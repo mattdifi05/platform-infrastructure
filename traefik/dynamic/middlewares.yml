@@ -1,0 +1,29 @@
+http:
+  middlewares:
+    enterprise-security-headers:
+      headers:
+        browserXssFilter: true
+        contentTypeNosniff: true
+        frameDeny: true
+        referrerPolicy: no-referrer
+        stsSeconds: 31536000
+        stsIncludeSubdomains: true
+        stsPreload: true
+        customResponseHeaders:
+          X-Permitted-Cross-Domain-Policies: none
+          X-Content-Type-Options: nosniff
+          Permissions-Policy: "camera=(), microphone=(), geolocation=()"
+
+    enterprise-rate-limit:
+      rateLimit:
+        average: 120
+        burst: 60
+        period: 1m
+
+    enterprise-compress:
+      compress: {}
+
+    enterprise-redirect-https:
+      redirectScheme:
+        scheme: https
+        permanent: true

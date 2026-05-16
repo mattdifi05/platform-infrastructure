@@ -1,0 +1,34 @@
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+
+positions:
+  filename: /tmp/positions.yml
+
+clients:
+  - url: http://loki:3100/loki/api/v1/push
+
+scrape_configs:
+  - job_name: docker
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: docker
+          __path__: /var/lib/docker/containers/*/*-json.log
+    pipeline_stages:
+      - docker: {}
+      - drop:
+          older_than: 168h
+          drop_counter_reason: stale_docker_log
+      - replace:
+          expression: '(?i)("?(authorization|cookie|set-cookie|x-db-console-access|password|secret|token|otp|otpauthUrl|backupCode|backupCodes|credential|challenge)"?\s*[:=]\s*)("[^"]*"|[^,\s}]+)'
+          replace: '$1"[REDACTED]"'
+      - json:
+          expressions:
+            level: level
+            service: service
+            event: event
+      - labels:
+          level:
+          service:

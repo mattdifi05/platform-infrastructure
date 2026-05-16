@@ -2,6 +2,14 @@
 .env.*
 !.env.example
 
+.docker-build-cache/
+.cache/
+node_modules/
+.pnpm-store/
+coverage/
+test-results/
+playwright-report/
+
 traefik/acme/*
 !traefik/acme/.gitkeep
 
@@ -10,6 +18,13 @@ traefik/certs/*
 
 *.log
 *.tmp
+*.pid
+*.seed
+*.local
+*.pem
+*.key
+*.p12
+*.pfx
 backups/
 security/sbom/
 secrets/*

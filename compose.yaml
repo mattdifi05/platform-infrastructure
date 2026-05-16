@@ -1,0 +1,806 @@
+name: enterprise_local
+
+x-default-logging: &default_logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+services:
+  traefik:
+    image: ${TRAEFIK_IMAGE:-traefik:v3.7.0@sha256:eb328e2c806c53aafbbace6c451fa54d268961261a85452fcf0fb752a30c17be}
+    container_name: enterprise-traefik
+    init: true
+    pids_limit: 256
+    logging: *default_logging
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    command:
+      - --configFile=/etc/traefik/traefik.yml
+    ports:
+      - "127.0.0.1:80:80"
+      - "127.0.0.1:443:443"
+      - "127.0.0.1:8090:8080"
+    volumes:
+      - ./traefik/traefik.yml:/etc/traefik/traefik.yml:ro
+      - ./traefik/dynamic/middlewares.yml:/etc/traefik/dynamic/middlewares.yml:ro
+      - ./traefik/dynamic/tls-local.yml:/etc/traefik/dynamic/tls-local.yml:ro
+      - ./traefik/certs:/etc/traefik/certs:ro
+    configs:
+      - source: enterprise_traefik_routes
+        target: /etc/traefik/dynamic/routes.yml
+    networks:
+      - enterprise_net
+    healthcheck:
+      test: ["CMD", "traefik", "healthcheck", "--ping"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  postgres:
+    image: ${POSTGRES_IMAGE:-postgres:18-alpine@sha256:54451ecb8ab38c24c3ec123f2fd501303a3a1856a5c66e98cecf2460d5e1e9d7}
+    container_name: enterprise-postgres
+    init: true
+    pids_limit: 1024
+    logging: *default_logging
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: postgres
+      POSTGRES_USER: ${POSTGRES_SUPERUSER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD:-}
+      APP_DB_NAME: ${APP_DB_NAME:-stexor_app}
+      APP_DB_USER: ${APP_DB_USER:-stexor_app_user}
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD:-}
+      KEYCLOAK_DB_NAME: ${KEYCLOAK_DB_NAME:-keycloak}
+      KEYCLOAK_DB_USER: ${KEYCLOAK_DB_USER:-keycloak}
+      KEYCLOAK_DB_PASSWORD: ${KEYCLOAK_DB_PASSWORD:-}
+    volumes:
+      - enterprise_postgres_data:/var/lib/postgresql
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+    networks:
+      - enterprise_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: ${REDIS_IMAGE:-redis:8.6-alpine@sha256:b9646e7cdf8165d985b88bb3e61b3f2f7625db7f6c98af79def91997d04f26b9}
+    container_name: enterprise-redis
+    init: true
+    pids_limit: 256
+    logging: *default_logging
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+    command:
+      - sh
+      - -ec
+      - |
+        if [ -n "$${REDIS_PASSWORD_FILE:-}" ]; then
+          REDIS_PASSWORD="$$(cat "$${REDIS_PASSWORD_FILE}")"
+        fi
+        if [ -n "$${REDIS_PASSWORD:-}" ]; then
+          exec redis-server --appendonly yes --requirepass "$${REDIS_PASSWORD}"
+        fi
+        exec redis-server --appendonly yes
+    volumes:
+      - enterprise_redis_data:/data
+    networks:
+      - enterprise_net
+    healthcheck:
+      test: ["CMD-SHELL", "if [ -n \"$${REDIS_PASSWORD_FILE:-}\" ]; then REDISCLI_AUTH=\"$$(cat \"$${REDIS_PASSWORD_FILE}\")\" redis-cli ping | grep PONG; elif [ -n \"$${REDIS_PASSWORD:-}\" ]; then REDISCLI_AUTH=\"$${REDIS_PASSWORD}\" redis-cli ping | grep PONG; else redis-cli ping | grep PONG; fi"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  keycloak:
+    image: ${KEYCLOAK_IMAGE:-quay.io/keycloak/keycloak:26.6.1@sha256:dea26401d06341095cc4ea9d66896200b55de5ca1daa1d2fcbe58493afa6e0ad}
+    container_name: enterprise-keycloak
+    init: true
+    pids_limit: 1024
+    logging: *default_logging
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    command: ["start", "--http-port=8080", "--import-realm"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN:-admin}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-}
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/${KEYCLOAK_DB_NAME:-keycloak}
+      KC_DB_USERNAME: ${KEYCLOAK_DB_USER:-keycloak}
+      KC_DB_PASSWORD: ${KEYCLOAK_DB_PASSWORD:-}
+      KC_HEALTH_ENABLED: "true"
+      KC_METRICS_ENABLED: "true"
+      KC_HTTP_ENABLED: "true"
+      KC_PROXY_HEADERS: xforwarded
+      KC_HOSTNAME: ${KEYCLOAK_HOSTNAME:-auth.localhost.com}
+      KC_HOSTNAME_STRICT: ${KEYCLOAK_HOSTNAME_STRICT:-true}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - enterprise_keycloak_data:/opt/keycloak/data
+      - ./keycloak/import:/opt/keycloak/data/import:ro
+    networks:
+      - enterprise_net
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.enterprise-keycloak.rule: Host(`${AUTH_HOST:-auth.localhost.com}`)
+      traefik.http.routers.enterprise-keycloak.entrypoints: web
+      traefik.http.routers.enterprise-keycloak.middlewares: enterprise-security-headers@file,enterprise-compress@file
+      traefik.http.services.enterprise-keycloak.loadbalancer.server.port: "8080"
+    healthcheck:
+      test: ["CMD-SHELL", "bash -ec 'true < /dev/tcp/127.0.0.1/8080'"]
+      interval: 20s
+      timeout: 5s
+      retries: 15
+      start_period: 60s
+
+  nats:
+    image: ${NATS_IMAGE:-nats:2.14-alpine@sha256:df3dbf7615519c64c1ecf5bff1811e0f1349e980e12cf8edac882a53cf3f9dd9}
+    container_name: enterprise-nats
+    init: true
+    pids_limit: 256
+    logging: *default_logging
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - exec nats-server -c /etc/nats/nats-server.conf --user "$$NATS_USER" --pass "$$NATS_PASSWORD"
+    environment:
+      NATS_USER: ${NATS_USER:-enterprise}
+      NATS_PASSWORD: ${NATS_PASSWORD:-}
+    volumes:
+      - enterprise_nats_data:/data
+      - ./nats/nats-server.conf:/etc/nats/nats-server.conf:ro
+    networks:
+      - enterprise_net
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8222/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  minio:
+    image: ${MINIO_IMAGE:-quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e}
+    container_name: enterprise-minio
+    init: true
+    pids_limit: 512
+    logging: *default_logging
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    command: server /data --address ":9000" --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-stexor_minio}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-}
+      MINIO_BROWSER_REDIRECT_URL: ${MINIO_BROWSER_REDIRECT_URL:-https://minio.localhost.com}
+      MINIO_SERVER_URL: ${MINIO_SERVER_URL:-http://localhost:9000}
+    volumes:
+      - enterprise_minio_data:/data
+    networks:
+      - enterprise_net
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.enterprise-minio.rule: Host(`${MINIO_CONSOLE_HOST:-minio.localhost.com}`)
+      traefik.http.routers.enterprise-minio.entrypoints: web
+      traefik.http.routers.enterprise-minio.middlewares: enterprise-security-headers@file,enterprise-compress@file
+      traefik.http.services.enterprise-minio.loadbalancer.server.port: "9001"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9000/minio/health/live >/dev/null"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    image: ${BACKEND_BUILD_IMAGE:-stexor/backend:local}
+    container_name: enterprise-backend
+    init: true
+    pids_limit: 512
+    logging: *default_logging
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      NEXT_TELEMETRY_DISABLED: "1"
+      PORT: 3000
+      SERVICE_NAME: enterprise-backend
+      SESSION_SECRET: ${SESSION_SECRET:-}
+      SESSION_SIGNING_KEYS: ${SESSION_SIGNING_KEYS:-}
+      SESSION_SECRET_PREVIOUS: ${SESSION_SECRET_PREVIOUS:-}
+      SECRET_HASH_KEYS: ${SECRET_HASH_KEYS:-}
+      SECRET_HASH_LEGACY_KEYS: ${SECRET_HASH_LEGACY_KEYS:-}
+      TOTP_ENCRYPTION_KEYS: ${TOTP_ENCRYPTION_KEYS:-}
+      TOTP_ENCRYPTION_LEGACY_KEYS: ${TOTP_ENCRYPTION_LEGACY_KEYS:-}
+      SESSION_COOKIE_NAME: ${SESSION_COOKIE_NAME:-stexor_session}
+      SESSION_COOKIE_MAX_AGE_SECONDS: ${SESSION_COOKIE_MAX_AGE_SECONDS:-315360000}
+      SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-true}
+      SESSION_COOKIE_SAMESITE: ${SESSION_COOKIE_SAMESITE:-Lax}
+      API_DOCS_ENABLED: ${API_DOCS_ENABLED:-false}
+      APP_DB_NAME: ${APP_DB_NAME:-stexor_app}
+      APP_DB_USER: ${APP_DB_USER:-stexor_app_user}
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD:-}
+      DATABASE_URL: postgresql://${APP_DB_USER:-stexor_app_user}:${APP_DB_PASSWORD:-}@postgres:5432/${APP_DB_NAME:-stexor_app}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      REDIS_DB: ${REDIS_DB:-0}
+      REDIS_KEY_PREFIX: ${REDIS_KEY_PREFIX:-stexor}
+      KEYCLOAK_URL: http://keycloak:8080
+      KEYCLOAK_REALM: ${KEYCLOAK_REALM:-enterprise}
+      NATS_URL: nats://${NATS_USER:-enterprise}:${NATS_PASSWORD:-}@nats:4222
+      MINIO_ENDPOINT: minio
+      MINIO_PORT: 9000
+      MINIO_USE_SSL: "false"
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-stexor_minio}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-}
+      MINIO_DEFAULT_BUCKET: ${MINIO_DEFAULT_BUCKET:-stexor-local}
+      API_PUBLIC_URL: ${API_PUBLIC_URL:-https://api.localhost.com}
+      ACCOUNT_PUBLIC_URL: ${ACCOUNT_PUBLIC_URL:-https://account.localhost.com}
+      APP_PUBLIC_URL: ${APP_PUBLIC_URL:-https://app.localhost.com}
+      WEBAUTHN_RP_ID: ${WEBAUTHN_RP_ID:-account.localhost.com}
+      WEBAUTHN_ORIGINS: ${WEBAUTHN_ORIGINS:-https://account.localhost.com}
+      CORS_ORIGINS: ${CORS_ORIGINS:-https://account.localhost.com,https://app.localhost.com,https://db.localhost.com}
+      BOT_PROTECTION_PROVIDER: ${BOT_PROTECTION_PROVIDER:-disabled}
+      BOT_PROTECTION_REQUIRED: ${BOT_PROTECTION_REQUIRED:-}
+      BOT_PROTECTION_MIN_SCORE: ${BOT_PROTECTION_MIN_SCORE:-0.5}
+      BOT_PROTECTION_EXPECTED_HOSTNAMES: ${BOT_PROTECTION_EXPECTED_HOSTNAMES:-account.localhost.com,app.localhost.com,db.localhost.com}
+      GOOGLE_RECAPTCHA_SECRET_KEY: ${GOOGLE_RECAPTCHA_SECRET_KEY:-}
+      GOOGLE_RECAPTCHA_SECRET_KEY_FILE: ${GOOGLE_RECAPTCHA_SECRET_KEY_FILE:-}
+      CLOUDFLARE_TURNSTILE_SECRET_KEY: ${CLOUDFLARE_TURNSTILE_SECRET_KEY:-}
+      CLOUDFLARE_TURNSTILE_SECRET_KEY_FILE: ${CLOUDFLARE_TURNSTILE_SECRET_KEY_FILE:-}
+      GOOGLE_OAUTH_CLIENT_ID: ${GOOGLE_OAUTH_CLIENT_ID:-}
+      GOOGLE_OAUTH_CLIENT_SECRET: ${GOOGLE_OAUTH_CLIENT_SECRET:-}
+      GOOGLE_OAUTH_CLIENT_SECRET_FILE: ${GOOGLE_OAUTH_CLIENT_SECRET_FILE:-}
+      GOOGLE_OAUTH_REDIRECT_URI: ${GOOGLE_OAUTH_REDIRECT_URI:-https://api.localhost.com/auth/google/callback}
+      GOOGLE_OAUTH_SCOPES: ${GOOGLE_OAUTH_SCOPES:-openid email profile https://www.googleapis.com/auth/user.birthday.read}
+      RATE_LIMIT_TTL_SECONDS: ${RATE_LIMIT_TTL_SECONDS:-60}
+      RATE_LIMIT_MAX_REQUESTS: ${RATE_LIMIT_MAX_REQUESTS:-120}
+      RATE_LIMIT_FALLBACK_MAX_REQUESTS: ${RATE_LIMIT_FALLBACK_MAX_REQUESTS:-80}
+      SENSITIVE_ACTION_RATE_LIMIT_MAX: ${SENSITIVE_ACTION_RATE_LIMIT_MAX:-40}
+      SENSITIVE_ACTION_FALLBACK_RATE_LIMIT_MAX: ${SENSITIVE_ACTION_FALLBACK_RATE_LIMIT_MAX:-10}
+      SESSION_TOUCH_THROTTLE_SECONDS: ${SESSION_TOUCH_THROTTLE_SECONDS:-60}
+      PASSKEY_CHALLENGE_TTL_SECONDS: ${PASSKEY_CHALLENGE_TTL_SECONDS:-300}
+      TOTP_SETUP_TTL_SECONDS: ${TOTP_SETUP_TTL_SECONDS:-600}
+      OTP_SEND_COOLDOWN_SECONDS: ${OTP_SEND_COOLDOWN_SECONDS:-60}
+      AUDIT_LOG_ENABLED: ${AUDIT_LOG_ENABLED:-true}
+      STRUCTURED_LOGGING: ${STRUCTURED_LOGGING:-true}
+      DB_CONSOLE_ENABLED: ${DEV_DB_CONSOLE_ENABLED:-false}
+      DB_CONSOLE_WRITE_ENABLED: ${DB_CONSOLE_WRITE_ENABLED:-false}
+      DB_CONSOLE_MAX_ROWS: ${DB_CONSOLE_MAX_ROWS:-200}
+      DB_CONSOLE_READ_ROLE: ${DB_CONSOLE_READ_ROLE:-stexor_console_readonly}
+      DB_CONSOLE_ALLOWED_SCHEMAS: ${DB_CONSOLE_ALLOWED_SCHEMAS:-stexor_account,stexor_platform,public}
+      DB_CONSOLE_DENIED_TABLES: ${DB_CONSOLE_DENIED_TABLES:-stexor_account.passkeys,stexor_account.totp_secrets,stexor_account.backup_codes,stexor_account.backup_code_sets,stexor_account.email_otp_challenges,stexor_account.email_delivery_settings,stexor_account.email_outbox,stexor_account.audit_outbox}
+      DB_CONSOLE_ALLOWED_EMAILS: ${DB_CONSOLE_ALLOWED_EMAILS:?Set DB_CONSOLE_ALLOWED_EMAILS}
+      MAILER_PROVIDER: ${MAILER_PROVIDER:-smtp}
+      MAILER_FROM: ${MAILER_FROM:?Set MAILER_FROM}
+      MAILER_REPLY_TO: ${MAILER_REPLY_TO:?Set MAILER_REPLY_TO}
+      SMTP_HOST: ${SMTP_HOST:?Set SMTP_HOST}
+      SMTP_PORT: ${SMTP_PORT:-465}
+      SMTP_SECURE: ${SMTP_SECURE:-true}
+      SMTP_USER: ${SMTP_USER:?Set SMTP_USER}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      MAILER_CREDENTIALS_MANAGED_EXTERNALLY: ${MAILER_CREDENTIALS_MANAGED_EXTERNALLY:-true}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    networks:
+      - enterprise_net
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.enterprise-backend.rule: Host(`${API_HOST:-api.localhost.com}`)
+      traefik.http.routers.enterprise-backend.entrypoints: web
+      traefik.http.routers.enterprise-backend.middlewares: enterprise-security-headers@file,enterprise-rate-limit@file,enterprise-compress@file
+      traefik.http.services.enterprise-backend.loadbalancer.server.port: "3000"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:3000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  web:
+    image: ${WEB_BUILD_IMAGE:-stexor/web:local}
+    container_name: enterprise-web
+    init: true
+    pids_limit: 512
+    logging: *default_logging
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      NEXT_TELEMETRY_DISABLED: "1"
+      PORT: 3000
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-https://api.localhost.com}
+      NEXT_PUBLIC_APP_URL: ${NEXT_PUBLIC_APP_URL:-https://app.localhost.com}
+      NEXT_PUBLIC_ACCOUNT_URL: ${NEXT_PUBLIC_ACCOUNT_URL:-https://account.localhost.com}
+      NEXT_PUBLIC_DB_CONSOLE_URL: ${NEXT_PUBLIC_DB_CONSOLE_URL:-https://db.localhost.com}
+      NEXT_PUBLIC_DB_CONSOLE_ALLOWED_EMAIL: ${NEXT_PUBLIC_DB_CONSOLE_ALLOWED_EMAIL:-}
+      NEXT_PUBLIC_DB_CONSOLE_ENABLED: ${DEV_DB_CONSOLE_ENABLED:-false}
+      NEXT_PUBLIC_BOT_PROTECTION_PROVIDER: ${NEXT_PUBLIC_BOT_PROTECTION_PROVIDER:-disabled}
+      NEXT_PUBLIC_GOOGLE_RECAPTCHA_SITE_KEY: ${NEXT_PUBLIC_GOOGLE_RECAPTCHA_SITE_KEY:-}
+      NEXT_PUBLIC_CLOUDFLARE_TURNSTILE_SITE_KEY: ${NEXT_PUBLIC_CLOUDFLARE_TURNSTILE_SITE_KEY:-}
+      DB_CONSOLE_ENABLED: ${DEV_DB_CONSOLE_ENABLED:-false}
+      INTERNAL_API_URL: http://backend:3000
+      ACCOUNT_HOST: ${ACCOUNT_HOST:-account.localhost.com}
+      DB_CONSOLE_HOST: ${DB_CONSOLE_HOST:-db.localhost.com}
+      ACCOUNT_PUBLIC_URL: ${ACCOUNT_PUBLIC_URL:-https://account.localhost.com}
+      NEXTAUTH_URL: ${NEXTAUTH_URL:-https://account.localhost.com}
+      KEYCLOAK_ISSUER: ${KEYCLOAK_ISSUER:-https://auth.localhost.com/realms/stexor}
+    depends_on:
+      backend:
+        condition: service_healthy
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    networks:
+      - enterprise_net
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.enterprise-web.rule: Host(`${APP_HOST:-app.localhost.com}`)
+      traefik.http.routers.enterprise-web.entrypoints: web
+      traefik.http.routers.enterprise-web.middlewares: enterprise-security-headers@file,enterprise-compress@file
+      traefik.http.services.enterprise-web.loadbalancer.server.port: "3000"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:3000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  worker-notifications:
+    image: ${WORKER_NOTIFICATIONS_BUILD_IMAGE:-stexor/worker-notifications:local}
+    container_name: enterprise-worker-notifications
+    init: true
+    pids_limit: 512
+    logging: *default_logging
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      WORKER_NAME: enterprise-worker-notifications
+      DATABASE_URL: postgresql://${APP_DB_USER:-stexor_app_user}:${APP_DB_PASSWORD:-}@postgres:5432/${APP_DB_NAME:-stexor_app}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      REDIS_DB: ${REDIS_DB:-0}
+      REDIS_KEY_PREFIX: ${REDIS_KEY_PREFIX:-stexor}
+      NATS_URL: nats://${NATS_USER:-enterprise}:${NATS_PASSWORD:-}@nats:4222
+      ALERT_FORWARD_WEBHOOK_URL: ${ALERT_FORWARD_WEBHOOK_URL:-}
+      STRUCTURED_LOGGING: ${STRUCTURED_LOGGING:-true}
+      AUDIT_LOG_ENABLED: ${AUDIT_LOG_ENABLED:-true}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    networks:
+      - enterprise_net
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:3000/health"]
+      interval: 20s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  worker-jobs:
+    image: ${WORKER_JOBS_BUILD_IMAGE:-stexor/worker-jobs:local}
+    container_name: enterprise-worker-jobs
+    init: true
+    pids_limit: 512
+    logging: *default_logging
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      WORKER_NAME: enterprise-worker-jobs
+      DATABASE_URL: postgresql://${APP_DB_USER:-stexor_app_user}:${APP_DB_PASSWORD:-}@postgres:5432/${APP_DB_NAME:-stexor_app}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      REDIS_DB: ${REDIS_DB:-0}
+      REDIS_KEY_PREFIX: ${REDIS_KEY_PREFIX:-stexor}
+      NATS_URL: nats://${NATS_USER:-enterprise}:${NATS_PASSWORD:-}@nats:4222
+      MINIO_ENDPOINT: minio
+      MINIO_PORT: 9000
+      MINIO_USE_SSL: "false"
+      STRUCTURED_LOGGING: ${STRUCTURED_LOGGING:-true}
+      AUDIT_LOG_ENABLED: ${AUDIT_LOG_ENABLED:-true}
+      AUDIT_OUTBOX_ENABLED: ${AUDIT_OUTBOX_ENABLED:-true}
+      AUDIT_OUTBOX_BATCH_SIZE: ${AUDIT_OUTBOX_BATCH_SIZE:-25}
+      AUDIT_OUTBOX_INTERVAL_MS: ${AUDIT_OUTBOX_INTERVAL_MS:-5000}
+      AUDIT_OUTBOX_MAX_ATTEMPTS: ${AUDIT_OUTBOX_MAX_ATTEMPTS:-8}
+      AUDIT_OUTBOX_LEASE_MS: ${AUDIT_OUTBOX_LEASE_MS:-60000}
+      AUDIT_OUTBOX_INITIAL_BACKOFF_MS: ${AUDIT_OUTBOX_INITIAL_BACKOFF_MS:-5000}
+      AUDIT_OUTBOX_BACKOFF_MULTIPLIER: ${AUDIT_OUTBOX_BACKOFF_MULTIPLIER:-2}
+      AUDIT_OUTBOX_MAX_BACKOFF_MS: ${AUDIT_OUTBOX_MAX_BACKOFF_MS:-300000}
+      AUDIT_OUTBOX_NATS_SUBJECT_PREFIX: ${AUDIT_OUTBOX_NATS_SUBJECT_PREFIX:-audit.events}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    networks:
+      - enterprise_net
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:3000/health"]
+      interval: 20s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  prometheus:
+    image: ${PROMETHEUS_IMAGE:-prom/prometheus:v3.11.3@sha256:e4254400b85610324913f0dc4acf92603d9984e7519414c5a12811aa6146acc3}
+    container_name: enterprise-prometheus
+    init: true
+    pids_limit: 512
+    logging: *default_logging
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --web.enable-lifecycle
+    depends_on:
+      alertmanager:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+      web:
+        condition: service_healthy
+    volumes:
+      - enterprise_prometheus_data:/prometheus
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/rules:/etc/prometheus/rules:ro
+    networks:
+      - enterprise_net
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:9090/-/healthy"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+  alertmanager:
+    image: ${ALERTMANAGER_IMAGE:-prom/alertmanager:v0.29.0@sha256:88743b63b3e09ea6e31e140ced5bf45f4a8e82c617c2a963f78841f4995ad1d7}
+    container_name: enterprise-alertmanager
+    init: true
+    pids_limit: 256
+    logging: *default_logging
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --storage.path=/alertmanager
+    depends_on:
+      worker-notifications:
+        condition: service_healthy
+    volumes:
+      - enterprise_alertmanager_data:/alertmanager
+      - ./alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+    networks:
+      - enterprise_net
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:9093/-/healthy"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+  grafana:
+    image: ${GRAFANA_IMAGE:-grafana/grafana:13.0.1@sha256:0f86bada30d65ef9d0183b90c1e2682ac92d53d95da8bed322b984ea78a4a73a}
+    container_name: enterprise-grafana
+    init: true
+    pids_limit: 512
+    logging: *default_logging
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_SERVER_ROOT_URL: ${GRAFANA_ROOT_URL:-https://grafana.localhost.com}
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_PLUGINS_PREINSTALL_DISABLED: "true"
+      GF_SECURITY_COOKIE_SAMESITE: strict
+      GF_LOG_MODE: console
+      GF_LOG_LEVEL: info
+    depends_on:
+      prometheus:
+        condition: service_healthy
+      loki:
+        condition: service_healthy
+    volumes:
+      - enterprise_grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    networks:
+      - enterprise_net
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.enterprise-grafana.rule: Host(`${GRAFANA_HOST:-grafana.localhost.com}`)
+      traefik.http.routers.enterprise-grafana.entrypoints: web
+      traefik.http.routers.enterprise-grafana.middlewares: enterprise-security-headers@file,enterprise-compress@file
+      traefik.http.services.enterprise-grafana.loadbalancer.server.port: "3000"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:3000/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+  loki:
+    image: ${LOKI_IMAGE:-grafana/loki:3.7.1@sha256:73e905b51a7f917f7a1075e4be68759df30226e03dcb3cd2213b989cc0dc8eb4}
+    container_name: enterprise-loki
+    init: true
+    pids_limit: 512
+    logging: *default_logging
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    command: -config.file=/etc/loki/config.yml
+    depends_on:
+      alertmanager:
+        condition: service_healthy
+    volumes:
+      - enterprise_loki_data:/loki
+      - ./loki/config.yml:/etc/loki/config.yml:ro
+    networks:
+      - enterprise_net
+    healthcheck:
+      test: ["CMD", "/usr/bin/loki", "-version"]
+      interval: 15s
+      timeout: 5s
+      retries: 15
+
+  promtail:
+    image: ${PROMTAIL_IMAGE:-grafana/promtail:3.6.10@sha256:2a0f5e3e160ee5d549c585f6cc4f4e1c566ff783324a424bd75bc16503fc660e}
+    container_name: enterprise-promtail
+    init: true
+    pids_limit: 256
+    logging: *default_logging
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    command: -config.file=/etc/promtail/config.yml
+    depends_on:
+      loki:
+        condition: service_healthy
+    volumes:
+      - ./promtail/config.yml:/etc/promtail/config.yml:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+    networks:
+      - enterprise_net
+    healthcheck:
+      test: ["CMD", "/usr/bin/promtail", "-version"]
+      interval: 20s
+      timeout: 5s
+      retries: 10
+
+networks:
+  enterprise_net:
+    name: enterprise_net
+    driver: bridge
+
+volumes:
+  enterprise_postgres_data:
+    name: enterprise_postgres_data
+  enterprise_redis_data:
+    name: enterprise_redis_data
+  enterprise_keycloak_data:
+    name: enterprise_keycloak_data
+  enterprise_nats_data:
+    name: enterprise_nats_data
+  enterprise_minio_data:
+    name: enterprise_minio_data
+  enterprise_alertmanager_data:
+    name: enterprise_alertmanager_data
+  enterprise_grafana_data:
+    name: enterprise_grafana_data
+  enterprise_prometheus_data:
+    name: enterprise_prometheus_data
+  enterprise_loki_data:
+    name: enterprise_loki_data
+
+configs:
+  enterprise_traefik_routes:
+    content: |
+      http:
+        routers:
+          enterprise-web-http:
+            rule: Host(`${APP_HOST:-app.localhost.com}`)
+            entryPoints:
+              - web
+            middlewares:
+              - enterprise-redirect-https@file
+            service: enterprise-web
+
+          enterprise-web:
+            rule: Host(`${APP_HOST:-app.localhost.com}`)
+            entryPoints:
+              - websecure
+            tls: {}
+            middlewares:
+              - enterprise-security-headers@file
+              - enterprise-compress@file
+            service: enterprise-web
+
+          enterprise-account-http:
+            rule: Host(`${ACCOUNT_HOST:-account.localhost.com}`)
+            entryPoints:
+              - web
+            middlewares:
+              - enterprise-redirect-https@file
+            service: enterprise-web
+
+          enterprise-account:
+            rule: Host(`${ACCOUNT_HOST:-account.localhost.com}`)
+            entryPoints:
+              - websecure
+            tls: {}
+            middlewares:
+              - enterprise-security-headers@file
+              - enterprise-compress@file
+            service: enterprise-web
+
+          enterprise-backend-http:
+            rule: Host(`${API_HOST:-api.localhost.com}`)
+            entryPoints:
+              - web
+            middlewares:
+              - enterprise-redirect-https@file
+            service: enterprise-backend
+
+          enterprise-backend:
+            rule: Host(`${API_HOST:-api.localhost.com}`)
+            entryPoints:
+              - websecure
+            tls: {}
+            middlewares:
+              - enterprise-security-headers@file
+              - enterprise-rate-limit@file
+              - enterprise-compress@file
+            service: enterprise-backend
+
+          enterprise-keycloak-http:
+            rule: Host(`${AUTH_HOST:-auth.localhost.com}`)
+            entryPoints:
+              - web
+            middlewares:
+              - enterprise-redirect-https@file
+            service: enterprise-keycloak
+
+          enterprise-keycloak:
+            rule: Host(`${AUTH_HOST:-auth.localhost.com}`)
+            entryPoints:
+              - websecure
+            tls: {}
+            middlewares:
+              - enterprise-security-headers@file
+              - enterprise-compress@file
+            service: enterprise-keycloak
+
+          enterprise-minio-http:
+            rule: Host(`${MINIO_CONSOLE_HOST:-minio.localhost.com}`)
+            entryPoints:
+              - web
+            middlewares:
+              - enterprise-redirect-https@file
+            service: enterprise-minio
+
+          enterprise-minio:
+            rule: Host(`${MINIO_CONSOLE_HOST:-minio.localhost.com}`)
+            entryPoints:
+              - websecure
+            tls: {}
+            middlewares:
+              - enterprise-security-headers@file
+              - enterprise-compress@file
+            service: enterprise-minio
+
+          enterprise-db-console-http:
+            rule: Host(`${DB_CONSOLE_HOST:-db.localhost.com}`)
+            entryPoints:
+              - web
+            middlewares:
+              - enterprise-redirect-https@file
+            service: enterprise-web
+
+          enterprise-db-console:
+            rule: Host(`${DB_CONSOLE_HOST:-db.localhost.com}`)
+            entryPoints:
+              - websecure
+            tls: {}
+            middlewares:
+              - enterprise-security-headers@file
+              - enterprise-rate-limit@file
+              - enterprise-compress@file
+            service: enterprise-web
+
+          enterprise-grafana-http:
+            rule: Host(`${GRAFANA_HOST:-grafana.localhost.com}`)
+            entryPoints:
+              - web
+            middlewares:
+              - enterprise-redirect-https@file
+            service: enterprise-grafana
+
+          enterprise-grafana:
+            rule: Host(`${GRAFANA_HOST:-grafana.localhost.com}`)
+            entryPoints:
+              - websecure
+            tls: {}
+            middlewares:
+              - enterprise-security-headers@file
+              - enterprise-compress@file
+            service: enterprise-grafana
+
+        services:
+          enterprise-web:
+            loadBalancer:
+              servers:
+                - url: http://web:3000
+          enterprise-backend:
+            loadBalancer:
+              servers:
+                - url: http://backend:3000
+          enterprise-keycloak:
+            loadBalancer:
+              servers:
+                - url: http://keycloak:8080
+          enterprise-minio:
+            loadBalancer:
+              servers:
+                - url: http://minio:9001
+          enterprise-grafana:
+            loadBalancer:
+              servers:
+                - url: http://grafana:3000

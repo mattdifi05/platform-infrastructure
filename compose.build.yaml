@@ -1,0 +1,69 @@
+services:
+  backend:
+    image: ${BACKEND_BUILD_IMAGE:-stexor/backend:local}
+    build:
+      context: ../src
+      dockerfile: ../enterprise-infrastructure/docker/backend.Dockerfile
+      args:
+        NODE_IMAGE: ${NODE_IMAGE:-node:26-alpine@sha256:e71ac5e964b9201072425d59d2e876359efa25dc96bb1768cb73295728d6e4ea}
+        PNPM_VERSION: ${PNPM_VERSION:-11.0.9}
+      cache_from:
+        - type=local,src=${DOCKER_BUILD_CACHE_DIR:-.docker-build-cache}/backend
+      cache_to:
+        - type=local,dest=${DOCKER_BUILD_CACHE_DIR:-.docker-build-cache}/backend,mode=max
+
+  web:
+    image: ${WEB_BUILD_IMAGE:-stexor/web:local}
+    build:
+      context: ../src
+      dockerfile: ../enterprise-infrastructure/docker/web.Dockerfile
+      args:
+        NODE_IMAGE: ${NODE_IMAGE:-node:26-alpine@sha256:e71ac5e964b9201072425d59d2e876359efa25dc96bb1768cb73295728d6e4ea}
+        PNPM_VERSION: ${PNPM_VERSION:-11.0.9}
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-https://api.localhost.com}
+        NEXT_PUBLIC_APP_URL: ${NEXT_PUBLIC_APP_URL:-https://app.localhost.com}
+        NEXT_PUBLIC_ACCOUNT_URL: ${NEXT_PUBLIC_ACCOUNT_URL:-https://account.localhost.com}
+        NEXT_PUBLIC_DB_CONSOLE_URL: ${NEXT_PUBLIC_DB_CONSOLE_URL:-https://db.localhost.com}
+        NEXT_PUBLIC_DB_CONSOLE_ALLOWED_EMAIL: ${NEXT_PUBLIC_DB_CONSOLE_ALLOWED_EMAIL:-}
+        NEXT_PUBLIC_DB_CONSOLE_ENABLED: ${DEV_DB_CONSOLE_ENABLED:-false}
+        NEXT_PUBLIC_BOT_PROTECTION_PROVIDER: ${NEXT_PUBLIC_BOT_PROTECTION_PROVIDER:-disabled}
+        NEXT_PUBLIC_GOOGLE_RECAPTCHA_SITE_KEY: ${NEXT_PUBLIC_GOOGLE_RECAPTCHA_SITE_KEY:-}
+        NEXT_PUBLIC_CLOUDFLARE_TURNSTILE_SITE_KEY: ${NEXT_PUBLIC_CLOUDFLARE_TURNSTILE_SITE_KEY:-}
+        DB_CONSOLE_ENABLED: ${DEV_DB_CONSOLE_ENABLED:-false}
+        ACCOUNT_HOST: ${ACCOUNT_HOST:-account.localhost.com}
+        DB_CONSOLE_HOST: ${DB_CONSOLE_HOST:-db.localhost.com}
+        ACCOUNT_PUBLIC_URL: ${ACCOUNT_PUBLIC_URL:-https://account.localhost.com}
+        NEXTAUTH_URL: ${NEXTAUTH_URL:-https://account.localhost.com}
+        KEYCLOAK_ISSUER: ${KEYCLOAK_ISSUER:-https://auth.localhost.com/realms/stexor}
+      cache_from:
+        - type=local,src=${DOCKER_BUILD_CACHE_DIR:-.docker-build-cache}/web
+      cache_to:
+        - type=local,dest=${DOCKER_BUILD_CACHE_DIR:-.docker-build-cache}/web,mode=max
+
+  worker-notifications:
+    image: ${WORKER_NOTIFICATIONS_BUILD_IMAGE:-stexor/worker-notifications:local}
+    build:
+      context: ../src
+      dockerfile: ../enterprise-infrastructure/docker/worker.Dockerfile
+      args:
+        NODE_IMAGE: ${NODE_IMAGE:-node:26-alpine@sha256:e71ac5e964b9201072425d59d2e876359efa25dc96bb1768cb73295728d6e4ea}
+        PNPM_VERSION: ${PNPM_VERSION:-11.0.9}
+        WORKER_PACKAGE: ./apps/worker-notifications
+      cache_from:
+        - type=local,src=${DOCKER_BUILD_CACHE_DIR:-.docker-build-cache}/worker-notifications
+      cache_to:
+        - type=local,dest=${DOCKER_BUILD_CACHE_DIR:-.docker-build-cache}/worker-notifications,mode=max
+
+  worker-jobs:
+    image: ${WORKER_JOBS_BUILD_IMAGE:-stexor/worker-jobs:local}
+    build:
+      context: ../src
+      dockerfile: ../enterprise-infrastructure/docker/worker.Dockerfile
+      args:
+        NODE_IMAGE: ${NODE_IMAGE:-node:26-alpine@sha256:e71ac5e964b9201072425d59d2e876359efa25dc96bb1768cb73295728d6e4ea}
+        PNPM_VERSION: ${PNPM_VERSION:-11.0.9}
+        WORKER_PACKAGE: ./apps/worker-jobs
+      cache_from:
+        - type=local,src=${DOCKER_BUILD_CACHE_DIR:-.docker-build-cache}/worker-jobs
+      cache_to:
+        - type=local,dest=${DOCKER_BUILD_CACHE_DIR:-.docker-build-cache}/worker-jobs,mode=max

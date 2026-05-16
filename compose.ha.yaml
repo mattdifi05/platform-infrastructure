@@ -1,0 +1,124 @@
+# Production HA overlay.
+#
+# Use with:
+#   docker compose -f compose.yaml -f compose.prod.yaml -f compose.ha.yaml config --quiet
+#
+# This overlay removes fixed container names from replicated stateless services
+# and adds rolling update / rollback policy. Stateful HA still requires managed
+# or clustered PostgreSQL, Redis, NATS and object storage; see ENTERPRISE-10-PLAN.md.
+services:
+  backend:
+    container_name: !reset null
+    deploy:
+      replicas: ${BACKEND_REPLICAS:-3}
+      update_config:
+        parallelism: 1
+        delay: 10s
+        order: start-first
+        failure_action: rollback
+        monitor: 60s
+      rollback_config:
+        parallelism: 1
+        delay: 5s
+        order: stop-first
+        failure_action: pause
+        monitor: 60s
+      restart_policy:
+        condition: any
+        delay: 5s
+        max_attempts: 3
+        window: 120s
+      placement:
+        max_replicas_per_node: 1
+
+  web:
+    container_name: !reset null
+    deploy:
+      replicas: ${WEB_REPLICAS:-3}
+      update_config:
+        parallelism: 1
+        delay: 10s
+        order: start-first
+        failure_action: rollback
+        monitor: 60s
+      rollback_config:
+        parallelism: 1
+        delay: 5s
+        order: stop-first
+        failure_action: pause
+        monitor: 60s
+      restart_policy:
+        condition: any
+        delay: 5s
+        max_attempts: 3
+        window: 120s
+      placement:
+        max_replicas_per_node: 1
+
+  worker-notifications:
+    container_name: !reset null
+    deploy:
+      replicas: ${WORKER_NOTIFICATIONS_REPLICAS:-2}
+      update_config:
+        parallelism: 1
+        delay: 10s
+        order: start-first
+        failure_action: rollback
+        monitor: 60s
+      rollback_config:
+        parallelism: 1
+        delay: 5s
+        order: stop-first
+        failure_action: pause
+        monitor: 60s
+      restart_policy:
+        condition: any
+        delay: 5s
+        max_attempts: 3
+        window: 120s
+
+  worker-jobs:
+    container_name: !reset null
+    deploy:
+      replicas: ${WORKER_JOBS_REPLICAS:-2}
+      update_config:
+        parallelism: 1
+        delay: 10s
+        order: start-first
+        failure_action: rollback
+        monitor: 60s
+      rollback_config:
+        parallelism: 1
+        delay: 5s
+        order: stop-first
+        failure_action: pause
+        monitor: 60s
+      restart_policy:
+        condition: any
+        delay: 5s
+        max_attempts: 3
+        window: 120s
+
+  postgres:
+    deploy:
+      placement:
+        constraints:
+          - node.labels.stexor.stateful == true
+
+  redis:
+    deploy:
+      placement:
+        constraints:
+          - node.labels.stexor.stateful == true
+
+  nats:
+    deploy:
+      placement:
+        constraints:
+          - node.labels.stexor.stateful == true
+
+  minio:
+    deploy:
+      placement:
+        constraints:
+          - node.labels.stexor.stateful == true

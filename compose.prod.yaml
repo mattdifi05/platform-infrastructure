@@ -1,0 +1,295 @@
+services:
+  traefik:
+    restart: always
+    command:
+      - --configFile=/etc/traefik/traefik.prod.yml
+      - --certificatesresolvers.letsencrypt.acme.email=${TRAEFIK_ACME_EMAIL:?Set TRAEFIK_ACME_EMAIL}
+      - --certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json
+      - --certificatesresolvers.letsencrypt.acme.httpchallenge=true
+      - --certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=web
+    ports: !override
+      - "80:80"
+      - "443:443"
+    volumes: !override
+      - ./traefik/traefik.prod.yml:/etc/traefik/traefik.prod.yml:ro
+      - ./traefik/dynamic/middlewares.yml:/etc/traefik/dynamic/middlewares.yml:ro
+      - ./traefik/acme:/letsencrypt
+
+  postgres:
+    restart: always
+    ports: !reset []
+
+  redis:
+    restart: always
+    ports: !reset []
+
+  keycloak:
+    restart: always
+    command: ["start", "--http-port=8080", "--import-realm"]
+    environment:
+      KC_HOSTNAME: ${KEYCLOAK_HOSTNAME:?Set KEYCLOAK_HOSTNAME to your public auth host}
+      KC_HOSTNAME_STRICT: "true"
+      KC_HTTP_ENABLED: "true"
+      KC_PROXY_HEADERS: xforwarded
+    ports: !reset []
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.enterprise-keycloak.rule: Host(`${AUTH_HOST:?Set AUTH_HOST}`)
+      traefik.http.routers.enterprise-keycloak.entrypoints: websecure
+      traefik.http.routers.enterprise-keycloak.tls: "true"
+      traefik.http.routers.enterprise-keycloak.tls.certresolver: letsencrypt
+      traefik.http.routers.enterprise-keycloak.middlewares: enterprise-security-headers@file,enterprise-compress@file
+      traefik.http.services.enterprise-keycloak.loadbalancer.server.port: "8080"
+
+  nats:
+    restart: always
+    ports: !reset []
+
+  minio:
+    restart: always
+    ports: !reset []
+    labels:
+      traefik.enable: "false"
+
+  backend:
+    image: ${BACKEND_IMAGE:?Set BACKEND_IMAGE for production}
+    restart: always
+    command: null
+    read_only: true
+    tmpfs: !override
+      - /tmp
+    security_opt: !override
+      - no-new-privileges:true
+    cap_drop: !override
+      - ALL
+    ports: !reset []
+    volumes: !reset []
+    environment:
+      NODE_ENV: production
+      SESSION_SECRET: ${SESSION_SECRET:-}
+      SESSION_SIGNING_KEYS: ${SESSION_SIGNING_KEYS:-}
+      SESSION_SECRET_PREVIOUS: ${SESSION_SECRET_PREVIOUS:-}
+      SECRET_HASH_KEYS: ${SECRET_HASH_KEYS:-}
+      SECRET_HASH_LEGACY_KEYS: ${SECRET_HASH_LEGACY_KEYS:-}
+      TOTP_ENCRYPTION_KEYS: ${TOTP_ENCRYPTION_KEYS:-}
+      TOTP_ENCRYPTION_LEGACY_KEYS: ${TOTP_ENCRYPTION_LEGACY_KEYS:-}
+      SESSION_COOKIE_NAME: ${SESSION_COOKIE_NAME:-stexor_session}
+      SESSION_COOKIE_MAX_AGE_SECONDS: ${SESSION_COOKIE_MAX_AGE_SECONDS:-315360000}
+      SESSION_COOKIE_SECURE: "true"
+      SESSION_COOKIE_SAMESITE: Lax
+      API_DOCS_ENABLED: ${API_DOCS_ENABLED:-false}
+      PUBLIC_BASE_URL: ${API_PUBLIC_URL:?Set API_PUBLIC_URL}
+      ACCOUNT_PUBLIC_URL: ${ACCOUNT_PUBLIC_URL:?Set ACCOUNT_PUBLIC_URL}
+      APP_PUBLIC_URL: ${APP_PUBLIC_URL:?Set APP_PUBLIC_URL}
+      WEBAUTHN_RP_ID: ${WEBAUTHN_RP_ID:?Set WEBAUTHN_RP_ID}
+      WEBAUTHN_ORIGINS: ${WEBAUTHN_ORIGINS:?Set WEBAUTHN_ORIGINS}
+      CORS_ORIGINS: ${CORS_ORIGINS:?Set CORS_ORIGINS}
+      BOT_PROTECTION_PROVIDER: ${BOT_PROTECTION_PROVIDER:-disabled}
+      BOT_PROTECTION_REQUIRED: ${BOT_PROTECTION_REQUIRED:-}
+      BOT_PROTECTION_MIN_SCORE: ${BOT_PROTECTION_MIN_SCORE:-0.5}
+      BOT_PROTECTION_EXPECTED_HOSTNAMES: ${BOT_PROTECTION_EXPECTED_HOSTNAMES:-}
+      GOOGLE_OAUTH_CLIENT_ID: ${GOOGLE_OAUTH_CLIENT_ID:-}
+      GOOGLE_OAUTH_CLIENT_SECRET: ${GOOGLE_OAUTH_CLIENT_SECRET:-}
+      GOOGLE_OAUTH_REDIRECT_URI: ${GOOGLE_OAUTH_REDIRECT_URI:?Set GOOGLE_OAUTH_REDIRECT_URI}
+      GOOGLE_OAUTH_SCOPES: ${GOOGLE_OAUTH_SCOPES:-openid email profile https://www.googleapis.com/auth/user.birthday.read}
+      RATE_LIMIT_TTL_SECONDS: ${RATE_LIMIT_TTL_SECONDS:-60}
+      RATE_LIMIT_MAX_REQUESTS: ${RATE_LIMIT_MAX_REQUESTS:-120}
+      RATE_LIMIT_FALLBACK_MAX_REQUESTS: ${RATE_LIMIT_FALLBACK_MAX_REQUESTS:-80}
+      SENSITIVE_ACTION_RATE_LIMIT_MAX: ${SENSITIVE_ACTION_RATE_LIMIT_MAX:-40}
+      SENSITIVE_ACTION_FALLBACK_RATE_LIMIT_MAX: ${SENSITIVE_ACTION_FALLBACK_RATE_LIMIT_MAX:-10}
+      SESSION_TOUCH_THROTTLE_SECONDS: ${SESSION_TOUCH_THROTTLE_SECONDS:-60}
+      DB_CONSOLE_ENABLED: ${DB_CONSOLE_ENABLED:-false}
+      DB_CONSOLE_WRITE_ENABLED: ${DB_CONSOLE_WRITE_ENABLED:-false}
+      DB_CONSOLE_MAX_ROWS: ${DB_CONSOLE_MAX_ROWS:-200}
+      DB_CONSOLE_READ_ROLE: ${DB_CONSOLE_READ_ROLE:-stexor_console_readonly}
+      DB_CONSOLE_ALLOWED_SCHEMAS: ${DB_CONSOLE_ALLOWED_SCHEMAS:-stexor_account,stexor_platform,public}
+      DB_CONSOLE_DENIED_TABLES: ${DB_CONSOLE_DENIED_TABLES:-stexor_account.passkeys,stexor_account.totp_secrets,stexor_account.backup_codes,stexor_account.backup_code_sets,stexor_account.email_otp_challenges,stexor_account.email_delivery_settings,stexor_account.email_outbox,stexor_account.audit_outbox}
+      DB_CONSOLE_ALLOWED_EMAILS: ${DB_CONSOLE_ALLOWED_EMAILS:?Set DB_CONSOLE_ALLOWED_EMAILS}
+      MAILER_PROVIDER: ${MAILER_PROVIDER:-smtp}
+      MAILER_FROM: ${MAILER_FROM:?Set MAILER_FROM}
+      MAILER_REPLY_TO: ${MAILER_REPLY_TO:?Set MAILER_REPLY_TO}
+      SMTP_HOST: ${SMTP_HOST:?Set SMTP_HOST}
+      SMTP_PORT: ${SMTP_PORT:-465}
+      SMTP_SECURE: ${SMTP_SECURE:-true}
+      SMTP_USER: ${SMTP_USER:?Set SMTP_USER}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      MAILER_CREDENTIALS_MANAGED_EXTERNALLY: ${MAILER_CREDENTIALS_MANAGED_EXTERNALLY:-true}
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.enterprise-backend.rule: Host(`${API_HOST:?Set API_HOST}`)
+      traefik.http.routers.enterprise-backend.entrypoints: websecure
+      traefik.http.routers.enterprise-backend.tls: "true"
+      traefik.http.routers.enterprise-backend.tls.certresolver: letsencrypt
+      traefik.http.routers.enterprise-backend.middlewares: enterprise-security-headers@file,enterprise-rate-limit@file,enterprise-compress@file
+      traefik.http.services.enterprise-backend.loadbalancer.server.port: "3000"
+
+  web:
+    image: ${WEB_IMAGE:?Set WEB_IMAGE for production}
+    restart: always
+    command: null
+    read_only: true
+    tmpfs: !override
+      - /tmp
+    security_opt: !override
+      - no-new-privileges:true
+    cap_drop: !override
+      - ALL
+    ports: !reset []
+    volumes: !reset []
+    environment:
+      NODE_ENV: production
+      NEXT_TELEMETRY_DISABLED: "1"
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:?Set NEXT_PUBLIC_API_URL}
+      NEXT_PUBLIC_APP_URL: ${NEXT_PUBLIC_APP_URL:?Set NEXT_PUBLIC_APP_URL}
+      NEXT_PUBLIC_ACCOUNT_URL: ${NEXT_PUBLIC_ACCOUNT_URL:?Set NEXT_PUBLIC_ACCOUNT_URL}
+      NEXT_PUBLIC_DB_CONSOLE_URL: ${NEXT_PUBLIC_DB_CONSOLE_URL:?Set NEXT_PUBLIC_DB_CONSOLE_URL}
+      NEXT_PUBLIC_DB_CONSOLE_ALLOWED_EMAIL: ${NEXT_PUBLIC_DB_CONSOLE_ALLOWED_EMAIL:-}
+      NEXT_PUBLIC_DB_CONSOLE_ENABLED: ${DB_CONSOLE_ENABLED:-false}
+      NEXT_PUBLIC_BOT_PROTECTION_PROVIDER: ${NEXT_PUBLIC_BOT_PROTECTION_PROVIDER:-disabled}
+      NEXT_PUBLIC_GOOGLE_RECAPTCHA_SITE_KEY: ${NEXT_PUBLIC_GOOGLE_RECAPTCHA_SITE_KEY:-}
+      NEXT_PUBLIC_CLOUDFLARE_TURNSTILE_SITE_KEY: ${NEXT_PUBLIC_CLOUDFLARE_TURNSTILE_SITE_KEY:-}
+      DB_CONSOLE_ENABLED: ${DB_CONSOLE_ENABLED:-false}
+      ACCOUNT_HOST: ${ACCOUNT_HOST:?Set ACCOUNT_HOST}
+      DB_CONSOLE_HOST: ${DB_CONSOLE_HOST:?Set DB_CONSOLE_HOST}
+      ACCOUNT_PUBLIC_URL: ${ACCOUNT_PUBLIC_URL:?Set ACCOUNT_PUBLIC_URL}
+      NEXTAUTH_URL: ${NEXTAUTH_URL:?Set NEXTAUTH_URL}
+      KEYCLOAK_ISSUER: ${KEYCLOAK_ISSUER:?Set KEYCLOAK_ISSUER}
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.enterprise-web.rule: Host(`${APP_HOST:?Set APP_HOST}`)
+      traefik.http.routers.enterprise-web.entrypoints: websecure
+      traefik.http.routers.enterprise-web.tls: "true"
+      traefik.http.routers.enterprise-web.tls.certresolver: letsencrypt
+      traefik.http.routers.enterprise-web.middlewares: enterprise-security-headers@file,enterprise-compress@file
+      traefik.http.services.enterprise-web.loadbalancer.server.port: "3000"
+
+  worker-notifications:
+    image: ${WORKER_NOTIFICATIONS_IMAGE:?Set WORKER_NOTIFICATIONS_IMAGE for production}
+    restart: always
+    command: null
+    read_only: true
+    tmpfs: !override
+      - /tmp
+    security_opt: !override
+      - no-new-privileges:true
+    cap_drop: !override
+      - ALL
+    volumes: !reset []
+    environment:
+      NODE_ENV: production
+
+  worker-jobs:
+    image: ${WORKER_JOBS_IMAGE:?Set WORKER_JOBS_IMAGE for production}
+    restart: always
+    command: null
+    read_only: true
+    tmpfs: !override
+      - /tmp
+    security_opt: !override
+      - no-new-privileges:true
+    cap_drop: !override
+      - ALL
+    volumes: !reset []
+    environment:
+      NODE_ENV: production
+
+  prometheus:
+    restart: always
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-15d}
+    ports: !reset []
+
+  alertmanager:
+    restart: always
+    ports: !reset []
+
+  grafana:
+    restart: always
+    ports: !reset []
+    labels:
+      traefik.enable: "false"
+
+  loki:
+    restart: always
+    ports: !reset []
+
+  promtail:
+    restart: always
+
+configs:
+  enterprise_traefik_routes:
+    content: |
+      http:
+        routers:
+          enterprise-web:
+            rule: Host(`${APP_HOST:?Set APP_HOST}`)
+            entryPoints:
+              - websecure
+            tls:
+              certResolver: letsencrypt
+            middlewares:
+              - enterprise-security-headers@file
+              - enterprise-compress@file
+            service: enterprise-web
+
+          enterprise-account:
+            rule: Host(`${ACCOUNT_HOST:?Set ACCOUNT_HOST}`)
+            entryPoints:
+              - websecure
+            tls:
+              certResolver: letsencrypt
+            middlewares:
+              - enterprise-security-headers@file
+              - enterprise-compress@file
+            service: enterprise-web
+
+          enterprise-db-console:
+            rule: Host(`${DB_CONSOLE_HOST:?Set DB_CONSOLE_HOST}`)
+            entryPoints:
+              - websecure
+            tls:
+              certResolver: letsencrypt
+            middlewares:
+              - enterprise-security-headers@file
+              - enterprise-rate-limit@file
+              - enterprise-compress@file
+            service: enterprise-web
+
+          enterprise-backend:
+            rule: Host(`${API_HOST:?Set API_HOST}`)
+            entryPoints:
+              - websecure
+            tls:
+              certResolver: letsencrypt
+            middlewares:
+              - enterprise-security-headers@file
+              - enterprise-rate-limit@file
+              - enterprise-compress@file
+            service: enterprise-backend
+
+          enterprise-keycloak:
+            rule: Host(`${AUTH_HOST:?Set AUTH_HOST}`)
+            entryPoints:
+              - websecure
+            tls:
+              certResolver: letsencrypt
+            middlewares:
+              - enterprise-security-headers@file
+              - enterprise-compress@file
+            service: enterprise-keycloak
+
+        services:
+          enterprise-web:
+            loadBalancer:
+              servers:
+                - url: http://web:3000
+          enterprise-backend:
+            loadBalancer:
+              servers:
+                - url: http://backend:3000
+          enterprise-keycloak:
+            loadBalancer:
+              servers:
+                - url: http://keycloak:8080

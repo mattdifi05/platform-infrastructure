@@ -1,0 +1,50 @@
+{
+  "realm": "stexor",
+  "enabled": true,
+  "displayName": "Stexor",
+  "registrationAllowed": false,
+  "resetPasswordAllowed": true,
+  "rememberMe": true,
+  "verifyEmail": true,
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "webAuthnPolicyRpEntityName": "Stexor",
+  "webAuthnPolicyUserVerificationRequirement": "preferred",
+  "webAuthnPolicyResidentKey": "preferred",
+  "webAuthnPolicyAuthenticatorAttachment": "not specified",
+  "webAuthnPolicyAvoidSameAuthenticatorRegister": true,
+  "webAuthnPolicyPasswordlessRpEntityName": "Stexor",
+  "webAuthnPolicyPasswordlessUserVerificationRequirement": "required",
+  "webAuthnPolicyPasswordlessResidentKey": "preferred",
+  "webAuthnPolicyPasswordlessAuthenticatorAttachment": "not specified",
+  "webAuthnPolicyPasswordlessAvoidSameAuthenticatorRegister": true,
+  "clients": [
+    {
+      "clientId": "stexor-web",
+      "name": "Stexor Web",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "redirectUris": [
+        "https://account.localhost.com/*",
+        "https://app.localhost.com/*"
+      ],
+      "webOrigins": [
+        "https://account.localhost.com",
+        "https://app.localhost.com"
+      ]
+    }
+  ],
+  "roles": {
+    "realm": [
+      { "name": "owner", "description": "Full Stexor owner access" },
+      { "name": "admin", "description": "Administrative access" },
+      { "name": "db_admin", "description": "Database console administration" },
+      { "name": "developer", "description": "Developer access" },
+      { "name": "billing", "description": "Billing access" },
+      { "name": "viewer", "description": "Read-only access" }
+    ]
+  }
+}

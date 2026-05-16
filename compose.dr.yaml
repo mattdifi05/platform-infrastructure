@@ -1,0 +1,23 @@
+# Disaster recovery / PITR overlay for PostgreSQL.
+#
+# Enables WAL archiving into an append-only host path or mounted object-store
+# sync directory. The archive directory must be shipped off-site by restic or
+# an equivalent encrypted backup pipeline.
+services:
+  postgres:
+    command:
+      - postgres
+      - -c
+      - wal_level=replica
+      - -c
+      - archive_mode=on
+      - -c
+      - archive_timeout=${POSTGRES_ARCHIVE_TIMEOUT:-60s}
+      - -c
+      - archive_command=test ! -f /var/lib/postgresql/wal-archive/%f && cp %p /var/lib/postgresql/wal-archive/%f
+    volumes:
+      - enterprise_postgres_wal_archive:/var/lib/postgresql/wal-archive
+
+volumes:
+  enterprise_postgres_wal_archive:
+    name: enterprise_postgres_wal_archive

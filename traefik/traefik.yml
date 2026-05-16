@@ -1,0 +1,31 @@
+api:
+  dashboard: true
+  insecure: true
+
+ping: {}
+
+log:
+  level: INFO
+  format: json
+
+accessLog:
+  format: json
+
+entryPoints:
+  web:
+    address: ":80"
+  websecure:
+    address: ":443"
+  traefik:
+    address: ":8080"
+
+providers:
+  file:
+    directory: /etc/traefik/dynamic
+    watch: true
+
+metrics:
+  prometheus:
+    addEntryPointsLabels: true
+    addRoutersLabels: true
+    addServicesLabels: true

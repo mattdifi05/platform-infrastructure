@@ -1,0 +1,119 @@
+groups:
+  - name: stexor-enterprise-health
+    rules:
+      - alert: ServiceTargetDown
+        expr: up{job=~"backend|web|workers|traefik|prometheus|alertmanager|keycloak"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Service target is down"
+          description: "{{ $labels.job }} target {{ $labels.instance }} is not scrapeable."
+
+      - alert: BackendErrorBudgetBurn
+        expr: rate(http_requests_total{service="enterprise-backend"}[5m]) == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Backend request rate dropped to zero"
+          description: "The backend is healthy but not receiving traffic for 5 minutes."
+
+      - alert: TooManyActiveSessions
+        expr: account_active_sessions{service="enterprise-backend"} > 25
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Unexpected number of active sessions"
+          description: "Review account sessions and audit history."
+
+      - alert: MissingPasskeys
+        expr: account_passkeys_total{service="enterprise-backend"} < 1
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "No passkeys registered"
+          description: "DB Console and passwordless flows require at least one passkey."
+
+      - alert: BackendRedisUnavailable
+        expr: redis_connection_up{service="enterprise-backend"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Backend Redis client is unavailable"
+          description: "Redis-backed rate limiting and ephemeral auth state are degraded."
+
+      - alert: WorkerRedisUnavailable
+        expr: worker_redis_connection_up == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Worker Redis client is unavailable"
+          description: "{{ $labels.service }} cannot write its Redis heartbeat."
+
+      - alert: WorkerPostgresUnavailable
+        expr: worker_postgres_connection_up{service="enterprise-worker-jobs"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Worker PostgreSQL client is unavailable"
+          description: "The jobs worker cannot read audit outbox or backup/restore metrics."
+
+      - alert: AuditOutboxDispatchBacklog
+        expr: audit_outbox_due_rows{service="enterprise-worker-jobs"} > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Audit outbox has due records"
+          description: "Durable audit events are waiting for dispatch for more than 10 minutes."
+
+      - alert: AuditOutboxDeadLetters
+        expr: audit_outbox_rows{service="enterprise-worker-jobs",status="dead"} > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Audit outbox has dead-letter records"
+          description: "Investigate failed durable audit delivery and replay policy."
+
+      - alert: AuditOutboxDispatchFailures
+        expr: increase(audit_outbox_failed_total{service="enterprise-worker-jobs"}[15m]) > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Audit outbox dispatch is failing"
+          description: "At least one audit outbox delivery failed in the last 15 minutes."
+
+      - alert: PostgresBackupStale
+        expr: backup_restore_last_success_age_seconds{operation="backup"} < 0 or backup_restore_last_success_age_seconds{operation="backup"} > 172800
+        for: 15m
+        labels:
+          severity: critical
+        annotations:
+          summary: "PostgreSQL backup is stale or missing"
+          description: "No successful PostgreSQL backup has been recorded in the last 48 hours."
+
+      - alert: RestoreDrillStale
+        expr: backup_restore_last_success_age_seconds{operation="restore_test"} < 0 or backup_restore_last_success_age_seconds{operation="restore_test"} > 3024000
+        for: 30m
+        labels:
+          severity: critical
+        annotations:
+          summary: "PostgreSQL restore drill is stale or missing"
+          description: "No successful restore_test has been recorded in the last 35 days."
+
+      - alert: AlertmanagerDeliveryFailed
+        expr: increase(notification_alert_forward_failures_total{service="enterprise-worker-notifications"}[15m]) > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "External alert forwarding failed"
+          description: "The notification worker accepted Prometheus alerts but failed optional external webhook delivery."
