@@ -30,13 +30,13 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA stexor_platform REVOKE ALL ON SEQUENCES FROM
   stexor_app_auth_rw,
   stexor_app_audit_rw;
 
-GRANT USAGE ON SCHEMA stexor_platform TO stexor_app_user, stexor_console_readonly;
+GRANT USAGE ON SCHEMA stexor_platform TO stexor_app_user;
 
 GRANT SELECT ON
   stexor_platform.schema_migrations,
   stexor_platform.data_retention_policies,
   stexor_platform.backup_restore_runs
-TO stexor_app_user, stexor_console_readonly;
+TO stexor_app_user;
 
 REVOKE INSERT, UPDATE, DELETE ON
   stexor_platform.schema_migrations,
@@ -47,8 +47,7 @@ FROM
   stexor_app_user,
   stexor_app_account_rw,
   stexor_app_auth_rw,
-  stexor_app_audit_rw,
-  stexor_console_readonly;
+  stexor_app_audit_rw;
 
 INSERT INTO stexor_account.security_policies (key, value, description)
 VALUES (

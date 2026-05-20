@@ -68,7 +68,7 @@ GRANT stexor_app_audit_rw TO stexor_app_user;
 INSERT INTO stexor_account.security_policies (key, value, description)
 VALUES (
   'app_runtime_db_privileges',
-  '{"directBroadGrants":false,"deletePrivilege":false,"splitRoles":["stexor_app_account_rw","stexor_app_auth_rw","stexor_app_audit_rw","stexor_console_readonly"]}'::jsonb,
+  '{"directBroadGrants":false,"deletePrivilege":false,"splitRoles":["stexor_app_account_rw","stexor_app_auth_rw","stexor_app_audit_rw"]}'::jsonb,
   'Application runtime database privileges are split by capability and exclude broad DELETE grants.'
 )
 ON CONFLICT (key) DO UPDATE SET

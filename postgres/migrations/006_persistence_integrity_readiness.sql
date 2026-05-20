@@ -225,10 +225,7 @@ DROP POLICY IF EXISTS audit_events_runtime_select ON stexor_account.audit_events
 DROP POLICY IF EXISTS audit_events_runtime_insert ON stexor_account.audit_events;
 CREATE POLICY audit_events_runtime_select ON stexor_account.audit_events
   FOR SELECT TO PUBLIC
-  USING (
-    pg_has_role(current_user, 'stexor_app_audit_rw', 'member')
-    OR pg_has_role(current_user, 'stexor_console_readonly', 'member')
-  );
+  USING (pg_has_role(current_user, 'stexor_app_audit_rw', 'member'));
 CREATE POLICY audit_events_runtime_insert ON stexor_account.audit_events
   FOR INSERT TO PUBLIC
   WITH CHECK (pg_has_role(current_user, 'stexor_app_audit_rw', 'member'));
@@ -237,12 +234,6 @@ REVOKE UPDATE, DELETE ON stexor_account.audit_events FROM stexor_app_audit_rw;
 REVOKE UPDATE, DELETE ON stexor_account.audit_events FROM stexor_app_user;
 GRANT SELECT, INSERT ON stexor_account.audit_events TO stexor_app_audit_rw;
 ALTER DEFAULT PRIVILEGES IN SCHEMA stexor_account REVOKE UPDATE, DELETE ON TABLES FROM stexor_app_audit_rw;
-
-GRANT SELECT ON
-  stexor_platform.schema_migrations,
-  stexor_platform.data_retention_policies,
-  stexor_platform.backup_restore_runs
-TO stexor_console_readonly;
 
 GRANT SELECT, INSERT, UPDATE ON
   stexor_platform.data_retention_policies,

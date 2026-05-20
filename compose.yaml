@@ -249,11 +249,11 @@ services:
       APP_PUBLIC_URL: ${APP_PUBLIC_URL:-https://app.localhost.com}
       WEBAUTHN_RP_ID: ${WEBAUTHN_RP_ID:-account.localhost.com}
       WEBAUTHN_ORIGINS: ${WEBAUTHN_ORIGINS:-https://account.localhost.com}
-      CORS_ORIGINS: ${CORS_ORIGINS:-https://account.localhost.com,https://app.localhost.com,https://db.localhost.com}
+      CORS_ORIGINS: ${CORS_ORIGINS:-https://account.localhost.com,https://app.localhost.com}
       BOT_PROTECTION_PROVIDER: ${BOT_PROTECTION_PROVIDER:-disabled}
       BOT_PROTECTION_REQUIRED: ${BOT_PROTECTION_REQUIRED:-}
       BOT_PROTECTION_MIN_SCORE: ${BOT_PROTECTION_MIN_SCORE:-0.5}
-      BOT_PROTECTION_EXPECTED_HOSTNAMES: ${BOT_PROTECTION_EXPECTED_HOSTNAMES:-account.localhost.com,app.localhost.com,db.localhost.com}
+      BOT_PROTECTION_EXPECTED_HOSTNAMES: ${BOT_PROTECTION_EXPECTED_HOSTNAMES:-account.localhost.com,app.localhost.com}
       GOOGLE_RECAPTCHA_SECRET_KEY: ${GOOGLE_RECAPTCHA_SECRET_KEY:-}
       GOOGLE_RECAPTCHA_SECRET_KEY_FILE: ${GOOGLE_RECAPTCHA_SECRET_KEY_FILE:-}
       CLOUDFLARE_TURNSTILE_SECRET_KEY: ${CLOUDFLARE_TURNSTILE_SECRET_KEY:-}
@@ -274,13 +274,6 @@ services:
       OTP_SEND_COOLDOWN_SECONDS: ${OTP_SEND_COOLDOWN_SECONDS:-60}
       AUDIT_LOG_ENABLED: ${AUDIT_LOG_ENABLED:-true}
       STRUCTURED_LOGGING: ${STRUCTURED_LOGGING:-true}
-      DB_CONSOLE_ENABLED: ${DEV_DB_CONSOLE_ENABLED:-false}
-      DB_CONSOLE_WRITE_ENABLED: ${DB_CONSOLE_WRITE_ENABLED:-false}
-      DB_CONSOLE_MAX_ROWS: ${DB_CONSOLE_MAX_ROWS:-200}
-      DB_CONSOLE_READ_ROLE: ${DB_CONSOLE_READ_ROLE:-stexor_console_readonly}
-      DB_CONSOLE_ALLOWED_SCHEMAS: ${DB_CONSOLE_ALLOWED_SCHEMAS:-stexor_account,stexor_platform,public}
-      DB_CONSOLE_DENIED_TABLES: ${DB_CONSOLE_DENIED_TABLES:-stexor_account.passkeys,stexor_account.totp_secrets,stexor_account.backup_codes,stexor_account.backup_code_sets,stexor_account.email_otp_challenges,stexor_account.email_delivery_settings,stexor_account.email_outbox,stexor_account.audit_outbox}
-      DB_CONSOLE_ALLOWED_EMAILS: ${DB_CONSOLE_ALLOWED_EMAILS:?Set DB_CONSOLE_ALLOWED_EMAILS}
       MAILER_PROVIDER: ${MAILER_PROVIDER:-smtp}
       MAILER_FROM: ${MAILER_FROM:?Set MAILER_FROM}
       MAILER_REPLY_TO: ${MAILER_REPLY_TO:?Set MAILER_REPLY_TO}
@@ -337,16 +330,11 @@ services:
       NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-https://api.localhost.com}
       NEXT_PUBLIC_APP_URL: ${NEXT_PUBLIC_APP_URL:-https://app.localhost.com}
       NEXT_PUBLIC_ACCOUNT_URL: ${NEXT_PUBLIC_ACCOUNT_URL:-https://account.localhost.com}
-      NEXT_PUBLIC_DB_CONSOLE_URL: ${NEXT_PUBLIC_DB_CONSOLE_URL:-https://db.localhost.com}
-      NEXT_PUBLIC_DB_CONSOLE_ALLOWED_EMAIL: ${NEXT_PUBLIC_DB_CONSOLE_ALLOWED_EMAIL:-}
-      NEXT_PUBLIC_DB_CONSOLE_ENABLED: ${DEV_DB_CONSOLE_ENABLED:-false}
       NEXT_PUBLIC_BOT_PROTECTION_PROVIDER: ${NEXT_PUBLIC_BOT_PROTECTION_PROVIDER:-disabled}
       NEXT_PUBLIC_GOOGLE_RECAPTCHA_SITE_KEY: ${NEXT_PUBLIC_GOOGLE_RECAPTCHA_SITE_KEY:-}
       NEXT_PUBLIC_CLOUDFLARE_TURNSTILE_SITE_KEY: ${NEXT_PUBLIC_CLOUDFLARE_TURNSTILE_SITE_KEY:-}
-      DB_CONSOLE_ENABLED: ${DEV_DB_CONSOLE_ENABLED:-false}
       INTERNAL_API_URL: http://backend:3000
       ACCOUNT_HOST: ${ACCOUNT_HOST:-account.localhost.com}
-      DB_CONSOLE_HOST: ${DB_CONSOLE_HOST:-db.localhost.com}
       ACCOUNT_PUBLIC_URL: ${ACCOUNT_PUBLIC_URL:-https://account.localhost.com}
       NEXTAUTH_URL: ${NEXTAUTH_URL:-https://account.localhost.com}
       KEYCLOAK_ISSUER: ${KEYCLOAK_ISSUER:-https://auth.localhost.com/realms/stexor}
@@ -745,25 +733,6 @@ configs:
               - enterprise-security-headers@file
               - enterprise-compress@file
             service: enterprise-minio
-
-          enterprise-db-console-http:
-            rule: Host(`${DB_CONSOLE_HOST:-db.localhost.com}`)
-            entryPoints:
-              - web
-            middlewares:
-              - enterprise-redirect-https@file
-            service: enterprise-web
-
-          enterprise-db-console:
-            rule: Host(`${DB_CONSOLE_HOST:-db.localhost.com}`)
-            entryPoints:
-              - websecure
-            tls: {}
-            middlewares:
-              - enterprise-security-headers@file
-              - enterprise-rate-limit@file
-              - enterprise-compress@file
-            service: enterprise-web
 
           enterprise-grafana-http:
             rule: Host(`${GRAFANA_HOST:-grafana.localhost.com}`)

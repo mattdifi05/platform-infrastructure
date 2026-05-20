@@ -442,23 +442,3 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA stexor_account GRANT USAGE, SELECT ON SEQUENC
 GRANT stexor_app_account_rw TO stexor_app_user;
 GRANT stexor_app_auth_rw TO stexor_app_user;
 GRANT stexor_app_audit_rw TO stexor_app_user;
-
-DO $$
-BEGIN
-  CREATE ROLE stexor_console_readonly NOLOGIN;
-EXCEPTION WHEN duplicate_object THEN NULL;
-END $$;
-
-GRANT USAGE ON SCHEMA stexor_account TO stexor_console_readonly;
-GRANT SELECT ON
-  stexor_account.accounts,
-  stexor_account.account_security_settings,
-  stexor_account.sessions,
-  stexor_account.device_approval_requests,
-  stexor_account.audit_events,
-  stexor_account.service_catalog,
-  stexor_account.subscriptions,
-  stexor_account.email_templates
-TO stexor_console_readonly;
-
-GRANT stexor_console_readonly TO stexor_app_user;

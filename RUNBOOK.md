@@ -73,11 +73,11 @@ The load profile uses a bounded synthetic `X-Forwarded-For` client pool by defau
 
 If `AuditOutboxDeadLetters` fires, pause risky account operations, inspect `{job="docker",service="enterprise-worker-jobs"} |= "audit_outbox"`, fix the downstream sink, then replay only events whose `external_event_id` has not already been accepted by the sink.
 
-If `BackendRedisUnavailable` fires, keep login/MFA/DB Console traffic under the degraded memory budget until Redis is healthy. Do not raise rate-limit ceilings during the incident.
+If `BackendRedisUnavailable` fires, keep login/MFA traffic under the degraded memory budget until Redis is healthy. Do not raise rate-limit ceilings during the incident.
 
 ## Centralized logs and audit
 
-Promtail reads Docker JSON logs from `/var/lib/docker/containers` without Docker socket service discovery. Its pipeline unwraps Docker log entries, redacts common sensitive fields (`authorization`, `cookie`, `set-cookie`, `x-db-console-access`, `password`, `secret`, `token`, `otp`, passkey credentials and challenges), parses JSON app logs and labels them by `service` and `level`.
+Promtail reads Docker JSON logs from `/var/lib/docker/containers` without Docker socket service discovery. Its pipeline unwraps Docker log entries, redacts common sensitive fields (`authorization`, `cookie`, `set-cookie`, `password`, `secret`, `token`, `otp`, passkey credentials and challenges), parses JSON app logs and labels them by `service` and `level`.
 
 Primary operator queries:
 
@@ -87,7 +87,7 @@ Primary operator queries:
 {job="docker",service="enterprise-worker-jobs"} |= "audit_outbox"
 ```
 
-Use Loki for operational logs and PostgreSQL `stexor_account.audit_events` plus `stexor_account.audit_outbox` for durable security/compliance events. Audit tables are append-only/RLS protected and the DB Console role must not read the outbox.
+Use Loki for operational logs and PostgreSQL `stexor_account.audit_events` plus `stexor_account.audit_outbox` for durable security/compliance events. Audit tables are append-only and RLS protected.
 
 ## Backup
 

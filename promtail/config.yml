@@ -22,7 +22,7 @@ scrape_configs:
           older_than: 168h
           drop_counter_reason: stale_docker_log
       - replace:
-          expression: '(?i)("?(authorization|cookie|set-cookie|x-db-console-access|password|secret|token|otp|otpauthUrl|backupCode|backupCodes|credential|challenge)"?\s*[:=]\s*)("[^"]*"|[^,\s}]+)'
+          expression: '(?i)("?(authorization|cookie|set-cookie|password|secret|token|otp|otpauthUrl|backupCode|backupCodes|credential|challenge)"?\s*[:=]\s*)("[^"]*"|[^,\s}]+)'
           replace: '$1"[REDACTED]"'
       - json:
           expressions:

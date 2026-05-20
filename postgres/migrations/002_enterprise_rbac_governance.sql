@@ -2,7 +2,7 @@
 
 CREATE TABLE IF NOT EXISTS stexor_account.account_roles (
   account_id uuid NOT NULL REFERENCES stexor_account.accounts(id) ON DELETE CASCADE,
-  role text NOT NULL CHECK (role IN ('owner', 'admin', 'developer', 'billing', 'viewer', 'db_admin')),
+  role text NOT NULL CHECK (role IN ('owner', 'admin', 'developer', 'billing', 'viewer')),
   granted_by uuid REFERENCES stexor_account.accounts(id) ON DELETE SET NULL,
   granted_at timestamptz NOT NULL DEFAULT now(),
   revoked_at timestamptz,
@@ -49,7 +49,6 @@ ON CONFLICT (account_id, role) DO NOTHING;
 
 INSERT INTO stexor_account.security_policies (key, value, description)
 VALUES
-  ('db_console', '{"allowedRoles":["owner","admin","db_admin"],"requirePasskeyEveryAccess":true,"defaultWriteEnabled":false}'::jsonb, 'DB Console access policy'),
   ('account_session', '{"cookie":"HttpOnly Secure SameSite=Lax","rememberMeSeconds":315360000,"requireServerSession":true}'::jsonb, 'Account session policy'),
   ('backup', '{"postgres":"daily","restoreTest":"monthly","encryptOffsite":true}'::jsonb, 'Backup and restore policy')
 ON CONFLICT (key) DO UPDATE SET

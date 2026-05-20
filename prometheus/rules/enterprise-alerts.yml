@@ -35,7 +35,7 @@ groups:
           severity: critical
         annotations:
           summary: "No passkeys registered"
-          description: "DB Console and passwordless flows require at least one passkey."
+          description: "Passwordless flows require at least one passkey."
 
       - alert: BackendRedisUnavailable
         expr: redis_connection_up{service="enterprise-backend"} == 0

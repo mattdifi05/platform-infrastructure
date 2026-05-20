@@ -41,7 +41,6 @@
     "realm": [
       { "name": "owner", "description": "Full Stexor owner access" },
       { "name": "admin", "description": "Administrative access" },
-      { "name": "db_admin", "description": "Database console administration" },
       { "name": "developer", "description": "Developer access" },
       { "name": "billing", "description": "Billing access" },
       { "name": "viewer", "description": "Read-only access" }

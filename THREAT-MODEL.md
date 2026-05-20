@@ -5,7 +5,6 @@
 - Account profile and recovery data.
 - Passkey public credentials and counters.
 - PostgreSQL application data.
-- DB Console privileged access.
 - SMTP credentials and OTP delivery.
 - MinIO objects.
 - Observability logs and metrics.
@@ -15,14 +14,12 @@
 - Browser to Traefik over HTTPS.
 - Traefik to internal services on `enterprise_net`.
 - Backend to PostgreSQL/Redis/NATS/MinIO.
-- DB Console browser UI to backend API only, never directly to PostgreSQL.
 - SMTP provider outside the infrastructure boundary.
 
 ## Primary threats
 
 - Session theft: mitigated by `HttpOnly`, `Secure`, signed cookies and server-side session state.
 - CSRF on mutating endpoints: mitigated by Origin checks and JSON APIs.
-- DB Console abuse: mitigated by passkey reauth, email allowlist, role checks, query classification, timeouts and audit fingerprints.
 - Account enumeration: UI should keep generic error copy; backend should continue avoiding detailed public errors.
 - Secret leakage: `.env` ignored; production should move to secret manager.
 - Backup compromise: backups must be encrypted before offsite storage.

@@ -4,7 +4,6 @@
 
 - Account sessions are signed server-side and stored in `HttpOnly`, `Secure`, `SameSite=Lax` cookies by default.
 - Mutating API calls reject untrusted `Origin` headers and hostile Fetch Metadata.
-- DB Console requires an allowlisted email, an enterprise role (`owner`, `admin`, `db_admin`) and a fresh passkey challenge.
 - Passkeys are the preferred high-assurance factor.
 - Redis stores only short-lived auth state; PostgreSQL remains the durable source of truth.
 - Fastify rate limiting uses Redis when available, so limits remain consistent across backend replicas.
@@ -13,7 +12,6 @@
 
 - `owner`: full platform ownership.
 - `admin`: operational administration.
-- `db_admin`: database console administration.
 - `developer`: build/deploy diagnostics.
 - `billing`: services and subscription management.
 - `viewer`: read-only baseline.
@@ -33,10 +31,7 @@ Roles are stored in `stexor_account.account_roles` and must not be trusted from 
 ## Database
 
 - PostgreSQL is not public in production.
-- DB Console write mode is disabled by default.
 - Query execution is statement-time-limited and row-limited.
-- DB Console activity is audit logged with query fingerprints.
-- Console reads use `stexor_console_readonly`; sensitive tables stay denied.
 - Operational logs are centralized in Loki/Promtail with shared application redaction in `@stexor/observability`; durable security events are stored in append-only audit tables and dispatched through the audit outbox.
 
 ## Required recurring checks
@@ -47,7 +42,7 @@ Roles are stored in `stexor_account.account_roles` and must not be trusted from 
 - Fault-injection tests for Redis degradation, PostgreSQL timeout and session races.
 - Certificate expiry check.
 - RBAC review.
-- Audit log review for DB Console access.
+- Audit log review.
 - `sh ./scripts/enterprise-hardening-audit.sh`.
 - `sh ./scripts/secret-scan.sh`.
 - `sh ./scripts/stexor-secret-manager.sh verify`.

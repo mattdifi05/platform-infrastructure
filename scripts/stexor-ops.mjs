@@ -949,7 +949,7 @@ async function backupPostgres(options = {}) {
 }
 
 async function certificateExpiryCheck() {
-  const hosts = (argv.hosts ?? "app.localhost.com,account.localhost.com,api.localhost.com,db.localhost.com").split(",").map((host) => host.trim()).filter(Boolean);
+  const hosts = (argv.hosts ?? "app.localhost.com,account.localhost.com,api.localhost.com").split(",").map((host) => host.trim()).filter(Boolean);
   const warnDays = Number(argv.warnDays ?? 30);
   for (const host of hosts) {
     await new Promise((resolve, reject) => {
@@ -1147,19 +1147,6 @@ async function runtimeHealthChecks() {
     fail("Database account_session policy rememberMeSeconds must be 315360000.");
   }
 
-  log("==> DB Console read-only role");
-  const membership = postgresOut("enterprise-postgres", "stexor_app", "postgres", "select pg_has_role('stexor_app_user', 'stexor_console_readonly', 'member');").trim();
-  if (membership !== "t") {
-    fail("stexor_app_user must be able to SET ROLE stexor_console_readonly for DB Console reads.");
-  }
-  postgresOut("enterprise-postgres", "stexor_app", "postgres", "begin; set local role stexor_console_readonly; select count(*) from stexor_account.accounts; rollback;");
-  const deniedTotp = postgresOut("enterprise-postgres", "stexor_app", "postgres", "select has_table_privilege('stexor_console_readonly', 'stexor_account.totp_secrets', 'select');").trim();
-  const deniedPasskeys = postgresOut("enterprise-postgres", "stexor_app", "postgres", "select has_table_privilege('stexor_console_readonly', 'stexor_account.passkeys', 'select');").trim();
-  const deniedAuditOutbox = postgresOut("enterprise-postgres", "stexor_app", "postgres", "select has_table_privilege('stexor_console_readonly', 'stexor_account.audit_outbox', 'select');").trim();
-  if (deniedTotp !== "f" || deniedPasskeys !== "f" || deniedAuditOutbox !== "f") {
-    fail("stexor_console_readonly must not have SELECT on sensitive tables.");
-  }
-
   log("==> App DB least privilege");
   for (const role of ["stexor_app_account_rw", "stexor_app_auth_rw", "stexor_app_audit_rw"]) {
     const roleMembership = postgresOut("enterprise-postgres", "stexor_app", "postgres", `select pg_has_role('stexor_app_user', ${sqlString(role)}, 'member');`).trim();
@@ -1257,11 +1244,6 @@ async function runtimeHealthChecks() {
   if (auditOutboxDueIndex !== "t") {
     fail("Audit outbox must have a due-dispatch index for worker claims.");
   }
-  const consoleRetentionRead = postgresOut("enterprise-postgres", "stexor_app", "postgres", "select has_table_privilege('stexor_console_readonly', 'stexor_platform.data_retention_policies', 'select') and has_table_privilege('stexor_console_readonly', 'stexor_platform.backup_restore_runs', 'select');").trim();
-  if (consoleRetentionRead !== "t") {
-    fail("Console read-only role must be able to inspect retention and backup readiness tables.");
-  }
-
   log("==> Dev app container hardening");
   for (const container of ["enterprise-backend", "enterprise-web", "enterprise-worker-notifications", "enterprise-worker-jobs"]) {
     const readonly = output("docker", ["inspect", "--format", "{{.HostConfig.ReadonlyRootfs}}", container]).trim().toLowerCase();
@@ -1648,7 +1630,6 @@ async function productionPreflight() {
     "NEXT_PUBLIC_API_URL",
     "NEXT_PUBLIC_APP_URL",
     "NEXT_PUBLIC_ACCOUNT_URL",
-    "NEXT_PUBLIC_DB_CONSOLE_URL",
     "NEXTAUTH_URL",
     "KEYCLOAK_ISSUER",
     "WEBAUTHN_RP_ID",
@@ -1689,9 +1670,6 @@ async function productionPreflight() {
     if (/@sha256:0{64}$/i.test(env[imageKey])) {
       fail(`${imageKey} must use a real image digest, not the all-zero placeholder.`);
     }
-  }
-  if ((env.DB_CONSOLE_ENABLED ?? "false").toLowerCase() !== "false") {
-    fail("DB_CONSOLE_ENABLED must be false for public production unless behind a separate VPN/SSO control.");
   }
   if ((env.SESSION_COOKIE_SECURE ?? "true").toLowerCase() !== "true") {
     fail("SESSION_COOKIE_SECURE must be true in production.");
@@ -2218,7 +2196,7 @@ async function secretScan() {
 }
 
 async function securitySmoke() {
-  const urls = (argv.urls ?? "https://app.localhost.com/,https://account.localhost.com/,https://db.localhost.com/,https://api.localhost.com/health").split(",").map((url) => url.trim()).filter(Boolean);
+  const urls = (argv.urls ?? "https://app.localhost.com/,https://account.localhost.com/,https://api.localhost.com/health").split(",").map((url) => url.trim()).filter(Boolean);
   for (const url of urls) {
     log(`Checking ${url}`);
     const response = await request("HEAD", url);
@@ -2282,7 +2260,6 @@ async function staticSecurityCheck() {
   const opsScript = readText(path.join(infraRoot, "scripts", "stexor-ops.mjs"));
   const secretManagerScript = readText(path.join(infraRoot, "scripts", "stexor-secret-manager.mjs"));
   const backendConfig = readText(path.join(sourceRoot, "apps", "backend", "src", "server-config.ts"));
-  const backendSqlUtils = readText(path.join(sourceRoot, "apps", "backend", "src", "utils", "sql.ts"));
   const backendRedisStore = readText(path.join(sourceRoot, "apps", "backend", "src", "runtime", "redis-store.ts"));
   const backendSessionAuth = readText(path.join(sourceRoot, "apps", "backend", "src", "runtime", "session-auth.ts"));
   const observabilitySource = readText(path.join(sourceRoot, "packages", "observability", "src", "index.ts"));
@@ -2301,8 +2278,10 @@ async function staticSecurityCheck() {
   const webGlobalError = readText(path.join(sourceRoot, "apps", "web", "src", "app", "global-error.tsx"));
   const webPages404 = readText(path.join(sourceRoot, "apps", "web", "src", "pages", "404.tsx"));
   const webPages500 = readText(path.join(sourceRoot, "apps", "web", "src", "pages", "500.tsx"));
-  const webRememberModel = readText(path.join(sourceRoot, "apps", "web", "src", "components", "account-center", "model.ts"));
+  const webRememberModel = readText(path.join(sourceRoot, "packages", "ui", "src", "account-center", "model.ts"));
   const webSource = readSourceTreeText(path.join(sourceRoot, "apps", "web", "src"));
+  const uiSource = readSourceTreeText(path.join(sourceRoot, "packages", "ui", "src"));
+  const browserUiSource = `${webSource}\n${uiSource}`;
   const enterprisePlan = readText(path.join(infraRoot, "ENTERPRISE-10-PLAN.md"));
   const admissionPolicy = readText(path.join(infraRoot, "security", "admission", "cosign-digest-policy.rego"));
   const branchProtection = readText(path.join(infraRoot, "governance", "github-branch-protection.json"));
@@ -2314,7 +2293,7 @@ async function staticSecurityCheck() {
   assertMatch(compose, /^name:\s+enterprise_local/m, "Compose must set a stable local project name to avoid accidental duplicate stacks.");
   assertMatch(composeBuild, /BACKEND_BUILD_IMAGE[\s\S]*WEB_BUILD_IMAGE[\s\S]*WORKER_NOTIFICATIONS_BUILD_IMAGE[\s\S]*WORKER_JOBS_BUILD_IMAGE/, "Compose build must use local build image variables.");
   assertMatch(composeBuild, /cache_from:[\s\S]*cache_to:/, "Compose build must define reusable BuildKit cache import/export.");
-  assertMatch(composeBuild, /NEXT_PUBLIC_API_URL[\s\S]*NEXT_PUBLIC_DB_CONSOLE_URL/, "Compose build must pass public web URLs into the Next.js production build.");
+  assertMatch(composeBuild, /NEXT_PUBLIC_API_URL[\s\S]*NEXT_PUBLIC_ACCOUNT_URL/, "Compose build must pass public web URLs into the Next.js production build.");
   assertNoMatch(composeBuild, /\$\{(?:BACKEND_IMAGE|WEB_IMAGE|WORKER_NOTIFICATIONS_IMAGE|WORKER_JOBS_IMAGE)[:-]/, "Compose build must not reuse production release image variables.");
   assertMatch(composeHa, /failure_action:\s+rollback/, "HA overlay must rollback failed rolling updates.");
   assertMatch(composeHa, /max_replicas_per_node:\s+1/, "HA overlay must spread stateless replicas across nodes.");
@@ -2347,11 +2326,10 @@ async function staticSecurityCheck() {
   assertNoMatch(compose, /\.\.\/src:\/workspace/, "Local dev compose must not bind-mount app source into runtime containers.");
   assertNoMatch(compose, /\$\{(?:POSTGRES_PORT|REDIS_PORT|KEYCLOAK_PORT|NATS_CLIENT_PORT|NATS_MONITORING_PORT|MINIO_API_PORT|MINIO_CONSOLE_PORT|BACKEND_PORT|WEB_PORT|PROMETHEUS_PORT|GRAFANA_PORT|LOKI_PORT)/, "Local dev compose must not expose direct service ports; route through Traefik like production.");
   assertMatch(compose, /NODE_ENV:\s+production/, "Local dev app services must run with NODE_ENV=production.");
-  assertMatch(compose, /DB_CONSOLE_ENABLED:\s+\$\{DEV_DB_CONSOLE_ENABLED:-false\}/, "Local dev must default DB Console off like public production.");
   assertNoMatch(compose, /\/var\/run\/docker\.sock/, "Compose must not mount docker.sock into application or observability containers.");
   assertNoMatch(promtailConfig, /docker_sd_configs|unix:\/\/\/var\/run\/docker\.sock/, "Promtail must scrape container logs without docker.sock service discovery.");
   assertMatch(promtailConfig, /drop:[\s\S]*older_than:\s+168h/, "Promtail must drop stale Docker log backfill before sending to Loki.");
-  assertMatch(promtailConfig, /replace:[\s\S]*x-db-console-access[\s\S]*\[REDACTED\]/, "Promtail must apply a sensitive-field redaction pipeline.");
+  assertMatch(promtailConfig, /replace:[\s\S]*authorization[\s\S]*\[REDACTED\]/, "Promtail must apply a sensitive-field redaction pipeline.");
   assertMatch(promtailConfig, /json:[\s\S]*level:\s+level[\s\S]*service:\s+service/, "Promtail must parse structured application log fields.");
   assertMatch(promtailConfig, /labels:[\s\S]*level:[\s\S]*service:/, "Promtail must promote service and level labels for Loki queries.");
   assertMatch(lokiConfig, /retention_period:\s+168h/, "Loki must enforce bounded log retention.");
@@ -2389,13 +2367,7 @@ async function staticSecurityCheck() {
     assertMatch(dockerfile, /USER node[\s\S]*RUN[\s\S]*pnpm install/, "Production Dockerfiles must run dependency install as the non-root node user.");
     assertMatch(dockerfile, /^HEALTHCHECK /m, "Production Dockerfiles must include an image-level healthcheck.");
   }
-  assertMatch(webDockerfile, /ARG NEXT_PUBLIC_API_URL[\s\S]*NEXT_PUBLIC_DB_CONSOLE_URL/, "Web Dockerfile must receive public URLs as build args for production bundles.");
-  assertMatch(compose, /DB_CONSOLE_DENIED_TABLES:.*stexor_account\.passkeys/, "DB Console must deny passkeys in local compose.");
-  assertMatch(composeProd, /DB_CONSOLE_DENIED_TABLES:.*stexor_account\.passkeys/, "DB Console must deny passkeys in prod compose.");
-  assertMatch(composeSecrets, /DB_CONSOLE_DENIED_TABLES:.*stexor_account\.passkeys/, "DB Console must deny passkeys in secrets compose.");
-  assertMatch(compose, /DB_CONSOLE_DENIED_TABLES:.*stexor_account\.audit_outbox/, "DB Console must deny audit outbox in local compose.");
-  assertMatch(composeProd, /DB_CONSOLE_DENIED_TABLES:.*stexor_account\.audit_outbox/, "DB Console must deny audit outbox in prod compose.");
-  assertMatch(composeSecrets, /DB_CONSOLE_DENIED_TABLES:.*stexor_account\.audit_outbox/, "DB Console must deny audit outbox in secrets compose.");
+  assertMatch(webDockerfile, /ARG NEXT_PUBLIC_API_URL[\s\S]*NEXT_PUBLIC_ACCOUNT_URL/, "Web Dockerfile must receive public URLs as build args for production bundles.");
   assertMatch(compose, /AUDIT_OUTBOX_ENABLED:\s+\$\{AUDIT_OUTBOX_ENABLED:-true\}/, "Worker jobs must enable audit outbox dispatch by default.");
   assertMatch(compose, /AUDIT_OUTBOX_MAX_ATTEMPTS:\s+\$\{AUDIT_OUTBOX_MAX_ATTEMPTS:-8\}/, "Audit outbox worker must have bounded retry attempts.");
   assertMatch(compose, /alertmanager:[\s\S]*prom\/alertmanager:v0\.29\.0@sha256:/, "Alertmanager must run as a pinned local/prod service.");
@@ -2410,7 +2382,7 @@ async function staticSecurityCheck() {
   assertMatch(workerNotificationsServer, /\/alerts\/prometheus/, "Notification worker must expose an Alertmanager webhook endpoint.");
   assertMatch(workerNotificationsServer, /notification_alert_webhook_alerts_total/, "Notification worker must expose alert webhook metrics.");
   assertMatch(workerJobsServer, /backup_restore_last_success_age_seconds/, "Jobs worker must expose backup/restore freshness metrics.");
-  assertMatch(observabilitySource, /FASTIFY_LOG_REDACTION_PATHS[\s\S]*x-db-console-access[\s\S]*set-cookie/, "Shared observability package must define sensitive Fastify redaction paths.");
+  assertMatch(observabilitySource, /FASTIFY_LOG_REDACTION_PATHS[\s\S]*authorization[\s\S]*set-cookie/, "Shared observability package must define sensitive Fastify redaction paths.");
   assertMatch(observabilitySource, /function redactLogValue[\s\S]*isSensitiveLogKey/, "Shared observability package must recursively redact sensitive log fields.");
   assertMatch(readText(path.join(sourceRoot, "apps", "backend", "src", "server.ts")), /FASTIFY_LOG_REDACTION_PATHS[\s\S]*LOG_REDACTION_CENSOR/, "Backend must use the shared log redaction policy.");
   assertMatch(readText(path.join(sourceRoot, "apps", "backend", "src", "server.ts")), /base:[\s\S]*service:[\s\S]*enterprise-backend/, "Backend logs must include a stable service field.");
@@ -2421,9 +2393,6 @@ async function staticSecurityCheck() {
   assertMatch(backendConfig, /SESSION_SIGNING_KEYS/, "Session signing key-ring support must be configured.");
   assertMatch(backendConfig, /sensitiveActionFallbackRateLimitMax/, "Sensitive action degraded rate limit budget must be configured.");
   assertMatch(backendConfig, /sessionTouchThrottleMs/, "Session touch throttling must be configurable.");
-  assertMatch(backendSqlUtils, /stripSqlForSecurityScan/, "DB Console classifier must use a sanitized SQL security scan.");
-  assertMatch(backendSqlUtils, /set_config/, "DB Console classifier must block search_path mutation through set_config.");
-  assertMatch(backendSqlUtils, /pg_sleep/, "DB Console classifier must block expensive or side-effecting PostgreSQL functions.");
   assertMatch(readText(path.join(sourceRoot, "apps", "backend", "src", "server.ts")), /skipOnError:\s*false/, "Fastify rate-limit must fail closed instead of skipping on store errors.");
   assertMatch(backendRedisStore, /assertRequestRateAllowed/, "HTTP rate limiting must have a Redis-backed runtime guard.");
   assertMatch(backendRedisStore, /using fail-safe memory window/, "Redis rate-limit degradation must fall back to memory.");
@@ -2476,13 +2445,13 @@ async function staticSecurityCheck() {
   assertNoMatch(webProxy, /style-src[^\n`"]*unsafe-inline/, "Web style CSP must not allow unsafe-inline.");
   assertMatch(webProxy, /style-src-elem 'self' 'nonce-\$\{nonce\}'/, "Web CSP must nonce stylesheet elements.");
   assertMatch(webProxy, /style-src-attr 'none'/, "Web CSP must block style attributes.");
-  assertNoMatch(webSource, /style=\{/, "Web source must not use React inline style props.");
-  assertNoMatch(webSource, /dangerouslySetInnerHTML/, "Web source must not inject inline style/script blocks.");
-  assertNoMatch(webSource, /import\s*\{[^}]*\bmotion\b[^}]*\}\s*from\s*["']framer-motion["']/, "Web source must not import Framer Motion DOM components because they write inline style attributes at runtime.");
-  assertNoMatch(webSource, /import\s+\*\s+as\s+motion\s+from\s*["']framer-motion["']/, "Web source must not import Framer Motion DOM components because they write inline style attributes at runtime.");
-  assertMatch(webSource, /createDynamicCssRule/, "CSP-safe motion and scroll affordances must write dynamic geometry through stylesheet rules.");
+  assertNoMatch(browserUiSource, /style=\{/, "Browser UI source must not use React inline style props.");
+  assertNoMatch(browserUiSource, /dangerouslySetInnerHTML/, "Browser UI source must not inject inline style/script blocks.");
+  assertNoMatch(browserUiSource, /import\s*\{[^}]*\bmotion\b[^}]*\}\s*from\s*["']framer-motion["']/, "Browser UI source must not import Framer Motion DOM components because they write inline style attributes at runtime.");
+  assertNoMatch(browserUiSource, /import\s+\*\s+as\s+motion\s+from\s*["']framer-motion["']/, "Browser UI source must not import Framer Motion DOM components because they write inline style attributes at runtime.");
+  assertMatch(browserUiSource, /createDynamicCssRule/, "CSP-safe motion and scroll affordances must write dynamic geometry through stylesheet rules.");
   for (const fallback of [webAppNotFound, webGlobalError, webPages404, webPages500]) {
-    assertMatch(fallback, /ErrorSurface\.module\.css|className="error-surface"/, "Web fallback error surfaces must use CSP-safe authored styles instead of Next inline styled defaults.");
+    assertMatch(fallback, /SectionCard[\s\S]*className="ui-section"/, "Web fallback error surfaces must use CSP-safe UI package styles instead of Next inline styled defaults.");
   }
   assertNoMatch(webRememberModel, /JSON\.stringify\(accounts/, "Remembered accounts must not persist full profile objects in localStorage.");
 
@@ -2491,10 +2460,8 @@ async function staticSecurityCheck() {
   const auditUnlinkSql = readText(path.join(infraRoot, "postgres", "migrations", "008_audit_account_unlink.sql"));
   const auditOutboxDispatcherSql = readText(path.join(infraRoot, "postgres", "migrations", "009_audit_outbox_dispatcher.sql"));
   assertMatch(rlsSql, /FORCE ROW LEVEL SECURITY/, "RLS hardening migration must force row-level security.");
-  assertMatch(rlsSql, /REVOKE ALL ON stexor_account\.passkeys FROM stexor_console_readonly/, "DB Console readonly role must not read passkeys.");
   assertMatch(auditOutboxSql, /CREATE TABLE IF NOT EXISTS stexor_account\.audit_outbox/, "Audit outbox migration must create a durable queue.");
   assertMatch(auditOutboxSql, /FORCE ROW LEVEL SECURITY/, "Audit outbox must force row-level security.");
-  assertMatch(auditOutboxSql, /REVOKE ALL ON stexor_account\.audit_outbox FROM stexor_console_readonly/, "DB Console readonly role must not read audit outbox.");
   assertMatch(auditUnlinkSql, /NEW\.account_id IS NULL/, "Audit append-only trigger must permit account_id unlink for cleanup/anonymization.");
   assertMatch(auditOutboxDispatcherSql, /'dead'/, "Audit outbox dispatcher migration must add dead-letter status.");
   assertMatch(auditOutboxDispatcherSql, /idx_audit_outbox_due_dispatch/, "Audit outbox dispatcher migration must add a due-dispatch index.");
@@ -2756,11 +2723,6 @@ async function accountIntegrationTests() {
     const revokedSessionStatus = postgresOut("enterprise-postgres", "stexor_app", "postgres", `select status from stexor_account.sessions where id = ${sqlString(extraSessionId)}::uuid;`).trim();
     if (revokedSessionStatus !== "revoked") {
       fail("session revocation did not persist revoked status.");
-    }
-    const dbConsoleBlock = await request("GET", `${apiBase}/db-console/tables`, { headers: authHeaders });
-    const dbConsoleBlocked = dbConsoleBlock.status === 403 || (dbConsoleBlock.status === 404 && dbConsoleBlock.json?.error === "db_console_disabled");
-    if (!dbConsoleBlocked) {
-      fail(`db console non-allowed account block expected HTTP 403 or disabled 404, got ${dbConsoleBlock.status}: ${dbConsoleBlock.text}`);
     }
     log("Account integration tests passed.");
   } finally {

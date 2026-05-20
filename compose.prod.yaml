@@ -98,13 +98,6 @@ services:
       SENSITIVE_ACTION_RATE_LIMIT_MAX: ${SENSITIVE_ACTION_RATE_LIMIT_MAX:-40}
       SENSITIVE_ACTION_FALLBACK_RATE_LIMIT_MAX: ${SENSITIVE_ACTION_FALLBACK_RATE_LIMIT_MAX:-10}
       SESSION_TOUCH_THROTTLE_SECONDS: ${SESSION_TOUCH_THROTTLE_SECONDS:-60}
-      DB_CONSOLE_ENABLED: ${DB_CONSOLE_ENABLED:-false}
-      DB_CONSOLE_WRITE_ENABLED: ${DB_CONSOLE_WRITE_ENABLED:-false}
-      DB_CONSOLE_MAX_ROWS: ${DB_CONSOLE_MAX_ROWS:-200}
-      DB_CONSOLE_READ_ROLE: ${DB_CONSOLE_READ_ROLE:-stexor_console_readonly}
-      DB_CONSOLE_ALLOWED_SCHEMAS: ${DB_CONSOLE_ALLOWED_SCHEMAS:-stexor_account,stexor_platform,public}
-      DB_CONSOLE_DENIED_TABLES: ${DB_CONSOLE_DENIED_TABLES:-stexor_account.passkeys,stexor_account.totp_secrets,stexor_account.backup_codes,stexor_account.backup_code_sets,stexor_account.email_otp_challenges,stexor_account.email_delivery_settings,stexor_account.email_outbox,stexor_account.audit_outbox}
-      DB_CONSOLE_ALLOWED_EMAILS: ${DB_CONSOLE_ALLOWED_EMAILS:?Set DB_CONSOLE_ALLOWED_EMAILS}
       MAILER_PROVIDER: ${MAILER_PROVIDER:-smtp}
       MAILER_FROM: ${MAILER_FROM:?Set MAILER_FROM}
       MAILER_REPLY_TO: ${MAILER_REPLY_TO:?Set MAILER_REPLY_TO}
@@ -142,15 +135,10 @@ services:
       NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:?Set NEXT_PUBLIC_API_URL}
       NEXT_PUBLIC_APP_URL: ${NEXT_PUBLIC_APP_URL:?Set NEXT_PUBLIC_APP_URL}
       NEXT_PUBLIC_ACCOUNT_URL: ${NEXT_PUBLIC_ACCOUNT_URL:?Set NEXT_PUBLIC_ACCOUNT_URL}
-      NEXT_PUBLIC_DB_CONSOLE_URL: ${NEXT_PUBLIC_DB_CONSOLE_URL:?Set NEXT_PUBLIC_DB_CONSOLE_URL}
-      NEXT_PUBLIC_DB_CONSOLE_ALLOWED_EMAIL: ${NEXT_PUBLIC_DB_CONSOLE_ALLOWED_EMAIL:-}
-      NEXT_PUBLIC_DB_CONSOLE_ENABLED: ${DB_CONSOLE_ENABLED:-false}
       NEXT_PUBLIC_BOT_PROTECTION_PROVIDER: ${NEXT_PUBLIC_BOT_PROTECTION_PROVIDER:-disabled}
       NEXT_PUBLIC_GOOGLE_RECAPTCHA_SITE_KEY: ${NEXT_PUBLIC_GOOGLE_RECAPTCHA_SITE_KEY:-}
       NEXT_PUBLIC_CLOUDFLARE_TURNSTILE_SITE_KEY: ${NEXT_PUBLIC_CLOUDFLARE_TURNSTILE_SITE_KEY:-}
-      DB_CONSOLE_ENABLED: ${DB_CONSOLE_ENABLED:-false}
       ACCOUNT_HOST: ${ACCOUNT_HOST:?Set ACCOUNT_HOST}
-      DB_CONSOLE_HOST: ${DB_CONSOLE_HOST:?Set DB_CONSOLE_HOST}
       ACCOUNT_PUBLIC_URL: ${ACCOUNT_PUBLIC_URL:?Set ACCOUNT_PUBLIC_URL}
       NEXTAUTH_URL: ${NEXTAUTH_URL:?Set NEXTAUTH_URL}
       KEYCLOAK_ISSUER: ${KEYCLOAK_ISSUER:?Set KEYCLOAK_ISSUER}
@@ -242,18 +230,6 @@ configs:
               certResolver: letsencrypt
             middlewares:
               - enterprise-security-headers@file
-              - enterprise-compress@file
-            service: enterprise-web
-
-          enterprise-db-console:
-            rule: Host(`${DB_CONSOLE_HOST:?Set DB_CONSOLE_HOST}`)
-            entryPoints:
-              - websecure
-            tls:
-              certResolver: letsencrypt
-            middlewares:
-              - enterprise-security-headers@file
-              - enterprise-rate-limit@file
               - enterprise-compress@file
             service: enterprise-web
 

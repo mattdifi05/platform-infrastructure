@@ -21,7 +21,7 @@ flussi end-to-end, sicurezza applicativa, configurazione e quality gate.
 
 - Traefik reverse proxy con file provider, senza Docker socket montato.
 - PostgreSQL per app e Keycloak.
-- Redis per rate limit, OTP, passkey challenge, TOTP setup, grant DB Console e heartbeat worker.
+- Redis per rate limit, OTP, passkey challenge, TOTP setup e heartbeat worker.
 - Keycloak, NATS JetStream, MinIO, Prometheus, Grafana, Loki e Promtail.
 - Backend Fastify, web Next.js, worker notifiche e worker jobs in immagini locali buildate dal monorepo `../src`.
 
@@ -46,11 +46,7 @@ docker compose -f compose.yaml -f compose.build.yaml -f compose.secrets.yaml --e
 
 `stexor-secret-manager` mantiene uno store proprietario cifrato in `secrets/stexor-secret-manager-store.json`, audit JSONL in `secrets/stexor-secret-manager-audit.log` e materializza i file Docker secrets usati da `compose.secrets.yaml`. Backend e worker leggono i secret da `/run/secrets/*`, inclusi `DATABASE_URL_FILE`, `SESSION_SECRET_FILE`, `SESSION_SIGNING_KEYS_FILE`, `REDIS_PASSWORD_FILE`, `NATS_URL_FILE` e `SMTP_PASSWORD_FILE`.
 
-Il dev Docker e' volutamente production-like: usa `NODE_ENV=production`, immagini buildate, nessun hot reload, nessun bind mount del sorgente applicativo e nessuna porta host diretta per database/cache/app. Il traffico passa da Traefik su `https://*.localhost.com`. Per riabilitare temporaneamente la DB Console in dev:
-
-```sh
-DEV_DB_CONSOLE_ENABLED=true docker compose -f compose.yaml -f compose.build.yaml --env-file .env -p enterprise_local up -d --build
-```
+Il dev Docker e' volutamente production-like: usa `NODE_ENV=production`, immagini buildate, nessun hot reload, nessun bind mount del sorgente applicativo e nessuna porta host diretta per database/cache/app. Il traffico passa da Traefik su `https://*.localhost.com`.
 
 ## Stop, log e reset
 
@@ -69,7 +65,6 @@ docker compose -p enterprise_local down -v
 | API backend | `https://api.localhost.com` |
 | Keycloak | `https://auth.localhost.com` |
 | MinIO console | `https://minio.localhost.com` |
-| Stexor DB Console | `https://db.localhost.com` |
 | Grafana | `https://grafana.localhost.com` |
 | Traefik dashboard | `http://localhost:8090` |
 
@@ -82,7 +77,7 @@ I log sono centralizzati via Promtail senza montare `docker.sock`: Promtail legg
 ```sh
 cd /opt/stexor/enterprise-infrastructure
 mkcert -install
-mkcert -cert-file ./traefik/certs/local-cert.pem -key-file ./traefik/certs/local-key.pem localhost 127.0.0.1 ::1 "*.localhost.com" app.localhost.com account.localhost.com api.localhost.com auth.localhost.com minio.localhost.com db.localhost.com grafana.localhost.com
+mkcert -cert-file ./traefik/certs/local-cert.pem -key-file ./traefik/certs/local-key.pem localhost 127.0.0.1 ::1 "*.localhost.com" app.localhost.com account.localhost.com api.localhost.com auth.localhost.com minio.localhost.com grafana.localhost.com
 docker compose -f compose.yaml -f compose.build.yaml --env-file .env -p enterprise_local up -d --build traefik
 curl https://api.localhost.com/health
 ```
@@ -90,7 +85,7 @@ curl https://api.localhost.com/health
 Su Windows, apri PowerShell come amministratore e aggiungi gli host locali:
 
 ```powershell
-Add-Content -Path "$env:SystemRoot\System32\drivers\etc\hosts" -Value "127.0.0.1 app.localhost.com account.localhost.com api.localhost.com auth.localhost.com minio.localhost.com db.localhost.com grafana.localhost.com"
+Add-Content -Path "$env:SystemRoot\System32\drivers\etc\hosts" -Value "127.0.0.1 app.localhost.com account.localhost.com api.localhost.com auth.localhost.com minio.localhost.com grafana.localhost.com"
 ```
 
 I file in `traefik/certs/` sono ignorati da Git. In container isolati monta la CA mkcert oppure passa `--cacert`.
@@ -183,7 +178,6 @@ In produzione:
 - Traefik pubblica solo 80/443.
 - PostgreSQL, Redis, NATS, MinIO, Prometheus e Loki non espongono porte host.
 - Le immagini applicative devono essere versionate e pin-nate con digest.
-- `DB_CONSOLE_ENABLED=false` salvo protezione separata con VPN/SSO/allowlist.
 - `.localhost.com` non e' valido per ACME pubblico: servono domini DNS reali.
 
 Build immagini applicative:
@@ -192,7 +186,7 @@ Build immagini applicative:
 docker compose -f compose.yaml -f compose.build.yaml --env-file .env build
 ```
 
-Le variabili pubbliche di Next.js (`NEXT_PUBLIC_*`, host account e DB Console) vengono passate anche come build args, quindi le immagini web devono essere buildate con l'ambiente corretto prima del deploy.
+Le variabili pubbliche di Next.js (`NEXT_PUBLIC_*` e host account) vengono passate anche come build args, quindi le immagini web devono essere buildate con l'ambiente corretto prima del deploy.
 
 ## Sicurezza account
 
@@ -200,7 +194,6 @@ Le variabili pubbliche di Next.js (`NEXT_PUBLIC_*`, host account e DB Console) v
 - Remember-me di 10 anni via `SESSION_COOKIE_MAX_AGE_SECONDS=315360000`; la revoca resta server-side.
 - API mutative protette da Origin/Fetch Metadata.
 - Passkey, OTP email, TOTP, backup codes e revoca sessioni sono persistiti su PostgreSQL quando serve e usano Redis solo per stato temporaneo.
-- La DB Console usa ruolo PostgreSQL read-only dedicato e denylist sulle tabelle sensibili.
 
 ## File principali
 

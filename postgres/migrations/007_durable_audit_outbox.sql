@@ -54,7 +54,6 @@ CREATE POLICY audit_outbox_runtime_access ON stexor_account.audit_outbox
   WITH CHECK (pg_has_role(current_user, 'stexor_app_audit_rw', 'member'));
 
 REVOKE ALL ON stexor_account.audit_outbox FROM PUBLIC;
-REVOKE ALL ON stexor_account.audit_outbox FROM stexor_console_readonly;
 GRANT SELECT, INSERT, UPDATE ON stexor_account.audit_outbox TO stexor_app_audit_rw;
 REVOKE DELETE ON stexor_account.audit_outbox FROM stexor_app_audit_rw;
 
@@ -68,16 +67,6 @@ ON CONFLICT (key) DO UPDATE SET
   enabled = EXCLUDED.enabled,
   description = EXCLUDED.description,
   updated_at = now();
-
-UPDATE stexor_account.security_policies
-SET value = jsonb_set(
-      value,
-      '{deniedTables}',
-      '["stexor_account.passkeys","stexor_account.totp_secrets","stexor_account.backup_codes","stexor_account.backup_code_sets","stexor_account.email_otp_challenges","stexor_account.email_delivery_settings","stexor_account.email_outbox","stexor_account.audit_outbox"]'::jsonb,
-      true
-    ),
-    updated_at = now()
-WHERE key = 'db_console';
 
 UPDATE stexor_account.security_policies
 SET value = jsonb_set(

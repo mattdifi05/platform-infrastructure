@@ -7,18 +7,18 @@ REVOKE ALL ON ALL SEQUENCES IN SCHEMA stexor_platform FROM stexor_app_user;
 ALTER DEFAULT PRIVILEGES IN SCHEMA stexor_platform REVOKE ALL ON TABLES FROM stexor_app_user;
 ALTER DEFAULT PRIVILEGES IN SCHEMA stexor_platform REVOKE ALL ON SEQUENCES FROM stexor_app_user;
 
-GRANT USAGE ON SCHEMA stexor_platform TO stexor_app_user, stexor_console_readonly;
+GRANT USAGE ON SCHEMA stexor_platform TO stexor_app_user;
 GRANT SELECT ON
   stexor_platform.schema_migrations,
   stexor_platform.data_retention_policies,
   stexor_platform.backup_restore_runs
-TO stexor_app_user, stexor_console_readonly;
+TO stexor_app_user;
 
 REVOKE INSERT, UPDATE, DELETE ON
   stexor_platform.schema_migrations,
   stexor_platform.data_retention_policies,
   stexor_platform.backup_restore_runs
-FROM stexor_app_user, stexor_console_readonly;
+FROM stexor_app_user;
 
 INSERT INTO stexor_account.security_policies (key, value, description)
 VALUES (
