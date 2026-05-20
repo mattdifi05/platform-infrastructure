@@ -51,11 +51,13 @@ USER node
 COPY --chown=node:node package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
 COPY --chown=node:node apps/web/package.json apps/web/package.json
 COPY --chown=node:node packages/types/package.json packages/types/package.json
+COPY --chown=node:node packages/ui/package.json packages/ui/package.json
 RUN --mount=type=cache,target=/pnpm/store,uid=1000,gid=1000 \
-    pnpm install --frozen-lockfile --filter ./apps/web... --store-dir /pnpm/store
+    pnpm install --frozen-lockfile --filter ./apps/web... --filter ./packages/ui... --store-dir /pnpm/store
 
 COPY --chown=node:node apps/web apps/web
 COPY --chown=node:node packages/types packages/types
+COPY --chown=node:node packages/ui packages/ui
 RUN mkdir -p apps/web/.next && chown -R node:node apps/web/.next
 RUN --mount=type=cache,target=/workspace/apps/web/.next/cache,uid=1000,gid=1000 \
     pnpm --filter ./apps/web build
