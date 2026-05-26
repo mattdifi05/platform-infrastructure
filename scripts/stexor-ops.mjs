@@ -831,11 +831,27 @@ function sourceWorkspaceOutput(commands, options = {}) {
 }
 
 function sourceWorkspaceBootstrap(commands) {
+  const excludes = [
+    "./.artifacts",
+    "./.codex-*.log",
+    "./.docker-build-cache",
+    "./.git",
+    "./.next",
+    "./*/.next",
+    "./.pnpm-store",
+    "./coverage",
+    "./dist",
+    "./*/dist",
+    "./node_modules",
+    "./*/node_modules",
+    "./playwright-report",
+    "./test-results",
+  ].map((pattern) => `--exclude='${pattern}'`).join(" ");
   return [
     "set -eu",
     "mkdir -p /workspace",
     "cd /source",
-    "tar --exclude='./node_modules' --exclude='./*/node_modules' --exclude='./.next' --exclude='./*/.next' --exclude='./.pnpm-store' --exclude='./dist' --exclude='./*/dist' -cf - . | tar -xf - -C /workspace",
+    `tar ${excludes} -cf - . | tar -xf - -C /workspace`,
     "cd /workspace",
     "npm install -g pnpm@11.0.9 >/dev/null",
     commands,
@@ -949,7 +965,13 @@ async function backupPostgres(options = {}) {
 }
 
 async function certificateExpiryCheck() {
-  const hosts = (argv.hosts ?? "app.localhost.com,account.localhost.com,api.localhost.com").split(",").map((host) => host.trim()).filter(Boolean);
+  const env = parseEnv(path.join(infraRoot, ".env"));
+  const defaultHosts = [
+    env.APP_HOST ?? env.UI_HOST ?? "ui.localhost.com",
+    env.ACCOUNT_HOST ?? "account.localhost.com",
+    env.API_HOST ?? "api.localhost.com",
+  ].join(",");
+  const hosts = (argv.hosts ?? defaultHosts).split(",").map((host) => host.trim()).filter(Boolean);
   const warnDays = Number(argv.warnDays ?? 30);
   for (const host of hosts) {
     await new Promise((resolve, reject) => {
@@ -1031,6 +1053,8 @@ async function enterpriseHardeningAudit() {
 
 async function browserE2eTests() {
   log("==> Browser E2E tests");
+  const env = parseEnv(path.join(infraRoot, ".env"));
+  const playwrightBaseUrl = env.NEXT_PUBLIC_APP_URL ?? env.APP_PUBLIC_URL ?? env.UI_PUBLIC_URL ?? "https://ui.localhost.com";
   const bootstrap = [
     "set -eu",
     "if ! command -v docker >/dev/null; then apt-get update >/dev/null && apt-get install -y docker.io >/dev/null; fi",
@@ -1050,7 +1074,7 @@ async function browserE2eTests() {
     "-e",
     "NEXT_TELEMETRY_DISABLED=1",
     "-e",
-    "PLAYWRIGHT_BASE_URL=https://app.localhost.com",
+    `PLAYWRIGHT_BASE_URL=${playwrightBaseUrl}`,
     "-e",
     "PLAYWRIGHT_HTML_OPEN=never",
     "-e",
@@ -2196,7 +2220,16 @@ async function secretScan() {
 }
 
 async function securitySmoke() {
-  const urls = (argv.urls ?? "https://app.localhost.com/,https://account.localhost.com/,https://api.localhost.com/health").split(",").map((url) => url.trim()).filter(Boolean);
+  const env = parseEnv(path.join(infraRoot, ".env"));
+  const appPublicUrl = env.APP_PUBLIC_URL ?? env.UI_PUBLIC_URL ?? env.NEXT_PUBLIC_APP_URL ?? "https://ui.localhost.com";
+  const accountPublicUrl = env.ACCOUNT_PUBLIC_URL ?? env.NEXT_PUBLIC_ACCOUNT_URL ?? "https://account.localhost.com";
+  const apiPublicUrl = env.API_PUBLIC_URL ?? env.NEXT_PUBLIC_API_URL ?? "https://api.localhost.com";
+  const defaultUrls = [
+    `${appPublicUrl.replace(/\/$/, "")}/`,
+    `${accountPublicUrl.replace(/\/$/, "")}/`,
+    `${apiPublicUrl.replace(/\/$/, "")}/health`,
+  ].join(",");
+  const urls = (argv.urls ?? defaultUrls).split(",").map((url) => url.trim()).filter(Boolean);
   for (const url of urls) {
     log(`Checking ${url}`);
     const response = await request("HEAD", url);
@@ -2278,7 +2311,7 @@ async function staticSecurityCheck() {
   const webGlobalError = readText(path.join(sourceRoot, "apps", "web", "src", "app", "global-error.tsx"));
   const webPages404 = readText(path.join(sourceRoot, "apps", "web", "src", "pages", "404.tsx"));
   const webPages500 = readText(path.join(sourceRoot, "apps", "web", "src", "pages", "500.tsx"));
-  const webRememberModel = readText(path.join(sourceRoot, "packages", "ui", "src", "account-center", "model.ts"));
+  const webRememberModel = readText(path.join(sourceRoot, "apps", "web", "src", "components", "account-center", "model.ts"));
   const webSource = readSourceTreeText(path.join(sourceRoot, "apps", "web", "src"));
   const uiSource = readSourceTreeText(path.join(sourceRoot, "packages", "ui", "src"));
   const browserUiSource = `${webSource}\n${uiSource}`;
