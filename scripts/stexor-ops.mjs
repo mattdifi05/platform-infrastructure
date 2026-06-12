@@ -639,42 +639,6 @@ function newSignedCookie(signingKey, accountId, sessionId) {
   return `stexor_session=${encoded}.${signature}`;
 }
 
-function base32Decode(value) {
-  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
-  let bits = 0;
-  let buffer = 0;
-  const bytes = [];
-  for (const char of value.toUpperCase()) {
-    if (char === "=") {
-      break;
-    }
-    const index = alphabet.indexOf(char);
-    if (index < 0) {
-      continue;
-    }
-    buffer = (buffer << 5) | index;
-    bits += 5;
-    if (bits >= 8) {
-      bits -= 8;
-      bytes.push((buffer >> bits) & 0xff);
-    }
-  }
-  return Buffer.from(bytes);
-}
-
-function totpCode(secret) {
-  const key = base32Decode(secret);
-  const counter = Buffer.alloc(8);
-  counter.writeBigUInt64BE(BigInt(Math.floor(Date.now() / 30000)));
-  const hash = crypto.createHmac("sha1", key).update(counter).digest();
-  const offset = hash[hash.length - 1] & 0x0f;
-  const binary = ((hash[offset] & 0x7f) << 24)
-    | ((hash[offset + 1] & 0xff) << 16)
-    | ((hash[offset + 2] & 0xff) << 8)
-    | (hash[offset + 3] & 0xff);
-  return String(binary % 1000000).padStart(6, "0");
-}
-
 function redisCommand(args, options = {}) {
   const script = [
     'if [ -s /run/secrets/redis_password ]; then REDISCLI_AUTH=$(cat /run/secrets/redis_password); export REDISCLI_AUTH;',
@@ -1236,9 +1200,8 @@ async function runtimeHealthChecks() {
     fail("At least one successful PostgreSQL restore-test drill must be recorded in stexor_platform.backup_restore_runs.");
   }
   const activeBackupSetIndex = postgresOut("enterprise-postgres", "stexor_app", "postgres", "select to_regclass('stexor_account.idx_backup_code_sets_one_active') is not null;").trim();
-  const activeTotpIndex = postgresOut("enterprise-postgres", "stexor_app", "postgres", "select to_regclass('stexor_account.idx_totp_secrets_one_active') is not null;").trim();
-  if (activeBackupSetIndex !== "t" || activeTotpIndex !== "t") {
-    fail("Active backup-code and TOTP uniqueness indexes must exist.");
+  if (activeBackupSetIndex !== "t") {
+    fail("Active backup-code uniqueness index must exist.");
   }
   const auditMutationDenied = postgresOut("enterprise-postgres", "stexor_app", "postgres", "select has_table_privilege('stexor_app_audit_rw', 'stexor_account.audit_events', 'update') or has_table_privilege('stexor_app_audit_rw', 'stexor_account.audit_events', 'delete');").trim();
   if (auditMutationDenied !== "f") {
@@ -1872,7 +1835,6 @@ async function securityMatrix() {
   const opsScript = readText(path.join(infraRoot, "scripts", "stexor-ops.mjs"));
   assertMatch(securitySpec, /cross-site mutating requests are blocked/, "Security E2E must cover cross-site request blocking.");
   assertMatch(securitySpec, /require the CSRF header/, "Security E2E must cover CSRF header enforcement.");
-  assertMatch(accountSpec, /loginWithTotpRecovery/, "Account E2E must cover TOTP recovery login.");
   assertMatch(accountSpec, /loginWithBackupCodeRecovery/, "Account E2E must cover backup-code recovery login.");
   assertMatch(accountSpec, /expectBackupCodeStatus\(page, backupCode \?\? "", 400\)/, "Account E2E/integration must cover backup-code single-use blocking.");
   assertMatch(opsScript, /passkey login options for added account/, "Account integration must cover passkey requested-account isolation.");
@@ -2711,23 +2673,6 @@ async function accountIntegrationTests() {
       headers: { Origin: "https://account.localhost.com", "Sec-Fetch-Site": "same-site" },
       body: { challengeId: loginChallengeId, code, email },
     }), 200, "email OTP login verify");
-
-    const totpSetup = await request("POST", `${apiBase}/auth/totp/setup`, { headers: authHeaders });
-    assertStatus(totpSetup, 200, "totp setup");
-    const validTotpCode = totpCode(totpSetup.json.secret);
-    const invalidTotpCode = validTotpCode === "000000" ? "000001" : "000000";
-    assertStatus(await request("POST", `${apiBase}/auth/totp/verify`, {
-      headers: authHeaders,
-      body: { enrollmentId: totpSetup.json.enrollmentId, code: invalidTotpCode },
-    }), 400, "invalid totp verify");
-    assertStatus(await request("POST", `${apiBase}/auth/totp/verify`, {
-      headers: authHeaders,
-      body: { enrollmentId: totpSetup.json.enrollmentId, code: validTotpCode },
-    }), 200, "totp verify");
-    assertStatus(await request("POST", `${apiBase}/auth/login/recovery/verify`, {
-      headers: { Origin: "https://account.localhost.com", "Sec-Fetch-Site": "same-site" },
-      body: { email, method: "totp", code: validTotpCode },
-    }), 200, "totp recovery login verify");
 
     const backupRotate = await request("POST", `${apiBase}/account/backup-codes/rotate`, { headers: authHeaders });
     assertStatus(backupRotate, 200, "backup code rotate");

@@ -12,7 +12,7 @@ Regole:
 - avvia lo stack locale con `compose.secrets.yaml`;
 - i container leggono i secret da `/run/secrets/*`;
 - backend e worker usano variabili `*_FILE`;
-- `SESSION_SECRET`, `SECRET_HASH_KEYS`, `TOTP_ENCRYPTION_KEYS`, password DB, SMTP, Redis, MinIO, NATS e Grafana devono essere ruotabili;
+- `SESSION_SECRET`, `SECRET_HASH_KEYS`, `BACKUP_SIGNING_KEYS`, password DB, SMTP, Redis, MinIO, NATS e Grafana devono essere ruotabili;
 - ogni secret deve avere owner, scadenza/rotazione e ambiente (`local`, `staging`, `prod`).
 
 File principali:

@@ -161,25 +161,8 @@ FROM ranked_sets ranked
 WHERE code_set.id = ranked.id
   AND ranked.rank > 1;
 
-WITH ranked_totp AS (
-  SELECT
-    id,
-    row_number() OVER (PARTITION BY account_id ORDER BY verified_at DESC NULLS LAST, created_at DESC, id DESC) AS rank
-  FROM stexor_account.totp_secrets
-  WHERE revoked_at IS NULL
-)
-UPDATE stexor_account.totp_secrets secret
-SET revoked_at = now()
-FROM ranked_totp ranked
-WHERE secret.id = ranked.id
-  AND ranked.rank > 1;
-
 CREATE UNIQUE INDEX IF NOT EXISTS idx_backup_code_sets_one_active
   ON stexor_account.backup_code_sets(account_id)
-  WHERE revoked_at IS NULL;
-
-CREATE UNIQUE INDEX IF NOT EXISTS idx_totp_secrets_one_active
-  ON stexor_account.totp_secrets(account_id)
   WHERE revoked_at IS NULL;
 
 CREATE INDEX IF NOT EXISTS idx_sessions_active_expiry

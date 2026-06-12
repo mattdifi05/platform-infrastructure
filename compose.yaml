@@ -1,4 +1,4 @@
-name: enterprise_local
+﻿name: enterprise_local
 
 x-default-logging: &default_logging
   driver: json-file
@@ -695,6 +695,17 @@ configs:
             middlewares:
               - enterprise-security-headers@file
               - enterprise-rate-limit@file
+              - enterprise-compress@file
+            service: enterprise-backend
+
+          enterprise-backend-preflight:
+            rule: Host(`${API_HOST:-api.localhost.com}`) && Method(`OPTIONS`)
+            entryPoints:
+              - websecure
+            tls: {}
+            priority: 100
+            middlewares:
+              - enterprise-security-headers@file
               - enterprise-compress@file
             service: enterprise-backend
 

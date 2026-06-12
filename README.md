@@ -21,7 +21,7 @@ flussi end-to-end, sicurezza applicativa, configurazione e quality gate.
 
 - Traefik reverse proxy con file provider, senza Docker socket montato.
 - PostgreSQL per app e Keycloak.
-- Redis per rate limit, OTP, passkey challenge, TOTP setup e heartbeat worker.
+- Redis per rate limit, OTP, passkey challenge e heartbeat worker.
 - Keycloak, NATS JetStream, MinIO, Prometheus, Grafana, Loki e Promtail.
 - Backend Fastify, web Next.js, worker notifiche e worker jobs in immagini locali buildate dal monorepo `../src`.
 
@@ -193,7 +193,7 @@ Le variabili pubbliche di Next.js (`NEXT_PUBLIC_*` e host account) vengono passa
 - Sessioni firmate lato server in cookie `HttpOnly`, `Secure`, `SameSite=Lax`.
 - Remember-me di 10 anni via `SESSION_COOKIE_MAX_AGE_SECONDS=315360000`; la revoca resta server-side.
 - API mutative protette da Origin/Fetch Metadata.
-- Passkey, OTP email, TOTP, backup codes e revoca sessioni sono persistiti su PostgreSQL quando serve e usano Redis solo per stato temporaneo.
+- Passkey, OTP email, backup codes e revoca sessioni sono persistiti su PostgreSQL quando serve e usano Redis solo per stato temporaneo.
 
 ## File principali
 

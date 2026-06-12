@@ -86,7 +86,6 @@ CREATE TABLE IF NOT EXISTS stexor_account.account_security_settings (
   account_id uuid PRIMARY KEY REFERENCES stexor_account.accounts(id) ON DELETE CASCADE,
   passwordless_required boolean NOT NULL DEFAULT true,
   email_otp_enabled boolean NOT NULL DEFAULT true,
-  totp_enabled boolean NOT NULL DEFAULT false,
   device_approval_enabled boolean NOT NULL DEFAULT true,
   backup_codes_remaining integer NOT NULL DEFAULT 0 CHECK (backup_codes_remaining >= 0),
   failed_login_attempts integer NOT NULL DEFAULT 0 CHECK (failed_login_attempts >= 0),
@@ -111,20 +110,6 @@ CREATE TABLE IF NOT EXISTS stexor_account.passkeys (
   created_at timestamptz NOT NULL DEFAULT now(),
   last_used_at timestamptz,
   revoked_at timestamptz
-);
-
-CREATE TABLE IF NOT EXISTS stexor_account.totp_secrets (
-  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  account_id uuid NOT NULL REFERENCES stexor_account.accounts(id) ON DELETE CASCADE,
-  label text NOT NULL DEFAULT 'Google Authenticator',
-  secret_encrypted bytea NOT NULL,
-  algorithm text NOT NULL DEFAULT 'SHA1',
-  digits integer NOT NULL DEFAULT 6 CHECK (digits BETWEEN 6 AND 8),
-  period_seconds integer NOT NULL DEFAULT 30 CHECK (period_seconds BETWEEN 15 AND 120),
-  verified_at timestamptz,
-  revoked_at timestamptz,
-  created_at timestamptz NOT NULL DEFAULT now(),
-  UNIQUE (account_id, label)
 );
 
 CREATE TABLE IF NOT EXISTS stexor_account.email_otp_challenges (
@@ -419,7 +404,6 @@ TO stexor_app_account_rw;
 GRANT SELECT, INSERT, UPDATE ON
   stexor_account.passkeys,
   stexor_account.sessions,
-  stexor_account.totp_secrets,
   stexor_account.backup_code_sets,
   stexor_account.backup_codes,
   stexor_account.device_approval_requests,

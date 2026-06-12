@@ -20,7 +20,7 @@ every item must map to a file, command, policy or recurring drill.
   encrypted audited store.
 - Multi-node/high-compliance deployments may swap the materialization backend
   to a provider KMS while preserving the same `*_FILE` contract.
-- Raw `SESSION_SECRET`, `SECRET_HASH_KEYS` and `TOTP_ENCRYPTION_KEYS` values
+- Raw `SESSION_SECRET`, `SECRET_HASH_KEYS` and `BACKUP_SIGNING_KEYS` values
   must not be required in `.env` for production.
 - Rotation uses active plus legacy key rings, then removes legacy after the
   observation window.

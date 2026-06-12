@@ -18,7 +18,7 @@ Questo documento traduce i 30 punti enterprise in controlli concreti. Le voci `r
 | 10 | Log centralizzati/redaction/audit | Gate-ready | Loki/Promtail con label strutturate, redaction condivisa, audit DB append-only |
 | 11 | WAF/rate limit/bot protection | Repo-ready | Traefik rate limit + Fastify Redis-backed rate limit |
 | 12 | RBAC completa | Repo-ready | `account_roles`, role gate applicativi |
-| 13 | Passkey recovery multi-device | Repo-ready | Passkey, OTP, TOTP, backup code |
+| 13 | Passkey recovery multi-device | Repo-ready | Passkey, OTP, backup code |
 | 14 | Email production SPF/DKIM/DMARC | Gate-ready | SMTP configurabile; checklist record dominio |
 | 15 | Migrazioni DB rollback-safe | Repo-ready | Cartella migrations e runner Linux/Docker |
 | 16 | GDPR/privacy data lifecycle | Repo-ready | Export account, soft-delete, audit/retention policy |
@@ -53,7 +53,7 @@ sh ./scripts/enterprise-hardening-audit.sh
 
 ## Redis enterprise runtime
 
-Redis viene usato per rate limit distribuito, OTP, challenge WebAuthn/passkey, setup TOTP, heartbeat worker e metriche Prometheus.
+Redis viene usato per rate limit distribuito, OTP, challenge WebAuthn/passkey, heartbeat worker e metriche Prometheus.
 
 PostgreSQL rimane source of truth per account, sessioni, passkey, audit, ruoli e backup code.
 

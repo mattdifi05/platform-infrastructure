@@ -41,7 +41,6 @@ TO stexor_app_account_rw;
 GRANT SELECT, INSERT, UPDATE ON
   stexor_account.passkeys,
   stexor_account.sessions,
-  stexor_account.totp_secrets,
   stexor_account.backup_code_sets,
   stexor_account.backup_codes,
   stexor_account.device_approval_requests,

@@ -166,7 +166,7 @@ node ./scripts/stexor-ops.mjs dr-readiness-check
 
 Production secret values must come from the approved secret manager or KMS sync
 into external Docker secrets. The app accepts `*_FILE` variables for
-`SESSION_SECRET`, `SECRET_HASH_KEYS`, `TOTP_ENCRYPTION_KEYS`, database, Redis,
+`SESSION_SECRET`, `SECRET_HASH_KEYS`, `BACKUP_SIGNING_KEYS`, database, Redis,
 NATS, SMTP and service credentials.
 
 ## Production preflight

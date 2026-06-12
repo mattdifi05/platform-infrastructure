@@ -1,4 +1,4 @@
-services:
+﻿services:
   traefik:
     restart: always
     command:
@@ -242,6 +242,18 @@ configs:
             middlewares:
               - enterprise-security-headers@file
               - enterprise-rate-limit@file
+              - enterprise-compress@file
+            service: enterprise-backend
+
+          enterprise-backend-preflight:
+            rule: Host(`${API_HOST:?Set API_HOST}`) && Method(`OPTIONS`)
+            entryPoints:
+              - websecure
+            tls:
+              certResolver: letsencrypt
+            priority: 100
+            middlewares:
+              - enterprise-security-headers@file
               - enterprise-compress@file
             service: enterprise-backend
 

@@ -48,14 +48,6 @@ CREATE POLICY passkeys_runtime_access ON stexor_account.passkeys
   USING (pg_has_role(current_user, 'stexor_app_auth_rw', 'member'))
   WITH CHECK (pg_has_role(current_user, 'stexor_app_auth_rw', 'member'));
 
-ALTER TABLE stexor_account.totp_secrets ENABLE ROW LEVEL SECURITY;
-ALTER TABLE stexor_account.totp_secrets FORCE ROW LEVEL SECURITY;
-DROP POLICY IF EXISTS totp_secrets_runtime_access ON stexor_account.totp_secrets;
-CREATE POLICY totp_secrets_runtime_access ON stexor_account.totp_secrets
-  FOR ALL TO PUBLIC
-  USING (pg_has_role(current_user, 'stexor_app_auth_rw', 'member'))
-  WITH CHECK (pg_has_role(current_user, 'stexor_app_auth_rw', 'member'));
-
 ALTER TABLE stexor_account.email_otp_challenges ENABLE ROW LEVEL SECURITY;
 ALTER TABLE stexor_account.email_otp_challenges FORCE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS email_otp_challenges_runtime_access ON stexor_account.email_otp_challenges;

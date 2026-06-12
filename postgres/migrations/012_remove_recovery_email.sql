@@ -11,7 +11,7 @@ ALTER TABLE stexor_account.accounts
 INSERT INTO stexor_account.security_policies (key, value, description)
 VALUES (
   'recovery_email_removed',
-  '{"removedColumns":["stexor_account.accounts.recovery_email","stexor_account.accounts.recovery_email_verified"],"primaryEmailOtpRecovery":true,"strongRecovery":["totp","backup_codes"],"migration":"012_remove_recovery_email"}'::jsonb,
+  '{"removedColumns":["stexor_account.accounts.recovery_email","stexor_account.accounts.recovery_email_verified"],"primaryEmailOtpRecovery":true,"strongRecovery":["backup_codes"],"migration":"012_remove_recovery_email"}'::jsonb,
   'Separate recovery email storage is removed; recovery uses the verified primary email plus stronger recovery factors.'
 )
 ON CONFLICT (key) DO UPDATE
