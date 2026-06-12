@@ -22,7 +22,7 @@ every item must map to a file, command, policy or recurring drill.
   to a provider KMS while preserving the same `*_FILE` contract.
 - Raw `SESSION_SECRET`, `SECRET_HASH_KEYS` and `BACKUP_SIGNING_KEYS` values
   must not be required in `.env` for production.
-- Rotation uses active plus legacy key rings, then removes legacy after the
+- Rotation uses active plus previous key rings, then removes previous keys after the
   observation window.
 - Gate: `node scripts/stexor-ops.mjs managed-secrets-preflight`.
 

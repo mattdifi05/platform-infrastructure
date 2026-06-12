@@ -22,7 +22,6 @@ const requiredSecrets = [
   { name: "session_secret", env: "SESSION_SECRET", kind: "raw", bytes: 48, rotationDays: 90 },
   { name: "session_signing_keys", env: "SESSION_SIGNING_KEYS", kind: "keyring", bytes: 48, keyPrefix: "s", rotationDays: 60 },
   { name: "hash_pepper_keys", env: "SECRET_HASH_KEYS", kind: "keyring", bytes: 48, keyPrefix: "h", rotationDays: 90 },
-  { name: "totp_encryption_keys", env: "TOTP_ENCRYPTION_KEYS", kind: "keyring", bytes: 48, keyPrefix: "t", rotationDays: 90 },
   { name: "backup_signing_keys", env: "BACKUP_SIGNING_KEYS", kind: "keyring", bytes: 48, keyPrefix: "b", rotationDays: 90 },
   { name: "smtp_password", env: "SMTP_PASSWORD", kind: "raw", bytes: 36, minLength: 8, rotationDays: 90 },
   { name: "google_recaptcha_secret_key", env: "GOOGLE_RECAPTCHA_SECRET_KEY", kind: "raw", bytes: 36, minLength: 8, rotationDays: 90, manualRotation: true },
@@ -89,14 +88,6 @@ function masterKeyPath() {
 
 function auditLogPath() {
   return path.resolve(argv.auditLog ?? path.join(secretsDir(), "stexor-secret-manager-audit.log"));
-}
-
-function legacyLocalStorePath() {
-  return path.join(secretsDir(), "local-secret-store.json");
-}
-
-function legacyLocalMasterKeyPath() {
-  return path.join(secretsDir(), "local_kms_master_key.txt");
 }
 
 function secretFilePath(name) {
@@ -181,10 +172,6 @@ function encryptionKey(master) {
   return crypto.createHash("sha256").update(`stexor-secret-manager-v1:${master}`).digest();
 }
 
-function legacyEncryptionKey(master) {
-  return crypto.createHash("sha256").update(`stexor-local-kms-v1:${master}`).digest();
-}
-
 function encryptSecret(master, name, value) {
   const iv = crypto.randomBytes(12);
   const aad = Buffer.from(`stexor-secret:${name}`, "utf8");
@@ -202,22 +189,6 @@ function encryptSecret(master, name, value) {
 function decryptSecret(master, name, encrypted) {
   const decipher = crypto.createDecipheriv("aes-256-gcm", encryptionKey(master), Buffer.from(encrypted.iv, "base64url"));
   decipher.setAAD(Buffer.from(`stexor-secret:${name}`, "utf8"));
-  decipher.setAuthTag(Buffer.from(encrypted.tag, "base64url"));
-  return Buffer.concat([
-    decipher.update(Buffer.from(encrypted.ciphertext, "base64url")),
-    decipher.final(),
-  ]).toString("utf8");
-}
-
-function decryptLegacyLocalSecret(name) {
-  const master = readFileIfExists(legacyLocalMasterKeyPath());
-  if (!master) fail(`Missing legacy local KMS master key: ${legacyLocalMasterKeyPath()}`);
-  if (!fs.existsSync(legacyLocalStorePath())) fail(`Missing legacy local secret store: ${legacyLocalStorePath()}`);
-  const store = JSON.parse(fs.readFileSync(legacyLocalStorePath(), "utf8"));
-  const encrypted = store.secrets?.[name];
-  if (!encrypted) fail(`Legacy local secret store does not contain ${name}.`);
-  const decipher = crypto.createDecipheriv("aes-256-gcm", legacyEncryptionKey(master), Buffer.from(encrypted.iv, "base64url"));
-  decipher.setAAD(Buffer.from(`stexor-local-secret:${name}`, "utf8"));
   decipher.setAuthTag(Buffer.from(encrypted.tag, "base64url"));
   return Buffer.concat([
     decipher.update(Buffer.from(encrypted.ciphertext, "base64url")),
@@ -499,30 +470,12 @@ async function setSecret() {
   log(`Updated ${name} in Stexor Secret Manager and materialized Docker secret files.`);
 }
 
-async function importLegacy() {
-  const name = argv.name ?? argv._[0];
-  if (!name) fail("Use import-legacy --name <secret_name>.");
-  const spec = requiredByName.get(name);
-  if (!spec) fail(`Unknown secret: ${name}`);
-  const store = readStore();
-  if (!store) fail(`Missing Stexor Secret Manager store: ${storePath()}`);
-  const values = decryptStoreValues(store);
-  values[name] = decryptLegacyLocalSecret(name);
-  validateValues(values);
-  writeStore(values, store);
-  materialize(values);
-  audit("import-legacy", { name });
-  log(`Imported ${name} from the legacy local encrypted store.`);
-}
-
 function help() {
   log(`Usage: node scripts/stexor-secret-manager.mjs <command> [--key value]
 
 Commands:
   init                 Create/update the encrypted store and materialize Docker secret files.
   materialize          Decrypt the store into secrets/*.txt for compose.secrets.yaml.
-  import-legacy --name <name>
-                       Import one secret from the legacy local encrypted store.
   rotate --name <name> Rotate a keyring or safe raw secret, then materialize.
   set --name <name>    Import or replace a secret from --value-file, --value-env, or --stdin.
   status               Print metadata and fingerprints without secret values.
@@ -533,7 +486,6 @@ Commands:
 const commands = {
   help,
   init,
-  "import-legacy": importLegacy,
   materialize: async () => materialize(),
   rotate,
   set: setSecret,

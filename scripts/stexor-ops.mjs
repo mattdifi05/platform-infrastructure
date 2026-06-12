@@ -363,106 +363,6 @@ function parseVersionedSecretKeys(value) {
     .filter(Boolean);
 }
 
-function localKmsMasterKeyPath(secretsDir) {
-  return path.join(secretsDir, "local_kms_master_key.txt");
-}
-
-function localSecretStorePath(secretsDir) {
-  return path.join(secretsDir, "local-secret-store.json");
-}
-
-function readOrCreateLocalKmsMasterKey(secretsDir) {
-  fs.mkdirSync(secretsDir, { recursive: true });
-  const filePath = localKmsMasterKeyPath(secretsDir);
-  const existing = readSecretFileIfExists(filePath);
-  if (existing) {
-    return existing;
-  }
-  const secret = randomSecret(64);
-  fs.writeFileSync(filePath, `${secret}\n`, "utf8");
-  try {
-    fs.chmodSync(filePath, 0o600);
-  } catch {
-    // Best effort on platforms without POSIX permissions.
-  }
-  return secret;
-}
-
-function localKmsKey(masterSecret) {
-  return crypto.createHash("sha256").update(`stexor-local-kms-v1:${masterSecret}`).digest();
-}
-
-function encryptLocalSecret(masterSecret, name, value) {
-  const iv = crypto.randomBytes(12);
-  const aad = Buffer.from(`stexor-local-secret:${name}`, "utf8");
-  const cipher = crypto.createCipheriv("aes-256-gcm", localKmsKey(masterSecret), iv);
-  cipher.setAAD(aad);
-  const ciphertext = Buffer.concat([cipher.update(value, "utf8"), cipher.final()]);
-  return {
-    algorithm: "AES-256-GCM",
-    iv: iv.toString("base64url"),
-    tag: cipher.getAuthTag().toString("base64url"),
-    ciphertext: ciphertext.toString("base64url"),
-  };
-}
-
-function decryptLocalSecret(masterSecret, name, encrypted) {
-  const decipher = crypto.createDecipheriv("aes-256-gcm", localKmsKey(masterSecret), Buffer.from(encrypted.iv, "base64url"));
-  decipher.setAAD(Buffer.from(`stexor-local-secret:${name}`, "utf8"));
-  decipher.setAuthTag(Buffer.from(encrypted.tag, "base64url"));
-  return Buffer.concat([
-    decipher.update(Buffer.from(encrypted.ciphertext, "base64url")),
-    decipher.final(),
-  ]).toString("utf8");
-}
-
-function writeLocalSecretStore(secretsDir, secretValues) {
-  const masterSecret = readOrCreateLocalKmsMasterKey(secretsDir);
-  const now = new Date().toISOString();
-  const secrets = {};
-  for (const [name, value] of Object.entries(secretValues)) {
-    secrets[name] = {
-      ...encryptLocalSecret(masterSecret, name, value),
-      updatedAt: now,
-    };
-  }
-  const store = {
-    version: 1,
-    provider: "local-file-kms",
-    generatedAt: fs.existsSync(localSecretStorePath(secretsDir))
-      ? JSON.parse(fs.readFileSync(localSecretStorePath(secretsDir), "utf8")).generatedAt ?? now
-      : now,
-    updatedAt: now,
-    secrets,
-  };
-  fs.writeFileSync(localSecretStorePath(secretsDir), `${JSON.stringify(store, null, 2)}\n`, "utf8");
-}
-
-function validateLocalSecretStore(secretsDir, required) {
-  const masterSecret = readSecretFileIfExists(localKmsMasterKeyPath(secretsDir));
-  if (!masterSecret) {
-    fail(`Missing local KMS master key: ${localKmsMasterKeyPath(secretsDir)}`);
-  }
-  if (!fs.existsSync(localSecretStorePath(secretsDir))) {
-    fail(`Missing encrypted local secret store: ${localSecretStorePath(secretsDir)}`);
-  }
-  const store = JSON.parse(fs.readFileSync(localSecretStorePath(secretsDir), "utf8"));
-  if (store.provider !== "local-file-kms" || store.version !== 1 || !store.secrets) {
-    fail("Encrypted local secret store has an invalid format.");
-  }
-  for (const name of required) {
-    const encrypted = store.secrets[name];
-    if (!encrypted) {
-      fail(`Encrypted local secret store is missing ${name}.`);
-    }
-    const materialized = readSecretFileIfExists(path.join(secretsDir, `${name}.txt`));
-    const decrypted = decryptLocalSecret(masterSecret, name, encrypted);
-    if (!materialized || !timingSafeEqualBuffer(Buffer.from(materialized), Buffer.from(decrypted))) {
-      fail(`Materialized local secret does not match encrypted store entry: ${name}.`);
-    }
-  }
-}
-
 function timingSafeEqualBuffer(a, b) {
   if (a.length !== b.length) {
     return false;
@@ -931,7 +831,7 @@ async function backupPostgres(options = {}) {
 async function certificateExpiryCheck() {
   const env = parseEnv(path.join(infraRoot, ".env"));
   const defaultHosts = [
-    env.APP_HOST ?? env.UI_HOST ?? "ui.localhost.com",
+    env.APP_HOST ?? "app.localhost.com",
     env.ACCOUNT_HOST ?? "account.localhost.com",
     env.API_HOST ?? "api.localhost.com",
   ].join(",");
@@ -1018,7 +918,7 @@ async function enterpriseHardeningAudit() {
 async function browserE2eTests() {
   log("==> Browser E2E tests");
   const env = parseEnv(path.join(infraRoot, ".env"));
-  const playwrightBaseUrl = env.NEXT_PUBLIC_APP_URL ?? env.APP_PUBLIC_URL ?? env.UI_PUBLIC_URL ?? "https://ui.localhost.com";
+  const playwrightBaseUrl = env.NEXT_PUBLIC_APP_URL ?? env.APP_PUBLIC_URL ?? "https://app.localhost.com";
   const bootstrap = [
     "set -eu",
     "if ! command -v docker >/dev/null; then apt-get update >/dev/null && apt-get install -y docker.io >/dev/null; fi",
@@ -1337,7 +1237,6 @@ async function initLocalSecrets() {
   const sessionSecret = secretValue("SESSION_SECRET", "session_secret", 48);
   const sessionSigningKeys = versionedSecretValue("SESSION_SIGNING_KEYS", "session_signing_keys", secretId("s"));
   const hashPepperKeys = versionedSecretValue("SECRET_HASH_KEYS", "hash_pepper_keys", "local");
-  const totpEncryptionKeys = versionedSecretValue("TOTP_ENCRYPTION_KEYS", "totp_encryption_keys", "local");
   const backupSigningKeys = versionedSecretValue("BACKUP_SIGNING_KEYS", "backup_signing_keys", secretId("b"));
   const smtpPassword = secretValue("SMTP_PASSWORD", "smtp_password");
   const googleOAuthClientSecret = secretValue("GOOGLE_OAUTH_CLIENT_SECRET", "google_oauth_client_secret");
@@ -1372,7 +1271,6 @@ async function initLocalSecrets() {
     session_secret: sessionSecret,
     session_signing_keys: sessionSigningKeys,
     hash_pepper_keys: hashPepperKeys,
-    totp_encryption_keys: totpEncryptionKeys,
     backup_signing_keys: backupSigningKeys,
     smtp_password: smtpPassword,
     google_oauth_client_secret: googleOAuthClientSecret,
@@ -1633,7 +1531,6 @@ async function productionPreflight() {
     ["SESSION_SECRET", 48],
     ["SESSION_SIGNING_KEYS", 48],
     ["SECRET_HASH_KEYS", 48],
-    ["TOTP_ENCRYPTION_KEYS", 48],
     ["BACKUP_SIGNING_KEYS", 48],
     ["POSTGRES_SUPERUSER_PASSWORD", 24],
     ["APP_DB_PASSWORD", 24],
@@ -1720,7 +1617,6 @@ async function managedSecretsPreflight() {
     "session_secret",
     "session_signing_keys",
     "hash_pepper_keys",
-    "totp_encryption_keys",
     "backup_signing_keys",
     "smtp_password",
     "google_recaptcha_secret_key",
@@ -1731,7 +1627,7 @@ async function managedSecretsPreflight() {
   ]) {
     assertMatch(managedCompose, new RegExp(`^\\s{2}${secretName}:\\s*\\r?\\n\\s+external:\\s+true`, "m"), `${secretName} must be declared as an external Docker secret.`);
   }
-  for (const fileEnv of ["SESSION_SECRET_FILE", "SESSION_SIGNING_KEYS_FILE", "SECRET_HASH_KEYS_FILE", "TOTP_ENCRYPTION_KEYS_FILE", "DATABASE_URL_FILE", "SMTP_PASSWORD_FILE", "GOOGLE_RECAPTCHA_SECRET_KEY_FILE", "CLOUDFLARE_TURNSTILE_SECRET_KEY_FILE", "GOOGLE_OAUTH_CLIENT_SECRET_FILE"]) {
+  for (const fileEnv of ["SESSION_SECRET_FILE", "SESSION_SIGNING_KEYS_FILE", "SECRET_HASH_KEYS_FILE", "DATABASE_URL_FILE", "SMTP_PASSWORD_FILE", "GOOGLE_RECAPTCHA_SECRET_KEY_FILE", "CLOUDFLARE_TURNSTILE_SECRET_KEY_FILE", "GOOGLE_OAUTH_CLIENT_SECRET_FILE"]) {
     assertMatch(managedCompose, new RegExp(`${fileEnv}:\\s+/run/secrets/`), `${fileEnv} must point at /run/secrets.`);
   }
   run("docker", [
@@ -2183,7 +2079,7 @@ async function secretScan() {
 
 async function securitySmoke() {
   const env = parseEnv(path.join(infraRoot, ".env"));
-  const appPublicUrl = env.APP_PUBLIC_URL ?? env.UI_PUBLIC_URL ?? env.NEXT_PUBLIC_APP_URL ?? "https://ui.localhost.com";
+  const appPublicUrl = env.APP_PUBLIC_URL ?? env.NEXT_PUBLIC_APP_URL ?? "https://app.localhost.com";
   const accountPublicUrl = env.ACCOUNT_PUBLIC_URL ?? env.NEXT_PUBLIC_ACCOUNT_URL ?? "https://account.localhost.com";
   const apiPublicUrl = env.API_PUBLIC_URL ?? env.NEXT_PUBLIC_API_URL ?? "https://api.localhost.com";
   const defaultUrls = [
@@ -2477,7 +2373,6 @@ async function validateLocalSecrets() {
     "session_secret",
     "session_signing_keys",
     "hash_pepper_keys",
-    "totp_encryption_keys",
     "backup_signing_keys",
     "smtp_password",
     "google_recaptcha_secret_key",
@@ -2496,7 +2391,7 @@ async function validateLocalSecrets() {
       fail(`Invalid local secret value in ${filePath}`);
     }
   }
-  for (const name of ["session_signing_keys", "hash_pepper_keys", "totp_encryption_keys", "backup_signing_keys"]) {
+  for (const name of ["session_signing_keys", "hash_pepper_keys", "backup_signing_keys"]) {
     const keys = parseVersionedSecretKeys(fs.readFileSync(path.join(secretsDir, `${name}.txt`), "utf8"));
     if (!keys.length || keys.some((key) => key.secret.length < 48)) {
       fail(`Invalid versioned key ring in ${path.join(secretsDir, `${name}.txt`)}`);
