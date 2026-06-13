@@ -22,6 +22,10 @@ receivers:
       - url: http://worker-notifications:3000/alerts/prometheus
         send_resolved: true
         max_alerts: 20
+        http_config:
+          authorization:
+            type: Bearer
+            credentials_file: /run/secrets/alertmanager_webhook_token
 
 inhibit_rules:
   - source_matchers:

@@ -26,7 +26,7 @@ Roles are stored in `stexor_account.account_roles` and must not be trusted from 
 - Local secret files and manager runtime files are ignored by Git and mounted as `/run/secrets/*`.
 - Runtime code must prefer `*_FILE` values over raw secret environment variables.
 - `SESSION_SECRET` must be random, long and rotated per environment.
-- SMTP, DB, MinIO, NATS, Redis and Grafana secrets must be managed through `stexor-secret-manager` or a stronger external KMS before serious VPS usage.
+- SMTP, DB, MinIO, NATS, Redis, Grafana and Alertmanager webhook secrets must be managed through `stexor-secret-manager` or a stronger external KMS before serious VPS usage.
 
 ## Database
 

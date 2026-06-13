@@ -2193,11 +2193,13 @@ async function staticSecurityCheck() {
   assertMatch(composeManagedSecrets, /GOOGLE_RECAPTCHA_SECRET_KEY_FILE:\s+\/run\/secrets\/google_recaptcha_secret_key/, "Managed secret overlay must consume Google reCAPTCHA secret through a file.");
   assertMatch(composeManagedSecrets, /CLOUDFLARE_TURNSTILE_SECRET_KEY_FILE:\s+\/run\/secrets\/cloudflare_turnstile_secret_key/, "Managed secret overlay must consume Cloudflare Turnstile secret through a file.");
   assertMatch(composeManagedSecrets, /GOOGLE_OAUTH_CLIENT_SECRET_FILE:\s+\/run\/secrets\/google_oauth_client_secret/, "Managed secret overlay must consume Google OAuth client secret through a file.");
+  assertMatch(composeManagedSecrets, /ALERTMANAGER_WEBHOOK_TOKEN_FILE:\s+\/run\/secrets\/alertmanager_webhook_token/, "Managed secret overlay must consume the Alertmanager webhook token through a file.");
   assertMatch(composeManagedSecrets, /external:\s+true/, "Managed secret overlay must use external Docker secrets.");
   assertMatch(composeSecrets, /SESSION_SIGNING_KEYS_FILE:\s+\/run\/secrets\/session_signing_keys/, "Local secret overlay must consume session signing keys through a Docker secret file.");
   assertMatch(composeSecrets, /GOOGLE_RECAPTCHA_SECRET_KEY_FILE:\s+\/run\/secrets\/google_recaptcha_secret_key/, "Local secret overlay must consume Google reCAPTCHA secret through a Docker secret file.");
   assertMatch(composeSecrets, /CLOUDFLARE_TURNSTILE_SECRET_KEY_FILE:\s+\/run\/secrets\/cloudflare_turnstile_secret_key/, "Local secret overlay must consume Cloudflare Turnstile secret through a Docker secret file.");
   assertMatch(composeSecrets, /GOOGLE_OAUTH_CLIENT_SECRET_FILE:\s+\/run\/secrets\/google_oauth_client_secret/, "Local secret overlay must consume Google OAuth client secret through a Docker secret file.");
+  assertMatch(composeSecrets, /ALERTMANAGER_WEBHOOK_TOKEN_FILE:\s+\/run\/secrets\/alertmanager_webhook_token/, "Local secret overlay must consume the Alertmanager webhook token through a Docker secret file.");
   assertMatch(secretManagerScript, /manager:\s+"stexor-secret-manager"/, "Infrastructure must include the proprietary Stexor Secret Manager store format.");
   assertMatch(secretManagerScript, /AES-256-GCM/, "Stexor Secret Manager must encrypt stored secrets with authenticated encryption.");
   assertMatch(secretManagerScript, /function audit\(/, "Stexor Secret Manager must append an audit trail for secret operations.");
@@ -2266,11 +2268,13 @@ async function staticSecurityCheck() {
   assertMatch(prometheusConfig, /alertmanagers:[\s\S]*alertmanager:9093/, "Prometheus must route alerts to Alertmanager.");
   assertMatch(prometheusConfig, /job_name: alertmanager[\s\S]*alertmanager:9093/, "Prometheus must scrape Alertmanager.");
   assertMatch(alertmanagerConfig, /worker-notifications:3000\/alerts\/prometheus/, "Alertmanager must deliver alerts to the notification worker.");
+  assertMatch(alertmanagerConfig, /authorization:[\s\S]*type:\s+Bearer[\s\S]*credentials_file:\s+\/run\/secrets\/alertmanager_webhook_token/, "Alertmanager webhook delivery must use the shared bearer-token secret.");
   assertMatch(lokiConfig, /alertmanager_url:\s+http:\/\/alertmanager:9093/, "Loki ruler must route alerts to Alertmanager over the Docker network.");
   for (const alertName of ["AuditOutboxDeadLetters", "PostgresBackupStale", "RestoreDrillStale", "AlertmanagerDeliveryFailed"]) {
     assertMatch(prometheusAlerts, new RegExp(`alert: ${alertName}`), `Prometheus alerts must include ${alertName}.`);
   }
   assertMatch(workerNotificationsServer, /\/alerts\/prometheus/, "Notification worker must expose an Alertmanager webhook endpoint.");
+  assertMatch(workerNotificationsServer, /ALERTMANAGER_WEBHOOK_TOKEN/, "Notification worker must require the Alertmanager webhook token in production.");
   assertMatch(workerNotificationsServer, /notification_alert_webhook_alerts_total/, "Notification worker must expose alert webhook metrics.");
   assertMatch(workerJobsServer, /backup_restore_last_success_age_seconds/, "Jobs worker must expose backup/restore freshness metrics.");
   assertMatch(observabilitySource, /FASTIFY_LOG_REDACTION_PATHS[\s\S]*authorization[\s\S]*set-cookie/, "Shared observability package must define sensitive Fastify redaction paths.");
@@ -2341,6 +2345,8 @@ async function staticSecurityCheck() {
   assertNoMatch(browserUiSource, /import\s*\{[^}]*\bmotion\b[^}]*\}\s*from\s*["']framer-motion["']/, "Browser UI source must not import Framer Motion DOM components because they write inline style attributes at runtime.");
   assertNoMatch(browserUiSource, /import\s+\*\s+as\s+motion\s+from\s*["']framer-motion["']/, "Browser UI source must not import Framer Motion DOM components because they write inline style attributes at runtime.");
   assertMatch(browserUiSource, /createDynamicCssRule/, "CSP-safe motion and scroll affordances must write dynamic geometry through stylesheet rules.");
+  assertNoMatch(webSource, /container\.style\./, "Bot-protection widgets must not position themselves with CSP-blocked style attributes.");
+  assertMatch(webSource, /sx-account-turnstile-container/, "Turnstile must use account-owned static CSS instead of inline styles.");
   for (const fallback of [webAppNotFound, webGlobalError, webPages404, webPages500]) {
     assertMatch(fallback, /SectionCard[\s\S]*className="ui-section"/, "Web fallback error surfaces must use CSP-safe UI package styles instead of Next inline styled defaults.");
   }

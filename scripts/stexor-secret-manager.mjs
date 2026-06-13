@@ -23,6 +23,7 @@ const requiredSecrets = [
   { name: "session_signing_keys", env: "SESSION_SIGNING_KEYS", kind: "keyring", bytes: 48, keyPrefix: "s", rotationDays: 60 },
   { name: "hash_pepper_keys", env: "SECRET_HASH_KEYS", kind: "keyring", bytes: 48, keyPrefix: "h", rotationDays: 90 },
   { name: "backup_signing_keys", env: "BACKUP_SIGNING_KEYS", kind: "keyring", bytes: 48, keyPrefix: "b", rotationDays: 90 },
+  { name: "alertmanager_webhook_token", env: "ALERTMANAGER_WEBHOOK_TOKEN", kind: "raw", bytes: 48, rotationDays: 90 },
   { name: "smtp_password", env: "SMTP_PASSWORD", kind: "raw", bytes: 36, minLength: 8, rotationDays: 90 },
   { name: "google_recaptcha_secret_key", env: "GOOGLE_RECAPTCHA_SECRET_KEY", kind: "raw", bytes: 36, minLength: 8, rotationDays: 90, manualRotation: true },
   { name: "cloudflare_turnstile_secret_key", env: "CLOUDFLARE_TURNSTILE_SECRET_KEY", kind: "raw", bytes: 36, minLength: 8, rotationDays: 90, manualRotation: true },
@@ -198,7 +199,7 @@ function decryptSecret(master, name, encrypted) {
 
 function readStore() {
   if (!fs.existsSync(storePath())) return null;
-  return JSON.parse(fs.readFileSync(storePath(), "utf8"));
+  return JSON.parse(fs.readFileSync(storePath(), "utf8").replace(/^\uFEFF/, ""));
 }
 
 function decryptStoreValues(store = readStore()) {

@@ -30,7 +30,7 @@
 
 ## Alerting
 
-Prometheus sends alerts to Alertmanager, and Alertmanager posts grouped alerts to the notification worker at `worker-notifications:3000/alerts/prometheus`. The worker logs sanitized alert summaries into Loki and exposes delivery counters on `/metrics`.
+Prometheus sends alerts to Alertmanager, and Alertmanager posts grouped alerts to the notification worker at `worker-notifications:3000/alerts/prometheus` with the shared bearer token from `/run/secrets/alertmanager_webhook_token`. The worker logs sanitized alert summaries into Loki and exposes delivery counters on `/metrics`.
 
 Key alerts:
 
@@ -73,7 +73,7 @@ The load profile uses a bounded synthetic `X-Forwarded-For` client pool by defau
 
 If `AuditOutboxDeadLetters` fires, pause risky account operations, inspect `{job="docker",service="enterprise-worker-jobs"} |= "audit_outbox"`, fix the downstream sink, then replay only events whose `external_event_id` has not already been accepted by the sink.
 
-If `BackendRedisUnavailable` fires, keep login/MFA traffic under the degraded memory budget until Redis is healthy. Do not raise rate-limit ceilings during the incident.
+If `BackendRedisUnavailable` fires, keep login, passkey, OTP and backup-code traffic under the degraded memory budget until Redis is healthy. Do not raise rate-limit ceilings during the incident.
 
 ## Centralized logs and audit
 
@@ -121,6 +121,7 @@ Useful operations:
 sh ./scripts/stexor-secret-manager.sh status
 sh ./scripts/stexor-secret-manager.sh rotate --name session_signing_keys
 sh ./scripts/stexor-secret-manager.sh rotate --name backup_signing_keys
+sh ./scripts/stexor-secret-manager.sh rotate --name alertmanager_webhook_token
 ```
 
 ## Restore test

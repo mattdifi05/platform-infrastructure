@@ -68,7 +68,7 @@ docker compose -p enterprise_local down -v
 | Grafana | `https://grafana.localhost.com` |
 | Traefik dashboard | `http://localhost:8090` |
 
-Alertmanager resta interno alla rete Docker. Prometheus invia gli alert ad Alertmanager, che li inoltra al worker notifiche su `/alerts/prometheus`; il worker produce log Loki e metriche `notification_alert_*`.
+Alertmanager resta interno alla rete Docker. Prometheus invia gli alert ad Alertmanager, che li inoltra al worker notifiche su `/alerts/prometheus` con token Bearer da Docker secret; il worker produce log Loki e metriche `notification_alert_*`.
 
 I log sono centralizzati via Promtail senza montare `docker.sock`: Promtail legge i log JSON bounded dei container, applica una redaction pipeline su header, token, cookie, OTP e segreti, e promuove `service` e `level` a label Loki per query operative. Backend e worker usano la policy condivisa `@stexor/observability`; gli eventi critici restano anche su audit DB append-only/outbox.
 
