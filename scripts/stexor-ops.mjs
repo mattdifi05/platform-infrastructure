@@ -13,7 +13,7 @@ import { fileURLToPath } from "node:url";
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const infraRoot = path.resolve(scriptDir, "..");
 const sourceRoot = path.resolve(infraRoot, "..", "src");
-const defaultNodeImage = "node:26-alpine@sha256:e71ac5e964b9201072425d59d2e876359efa25dc96bb1768cb73295728d6e4ea";
+const defaultNodeImage = "node:26-alpine@sha256:3ad34ca6292aec4a91d8ddeb9229e29d9c2f689efd0dd242860889ac71842eba";
 const defaultPlaywrightImage = "mcr.microsoft.com/playwright:v1.60.0-noble";
 
 const command = process.argv[2] ?? "help";
@@ -568,6 +568,18 @@ function redisDelete(keys) {
   redisCommand(["del", ...keys], { allowFailure: true, capture: true });
 }
 
+const localTlsHostnames = new Set([
+  "localhost",
+  "127.0.0.1",
+  "::1",
+  "ui.localhost.com",
+  "account.localhost.com",
+  "api.localhost.com",
+  "auth.localhost.com",
+  "minio.localhost.com",
+  "grafana.localhost.com",
+]);
+
 function request(method, urlString, { headers = {}, body } = {}) {
   return new Promise((resolve, reject) => {
     const url = new URL(urlString);
@@ -583,7 +595,7 @@ function request(method, urlString, { headers = {}, body } = {}) {
         ...headers,
         ...(data ? { "Content-Type": "application/json", "Content-Length": data.length } : {}),
       },
-      rejectUnauthorized: !url.hostname.endsWith(".localhost.com") && url.hostname !== "localhost",
+      rejectUnauthorized: !localTlsHostnames.has(url.hostname),
     }, (res) => {
       const chunks = [];
       res.on("data", (chunk) => chunks.push(chunk));
@@ -639,12 +651,12 @@ function assertStatus(response, expected, name) {
 }
 
 function pnpmInWeb(commandLine, options = {}) {
-  const bootstrap = `cd /workspace && export HOME=/tmp XDG_DATA_HOME=/tmp/xdg PNPM_HOME=/tmp/pnpm-home npm_config_cache=/tmp/npm-cache && if [ ! -f /tmp/pnpm-run/node_modules/pnpm/bin/pnpm.mjs ]; then npm install --prefix /tmp/pnpm-run --no-save pnpm@11.0.9 >/dev/null; fi && node /tmp/pnpm-run/node_modules/pnpm/bin/pnpm.mjs ${commandLine}`;
+  const bootstrap = `cd /workspace && export HOME=/tmp XDG_DATA_HOME=/tmp/xdg PNPM_HOME=/tmp/pnpm-home npm_config_cache=/tmp/npm-cache && if [ ! -f /tmp/pnpm-run/node_modules/pnpm/bin/pnpm.mjs ]; then npm install --prefix /tmp/pnpm-run --no-save pnpm@11.6.0 >/dev/null; fi && node /tmp/pnpm-run/node_modules/pnpm/bin/pnpm.mjs ${commandLine}`;
   return dockerExec("enterprise-web", ["sh", "-lc", bootstrap], options);
 }
 
 function pnpmInWebOutput(commandLine) {
-  const bootstrap = `cd /workspace && export HOME=/tmp XDG_DATA_HOME=/tmp/xdg PNPM_HOME=/tmp/pnpm-home npm_config_cache=/tmp/npm-cache && if [ ! -f /tmp/pnpm-run/node_modules/pnpm/bin/pnpm.mjs ]; then npm install --prefix /tmp/pnpm-run --no-save pnpm@11.0.9 >/dev/null; fi && node /tmp/pnpm-run/node_modules/pnpm/bin/pnpm.mjs ${commandLine}`;
+  const bootstrap = `cd /workspace && export HOME=/tmp XDG_DATA_HOME=/tmp/xdg PNPM_HOME=/tmp/pnpm-home npm_config_cache=/tmp/npm-cache && if [ ! -f /tmp/pnpm-run/node_modules/pnpm/bin/pnpm.mjs ]; then npm install --prefix /tmp/pnpm-run --no-save pnpm@11.6.0 >/dev/null; fi && node /tmp/pnpm-run/node_modules/pnpm/bin/pnpm.mjs ${commandLine}`;
   return dockerExecOutput("enterprise-web", ["sh", "-lc", bootstrap]);
 }
 
@@ -717,7 +729,7 @@ function sourceWorkspaceBootstrap(commands) {
     "cd /source",
     `tar ${excludes} -cf - . | tar -xf - -C /workspace`,
     "cd /workspace",
-    "npm install -g pnpm@11.0.9 >/dev/null",
+    "npm install -g pnpm@11.6.0 >/dev/null",
     commands,
   ].join(" && ");
 }
@@ -831,7 +843,7 @@ async function backupPostgres(options = {}) {
 async function certificateExpiryCheck() {
   const env = parseEnv(path.join(infraRoot, ".env"));
   const defaultHosts = [
-    env.APP_HOST ?? "app.localhost.com",
+    env.UI_HOST ?? "ui.localhost.com",
     env.ACCOUNT_HOST ?? "account.localhost.com",
     env.API_HOST ?? "api.localhost.com",
   ].join(",");
@@ -918,7 +930,7 @@ async function enterpriseHardeningAudit() {
 async function browserE2eTests() {
   log("==> Browser E2E tests");
   const env = parseEnv(path.join(infraRoot, ".env"));
-  const playwrightBaseUrl = env.NEXT_PUBLIC_APP_URL ?? env.APP_PUBLIC_URL ?? "https://app.localhost.com";
+  const playwrightBaseUrl = env.NEXT_PUBLIC_UI_URL ?? env.UI_PUBLIC_URL ?? "https://ui.localhost.com";
   const bootstrap = [
     "set -eu",
     "if ! command -v docker >/dev/null; then apt-get update >/dev/null && apt-get install -y docker.io >/dev/null; fi",
@@ -1511,9 +1523,9 @@ async function productionPreflight() {
     "TRAEFIK_ACME_EMAIL",
     "API_PUBLIC_URL",
     "ACCOUNT_PUBLIC_URL",
-    "APP_PUBLIC_URL",
+    "UI_PUBLIC_URL",
     "NEXT_PUBLIC_API_URL",
-    "NEXT_PUBLIC_APP_URL",
+    "NEXT_PUBLIC_UI_URL",
     "NEXT_PUBLIC_ACCOUNT_URL",
     "NEXTAUTH_URL",
     "KEYCLOAK_ISSUER",
@@ -1562,7 +1574,7 @@ async function productionPreflight() {
     fail("Managed production secrets require SECRET_MANAGER_PROVIDER.");
   }
   if (!argv.skipDns) {
-    for (const host of [env.APP_HOST, env.ACCOUNT_HOST, env.API_HOST, env.AUTH_HOST].filter(Boolean)) {
+    for (const host of [env.UI_HOST, env.ACCOUNT_HOST, env.API_HOST, env.AUTH_HOST].filter(Boolean)) {
       if (/localhost|your-domain/i.test(host)) {
         fail(`Production host is not public: ${host}`);
       }
@@ -2079,11 +2091,11 @@ async function secretScan() {
 
 async function securitySmoke() {
   const env = parseEnv(path.join(infraRoot, ".env"));
-  const appPublicUrl = env.APP_PUBLIC_URL ?? env.NEXT_PUBLIC_APP_URL ?? "https://app.localhost.com";
+  const uiPublicUrl = env.UI_PUBLIC_URL ?? env.NEXT_PUBLIC_UI_URL ?? "https://ui.localhost.com";
   const accountPublicUrl = env.ACCOUNT_PUBLIC_URL ?? env.NEXT_PUBLIC_ACCOUNT_URL ?? "https://account.localhost.com";
   const apiPublicUrl = env.API_PUBLIC_URL ?? env.NEXT_PUBLIC_API_URL ?? "https://api.localhost.com";
   const defaultUrls = [
-    `${appPublicUrl.replace(/\/$/, "")}/`,
+    `${uiPublicUrl.replace(/\/$/, "")}/`,
     `${accountPublicUrl.replace(/\/$/, "")}/`,
     `${apiPublicUrl.replace(/\/$/, "")}/health`,
   ].join(",");
@@ -2167,8 +2179,6 @@ async function staticSecurityCheck() {
   const webProxy = readText(path.join(sourceRoot, "apps", "web", "src", "proxy.ts"));
   const webAppNotFound = readText(path.join(sourceRoot, "apps", "web", "src", "app", "not-found.tsx"));
   const webGlobalError = readText(path.join(sourceRoot, "apps", "web", "src", "app", "global-error.tsx"));
-  const webPages404 = readText(path.join(sourceRoot, "apps", "web", "src", "pages", "404.tsx"));
-  const webPages500 = readText(path.join(sourceRoot, "apps", "web", "src", "pages", "500.tsx"));
   const webRememberModel = readText(path.join(sourceRoot, "apps", "web", "src", "components", "account-center", "model.ts"));
   const webSource = readSourceTreeText(path.join(sourceRoot, "apps", "web", "src"));
   const uiSource = readSourceTreeText(path.join(sourceRoot, "packages", "ui", "src"));
@@ -2215,7 +2225,7 @@ async function staticSecurityCheck() {
   assertMatch(compose, /image:\s+\$\{WEB_BUILD_IMAGE:-stexor\/web:local\}/, "Local dev web must run the production image shape, not next dev.");
   assertMatch(compose, /image:\s+\$\{WORKER_NOTIFICATIONS_BUILD_IMAGE:-stexor\/worker-notifications:local\}/, "Local dev workers must run production-shaped images.");
   assertNoMatch(compose, /--watch|next dev/, "Local dev compose must not run watch/dev servers.");
-  assertNoMatch(compose, /--loader \.\/scripts\/ts-extension-loader\.mjs/, "Dev backend must not use the deprecated Node --loader flag.");
+  assertNoMatch(compose, /--loader \.\/scripts\/ts-extension-loader\.mjs/, "Dev backend must not use the unsupported Node --loader flag.");
   assertNoMatch(compose, /\.\.\/src:\/workspace/, "Local dev compose must not bind-mount app source into runtime containers.");
   assertNoMatch(compose, /\$\{(?:POSTGRES_PORT|REDIS_PORT|KEYCLOAK_PORT|NATS_CLIENT_PORT|NATS_MONITORING_PORT|MINIO_API_PORT|MINIO_CONSOLE_PORT|BACKEND_PORT|WEB_PORT|PROMETHEUS_PORT|GRAFANA_PORT|LOKI_PORT)/, "Local dev compose must not expose direct service ports; route through Traefik like production.");
   assertMatch(compose, /NODE_ENV:\s+production/, "Local dev app services must run with NODE_ENV=production.");
@@ -2263,7 +2273,7 @@ async function staticSecurityCheck() {
   assertMatch(webDockerfile, /ARG NEXT_PUBLIC_API_URL[\s\S]*NEXT_PUBLIC_ACCOUNT_URL/, "Web Dockerfile must receive public URLs as build args for production bundles.");
   assertMatch(compose, /AUDIT_OUTBOX_ENABLED:\s+\$\{AUDIT_OUTBOX_ENABLED:-true\}/, "Worker jobs must enable audit outbox dispatch by default.");
   assertMatch(compose, /AUDIT_OUTBOX_MAX_ATTEMPTS:\s+\$\{AUDIT_OUTBOX_MAX_ATTEMPTS:-8\}/, "Audit outbox worker must have bounded retry attempts.");
-  assertMatch(compose, /alertmanager:[\s\S]*prom\/alertmanager:v0\.29\.0@sha256:/, "Alertmanager must run as a pinned local/prod service.");
+  assertMatch(compose, /alertmanager:[\s\S]*prom\/alertmanager:v0\.32\.2@sha256:/, "Alertmanager must run as a pinned local/prod service.");
   assertMatch(composeProd, /alertmanager:[\s\S]*ports:\s*!reset \[\]/, "Alertmanager must not expose host ports in production.");
   assertMatch(prometheusConfig, /alertmanagers:[\s\S]*alertmanager:9093/, "Prometheus must route alerts to Alertmanager.");
   assertMatch(prometheusConfig, /job_name: alertmanager[\s\S]*alertmanager:9093/, "Prometheus must scrape Alertmanager.");
@@ -2332,7 +2342,7 @@ async function staticSecurityCheck() {
   assertMatch(workerJobsNatsSink, /Idempotency-Key/, "Audit outbox delivery must publish an idempotency key.");
   assertNoMatch(webNextConfig, /Content-Security-Policy/, "Web CSP must be nonce-based middleware, not a static header.");
   if (fs.existsSync(path.join(sourceRoot, "apps", "web", "src", "middleware.ts"))) {
-    fail("Web must use src/proxy.ts instead of deprecated src/middleware.ts.");
+    fail("Web must use src/proxy.ts instead of src/middleware.ts.");
   }
   assertMatch(webProxy, /export function proxy/, "Web CSP proxy must export the Next.js proxy handler.");
   assertMatch(webProxy, /'nonce-\$\{nonce\}'/, "Web CSP must include a request nonce.");
@@ -2347,7 +2357,7 @@ async function staticSecurityCheck() {
   assertMatch(browserUiSource, /createDynamicCssRule/, "CSP-safe motion and scroll affordances must write dynamic geometry through stylesheet rules.");
   assertNoMatch(webSource, /container\.style\./, "Bot-protection widgets must not position themselves with CSP-blocked style attributes.");
   assertMatch(webSource, /sx-account-turnstile-container/, "Turnstile must use account-owned static CSS instead of inline styles.");
-  for (const fallback of [webAppNotFound, webGlobalError, webPages404, webPages500]) {
+  for (const fallback of [webAppNotFound, webGlobalError]) {
     assertMatch(fallback, /SectionCard[\s\S]*className="ui-section"/, "Web fallback error surfaces must use CSP-safe UI package styles instead of Next inline styled defaults.");
   }
   assertNoMatch(webRememberModel, /JSON\.stringify\(accounts/, "Remembered accounts must not persist full profile objects in localStorage.");

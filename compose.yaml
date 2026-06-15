@@ -8,7 +8,7 @@ x-default-logging: &default_logging
 
 services:
   traefik:
-    image: ${TRAEFIK_IMAGE:-traefik:v3.7.0@sha256:eb328e2c806c53aafbbace6c451fa54d268961261a85452fcf0fb752a30c17be}
+    image: ${TRAEFIK_IMAGE:-traefik:v3.7.5@sha256:d6858791f9e74df44ca4014166647c41cdc2abd3bf2a71b832ca4e1c6a91b257}
     container_name: enterprise-traefik
     init: true
     pids_limit: 256
@@ -39,7 +39,7 @@ services:
       retries: 5
 
   postgres:
-    image: ${POSTGRES_IMAGE:-postgres:18-alpine@sha256:54451ecb8ab38c24c3ec123f2fd501303a3a1856a5c66e98cecf2460d5e1e9d7}
+    image: ${POSTGRES_IMAGE:-postgres:18-alpine@sha256:96d56f7f57c6aacd1fcb908bc83b345ec5f83231ee486dd66a1baadce274db88}
     container_name: enterprise-postgres
     init: true
     pids_limit: 1024
@@ -69,7 +69,7 @@ services:
       retries: 10
 
   redis:
-    image: ${REDIS_IMAGE:-redis:8.6-alpine@sha256:b9646e7cdf8165d985b88bb3e61b3f2f7625db7f6c98af79def91997d04f26b9}
+    image: ${REDIS_IMAGE:-redis:8.6-alpine@sha256:d103b9cd0b54b98b2c38e2b19220ee7adfe4b0fb22c406baa75f321179da2f00}
     container_name: enterprise-redis
     init: true
     pids_limit: 256
@@ -101,7 +101,7 @@ services:
       retries: 10
 
   keycloak:
-    image: ${KEYCLOAK_IMAGE:-quay.io/keycloak/keycloak:26.6.1@sha256:dea26401d06341095cc4ea9d66896200b55de5ca1daa1d2fcbe58493afa6e0ad}
+    image: ${KEYCLOAK_IMAGE:-quay.io/keycloak/keycloak:26.6.3@sha256:5fdbf2dbb5897cc34e82de49d13e23db011f9925089dbc555fc095f2c8bc1dac}
     container_name: enterprise-keycloak
     init: true
     pids_limit: 1024
@@ -145,7 +145,7 @@ services:
       start_period: 60s
 
   nats:
-    image: ${NATS_IMAGE:-nats:2.14-alpine@sha256:df3dbf7615519c64c1ecf5bff1811e0f1349e980e12cf8edac882a53cf3f9dd9}
+    image: ${NATS_IMAGE:-nats:2.14-alpine@sha256:b039b46715673a9436989cfc49dde04e6bd57e205347478a58214789baf5efdc}
     container_name: enterprise-nats
     init: true
     pids_limit: 256
@@ -244,14 +244,14 @@ services:
       MINIO_DEFAULT_BUCKET: ${MINIO_DEFAULT_BUCKET:-stexor-local}
       API_PUBLIC_URL: ${API_PUBLIC_URL:-https://api.localhost.com}
       ACCOUNT_PUBLIC_URL: ${ACCOUNT_PUBLIC_URL:-https://account.localhost.com}
-      APP_PUBLIC_URL: ${APP_PUBLIC_URL:-https://app.localhost.com}
+      UI_PUBLIC_URL: ${UI_PUBLIC_URL:-https://ui.localhost.com}
       WEBAUTHN_RP_ID: ${WEBAUTHN_RP_ID:-account.localhost.com}
       WEBAUTHN_ORIGINS: ${WEBAUTHN_ORIGINS:-https://account.localhost.com}
-      CORS_ORIGINS: ${CORS_ORIGINS:-https://account.localhost.com,https://app.localhost.com}
+      CORS_ORIGINS: ${CORS_ORIGINS:-https://account.localhost.com,https://ui.localhost.com}
       BOT_PROTECTION_PROVIDER: ${BOT_PROTECTION_PROVIDER:-disabled}
       BOT_PROTECTION_REQUIRED: ${BOT_PROTECTION_REQUIRED:-}
       BOT_PROTECTION_MIN_SCORE: ${BOT_PROTECTION_MIN_SCORE:-0.5}
-      BOT_PROTECTION_EXPECTED_HOSTNAMES: ${BOT_PROTECTION_EXPECTED_HOSTNAMES:-account.localhost.com,app.localhost.com}
+      BOT_PROTECTION_EXPECTED_HOSTNAMES: ${BOT_PROTECTION_EXPECTED_HOSTNAMES:-account.localhost.com,ui.localhost.com}
       GOOGLE_RECAPTCHA_SECRET_KEY: ${GOOGLE_RECAPTCHA_SECRET_KEY:-}
       GOOGLE_RECAPTCHA_SECRET_KEY_FILE: ${GOOGLE_RECAPTCHA_SECRET_KEY_FILE:-}
       CLOUDFLARE_TURNSTILE_SECRET_KEY: ${CLOUDFLARE_TURNSTILE_SECRET_KEY:-}
@@ -325,7 +325,7 @@ services:
       NEXT_TELEMETRY_DISABLED: "1"
       PORT: 3000
       NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-https://api.localhost.com}
-      NEXT_PUBLIC_APP_URL: ${NEXT_PUBLIC_APP_URL:-https://app.localhost.com}
+      NEXT_PUBLIC_UI_URL: ${NEXT_PUBLIC_UI_URL:-https://ui.localhost.com}
       NEXT_PUBLIC_ACCOUNT_URL: ${NEXT_PUBLIC_ACCOUNT_URL:-https://account.localhost.com}
       NEXT_PUBLIC_BOT_PROTECTION_PROVIDER: ${NEXT_PUBLIC_BOT_PROTECTION_PROVIDER:-disabled}
       NEXT_PUBLIC_GOOGLE_RECAPTCHA_SITE_KEY: ${NEXT_PUBLIC_GOOGLE_RECAPTCHA_SITE_KEY:-}
@@ -349,7 +349,7 @@ services:
       - enterprise_net
     labels:
       traefik.enable: "true"
-      traefik.http.routers.enterprise-web.rule: Host(`${APP_HOST:-app.localhost.com}`)
+      traefik.http.routers.enterprise-web.rule: Host(`${UI_HOST:-ui.localhost.com}`)
       traefik.http.routers.enterprise-web.entrypoints: web
       traefik.http.routers.enterprise-web.middlewares: enterprise-security-headers@file,enterprise-compress@file
       traefik.http.services.enterprise-web.loadbalancer.server.port: "3000"
@@ -462,7 +462,7 @@ services:
       start_period: 20s
 
   prometheus:
-    image: ${PROMETHEUS_IMAGE:-prom/prometheus:v3.11.3@sha256:e4254400b85610324913f0dc4acf92603d9984e7519414c5a12811aa6146acc3}
+    image: ${PROMETHEUS_IMAGE:-prom/prometheus:v3.12.0@sha256:69f5241418838263316593f7274a304b095c40bcf22e57272865da91bd60a8ac}
     container_name: enterprise-prometheus
     init: true
     pids_limit: 512
@@ -494,7 +494,7 @@ services:
       retries: 10
 
   alertmanager:
-    image: ${ALERTMANAGER_IMAGE:-prom/alertmanager:v0.29.0@sha256:88743b63b3e09ea6e31e140ced5bf45f4a8e82c617c2a963f78841f4995ad1d7}
+    image: ${ALERTMANAGER_IMAGE:-prom/alertmanager:v0.32.2@sha256:b85533a2eb45865835315810315f6951331b2dbc8c93a6cf9a51e156a006a706}
     container_name: enterprise-alertmanager
     init: true
     pids_limit: 256
@@ -520,7 +520,7 @@ services:
       retries: 10
 
   grafana:
-    image: ${GRAFANA_IMAGE:-grafana/grafana:13.0.1@sha256:0f86bada30d65ef9d0183b90c1e2682ac92d53d95da8bed322b984ea78a4a73a}
+    image: ${GRAFANA_IMAGE:-grafana/grafana:13.0.2@sha256:5dad0df181cb644a14e13617b913b261a54f7d4fd4510721dba420929f35bea2}
     container_name: enterprise-grafana
     init: true
     pids_limit: 512
@@ -563,7 +563,7 @@ services:
       retries: 10
 
   loki:
-    image: ${LOKI_IMAGE:-grafana/loki:3.7.1@sha256:73e905b51a7f917f7a1075e4be68759df30226e03dcb3cd2213b989cc0dc8eb4}
+    image: ${LOKI_IMAGE:-grafana/loki:3.7.2@sha256:191d4fdfb7264f16989f0a57f320872620a5a7c2ceeec6229212c4190ec49b86}
     container_name: enterprise-loki
     init: true
     pids_limit: 512
@@ -641,7 +641,7 @@ configs:
       http:
         routers:
           enterprise-web-http:
-            rule: Host(`${APP_HOST:-app.localhost.com}`)
+            rule: Host(`${UI_HOST:-ui.localhost.com}`)
             entryPoints:
               - web
             middlewares:
@@ -649,7 +649,7 @@ configs:
             service: enterprise-web
 
           enterprise-web:
-            rule: Host(`${APP_HOST:-app.localhost.com}`)
+            rule: Host(`${UI_HOST:-ui.localhost.com}`)
             entryPoints:
               - websecure
             tls: {}

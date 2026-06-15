@@ -5,8 +5,8 @@ services:
       context: ../src
       dockerfile: ../enterprise-infrastructure/docker/backend.Dockerfile
       args:
-        NODE_IMAGE: ${NODE_IMAGE:-node:26-alpine@sha256:e71ac5e964b9201072425d59d2e876359efa25dc96bb1768cb73295728d6e4ea}
-        PNPM_VERSION: ${PNPM_VERSION:-11.0.9}
+        NODE_IMAGE: ${NODE_IMAGE:-node:26-alpine@sha256:3ad34ca6292aec4a91d8ddeb9229e29d9c2f689efd0dd242860889ac71842eba}
+        PNPM_VERSION: ${PNPM_VERSION:-11.6.0}
       cache_from:
         - type=local,src=${DOCKER_BUILD_CACHE_DIR:-.docker-build-cache}/backend
       cache_to:
@@ -18,10 +18,10 @@ services:
       context: ../src
       dockerfile: ../enterprise-infrastructure/docker/web.Dockerfile
       args:
-        NODE_IMAGE: ${NODE_IMAGE:-node:26-alpine@sha256:e71ac5e964b9201072425d59d2e876359efa25dc96bb1768cb73295728d6e4ea}
-        PNPM_VERSION: ${PNPM_VERSION:-11.0.9}
+        NODE_IMAGE: ${NODE_IMAGE:-node:26-alpine@sha256:3ad34ca6292aec4a91d8ddeb9229e29d9c2f689efd0dd242860889ac71842eba}
+        PNPM_VERSION: ${PNPM_VERSION:-11.6.0}
         NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-https://api.localhost.com}
-        NEXT_PUBLIC_APP_URL: ${NEXT_PUBLIC_APP_URL:-https://app.localhost.com}
+        NEXT_PUBLIC_UI_URL: ${NEXT_PUBLIC_UI_URL:-https://ui.localhost.com}
         NEXT_PUBLIC_ACCOUNT_URL: ${NEXT_PUBLIC_ACCOUNT_URL:-https://account.localhost.com}
         NEXT_PUBLIC_BOT_PROTECTION_PROVIDER: ${NEXT_PUBLIC_BOT_PROTECTION_PROVIDER:-disabled}
         NEXT_PUBLIC_GOOGLE_RECAPTCHA_SITE_KEY: ${NEXT_PUBLIC_GOOGLE_RECAPTCHA_SITE_KEY:-}
@@ -41,8 +41,8 @@ services:
       context: ../src
       dockerfile: ../enterprise-infrastructure/docker/worker.Dockerfile
       args:
-        NODE_IMAGE: ${NODE_IMAGE:-node:26-alpine@sha256:e71ac5e964b9201072425d59d2e876359efa25dc96bb1768cb73295728d6e4ea}
-        PNPM_VERSION: ${PNPM_VERSION:-11.0.9}
+        NODE_IMAGE: ${NODE_IMAGE:-node:26-alpine@sha256:3ad34ca6292aec4a91d8ddeb9229e29d9c2f689efd0dd242860889ac71842eba}
+        PNPM_VERSION: ${PNPM_VERSION:-11.6.0}
         WORKER_PACKAGE: ./apps/worker-notifications
       cache_from:
         - type=local,src=${DOCKER_BUILD_CACHE_DIR:-.docker-build-cache}/worker-notifications
@@ -55,8 +55,8 @@ services:
       context: ../src
       dockerfile: ../enterprise-infrastructure/docker/worker.Dockerfile
       args:
-        NODE_IMAGE: ${NODE_IMAGE:-node:26-alpine@sha256:e71ac5e964b9201072425d59d2e876359efa25dc96bb1768cb73295728d6e4ea}
-        PNPM_VERSION: ${PNPM_VERSION:-11.0.9}
+        NODE_IMAGE: ${NODE_IMAGE:-node:26-alpine@sha256:3ad34ca6292aec4a91d8ddeb9229e29d9c2f689efd0dd242860889ac71842eba}
+        PNPM_VERSION: ${PNPM_VERSION:-11.6.0}
         WORKER_PACKAGE: ./apps/worker-jobs
       cache_from:
         - type=local,src=${DOCKER_BUILD_CACHE_DIR:-.docker-build-cache}/worker-jobs

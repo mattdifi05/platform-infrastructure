@@ -46,7 +46,7 @@ docker compose -f compose.yaml -f compose.build.yaml -f compose.secrets.yaml --e
 
 `stexor-secret-manager` mantiene uno store proprietario cifrato in `secrets/stexor-secret-manager-store.json`, audit JSONL in `secrets/stexor-secret-manager-audit.log` e materializza i file Docker secrets usati da `compose.secrets.yaml`. Backend e worker leggono i secret da `/run/secrets/*`, inclusi `DATABASE_URL_FILE`, `SESSION_SECRET_FILE`, `SESSION_SIGNING_KEYS_FILE`, `REDIS_PASSWORD_FILE`, `NATS_URL_FILE` e `SMTP_PASSWORD_FILE`.
 
-Il dev Docker e' volutamente production-like: usa `NODE_ENV=production`, immagini buildate, nessun hot reload, nessun bind mount del sorgente applicativo e nessuna porta host diretta per database/cache/app. Il traffico passa da Traefik su `https://*.localhost.com`.
+Il dev Docker e' volutamente production-like: usa `NODE_ENV=production`, immagini buildate, nessun hot reload, nessun bind mount del sorgente applicativo e nessuna porta host diretta per database/cache/app. Il traffico passa da Traefik solo sugli host locali dichiarati del progetto.
 
 ## Stop, log e reset
 
@@ -60,7 +60,7 @@ docker compose -p enterprise_local down -v
 
 | Servizio | URL |
 | --- | --- |
-| App principale | `https://app.localhost.com` |
+| UI principale | `https://ui.localhost.com` |
 | Account center | `https://account.localhost.com` |
 | API backend | `https://api.localhost.com` |
 | Keycloak | `https://auth.localhost.com` |
@@ -77,7 +77,7 @@ I log sono centralizzati via Promtail senza montare `docker.sock`: Promtail legg
 ```sh
 cd /opt/stexor/enterprise-infrastructure
 mkcert -install
-mkcert -cert-file ./traefik/certs/local-cert.pem -key-file ./traefik/certs/local-key.pem localhost 127.0.0.1 ::1 "*.localhost.com" app.localhost.com account.localhost.com api.localhost.com auth.localhost.com minio.localhost.com grafana.localhost.com
+mkcert -cert-file ./traefik/certs/local-cert.pem -key-file ./traefik/certs/local-key.pem localhost 127.0.0.1 ::1 ui.localhost.com account.localhost.com api.localhost.com auth.localhost.com minio.localhost.com grafana.localhost.com
 docker compose -f compose.yaml -f compose.build.yaml --env-file .env -p enterprise_local up -d --build traefik
 curl https://api.localhost.com/health
 ```
@@ -85,7 +85,7 @@ curl https://api.localhost.com/health
 Su Windows, apri PowerShell come amministratore e aggiungi gli host locali:
 
 ```powershell
-Add-Content -Path "$env:SystemRoot\System32\drivers\etc\hosts" -Value "127.0.0.1 app.localhost.com account.localhost.com api.localhost.com auth.localhost.com minio.localhost.com grafana.localhost.com"
+Add-Content -Path "$env:SystemRoot\System32\drivers\etc\hosts" -Value "127.0.0.1 ui.localhost.com account.localhost.com api.localhost.com auth.localhost.com minio.localhost.com grafana.localhost.com"
 ```
 
 I file in `traefik/certs/` sono ignorati da Git. In container isolati monta la CA mkcert oppure passa `--cacert`.

@@ -1,4 +1,4 @@
-﻿services:
+services:
   traefik:
     restart: always
     command:
@@ -78,7 +78,7 @@
       API_DOCS_ENABLED: ${API_DOCS_ENABLED:-false}
       PUBLIC_BASE_URL: ${API_PUBLIC_URL:?Set API_PUBLIC_URL}
       ACCOUNT_PUBLIC_URL: ${ACCOUNT_PUBLIC_URL:?Set ACCOUNT_PUBLIC_URL}
-      APP_PUBLIC_URL: ${APP_PUBLIC_URL:?Set APP_PUBLIC_URL}
+      UI_PUBLIC_URL: ${UI_PUBLIC_URL:?Set UI_PUBLIC_URL}
       WEBAUTHN_RP_ID: ${WEBAUTHN_RP_ID:?Set WEBAUTHN_RP_ID}
       WEBAUTHN_ORIGINS: ${WEBAUTHN_ORIGINS:?Set WEBAUTHN_ORIGINS}
       CORS_ORIGINS: ${CORS_ORIGINS:?Set CORS_ORIGINS}
@@ -131,7 +131,7 @@
       NODE_ENV: production
       NEXT_TELEMETRY_DISABLED: "1"
       NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:?Set NEXT_PUBLIC_API_URL}
-      NEXT_PUBLIC_APP_URL: ${NEXT_PUBLIC_APP_URL:?Set NEXT_PUBLIC_APP_URL}
+      NEXT_PUBLIC_UI_URL: ${NEXT_PUBLIC_UI_URL:?Set NEXT_PUBLIC_UI_URL}
       NEXT_PUBLIC_ACCOUNT_URL: ${NEXT_PUBLIC_ACCOUNT_URL:?Set NEXT_PUBLIC_ACCOUNT_URL}
       NEXT_PUBLIC_BOT_PROTECTION_PROVIDER: ${NEXT_PUBLIC_BOT_PROTECTION_PROVIDER:-disabled}
       NEXT_PUBLIC_GOOGLE_RECAPTCHA_SITE_KEY: ${NEXT_PUBLIC_GOOGLE_RECAPTCHA_SITE_KEY:-}
@@ -142,7 +142,7 @@
       KEYCLOAK_ISSUER: ${KEYCLOAK_ISSUER:?Set KEYCLOAK_ISSUER}
     labels:
       traefik.enable: "true"
-      traefik.http.routers.enterprise-web.rule: Host(`${APP_HOST:?Set APP_HOST}`)
+      traefik.http.routers.enterprise-web.rule: Host(`${UI_HOST:?Set UI_HOST}`)
       traefik.http.routers.enterprise-web.entrypoints: websecure
       traefik.http.routers.enterprise-web.tls: "true"
       traefik.http.routers.enterprise-web.tls.certresolver: letsencrypt
@@ -210,7 +210,7 @@ configs:
       http:
         routers:
           enterprise-web:
-            rule: Host(`${APP_HOST:?Set APP_HOST}`)
+            rule: Host(`${UI_HOST:?Set UI_HOST}`)
             entryPoints:
               - websecure
             tls:

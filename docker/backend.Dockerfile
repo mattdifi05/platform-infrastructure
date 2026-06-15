@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
-ARG NODE_IMAGE=node:26-alpine@sha256:e71ac5e964b9201072425d59d2e876359efa25dc96bb1768cb73295728d6e4ea
+ARG NODE_IMAGE=node:26-alpine@sha256:3ad34ca6292aec4a91d8ddeb9229e29d9c2f689efd0dd242860889ac71842eba
 FROM ${NODE_IMAGE} AS build
-ARG PNPM_VERSION=11.0.9
+ARG PNPM_VERSION=11.6.0
 
 ENV NEXT_TELEMETRY_DISABLED=1 \
     PNPM_HOME=/pnpm \
@@ -28,7 +28,7 @@ COPY --chown=node:node packages/types packages/types
 RUN pnpm --filter ./apps/backend build
 
 FROM ${NODE_IMAGE} AS runtime
-ARG PNPM_VERSION=11.0.9
+ARG PNPM_VERSION=11.6.0
 
 ENV NODE_ENV=production \
     NEXT_TELEMETRY_DISABLED=1 \
