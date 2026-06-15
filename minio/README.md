@@ -1,6 +1,6 @@
 # MinIO notes
 
-MinIO starts as an S3-compatible object store with credentials mounted from Docker secrets.
+MinIO starts as an object store with S3 APIs and credentials mounted from Docker secrets.
 
 For local development, create the optional initial bucket after startup:
 

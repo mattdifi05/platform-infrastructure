@@ -9,7 +9,7 @@ Infrastruttura Docker self-hosted per la piattaforma Stexor enterprise. La carte
 `-- enterprise-infrastructure
 ```
 
-La vecchia `src/infrastructure/` resta separata: avvia una sola infrastruttura alla volta.
+`src/infrastructure/` e `enterprise-infrastructure/` sono stack separati: avvia una sola infrastruttura alla volta.
 
 ## Documentazione applicativa
 

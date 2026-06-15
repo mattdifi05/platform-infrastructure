@@ -1935,7 +1935,7 @@ function listDumpArtifacts(directory) {
 function pruneDumpDirectory({ directory, dryRun, label, minKeep, retentionDays }) {
   const artifacts = listDumpArtifacts(directory);
   const cutoff = Date.now() - retentionDays * 86400000;
-  let removed = 0;
+  let pruned = 0;
   for (const [index, artifact] of artifacts.entries()) {
     if (index < minKeep || artifact.mtimeMs >= cutoff) {
       continue;
@@ -1953,9 +1953,9 @@ function pruneDumpDirectory({ directory, dryRun, label, minKeep, retentionDays }
       if (artifact.shaPath) fs.rmSync(artifact.shaPath, { force: true });
       if (artifact.sigPath) fs.rmSync(artifact.sigPath, { force: true });
     }
-    removed += 1;
+    pruned += 1;
   }
-  return { kept: artifacts.length - removed, removed, total: artifacts.length };
+  return { kept: artifacts.length - pruned, pruned, total: artifacts.length };
 }
 
 function assertRecentRestoreTest(container, database, user, maxAgeDays) {
@@ -1998,7 +1998,7 @@ async function prunePostgresBackups(options = {}) {
   log(`==> PostgreSQL backup retention${dryRun ? " dry run" : ""}`);
   const backups = pruneDumpDirectory({ directory: backupDir, dryRun, label: "regular", minKeep: minBackups, retentionDays: backupRetentionDays });
   const drills = pruneDumpDirectory({ directory: drillDir, dryRun, label: "drill", minKeep: minDrills, retentionDays: drillRetentionDays });
-  log(`Retention complete: regular ${backups.removed}/${backups.total} pruned, drill ${drills.removed}/${drills.total} pruned.`);
+  log(`Retention complete: regular ${backups.pruned}/${backups.total} pruned, drill ${drills.pruned}/${drills.total} pruned.`);
 }
 
 async function secretScan() {
