@@ -50,13 +50,13 @@ services:
     environment:
       POSTGRES_DB: postgres
       POSTGRES_USER: ${POSTGRES_SUPERUSER:-postgres}
-      POSTGRES_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD:-}
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_superuser_password
       APP_DB_NAME: ${APP_DB_NAME:-stexor_app}
       APP_DB_USER: ${APP_DB_USER:-stexor_app_user}
-      APP_DB_PASSWORD: ${APP_DB_PASSWORD:-}
+      APP_DB_PASSWORD_FILE: /run/secrets/app_db_password
       KEYCLOAK_DB_NAME: ${KEYCLOAK_DB_NAME:-keycloak}
       KEYCLOAK_DB_USER: ${KEYCLOAK_DB_USER:-keycloak}
-      KEYCLOAK_DB_PASSWORD: ${KEYCLOAK_DB_PASSWORD:-}
+      KEYCLOAK_DB_PASSWORD_FILE: /run/secrets/keycloak_db_password
     volumes:
       - enterprise_postgres_data:/var/lib/postgresql
       - ./postgres/init:/docker-entrypoint-initdb.d:ro
@@ -78,24 +78,19 @@ services:
       - no-new-privileges:true
     restart: unless-stopped
     environment:
-      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      REDIS_PASSWORD_FILE: /run/secrets/redis_password
     command:
       - sh
       - -ec
       - |
-        if [ -n "$${REDIS_PASSWORD_FILE:-}" ]; then
-          REDIS_PASSWORD="$$(cat "$${REDIS_PASSWORD_FILE}")"
-        fi
-        if [ -n "$${REDIS_PASSWORD:-}" ]; then
-          exec redis-server --appendonly yes --requirepass "$${REDIS_PASSWORD}"
-        fi
-        exec redis-server --appendonly yes
+        REDIS_PASSWORD="$$(cat "$${REDIS_PASSWORD_FILE}")"
+        exec redis-server --appendonly yes --requirepass "$${REDIS_PASSWORD}"
     volumes:
       - enterprise_redis_data:/data
     networks:
       - enterprise_net
     healthcheck:
-      test: ["CMD-SHELL", "if [ -n \"$${REDIS_PASSWORD_FILE:-}\" ]; then REDISCLI_AUTH=\"$$(cat \"$${REDIS_PASSWORD_FILE}\")\" redis-cli ping | grep PONG; elif [ -n \"$${REDIS_PASSWORD:-}\" ]; then REDISCLI_AUTH=\"$${REDIS_PASSWORD}\" redis-cli ping | grep PONG; else redis-cli ping | grep PONG; fi"]
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$$(cat \"$${REDIS_PASSWORD_FILE}\")\" redis-cli ping | grep PONG"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -109,14 +104,18 @@ services:
     security_opt:
       - no-new-privileges:true
     restart: unless-stopped
-    command: ["start", "--http-port=8080", "--import-realm"]
+    entrypoint:
+      - /bin/sh
+      - -ec
+    command:
+      - export KC_BOOTSTRAP_ADMIN_PASSWORD="$$(cat "$${KC_BOOTSTRAP_ADMIN_PASSWORD_FILE}")"; export KC_DB_PASSWORD="$$(cat "$${KC_DB_PASSWORD_FILE}")"; exec /opt/keycloak/bin/kc.sh start --http-port=8080 --import-realm
     environment:
       KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN:-admin}
-      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-}
+      KC_BOOTSTRAP_ADMIN_PASSWORD_FILE: /run/secrets/keycloak_admin_password
       KC_DB: postgres
       KC_DB_URL: jdbc:postgresql://postgres:5432/${KEYCLOAK_DB_NAME:-keycloak}
       KC_DB_USERNAME: ${KEYCLOAK_DB_USER:-keycloak}
-      KC_DB_PASSWORD: ${KEYCLOAK_DB_PASSWORD:-}
+      KC_DB_PASSWORD_FILE: /run/secrets/keycloak_db_password
       KC_HEALTH_ENABLED: "true"
       KC_METRICS_ENABLED: "true"
       KC_HTTP_ENABLED: "true"
@@ -156,10 +155,10 @@ services:
     entrypoint:
       - /bin/sh
       - -ec
-      - exec nats-server -c /etc/nats/nats-server.conf --user "$$NATS_USER" --pass "$$NATS_PASSWORD"
+      - NATS_PASSWORD="$$(cat "$$NATS_PASSWORD_FILE")"; exec nats-server -c /etc/nats/nats-server.conf --user "$$NATS_USER" --pass "$$NATS_PASSWORD"
     environment:
       NATS_USER: ${NATS_USER:-enterprise}
-      NATS_PASSWORD: ${NATS_PASSWORD:-}
+      NATS_PASSWORD_FILE: /run/secrets/nats_password
     volumes:
       - enterprise_nats_data:/data
       - ./nats/nats-server.conf:/etc/nats/nats-server.conf:ro
@@ -180,10 +179,14 @@ services:
     security_opt:
       - no-new-privileges:true
     restart: unless-stopped
-    command: server /data --address ":9000" --console-address ":9001"
+    entrypoint:
+      - /bin/sh
+      - -ec
+    command:
+      - export MINIO_ROOT_PASSWORD="$$(cat "$${MINIO_ROOT_PASSWORD_FILE}")"; exec minio server /data --address ":9000" --console-address ":9001"
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-stexor_minio}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-}
+      MINIO_ROOT_PASSWORD_FILE: /run/secrets/minio_root_password
       MINIO_BROWSER_REDIRECT_URL: ${MINIO_BROWSER_REDIRECT_URL:-https://minio.localhost.com}
       MINIO_SERVER_URL: ${MINIO_SERVER_URL:-http://localhost:9000}
     volumes:
@@ -214,11 +217,9 @@ services:
       NEXT_TELEMETRY_DISABLED: "1"
       PORT: 3000
       SERVICE_NAME: enterprise-backend
-      SESSION_SECRET: ${SESSION_SECRET:-}
-      SESSION_SIGNING_KEYS: ${SESSION_SIGNING_KEYS:-}
-      SESSION_SECRET_PREVIOUS: ${SESSION_SECRET_PREVIOUS:-}
-      SECRET_HASH_KEYS: ${SECRET_HASH_KEYS:-}
-      SECRET_HASH_PREVIOUS_KEYS: ${SECRET_HASH_PREVIOUS_KEYS:-}
+      SESSION_SECRET_FILE: /run/secrets/session_secret
+      SESSION_SIGNING_KEYS_FILE: /run/secrets/session_signing_keys
+      SECRET_HASH_KEYS_FILE: /run/secrets/hash_pepper_keys
       SESSION_COOKIE_NAME: ${SESSION_COOKIE_NAME:-stexor_session}
       SESSION_COOKIE_MAX_AGE_SECONDS: ${SESSION_COOKIE_MAX_AGE_SECONDS:-315360000}
       SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-true}
@@ -226,21 +227,20 @@ services:
       API_DOCS_ENABLED: ${API_DOCS_ENABLED:-false}
       APP_DB_NAME: ${APP_DB_NAME:-stexor_app}
       APP_DB_USER: ${APP_DB_USER:-stexor_app_user}
-      APP_DB_PASSWORD: ${APP_DB_PASSWORD:-}
-      DATABASE_URL: postgresql://${APP_DB_USER:-stexor_app_user}:${APP_DB_PASSWORD:-}@postgres:5432/${APP_DB_NAME:-stexor_app}
+      DATABASE_URL_FILE: /run/secrets/database_url
       REDIS_HOST: redis
       REDIS_PORT: 6379
-      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      REDIS_PASSWORD_FILE: /run/secrets/redis_password
       REDIS_DB: ${REDIS_DB:-0}
       REDIS_KEY_PREFIX: ${REDIS_KEY_PREFIX:-stexor}
       KEYCLOAK_URL: http://keycloak:8080
       KEYCLOAK_REALM: ${KEYCLOAK_REALM:-enterprise}
-      NATS_URL: nats://${NATS_USER:-enterprise}:${NATS_PASSWORD:-}@nats:4222
+      NATS_URL_FILE: /run/secrets/nats_url
       MINIO_ENDPOINT: minio
       MINIO_PORT: 9000
       MINIO_USE_SSL: "false"
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-stexor_minio}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-}
+      MINIO_ROOT_PASSWORD_FILE: /run/secrets/minio_root_password
       MINIO_DEFAULT_BUCKET: ${MINIO_DEFAULT_BUCKET:-stexor-local}
       API_PUBLIC_URL: ${API_PUBLIC_URL:-https://api.localhost.com}
       ACCOUNT_PUBLIC_URL: ${ACCOUNT_PUBLIC_URL:-https://account.localhost.com}
@@ -252,13 +252,10 @@ services:
       BOT_PROTECTION_REQUIRED: ${BOT_PROTECTION_REQUIRED:-}
       BOT_PROTECTION_MIN_SCORE: ${BOT_PROTECTION_MIN_SCORE:-0.5}
       BOT_PROTECTION_EXPECTED_HOSTNAMES: ${BOT_PROTECTION_EXPECTED_HOSTNAMES:-account.localhost.com,ui.localhost.com}
-      GOOGLE_RECAPTCHA_SECRET_KEY: ${GOOGLE_RECAPTCHA_SECRET_KEY:-}
-      GOOGLE_RECAPTCHA_SECRET_KEY_FILE: ${GOOGLE_RECAPTCHA_SECRET_KEY_FILE:-}
-      CLOUDFLARE_TURNSTILE_SECRET_KEY: ${CLOUDFLARE_TURNSTILE_SECRET_KEY:-}
-      CLOUDFLARE_TURNSTILE_SECRET_KEY_FILE: ${CLOUDFLARE_TURNSTILE_SECRET_KEY_FILE:-}
+      GOOGLE_RECAPTCHA_SECRET_KEY_FILE: /run/secrets/google_recaptcha_secret_key
+      CLOUDFLARE_TURNSTILE_SECRET_KEY_FILE: /run/secrets/cloudflare_turnstile_secret_key
       GOOGLE_OAUTH_CLIENT_ID: ${GOOGLE_OAUTH_CLIENT_ID:-}
-      GOOGLE_OAUTH_CLIENT_SECRET: ${GOOGLE_OAUTH_CLIENT_SECRET:-}
-      GOOGLE_OAUTH_CLIENT_SECRET_FILE: ${GOOGLE_OAUTH_CLIENT_SECRET_FILE:-}
+      GOOGLE_OAUTH_CLIENT_SECRET_FILE: /run/secrets/google_oauth_client_secret
       GOOGLE_OAUTH_REDIRECT_URI: ${GOOGLE_OAUTH_REDIRECT_URI:-https://api.localhost.com/auth/google/callback}
       GOOGLE_OAUTH_SCOPES: ${GOOGLE_OAUTH_SCOPES:-openid email profile https://www.googleapis.com/auth/user.birthday.read}
       RATE_LIMIT_TTL_SECONDS: ${RATE_LIMIT_TTL_SECONDS:-60}
@@ -278,7 +275,7 @@ services:
       SMTP_PORT: ${SMTP_PORT:-465}
       SMTP_SECURE: ${SMTP_SECURE:-true}
       SMTP_USER: ${SMTP_USER:?Set SMTP_USER}
-      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_PASSWORD_FILE: /run/secrets/smtp_password
       MAILER_CREDENTIALS_MANAGED_EXTERNALLY: ${MAILER_CREDENTIALS_MANAGED_EXTERNALLY:-true}
     depends_on:
       postgres:
@@ -371,13 +368,14 @@ services:
       NODE_ENV: production
       PORT: 3000
       WORKER_NAME: enterprise-worker-notifications
-      DATABASE_URL: postgresql://${APP_DB_USER:-stexor_app_user}:${APP_DB_PASSWORD:-}@postgres:5432/${APP_DB_NAME:-stexor_app}
+      ALERTMANAGER_WEBHOOK_TOKEN_FILE: /run/secrets/alertmanager_webhook_token
+      DATABASE_URL_FILE: /run/secrets/database_url
       REDIS_HOST: redis
       REDIS_PORT: 6379
-      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      REDIS_PASSWORD_FILE: /run/secrets/redis_password
       REDIS_DB: ${REDIS_DB:-0}
       REDIS_KEY_PREFIX: ${REDIS_KEY_PREFIX:-stexor}
-      NATS_URL: nats://${NATS_USER:-enterprise}:${NATS_PASSWORD:-}@nats:4222
+      NATS_URL_FILE: /run/secrets/nats_url
       ALERT_FORWARD_WEBHOOK_URL: ${ALERT_FORWARD_WEBHOOK_URL:-}
       STRUCTURED_LOGGING: ${STRUCTURED_LOGGING:-true}
       AUDIT_LOG_ENABLED: ${AUDIT_LOG_ENABLED:-true}
@@ -415,13 +413,13 @@ services:
       NODE_ENV: production
       PORT: 3000
       WORKER_NAME: enterprise-worker-jobs
-      DATABASE_URL: postgresql://${APP_DB_USER:-stexor_app_user}:${APP_DB_PASSWORD:-}@postgres:5432/${APP_DB_NAME:-stexor_app}
+      DATABASE_URL_FILE: /run/secrets/database_url
       REDIS_HOST: redis
       REDIS_PORT: 6379
-      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      REDIS_PASSWORD_FILE: /run/secrets/redis_password
       REDIS_DB: ${REDIS_DB:-0}
       REDIS_KEY_PREFIX: ${REDIS_KEY_PREFIX:-stexor}
-      NATS_URL: nats://${NATS_USER:-enterprise}:${NATS_PASSWORD:-}@nats:4222
+      NATS_URL_FILE: /run/secrets/nats_url
       MINIO_ENDPOINT: minio
       MINIO_PORT: 9000
       MINIO_USE_SSL: "false"
@@ -530,7 +528,7 @@ services:
     restart: unless-stopped
     environment:
       GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
-      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-}
+      GF_SECURITY_ADMIN_PASSWORD__FILE: /run/secrets/grafana_admin_password
       GF_USERS_ALLOW_SIGN_UP: "false"
       GF_SERVER_ROOT_URL: ${GRAFANA_ROOT_URL:-https://grafana.localhost.com}
       GF_ANALYTICS_REPORTING_ENABLED: "false"

@@ -151,8 +151,7 @@ Retention refuses to delete dump artifacts unless `stexor_platform.backup_restor
 
 ```sh
 export RESTIC_REPOSITORY="s3:s3.amazonaws.com/bucket/stexor"
-export RESTIC_PASSWORD="use-a-real-secret-manager"
-sh ./scripts/offsite-backup-restic.sh
+sh ./scripts/offsite-backup-restic.sh --passwordFile ./secrets/restic_password.txt
 ```
 
 ## HA and managed secrets
@@ -167,8 +166,8 @@ node ./scripts/stexor-ops.mjs dr-readiness-check
 
 Production secret values must come from the approved secret manager or KMS sync
 into external Docker secrets. The app accepts `*_FILE` variables for
-`SESSION_SECRET`, `SECRET_HASH_KEYS`, `BACKUP_SIGNING_KEYS`, database, Redis,
-NATS, SMTP and service credentials.
+session signing, hash pepper, backup signing, database, Redis, NATS, SMTP and
+service credentials.
 
 ## Production preflight
 

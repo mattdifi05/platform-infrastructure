@@ -24,7 +24,7 @@ Roles are stored in `stexor_account.account_roles` and must not be trusted from 
 - Local development and single-node Docker production can use the proprietary `stexor-secret-manager`.
 - The manager keeps the canonical store encrypted under `secrets/stexor-secret-manager-store.json`, writes an audit log and materializes Docker secret files under `secrets/*.txt`.
 - Local secret files and manager runtime files are ignored by Git and mounted as `/run/secrets/*`.
-- Runtime code must prefer `*_FILE` values over raw secret environment variables.
+- Runtime code must consume secret material only through `*_FILE` values or approved managed secret references.
 - `SESSION_SECRET` must be random, long and rotated per environment.
 - SMTP, DB, MinIO, NATS, Redis, Grafana and Alertmanager webhook secrets must be managed through `stexor-secret-manager` or a stronger external KMS before serious VPS usage.
 

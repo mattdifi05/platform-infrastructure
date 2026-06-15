@@ -258,8 +258,8 @@ function parseEnv(filePath) {
   if (!fs.existsSync(filePath)) {
     return env;
   }
-  for (const rawLine of fs.readFileSync(filePath, "utf8").split(/\r?\n/)) {
-    const line = rawLine.trim();
+  for (const sourceLine of fs.readFileSync(filePath, "utf8").split(/\r?\n/)) {
+    const line = sourceLine.trim();
     if (!line || line.startsWith("#") || !line.includes("=")) {
       continue;
     }
@@ -283,15 +283,7 @@ function hasManagedSecret(env, key) {
   return Boolean(env[`${key}_FILE`] || env[`${key}_SECRET_REF`]);
 }
 
-function requireManagedOrRawSecret(env, key, options = {}) {
-  const raw = env[key];
-  if (isUsableSecret(raw)) {
-    const minLength = options.minLength ?? 0;
-    if (minLength > 0 && raw.length < minLength) {
-      fail(`${key} must be at least ${minLength} characters.`);
-    }
-    return;
-  }
+function requireManagedSecret(env, key) {
   const fileRef = env[`${key}_FILE`];
   const managerRef = env[`${key}_SECRET_REF`];
   if (fileRef && /^\/run\/secrets\/[A-Za-z0-9_.-]+$/.test(fileRef)) {
@@ -300,7 +292,7 @@ function requireManagedOrRawSecret(env, key, options = {}) {
   if (managerRef && env.SECRET_MANAGER_PROVIDER) {
     return;
   }
-  fail(`${key} must be provided as a strong raw value, ${key}_FILE=/run/secrets/<name>, or ${key}_SECRET_REF with SECRET_MANAGER_PROVIDER.`);
+  fail(`${key} must be provided through ${key}_FILE=/run/secrets/<name> or ${key}_SECRET_REF with SECRET_MANAGER_PROVIDER.`);
 }
 
 function latestFileByMtime(directory, predicate) {
@@ -372,9 +364,7 @@ function timingSafeEqualBuffer(a, b) {
 
 function backupSigningKeys() {
   const filePath = path.resolve(argv.backupSigningKeysFile ?? process.env.BACKUP_SIGNING_KEYS_FILE ?? path.join(infraRoot, "secrets", "backup_signing_keys.txt"));
-  const value = argv.backupSigningKeys
-    ?? process.env.BACKUP_SIGNING_KEYS
-    ?? readSecretFileIfExists(filePath);
+  const value = readSecretFileIfExists(filePath);
   const keys = parseVersionedSecretKeys(value);
   if (!keys.length) {
     fail(`Backup signing keys are required. Run local-secret-manager or set BACKUP_SIGNING_KEYS_FILE. Expected local file: ${filePath}`);
@@ -487,17 +477,16 @@ async function signExistingPostgresBackups() {
 }
 
 function backendSessionSigningKey() {
-  const raw = dockerExecOutput("enterprise-backend", [
+  const keyText = dockerExecOutput("enterprise-backend", [
     "sh",
     "-c",
     [
       'if [ -s /run/secrets/session_signing_keys ]; then cat /run/secrets/session_signing_keys;',
-      'elif [ -n "$SESSION_SIGNING_KEYS" ]; then printf "%s" "$SESSION_SIGNING_KEYS";',
       'elif [ -s /run/secrets/session_secret ]; then printf "current=%s" "$(cat /run/secrets/session_secret)";',
-      'else printf "current=%s" "$SESSION_SECRET"; fi',
+      'fi',
     ].join(" "),
   ]).trim();
-  const keys = parseVersionedSecretKeys(raw);
+  const keys = parseVersionedSecretKeys(keyText);
   const activeKey = keys[0];
   if (!activeKey) {
     fail("Cannot read backend session signing key for integration signing.");
@@ -509,7 +498,7 @@ function backendSecretHash(value) {
   const keys = parseVersionedSecretKeys(dockerExecOutput("enterprise-backend", [
     "sh",
     "-c",
-    'if [ -s /run/secrets/hash_pepper_keys ]; then cat /run/secrets/hash_pepper_keys; else printf "%s" "$SECRET_HASH_KEYS"; fi',
+    'if [ -s /run/secrets/hash_pepper_keys ]; then cat /run/secrets/hash_pepper_keys; fi',
   ]).trim());
   const activeKey = keys[0];
   if (activeKey) {
@@ -518,7 +507,7 @@ function backendSecretHash(value) {
   const sessionSecret = dockerExecOutput("enterprise-backend", [
     "sh",
     "-c",
-    'if [ -s /run/secrets/session_secret ]; then cat /run/secrets/session_secret; else printf "%s" "$SESSION_SECRET"; fi',
+    'if [ -s /run/secrets/session_secret ]; then cat /run/secrets/session_secret; fi',
   ]).trim();
   return hmacHex(sessionSecret, value);
 }
@@ -541,8 +530,7 @@ function newSignedCookie(signingKey, accountId, sessionId) {
 
 function redisCommand(args, options = {}) {
   const script = [
-    'if [ -s /run/secrets/redis_password ]; then REDISCLI_AUTH=$(cat /run/secrets/redis_password); export REDISCLI_AUTH;',
-    'elif [ -n "$REDIS_PASSWORD" ]; then REDISCLI_AUTH="$REDIS_PASSWORD"; export REDISCLI_AUTH; fi;',
+    'if [ -s /run/secrets/redis_password ]; then REDISCLI_AUTH=$(cat /run/secrets/redis_password); export REDISCLI_AUTH; fi;',
     'redis-cli "$@"',
   ].join(" ");
   return dockerExec("enterprise-redis", ["sh", "-c", script, "sh", ...args], options);
@@ -550,8 +538,7 @@ function redisCommand(args, options = {}) {
 
 function redisSetValue(key, value, ttlMs) {
   const script = [
-    'if [ -s /run/secrets/redis_password ]; then REDISCLI_AUTH=$(cat /run/secrets/redis_password); export REDISCLI_AUTH;',
-    'elif [ -n "$REDIS_PASSWORD" ]; then REDISCLI_AUTH="$REDIS_PASSWORD"; export REDISCLI_AUTH; fi;',
+    'if [ -s /run/secrets/redis_password ]; then REDISCLI_AUTH=$(cat /run/secrets/redis_password); export REDISCLI_AUTH; fi;',
     'redis-cli -x set "$1" >/dev/null && redis-cli pexpire "$1" "$2" >/dev/null',
   ].join(" ");
   dockerExec("enterprise-redis", ["sh", "-c", script, "sh", key, String(ttlMs)], { input: value });
@@ -1018,7 +1005,7 @@ async function runtimeHealthChecks() {
   }
 
   log("==> Redis runtime integration");
-  const redisPing = dockerExecOutput("enterprise-redis", ["sh", "-c", 'if [ -s /run/secrets/redis_password ]; then REDISCLI_AUTH=$(cat /run/secrets/redis_password); export REDISCLI_AUTH; elif [ -n "$REDIS_PASSWORD" ]; then REDISCLI_AUTH="$REDIS_PASSWORD"; export REDISCLI_AUTH; fi; redis-cli ping']);
+  const redisPing = dockerExecOutput("enterprise-redis", ["sh", "-c", 'if [ -s /run/secrets/redis_password ]; then REDISCLI_AUTH=$(cat /run/secrets/redis_password); export REDISCLI_AUTH; fi; redis-cli ping']);
   if (!/PONG/.test(redisPing)) {
     fail("Redis ping failed");
   }
@@ -1231,27 +1218,26 @@ async function initLocalSecrets() {
     const value = readSecretFileIfExists(path.join(secretsDir, `${name}.txt`));
     return isUsableSecret(value) ? value : null;
   };
-  const secretValue = (key, name, bytes = 36) => existingSecret(name) ?? (isUsableSecret(env[key]) ? env[key] : randomSecret(bytes));
-  const versionedSecretValue = (key, name, fallbackId) => {
+  const secretValue = (name, bytes = 36) => existingSecret(name) ?? randomSecret(bytes);
+  const versionedSecretValue = (name, fallbackId) => {
     const existing = existingSecret(name);
     if (existing) return existing;
-    if (isUsableSecret(env[key])) return env[key];
     return `${fallbackId}=${randomSecret(48)}`;
   };
-  const postgresSuper = secretValue("POSTGRES_SUPERUSER_PASSWORD", "postgres_superuser_password");
-  const appDbPassword = secretValue("APP_DB_PASSWORD", "app_db_password");
-  const keycloakDbPassword = secretValue("KEYCLOAK_DB_PASSWORD", "keycloak_db_password");
-  const redisPassword = secretValue("REDIS_PASSWORD", "redis_password");
-  const keycloakAdminPassword = secretValue("KEYCLOAK_ADMIN_PASSWORD", "keycloak_admin_password");
-  const natsPassword = secretValue("NATS_PASSWORD", "nats_password");
-  const minioRootPassword = secretValue("MINIO_ROOT_PASSWORD", "minio_root_password");
-  const grafanaAdminPassword = secretValue("GRAFANA_ADMIN_PASSWORD", "grafana_admin_password");
-  const sessionSecret = secretValue("SESSION_SECRET", "session_secret", 48);
-  const sessionSigningKeys = versionedSecretValue("SESSION_SIGNING_KEYS", "session_signing_keys", secretId("s"));
-  const hashPepperKeys = versionedSecretValue("SECRET_HASH_KEYS", "hash_pepper_keys", "local");
-  const backupSigningKeys = versionedSecretValue("BACKUP_SIGNING_KEYS", "backup_signing_keys", secretId("b"));
-  const smtpPassword = secretValue("SMTP_PASSWORD", "smtp_password");
-  const googleOAuthClientSecret = secretValue("GOOGLE_OAUTH_CLIENT_SECRET", "google_oauth_client_secret");
+  const postgresSuper = secretValue("postgres_superuser_password");
+  const appDbPassword = secretValue("app_db_password");
+  const keycloakDbPassword = secretValue("keycloak_db_password");
+  const redisPassword = secretValue("redis_password");
+  const keycloakAdminPassword = secretValue("keycloak_admin_password");
+  const natsPassword = secretValue("nats_password");
+  const minioRootPassword = secretValue("minio_root_password");
+  const grafanaAdminPassword = secretValue("grafana_admin_password");
+  const sessionSecret = secretValue("session_secret", 48);
+  const sessionSigningKeys = versionedSecretValue("session_signing_keys", secretId("s"));
+  const hashPepperKeys = versionedSecretValue("hash_pepper_keys", "local");
+  const backupSigningKeys = versionedSecretValue("backup_signing_keys", secretId("b"));
+  const smtpPassword = secretValue("smtp_password");
+  const googleOAuthClientSecret = secretValue("google_oauth_client_secret");
   const appDbUser = env.APP_DB_USER || "stexor_app_user";
   const appDbName = env.APP_DB_NAME || "stexor_app";
   const natsUser = env.NATS_USER || "stexor";
@@ -1308,8 +1294,6 @@ async function initLocalSecrets() {
       "SESSION_SECRET",
       "SMTP_PASSWORD",
       "GOOGLE_OAUTH_CLIENT_SECRET",
-      "GOOGLE_CLIENT_SECRET",
-      "RESTIC_PASSWORD",
     ]);
     const next = fs.readFileSync(envFile, "utf8").split(/\r?\n/).map((line) => {
       const key = line.split("=", 1)[0];
@@ -1463,7 +1447,7 @@ async function runLoadProbe({ label, url, requests, concurrency, maxP95Ms }) {
 async function offsiteBackupRestic() {
   let backupFile = argv.backupFile;
   const repository = argv.repository ?? process.env.RESTIC_REPOSITORY;
-  const password = argv.password ?? process.env.RESTIC_PASSWORD;
+  const passwordFile = path.resolve(argv.passwordFile ?? process.env.RESTIC_PASSWORD_FILE ?? path.join(infraRoot, "secrets", "restic_password.txt"));
   const tag = argv.tag ?? "stexor-postgres";
   if (!backupFile) {
     const backupRoot = path.join(infraRoot, "backups", "postgres");
@@ -1480,11 +1464,13 @@ async function offsiteBackupRestic() {
     fail(`Backup file not found: ${backupFile}`);
   }
   verifyBackupArtifact(backupFile);
-  if (!repository || !password) {
-    fail("Set RESTIC_REPOSITORY and RESTIC_PASSWORD before running off-site backup.");
+  if (!repository || !fs.existsSync(passwordFile)) {
+    fail("Set RESTIC_REPOSITORY and RESTIC_PASSWORD_FILE before running off-site backup.");
   }
   const backupDir = path.dirname(path.resolve(backupFile));
   const backupName = path.basename(backupFile);
+  const resticPasswordDir = path.dirname(passwordFile);
+  const resticPasswordName = path.basename(passwordFile);
   const sidecars = [`${backupName}.sha256`, `${backupName}.sig.json`].filter((file) => fs.existsSync(path.join(backupDir, file)));
   run("docker", [
     "run",
@@ -1492,9 +1478,11 @@ async function offsiteBackupRestic() {
     "-e",
     `RESTIC_REPOSITORY=${repository}`,
     "-e",
-    `RESTIC_PASSWORD=${password}`,
+    `RESTIC_PASSWORD_FILE=/restic-password/${resticPasswordName}`,
     "-v",
     `${backupDir}:/backup:ro`,
+    "-v",
+    `${resticPasswordDir}:/restic-password:ro`,
     "restic/restic:0.18.0",
     "backup",
     `/backup/${backupName}`,
@@ -1553,7 +1541,7 @@ async function productionPreflight() {
     ["GRAFANA_ADMIN_PASSWORD", 24],
     ["SMTP_PASSWORD", 16],
   ]) {
-    requireManagedOrRawSecret(env, key, { minLength });
+    requireManagedSecret(env, key);
   }
 
   for (const imageKey of ["BACKEND_IMAGE", "WEB_IMAGE", "WORKER_NOTIFICATIONS_IMAGE", "WORKER_JOBS_IMAGE"]) {
@@ -2180,6 +2168,7 @@ async function staticSecurityCheck() {
   const webAppNotFound = readText(path.join(sourceRoot, "apps", "web", "src", "app", "not-found.tsx"));
   const webGlobalError = readText(path.join(sourceRoot, "apps", "web", "src", "app", "global-error.tsx"));
   const webRememberModel = readText(path.join(sourceRoot, "apps", "web", "src", "components", "account-center", "model.ts"));
+  const e2eStackHelper = readText(path.join(sourceRoot, "e2e", "helpers", "stack.ts"));
   const webSource = readSourceTreeText(path.join(sourceRoot, "apps", "web", "src"));
   const uiSource = readSourceTreeText(path.join(sourceRoot, "packages", "ui", "src"));
   const browserUiSource = `${webSource}\n${uiSource}`;
@@ -2210,6 +2199,13 @@ async function staticSecurityCheck() {
   assertMatch(composeSecrets, /CLOUDFLARE_TURNSTILE_SECRET_KEY_FILE:\s+\/run\/secrets\/cloudflare_turnstile_secret_key/, "Local secret overlay must consume Cloudflare Turnstile secret through a Docker secret file.");
   assertMatch(composeSecrets, /GOOGLE_OAUTH_CLIENT_SECRET_FILE:\s+\/run\/secrets\/google_oauth_client_secret/, "Local secret overlay must consume Google OAuth client secret through a Docker secret file.");
   assertMatch(composeSecrets, /ALERTMANAGER_WEBHOOK_TOKEN_FILE:\s+\/run\/secrets\/alertmanager_webhook_token/, "Local secret overlay must consume the Alertmanager webhook token through a Docker secret file.");
+  const secretInterpolationPattern = /\b(?:POSTGRES_PASSWORD|APP_DB_PASSWORD|KEYCLOAK_DB_PASSWORD|REDIS_PASSWORD|KC_BOOTSTRAP_ADMIN_PASSWORD|KC_DB_PASSWORD|NATS_PASSWORD|MINIO_ROOT_PASSWORD|SESSION_SECRET|SESSION_SIGNING_KEYS|SECRET_HASH_KEYS|DATABASE_URL|NATS_URL|SMTP_PASSWORD|GF_SECURITY_ADMIN_PASSWORD|GOOGLE_RECAPTCHA_SECRET_KEY|CLOUDFLARE_TURNSTILE_SECRET_KEY|GOOGLE_OAUTH_CLIENT_SECRET)\s*:\s*\$\{/;
+  for (const [label, text] of [["compose.yaml", compose], ["compose.prod.yaml", composeProd], ["compose.secrets.yaml", composeSecrets]]) {
+    assertNoMatch(text, secretInterpolationPattern, `${label} must not interpolate secret values from process environment.`);
+  }
+  assertNoMatch(observabilitySource, /env\.NODE_ENV[\s\S]*env\[name\]/, "Shared secret reader must not fall back to process environment secret values.");
+  assertNoMatch(e2eStackHelper, /\$(?:SESSION_SECRET|SECRET_HASH_KEYS|REDIS_PASSWORD)\b/, "E2E stack helpers must read runtime secrets through Docker secret files only.");
+  assertNoMatch(secretManagerScript, /value(?:E|[-]e)nv/, "Stexor Secret Manager imports must not accept secret values from process environment variables.");
   assertMatch(secretManagerScript, /manager:\s+"stexor-secret-manager"/, "Infrastructure must include the proprietary Stexor Secret Manager store format.");
   assertMatch(secretManagerScript, /AES-256-GCM/, "Stexor Secret Manager must encrypt stored secrets with authenticated encryption.");
   assertMatch(secretManagerScript, /function audit\(/, "Stexor Secret Manager must append an audit trail for secret operations.");

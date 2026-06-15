@@ -11,23 +11,23 @@ const command = process.argv[2] ?? "help";
 const argv = parseArgs(process.argv.slice(3));
 
 const requiredSecrets = [
-  { name: "postgres_superuser_password", env: "POSTGRES_SUPERUSER_PASSWORD", kind: "raw", bytes: 36, rotationDays: 90, manualRotation: true },
-  { name: "app_db_password", env: "APP_DB_PASSWORD", kind: "raw", bytes: 36, rotationDays: 90, manualRotation: true },
-  { name: "keycloak_db_password", env: "KEYCLOAK_DB_PASSWORD", kind: "raw", bytes: 36, rotationDays: 90, manualRotation: true },
-  { name: "redis_password", env: "REDIS_PASSWORD", kind: "raw", bytes: 36, rotationDays: 90 },
-  { name: "keycloak_admin_password", env: "KEYCLOAK_ADMIN_PASSWORD", kind: "raw", bytes: 36, rotationDays: 90 },
-  { name: "nats_password", env: "NATS_PASSWORD", kind: "raw", bytes: 36, rotationDays: 90, manualRotation: true },
-  { name: "minio_root_password", env: "MINIO_ROOT_PASSWORD", kind: "raw", bytes: 36, rotationDays: 90 },
-  { name: "grafana_admin_password", env: "GRAFANA_ADMIN_PASSWORD", kind: "raw", bytes: 36, rotationDays: 90 },
-  { name: "session_secret", env: "SESSION_SECRET", kind: "raw", bytes: 48, rotationDays: 90 },
-  { name: "session_signing_keys", env: "SESSION_SIGNING_KEYS", kind: "keyring", bytes: 48, keyPrefix: "s", rotationDays: 60 },
-  { name: "hash_pepper_keys", env: "SECRET_HASH_KEYS", kind: "keyring", bytes: 48, keyPrefix: "h", rotationDays: 90 },
-  { name: "backup_signing_keys", env: "BACKUP_SIGNING_KEYS", kind: "keyring", bytes: 48, keyPrefix: "b", rotationDays: 90 },
-  { name: "alertmanager_webhook_token", env: "ALERTMANAGER_WEBHOOK_TOKEN", kind: "raw", bytes: 48, rotationDays: 90 },
-  { name: "smtp_password", env: "SMTP_PASSWORD", kind: "raw", bytes: 36, minLength: 8, rotationDays: 90 },
-  { name: "google_recaptcha_secret_key", env: "GOOGLE_RECAPTCHA_SECRET_KEY", kind: "raw", bytes: 36, minLength: 8, rotationDays: 90, manualRotation: true },
-  { name: "cloudflare_turnstile_secret_key", env: "CLOUDFLARE_TURNSTILE_SECRET_KEY", kind: "raw", bytes: 36, minLength: 8, rotationDays: 90, manualRotation: true },
-  { name: "google_oauth_client_secret", env: "GOOGLE_OAUTH_CLIENT_SECRET", kind: "raw", bytes: 36, minLength: 8, rotationDays: 90, manualRotation: true },
+  { name: "postgres_superuser_password", kind: "opaque", bytes: 36, rotationDays: 90, manualRotation: true },
+  { name: "app_db_password", kind: "opaque", bytes: 36, rotationDays: 90, manualRotation: true },
+  { name: "keycloak_db_password", kind: "opaque", bytes: 36, rotationDays: 90, manualRotation: true },
+  { name: "redis_password", kind: "opaque", bytes: 36, rotationDays: 90 },
+  { name: "keycloak_admin_password", kind: "opaque", bytes: 36, rotationDays: 90 },
+  { name: "nats_password", kind: "opaque", bytes: 36, rotationDays: 90, manualRotation: true },
+  { name: "minio_root_password", kind: "opaque", bytes: 36, rotationDays: 90 },
+  { name: "grafana_admin_password", kind: "opaque", bytes: 36, rotationDays: 90 },
+  { name: "session_secret", kind: "opaque", bytes: 48, rotationDays: 90 },
+  { name: "session_signing_keys", kind: "keyring", bytes: 48, keyPrefix: "s", rotationDays: 60 },
+  { name: "hash_pepper_keys", kind: "keyring", bytes: 48, keyPrefix: "h", rotationDays: 90 },
+  { name: "backup_signing_keys", kind: "keyring", bytes: 48, keyPrefix: "b", rotationDays: 90 },
+  { name: "alertmanager_webhook_token", kind: "opaque", bytes: 48, rotationDays: 90 },
+  { name: "smtp_password", kind: "opaque", bytes: 36, minLength: 8, rotationDays: 90 },
+  { name: "google_recaptcha_secret_key", kind: "opaque", bytes: 36, minLength: 8, rotationDays: 90, manualRotation: true },
+  { name: "cloudflare_turnstile_secret_key", kind: "opaque", bytes: 36, minLength: 8, rotationDays: 90, manualRotation: true },
+  { name: "google_oauth_client_secret", kind: "opaque", bytes: 36, minLength: 8, rotationDays: 90, manualRotation: true },
   { name: "database_url", kind: "derived", rotationDays: 90 },
   { name: "nats_url", kind: "derived", rotationDays: 90 },
 ];
@@ -126,8 +126,8 @@ function writePrivateFile(filePath, value) {
 function parseEnv(filePath) {
   const env = {};
   if (!fs.existsSync(filePath)) return env;
-  for (const rawLine of fs.readFileSync(filePath, "utf8").split(/\r?\n/)) {
-    const line = rawLine.trim();
+  for (const sourceLine of fs.readFileSync(filePath, "utf8").split(/\r?\n/)) {
+    const line = sourceLine.trim();
     if (!line || line.startsWith("#") || !line.includes("=")) continue;
     const index = line.indexOf("=");
     const key = line.slice(0, index).trim();
@@ -265,20 +265,18 @@ function audit(action, details = {}) {
   fs.appendFileSync(auditLogPath(), `${JSON.stringify(entry)}\n`, "utf8");
 }
 
-function materializedOrEnv(spec, env) {
+function materializedOrGenerated(spec) {
   const existing = readFileIfExists(secretFilePath(spec.name));
   if (spec.kind === "keyring") {
     if (isUsableSecret(existing) && parseVersionedSecretKeys(existing).every((key) => key.secret.length >= 48)) return existing;
-    if (spec.env && isUsableSecret(env[spec.env]) && parseVersionedSecretKeys(env[spec.env]).every((key) => key.secret.length >= 48)) return env[spec.env];
-  } else if (spec.kind === "raw") {
+  } else if (spec.kind === "opaque") {
     const minLength = spec.minLength ?? Math.min(spec.bytes, 24);
     if (isUsableSecret(existing) && existing.length >= minLength) return existing;
-    if (spec.env && isUsableSecret(env[spec.env]) && env[spec.env].length >= minLength) return env[spec.env];
   } else if (isUsableSecret(existing)) {
     return existing;
   }
   if (spec.kind === "keyring") return keyringValue(spec.keyPrefix, spec.bytes);
-  if (spec.kind === "raw") return randomSecret(spec.bytes);
+  if (spec.kind === "opaque") return randomSecret(spec.bytes);
   return null;
 }
 
@@ -290,7 +288,7 @@ function buildValues(existingValues = {}) {
       values[spec.name] = existingValues[spec.name];
       continue;
     }
-    values[spec.name] = materializedOrEnv(spec, env);
+    values[spec.name] = materializedOrGenerated(spec);
   }
   const appDbUser = env.APP_DB_USER || "stexor_app_user";
   const appDbName = env.APP_DB_NAME || "stexor_app";
@@ -311,7 +309,7 @@ function validateValues(values) {
       if (!keys.length || keys.some((key) => key.secret.length < 48)) {
         fail(`Invalid keyring secret: ${spec.name}`);
       }
-    } else if (spec.kind === "raw" && value.length < (spec.minLength ?? Math.min(spec.bytes, 24))) {
+    } else if (spec.kind === "opaque" && value.length < (spec.minLength ?? Math.min(spec.bytes, 24))) {
       fail(`Secret ${spec.name} is too short.`);
     }
   }
@@ -396,7 +394,7 @@ async function rotate() {
       keyringValue(spec.keyPrefix, spec.bytes),
       ...previous.map((key) => `${key.id}=${key.secret}`),
     ].slice(0, keep).join(",");
-  } else if (spec.kind === "raw") {
+  } else if (spec.kind === "opaque") {
     values[name] = randomSecret(spec.bytes);
   } else {
     fail(`${name} is derived and cannot be rotated directly.`);
@@ -421,26 +419,17 @@ async function rotate() {
 
 function readSecretInput(spec) {
   const valueFile = argv.valueFile ?? argv["value-file"] ?? argv.file;
-  const valueEnv = argv.valueEnv ?? argv["value-env"] ?? argv.env;
   if (valueFile) {
     const value = readFileIfExists(path.resolve(valueFile));
     if (!value) fail(`Secret value file is empty or unreadable: ${valueFile}`);
     return value;
-  }
-  if (valueEnv) {
-    const value = process.env[String(valueEnv)];
-    if (!value) fail(`Environment variable ${valueEnv} is empty.`);
-    return value.trim();
   }
   if (booleanFlag(argv.stdin)) {
     const value = fs.readFileSync(0, "utf8").trim();
     if (!value) fail("No secret value received on stdin.");
     return value;
   }
-  if (argv.value) {
-    return String(argv.value).trim();
-  }
-  fail(`Use set --name ${spec.name} with --value-file, --value-env, --stdin, or --value.`);
+  fail(`Use set --name ${spec.name} with --value-file or --stdin.`);
 }
 
 async function setSecret() {
@@ -477,8 +466,8 @@ function help() {
 Commands:
   init                 Create/update the encrypted store and materialize Docker secret files.
   materialize          Decrypt the store into secrets/*.txt for compose.secrets.yaml.
-  rotate --name <name> Rotate a keyring or safe raw secret, then materialize.
-  set --name <name>    Import or replace a secret from --value-file, --value-env, or --stdin.
+  rotate --name <name> Rotate a keyring or opaque secret, then materialize.
+  set --name <name>    Import or replace a secret from --value-file or --stdin.
   status               Print metadata and fingerprints without secret values.
   verify               Validate encrypted store and materialized Docker secret files.
 `);

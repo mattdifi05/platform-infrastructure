@@ -4,12 +4,12 @@ set -euo pipefail
 read_secret() {
   local name="$1"
   local file_var="${name}_FILE"
-  local value="${!name:-}"
   local file="${!file_var:-}"
-  if [[ -n "$file" ]]; then
-    value="$(<"$file")"
+  if [[ -z "$file" || ! -s "$file" ]]; then
+    printf '%s\n' "$file_var must point to a readable Docker secret file." >&2
+    exit 1
   fi
-  printf '%s' "$value"
+  cat "$file"
 }
 
 APP_DB_PASSWORD="$(read_secret APP_DB_PASSWORD)"

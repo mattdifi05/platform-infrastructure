@@ -118,8 +118,7 @@ Backup off-site Restic:
 
 ```sh
 export RESTIC_REPOSITORY="s3:s3.amazonaws.com/bucket/stexor"
-export RESTIC_PASSWORD="use-a-real-secret-manager"
-sh ./scripts/offsite-backup-restic.sh
+sh ./scripts/offsite-backup-restic.sh --passwordFile ./secrets/restic_password.txt
 ```
 
 Schedulazione Linux consigliata:
