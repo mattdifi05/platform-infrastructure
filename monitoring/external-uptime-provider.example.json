@@ -9,7 +9,7 @@
     {
       "targetName": "web-public-home",
       "monitorId": "replace-with-provider-monitor-id",
-      "url": "${UI_PUBLIC_URL:-https://stexor.example.com}/",
+      "url": "${UI_PUBLIC_URL:-https://platform.example.com}/",
       "intervalSeconds": 60,
       "regions": ["eu-west", "us-east"],
       "enabled": true,
@@ -21,7 +21,7 @@
     {
       "targetName": "api-public-health",
       "monitorId": "replace-with-provider-monitor-id",
-      "url": "${API_PUBLIC_URL:-https://api.stexor.example.com}/health",
+      "url": "${API_PUBLIC_URL:-https://api.platform.example.com}/health",
       "intervalSeconds": 60,
       "regions": ["eu-west", "us-east"],
       "enabled": true,
@@ -33,7 +33,7 @@
     {
       "targetName": "account-public-home",
       "monitorId": "replace-with-provider-monitor-id",
-      "url": "${ACCOUNT_PUBLIC_URL:-https://account.stexor.example.com}/",
+      "url": "${ACCOUNT_PUBLIC_URL:-https://account.platform.example.com}/",
       "intervalSeconds": 60,
       "regions": ["eu-west", "us-east"],
       "enabled": true,
@@ -45,7 +45,7 @@
     {
       "targetName": "keycloak-issuer-discovery",
       "monitorId": "replace-with-provider-monitor-id",
-      "url": "${KEYCLOAK_ISSUER:-https://auth.stexor.example.com/realms/stexor}/.well-known/openid-configuration",
+      "url": "${KEYCLOAK_ISSUER:-https://auth.platform.example.com/realms/platform}/.well-known/openid-configuration",
       "intervalSeconds": 60,
       "regions": ["eu-west", "us-east"],
       "enabled": true,
@@ -57,7 +57,7 @@
     {
       "targetName": "blocked-phpmyadmin-public",
       "monitorId": "replace-with-provider-monitor-id",
-      "url": "https://phpmyadmin.${PUBLIC_ROOT_DOMAIN:-stexor.example.com}/",
+      "url": "https://phpmyadmin.${PUBLIC_ROOT_DOMAIN:-platform.example.com}/",
       "intervalSeconds": 60,
       "regions": ["eu-west", "us-east"],
       "enabled": true,
@@ -69,7 +69,7 @@
     {
       "targetName": "blocked-prometheus-public",
       "monitorId": "replace-with-provider-monitor-id",
-      "url": "https://prometheus.${PUBLIC_ROOT_DOMAIN:-stexor.example.com}/",
+      "url": "https://prometheus.${PUBLIC_ROOT_DOMAIN:-platform.example.com}/",
       "intervalSeconds": 60,
       "regions": ["eu-west", "us-east"],
       "enabled": true,
@@ -81,7 +81,7 @@
     {
       "targetName": "blocked-alertmanager-public",
       "monitorId": "replace-with-provider-monitor-id",
-      "url": "https://alertmanager.${PUBLIC_ROOT_DOMAIN:-stexor.example.com}/",
+      "url": "https://alertmanager.${PUBLIC_ROOT_DOMAIN:-platform.example.com}/",
       "intervalSeconds": 60,
       "regions": ["eu-west", "us-east"],
       "enabled": true,

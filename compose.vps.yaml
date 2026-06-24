@@ -1,4 +1,4 @@
-# Single-VPS, prod-like overlay for Hostinger or another edge that terminates TLS.
+# Single-VPS, prod-like overlay for VPS or another edge that terminates TLS.
 # Public HTTPS stays at the provider/CDN; Traefik receives HTTP on port 80 and
 # forwards X-Forwarded-Proto=https to application containers.
 
@@ -182,9 +182,10 @@ configs:
             service: enterprise-keycloak
 
           php-projects:
-            rule: Host(`${PROJECTS_HOST:?Set PROJECTS_HOST}`) || Host(`${STREAM_HOST:?Set STREAM_HOST}`) || Host(`${ANNIVERSARY_HOST:?Set ANNIVERSARY_HOST}`) || Host(`${WORKCALENDAR_HOST:?Set WORKCALENDAR_HOST}`) || Host(`${FIREPORT_HOST:?Set FIREPORT_HOST}`)
+            rule: Host(`${PROJECTS_HOST:?Set PROJECTS_HOST}`) || HostRegexp(`${PROJECTS_WILDCARD_HOST_REGEXP:?Set PROJECTS_WILDCARD_HOST_REGEXP}`)
             entryPoints:
               - web
+            priority: 1
             middlewares:
               - enterprise-edge-forwarded-https@file
               - enterprise-security-headers@file

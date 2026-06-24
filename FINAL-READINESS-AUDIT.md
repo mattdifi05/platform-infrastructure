@@ -1,6 +1,6 @@
-# Stexor Final Readiness Audit
+# Platform Final Readiness Audit
 
-Scope: repository and local Docker Desktop evidence before Hostinger Ubuntu LTS VPS deployment.
+Scope: repository and local Docker Desktop evidence before VPS Ubuntu LTS VPS deployment.
 
 Status: repo/local readiness is strong, but production readiness is not fully proven until the real VPS, Cloudflare zone, remote backup store, external monitoring and alert recipients are exercised.
 
@@ -30,7 +30,7 @@ governance/github-actions-runtime.json
 governance/github-environments.json
 governance/production-go-no-go.json
 grafana/dashboards/enterprise-overview.json
-keycloak/templates/stexor-realm.example.json
+keycloak/templates/platform-realm.example.json
 prometheus/prometheus.yml
 prometheus/rules/enterprise-alerts.yml
 scripts/access-review.sh
@@ -57,28 +57,28 @@ scripts/secret-scan.sh
 scripts/security-smoke.sh
 scripts/sign-images.sh
 scripts/static-security-check.sh
-scripts/stexor-ops.mjs
-scripts/stexor-secret-manager.mjs
-scripts/stexor-secret-manager.sh
+scripts/infra-ops.mjs
+scripts/infra-secret-manager.mjs
+scripts/infra-secret-manager.sh
 scripts/supply-chain-hygiene.sh
 scripts/validate-local-secrets.sh
 secrets/README.md
 traefik/dynamic/middlewares.yml
 traefik/traefik.yml
-.env.hostinger.example
+.env.vps.example
 .env.staging.example
 .github/workflows/enterprise-infra.yml
 READINESS-REPORT.md
 VPS-PREDEPLOY-CHECKLIST.md
 cloudflare/*
 cloudflare/access-admin.example.json
-compose.hostinger-waf.yaml
-compose.hostinger.yaml
+compose.vps-waf.yaml
+compose.vps.yaml
 compose.staging.yaml
 compose.waf.yaml
 docker/ops.Dockerfile
-keycloak/import/stexor-realm.json
-loki/rules/stexor/waf-alerts.yml
+keycloak/import/platform-realm.json
+loki/rules/platform/waf-alerts.yml
 monitoring/external-uptime.example.json
 monitoring/external-uptime-provider.example.json
 phpmyadmin/config.user.inc.php
@@ -97,7 +97,7 @@ scripts/cloudflare-access-admin.sh
 scripts/cloudflare-from-zero.sh
 scripts/cloudflare-origin-lock-ufw.sh
 scripts/dast-zap-baseline.sh
-scripts/deploy-hostinger.sh
+scripts/deploy-vps.sh
 scripts/dr-evidence.sh
 scripts/evidence-bundle.sh
 scripts/external-uptime-check.sh
@@ -106,9 +106,9 @@ scripts/full-restore-drill.sh
 scripts/github-actions-config.sh
 scripts/github-branch-protection.sh
 scripts/github-environments.sh
-scripts/hostinger-go-live.sh
-scripts/hostinger-postdeploy.sh
-scripts/hostinger-preflight.sh
+scripts/vps-go-live.sh
+scripts/vps-postdeploy.sh
+scripts/vps-preflight.sh
 scripts/infra-health.sh
 scripts/install-mariadb-backup-cron.sh
 scripts/install-offsite-backup-cron.sh
@@ -124,7 +124,7 @@ scripts/restore-test-mariadb.sh
 scripts/restore-test-minio.sh
 scripts/restore-test-secret-manager-metadata.sh
 scripts/rollback-release.sh
-scripts/stexor-ops.sh
+scripts/infra-ops.sh
 scripts/vps-bootstrap-ubuntu.sh
 scripts/vps-hardening-ubuntu.sh
 scripts/waf-smoke.sh
@@ -150,7 +150,7 @@ docs/configuration-reference.md
 docs/local-docker.md
 docs/maintainer-playbook.md
 docs/operations-runbook.md
-docs/production-cloudflare-hostinger.md
+docs/production-cloudflare-vps.md
 docs/runtime-flows.md
 docs/security.md
 docs/testing-quality-gates.md
@@ -169,11 +169,11 @@ scripts/ui-publish-dry-run.mjs
 
 ## New Components
 
-- Dockerized ops runner: `docker/ops.Dockerfile` and `scripts/stexor-ops.sh`.
+- Dockerized ops runner: `docker/ops.Dockerfile` and `scripts/infra-ops.sh`.
 - Dockerized backup scheduler: `compose.backup-scheduler.yaml` and `scripts/backup-scheduler.sh`.
-- Hostinger/VPS overlays: `compose.hostinger.yaml`, `compose.hostinger-waf.yaml`, `.env.hostinger.example`.
+- VPS overlays: `compose.vps.yaml`, `compose.vps-waf.yaml`, `.env.vps.example`.
 - Staging overlay and environment: `compose.staging.yaml`, `.env.staging.example`.
-- OWASP CRS WAF overlay and local/Hostinger WAF rule files under `waf/`.
+- OWASP CRS WAF overlay and local/VPS WAF rule files under `waf/`.
 - Backup/restore commands for MariaDB, MinIO, Keycloak config and Secret Manager metadata.
 - Non-secret backup execution reports under ignored `reports/backups/`.
 - Off-site Restic restore drill with `--planOnly`, `--dryRun`, disposable artifact staging and reports under `reports/offsite-restore-drills/`.
@@ -187,7 +187,7 @@ scripts/ui-publish-dry-run.mjs
 - GitHub Actions runtime secret/variable verification command.
 - GitHub Actions run evidence command for successful remote workflow proof on the release commit.
 - Secret rotation evidence command with non-secret reports for Secret Manager store coverage, materialized files, audit trail, KMS age and per-secret freshness.
-- Healthcheck coverage command with rendered Compose reports for local WAF, Hostinger WAF and backup-scheduler stacks.
+- Healthcheck coverage command with rendered Compose reports for local WAF, VPS WAF and backup-scheduler stacks.
 - Pre go-live evidence pack with JSON/Markdown reports under `reports/go-live/`.
 - Production go/no-go evidence gate with JSON/Markdown reports under `reports/go-no-go/`.
 - Live production readiness checklist with JSON/Markdown reports under `reports/production-readiness/`.
@@ -204,8 +204,8 @@ scripts/ui-publish-dry-run.mjs
 - Provider-neutral external uptime manifest and `external-uptime-check` command.
 - External uptime dry-run reports with `mode=dry-run` and `providerEvidence.verified=false`, so manifest evidence can be archived without satisfying live provider gates.
 - Alert evidence command with synthetic Alertmanager delivery test and optional email/Discord/Telegram delivery requirements.
-- Hostinger post-deploy command with WAF smoke, `infra-health`, optional pre go-live evidence and optional final go/no-go enforcement.
-- Hostinger go-live orchestrator with plan-only default and JSON/Markdown reports under `reports/hostinger-go-live/`.
+- VPS post-deploy command with WAF smoke, `infra-health`, optional pre go-live evidence and optional final go/no-go enforcement.
+- VPS go-live orchestrator with plan-only default and JSON/Markdown reports under `reports/vps-go-live/`.
 - Non-secret evidence bundle command with manifest, SHA256 checksums and `.tar.gz` output under `.tmp/evidence-bundles/`.
 - Final readiness report and VPS pre-deploy checklist.
 
@@ -214,48 +214,48 @@ scripts/ui-publish-dry-run.mjs
 Latest local evidence includes:
 
 ```text
-node scripts/stexor-ops.mjs static-security-check
-docker run --rm -v D:/docker/stexor-platform-infrastructure:/infra:ro -w /infra alpine:3.22 sh -ec 'for file in scripts/*.sh; do sh -n "$file"; done'
-docker run --rm -v D:/docker/stexor-platform-infrastructure:/infra -w /infra alpine:3.22 sh ./scripts/vps-host-readiness.sh --diagnostic
-docker compose --env-file .env -p stexor_platform_local -f compose.yaml -f compose.build.yaml -f compose.secrets.yaml -f compose.waf.yaml config --quiet
-docker compose --env-file .env -p stexor_platform_local -f compose.yaml -f compose.build.yaml -f compose.secrets.yaml -f compose.waf.yaml -f compose.backup-scheduler.yaml --profile backup config --quiet
-docker compose --env-file .env.hostinger.example -p stexor_platform_vps_ci -f compose.yaml -f compose.build.yaml -f compose.secrets.yaml -f compose.hostinger.yaml -f compose.waf.yaml -f compose.hostinger-waf.yaml config --quiet
-docker compose --env-file .env.hostinger.example -p stexor_platform_vps_ci -f compose.yaml -f compose.build.yaml -f compose.secrets.yaml -f compose.hostinger.yaml -f compose.waf.yaml -f compose.hostinger-waf.yaml -f compose.backup-scheduler.yaml --profile backup config --quiet
-docker compose --env-file .env.staging.example -p stexor_platform_staging_ci -f compose.yaml -f compose.build.yaml -f compose.secrets.yaml -f compose.hostinger.yaml -f compose.waf.yaml -f compose.hostinger-waf.yaml -f compose.staging.yaml config --quiet
+node scripts/infra-ops.mjs static-security-check
+docker run --rm -v D:/docker/platform-infrastructure:/infra:ro -w /infra alpine:3.22 sh -ec 'for file in scripts/*.sh; do sh -n "$file"; done'
+docker run --rm -v D:/docker/platform-infrastructure:/infra -w /infra alpine:3.22 sh ./scripts/vps-host-readiness.sh --diagnostic
+docker compose --env-file .env -p platform_infra_local -f compose.yaml -f compose.build.yaml -f compose.secrets.yaml -f compose.waf.yaml config --quiet
+docker compose --env-file .env -p platform_infra_local -f compose.yaml -f compose.build.yaml -f compose.secrets.yaml -f compose.waf.yaml -f compose.backup-scheduler.yaml --profile backup config --quiet
+docker compose --env-file .env.vps.example -p platform_infra_vps_ci -f compose.yaml -f compose.build.yaml -f compose.secrets.yaml -f compose.vps.yaml -f compose.waf.yaml -f compose.vps-waf.yaml config --quiet
+docker compose --env-file .env.vps.example -p platform_infra_vps_ci -f compose.yaml -f compose.build.yaml -f compose.secrets.yaml -f compose.vps.yaml -f compose.waf.yaml -f compose.vps-waf.yaml -f compose.backup-scheduler.yaml --profile backup config --quiet
+docker compose --env-file .env.staging.example -p platform_infra_staging_ci -f compose.yaml -f compose.build.yaml -f compose.secrets.yaml -f compose.vps.yaml -f compose.waf.yaml -f compose.vps-waf.yaml -f compose.staging.yaml config --quiet
 docker compose --env-file .env -p enterprise_prod_ci -f compose.yaml -f compose.prod.yaml -f compose.managed-secrets.yaml config --quiet
-docker build -f docker/ops.Dockerfile -t stexor/ops:local .
-docker run --rm -e BACKUP_SCHEDULER_DRY_RUN=true -v D:/docker/stexor-platform-infrastructure:/infra:ro --entrypoint sh stexor/ops:local /infra/scripts/backup-scheduler.sh
-docker run --rm -e BACKUP_SCHEDULER_DRY_RUN=true -e BACKUP_SCHEDULER_ENABLE_OFFSITE=true -v D:/docker/stexor-platform-infrastructure:/infra:ro --entrypoint sh stexor/ops:local /infra/scripts/backup-scheduler.sh
-sh ./scripts/stexor-ops.sh external-uptime-check --dryRun
-sh ./scripts/stexor-ops.sh github-branch-protection --repo OWNER/REPO --branch main --dryRun
-sh ./scripts/stexor-ops.sh github-environments --repo OWNER/REPO --dryRun
-sh ./scripts/stexor-ops.sh github-actions-config --repo OWNER/REPO
-sh ./scripts/stexor-ops.sh pre-go-live-evidence --repo OWNER/REPO
-node --check scripts/stexor-ops.mjs
-node scripts/stexor-ops.mjs offsite-restore-drill-restic --planOnly
-node scripts/stexor-ops.mjs linux-portability-check
-node scripts/stexor-ops.mjs dr-evidence
-node scripts/stexor-ops.mjs alert-evidence
-node scripts/stexor-ops.mjs release-evidence --planOnly
-node scripts/stexor-ops.mjs governance-check
-node scripts/stexor-ops.mjs github-actions-config --repo mattdifi05/Stexor-account
-node scripts/stexor-ops.mjs pre-go-live-evidence --repo mattdifi05/Stexor-account
-node scripts/stexor-ops.mjs production-go-no-go
-node scripts/stexor-ops.mjs external-uptime-check --dryRun
-node scripts/stexor-ops.mjs evidence-bundle
-node scripts/stexor-ops.mjs github-environments --repo mattdifi05/Stexor-account --dryRun
-node scripts/stexor-ops.mjs github-environments --repo mattdifi05/Stexor-account --apply (expected fail-fast without GITHUB_PRODUCTION_REVIEWERS)
-docker run --rm -v D:/docker/stexor-platform-infrastructure:/infra:ro -w /infra stexor/ops:local github-environments --repo mattdifi05/Stexor-account --dryRun
-docker run --rm -e STEXOR_SOURCE_ROOT=/src_stexor -v D:/docker/stexor-platform-infrastructure:/infra:ro -v D:/docker/src_stexor:/src_stexor:ro -w /infra stexor/ops:local static-security-check
-node scripts/stexor-ops.mjs backup-secret-manager-metadata --outputDir backups/secret-manager/report-test --skipEvidence
+docker build -f docker/ops.Dockerfile -t platform/ops:local .
+docker run --rm -e BACKUP_SCHEDULER_DRY_RUN=true -v D:/docker/platform-infrastructure:/infra:ro --entrypoint sh platform/ops:local /infra/scripts/backup-scheduler.sh
+docker run --rm -e BACKUP_SCHEDULER_DRY_RUN=true -e BACKUP_SCHEDULER_ENABLE_OFFSITE=true -v D:/docker/platform-infrastructure:/infra:ro --entrypoint sh platform/ops:local /infra/scripts/backup-scheduler.sh
+sh ./scripts/infra-ops.sh external-uptime-check --dryRun
+sh ./scripts/infra-ops.sh github-branch-protection --repo OWNER/REPO --branch main --dryRun
+sh ./scripts/infra-ops.sh github-environments --repo OWNER/REPO --dryRun
+sh ./scripts/infra-ops.sh github-actions-config --repo OWNER/REPO
+sh ./scripts/infra-ops.sh pre-go-live-evidence --repo OWNER/REPO
+node --check scripts/infra-ops.mjs
+node scripts/infra-ops.mjs offsite-restore-drill-restic --planOnly
+node scripts/infra-ops.mjs linux-portability-check
+node scripts/infra-ops.mjs dr-evidence
+node scripts/infra-ops.mjs alert-evidence
+node scripts/infra-ops.mjs release-evidence --planOnly
+node scripts/infra-ops.mjs governance-check
+node scripts/infra-ops.mjs github-actions-config --repo mattdifi05/project-repository
+node scripts/infra-ops.mjs pre-go-live-evidence --repo mattdifi05/project-repository
+node scripts/infra-ops.mjs production-go-no-go
+node scripts/infra-ops.mjs external-uptime-check --dryRun
+node scripts/infra-ops.mjs evidence-bundle
+node scripts/infra-ops.mjs github-environments --repo mattdifi05/project-repository --dryRun
+node scripts/infra-ops.mjs github-environments --repo mattdifi05/project-repository --apply (expected fail-fast without GITHUB_PRODUCTION_REVIEWERS)
+docker run --rm -v D:/docker/platform-infrastructure:/infra:ro -w /infra platform/ops:local github-environments --repo mattdifi05/project-repository --dryRun
+docker run --rm -e PROJECT_SOURCE_ROOT=/project -v D:/docker/platform-infrastructure:/infra:ro -v D:/docker/project:/project:ro -w /infra platform/ops:local static-security-check
+node scripts/infra-ops.mjs backup-secret-manager-metadata --outputDir backups/secret-manager/report-test --skipEvidence
 scripts/run-infra-ops.mjs static-security-check
 scripts/run-infra-ops.mjs infra-health
 scripts/run-infra-ops.mjs enterprise-10-check
-scripts/stexor-ops.sh static-security-check through docker:29-cli
-scripts/stexor-ops.sh infra-health through docker:29-cli
-scripts/stexor-ops.sh enterprise-10-check through docker:29-cli
-docker run --rm -v D:/docker/stexor-platform-infrastructure:/work:ro alpine:3.22 sh -ec 'sh -n /work/scripts/deploy-hostinger.sh && sh -n /work/scripts/hostinger-postdeploy.sh && sh -n /work/scripts/evidence-bundle.sh'
-docker run --rm -v D:/docker/stexor-platform-infrastructure:/infra -w /infra alpine:3.22 sh ./scripts/hostinger-go-live.sh --planOnly --repo OWNER/REPO
+scripts/infra-ops.sh static-security-check through docker:29-cli
+scripts/infra-ops.sh infra-health through docker:29-cli
+scripts/infra-ops.sh enterprise-10-check through docker:29-cli
+docker run --rm -v D:/docker/platform-infrastructure:/work:ro alpine:3.22 sh -ec 'sh -n /work/scripts/deploy-vps.sh && sh -n /work/scripts/vps-postdeploy.sh && sh -n /work/scripts/evidence-bundle.sh'
+docker run --rm -v D:/docker/platform-infrastructure:/infra -w /infra alpine:3.22 sh ./scripts/vps-go-live.sh --planOnly --repo OWNER/REPO
 node --import ./scripts/register-ts-extension-loader.mjs --test apps/worker-notifications/src/server.test.ts
 full-restore-drill.sh
 failure-tests.sh --confirmServiceStop --targets redis
@@ -281,13 +281,13 @@ All commands listed above passed in the local evidence gathered during this hard
 - Production go/no-go now requires a remote successful `enterprise-infra` workflow report for the release commit.
 - Alerting had email/generic webhook only; optional native Discord and Telegram delivery with metrics was added.
 - Uptime dry-run previously did not leave report evidence; it now writes diagnostic reports while keeping `providerEvidence.verified=false` so production go/no-go still requires a live provider.
-- Hostinger deploy previously stopped after compose/WAF smoke; a post-deploy script now runs WAF smoke plus `infra-health` and can opt into pre go-live, go/no-go and live production readiness gates.
-- Hostinger live execution previously required manually sequencing many commands; `hostinger-go-live.sh` now creates a plan-first orchestration report and can run the ordered live sequence with `--confirmLive`.
-- VPS bootstrap was previously a manual Hostinger task; `vps-bootstrap-ubuntu.sh` now plans/applies Git, Docker Engine, Buildx and Compose plugin installation with evidence reports.
+- VPS deploy previously stopped after compose/WAF smoke; a post-deploy script now runs WAF smoke plus `infra-health` and can opt into pre go-live, go/no-go and live production readiness gates.
+- VPS live execution previously required manually sequencing many commands; `vps-go-live.sh` now creates a plan-first orchestration report and can run the ordered live sequence with `--confirmLive`.
+- VPS bootstrap was previously a manual VPS task; `vps-bootstrap-ubuntu.sh` now plans/applies Git, Docker Engine, Buildx and Compose plugin installation with evidence reports.
 - VPS hardening previously printed dry-run/apply output only; it now writes plan/apply JSON and Markdown evidence reports.
-- Hostinger preflight previously rendered only the base Hostinger overlay; it now renders the full Hostinger+WAF Compose stack used by deploy and scans that render for mutable `:latest` images.
-- Hostinger post-deploy previously sourced `.env`; it now parses only the required public URL keys without executing the env file.
-- Hostinger remote deploy previously interpolated deploy values inside one SSH shell string; it now passes values as positional arguments to a literal remote script.
+- VPS preflight previously rendered only the base VPS overlay; it now renders the full VPS+WAF Compose stack used by deploy and scans that render for mutable `:latest` images.
+- VPS post-deploy previously sourced `.env`; it now parses only the required public URL keys without executing the env file.
+- VPS remote deploy previously interpolated deploy values inside one SSH shell string; it now passes values as positional arguments to a literal remote script.
 - Backup scheduler cron jobs previously sourced the private scheduler env file; they now call `backup-scheduler.sh --run` and parse the env file without shell execution.
 - VPS host readiness previously sourced `/etc/os-release`; it now parses that file as data before checking Ubuntu LTS status.
 - Local disposable Linux VPS-readiness probes previously wrote failed reports into production evidence; `--diagnostic` now writes them under `reports/vps-host-diagnostics/` while real VPS checks use `--enforce`.
@@ -306,17 +306,17 @@ All commands listed above passed in the local evidence gathered during this hard
 | 6 | Alert reali | Prometheus/Alertmanager/email plus optional Discord/Telegram metrics implemented; alert evidence and external uptime dry-run reports added. | Real email/Discord/Telegram delivery and external monitoring provider checks must be tested. |
 | 7 | Failure tests | Controlled failure tests implemented and Redis recovery exercised. | Full target matrix should run in staging/VPS window. |
 | 8 | Rollback | Image/compose rollback dry-run, post-health command and release evidence rollback-target generation are implemented. | Real previous image set must be captured from the live registry per release. |
-| 9 | CI/CD | GitHub workflows, compose gates, DAST job, branch-protection apply command, deployment environment approvals, runtime secret/var verification, release evidence plan, Hostinger deploy job, post-deploy checks and evidence bundle smoke are prepared. | Secrets, branch protection and deploy approvals must be enabled in GitHub. |
+| 9 | CI/CD | GitHub workflows, compose gates, DAST job, branch-protection apply command, deployment environment approvals, runtime secret/var verification, release evidence plan, VPS deploy job, post-deploy checks and evidence bundle smoke are prepared. | Secrets, branch protection and deploy approvals must be enabled in GitHub. |
 | 10 | Dependency management | Renovate configured for app/infra. | Dependency dashboard and production update cadence must be operated. |
 | 11 | Log hygiene | Redaction, bounded logs, Loki retention and dashboards added. | Retention/capacity must be tuned on VPS disk size. |
 | 12 | Runbook definitivo | README, RUNBOOK, SECURITY, readiness and VPS checklist updated. | Must be followed during first real deploy. |
 | 13 | Security hardening | Secrets, rotation evidence, service healthcheck coverage, CSP, rate limits, WAF, headers, admin blocks and audit gates implemented. | Cloudflare and VPS hardening must be applied live. |
 | 14 | Load test | 50/100/500 benchmark command and local quick run completed. | Public-path VPS load benchmark still required. |
-| 15 | Production-like env | Local, staging, Hostinger and production overlays exist. | Real staging and production hosts must be exercised. |
+| 15 | Production-like env | Local, staging, VPS and production overlays exist. | Real staging and production hosts must be exercised. |
 | 16 | Remove Windows dependency | Host-critical ops moved to Linux containers; LF normalization configured. | Docker Desktop compatibility retained; VPS requires no Windows. |
 | 17 | Container-first ops | Backup, restore, scheduler, health, load, SBOM and diagnostics run through ops containers. | Confirm on Ubuntu VPS after clone. |
 | 18 | Ubuntu LTS compatibility | Compose renders, shell syntax checks and host-readiness script exist. | Real Ubuntu LTS run still required. |
-| 19 | Hostinger VPS prep | Hardening, host readiness, origin lock, deploy scripts, post-deploy checks and checklist exist. | Execute on actual Hostinger VPS. |
+| 19 | VPS prep | Hardening, host readiness, origin lock, deploy scripts, post-deploy checks and checklist exist. | Execute on the actual VPS. |
 | 20 | Final report | This audit, `READINESS-REPORT.md`, `VPS-PREDEPLOY-CHECKLIST.md`, pre go-live evidence and evidence bundle command exist. | Update with real production evidence after go-live. |
 
 ## Readiness Scores
@@ -325,7 +325,7 @@ All commands listed above passed in the local evidence gathered during this hard
 | --- | ---: | --- |
 | Development | 9/10 | Local Docker stack, app launcher, health, WAF, secrets and gates are operational. |
 | Staging | 8/10 | Staging overlay exists and renders; real staging host/domain remains untested. |
-| Production | 7.5/10 | Hostinger overlays and hardening exist; real VPS deploy and provider wiring remain. |
+| Production | 7.5/10 | VPS overlays and hardening exist; real VPS deploy and provider wiring remain. |
 | Security | 8.7/10 | WAF, CSP, rate limits, secrets, audit, admin blocks and smoke gates are present. |
 | Observability | 8.5/10 | Metrics, logs, dashboards, alerts, email, Discord and Telegram hooks are wired locally. |
 | Disaster Recovery | 8.5/10 | Local full restore drills pass and off-site restore automation exists; live Restic repository restore must still be proven. |
@@ -333,10 +333,10 @@ All commands listed above passed in the local evidence gathered during this hard
 
 ## Requires Real VPS Or External Provider
 
-- Hostinger Ubuntu LTS host bootstrap apply report under `reports/vps-bootstrap/`.
-- Hostinger Ubuntu LTS host hardening apply report under `reports/vps-hardening/`.
+- VPS Ubuntu LTS host bootstrap apply report under `reports/vps-bootstrap/`.
+- VPS Ubuntu LTS host hardening apply report under `reports/vps-hardening/`.
 - Docker Engine, Compose plugin and Git installation on the actual VPS.
-- VPS host readiness script passed on the actual Hostinger host under `reports/vps-host/`.
+- VPS host readiness script passed on the actual VPS host under `reports/vps-host/`.
 - Cloudflare DNS/CDN/WAF/Access setup on the real zone, including verified MFA-protected Access applications for admin hosts.
 - Cloudflare origin lock applied after proxied DNS works.
 - Real SMTP/email and optional Discord/Telegram delivery tests.
@@ -362,7 +362,7 @@ Use `VPS-PREDEPLOY-CHECKLIST.md` as the canonical checklist. Minimum go/no-go:
 2. VPS host readiness report passed and archived.
 3. .env created from examples with no placeholders.
 4. Secret manager initialized, verified and `secret-rotation-evidence.sh --enforce` archived.
-5. Hostinger compose render passes.
+5. VPS compose render passes.
 6. Cloudflare DNS proxied, Access admin applications verified, and origin lock applied.
 7. Dockerized backup scheduler enabled and backup execution reports reviewed.
 8. Full local and remote restore drills pass.

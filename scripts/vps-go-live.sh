@@ -3,7 +3,7 @@ set -eu
 
 ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 ENV_FILE="$ROOT_DIR/.env"
-PROJECT_NAME="${COMPOSE_PROJECT_NAME:-stexor_platform_vps}"
+PROJECT_NAME="${COMPOSE_PROJECT_NAME:-platform_infra_vps}"
 DEPLOY_REPO_VALUE="${DEPLOY_REPO:-}"
 DEPLOY_USER="${DEPLOY_USER:-}"
 SSH_PORT="${SSH_PORT:-65002}"
@@ -24,11 +24,11 @@ RELOAD_SSHD=0
 
 usage() {
   cat <<'EOF'
-Usage: hostinger-go-live.sh [options]
+Usage: vps-go-live.sh [options]
 
-Safe-by-default Hostinger VPS go-live orchestrator. Without --confirmLive it
+Safe-by-default VPS go-live orchestrator. Without --confirmLive it
 only writes a plan report. With --confirmLive it runs the selected live steps in
-order and writes JSON/Markdown reports under reports/hostinger-go-live/.
+order and writes JSON/Markdown reports under reports/vps-go-live/.
 
 Options:
   --confirmLive                         Execute live checks/actions.
@@ -46,8 +46,8 @@ Options:
                                         the target SSH port are verified.
   --replace-docker-daemon-config        When applying hardening, back up and
                                         replace an existing Docker daemon config
-                                        that is missing Stexor hardening keys.
-  --start-stack                         Run docker compose up for Hostinger stack.
+                                        that is missing Platform hardening keys.
+  --start-stack                         Run docker compose up for VPS stack.
   --pre-go-live                         Run pre-go-live evidence during postdeploy.
   --include-restore-drill               Include full restore drill in pre-go-live.
   --include-offsite-restore-dry-run     Include Restic dry-run in pre-go-live.
@@ -147,13 +147,13 @@ esac
 
 cd "$ROOT_DIR"
 
-REPORT_DIR="$ROOT_DIR/reports/hostinger-go-live"
+REPORT_DIR="$ROOT_DIR/reports/vps-go-live"
 mkdir -p "$REPORT_DIR"
 STAMP=$(date -u +%Y%m%d%H%M%S)
 ROWS_FILE=$(mktemp)
-REPORT_PREFIX="hostinger-go-live"
+REPORT_PREFIX="vps-go-live"
 if [ "$PLAN_ONLY" -eq 1 ]; then
-  REPORT_PREFIX="hostinger-go-live-plan"
+  REPORT_PREFIX="vps-go-live-plan"
 fi
 JSON_REPORT="$REPORT_DIR/$REPORT_PREFIX-$STAMP.json"
 MD_REPORT="$REPORT_DIR/$REPORT_PREFIX-$STAMP.md"
@@ -237,7 +237,7 @@ write_reports() {
   } > "$JSON_REPORT"
 
   {
-    printf '# Stexor Hostinger Go-Live\n\n'
+    printf '# Platform VPS Go-Live\n\n'
     printf 'Generated at: %s\n\n' "$generated_at"
     printf 'Status: %s\n\n' "$status"
     printf 'Mode: %s\n\n' "$([ "$PLAN_ONLY" -eq 1 ] && printf plan || printf live)"
@@ -250,7 +250,7 @@ write_reports() {
     done < "$ROWS_FILE"
   } > "$MD_REPORT"
 
-  echo "Hostinger go-live reports written to $JSON_REPORT and $MD_REPORT"
+  echo "VPS go-live reports written to $JSON_REPORT and $MD_REPORT"
 }
 
 run_step() {
@@ -295,8 +295,8 @@ step_vps_readiness() {
   sudo sh ./scripts/vps-host-readiness.sh --ssh-port "$SSH_PORT" --enforce
 }
 
-step_hostinger_preflight() {
-  sh ./scripts/hostinger-preflight.sh "$ENV_FILE"
+step_vps_preflight() {
+  sh ./scripts/vps-preflight.sh "$ENV_FILE"
 }
 
 step_start_stack() {
@@ -304,13 +304,13 @@ step_start_stack() {
     -f compose.yaml \
     -f compose.build.yaml \
     -f compose.secrets.yaml \
-    -f compose.hostinger.yaml \
+    -f compose.vps.yaml \
     -f compose.waf.yaml \
-    -f compose.hostinger-waf.yaml \
+    -f compose.vps-waf.yaml \
     up -d --build --remove-orphans
 }
 
-step_hostinger_postdeploy() {
+step_vps_postdeploy() {
   DEPLOY_RUN_WAF_SMOKE=1 \
   DEPLOY_RUN_INFRA_HEALTH=1 \
   DEPLOY_RUN_PRODUCTION_PREFLIGHT="$RUN_PRODUCTION_PREFLIGHT" \
@@ -321,7 +321,7 @@ step_hostinger_postdeploy() {
   DEPLOY_PRE_GO_LIVE_RESTORE_DRILL="$INCLUDE_RESTORE_DRILL" \
   DEPLOY_PRE_GO_LIVE_OFFSITE_RESTORE_DRY_RUN="$INCLUDE_OFFSITE_RESTORE_DRY_RUN" \
   DEPLOY_PRE_GO_LIVE_GITHUB_REMOTE="$VERIFY_GITHUB_REMOTE" \
-    sh ./scripts/hostinger-postdeploy.sh "$ENV_FILE"
+    sh ./scripts/vps-postdeploy.sh "$ENV_FILE"
 }
 
 step_go_no_go() {
@@ -396,15 +396,15 @@ else
 fi
 
 run_step "vps-host-readiness" "sudo sh ./scripts/vps-host-readiness.sh --ssh-port $SSH_PORT --enforce" step_vps_readiness
-run_step "hostinger-preflight" "sh ./scripts/hostinger-preflight.sh $ENV_FILE" step_hostinger_preflight
+run_step "vps-preflight" "sh ./scripts/vps-preflight.sh $ENV_FILE" step_vps_preflight
 
 if [ "$START_STACK" -eq 1 ]; then
-  run_step "compose-up" "docker compose --env-file $ENV_FILE -p $PROJECT_NAME -f compose.yaml -f compose.build.yaml -f compose.secrets.yaml -f compose.hostinger.yaml -f compose.waf.yaml -f compose.hostinger-waf.yaml up -d --build --remove-orphans" step_start_stack
+  run_step "compose-up" "docker compose --env-file $ENV_FILE -p $PROJECT_NAME -f compose.yaml -f compose.build.yaml -f compose.secrets.yaml -f compose.vps.yaml -f compose.waf.yaml -f compose.vps-waf.yaml up -d --build --remove-orphans" step_start_stack
 else
   add_step "compose-up" "skipped" "docker compose --env-file $ENV_FILE -p $PROJECT_NAME ... up -d --build --remove-orphans" "enable with --start-stack"
 fi
 
-run_step "hostinger-postdeploy" "sh ./scripts/hostinger-postdeploy.sh $ENV_FILE" step_hostinger_postdeploy
+run_step "vps-postdeploy" "sh ./scripts/vps-postdeploy.sh $ENV_FILE" step_vps_postdeploy
 
 if [ "$RUN_GO_NO_GO" -eq 1 ]; then
   run_step "github-actions-run-evidence" "sh ./scripts/github-actions-run-evidence.sh --repo $DEPLOY_REPO_VALUE --workflow enterprise-infra.yml --branch main --verifyRemote" step_github_actions_run_evidence
@@ -433,5 +433,5 @@ fi
 write_reports
 
 if [ "$PLAN_ONLY" -eq 1 ]; then
-  echo "Plan only. Re-run with --confirmLive on the Hostinger VPS when ready."
+  echo "Plan only. Re-run with --confirmLive on the VPS when ready."
 fi

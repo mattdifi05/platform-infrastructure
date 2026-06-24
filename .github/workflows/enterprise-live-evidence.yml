@@ -58,10 +58,10 @@ jobs:
           test -n "$EXTERNAL_UPTIME_PROVIDER_EVIDENCE_JSON"
           mkdir -p .tmp
           printf '%s\n' "$EXTERNAL_UPTIME_PROVIDER_EVIDENCE_JSON" > .tmp/external-uptime-provider.production.json
-          sh ./scripts/stexor-ops.sh external-uptime-check \
+          sh ./scripts/infra-ops.sh external-uptime-check \
             --providerEvidence .tmp/external-uptime-provider.production.json \
             --validateProviderEvidenceOnly
-          sh ./scripts/stexor-ops.sh external-uptime-check \
+          sh ./scripts/infra-ops.sh external-uptime-check \
             --providerEvidence .tmp/external-uptime-provider.production.json \
             --requireProviderEvidence
 
@@ -71,7 +71,7 @@ jobs:
           PUBLIC_API_HEALTH_URL: ${{ vars.PUBLIC_API_HEALTH_URL }}
         run: |
           test -n "$PUBLIC_API_HEALTH_URL"
-          sh ./scripts/stexor-ops.sh load-benchmark \
+          sh ./scripts/infra-ops.sh load-benchmark \
             --profiles 50,100,500 \
             --url "$PUBLIC_API_HEALTH_URL" \
             --requirePublicTarget \
@@ -90,13 +90,13 @@ jobs:
           test -n "$CLOUDFLARE_ACCESS_ADMIN_MANIFEST_JSON"
           mkdir -p .tmp
           printf '%s\n' "$CLOUDFLARE_ACCESS_ADMIN_MANIFEST_JSON" > .tmp/cloudflare-access-admin.production.json
-          sh ./scripts/stexor-ops.sh cloudflare-access-admin \
+          sh ./scripts/infra-ops.sh cloudflare-access-admin \
             --manifest .tmp/cloudflare-access-admin.production.json \
             --verifyRemote
 
       - name: Production go-no-go
         if: inputs.run_final_gates == 'true'
-        run: sh ./scripts/stexor-ops.sh production-go-no-go --enforce
+        run: sh ./scripts/infra-ops.sh production-go-no-go --enforce
 
       - name: Production readiness live
         if: inputs.run_final_gates == 'true'
@@ -105,8 +105,8 @@ jobs:
       - name: Evidence bundle complete verify
         if: inputs.run_final_gates == 'true'
         run: |
-          sh ./scripts/stexor-ops.sh evidence-bundle --noArchive
-          sh ./scripts/stexor-ops.sh evidence-bundle-verify --requireComplete
+          sh ./scripts/infra-ops.sh evidence-bundle --noArchive
+          sh ./scripts/infra-ops.sh evidence-bundle-verify --requireComplete
 
       - name: Upload live evidence reports
         if: always()

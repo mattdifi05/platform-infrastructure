@@ -83,7 +83,7 @@
           "refId": "A"
         }
       ],
-      "title": "Stexor container logs",
+      "title": "Platform container logs",
       "type": "logs"
     },
     {
@@ -331,7 +331,7 @@
   },
   "timepicker": {},
   "timezone": "browser",
-  "title": "Stexor Overview",
+  "title": "Platform Overview",
   "uid": "enterprise-overview",
   "version": 1,
   "weekStart": ""

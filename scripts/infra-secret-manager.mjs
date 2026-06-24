@@ -83,15 +83,15 @@ function envFile() {
 }
 
 function storePath() {
-  return path.resolve(argv.store ?? path.join(secretsDir(), "stexor-secret-manager-store.json"));
+  return path.resolve(argv.store ?? path.join(secretsDir(), "infra-secret-manager-store.json"));
 }
 
 function masterKeyPath() {
-  return path.resolve(argv.masterKey ?? path.join(secretsDir(), "stexor-secret-manager-master.key"));
+  return path.resolve(argv.masterKey ?? path.join(secretsDir(), "infra-secret-manager-master.key"));
 }
 
 function auditLogPath() {
-  return path.resolve(argv.auditLog ?? path.join(secretsDir(), "stexor-secret-manager-audit.log"));
+  return path.resolve(argv.auditLog ?? path.join(secretsDir(), "infra-secret-manager-audit.log"));
 }
 
 function secretFilePath(name) {
@@ -168,13 +168,13 @@ function kmsKeyId() {
 }
 
 function kmsRootFingerprint(master) {
-  return crypto.createHash("sha256").update(`stexor-local-kms-root:${master}`).digest("hex").slice(0, 24);
+  return crypto.createHash("sha256").update(`local-bucket-kms-root:${master}`).digest("hex").slice(0, 24);
 }
 
 function normalizeKmsMetadata(previousStore) {
   const now = new Date().toISOString();
   const rootFingerprint = kmsRootFingerprint(masterKey());
-  if (previousStore?.kms?.provider === "stexor-local-kms" && previousStore.kms.activeKeyId && previousStore.kms.keys?.[previousStore.kms.activeKeyId]) {
+  if (previousStore?.kms?.provider === "local-bucket-kms" && previousStore.kms.activeKeyId && previousStore.kms.keys?.[previousStore.kms.activeKeyId]) {
     return {
       ...previousStore.kms,
       rootFingerprint,
@@ -183,7 +183,7 @@ function normalizeKmsMetadata(previousStore) {
   }
   const activeKeyId = kmsKeyId();
   return {
-    provider: "stexor-local-kms",
+    provider: "local-bucket-kms",
     version: 1,
     algorithm: "HKDF-SHA256+A256GCM",
     activeKeyId,
@@ -211,12 +211,12 @@ function masterKey() {
 
 function encryptionKey(master, keyId) {
   if (!keyId) {
-    return crypto.createHash("sha256").update(`stexor-secret-manager-v1:${master}`).digest();
+    return crypto.createHash("sha256").update(`infra-secret-manager-v1:${master}`).digest();
   }
   return Buffer.from(crypto.hkdfSync(
     "sha256",
     Buffer.from(master),
-    Buffer.from("stexor-local-kms-v1", "utf8"),
+    Buffer.from("local-bucket-kms-v1", "utf8"),
     Buffer.from(`secret-store:${keyId}`, "utf8"),
     32,
   ));
@@ -224,13 +224,13 @@ function encryptionKey(master, keyId) {
 
 function encryptSecret(master, name, value, keyId) {
   const iv = crypto.randomBytes(12);
-  const aad = Buffer.from(`stexor-secret:${name}:kms:${keyId ?? "legacy"}`, "utf8");
+  const aad = Buffer.from(`platform-secret:${name}:kms:${keyId ?? "legacy"}`, "utf8");
   const cipher = crypto.createCipheriv("aes-256-gcm", encryptionKey(master, keyId), iv);
   cipher.setAAD(aad);
   const ciphertext = Buffer.concat([cipher.update(value, "utf8"), cipher.final()]);
   return {
     algorithm: "AES-256-GCM",
-    provider: keyId ? "stexor-local-kms" : "legacy-local-master-key",
+    provider: keyId ? "local-bucket-kms" : "legacy-local-master-key",
     keyId,
     iv: iv.toString("base64url"),
     tag: cipher.getAuthTag().toString("base64url"),
@@ -241,7 +241,7 @@ function encryptSecret(master, name, value, keyId) {
 function decryptSecret(master, name, encrypted) {
   const keyId = encrypted.keyId;
   const decipher = crypto.createDecipheriv("aes-256-gcm", encryptionKey(master, keyId), Buffer.from(encrypted.iv, "base64url"));
-  const aad = keyId ? `stexor-secret:${name}:kms:${keyId}` : `stexor-secret:${name}`;
+  const aad = keyId ? `platform-secret:${name}:kms:${keyId}` : `platform-secret:${name}`;
   decipher.setAAD(Buffer.from(aad, "utf8"));
   decipher.setAuthTag(Buffer.from(encrypted.tag, "base64url"));
   return Buffer.concat([
@@ -257,7 +257,7 @@ function readStore() {
 
 function decryptStoreValues(store = readStore()) {
   if (!store) return {};
-  if (store.manager !== "stexor-secret-manager" || store.version !== 1 || !store.secrets) {
+  if (store.manager !== "infra-secret-manager" || store.version !== 1 || !store.secrets) {
     fail("Secret manager store has an invalid format.");
   }
   const key = masterKey();
@@ -291,7 +291,7 @@ function writeStore(values, previousStore = readStore(), kmsOverride = null) {
   }
   const store = {
     version: 1,
-    manager: "stexor-secret-manager",
+    manager: "infra-secret-manager",
     createdAt: previousStore?.createdAt ?? now,
     updatedAt: now,
     kms: {
@@ -348,9 +348,9 @@ function buildValues(existingValues = {}) {
     }
     values[spec.name] = materializedOrGenerated(spec);
   }
-  const appDbUser = env.APP_DB_USER || "stexor_app_user";
-  const appDbName = env.APP_DB_NAME || "stexor_app";
-  const natsUser = env.NATS_USER || "stexor";
+  const appDbUser = env.APP_DB_USER || "app_user";
+  const appDbName = env.APP_DB_NAME || "app_db";
+  const natsUser = env.NATS_USER || "platform";
   values.database_url ||= `postgresql://${encodeURIComponent(appDbUser)}:${encodeURIComponent(values.app_db_password)}@postgres:5432/${encodeURIComponent(appDbName)}`;
   values.nats_url ||= `nats://${encodeURIComponent(natsUser)}:${encodeURIComponent(values.nats_password)}@nats:4222`;
   return values;
@@ -394,12 +394,12 @@ async function init() {
     store: storePath(),
     names: Object.keys(store.secrets),
   });
-  log(`Stexor Secret Manager initialized at ${storePath()}`);
+  log(`Infra Secret Manager initialized at ${storePath()}`);
 }
 
 async function verify() {
   const store = readStore();
-  if (!store) fail(`Missing Stexor Secret Manager store: ${storePath()}`);
+  if (!store) fail(`Missing Infra Secret Manager store: ${storePath()}`);
   const values = decryptStoreValues(store);
   validateValues(values);
   for (const spec of requiredSecrets) {
@@ -410,7 +410,7 @@ async function verify() {
     }
   }
   audit("verify", { names: requiredSecrets.map((secret) => secret.name) });
-  log("Stexor Secret Manager verification passed.");
+  log("Infra Secret Manager verification passed.");
 }
 
 function timingSafeEqual(a, b) {
@@ -420,7 +420,7 @@ function timingSafeEqual(a, b) {
 
 async function status() {
   const store = readStore();
-  if (!store) fail(`Missing Stexor Secret Manager store: ${storePath()}`);
+  if (!store) fail(`Missing Infra Secret Manager store: ${storePath()}`);
   log(`Store: ${storePath()}`);
   log(`Updated: ${store.updatedAt}`);
   for (const spec of requiredSecrets) {
@@ -436,7 +436,7 @@ async function status() {
 
 async function kmsStatus() {
   const store = readStore();
-  if (!store) fail(`Missing Stexor Secret Manager store: ${storePath()}`);
+  if (!store) fail(`Missing Infra Secret Manager store: ${storePath()}`);
   const kms = normalizeKmsMetadata(store);
   log(`KMS provider: ${kms.provider}`);
   log(`Algorithm: ${kms.algorithm}`);
@@ -449,7 +449,7 @@ async function kmsStatus() {
 
 async function kmsRotate() {
   const store = readStore();
-  if (!store) fail(`Missing Stexor Secret Manager store: ${storePath()}`);
+  if (!store) fail(`Missing Infra Secret Manager store: ${storePath()}`);
   const values = decryptStoreValues(store);
   const previousKms = normalizeKmsMetadata(store);
   const now = new Date().toISOString();
@@ -478,7 +478,7 @@ async function kmsRotate() {
   writeStore(values, store, nextKms);
   materialize(values);
   audit("kms_rotate", { previousActiveKeyId: previousKms.activeKeyId, activeKeyId: nextKeyId });
-  log(`Rotated Stexor Local KMS active key to ${nextKeyId} and rewrapped ${Object.keys(values).length} secrets.`);
+  log(`Rotated Platform Local KMS active key to ${nextKeyId} and rewrapped ${Object.keys(values).length} secrets.`);
 }
 
 async function rotate() {
@@ -490,7 +490,7 @@ async function rotate() {
     fail(`${name} requires coordinated service-side rotation. Re-run with --force only after updating the dependent service.`);
   }
   const store = readStore();
-  if (!store) fail(`Missing Stexor Secret Manager store: ${storePath()}`);
+  if (!store) fail(`Missing Infra Secret Manager store: ${storePath()}`);
   const values = decryptStoreValues(store);
   const keep = Number(argv.keep ?? 3);
   if (spec.kind === "keyring") {
@@ -506,13 +506,13 @@ async function rotate() {
   }
   if (name === "app_db_password") {
     const env = parseEnv(envFile());
-    const appDbUser = env.APP_DB_USER || "stexor_app_user";
-    const appDbName = env.APP_DB_NAME || "stexor_app";
+    const appDbUser = env.APP_DB_USER || "app_user";
+    const appDbName = env.APP_DB_NAME || "app_db";
     values.database_url = `postgresql://${encodeURIComponent(appDbUser)}:${encodeURIComponent(values.app_db_password)}@postgres:5432/${encodeURIComponent(appDbName)}`;
   }
   if (name === "nats_password") {
     const env = parseEnv(envFile());
-    const natsUser = env.NATS_USER || "stexor";
+    const natsUser = env.NATS_USER || "platform";
     values.nats_url = `nats://${encodeURIComponent(natsUser)}:${encodeURIComponent(values.nats_password)}@nats:4222`;
   }
   validateValues(values);
@@ -549,24 +549,24 @@ async function setSecret() {
   values[name] = readSecretInput(spec);
   if (name === "app_db_password") {
     const env = parseEnv(envFile());
-    const appDbUser = env.APP_DB_USER || "stexor_app_user";
-    const appDbName = env.APP_DB_NAME || "stexor_app";
+    const appDbUser = env.APP_DB_USER || "app_user";
+    const appDbName = env.APP_DB_NAME || "app_db";
     values.database_url = `postgresql://${encodeURIComponent(appDbUser)}:${encodeURIComponent(values.app_db_password)}@postgres:5432/${encodeURIComponent(appDbName)}`;
   }
   if (name === "nats_password") {
     const env = parseEnv(envFile());
-    const natsUser = env.NATS_USER || "stexor";
+    const natsUser = env.NATS_USER || "platform";
     values.nats_url = `nats://${encodeURIComponent(natsUser)}:${encodeURIComponent(values.nats_password)}@nats:4222`;
   }
   validateValues(values);
   writeStore(values, store);
   materialize(values);
   audit("set", { name });
-  log(`Updated ${name} in Stexor Secret Manager and materialized Docker secret files.`);
+  log(`Updated ${name} in Infra Secret Manager and materialized Docker secret files.`);
 }
 
 function help() {
-  log(`Usage: node scripts/stexor-secret-manager.mjs <command> [--key value]
+  log(`Usage: node scripts/infra-secret-manager.mjs <command> [--key value]
 
 Commands:
   init                 Create/update the encrypted store and materialize Docker secret files.

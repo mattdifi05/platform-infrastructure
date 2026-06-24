@@ -1,6 +1,6 @@
-\connect stexor_app
+\connect app_db
 
-ALTER TABLE stexor_account.sessions
+ALTER TABLE app_account.sessions
   ADD COLUMN IF NOT EXISTS device_type text NOT NULL DEFAULT 'unknown',
   ADD COLUMN IF NOT EXISTS device_vendor text NOT NULL DEFAULT '',
   ADD COLUMN IF NOT EXISTS device_model text NOT NULL DEFAULT '',
@@ -49,10 +49,10 @@ ALTER TABLE stexor_account.sessions
   ADD COLUMN IF NOT EXISTS reduced_motion boolean,
   ADD COLUMN IF NOT EXISTS forced_colors boolean;
 
-ALTER TABLE stexor_account.sessions
+ALTER TABLE app_account.sessions
   ALTER COLUMN downlink_mbps TYPE numeric(9,3);
 
-UPDATE stexor_account.sessions
+UPDATE app_account.sessions
 SET
   browser_name = coalesce(nullif(browser_name, ''), browser),
   ip_version = case
@@ -64,27 +64,27 @@ SET
 WHERE browser_name = ''
    OR ip_version = 'unknown';
 
-ALTER TABLE stexor_account.sessions
+ALTER TABLE app_account.sessions
   DROP CONSTRAINT IF EXISTS sessions_device_type_valid,
   ADD CONSTRAINT sessions_device_type_valid CHECK (device_type IN ('bot', 'desktop', 'mobile', 'tablet', 'unknown'));
 
-ALTER TABLE stexor_account.sessions
+ALTER TABLE app_account.sessions
   DROP CONSTRAINT IF EXISTS sessions_ip_version_valid,
   ADD CONSTRAINT sessions_ip_version_valid CHECK (ip_version IN ('IPv4', 'IPv6', 'unknown'));
 
-ALTER TABLE stexor_account.sessions
+ALTER TABLE app_account.sessions
   DROP CONSTRAINT IF EXISTS sessions_network_type_valid,
   ADD CONSTRAINT sessions_network_type_valid CHECK (network_type IN ('bluetooth', 'cellular', 'ethernet', 'mixed', 'none', 'other', 'unknown', 'wifi', 'wimax'));
 
-ALTER TABLE stexor_account.sessions
+ALTER TABLE app_account.sessions
   DROP CONSTRAINT IF EXISTS sessions_effective_network_type_valid,
   ADD CONSTRAINT sessions_effective_network_type_valid CHECK (effective_network_type IN ('', 'slow-2g', '2g', '3g', '4g', 'unknown'));
 
-ALTER TABLE stexor_account.sessions
+ALTER TABLE app_account.sessions
   DROP CONSTRAINT IF EXISTS sessions_color_scheme_valid,
   ADD CONSTRAINT sessions_color_scheme_valid CHECK (color_scheme IN ('dark', 'light', 'no-preference', 'unknown'));
 
-ALTER TABLE stexor_account.sessions
+ALTER TABLE app_account.sessions
   DROP CONSTRAINT IF EXISTS sessions_network_measurements_valid,
   ADD CONSTRAINT sessions_network_measurements_valid CHECK (
     (downlink_mbps IS NULL OR downlink_mbps >= 0)
@@ -103,4 +103,4 @@ ALTER TABLE stexor_account.sessions
     AND (max_touch_points IS NULL OR max_touch_points >= 0)
   );
 
-COMMENT ON COLUMN stexor_account.sessions.metadata IS 'Flexible session telemetry such as client network API availability and source confidence.';
+COMMENT ON COLUMN app_account.sessions.metadata IS 'Flexible session telemetry such as client network API availability and source confidence.';

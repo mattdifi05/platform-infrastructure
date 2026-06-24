@@ -10,7 +10,7 @@
     {
       "id": "ssl",
       "recommended_value": "full_strict",
-      "reason": "Use Full (strict) only after the Hostinger origin certificate is valid for every proxied hostname."
+      "reason": "Use Full (strict) only after the VPS origin certificate is valid for every proxied hostname."
     },
     {
       "id": "dns_records",

@@ -2,4 +2,4 @@
 set -eu
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-exec "$SCRIPT_DIR/stexor-ops.sh" alert-evidence "$@"
+exec "$SCRIPT_DIR/infra-ops.sh" alert-evidence "$@"

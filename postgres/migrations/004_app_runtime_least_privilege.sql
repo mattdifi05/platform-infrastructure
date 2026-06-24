@@ -2,72 +2,72 @@ BEGIN;
 
 DO $$
 BEGIN
-  CREATE ROLE stexor_app_account_rw NOLOGIN;
+  CREATE ROLE app_db_account_rw NOLOGIN;
 EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
 
 DO $$
 BEGIN
-  CREATE ROLE stexor_app_auth_rw NOLOGIN;
+  CREATE ROLE app_db_auth_rw NOLOGIN;
 EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
 
 DO $$
 BEGIN
-  CREATE ROLE stexor_app_audit_rw NOLOGIN;
+  CREATE ROLE app_db_audit_rw NOLOGIN;
 EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
 
-REVOKE ALL ON ALL TABLES IN SCHEMA stexor_account FROM stexor_app_user;
-REVOKE ALL ON ALL SEQUENCES IN SCHEMA stexor_account FROM stexor_app_user;
-ALTER DEFAULT PRIVILEGES IN SCHEMA stexor_account REVOKE ALL ON TABLES FROM stexor_app_user;
-ALTER DEFAULT PRIVILEGES IN SCHEMA stexor_account REVOKE ALL ON SEQUENCES FROM stexor_app_user;
+REVOKE ALL ON ALL TABLES IN SCHEMA app_account FROM app_user;
+REVOKE ALL ON ALL SEQUENCES IN SCHEMA app_account FROM app_user;
+ALTER DEFAULT PRIVILEGES IN SCHEMA app_account REVOKE ALL ON TABLES FROM app_user;
+ALTER DEFAULT PRIVILEGES IN SCHEMA app_account REVOKE ALL ON SEQUENCES FROM app_user;
 
-GRANT USAGE ON SCHEMA stexor_account TO stexor_app_account_rw, stexor_app_auth_rw, stexor_app_audit_rw;
-GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA stexor_account TO stexor_app_account_rw, stexor_app_auth_rw, stexor_app_audit_rw;
+GRANT USAGE ON SCHEMA app_account TO app_db_account_rw, app_db_auth_rw, app_db_audit_rw;
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA app_account TO app_db_account_rw, app_db_auth_rw, app_db_audit_rw;
 
 GRANT SELECT, INSERT, UPDATE ON
-  stexor_account.accounts,
-  stexor_account.account_roles,
-  stexor_account.account_security_settings,
-  stexor_account.subscriptions
-TO stexor_app_account_rw;
+  app_account.accounts,
+  app_account.account_roles,
+  app_account.account_security_settings,
+  app_account.subscriptions
+TO app_db_account_rw;
 
 GRANT SELECT ON
-  stexor_account.service_catalog,
-  stexor_account.security_policies
-TO stexor_app_account_rw;
+  app_account.service_catalog,
+  app_account.security_policies
+TO app_db_account_rw;
 
 GRANT SELECT, INSERT, UPDATE ON
-  stexor_account.passkeys,
-  stexor_account.sessions,
-  stexor_account.backup_code_sets,
-  stexor_account.backup_codes,
-  stexor_account.device_approval_requests,
-  stexor_account.email_otp_challenges
-TO stexor_app_auth_rw;
+  app_account.passkeys,
+  app_account.sessions,
+  app_account.backup_code_sets,
+  app_account.backup_codes,
+  app_account.device_approval_requests,
+  app_account.email_otp_challenges
+TO app_db_auth_rw;
 
 GRANT SELECT, INSERT, UPDATE ON
-  stexor_account.audit_events,
-  stexor_account.email_outbox
-TO stexor_app_audit_rw;
+  app_account.audit_events,
+  app_account.email_outbox
+TO app_db_audit_rw;
 
 GRANT SELECT ON
-  stexor_account.email_templates,
-  stexor_account.email_delivery_settings
-TO stexor_app_audit_rw;
+  app_account.email_templates,
+  app_account.email_delivery_settings
+TO app_db_audit_rw;
 
-ALTER DEFAULT PRIVILEGES IN SCHEMA stexor_account GRANT SELECT, INSERT, UPDATE ON TABLES TO stexor_app_account_rw;
-ALTER DEFAULT PRIVILEGES IN SCHEMA stexor_account GRANT USAGE, SELECT ON SEQUENCES TO stexor_app_account_rw;
+ALTER DEFAULT PRIVILEGES IN SCHEMA app_account GRANT SELECT, INSERT, UPDATE ON TABLES TO app_db_account_rw;
+ALTER DEFAULT PRIVILEGES IN SCHEMA app_account GRANT USAGE, SELECT ON SEQUENCES TO app_db_account_rw;
 
-GRANT stexor_app_account_rw TO stexor_app_user;
-GRANT stexor_app_auth_rw TO stexor_app_user;
-GRANT stexor_app_audit_rw TO stexor_app_user;
+GRANT app_db_account_rw TO app_user;
+GRANT app_db_auth_rw TO app_user;
+GRANT app_db_audit_rw TO app_user;
 
-INSERT INTO stexor_account.security_policies (key, value, description)
+INSERT INTO app_account.security_policies (key, value, description)
 VALUES (
   'app_runtime_db_privileges',
-  '{"directBroadGrants":false,"deletePrivilege":false,"splitRoles":["stexor_app_account_rw","stexor_app_auth_rw","stexor_app_audit_rw"]}'::jsonb,
+  '{"directBroadGrants":false,"deletePrivilege":false,"splitRoles":["app_db_account_rw","app_db_auth_rw","app_db_audit_rw"]}'::jsonb,
   'Application runtime database privileges are split by capability and exclude broad DELETE grants.'
 )
 ON CONFLICT (key) DO UPDATE SET

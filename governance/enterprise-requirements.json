@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "scope": "stexor-platform-infrastructure",
+  "scope": "platform-infrastructure",
   "requirements": [
     {
       "id": "vps-hardening-firewall-fail2ban",
@@ -11,9 +11,9 @@
         { "type": "file", "path": "scripts/vps-hardening-ubuntu.sh" },
         { "type": "pattern", "path": "scripts/vps-hardening-ubuntu.sh", "pattern": "ufw[\\s\\S]*fail2ban[\\s\\S]*auditd[\\s\\S]*apparmor" },
         { "type": "pattern", "path": "scripts/vps-host-readiness.sh", "pattern": "ufw-active[\\s\\S]*fail2ban-active[\\s\\S]*ssh-hardening" },
-        { "type": "workflow", "pattern": "Run VPS evidence on Hostinger[\\s\\S]*vps-hardening-ubuntu\\.sh[\\s\\S]*vps-host-readiness\\.sh" }
+        { "type": "workflow", "pattern": "Run VPS evidence on VPS[\\s\\S]*vps-hardening-ubuntu\\.sh[\\s\\S]*vps-host-readiness\\.sh" }
       ],
-      "liveProof": "Run vps-hardening-ubuntu.sh --apply and vps-host-readiness.sh --enforce on the Hostinger Ubuntu LTS VPS."
+      "liveProof": "Run vps-hardening-ubuntu.sh --apply and vps-host-readiness.sh --enforce on the VPS Ubuntu LTS VPS."
     },
     {
       "id": "real-dns",
@@ -22,7 +22,7 @@
       "evidence": [
         { "type": "file", "path": "scripts/production-preflight.sh" },
         { "type": "command", "name": "production-preflight" },
-        { "type": "pattern", "path": "scripts/stexor-ops.mjs", "pattern": "async function productionPreflight[\\s\\S]*(dns|resolve|host)" }
+        { "type": "pattern", "path": "scripts/infra-ops.mjs", "pattern": "async function productionPreflight[\\s\\S]*(dns|resolve|host)" }
       ],
       "liveProof": "Run production-preflight with final production domains after Cloudflare DNS is configured."
     },
@@ -42,7 +42,7 @@
       "title": "Integrated secrets manager and mounted secrets",
       "state": "proprietary-integrated",
       "evidence": [
-        { "type": "file", "path": "scripts/stexor-secret-manager.mjs" },
+        { "type": "file", "path": "scripts/infra-secret-manager.mjs" },
         { "type": "file", "path": "compose.managed-secrets.yaml" },
         { "type": "workflow", "pattern": "Managed secrets preflight[\\s\\S]*managed-secrets-preflight" }
       ],
@@ -54,7 +54,7 @@
       "state": "repo-ready",
       "evidence": [
         { "type": "command", "name": "secret-scan" },
-        { "type": "pattern", "path": "scripts/stexor-secret-manager.mjs", "pattern": "rotationDays" },
+        { "type": "pattern", "path": "scripts/infra-secret-manager.mjs", "pattern": "rotationDays" },
         { "type": "workflow", "pattern": "Secret scan[\\s\\S]*secret-scan" }
       ],
       "liveProof": "Rotate production secrets according to the runbook and keep rotation evidence."
@@ -76,7 +76,7 @@
       "state": "repo-ready",
       "evidence": [
         { "type": "file", "path": ".github/workflows/enterprise-infra.yml" },
-        { "type": "pattern", "path": ".github/workflows/enterprise-infra.yml", "pattern": "deploy-hostinger[\\s\\S]*environment:[\\s\\S]*production" },
+        { "type": "pattern", "path": ".github/workflows/enterprise-infra.yml", "pattern": "deploy-vps[\\s\\S]*environment:[\\s\\S]*production" },
         { "type": "command", "name": "github-actions-config" }
       ],
       "liveProof": "Configure GitHub environments, secrets and deployment approvals on the live repository."
@@ -121,7 +121,7 @@
       "state": "repo-ready",
       "evidence": [
         { "type": "file", "path": "compose.waf.yaml" },
-        { "type": "file", "path": "cloudflare/stexor-zone-waf-rules.json" },
+        { "type": "file", "path": "cloudflare/zone-waf-rules.json" },
         { "type": "command", "name": "waf-smoke" }
       ],
       "liveProof": "Apply Cloudflare WAF rules and pass WAF smoke tests from the public edge."
@@ -143,8 +143,8 @@
       "state": "repo-ready",
       "evidence": [
         { "type": "command", "name": "account-integration-tests" },
-        { "type": "pattern", "path": "scripts/stexor-ops.mjs", "pattern": "backup code one-time reuse block" },
-        { "type": "pattern", "path": "scripts/stexor-ops.mjs", "pattern": "passkey" }
+        { "type": "pattern", "path": "scripts/infra-ops.mjs", "pattern": "backup code one-time reuse block" },
+        { "type": "pattern", "path": "scripts/infra-ops.mjs", "pattern": "passkey" }
       ],
       "liveProof": "Run account integration tests against staging before production promotion."
     },
@@ -234,7 +234,7 @@
         { "type": "command", "name": "ha-config-check" },
         { "type": "workflow", "pattern": "HA configuration check[\\s\\S]*ha-config-check" }
       ],
-      "liveProof": "Deploy to a real multi-node target or document the accepted single-node Hostinger risk."
+      "liveProof": "Deploy to a real multi-node target or document the accepted single-node VPS risk."
     },
     {
       "id": "zero-downtime-rollback",

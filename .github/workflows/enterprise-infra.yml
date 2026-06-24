@@ -28,8 +28,8 @@ jobs:
 
       - name: Prepare optional source placeholder
         run: |
-          mkdir -p .tmp/optional-node-source
-          printf 'Infrastructure CI source placeholder; project repositories are intentionally not checked out here.\n' > .tmp/optional-node-source/.infra-only
+          mkdir -p .tmp/optional-project-source
+          printf 'Infrastructure CI source placeholder; project repositories are intentionally not checked out here.\n' > .tmp/optional-project-source/.infra-only
 
       - name: Prepare local secret files
         run: |
@@ -43,37 +43,37 @@ jobs:
       - name: Render local WAF compose
         run: |
           cp .env.example .env
-          printf '\nNODE_SOURCE_DIR=./.tmp/optional-node-source\n' >> .env
+          printf '\nPROJECT_SOURCE_DIR=./.tmp/optional-project-source\n' >> .env
           docker network create enterprise_net || true
           docker volume create enterprise_mariadb_data || true
-          docker compose --env-file .env -p stexor_platform_ci \
+          docker compose --env-file .env -p platform_ops_ci \
             -f compose.yaml \
             -f compose.build.yaml \
             -f compose.secrets.yaml \
             -f compose.waf.yaml \
             config --quiet
 
-      - name: Render Hostinger WAF compose
+      - name: Render VPS WAF compose
         run: |
-          docker compose --env-file .env.hostinger.example -p stexor_platform_vps_ci \
+          docker compose --env-file .env.vps.example -p platform_infra_vps_ci \
             -f compose.yaml \
             -f compose.build.yaml \
             -f compose.secrets.yaml \
-            -f compose.hostinger.yaml \
+            -f compose.vps.yaml \
             -f compose.waf.yaml \
-            -f compose.hostinger-waf.yaml \
+            -f compose.vps-waf.yaml \
             config --quiet
 
       - name: Render staging and backup compose
         run: |
-          docker compose --env-file .env -p stexor_platform_staging_ci \
+          docker compose --env-file .env -p platform_infra_staging_ci \
             -f compose.yaml \
             -f compose.build.yaml \
             -f compose.secrets.yaml \
             -f compose.waf.yaml \
             -f compose.staging.yaml \
             config --quiet
-          docker compose --env-file .env -p stexor_platform_backup_ci \
+          docker compose --env-file .env -p platform_ops_backup_ci \
             -f compose.yaml \
             -f compose.secrets.yaml \
             -f compose.backup-scheduler.yaml \
@@ -81,123 +81,123 @@ jobs:
 
       - name: Backup scheduler dry run
         run: |
-          docker build -f docker/ops.Dockerfile -t stexor/ops:ci .
+          docker build -f docker/ops.Dockerfile -t platform/ops:ci .
           docker run --rm \
             -e BACKUP_SCHEDULER_DRY_RUN=true \
-            -e STEXOR_INFRA_HOST_ROOT="${{ github.workspace }}" \
-            -e STEXOR_SOURCE_HOST_ROOT="${{ github.workspace }}/.tmp/optional-node-source" \
+            -e PLATFORM_INFRA_HOST_ROOT="${{ github.workspace }}" \
+            -e PROJECT_SOURCE_HOST_ROOT="${{ github.workspace }}/.tmp/optional-project-source" \
             -v /var/run/docker.sock:/var/run/docker.sock \
             -v "${{ github.workspace }}:/infra:ro" \
-            -v "${{ github.workspace }}/.tmp/optional-node-source:/src_stexor:ro" \
+            -v "${{ github.workspace }}/.tmp/optional-project-source:/project:ro" \
             --entrypoint sh \
-            stexor/ops:ci \
+            platform/ops:ci \
             /infra/scripts/backup-scheduler.sh
 
       - name: External uptime manifest dry run
-        run: sh ./scripts/stexor-ops.sh external-uptime-check --dryRun
+        run: sh ./scripts/infra-ops.sh external-uptime-check --dryRun
 
       - name: Cloudflare Access admin dry run
-        run: sh ./scripts/stexor-ops.sh cloudflare-access-admin --manifest cloudflare/access-admin.example.json
+        run: sh ./scripts/infra-ops.sh cloudflare-access-admin --manifest cloudflare/access-admin.example.json
 
       - name: Cloudflare from-zero dry run
-        run: sh ./scripts/stexor-ops.sh cloudflare-from-zero --manifest cloudflare/from-zero.example.json
+        run: sh ./scripts/infra-ops.sh cloudflare-from-zero --manifest cloudflare/from-zero.example.json
 
       - name: GitHub branch protection dry run
-        run: sh ./scripts/stexor-ops.sh github-branch-protection --repo "${{ github.repository }}" --branch main --dryRun
+        run: sh ./scripts/infra-ops.sh github-branch-protection --repo "${{ github.repository }}" --branch main --dryRun
 
       - name: GitHub environments dry run
-        run: sh ./scripts/stexor-ops.sh github-environments --repo "${{ github.repository }}" --dryRun
+        run: sh ./scripts/infra-ops.sh github-environments --repo "${{ github.repository }}" --dryRun
 
       - name: GitHub Actions runtime config dry run
-        run: sh ./scripts/stexor-ops.sh github-actions-config --repo "${{ github.repository }}"
+        run: sh ./scripts/infra-ops.sh github-actions-config --repo "${{ github.repository }}"
 
       - name: GitHub Actions run evidence plan
-        run: sh ./scripts/stexor-ops.sh github-actions-run-evidence --repo "${{ github.repository }}" --workflow enterprise-infra.yml --branch main --sha "${{ github.sha }}"
+        run: sh ./scripts/infra-ops.sh github-actions-run-evidence --repo "${{ github.repository }}" --workflow enterprise-infra.yml --branch main --sha "${{ github.sha }}"
 
       - name: Secret scan
-        run: sh ./scripts/stexor-ops.sh secret-scan
+        run: sh ./scripts/infra-ops.sh secret-scan
 
       - name: HA configuration check
-        run: sh ./scripts/stexor-ops.sh ha-config-check
+        run: sh ./scripts/infra-ops.sh ha-config-check
 
       - name: Managed secrets preflight
-        run: sh ./scripts/stexor-ops.sh managed-secrets-preflight
+        run: sh ./scripts/infra-ops.sh managed-secrets-preflight
 
       - name: Compose healthcheck coverage
-        run: sh ./scripts/stexor-ops.sh compose-healthcheck-coverage
+        run: sh ./scripts/infra-ops.sh compose-healthcheck-coverage
 
       - name: Rate limit evidence
-        run: sh ./scripts/stexor-ops.sh rate-limit-evidence
+        run: sh ./scripts/infra-ops.sh rate-limit-evidence
 
       - name: Audit log evidence
-        run: sh ./scripts/stexor-ops.sh audit-log-evidence
+        run: sh ./scripts/infra-ops.sh audit-log-evidence
 
       - name: Retention evidence
-        run: sh ./scripts/stexor-ops.sh retention-evidence
+        run: sh ./scripts/infra-ops.sh retention-evidence
 
       - name: Secret rotation evidence plan
-        run: sh ./scripts/stexor-ops.sh secret-rotation-evidence
+        run: sh ./scripts/infra-ops.sh secret-rotation-evidence
 
       - name: DR readiness check
-        run: sh ./scripts/stexor-ops.sh dr-readiness-check
+        run: sh ./scripts/infra-ops.sh dr-readiness-check
 
       - name: DR evidence summary
-        run: sh ./scripts/stexor-ops.sh dr-evidence
+        run: sh ./scripts/infra-ops.sh dr-evidence
 
       - name: Off-site restore drill plan
-        run: sh ./scripts/stexor-ops.sh offsite-restore-drill-restic --planOnly
+        run: sh ./scripts/infra-ops.sh offsite-restore-drill-restic --planOnly
 
       - name: Release evidence plan
-        run: sh ./scripts/stexor-ops.sh release-evidence --planOnly
+        run: sh ./scripts/infra-ops.sh release-evidence --planOnly
 
       - name: Release artifact gate dry run
         run: |
           mkdir -p .tmp/ci-sbom
           printf '%s\n' \
-            'BACKEND_IMAGE=registry.example/stexor/backend:ci@sha256:1111111111111111111111111111111111111111111111111111111111111111' \
-            'WEB_IMAGE=registry.example/stexor/web:ci@sha256:2222222222222222222222222222222222222222222222222222222222222222' \
-            'WORKER_NOTIFICATIONS_IMAGE=registry.example/stexor/worker-notifications:ci@sha256:3333333333333333333333333333333333333333333333333333333333333333' \
-            'WORKER_JOBS_IMAGE=registry.example/stexor/worker-jobs:ci@sha256:4444444444444444444444444444444444444444444444444444444444444444' \
+            'BACKEND_IMAGE=registry.example/platform/backend:ci@sha256:1111111111111111111111111111111111111111111111111111111111111111' \
+            'WEB_IMAGE=registry.example/platform/web:ci@sha256:2222222222222222222222222222222222222222222222222222222222222222' \
+            'WORKER_NOTIFICATIONS_IMAGE=registry.example/platform/worker-notifications:ci@sha256:3333333333333333333333333333333333333333333333333333333333333333' \
+            'WORKER_JOBS_IMAGE=registry.example/platform/worker-jobs:ci@sha256:4444444444444444444444444444444444444444444444444444444444444444' \
             > .tmp/ci-release.env
           printf '%s\n' '{"bomFormat":"CycloneDX","specVersion":"1.5","components":[]}' > .tmp/ci-sbom/pnpm-sbom-ci.json
-          sh ./scripts/stexor-ops.sh release-artifact-gate --envFile .tmp/ci-release.env --sbom .tmp/ci-sbom/pnpm-sbom-ci.json
+          sh ./scripts/infra-ops.sh release-artifact-gate --envFile .tmp/ci-release.env --sbom .tmp/ci-sbom/pnpm-sbom-ci.json
 
       - name: Alert evidence summary
-        run: sh ./scripts/stexor-ops.sh alert-evidence
+        run: sh ./scripts/infra-ops.sh alert-evidence
 
       - name: Production go-no-go summary
-        run: sh ./scripts/stexor-ops.sh production-go-no-go
+        run: sh ./scripts/infra-ops.sh production-go-no-go
 
       - name: Pre go-live evidence report
-        run: sh ./scripts/stexor-ops.sh pre-go-live-evidence --infraOnly --repo "${{ github.repository }}" --allowFailures
+        run: sh ./scripts/infra-ops.sh pre-go-live-evidence --infraOnly --repo "${{ github.repository }}" --allowFailures
 
       - name: Evidence bundle smoke
-        run: sh ./scripts/stexor-ops.sh evidence-bundle --noArchive
+        run: sh ./scripts/infra-ops.sh evidence-bundle --noArchive
 
       - name: Evidence bundle integrity verify
-        run: sh ./scripts/stexor-ops.sh evidence-bundle-verify
+        run: sh ./scripts/infra-ops.sh evidence-bundle-verify
 
       - name: Linux portability check
-        run: sh ./scripts/stexor-ops.sh linux-portability-check
+        run: sh ./scripts/infra-ops.sh linux-portability-check
 
       - name: Enterprise requirements traceability
-        run: sh ./scripts/stexor-ops.sh enterprise-requirements-check
+        run: sh ./scripts/infra-ops.sh enterprise-requirements-check
 
       - name: Production readiness checklist
-        run: sh ./scripts/stexor-ops.sh enterprise-requirements-check --manifest governance/production-readiness.json
+        run: sh ./scripts/infra-ops.sh enterprise-requirements-check --manifest governance/production-readiness.json
 
       - name: Production live proof gate rejects missing evidence
         run: |
-          if sh ./scripts/stexor-ops.sh enterprise-requirements-check --manifest governance/production-readiness.json --requireLiveProofs; then
+          if sh ./scripts/infra-ops.sh enterprise-requirements-check --manifest governance/production-readiness.json --requireLiveProofs; then
             echo "Live proof gate passed without real production evidence." >&2
             exit 1
           fi
 
       - name: Repository coverage audit
-        run: sh ./scripts/stexor-ops.sh repo-coverage-check
+        run: sh ./scripts/infra-ops.sh repo-coverage-check
 
       - name: Run infrastructure static policy gate
-        run: sh ./scripts/stexor-ops.sh static-security-check --infraOnly
+        run: sh ./scripts/infra-ops.sh static-security-check --infraOnly
 
       - name: Upload CI evidence reports
         if: always()
@@ -243,7 +243,7 @@ jobs:
           name: zap-baseline
           path: security/dast/
 
-  deploy-hostinger:
+  deploy-vps:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     needs:
@@ -253,7 +253,7 @@ jobs:
     environment:
       name: production
     concurrency:
-      group: stexor-production-deploy
+      group: infra-production-deploy
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@v5
@@ -265,7 +265,7 @@ jobs:
           install -m 700 -d ~/.ssh
           printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
-      - name: Deploy to Hostinger VPS
+      - name: Deploy to VPS
         env:
           DEPLOY_REMOTE: ${{ vars.DEPLOY_REMOTE }}
           DEPLOY_REMOTE_DIR: ${{ vars.DEPLOY_REMOTE_DIR }}
@@ -278,4 +278,4 @@ jobs:
           DEPLOY_PRE_GO_LIVE_RESTORE_DRILL: "1"
           DEPLOY_PRE_GO_LIVE_OFFSITE_RESTORE_DRY_RUN: "1"
           GIT_SSH_COMMAND: ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=accept-new
-        run: sh ./scripts/deploy-hostinger.sh
+        run: sh ./scripts/deploy-vps.sh

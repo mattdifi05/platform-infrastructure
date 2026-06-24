@@ -1,9 +1,9 @@
 services:
   backend:
-    image: ${BACKEND_BUILD_IMAGE:-stexor/backend:local}
+    image: ${BACKEND_BUILD_IMAGE:-platform/backend:local}
     build:
-      context: ${NODE_SOURCE_DIR:-../src_stexor}
-      dockerfile: ../stexor-platform-infrastructure/docker/backend.Dockerfile
+      context: ${PROJECT_SOURCE_DIR:-../project}
+      dockerfile: ../platform-infrastructure/docker/backend.Dockerfile
       args:
         NODE_IMAGE: ${NODE_IMAGE:-node:26.3.1-alpine@sha256:a2dc166a387cc6ca1e62d0c8e265e49ca985d6e60abc9fe6e6c3d6ce8e63f606}
         PNPM_VERSION: ${PNPM_VERSION:-11.9.0}
@@ -13,10 +13,10 @@ services:
         - type=local,dest=${DOCKER_BUILD_CACHE_DIR:-.docker-build-cache}/backend,mode=max
 
   web:
-    image: ${WEB_BUILD_IMAGE:-stexor/web:local}
+    image: ${WEB_BUILD_IMAGE:-platform/web:local}
     build:
-      context: ${NODE_SOURCE_DIR:-../src_stexor}
-      dockerfile: ../stexor-platform-infrastructure/docker/web.Dockerfile
+      context: ${PROJECT_SOURCE_DIR:-../project}
+      dockerfile: ../platform-infrastructure/docker/web.Dockerfile
       args:
         NODE_IMAGE: ${NODE_IMAGE:-node:26.3.1-alpine@sha256:a2dc166a387cc6ca1e62d0c8e265e49ca985d6e60abc9fe6e6c3d6ce8e63f606}
         PNPM_VERSION: ${PNPM_VERSION:-11.9.0}
@@ -29,17 +29,17 @@ services:
         ACCOUNT_HOST: ${ACCOUNT_HOST:-account.localhost.com}
         ACCOUNT_PUBLIC_URL: ${ACCOUNT_PUBLIC_URL:-https://account.localhost.com}
         NEXTAUTH_URL: ${NEXTAUTH_URL:-https://account.localhost.com}
-        KEYCLOAK_ISSUER: ${KEYCLOAK_ISSUER:-https://auth.localhost.com/realms/stexor}
+        KEYCLOAK_ISSUER: ${KEYCLOAK_ISSUER:-https://auth.localhost.com/realms/platform}
       cache_from:
         - type=local,src=${DOCKER_BUILD_CACHE_DIR:-.docker-build-cache}/web
       cache_to:
         - type=local,dest=${DOCKER_BUILD_CACHE_DIR:-.docker-build-cache}/web,mode=max
 
   worker-notifications:
-    image: ${WORKER_NOTIFICATIONS_BUILD_IMAGE:-stexor/worker-notifications:local}
+    image: ${WORKER_NOTIFICATIONS_BUILD_IMAGE:-platform/worker-notifications:local}
     build:
-      context: ${NODE_SOURCE_DIR:-../src_stexor}
-      dockerfile: ../stexor-platform-infrastructure/docker/worker.Dockerfile
+      context: ${PROJECT_SOURCE_DIR:-../project}
+      dockerfile: ../platform-infrastructure/docker/worker.Dockerfile
       args:
         NODE_IMAGE: ${NODE_IMAGE:-node:26.3.1-alpine@sha256:a2dc166a387cc6ca1e62d0c8e265e49ca985d6e60abc9fe6e6c3d6ce8e63f606}
         PNPM_VERSION: ${PNPM_VERSION:-11.9.0}
@@ -50,10 +50,10 @@ services:
         - type=local,dest=${DOCKER_BUILD_CACHE_DIR:-.docker-build-cache}/worker-notifications,mode=max
 
   worker-jobs:
-    image: ${WORKER_JOBS_BUILD_IMAGE:-stexor/worker-jobs:local}
+    image: ${WORKER_JOBS_BUILD_IMAGE:-platform/worker-jobs:local}
     build:
-      context: ${NODE_SOURCE_DIR:-../src_stexor}
-      dockerfile: ../stexor-platform-infrastructure/docker/worker.Dockerfile
+      context: ${PROJECT_SOURCE_DIR:-../project}
+      dockerfile: ../platform-infrastructure/docker/worker.Dockerfile
       args:
         NODE_IMAGE: ${NODE_IMAGE:-node:26.3.1-alpine@sha256:a2dc166a387cc6ca1e62d0c8e265e49ca985d6e60abc9fe6e6c3d6ce8e63f606}
         PNPM_VERSION: ${PNPM_VERSION:-11.9.0}

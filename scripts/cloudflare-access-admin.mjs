@@ -79,7 +79,7 @@ function writeEvidenceReport({ mode, status, manifest, applications, issues = []
   const markdownPath = path.join(directory, `${baseName}.md`);
   fs.writeFileSync(jsonPath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
   fs.writeFileSync(markdownPath, [
-    "# Stexor Cloudflare Access Admin Evidence",
+    "# Platform Cloudflare Access Admin Evidence",
     "",
     `Status: ${status}`,
     `Mode: ${mode}`,

@@ -1,4 +1,4 @@
-# Stexor Enterprise Maturity Matrix
+# Platform Enterprise Maturity Matrix
 
 Questo documento traduce i 30 punti enterprise in controlli concreti. Le voci `repo-ready` sono implementate o automatizzate nel repository; le voci `environment-ready` richiedono VPS, DNS, provider o policy operative reali.
 
@@ -9,7 +9,7 @@ Questo documento traduce i 30 punti enterprise in controlli concreti. Le voci `r
 | 1 | VPS hardening OS/firewall/fail2ban | Gate-ready | Preflight e runbook bloccano deploy incompleto |
 | 2 | DNS reali | Gate-ready | `production-preflight.sh` verifica domini pubblici e risoluzione DNS |
 | 3 | HTTPS pubblico ACME | Repo-ready | `compose.prod.yaml` con Let's Encrypt HTTP challenge |
-| 4 | Secrets manager | Proprietary integrated | `stexor-secret-manager`, encrypted store, audit log, `/run/secrets/*`, `*_FILE`, keyring rotation |
+| 4 | Secrets manager | Proprietary integrated | `infra-secret-manager`, encrypted store, audit log, `/run/secrets/*`, `*_FILE`, keyring rotation |
 | 5 | Rotazione credenziali | Repo-ready | Runbook e secret scan gate |
 | 6 | Registry immagini privato | Repo-ready | Dockerfile prod e `compose.build.yaml`; prod usa immagini versionate |
 | 7 | CI/CD remoto | Repo-ready | Workflow GitHub, `pnpm enterprise:check` e release/deploy gate |
@@ -40,18 +40,18 @@ Questo documento traduce i 30 punti enterprise in controlli concreti. Le voci `r
 ## Gate locale
 
 ```sh
-cd /opt/stexor/src
+cd /opt/platform/src
 pnpm enterprise:check
 ```
 
 Oppure direttamente:
 
 ```sh
-cd /opt/stexor/stexor-platform-infrastructure
+cd /opt/platform/platform-infrastructure
 sh ./scripts/enterprise-hardening-audit.sh
-sh ./scripts/stexor-ops.sh enterprise-requirements-check
-sh ./scripts/stexor-ops.sh enterprise-requirements-check --manifest governance/production-readiness.json
-sh ./scripts/stexor-ops.sh enterprise-requirements-check --manifest governance/production-readiness.json --requireLiveProofs
+sh ./scripts/infra-ops.sh enterprise-requirements-check
+sh ./scripts/infra-ops.sh enterprise-requirements-check --manifest governance/production-readiness.json
+sh ./scripts/infra-ops.sh enterprise-requirements-check --manifest governance/production-readiness.json --requireLiveProofs
 ```
 
 La matrice machine-readable vive in `governance/enterprise-requirements.json`.
@@ -75,9 +75,9 @@ PostgreSQL rimane source of truth per account, sessioni, passkey, audit, ruoli e
 ## Secret manager locale
 
 ```sh
-cd /opt/stexor/stexor-platform-infrastructure
-sh ./scripts/stexor-secret-manager.sh init
-docker compose -f compose.yaml -f compose.secrets.yaml --env-file .env -p stexor_platform_local up -d
-sh ./scripts/stexor-secret-manager.sh verify
-docker compose -f compose.yaml -f compose.secrets.yaml --env-file .env -p stexor_platform_local config --quiet
+cd /opt/platform/platform-infrastructure
+sh ./scripts/infra-secret-manager.sh init
+docker compose -f compose.yaml -f compose.secrets.yaml --env-file .env -p platform_infra_local up -d
+sh ./scripts/infra-secret-manager.sh verify
+docker compose -f compose.yaml -f compose.secrets.yaml --env-file .env -p platform_infra_local config --quiet
 ```

@@ -1,8 +1,8 @@
-\connect stexor_app
+\connect app_db
 
 BEGIN;
 
-CREATE OR REPLACE FUNCTION stexor_account.prevent_audit_event_mutation()
+CREATE OR REPLACE FUNCTION app_account.prevent_audit_event_mutation()
 RETURNS trigger
 LANGUAGE plpgsql
 AS $$
@@ -18,6 +18,6 @@ BEGIN
 END;
 $$;
 
-COMMENT ON FUNCTION stexor_account.prevent_audit_event_mutation() IS 'Audit events are append-only; only FK-driven account_id nullification is allowed for account deletion/anonymization cleanup.';
+COMMENT ON FUNCTION app_account.prevent_audit_event_mutation() IS 'Audit events are append-only; only FK-driven account_id nullification is allowed for account deletion/anonymization cleanup.';
 
 COMMIT;

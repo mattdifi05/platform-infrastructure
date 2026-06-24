@@ -1,59 +1,59 @@
-\connect stexor_app
+\connect app_db
 
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 CREATE EXTENSION IF NOT EXISTS citext;
 
-CREATE SCHEMA IF NOT EXISTS stexor_account;
+CREATE SCHEMA IF NOT EXISTS app_account;
 
 DO $$
 BEGIN
-  CREATE TYPE stexor_account.account_risk_level AS ENUM ('low', 'medium', 'high', 'locked');
+  CREATE TYPE app_account.account_risk_level AS ENUM ('low', 'medium', 'high', 'locked');
 EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
 
 DO $$
 BEGIN
-  CREATE TYPE stexor_account.session_status AS ENUM ('active', 'revoked', 'expired');
+  CREATE TYPE app_account.session_status AS ENUM ('active', 'revoked', 'expired');
 EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
 
 DO $$
 BEGIN
-  CREATE TYPE stexor_account.otp_purpose AS ENUM ('login', 'signup', 'recovery');
+  CREATE TYPE app_account.otp_purpose AS ENUM ('login', 'signup', 'recovery');
 EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
 
 DO $$
 BEGIN
-  CREATE TYPE stexor_account.challenge_status AS ENUM ('pending', 'verified', 'consumed', 'expired', 'failed');
+  CREATE TYPE app_account.challenge_status AS ENUM ('pending', 'verified', 'consumed', 'expired', 'failed');
 EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
 
 DO $$
 BEGIN
-  CREATE TYPE stexor_account.audit_severity AS ENUM ('info', 'success', 'warning', 'critical');
+  CREATE TYPE app_account.audit_severity AS ENUM ('info', 'success', 'warning', 'critical');
 EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
 
 DO $$
 BEGIN
-  CREATE TYPE stexor_account.device_approval_status AS ENUM ('pending', 'approved', 'denied', 'expired');
+  CREATE TYPE app_account.device_approval_status AS ENUM ('pending', 'approved', 'denied', 'expired');
 EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
 
 DO $$
 BEGIN
-  CREATE TYPE stexor_account.subscription_status AS ENUM ('active', 'trial', 'paused', 'cancelled', 'expired');
+  CREATE TYPE app_account.subscription_status AS ENUM ('active', 'trial', 'paused', 'cancelled', 'expired');
 EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
 
 DO $$
 BEGIN
-  CREATE TYPE stexor_account.email_delivery_status AS ENUM ('queued', 'sending', 'sent', 'failed', 'cancelled');
+  CREATE TYPE app_account.email_delivery_status AS ENUM ('queued', 'sending', 'sent', 'failed', 'cancelled');
 EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
 
-CREATE OR REPLACE FUNCTION stexor_account.set_updated_at()
+CREATE OR REPLACE FUNCTION app_account.set_updated_at()
 RETURNS trigger
 LANGUAGE plpgsql
 AS $$
@@ -63,7 +63,7 @@ BEGIN
 END;
 $$;
 
-CREATE TABLE IF NOT EXISTS stexor_account.accounts (
+CREATE TABLE IF NOT EXISTS app_account.accounts (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   external_id text UNIQUE NOT NULL,
   username citext UNIQUE NOT NULL,
@@ -74,7 +74,7 @@ CREATE TABLE IF NOT EXISTS stexor_account.accounts (
   language text NOT NULL DEFAULT 'it-IT',
   country char(2) NOT NULL,
   avatar_initials text NOT NULL,
-  risk_level stexor_account.account_risk_level NOT NULL DEFAULT 'low',
+  risk_level app_account.account_risk_level NOT NULL DEFAULT 'low',
   metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now(),
@@ -82,8 +82,8 @@ CREATE TABLE IF NOT EXISTS stexor_account.accounts (
   CHECK (country = upper(country))
 );
 
-CREATE TABLE IF NOT EXISTS stexor_account.account_security_settings (
-  account_id uuid PRIMARY KEY REFERENCES stexor_account.accounts(id) ON DELETE CASCADE,
+CREATE TABLE IF NOT EXISTS app_account.account_security_settings (
+  account_id uuid PRIMARY KEY REFERENCES app_account.accounts(id) ON DELETE CASCADE,
   passwordless_required boolean NOT NULL DEFAULT true,
   email_otp_enabled boolean NOT NULL DEFAULT true,
   device_approval_enabled boolean NOT NULL DEFAULT true,
@@ -95,9 +95,9 @@ CREATE TABLE IF NOT EXISTS stexor_account.account_security_settings (
   updated_at timestamptz NOT NULL DEFAULT now()
 );
 
-CREATE TABLE IF NOT EXISTS stexor_account.passkeys (
+CREATE TABLE IF NOT EXISTS app_account.passkeys (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  account_id uuid NOT NULL REFERENCES stexor_account.accounts(id) ON DELETE CASCADE,
+  account_id uuid NOT NULL REFERENCES app_account.accounts(id) ON DELETE CASCADE,
   credential_id text UNIQUE NOT NULL,
   public_key bytea NOT NULL,
   counter bigint NOT NULL DEFAULT 0 CHECK (counter >= 0),
@@ -112,13 +112,13 @@ CREATE TABLE IF NOT EXISTS stexor_account.passkeys (
   revoked_at timestamptz
 );
 
-CREATE TABLE IF NOT EXISTS stexor_account.email_otp_challenges (
+CREATE TABLE IF NOT EXISTS app_account.email_otp_challenges (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  account_id uuid REFERENCES stexor_account.accounts(id) ON DELETE CASCADE,
-  purpose stexor_account.otp_purpose NOT NULL,
+  account_id uuid REFERENCES app_account.accounts(id) ON DELETE CASCADE,
+  purpose app_account.otp_purpose NOT NULL,
   destination citext NOT NULL,
   code_hash text NOT NULL,
-  status stexor_account.challenge_status NOT NULL DEFAULT 'pending',
+  status app_account.challenge_status NOT NULL DEFAULT 'pending',
   attempts integer NOT NULL DEFAULT 0 CHECK (attempts >= 0),
   max_attempts integer NOT NULL DEFAULT 5 CHECK (max_attempts BETWEEN 1 AND 20),
   expires_at timestamptz NOT NULL,
@@ -128,24 +128,24 @@ CREATE TABLE IF NOT EXISTS stexor_account.email_otp_challenges (
   created_at timestamptz NOT NULL DEFAULT now()
 );
 
-CREATE TABLE IF NOT EXISTS stexor_account.backup_code_sets (
+CREATE TABLE IF NOT EXISTS app_account.backup_code_sets (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  account_id uuid NOT NULL REFERENCES stexor_account.accounts(id) ON DELETE CASCADE,
+  account_id uuid NOT NULL REFERENCES app_account.accounts(id) ON DELETE CASCADE,
   created_at timestamptz NOT NULL DEFAULT now(),
   revoked_at timestamptz
 );
 
-CREATE TABLE IF NOT EXISTS stexor_account.backup_codes (
+CREATE TABLE IF NOT EXISTS app_account.backup_codes (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  set_id uuid NOT NULL REFERENCES stexor_account.backup_code_sets(id) ON DELETE CASCADE,
+  set_id uuid NOT NULL REFERENCES app_account.backup_code_sets(id) ON DELETE CASCADE,
   code_hash text UNIQUE NOT NULL,
   used_at timestamptz,
   created_at timestamptz NOT NULL DEFAULT now()
 );
 
-CREATE TABLE IF NOT EXISTS stexor_account.sessions (
+CREATE TABLE IF NOT EXISTS app_account.sessions (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  account_id uuid NOT NULL REFERENCES stexor_account.accounts(id) ON DELETE CASCADE,
+  account_id uuid NOT NULL REFERENCES app_account.accounts(id) ON DELETE CASCADE,
   device text NOT NULL,
   device_type text NOT NULL DEFAULT 'unknown' CHECK (device_type IN ('bot', 'desktop', 'mobile', 'tablet', 'unknown')),
   device_vendor text NOT NULL DEFAULT '',
@@ -201,7 +201,7 @@ CREATE TABLE IF NOT EXISTS stexor_account.sessions (
   trusted boolean NOT NULL DEFAULT false,
   current_session boolean NOT NULL DEFAULT false,
   auth_method text NOT NULL DEFAULT 'passkey',
-  status stexor_account.session_status NOT NULL DEFAULT 'active',
+  status app_account.session_status NOT NULL DEFAULT 'active',
   created_at timestamptz NOT NULL DEFAULT now(),
   last_seen_at timestamptz NOT NULL DEFAULT now(),
   expires_at timestamptz NOT NULL,
@@ -209,34 +209,34 @@ CREATE TABLE IF NOT EXISTS stexor_account.sessions (
   metadata jsonb NOT NULL DEFAULT '{}'::jsonb
 );
 
-CREATE TABLE IF NOT EXISTS stexor_account.device_approval_requests (
+CREATE TABLE IF NOT EXISTS app_account.device_approval_requests (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  account_id uuid NOT NULL REFERENCES stexor_account.accounts(id) ON DELETE CASCADE,
+  account_id uuid NOT NULL REFERENCES app_account.accounts(id) ON DELETE CASCADE,
   requesting_device text NOT NULL,
   ip_address inet,
-  status stexor_account.device_approval_status NOT NULL DEFAULT 'pending',
+  status app_account.device_approval_status NOT NULL DEFAULT 'pending',
   approvable_by_session_ids uuid[] NOT NULL DEFAULT ARRAY[]::uuid[],
-  approved_by_session_id uuid REFERENCES stexor_account.sessions(id) ON DELETE SET NULL,
+  approved_by_session_id uuid REFERENCES app_account.sessions(id) ON DELETE SET NULL,
   created_at timestamptz NOT NULL DEFAULT now(),
   expires_at timestamptz NOT NULL,
   approved_at timestamptz,
   denied_at timestamptz
 );
 
-CREATE TABLE IF NOT EXISTS stexor_account.audit_events (
+CREATE TABLE IF NOT EXISTS app_account.audit_events (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  account_id uuid REFERENCES stexor_account.accounts(id) ON DELETE SET NULL,
+  account_id uuid REFERENCES app_account.accounts(id) ON DELETE SET NULL,
   event_type text NOT NULL,
   title text NOT NULL,
   detail text NOT NULL,
-  severity stexor_account.audit_severity NOT NULL DEFAULT 'info',
+  severity app_account.audit_severity NOT NULL DEFAULT 'info',
   ip_address inet,
   device text,
   metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
   created_at timestamptz NOT NULL DEFAULT now()
 );
 
-CREATE TABLE IF NOT EXISTS stexor_account.service_catalog (
+CREATE TABLE IF NOT EXISTS app_account.service_catalog (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   slug text UNIQUE NOT NULL,
   name text NOT NULL,
@@ -247,11 +247,11 @@ CREATE TABLE IF NOT EXISTS stexor_account.service_catalog (
   updated_at timestamptz NOT NULL DEFAULT now()
 );
 
-CREATE TABLE IF NOT EXISTS stexor_account.subscriptions (
+CREATE TABLE IF NOT EXISTS app_account.subscriptions (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  account_id uuid NOT NULL REFERENCES stexor_account.accounts(id) ON DELETE CASCADE,
-  service_id uuid NOT NULL REFERENCES stexor_account.service_catalog(id) ON DELETE RESTRICT,
-  status stexor_account.subscription_status NOT NULL,
+  account_id uuid NOT NULL REFERENCES app_account.accounts(id) ON DELETE CASCADE,
+  service_id uuid NOT NULL REFERENCES app_account.service_catalog(id) ON DELETE RESTRICT,
+  status app_account.subscription_status NOT NULL,
   plan text NOT NULL,
   renewal_date date,
   seats_used integer NOT NULL DEFAULT 1 CHECK (seats_used >= 0),
@@ -264,7 +264,7 @@ CREATE TABLE IF NOT EXISTS stexor_account.subscriptions (
   UNIQUE (account_id, service_id)
 );
 
-CREATE TABLE IF NOT EXISTS stexor_account.email_delivery_settings (
+CREATE TABLE IF NOT EXISTS app_account.email_delivery_settings (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   provider text NOT NULL DEFAULT 'disabled',
   from_email citext NOT NULL,
@@ -281,15 +281,15 @@ CREATE TABLE IF NOT EXISTS stexor_account.email_delivery_settings (
   CHECK (provider <> 'smtp' OR (smtp_host IS NOT NULL AND secret_ref IS NOT NULL))
 );
 
-ALTER TABLE stexor_account.email_delivery_settings
+ALTER TABLE app_account.email_delivery_settings
   DROP CONSTRAINT IF EXISTS email_delivery_settings_check;
-ALTER TABLE stexor_account.email_delivery_settings
+ALTER TABLE app_account.email_delivery_settings
   DROP CONSTRAINT IF EXISTS email_delivery_settings_smtp_requires_host_and_secret;
-ALTER TABLE stexor_account.email_delivery_settings
+ALTER TABLE app_account.email_delivery_settings
   ADD CONSTRAINT email_delivery_settings_smtp_requires_host_and_secret
   CHECK (provider <> 'smtp' OR (smtp_host IS NOT NULL AND secret_ref IS NOT NULL));
 
-CREATE TABLE IF NOT EXISTS stexor_account.email_templates (
+CREATE TABLE IF NOT EXISTS app_account.email_templates (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   template_key text NOT NULL,
   locale text NOT NULL DEFAULT 'it-IT',
@@ -301,14 +301,14 @@ CREATE TABLE IF NOT EXISTS stexor_account.email_templates (
   UNIQUE (template_key, locale)
 );
 
-CREATE TABLE IF NOT EXISTS stexor_account.email_outbox (
+CREATE TABLE IF NOT EXISTS app_account.email_outbox (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  account_id uuid REFERENCES stexor_account.accounts(id) ON DELETE SET NULL,
+  account_id uuid REFERENCES app_account.accounts(id) ON DELETE SET NULL,
   to_email citext NOT NULL,
   purpose text NOT NULL,
   template_key text,
   payload jsonb NOT NULL DEFAULT '{}'::jsonb,
-  status stexor_account.email_delivery_status NOT NULL DEFAULT 'queued',
+  status app_account.email_delivery_status NOT NULL DEFAULT 'queued',
   provider_message_id text,
   attempts integer NOT NULL DEFAULT 0 CHECK (attempts >= 0),
   next_attempt_at timestamptz,
@@ -318,47 +318,47 @@ CREATE TABLE IF NOT EXISTS stexor_account.email_outbox (
   last_error text
 );
 
-CREATE INDEX IF NOT EXISTS idx_accounts_email ON stexor_account.accounts(email);
-CREATE INDEX IF NOT EXISTS idx_accounts_username ON stexor_account.accounts(username);
-CREATE INDEX IF NOT EXISTS idx_passkeys_account ON stexor_account.passkeys(account_id) WHERE revoked_at IS NULL;
-CREATE INDEX IF NOT EXISTS idx_email_otp_account_status ON stexor_account.email_otp_challenges(account_id, status, expires_at);
-CREATE INDEX IF NOT EXISTS idx_sessions_account_status ON stexor_account.sessions(account_id, status, last_seen_at DESC);
-CREATE INDEX IF NOT EXISTS idx_device_approval_account_status ON stexor_account.device_approval_requests(account_id, status, expires_at);
-CREATE INDEX IF NOT EXISTS idx_audit_events_account_created ON stexor_account.audit_events(account_id, created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_email_outbox_status_next ON stexor_account.email_outbox(status, next_attempt_at, created_at);
-CREATE INDEX IF NOT EXISTS idx_subscriptions_account_status ON stexor_account.subscriptions(account_id, status);
+CREATE INDEX IF NOT EXISTS idx_accounts_email ON app_account.accounts(email);
+CREATE INDEX IF NOT EXISTS idx_accounts_username ON app_account.accounts(username);
+CREATE INDEX IF NOT EXISTS idx_passkeys_account ON app_account.passkeys(account_id) WHERE revoked_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_email_otp_account_status ON app_account.email_otp_challenges(account_id, status, expires_at);
+CREATE INDEX IF NOT EXISTS idx_sessions_account_status ON app_account.sessions(account_id, status, last_seen_at DESC);
+CREATE INDEX IF NOT EXISTS idx_device_approval_account_status ON app_account.device_approval_requests(account_id, status, expires_at);
+CREATE INDEX IF NOT EXISTS idx_audit_events_account_created ON app_account.audit_events(account_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_email_outbox_status_next ON app_account.email_outbox(status, next_attempt_at, created_at);
+CREATE INDEX IF NOT EXISTS idx_subscriptions_account_status ON app_account.subscriptions(account_id, status);
 
-DROP TRIGGER IF EXISTS trg_accounts_updated_at ON stexor_account.accounts;
+DROP TRIGGER IF EXISTS trg_accounts_updated_at ON app_account.accounts;
 CREATE TRIGGER trg_accounts_updated_at
-BEFORE UPDATE ON stexor_account.accounts
-FOR EACH ROW EXECUTE FUNCTION stexor_account.set_updated_at();
+BEFORE UPDATE ON app_account.accounts
+FOR EACH ROW EXECUTE FUNCTION app_account.set_updated_at();
 
-DROP TRIGGER IF EXISTS trg_security_updated_at ON stexor_account.account_security_settings;
+DROP TRIGGER IF EXISTS trg_security_updated_at ON app_account.account_security_settings;
 CREATE TRIGGER trg_security_updated_at
-BEFORE UPDATE ON stexor_account.account_security_settings
-FOR EACH ROW EXECUTE FUNCTION stexor_account.set_updated_at();
+BEFORE UPDATE ON app_account.account_security_settings
+FOR EACH ROW EXECUTE FUNCTION app_account.set_updated_at();
 
-DROP TRIGGER IF EXISTS trg_service_catalog_updated_at ON stexor_account.service_catalog;
+DROP TRIGGER IF EXISTS trg_service_catalog_updated_at ON app_account.service_catalog;
 CREATE TRIGGER trg_service_catalog_updated_at
-BEFORE UPDATE ON stexor_account.service_catalog
-FOR EACH ROW EXECUTE FUNCTION stexor_account.set_updated_at();
+BEFORE UPDATE ON app_account.service_catalog
+FOR EACH ROW EXECUTE FUNCTION app_account.set_updated_at();
 
-DROP TRIGGER IF EXISTS trg_subscriptions_updated_at ON stexor_account.subscriptions;
+DROP TRIGGER IF EXISTS trg_subscriptions_updated_at ON app_account.subscriptions;
 CREATE TRIGGER trg_subscriptions_updated_at
-BEFORE UPDATE ON stexor_account.subscriptions
-FOR EACH ROW EXECUTE FUNCTION stexor_account.set_updated_at();
+BEFORE UPDATE ON app_account.subscriptions
+FOR EACH ROW EXECUTE FUNCTION app_account.set_updated_at();
 
-DROP TRIGGER IF EXISTS trg_email_delivery_settings_updated_at ON stexor_account.email_delivery_settings;
+DROP TRIGGER IF EXISTS trg_email_delivery_settings_updated_at ON app_account.email_delivery_settings;
 CREATE TRIGGER trg_email_delivery_settings_updated_at
-BEFORE UPDATE ON stexor_account.email_delivery_settings
-FOR EACH ROW EXECUTE FUNCTION stexor_account.set_updated_at();
+BEFORE UPDATE ON app_account.email_delivery_settings
+FOR EACH ROW EXECUTE FUNCTION app_account.set_updated_at();
 
-DROP TRIGGER IF EXISTS trg_email_templates_updated_at ON stexor_account.email_templates;
+DROP TRIGGER IF EXISTS trg_email_templates_updated_at ON app_account.email_templates;
 CREATE TRIGGER trg_email_templates_updated_at
-BEFORE UPDATE ON stexor_account.email_templates
-FOR EACH ROW EXECUTE FUNCTION stexor_account.set_updated_at();
+BEFORE UPDATE ON app_account.email_templates
+FOR EACH ROW EXECUTE FUNCTION app_account.set_updated_at();
 
-INSERT INTO stexor_account.email_templates (template_key, locale, subject, body_text)
+INSERT INTO app_account.email_templates (template_key, locale, subject, body_text)
 VALUES
   ('login_otp', 'it-IT', 'Il tuo codice di accesso', 'Il tuo codice OTP e {{code}}. Scade tra {{minutes}} minuti.'),
   ('recovery_otp', 'it-IT', 'Codice recupero account', 'Usa {{code}} per recuperare il tuo account.'),
@@ -370,59 +370,59 @@ ON CONFLICT (template_key, locale) DO UPDATE SET
 
 DO $$
 BEGIN
-  CREATE ROLE stexor_app_account_rw NOLOGIN;
+  CREATE ROLE app_db_account_rw NOLOGIN;
 EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
 
 DO $$
 BEGIN
-  CREATE ROLE stexor_app_auth_rw NOLOGIN;
+  CREATE ROLE app_db_auth_rw NOLOGIN;
 EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
 
 DO $$
 BEGIN
-  CREATE ROLE stexor_app_audit_rw NOLOGIN;
+  CREATE ROLE app_db_audit_rw NOLOGIN;
 EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
 
-GRANT USAGE ON SCHEMA stexor_account TO stexor_app_account_rw, stexor_app_auth_rw, stexor_app_audit_rw;
-GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA stexor_account TO stexor_app_account_rw, stexor_app_auth_rw, stexor_app_audit_rw;
+GRANT USAGE ON SCHEMA app_account TO app_db_account_rw, app_db_auth_rw, app_db_audit_rw;
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA app_account TO app_db_account_rw, app_db_auth_rw, app_db_audit_rw;
 
 GRANT SELECT, INSERT, UPDATE ON
-  stexor_account.accounts,
-  stexor_account.account_roles,
-  stexor_account.account_security_settings,
-  stexor_account.subscriptions
-TO stexor_app_account_rw;
+  app_account.accounts,
+  app_account.account_roles,
+  app_account.account_security_settings,
+  app_account.subscriptions
+TO app_db_account_rw;
 
 GRANT SELECT ON
-  stexor_account.service_catalog,
-  stexor_account.security_policies
-TO stexor_app_account_rw;
+  app_account.service_catalog,
+  app_account.security_policies
+TO app_db_account_rw;
 
 GRANT SELECT, INSERT, UPDATE ON
-  stexor_account.passkeys,
-  stexor_account.sessions,
-  stexor_account.backup_code_sets,
-  stexor_account.backup_codes,
-  stexor_account.device_approval_requests,
-  stexor_account.email_otp_challenges
-TO stexor_app_auth_rw;
+  app_account.passkeys,
+  app_account.sessions,
+  app_account.backup_code_sets,
+  app_account.backup_codes,
+  app_account.device_approval_requests,
+  app_account.email_otp_challenges
+TO app_db_auth_rw;
 
 GRANT SELECT, INSERT, UPDATE ON
-  stexor_account.audit_events,
-  stexor_account.email_outbox
-TO stexor_app_audit_rw;
+  app_account.audit_events,
+  app_account.email_outbox
+TO app_db_audit_rw;
 
 GRANT SELECT ON
-  stexor_account.email_templates,
-  stexor_account.email_delivery_settings
-TO stexor_app_audit_rw;
+  app_account.email_templates,
+  app_account.email_delivery_settings
+TO app_db_audit_rw;
 
-ALTER DEFAULT PRIVILEGES IN SCHEMA stexor_account GRANT SELECT, INSERT, UPDATE ON TABLES TO stexor_app_account_rw;
-ALTER DEFAULT PRIVILEGES IN SCHEMA stexor_account GRANT USAGE, SELECT ON SEQUENCES TO stexor_app_account_rw;
+ALTER DEFAULT PRIVILEGES IN SCHEMA app_account GRANT SELECT, INSERT, UPDATE ON TABLES TO app_db_account_rw;
+ALTER DEFAULT PRIVILEGES IN SCHEMA app_account GRANT USAGE, SELECT ON SEQUENCES TO app_db_account_rw;
 
-GRANT stexor_app_account_rw TO stexor_app_user;
-GRANT stexor_app_auth_rw TO stexor_app_user;
-GRANT stexor_app_audit_rw TO stexor_app_user;
+GRANT app_db_account_rw TO app_user;
+GRANT app_db_auth_rw TO app_user;
+GRANT app_db_audit_rw TO app_user;

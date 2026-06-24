@@ -2,4 +2,4 @@
 set -eu
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-exec "$SCRIPT_DIR/stexor-ops.sh" cloudflare-access-admin "$@"
+exec "$SCRIPT_DIR/infra-ops.sh" cloudflare-access-admin "$@"

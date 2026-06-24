@@ -11,7 +11,7 @@ ARG NEXT_PUBLIC_CLOUDFLARE_TURNSTILE_SITE_KEY=
 ARG ACCOUNT_HOST=account.localhost.com
 ARG ACCOUNT_PUBLIC_URL=https://account.localhost.com
 ARG NEXTAUTH_URL=https://account.localhost.com
-ARG KEYCLOAK_ISSUER=https://auth.localhost.com/realms/stexor
+ARG KEYCLOAK_ISSUER=https://auth.localhost.com/realms/platform
 
 ENV NODE_ENV=production \
     NEXT_TELEMETRY_DISABLED=1 \
@@ -62,7 +62,7 @@ ARG NEXT_PUBLIC_CLOUDFLARE_TURNSTILE_SITE_KEY=
 ARG ACCOUNT_HOST=account.localhost.com
 ARG ACCOUNT_PUBLIC_URL=https://account.localhost.com
 ARG NEXTAUTH_URL=https://account.localhost.com
-ARG KEYCLOAK_ISSUER=https://auth.localhost.com/realms/stexor
+ARG KEYCLOAK_ISSUER=https://auth.localhost.com/realms/platform
 
 ENV NODE_ENV=production \
     NEXT_TELEMETRY_DISABLED=1 \

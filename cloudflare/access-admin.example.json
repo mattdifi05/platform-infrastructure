@@ -1,6 +1,6 @@
 {
   "accountId": "00000000000000000000000000000000",
-  "teamName": "stexor",
+  "teamName": "platform",
   "adminSessionDuration": "8h",
   "mfaEnforcedByIdentityProvider": true,
   "allowedIdentityProviderIds": [
@@ -11,13 +11,13 @@
   ],
   "allowedEmailDomains": [],
   "applications": [
-    { "name": "Stexor Grafana", "domain": "grafana.example.com" },
-    { "name": "Stexor Prometheus", "domain": "prometheus.example.com" },
-    { "name": "Stexor Alertmanager", "domain": "alertmanager.example.com" },
-    { "name": "Stexor MinIO Console", "domain": "minio.example.com" },
-    { "name": "Stexor Traefik Dashboard", "domain": "traefik.example.com" },
-    { "name": "Stexor phpMyAdmin", "domain": "phpmyadmin.example.com" },
-    { "name": "Stexor Projects Gateway", "domain": "projects.example.com" },
-    { "name": "Stexor Keycloak Admin", "domain": "keycloak-admin.example.com" }
+    { "name": "Platform Grafana", "domain": "grafana.example.com" },
+    { "name": "Platform Prometheus", "domain": "prometheus.example.com" },
+    { "name": "Platform Alertmanager", "domain": "alertmanager.example.com" },
+    { "name": "Platform MinIO Console", "domain": "minio.example.com" },
+    { "name": "Platform Traefik Dashboard", "domain": "traefik.example.com" },
+    { "name": "Platform phpMyAdmin", "domain": "phpmyadmin.example.com" },
+    { "name": "Platform Projects Gateway", "domain": "projects.example.com" },
+    { "name": "Platform Keycloak Admin", "domain": "keycloak-admin.example.com" }
   ]
 }

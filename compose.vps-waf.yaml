@@ -1,5 +1,5 @@
-# Hostinger/VPS WAF overlay.
-# Use after compose.hostinger.yaml and compose.waf.yaml. The provider/CDN owns
+# VPS WAF overlay.
+# Use after compose.vps.yaml and compose.waf.yaml. The provider/CDN owns
 # public HTTPS; the WAF receives HTTP from the edge and forwards trusted
 # X-Forwarded-Proto=https to Traefik.
 
@@ -17,5 +17,5 @@ services:
       NGINX_X_FORWARDED_PROTO: ${WAF_X_FORWARDED_PROTO:-https}
       PROXY_SSL_VERIFY: "off"
     volumes: !override
-      - ./waf/REQUEST-900-HOSTINGER-RULES-BEFORE-CRS.conf:/etc/modsecurity.d/owasp-crs/rules/REQUEST-900-EXCLUSION-RULES-BEFORE-CRS.conf:ro
+      - ./waf/REQUEST-900-VPS-RULES-BEFORE-CRS.conf:/etc/modsecurity.d/owasp-crs/rules/REQUEST-900-EXCLUSION-RULES-BEFORE-CRS.conf:ro
       - ./waf/RESPONSE-999-EXCLUSION-RULES-AFTER-CRS.conf:/etc/modsecurity.d/owasp-crs/rules/RESPONSE-999-EXCLUSION-RULES-AFTER-CRS.conf:ro

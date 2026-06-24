@@ -2,7 +2,7 @@ global:
   resolve_timeout: 5m
 
 route:
-  receiver: stexor-notification-worker
+  receiver: platform-notification-worker
   group_by:
     - alertname
     - service
@@ -11,13 +11,13 @@ route:
   group_interval: 5m
   repeat_interval: 4h
   routes:
-    - receiver: stexor-notification-worker
+    - receiver: platform-notification-worker
       matchers:
         - severity="critical"
       repeat_interval: 1h
 
 receivers:
-  - name: stexor-notification-worker
+  - name: platform-notification-worker
     webhook_configs:
       - url: http://worker-notifications:3000/alerts/prometheus
         send_resolved: true

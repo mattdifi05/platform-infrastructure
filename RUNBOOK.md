@@ -1,4 +1,4 @@
-# Stexor Enterprise Runbook
+# Platform Enterprise Runbook
 
 ## Incident triage
 
@@ -13,12 +13,12 @@
    docker ps --format "table {{.Names}}\t{{.Status}}" | grep enterprise-
    ```
 
-`compose-healthcheck-coverage.sh` verifies the rendered local WAF, Hostinger WAF and backup-scheduler stacks have a healthcheck on every operational service and writes non-secret reports under `reports/healthchecks/`.
-`rate-limit-evidence.sh` verifies edge/API rate-limit configuration and writes non-secret reports under `reports/rate-limits/`; it runs infra-only when the Stexor app source is intentionally not mounted.
-`audit-log-evidence.sh` verifies append-only audit events, durable outbox dispatch, alerts, dashboards and optional Stexor source wiring, then writes non-secret reports under `reports/audit-logs/`.
-`retention-evidence.sh` verifies bounded Docker logs, Loki/Promtail retention, Prometheus TSDB retention, Grafana log panels and optional Stexor structured log redaction, then writes non-secret reports under `reports/retention/`.
+`compose-healthcheck-coverage.sh` verifies the rendered local WAF, VPS WAF and backup-scheduler stacks have a healthcheck on every operational service and writes non-secret reports under `reports/healthchecks/`.
+`rate-limit-evidence.sh` verifies edge/API rate-limit configuration and writes non-secret reports under `reports/rate-limits/`; it runs infra-only when the Platform app source is intentionally not mounted.
+`audit-log-evidence.sh` verifies append-only audit events, durable outbox dispatch, alerts, dashboards and optional Platform source wiring, then writes non-secret reports under `reports/audit-logs/`.
+`retention-evidence.sh` verifies bounded Docker logs, Loki/Promtail retention, Prometheus TSDB retention, Grafana log panels and optional Platform structured log redaction, then writes non-secret reports under `reports/retention/`.
 
-The shell wrappers are container-first. On Linux they run the ops container with host networking so `*.localhost.com` resolves to the local edge. On Docker Desktop they map those hostnames to `host-gateway`; override `STEXOR_LOCAL_HOST_TARGET` only if your Docker runtime exposes the host through a different address.
+The shell wrappers are container-first. On Linux they run the ops container with host networking so `*.localhost.com` resolves to the local edge. On Docker Desktop they map those hostnames to `host-gateway`; override `PLATFORM_LOCAL_HOST_TARGET` only if your Docker runtime exposes the host through a different address.
 
 2. Check edge and API:
 
@@ -32,13 +32,13 @@ The shell wrappers are container-first. On Linux they run the ops container with
 3. Read scoped logs:
 
    ```sh
-   docker compose -p stexor_platform_local logs -f traefik backend web postgres
+   docker compose -p platform_infra_local logs -f traefik backend web postgres
    ```
 
 4. Check database migrations:
 
    ```sh
-   docker exec enterprise-postgres psql -U postgres -d stexor_app -c "select * from stexor_platform.schema_migrations order by applied_at desc;"
+   docker exec enterprise-postgres psql -U postgres -d app_db -c "select * from platform_ops.schema_migrations order by applied_at desc;"
    ```
 
 ## WAF operations
@@ -105,7 +105,7 @@ WafBlockSpike
 Optional external forwarding:
 
 ```sh
-ALERT_FORWARD_WEBHOOK_URL=https://hooks.example.invalid/stexor-alerts
+ALERT_FORWARD_WEBHOOK_URL=https://hooks.example.invalid/platform-alerts
 ```
 
 Keep the URL in the production secret manager if it embeds credentials.
@@ -185,10 +185,10 @@ Run these before major releases and after infrastructure changes:
 ```sh
 sh ./scripts/fault-injection-tests.sh
 sh ./scripts/failure-tests.sh --confirmServiceStop --targets redis,postgres,minio,keycloak,backend,worker-notifications,worker-jobs,nats,waf
-sh ./scripts/stexor-ops.sh load-profile --durationSeconds 60 --targetRps 8 --concurrency 8 --maxP95Ms 1000
+sh ./scripts/infra-ops.sh load-profile --durationSeconds 60 --targetRps 8 --concurrency 8 --maxP95Ms 1000
 sh ./scripts/load-benchmark.sh --profiles 50,100,500 --durationSeconds 60 --perUserRps 0.2 --maxP95Ms 1000
 sh ./scripts/load-benchmark.sh --profiles 50,100,500 --url https://api.example.com/health --requirePublicTarget --requireEdgeEvidence --expectedEdgeProvider cloudflare
-sh ./scripts/stexor-ops.sh chaos-profile --confirmChaos
+sh ./scripts/infra-ops.sh chaos-profile --confirmChaos
 ```
 
 Acceptance criteria:
@@ -219,7 +219,7 @@ Primary operator queries:
 {job="docker",service="enterprise-worker-jobs"} |= "audit_outbox"
 ```
 
-Use Loki for operational logs and PostgreSQL `stexor_account.audit_events` plus `stexor_account.audit_outbox` for durable security/compliance events. Audit tables are append-only and RLS protected.
+Use Loki for operational logs and PostgreSQL `app_account.audit_events` plus `app_account.audit_outbox` for durable security/compliance events. Audit tables are append-only and RLS protected.
 Run `sh ./scripts/audit-log-evidence.sh` before go-live and after audit/outbox changes; archive `reports/audit-logs/audit-log-evidence-*.json` with the release evidence.
 Run `sh ./scripts/retention-evidence.sh` after log/metric retention changes and before go-live; archive `reports/retention/retention-evidence-*.json` with the release evidence.
 
@@ -238,9 +238,9 @@ sh ./scripts/backup-secret-manager-metadata.sh
 Daily Linux cron:
 
 ```sh
-sh ./scripts/install-postgres-backup-cron.sh --cronRoot /opt/stexor/stexor-platform-infrastructure --backupAt 03:15 --drillAt 04:15 --retentionAt 05:15 --drillWeekday 0
-sh ./scripts/install-mariadb-backup-cron.sh --cronRoot /opt/stexor/stexor-platform-infrastructure --backupAt 03:45 --drillAt 04:45 --drillWeekday 0
-sh ./scripts/install-offsite-backup-cron.sh --cron-root /opt/stexor/stexor-platform-infrastructure
+sh ./scripts/install-postgres-backup-cron.sh --cronRoot /opt/platform/platform-infrastructure --backupAt 03:15 --drillAt 04:15 --retentionAt 05:15 --drillWeekday 0
+sh ./scripts/install-mariadb-backup-cron.sh --cronRoot /opt/platform/platform-infrastructure --backupAt 03:45 --drillAt 04:45 --drillWeekday 0
+sh ./scripts/install-offsite-backup-cron.sh --cron-root /opt/platform/platform-infrastructure
 ```
 
 The generated crontab covers PostgreSQL/MariaDB local database backups, weekly restore drills, daily PostgreSQL backup-artifact retention, MinIO/Keycloak/Secret Manager metadata backups, and encrypted Restic off-site upload.
@@ -248,13 +248,13 @@ The generated crontab covers PostgreSQL/MariaDB local database backups, weekly r
 Preferred VPS scheduler:
 
 ```sh
-docker compose --env-file .env -p stexor_platform_vps \
+docker compose --env-file .env -p platform_infra_vps \
   -f compose.yaml \
   -f compose.build.yaml \
   -f compose.secrets.yaml \
-  -f compose.hostinger.yaml \
+  -f compose.vps.yaml \
   -f compose.waf.yaml \
-  -f compose.hostinger-waf.yaml \
+  -f compose.vps-waf.yaml \
   -f compose.backup-scheduler.yaml \
   --profile backup \
   up -d backup-scheduler
@@ -263,32 +263,32 @@ docker logs enterprise-backup-scheduler
 docker exec enterprise-backup-scheduler crontab -l
 ```
 
-This keeps scheduling inside Docker. The host only needs Docker, Compose and Git. The scheduler autodetects Docker mount sources; set `STEXOR_INFRA_HOST_ROOT` and `STEXOR_SOURCE_HOST_ROOT` only when the VPS uses nonstandard paths. Enable off-site upload with `BACKUP_SCHEDULER_ENABLE_OFFSITE=true` after `RESTIC_REPOSITORY`, `RESTIC_PASSWORD_FILE` and provider credentials are valid. Scheduled jobs call `backup-scheduler.sh --run <command>` and parse the private runtime env file as data instead of sourcing it as shell code.
+This keeps scheduling inside Docker. The host only needs Docker, Compose and Git. The scheduler autodetects Docker mount sources; set `PLATFORM_INFRA_HOST_ROOT` and `PROJECT_SOURCE_HOST_ROOT` only when the VPS uses nonstandard paths. Enable off-site upload with `BACKUP_SCHEDULER_ENABLE_OFFSITE=true` after `RESTIC_REPOSITORY`, `RESTIC_PASSWORD_FILE` and provider credentials are valid. Scheduled jobs call `backup-scheduler.sh --run <command>` and parse the private runtime env file as data instead of sourcing it as shell code.
 
 ## Local secrets
 
 ```sh
-sh ./scripts/stexor-secret-manager.sh init
-sh ./scripts/stexor-secret-manager.sh verify
-docker compose -f compose.yaml -f compose.secrets.yaml --env-file .env -p stexor_platform_local up -d
+sh ./scripts/infra-secret-manager.sh init
+sh ./scripts/infra-secret-manager.sh verify
+docker compose -f compose.yaml -f compose.secrets.yaml --env-file .env -p platform_infra_local up -d
 ```
 
-`stexor-secret-manager` is the proprietary local secret manager. It encrypts the canonical store, writes an audit log and materializes `secrets/*.txt` only for Docker Compose. Use `--sanitizeEnv` on `init-local-secrets` only after you are committed to starting local with `compose.secrets.yaml`.
+`infra-secret-manager` is the proprietary local secret manager. It encrypts the canonical store, writes an audit log and materializes `secrets/*.txt` only for Docker Compose. Use `--sanitizeEnv` on `init-local-secrets` only after you are committed to starting local with `compose.secrets.yaml`.
 
 Useful operations:
 
 ```sh
-sh ./scripts/stexor-secret-manager.sh status
-sh ./scripts/stexor-secret-manager.sh kms-status
-sh ./scripts/stexor-secret-manager.sh kms-rotate
-sh ./scripts/stexor-secret-manager.sh rotate --name session_signing_keys
-sh ./scripts/stexor-secret-manager.sh rotate --name projects_gateway_signing_keys
-sh ./scripts/stexor-secret-manager.sh rotate --name backup_signing_keys
-sh ./scripts/stexor-secret-manager.sh rotate --name alertmanager_webhook_token
+sh ./scripts/infra-secret-manager.sh status
+sh ./scripts/infra-secret-manager.sh kms-status
+sh ./scripts/infra-secret-manager.sh kms-rotate
+sh ./scripts/infra-secret-manager.sh rotate --name session_signing_keys
+sh ./scripts/infra-secret-manager.sh rotate --name projects_gateway_signing_keys
+sh ./scripts/infra-secret-manager.sh rotate --name backup_signing_keys
+sh ./scripts/infra-secret-manager.sh rotate --name alertmanager_webhook_token
 sh ./scripts/secret-rotation-evidence.sh --enforce
 ```
 
-`secret-rotation-evidence.sh --enforce` validates the encrypted store, materialized Docker secret files, audit log, Stexor Local KMS age and every secret `rotationDays` window without printing secret values. Archive `reports/secret-rotation/secret-rotation-evidence-*.json` outside Git before production go/no-go.
+`secret-rotation-evidence.sh --enforce` validates the encrypted store, materialized Docker secret files, audit log, Platform Local KMS age and every secret `rotationDays` window without printing secret values. Archive `reports/secret-rotation/secret-rotation-evidence-*.json` outside Git before production go/no-go.
 
 `projects.localhost.com` is a protected local control page. It sends OTP codes to `PROJECTS_GATEWAY_EMAIL`, then writes a signed `HttpOnly`, `Secure`, `SameSite=Lax` cookie using `projects_gateway_signing_keys`. The cookie is intentionally long-lived for the local browser. To revoke all sessions, rotate `projects_gateway_signing_keys` and recreate `php-apache`.
 
@@ -297,7 +297,7 @@ sh ./scripts/secret-rotation-evidence.sh --enforce
 Never trust a backup that has not been restored.
 
 ```sh
-sh ./scripts/restore-test-postgres.sh --backupFile ./backups/postgres/stexor_app-YYYYMMDD-HHMMSS.dump
+sh ./scripts/restore-test-postgres.sh --backupFile ./backups/postgres/app_db-YYYYMMDD-HHMMSS.dump
 sh ./scripts/restore-test-mariadb.sh --backupFile ./backups/mariadb/mariadb-all-YYYYMMDD-HHMMSS.sql.gz
 sh ./scripts/restore-test-minio.sh --backupFile ./backups/minio/minio-data-YYYYMMDD-HHMMSS.tar.gz
 sh ./scripts/restore-test-keycloak.sh --backupFile ./backups/keycloak/keycloak-config-YYYYMMDD-HHMMSS.tar.gz
@@ -329,17 +329,17 @@ sh ./scripts/prune-postgres-backups.sh --dryRun
 sh ./scripts/prune-postgres-backups.sh
 ```
 
-Retention refuses to delete dump artifacts unless `stexor_platform.backup_restore_runs` contains a recent successful `restore_test`.
+Retention refuses to delete dump artifacts unless `platform_ops.backup_restore_runs` contains a recent successful `restore_test`.
 
 ## Off-site backup
 
 ```sh
-export RESTIC_REPOSITORY="s3:s3.amazonaws.com/bucket/stexor"
+export RESTIC_REPOSITORY="s3:s3.amazonaws.com/bucket/platform"
 sh ./scripts/offsite-backup-restic.sh --passwordFile ./secrets/restic_password.txt
 sh ./scripts/offsite-restore-drill-restic.sh --planOnly
 sh ./scripts/offsite-restore-drill-restic.sh --dryRun --passwordFile ./secrets/restic_password.txt
 sh ./scripts/offsite-restore-drill-restic.sh --passwordFile ./secrets/restic_password.txt
-sh ./scripts/install-offsite-backup-cron.sh --cron-root /opt/stexor/stexor-platform-infrastructure
+sh ./scripts/install-offsite-backup-cron.sh --cron-root /opt/platform/platform-infrastructure
 ```
 
 Without `--backupFile`, the Restic command uploads the latest signed PostgreSQL, MariaDB, MinIO, Keycloak and Secret Manager metadata artifact. Missing artifact families fail the run so cron/alerts catch incomplete protection.
@@ -356,7 +356,7 @@ root-only systemd/cron environment, not in Git.
 
 ## VPS hardening and Cloudflare
 
-Run on a new Hostinger Ubuntu LTS VPS before public traffic:
+Run on a new VPS Ubuntu LTS VPS before public traffic:
 
 ```sh
 sudo sh ./scripts/vps-bootstrap-ubuntu.sh --apply --deploy-user deploy
@@ -375,7 +375,7 @@ and `git`. Use `--deploy-user <user>` only after reviewing Docker group access.
 under `reports/vps-hardening/`. In `--apply` mode it requires root, applies SSH
 hardening, sysctl, UFW, fail2ban, unattended upgrades, auditd/AppArmor and Docker
 daemon hardening. If `/etc/docker/daemon.json` is absent, it writes the hardened
-config and restarts Docker. If an existing daemon config is missing Stexor keys,
+config and restarts Docker. If an existing daemon config is missing Platform keys,
 the script fails until the generated template is reviewed and the command is
 rerun with `--replace-docker-daemon-config`, which backs up the old file before
 replacement. Use `--reload-sshd` only after key-based SSH access and the target
@@ -390,7 +390,7 @@ hardening are installed, and it also verifies the expected SSH port and matching
 UFW allow rule. Every check includes remediation text in JSON and Markdown so a
 failed report can be used as the host fix checklist. If Docker daemon hardening
 fails, merge the reviewed
-`/etc/docker/daemon.json.stexor-template` into `/etc/docker/daemon.json`,
+`/etc/docker/daemon.json.platform-template` into `/etc/docker/daemon.json`,
 restart Docker in a maintenance window and rerun the readiness script.
 Use `--diagnostic` only from disposable Linux containers or non-VPS hosts; it
 writes to `reports/vps-host-diagnostics/` so diagnostic failures cannot satisfy
@@ -402,13 +402,13 @@ public UFW web rules so the origin accepts web traffic only from Cloudflare IP
 ranges.
 
 Cloudflare zone code lives in `cloudflare/`. Keep `ssl=full_strict` as a manual
-review item until the Hostinger origin certificate is valid for every proxied
+review item until the VPS origin certificate is valid for every proxied
 hostname.
 
 Cloudflare Access admin protection is versioned in `cloudflare/access-admin.example.json`.
 Before live apply, replace placeholder domains, account id, identity provider ids and
 admin emails. MFA is enforced by the configured Cloudflare Access identity provider;
-the Stexor manifest refuses live operations unless that intent is explicit.
+the Platform manifest refuses live operations unless that intent is explicit.
 
 ```sh
 sh ./scripts/cloudflare-access-admin.sh --manifest cloudflare/access-admin.example.json
@@ -452,9 +452,9 @@ evidence. Treat high findings as release blockers.
 Validate multi-node production overlays before deployment:
 
 ```sh
-sh ./scripts/stexor-ops.sh ha-config-check
-sh ./scripts/stexor-ops.sh managed-secrets-preflight
-sh ./scripts/stexor-ops.sh dr-readiness-check
+sh ./scripts/infra-ops.sh ha-config-check
+sh ./scripts/infra-ops.sh managed-secrets-preflight
+sh ./scripts/infra-ops.sh dr-readiness-check
 ```
 
 Production secret values must come from the approved secret manager or KMS sync
@@ -485,10 +485,10 @@ must verify the release SHA, immutable image digests, SBOM artifact, provenance
 attestation, rollback target and the output of:
 
 ```sh
-sh ./scripts/stexor-ops.sh release-artifact-gate --requireProvenance
+sh ./scripts/infra-ops.sh release-artifact-gate --requireProvenance
 sh ./scripts/release-evidence.sh --requireProvenance --provenance ./release/provenance.json --previousImagesFile ./release/previous-images.json
-sh ./scripts/stexor-ops.sh governance-check
-sh ./scripts/stexor-ops.sh enterprise-10-check
+sh ./scripts/infra-ops.sh governance-check
+sh ./scripts/infra-ops.sh enterprise-10-check
 ```
 
 The provenance artifact must be an in-toto statement, DSSE envelope or bundle
@@ -526,7 +526,7 @@ production secret `CLOUDFLARE_API_TOKEN`, and production variables
 It also expects production secret
 `CLOUDFLARE_ACCESS_ADMIN_MANIFEST_JSON` for live Cloudflare Access verification.
 Infrastructure CI intentionally does not checkout project
-repositories; attach Stexor or another project with `NODE_SOURCE_DIR` only when
+repositories; attach an application project with `PROJECT_SOURCE_DIR` only when
 building application images. The run evidence command verifies that the remote
 `enterprise-infra` workflow completed successfully on the exact release commit
 and writes `reports/github-actions/github-actions-run-*.json`. The
@@ -538,7 +538,7 @@ environment after DNS, Cloudflare, provider monitors and VPS evidence are ready;
 it gathers external uptime, public Cloudflare load, Cloudflare Access, live
 go/no-go and complete evidence bundle reports without deploying.
 Run `enterprise-vps-evidence` from the same production environment to collect
-VPS bootstrap, hardening and host readiness reports from Hostinger over SSH. It
+VPS bootstrap, hardening and host readiness reports from VPS over SSH. It
 requires `DEPLOY_SSH_KEY`, `DEPLOY_REMOTE`, `DEPLOY_SSH_PORT`,
 `DEPLOY_REMOTE_DIR` and `VPS_HARDENED_SSH_PORT`; bootstrap/hardening only run
 when the workflow inputs explicitly enable them and `confirm_mutating_vps=true`.
@@ -567,7 +567,7 @@ production go/no-go.
 Run the repository coverage gate whenever files or workflow jobs are added:
 
 ```sh
-sh ./scripts/stexor-ops.sh repo-coverage-check
+sh ./scripts/infra-ops.sh repo-coverage-check
 ```
 
 The report in `reports/repo-coverage/` proves every tracked file belongs to an
@@ -668,44 +668,44 @@ checks every entry's size and SHA256, confirms the anti-secret policy and, with
 
 9. Record the deploy audit trail:
 
-## Hostinger/VPS prod-like deploy
+## VPS Prod-Like Deploy
 
-Use this path when TLS and public certificates are terminated by Hostinger, Cloudflare, or another edge in front of the VPS.
+Use this path when TLS and public certificates are terminated by VPS, Cloudflare, or another edge in front of the VPS.
 
-1. Prepare `.env` from `.env.example` plus `.env.hostinger.example`.
+1. Prepare `.env` from `.env.example` plus `.env.vps.example`.
 2. Replace every `example.com`, `localhost` and placeholder value with the final host names.
 3. Initialize Docker secret files:
 
    ```sh
-   sh ./scripts/stexor-secret-manager.sh init
+   sh ./scripts/infra-secret-manager.sh init
    ```
 
 4. Run the VPS preflight:
 
    ```sh
-   sh ./scripts/hostinger-preflight.sh .env
+   sh ./scripts/vps-preflight.sh .env
    ```
 
    The preflight validates production env values, Docker secret files and the
-   same Hostinger Compose file set used by deploy, including `compose.waf.yaml`
-   and `compose.hostinger-waf.yaml`.
+   same VPS Compose file set used by deploy, including `compose.waf.yaml`
+   and `compose.vps-waf.yaml`.
 
 5. Start the single-node VPS stack:
 
    ```sh
-   docker compose --env-file .env -p stexor_platform_vps \
+   docker compose --env-file .env -p platform_infra_vps \
      -f compose.yaml \
      -f compose.build.yaml \
      -f compose.secrets.yaml \
-     -f compose.hostinger.yaml \
+     -f compose.vps.yaml \
      -f compose.waf.yaml \
-     -f compose.hostinger-waf.yaml \
+     -f compose.vps-waf.yaml \
      up -d --build
-   sh ./scripts/hostinger-postdeploy.sh .env
+   sh ./scripts/vps-postdeploy.sh .env
    ```
 
-6. For remote deploys, `scripts/deploy-hostinger.sh` now calls
-   `hostinger-postdeploy.sh` after `docker compose up`. By default the
+6. For remote deploys, `scripts/deploy-vps.sh` now calls
+   `vps-postdeploy.sh` after `docker compose up`. By default the
    post-deploy step runs WAF smoke and `infra-health` against the public URLs
    loaded from `.env`. With `DEPLOY_RUN_GO_NO_GO=1`, it also enforces
    `production-go-no-go.sh --enforce` and `production-readiness-live.sh`.
@@ -716,7 +716,7 @@ Use this path when TLS and public certificates are terminated by Hostinger, Clou
    DEPLOY_RUN_PRE_GO_LIVE=1 \
    DEPLOY_RUN_GO_NO_GO=1 \
    DEPLOY_REPO=OWNER/REPO \
-   sh ./scripts/deploy-hostinger.sh
+   sh ./scripts/deploy-vps.sh
    ```
 
    Use `DEPLOY_PRE_GO_LIVE_RESTORE_DRILL=1`,
@@ -728,21 +728,21 @@ Use this path when TLS and public certificates are terminated by Hostinger, Clou
    live orchestrator:
 
    ```sh
-   sh ./scripts/hostinger-go-live.sh --planOnly --repo OWNER/REPO
-   sh ./scripts/hostinger-go-live.sh --confirmLive --repo OWNER/REPO --start-stack
-   sh ./scripts/hostinger-go-live.sh --confirmLive --repo OWNER/REPO --bootstrap --apply-hardening --reload-sshd --full-evidence --start-stack
-   sh ./scripts/hostinger-go-live.sh --confirmLive --repo OWNER/REPO --apply-hardening --reload-sshd --replace-docker-daemon-config --full-evidence --start-stack
+   sh ./scripts/vps-go-live.sh --planOnly --repo OWNER/REPO
+   sh ./scripts/vps-go-live.sh --confirmLive --repo OWNER/REPO --start-stack
+   sh ./scripts/vps-go-live.sh --confirmLive --repo OWNER/REPO --bootstrap --apply-hardening --reload-sshd --full-evidence --start-stack
+   sh ./scripts/vps-go-live.sh --confirmLive --repo OWNER/REPO --apply-hardening --reload-sshd --replace-docker-daemon-config --full-evidence --start-stack
    ```
 
    The orchestrator is plan-only by default. Live mode runs VPS readiness,
-   Hostinger preflight, optional compose start, post-deploy smoke/health, final
+   VPS preflight, optional compose start, post-deploy smoke/health, final
    go/no-go and evidence bundle in order. On a fresh VPS add `--bootstrap` to
    install Git/Docker/Compose and `--apply-hardening` after SSH key access is
    verified. Use `--reload-sshd` after the target SSH port is reachable so the
    daemon actually enforces the hardened config. Use `--replace-docker-daemon-config` only after reviewing the
    generated Docker daemon template on a host that already has
    `/etc/docker/daemon.json`. The flow writes JSON/Markdown reports under
-   `reports/hostinger-go-live/`. It does not source `.env`; the file is passed
+   `reports/vps-go-live/`. It does not source `.env`; the file is passed
    to the dedicated preflight/postdeploy commands.
 
 7. Keep database/admin surfaces private. Do not publish phpMyAdmin, Grafana, Prometheus, Alertmanager, MinIO console or Traefik dashboard to public DNS.
@@ -768,10 +768,10 @@ Use this path when TLS and public certificates are terminated by Hostinger, Clou
 
    ```json
    {
-     "BACKEND_IMAGE": "registry.example.com/stexor/backend@sha256:...",
-     "WEB_IMAGE": "registry.example.com/stexor/web@sha256:...",
-     "WORKER_NOTIFICATIONS_IMAGE": "registry.example.com/stexor/worker-notifications@sha256:...",
-     "WORKER_JOBS_IMAGE": "registry.example.com/stexor/worker-jobs@sha256:..."
+     "BACKEND_IMAGE": "registry.example.com/platform/backend@sha256:...",
+     "WEB_IMAGE": "registry.example.com/platform/web@sha256:...",
+     "WORKER_NOTIFICATIONS_IMAGE": "registry.example.com/platform/worker-notifications@sha256:...",
+     "WORKER_JOBS_IMAGE": "registry.example.com/platform/worker-jobs@sha256:..."
    }
    ```
 

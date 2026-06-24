@@ -1,4 +1,4 @@
 #!/usr/bin/env sh
 set -eu
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-exec "$SCRIPT_DIR/stexor-ops.sh" secret-rotation-evidence "$@"
+exec "$SCRIPT_DIR/infra-ops.sh" secret-rotation-evidence "$@"

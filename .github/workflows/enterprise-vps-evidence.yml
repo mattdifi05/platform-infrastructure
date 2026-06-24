@@ -70,7 +70,7 @@ jobs:
           printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
 
-      - name: Run VPS evidence on Hostinger
+      - name: Run VPS evidence on VPS
         env:
           DEPLOY_REMOTE: ${{ vars.DEPLOY_REMOTE }}
           DEPLOY_REMOTE_DIR: ${{ vars.DEPLOY_REMOTE_DIR }}
@@ -148,13 +148,13 @@ jobs:
             echo "No VPS evidence report directories were produced." >&2
             exit 1
           fi
-          echo "__STEXOR_VPS_EVIDENCE_TGZ_BEGIN__"
+          echo "__PLATFORM_VPS_EVIDENCE_TGZ_BEGIN__"
           # shellcheck disable=SC2086
           tar -czf - $tar_paths | base64 -w0
           echo
-          echo "__STEXOR_VPS_EVIDENCE_TGZ_END__"
+          echo "__PLATFORM_VPS_EVIDENCE_TGZ_END__"
           REMOTE_SCRIPT
-          sed -n '/^__STEXOR_VPS_EVIDENCE_TGZ_BEGIN__$/,/^__STEXOR_VPS_EVIDENCE_TGZ_END__$/p' "$remote_output" \
+          sed -n '/^__PLATFORM_VPS_EVIDENCE_TGZ_BEGIN__$/,/^__PLATFORM_VPS_EVIDENCE_TGZ_END__$/p' "$remote_output" \
             | sed '1d;$d' > .tmp/vps-evidence.tgz.b64
           test -s .tmp/vps-evidence.tgz.b64
           base64 -d .tmp/vps-evidence.tgz.b64 > .tmp/vps-evidence.tgz

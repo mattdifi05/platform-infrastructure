@@ -1,4 +1,4 @@
 #!/usr/bin/env sh
 set -eu
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-exec "$SCRIPT_DIR/stexor-ops.sh" restore-test-secret-manager-metadata "$@"
+exec "$SCRIPT_DIR/infra-ops.sh" restore-test-secret-manager-metadata "$@"

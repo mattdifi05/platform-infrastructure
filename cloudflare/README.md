@@ -8,7 +8,7 @@ been reviewed and approved.
 - `scripts/cloudflare-from-zero.sh` creates only missing resources and refuses
   to modify existing DNS records or existing custom WAF rulesets. Zone settings
   are applied only when the zone is created by the same script run.
-- `stexor-zone-waf-rules.json` defines reusable WAF rule content that blocks
+- `zone-waf-rules.json` defines reusable WAF rule content that blocks
   admin hosts, sensitive file probes and scanner paths before traffic reaches
   the VPS.
 - `access-admin.example.json` defines Cloudflare Access self-hosted

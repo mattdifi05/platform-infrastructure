@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "description": "Provider-neutral external uptime monitor manifest for the public Stexor production edge.",
+  "description": "Provider-neutral external uptime monitor manifest for the public Platform production edge.",
   "defaults": {
     "method": "GET",
     "timeoutMs": 5000,
@@ -8,52 +8,52 @@
     "intervalSeconds": 60,
     "expectedStatuses": [200],
     "headers": {
-      "User-Agent": "Stexor-Uptime/1.0"
+      "User-Agent": "Platform-Uptime/1.0"
     },
     "regions": ["eu-west", "us-east"]
   },
   "targets": [
     {
       "name": "web-public-home",
-      "url": "${UI_PUBLIC_URL:-https://stexor.example.com}/",
+      "url": "${UI_PUBLIC_URL:-https://platform.example.com}/",
       "expectedStatuses": [200, 301, 302],
       "maxLatencyMs": 2500
     },
     {
       "name": "api-public-health",
-      "url": "${API_PUBLIC_URL:-https://api.stexor.example.com}/health",
+      "url": "${API_PUBLIC_URL:-https://api.platform.example.com}/health",
       "expectedStatuses": [200],
       "maxLatencyMs": 1500,
       "expectedBodyIncludes": "ok"
     },
     {
       "name": "account-public-home",
-      "url": "${ACCOUNT_PUBLIC_URL:-https://account.stexor.example.com}/",
+      "url": "${ACCOUNT_PUBLIC_URL:-https://account.platform.example.com}/",
       "expectedStatuses": [200, 301, 302],
       "maxLatencyMs": 2500
     },
     {
       "name": "keycloak-issuer-discovery",
-      "url": "${KEYCLOAK_ISSUER:-https://auth.stexor.example.com/realms/stexor}/.well-known/openid-configuration",
+      "url": "${KEYCLOAK_ISSUER:-https://auth.platform.example.com/realms/platform}/.well-known/openid-configuration",
       "expectedStatuses": [200],
       "maxLatencyMs": 2500,
       "expectedBodyIncludes": "issuer"
     },
     {
       "name": "blocked-phpmyadmin-public",
-      "url": "https://phpmyadmin.${PUBLIC_ROOT_DOMAIN:-stexor.example.com}/",
+      "url": "https://phpmyadmin.${PUBLIC_ROOT_DOMAIN:-platform.example.com}/",
       "expectedStatuses": [403, 404],
       "maxLatencyMs": 2000
     },
     {
       "name": "blocked-prometheus-public",
-      "url": "https://prometheus.${PUBLIC_ROOT_DOMAIN:-stexor.example.com}/",
+      "url": "https://prometheus.${PUBLIC_ROOT_DOMAIN:-platform.example.com}/",
       "expectedStatuses": [403, 404],
       "maxLatencyMs": 2000
     },
     {
       "name": "blocked-alertmanager-public",
-      "url": "https://alertmanager.${PUBLIC_ROOT_DOMAIN:-stexor.example.com}/",
+      "url": "https://alertmanager.${PUBLIC_ROOT_DOMAIN:-platform.example.com}/",
       "expectedStatuses": [403, 404],
       "maxLatencyMs": 2000
     }

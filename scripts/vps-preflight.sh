@@ -3,7 +3,7 @@ set -eu
 
 ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 ENV_FILE="${1:-$ROOT_DIR/.env}"
-PROJECT_NAME="${COMPOSE_PROJECT_NAME:-stexor_platform_vps}"
+PROJECT_NAME="${COMPOSE_PROJECT_NAME:-platform_infra_vps}"
 
 cd "$ROOT_DIR"
 
@@ -34,7 +34,7 @@ require_env() {
 }
 
 for key in \
-  UI_HOST ACCOUNT_HOST API_HOST AUTH_HOST PROJECTS_HOST STREAM_HOST ANNIVERSARY_HOST WORKCALENDAR_HOST FIREPORT_HOST \
+  UI_HOST ACCOUNT_HOST API_HOST AUTH_HOST PROJECTS_HOST PROJECTS_WILDCARD_HOST_REGEXP \
   API_PUBLIC_URL ACCOUNT_PUBLIC_URL UI_PUBLIC_URL NEXT_PUBLIC_API_URL NEXT_PUBLIC_UI_URL NEXT_PUBLIC_ACCOUNT_URL \
   NEXTAUTH_URL KEYCLOAK_ISSUER WEBAUTHN_RP_ID WEBAUTHN_ORIGINS CORS_ORIGINS GOOGLE_OAUTH_REDIRECT_URI \
   MAILER_FROM MAILER_REPLY_TO SMTP_HOST SMTP_USER \
@@ -61,9 +61,9 @@ docker compose \
   -f compose.yaml \
   -f compose.build.yaml \
   -f compose.secrets.yaml \
-  -f compose.hostinger.yaml \
+  -f compose.vps.yaml \
   -f compose.waf.yaml \
-  -f compose.hostinger-waf.yaml \
+  -f compose.vps-waf.yaml \
   config --quiet
 
 if docker compose \
@@ -72,12 +72,12 @@ if docker compose \
   -f compose.yaml \
   -f compose.build.yaml \
   -f compose.secrets.yaml \
-  -f compose.hostinger.yaml \
+  -f compose.vps.yaml \
   -f compose.waf.yaml \
-  -f compose.hostinger-waf.yaml \
+  -f compose.vps-waf.yaml \
   config | grep -E 'image: .+:latest(@|$)' >/dev/null; then
-  echo "Mutable :latest image found in rendered Hostinger config." >&2
+  echo "Mutable :latest image found in rendered VPS config." >&2
   exit 1
 fi
 
-echo "Hostinger/VPS preflight passed."
+echo "VPS preflight passed."

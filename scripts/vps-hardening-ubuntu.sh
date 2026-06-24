@@ -13,12 +13,12 @@ usage() {
   cat <<'EOF'
 Usage: vps-hardening-ubuntu.sh [--apply] [--ssh-port PORT] [--replace-docker-daemon-config] [--reload-sshd]
 
-Harden an Ubuntu LTS VPS for the Stexor single-node Docker profile.
+Harden an Ubuntu LTS VPS for the Platform single-node Docker profile.
 Dry-run by default. Re-run with --apply after reviewing the actions.
 Writes JSON and Markdown evidence under reports/vps-hardening/.
 
 By default, apply mode writes a hardened /etc/docker/daemon.json only when the
-file is absent or already contains the required Stexor keys. If an existing
+file is absent or already contains the required Platform keys. If an existing
 daemon config is missing required keys, review the generated template and rerun
 with --replace-docker-daemon-config to back up and replace it.
 
@@ -125,7 +125,7 @@ write_reports() {
   } > "$JSON_REPORT"
 
   {
-    printf '# Stexor VPS Hardening\n\n'
+    printf '# Platform VPS Hardening\n\n'
     printf 'Generated at: %s\n\n' "$generated_at"
     printf 'Status: %s\n\n' "$status"
     printf 'Mode: %s\n\n' "$([ "$APPLY" -eq 1 ] && printf apply || printf plan)"
@@ -214,7 +214,7 @@ restart_docker_if_changed() {
 
 apply_docker_daemon_config() {
   daemon_path=/etc/docker/daemon.json
-  backup_path="/etc/docker/daemon.json.stexor-backup-$STAMP"
+  backup_path="/etc/docker/daemon.json.platform-backup-$STAMP"
   if [ "$APPLY" -eq 0 ]; then
     if [ -f "$daemon_path" ]; then
       add_step "docker-daemon-config" "planned" "validate $daemon_path" "existing config will be checked; missing keys require --replace-docker-daemon-config"
@@ -227,12 +227,12 @@ apply_docker_daemon_config() {
   fi
 
   if [ -r "$daemon_path" ] && daemon_contains_hardening "$daemon_path"; then
-    add_step "docker-daemon-config" "applied" "validate $daemon_path" "already contains Stexor hardening keys"
+    add_step "docker-daemon-config" "applied" "validate $daemon_path" "already contains Platform hardening keys"
     return 0
   fi
 
   if [ -f "$daemon_path" ] && [ "$REPLACE_DOCKER_DAEMON_CONFIG" -ne 1 ]; then
-    fail_step "docker-daemon-config" "write $daemon_path" "existing daemon config is missing Stexor hardening keys; review /etc/docker/daemon.json.stexor-template and rerun with --replace-docker-daemon-config"
+    fail_step "docker-daemon-config" "write $daemon_path" "existing daemon config is missing Platform hardening keys; review /etc/docker/daemon.json.platform-template and rerun with --replace-docker-daemon-config"
   fi
 
   if [ -f "$daemon_path" ]; then
@@ -241,9 +241,9 @@ apply_docker_daemon_config() {
   write_file "$daemon_path" 0644 "$DOCKER_DAEMON_CONFIG"
   DOCKER_DAEMON_CONFIG_CHANGED=1
   if daemon_contains_hardening "$daemon_path"; then
-    add_step "docker-daemon-config" "applied" "validate $daemon_path" "contains Stexor hardening keys"
+    add_step "docker-daemon-config" "applied" "validate $daemon_path" "contains Platform hardening keys"
   else
-    fail_step "docker-daemon-config" "validate $daemon_path" "required Stexor hardening keys are still missing"
+    fail_step "docker-daemon-config" "validate $daemon_path" "required Platform hardening keys are still missing"
   fi
   restart_docker_if_changed
 }
@@ -289,7 +289,7 @@ run apt-get update
 run apt-get install -y ca-certificates curl gnupg ufw fail2ban unattended-upgrades auditd apparmor apparmor-utils
 
 echo "==> SSH hardening"
-write_file /etc/ssh/sshd_config.d/99-stexor-hardening.conf 0644 "Port ${SSH_PORT}
+write_file /etc/ssh/sshd_config.d/99-platform-hardening.conf 0644 "Port ${SSH_PORT}
 PermitRootLogin no
 PasswordAuthentication no
 KbdInteractiveAuthentication no
@@ -300,7 +300,7 @@ ClientAliveInterval 300
 ClientAliveCountMax 2"
 
 echo "==> Kernel network hardening"
-write_file /etc/sysctl.d/99-stexor-hardening.conf 0644 "net.ipv4.conf.all.rp_filter = 1
+write_file /etc/sysctl.d/99-platform-hardening.conf 0644 "net.ipv4.conf.all.rp_filter = 1
 net.ipv4.conf.default.rp_filter = 1
 net.ipv4.conf.all.accept_redirects = 0
 net.ipv4.conf.default.accept_redirects = 0
@@ -328,7 +328,7 @@ run ufw --force enable
 reload_sshd_if_requested
 
 echo "==> fail2ban baseline"
-write_file /etc/fail2ban/jail.d/stexor-sshd.conf 0644 "[sshd]
+write_file /etc/fail2ban/jail.d/platform-sshd.conf 0644 "[sshd]
 enabled = true
 port = ${SSH_PORT}
 maxretry = 5
@@ -351,7 +351,7 @@ DOCKER_DAEMON_CONFIG="{
   },
   \"no-new-privileges\": true
 }"
-write_file /etc/docker/daemon.json.stexor-template 0644 "$DOCKER_DAEMON_CONFIG"
+write_file /etc/docker/daemon.json.platform-template 0644 "$DOCKER_DAEMON_CONFIG"
 apply_docker_daemon_config
 
 echo "Docker daemon hardening is applied automatically when /etc/docker/daemon.json is absent or already compatible."

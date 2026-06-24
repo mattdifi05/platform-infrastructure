@@ -9,8 +9,8 @@ FROM ${PHP_IMAGE}
 
 SHELL ["/bin/bash", "-euxo", "pipefail", "-c"]
 
-# Apache modules (SSL + reverse proxy)
-RUN a2enmod rewrite ssl headers proxy proxy_http
+# Apache modules (SSL + reverse proxy + dynamic project vhosts)
+RUN a2enmod rewrite ssl headers proxy proxy_http vhost_alias
 
 # OS deps (ImageMagick CLI + dev libs for imagick, + tools)
 RUN apt-get update \

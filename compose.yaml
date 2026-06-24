@@ -1,4 +1,4 @@
-name: stexor_platform_local
+name: platform_infra_local
 
 x-default-logging: &default_logging
   driver: json-file
@@ -50,8 +50,8 @@ services:
       POSTGRES_DB: postgres
       POSTGRES_USER: ${POSTGRES_SUPERUSER:-postgres}
       POSTGRES_PASSWORD_FILE: /run/secrets/postgres_superuser_password
-      APP_DB_NAME: ${APP_DB_NAME:-stexor_app}
-      APP_DB_USER: ${APP_DB_USER:-stexor_app_user}
+      APP_DB_NAME: ${APP_DB_NAME:-app_db}
+      APP_DB_USER: ${APP_DB_USER:-app_user}
       APP_DB_PASSWORD_FILE: /run/secrets/app_db_password
       KEYCLOAK_DB_NAME: ${KEYCLOAK_DB_NAME:-keycloak}
       KEYCLOAK_DB_USER: ${KEYCLOAK_DB_USER:-keycloak}
@@ -184,7 +184,7 @@ services:
     command:
       - export MINIO_ROOT_PASSWORD="$$(cat "$${MINIO_ROOT_PASSWORD_FILE}")"; exec minio server /data --address ":9000" --console-address ":9001"
     environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-stexor_minio}
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minio_admin}
       MINIO_ROOT_PASSWORD_FILE: /run/secrets/minio_root_password
       MINIO_BROWSER_REDIRECT_URL: ${MINIO_BROWSER_REDIRECT_URL:-https://minio.localhost.com}
       MINIO_SERVER_URL: ${MINIO_SERVER_URL:-https://s3.localhost.com}
@@ -205,7 +205,7 @@ services:
       retries: 10
 
   php-apache:
-    image: ${PHP_APACHE_BUILD_IMAGE:-stexor/php-apache:local}
+    image: ${PHP_APACHE_BUILD_IMAGE:-platform/php-apache:local}
     build:
       context: .
       dockerfile: docker/php-apache.Dockerfile
@@ -234,11 +234,9 @@ services:
       SMTP_USER: ${SMTP_USER:-}
       SMTP_PASSWORD_FILE: /run/secrets/smtp_password
     volumes:
-      - ${PHP_SOURCE_DIR:-../src}:/var/www/html
-      - ${PHP_STREAM_SOURCE_DIR:-../src_stream}:/var/www/projects/stream
-      - ${PHP_ANNIVERSARY_SOURCE_DIR:-../src_anniversary}:/var/www/projects/anniversary
-      - ${PHP_WORKCALENDAR_SOURCE_DIR:-../src_workcalendar}:/var/www/projects/workcalendar
-      - ${PHP_FIREPORT_SOURCE_DIR:-../src_fireport}:/var/www/projects/fireport
+      - ${PHP_SOURCE_DIR:-./projects-portal}:/var/www/html
+      - .:/var/www/infra-docs:ro
+      - ${PHP_PROJECTS_DIR:-../src}:/var/www/projects
       - ./php-apache/php/custom.ini:/usr/local/etc/php/conf.d/zz-custom.ini:ro
       - ./php-apache/apache:/etc/apache2/sites-available
       - ./traefik/certs:/etc/apache2/certs:ro
@@ -306,7 +304,7 @@ services:
       - enterprise_net
 
   backend:
-    image: ${BACKEND_BUILD_IMAGE:-stexor/backend:local}
+    image: ${BACKEND_BUILD_IMAGE:-platform/backend:local}
     container_name: enterprise-backend
     init: true
     pids_limit: 512
@@ -320,28 +318,28 @@ services:
       SESSION_SECRET_FILE: /run/secrets/session_secret
       SESSION_SIGNING_KEYS_FILE: /run/secrets/session_signing_keys
       SECRET_HASH_KEYS_FILE: /run/secrets/hash_pepper_keys
-      SESSION_COOKIE_NAME: ${SESSION_COOKIE_NAME:-stexor_session}
+      SESSION_COOKIE_NAME: ${SESSION_COOKIE_NAME:-app_session}
       SESSION_COOKIE_MAX_AGE_SECONDS: ${SESSION_COOKIE_MAX_AGE_SECONDS:-315360000}
       SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-true}
       SESSION_COOKIE_SAMESITE: ${SESSION_COOKIE_SAMESITE:-Lax}
       API_DOCS_ENABLED: ${API_DOCS_ENABLED:-false}
-      APP_DB_NAME: ${APP_DB_NAME:-stexor_app}
-      APP_DB_USER: ${APP_DB_USER:-stexor_app_user}
+      APP_DB_NAME: ${APP_DB_NAME:-app_db}
+      APP_DB_USER: ${APP_DB_USER:-app_user}
       DATABASE_URL_FILE: /run/secrets/database_url
       REDIS_HOST: redis
       REDIS_PORT: 6379
       REDIS_PASSWORD_FILE: /run/secrets/redis_password
       REDIS_DB: ${REDIS_DB:-0}
-      REDIS_KEY_PREFIX: ${REDIS_KEY_PREFIX:-stexor}
+      REDIS_KEY_PREFIX: ${REDIS_KEY_PREFIX:-platform}
       KEYCLOAK_URL: http://keycloak:8080
       KEYCLOAK_REALM: ${KEYCLOAK_REALM:-enterprise}
       NATS_URL_FILE: /run/secrets/nats_url
       MINIO_ENDPOINT: minio
       MINIO_PORT: 9000
       MINIO_USE_SSL: "false"
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-stexor_minio}
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minio_admin}
       MINIO_ROOT_PASSWORD_FILE: /run/secrets/minio_root_password
-      MINIO_DEFAULT_BUCKET: ${MINIO_DEFAULT_BUCKET:-stexor-local}
+      MINIO_DEFAULT_BUCKET: ${MINIO_DEFAULT_BUCKET:-local-bucket}
       API_PUBLIC_URL: ${API_PUBLIC_URL:-https://api.localhost.com}
       ACCOUNT_PUBLIC_URL: ${ACCOUNT_PUBLIC_URL:-https://account.localhost.com}
       UI_PUBLIC_URL: ${UI_PUBLIC_URL:-https://ui.localhost.com}
@@ -411,7 +409,7 @@ services:
       start_period: 20s
 
   web:
-    image: ${WEB_BUILD_IMAGE:-stexor/web:local}
+    image: ${WEB_BUILD_IMAGE:-platform/web:local}
     container_name: enterprise-web
     init: true
     pids_limit: 512
@@ -431,7 +429,7 @@ services:
       ACCOUNT_HOST: ${ACCOUNT_HOST:-account.localhost.com}
       ACCOUNT_PUBLIC_URL: ${ACCOUNT_PUBLIC_URL:-https://account.localhost.com}
       NEXTAUTH_URL: ${NEXTAUTH_URL:-https://account.localhost.com}
-      KEYCLOAK_ISSUER: ${KEYCLOAK_ISSUER:-https://auth.localhost.com/realms/stexor}
+      KEYCLOAK_ISSUER: ${KEYCLOAK_ISSUER:-https://auth.localhost.com/realms/platform}
     depends_on:
       backend:
         condition: service_healthy
@@ -458,7 +456,7 @@ services:
       start_period: 20s
 
   worker-notifications:
-    image: ${WORKER_NOTIFICATIONS_BUILD_IMAGE:-stexor/worker-notifications:local}
+    image: ${WORKER_NOTIFICATIONS_BUILD_IMAGE:-platform/worker-notifications:local}
     container_name: enterprise-worker-notifications
     init: true
     pids_limit: 512
@@ -474,7 +472,7 @@ services:
       REDIS_PORT: 6379
       REDIS_PASSWORD_FILE: /run/secrets/redis_password
       REDIS_DB: ${REDIS_DB:-0}
-      REDIS_KEY_PREFIX: ${REDIS_KEY_PREFIX:-stexor}
+      REDIS_KEY_PREFIX: ${REDIS_KEY_PREFIX:-platform}
       NATS_URL_FILE: /run/secrets/nats_url
       ALERT_FORWARD_WEBHOOK_URL: ${ALERT_FORWARD_WEBHOOK_URL:-}
       ALERT_DISCORD_WEBHOOK_URL_FILE: ${ALERT_DISCORD_WEBHOOK_URL_FILE:-}
@@ -515,7 +513,7 @@ services:
       start_period: 20s
 
   worker-jobs:
-    image: ${WORKER_JOBS_BUILD_IMAGE:-stexor/worker-jobs:local}
+    image: ${WORKER_JOBS_BUILD_IMAGE:-platform/worker-jobs:local}
     container_name: enterprise-worker-jobs
     init: true
     pids_limit: 512
@@ -530,7 +528,7 @@ services:
       REDIS_PORT: 6379
       REDIS_PASSWORD_FILE: /run/secrets/redis_password
       REDIS_DB: ${REDIS_DB:-0}
-      REDIS_KEY_PREFIX: ${REDIS_KEY_PREFIX:-stexor}
+      REDIS_KEY_PREFIX: ${REDIS_KEY_PREFIX:-platform}
       NATS_URL_FILE: /run/secrets/nats_url
       MINIO_ENDPOINT: minio
       MINIO_PORT: 9000
@@ -966,17 +964,19 @@ configs:
             service: enterprise-minio-api
 
           local-php-http:
-            rule: Host(`projects.localhost.com`) || Host(`stream.localhost.com`) || Host(`anniversary.localhost.com`) || Host(`workcalendar.localhost.com`) || Host(`fireport.localhost.com`) || Host(`fireport.top`)
+            rule: Host(`${PROJECTS_HOST:-projects.localhost.com}`) || HostRegexp(`${PROJECTS_WILDCARD_HOST_REGEXP:-[a-z0-9-]+\\.localhost\\.com}`)
             entryPoints:
               - web
+            priority: 1
             middlewares:
               - enterprise-redirect-https@file
             service: local-php
 
           local-php:
-            rule: Host(`projects.localhost.com`) || Host(`stream.localhost.com`) || Host(`anniversary.localhost.com`) || Host(`workcalendar.localhost.com`) || Host(`fireport.localhost.com`) || Host(`fireport.top`)
+            rule: Host(`${PROJECTS_HOST:-projects.localhost.com}`) || HostRegexp(`${PROJECTS_WILDCARD_HOST_REGEXP:-[a-z0-9-]+\\.localhost\\.com}`)
             entryPoints:
               - websecure
+            priority: 1
             tls: {}
             middlewares:
               - enterprise-security-headers@file

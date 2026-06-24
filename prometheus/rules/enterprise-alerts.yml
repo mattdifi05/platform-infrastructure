@@ -1,5 +1,5 @@
 groups:
-  - name: stexor-enterprise-health
+  - name: platform-enterprise-health
     rules:
       - alert: ServiceTargetDown
         expr: up{job=~"backend|web|workers|traefik|prometheus|alertmanager|keycloak|node-exporter|cadvisor"} == 0
@@ -170,4 +170,4 @@ groups:
           severity: critical
         annotations:
           summary: "A monitored container disappeared"
-          description: "cAdvisor no longer reports one or more Stexor containers."
+          description: "cAdvisor no longer reports one or more Platform containers."

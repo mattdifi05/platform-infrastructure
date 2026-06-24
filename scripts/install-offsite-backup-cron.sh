@@ -1,14 +1,14 @@
 #!/usr/bin/env sh
 set -eu
 
-CRON_ROOT="/opt/stexor/stexor-platform-infrastructure"
+CRON_ROOT="/opt/platform/platform-infrastructure"
 BACKUP_AT="03:15"
 MARIADB_BACKUP_AT="03:45"
 MINIO_BACKUP_AT="04:00"
 KEYCLOAK_BACKUP_AT="04:10"
 SECRET_MANAGER_BACKUP_AT="04:20"
 RESTIC_AT="04:45"
-LOG_DIR="/var/log/stexor"
+LOG_DIR="/var/log/platform"
 
 usage() {
   cat <<'EOF'
@@ -44,11 +44,11 @@ cron_line() {
 }
 
 cat <<EOF
-# Stexor backup schedule. Requires RESTIC_REPOSITORY and RESTIC_PASSWORD_FILE in $CRON_ROOT/.env or the system environment.
-$(cron_line "$BACKUP_AT" 'sh ./scripts/backup-postgres.sh >> /var/log/stexor/postgres-backup.log 2>&1')
-$(cron_line "$MARIADB_BACKUP_AT" 'sh ./scripts/backup-mariadb.sh >> /var/log/stexor/mariadb-backup.log 2>&1')
-$(cron_line "$MINIO_BACKUP_AT" 'sh ./scripts/backup-minio.sh >> /var/log/stexor/minio-backup.log 2>&1')
-$(cron_line "$KEYCLOAK_BACKUP_AT" 'sh ./scripts/backup-keycloak.sh >> /var/log/stexor/keycloak-backup.log 2>&1')
-$(cron_line "$SECRET_MANAGER_BACKUP_AT" 'sh ./scripts/backup-secret-manager-metadata.sh >> /var/log/stexor/secret-manager-backup.log 2>&1')
-$(cron_line "$RESTIC_AT" '. ./.env >/dev/null 2>&1 || true; sh ./scripts/offsite-backup-restic.sh >> /var/log/stexor/restic-offsite.log 2>&1')
+# Platform backup schedule. Requires RESTIC_REPOSITORY and RESTIC_PASSWORD_FILE in $CRON_ROOT/.env or the system environment.
+$(cron_line "$BACKUP_AT" 'sh ./scripts/backup-postgres.sh >> /var/log/platform/postgres-backup.log 2>&1')
+$(cron_line "$MARIADB_BACKUP_AT" 'sh ./scripts/backup-mariadb.sh >> /var/log/platform/mariadb-backup.log 2>&1')
+$(cron_line "$MINIO_BACKUP_AT" 'sh ./scripts/backup-minio.sh >> /var/log/platform/minio-backup.log 2>&1')
+$(cron_line "$KEYCLOAK_BACKUP_AT" 'sh ./scripts/backup-keycloak.sh >> /var/log/platform/keycloak-backup.log 2>&1')
+$(cron_line "$SECRET_MANAGER_BACKUP_AT" 'sh ./scripts/backup-secret-manager-metadata.sh >> /var/log/platform/secret-manager-backup.log 2>&1')
+$(cron_line "$RESTIC_AT" '. ./.env >/dev/null 2>&1 || true; sh ./scripts/offsite-backup-restic.sh >> /var/log/platform/restic-offsite.log 2>&1')
 EOF

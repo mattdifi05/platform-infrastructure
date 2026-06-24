@@ -69,7 +69,7 @@ services:
       SESSION_SECRET_FILE: /run/secrets/session_secret
       SESSION_SIGNING_KEYS_FILE: /run/secrets/session_signing_keys
       SECRET_HASH_KEYS_FILE: /run/secrets/hash_pepper_keys
-      SESSION_COOKIE_NAME: ${SESSION_COOKIE_NAME:-stexor_session}
+      SESSION_COOKIE_NAME: ${SESSION_COOKIE_NAME:-app_session}
       SESSION_COOKIE_MAX_AGE_SECONDS: ${SESSION_COOKIE_MAX_AGE_SECONDS:-315360000}
       SESSION_COOKIE_SECURE: "true"
       SESSION_COOKIE_SAMESITE: Lax

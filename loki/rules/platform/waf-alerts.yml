@@ -1,5 +1,5 @@
 groups:
-  - name: stexor-waf-log-alerts
+  - name: platform-waf-log-alerts
     rules:
       - alert: WafBlockSpike
         expr: sum(count_over_time({job="docker"} |= "ModSecurity" [15m])) > 100

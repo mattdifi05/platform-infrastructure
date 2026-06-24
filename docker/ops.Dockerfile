@@ -17,4 +17,4 @@ RUN apk add --no-cache \
 
 WORKDIR /infra
 
-ENTRYPOINT ["tini", "--", "node", "/infra/scripts/stexor-ops.mjs"]
+ENTRYPOINT ["tini", "--", "node", "/infra/scripts/infra-ops.mjs"]

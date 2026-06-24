@@ -1,4 +1,4 @@
-package stexor.admission
+package platform.admission
 
 deny[msg] {
   input.kind == "Deployment"

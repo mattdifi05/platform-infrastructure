@@ -2,12 +2,12 @@
 set -eu
 
 REMOTE="${DEPLOY_REMOTE:-}"
-REMOTE_DIR="${DEPLOY_REMOTE_DIR:-/opt/stexor/stexor-platform-infrastructure}"
+REMOTE_DIR="${DEPLOY_REMOTE_DIR:-/opt/platform/platform-infrastructure}"
 SSH_PORT="${DEPLOY_SSH_PORT:-22}"
 SSH_KEY_PATH="${DEPLOY_SSH_KEY_PATH:-$HOME/.ssh/deploy_key}"
 BRANCH="${DEPLOY_BRANCH:-main}"
 ENV_FILE="${DEPLOY_ENV_FILE:-.env}"
-PROJECT_NAME="${DEPLOY_PROJECT_NAME:-stexor_platform_vps}"
+PROJECT_NAME="${DEPLOY_PROJECT_NAME:-platform_infra_vps}"
 
 if [ -z "$REMOTE" ]; then
   echo "Set DEPLOY_REMOTE, for example DEPLOY_REMOTE=deploy@your-vps" >&2
@@ -63,14 +63,14 @@ cd "$remote_dir"
 git fetch --all --prune
 git checkout "$branch"
 git pull --ff-only origin "$branch"
-sh ./scripts/hostinger-preflight.sh "$env_file"
+sh ./scripts/vps-preflight.sh "$env_file"
 docker compose --env-file "$env_file" -p "$project_name" \
     -f compose.yaml \
     -f compose.build.yaml \
     -f compose.secrets.yaml \
-    -f compose.hostinger.yaml \
+    -f compose.vps.yaml \
     -f compose.waf.yaml \
-    -f compose.hostinger-waf.yaml \
+    -f compose.vps-waf.yaml \
     up -d --build --remove-orphans
 DEPLOY_RUN_WAF_SMOKE="$deploy_run_waf_smoke" \
 DEPLOY_RUN_INFRA_HEALTH="$deploy_run_infra_health" \
@@ -82,5 +82,5 @@ DEPLOY_PRE_GO_LIVE_PRODUCTION_PREFLIGHT="$deploy_pre_go_live_production_prefligh
 DEPLOY_PRE_GO_LIVE_RESTORE_DRILL="$deploy_pre_go_live_restore_drill" \
 DEPLOY_PRE_GO_LIVE_OFFSITE_RESTORE_DRY_RUN="$deploy_pre_go_live_offsite_restore_dry_run" \
 DEPLOY_PRE_GO_LIVE_GITHUB_REMOTE="$deploy_pre_go_live_github_remote" \
-  sh ./scripts/hostinger-postdeploy.sh "$env_file"
+  sh ./scripts/vps-postdeploy.sh "$env_file"
 REMOTE_SCRIPT

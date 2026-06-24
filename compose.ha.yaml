@@ -103,22 +103,22 @@ services:
     deploy:
       placement:
         constraints:
-          - node.labels.stexor.stateful == true
+          - node.labels.platform.stateful == true
 
   redis:
     deploy:
       placement:
         constraints:
-          - node.labels.stexor.stateful == true
+          - node.labels.platform.stateful == true
 
   nats:
     deploy:
       placement:
         constraints:
-          - node.labels.stexor.stateful == true
+          - node.labels.platform.stateful == true
 
   minio:
     deploy:
       placement:
         constraints:
-          - node.labels.stexor.stateful == true
+          - node.labels.platform.stateful == true

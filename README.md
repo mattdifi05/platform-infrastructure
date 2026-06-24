@@ -1,14 +1,14 @@
 # Enterprise Infrastructure
 
-Infrastruttura Docker self-hosted per la piattaforma Stexor enterprise. La cartella deve stare accanto al monorepo applicativo:
+Infrastruttura Docker self-hosted per la piattaforma Platform enterprise. La cartella deve stare accanto al monorepo applicativo:
 
 ```text
-/opt/stexor
+/opt/platform
 |-- src
-`-- stexor-platform-infrastructure
+`-- platform-infrastructure
 ```
 
-`stexor-platform-infrastructure/` e' l'unica infrastruttura attiva: contiene anche la config PHP/Apache, MariaDB, phpMyAdmin, WAF, Hostinger e operazioni enterprise. I progetti applicativi restano in `src` e nelle cartelle sorgente dedicate, ma non esiste piu' una seconda infra da avviare.
+`platform-infrastructure/` e' l'unica infrastruttura attiva: contiene anche la config PHP/Apache, MariaDB, phpMyAdmin, WAF, VPS e operazioni enterprise. I progetti applicativi restano in `src` e nelle cartelle sorgente dedicate, ma non esiste piu' una seconda infra da avviare.
 
 ## Documentazione applicativa
 
@@ -29,47 +29,47 @@ I container usano prefisso `enterprise-`, network `enterprise_net` e volumi `ent
 ## Avvio locale
 
 ```sh
-cd /opt/stexor/stexor-platform-infrastructure
+cd /opt/platform/platform-infrastructure
 cp .env.example .env
-docker compose -f compose.yaml -f compose.build.yaml --env-file .env -p stexor_platform_local up -d --build
+docker compose -f compose.yaml -f compose.build.yaml --env-file .env -p platform_infra_local up -d --build
 ```
 
-Avvio consigliato con Stexor Secret Manager e Docker secrets file-based:
+Avvio consigliato con Infra Secret Manager e Docker secrets file-based:
 
 ```sh
-cd /opt/stexor/stexor-platform-infrastructure
+cd /opt/platform/platform-infrastructure
 cp .env.example .env
-sh ./scripts/stexor-secret-manager.sh init
-docker compose -f compose.yaml -f compose.build.yaml -f compose.secrets.yaml --env-file .env -p stexor_platform_local up -d --build
+sh ./scripts/infra-secret-manager.sh init
+docker compose -f compose.yaml -f compose.build.yaml -f compose.secrets.yaml --env-file .env -p platform_infra_local up -d --build
 ```
 
-`stexor-secret-manager` mantiene uno store proprietario cifrato in `secrets/stexor-secret-manager-store.json`, audit JSONL in `secrets/stexor-secret-manager-audit.log` e materializza i file Docker secrets usati da `compose.secrets.yaml`. Lo store usa envelope KMS locale `stexor-local-kms` con KEK ruotabile. Backend, worker e gateway projects leggono i secret da `/run/secrets/*`, inclusi `DATABASE_URL_FILE`, `SESSION_SECRET_FILE`, `SESSION_SIGNING_KEYS_FILE`, `PROJECTS_GATEWAY_SIGNING_KEYS_FILE`, `REDIS_PASSWORD_FILE`, `NATS_URL_FILE` e `SMTP_PASSWORD_FILE`.
+`infra-secret-manager` mantiene uno store proprietario cifrato in `secrets/infra-secret-manager-store.json`, audit JSONL in `secrets/infra-secret-manager-audit.log` e materializza i file Docker secrets usati da `compose.secrets.yaml`. Lo store usa envelope KMS locale `local-bucket-kms` con KEK ruotabile. Backend, worker e gateway projects leggono i secret da `/run/secrets/*`, inclusi `DATABASE_URL_FILE`, `SESSION_SECRET_FILE`, `SESSION_SIGNING_KEYS_FILE`, `PROJECTS_GATEWAY_SIGNING_KEYS_FILE`, `REDIS_PASSWORD_FILE`, `NATS_URL_FILE` e `SMTP_PASSWORD_FILE`.
 
 Il dev Docker e' volutamente production-like: usa `NODE_ENV=production`, immagini buildate, nessun hot reload, nessun bind mount del sorgente applicativo e nessuna porta host diretta per database/cache/app. Il traffico passa da Traefik solo sugli host locali dichiarati del progetto.
 
 `phpmyadmin` non parte nello stack default. Per manutenzione locale temporanea avvialo esplicitamente con il profilo `admin` e spegnilo a fine intervento:
 
 ```sh
-docker compose --env-file .env -p stexor_platform_local -f compose.yaml -f compose.build.yaml -f compose.secrets.yaml -f compose.waf.yaml --profile admin up -d phpmyadmin traefik waf
-docker compose -f compose.yaml -f compose.secrets.yaml --env-file .env -p stexor_platform_local stop phpmyadmin
+docker compose --env-file .env -p platform_infra_local -f compose.yaml -f compose.build.yaml -f compose.secrets.yaml -f compose.waf.yaml --profile admin up -d phpmyadmin traefik waf
+docker compose -f compose.yaml -f compose.secrets.yaml --env-file .env -p platform_infra_local stop phpmyadmin
 ```
 
 ## Operazioni container-first
 
-Tutti i wrapper in `scripts/*.sh` delegano a `scripts/stexor-ops.sh`, che avvia l'immagine Linux `stexor/ops:local` e monta solo repo, sorgente applicativo read-only e Docker socket. L'host non deve avere Node/PHP installati per backup, restore drill, health check, audit o deploy helper.
+Tutti i wrapper in `scripts/*.sh` delegano a `scripts/infra-ops.sh`, che avvia l'immagine Linux `platform/ops:local` e monta solo repo, sorgente applicativo read-only e Docker socket. L'host non deve avere Node/PHP installati per backup, restore drill, health check, audit o deploy helper.
 
-Per raggiungere i domini locali durante i check runtime, il runner usa `--network host` su Linux e mappa `*.localhost.com` a `host-gateway` su Docker Desktop. Se la tua installazione Docker richiede un target diverso, imposta `STEXOR_LOCAL_HOST_TARGET`, ad esempio:
+Per raggiungere i domini locali durante i check runtime, il runner usa `--network host` su Linux e mappa `*.localhost.com` a `host-gateway` su Docker Desktop. Se la tua installazione Docker richiede un target diverso, imposta `PLATFORM_LOCAL_HOST_TARGET`, ad esempio:
 
 ```sh
-STEXOR_LOCAL_HOST_TARGET=host.docker.internal sh ./scripts/infra-health.sh
+PLATFORM_LOCAL_HOST_TARGET=host.docker.internal sh ./scripts/infra-health.sh
 ```
 
 ## Stop, log e reset
 
 ```sh
-docker compose -p stexor_platform_local down
-docker compose -p stexor_platform_local logs -f
-docker compose -p stexor_platform_local down -v
+docker compose -p platform_infra_local down
+docker compose -p platform_infra_local logs -f
+docker compose -p platform_infra_local down -v
 ```
 
 ## URL locali
@@ -89,7 +89,7 @@ docker compose -p stexor_platform_local down -v
 
 Alertmanager resta interno alla rete Docker. Prometheus invia gli alert ad Alertmanager, che li inoltra al worker notifiche su `/alerts/prometheus` con token Bearer da Docker secret; il worker produce log Loki, metriche `notification_alert_*`, email reali verso `ALERT_EMAIL_TO` quando SMTP e' configurato, e canali opzionali Discord/Telegram tramite secret file. `node-exporter` e `cadvisor` forniscono metriche CPU, RAM, disco e container per alert operativi.
 
-I log sono centralizzati via Promtail senza montare `docker.sock`: Promtail legge i log JSON bounded dei container, applica una redaction pipeline su header, token, cookie, OTP e segreti, e promuove `service` e `level` a label Loki per query operative. Backend e worker usano la policy condivisa `@stexor/observability`; gli eventi critici restano anche su audit DB append-only/outbox.
+I log sono centralizzati via Promtail senza montare `docker.sock`: Promtail legge i log JSON bounded dei container, applica una redaction pipeline su header, token, cookie, OTP e segreti, e promuove `service` e `level` a label Loki per query operative. Backend e worker usano la policy condivisa `@platform/observability`; gli eventi critici restano anche su audit DB append-only/outbox.
 
 Prometheus, Alertmanager e la dashboard Traefik non hanno route browser locali: restano interni alla rete Docker. Usa Grafana, protetto da login, come superficie browser per metriche, alert e log.
 
@@ -115,10 +115,10 @@ Il go/no-go accetta `reports/uptime/` solo se i target pubblici sono coperti da 
 ## HTTPS locale
 
 ```sh
-cd /opt/stexor/stexor-platform-infrastructure
+cd /opt/platform/platform-infrastructure
 mkcert -install
 mkcert -cert-file ./traefik/certs/local-cert.pem -key-file ./traefik/certs/local-key.pem localhost 127.0.0.1 ::1 ui.localhost.com account.localhost.com api.localhost.com auth.localhost.com minio.localhost.com grafana.localhost.com
-docker compose -f compose.yaml -f compose.build.yaml --env-file .env -p stexor_platform_local up -d --build traefik
+docker compose -f compose.yaml -f compose.build.yaml --env-file .env -p platform_infra_local up -d --build traefik
 curl https://api.localhost.com/health
 ```
 
@@ -135,8 +135,8 @@ I file in `traefik/certs/` sono ignorati da Git. In container isolati monta la C
 Il profilo WAF mette OWASP CRS/ModSecurity davanti a Traefik. Le porte host `80/443` sono pubblicate solo dal WAF; Traefik resta interno alla rete Docker. L'immagine e' un tag stabile pin-nato con digest, non un rolling tag.
 
 ```sh
-cd /opt/stexor/stexor-platform-infrastructure
-docker compose --env-file .env -p stexor_platform_local \
+cd /opt/platform/platform-infrastructure
+docker compose --env-file .env -p platform_infra_local \
   -f compose.yaml \
   -f compose.build.yaml \
   -f compose.secrets.yaml \
@@ -151,29 +151,29 @@ Su Windows/Docker Desktop il certificato mkcert locale e' montato in un containe
 
 ```powershell
 docker run --rm --entrypoint sh -u root -v "${PWD}\traefik\certs\local-key.pem:/tmp/server.key" owasp/modsecurity-crs:4.26.0-nginx-202605200705 -c "chmod 0644 /tmp/server.key"
-docker compose --env-file .env -p stexor_platform_local -f compose.yaml -f compose.build.yaml -f compose.secrets.yaml -f compose.waf.yaml up -d waf
+docker compose --env-file .env -p platform_infra_local -f compose.yaml -f compose.build.yaml -f compose.secrets.yaml -f compose.waf.yaml up -d waf
 ```
 
 ## Database e migrazioni
 
-Lo schema applicativo vive in `stexor_account` dentro `stexor_app`. Gli init script in `postgres/init/` girano solo al primo avvio del volume; per aggiornamenti successivi:
+Lo schema applicativo vive in `app_account` dentro `app_db`. Gli init script in `postgres/init/` girano solo al primo avvio del volume; per aggiornamenti successivi:
 
 ```sh
-cd /opt/stexor/stexor-platform-infrastructure
+cd /opt/platform/platform-infrastructure
 sh ./scripts/apply-postgres-migrations.sh
 ```
 
-Le migrazioni sono tracciate in `stexor_platform.schema_migrations`.
+Le migrazioni sono tracciate in `platform_ops.schema_migrations`.
 
 ## Backup e restore
 
 ```sh
-cd /opt/stexor/stexor-platform-infrastructure
+cd /opt/platform/platform-infrastructure
 sh ./scripts/backup-postgres.sh
 sh ./scripts/backup-restore-drill.sh
 sh ./scripts/prune-postgres-backups.sh --dryRun
-sh ./scripts/restore-test-postgres.sh --backupFile ./backups/postgres/stexor_app-YYYYMMDD-HHMMSS.dump
-sh ./scripts/restore-postgres.sh --backupFile ./backups/postgres/stexor_app-YYYYMMDD-HHMMSS.dump --confirmRestore
+sh ./scripts/restore-test-postgres.sh --backupFile ./backups/postgres/app_db-YYYYMMDD-HHMMSS.dump
+sh ./scripts/restore-postgres.sh --backupFile ./backups/postgres/app_db-YYYYMMDD-HHMMSS.dump --confirmRestore
 sh ./scripts/backup-mariadb.sh
 sh ./scripts/backup-restore-drill-mariadb.sh
 sh ./scripts/restore-test-mariadb.sh --backupFile ./backups/mariadb/mariadb-all-YYYYMMDD-HHMMSS.sql.gz
@@ -190,7 +190,7 @@ sh ./scripts/full-restore-drill.sh
 sh ./scripts/dr-evidence.sh
 ```
 
-Il restore reale e' protetto da `--confirmRestore` e accetta solo file sotto `backups/`. La retention dei dump richiede un `restore_test` riuscito recente in `stexor_platform.backup_restore_runs` e mantiene sempre almeno 3 backup regolari e 3 drill.
+Il restore reale e' protetto da `--confirmRestore` e accetta solo file sotto `backups/`. La retention dei dump richiede un `restore_test` riuscito recente in `platform_ops.backup_restore_runs` e mantiene sempre almeno 3 backup regolari e 3 drill.
 I backup MariaDB coprono tutti i database dei progetti PHP locali, sono compressi, hanno sidecar `.sha256` e firma HMAC, e il restore drill importa il dump in un container MariaDB disposable senza toccare il volume reale.
 I backup MinIO, Keycloak e Secret Manager metadata sono artifact tar.gz firmati e verificati. I restore drill sono non distruttivi: MinIO usa un volume/container disposable, Keycloak valida la configurazione esportata senza importarla sul realm live, Secret Manager verifica store/KMS metadata senza includere la master key.
 Ogni backup manuale, schedulato o eseguito dentro un drill scrive anche un report JSON e Markdown in `reports/backups/` con durata, artifact, dimensione, SHA256 e firma. La cartella `reports/` e' ignorata da Git.
@@ -199,7 +199,7 @@ Ogni backup manuale, schedulato o eseguito dentro un drill scrive anche un repor
 Backup off-site Restic:
 
 ```sh
-export RESTIC_REPOSITORY="s3:s3.amazonaws.com/bucket/stexor"
+export RESTIC_REPOSITORY="s3:s3.amazonaws.com/bucket/platform"
 sh ./scripts/offsite-backup-restic.sh --passwordFile ./secrets/restic_password.txt
 sh ./scripts/offsite-restore-drill-restic.sh --planOnly
 sh ./scripts/offsite-restore-drill-restic.sh --dryRun --passwordFile ./secrets/restic_password.txt
@@ -213,26 +213,26 @@ Per il go-live il repository Restic deve essere remoto (`s3:`, `b2:`, `azure:`, 
 Schedulazione consigliata, container-first:
 
 ```sh
-docker compose --env-file .env -p stexor_platform_vps \
+docker compose --env-file .env -p platform_infra_vps \
   -f compose.yaml \
   -f compose.build.yaml \
   -f compose.secrets.yaml \
-  -f compose.hostinger.yaml \
+  -f compose.vps.yaml \
   -f compose.waf.yaml \
-  -f compose.hostinger-waf.yaml \
+  -f compose.vps-waf.yaml \
   -f compose.backup-scheduler.yaml \
   --profile backup \
   up -d backup-scheduler
 ```
 
-Il servizio `backup-scheduler` usa l'immagine ops Dockerizzata e `crond` interno, quindi non richiede cron o Node sull'host. Schedula backup giornalieri PostgreSQL, MariaDB, MinIO, Keycloak e Secret Manager metadata, retention PostgreSQL e un `full-restore-drill` settimanale. Lo scheduler rileva i mount host da Docker; su VPS puoi forzarli con `STEXOR_INFRA_HOST_ROOT` e `STEXOR_SOURCE_HOST_ROOT` se usi percorsi custom. L'upload Restic off-site parte solo con `BACKUP_SCHEDULER_ENABLE_OFFSITE=true` e credenziali reali. Il runtime env file privato dello scheduler viene letto con parser dedicato dai job `--run` e non viene eseguito con `source`.
+Il servizio `backup-scheduler` usa l'immagine ops Dockerizzata e `crond` interno, quindi non richiede cron o Node sull'host. Schedula backup giornalieri PostgreSQL, MariaDB, MinIO, Keycloak e Secret Manager metadata, retention PostgreSQL e un `full-restore-drill` settimanale. Lo scheduler rileva i mount host da Docker; su VPS puoi forzarli con `PLATFORM_INFRA_HOST_ROOT` e `PROJECT_SOURCE_HOST_ROOT` se usi percorsi custom. L'upload Restic off-site parte solo con `BACKUP_SCHEDULER_ENABLE_OFFSITE=true` e credenziali reali. Il runtime env file privato dello scheduler viene letto con parser dedicato dai job `--run` e non viene eseguito con `source`.
 
 Schedulazione Linux host fallback:
 
 ```sh
-sh ./scripts/install-postgres-backup-cron.sh --cronRoot /opt/stexor/stexor-platform-infrastructure --backupAt 03:15 --drillAt 04:15 --retentionAt 05:15 --drillWeekday 0
-sh ./scripts/install-mariadb-backup-cron.sh --cronRoot /opt/stexor/stexor-platform-infrastructure --backupAt 03:45 --drillAt 04:45 --drillWeekday 0
-sh ./scripts/install-offsite-backup-cron.sh --cron-root /opt/stexor/stexor-platform-infrastructure
+sh ./scripts/install-postgres-backup-cron.sh --cronRoot /opt/platform/platform-infrastructure --backupAt 03:15 --drillAt 04:15 --retentionAt 05:15 --drillWeekday 0
+sh ./scripts/install-mariadb-backup-cron.sh --cronRoot /opt/platform/platform-infrastructure --backupAt 03:45 --drillAt 04:45 --drillWeekday 0
+sh ./scripts/install-offsite-backup-cron.sh --cron-root /opt/platform/platform-infrastructure
 ```
 
 I comandi stampano le righe cron da installare sull'host: backup quotidiano, restore drill settimanale, retention quotidiana dei dump PostgreSQL e upload off-site degli artifact firmati.
@@ -242,14 +242,14 @@ I comandi stampano le righe cron da installare sull'host: backup quotidiano, res
 Quality gate dal monorepo, per dev/CI dove Node e pnpm sono gia' presenti:
 
 ```sh
-cd /opt/stexor/src
+cd /opt/platform/src
 pnpm enterprise:check
 ```
 
 Audit infrastrutturale diretto:
 
 ```sh
-cd /opt/stexor/stexor-platform-infrastructure
+cd /opt/platform/platform-infrastructure
 sh ./scripts/enterprise-hardening-audit.sh
 ```
 
@@ -295,22 +295,22 @@ sh ./scripts/dast-zap-baseline.sh https://api-staging.example.com
 
 `alert-evidence.sh` verifica configurazione Alertmanager, bearer secret, metriche worker e alert di failure delivery. In staging/VPS usa `alert-evidence.sh --sendTest`; con canali reali configurati puoi aggiungere `--requireEmailDelivery`, `--requireDiscordDelivery` o `--requireTelegramDelivery` per rendere la consegna un gate.
 
-`secret-rotation-evidence.sh` scrive un report non-secret in `reports/secret-rotation/` con stato dello store Stexor Secret Manager, audit log, KMS attivo, eta' dei secret rispetto a `rotationDays`, file materializzati e risultato di `stexor-secret-manager verify`. In produzione usa `--enforce`: il go/no-go accetta solo `mode=evidence`, `status=passed`, zero secret scaduti e zero file mancanti.
+`secret-rotation-evidence.sh` scrive un report non-secret in `reports/secret-rotation/` con stato dello store Infra Secret Manager, audit log, KMS attivo, eta' dei secret rispetto a `rotationDays`, file materializzati e risultato di `infra-secret-manager verify`. In produzione usa `--enforce`: il go/no-go accetta solo `mode=evidence`, `status=passed`, zero secret scaduti e zero file mancanti.
 
-`compose-healthcheck-coverage` renderizza gli stack local WAF, Hostinger WAF e backup scheduler, poi scrive `reports/healthchecks/healthcheck-coverage-*.json`/`.md`. Fallisce se un servizio operativo del render Compose non ha una healthcheck.
+`compose-healthcheck-coverage` renderizza gli stack local WAF, VPS WAF e backup scheduler, poi scrive `reports/healthchecks/healthcheck-coverage-*.json`/`.md`. Fallisce se un servizio operativo del render Compose non ha una healthcheck.
 
-`rate-limit-evidence.sh` scrive un report in `reports/rate-limits/` che verifica il rate limit Traefik, i router local/Hostinger, i budget backend e, quando il sorgente Stexor e' montato, anche Fastify fail-closed, fallback Redis->memoria e test 429. In CI resta infra-only se il progetto applicativo non e' presente.
+`rate-limit-evidence.sh` scrive un report in `reports/rate-limits/` che verifica il rate limit Traefik, i router local/VPS, i budget backend e, quando il sorgente Platform e' montato, anche Fastify fail-closed, fallback Redis->memoria e test 429. In CI resta infra-only se il progetto applicativo non e' presente.
 
-`audit-log-evidence.sh` scrive un report in `reports/audit-logs/` che verifica schema audit append-only, outbox durevole, RLS, dead-letter, alert Prometheus, dashboard Grafana e, quando il sorgente Stexor e' montato, anche scrittura transazionale backend, dispatcher worker, sink NATS e test di crash/retry.
+`audit-log-evidence.sh` scrive un report in `reports/audit-logs/` che verifica schema audit append-only, outbox durevole, RLS, dead-letter, alert Prometheus, dashboard Grafana e, quando il sorgente Platform e' montato, anche scrittura transazionale backend, dispatcher worker, sink NATS e test di crash/retry.
 
-`retention-evidence.sh` scrive un report in `reports/retention/` che verifica logging Docker bounded, retention Loki/Promtail, retention TSDB Prometheus, datasource/pannelli Grafana e, quando il sorgente Stexor e' montato, anche log JSON strutturati e redazione dei campi sensibili. In CI resta infra-only se il progetto applicativo non e' presente.
+`retention-evidence.sh` scrive un report in `reports/retention/` che verifica logging Docker bounded, retention Loki/Promtail, retention TSDB Prometheus, datasource/pannelli Grafana e, quando il sorgente Platform e' montato, anche log JSON strutturati e redazione dei campi sensibili. In CI resta infra-only se il progetto applicativo non e' presente.
 
 `load-benchmark.sh` senza `--url` misura il backend dentro la rete Docker ed e' utile per regressioni locali. Per il go-live devi usare l'URL pubblico e `--requirePublicTarget`; con Cloudflare CDN attivo aggiungi `--requireEdgeEvidence --expectedEdgeProvider cloudflare`. Il report in `reports/load/` include profili 50/100/500, snapshot CPU/RAM Docker, target evidence pubblico/edge e `status`. Anche i fallimenti scrivono report diagnostici, ma il go/no-go accetta solo `status=passed`.
 
-Tutti gli entrypoint sono Linux/Docker-first; il runner comune e' `scripts/stexor-ops.sh`.
+Tutti gli entrypoint sono Linux/Docker-first; il runner comune e' `scripts/infra-ops.sh`.
 Sul VPS non servono Node, pnpm o una toolchain JS installati sull'host: i wrapper
 `scripts/*.sh` costruiscono e usano automaticamente il runner containerizzato
-`stexor/ops:local` da `docker/ops.Dockerfile`. L'host deve avere solo Ubuntu LTS,
+`platform/ops:local` da `docker/ops.Dockerfile`. L'host deve avere solo Ubuntu LTS,
 Docker Engine, Docker Compose plugin e Git.
 
 La policy GitHub live e' versionata in `governance/github-branch-protection.json`.
@@ -334,7 +334,7 @@ il report finisce in `reports/github-actions/` e deve avere `status=passed` e
 `run.conclusion=success`. La workflow `enterprise-infra-run-evidence` produce
 automaticamente la stessa evidenza dopo ogni completamento di `enterprise-infra`
 su `main` e carica `reports/github-actions/` come artifact non-secret. La CI dell'infra non esegue checkout di repository progetto: collega
-Stexor o altri progetti solo tramite `NODE_SOURCE_DIR` quando devi buildarli.
+Collega i repository applicativi solo tramite `PROJECT_SOURCE_DIR` quando devi buildarli.
 La workflow manuale `enterprise-live-evidence` gira nell'environment GitHub
 `production` e raccoglie prove live non mutanti: uptime provider, load benchmark
 pubblico via Cloudflare, Cloudflare Access `--verifyRemote`, go/no-go live e
@@ -344,7 +344,7 @@ entra nel VPS con `DEPLOY_SSH_KEY`, `DEPLOY_REMOTE` e `DEPLOY_SSH_PORT`, puo'
 applicare bootstrap/hardening solo con conferma esplicita, esegue
 `vps-host-readiness --enforce` sulla porta `VPS_HARDENED_SSH_PORT` e carica i
 report `reports/vps-*` come artifact.
-Il gate `scripts/stexor-ops.sh repo-coverage-check` misura la copertura dei
+Il gate `scripts/infra-ops.sh repo-coverage-check` misura la copertura dei
 file tracciati della repo: ogni file deve rientrare in una categoria
 infrastrutturale e il workflow deve esercitare tutti i gate CI obbligatori.
 Prima del go-live genera un evidence pack con
@@ -405,7 +405,7 @@ sh ./scripts/release-evidence.sh --requireProvenance --provenance ./release/prov
 
 ### VPS hardening e Cloudflare origin-lock
 
-Prima del deploy pubblico su Hostinger/Ubuntu LTS:
+Prima del deploy pubblico su VPS/Ubuntu LTS:
 
 ```sh
 sudo sh ./scripts/vps-bootstrap-ubuntu.sh --apply --deploy-user deploy
@@ -423,8 +423,8 @@ poi verifica `docker`, `docker compose` e `git`.
 `reports/vps-hardening/`. Con `--apply` applica SSH hardening, sysctl, UFW,
 fail2ban, unattended upgrades, auditd/AppArmor e Docker daemon hardening. Se
 `/etc/docker/daemon.json` non esiste, scrive direttamente la config hardened e
-riavvia Docker; se esiste ma manca chiavi Stexor, fallisce finche' non rivedi
-`/etc/docker/daemon.json.stexor-template` e rilanci con
+riavvia Docker; se esiste ma manca chiavi Platform, fallisce finche' non rivedi
+`/etc/docker/daemon.json.platform-template` e rilanci con
 `--replace-docker-daemon-config`, che crea backup prima della sostituzione.
 Usa `--reload-sshd` solo dopo aver verificato accesso con chiave e nuova porta:
 il comando valida `sshd -t`, ricarica `ssh`/`sshd` e registra
@@ -453,14 +453,14 @@ Staging usa gli stessi overlay della produzione ma domini, volumi e secret separ
 
 ```sh
 cp .env.staging.example .env.staging
-sh ./scripts/stexor-secret-manager.sh init
-docker compose --env-file .env.staging -p stexor_platform_staging \
+sh ./scripts/infra-secret-manager.sh init
+docker compose --env-file .env.staging -p platform_infra_staging \
   -f compose.yaml \
   -f compose.build.yaml \
   -f compose.secrets.yaml \
-  -f compose.hostinger.yaml \
+  -f compose.vps.yaml \
   -f compose.waf.yaml \
-  -f compose.hostinger-waf.yaml \
+  -f compose.vps-waf.yaml \
   -f compose.staging.yaml \
   up -d --build
 ```
@@ -471,41 +471,41 @@ Esegui DAST solo su staging:
 sh ./scripts/dast-zap-baseline.sh https://api-staging.example.com
 ```
 
-### Hostinger/VPS prod-like con TLS esterno
+### VPS prod-like con TLS esterno
 
-Usa questo profilo quando dominio e certificati sono gestiti fuori da Docker, per esempio da Hostinger o da Cloudflare davanti alla VPS. Traefik resta il reverse proxy interno, ascolta solo HTTP sulla porta 80 e inoltra alle app `X-Forwarded-Proto=https`.
+Usa questo profilo quando dominio e certificati sono gestiti fuori da Docker, per esempio da VPS o da Cloudflare davanti alla VPS. Traefik resta il reverse proxy interno, ascolta solo HTTP sulla porta 80 e inoltra alle app `X-Forwarded-Proto=https`.
 
 ```sh
-cd /opt/stexor/stexor-platform-infrastructure
+cd /opt/platform/platform-infrastructure
 cp .env.example .env
-# copia i valori di .env.hostinger.example dentro .env e sostituisci tutti i domini example.com
-sh ./scripts/stexor-secret-manager.sh init
-sh ./scripts/hostinger-preflight.sh .env
-docker compose --env-file .env -p stexor_platform_vps \
+# copia i valori di .env.vps.example dentro .env e sostituisci tutti i domini example.com
+sh ./scripts/infra-secret-manager.sh init
+sh ./scripts/vps-preflight.sh .env
+docker compose --env-file .env -p platform_infra_vps \
   -f compose.yaml \
   -f compose.build.yaml \
   -f compose.secrets.yaml \
-  -f compose.hostinger.yaml \
+  -f compose.vps.yaml \
   -f compose.waf.yaml \
-  -f compose.hostinger-waf.yaml \
+  -f compose.vps-waf.yaml \
   up -d --build
-sh ./scripts/hostinger-postdeploy.sh .env
+sh ./scripts/vps-postdeploy.sh .env
 ```
 
-`hostinger-preflight.sh` valida env, secret file e render completo dello stesso
-set Compose usato dal deploy Hostinger, inclusi `compose.waf.yaml` e
-`compose.hostinger-waf.yaml`.
+`vps-preflight.sh` valida env, secret file e render completo dello stesso
+set Compose usato dal deploy VPS, inclusi `compose.waf.yaml` e
+`compose.vps-waf.yaml`.
 
-`hostinger-postdeploy.sh` carica `.env`, usa gli URL pubblici reali e lancia
+`vps-postdeploy.sh` carica `.env`, usa gli URL pubblici reali e lancia
 WAF smoke piu' `infra-health` per default. Con `DEPLOY_RUN_GO_NO_GO=1` esegue
 anche `production-go-no-go.sh --enforce` e `production-readiness-live.sh`. Per
-il go-live finale puoi abilitarlo anche da `deploy-hostinger.sh` con:
+il go-live finale puoi abilitarlo anche da `deploy-vps.sh` con:
 
 ```sh
 DEPLOY_RUN_PRE_GO_LIVE=1 \
 DEPLOY_RUN_GO_NO_GO=1 \
 DEPLOY_REPO=OWNER/REPO \
-sh ./scripts/deploy-hostinger.sh
+sh ./scripts/deploy-vps.sh
 ```
 
 I drill piu' pesanti restano opt-in: usa
@@ -517,15 +517,15 @@ sono pronti.
 Per ridurre errori manuali sulla VPS, usa l'orchestratore safe-by-default:
 
 ```sh
-sh ./scripts/hostinger-go-live.sh --planOnly --repo OWNER/REPO
-sh ./scripts/hostinger-go-live.sh --confirmLive --repo OWNER/REPO --start-stack
-sh ./scripts/hostinger-go-live.sh --confirmLive --repo OWNER/REPO --bootstrap --apply-hardening --reload-sshd --full-evidence --start-stack
-sh ./scripts/hostinger-go-live.sh --confirmLive --repo OWNER/REPO --apply-hardening --reload-sshd --replace-docker-daemon-config --full-evidence --start-stack
+sh ./scripts/vps-go-live.sh --planOnly --repo OWNER/REPO
+sh ./scripts/vps-go-live.sh --confirmLive --repo OWNER/REPO --start-stack
+sh ./scripts/vps-go-live.sh --confirmLive --repo OWNER/REPO --bootstrap --apply-hardening --reload-sshd --full-evidence --start-stack
+sh ./scripts/vps-go-live.sh --confirmLive --repo OWNER/REPO --apply-hardening --reload-sshd --replace-docker-daemon-config --full-evidence --start-stack
 ```
 
-Senza `--confirmLive` scrive solo il piano in `reports/hostinger-go-live/`.
+Senza `--confirmLive` scrive solo il piano in `reports/vps-go-live/`.
 Con `--confirmLive` puo' eseguire bootstrap host, hardening, `vps-host-readiness
---enforce`, `hostinger-preflight`, opzionalmente `docker compose up`,
+--enforce`, `vps-preflight`, opzionalmente `docker compose up`,
 post-deploy, go/no-go, checklist live production-ready, `evidence-bundle` e
 verifica integrita' bundle, fermandosi al primo errore e
 lasciando un report JSON/Markdown non sensibile. Usa
@@ -535,20 +535,20 @@ production evidence. Usa
 `--replace-docker-daemon-config` solo dopo aver rivisto il template Docker
 generato quando una VPS esistente ha gia' `/etc/docker/daemon.json`.
 
-Nel profilo Hostinger:
+Nel profilo VPS:
 
 - Il WAF pubblica la porta 80; Traefik resta interno e riceve solo traffico filtrato.
-- SSL, redirect HTTPS e CDN stanno all'edge esterno, per esempio Hostinger/Cloudflare.
+- SSL, redirect HTTPS e CDN stanno all'edge esterno, per esempio VPS/Cloudflare.
 - PostgreSQL, MariaDB, Redis, NATS, MinIO, Prometheus, Loki, Grafana, phpMyAdmin e dashboard Traefik non sono pubblici.
 - Le app Node usano `UI_HOST`, `ACCOUNT_HOST`, `API_HOST` e `AUTH_HOST`.
-- I progetti PHP usano `PROJECTS_HOST`, `STREAM_HOST`, `ANNIVERSARY_HOST`, `WORKCALENDAR_HOST` e `FIREPORT_HOST`.
+- I progetti PHP usano `PROJECTS_HOST` per la pagina documentazione e `PROJECTS_WILDCARD_HOST_REGEXP` per i sottodomini progetto; i sorgenti stanno in `PHP_PROJECTS_DIR/nomeprogetto`.
 - MariaDB usa `secrets/mariadb_root_password.txt` tramite Docker secret, non una password root in `.env`.
 - `phpmyadmin` resta fuori dal profilo di default; su VPS pubblica usa preferibilmente SSH e client CLI, non una UI DB esposta.
 
 ### Produzione full con ACME
 
 ```sh
-cd /opt/stexor/stexor-platform-infrastructure
+cd /opt/platform/platform-infrastructure
 sh ./scripts/production-preflight.sh
 docker compose -f compose.yaml -f compose.prod.yaml --env-file .env -p enterprise_prod up -d
 ```
@@ -580,15 +580,15 @@ Le variabili pubbliche di Next.js (`NEXT_PUBLIC_*` e host account) vengono passa
 - `compose.yaml`: stack local/dev production-like.
 - `compose.secrets.yaml`: overlay Docker secrets file-based.
 - `compose.prod.yaml`: overlay produzione.
-- `compose.hostinger.yaml`: overlay VPS prod-like dietro TLS esterno.
+- `compose.vps.yaml`: overlay VPS prod-like dietro TLS esterno.
 - `compose.waf.yaml`: overlay OWASP CRS/ModSecurity davanti a Traefik.
-- `compose.hostinger-waf.yaml`: adattamento WAF per VPS con TLS/CDN esterno.
+- `compose.vps-waf.yaml`: adattamento WAF per VPS con TLS/CDN esterno.
 - `compose.backup-scheduler.yaml`: scheduler backup/restore drill container-first.
 - `compose.build.yaml`: build immagini applicative.
 - `traefik/traefik.edge-http.yml`: Traefik per edge TLS esterno.
 - `scripts/*.sh`: entrypoint operativi Linux/Docker.
-- `scripts/stexor-ops.sh`: entrypoint container-first che non richiede Node sull'host.
-- `scripts/stexor-ops.mjs`: runner applicativo eseguito dentro il container ops.
+- `scripts/infra-ops.sh`: entrypoint container-first che non richiede Node sull'host.
+- `scripts/infra-ops.mjs`: runner applicativo eseguito dentro il container ops.
 - `docker/ops.Dockerfile`: immagine operativa con Node, Docker CLI e Compose plugin.
 - `postgres/init/` e `postgres/migrations/`: schema e migrazioni.
 - `RUNBOOK.md`, `SECURITY.md`, `THREAT-MODEL.md`, `ENTERPRISE-MATURITY.md`: governance operativa.

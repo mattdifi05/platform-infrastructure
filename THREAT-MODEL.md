@@ -1,4 +1,4 @@
-# Stexor Threat Model
+# Platform Threat Model
 
 ## Assets
 

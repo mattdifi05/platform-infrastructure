@@ -11,7 +11,7 @@ usage() {
   cat <<'EOF'
 Usage: vps-bootstrap-ubuntu.sh [--apply] [--deploy-user USER] [--ubuntu-codename CODENAME]
 
-Bootstrap a Hostinger Ubuntu LTS VPS with only the host dependencies Stexor
+Bootstrap a VPS Ubuntu LTS VPS with only the host dependencies Platform
 requires: Git, Docker Engine, Docker Buildx and the Docker Compose plugin.
 Dry-run by default. Re-run with --apply after reviewing the report.
 Writes JSON and Markdown evidence under reports/vps-bootstrap/.
@@ -112,7 +112,7 @@ write_reports() {
   } > "$JSON_REPORT"
 
   {
-    printf '# Stexor VPS Bootstrap\n\n'
+    printf '# Platform VPS Bootstrap\n\n'
     printf 'Generated at: %s\n\n' "$generated_at"
     printf 'Status: %s\n\n' "$status"
     printf 'Mode: %s\n\n' "$([ "$APPLY" -eq 1 ] && printf apply || printf plan)"
@@ -266,5 +266,5 @@ write_reports
 if [ "$APPLY" -eq 1 ]; then
   echo "VPS bootstrap apply complete. Log out/in if a deploy user was added to the docker group, then run vps-hardening and vps-host-readiness."
 else
-  echo "VPS bootstrap dry-run complete. Re-run with --apply on the Hostinger Ubuntu LTS VPS."
+  echo "VPS bootstrap dry-run complete. Re-run with --apply on the VPS Ubuntu LTS VPS."
 fi

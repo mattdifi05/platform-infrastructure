@@ -25,26 +25,26 @@
     }
   ],
   "customWafRuleset": {
-    "name": "Stexor Enterprise Custom WAF",
+    "name": "Platform Enterprise Custom WAF",
     "description": "Created only on clean/new Cloudflare zones by scripts/cloudflare-from-zero.sh.",
     "phase": "http_request_firewall_custom",
     "rules": [
       {
-        "ref": "stexor-block-admin-hosts",
+        "ref": "platform-block-admin-hosts",
         "description": "Block public admin hostnames",
         "action": "block",
         "enabled": true,
         "expression": "(lower(http.host) matches \"^(phpmyadmin|traefik|prometheus|alertmanager|grafana|minio|s3)\\\\.\")"
       },
       {
-        "ref": "stexor-block-sensitive-files",
+        "ref": "platform-block-sensitive-files",
         "description": "Block sensitive file probes",
         "action": "block",
         "enabled": true,
         "expression": "(http.request.uri.path matches \"(?i)^/(\\\\.env|\\\\.git|\\\\.svn|\\\\.hg|composer\\\\.(json|lock)|package(-lock)?\\\\.json|pnpm-lock\\\\.yaml|yarn\\\\.lock|docker-compose\\\\.ya?ml|compose\\\\.ya?ml|\\\\.DS_Store)(/|$)\")"
       },
       {
-        "ref": "stexor-block-common-scanners",
+        "ref": "platform-block-common-scanners",
         "description": "Block common scanner paths",
         "action": "block",
         "enabled": true,

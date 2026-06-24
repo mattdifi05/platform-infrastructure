@@ -28,7 +28,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
-          sh ./scripts/stexor-ops.sh github-actions-run-evidence \
+          sh ./scripts/infra-ops.sh github-actions-run-evidence \
             --repo "${{ github.repository }}" \
             --workflow enterprise-infra.yml \
             --branch "${{ github.event.workflow_run.head_branch }}" \

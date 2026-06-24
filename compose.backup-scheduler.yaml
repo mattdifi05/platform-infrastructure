@@ -1,6 +1,6 @@
 services:
   backup-scheduler:
-    image: ${STEXOR_OPS_IMAGE:-stexor/ops:local}
+    image: ${PLATFORM_OPS_IMAGE:-platform/ops:local}
     build:
       context: .
       dockerfile: docker/ops.Dockerfile
@@ -25,11 +25,11 @@ services:
       - sh
       - /infra/scripts/backup-scheduler.sh
     environment:
-      STEXOR_INFRA_ROOT: /infra
-      STEXOR_INFRA_CONTAINER_ROOT: /infra
-      STEXOR_INFRA_HOST_ROOT: ${STEXOR_INFRA_HOST_ROOT:-}
-      STEXOR_SOURCE_ROOT: /src_stexor
-      STEXOR_SOURCE_HOST_ROOT: ${STEXOR_SOURCE_HOST_ROOT:-}
+      PLATFORM_INFRA_ROOT: /infra
+      PLATFORM_INFRA_CONTAINER_ROOT: /infra
+      PLATFORM_INFRA_HOST_ROOT: ${PLATFORM_INFRA_HOST_ROOT:-}
+      PROJECT_SOURCE_ROOT: /project
+      PROJECT_SOURCE_HOST_ROOT: ${PROJECT_SOURCE_HOST_ROOT:-}
       NODE_IMAGE: ${NODE_IMAGE:-node:26.3.1-alpine@sha256:a2dc166a387cc6ca1e62d0c8e265e49ca985d6e60abc9fe6e6c3d6ce8e63f606}
       BACKUP_SCHEDULER_POSTGRES_AT: ${BACKUP_SCHEDULER_POSTGRES_AT:-03:15}
       BACKUP_SCHEDULER_MARIADB_AT: ${BACKUP_SCHEDULER_MARIADB_AT:-03:45}
@@ -48,7 +48,7 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - .:/infra
-      - ${NODE_SOURCE_DIR:-../src_stexor}:/src_stexor:ro
+      - ${PROJECT_SOURCE_DIR:-../project}:/project:ro
     depends_on:
       postgres:
         condition: service_healthy

@@ -10,31 +10,31 @@ enterprise edge baseline.
 
 Current verified state after revert:
 
-- `fireport.top`
-  - `ftp.fireport.top`: proxied.
-  - `autoconfig.fireport.top`: proxied.
-  - `autodiscover.fireport.top`: proxied.
-  - `hostingermail-a._domainkey.fireport.top`: proxied.
-  - `hostingermail-b._domainkey.fireport.top`: proxied.
-  - `hostingermail-c._domainkey.fireport.top`: proxied.
+- `project.example.com`
+  - `ftp.project.example.com`: proxied.
+  - `autoconfig.project.example.com`: proxied.
+  - `autodiscover.project.example.com`: proxied.
+  - `provider-mail-a._domainkey.project.example.com`: proxied.
+  - `provider-mail-b._domainkey.project.example.com`: proxied.
+  - `provider-mail-c._domainkey.project.example.com`: proxied.
 
-- `matthewdifilippo.com`
-  - `ftp.matthewdifilippo.com`: proxied.
+- `portfolio.example.com`
+  - `ftp.portfolio.example.com`: proxied.
 
 ## Superseded Change Log
 
 Applied through the connected Cloudflare API:
 
-- `fireport.top`
-  - Set `ftp.fireport.top` to DNS-only.
-  - Set `autoconfig.fireport.top` to DNS-only.
-  - Set `autodiscover.fireport.top` to DNS-only.
-  - Set `hostingermail-a._domainkey.fireport.top` to DNS-only.
-  - Set `hostingermail-b._domainkey.fireport.top` to DNS-only.
-  - Set `hostingermail-c._domainkey.fireport.top` to DNS-only.
+- `project.example.com`
+  - Set `ftp.project.example.com` to DNS-only.
+  - Set `autoconfig.project.example.com` to DNS-only.
+  - Set `autodiscover.project.example.com` to DNS-only.
+  - Set `provider-mail-a._domainkey.project.example.com` to DNS-only.
+  - Set `provider-mail-b._domainkey.project.example.com` to DNS-only.
+  - Set `provider-mail-c._domainkey.project.example.com` to DNS-only.
 
-- `matthewdifilippo.com`
-  - Set `ftp.matthewdifilippo.com` to DNS-only.
+- `portfolio.example.com`
+  - Set `ftp.portfolio.example.com` to DNS-only.
 
 This section is kept only as an audit trail of the temporary change that has
 now been reverted.
@@ -47,5 +47,5 @@ Blocked by current Cloudflare token permissions:
 
 The intended rules and settings are versioned in this directory:
 
-- `stexor-zone-waf-rules.json`
+- `zone-waf-rules.json`
 - `zone-settings.json`

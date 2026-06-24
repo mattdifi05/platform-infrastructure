@@ -1,6 +1,6 @@
-# Stexor VPS Pre-Deploy Checklist
+# Platform VPS Pre-Deploy Checklist
 
-Use this checklist on the Hostinger Ubuntu LTS VPS before exposing public traffic.
+Use this checklist on the VPS Ubuntu LTS VPS before exposing public traffic.
 
 ## Host Bootstrap
 
@@ -19,17 +19,17 @@ Use this checklist on the Hostinger Ubuntu LTS VPS before exposing public traffi
 
 ## Repository And Environment
 
-- [ ] App repository and `stexor-platform-infrastructure` cloned under `/opt/stexor`.
-- [ ] `.env` created from `.env.example` and `.env.hostinger.example`.
+- [ ] App repository and `platform-infrastructure` cloned under `/opt/platform`.
+- [ ] `.env` created from `.env.example` and `.env.vps.example`.
 - [ ] No `localhost`, `example.com`, `change_me` or placeholder production values remain.
-- [ ] `sh ./scripts/stexor-secret-manager.sh init` executed.
-- [ ] `sh ./scripts/stexor-secret-manager.sh verify` passed.
+- [ ] `sh ./scripts/infra-secret-manager.sh init` executed.
+- [ ] `sh ./scripts/infra-secret-manager.sh verify` passed.
 - [ ] `sh ./scripts/secret-rotation-evidence.sh --enforce` passed and the JSON/Markdown reports under `reports/secret-rotation/` were archived outside Git.
-- [ ] `sh ./scripts/hostinger-preflight.sh .env` passed and rendered the full Hostinger+WAF Compose stack, including `compose.waf.yaml` and `compose.hostinger-waf.yaml`.
+- [ ] `sh ./scripts/vps-preflight.sh .env` passed and rendered the full VPS+WAF Compose stack, including `compose.waf.yaml` and `compose.vps-waf.yaml`.
 - [ ] `sh ./scripts/linux-portability-check.sh` passed and the JSON/Markdown report under `reports/linux-portability/` was archived outside Git.
-- [ ] No mutable `:latest` image exists in the rendered Hostinger+WAF stack.
-- [ ] `sh ./scripts/hostinger-go-live.sh --planOnly --repo OWNER/REPO --bootstrap --apply-hardening --reload-sshd` generated a reviewed JSON/Markdown plan under `reports/hostinger-go-live/`; if an existing Docker daemon config must be replaced, the reviewed plan includes `--replace-docker-daemon-config`.
-- [ ] `sh ./scripts/hostinger-postdeploy.sh .env` passed after the first VPS compose start, including WAF smoke and `infra-health` against public URLs from `.env`.
+- [ ] No mutable `:latest` image exists in the rendered VPS+WAF stack.
+- [ ] `sh ./scripts/vps-go-live.sh --planOnly --repo OWNER/REPO --bootstrap --apply-hardening --reload-sshd` generated a reviewed JSON/Markdown plan under `reports/vps-go-live/`; if an existing Docker daemon config must be replaced, the reviewed plan includes `--replace-docker-daemon-config`.
+- [ ] `sh ./scripts/vps-postdeploy.sh .env` passed after the first VPS compose start, including WAF smoke and `infra-health` against public URLs from `.env`.
 - [ ] Remote deploy variables reviewed: `DEPLOY_RUN_PRE_GO_LIVE`, `DEPLOY_RUN_GO_NO_GO`, `DEPLOY_PRE_GO_LIVE_RESTORE_DRILL`, `DEPLOY_PRE_GO_LIVE_OFFSITE_RESTORE_DRY_RUN` and `DEPLOY_PRE_GO_LIVE_GITHUB_REMOTE` are enabled only for the final evidence window.
 
 ## Cloudflare And Edge
@@ -92,7 +92,7 @@ Use this checklist on the Hostinger Ubuntu LTS VPS before exposing public traffi
 - [ ] `sh ./scripts/production-go-no-go.sh --enforce` passed and `reports/go-no-go/` was archived outside Git.
 - [ ] If `production-go-no-go` returns `no-go`, every item in the report `remediation` checklist was completed and the gate was rerun until `status=go`.
 - [ ] `sh ./scripts/production-readiness-live.sh` passed and `reports/production-readiness/` was archived outside Git.
-- [ ] `sh ./scripts/evidence-bundle.sh` generated `.tmp/evidence-bundles/stexor-evidence-bundle-*.tar.gz`; `manifest.json` was reviewed and the archive was stored outside Git.
+- [ ] `sh ./scripts/evidence-bundle.sh` generated `.tmp/evidence-bundles/infra-evidence-bundle-*.tar.gz`; `manifest.json` was reviewed and the archive was stored outside Git.
 - [ ] `sh ./scripts/evidence-bundle-verify.sh --requireComplete` passed against the final evidence bundle.
 - [ ] GitHub Actions workflow `enterprise-live-evidence` passed in the `production` environment and its `enterprise-live-evidence` artifact was archived outside Git.
 

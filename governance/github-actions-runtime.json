@@ -20,7 +20,7 @@
       "required_secrets": [
         {
           "name": "DEPLOY_SSH_KEY",
-          "purpose": "Private deploy key used by the Hostinger deployment job."
+          "purpose": "Private deploy key used by the VPS deployment job."
         },
         {
           "name": "EXTERNAL_UPTIME_PROVIDER_EVIDENCE_JSON",
@@ -38,17 +38,17 @@
       "required_variables": [
         {
           "name": "DEPLOY_REMOTE",
-          "purpose": "SSH destination for the Hostinger VPS deploy user.",
+          "purpose": "SSH destination for the VPS deploy user.",
           "pattern": "^[^@\\s]+@[^\\s]+$"
         },
         {
           "name": "DEPLOY_REMOTE_DIR",
-          "purpose": "Absolute infrastructure path on the Hostinger VPS.",
+          "purpose": "Absolute infrastructure path on the VPS.",
           "pattern": "^/"
         },
         {
           "name": "DEPLOY_SSH_PORT",
-          "purpose": "Current SSH port used by GitHub Actions to reach the Hostinger VPS.",
+          "purpose": "Current SSH port used by GitHub Actions to reach the VPS.",
           "pattern": "^[0-9]{2,5}$"
         },
         {

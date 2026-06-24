@@ -14,7 +14,7 @@ usage() {
   cat <<'EOF'
 Usage: vps-host-readiness.sh [--enforce|--allow-failures|--diagnostic] [--ssh-port PORT]
 
-Verify the Hostinger Ubuntu LTS host after Docker and hardening are installed.
+Verify the VPS Ubuntu LTS host after Docker and hardening are installed.
 Writes JSON and Markdown evidence under reports/vps-host/.
 
 Options:
@@ -113,7 +113,7 @@ remediation_for_check() {
       printf '%s' "Install Docker Engine and the Docker Compose plugin from the official Docker Ubuntu repository, then ensure the deploy user can reach the Docker daemon."
       ;;
     docker-daemon-hardening)
-      printf '%s' "Run sudo sh ./scripts/vps-hardening-ubuntu.sh --apply. If /etc/docker/daemon.json already exists and is missing Stexor keys, review /etc/docker/daemon.json.stexor-template and rerun with --replace-docker-daemon-config to create a backup, write /etc/docker/daemon.json and restart Docker."
+      printf '%s' "Run sudo sh ./scripts/vps-hardening-ubuntu.sh --apply. If /etc/docker/daemon.json already exists and is missing Platform keys, review /etc/docker/daemon.json.platform-template and rerun with --replace-docker-daemon-config to create a backup, write /etc/docker/daemon.json and restart Docker."
       ;;
     ufw-active|ufw-no-direct-internal-ports)
       printf '%s' "Run sudo sh ./scripts/vps-hardening-ubuntu.sh --apply --ssh-port <port>, then apply Cloudflare origin lock before removing generic 80/443 exposure."
@@ -125,7 +125,7 @@ remediation_for_check() {
       printf '%s' "Install and enable the host security service with sudo sh ./scripts/vps-hardening-ubuntu.sh --apply."
       ;;
     ssh-password-auth-disabled|ssh-root-login-disabled|ssh-hardening)
-      printf '%s' "Apply /etc/ssh/sshd_config.d/99-stexor-hardening.conf with sudo sh ./scripts/vps-hardening-ubuntu.sh --apply --ssh-port <port>, then reload sshd after confirming key access."
+      printf '%s' "Apply /etc/ssh/sshd_config.d/99-platform-hardening.conf with sudo sh ./scripts/vps-hardening-ubuntu.sh --apply --ssh-port <port>, then reload sshd after confirming key access."
       ;;
     ssh-port-expected)
       printf '%s' "Run sudo sh ./scripts/vps-hardening-ubuntu.sh --apply --ssh-port <port> --reload-sshd after verifying key access to that port."
@@ -137,7 +137,7 @@ remediation_for_check() {
       printf '%s' "Increase VPS disk size or prune unused Docker images, volumes and logs before production deploy."
       ;;
     memory-total)
-      printf '%s' "Use a larger Hostinger VPS plan before production deploy."
+      printf '%s' "Use a larger VPS plan before production deploy."
       ;;
     time-sync)
       printf '%s' "Enable NTP with timedatectl/systemd-timesyncd or chrony, then rerun readiness."
@@ -224,7 +224,7 @@ check_docker_daemon_hardening() {
   grep -q '"max-size"[[:space:]]*:[[:space:]]*"10m"' "$daemon_file" || missing="$missing log-max-size"
   grep -q '"max-file"[[:space:]]*:[[:space:]]*"5"' "$daemon_file" || missing="$missing log-max-file"
   if [ -z "$missing" ]; then
-    add_check "docker-daemon-hardening" "yes" "passed" "$daemon_file contains Stexor hardening keys"
+    add_check "docker-daemon-hardening" "yes" "passed" "$daemon_file contains Platform hardening keys"
   else
     add_check "docker-daemon-hardening" "yes" "failed" "missing:$missing"
   fi
@@ -264,8 +264,8 @@ check_services() {
 }
 
 check_ssh_hardening() {
-  if command_exists sshd && sshd -T >/tmp/stexor-sshd-effective.$$ 2>/dev/null; then
-    effective=/tmp/stexor-sshd-effective.$$
+  if command_exists sshd && sshd -T >/tmp/platform-sshd-effective.$$ 2>/dev/null; then
+    effective=/tmp/platform-sshd-effective.$$
     if grep -qi '^passwordauthentication no' "$effective"; then
       add_check "ssh-password-auth-disabled" "yes" "passed" "PasswordAuthentication no"
     else
@@ -283,8 +283,8 @@ check_ssh_hardening() {
       add_check "ssh-port-expected" "yes" "failed" "expected ${EXPECTED_SSH_PORT}, effective ${effective_ports:-unknown}"
     fi
     rm -f "$effective"
-  elif [ -r /etc/ssh/sshd_config.d/99-stexor-hardening.conf ]; then
-    config=/etc/ssh/sshd_config.d/99-stexor-hardening.conf
+  elif [ -r /etc/ssh/sshd_config.d/99-platform-hardening.conf ]; then
+    config=/etc/ssh/sshd_config.d/99-platform-hardening.conf
     grep -qi '^PasswordAuthentication no' "$config" \
       && add_check "ssh-password-auth-disabled" "yes" "passed" "$config contains PasswordAuthentication no" \
       || add_check "ssh-password-auth-disabled" "yes" "failed" "$config does not disable password auth"
@@ -295,7 +295,7 @@ check_ssh_hardening() {
       && add_check "ssh-port-expected" "yes" "passed" "$config contains Port ${EXPECTED_SSH_PORT}" \
       || add_check "ssh-port-expected" "yes" "failed" "$config does not set Port ${EXPECTED_SSH_PORT}"
   else
-    add_check "ssh-hardening" "yes" "failed" "cannot inspect sshd effective config or Stexor hardening file"
+    add_check "ssh-hardening" "yes" "failed" "cannot inspect sshd effective config or Platform hardening file"
   fi
 }
 
@@ -387,7 +387,7 @@ write_reports() {
   } > "$JSON_REPORT"
 
   {
-    printf '# Stexor VPS Host Readiness\n\n'
+    printf '# Platform VPS Host Readiness\n\n'
     printf 'Generated at: %s\n\n' "$generated_at"
     printf 'Mode: %s\n\n' "$([ "$DIAGNOSTIC" -eq 1 ] && printf diagnostic || printf production)"
     printf 'Failed required checks: %s\n\n' "$failed_required"

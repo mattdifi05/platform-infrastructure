@@ -4,7 +4,7 @@
 # fixed container names so staging can coexist with other stacks when ports and
 # volumes are separated by the environment.
 
-name: ${COMPOSE_PROJECT_NAME:-stexor_platform_staging}
+name: ${COMPOSE_PROJECT_NAME:-platform_infra_staging}
 
 services:
   traefik:

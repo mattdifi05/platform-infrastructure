@@ -1,9 +1,9 @@
 apiVersion: 1
 
 providers:
-  - name: Stexor
+  - name: Platform
     orgId: 1
-    folder: Stexor
+    folder: Platform
     type: file
     disableDeletion: false
     editable: true

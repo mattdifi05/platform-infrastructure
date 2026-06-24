@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "scope": "stexor-platform-infrastructure",
+  "scope": "platform-infrastructure",
   "title": "Production Readiness Checklist",
   "expectedCount": 20,
   "reportDirectory": "production-readiness",
@@ -38,7 +38,7 @@
       "evidence": [
         { "type": "file", "path": ".github/workflows/enterprise-infra.yml" },
         { "type": "file", "path": ".github/workflows/enterprise-infra-run-evidence.yml" },
-        { "type": "pattern", "path": ".github/workflows/enterprise-infra.yml", "pattern": "deploy-hostinger[\\s\\S]*deploy-hostinger\\.sh" },
+        { "type": "pattern", "path": ".github/workflows/enterprise-infra.yml", "pattern": "deploy-vps[\\s\\S]*deploy-vps\\.sh" },
         { "type": "pattern", "path": ".github/workflows/enterprise-infra-run-evidence.yml", "pattern": "workflow_run[\\s\\S]*enterprise-infra[\\s\\S]*github-actions-run-evidence[\\s\\S]*--verifyRemote" },
         { "type": "command", "name": "github-actions-config" }
       ],
@@ -68,9 +68,9 @@
         { "type": "file", "path": "scripts/vps-hardening-ubuntu.sh" },
         { "type": "pattern", "path": "scripts/vps-hardening-ubuntu.sh", "pattern": "ufw[\\s\\S]*fail2ban" },
         { "type": "pattern", "path": "scripts/vps-host-readiness.sh", "pattern": "ufw-active[\\s\\S]*fail2ban-active" },
-        { "type": "workflow", "pattern": "Run VPS evidence on Hostinger[\\s\\S]*vps-hardening-ubuntu\\.sh[\\s\\S]*vps-host-readiness\\.sh" }
+        { "type": "workflow", "pattern": "Run VPS evidence on VPS[\\s\\S]*vps-hardening-ubuntu\\.sh[\\s\\S]*vps-host-readiness\\.sh" }
       ],
-      "liveProof": "Apply VPS hardening and pass vps-host-readiness --enforce on the Hostinger VPS.",
+      "liveProof": "Apply VPS hardening and pass vps-host-readiness --enforce on the VPS.",
       "liveProofChecks": ["vps-hardening-applied", "vps-host-readiness"]
     },
     {
@@ -78,7 +78,7 @@
       "title": "Gestione segreti",
       "state": "proprietary-integrated",
       "evidence": [
-        { "type": "file", "path": "scripts/stexor-secret-manager.mjs" },
+        { "type": "file", "path": "scripts/infra-secret-manager.mjs" },
         { "type": "file", "path": "compose.managed-secrets.yaml" },
         { "type": "command", "name": "secret-rotation-evidence" },
         { "type": "workflow", "pattern": "Managed secrets preflight[\\s\\S]*managed-secrets-preflight" }
@@ -130,7 +130,7 @@
         { "type": "command", "name": "compose-healthcheck-coverage" },
         { "type": "command", "name": "infra-health" },
         { "type": "pattern", "path": "compose.yaml", "pattern": "healthcheck:" },
-        { "type": "pattern", "path": "scripts/stexor-ops.mjs", "pattern": "async function infraHealth" }
+        { "type": "pattern", "path": "scripts/infra-ops.mjs", "pattern": "async function infraHealth" }
       ],
       "liveProof": "Pass compose-healthcheck-coverage and run infra-health after deploy against the real VPS stack.",
       "liveProofChecks": ["pre-go-live-evidence-complete"]
@@ -196,7 +196,7 @@
         { "type": "file", "path": "scripts/vps-hardening-ubuntu.sh" },
         { "type": "pattern", "path": "scripts/vps-hardening-ubuntu.sh", "pattern": "no-new-privileges[\\s\\S]*live-restore" },
         { "type": "command", "name": "linux-portability-check" },
-        { "type": "workflow", "pattern": "Run VPS evidence on Hostinger[\\s\\S]*vps-hardening-ubuntu\\.sh[\\s\\S]*vps-host-readiness\\.sh" }
+        { "type": "workflow", "pattern": "Run VPS evidence on VPS[\\s\\S]*vps-hardening-ubuntu\\.sh[\\s\\S]*vps-host-readiness\\.sh" }
       ],
       "liveProof": "Apply Docker daemon hardening on the VPS and pass vps-host-readiness.",
       "liveProofChecks": ["vps-hardening-applied", "vps-host-readiness"]

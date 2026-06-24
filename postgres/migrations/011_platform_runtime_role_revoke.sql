@@ -1,55 +1,55 @@
-\connect stexor_app
+\connect app_db
 
 BEGIN;
 
-REVOKE ALL ON ALL TABLES IN SCHEMA stexor_platform FROM
+REVOKE ALL ON ALL TABLES IN SCHEMA platform_ops FROM
   PUBLIC,
-  stexor_app_user,
-  stexor_app_account_rw,
-  stexor_app_auth_rw,
-  stexor_app_audit_rw;
+  app_user,
+  app_db_account_rw,
+  app_db_auth_rw,
+  app_db_audit_rw;
 
-REVOKE ALL ON ALL SEQUENCES IN SCHEMA stexor_platform FROM
+REVOKE ALL ON ALL SEQUENCES IN SCHEMA platform_ops FROM
   PUBLIC,
-  stexor_app_user,
-  stexor_app_account_rw,
-  stexor_app_auth_rw,
-  stexor_app_audit_rw;
+  app_user,
+  app_db_account_rw,
+  app_db_auth_rw,
+  app_db_audit_rw;
 
-ALTER DEFAULT PRIVILEGES IN SCHEMA stexor_platform REVOKE ALL ON TABLES FROM
+ALTER DEFAULT PRIVILEGES IN SCHEMA platform_ops REVOKE ALL ON TABLES FROM
   PUBLIC,
-  stexor_app_user,
-  stexor_app_account_rw,
-  stexor_app_auth_rw,
-  stexor_app_audit_rw;
+  app_user,
+  app_db_account_rw,
+  app_db_auth_rw,
+  app_db_audit_rw;
 
-ALTER DEFAULT PRIVILEGES IN SCHEMA stexor_platform REVOKE ALL ON SEQUENCES FROM
+ALTER DEFAULT PRIVILEGES IN SCHEMA platform_ops REVOKE ALL ON SEQUENCES FROM
   PUBLIC,
-  stexor_app_user,
-  stexor_app_account_rw,
-  stexor_app_auth_rw,
-  stexor_app_audit_rw;
+  app_user,
+  app_db_account_rw,
+  app_db_auth_rw,
+  app_db_audit_rw;
 
-GRANT USAGE ON SCHEMA stexor_platform TO stexor_app_user;
+GRANT USAGE ON SCHEMA platform_ops TO app_user;
 
 GRANT SELECT ON
-  stexor_platform.schema_migrations,
-  stexor_platform.data_retention_policies,
-  stexor_platform.backup_restore_runs
-TO stexor_app_user;
+  platform_ops.schema_migrations,
+  platform_ops.data_retention_policies,
+  platform_ops.backup_restore_runs
+TO app_user;
 
 REVOKE INSERT, UPDATE, DELETE ON
-  stexor_platform.schema_migrations,
-  stexor_platform.data_retention_policies,
-  stexor_platform.backup_restore_runs
+  platform_ops.schema_migrations,
+  platform_ops.data_retention_policies,
+  platform_ops.backup_restore_runs
 FROM
   PUBLIC,
-  stexor_app_user,
-  stexor_app_account_rw,
-  stexor_app_auth_rw,
-  stexor_app_audit_rw;
+  app_user,
+  app_db_account_rw,
+  app_db_auth_rw,
+  app_db_audit_rw;
 
-INSERT INTO stexor_account.security_policies (key, value, description)
+INSERT INTO app_account.security_policies (key, value, description)
 VALUES (
   'platform_runtime_role_revoke',
   '{"runtimeCanReadPlatformEvidence":true,"runtimeCanMutatePlatformEvidence":false,"revokesInheritedRuntimeRoles":true,"migration":"011_platform_runtime_role_revoke"}'::jsonb,

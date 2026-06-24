@@ -1,14 +1,14 @@
 #!/usr/bin/env sh
 set -eu
 
-INFRA_ROOT="${STEXOR_INFRA_ROOT:-/infra}"
-INFRA_CONTAINER_ROOT="${STEXOR_INFRA_CONTAINER_ROOT:-$INFRA_ROOT}"
-SOURCE_ROOT="${STEXOR_SOURCE_ROOT:-/src_stexor}"
-INFRA_HOST_ROOT="${STEXOR_INFRA_HOST_ROOT:-}"
-SOURCE_HOST_ROOT="${STEXOR_SOURCE_HOST_ROOT:-}"
-LOG_DIR="${BACKUP_SCHEDULER_LOG_DIR:-/var/log/stexor}"
+INFRA_ROOT="${PLATFORM_INFRA_ROOT:-/infra}"
+INFRA_CONTAINER_ROOT="${PLATFORM_INFRA_CONTAINER_ROOT:-$INFRA_ROOT}"
+SOURCE_ROOT="${PROJECT_SOURCE_ROOT:-/project}"
+INFRA_HOST_ROOT="${PLATFORM_INFRA_HOST_ROOT:-}"
+SOURCE_HOST_ROOT="${PROJECT_SOURCE_HOST_ROOT:-}"
+LOG_DIR="${BACKUP_SCHEDULER_LOG_DIR:-/var/log/platform}"
 CRON_FILE="${BACKUP_SCHEDULER_CRON_FILE:-/etc/crontabs/root}"
-ENV_FILE="${BACKUP_SCHEDULER_ENV_FILE:-/etc/stexor/backup-scheduler.env}"
+ENV_FILE="${BACKUP_SCHEDULER_ENV_FILE:-/etc/platform/backup-scheduler.env}"
 RESTORE_DRILL_WEEKDAY="${BACKUP_SCHEDULER_RESTORE_DRILL_WEEKDAY:-0}"
 
 POSTGRES_BACKUP_AT="${BACKUP_SCHEDULER_POSTGRES_AT:-03:15}"
@@ -28,7 +28,7 @@ usage() {
   cat <<'EOF'
 Usage: backup-scheduler.sh
 
-Runs a container-local crond schedule for Stexor backups and restore drills.
+Runs a container-local crond schedule for Platform backups and restore drills.
 Configuration is through BACKUP_SCHEDULER_* environment variables.
 EOF
 }
@@ -89,21 +89,21 @@ prepare_runtime_env() {
   fi
 
   if [ -z "$INFRA_HOST_ROOT" ]; then
-    echo "Unable to detect STEXOR_INFRA_HOST_ROOT from the $INFRA_CONTAINER_ROOT mount. Set it explicitly before starting the backup scheduler." >&2
+    echo "Unable to detect PLATFORM_INFRA_HOST_ROOT from the $INFRA_CONTAINER_ROOT mount. Set it explicitly before starting the backup scheduler." >&2
     exit 1
   fi
   if [ -z "$SOURCE_HOST_ROOT" ]; then
-    echo "Warning: STEXOR_SOURCE_HOST_ROOT could not be detected from the $SOURCE_ROOT mount. Source-dependent ops will use container-local paths only." >&2
+    echo "Warning: PROJECT_SOURCE_HOST_ROOT could not be detected from the $SOURCE_ROOT mount. Source-dependent ops will use container-local paths only." >&2
   fi
 
   mkdir -p "$(dirname "$ENV_FILE")"
   : > "$ENV_FILE"
   chmod 600 "$ENV_FILE"
-  write_env_var STEXOR_INFRA_ROOT "$INFRA_ROOT"
-  write_env_var STEXOR_INFRA_CONTAINER_ROOT "$INFRA_CONTAINER_ROOT"
-  write_env_var STEXOR_INFRA_HOST_ROOT "$INFRA_HOST_ROOT"
-  write_env_var STEXOR_SOURCE_ROOT "$SOURCE_ROOT"
-  write_env_var STEXOR_SOURCE_HOST_ROOT "$SOURCE_HOST_ROOT"
+  write_env_var PLATFORM_INFRA_ROOT "$INFRA_ROOT"
+  write_env_var PLATFORM_INFRA_CONTAINER_ROOT "$INFRA_CONTAINER_ROOT"
+  write_env_var PLATFORM_INFRA_HOST_ROOT "$INFRA_HOST_ROOT"
+  write_env_var PROJECT_SOURCE_ROOT "$SOURCE_ROOT"
+  write_env_var PROJECT_SOURCE_HOST_ROOT "$SOURCE_HOST_ROOT"
   write_env_var NODE_IMAGE "${NODE_IMAGE:-}"
   write_env_var RESTIC_REPOSITORY "${RESTIC_REPOSITORY:-}"
   write_env_var RESTIC_PASSWORD_FILE "${RESTIC_PASSWORD_FILE:-}"
@@ -153,12 +153,12 @@ node_ops() {
 if [ "${1:-}" = "--run" ]; then
   shift
   if [ "$#" -lt 1 ]; then
-    echo "Usage: backup-scheduler.sh --run <stexor-ops-command>" >&2
+    echo "Usage: backup-scheduler.sh --run <infra-ops-command>" >&2
     exit 1
   fi
   load_runtime_env
   cd "$INFRA_ROOT"
-  exec node "$INFRA_ROOT/scripts/stexor-ops.mjs" "$@"
+  exec node "$INFRA_ROOT/scripts/infra-ops.mjs" "$@"
 fi
 
 mkdir -p "$LOG_DIR" "$(dirname "$CRON_FILE")"
@@ -182,7 +182,7 @@ if [ "$ENABLE_OFFSITE" = "true" ] || [ "$ENABLE_OFFSITE" = "1" ]; then
   append_daily "$OFFSITE_BACKUP_AT" "restic-offsite" "$(node_ops offsite-backup-restic)"
 fi
 
-echo "Installed Stexor backup scheduler crontab:"
+echo "Installed Platform backup scheduler crontab:"
 cat "$CRON_FILE"
 
 if [ "$DRY_RUN" = "true" ] || [ "$DRY_RUN" = "1" ]; then
@@ -192,11 +192,11 @@ fi
 if [ "$RUN_ON_START" = "true" ] || [ "$RUN_ON_START" = "1" ]; then
   cd "$INFRA_ROOT"
   load_runtime_env
-  node "$INFRA_ROOT/scripts/stexor-ops.mjs" backup-postgres
-  node "$INFRA_ROOT/scripts/stexor-ops.mjs" backup-mariadb
-  node "$INFRA_ROOT/scripts/stexor-ops.mjs" backup-minio
-  node "$INFRA_ROOT/scripts/stexor-ops.mjs" backup-keycloak
-  node "$INFRA_ROOT/scripts/stexor-ops.mjs" backup-secret-manager-metadata
+  node "$INFRA_ROOT/scripts/infra-ops.mjs" backup-postgres
+  node "$INFRA_ROOT/scripts/infra-ops.mjs" backup-mariadb
+  node "$INFRA_ROOT/scripts/infra-ops.mjs" backup-minio
+  node "$INFRA_ROOT/scripts/infra-ops.mjs" backup-keycloak
+  node "$INFRA_ROOT/scripts/infra-ops.mjs" backup-secret-manager-metadata
 fi
 
 exec crond -f -l 8 -L "$LOG_DIR/backup-scheduler.log"
