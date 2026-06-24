@@ -5,11 +5,10 @@ Infrastruttura Docker self-hosted per la piattaforma Stexor enterprise. La carte
 ```text
 /opt/stexor
 |-- src
-|   `-- infrastructure
 `-- stexor-platform-infrastructure
 ```
 
-`src/infrastructure/` e `stexor-platform-infrastructure/` sono stack separati: avvia una sola infrastruttura alla volta.
+`stexor-platform-infrastructure/` e' l'unica infrastruttura attiva: contiene anche la config PHP/Apache, MariaDB, phpMyAdmin, WAF, Hostinger e operazioni enterprise. I progetti applicativi restano in `src` e nelle cartelle sorgente dedicate, ma non esiste piu' una seconda infra da avviare.
 
 ## Documentazione applicativa
 

@@ -207,8 +207,8 @@ services:
   php-apache:
     image: ${PHP_APACHE_BUILD_IMAGE:-stexor/php-apache:local}
     build:
-      context: ..
-      dockerfile: web-php-infrastructure/php-apache/Dockerfile
+      context: .
+      dockerfile: docker/php-apache.Dockerfile
       args:
         PHP_IMAGE: ${PHP_IMAGE:-php:8.5-apache@sha256:65094755171975e565538ddbfa589847548e80d15adfbb9064a20b86f8485215}
         COMPOSER_IMAGE: ${COMPOSER_IMAGE:-composer:2.10.1@sha256:7725eb4545c438629ae8bde3ef0bb9a5038ef566126ad878442a69007242d267}
@@ -239,9 +239,9 @@ services:
       - ${PHP_ANNIVERSARY_SOURCE_DIR:-../src_anniversary}:/var/www/projects/anniversary
       - ${PHP_WORKCALENDAR_SOURCE_DIR:-../src_workcalendar}:/var/www/projects/workcalendar
       - ${PHP_FIREPORT_SOURCE_DIR:-../src_fireport}:/var/www/projects/fireport
-      - ../web-php-infrastructure/php-apache/php/custom.ini:/usr/local/etc/php/conf.d/zz-custom.ini:ro
-      - ../web-php-infrastructure/php-apache/apache:/etc/apache2/sites-available
-      - ../web-php-infrastructure/certs:/etc/apache2/certs:ro
+      - ./php-apache/php/custom.ini:/usr/local/etc/php/conf.d/zz-custom.ini:ro
+      - ./php-apache/apache:/etc/apache2/sites-available
+      - ./traefik/certs:/etc/apache2/certs:ro
     depends_on:
       mariadb:
         condition: service_healthy
@@ -266,9 +266,9 @@ services:
       MARIADB_ROOT_PASSWORD: ${LOCAL_MARIADB_ROOT_PASSWORD:-root}
     volumes:
       - enterprise_mariadb_data:/var/lib/mysql
-      - ../web-php-infrastructure/mariadb/initdb:/docker-entrypoint-initdb.d:ro
-      - ../web-php-infrastructure/mariadb/conf.d:/etc/mysql/conf.d:ro
-      - ../web-php-infrastructure/certs:/etc/mysql/ssl:ro
+      - ./mariadb/initdb:/docker-entrypoint-initdb.d:ro
+      - ./mariadb/conf.d:/etc/mysql/conf.d:ro
+      - ./traefik/certs:/etc/mysql/ssl:ro
     networks:
       - enterprise_net
     healthcheck:
@@ -296,7 +296,7 @@ services:
       UPLOAD_LIMIT: 256M
     volumes:
       - ./phpmyadmin/config.user.inc.php:/etc/phpmyadmin/config.user.inc.php:ro
-      - ../web-php-infrastructure/certs:/etc/phpmyadmin/certs:ro
+      - ./traefik/certs:/etc/phpmyadmin/certs:ro
     depends_on:
       mariadb:
         condition: service_healthy

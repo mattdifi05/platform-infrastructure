@@ -1,0 +1,4 @@
+[mariadb]
+ssl_ca=/etc/mysql/ssl/ca.pem
+ssl_cert=/etc/mysql/ssl/mariadb.fullchain.crt
+ssl_key=/etc/mysql/ssl/mariadb.key
