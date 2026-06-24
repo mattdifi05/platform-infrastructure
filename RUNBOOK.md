@@ -519,8 +519,12 @@ timers depend on the repository visibility and GitHub plan; verify them in the
 repository Environments UI after `--verifyRemote`.
 The GitHub Actions runtime check only verifies secret presence and variable
 formats: it expects staging variable `DAST_TARGET`, production secret
-`DEPLOY_SSH_KEY`, and production variables `DEPLOY_REMOTE` plus
-`DEPLOY_REMOTE_DIR`. Infrastructure CI intentionally does not checkout project
+`DEPLOY_SSH_KEY`, production secret `EXTERNAL_UPTIME_PROVIDER_EVIDENCE_JSON`,
+production secret `CLOUDFLARE_API_TOKEN`, and production variables
+`DEPLOY_REMOTE`, `DEPLOY_REMOTE_DIR`, `PUBLIC_API_HEALTH_URL` plus
+`CLOUDFLARE_ACCOUNT_ID`. It also expects production secret
+`CLOUDFLARE_ACCESS_ADMIN_MANIFEST_JSON` for live Cloudflare Access verification.
+Infrastructure CI intentionally does not checkout project
 repositories; attach Stexor or another project with `NODE_SOURCE_DIR` only when
 building application images. The run evidence command verifies that the remote
 `enterprise-infra` workflow completed successfully on the exact release commit
@@ -528,6 +532,10 @@ and writes `reports/github-actions/github-actions-run-*.json`. The
 `enterprise-infra-run-evidence` workflow runs automatically after completed
 `enterprise-infra` pushes on `main`, verifies the completed run with
 `--verifyRemote`, and uploads the same non-secret report artifact.
+Run the manual `enterprise-live-evidence` workflow from the production
+environment after DNS, Cloudflare, provider monitors and VPS evidence are ready;
+it gathers external uptime, public Cloudflare load, Cloudflare Access, live
+go/no-go and complete evidence bundle reports without deploying.
 
 Before changing public traffic, generate the consolidated go-live evidence pack:
 

@@ -21,6 +21,18 @@
         {
           "name": "DEPLOY_SSH_KEY",
           "purpose": "Private deploy key used by the Hostinger deployment job."
+        },
+        {
+          "name": "EXTERNAL_UPTIME_PROVIDER_EVIDENCE_JSON",
+          "purpose": "Provider-exported external uptime evidence JSON used by the live evidence workflow."
+        },
+        {
+          "name": "CLOUDFLARE_API_TOKEN",
+          "purpose": "Cloudflare API token with read access for Access application verification."
+        },
+        {
+          "name": "CLOUDFLARE_ACCESS_ADMIN_MANIFEST_JSON",
+          "purpose": "Production Cloudflare Access admin manifest JSON consumed by the live evidence workflow."
         }
       ],
       "required_variables": [
@@ -33,6 +45,16 @@
           "name": "DEPLOY_REMOTE_DIR",
           "purpose": "Absolute infrastructure path on the Hostinger VPS.",
           "pattern": "^/"
+        },
+        {
+          "name": "PUBLIC_API_HEALTH_URL",
+          "purpose": "Public HTTPS API health endpoint routed through Cloudflare for production load evidence.",
+          "pattern": "^https://"
+        },
+        {
+          "name": "CLOUDFLARE_ACCOUNT_ID",
+          "purpose": "Cloudflare account id used by the Access verification workflow.",
+          "pattern": "^[A-Za-z0-9_-]+$"
         }
       ]
     }

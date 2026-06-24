@@ -82,7 +82,7 @@ Use this checklist on the Hostinger Ubuntu LTS VPS before exposing public traffi
 - [ ] `sh ./scripts/github-environments.sh --repo OWNER/REPO --dryRun` reviewed.
 - [ ] `GITHUB_PRODUCTION_REVIEWERS=user:OWNER GITHUB_TOKEN=... sh ./scripts/github-environments.sh --repo OWNER/REPO --apply` and `--verifyRemote` completed, or equivalent deployment approvals are proven in GitHub.
 - [ ] `sh ./scripts/github-actions-config.sh --repo OWNER/REPO` reviewed.
-- [ ] `GITHUB_TOKEN=... sh ./scripts/github-actions-config.sh --repo OWNER/REPO --verifyRemote` confirmed `DAST_TARGET`, `DEPLOY_SSH_KEY`, `DEPLOY_REMOTE` and `DEPLOY_REMOTE_DIR`.
+- [ ] `GITHUB_TOKEN=... sh ./scripts/github-actions-config.sh --repo OWNER/REPO --verifyRemote` confirmed `DAST_TARGET`, `DEPLOY_SSH_KEY`, `DEPLOY_REMOTE`, `DEPLOY_REMOTE_DIR`, `PUBLIC_API_HEALTH_URL`, `CLOUDFLARE_ACCOUNT_ID`, `EXTERNAL_UPTIME_PROVIDER_EVIDENCE_JSON`, `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCESS_ADMIN_MANIFEST_JSON`.
 - [ ] `GITHUB_TOKEN=... sh ./scripts/github-actions-run-evidence.sh --repo OWNER/REPO --workflow enterprise-infra.yml --branch main --sha <release-sha> --verifyRemote` passed and `reports/github-actions/` was archived outside Git.
 - [ ] `sh ./scripts/pre-go-live-evidence.sh --repo OWNER/REPO --includeRuntime --includeRestoreDrill --includeOffsiteRestoreDryRun --includeProductionPreflight --verifyGithubRemote` passed with `status=passed` and the JSON/Markdown reports under `reports/go-live/` were archived outside Git.
 - [ ] SBOM archived.
@@ -93,6 +93,7 @@ Use this checklist on the Hostinger Ubuntu LTS VPS before exposing public traffi
 - [ ] `sh ./scripts/production-readiness-live.sh` passed and `reports/production-readiness/` was archived outside Git.
 - [ ] `sh ./scripts/evidence-bundle.sh` generated `.tmp/evidence-bundles/stexor-evidence-bundle-*.tar.gz`; `manifest.json` was reviewed and the archive was stored outside Git.
 - [ ] `sh ./scripts/evidence-bundle-verify.sh --requireComplete` passed against the final evidence bundle.
+- [ ] GitHub Actions workflow `enterprise-live-evidence` passed in the `production` environment and its `enterprise-live-evidence` artifact was archived outside Git.
 
 ## Admin Surfaces
 

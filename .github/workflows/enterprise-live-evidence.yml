@@ -1,0 +1,120 @@
+name: enterprise-live-evidence
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_external_uptime:
+        description: Validate provider-backed external uptime evidence
+        required: true
+        default: "true"
+        type: choice
+        options:
+          - "true"
+          - "false"
+      run_public_load:
+        description: Run public Cloudflare edge load benchmark
+        required: true
+        default: "true"
+        type: choice
+        options:
+          - "true"
+          - "false"
+      run_cloudflare_access:
+        description: Verify Cloudflare Access admin applications
+        required: true
+        default: "true"
+        type: choice
+        options:
+          - "true"
+          - "false"
+      run_final_gates:
+        description: Run production readiness/go-no-go and complete bundle verification
+        required: true
+        default: "true"
+        type: choice
+        options:
+          - "true"
+          - "false"
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  production-live-evidence:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    environment:
+      name: production
+    steps:
+      - name: Checkout infrastructure
+        uses: actions/checkout@v5
+
+      - name: External uptime provider evidence
+        if: inputs.run_external_uptime == 'true'
+        env:
+          EXTERNAL_UPTIME_PROVIDER_EVIDENCE_JSON: ${{ secrets.EXTERNAL_UPTIME_PROVIDER_EVIDENCE_JSON }}
+        run: |
+          test -n "$EXTERNAL_UPTIME_PROVIDER_EVIDENCE_JSON"
+          mkdir -p .tmp
+          printf '%s\n' "$EXTERNAL_UPTIME_PROVIDER_EVIDENCE_JSON" > .tmp/external-uptime-provider.production.json
+          sh ./scripts/stexor-ops.sh external-uptime-check \
+            --providerEvidence .tmp/external-uptime-provider.production.json \
+            --validateProviderEvidenceOnly
+          sh ./scripts/stexor-ops.sh external-uptime-check \
+            --providerEvidence .tmp/external-uptime-provider.production.json \
+            --requireProviderEvidence
+
+      - name: Production Cloudflare edge load benchmark
+        if: inputs.run_public_load == 'true'
+        env:
+          PUBLIC_API_HEALTH_URL: ${{ vars.PUBLIC_API_HEALTH_URL }}
+        run: |
+          test -n "$PUBLIC_API_HEALTH_URL"
+          sh ./scripts/stexor-ops.sh load-benchmark \
+            --profiles 50,100,500 \
+            --url "$PUBLIC_API_HEALTH_URL" \
+            --requirePublicTarget \
+            --requireEdgeEvidence \
+            --expectedEdgeProvider cloudflare
+
+      - name: Cloudflare Access admin verify
+        if: inputs.run_cloudflare_access == 'true'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_ACCESS_ADMIN_MANIFEST_JSON: ${{ secrets.CLOUDFLARE_ACCESS_ADMIN_MANIFEST_JSON }}
+        run: |
+          test -n "$CLOUDFLARE_API_TOKEN"
+          test -n "$CLOUDFLARE_ACCOUNT_ID"
+          test -n "$CLOUDFLARE_ACCESS_ADMIN_MANIFEST_JSON"
+          mkdir -p .tmp
+          printf '%s\n' "$CLOUDFLARE_ACCESS_ADMIN_MANIFEST_JSON" > .tmp/cloudflare-access-admin.production.json
+          sh ./scripts/stexor-ops.sh cloudflare-access-admin \
+            --manifest .tmp/cloudflare-access-admin.production.json \
+            --verifyRemote
+
+      - name: Production go-no-go
+        if: inputs.run_final_gates == 'true'
+        run: sh ./scripts/stexor-ops.sh production-go-no-go --enforce
+
+      - name: Production readiness live
+        if: inputs.run_final_gates == 'true'
+        run: sh ./scripts/production-readiness-live.sh
+
+      - name: Evidence bundle complete verify
+        if: inputs.run_final_gates == 'true'
+        run: |
+          sh ./scripts/stexor-ops.sh evidence-bundle --noArchive
+          sh ./scripts/stexor-ops.sh evidence-bundle-verify --requireComplete
+
+      - name: Upload live evidence reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: enterprise-live-evidence
+          path: |
+            reports/
+            .tmp/evidence-bundles/
+          if-no-files-found: error
+          retention-days: 30

@@ -51,8 +51,10 @@
       "state": "gate-ready",
       "evidence": [
         { "type": "file", "path": "monitoring/external-uptime.example.json" },
+        { "type": "file", "path": ".github/workflows/enterprise-live-evidence.yml" },
         { "type": "command", "name": "external-uptime-check" },
-        { "type": "workflow", "pattern": "External uptime manifest dry run[\\s\\S]*external-uptime-check --dryRun" }
+        { "type": "workflow", "pattern": "External uptime manifest dry run[\\s\\S]*external-uptime-check --dryRun" },
+        { "type": "workflow", "pattern": "External uptime provider evidence[\\s\\S]*external-uptime-check[\\s\\S]*--requireProviderEvidence" }
       ],
       "liveProof": "Create external provider monitors and pass external-uptime-check with provider evidence.",
       "liveProofChecks": ["external-uptime-provider"]
@@ -228,8 +230,10 @@
       "state": "gate-ready",
       "evidence": [
         { "type": "file", "path": "cloudflare/access-admin.example.json" },
+        { "type": "file", "path": ".github/workflows/enterprise-live-evidence.yml" },
         { "type": "command", "name": "cloudflare-access-admin" },
-        { "type": "workflow", "pattern": "Cloudflare Access admin dry run[\\s\\S]*cloudflare-access-admin" }
+        { "type": "workflow", "pattern": "Cloudflare Access admin dry run[\\s\\S]*cloudflare-access-admin" },
+        { "type": "workflow", "pattern": "Cloudflare Access admin verify[\\s\\S]*cloudflare-access-admin[\\s\\S]*--verifyRemote" }
       ],
       "liveProof": "Apply and verify Cloudflare Access or VPN protection with IdP MFA for every admin surface.",
       "liveProofChecks": ["cloudflare-access-admin-verified"]

@@ -322,7 +322,9 @@ Configura `GITHUB_PRODUCTION_REVIEWERS=user:login` o `team:slug`, poi usa
 abilitare approvazione, wait timer e branch policy su staging/production.
 La runtime config GitHub Actions e' versionata in
 `governance/github-actions-runtime.json`: `DAST_TARGET`, `DEPLOY_SSH_KEY`,
-`DEPLOY_REMOTE` e `DEPLOY_REMOTE_DIR` vengono verificati da
+`DEPLOY_REMOTE`, `DEPLOY_REMOTE_DIR`, `PUBLIC_API_HEALTH_URL`,
+`CLOUDFLARE_ACCOUNT_ID`, `EXTERNAL_UPTIME_PROVIDER_EVIDENCE_JSON` e
+`CLOUDFLARE_API_TOKEN` piu' `CLOUDFLARE_ACCESS_ADMIN_MANIFEST_JSON` vengono verificati da
 `scripts/github-actions-config.sh --verifyRemote` senza stampare valori
 segreti. Per il go-live finale registra anche la run CI remota del commit di
 release con
@@ -332,6 +334,10 @@ il report finisce in `reports/github-actions/` e deve avere `status=passed` e
 automaticamente la stessa evidenza dopo ogni completamento di `enterprise-infra`
 su `main` e carica `reports/github-actions/` come artifact non-secret. La CI dell'infra non esegue checkout di repository progetto: collega
 Stexor o altri progetti solo tramite `NODE_SOURCE_DIR` quando devi buildarli.
+La workflow manuale `enterprise-live-evidence` gira nell'environment GitHub
+`production` e raccoglie prove live non mutanti: uptime provider, load benchmark
+pubblico via Cloudflare, Cloudflare Access `--verifyRemote`, go/no-go live e
+bundle completo.
 Il gate `scripts/stexor-ops.sh repo-coverage-check` misura la copertura dei
 file tracciati della repo: ogni file deve rientrare in una categoria
 infrastrutturale e il workflow deve esercitare tutti i gate CI obbligatori.

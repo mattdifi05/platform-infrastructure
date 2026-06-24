@@ -7495,6 +7495,18 @@ function repoCoverageCategory(filePath) {
   return match?.[0] ?? null;
 }
 
+function readGithubWorkflowText() {
+  const workflowDir = path.join(infraRoot, ".github", "workflows");
+  if (!fs.existsSync(workflowDir)) {
+    return "";
+  }
+  return fs.readdirSync(workflowDir)
+    .filter((name) => /\.ya?ml$/i.test(name))
+    .sort()
+    .map((name) => readText(path.join(workflowDir, name)))
+    .join("\n");
+}
+
 async function repoCoverageCheck() {
   log("==> Repository coverage check");
   const trackedFiles = output("git", ["ls-files"], { cwd: infraRoot })
@@ -7534,10 +7546,7 @@ async function repoCoverageCheck() {
     "security-policy",
   ];
   const missingCategories = requiredCategories.filter((category) => !categories.has(category));
-  const workflow = [
-    readText(path.join(infraRoot, ".github", "workflows", "enterprise-infra.yml")),
-    readText(path.join(infraRoot, ".github", "workflows", "enterprise-infra-run-evidence.yml")),
-  ].join("\n");
+  const workflow = readGithubWorkflowText();
   const requiredWorkflowGates = [
     ["local-compose-render", /Render local WAF compose[\s\S]*compose\.yaml[\s\S]*compose\.build\.yaml[\s\S]*compose\.secrets\.yaml[\s\S]*compose\.waf\.yaml/],
     ["hostinger-compose-render", /Render Hostinger WAF compose[\s\S]*compose\.hostinger\.yaml[\s\S]*compose\.hostinger-waf\.yaml/],
@@ -7552,6 +7561,7 @@ async function repoCoverageCheck() {
     ["github-actions-runtime-dry-run", /github-actions-config --repo/],
     ["github-actions-run-evidence-plan", /GitHub Actions run evidence plan[\s\S]*github-actions-run-evidence/],
     ["github-actions-run-evidence-verify-remote", /workflow_run:[\s\S]*enterprise-infra[\s\S]*Verify completed enterprise infra run[\s\S]*github-actions-run-evidence[\s\S]*--verifyRemote/],
+    ["production-live-evidence-workflow", /workflow_dispatch:[\s\S]*External uptime provider evidence[\s\S]*external-uptime-check[\s\S]*--requireProviderEvidence[\s\S]*Production Cloudflare edge load benchmark[\s\S]*load-benchmark[\s\S]*--expectedEdgeProvider cloudflare[\s\S]*Cloudflare Access admin verify[\s\S]*cloudflare-access-admin[\s\S]*--verifyRemote[\s\S]*evidence-bundle-verify --requireComplete/],
     ["secret-scan", /Secret scan[\s\S]*secret-scan/],
     ["ha-config-check", /HA configuration check[\s\S]*ha-config-check/],
     ["managed-secrets-preflight", /Managed secrets preflight[\s\S]*managed-secrets-preflight/],
@@ -7761,7 +7771,7 @@ async function enterpriseRequirementsCheck() {
   const requireLiveProofs = booleanFlag(argv.requireLiveProofs);
   const liveProofCheckRequired = Boolean(manifest.liveProofCheckRequired);
   const goNoGoReport = latestJsonReport("go-no-go", "production-go-no-go-");
-  const workflowText = readText(path.join(infraRoot, ".github", "workflows", "enterprise-infra.yml"));
+  const workflowText = readGithubWorkflowText();
   const allowedStates = new Set(["repo-ready", "gate-ready", "environment-ready", "proprietary-integrated", "repo-ready-plus-environment-action"]);
   const repoIssues = [];
   const liveProofIssues = [];
@@ -9350,6 +9360,7 @@ function staticSecurityInfraOnlyCheck() {
   const productionReadinessLiveWrapper = readText(path.join(infraRoot, "scripts", "production-readiness-live.sh"));
   const githubWorkflow = readText(path.join(infraRoot, ".github", "workflows", "enterprise-infra.yml"));
   const githubRunEvidenceWorkflow = readText(path.join(infraRoot, ".github", "workflows", "enterprise-infra-run-evidence.yml"));
+  const githubLiveEvidenceWorkflow = readText(path.join(infraRoot, ".github", "workflows", "enterprise-live-evidence.yml"));
   const readme = readText(path.join(infraRoot, "README.md"));
   const runbook = readText(path.join(infraRoot, "RUNBOOK.md"));
   const envExample = readText(path.join(infraRoot, ".env.example"));
@@ -9382,6 +9393,7 @@ function staticSecurityInfraOnlyCheck() {
     productionReadinessLiveWrapper,
     githubWorkflow,
     githubRunEvidenceWorkflow,
+    githubLiveEvidenceWorkflow,
     readme,
     runbook,
     envExample,
@@ -9427,6 +9439,12 @@ function staticSecurityInfraOnlyCheck() {
   assertMatch(githubWorkflow, /GitHub Actions run evidence plan[\s\S]*github-actions-run-evidence/, "Infrastructure CI must generate a GitHub Actions run evidence plan.");
   assertMatch(githubRunEvidenceWorkflow, /workflow_run:[\s\S]*enterprise-infra[\s\S]*GITHUB_TOKEN:[\s\S]*github\.token[\s\S]*github-actions-run-evidence[\s\S]*--verifyRemote/, "Infrastructure CI must verify completed enterprise-infra runs through a workflow_run evidence workflow.");
   assertMatch(githubRunEvidenceWorkflow, /permissions:[\s\S]*contents:\s+read[\s\S]*actions:\s+read/, "GitHub Actions run evidence workflow must use least-privilege read permissions.");
+  assertMatch(githubLiveEvidenceWorkflow, /name:\s+enterprise-live-evidence[\s\S]*workflow_dispatch:/, "Infrastructure must provide a manual production live evidence workflow.");
+  assertMatch(githubLiveEvidenceWorkflow, /environment:[\s\S]*name:\s+production/, "Live evidence workflow must run in the production environment.");
+  assertMatch(githubLiveEvidenceWorkflow, /EXTERNAL_UPTIME_PROVIDER_EVIDENCE_JSON[\s\S]*external-uptime-check[\s\S]*--requireProviderEvidence/, "Live evidence workflow must validate provider-backed external uptime evidence.");
+  assertMatch(githubLiveEvidenceWorkflow, /PUBLIC_API_HEALTH_URL[\s\S]*load-benchmark[\s\S]*--requirePublicTarget[\s\S]*--requireEdgeEvidence[\s\S]*--expectedEdgeProvider cloudflare/, "Live evidence workflow must run public Cloudflare edge load evidence.");
+  assertMatch(githubLiveEvidenceWorkflow, /CLOUDFLARE_API_TOKEN[\s\S]*CLOUDFLARE_ACCOUNT_ID[\s\S]*cloudflare-access-admin[\s\S]*--verifyRemote/, "Live evidence workflow must verify Cloudflare Access admin applications.");
+  assertMatch(githubLiveEvidenceWorkflow, /production-go-no-go --enforce[\s\S]*production-readiness-live\.sh[\s\S]*evidence-bundle-verify --requireComplete/, "Live evidence workflow must enforce go/no-go, live readiness and complete bundle verification.");
   assertMatch(githubWorkflow, /Secret scan[\s\S]*secret-scan/, "Infrastructure CI must run the secret scanner.");
   assertMatch(githubWorkflow, /HA configuration check[\s\S]*ha-config-check/, "Infrastructure CI must run the HA configuration check.");
   assertMatch(githubWorkflow, /Managed secrets preflight[\s\S]*managed-secrets-preflight/, "Infrastructure CI must run the managed secrets preflight.");
@@ -9578,6 +9596,7 @@ async function staticSecurityCheck() {
   const productionReadinessManifest = readText(path.join(infraRoot, "governance", "production-readiness.json"));
   const githubWorkflow = readText(path.join(infraRoot, ".github", "workflows", "enterprise-infra.yml"));
   const githubRunEvidenceWorkflow = readText(path.join(infraRoot, ".github", "workflows", "enterprise-infra-run-evidence.yml"));
+  const githubLiveEvidenceWorkflow = readText(path.join(infraRoot, ".github", "workflows", "enterprise-live-evidence.yml"));
   const externalUptimeManifest = readText(path.join(infraRoot, "monitoring", "external-uptime.example.json"));
   const cloudflareReadme = readText(path.join(infraRoot, "cloudflare", "README.md"));
   const cloudflareFromZeroManifest = readText(path.join(infraRoot, "cloudflare", "from-zero.example.json"));
@@ -9675,6 +9694,12 @@ async function staticSecurityCheck() {
   assertMatch(githubRunEvidenceWorkflow, /permissions:[\s\S]*contents:\s+read[\s\S]*actions:\s+read/, "GitHub Actions run evidence workflow must use least-privilege read permissions.");
   assertMatch(githubRunEvidenceWorkflow, /GITHUB_TOKEN:[\s\S]*github\.token[\s\S]*github-actions-run-evidence[\s\S]*--verifyRemote/, "GitHub Actions run evidence workflow must verify completed runs remotely.");
   assertMatch(githubRunEvidenceWorkflow, /Upload GitHub Actions run evidence[\s\S]*reports\/github-actions\/[\s\S]*retention-days:\s+30/, "GitHub Actions run evidence workflow must upload its non-secret report artifact.");
+  assertMatch(githubLiveEvidenceWorkflow, /name:\s+enterprise-live-evidence[\s\S]*workflow_dispatch:/, "GitHub Actions must define a manual production live evidence workflow.");
+  assertMatch(githubLiveEvidenceWorkflow, /environment:[\s\S]*name:\s+production/, "Live evidence workflow must use the production environment protection.");
+  assertMatch(githubLiveEvidenceWorkflow, /EXTERNAL_UPTIME_PROVIDER_EVIDENCE_JSON[\s\S]*external-uptime-check[\s\S]*--validateProviderEvidenceOnly[\s\S]*external-uptime-check[\s\S]*--requireProviderEvidence/, "Live evidence workflow must validate external uptime provider evidence and direct public probes.");
+  assertMatch(githubLiveEvidenceWorkflow, /PUBLIC_API_HEALTH_URL[\s\S]*load-benchmark[\s\S]*--profiles 50,100,500[\s\S]*--requirePublicTarget[\s\S]*--requireEdgeEvidence[\s\S]*--expectedEdgeProvider cloudflare/, "Live evidence workflow must run public Cloudflare edge load benchmarks.");
+  assertMatch(githubLiveEvidenceWorkflow, /CLOUDFLARE_API_TOKEN[\s\S]*CLOUDFLARE_ACCOUNT_ID[\s\S]*CLOUDFLARE_ACCESS_ADMIN_MANIFEST_JSON[\s\S]*cloudflare-access-admin[\s\S]*--manifest \.tmp\/cloudflare-access-admin\.production\.json[\s\S]*--verifyRemote/, "Live evidence workflow must verify Cloudflare Access admin applications.");
+  assertMatch(githubLiveEvidenceWorkflow, /production-go-no-go --enforce[\s\S]*production-readiness-live\.sh[\s\S]*evidence-bundle-verify --requireComplete/, "Live evidence workflow must enforce go/no-go, live readiness and complete bundle verification.");
   if (productionGoNoGoPolicyJson.version !== 1) {
     fail("Production go/no-go policy must use version 1.");
   }
@@ -9971,6 +9996,9 @@ async function staticSecurityCheck() {
   assertMatch(runbook, /github-actions-run-evidence\.sh[\s\S]*reports\/github-actions/, "Runbook must document GitHub Actions run evidence.");
   assertMatch(vpsPredeployChecklist, /github-actions-config\.sh[\s\S]*DEPLOY_REMOTE_DIR/, "VPS checklist must require live GitHub Actions runtime config verification.");
   assertMatch(vpsPredeployChecklist, /github-actions-run-evidence\.sh[\s\S]*reports\/github-actions/, "VPS checklist must require GitHub Actions run evidence.");
+  assertMatch(readme, /enterprise-live-evidence[\s\S]*Cloudflare Access[\s\S]*bundle completo/, "README must document the production live evidence workflow.");
+  assertMatch(runbook, /enterprise-live-evidence[\s\S]*external uptime[\s\S]*complete evidence bundle/, "Runbook must document the production live evidence workflow.");
+  assertMatch(vpsPredeployChecklist, /enterprise-live-evidence[\s\S]*production[\s\S]*artifact/, "VPS checklist must require the production live evidence workflow artifact.");
   assertMatch(readme, /pre-go-live-evidence\.sh[\s\S]*reports\/go-live/, "README must document the pre go-live evidence pack.");
   assertMatch(runbook, /pre-go-live-evidence\.sh[\s\S]*includeRuntime[\s\S]*includeRestoreDrill/, "Runbook must document runtime and restore evidence options.");
   assertMatch(vpsPredeployChecklist, /pre-go-live-evidence\.sh[\s\S]*reports\/go-live/, "VPS checklist must require the go-live evidence report.");
@@ -10072,12 +10100,18 @@ async function staticSecurityCheck() {
   if (!productionRuntime?.required_secrets?.some((secret) => secret.name === "DEPLOY_SSH_KEY")) {
     fail("GitHub Actions runtime policy must require DEPLOY_SSH_KEY in production.");
   }
-  for (const name of ["DEPLOY_REMOTE", "DEPLOY_REMOTE_DIR"]) {
+  for (const name of ["EXTERNAL_UPTIME_PROVIDER_EVIDENCE_JSON", "CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ACCESS_ADMIN_MANIFEST_JSON"]) {
+    if (!productionRuntime?.required_secrets?.some((secret) => secret.name === name)) {
+      fail(`GitHub Actions runtime policy must require ${name} in production.`);
+    }
+  }
+  for (const name of ["DEPLOY_REMOTE", "DEPLOY_REMOTE_DIR", "PUBLIC_API_HEALTH_URL", "CLOUDFLARE_ACCOUNT_ID"]) {
     if (!productionRuntime?.required_variables?.some((variable) => variable.name === name)) {
       fail(`GitHub Actions runtime policy must require ${name} in production.`);
     }
   }
-  assertMatch(githubActionsRuntimePolicyText, /"DEPLOY_REMOTE"[\s\S]*"DEPLOY_REMOTE_DIR"/, "GitHub Actions runtime policy must define production deploy destination variables.");
+  assertMatch(githubActionsRuntimePolicyText, /"DEPLOY_REMOTE"[\s\S]*"DEPLOY_REMOTE_DIR"[\s\S]*"PUBLIC_API_HEALTH_URL"[\s\S]*"CLOUDFLARE_ACCOUNT_ID"/, "GitHub Actions runtime policy must define production deploy, public API and Cloudflare variables.");
+  assertMatch(githubActionsRuntimePolicyText, /"EXTERNAL_UPTIME_PROVIDER_EVIDENCE_JSON"[\s\S]*"CLOUDFLARE_API_TOKEN"[\s\S]*"CLOUDFLARE_ACCESS_ADMIN_MANIFEST_JSON"/, "GitHub Actions runtime policy must define live evidence production secrets.");
   assertMatch(opsScript, /async function githubBranchProtection/, "Ops script must provide a GitHub branch protection command.");
   assertMatch(opsScript, /Mode: dry-run[\s\S]*--apply/, "GitHub branch protection command must default to dry-run and require explicit apply.");
   assertMatch(opsScript, /GITHUB_TOKEN[\s\S]*GH_TOKEN[\s\S]*Authorization[\s\S]*Bearer \$\{token\}/, "GitHub branch protection command must use token-authenticated GitHub API calls.");
