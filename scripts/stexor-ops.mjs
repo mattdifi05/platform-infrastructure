@@ -5867,6 +5867,7 @@ async function repoCoverageCheck() {
     ["evidence-bundle-smoke", /evidence-bundle --noArchive/],
     ["linux-portability", /linux-portability-check/],
     ["enterprise-requirements", /Enterprise requirements traceability[\s\S]*enterprise-requirements-check/],
+    ["production-readiness-checklist", /Production readiness checklist[\s\S]*enterprise-requirements-check --manifest governance\/production-readiness\.json/],
     ["static-security-infra-only", /static-security-check --infraOnly/],
     ["repository-coverage", /repo-coverage-check/],
     ["ci-evidence-artifact", /Upload CI evidence reports[\s\S]*actions\/upload-artifact@v4[\s\S]*reports\/[\s\S]*\.tmp\/evidence-bundles\/[\s\S]*retention-days:\s+30/],
@@ -5994,6 +5995,10 @@ async function enterpriseRequirementsCheck() {
   log("==> Enterprise requirements traceability check");
   const manifestPath = path.resolve(argv.manifest ?? path.join(infraRoot, "governance", "enterprise-requirements.json"));
   const manifest = readJsonFile(manifestPath, manifestPath);
+  const expectedCount = positiveInteger(argv.expectedCount ?? manifest.expectedCount ?? 30, "--expectedCount", 1);
+  const reportDirectory = String(manifest.reportDirectory ?? "enterprise-requirements");
+  const reportPrefix = String(manifest.reportPrefix ?? "enterprise-requirements");
+  const reportTitle = String(manifest.title ?? "Enterprise Requirements Traceability");
   const workflowText = readText(path.join(infraRoot, ".github", "workflows", "enterprise-infra.yml"));
   const allowedStates = new Set(["repo-ready", "gate-ready", "environment-ready", "proprietary-integrated", "repo-ready-plus-environment-action"]);
   const issues = [];
@@ -6004,8 +6009,8 @@ async function enterpriseRequirementsCheck() {
     issues.push("Manifest must define requirements array.");
   }
   const requirements = Array.isArray(manifest.requirements) ? manifest.requirements : [];
-  if (requirements.length !== 30) {
-    issues.push(`Enterprise maturity manifest must track exactly 30 requirements, found ${requirements.length}.`);
+  if (requirements.length !== expectedCount) {
+    issues.push(`Traceability manifest must track exactly ${expectedCount} requirements, found ${requirements.length}.`);
   }
   const seenIds = new Set();
   const rows = requirements.map((requirement) => {
@@ -6061,9 +6066,9 @@ async function enterpriseRequirementsCheck() {
     issues,
   };
   const stamp = reportTimestamp();
-  const jsonPath = writeJsonReport("enterprise-requirements", `enterprise-requirements-${stamp}`, payload);
-  const markdownPath = writeMarkdownReport("enterprise-requirements", `enterprise-requirements-${stamp}`, [
-    "# Enterprise Requirements Traceability",
+  const jsonPath = writeJsonReport(reportDirectory, `${reportPrefix}-${stamp}`, payload);
+  const markdownPath = writeMarkdownReport(reportDirectory, `${reportPrefix}-${stamp}`, [
+    `# ${reportTitle}`,
     "",
     `Status: ${payload.status}`,
     `Generated at: ${payload.generatedAt}`,
@@ -7597,6 +7602,7 @@ function staticSecurityInfraOnlyCheck() {
   assertMatch(githubWorkflow, /Upload CI evidence reports[\s\S]*actions\/upload-artifact@v4[\s\S]*reports\/[\s\S]*\.tmp\/evidence-bundles\/[\s\S]*retention-days:\s+30/, "Infrastructure CI must upload non-secret evidence reports.");
   assertMatch(githubWorkflow, /Pre go-live evidence report[\s\S]*pre-go-live-evidence --infraOnly --repo/, "Infrastructure CI must produce an infrastructure-only pre go-live evidence report.");
   assertMatch(githubWorkflow, /Enterprise requirements traceability[\s\S]*enterprise-requirements-check/, "Infrastructure CI must verify enterprise requirements traceability.");
+  assertMatch(githubWorkflow, /Production readiness checklist[\s\S]*enterprise-requirements-check --manifest governance\/production-readiness\.json/, "Infrastructure CI must verify the 20-point production readiness checklist.");
   assertMatch(githubWorkflow, /permissions:\s*\r?\n\s+contents:\s+read/, "Infrastructure CI must declare least-privilege read permissions.");
   assertNoMatch(githubWorkflow, /security-events:\s+write|contents:\s+write/, "Infrastructure CI must not request unused write permissions.");
   assertMatch(githubWorkflow, /compose-and-policy:[\s\S]*timeout-minutes:\s+45[\s\S]*shell-syntax:[\s\S]*timeout-minutes:\s+10[\s\S]*dast-zap:[\s\S]*timeout-minutes:\s+45[\s\S]*deploy-hostinger:[\s\S]*timeout-minutes:\s+90/, "Infrastructure CI jobs must set explicit timeouts.");
@@ -8161,6 +8167,7 @@ async function staticSecurityCheck() {
   assertMatch(githubWorkflow, /Pre go-live evidence report[\s\S]*pre-go-live-evidence --infraOnly --repo/, "Infra workflow must exercise the infrastructure-only pre go-live evidence pack.");
   assertMatch(githubWorkflow, /Linux portability check[\s\S]*linux-portability-check/, "Infra workflow must exercise the Linux portability command.");
   assertMatch(githubWorkflow, /Enterprise requirements traceability[\s\S]*enterprise-requirements-check/, "Infra workflow must exercise the enterprise requirements traceability gate.");
+  assertMatch(githubWorkflow, /Production readiness checklist[\s\S]*enterprise-requirements-check --manifest governance\/production-readiness\.json/, "Infra workflow must exercise the 20-point production readiness checklist.");
   assertMatch(githubWorkflow, /Repository coverage audit[\s\S]*repo-coverage-check/, "Infra workflow must audit tracked repository coverage.");
   assertMatch(githubWorkflow, /Render staging and backup compose[\s\S]*compose\.waf\.yaml[\s\S]*compose\.staging\.yaml[\s\S]*compose\.backup-scheduler\.yaml/, "Infra workflow must render staging, WAF and backup compose overlays.");
   assertMatch(githubWorkflow, /Secret scan[\s\S]*secret-scan/, "Infra workflow must exercise the secret scanner.");

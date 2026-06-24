@@ -1,0 +1,230 @@
+{
+  "version": 1,
+  "scope": "stexor-platform-infrastructure",
+  "title": "Production Readiness Checklist",
+  "expectedCount": 20,
+  "reportDirectory": "production-readiness",
+  "reportPrefix": "production-readiness",
+  "requirements": [
+    {
+      "id": "offsite-automatic-backups",
+      "title": "Backup automatici off-site",
+      "state": "repo-ready-plus-environment-action",
+      "evidence": [
+        { "type": "file", "path": "compose.backup-scheduler.yaml" },
+        { "type": "command", "name": "offsite-backup-restic" },
+        { "type": "pattern", "path": "scripts/backup-scheduler.sh", "pattern": "offsite-backup-restic" }
+      ],
+      "liveProof": "Enable the backup scheduler on the VPS with remote Restic credentials and archive the first off-site backup report."
+    },
+    {
+      "id": "restore-tested",
+      "title": "Restore testato",
+      "state": "repo-ready-plus-environment-action",
+      "evidence": [
+        { "type": "command", "name": "full-restore-drill" },
+        { "type": "command", "name": "offsite-restore-drill-restic" },
+        { "type": "workflow", "pattern": "Off-site restore drill plan[\\s\\S]*offsite-restore-drill-restic --planOnly" }
+      ],
+      "liveProof": "Run full-restore-drill and a complete off-site restore drill against the real backup repository."
+    },
+    {
+      "id": "automatic-ci-cd-deploy",
+      "title": "CI/CD deploy automatico",
+      "state": "repo-ready",
+      "evidence": [
+        { "type": "file", "path": ".github/workflows/enterprise-infra.yml" },
+        { "type": "pattern", "path": ".github/workflows/enterprise-infra.yml", "pattern": "deploy-hostinger[\\s\\S]*deploy-hostinger\\.sh" },
+        { "type": "command", "name": "github-actions-config" }
+      ],
+      "liveProof": "Configure GitHub production environment secrets/variables and require approvals for the deploy job."
+    },
+    {
+      "id": "external-uptime-monitoring",
+      "title": "Uptime monitoring esterno",
+      "state": "gate-ready",
+      "evidence": [
+        { "type": "file", "path": "monitoring/external-uptime.example.json" },
+        { "type": "command", "name": "external-uptime-check" },
+        { "type": "workflow", "pattern": "External uptime manifest dry run[\\s\\S]*external-uptime-check --dryRun" }
+      ],
+      "liveProof": "Create external provider monitors and pass external-uptime-check with provider evidence."
+    },
+    {
+      "id": "firewall-fail2ban",
+      "title": "Firewall + fail2ban",
+      "state": "gate-ready",
+      "evidence": [
+        { "type": "file", "path": "scripts/vps-hardening-ubuntu.sh" },
+        { "type": "pattern", "path": "scripts/vps-hardening-ubuntu.sh", "pattern": "ufw[\\s\\S]*fail2ban" },
+        { "type": "pattern", "path": "scripts/vps-host-readiness.sh", "pattern": "ufw-active[\\s\\S]*fail2ban-active" }
+      ],
+      "liveProof": "Apply VPS hardening and pass vps-host-readiness --enforce on the Hostinger VPS."
+    },
+    {
+      "id": "secrets-management",
+      "title": "Gestione segreti",
+      "state": "proprietary-integrated",
+      "evidence": [
+        { "type": "file", "path": "scripts/stexor-secret-manager.mjs" },
+        { "type": "file", "path": "compose.managed-secrets.yaml" },
+        { "type": "workflow", "pattern": "Managed secrets preflight[\\s\\S]*managed-secrets-preflight" }
+      ],
+      "liveProof": "Materialize production Docker secrets and rotate them through the managed store."
+    },
+    {
+      "id": "tls-https-production-ready",
+      "title": "TLS/HTTPS production-ready",
+      "state": "repo-ready",
+      "evidence": [
+        { "type": "file", "path": "compose.prod.yaml" },
+        { "type": "pattern", "path": "compose.prod.yaml", "pattern": "letsencrypt[\\s\\S]*httpchallenge" },
+        { "type": "command", "name": "certificate-expiry-check" }
+      ],
+      "liveProof": "Verify production certificates, Cloudflare SSL mode and certificate expiry monitoring."
+    },
+    {
+      "id": "container-update-policy",
+      "title": "Policy aggiornamenti container",
+      "state": "repo-ready",
+      "evidence": [
+        { "type": "file", "path": "renovate.json" },
+        { "type": "pattern", "path": "renovate.json", "pattern": "docker-compose" },
+        { "type": "command", "name": "supply-chain-hygiene" }
+      ],
+      "liveProof": "Review Renovate updates and release signed image digests through the release gate."
+    },
+    {
+      "id": "staging-separated",
+      "title": "Staging separato da produzione",
+      "state": "gate-ready",
+      "evidence": [
+        { "type": "file", "path": "compose.staging.yaml" },
+        { "type": "file", "path": ".env.staging.example" },
+        { "type": "workflow", "pattern": "Render staging and backup compose[\\s\\S]*compose\\.staging\\.yaml" }
+      ],
+      "liveProof": "Deploy staging with separate project name, data volumes, secrets and public target."
+    },
+    {
+      "id": "all-service-healthchecks",
+      "title": "Healthcheck su tutti i servizi",
+      "state": "repo-ready",
+      "evidence": [
+        { "type": "command", "name": "infra-health" },
+        { "type": "pattern", "path": "compose.yaml", "pattern": "healthcheck:" },
+        { "type": "pattern", "path": "scripts/stexor-ops.mjs", "pattern": "async function infraHealth" }
+      ],
+      "liveProof": "Run infra-health after deploy and before go-live against the real VPS stack."
+    },
+    {
+      "id": "operations-runbook",
+      "title": "Documentazione operativa/runbook",
+      "state": "repo-ready",
+      "evidence": [
+        { "type": "file", "path": "RUNBOOK.md" },
+        { "type": "file", "path": "VPS-PREDEPLOY-CHECKLIST.md" },
+        { "type": "pattern", "path": "RUNBOOK.md", "pattern": "Production deploy[\\s\\S]*Rollback" }
+      ],
+      "liveProof": "Keep the runbook updated with real production evidence paths after every go-live."
+    },
+    {
+      "id": "disaster-recovery-plan",
+      "title": "Disaster recovery plan",
+      "state": "repo-ready",
+      "evidence": [
+        { "type": "command", "name": "dr-evidence" },
+        { "type": "file", "path": "compose.dr.yaml" },
+        { "type": "workflow", "pattern": "DR evidence summary[\\s\\S]*dr-evidence" }
+      ],
+      "liveProof": "Run dr-evidence --enforce with fresh backup, restore and off-site reports."
+    },
+    {
+      "id": "rate-limiting",
+      "title": "Rate limiting",
+      "state": "repo-ready",
+      "evidence": [
+        { "type": "file", "path": "compose.waf.yaml" },
+        { "type": "pattern", "path": "README.md", "pattern": "rate limit|rate limiting" },
+        { "type": "command", "name": "waf-smoke" }
+      ],
+      "liveProof": "Pass WAF/rate-limit smoke checks from the public edge."
+    },
+    {
+      "id": "admin-audit-log",
+      "title": "Audit log admin",
+      "state": "repo-ready",
+      "evidence": [
+        { "type": "file", "path": "postgres/migrations/007_durable_audit_outbox.sql" },
+        { "type": "command", "name": "access-review" },
+        { "type": "pattern", "path": "RUNBOOK.md", "pattern": "audit_outbox|AuditOutbox" }
+      ],
+      "liveProof": "Review audit logs and access-review output after every admin permission change."
+    },
+    {
+      "id": "docker-linux-hardening",
+      "title": "Hardening Docker/Linux",
+      "state": "gate-ready",
+      "evidence": [
+        { "type": "file", "path": "scripts/vps-hardening-ubuntu.sh" },
+        { "type": "pattern", "path": "scripts/vps-hardening-ubuntu.sh", "pattern": "no-new-privileges[\\s\\S]*live-restore" },
+        { "type": "command", "name": "linux-portability-check" }
+      ],
+      "liveProof": "Apply Docker daemon hardening on the VPS and pass vps-host-readiness."
+    },
+    {
+      "id": "log-metric-retention",
+      "title": "Retention log/metriche",
+      "state": "repo-ready",
+      "evidence": [
+        { "type": "file", "path": "loki/config.yml" },
+        { "type": "file", "path": "prometheus/prometheus.yml" },
+        { "type": "pattern", "path": "compose.yaml", "pattern": "max-size:[\\s\\S]*max-file:" }
+      ],
+      "liveProof": "Tune log and metric retention according to the final VPS disk size."
+    },
+    {
+      "id": "real-telegram-email-alerts",
+      "title": "Alert reali su Telegram/email",
+      "state": "gate-ready",
+      "evidence": [
+        { "type": "command", "name": "alert-evidence" },
+        { "type": "pattern", "path": "RUNBOOK.md", "pattern": "requireEmailDelivery[\\s\\S]*requireTelegramDelivery" },
+        { "type": "pattern", "path": "compose.yaml", "pattern": "ALERT_TELEGRAM_BOT_TOKEN_FILE" }
+      ],
+      "liveProof": "Run alert-evidence with real email or Telegram delivery requirements enabled."
+    },
+    {
+      "id": "admin-access-mfa-vpn",
+      "title": "Accessi admin protetti da MFA/VPN",
+      "state": "gate-ready",
+      "evidence": [
+        { "type": "file", "path": "cloudflare/access-admin.example.json" },
+        { "type": "command", "name": "cloudflare-access-admin" },
+        { "type": "workflow", "pattern": "Cloudflare Access admin dry run[\\s\\S]*cloudflare-access-admin" }
+      ],
+      "liveProof": "Apply and verify Cloudflare Access or VPN protection with IdP MFA for every admin surface."
+    },
+    {
+      "id": "controlled-db-migrations",
+      "title": "Migrazioni database controllate",
+      "state": "repo-ready",
+      "evidence": [
+        { "type": "file", "path": "scripts/apply-postgres-migrations.sh" },
+        { "type": "command", "name": "apply-postgres-migrations" },
+        { "type": "pattern", "path": "postgres/migrations/001_session_security_hardening.sql", "pattern": "schema_migrations" }
+      ],
+      "liveProof": "Run migrations only through the deploy flow and archive schema_migrations output."
+    },
+    {
+      "id": "deploy-rollback-tests",
+      "title": "Test deploy/rollback",
+      "state": "gate-ready",
+      "evidence": [
+        { "type": "command", "name": "rollback-release" },
+        { "type": "command", "name": "release-evidence" },
+        { "type": "workflow", "pattern": "Release evidence plan[\\s\\S]*release-evidence --planOnly" }
+      ],
+      "liveProof": "Archive release evidence with previous digests and a validated rollback dry-run."
+    }
+  ]
+}

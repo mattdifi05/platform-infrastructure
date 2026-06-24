@@ -50,12 +50,16 @@ Oppure direttamente:
 cd /opt/stexor/stexor-platform-infrastructure
 sh ./scripts/enterprise-hardening-audit.sh
 sh ./scripts/stexor-ops.sh enterprise-requirements-check
+sh ./scripts/stexor-ops.sh enterprise-requirements-check --manifest governance/production-readiness.json
 ```
 
 La matrice machine-readable vive in `governance/enterprise-requirements.json`.
 Il comando `enterprise-requirements-check` verifica i 30 requisiti contro file,
 pattern, comandi ops e gate GitHub Actions, poi scrive evidenza non sensibile in
 `reports/enterprise-requirements/`.
+La checklist production-ready da 20 punti vive in
+`governance/production-readiness.json` e produce report in
+`reports/production-readiness/`.
 
 ## Redis enterprise runtime
 

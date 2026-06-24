@@ -154,6 +154,9 @@ jobs:
       - name: Enterprise requirements traceability
         run: sh ./scripts/stexor-ops.sh enterprise-requirements-check
 
+      - name: Production readiness checklist
+        run: sh ./scripts/stexor-ops.sh enterprise-requirements-check --manifest governance/production-readiness.json
+
       - name: Repository coverage audit
         run: sh ./scripts/stexor-ops.sh repo-coverage-check
 
