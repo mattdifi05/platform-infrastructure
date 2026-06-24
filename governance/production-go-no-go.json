@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "maxAgeHours": {
+    "vpsBootstrap": 168,
+    "vpsHardening": 168,
+    "vpsHost": 24,
+    "preGoLive": 24,
+    "dr": 24,
+    "alerts": 24,
+    "uptime": 24,
+    "load": 72,
+    "release": 24,
+    "cloudflareAccess": 24
+  },
+  "requiredLoadProfiles": [50, 100, 500],
+  "requirePublicLoadTarget": true,
+  "requireLoadEdgeEvidence": true,
+  "requireEmailAlertDelivery": true,
+  "requireOffsiteRestore": true,
+  "requireReleaseProvenance": true,
+  "requireCleanReleaseGit": true,
+  "requireCloudflareAccessVerify": true,
+  "requireRuntimePreGoLive": true,
+  "requireRestorePreGoLive": true,
+  "requireGithubRemoteVerification": true,
+  "requireProductionPreflight": true
+}

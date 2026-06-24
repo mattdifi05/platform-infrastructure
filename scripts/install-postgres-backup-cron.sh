@@ -1,4 +1,4 @@
 #!/usr/bin/env sh
 set -eu
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-exec node "$SCRIPT_DIR/stexor-ops.mjs" install-postgres-backup-cron "$@"
+exec "$SCRIPT_DIR/stexor-ops.sh" install-postgres-backup-cron "$@"

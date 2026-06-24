@@ -11,7 +11,7 @@ every item must map to a file, command, policy or recurring drill.
   healthchecked load balancing and rolling updates.
 - Stateful services must run on a managed or clustered tier before public
   high-availability claims are made.
-- Gate: `node scripts/stexor-ops.mjs ha-config-check`.
+- Gate: `sh scripts/stexor-ops.sh ha-config-check`.
 
 ## 2. Managed secrets and KMS
 
@@ -24,7 +24,7 @@ every item must map to a file, command, policy or recurring drill.
   must not be required in `.env` for production.
 - Rotation uses active plus previous key rings, then removes previous keys after the
   observation window.
-- Gate: `node scripts/stexor-ops.mjs managed-secrets-preflight`.
+- Gate: `sh scripts/stexor-ops.sh managed-secrets-preflight`.
 
 ## 3. Supply chain enforcement
 
@@ -32,7 +32,7 @@ every item must map to a file, command, policy or recurring drill.
 - SBOM must be archived per release.
 - Images must be signed with cosign and accompanied by provenance attestation.
 - Admission must reject unsigned, mutable or provenance-missing workloads.
-- Gate: `node scripts/stexor-ops.mjs release-artifact-gate`.
+- Gate: `sh scripts/stexor-ops.sh release-artifact-gate`.
 
 ## 4. DR, PITR and RPO/RTO
 
@@ -41,7 +41,7 @@ every item must map to a file, command, policy or recurring drill.
 - Restore drills must run on a schedule and record success in
   `stexor_platform.backup_restore_runs`.
 - RPO/RTO targets are declared in this plan and checked by gate.
-- Gate: `node scripts/stexor-ops.mjs dr-readiness-check`.
+- Gate: `sh scripts/stexor-ops.sh dr-readiness-check`.
 
 Declared targets:
 
@@ -53,7 +53,7 @@ Declared targets:
 
 - Cover CSRF, CORS, CSP, recovery brute force, passkey requested-account
   isolation, backup code single-use, session revocation and privilege blocks.
-- Gate: `node scripts/stexor-ops.mjs security-matrix`.
+- Gate: `sh scripts/stexor-ops.sh security-matrix`.
 
 ## 6. Load and chaos
 
@@ -61,7 +61,7 @@ Declared targets:
 - Run opt-in destructive chaos against staging only: Redis unavailable,
   PostgreSQL interruption/failover, NATS unavailable and MinIO unavailable.
 - Measure p95 and p99 against published SLO budgets.
-- Gate: `node scripts/stexor-ops.mjs chaos-profile --confirmChaos`.
+- Gate: `sh scripts/stexor-ops.sh chaos-profile --confirmChaos`.
 
 ## 7. Cross-browser UX
 
@@ -75,4 +75,4 @@ Declared targets:
 - Required checks must block protected branches.
 - Releases require approval, signed artifacts, SBOM archive and rollback plan.
 - Deploys must leave an audit trail.
-- Gate: `node scripts/stexor-ops.mjs governance-check`.
+- Gate: `sh scripts/stexor-ops.sh governance-check`.

@@ -1,4 +1,4 @@
-name: enterprise_local
+name: stexor_platform_local
 
 x-default-logging: &default_logging
   driver: json-file
@@ -21,7 +21,6 @@ services:
     ports:
       - "127.0.0.1:80:80"
       - "127.0.0.1:443:443"
-      - "127.0.0.1:8090:8080"
     volumes:
       - ./traefik/traefik.yml:/etc/traefik/traefik.yml:ro
       - ./traefik/dynamic/middlewares.yml:/etc/traefik/dynamic/middlewares.yml:ro
@@ -134,7 +133,7 @@ services:
       traefik.enable: "true"
       traefik.http.routers.enterprise-keycloak.rule: Host(`${AUTH_HOST:-auth.localhost.com}`)
       traefik.http.routers.enterprise-keycloak.entrypoints: web
-      traefik.http.routers.enterprise-keycloak.middlewares: enterprise-security-headers@file,enterprise-compress@file
+      traefik.http.routers.enterprise-keycloak.middlewares: keycloak-security-headers@file,enterprise-compress@file
       traefik.http.services.enterprise-keycloak.loadbalancer.server.port: "8080"
     healthcheck:
       test: ["CMD-SHELL", "bash -ec 'true < /dev/tcp/127.0.0.1/8080'"]
@@ -188,7 +187,7 @@ services:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-stexor_minio}
       MINIO_ROOT_PASSWORD_FILE: /run/secrets/minio_root_password
       MINIO_BROWSER_REDIRECT_URL: ${MINIO_BROWSER_REDIRECT_URL:-https://minio.localhost.com}
-      MINIO_SERVER_URL: ${MINIO_SERVER_URL:-http://localhost:9000}
+      MINIO_SERVER_URL: ${MINIO_SERVER_URL:-https://s3.localhost.com}
     volumes:
       - enterprise_minio_data:/data
     networks:
@@ -204,6 +203,107 @@ services:
       interval: 15s
       timeout: 5s
       retries: 10
+
+  php-apache:
+    image: ${PHP_APACHE_BUILD_IMAGE:-stexor/php-apache:local}
+    build:
+      context: ..
+      dockerfile: web-php-infrastructure/php-apache/Dockerfile
+      args:
+        PHP_IMAGE: ${PHP_IMAGE:-php:8.5-apache@sha256:65094755171975e565538ddbfa589847548e80d15adfbb9064a20b86f8485215}
+        COMPOSER_IMAGE: ${COMPOSER_IMAGE:-composer:2.10.1@sha256:7725eb4545c438629ae8bde3ef0bb9a5038ef566126ad878442a69007242d267}
+        PHP_EXTENSION_INSTALLER_IMAGE: ${PHP_EXTENSION_INSTALLER_IMAGE:-mlocati/php-extension-installer:2.11.12@sha256:b6d3fa381b9ba5cf051117c1c601d6a523b590e534bf3d56eb4fbe352949c138}
+    container_name: php-apache
+    init: true
+    pids_limit: 512
+    logging: *default_logging
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    expose:
+      - "80"
+      - "443"
+    environment:
+      PROJECTS_GATEWAY_EMAIL: ${PROJECTS_GATEWAY_EMAIL:-admin@example.com}
+      PROJECTS_GATEWAY_SIGNING_KEYS_FILE: /run/secrets/projects_gateway_signing_keys
+      MAILER_FROM: ${MAILER_FROM:-no-reply@localhost}
+      MAILER_REPLY_TO: ${MAILER_REPLY_TO:-no-reply@localhost}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-465}
+      SMTP_SECURE: ${SMTP_SECURE:-true}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD_FILE: /run/secrets/smtp_password
+    volumes:
+      - ${PHP_SOURCE_DIR:-../src}:/var/www/html
+      - ${PHP_STREAM_SOURCE_DIR:-../src_stream}:/var/www/projects/stream
+      - ${PHP_ANNIVERSARY_SOURCE_DIR:-../src_anniversary}:/var/www/projects/anniversary
+      - ${PHP_WORKCALENDAR_SOURCE_DIR:-../src_workcalendar}:/var/www/projects/workcalendar
+      - ${PHP_FIREPORT_SOURCE_DIR:-../src_fireport}:/var/www/projects/fireport
+      - ../web-php-infrastructure/php-apache/php/custom.ini:/usr/local/etc/php/conf.d/zz-custom.ini:ro
+      - ../web-php-infrastructure/php-apache/apache:/etc/apache2/sites-available
+      - ../web-php-infrastructure/certs:/etc/apache2/certs:ro
+    depends_on:
+      mariadb:
+        condition: service_healthy
+    networks:
+      - enterprise_net
+    healthcheck:
+      test: ["CMD-SHELL", "apache2ctl -t >/dev/null"]
+      interval: 20s
+      timeout: 5s
+      retries: 10
+
+  mariadb:
+    image: ${MARIADB_IMAGE:-mariadb:12.3.2@sha256:b1c7bf836e64ed9406a8984af29509f40089d55cea14b32f12c4726a1f17104b}
+    container_name: mariadb
+    init: true
+    pids_limit: 1024
+    logging: *default_logging
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    environment:
+      MARIADB_ROOT_PASSWORD: ${LOCAL_MARIADB_ROOT_PASSWORD:-root}
+    volumes:
+      - enterprise_mariadb_data:/var/lib/mysql
+      - ../web-php-infrastructure/mariadb/initdb:/docker-entrypoint-initdb.d:ro
+      - ../web-php-infrastructure/mariadb/conf.d:/etc/mysql/conf.d:ro
+      - ../web-php-infrastructure/certs:/etc/mysql/ssl:ro
+    networks:
+      - enterprise_net
+    healthcheck:
+      test: ["CMD-SHELL", "mariadb -uroot -p\"$${MARIADB_ROOT_PASSWORD}\" -N -e 'select 1' >/dev/null"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  phpmyadmin:
+    image: ${PHPMYADMIN_IMAGE:-phpmyadmin:5.2.3@sha256:51b74806646fb15aa59df2a2e73573969a44f4b7d4729e4a5c4ba364bc20ec77}
+    container_name: phpmyadmin
+    profiles:
+      - admin
+    init: true
+    pids_limit: 512
+    logging: *default_logging
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    environment:
+      PMA_HOST: mariadb
+      PMA_PORT: 3306
+      PMA_SSL_CA: /etc/phpmyadmin/certs/ca.pem
+      PMA_SSL_VERIFIES: "1"
+      UPLOAD_LIMIT: 256M
+    volumes:
+      - ./phpmyadmin/config.user.inc.php:/etc/phpmyadmin/config.user.inc.php:ro
+      - ../web-php-infrastructure/certs:/etc/phpmyadmin/certs:ro
+    depends_on:
+      mariadb:
+        condition: service_healthy
+    expose:
+      - "80"
+    networks:
+      - enterprise_net
 
   backend:
     image: ${BACKEND_BUILD_IMAGE:-stexor/backend:local}
@@ -377,6 +477,18 @@ services:
       REDIS_KEY_PREFIX: ${REDIS_KEY_PREFIX:-stexor}
       NATS_URL_FILE: /run/secrets/nats_url
       ALERT_FORWARD_WEBHOOK_URL: ${ALERT_FORWARD_WEBHOOK_URL:-}
+      ALERT_DISCORD_WEBHOOK_URL_FILE: ${ALERT_DISCORD_WEBHOOK_URL_FILE:-}
+      ALERT_TELEGRAM_BOT_TOKEN_FILE: ${ALERT_TELEGRAM_BOT_TOKEN_FILE:-}
+      ALERT_TELEGRAM_CHAT_ID: ${ALERT_TELEGRAM_CHAT_ID:-}
+      ALERT_TELEGRAM_API_BASE_URL: ${ALERT_TELEGRAM_API_BASE_URL:-}
+      ALERT_EMAIL_TO: ${ALERT_EMAIL_TO:-admin@example.com}
+      MAILER_FROM: ${MAILER_FROM:?Set MAILER_FROM}
+      MAILER_REPLY_TO: ${MAILER_REPLY_TO:?Set MAILER_REPLY_TO}
+      SMTP_HOST: ${SMTP_HOST:?Set SMTP_HOST}
+      SMTP_PORT: ${SMTP_PORT:-465}
+      SMTP_SECURE: ${SMTP_SECURE:-true}
+      SMTP_USER: ${SMTP_USER:?Set SMTP_USER}
+      SMTP_PASSWORD_FILE: /run/secrets/smtp_password
       STRUCTURED_LOGGING: ${STRUCTURED_LOGGING:-true}
       AUDIT_LOG_ENABLED: ${AUDIT_LOG_ENABLED:-true}
     depends_on:
@@ -479,6 +591,10 @@ services:
         condition: service_healthy
       web:
         condition: service_healthy
+      node-exporter:
+        condition: service_healthy
+      cadvisor:
+        condition: service_healthy
     volumes:
       - enterprise_prometheus_data:/prometheus
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
@@ -488,6 +604,56 @@ services:
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:9090/-/healthy"]
       interval: 15s
+      timeout: 5s
+      retries: 10
+
+  node-exporter:
+    image: ${NODE_EXPORTER_IMAGE:-prom/node-exporter:v1.10.2@sha256:3ac34ce007accad95afed72149e0d2b927b7e42fd1c866149b945b84737c62c3}
+    container_name: enterprise-node-exporter
+    init: true
+    pids_limit: 128
+    logging: *default_logging
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    command:
+      - --path.rootfs=/host
+      - --collector.filesystem.mount-points-exclude=^/(dev|proc|sys|var/lib/docker/.+|run/docker/netns)($|/)
+      - --collector.netclass.ignored-devices=^(veth.*|br-.*|docker.*)$
+    pid: host
+    volumes:
+      - /:/host:ro
+    networks:
+      - enterprise_net
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:9100/metrics"]
+      interval: 20s
+      timeout: 5s
+      retries: 10
+
+  cadvisor:
+    image: ${CADVISOR_IMAGE:-gcr.io/cadvisor/cadvisor:v0.52.1@sha256:f40e65878e25c2e78ea037f73a449527a0fb994e303dc3e34cb6b187b4b91435}
+    container_name: enterprise-cadvisor
+    init: true
+    pids_limit: 256
+    logging: *default_logging
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    command:
+      - --docker_only=true
+      - --store_container_labels=false
+      - --housekeeping_interval=30s
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+    networks:
+      - enterprise_net
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/healthz"]
+      interval: 20s
       timeout: 5s
       retries: 10
 
@@ -576,6 +742,7 @@ services:
     volumes:
       - enterprise_loki_data:/loki
       - ./loki/config.yml:/etc/loki/config.yml:ro
+      - ./loki/rules:/loki/rules:ro
     networks:
       - enterprise_net
     healthcheck:
@@ -610,10 +777,13 @@ services:
 
 networks:
   enterprise_net:
+    external: true
     name: enterprise_net
-    driver: bridge
 
 volumes:
+  enterprise_mariadb_data:
+    name: ${MARIADB_DATA_VOLUME:-enterprise_mariadb_data}
+    external: true
   enterprise_postgres_data:
     name: enterprise_postgres_data
   enterprise_redis_data:
@@ -718,7 +888,7 @@ configs:
               - websecure
             tls: {}
             middlewares:
-              - enterprise-security-headers@file
+              - keycloak-security-headers@file
               - enterprise-compress@file
             service: enterprise-keycloak
 
@@ -758,6 +928,60 @@ configs:
               - enterprise-compress@file
             service: enterprise-grafana
 
+          enterprise-phpmyadmin-http:
+            rule: Host(`${PHPMYADMIN_HOST:-phpmyadmin.localhost.com}`)
+            entryPoints:
+              - web
+            middlewares:
+              - enterprise-redirect-https@file
+            service: enterprise-phpmyadmin
+
+          enterprise-phpmyadmin:
+            rule: Host(`${PHPMYADMIN_HOST:-phpmyadmin.localhost.com}`)
+            entryPoints:
+              - websecure
+            tls: {}
+            middlewares:
+              - enterprise-security-headers@file
+              - enterprise-compress@file
+            service: enterprise-phpmyadmin
+
+          enterprise-minio-api-http:
+            rule: Host(`s3.localhost.com`)
+            entryPoints:
+              - web
+            middlewares:
+              - enterprise-redirect-https@file
+            service: enterprise-minio-api
+
+          enterprise-minio-api:
+            rule: Host(`s3.localhost.com`)
+            entryPoints:
+              - websecure
+            tls: {}
+            middlewares:
+              - enterprise-security-headers@file
+              - enterprise-compress@file
+            service: enterprise-minio-api
+
+          local-php-http:
+            rule: Host(`projects.localhost.com`) || Host(`stream.localhost.com`) || Host(`anniversary.localhost.com`) || Host(`workcalendar.localhost.com`) || Host(`fireport.localhost.com`) || Host(`fireport.top`)
+            entryPoints:
+              - web
+            middlewares:
+              - enterprise-redirect-https@file
+            service: local-php
+
+          local-php:
+            rule: Host(`projects.localhost.com`) || Host(`stream.localhost.com`) || Host(`anniversary.localhost.com`) || Host(`workcalendar.localhost.com`) || Host(`fireport.localhost.com`) || Host(`fireport.top`)
+            entryPoints:
+              - websecure
+            tls: {}
+            middlewares:
+              - enterprise-security-headers@file
+              - enterprise-compress@file
+            service: local-php
+
         services:
           enterprise-web:
             loadBalancer:
@@ -775,7 +999,19 @@ configs:
             loadBalancer:
               servers:
                 - url: http://minio:9001
+          enterprise-minio-api:
+            loadBalancer:
+              servers:
+                - url: http://minio:9000
           enterprise-grafana:
             loadBalancer:
               servers:
                 - url: http://grafana:3000
+          enterprise-phpmyadmin:
+            loadBalancer:
+              servers:
+                - url: http://phpmyadmin:80
+          local-php:
+            loadBalancer:
+              servers:
+                - url: http://php-apache:80

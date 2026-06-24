@@ -1,0 +1,55 @@
+{
+  "zoneName": "example.com",
+  "requireEmptyDns": true,
+  "settings": [
+    { "id": "always_use_https", "value": "on" },
+    { "id": "automatic_https_rewrites", "value": "on" },
+    { "id": "brotli", "value": "on" },
+    { "id": "min_tls_version", "value": "1.2" },
+    { "id": "security_level", "value": "medium" }
+  ],
+  "dnsRecords": [
+    {
+      "type": "A",
+      "name": "example.com",
+      "content": "203.0.113.10",
+      "ttl": 1,
+      "proxied": true
+    },
+    {
+      "type": "CNAME",
+      "name": "api.example.com",
+      "content": "example.com",
+      "ttl": 1,
+      "proxied": true
+    }
+  ],
+  "customWafRuleset": {
+    "name": "Stexor Enterprise Custom WAF",
+    "description": "Created only on clean/new Cloudflare zones by scripts/cloudflare-from-zero.sh.",
+    "phase": "http_request_firewall_custom",
+    "rules": [
+      {
+        "ref": "stexor-block-admin-hosts",
+        "description": "Block public admin hostnames",
+        "action": "block",
+        "enabled": true,
+        "expression": "(lower(http.host) matches \"^(phpmyadmin|traefik|prometheus|alertmanager|grafana|minio|s3)\\\\.\")"
+      },
+      {
+        "ref": "stexor-block-sensitive-files",
+        "description": "Block sensitive file probes",
+        "action": "block",
+        "enabled": true,
+        "expression": "(http.request.uri.path matches \"(?i)^/(\\\\.env|\\\\.git|\\\\.svn|\\\\.hg|composer\\\\.(json|lock)|package(-lock)?\\\\.json|pnpm-lock\\\\.yaml|yarn\\\\.lock|docker-compose\\\\.ya?ml|compose\\\\.ya?ml|\\\\.DS_Store)(/|$)\")"
+      },
+      {
+        "ref": "stexor-block-common-scanners",
+        "description": "Block common scanner paths",
+        "action": "block",
+        "enabled": true,
+        "expression": "(http.request.uri.path matches \"(?i)^/(wp-admin|wp-login\\\\.php|xmlrpc\\\\.php|phpinfo\\\\.php|server-status)(/|$)\")"
+      }
+    ]
+  }
+}

@@ -12,8 +12,8 @@ Questo documento traduce i 30 punti enterprise in controlli concreti. Le voci `r
 | 4 | Secrets manager | Proprietary integrated | `stexor-secret-manager`, encrypted store, audit log, `/run/secrets/*`, `*_FILE`, keyring rotation |
 | 5 | Rotazione credenziali | Repo-ready | Runbook e secret scan gate |
 | 6 | Registry immagini privato | Repo-ready | Dockerfile prod e `compose.build.yaml`; prod usa immagini versionate |
-| 7 | CI/CD remoto | Repo-ready | Workflow GitHub e `pnpm enterprise:check` |
-| 8 | Backup off-site e restore drill | Gate-ready | Backup, restore test schedulato, retention dump e hook Restic off-site |
+| 7 | CI/CD remoto | Repo-ready | Workflow GitHub, `pnpm enterprise:check` e release/deploy gate |
+| 8 | Backup off-site e restore drill | Repo-ready + environment action | Backup e restore drill PostgreSQL, MariaDB, MinIO, Keycloak, Secret Manager metadata; Restic richiede repository off-site reale |
 | 9 | Alerting reale | Gate-ready | Prometheus, Alertmanager, worker notifiche, Loki/Grafana e runbook provider |
 | 10 | Log centralizzati/redaction/audit | Gate-ready | Loki/Promtail con label strutturate, redaction condivisa, audit DB append-only |
 | 11 | WAF/rate limit/bot protection | Repo-ready | Traefik rate limit + Fastify Redis-backed rate limit |
@@ -22,12 +22,12 @@ Questo documento traduce i 30 punti enterprise in controlli concreti. Le voci `r
 | 14 | Email production SPF/DKIM/DMARC | Gate-ready | SMTP configurabile; checklist record dominio |
 | 15 | Migrazioni DB rollback-safe | Repo-ready | Cartella migrations e runner Linux/Docker |
 | 16 | GDPR/privacy data lifecycle | Repo-ready | Export account, soft-delete, audit/retention policy |
-| 17 | SAST/DAST/dependency/container scan | Gate-ready | Audit, secret scan, SBOM; DAST esterno da collegare |
+| 17 | SAST/DAST/dependency/container scan | Gate-ready | Audit, secret scan, SBOM, Renovate; DAST esterno da collegare |
 | 18 | Pen-test applicativo | Gate-ready | Threat model + checklist; richiede test professionale/manuale |
-| 19 | Load/performance test | Repo-ready | `load-smoke.sh`, metriche e health |
+| 19 | Load/performance test | Repo-ready | `load-smoke.sh`, `load-profile`, `load-benchmark.sh` 50/100/500 con report CPU/RAM e `infra-health` |
 | 20 | Incident runbook RTO/RPO | Repo-ready | `RUNBOOK.md`, backup/restore, restore drill |
 | 21 | HA/multi-node | Environment-ready | Richiede infrastruttura multi-node reale |
-| 22 | Zero-downtime deploy | Gate-ready | Immagini immutabili e firma; blue/green richiede target reale |
+| 22 | Zero-downtime deploy | Gate-ready | Immagini immutabili, firma e `rollback-release.sh`; blue/green richiede target reale |
 | 23 | Staging identico alla prod | Gate-ready | Prod overlay replicabile con project/env separati |
 | 24 | Feature flags/kill switch | Repo-ready | Policy documentata; implementazione applicativa futura |
 | 25 | SIEM/security monitoring | Gate-ready | Log/alert esportabili; SIEM esterno da collegare |
@@ -47,7 +47,7 @@ pnpm enterprise:check
 Oppure direttamente:
 
 ```sh
-cd /opt/stexor/enterprise-infrastructure
+cd /opt/stexor/stexor-platform-infrastructure
 sh ./scripts/enterprise-hardening-audit.sh
 ```
 
@@ -60,9 +60,9 @@ PostgreSQL rimane source of truth per account, sessioni, passkey, audit, ruoli e
 ## Secret manager locale
 
 ```sh
-cd /opt/stexor/enterprise-infrastructure
+cd /opt/stexor/stexor-platform-infrastructure
 sh ./scripts/stexor-secret-manager.sh init
-docker compose -f compose.yaml -f compose.secrets.yaml --env-file .env -p enterprise_local up -d
+docker compose -f compose.yaml -f compose.secrets.yaml --env-file .env -p stexor_platform_local up -d
 sh ./scripts/stexor-secret-manager.sh verify
-docker compose -f compose.yaml -f compose.secrets.yaml --env-file .env -p enterprise_local config --quiet
+docker compose -f compose.yaml -f compose.secrets.yaml --env-file .env -p stexor_platform_local config --quiet
 ```

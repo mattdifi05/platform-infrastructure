@@ -1,0 +1,26 @@
+{
+  "environments": [
+    {
+      "name": "staging",
+      "wait_timer": 0,
+      "prevent_self_review": true,
+      "required_reviewers_env": "GITHUB_STAGING_REVIEWERS",
+      "require_reviewers_on_apply": false,
+      "deployment_branch_policy": {
+        "protected_branches": false,
+        "custom_branch_policies": true
+      }
+    },
+    {
+      "name": "production",
+      "wait_timer": 15,
+      "prevent_self_review": true,
+      "required_reviewers_env": "GITHUB_PRODUCTION_REVIEWERS",
+      "require_reviewers_on_apply": true,
+      "deployment_branch_policy": {
+        "protected_branches": true,
+        "custom_branch_policies": false
+      }
+    }
+  ]
+}

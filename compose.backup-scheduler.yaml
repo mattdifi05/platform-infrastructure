@@ -1,0 +1,73 @@
+services:
+  backup-scheduler:
+    image: ${STEXOR_OPS_IMAGE:-stexor/ops:local}
+    build:
+      context: .
+      dockerfile: docker/ops.Dockerfile
+      args:
+        NODE_IMAGE: ${NODE_IMAGE:-node:26.3.1-alpine@sha256:a2dc166a387cc6ca1e62d0c8e265e49ca985d6e60abc9fe6e6c3d6ce8e63f606}
+    container_name: enterprise-backup-scheduler
+    profiles:
+      - backup
+    init: true
+    pids_limit: 256
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    entrypoint:
+      - tini
+      - --
+      - sh
+      - /infra/scripts/backup-scheduler.sh
+    environment:
+      STEXOR_INFRA_ROOT: /infra
+      STEXOR_INFRA_CONTAINER_ROOT: /infra
+      STEXOR_INFRA_HOST_ROOT: ${STEXOR_INFRA_HOST_ROOT:-}
+      STEXOR_SOURCE_ROOT: /src_stexor
+      STEXOR_SOURCE_HOST_ROOT: ${STEXOR_SOURCE_HOST_ROOT:-}
+      NODE_IMAGE: ${NODE_IMAGE:-node:26.3.1-alpine@sha256:a2dc166a387cc6ca1e62d0c8e265e49ca985d6e60abc9fe6e6c3d6ce8e63f606}
+      BACKUP_SCHEDULER_POSTGRES_AT: ${BACKUP_SCHEDULER_POSTGRES_AT:-03:15}
+      BACKUP_SCHEDULER_MARIADB_AT: ${BACKUP_SCHEDULER_MARIADB_AT:-03:45}
+      BACKUP_SCHEDULER_MINIO_AT: ${BACKUP_SCHEDULER_MINIO_AT:-04:00}
+      BACKUP_SCHEDULER_KEYCLOAK_AT: ${BACKUP_SCHEDULER_KEYCLOAK_AT:-04:10}
+      BACKUP_SCHEDULER_SECRET_MANAGER_AT: ${BACKUP_SCHEDULER_SECRET_MANAGER_AT:-04:20}
+      BACKUP_SCHEDULER_FULL_RESTORE_DRILL_AT: ${BACKUP_SCHEDULER_FULL_RESTORE_DRILL_AT:-04:45}
+      BACKUP_SCHEDULER_RESTORE_DRILL_WEEKDAY: ${BACKUP_SCHEDULER_RESTORE_DRILL_WEEKDAY:-0}
+      BACKUP_SCHEDULER_RETENTION_AT: ${BACKUP_SCHEDULER_RETENTION_AT:-05:15}
+      BACKUP_SCHEDULER_ENABLE_OFFSITE: ${BACKUP_SCHEDULER_ENABLE_OFFSITE:-false}
+      BACKUP_SCHEDULER_OFFSITE_AT: ${BACKUP_SCHEDULER_OFFSITE_AT:-05:30}
+      RESTIC_REPOSITORY: ${RESTIC_REPOSITORY:-}
+      RESTIC_PASSWORD_FILE: ${RESTIC_PASSWORD_FILE:-/infra/secrets/restic_password.txt}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - .:/infra
+      - ${NODE_SOURCE_DIR:-../src_stexor}:/src_stexor:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mariadb:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+      worker-jobs:
+        condition: service_healthy
+      worker-notifications:
+        condition: service_healthy
+    networks:
+      - enterprise_net
+    healthcheck:
+      test: ["CMD-SHELL", "test -s /etc/crontabs/root && pgrep crond >/dev/null"]
+      interval: 30s
+      timeout: 5s
+      retries: 5

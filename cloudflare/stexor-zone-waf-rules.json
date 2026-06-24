@@ -1,0 +1,26 @@
+{
+  "phase": "http_request_firewall_custom",
+  "rules": [
+    {
+      "ref": "stexor-block-admin-hosts",
+      "description": "Block public admin hostnames",
+      "action": "block",
+      "enabled": true,
+      "expression": "(lower(http.host) matches \"^(phpmyadmin|traefik|prometheus|alertmanager|grafana|minio|s3)\\\\.\")"
+    },
+    {
+      "ref": "stexor-block-sensitive-files",
+      "description": "Block sensitive file probes",
+      "action": "block",
+      "enabled": true,
+      "expression": "(http.request.uri.path matches \"(?i)^/(\\\\.env|\\\\.git|\\\\.svn|\\\\.hg|composer\\\\.(json|lock)|package(-lock)?\\\\.json|pnpm-lock\\\\.yaml|yarn\\\\.lock|docker-compose\\\\.ya?ml|compose\\\\.ya?ml|\\\\.DS_Store)(/|$)\")"
+    },
+    {
+      "ref": "stexor-block-common-scanners",
+      "description": "Block common scanner paths",
+      "action": "block",
+      "enabled": true,
+      "expression": "(http.request.uri.path matches \"(?i)^/(wp-admin|wp-login\\\\.php|xmlrpc\\\\.php|phpinfo\\\\.php|server-status)(/|$)\")"
+    }
+  ]
+}

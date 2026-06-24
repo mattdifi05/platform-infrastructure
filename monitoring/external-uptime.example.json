@@ -1,0 +1,67 @@
+{
+  "version": 1,
+  "description": "Provider-neutral external uptime monitor manifest for the public Stexor production edge.",
+  "defaults": {
+    "method": "GET",
+    "timeoutMs": 5000,
+    "maxLatencyMs": 2000,
+    "intervalSeconds": 60,
+    "expectedStatuses": [200],
+    "headers": {
+      "User-Agent": "Stexor-Uptime/1.0"
+    },
+    "regions": ["eu-west", "us-east"]
+  },
+  "targets": [
+    {
+      "name": "web-public-home",
+      "url": "${UI_PUBLIC_URL:-https://stexor.example.com}/",
+      "expectedStatuses": [200, 301, 302],
+      "maxLatencyMs": 2500
+    },
+    {
+      "name": "api-public-health",
+      "url": "${API_PUBLIC_URL:-https://api.stexor.example.com}/health",
+      "expectedStatuses": [200],
+      "maxLatencyMs": 1500,
+      "expectedBodyIncludes": "ok"
+    },
+    {
+      "name": "account-public-home",
+      "url": "${ACCOUNT_PUBLIC_URL:-https://account.stexor.example.com}/",
+      "expectedStatuses": [200, 301, 302],
+      "maxLatencyMs": 2500
+    },
+    {
+      "name": "keycloak-issuer-discovery",
+      "url": "${KEYCLOAK_ISSUER:-https://auth.stexor.example.com/realms/stexor}/.well-known/openid-configuration",
+      "expectedStatuses": [200],
+      "maxLatencyMs": 2500,
+      "expectedBodyIncludes": "issuer"
+    },
+    {
+      "name": "blocked-phpmyadmin-public",
+      "url": "https://phpmyadmin.${PUBLIC_ROOT_DOMAIN:-stexor.example.com}/",
+      "expectedStatuses": [403, 404],
+      "maxLatencyMs": 2000
+    },
+    {
+      "name": "blocked-prometheus-public",
+      "url": "https://prometheus.${PUBLIC_ROOT_DOMAIN:-stexor.example.com}/",
+      "expectedStatuses": [403, 404],
+      "maxLatencyMs": 2000
+    },
+    {
+      "name": "blocked-alertmanager-public",
+      "url": "https://alertmanager.${PUBLIC_ROOT_DOMAIN:-stexor.example.com}/",
+      "expectedStatuses": [403, 404],
+      "maxLatencyMs": 2000
+    }
+  ],
+  "providerNotes": {
+    "cloudflare": "Create Health Checks or Synthetic Tests from these targets after DNS is live.",
+    "betterstack": "Create HTTPS keyword/status monitors with the same status and latency thresholds.",
+    "uptimerobot": "Create HTTPS monitors for public targets and keyword checks where expectedBodyIncludes is set.",
+    "evidenceTemplate": "Copy monitoring/external-uptime-provider.example.json, fill provider monitor ids, regions, verifiedAt, lastStatusCode, lastLatencyMs and lastCheckedAt after a live provider API/dashboard verification, then pass it with --providerEvidence."
+  }
+}

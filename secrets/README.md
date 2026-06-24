@@ -9,17 +9,22 @@ Regole:
 - inizializza i secret locali con `sh ./scripts/stexor-secret-manager.sh init`;
 - valida i secret locali con `sh ./scripts/stexor-secret-manager.sh verify`;
 - controlla metadata e fingerprint non sensibili con `sh ./scripts/stexor-secret-manager.sh status`;
+- controlla lo stato KMS con `sh ./scripts/stexor-secret-manager.sh kms-status`;
+- ruota la KEK locale con `sh ./scripts/stexor-secret-manager.sh kms-rotate`;
 - avvia lo stack locale con `compose.secrets.yaml`;
 - i container leggono i secret da `/run/secrets/*`;
 - backend e worker usano variabili `*_FILE`;
-- `SESSION_SECRET`, `SECRET_HASH_KEYS`, `BACKUP_SIGNING_KEYS`, `ALERTMANAGER_WEBHOOK_TOKEN`, password DB, SMTP, Redis, MinIO, NATS e Grafana devono essere ruotabili;
+- `SESSION_SECRET`, `SESSION_SIGNING_KEYS`, `PROJECTS_GATEWAY_SIGNING_KEYS`, `SECRET_HASH_KEYS`, `BACKUP_SIGNING_KEYS`, `ALERTMANAGER_WEBHOOK_TOKEN`, password DB, SMTP, Redis, MariaDB, MinIO, NATS e Grafana devono essere ruotabili;
 - ogni secret deve avere owner, scadenza/rotazione e ambiente (`local`, `staging`, `prod`).
 
 File principali:
 
-- `stexor-secret-manager-store.json`: store cifrato AES-256-GCM;
+- `stexor-secret-manager-store.json`: store cifrato AES-256-GCM con envelope KMS proprietario `stexor-local-kms` e KEK derivate HKDF-SHA256;
 - `stexor-secret-manager-master.key`: master key locale, da proteggere fuori dal repo e includere nel backup sicuro dell'host;
 - `stexor-secret-manager-audit.log`: audit JSONL delle operazioni;
 - `*.txt`: secret materializzati per Docker Compose.
+- `projects_gateway_signing_keys.txt`: keyring per il cookie permanente firmato di `projects.localhost.com`.
+- `mariadb_root_password.txt`: richiesto da `compose.secrets.yaml` e dal profilo `compose.hostinger.yaml` per evitare password root MariaDB in `.env`.
+- `phpmyadmin_control_password.txt`: password dell'utente tecnico `pma`, usata solo quando abiliti manualmente il profilo `admin`.
 
 Su una VPS pubblica proteggi questa cartella con permessi host stretti, backup cifrato e accesso SSH ristretto.

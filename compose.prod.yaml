@@ -38,7 +38,7 @@ services:
       traefik.http.routers.enterprise-keycloak.entrypoints: websecure
       traefik.http.routers.enterprise-keycloak.tls: "true"
       traefik.http.routers.enterprise-keycloak.tls.certresolver: letsencrypt
-      traefik.http.routers.enterprise-keycloak.middlewares: enterprise-security-headers@file,enterprise-compress@file
+      traefik.http.routers.enterprise-keycloak.middlewares: keycloak-security-headers@file,enterprise-compress@file
       traefik.http.services.enterprise-keycloak.loadbalancer.server.port: "8080"
 
   nats:
@@ -260,7 +260,7 @@ configs:
             tls:
               certResolver: letsencrypt
             middlewares:
-              - enterprise-security-headers@file
+              - keycloak-security-headers@file
               - enterprise-compress@file
             service: enterprise-keycloak
 

@@ -1,6 +1,5 @@
 api:
-  dashboard: true
-  insecure: true
+  dashboard: false
 
 ping: {}
 

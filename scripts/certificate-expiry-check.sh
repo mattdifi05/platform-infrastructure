@@ -1,4 +1,4 @@
 #!/usr/bin/env sh
 set -eu
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-exec node "$SCRIPT_DIR/stexor-ops.mjs" certificate-expiry-check "$@"
+exec "$SCRIPT_DIR/stexor-ops.sh" certificate-expiry-check "$@"

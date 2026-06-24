@@ -1,9 +1,12 @@
 .env
 .env.*
 !.env.example
+!.env.hostinger.example
+!.env.staging.example
 
 .docker-build-cache/
 .cache/
+.tmp/
 node_modules/
 .pnpm-store/
 coverage/
@@ -26,7 +29,10 @@ traefik/certs/*
 *.p12
 *.pfx
 backups/
+reports/
+release/
 security/sbom/
+security/dast/
 secrets/*
 !secrets/README.md
 .DS_Store

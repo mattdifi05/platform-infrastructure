@@ -21,6 +21,7 @@ const requiredSecrets = [
   { name: "grafana_admin_password", kind: "opaque", bytes: 36, rotationDays: 90 },
   { name: "session_secret", kind: "opaque", bytes: 48, rotationDays: 90 },
   { name: "session_signing_keys", kind: "keyring", bytes: 48, keyPrefix: "s", rotationDays: 60 },
+  { name: "projects_gateway_signing_keys", kind: "keyring", bytes: 48, keyPrefix: "p", rotationDays: 90 },
   { name: "hash_pepper_keys", kind: "keyring", bytes: 48, keyPrefix: "h", rotationDays: 90 },
   { name: "backup_signing_keys", kind: "keyring", bytes: 48, keyPrefix: "b", rotationDays: 90 },
   { name: "alertmanager_webhook_token", kind: "opaque", bytes: 48, rotationDays: 90 },
@@ -160,6 +161,43 @@ function fingerprint(value) {
   return crypto.createHash("sha256").update(value).digest("hex").slice(0, 16);
 }
 
+function kmsKeyId() {
+  return `kek_${new Date().toISOString().replace(/\D/g, "").slice(0, 14)}_${randomSecret(9)}`;
+}
+
+function kmsRootFingerprint(master) {
+  return crypto.createHash("sha256").update(`stexor-local-kms-root:${master}`).digest("hex").slice(0, 24);
+}
+
+function normalizeKmsMetadata(previousStore) {
+  const now = new Date().toISOString();
+  const rootFingerprint = kmsRootFingerprint(masterKey());
+  if (previousStore?.kms?.provider === "stexor-local-kms" && previousStore.kms.activeKeyId && previousStore.kms.keys?.[previousStore.kms.activeKeyId]) {
+    return {
+      ...previousStore.kms,
+      rootFingerprint,
+      keys: previousStore.kms.keys,
+    };
+  }
+  const activeKeyId = kmsKeyId();
+  return {
+    provider: "stexor-local-kms",
+    version: 1,
+    algorithm: "HKDF-SHA256+A256GCM",
+    activeKeyId,
+    rootFingerprint,
+    createdAt: previousStore?.createdAt ?? now,
+    updatedAt: now,
+    keys: {
+      [activeKeyId]: {
+        createdAt: now,
+        status: "active",
+        rootFingerprint,
+      },
+    },
+  };
+}
+
 function masterKey() {
   fs.mkdirSync(secretsDir(), { recursive: true });
   const existing = readFileIfExists(masterKeyPath());
@@ -169,18 +207,29 @@ function masterKey() {
   return value;
 }
 
-function encryptionKey(master) {
-  return crypto.createHash("sha256").update(`stexor-secret-manager-v1:${master}`).digest();
+function encryptionKey(master, keyId) {
+  if (!keyId) {
+    return crypto.createHash("sha256").update(`stexor-secret-manager-v1:${master}`).digest();
+  }
+  return Buffer.from(crypto.hkdfSync(
+    "sha256",
+    Buffer.from(master),
+    Buffer.from("stexor-local-kms-v1", "utf8"),
+    Buffer.from(`secret-store:${keyId}`, "utf8"),
+    32,
+  ));
 }
 
-function encryptSecret(master, name, value) {
+function encryptSecret(master, name, value, keyId) {
   const iv = crypto.randomBytes(12);
-  const aad = Buffer.from(`stexor-secret:${name}`, "utf8");
-  const cipher = crypto.createCipheriv("aes-256-gcm", encryptionKey(master), iv);
+  const aad = Buffer.from(`stexor-secret:${name}:kms:${keyId ?? "legacy"}`, "utf8");
+  const cipher = crypto.createCipheriv("aes-256-gcm", encryptionKey(master, keyId), iv);
   cipher.setAAD(aad);
   const ciphertext = Buffer.concat([cipher.update(value, "utf8"), cipher.final()]);
   return {
     algorithm: "AES-256-GCM",
+    provider: keyId ? "stexor-local-kms" : "legacy-local-master-key",
+    keyId,
     iv: iv.toString("base64url"),
     tag: cipher.getAuthTag().toString("base64url"),
     ciphertext: ciphertext.toString("base64url"),
@@ -188,8 +237,10 @@ function encryptSecret(master, name, value) {
 }
 
 function decryptSecret(master, name, encrypted) {
-  const decipher = crypto.createDecipheriv("aes-256-gcm", encryptionKey(master), Buffer.from(encrypted.iv, "base64url"));
-  decipher.setAAD(Buffer.from(`stexor-secret:${name}`, "utf8"));
+  const keyId = encrypted.keyId;
+  const decipher = crypto.createDecipheriv("aes-256-gcm", encryptionKey(master, keyId), Buffer.from(encrypted.iv, "base64url"));
+  const aad = keyId ? `stexor-secret:${name}:kms:${keyId}` : `stexor-secret:${name}`;
+  decipher.setAAD(Buffer.from(aad, "utf8"));
   decipher.setAuthTag(Buffer.from(encrypted.tag, "base64url"));
   return Buffer.concat([
     decipher.update(Buffer.from(encrypted.ciphertext, "base64url")),
@@ -215,9 +266,10 @@ function decryptStoreValues(store = readStore()) {
   return values;
 }
 
-function writeStore(values, previousStore = readStore()) {
+function writeStore(values, previousStore = readStore(), kmsOverride = null) {
   const key = masterKey();
   const now = new Date().toISOString();
+  const kms = kmsOverride ?? normalizeKmsMetadata(previousStore);
   const previousRecords = previousStore?.secrets ?? {};
   const records = {};
   for (const spec of requiredSecrets) {
@@ -232,7 +284,7 @@ function writeStore(values, previousStore = readStore()) {
       updatedAt: previousRecords[spec.name]?.fingerprint === fingerprint(value) ? previousRecords[spec.name].updatedAt : now,
       fingerprint: fingerprint(value),
       keyIds,
-      encryption: encryptSecret(key, spec.name, value),
+      encryption: encryptSecret(key, spec.name, value, kms.activeKeyId),
     };
   }
   const store = {
@@ -240,6 +292,10 @@ function writeStore(values, previousStore = readStore()) {
     manager: "stexor-secret-manager",
     createdAt: previousStore?.createdAt ?? now,
     updatedAt: now,
+    kms: {
+      ...kms,
+      updatedAt: now,
+    },
     secrets: records,
   };
   writePrivateFile(storePath(), `${JSON.stringify(store, null, 2)}\n`);
@@ -376,6 +432,53 @@ async function status() {
   }
 }
 
+async function kmsStatus() {
+  const store = readStore();
+  if (!store) fail(`Missing Stexor Secret Manager store: ${storePath()}`);
+  const kms = normalizeKmsMetadata(store);
+  log(`KMS provider: ${kms.provider}`);
+  log(`Algorithm: ${kms.algorithm}`);
+  log(`Root fingerprint: ${kms.rootFingerprint}`);
+  log(`Active key: ${kms.activeKeyId}`);
+  for (const [keyId, record] of Object.entries(kms.keys)) {
+    log(`${keyId}: status=${record.status} createdAt=${record.createdAt} root=${record.rootFingerprint}`);
+  }
+}
+
+async function kmsRotate() {
+  const store = readStore();
+  if (!store) fail(`Missing Stexor Secret Manager store: ${storePath()}`);
+  const values = decryptStoreValues(store);
+  const previousKms = normalizeKmsMetadata(store);
+  const now = new Date().toISOString();
+  const nextKeyId = kmsKeyId();
+  const keys = { ...previousKms.keys };
+  for (const [keyId, record] of Object.entries(keys)) {
+    keys[keyId] = {
+      ...record,
+      status: keyId === previousKms.activeKeyId ? "decrypt-only" : record.status,
+    };
+  }
+  const nextKms = {
+    ...previousKms,
+    activeKeyId: nextKeyId,
+    rotatedAt: now,
+    updatedAt: now,
+    keys: {
+      ...keys,
+      [nextKeyId]: {
+        createdAt: now,
+        status: "active",
+        rootFingerprint: kmsRootFingerprint(masterKey()),
+      },
+    },
+  };
+  writeStore(values, store, nextKms);
+  materialize(values);
+  audit("kms_rotate", { previousActiveKeyId: previousKms.activeKeyId, activeKeyId: nextKeyId });
+  log(`Rotated Stexor Local KMS active key to ${nextKeyId} and rewrapped ${Object.keys(values).length} secrets.`);
+}
+
 async function rotate() {
   const name = argv.name ?? argv._[0];
   if (!name) fail("Use rotate --name <secret_name>.");
@@ -466,6 +569,8 @@ function help() {
 Commands:
   init                 Create/update the encrypted store and materialize Docker secret files.
   materialize          Decrypt the store into secrets/*.txt for compose.secrets.yaml.
+  kms-status           Print proprietary KMS key metadata without secret values.
+  kms-rotate           Rotate the active KMS KEK and rewrap all stored secrets.
   rotate --name <name> Rotate a keyring or opaque secret, then materialize.
   set --name <name>    Import or replace a secret from --value-file or --stdin.
   status               Print metadata and fingerprints without secret values.
@@ -476,6 +581,8 @@ Commands:
 const commands = {
   help,
   init,
+  "kms-rotate": kmsRotate,
+  "kms-status": kmsStatus,
   materialize: async () => materialize(),
   rotate,
   set: setSecret,

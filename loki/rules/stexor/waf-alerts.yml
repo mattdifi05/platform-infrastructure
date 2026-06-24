@@ -1,0 +1,11 @@
+groups:
+  - name: stexor-waf-log-alerts
+    rules:
+      - alert: WafBlockSpike
+        expr: sum(count_over_time({job="docker"} |= "ModSecurity" [15m])) > 100
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "WAF block volume is anomalous"
+          description: "ModSecurity log volume exceeded the expected baseline over 15 minutes."

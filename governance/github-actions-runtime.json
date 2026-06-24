@@ -1,0 +1,45 @@
+{
+  "repository": {
+    "required_secrets": [
+      {
+        "name": "STEXOR_APP_REPO_TOKEN",
+        "purpose": "Read-only checkout token for the application repository when it is private or cross-repository."
+      }
+    ],
+    "required_variables": []
+  },
+  "environments": [
+    {
+      "name": "staging",
+      "required_secrets": [],
+      "required_variables": [
+        {
+          "name": "DAST_TARGET",
+          "purpose": "HTTPS staging target for OWASP ZAP baseline scans.",
+          "pattern": "^https://"
+        }
+      ]
+    },
+    {
+      "name": "production",
+      "required_secrets": [
+        {
+          "name": "DEPLOY_SSH_KEY",
+          "purpose": "Private deploy key used by the Hostinger deployment job."
+        }
+      ],
+      "required_variables": [
+        {
+          "name": "DEPLOY_REMOTE",
+          "purpose": "SSH destination for the Hostinger VPS deploy user.",
+          "pattern": "^[^@\\s]+@[^\\s]+$"
+        },
+        {
+          "name": "DEPLOY_REMOTE_DIR",
+          "purpose": "Absolute infrastructure path on the Hostinger VPS.",
+          "pattern": "^/"
+        }
+      ]
+    }
+  ]
+}

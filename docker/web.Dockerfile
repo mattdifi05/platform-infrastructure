@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 ARG NODE_IMAGE=node:26-alpine@sha256:3ad34ca6292aec4a91d8ddeb9229e29d9c2f689efd0dd242860889ac71842eba
 FROM ${NODE_IMAGE} AS build
-ARG PNPM_VERSION=11.6.0
+ARG PNPM_VERSION=11.9.0
 ARG NEXT_PUBLIC_API_URL=https://api.localhost.com
 ARG NEXT_PUBLIC_UI_URL=https://ui.localhost.com
 ARG NEXT_PUBLIC_ACCOUNT_URL=https://account.localhost.com

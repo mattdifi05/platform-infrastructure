@@ -1,0 +1,214 @@
+# Single-VPS, prod-like overlay for Hostinger or another edge that terminates TLS.
+# Public HTTPS stays at the provider/CDN; Traefik receives HTTP on port 80 and
+# forwards X-Forwarded-Proto=https to application containers.
+
+services:
+  traefik:
+    restart: always
+    command: !override
+      - --configFile=/etc/traefik/traefik.edge-http.yml
+    ports: !override
+      - "${TRAEFIK_HTTP_BIND:-80}:80"
+    volumes: !override
+      - ./traefik/traefik.edge-http.yml:/etc/traefik/traefik.edge-http.yml:ro
+      - ./traefik/dynamic/middlewares.yml:/etc/traefik/dynamic/middlewares.yml:ro
+
+  postgres:
+    restart: always
+    ports: !reset []
+
+  redis:
+    restart: always
+    ports: !reset []
+
+  keycloak:
+    restart: always
+    ports: !reset []
+    labels: !reset []
+    environment:
+      KC_HOSTNAME: ${AUTH_HOST:?Set AUTH_HOST}
+      KC_HOSTNAME_STRICT: "true"
+      KC_HTTP_ENABLED: "true"
+      KC_PROXY_HEADERS: xforwarded
+
+  nats:
+    restart: always
+    ports: !reset []
+
+  minio:
+    restart: always
+    ports: !reset []
+    labels: !reset []
+
+  mariadb:
+    restart: always
+    ports: !reset []
+    environment: !override
+      MARIADB_ROOT_PASSWORD_FILE: /run/secrets/mariadb_root_password
+    secrets:
+      - mariadb_root_password
+    healthcheck:
+      test: ["CMD-SHELL", "mariadb -uroot -p\"$$(cat /run/secrets/mariadb_root_password)\" -N -e 'select 1' >/dev/null"]
+
+  php-apache:
+    restart: always
+    depends_on: !override
+      mariadb:
+        condition: service_healthy
+
+  phpmyadmin:
+    profiles:
+      - admin
+    restart: "no"
+    labels: !reset []
+
+  backend:
+    restart: always
+    ports: !reset []
+    labels: !reset []
+    environment:
+      NODE_ENV: production
+      SESSION_COOKIE_SECURE: "true"
+      API_DOCS_ENABLED: "false"
+      API_PUBLIC_URL: ${API_PUBLIC_URL:?Set API_PUBLIC_URL}
+      ACCOUNT_PUBLIC_URL: ${ACCOUNT_PUBLIC_URL:?Set ACCOUNT_PUBLIC_URL}
+      UI_PUBLIC_URL: ${UI_PUBLIC_URL:?Set UI_PUBLIC_URL}
+      WEBAUTHN_RP_ID: ${WEBAUTHN_RP_ID:?Set WEBAUTHN_RP_ID}
+      WEBAUTHN_ORIGINS: ${WEBAUTHN_ORIGINS:?Set WEBAUTHN_ORIGINS}
+      CORS_ORIGINS: ${CORS_ORIGINS:?Set CORS_ORIGINS}
+      GOOGLE_OAUTH_REDIRECT_URI: ${GOOGLE_OAUTH_REDIRECT_URI:?Set GOOGLE_OAUTH_REDIRECT_URI}
+      MAILER_FROM: ${MAILER_FROM:?Set MAILER_FROM}
+      MAILER_REPLY_TO: ${MAILER_REPLY_TO:?Set MAILER_REPLY_TO}
+      SMTP_HOST: ${SMTP_HOST:?Set SMTP_HOST}
+      SMTP_USER: ${SMTP_USER:?Set SMTP_USER}
+
+  web:
+    restart: always
+    ports: !reset []
+    labels: !reset []
+    environment:
+      NODE_ENV: production
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:?Set NEXT_PUBLIC_API_URL}
+      NEXT_PUBLIC_UI_URL: ${NEXT_PUBLIC_UI_URL:?Set NEXT_PUBLIC_UI_URL}
+      NEXT_PUBLIC_ACCOUNT_URL: ${NEXT_PUBLIC_ACCOUNT_URL:?Set NEXT_PUBLIC_ACCOUNT_URL}
+      ACCOUNT_HOST: ${ACCOUNT_HOST:?Set ACCOUNT_HOST}
+      ACCOUNT_PUBLIC_URL: ${ACCOUNT_PUBLIC_URL:?Set ACCOUNT_PUBLIC_URL}
+      NEXTAUTH_URL: ${NEXTAUTH_URL:?Set NEXTAUTH_URL}
+      KEYCLOAK_ISSUER: ${KEYCLOAK_ISSUER:?Set KEYCLOAK_ISSUER}
+
+  worker-notifications:
+    restart: always
+    ports: !reset []
+
+  worker-jobs:
+    restart: always
+    ports: !reset []
+
+  prometheus:
+    restart: always
+    ports: !reset []
+
+  alertmanager:
+    restart: always
+    ports: !reset []
+
+  grafana:
+    restart: always
+    ports: !reset []
+    labels: !reset []
+
+  loki:
+    restart: always
+    ports: !reset []
+
+  promtail:
+    restart: always
+
+configs:
+  enterprise_traefik_routes:
+    content: |
+      http:
+        routers:
+          enterprise-web:
+            rule: Host(`${UI_HOST:?Set UI_HOST}`)
+            entryPoints:
+              - web
+            middlewares:
+              - enterprise-edge-forwarded-https@file
+              - enterprise-security-headers@file
+              - enterprise-compress@file
+            service: enterprise-web
+
+          enterprise-account:
+            rule: Host(`${ACCOUNT_HOST:?Set ACCOUNT_HOST}`)
+            entryPoints:
+              - web
+            middlewares:
+              - enterprise-edge-forwarded-https@file
+              - enterprise-security-headers@file
+              - enterprise-compress@file
+            service: enterprise-web
+
+          enterprise-backend:
+            rule: Host(`${API_HOST:?Set API_HOST}`)
+            entryPoints:
+              - web
+            middlewares:
+              - enterprise-edge-forwarded-https@file
+              - enterprise-security-headers@file
+              - enterprise-rate-limit@file
+              - enterprise-compress@file
+            service: enterprise-backend
+
+          enterprise-backend-preflight:
+            rule: Host(`${API_HOST:?Set API_HOST}`) && Method(`OPTIONS`)
+            entryPoints:
+              - web
+            priority: 100
+            middlewares:
+              - enterprise-edge-forwarded-https@file
+              - enterprise-security-headers@file
+              - enterprise-compress@file
+            service: enterprise-backend
+
+          enterprise-keycloak:
+            rule: Host(`${AUTH_HOST:?Set AUTH_HOST}`)
+            entryPoints:
+              - web
+            middlewares:
+              - enterprise-edge-forwarded-https@file
+              - keycloak-security-headers@file
+              - enterprise-compress@file
+            service: enterprise-keycloak
+
+          php-projects:
+            rule: Host(`${PROJECTS_HOST:?Set PROJECTS_HOST}`) || Host(`${STREAM_HOST:?Set STREAM_HOST}`) || Host(`${ANNIVERSARY_HOST:?Set ANNIVERSARY_HOST}`) || Host(`${WORKCALENDAR_HOST:?Set WORKCALENDAR_HOST}`) || Host(`${FIREPORT_HOST:?Set FIREPORT_HOST}`)
+            entryPoints:
+              - web
+            middlewares:
+              - enterprise-edge-forwarded-https@file
+              - enterprise-security-headers@file
+              - enterprise-compress@file
+            service: local-php
+
+        services:
+          enterprise-web:
+            loadBalancer:
+              servers:
+                - url: http://web:3000
+          enterprise-backend:
+            loadBalancer:
+              servers:
+                - url: http://backend:3000
+          enterprise-keycloak:
+            loadBalancer:
+              servers:
+                - url: http://keycloak:8080
+          local-php:
+            loadBalancer:
+              servers:
+                - url: http://php-apache:80
+
+secrets:
+  mariadb_root_password:
+    file: ${MARIADB_ROOT_PASSWORD_SECRET_FILE:-./secrets/mariadb_root_password.txt}

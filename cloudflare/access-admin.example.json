@@ -1,0 +1,23 @@
+{
+  "accountId": "00000000000000000000000000000000",
+  "teamName": "stexor",
+  "adminSessionDuration": "8h",
+  "mfaEnforcedByIdentityProvider": true,
+  "allowedIdentityProviderIds": [
+    "00000000-0000-0000-0000-000000000000"
+  ],
+  "allowedEmails": [
+    "admin@example.com"
+  ],
+  "allowedEmailDomains": [],
+  "applications": [
+    { "name": "Stexor Grafana", "domain": "grafana.example.com" },
+    { "name": "Stexor Prometheus", "domain": "prometheus.example.com" },
+    { "name": "Stexor Alertmanager", "domain": "alertmanager.example.com" },
+    { "name": "Stexor MinIO Console", "domain": "minio.example.com" },
+    { "name": "Stexor Traefik Dashboard", "domain": "traefik.example.com" },
+    { "name": "Stexor phpMyAdmin", "domain": "phpmyadmin.example.com" },
+    { "name": "Stexor Projects Gateway", "domain": "projects.example.com" },
+    { "name": "Stexor Keycloak Admin", "domain": "keycloak-admin.example.com" }
+  ]
+}

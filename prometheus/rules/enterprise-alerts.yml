@@ -2,7 +2,7 @@ groups:
   - name: stexor-enterprise-health
     rules:
       - alert: ServiceTargetDown
-        expr: up{job=~"backend|web|workers|traefik|prometheus|alertmanager|keycloak"} == 0
+        expr: up{job=~"backend|web|workers|traefik|prometheus|alertmanager|keycloak|node-exporter|cadvisor"} == 0
         for: 1m
         labels:
           severity: critical
@@ -117,3 +117,57 @@ groups:
         annotations:
           summary: "External alert forwarding failed"
           description: "The notification worker accepted Prometheus alerts but failed optional external webhook delivery."
+
+      - alert: HostDiskUsageHigh
+        expr: 100 - ((node_filesystem_avail_bytes{job="node-exporter",fstype!~"tmpfs|overlay"} * 100) / node_filesystem_size_bytes{job="node-exporter",fstype!~"tmpfs|overlay"}) > 85
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Host disk usage is high"
+          description: "{{ $labels.mountpoint }} on {{ $labels.instance }} is above 85% usage."
+
+      - alert: HostMemoryUsageHigh
+        expr: 100 * (1 - (node_memory_MemAvailable_bytes{job="node-exporter"} / node_memory_MemTotal_bytes{job="node-exporter"})) > 85
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Host memory usage is high"
+          description: "Memory usage on {{ $labels.instance }} is above 85%."
+
+      - alert: HostCpuUsageHigh
+        expr: 100 * (1 - avg by (instance) (rate(node_cpu_seconds_total{job="node-exporter",mode="idle"}[5m]))) > 85
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Host CPU usage is high"
+          description: "CPU usage on {{ $labels.instance }} is above 85% for 15 minutes."
+
+      - alert: ContainerCpuUsageHigh
+        expr: sum by (name) (rate(container_cpu_usage_seconds_total{job="cadvisor",name=~"enterprise-.+|mariadb|php-apache"}[5m])) * 100 > 80
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Container CPU usage is high"
+          description: "{{ $labels.name }} is using high CPU for 10 minutes."
+
+      - alert: ContainerMemoryUsageHigh
+        expr: container_memory_working_set_bytes{job="cadvisor",name=~"enterprise-.+|mariadb|php-apache"} > 1073741824
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Container memory usage is high"
+          description: "{{ $labels.name }} is using more than 1GiB working set memory."
+
+      - alert: ContainerDisappeared
+        expr: absent(container_last_seen{job="cadvisor",name=~"enterprise-.+|mariadb|php-apache"})
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "A monitored container disappeared"
+          description: "cAdvisor no longer reports one or more Stexor containers."

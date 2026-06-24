@@ -14,6 +14,25 @@ http:
           X-Content-Type-Options: nosniff
           Permissions-Policy: "camera=(), microphone=(), geolocation=()"
 
+    keycloak-security-headers:
+      headers:
+        browserXssFilter: true
+        contentTypeNosniff: true
+        referrerPolicy: no-referrer
+        stsSeconds: 31536000
+        stsIncludeSubdomains: true
+        stsPreload: true
+        customResponseHeaders:
+          X-Permitted-Cross-Domain-Policies: none
+          X-Content-Type-Options: nosniff
+          Permissions-Policy: "camera=(), microphone=(), geolocation=()"
+
+    enterprise-edge-forwarded-https:
+      headers:
+        customRequestHeaders:
+          X-Forwarded-Proto: https
+          X-Forwarded-Port: "443"
+
     enterprise-rate-limit:
       rateLimit:
         average: 120

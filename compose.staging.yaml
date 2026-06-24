@@ -1,0 +1,90 @@
+# Staging overlay.
+#
+# Use on a separate staging VPS or with a separate project/network. It removes
+# fixed container names so staging can coexist with other stacks when ports and
+# volumes are separated by the environment.
+
+name: ${COMPOSE_PROJECT_NAME:-stexor_platform_staging}
+
+services:
+  traefik:
+    container_name: !reset null
+
+  postgres:
+    container_name: !reset null
+
+  redis:
+    container_name: !reset null
+
+  keycloak:
+    container_name: !reset null
+
+  nats:
+    container_name: !reset null
+
+  minio:
+    container_name: !reset null
+
+  mariadb:
+    container_name: !reset null
+
+  php-apache:
+    container_name: !reset null
+
+  phpmyadmin:
+    container_name: !reset null
+    profiles:
+      - admin
+
+  backend:
+    container_name: !reset null
+
+  web:
+    container_name: !reset null
+
+  worker-notifications:
+    container_name: !reset null
+
+  worker-jobs:
+    container_name: !reset null
+
+  prometheus:
+    container_name: !reset null
+
+  alertmanager:
+    container_name: !reset null
+
+  grafana:
+    container_name: !reset null
+
+  loki:
+    container_name: !reset null
+
+  promtail:
+    container_name: !reset null
+
+  waf:
+    container_name: !reset null
+
+volumes:
+  enterprise_mariadb_data:
+    name: ${MARIADB_DATA_VOLUME:-enterprise_mariadb_data_staging}
+    external: false
+  enterprise_postgres_data:
+    name: ${POSTGRES_DATA_VOLUME:-enterprise_postgres_data_staging}
+  enterprise_redis_data:
+    name: ${REDIS_DATA_VOLUME:-enterprise_redis_data_staging}
+  enterprise_keycloak_data:
+    name: ${KEYCLOAK_DATA_VOLUME:-enterprise_keycloak_data_staging}
+  enterprise_nats_data:
+    name: ${NATS_DATA_VOLUME:-enterprise_nats_data_staging}
+  enterprise_minio_data:
+    name: ${MINIO_DATA_VOLUME:-enterprise_minio_data_staging}
+  enterprise_alertmanager_data:
+    name: ${ALERTMANAGER_DATA_VOLUME:-enterprise_alertmanager_data_staging}
+  enterprise_grafana_data:
+    name: ${GRAFANA_DATA_VOLUME:-enterprise_grafana_data_staging}
+  enterprise_prometheus_data:
+    name: ${PROMETHEUS_DATA_VOLUME:-enterprise_prometheus_data_staging}
+  enterprise_loki_data:
+    name: ${LOKI_DATA_VOLUME:-enterprise_loki_data_staging}

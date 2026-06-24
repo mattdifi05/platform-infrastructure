@@ -1,0 +1,164 @@
+name: enterprise-infra
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  compose-and-policy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/checkout@v5
+        with:
+          repository: mattdifi05/Stexor-account
+          path: src_stexor
+          token: ${{ secrets.STEXOR_APP_REPO_TOKEN || github.token }}
+
+      - name: Prepare local secret files
+        run: |
+          mkdir -p secrets traefik/certs
+          for name in postgres_superuser_password app_db_password keycloak_db_password redis_password keycloak_admin_password nats_password minio_root_password grafana_admin_password session_secret session_signing_keys projects_gateway_signing_keys hash_pepper_keys database_url nats_url smtp_password mariadb_root_password phpmyadmin_control_password google_recaptcha_secret_key cloudflare_turnstile_secret_key google_oauth_client_secret alertmanager_webhook_token backup_signing_keys restic_password; do
+            printf 'ci-placeholder-%s-00000000000000000000000000000000\n' "$name" > "secrets/$name.txt"
+          done
+          printf 'dummy-cert\n' > traefik/certs/local-cert.pem
+          printf 'dummy-key\n' > traefik/certs/local-key.pem
+
+      - name: Render local WAF compose
+        run: |
+          cp .env.example .env
+          printf '\nNODE_SOURCE_DIR=./src_stexor\n' >> .env
+          docker network create enterprise_net || true
+          docker volume create enterprise_mariadb_data || true
+          docker compose --env-file .env -p stexor_platform_ci \
+            -f compose.yaml \
+            -f compose.build.yaml \
+            -f compose.secrets.yaml \
+            -f compose.waf.yaml \
+            config --quiet
+
+      - name: Render Hostinger WAF compose
+        run: |
+          docker compose --env-file .env.hostinger.example -p stexor_platform_vps_ci \
+            -f compose.yaml \
+            -f compose.build.yaml \
+            -f compose.secrets.yaml \
+            -f compose.hostinger.yaml \
+            -f compose.waf.yaml \
+            -f compose.hostinger-waf.yaml \
+            config --quiet
+
+      - name: Backup scheduler dry run
+        run: |
+          docker build -f docker/ops.Dockerfile -t stexor/ops:ci .
+          docker run --rm \
+            -e BACKUP_SCHEDULER_DRY_RUN=true \
+            -e STEXOR_INFRA_HOST_ROOT="${{ github.workspace }}" \
+            -e STEXOR_SOURCE_HOST_ROOT="${{ github.workspace }}/src_stexor" \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "${{ github.workspace }}:/infra:ro" \
+            -v "${{ github.workspace }}/src_stexor:/src_stexor:ro" \
+            --entrypoint sh \
+            stexor/ops:ci \
+            /infra/scripts/backup-scheduler.sh
+
+      - name: External uptime manifest dry run
+        run: sh ./scripts/stexor-ops.sh external-uptime-check --dryRun
+
+      - name: Cloudflare Access admin dry run
+        run: sh ./scripts/stexor-ops.sh cloudflare-access-admin --manifest cloudflare/access-admin.example.json
+
+      - name: GitHub branch protection dry run
+        run: sh ./scripts/stexor-ops.sh github-branch-protection --repo "${{ github.repository }}" --branch main --dryRun
+
+      - name: GitHub environments dry run
+        run: sh ./scripts/stexor-ops.sh github-environments --repo "${{ github.repository }}" --dryRun
+
+      - name: GitHub Actions runtime config dry run
+        run: sh ./scripts/stexor-ops.sh github-actions-config --repo "${{ github.repository }}"
+
+      - name: Release evidence plan
+        run: sh ./scripts/stexor-ops.sh release-evidence --planOnly
+
+      - name: Alert evidence summary
+        run: sh ./scripts/stexor-ops.sh alert-evidence
+
+      - name: Production go-no-go summary
+        run: sh ./scripts/stexor-ops.sh production-go-no-go
+
+      - name: Evidence bundle smoke
+        run: sh ./scripts/stexor-ops.sh evidence-bundle --noArchive
+
+      - name: Linux portability check
+        run: sh ./scripts/stexor-ops.sh linux-portability-check
+
+      - name: Run infrastructure static policy gate
+        env:
+          STEXOR_SOURCE_ROOT: ${{ github.workspace }}/src_stexor
+        run: sh ./scripts/stexor-ops.sh static-security-check
+
+  shell-syntax:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Check shell scripts parse
+        run: |
+          for file in scripts/*.sh; do
+            sh -n "$file"
+          done
+
+  dast-zap:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+    environment:
+      name: staging
+      url: ${{ vars.DAST_TARGET }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Run ZAP baseline against staging
+        env:
+          DAST_TARGET: ${{ vars.DAST_TARGET }}
+        run: |
+          test -n "$DAST_TARGET"
+          sh ./scripts/dast-zap-baseline.sh "$DAST_TARGET"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: zap-baseline
+          path: security/dast/
+
+  deploy-hostinger:
+    runs-on: ubuntu-latest
+    needs:
+      - compose-and-policy
+      - shell-syntax
+    if: github.event_name == 'workflow_dispatch'
+    environment:
+      name: production
+    concurrency:
+      group: stexor-production-deploy
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install SSH key
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          test -n "$DEPLOY_SSH_KEY"
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+      - name: Deploy to Hostinger VPS
+        env:
+          DEPLOY_REMOTE: ${{ vars.DEPLOY_REMOTE }}
+          DEPLOY_REMOTE_DIR: ${{ vars.DEPLOY_REMOTE_DIR }}
+          GIT_SSH_COMMAND: ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=accept-new
+        run: sh ./scripts/deploy-hostinger.sh
