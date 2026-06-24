@@ -3,7 +3,7 @@ declare(strict_types=1);
 
 $docsRoot = '/var/www/infra-docs';
 $projectRoots = [
-    'PHP projects' => '/var/www/projects',
+    'Mounted source' => '/var/www/projects',
     'Project source' => '/project',
 ];
 
@@ -39,10 +39,12 @@ if (is_string($selectedDoc) && isset($docMap[$selectedDoc])) {
     exit;
 }
 
-renderIndex($docsRoot, $docs, discoverProjects($projectRoots));
+renderIndex($docsRoot, $docs, discoverProjects($projectRoots, parseNodeProjectHosts()));
 
 function renderIndex(string $docsRoot, array $docs, array $projects): void
 {
+    $phpProjects = projectsByType($projects, 'PHP');
+    $nodeProjects = projectsByType($projects, 'Node');
     $toolLinks = [
         ['phpMyAdmin', 'https://phpmyadmin.localhost.com/', 'Database administration'],
         ['Keycloak', 'https://auth.localhost.com/', 'Identity provider'],
@@ -56,13 +58,37 @@ function renderIndex(string $docsRoot, array $docs, array $projects): void
         <section class="hero">
             <div>
                 <p class="eyebrow">Local infrastructure</p>
-                <h1>Documentation and project launcher</h1>
-                <p class="lede">This page is served by the infrastructure itself. It stays useful even when no application project is mounted.</p>
+                <h1>Projects dashboard</h1>
+                <p class="lede">All mounted local projects are grouped by runtime and linked through their local HTTPS hostnames.</p>
             </div>
             <div class="status-grid" aria-label="Local status">
-                <div><span><?= countAvailableDocs($docsRoot, $docs) ?></span><small>docs</small></div>
                 <div><span><?= count($projects) ?></span><small>projects</small></div>
-                <div><span><?= count($toolLinks) ?></span><small>tools</small></div>
+                <div><span><?= count($phpProjects) ?></span><small>php</small></div>
+                <div><span><?= count($nodeProjects) ?></span><small>node</small></div>
+            </div>
+        </section>
+
+        <section class="grid two project-grid">
+            <div class="panel">
+                <div class="panel-head">
+                    <span>PHP</span>
+                    <div>
+                        <h2>PHP projects</h2>
+                        <p><?= count($phpProjects) ?> local hosts via Apache</p>
+                    </div>
+                </div>
+                <?php renderProjectCards($phpProjects, 'No PHP projects found in the mounted source directory.'); ?>
+            </div>
+
+            <div class="panel">
+                <div class="panel-head">
+                    <span>NOD</span>
+                    <div>
+                        <h2>Node projects</h2>
+                        <p><?= count($nodeProjects) ?> routed app hosts</p>
+                    </div>
+                </div>
+                <?php renderProjectCards($nodeProjects, 'No Node projects found in the mounted source directory.'); ?>
             </div>
         </section>
 
@@ -70,7 +96,10 @@ function renderIndex(string $docsRoot, array $docs, array $projects): void
             <div class="panel">
                 <div class="panel-head">
                     <span>DOC</span>
-                    <h2>Documentation</h2>
+                    <div>
+                        <h2>Documentation</h2>
+                        <p><?= countAvailableDocs($docsRoot, $docs) ?> local docs</p>
+                    </div>
                 </div>
                 <?php foreach ($docs as $group => $items): ?>
                     <h3><?= e($group) ?></h3>
@@ -88,28 +117,11 @@ function renderIndex(string $docsRoot, array $docs, array $projects): void
 
             <div class="panel">
                 <div class="panel-head">
-                    <span>RUN</span>
-                    <h2>Mounted projects</h2>
-                </div>
-                <?php if (!$projects): ?>
-                    <div class="empty">
-                        <strong>No project mounted</strong>
-                        <p>Mount a PHP or Node project through the compose environment, or keep using this page as the local operations desk.</p>
-                    </div>
-                <?php else: ?>
-                    <div class="cards">
-                        <?php foreach ($projects as $project): ?>
-                            <a class="card" href="<?= e($project['href']) ?>">
-                                <strong><?= e($project['name']) ?></strong>
-                                <span><?= e($project['type']) ?> - <?= e($project['path']) ?></span>
-                            </a>
-                        <?php endforeach; ?>
-                    </div>
-                <?php endif; ?>
-
-                <div class="panel-head secondary">
                     <span>OPS</span>
-                    <h2>Local tools</h2>
+                    <div>
+                        <h2>Admin and data</h2>
+                        <p><?= count($toolLinks) ?> local tools</p>
+                    </div>
                 </div>
                 <div class="cards">
                     <?php foreach ($toolLinks as [$name, $href, $description]): ?>
@@ -124,6 +136,33 @@ function renderIndex(string $docsRoot, array $docs, array $projects): void
     </main>
     <?php
     pageEnd();
+}
+
+function renderProjectCards(array $projects, string $emptyMessage): void
+{
+    if (!$projects) {
+        ?>
+        <div class="empty">
+            <strong>No projects</strong>
+            <p><?= e($emptyMessage) ?></p>
+        </div>
+        <?php
+        return;
+    }
+    ?>
+    <div class="cards project-cards">
+        <?php foreach ($projects as $project): ?>
+            <a class="card project-card" href="<?= e($project['href']) ?>">
+                <div class="card-title">
+                    <strong><?= e($project['name']) ?></strong>
+                    <em><?= e($project['type']) ?></em>
+                </div>
+                <span class="host"><?= e($project['host']) ?></span>
+                <span><?= e($project['summary']) ?></span>
+            </a>
+        <?php endforeach; ?>
+    </div>
+    <?php
 }
 
 function renderDocument(string $docsRoot, string $path): void
@@ -148,9 +187,10 @@ function renderDocument(string $docsRoot, string $path): void
     pageEnd();
 }
 
-function discoverProjects(array $roots): array
+function discoverProjects(array $roots, array $nodeHosts): array
 {
     $projects = [];
+    $seen = [];
     foreach ($roots as $label => $root) {
         if (!is_dir($root)) {
             continue;
@@ -160,25 +200,91 @@ function discoverProjects(array $roots): array
             if ($entry === '.' || $entry === '..') {
                 continue;
             }
+            if (in_array(strtolower($entry), ['public', 'node_modules', 'vendor'], true)) {
+                continue;
+            }
             $path = $root . '/' . $entry;
             if (!is_dir($path)) {
                 continue;
             }
-            $hasPublic = is_dir($path . '/public');
-            $hasPackage = is_file($path . '/package.json');
-            $hasComposer = is_file($path . '/composer.json');
-            if (!$hasPublic && !$hasPackage && !$hasComposer) {
+            $slug = slugify($entry);
+            if ($slug === '' || isset($seen[$slug])) {
                 continue;
             }
+            $hasPackage = is_file($path . '/package.json');
+            $isPhp = isPhpProject($path);
+            if (!$isPhp && !$hasPackage) {
+                continue;
+            }
+            $type = $isPhp ? 'PHP' : 'Node';
+            $host = projectHost($slug, $type, $nodeHosts);
             $projects[] = [
                 'name' => humanName($entry),
-                'type' => $hasPackage ? 'Node' : 'PHP',
-                'path' => $label,
-                'href' => 'https://' . strtolower(preg_replace('/[^a-z0-9-]+/i', '-', $entry)) . '.localhost.com/',
+                'type' => $type,
+                'host' => $host,
+                'href' => 'https://' . $host . '/',
+                'summary' => $type === 'PHP'
+                    ? 'Apache/PHP local host'
+                    : 'Node routed service',
             ];
+            $seen[$slug] = true;
         }
     }
+    usort($projects, static fn (array $a, array $b): int => [$a['type'], $a['name']] <=> [$b['type'], $b['name']]);
     return $projects;
+}
+
+function projectsByType(array $projects, string $type): array
+{
+    return array_values(array_filter($projects, static fn (array $project): bool => $project['type'] === $type));
+}
+
+function isPhpProject(string $path): bool
+{
+    if (is_file($path . '/composer.json') || is_file($path . '/public/index.php') || is_file($path . '/index.php')) {
+        return true;
+    }
+    foreach (glob($path . '/public/*.php') ?: [] as $file) {
+        if (is_file($file)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+function parseNodeProjectHosts(): array
+{
+    $hosts = [];
+    $raw = getenv('NODE_PROJECT_HOSTS') ?: '';
+    foreach (explode(',', $raw) as $entry) {
+        $entry = trim($entry);
+        if ($entry === '') {
+            continue;
+        }
+        $parts = preg_split('/[:=]/', $entry, 2);
+        if (!$parts || count($parts) !== 2) {
+            continue;
+        }
+        $slug = slugify($parts[0]);
+        $host = strtolower(trim($parts[1]));
+        if ($slug !== '' && preg_match('/^[a-z0-9.-]+$/', $host)) {
+            $hosts[$slug] = $host;
+        }
+    }
+    return $hosts;
+}
+
+function projectHost(string $slug, string $type, array $nodeHosts): string
+{
+    if ($type === 'Node' && isset($nodeHosts[$slug])) {
+        return $nodeHosts[$slug];
+    }
+    return $slug . '.localhost.com';
+}
+
+function slugify(string $value): string
+{
+    return trim(strtolower((string) preg_replace('/[^a-z0-9-]+/i', '-', $value)), '-');
 }
 
 function safeDocPath(string $root, string $path): string
@@ -243,6 +349,7 @@ function pageStart(string $title): void
         .eyebrow { margin: 0 0 8px; color: var(--accent); font-size: 13px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
         h1 { margin: 0; font-size: clamp(34px, 5vw, 64px); line-height: .96; letter-spacing: 0; }
         h2 { margin: 0; font-size: 22px; }
+        .panel-head p { margin: 4px 0 0; color: var(--muted); font-size: 13px; }
         h3 { margin: 22px 0 10px; color: var(--muted); font-size: 13px; text-transform: uppercase; }
         .lede { max-width: 720px; margin: 16px 0 0; color: var(--muted); font-size: 17px; line-height: 1.6; }
         .status-grid { display: grid; grid-template-columns: repeat(3, 90px); gap: 10px; }
@@ -260,6 +367,12 @@ function pageStart(string $title): void
         .card:hover { transform: translateY(-2px); border-color: var(--accent); background: #1a2838; }
         .card strong { display: block; font-size: 15px; }
         .card span { display: block; margin-top: 8px; color: var(--muted); font-size: 13px; line-height: 1.45; }
+        .project-grid { margin-top: 22px; }
+        .project-cards { margin-top: 16px; }
+        .project-card { min-height: 124px; }
+        .card-title { display: flex; align-items: start; justify-content: space-between; gap: 10px; }
+        .card-title em { padding: 4px 8px; border: 1px solid var(--line); border-radius: 999px; color: var(--accent); font-size: 11px; font-style: normal; font-weight: 850; }
+        .card .host { color: var(--accent-2); font-weight: 800; overflow-wrap: anywhere; }
         .card.compact { min-height: 76px; }
         .card.disabled { opacity: .42; pointer-events: none; }
         .empty { padding: 18px; background: #101820; border: 1px dashed var(--line); border-radius: 8px; color: var(--muted); }

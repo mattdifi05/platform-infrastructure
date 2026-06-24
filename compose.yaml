@@ -233,6 +233,7 @@ services:
       SMTP_SECURE: ${SMTP_SECURE:-true}
       SMTP_USER: ${SMTP_USER:-}
       SMTP_PASSWORD_FILE: /run/secrets/smtp_password
+      NODE_PROJECT_HOSTS: ${NODE_PROJECT_HOSTS:-}
     secrets:
       - projects_gateway_signing_keys
       - smtp_password
@@ -240,6 +241,7 @@ services:
       - ${PHP_SOURCE_DIR:-./projects-portal}:/var/www/html
       - .:/var/www/infra-docs:ro
       - ${PHP_PROJECTS_DIR:-../src}:/var/www/projects
+      - ${PROJECTS_SYMLINK_TARGET_ROOT:-..}:/mnt/host/d/docker:ro
       - ./php-apache/php/custom.ini:/usr/local/etc/php/conf.d/zz-custom.ini:ro
       - ./php-apache/apache:/etc/apache2/sites-available
       - ./traefik/certs:/etc/apache2/certs:ro
@@ -967,7 +969,7 @@ configs:
             service: enterprise-minio-api
 
           local-php-http:
-            rule: Host(`${PROJECTS_HOST:-projects.localhost.com}`) || HostRegexp(`${PROJECTS_WILDCARD_HOST_REGEXP:-[a-z0-9-]+\\.localhost\\.com}`)
+            rule: Host(`${PROJECTS_HOST:-projects.localhost.com}`) || HostRegexp(`${PROJECTS_WILDCARD_HOST_REGEXP:-[a-z0-9-]+\.localhost\.com}`)
             entryPoints:
               - web
             priority: 1
@@ -976,7 +978,7 @@ configs:
             service: local-php
 
           local-php:
-            rule: Host(`${PROJECTS_HOST:-projects.localhost.com}`) || HostRegexp(`${PROJECTS_WILDCARD_HOST_REGEXP:-[a-z0-9-]+\\.localhost\\.com}`)
+            rule: Host(`${PROJECTS_HOST:-projects.localhost.com}`) || HostRegexp(`${PROJECTS_WILDCARD_HOST_REGEXP:-[a-z0-9-]+\.localhost\.com}`)
             entryPoints:
               - websecure
             priority: 1

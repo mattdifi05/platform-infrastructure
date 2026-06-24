@@ -9414,7 +9414,7 @@ function staticSecurityInfraOnlyCheck() {
   assertMatch(compose, /dockerfile:\s+docker\/php-apache\.Dockerfile/, "Compose must build PHP hosting from the unified infra Dockerfile.");
   assertMatch(compose, /\$\{PHP_SOURCE_DIR:-\.\/projects-portal\}:\/var\/www\/html/, "Compose must default the PHP root to the built-in documentation portal.");
   assertMatch(compose, /\$\{PHP_PROJECTS_DIR:-\.\.\/src\}:\/var\/www\/projects/, "Compose must mount PHP projects through one generic projects directory.");
-  assertMatch(compose, /HostRegexp\(`\$\{PROJECTS_WILDCARD_HOST_REGEXP:-\[a-z0-9-\]\+\\\\\.localhost\\\\\.com\}`\)/, "Compose must route PHP project subdomains through a generic wildcard rule.");
+  assertMatch(compose, /HostRegexp\(`\$\{PROJECTS_WILDCARD_HOST_REGEXP:-\[a-z0-9-\]\+\\\.localhost\\\.com\}`\)/, "Compose must route PHP project subdomains through a generic wildcard rule.");
   assertMatch(compose, /\.:\s*\/var\/www\/infra-docs:ro/, "Compose must mount infrastructure documentation read-only for the fallback portal.");
   assertMatch(compose, /\.\/php-apache\/apache:\/etc\/apache2\/sites-available/, "Compose must mount the unified PHP Apache vhost configs.");
   assertMatch(compose, /\.\/php-apache\/php\/custom\.ini/, "Compose must mount the unified PHP runtime config.");
