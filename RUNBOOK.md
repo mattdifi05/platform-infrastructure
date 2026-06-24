@@ -566,13 +566,16 @@ After the final reports are generated, create a non-secret evidence archive:
 
 ```sh
 sh ./scripts/evidence-bundle.sh
+sh ./scripts/evidence-bundle-verify.sh --requireComplete
 ```
 
 The bundle is written under `.tmp/evidence-bundles/` and includes operational
 docs plus the latest JSON/Markdown reports for each evidence family. It refuses
 to include `.env`, `secrets/`, backup artifacts, release artifacts and SBOM
 directories; use `--allReports` only for a reviewed validation window where the
-full report history is needed.
+full report history is needed. The verify command rereads `manifest.json`,
+checks every entry's size and SHA256, confirms the anti-secret policy and, with
+`--requireComplete`, fails while any required evidence family is still missing.
 
 1. Build versioned images:
 

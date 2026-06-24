@@ -53,6 +53,7 @@ Current scope: repository and local Docker evidence before Hostinger VPS deploym
 - `production-go-no-go` reports include a remediation checklist for every failed required gate.
 - `production-readiness-live.sh` maps the 20-point production-ready checklist to the latest live `production-go-no-go` evidence and writes `reports/production-readiness/`.
 - `hostinger-preflight.sh` validates the full Hostinger+WAF Compose render used by deploy, then `hostinger-postdeploy.sh` runs WAF smoke and `infra-health` after the VPS compose start, with opt-in pre go-live evidence, final `production-go-no-go` and live readiness flags.
+- `evidence-bundle-verify.sh` rereads the final evidence bundle manifest, validates entry SHA256/size and can require every live evidence family before handoff.
 - `hostinger-postdeploy.sh` parses only the required `.env` keys and does not source/execute the env file.
 - `hostinger-go-live.sh` provides a plan-first VPS orchestration path for readiness, preflight, optional compose start, postdeploy, go/no-go and evidence bundle reports.
 - `deploy-hostinger.sh` passes remote deploy values through SSH positional arguments and a literal remote script, avoiding shell-string interpolation for branch, path, env file and deploy flags.
@@ -99,4 +100,5 @@ sh ./scripts/release-evidence.sh --planOnly
 sh ./scripts/production-go-no-go.sh --enforce
 sh ./scripts/production-readiness-live.sh
 sh ./scripts/evidence-bundle.sh
+sh ./scripts/evidence-bundle-verify.sh --requireComplete
 ```

@@ -148,6 +148,9 @@ jobs:
       - name: Evidence bundle smoke
         run: sh ./scripts/stexor-ops.sh evidence-bundle --noArchive
 
+      - name: Evidence bundle integrity verify
+        run: sh ./scripts/stexor-ops.sh evidence-bundle-verify
+
       - name: Linux portability check
         run: sh ./scripts/stexor-ops.sh linux-portability-check
 

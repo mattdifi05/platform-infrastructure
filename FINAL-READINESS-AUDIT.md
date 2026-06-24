@@ -189,6 +189,7 @@ scripts/ui-publish-dry-run.mjs
 - Production go/no-go evidence gate with JSON/Markdown reports under `reports/go-no-go/`.
 - Live production readiness checklist with JSON/Markdown reports under `reports/production-readiness/`.
 - Release evidence pack with digest validation, SBOM/provenance references, rollback target generation and reports under `reports/release/`.
+- Evidence bundle verifier for manifest policy, SHA256 and completeness checks.
 - VPS bootstrap script with plan/apply JSON/Markdown evidence under `reports/vps-bootstrap/`.
 - VPS hardening script with plan/apply JSON/Markdown evidence under `reports/vps-hardening/`.
 - VPS host readiness script with JSON/Markdown evidence under `reports/vps-host/`.
@@ -285,6 +286,7 @@ All commands listed above passed in the local evidence gathered during this hard
 - VPS host readiness previously sourced `/etc/os-release`; it now parses that file as data before checking Ubuntu LTS status.
 - Local disposable Linux VPS-readiness probes previously wrote failed reports into production evidence; `--diagnostic` now writes them under `reports/vps-host-diagnostics/` while real VPS checks use `--enforce`.
 - Evidence reports previously had to be gathered manually; `evidence-bundle.sh` now creates a non-secret archive with a manifest and SHA256 checksums.
+- Evidence bundles now have a verifier that rereads the manifest and fails on hash drift, policy violations or missing required live evidence.
 
 ## Requirement Status
 

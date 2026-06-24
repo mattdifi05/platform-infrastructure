@@ -5303,6 +5303,61 @@ function listEvidenceBundleReportFiles({ allReports }) {
   return { files, missing };
 }
 
+function latestEvidenceBundleDir(outputRoot) {
+  if (!fs.existsSync(outputRoot)) {
+    return null;
+  }
+  const candidates = fs.readdirSync(outputRoot)
+    .filter((name) => name.startsWith("stexor-evidence-bundle-"))
+    .map((name) => path.join(outputRoot, name))
+    .filter((entryPath) => fs.existsSync(entryPath) && fs.statSync(entryPath).isDirectory())
+    .filter((entryPath) => fs.existsSync(path.join(entryPath, "manifest.json")))
+    .sort();
+  return candidates.at(-1) ?? null;
+}
+
+function validateEvidenceBundleEntry(entry, bundleDir, issues) {
+  if (!entry || typeof entry !== "object") {
+    issues.push("manifest contains a non-object entry");
+    return null;
+  }
+  let normalizedPath = null;
+  try {
+    normalizedPath = assertEvidenceBundleRelativePath(String(entry.path ?? ""));
+  } catch (error) {
+    issues.push(String(error?.message ?? error));
+    return null;
+  }
+  if (!["document", "report"].includes(entry.type)) {
+    issues.push(`${normalizedPath}: invalid entry type '${entry.type}'`);
+  }
+  if (!/^[a-f0-9]{64}$/i.test(String(entry.sha256 ?? ""))) {
+    issues.push(`${normalizedPath}: invalid sha256`);
+  }
+  if (!Number.isInteger(entry.sizeBytes) || entry.sizeBytes < 0) {
+    issues.push(`${normalizedPath}: invalid sizeBytes`);
+  }
+  const filePath = path.resolve(bundleDir, normalizedPath);
+  const bundleRoot = path.resolve(bundleDir);
+  if (!filePath.startsWith(`${bundleRoot}${path.sep}`)) {
+    issues.push(`${normalizedPath}: resolves outside bundle directory`);
+    return normalizedPath;
+  }
+  if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
+    issues.push(`${normalizedPath}: file missing from bundle`);
+    return normalizedPath;
+  }
+  const stat = fs.statSync(filePath);
+  if (Number.isInteger(entry.sizeBytes) && stat.size !== entry.sizeBytes) {
+    issues.push(`${normalizedPath}: size mismatch manifest=${entry.sizeBytes} actual=${stat.size}`);
+  }
+  const actualHash = sha256File(filePath);
+  if (String(entry.sha256 ?? "").toLowerCase() !== actualHash) {
+    issues.push(`${normalizedPath}: sha256 mismatch`);
+  }
+  return normalizedPath;
+}
+
 async function evidenceBundle() {
   log("==> Evidence bundle");
   const allReports = booleanFlag(argv.allReports);
@@ -5348,6 +5403,7 @@ async function evidenceBundle() {
 
   const manifestPath = path.join(bundleDir, "manifest.json");
   const manifest = {
+    version: 1,
     generatedAt: new Date().toISOString(),
     mode: allReports ? "all-reports" : "latest-per-category",
     source: {
@@ -5420,6 +5476,124 @@ async function evidenceBundle() {
   if (missing.length) {
     log(`Missing required evidence: ${missing.map((item) => item.label).join(", ")}`);
   }
+}
+
+async function evidenceBundleVerify() {
+  log("==> Evidence bundle verify");
+  const outputRoot = path.resolve(argv.outputDir ?? path.join(infraRoot, ".tmp", "evidence-bundles"));
+  const bundleDir = path.resolve(argv.bundleDir ?? argv._[0] ?? latestEvidenceBundleDir(outputRoot) ?? "");
+  const requireComplete = booleanFlag(argv.requireComplete);
+  const issues = [];
+  if (!bundleDir || !fs.existsSync(bundleDir) || !fs.statSync(bundleDir).isDirectory()) {
+    fail(`Evidence bundle directory not found. Pass --bundleDir <path> or create one with evidence-bundle. Looked in: ${outputRoot}`);
+  }
+  const manifestPath = path.join(bundleDir, "manifest.json");
+  const manifestMarkdownPath = path.join(bundleDir, "manifest.md");
+  const summaryPath = path.join(bundleDir, "summary.json");
+  if (!fs.existsSync(manifestPath)) {
+    fail(`Missing evidence bundle manifest: ${manifestPath}`);
+  }
+  const manifest = readJsonFile(manifestPath, manifestPath);
+  if (manifest.version !== 1) {
+    issues.push(`manifest.version must be 1, found ${manifest.version ?? "missing"}`);
+  }
+  if (manifest.source?.command !== "evidence-bundle") {
+    issues.push("manifest.source.command must be evidence-bundle");
+  }
+  if (manifest.policy?.includesSecrets !== false) {
+    issues.push("manifest policy must exclude secrets");
+  }
+  if (manifest.policy?.includesBackupArtifacts !== false) {
+    issues.push("manifest policy must exclude backup artifacts");
+  }
+  if (manifest.policy?.includesReleaseArtifacts !== false) {
+    issues.push("manifest policy must exclude release artifacts");
+  }
+  if (manifest.policy?.outputDirectoryIgnoredByGit !== true) {
+    issues.push("manifest policy must confirm the output directory is ignored by Git");
+  }
+  const missingRequiredEvidence = Array.isArray(manifest.missingRequiredEvidence) ? manifest.missingRequiredEvidence : [];
+  if (!Array.isArray(manifest.missingRequiredEvidence)) {
+    issues.push("manifest.missingRequiredEvidence must be an array");
+  }
+  if (requireComplete && missingRequiredEvidence.length) {
+    issues.push(`required evidence is still missing: ${missingRequiredEvidence.map((item) => item.label ?? "unknown").join(", ")}`);
+  }
+  if (!Array.isArray(manifest.entries) || !manifest.entries.length) {
+    issues.push("manifest.entries must be a non-empty array");
+  }
+  const paths = new Set();
+  for (const entry of Array.isArray(manifest.entries) ? manifest.entries : []) {
+    const normalizedPath = validateEvidenceBundleEntry(entry, bundleDir, issues);
+    if (!normalizedPath) {
+      continue;
+    }
+    if (paths.has(normalizedPath)) {
+      issues.push(`${normalizedPath}: duplicate manifest entry`);
+    }
+    paths.add(normalizedPath);
+  }
+  for (const docPath of evidenceBundleDocPaths) {
+    if (!paths.has(docPath)) {
+      issues.push(`missing required document entry: ${docPath}`);
+    }
+  }
+  const missingLabels = new Set(missingRequiredEvidence.map((item) => item.label));
+  for (const spec of evidenceBundleReportSpecs) {
+    if (spec.required && !missingLabels.has(spec.label)) {
+      const hasReport = [...paths].some((entryPath) => entryPath.startsWith(`reports/${spec.directory}/`) && path.basename(entryPath).startsWith(spec.prefix));
+      if (!hasReport) {
+        issues.push(`missing required report entry: ${spec.label}`);
+      }
+    }
+  }
+  if (!fs.existsSync(manifestMarkdownPath)) {
+    issues.push("missing manifest.md");
+  }
+  if (fs.existsSync(summaryPath)) {
+    const summary = readJsonFile(summaryPath, summaryPath);
+    if (summary.files !== paths.size) {
+      issues.push(`summary.files mismatch manifest entries: summary=${summary.files} manifest=${paths.size}`);
+    }
+    if (!Array.isArray(summary.missingRequiredEvidence)) {
+      issues.push("summary.missingRequiredEvidence must be an array");
+    }
+  } else {
+    issues.push("missing summary.json");
+  }
+
+  const stamp = reportTimestamp();
+  const payload = {
+    generatedAt: new Date().toISOString(),
+    status: issues.length ? "failed" : "passed",
+    bundleDir,
+    requireComplete,
+    entryCount: paths.size,
+    missingRequiredEvidence,
+    issues,
+  };
+  const jsonPath = writeJsonReport("evidence-bundle-verify", `evidence-bundle-verify-${stamp}`, payload);
+  const markdownPath = writeMarkdownReport("evidence-bundle-verify", `evidence-bundle-verify-${stamp}`, [
+    "# Evidence Bundle Verify",
+    "",
+    `Status: ${payload.status}`,
+    `Bundle: ${bundleDir}`,
+    `Require complete: ${requireComplete}`,
+    `Entries: ${payload.entryCount}`,
+    "",
+    "## Missing Required Evidence",
+    "",
+    ...(missingRequiredEvidence.length ? missingRequiredEvidence.map((item) => `- ${item.label}: ${item.reason}`) : ["- none"]),
+    "",
+    "## Issues",
+    "",
+    ...(issues.length ? issues.map((issue) => `- ${issue}`) : ["- none"]),
+  ]);
+  log(`Evidence bundle verification report written to ${jsonPath} and ${markdownPath}`);
+  if (issues.length) {
+    fail(`Evidence bundle verification failed with ${issues.length} issue(s). Report: ${jsonPath}`);
+  }
+  log("Evidence bundle verification passed.");
 }
 
 async function productionGoNoGo() {
@@ -5867,6 +6041,7 @@ async function repoCoverageCheck() {
     ["production-go-no-go-summary", /production-go-no-go/],
     ["pre-go-live-evidence-report", /Pre go-live evidence report[\s\S]*pre-go-live-evidence --infraOnly --repo/],
     ["evidence-bundle-smoke", /evidence-bundle --noArchive/],
+    ["evidence-bundle-verify", /Evidence bundle integrity verify[\s\S]*evidence-bundle-verify/],
     ["linux-portability", /linux-portability-check/],
     ["enterprise-requirements", /Enterprise requirements traceability[\s\S]*enterprise-requirements-check/],
     ["production-readiness-checklist", /Production readiness checklist[\s\S]*enterprise-requirements-check --manifest governance\/production-readiness\.json/],
@@ -7636,6 +7811,7 @@ function staticSecurityInfraOnlyCheck() {
   const opsDockerfile = readText(path.join(infraRoot, "docker", "ops.Dockerfile"));
   const opsWrapper = readText(path.join(infraRoot, "scripts", "stexor-ops.sh"));
   const backupSchedulerScript = readText(path.join(infraRoot, "scripts", "backup-scheduler.sh"));
+  const evidenceBundleVerifyWrapper = readText(path.join(infraRoot, "scripts", "evidence-bundle-verify.sh"));
   const opsScript = readText(path.join(infraRoot, "scripts", "stexor-ops.mjs"));
   const hostingerPostdeployScript = readText(path.join(infraRoot, "scripts", "hostinger-postdeploy.sh"));
   const productionReadinessLiveWrapper = readText(path.join(infraRoot, "scripts", "production-readiness-live.sh"));
@@ -7662,6 +7838,7 @@ function staticSecurityInfraOnlyCheck() {
     opsDockerfile,
     opsWrapper,
     backupSchedulerScript,
+    evidenceBundleVerifyWrapper,
     hostingerPostdeployScript,
     productionReadinessLiveWrapper,
     githubWorkflow,
@@ -7715,6 +7892,7 @@ function staticSecurityInfraOnlyCheck() {
   assertMatch(githubWorkflow, /DEPLOY_RUN_PRODUCTION_PREFLIGHT:\s+"1"[\s\S]*DEPLOY_RUN_PRE_GO_LIVE:\s+"1"[\s\S]*DEPLOY_RUN_GO_NO_GO:\s+"1"/, "Production deploy workflow must enforce preflight, pre-go-live evidence and go/no-go.");
   assertMatch(githubWorkflow, /DEPLOY_PRE_GO_LIVE_RESTORE_DRILL:\s+"1"[\s\S]*DEPLOY_PRE_GO_LIVE_OFFSITE_RESTORE_DRY_RUN:\s+"1"/, "Production deploy workflow must require restore and off-site restore evidence.");
   assertMatch(githubWorkflow, /Upload CI evidence reports[\s\S]*actions\/upload-artifact@v4[\s\S]*reports\/[\s\S]*\.tmp\/evidence-bundles\/[\s\S]*retention-days:\s+30/, "Infrastructure CI must upload non-secret evidence reports.");
+  assertMatch(githubWorkflow, /Evidence bundle integrity verify[\s\S]*evidence-bundle-verify/, "Infrastructure CI must verify evidence bundle manifest integrity.");
   assertMatch(githubWorkflow, /Pre go-live evidence report[\s\S]*pre-go-live-evidence --infraOnly --repo/, "Infrastructure CI must produce an infrastructure-only pre go-live evidence report.");
   assertMatch(githubWorkflow, /Enterprise requirements traceability[\s\S]*enterprise-requirements-check/, "Infrastructure CI must verify enterprise requirements traceability.");
   assertMatch(githubWorkflow, /Production readiness checklist[\s\S]*enterprise-requirements-check --manifest governance\/production-readiness\.json/, "Infrastructure CI must verify the 20-point production readiness checklist.");
@@ -7728,6 +7906,8 @@ function staticSecurityInfraOnlyCheck() {
   assertMatch(opsScript, /async function repoCoverageCheck/, "Ops script must provide a repository coverage audit command.");
   assertMatch(opsScript, /"repo-coverage-check": repoCoverageCheck/, "Ops command map must expose repo-coverage-check.");
   assertMatch(opsScript, /repoStatus:[\s\S]*liveProofStatus[\s\S]*liveProofsPending/, "Enterprise requirement reports must separate repository evidence from pending live production proof.");
+  assertMatch(evidenceBundleVerifyWrapper, /evidence-bundle-verify/, "Evidence bundle verify wrapper must delegate to the Dockerized ops runner.");
+  assertMatch(opsScript, /async function evidenceBundleVerify[\s\S]*sha256 mismatch[\s\S]*--requireComplete/, "Ops script must verify evidence bundle SHA256 and completeness.");
   assertMatch(hostingerPostdeployScript, /production-go-no-go\.sh --enforce[\s\S]*production-readiness-live\.sh/, "Hostinger post-deploy must enforce live production readiness after production go/no-go.");
   assertMatch(productionReadinessLiveWrapper, /enterprise-requirements-check --manifest governance\/production-readiness\.json --requireLiveProofs/, "Production readiness live wrapper must enforce the 20-point live checklist.");
   assertMatch(opsScript, /directory: "production-readiness"[\s\S]*prefix: "production-readiness-"[\s\S]*required: true/, "Evidence bundle must require the live production readiness report.");
@@ -7850,6 +8030,7 @@ async function staticSecurityCheck() {
   const backupSecretManagerWrapper = readText(path.join(infraRoot, "scripts", "backup-secret-manager-metadata.sh"));
   const alertEvidenceWrapper = readText(path.join(infraRoot, "scripts", "alert-evidence.sh"));
   const evidenceBundleWrapper = readText(path.join(infraRoot, "scripts", "evidence-bundle.sh"));
+  const evidenceBundleVerifyWrapper = readText(path.join(infraRoot, "scripts", "evidence-bundle-verify.sh"));
   const infraHealthWrapper = readText(path.join(infraRoot, "scripts", "infra-health.sh"));
   const failureTestsWrapper = readText(path.join(infraRoot, "scripts", "failure-tests.sh"));
   const drEvidenceWrapper = readText(path.join(infraRoot, "scripts", "dr-evidence.sh"));
@@ -8020,6 +8201,7 @@ async function staticSecurityCheck() {
   assertMatch(githubWorkflow, /Cloudflare from-zero dry run[\s\S]*cloudflare-from-zero --manifest cloudflare\/from-zero\.example\.json/, "Infrastructure CI must validate the additive-only Cloudflare bootstrap manifest.");
   assertMatch(githubWorkflow, /GitHub branch protection dry run[\s\S]*github-branch-protection --repo/, "Infrastructure CI must validate the GitHub branch protection policy command.");
   assertMatch(githubWorkflow, /Evidence bundle smoke[\s\S]*evidence-bundle --noArchive/, "Infrastructure CI must smoke-test the evidence bundle command.");
+  assertMatch(githubWorkflow, /Evidence bundle integrity verify[\s\S]*evidence-bundle-verify/, "Infrastructure CI must verify evidence bundle manifest integrity.");
   assertMatch(githubWorkflow, /sh \.\/scripts\/stexor-ops\.sh static-security-check/, "Infrastructure CI must run the Dockerized ops wrapper instead of host Node.");
   assertNoMatch(githubWorkflow, /setup-node|node scripts\/stexor-ops\.mjs|shell:\s+pwsh|\.ps1/, "Infrastructure CI must stay Linux/container-first without PowerShell or host Node policy gates.");
   assertMatch(deployHostingerScript, /ssh "\$REMOTE" sh -s --[\s\S]*<<'REMOTE_SCRIPT'[\s\S]*remote_dir="\$1"[\s\S]*cd "\$remote_dir"/, "Hostinger deploy must pass remote values through SSH positional arguments instead of interpolating a remote shell string.");
@@ -8031,6 +8213,7 @@ async function staticSecurityCheck() {
   assertMatch(hostingerPostdeployScript, /waf-smoke\.sh[\s\S]*infra-health\.sh[\s\S]*pre-go-live-evidence\.sh[\s\S]*production-go-no-go\.sh --enforce[\s\S]*production-readiness-live\.sh/, "Hostinger post-deploy must cover smoke, health, optional pre go-live evidence, final go/no-go and live production readiness.");
   assertMatch(hostingerGoLiveScript, /PLAN_ONLY=1[\s\S]*--confirmLive[\s\S]*PLAN_ONLY=0/, "Hostinger go-live orchestrator must be plan-only unless explicitly confirmed.");
   assertMatch(hostingerGoLiveScript, /vps-bootstrap-ubuntu\.sh --apply[\s\S]*vps-hardening-ubuntu\.sh --apply[\s\S]*vps-host-readiness\.sh --ssh-port \$SSH_PORT --enforce[\s\S]*hostinger-preflight\.sh[\s\S]*hostinger-postdeploy\.sh[\s\S]*production-go-no-go\.sh --enforce[\s\S]*production-readiness-live\.sh[\s\S]*evidence-bundle\.sh/, "Hostinger go-live orchestrator must sequence optional VPS bootstrap, hardening, readiness, preflight, postdeploy, go/no-go, live readiness and evidence bundle.");
+  assertMatch(hostingerGoLiveScript, /evidence-bundle\.sh[\s\S]*evidence-bundle-verify\.sh --requireComplete/, "Hostinger go-live orchestrator must verify the final evidence bundle when go/no-go is enabled.");
   assertMatch(hostingerGoLiveScript, /--reload-sshd[\s\S]*RELOAD_SSHD=1[\s\S]*reloadSshd[\s\S]*vps-hardening-ubuntu\.sh --apply --ssh-port "\$SSH_PORT" \$reload_flag/, "Hostinger go-live orchestrator must expose explicit SSH reload for VPS hardening.");
   assertMatch(hostingerGoLiveScript, /--replace-docker-daemon-config[\s\S]*REPLACE_DOCKER_DAEMON_CONFIG=1[\s\S]*replaceDockerDaemonConfig[\s\S]*vps-hardening-ubuntu\.sh --apply --ssh-port "\$SSH_PORT" \$reload_flag --replace-docker-daemon-config/, "Hostinger go-live orchestrator must expose explicit Docker daemon config replacement for VPS hardening.");
   assertMatch(hostingerGoLiveScript, /REPLACE_DOCKER_DAEMON_CONFIG" -eq 1[\s\S]*APPLY_HARDENING" -ne 1[\s\S]*requires --apply-hardening/, "Hostinger go-live must reject Docker daemon replacement without --apply-hardening.");
@@ -8053,7 +8236,9 @@ async function staticSecurityCheck() {
   assertMatch(vpsPredeployChecklist, /hostinger-go-live\.sh --planOnly[\s\S]*--reload-sshd/, "VPS checklist must require reviewed planning for SSH reload.");
   assertMatch(vpsPredeployChecklist, /hostinger-go-live\.sh --planOnly[\s\S]*--replace-docker-daemon-config/, "VPS checklist must require reviewed planning for Docker daemon replacement.");
   assertMatch(evidenceBundleWrapper, /evidence-bundle/, "Evidence bundle wrapper must delegate to the Dockerized ops runner.");
+  assertMatch(evidenceBundleVerifyWrapper, /evidence-bundle-verify/, "Evidence bundle verify wrapper must delegate to the Dockerized ops runner.");
   assertMatch(opsScript, /async function evidenceBundle[\s\S]*stexor-evidence-bundle-\$\{stamp\}[\s\S]*includesSecrets:\s+false/, "Ops script must create non-secret evidence bundles with a manifest.");
+  assertMatch(opsScript, /async function evidenceBundleVerify[\s\S]*sha256 mismatch[\s\S]*--requireComplete/, "Ops script must verify evidence bundle SHA256 and completeness.");
   assertMatch(productionReadinessLiveWrapper, /enterprise-requirements-check --manifest governance\/production-readiness\.json --requireLiveProofs/, "Production readiness live wrapper must enforce the 20-point live checklist.");
   assertMatch(opsScript, /directory: "production-readiness"[\s\S]*prefix: "production-readiness-"[\s\S]*required: true/, "Evidence bundle must require the live production readiness report.");
   assertMatch(opsScript, /directory: "vps-bootstrap"[\s\S]*prefix: "vps-bootstrap-apply-"[\s\S]*required: true/, "Evidence bundle must require VPS bootstrap apply reports.");
@@ -8061,11 +8246,16 @@ async function staticSecurityCheck() {
   assertMatch(opsScript, /directory: "hostinger-go-live"[\s\S]*prefix: "hostinger-go-live-"/, "Evidence bundle must include Hostinger go-live orchestration reports when present.");
   assertMatch(opsScript, /"evidence-bundle": evidenceBundle/, "Ops command map must expose evidence-bundle.");
   assertMatch(readme, /evidence-bundle\.sh[\s\S]*\.tmp\/evidence-bundles/, "README must document the evidence bundle output.");
+  assertMatch(readme, /evidence-bundle-verify\.sh --requireComplete[\s\S]*SHA256/, "README must document final evidence bundle verification.");
   assertMatch(runbook, /evidence-bundle\.sh[\s\S]*secrets\//, "Runbook must document evidence bundle secret exclusions.");
+  assertMatch(runbook, /evidence-bundle-verify\.sh --requireComplete[\s\S]*SHA256/, "Runbook must document final evidence bundle verification.");
   assertMatch(vpsPredeployChecklist, /evidence-bundle\.sh[\s\S]*manifest\.json/, "VPS checklist must require the evidence bundle manifest review.");
+  assertMatch(vpsPredeployChecklist, /evidence-bundle-verify\.sh --requireComplete/, "VPS checklist must require final evidence bundle verification.");
   assertMatch(readinessReport, /evidence-bundle\.sh[\s\S]*\.tmp\/evidence-bundles/, "Readiness report must include the evidence bundle command.");
+  assertMatch(readinessReport, /evidence-bundle-verify\.sh --requireComplete/, "Readiness report must include final evidence bundle verification.");
   assertMatch(readinessReport, /hostinger-postdeploy\.sh[\s\S]*production-go-no-go/, "Readiness report must include Hostinger post-deploy and go/no-go flow.");
   assertMatch(finalReadinessAudit, /evidence-bundle\.sh[\s\S]*SHA256/, "Final readiness audit must include evidence bundle and checksum evidence.");
+  assertMatch(finalReadinessAudit, /Evidence bundle verifier[\s\S]*SHA256/, "Final readiness audit must include evidence bundle verifier coverage.");
   assertMatch(finalReadinessAudit, /hostinger-postdeploy\.sh[\s\S]*infra-health/, "Final readiness audit must include Hostinger post-deploy health checks.");
   assertMatch(finalReadinessAudit, /mode=dry-run[\s\S]*providerEvidence\.verified=false/, "Final readiness audit must document uptime dry-run evidence semantics.");
   assertMatch(externalUptimeManifest, /api-public-health[\s\S]*API_PUBLIC_URL/, "External uptime manifest must monitor the public API health endpoint.");
@@ -8922,6 +9112,7 @@ Commands:
   enterprise-requirements-check
   enterprise-10-check
   evidence-bundle
+  evidence-bundle-verify
   external-uptime-check
   failure-tests
   fault-injection-tests
@@ -9001,6 +9192,7 @@ const commands = {
   "enterprise-requirements-check": enterpriseRequirementsCheck,
   "enterprise-10-check": enterpriseTenCheck,
   "evidence-bundle": evidenceBundle,
+  "evidence-bundle-verify": evidenceBundleVerify,
   "external-uptime-check": externalUptimeCheck,
   "failure-tests": failureTests,
   "fault-injection-tests": faultInjectionTests,

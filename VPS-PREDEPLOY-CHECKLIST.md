@@ -86,6 +86,7 @@ Use this checklist on the Hostinger Ubuntu LTS VPS before exposing public traffi
 - [ ] If `production-go-no-go` returns `no-go`, every item in the report `remediation` checklist was completed and the gate was rerun until `status=go`.
 - [ ] `sh ./scripts/production-readiness-live.sh` passed and `reports/production-readiness/` was archived outside Git.
 - [ ] `sh ./scripts/evidence-bundle.sh` generated `.tmp/evidence-bundles/stexor-evidence-bundle-*.tar.gz`; `manifest.json` was reviewed and the archive was stored outside Git.
+- [ ] `sh ./scripts/evidence-bundle-verify.sh --requireComplete` passed against the final evidence bundle.
 
 ## Admin Surfaces
 

@@ -336,6 +336,14 @@ step_evidence_bundle() {
   sh ./scripts/evidence-bundle.sh
 }
 
+step_evidence_bundle_verify() {
+  if [ "$RUN_GO_NO_GO" -eq 1 ]; then
+    sh ./scripts/evidence-bundle-verify.sh --requireComplete
+  else
+    sh ./scripts/evidence-bundle-verify.sh
+  fi
+}
+
 if [ "$RUN_PRE_GO_LIVE" -eq 1 ] && [ -z "$DEPLOY_REPO_VALUE" ]; then
   echo "Set --repo OWNER/REPO before enabling --pre-go-live or --full-evidence." >&2
   exit 1
@@ -400,8 +408,14 @@ fi
 
 if [ "$RUN_BUNDLE" -eq 1 ]; then
   run_step "evidence-bundle" "sh ./scripts/evidence-bundle.sh" step_evidence_bundle
+  if [ "$RUN_GO_NO_GO" -eq 1 ]; then
+    run_step "evidence-bundle-verify" "sh ./scripts/evidence-bundle-verify.sh --requireComplete" step_evidence_bundle_verify
+  else
+    run_step "evidence-bundle-verify" "sh ./scripts/evidence-bundle-verify.sh" step_evidence_bundle_verify
+  fi
 else
   add_step "evidence-bundle" "skipped" "sh ./scripts/evidence-bundle.sh" "disabled with --no-bundle"
+  add_step "evidence-bundle-verify" "skipped" "sh ./scripts/evidence-bundle-verify.sh" "disabled with --no-bundle"
 fi
 
 write_reports

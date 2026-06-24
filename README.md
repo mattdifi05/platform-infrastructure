@@ -341,13 +341,16 @@ operative:
 
 ```sh
 sh ./scripts/evidence-bundle.sh
+sh ./scripts/evidence-bundle-verify.sh --requireComplete
 ```
 
 Il bundle finisce in `.tmp/evidence-bundles/`, include gli ultimi report
 JSON/Markdown per categoria, documentazione operativa e manifest SHA256, ed
 esclude sempre `secrets/`, artifact di backup, `.env`, SBOM/release artifact e
 altri file sensibili. Usa `--allReports` solo se devi consegnare tutta la
-cronologia report della finestra di validazione.
+cronologia report della finestra di validazione. `evidence-bundle-verify.sh`
+rilegge `manifest.json`, ricontrolla SHA256, size, policy anti-segreti e, con
+`--requireComplete`, fallisce se manca una qualunque evidenza richiesta.
 
 `scripts/linux-portability-check.sh` verifica BOM UTF-8, CRLF, path Windows e
 dipendenze PowerShell/cmd nei file operativi, poi valida gli shell script dentro
@@ -486,8 +489,8 @@ sh ./scripts/hostinger-go-live.sh --confirmLive --repo OWNER/REPO --apply-harden
 Senza `--confirmLive` scrive solo il piano in `reports/hostinger-go-live/`.
 Con `--confirmLive` puo' eseguire bootstrap host, hardening, `vps-host-readiness
 --enforce`, `hostinger-preflight`, opzionalmente `docker compose up`,
-post-deploy, go/no-go, checklist live production-ready e `evidence-bundle`,
-fermandosi al primo errore e
+post-deploy, go/no-go, checklist live production-ready, `evidence-bundle` e
+verifica integrita' bundle, fermandosi al primo errore e
 lasciando un report JSON/Markdown non sensibile. Usa
 `--reload-sshd` solo dopo aver verificato che la chiave SSH e la porta target
 funzionano; senza questa prova il go/no-go non accetta l'hardening host come
