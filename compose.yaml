@@ -233,6 +233,9 @@ services:
       SMTP_SECURE: ${SMTP_SECURE:-true}
       SMTP_USER: ${SMTP_USER:-}
       SMTP_PASSWORD_FILE: /run/secrets/smtp_password
+    secrets:
+      - projects_gateway_signing_keys
+      - smtp_password
     volumes:
       - ${PHP_SOURCE_DIR:-./projects-portal}:/var/www/html
       - .:/var/www/infra-docs:ro
@@ -353,7 +356,7 @@ services:
       GOOGLE_RECAPTCHA_SECRET_KEY_FILE: /run/secrets/google_recaptcha_secret_key
       CLOUDFLARE_TURNSTILE_SECRET_KEY_FILE: /run/secrets/cloudflare_turnstile_secret_key
       GOOGLE_OAUTH_CLIENT_ID: ${GOOGLE_OAUTH_CLIENT_ID:-}
-      GOOGLE_OAUTH_CLIENT_SECRET_FILE: /run/secrets/google_oauth_client_secret
+      GOOGLE_OAUTH_CLIENT_SECRET_FILE: ${GOOGLE_OAUTH_CLIENT_SECRET_FILE-}
       GOOGLE_OAUTH_REDIRECT_URI: ${GOOGLE_OAUTH_REDIRECT_URI:-https://api.localhost.com/auth/google/callback}
       GOOGLE_OAUTH_SCOPES: ${GOOGLE_OAUTH_SCOPES:-openid email profile https://www.googleapis.com/auth/user.birthday.read}
       RATE_LIMIT_TTL_SECONDS: ${RATE_LIMIT_TTL_SECONDS:-60}
@@ -1016,3 +1019,9 @@ configs:
             loadBalancer:
               servers:
                 - url: http://php-apache:80
+
+secrets:
+  projects_gateway_signing_keys:
+    file: ${PROJECTS_GATEWAY_SIGNING_KEYS_SECRET_FILE:-./secrets/projects_gateway_signing_keys.txt}
+  smtp_password:
+    file: ${SMTP_PASSWORD_SECRET_FILE:-./secrets/smtp_password.txt}

@@ -9810,7 +9810,9 @@ async function staticSecurityCheck() {
   assertNoMatch(compose, /8090:8080|api@internal|traefik\.localhost\.com/, "Traefik dashboard must not be routed or exposed in the local stack.");
   assertNoMatch(compose, /prometheus\.localhost\.com|alertmanager\.localhost\.com/, "Prometheus and Alertmanager must remain internal; use authenticated Grafana for browser access.");
   if (localProjectsPage) {
-    assertMatch(localProjectsPage, /Documentation and project launcher[\s\S]*README\.md[\s\S]*RUNBOOK\.md[\s\S]*discoverProjects/, "Fallback projects page must provide organized documentation and project discovery.");
+    assertMatch(localProjectsPage, /Documentation and project launcher/, "Fallback projects page must title the local documentation launcher.");
+    assertMatch(localProjectsPage, /README\.md[\s\S]*RUNBOOK\.md/, "Fallback projects page must link core operational docs.");
+    assertMatch(localProjectsPage, /discoverProjects/, "Fallback projects page must provide project discovery.");
     assertNoMatch(localProjectsPage, /prometheus\.localhost\.com|alertmanager\.localhost\.com|traefik\.localhost\.com/, "Projects page must not link unauthenticated internal consoles.");
   }
   assertMatch(composeHa, /failure_action:\s+rollback/, "HA overlay must rollback failed rolling updates.");
@@ -9820,7 +9822,7 @@ async function staticSecurityCheck() {
   assertMatch(composeManagedSecrets, /PROJECTS_GATEWAY_SIGNING_KEYS_FILE:\s+\/run\/secrets\/projects_gateway_signing_keys/, "Managed secret overlay must consume projects gateway signing keys through a file.");
   assertMatch(composeManagedSecrets, /GOOGLE_RECAPTCHA_SECRET_KEY_FILE:\s+\/run\/secrets\/google_recaptcha_secret_key/, "Managed secret overlay must consume Google reCAPTCHA secret through a file.");
   assertMatch(composeManagedSecrets, /CLOUDFLARE_TURNSTILE_SECRET_KEY_FILE:\s+\/run\/secrets\/cloudflare_turnstile_secret_key/, "Managed secret overlay must consume Cloudflare Turnstile secret through a file.");
-  assertMatch(composeManagedSecrets, /GOOGLE_OAUTH_CLIENT_SECRET_FILE:\s+\/run\/secrets\/google_oauth_client_secret/, "Managed secret overlay must consume Google OAuth client secret through a file.");
+  assertMatch(composeManagedSecrets, /GOOGLE_OAUTH_CLIENT_SECRET_FILE:\s+\$\{GOOGLE_OAUTH_CLIENT_SECRET_FILE-\}/, "Managed secret overlay must expose optional Google OAuth client secret-file configuration.");
   assertMatch(composeManagedSecrets, /ALERTMANAGER_WEBHOOK_TOKEN_FILE:\s+\/run\/secrets\/alertmanager_webhook_token/, "Managed secret overlay must consume the Alertmanager webhook token through a file.");
   assertMatch(composeManagedSecrets, /MARIADB_ROOT_PASSWORD_FILE:\s+\/run\/secrets\/mariadb_root_password/, "Managed secret overlay must consume MariaDB root password through a Docker secret file.");
   assertMatch(composeManagedSecrets, /^ {2}mariadb_root_password:\s*\r?\n {4}external:\s+true/m, "Managed secret overlay must declare MariaDB root password as an external Docker secret.");
@@ -9831,7 +9833,7 @@ async function staticSecurityCheck() {
   assertMatch(composeSecrets, /PROJECTS_GATEWAY_SIGNING_KEYS_FILE:\s+\/run\/secrets\/projects_gateway_signing_keys/, "Local secret overlay must consume projects gateway signing keys through a Docker secret file.");
   assertMatch(composeSecrets, /GOOGLE_RECAPTCHA_SECRET_KEY_FILE:\s+\/run\/secrets\/google_recaptcha_secret_key/, "Local secret overlay must consume Google reCAPTCHA secret through a Docker secret file.");
   assertMatch(composeSecrets, /CLOUDFLARE_TURNSTILE_SECRET_KEY_FILE:\s+\/run\/secrets\/cloudflare_turnstile_secret_key/, "Local secret overlay must consume Cloudflare Turnstile secret through a Docker secret file.");
-  assertMatch(composeSecrets, /GOOGLE_OAUTH_CLIENT_SECRET_FILE:\s+\/run\/secrets\/google_oauth_client_secret/, "Local secret overlay must consume Google OAuth client secret through a Docker secret file.");
+  assertMatch(composeSecrets, /GOOGLE_OAUTH_CLIENT_SECRET_FILE:\s+\$\{GOOGLE_OAUTH_CLIENT_SECRET_FILE-\}/, "Local secret overlay must expose optional Google OAuth client secret-file configuration.");
   assertMatch(composeSecrets, /ALERTMANAGER_WEBHOOK_TOKEN_FILE:\s+\/run\/secrets\/alertmanager_webhook_token/, "Local secret overlay must consume the Alertmanager webhook token through a Docker secret file.");
   assertMatch(compose, /ALERT_DISCORD_WEBHOOK_URL_FILE:\s+\$\{ALERT_DISCORD_WEBHOOK_URL_FILE:-\}/, "Compose must expose optional Discord alert webhook secret-file configuration.");
   assertMatch(compose, /ALERT_TELEGRAM_BOT_TOKEN_FILE:\s+\$\{ALERT_TELEGRAM_BOT_TOKEN_FILE:-\}/, "Compose must expose optional Telegram alert bot token secret-file configuration.");
