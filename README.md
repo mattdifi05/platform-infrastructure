@@ -271,6 +271,7 @@ sh ./scripts/load-benchmark.sh --profiles 50,100,500
 sh ./scripts/load-benchmark.sh --profiles 50,100,500 --url https://api.example.com/health --requirePublicTarget --requireEdgeEvidence --expectedEdgeProvider cloudflare
 sh ./scripts/linux-portability-check.sh
 sh ./scripts/secret-scan.sh
+sh ./scripts/secret-rotation-evidence.sh
 sh ./scripts/certificate-expiry-check.sh
 sh ./scripts/supply-chain-hygiene.sh
 sh ./scripts/generate-sbom.sh
@@ -289,6 +290,8 @@ sh ./scripts/dast-zap-baseline.sh https://api-staging.example.com
 ```
 
 `alert-evidence.sh` verifica configurazione Alertmanager, bearer secret, metriche worker e alert di failure delivery. In staging/VPS usa `alert-evidence.sh --sendTest`; con canali reali configurati puoi aggiungere `--requireEmailDelivery`, `--requireDiscordDelivery` o `--requireTelegramDelivery` per rendere la consegna un gate.
+
+`secret-rotation-evidence.sh` scrive un report non-secret in `reports/secret-rotation/` con stato dello store Stexor Secret Manager, audit log, KMS attivo, eta' dei secret rispetto a `rotationDays`, file materializzati e risultato di `stexor-secret-manager verify`. In produzione usa `--enforce`: il go/no-go accetta solo `mode=evidence`, `status=passed`, zero secret scaduti e zero file mancanti.
 
 `load-benchmark.sh` senza `--url` misura il backend dentro la rete Docker ed e' utile per regressioni locali. Per il go-live devi usare l'URL pubblico e `--requirePublicTarget`; con Cloudflare CDN attivo aggiungi `--requireEdgeEvidence --expectedEdgeProvider cloudflare`. Il report in `reports/load/` include profili 50/100/500, snapshot CPU/RAM Docker, target evidence pubblico/edge e `status`. Anche i fallimenti scrivono report diagnostici, ma il go/no-go accetta solo `status=passed`.
 
@@ -332,8 +335,9 @@ comando legge i report ignorati da Git e scrive JSON/Markdown in
 `reports/go-no-go/`. In summary mode mostra `go` o `no-go`; con `--enforce`
 blocca la release se mancano VPS bootstrap/hardening apply, VPS host readiness,
 Cloudflare Access `--verifyRemote`, GitHub Actions run remota passata,
-DR/off-site restore, alert email reale, uptime esterno, load pubblico
-50/100/500, release evidence o pre-go-live evidence completo. Ogni
+secret rotation evidence, DR/off-site restore, alert email reale, uptime
+esterno, load pubblico 50/100/500, release evidence o pre-go-live evidence
+completo. Ogni
 report `no-go` include anche `remediation` in JSON e una sezione Markdown con
 azioni, comandi ed evidenza attesa per chiudere i check falliti sulla VPS.
 Dopo un `go`, esegui anche `scripts/production-readiness-live.sh`: valida la

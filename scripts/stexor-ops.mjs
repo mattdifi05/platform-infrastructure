@@ -3780,6 +3780,313 @@ async function managedSecretsPreflight() {
   log("Managed secrets / KMS preflight passed.");
 }
 
+const managedSecretRotationExpectations = [
+  { name: "postgres_superuser_password", kind: "opaque", rotationDays: 90, manualRotation: true },
+  { name: "app_db_password", kind: "opaque", rotationDays: 90, manualRotation: true },
+  { name: "keycloak_db_password", kind: "opaque", rotationDays: 90, manualRotation: true },
+  { name: "redis_password", kind: "opaque", rotationDays: 90 },
+  { name: "keycloak_admin_password", kind: "opaque", rotationDays: 90 },
+  { name: "nats_password", kind: "opaque", rotationDays: 90, manualRotation: true },
+  { name: "minio_root_password", kind: "opaque", rotationDays: 90 },
+  { name: "mariadb_root_password", kind: "opaque", rotationDays: 90, manualRotation: true },
+  { name: "phpmyadmin_control_password", kind: "opaque", rotationDays: 90 },
+  { name: "grafana_admin_password", kind: "opaque", rotationDays: 90 },
+  { name: "session_secret", kind: "opaque", rotationDays: 90 },
+  { name: "session_signing_keys", kind: "keyring", rotationDays: 60 },
+  { name: "projects_gateway_signing_keys", kind: "keyring", rotationDays: 90 },
+  { name: "hash_pepper_keys", kind: "keyring", rotationDays: 90 },
+  { name: "backup_signing_keys", kind: "keyring", rotationDays: 90 },
+  { name: "alertmanager_webhook_token", kind: "opaque", rotationDays: 90 },
+  { name: "smtp_password", kind: "opaque", rotationDays: 90 },
+  { name: "google_recaptcha_secret_key", kind: "opaque", rotationDays: 90, manualRotation: true },
+  { name: "cloudflare_turnstile_secret_key", kind: "opaque", rotationDays: 90, manualRotation: true },
+  { name: "google_oauth_client_secret", kind: "opaque", rotationDays: 90, manualRotation: true },
+  { name: "database_url", kind: "derived", rotationDays: 90 },
+  { name: "nats_url", kind: "derived", rotationDays: 90 },
+];
+
+function readJsonLines(filePath) {
+  if (!fs.existsSync(filePath)) {
+    return { entries: [], invalidLines: 0 };
+  }
+  const entries = [];
+  let invalidLines = 0;
+  for (const line of readText(filePath).split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      entries.push(JSON.parse(trimmed));
+    } catch {
+      invalidLines += 1;
+    }
+  }
+  return { entries, invalidLines };
+}
+
+function ageDaysFromIso(value) {
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp)) return Number.POSITIVE_INFINITY;
+  return (Date.now() - timestamp) / 86400000;
+}
+
+function optionalPositiveNumber(value, optionName, fallback) {
+  if (value === undefined || value === null || value === "") return fallback;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    fail(`${optionName} must be a non-negative number.`);
+  }
+  return parsed;
+}
+
+function secretRotationLatestEvent(entries, actions) {
+  const allowed = new Set(actions);
+  return entries
+    .filter((entry) => allowed.has(entry.action) && entry.status !== "failed" && Number.isFinite(Date.parse(entry.at)))
+    .sort((a, b) => Date.parse(b.at) - Date.parse(a.at))[0] ?? null;
+}
+
+function secretRotationEventSummary(entry) {
+  if (!entry) return null;
+  return {
+    at: entry.at,
+    action: entry.action,
+    status: entry.status ?? "success",
+    name: entry.name ?? null,
+  };
+}
+
+async function secretRotationEvidence(options = {}) {
+  log("==> Secret rotation evidence");
+  const enforce = options.enforce ?? booleanFlag(argv.enforce);
+  const secretsDir = path.resolve(options.secretsDir ?? argv.secretsDir ?? path.join(infraRoot, "secrets"));
+  const storePath = path.resolve(options.store ?? argv.store ?? path.join(secretsDir, "stexor-secret-manager-store.json"));
+  const auditLogPath = path.resolve(options.auditLog ?? argv.auditLog ?? path.join(secretsDir, "stexor-secret-manager-audit.log"));
+  const maxKmsAgeDays = optionalPositiveNumber(options.maxKmsAgeDays ?? argv.maxKmsAgeDays, "--maxKmsAgeDays", 180);
+  const rotationGraceDays = optionalPositiveNumber(options.rotationGraceDays ?? argv.rotationGraceDays, "--rotationGraceDays", 0);
+  const generatedAt = new Date().toISOString();
+  const issues = [];
+  const secretReports = [];
+  let store = null;
+  let verify = { status: "not-run", detail: "store missing" };
+
+  if (!fs.existsSync(storePath)) {
+    if (enforce) {
+      issues.push(`missing Stexor Secret Manager store: ${storePath}`);
+    }
+  } else {
+    try {
+      store = readJsonFile(storePath, storePath);
+    } catch (error) {
+      issues.push(`secret manager store is unreadable: ${String(error?.message ?? error)}`);
+    }
+  }
+
+  if (store) {
+    if (store.manager !== "stexor-secret-manager" || store.version !== 1) {
+      issues.push("secret manager store has an invalid manager/version marker");
+    }
+    if (store.kms?.provider !== "stexor-local-kms" || !store.kms?.activeKeyId) {
+      issues.push("secret manager store is missing active Stexor Local KMS metadata");
+    }
+    const activeKmsKey = store.kms?.keys?.[store.kms?.activeKeyId];
+    const activeKmsAgeDays = ageDaysFromIso(activeKmsKey?.createdAt);
+    if (!Number.isFinite(activeKmsAgeDays)) {
+      issues.push("active KMS key is missing a valid createdAt timestamp");
+    } else if (activeKmsAgeDays > maxKmsAgeDays) {
+      issues.push(`active KMS key is ${activeKmsAgeDays.toFixed(1)}d old; max ${maxKmsAgeDays}d`);
+    }
+
+    const storeSecrets = store.secrets ?? {};
+    for (const expected of managedSecretRotationExpectations) {
+      const record = storeSecrets[expected.name];
+      const materializedPath = path.join(secretsDir, `${expected.name}.txt`);
+      const materializedPresent = fs.existsSync(materializedPath) && fs.statSync(materializedPath).isFile() && fs.statSync(materializedPath).size > 0;
+      if (!record) {
+        issues.push(`missing managed secret record: ${expected.name}`);
+        secretReports.push({
+          name: expected.name,
+          kind: expected.kind,
+          status: "missing",
+          materializedPresent,
+          rotationDays: expected.rotationDays,
+          ageDays: null,
+          expired: true,
+          manualRotation: Boolean(expected.manualRotation),
+        });
+        continue;
+      }
+      const rotationDays = Number(record.rotationDays ?? expected.rotationDays);
+      const ageDays = ageDaysFromIso(record.updatedAt);
+      const allowedAgeDays = Math.max(0, rotationDays + rotationGraceDays);
+      const expired = !Number.isFinite(ageDays) || ageDays > allowedAgeDays;
+      const status = expired || !materializedPresent || record.kind !== expected.kind ? "failed" : "passed";
+      if (record.kind !== expected.kind) {
+        issues.push(`${expected.name} kind=${record.kind ?? "missing"} expected=${expected.kind}`);
+      }
+      if (!materializedPresent) {
+        issues.push(`missing materialized Docker secret file for ${expected.name}`);
+      }
+      if (!Number.isFinite(ageDays)) {
+        issues.push(`${expected.name} has an invalid updatedAt timestamp`);
+      } else if (expired) {
+        issues.push(`${expected.name} is ${ageDays.toFixed(1)}d old; max ${allowedAgeDays}d`);
+      }
+      secretReports.push({
+        name: expected.name,
+        kind: record.kind ?? expected.kind,
+        status,
+        updatedAt: record.updatedAt ?? null,
+        ageDays: Number.isFinite(ageDays) ? Number(ageDays.toFixed(3)) : null,
+        rotationDays,
+        rotationGraceDays,
+        expired,
+        manualRotation: Boolean(expected.manualRotation),
+        materializedPresent,
+        fingerprintPresent: Boolean(record.fingerprint),
+        kmsKeyId: record.encryption?.keyId ?? null,
+        keyIds: Array.isArray(record.keyIds) ? record.keyIds : [],
+      });
+    }
+
+    const expectedNames = new Set(managedSecretRotationExpectations.map((secret) => secret.name));
+    const unmanagedNames = Object.keys(storeSecrets).filter((name) => !expectedNames.has(name)).sort();
+    if (unmanagedNames.length) {
+      issues.push(`unexpected managed secret records: ${unmanagedNames.join(", ")}`);
+    }
+
+    const verifyResult = runSecretManager([
+      "verify",
+      "--secretsDir",
+      secretsDir,
+      "--store",
+      storePath,
+      "--auditLog",
+      auditLogPath,
+    ], { capture: true, allowFailure: true });
+    verify = {
+      status: verifyResult.status === 0 ? "passed" : "failed",
+      detail: verifyResult.status === 0
+        ? "secret manager verify passed"
+        : String(verifyResult.stderr || verifyResult.stdout || "secret manager verify failed").trim(),
+    };
+    if (verifyResult.status !== 0) {
+      issues.push("stexor-secret-manager verify failed");
+    }
+  }
+
+  const audit = readJsonLines(auditLogPath);
+  const auditActions = audit.entries.reduce((acc, entry) => {
+    acc[entry.action] = (acc[entry.action] ?? 0) + 1;
+    return acc;
+  }, {});
+  const latestManagedEvent = secretRotationLatestEvent(audit.entries, ["init", "rotate", "set", "kms_rotate", "materialize", "verify"]);
+  const latestRotationEvent = secretRotationLatestEvent(audit.entries, ["rotate", "set", "kms_rotate", "init"]);
+  if (store && !fs.existsSync(auditLogPath)) {
+    issues.push(`missing secret manager audit log: ${auditLogPath}`);
+  }
+  if (store && audit.invalidLines) {
+    issues.push(`secret manager audit log has ${audit.invalidLines} invalid JSON line(s)`);
+  }
+  if (store && !latestManagedEvent) {
+    issues.push("secret manager audit log has no successful managed operation events");
+  }
+  if (store && !latestRotationEvent) {
+    issues.push("secret manager audit log has no init/rotate/set/kms_rotate event");
+  }
+
+  const expiredSecrets = secretReports.filter((secret) => secret.expired);
+  const failedSecrets = secretReports.filter((secret) => secret.status !== "passed");
+  const payload = {
+    generatedAt,
+    mode: store ? "evidence" : "plan",
+    status: store ? (issues.length ? "failed" : "passed") : (enforce ? "failed" : "plan"),
+    enforce,
+    store: {
+      path: storePath,
+      present: Boolean(store),
+      manager: store?.manager ?? null,
+      version: store?.version ?? null,
+      updatedAt: store?.updatedAt ?? null,
+    },
+    kms: store ? {
+      provider: store.kms?.provider ?? null,
+      activeKeyId: store.kms?.activeKeyId ?? null,
+      activeKeyCreatedAt: store.kms?.keys?.[store.kms?.activeKeyId]?.createdAt ?? null,
+      activeKeyAgeDays: Number.isFinite(ageDaysFromIso(store.kms?.keys?.[store.kms?.activeKeyId]?.createdAt))
+        ? Number(ageDaysFromIso(store.kms?.keys?.[store.kms?.activeKeyId]?.createdAt).toFixed(3))
+        : null,
+      maxAgeDays: maxKmsAgeDays,
+    } : null,
+    audit: {
+      path: auditLogPath,
+      present: fs.existsSync(auditLogPath),
+      entries: audit.entries.length,
+      invalidLines: audit.invalidLines,
+      actions: auditActions,
+      latestManagedEvent: secretRotationEventSummary(latestManagedEvent),
+      latestRotationEvent: secretRotationEventSummary(latestRotationEvent),
+    },
+    verify,
+    summary: {
+      expectedSecrets: managedSecretRotationExpectations.length,
+      reportedSecrets: secretReports.length,
+      failedSecrets: failedSecrets.length,
+      expiredSecrets: expiredSecrets.length,
+      missingMaterializedFiles: secretReports.filter((secret) => !secret.materializedPresent).length,
+      manualRotationSecrets: secretReports.filter((secret) => secret.manualRotation).length,
+      maxKmsAgeDays,
+      rotationGraceDays,
+    },
+    secrets: secretReports,
+    issues,
+    nextCommands: [
+      "sh ./scripts/stexor-secret-manager.sh init",
+      "sh ./scripts/stexor-secret-manager.sh verify",
+      "sh ./scripts/stexor-secret-manager.sh rotate --name session_signing_keys",
+      "sh ./scripts/stexor-secret-manager.sh kms-rotate",
+      "sh ./scripts/secret-rotation-evidence.sh --enforce",
+    ],
+  };
+  const stamp = reportTimestamp();
+  const jsonPath = writeJsonReport("secret-rotation", `secret-rotation-evidence-${stamp}`, payload);
+  const markdownPath = writeMarkdownReport("secret-rotation", `secret-rotation-evidence-${stamp}`, [
+    "# Secret Rotation Evidence",
+    "",
+    `Status: ${payload.status}`,
+    `Mode: ${payload.mode}`,
+    `Generated at: ${payload.generatedAt}`,
+    `Store present: ${payload.store.present ? "yes" : "no"}`,
+    `Verify: ${payload.verify.status}`,
+    `Expired secrets: ${payload.summary.expiredSecrets}`,
+    `Failed secrets: ${payload.summary.failedSecrets}`,
+    `Missing materialized files: ${payload.summary.missingMaterializedFiles}`,
+    "",
+    "| Secret | Status | Kind | Age days | Rotation days | Materialized |",
+    "| --- | --- | --- | ---: | ---: | --- |",
+    ...(secretReports.length
+      ? secretReports.map((secret) => `| ${secret.name} | ${secret.status} | ${secret.kind} | ${secret.ageDays ?? "n/a"} | ${secret.rotationDays ?? "n/a"} | ${secret.materializedPresent ? "yes" : "no"} |`)
+      : ["| n/a | plan | n/a | n/a | n/a | no |"]),
+    "",
+    "## Audit",
+    "",
+    `Entries: ${payload.audit.entries}`,
+    `Latest managed event: ${payload.audit.latestManagedEvent ? `${payload.audit.latestManagedEvent.action} at ${payload.audit.latestManagedEvent.at}` : "n/a"}`,
+    `Latest rotation event: ${payload.audit.latestRotationEvent ? `${payload.audit.latestRotationEvent.action} at ${payload.audit.latestRotationEvent.at}` : "n/a"}`,
+    "",
+    "## Issues",
+    "",
+    ...(issues.length ? issues.map((issue) => `- ${issue}`) : ["- none"]),
+    "",
+    "## Next Commands",
+    "",
+    ...payload.nextCommands.map((commandLine) => `- \`${commandLine}\``),
+  ]);
+  log(`Secret rotation evidence written to ${jsonPath} and ${markdownPath}`);
+  if (enforce && payload.status !== "passed") {
+    fail(`Secret rotation evidence failed with ${issues.length} issue(s). Report: ${jsonPath}`);
+  }
+}
+
 async function releaseArtifactGate() {
   log("==> Release artifact admission gate");
   const env = parseEnv(path.resolve(argv.envFile ?? path.join(infraRoot, ".env")));
@@ -4858,6 +5165,7 @@ function buildPreGoLiveReadinessMatrix({ steps, options, repo }) {
     "governance-check",
     "ha-config-check",
     "managed-secrets-preflight",
+    "secret-rotation-evidence-plan",
     "dr-readiness-check",
     "dr-evidence-summary",
     "release-evidence-plan",
@@ -4959,6 +5267,7 @@ async function preGoLiveEvidence() {
   await collectEvidenceStep(steps, { name: "governance-check", category: "local-policy", fn: governanceCheck });
   await collectEvidenceStep(steps, { name: "ha-config-check", category: "local-policy", fn: haConfigCheck });
   await collectEvidenceStep(steps, { name: "managed-secrets-preflight", category: "local-policy", fn: managedSecretsPreflight });
+  await collectEvidenceStep(steps, { name: "secret-rotation-evidence-plan", category: "local-policy", fn: secretRotationEvidence });
   await collectEvidenceStep(steps, { name: "dr-readiness-check", category: "local-policy", fn: drReadinessCheck });
   await collectEvidenceStep(steps, { name: "dr-evidence-summary", category: "local-policy", fn: drEvidence });
   await collectEvidenceStep(steps, { name: "release-evidence-plan", category: "local-policy", fn: () => releaseEvidence({ planOnly: true }) });
@@ -5234,6 +5543,21 @@ function goNoGoRemediation(check) {
       ],
       evidence: "reports/github-actions/github-actions-run-*.json with mode=verifyRemote, status=passed, workflow=enterprise-infra.yml and run.conclusion=success",
     },
+    "secret-rotation-evidence": {
+      actions: [
+        "Initialize or upgrade the Stexor Secret Manager store so every Compose secret is managed, materialized and audited.",
+        "Rotate stale keyrings and opaque secrets inside a planned maintenance window, then rotate the Stexor Local KMS active key.",
+        "Archive the passing non-secret rotation report outside Git before the final go/no-go gate.",
+      ],
+      commands: [
+        "sh ./scripts/stexor-secret-manager.sh init",
+        "sh ./scripts/stexor-secret-manager.sh verify",
+        "sh ./scripts/stexor-secret-manager.sh rotate --name session_signing_keys",
+        "sh ./scripts/stexor-secret-manager.sh kms-rotate",
+        "sh ./scripts/secret-rotation-evidence.sh --enforce",
+      ],
+      evidence: "reports/secret-rotation/secret-rotation-evidence-*.json with mode=evidence, status=passed, verify.status=passed and zero expired/missing secrets",
+    },
     "disaster-recovery-rpo-rto-offsite": {
       actions: [
         "Configure a remote Restic repository and run a real off-site restore drill covering PostgreSQL, MariaDB, MinIO, Keycloak and Secret Manager metadata.",
@@ -5337,6 +5661,7 @@ const evidenceBundleReportSpecs = [
   { directory: "go-no-go", prefix: "production-go-no-go-", label: "production-go-no-go", required: true },
   { directory: "production-readiness", prefix: "production-readiness-", label: "production-readiness-live", required: true },
   { directory: "github-actions", prefix: "github-actions-run-", label: "github-actions-run", required: true },
+  { directory: "secret-rotation", prefix: "secret-rotation-evidence-", label: "secret-rotation-evidence", required: true },
   { directory: "go-live", prefix: "pre-go-live-evidence-", label: "pre-go-live", required: true },
   { directory: "vps-host", prefix: "vps-host-readiness-", label: "vps-host-readiness", required: true },
   { directory: "dr", prefix: "dr-evidence-", label: "dr-evidence", required: true },
@@ -5498,6 +5823,17 @@ function evidenceBundleReportPasses(spec, payload) {
   }
   if (spec.label === "github-actions-run") {
     return { passed: payload.mode === "verifyRemote" && payload.status === "passed" && payload.run?.conclusion === "success", detail: `mode=${payload.mode ?? "missing"} status=${payload.status ?? "missing"} conclusion=${payload.run?.conclusion ?? "missing"}` };
+  }
+  if (spec.label === "secret-rotation-evidence") {
+    return {
+      passed: payload.mode === "evidence"
+        && payload.status === "passed"
+        && payload.verify?.status === "passed"
+        && Number(payload.summary?.failedSecrets ?? 1) === 0
+        && Number(payload.summary?.expiredSecrets ?? 1) === 0
+        && Number(payload.summary?.missingMaterializedFiles ?? 1) === 0,
+      detail: `mode=${payload.mode ?? "missing"} status=${payload.status ?? "missing"} verify=${payload.verify?.status ?? "missing"} expired=${payload.summary?.expiredSecrets ?? "missing"} missingFiles=${payload.summary?.missingMaterializedFiles ?? "missing"}`,
+    };
   }
   if (spec.label === "rollback-plan") {
     return { passed: payload.validated === true || payload.status === "passed", detail: `validated=${payload.validated ?? "missing"} status=${payload.status ?? "missing"}` };
@@ -5768,6 +6104,7 @@ async function productionGoNoGo() {
     load: 72,
     release: 24,
     cloudflareAccess: 24,
+    secretRotation: 24,
     ...(policy.maxAgeHours ?? {}),
   };
 
@@ -5882,6 +6219,43 @@ async function productionGoNoGo() {
         ? `missing successful verifyRemote workflow report; latestWorkflow=${latestGithubActionsRun.payload.workflow ?? "unknown"}; latestStatus=${latestGithubActionsRun.payload.status ?? "unknown"}; latestMode=${latestGithubActionsRun.payload.mode ?? "unknown"}; ${latestGithubActionsFresh.detail}`
         : githubActionsFresh.detail,
     report: githubActionsRun ?? latestGithubActionsRun,
+  });
+
+  const latestSecretRotationReport = latestJsonReport("secret-rotation", "secret-rotation-evidence-");
+  const secretRotation = latestJsonReport("secret-rotation", "secret-rotation-evidence-", (payload) => (
+    !policy.requireSecretRotationEvidence
+    || (
+      payload.mode === "evidence"
+      && payload.status === "passed"
+      && payload.verify?.status === "passed"
+      && Number(payload.summary?.failedSecrets ?? 1) === 0
+      && Number(payload.summary?.expiredSecrets ?? 1) === 0
+      && Number(payload.summary?.missingMaterializedFiles ?? 1) === 0
+      && payload.audit?.latestRotationEvent
+    )
+  ));
+  const secretRotationFresh = reportFreshDetail(secretRotation, maxAge.secretRotation);
+  const latestSecretRotationFresh = reportFreshDetail(latestSecretRotationReport, maxAge.secretRotation);
+  const secretRotationOk = !policy.requireSecretRotationEvidence || Boolean(
+    secretRotation
+    && secretRotationFresh.fresh
+    && secretRotation.payload.mode === "evidence"
+    && secretRotation.payload.status === "passed"
+    && secretRotation.payload.verify?.status === "passed"
+    && Number(secretRotation.payload.summary?.failedSecrets ?? 1) === 0
+    && Number(secretRotation.payload.summary?.expiredSecrets ?? 1) === 0
+    && Number(secretRotation.payload.summary?.missingMaterializedFiles ?? 1) === 0
+    && secretRotation.payload.audit?.latestRotationEvent
+  );
+  addGoNoGoCheck(checks, {
+    name: "secret-rotation-evidence",
+    passed: secretRotationOk,
+    detail: secretRotation
+      ? `${secretRotationFresh.detail}; mode=${secretRotation.payload.mode}; status=${secretRotation.payload.status}; verify=${secretRotation.payload.verify?.status ?? "missing"}; expired=${secretRotation.payload.summary?.expiredSecrets ?? "missing"}; missingFiles=${secretRotation.payload.summary?.missingMaterializedFiles ?? "missing"}; latestRotation=${secretRotation.payload.audit?.latestRotationEvent?.action ?? "missing"}`
+      : latestSecretRotationReport
+        ? `missing passing secret rotation evidence; latestMode=${latestSecretRotationReport.payload.mode ?? "unknown"}; latestStatus=${latestSecretRotationReport.payload.status ?? "unknown"}; latestVerify=${latestSecretRotationReport.payload.verify?.status ?? "unknown"}; ${latestSecretRotationFresh.detail}`
+        : secretRotationFresh.detail,
+    report: secretRotation ?? latestSecretRotationReport,
   });
 
   const dr = latestJsonReport("dr", "dr-evidence-");
@@ -6225,6 +6599,7 @@ async function repoCoverageCheck() {
     ["secret-scan", /Secret scan[\s\S]*secret-scan/],
     ["ha-config-check", /HA configuration check[\s\S]*ha-config-check/],
     ["managed-secrets-preflight", /Managed secrets preflight[\s\S]*managed-secrets-preflight/],
+    ["secret-rotation-evidence-plan", /Secret rotation evidence plan[\s\S]*secret-rotation-evidence/],
     ["dr-readiness-check", /DR readiness check[\s\S]*dr-readiness-check/],
     ["dr-evidence-summary", /DR evidence summary[\s\S]*dr-evidence/],
     ["offsite-restore-plan", /Off-site restore drill plan[\s\S]*offsite-restore-drill-restic --planOnly/],
@@ -8006,6 +8381,7 @@ function staticSecurityInfraOnlyCheck() {
   const backupSchedulerScript = readText(path.join(infraRoot, "scripts", "backup-scheduler.sh"));
   const evidenceBundleVerifyWrapper = readText(path.join(infraRoot, "scripts", "evidence-bundle-verify.sh"));
   const githubActionsRunEvidenceWrapper = readText(path.join(infraRoot, "scripts", "github-actions-run-evidence.sh"));
+  const secretRotationEvidenceWrapper = readText(path.join(infraRoot, "scripts", "secret-rotation-evidence.sh"));
   const opsScript = readText(path.join(infraRoot, "scripts", "stexor-ops.mjs"));
   const hostingerPostdeployScript = readText(path.join(infraRoot, "scripts", "hostinger-postdeploy.sh"));
   const productionReadinessLiveWrapper = readText(path.join(infraRoot, "scripts", "production-readiness-live.sh"));
@@ -8034,6 +8410,7 @@ function staticSecurityInfraOnlyCheck() {
     backupSchedulerScript,
     evidenceBundleVerifyWrapper,
     githubActionsRunEvidenceWrapper,
+    secretRotationEvidenceWrapper,
     hostingerPostdeployScript,
     productionReadinessLiveWrapper,
     githubWorkflow,
@@ -8081,6 +8458,7 @@ function staticSecurityInfraOnlyCheck() {
   assertMatch(githubWorkflow, /Secret scan[\s\S]*secret-scan/, "Infrastructure CI must run the secret scanner.");
   assertMatch(githubWorkflow, /HA configuration check[\s\S]*ha-config-check/, "Infrastructure CI must run the HA configuration check.");
   assertMatch(githubWorkflow, /Managed secrets preflight[\s\S]*managed-secrets-preflight/, "Infrastructure CI must run the managed secrets preflight.");
+  assertMatch(githubWorkflow, /Secret rotation evidence plan[\s\S]*secret-rotation-evidence/, "Infrastructure CI must write a secret rotation evidence plan.");
   assertMatch(githubWorkflow, /DR readiness check[\s\S]*dr-readiness-check/, "Infrastructure CI must run the DR readiness check.");
   assertMatch(githubWorkflow, /DR evidence summary[\s\S]*dr-evidence/, "Infrastructure CI must write a DR evidence summary.");
   assertMatch(githubWorkflow, /Off-site restore drill plan[\s\S]*offsite-restore-drill-restic --planOnly/, "Infrastructure CI must exercise the off-site restore drill plan.");
@@ -8107,7 +8485,13 @@ function staticSecurityInfraOnlyCheck() {
   assertMatch(githubActionsRunEvidenceWrapper, /github-actions-run-evidence/, "GitHub Actions run evidence wrapper must delegate to the Dockerized ops runner.");
   assertMatch(opsScript, /async function githubActionsRunEvidence[\s\S]*workflow_runs[\s\S]*run\.conclusion !== "success"/, "Ops script must verify remote GitHub Actions workflow success.");
   assertMatch(productionGoNoGoPolicyText, /"requireGithubActionsRunSuccess":\s*true[\s\S]*"requiredGithubWorkflow":\s*"enterprise-infra\.yml"/, "Production go/no-go policy must require a successful remote GitHub Actions workflow run.");
-  assertMatch(hostingerPostdeployScript, /production-go-no-go\.sh --enforce[\s\S]*production-readiness-live\.sh/, "Hostinger post-deploy must enforce live production readiness after production go/no-go.");
+  assertMatch(secretRotationEvidenceWrapper, /secret-rotation-evidence/, "Secret rotation evidence wrapper must delegate to the Dockerized ops runner.");
+  assertMatch(opsScript, /async function secretRotationEvidence[\s\S]*secret-rotation-evidence-[\s\S]*expiredSecrets/, "Ops script must provide non-secret secret rotation evidence reports.");
+  assertMatch(opsScript, /latestJsonReport\("secret-rotation", "secret-rotation-evidence-"/, "Production go/no-go must evaluate secret rotation evidence reports.");
+  assertMatch(productionGoNoGoPolicyText, /"requireSecretRotationEvidence":\s*true/, "Production go/no-go policy must require secret rotation evidence.");
+  assertMatch(productionGoNoGoPolicyText, /"secretRotation":\s*24/, "Production go/no-go policy must require fresh secret rotation evidence.");
+  assertMatch(productionReadinessManifest, /"secrets-management"[\s\S]*"secret-rotation-evidence"/, "Production readiness must map secrets management to the dedicated secret rotation live proof.");
+  assertMatch(hostingerPostdeployScript, /secret-rotation-evidence\.sh --enforce[\s\S]*production-go-no-go\.sh --enforce[\s\S]*production-readiness-live\.sh/, "Hostinger post-deploy must enforce secret rotation evidence, production go/no-go and live readiness.");
   assertMatch(productionReadinessLiveWrapper, /enterprise-requirements-check --manifest governance\/production-readiness\.json --requireLiveProofs/, "Production readiness live wrapper must enforce the 20-point live checklist.");
   assertMatch(opsScript, /directory: "production-readiness"[\s\S]*prefix: "production-readiness-"[\s\S]*required: true/, "Evidence bundle must require the live production readiness report.");
   assertMatch(readme, /production-readiness-live\.sh[\s\S]*reports\/production-readiness/, "README must document the live production readiness report.");
@@ -8245,6 +8629,7 @@ async function staticSecurityCheck() {
   const githubEnvironmentsWrapper = readText(path.join(infraRoot, "scripts", "github-environments.sh"));
   const githubActionsConfigWrapper = readText(path.join(infraRoot, "scripts", "github-actions-config.sh"));
   const githubActionsRunEvidenceWrapper = readText(path.join(infraRoot, "scripts", "github-actions-run-evidence.sh"));
+  const secretRotationEvidenceWrapper = readText(path.join(infraRoot, "scripts", "secret-rotation-evidence.sh"));
   const preGoLiveEvidenceWrapper = readText(path.join(infraRoot, "scripts", "pre-go-live-evidence.sh"));
   const productionGoNoGoWrapper = readText(path.join(infraRoot, "scripts", "production-go-no-go.sh"));
   const productionReadinessLiveWrapper = readText(path.join(infraRoot, "scripts", "production-readiness-live.sh"));
@@ -8306,6 +8691,7 @@ async function staticSecurityCheck() {
     "requireOffsiteRestore",
     "requireReleaseProvenance",
     "requireCloudflareAccessVerify",
+    "requireSecretRotationEvidence",
     "requireRuntimePreGoLive",
     "requireRestorePreGoLive",
     "requireGithubRemoteVerification",
@@ -8315,7 +8701,7 @@ async function staticSecurityCheck() {
       fail(`Production go/no-go policy must enable ${key}.`);
     }
   }
-  assertMatch(productionGoNoGoPolicyText, /"maxAgeHours"[\s\S]*"vpsHost"[\s\S]*"cloudflareAccess"/, "Production go/no-go policy must define evidence freshness budgets.");
+  assertMatch(productionGoNoGoPolicyText, /"maxAgeHours"[\s\S]*"vpsHost"[\s\S]*"cloudflareAccess"[\s\S]*"secretRotation"/, "Production go/no-go policy must define evidence freshness budgets.");
   assertMatch(composeBackupScheduler, /backup-scheduler:[\s\S]*profiles:\s*\r?\n\s+- backup/, "Backup scheduler must be an opt-in Compose profile.");
   assertMatch(composeBackupScheduler, /logging:[\s\S]*max-size:\s+"10m"[\s\S]*max-file:\s+"5"/, "Backup scheduler must use bounded container logging.");
   assertMatch(composeBackupScheduler, /image:\s+\$\{STEXOR_OPS_IMAGE:-stexor\/ops:local\}/, "Backup scheduler must reuse the Dockerized ops image.");
@@ -8410,9 +8796,9 @@ async function staticSecurityCheck() {
   assertMatch(hostingerPreflightScript, /compose\.hostinger\.yaml[\s\S]*compose\.waf\.yaml[\s\S]*compose\.hostinger-waf\.yaml[\s\S]*config --quiet[\s\S]*compose\.hostinger\.yaml[\s\S]*compose\.waf\.yaml[\s\S]*compose\.hostinger-waf\.yaml[\s\S]*grep -E 'image: .\+:latest/, "Hostinger preflight must render the same Hostinger+WAF compose stack used by deploy and scan it for mutable images.");
   assertMatch(hostingerPostdeployScript, /get_env\(\)[\s\S]*awk -F=[\s\S]*env_or_default\(\)/, "Hostinger post-deploy must parse .env without executing it as a shell script.");
   assertNoMatch(hostingerPostdeployScript, /(?:^|\n)\s*\.\s+"\$ENV_FILE"|set -a[\s\S]*"\$ENV_FILE"/, "Hostinger post-deploy must not source .env.");
-  assertMatch(hostingerPostdeployScript, /waf-smoke\.sh[\s\S]*infra-health\.sh[\s\S]*pre-go-live-evidence\.sh[\s\S]*production-go-no-go\.sh --enforce[\s\S]*production-readiness-live\.sh/, "Hostinger post-deploy must cover smoke, health, optional pre go-live evidence, final go/no-go and live production readiness.");
+  assertMatch(hostingerPostdeployScript, /waf-smoke\.sh[\s\S]*infra-health\.sh[\s\S]*pre-go-live-evidence\.sh[\s\S]*secret-rotation-evidence\.sh --enforce[\s\S]*production-go-no-go\.sh --enforce[\s\S]*production-readiness-live\.sh/, "Hostinger post-deploy must cover smoke, health, optional pre go-live evidence, secret rotation evidence, final go/no-go and live production readiness.");
   assertMatch(hostingerGoLiveScript, /PLAN_ONLY=1[\s\S]*--confirmLive[\s\S]*PLAN_ONLY=0/, "Hostinger go-live orchestrator must be plan-only unless explicitly confirmed.");
-  assertMatch(hostingerGoLiveScript, /vps-bootstrap-ubuntu\.sh --apply[\s\S]*vps-hardening-ubuntu\.sh --apply[\s\S]*vps-host-readiness\.sh --ssh-port \$SSH_PORT --enforce[\s\S]*hostinger-preflight\.sh[\s\S]*hostinger-postdeploy\.sh[\s\S]*github-actions-run-evidence\.sh[\s\S]*production-go-no-go\.sh --enforce[\s\S]*production-readiness-live\.sh[\s\S]*evidence-bundle\.sh/, "Hostinger go-live orchestrator must sequence optional VPS bootstrap, hardening, readiness, preflight, postdeploy, GitHub Actions evidence, go/no-go, live readiness and evidence bundle.");
+  assertMatch(hostingerGoLiveScript, /vps-bootstrap-ubuntu\.sh --apply[\s\S]*vps-hardening-ubuntu\.sh --apply[\s\S]*vps-host-readiness\.sh --ssh-port \$SSH_PORT --enforce[\s\S]*hostinger-preflight\.sh[\s\S]*hostinger-postdeploy\.sh[\s\S]*github-actions-run-evidence\.sh[\s\S]*secret-rotation-evidence\.sh --enforce[\s\S]*production-go-no-go\.sh --enforce[\s\S]*production-readiness-live\.sh[\s\S]*evidence-bundle\.sh/, "Hostinger go-live orchestrator must sequence optional VPS bootstrap, hardening, readiness, preflight, postdeploy, GitHub Actions evidence, secret rotation evidence, go/no-go, live readiness and evidence bundle.");
   assertMatch(hostingerGoLiveScript, /evidence-bundle\.sh[\s\S]*evidence-bundle-verify\.sh --requireComplete/, "Hostinger go-live orchestrator must verify the final evidence bundle when go/no-go is enabled.");
   assertMatch(hostingerGoLiveScript, /--reload-sshd[\s\S]*RELOAD_SSHD=1[\s\S]*reloadSshd[\s\S]*vps-hardening-ubuntu\.sh --apply --ssh-port "\$SSH_PORT" \$reload_flag/, "Hostinger go-live orchestrator must expose explicit SSH reload for VPS hardening.");
   assertMatch(hostingerGoLiveScript, /--replace-docker-daemon-config[\s\S]*REPLACE_DOCKER_DAEMON_CONFIG=1[\s\S]*replaceDockerDaemonConfig[\s\S]*vps-hardening-ubuntu\.sh --apply --ssh-port "\$SSH_PORT" \$reload_flag --replace-docker-daemon-config/, "Hostinger go-live orchestrator must expose explicit Docker daemon config replacement for VPS hardening.");
@@ -8635,7 +9021,14 @@ async function staticSecurityCheck() {
   assertMatch(secretManagerScript, /AES-256-GCM/, "Stexor Secret Manager must encrypt stored secrets with authenticated encryption.");
   assertMatch(secretManagerScript, /function audit\(/, "Stexor Secret Manager must append an audit trail for secret operations.");
   assertMatch(secretManagerScript, /function materialize\(/, "Stexor Secret Manager must materialize Docker secret files for Compose.");
+  assertMatch(secretManagerScript, /mariadb_root_password[\s\S]*phpmyadmin_control_password/, "Stexor Secret Manager must manage MariaDB and phpMyAdmin local Docker secrets.");
   assertMatch(opsScript, /runSecretManager\(\["verify"/, "Enterprise local secret validation must verify the proprietary secret manager store.");
+  assertMatch(secretRotationEvidenceWrapper, /secret-rotation-evidence/, "Secret rotation evidence wrapper must delegate to the Dockerized ops runner.");
+  assertMatch(opsScript, /async function secretRotationEvidence[\s\S]*verify\.status[\s\S]*expiredSecrets/, "Ops script must write a secret rotation/freshness evidence report without secret values.");
+  assertMatch(opsScript, /latestJsonReport\("secret-rotation", "secret-rotation-evidence-"/, "Production go/no-go must evaluate secret rotation evidence.");
+  assertMatch(productionGoNoGoPolicyText, /"requireSecretRotationEvidence":\s*true/, "Production go/no-go policy must require a secret rotation evidence report.");
+  assertMatch(productionGoNoGoPolicyText, /"secretRotation":\s*24/, "Production go/no-go policy must require fresh secret rotation evidence.");
+  assertMatch(productionReadinessManifest, /"secrets-management"[\s\S]*"secret-rotation-evidence"/, "Production readiness must map secrets management to dedicated secret rotation evidence.");
   assertMatch(composeDr, /archive_mode=on/, "DR overlay must enable PostgreSQL WAL archiving.");
   assertMatch(composeDr, /enterprise_postgres_wal_archive/, "DR overlay must persist WAL archives.");
   assertMatch(admissionPolicy, /cosign\.sigstore\.dev\/verified/, "Admission policy must require cosign verification.");
@@ -8709,6 +9102,7 @@ async function staticSecurityCheck() {
   assertMatch(githubWorkflow, /Secret scan[\s\S]*secret-scan/, "Infra workflow must exercise the secret scanner.");
   assertMatch(githubWorkflow, /HA configuration check[\s\S]*ha-config-check/, "Infra workflow must exercise the HA configuration gate.");
   assertMatch(githubWorkflow, /Managed secrets preflight[\s\S]*managed-secrets-preflight/, "Infra workflow must exercise the managed secrets gate.");
+  assertMatch(githubWorkflow, /Secret rotation evidence plan[\s\S]*secret-rotation-evidence/, "Infra workflow must exercise the secret rotation evidence command.");
   assertMatch(githubWorkflow, /DR readiness check[\s\S]*dr-readiness-check/, "Infra workflow must exercise the DR readiness gate.");
   assertMatch(githubWorkflow, /DEPLOY_RUN_PRODUCTION_PREFLIGHT:\s+"1"[\s\S]*DEPLOY_RUN_PRE_GO_LIVE:\s+"1"[\s\S]*DEPLOY_RUN_GO_NO_GO:\s+"1"/, "Production deploy workflow must enforce preflight, pre-go-live evidence and go/no-go.");
   assertMatch(githubWorkflow, /DEPLOY_PRE_GO_LIVE_RESTORE_DRILL:\s+"1"[\s\S]*DEPLOY_PRE_GO_LIVE_OFFSITE_RESTORE_DRY_RUN:\s+"1"/, "Production deploy workflow must require restore and off-site restore evidence.");
@@ -9030,6 +9424,8 @@ async function validateLocalSecrets() {
     "keycloak_admin_password",
     "nats_password",
     "minio_root_password",
+    "mariadb_root_password",
+    "phpmyadmin_control_password",
     "grafana_admin_password",
     "session_secret",
     "session_signing_keys",
@@ -9360,6 +9756,7 @@ Commands:
   restore-test-secret-manager-metadata
   restore-postgres
   restore-test-postgres
+  secret-rotation-evidence
   secret-scan
   secret-manager
   security-matrix
@@ -9441,6 +9838,7 @@ const commands = {
   "restore-test-secret-manager-metadata": restoreTestSecretManagerMetadata,
   "restore-postgres": restorePostgres,
   "restore-test-postgres": restoreTestPostgres,
+  "secret-rotation-evidence": secretRotationEvidence,
   "secret-scan": secretScan,
   "secret-manager": secretManager,
   "security-matrix": securityMatrix,

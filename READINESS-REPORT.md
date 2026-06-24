@@ -47,6 +47,7 @@ Current scope: repository and local Docker evidence before Hostinger VPS deploym
 - GitHub branch protection policy has a containerized dry-run/apply/verify command; live enforcement still needs an admin token and repository access.
 - GitHub deployment environments for staging/production are now versioned with dry-run/apply/verify, production reviewers and serialized deploys.
 - GitHub Actions runtime secrets/vars are versioned and can be verified remotely without exposing secret values.
+- Secret rotation evidence now writes non-secret reports under `reports/secret-rotation/` and production go/no-go requires fresh passing secret/KMS/audit evidence.
 - Pre go-live evidence pack aggregates local gates, provider dry-runs and remaining VPS/provider proof into ignored JSON/Markdown reports.
 - Off-site restore drill and release evidence plan are included in the pre go-live evidence flow.
 - `production-go-no-go.sh` aggregates live evidence reports and writes ignored JSON/Markdown reports under `reports/go-no-go/`; `--enforce` blocks production if any required proof is missing.
@@ -84,6 +85,7 @@ Current scope: repository and local Docker evidence before Hostinger VPS deploym
 
 ```sh
 sh ./scripts/stexor-secret-manager.sh verify
+sh ./scripts/secret-rotation-evidence.sh --enforce
 sh ./scripts/static-security-check.sh
 sh ./scripts/linux-portability-check.sh
 sh ./scripts/infra-health.sh

@@ -23,6 +23,7 @@ Use this checklist on the Hostinger Ubuntu LTS VPS before exposing public traffi
 - [ ] No `localhost`, `example.com`, `change_me` or placeholder production values remain.
 - [ ] `sh ./scripts/stexor-secret-manager.sh init` executed.
 - [ ] `sh ./scripts/stexor-secret-manager.sh verify` passed.
+- [ ] `sh ./scripts/secret-rotation-evidence.sh --enforce` passed and the JSON/Markdown reports under `reports/secret-rotation/` were archived outside Git.
 - [ ] `sh ./scripts/hostinger-preflight.sh .env` passed and rendered the full Hostinger+WAF Compose stack, including `compose.waf.yaml` and `compose.hostinger-waf.yaml`.
 - [ ] `sh ./scripts/linux-portability-check.sh` passed and the JSON/Markdown report under `reports/linux-portability/` was archived outside Git.
 - [ ] No mutable `:latest` image exists in the rendered Hostinger+WAF stack.

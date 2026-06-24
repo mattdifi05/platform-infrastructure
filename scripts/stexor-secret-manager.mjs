@@ -18,6 +18,8 @@ const requiredSecrets = [
   { name: "keycloak_admin_password", kind: "opaque", bytes: 36, rotationDays: 90 },
   { name: "nats_password", kind: "opaque", bytes: 36, rotationDays: 90, manualRotation: true },
   { name: "minio_root_password", kind: "opaque", bytes: 36, rotationDays: 90 },
+  { name: "mariadb_root_password", kind: "opaque", bytes: 36, rotationDays: 90, manualRotation: true },
+  { name: "phpmyadmin_control_password", kind: "opaque", bytes: 36, rotationDays: 90 },
   { name: "grafana_admin_password", kind: "opaque", bytes: 36, rotationDays: 90 },
   { name: "session_secret", kind: "opaque", bytes: 48, rotationDays: 90 },
   { name: "session_signing_keys", kind: "keyring", bytes: 48, keyPrefix: "s", rotationDays: 60 },

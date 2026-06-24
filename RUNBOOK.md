@@ -273,7 +273,10 @@ sh ./scripts/stexor-secret-manager.sh rotate --name session_signing_keys
 sh ./scripts/stexor-secret-manager.sh rotate --name projects_gateway_signing_keys
 sh ./scripts/stexor-secret-manager.sh rotate --name backup_signing_keys
 sh ./scripts/stexor-secret-manager.sh rotate --name alertmanager_webhook_token
+sh ./scripts/secret-rotation-evidence.sh --enforce
 ```
+
+`secret-rotation-evidence.sh --enforce` validates the encrypted store, materialized Docker secret files, audit log, Stexor Local KMS age and every secret `rotationDays` window without printing secret values. Archive `reports/secret-rotation/secret-rotation-evidence-*.json` outside Git before production go/no-go.
 
 `projects.localhost.com` is a protected local control page. It sends OTP codes to `PROJECTS_GATEWAY_EMAIL`, then writes a signed `HttpOnly`, `Secure`, `SameSite=Lax` cookie using `projects_gateway_signing_keys`. The cookie is intentionally long-lived for the local browser. To revoke all sessions, rotate `projects_gateway_signing_keys` and recreate `php-apache`.
 
@@ -555,9 +558,10 @@ sh ./scripts/production-readiness-live.sh
 The summary command writes `reports/go-no-go/production-go-no-go-*.json` and
 `.md`. `--enforce` fails unless the latest evidence proves VPS bootstrap and
 hardening apply reports, VPS host readiness, Cloudflare Access admin
-`--verifyRemote`, successful remote GitHub Actions run evidence, DR/off-site
-restore, real alert delivery, external uptime, public 50/100/500 load, release
-evidence with rollback/provenance and complete pre-go-live evidence. Treat
+`--verifyRemote`, successful remote GitHub Actions run evidence, secret
+rotation evidence, DR/off-site restore, real alert delivery, external uptime,
+public 50/100/500 load, release evidence with rollback/provenance and complete
+pre-go-live evidence. Treat
 `no-go` as a hard stop before public traffic changes. A `no-go` report carries a JSON
 `remediation` array and a Markdown remediation checklist with the exact
 follow-up commands and evidence expected for each failed gate.

@@ -332,6 +332,10 @@ step_github_actions_run_evidence() {
   sh ./scripts/github-actions-run-evidence.sh --repo "$DEPLOY_REPO_VALUE" --workflow enterprise-infra.yml --branch main --verifyRemote
 }
 
+step_secret_rotation_evidence() {
+  sh ./scripts/secret-rotation-evidence.sh --enforce
+}
+
 step_production_readiness_live() {
   sh ./scripts/production-readiness-live.sh
 }
@@ -404,10 +408,12 @@ run_step "hostinger-postdeploy" "sh ./scripts/hostinger-postdeploy.sh $ENV_FILE"
 
 if [ "$RUN_GO_NO_GO" -eq 1 ]; then
   run_step "github-actions-run-evidence" "sh ./scripts/github-actions-run-evidence.sh --repo $DEPLOY_REPO_VALUE --workflow enterprise-infra.yml --branch main --verifyRemote" step_github_actions_run_evidence
+  run_step "secret-rotation-evidence" "sh ./scripts/secret-rotation-evidence.sh --enforce" step_secret_rotation_evidence
   run_step "production-go-no-go" "sh ./scripts/production-go-no-go.sh --enforce" step_go_no_go
   run_step "production-readiness-live" "sh ./scripts/production-readiness-live.sh" step_production_readiness_live
 else
   add_step "github-actions-run-evidence" "skipped" "sh ./scripts/github-actions-run-evidence.sh --repo OWNER/REPO --workflow enterprise-infra.yml --branch main --verifyRemote" "enable with --go-no-go or --full-evidence"
+  add_step "secret-rotation-evidence" "skipped" "sh ./scripts/secret-rotation-evidence.sh --enforce" "enable with --go-no-go or --full-evidence"
   add_step "production-go-no-go" "skipped" "sh ./scripts/production-go-no-go.sh --enforce" "enable with --go-no-go or --full-evidence"
   add_step "production-readiness-live" "skipped" "sh ./scripts/production-readiness-live.sh" "enable with --go-no-go or --full-evidence"
 fi

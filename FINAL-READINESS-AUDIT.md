@@ -186,6 +186,7 @@ scripts/ui-publish-dry-run.mjs
 - GitHub staging/production environment dry-run/apply/verify command with production reviewer enforcement.
 - GitHub Actions runtime secret/variable verification command.
 - GitHub Actions run evidence command for successful remote workflow proof on the release commit.
+- Secret rotation evidence command with non-secret reports for Secret Manager store coverage, materialized files, audit trail, KMS age and per-secret freshness.
 - Pre go-live evidence pack with JSON/Markdown reports under `reports/go-live/`.
 - Production go/no-go evidence gate with JSON/Markdown reports under `reports/go-no-go/`.
 - Live production readiness checklist with JSON/Markdown reports under `reports/production-readiness/`.
@@ -273,6 +274,7 @@ All commands listed above passed in the local evidence gathered during this hard
 - Dockerized ops runner initially failed local HTTPS health checks from inside containers; Linux host networking and local host aliases were added.
 - Nested Docker path mapping initially failed for backup/SBOM flows; host/container source mappings were added.
 - Managed-secret overlay missed MariaDB/phpMyAdmin secrets; they are now external Docker secrets.
+- Secret rotation/freshness proof was only implicit through Secret Manager verify; `secret-rotation-evidence.sh --enforce` now writes a required go/no-go report under `reports/secret-rotation/`.
 - Application CI and docs still referenced PowerShell or direct host-Node infra gates; they now use bash/containerized gates or `scripts/run-infra-ops.mjs`.
 - Production go/no-go now requires a remote successful `enterprise-infra` workflow report for the release commit.
 - Alerting had email/generic webhook only; optional native Discord and Telegram delivery with metrics was added.
@@ -306,7 +308,7 @@ All commands listed above passed in the local evidence gathered during this hard
 | 10 | Dependency management | Renovate configured for app/infra. | Dependency dashboard and production update cadence must be operated. |
 | 11 | Log hygiene | Redaction, bounded logs, Loki retention and dashboards added. | Retention/capacity must be tuned on VPS disk size. |
 | 12 | Runbook definitivo | README, RUNBOOK, SECURITY, readiness and VPS checklist updated. | Must be followed during first real deploy. |
-| 13 | Security hardening | Secrets, CSP, rate limits, WAF, headers, admin blocks and audit gates implemented. | Cloudflare and VPS hardening must be applied live. |
+| 13 | Security hardening | Secrets, rotation evidence, CSP, rate limits, WAF, headers, admin blocks and audit gates implemented. | Cloudflare and VPS hardening must be applied live. |
 | 14 | Load test | 50/100/500 benchmark command and local quick run completed. | Public-path VPS load benchmark still required. |
 | 15 | Production-like env | Local, staging, Hostinger and production overlays exist. | Real staging and production hosts must be exercised. |
 | 16 | Remove Windows dependency | Host-critical ops moved to Linux containers; LF normalization configured. | Docker Desktop compatibility retained; VPS requires no Windows. |
@@ -357,7 +359,7 @@ Use `VPS-PREDEPLOY-CHECKLIST.md` as the canonical checklist. Minimum go/no-go:
 1. Host bootstrap hardened.
 2. VPS host readiness report passed and archived.
 3. .env created from examples with no placeholders.
-4. Secret manager initialized and verified.
+4. Secret manager initialized, verified and `secret-rotation-evidence.sh --enforce` archived.
 5. Hostinger compose render passes.
 6. Cloudflare DNS proxied, Access admin applications verified, and origin lock applied.
 7. Dockerized backup scheduler enabled and backup execution reports reviewed.

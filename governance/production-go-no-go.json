@@ -11,7 +11,8 @@
     "load": 72,
     "release": 24,
     "cloudflareAccess": 24,
-    "githubActionsRun": 24
+    "githubActionsRun": 24,
+    "secretRotation": 24
   },
   "requiredLoadProfiles": [50, 100, 500],
   "requirePublicLoadTarget": true,
@@ -22,6 +23,7 @@
   "requireCleanReleaseGit": true,
   "requireCloudflareAccessVerify": true,
   "requireGithubActionsRunSuccess": true,
+  "requireSecretRotationEvidence": true,
   "requiredGithubWorkflow": "enterprise-infra.yml",
   "requireRuntimePreGoLive": true,
   "requireRestorePreGoLive": true,

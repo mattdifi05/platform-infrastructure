@@ -75,6 +75,7 @@ if [ "${DEPLOY_RUN_PRE_GO_LIVE:-0}" = "1" ]; then
 fi
 
 if [ "${DEPLOY_RUN_GO_NO_GO:-0}" = "1" ]; then
+  sh ./scripts/secret-rotation-evidence.sh --enforce
   sh ./scripts/production-go-no-go.sh --enforce
   sh ./scripts/production-readiness-live.sh
 fi

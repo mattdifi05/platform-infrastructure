@@ -74,10 +74,11 @@
       "evidence": [
         { "type": "file", "path": "scripts/stexor-secret-manager.mjs" },
         { "type": "file", "path": "compose.managed-secrets.yaml" },
+        { "type": "command", "name": "secret-rotation-evidence" },
         { "type": "workflow", "pattern": "Managed secrets preflight[\\s\\S]*managed-secrets-preflight" }
       ],
-      "liveProof": "Materialize production Docker secrets and rotate them through the managed store.",
-      "liveProofChecks": ["pre-go-live-evidence-complete"]
+      "liveProof": "Materialize production Docker secrets, rotate them through the managed store and archive a passing secret-rotation-evidence report.",
+      "liveProofChecks": ["secret-rotation-evidence", "pre-go-live-evidence-complete"]
     },
     {
       "id": "tls-https-production-ready",
