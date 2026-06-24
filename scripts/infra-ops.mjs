@@ -7588,7 +7588,7 @@ async function repoCoverageCheck() {
     ["production-live-proof-rejection", /Production live proof gate rejects missing evidence[\s\S]*enterprise-requirements-check --manifest governance\/production-readiness\.json --requireLiveProofs/],
     ["static-security-infra-only", /static-security-check --infraOnly/],
     ["repository-coverage", /repo-coverage-check/],
-    ["ci-evidence-artifact", /Upload CI evidence reports[\s\S]*actions\/upload-artifact@v4[\s\S]*reports\/[\s\S]*\.tmp\/evidence-bundles\/[\s\S]*retention-days:\s+30/],
+    ["ci-evidence-artifact", /Upload CI evidence reports[\s\S]*actions\/upload-artifact@v7[\s\S]*reports\/[\s\S]*\.tmp\/evidence-bundles\/[\s\S]*retention-days:\s+30/],
     ["least-privilege-permissions", /permissions:\s*\r?\n\s+contents:\s+read(?![\s\S]*security-events:\s+write)/],
     ["compose-job-timeout", /compose-and-policy:[\s\S]*timeout-minutes:\s+45/],
     ["shell-job-timeout", /shell-syntax:[\s\S]*timeout-minutes:\s+10/],
@@ -9489,7 +9489,7 @@ function staticSecurityInfraOnlyCheck() {
   assertMatch(githubWorkflow, /DEPLOY_SSH_PORT:\s+\$\{\{ vars\.DEPLOY_SSH_PORT \}\}/, "Production deploy workflow must pass the configured SSH port.");
   assertMatch(githubWorkflow, /DEPLOY_RUN_PRODUCTION_PREFLIGHT:\s+"1"[\s\S]*DEPLOY_RUN_PRE_GO_LIVE:\s+"1"[\s\S]*DEPLOY_RUN_GO_NO_GO:\s+"1"/, "Production deploy workflow must enforce preflight, pre-go-live evidence and go/no-go.");
   assertMatch(githubWorkflow, /DEPLOY_PRE_GO_LIVE_RESTORE_DRILL:\s+"1"[\s\S]*DEPLOY_PRE_GO_LIVE_OFFSITE_RESTORE_DRY_RUN:\s+"1"/, "Production deploy workflow must require restore and off-site restore evidence.");
-  assertMatch(githubWorkflow, /Upload CI evidence reports[\s\S]*actions\/upload-artifact@v4[\s\S]*reports\/[\s\S]*\.tmp\/evidence-bundles\/[\s\S]*retention-days:\s+30/, "Infrastructure CI must upload non-secret evidence reports.");
+  assertMatch(githubWorkflow, /Upload CI evidence reports[\s\S]*actions\/upload-artifact@v7[\s\S]*reports\/[\s\S]*\.tmp\/evidence-bundles\/[\s\S]*retention-days:\s+30/, "Infrastructure CI must upload non-secret evidence reports.");
   assertMatch(githubWorkflow, /Evidence bundle integrity verify[\s\S]*evidence-bundle-verify/, "Infrastructure CI must verify evidence bundle manifest integrity.");
   assertMatch(githubWorkflow, /Pre go-live evidence report[\s\S]*pre-go-live-evidence --infraOnly --repo/, "Infrastructure CI must produce an infrastructure-only pre go-live evidence report.");
   assertMatch(githubWorkflow, /Enterprise requirements traceability[\s\S]*enterprise-requirements-check/, "Infrastructure CI must verify enterprise requirements traceability.");
@@ -10215,7 +10215,7 @@ async function staticSecurityCheck() {
   assertMatch(githubWorkflow, /DR readiness check[\s\S]*dr-readiness-check/, "Infra workflow must exercise the DR readiness gate.");
   assertMatch(githubWorkflow, /DEPLOY_RUN_PRODUCTION_PREFLIGHT:\s+"1"[\s\S]*DEPLOY_RUN_PRE_GO_LIVE:\s+"1"[\s\S]*DEPLOY_RUN_GO_NO_GO:\s+"1"/, "Production deploy workflow must enforce preflight, pre-go-live evidence and go/no-go.");
   assertMatch(githubWorkflow, /DEPLOY_PRE_GO_LIVE_RESTORE_DRILL:\s+"1"[\s\S]*DEPLOY_PRE_GO_LIVE_OFFSITE_RESTORE_DRY_RUN:\s+"1"/, "Production deploy workflow must require restore and off-site restore evidence.");
-  assertMatch(githubWorkflow, /Upload CI evidence reports[\s\S]*actions\/upload-artifact@v4[\s\S]*reports\/[\s\S]*\.tmp\/evidence-bundles\/[\s\S]*retention-days:\s+30/, "Infra workflow must upload non-secret CI evidence reports.");
+  assertMatch(githubWorkflow, /Upload CI evidence reports[\s\S]*actions\/upload-artifact@v7[\s\S]*reports\/[\s\S]*\.tmp\/evidence-bundles\/[\s\S]*retention-days:\s+30/, "Infra workflow must upload non-secret CI evidence reports.");
   assertMatch(githubWorkflow, /permissions:\s*\r?\n\s+contents:\s+read/, "Infra workflow must declare least-privilege read permissions.");
   assertNoMatch(githubWorkflow, /security-events:\s+write|contents:\s+write/, "Infra workflow must not request unused write permissions.");
   assertMatch(githubWorkflow, /compose-and-policy:[\s\S]*timeout-minutes:\s+45[\s\S]*shell-syntax:[\s\S]*timeout-minutes:\s+10[\s\S]*dast-zap:[\s\S]*timeout-minutes:\s+45[\s\S]*deploy-vps:[\s\S]*timeout-minutes:\s+90/, "Infra workflow jobs must set explicit timeouts.");

@@ -16,7 +16,7 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Checkout infrastructure
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
 
       - name: GitHub Actions workflow lint
         run: |
@@ -201,7 +201,7 @@ jobs:
 
       - name: Upload CI evidence reports
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: infra-ci-evidence
           path: |
@@ -215,7 +215,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout infrastructure
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
       - name: Check shell scripts parse
         run: |
           for file in scripts/*.sh; do
@@ -230,14 +230,14 @@ jobs:
       name: staging
       url: ${{ vars.DAST_TARGET }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Run ZAP baseline against staging
         env:
           DAST_TARGET: ${{ vars.DAST_TARGET }}
         run: |
           test -n "$DAST_TARGET"
           sh ./scripts/dast-zap-baseline.sh "$DAST_TARGET"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: zap-baseline
@@ -256,7 +256,7 @@ jobs:
       group: infra-production-deploy
       cancel-in-progress: false
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Install SSH key
         env:
           DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}

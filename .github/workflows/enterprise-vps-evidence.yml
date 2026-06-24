@@ -59,7 +59,7 @@ jobs:
       name: production
     steps:
       - name: Checkout infrastructure
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
 
       - name: Install SSH key
         env:
@@ -162,7 +162,7 @@ jobs:
 
       - name: Upload VPS evidence reports
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: enterprise-vps-evidence
           path: |

@@ -8,7 +8,7 @@ x-default-logging: &default_logging
 
 services:
   traefik:
-    image: ${TRAEFIK_IMAGE:-traefik:v3.7.5@sha256:d6858791f9e74df44ca4014166647c41cdc2abd3bf2a71b832ca4e1c6a91b257}
+    image: ${TRAEFIK_IMAGE:-traefik:v3.7.5@sha256:e4d98158c01ad752fc1071d4e9573788747230d902cdde00a772516e692d07c9}
     container_name: enterprise-traefik
     init: true
     pids_limit: 256
@@ -38,7 +38,7 @@ services:
       retries: 5
 
   postgres:
-    image: ${POSTGRES_IMAGE:-postgres:18-alpine@sha256:96d56f7f57c6aacd1fcb908bc83b345ec5f83231ee486dd66a1baadce274db88}
+    image: ${POSTGRES_IMAGE:-postgres:18-alpine@sha256:1b1689b20d16a014a3d195653381cf2caa75a41a92d93b255a9d6ea29fd353aa}
     container_name: enterprise-postgres
     init: true
     pids_limit: 1024
@@ -68,7 +68,7 @@ services:
       retries: 10
 
   redis:
-    image: ${REDIS_IMAGE:-redis:8.6-alpine@sha256:d103b9cd0b54b98b2c38e2b19220ee7adfe4b0fb22c406baa75f321179da2f00}
+    image: ${REDIS_IMAGE:-redis:8.6-alpine@sha256:2cc044fc5a07c9b701f8f1255a309ae9ad7856e694ac03513bf3648c01e40763}
     container_name: enterprise-redis
     init: true
     pids_limit: 256
@@ -143,7 +143,7 @@ services:
       start_period: 60s
 
   nats:
-    image: ${NATS_IMAGE:-nats:2.14-alpine@sha256:b039b46715673a9436989cfc49dde04e6bd57e205347478a58214789baf5efdc}
+    image: ${NATS_IMAGE:-nats:2.14-alpine@sha256:952d157e28d5394a211229bd57a7b37ff9f184e58e2c8486a08fa909fd254e32}
     container_name: enterprise-nats
     init: true
     pids_limit: 256
@@ -210,7 +210,7 @@ services:
       context: .
       dockerfile: docker/php-apache.Dockerfile
       args:
-        PHP_IMAGE: ${PHP_IMAGE:-php:8.5-apache@sha256:65094755171975e565538ddbfa589847548e80d15adfbb9064a20b86f8485215}
+        PHP_IMAGE: ${PHP_IMAGE:-php:8.5-apache@sha256:c6e17deefe4b7f79fd6a826a3d5f61f28035c3a7c12a1b446bf45f0e07bee9b2}
         COMPOSER_IMAGE: ${COMPOSER_IMAGE:-composer:2.10.1@sha256:7725eb4545c438629ae8bde3ef0bb9a5038ef566126ad878442a69007242d267}
         PHP_EXTENSION_INSTALLER_IMAGE: ${PHP_EXTENSION_INSTALLER_IMAGE:-mlocati/php-extension-installer:2.11.12@sha256:b6d3fa381b9ba5cf051117c1c601d6a523b590e534bf3d56eb4fbe352949c138}
     container_name: php-apache
@@ -276,7 +276,7 @@ services:
       retries: 30
 
   phpmyadmin:
-    image: ${PHPMYADMIN_IMAGE:-phpmyadmin:5.2.3@sha256:51b74806646fb15aa59df2a2e73573969a44f4b7d4729e4a5c4ba364bc20ec77}
+    image: ${PHPMYADMIN_IMAGE:-phpmyadmin:5.2.3@sha256:b16dc88d6e62b186dc4864adac4996fe0238587aa9f5ed507dcfc3894903a3f6}
     container_name: phpmyadmin
     profiles:
       - admin
