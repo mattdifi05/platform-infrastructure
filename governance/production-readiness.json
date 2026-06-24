@@ -121,11 +121,12 @@
       "title": "Healthcheck su tutti i servizi",
       "state": "repo-ready",
       "evidence": [
+        { "type": "command", "name": "compose-healthcheck-coverage" },
         { "type": "command", "name": "infra-health" },
         { "type": "pattern", "path": "compose.yaml", "pattern": "healthcheck:" },
         { "type": "pattern", "path": "scripts/stexor-ops.mjs", "pattern": "async function infraHealth" }
       ],
-      "liveProof": "Run infra-health after deploy and before go-live against the real VPS stack.",
+      "liveProof": "Pass compose-healthcheck-coverage and run infra-health after deploy against the real VPS stack.",
       "liveProofChecks": ["pre-go-live-evidence-complete"]
     },
     {

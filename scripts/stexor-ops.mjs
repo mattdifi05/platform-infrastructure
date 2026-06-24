@@ -3780,6 +3780,126 @@ async function managedSecretsPreflight() {
   log("Managed secrets / KMS preflight passed.");
 }
 
+function dockerComposeConfigJson({ envFile, projectName, files, profiles = [] }) {
+  const args = ["compose", "--env-file", envFile, "-p", projectName];
+  for (const file of files) {
+    args.push("-f", file);
+  }
+  for (const profile of profiles) {
+    args.push("--profile", profile);
+  }
+  args.push("config", "--format", "json");
+  const text = output("docker", args);
+  try {
+    return JSON.parse(text);
+  } catch (error) {
+    fail(`Docker Compose JSON config parse failed for ${projectName}: ${String(error?.message ?? error)}`);
+  }
+}
+
+function composeServiceHasHealthcheck(service) {
+  return Boolean(service?.healthcheck && service.healthcheck.disable !== true && service.healthcheck.test);
+}
+
+async function composeHealthcheckCoverage() {
+  log("==> Compose healthcheck coverage");
+  const stacks = [
+    {
+      name: "local-waf",
+      envFile: ".env",
+      projectName: "stexor_platform_health_local",
+      files: ["compose.yaml", "compose.build.yaml", "compose.secrets.yaml", "compose.waf.yaml"],
+      profiles: [],
+    },
+    {
+      name: "hostinger-waf",
+      envFile: ".env.hostinger.example",
+      projectName: "stexor_platform_health_hostinger",
+      files: ["compose.yaml", "compose.build.yaml", "compose.secrets.yaml", "compose.hostinger.yaml", "compose.waf.yaml", "compose.hostinger-waf.yaml"],
+      profiles: [],
+    },
+    {
+      name: "backup-scheduler",
+      envFile: ".env",
+      projectName: "stexor_platform_health_backup",
+      files: ["compose.yaml", "compose.secrets.yaml", "compose.backup-scheduler.yaml"],
+      profiles: ["backup"],
+    },
+  ];
+  const issues = [];
+  const stackReports = [];
+  for (const stack of stacks) {
+    const config = dockerComposeConfigJson(stack);
+    const services = Object.entries(config.services ?? {})
+      .map(([name, service]) => ({
+        name,
+        hasHealthcheck: composeServiceHasHealthcheck(service),
+        restart: service.restart ?? null,
+        profiles: Array.isArray(service.profiles) ? service.profiles : [],
+      }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+    const missing = services
+      .filter((service) => !service.hasHealthcheck)
+      .map((service) => service.name);
+    for (const serviceName of missing) {
+      issues.push(`${stack.name}: service ${serviceName} has no healthcheck`);
+    }
+    stackReports.push({
+      name: stack.name,
+      envFile: stack.envFile,
+      files: stack.files,
+      profiles: stack.profiles,
+      serviceCount: services.length,
+      missingHealthchecks: missing,
+      services,
+    });
+  }
+  const payload = {
+    generatedAt: new Date().toISOString(),
+    status: issues.length ? "failed" : "passed",
+    stacks: stackReports,
+    summary: {
+      stacks: stackReports.length,
+      services: stackReports.reduce((sum, stack) => sum + stack.serviceCount, 0),
+      missingHealthchecks: issues.length,
+    },
+    issues,
+  };
+  const stamp = reportTimestamp();
+  const jsonPath = writeJsonReport("healthchecks", `healthcheck-coverage-${stamp}`, payload);
+  const markdownPath = writeMarkdownReport("healthchecks", `healthcheck-coverage-${stamp}`, [
+    "# Compose Healthcheck Coverage",
+    "",
+    `Status: ${payload.status}`,
+    `Generated at: ${payload.generatedAt}`,
+    `Stacks: ${payload.summary.stacks}`,
+    `Services checked: ${payload.summary.services}`,
+    `Missing healthchecks: ${payload.summary.missingHealthchecks}`,
+    "",
+    "## Stacks",
+    "",
+    ...stackReports.flatMap((stack) => [
+      `### ${stack.name}`,
+      "",
+      `Files: ${stack.files.join(", ")}`,
+      `Profiles: ${stack.profiles.join(", ") || "none"}`,
+      "",
+      "| Service | Healthcheck | Restart | Profiles |",
+      "| --- | --- | --- | --- |",
+      ...stack.services.map((service) => `| ${service.name} | ${service.hasHealthcheck ? "yes" : "no"} | ${service.restart ?? "n/a"} | ${service.profiles.join(", ") || "none"} |`),
+      "",
+    ]),
+    "## Issues",
+    "",
+    ...(issues.length ? issues.map((issue) => `- ${issue}`) : ["- none"]),
+  ]);
+  log(`Compose healthcheck coverage report written to ${jsonPath} and ${markdownPath}`);
+  if (issues.length && !booleanFlag(argv.allowFailures)) {
+    fail(`Compose healthcheck coverage failed with ${issues.length} issue(s). Report: ${jsonPath}`);
+  }
+  log("Compose healthcheck coverage passed.");
+}
+
 const managedSecretRotationExpectations = [
   { name: "postgres_superuser_password", kind: "opaque", rotationDays: 90, manualRotation: true },
   { name: "app_db_password", kind: "opaque", rotationDays: 90, manualRotation: true },
@@ -5165,6 +5285,7 @@ function buildPreGoLiveReadinessMatrix({ steps, options, repo }) {
     "governance-check",
     "ha-config-check",
     "managed-secrets-preflight",
+    "compose-healthcheck-coverage",
     "secret-rotation-evidence-plan",
     "dr-readiness-check",
     "dr-evidence-summary",
@@ -5267,6 +5388,7 @@ async function preGoLiveEvidence() {
   await collectEvidenceStep(steps, { name: "governance-check", category: "local-policy", fn: governanceCheck });
   await collectEvidenceStep(steps, { name: "ha-config-check", category: "local-policy", fn: haConfigCheck });
   await collectEvidenceStep(steps, { name: "managed-secrets-preflight", category: "local-policy", fn: managedSecretsPreflight });
+  await collectEvidenceStep(steps, { name: "compose-healthcheck-coverage", category: "local-policy", fn: composeHealthcheckCoverage });
   await collectEvidenceStep(steps, { name: "secret-rotation-evidence-plan", category: "local-policy", fn: secretRotationEvidence });
   await collectEvidenceStep(steps, { name: "dr-readiness-check", category: "local-policy", fn: drReadinessCheck });
   await collectEvidenceStep(steps, { name: "dr-evidence-summary", category: "local-policy", fn: drEvidence });
@@ -5661,6 +5783,7 @@ const evidenceBundleReportSpecs = [
   { directory: "go-no-go", prefix: "production-go-no-go-", label: "production-go-no-go", required: true },
   { directory: "production-readiness", prefix: "production-readiness-", label: "production-readiness-live", required: true },
   { directory: "github-actions", prefix: "github-actions-run-", label: "github-actions-run", required: true },
+  { directory: "healthchecks", prefix: "healthcheck-coverage-", label: "healthcheck-coverage", required: true },
   { directory: "secret-rotation", prefix: "secret-rotation-evidence-", label: "secret-rotation-evidence", required: true },
   { directory: "go-live", prefix: "pre-go-live-evidence-", label: "pre-go-live", required: true },
   { directory: "vps-host", prefix: "vps-host-readiness-", label: "vps-host-readiness", required: true },
@@ -5823,6 +5946,9 @@ function evidenceBundleReportPasses(spec, payload) {
   }
   if (spec.label === "github-actions-run") {
     return { passed: payload.mode === "verifyRemote" && payload.status === "passed" && payload.run?.conclusion === "success", detail: `mode=${payload.mode ?? "missing"} status=${payload.status ?? "missing"} conclusion=${payload.run?.conclusion ?? "missing"}` };
+  }
+  if (spec.label === "healthcheck-coverage") {
+    return { passed: payload.status === "passed" && Number(payload.summary?.missingHealthchecks ?? 1) === 0, detail: `status=${payload.status ?? "missing"} missing=${payload.summary?.missingHealthchecks ?? "missing"}` };
   }
   if (spec.label === "secret-rotation-evidence") {
     return {
@@ -6599,6 +6725,7 @@ async function repoCoverageCheck() {
     ["secret-scan", /Secret scan[\s\S]*secret-scan/],
     ["ha-config-check", /HA configuration check[\s\S]*ha-config-check/],
     ["managed-secrets-preflight", /Managed secrets preflight[\s\S]*managed-secrets-preflight/],
+    ["compose-healthcheck-coverage", /Compose healthcheck coverage[\s\S]*compose-healthcheck-coverage/],
     ["secret-rotation-evidence-plan", /Secret rotation evidence plan[\s\S]*secret-rotation-evidence/],
     ["dr-readiness-check", /DR readiness check[\s\S]*dr-readiness-check/],
     ["dr-evidence-summary", /DR evidence summary[\s\S]*dr-evidence/],
@@ -8430,6 +8557,7 @@ function staticSecurityInfraOnlyCheck() {
   assertMatch(composeSecrets, /SESSION_SIGNING_KEYS_FILE:\s+\/run\/secrets\/session_signing_keys/, "Local secret overlay must consume session signing keys from Docker secrets.");
   assertMatch(composeSecrets, /MARIADB_ROOT_PASSWORD_FILE:\s+\/run\/secrets\/mariadb_root_password/, "Local secret overlay must consume MariaDB root password from Docker secrets.");
   assertMatch(composeWaf, /owasp\/modsecurity-crs:4\.26\.0-nginx-202605200705@sha256:[a-f0-9]{64}/, "WAF image must be a pinned OWASP CRS image.");
+  assertMatch(composeWaf, /waf:[\s\S]*healthcheck:[\s\S]*nginx -t[\s\S]*curl -ksS/, "WAF service must define a container healthcheck.");
   assertMatch(composeWaf, /BLOCKING_PARANOIA:\s+\$\{WAF_BLOCKING_PARANOIA:-2\}/, "WAF must default to CRS blocking paranoia level 2.");
   assertMatch(composeWaf, /REQUEST-900-EXCLUSION-RULES-BEFORE-CRS\.conf/, "WAF must load local pre-CRS rules.");
   assertMatch(composeHostingerWaf, /ports:\s*!override[\s\S]*WAF_HTTP_BIND/, "Hostinger WAF overlay must make the WAF the only public HTTP listener.");
@@ -8458,6 +8586,7 @@ function staticSecurityInfraOnlyCheck() {
   assertMatch(githubWorkflow, /Secret scan[\s\S]*secret-scan/, "Infrastructure CI must run the secret scanner.");
   assertMatch(githubWorkflow, /HA configuration check[\s\S]*ha-config-check/, "Infrastructure CI must run the HA configuration check.");
   assertMatch(githubWorkflow, /Managed secrets preflight[\s\S]*managed-secrets-preflight/, "Infrastructure CI must run the managed secrets preflight.");
+  assertMatch(githubWorkflow, /Compose healthcheck coverage[\s\S]*compose-healthcheck-coverage/, "Infrastructure CI must verify service healthcheck coverage.");
   assertMatch(githubWorkflow, /Secret rotation evidence plan[\s\S]*secret-rotation-evidence/, "Infrastructure CI must write a secret rotation evidence plan.");
   assertMatch(githubWorkflow, /DR readiness check[\s\S]*dr-readiness-check/, "Infrastructure CI must run the DR readiness check.");
   assertMatch(githubWorkflow, /DR evidence summary[\s\S]*dr-evidence/, "Infrastructure CI must write a DR evidence summary.");
@@ -8482,6 +8611,8 @@ function staticSecurityInfraOnlyCheck() {
   assertMatch(opsScript, /repoStatus:[\s\S]*liveProofStatus[\s\S]*liveProofsPending/, "Enterprise requirement reports must separate repository evidence from pending live production proof.");
   assertMatch(evidenceBundleVerifyWrapper, /evidence-bundle-verify/, "Evidence bundle verify wrapper must delegate to the Dockerized ops runner.");
   assertMatch(opsScript, /async function evidenceBundleVerify[\s\S]*sha256 mismatch[\s\S]*required report is not passing[\s\S]*--requireComplete/, "Ops script must verify evidence bundle SHA256, report status and completeness.");
+  assertMatch(opsScript, /async function composeHealthcheckCoverage[\s\S]*missingHealthchecks/, "Ops script must provide service-by-service healthcheck coverage reports.");
+  assertMatch(opsScript, /directory: "healthchecks"[\s\S]*prefix: "healthcheck-coverage-"[\s\S]*required: true/, "Evidence bundle must require healthcheck coverage reports.");
   assertMatch(githubActionsRunEvidenceWrapper, /github-actions-run-evidence/, "GitHub Actions run evidence wrapper must delegate to the Dockerized ops runner.");
   assertMatch(opsScript, /async function githubActionsRunEvidence[\s\S]*workflow_runs[\s\S]*run\.conclusion !== "success"/, "Ops script must verify remote GitHub Actions workflow success.");
   assertMatch(productionGoNoGoPolicyText, /"requireGithubActionsRunSuccess":\s*true[\s\S]*"requiredGithubWorkflow":\s*"enterprise-infra\.yml"/, "Production go/no-go policy must require a successful remote GitHub Actions workflow run.");
@@ -8759,6 +8890,7 @@ async function staticSecurityCheck() {
   assertMatch(composeWaf, /owasp\/modsecurity-crs:4\.26\.0-nginx-202605200705@sha256:[a-f0-9]{64}/, "WAF image must be an explicit stable CRS tag pinned by digest.");
   assertMatch(composeWaf, /traefik:[\s\S]*ports:\s*!override \[\]/, "WAF overlay must keep Traefik off host ports.");
   assertMatch(composeWaf, /container_name:\s+enterprise-waf[\s\S]*security_opt:\s*\r?\n\s+- no-new-privileges:true/, "WAF container must run with no-new-privileges.");
+  assertMatch(composeWaf, /waf:[\s\S]*healthcheck:[\s\S]*nginx -t[\s\S]*curl -ksS/, "WAF container must expose a healthcheck.");
   assertMatch(composeWaf, /BLOCKING_PARANOIA:\s+\$\{WAF_BLOCKING_PARANOIA:-2\}/, "WAF must default to CRS blocking paranoia level 2.");
   assertMatch(composeWaf, /DETECTION_PARANOIA:\s+\$\{WAF_DETECTION_PARANOIA:-2\}/, "WAF must default to CRS detection paranoia level 2.");
   assertMatch(composeWaf, /MODSEC_AUDIT_ENGINE:\s+\$\{WAF_MODSEC_AUDIT_ENGINE:-RelevantOnly\}/, "WAF audit logging must default to relevant events only.");
@@ -9102,6 +9234,7 @@ async function staticSecurityCheck() {
   assertMatch(githubWorkflow, /Secret scan[\s\S]*secret-scan/, "Infra workflow must exercise the secret scanner.");
   assertMatch(githubWorkflow, /HA configuration check[\s\S]*ha-config-check/, "Infra workflow must exercise the HA configuration gate.");
   assertMatch(githubWorkflow, /Managed secrets preflight[\s\S]*managed-secrets-preflight/, "Infra workflow must exercise the managed secrets gate.");
+  assertMatch(githubWorkflow, /Compose healthcheck coverage[\s\S]*compose-healthcheck-coverage/, "Infra workflow must exercise the healthcheck coverage gate.");
   assertMatch(githubWorkflow, /Secret rotation evidence plan[\s\S]*secret-rotation-evidence/, "Infra workflow must exercise the secret rotation evidence command.");
   assertMatch(githubWorkflow, /DR readiness check[\s\S]*dr-readiness-check/, "Infra workflow must exercise the DR readiness gate.");
   assertMatch(githubWorkflow, /DEPLOY_RUN_PRODUCTION_PREFLIGHT:\s+"1"[\s\S]*DEPLOY_RUN_PRE_GO_LIVE:\s+"1"[\s\S]*DEPLOY_RUN_GO_NO_GO:\s+"1"/, "Production deploy workflow must enforce preflight, pre-go-live evidence and go/no-go.");
@@ -9225,6 +9358,7 @@ async function staticSecurityCheck() {
   assertMatch(opsScript, /async function backupSecretManagerMetadata/, "Ops script must provide Secret Manager metadata backups.");
   assertMatch(opsScript, /async function restoreTestSecretManagerMetadata/, "Ops script must provide Secret Manager metadata restore dry-runs.");
   assertMatch(opsScript, /async function infraHealth/, "Ops script must provide a global infra health gate.");
+  assertMatch(opsScript, /async function composeHealthcheckCoverage[\s\S]*healthcheck-coverage-/, "Ops script must provide a service-by-service healthcheck coverage gate.");
   assertMatch(opsScript, /admin-traefik-block[\s\S]*admin-prometheus-block[\s\S]*admin-alertmanager-block/, "Infra health must verify unauthenticated internal consoles stay blocked.");
   assertMatch(opsScript, /async function fullRestoreDrill/, "Ops script must provide a full restore drill across all local data families.");
   assertMatch(opsScript, /async function loadBenchmark/, "Ops script must provide 50/100/500 load benchmark reports.");
@@ -9708,6 +9842,7 @@ Commands:
   chaos-profile
   cloudflare-access-admin
   cloudflare-from-zero
+  compose-healthcheck-coverage
   dependency-hygiene
   dr-readiness-check
   dr-evidence
@@ -9790,6 +9925,7 @@ const commands = {
   "chaos-profile": chaosProfile,
   "cloudflare-access-admin": cloudflareAccessAdmin,
   "cloudflare-from-zero": cloudflareFromZero,
+  "compose-healthcheck-coverage": composeHealthcheckCoverage,
   "dependency-hygiene": dependencyHygiene,
   "dr-readiness-check": drReadinessCheck,
   "dr-evidence": drEvidence,

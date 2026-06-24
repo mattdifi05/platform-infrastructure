@@ -258,6 +258,7 @@ Controlli disponibili:
 ```sh
 sh ./scripts/static-security-check.sh
 sh ./scripts/infra-health.sh
+sh ./scripts/compose-healthcheck-coverage.sh
 sh ./scripts/dr-evidence.sh
 sh ./scripts/alert-evidence.sh
 sh ./scripts/security-smoke.sh
@@ -292,6 +293,8 @@ sh ./scripts/dast-zap-baseline.sh https://api-staging.example.com
 `alert-evidence.sh` verifica configurazione Alertmanager, bearer secret, metriche worker e alert di failure delivery. In staging/VPS usa `alert-evidence.sh --sendTest`; con canali reali configurati puoi aggiungere `--requireEmailDelivery`, `--requireDiscordDelivery` o `--requireTelegramDelivery` per rendere la consegna un gate.
 
 `secret-rotation-evidence.sh` scrive un report non-secret in `reports/secret-rotation/` con stato dello store Stexor Secret Manager, audit log, KMS attivo, eta' dei secret rispetto a `rotationDays`, file materializzati e risultato di `stexor-secret-manager verify`. In produzione usa `--enforce`: il go/no-go accetta solo `mode=evidence`, `status=passed`, zero secret scaduti e zero file mancanti.
+
+`compose-healthcheck-coverage` renderizza gli stack local WAF, Hostinger WAF e backup scheduler, poi scrive `reports/healthchecks/healthcheck-coverage-*.json`/`.md`. Fallisce se un servizio operativo del render Compose non ha una healthcheck.
 
 `load-benchmark.sh` senza `--url` misura il backend dentro la rete Docker ed e' utile per regressioni locali. Per il go-live devi usare l'URL pubblico e `--requirePublicTarget`; con Cloudflare CDN attivo aggiungi `--requireEdgeEvidence --expectedEdgeProvider cloudflare`. Il report in `reports/load/` include profili 50/100/500, snapshot CPU/RAM Docker, target evidence pubblico/edge e `status`. Anche i fallimenti scrivono report diagnostici, ma il go/no-go accetta solo `status=passed`.
 

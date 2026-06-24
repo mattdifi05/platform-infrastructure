@@ -5,9 +5,12 @@
 1. Check service health:
 
    ```sh
+   sh ./scripts/compose-healthcheck-coverage.sh
    sh ./scripts/infra-health.sh
    docker ps --format "table {{.Names}}\t{{.Status}}" | grep enterprise-
    ```
+
+`compose-healthcheck-coverage.sh` verifies the rendered local WAF, Hostinger WAF and backup-scheduler stacks have a healthcheck on every operational service and writes non-secret reports under `reports/healthchecks/`.
 
 The shell wrappers are container-first. On Linux they run the ops container with host networking so `*.localhost.com` resolves to the local edge. On Docker Desktop they map those hostnames to `host-gateway`; override `STEXOR_LOCAL_HOST_TARGET` only if your Docker runtime exposes the host through a different address.
 
