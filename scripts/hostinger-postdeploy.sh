@@ -49,6 +49,10 @@ if [ "${DEPLOY_RUN_AUDIT_LOG_EVIDENCE:-1}" = "1" ]; then
   sh ./scripts/audit-log-evidence.sh
 fi
 
+if [ "${DEPLOY_RUN_RETENTION_EVIDENCE:-1}" = "1" ]; then
+  sh ./scripts/retention-evidence.sh
+fi
+
 if [ "${DEPLOY_RUN_INFRA_HEALTH:-1}" = "1" ]; then
   sh ./scripts/infra-health.sh \
     --apiBase "$api_base" \

@@ -4417,6 +4417,271 @@ async function auditLogEvidence(options = {}) {
   log("Audit log evidence passed.");
 }
 
+function addRetentionEvidenceCheck(checks, issues, { name, category, status, detail, required = true, file = null }) {
+  const check = {
+    name,
+    category,
+    required,
+    status,
+    detail,
+    file,
+  };
+  checks.push(check);
+  if (required && status !== "passed") {
+    issues.push(`${name}: ${detail}`);
+  }
+  return check;
+}
+
+function addRetentionPatternCheck(checks, issues, { name, category, filePath, pattern, detail, required = true, sourceFile = false }) {
+  const relativeFile = path.relative(sourceFile ? sourceRoot : infraRoot, filePath).replaceAll("\\", "/");
+  if (!fs.existsSync(filePath)) {
+    addRetentionEvidenceCheck(checks, issues, {
+      name,
+      category,
+      required,
+      status: required ? "failed" : "skipped",
+      detail: `${sourceFile ? "missing optional source file" : "missing file"}: ${relativeFile}`,
+      file: relativeFile,
+    });
+    return;
+  }
+  const text = readText(filePath);
+  const passed = pattern.test(text);
+  addRetentionEvidenceCheck(checks, issues, {
+    name,
+    category,
+    required,
+    status: passed ? "passed" : "failed",
+    detail: passed ? detail : `pattern not found: ${detail}`,
+    file: relativeFile,
+  });
+}
+
+async function retentionEvidence(options = {}) {
+  log("==> Retention evidence");
+  const requireSource = options.requireSource ?? booleanFlag(argv.requireSource);
+  const generatedAt = new Date().toISOString();
+  const checks = [];
+  const issues = [];
+
+  addRetentionPatternCheck(checks, issues, {
+    name: "docker-json-file-log-bounds",
+    category: "infra",
+    filePath: path.join(infraRoot, "compose.yaml"),
+    pattern: /x-default-logging:[\s\S]*driver:\s+json-file[\s\S]*max-size:\s+"10m"[\s\S]*max-file:\s+"5"/,
+    detail: "Default Docker json-file logging is bounded to 10m x 5 files.",
+  });
+  for (const service of ["traefik", "postgres", "redis", "keycloak", "nats", "minio", "backend", "web", "worker-notifications", "worker-jobs", "prometheus", "node-exporter", "cadvisor", "alertmanager", "grafana", "loki", "promtail"]) {
+    addRetentionPatternCheck(checks, issues, {
+      name: `bounded-logging-${service}`,
+      category: "infra",
+      filePath: path.join(infraRoot, "compose.yaml"),
+      pattern: new RegExp(`^\\s{2}${service}:.*?logging:\\s+\\*default_logging`, "ms"),
+      detail: `${service} uses the bounded default Docker logging config.`,
+    });
+  }
+  addRetentionPatternCheck(checks, issues, {
+    name: "bounded-logging-waf",
+    category: "infra",
+    filePath: path.join(infraRoot, "compose.waf.yaml"),
+    pattern: /waf:[\s\S]*logging:[\s\S]*driver:\s+json-file[\s\S]*max-size:\s+"10m"[\s\S]*max-file:\s+"5"/,
+    detail: "WAF edge container has bounded json-file logging.",
+  });
+  addRetentionPatternCheck(checks, issues, {
+    name: "loki-retention-and-compactor",
+    category: "infra",
+    filePath: path.join(infraRoot, "loki", "config.yml"),
+    pattern: /retention_period:\s+168h[\s\S]*reject_old_samples:\s+true[\s\S]*reject_old_samples_max_age:\s+168h[\s\S]*compactor:[\s\S]*retention_enabled:\s+true/,
+    detail: "Loki retains 7 days, rejects stale samples and enables compactor retention.",
+  });
+  addRetentionPatternCheck(checks, issues, {
+    name: "promtail-stale-backfill-drop",
+    category: "infra",
+    filePath: path.join(infraRoot, "promtail", "config.yml"),
+    pattern: /drop:[\s\S]*older_than:\s+168h[\s\S]*drop_counter_reason:\s+stale_docker_log/,
+    detail: "Promtail drops Docker log backfill older than 7 days before Loki ingestion.",
+  });
+  addRetentionPatternCheck(checks, issues, {
+    name: "promtail-sensitive-field-redaction",
+    category: "infra",
+    filePath: path.join(infraRoot, "promtail", "config.yml"),
+    pattern: /replace:[\s\S]*authorization[\s\S]*cookie[\s\S]*token[\s\S]*\[REDACTED\]/i,
+    detail: "Promtail redacts common sensitive fields before labeling and retention.",
+  });
+  addRetentionPatternCheck(checks, issues, {
+    name: "promtail-structured-labels",
+    category: "infra",
+    filePath: path.join(infraRoot, "promtail", "config.yml"),
+    pattern: /json:[\s\S]*level:\s+level[\s\S]*service:\s+service[\s\S]*labels:[\s\S]*level:[\s\S]*service:/,
+    detail: "Promtail extracts service and level labels for retained log queries.",
+  });
+  addRetentionPatternCheck(checks, issues, {
+    name: "prometheus-tsdb-retention",
+    category: "infra",
+    filePath: path.join(infraRoot, "compose.yaml"),
+    pattern: /prometheus:[\s\S]*--storage\.tsdb\.path=\/prometheus[\s\S]*--storage\.tsdb\.retention\.time=\$\{PROMETHEUS_RETENTION_TIME:-15d\}/,
+    detail: "Prometheus TSDB retention is explicitly bounded to 15 days by default.",
+  });
+  addRetentionPatternCheck(checks, issues, {
+    name: "prometheus-scrape-targets",
+    category: "infra",
+    filePath: path.join(infraRoot, "prometheus", "prometheus.yml"),
+    pattern: /job_name:\s+backend[\s\S]*job_name:\s+workers[\s\S]*job_name:\s+node-exporter[\s\S]*job_name:\s+cadvisor/,
+    detail: "Prometheus scrapes app, worker, host and container metrics.",
+  });
+  addRetentionPatternCheck(checks, issues, {
+    name: "grafana-prometheus-loki-datasources",
+    category: "infra",
+    filePath: path.join(infraRoot, "grafana", "provisioning", "datasources", "datasources.yml"),
+    pattern: /type:\s+prometheus[\s\S]*url:\s+http:\/\/prometheus:9090[\s\S]*type:\s+loki[\s\S]*url:\s+http:\/\/loki:3100/,
+    detail: "Grafana provisions Prometheus and Loki datasources.",
+  });
+  addRetentionPatternCheck(checks, issues, {
+    name: "grafana-retained-log-panels",
+    category: "infra",
+    filePath: path.join(infraRoot, "grafana", "dashboards", "enterprise-overview.json"),
+    pattern: /Stexor container logs[\s\S]*Application warning and error logs[\s\S]*Backend errors[\s\S]*Worker errors[\s\S]*WAF events/,
+    detail: "Grafana dashboard contains retained log investigation panels.",
+  });
+
+  const observabilitySource = path.join(sourceRoot, "packages", "observability", "src", "index.ts");
+  const observabilityTest = path.join(sourceRoot, "packages", "observability", "src", "index.test.ts");
+  const backendServer = path.join(sourceRoot, "apps", "backend", "src", "server.ts");
+  const workerJobsServer = path.join(sourceRoot, "apps", "worker-jobs", "src", "server.ts");
+  const workerNotificationsServer = path.join(sourceRoot, "apps", "worker-notifications", "src", "server.ts");
+  const sourcePresent = fs.existsSync(observabilitySource) && fs.existsSync(backendServer);
+
+  addRetentionEvidenceCheck(checks, issues, {
+    name: "optional-stexor-observability-source",
+    category: "source",
+    required: requireSource,
+    status: sourcePresent ? "passed" : requireSource ? "failed" : "skipped",
+    detail: sourcePresent
+      ? `observability source mounted at ${sourceRoot}`
+      : `observability source not mounted at ${sourceRoot}; infra-only evidence mode`,
+    file: sourcePresent ? path.relative(infraRoot, observabilitySource).replaceAll("\\", "/") : null,
+  });
+
+  if (sourcePresent) {
+    addRetentionPatternCheck(checks, issues, {
+      name: "shared-log-redaction-policy",
+      category: "source",
+      sourceFile: true,
+      filePath: observabilitySource,
+      pattern: /FASTIFY_LOG_REDACTION_PATHS[\s\S]*authorization[\s\S]*cookie[\s\S]*set-cookie[\s\S]*function redactLogValue[\s\S]*isSensitiveLogKey/,
+      detail: "Shared observability package defines recursive sensitive log redaction.",
+    });
+    addRetentionPatternCheck(checks, issues, {
+      name: "shared-log-redaction-tests",
+      category: "source-test",
+      sourceFile: true,
+      filePath: observabilityTest,
+      pattern: /redacts nested secret-bearing keys[\s\S]*redacts bearer tokens[\s\S]*createJsonLogger writes structured redacted JSON/,
+      detail: "Observability tests cover nested secrets, bearer/cookie strings and structured JSON logging.",
+    });
+    addRetentionPatternCheck(checks, issues, {
+      name: "backend-structured-redacted-logs",
+      category: "source",
+      sourceFile: true,
+      filePath: backendServer,
+      pattern: /FASTIFY_LOG_REDACTION_PATHS[\s\S]*LOG_REDACTION_CENSOR[\s\S]*service:\s*process\.env\.SERVICE_NAME\s*\?\?\s*"enterprise-backend"[\s\S]*formatters:[\s\S]*level\(label\)[\s\S]*redact:[\s\S]*censor:\s*LOG_REDACTION_CENSOR[\s\S]*paths:\s*\[\.\.\.FASTIFY_LOG_REDACTION_PATHS\]/,
+      detail: "Backend logs use shared redaction, stable service label and text levels.",
+    });
+    addRetentionPatternCheck(checks, issues, {
+      name: "worker-jobs-structured-logs",
+      category: "source",
+      sourceFile: true,
+      filePath: workerJobsServer,
+      pattern: /const serviceName[\s\S]*enterprise-worker-jobs[\s\S]*createJsonLogger\(serviceName\)/,
+      detail: "Jobs worker emits structured JSON logs with a stable service name.",
+    });
+    addRetentionPatternCheck(checks, issues, {
+      name: "worker-notifications-structured-logs",
+      category: "source",
+      sourceFile: true,
+      filePath: workerNotificationsServer,
+      pattern: /defaultServiceName[\s\S]*enterprise-worker-notifications[\s\S]*createJsonLogger/,
+      detail: "Notifications worker emits structured JSON logs with a stable service name.",
+    });
+  }
+
+  const passedCount = checks.filter((check) => check.status === "passed").length;
+  const failedCount = checks.filter((check) => check.status === "failed").length;
+  const skippedCount = checks.filter((check) => check.status === "skipped").length;
+  const payload = {
+    generatedAt,
+    status: issues.length ? "failed" : "passed",
+    mode: sourcePresent ? "full" : "infra-only",
+    source: {
+      root: sourceRoot,
+      present: sourcePresent,
+      required: requireSource,
+    },
+    policy: {
+      dockerJsonFile: { maxSize: "10m", maxFile: 5 },
+      lokiRetention: "168h",
+      promtailStaleDrop: "168h",
+      prometheusRetention: "15d",
+    },
+    summary: {
+      checks: checks.length,
+      passed: passedCount,
+      failed: failedCount,
+      skipped: skippedCount,
+      infraChecksPassed: checks.filter((check) => check.category === "infra" && check.status === "passed").length,
+      sourceChecksPassed: checks.filter((check) => check.category.startsWith("source") && check.status === "passed").length,
+    },
+    checks,
+    issues,
+    nextCommands: [
+      "sh ./scripts/retention-evidence.sh",
+      "sh ./scripts/infra-health.sh",
+      "review VPS disk capacity before raising PROMETHEUS_RETENTION_TIME or Loki retention_period",
+    ],
+  };
+
+  const stamp = reportTimestamp();
+  const jsonPath = writeJsonReport("retention", `retention-evidence-${stamp}`, payload);
+  const markdownPath = writeMarkdownReport("retention", `retention-evidence-${stamp}`, [
+    "# Retention Evidence",
+    "",
+    `Status: ${payload.status}`,
+    `Mode: ${payload.mode}`,
+    `Generated at: ${payload.generatedAt}`,
+    `Docker log cap: ${payload.policy.dockerJsonFile.maxSize} x ${payload.policy.dockerJsonFile.maxFile}`,
+    `Loki retention: ${payload.policy.lokiRetention}`,
+    `Promtail stale drop: ${payload.policy.promtailStaleDrop}`,
+    `Prometheus retention: ${payload.policy.prometheusRetention}`,
+    "",
+    "## Summary",
+    "",
+    `- Checks: ${payload.summary.checks}`,
+    `- Passed: ${payload.summary.passed}`,
+    `- Failed: ${payload.summary.failed}`,
+    `- Skipped: ${payload.summary.skipped}`,
+    "",
+    "## Checks",
+    "",
+    "| Check | Category | Required | Status | Detail |",
+    "| --- | --- | --- | --- | --- |",
+    ...checks.map((check) => `| ${check.name} | ${check.category} | ${check.required ? "yes" : "no"} | ${check.status} | ${String(check.detail).replaceAll("|", "\\|")} |`),
+    "",
+    "## Issues",
+    "",
+    ...(issues.length ? issues.map((issue) => `- ${issue}`) : ["- none"]),
+    "",
+    "## Next Commands",
+    "",
+    ...payload.nextCommands.map((commandLine) => `- \`${commandLine}\``),
+  ]);
+  log(`Retention evidence report written to ${jsonPath} and ${markdownPath}`);
+  if (issues.length && !booleanFlag(argv.allowFailures)) {
+    fail(`Retention evidence failed with ${issues.length} issue(s). Report: ${jsonPath}`);
+  }
+  log("Retention evidence passed.");
+}
+
 const managedSecretRotationExpectations = [
   { name: "postgres_superuser_password", kind: "opaque", rotationDays: 90, manualRotation: true },
   { name: "app_db_password", kind: "opaque", rotationDays: 90, manualRotation: true },
@@ -5152,17 +5417,25 @@ async function chaosProfile() {
 
 async function governanceCheck() {
   log("==> Governance / release control check");
-  const workflow = readText(path.join(sourceRoot, ".github", "workflows", "enterprise-ci.yml"));
+  const sourceWorkflowPath = path.join(sourceRoot, ".github", "workflows", "enterprise-ci.yml");
+  const sourceWorkflowAvailable = fs.existsSync(sourceWorkflowPath);
+  const checkSourceWorkflow = sourceWorkflowAvailable && !booleanFlag(argv.infraOnly);
+  const workflow = checkSourceWorkflow ? readText(sourceWorkflowPath) : "";
   const branchProtection = JSON.parse(readText(path.join(infraRoot, "governance", "github-branch-protection.json")));
   const environmentsPolicy = JSON.parse(readText(path.join(infraRoot, "governance", "github-environments.json")));
   const actionsRuntimePolicy = JSON.parse(readText(path.join(infraRoot, "governance", "github-actions-runtime.json")));
   const infraWorkflow = readText(path.join(infraRoot, ".github", "workflows", "enterprise-infra.yml"));
   const runbook = readText(path.join(infraRoot, "RUNBOOK.md"));
   for (const job of ["quality", "compose", "supply-chain", "enterprise-readiness"]) {
-    assertMatch(workflow, new RegExp(`^\\s{2}${job}:`, "m"), `Enterprise CI must define ${job} job.`);
+    if (checkSourceWorkflow) {
+      assertMatch(workflow, new RegExp(`^\\s{2}${job}:`, "m"), `Enterprise CI must define ${job} job.`);
+    }
     if (!branchProtection.required_status_checks.contexts.includes(job)) {
       fail(`Branch protection must require ${job}.`);
     }
+  }
+  if (!checkSourceWorkflow) {
+    log(`Skipping optional Stexor application CI source checks (${sourceWorkflowAvailable ? "--infraOnly enabled" : `missing ${sourceWorkflowPath}`}).`);
   }
   const environmentNames = new Set(environmentsPolicy.environments?.map((environment) => environment.name) ?? []);
   for (const name of ["staging", "production"]) {
@@ -5805,6 +6078,7 @@ function buildPreGoLiveReadinessMatrix({ steps, options, repo }) {
     "compose-healthcheck-coverage",
     "rate-limit-evidence",
     "audit-log-evidence",
+    "retention-evidence",
     "secret-rotation-evidence-plan",
     "dr-readiness-check",
     "dr-evidence-summary",
@@ -5910,6 +6184,7 @@ async function preGoLiveEvidence() {
   await collectEvidenceStep(steps, { name: "compose-healthcheck-coverage", category: "local-policy", fn: composeHealthcheckCoverage });
   await collectEvidenceStep(steps, { name: "rate-limit-evidence", category: "local-policy", fn: rateLimitEvidence });
   await collectEvidenceStep(steps, { name: "audit-log-evidence", category: "local-policy", fn: auditLogEvidence });
+  await collectEvidenceStep(steps, { name: "retention-evidence", category: "local-policy", fn: retentionEvidence });
   await collectEvidenceStep(steps, { name: "secret-rotation-evidence-plan", category: "local-policy", fn: secretRotationEvidence });
   await collectEvidenceStep(steps, { name: "dr-readiness-check", category: "local-policy", fn: drReadinessCheck });
   await collectEvidenceStep(steps, { name: "dr-evidence-summary", category: "local-policy", fn: drEvidence });
@@ -6307,6 +6582,7 @@ const evidenceBundleReportSpecs = [
   { directory: "healthchecks", prefix: "healthcheck-coverage-", label: "healthcheck-coverage", required: true },
   { directory: "rate-limits", prefix: "rate-limit-evidence-", label: "rate-limit-evidence", required: true },
   { directory: "audit-logs", prefix: "audit-log-evidence-", label: "audit-log-evidence", required: true },
+  { directory: "retention", prefix: "retention-evidence-", label: "retention-evidence", required: true },
   { directory: "secret-rotation", prefix: "secret-rotation-evidence-", label: "secret-rotation-evidence", required: true },
   { directory: "go-live", prefix: "pre-go-live-evidence-", label: "pre-go-live", required: true },
   { directory: "vps-host", prefix: "vps-host-readiness-", label: "vps-host-readiness", required: true },
@@ -6487,6 +6763,15 @@ function evidenceBundleReportPasses(spec, payload) {
       passed: payload.status === "passed"
         && Number(payload.summary?.failed ?? 1) === 0
         && Number(payload.summary?.infraChecksPassed ?? 0) >= 9
+        && ["full", "infra-only"].includes(payload.mode),
+      detail: `mode=${payload.mode ?? "missing"} status=${payload.status ?? "missing"} failed=${payload.summary?.failed ?? "missing"} infraPassed=${payload.summary?.infraChecksPassed ?? "missing"}`,
+    };
+  }
+  if (spec.label === "retention-evidence") {
+    return {
+      passed: payload.status === "passed"
+        && Number(payload.summary?.failed ?? 1) === 0
+        && Number(payload.summary?.infraChecksPassed ?? 0) >= 14
         && ["full", "infra-only"].includes(payload.mode),
       detail: `mode=${payload.mode ?? "missing"} status=${payload.status ?? "missing"} failed=${payload.summary?.failed ?? "missing"} infraPassed=${payload.summary?.infraChecksPassed ?? "missing"}`,
     };
@@ -7269,6 +7554,7 @@ async function repoCoverageCheck() {
     ["compose-healthcheck-coverage", /Compose healthcheck coverage[\s\S]*compose-healthcheck-coverage/],
     ["rate-limit-evidence", /Rate limit evidence[\s\S]*rate-limit-evidence/],
     ["audit-log-evidence", /Audit log evidence[\s\S]*audit-log-evidence/],
+    ["retention-evidence", /Retention evidence[\s\S]*retention-evidence/],
     ["secret-rotation-evidence-plan", /Secret rotation evidence plan[\s\S]*secret-rotation-evidence/],
     ["dr-readiness-check", /DR readiness check[\s\S]*dr-readiness-check/],
     ["dr-evidence-summary", /DR evidence summary[\s\S]*dr-evidence/],
@@ -9053,6 +9339,7 @@ function staticSecurityInfraOnlyCheck() {
   const githubActionsRunEvidenceWrapper = readText(path.join(infraRoot, "scripts", "github-actions-run-evidence.sh"));
   const rateLimitEvidenceWrapper = readText(path.join(infraRoot, "scripts", "rate-limit-evidence.sh"));
   const auditLogEvidenceWrapper = readText(path.join(infraRoot, "scripts", "audit-log-evidence.sh"));
+  const retentionEvidenceWrapper = readText(path.join(infraRoot, "scripts", "retention-evidence.sh"));
   const secretRotationEvidenceWrapper = readText(path.join(infraRoot, "scripts", "secret-rotation-evidence.sh"));
   const opsScript = readText(path.join(infraRoot, "scripts", "stexor-ops.mjs"));
   const hostingerPostdeployScript = readText(path.join(infraRoot, "scripts", "hostinger-postdeploy.sh"));
@@ -9084,6 +9371,7 @@ function staticSecurityInfraOnlyCheck() {
     githubActionsRunEvidenceWrapper,
     rateLimitEvidenceWrapper,
     auditLogEvidenceWrapper,
+    retentionEvidenceWrapper,
     secretRotationEvidenceWrapper,
     hostingerPostdeployScript,
     productionReadinessLiveWrapper,
@@ -9100,6 +9388,7 @@ function staticSecurityInfraOnlyCheck() {
   assertMatch(compose, /\.\/php-apache\/php\/custom\.ini/, "Compose must mount the unified PHP runtime config.");
   assertMatch(compose, /\.\/mariadb\/initdb:/, "Compose must initialize MariaDB from the unified infra tree.");
   assertMatch(compose, /x-default-logging:[\s\S]*max-size:\s+"10m"[\s\S]*max-file:\s+"5"/, "Compose services must define bounded json-file logging.");
+  assertMatch(compose, /--storage\.tsdb\.retention\.time=\$\{PROMETHEUS_RETENTION_TIME:-15d\}/, "Prometheus must set explicit TSDB retention.");
   assertMatch(composeBuild, /BACKEND_BUILD_IMAGE[\s\S]*WEB_BUILD_IMAGE[\s\S]*WORKER_NOTIFICATIONS_BUILD_IMAGE[\s\S]*WORKER_JOBS_BUILD_IMAGE/, "Compose build must use local build image variables.");
   assertMatch(composeSecrets, /SESSION_SIGNING_KEYS_FILE:\s+\/run\/secrets\/session_signing_keys/, "Local secret overlay must consume session signing keys from Docker secrets.");
   assertMatch(composeSecrets, /MARIADB_ROOT_PASSWORD_FILE:\s+\/run\/secrets\/mariadb_root_password/, "Local secret overlay must consume MariaDB root password from Docker secrets.");
@@ -9136,6 +9425,7 @@ function staticSecurityInfraOnlyCheck() {
   assertMatch(githubWorkflow, /Compose healthcheck coverage[\s\S]*compose-healthcheck-coverage/, "Infrastructure CI must verify service healthcheck coverage.");
   assertMatch(githubWorkflow, /Rate limit evidence[\s\S]*rate-limit-evidence/, "Infrastructure CI must write a dedicated rate-limit evidence report.");
   assertMatch(githubWorkflow, /Audit log evidence[\s\S]*audit-log-evidence/, "Infrastructure CI must write a dedicated audit log evidence report.");
+  assertMatch(githubWorkflow, /Retention evidence[\s\S]*retention-evidence/, "Infrastructure CI must write a dedicated retention evidence report.");
   assertMatch(githubWorkflow, /Secret rotation evidence plan[\s\S]*secret-rotation-evidence/, "Infrastructure CI must write a secret rotation evidence plan.");
   assertMatch(githubWorkflow, /DR readiness check[\s\S]*dr-readiness-check/, "Infrastructure CI must run the DR readiness check.");
   assertMatch(githubWorkflow, /DR evidence summary[\s\S]*dr-evidence/, "Infrastructure CI must write a DR evidence summary.");
@@ -9170,6 +9460,10 @@ function staticSecurityInfraOnlyCheck() {
   assertMatch(opsScript, /async function auditLogEvidence[\s\S]*audit-log-evidence-[\s\S]*infraChecksPassed/, "Ops script must provide dedicated audit log evidence reports.");
   assertMatch(opsScript, /directory: "audit-logs"[\s\S]*prefix: "audit-log-evidence-"[\s\S]*required: true/, "Evidence bundle must require audit log evidence reports.");
   assertMatch(productionReadinessManifest, /"admin-audit-log"[\s\S]*"audit-log-evidence"/, "Production readiness must map admin audit logging to dedicated evidence.");
+  assertMatch(retentionEvidenceWrapper, /retention-evidence/, "Retention evidence wrapper must delegate to the Dockerized ops runner.");
+  assertMatch(opsScript, /async function retentionEvidence[\s\S]*retention-evidence-[\s\S]*infraChecksPassed/, "Ops script must provide dedicated retention evidence reports.");
+  assertMatch(opsScript, /directory: "retention"[\s\S]*prefix: "retention-evidence-"[\s\S]*required: true/, "Evidence bundle must require retention evidence reports.");
+  assertMatch(productionReadinessManifest, /"log-metric-retention"[\s\S]*"retention-evidence"/, "Production readiness must map log and metric retention to dedicated evidence.");
   assertMatch(githubActionsRunEvidenceWrapper, /github-actions-run-evidence/, "GitHub Actions run evidence wrapper must delegate to the Dockerized ops runner.");
   assertMatch(opsScript, /async function githubActionsRunEvidence[\s\S]*workflow_runs[\s\S]*run\.conclusion !== "success"/, "Ops script must verify remote GitHub Actions workflow success.");
   assertMatch(productionGoNoGoPolicyText, /"requireGithubActionsRunSuccess":\s*true[\s\S]*"requiredGithubWorkflow":\s*"enterprise-infra\.yml"/, "Production go/no-go policy must require a successful remote GitHub Actions workflow run.");
@@ -9319,6 +9613,7 @@ async function staticSecurityCheck() {
   const githubActionsRunEvidenceWrapper = readText(path.join(infraRoot, "scripts", "github-actions-run-evidence.sh"));
   const rateLimitEvidenceWrapper = readText(path.join(infraRoot, "scripts", "rate-limit-evidence.sh"));
   const auditLogEvidenceWrapper = readText(path.join(infraRoot, "scripts", "audit-log-evidence.sh"));
+  const retentionEvidenceWrapper = readText(path.join(infraRoot, "scripts", "retention-evidence.sh"));
   const secretRotationEvidenceWrapper = readText(path.join(infraRoot, "scripts", "secret-rotation-evidence.sh"));
   const preGoLiveEvidenceWrapper = readText(path.join(infraRoot, "scripts", "pre-go-live-evidence.sh"));
   const productionGoNoGoWrapper = readText(path.join(infraRoot, "scripts", "production-go-no-go.sh"));
@@ -9728,6 +10023,10 @@ async function staticSecurityCheck() {
   assertMatch(opsScript, /async function auditLogEvidence[\s\S]*audit-log-evidence-[\s\S]*infraChecksPassed/, "Ops script must write dedicated audit log evidence reports.");
   assertMatch(opsScript, /directory: "audit-logs"[\s\S]*prefix: "audit-log-evidence-"[\s\S]*required: true/, "Evidence bundle must require audit log evidence reports.");
   assertMatch(productionReadinessManifest, /"admin-audit-log"[\s\S]*"audit-log-evidence"/, "Production readiness must map admin audit logging to dedicated evidence.");
+  assertMatch(retentionEvidenceWrapper, /retention-evidence/, "Retention evidence wrapper must delegate to the Dockerized ops runner.");
+  assertMatch(opsScript, /async function retentionEvidence[\s\S]*retention-evidence-[\s\S]*infraChecksPassed/, "Ops script must write dedicated retention evidence reports.");
+  assertMatch(opsScript, /directory: "retention"[\s\S]*prefix: "retention-evidence-"[\s\S]*required: true/, "Evidence bundle must require retention evidence reports.");
+  assertMatch(productionReadinessManifest, /"log-metric-retention"[\s\S]*"retention-evidence"/, "Production readiness must map log and metric retention to dedicated evidence.");
   assertMatch(composeDr, /archive_mode=on/, "DR overlay must enable PostgreSQL WAL archiving.");
   assertMatch(composeDr, /enterprise_postgres_wal_archive/, "DR overlay must persist WAL archives.");
   assertMatch(admissionPolicy, /cosign\.sigstore\.dev\/verified/, "Admission policy must require cosign verification.");
@@ -9804,6 +10103,7 @@ async function staticSecurityCheck() {
   assertMatch(githubWorkflow, /Compose healthcheck coverage[\s\S]*compose-healthcheck-coverage/, "Infra workflow must exercise the healthcheck coverage gate.");
   assertMatch(githubWorkflow, /Rate limit evidence[\s\S]*rate-limit-evidence/, "Infra workflow must exercise the rate-limit evidence gate.");
   assertMatch(githubWorkflow, /Audit log evidence[\s\S]*audit-log-evidence/, "Infra workflow must exercise the audit log evidence gate.");
+  assertMatch(githubWorkflow, /Retention evidence[\s\S]*retention-evidence/, "Infra workflow must exercise the retention evidence gate.");
   assertMatch(githubWorkflow, /Secret rotation evidence plan[\s\S]*secret-rotation-evidence/, "Infra workflow must exercise the secret rotation evidence command.");
   assertMatch(githubWorkflow, /DR readiness check[\s\S]*dr-readiness-check/, "Infra workflow must exercise the DR readiness gate.");
   assertMatch(githubWorkflow, /DEPLOY_RUN_PRODUCTION_PREFLIGHT:\s+"1"[\s\S]*DEPLOY_RUN_PRE_GO_LIVE:\s+"1"[\s\S]*DEPLOY_RUN_GO_NO_GO:\s+"1"/, "Production deploy workflow must enforce preflight, pre-go-live evidence and go/no-go.");
@@ -9839,6 +10139,7 @@ async function staticSecurityCheck() {
   assertMatch(grafanaOverviewDashboard, /WAF events/, "Grafana dashboard must include WAF event log panel.");
   assertMatch(grafanaOverviewDashboard, /Auth failures/, "Grafana dashboard must include auth failure log panel.");
   assertMatch(lokiConfig, /retention_period:\s+168h/, "Loki must enforce bounded log retention.");
+  assertMatch(compose, /--storage\.tsdb\.retention\.time=\$\{PROMETHEUS_RETENTION_TIME:-15d\}/, "Prometheus must enforce bounded metric retention.");
   assertMatch(lokiConfig, /reject_old_samples:\s+true/, "Loki must reject stale samples.");
   assertMatch(backendDockerfile, /FROM \$\{NODE_IMAGE\} AS build/, "Backend Dockerfile must use a dedicated JavaScript build stage.");
   assertMatch(backendDockerfile, /pnpm --filter \.\/apps\/backend build/, "Backend Dockerfile must build the production JavaScript bundle.");
@@ -10452,6 +10753,7 @@ Commands:
   production-go-no-go
   production-preflight
   rate-limit-evidence
+  retention-evidence
   repo-coverage-check
   release-evidence
   release-artifact-gate
@@ -10537,6 +10839,7 @@ const commands = {
   "production-go-no-go": productionGoNoGo,
   "production-preflight": productionPreflight,
   "rate-limit-evidence": rateLimitEvidence,
+  "retention-evidence": retentionEvidence,
   "repo-coverage-check": repoCoverageCheck,
   "release-evidence": releaseEvidence,
   "release-artifact-gate": releaseArtifactGate,

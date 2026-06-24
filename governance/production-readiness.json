@@ -198,11 +198,14 @@
       "title": "Retention log/metriche",
       "state": "repo-ready",
       "evidence": [
+        { "type": "command", "name": "retention-evidence" },
         { "type": "file", "path": "loki/config.yml" },
         { "type": "file", "path": "prometheus/prometheus.yml" },
-        { "type": "pattern", "path": "compose.yaml", "pattern": "max-size:[\\s\\S]*max-file:" }
+        { "type": "pattern", "path": "compose.yaml", "pattern": "max-size:[\\s\\S]*max-file:" },
+        { "type": "pattern", "path": "compose.yaml", "pattern": "--storage\\.tsdb\\.retention\\.time" },
+        { "type": "workflow", "pattern": "Retention evidence[\\s\\S]*retention-evidence" }
       ],
-      "liveProof": "Tune log and metric retention according to the final VPS disk size.",
+      "liveProof": "Pass retention-evidence and tune log/metric retention according to the final VPS disk size.",
       "liveProofChecks": ["pre-go-live-evidence-complete"]
     },
     {
