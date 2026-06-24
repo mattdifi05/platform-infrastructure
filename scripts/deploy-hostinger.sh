@@ -3,6 +3,8 @@ set -eu
 
 REMOTE="${DEPLOY_REMOTE:-}"
 REMOTE_DIR="${DEPLOY_REMOTE_DIR:-/opt/stexor/stexor-platform-infrastructure}"
+SSH_PORT="${DEPLOY_SSH_PORT:-22}"
+SSH_KEY_PATH="${DEPLOY_SSH_KEY_PATH:-$HOME/.ssh/deploy_key}"
 BRANCH="${DEPLOY_BRANCH:-main}"
 ENV_FILE="${DEPLOY_ENV_FILE:-.env}"
 PROJECT_NAME="${DEPLOY_PROJECT_NAME:-stexor_platform_vps}"
@@ -12,7 +14,19 @@ if [ -z "$REMOTE" ]; then
   exit 1
 fi
 
-ssh "$REMOTE" sh -s -- \
+case "$SSH_PORT" in
+  ''|*[!0-9]*)
+    echo "DEPLOY_SSH_PORT must be numeric." >&2
+    exit 1
+    ;;
+esac
+
+set -- -p "$SSH_PORT" -o StrictHostKeyChecking=accept-new
+if [ -f "$SSH_KEY_PATH" ]; then
+  set -- -i "$SSH_KEY_PATH" "$@"
+fi
+
+ssh "$@" "$REMOTE" sh -s -- \
   "$REMOTE_DIR" \
   "$BRANCH" \
   "$ENV_FILE" \

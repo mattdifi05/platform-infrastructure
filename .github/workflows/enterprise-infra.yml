@@ -261,6 +261,7 @@ jobs:
         env:
           DEPLOY_REMOTE: ${{ vars.DEPLOY_REMOTE }}
           DEPLOY_REMOTE_DIR: ${{ vars.DEPLOY_REMOTE_DIR }}
+          DEPLOY_SSH_PORT: ${{ vars.DEPLOY_SSH_PORT }}
           DEPLOY_REPO: ${{ github.repository }}
           DEPLOY_RUN_PRODUCTION_PREFLIGHT: "1"
           DEPLOY_RUN_PRE_GO_LIVE: "1"

@@ -47,6 +47,16 @@
           "pattern": "^/"
         },
         {
+          "name": "DEPLOY_SSH_PORT",
+          "purpose": "Current SSH port used by GitHub Actions to reach the Hostinger VPS.",
+          "pattern": "^[0-9]{2,5}$"
+        },
+        {
+          "name": "VPS_HARDENED_SSH_PORT",
+          "purpose": "Expected hardened SSH port validated by VPS host readiness.",
+          "pattern": "^[0-9]{2,5}$"
+        },
+        {
           "name": "PUBLIC_API_HEALTH_URL",
           "purpose": "Public HTTPS API health endpoint routed through Cloudflare for production load evidence.",
           "pattern": "^https://"

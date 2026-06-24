@@ -1,0 +1,174 @@
+name: enterprise-vps-evidence
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_bootstrap:
+        description: Apply VPS bootstrap on the remote host
+        required: true
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+      run_hardening:
+        description: Apply VPS hardening on the remote host
+        required: true
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+      reload_sshd:
+        description: Reload SSH after hardening
+        required: true
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+      replace_docker_daemon_config:
+        description: Replace Docker daemon config after review
+        required: true
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+      confirm_mutating_vps:
+        description: Required true when bootstrap or hardening is enabled
+        required: true
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+      deploy_user:
+        description: Optional deploy user for bootstrap
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  vps-host-evidence:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    environment:
+      name: production
+    steps:
+      - name: Checkout infrastructure
+        uses: actions/checkout@v5
+
+      - name: Install SSH key
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          test -n "$DEPLOY_SSH_KEY"
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+
+      - name: Run VPS evidence on Hostinger
+        env:
+          DEPLOY_REMOTE: ${{ vars.DEPLOY_REMOTE }}
+          DEPLOY_REMOTE_DIR: ${{ vars.DEPLOY_REMOTE_DIR }}
+          DEPLOY_SSH_PORT: ${{ vars.DEPLOY_SSH_PORT }}
+          VPS_HARDENED_SSH_PORT: ${{ vars.VPS_HARDENED_SSH_PORT }}
+          RUN_BOOTSTRAP: ${{ inputs.run_bootstrap }}
+          RUN_HARDENING: ${{ inputs.run_hardening }}
+          RELOAD_SSHD: ${{ inputs.reload_sshd }}
+          REPLACE_DOCKER_DAEMON_CONFIG: ${{ inputs.replace_docker_daemon_config }}
+          CONFIRM_MUTATING_VPS: ${{ inputs.confirm_mutating_vps }}
+          DEPLOY_USER: ${{ inputs.deploy_user }}
+        run: |
+          set -euo pipefail
+          test -n "$DEPLOY_REMOTE"
+          test -n "$DEPLOY_REMOTE_DIR"
+          test -n "$DEPLOY_SSH_PORT"
+          test -n "$VPS_HARDENED_SSH_PORT"
+          if { [ "$RUN_BOOTSTRAP" = "true" ] || [ "$RUN_HARDENING" = "true" ]; } && [ "$CONFIRM_MUTATING_VPS" != "true" ]; then
+            echo "Set confirm_mutating_vps=true before enabling VPS bootstrap or hardening." >&2
+            exit 1
+          fi
+          install -d .tmp
+          remote_output=".tmp/vps-evidence-remote-output.txt"
+          ssh -i ~/.ssh/deploy_key -p "$DEPLOY_SSH_PORT" -o StrictHostKeyChecking=accept-new "$DEPLOY_REMOTE" bash -s -- \
+            "$DEPLOY_REMOTE_DIR" \
+            "$VPS_HARDENED_SSH_PORT" \
+            "$RUN_BOOTSTRAP" \
+            "$RUN_HARDENING" \
+            "$RELOAD_SSHD" \
+            "$REPLACE_DOCKER_DAEMON_CONFIG" \
+            "$DEPLOY_USER" <<'REMOTE_SCRIPT' > "$remote_output"
+          set -euo pipefail
+          remote_dir="$1"
+          hardened_ssh_port="$2"
+          run_bootstrap="$3"
+          run_hardening="$4"
+          reload_sshd="$5"
+          replace_docker_daemon_config="$6"
+          deploy_user="$7"
+
+          cd "$remote_dir"
+          git fetch --all --prune
+          git checkout main
+          git pull --ff-only origin main
+
+          if [ "$run_bootstrap" = "true" ]; then
+            if [ -n "$deploy_user" ]; then
+              sudo sh ./scripts/vps-bootstrap-ubuntu.sh --apply --deploy-user "$deploy_user"
+            else
+              sudo sh ./scripts/vps-bootstrap-ubuntu.sh --apply
+            fi
+          fi
+
+          if [ "$run_hardening" = "true" ]; then
+            hardening_args="--apply --ssh-port $hardened_ssh_port"
+            if [ "$reload_sshd" = "true" ]; then
+              hardening_args="$hardening_args --reload-sshd"
+            fi
+            if [ "$replace_docker_daemon_config" = "true" ]; then
+              hardening_args="$hardening_args --replace-docker-daemon-config"
+            fi
+            # shellcheck disable=SC2086
+            sudo sh ./scripts/vps-hardening-ubuntu.sh $hardening_args
+          fi
+
+          sudo sh ./scripts/vps-host-readiness.sh --ssh-port "$hardened_ssh_port" --enforce
+
+          tar_paths=""
+          for path in reports/vps-bootstrap reports/vps-hardening reports/vps-host; do
+            if [ -d "$path" ]; then
+              tar_paths="$tar_paths $path"
+            fi
+          done
+          if [ -z "$tar_paths" ]; then
+            echo "No VPS evidence report directories were produced." >&2
+            exit 1
+          fi
+          echo "__STEXOR_VPS_EVIDENCE_TGZ_BEGIN__"
+          # shellcheck disable=SC2086
+          tar -czf - $tar_paths | base64 -w0
+          echo
+          echo "__STEXOR_VPS_EVIDENCE_TGZ_END__"
+REMOTE_SCRIPT
+          sed -n '/^__STEXOR_VPS_EVIDENCE_TGZ_BEGIN__$/,/^__STEXOR_VPS_EVIDENCE_TGZ_END__$/p' "$remote_output" \
+            | sed '1d;$d' > .tmp/vps-evidence.tgz.b64
+          test -s .tmp/vps-evidence.tgz.b64
+          base64 -d .tmp/vps-evidence.tgz.b64 > .tmp/vps-evidence.tgz
+          tar -xzf .tmp/vps-evidence.tgz
+
+      - name: Upload VPS evidence reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: enterprise-vps-evidence
+          path: |
+            reports/vps-bootstrap/
+            reports/vps-hardening/
+            reports/vps-host/
+            .tmp/vps-evidence-remote-output.txt
+          if-no-files-found: error
+          retention-days: 30

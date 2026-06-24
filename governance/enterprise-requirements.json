@@ -7,9 +7,11 @@
       "title": "VPS hardening OS, firewall and fail2ban",
       "state": "gate-ready",
       "evidence": [
+        { "type": "file", "path": ".github/workflows/enterprise-vps-evidence.yml" },
         { "type": "file", "path": "scripts/vps-hardening-ubuntu.sh" },
         { "type": "pattern", "path": "scripts/vps-hardening-ubuntu.sh", "pattern": "ufw[\\s\\S]*fail2ban[\\s\\S]*auditd[\\s\\S]*apparmor" },
-        { "type": "pattern", "path": "scripts/vps-host-readiness.sh", "pattern": "ufw-active[\\s\\S]*fail2ban-active[\\s\\S]*ssh-hardening" }
+        { "type": "pattern", "path": "scripts/vps-host-readiness.sh", "pattern": "ufw-active[\\s\\S]*fail2ban-active[\\s\\S]*ssh-hardening" },
+        { "type": "workflow", "pattern": "Run VPS evidence on Hostinger[\\s\\S]*vps-hardening-ubuntu\\.sh[\\s\\S]*vps-host-readiness\\.sh" }
       ],
       "liveProof": "Run vps-hardening-ubuntu.sh --apply and vps-host-readiness.sh --enforce on the Hostinger Ubuntu LTS VPS."
     },

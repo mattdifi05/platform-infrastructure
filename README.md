@@ -322,8 +322,9 @@ Configura `GITHUB_PRODUCTION_REVIEWERS=user:login` o `team:slug`, poi usa
 abilitare approvazione, wait timer e branch policy su staging/production.
 La runtime config GitHub Actions e' versionata in
 `governance/github-actions-runtime.json`: `DAST_TARGET`, `DEPLOY_SSH_KEY`,
-`DEPLOY_REMOTE`, `DEPLOY_REMOTE_DIR`, `PUBLIC_API_HEALTH_URL`,
-`CLOUDFLARE_ACCOUNT_ID`, `EXTERNAL_UPTIME_PROVIDER_EVIDENCE_JSON` e
+`DEPLOY_REMOTE`, `DEPLOY_REMOTE_DIR`, `DEPLOY_SSH_PORT`,
+`VPS_HARDENED_SSH_PORT`, `PUBLIC_API_HEALTH_URL`, `CLOUDFLARE_ACCOUNT_ID`,
+`EXTERNAL_UPTIME_PROVIDER_EVIDENCE_JSON` e
 `CLOUDFLARE_API_TOKEN` piu' `CLOUDFLARE_ACCESS_ADMIN_MANIFEST_JSON` vengono verificati da
 `scripts/github-actions-config.sh --verifyRemote` senza stampare valori
 segreti. Per il go-live finale registra anche la run CI remota del commit di
@@ -338,6 +339,11 @@ La workflow manuale `enterprise-live-evidence` gira nell'environment GitHub
 `production` e raccoglie prove live non mutanti: uptime provider, load benchmark
 pubblico via Cloudflare, Cloudflare Access `--verifyRemote`, go/no-go live e
 bundle completo.
+La workflow manuale `enterprise-vps-evidence` gira nello stesso environment,
+entra nel VPS con `DEPLOY_SSH_KEY`, `DEPLOY_REMOTE` e `DEPLOY_SSH_PORT`, puo'
+applicare bootstrap/hardening solo con conferma esplicita, esegue
+`vps-host-readiness --enforce` sulla porta `VPS_HARDENED_SSH_PORT` e carica i
+report `reports/vps-*` come artifact.
 Il gate `scripts/stexor-ops.sh repo-coverage-check` misura la copertura dei
 file tracciati della repo: ogni file deve rientrare in una categoria
 infrastrutturale e il workflow deve esercitare tutti i gate CI obbligatori.
@@ -435,6 +441,9 @@ la checklist correttiva da applicare sulla VPS.
 Per prove Linux locali dentro container usa `--diagnostic`: scrive in
 `reports/vps-host-diagnostics/` e non viene considerato dal go/no-go di
 produzione.
+In GitHub Actions puoi raccogliere la stessa evidenza con la workflow manuale
+`enterprise-vps-evidence`; usa `DEPLOY_SSH_PORT` per la porta corrente di accesso
+e `VPS_HARDENED_SSH_PORT` per la porta che la readiness deve provare.
 
 Le regole edge Cloudflare versionate sono in `cloudflare/`. Il WAF Cloudflare blocca admin host, file sensibili e scanner path prima della VPS; il WAF interno OWASP CRS resta attivo come secondo livello. `cloudflare/access-admin.example.json` rende versionate anche le applicazioni Cloudflare Access per phpMyAdmin, Grafana, Prometheus, Alertmanager, MinIO, Traefik, Projects e Keycloak Admin.
 

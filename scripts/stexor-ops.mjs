@@ -7562,6 +7562,7 @@ async function repoCoverageCheck() {
     ["github-actions-run-evidence-plan", /GitHub Actions run evidence plan[\s\S]*github-actions-run-evidence/],
     ["github-actions-run-evidence-verify-remote", /workflow_run:[\s\S]*enterprise-infra[\s\S]*Verify completed enterprise infra run[\s\S]*github-actions-run-evidence[\s\S]*--verifyRemote/],
     ["production-live-evidence-workflow", /workflow_dispatch:[\s\S]*External uptime provider evidence[\s\S]*external-uptime-check[\s\S]*--requireProviderEvidence[\s\S]*Production Cloudflare edge load benchmark[\s\S]*load-benchmark[\s\S]*--expectedEdgeProvider cloudflare[\s\S]*Cloudflare Access admin verify[\s\S]*cloudflare-access-admin[\s\S]*--verifyRemote[\s\S]*evidence-bundle-verify --requireComplete/],
+    ["vps-evidence-workflow", /workflow_dispatch:[\s\S]*Run VPS evidence on Hostinger[\s\S]*vps-bootstrap-ubuntu\.sh[\s\S]*vps-hardening-ubuntu\.sh[\s\S]*vps-host-readiness\.sh[\s\S]*Upload VPS evidence reports/],
     ["secret-scan", /Secret scan[\s\S]*secret-scan/],
     ["ha-config-check", /HA configuration check[\s\S]*ha-config-check/],
     ["managed-secrets-preflight", /Managed secrets preflight[\s\S]*managed-secrets-preflight/],
@@ -9356,11 +9357,13 @@ function staticSecurityInfraOnlyCheck() {
   const retentionEvidenceWrapper = readText(path.join(infraRoot, "scripts", "retention-evidence.sh"));
   const secretRotationEvidenceWrapper = readText(path.join(infraRoot, "scripts", "secret-rotation-evidence.sh"));
   const opsScript = readText(path.join(infraRoot, "scripts", "stexor-ops.mjs"));
+  const deployHostingerScript = readText(path.join(infraRoot, "scripts", "deploy-hostinger.sh"));
   const hostingerPostdeployScript = readText(path.join(infraRoot, "scripts", "hostinger-postdeploy.sh"));
   const productionReadinessLiveWrapper = readText(path.join(infraRoot, "scripts", "production-readiness-live.sh"));
   const githubWorkflow = readText(path.join(infraRoot, ".github", "workflows", "enterprise-infra.yml"));
   const githubRunEvidenceWorkflow = readText(path.join(infraRoot, ".github", "workflows", "enterprise-infra-run-evidence.yml"));
   const githubLiveEvidenceWorkflow = readText(path.join(infraRoot, ".github", "workflows", "enterprise-live-evidence.yml"));
+  const githubVpsEvidenceWorkflow = readText(path.join(infraRoot, ".github", "workflows", "enterprise-vps-evidence.yml"));
   const readme = readText(path.join(infraRoot, "README.md"));
   const runbook = readText(path.join(infraRoot, "RUNBOOK.md"));
   const envExample = readText(path.join(infraRoot, ".env.example"));
@@ -9389,11 +9392,13 @@ function staticSecurityInfraOnlyCheck() {
     auditLogEvidenceWrapper,
     retentionEvidenceWrapper,
     secretRotationEvidenceWrapper,
+    deployHostingerScript,
     hostingerPostdeployScript,
     productionReadinessLiveWrapper,
     githubWorkflow,
     githubRunEvidenceWorkflow,
     githubLiveEvidenceWorkflow,
+    githubVpsEvidenceWorkflow,
     readme,
     runbook,
     envExample,
@@ -9445,6 +9450,11 @@ function staticSecurityInfraOnlyCheck() {
   assertMatch(githubLiveEvidenceWorkflow, /PUBLIC_API_HEALTH_URL[\s\S]*load-benchmark[\s\S]*--requirePublicTarget[\s\S]*--requireEdgeEvidence[\s\S]*--expectedEdgeProvider cloudflare/, "Live evidence workflow must run public Cloudflare edge load evidence.");
   assertMatch(githubLiveEvidenceWorkflow, /CLOUDFLARE_API_TOKEN[\s\S]*CLOUDFLARE_ACCOUNT_ID[\s\S]*cloudflare-access-admin[\s\S]*--verifyRemote/, "Live evidence workflow must verify Cloudflare Access admin applications.");
   assertMatch(githubLiveEvidenceWorkflow, /production-go-no-go --enforce[\s\S]*production-readiness-live\.sh[\s\S]*evidence-bundle-verify --requireComplete/, "Live evidence workflow must enforce go/no-go, live readiness and complete bundle verification.");
+  assertMatch(githubVpsEvidenceWorkflow, /name:\s+enterprise-vps-evidence[\s\S]*workflow_dispatch:/, "Infrastructure must provide a manual VPS evidence workflow.");
+  assertMatch(githubVpsEvidenceWorkflow, /environment:[\s\S]*name:\s+production/, "VPS evidence workflow must run in the production environment.");
+  assertMatch(githubVpsEvidenceWorkflow, /DEPLOY_SSH_KEY[\s\S]*DEPLOY_REMOTE[\s\S]*DEPLOY_SSH_PORT[\s\S]*VPS_HARDENED_SSH_PORT/, "VPS evidence workflow must use production SSH variables.");
+  assertMatch(githubVpsEvidenceWorkflow, /confirm_mutating_vps[\s\S]*vps-bootstrap-ubuntu\.sh --apply[\s\S]*vps-hardening-ubuntu\.sh[\s\S]*vps-host-readiness\.sh/, "VPS evidence workflow must gate mutating bootstrap/hardening and always run readiness.");
+  assertMatch(githubVpsEvidenceWorkflow, /Upload VPS evidence reports[\s\S]*reports\/vps-bootstrap\/[\s\S]*reports\/vps-hardening\/[\s\S]*reports\/vps-host\//, "VPS evidence workflow must upload VPS evidence reports.");
   assertMatch(githubWorkflow, /Secret scan[\s\S]*secret-scan/, "Infrastructure CI must run the secret scanner.");
   assertMatch(githubWorkflow, /HA configuration check[\s\S]*ha-config-check/, "Infrastructure CI must run the HA configuration check.");
   assertMatch(githubWorkflow, /Managed secrets preflight[\s\S]*managed-secrets-preflight/, "Infrastructure CI must run the managed secrets preflight.");
@@ -9457,6 +9467,8 @@ function staticSecurityInfraOnlyCheck() {
   assertMatch(githubWorkflow, /DR evidence summary[\s\S]*dr-evidence/, "Infrastructure CI must write a DR evidence summary.");
   assertMatch(githubWorkflow, /Off-site restore drill plan[\s\S]*offsite-restore-drill-restic --planOnly/, "Infrastructure CI must exercise the off-site restore drill plan.");
   assertMatch(githubWorkflow, /Release artifact gate dry run[\s\S]*release-artifact-gate --envFile \.tmp\/ci-release\.env --sbom \.tmp\/ci-sbom\/pnpm-sbom-ci\.json/, "Infrastructure CI must exercise release image and SBOM admission.");
+  assertMatch(deployHostingerScript, /DEPLOY_SSH_PORT[\s\S]*SSH_KEY_PATH[\s\S]*ssh "\$@" "\$REMOTE"/, "Hostinger deploy must use the configured SSH key and port.");
+  assertMatch(githubWorkflow, /DEPLOY_SSH_PORT:\s+\$\{\{ vars\.DEPLOY_SSH_PORT \}\}/, "Production deploy workflow must pass the configured SSH port.");
   assertMatch(githubWorkflow, /DEPLOY_RUN_PRODUCTION_PREFLIGHT:\s+"1"[\s\S]*DEPLOY_RUN_PRE_GO_LIVE:\s+"1"[\s\S]*DEPLOY_RUN_GO_NO_GO:\s+"1"/, "Production deploy workflow must enforce preflight, pre-go-live evidence and go/no-go.");
   assertMatch(githubWorkflow, /DEPLOY_PRE_GO_LIVE_RESTORE_DRILL:\s+"1"[\s\S]*DEPLOY_PRE_GO_LIVE_OFFSITE_RESTORE_DRY_RUN:\s+"1"/, "Production deploy workflow must require restore and off-site restore evidence.");
   assertMatch(githubWorkflow, /Upload CI evidence reports[\s\S]*actions\/upload-artifact@v4[\s\S]*reports\/[\s\S]*\.tmp\/evidence-bundles\/[\s\S]*retention-days:\s+30/, "Infrastructure CI must upload non-secret evidence reports.");
@@ -9597,6 +9609,7 @@ async function staticSecurityCheck() {
   const githubWorkflow = readText(path.join(infraRoot, ".github", "workflows", "enterprise-infra.yml"));
   const githubRunEvidenceWorkflow = readText(path.join(infraRoot, ".github", "workflows", "enterprise-infra-run-evidence.yml"));
   const githubLiveEvidenceWorkflow = readText(path.join(infraRoot, ".github", "workflows", "enterprise-live-evidence.yml"));
+  const githubVpsEvidenceWorkflow = readText(path.join(infraRoot, ".github", "workflows", "enterprise-vps-evidence.yml"));
   const externalUptimeManifest = readText(path.join(infraRoot, "monitoring", "external-uptime.example.json"));
   const cloudflareReadme = readText(path.join(infraRoot, "cloudflare", "README.md"));
   const cloudflareFromZeroManifest = readText(path.join(infraRoot, "cloudflare", "from-zero.example.json"));
@@ -9700,6 +9713,14 @@ async function staticSecurityCheck() {
   assertMatch(githubLiveEvidenceWorkflow, /PUBLIC_API_HEALTH_URL[\s\S]*load-benchmark[\s\S]*--profiles 50,100,500[\s\S]*--requirePublicTarget[\s\S]*--requireEdgeEvidence[\s\S]*--expectedEdgeProvider cloudflare/, "Live evidence workflow must run public Cloudflare edge load benchmarks.");
   assertMatch(githubLiveEvidenceWorkflow, /CLOUDFLARE_API_TOKEN[\s\S]*CLOUDFLARE_ACCOUNT_ID[\s\S]*CLOUDFLARE_ACCESS_ADMIN_MANIFEST_JSON[\s\S]*cloudflare-access-admin[\s\S]*--manifest \.tmp\/cloudflare-access-admin\.production\.json[\s\S]*--verifyRemote/, "Live evidence workflow must verify Cloudflare Access admin applications.");
   assertMatch(githubLiveEvidenceWorkflow, /production-go-no-go --enforce[\s\S]*production-readiness-live\.sh[\s\S]*evidence-bundle-verify --requireComplete/, "Live evidence workflow must enforce go/no-go, live readiness and complete bundle verification.");
+  assertMatch(githubVpsEvidenceWorkflow, /name:\s+enterprise-vps-evidence[\s\S]*workflow_dispatch:/, "GitHub Actions must define a manual VPS evidence workflow.");
+  assertMatch(githubVpsEvidenceWorkflow, /environment:[\s\S]*name:\s+production/, "VPS evidence workflow must use the production environment protection.");
+  assertMatch(githubVpsEvidenceWorkflow, /DEPLOY_SSH_KEY[\s\S]*DEPLOY_REMOTE[\s\S]*DEPLOY_REMOTE_DIR[\s\S]*DEPLOY_SSH_PORT[\s\S]*VPS_HARDENED_SSH_PORT/, "VPS evidence workflow must use production SSH key, target and port variables.");
+  assertMatch(githubVpsEvidenceWorkflow, /confirm_mutating_vps[\s\S]*CONFIRM_MUTATING_VPS[\s\S]*vps-bootstrap-ubuntu\.sh --apply[\s\S]*hardening_args="--apply --ssh-port \$hardened_ssh_port"[\s\S]*vps-host-readiness\.sh --ssh-port "\$hardened_ssh_port" --enforce/, "VPS evidence workflow must gate mutating bootstrap/hardening and always enforce host readiness.");
+  assertMatch(githubVpsEvidenceWorkflow, /__STEXOR_VPS_EVIDENCE_TGZ_BEGIN__[\s\S]*__STEXOR_VPS_EVIDENCE_TGZ_END__/, "VPS evidence workflow must transport remote VPS evidence as a bounded archive.");
+  assertMatch(githubVpsEvidenceWorkflow, /Upload VPS evidence reports[\s\S]*reports\/vps-bootstrap\/[\s\S]*reports\/vps-hardening\/[\s\S]*reports\/vps-host\//, "VPS evidence workflow must upload remote VPS evidence reports.");
+  assertMatch(deployHostingerScript, /DEPLOY_SSH_PORT[\s\S]*SSH_KEY_PATH[\s\S]*ssh "\$@" "\$REMOTE"/, "Hostinger deploy must use the configured SSH key and port.");
+  assertMatch(githubWorkflow, /DEPLOY_SSH_PORT:\s+\$\{\{ vars\.DEPLOY_SSH_PORT \}\}/, "Production deploy workflow must pass the configured SSH port.");
   if (productionGoNoGoPolicyJson.version !== 1) {
     fail("Production go/no-go policy must use version 1.");
   }
@@ -9815,7 +9836,7 @@ async function staticSecurityCheck() {
   assertMatch(githubWorkflow, /Evidence bundle integrity verify[\s\S]*evidence-bundle-verify/, "Infrastructure CI must verify evidence bundle manifest integrity.");
   assertMatch(githubWorkflow, /sh \.\/scripts\/stexor-ops\.sh static-security-check/, "Infrastructure CI must run the Dockerized ops wrapper instead of host Node.");
   assertNoMatch(githubWorkflow, /setup-node|node scripts\/stexor-ops\.mjs|shell:\s+pwsh|\.ps1/, "Infrastructure CI must stay Linux/container-first without PowerShell or host Node policy gates.");
-  assertMatch(deployHostingerScript, /ssh "\$REMOTE" sh -s --[\s\S]*<<'REMOTE_SCRIPT'[\s\S]*remote_dir="\$1"[\s\S]*cd "\$remote_dir"/, "Hostinger deploy must pass remote values through SSH positional arguments instead of interpolating a remote shell string.");
+  assertMatch(deployHostingerScript, /ssh "\$@" "\$REMOTE" sh -s --[\s\S]*<<'REMOTE_SCRIPT'[\s\S]*remote_dir="\$1"[\s\S]*cd "\$remote_dir"/, "Hostinger deploy must pass remote values through SSH positional arguments instead of interpolating a remote shell string.");
   assertNoMatch(deployHostingerScript, /ssh "\$REMOTE" "set -eu/, "Hostinger deploy must not interpolate the remote deployment script into one shell string.");
   assertMatch(deployHostingerScript, /DEPLOY_RUN_PRE_GO_LIVE[\s\S]*DEPLOY_RUN_GO_NO_GO[\s\S]*hostinger-postdeploy\.sh/, "Hostinger deploy script must run post-deploy health and optional evidence gates.");
   assertMatch(hostingerPreflightScript, /compose\.hostinger\.yaml[\s\S]*compose\.waf\.yaml[\s\S]*compose\.hostinger-waf\.yaml[\s\S]*config --quiet[\s\S]*compose\.hostinger\.yaml[\s\S]*compose\.waf\.yaml[\s\S]*compose\.hostinger-waf\.yaml[\s\S]*grep -E 'image: .\+:latest/, "Hostinger preflight must render the same Hostinger+WAF compose stack used by deploy and scan it for mutable images.");
@@ -9999,6 +10020,9 @@ async function staticSecurityCheck() {
   assertMatch(readme, /enterprise-live-evidence[\s\S]*Cloudflare Access[\s\S]*bundle completo/, "README must document the production live evidence workflow.");
   assertMatch(runbook, /enterprise-live-evidence[\s\S]*external uptime[\s\S]*complete evidence bundle/, "Runbook must document the production live evidence workflow.");
   assertMatch(vpsPredeployChecklist, /enterprise-live-evidence[\s\S]*production[\s\S]*artifact/, "VPS checklist must require the production live evidence workflow artifact.");
+  assertMatch(readme, /enterprise-vps-evidence[\s\S]*VPS_HARDENED_SSH_PORT[\s\S]*reports\/vps-/, "README must document the protected VPS evidence workflow.");
+  assertMatch(runbook, /enterprise-vps-evidence[\s\S]*confirm_mutating_vps=true[\s\S]*reports\/vps-/, "Runbook must document the protected VPS evidence workflow.");
+  assertMatch(vpsPredeployChecklist, /enterprise-vps-evidence[\s\S]*`enterprise-vps-evidence` artifact/, "VPS checklist must require archiving the VPS evidence workflow artifact.");
   assertMatch(readme, /pre-go-live-evidence\.sh[\s\S]*reports\/go-live/, "README must document the pre go-live evidence pack.");
   assertMatch(runbook, /pre-go-live-evidence\.sh[\s\S]*includeRuntime[\s\S]*includeRestoreDrill/, "Runbook must document runtime and restore evidence options.");
   assertMatch(vpsPredeployChecklist, /pre-go-live-evidence\.sh[\s\S]*reports\/go-live/, "VPS checklist must require the go-live evidence report.");
@@ -10105,12 +10129,12 @@ async function staticSecurityCheck() {
       fail(`GitHub Actions runtime policy must require ${name} in production.`);
     }
   }
-  for (const name of ["DEPLOY_REMOTE", "DEPLOY_REMOTE_DIR", "PUBLIC_API_HEALTH_URL", "CLOUDFLARE_ACCOUNT_ID"]) {
+  for (const name of ["DEPLOY_REMOTE", "DEPLOY_REMOTE_DIR", "DEPLOY_SSH_PORT", "VPS_HARDENED_SSH_PORT", "PUBLIC_API_HEALTH_URL", "CLOUDFLARE_ACCOUNT_ID"]) {
     if (!productionRuntime?.required_variables?.some((variable) => variable.name === name)) {
       fail(`GitHub Actions runtime policy must require ${name} in production.`);
     }
   }
-  assertMatch(githubActionsRuntimePolicyText, /"DEPLOY_REMOTE"[\s\S]*"DEPLOY_REMOTE_DIR"[\s\S]*"PUBLIC_API_HEALTH_URL"[\s\S]*"CLOUDFLARE_ACCOUNT_ID"/, "GitHub Actions runtime policy must define production deploy, public API and Cloudflare variables.");
+  assertMatch(githubActionsRuntimePolicyText, /"DEPLOY_REMOTE"[\s\S]*"DEPLOY_REMOTE_DIR"[\s\S]*"DEPLOY_SSH_PORT"[\s\S]*"VPS_HARDENED_SSH_PORT"[\s\S]*"PUBLIC_API_HEALTH_URL"[\s\S]*"CLOUDFLARE_ACCOUNT_ID"/, "GitHub Actions runtime policy must define production deploy, VPS, public API and Cloudflare variables.");
   assertMatch(githubActionsRuntimePolicyText, /"EXTERNAL_UPTIME_PROVIDER_EVIDENCE_JSON"[\s\S]*"CLOUDFLARE_API_TOKEN"[\s\S]*"CLOUDFLARE_ACCESS_ADMIN_MANIFEST_JSON"/, "GitHub Actions runtime policy must define live evidence production secrets.");
   assertMatch(opsScript, /async function githubBranchProtection/, "Ops script must provide a GitHub branch protection command.");
   assertMatch(opsScript, /Mode: dry-run[\s\S]*--apply/, "GitHub branch protection command must default to dry-run and require explicit apply.");

@@ -64,9 +64,11 @@
       "title": "Firewall + fail2ban",
       "state": "gate-ready",
       "evidence": [
+        { "type": "file", "path": ".github/workflows/enterprise-vps-evidence.yml" },
         { "type": "file", "path": "scripts/vps-hardening-ubuntu.sh" },
         { "type": "pattern", "path": "scripts/vps-hardening-ubuntu.sh", "pattern": "ufw[\\s\\S]*fail2ban" },
-        { "type": "pattern", "path": "scripts/vps-host-readiness.sh", "pattern": "ufw-active[\\s\\S]*fail2ban-active" }
+        { "type": "pattern", "path": "scripts/vps-host-readiness.sh", "pattern": "ufw-active[\\s\\S]*fail2ban-active" },
+        { "type": "workflow", "pattern": "Run VPS evidence on Hostinger[\\s\\S]*vps-hardening-ubuntu\\.sh[\\s\\S]*vps-host-readiness\\.sh" }
       ],
       "liveProof": "Apply VPS hardening and pass vps-host-readiness --enforce on the Hostinger VPS.",
       "liveProofChecks": ["vps-hardening-applied", "vps-host-readiness"]
@@ -190,9 +192,11 @@
       "title": "Hardening Docker/Linux",
       "state": "gate-ready",
       "evidence": [
+        { "type": "file", "path": ".github/workflows/enterprise-vps-evidence.yml" },
         { "type": "file", "path": "scripts/vps-hardening-ubuntu.sh" },
         { "type": "pattern", "path": "scripts/vps-hardening-ubuntu.sh", "pattern": "no-new-privileges[\\s\\S]*live-restore" },
-        { "type": "command", "name": "linux-portability-check" }
+        { "type": "command", "name": "linux-portability-check" },
+        { "type": "workflow", "pattern": "Run VPS evidence on Hostinger[\\s\\S]*vps-hardening-ubuntu\\.sh[\\s\\S]*vps-host-readiness\\.sh" }
       ],
       "liveProof": "Apply Docker daemon hardening on the VPS and pass vps-host-readiness.",
       "liveProofChecks": ["vps-hardening-applied", "vps-host-readiness"]

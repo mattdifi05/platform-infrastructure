@@ -521,8 +521,9 @@ The GitHub Actions runtime check only verifies secret presence and variable
 formats: it expects staging variable `DAST_TARGET`, production secret
 `DEPLOY_SSH_KEY`, production secret `EXTERNAL_UPTIME_PROVIDER_EVIDENCE_JSON`,
 production secret `CLOUDFLARE_API_TOKEN`, and production variables
-`DEPLOY_REMOTE`, `DEPLOY_REMOTE_DIR`, `PUBLIC_API_HEALTH_URL` plus
-`CLOUDFLARE_ACCOUNT_ID`. It also expects production secret
+`DEPLOY_REMOTE`, `DEPLOY_REMOTE_DIR`, `DEPLOY_SSH_PORT`,
+`VPS_HARDENED_SSH_PORT`, `PUBLIC_API_HEALTH_URL` plus `CLOUDFLARE_ACCOUNT_ID`.
+It also expects production secret
 `CLOUDFLARE_ACCESS_ADMIN_MANIFEST_JSON` for live Cloudflare Access verification.
 Infrastructure CI intentionally does not checkout project
 repositories; attach Stexor or another project with `NODE_SOURCE_DIR` only when
@@ -536,6 +537,12 @@ Run the manual `enterprise-live-evidence` workflow from the production
 environment after DNS, Cloudflare, provider monitors and VPS evidence are ready;
 it gathers external uptime, public Cloudflare load, Cloudflare Access, live
 go/no-go and complete evidence bundle reports without deploying.
+Run `enterprise-vps-evidence` from the same production environment to collect
+VPS bootstrap, hardening and host readiness reports from Hostinger over SSH. It
+requires `DEPLOY_SSH_KEY`, `DEPLOY_REMOTE`, `DEPLOY_SSH_PORT`,
+`DEPLOY_REMOTE_DIR` and `VPS_HARDENED_SSH_PORT`; bootstrap/hardening only run
+when the workflow inputs explicitly enable them and `confirm_mutating_vps=true`.
+Archive the uploaded artifact with `reports/vps-*` outside Git.
 
 Before changing public traffic, generate the consolidated go-live evidence pack:
 

@@ -13,6 +13,7 @@ Use this checklist on the Hostinger Ubuntu LTS VPS before exposing public traffi
 - [ ] Password SSH login disabled.
 - [ ] `sudo sh ./scripts/vps-hardening-ubuntu.sh --apply --ssh-port 65002 --reload-sshd` executed after key access and the target SSH port were verified, including Docker daemon hardening, and the JSON/Markdown report under `reports/vps-hardening/` was archived outside Git. If an existing `/etc/docker/daemon.json` blocks the run, review the generated template and rerun with `--replace-docker-daemon-config`.
 - [ ] `sudo sh ./scripts/vps-host-readiness.sh --ssh-port 65002 --enforce` passed and the JSON/Markdown report under `reports/vps-host/`, including the expected SSH port, UFW allow rule and remediation guidance for every check, was archived outside Git.
+- [ ] GitHub Actions workflow `enterprise-vps-evidence` passed in the `production` environment and its `enterprise-vps-evidence` artifact was archived outside Git.
 - [ ] `sudo ufw status verbose` reviewed.
 - [ ] fail2ban active.
 
@@ -82,7 +83,7 @@ Use this checklist on the Hostinger Ubuntu LTS VPS before exposing public traffi
 - [ ] `sh ./scripts/github-environments.sh --repo OWNER/REPO --dryRun` reviewed.
 - [ ] `GITHUB_PRODUCTION_REVIEWERS=user:OWNER GITHUB_TOKEN=... sh ./scripts/github-environments.sh --repo OWNER/REPO --apply` and `--verifyRemote` completed, or equivalent deployment approvals are proven in GitHub.
 - [ ] `sh ./scripts/github-actions-config.sh --repo OWNER/REPO` reviewed.
-- [ ] `GITHUB_TOKEN=... sh ./scripts/github-actions-config.sh --repo OWNER/REPO --verifyRemote` confirmed `DAST_TARGET`, `DEPLOY_SSH_KEY`, `DEPLOY_REMOTE`, `DEPLOY_REMOTE_DIR`, `PUBLIC_API_HEALTH_URL`, `CLOUDFLARE_ACCOUNT_ID`, `EXTERNAL_UPTIME_PROVIDER_EVIDENCE_JSON`, `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCESS_ADMIN_MANIFEST_JSON`.
+- [ ] `GITHUB_TOKEN=... sh ./scripts/github-actions-config.sh --repo OWNER/REPO --verifyRemote` confirmed `DAST_TARGET`, `DEPLOY_SSH_KEY`, `DEPLOY_REMOTE`, `DEPLOY_REMOTE_DIR`, `DEPLOY_SSH_PORT`, `VPS_HARDENED_SSH_PORT`, `PUBLIC_API_HEALTH_URL`, `CLOUDFLARE_ACCOUNT_ID`, `EXTERNAL_UPTIME_PROVIDER_EVIDENCE_JSON`, `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCESS_ADMIN_MANIFEST_JSON`.
 - [ ] `GITHUB_TOKEN=... sh ./scripts/github-actions-run-evidence.sh --repo OWNER/REPO --workflow enterprise-infra.yml --branch main --sha <release-sha> --verifyRemote` passed and `reports/github-actions/` was archived outside Git.
 - [ ] `sh ./scripts/pre-go-live-evidence.sh --repo OWNER/REPO --includeRuntime --includeRestoreDrill --includeOffsiteRestoreDryRun --includeProductionPreflight --verifyGithubRemote` passed with `status=passed` and the JSON/Markdown reports under `reports/go-live/` were archived outside Git.
 - [ ] SBOM archived.
