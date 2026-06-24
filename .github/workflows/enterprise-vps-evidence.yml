@@ -153,7 +153,7 @@ jobs:
           tar -czf - $tar_paths | base64 -w0
           echo
           echo "__STEXOR_VPS_EVIDENCE_TGZ_END__"
-REMOTE_SCRIPT
+          REMOTE_SCRIPT
           sed -n '/^__STEXOR_VPS_EVIDENCE_TGZ_BEGIN__$/,/^__STEXOR_VPS_EVIDENCE_TGZ_END__$/p' "$remote_output" \
             | sed '1d;$d' > .tmp/vps-evidence.tgz.b64
           test -s .tmp/vps-evidence.tgz.b64

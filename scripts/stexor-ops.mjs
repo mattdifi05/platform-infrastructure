@@ -7559,6 +7559,7 @@ async function repoCoverageCheck() {
     ["github-branch-policy-dry-run", /github-branch-protection --repo/],
     ["github-environments-dry-run", /github-environments --repo/],
     ["github-actions-runtime-dry-run", /github-actions-config --repo/],
+    ["github-actions-workflow-lint", /GitHub Actions workflow lint[\s\S]*rhysd\/actionlint:1\.7\.12@sha256:[a-f0-9]{64}/],
     ["github-actions-run-evidence-plan", /GitHub Actions run evidence plan[\s\S]*github-actions-run-evidence/],
     ["github-actions-run-evidence-verify-remote", /workflow_run:[\s\S]*enterprise-infra[\s\S]*Verify completed enterprise infra run[\s\S]*github-actions-run-evidence[\s\S]*--verifyRemote/],
     ["production-live-evidence-workflow", /workflow_dispatch:[\s\S]*External uptime provider evidence[\s\S]*external-uptime-check[\s\S]*--requireProviderEvidence[\s\S]*Production Cloudflare edge load benchmark[\s\S]*load-benchmark[\s\S]*--expectedEdgeProvider cloudflare[\s\S]*Cloudflare Access admin verify[\s\S]*cloudflare-access-admin[\s\S]*--verifyRemote[\s\S]*evidence-bundle-verify --requireComplete/],
@@ -9437,6 +9438,7 @@ function staticSecurityInfraOnlyCheck() {
   assertMatch(opsScript, /async function staticSecurityCheck/, "Ops script must expose the full static security gate.");
   assertNoMatch(githubWorkflow, /Stexor-account|STEXOR_APP_REPO_TOKEN|Checkout application source/, "Infrastructure CI must not checkout or require project repositories.");
   assertMatch(githubWorkflow, /\.tmp\/optional-node-source/, "Infrastructure CI must use a local optional source placeholder for Compose rendering.");
+  assertMatch(githubWorkflow, /GitHub Actions workflow lint[\s\S]*rhysd\/actionlint:1\.7\.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667[\s\S]*-color/, "Infrastructure CI must lint GitHub Actions workflows with a digest-pinned actionlint image.");
   assertMatch(githubWorkflow, /static-security-check --infraOnly/, "Infrastructure CI must run infrastructure-only static checks.");
   assertMatch(githubWorkflow, /Repository coverage audit[\s\S]*repo-coverage-check/, "Infrastructure CI must audit tracked repository file coverage.");
   assertMatch(githubWorkflow, /Render staging and backup compose[\s\S]*compose\.waf\.yaml[\s\S]*compose\.staging\.yaml[\s\S]*compose\.backup-scheduler\.yaml/, "Infrastructure CI must render staging, WAF and backup scheduler compose overlays.");
@@ -9454,6 +9456,8 @@ function staticSecurityInfraOnlyCheck() {
   assertMatch(githubVpsEvidenceWorkflow, /environment:[\s\S]*name:\s+production/, "VPS evidence workflow must run in the production environment.");
   assertMatch(githubVpsEvidenceWorkflow, /DEPLOY_SSH_KEY[\s\S]*DEPLOY_REMOTE[\s\S]*DEPLOY_SSH_PORT[\s\S]*VPS_HARDENED_SSH_PORT/, "VPS evidence workflow must use production SSH variables.");
   assertMatch(githubVpsEvidenceWorkflow, /confirm_mutating_vps[\s\S]*vps-bootstrap-ubuntu\.sh --apply[\s\S]*vps-hardening-ubuntu\.sh[\s\S]*vps-host-readiness\.sh/, "VPS evidence workflow must gate mutating bootstrap/hardening and always run readiness.");
+  assertMatch(githubVpsEvidenceWorkflow, /\n {10}REMOTE_SCRIPT\r?\n {10}sed -n/, "VPS evidence workflow heredoc terminator must remain inside the YAML run block.");
+  assertNoMatch(githubVpsEvidenceWorkflow, /\nREMOTE_SCRIPT\r?\n/, "VPS evidence workflow heredoc terminator must not become a top-level YAML key.");
   assertMatch(githubVpsEvidenceWorkflow, /Upload VPS evidence reports[\s\S]*reports\/vps-bootstrap\/[\s\S]*reports\/vps-hardening\/[\s\S]*reports\/vps-host\//, "VPS evidence workflow must upload VPS evidence reports.");
   assertMatch(githubWorkflow, /Secret scan[\s\S]*secret-scan/, "Infrastructure CI must run the secret scanner.");
   assertMatch(githubWorkflow, /HA configuration check[\s\S]*ha-config-check/, "Infrastructure CI must run the HA configuration check.");
@@ -9707,6 +9711,7 @@ async function staticSecurityCheck() {
   assertMatch(githubRunEvidenceWorkflow, /permissions:[\s\S]*contents:\s+read[\s\S]*actions:\s+read/, "GitHub Actions run evidence workflow must use least-privilege read permissions.");
   assertMatch(githubRunEvidenceWorkflow, /GITHUB_TOKEN:[\s\S]*github\.token[\s\S]*github-actions-run-evidence[\s\S]*--verifyRemote/, "GitHub Actions run evidence workflow must verify completed runs remotely.");
   assertMatch(githubRunEvidenceWorkflow, /Upload GitHub Actions run evidence[\s\S]*reports\/github-actions\/[\s\S]*retention-days:\s+30/, "GitHub Actions run evidence workflow must upload its non-secret report artifact.");
+  assertMatch(githubWorkflow, /GitHub Actions workflow lint[\s\S]*rhysd\/actionlint:1\.7\.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667[\s\S]*-color/, "Infra workflow must lint GitHub Actions workflows with a digest-pinned actionlint image.");
   assertMatch(githubLiveEvidenceWorkflow, /name:\s+enterprise-live-evidence[\s\S]*workflow_dispatch:/, "GitHub Actions must define a manual production live evidence workflow.");
   assertMatch(githubLiveEvidenceWorkflow, /environment:[\s\S]*name:\s+production/, "Live evidence workflow must use the production environment protection.");
   assertMatch(githubLiveEvidenceWorkflow, /EXTERNAL_UPTIME_PROVIDER_EVIDENCE_JSON[\s\S]*external-uptime-check[\s\S]*--validateProviderEvidenceOnly[\s\S]*external-uptime-check[\s\S]*--requireProviderEvidence/, "Live evidence workflow must validate external uptime provider evidence and direct public probes.");
@@ -9718,6 +9723,8 @@ async function staticSecurityCheck() {
   assertMatch(githubVpsEvidenceWorkflow, /DEPLOY_SSH_KEY[\s\S]*DEPLOY_REMOTE[\s\S]*DEPLOY_REMOTE_DIR[\s\S]*DEPLOY_SSH_PORT[\s\S]*VPS_HARDENED_SSH_PORT/, "VPS evidence workflow must use production SSH key, target and port variables.");
   assertMatch(githubVpsEvidenceWorkflow, /confirm_mutating_vps[\s\S]*CONFIRM_MUTATING_VPS[\s\S]*vps-bootstrap-ubuntu\.sh --apply[\s\S]*hardening_args="--apply --ssh-port \$hardened_ssh_port"[\s\S]*vps-host-readiness\.sh --ssh-port "\$hardened_ssh_port" --enforce/, "VPS evidence workflow must gate mutating bootstrap/hardening and always enforce host readiness.");
   assertMatch(githubVpsEvidenceWorkflow, /__STEXOR_VPS_EVIDENCE_TGZ_BEGIN__[\s\S]*__STEXOR_VPS_EVIDENCE_TGZ_END__/, "VPS evidence workflow must transport remote VPS evidence as a bounded archive.");
+  assertMatch(githubVpsEvidenceWorkflow, /\n {10}REMOTE_SCRIPT\r?\n {10}sed -n/, "VPS evidence workflow heredoc terminator must remain inside the YAML run block.");
+  assertNoMatch(githubVpsEvidenceWorkflow, /\nREMOTE_SCRIPT\r?\n/, "VPS evidence workflow heredoc terminator must not become a top-level YAML key.");
   assertMatch(githubVpsEvidenceWorkflow, /Upload VPS evidence reports[\s\S]*reports\/vps-bootstrap\/[\s\S]*reports\/vps-hardening\/[\s\S]*reports\/vps-host\//, "VPS evidence workflow must upload remote VPS evidence reports.");
   assertMatch(deployHostingerScript, /DEPLOY_SSH_PORT[\s\S]*SSH_KEY_PATH[\s\S]*ssh "\$@" "\$REMOTE"/, "Hostinger deploy must use the configured SSH key and port.");
   assertMatch(githubWorkflow, /DEPLOY_SSH_PORT:\s+\$\{\{ vars\.DEPLOY_SSH_PORT \}\}/, "Production deploy workflow must pass the configured SSH port.");
