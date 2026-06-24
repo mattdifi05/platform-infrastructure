@@ -37,7 +37,9 @@
       "state": "repo-ready",
       "evidence": [
         { "type": "file", "path": ".github/workflows/enterprise-infra.yml" },
+        { "type": "file", "path": ".github/workflows/enterprise-infra-run-evidence.yml" },
         { "type": "pattern", "path": ".github/workflows/enterprise-infra.yml", "pattern": "deploy-hostinger[\\s\\S]*deploy-hostinger\\.sh" },
+        { "type": "pattern", "path": ".github/workflows/enterprise-infra-run-evidence.yml", "pattern": "workflow_run[\\s\\S]*enterprise-infra[\\s\\S]*github-actions-run-evidence[\\s\\S]*--verifyRemote" },
         { "type": "command", "name": "github-actions-config" }
       ],
       "liveProof": "Configure GitHub production environment secrets/variables and require approvals for the deploy job.",

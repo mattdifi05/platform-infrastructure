@@ -328,7 +328,9 @@ segreti. Per il go-live finale registra anche la run CI remota del commit di
 release con
 `GITHUB_TOKEN=<token> sh ./scripts/github-actions-run-evidence.sh --repo OWNER/REPO --workflow enterprise-infra.yml --branch main --sha <release-sha> --verifyRemote`;
 il report finisce in `reports/github-actions/` e deve avere `status=passed` e
-`run.conclusion=success`. La CI dell'infra non esegue checkout di repository progetto: collega
+`run.conclusion=success`. La workflow `enterprise-infra-run-evidence` produce
+automaticamente la stessa evidenza dopo ogni completamento di `enterprise-infra`
+su `main` e carica `reports/github-actions/` come artifact non-secret. La CI dell'infra non esegue checkout di repository progetto: collega
 Stexor o altri progetti solo tramite `NODE_SOURCE_DIR` quando devi buildarli.
 Il gate `scripts/stexor-ops.sh repo-coverage-check` misura la copertura dei
 file tracciati della repo: ogni file deve rientrare in una categoria

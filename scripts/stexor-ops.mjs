@@ -7534,7 +7534,10 @@ async function repoCoverageCheck() {
     "security-policy",
   ];
   const missingCategories = requiredCategories.filter((category) => !categories.has(category));
-  const workflow = readText(path.join(infraRoot, ".github", "workflows", "enterprise-infra.yml"));
+  const workflow = [
+    readText(path.join(infraRoot, ".github", "workflows", "enterprise-infra.yml")),
+    readText(path.join(infraRoot, ".github", "workflows", "enterprise-infra-run-evidence.yml")),
+  ].join("\n");
   const requiredWorkflowGates = [
     ["local-compose-render", /Render local WAF compose[\s\S]*compose\.yaml[\s\S]*compose\.build\.yaml[\s\S]*compose\.secrets\.yaml[\s\S]*compose\.waf\.yaml/],
     ["hostinger-compose-render", /Render Hostinger WAF compose[\s\S]*compose\.hostinger\.yaml[\s\S]*compose\.hostinger-waf\.yaml/],
@@ -7548,6 +7551,7 @@ async function repoCoverageCheck() {
     ["github-environments-dry-run", /github-environments --repo/],
     ["github-actions-runtime-dry-run", /github-actions-config --repo/],
     ["github-actions-run-evidence-plan", /GitHub Actions run evidence plan[\s\S]*github-actions-run-evidence/],
+    ["github-actions-run-evidence-verify-remote", /workflow_run:[\s\S]*enterprise-infra[\s\S]*Verify completed enterprise infra run[\s\S]*github-actions-run-evidence[\s\S]*--verifyRemote/],
     ["secret-scan", /Secret scan[\s\S]*secret-scan/],
     ["ha-config-check", /HA configuration check[\s\S]*ha-config-check/],
     ["managed-secrets-preflight", /Managed secrets preflight[\s\S]*managed-secrets-preflight/],
@@ -9345,6 +9349,7 @@ function staticSecurityInfraOnlyCheck() {
   const hostingerPostdeployScript = readText(path.join(infraRoot, "scripts", "hostinger-postdeploy.sh"));
   const productionReadinessLiveWrapper = readText(path.join(infraRoot, "scripts", "production-readiness-live.sh"));
   const githubWorkflow = readText(path.join(infraRoot, ".github", "workflows", "enterprise-infra.yml"));
+  const githubRunEvidenceWorkflow = readText(path.join(infraRoot, ".github", "workflows", "enterprise-infra-run-evidence.yml"));
   const readme = readText(path.join(infraRoot, "README.md"));
   const runbook = readText(path.join(infraRoot, "RUNBOOK.md"));
   const envExample = readText(path.join(infraRoot, ".env.example"));
@@ -9376,6 +9381,7 @@ function staticSecurityInfraOnlyCheck() {
     hostingerPostdeployScript,
     productionReadinessLiveWrapper,
     githubWorkflow,
+    githubRunEvidenceWorkflow,
     readme,
     runbook,
     envExample,
@@ -9419,6 +9425,8 @@ function staticSecurityInfraOnlyCheck() {
   assertMatch(githubWorkflow, /Render staging and backup compose[\s\S]*compose\.waf\.yaml[\s\S]*compose\.staging\.yaml[\s\S]*compose\.backup-scheduler\.yaml/, "Infrastructure CI must render staging, WAF and backup scheduler compose overlays.");
   assertMatch(githubWorkflow, /Cloudflare from-zero dry run[\s\S]*cloudflare-from-zero --manifest cloudflare\/from-zero\.example\.json/, "Infrastructure CI must exercise the additive-only Cloudflare from-zero plan.");
   assertMatch(githubWorkflow, /GitHub Actions run evidence plan[\s\S]*github-actions-run-evidence/, "Infrastructure CI must generate a GitHub Actions run evidence plan.");
+  assertMatch(githubRunEvidenceWorkflow, /workflow_run:[\s\S]*enterprise-infra[\s\S]*GITHUB_TOKEN:[\s\S]*github\.token[\s\S]*github-actions-run-evidence[\s\S]*--verifyRemote/, "Infrastructure CI must verify completed enterprise-infra runs through a workflow_run evidence workflow.");
+  assertMatch(githubRunEvidenceWorkflow, /permissions:[\s\S]*contents:\s+read[\s\S]*actions:\s+read/, "GitHub Actions run evidence workflow must use least-privilege read permissions.");
   assertMatch(githubWorkflow, /Secret scan[\s\S]*secret-scan/, "Infrastructure CI must run the secret scanner.");
   assertMatch(githubWorkflow, /HA configuration check[\s\S]*ha-config-check/, "Infrastructure CI must run the HA configuration check.");
   assertMatch(githubWorkflow, /Managed secrets preflight[\s\S]*managed-secrets-preflight/, "Infrastructure CI must run the managed secrets preflight.");
@@ -9569,6 +9577,7 @@ async function staticSecurityCheck() {
   const productionGoNoGoPolicyJson = JSON.parse(productionGoNoGoPolicyText);
   const productionReadinessManifest = readText(path.join(infraRoot, "governance", "production-readiness.json"));
   const githubWorkflow = readText(path.join(infraRoot, ".github", "workflows", "enterprise-infra.yml"));
+  const githubRunEvidenceWorkflow = readText(path.join(infraRoot, ".github", "workflows", "enterprise-infra-run-evidence.yml"));
   const externalUptimeManifest = readText(path.join(infraRoot, "monitoring", "external-uptime.example.json"));
   const cloudflareReadme = readText(path.join(infraRoot, "cloudflare", "README.md"));
   const cloudflareFromZeroManifest = readText(path.join(infraRoot, "cloudflare", "from-zero.example.json"));
@@ -9661,6 +9670,11 @@ async function staticSecurityCheck() {
   assertMatch(gitignore, /^\.tmp\/$/m, "Generated ops temp files must be ignored by Git.");
   assertMatch(gitignore, /^release\/$/m, "Generated release manifests and rollback targets must be ignored by Git.");
   assertMatch(gitignore, /^reports\/$/m, "Generated operational reports must be ignored by Git.");
+  assertMatch(githubRunEvidenceWorkflow, /name:\s+enterprise-infra-run-evidence/, "GitHub Actions must define a post-run evidence workflow.");
+  assertMatch(githubRunEvidenceWorkflow, /workflow_run:[\s\S]*enterprise-infra[\s\S]*types:[\s\S]*completed[\s\S]*branches:[\s\S]*main/, "GitHub Actions run evidence workflow must trigger after completed enterprise-infra runs on main.");
+  assertMatch(githubRunEvidenceWorkflow, /permissions:[\s\S]*contents:\s+read[\s\S]*actions:\s+read/, "GitHub Actions run evidence workflow must use least-privilege read permissions.");
+  assertMatch(githubRunEvidenceWorkflow, /GITHUB_TOKEN:[\s\S]*github\.token[\s\S]*github-actions-run-evidence[\s\S]*--verifyRemote/, "GitHub Actions run evidence workflow must verify completed runs remotely.");
+  assertMatch(githubRunEvidenceWorkflow, /Upload GitHub Actions run evidence[\s\S]*reports\/github-actions\/[\s\S]*retention-days:\s+30/, "GitHub Actions run evidence workflow must upload its non-secret report artifact.");
   if (productionGoNoGoPolicyJson.version !== 1) {
     fail("Production go/no-go policy must use version 1.");
   }

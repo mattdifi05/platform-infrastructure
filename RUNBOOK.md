@@ -524,7 +524,10 @@ formats: it expects staging variable `DAST_TARGET`, production secret
 repositories; attach Stexor or another project with `NODE_SOURCE_DIR` only when
 building application images. The run evidence command verifies that the remote
 `enterprise-infra` workflow completed successfully on the exact release commit
-and writes `reports/github-actions/github-actions-run-*.json`.
+and writes `reports/github-actions/github-actions-run-*.json`. The
+`enterprise-infra-run-evidence` workflow runs automatically after completed
+`enterprise-infra` pushes on `main`, verifies the completed run with
+`--verifyRemote`, and uploads the same non-secret report artifact.
 
 Before changing public traffic, generate the consolidated go-live evidence pack:
 
