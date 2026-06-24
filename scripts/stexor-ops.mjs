@@ -7226,6 +7226,9 @@ function staticSecurityInfraOnlyCheck() {
   assertMatch(opsDockerfile, /docker-cli[\s\S]*docker-cli-compose/, "Ops container must include Docker CLI and Compose plugin.");
   assertMatch(opsWrapper, /docker build[\s\S]*docker\/ops\.Dockerfile[\s\S]*docker run --rm/, "Ops wrapper must execute commands through the containerized runner.");
   assertMatch(opsWrapper, /\/var\/run\/docker\.sock/, "Ops wrapper must mount the Docker socket for controlled Docker operations.");
+  assertMatch(opsWrapper, /INFRA_CONTAINER_ROOT="\$\{STEXOR_INFRA_CONTAINER_ROOT:-\/infra\}"/, "Ops wrapper must mount infrastructure at /infra to match the ops image entrypoint.");
+  assertMatch(opsWrapper, /SOURCE_CONTAINER_ROOT="\$\{STEXOR_SOURCE_CONTAINER_ROOT:-\/src_stexor\}"/, "Ops wrapper must mount source at /src_stexor by default.");
+  assertNoMatch(opsWrapper, /INFRA_CONTAINER_ROOT="\$\{STEXOR_INFRA_CONTAINER_ROOT:-\$INFRA_ROOT\}"/, "Ops wrapper must not use the host workspace path as the default container root.");
   assertMatch(backupSchedulerScript, /BACKUP_SCHEDULER_DRY_RUN/, "Backup scheduler must support CI dry-run mode.");
   assertMatch(opsScript, /async function staticSecurityCheck/, "Ops script must expose the full static security gate.");
   assertMatch(githubWorkflow, /Checkout application source[\s\S]*continue-on-error:\s+true/, "Infrastructure CI must tolerate unavailable private application source checkout.");
@@ -7381,6 +7384,9 @@ async function staticSecurityCheck() {
   assertMatch(opsWrapper, /docker build[\s\S]*docker\/ops\.Dockerfile[\s\S]*docker run --rm/, "Ops wrapper must execute commands through the containerized runner.");
   assertMatch(opsWrapper, /\/var\/run\/docker\.sock/, "Ops wrapper must mount the Docker socket for controlled Docker operations.");
   assertMatch(opsWrapper, /--network host/, "Ops wrapper must use host networking on Linux so runtime health checks reach local routed domains.");
+  assertMatch(opsWrapper, /INFRA_CONTAINER_ROOT="\$\{STEXOR_INFRA_CONTAINER_ROOT:-\/infra\}"/, "Ops wrapper must mount infrastructure at /infra to match the ops image entrypoint.");
+  assertMatch(opsWrapper, /SOURCE_CONTAINER_ROOT="\$\{STEXOR_SOURCE_CONTAINER_ROOT:-\/src_stexor\}"/, "Ops wrapper must mount source at /src_stexor by default.");
+  assertNoMatch(opsWrapper, /INFRA_CONTAINER_ROOT="\$\{STEXOR_INFRA_CONTAINER_ROOT:-\$INFRA_ROOT\}"/, "Ops wrapper must not use the host workspace path as the default container root.");
   assertMatch(opsWrapper, /Linux\)[\s\S]*LOCAL_HOST_TARGET="\$\{STEXOR_LOCAL_HOST_TARGET:-127\.0\.0\.1\}"/, "Ops wrapper must pin local development domains to loopback on Linux host networking.");
   assertMatch(opsWrapper, /\*\)[\s\S]*LOCAL_HOST_TARGET="\$\{STEXOR_LOCAL_HOST_TARGET:-host-gateway\}"/, "Ops wrapper must route local development domains to the Docker host gateway on Docker Desktop.");
   assertMatch(opsWrapper, /api\.localhost\.com[\s\S]*account\.localhost\.com[\s\S]*--add-host \$host:\$LOCAL_HOST_TARGET/, "Ops wrapper must pin local development domains through the selected local host target.");
