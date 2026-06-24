@@ -185,6 +185,7 @@ scripts/ui-publish-dry-run.mjs
 - GitHub branch protection dry-run/apply/verify command.
 - GitHub staging/production environment dry-run/apply/verify command with production reviewer enforcement.
 - GitHub Actions runtime secret/variable verification command.
+- GitHub Actions run evidence command for successful remote workflow proof on the release commit.
 - Pre go-live evidence pack with JSON/Markdown reports under `reports/go-live/`.
 - Production go/no-go evidence gate with JSON/Markdown reports under `reports/go-no-go/`.
 - Live production readiness checklist with JSON/Markdown reports under `reports/production-readiness/`.
@@ -273,6 +274,7 @@ All commands listed above passed in the local evidence gathered during this hard
 - Nested Docker path mapping initially failed for backup/SBOM flows; host/container source mappings were added.
 - Managed-secret overlay missed MariaDB/phpMyAdmin secrets; they are now external Docker secrets.
 - Application CI and docs still referenced PowerShell or direct host-Node infra gates; they now use bash/containerized gates or `scripts/run-infra-ops.mjs`.
+- Production go/no-go now requires a remote successful `enterprise-infra` workflow report for the release commit.
 - Alerting had email/generic webhook only; optional native Discord and Telegram delivery with metrics was added.
 - Uptime dry-run previously did not leave report evidence; it now writes diagnostic reports while keeping `providerEvidence.verified=false` so production go/no-go still requires a live provider.
 - Hostinger deploy previously stopped after compose/WAF smoke; a post-deploy script now runs WAF smoke plus `infra-health` and can opt into pre go-live, go/no-go and live production readiness gates.

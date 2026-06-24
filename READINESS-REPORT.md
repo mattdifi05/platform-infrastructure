@@ -52,6 +52,7 @@ Current scope: repository and local Docker evidence before Hostinger VPS deploym
 - `production-go-no-go.sh` aggregates live evidence reports and writes ignored JSON/Markdown reports under `reports/go-no-go/`; `--enforce` blocks production if any required proof is missing.
 - `production-go-no-go` reports include a remediation checklist for every failed required gate.
 - `production-readiness-live.sh` maps the 20-point production-ready checklist to the latest live `production-go-no-go` evidence and writes `reports/production-readiness/`.
+- `github-actions-run-evidence.sh --verifyRemote` proves the remote `enterprise-infra` workflow completed successfully on the release commit and writes `reports/github-actions/`.
 - `hostinger-preflight.sh` validates the full Hostinger+WAF Compose render used by deploy, then `hostinger-postdeploy.sh` runs WAF smoke and `infra-health` after the VPS compose start, with opt-in pre go-live evidence, final `production-go-no-go` and live readiness flags.
 - `evidence-bundle-verify.sh` rereads the final evidence bundle manifest, validates entry SHA256/size and can require every live evidence family before handoff.
 - `hostinger-postdeploy.sh` parses only the required `.env` keys and does not source/execute the env file.
@@ -97,6 +98,7 @@ sh ./scripts/github-environments.sh --repo OWNER/REPO --dryRun
 sh ./scripts/github-actions-config.sh --repo OWNER/REPO
 sh ./scripts/pre-go-live-evidence.sh --repo OWNER/REPO
 sh ./scripts/release-evidence.sh --planOnly
+GITHUB_TOKEN=... sh ./scripts/github-actions-run-evidence.sh --repo OWNER/REPO --workflow enterprise-infra.yml --branch main --sha <release-sha> --verifyRemote
 sh ./scripts/production-go-no-go.sh --enforce
 sh ./scripts/production-readiness-live.sh
 sh ./scripts/evidence-bundle.sh

@@ -4666,6 +4666,111 @@ async function verifyGithubActionsRuntimeConfig(repo, policy = githubActionsRunt
   log(`GitHub Actions runtime config for ${repo} matches required policy.`);
 }
 
+function expectedGithubActionsRunSha() {
+  const explicit = argv.sha ?? argv.commit ?? process.env.GITHUB_SHA;
+  if (explicit) {
+    return String(explicit);
+  }
+  const git = gitEvidence();
+  return git.commit;
+}
+
+function writeGithubActionsRunEvidenceReport(payload) {
+  const stamp = reportTimestamp();
+  const jsonPath = writeJsonReport("github-actions", `github-actions-run-${stamp}`, payload);
+  const markdownPath = writeMarkdownReport("github-actions", `github-actions-run-${stamp}`, [
+    "# GitHub Actions Run Evidence",
+    "",
+    `Status: ${payload.status}`,
+    `Mode: ${payload.mode}`,
+    `Repository: ${payload.repo}`,
+    `Workflow: ${payload.workflow}`,
+    `Branch: ${payload.branch}`,
+    `Expected SHA: ${payload.expectedSha ?? "n/a"}`,
+    `Run ID: ${payload.run?.id ?? "n/a"}`,
+    `Run conclusion: ${payload.run?.conclusion ?? "n/a"}`,
+    `Run status: ${payload.run?.status ?? "n/a"}`,
+    "",
+    "## Issues",
+    "",
+    ...(payload.issues?.length ? payload.issues.map((issue) => `- ${issue}`) : ["- none"]),
+  ]);
+  log(`GitHub Actions run evidence report written to ${jsonPath} and ${markdownPath}`);
+  return { jsonPath, markdownPath };
+}
+
+async function githubActionsRunEvidence() {
+  log("==> GitHub Actions run evidence");
+  const repo = requiredGithubRepo();
+  const workflow = String(argv.workflow ?? productionGoNoGoPolicy().policy.requiredGithubWorkflow ?? "enterprise-infra.yml");
+  const branch = String(argv.branch ?? process.env.GITHUB_REF_NAME ?? "main");
+  const expectedSha = expectedGithubActionsRunSha();
+  const mode = booleanFlag(argv.verifyRemote) ? "verifyRemote" : "plan";
+  const issues = [];
+  if (!expectedSha || !/^[a-f0-9]{40}$/i.test(expectedSha)) {
+    issues.push(`expected SHA is missing or invalid: ${expectedSha ?? "n/a"}`);
+  }
+  let runEvidence = null;
+  if (mode === "verifyRemote") {
+    const basePath = githubRepoApiPath(repo);
+    const query = new URLSearchParams({
+      branch,
+      event: "push",
+      per_page: "30",
+    });
+    if (expectedSha && /^[a-f0-9]{40}$/i.test(expectedSha)) {
+      query.set("head_sha", expectedSha);
+    }
+    const response = await githubApi("GET", `${basePath}/actions/workflows/${encodeURIComponent(workflow)}/runs?${query.toString()}`);
+    const runs = Array.isArray(response?.workflow_runs) ? response.workflow_runs : [];
+    const matchingRuns = runs.filter((run) => !expectedSha || String(run.head_sha ?? "").toLowerCase() === expectedSha.toLowerCase());
+    const run = matchingRuns[0] ?? null;
+    if (!run) {
+      issues.push(`no workflow run found for ${workflow} on ${branch} at ${expectedSha ?? "latest"}`);
+    } else {
+      runEvidence = {
+        id: run.id,
+        name: run.name,
+        htmlUrl: run.html_url,
+        headSha: run.head_sha,
+        status: run.status,
+        conclusion: run.conclusion,
+        event: run.event,
+        createdAt: run.created_at,
+        updatedAt: run.updated_at,
+      };
+      if (run.status !== "completed") {
+        issues.push(`workflow run is not completed: ${run.status}`);
+      }
+      if (run.conclusion !== "success") {
+        issues.push(`workflow run conclusion is not success: ${run.conclusion ?? "null"}`);
+      }
+    }
+  } else {
+    issues.push("remote workflow run not verified; rerun with --verifyRemote and GITHUB_TOKEN/GH_TOKEN");
+  }
+  const payload = {
+    generatedAt: new Date().toISOString(),
+    status: issues.length ? "failed" : "passed",
+    mode,
+    repo,
+    workflow,
+    branch,
+    expectedSha,
+    run: runEvidence,
+    issues,
+  };
+  writeGithubActionsRunEvidenceReport(payload);
+  if (issues.length && mode === "verifyRemote") {
+    fail(`GitHub Actions run evidence failed: ${issues.join("; ")}`);
+  }
+  if (mode === "plan") {
+    log("Mode: plan. Re-run with --verifyRemote and GITHUB_TOKEN/GH_TOKEN after the workflow has completed on the release commit.");
+  } else {
+    log("GitHub Actions run evidence passed.");
+  }
+}
+
 function gitEvidence() {
   const rev = run("git", ["rev-parse", "HEAD"], { capture: true, allowFailure: true });
   const branch = run("git", ["rev-parse", "--abbrev-ref", "HEAD"], { capture: true, allowFailure: true });
@@ -4675,6 +4780,15 @@ function gitEvidence() {
     branch: branch.status === 0 ? String(branch.stdout ?? "").trim() : null,
     dirty: status.status === 0 ? String(status.stdout ?? "").trim().split(/\r?\n/).filter(Boolean).length > 0 : null,
   };
+}
+
+function releaseCommitShaCandidate() {
+  const release = latestJsonReport("release", "release-evidence-", (payload) => payload.mode === "evidence");
+  const releaseSha = release?.payload?.releaseSha ?? release?.payload?.git?.commit ?? release?.payload?.git?.sha;
+  if (releaseSha && /^[a-f0-9]{40}$/i.test(String(releaseSha))) {
+    return String(releaseSha);
+  }
+  return null;
 }
 
 async function collectEvidenceStep(steps, { name, category, required = true, fn }) {
@@ -5110,6 +5224,16 @@ function goNoGoRemediation(check) {
       ],
       evidence: "reports/go-live/pre-go-live-evidence-*.json with status=passed and no missingOptions",
     },
+    "github-actions-run-success": {
+      actions: [
+        "Wait for the enterprise-infra GitHub Actions workflow to complete on the exact release commit.",
+        "Rerun failed jobs from GitHub if needed, then verify the successful remote run with a token that can read Actions metadata.",
+      ],
+      commands: [
+        "GITHUB_TOKEN=<token> sh ./scripts/github-actions-run-evidence.sh --repo OWNER/REPO --workflow enterprise-infra.yml --branch main --sha <release-sha> --verifyRemote",
+      ],
+      evidence: "reports/github-actions/github-actions-run-*.json with mode=verifyRemote, status=passed, workflow=enterprise-infra.yml and run.conclusion=success",
+    },
     "disaster-recovery-rpo-rto-offsite": {
       actions: [
         "Configure a remote Restic repository and run a real off-site restore drill covering PostgreSQL, MariaDB, MinIO, Keycloak and Secret Manager metadata.",
@@ -5212,6 +5336,7 @@ function goNoGoRemediationMarkdown(remediation) {
 const evidenceBundleReportSpecs = [
   { directory: "go-no-go", prefix: "production-go-no-go-", label: "production-go-no-go", required: true },
   { directory: "production-readiness", prefix: "production-readiness-", label: "production-readiness-live", required: true },
+  { directory: "github-actions", prefix: "github-actions-run-", label: "github-actions-run", required: true },
   { directory: "go-live", prefix: "pre-go-live-evidence-", label: "pre-go-live", required: true },
   { directory: "vps-host", prefix: "vps-host-readiness-", label: "vps-host-readiness", required: true },
   { directory: "dr", prefix: "dr-evidence-", label: "dr-evidence", required: true },
@@ -5356,6 +5481,28 @@ function validateEvidenceBundleEntry(entry, bundleDir, issues) {
     issues.push(`${normalizedPath}: sha256 mismatch`);
   }
   return normalizedPath;
+}
+
+function evidenceBundleReportPasses(spec, payload) {
+  if (!payload || typeof payload !== "object") {
+    return { passed: false, detail: "report payload is missing" };
+  }
+  if (spec.label === "production-go-no-go") {
+    return { passed: payload.status === "go", detail: `status=${payload.status ?? "missing"}` };
+  }
+  if (spec.label === "vps-bootstrap-apply" || spec.label === "vps-hardening-apply") {
+    return { passed: payload.status === "applied" && payload.mode === "apply", detail: `mode=${payload.mode ?? "missing"} status=${payload.status ?? "missing"}` };
+  }
+  if (spec.label === "vps-host-readiness") {
+    return { passed: Number(payload.summary?.failedRequired ?? 1) === 0 && payload.productionEvidence !== false, detail: `failedRequired=${payload.summary?.failedRequired ?? "missing"}` };
+  }
+  if (spec.label === "github-actions-run") {
+    return { passed: payload.mode === "verifyRemote" && payload.status === "passed" && payload.run?.conclusion === "success", detail: `mode=${payload.mode ?? "missing"} status=${payload.status ?? "missing"} conclusion=${payload.run?.conclusion ?? "missing"}` };
+  }
+  if (spec.label === "rollback-plan") {
+    return { passed: payload.validated === true || payload.status === "passed", detail: `validated=${payload.validated ?? "missing"} status=${payload.status ?? "missing"}` };
+  }
+  return { passed: payload.status === "passed", detail: `status=${payload.status ?? "missing"}` };
 }
 
 async function evidenceBundle() {
@@ -5541,9 +5688,18 @@ async function evidenceBundleVerify() {
   const missingLabels = new Set(missingRequiredEvidence.map((item) => item.label));
   for (const spec of evidenceBundleReportSpecs) {
     if (spec.required && !missingLabels.has(spec.label)) {
-      const hasReport = [...paths].some((entryPath) => entryPath.startsWith(`reports/${spec.directory}/`) && path.basename(entryPath).startsWith(spec.prefix));
-      if (!hasReport) {
+      const reportEntries = [...paths]
+        .filter((entryPath) => entryPath.startsWith(`reports/${spec.directory}/`) && path.basename(entryPath).startsWith(spec.prefix) && entryPath.endsWith(".json"))
+        .sort();
+      if (!reportEntries.length) {
         issues.push(`missing required report entry: ${spec.label}`);
+      } else if (requireComplete) {
+        const reportPath = path.join(bundleDir, reportEntries.at(-1));
+        const payload = readJsonFile(reportPath, reportPath);
+        const result = evidenceBundleReportPasses(spec, payload);
+        if (!result.passed) {
+          issues.push(`required report is not passing: ${spec.label}; ${result.detail}`);
+        }
       }
     }
   }
@@ -5690,6 +5846,42 @@ async function productionGoNoGo() {
       ? `${preFresh.detail}; status=${preGoLive.payload.status ?? "unknown"}; requiredFailures=${preRequiredFailures.length}; missingOptions=${preMissingOptions.join(",") || "none"}; readinessMissing=${preMatrixRequiredFailures.map((item) => item.id).join(",") || "none"}`
       : preFresh.detail,
     report: preGoLive,
+  });
+
+  const expectedWorkflow = policy.requiredGithubWorkflow ?? "enterprise-infra.yml";
+  const releaseSha = releaseCommitShaCandidate() ?? gitEvidence().commit;
+  const githubActionsRun = latestJsonReport("github-actions", "github-actions-run-", (payload) => (
+    !policy.requireGithubActionsRunSuccess
+    || (
+      payload.mode === "verifyRemote"
+      && payload.status === "passed"
+      && payload.workflow === expectedWorkflow
+      && (!releaseSha || String(payload.expectedSha ?? "").toLowerCase() === String(releaseSha).toLowerCase())
+      && payload.run?.status === "completed"
+      && payload.run?.conclusion === "success"
+    )
+  ));
+  const latestGithubActionsRun = latestJsonReport("github-actions", "github-actions-run-");
+  const githubActionsFresh = reportFreshDetail(githubActionsRun, maxAge.githubActionsRun);
+  const latestGithubActionsFresh = reportFreshDetail(latestGithubActionsRun, maxAge.githubActionsRun);
+  const githubActionsOk = !policy.requireGithubActionsRunSuccess || Boolean(
+    githubActionsRun
+    && githubActionsFresh.fresh
+    && githubActionsRun.payload.mode === "verifyRemote"
+    && githubActionsRun.payload.status === "passed"
+    && githubActionsRun.payload.workflow === expectedWorkflow
+    && githubActionsRun.payload.run?.conclusion === "success"
+    && (!releaseSha || String(githubActionsRun.payload.expectedSha ?? "").toLowerCase() === String(releaseSha).toLowerCase())
+  );
+  addGoNoGoCheck(checks, {
+    name: "github-actions-run-success",
+    passed: githubActionsOk,
+    detail: githubActionsRun
+      ? `${githubActionsFresh.detail}; workflow=${githubActionsRun.payload.workflow}; mode=${githubActionsRun.payload.mode}; status=${githubActionsRun.payload.status}; conclusion=${githubActionsRun.payload.run?.conclusion ?? "missing"}; sha=${githubActionsRun.payload.expectedSha ?? "missing"}`
+      : latestGithubActionsRun
+        ? `missing successful verifyRemote workflow report; latestWorkflow=${latestGithubActionsRun.payload.workflow ?? "unknown"}; latestStatus=${latestGithubActionsRun.payload.status ?? "unknown"}; latestMode=${latestGithubActionsRun.payload.mode ?? "unknown"}; ${latestGithubActionsFresh.detail}`
+        : githubActionsFresh.detail,
+    report: githubActionsRun ?? latestGithubActionsRun,
   });
 
   const dr = latestJsonReport("dr", "dr-evidence-");
@@ -6029,6 +6221,7 @@ async function repoCoverageCheck() {
     ["github-branch-policy-dry-run", /github-branch-protection --repo/],
     ["github-environments-dry-run", /github-environments --repo/],
     ["github-actions-runtime-dry-run", /github-actions-config --repo/],
+    ["github-actions-run-evidence-plan", /GitHub Actions run evidence plan[\s\S]*github-actions-run-evidence/],
     ["secret-scan", /Secret scan[\s\S]*secret-scan/],
     ["ha-config-check", /HA configuration check[\s\S]*ha-config-check/],
     ["managed-secrets-preflight", /Managed secrets preflight[\s\S]*managed-secrets-preflight/],
@@ -7812,6 +8005,7 @@ function staticSecurityInfraOnlyCheck() {
   const opsWrapper = readText(path.join(infraRoot, "scripts", "stexor-ops.sh"));
   const backupSchedulerScript = readText(path.join(infraRoot, "scripts", "backup-scheduler.sh"));
   const evidenceBundleVerifyWrapper = readText(path.join(infraRoot, "scripts", "evidence-bundle-verify.sh"));
+  const githubActionsRunEvidenceWrapper = readText(path.join(infraRoot, "scripts", "github-actions-run-evidence.sh"));
   const opsScript = readText(path.join(infraRoot, "scripts", "stexor-ops.mjs"));
   const hostingerPostdeployScript = readText(path.join(infraRoot, "scripts", "hostinger-postdeploy.sh"));
   const productionReadinessLiveWrapper = readText(path.join(infraRoot, "scripts", "production-readiness-live.sh"));
@@ -7839,6 +8033,7 @@ function staticSecurityInfraOnlyCheck() {
     opsWrapper,
     backupSchedulerScript,
     evidenceBundleVerifyWrapper,
+    githubActionsRunEvidenceWrapper,
     hostingerPostdeployScript,
     productionReadinessLiveWrapper,
     githubWorkflow,
@@ -7882,6 +8077,7 @@ function staticSecurityInfraOnlyCheck() {
   assertMatch(githubWorkflow, /Repository coverage audit[\s\S]*repo-coverage-check/, "Infrastructure CI must audit tracked repository file coverage.");
   assertMatch(githubWorkflow, /Render staging and backup compose[\s\S]*compose\.waf\.yaml[\s\S]*compose\.staging\.yaml[\s\S]*compose\.backup-scheduler\.yaml/, "Infrastructure CI must render staging, WAF and backup scheduler compose overlays.");
   assertMatch(githubWorkflow, /Cloudflare from-zero dry run[\s\S]*cloudflare-from-zero --manifest cloudflare\/from-zero\.example\.json/, "Infrastructure CI must exercise the additive-only Cloudflare from-zero plan.");
+  assertMatch(githubWorkflow, /GitHub Actions run evidence plan[\s\S]*github-actions-run-evidence/, "Infrastructure CI must generate a GitHub Actions run evidence plan.");
   assertMatch(githubWorkflow, /Secret scan[\s\S]*secret-scan/, "Infrastructure CI must run the secret scanner.");
   assertMatch(githubWorkflow, /HA configuration check[\s\S]*ha-config-check/, "Infrastructure CI must run the HA configuration check.");
   assertMatch(githubWorkflow, /Managed secrets preflight[\s\S]*managed-secrets-preflight/, "Infrastructure CI must run the managed secrets preflight.");
@@ -7907,7 +8103,10 @@ function staticSecurityInfraOnlyCheck() {
   assertMatch(opsScript, /"repo-coverage-check": repoCoverageCheck/, "Ops command map must expose repo-coverage-check.");
   assertMatch(opsScript, /repoStatus:[\s\S]*liveProofStatus[\s\S]*liveProofsPending/, "Enterprise requirement reports must separate repository evidence from pending live production proof.");
   assertMatch(evidenceBundleVerifyWrapper, /evidence-bundle-verify/, "Evidence bundle verify wrapper must delegate to the Dockerized ops runner.");
-  assertMatch(opsScript, /async function evidenceBundleVerify[\s\S]*sha256 mismatch[\s\S]*--requireComplete/, "Ops script must verify evidence bundle SHA256 and completeness.");
+  assertMatch(opsScript, /async function evidenceBundleVerify[\s\S]*sha256 mismatch[\s\S]*required report is not passing[\s\S]*--requireComplete/, "Ops script must verify evidence bundle SHA256, report status and completeness.");
+  assertMatch(githubActionsRunEvidenceWrapper, /github-actions-run-evidence/, "GitHub Actions run evidence wrapper must delegate to the Dockerized ops runner.");
+  assertMatch(opsScript, /async function githubActionsRunEvidence[\s\S]*workflow_runs[\s\S]*run\.conclusion !== "success"/, "Ops script must verify remote GitHub Actions workflow success.");
+  assertMatch(productionGoNoGoPolicyText, /"requireGithubActionsRunSuccess":\s*true[\s\S]*"requiredGithubWorkflow":\s*"enterprise-infra\.yml"/, "Production go/no-go policy must require a successful remote GitHub Actions workflow run.");
   assertMatch(hostingerPostdeployScript, /production-go-no-go\.sh --enforce[\s\S]*production-readiness-live\.sh/, "Hostinger post-deploy must enforce live production readiness after production go/no-go.");
   assertMatch(productionReadinessLiveWrapper, /enterprise-requirements-check --manifest governance\/production-readiness\.json --requireLiveProofs/, "Production readiness live wrapper must enforce the 20-point live checklist.");
   assertMatch(opsScript, /directory: "production-readiness"[\s\S]*prefix: "production-readiness-"[\s\S]*required: true/, "Evidence bundle must require the live production readiness report.");
@@ -8045,6 +8244,7 @@ async function staticSecurityCheck() {
   const githubBranchProtectionWrapper = readText(path.join(infraRoot, "scripts", "github-branch-protection.sh"));
   const githubEnvironmentsWrapper = readText(path.join(infraRoot, "scripts", "github-environments.sh"));
   const githubActionsConfigWrapper = readText(path.join(infraRoot, "scripts", "github-actions-config.sh"));
+  const githubActionsRunEvidenceWrapper = readText(path.join(infraRoot, "scripts", "github-actions-run-evidence.sh"));
   const preGoLiveEvidenceWrapper = readText(path.join(infraRoot, "scripts", "pre-go-live-evidence.sh"));
   const productionGoNoGoWrapper = readText(path.join(infraRoot, "scripts", "production-go-no-go.sh"));
   const productionReadinessLiveWrapper = readText(path.join(infraRoot, "scripts", "production-readiness-live.sh"));
@@ -8212,7 +8412,7 @@ async function staticSecurityCheck() {
   assertNoMatch(hostingerPostdeployScript, /(?:^|\n)\s*\.\s+"\$ENV_FILE"|set -a[\s\S]*"\$ENV_FILE"/, "Hostinger post-deploy must not source .env.");
   assertMatch(hostingerPostdeployScript, /waf-smoke\.sh[\s\S]*infra-health\.sh[\s\S]*pre-go-live-evidence\.sh[\s\S]*production-go-no-go\.sh --enforce[\s\S]*production-readiness-live\.sh/, "Hostinger post-deploy must cover smoke, health, optional pre go-live evidence, final go/no-go and live production readiness.");
   assertMatch(hostingerGoLiveScript, /PLAN_ONLY=1[\s\S]*--confirmLive[\s\S]*PLAN_ONLY=0/, "Hostinger go-live orchestrator must be plan-only unless explicitly confirmed.");
-  assertMatch(hostingerGoLiveScript, /vps-bootstrap-ubuntu\.sh --apply[\s\S]*vps-hardening-ubuntu\.sh --apply[\s\S]*vps-host-readiness\.sh --ssh-port \$SSH_PORT --enforce[\s\S]*hostinger-preflight\.sh[\s\S]*hostinger-postdeploy\.sh[\s\S]*production-go-no-go\.sh --enforce[\s\S]*production-readiness-live\.sh[\s\S]*evidence-bundle\.sh/, "Hostinger go-live orchestrator must sequence optional VPS bootstrap, hardening, readiness, preflight, postdeploy, go/no-go, live readiness and evidence bundle.");
+  assertMatch(hostingerGoLiveScript, /vps-bootstrap-ubuntu\.sh --apply[\s\S]*vps-hardening-ubuntu\.sh --apply[\s\S]*vps-host-readiness\.sh --ssh-port \$SSH_PORT --enforce[\s\S]*hostinger-preflight\.sh[\s\S]*hostinger-postdeploy\.sh[\s\S]*github-actions-run-evidence\.sh[\s\S]*production-go-no-go\.sh --enforce[\s\S]*production-readiness-live\.sh[\s\S]*evidence-bundle\.sh/, "Hostinger go-live orchestrator must sequence optional VPS bootstrap, hardening, readiness, preflight, postdeploy, GitHub Actions evidence, go/no-go, live readiness and evidence bundle.");
   assertMatch(hostingerGoLiveScript, /evidence-bundle\.sh[\s\S]*evidence-bundle-verify\.sh --requireComplete/, "Hostinger go-live orchestrator must verify the final evidence bundle when go/no-go is enabled.");
   assertMatch(hostingerGoLiveScript, /--reload-sshd[\s\S]*RELOAD_SSHD=1[\s\S]*reloadSshd[\s\S]*vps-hardening-ubuntu\.sh --apply --ssh-port "\$SSH_PORT" \$reload_flag/, "Hostinger go-live orchestrator must expose explicit SSH reload for VPS hardening.");
   assertMatch(hostingerGoLiveScript, /--replace-docker-daemon-config[\s\S]*REPLACE_DOCKER_DAEMON_CONFIG=1[\s\S]*replaceDockerDaemonConfig[\s\S]*vps-hardening-ubuntu\.sh --apply --ssh-port "\$SSH_PORT" \$reload_flag --replace-docker-daemon-config/, "Hostinger go-live orchestrator must expose explicit Docker daemon config replacement for VPS hardening.");
@@ -8238,8 +8438,11 @@ async function staticSecurityCheck() {
   assertMatch(evidenceBundleWrapper, /evidence-bundle/, "Evidence bundle wrapper must delegate to the Dockerized ops runner.");
   assertMatch(evidenceBundleVerifyWrapper, /evidence-bundle-verify/, "Evidence bundle verify wrapper must delegate to the Dockerized ops runner.");
   assertMatch(opsScript, /async function evidenceBundle[\s\S]*stexor-evidence-bundle-\$\{stamp\}[\s\S]*includesSecrets:\s+false/, "Ops script must create non-secret evidence bundles with a manifest.");
-  assertMatch(opsScript, /async function evidenceBundleVerify[\s\S]*sha256 mismatch[\s\S]*--requireComplete/, "Ops script must verify evidence bundle SHA256 and completeness.");
+  assertMatch(opsScript, /async function evidenceBundleVerify[\s\S]*sha256 mismatch[\s\S]*required report is not passing[\s\S]*--requireComplete/, "Ops script must verify evidence bundle SHA256, report status and completeness.");
+  assertMatch(githubActionsRunEvidenceWrapper, /github-actions-run-evidence/, "GitHub Actions run evidence wrapper must delegate to the Dockerized ops runner.");
+  assertMatch(opsScript, /async function githubActionsRunEvidence[\s\S]*workflow_runs[\s\S]*run\.conclusion !== "success"/, "Ops script must verify remote GitHub Actions workflow success.");
   assertMatch(productionReadinessLiveWrapper, /enterprise-requirements-check --manifest governance\/production-readiness\.json --requireLiveProofs/, "Production readiness live wrapper must enforce the 20-point live checklist.");
+  assertMatch(opsScript, /directory: "github-actions"[\s\S]*prefix: "github-actions-run-"[\s\S]*required: true/, "Evidence bundle must require the GitHub Actions run evidence report.");
   assertMatch(opsScript, /directory: "production-readiness"[\s\S]*prefix: "production-readiness-"[\s\S]*required: true/, "Evidence bundle must require the live production readiness report.");
   assertMatch(opsScript, /directory: "vps-bootstrap"[\s\S]*prefix: "vps-bootstrap-apply-"[\s\S]*required: true/, "Evidence bundle must require VPS bootstrap apply reports.");
   assertMatch(opsScript, /directory: "vps-hardening"[\s\S]*prefix: "vps-hardening-apply-"[\s\S]*required: true/, "Evidence bundle must require VPS hardening apply reports.");
@@ -8377,8 +8580,11 @@ async function staticSecurityCheck() {
   assertMatch(runbook, /github-environments\.sh[\s\S]*GITHUB_PRODUCTION_REVIEWERS[\s\S]*--verifyRemote/, "Runbook must document GitHub deployment environments apply and remote verification.");
   assertMatch(vpsPredeployChecklist, /github-environments\.sh[\s\S]*--verifyRemote/, "VPS checklist must require live GitHub deployment environment verification.");
   assertMatch(readme, /github-actions-config\.sh[\s\S]*DEPLOY_SSH_KEY[\s\S]*--verifyRemote/, "README must document GitHub Actions runtime config verification.");
+  assertMatch(readme, /github-actions-run-evidence\.sh[\s\S]*reports\/github-actions/, "README must document GitHub Actions run evidence.");
   assertMatch(runbook, /github-actions-config\.sh[\s\S]*DEPLOY_SSH_KEY/, "Runbook must document required GitHub Actions runtime secrets and variables.");
+  assertMatch(runbook, /github-actions-run-evidence\.sh[\s\S]*reports\/github-actions/, "Runbook must document GitHub Actions run evidence.");
   assertMatch(vpsPredeployChecklist, /github-actions-config\.sh[\s\S]*DEPLOY_REMOTE_DIR/, "VPS checklist must require live GitHub Actions runtime config verification.");
+  assertMatch(vpsPredeployChecklist, /github-actions-run-evidence\.sh[\s\S]*reports\/github-actions/, "VPS checklist must require GitHub Actions run evidence.");
   assertMatch(readme, /pre-go-live-evidence\.sh[\s\S]*reports\/go-live/, "README must document the pre go-live evidence pack.");
   assertMatch(runbook, /pre-go-live-evidence\.sh[\s\S]*includeRuntime[\s\S]*includeRestoreDrill/, "Runbook must document runtime and restore evidence options.");
   assertMatch(vpsPredeployChecklist, /pre-go-live-evidence\.sh[\s\S]*reports\/go-live/, "VPS checklist must require the go-live evidence report.");
@@ -8482,6 +8688,8 @@ async function staticSecurityCheck() {
   assertMatch(opsScript, /validateVariablePatterns/, "GitHub Actions config command must validate variable formats without printing secret values.");
   assertMatch(opsScript, /"github-actions-config": githubActionsConfig/, "Ops command map must expose github-actions-config.");
   assertMatch(githubWorkflow, /GitHub Actions runtime config dry run[\s\S]*github-actions-config --repo/, "Infra workflow must dry-run GitHub Actions runtime config policy.");
+  assertMatch(githubWorkflow, /GitHub Actions run evidence plan[\s\S]*github-actions-run-evidence/, "Infra workflow must generate a GitHub Actions run evidence plan.");
+  assertMatch(productionGoNoGoPolicyText, /"requireGithubActionsRunSuccess":\s*true[\s\S]*"requiredGithubWorkflow":\s*"enterprise-infra\.yml"/, "Production go/no-go policy must require a successful remote GitHub Actions workflow run.");
   assertMatch(githubWorkflow, /DR evidence summary[\s\S]*dr-evidence/, "Infra workflow must exercise the DR evidence summary.");
   assertMatch(githubWorkflow, /Off-site restore drill plan[\s\S]*offsite-restore-drill-restic --planOnly/, "Infra workflow must exercise the off-site restore drill plan.");
   assertMatch(githubWorkflow, /Release evidence plan[\s\S]*release-evidence --planOnly/, "Infra workflow must exercise the release evidence command in plan mode.");
@@ -9119,6 +9327,7 @@ Commands:
   full-restore-drill
   generate-sbom
   github-actions-config
+  github-actions-run-evidence
   github-branch-protection
   github-environments
   governance-check
@@ -9199,6 +9408,7 @@ const commands = {
   "full-restore-drill": fullRestoreDrill,
   "generate-sbom": generateSbom,
   "github-actions-config": githubActionsConfig,
+  "github-actions-run-evidence": githubActionsRunEvidence,
   "github-branch-protection": githubBranchProtection,
   "github-environments": githubEnvironments,
   "governance-check": governanceCheck,

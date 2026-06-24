@@ -495,6 +495,7 @@ GITHUB_PRODUCTION_REVIEWERS=user:OWNER GITHUB_TOKEN=... sh ./scripts/github-envi
 GITHUB_TOKEN=... sh ./scripts/github-environments.sh --repo OWNER/REPO --verifyRemote
 sh ./scripts/github-actions-config.sh --repo OWNER/REPO
 GITHUB_TOKEN=... sh ./scripts/github-actions-config.sh --repo OWNER/REPO --verifyRemote
+GITHUB_TOKEN=... sh ./scripts/github-actions-run-evidence.sh --repo OWNER/REPO --workflow enterprise-infra.yml --branch main --sha <release-sha> --verifyRemote
 ```
 
 The token must have repository administration permission. Do not keep the token
@@ -506,7 +507,9 @@ formats: it expects staging variable `DAST_TARGET`, production secret
 `DEPLOY_SSH_KEY`, and production variables `DEPLOY_REMOTE` plus
 `DEPLOY_REMOTE_DIR`. Infrastructure CI intentionally does not checkout project
 repositories; attach Stexor or another project with `NODE_SOURCE_DIR` only when
-building application images.
+building application images. The run evidence command verifies that the remote
+`enterprise-infra` workflow completed successfully on the exact release commit
+and writes `reports/github-actions/github-actions-run-*.json`.
 
 Before changing public traffic, generate the consolidated go-live evidence pack:
 
@@ -552,10 +555,10 @@ sh ./scripts/production-readiness-live.sh
 The summary command writes `reports/go-no-go/production-go-no-go-*.json` and
 `.md`. `--enforce` fails unless the latest evidence proves VPS bootstrap and
 hardening apply reports, VPS host readiness, Cloudflare Access admin
-`--verifyRemote`, DR/off-site restore, real alert delivery, external uptime,
-public 50/100/500 load, release evidence with rollback/provenance and complete
-pre-go-live evidence. Treat `no-go` as a hard stop before public traffic
-changes. A `no-go` report carries a JSON
+`--verifyRemote`, successful remote GitHub Actions run evidence, DR/off-site
+restore, real alert delivery, external uptime, public 50/100/500 load, release
+evidence with rollback/provenance and complete pre-go-live evidence. Treat
+`no-go` as a hard stop before public traffic changes. A `no-go` report carries a JSON
 `remediation` array and a Markdown remediation checklist with the exact
 follow-up commands and evidence expected for each failed gate.
 `production-readiness-live.sh` then maps the 20-point production readiness

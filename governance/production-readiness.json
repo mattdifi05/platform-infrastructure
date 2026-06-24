@@ -41,7 +41,7 @@
         { "type": "command", "name": "github-actions-config" }
       ],
       "liveProof": "Configure GitHub production environment secrets/variables and require approvals for the deploy job.",
-      "liveProofChecks": ["pre-go-live-evidence-complete"]
+      "liveProofChecks": ["github-actions-run-success", "pre-go-live-evidence-complete"]
     },
     {
       "id": "external-uptime-monitoring",

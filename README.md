@@ -309,7 +309,11 @@ La runtime config GitHub Actions e' versionata in
 `governance/github-actions-runtime.json`: `DAST_TARGET`, `DEPLOY_SSH_KEY`,
 `DEPLOY_REMOTE` e `DEPLOY_REMOTE_DIR` vengono verificati da
 `scripts/github-actions-config.sh --verifyRemote` senza stampare valori
-segreti. La CI dell'infra non esegue checkout di repository progetto: collega
+segreti. Per il go-live finale registra anche la run CI remota del commit di
+release con
+`GITHUB_TOKEN=<token> sh ./scripts/github-actions-run-evidence.sh --repo OWNER/REPO --workflow enterprise-infra.yml --branch main --sha <release-sha> --verifyRemote`;
+il report finisce in `reports/github-actions/` e deve avere `status=passed` e
+`run.conclusion=success`. La CI dell'infra non esegue checkout di repository progetto: collega
 Stexor o altri progetti solo tramite `NODE_SOURCE_DIR` quando devi buildarli.
 Il gate `scripts/stexor-ops.sh repo-coverage-check` misura la copertura dei
 file tracciati della repo: ogni file deve rientrare in una categoria
@@ -327,9 +331,9 @@ Prima del deploy pubblico esegui anche `scripts/production-go-no-go.sh`. Il
 comando legge i report ignorati da Git e scrive JSON/Markdown in
 `reports/go-no-go/`. In summary mode mostra `go` o `no-go`; con `--enforce`
 blocca la release se mancano VPS bootstrap/hardening apply, VPS host readiness,
-Cloudflare Access `--verifyRemote`, DR/off-site restore, alert email reale,
-uptime esterno, load pubblico 50/100/500, release evidence o pre-go-live
-evidence completo. Ogni
+Cloudflare Access `--verifyRemote`, GitHub Actions run remota passata,
+DR/off-site restore, alert email reale, uptime esterno, load pubblico
+50/100/500, release evidence o pre-go-live evidence completo. Ogni
 report `no-go` include anche `remediation` in JSON e una sezione Markdown con
 azioni, comandi ed evidenza attesa per chiudere i check falliti sulla VPS.
 Dopo un `go`, esegui anche `scripts/production-readiness-live.sh`: valida la

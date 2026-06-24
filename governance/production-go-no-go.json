@@ -10,7 +10,8 @@
     "uptime": 24,
     "load": 72,
     "release": 24,
-    "cloudflareAccess": 24
+    "cloudflareAccess": 24,
+    "githubActionsRun": 24
   },
   "requiredLoadProfiles": [50, 100, 500],
   "requirePublicLoadTarget": true,
@@ -20,6 +21,8 @@
   "requireReleaseProvenance": true,
   "requireCleanReleaseGit": true,
   "requireCloudflareAccessVerify": true,
+  "requireGithubActionsRunSuccess": true,
+  "requiredGithubWorkflow": "enterprise-infra.yml",
   "requireRuntimePreGoLive": true,
   "requireRestorePreGoLive": true,
   "requireGithubRemoteVerification": true,

@@ -103,6 +103,9 @@ jobs:
       - name: GitHub Actions runtime config dry run
         run: sh ./scripts/stexor-ops.sh github-actions-config --repo "${{ github.repository }}"
 
+      - name: GitHub Actions run evidence plan
+        run: sh ./scripts/stexor-ops.sh github-actions-run-evidence --repo "${{ github.repository }}" --workflow enterprise-infra.yml --branch main --sha "${{ github.sha }}"
+
       - name: Secret scan
         run: sh ./scripts/stexor-ops.sh secret-scan
 
