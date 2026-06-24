@@ -5843,6 +5843,7 @@ async function repoCoverageCheck() {
     ["backup-scheduler-dry-run", /Backup scheduler dry run[\s\S]*BACKUP_SCHEDULER_DRY_RUN=true/],
     ["external-uptime-dry-run", /external-uptime-check --dryRun/],
     ["cloudflare-access-dry-run", /cloudflare-access-admin --manifest cloudflare\/access-admin\.example\.json/],
+    ["cloudflare-from-zero-dry-run", /Cloudflare from-zero dry run[\s\S]*cloudflare-from-zero --manifest cloudflare\/from-zero\.example\.json/],
     ["github-branch-policy-dry-run", /github-branch-protection --repo/],
     ["github-environments-dry-run", /github-environments --repo/],
     ["github-actions-runtime-dry-run", /github-actions-config --repo/],
@@ -5851,6 +5852,7 @@ async function repoCoverageCheck() {
     ["managed-secrets-preflight", /Managed secrets preflight[\s\S]*managed-secrets-preflight/],
     ["dr-readiness-check", /DR readiness check[\s\S]*dr-readiness-check/],
     ["release-evidence-plan", /release-evidence --planOnly/],
+    ["release-artifact-gate-dry-run", /Release artifact gate dry run[\s\S]*release-artifact-gate --envFile \.tmp\/ci-release\.env --sbom \.tmp\/ci-sbom\/pnpm-sbom-ci\.json/],
     ["alert-evidence-summary", /alert-evidence/],
     ["production-go-no-go-summary", /production-go-no-go/],
     ["evidence-bundle-smoke", /evidence-bundle --noArchive/],
@@ -7426,10 +7428,12 @@ function staticSecurityInfraOnlyCheck() {
   assertMatch(githubWorkflow, /static-security-check --infraOnly/, "Infrastructure CI must run infrastructure-only static checks.");
   assertMatch(githubWorkflow, /Repository coverage audit[\s\S]*repo-coverage-check/, "Infrastructure CI must audit tracked repository file coverage.");
   assertMatch(githubWorkflow, /Render staging and backup compose[\s\S]*compose\.waf\.yaml[\s\S]*compose\.staging\.yaml[\s\S]*compose\.backup-scheduler\.yaml/, "Infrastructure CI must render staging, WAF and backup scheduler compose overlays.");
+  assertMatch(githubWorkflow, /Cloudflare from-zero dry run[\s\S]*cloudflare-from-zero --manifest cloudflare\/from-zero\.example\.json/, "Infrastructure CI must exercise the additive-only Cloudflare from-zero plan.");
   assertMatch(githubWorkflow, /Secret scan[\s\S]*secret-scan/, "Infrastructure CI must run the secret scanner.");
   assertMatch(githubWorkflow, /HA configuration check[\s\S]*ha-config-check/, "Infrastructure CI must run the HA configuration check.");
   assertMatch(githubWorkflow, /Managed secrets preflight[\s\S]*managed-secrets-preflight/, "Infrastructure CI must run the managed secrets preflight.");
   assertMatch(githubWorkflow, /DR readiness check[\s\S]*dr-readiness-check/, "Infrastructure CI must run the DR readiness check.");
+  assertMatch(githubWorkflow, /Release artifact gate dry run[\s\S]*release-artifact-gate --envFile \.tmp\/ci-release\.env --sbom \.tmp\/ci-sbom\/pnpm-sbom-ci\.json/, "Infrastructure CI must exercise release image and SBOM admission.");
   assertMatch(githubWorkflow, /DEPLOY_RUN_PRODUCTION_PREFLIGHT:\s+"1"[\s\S]*DEPLOY_RUN_PRE_GO_LIVE:\s+"1"[\s\S]*DEPLOY_RUN_GO_NO_GO:\s+"1"/, "Production deploy workflow must enforce preflight, pre-go-live evidence and go/no-go.");
   assertMatch(githubWorkflow, /DEPLOY_PRE_GO_LIVE_RESTORE_DRILL:\s+"1"[\s\S]*DEPLOY_PRE_GO_LIVE_OFFSITE_RESTORE_DRY_RUN:\s+"1"/, "Production deploy workflow must require restore and off-site restore evidence.");
   assertMatch(githubWorkflow, /Upload CI evidence reports[\s\S]*actions\/upload-artifact@v4[\s\S]*reports\/[\s\S]*\.tmp\/evidence-bundles\/[\s\S]*retention-days:\s+30/, "Infrastructure CI must upload non-secret evidence reports.");
@@ -7720,6 +7724,7 @@ async function staticSecurityCheck() {
   assertMatch(githubWorkflow, /projects_gateway_signing_keys/, "GitHub Actions compose render must provide the Projects gateway signing secret placeholder.");
   assertMatch(githubWorkflow, /Backup scheduler dry run[\s\S]*BACKUP_SCHEDULER_DRY_RUN=true/, "Infrastructure CI must exercise the Dockerized backup scheduler in dry-run mode.");
   assertMatch(githubWorkflow, /External uptime manifest dry run[\s\S]*external-uptime-check --dryRun/, "Infrastructure CI must validate the external uptime manifest.");
+  assertMatch(githubWorkflow, /Cloudflare from-zero dry run[\s\S]*cloudflare-from-zero --manifest cloudflare\/from-zero\.example\.json/, "Infrastructure CI must validate the additive-only Cloudflare bootstrap manifest.");
   assertMatch(githubWorkflow, /GitHub branch protection dry run[\s\S]*github-branch-protection --repo/, "Infrastructure CI must validate the GitHub branch protection policy command.");
   assertMatch(githubWorkflow, /Evidence bundle smoke[\s\S]*evidence-bundle --noArchive/, "Infrastructure CI must smoke-test the evidence bundle command.");
   assertMatch(githubWorkflow, /sh \.\/scripts\/stexor-ops\.sh static-security-check/, "Infrastructure CI must run the Dockerized ops wrapper instead of host Node.");
@@ -7988,6 +7993,7 @@ async function staticSecurityCheck() {
   assertMatch(opsScript, /"github-actions-config": githubActionsConfig/, "Ops command map must expose github-actions-config.");
   assertMatch(githubWorkflow, /GitHub Actions runtime config dry run[\s\S]*github-actions-config --repo/, "Infra workflow must dry-run GitHub Actions runtime config policy.");
   assertMatch(githubWorkflow, /Release evidence plan[\s\S]*release-evidence --planOnly/, "Infra workflow must exercise the release evidence command in plan mode.");
+  assertMatch(githubWorkflow, /Release artifact gate dry run[\s\S]*release-artifact-gate --envFile \.tmp\/ci-release\.env --sbom \.tmp\/ci-sbom\/pnpm-sbom-ci\.json/, "Infra workflow must exercise the release artifact admission gate.");
   assertMatch(githubWorkflow, /Alert evidence summary[\s\S]*alert-evidence/, "Infra workflow must exercise the alert evidence command in summary mode.");
   assertMatch(githubWorkflow, /Production go-no-go summary[\s\S]*production-go-no-go/, "Infra workflow must exercise the production go/no-go command in summary mode.");
   assertMatch(githubWorkflow, /Linux portability check[\s\S]*linux-portability-check/, "Infra workflow must exercise the Linux portability command.");

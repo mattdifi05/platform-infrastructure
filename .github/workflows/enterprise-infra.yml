@@ -91,6 +91,9 @@ jobs:
       - name: Cloudflare Access admin dry run
         run: sh ./scripts/stexor-ops.sh cloudflare-access-admin --manifest cloudflare/access-admin.example.json
 
+      - name: Cloudflare from-zero dry run
+        run: sh ./scripts/stexor-ops.sh cloudflare-from-zero --manifest cloudflare/from-zero.example.json
+
       - name: GitHub branch protection dry run
         run: sh ./scripts/stexor-ops.sh github-branch-protection --repo "${{ github.repository }}" --branch main --dryRun
 
@@ -114,6 +117,18 @@ jobs:
 
       - name: Release evidence plan
         run: sh ./scripts/stexor-ops.sh release-evidence --planOnly
+
+      - name: Release artifact gate dry run
+        run: |
+          mkdir -p .tmp/ci-sbom
+          printf '%s\n' \
+            'BACKEND_IMAGE=registry.example/stexor/backend:ci@sha256:1111111111111111111111111111111111111111111111111111111111111111' \
+            'WEB_IMAGE=registry.example/stexor/web:ci@sha256:2222222222222222222222222222222222222222222222222222222222222222' \
+            'WORKER_NOTIFICATIONS_IMAGE=registry.example/stexor/worker-notifications:ci@sha256:3333333333333333333333333333333333333333333333333333333333333333' \
+            'WORKER_JOBS_IMAGE=registry.example/stexor/worker-jobs:ci@sha256:4444444444444444444444444444444444444444444444444444444444444444' \
+            > .tmp/ci-release.env
+          printf '%s\n' '{"bomFormat":"CycloneDX","specVersion":"1.5","components":[]}' > .tmp/ci-sbom/pnpm-sbom-ci.json
+          sh ./scripts/stexor-ops.sh release-artifact-gate --envFile .tmp/ci-release.env --sbom .tmp/ci-sbom/pnpm-sbom-ci.json
 
       - name: Alert evidence summary
         run: sh ./scripts/stexor-ops.sh alert-evidence
