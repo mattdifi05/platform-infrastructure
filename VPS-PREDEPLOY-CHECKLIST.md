@@ -64,6 +64,7 @@ Use this checklist on the Hostinger Ubuntu LTS VPS before exposing public traffi
 
 - [ ] `sh ./scripts/static-security-check.sh` passed.
 - [ ] `sh ./scripts/compose-healthcheck-coverage.sh` passed and the JSON/Markdown reports under `reports/healthchecks/` were archived outside Git.
+- [ ] `sh ./scripts/rate-limit-evidence.sh` passed and the JSON/Markdown reports under `reports/rate-limits/` were archived outside Git.
 - [ ] `sh ./scripts/infra-health.sh` passed.
 - [ ] `sh ./scripts/security-smoke.sh` passed.
 - [ ] `sh ./scripts/waf-smoke.sh` passed.

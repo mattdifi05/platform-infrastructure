@@ -159,10 +159,12 @@
       "state": "repo-ready",
       "evidence": [
         { "type": "file", "path": "compose.waf.yaml" },
+        { "type": "command", "name": "rate-limit-evidence" },
         { "type": "pattern", "path": "README.md", "pattern": "rate limit|rate limiting" },
-        { "type": "command", "name": "waf-smoke" }
+        { "type": "command", "name": "waf-smoke" },
+        { "type": "workflow", "pattern": "Rate limit evidence[\\s\\S]*rate-limit-evidence" }
       ],
-      "liveProof": "Pass WAF/rate-limit smoke checks from the public edge.",
+      "liveProof": "Pass rate-limit-evidence plus WAF/rate-limit smoke checks from the public edge.",
       "liveProofChecks": ["pre-go-live-evidence-complete"]
     },
     {

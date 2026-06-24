@@ -3900,6 +3900,252 @@ async function composeHealthcheckCoverage() {
   log("Compose healthcheck coverage passed.");
 }
 
+function addRateLimitEvidenceCheck(checks, issues, { name, category, status, detail, required = true, file = null }) {
+  const check = {
+    name,
+    category,
+    required,
+    status,
+    detail,
+    file,
+  };
+  checks.push(check);
+  if (required && status !== "passed") {
+    issues.push(`${name}: ${detail}`);
+  }
+  return check;
+}
+
+function addRateLimitPatternCheck(checks, issues, { name, category, filePath, pattern, detail, required = true }) {
+  const relativeFile = path.relative(infraRoot, filePath).replaceAll("\\", "/");
+  if (!fs.existsSync(filePath)) {
+    addRateLimitEvidenceCheck(checks, issues, {
+      name,
+      category,
+      required,
+      status: required ? "failed" : "skipped",
+      detail: `missing file: ${relativeFile}`,
+      file: relativeFile,
+    });
+    return;
+  }
+  const text = readText(filePath);
+  const passed = pattern.test(text);
+  addRateLimitEvidenceCheck(checks, issues, {
+    name,
+    category,
+    required,
+    status: passed ? "passed" : "failed",
+    detail: passed ? detail : `pattern not found: ${detail}`,
+    file: relativeFile,
+  });
+}
+
+function addRateLimitSourcePatternCheck(checks, issues, { name, category, filePath, pattern, detail, required }) {
+  const relativeFile = path.relative(sourceRoot, filePath).replaceAll("\\", "/");
+  if (!fs.existsSync(filePath)) {
+    addRateLimitEvidenceCheck(checks, issues, {
+      name,
+      category,
+      required,
+      status: required ? "failed" : "skipped",
+      detail: `missing optional source file: ${relativeFile}`,
+      file: relativeFile,
+    });
+    return;
+  }
+  const text = readText(filePath);
+  const passed = pattern.test(text);
+  addRateLimitEvidenceCheck(checks, issues, {
+    name,
+    category,
+    required,
+    status: passed ? "passed" : "failed",
+    detail: passed ? detail : `source pattern not found: ${detail}`,
+    file: relativeFile,
+  });
+}
+
+async function rateLimitEvidence(options = {}) {
+  log("==> Rate limit evidence");
+  const requireSource = options.requireSource ?? booleanFlag(argv.requireSource);
+  const generatedAt = new Date().toISOString();
+  const checks = [];
+  const issues = [];
+
+  addRateLimitPatternCheck(checks, issues, {
+    name: "traefik-edge-rate-limit-middleware",
+    category: "infra",
+    filePath: path.join(infraRoot, "traefik", "dynamic", "middlewares.yml"),
+    pattern: /enterprise-rate-limit:[\s\S]*rateLimit:[\s\S]*average:\s*120[\s\S]*burst:\s*60[\s\S]*period:\s*1m/,
+    detail: "Traefik defines enterprise-rate-limit with average=120, burst=60, period=1m.",
+  });
+  addRateLimitPatternCheck(checks, issues, {
+    name: "local-api-router-uses-edge-rate-limit",
+    category: "infra",
+    filePath: path.join(infraRoot, "compose.yaml"),
+    pattern: /traefik\.http\.routers\.enterprise-backend\.middlewares:[^\r\n]*enterprise-rate-limit@file/,
+    detail: "Local API router attaches enterprise-rate-limit@file.",
+  });
+  addRateLimitPatternCheck(checks, issues, {
+    name: "hostinger-api-router-uses-edge-rate-limit",
+    category: "infra",
+    filePath: path.join(infraRoot, "compose.hostinger.yaml"),
+    pattern: /enterprise-backend:[\s\S]*middlewares:[\s\S]*enterprise-rate-limit@file/,
+    detail: "Hostinger API router attaches enterprise-rate-limit@file.",
+  });
+  addRateLimitPatternCheck(checks, issues, {
+    name: "backend-rate-limit-env-defaults",
+    category: "infra",
+    filePath: path.join(infraRoot, "compose.yaml"),
+    pattern: /RATE_LIMIT_TTL_SECONDS:[\s\S]*RATE_LIMIT_MAX_REQUESTS:[\s\S]*RATE_LIMIT_FALLBACK_MAX_REQUESTS:[\s\S]*SENSITIVE_ACTION_RATE_LIMIT_MAX:[\s\S]*SENSITIVE_ACTION_FALLBACK_RATE_LIMIT_MAX:/,
+    detail: "Backend exposes standard and sensitive-action rate-limit budgets.",
+  });
+
+  const backendPackage = path.join(sourceRoot, "apps", "backend", "package.json");
+  const backendServer = path.join(sourceRoot, "apps", "backend", "src", "server.ts");
+  const backendServerConfig = path.join(sourceRoot, "apps", "backend", "src", "server-config.ts");
+  const backendRedisStore = path.join(sourceRoot, "apps", "backend", "src", "runtime", "redis-store.ts");
+  const backendRedisStoreTest = path.join(sourceRoot, "apps", "backend", "src", "runtime", "redis-store.test.ts");
+  const sourcePresent = fs.existsSync(backendPackage) && fs.existsSync(backendServer);
+  addRateLimitEvidenceCheck(checks, issues, {
+    name: "optional-stexor-backend-source",
+    category: "source",
+    required: requireSource,
+    status: sourcePresent ? "passed" : requireSource ? "failed" : "skipped",
+    detail: sourcePresent
+      ? `backend source mounted at ${sourceRoot}`
+      : `backend source not mounted at ${sourceRoot}; infra-only evidence mode`,
+    file: sourcePresent ? path.relative(infraRoot, backendPackage).replaceAll("\\", "/") : null,
+  });
+
+  if (sourcePresent) {
+    addRateLimitSourcePatternCheck(checks, issues, {
+      name: "backend-fastify-rate-limit-package",
+      category: "source",
+      filePath: backendPackage,
+      pattern: /"@fastify\/rate-limit"\s*:/,
+      detail: "Backend declares @fastify/rate-limit.",
+      required: true,
+    });
+    addRateLimitSourcePatternCheck(checks, issues, {
+      name: "backend-fastify-rate-limit-fail-closed",
+      category: "source",
+      filePath: backendServer,
+      pattern: /register\(rateLimit[\s\S]*skipOnError:\s*false[\s\S]*max:\s*rateLimitMaxRequests[\s\S]*timeWindow:/,
+      detail: "Fastify rate-limit is registered and fails closed on store errors.",
+      required: true,
+    });
+    addRateLimitSourcePatternCheck(checks, issues, {
+      name: "backend-per-route-runtime-guard",
+      category: "source",
+      filePath: backendServer,
+      pattern: /assertRequestRateAllowed[\s\S]*isSensitiveMutation[\s\S]*assertSensitiveActionAllowed/,
+      detail: "Request and sensitive mutation guards run during onRequest.",
+      required: true,
+    });
+    addRateLimitSourcePatternCheck(checks, issues, {
+      name: "backend-configured-sensitive-budgets",
+      category: "source",
+      filePath: backendServerConfig,
+      pattern: /rateLimitMaxRequests[\s\S]*rateLimitFallbackMaxRequests[\s\S]*sensitiveActionRateLimitMax[\s\S]*sensitiveActionFallbackRateLimitMax/,
+      detail: "Backend config has normal and sensitive fallback budgets.",
+      required: true,
+    });
+    addRateLimitSourcePatternCheck(checks, issues, {
+      name: "backend-redis-window-returns-429",
+      category: "source",
+      filePath: backendRedisStore,
+      pattern: /incrementRedisWindow[\s\S]*count > input\.max[\s\S]*statusCode:\s*429/,
+      detail: "Redis-backed windows return HTTP 429 when exceeded.",
+      required: true,
+    });
+    addRateLimitSourcePatternCheck(checks, issues, {
+      name: "backend-redis-degradation-memory-failsafe",
+      category: "source",
+      filePath: backendRedisStore,
+      pattern: /redis rate limit failed, using fail-safe memory window[\s\S]*assertMemoryRateAllowed\(memoryKey, input\.ttlMs, input\.fallbackMax\)/,
+      detail: "Redis degradation falls back to the stricter memory window.",
+      required: true,
+    });
+    addRateLimitSourcePatternCheck(checks, issues, {
+      name: "backend-rate-limit-regression-tests",
+      category: "source-test",
+      filePath: backendRedisStoreTest,
+      pattern: /rate limit memory fallback blocks[\s\S]*statusCode\?: unknown[\s\S]*429[\s\S]*sensitive rate limit remains fail-safe[\s\S]*Redis-enforced rate limits do not fall through/,
+      detail: "Backend tests cover memory fallback, sensitive fail-safe and Redis-enforced 429s.",
+      required: true,
+    });
+  }
+
+  const passedCount = checks.filter((check) => check.status === "passed").length;
+  const failedCount = checks.filter((check) => check.status === "failed").length;
+  const skippedCount = checks.filter((check) => check.status === "skipped").length;
+  const payload = {
+    generatedAt,
+    status: issues.length ? "failed" : "passed",
+    mode: sourcePresent ? "full" : "infra-only",
+    source: {
+      root: sourceRoot,
+      present: sourcePresent,
+      required: requireSource,
+    },
+    summary: {
+      checks: checks.length,
+      passed: passedCount,
+      failed: failedCount,
+      skipped: skippedCount,
+      infraChecksPassed: checks.filter((check) => check.category === "infra" && check.status === "passed").length,
+      sourceChecksPassed: checks.filter((check) => check.category.startsWith("source") && check.status === "passed").length,
+    },
+    checks,
+    issues,
+    nextCommands: [
+      "sh ./scripts/rate-limit-evidence.sh",
+      "sh ./scripts/waf-smoke.sh",
+      "sh ./scripts/load-benchmark.sh --profiles 50,100,500 --url https://api.example.com/health --requirePublicTarget --requireEdgeEvidence --expectedEdgeProvider cloudflare",
+    ],
+  };
+
+  const stamp = reportTimestamp();
+  const jsonPath = writeJsonReport("rate-limits", `rate-limit-evidence-${stamp}`, payload);
+  const markdownPath = writeMarkdownReport("rate-limits", `rate-limit-evidence-${stamp}`, [
+    "# Rate Limit Evidence",
+    "",
+    `Status: ${payload.status}`,
+    `Mode: ${payload.mode}`,
+    `Generated at: ${payload.generatedAt}`,
+    `Source mounted: ${payload.source.present ? "yes" : "no"}`,
+    `Require source: ${payload.source.required ? "yes" : "no"}`,
+    "",
+    "## Summary",
+    "",
+    `- Checks: ${payload.summary.checks}`,
+    `- Passed: ${payload.summary.passed}`,
+    `- Failed: ${payload.summary.failed}`,
+    `- Skipped: ${payload.summary.skipped}`,
+    "",
+    "## Checks",
+    "",
+    "| Check | Category | Required | Status | Detail |",
+    "| --- | --- | --- | --- | --- |",
+    ...checks.map((check) => `| ${check.name} | ${check.category} | ${check.required ? "yes" : "no"} | ${check.status} | ${String(check.detail).replaceAll("|", "\\|")} |`),
+    "",
+    "## Issues",
+    "",
+    ...(issues.length ? issues.map((issue) => `- ${issue}`) : ["- none"]),
+    "",
+    "## Next Commands",
+    "",
+    ...payload.nextCommands.map((commandLine) => `- \`${commandLine}\``),
+  ]);
+  log(`Rate limit evidence report written to ${jsonPath} and ${markdownPath}`);
+  if (issues.length && !booleanFlag(argv.allowFailures)) {
+    fail(`Rate limit evidence failed with ${issues.length} issue(s). Report: ${jsonPath}`);
+  }
+  log("Rate limit evidence passed.");
+}
+
 const managedSecretRotationExpectations = [
   { name: "postgres_superuser_password", kind: "opaque", rotationDays: 90, manualRotation: true },
   { name: "app_db_password", kind: "opaque", rotationDays: 90, manualRotation: true },
@@ -5286,6 +5532,7 @@ function buildPreGoLiveReadinessMatrix({ steps, options, repo }) {
     "ha-config-check",
     "managed-secrets-preflight",
     "compose-healthcheck-coverage",
+    "rate-limit-evidence",
     "secret-rotation-evidence-plan",
     "dr-readiness-check",
     "dr-evidence-summary",
@@ -5389,6 +5636,7 @@ async function preGoLiveEvidence() {
   await collectEvidenceStep(steps, { name: "ha-config-check", category: "local-policy", fn: haConfigCheck });
   await collectEvidenceStep(steps, { name: "managed-secrets-preflight", category: "local-policy", fn: managedSecretsPreflight });
   await collectEvidenceStep(steps, { name: "compose-healthcheck-coverage", category: "local-policy", fn: composeHealthcheckCoverage });
+  await collectEvidenceStep(steps, { name: "rate-limit-evidence", category: "local-policy", fn: rateLimitEvidence });
   await collectEvidenceStep(steps, { name: "secret-rotation-evidence-plan", category: "local-policy", fn: secretRotationEvidence });
   await collectEvidenceStep(steps, { name: "dr-readiness-check", category: "local-policy", fn: drReadinessCheck });
   await collectEvidenceStep(steps, { name: "dr-evidence-summary", category: "local-policy", fn: drEvidence });
@@ -5784,6 +6032,7 @@ const evidenceBundleReportSpecs = [
   { directory: "production-readiness", prefix: "production-readiness-", label: "production-readiness-live", required: true },
   { directory: "github-actions", prefix: "github-actions-run-", label: "github-actions-run", required: true },
   { directory: "healthchecks", prefix: "healthcheck-coverage-", label: "healthcheck-coverage", required: true },
+  { directory: "rate-limits", prefix: "rate-limit-evidence-", label: "rate-limit-evidence", required: true },
   { directory: "secret-rotation", prefix: "secret-rotation-evidence-", label: "secret-rotation-evidence", required: true },
   { directory: "go-live", prefix: "pre-go-live-evidence-", label: "pre-go-live", required: true },
   { directory: "vps-host", prefix: "vps-host-readiness-", label: "vps-host-readiness", required: true },
@@ -5949,6 +6198,15 @@ function evidenceBundleReportPasses(spec, payload) {
   }
   if (spec.label === "healthcheck-coverage") {
     return { passed: payload.status === "passed" && Number(payload.summary?.missingHealthchecks ?? 1) === 0, detail: `status=${payload.status ?? "missing"} missing=${payload.summary?.missingHealthchecks ?? "missing"}` };
+  }
+  if (spec.label === "rate-limit-evidence") {
+    return {
+      passed: payload.status === "passed"
+        && Number(payload.summary?.failed ?? 1) === 0
+        && Number(payload.summary?.infraChecksPassed ?? 0) >= 4
+        && ["full", "infra-only"].includes(payload.mode),
+      detail: `mode=${payload.mode ?? "missing"} status=${payload.status ?? "missing"} failed=${payload.summary?.failed ?? "missing"} infraPassed=${payload.summary?.infraChecksPassed ?? "missing"}`,
+    };
   }
   if (spec.label === "secret-rotation-evidence") {
     return {
@@ -6726,6 +6984,7 @@ async function repoCoverageCheck() {
     ["ha-config-check", /HA configuration check[\s\S]*ha-config-check/],
     ["managed-secrets-preflight", /Managed secrets preflight[\s\S]*managed-secrets-preflight/],
     ["compose-healthcheck-coverage", /Compose healthcheck coverage[\s\S]*compose-healthcheck-coverage/],
+    ["rate-limit-evidence", /Rate limit evidence[\s\S]*rate-limit-evidence/],
     ["secret-rotation-evidence-plan", /Secret rotation evidence plan[\s\S]*secret-rotation-evidence/],
     ["dr-readiness-check", /DR readiness check[\s\S]*dr-readiness-check/],
     ["dr-evidence-summary", /DR evidence summary[\s\S]*dr-evidence/],
@@ -8508,6 +8767,7 @@ function staticSecurityInfraOnlyCheck() {
   const backupSchedulerScript = readText(path.join(infraRoot, "scripts", "backup-scheduler.sh"));
   const evidenceBundleVerifyWrapper = readText(path.join(infraRoot, "scripts", "evidence-bundle-verify.sh"));
   const githubActionsRunEvidenceWrapper = readText(path.join(infraRoot, "scripts", "github-actions-run-evidence.sh"));
+  const rateLimitEvidenceWrapper = readText(path.join(infraRoot, "scripts", "rate-limit-evidence.sh"));
   const secretRotationEvidenceWrapper = readText(path.join(infraRoot, "scripts", "secret-rotation-evidence.sh"));
   const opsScript = readText(path.join(infraRoot, "scripts", "stexor-ops.mjs"));
   const hostingerPostdeployScript = readText(path.join(infraRoot, "scripts", "hostinger-postdeploy.sh"));
@@ -8537,6 +8797,7 @@ function staticSecurityInfraOnlyCheck() {
     backupSchedulerScript,
     evidenceBundleVerifyWrapper,
     githubActionsRunEvidenceWrapper,
+    rateLimitEvidenceWrapper,
     secretRotationEvidenceWrapper,
     hostingerPostdeployScript,
     productionReadinessLiveWrapper,
@@ -8587,6 +8848,7 @@ function staticSecurityInfraOnlyCheck() {
   assertMatch(githubWorkflow, /HA configuration check[\s\S]*ha-config-check/, "Infrastructure CI must run the HA configuration check.");
   assertMatch(githubWorkflow, /Managed secrets preflight[\s\S]*managed-secrets-preflight/, "Infrastructure CI must run the managed secrets preflight.");
   assertMatch(githubWorkflow, /Compose healthcheck coverage[\s\S]*compose-healthcheck-coverage/, "Infrastructure CI must verify service healthcheck coverage.");
+  assertMatch(githubWorkflow, /Rate limit evidence[\s\S]*rate-limit-evidence/, "Infrastructure CI must write a dedicated rate-limit evidence report.");
   assertMatch(githubWorkflow, /Secret rotation evidence plan[\s\S]*secret-rotation-evidence/, "Infrastructure CI must write a secret rotation evidence plan.");
   assertMatch(githubWorkflow, /DR readiness check[\s\S]*dr-readiness-check/, "Infrastructure CI must run the DR readiness check.");
   assertMatch(githubWorkflow, /DR evidence summary[\s\S]*dr-evidence/, "Infrastructure CI must write a DR evidence summary.");
@@ -8613,6 +8875,10 @@ function staticSecurityInfraOnlyCheck() {
   assertMatch(opsScript, /async function evidenceBundleVerify[\s\S]*sha256 mismatch[\s\S]*required report is not passing[\s\S]*--requireComplete/, "Ops script must verify evidence bundle SHA256, report status and completeness.");
   assertMatch(opsScript, /async function composeHealthcheckCoverage[\s\S]*missingHealthchecks/, "Ops script must provide service-by-service healthcheck coverage reports.");
   assertMatch(opsScript, /directory: "healthchecks"[\s\S]*prefix: "healthcheck-coverage-"[\s\S]*required: true/, "Evidence bundle must require healthcheck coverage reports.");
+  assertMatch(rateLimitEvidenceWrapper, /rate-limit-evidence/, "Rate-limit evidence wrapper must delegate to the Dockerized ops runner.");
+  assertMatch(opsScript, /async function rateLimitEvidence[\s\S]*rate-limit-evidence-[\s\S]*infraChecksPassed/, "Ops script must provide dedicated rate-limit evidence reports.");
+  assertMatch(opsScript, /directory: "rate-limits"[\s\S]*prefix: "rate-limit-evidence-"[\s\S]*required: true/, "Evidence bundle must require rate-limit evidence reports.");
+  assertMatch(productionReadinessManifest, /"rate-limiting"[\s\S]*"rate-limit-evidence"/, "Production readiness must map rate limiting to dedicated evidence.");
   assertMatch(githubActionsRunEvidenceWrapper, /github-actions-run-evidence/, "GitHub Actions run evidence wrapper must delegate to the Dockerized ops runner.");
   assertMatch(opsScript, /async function githubActionsRunEvidence[\s\S]*workflow_runs[\s\S]*run\.conclusion !== "success"/, "Ops script must verify remote GitHub Actions workflow success.");
   assertMatch(productionGoNoGoPolicyText, /"requireGithubActionsRunSuccess":\s*true[\s\S]*"requiredGithubWorkflow":\s*"enterprise-infra\.yml"/, "Production go/no-go policy must require a successful remote GitHub Actions workflow run.");
@@ -8760,6 +9026,7 @@ async function staticSecurityCheck() {
   const githubEnvironmentsWrapper = readText(path.join(infraRoot, "scripts", "github-environments.sh"));
   const githubActionsConfigWrapper = readText(path.join(infraRoot, "scripts", "github-actions-config.sh"));
   const githubActionsRunEvidenceWrapper = readText(path.join(infraRoot, "scripts", "github-actions-run-evidence.sh"));
+  const rateLimitEvidenceWrapper = readText(path.join(infraRoot, "scripts", "rate-limit-evidence.sh"));
   const secretRotationEvidenceWrapper = readText(path.join(infraRoot, "scripts", "secret-rotation-evidence.sh"));
   const preGoLiveEvidenceWrapper = readText(path.join(infraRoot, "scripts", "pre-go-live-evidence.sh"));
   const productionGoNoGoWrapper = readText(path.join(infraRoot, "scripts", "production-go-no-go.sh"));
@@ -9161,6 +9428,10 @@ async function staticSecurityCheck() {
   assertMatch(productionGoNoGoPolicyText, /"requireSecretRotationEvidence":\s*true/, "Production go/no-go policy must require a secret rotation evidence report.");
   assertMatch(productionGoNoGoPolicyText, /"secretRotation":\s*24/, "Production go/no-go policy must require fresh secret rotation evidence.");
   assertMatch(productionReadinessManifest, /"secrets-management"[\s\S]*"secret-rotation-evidence"/, "Production readiness must map secrets management to dedicated secret rotation evidence.");
+  assertMatch(rateLimitEvidenceWrapper, /rate-limit-evidence/, "Rate-limit evidence wrapper must delegate to the Dockerized ops runner.");
+  assertMatch(opsScript, /async function rateLimitEvidence[\s\S]*rate-limit-evidence-[\s\S]*infraChecksPassed/, "Ops script must write dedicated rate-limit evidence reports.");
+  assertMatch(opsScript, /directory: "rate-limits"[\s\S]*prefix: "rate-limit-evidence-"[\s\S]*required: true/, "Evidence bundle must require rate-limit evidence reports.");
+  assertMatch(productionReadinessManifest, /"rate-limiting"[\s\S]*"rate-limit-evidence"/, "Production readiness must map rate limiting to dedicated evidence.");
   assertMatch(composeDr, /archive_mode=on/, "DR overlay must enable PostgreSQL WAL archiving.");
   assertMatch(composeDr, /enterprise_postgres_wal_archive/, "DR overlay must persist WAL archives.");
   assertMatch(admissionPolicy, /cosign\.sigstore\.dev\/verified/, "Admission policy must require cosign verification.");
@@ -9235,6 +9506,7 @@ async function staticSecurityCheck() {
   assertMatch(githubWorkflow, /HA configuration check[\s\S]*ha-config-check/, "Infra workflow must exercise the HA configuration gate.");
   assertMatch(githubWorkflow, /Managed secrets preflight[\s\S]*managed-secrets-preflight/, "Infra workflow must exercise the managed secrets gate.");
   assertMatch(githubWorkflow, /Compose healthcheck coverage[\s\S]*compose-healthcheck-coverage/, "Infra workflow must exercise the healthcheck coverage gate.");
+  assertMatch(githubWorkflow, /Rate limit evidence[\s\S]*rate-limit-evidence/, "Infra workflow must exercise the rate-limit evidence gate.");
   assertMatch(githubWorkflow, /Secret rotation evidence plan[\s\S]*secret-rotation-evidence/, "Infra workflow must exercise the secret rotation evidence command.");
   assertMatch(githubWorkflow, /DR readiness check[\s\S]*dr-readiness-check/, "Infra workflow must exercise the DR readiness gate.");
   assertMatch(githubWorkflow, /DEPLOY_RUN_PRODUCTION_PREFLIGHT:\s+"1"[\s\S]*DEPLOY_RUN_PRE_GO_LIVE:\s+"1"[\s\S]*DEPLOY_RUN_GO_NO_GO:\s+"1"/, "Production deploy workflow must enforce preflight, pre-go-live evidence and go/no-go.");
@@ -9881,6 +10153,7 @@ Commands:
   prune-postgres-backups
   production-go-no-go
   production-preflight
+  rate-limit-evidence
   repo-coverage-check
   release-evidence
   release-artifact-gate
@@ -9964,6 +10237,7 @@ const commands = {
   "prune-postgres-backups": prunePostgresBackups,
   "production-go-no-go": productionGoNoGo,
   "production-preflight": productionPreflight,
+  "rate-limit-evidence": rateLimitEvidence,
   "repo-coverage-check": repoCoverageCheck,
   "release-evidence": releaseEvidence,
   "release-artifact-gate": releaseArtifactGate,

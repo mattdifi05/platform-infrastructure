@@ -41,6 +41,10 @@ if [ "${DEPLOY_RUN_WAF_SMOKE:-1}" = "1" ]; then
   sh ./scripts/waf-smoke.sh --apiBase "$api_base" --phpBase "$projects_base"
 fi
 
+if [ "${DEPLOY_RUN_RATE_LIMIT_EVIDENCE:-1}" = "1" ]; then
+  sh ./scripts/rate-limit-evidence.sh
+fi
+
 if [ "${DEPLOY_RUN_INFRA_HEALTH:-1}" = "1" ]; then
   sh ./scripts/infra-health.sh \
     --apiBase "$api_base" \
