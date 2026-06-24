@@ -5,6 +5,7 @@
   "expectedCount": 20,
   "reportDirectory": "production-readiness",
   "reportPrefix": "production-readiness",
+  "liveProofCheckRequired": true,
   "requirements": [
     {
       "id": "offsite-automatic-backups",
@@ -15,7 +16,8 @@
         { "type": "command", "name": "offsite-backup-restic" },
         { "type": "pattern", "path": "scripts/backup-scheduler.sh", "pattern": "offsite-backup-restic" }
       ],
-      "liveProof": "Enable the backup scheduler on the VPS with remote Restic credentials and archive the first off-site backup report."
+      "liveProof": "Enable the backup scheduler on the VPS with remote Restic credentials and archive the first off-site backup report.",
+      "liveProofChecks": ["disaster-recovery-rpo-rto-offsite"]
     },
     {
       "id": "restore-tested",
@@ -26,7 +28,8 @@
         { "type": "command", "name": "offsite-restore-drill-restic" },
         { "type": "workflow", "pattern": "Off-site restore drill plan[\\s\\S]*offsite-restore-drill-restic --planOnly" }
       ],
-      "liveProof": "Run full-restore-drill and a complete off-site restore drill against the real backup repository."
+      "liveProof": "Run full-restore-drill and a complete off-site restore drill against the real backup repository.",
+      "liveProofChecks": ["disaster-recovery-rpo-rto-offsite"]
     },
     {
       "id": "automatic-ci-cd-deploy",
@@ -37,7 +40,8 @@
         { "type": "pattern", "path": ".github/workflows/enterprise-infra.yml", "pattern": "deploy-hostinger[\\s\\S]*deploy-hostinger\\.sh" },
         { "type": "command", "name": "github-actions-config" }
       ],
-      "liveProof": "Configure GitHub production environment secrets/variables and require approvals for the deploy job."
+      "liveProof": "Configure GitHub production environment secrets/variables and require approvals for the deploy job.",
+      "liveProofChecks": ["pre-go-live-evidence-complete"]
     },
     {
       "id": "external-uptime-monitoring",
@@ -48,7 +52,8 @@
         { "type": "command", "name": "external-uptime-check" },
         { "type": "workflow", "pattern": "External uptime manifest dry run[\\s\\S]*external-uptime-check --dryRun" }
       ],
-      "liveProof": "Create external provider monitors and pass external-uptime-check with provider evidence."
+      "liveProof": "Create external provider monitors and pass external-uptime-check with provider evidence.",
+      "liveProofChecks": ["external-uptime-provider"]
     },
     {
       "id": "firewall-fail2ban",
@@ -59,7 +64,8 @@
         { "type": "pattern", "path": "scripts/vps-hardening-ubuntu.sh", "pattern": "ufw[\\s\\S]*fail2ban" },
         { "type": "pattern", "path": "scripts/vps-host-readiness.sh", "pattern": "ufw-active[\\s\\S]*fail2ban-active" }
       ],
-      "liveProof": "Apply VPS hardening and pass vps-host-readiness --enforce on the Hostinger VPS."
+      "liveProof": "Apply VPS hardening and pass vps-host-readiness --enforce on the Hostinger VPS.",
+      "liveProofChecks": ["vps-hardening-applied", "vps-host-readiness"]
     },
     {
       "id": "secrets-management",
@@ -70,7 +76,8 @@
         { "type": "file", "path": "compose.managed-secrets.yaml" },
         { "type": "workflow", "pattern": "Managed secrets preflight[\\s\\S]*managed-secrets-preflight" }
       ],
-      "liveProof": "Materialize production Docker secrets and rotate them through the managed store."
+      "liveProof": "Materialize production Docker secrets and rotate them through the managed store.",
+      "liveProofChecks": ["pre-go-live-evidence-complete"]
     },
     {
       "id": "tls-https-production-ready",
@@ -81,7 +88,8 @@
         { "type": "pattern", "path": "compose.prod.yaml", "pattern": "letsencrypt[\\s\\S]*httpchallenge" },
         { "type": "command", "name": "certificate-expiry-check" }
       ],
-      "liveProof": "Verify production certificates, Cloudflare SSL mode and certificate expiry monitoring."
+      "liveProof": "Verify production certificates, Cloudflare SSL mode and certificate expiry monitoring.",
+      "liveProofChecks": ["external-uptime-provider", "pre-go-live-evidence-complete"]
     },
     {
       "id": "container-update-policy",
@@ -92,7 +100,8 @@
         { "type": "pattern", "path": "renovate.json", "pattern": "docker-compose" },
         { "type": "command", "name": "supply-chain-hygiene" }
       ],
-      "liveProof": "Review Renovate updates and release signed image digests through the release gate."
+      "liveProof": "Review Renovate updates and release signed image digests through the release gate.",
+      "liveProofChecks": ["release-evidence-and-rollback"]
     },
     {
       "id": "staging-separated",
@@ -103,7 +112,8 @@
         { "type": "file", "path": ".env.staging.example" },
         { "type": "workflow", "pattern": "Render staging and backup compose[\\s\\S]*compose\\.staging\\.yaml" }
       ],
-      "liveProof": "Deploy staging with separate project name, data volumes, secrets and public target."
+      "liveProof": "Deploy staging with separate project name, data volumes, secrets and public target.",
+      "liveProofChecks": ["pre-go-live-evidence-complete"]
     },
     {
       "id": "all-service-healthchecks",
@@ -114,7 +124,8 @@
         { "type": "pattern", "path": "compose.yaml", "pattern": "healthcheck:" },
         { "type": "pattern", "path": "scripts/stexor-ops.mjs", "pattern": "async function infraHealth" }
       ],
-      "liveProof": "Run infra-health after deploy and before go-live against the real VPS stack."
+      "liveProof": "Run infra-health after deploy and before go-live against the real VPS stack.",
+      "liveProofChecks": ["pre-go-live-evidence-complete"]
     },
     {
       "id": "operations-runbook",
@@ -125,7 +136,8 @@
         { "type": "file", "path": "VPS-PREDEPLOY-CHECKLIST.md" },
         { "type": "pattern", "path": "RUNBOOK.md", "pattern": "Production deploy[\\s\\S]*Rollback" }
       ],
-      "liveProof": "Keep the runbook updated with real production evidence paths after every go-live."
+      "liveProof": "Keep the runbook updated with real production evidence paths after every go-live.",
+      "liveProofChecks": ["pre-go-live-evidence-complete"]
     },
     {
       "id": "disaster-recovery-plan",
@@ -136,7 +148,8 @@
         { "type": "file", "path": "compose.dr.yaml" },
         { "type": "workflow", "pattern": "DR evidence summary[\\s\\S]*dr-evidence" }
       ],
-      "liveProof": "Run dr-evidence --enforce with fresh backup, restore and off-site reports."
+      "liveProof": "Run dr-evidence --enforce with fresh backup, restore and off-site reports.",
+      "liveProofChecks": ["disaster-recovery-rpo-rto-offsite"]
     },
     {
       "id": "rate-limiting",
@@ -147,7 +160,8 @@
         { "type": "pattern", "path": "README.md", "pattern": "rate limit|rate limiting" },
         { "type": "command", "name": "waf-smoke" }
       ],
-      "liveProof": "Pass WAF/rate-limit smoke checks from the public edge."
+      "liveProof": "Pass WAF/rate-limit smoke checks from the public edge.",
+      "liveProofChecks": ["pre-go-live-evidence-complete"]
     },
     {
       "id": "admin-audit-log",
@@ -158,7 +172,8 @@
         { "type": "command", "name": "access-review" },
         { "type": "pattern", "path": "RUNBOOK.md", "pattern": "audit_outbox|AuditOutbox" }
       ],
-      "liveProof": "Review audit logs and access-review output after every admin permission change."
+      "liveProof": "Review audit logs and access-review output after every admin permission change.",
+      "liveProofChecks": ["pre-go-live-evidence-complete"]
     },
     {
       "id": "docker-linux-hardening",
@@ -169,7 +184,8 @@
         { "type": "pattern", "path": "scripts/vps-hardening-ubuntu.sh", "pattern": "no-new-privileges[\\s\\S]*live-restore" },
         { "type": "command", "name": "linux-portability-check" }
       ],
-      "liveProof": "Apply Docker daemon hardening on the VPS and pass vps-host-readiness."
+      "liveProof": "Apply Docker daemon hardening on the VPS and pass vps-host-readiness.",
+      "liveProofChecks": ["vps-hardening-applied", "vps-host-readiness"]
     },
     {
       "id": "log-metric-retention",
@@ -180,7 +196,8 @@
         { "type": "file", "path": "prometheus/prometheus.yml" },
         { "type": "pattern", "path": "compose.yaml", "pattern": "max-size:[\\s\\S]*max-file:" }
       ],
-      "liveProof": "Tune log and metric retention according to the final VPS disk size."
+      "liveProof": "Tune log and metric retention according to the final VPS disk size.",
+      "liveProofChecks": ["pre-go-live-evidence-complete"]
     },
     {
       "id": "real-telegram-email-alerts",
@@ -191,7 +208,8 @@
         { "type": "pattern", "path": "RUNBOOK.md", "pattern": "requireEmailDelivery[\\s\\S]*requireTelegramDelivery" },
         { "type": "pattern", "path": "compose.yaml", "pattern": "ALERT_TELEGRAM_BOT_TOKEN_FILE" }
       ],
-      "liveProof": "Run alert-evidence with real email or Telegram delivery requirements enabled."
+      "liveProof": "Run alert-evidence with real email or Telegram delivery requirements enabled.",
+      "liveProofChecks": ["real-alert-delivery"]
     },
     {
       "id": "admin-access-mfa-vpn",
@@ -202,7 +220,8 @@
         { "type": "command", "name": "cloudflare-access-admin" },
         { "type": "workflow", "pattern": "Cloudflare Access admin dry run[\\s\\S]*cloudflare-access-admin" }
       ],
-      "liveProof": "Apply and verify Cloudflare Access or VPN protection with IdP MFA for every admin surface."
+      "liveProof": "Apply and verify Cloudflare Access or VPN protection with IdP MFA for every admin surface.",
+      "liveProofChecks": ["cloudflare-access-admin-verified"]
     },
     {
       "id": "controlled-db-migrations",
@@ -213,7 +232,8 @@
         { "type": "command", "name": "apply-postgres-migrations" },
         { "type": "pattern", "path": "postgres/migrations/001_session_security_hardening.sql", "pattern": "schema_migrations" }
       ],
-      "liveProof": "Run migrations only through the deploy flow and archive schema_migrations output."
+      "liveProof": "Run migrations only through the deploy flow and archive schema_migrations output.",
+      "liveProofChecks": ["pre-go-live-evidence-complete"]
     },
     {
       "id": "deploy-rollback-tests",
@@ -224,7 +244,8 @@
         { "type": "command", "name": "release-evidence" },
         { "type": "workflow", "pattern": "Release evidence plan[\\s\\S]*release-evidence --planOnly" }
       ],
-      "liveProof": "Archive release evidence with previous digests and a validated rollback dry-run."
+      "liveProof": "Archive release evidence with previous digests and a validated rollback dry-run.",
+      "liveProofChecks": ["release-evidence-and-rollback"]
     }
   ]
 }

@@ -5991,6 +5991,59 @@ function enterpriseRequirementEvidenceResult(requirement, evidence, workflowText
   return { ...base, detail: `unknown evidence type: ${evidence.type}` };
 }
 
+function enterpriseRequirementLiveProofResult(requirement, goNoGoReport, requireLiveProofs) {
+  if (!requirement.liveProof) {
+    return {
+      required: false,
+      status: "not-required",
+      detail: "no live production proof required",
+      checks: [],
+      reportPath: null,
+    };
+  }
+  const requiredChecks = Array.isArray(requirement.liveProofChecks) ? requirement.liveProofChecks : [];
+  if (!requiredChecks.length) {
+    return {
+      required: true,
+      status: requireLiveProofs ? "failed" : "pending-external-evidence",
+      detail: "no production go/no-go checks mapped",
+      checks: [],
+      reportPath: goNoGoReport?.filePath ?? null,
+    };
+  }
+  if (!goNoGoReport?.payload) {
+    return {
+      required: true,
+      status: requireLiveProofs ? "failed" : "pending-external-evidence",
+      detail: "missing production go/no-go report",
+      checks: requiredChecks.map((name) => ({ name, status: "missing" })),
+      reportPath: null,
+    };
+  }
+  const checksByName = new Map((goNoGoReport.payload.checks ?? []).map((check) => [check.name, check]));
+  const checkResults = requiredChecks.map((name) => {
+    const check = checksByName.get(name);
+    return {
+      name,
+      status: check?.status ?? "missing",
+      detail: check?.detail ?? "missing production go/no-go check",
+      reportPath: check?.reportPath ?? null,
+    };
+  });
+  const allChecksPassed = checkResults.every((check) => check.status === "passed");
+  const go = goNoGoReport.payload.status === "go";
+  const passed = go && allChecksPassed;
+  return {
+    required: true,
+    status: passed ? "passed" : requireLiveProofs ? "failed" : "pending-external-evidence",
+    detail: passed
+      ? "production go/no-go report proves mapped checks"
+      : `production go/no-go status=${goNoGoReport.payload.status ?? "unknown"}; failedOrMissing=${checkResults.filter((check) => check.status !== "passed").map((check) => check.name).join(",") || "none"}`,
+    checks: checkResults,
+    reportPath: goNoGoReport.filePath,
+  };
+}
+
 async function enterpriseRequirementsCheck() {
   log("==> Enterprise requirements traceability check");
   const manifestPath = path.resolve(argv.manifest ?? path.join(infraRoot, "governance", "enterprise-requirements.json"));
@@ -5999,50 +6052,64 @@ async function enterpriseRequirementsCheck() {
   const reportDirectory = String(manifest.reportDirectory ?? "enterprise-requirements");
   const reportPrefix = String(manifest.reportPrefix ?? "enterprise-requirements");
   const reportTitle = String(manifest.title ?? "Enterprise Requirements Traceability");
+  const requireLiveProofs = booleanFlag(argv.requireLiveProofs);
+  const liveProofCheckRequired = Boolean(manifest.liveProofCheckRequired);
+  const goNoGoReport = latestJsonReport("go-no-go", "production-go-no-go-");
   const workflowText = readText(path.join(infraRoot, ".github", "workflows", "enterprise-infra.yml"));
   const allowedStates = new Set(["repo-ready", "gate-ready", "environment-ready", "proprietary-integrated", "repo-ready-plus-environment-action"]);
-  const issues = [];
+  const repoIssues = [];
+  const liveProofIssues = [];
   if (manifest.version !== 1) {
-    issues.push(`Unsupported manifest version: ${manifest.version}`);
+    repoIssues.push(`Unsupported manifest version: ${manifest.version}`);
   }
   if (!Array.isArray(manifest.requirements)) {
-    issues.push("Manifest must define requirements array.");
+    repoIssues.push("Manifest must define requirements array.");
   }
   const requirements = Array.isArray(manifest.requirements) ? manifest.requirements : [];
   if (requirements.length !== expectedCount) {
-    issues.push(`Traceability manifest must track exactly ${expectedCount} requirements, found ${requirements.length}.`);
+    repoIssues.push(`Traceability manifest must track exactly ${expectedCount} requirements, found ${requirements.length}.`);
   }
   const seenIds = new Set();
   const rows = requirements.map((requirement) => {
-    const requirementIssues = [];
+    const repoRequirementIssues = [];
     if (!requirement.id || !/^[a-z0-9-]+$/.test(requirement.id)) {
-      requirementIssues.push("missing or invalid id");
+      repoRequirementIssues.push("missing or invalid id");
     } else if (seenIds.has(requirement.id)) {
-      requirementIssues.push(`duplicate id: ${requirement.id}`);
+      repoRequirementIssues.push(`duplicate id: ${requirement.id}`);
     } else {
       seenIds.add(requirement.id);
     }
     if (!requirement.title) {
-      requirementIssues.push("missing title");
+      repoRequirementIssues.push("missing title");
     }
     if (!allowedStates.has(requirement.state)) {
-      requirementIssues.push(`invalid state: ${requirement.state}`);
+      repoRequirementIssues.push(`invalid state: ${requirement.state}`);
     }
     if (!requirement.liveProof) {
-      requirementIssues.push("missing liveProof");
+      repoRequirementIssues.push("missing liveProof");
+    }
+    if (liveProofCheckRequired && requirement.liveProof && !Array.isArray(requirement.liveProofChecks)) {
+      repoRequirementIssues.push("missing liveProofChecks");
     }
     const evidence = Array.isArray(requirement.evidence) ? requirement.evidence : [];
     if (evidence.length < 2) {
-      requirementIssues.push("at least two evidence entries are required");
+      repoRequirementIssues.push("at least two evidence entries are required");
     }
     const evidenceResults = evidence.map((item) => enterpriseRequirementEvidenceResult(requirement, item, workflowText));
+    const liveProofResult = enterpriseRequirementLiveProofResult(requirement, goNoGoReport, requireLiveProofs);
     for (const result of evidenceResults) {
       if (!result.passed) {
-        requirementIssues.push(result.detail);
+        repoRequirementIssues.push(result.detail);
       }
     }
-    if (requirementIssues.length) {
-      issues.push(`${requirement.id ?? "unknown"}: ${requirementIssues.join("; ")}`);
+    const requirementIssues = [...repoRequirementIssues];
+    if (repoRequirementIssues.length) {
+      repoIssues.push(`${requirement.id ?? "unknown"}: ${repoRequirementIssues.join("; ")}`);
+    }
+    if (requireLiveProofs && liveProofResult.required && liveProofResult.status !== "passed") {
+      const liveIssue = `live proof not satisfied: ${liveProofResult.detail}`;
+      requirementIssues.push(liveIssue);
+      liveProofIssues.push(`${requirement.id ?? "unknown"}: ${liveIssue}`);
     }
     return {
       id: requirement.id ?? "unknown",
@@ -6050,14 +6117,19 @@ async function enterpriseRequirementsCheck() {
       state: requirement.state ?? "",
       liveProof: requirement.liveProof ?? "",
       liveProofRequired: Boolean(requirement.liveProof),
-      liveProofStatus: requirement.liveProof ? "pending-external-evidence" : "not-required",
+      liveProofChecks: Array.isArray(requirement.liveProofChecks) ? requirement.liveProofChecks : [],
+      liveProofStatus: liveProofResult.status,
+      liveProofEvidence: liveProofResult,
+      repoEvidenceStatus: repoRequirementIssues.length ? "failed" : "passed",
       status: requirementIssues.length ? "failed" : "passed",
       evidence: evidenceResults,
       issues: requirementIssues,
+      repoIssues: repoRequirementIssues,
     };
   });
+  const issues = [...repoIssues, ...liveProofIssues];
   const liveProofsPending = rows
-    .filter((row) => row.liveProofRequired)
+    .filter((row) => row.liveProofRequired && row.liveProofStatus !== "passed")
     .map((row) => ({
       id: row.id,
       title: row.title,
@@ -6065,18 +6137,31 @@ async function enterpriseRequirementsCheck() {
       liveProof: row.liveProof,
       status: row.liveProofStatus,
     }));
+  const liveProofRequiredCount = rows.filter((row) => row.liveProofRequired).length;
+  const liveProofStatus = liveProofIssues.length
+    ? "failed"
+    : liveProofsPending.length
+      ? "pending-external-evidence"
+      : liveProofRequiredCount
+        ? "passed"
+        : "not-required";
 
   const payload = {
     generatedAt: new Date().toISOString(),
     manifestPath,
+    requireLiveProofs,
+    goNoGoReportPath: goNoGoReport?.filePath ?? null,
+    goNoGoStatus: goNoGoReport?.payload?.status ?? null,
     status: issues.length ? "failed" : "passed",
-    repoStatus: issues.length ? "failed" : "passed",
-    liveProofStatus: liveProofsPending.length ? "pending-external-evidence" : "not-required",
+    repoStatus: repoIssues.length ? "failed" : "passed",
+    liveProofStatus,
     requirementCount: requirements.length,
     passedCount: rows.filter((row) => row.status === "passed").length,
     failedCount: rows.filter((row) => row.status !== "passed").length,
-    liveProofRequiredCount: liveProofsPending.length,
+    liveProofRequiredCount,
     liveProofsPending,
+    repoIssues,
+    liveProofIssues,
     requirements: rows,
     issues,
   };
@@ -6096,7 +6181,7 @@ async function enterpriseRequirementsCheck() {
     "",
     "| Requirement | State | Repo evidence | Live proof status | Evidence passed | Live proof still required |",
     "| --- | --- | --- | --- | ---: | --- |",
-    ...rows.map((row) => `| ${row.id} | ${row.state} | ${row.status} | ${row.liveProofStatus} | ${row.evidence.filter((item) => item.passed).length}/${row.evidence.length} | ${row.liveProof.replace(/\|/g, "/")} |`),
+    ...rows.map((row) => `| ${row.id} | ${row.state} | ${row.repoEvidenceStatus} | ${row.liveProofStatus} | ${row.evidence.filter((item) => item.passed).length}/${row.evidence.length} | ${row.liveProof.replace(/\|/g, "/")} |`),
     "",
     "## Issues",
     "",
@@ -7553,6 +7638,7 @@ function staticSecurityInfraOnlyCheck() {
   const readme = readText(path.join(infraRoot, "README.md"));
   const runbook = readText(path.join(infraRoot, "RUNBOOK.md"));
   const envExample = readText(path.join(infraRoot, ".env.example"));
+  const productionReadinessManifest = readText(path.join(infraRoot, "governance", "production-readiness.json"));
   const productionGoNoGoPolicyText = readText(path.join(infraRoot, "governance", "production-go-no-go.json"));
   const infraRenovate = readText(path.join(infraRoot, "renovate.json"));
   const infraGitattributes = readText(path.join(infraRoot, ".gitattributes"));
@@ -7625,12 +7711,15 @@ function staticSecurityInfraOnlyCheck() {
   assertMatch(githubWorkflow, /Pre go-live evidence report[\s\S]*pre-go-live-evidence --infraOnly --repo/, "Infrastructure CI must produce an infrastructure-only pre go-live evidence report.");
   assertMatch(githubWorkflow, /Enterprise requirements traceability[\s\S]*enterprise-requirements-check/, "Infrastructure CI must verify enterprise requirements traceability.");
   assertMatch(githubWorkflow, /Production readiness checklist[\s\S]*enterprise-requirements-check --manifest governance\/production-readiness\.json/, "Infrastructure CI must verify the 20-point production readiness checklist.");
+  assertMatch(productionReadinessManifest, /"expectedCount":\s*20/, "Production readiness manifest must track the exact 20-point checklist.");
+  assertMatch(productionReadinessManifest, /"liveProofCheckRequired":\s*true/, "Production readiness manifest must require mapped live proof checks.");
+  assertMatch(productionReadinessManifest, /"liveProofChecks"/, "Production readiness requirements must map to production go/no-go live checks.");
   assertMatch(githubWorkflow, /permissions:\s*\r?\n\s+contents:\s+read/, "Infrastructure CI must declare least-privilege read permissions.");
   assertNoMatch(githubWorkflow, /security-events:\s+write|contents:\s+write/, "Infrastructure CI must not request unused write permissions.");
   assertMatch(githubWorkflow, /compose-and-policy:[\s\S]*timeout-minutes:\s+45[\s\S]*shell-syntax:[\s\S]*timeout-minutes:\s+10[\s\S]*dast-zap:[\s\S]*timeout-minutes:\s+45[\s\S]*deploy-hostinger:[\s\S]*timeout-minutes:\s+90/, "Infrastructure CI jobs must set explicit timeouts.");
   assertMatch(opsScript, /async function repoCoverageCheck/, "Ops script must provide a repository coverage audit command.");
   assertMatch(opsScript, /"repo-coverage-check": repoCoverageCheck/, "Ops command map must expose repo-coverage-check.");
-  assertMatch(opsScript, /repoStatus:[\s\S]*liveProofStatus:[\s\S]*liveProofsPending/, "Enterprise requirement reports must separate repository evidence from pending live production proof.");
+  assertMatch(opsScript, /repoStatus:[\s\S]*liveProofStatus[\s\S]*liveProofsPending/, "Enterprise requirement reports must separate repository evidence from pending live production proof.");
   assertMatch(opsScript, /workerNotificationsServerPath[\s\S]*fs\.existsSync\(workerNotificationsServerPath\)/, "Alert evidence must treat Stexor source checks as optional.");
   assertMatch(githubWorkflow, /Backup scheduler dry run[\s\S]*BACKUP_SCHEDULER_DRY_RUN=true/, "Infrastructure CI must exercise the Dockerized backup scheduler in dry-run mode.");
   assertNoMatch(githubWorkflow, /setup-node|node scripts\/stexor-ops\.mjs|shell:\s+pwsh|\.ps1/, "Infrastructure CI must stay Linux/container-first without PowerShell or host Node policy gates.");
@@ -7720,6 +7809,7 @@ async function staticSecurityCheck() {
   const githubActionsRuntimePolicyJson = JSON.parse(githubActionsRuntimePolicyText);
   const productionGoNoGoPolicyText = readText(path.join(infraRoot, "governance", "production-go-no-go.json"));
   const productionGoNoGoPolicyJson = JSON.parse(productionGoNoGoPolicyText);
+  const productionReadinessManifest = readText(path.join(infraRoot, "governance", "production-readiness.json"));
   const githubWorkflow = readText(path.join(infraRoot, ".github", "workflows", "enterprise-infra.yml"));
   const externalUptimeManifest = readText(path.join(infraRoot, "monitoring", "external-uptime.example.json"));
   const cloudflareReadme = readText(path.join(infraRoot, "cloudflare", "README.md"));
@@ -8191,6 +8281,9 @@ async function staticSecurityCheck() {
   assertMatch(githubWorkflow, /Linux portability check[\s\S]*linux-portability-check/, "Infra workflow must exercise the Linux portability command.");
   assertMatch(githubWorkflow, /Enterprise requirements traceability[\s\S]*enterprise-requirements-check/, "Infra workflow must exercise the enterprise requirements traceability gate.");
   assertMatch(githubWorkflow, /Production readiness checklist[\s\S]*enterprise-requirements-check --manifest governance\/production-readiness\.json/, "Infra workflow must exercise the 20-point production readiness checklist.");
+  assertMatch(productionReadinessManifest, /"expectedCount":\s*20/, "Production readiness manifest must track the exact 20-point checklist.");
+  assertMatch(productionReadinessManifest, /"liveProofCheckRequired":\s*true/, "Production readiness manifest must require mapped live proof checks.");
+  assertMatch(productionReadinessManifest, /"liveProofChecks"/, "Production readiness requirements must map to production go/no-go live checks.");
   assertMatch(githubWorkflow, /Repository coverage audit[\s\S]*repo-coverage-check/, "Infra workflow must audit tracked repository coverage.");
   assertMatch(githubWorkflow, /Render staging and backup compose[\s\S]*compose\.waf\.yaml[\s\S]*compose\.staging\.yaml[\s\S]*compose\.backup-scheduler\.yaml/, "Infra workflow must render staging, WAF and backup compose overlays.");
   assertMatch(githubWorkflow, /Secret scan[\s\S]*secret-scan/, "Infra workflow must exercise the secret scanner.");
@@ -8443,7 +8536,8 @@ async function staticSecurityCheck() {
   assertMatch(opsScript, /async function chaosProfile/, "Ops script must provide an opt-in chaos profile.");
   assertMatch(opsScript, /async function governanceCheck/, "Ops script must provide a governance gate.");
   assertMatch(opsScript, /async function repoCoverageCheck/, "Ops script must provide a repository coverage audit gate.");
-  assertMatch(opsScript, /liveProofStatus:\s+liveProofsPending\.length \? "pending-external-evidence" : "not-required"/, "Enterprise requirement reports must mark unresolved live production proof separately from repo evidence.");
+  assertMatch(opsScript, /enterpriseRequirementLiveProofResult[\s\S]*requireLiveProofs[\s\S]*liveProofIssues/, "Enterprise requirement reports must optionally enforce live production proof separately from repo evidence.");
+  assertMatch(opsScript, /repoStatus:\s+repoIssues\.length \? "failed" : "passed"[\s\S]*liveProofStatus/, "Enterprise requirement reports must keep repository evidence status separate from live proof status.");
   assertMatch(opsScript, /async function enterpriseTenCheck/, "Ops script must provide the combined enterprise 10 readiness gate.");
   assertMatch(opsScript, /await externalUptimeCheck\(\{ dryRun: true \}\)/, "Enterprise 10 readiness gate must validate the external uptime manifest.");
   assertMatch(opsScript, /"external-uptime-check": externalUptimeCheck/, "Ops command map must expose external-uptime-check.");

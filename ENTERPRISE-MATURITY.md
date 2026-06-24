@@ -51,6 +51,7 @@ cd /opt/stexor/stexor-platform-infrastructure
 sh ./scripts/enterprise-hardening-audit.sh
 sh ./scripts/stexor-ops.sh enterprise-requirements-check
 sh ./scripts/stexor-ops.sh enterprise-requirements-check --manifest governance/production-readiness.json
+sh ./scripts/stexor-ops.sh enterprise-requirements-check --manifest governance/production-readiness.json --requireLiveProofs
 ```
 
 La matrice machine-readable vive in `governance/enterprise-requirements.json`.
@@ -60,6 +61,10 @@ pattern, comandi ops e gate GitHub Actions, poi scrive evidenza non sensibile in
 La checklist production-ready da 20 punti vive in
 `governance/production-readiness.json` e produce report in
 `reports/production-readiness/`.
+Senza `--requireLiveProofs` il gate verifica la copertura repo/infra e segnala le
+prove live mancanti come `pending-external-evidence`; con `--requireLiveProofs`
+fallisce finche' l'ultimo `production-go-no-go` non contiene prove reali `go`
+per VPS, Cloudflare, monitor esterni, alert, restore e rollback.
 
 ## Redis enterprise runtime
 
