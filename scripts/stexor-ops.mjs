@@ -6049,19 +6049,34 @@ async function enterpriseRequirementsCheck() {
       title: requirement.title ?? "",
       state: requirement.state ?? "",
       liveProof: requirement.liveProof ?? "",
+      liveProofRequired: Boolean(requirement.liveProof),
+      liveProofStatus: requirement.liveProof ? "pending-external-evidence" : "not-required",
       status: requirementIssues.length ? "failed" : "passed",
       evidence: evidenceResults,
       issues: requirementIssues,
     };
   });
+  const liveProofsPending = rows
+    .filter((row) => row.liveProofRequired)
+    .map((row) => ({
+      id: row.id,
+      title: row.title,
+      state: row.state,
+      liveProof: row.liveProof,
+      status: row.liveProofStatus,
+    }));
 
   const payload = {
     generatedAt: new Date().toISOString(),
     manifestPath,
     status: issues.length ? "failed" : "passed",
+    repoStatus: issues.length ? "failed" : "passed",
+    liveProofStatus: liveProofsPending.length ? "pending-external-evidence" : "not-required",
     requirementCount: requirements.length,
     passedCount: rows.filter((row) => row.status === "passed").length,
     failedCount: rows.filter((row) => row.status !== "passed").length,
+    liveProofRequiredCount: liveProofsPending.length,
+    liveProofsPending,
     requirements: rows,
     issues,
   };
@@ -6071,18 +6086,25 @@ async function enterpriseRequirementsCheck() {
     `# ${reportTitle}`,
     "",
     `Status: ${payload.status}`,
+    `Repository evidence status: ${payload.repoStatus}`,
+    `Live proof status: ${payload.liveProofStatus}`,
     `Generated at: ${payload.generatedAt}`,
     `Requirements: ${payload.requirementCount}`,
     `Passed: ${payload.passedCount}`,
     `Failed: ${payload.failedCount}`,
+    `Live proofs still required: ${payload.liveProofRequiredCount}`,
     "",
-    "| Requirement | State | Status | Evidence passed | Live proof still required |",
-    "| --- | --- | --- | ---: | --- |",
-    ...rows.map((row) => `| ${row.id} | ${row.state} | ${row.status} | ${row.evidence.filter((item) => item.passed).length}/${row.evidence.length} | ${row.liveProof.replace(/\|/g, "/")} |`),
+    "| Requirement | State | Repo evidence | Live proof status | Evidence passed | Live proof still required |",
+    "| --- | --- | --- | --- | ---: | --- |",
+    ...rows.map((row) => `| ${row.id} | ${row.state} | ${row.status} | ${row.liveProofStatus} | ${row.evidence.filter((item) => item.passed).length}/${row.evidence.length} | ${row.liveProof.replace(/\|/g, "/")} |`),
     "",
     "## Issues",
     "",
     ...(issues.length ? issues.map((issue) => `- ${issue}`) : ["- none"]),
+    "",
+    "## Pending Live Proofs",
+    "",
+    ...(liveProofsPending.length ? liveProofsPending.map((item) => `- ${item.id}: ${item.liveProof}`) : ["- none"]),
   ]);
   log(`Enterprise requirements report written to ${jsonPath} and ${markdownPath}`);
   if (issues.length) {
@@ -7608,6 +7630,7 @@ function staticSecurityInfraOnlyCheck() {
   assertMatch(githubWorkflow, /compose-and-policy:[\s\S]*timeout-minutes:\s+45[\s\S]*shell-syntax:[\s\S]*timeout-minutes:\s+10[\s\S]*dast-zap:[\s\S]*timeout-minutes:\s+45[\s\S]*deploy-hostinger:[\s\S]*timeout-minutes:\s+90/, "Infrastructure CI jobs must set explicit timeouts.");
   assertMatch(opsScript, /async function repoCoverageCheck/, "Ops script must provide a repository coverage audit command.");
   assertMatch(opsScript, /"repo-coverage-check": repoCoverageCheck/, "Ops command map must expose repo-coverage-check.");
+  assertMatch(opsScript, /repoStatus:[\s\S]*liveProofStatus:[\s\S]*liveProofsPending/, "Enterprise requirement reports must separate repository evidence from pending live production proof.");
   assertMatch(opsScript, /workerNotificationsServerPath[\s\S]*fs\.existsSync\(workerNotificationsServerPath\)/, "Alert evidence must treat Stexor source checks as optional.");
   assertMatch(githubWorkflow, /Backup scheduler dry run[\s\S]*BACKUP_SCHEDULER_DRY_RUN=true/, "Infrastructure CI must exercise the Dockerized backup scheduler in dry-run mode.");
   assertNoMatch(githubWorkflow, /setup-node|node scripts\/stexor-ops\.mjs|shell:\s+pwsh|\.ps1/, "Infrastructure CI must stay Linux/container-first without PowerShell or host Node policy gates.");
@@ -8420,6 +8443,7 @@ async function staticSecurityCheck() {
   assertMatch(opsScript, /async function chaosProfile/, "Ops script must provide an opt-in chaos profile.");
   assertMatch(opsScript, /async function governanceCheck/, "Ops script must provide a governance gate.");
   assertMatch(opsScript, /async function repoCoverageCheck/, "Ops script must provide a repository coverage audit gate.");
+  assertMatch(opsScript, /liveProofStatus:\s+liveProofsPending\.length \? "pending-external-evidence" : "not-required"/, "Enterprise requirement reports must mark unresolved live production proof separately from repo evidence.");
   assertMatch(opsScript, /async function enterpriseTenCheck/, "Ops script must provide the combined enterprise 10 readiness gate.");
   assertMatch(opsScript, /await externalUptimeCheck\(\{ dryRun: true \}\)/, "Enterprise 10 readiness gate must validate the external uptime manifest.");
   assertMatch(opsScript, /"external-uptime-check": externalUptimeCheck/, "Ops command map must expose external-uptime-check.");
