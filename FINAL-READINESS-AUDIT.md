@@ -187,6 +187,7 @@ scripts/ui-publish-dry-run.mjs
 - GitHub Actions runtime secret/variable verification command.
 - Pre go-live evidence pack with JSON/Markdown reports under `reports/go-live/`.
 - Production go/no-go evidence gate with JSON/Markdown reports under `reports/go-no-go/`.
+- Live production readiness checklist with JSON/Markdown reports under `reports/production-readiness/`.
 - Release evidence pack with digest validation, SBOM/provenance references, rollback target generation and reports under `reports/release/`.
 - VPS bootstrap script with plan/apply JSON/Markdown evidence under `reports/vps-bootstrap/`.
 - VPS hardening script with plan/apply JSON/Markdown evidence under `reports/vps-hardening/`.
@@ -273,7 +274,7 @@ All commands listed above passed in the local evidence gathered during this hard
 - Application CI and docs still referenced PowerShell or direct host-Node infra gates; they now use bash/containerized gates or `scripts/run-infra-ops.mjs`.
 - Alerting had email/generic webhook only; optional native Discord and Telegram delivery with metrics was added.
 - Uptime dry-run previously did not leave report evidence; it now writes diagnostic reports while keeping `providerEvidence.verified=false` so production go/no-go still requires a live provider.
-- Hostinger deploy previously stopped after compose/WAF smoke; a post-deploy script now runs WAF smoke plus `infra-health` and can opt into pre go-live/go-no-go gates.
+- Hostinger deploy previously stopped after compose/WAF smoke; a post-deploy script now runs WAF smoke plus `infra-health` and can opt into pre go-live, go/no-go and live production readiness gates.
 - Hostinger live execution previously required manually sequencing many commands; `hostinger-go-live.sh` now creates a plan-first orchestration report and can run the ordered live sequence with `--confirmLive`.
 - VPS bootstrap was previously a manual Hostinger task; `vps-bootstrap-ubuntu.sh` now plans/applies Git, Docker Engine, Buildx and Compose plugin installation with evidence reports.
 - VPS hardening previously printed dry-run/apply output only; it now writes plan/apply JSON and Markdown evidence reports.

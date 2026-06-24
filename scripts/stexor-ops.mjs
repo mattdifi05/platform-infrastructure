@@ -5211,6 +5211,7 @@ function goNoGoRemediationMarkdown(remediation) {
 
 const evidenceBundleReportSpecs = [
   { directory: "go-no-go", prefix: "production-go-no-go-", label: "production-go-no-go", required: true },
+  { directory: "production-readiness", prefix: "production-readiness-", label: "production-readiness-live", required: true },
   { directory: "go-live", prefix: "pre-go-live-evidence-", label: "pre-go-live", required: true },
   { directory: "vps-host", prefix: "vps-host-readiness-", label: "vps-host-readiness", required: true },
   { directory: "dr", prefix: "dr-evidence-", label: "dr-evidence", required: true },
@@ -5239,6 +5240,7 @@ const evidenceBundleDocPaths = [
   "FINAL-READINESS-AUDIT.md",
   "VPS-PREDEPLOY-CHECKLIST.md",
   "governance/production-go-no-go.json",
+  "governance/production-readiness.json",
   "governance/github-actions-runtime.json",
   "governance/github-branch-protection.json",
   "governance/github-environments.json",
@@ -7635,6 +7637,8 @@ function staticSecurityInfraOnlyCheck() {
   const opsWrapper = readText(path.join(infraRoot, "scripts", "stexor-ops.sh"));
   const backupSchedulerScript = readText(path.join(infraRoot, "scripts", "backup-scheduler.sh"));
   const opsScript = readText(path.join(infraRoot, "scripts", "stexor-ops.mjs"));
+  const hostingerPostdeployScript = readText(path.join(infraRoot, "scripts", "hostinger-postdeploy.sh"));
+  const productionReadinessLiveWrapper = readText(path.join(infraRoot, "scripts", "production-readiness-live.sh"));
   const githubWorkflow = readText(path.join(infraRoot, ".github", "workflows", "enterprise-infra.yml"));
   const readme = readText(path.join(infraRoot, "README.md"));
   const runbook = readText(path.join(infraRoot, "RUNBOOK.md"));
@@ -7658,6 +7662,8 @@ function staticSecurityInfraOnlyCheck() {
     opsDockerfile,
     opsWrapper,
     backupSchedulerScript,
+    hostingerPostdeployScript,
+    productionReadinessLiveWrapper,
     githubWorkflow,
     readme,
     runbook,
@@ -7722,6 +7728,11 @@ function staticSecurityInfraOnlyCheck() {
   assertMatch(opsScript, /async function repoCoverageCheck/, "Ops script must provide a repository coverage audit command.");
   assertMatch(opsScript, /"repo-coverage-check": repoCoverageCheck/, "Ops command map must expose repo-coverage-check.");
   assertMatch(opsScript, /repoStatus:[\s\S]*liveProofStatus[\s\S]*liveProofsPending/, "Enterprise requirement reports must separate repository evidence from pending live production proof.");
+  assertMatch(hostingerPostdeployScript, /production-go-no-go\.sh --enforce[\s\S]*production-readiness-live\.sh/, "Hostinger post-deploy must enforce live production readiness after production go/no-go.");
+  assertMatch(productionReadinessLiveWrapper, /enterprise-requirements-check --manifest governance\/production-readiness\.json --requireLiveProofs/, "Production readiness live wrapper must enforce the 20-point live checklist.");
+  assertMatch(opsScript, /directory: "production-readiness"[\s\S]*prefix: "production-readiness-"[\s\S]*required: true/, "Evidence bundle must require the live production readiness report.");
+  assertMatch(readme, /production-readiness-live\.sh[\s\S]*reports\/production-readiness/, "README must document the live production readiness report.");
+  assertMatch(runbook, /production-readiness-live\.sh[\s\S]*reports\/production-readiness/, "Runbook must document the live production readiness report.");
   assertMatch(opsScript, /workerNotificationsServerPath[\s\S]*fs\.existsSync\(workerNotificationsServerPath\)/, "Alert evidence must treat Stexor source checks as optional.");
   assertMatch(githubWorkflow, /Backup scheduler dry run[\s\S]*BACKUP_SCHEDULER_DRY_RUN=true/, "Infrastructure CI must exercise the Dockerized backup scheduler in dry-run mode.");
   assertNoMatch(githubWorkflow, /setup-node|node scripts\/stexor-ops\.mjs|shell:\s+pwsh|\.ps1/, "Infrastructure CI must stay Linux/container-first without PowerShell or host Node policy gates.");
@@ -7855,6 +7866,7 @@ async function staticSecurityCheck() {
   const githubActionsConfigWrapper = readText(path.join(infraRoot, "scripts", "github-actions-config.sh"));
   const preGoLiveEvidenceWrapper = readText(path.join(infraRoot, "scripts", "pre-go-live-evidence.sh"));
   const productionGoNoGoWrapper = readText(path.join(infraRoot, "scripts", "production-go-no-go.sh"));
+  const productionReadinessLiveWrapper = readText(path.join(infraRoot, "scripts", "production-readiness-live.sh"));
   const infraRenovate = readText(path.join(infraRoot, "renovate.json"));
   const sourceRenovate = readText(path.join(sourceRoot, "renovate.json"));
   const infraGitattributes = readText(path.join(infraRoot, ".gitattributes"));
@@ -8016,9 +8028,9 @@ async function staticSecurityCheck() {
   assertMatch(hostingerPreflightScript, /compose\.hostinger\.yaml[\s\S]*compose\.waf\.yaml[\s\S]*compose\.hostinger-waf\.yaml[\s\S]*config --quiet[\s\S]*compose\.hostinger\.yaml[\s\S]*compose\.waf\.yaml[\s\S]*compose\.hostinger-waf\.yaml[\s\S]*grep -E 'image: .\+:latest/, "Hostinger preflight must render the same Hostinger+WAF compose stack used by deploy and scan it for mutable images.");
   assertMatch(hostingerPostdeployScript, /get_env\(\)[\s\S]*awk -F=[\s\S]*env_or_default\(\)/, "Hostinger post-deploy must parse .env without executing it as a shell script.");
   assertNoMatch(hostingerPostdeployScript, /(?:^|\n)\s*\.\s+"\$ENV_FILE"|set -a[\s\S]*"\$ENV_FILE"/, "Hostinger post-deploy must not source .env.");
-  assertMatch(hostingerPostdeployScript, /waf-smoke\.sh[\s\S]*infra-health\.sh[\s\S]*pre-go-live-evidence\.sh[\s\S]*production-go-no-go\.sh --enforce/, "Hostinger post-deploy must cover smoke, health, optional pre go-live evidence and final go/no-go.");
+  assertMatch(hostingerPostdeployScript, /waf-smoke\.sh[\s\S]*infra-health\.sh[\s\S]*pre-go-live-evidence\.sh[\s\S]*production-go-no-go\.sh --enforce[\s\S]*production-readiness-live\.sh/, "Hostinger post-deploy must cover smoke, health, optional pre go-live evidence, final go/no-go and live production readiness.");
   assertMatch(hostingerGoLiveScript, /PLAN_ONLY=1[\s\S]*--confirmLive[\s\S]*PLAN_ONLY=0/, "Hostinger go-live orchestrator must be plan-only unless explicitly confirmed.");
-  assertMatch(hostingerGoLiveScript, /vps-bootstrap-ubuntu\.sh --apply[\s\S]*vps-hardening-ubuntu\.sh --apply[\s\S]*vps-host-readiness\.sh --ssh-port \$SSH_PORT --enforce[\s\S]*hostinger-preflight\.sh[\s\S]*hostinger-postdeploy\.sh[\s\S]*production-go-no-go\.sh --enforce[\s\S]*evidence-bundle\.sh/, "Hostinger go-live orchestrator must sequence optional VPS bootstrap, hardening, readiness, preflight, postdeploy, go/no-go and evidence bundle.");
+  assertMatch(hostingerGoLiveScript, /vps-bootstrap-ubuntu\.sh --apply[\s\S]*vps-hardening-ubuntu\.sh --apply[\s\S]*vps-host-readiness\.sh --ssh-port \$SSH_PORT --enforce[\s\S]*hostinger-preflight\.sh[\s\S]*hostinger-postdeploy\.sh[\s\S]*production-go-no-go\.sh --enforce[\s\S]*production-readiness-live\.sh[\s\S]*evidence-bundle\.sh/, "Hostinger go-live orchestrator must sequence optional VPS bootstrap, hardening, readiness, preflight, postdeploy, go/no-go, live readiness and evidence bundle.");
   assertMatch(hostingerGoLiveScript, /--reload-sshd[\s\S]*RELOAD_SSHD=1[\s\S]*reloadSshd[\s\S]*vps-hardening-ubuntu\.sh --apply --ssh-port "\$SSH_PORT" \$reload_flag/, "Hostinger go-live orchestrator must expose explicit SSH reload for VPS hardening.");
   assertMatch(hostingerGoLiveScript, /--replace-docker-daemon-config[\s\S]*REPLACE_DOCKER_DAEMON_CONFIG=1[\s\S]*replaceDockerDaemonConfig[\s\S]*vps-hardening-ubuntu\.sh --apply --ssh-port "\$SSH_PORT" \$reload_flag --replace-docker-daemon-config/, "Hostinger go-live orchestrator must expose explicit Docker daemon config replacement for VPS hardening.");
   assertMatch(hostingerGoLiveScript, /REPLACE_DOCKER_DAEMON_CONFIG" -eq 1[\s\S]*APPLY_HARDENING" -ne 1[\s\S]*requires --apply-hardening/, "Hostinger go-live must reject Docker daemon replacement without --apply-hardening.");
@@ -8042,6 +8054,8 @@ async function staticSecurityCheck() {
   assertMatch(vpsPredeployChecklist, /hostinger-go-live\.sh --planOnly[\s\S]*--replace-docker-daemon-config/, "VPS checklist must require reviewed planning for Docker daemon replacement.");
   assertMatch(evidenceBundleWrapper, /evidence-bundle/, "Evidence bundle wrapper must delegate to the Dockerized ops runner.");
   assertMatch(opsScript, /async function evidenceBundle[\s\S]*stexor-evidence-bundle-\$\{stamp\}[\s\S]*includesSecrets:\s+false/, "Ops script must create non-secret evidence bundles with a manifest.");
+  assertMatch(productionReadinessLiveWrapper, /enterprise-requirements-check --manifest governance\/production-readiness\.json --requireLiveProofs/, "Production readiness live wrapper must enforce the 20-point live checklist.");
+  assertMatch(opsScript, /directory: "production-readiness"[\s\S]*prefix: "production-readiness-"[\s\S]*required: true/, "Evidence bundle must require the live production readiness report.");
   assertMatch(opsScript, /directory: "vps-bootstrap"[\s\S]*prefix: "vps-bootstrap-apply-"[\s\S]*required: true/, "Evidence bundle must require VPS bootstrap apply reports.");
   assertMatch(opsScript, /directory: "vps-hardening"[\s\S]*prefix: "vps-hardening-apply-"[\s\S]*required: true/, "Evidence bundle must require VPS hardening apply reports.");
   assertMatch(opsScript, /directory: "hostinger-go-live"[\s\S]*prefix: "hostinger-go-live-"/, "Evidence bundle must include Hostinger go-live orchestration reports when present.");
@@ -8187,8 +8201,13 @@ async function staticSecurityCheck() {
   assertMatch(readme, /production-go-no-go\.sh[\s\S]*reports\/go-no-go/, "README must document the production go/no-go evidence gate.");
   assertMatch(runbook, /Production go\/no-go[\s\S]*production-go-no-go\.sh --enforce/, "Runbook must document enforcing the production go/no-go gate.");
   assertMatch(vpsPredeployChecklist, /production-go-no-go\.sh --enforce[\s\S]*reports\/go-no-go/, "VPS checklist must require the production go/no-go report.");
+  assertMatch(readme, /production-readiness-live\.sh[\s\S]*reports\/production-readiness/, "README must document the live production readiness gate.");
+  assertMatch(runbook, /production-readiness-live\.sh[\s\S]*reports\/production-readiness/, "Runbook must document the live production readiness gate.");
+  assertMatch(vpsPredeployChecklist, /production-readiness-live\.sh[\s\S]*reports\/production-readiness/, "VPS checklist must require the live production readiness report.");
   assertMatch(readinessReport, /production-go-no-go\.sh/, "Readiness report must include production go/no-go tooling.");
   assertMatch(finalReadinessAudit, /production-go-no-go/, "Final readiness audit must mention the production go/no-go gate.");
+  assertMatch(readinessReport, /production-readiness-live\.sh/, "Readiness report must include live production readiness tooling.");
+  assertMatch(finalReadinessAudit, /production-readiness/, "Final readiness audit must mention the live production readiness report.");
   assertMatch(readme, /linux-portability-check\.sh[\s\S]*reports\/linux-portability/, "README must document Linux portability evidence reports.");
   assertMatch(runbook, /Linux portability[\s\S]*linux-portability-check\.sh --fix/, "Runbook must document the Linux portability check and fix mode.");
   assertMatch(vpsPredeployChecklist, /linux-portability-check\.sh[\s\S]*reports\/linux-portability/, "VPS checklist must require Linux portability evidence reports.");

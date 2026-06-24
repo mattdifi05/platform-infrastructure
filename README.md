@@ -332,6 +332,9 @@ uptime esterno, load pubblico 50/100/500, release evidence o pre-go-live
 evidence completo. Ogni
 report `no-go` include anche `remediation` in JSON e una sezione Markdown con
 azioni, comandi ed evidenza attesa per chiudere i check falliti sulla VPS.
+Dopo un `go`, esegui anche `scripts/production-readiness-live.sh`: valida la
+checklist production-ready da 20 punti contro l'ultimo `production-go-no-go` e
+scrive l'evidenza in `reports/production-readiness/`.
 
 Quando i report sono pronti, genera un archivio non committato con le evidenze
 operative:
@@ -454,8 +457,9 @@ set Compose usato dal deploy Hostinger, inclusi `compose.waf.yaml` e
 `compose.hostinger-waf.yaml`.
 
 `hostinger-postdeploy.sh` carica `.env`, usa gli URL pubblici reali e lancia
-WAF smoke piu' `infra-health` per default. Per il go-live finale puoi abilitarlo
-anche da `deploy-hostinger.sh` con:
+WAF smoke piu' `infra-health` per default. Con `DEPLOY_RUN_GO_NO_GO=1` esegue
+anche `production-go-no-go.sh --enforce` e `production-readiness-live.sh`. Per
+il go-live finale puoi abilitarlo anche da `deploy-hostinger.sh` con:
 
 ```sh
 DEPLOY_RUN_PRE_GO_LIVE=1 \
@@ -482,7 +486,8 @@ sh ./scripts/hostinger-go-live.sh --confirmLive --repo OWNER/REPO --apply-harden
 Senza `--confirmLive` scrive solo il piano in `reports/hostinger-go-live/`.
 Con `--confirmLive` puo' eseguire bootstrap host, hardening, `vps-host-readiness
 --enforce`, `hostinger-preflight`, opzionalmente `docker compose up`,
-post-deploy, go/no-go e `evidence-bundle`, fermandosi al primo errore e
+post-deploy, go/no-go, checklist live production-ready e `evidence-bundle`,
+fermandosi al primo errore e
 lasciando un report JSON/Markdown non sensibile. Usa
 `--reload-sshd` solo dopo aver verificato che la chiave SSH e la porta target
 funzionano; senza questa prova il go/no-go non accetta l'hardening host come

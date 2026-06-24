@@ -546,6 +546,7 @@ their reports:
 ```sh
 sh ./scripts/production-go-no-go.sh
 sh ./scripts/production-go-no-go.sh --enforce
+sh ./scripts/production-readiness-live.sh
 ```
 
 The summary command writes `reports/go-no-go/production-go-no-go-*.json` and
@@ -557,6 +558,9 @@ pre-go-live evidence. Treat `no-go` as a hard stop before public traffic
 changes. A `no-go` report carries a JSON
 `remediation` array and a Markdown remediation checklist with the exact
 follow-up commands and evidence expected for each failed gate.
+`production-readiness-live.sh` then maps the 20-point production readiness
+checklist to the latest `production-go-no-go` report and writes
+`reports/production-readiness/production-readiness-*.json` plus `.md`.
 
 After the final reports are generated, create a non-secret evidence archive:
 
@@ -663,8 +667,10 @@ Use this path when TLS and public certificates are terminated by Hostinger, Clou
 6. For remote deploys, `scripts/deploy-hostinger.sh` now calls
    `hostinger-postdeploy.sh` after `docker compose up`. By default the
    post-deploy step runs WAF smoke and `infra-health` against the public URLs
-   loaded from `.env`. Enable the final evidence gates only when the external
-   providers are configured:
+   loaded from `.env`. With `DEPLOY_RUN_GO_NO_GO=1`, it also enforces
+   `production-go-no-go.sh --enforce` and `production-readiness-live.sh`.
+   Enable the final evidence gates only when the external providers are
+   configured:
 
    ```sh
    DEPLOY_RUN_PRE_GO_LIVE=1 \

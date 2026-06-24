@@ -76,6 +76,7 @@ fi
 
 if [ "${DEPLOY_RUN_GO_NO_GO:-0}" = "1" ]; then
   sh ./scripts/production-go-no-go.sh --enforce
+  sh ./scripts/production-readiness-live.sh
 fi
 
 echo "Hostinger/VPS post-deploy checks completed."

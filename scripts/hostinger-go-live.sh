@@ -52,7 +52,7 @@ Options:
   --include-restore-drill               Include full restore drill in pre-go-live.
   --include-offsite-restore-dry-run     Include Restic dry-run in pre-go-live.
   --verify-github-remote                Verify live GitHub branch/env/runtime config.
-  --go-no-go                            Enforce production go/no-go after postdeploy.
+  --go-no-go                            Enforce production go/no-go and live readiness after postdeploy.
   --no-bundle                           Skip evidence bundle creation.
   --full-evidence                       Enable pre-go-live, restore, off-site dry-run,
                                         GitHub remote verification and go/no-go.
@@ -328,6 +328,10 @@ step_go_no_go() {
   sh ./scripts/production-go-no-go.sh --enforce
 }
 
+step_production_readiness_live() {
+  sh ./scripts/production-readiness-live.sh
+}
+
 step_evidence_bundle() {
   sh ./scripts/evidence-bundle.sh
 }
@@ -388,8 +392,10 @@ run_step "hostinger-postdeploy" "sh ./scripts/hostinger-postdeploy.sh $ENV_FILE"
 
 if [ "$RUN_GO_NO_GO" -eq 1 ]; then
   run_step "production-go-no-go" "sh ./scripts/production-go-no-go.sh --enforce" step_go_no_go
+  run_step "production-readiness-live" "sh ./scripts/production-readiness-live.sh" step_production_readiness_live
 else
   add_step "production-go-no-go" "skipped" "sh ./scripts/production-go-no-go.sh --enforce" "enable with --go-no-go or --full-evidence"
+  add_step "production-readiness-live" "skipped" "sh ./scripts/production-readiness-live.sh" "enable with --go-no-go or --full-evidence"
 fi
 
 if [ "$RUN_BUNDLE" -eq 1 ]; then
