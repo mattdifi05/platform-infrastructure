@@ -15,13 +15,23 @@ jobs:
   compose-and-policy:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - name: Checkout infrastructure
+        uses: actions/checkout@v5
 
-      - uses: actions/checkout@v5
+      - name: Checkout application source
+        id: checkout-source
+        uses: actions/checkout@v5
+        continue-on-error: true
         with:
           repository: mattdifi05/Stexor-account
           path: src_stexor
           token: ${{ secrets.STEXOR_APP_REPO_TOKEN || github.token }}
+
+      - name: Prepare application source fallback
+        if: steps.checkout-source.outcome != 'success'
+        run: |
+          mkdir -p src_stexor
+          printf 'Application source checkout unavailable; running infrastructure-only CI checks.\n' > src_stexor/.infra-only
 
       - name: Prepare local secret files
         run: |
@@ -103,12 +113,18 @@ jobs:
       - name: Run infrastructure static policy gate
         env:
           STEXOR_SOURCE_ROOT: ${{ github.workspace }}/src_stexor
-        run: sh ./scripts/stexor-ops.sh static-security-check
+        run: |
+          if [ -f src_stexor/package.json ] && [ ! -f src_stexor/.infra-only ]; then
+            sh ./scripts/stexor-ops.sh static-security-check
+          else
+            sh ./scripts/stexor-ops.sh static-security-check --infraOnly
+          fi
 
   shell-syntax:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - name: Checkout infrastructure
+        uses: actions/checkout@v5
       - name: Check shell scripts parse
         run: |
           for file in scripts/*.sh; do

@@ -7162,7 +7162,90 @@ async function signImages() {
   log("Image signing completed.");
 }
 
+function staticSecurityInfraOnlyCheck() {
+  log("==> Static security checks (infra-only)");
+  const compose = readText(path.join(infraRoot, "compose.yaml"));
+  const composeBuild = readText(path.join(infraRoot, "compose.build.yaml"));
+  const composeSecrets = readText(path.join(infraRoot, "compose.secrets.yaml"));
+  const composeWaf = readText(path.join(infraRoot, "compose.waf.yaml"));
+  const composeHostingerWaf = readText(path.join(infraRoot, "compose.hostinger-waf.yaml"));
+  const phpApacheDockerfile = readText(path.join(infraRoot, "docker", "php-apache.Dockerfile"));
+  const opsDockerfile = readText(path.join(infraRoot, "docker", "ops.Dockerfile"));
+  const opsWrapper = readText(path.join(infraRoot, "scripts", "stexor-ops.sh"));
+  const backupSchedulerScript = readText(path.join(infraRoot, "scripts", "backup-scheduler.sh"));
+  const opsScript = readText(path.join(infraRoot, "scripts", "stexor-ops.mjs"));
+  const githubWorkflow = readText(path.join(infraRoot, ".github", "workflows", "enterprise-infra.yml"));
+  const readme = readText(path.join(infraRoot, "README.md"));
+  const runbook = readText(path.join(infraRoot, "RUNBOOK.md"));
+  const envExample = readText(path.join(infraRoot, ".env.example"));
+  const productionGoNoGoPolicyText = readText(path.join(infraRoot, "governance", "production-go-no-go.json"));
+  const infraRenovate = readText(path.join(infraRoot, "renovate.json"));
+  const infraGitattributes = readText(path.join(infraRoot, ".gitattributes"));
+  const gitignore = readText(path.join(infraRoot, ".gitignore"));
+  const localWafPreRules = readText(path.join(infraRoot, "waf", "REQUEST-900-EXCLUSION-RULES-BEFORE-CRS.conf"));
+  const hostingerWafPreRules = readText(path.join(infraRoot, "waf", "REQUEST-900-HOSTINGER-RULES-BEFORE-CRS.conf"));
+  const phpMyAdminConfig = readText(path.join(infraRoot, "phpmyadmin", "config.user.inc.php"));
+
+  const infrastructureText = [
+    compose,
+    composeBuild,
+    composeSecrets,
+    composeWaf,
+    composeHostingerWaf,
+    phpApacheDockerfile,
+    opsDockerfile,
+    opsWrapper,
+    backupSchedulerScript,
+    githubWorkflow,
+    readme,
+    runbook,
+    envExample,
+  ].join("\n");
+
+  assertNoMatch(infrastructureText, /(?:\.\.\/web-php-infrastructure|src\/infrastructure|enterprise-infrastructure)/, "Infrastructure must not reference retired duplicate infra directories.");
+  assertMatch(compose, /^name:\s+stexor_platform_local/m, "Compose must set a stable local project name.");
+  assertMatch(compose, /dockerfile:\s+docker\/php-apache\.Dockerfile/, "Compose must build PHP hosting from the unified infra Dockerfile.");
+  assertMatch(compose, /\.\/php-apache\/apache:\/etc\/apache2\/sites-available/, "Compose must mount the unified PHP Apache vhost configs.");
+  assertMatch(compose, /\.\/php-apache\/php\/custom\.ini/, "Compose must mount the unified PHP runtime config.");
+  assertMatch(compose, /\.\/mariadb\/initdb:/, "Compose must initialize MariaDB from the unified infra tree.");
+  assertMatch(compose, /x-default-logging:[\s\S]*max-size:\s+"10m"[\s\S]*max-file:\s+"5"/, "Compose services must define bounded json-file logging.");
+  assertMatch(composeBuild, /BACKEND_BUILD_IMAGE[\s\S]*WEB_BUILD_IMAGE[\s\S]*WORKER_NOTIFICATIONS_BUILD_IMAGE[\s\S]*WORKER_JOBS_BUILD_IMAGE/, "Compose build must use local build image variables.");
+  assertMatch(composeSecrets, /SESSION_SIGNING_KEYS_FILE:\s+\/run\/secrets\/session_signing_keys/, "Local secret overlay must consume session signing keys from Docker secrets.");
+  assertMatch(composeSecrets, /MARIADB_ROOT_PASSWORD_FILE:\s+\/run\/secrets\/mariadb_root_password/, "Local secret overlay must consume MariaDB root password from Docker secrets.");
+  assertMatch(composeWaf, /owasp\/modsecurity-crs:4\.26\.0-nginx-202605200705@sha256:[a-f0-9]{64}/, "WAF image must be a pinned OWASP CRS image.");
+  assertMatch(composeWaf, /BLOCKING_PARANOIA:\s+\$\{WAF_BLOCKING_PARANOIA:-2\}/, "WAF must default to CRS blocking paranoia level 2.");
+  assertMatch(composeWaf, /REQUEST-900-EXCLUSION-RULES-BEFORE-CRS\.conf/, "WAF must load local pre-CRS rules.");
+  assertMatch(composeHostingerWaf, /ports:\s*!override[\s\S]*WAF_HTTP_BIND/, "Hostinger WAF overlay must make the WAF the only public HTTP listener.");
+  assertMatch(localWafPreRules, /\(\?:traefik\|prometheus\|alertmanager\)\\\.localhost\\\.com/, "Local WAF must block unauthenticated internal console hostnames.");
+  assertMatch(hostingerWafPreRules, /\(\?:phpmyadmin\|traefik\|prometheus\|alertmanager\|grafana\|minio\|s3\)/, "Hostinger WAF must block public admin/storage console hostnames.");
+  assertNoMatch(compose, /phpmyadmin\/themes\/|blueberry/i, "phpMyAdmin must not mount removed local themes.");
+  assertMatch(phpMyAdminConfig, /\$cfg\['ThemeDefault'\]\s*=\s*'pmahomme'/, "phpMyAdmin must use the bundled default pmahomme theme.");
+  assertMatch(phpMyAdminConfig, /\$cfg\['ThemeManager'\]\s*=\s*false/, "phpMyAdmin theme switching must be disabled.");
+  assertMatch(phpApacheDockerfile, /php:8\.5-apache@sha256:[a-f0-9]{64}/, "PHP Apache image must be pinned to a digest.");
+  assertMatch(phpApacheDockerfile, /a2enmod(?=[^\n]*rewrite)(?=[^\n]*headers)(?=[^\n]*ssl)(?=[^\n]*proxy)(?=[^\n]*proxy_http)/, "PHP Apache image must enable the required hosting modules.");
+  assertMatch(opsDockerfile, /docker-cli[\s\S]*docker-cli-compose/, "Ops container must include Docker CLI and Compose plugin.");
+  assertMatch(opsWrapper, /docker build[\s\S]*docker\/ops\.Dockerfile[\s\S]*docker run --rm/, "Ops wrapper must execute commands through the containerized runner.");
+  assertMatch(opsWrapper, /\/var\/run\/docker\.sock/, "Ops wrapper must mount the Docker socket for controlled Docker operations.");
+  assertMatch(backupSchedulerScript, /BACKUP_SCHEDULER_DRY_RUN/, "Backup scheduler must support CI dry-run mode.");
+  assertMatch(opsScript, /async function staticSecurityCheck/, "Ops script must expose the full static security gate.");
+  assertMatch(githubWorkflow, /Checkout application source[\s\S]*continue-on-error:\s+true/, "Infrastructure CI must tolerate unavailable private application source checkout.");
+  assertMatch(githubWorkflow, /src_stexor\/\.infra-only/, "Infrastructure CI must create an explicit infra-only fallback marker.");
+  assertMatch(githubWorkflow, /static-security-check --infraOnly/, "Infrastructure CI must run infra-only static checks when application source is unavailable.");
+  assertMatch(githubWorkflow, /Backup scheduler dry run[\s\S]*BACKUP_SCHEDULER_DRY_RUN=true/, "Infrastructure CI must exercise the Dockerized backup scheduler in dry-run mode.");
+  assertNoMatch(githubWorkflow, /setup-node|node scripts\/stexor-ops\.mjs|shell:\s+pwsh|\.ps1/, "Infrastructure CI must stay Linux/container-first without PowerShell or host Node policy gates.");
+  assertMatch(productionGoNoGoPolicyText, /"vpsHost"[\s\S]*"cloudflareAccess"/, "Production go/no-go policy must require VPS and Cloudflare evidence.");
+  assertMatch(infraRenovate, /dependencyDashboardApproval/, "Renovate must require dashboard approval for controlled updates.");
+  assertMatch(infraGitattributes, /^\* text=auto eol=lf/m, "Infrastructure repo must enforce LF line endings.");
+  assertMatch(gitignore, /^\.tmp\/$/m, "Generated ops temp files must be ignored by Git.");
+
+  log("Infra-only static security checks passed.");
+}
+
 async function staticSecurityCheck() {
+  if (booleanFlag(argv.infraOnly) || booleanFlag(process.env.STEXOR_STATIC_INFRA_ONLY)) {
+    staticSecurityInfraOnlyCheck();
+    return;
+  }
   log("==> Static security checks");
   const compose = readText(path.join(infraRoot, "compose.yaml"));
   const composeBuild = readText(path.join(infraRoot, "compose.build.yaml"));
