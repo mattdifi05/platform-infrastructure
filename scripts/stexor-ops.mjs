@@ -9433,6 +9433,7 @@ function staticSecurityInfraOnlyCheck() {
   assertMatch(opsWrapper, /\/var\/run\/docker\.sock/, "Ops wrapper must mount the Docker socket for controlled Docker operations.");
   assertMatch(opsWrapper, /INFRA_CONTAINER_ROOT="\$\{STEXOR_INFRA_CONTAINER_ROOT:-\/infra\}"/, "Ops wrapper must mount infrastructure at /infra to match the ops image entrypoint.");
   assertMatch(opsWrapper, /SOURCE_CONTAINER_ROOT="\$\{STEXOR_SOURCE_CONTAINER_ROOT:-\/src_stexor\}"/, "Ops wrapper must mount source at /src_stexor by default.");
+  assertMatch(opsWrapper, /ENV_FORWARD_ARGS(?=[\s\S]*GITHUB_TOKEN)(?=[\s\S]*GH_TOKEN)(?=[\s\S]*CLOUDFLARE_API_TOKEN)/, "Ops wrapper must forward required GitHub and Cloudflare tokens into the container by name.");
   assertNoMatch(opsWrapper, /INFRA_CONTAINER_ROOT="\$\{STEXOR_INFRA_CONTAINER_ROOT:-\$INFRA_ROOT\}"/, "Ops wrapper must not use the host workspace path as the default container root.");
   assertMatch(backupSchedulerScript, /BACKUP_SCHEDULER_DRY_RUN/, "Backup scheduler must support CI dry-run mode.");
   assertMatch(opsScript, /async function staticSecurityCheck/, "Ops script must expose the full static security gate.");
@@ -9695,6 +9696,7 @@ async function staticSecurityCheck() {
   assertMatch(opsWrapper, /STEXOR_SOURCE_CONTAINER_ROOT/, "Ops wrapper must pass the source container root.");
   assertMatch(opsWrapper, /STEXOR_SOURCE_VOLUME_SOURCE/, "Ops wrapper must allow overriding the source host volume source.");
   assertMatch(opsWrapper, /STEXOR_SOURCE_HOST_ROOT/, "Ops wrapper must pass the source host root for nested Docker volume mounts.");
+  assertMatch(opsWrapper, /ENV_FORWARD_ARGS(?=[\s\S]*GITHUB_TOKEN)(?=[\s\S]*GH_TOKEN)(?=[\s\S]*CLOUDFLARE_API_TOKEN)(?=[\s\S]*RESTIC_REPOSITORY)(?=[\s\S]*COSIGN_KEY)/, "Ops wrapper must forward operational credentials into the container by environment name.");
   const shellWrappers = fs.readdirSync(path.join(infraRoot, "scripts"))
     .filter((name) => name.endsWith(".sh"))
     .map((name) => [name, readText(path.join(infraRoot, "scripts", name))]);
