@@ -100,6 +100,9 @@ jobs:
       - name: Linux portability check
         run: sh ./scripts/stexor-ops.sh linux-portability-check
 
+      - name: Repository coverage audit
+        run: sh ./scripts/stexor-ops.sh repo-coverage-check
+
       - name: Run infrastructure static policy gate
         run: sh ./scripts/stexor-ops.sh static-security-check --infraOnly
 

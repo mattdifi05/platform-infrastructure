@@ -5770,6 +5770,147 @@ async function linuxPortabilityCheck(options = {}) {
   log("Linux portability check passed.");
 }
 
+function repoCoverageCategory(filePath) {
+  const normalized = filePath.replaceAll("\\", "/");
+  const rules = [
+    ["workflow", /^\.github\/workflows\/[^/]+\.ya?ml$/],
+    ["root-policy", /^(?:\.env(?:\..*)?|\.gitattributes|\.gitignore|renovate\.json|SECURITY\.md|THREAT-MODEL\.md)$/],
+    ["object-storage", /^minio\//],
+    ["documentation", /^(?:README|RUNBOOK|ENTERPRISE-10-PLAN|ENTERPRISE-MATURITY|FINAL-READINESS-AUDIT|READINESS-REPORT|VPS-PREDEPLOY-CHECKLIST)\.md$|^(?:cloudflare|keycloak|minio|secrets)\/README\.md$/],
+    ["compose", /^compose(?:\.[^.]+)?\.ya?ml$/],
+    ["docker-build", /^docker\/[^/]+\.Dockerfile$/],
+    ["operations-script", /^scripts\/.+\.(?:sh|mjs)$/],
+    ["governance-policy", /^governance\/.+\.json$/],
+    ["cloudflare-policy", /^cloudflare\/.+\.(?:json|md)$/],
+    ["observability", /^(?:alertmanager|grafana|loki|monitoring|prometheus|promtail)\//],
+    ["identity", /^keycloak\//],
+    ["database", /^(?:postgres|mariadb)\//],
+    ["messaging", /^nats\//],
+    ["php-runtime", /^(?:php-apache|phpmyadmin)\//],
+    ["reverse-proxy", /^traefik\//],
+    ["waf", /^waf\//],
+    ["security-policy", /^security\//],
+  ];
+  const match = rules.find(([, pattern]) => pattern.test(normalized));
+  return match?.[0] ?? null;
+}
+
+async function repoCoverageCheck() {
+  log("==> Repository coverage check");
+  const trackedFiles = output("git", ["ls-files"], { cwd: infraRoot })
+    .split(/\r?\n/)
+    .map((file) => file.trim())
+    .filter(Boolean)
+    .sort();
+  const categories = new Map();
+  const uncovered = [];
+  for (const file of trackedFiles) {
+    const category = repoCoverageCategory(file);
+    if (!category) {
+      uncovered.push(file);
+      continue;
+    }
+    if (!categories.has(category)) categories.set(category, []);
+    categories.get(category).push(file);
+  }
+
+  const requiredCategories = [
+    "workflow",
+    "root-policy",
+    "documentation",
+    "compose",
+    "docker-build",
+    "operations-script",
+    "governance-policy",
+    "cloudflare-policy",
+    "observability",
+    "identity",
+    "database",
+    "object-storage",
+    "messaging",
+    "php-runtime",
+    "reverse-proxy",
+    "waf",
+    "security-policy",
+  ];
+  const missingCategories = requiredCategories.filter((category) => !categories.has(category));
+  const workflow = readText(path.join(infraRoot, ".github", "workflows", "enterprise-infra.yml"));
+  const requiredWorkflowGates = [
+    ["local-compose-render", /Render local WAF compose[\s\S]*compose\.yaml[\s\S]*compose\.build\.yaml[\s\S]*compose\.secrets\.yaml[\s\S]*compose\.waf\.yaml/],
+    ["hostinger-compose-render", /Render Hostinger WAF compose[\s\S]*compose\.hostinger\.yaml[\s\S]*compose\.hostinger-waf\.yaml/],
+    ["backup-scheduler-dry-run", /Backup scheduler dry run[\s\S]*BACKUP_SCHEDULER_DRY_RUN=true/],
+    ["external-uptime-dry-run", /external-uptime-check --dryRun/],
+    ["cloudflare-access-dry-run", /cloudflare-access-admin --manifest cloudflare\/access-admin\.example\.json/],
+    ["github-branch-policy-dry-run", /github-branch-protection --repo/],
+    ["github-environments-dry-run", /github-environments --repo/],
+    ["github-actions-runtime-dry-run", /github-actions-config --repo/],
+    ["release-evidence-plan", /release-evidence --planOnly/],
+    ["alert-evidence-summary", /alert-evidence/],
+    ["production-go-no-go-summary", /production-go-no-go/],
+    ["evidence-bundle-smoke", /evidence-bundle --noArchive/],
+    ["linux-portability", /linux-portability-check/],
+    ["static-security-infra-only", /static-security-check --infraOnly/],
+    ["repository-coverage", /repo-coverage-check/],
+    ["shell-syntax", /for file in scripts\/\*\.sh/],
+    ["workflow-dispatch", /workflow_dispatch:/],
+    ["dast-manual", /dast-zap:[\s\S]*dast-zap-baseline\.sh/],
+    ["deploy-manual", /deploy-hostinger:[\s\S]*deploy-hostinger\.sh/],
+  ];
+  const missingWorkflowGates = requiredWorkflowGates
+    .filter(([, pattern]) => !pattern.test(workflow))
+    .map(([name]) => name);
+  const issues = [
+    ...uncovered.map((file) => `Uncovered tracked file: ${file}`),
+    ...missingCategories.map((category) => `Missing tracked files for required category: ${category}`),
+    ...missingWorkflowGates.map((gate) => `Workflow does not exercise required gate: ${gate}`),
+  ];
+  const categorySummary = Object.fromEntries([...categories.entries()].map(([category, files]) => [category, files.length]));
+  const payload = {
+    generatedAt: new Date().toISOString(),
+    status: issues.length ? "failed" : "passed",
+    trackedFileCount: trackedFiles.length,
+    coveredFileCount: trackedFiles.length - uncovered.length,
+    uncovered,
+    requiredCategories,
+    missingCategories,
+    categorySummary,
+    workflowGates: requiredWorkflowGates.map(([name]) => ({
+      name,
+      present: !missingWorkflowGates.includes(name),
+    })),
+    issues,
+  };
+  const stamp = reportTimestamp();
+  const jsonPath = writeJsonReport("repo-coverage", `repo-coverage-${stamp}`, payload);
+  const markdownPath = writeMarkdownReport("repo-coverage", `repo-coverage-${stamp}`, [
+    "# Repository Coverage",
+    "",
+    `Status: ${payload.status}`,
+    `Generated at: ${payload.generatedAt}`,
+    `Tracked files: ${payload.trackedFileCount}`,
+    `Covered files: ${payload.coveredFileCount}`,
+    "",
+    "| Category | Files |",
+    "| --- | ---: |",
+    ...Object.entries(categorySummary).sort(([a], [b]) => a.localeCompare(b)).map(([category, count]) => `| ${category} | ${count} |`),
+    "",
+    "## Workflow Gates",
+    "",
+    "| Gate | Present |",
+    "| --- | --- |",
+    ...payload.workflowGates.map((gate) => `| ${gate.name} | ${gate.present ? "yes" : "no"} |`),
+    "",
+    "## Issues",
+    "",
+    ...(issues.length ? issues.map((issue) => `- ${issue}`) : ["- None"]),
+  ]);
+  log(`Repository coverage report written to ${jsonPath} and ${markdownPath}`);
+  if (issues.length) {
+    fail(`Repository coverage check failed with ${issues.length} issue(s). Report: ${jsonPath}`);
+  }
+  log("Repository coverage check passed.");
+}
+
 async function enterpriseTenCheck() {
   log("==> Enterprise 10 readiness gate");
   await haConfigCheck();
@@ -7263,6 +7404,9 @@ function staticSecurityInfraOnlyCheck() {
   assertNoMatch(githubWorkflow, /Stexor-account|STEXOR_APP_REPO_TOKEN|Checkout application source/, "Infrastructure CI must not checkout or require project repositories.");
   assertMatch(githubWorkflow, /\.tmp\/optional-node-source/, "Infrastructure CI must use a local optional source placeholder for Compose rendering.");
   assertMatch(githubWorkflow, /static-security-check --infraOnly/, "Infrastructure CI must run infrastructure-only static checks.");
+  assertMatch(githubWorkflow, /Repository coverage audit[\s\S]*repo-coverage-check/, "Infrastructure CI must audit tracked repository file coverage.");
+  assertMatch(opsScript, /async function repoCoverageCheck/, "Ops script must provide a repository coverage audit command.");
+  assertMatch(opsScript, /"repo-coverage-check": repoCoverageCheck/, "Ops command map must expose repo-coverage-check.");
   assertMatch(opsScript, /workerNotificationsServerPath[\s\S]*fs\.existsSync\(workerNotificationsServerPath\)/, "Alert evidence must treat Stexor source checks as optional.");
   assertMatch(githubWorkflow, /Backup scheduler dry run[\s\S]*BACKUP_SCHEDULER_DRY_RUN=true/, "Infrastructure CI must exercise the Dockerized backup scheduler in dry-run mode.");
   assertNoMatch(githubWorkflow, /setup-node|node scripts\/stexor-ops\.mjs|shell:\s+pwsh|\.ps1/, "Infrastructure CI must stay Linux/container-first without PowerShell or host Node policy gates.");
@@ -7816,6 +7960,7 @@ async function staticSecurityCheck() {
   assertMatch(githubWorkflow, /Alert evidence summary[\s\S]*alert-evidence/, "Infra workflow must exercise the alert evidence command in summary mode.");
   assertMatch(githubWorkflow, /Production go-no-go summary[\s\S]*production-go-no-go/, "Infra workflow must exercise the production go/no-go command in summary mode.");
   assertMatch(githubWorkflow, /Linux portability check[\s\S]*linux-portability-check/, "Infra workflow must exercise the Linux portability command.");
+  assertMatch(githubWorkflow, /Repository coverage audit[\s\S]*repo-coverage-check/, "Infra workflow must audit tracked repository coverage.");
   assertMatch(opsScript, /async function preGoLiveEvidence/, "Ops script must provide a pre go-live evidence command.");
   assertMatch(opsScript, /writeJsonReport\("go-live"[\s\S]*writeMarkdownReport\("go-live"/, "Pre go-live evidence must write JSON and Markdown reports.");
   assertMatch(opsScript, /providerEvidence = \[[\s\S]*Hostinger Ubuntu LTS[\s\S]*Cloudflare DNS\/CDN\/WAF\/Access[\s\S]*providerEvidenceRequired/, "Pre go-live evidence must track remaining provider proof.");
@@ -8055,6 +8200,7 @@ async function staticSecurityCheck() {
   assertMatch(opsScript, /async function securityMatrix/, "Ops script must provide a security test matrix gate.");
   assertMatch(opsScript, /async function chaosProfile/, "Ops script must provide an opt-in chaos profile.");
   assertMatch(opsScript, /async function governanceCheck/, "Ops script must provide a governance gate.");
+  assertMatch(opsScript, /async function repoCoverageCheck/, "Ops script must provide a repository coverage audit gate.");
   assertMatch(opsScript, /async function enterpriseTenCheck/, "Ops script must provide the combined enterprise 10 readiness gate.");
   assertMatch(opsScript, /await externalUptimeCheck\(\{ dryRun: true \}\)/, "Enterprise 10 readiness gate must validate the external uptime manifest.");
   assertMatch(opsScript, /"external-uptime-check": externalUptimeCheck/, "Ops command map must expose external-uptime-check.");
@@ -8444,6 +8590,7 @@ Commands:
   prune-postgres-backups
   production-go-no-go
   production-preflight
+  repo-coverage-check
   release-evidence
   release-artifact-gate
   rollback-release
@@ -8521,6 +8668,7 @@ const commands = {
   "prune-postgres-backups": prunePostgresBackups,
   "production-go-no-go": productionGoNoGo,
   "production-preflight": productionPreflight,
+  "repo-coverage-check": repoCoverageCheck,
   "release-evidence": releaseEvidence,
   "release-artifact-gate": releaseArtifactGate,
   "rollback-release": rollbackRelease,

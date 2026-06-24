@@ -311,6 +311,9 @@ La runtime config GitHub Actions e' versionata in
 `scripts/github-actions-config.sh --verifyRemote` senza stampare valori
 segreti. La CI dell'infra non esegue checkout di repository progetto: collega
 Stexor o altri progetti solo tramite `NODE_SOURCE_DIR` quando devi buildarli.
+Il gate `scripts/stexor-ops.sh repo-coverage-check` misura la copertura dei
+file tracciati della repo: ogni file deve rientrare in una categoria
+infrastrutturale e il workflow deve esercitare tutti i gate CI obbligatori.
 Prima del go-live genera un evidence pack con
 `scripts/pre-go-live-evidence.sh --repo OWNER/REPO`: il comando scrive JSON e
 Markdown in `reports/go-live/` con `status`, `missingOptions` e `issues`,

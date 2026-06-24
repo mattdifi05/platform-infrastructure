@@ -524,6 +524,16 @@ manifest or rollback-target work stays visible before approval. Diagnostic
 packs with `status=failed` are useful for remediation but do not satisfy
 production go/no-go.
 
+Run the repository coverage gate whenever files or workflow jobs are added:
+
+```sh
+sh ./scripts/stexor-ops.sh repo-coverage-check
+```
+
+The report in `reports/repo-coverage/` proves every tracked file belongs to an
+infrastructure category and that the GitHub Actions workflow still exercises the
+required CI gates.
+
 ## Production go/no-go
 
 Run the final production gate after the live VPS/provider checks have produced
