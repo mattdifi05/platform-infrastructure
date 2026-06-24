@@ -4826,6 +4826,7 @@ async function preGoLiveEvidence() {
   log("==> Pre go-live evidence pack");
   const repo = argv.repo ?? process.env.STEXOR_GITHUB_REPOSITORY ?? process.env.GITHUB_REPOSITORY ?? null;
   const branch = String(argv.branch ?? "main");
+  const infraOnly = booleanFlag(argv.infraOnly);
   const steps = [];
   const providerEvidence = [
     "Hostinger Ubuntu LTS bootstrap and hardening executed on the real VPS.",
@@ -4836,7 +4837,11 @@ async function preGoLiveEvidence() {
     "Public-path load benchmark archived.",
   ];
 
-  await collectEvidenceStep(steps, { name: "static-security-check", category: "local-policy", fn: staticSecurityCheck });
+  await collectEvidenceStep(steps, {
+    name: "static-security-check",
+    category: "local-policy",
+    fn: infraOnly ? staticSecurityInfraOnlyCheck : staticSecurityCheck,
+  });
   await collectEvidenceStep(steps, { name: "governance-check", category: "local-policy", fn: governanceCheck });
   await collectEvidenceStep(steps, { name: "ha-config-check", category: "local-policy", fn: haConfigCheck });
   await collectEvidenceStep(steps, { name: "managed-secrets-preflight", category: "local-policy", fn: managedSecretsPreflight });
@@ -4913,6 +4918,7 @@ async function preGoLiveEvidence() {
 
   const generatedAt = new Date().toISOString();
   const options = {
+    infraOnly,
     includeProductionPreflight: booleanFlag(argv.includeProductionPreflight),
     includeRuntime: booleanFlag(argv.includeRuntime),
     includeRestoreDrill: booleanFlag(argv.includeRestoreDrill),
@@ -5851,10 +5857,13 @@ async function repoCoverageCheck() {
     ["ha-config-check", /HA configuration check[\s\S]*ha-config-check/],
     ["managed-secrets-preflight", /Managed secrets preflight[\s\S]*managed-secrets-preflight/],
     ["dr-readiness-check", /DR readiness check[\s\S]*dr-readiness-check/],
+    ["dr-evidence-summary", /DR evidence summary[\s\S]*dr-evidence/],
+    ["offsite-restore-plan", /Off-site restore drill plan[\s\S]*offsite-restore-drill-restic --planOnly/],
     ["release-evidence-plan", /release-evidence --planOnly/],
     ["release-artifact-gate-dry-run", /Release artifact gate dry run[\s\S]*release-artifact-gate --envFile \.tmp\/ci-release\.env --sbom \.tmp\/ci-sbom\/pnpm-sbom-ci\.json/],
     ["alert-evidence-summary", /alert-evidence/],
     ["production-go-no-go-summary", /production-go-no-go/],
+    ["pre-go-live-evidence-report", /Pre go-live evidence report[\s\S]*pre-go-live-evidence --infraOnly --repo/],
     ["evidence-bundle-smoke", /evidence-bundle --noArchive/],
     ["linux-portability", /linux-portability-check/],
     ["static-security-infra-only", /static-security-check --infraOnly/],
@@ -7433,10 +7442,13 @@ function staticSecurityInfraOnlyCheck() {
   assertMatch(githubWorkflow, /HA configuration check[\s\S]*ha-config-check/, "Infrastructure CI must run the HA configuration check.");
   assertMatch(githubWorkflow, /Managed secrets preflight[\s\S]*managed-secrets-preflight/, "Infrastructure CI must run the managed secrets preflight.");
   assertMatch(githubWorkflow, /DR readiness check[\s\S]*dr-readiness-check/, "Infrastructure CI must run the DR readiness check.");
+  assertMatch(githubWorkflow, /DR evidence summary[\s\S]*dr-evidence/, "Infrastructure CI must write a DR evidence summary.");
+  assertMatch(githubWorkflow, /Off-site restore drill plan[\s\S]*offsite-restore-drill-restic --planOnly/, "Infrastructure CI must exercise the off-site restore drill plan.");
   assertMatch(githubWorkflow, /Release artifact gate dry run[\s\S]*release-artifact-gate --envFile \.tmp\/ci-release\.env --sbom \.tmp\/ci-sbom\/pnpm-sbom-ci\.json/, "Infrastructure CI must exercise release image and SBOM admission.");
   assertMatch(githubWorkflow, /DEPLOY_RUN_PRODUCTION_PREFLIGHT:\s+"1"[\s\S]*DEPLOY_RUN_PRE_GO_LIVE:\s+"1"[\s\S]*DEPLOY_RUN_GO_NO_GO:\s+"1"/, "Production deploy workflow must enforce preflight, pre-go-live evidence and go/no-go.");
   assertMatch(githubWorkflow, /DEPLOY_PRE_GO_LIVE_RESTORE_DRILL:\s+"1"[\s\S]*DEPLOY_PRE_GO_LIVE_OFFSITE_RESTORE_DRY_RUN:\s+"1"/, "Production deploy workflow must require restore and off-site restore evidence.");
   assertMatch(githubWorkflow, /Upload CI evidence reports[\s\S]*actions\/upload-artifact@v4[\s\S]*reports\/[\s\S]*\.tmp\/evidence-bundles\/[\s\S]*retention-days:\s+30/, "Infrastructure CI must upload non-secret evidence reports.");
+  assertMatch(githubWorkflow, /Pre go-live evidence report[\s\S]*pre-go-live-evidence --infraOnly --repo/, "Infrastructure CI must produce an infrastructure-only pre go-live evidence report.");
   assertMatch(githubWorkflow, /permissions:\s*\r?\n\s+contents:\s+read/, "Infrastructure CI must declare least-privilege read permissions.");
   assertNoMatch(githubWorkflow, /security-events:\s+write|contents:\s+write/, "Infrastructure CI must not request unused write permissions.");
   assertMatch(githubWorkflow, /compose-and-policy:[\s\S]*timeout-minutes:\s+45[\s\S]*shell-syntax:[\s\S]*timeout-minutes:\s+10[\s\S]*dast-zap:[\s\S]*timeout-minutes:\s+45[\s\S]*deploy-hostinger:[\s\S]*timeout-minutes:\s+90/, "Infrastructure CI jobs must set explicit timeouts.");
@@ -7992,10 +8004,13 @@ async function staticSecurityCheck() {
   assertMatch(opsScript, /validateVariablePatterns/, "GitHub Actions config command must validate variable formats without printing secret values.");
   assertMatch(opsScript, /"github-actions-config": githubActionsConfig/, "Ops command map must expose github-actions-config.");
   assertMatch(githubWorkflow, /GitHub Actions runtime config dry run[\s\S]*github-actions-config --repo/, "Infra workflow must dry-run GitHub Actions runtime config policy.");
+  assertMatch(githubWorkflow, /DR evidence summary[\s\S]*dr-evidence/, "Infra workflow must exercise the DR evidence summary.");
+  assertMatch(githubWorkflow, /Off-site restore drill plan[\s\S]*offsite-restore-drill-restic --planOnly/, "Infra workflow must exercise the off-site restore drill plan.");
   assertMatch(githubWorkflow, /Release evidence plan[\s\S]*release-evidence --planOnly/, "Infra workflow must exercise the release evidence command in plan mode.");
   assertMatch(githubWorkflow, /Release artifact gate dry run[\s\S]*release-artifact-gate --envFile \.tmp\/ci-release\.env --sbom \.tmp\/ci-sbom\/pnpm-sbom-ci\.json/, "Infra workflow must exercise the release artifact admission gate.");
   assertMatch(githubWorkflow, /Alert evidence summary[\s\S]*alert-evidence/, "Infra workflow must exercise the alert evidence command in summary mode.");
   assertMatch(githubWorkflow, /Production go-no-go summary[\s\S]*production-go-no-go/, "Infra workflow must exercise the production go/no-go command in summary mode.");
+  assertMatch(githubWorkflow, /Pre go-live evidence report[\s\S]*pre-go-live-evidence --infraOnly --repo/, "Infra workflow must exercise the infrastructure-only pre go-live evidence pack.");
   assertMatch(githubWorkflow, /Linux portability check[\s\S]*linux-portability-check/, "Infra workflow must exercise the Linux portability command.");
   assertMatch(githubWorkflow, /Repository coverage audit[\s\S]*repo-coverage-check/, "Infra workflow must audit tracked repository coverage.");
   assertMatch(githubWorkflow, /Render staging and backup compose[\s\S]*compose\.waf\.yaml[\s\S]*compose\.staging\.yaml[\s\S]*compose\.backup-scheduler\.yaml/, "Infra workflow must render staging, WAF and backup compose overlays.");

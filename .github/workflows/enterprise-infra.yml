@@ -115,6 +115,12 @@ jobs:
       - name: DR readiness check
         run: sh ./scripts/stexor-ops.sh dr-readiness-check
 
+      - name: DR evidence summary
+        run: sh ./scripts/stexor-ops.sh dr-evidence
+
+      - name: Off-site restore drill plan
+        run: sh ./scripts/stexor-ops.sh offsite-restore-drill-restic --planOnly
+
       - name: Release evidence plan
         run: sh ./scripts/stexor-ops.sh release-evidence --planOnly
 
@@ -135,6 +141,9 @@ jobs:
 
       - name: Production go-no-go summary
         run: sh ./scripts/stexor-ops.sh production-go-no-go
+
+      - name: Pre go-live evidence report
+        run: sh ./scripts/stexor-ops.sh pre-go-live-evidence --infraOnly --repo "${{ github.repository }}" --allowFailures
 
       - name: Evidence bundle smoke
         run: sh ./scripts/stexor-ops.sh evidence-bundle --noArchive
