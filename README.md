@@ -306,10 +306,11 @@ Configura `GITHUB_PRODUCTION_REVIEWERS=user:login` o `team:slug`, poi usa
 `scripts/github-environments.sh --dryRun`, `--apply` e `--verifyRemote` per
 abilitare approvazione, wait timer e branch policy su staging/production.
 La runtime config GitHub Actions e' versionata in
-`governance/github-actions-runtime.json`: `STEXOR_APP_REPO_TOKEN`,
-`DAST_TARGET`, `DEPLOY_SSH_KEY`, `DEPLOY_REMOTE` e `DEPLOY_REMOTE_DIR` vengono
-verificati da `scripts/github-actions-config.sh --verifyRemote` senza stampare
-valori segreti.
+`governance/github-actions-runtime.json`: `DAST_TARGET`, `DEPLOY_SSH_KEY`,
+`DEPLOY_REMOTE` e `DEPLOY_REMOTE_DIR` vengono verificati da
+`scripts/github-actions-config.sh --verifyRemote` senza stampare valori
+segreti. La CI dell'infra non esegue checkout di repository progetto: collega
+Stexor o altri progetti solo tramite `NODE_SOURCE_DIR` quando devi buildarli.
 Prima del go-live genera un evidence pack con
 `scripts/pre-go-live-evidence.sh --repo OWNER/REPO`: il comando scrive JSON e
 Markdown in `reports/go-live/` con `status`, `missingOptions` e `issues`,

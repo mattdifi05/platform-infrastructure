@@ -3,7 +3,15 @@ set -eu
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 INFRA_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
-SOURCE_ROOT_RAW="${STEXOR_SOURCE_ROOT:-${NODE_SOURCE_DIR:-$INFRA_ROOT/../src_stexor}}"
+if [ -n "${STEXOR_SOURCE_ROOT:-}" ]; then
+  SOURCE_ROOT_RAW="$STEXOR_SOURCE_ROOT"
+elif [ -n "${NODE_SOURCE_DIR:-}" ]; then
+  SOURCE_ROOT_RAW="$NODE_SOURCE_DIR"
+elif [ -d "$INFRA_ROOT/src_stexor" ]; then
+  SOURCE_ROOT_RAW="$INFRA_ROOT/src_stexor"
+else
+  SOURCE_ROOT_RAW="$INFRA_ROOT/../src_stexor"
+fi
 if [ -d "$SOURCE_ROOT_RAW" ]; then
   SOURCE_ROOT=$(CDPATH= cd -- "$SOURCE_ROOT_RAW" && pwd)
 else

@@ -1,11 +1,6 @@
 {
   "repository": {
-    "required_secrets": [
-      {
-        "name": "STEXOR_APP_REPO_TOKEN",
-        "purpose": "Read-only checkout token for the application repository when it is private or cross-repository."
-      }
-    ],
+    "required_secrets": [],
     "required_variables": []
   },
   "environments": [

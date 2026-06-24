@@ -18,20 +18,10 @@ jobs:
       - name: Checkout infrastructure
         uses: actions/checkout@v5
 
-      - name: Checkout application source
-        id: checkout-source
-        uses: actions/checkout@v5
-        continue-on-error: true
-        with:
-          repository: mattdifi05/Stexor-account
-          path: src_stexor
-          token: ${{ secrets.STEXOR_APP_REPO_TOKEN || github.token }}
-
-      - name: Prepare application source fallback
-        if: steps.checkout-source.outcome != 'success'
+      - name: Prepare optional source placeholder
         run: |
-          mkdir -p src_stexor
-          printf 'Application source checkout unavailable; running infrastructure-only CI checks.\n' > src_stexor/.infra-only
+          mkdir -p .tmp/optional-node-source
+          printf 'Infrastructure CI source placeholder; project repositories are intentionally not checked out here.\n' > .tmp/optional-node-source/.infra-only
 
       - name: Prepare local secret files
         run: |
@@ -45,7 +35,7 @@ jobs:
       - name: Render local WAF compose
         run: |
           cp .env.example .env
-          printf '\nNODE_SOURCE_DIR=./src_stexor\n' >> .env
+          printf '\nNODE_SOURCE_DIR=./.tmp/optional-node-source\n' >> .env
           docker network create enterprise_net || true
           docker volume create enterprise_mariadb_data || true
           docker compose --env-file .env -p stexor_platform_ci \
@@ -72,10 +62,10 @@ jobs:
           docker run --rm \
             -e BACKUP_SCHEDULER_DRY_RUN=true \
             -e STEXOR_INFRA_HOST_ROOT="${{ github.workspace }}" \
-            -e STEXOR_SOURCE_HOST_ROOT="${{ github.workspace }}/src_stexor" \
+            -e STEXOR_SOURCE_HOST_ROOT="${{ github.workspace }}/.tmp/optional-node-source" \
             -v /var/run/docker.sock:/var/run/docker.sock \
             -v "${{ github.workspace }}:/infra:ro" \
-            -v "${{ github.workspace }}/src_stexor:/src_stexor:ro" \
+            -v "${{ github.workspace }}/.tmp/optional-node-source:/src_stexor:ro" \
             --entrypoint sh \
             stexor/ops:ci \
             /infra/scripts/backup-scheduler.sh
@@ -111,14 +101,7 @@ jobs:
         run: sh ./scripts/stexor-ops.sh linux-portability-check
 
       - name: Run infrastructure static policy gate
-        env:
-          STEXOR_SOURCE_ROOT: ${{ github.workspace }}/src_stexor
-        run: |
-          if [ -f src_stexor/package.json ] && [ ! -f src_stexor/.infra-only ]; then
-            sh ./scripts/stexor-ops.sh static-security-check
-          else
-            sh ./scripts/stexor-ops.sh static-security-check --infraOnly
-          fi
+        run: sh ./scripts/stexor-ops.sh static-security-check --infraOnly
 
   shell-syntax:
     runs-on: ubuntu-latest

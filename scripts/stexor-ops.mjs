@@ -2550,12 +2550,14 @@ async function alertEvidence(options = {}) {
   const requireEmailDelivery = options.requireEmailDelivery ?? booleanFlag(argv.requireEmailDelivery);
   const requireDiscordDelivery = options.requireDiscordDelivery ?? booleanFlag(argv.requireDiscordDelivery);
   const requireTelegramDelivery = options.requireTelegramDelivery ?? booleanFlag(argv.requireTelegramDelivery);
+  const requireSource = options.requireSource ?? booleanFlag(argv.requireSource ?? process.env.STEXOR_REQUIRE_SOURCE_ROOT);
   const timeoutMs = positiveInteger(options.timeoutMs ?? argv.timeoutMs ?? 15000, "--timeoutMs", 1000);
   const compose = readText(path.join(infraRoot, "compose.yaml"));
   const composeSecrets = readText(path.join(infraRoot, "compose.secrets.yaml"));
   const alertmanagerConfig = readText(path.join(infraRoot, "alertmanager", "alertmanager.yml"));
   const prometheusAlerts = readText(path.join(infraRoot, "prometheus", "rules", "enterprise-alerts.yml"));
-  const workerNotificationsServer = readText(path.join(sourceRoot, "apps", "worker-notifications", "src", "server.ts"));
+  const workerNotificationsServerPath = path.join(sourceRoot, "apps", "worker-notifications", "src", "server.ts");
+  const workerNotificationsServer = fs.existsSync(workerNotificationsServerPath) ? readText(workerNotificationsServerPath) : null;
   const issues = [];
 
   const checks = [
@@ -2565,12 +2567,27 @@ async function alertEvidence(options = {}) {
     ["compose-email-recipient", /ALERT_EMAIL_TO:\s+\$\{ALERT_EMAIL_TO/.test(compose)],
     ["compose-discord-secret-file", /ALERT_DISCORD_WEBHOOK_URL_FILE:\s+\$\{ALERT_DISCORD_WEBHOOK_URL_FILE:-\}/.test(compose)],
     ["compose-telegram-secret-file", /ALERT_TELEGRAM_BOT_TOKEN_FILE:\s+\$\{ALERT_TELEGRAM_BOT_TOKEN_FILE:-\}/.test(compose)],
-    ["worker-webhook-auth", /ALERTMANAGER_WEBHOOK_TOKEN/.test(workerNotificationsServer) && /isAuthorizedAlertWebhook/.test(workerNotificationsServer)],
-    ["worker-email-metrics", /notification_alert_email_deliveries_total/.test(workerNotificationsServer) && /notification_alert_email_failures_total/.test(workerNotificationsServer)],
-    ["worker-discord-metrics", /notification_alert_discord_deliveries_total/.test(workerNotificationsServer) && /notification_alert_discord_failures_total/.test(workerNotificationsServer)],
-    ["worker-telegram-metrics", /notification_alert_telegram_deliveries_total/.test(workerNotificationsServer) && /notification_alert_telegram_failures_total/.test(workerNotificationsServer)],
     ["prometheus-delivery-failure-alert", /alert:\s+AlertmanagerDeliveryFailed/.test(prometheusAlerts)],
   ].map(([name, passed]) => ({ name, passed: Boolean(passed) }));
+
+  if (workerNotificationsServer) {
+    checks.push(
+      { name: "worker-webhook-auth", passed: /ALERTMANAGER_WEBHOOK_TOKEN/.test(workerNotificationsServer) && /isAuthorizedAlertWebhook/.test(workerNotificationsServer) },
+      { name: "worker-email-metrics", passed: /notification_alert_email_deliveries_total/.test(workerNotificationsServer) && /notification_alert_email_failures_total/.test(workerNotificationsServer) },
+      { name: "worker-discord-metrics", passed: /notification_alert_discord_deliveries_total/.test(workerNotificationsServer) && /notification_alert_discord_failures_total/.test(workerNotificationsServer) },
+      { name: "worker-telegram-metrics", passed: /notification_alert_telegram_deliveries_total/.test(workerNotificationsServer) && /notification_alert_telegram_failures_total/.test(workerNotificationsServer) },
+    );
+  } else {
+    checks.push({
+      name: "worker-source-checks",
+      passed: !requireSource,
+      skipped: !requireSource,
+      detail: `Optional Stexor source not mounted at ${workerNotificationsServerPath}`,
+    });
+    if (requireSource) {
+      issues.push(`Required Stexor source file is missing: ${workerNotificationsServerPath}`);
+    }
+  }
 
   for (const check of checks) {
     if (!check.passed) issues.push(`Alert evidence check failed: ${check.name}`);
@@ -2595,6 +2612,11 @@ async function alertEvidence(options = {}) {
     status: issues.length ? "warning" : "passed",
     checks,
     runtime,
+    source: {
+      required: requireSource,
+      available: Boolean(workerNotificationsServer),
+      workerNotificationsServerPath,
+    },
     requestedDelivery: {
       email: requireEmailDelivery,
       discord: requireDiscordDelivery,
@@ -2613,7 +2635,13 @@ async function alertEvidence(options = {}) {
     "",
     "| Check | Passed |",
     "| --- | --- |",
-    ...checks.map((check) => `| ${check.name} | ${check.passed ? "yes" : "no"} |`),
+    ...checks.map((check) => `| ${check.name} | ${check.skipped ? "skipped" : check.passed ? "yes" : "no"} |`),
+    "",
+    "## Source",
+    "",
+    `Stexor source required: ${requireSource ? "yes" : "no"}`,
+    `Stexor source available: ${workerNotificationsServer ? "yes" : "no"}`,
+    `Worker source path: ${workerNotificationsServerPath}`,
     "",
     "## Runtime Delivery",
     "",
@@ -4198,9 +4226,10 @@ async function governanceCheck() {
       fail(`GitHub environments policy must define ${name}.`);
     }
   }
-  if (!actionsRuntimePolicy.repository?.required_secrets?.some((item) => item.name === "STEXOR_APP_REPO_TOKEN")) {
-    fail("GitHub Actions runtime policy must require the application checkout token.");
+  if (actionsRuntimePolicy.repository?.required_secrets?.some((item) => item.name === "STEXOR_APP_REPO_TOKEN")) {
+    fail("GitHub Actions runtime policy must not require project repository checkout tokens.");
   }
+  assertNoMatch(infraWorkflow, /Stexor-account|STEXOR_APP_REPO_TOKEN|Checkout application source/, "Infrastructure CI must not checkout or require Stexor application repositories.");
   assertMatch(infraWorkflow, /dast-zap:[\s\S]*environment:\s*\r?\n\s+name:\s+staging/, "DAST job must target the staging GitHub environment.");
   assertMatch(infraWorkflow, /deploy-hostinger:[\s\S]*environment:\s*\r?\n\s+name:\s+production/, "Hostinger deploy job must target the production GitHub environment.");
   assertMatch(infraWorkflow, /deploy-hostinger:[\s\S]*concurrency:[\s\S]*stexor-production-deploy[\s\S]*cancel-in-progress:\s+false/, "Production deploys must be serialized.");
@@ -7231,9 +7260,10 @@ function staticSecurityInfraOnlyCheck() {
   assertNoMatch(opsWrapper, /INFRA_CONTAINER_ROOT="\$\{STEXOR_INFRA_CONTAINER_ROOT:-\$INFRA_ROOT\}"/, "Ops wrapper must not use the host workspace path as the default container root.");
   assertMatch(backupSchedulerScript, /BACKUP_SCHEDULER_DRY_RUN/, "Backup scheduler must support CI dry-run mode.");
   assertMatch(opsScript, /async function staticSecurityCheck/, "Ops script must expose the full static security gate.");
-  assertMatch(githubWorkflow, /Checkout application source[\s\S]*continue-on-error:\s+true/, "Infrastructure CI must tolerate unavailable private application source checkout.");
-  assertMatch(githubWorkflow, /src_stexor\/\.infra-only/, "Infrastructure CI must create an explicit infra-only fallback marker.");
-  assertMatch(githubWorkflow, /static-security-check --infraOnly/, "Infrastructure CI must run infra-only static checks when application source is unavailable.");
+  assertNoMatch(githubWorkflow, /Stexor-account|STEXOR_APP_REPO_TOKEN|Checkout application source/, "Infrastructure CI must not checkout or require project repositories.");
+  assertMatch(githubWorkflow, /\.tmp\/optional-node-source/, "Infrastructure CI must use a local optional source placeholder for Compose rendering.");
+  assertMatch(githubWorkflow, /static-security-check --infraOnly/, "Infrastructure CI must run infrastructure-only static checks.");
+  assertMatch(opsScript, /workerNotificationsServerPath[\s\S]*fs\.existsSync\(workerNotificationsServerPath\)/, "Alert evidence must treat Stexor source checks as optional.");
   assertMatch(githubWorkflow, /Backup scheduler dry run[\s\S]*BACKUP_SCHEDULER_DRY_RUN=true/, "Infrastructure CI must exercise the Dockerized backup scheduler in dry-run mode.");
   assertNoMatch(githubWorkflow, /setup-node|node scripts\/stexor-ops\.mjs|shell:\s+pwsh|\.ps1/, "Infrastructure CI must stay Linux/container-first without PowerShell or host Node policy gates.");
   assertMatch(productionGoNoGoPolicyText, /"vpsHost"[\s\S]*"cloudflareAccess"/, "Production go/no-go policy must require VPS and Cloudflare evidence.");
@@ -7681,9 +7711,9 @@ async function staticSecurityCheck() {
   assertMatch(readme, /github-environments\.sh[\s\S]*GITHUB_PRODUCTION_REVIEWERS[\s\S]*--verifyRemote/, "README must document GitHub deployment environments apply/verify.");
   assertMatch(runbook, /github-environments\.sh[\s\S]*GITHUB_PRODUCTION_REVIEWERS[\s\S]*--verifyRemote/, "Runbook must document GitHub deployment environments apply and remote verification.");
   assertMatch(vpsPredeployChecklist, /github-environments\.sh[\s\S]*--verifyRemote/, "VPS checklist must require live GitHub deployment environment verification.");
-  assertMatch(readme, /github-actions-config\.sh[\s\S]*STEXOR_APP_REPO_TOKEN[\s\S]*DEPLOY_SSH_KEY[\s\S]*--verifyRemote/, "README must document GitHub Actions runtime config verification.");
-  assertMatch(runbook, /github-actions-config\.sh[\s\S]*STEXOR_APP_REPO_TOKEN[\s\S]*DEPLOY_SSH_KEY/, "Runbook must document required GitHub Actions runtime secrets and variables.");
-  assertMatch(vpsPredeployChecklist, /github-actions-config\.sh[\s\S]*STEXOR_APP_REPO_TOKEN[\s\S]*DEPLOY_REMOTE_DIR/, "VPS checklist must require live GitHub Actions runtime config verification.");
+  assertMatch(readme, /github-actions-config\.sh[\s\S]*DEPLOY_SSH_KEY[\s\S]*--verifyRemote/, "README must document GitHub Actions runtime config verification.");
+  assertMatch(runbook, /github-actions-config\.sh[\s\S]*DEPLOY_SSH_KEY/, "Runbook must document required GitHub Actions runtime secrets and variables.");
+  assertMatch(vpsPredeployChecklist, /github-actions-config\.sh[\s\S]*DEPLOY_REMOTE_DIR/, "VPS checklist must require live GitHub Actions runtime config verification.");
   assertMatch(readme, /pre-go-live-evidence\.sh[\s\S]*reports\/go-live/, "README must document the pre go-live evidence pack.");
   assertMatch(runbook, /pre-go-live-evidence\.sh[\s\S]*includeRuntime[\s\S]*includeRestoreDrill/, "Runbook must document runtime and restore evidence options.");
   assertMatch(vpsPredeployChecklist, /pre-go-live-evidence\.sh[\s\S]*reports\/go-live/, "VPS checklist must require the go-live evidence report.");
@@ -7750,8 +7780,8 @@ async function staticSecurityCheck() {
     fail("Production GitHub environment must require deployment reviewers through GITHUB_PRODUCTION_REVIEWERS.");
   }
   assertMatch(githubEnvironmentsPolicyText, /"wait_timer":\s*15[\s\S]*"protected_branches":\s*true[\s\S]*"custom_branch_policies":\s*false/, "Production GitHub environment must require a wait timer and protected branches.");
-  if (!githubActionsRuntimePolicyJson.repository?.required_secrets?.some((secret) => secret.name === "STEXOR_APP_REPO_TOKEN")) {
-    fail("GitHub Actions runtime policy must require STEXOR_APP_REPO_TOKEN.");
+  if (githubActionsRuntimePolicyJson.repository?.required_secrets?.some((secret) => secret.name === "STEXOR_APP_REPO_TOKEN")) {
+    fail("GitHub Actions runtime policy must not require STEXOR_APP_REPO_TOKEN.");
   }
   const stagingRuntime = githubActionsRuntimePolicyJson.environments?.find((environment) => environment.name === "staging");
   const productionRuntime = githubActionsRuntimePolicyJson.environments?.find((environment) => environment.name === "production");

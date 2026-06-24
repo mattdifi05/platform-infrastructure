@@ -498,9 +498,11 @@ in `.env` or GitHub workflow logs. Required deployment reviewers and wait
 timers depend on the repository visibility and GitHub plan; verify them in the
 repository Environments UI after `--verifyRemote`.
 The GitHub Actions runtime check only verifies secret presence and variable
-formats: it expects repository secret `STEXOR_APP_REPO_TOKEN`, staging variable
-`DAST_TARGET`, production secret `DEPLOY_SSH_KEY`, and production variables
-`DEPLOY_REMOTE` plus `DEPLOY_REMOTE_DIR`.
+formats: it expects staging variable `DAST_TARGET`, production secret
+`DEPLOY_SSH_KEY`, and production variables `DEPLOY_REMOTE` plus
+`DEPLOY_REMOTE_DIR`. Infrastructure CI intentionally does not checkout project
+repositories; attach Stexor or another project with `NODE_SOURCE_DIR` only when
+building application images.
 
 Before changing public traffic, generate the consolidated go-live evidence pack:
 

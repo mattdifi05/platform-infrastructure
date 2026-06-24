@@ -77,7 +77,7 @@ Use this checklist on the Hostinger Ubuntu LTS VPS before exposing public traffi
 - [ ] `sh ./scripts/github-environments.sh --repo OWNER/REPO --dryRun` reviewed.
 - [ ] `GITHUB_PRODUCTION_REVIEWERS=user:OWNER GITHUB_TOKEN=... sh ./scripts/github-environments.sh --repo OWNER/REPO --apply` and `--verifyRemote` completed, or equivalent deployment approvals are proven in GitHub.
 - [ ] `sh ./scripts/github-actions-config.sh --repo OWNER/REPO` reviewed.
-- [ ] `GITHUB_TOKEN=... sh ./scripts/github-actions-config.sh --repo OWNER/REPO --verifyRemote` confirmed `STEXOR_APP_REPO_TOKEN`, `DAST_TARGET`, `DEPLOY_SSH_KEY`, `DEPLOY_REMOTE` and `DEPLOY_REMOTE_DIR`.
+- [ ] `GITHUB_TOKEN=... sh ./scripts/github-actions-config.sh --repo OWNER/REPO --verifyRemote` confirmed `DAST_TARGET`, `DEPLOY_SSH_KEY`, `DEPLOY_REMOTE` and `DEPLOY_REMOTE_DIR`.
 - [ ] `sh ./scripts/pre-go-live-evidence.sh --repo OWNER/REPO --includeRuntime --includeRestoreDrill --includeOffsiteRestoreDryRun --includeProductionPreflight --verifyGithubRemote` passed with `status=passed` and the JSON/Markdown reports under `reports/go-live/` were archived outside Git.
 - [ ] SBOM archived.
 - [ ] `sh ./scripts/release-evidence.sh --requireProvenance --provenance ./release/provenance.json --previousImagesFile ./release/previous-images.json` passed with `status=passed`, validated SLSA v1 provenance subjects against every image digest and release commit, linked a validated `reports/rollback/rollback-plan-*.json`, and `reports/release/` plus `reports/rollback/` were archived outside Git.
