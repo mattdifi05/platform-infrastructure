@@ -151,6 +151,9 @@ jobs:
       - name: Linux portability check
         run: sh ./scripts/stexor-ops.sh linux-portability-check
 
+      - name: Enterprise requirements traceability
+        run: sh ./scripts/stexor-ops.sh enterprise-requirements-check
+
       - name: Repository coverage audit
         run: sh ./scripts/stexor-ops.sh repo-coverage-check
 

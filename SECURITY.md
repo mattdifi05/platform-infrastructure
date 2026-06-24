@@ -1,5 +1,9 @@
 # Stexor Security Baseline
 
+## Vulnerability disclosure
+
+Report suspected vulnerabilities privately to the project owner or the configured production security contact. Do not open public issues with exploit details, credentials, personal data or live target output. Every accepted report should receive an acknowledgement, severity triage, remediation owner and follow-up evidence once the fix is deployed.
+
 ## Authentication and sessions
 
 - Account sessions are signed server-side and stored in `HttpOnly`, `Secure`, `SameSite=Lax` cookies by default.

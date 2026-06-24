@@ -1,0 +1,336 @@
+{
+  "version": 1,
+  "scope": "stexor-platform-infrastructure",
+  "requirements": [
+    {
+      "id": "vps-hardening-firewall-fail2ban",
+      "title": "VPS hardening OS, firewall and fail2ban",
+      "state": "gate-ready",
+      "evidence": [
+        { "type": "file", "path": "scripts/vps-hardening-ubuntu.sh" },
+        { "type": "pattern", "path": "scripts/vps-hardening-ubuntu.sh", "pattern": "ufw[\\s\\S]*fail2ban[\\s\\S]*auditd[\\s\\S]*apparmor" },
+        { "type": "pattern", "path": "scripts/vps-host-readiness.sh", "pattern": "ufw-active[\\s\\S]*fail2ban-active[\\s\\S]*ssh-hardening" }
+      ],
+      "liveProof": "Run vps-hardening-ubuntu.sh --apply and vps-host-readiness.sh --enforce on the Hostinger Ubuntu LTS VPS."
+    },
+    {
+      "id": "real-dns",
+      "title": "Real DNS and domain preflight",
+      "state": "gate-ready",
+      "evidence": [
+        { "type": "file", "path": "scripts/production-preflight.sh" },
+        { "type": "command", "name": "production-preflight" },
+        { "type": "pattern", "path": "scripts/stexor-ops.mjs", "pattern": "async function productionPreflight[\\s\\S]*(dns|resolve|host)" }
+      ],
+      "liveProof": "Run production-preflight with final production domains after Cloudflare DNS is configured."
+    },
+    {
+      "id": "public-https-acme",
+      "title": "Public HTTPS and ACME readiness",
+      "state": "repo-ready",
+      "evidence": [
+        { "type": "file", "path": "compose.prod.yaml" },
+        { "type": "pattern", "path": "compose.prod.yaml", "pattern": "letsencrypt[\\s\\S]*httpchallenge" },
+        { "type": "file", "path": "scripts/certificate-expiry-check.sh" }
+      ],
+      "liveProof": "Verify issued certificates and run certificate-expiry-check against the live domain set."
+    },
+    {
+      "id": "secrets-manager",
+      "title": "Integrated secrets manager and mounted secrets",
+      "state": "proprietary-integrated",
+      "evidence": [
+        { "type": "file", "path": "scripts/stexor-secret-manager.mjs" },
+        { "type": "file", "path": "compose.managed-secrets.yaml" },
+        { "type": "workflow", "pattern": "Managed secrets preflight[\\s\\S]*managed-secrets-preflight" }
+      ],
+      "liveProof": "Materialize production Docker secrets from the encrypted store and run managed-secrets-preflight."
+    },
+    {
+      "id": "credential-rotation",
+      "title": "Credential rotation and secret scan",
+      "state": "repo-ready",
+      "evidence": [
+        { "type": "command", "name": "secret-scan" },
+        { "type": "pattern", "path": "scripts/stexor-secret-manager.mjs", "pattern": "rotationDays" },
+        { "type": "workflow", "pattern": "Secret scan[\\s\\S]*secret-scan" }
+      ],
+      "liveProof": "Rotate production secrets according to the runbook and keep rotation evidence."
+    },
+    {
+      "id": "private-registry-images",
+      "title": "Private registry and immutable production images",
+      "state": "repo-ready",
+      "evidence": [
+        { "type": "file", "path": "compose.build.yaml" },
+        { "type": "command", "name": "release-artifact-gate" },
+        { "type": "workflow", "pattern": "Release artifact gate dry run[\\s\\S]*release-artifact-gate" }
+      ],
+      "liveProof": "Publish signed digest-pinned release images to the production registry."
+    },
+    {
+      "id": "remote-ci-cd",
+      "title": "Remote CI/CD and controlled deployment",
+      "state": "repo-ready",
+      "evidence": [
+        { "type": "file", "path": ".github/workflows/enterprise-infra.yml" },
+        { "type": "pattern", "path": ".github/workflows/enterprise-infra.yml", "pattern": "deploy-hostinger[\\s\\S]*environment:[\\s\\S]*production" },
+        { "type": "command", "name": "github-actions-config" }
+      ],
+      "liveProof": "Configure GitHub environments, secrets and deployment approvals on the live repository."
+    },
+    {
+      "id": "offsite-backup-restore",
+      "title": "Off-site backup and restore drill",
+      "state": "repo-ready-plus-environment-action",
+      "evidence": [
+        { "type": "file", "path": "compose.backup-scheduler.yaml" },
+        { "type": "command", "name": "offsite-backup-restic" },
+        { "type": "command", "name": "offsite-restore-drill-restic" },
+        { "type": "workflow", "pattern": "Off-site restore drill plan[\\s\\S]*offsite-restore-drill-restic --planOnly" }
+      ],
+      "liveProof": "Configure a remote Restic repository and archive a successful full off-site restore report."
+    },
+    {
+      "id": "real-alerting",
+      "title": "Real alerting on email, Telegram or provider channels",
+      "state": "gate-ready",
+      "evidence": [
+        { "type": "file", "path": "alertmanager/alertmanager.yml" },
+        { "type": "command", "name": "alert-evidence" },
+        { "type": "workflow", "pattern": "Alert evidence summary[\\s\\S]*alert-evidence" }
+      ],
+      "liveProof": "Send and archive a real alert delivery to the production notification channel."
+    },
+    {
+      "id": "centralized-logs-audit",
+      "title": "Centralized logs, redaction and audit trail",
+      "state": "gate-ready",
+      "evidence": [
+        { "type": "file", "path": "loki/config.yml" },
+        { "type": "file", "path": "promtail/config.yml" },
+        { "type": "pattern", "path": "postgres/migrations/007_durable_audit_outbox.sql", "pattern": "audit_outbox" }
+      ],
+      "liveProof": "Verify production log retention, alert routing and audit export during go-live."
+    },
+    {
+      "id": "waf-rate-limit-bot-protection",
+      "title": "WAF, rate limiting and bot protection",
+      "state": "repo-ready",
+      "evidence": [
+        { "type": "file", "path": "compose.waf.yaml" },
+        { "type": "file", "path": "cloudflare/stexor-zone-waf-rules.json" },
+        { "type": "command", "name": "waf-smoke" }
+      ],
+      "liveProof": "Apply Cloudflare WAF rules and pass WAF smoke tests from the public edge."
+    },
+    {
+      "id": "rbac",
+      "title": "RBAC and admin authorization",
+      "state": "repo-ready",
+      "evidence": [
+        { "type": "file", "path": "scripts/access-review.sh" },
+        { "type": "command", "name": "access-review" },
+        { "type": "pattern", "path": "postgres/migrations/002_enterprise_rbac_governance.sql", "pattern": "account_roles" }
+      ],
+      "liveProof": "Run access-review monthly and after every admin change."
+    },
+    {
+      "id": "account-recovery",
+      "title": "Account recovery, passkeys and backup codes",
+      "state": "repo-ready",
+      "evidence": [
+        { "type": "command", "name": "account-integration-tests" },
+        { "type": "pattern", "path": "scripts/stexor-ops.mjs", "pattern": "backup code one-time reuse block" },
+        { "type": "pattern", "path": "scripts/stexor-ops.mjs", "pattern": "passkey" }
+      ],
+      "liveProof": "Run account integration tests against staging before production promotion."
+    },
+    {
+      "id": "production-email-dns",
+      "title": "Production email and SPF/DKIM/DMARC checklist",
+      "state": "gate-ready",
+      "evidence": [
+        { "type": "pattern", "path": "README.md", "pattern": "SMTP" },
+        { "type": "pattern", "path": "ENTERPRISE-MATURITY.md", "pattern": "SPF/DKIM/DMARC" },
+        { "type": "command", "name": "alert-evidence" }
+      ],
+      "liveProof": "Verify production DNS email records and SMTP alert delivery."
+    },
+    {
+      "id": "database-migrations",
+      "title": "Controlled database migrations",
+      "state": "repo-ready",
+      "evidence": [
+        { "type": "file", "path": "scripts/apply-postgres-migrations.sh" },
+        { "type": "command", "name": "apply-postgres-migrations" },
+        { "type": "pattern", "path": "postgres/migrations/001_session_security_hardening.sql", "pattern": "schema_migrations" }
+      ],
+      "liveProof": "Run migrations through the controlled deploy flow and archive schema_migrations output."
+    },
+    {
+      "id": "privacy-lifecycle",
+      "title": "GDPR and privacy data lifecycle",
+      "state": "repo-ready",
+      "evidence": [
+        { "type": "file", "path": "THREAT-MODEL.md" },
+        { "type": "pattern", "path": "README.md", "pattern": "privacy|GDPR|retention" },
+        { "type": "pattern", "path": "postgres/migrations/008_audit_account_unlink.sql", "pattern": "account_id IS NULL" }
+      ],
+      "liveProof": "Review and rehearse account export/deletion and audit unlink procedures."
+    },
+    {
+      "id": "sast-dast-dependency-container-scan",
+      "title": "SAST, DAST, dependency and container scan",
+      "state": "gate-ready",
+      "evidence": [
+        { "type": "workflow", "pattern": "dast-zap[\\s\\S]*dast-zap-baseline\\.sh" },
+        { "type": "command", "name": "generate-sbom" },
+        { "type": "command", "name": "supply-chain-hygiene" }
+      ],
+      "liveProof": "Run ZAP against staging and archive dependency/container scan evidence."
+    },
+    {
+      "id": "pentest",
+      "title": "Application penetration test readiness",
+      "state": "gate-ready",
+      "evidence": [
+        { "type": "file", "path": "THREAT-MODEL.md" },
+        { "type": "command", "name": "security-matrix" },
+        { "type": "command", "name": "security-smoke" }
+      ],
+      "liveProof": "Schedule and archive an external professional penetration test before enterprise launch."
+    },
+    {
+      "id": "load-performance",
+      "title": "Load and performance test",
+      "state": "repo-ready",
+      "evidence": [
+        { "type": "command", "name": "load-benchmark" },
+        { "type": "command", "name": "load-profile" },
+        { "type": "pattern", "path": "governance/production-go-no-go.json", "pattern": "requiredLoadProfiles" }
+      ],
+      "liveProof": "Run 50/100/500-user public edge benchmark and archive edge evidence."
+    },
+    {
+      "id": "incident-runbook-rto-rpo",
+      "title": "Incident runbook and RTO/RPO",
+      "state": "repo-ready",
+      "evidence": [
+        { "type": "file", "path": "RUNBOOK.md" },
+        { "type": "command", "name": "dr-evidence" },
+        { "type": "workflow", "pattern": "DR evidence summary[\\s\\S]*dr-evidence" }
+      ],
+      "liveProof": "Run dr-evidence --enforce after live backup and restore evidence exists."
+    },
+    {
+      "id": "ha-multi-node",
+      "title": "HA and multi-node readiness",
+      "state": "environment-ready",
+      "evidence": [
+        { "type": "file", "path": "compose.ha.yaml" },
+        { "type": "command", "name": "ha-config-check" },
+        { "type": "workflow", "pattern": "HA configuration check[\\s\\S]*ha-config-check" }
+      ],
+      "liveProof": "Deploy to a real multi-node target or document the accepted single-node Hostinger risk."
+    },
+    {
+      "id": "zero-downtime-rollback",
+      "title": "Zero-downtime deploy and rollback",
+      "state": "gate-ready",
+      "evidence": [
+        { "type": "command", "name": "rollback-release" },
+        { "type": "command", "name": "release-evidence" },
+        { "type": "pattern", "path": "compose.ha.yaml", "pattern": "failure_action:\\s+rollback" }
+      ],
+      "liveProof": "Archive a release evidence pack with previous image digests and rollback dry-run."
+    },
+    {
+      "id": "staging-production-parity",
+      "title": "Staging separated from production",
+      "state": "gate-ready",
+      "evidence": [
+        { "type": "file", "path": "compose.staging.yaml" },
+        { "type": "file", "path": ".env.staging.example" },
+        { "type": "workflow", "pattern": "Render staging and backup compose[\\s\\S]*compose\\.staging\\.yaml" }
+      ],
+      "liveProof": "Deploy the staging overlay to a separate host/project before production."
+    },
+    {
+      "id": "feature-flags-kill-switch",
+      "title": "Feature flags and kill switches",
+      "state": "repo-ready",
+      "evidence": [
+        { "type": "pattern", "path": "ENTERPRISE-MATURITY.md", "pattern": "Feature flags" },
+        { "type": "pattern", "path": "RUNBOOK.md", "pattern": "kill switch|feature flag" }
+      ],
+      "liveProof": "Confirm each risky feature has an operational disable path before go-live."
+    },
+    {
+      "id": "siem-monitoring",
+      "title": "SIEM and security monitoring export",
+      "state": "gate-ready",
+      "evidence": [
+        { "type": "file", "path": "loki/config.yml" },
+        { "type": "file", "path": "alertmanager/alertmanager.yml" },
+        { "type": "command", "name": "alert-evidence" }
+      ],
+      "liveProof": "Connect production logs/alerts to the chosen external SIEM or monitoring provider."
+    },
+    {
+      "id": "vulnerability-disclosure",
+      "title": "Vulnerability disclosure",
+      "state": "repo-ready",
+      "evidence": [
+        { "type": "file", "path": "SECURITY.md" },
+        { "type": "pattern", "path": "SECURITY.md", "pattern": "report|vulnerabil" }
+      ],
+      "liveProof": "Publish the security contact and response process for the production domain."
+    },
+    {
+      "id": "supply-chain-sbom-provenance",
+      "title": "Supply-chain SBOM, signing and provenance",
+      "state": "gate-ready",
+      "evidence": [
+        { "type": "command", "name": "generate-sbom" },
+        { "type": "command", "name": "sign-images" },
+        { "type": "command", "name": "release-artifact-gate" },
+        { "type": "pattern", "path": "security/admission/cosign-digest-policy.rego", "pattern": "slsa\\.dev/provenance" }
+      ],
+      "liveProof": "Verify signed production images, SBOM and SLSA provenance in every release evidence pack."
+    },
+    {
+      "id": "compliance-gdpr-soc2-like",
+      "title": "Compliance GDPR/SOC2-like evidence",
+      "state": "repo-ready",
+      "evidence": [
+        { "type": "file", "path": "FINAL-READINESS-AUDIT.md" },
+        { "type": "file", "path": "READINESS-REPORT.md" },
+        { "type": "command", "name": "evidence-bundle" }
+      ],
+      "liveProof": "Have the evidence bundle and operational controls reviewed by an external auditor if formal compliance is required."
+    },
+    {
+      "id": "data-classification",
+      "title": "Data classification",
+      "state": "repo-ready",
+      "evidence": [
+        { "type": "file", "path": "THREAT-MODEL.md" },
+        { "type": "pattern", "path": "THREAT-MODEL.md", "pattern": "data|classification|PII" },
+        { "type": "pattern", "path": "RUNBOOK.md", "pattern": "data|PII|retention" }
+      ],
+      "liveProof": "Review production datasets and update classification whenever new data types are introduced."
+    },
+    {
+      "id": "periodic-access-review",
+      "title": "Periodic access review",
+      "state": "repo-ready",
+      "evidence": [
+        { "type": "file", "path": "scripts/access-review.sh" },
+        { "type": "command", "name": "access-review" },
+        { "type": "pattern", "path": "RUNBOOK.md", "pattern": "access review|review.*access" }
+      ],
+      "liveProof": "Archive monthly access-review output and reconcile admin access with Cloudflare/GitHub/VPS users."
+    }
+  ]
+}

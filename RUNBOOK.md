@@ -55,6 +55,10 @@ curl -k -o /dev/null -s -w "%{http_code}\n" "https://projects.localhost.com/.env
 
 Both should return `403`. If a real workflow is blocked, keep `WAF_BLOCKING_PARANOIA=2`, inspect the JSON audit event in `enterprise-waf`, then add the smallest possible exclusion to `waf/RESPONSE-999-EXCLUSION-RULES-AFTER-CRS.conf` or `waf/REQUEST-900-EXCLUSION-RULES-BEFORE-CRS.conf`. Raise to PL3/PL4 only after the audit log is clean for the affected apps.
 
+## Feature Flags And Kill Switches
+
+Treat every risky launch feature as disabled-by-default until it has an owner, rollback path and monitoring signal. Document the feature flag name, default value, owning service, production enablement window and emergency disable command in the release evidence pack. If a feature does not have a runtime flag yet, the approved kill switch is a release rollback through `rollback-release.sh` plus the smallest environment or routing change needed to remove public exposure.
+
 ## Alerting
 
 Prometheus sends alerts to Alertmanager, and Alertmanager posts grouped alerts to the notification worker at `worker-notifications:3000/alerts/prometheus` with the shared bearer token from `/run/secrets/alertmanager_webhook_token`. The worker logs sanitized alert summaries into Loki and exposes delivery counters on `/metrics`.

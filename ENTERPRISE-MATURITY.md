@@ -49,7 +49,13 @@ Oppure direttamente:
 ```sh
 cd /opt/stexor/stexor-platform-infrastructure
 sh ./scripts/enterprise-hardening-audit.sh
+sh ./scripts/stexor-ops.sh enterprise-requirements-check
 ```
+
+La matrice machine-readable vive in `governance/enterprise-requirements.json`.
+Il comando `enterprise-requirements-check` verifica i 30 requisiti contro file,
+pattern, comandi ops e gate GitHub Actions, poi scrive evidenza non sensibile in
+`reports/enterprise-requirements/`.
 
 ## Redis enterprise runtime
 

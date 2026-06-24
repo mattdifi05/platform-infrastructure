@@ -5866,6 +5866,7 @@ async function repoCoverageCheck() {
     ["pre-go-live-evidence-report", /Pre go-live evidence report[\s\S]*pre-go-live-evidence --infraOnly --repo/],
     ["evidence-bundle-smoke", /evidence-bundle --noArchive/],
     ["linux-portability", /linux-portability-check/],
+    ["enterprise-requirements", /Enterprise requirements traceability[\s\S]*enterprise-requirements-check/],
     ["static-security-infra-only", /static-security-check --infraOnly/],
     ["repository-coverage", /repo-coverage-check/],
     ["ci-evidence-artifact", /Upload CI evidence reports[\s\S]*actions\/upload-artifact@v4[\s\S]*reports\/[\s\S]*\.tmp\/evidence-bundles\/[\s\S]*retention-days:\s+30/],
@@ -5937,6 +5938,152 @@ async function repoCoverageCheck() {
     fail(`Repository coverage check failed with ${issues.length} issue(s). Report: ${jsonPath}`);
   }
   log("Repository coverage check passed.");
+}
+
+function enterpriseRequirementEvidenceResult(requirement, evidence, workflowText) {
+  const base = {
+    requirementId: requirement.id,
+    type: evidence.type,
+    target: evidence.path ?? evidence.name ?? evidence.pattern ?? "unknown",
+    passed: false,
+    detail: "",
+  };
+  if (evidence.type === "file") {
+    const filePath = path.join(infraRoot, evidence.path);
+    return {
+      ...base,
+      passed: fs.existsSync(filePath),
+      detail: fs.existsSync(filePath) ? "file exists" : `missing file: ${evidence.path}`,
+    };
+  }
+  if (evidence.type === "pattern") {
+    const filePath = path.join(infraRoot, evidence.path);
+    if (!fs.existsSync(filePath)) {
+      return { ...base, detail: `missing file: ${evidence.path}` };
+    }
+    const text = readText(filePath);
+    const pattern = new RegExp(evidence.pattern, evidence.flags ?? "i");
+    const passed = pattern.test(text);
+    return {
+      ...base,
+      passed,
+      detail: passed ? `pattern matched in ${evidence.path}` : `pattern did not match in ${evidence.path}`,
+    };
+  }
+  if (evidence.type === "workflow") {
+    const pattern = new RegExp(evidence.pattern, evidence.flags ?? "i");
+    const passed = pattern.test(workflowText);
+    return {
+      ...base,
+      passed,
+      detail: passed ? "workflow gate present" : "workflow gate missing",
+    };
+  }
+  if (evidence.type === "command") {
+    const passed = Object.prototype.hasOwnProperty.call(commands, evidence.name);
+    return {
+      ...base,
+      passed,
+      detail: passed ? "ops command exposed" : `missing ops command: ${evidence.name}`,
+    };
+  }
+  return { ...base, detail: `unknown evidence type: ${evidence.type}` };
+}
+
+async function enterpriseRequirementsCheck() {
+  log("==> Enterprise requirements traceability check");
+  const manifestPath = path.resolve(argv.manifest ?? path.join(infraRoot, "governance", "enterprise-requirements.json"));
+  const manifest = readJsonFile(manifestPath, manifestPath);
+  const workflowText = readText(path.join(infraRoot, ".github", "workflows", "enterprise-infra.yml"));
+  const allowedStates = new Set(["repo-ready", "gate-ready", "environment-ready", "proprietary-integrated", "repo-ready-plus-environment-action"]);
+  const issues = [];
+  if (manifest.version !== 1) {
+    issues.push(`Unsupported manifest version: ${manifest.version}`);
+  }
+  if (!Array.isArray(manifest.requirements)) {
+    issues.push("Manifest must define requirements array.");
+  }
+  const requirements = Array.isArray(manifest.requirements) ? manifest.requirements : [];
+  if (requirements.length !== 30) {
+    issues.push(`Enterprise maturity manifest must track exactly 30 requirements, found ${requirements.length}.`);
+  }
+  const seenIds = new Set();
+  const rows = requirements.map((requirement) => {
+    const requirementIssues = [];
+    if (!requirement.id || !/^[a-z0-9-]+$/.test(requirement.id)) {
+      requirementIssues.push("missing or invalid id");
+    } else if (seenIds.has(requirement.id)) {
+      requirementIssues.push(`duplicate id: ${requirement.id}`);
+    } else {
+      seenIds.add(requirement.id);
+    }
+    if (!requirement.title) {
+      requirementIssues.push("missing title");
+    }
+    if (!allowedStates.has(requirement.state)) {
+      requirementIssues.push(`invalid state: ${requirement.state}`);
+    }
+    if (!requirement.liveProof) {
+      requirementIssues.push("missing liveProof");
+    }
+    const evidence = Array.isArray(requirement.evidence) ? requirement.evidence : [];
+    if (evidence.length < 2) {
+      requirementIssues.push("at least two evidence entries are required");
+    }
+    const evidenceResults = evidence.map((item) => enterpriseRequirementEvidenceResult(requirement, item, workflowText));
+    for (const result of evidenceResults) {
+      if (!result.passed) {
+        requirementIssues.push(result.detail);
+      }
+    }
+    if (requirementIssues.length) {
+      issues.push(`${requirement.id ?? "unknown"}: ${requirementIssues.join("; ")}`);
+    }
+    return {
+      id: requirement.id ?? "unknown",
+      title: requirement.title ?? "",
+      state: requirement.state ?? "",
+      liveProof: requirement.liveProof ?? "",
+      status: requirementIssues.length ? "failed" : "passed",
+      evidence: evidenceResults,
+      issues: requirementIssues,
+    };
+  });
+
+  const payload = {
+    generatedAt: new Date().toISOString(),
+    manifestPath,
+    status: issues.length ? "failed" : "passed",
+    requirementCount: requirements.length,
+    passedCount: rows.filter((row) => row.status === "passed").length,
+    failedCount: rows.filter((row) => row.status !== "passed").length,
+    requirements: rows,
+    issues,
+  };
+  const stamp = reportTimestamp();
+  const jsonPath = writeJsonReport("enterprise-requirements", `enterprise-requirements-${stamp}`, payload);
+  const markdownPath = writeMarkdownReport("enterprise-requirements", `enterprise-requirements-${stamp}`, [
+    "# Enterprise Requirements Traceability",
+    "",
+    `Status: ${payload.status}`,
+    `Generated at: ${payload.generatedAt}`,
+    `Requirements: ${payload.requirementCount}`,
+    `Passed: ${payload.passedCount}`,
+    `Failed: ${payload.failedCount}`,
+    "",
+    "| Requirement | State | Status | Evidence passed | Live proof still required |",
+    "| --- | --- | --- | ---: | --- |",
+    ...rows.map((row) => `| ${row.id} | ${row.state} | ${row.status} | ${row.evidence.filter((item) => item.passed).length}/${row.evidence.length} | ${row.liveProof.replace(/\|/g, "/")} |`),
+    "",
+    "## Issues",
+    "",
+    ...(issues.length ? issues.map((issue) => `- ${issue}`) : ["- none"]),
+  ]);
+  log(`Enterprise requirements report written to ${jsonPath} and ${markdownPath}`);
+  if (issues.length) {
+    fail(`Enterprise requirements check failed with ${issues.length} issue(s). Report: ${jsonPath}`);
+  }
+  log("Enterprise requirements traceability check passed.");
 }
 
 async function enterpriseTenCheck() {
@@ -7449,6 +7596,7 @@ function staticSecurityInfraOnlyCheck() {
   assertMatch(githubWorkflow, /DEPLOY_PRE_GO_LIVE_RESTORE_DRILL:\s+"1"[\s\S]*DEPLOY_PRE_GO_LIVE_OFFSITE_RESTORE_DRY_RUN:\s+"1"/, "Production deploy workflow must require restore and off-site restore evidence.");
   assertMatch(githubWorkflow, /Upload CI evidence reports[\s\S]*actions\/upload-artifact@v4[\s\S]*reports\/[\s\S]*\.tmp\/evidence-bundles\/[\s\S]*retention-days:\s+30/, "Infrastructure CI must upload non-secret evidence reports.");
   assertMatch(githubWorkflow, /Pre go-live evidence report[\s\S]*pre-go-live-evidence --infraOnly --repo/, "Infrastructure CI must produce an infrastructure-only pre go-live evidence report.");
+  assertMatch(githubWorkflow, /Enterprise requirements traceability[\s\S]*enterprise-requirements-check/, "Infrastructure CI must verify enterprise requirements traceability.");
   assertMatch(githubWorkflow, /permissions:\s*\r?\n\s+contents:\s+read/, "Infrastructure CI must declare least-privilege read permissions.");
   assertNoMatch(githubWorkflow, /security-events:\s+write|contents:\s+write/, "Infrastructure CI must not request unused write permissions.");
   assertMatch(githubWorkflow, /compose-and-policy:[\s\S]*timeout-minutes:\s+45[\s\S]*shell-syntax:[\s\S]*timeout-minutes:\s+10[\s\S]*dast-zap:[\s\S]*timeout-minutes:\s+45[\s\S]*deploy-hostinger:[\s\S]*timeout-minutes:\s+90/, "Infrastructure CI jobs must set explicit timeouts.");
@@ -8012,6 +8160,7 @@ async function staticSecurityCheck() {
   assertMatch(githubWorkflow, /Production go-no-go summary[\s\S]*production-go-no-go/, "Infra workflow must exercise the production go/no-go command in summary mode.");
   assertMatch(githubWorkflow, /Pre go-live evidence report[\s\S]*pre-go-live-evidence --infraOnly --repo/, "Infra workflow must exercise the infrastructure-only pre go-live evidence pack.");
   assertMatch(githubWorkflow, /Linux portability check[\s\S]*linux-portability-check/, "Infra workflow must exercise the Linux portability command.");
+  assertMatch(githubWorkflow, /Enterprise requirements traceability[\s\S]*enterprise-requirements-check/, "Infra workflow must exercise the enterprise requirements traceability gate.");
   assertMatch(githubWorkflow, /Repository coverage audit[\s\S]*repo-coverage-check/, "Infra workflow must audit tracked repository coverage.");
   assertMatch(githubWorkflow, /Render staging and backup compose[\s\S]*compose\.waf\.yaml[\s\S]*compose\.staging\.yaml[\s\S]*compose\.backup-scheduler\.yaml/, "Infra workflow must render staging, WAF and backup compose overlays.");
   assertMatch(githubWorkflow, /Secret scan[\s\S]*secret-scan/, "Infra workflow must exercise the secret scanner.");
@@ -8623,6 +8772,7 @@ Commands:
   dr-evidence
   enterprise-check
   enterprise-hardening-audit
+  enterprise-requirements-check
   enterprise-10-check
   evidence-bundle
   external-uptime-check
@@ -8701,6 +8851,7 @@ const commands = {
   "dr-evidence": drEvidence,
   "enterprise-check": enterpriseCheck,
   "enterprise-hardening-audit": enterpriseHardeningAudit,
+  "enterprise-requirements-check": enterpriseRequirementsCheck,
   "enterprise-10-check": enterpriseTenCheck,
   "evidence-bundle": evidenceBundle,
   "external-uptime-check": externalUptimeCheck,
