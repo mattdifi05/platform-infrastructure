@@ -7,12 +7,14 @@
    ```sh
    sh ./scripts/compose-healthcheck-coverage.sh
    sh ./scripts/rate-limit-evidence.sh
+   sh ./scripts/audit-log-evidence.sh
    sh ./scripts/infra-health.sh
    docker ps --format "table {{.Names}}\t{{.Status}}" | grep enterprise-
    ```
 
 `compose-healthcheck-coverage.sh` verifies the rendered local WAF, Hostinger WAF and backup-scheduler stacks have a healthcheck on every operational service and writes non-secret reports under `reports/healthchecks/`.
 `rate-limit-evidence.sh` verifies edge/API rate-limit configuration and writes non-secret reports under `reports/rate-limits/`; it runs infra-only when the Stexor app source is intentionally not mounted.
+`audit-log-evidence.sh` verifies append-only audit events, durable outbox dispatch, alerts, dashboards and optional Stexor source wiring, then writes non-secret reports under `reports/audit-logs/`.
 
 The shell wrappers are container-first. On Linux they run the ops container with host networking so `*.localhost.com` resolves to the local edge. On Docker Desktop they map those hostnames to `host-gateway`; override `STEXOR_LOCAL_HOST_TARGET` only if your Docker runtime exposes the host through a different address.
 
@@ -216,6 +218,7 @@ Primary operator queries:
 ```
 
 Use Loki for operational logs and PostgreSQL `stexor_account.audit_events` plus `stexor_account.audit_outbox` for durable security/compliance events. Audit tables are append-only and RLS protected.
+Run `sh ./scripts/audit-log-evidence.sh` before go-live and after audit/outbox changes; archive `reports/audit-logs/audit-log-evidence-*.json` with the release evidence.
 
 ## Backup
 

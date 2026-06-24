@@ -4146,6 +4146,277 @@ async function rateLimitEvidence(options = {}) {
   log("Rate limit evidence passed.");
 }
 
+function addAuditLogEvidenceCheck(checks, issues, { name, category, status, detail, required = true, file = null }) {
+  const check = {
+    name,
+    category,
+    required,
+    status,
+    detail,
+    file,
+  };
+  checks.push(check);
+  if (required && status !== "passed") {
+    issues.push(`${name}: ${detail}`);
+  }
+  return check;
+}
+
+function addAuditLogPatternCheck(checks, issues, { name, category, filePath, pattern, detail, required = true, sourceFile = false }) {
+  const relativeFile = path.relative(sourceFile ? sourceRoot : infraRoot, filePath).replaceAll("\\", "/");
+  if (!fs.existsSync(filePath)) {
+    addAuditLogEvidenceCheck(checks, issues, {
+      name,
+      category,
+      required,
+      status: required ? "failed" : "skipped",
+      detail: `${sourceFile ? "missing optional source file" : "missing file"}: ${relativeFile}`,
+      file: relativeFile,
+    });
+    return;
+  }
+  const text = readText(filePath);
+  const passed = pattern.test(text);
+  addAuditLogEvidenceCheck(checks, issues, {
+    name,
+    category,
+    required,
+    status: passed ? "passed" : "failed",
+    detail: passed ? detail : `pattern not found: ${detail}`,
+    file: relativeFile,
+  });
+}
+
+async function auditLogEvidence(options = {}) {
+  log("==> Audit log evidence");
+  const requireSource = options.requireSource ?? booleanFlag(argv.requireSource);
+  const generatedAt = new Date().toISOString();
+  const checks = [];
+  const issues = [];
+
+  addAuditLogPatternCheck(checks, issues, {
+    name: "audit-events-schema-and-indexes",
+    category: "infra",
+    filePath: path.join(infraRoot, "postgres", "init", "02-enterprise-account-schema.sql"),
+    pattern: /CREATE TABLE IF NOT EXISTS stexor_account\.audit_events[\s\S]*idx_audit_events_account_created/,
+    detail: "Base schema creates audit_events and account/time indexes.",
+  });
+  addAuditLogPatternCheck(checks, issues, {
+    name: "audit-events-append-only",
+    category: "infra",
+    filePath: path.join(infraRoot, "postgres", "migrations", "006_persistence_integrity_readiness.sql"),
+    pattern: /audit_events_are_append_only[\s\S]*BEFORE UPDATE OR DELETE ON stexor_account\.audit_events[\s\S]*REVOKE UPDATE, DELETE ON stexor_account\.audit_events/,
+    detail: "Audit events are append-only and runtime update/delete privileges are revoked.",
+  });
+  addAuditLogPatternCheck(checks, issues, {
+    name: "audit-outbox-durable-queue",
+    category: "infra",
+    filePath: path.join(infraRoot, "postgres", "migrations", "007_durable_audit_outbox.sql"),
+    pattern: /CREATE TABLE IF NOT EXISTS stexor_account\.audit_outbox[\s\S]*audit_event_id uuid NOT NULL REFERENCES stexor_account\.audit_events\(id\) ON DELETE RESTRICT[\s\S]*FORCE ROW LEVEL SECURITY[\s\S]*REVOKE DELETE ON stexor_account\.audit_outbox/,
+    detail: "Durable audit outbox references audit_events, forces RLS and blocks deletes.",
+  });
+  addAuditLogPatternCheck(checks, issues, {
+    name: "audit-outbox-dead-letter-and-due-index",
+    category: "infra",
+    filePath: path.join(infraRoot, "postgres", "migrations", "009_audit_outbox_dispatcher.sql"),
+    pattern: /status IN \('queued', 'processing', 'delivered', 'failed', 'dead'\)[\s\S]*idx_audit_outbox_due_dispatch/,
+    detail: "Audit outbox supports dead-letter status and due-dispatch indexing.",
+  });
+  addAuditLogPatternCheck(checks, issues, {
+    name: "worker-audit-outbox-default-enabled",
+    category: "infra",
+    filePath: path.join(infraRoot, "compose.yaml"),
+    pattern: /AUDIT_OUTBOX_ENABLED:\s+\$\{AUDIT_OUTBOX_ENABLED:-true\}/,
+    detail: "Worker jobs enables audit outbox dispatch by default.",
+  });
+  addAuditLogPatternCheck(checks, issues, {
+    name: "audit-outbox-alerts",
+    category: "infra",
+    filePath: path.join(infraRoot, "prometheus", "rules", "enterprise-alerts.yml"),
+    pattern: /AuditOutboxDispatchBacklog[\s\S]*AuditOutboxDeadLetters[\s\S]*AuditOutboxDispatchFailures/,
+    detail: "Prometheus alerts cover backlog, dead-letter and dispatch failure states.",
+  });
+  addAuditLogPatternCheck(checks, issues, {
+    name: "audit-outbox-dashboard",
+    category: "infra",
+    filePath: path.join(infraRoot, "grafana", "dashboards", "enterprise-overview.json"),
+    pattern: /audit_outbox_rows/,
+    detail: "Grafana dashboard includes audit outbox lifecycle metrics.",
+  });
+  addAuditLogPatternCheck(checks, issues, {
+    name: "access-review-command-exposed",
+    category: "infra",
+    filePath: path.join(infraRoot, "scripts", "stexor-ops.mjs"),
+    pattern: /async function accessReview[\s\S]*"access-review": accessReview/,
+    detail: "Ops runner exposes the access-review command for admin role/session reviews.",
+  });
+  addAuditLogPatternCheck(checks, issues, {
+    name: "audit-runbook",
+    category: "infra",
+    filePath: path.join(infraRoot, "RUNBOOK.md"),
+    pattern: /Centralized logs and audit[\s\S]*audit_events[\s\S]*audit_outbox[\s\S]*append-only/,
+    detail: "Runbook documents centralized audit events and outbox operations.",
+  });
+
+  const backendAudit = path.join(sourceRoot, "apps", "backend", "src", "runtime", "account-audit.ts");
+  const backendServicesDir = path.join(sourceRoot, "apps", "backend", "src", "services");
+  const workerServer = path.join(sourceRoot, "apps", "worker-jobs", "src", "server.ts");
+  const workerAuditStore = path.join(sourceRoot, "apps", "worker-jobs", "src", "audit-outbox-store.ts");
+  const workerAuditTest = path.join(sourceRoot, "apps", "worker-jobs", "src", "audit-outbox.test.ts");
+  const natsAuditSink = path.join(sourceRoot, "apps", "worker-jobs", "src", "nats-audit-sink.ts");
+  const sourcePresent = fs.existsSync(backendAudit) && fs.existsSync(workerServer);
+
+  addAuditLogEvidenceCheck(checks, issues, {
+    name: "optional-stexor-audit-source",
+    category: "source",
+    required: requireSource,
+    status: sourcePresent ? "passed" : requireSource ? "failed" : "skipped",
+    detail: sourcePresent
+      ? `audit source mounted at ${sourceRoot}`
+      : `audit source not mounted at ${sourceRoot}; infra-only evidence mode`,
+    file: sourcePresent ? path.relative(infraRoot, backendAudit).replaceAll("\\", "/") : null,
+  });
+
+  if (sourcePresent) {
+    addAuditLogPatternCheck(checks, issues, {
+      name: "backend-audit-transactional-outbox-write",
+      category: "source",
+      sourceFile: true,
+      filePath: backendAudit,
+      pattern: /await client\.query\("begin"\)[\s\S]*insert into stexor_account\.audit_events[\s\S]*insert into stexor_account\.audit_outbox[\s\S]*await client\.query\("commit"\)[\s\S]*rollback/,
+      detail: "Backend writes audit_events and audit_outbox in one transaction with rollback.",
+    });
+    addAuditLogPatternCheck(checks, issues, {
+      name: "backend-audit-outbox-durability-metadata",
+      category: "source",
+      sourceFile: true,
+      filePath: backendAudit,
+      pattern: /jsonb_build_object\('externalEventId'[\s\S]*'durability', 'outbox'\)/,
+      detail: "Backend tags persisted audit events with outbox durability metadata.",
+    });
+
+    if (fs.existsSync(backendServicesDir)) {
+      const servicesText = readSourceTreeText(backendServicesDir, new Set([".ts"]));
+      const pushAuditUses = [...servicesText.matchAll(/pushAudit\(/g)].length;
+      addAuditLogEvidenceCheck(checks, issues, {
+        name: "backend-services-emit-audit-events",
+        category: "source",
+        status: pushAuditUses >= 6 ? "passed" : "failed",
+        detail: `${pushAuditUses} pushAudit call(s) found in backend services; expected at least 6 account/security flows.`,
+        file: "apps/backend/src/services",
+      });
+    } else {
+      addAuditLogEvidenceCheck(checks, issues, {
+        name: "backend-services-emit-audit-events",
+        category: "source",
+        status: "failed",
+        detail: "missing optional source directory: apps/backend/src/services",
+        file: "apps/backend/src/services",
+      });
+    }
+
+    addAuditLogPatternCheck(checks, issues, {
+      name: "worker-audit-dispatcher-and-metrics",
+      category: "source",
+      sourceFile: true,
+      filePath: workerServer,
+      pattern: /AuditOutboxDispatcher[\s\S]*PostgresAuditOutboxStore[\s\S]*createNatsAuditSink[\s\S]*audit_outbox_rows[\s\S]*audit_outbox_failed_total[\s\S]*audit_outbox_dead_total/,
+      detail: "Worker jobs runs dispatcher, NATS sink and audit outbox metrics.",
+    });
+    addAuditLogPatternCheck(checks, issues, {
+      name: "worker-audit-transactional-claim-and-dead-letter",
+      category: "source",
+      sourceFile: true,
+      filePath: workerAuditStore,
+      pattern: /for update skip locked[\s\S]*set status = 'dead'[\s\S]*from stexor_account\.audit_outbox/,
+      detail: "Worker claims audit rows safely and moves exhausted delivery attempts to dead-letter.",
+    });
+    addAuditLogPatternCheck(checks, issues, {
+      name: "worker-audit-nats-headers",
+      category: "source",
+      sourceFile: true,
+      filePath: natsAuditSink,
+      pattern: /X-Audit-Event-Id[\s\S]*record\.auditEventId/,
+      detail: "NATS audit sink carries the audit event id for downstream traceability.",
+    });
+    addAuditLogPatternCheck(checks, issues, {
+      name: "worker-audit-regression-tests",
+      category: "source-test",
+      sourceFile: true,
+      filePath: workerAuditTest,
+      pattern: /row locking[\s\S]*marks them delivered[\s\S]*moves exhausted events to dead letter[\s\S]*reclaims expired processing rows/,
+      detail: "Worker tests cover row locking, delivery, dead-letter and crash recovery.",
+    });
+  }
+
+  const passedCount = checks.filter((check) => check.status === "passed").length;
+  const failedCount = checks.filter((check) => check.status === "failed").length;
+  const skippedCount = checks.filter((check) => check.status === "skipped").length;
+  const payload = {
+    generatedAt,
+    status: issues.length ? "failed" : "passed",
+    mode: sourcePresent ? "full" : "infra-only",
+    source: {
+      root: sourceRoot,
+      present: sourcePresent,
+      required: requireSource,
+    },
+    summary: {
+      checks: checks.length,
+      passed: passedCount,
+      failed: failedCount,
+      skipped: skippedCount,
+      infraChecksPassed: checks.filter((check) => check.category === "infra" && check.status === "passed").length,
+      sourceChecksPassed: checks.filter((check) => check.category.startsWith("source") && check.status === "passed").length,
+    },
+    checks,
+    issues,
+    nextCommands: [
+      "sh ./scripts/audit-log-evidence.sh",
+      "sh ./scripts/access-review.sh",
+      "sh ./scripts/pre-go-live-evidence.sh --includeRuntime",
+    ],
+  };
+
+  const stamp = reportTimestamp();
+  const jsonPath = writeJsonReport("audit-logs", `audit-log-evidence-${stamp}`, payload);
+  const markdownPath = writeMarkdownReport("audit-logs", `audit-log-evidence-${stamp}`, [
+    "# Audit Log Evidence",
+    "",
+    `Status: ${payload.status}`,
+    `Mode: ${payload.mode}`,
+    `Generated at: ${payload.generatedAt}`,
+    `Source mounted: ${payload.source.present ? "yes" : "no"}`,
+    `Require source: ${payload.source.required ? "yes" : "no"}`,
+    "",
+    "## Summary",
+    "",
+    `- Checks: ${payload.summary.checks}`,
+    `- Passed: ${payload.summary.passed}`,
+    `- Failed: ${payload.summary.failed}`,
+    `- Skipped: ${payload.summary.skipped}`,
+    "",
+    "## Checks",
+    "",
+    "| Check | Category | Required | Status | Detail |",
+    "| --- | --- | --- | --- | --- |",
+    ...checks.map((check) => `| ${check.name} | ${check.category} | ${check.required ? "yes" : "no"} | ${check.status} | ${String(check.detail).replaceAll("|", "\\|")} |`),
+    "",
+    "## Issues",
+    "",
+    ...(issues.length ? issues.map((issue) => `- ${issue}`) : ["- none"]),
+    "",
+    "## Next Commands",
+    "",
+    ...payload.nextCommands.map((commandLine) => `- \`${commandLine}\``),
+  ]);
+  log(`Audit log evidence report written to ${jsonPath} and ${markdownPath}`);
+  if (issues.length && !booleanFlag(argv.allowFailures)) {
+    fail(`Audit log evidence failed with ${issues.length} issue(s). Report: ${jsonPath}`);
+  }
+  log("Audit log evidence passed.");
+}
+
 const managedSecretRotationExpectations = [
   { name: "postgres_superuser_password", kind: "opaque", rotationDays: 90, manualRotation: true },
   { name: "app_db_password", kind: "opaque", rotationDays: 90, manualRotation: true },
@@ -5533,6 +5804,7 @@ function buildPreGoLiveReadinessMatrix({ steps, options, repo }) {
     "managed-secrets-preflight",
     "compose-healthcheck-coverage",
     "rate-limit-evidence",
+    "audit-log-evidence",
     "secret-rotation-evidence-plan",
     "dr-readiness-check",
     "dr-evidence-summary",
@@ -5637,6 +5909,7 @@ async function preGoLiveEvidence() {
   await collectEvidenceStep(steps, { name: "managed-secrets-preflight", category: "local-policy", fn: managedSecretsPreflight });
   await collectEvidenceStep(steps, { name: "compose-healthcheck-coverage", category: "local-policy", fn: composeHealthcheckCoverage });
   await collectEvidenceStep(steps, { name: "rate-limit-evidence", category: "local-policy", fn: rateLimitEvidence });
+  await collectEvidenceStep(steps, { name: "audit-log-evidence", category: "local-policy", fn: auditLogEvidence });
   await collectEvidenceStep(steps, { name: "secret-rotation-evidence-plan", category: "local-policy", fn: secretRotationEvidence });
   await collectEvidenceStep(steps, { name: "dr-readiness-check", category: "local-policy", fn: drReadinessCheck });
   await collectEvidenceStep(steps, { name: "dr-evidence-summary", category: "local-policy", fn: drEvidence });
@@ -6033,6 +6306,7 @@ const evidenceBundleReportSpecs = [
   { directory: "github-actions", prefix: "github-actions-run-", label: "github-actions-run", required: true },
   { directory: "healthchecks", prefix: "healthcheck-coverage-", label: "healthcheck-coverage", required: true },
   { directory: "rate-limits", prefix: "rate-limit-evidence-", label: "rate-limit-evidence", required: true },
+  { directory: "audit-logs", prefix: "audit-log-evidence-", label: "audit-log-evidence", required: true },
   { directory: "secret-rotation", prefix: "secret-rotation-evidence-", label: "secret-rotation-evidence", required: true },
   { directory: "go-live", prefix: "pre-go-live-evidence-", label: "pre-go-live", required: true },
   { directory: "vps-host", prefix: "vps-host-readiness-", label: "vps-host-readiness", required: true },
@@ -6204,6 +6478,15 @@ function evidenceBundleReportPasses(spec, payload) {
       passed: payload.status === "passed"
         && Number(payload.summary?.failed ?? 1) === 0
         && Number(payload.summary?.infraChecksPassed ?? 0) >= 4
+        && ["full", "infra-only"].includes(payload.mode),
+      detail: `mode=${payload.mode ?? "missing"} status=${payload.status ?? "missing"} failed=${payload.summary?.failed ?? "missing"} infraPassed=${payload.summary?.infraChecksPassed ?? "missing"}`,
+    };
+  }
+  if (spec.label === "audit-log-evidence") {
+    return {
+      passed: payload.status === "passed"
+        && Number(payload.summary?.failed ?? 1) === 0
+        && Number(payload.summary?.infraChecksPassed ?? 0) >= 9
         && ["full", "infra-only"].includes(payload.mode),
       detail: `mode=${payload.mode ?? "missing"} status=${payload.status ?? "missing"} failed=${payload.summary?.failed ?? "missing"} infraPassed=${payload.summary?.infraChecksPassed ?? "missing"}`,
     };
@@ -6985,6 +7268,7 @@ async function repoCoverageCheck() {
     ["managed-secrets-preflight", /Managed secrets preflight[\s\S]*managed-secrets-preflight/],
     ["compose-healthcheck-coverage", /Compose healthcheck coverage[\s\S]*compose-healthcheck-coverage/],
     ["rate-limit-evidence", /Rate limit evidence[\s\S]*rate-limit-evidence/],
+    ["audit-log-evidence", /Audit log evidence[\s\S]*audit-log-evidence/],
     ["secret-rotation-evidence-plan", /Secret rotation evidence plan[\s\S]*secret-rotation-evidence/],
     ["dr-readiness-check", /DR readiness check[\s\S]*dr-readiness-check/],
     ["dr-evidence-summary", /DR evidence summary[\s\S]*dr-evidence/],
@@ -8768,6 +9052,7 @@ function staticSecurityInfraOnlyCheck() {
   const evidenceBundleVerifyWrapper = readText(path.join(infraRoot, "scripts", "evidence-bundle-verify.sh"));
   const githubActionsRunEvidenceWrapper = readText(path.join(infraRoot, "scripts", "github-actions-run-evidence.sh"));
   const rateLimitEvidenceWrapper = readText(path.join(infraRoot, "scripts", "rate-limit-evidence.sh"));
+  const auditLogEvidenceWrapper = readText(path.join(infraRoot, "scripts", "audit-log-evidence.sh"));
   const secretRotationEvidenceWrapper = readText(path.join(infraRoot, "scripts", "secret-rotation-evidence.sh"));
   const opsScript = readText(path.join(infraRoot, "scripts", "stexor-ops.mjs"));
   const hostingerPostdeployScript = readText(path.join(infraRoot, "scripts", "hostinger-postdeploy.sh"));
@@ -8798,6 +9083,7 @@ function staticSecurityInfraOnlyCheck() {
     evidenceBundleVerifyWrapper,
     githubActionsRunEvidenceWrapper,
     rateLimitEvidenceWrapper,
+    auditLogEvidenceWrapper,
     secretRotationEvidenceWrapper,
     hostingerPostdeployScript,
     productionReadinessLiveWrapper,
@@ -8849,6 +9135,7 @@ function staticSecurityInfraOnlyCheck() {
   assertMatch(githubWorkflow, /Managed secrets preflight[\s\S]*managed-secrets-preflight/, "Infrastructure CI must run the managed secrets preflight.");
   assertMatch(githubWorkflow, /Compose healthcheck coverage[\s\S]*compose-healthcheck-coverage/, "Infrastructure CI must verify service healthcheck coverage.");
   assertMatch(githubWorkflow, /Rate limit evidence[\s\S]*rate-limit-evidence/, "Infrastructure CI must write a dedicated rate-limit evidence report.");
+  assertMatch(githubWorkflow, /Audit log evidence[\s\S]*audit-log-evidence/, "Infrastructure CI must write a dedicated audit log evidence report.");
   assertMatch(githubWorkflow, /Secret rotation evidence plan[\s\S]*secret-rotation-evidence/, "Infrastructure CI must write a secret rotation evidence plan.");
   assertMatch(githubWorkflow, /DR readiness check[\s\S]*dr-readiness-check/, "Infrastructure CI must run the DR readiness check.");
   assertMatch(githubWorkflow, /DR evidence summary[\s\S]*dr-evidence/, "Infrastructure CI must write a DR evidence summary.");
@@ -8879,6 +9166,10 @@ function staticSecurityInfraOnlyCheck() {
   assertMatch(opsScript, /async function rateLimitEvidence[\s\S]*rate-limit-evidence-[\s\S]*infraChecksPassed/, "Ops script must provide dedicated rate-limit evidence reports.");
   assertMatch(opsScript, /directory: "rate-limits"[\s\S]*prefix: "rate-limit-evidence-"[\s\S]*required: true/, "Evidence bundle must require rate-limit evidence reports.");
   assertMatch(productionReadinessManifest, /"rate-limiting"[\s\S]*"rate-limit-evidence"/, "Production readiness must map rate limiting to dedicated evidence.");
+  assertMatch(auditLogEvidenceWrapper, /audit-log-evidence/, "Audit log evidence wrapper must delegate to the Dockerized ops runner.");
+  assertMatch(opsScript, /async function auditLogEvidence[\s\S]*audit-log-evidence-[\s\S]*infraChecksPassed/, "Ops script must provide dedicated audit log evidence reports.");
+  assertMatch(opsScript, /directory: "audit-logs"[\s\S]*prefix: "audit-log-evidence-"[\s\S]*required: true/, "Evidence bundle must require audit log evidence reports.");
+  assertMatch(productionReadinessManifest, /"admin-audit-log"[\s\S]*"audit-log-evidence"/, "Production readiness must map admin audit logging to dedicated evidence.");
   assertMatch(githubActionsRunEvidenceWrapper, /github-actions-run-evidence/, "GitHub Actions run evidence wrapper must delegate to the Dockerized ops runner.");
   assertMatch(opsScript, /async function githubActionsRunEvidence[\s\S]*workflow_runs[\s\S]*run\.conclusion !== "success"/, "Ops script must verify remote GitHub Actions workflow success.");
   assertMatch(productionGoNoGoPolicyText, /"requireGithubActionsRunSuccess":\s*true[\s\S]*"requiredGithubWorkflow":\s*"enterprise-infra\.yml"/, "Production go/no-go policy must require a successful remote GitHub Actions workflow run.");
@@ -9027,6 +9318,7 @@ async function staticSecurityCheck() {
   const githubActionsConfigWrapper = readText(path.join(infraRoot, "scripts", "github-actions-config.sh"));
   const githubActionsRunEvidenceWrapper = readText(path.join(infraRoot, "scripts", "github-actions-run-evidence.sh"));
   const rateLimitEvidenceWrapper = readText(path.join(infraRoot, "scripts", "rate-limit-evidence.sh"));
+  const auditLogEvidenceWrapper = readText(path.join(infraRoot, "scripts", "audit-log-evidence.sh"));
   const secretRotationEvidenceWrapper = readText(path.join(infraRoot, "scripts", "secret-rotation-evidence.sh"));
   const preGoLiveEvidenceWrapper = readText(path.join(infraRoot, "scripts", "pre-go-live-evidence.sh"));
   const productionGoNoGoWrapper = readText(path.join(infraRoot, "scripts", "production-go-no-go.sh"));
@@ -9432,6 +9724,10 @@ async function staticSecurityCheck() {
   assertMatch(opsScript, /async function rateLimitEvidence[\s\S]*rate-limit-evidence-[\s\S]*infraChecksPassed/, "Ops script must write dedicated rate-limit evidence reports.");
   assertMatch(opsScript, /directory: "rate-limits"[\s\S]*prefix: "rate-limit-evidence-"[\s\S]*required: true/, "Evidence bundle must require rate-limit evidence reports.");
   assertMatch(productionReadinessManifest, /"rate-limiting"[\s\S]*"rate-limit-evidence"/, "Production readiness must map rate limiting to dedicated evidence.");
+  assertMatch(auditLogEvidenceWrapper, /audit-log-evidence/, "Audit log evidence wrapper must delegate to the Dockerized ops runner.");
+  assertMatch(opsScript, /async function auditLogEvidence[\s\S]*audit-log-evidence-[\s\S]*infraChecksPassed/, "Ops script must write dedicated audit log evidence reports.");
+  assertMatch(opsScript, /directory: "audit-logs"[\s\S]*prefix: "audit-log-evidence-"[\s\S]*required: true/, "Evidence bundle must require audit log evidence reports.");
+  assertMatch(productionReadinessManifest, /"admin-audit-log"[\s\S]*"audit-log-evidence"/, "Production readiness must map admin audit logging to dedicated evidence.");
   assertMatch(composeDr, /archive_mode=on/, "DR overlay must enable PostgreSQL WAL archiving.");
   assertMatch(composeDr, /enterprise_postgres_wal_archive/, "DR overlay must persist WAL archives.");
   assertMatch(admissionPolicy, /cosign\.sigstore\.dev\/verified/, "Admission policy must require cosign verification.");
@@ -9507,6 +9803,7 @@ async function staticSecurityCheck() {
   assertMatch(githubWorkflow, /Managed secrets preflight[\s\S]*managed-secrets-preflight/, "Infra workflow must exercise the managed secrets gate.");
   assertMatch(githubWorkflow, /Compose healthcheck coverage[\s\S]*compose-healthcheck-coverage/, "Infra workflow must exercise the healthcheck coverage gate.");
   assertMatch(githubWorkflow, /Rate limit evidence[\s\S]*rate-limit-evidence/, "Infra workflow must exercise the rate-limit evidence gate.");
+  assertMatch(githubWorkflow, /Audit log evidence[\s\S]*audit-log-evidence/, "Infra workflow must exercise the audit log evidence gate.");
   assertMatch(githubWorkflow, /Secret rotation evidence plan[\s\S]*secret-rotation-evidence/, "Infra workflow must exercise the secret rotation evidence command.");
   assertMatch(githubWorkflow, /DR readiness check[\s\S]*dr-readiness-check/, "Infra workflow must exercise the DR readiness gate.");
   assertMatch(githubWorkflow, /DEPLOY_RUN_PRODUCTION_PREFLIGHT:\s+"1"[\s\S]*DEPLOY_RUN_PRE_GO_LIVE:\s+"1"[\s\S]*DEPLOY_RUN_GO_NO_GO:\s+"1"/, "Production deploy workflow must enforce preflight, pre-go-live evidence and go/no-go.");
@@ -10097,6 +10394,7 @@ function help() {
 Commands:
   access-review
   account-integration-tests
+  audit-log-evidence
   alert-evidence
   apply-postgres-migrations
   backup-mariadb
@@ -10181,6 +10479,7 @@ Commands:
 const commands = {
   "access-review": accessReview,
   "account-integration-tests": accountIntegrationTests,
+  "audit-log-evidence": auditLogEvidence,
   "alert-evidence": alertEvidence,
   "apply-postgres-migrations": applyPostgresMigrations,
   "backup-keycloak": backupKeycloakConfig,

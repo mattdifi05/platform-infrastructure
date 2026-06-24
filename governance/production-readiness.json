@@ -173,10 +173,12 @@
       "state": "repo-ready",
       "evidence": [
         { "type": "file", "path": "postgres/migrations/007_durable_audit_outbox.sql" },
+        { "type": "command", "name": "audit-log-evidence" },
         { "type": "command", "name": "access-review" },
-        { "type": "pattern", "path": "RUNBOOK.md", "pattern": "audit_outbox|AuditOutbox" }
+        { "type": "pattern", "path": "RUNBOOK.md", "pattern": "audit_outbox|AuditOutbox" },
+        { "type": "workflow", "pattern": "Audit log evidence[\\s\\S]*audit-log-evidence" }
       ],
-      "liveProof": "Review audit logs and access-review output after every admin permission change.",
+      "liveProof": "Pass audit-log-evidence and review access-review output after every admin permission change.",
       "liveProofChecks": ["pre-go-live-evidence-complete"]
     },
     {

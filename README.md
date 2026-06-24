@@ -260,6 +260,7 @@ sh ./scripts/static-security-check.sh
 sh ./scripts/infra-health.sh
 sh ./scripts/compose-healthcheck-coverage.sh
 sh ./scripts/rate-limit-evidence.sh
+sh ./scripts/audit-log-evidence.sh
 sh ./scripts/dr-evidence.sh
 sh ./scripts/alert-evidence.sh
 sh ./scripts/security-smoke.sh
@@ -298,6 +299,8 @@ sh ./scripts/dast-zap-baseline.sh https://api-staging.example.com
 `compose-healthcheck-coverage` renderizza gli stack local WAF, Hostinger WAF e backup scheduler, poi scrive `reports/healthchecks/healthcheck-coverage-*.json`/`.md`. Fallisce se un servizio operativo del render Compose non ha una healthcheck.
 
 `rate-limit-evidence.sh` scrive un report in `reports/rate-limits/` che verifica il rate limit Traefik, i router local/Hostinger, i budget backend e, quando il sorgente Stexor e' montato, anche Fastify fail-closed, fallback Redis->memoria e test 429. In CI resta infra-only se il progetto applicativo non e' presente.
+
+`audit-log-evidence.sh` scrive un report in `reports/audit-logs/` che verifica schema audit append-only, outbox durevole, RLS, dead-letter, alert Prometheus, dashboard Grafana e, quando il sorgente Stexor e' montato, anche scrittura transazionale backend, dispatcher worker, sink NATS e test di crash/retry.
 
 `load-benchmark.sh` senza `--url` misura il backend dentro la rete Docker ed e' utile per regressioni locali. Per il go-live devi usare l'URL pubblico e `--requirePublicTarget`; con Cloudflare CDN attivo aggiungi `--requireEdgeEvidence --expectedEdgeProvider cloudflare`. Il report in `reports/load/` include profili 50/100/500, snapshot CPU/RAM Docker, target evidence pubblico/edge e `status`. Anche i fallimenti scrivono report diagnostici, ma il go/no-go accetta solo `status=passed`.
 

@@ -45,6 +45,10 @@ if [ "${DEPLOY_RUN_RATE_LIMIT_EVIDENCE:-1}" = "1" ]; then
   sh ./scripts/rate-limit-evidence.sh
 fi
 
+if [ "${DEPLOY_RUN_AUDIT_LOG_EVIDENCE:-1}" = "1" ]; then
+  sh ./scripts/audit-log-evidence.sh
+fi
+
 if [ "${DEPLOY_RUN_INFRA_HEALTH:-1}" = "1" ]; then
   sh ./scripts/infra-health.sh \
     --apiBase "$api_base" \

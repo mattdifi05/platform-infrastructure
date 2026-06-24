@@ -121,6 +121,9 @@ jobs:
       - name: Rate limit evidence
         run: sh ./scripts/stexor-ops.sh rate-limit-evidence
 
+      - name: Audit log evidence
+        run: sh ./scripts/stexor-ops.sh audit-log-evidence
+
       - name: Secret rotation evidence plan
         run: sh ./scripts/stexor-ops.sh secret-rotation-evidence
 

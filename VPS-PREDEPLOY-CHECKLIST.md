@@ -65,6 +65,7 @@ Use this checklist on the Hostinger Ubuntu LTS VPS before exposing public traffi
 - [ ] `sh ./scripts/static-security-check.sh` passed.
 - [ ] `sh ./scripts/compose-healthcheck-coverage.sh` passed and the JSON/Markdown reports under `reports/healthchecks/` were archived outside Git.
 - [ ] `sh ./scripts/rate-limit-evidence.sh` passed and the JSON/Markdown reports under `reports/rate-limits/` were archived outside Git.
+- [ ] `sh ./scripts/audit-log-evidence.sh` passed and the JSON/Markdown reports under `reports/audit-logs/` were archived outside Git.
 - [ ] `sh ./scripts/infra-health.sh` passed.
 - [ ] `sh ./scripts/security-smoke.sh` passed.
 - [ ] `sh ./scripts/waf-smoke.sh` passed.
@@ -105,5 +106,6 @@ Use this checklist on the Hostinger Ubuntu LTS VPS before exposing public traffi
 - [ ] Optional Discord/Telegram alert channels configured through secret files and delivery metrics checked, if used.
 - [ ] Disaster recovery procedure rehearsed.
 - [ ] Deploy audit entry written.
+- [ ] `sh ./scripts/access-review.sh` output reviewed after the deploy/admin changes.
 - [ ] Rollback dry-run plan generated with `sh ./scripts/rollback-release.sh --rollbackFile ./release/previous-images.json`.
 - [ ] Production go/no-go status is `go`.
