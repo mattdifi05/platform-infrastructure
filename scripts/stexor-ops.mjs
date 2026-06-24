@@ -7509,7 +7509,7 @@ function readGithubWorkflowText() {
 
 async function repoCoverageCheck() {
   log("==> Repository coverage check");
-  const trackedFiles = output("git", ["ls-files"], { cwd: infraRoot })
+  const trackedFiles = output("git", ["-c", `safe.directory=${infraRoot}`, "ls-files"], { cwd: infraRoot })
     .split(/\r?\n/)
     .map((file) => file.trim())
     .filter(Boolean)
@@ -9488,6 +9488,7 @@ function staticSecurityInfraOnlyCheck() {
   assertNoMatch(githubWorkflow, /security-events:\s+write|contents:\s+write/, "Infrastructure CI must not request unused write permissions.");
   assertMatch(githubWorkflow, /compose-and-policy:[\s\S]*timeout-minutes:\s+45[\s\S]*shell-syntax:[\s\S]*timeout-minutes:\s+10[\s\S]*dast-zap:[\s\S]*timeout-minutes:\s+45[\s\S]*deploy-hostinger:[\s\S]*timeout-minutes:\s+90/, "Infrastructure CI jobs must set explicit timeouts.");
   assertMatch(opsScript, /async function repoCoverageCheck/, "Ops script must provide a repository coverage audit command.");
+  assertMatch(opsScript, /safe\.directory=\$\{infraRoot\}[\s\S]*"ls-files"/, "Repository coverage must work inside Docker-mounted GitHub Actions worktrees.");
   assertMatch(opsScript, /"repo-coverage-check": repoCoverageCheck/, "Ops command map must expose repo-coverage-check.");
   assertMatch(opsScript, /repoStatus:[\s\S]*liveProofStatus[\s\S]*liveProofsPending/, "Enterprise requirement reports must separate repository evidence from pending live production proof.");
   assertMatch(evidenceBundleVerifyWrapper, /evidence-bundle-verify/, "Evidence bundle verify wrapper must delegate to the Dockerized ops runner.");
@@ -10433,6 +10434,7 @@ async function staticSecurityCheck() {
   assertMatch(opsScript, /async function chaosProfile/, "Ops script must provide an opt-in chaos profile.");
   assertMatch(opsScript, /async function governanceCheck/, "Ops script must provide a governance gate.");
   assertMatch(opsScript, /async function repoCoverageCheck/, "Ops script must provide a repository coverage audit gate.");
+  assertMatch(opsScript, /safe\.directory=\$\{infraRoot\}[\s\S]*"ls-files"/, "Repository coverage must work inside Docker-mounted GitHub Actions worktrees.");
   assertMatch(opsScript, /enterpriseRequirementLiveProofResult[\s\S]*requireLiveProofs[\s\S]*liveProofIssues/, "Enterprise requirement reports must optionally enforce live production proof separately from repo evidence.");
   assertMatch(opsScript, /repoStatus:\s+repoIssues\.length \? "failed" : "passed"[\s\S]*liveProofStatus/, "Enterprise requirement reports must keep repository evidence status separate from live proof status.");
   assertMatch(opsScript, /async function enterpriseTenCheck/, "Ops script must provide the combined enterprise 10 readiness gate.");
