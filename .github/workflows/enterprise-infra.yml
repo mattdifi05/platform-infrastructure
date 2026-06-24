@@ -56,6 +56,21 @@ jobs:
             -f compose.hostinger-waf.yaml \
             config --quiet
 
+      - name: Render staging and backup compose
+        run: |
+          docker compose --env-file .env -p stexor_platform_staging_ci \
+            -f compose.yaml \
+            -f compose.build.yaml \
+            -f compose.secrets.yaml \
+            -f compose.waf.yaml \
+            -f compose.staging.yaml \
+            config --quiet
+          docker compose --env-file .env -p stexor_platform_backup_ci \
+            -f compose.yaml \
+            -f compose.secrets.yaml \
+            -f compose.backup-scheduler.yaml \
+            config --quiet
+
       - name: Backup scheduler dry run
         run: |
           docker build -f docker/ops.Dockerfile -t stexor/ops:ci .
@@ -84,6 +99,18 @@ jobs:
 
       - name: GitHub Actions runtime config dry run
         run: sh ./scripts/stexor-ops.sh github-actions-config --repo "${{ github.repository }}"
+
+      - name: Secret scan
+        run: sh ./scripts/stexor-ops.sh secret-scan
+
+      - name: HA configuration check
+        run: sh ./scripts/stexor-ops.sh ha-config-check
+
+      - name: Managed secrets preflight
+        run: sh ./scripts/stexor-ops.sh managed-secrets-preflight
+
+      - name: DR readiness check
+        run: sh ./scripts/stexor-ops.sh dr-readiness-check
 
       - name: Release evidence plan
         run: sh ./scripts/stexor-ops.sh release-evidence --planOnly
@@ -162,5 +189,12 @@ jobs:
         env:
           DEPLOY_REMOTE: ${{ vars.DEPLOY_REMOTE }}
           DEPLOY_REMOTE_DIR: ${{ vars.DEPLOY_REMOTE_DIR }}
+          DEPLOY_REPO: ${{ github.repository }}
+          DEPLOY_RUN_PRODUCTION_PREFLIGHT: "1"
+          DEPLOY_RUN_PRE_GO_LIVE: "1"
+          DEPLOY_RUN_GO_NO_GO: "1"
+          DEPLOY_PRE_GO_LIVE_PRODUCTION_PREFLIGHT: "1"
+          DEPLOY_PRE_GO_LIVE_RESTORE_DRILL: "1"
+          DEPLOY_PRE_GO_LIVE_OFFSITE_RESTORE_DRY_RUN: "1"
           GIT_SSH_COMMAND: ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=accept-new
         run: sh ./scripts/deploy-hostinger.sh

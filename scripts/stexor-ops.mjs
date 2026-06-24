@@ -5838,12 +5838,18 @@ async function repoCoverageCheck() {
   const requiredWorkflowGates = [
     ["local-compose-render", /Render local WAF compose[\s\S]*compose\.yaml[\s\S]*compose\.build\.yaml[\s\S]*compose\.secrets\.yaml[\s\S]*compose\.waf\.yaml/],
     ["hostinger-compose-render", /Render Hostinger WAF compose[\s\S]*compose\.hostinger\.yaml[\s\S]*compose\.hostinger-waf\.yaml/],
+    ["staging-compose-render", /Render staging and backup compose[\s\S]*compose\.waf\.yaml[\s\S]*compose\.staging\.yaml/],
+    ["backup-compose-render", /Render staging and backup compose[\s\S]*compose\.backup-scheduler\.yaml/],
     ["backup-scheduler-dry-run", /Backup scheduler dry run[\s\S]*BACKUP_SCHEDULER_DRY_RUN=true/],
     ["external-uptime-dry-run", /external-uptime-check --dryRun/],
     ["cloudflare-access-dry-run", /cloudflare-access-admin --manifest cloudflare\/access-admin\.example\.json/],
     ["github-branch-policy-dry-run", /github-branch-protection --repo/],
     ["github-environments-dry-run", /github-environments --repo/],
     ["github-actions-runtime-dry-run", /github-actions-config --repo/],
+    ["secret-scan", /Secret scan[\s\S]*secret-scan/],
+    ["ha-config-check", /HA configuration check[\s\S]*ha-config-check/],
+    ["managed-secrets-preflight", /Managed secrets preflight[\s\S]*managed-secrets-preflight/],
+    ["dr-readiness-check", /DR readiness check[\s\S]*dr-readiness-check/],
     ["release-evidence-plan", /release-evidence --planOnly/],
     ["alert-evidence-summary", /alert-evidence/],
     ["production-go-no-go-summary", /production-go-no-go/],
@@ -5855,6 +5861,11 @@ async function repoCoverageCheck() {
     ["workflow-dispatch", /workflow_dispatch:/],
     ["dast-manual", /dast-zap:[\s\S]*dast-zap-baseline\.sh/],
     ["deploy-manual", /deploy-hostinger:[\s\S]*deploy-hostinger\.sh/],
+    ["deploy-production-preflight", /DEPLOY_RUN_PRODUCTION_PREFLIGHT:\s+"1"/],
+    ["deploy-pre-go-live-evidence", /DEPLOY_RUN_PRE_GO_LIVE:\s+"1"/],
+    ["deploy-production-go-no-go", /DEPLOY_RUN_GO_NO_GO:\s+"1"/],
+    ["deploy-restore-drill-evidence", /DEPLOY_PRE_GO_LIVE_RESTORE_DRILL:\s+"1"/],
+    ["deploy-offsite-restore-evidence", /DEPLOY_PRE_GO_LIVE_OFFSITE_RESTORE_DRY_RUN:\s+"1"/],
   ];
   const missingWorkflowGates = requiredWorkflowGates
     .filter(([, pattern]) => !pattern.test(workflow))
@@ -7084,20 +7095,23 @@ async function secretScan() {
   ];
   const patterns = [
     /-----BEGIN (RSA |EC |OPENSSH |)PRIVATE KEY-----/,
-    /\baws_access_key_id\b/i,
-    /\baws_secret_access_key\b/i,
+    /\bAKIA[0-9A-Z]{16}\b/,
+    /\b(?:AWS_SECRET_ACCESS_KEY|aws_secret_access_key)\b\s*[:=]\s*['"]?[A-Za-z0-9/+]{32,}/,
     /\b(api|access|secret|private|client)_?(key|token|secret)\b\s*[:=]\s*['"][^'"]{16,}/i,
     /\b(password|passwd|pwd)\b\s*[:=]\s*['"][^'"]{8,}/i,
     /\bSMTP_PASSWORD\b\s*=.+/i,
   ];
   const ignoredDirs = new Set([
     ".git",
+    ".tmp",
     "node_modules",
     ".pnpm-store",
     ".next",
     "dist",
     "coverage",
     "backups",
+    "release",
+    "reports",
     "secrets",
     "certs",
     "acme",
@@ -7405,6 +7419,13 @@ function staticSecurityInfraOnlyCheck() {
   assertMatch(githubWorkflow, /\.tmp\/optional-node-source/, "Infrastructure CI must use a local optional source placeholder for Compose rendering.");
   assertMatch(githubWorkflow, /static-security-check --infraOnly/, "Infrastructure CI must run infrastructure-only static checks.");
   assertMatch(githubWorkflow, /Repository coverage audit[\s\S]*repo-coverage-check/, "Infrastructure CI must audit tracked repository file coverage.");
+  assertMatch(githubWorkflow, /Render staging and backup compose[\s\S]*compose\.waf\.yaml[\s\S]*compose\.staging\.yaml[\s\S]*compose\.backup-scheduler\.yaml/, "Infrastructure CI must render staging, WAF and backup scheduler compose overlays.");
+  assertMatch(githubWorkflow, /Secret scan[\s\S]*secret-scan/, "Infrastructure CI must run the secret scanner.");
+  assertMatch(githubWorkflow, /HA configuration check[\s\S]*ha-config-check/, "Infrastructure CI must run the HA configuration check.");
+  assertMatch(githubWorkflow, /Managed secrets preflight[\s\S]*managed-secrets-preflight/, "Infrastructure CI must run the managed secrets preflight.");
+  assertMatch(githubWorkflow, /DR readiness check[\s\S]*dr-readiness-check/, "Infrastructure CI must run the DR readiness check.");
+  assertMatch(githubWorkflow, /DEPLOY_RUN_PRODUCTION_PREFLIGHT:\s+"1"[\s\S]*DEPLOY_RUN_PRE_GO_LIVE:\s+"1"[\s\S]*DEPLOY_RUN_GO_NO_GO:\s+"1"/, "Production deploy workflow must enforce preflight, pre-go-live evidence and go/no-go.");
+  assertMatch(githubWorkflow, /DEPLOY_PRE_GO_LIVE_RESTORE_DRILL:\s+"1"[\s\S]*DEPLOY_PRE_GO_LIVE_OFFSITE_RESTORE_DRY_RUN:\s+"1"/, "Production deploy workflow must require restore and off-site restore evidence.");
   assertMatch(opsScript, /async function repoCoverageCheck/, "Ops script must provide a repository coverage audit command.");
   assertMatch(opsScript, /"repo-coverage-check": repoCoverageCheck/, "Ops command map must expose repo-coverage-check.");
   assertMatch(opsScript, /workerNotificationsServerPath[\s\S]*fs\.existsSync\(workerNotificationsServerPath\)/, "Alert evidence must treat Stexor source checks as optional.");
@@ -7961,6 +7982,13 @@ async function staticSecurityCheck() {
   assertMatch(githubWorkflow, /Production go-no-go summary[\s\S]*production-go-no-go/, "Infra workflow must exercise the production go/no-go command in summary mode.");
   assertMatch(githubWorkflow, /Linux portability check[\s\S]*linux-portability-check/, "Infra workflow must exercise the Linux portability command.");
   assertMatch(githubWorkflow, /Repository coverage audit[\s\S]*repo-coverage-check/, "Infra workflow must audit tracked repository coverage.");
+  assertMatch(githubWorkflow, /Render staging and backup compose[\s\S]*compose\.waf\.yaml[\s\S]*compose\.staging\.yaml[\s\S]*compose\.backup-scheduler\.yaml/, "Infra workflow must render staging, WAF and backup compose overlays.");
+  assertMatch(githubWorkflow, /Secret scan[\s\S]*secret-scan/, "Infra workflow must exercise the secret scanner.");
+  assertMatch(githubWorkflow, /HA configuration check[\s\S]*ha-config-check/, "Infra workflow must exercise the HA configuration gate.");
+  assertMatch(githubWorkflow, /Managed secrets preflight[\s\S]*managed-secrets-preflight/, "Infra workflow must exercise the managed secrets gate.");
+  assertMatch(githubWorkflow, /DR readiness check[\s\S]*dr-readiness-check/, "Infra workflow must exercise the DR readiness gate.");
+  assertMatch(githubWorkflow, /DEPLOY_RUN_PRODUCTION_PREFLIGHT:\s+"1"[\s\S]*DEPLOY_RUN_PRE_GO_LIVE:\s+"1"[\s\S]*DEPLOY_RUN_GO_NO_GO:\s+"1"/, "Production deploy workflow must enforce preflight, pre-go-live evidence and go/no-go.");
+  assertMatch(githubWorkflow, /DEPLOY_PRE_GO_LIVE_RESTORE_DRILL:\s+"1"[\s\S]*DEPLOY_PRE_GO_LIVE_OFFSITE_RESTORE_DRY_RUN:\s+"1"/, "Production deploy workflow must require restore and off-site restore evidence.");
   assertMatch(opsScript, /async function preGoLiveEvidence/, "Ops script must provide a pre go-live evidence command.");
   assertMatch(opsScript, /writeJsonReport\("go-live"[\s\S]*writeMarkdownReport\("go-live"/, "Pre go-live evidence must write JSON and Markdown reports.");
   assertMatch(opsScript, /providerEvidence = \[[\s\S]*Hostinger Ubuntu LTS[\s\S]*Cloudflare DNS\/CDN\/WAF\/Access[\s\S]*providerEvidenceRequired/, "Pre go-live evidence must track remaining provider proof.");
