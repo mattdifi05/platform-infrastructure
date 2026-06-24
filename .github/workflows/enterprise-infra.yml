@@ -157,6 +157,13 @@ jobs:
       - name: Production readiness checklist
         run: sh ./scripts/stexor-ops.sh enterprise-requirements-check --manifest governance/production-readiness.json
 
+      - name: Production live proof gate rejects missing evidence
+        run: |
+          if sh ./scripts/stexor-ops.sh enterprise-requirements-check --manifest governance/production-readiness.json --requireLiveProofs; then
+            echo "Live proof gate passed without real production evidence." >&2
+            exit 1
+          fi
+
       - name: Repository coverage audit
         run: sh ./scripts/stexor-ops.sh repo-coverage-check
 

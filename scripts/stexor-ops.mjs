@@ -5868,6 +5868,7 @@ async function repoCoverageCheck() {
     ["linux-portability", /linux-portability-check/],
     ["enterprise-requirements", /Enterprise requirements traceability[\s\S]*enterprise-requirements-check/],
     ["production-readiness-checklist", /Production readiness checklist[\s\S]*enterprise-requirements-check --manifest governance\/production-readiness\.json/],
+    ["production-live-proof-rejection", /Production live proof gate rejects missing evidence[\s\S]*enterprise-requirements-check --manifest governance\/production-readiness\.json --requireLiveProofs/],
     ["static-security-infra-only", /static-security-check --infraOnly/],
     ["repository-coverage", /repo-coverage-check/],
     ["ci-evidence-artifact", /Upload CI evidence reports[\s\S]*actions\/upload-artifact@v4[\s\S]*reports\/[\s\S]*\.tmp\/evidence-bundles\/[\s\S]*retention-days:\s+30/],
@@ -7711,6 +7712,7 @@ function staticSecurityInfraOnlyCheck() {
   assertMatch(githubWorkflow, /Pre go-live evidence report[\s\S]*pre-go-live-evidence --infraOnly --repo/, "Infrastructure CI must produce an infrastructure-only pre go-live evidence report.");
   assertMatch(githubWorkflow, /Enterprise requirements traceability[\s\S]*enterprise-requirements-check/, "Infrastructure CI must verify enterprise requirements traceability.");
   assertMatch(githubWorkflow, /Production readiness checklist[\s\S]*enterprise-requirements-check --manifest governance\/production-readiness\.json/, "Infrastructure CI must verify the 20-point production readiness checklist.");
+  assertMatch(githubWorkflow, /Production live proof gate rejects missing evidence[\s\S]*--requireLiveProofs[\s\S]*Live proof gate passed without real production evidence/, "Infrastructure CI must prove the live-production gate rejects missing external evidence.");
   assertMatch(productionReadinessManifest, /"expectedCount":\s*20/, "Production readiness manifest must track the exact 20-point checklist.");
   assertMatch(productionReadinessManifest, /"liveProofCheckRequired":\s*true/, "Production readiness manifest must require mapped live proof checks.");
   assertMatch(productionReadinessManifest, /"liveProofChecks"/, "Production readiness requirements must map to production go/no-go live checks.");
@@ -8281,6 +8283,7 @@ async function staticSecurityCheck() {
   assertMatch(githubWorkflow, /Linux portability check[\s\S]*linux-portability-check/, "Infra workflow must exercise the Linux portability command.");
   assertMatch(githubWorkflow, /Enterprise requirements traceability[\s\S]*enterprise-requirements-check/, "Infra workflow must exercise the enterprise requirements traceability gate.");
   assertMatch(githubWorkflow, /Production readiness checklist[\s\S]*enterprise-requirements-check --manifest governance\/production-readiness\.json/, "Infra workflow must exercise the 20-point production readiness checklist.");
+  assertMatch(githubWorkflow, /Production live proof gate rejects missing evidence[\s\S]*--requireLiveProofs[\s\S]*Live proof gate passed without real production evidence/, "Infra workflow must prove the live-production gate rejects missing external evidence.");
   assertMatch(productionReadinessManifest, /"expectedCount":\s*20/, "Production readiness manifest must track the exact 20-point checklist.");
   assertMatch(productionReadinessManifest, /"liveProofCheckRequired":\s*true/, "Production readiness manifest must require mapped live proof checks.");
   assertMatch(productionReadinessManifest, /"liveProofChecks"/, "Production readiness requirements must map to production go/no-go live checks.");
