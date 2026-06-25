@@ -9859,6 +9859,8 @@ async function staticSecurityCheck() {
   assertMatch(controlCenterServer, /Stexor Control Center/, "Control Center must title the operational panel.");
   assertMatch(controlCenterServer, /handleApi[\s\S]*\/control\/overview/, "Control Center must expose operational API endpoints.");
   assertMatch(controlCenterServer, /appendAudit/, "Control Center must audit every local control action.");
+  assertMatch(controlCenterServer, /planOrApplyProjectUpdate[\s\S]*planProjectArchive[\s\S]*applyProjectArchive[\s\S]*planProjectDelete[\s\S]*applyProjectDelete/, "Control Center must expose safe project update, archive and soft-delete lifecycle operations.");
+  assertMatch(controlCenterServer, /ARCHIVE-PROJECT[\s\S]*DELETE-PROJECT:\$\{project\.slug\}[\s\S]*filesystemTouched:\s+false/, "Project archive/delete must require strong confirmation and preserve project files.");
   assertMatch(controlCenterServer, /operationsFile[\s\S]*appendOperation[\s\S]*readOperations/, "Control Center must persist operations in a dedicated Node-managed JSONL store.");
   assertMatch(controlCenterServer, /deploymentsFile[\s\S]*appendDeployment[\s\S]*readDeployments/, "Control Center must persist deployment records in a dedicated Node-managed JSONL store.");
   assertMatch(controlCenterServer, /operationId[\s\S]*requestedBy[\s\S]*resultSummary[\s\S]*reportPath[\s\S]*errorMessage[\s\S]*steps:/, "Control Center Operation records must include the enterprise operation fields and OperationStep list.");
@@ -9878,6 +9880,7 @@ async function staticSecurityCheck() {
   assertMatch(githubWorkflow, /Control Center tests[\s\S]*control-center-tests/, "Infrastructure CI must run the Control Center API/UI regression tests.");
   assertMatch(opsScript, /async function controlCenterTests[\s\S]*control-center\/tests\/control-center\.test\.mjs[\s\S]*"control-center-tests": controlCenterTests/, "Ops runner must expose container-first Control Center tests.");
   assertMatch(controlCenterTest, /production[\s\S]*bad\.localhost\.com[\s\S]*422/, "Control Center tests must reject localhost production subdomain plans.");
+  assertMatch(controlCenterTest, /project\.archive[\s\S]*ARCHIVE-PROJECT[\s\S]*project\.delete[\s\S]*DELETE-PROJECT:anniversary[\s\S]*filesystemTouched/, "Control Center tests must cover project archive and soft-delete confirmation without deleting files.");
   assertMatch(controlCenterTest, /APPLY-PRODUCTION[\s\S]*409/, "Control Center tests must reject production apply without valid production execution.");
   assertMatch(controlCenterTest, /\.\.\/secret[\s\S]*Invalid webspace path/, "Control Center tests must cover path traversal rejection.");
   assertMatch(controlCenterTest, /super-secret-token-should-not-leak[\s\S]*doesNotMatch/, "Control Center tests must prove supplied secret-like payloads are not serialized to audit/API output.");

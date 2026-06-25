@@ -90,6 +90,72 @@ test("Stexor Control Center local foundation", async (t) => {
     ["stexor", "Node"],
   ]);
 
+  const projectsHtml = await getText(`${baseUrl}/?section=projects`);
+  assert.match(projectsHtml, /ARCHIVE-PROJECT/);
+  assert.match(projectsHtml, /DELETE-PROJECT:anniversary/);
+
+  const updatePlan = await postJson(`${baseUrl}/control/projects/stexor/update`, {
+    displayName: "Stexor Local",
+  });
+  assert.equal(updatePlan.status, 202);
+  assert.equal(updatePlan.body.type, "project.update");
+  assert.equal(updatePlan.body.dryRun, true);
+
+  const updateApply = await postJson(`${baseUrl}/control/projects/stexor/update`, {
+    displayName: "Stexor Local",
+    confirm: "UPDATE-PROJECT",
+  });
+  assert.equal(updateApply.status, 202);
+  assert.equal(updateApply.body.type, "project.update.local");
+  assert.equal(updateApply.body.dryRun, false);
+
+  const archivePlan = await postJson(`${baseUrl}/control/projects/anniversary/archive/plan`, {});
+  assert.equal(archivePlan.status, 202);
+  assert.equal(archivePlan.body.type, "project.archive");
+  assert.equal(archivePlan.body.details.confirmationRequired, "ARCHIVE-PROJECT");
+
+  const archiveRejected = await postJson(`${baseUrl}/control/projects/anniversary/archive/apply`, {
+    confirm: "wrong",
+  });
+  assert.equal(archiveRejected.status, 409);
+
+  const archiveApply = await postJson(`${baseUrl}/control/projects/anniversary/archive/apply`, {
+    confirm: "ARCHIVE-PROJECT",
+  });
+  assert.equal(archiveApply.status, 202);
+  assert.equal(archiveApply.body.type, "project.archive.local");
+  assert.equal(archiveApply.body.details.filesystemTouched, false);
+
+  const projectsAfterArchive = await getJson(`${baseUrl}/control/projects`);
+  const archivedProject = projectsAfterArchive.projects.find((project) => project.slug === "anniversary");
+  assert.equal(archivedProject.status, "archived");
+  assert.equal(archivedProject.enabled, false);
+  const overviewAfterArchive = await getJson(`${baseUrl}/control/overview`);
+  assert.equal(overviewAfterArchive.projects.archived, 1);
+
+  const deletePlan = await postJson(`${baseUrl}/control/projects/anniversary/delete/plan`, {});
+  assert.equal(deletePlan.status, 202);
+  assert.equal(deletePlan.body.type, "project.delete");
+  assert.equal(deletePlan.body.details.confirmationRequired, "DELETE-PROJECT:anniversary");
+
+  const deleteRejected = await postJson(`${baseUrl}/control/projects/anniversary/delete/apply`, {
+    confirm: "DELETE-PROJECT",
+  });
+  assert.equal(deleteRejected.status, 409);
+
+  const deleteApply = await postJson(`${baseUrl}/control/projects/anniversary/delete/apply`, {
+    confirm: "DELETE-PROJECT:anniversary",
+  });
+  assert.equal(deleteApply.status, 202);
+  assert.equal(deleteApply.body.type, "project.delete.local");
+  assert.equal(deleteApply.body.details.filesystemTouched, false);
+  assert.equal(deleteApply.body.details.databaseTouched, false);
+  assert.equal(existsSync(path.join(projectsRoot, "anniversary", "public", "index.php")), true);
+
+  const projectsAfterDelete = await getJson(`${baseUrl}/control/projects`);
+  assert.equal(projectsAfterDelete.projects.some((project) => project.slug === "anniversary"), false);
+  assert.equal(projectsAfterDelete.projects.some((project) => project.slug === "stexor"), true);
+
   const prodLocalhostPlan = await postJson(`${baseUrl}/control/subdomains/plan`, {
     environment: "production",
     projectId: "stexor",

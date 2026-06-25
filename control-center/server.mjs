@@ -81,6 +81,11 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    if (req.method === "POST" && url.pathname === "/actions/project-command") {
+      await handleProjectCommand(req, res, context);
+      return;
+    }
+
     if (req.method === "POST" && url.pathname === "/actions/application-command") {
       await handleApplicationCommand(req, res, context);
       return;
@@ -150,6 +155,21 @@ async function handleApi(req, res, url, context) {
     if (method === "GET" && route(parts, "control", "projects")) return json(res, { projects: context.projects });
     if (method === "POST" && route(parts, "control", "projects")) return json(res, planProjectCreate(payload, context), 202);
     if (method === "GET" && parts.length === 3 && route(parts.slice(0, 2), "control", "projects")) return json(res, findById(context.projects, parts[2], "Project"));
+    if (method === "POST" && parts.length === 4 && route([parts[0], parts[1], parts[3]], "control", "projects", "update")) {
+      return json(res, planOrApplyProjectUpdate(parts[2], payload, context), 202);
+    }
+    if (method === "POST" && parts.length === 5 && route([parts[0], parts[1], parts[3], parts[4]], "control", "projects", "archive", "plan")) {
+      return json(res, planProjectArchive(parts[2], context), 202);
+    }
+    if (method === "POST" && parts.length === 5 && route([parts[0], parts[1], parts[3], parts[4]], "control", "projects", "archive", "apply")) {
+      return json(res, applyProjectArchive(parts[2], payload, context), 202);
+    }
+    if (method === "POST" && parts.length === 5 && route([parts[0], parts[1], parts[3], parts[4]], "control", "projects", "delete", "plan")) {
+      return json(res, planProjectDelete(parts[2], context), 202);
+    }
+    if (method === "POST" && parts.length === 5 && route([parts[0], parts[1], parts[3], parts[4]], "control", "projects", "delete", "apply")) {
+      return json(res, applyProjectDelete(parts[2], payload, context), 202);
+    }
 
     if (method === "GET" && route(parts, "control", "applications")) return json(res, { applications: context.applications });
     if (method === "POST" && route(parts, "control", "applications")) return json(res, planApplicationCreate(payload, context), 202);
@@ -204,7 +224,7 @@ async function handleToggleProject(req, res, projects) {
   }
   const enabled = String(payload.enabled || "") === "1";
   const state = readState();
-  state.projects[slug] = { enabled, updatedAt: new Date().toISOString() };
+  state.projects[slug] = { ...(state.projects[slug] || {}), enabled, archivedAt: enabled ? null : state.projects[slug]?.archivedAt || null, updatedAt: new Date().toISOString() };
   writeState(state);
   appendAudit({
     action: enabled ? "project.enable" : "project.disable",
@@ -216,6 +236,34 @@ async function handleToggleProject(req, res, projects) {
     summary: enabled ? "Project routing enabled locally." : "Project routing disabled locally.",
   });
   redirect(res, `/?section=projects#project-${encodeURIComponent(slug)}`);
+}
+
+async function handleProjectCommand(req, res, context) {
+  const payload = await readPayload(req);
+  const id = slugify(payload.id || payload.slug || payload.projectId || "");
+  const action = String(payload.action || "");
+  let operation;
+  try {
+    if (action === "archive") operation = applyProjectArchive(id, payload, context);
+    else if (action === "delete") operation = applyProjectDelete(id, payload, context);
+    else if (action === "update") operation = planOrApplyProjectUpdate(id, payload, context);
+    else throw new ValidationError("Unsupported project action.");
+  } catch (error) {
+    if (error instanceof ValidationError) {
+      json(res, { error: "validation_failed", message: error.message }, 422);
+      return;
+    }
+    if (error instanceof RejectedOperationError) {
+      json(res, { error: "operation_rejected", message: error.message }, 409);
+      return;
+    }
+    throw error;
+  }
+  if (wantsJson(req)) {
+    json(res, operation, 202);
+    return;
+  }
+  redirect(res, "/?section=projects");
 }
 
 async function handleApplicationCommand(req, res, context) {
@@ -289,7 +337,8 @@ function buildContext({ projects, state }) {
   const deployments = readDeployments();
   const audit = readAudit();
   const operations = readOperations();
-  const activeProjects = projects.filter((project) => project.enabled).length;
+  const activeProjects = projects.filter((project) => project.enabled && project.status === "active").length;
+  const archivedProjects = projects.filter((project) => project.status === "archived").length;
   const onlineApps = applications.filter((app) => app.status === "online").length;
   const resources = {
     mode: environment,
@@ -332,7 +381,7 @@ function buildContext({ projects, state }) {
     title: "Stexor Control Center",
     environment,
     modeEvidence: environment === "production" ? "production evidence requires verifyRemote" : "local evidence only",
-    projects: { total: projects.length, active: activeProjects, archived: 0 },
+    projects: { total: projects.length, active: activeProjects, archived: archivedProjects },
     applications: { total: applications.length, online: onlineApps, offline: applications.length - onlineApps },
     resources,
     subdomains: { total: subdomains.length, active: subdomains.filter((item) => item.status === "active").length },
@@ -369,23 +418,28 @@ function discoverProjects(state) {
     if (!slug || seen.has(slug) || ["public", "node-modules", "vendor"].includes(slug)) continue;
     const projectPath = path.join(projectsRoot, entry.name);
     if (!safeIsDirectory(projectPath)) continue;
+    const metadata = state.projects?.[slug] || {};
+    if (metadata.deletedAt) continue;
     const isPhp = isPhpProject(projectPath);
     const isNode = existsSync(path.join(projectPath, "package.json"));
     if (!isPhp && !isNode) continue;
     const type = isPhp ? "PHP" : "Node";
     const host = type === "Node" && nodeHosts.has(slug) ? nodeHosts.get(slug) : `${slug}${hostSuffix}`;
-    const enabled = state.projects?.[slug]?.enabled !== false;
+    const archived = Boolean(metadata.archivedAt);
+    const enabled = metadata.enabled !== false && !archived;
     projects.push({
       id: slug,
       slug,
-      name: humanName(entry.name),
+      name: metadata.displayName || humanName(entry.name),
       type,
       runtime: type.toLowerCase(),
       host,
       href: `https://${host}/`,
       enabled,
-      status: enabled ? "active" : "disabled",
-      summary: type === "PHP" ? "Apache/PHP local host" : "Node routed service",
+      status: archived ? "archived" : enabled ? "active" : "disabled",
+      archivedAt: metadata.archivedAt || null,
+      updatedAt: metadata.updatedAt || null,
+      summary: archived ? "Archived in local Control Center state" : type === "PHP" ? "Apache/PHP local host" : "Node routed service",
     });
     seen.add(slug);
   }
@@ -536,13 +590,26 @@ function renderProjectCard(project) {
     <div class="card-title"><strong>${escapeHtml(project.name)}</strong><em>${escapeHtml(project.type)}</em></div>
     <span class="host">${escapeHtml(project.host)}</span>
     <span>${escapeHtml(project.summary)}</span>
+    ${project.archivedAt ? `<span>Archived at ${escapeHtml(project.archivedAt)}</span>` : ""}
     <div class="project-actions">
-      <span class="state ${project.enabled ? "on" : "off"}">${project.enabled ? "Active" : "Off"}</span>
+      <span class="state ${project.enabled ? "on" : "off"}">${escapeHtml(humanName(project.status))}</span>
       ${project.enabled ? `<a class="button open" href="${escapeHtml(project.href)}">Open</a>` : `<span class="button muted">Open</span>`}
       <form method="post" action="/actions/toggle-project">
         <input type="hidden" name="slug" value="${escapeHtml(project.slug)}">
         <input type="hidden" name="enabled" value="${project.enabled ? "0" : "1"}">
         <button class="button ${project.enabled ? "danger" : "enable"}" type="submit">${project.enabled ? "Disable" : "Enable"}</button>
+      </form>
+      <form class="inline-confirm" method="post" action="/actions/project-command">
+        <input type="hidden" name="slug" value="${escapeHtml(project.slug)}">
+        <input type="hidden" name="action" value="archive">
+        <input name="confirm" value="" placeholder="ARCHIVE-PROJECT" aria-label="Archive confirmation for ${escapeHtml(project.slug)}">
+        <button class="button danger" type="submit">Archive</button>
+      </form>
+      <form class="inline-confirm" method="post" action="/actions/project-command">
+        <input type="hidden" name="slug" value="${escapeHtml(project.slug)}">
+        <input type="hidden" name="action" value="delete">
+        <input name="confirm" value="" placeholder="DELETE-PROJECT:${escapeHtml(project.slug)}" aria-label="Delete confirmation for ${escapeHtml(project.slug)}">
+        <button class="button danger" type="submit">Soft delete</button>
       </form>
     </div>
   </div>`;
@@ -620,6 +687,68 @@ function planProjectCreate(payload, context) {
   validateSlug(slug);
   appendAudit({ action: "project.create.plan", target: slug, environment: context.environment, risk: "low", result: "planned", dryRun: true, summary: "Project creation plan generated; no filesystem changes applied." });
   return operationPlan("project.create", context.environment, true, ["validate slug", "create project metadata", "create optional webspace", "link applications/domains/databases", "write audit event"], { projectId: slug });
+}
+
+function planOrApplyProjectUpdate(id, payload, context) {
+  const project = findById(context.projects, id, "Project");
+  const displayName = sanitizeDisplayName(payload.displayName || payload.name || project.name);
+  const details = { projectId: project.slug, displayName };
+  if (payload.confirm !== "UPDATE-PROJECT") {
+    appendAudit({ action: "project.update.plan", target: project.slug, environment: context.environment, risk: "low", result: "planned", dryRun: true, summary: "Project metadata update plan generated." });
+    return operationPlan("project.update", context.environment, true, ["validate project", "validate metadata", "prepare local state update", "write audit event"], details);
+  }
+  const state = readState();
+  state.projects[project.slug] = {
+    ...(state.projects[project.slug] || {}),
+    displayName,
+    updatedAt: new Date().toISOString(),
+  };
+  writeState(state);
+  appendAudit({ action: "project.update.apply", target: project.slug, environment: context.environment, risk: "low", result: "success", dryRun: false, summary: "Project display metadata updated in local Control Center state." });
+  return operationPlan("project.update.local", context.environment, false, ["validate project", "update local project metadata", "write audit event"], details);
+}
+
+function planProjectArchive(id, context) {
+  const project = findById(context.projects, id, "Project");
+  appendAudit({ action: "project.archive.plan", target: project.slug, environment: context.environment, risk: "medium", result: "planned", dryRun: true, summary: "Project archive plan generated; no filesystem changes applied." });
+  return operationPlan("project.archive", context.environment, true, ["validate project", "disable local routing", "mark project archived", "preserve filesystem and audit trail", "write audit event"], { projectId: project.slug, confirmationRequired: "ARCHIVE-PROJECT" });
+}
+
+function applyProjectArchive(id, payload, context) {
+  const project = findById(context.projects, id, "Project");
+  if (payload.confirm !== "ARCHIVE-PROJECT") throw new RejectedOperationError("Project archive requires confirm=ARCHIVE-PROJECT.");
+  const state = readState();
+  state.projects[project.slug] = {
+    ...(state.projects[project.slug] || {}),
+    enabled: false,
+    archivedAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+  writeState(state);
+  appendAudit({ action: "project.archive.apply", target: project.slug, environment: context.environment, risk: "medium", result: "success", dryRun: false, summary: "Project archived in local Control Center state; project files were not deleted." });
+  return operationPlan("project.archive.local", context.environment, false, ["validate confirmation", "disable local routing", "mark project archived", "preserve filesystem", "write audit event"], { projectId: project.slug, filesystemTouched: false });
+}
+
+function planProjectDelete(id, context) {
+  const project = findById(context.projects, id, "Project");
+  appendAudit({ action: "project.delete.plan", target: project.slug, environment: context.environment, risk: "high", result: "planned", dryRun: true, summary: "Project delete plan generated; local foundation only supports soft delete from inventory." });
+  return operationPlan("project.delete", context.environment, true, ["validate project", "require strong confirmation", "soft delete from Control Center inventory", "preserve filesystem and databases", "write audit event"], { projectId: project.slug, confirmationRequired: `DELETE-PROJECT:${project.slug}`, filesystemTouched: false });
+}
+
+function applyProjectDelete(id, payload, context) {
+  const project = findById(context.projects, id, "Project");
+  const expected = `DELETE-PROJECT:${project.slug}`;
+  if (payload.confirm !== expected) throw new RejectedOperationError(`Project soft delete requires confirm=${expected}.`);
+  const state = readState();
+  state.projects[project.slug] = {
+    ...(state.projects[project.slug] || {}),
+    enabled: false,
+    deletedAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+  writeState(state);
+  appendAudit({ action: "project.delete.apply", target: project.slug, environment: context.environment, risk: "high", result: "success", dryRun: false, summary: "Project soft deleted from local Control Center inventory; project files and databases were not deleted." });
+  return operationPlan("project.delete.local", context.environment, false, ["validate strong confirmation", "soft delete local inventory entry", "disable local routing", "preserve filesystem and databases", "write audit event"], { projectId: project.slug, filesystemTouched: false, databaseTouched: false });
 }
 
 function planApplicationCreate(payload, context) {
@@ -1079,6 +1208,12 @@ function sanitizeIdentifier(value) {
   return slugify(value).slice(0, 80);
 }
 
+function sanitizeDisplayName(value) {
+  const next = sanitizeMessage(value).replace(/\s+/g, " ").trim().slice(0, 80);
+  if (!next) throw new ValidationError("Project display name is required.");
+  return next;
+}
+
 function sanitizeRef(value) {
   return String(value || "").trim().replace(/[^a-zA-Z0-9._/@:-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 120) || "unknown";
 }
@@ -1225,7 +1360,7 @@ function escapeHtml(value) {
 
 function styleTag() {
   return `<style>
-:root{color-scheme:dark;--bg:#0b1117;--panel:#121a23;--panel-2:#172231;--text:#eef5ff;--muted:#9eb0c5;--line:#263547;--accent:#76e4c5;--accent-2:#8fb7ff;--danger:#ff8b8b;--warn:#f6d66f;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text)}a{color:inherit;text-decoration:none}button,input,select{font:inherit}.control-shell{display:grid;grid-template-columns:280px minmax(0,1fr);min-height:100vh}.sidebar{position:sticky;top:0;height:100vh;padding:18px;border-right:1px solid var(--line);background:#090f15;overflow:auto}.brand{display:flex;gap:12px;align-items:center;padding-bottom:18px;border-bottom:1px solid var(--line)}.brand-mark{display:grid;place-items:center;width:42px;height:42px;border:1px solid var(--accent);border-radius:8px;color:var(--accent);font-weight:900}.brand strong,.brand small{display:block}.brand small{color:var(--muted)}nav{display:grid;gap:8px;margin-top:18px}nav a{display:flex;align-items:center;gap:10px;min-height:40px;padding:8px 10px;border:1px solid transparent;border-radius:8px;color:var(--muted);font-weight:800}nav a span{display:inline-grid;place-items:center;min-width:38px;min-height:26px;border:1px solid var(--line);border-radius:7px;color:var(--accent-2);font-size:11px}nav a.active,nav a:hover{color:var(--text);background:var(--panel);border-color:var(--line)}.mode-card{margin-top:18px;padding:12px;border:1px solid var(--line);border-radius:8px;background:var(--panel)}.mode-card small{color:var(--muted)}.segmented{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:8px}.segmented a{display:grid;place-items:center;min-height:34px;border:1px solid var(--line);border-radius:8px;color:var(--muted);font-weight:850}.segmented a.selected{color:var(--accent);border-color:var(--accent)}.workspace{width:min(1240px,calc(100% - 32px));margin:0 auto;padding:28px 0 48px}.topbar{display:flex;justify-content:space-between;align-items:end;gap:18px;padding-bottom:22px;border-bottom:1px solid var(--line)}.eyebrow{margin:0 0 8px;color:var(--accent);font-size:13px;font-weight:850;letter-spacing:0}h1{margin:0;font-size:48px;line-height:1;letter-spacing:0}h2{margin:0;font-size:22px}h3{margin:18px 0 10px;color:var(--muted);font-size:13px;text-transform:uppercase;letter-spacing:0}.top-actions{display:flex;align-items:center;justify-content:end;gap:10px;flex-wrap:wrap}.switcher select{min-height:38px;border:1px solid var(--line);border-radius:8px;background:var(--panel);color:var(--text);padding:0 10px}.pill,.state{display:inline-flex;align-items:center;min-height:30px;padding:0 10px;border:1px solid var(--line);border-radius:999px;font-size:12px;font-weight:850;color:var(--muted)}.pill.info,.state.on{color:var(--accent);border-color:color-mix(in srgb,var(--accent) 55%,var(--line))}.pill.danger,.state.off{color:var(--warn);border-color:color-mix(in srgb,var(--warn) 55%,var(--line))}.metric-grid{display:grid;grid-template-columns:repeat(4,minmax(140px,1fr));gap:12px;margin-top:22px}.metric{min-height:96px;padding:16px;background:var(--panel);border:1px solid var(--line);border-radius:8px}.metric span{display:block;font-size:34px;font-weight:900;color:var(--accent-2)}.metric small{color:var(--muted)}.grid{display:grid;gap:16px;margin-top:22px}.grid.two{grid-template-columns:minmax(0,1.15fr) minmax(320px,.85fr)}.panel{margin-top:22px;padding:18px;background:var(--panel);border:1px solid var(--line);border-radius:8px}.grid .panel{margin-top:0}.panel-head{display:flex;gap:12px;align-items:center;margin-bottom:16px}.panel-head>span{display:inline-grid;place-items:center;width:42px;height:42px;border:1px solid var(--accent);border-radius:8px;color:var(--accent);font-size:12px;font-weight:900}.panel-head p{margin:4px 0 0;color:var(--muted);font-size:13px}.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:10px}.card{min-height:96px;padding:14px;background:var(--panel-2);border:1px solid var(--line);border-radius:8px;transition:transform .18s ease,border-color .18s ease,background .18s ease}a.card:hover,.project-card:hover{transform:translateY(-2px);border-color:var(--accent);background:#1a2838}.card strong{display:block;font-size:15px}.card span{display:block;margin-top:8px;color:var(--muted);font-size:13px;line-height:1.45}.card.compact{min-height:78px}.project-cards{margin-top:16px}.project-card{min-height:164px;display:flex;flex-direction:column;gap:4px}.project-card.is-off{opacity:.76}.card-title{display:flex;align-items:start;justify-content:space-between;gap:10px}.card-title em{padding:4px 8px;border:1px solid var(--line);border-radius:999px;color:var(--accent);font-size:11px;font-style:normal;font-weight:850}.card .host{color:var(--accent-2);font-weight:850;overflow-wrap:anywhere}.project-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:auto;padding-top:12px}.button{display:inline-flex;align-items:center;justify-content:center;min-height:34px;padding:0 12px;border:1px solid var(--line);border-radius:8px;background:#101820;color:var(--text);font-size:13px;font-weight:850;cursor:pointer}.button.open,.button.enable{border-color:color-mix(in srgb,var(--accent) 60%,var(--line));color:var(--accent)}.button.danger{border-color:color-mix(in srgb,var(--danger) 60%,var(--line));color:var(--danger)}.button.muted{color:var(--muted);cursor:not-allowed;opacity:.55}.status-list{display:grid;gap:10px;padding:0;margin:0;list-style:none}.status-list li{display:flex;justify-content:space-between;gap:16px;padding:12px;background:var(--panel-2);border:1px solid var(--line);border-radius:8px}.status-list span{color:var(--muted);text-align:right}.json-block,pre{overflow:auto;white-space:pre-wrap;margin:0;color:#dce8f7;line-height:1.55;font-size:14px}.empty{padding:18px;background:#101820;border:1px dashed var(--line);border-radius:8px;color:var(--muted)}.disabled{opacity:.45;pointer-events:none}.login-shell{display:grid;place-items:center;min-height:100vh;padding:24px}.login-panel{width:min(460px,100%);padding:24px;border:1px solid var(--line);border-radius:8px;background:var(--panel)}.login-panel h1{font-size:38px}.login-copy{color:var(--muted);line-height:1.55}.login-form{display:grid;gap:12px;margin-top:20px}.login-form label{color:var(--muted);font-size:13px;font-weight:850}.login-form input{min-height:42px;padding:0 12px;border:1px solid var(--line);border-radius:8px;background:#090f15;color:var(--text)}@media(max-width:980px){.control-shell{display:block}.sidebar{position:static;height:auto}.workspace{width:min(100% - 24px,1240px)}.topbar,.grid.two{display:block}.metric-grid{grid-template-columns:repeat(2,1fr)}h1{font-size:36px}.top-actions{justify-content:start;margin-top:14px}}
+:root{color-scheme:dark;--bg:#0b1117;--panel:#121a23;--panel-2:#172231;--text:#eef5ff;--muted:#9eb0c5;--line:#263547;--accent:#76e4c5;--accent-2:#8fb7ff;--danger:#ff8b8b;--warn:#f6d66f;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text)}a{color:inherit;text-decoration:none}button,input,select{font:inherit}.control-shell{display:grid;grid-template-columns:280px minmax(0,1fr);min-height:100vh}.sidebar{position:sticky;top:0;height:100vh;padding:18px;border-right:1px solid var(--line);background:#090f15;overflow:auto}.brand{display:flex;gap:12px;align-items:center;padding-bottom:18px;border-bottom:1px solid var(--line)}.brand-mark{display:grid;place-items:center;width:42px;height:42px;border:1px solid var(--accent);border-radius:8px;color:var(--accent);font-weight:900}.brand strong,.brand small{display:block}.brand small{color:var(--muted)}nav{display:grid;gap:8px;margin-top:18px}nav a{display:flex;align-items:center;gap:10px;min-height:40px;padding:8px 10px;border:1px solid transparent;border-radius:8px;color:var(--muted);font-weight:800}nav a span{display:inline-grid;place-items:center;min-width:38px;min-height:26px;border:1px solid var(--line);border-radius:7px;color:var(--accent-2);font-size:11px}nav a.active,nav a:hover{color:var(--text);background:var(--panel);border-color:var(--line)}.mode-card{margin-top:18px;padding:12px;border:1px solid var(--line);border-radius:8px;background:var(--panel)}.mode-card small{color:var(--muted)}.segmented{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:8px}.segmented a{display:grid;place-items:center;min-height:34px;border:1px solid var(--line);border-radius:8px;color:var(--muted);font-weight:850}.segmented a.selected{color:var(--accent);border-color:var(--accent)}.workspace{width:min(1240px,calc(100% - 32px));margin:0 auto;padding:28px 0 48px}.topbar{display:flex;justify-content:space-between;align-items:end;gap:18px;padding-bottom:22px;border-bottom:1px solid var(--line)}.eyebrow{margin:0 0 8px;color:var(--accent);font-size:13px;font-weight:850;letter-spacing:0}h1{margin:0;font-size:48px;line-height:1;letter-spacing:0}h2{margin:0;font-size:22px}h3{margin:18px 0 10px;color:var(--muted);font-size:13px;text-transform:uppercase;letter-spacing:0}.top-actions{display:flex;align-items:center;justify-content:end;gap:10px;flex-wrap:wrap}.switcher select{min-height:38px;border:1px solid var(--line);border-radius:8px;background:var(--panel);color:var(--text);padding:0 10px}.pill,.state{display:inline-flex;align-items:center;min-height:30px;padding:0 10px;border:1px solid var(--line);border-radius:999px;font-size:12px;font-weight:850;color:var(--muted)}.pill.info,.state.on{color:var(--accent);border-color:color-mix(in srgb,var(--accent) 55%,var(--line))}.pill.danger,.state.off{color:var(--warn);border-color:color-mix(in srgb,var(--warn) 55%,var(--line))}.metric-grid{display:grid;grid-template-columns:repeat(4,minmax(140px,1fr));gap:12px;margin-top:22px}.metric{min-height:96px;padding:16px;background:var(--panel);border:1px solid var(--line);border-radius:8px}.metric span{display:block;font-size:34px;font-weight:900;color:var(--accent-2)}.metric small{color:var(--muted)}.grid{display:grid;gap:16px;margin-top:22px}.grid.two{grid-template-columns:minmax(0,1.15fr) minmax(320px,.85fr)}.panel{margin-top:22px;padding:18px;background:var(--panel);border:1px solid var(--line);border-radius:8px}.grid .panel{margin-top:0}.panel-head{display:flex;gap:12px;align-items:center;margin-bottom:16px}.panel-head>span{display:inline-grid;place-items:center;width:42px;height:42px;border:1px solid var(--accent);border-radius:8px;color:var(--accent);font-size:12px;font-weight:900}.panel-head p{margin:4px 0 0;color:var(--muted);font-size:13px}.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:10px}.card{min-height:96px;padding:14px;background:var(--panel-2);border:1px solid var(--line);border-radius:8px;transition:transform .18s ease,border-color .18s ease,background .18s ease}a.card:hover,.project-card:hover{transform:translateY(-2px);border-color:var(--accent);background:#1a2838}.card strong{display:block;font-size:15px}.card span{display:block;margin-top:8px;color:var(--muted);font-size:13px;line-height:1.45}.card.compact{min-height:78px}.project-cards{margin-top:16px}.project-card{min-height:164px;display:flex;flex-direction:column;gap:4px}.project-card.is-off{opacity:.76}.card-title{display:flex;align-items:start;justify-content:space-between;gap:10px}.card-title em{padding:4px 8px;border:1px solid var(--line);border-radius:999px;color:var(--accent);font-size:11px;font-style:normal;font-weight:850}.card .host{color:var(--accent-2);font-weight:850;overflow-wrap:anywhere}.project-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:auto;padding-top:12px}.button{display:inline-flex;align-items:center;justify-content:center;min-height:34px;padding:0 12px;border:1px solid var(--line);border-radius:8px;background:#101820;color:var(--text);font-size:13px;font-weight:850;cursor:pointer}.button.open,.button.enable{border-color:color-mix(in srgb,var(--accent) 60%,var(--line));color:var(--accent)}.button.danger{border-color:color-mix(in srgb,var(--danger) 60%,var(--line));color:var(--danger)}.button.muted{color:var(--muted);cursor:not-allowed;opacity:.55}.status-list{display:grid;gap:10px;padding:0;margin:0;list-style:none}.status-list li{display:flex;justify-content:space-between;gap:16px;padding:12px;background:var(--panel-2);border:1px solid var(--line);border-radius:8px}.status-list span{color:var(--muted);text-align:right}.json-block,pre{overflow:auto;white-space:pre-wrap;margin:0;color:#dce8f7;line-height:1.55;font-size:14px}.empty{padding:18px;background:#101820;border:1px dashed var(--line);border-radius:8px;color:var(--muted)}.disabled{opacity:.45;pointer-events:none}.login-shell{display:grid;place-items:center;min-height:100vh;padding:24px}.login-panel{width:min(460px,100%);padding:24px;border:1px solid var(--line);border-radius:8px;background:var(--panel)}.login-panel h1{font-size:38px}.login-copy{color:var(--muted);line-height:1.55}.login-form{display:grid;gap:12px;margin-top:20px}.login-form label{color:var(--muted);font-size:13px;font-weight:850}.login-form input{min-height:42px;padding:0 12px;border:1px solid var(--line);border-radius:8px;background:#090f15;color:var(--text)}.inline-confirm{display:flex;align-items:center;gap:6px;flex-wrap:wrap}.inline-confirm input{width:190px;min-height:34px;padding:0 10px;border:1px solid var(--line);border-radius:8px;background:#090f15;color:var(--text);font-size:12px}@media(max-width:980px){.control-shell{display:block}.sidebar{position:static;height:auto}.workspace{width:min(100% - 24px,1240px)}.topbar,.grid.two{display:block}.metric-grid{grid-template-columns:repeat(2,1fr)}h1{font-size:36px}.top-actions{justify-content:start;margin-top:14px}}
 </style>`;
 }
 
