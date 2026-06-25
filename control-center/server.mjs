@@ -12,6 +12,7 @@ const operationsFile = process.env.PROJECT_OPERATIONS_FILE || "/var/www/project-
 const deploymentsFile = process.env.PROJECT_DEPLOYMENTS_FILE || "/var/www/project-state/deployments.jsonl";
 const backupRecordsFile = process.env.PROJECT_BACKUP_RECORDS_FILE || "/var/www/project-state/backups.jsonl";
 const resourceLimitsFile = process.env.PROJECT_RESOURCE_LIMITS_FILE || "/var/www/project-state/resource-limits.json";
+const securityPoliciesFile = process.env.PROJECT_SECURITY_POLICIES_FILE || "/var/www/project-state/security-policies.json";
 const webspacesFile = process.env.PROJECT_WEBSPACES_FILE || "/var/www/project-state/webspaces.json";
 const sessionKeysFile = process.env.CONTROL_CENTER_SESSION_KEYS_FILE || "";
 const adminPasswordFile = process.env.CONTROL_CENTER_ADMIN_PASSWORD_FILE || "";
@@ -111,6 +112,11 @@ const server = createServer(async (req, res) => {
 
     if (req.method === "POST" && url.pathname === "/actions/resource-command") {
       await handleResourceCommand(req, res, context);
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/actions/security-command") {
+      await handleSecurityCommand(req, res, context);
       return;
     }
 
@@ -222,6 +228,7 @@ async function handleApi(req, res, url, context) {
     if (method === "GET" && route(parts, "control", "resources", "summary")) return json(res, context.resources);
     if (method === "POST" && route(parts, "control", "resources", "limits")) return json(res, planResourceLimitUpdate(payload, context), 202);
     if (method === "GET" && route(parts, "control", "security", "summary")) return json(res, context.security);
+    if (method === "POST" && route(parts, "control", "security", "policy")) return json(res, planSecurityPolicyUpdate(payload, context), 202);
     if (method === "GET" && route(parts, "control", "backups", "summary")) return json(res, context.backups);
     if (method === "GET" && route(parts, "control", "backups", "records")) return json(res, { records: context.backupRecords });
     if (method === "POST" && route(parts, "control", "backups", "run")) return json(res, planBackupRun(payload, context), 202);
@@ -420,6 +427,31 @@ async function handleResourceCommand(req, res, context) {
   redirect(res, `/?section=resources#resources-${encodeURIComponent(operation.details?.projectId || operation.resourceLimit?.projectId || "")}`);
 }
 
+async function handleSecurityCommand(req, res, context) {
+  const payload = await readPayload(req);
+  const action = String(payload.action || "");
+  let operation;
+  try {
+    if (action === "policy") operation = planSecurityPolicyUpdate(payload, context);
+    else throw new ValidationError("Unsupported security action.");
+  } catch (error) {
+    if (error instanceof ValidationError) {
+      json(res, { error: "validation_failed", message: error.message }, 422);
+      return;
+    }
+    if (error instanceof RejectedOperationError) {
+      json(res, { error: "operation_rejected", message: error.message }, 409);
+      return;
+    }
+    throw error;
+  }
+  if (wantsJson(req)) {
+    json(res, operation, 202);
+    return;
+  }
+  redirect(res, `/?section=security#security-${encodeURIComponent(operation.details?.scope || operation.securityPolicy?.scope || "global")}`);
+}
+
 function buildContext({ projects, state }) {
   const applications = projects.map((project) => ({
     id: project.slug,
@@ -474,6 +506,7 @@ function buildContext({ projects, state }) {
   const deployments = readDeployments();
   const backupRecords = readBackupRecords();
   const storedResourceLimits = readResourceLimitsState();
+  const storedSecurityPolicies = readSecurityPoliciesState();
   const audit = readAudit();
   const operations = readOperations();
   const activeProjects = projects.filter((project) => project.enabled && project.status === "active").length;
@@ -494,14 +527,34 @@ function buildContext({ projects, state }) {
     projectLimits: projects.map((project) => resourceLimitRecord({ projectId: project.slug, ...(storedResourceLimits[project.slug] || {}) })),
     trend: "delegated-to-prometheus-and-cadvisor",
   };
-  const security = {
-    waf: "configured",
-    rateLimit: "configured",
-    cloudflareAccess: environment === "production" ? "requires-verify-remote" : "plan-only-local",
-    adminProtection: process.env.CONTROL_CENTER_REQUIRE_ADMIN === "1" ? "required" : "local-only",
+  const defaultSecurityPolicy = securityPolicyRecord({
+    scope: "global",
+    wafMode: "configured",
+    rateLimitTier: "configured",
+    adminProtection: authRequired ? "required" : "local-only",
     securityHeaders: "configured",
+    cloudflareAccess: environment === "production" ? "requires-verify-remote" : "plan-only-local",
     passkeyAdminAuth: "available-through-stexor-account-app",
-    recentAuditEvents: audit.slice(0, 8),
+    status: "discovered",
+    source: "control-center-default",
+  });
+  const securityPolicies = [
+    securityPolicyRecord({ ...defaultSecurityPolicy, ...(storedSecurityPolicies.global || {}) }),
+    ...Object.values(storedSecurityPolicies)
+      .filter((policy) => policy && policy.scope !== "global")
+      .map((policy) => securityPolicyRecord(policy)),
+  ];
+  const globalSecurityPolicy = securityPolicies[0];
+  const recentSecurityAudit = audit.filter((event) => /security|admin|auth|waf|rate|cloudflare/i.test(event.action || "")).slice(0, 8);
+  const security = {
+    waf: globalSecurityPolicy.wafMode,
+    rateLimit: globalSecurityPolicy.rateLimitTier,
+    cloudflareAccess: globalSecurityPolicy.cloudflareAccess,
+    adminProtection: globalSecurityPolicy.adminProtection,
+    securityHeaders: globalSecurityPolicy.securityHeaders,
+    passkeyAdminAuth: globalSecurityPolicy.passkeyAdminAuth,
+    policies: securityPolicies,
+    recentAuditEvents: recentSecurityAudit,
   };
   const backups = {
     mode: environment,
@@ -610,7 +663,7 @@ function renderControlCenter(context, params) {
     else if (section === "domains") body = renderDomains(context.domains, scoped(context.subdomains), context.projects);
     else if (section === "webspaces") body = renderWebspaces(scoped(context.webspaces), context.projects);
     else if (section === "resources") body = renderResources(context.resources, context.projects);
-    else if (section === "security") body = renderJsonPanel("Security", context.security);
+    else if (section === "security") body = renderSecurity(context.security);
     else if (section === "backups") body = renderBackups(context.backups, context.backupRecords);
     else if (section === "logs") body = renderAudit(context.audit, "Logs / Alerts minimal");
     else body = renderSettings(context);
@@ -878,6 +931,51 @@ function renderResourceLimitCard(limit) {
     <div class="card-title"><strong>${escapeHtml(limit.projectId)}</strong><em>${escapeHtml(limit.status)}</em></div>
     <span>CPU ${limit.cpuMillicores}m / RAM ${limit.memoryMb} MB / Disk ${limit.diskMb} MB</span>
     <span>${escapeHtml(limit.updatedAt ? `updated ${limit.updatedAt}` : "no local quota metadata yet")}</span>
+  </div>`;
+}
+
+function renderSecurity(security) {
+  const policies = security.policies || [];
+  const globalPolicy = policies.find((policy) => policy.scope === "global") || securityPolicyRecord({ scope: "global" });
+  const selectOptions = (name, selected, values, label) => `<select name="${escapeHtml(name)}" aria-label="${escapeHtml(label)}">${values.map((value) => `<option value="${escapeHtml(value)}" ${selected === value ? "selected" : ""}>${escapeHtml(value)}</option>`).join("")}</select>`;
+  return `<section class="grid two">
+    <div class="panel"><div class="panel-head"><span>SEC</span><div><h2>Security</h2><p>Security posture is managed as local policy metadata unless a verified production adapter applies it.</p></div></div>
+      <div class="cards">
+        <div class="card compact"><strong>WAF</strong><span>${escapeHtml(security.waf)}</span></div>
+        <div class="card compact"><strong>Rate limit</strong><span>${escapeHtml(security.rateLimit)}</span></div>
+        <div class="card compact"><strong>Cloudflare Access</strong><span>${escapeHtml(security.cloudflareAccess)}</span></div>
+        <div class="card compact"><strong>Admin Protection</strong><span>${escapeHtml(security.adminProtection)}</span></div>
+        <div class="card compact"><strong>Security Headers</strong><span>${escapeHtml(security.securityHeaders)}</span></div>
+        <div class="card compact"><strong>Passkey/Admin Auth</strong><span>${escapeHtml(security.passkeyAdminAuth)}</span></div>
+      </div>
+      <form method="post" action="/actions/security-command" class="inline-confirm security-form">
+        <input type="hidden" name="action" value="policy">
+        <input name="scope" value="${escapeHtml(globalPolicy.scope)}" aria-label="Security policy scope">
+        ${selectOptions("wafMode", globalPolicy.wafMode, ["configured", "monitor", "blocking", "disabled"], "WAF mode")}
+        ${selectOptions("rateLimitTier", globalPolicy.rateLimitTier, ["configured", "standard", "strict", "disabled"], "Rate limit tier")}
+        ${selectOptions("adminProtection", globalPolicy.adminProtection, ["local-only", "required", "cloudflare-access", "vpn-required"], "Admin protection")}
+        ${selectOptions("securityHeaders", globalPolicy.securityHeaders, ["configured", "strict", "report-only", "disabled"], "Security headers")}
+        ${selectOptions("cloudflareAccess", globalPolicy.cloudflareAccess, ["plan-only-local", "requires-verify-remote", "configured"], "Cloudflare Access status")}
+        ${selectOptions("passkeyAdminAuth", globalPolicy.passkeyAdminAuth, ["available-through-stexor-account-app", "required", "not-configured"], "Passkey admin auth")}
+        <input type="hidden" name="confirm" value="UPDATE-SECURITY-POLICY">
+        <button class="button enable" type="submit">Update policy</button>
+      </form>
+    </div>
+    <div class="panel"><div class="panel-head"><span>POL</span><div><h2>Policy Records</h2><p>Provider changes stay plan-only until explicit production adapters verify remote evidence.</p></div></div>
+      <div class="cards">${policies.map(renderSecurityPolicyCard).join("") || empty("No security policies", "Update the global policy to create local metadata.")}</div>
+    </div>
+    <div class="panel"><div class="panel-head"><span>AUD</span><div><h2>Recent Security Audit</h2><p>Filtered Control Center security, auth and admin events.</p></div></div>
+      ${security.recentAuditEvents?.length ? `<div class="cards">${security.recentAuditEvents.map((event) => `<div class="card compact"><strong>${escapeHtml(event.action || "event")}</strong><span>${escapeHtml(`${event.timestamp || ""} / ${event.result || "unknown"}`)}</span></div>`).join("")}</div>` : empty("No security events", "Security policy and admin auth events will appear here after activity.")}
+    </div>
+  </section>`;
+}
+
+function renderSecurityPolicyCard(policy) {
+  return `<div id="security-${escapeHtml(policy.scope)}" class="card compact">
+    <div class="card-title"><strong>${escapeHtml(policy.scope)}</strong><em>${escapeHtml(policy.status)}</em></div>
+    <span>WAF ${escapeHtml(policy.wafMode)} / Rate ${escapeHtml(policy.rateLimitTier)} / Admin ${escapeHtml(policy.adminProtection)}</span>
+    <span>Headers ${escapeHtml(policy.securityHeaders)} / Access ${escapeHtml(policy.cloudflareAccess)} / Auth ${escapeHtml(policy.passkeyAdminAuth)}</span>
+    <span>${escapeHtml(policy.updatedAt ? `updated ${policy.updatedAt}` : policy.source || "control-center-default")}</span>
   </div>`;
 }
 
@@ -1214,6 +1312,37 @@ function planResourceLimitUpdate(payload, context) {
   return operationPlan("resources.limits", context.environment, true, ["validate project", "validate resource limits", "prepare quota metadata update", "require apply confirmation", "write audit event"], { ...details, dockerTouched: false, confirmationRequired: "UPDATE-RESOURCE-LIMITS" });
 }
 
+function planSecurityPolicyUpdate(payload, context) {
+  const scope = sanitizeIdentifier(payload.scope || "global") || "global";
+  if (scope !== "global") findById(context.projects, scope, "Project");
+  const details = securityPolicyRecord({
+    scope,
+    wafMode: choice(String(payload.wafMode || "configured"), ["configured", "monitor", "blocking", "disabled"], "WAF mode"),
+    rateLimitTier: choice(String(payload.rateLimitTier || "configured"), ["configured", "standard", "strict", "disabled"], "rate limit tier"),
+    adminProtection: choice(String(payload.adminProtection || "local-only"), ["local-only", "required", "cloudflare-access", "vpn-required"], "admin protection"),
+    securityHeaders: choice(String(payload.securityHeaders || "configured"), ["configured", "strict", "report-only", "disabled"], "security headers"),
+    cloudflareAccess: choice(String(payload.cloudflareAccess || "plan-only-local"), ["plan-only-local", "requires-verify-remote", "configured"], "Cloudflare Access status"),
+    passkeyAdminAuth: choice(String(payload.passkeyAdminAuth || "available-through-stexor-account-app"), ["available-through-stexor-account-app", "required", "not-configured"], "passkey admin auth"),
+    status: "configured",
+    source: "control-center-state",
+  });
+  if (payload.confirm === "UPDATE-SECURITY-POLICY") {
+    const state = readSecurityPoliciesState();
+    state[scope] = {
+      ...(state[scope] || {}),
+      ...details,
+      updatedAt: new Date().toISOString(),
+      createdAt: state[scope]?.createdAt || new Date().toISOString(),
+    };
+    writeSecurityPoliciesState(state);
+    appendAudit({ action: "security.policy.apply", target: scope, environment: context.environment, risk: "medium", result: "success", dryRun: false, summary: "Security policy metadata updated locally; no provider or firewall mutation executed." });
+    const operation = operationPlan("security.policy.local", context.environment, false, ["validate scope", "validate security posture fields", "update local policy metadata", "leave providers and firewall unchanged", "write audit event"], { ...state[scope], providerTouched: false, productionEvidence: false });
+    return { ...operation, securityPolicy: state[scope] };
+  }
+  appendAudit({ action: "security.policy.plan", target: scope, environment: context.environment, risk: "medium", result: "planned", dryRun: true, summary: "Security policy update plan generated; no provider or firewall mutation executed." });
+  return operationPlan("security.policy", context.environment, true, ["validate scope", "validate security posture fields", "prepare local policy update", "require apply confirmation", "write audit event"], { ...details, providerTouched: false, productionEvidence: false, confirmationRequired: "UPDATE-SECURITY-POLICY" });
+}
+
 function planBackupRun(payload, context) {
   const scope = sanitizeIdentifier(payload.scope || "all") || "all";
   appendAudit({ action: "backup.run.plan", target: scope, environment: context.environment, risk: "medium", result: "planned", dryRun: true, summary: "Manual backup plan generated." });
@@ -1361,6 +1490,20 @@ function readResourceLimitsState() {
 function writeResourceLimitsState(state) {
   mkdirSync(path.dirname(resourceLimitsFile), { recursive: true });
   writeFileSync(resourceLimitsFile, `${JSON.stringify(sanitizeEvent(state), null, 2)}\n`);
+}
+
+function readSecurityPoliciesState() {
+  try {
+    const parsed = JSON.parse(readFileSync(securityPoliciesFile, "utf8"));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeSecurityPoliciesState(state) {
+  mkdirSync(path.dirname(securityPoliciesFile), { recursive: true });
+  writeFileSync(securityPoliciesFile, `${JSON.stringify(sanitizeEvent(state), null, 2)}\n`);
 }
 
 function appendDeployment(deployment) {
@@ -1593,6 +1736,39 @@ function resourceLimitRecord({ projectId, cpuMillicores = 0, memoryMb = 0, diskM
     status: status || (Number(cpuMillicores || 0) || Number(memoryMb || 0) || Number(diskMb || 0) ? "configured" : "not-set"),
     source: "control-center-state",
     dockerTouched: false,
+    createdAt,
+    updatedAt,
+  });
+}
+
+function securityPolicyRecord({
+  scope = "global",
+  wafMode = "configured",
+  rateLimitTier = "configured",
+  adminProtection = "local-only",
+  securityHeaders = "configured",
+  cloudflareAccess = "plan-only-local",
+  passkeyAdminAuth = "available-through-stexor-account-app",
+  status = "configured",
+  source = "control-center-state",
+  createdAt = null,
+  updatedAt = null,
+} = {}) {
+  const cleanScope = sanitizeIdentifier(scope || "global") || "global";
+  return sanitizeEvent({
+    id: cleanScope,
+    scope: cleanScope,
+    environment: "local",
+    wafMode,
+    rateLimitTier,
+    adminProtection,
+    securityHeaders,
+    cloudflareAccess,
+    passkeyAdminAuth,
+    status,
+    source,
+    providerTouched: false,
+    productionEvidence: false,
     createdAt,
     updatedAt,
   });

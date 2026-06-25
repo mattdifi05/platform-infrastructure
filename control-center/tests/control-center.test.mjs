@@ -22,6 +22,7 @@ const operationsFile = path.join(stateDir, "operations.jsonl");
 const deploymentsFile = path.join(stateDir, "deployments.jsonl");
 const backupRecordsFile = path.join(stateDir, "backups.jsonl");
 const resourceLimitsFile = path.join(stateDir, "resource-limits.json");
+const securityPoliciesFile = path.join(stateDir, "security-policies.json");
 const webspacesFile = path.join(stateDir, "webspaces.json");
 
 test("Stexor Control Center local foundation", async (t) => {
@@ -41,6 +42,7 @@ test("Stexor Control Center local foundation", async (t) => {
       PROJECT_DEPLOYMENTS_FILE: deploymentsFile,
       PROJECT_BACKUP_RECORDS_FILE: backupRecordsFile,
       PROJECT_RESOURCE_LIMITS_FILE: resourceLimitsFile,
+      PROJECT_SECURITY_POLICIES_FILE: securityPoliciesFile,
       PROJECT_WEBSPACES_FILE: webspacesFile,
       PROJECTS_HOST: "projects.localhost.com",
       PROJECT_HOST_SUFFIX: ".localhost.com",
@@ -348,6 +350,75 @@ test("Stexor Control Center local foundation", async (t) => {
   assert.doesNotMatch(resourceLimitText, /resource-limit-secret-should-not-leak/);
   assert.equal(JSON.parse(resourceLimitText).stexor.diskMb, 2048);
 
+  const securityHtml = await getText(`${baseUrl}/?section=security`);
+  assert.match(securityHtml, /Security/);
+  assert.match(securityHtml, /WAF/);
+  assert.match(securityHtml, /Rate limit/);
+  assert.match(securityHtml, /Cloudflare Access/);
+  assert.match(securityHtml, /Admin Protection/);
+  assert.match(securityHtml, /Security Headers/);
+  assert.match(securityHtml, /Update policy/);
+
+  const invalidSecurityPolicy = await postJson(`${baseUrl}/control/security/policy`, {
+    scope: "global",
+    wafMode: "evil",
+  });
+  assert.equal(invalidSecurityPolicy.status, 422);
+  assert.match(invalidSecurityPolicy.body.message, /WAF mode/);
+
+  const securityPolicyPlan = await postJson(`${baseUrl}/control/security/policy`, {
+    scope: "global",
+    wafMode: "monitor",
+    rateLimitTier: "standard",
+    adminProtection: "local-only",
+    securityHeaders: "report-only",
+    cloudflareAccess: "plan-only-local",
+    passkeyAdminAuth: "available-through-stexor-account-app",
+    secret: "security-secret-should-not-leak",
+  });
+  assert.equal(securityPolicyPlan.status, 202);
+  assert.equal(securityPolicyPlan.body.type, "security.policy");
+  assert.equal(securityPolicyPlan.body.dryRun, true);
+  assert.equal(securityPolicyPlan.body.details.confirmationRequired, "UPDATE-SECURITY-POLICY");
+  assert.equal(securityPolicyPlan.body.details.providerTouched, false);
+  assert.equal(securityPolicyPlan.body.details.productionEvidence, false);
+  assert.doesNotMatch(JSON.stringify(securityPolicyPlan.body), /security-secret-should-not-leak/);
+
+  const securityPolicyApply = await postJson(`${baseUrl}/actions/security-command`, {
+    action: "policy",
+    scope: "global",
+    wafMode: "blocking",
+    rateLimitTier: "strict",
+    adminProtection: "required",
+    securityHeaders: "strict",
+    cloudflareAccess: "plan-only-local",
+    passkeyAdminAuth: "required",
+    confirm: "UPDATE-SECURITY-POLICY",
+    secret: "security-secret-should-not-leak",
+  });
+  assert.equal(securityPolicyApply.status, 202);
+  assert.equal(securityPolicyApply.body.type, "security.policy.local");
+  assert.equal(securityPolicyApply.body.dryRun, false);
+  assert.equal(securityPolicyApply.body.securityPolicy.scope, "global");
+  assert.equal(securityPolicyApply.body.securityPolicy.wafMode, "blocking");
+  assert.equal(securityPolicyApply.body.securityPolicy.rateLimitTier, "strict");
+  assert.equal(securityPolicyApply.body.securityPolicy.adminProtection, "required");
+  assert.equal(securityPolicyApply.body.securityPolicy.securityHeaders, "strict");
+  assert.equal(securityPolicyApply.body.securityPolicy.providerTouched, false);
+  assert.equal(securityPolicyApply.body.securityPolicy.productionEvidence, false);
+  assert.doesNotMatch(JSON.stringify(securityPolicyApply.body), /security-secret-should-not-leak/);
+
+  const securitySummary = await getJson(`${baseUrl}/control/security/summary`);
+  assert.equal(securitySummary.waf, "blocking");
+  assert.equal(securitySummary.rateLimit, "strict");
+  assert.equal(securitySummary.adminProtection, "required");
+  assert.equal(securitySummary.securityHeaders, "strict");
+  assert.equal(securitySummary.policies.some((policy) => policy.scope === "global" && policy.providerTouched === false && policy.productionEvidence === false), true);
+  assert.equal(existsSync(securityPoliciesFile), true);
+  const securityPoliciesText = readFileSync(securityPoliciesFile, "utf8");
+  assert.doesNotMatch(securityPoliciesText, /security-secret-should-not-leak/);
+  assert.equal(JSON.parse(securityPoliciesText).global.wafMode, "blocking");
+
   const deployPlan = await postJson(`${baseUrl}/control/applications/stexor/deploy`, {
     branch: "main",
     commit: "abc1234",
@@ -526,6 +597,7 @@ test("Stexor Control Center admin guard", async (t) => {
       PROJECT_DEPLOYMENTS_FILE: deploymentsFile,
       PROJECT_BACKUP_RECORDS_FILE: backupRecordsFile,
       PROJECT_RESOURCE_LIMITS_FILE: resourceLimitsFile,
+      PROJECT_SECURITY_POLICIES_FILE: securityPoliciesFile,
       PROJECT_WEBSPACES_FILE: webspacesFile,
       PROJECTS_HOST: "projects.localhost.com",
       PROJECT_HOST_SUFFIX: ".localhost.com",
