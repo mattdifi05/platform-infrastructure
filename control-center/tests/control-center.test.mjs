@@ -23,6 +23,8 @@ const deploymentsFile = path.join(stateDir, "deployments.jsonl");
 const backupRecordsFile = path.join(stateDir, "backups.jsonl");
 const resourceLimitsFile = path.join(stateDir, "resource-limits.json");
 const securityPoliciesFile = path.join(stateDir, "security-policies.json");
+const alertsFile = path.join(stateDir, "alerts.json");
+const notificationChannelsFile = path.join(stateDir, "notification-channels.json");
 const webspacesFile = path.join(stateDir, "webspaces.json");
 
 test("Stexor Control Center local foundation", async (t) => {
@@ -43,6 +45,8 @@ test("Stexor Control Center local foundation", async (t) => {
       PROJECT_BACKUP_RECORDS_FILE: backupRecordsFile,
       PROJECT_RESOURCE_LIMITS_FILE: resourceLimitsFile,
       PROJECT_SECURITY_POLICIES_FILE: securityPoliciesFile,
+      PROJECT_ALERTS_FILE: alertsFile,
+      PROJECT_NOTIFICATION_CHANNELS_FILE: notificationChannelsFile,
       PROJECT_WEBSPACES_FILE: webspacesFile,
       PROJECTS_HOST: "projects.localhost.com",
       PROJECT_HOST_SUFFIX: ".localhost.com",
@@ -419,6 +423,94 @@ test("Stexor Control Center local foundation", async (t) => {
   assert.doesNotMatch(securityPoliciesText, /security-secret-should-not-leak/);
   assert.equal(JSON.parse(securityPoliciesText).global.wafMode, "blocking");
 
+  const logsHtml = await getText(`${baseUrl}/?section=logs`);
+  assert.match(logsHtml, /Logs \/ Alerts/);
+  assert.match(logsHtml, /Open alerts/);
+  assert.match(logsHtml, /Recent errors/);
+  assert.match(logsHtml, /Notification Channels/);
+  assert.match(logsHtml, /Email/);
+  assert.match(logsHtml, /Discord/);
+  assert.match(logsHtml, /Telegram/);
+  assert.match(logsHtml, /Record alert/);
+
+  const invalidAlert = await postJson(`${baseUrl}/control/alerts/record`, {
+    service: "waf",
+    severity: "panic",
+  });
+  assert.equal(invalidAlert.status, 422);
+  assert.match(invalidAlert.body.message, /alert severity/);
+
+  const alertPlan = await postJson(`${baseUrl}/control/alerts/record`, {
+    service: "waf",
+    severity: "critical",
+    summary: "WAF block spike",
+    secret: "alert-secret-should-not-leak",
+  });
+  assert.equal(alertPlan.status, 202);
+  assert.equal(alertPlan.body.type, "alert.record");
+  assert.equal(alertPlan.body.dryRun, true);
+  assert.equal(alertPlan.body.details.deliveryAttempted, false);
+  assert.equal(alertPlan.body.details.productionEvidence, false);
+  assert.equal(alertPlan.body.details.confirmationRequired, "RECORD-ALERT");
+  assert.doesNotMatch(JSON.stringify(alertPlan.body), /alert-secret-should-not-leak/);
+
+  const alertApply = await postJson(`${baseUrl}/actions/alert-command`, {
+    action: "record",
+    service: "waf",
+    severity: "critical",
+    summary: "WAF block spike",
+    confirm: "RECORD-ALERT",
+    secret: "alert-secret-should-not-leak",
+  });
+  assert.equal(alertApply.status, 202);
+  assert.equal(alertApply.body.type, "alert.record.local");
+  assert.equal(alertApply.body.dryRun, false);
+  assert.equal(alertApply.body.alert.service, "waf");
+  assert.equal(alertApply.body.alert.status, "open");
+  assert.equal(alertApply.body.alert.deliveryAttempted, false);
+  assert.equal(alertApply.body.alert.productionEvidence, false);
+  assert.doesNotMatch(JSON.stringify(alertApply.body), /alert-secret-should-not-leak/);
+
+  const channelApply = await postJson(`${baseUrl}/actions/alert-command`, {
+    action: "channel",
+    channel: "email",
+    status: "configured",
+    deliveryMode: "secret-file",
+    confirm: "UPDATE-NOTIFICATION-CHANNEL",
+    secret: "alert-secret-should-not-leak",
+  });
+  assert.equal(channelApply.status, 202);
+  assert.equal(channelApply.body.type, "alerts.channel.local");
+  assert.equal(channelApply.body.notificationChannel.channel, "email");
+  assert.equal(channelApply.body.notificationChannel.status, "configured");
+  assert.equal(channelApply.body.notificationChannel.plainValueExposed, false);
+  assert.equal(channelApply.body.notificationChannel.deliveryAttempted, false);
+
+  const logsSummary = await getJson(`${baseUrl}/control/logs/summary`);
+  assert.equal(logsSummary.openAlerts.some((alert) => alert.id === alertApply.body.alert.id), true);
+  assert.equal(logsSummary.notificationChannels.some((channel) => channel.channel === "email" && channel.status === "configured"), true);
+  assert.doesNotMatch(JSON.stringify(logsSummary), /alert-secret-should-not-leak/);
+
+  const alerts = await getJson(`${baseUrl}/control/alerts`);
+  assert.equal(alerts.alerts.some((alert) => alert.id === alertApply.body.alert.id), true);
+  assert.equal(alerts.notificationChannels.some((channel) => channel.channel === "email"), true);
+
+  const resolveAlert = await postJson(`${baseUrl}/control/alerts/${alertApply.body.alert.id}/resolve`, {
+    confirm: "RESOLVE-ALERT",
+    secret: "alert-secret-should-not-leak",
+  });
+  assert.equal(resolveAlert.status, 202);
+  assert.equal(resolveAlert.body.type, "alert.resolve.local");
+  assert.equal(resolveAlert.body.alert.status, "resolved");
+  assert.equal(existsSync(alertsFile), true);
+  assert.equal(existsSync(notificationChannelsFile), true);
+  const alertsText = readFileSync(alertsFile, "utf8");
+  const notificationChannelsText = readFileSync(notificationChannelsFile, "utf8");
+  assert.doesNotMatch(alertsText, /alert-secret-should-not-leak/);
+  assert.doesNotMatch(notificationChannelsText, /alert-secret-should-not-leak/);
+  assert.equal(JSON.parse(alertsText)[alertApply.body.alert.id].status, "resolved");
+  assert.equal(JSON.parse(notificationChannelsText).email.status, "configured");
+
   const deployPlan = await postJson(`${baseUrl}/control/applications/stexor/deploy`, {
     branch: "main",
     commit: "abc1234",
@@ -598,6 +690,8 @@ test("Stexor Control Center admin guard", async (t) => {
       PROJECT_BACKUP_RECORDS_FILE: backupRecordsFile,
       PROJECT_RESOURCE_LIMITS_FILE: resourceLimitsFile,
       PROJECT_SECURITY_POLICIES_FILE: securityPoliciesFile,
+      PROJECT_ALERTS_FILE: alertsFile,
+      PROJECT_NOTIFICATION_CHANNELS_FILE: notificationChannelsFile,
       PROJECT_WEBSPACES_FILE: webspacesFile,
       PROJECTS_HOST: "projects.localhost.com",
       PROJECT_HOST_SUFFIX: ".localhost.com",

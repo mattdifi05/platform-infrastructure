@@ -288,6 +288,8 @@ services:
       PROJECT_BACKUP_RECORDS_FILE: /var/www/project-state/backups.jsonl
       PROJECT_RESOURCE_LIMITS_FILE: /var/www/project-state/resource-limits.json
       PROJECT_SECURITY_POLICIES_FILE: /var/www/project-state/security-policies.json
+      PROJECT_ALERTS_FILE: /var/www/project-state/alerts.json
+      PROJECT_NOTIFICATION_CHANNELS_FILE: /var/www/project-state/notification-channels.json
       PROJECT_WEBSPACES_FILE: /var/www/project-state/webspaces.json
       PROJECTS_HOST: ${PROJECTS_HOST:-projects.localhost.com}
       PROJECT_HOST_SUFFIX: ${PROJECT_HOST_SUFFIX:-.localhost.com}

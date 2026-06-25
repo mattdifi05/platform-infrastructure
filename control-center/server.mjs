@@ -13,6 +13,8 @@ const deploymentsFile = process.env.PROJECT_DEPLOYMENTS_FILE || "/var/www/projec
 const backupRecordsFile = process.env.PROJECT_BACKUP_RECORDS_FILE || "/var/www/project-state/backups.jsonl";
 const resourceLimitsFile = process.env.PROJECT_RESOURCE_LIMITS_FILE || "/var/www/project-state/resource-limits.json";
 const securityPoliciesFile = process.env.PROJECT_SECURITY_POLICIES_FILE || "/var/www/project-state/security-policies.json";
+const alertsFile = process.env.PROJECT_ALERTS_FILE || "/var/www/project-state/alerts.json";
+const notificationChannelsFile = process.env.PROJECT_NOTIFICATION_CHANNELS_FILE || "/var/www/project-state/notification-channels.json";
 const webspacesFile = process.env.PROJECT_WEBSPACES_FILE || "/var/www/project-state/webspaces.json";
 const sessionKeysFile = process.env.CONTROL_CENTER_SESSION_KEYS_FILE || "";
 const adminPasswordFile = process.env.CONTROL_CENTER_ADMIN_PASSWORD_FILE || "";
@@ -117,6 +119,11 @@ const server = createServer(async (req, res) => {
 
     if (req.method === "POST" && url.pathname === "/actions/security-command") {
       await handleSecurityCommand(req, res, context);
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/actions/alert-command") {
+      await handleAlertCommand(req, res, context);
       return;
     }
 
@@ -229,6 +236,13 @@ async function handleApi(req, res, url, context) {
     if (method === "POST" && route(parts, "control", "resources", "limits")) return json(res, planResourceLimitUpdate(payload, context), 202);
     if (method === "GET" && route(parts, "control", "security", "summary")) return json(res, context.security);
     if (method === "POST" && route(parts, "control", "security", "policy")) return json(res, planSecurityPolicyUpdate(payload, context), 202);
+    if (method === "GET" && route(parts, "control", "logs", "summary")) return json(res, context.logsAlerts);
+    if (method === "GET" && route(parts, "control", "alerts")) return json(res, { alerts: context.alertRecords, notificationChannels: context.notificationChannels });
+    if (method === "POST" && route(parts, "control", "alerts", "record")) return json(res, planAlertRecord(payload, context), 202);
+    if (method === "POST" && parts.length === 4 && route([parts[0], parts[1], parts[3]], "control", "alerts", "resolve")) {
+      return json(res, planAlertResolution(parts[2], payload, context), 202);
+    }
+    if (method === "POST" && route(parts, "control", "notifications", "channel")) return json(res, planNotificationChannelUpdate(payload, context), 202);
     if (method === "GET" && route(parts, "control", "backups", "summary")) return json(res, context.backups);
     if (method === "GET" && route(parts, "control", "backups", "records")) return json(res, { records: context.backupRecords });
     if (method === "POST" && route(parts, "control", "backups", "run")) return json(res, planBackupRun(payload, context), 202);
@@ -452,6 +466,33 @@ async function handleSecurityCommand(req, res, context) {
   redirect(res, `/?section=security#security-${encodeURIComponent(operation.details?.scope || operation.securityPolicy?.scope || "global")}`);
 }
 
+async function handleAlertCommand(req, res, context) {
+  const payload = await readPayload(req);
+  const action = String(payload.action || "");
+  let operation;
+  try {
+    if (action === "record") operation = planAlertRecord(payload, context);
+    else if (action === "resolve") operation = planAlertResolution(payload.id || payload.alertId || "", payload, context);
+    else if (action === "channel") operation = planNotificationChannelUpdate(payload, context);
+    else throw new ValidationError("Unsupported alert action.");
+  } catch (error) {
+    if (error instanceof ValidationError) {
+      json(res, { error: "validation_failed", message: error.message }, 422);
+      return;
+    }
+    if (error instanceof RejectedOperationError) {
+      json(res, { error: "operation_rejected", message: error.message }, 409);
+      return;
+    }
+    throw error;
+  }
+  if (wantsJson(req)) {
+    json(res, operation, 202);
+    return;
+  }
+  redirect(res, `/?section=logs#alert-${encodeURIComponent(operation.details?.alertId || operation.alert?.id || operation.notificationChannel?.channel || "")}`);
+}
+
 function buildContext({ projects, state }) {
   const applications = projects.map((project) => ({
     id: project.slug,
@@ -507,6 +548,8 @@ function buildContext({ projects, state }) {
   const backupRecords = readBackupRecords();
   const storedResourceLimits = readResourceLimitsState();
   const storedSecurityPolicies = readSecurityPoliciesState();
+  const storedAlerts = readAlertsState();
+  const storedNotificationChannels = readNotificationChannelsState();
   const audit = readAudit();
   const operations = readOperations();
   const activeProjects = projects.filter((project) => project.enabled && project.status === "active").length;
@@ -564,6 +607,25 @@ function buildContext({ projects, state }) {
     rpoRto: "reported-by-production-go-no-go-evidence",
     latest: backupRecords.slice(0, 5),
   };
+  const alertRecords = Object.values(storedAlerts)
+    .filter((alert) => alert && !alert.deletedAt)
+    .map((alert) => alertRecord(alert))
+    .sort((a, b) => String(b.updatedAt || b.createdAt).localeCompare(String(a.updatedAt || a.createdAt)));
+  const notificationChannels = defaultNotificationChannels().map((channel) => notificationChannelRecord({
+    ...channel,
+    ...(storedNotificationChannels[channel.channel] || {}),
+  }));
+  const openAlerts = alertRecords.filter((alert) => ["open", "firing"].includes(alert.status));
+  const logsAlerts = {
+    mode: environment,
+    source: "local-control-plane",
+    openAlerts,
+    recentErrors: recentErrorRecords(audit, operations),
+    notificationChannels,
+    detailedLogs: "Use authenticated Grafana/Loki dashboards or Docker logs from the operator shell.",
+    alertRouting: "Prometheus routes to internal Alertmanager, then to worker-notifications with secret-backed delivery.",
+    rawConsoles: "Prometheus, Alertmanager and Traefik raw consoles are intentionally not linked from Projects.",
+  };
   const domains = [{
     id: "local",
     environment: "local",
@@ -580,7 +642,7 @@ function buildContext({ projects, state }) {
     applications: { total: applications.length, online: onlineApps, offline: applications.length - onlineApps },
     resources,
     subdomains: { total: subdomains.length, active: subdomains.filter((item) => item.status === "active").length },
-    alerts: { open: 0, source: "Alertmanager summary link" },
+    alerts: { open: openAlerts.length, source: "Control Center local alert metadata and Alertmanager evidence tooling" },
     deployments: { latest: deployments.slice(0, 5) },
     backups,
   };
@@ -594,6 +656,9 @@ function buildContext({ projects, state }) {
     resources,
     security,
     backups,
+    logsAlerts,
+    alertRecords,
+    notificationChannels,
     backupRecords,
     deployments,
     operations,
@@ -665,7 +730,7 @@ function renderControlCenter(context, params) {
     else if (section === "resources") body = renderResources(context.resources, context.projects);
     else if (section === "security") body = renderSecurity(context.security);
     else if (section === "backups") body = renderBackups(context.backups, context.backupRecords);
-    else if (section === "logs") body = renderAudit(context.audit, "Logs / Alerts minimal");
+    else if (section === "logs") body = renderLogsAlerts(context.logsAlerts);
     else body = renderSettings(context);
   } else {
     if (section === "audit") body = renderAudit(context.audit, "Audit Log");
@@ -1041,6 +1106,69 @@ function renderBackupRecord(record) {
   </div>`;
 }
 
+function renderLogsAlerts(logsAlerts) {
+  const openAlerts = logsAlerts.openAlerts || [];
+  const recentErrors = logsAlerts.recentErrors || [];
+  const channels = logsAlerts.notificationChannels || [];
+  return `<section class="grid two">
+    <div class="panel"><div class="panel-head"><span>LOG</span><div><h2>Logs / Alerts</h2><p>Minimal operational view. Raw internal consoles stay off the public Projects surface.</p></div></div>
+      <div class="cards">
+        <div class="card compact"><strong>Open alerts</strong><span>${openAlerts.length} active local records</span></div>
+        <div class="card compact"><strong>Recent errors</strong><span>${recentErrors.length} failed operations or audit events</span></div>
+        <div class="card compact"><strong>Detailed logs</strong><span>${escapeHtml(logsAlerts.detailedLogs)}</span></div>
+        <div class="card compact"><strong>Alert routing</strong><span>${escapeHtml(logsAlerts.alertRouting)}</span></div>
+      </div>
+      <form method="post" action="/actions/alert-command" class="inline-confirm alert-form">
+        <input type="hidden" name="action" value="record">
+        <input name="service" value="platform" aria-label="Alert service">
+        <select name="severity" aria-label="Alert severity"><option value="info">info</option><option value="warning" selected>warning</option><option value="critical">critical</option></select>
+        <input name="summary" value="note" aria-label="Alert summary">
+        <input type="hidden" name="confirm" value="RECORD-ALERT">
+        <button class="button enable" type="submit">Record alert</button>
+      </form>
+      <form method="post" action="/actions/alert-command" class="inline-confirm alert-form">
+        <input type="hidden" name="action" value="channel">
+        <select name="channel" aria-label="Notification channel"><option value="email">email</option><option value="discord">discord</option><option value="telegram">telegram</option></select>
+        <select name="status" aria-label="Notification status"><option value="not-configured">not-configured</option><option value="requires-secret-file">requires-secret-file</option><option value="configured">configured</option><option value="disabled">disabled</option><option value="verified-production">verified-production</option></select>
+        <select name="deliveryMode" aria-label="Delivery mode"><option value="local-metadata">local-metadata</option><option value="secret-file">secret-file</option><option value="provider-verified">provider-verified</option></select>
+        <input type="hidden" name="confirm" value="UPDATE-NOTIFICATION-CHANNEL">
+        <button class="button" type="submit">Update channel</button>
+      </form>
+    </div>
+    <div class="panel"><div class="panel-head"><span>ALT</span><div><h2>Open Alerts</h2><p>${escapeHtml(logsAlerts.rawConsoles)}</p></div></div>
+      ${openAlerts.length ? `<div class="cards">${openAlerts.map(renderAlertCard).join("")}</div>` : empty("No open alerts", "Record a local alert or run alert evidence tooling to create operational context.")}
+    </div>
+    <div class="panel"><div class="panel-head"><span>MET</span><div><h2>Notification Channels</h2><p>Email, Discord and Telegram status without exposing webhook or token values.</p></div></div>
+      <div class="cards">${channels.map(renderNotificationChannelCard).join("")}</div>
+    </div>
+    <div class="panel"><div class="panel-head"><span>ERR</span><div><h2>Recent Errors</h2><p>Sanitized failed operations and audit failures.</p></div></div>
+      ${recentErrors.length ? `<div class="cards">${recentErrors.map((item) => `<div class="card compact"><strong>${escapeHtml(item.source)}</strong><span>${escapeHtml(`${item.timestamp} / ${item.name}`)}</span><span>${escapeHtml(item.summary)}</span></div>`).join("")}</div>` : empty("No recent errors", "No failed Control Center operations or audited failures were found.")}
+    </div>
+  </section>`;
+}
+
+function renderAlertCard(alert) {
+  return `<div id="alert-${escapeHtml(alert.id)}" class="card compact">
+    <div class="card-title"><strong>${escapeHtml(alert.service)}</strong><em>${escapeHtml(alert.severity)}</em></div>
+    <span>${escapeHtml(alert.summary)}</span>
+    <span>${escapeHtml(alert.status)} / ${escapeHtml(alert.createdAt || "local metadata")}</span>
+    <form method="post" action="/actions/alert-command" class="inline-confirm">
+      <input type="hidden" name="action" value="resolve">
+      <input type="hidden" name="id" value="${escapeHtml(alert.id)}">
+      <input type="hidden" name="confirm" value="RESOLVE-ALERT">
+      <button class="button" type="submit">Resolve</button>
+    </form>
+  </div>`;
+}
+
+function renderNotificationChannelCard(channel) {
+  return `<div id="channel-${escapeHtml(channel.channel)}" class="card compact">
+    <div class="card-title"><strong>${escapeHtml(humanName(channel.channel))}</strong><em>${escapeHtml(channel.status)}</em></div>
+    <span>${escapeHtml(channel.deliveryMode)} / ${escapeHtml(channel.source)}</span>
+    <span>${escapeHtml(channel.updatedAt ? `updated ${channel.updatedAt}` : "no local override")}</span>
+  </div>`;
+}
+
 function renderPlanOnlyPanel(title, items) {
   return `<section class="panel"><div class="panel-head"><span>ADV</span><div><h2>${escapeHtml(title)}</h2><p>Advanced control is dry-run/plan by default in this foundation.</p></div></div><div class="cards">${items.map((item) => `<div class="card compact"><strong>${escapeHtml(item)}</strong><span>planned adapter surface</span></div>`).join("")}</div></section>`;
 }
@@ -1343,6 +1471,74 @@ function planSecurityPolicyUpdate(payload, context) {
   return operationPlan("security.policy", context.environment, true, ["validate scope", "validate security posture fields", "prepare local policy update", "require apply confirmation", "write audit event"], { ...details, providerTouched: false, productionEvidence: false, confirmationRequired: "UPDATE-SECURITY-POLICY" });
 }
 
+function planAlertRecord(payload, context) {
+  const service = sanitizeIdentifier(payload.service || "platform") || "platform";
+  const severity = choice(String(payload.severity || "warning"), ["info", "warning", "critical"], "alert severity");
+  const summary = sanitizeMessage(payload.summary || "Local control alert").replace(/\s+/g, " ").trim().slice(0, 180) || "Local control alert";
+  const details = alertRecord({
+    id: payload.id ? sanitizeIdentifier(payload.id) : rid(),
+    service,
+    severity,
+    status: "open",
+    summary,
+    source: "control-center-local",
+  });
+  if (payload.confirm === "RECORD-ALERT") {
+    const state = readAlertsState();
+    state[details.id] = {
+      ...(state[details.id] || {}),
+      ...details,
+      updatedAt: new Date().toISOString(),
+      createdAt: state[details.id]?.createdAt || new Date().toISOString(),
+    };
+    writeAlertsState(state);
+    appendAudit({ action: "alert.record.apply", target: service, environment: context.environment, risk: severity === "critical" ? "high" : "medium", result: "success", dryRun: false, summary: "Local alert metadata recorded; no notification delivery attempted." });
+    const operation = operationPlan("alert.record.local", context.environment, false, ["validate alert metadata", "record local alert state", "leave notification delivery unchanged", "write audit event"], { alertId: details.id, service, severity, status: "open", deliveryAttempted: false, productionEvidence: false });
+    return { ...operation, alert: state[details.id] };
+  }
+  appendAudit({ action: "alert.record.plan", target: service, environment: context.environment, risk: severity === "critical" ? "high" : "medium", result: "planned", dryRun: true, summary: "Local alert record plan generated." });
+  return operationPlan("alert.record", context.environment, true, ["validate alert metadata", "prepare local alert state", "require apply confirmation", "write audit event"], { ...details, deliveryAttempted: false, productionEvidence: false, confirmationRequired: "RECORD-ALERT" });
+}
+
+function planAlertResolution(id, payload, context) {
+  const alertId = sanitizeIdentifier(id || "");
+  if (!alertId) throw new ValidationError("Alert id is required.");
+  const state = readAlertsState();
+  const alert = state[alertId];
+  if (!alert) throw new ValidationError("Alert not found.");
+  if (payload.confirm === "RESOLVE-ALERT") {
+    state[alertId] = { ...alertRecord(alert), status: "resolved", resolvedAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+    writeAlertsState(state);
+    appendAudit({ action: "alert.resolve.apply", target: alertId, environment: context.environment, risk: "low", result: "success", dryRun: false, summary: "Local alert marked resolved." });
+    const operation = operationPlan("alert.resolve.local", context.environment, false, ["validate alert", "mark local alert resolved", "write audit event"], { alertId, service: state[alertId].service, status: "resolved", deliveryAttempted: false, productionEvidence: false });
+    return { ...operation, alert: state[alertId] };
+  }
+  appendAudit({ action: "alert.resolve.plan", target: alertId, environment: context.environment, risk: "low", result: "planned", dryRun: true, summary: "Alert resolution plan generated." });
+  return operationPlan("alert.resolve", context.environment, true, ["validate alert", "prepare local resolution", "require apply confirmation", "write audit event"], { alertId, service: alert.service, status: alert.status, confirmationRequired: "RESOLVE-ALERT" });
+}
+
+function planNotificationChannelUpdate(payload, context) {
+  const channel = choice(String(payload.channel || ""), ["email", "discord", "telegram"], "notification channel");
+  const status = choice(String(payload.status || "not-configured"), ["not-configured", "configured", "disabled", "requires-secret-file", "verified-production"], "notification channel status");
+  const deliveryMode = choice(String(payload.deliveryMode || "local-metadata"), ["local-metadata", "secret-file", "provider-verified"], "notification delivery mode");
+  const details = notificationChannelRecord({ channel, status, deliveryMode, source: "control-center-state" });
+  if (payload.confirm === "UPDATE-NOTIFICATION-CHANNEL") {
+    const state = readNotificationChannelsState();
+    state[channel] = {
+      ...(state[channel] || {}),
+      ...details,
+      updatedAt: new Date().toISOString(),
+      createdAt: state[channel]?.createdAt || new Date().toISOString(),
+    };
+    writeNotificationChannelsState(state);
+    appendAudit({ action: "alerts.channel.apply", target: channel, environment: context.environment, risk: "low", result: "success", dryRun: false, summary: "Notification channel metadata updated locally; no test message sent." });
+    const operation = operationPlan("alerts.channel.local", context.environment, false, ["validate channel", "update local notification metadata", "leave provider delivery unchanged", "write audit event"], { ...state[channel], deliveryAttempted: false, productionEvidence: false });
+    return { ...operation, notificationChannel: state[channel] };
+  }
+  appendAudit({ action: "alerts.channel.plan", target: channel, environment: context.environment, risk: "low", result: "planned", dryRun: true, summary: "Notification channel update plan generated." });
+  return operationPlan("alerts.channel", context.environment, true, ["validate channel", "prepare local notification metadata", "require apply confirmation", "write audit event"], { ...details, deliveryAttempted: false, productionEvidence: false, confirmationRequired: "UPDATE-NOTIFICATION-CHANNEL" });
+}
+
 function planBackupRun(payload, context) {
   const scope = sanitizeIdentifier(payload.scope || "all") || "all";
   appendAudit({ action: "backup.run.plan", target: scope, environment: context.environment, risk: "medium", result: "planned", dryRun: true, summary: "Manual backup plan generated." });
@@ -1504,6 +1700,34 @@ function readSecurityPoliciesState() {
 function writeSecurityPoliciesState(state) {
   mkdirSync(path.dirname(securityPoliciesFile), { recursive: true });
   writeFileSync(securityPoliciesFile, `${JSON.stringify(sanitizeEvent(state), null, 2)}\n`);
+}
+
+function readAlertsState() {
+  try {
+    const parsed = JSON.parse(readFileSync(alertsFile, "utf8"));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeAlertsState(state) {
+  mkdirSync(path.dirname(alertsFile), { recursive: true });
+  writeFileSync(alertsFile, `${JSON.stringify(sanitizeEvent(state), null, 2)}\n`);
+}
+
+function readNotificationChannelsState() {
+  try {
+    const parsed = JSON.parse(readFileSync(notificationChannelsFile, "utf8"));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeNotificationChannelsState(state) {
+  mkdirSync(path.dirname(notificationChannelsFile), { recursive: true });
+  writeFileSync(notificationChannelsFile, `${JSON.stringify(sanitizeEvent(state), null, 2)}\n`);
 }
 
 function appendDeployment(deployment) {
@@ -1772,6 +1996,107 @@ function securityPolicyRecord({
     createdAt,
     updatedAt,
   });
+}
+
+function alertRecord({
+  id = "",
+  service = "platform",
+  severity = "warning",
+  status = "open",
+  summary = "Local control alert",
+  source = "control-center-local",
+  createdAt = null,
+  updatedAt = null,
+  resolvedAt = null,
+  deletedAt = null,
+} = {}) {
+  const alertId = sanitizeIdentifier(id || rid()) || rid();
+  return sanitizeEvent({
+    id: alertId,
+    service: sanitizeIdentifier(service || "platform") || "platform",
+    environment: "local",
+    severity,
+    status,
+    summary: sanitizeMessage(summary).replace(/\s+/g, " ").trim().slice(0, 180) || "Local control alert",
+    source,
+    deliveryAttempted: false,
+    productionEvidence: false,
+    createdAt,
+    updatedAt,
+    resolvedAt,
+    deletedAt,
+  });
+}
+
+function notificationChannelRecord({
+  channel = "email",
+  status = "not-configured",
+  deliveryMode = "local-metadata",
+  source = "control-center-default",
+  createdAt = null,
+  updatedAt = null,
+} = {}) {
+  return sanitizeEvent({
+    id: channel,
+    channel,
+    environment: "local",
+    status,
+    deliveryMode,
+    source,
+    plainValueExposed: false,
+    deliveryAttempted: false,
+    productionEvidence: false,
+    createdAt,
+    updatedAt,
+  });
+}
+
+function defaultNotificationChannels() {
+  return [
+    notificationChannelRecord({
+      channel: "email",
+      status: process.env.ALERT_EMAIL_TO && process.env.SMTP_HOST && process.env.SMTP_USER ? "configured" : "requires-secret-file",
+      deliveryMode: "secret-file",
+      source: "compose-env-secret-file",
+    }),
+    notificationChannelRecord({
+      channel: "discord",
+      status: process.env.ALERT_DISCORD_WEBHOOK_URL_FILE ? "configured" : "not-configured",
+      deliveryMode: "secret-file",
+      source: "compose-env-secret-file",
+    }),
+    notificationChannelRecord({
+      channel: "telegram",
+      status: process.env.ALERT_TELEGRAM_BOT_TOKEN_FILE && process.env.ALERT_TELEGRAM_CHAT_ID ? "configured" : "not-configured",
+      deliveryMode: "secret-file",
+      source: "compose-env-secret-file",
+    }),
+  ];
+}
+
+function recentErrorRecords(audit, operations) {
+  const fromOperations = operations
+    .filter((operation) => operation.status === "failed" || operation.errorCode || operation.errorMessage)
+    .map((operation) => ({
+      id: operation.id,
+      source: "operation",
+      timestamp: operation.finishedAt || operation.startedAt || "",
+      name: operation.type || "operation",
+      summary: operation.errorMessage || operation.resultSummary || "Operation failed.",
+    }));
+  const fromAudit = audit
+    .filter((event) => event.result === "failed")
+    .map((event) => ({
+      id: event.id,
+      source: "audit",
+      timestamp: event.timestamp || "",
+      name: event.action || "audit event",
+      summary: event.summary || "Audited action failed.",
+    }));
+  return [...fromOperations, ...fromAudit]
+    .sort((a, b) => String(b.timestamp).localeCompare(String(a.timestamp)))
+    .slice(0, 12)
+    .map((item) => sanitizeEvent(item));
 }
 
 function subdomainHostname(payload, targetEnv) {
