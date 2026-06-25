@@ -10,6 +10,7 @@ const stateFile = process.env.PROJECT_STATE_FILE || "/var/www/project-state/proj
 const auditFile = process.env.PROJECT_AUDIT_FILE || "/var/www/project-state/audit.jsonl";
 const operationsFile = process.env.PROJECT_OPERATIONS_FILE || "/var/www/project-state/operations.jsonl";
 const deploymentsFile = process.env.PROJECT_DEPLOYMENTS_FILE || "/var/www/project-state/deployments.jsonl";
+const webspacesFile = process.env.PROJECT_WEBSPACES_FILE || "/var/www/project-state/webspaces.json";
 const sessionKeysFile = process.env.CONTROL_CENTER_SESSION_KEYS_FILE || "";
 const adminPasswordFile = process.env.CONTROL_CENTER_ADMIN_PASSWORD_FILE || "";
 const adminPasswordSha256 = String(process.env.CONTROL_CENTER_ADMIN_PASSWORD_SHA256 || "").trim().toLowerCase();
@@ -88,6 +89,11 @@ const server = createServer(async (req, res) => {
 
     if (req.method === "POST" && url.pathname === "/actions/application-command") {
       await handleApplicationCommand(req, res, context);
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/actions/webspace-command") {
+      await handleWebspaceCommand(req, res, context);
       return;
     }
 
@@ -291,6 +297,32 @@ async function handleApplicationCommand(req, res, context) {
   redirect(res, `/?section=applications&project=${encodeURIComponent(operation.projectId || "")}#app-${encodeURIComponent(id)}`);
 }
 
+async function handleWebspaceCommand(req, res, context) {
+  const payload = await readPayload(req);
+  const action = String(payload.action || "");
+  let operation;
+  try {
+    if (action === "create") operation = planWebspaceCreate(payload, context);
+    else if (action === "quota") operation = planWebspaceQuota(payload.id || payload.webspaceId || "", payload, context);
+    else throw new ValidationError("Unsupported webspace action.");
+  } catch (error) {
+    if (error instanceof ValidationError) {
+      json(res, { error: "validation_failed", message: error.message }, 422);
+      return;
+    }
+    if (error instanceof RejectedOperationError) {
+      json(res, { error: "operation_rejected", message: error.message }, 409);
+      return;
+    }
+    throw error;
+  }
+  if (wantsJson(req)) {
+    json(res, operation, 202);
+    return;
+  }
+  redirect(res, `/?section=webspaces#webspace-${encodeURIComponent(operation.details?.webspaceId || operation.details?.id || "")}`);
+}
+
 function buildContext({ projects, state }) {
   const applications = projects.map((project) => ({
     id: project.slug,
@@ -322,7 +354,8 @@ function buildContext({ projects, state }) {
     })),
     ...Object.values(state.subdomains || {}).filter((item) => item && !item.deletedAt),
   ];
-  const webspaces = projects.map((project) => ({
+  const storedWebspaces = readWebspacesState();
+  const defaultWebspaces = projects.map((project) => ({
     id: project.slug,
     projectId: project.slug,
     name: project.slug,
@@ -333,7 +366,14 @@ function buildContext({ projects, state }) {
     mounts: ["public", "private", "uploads", "backups", "config"],
     linkedApps: [project.slug],
     status: project.enabled ? "active" : "disabled",
+    source: "project-discovery",
   }));
+  const defaultIds = new Set(defaultWebspaces.map((space) => space.id));
+  const storedActiveWebspaces = Object.values(storedWebspaces).filter((space) => space && !space.deletedAt);
+  const webspaces = [
+    ...defaultWebspaces.map((space) => ({ ...space, ...(storedWebspaces[space.id] || {}) })),
+    ...storedActiveWebspaces.filter((space) => !defaultIds.has(space.id)),
+  ];
   const deployments = readDeployments();
   const audit = readAudit();
   const operations = readOperations();
@@ -465,7 +505,7 @@ function renderControlCenter(context, params) {
     else if (section === "projects") body = renderProjects(scoped(context.projects));
     else if (section === "applications") body = renderApplications(scoped(context.applications));
     else if (section === "domains") body = renderDomains(context.domains, scoped(context.subdomains));
-    else if (section === "webspaces") body = renderWebspaces(scoped(context.webspaces));
+    else if (section === "webspaces") body = renderWebspaces(scoped(context.webspaces), context.projects);
     else if (section === "resources") body = renderJsonPanel("Resources", context.resources);
     else if (section === "security") body = renderJsonPanel("Security", context.security);
     else if (section === "backups") body = renderJsonPanel("Backups", context.backups);
@@ -641,8 +681,33 @@ function renderDomains(domains, subdomains) {
   <div class="panel"><div class="panel-head"><span>SUB</span><div><h2>Subdomains</h2><p>Wildcard local routing maps hostnames to apps by project slug.</p></div></div><div class="cards">${subdomains.map((item) => `<div class="card compact"><strong>${escapeHtml(item.hostname)}</strong><span>${escapeHtml(item.type)} / ${escapeHtml(item.visibility)} / ${escapeHtml(item.healthStatus)}</span></div>`).join("")}</div></div></section>`;
 }
 
-function renderWebspaces(webspaces) {
-  return `<section class="panel"><div class="panel-head"><span>WEB</span><div><h2>Web Spaces</h2><p>Declarative folders only; secrets are excluded by policy.</p></div></div><div class="cards">${webspaces.map((space) => `<div class="card"><strong>${escapeHtml(space.name)}</strong><span>${escapeHtml(space.basePath)}</span><span>${bytesLabel(space.usedBytes)} used / quota ${bytesLabel(space.quotaBytes)}</span></div>`).join("")}</div></section>`;
+function renderWebspaces(webspaces, projects) {
+  return `<section class="panel"><div class="panel-head"><span>WEB</span><div><h2>Web Spaces</h2><p>Declarative folders only; secrets are excluded by policy.</p></div></div>
+  <form method="post" action="/actions/webspace-command" class="inline-confirm">
+    <select name="projectId" aria-label="Project for web space">${projects.map((project) => `<option value="${escapeHtml(project.slug)}">${escapeHtml(project.name)}</option>`).join("")}</select>
+    <input name="name" placeholder="space name" aria-label="Web space name">
+    <input name="quotaBytes" placeholder="quota bytes" inputmode="numeric" aria-label="Quota bytes">
+    <input type="hidden" name="action" value="create">
+    <input type="hidden" name="confirm" value="CREATE-WEBSPACE">
+    <button class="button enable" type="submit">Create space</button>
+  </form>
+  <div class="cards">${webspaces.map(renderWebspaceCard).join("") || empty("No web spaces", "Create a project web space to declare public/private/uploads/backups/config folders.")}</div></section>`;
+}
+
+function renderWebspaceCard(space) {
+  return `<div id="webspace-${escapeHtml(space.id)}" class="card">
+    <div class="card-title"><strong>${escapeHtml(space.name)}</strong><em>${escapeHtml(space.status)}</em></div>
+    <span>${escapeHtml(space.basePath)}</span>
+    <span>${bytesLabel(space.usedBytes)} used / quota ${bytesLabel(space.quotaBytes)}</span>
+    <span>Folders: ${escapeHtml((space.mounts || []).join(", "))}</span>
+    <form method="post" action="/actions/webspace-command" class="inline-confirm">
+      <input type="hidden" name="id" value="${escapeHtml(space.id)}">
+      <input type="hidden" name="action" value="quota">
+      <input name="quotaBytes" value="${space.quotaBytes || 0}" inputmode="numeric" aria-label="Quota bytes for ${escapeHtml(space.id)}">
+      <input type="hidden" name="confirm" value="UPDATE-QUOTA">
+      <button class="button" type="submit">Set quota</button>
+    </form>
+  </div>`;
 }
 
 function renderSettings(context) {
@@ -882,17 +947,41 @@ function planWebspaceCreate(payload, context) {
   findById(context.projects, projectId, "Project");
   const name = slugify(payload.name || projectId);
   validateSlug(name);
-  const basePath = validateWebspacePath(payload.basePath || `webspaces/${projectId}`);
+  const id = webspaceId(projectId, name);
+  const basePath = validateWebspacePath(payload.basePath || `webspaces/${projectId}/${name}`);
+  const quotaBytes = parseQuotaBytes(payload.quotaBytes || 0);
+  const details = webspaceRecord({ id, projectId, name, basePath, quotaBytes });
+  if (payload.confirm === "CREATE-WEBSPACE") {
+    const state = readWebspacesState();
+    state[id] = { ...(state[id] || {}), ...details, updatedAt: new Date().toISOString(), createdAt: state[id]?.createdAt || new Date().toISOString() };
+    writeWebspacesState(state);
+    appendAudit({ action: "webspace.create.apply", target: `${projectId}/${name}`, environment: context.environment, risk: "low", result: "success", dryRun: false, summary: "Webspace metadata created locally; no host filesystem changes applied." });
+    const operation = operationPlan("webspace.create.local", context.environment, false, ["validate project", "validate path traversal protection", "declare public/private/uploads/backups/config folders", "apply quota metadata", "write audit event"], { ...details, filesystemTouched: false });
+    return { ...operation, webspace: state[id] };
+  }
   appendAudit({ action: "webspace.create.plan", target: `${projectId}/${name}`, environment: context.environment, risk: "low", result: "planned", dryRun: true, summary: "Webspace creation plan generated." });
-  return operationPlan("webspace.create", context.environment, true, ["validate project", "validate path traversal protection", "create public/private/uploads/backups/config folders", "apply quota", "write audit event"], { projectId, name, basePath });
+  return operationPlan("webspace.create", context.environment, true, ["validate project", "validate path traversal protection", "declare public/private/uploads/backups/config folders", "apply quota metadata", "write audit event"], { ...details, filesystemTouched: false, confirmationRequired: "CREATE-WEBSPACE" });
 }
 
 function planWebspaceQuota(id, payload, context) {
-  findById(context.webspaces, id, "Webspace");
-  const quotaBytes = Number(payload.quotaBytes || 0);
-  if (!Number.isFinite(quotaBytes) || quotaBytes < 0) throw new ValidationError("Quota must be zero or greater.");
+  const space = findById(context.webspaces, id, "Webspace");
+  const quotaBytes = parseQuotaBytes(payload.quotaBytes || 0);
+  if (payload.confirm === "UPDATE-QUOTA") {
+    const state = readWebspacesState();
+    state[space.id] = {
+      ...webspaceRecord(space),
+      ...(state[space.id] || {}),
+      quotaBytes,
+      updatedAt: new Date().toISOString(),
+      createdAt: state[space.id]?.createdAt || space.createdAt || new Date().toISOString(),
+    };
+    writeWebspacesState(state);
+    appendAudit({ action: "webspace.quota.apply", target: sanitizeIdentifier(id), environment: context.environment, risk: "low", result: "success", dryRun: false, summary: "Webspace quota metadata updated locally." });
+    const operation = operationPlan("webspace.quota.local", context.environment, false, ["validate quota", "update local quota metadata", "write audit event"], { webspaceId: space.id, projectId: space.projectId, quotaBytes, filesystemTouched: false });
+    return { ...operation, webspace: state[space.id] };
+  }
   appendAudit({ action: "webspace.quota.plan", target: sanitizeIdentifier(id), environment: context.environment, risk: "low", result: "planned", dryRun: true, summary: "Quota update plan generated." });
-  return operationPlan("webspace.quota", context.environment, true, ["validate quota", "prepare quota adapter update", "write audit event"], { webspaceId: id, quotaBytes });
+  return operationPlan("webspace.quota", context.environment, true, ["validate quota", "prepare quota metadata update", "write audit event"], { webspaceId: space.id, projectId: space.projectId, quotaBytes, confirmationRequired: "UPDATE-QUOTA" });
 }
 
 function planBackupRun(payload, context) {
@@ -990,6 +1079,20 @@ function readOperations() {
   } catch {
     return [];
   }
+}
+
+function readWebspacesState() {
+  try {
+    const parsed = JSON.parse(readFileSync(webspacesFile, "utf8"));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeWebspacesState(state) {
+  mkdirSync(path.dirname(webspacesFile), { recursive: true });
+  writeFileSync(webspacesFile, `${JSON.stringify(sanitizeEvent(state), null, 2)}\n`);
 }
 
 function appendDeployment(deployment) {
@@ -1141,6 +1244,34 @@ function validateWebspacePath(value) {
   if (!normalized || normalized.includes("..") || input.startsWith("/") || /^[A-Za-z]:/.test(input)) throw new ValidationError("Invalid webspace path.");
   if (!/^[a-zA-Z0-9._/-]+$/.test(normalized)) throw new ValidationError("Invalid webspace path.");
   return normalized;
+}
+
+function parseQuotaBytes(value) {
+  const quotaBytes = Number(value || 0);
+  if (!Number.isSafeInteger(quotaBytes) || quotaBytes < 0) throw new ValidationError("Quota must be zero or a positive safe integer.");
+  return quotaBytes;
+}
+
+function webspaceId(projectId, name) {
+  return name === projectId ? projectId : `${projectId}-${name}`;
+}
+
+function webspaceRecord({ id, projectId, name, basePath, quotaBytes = 0, usedBytes = 0, linkedApps = null, status = "active", createdAt = null, updatedAt = null }) {
+  return sanitizeEvent({
+    id,
+    projectId,
+    name,
+    environment: "local",
+    basePath,
+    quotaBytes,
+    usedBytes,
+    mounts: ["public", "private", "uploads", "backups", "config"],
+    linkedApps: linkedApps || [projectId],
+    status,
+    source: "control-center-state",
+    createdAt,
+    updatedAt,
+  });
 }
 
 function subdomainHostname(payload, targetEnv) {

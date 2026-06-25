@@ -20,6 +20,7 @@ const stateFile = path.join(stateDir, "projects.json");
 const auditFile = path.join(stateDir, "audit.jsonl");
 const operationsFile = path.join(stateDir, "operations.jsonl");
 const deploymentsFile = path.join(stateDir, "deployments.jsonl");
+const webspacesFile = path.join(stateDir, "webspaces.json");
 
 test("Stexor Control Center local foundation", async (t) => {
   prepareFixture();
@@ -36,6 +37,7 @@ test("Stexor Control Center local foundation", async (t) => {
       PROJECT_AUDIT_FILE: auditFile,
       PROJECT_OPERATIONS_FILE: operationsFile,
       PROJECT_DEPLOYMENTS_FILE: deploymentsFile,
+      PROJECT_WEBSPACES_FILE: webspacesFile,
       PROJECTS_HOST: "projects.localhost.com",
       PROJECT_HOST_SUFFIX: ".localhost.com",
       NODE_PROJECT_HOSTS: "stexor=stexor.localhost.com",
@@ -188,6 +190,61 @@ test("Stexor Control Center local foundation", async (t) => {
   assert.equal(invalidWebspace.status, 422);
   assert.match(invalidWebspace.body.message, /Invalid webspace path/);
 
+  const webspacesHtml = await getText(`${baseUrl}/?section=webspaces`);
+  assert.match(webspacesHtml, /Create space/);
+  assert.match(webspacesHtml, /public, private, uploads, backups, config/);
+
+  const webspacePlan = await postJson(`${baseUrl}/control/webspaces`, {
+    projectId: "stexor",
+    name: "media",
+    quotaBytes: 4096,
+    secret: "webspace-secret-should-not-leak",
+  });
+  assert.equal(webspacePlan.status, 202);
+  assert.equal(webspacePlan.body.type, "webspace.create");
+  assert.equal(webspacePlan.body.dryRun, true);
+  assert.equal(webspacePlan.body.details.confirmationRequired, "CREATE-WEBSPACE");
+  assert.equal(webspacePlan.body.details.filesystemTouched, false);
+  assert.doesNotMatch(JSON.stringify(webspacePlan.body), /webspace-secret-should-not-leak/);
+
+  const webspaceApply = await postJson(`${baseUrl}/control/webspaces`, {
+    projectId: "stexor",
+    name: "media",
+    quotaBytes: 4096,
+    confirm: "CREATE-WEBSPACE",
+    secret: "webspace-secret-should-not-leak",
+  });
+  assert.equal(webspaceApply.status, 202);
+  assert.equal(webspaceApply.body.type, "webspace.create.local");
+  assert.equal(webspaceApply.body.dryRun, false);
+  assert.equal(webspaceApply.body.webspace.id, "stexor-media");
+  assert.deepEqual(webspaceApply.body.webspace.mounts, ["public", "private", "uploads", "backups", "config"]);
+  assert.equal(webspaceApply.body.details.filesystemTouched, false);
+
+  const quotaPlan = await postJson(`${baseUrl}/control/webspaces/stexor-media/quota`, {
+    quotaBytes: 8192,
+  });
+  assert.equal(quotaPlan.status, 202);
+  assert.equal(quotaPlan.body.type, "webspace.quota");
+  assert.equal(quotaPlan.body.details.confirmationRequired, "UPDATE-QUOTA");
+
+  const quotaApply = await postJson(`${baseUrl}/control/webspaces/stexor-media/quota`, {
+    quotaBytes: 8192,
+    confirm: "UPDATE-QUOTA",
+  });
+  assert.equal(quotaApply.status, 202);
+  assert.equal(quotaApply.body.type, "webspace.quota.local");
+  assert.equal(quotaApply.body.webspace.quotaBytes, 8192);
+
+  const webspacesAfterApply = await getJson(`${baseUrl}/control/webspaces`);
+  const mediaSpace = webspacesAfterApply.webspaces.find((space) => space.id === "stexor-media");
+  assert.equal(mediaSpace.quotaBytes, 8192);
+  assert.equal(mediaSpace.basePath, "webspaces/stexor/media");
+  assert.equal(existsSync(webspacesFile), true);
+  const webspaceStateText = readFileSync(webspacesFile, "utf8");
+  assert.doesNotMatch(webspaceStateText, /webspace-secret-should-not-leak/);
+  assert.equal(JSON.parse(webspaceStateText)["stexor-media"].quotaBytes, 8192);
+
   const deployPlan = await postJson(`${baseUrl}/control/applications/stexor/deploy`, {
     branch: "main",
     commit: "abc1234",
@@ -325,6 +382,7 @@ test("Stexor Control Center admin guard", async (t) => {
       PROJECT_AUDIT_FILE: auditFile,
       PROJECT_OPERATIONS_FILE: operationsFile,
       PROJECT_DEPLOYMENTS_FILE: deploymentsFile,
+      PROJECT_WEBSPACES_FILE: webspacesFile,
       PROJECTS_HOST: "projects.localhost.com",
       PROJECT_HOST_SUFFIX: ".localhost.com",
       NODE_PROJECT_HOSTS: "stexor=stexor.localhost.com",
