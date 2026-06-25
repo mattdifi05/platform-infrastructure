@@ -417,6 +417,14 @@ sudo sh ./scripts/vps-host-readiness.sh --ssh-port 65002 --enforce
 sudo sh ./scripts/cloudflare-origin-lock-ufw.sh --apply --ports "80"
 ```
 
+Per il server home-VPS/LAN attuale non cambiare porta SSH: usa la stessa
+procedura con `--ssh-port 22` dopo aver confermato l'accesso con chiave.
+
+```sh
+sudo sh ./scripts/vps-hardening-ubuntu.sh --apply --ssh-port 22 --reload-sshd
+sh ./scripts/vps-host-readiness.sh --ssh-port 22 --enforce
+```
+
 `vps-bootstrap-ubuntu.sh` e' dry-run di default e genera report JSON/Markdown in
 `reports/vps-bootstrap/`. Con `--apply` configura il repository apt ufficiale
 Docker per Ubuntu, installa Git, Docker Engine, Buildx e Docker Compose plugin,
@@ -434,6 +442,12 @@ il comando valida `sshd -t`, ricarica `ssh`/`sshd` e registra
 `ssh-service-reload=applied` nel report.
 Archivia il report insieme al successivo `vps-host-readiness --ssh-port 65002 --enforce`.
 
+Lo script scrive l'hardening SSH in
+`/etc/ssh/sshd_config.d/01-platform-hardening.conf`, prima dei frammenti
+cloud-init come `50-cloud-init.conf`. La verifica accettata e' l'output
+effettivo di `sshd -T`: deve mostrare `passwordauthentication no`, non basta che
+un file contenga `PasswordAuthentication no`.
+
 Se Cloudflare parla con l'origin anche su 443, usa `--ports "80 443"`. Dopo aver verificato DNS proxied e traffico Cloudflare, rimuovi eventuali vecchie regole UFW generiche `allow 80/tcp` e `allow 443/tcp`: l'origin non deve accettare bypass diretti.
 `vps-host-readiness.sh --ssh-port 65002 --enforce` genera report JSON/Markdown in `reports/vps-host/` e
 verifica Ubuntu LTS, Docker Engine, Compose plugin, Git, UFW, fail2ban, SSH
@@ -441,6 +455,9 @@ hardening, porta SSH attesa, regola UFW per quella porta, Docker daemon
 hardening, auditd/AppArmor, risorse minime e runtime host non necessari. Ogni
 check include anche una remediation operativa, cosi' il report fallito diventa
 la checklist correttiva da applicare sulla VPS.
+Per il server home-VPS/LAN corrente il comando di readiness e'
+`vps-host-readiness.sh --ssh-port 22 --enforce` finche' una modifica separata
+della porta SSH non viene approvata e testata.
 Per prove Linux locali dentro container usa `--diagnostic`: scrive in
 `reports/vps-host-diagnostics/` e non viene considerato dal go/no-go di
 produzione.

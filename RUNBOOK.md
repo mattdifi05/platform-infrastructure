@@ -369,6 +369,15 @@ sudo sh ./scripts/vps-host-readiness.sh --ssh-port 65002 --enforce
 sudo sh ./scripts/cloudflare-origin-lock-ufw.sh --apply --ports "80"
 ```
 
+For the current home-VPS/LAN validation host, do not change the SSH port. Use
+the same sequence with `--ssh-port 22` after confirming the existing key-based
+session works:
+
+```sh
+sudo sh ./scripts/vps-hardening-ubuntu.sh --apply --ssh-port 22 --reload-sshd
+sh ./scripts/vps-host-readiness.sh --ssh-port 22 --enforce
+```
+
 `vps-bootstrap-ubuntu.sh` is dry-run by default and writes JSON/Markdown reports
 under `reports/vps-bootstrap/`. In `--apply` mode it requires root, configures
 Docker's official Ubuntu apt repository, installs Git, Docker Engine, Buildx and
@@ -387,6 +396,12 @@ port are verified; it validates `sshd -t`, reloads `ssh`/`sshd` and records
 `ssh-service-reload=applied`. Archive the apply report outside Git before
 running readiness.
 
+The SSH hardening fragment is written to
+`/etc/ssh/sshd_config.d/01-platform-hardening.conf` so OpenSSH reads Platform
+settings before cloud-init fragments such as `50-cloud-init.conf`. This matters
+because the effective `sshd -T` output, not only the file contents, must show
+`passwordauthentication no`.
+
 `vps-host-readiness.sh --ssh-port 65002 --enforce` writes `reports/vps-host/vps-host-readiness-*.json`
 and `.md`. It should pass after Docker Engine, the Compose plugin, Git, UFW,
 fail2ban, SSH hardening, unattended upgrades, auditd, AppArmor and Docker daemon
@@ -396,6 +411,9 @@ failed report can be used as the host fix checklist. If Docker daemon hardening
 fails, merge the reviewed
 `/etc/docker/daemon.json.platform-template` into `/etc/docker/daemon.json`,
 restart Docker in a maintenance window and rerun the readiness script.
+For the current home-VPS/LAN host, the accepted readiness command is
+`vps-host-readiness.sh --ssh-port 22 --enforce` until a separate SSH-port change
+is explicitly approved and tested.
 Use `--diagnostic` only from disposable Linux containers or non-VPS hosts; it
 writes to `reports/vps-host-diagnostics/` so diagnostic failures cannot satisfy
 or pollute production VPS evidence.
