@@ -93,55 +93,110 @@ test("Stexor Control Center local foundation", async (t) => {
   assert.match(html, /Advanced/);
   assert.match(html, /Anniversary/);
   assert.match(html, /Stexor/);
-  assert.match(html, /\/assets\/stexor-ui\/src\/styles\.css/);
-  assert.match(html, /\/assets\/stexor-ui\/src\/ui\.css/);
-  assert.match(html, /ui-experience/);
-  assert.match(html, /ui-shell/);
-  assert.match(html, /ui-stage-grid/);
-  assert.match(html, /ui-dock/);
-  assert.match(html, /pill-sidebar-nav/);
-  assert.match(html, /pill-tabs/);
+  assert.match(html, /\/assets\/control-center\/control-center\.css/);
+  assert.match(html, /\/assets\/control-center\/control-center\.js/);
+  assert.match(html, /cc-app-shell/);
+  assert.match(html, /cc-stage/);
+  assert.match(html, /cc-sidebar/);
+  assert.match(html, /data-cc-sidebar-toggle="gestione"/);
+  assert.match(html, /data-cc-sidebar-toggle="sicurezza"/);
+  assert.match(html, /data-cc-sidebar-toggle="avanzato"/);
+  assert.match(html, /aria-expanded="true"/);
+  assert.doesNotMatch(html, /class="cc-tabs"/);
+  assert.doesNotMatch(html, /Open navigation/);
+  assert.doesNotMatch(html, /Search Control Center/);
+  assert.doesNotMatch(html, /aria-label="Help"/);
+  assert.doesNotMatch(html, /aria-label="Settings"/);
+  assert.match(html, /data-cc-theme="light"/);
+  assert.doesNotMatch(html, /data-cc-theme="dark"/);
+  assert.doesNotMatch(html, /onchange=/);
+  assert.equal(html.includes(["/assets", "stexor", "ui"].join("/") + "/"), false);
+  assert.doesNotMatch(html, new RegExp(`${["ui", "shell"].join("-")}|${["pill", "sidebar", "nav"].join("-")}|${["pill", "tabs"].join("-")}`));
   assert.match(html, /stexor-wordmark/);
-  assert.match(html, /Workloads/);
-  assert.match(html, /Operations/);
+  assert.match(html, /hosting-dashboard/);
+  assert.match(html, /Pannello infrastruttura/);
+  assert.match(html, /Gestisci la tua piattaforma da un solo posto/);
+  assert.match(html, /Siti e applicazioni/);
+  assert.match(html, /Servizi infrastruttura/);
+  assert.match(html, /Operazioni rapide/);
+  assert.match(html, /runtime-badge php/);
+  assert.match(html, /runtime-badge node/);
+  assert.match(html, /phpmyadmin\.localhost\.com/);
+  assert.match(html, /grafana\.localhost\.com/);
+  assert.match(html, /Gestione/);
+  assert.match(html, /Sicurezza/);
+  assert.match(html, /Avanzato/);
 
-  const stexorStyles = await getText(`${baseUrl}/assets/stexor-ui/src/styles.css`);
-  assert.match(stexorStyles, /@import "\.\/styles\/base-01-foundation\.css"/);
-  const stexorUiStyles = await getText(`${baseUrl}/assets/stexor-ui/src/ui.css`);
-  assert.match(stexorUiStyles, /@import "\.\/styles\/ui-04-app\.css"/);
-  const stexorUiShellCss = await getText(`${baseUrl}/assets/stexor-ui/src/styles/ui-app-01-shell.css`);
-  assert.match(stexorUiShellCss, /\.ui-experience/);
-  assert.match(stexorUiShellCss, /\.ui-stage-grid/);
-  const stexorUiPackage = await getJson(`${baseUrl}/control/ui-package`);
-  assert.equal(stexorUiPackage.name, "@stexor/ui");
-  assert.equal(stexorUiPackage.controlCenterProject, "@stexor/control-center");
-  assert.equal(stexorUiPackage.controlCenterPackageLoaded, true);
-  assert.equal(stexorUiPackage.declaredDependency, "file:vendor/@stexor/ui");
-  assert.equal(stexorUiPackage.packageMountedInControlCenterProject, true);
-  assert.equal(stexorUiPackage.usingVendoredPackage, true);
-  assert.equal(stexorUiPackage.apiManifestLoaded, true);
-  assert.equal(stexorUiPackage.hostInstallRequired, false);
-  assert.equal(stexorUiPackage.entrypoints.includes("./styles.css"), true);
-  assert.equal(stexorUiPackage.entrypoints.includes("./ui.css"), true);
-  assert.equal(stexorUiPackage.servedAssets.includes("/assets/stexor-ui/src/styles.css"), true);
-  assert.equal(stexorUiPackage.servedAssets.includes("/assets/stexor-ui/src/ui.css"), true);
-  assert.equal(stexorUiPackage.coreExports.includes("UiShell"), true);
-  assert.equal(stexorUiPackage.coreExports.includes("PillSidebarNav"), true);
-  assert.deepEqual(stexorUiPackage.missingRequiredExports, []);
+  const localStyles = await getText(`${baseUrl}/assets/control-center/control-center.css`);
+  assert.match(localStyles, /--cc-bg/);
+  assert.match(localStyles, /--cc-surface-raised/);
+  assert.match(localStyles, /--cc-line/);
+  assert.match(localStyles, /\.cc-app-shell/);
+  assert.match(localStyles, /\.cc-sidebar/);
+  assert.match(localStyles, /\.cc-nav-toggle/);
+  assert.match(localStyles, /\.cc-nav-child/);
+  assert.match(localStyles, /\.cc-nav-branch/);
+  assert.match(localStyles, /\.hosting-dashboard/);
+  assert.match(localStyles, /\.hosting-summary-grid/);
+  assert.match(localStyles, /\.hosting-table/);
+  assert.match(localStyles, /\.hosting-service-row/);
+  assert.match(localStyles, /max-height var\(--cc-enter\)/);
+  assert.match(localStyles, /\.cc-sidebar,\s*\.cc-sidebar \*/);
+  assert.match(localStyles, /box-shadow:\s*var\(--cc-focus\)/);
+  assert.match(localStyles, /color-scheme:\s*light/);
+  assert.doesNotMatch(localStyles, /color-scheme:\s*dark/);
+  assert.doesNotMatch(localStyles, /gradient/i);
+  const localClient = await getText(`${baseUrl}/assets/control-center/control-center.js`);
+  assert.match(localClient, /history\.pushState/);
+  assert.match(localClient, /fetch\(/);
+  assert.match(localClient, /Accept", "text\/html,\*\/\*;q=0\.8"/);
+  assert.doesNotMatch(localClient, /application\/json;q=/);
+  assert.match(localClient, /addEventListener\("submit"/);
+  assert.match(localClient, /addEventListener\("popstate"/);
+  assert.match(localClient, /htmlCache/);
+  assert.match(localClient, /ccBootId/);
+  assert.match(localClient, /stexor-control-center-sidebar/);
+  assert.match(localClient, /toggleSidebarGroup/);
+  assert.doesNotMatch(localClient, /window\.location\.reload/);
+  const localUiPackage = await getJson(`${baseUrl}/control/ui-package`);
+  assert.equal(localUiPackage.name, "@stexor/control-center-local-ui");
+  assert.equal(localUiPackage.controlCenterProject, "@stexor/control-center");
+  assert.equal(localUiPackage.controlCenterPackageLoaded, true);
+  assert.equal(localUiPackage.declaredDependency, "none");
+  assert.equal(localUiPackage.packageMountedInControlCenterProject, true);
+  assert.equal(localUiPackage.usingVendoredPackage, false);
+  assert.equal(localUiPackage.apiManifestLoaded, true);
+  assert.equal(localUiPackage.hostInstallRequired, false);
+  assert.equal(localUiPackage.entrypoints.includes("/assets/control-center/control-center.css"), true);
+  assert.equal(localUiPackage.entrypoints.includes("/assets/control-center/control-center.js"), true);
+  assert.equal(localUiPackage.servedAssets.includes("/assets/control-center/control-center.css"), true);
+  assert.equal(localUiPackage.servedAssets.includes("/assets/control-center/control-center.js"), true);
+  assert.equal(localUiPackage.coreExports.includes("AppShell"), true);
+  assert.equal(localUiPackage.coreExports.includes("Sidebar"), true);
+  assert.equal(localUiPackage.coreExports.includes("TabGroup"), true);
+  assert.equal(localUiPackage.cssVariablePrefix, "--cc-");
+  assert.deepEqual(localUiPackage.missingRequiredExports, []);
 
   const advancedHtml = await getText(`${baseUrl}/?mode=advanced&section=infrastructure`);
   assert.match(advancedHtml, /Infrastructure/);
   assert.match(advancedHtml, /Traefik/);
   assert.match(advancedHtml, /cAdvisor/);
-  assert.match(advancedHtml, /pill-sidebar-nav/);
-  assert.match(advancedHtml, /pill-tabs/);
-  assert.match(advancedHtml, /Delivery/);
-  assert.match(advancedHtml, /Observability/);
-  assert.match(advancedHtml, /Resilience/);
+  assert.match(advancedHtml, /cc-sidebar/);
+  assert.doesNotMatch(advancedHtml, /class="cc-tabs"/);
+  assert.doesNotMatch(advancedHtml, /role="tablist"/);
+  assert.match(advancedHtml, /cc-nav-child/);
+  assert.match(advancedHtml, /data-cc-sidebar-toggle="platform"/);
+  assert.match(advancedHtml, /data-cc-sidebar-toggle="delivery"/);
+  assert.match(advancedHtml, /data-cc-sidebar-toggle="observability"/);
+  assert.match(advancedHtml, /Avanzato/);
+  assert.match(advancedHtml, /Deployments/);
+  assert.match(advancedHtml, /CI\/CD &amp; GitHub Governance/);
+  assert.match(advancedHtml, /Cloudflare/);
   assert.match(advancedHtml, /Workers &amp; Jobs/);
   assert.match(advancedHtml, /Network/);
   assert.match(advancedHtml, /Databases/);
-  assert.doesNotMatch(advancedHtml, /CI\/CD &amp; GitHub Governance[\s\S]*Logs Advanced[\s\S]*Billing \/ Plans/);
+  assert.match(advancedHtml, /Logs Advanced/);
+  assert.match(advancedHtml, /Billing \/ Plans/);
 
   const networkApi = await getJson(`${baseUrl}/control/network`);
   assert.equal(networkApi.guardrails.readOnly, true);
@@ -314,7 +369,7 @@ test("Stexor Control Center local foundation", async (t) => {
   assert.equal(readiness.dockerTouched, false);
   assert.equal(readiness.productionEvidence, false);
   assert.equal(readiness.localEvidenceIsProductionEvidence, false);
-  assert.equal(readiness.controlCenter.checks.some((check) => check.id === "stexor-ui-shell" && check.status === "passed"), true);
+  assert.equal(readiness.controlCenter.checks.some((check) => check.id === "control-center-local-ui" && check.status === "passed"), true);
   assert.equal(readiness.controlCenter.checks.some((check) => check.id === "safe-adapter-boundary" && check.status === "plan-only"), true);
   assert.equal(readiness.manifests.productionReadiness.loaded, true);
   assert.equal(readiness.manifests.productionReadiness.requirementCount, 20);
@@ -857,42 +912,42 @@ test("Stexor Control Center local foundation", async (t) => {
   const uiSubdomainApply = await postJson(`${baseUrl}/actions/subdomain-command`, {
     action: "apply-local",
     projectId: "stexor",
-    hostname: "stexor-ui.localhost.com",
+    hostname: "ui-catalog.localhost.com",
     visibility: "admin",
     protection: "passkey",
     secret: "subdomain-ui-secret-should-not-leak",
   });
   assert.equal(uiSubdomainApply.status, 202);
   assert.equal(uiSubdomainApply.body.type, "subdomain.apply.local");
-  assert.equal(uiSubdomainApply.body.details.hostname, "stexor-ui.localhost.com");
+  assert.equal(uiSubdomainApply.body.details.hostname, "ui-catalog.localhost.com");
   assert.equal(uiSubdomainApply.body.details.visibility, "admin");
   assert.equal(uiSubdomainApply.body.details.protection, "passkey");
   assert.doesNotMatch(JSON.stringify(uiSubdomainApply.body), /subdomain-ui-secret-should-not-leak/);
 
   const uiSubdomainVerify = await postJson(`${baseUrl}/actions/subdomain-command`, {
     action: "verify",
-    id: "stexor-ui-localhost-com",
+    id: "ui-catalog-localhost-com",
   });
   assert.equal(uiSubdomainVerify.status, 202);
   assert.equal(uiSubdomainVerify.body.type, "subdomain.verify");
 
   const uiRemoveRejected = await postJson(`${baseUrl}/actions/subdomain-command`, {
     action: "remove",
-    id: "stexor-ui-localhost-com",
+    id: "ui-catalog-localhost-com",
     confirm: "wrong",
   });
   assert.equal(uiRemoveRejected.status, 409);
 
   const uiRemoveApply = await postJson(`${baseUrl}/actions/subdomain-command`, {
     action: "remove",
-    id: "stexor-ui-localhost-com",
+    id: "ui-catalog-localhost-com",
     confirm: "REMOVE-SUBDOMAIN",
   });
   assert.equal(uiRemoveApply.status, 202);
   assert.equal(uiRemoveApply.body.type, "subdomain.remove");
 
   const domainsAfterUiRemove = await getJson(`${baseUrl}/control/domains`);
-  assert.equal(domainsAfterUiRemove.subdomains.some((item) => item.hostname === "stexor-ui.localhost.com"), false);
+  assert.equal(domainsAfterUiRemove.subdomains.some((item) => item.hostname === "ui-catalog.localhost.com"), false);
 
   const invalidWebspace = await postJson(`${baseUrl}/control/webspaces`, {
     projectId: "stexor",
@@ -1564,12 +1619,12 @@ test("Stexor Control Center local foundation", async (t) => {
   assert.match(settingsHtml, /Cloudflare connection/);
   assert.match(settingsHtml, /GitHub connection/);
   assert.match(settingsHtml, /SMTP\/alert status/);
-  assert.match(settingsHtml, /Design System/);
-  assert.match(settingsHtml, /@stexor\/ui/);
+  assert.match(settingsHtml, /Control Center UI/);
+  assert.match(settingsHtml, /@stexor\/control-center-local-ui/);
   assert.match(settingsHtml, /@stexor\/control-center/);
-  assert.match(settingsHtml, /file:vendor\/@stexor\/ui/);
-  assert.match(settingsHtml, /UiShell/);
-  assert.match(settingsHtml, /\/assets\/stexor-ui\/src\/ui\.css/);
+  assert.match(settingsHtml, /\/assets\/control-center\/control-center\.css/);
+  assert.match(settingsHtml, /AppShell/);
+  assert.equal(settingsHtml.includes(["file", "vendor"].join(":")), false);
   assert.match(settingsHtml, /Provider Connections/);
   assert.match(settingsHtml, /Cloudflare/);
   assert.match(settingsHtml, /Update settings/);

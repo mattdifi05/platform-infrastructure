@@ -300,7 +300,6 @@ services:
       PROJECT_PROVIDER_CONNECTIONS_FILE: /var/www/project-state/provider-connections.json
       PROJECT_SETTINGS_FILE: /var/www/project-state/settings.json
       PROJECT_WEBSPACES_FILE: /var/www/project-state/webspaces.json
-      STEXOR_UI_PACKAGE_ROOT: /app/vendor/@stexor/ui
       CONTROL_CENTER_PUBLIC_ROOT: /app/public
       PROJECTS_HOST: ${PROJECTS_HOST:-projects.localhost.com}
       PROJECT_HOST_SUFFIX: ${PROJECT_HOST_SUFFIX:-.localhost.com}

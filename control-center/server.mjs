@@ -3,10 +3,11 @@ import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypt
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync, appendFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { controlCenterScriptTags, controlCenterStylesheetLinks, controlCenterUiContract } from "./components/ui/controlCenterUi.mjs";
 
 const port = Number(process.env.CONTROL_CENTER_PORT || 8080);
 const appRoot = path.dirname(fileURLToPath(import.meta.url));
-const stexorUiPackageRoot = process.env.STEXOR_UI_PACKAGE_ROOT || path.join(appRoot, "vendor", "@stexor", "ui");
+const controlCenterStylesRoot = process.env.CONTROL_CENTER_STYLES_ROOT || path.join(appRoot, "styles");
 const publicRoot = process.env.CONTROL_CENTER_PUBLIC_ROOT || path.join(appRoot, "public");
 const projectsRoot = process.env.PROJECTS_ROOT || "/var/www/projects";
 const docsRoot = process.env.CONTROL_CENTER_DOCS_ROOT || "/var/www/infra-docs";
@@ -65,8 +66,8 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    if (url.pathname.startsWith("/assets/stexor-ui/")) {
-      serveStaticAsset(req, res, url, stexorUiPackageRoot, "/assets/stexor-ui/");
+    if (url.pathname.startsWith("/assets/control-center/")) {
+      serveStaticAsset(req, res, url, controlCenterStylesRoot, "/assets/control-center/");
       return;
     }
 
@@ -971,7 +972,7 @@ function buildContext({ projects, state }) {
   const storedProviderConnections = readProviderConnectionsState();
   const storedSettings = readSettingsState();
   const storedIdentityAccess = readIdentityAccessState();
-  const uiPackage = readStexorUiPackage();
+  const uiPackage = readControlCenterUiPackage();
   const audit = readAudit();
   const operations = readOperations();
   const activeProjects = projects.filter((project) => project.enabled && project.status === "active").length;
@@ -1636,11 +1637,11 @@ function buildControlReadiness(context) {
   const production = manifestReadiness("production-readiness", "Production readiness checklist", readGovernanceManifest("production-readiness.json"));
   const controlChecks = [
     readinessCheck({
-      id: "stexor-ui-shell",
-      title: "Stexor UI Shell contract",
+      id: "control-center-local-ui",
+      title: "Control Center local UI contract",
       status: context.uiPackage.controlCenterPackageLoaded && context.uiPackage.packageMountedInControlCenterProject && context.uiPackage.apiManifestLoaded && context.uiPackage.missingRequiredExports.length === 0 ? "passed" : "needs-work",
-      evidence: ["@stexor/control-center package", "@stexor/ui vendored package", "UiShell/PillSidebarNav/PillTabs DOM contract"],
-      nextAction: "Keep the vendored @stexor/ui package in sync with Stexor Account before visual changes.",
+      evidence: ["@stexor/control-center package", "control-center/components", "control-center/styles/control-center.css", "local AppShell/Sidebar/TabGroup contract"],
+      nextAction: "Keep Control Center visual changes scoped to local components and --cc-* tokens.",
     }),
     readinessCheck({
       id: "simple-mode-mvp",
@@ -1942,25 +1943,23 @@ function renderControlCenter(context, params) {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:,">
 <title>Stexor Control Center</title>
-<link rel="stylesheet" href="/assets/stexor-ui/src/styles.css">
-<link rel="stylesheet" href="/assets/stexor-ui/src/ui.css">
-${styleTag()}
+${controlCenterStylesheetLinks()}
+${controlCenterScriptTags()}
 </head>
-<body data-ui-theme="dark" data-ui-accent="blue">
-<main aria-busy="false" class="shell ui-shell ui-experience sx-control-shell">
-  <div class="ui-canvas" aria-hidden="true"></div>
-  <header class="ui-shell-header-surface ui-shell-header ui-homebar sx-control-homebar">
-    <a class="brand stexor-wordmark" href="/?mode=simple&section=overview" aria-label="Stexor Control Center"><span class="brand-mark">SX</span><div><strong>STEXOR</strong><small>Control Center</small></div></a>
-  </header>
-  <div class="ui-shell-stage ui-stage-grid sx-control-stage">
-    ${renderControlSidebar(groups, activeGroup.id, mode, selectedProject)}
-    <section aria-label="${escapeHtml(activeGroup.label)}" class="ui-shell-scene ui-scene sx-control-scene" data-scroll-root="" tabindex="0">
-      <div class="ui-shell-sheet ui-content-sheet sx-control-sheet">
+<body data-cc-theme="light">
+<main aria-busy="false" class="cc-app-shell section-${escapeHtml(section)}">
+  <div class="cc-shell-bg" aria-hidden="true"></div>
+  <div class="cc-stage">
+    ${renderControlSidebar(groups, activeGroup.id, section, mode, selectedProject)}
+    <section aria-label="${escapeHtml(activeGroup.label)}" class="cc-scene" data-scroll-root="" tabindex="0">
+      ${renderControlTopbar(context, mode)}
+      <div class="cc-sheet">
         <header class="control-page-head">
           <div>
             <p class="eyebrow">${escapeHtml(environment.toUpperCase())} MODE / ${escapeHtml(activeGroup.label)}</p>
-            <h1>${escapeHtml(title)}</h1>
+            <h1 id="control-page-title">${escapeHtml(title)}</h1>
           </div>
           <div class="top-actions">
             <span class="pill ${environment === "production" ? "danger" : "info"}">${escapeHtml(context.overview.modeEvidence)}</span>
@@ -1968,15 +1967,14 @@ ${styleTag()}
             <form method="get" class="switcher">
               <input type="hidden" name="mode" value="${escapeHtml(mode)}">
               <input type="hidden" name="section" value="${escapeHtml(section)}">
-              <select name="project" onchange="this.form.submit()" aria-label="Project switcher">
+              <select name="project" aria-label="Project switcher">
                 <option value="">All projects</option>
                 ${context.projects.map((project) => `<option value="${escapeHtml(project.slug)}" ${selectedProject === project.slug ? "selected" : ""}>${escapeHtml(project.name)}</option>`).join("")}
               </select>
             </form>
           </div>
         </header>
-        ${renderSectionTabs(activeGroup.tabs, section, mode, selectedProject)}
-        <section class="ui-panel-stack control-tab-panel" id="control-${escapeHtml(section)}-panel" role="tabpanel" aria-labelledby="control-${escapeHtml(section)}-tab">
+        <section class="ui-panel-stack control-tab-panel" id="control-${escapeHtml(section)}-panel" role="region" aria-labelledby="control-page-title">
           ${body}
         </section>
       </div>
@@ -1987,39 +1985,94 @@ ${styleTag()}
   </html>`;
 }
 
-function renderControlSidebar(groups, activeGroupId, mode, selectedProject) {
+function renderControlSidebar(groups, activeGroupId, activeSection, mode, selectedProject) {
   const activeIndex = Math.max(0, groups.findIndex((group) => group.id === activeGroupId));
-  return `<aside aria-label="Control Center navigation" class="ui-shell-navbar-surface pill-sidebar-nav ui-shell-navbar ui-dock sx-control-dock" data-pill-sidebar-active-index="${activeIndex}" data-pill-sidebar-id="control-sidebar">
-    ${groups.length ? '<span aria-hidden="true" class="nav-active-pill" data-pill-sidebar-pill=""></span>' : ""}
-    ${groups.map((group) => {
-      const active = group.id === activeGroupId;
-      const href = controlUrl({ mode, section: group.tabs[0]?.id || "overview", project: selectedProject });
-      return `<a class="nav-item ${active ? "active" : ""}" ${active ? 'aria-current="page"' : ""} href="${escapeHtml(href)}" title="${escapeHtml(group.label)}">
-        <span class="nav-code" aria-hidden="true">${escapeHtml(group.short)}</span>
-        <span>${escapeHtml(group.label)}</span>
-      </a>`;
-    }).join("")}
+  const buckets = [
+    ["", []],
+    ["Gestione", []],
+    ["Sicurezza", []],
+    ["Avanzato", []],
+  ];
+  const bucketByName = new Map(buckets);
+  for (const group of groups) {
+    const heading = sidebarCategoryForGroup(group);
+    bucketByName.get(heading)?.push(group);
+  }
+  const navGroups = buckets.map(([heading, navItems]) => {
+    if (!navItems.length) return "";
+    const bucketId = heading ? heading.toLowerCase() : "overview";
+    const links = navItems.map((group) => renderSidebarGroupEntry(group, activeGroupId, activeSection, mode, selectedProject)).join("");
+    if (!heading) {
+      return `<div class="cc-nav-group cc-nav-group-static" data-cc-nav-group="${escapeHtml(bucketId)}"><div class="cc-nav-panel">${links}</div></div>`;
+    }
+    return `<div class="cc-nav-group" data-cc-collapsible="" data-cc-nav-group="${escapeHtml(bucketId)}" data-cc-collapsed="false">
+      <button aria-controls="cc-nav-panel-${escapeHtml(bucketId)}" aria-expanded="true" class="cc-nav-toggle" data-cc-sidebar-toggle="${escapeHtml(bucketId)}" type="button">
+        <span>${escapeHtml(heading)}</span>
+        <span class="cc-nav-toggle-icon" aria-hidden="true">${controlIcon("chevron-down")}</span>
+      </button>
+      <div class="cc-nav-panel" id="cc-nav-panel-${escapeHtml(bucketId)}">${links}</div>
+    </div>`;
+  }).join("");
+  return `<aside aria-label="Control Center navigation" class="cc-sidebar" data-cc-sidebar-active-index="${activeIndex}" data-cc-sidebar-id="control-sidebar">
+    <a class="brand stexor-wordmark" href="/?mode=simple&section=overview" aria-label="Stexor Control Center"><span class="brand-mark">S</span><div><strong>Control Center</strong><small>Stexor Platform</small></div></a>
+    <div class="cc-nav-groups">${navGroups}</div>
     <div class="mode-card">
-      <small>Mode</small>
+      <small>Simple Mode</small>
       <div class="segmented">
         <a class="${mode === "simple" ? "selected" : ""}" href="${escapeHtml(controlUrl({ mode: "simple", section: "overview", project: selectedProject }))}">Simple</a>
         <a class="${mode === "advanced" ? "selected" : ""}" href="${escapeHtml(controlUrl({ mode: "advanced", section: "infrastructure", project: selectedProject }))}">Advanced</a>
       </div>
     </div>
+    <div class="cc-admin-card">
+      <span class="cc-admin-avatar" aria-hidden="true">A</span>
+      <span><strong>admin@stexor.local</strong><small>Administrator</small></span>
+      <span class="cc-admin-arrow" aria-hidden="true">${controlIcon("chevron")}</span>
+    </div>
   </aside>`;
 }
 
-function renderSectionTabs(tabs, activeSection, mode, selectedProject) {
-  const activeIndex = Math.max(0, tabs.findIndex((item) => item.id === activeSection));
-  if (!tabs.length) return "";
-  return `<nav aria-label="Control Center page sections" class="pill-tabs sx-control-tabs" data-ui-surface="gray" data-pill-tabs-id="control-tabs" role="tablist" style="--sx-tab-x:${6 + activeIndex * 132}px">
-    <span aria-hidden="true" class="pill-tabs-backdrop"></span>
-    <span aria-hidden="true" class="pill-tabs-pill"></span>
-    ${tabs.map((item) => {
-      const active = item.id === activeSection;
-      return `<a aria-controls="control-${escapeHtml(item.id)}-panel" aria-selected="${active ? "true" : "false"}" class="pill-tab ${active ? "active" : ""}" href="${escapeHtml(controlUrl({ mode, section: item.id, project: selectedProject }))}" id="control-${escapeHtml(item.id)}-tab" role="tab"><span>${escapeHtml(item.label)}</span></a>`;
-    }).join("")}
-  </nav>`;
+function renderSidebarGroupEntry(group, activeGroupId, activeSection, mode, selectedProject) {
+  const activeGroup = group.id === activeGroupId || group.tabs.some((item) => item.id === activeSection);
+  if (group.tabs.length === 1) {
+    return renderSidebarLink(group.tabs[0], group, activeSection, mode, selectedProject);
+  }
+  const branchId = `cc-nav-branch-${group.id}`;
+  const children = group.tabs.map((item) => renderSidebarLink(item, group, activeSection, mode, selectedProject, true)).join("");
+  return `<div class="cc-nav-branch" data-cc-collapsible="" data-cc-nav-group="${escapeHtml(group.id)}" data-cc-active-path="${activeGroup ? "true" : "false"}" data-cc-collapsed="${activeGroup ? "false" : "true"}">
+    <button aria-controls="${escapeHtml(branchId)}" aria-expanded="${activeGroup ? "true" : "false"}" class="cc-nav-item cc-nav-branch-toggle ${activeGroup ? "active" : ""}" data-cc-sidebar-toggle="${escapeHtml(group.id)}" type="button">
+      <span class="cc-nav-icon" aria-hidden="true">${controlIcon(sidebarGroupIcon(group))}</span>
+      <span>${escapeHtml(sidebarGroupLabel(group))}</span>
+      <span class="cc-nav-arrow" aria-hidden="true">${controlIcon("chevron-down")}</span>
+    </button>
+    <div class="cc-nav-panel cc-nav-children" id="${escapeHtml(branchId)}">${children}</div>
+  </div>`;
+}
+
+function renderSidebarLink(item, group, activeSection, mode, selectedProject, child = false) {
+  const active = item.id === activeSection;
+  const href = controlUrl({ mode, section: item.id, project: selectedProject });
+  return `<a class="${child ? "cc-nav-child" : "cc-nav-item"} ${active ? "active" : ""}" ${active ? 'aria-current="page"' : ""} href="${escapeHtml(href)}" title="${escapeHtml(item.label)}">
+    ${child ? "" : `<span class="cc-nav-icon" aria-hidden="true">${controlIcon(item.id)}</span>`}
+    <span>${escapeHtml(sidebarItemLabel(item.label))}</span>
+    ${child ? "" : `<span class="cc-nav-arrow" aria-hidden="true">${item.id === "overview" ? "" : controlIcon("chevron")}</span>`}
+  </a>`;
+}
+
+function renderControlTopbar(context, mode) {
+  const envLabel = context.environment === "production" ? "Production" : humanName(context.environment || "local");
+  const envClass = context.environment === "production" ? "production" : "local";
+  return `<header class="cc-topbar">
+    <a class="cc-platform-switch" href="/?mode=${escapeHtml(mode)}&section=overview">
+      <span aria-hidden="true">${controlIcon("cube")}</span>
+      <strong>Stexor Platform</strong>
+      <span aria-hidden="true">${controlIcon("chevron-down")}</span>
+    </a>
+    <span class="cc-env-pill ${escapeHtml(envClass)}">${escapeHtml(envLabel)}</span>
+    <span class="cc-topbar-fill" aria-hidden="true"></span>
+    <nav class="cc-top-actions" aria-label="Quick tools">
+      <a class="cc-icon-button" href="/?section=logs" aria-label="Logs and alerts">${controlIcon("bell")}<span class="cc-notification-badge">${escapeHtml(context.overview.alerts.open || 0)}</span></a>
+    </nav>
+  </header>`;
 }
 
 function controlUrl({ mode, section, project = "" }) {
@@ -2036,13 +2089,13 @@ function renderLogin(message) {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:,">
 <title>Stexor Control Center Sign In</title>
-<link rel="stylesheet" href="/assets/stexor-ui/src/styles.css">
-<link rel="stylesheet" href="/assets/stexor-ui/src/ui.css">
-${styleTag()}
+${controlCenterStylesheetLinks()}
+${controlCenterScriptTags()}
 </head>
-<body data-ui-theme="dark" data-ui-accent="blue">
-<main class="login-shell ui-experience">
+<body data-cc-theme="light">
+<main class="login-shell">
   <section class="login-panel ui-panel-stack">
     <span class="brand-mark">SX</span>
     <p class="eyebrow">${escapeHtml(environment.toUpperCase())} MODE</p>
@@ -2060,30 +2113,271 @@ ${styleTag()}
 }
 
 function renderOverview(context) {
-  return `<section class="metric-grid">
-    <div class="metric"><span>${context.overview.projects.active}</span><small>active projects</small></div>
-    <div class="metric"><span>${context.overview.applications.online}</span><small>online apps</small></div>
-    <div class="metric"><span>${context.overview.subdomains.active}</span><small>active subdomains</small></div>
-    <div class="metric"><span>${context.overview.alerts.open}</span><small>open alerts</small></div>
-  </section>
-  <section class="grid two">
-    <div class="panel"><div class="panel-head"><span>OPS</span><div><h2>Daily operations</h2><p>Safe local controls and dry-run production planning.</p></div></div>
-      <div class="cards">
-        <a class="card compact" href="/?section=projects"><strong>Projects</strong><span>Create/edit/archive/delete planning and routing state.</span></a>
-        <a class="card compact" href="/?section=applications"><strong>Applications</strong><span>Node, PHP, static, API and worker inventory.</span></a>
-        <a class="card compact" href="/?section=domains"><strong>Domains</strong><span>Local subdomain planning and production dry-runs.</span></a>
-        <a class="card compact" href="/?section=backups"><strong>Backups</strong><span>Manual backup and restore drill planning.</span></a>
+  const totals = context.overview;
+  const activeProjects = context.projects.filter((project) => project.enabled).length;
+  const phpProjects = context.projects.filter((project) => project.type === "PHP").length;
+  const nodeProjects = context.projects.filter((project) => project.type === "Node").length;
+  const latestBackup = context.backupRecords?.[0];
+  const alertCount = totals.alerts.open || 0;
+  const healthLabel = alertCount ? `${alertCount} alert aperti` : "Operativa";
+
+  return `<section class="hosting-dashboard" aria-label="Infrastructure hosting panel">
+    <section class="hosting-hero">
+      <div class="hosting-hero-copy">
+        <p class="hosting-kicker">Pannello infrastruttura</p>
+        <h1>Gestisci la tua piattaforma da un solo posto</h1>
+        <p>Progetti PHP e Node, domini locali, database, container, backup e sicurezza sono separati in aree operative chiare.</p>
       </div>
+      <div class="hosting-hero-status">
+        <span class="hosting-status ${alertCount ? "warning" : "good"}"><i aria-hidden="true"></i>${escapeHtml(healthLabel)}</span>
+        <span>${escapeHtml(dashboardDateLabel())}</span>
+        <div class="hosting-hero-actions">
+          <a class="primary-button" href="/?section=projects">${controlIcon("projects")} Gestisci progetti</a>
+          <a class="button" href="/?mode=advanced&section=infrastructure">${controlIcon("server")} Servizi infra</a>
+        </div>
+      </div>
+    </section>
+
+    <section class="hosting-summary-grid" aria-label="Hosting summary">
+      ${renderHostingTile("projects", "Siti e progetti", `${activeProjects}/${totals.projects.total}`, `${phpProjects} PHP / ${nodeProjects} Node`, "/?section=projects", "Gestisci")}
+      ${renderHostingTile("applications", "Applicazioni", totals.applications.total, `${totals.applications.online} online`, "/?section=applications", "Apri")}
+      ${renderHostingTile("domains", "Domini e routing", totals.subdomains.total, `${totals.subdomains.active} attivi`, "/?section=domains", "Configura")}
+      ${renderHostingTile("databases", "Database", totals.databases.total, `${context.databaseEngines.length} motori`, "/?mode=advanced&section=databases", "Gestisci")}
+      ${renderHostingTile("storage", "Storage", totals.storage.buckets, `${context.storageProvider.name} ${hostingStatusLabel(context.storageProvider.status)}`, "/?mode=advanced&section=storage", "Apri")}
+      ${renderHostingTile("security", "Sicurezza", alertCount ? "Check" : "OK", hostingStatusLabel(context.security.securityHeaders), "/?section=security", "Verifica")}
+      ${renderHostingTile("backups", "Backup", latestBackup ? "Attivo" : "Pronto", latestBackup ? relativeTimeLabel(latestBackup.createdAt || latestBackup.timestamp) : context.backups.offsite, "/?section=backups", "Esegui")}
+      ${renderHostingTile("resources", "Monitoraggio", totals.monitoring.scrapeJobs, `${totals.monitoring.alertRules} regole alert`, "/?mode=advanced&section=monitoring", "Dettagli")}
+    </section>
+
+    <section class="hosting-main-grid">
+      ${renderHostingProjects(context.projects)}
+      ${renderHostingServiceHealth(context)}
+    </section>
+
+    ${renderHostingQuickActions(context)}
+  </section>`;
+}
+
+function renderHostingTile(icon, title, value, meta, href, action) {
+  return `<a class="hosting-tile" href="${escapeHtml(href)}">
+    <span class="hosting-tile-icon" aria-hidden="true">${controlIcon(icon)}</span>
+    <span class="hosting-tile-body">
+      <strong>${escapeHtml(title)}</strong>
+      <small>${escapeHtml(meta)}</small>
+    </span>
+    <span class="hosting-tile-value">${escapeHtml(value)}</span>
+    <em>${escapeHtml(action)} ${controlIcon("chevron")}</em>
+  </a>`;
+}
+
+function renderHostingProjects(projects) {
+  const rows = projects.slice(0, 8).map((project) => {
+    const canOpen = project.enabled && project.filesystemExists !== false;
+    return `<tr>
+      <td>
+        <div class="hosting-project-cell">
+          <strong>${escapeHtml(project.name)}</strong>
+          <span>${escapeHtml(project.summary)}</span>
+        </div>
+      </td>
+      <td><span class="runtime-badge ${project.type === "PHP" ? "php" : "node"}">${escapeHtml(project.type)}</span></td>
+      <td><a class="hosting-host" href="${escapeHtml(project.href)}">${escapeHtml(project.host)}</a></td>
+      <td><span class="state ${project.enabled ? "on" : "off"}">${project.enabled ? "Attivo" : "Disattivo"}</span></td>
+      <td>
+        <div class="hosting-row-actions">
+          ${canOpen ? `<a class="button open" href="${escapeHtml(project.href)}">Apri</a>` : `<span class="button muted">Apri</span>`}
+          ${project.filesystemExists !== false ? `<form method="post" action="/actions/toggle-project">
+            <input type="hidden" name="slug" value="${escapeHtml(project.slug)}">
+            <input type="hidden" name="enabled" value="${project.enabled ? "0" : "1"}">
+            <button class="button ${project.enabled ? "danger" : "enable"}" type="submit">${project.enabled ? "Disattiva" : "Attiva"}</button>
+          </form>` : `<span class="button muted">Attiva</span>`}
+        </div>
+      </td>
+    </tr>`;
+  }).join("");
+
+  return `<section class="hosting-panel hosting-projects-panel">
+    <div class="hosting-panel-head">
+      <div>
+        <h2>Siti e applicazioni</h2>
+        <p>PHP e Node restano separati per runtime, ma sono ospitati contemporaneamente dalla stessa infrastruttura.</p>
+      </div>
+      <a class="button" href="/?section=projects">Tutti i progetti</a>
     </div>
-    <div class="panel"><div class="panel-head"><span>SEC</span><div><h2>Safety posture</h2><p>No live provider calls from this panel by default.</p></div></div>
-      <ul class="status-list">
-        <li><strong>Cloudflare</strong><span>plan-only until explicit apply and verifyRemote</span></li>
-        <li><strong>Secrets</strong><span>never serialized to the client</span></li>
-        <li><strong>Audit</strong><span>every Control Center action writes local audit</span></li>
-        <li><strong>Production</strong><span>local evidence is never production evidence</span></li>
-      </ul>
+    <div class="hosting-table-wrap">
+      <table class="hosting-table">
+        <thead><tr><th>Progetto</th><th>Runtime</th><th>Dominio</th><th>Stato</th><th>Azioni</th></tr></thead>
+        <tbody>${rows || `<tr><td colspan="5">${empty("Nessun progetto", "Monta un progetto in src per vederlo qui.")}</td></tr>`}</tbody>
+      </table>
     </div>
   </section>`;
+}
+
+function renderHostingServiceHealth(context) {
+  const serviceRows = hostingServiceRows(context);
+  return `<section class="hosting-panel hosting-health-panel">
+    <div class="hosting-panel-head">
+      <div>
+        <h2>Servizi infrastruttura</h2>
+        <p>Solo i servizi utili alla gestione quotidiana, con link diretti dove serve.</p>
+      </div>
+      <a class="button" href="/?mode=advanced&section=infrastructure">Inventario</a>
+    </div>
+    <div class="hosting-service-list">
+      ${serviceRows.map((item) => `<a class="hosting-service-row" href="${escapeHtml(item.href)}">
+        <span class="hosting-service-icon" aria-hidden="true">${controlIcon(item.icon)}</span>
+        <span><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(item.role)}</small></span>
+        <em class="${escapeHtml(item.tone)}"><i aria-hidden="true"></i>${escapeHtml(item.status)}</em>
+      </a>`).join("")}
+    </div>
+  </section>`;
+}
+
+function hostingServiceRows(context) {
+  return [
+    { name: "Traefik", role: "Reverse proxy e routing HTTPS", status: context.network.routers.length ? "configurato" : "da verificare", icon: "domains", href: "/?mode=advanced&section=network", tone: "good" },
+    { name: "MariaDB", role: "Database PHP locali", status: "configurato", icon: "databases", href: "/?mode=advanced&section=databases", tone: "good" },
+    { name: "PostgreSQL", role: "Database piattaforma", status: "configurato", icon: "databases", href: "/?mode=advanced&section=databases", tone: "good" },
+    { name: "phpMyAdmin", role: "Console database MariaDB", status: "admin", icon: "databases", href: "https://phpmyadmin.localhost.com", tone: "info" },
+    { name: "Keycloak", role: "Identity provider", status: "admin", icon: "security", href: "https://auth.localhost.com", tone: "info" },
+    { name: "MinIO", role: "Object storage e bucket", status: hostingStatusLabel(context.storageProvider.status), icon: "storage", href: "https://minio.localhost.com", tone: "good" },
+    { name: "Grafana", role: "Metriche, log e dashboard", status: `${context.monitoring.dashboardPanels.length} pannelli`, icon: "resources", href: "https://grafana.localhost.com", tone: "good" },
+    { name: "Alertmanager", role: "Routing alert", status: `${context.alertRecords.length} alert`, icon: "logs", href: "/?section=logs", tone: context.overview.alerts.open ? "warning" : "good" },
+  ];
+}
+
+function hostingStatusLabel(value) {
+  const normalized = String(value || "").toLowerCase().trim();
+  const labels = {
+    configured: "configurato",
+    strict: "header attivi",
+    active: "attivo",
+    disabled: "disattivo",
+    online: "online",
+    offline: "offline",
+    "not-configured": "non configurato",
+    "requires-secret-file": "richiede segreto",
+  };
+  return labels[normalized] || value || "sconosciuto";
+}
+
+function renderHostingQuickActions(context) {
+  const actions = [
+    ["Apri Projects", "/?section=projects", "projects"],
+    ["Nuovo dominio locale", "/?section=domains", "domains"],
+    ["Database", "/?mode=advanced&section=databases", "databases"],
+    ["Backup manuale", "/?section=backups", "backups"],
+    ["Log e alert", "/?section=logs", "logs"],
+    ["Preflight production", "/?mode=advanced&section=go-no-go", "rocket"],
+  ];
+  return `<section class="hosting-panel hosting-actions-panel">
+    <div class="hosting-panel-head">
+      <div>
+        <h2>Operazioni rapide</h2>
+        <p>Azioni frequenti da pannello hosting. Le operazioni sensibili restano pianificate e auditate.</p>
+      </div>
+      <span class="hosting-status ${context.environment === "production" ? "warning" : "info"}"><i aria-hidden="true"></i>${escapeHtml(context.overview.modeEvidence)}</span>
+    </div>
+    <div class="hosting-action-grid">
+      ${actions.map(([label, href, icon]) => `<a class="hosting-action" href="${escapeHtml(href)}">${controlIcon(icon)}<span>${escapeHtml(label)}</span>${controlIcon("chevron")}</a>`).join("")}
+    </div>
+  </section>`;
+}
+
+function dashboardDateLabel() {
+  try {
+    return new Intl.DateTimeFormat("it-IT", { day: "2-digit", month: "long", year: "numeric", hour: "2-digit", minute: "2-digit" }).format(new Date());
+  } catch {
+    return new Date().toISOString();
+  }
+}
+
+function relativeTimeLabel(value) {
+  const timestamp = Date.parse(value || "");
+  if (!Number.isFinite(timestamp)) return "locale";
+  const minutes = Math.max(1, Math.round((Date.now() - timestamp) / 60000));
+  if (minutes < 60) return `${minutes} min fa`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours} ore fa`;
+  return `${Math.round(hours / 24)} giorni fa`;
+}
+
+function sidebarCategoryForGroup(group) {
+  if (group.id === "home") return "";
+  if (["workloads", "routing", "platform"].includes(group.id)) return "Gestione";
+  if (["operations", "security", "resilience", "observability"].includes(group.id)) return "Sicurezza";
+  return "Avanzato";
+}
+
+function sidebarGroupIcon(group) {
+  const map = {
+    workloads: "projects",
+    routing: "domains",
+    operations: "resources",
+    platform: "server",
+    delivery: "rocket",
+    observability: "resources",
+    resilience: "backups",
+    security: "security",
+    plans: "server",
+    settings: "settings",
+  };
+  return map[group.id] || group.tabs[0]?.id || "settings";
+}
+
+function sidebarGroupLabel(group) {
+  const map = {
+    workloads: "Progetti",
+    routing: "Domini",
+    operations: "Operazioni",
+    platform: "Piattaforma",
+    delivery: "Delivery",
+    observability: "Osservabilita",
+    resilience: "Resilienza",
+    security: "Sicurezza",
+    plans: "Piani",
+    settings: "Impostazioni",
+  };
+  return map[group.id] || group.label;
+}
+
+function sidebarItemLabel(label) {
+  return label === "Logs / Alerts" ? "Logs & Alert" : label;
+}
+
+function controlIcon(name) {
+  const icons = {
+    overview: '<path d="M4 11.5 12 5l8 6.5v7a1.5 1.5 0 0 1-1.5 1.5H15v-5H9v5H5.5A1.5 1.5 0 0 1 4 18.5z"/>',
+    projects: '<path d="M3 7.5h7l2 2h9v8.5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M3 7.5V6a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v1.5"/>',
+    applications: '<path d="m12 3 8 4.5v9L12 21l-8-4.5v-9z"/><path d="m12 12 8-4.5"/><path d="M12 12v9"/><path d="m12 12-8-4.5"/>',
+    domains: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3c3 3.3 3 14.7 0 18"/><path d="M12 3c-3 3.3-3 14.7 0 18"/>',
+    databases: '<ellipse cx="12" cy="5" rx="7" ry="3"/><path d="M5 5v6c0 1.7 3.1 3 7 3s7-1.3 7-3V5"/><path d="M5 11v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"/>',
+    storage: '<path d="M5 8h14l-1.2 11H6.2z"/><path d="M8 8V5.5A1.5 1.5 0 0 1 9.5 4h5A1.5 1.5 0 0 1 16 5.5V8"/><path d="M9 12h6"/>',
+    webspaces: '<rect x="4" y="5" width="16" height="14" rx="2"/><path d="M4 10h16"/><path d="M8 15h3"/><path d="M14 15h2"/>',
+    resources: '<path d="M4 19V5"/><path d="M4 19h17"/><path d="m7 15 3-3 3 2 5-7"/><path d="M18 7h3v3"/>',
+    security: '<path d="M12 3 20 6v5c0 5-3.4 8.4-8 10-4.6-1.6-8-5-8-10V6z"/>',
+    backups: '<path d="M7 7h11a3 3 0 0 1 0 6H8a4 4 0 1 1 3.5-6"/><path d="M12 12v6"/><path d="m9 15 3 3 3-3"/>',
+    logs: '<path d="M18 8a6 6 0 1 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9"/><path d="M10 21h4"/>',
+    settings: '<path d="M12 15.5A3.5 3.5 0 1 0 12 8a3.5 3.5 0 0 0 0 7.5z"/><path d="M19.4 15a1.8 1.8 0 0 0 .36 2l.05.05a2 2 0 1 1-2.83 2.83l-.05-.05a1.8 1.8 0 0 0-2-.36 1.8 1.8 0 0 0-1 1.63V21a2 2 0 1 1-4 0v-.08a1.8 1.8 0 0 0-1-1.63 1.8 1.8 0 0 0-2 .36l-.05.05a2 2 0 1 1-2.83-2.83l.05-.05a1.8 1.8 0 0 0 .36-2 1.8 1.8 0 0 0-1.63-1H3a2 2 0 1 1 0-4h.08a1.8 1.8 0 0 0 1.63-1 1.8 1.8 0 0 0-.36-2l-.05-.05a2 2 0 1 1 2.83-2.83l.05.05a1.8 1.8 0 0 0 2 .36h.01A1.8 1.8 0 0 0 10 3.08V3a2 2 0 1 1 4 0v.08a1.8 1.8 0 0 0 1 1.63 1.8 1.8 0 0 0 2-.36l.05-.05a2 2 0 1 1 2.83 2.83l-.05.05a1.8 1.8 0 0 0-.36 2V9.2a1.8 1.8 0 0 0 1.63 1H21a2 2 0 1 1 0 4h-.08a1.8 1.8 0 0 0-1.52.8z"/>',
+    menu: '<path d="M4 7h16"/><path d="M4 12h16"/><path d="M4 17h16"/>',
+    search: '<circle cx="11" cy="11" r="7"/><path d="m16.5 16.5 4 4"/>',
+    bell: '<path d="M18 8a6 6 0 1 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9"/><path d="M10 21h4"/>',
+    help: '<path d="M9.2 9a3 3 0 1 1 5.2 2c-1.3.8-2.4 1.6-2.4 3"/><path d="M12 18h.01"/><circle cx="12" cy="12" r="9"/>',
+    sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/>',
+    folder: '<path d="M3 7.5h7l2 2h9v8.5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
+    cube: '<path d="m12 3 8 4.5v9L12 21l-8-4.5v-9z"/><path d="m12 12 8-4.5"/><path d="M12 12v9"/><path d="m12 12-8-4.5"/>',
+    globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3c3 3.3 3 14.7 0 18"/><path d="M12 3c-3 3.3-3 14.7 0 18"/>',
+    server: '<rect x="4" y="4" width="16" height="6" rx="2"/><rect x="4" y="14" width="16" height="6" rx="2"/><path d="M8 7h.01"/><path d="M8 17h.01"/>',
+    shield: '<path d="M12 3 20 6v5c0 5-3.4 8.4-8 10-4.6-1.6-8-5-8-10V6z"/>',
+    rocket: '<path d="M5 15c-1 1-1.5 3-1.5 5.5C6 20.5 8 20 9 19"/><path d="M15 5c3-2 5.5-1.5 5.5-1.5S21 6 19 9l-7 7-4-4z"/><path d="m9 15-4 4"/><path d="M15 5l4 4"/>',
+    user: '<circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/>',
+    plus: '<path d="M12 5v14"/><path d="M5 12h14"/>',
+    chevron: '<path d="m9 18 6-6-6-6"/>',
+    "chevron-down": '<path d="m6 9 6 6 6-6"/>',
+    "arrow-right": '<path d="M5 12h14"/><path d="m13 6 6 6-6 6"/>',
+  };
+  const body = icons[name] || icons.settings;
+  return `<svg viewBox="0 0 24 24" focusable="false" aria-hidden="true">${body}</svg>`;
 }
 
 function renderProjects(projects) {
@@ -2460,7 +2754,7 @@ function renderSecurityPolicyCard(policy) {
 
 function renderSettings(context) {
   const settings = context.settings || settingsRecord();
-  const uiPackage = context.uiPackage || readStexorUiPackage();
+  const uiPackage = context.uiPackage || readControlCenterUiPackage();
   const uiComponents = (uiPackage.requiredComponents || []).join(", ");
   const uiAssets = (uiPackage.servedAssets || []).join(", ");
   const optionList = (name, selected, values, label) => `<select name="${escapeHtml(name)}" aria-label="${escapeHtml(label)}">${values.map((value) => `<option value="${escapeHtml(value)}" ${selected === value ? "selected" : ""}>${escapeHtml(value)}</option>`).join("")}</select>`;
@@ -2494,13 +2788,13 @@ function renderSettings(context) {
         <div class="card compact"><strong>Provider touched</strong><span>${settings.providerTouched ? "yes" : "no"}</span></div>
       </div>
     </div>
-    <div class="panel"><div class="panel-head"><span>UI</span><div><h2>Design System</h2><p>The Control Center loads the vendored Stexor UI package, not a parallel dashboard theme.</p></div></div>
+    <div class="panel"><div class="panel-head"><span>UI</span><div><h2>Control Center UI</h2><p>The Control Center uses a local visual system scoped to this Node dashboard.</p></div></div>
       <div class="cards">
         <div class="card compact"><strong>${escapeHtml(uiPackage.name)}</strong><span>version ${escapeHtml(uiPackage.version)} / ${escapeHtml(uiPackage.source)}</span></div>
-        <div class="card compact"><strong>${escapeHtml(uiPackage.controlCenterProject || "@stexor/control-center")}</strong><span>${escapeHtml(uiPackage.declaredDependency || "missing @stexor/ui dependency")} / mounted ${uiPackage.packageMountedInControlCenterProject ? "yes" : "no"}</span></div>
-        <div class="card compact"><strong>Official entrypoints</strong><span>${escapeHtml(uiAssets)}</span></div>
-        <div class="card compact"><strong>Manifest components</strong><span>${escapeHtml(uiComponents)}</span></div>
-        <div class="card compact"><strong>Package contract</strong><span>${uiPackage.usingVendoredPackage && uiPackage.apiManifestLoaded && uiPackage.missingRequiredExports?.length === 0 ? "loaded from @stexor/ui" : "needs package review"}</span></div>
+        <div class="card compact"><strong>${escapeHtml(uiPackage.controlCenterProject || "@stexor/control-center")}</strong><span>${escapeHtml(uiPackage.declaredDependency || "none")} / local scope ${uiPackage.packageMountedInControlCenterProject ? "yes" : "no"}</span></div>
+        <div class="card compact"><strong>Local entrypoints</strong><span>${escapeHtml(uiAssets)}</span></div>
+        <div class="card compact"><strong>Local components</strong><span>${escapeHtml(uiComponents)}</span></div>
+        <div class="card compact"><strong>Visual contract</strong><span>${uiPackage.apiManifestLoaded && uiPackage.missingRequiredExports?.length === 0 ? "loaded from local Control Center files" : "needs package review"}</span></div>
       </div>
     </div>
     <div class="panel"><div class="panel-head"><span>CON</span><div><h2>Provider Connections</h2><p>Connection metadata only. Tokens and provider credentials stay in Docker secrets or private ops material.</p></div></div>
@@ -4651,55 +4945,14 @@ function writeSettingsState(state) {
   writeFileSync(settingsFile, `${JSON.stringify(sanitizeEvent(state), null, 2)}\n`);
 }
 
-function readStexorUiPackage() {
+function readControlCenterUiPackage() {
   const controlCenterPackage = readControlCenterPackageJson();
-  const packageJson = readStexorUiJson("package.json");
-  const manifest = readStexorUiJson("api-manifest.json");
-  const packageExports = packageJson.exports && typeof packageJson.exports === "object" && !Array.isArray(packageJson.exports) ? Object.keys(packageJson.exports) : [];
-  const entrypoints = Array.isArray(manifest.entrypoints) && manifest.entrypoints.length ? manifest.entrypoints : packageExports;
-  const coreExports = Array.isArray(manifest.coreExports) ? manifest.coreExports : [];
-  const requiredComponents = ["UiShell", "PillSidebarNav", "Button", "StatusPill", "UiMetricGrid", "UiSectionCard"];
-  const missingRequiredExports = requiredComponents.filter((name) => !coreExports.includes(name));
-  const declaredUiDependency = String(controlCenterPackage.dependencies?.["@stexor/ui"] || "");
-  return sanitizeEvent({
-    name: packageJson.name || "@stexor/ui",
-    version: packageJson.version || "unknown",
-    source: "control-center/vendor/@stexor/ui",
-    mountedRoot: "/app/vendor/@stexor/ui",
-    controlCenterProject: controlCenterPackage.name || "@stexor/control-center",
-    controlCenterPackageLoaded: controlCenterPackage.name === "@stexor/control-center",
-    declaredDependency: declaredUiDependency,
-    dependencyTarget: "vendor/@stexor/ui",
-    packageMountedInControlCenterProject: declaredUiDependency === "file:vendor/@stexor/ui",
-    usingVendoredPackage: packageJson.name === "@stexor/ui",
-    packageJsonLoaded: packageJson.name === "@stexor/ui",
-    apiManifestLoaded: manifest.package === "@stexor/ui",
-    runtimeFramework: "node-rendered-html-with-stexor-ui-package-assets",
-    hostInstallRequired: false,
-    entrypoints,
-    cssEntrypoints: ["./styles.css", "./ui.css"],
-    servedAssets: ["/assets/stexor-ui/src/styles.css", "/assets/stexor-ui/src/ui.css"],
-    coreExports,
-    requiredComponents,
-    missingRequiredExports,
-  });
+  return sanitizeEvent(controlCenterUiContract(controlCenterPackage));
 }
 
 function readControlCenterPackageJson() {
   try {
     const parsed = JSON.parse(readFileSync(path.join(appRoot, "package.json"), "utf8"));
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
-  } catch {
-    return {};
-  }
-}
-
-function readStexorUiJson(fileName) {
-  try {
-    const root = path.resolve(stexorUiPackageRoot);
-    const target = path.resolve(root, fileName);
-    if (!(target === root || target.startsWith(`${root}${path.sep}`)) || !existsSync(target)) return {};
-    const parsed = JSON.parse(readFileSync(target, "utf8"));
     return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
   } catch {
     return {};
@@ -6638,16 +6891,16 @@ function navigationGroupsForMode(mode) {
       ["overview", "Overview", "OVR"],
     ]),
     navGroup("workloads", "Workloads", "WRK", [
-      ["projects", "Projects", "PRJ"], ["applications", "Applications", "APP"], ["webspaces", "Web Spaces", "WEB"],
+      ["projects", "Progetti", "PRJ"], ["applications", "Applicazioni", "APP"], ["webspaces", "Web spaces", "WEB"],
     ]),
     navGroup("routing", "Routing", "DNS", [
-      ["domains", "Domains & Subdomains", "DNS"],
+      ["domains", "Domini e sottodomini", "DNS"],
     ]),
     navGroup("operations", "Operations", "OPS", [
-      ["resources", "Resources", "RES"], ["security", "Security", "SEC"], ["backups", "Backups", "BKP"], ["logs", "Logs / Alerts", "LOG"],
+      ["resources", "Risorse", "RES"], ["security", "Sicurezza", "SEC"], ["backups", "Backup", "BKP"], ["logs", "Log e alert", "LOG"],
     ]),
     navGroup("settings", "Settings", "SET", [
-      ["settings", "Settings", "SET"],
+      ["settings", "Impostazioni", "SET"],
     ]),
   ];
 }
@@ -6712,7 +6965,7 @@ function serveStaticAsset(req, res, url, rootDir, prefix) {
   }
   const normalized = relative.replaceAll("\\", "/");
   const extension = path.extname(normalized).toLowerCase();
-  if (!normalized || normalized.includes("..") || normalized.startsWith("/") || ![".css", ".ttf", ".woff", ".woff2", ".svg"].includes(extension)) {
+  if (!normalized || normalized.includes("..") || normalized.startsWith("/") || ![".css", ".js", ".ttf", ".woff", ".woff2", ".svg"].includes(extension)) {
     notFound(res);
     return;
   }
@@ -6724,6 +6977,7 @@ function serveStaticAsset(req, res, url, rootDir, prefix) {
   }
   const contentTypes = {
     ".css": "text/css; charset=utf-8",
+    ".js": "text/javascript; charset=utf-8",
     ".ttf": "font/ttf",
     ".woff": "font/woff",
     ".woff2": "font/woff2",
@@ -6745,204 +6999,6 @@ function escapeHtml(value) {
     "\"": "&quot;",
     "'": "&#039;",
   }[char]));
-}
-
-function styleTag() {
-  return `<style>
-/* Control Center composition layer over the vendored @stexor/ui package. */
-:root{
-  color-scheme:dark;
-  --ui-white:#ffffff;
-  --ui-dark-mono-bg:#0f1115;
-  --ui-dark-panel:#171a21;
-  --ui-dark-cell:#20242d;
-  --ui-dark-cell-muted:#151922;
-  --ui-dark-line:rgba(235,238,245,.12);
-  --ui-dark-text:#f5f7fb;
-  --ui-dark-muted:#a9b0bf;
-  --ui-dark-primary-bg:#86b7ff;
-  --ui-dark-primary-border:#5f8fce;
-  --ui-dark-primary-hover-bg:#acd0ff;
-  --ui-mono-bg:var(--ui-dark-mono-bg);
-  --ui-mono-bg-soft:#14171d;
-  --ui-mono-text:var(--ui-dark-text);
-  --ui-mono-muted:var(--ui-dark-muted);
-  --ui-mono-line:var(--ui-dark-line);
-  --ui-mono-focus:0 0 0 4px rgba(134,183,255,.18);
-  --ui-mono-shadow:0 18px 42px rgba(0,0,0,.28);
-  --ui-mono-shadow-soft:0 8px 24px rgba(0,0,0,.2);
-  --ui-body-background:linear-gradient(180deg,#0f1115 0%,#12151b 48%,#0f1115 100%);
-  --ui-shell-glow-blue:rgba(134,183,255,.13);
-  --ui-shell-glow-green:rgba(118,228,197,.08);
-  --ui-shell-grid-blue:rgba(134,183,255,.05);
-  --ui-shell-glass-start:rgba(15,17,21,.88);
-  --ui-shell-glass-end:rgba(15,17,21,.22);
-  --ui-shell-grid-line:rgba(235,238,245,.035);
-  --ui-accent:var(--ui-dark-primary-bg);
-  --ui-accent-action:var(--ui-dark-primary-bg);
-  --ui-accent-strong:var(--ui-dark-primary-hover-bg);
-  --ui-accent-soft:rgba(134,183,255,.14);
-  --ui-accent-focus-ring:rgba(134,183,255,.16);
-  --ui-accent-ring:rgba(134,183,255,.18);
-  --ui-accent-shadow:rgba(134,183,255,.12);
-  --ui-action-primary-bg:var(--ui-dark-primary-bg);
-  --ui-action-primary-soft-bg:rgba(134,183,255,.15);
-  --ui-action-primary-soft-bg-on-gray:rgba(134,183,255,.19);
-  --ui-action-primary-soft-fg:#d9e8ff;
-  --ui-action-danger-bg:rgba(255,139,139,.18);
-  --ui-action-warning-bg:rgba(246,214,111,.18);
-  --ui-action-cyan-bg:rgba(118,228,197,.16);
-  --ui-action-slate-bg:rgba(174,184,199,.15);
-  --ui-feedback-good-bg:rgba(118,228,197,.16);
-  --ui-feedback-warn-bg:rgba(246,214,111,.16);
-  --ui-feedback-danger-bg:rgba(255,139,139,.18);
-  --ui-feedback-info-bg:rgba(134,183,255,.16);
-  --ui-control-bg:#20242d;
-  --ui-control-hover-bg:#252a35;
-  --ui-input-icon-bg:rgba(134,183,255,.16);
-  --ui-input-icon-bg-on-gray:rgba(134,183,255,.22);
-  --ui-input-icon-fg:#d9e8ff;
-  --ui-choice-card-icon-bg:var(--ui-input-icon-bg);
-  --ui-choice-card-active-fg:var(--ui-input-icon-fg);
-  --ui-pill-active-bg-surface:var(--ui-action-primary-soft-bg);
-  --ui-pill-active-bg-gray:var(--ui-action-primary-soft-bg-on-gray);
-  --radius-pill:999px;
-  --ui-radius-12:12px;
-  --ui-radius-16:16px;
-  --ui-radius-22:22px;
-  --ui-radius-24:24px;
-  --ui-radius-26:26px;
-  --ui-radius-28:28px;
-  --ui-radius-32:32px;
-  --ui-radius-48:48px;
-  --ui-radius-panel:48px;
-  --ui-radius-section:32px;
-  --ui-density-gap:8px;
-  --ui-density-card-gap:10px;
-  --ui-density-control-height:38px;
-  --ui-density-choice-slot:34px;
-  --ui-motion-ease-standard:cubic-bezier(.16,1,.3,1);
-  --ui-motion-ease-emphasized:cubic-bezier(.22,1,.36,1);
-  --ui-motion-ease-linear:linear;
-  --ui-ease:var(--ui-motion-ease-standard);
-  --ui-motion-tiny:40ms;
-  --ui-motion-delay-short:80ms;
-  --ui-motion-delay-medium:100ms;
-  --ui-motion-short:160ms;
-  --ui-motion-fast:180ms;
-  --ui-motion-hover:200ms;
-  --ui-motion-base:220ms;
-  --ui-motion-medium:240ms;
-  --ui-motion-smooth:260ms;
-  --ui-motion-panel:380ms;
-  --ui-motion-enter:520ms;
-  --ui-z-shell:20;
-  --mono-bg:var(--ui-mono-bg);
-  --mono-cell:var(--ui-dark-cell);
-  --mono-cell-muted:var(--ui-dark-cell-muted);
-  --mono-text:var(--ui-mono-text);
-  --mono-muted:var(--ui-mono-muted);
-  --mono-line:var(--ui-mono-line);
-  --mono-radius-lg:var(--ui-radius-panel);
-  --mono-radius-md:var(--ui-radius-section);
-  --mono-control-radius:var(--radius-pill);
-  --text:var(--ui-mono-text);
-  --muted:var(--ui-mono-muted);
-  --bg:var(--ui-mono-bg);
-  --panel:var(--mono-cell);
-  --panel-2:var(--mono-cell-muted);
-  --line:var(--ui-mono-line);
-  --accent:var(--ui-accent);
-  --accent-2:var(--ui-action-primary-soft-fg);
-  --danger:#ff8b8b;
-  --warn:#f6d66f;
-  font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
-}
-*{box-sizing:border-box}
-html,body{margin:0;min-height:100%;background:var(--mono-bg);color:var(--text)}
-body{background:var(--ui-body-background)}
-a{color:inherit;text-decoration:none}
-button,input,select{font:inherit}
-.ui-experience{background:var(--ui-body-background);color:var(--text)}
-.sx-control-shell{--ui-dock-width:216px;--ui-layout-gap:clamp(16px,2vw,24px);--ui-shell-sidebar-width:216px;--ui-shell-gap:var(--ui-layout-gap);--ui-shell-width:1440px}
-.sx-control-stage{align-items:start}
-.sx-control-dock{max-width:var(--ui-dock-width);width:var(--ui-dock-width)}
-.sx-control-scene{min-width:0}
-.sx-control-sheet{display:grid;gap:18px;padding:0}
-.sx-control-homebar .brand{margin:0}
-.sx-control-tabs{--sx-control-tab-width:132px;--sx-tab-x:6px;--pill-tab-max-width:var(--sx-control-tab-width);--pill-tab-min-width:112px;--pill-tab-width:var(--sx-control-tab-width);--pill-tab-x:var(--sx-tab-x);justify-self:start;max-width:100%;overflow-x:auto;scrollbar-width:thin}
-.sx-control-tabs .pill-tabs-pill{opacity:1}
-.control-page-head{align-items:center;display:flex;gap:20px;justify-content:space-between;min-width:0}
-.control-tab-panel{background:transparent;border:0;border-radius:0;box-shadow:none;display:grid;gap:16px;min-width:0;padding:0}
-.control-tab-panel>.grid{margin-top:0}
-.brand,.stexor-wordmark{align-items:flex-start;background:transparent;border:0;display:flex;gap:10px;margin:0 0 18px;padding:0}
-.brand-mark{align-items:center;background:var(--ui-choice-card-icon-bg);border:0;border-radius:var(--ui-radius-16);color:var(--ui-choice-card-active-fg);display:inline-flex;font-size:13px;font-weight:950;height:42px;justify-content:center;width:42px}
-.brand strong,.brand small{display:block}
-.brand strong{color:var(--text);font-size:22px;font-weight:900;line-height:1}
-.brand small{color:var(--muted);font-size:10px;font-weight:800;text-transform:uppercase}
-.sx-control-dock .nav-item{grid-template-columns:auto minmax(0,1fr);min-height:48px}
-.sx-control-dock .nav-code{align-items:center;background:var(--ui-input-icon-bg);border:0;border-radius:var(--ui-radius-16);color:var(--ui-input-icon-fg);display:inline-flex;font-size:10px;font-weight:900;height:34px;justify-content:center;width:34px}
-.mode-card{background:var(--mono-cell-muted);border:0;border-radius:var(--ui-radius-28);display:grid;gap:10px;margin-top:18px;padding:12px}
-.mode-card small{color:var(--muted);font-size:11px;font-weight:850;text-transform:uppercase}
-.segmented{background:var(--mono-cell);border-radius:var(--radius-pill);display:grid;gap:4px;grid-template-columns:1fr 1fr;padding:4px}
-.segmented a{align-items:center;border:0;border-radius:var(--radius-pill);color:var(--muted);display:flex;font-size:12px;font-weight:850;justify-content:center;min-height:32px;padding:0 10px}
-.segmented a.selected{background:var(--ui-action-primary-soft-bg);color:var(--ui-action-primary-soft-fg)}
-.eyebrow{color:var(--accent);font-size:11px;font-weight:900;letter-spacing:0;margin:0 0 6px;text-transform:uppercase}
-h1{font-size:clamp(28px,3vw,42px);font-weight:920;letter-spacing:0;line-height:1;margin:0}
-h2{font-size:1.04rem;font-weight:850;letter-spacing:0;line-height:1.2;margin:0}
-h3{color:var(--muted);font-size:12px;font-weight:850;letter-spacing:0;margin:18px 0 10px;text-transform:uppercase}
-.top-actions{align-items:center;display:flex;flex-wrap:wrap;gap:10px;justify-content:end}
-.switcher select,.inline-confirm input,.inline-confirm select,.login-form input{background:var(--ui-control-bg);border:0;border-radius:var(--mono-control-radius);color:var(--text);min-height:var(--ui-density-control-height);padding:0 13px}
-.switcher select:focus-visible,.inline-confirm input:focus-visible,.inline-confirm select:focus-visible,.login-form input:focus-visible,.button:focus-visible{box-shadow:var(--ui-mono-focus);outline:0}
-.pill,.state{align-items:center;background:var(--ui-action-primary-soft-bg);border:0;border-radius:var(--radius-pill);color:var(--ui-action-primary-soft-fg);display:inline-flex;font-size:12px;font-weight:850;min-height:30px;padding:0 11px}
-.pill.danger,.state.off{background:var(--ui-feedback-warn-bg);color:var(--warn)}
-.metric-grid{display:grid;gap:12px;grid-template-columns:repeat(4,minmax(140px,1fr));margin-top:22px}
-.metric{animation:ui-block-enterprise-card-in var(--ui-motion-panel) var(--ui-ease) both;background:var(--mono-cell);border:0;border-radius:var(--ui-radius-28);min-height:98px;padding:16px}
-.metric span{color:var(--accent);display:block;font-size:34px;font-weight:930}
-.metric small{color:var(--muted);font-weight:760}
-.grid{display:grid;gap:16px;margin-top:22px}
-.grid.two{align-items:start;grid-template-columns:minmax(0,1.15fr) minmax(320px,.85fr)}
-.panel,.ui-section{align-content:start;background:var(--mono-cell);border:0;border-radius:var(--ui-radius-32);box-shadow:none;display:grid;gap:16px;margin-top:22px;min-width:0;overflow:hidden;padding:18px}
-.grid .panel{margin-top:0}
-.panel-head,.ui-section-head{align-items:center;display:grid;gap:12px;grid-template-columns:38px minmax(0,1fr);margin:0}
-.panel-head>span,.ui-section-icon{align-items:center;background:var(--ui-choice-card-icon-bg);border:0;border-radius:var(--ui-radius-16);color:var(--ui-choice-card-active-fg);display:inline-flex;font-size:11px;font-weight:950;height:38px;justify-content:center;width:38px}
-.panel-head p{color:var(--muted);font-size:.84rem;font-weight:700;line-height:1.45;margin:3px 0 0}
-.cards{display:grid;gap:10px;grid-template-columns:repeat(auto-fit,minmax(210px,1fr))}
-.card,.ui-block-card{animation:ui-block-enterprise-card-in var(--ui-motion-panel) var(--ui-ease) both;background:var(--mono-cell-muted);border:0;border-radius:var(--ui-radius-28);color:var(--text);display:grid;gap:8px;min-height:96px;min-width:0;overflow:hidden;padding:16px;position:relative;transition:background var(--ui-motion-smooth) var(--ui-ease),transform var(--ui-motion-hover) var(--ui-ease)}
-a.card:hover,.project-card:hover{background:#252a35;transform:translateY(-2px)}
-.card strong{color:var(--text);display:block;font-size:.98rem;font-weight:850;line-height:1.2}
-.card span{color:var(--muted);display:block;font-size:.79rem;font-weight:720;line-height:1.4}
-.card.compact{min-height:78px}
-.project-cards{margin-top:16px}
-.project-card{min-height:164px}
-.project-card.is-off{opacity:.72}
-.card-title{align-items:start;display:flex;gap:10px;justify-content:space-between}
-.card-title em{background:var(--ui-action-primary-soft-bg);border:0;border-radius:var(--radius-pill);color:var(--ui-action-primary-soft-fg);font-size:11px;font-style:normal;font-weight:850;padding:4px 8px}
-.card .host{color:var(--accent);font-weight:850;overflow-wrap:anywhere}
-.project-actions{align-items:center;display:flex;flex-wrap:wrap;gap:8px;margin-top:auto;padding-top:12px}
-.button,.primary-button,.muted-button,.danger-button{align-items:center;background:var(--mono-cell-muted);border:0;border-radius:var(--radius-pill);color:var(--text);cursor:pointer;display:inline-flex;font-size:.82rem;font-weight:760;gap:8px;justify-content:center;min-height:34px;padding:0 13px;transition:background var(--ui-motion-medium) var(--ui-ease),color var(--ui-motion-medium) var(--ui-ease),transform var(--ui-motion-content) var(--ui-ease)}
-.button:hover{transform:translateY(-1px)}
-.button.open,.button.enable,.primary-button{background:var(--ui-action-primary-soft-bg);color:var(--ui-action-primary-soft-fg)}
-.button.danger,.danger-button{background:var(--ui-action-danger-bg);color:var(--danger)}
-.button.muted,.muted-button{background:var(--mono-cell);color:var(--muted);cursor:not-allowed;opacity:.65}
-.status-list{display:grid;gap:10px;list-style:none;margin:0;padding:0}
-.status-list li{align-items:center;background:var(--mono-cell-muted);border:0;border-radius:var(--ui-radius-24);display:flex;gap:16px;justify-content:space-between;padding:12px}
-.status-list span{color:var(--muted);text-align:right}
-.json-block,pre{color:#dce8f7;font-size:14px;line-height:1.55;margin:0;overflow:auto;white-space:pre-wrap}
-.empty{background:var(--mono-cell-muted);border:1px dashed var(--line);border-radius:var(--ui-radius-24);color:var(--muted);padding:18px}
-.disabled{opacity:.45;pointer-events:none}
-.login-shell{align-content:center;display:grid;min-height:100vh;padding:24px;place-items:center}
-.login-panel{background:var(--mono-cell);border:0;border-radius:var(--ui-radius-32);display:grid;gap:14px;max-width:460px;padding:24px;width:100%}
-.login-panel h1{font-size:38px}
-.login-copy{color:var(--muted);line-height:1.55}
-.login-form{display:grid;gap:12px;margin-top:8px}
-.login-form label{color:var(--muted);font-size:13px;font-weight:850}
-.inline-confirm{align-items:center;display:flex;flex-wrap:wrap;gap:6px}
-.inline-confirm input,.inline-confirm select{font-size:12px;width:190px}
-@keyframes ui-block-enterprise-card-in{from{opacity:0;transform:translateY(8px) scale(.985)}to{opacity:1;transform:translateY(0) scale(1)}}
-@media (prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important}}
-@media(max-width:980px){.sx-control-shell{display:block;padding:14px}.sx-control-dock{max-width:none;position:relative;top:auto;width:100%}.sx-control-scene{margin-top:18px}.control-page-head,.grid.two{display:block}.metric-grid{grid-template-columns:repeat(2,1fr)}.top-actions{justify-content:start;margin-top:14px}.sx-control-tabs{justify-self:stretch;width:100%}}
-</style>`;
 }
 
 class ValidationError extends Error {}
