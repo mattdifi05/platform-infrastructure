@@ -561,7 +561,11 @@ function timingSafeEqualBuffer(a, b) {
 function backupSigningKeys() {
   const filePath = path.resolve(argv.backupSigningKeysFile ?? process.env.BACKUP_SIGNING_KEYS_FILE ?? path.join(infraRoot, "secrets", "backup_signing_keys.txt"));
   const value = readSecretFileIfExists(filePath);
-  const keys = parseVersionedSecretKeys(value);
+  let keys = parseVersionedSecretKeys(value);
+  if (!keys.length && String(value ?? "").trim().length >= 48) {
+    keys = [{ id: "legacy", secret: String(value).trim() }];
+    log("Using legacy raw backup signing key format; rotate to a versioned keyring before production go-live.");
+  }
   if (!keys.length) {
     fail(`Backup signing keys are required. Run local-secret-manager or set BACKUP_SIGNING_KEYS_FILE. Expected local file: ${filePath}`);
   }
