@@ -2620,8 +2620,18 @@ async function alertEvidence(options = {}) {
     checks.push(
       { name: "worker-webhook-auth", passed: /ALERTMANAGER_WEBHOOK_TOKEN/.test(workerNotificationsServer) && /isAuthorizedAlertWebhook/.test(workerNotificationsServer) },
       { name: "worker-email-metrics", passed: /notification_alert_email_deliveries_total/.test(workerNotificationsServer) && /notification_alert_email_failures_total/.test(workerNotificationsServer) },
-      { name: "worker-discord-metrics", passed: /notification_alert_discord_deliveries_total/.test(workerNotificationsServer) && /notification_alert_discord_failures_total/.test(workerNotificationsServer) },
-      { name: "worker-telegram-metrics", passed: /notification_alert_telegram_deliveries_total/.test(workerNotificationsServer) && /notification_alert_telegram_failures_total/.test(workerNotificationsServer) },
+      {
+        name: "worker-discord-metrics",
+        passed: !requireDiscordDelivery || (/notification_alert_discord_deliveries_total/.test(workerNotificationsServer) && /notification_alert_discord_failures_total/.test(workerNotificationsServer)),
+        skipped: !requireDiscordDelivery,
+        detail: requireDiscordDelivery ? undefined : "Discord delivery is not required for this evidence run.",
+      },
+      {
+        name: "worker-telegram-metrics",
+        passed: !requireTelegramDelivery || (/notification_alert_telegram_deliveries_total/.test(workerNotificationsServer) && /notification_alert_telegram_failures_total/.test(workerNotificationsServer)),
+        skipped: !requireTelegramDelivery,
+        detail: requireTelegramDelivery ? undefined : "Telegram delivery is not required for this evidence run.",
+      },
     );
   } else {
     checks.push({
