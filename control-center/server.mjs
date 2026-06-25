@@ -11,6 +11,7 @@ const auditFile = process.env.PROJECT_AUDIT_FILE || "/var/www/project-state/audi
 const operationsFile = process.env.PROJECT_OPERATIONS_FILE || "/var/www/project-state/operations.jsonl";
 const applicationsFile = process.env.PROJECT_APPLICATIONS_FILE || "/var/www/project-state/applications.json";
 const domainsFile = process.env.PROJECT_DOMAINS_FILE || "/var/www/project-state/domains.json";
+const databasesFile = process.env.PROJECT_DATABASES_FILE || "/var/www/project-state/databases.json";
 const deploymentsFile = process.env.PROJECT_DEPLOYMENTS_FILE || "/var/www/project-state/deployments.jsonl";
 const backupRecordsFile = process.env.PROJECT_BACKUP_RECORDS_FILE || "/var/www/project-state/backups.jsonl";
 const resourceLimitsFile = process.env.PROJECT_RESOURCE_LIMITS_FILE || "/var/www/project-state/resource-limits.json";
@@ -108,6 +109,11 @@ const server = createServer(async (req, res) => {
 
     if (req.method === "POST" && url.pathname === "/actions/webspace-command") {
       await handleWebspaceCommand(req, res, context);
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/actions/database-command") {
+      await handleDatabaseCommand(req, res, context);
       return;
     }
 
@@ -240,6 +246,15 @@ async function handleApi(req, res, url, context) {
     if (method === "POST" && route(parts, "control", "webspaces")) return json(res, planWebspaceCreate(payload, context), 202);
     if (method === "POST" && parts.length === 4 && route([parts[0], parts[1], parts[3]], "control", "webspaces", "quota")) {
       return json(res, planWebspaceQuota(parts[2], payload, context), 202);
+    }
+
+    if (method === "GET" && route(parts, "control", "databases")) return json(res, { databases: context.databases, engines: context.databaseEngines });
+    if (method === "POST" && route(parts, "control", "databases")) return json(res, planDatabaseCreate(payload, context), 202);
+    if (method === "POST" && parts.length === 4 && route([parts[0], parts[1], parts[3]], "control", "databases", "backup")) {
+      return json(res, planDatabaseBackup(parts[2], payload, context), 202);
+    }
+    if (method === "POST" && parts.length === 5 && route([parts[0], parts[1], parts[3], parts[4]], "control", "databases", "restore", "plan")) {
+      return json(res, planDatabaseRestore(parts[2], payload, context), 202);
     }
 
     if (method === "GET" && route(parts, "control", "resources", "summary")) return json(res, context.resources);
@@ -425,6 +440,33 @@ async function handleWebspaceCommand(req, res, context) {
     return;
   }
   redirect(res, `/?section=webspaces#webspace-${encodeURIComponent(operation.details?.webspaceId || operation.details?.id || "")}`);
+}
+
+async function handleDatabaseCommand(req, res, context) {
+  const payload = await readPayload(req);
+  const action = String(payload.action || "");
+  let operation;
+  try {
+    if (action === "create") operation = planDatabaseCreate(payload, context);
+    else if (action === "backup") operation = planDatabaseBackup(payload.id || payload.databaseId || "", payload, context);
+    else if (action === "restore") operation = planDatabaseRestore(payload.id || payload.databaseId || "", payload, context);
+    else throw new ValidationError("Unsupported database action.");
+  } catch (error) {
+    if (error instanceof ValidationError) {
+      json(res, { error: "validation_failed", message: error.message }, 422);
+      return;
+    }
+    if (error instanceof RejectedOperationError) {
+      json(res, { error: "operation_rejected", message: error.message }, 409);
+      return;
+    }
+    throw error;
+  }
+  if (wantsJson(req)) {
+    json(res, operation, 202);
+    return;
+  }
+  redirect(res, `/?mode=advanced&section=databases#database-${encodeURIComponent(operation.details?.databaseId || operation.database?.id || "")}`);
 }
 
 async function handleBackupCommand(req, res, context) {
@@ -619,6 +661,14 @@ function buildContext({ projects, state }) {
     ...defaultWebspaces.map((space) => ({ ...space, ...(storedWebspaces[space.id] || {}) })),
     ...storedActiveWebspaces.filter((space) => !defaultIds.has(space.id)),
   ];
+  const databaseEngines = [
+    { id: "mariadb", name: "MariaDB", status: "configured", service: "mariadb", liveAdapter: "DatabaseAdapter", productionEvidence: false },
+    { id: "postgres", name: "PostgreSQL", status: "configured", service: "postgres", liveAdapter: "DatabaseAdapter", productionEvidence: false },
+  ];
+  const databases = Object.values(readDatabasesState())
+    .filter((database) => database && !database.deletedAt)
+    .map((database) => databaseRecord(database))
+    .sort((a, b) => `${a.projectId}:${a.engine}:${a.name}`.localeCompare(`${b.projectId}:${b.engine}:${b.name}`));
   const deployments = readDeployments();
   const backupRecords = readBackupRecords();
   const storedResourceLimits = readResourceLimitsState();
@@ -742,6 +792,7 @@ function buildContext({ projects, state }) {
     applications: { total: applications.length, online: onlineApps, offline: applications.length - onlineApps },
     resources,
     subdomains: { total: subdomains.length, active: subdomains.filter((item) => item.status === "active").length },
+    databases: { total: databases.length, declared: databases.filter((item) => item.status === "declared").length },
     alerts: { open: openAlerts.length, source: "Control Center local alert metadata and Alertmanager evidence tooling" },
     deployments: { latest: deployments.slice(0, 5) },
     backups,
@@ -753,6 +804,8 @@ function buildContext({ projects, state }) {
     domains,
     subdomains,
     webspaces,
+    databases,
+    databaseEngines,
     resources,
     security,
     backups,
@@ -1100,9 +1153,11 @@ function advancedSectionData(section, context) {
       };
     case "databases":
       return {
-        engines: ["MariaDB", "PostgreSQL"].map((name) => ({ name, status: "configured", operations: ["create database", "backup DB", "restore DB", "users and permissions"] })),
-        slowQueries: "planned adapter",
-        connectionStatus: "planned adapter",
+        engines: context.databaseEngines,
+        databases: context.databases,
+        operations: ["create database", "backup DB", "restore DB", "users and permissions"],
+        slowQueries: "planned read-only adapter",
+        connectionStatus: "metadata-only until DatabaseAdapter verify is enabled",
       };
     case "storage":
       return {
@@ -1332,6 +1387,7 @@ function renderControlCenter(context, params) {
     if (section === "audit") body = renderAudit(context.audit, "Audit Log");
     else if (section === "network") body = renderDomains(context.domains, scoped(context.subdomains), context.projects);
     else if (section === "infrastructure") body = renderInfrastructure(context.advancedServices);
+    else if (section === "databases") body = renderDatabases(scoped(context.databases), context.databaseEngines, context.projects);
     else if (section === "deployments") body = renderDeployments(scoped(context.deployments));
     else if (section === "logs-advanced") body = renderAdvancedPanel(title, section, context, "Loki query and export surfaces stay metadata-only here.");
     else if (section === "alerts-advanced") body = renderAdvancedPanel(title, section, context, "Alert delivery evidence is verified through the ops runner before production use.");
@@ -1756,6 +1812,49 @@ function renderInfrastructure(services) {
 
 function renderDeployments(deployments) {
   return `<section class="panel"><div class="panel-head"><span>DEP</span><div><h2>Deployments</h2><p>Local deployment records are plan evidence only until production verifyRemote passes.</p></div></div>${deployments.length ? `<div class="cards">${deployments.slice(0, 24).map((deployment) => `<div class="card compact"><strong>${escapeHtml(`${deployment.action} / ${deployment.applicationId}`)}</strong><span>${escapeHtml(`${deployment.createdAt} / ${deployment.status} / ${deployment.environment}`)}</span><span>${escapeHtml(`branch ${deployment.branch} / commit ${deployment.commit}`)}</span></div>`).join("")}</div>` : empty("No deployments", "Deploy and rollback plans will appear here after you run them from Applications.")}</section>`;
+}
+
+function renderDatabases(databases, engines, projects) {
+  const projectOptions = projects.map((project) => `<option value="${escapeHtml(project.slug)}">${escapeHtml(project.name)}</option>`).join("");
+  const engineOptions = engines.map((engine) => `<option value="${escapeHtml(engine.id)}">${escapeHtml(engine.name)}</option>`).join("");
+  return `<section class="grid two">
+    <div class="panel"><div class="panel-head"><span>DB</span><div><h2>Databases</h2><p>Database inventory and plans are metadata-only until a live DatabaseAdapter is explicitly enabled.</p></div></div>
+      <div class="cards">
+        ${engines.map((engine) => `<div class="card compact"><strong>${escapeHtml(engine.name)}</strong><span>${escapeHtml(engine.service)} / ${escapeHtml(engine.status)} / production evidence ${engine.productionEvidence ? "yes" : "no"}</span></div>`).join("")}
+      </div>
+      <form method="post" action="/actions/database-command" class="inline-confirm database-form">
+        <input type="hidden" name="action" value="create">
+        <select name="projectId" aria-label="Database project">${projectOptions}</select>
+        <select name="engine" aria-label="Database engine">${engineOptions}</select>
+        <input name="name" value="app_db" aria-label="Database name">
+        <input name="ownerRole" value="app_user" aria-label="Owner role">
+        <input type="hidden" name="confirm" value="CREATE-DATABASE">
+        <button class="button enable" type="submit">Declare database</button>
+      </form>
+    </div>
+    <div class="panel"><div class="panel-head"><span>INV</span><div><h2>Database Inventory</h2><p>Create/backup/restore controls write audited plans and never expose credentials.</p></div></div>
+      ${databases.length ? `<div class="cards">${databases.map(renderDatabaseCard).join("")}</div>` : empty("No databases declared", "Declare a project database to track backup and restore plans from the Control Center.")}
+    </div>
+  </section>`;
+}
+
+function renderDatabaseCard(database) {
+  return `<div id="database-${escapeHtml(database.id)}" class="card compact">
+    <div class="card-title"><strong>${escapeHtml(database.name)}</strong><em>${escapeHtml(database.engine)}</em></div>
+    <span>${escapeHtml(database.projectId)} / ${escapeHtml(database.status)} / ${escapeHtml(database.connectionStatus)}</span>
+    <span>size ${escapeHtml(String(database.sizeBytes))} bytes / slow queries ${escapeHtml(database.slowQueries)}</span>
+    <form method="post" action="/actions/database-command" class="inline-confirm">
+      <input type="hidden" name="action" value="backup">
+      <input type="hidden" name="id" value="${escapeHtml(database.id)}">
+      <button class="button enable" type="submit">Plan backup</button>
+    </form>
+    <form method="post" action="/actions/database-command" class="inline-confirm">
+      <input type="hidden" name="action" value="restore">
+      <input type="hidden" name="id" value="${escapeHtml(database.id)}">
+      <input name="backupRef" value="latest" aria-label="Backup reference">
+      <button class="button danger" type="submit">Plan restore</button>
+    </form>
+  </div>`;
 }
 
 function renderBackups(summary, records) {
@@ -2246,6 +2345,66 @@ function planWebspaceQuota(id, payload, context) {
   return operationPlan("webspace.quota", context.environment, true, ["validate quota", "prepare quota metadata update", "write audit event"], { webspaceId: space.id, projectId: space.projectId, quotaBytes, confirmationRequired: "UPDATE-QUOTA" });
 }
 
+function planDatabaseCreate(payload, context) {
+  const projectId = slugify(payload.projectId || "");
+  validateSlug(projectId);
+  findById(context.projects, projectId, "Project");
+  const engine = choice(String(payload.engine || "mariadb").toLowerCase(), ["mariadb", "postgres"], "database engine");
+  const name = validateDatabaseName(payload.name || `${projectId}_${engine}`);
+  const ownerRole = validateDatabaseName(payload.ownerRole || `${projectId}_app`);
+  const id = databaseId(projectId, engine, name);
+  const details = databaseRecord({ id, projectId, engine, name, ownerRole });
+  if (payload.confirm === "CREATE-DATABASE") {
+    const state = readDatabasesState();
+    state[id] = {
+      ...(state[id] || {}),
+      ...details,
+      status: "declared",
+      updatedAt: new Date().toISOString(),
+      createdAt: state[id]?.createdAt || new Date().toISOString(),
+    };
+    writeDatabasesState(state);
+    appendAudit({ action: "database.create.apply", target: `${projectId}/${name}`, environment: context.environment, risk: "medium", result: "success", dryRun: false, summary: "Database metadata declared locally; no live database mutation executed." });
+    const operation = operationPlan("database.create.local", context.environment, false, ["validate project", "validate database name", "declare engine and owner role", "leave MariaDB/PostgreSQL unchanged", "write audit event"], { ...state[id], databaseTouched: false, credentialsExposed: false, productionEvidence: false });
+    return { ...operation, database: state[id] };
+  }
+  appendAudit({ action: "database.create.plan", target: `${projectId}/${name}`, environment: context.environment, risk: "medium", result: "planned", dryRun: true, summary: "Database creation plan generated; no live database mutation executed." });
+  return operationPlan("database.create", context.environment, true, ["validate project", "validate database name", "prepare local metadata", "require apply confirmation", "write audit event"], { ...details, databaseTouched: false, credentialsExposed: false, productionEvidence: false, confirmationRequired: "CREATE-DATABASE" });
+}
+
+function planDatabaseBackup(id, payload, context) {
+  const database = findById(context.databases, id, "Database");
+  const scope = `database:${database.id}`;
+  appendAudit({ action: "database.backup.plan", target: database.id, environment: context.environment, risk: "medium", result: "planned", dryRun: true, summary: "Database backup plan generated; no dump command executed from the web panel." });
+  const operation = operationPlan("database.backup", context.environment, true, ["validate database record", "select database engine", "invoke DatabaseAdapter dump in ops runner", "verify backup artifact", "write evidence"], {
+    databaseId: database.id,
+    projectId: database.projectId,
+    engine: database.engine,
+    scope,
+    databaseTouched: false,
+    credentialsExposed: false,
+    productionEvidence: false,
+  });
+  return { ...operation, database };
+}
+
+function planDatabaseRestore(id, payload, context) {
+  const database = findById(context.databases, id, "Database");
+  const backupRef = sanitizeRef(payload.backupRef || payload.backupId || "latest");
+  appendAudit({ action: "database.restore.plan", target: database.id, environment: context.environment, risk: "high", result: "planned", dryRun: true, summary: "Database restore drill plan generated; no live data changed." });
+  const operation = operationPlan("database.restore.plan", context.environment, true, ["validate database record", "validate backup reference", "create disposable restore target", "run restore drill through DatabaseAdapter", "generate evidence"], {
+    databaseId: database.id,
+    projectId: database.projectId,
+    engine: database.engine,
+    backupRef,
+    databaseTouched: false,
+    dataChanged: false,
+    credentialsExposed: false,
+    productionEvidence: false,
+  });
+  return { ...operation, database };
+}
+
 function planResourceLimitUpdate(payload, context) {
   const projectId = slugify(payload.projectId || "");
   validateSlug(projectId);
@@ -2589,6 +2748,20 @@ function writeWebspacesState(state) {
   writeFileSync(webspacesFile, `${JSON.stringify(sanitizeEvent(state), null, 2)}\n`);
 }
 
+function readDatabasesState() {
+  try {
+    const parsed = JSON.parse(readFileSync(databasesFile, "utf8"));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeDatabasesState(state) {
+  mkdirSync(path.dirname(databasesFile), { recursive: true });
+  writeFileSync(databasesFile, `${JSON.stringify(sanitizeEvent(state), null, 2)}\n`);
+}
+
 function readResourceLimitsState() {
   try {
     const parsed = JSON.parse(readFileSync(resourceLimitsFile, "utf8"));
@@ -2858,6 +3031,12 @@ function validateWebspacePath(value) {
   return normalized;
 }
 
+function validateDatabaseName(value) {
+  const name = String(value || "").trim().toLowerCase();
+  if (!/^[a-z][a-z0-9_]{0,62}$/.test(name)) throw new ValidationError("Invalid database identifier.");
+  return name;
+}
+
 function parseQuotaBytes(value) {
   const quotaBytes = Number(value || 0);
   if (!Number.isSafeInteger(quotaBytes) || quotaBytes < 0) throw new ValidationError("Quota must be zero or a positive safe integer.");
@@ -2879,6 +3058,10 @@ function validateBaseDomain(value) {
 
 function webspaceId(projectId, name) {
   return name === projectId ? projectId : `${projectId}-${name}`;
+}
+
+function databaseId(projectId, engine, name) {
+  return sanitizeIdentifier(`${projectId}-${engine}-${name.replace(/_/g, "-")}`);
 }
 
 function domainRecord({
@@ -2952,6 +3135,56 @@ function resourceLimitRecord({ projectId, cpuMillicores = 0, memoryMb = 0, diskM
     dockerTouched: false,
     createdAt,
     updatedAt,
+  });
+}
+
+function databaseRecord({
+  id = "",
+  projectId = "",
+  engine = "mariadb",
+  name = "",
+  ownerRole = "",
+  status = "declared",
+  connectionStatus = "metadata-only",
+  sizeBytes = 0,
+  slowQueries = "planned-adapter",
+  users = [],
+  permissions = [],
+  backupPolicy = "manual-plan-only",
+  restoreStatus = "restore-drill-plan-only",
+  source = "control-center-state",
+  createdAt = null,
+  updatedAt = null,
+  deletedAt = null,
+} = {}) {
+  const cleanProjectId = sanitizeIdentifier(projectId);
+  const cleanEngine = choice(String(engine || "mariadb").toLowerCase(), ["mariadb", "postgres"], "database engine");
+  const fallbackProject = cleanProjectId || "platform";
+  const cleanName = validateDatabaseName(name || `${fallbackProject}_${cleanEngine}`);
+  const cleanOwnerRole = validateDatabaseName(ownerRole || `${fallbackProject}_app`);
+  return sanitizeEvent({
+    id: sanitizeIdentifier(id || databaseId(cleanProjectId, cleanEngine, cleanName)),
+    projectId: cleanProjectId,
+    engine: cleanEngine,
+    name: cleanName,
+    ownerRole: cleanOwnerRole,
+    environment: "local",
+    status,
+    connectionStatus,
+    sizeBytes: Number.isSafeInteger(Number(sizeBytes)) && Number(sizeBytes) >= 0 ? Number(sizeBytes) : 0,
+    slowQueries,
+    users: Array.isArray(users) ? users.map((user) => sanitizeOptionalRef(user)).filter(Boolean).slice(0, 20) : [],
+    permissions: Array.isArray(permissions) ? permissions.map((permission) => sanitizeOptionalRef(permission)).filter(Boolean).slice(0, 20) : [],
+    backupPolicy,
+    restoreStatus,
+    source,
+    databaseTouched: false,
+    credentialsExposed: false,
+    providerTouched: false,
+    productionEvidence: false,
+    createdAt,
+    updatedAt,
+    deletedAt,
   });
 }
 

@@ -21,6 +21,7 @@ const auditFile = path.join(stateDir, "audit.jsonl");
 const operationsFile = path.join(stateDir, "operations.jsonl");
 const applicationsFile = path.join(stateDir, "applications.json");
 const domainsFile = path.join(stateDir, "domains.json");
+const databasesFile = path.join(stateDir, "databases.json");
 const deploymentsFile = path.join(stateDir, "deployments.jsonl");
 const backupRecordsFile = path.join(stateDir, "backups.jsonl");
 const resourceLimitsFile = path.join(stateDir, "resource-limits.json");
@@ -47,6 +48,7 @@ test("Stexor Control Center local foundation", async (t) => {
       PROJECT_OPERATIONS_FILE: operationsFile,
       PROJECT_APPLICATIONS_FILE: applicationsFile,
       PROJECT_DOMAINS_FILE: domainsFile,
+      PROJECT_DATABASES_FILE: databasesFile,
       PROJECT_DEPLOYMENTS_FILE: deploymentsFile,
       PROJECT_BACKUP_RECORDS_FILE: backupRecordsFile,
       PROJECT_RESOURCE_LIMITS_FILE: resourceLimitsFile,
@@ -589,6 +591,78 @@ test("Stexor Control Center local foundation", async (t) => {
   const webspaceStateText = readFileSync(webspacesFile, "utf8");
   assert.doesNotMatch(webspaceStateText, /webspace-secret-should-not-leak/);
   assert.equal(JSON.parse(webspaceStateText)["stexor-media"].quotaBytes, 8192);
+
+  const databasesHtml = await getText(`${baseUrl}/?mode=advanced&section=databases`);
+  assert.match(databasesHtml, /Databases/);
+  assert.match(databasesHtml, /Declare database/);
+
+  const invalidDatabase = await postJson(`${baseUrl}/control/databases`, {
+    projectId: "stexor",
+    engine: "mariadb",
+    name: "bad-name",
+  });
+  assert.equal(invalidDatabase.status, 422);
+  assert.match(invalidDatabase.body.message, /Invalid database identifier/);
+
+  const databasePlan = await postJson(`${baseUrl}/control/databases`, {
+    projectId: "stexor",
+    engine: "mariadb",
+    name: "stexor_app",
+    ownerRole: "stexor_user",
+    secret: "database-secret-should-not-leak",
+  });
+  assert.equal(databasePlan.status, 202);
+  assert.equal(databasePlan.body.type, "database.create");
+  assert.equal(databasePlan.body.dryRun, true);
+  assert.equal(databasePlan.body.details.confirmationRequired, "CREATE-DATABASE");
+  assert.equal(databasePlan.body.details.databaseTouched, false);
+  assert.equal(databasePlan.body.details.credentialsExposed, false);
+  assert.doesNotMatch(JSON.stringify(databasePlan.body), /database-secret-should-not-leak/);
+
+  const databaseApply = await postJson(`${baseUrl}/control/databases`, {
+    projectId: "stexor",
+    engine: "mariadb",
+    name: "stexor_app",
+    ownerRole: "stexor_user",
+    confirm: "CREATE-DATABASE",
+    secret: "database-secret-should-not-leak",
+  });
+  assert.equal(databaseApply.status, 202);
+  assert.equal(databaseApply.body.type, "database.create.local");
+  assert.equal(databaseApply.body.dryRun, false);
+  assert.equal(databaseApply.body.database.id, "stexor-mariadb-stexor-app");
+  assert.equal(databaseApply.body.details.databaseTouched, false);
+  assert.equal(databaseApply.body.details.credentialsExposed, false);
+
+  const databasesAfterApply = await getJson(`${baseUrl}/control/databases`);
+  assert.equal(databasesAfterApply.engines.some((engine) => engine.id === "mariadb"), true);
+  assert.equal(databasesAfterApply.databases.some((database) => database.id === "stexor-mariadb-stexor-app"), true);
+  assert.equal(existsSync(databasesFile), true);
+  const databaseStateText = readFileSync(databasesFile, "utf8");
+  assert.doesNotMatch(databaseStateText, /database-secret-should-not-leak/);
+  assert.equal(JSON.parse(databaseStateText)["stexor-mariadb-stexor-app"].credentialsExposed, false);
+
+  const databasesHtmlAfterApply = await getText(`${baseUrl}/?mode=advanced&section=databases`);
+  assert.match(databasesHtmlAfterApply, /Plan backup/);
+  assert.match(databasesHtmlAfterApply, /Plan restore/);
+
+  const databaseBackup = await postJson(`${baseUrl}/control/databases/stexor-mariadb-stexor-app/backup`, {
+    secret: "database-secret-should-not-leak",
+  });
+  assert.equal(databaseBackup.status, 202);
+  assert.equal(databaseBackup.body.type, "database.backup");
+  assert.equal(databaseBackup.body.dryRun, true);
+  assert.equal(databaseBackup.body.details.databaseTouched, false);
+  assert.equal(databaseBackup.body.details.credentialsExposed, false);
+  assert.doesNotMatch(JSON.stringify(databaseBackup.body), /database-secret-should-not-leak/);
+
+  const databaseRestore = await postJson(`${baseUrl}/control/databases/stexor-mariadb-stexor-app/restore/plan`, {
+    backupRef: "latest",
+  });
+  assert.equal(databaseRestore.status, 202);
+  assert.equal(databaseRestore.body.type, "database.restore.plan");
+  assert.equal(databaseRestore.body.details.dataChanged, false);
+  assert.equal(databaseRestore.body.details.databaseTouched, false);
 
   const resourcesHtml = await getText(`${baseUrl}/?section=resources`);
   assert.match(resourcesHtml, /Resources/);
