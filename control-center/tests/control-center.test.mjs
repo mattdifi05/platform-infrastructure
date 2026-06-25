@@ -160,6 +160,7 @@ test("Stexor Control Center local foundation", async (t) => {
   assert.equal(advancedCloudflare.dryRunDefault, true);
   assert.equal(advancedCloudflare.providerTouched, false);
   assert.equal(advancedCloudflare.productionEvidence, false);
+  assert.equal(advancedCloudflare.adapters.some((adapter) => adapter.id === "cloudflare" && adapter.name === "CloudflareAdapter"), true);
   assert.match(advancedCloudflare.data.apply, /blocked without explicit adapter/);
   assert.match(advancedCloudflare.data.verifyRemote, /required before production evidence/);
   assert.doesNotMatch(JSON.stringify(advancedCloudflare), /cloudflareToken|CLOUDFLARE_API_TOKEN|super-secret-token-should-not-leak/);
@@ -177,6 +178,46 @@ test("Stexor Control Center local foundation", async (t) => {
   const advancedSecretsApi = await getJson(`${baseUrl}/control/advanced/secrets`);
   assert.equal(advancedSecretsApi.data.stores.every((store) => store.valueExposed === false), true);
   assert.doesNotMatch(JSON.stringify(advancedSecretsApi), /example-control-center-admin-login|cloudflareToken|CLOUDFLARE_API_TOKEN/);
+
+  const adapters = await getJson(`${baseUrl}/control/adapters`);
+  assert.equal(adapters.adapters.length >= 13, true);
+  assert.equal(adapters.adapters.some((adapter) => adapter.name === "CloudflareAdapter"), true);
+  assert.equal(adapters.adapters.some((adapter) => adapter.name === "DockerAdapter"), true);
+  assert.equal(adapters.adapters.every((adapter) => adapter.dryRunDefault === true && adapter.liveProviderTouched === false && adapter.productionEvidence === false), true);
+  assert.equal(adapters.adapters.every((adapter) => adapter.guardrails.clientCannotExecuteShell === true), true);
+
+  const cloudflareAdapter = await getJson(`${baseUrl}/control/adapters/cloudflare`);
+  assert.equal(cloudflareAdapter.name, "CloudflareAdapter");
+  assert.equal(cloudflareAdapter.capabilities.includes("verify remote"), true);
+  assert.equal(cloudflareAdapter.guardrails.applyRequiresStrongConfirmation, true);
+  assert.equal(cloudflareAdapter.guardrails.sensitiveValuesExposed, false);
+
+  const adapterPlan = await postJson(`${baseUrl}/control/adapters/cloudflare/plan`, {
+    action: "dns-record",
+    cloudflareToken: "adapter-secret-should-not-leak",
+  });
+  assert.equal(adapterPlan.status, 202);
+  assert.equal(adapterPlan.body.type, "adapter.cloudflare.dns-record.plan");
+  assert.equal(adapterPlan.body.dryRun, true);
+  assert.equal(adapterPlan.body.details.liveProviderTouched, false);
+  assert.equal(adapterPlan.body.details.productionEvidence, false);
+  assert.match(adapterPlan.body.details.confirmationRequired, /ADAPTER-APPLY:cloudflare:dns-record/);
+  assert.doesNotMatch(JSON.stringify(adapterPlan.body), /adapter-secret-should-not-leak/);
+
+  const adapterVerify = await postJson(`${baseUrl}/control/adapters/go-no-go/verify`, {
+    scope: "production",
+  });
+  assert.equal(adapterVerify.status, 202);
+  assert.equal(adapterVerify.body.type, "adapter.go-no-go.verify.plan");
+  assert.equal(adapterVerify.body.details.productionEvidence, false);
+  assert.equal(adapterVerify.body.details.dockerTouched, false);
+
+  const adapterApplyRejected = await postJson(`${baseUrl}/control/adapters/cloudflare/apply`, {
+    action: "dns-record",
+    confirm: "ADAPTER-APPLY:cloudflare:dns-record",
+  });
+  assert.equal(adapterApplyRejected.status, 409);
+  assert.match(adapterApplyRejected.body.message, /disabled for CloudflareAdapter/);
 
   const projects = await getJson(`${baseUrl}/control/projects`);
   assert.deepEqual(projects.projects.map((project) => [project.slug, project.type]), [

@@ -259,6 +259,17 @@ async function handleApi(req, res, url, context) {
     if (method === "GET" && route(parts, "control", "deployments")) return json(res, { deployments: context.deployments });
     if (method === "GET" && route(parts, "control", "advanced")) return json(res, advancedControlOverview(context));
     if (method === "GET" && parts.length === 3 && route(parts.slice(0, 2), "control", "advanced")) return json(res, advancedControlSection(parts[2], context));
+    if (method === "GET" && route(parts, "control", "adapters")) return json(res, { adapters: adapterRegistry(context) });
+    if (method === "GET" && parts.length === 3 && route(parts.slice(0, 2), "control", "adapters")) return json(res, findAdapter(parts[2], context));
+    if (method === "POST" && parts.length === 4 && route([parts[0], parts[1], parts[3]], "control", "adapters", "plan")) {
+      return json(res, planAdapterAction(parts[2], payload, context), 202);
+    }
+    if (method === "POST" && parts.length === 4 && route([parts[0], parts[1], parts[3]], "control", "adapters", "verify")) {
+      return json(res, planAdapterVerify(parts[2], payload, context), 202);
+    }
+    if (method === "POST" && parts.length === 4 && route([parts[0], parts[1], parts[3]], "control", "adapters", "apply")) {
+      return json(res, rejectAdapterApply(parts[2], payload, context), 409);
+    }
     if (method === "GET" && route(parts, "control", "operations")) return json(res, { operations: context.operations });
     if (method === "GET" && parts.length === 3 && route(parts.slice(0, 2), "control", "operations")) return json(res, findById(context.operations, parts[2], "Operation"));
     if (method === "GET" && route(parts, "control", "audit")) return json(res, { audit: context.audit });
@@ -717,6 +728,246 @@ function buildContext({ projects, state }) {
   };
 }
 
+function adapterRegistry(context) {
+  const adapters = [
+    {
+      id: "cloudflare",
+      name: "CloudflareAdapter",
+      category: "edge",
+      status: context.environment === "production" ? "requires-private-material-and-verifyRemote" : "local-plan-only",
+      capabilities: ["dns records", "proxied status", "Access policies", "WAF rules", "cache rules", "verify remote"],
+      advancedSections: ["network", "cloudflare", "security-advanced", "go-no-go"],
+      privateMaterialRefs: ["Cloudflare API material file", "Cloudflare zone metadata"],
+    },
+    {
+      id: "traefik",
+      name: "TraefikAdapter",
+      category: "network",
+      status: "read-only-route-evidence",
+      capabilities: ["routers", "middleware", "TLS", "redirects", "route tests"],
+      advancedSections: ["infrastructure", "network"],
+      privateMaterialRefs: [],
+    },
+    {
+      id: "docker",
+      name: "DockerAdapter",
+      category: "runtime",
+      status: "planned-apply-adapter",
+      capabilities: ["start", "stop", "restart", "healthcheck", "resource limits"],
+      advancedSections: ["infrastructure", "workers-jobs", "deployments", "monitoring"],
+      privateMaterialRefs: ["Docker socket mounted only in ops runner"],
+    },
+    {
+      id: "github",
+      name: "GitHubAdapter",
+      category: "governance",
+      status: "evidence-through-actions",
+      capabilities: ["workflow status", "branch protection", "environments", "deploy approvals", "release evidence"],
+      advancedSections: ["cicd-github", "deployments", "release-evidence"],
+      privateMaterialRefs: ["GitHub app connection"],
+    },
+    {
+      id: "prometheus",
+      name: "PrometheusAdapter",
+      category: "observability",
+      status: "read-only-evidence",
+      capabilities: ["metrics", "latency", "error rate", "container resources"],
+      advancedSections: ["monitoring", "resources"],
+      privateMaterialRefs: [],
+    },
+    {
+      id: "loki",
+      name: "LokiAdapter",
+      category: "observability",
+      status: "planned-query-adapter",
+      capabilities: ["log query", "project filters", "request id", "non-sensitive export"],
+      advancedSections: ["logs-advanced", "monitoring"],
+      privateMaterialRefs: [],
+    },
+    {
+      id: "alertmanager",
+      name: "AlertmanagerAdapter",
+      category: "observability",
+      status: "read-only-evidence",
+      capabilities: ["alert rules", "routing", "delivery evidence", "failure evidence"],
+      advancedSections: ["alerts-advanced", "monitoring"],
+      privateMaterialRefs: ["notification delivery material files"],
+    },
+    {
+      id: "backup",
+      name: "BackupAdapter",
+      category: "resilience",
+      status: "plan-only-from-control-center",
+      capabilities: ["manual backup", "automatic backup", "retention", "off-site status"],
+      advancedSections: ["backup-restore", "disaster-recovery"],
+      privateMaterialRefs: ["backup repository material files"],
+    },
+    {
+      id: "restore",
+      name: "RestoreAdapter",
+      category: "resilience",
+      status: "plan-only-from-control-center",
+      capabilities: ["single service restore", "full restore drill", "off-site restore drill", "restore p95"],
+      advancedSections: ["backup-restore", "disaster-recovery"],
+      privateMaterialRefs: ["backup repository material files"],
+    },
+    {
+      id: "minio",
+      name: "MinioAdapter",
+      category: "storage",
+      status: "planned-adapter",
+      capabilities: ["buckets", "quota", "access policy", "lifecycle", "bucket restore"],
+      advancedSections: ["storage"],
+      privateMaterialRefs: ["MinIO access material file"],
+    },
+    {
+      id: "database",
+      name: "DatabaseAdapter",
+      category: "data",
+      status: "planned-adapter",
+      capabilities: ["create database", "backup DB", "restore DB", "connection status", "users and permissions"],
+      advancedSections: ["databases", "backup-restore", "disaster-recovery"],
+      privateMaterialRefs: ["database admin material files"],
+    },
+    {
+      id: "security",
+      name: "SecurityAdapter",
+      category: "security",
+      status: "local-policy-evidence",
+      capabilities: ["WAF", "rate limit", "CSP", "CORS", "headers", "admin route protection"],
+      advancedSections: ["security-advanced", "identity"],
+      privateMaterialRefs: [],
+    },
+    {
+      id: "go-no-go",
+      name: "GoNoGoAdapter",
+      category: "release-control",
+      status: "evidence-through-ops-runner",
+      capabilities: ["production gate", "blocker report", "JSON report", "Markdown report", "evidence bundle"],
+      advancedSections: ["go-no-go", "release-evidence", "disaster-recovery"],
+      privateMaterialRefs: [],
+    },
+  ];
+  return adapters.map((adapter) => adapterRecord(adapter, context));
+}
+
+function adapterRecord(adapter, context) {
+  return sanitizeEvent({
+    ...adapter,
+    environment: context.environment,
+    modeEvidence: context.overview.modeEvidence,
+    planEndpoint: `/control/adapters/${adapter.id}/plan`,
+    verifyEndpoint: `/control/adapters/${adapter.id}/verify`,
+    applyEndpoint: `/control/adapters/${adapter.id}/apply`,
+    dryRunDefault: true,
+    providerTouched: false,
+    liveProviderTouched: false,
+    dockerTouched: false,
+    destructiveActionExecuted: false,
+    productionEvidence: false,
+    guardrails: {
+      clientCannotExecuteShell: true,
+      applyRequiresBackendImplementation: true,
+      applyRequiresStrongConfirmation: true,
+      verifyAfterApplyRequired: true,
+      productionRequiresVerifyRemote: true,
+      sensitiveValuesExposed: false,
+    },
+    evidence: {
+      auditEvents: context.audit.filter((event) => String(event.action || "").includes(adapter.id)).length,
+      operations: context.operations.filter((operation) => String(operation.type || "").includes(adapter.id)).length,
+    },
+  });
+}
+
+function adaptersForSection(section, context) {
+  return adapterRegistry(context).filter((adapter) => adapter.advancedSections.includes(section));
+}
+
+function findAdapter(id, context) {
+  const cleanId = sanitizeIdentifier(id);
+  const adapter = adapterRegistry(context).find((item) => item.id === cleanId);
+  if (!adapter) throw new ValidationError("Adapter not found.");
+  return adapter;
+}
+
+function planAdapterAction(id, payload, context) {
+  const adapter = findAdapter(id, context);
+  const action = sanitizeIdentifier(payload.action || "inspect") || "inspect";
+  appendAudit({
+    action: `adapter.${adapter.id}.${action}.plan`,
+    target: adapter.id,
+    environment: context.environment,
+    risk: adapter.id === "cloudflare" || adapter.id === "docker" ? "medium" : "low",
+    result: "planned",
+    dryRun: true,
+    summary: "Adapter action plan generated; no live provider, Docker or destructive action executed.",
+  });
+  return operationPlan(`adapter.${adapter.id}.${action}.plan`, context.environment, true, [
+    "validate adapter",
+    "validate requested action",
+    "select backend adapter",
+    "prepare dry-run execution plan",
+    "require explicit apply implementation before mutation",
+    "write audit event",
+  ], {
+    adapterId: adapter.id,
+    adapterName: adapter.name,
+    action,
+    confirmationRequired: `ADAPTER-APPLY:${adapter.id}:${action}`,
+    providerTouched: false,
+    liveProviderTouched: false,
+    dockerTouched: false,
+    destructiveActionExecuted: false,
+    productionEvidence: false,
+  });
+}
+
+function planAdapterVerify(id, payload, context) {
+  const adapter = findAdapter(id, context);
+  const scope = sanitizeIdentifier(payload.scope || "default") || "default";
+  appendAudit({
+    action: `adapter.${adapter.id}.verify.plan`,
+    target: adapter.id,
+    environment: context.environment,
+    risk: "low",
+    result: "planned",
+    dryRun: true,
+    summary: "Adapter verification plan generated; remote checks are not executed from this foundation.",
+  });
+  return operationPlan(`adapter.${adapter.id}.verify.plan`, context.environment, true, [
+    "validate adapter",
+    "collect local evidence references",
+    "prepare remote verification checklist",
+    "mark production evidence false until verifyRemote passes",
+    "write audit event",
+  ], {
+    adapterId: adapter.id,
+    adapterName: adapter.name,
+    scope,
+    verifyRemoteRequired: context.environment === "production",
+    providerTouched: false,
+    liveProviderTouched: false,
+    dockerTouched: false,
+    productionEvidence: false,
+  });
+}
+
+function rejectAdapterApply(id, payload, context) {
+  const adapter = findAdapter(id, context);
+  const action = sanitizeIdentifier(payload.action || "apply") || "apply";
+  appendAudit({
+    action: `adapter.${adapter.id}.${action}.apply.rejected`,
+    target: adapter.id,
+    environment: context.environment,
+    risk: "high",
+    result: "rejected",
+    dryRun: true,
+    summary: "Adapter apply rejected because no live backend apply implementation is enabled.",
+  });
+  throw new RejectedOperationError(`Adapter apply is disabled for ${adapter.name}; add an explicit backend implementation, strong confirmation and verifyRemote before enabling mutations.`);
+}
+
 function advancedControlOverview(context) {
   const sections = navigationForMode("advanced").map((item) => ({
     id: item.id,
@@ -737,6 +988,8 @@ function advancedControlOverview(context) {
     providerTouched: false,
     liveProviderTouched: false,
     productionEvidence: false,
+    adapterEndpoint: "/control/adapters",
+    adapterCount: adapterRegistry(context).length,
     sections,
   });
 }
@@ -771,6 +1024,14 @@ function advancedControlSection(section, context) {
       backupRecords: context.backupRecords.length,
       openAlerts: context.logsAlerts.openAlerts.length,
     },
+    adapters: adaptersForSection(navItem.id, context).map((adapter) => ({
+      id: adapter.id,
+      name: adapter.name,
+      status: adapter.status,
+      planEndpoint: adapter.planEndpoint,
+      verifyEndpoint: adapter.verifyEndpoint,
+      productionEvidence: adapter.productionEvidence,
+    })),
     data: advancedSectionData(navItem.id, context),
   });
 }
