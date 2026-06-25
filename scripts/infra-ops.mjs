@@ -9287,9 +9287,18 @@ async function infraHealth() {
   const uiBase = (argv.uiBase ?? "https://ui.localhost.com").replace(/\/$/, "");
   const accountBase = (argv.accountBase ?? "https://account.localhost.com").replace(/\/$/, "");
   const projectsBase = (argv.projectsBase ?? "https://projects.localhost.com").replace(/\/$/, "");
+  let inferredAdminScheme = "https";
+  try {
+    inferredAdminScheme = new URL(apiBase).protocol === "http:" ? "http" : "https";
+  } catch {
+    inferredAdminScheme = "https";
+  }
+  const adminScheme = String(argv.adminScheme ?? inferredAdminScheme).replace(/:$/, "");
+  const grafanaBase = (argv.grafanaBase ?? `${adminScheme}://grafana.localhost.com/login`).replace(/\/$/, "");
+  const grafanaStatuses = booleanFlag(argv.grafanaBlocked) ? [403, 404] : [200];
   const useAdminHostnames = process.env.PLATFORM_OPS_CONTAINER === "1" || booleanFlag(argv.adminHostnames);
   const adminBlockUrl = (host, requestPath = "/") => (
-    useAdminHostnames ? `https://${host}${requestPath}` : `https://127.0.0.1${requestPath}`
+    useAdminHostnames ? `${adminScheme}://${host}${requestPath}` : `${adminScheme}://127.0.0.1${requestPath}`
   );
   const adminBlockHeaders = (host) => (useAdminHostnames ? {} : { Host: host });
   const checks = [];
@@ -9318,8 +9327,8 @@ async function infraHealth() {
     { name: "api-health", method: "GET", url: `${apiBase}/health`, statuses: [200] },
     { name: "ui-home", method: "HEAD", url: `${uiBase}/`, statuses: [200, 308] },
     { name: "account-home", method: "HEAD", url: `${accountBase}/`, statuses: [200, 308] },
-    { name: "projects-gateway", method: "GET", url: `${projectsBase}/`, statuses: [200], body: /Documentation and project launcher|Local infrastructure/ },
-    { name: "grafana-login", method: "GET", url: "https://grafana.localhost.com/login", statuses: [200] },
+    { name: "projects-gateway", method: "GET", url: `${projectsBase}/`, statuses: [200], body: /Stexor Control Center|Documentation and project launcher|Local infrastructure/ },
+    { name: "grafana-login", method: "GET", url: grafanaBase, statuses: grafanaStatuses },
     { name: "admin-traefik-block", method: "GET", url: adminBlockUrl("traefik.localhost.com", "/dashboard/"), statuses: [403, 404], headers: adminBlockHeaders("traefik.localhost.com") },
     { name: "admin-prometheus-block", method: "GET", url: adminBlockUrl("prometheus.localhost.com"), statuses: [403, 404], headers: adminBlockHeaders("prometheus.localhost.com") },
     { name: "admin-alertmanager-block", method: "GET", url: adminBlockUrl("alertmanager.localhost.com"), statuses: [403, 404], headers: adminBlockHeaders("alertmanager.localhost.com") },
