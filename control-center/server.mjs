@@ -9,6 +9,7 @@ const docsRoot = process.env.CONTROL_CENTER_DOCS_ROOT || "/var/www/infra-docs";
 const stateFile = process.env.PROJECT_STATE_FILE || "/var/www/project-state/projects.json";
 const auditFile = process.env.PROJECT_AUDIT_FILE || "/var/www/project-state/audit.jsonl";
 const operationsFile = process.env.PROJECT_OPERATIONS_FILE || "/var/www/project-state/operations.jsonl";
+const deploymentsFile = process.env.PROJECT_DEPLOYMENTS_FILE || "/var/www/project-state/deployments.jsonl";
 const sessionKeysFile = process.env.CONTROL_CENTER_SESSION_KEYS_FILE || "";
 const adminPasswordFile = process.env.CONTROL_CENTER_ADMIN_PASSWORD_FILE || "";
 const adminPasswordSha256 = String(process.env.CONTROL_CENTER_ADMIN_PASSWORD_SHA256 || "").trim().toLowerCase();
@@ -80,6 +81,11 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    if (req.method === "POST" && url.pathname === "/actions/application-command") {
+      await handleApplicationCommand(req, res, context);
+      return;
+    }
+
     if (url.pathname !== "/" && url.pathname !== "/index.html") {
       notFound(res);
       return;
@@ -148,7 +154,7 @@ async function handleApi(req, res, url, context) {
     if (method === "GET" && route(parts, "control", "applications")) return json(res, { applications: context.applications });
     if (method === "POST" && route(parts, "control", "applications")) return json(res, planApplicationCreate(payload, context), 202);
     if (method === "POST" && parts.length === 4 && route(parts.slice(0, 2), "control", "applications")) {
-      return json(res, planApplicationLifecycle(parts[2], parts[3], context), 202);
+      return json(res, planApplicationLifecycle(parts[2], parts[3], payload, context), 202);
     }
 
     if (method === "GET" && route(parts, "control", "domains")) return json(res, { domains: context.domains, subdomains: context.subdomains });
@@ -176,6 +182,7 @@ async function handleApi(req, res, url, context) {
     if (method === "POST" && route(parts, "control", "backups", "run")) return json(res, planBackupRun(payload, context), 202);
     if (method === "POST" && route(parts, "control", "restore", "plan")) return json(res, planRestore(payload, context), 202);
 
+    if (method === "GET" && route(parts, "control", "deployments")) return json(res, { deployments: context.deployments });
     if (method === "GET" && route(parts, "control", "operations")) return json(res, { operations: context.operations });
     if (method === "GET" && parts.length === 3 && route(parts.slice(0, 2), "control", "operations")) return json(res, findById(context.operations, parts[2], "Operation"));
     if (method === "GET" && route(parts, "control", "audit")) return json(res, { audit: context.audit });
@@ -209,6 +216,31 @@ async function handleToggleProject(req, res, projects) {
     summary: enabled ? "Project routing enabled locally." : "Project routing disabled locally.",
   });
   redirect(res, `/?section=projects#project-${encodeURIComponent(slug)}`);
+}
+
+async function handleApplicationCommand(req, res, context) {
+  const payload = await readPayload(req);
+  const id = slugify(payload.id || payload.applicationId || "");
+  const action = String(payload.action || "");
+  let operation;
+  try {
+    operation = planApplicationLifecycle(id, action, payload, context);
+  } catch (error) {
+    if (error instanceof ValidationError) {
+      json(res, { error: "validation_failed", message: error.message }, 422);
+      return;
+    }
+    if (error instanceof RejectedOperationError) {
+      json(res, { error: "operation_rejected", message: error.message }, 409);
+      return;
+    }
+    throw error;
+  }
+  if (wantsJson(req)) {
+    json(res, operation, 202);
+    return;
+  }
+  redirect(res, `/?section=applications&project=${encodeURIComponent(operation.projectId || "")}#app-${encodeURIComponent(id)}`);
 }
 
 function buildContext({ projects, state }) {
@@ -254,6 +286,7 @@ function buildContext({ projects, state }) {
     linkedApps: [project.slug],
     status: project.enabled ? "active" : "disabled",
   }));
+  const deployments = readDeployments();
   const audit = readAudit();
   const operations = readOperations();
   const activeProjects = projects.filter((project) => project.enabled).length;
@@ -304,7 +337,7 @@ function buildContext({ projects, state }) {
     resources,
     subdomains: { total: subdomains.length, active: subdomains.filter((item) => item.status === "active").length },
     alerts: { open: 0, source: "Alertmanager summary link" },
-    deployments: { latest: [] },
+    deployments: { latest: deployments.slice(0, 5) },
     backups,
   };
   return {
@@ -317,6 +350,7 @@ function buildContext({ projects, state }) {
     resources,
     security,
     backups,
+    deployments,
     operations,
     audit,
     docsAvailable: countAvailableDocs(),
@@ -387,6 +421,7 @@ function renderControlCenter(context, params) {
     if (section === "audit") body = renderAudit(context.audit, "Audit Log");
     else if (section === "network") body = renderDomains(context.domains, scoped(context.subdomains));
     else if (section === "infrastructure") body = renderInfrastructure(context.advancedServices);
+    else if (section === "deployments") body = renderDeployments(scoped(context.deployments));
     else if (section === "backup-restore") body = renderJsonPanel("Backup & Restore Advanced", context.backups);
     else body = renderPlanOnlyPanel(title, advancedItems(section));
   }
@@ -514,7 +549,24 @@ function renderProjectCard(project) {
 }
 
 function renderApplications(applications) {
-  return `<section class="panel"><div class="panel-head"><span>APP</span><div><h2>Applications</h2><p>Lifecycle commands are exposed as dry-run API plans.</p></div></div><div class="cards">${applications.map((app) => `<div class="card"><div class="card-title"><strong>${escapeHtml(app.name)}</strong><em>${escapeHtml(app.runtime)}</em></div><span>${escapeHtml(app.host)}</span><span class="state ${app.status === "online" ? "on" : "off"}">${escapeHtml(app.status)}</span></div>`).join("")}</div></section>`;
+  return `<section class="panel"><div class="panel-head"><span>APP</span><div><h2>Applications</h2><p>Start, stop, restart, deploy and rollback create safe dry-run operation plans.</p></div></div><div class="cards app-cards">${applications.map(renderApplicationCard).join("") || empty("No applications", "No Node, PHP, static, API or worker applications were discovered.")}</div></section>`;
+}
+
+function renderApplicationCard(app) {
+  const actions = ["start", "stop", "restart", "deploy", "rollback"];
+  return `<div id="app-${escapeHtml(app.id)}" class="card app-card">
+    <div class="card-title"><strong>${escapeHtml(app.name)}</strong><em>${escapeHtml(app.runtime)}</em></div>
+    <span class="host">${escapeHtml(app.host)}</span>
+    <span>Healthcheck: ${escapeHtml(app.healthcheck)}</span>
+    <div class="project-actions app-actions">
+      <span class="state ${app.status === "online" ? "on" : "off"}">${escapeHtml(app.status)}</span>
+      ${actions.map((action) => `<form method="post" action="/actions/application-command">
+        <input type="hidden" name="id" value="${escapeHtml(app.id)}">
+        <input type="hidden" name="action" value="${escapeHtml(action)}">
+        <button class="button ${action === "stop" || action === "rollback" ? "danger" : action === "deploy" ? "enable" : ""}" type="submit">${escapeHtml(humanName(action))}</button>
+      </form>`).join("")}
+    </div>
+  </div>`;
 }
 
 function renderDomains(domains, subdomains) {
@@ -547,6 +599,10 @@ function renderInfrastructure(services) {
   return `<section class="panel"><div class="panel-head"><span>INF</span><div><h2>Infrastructure</h2><p>Enterprise service map. Mutations stay behind backend adapters and confirmation.</p></div></div><div class="cards">${services.map((service) => `<div class="card compact"><strong>${escapeHtml(service.name)}</strong><span>${escapeHtml(service.role)} / ${escapeHtml(service.status)}</span></div>`).join("")}</div></section>`;
 }
 
+function renderDeployments(deployments) {
+  return `<section class="panel"><div class="panel-head"><span>DEP</span><div><h2>Deployments</h2><p>Local deployment records are plan evidence only until production verifyRemote passes.</p></div></div>${deployments.length ? `<div class="cards">${deployments.slice(0, 24).map((deployment) => `<div class="card compact"><strong>${escapeHtml(`${deployment.action} / ${deployment.applicationId}`)}</strong><span>${escapeHtml(`${deployment.createdAt} / ${deployment.status} / ${deployment.environment}`)}</span><span>${escapeHtml(`branch ${deployment.branch} / commit ${deployment.commit}`)}</span></div>`).join("")}</div>` : empty("No deployments", "Deploy and rollback plans will appear here after you run them from Applications.")}</section>`;
+}
+
 function renderPlanOnlyPanel(title, items) {
   return `<section class="panel"><div class="panel-head"><span>ADV</span><div><h2>${escapeHtml(title)}</h2><p>Advanced control is dry-run/plan by default in this foundation.</p></div></div><div class="cards">${items.map((item) => `<div class="card compact"><strong>${escapeHtml(item)}</strong><span>planned adapter surface</span></div>`).join("")}</div></section>`;
 }
@@ -573,11 +629,51 @@ function planApplicationCreate(payload, context) {
   return operationPlan("application.create", context.environment, true, ["validate runtime", "link repository or webspace", "create healthcheck", "prepare route plan", "write audit event"], { runtime });
 }
 
-function planApplicationLifecycle(id, action, context) {
-  if (!["start", "stop", "restart"].includes(action)) throw new ValidationError("Unsupported lifecycle action.");
-  findById(context.applications, id, "Application");
+function planApplicationLifecycle(id, action, payload, context) {
+  if (!["start", "stop", "restart", "deploy", "rollback"].includes(action)) throw new ValidationError("Unsupported lifecycle action.");
+  const app = findById(context.applications, id, "Application");
+  if (action === "deploy" || action === "rollback") return planApplicationDeployment(app, action, payload, context);
   appendAudit({ action: `application.${action}.plan`, target: sanitizeIdentifier(id), environment: context.environment, risk: action === "stop" ? "medium" : "low", result: "planned", dryRun: true, summary: "Lifecycle action planned; no container command executed." });
-  return operationPlan(`application.${action}`, context.environment, true, ["validate application", "check current health", "prepare Docker adapter command", "require confirmation for apply", "write audit event"], { applicationId: id });
+  return operationPlan(`application.${action}`, context.environment, true, ["validate application", "check current health", "prepare Docker adapter command", "require confirmation for apply", "write audit event"], { projectId: app.projectId, applicationId: app.id });
+}
+
+function planApplicationDeployment(app, action, payload, context) {
+  const deploymentId = rid();
+  const branch = sanitizeRef(payload.branch || "local");
+  const commit = sanitizeRef(payload.commit || "unresolved-local");
+  const rollbackTarget = sanitizeRef(payload.rollbackTarget || "previous-approved-release");
+  const risk = action === "rollback" ? "high" : "medium";
+  appendAudit({ action: `application.${action}.plan`, target: app.id, environment: context.environment, risk, result: "planned", dryRun: true, summary: `${humanName(action)} plan generated; no image build, container update or provider call executed.` });
+  const operation = operationPlan(`application.${action}`, context.environment, true, deploymentSteps(action), {
+    projectId: app.projectId,
+    applicationId: app.id,
+    deploymentId,
+    branch,
+    commit,
+    rollbackTarget,
+    productionEvidence: false,
+  });
+  const deployment = sanitizeEvent({
+    id: deploymentId,
+    operationId: operation.id,
+    projectId: app.projectId,
+    applicationId: app.id,
+    environment: context.environment,
+    action,
+    status: "planned",
+    branch,
+    commit,
+    imageDigest: "not-built",
+    sbom: "required-before-production",
+    provenance: "required-before-production",
+    rollbackTarget,
+    productionApproval: "required-for-production",
+    releaseEvidence: "local-plan-only",
+    dryRun: true,
+    createdAt: new Date().toISOString(),
+  });
+  appendDeployment(deployment);
+  return { ...operation, deployment };
 }
 
 function planSubdomain(payload, context) {
@@ -762,6 +858,19 @@ function appendOperation(operation) {
 function readOperations() {
   try {
     return readFileSync(operationsFile, "utf8").split(/\r?\n/).filter(Boolean).reverse().slice(0, 100).map((line) => JSON.parse(line));
+  } catch {
+    return [];
+  }
+}
+
+function appendDeployment(deployment) {
+  mkdirSync(path.dirname(deploymentsFile), { recursive: true });
+  appendFileSync(deploymentsFile, `${JSON.stringify(sanitizeEvent(deployment))}\n`);
+}
+
+function readDeployments() {
+  try {
+    return readFileSync(deploymentsFile, "utf8").split(/\r?\n/).filter(Boolean).reverse().slice(0, 100).map((line) => JSON.parse(line));
   } catch {
     return [];
   }
@@ -970,6 +1079,10 @@ function sanitizeIdentifier(value) {
   return slugify(value).slice(0, 80);
 }
 
+function sanitizeRef(value) {
+  return String(value || "").trim().replace(/[^a-zA-Z0-9._/@:-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 120) || "unknown";
+}
+
 function sanitizeMessage(message) {
   return String(message || "").replace(/\b(token|secret|password|authorization|cookie)=([^\s]+)/gi, "$1=[redacted]");
 }
@@ -1043,6 +1156,13 @@ function advancedServices() {
     ["Prometheus", "metrics"], ["Loki", "logs"], ["Alertmanager", "alert routing"], ["Grafana", "observability UI"],
     ["backup scheduler", "scheduled backup orchestration"], ["workers", "jobs and notifications"], ["node-exporter", "host metrics"], ["cAdvisor", "container metrics"],
   ].map(([name, role]) => ({ name, role, status: name === "backup scheduler" ? "planned adapter" : "configured" }));
+}
+
+function deploymentSteps(action) {
+  if (action === "rollback") {
+    return ["validate application", "select rollback target", "verify previous image digest", "prepare Compose override", "require production approval before apply", "write deployment evidence"];
+  }
+  return ["validate application", "resolve branch and commit", "prepare image build plan", "require SBOM and provenance", "prepare healthcheck", "write deployment evidence"];
 }
 
 function navigationForMode(mode) {

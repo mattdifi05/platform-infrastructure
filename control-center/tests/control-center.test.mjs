@@ -19,6 +19,7 @@ const stateDir = path.join(testRoot, "state");
 const stateFile = path.join(stateDir, "projects.json");
 const auditFile = path.join(stateDir, "audit.jsonl");
 const operationsFile = path.join(stateDir, "operations.jsonl");
+const deploymentsFile = path.join(stateDir, "deployments.jsonl");
 
 test("Stexor Control Center local foundation", async (t) => {
   prepareFixture();
@@ -34,6 +35,7 @@ test("Stexor Control Center local foundation", async (t) => {
       PROJECT_STATE_FILE: stateFile,
       PROJECT_AUDIT_FILE: auditFile,
       PROJECT_OPERATIONS_FILE: operationsFile,
+      PROJECT_DEPLOYMENTS_FILE: deploymentsFile,
       PROJECTS_HOST: "projects.localhost.com",
       PROJECT_HOST_SUFFIX: ".localhost.com",
       NODE_PROJECT_HOSTS: "stexor=stexor.localhost.com",
@@ -66,6 +68,11 @@ test("Stexor Control Center local foundation", async (t) => {
   assert.match(advancedHtml, /Infrastructure/);
   assert.match(advancedHtml, /Traefik/);
   assert.match(advancedHtml, /cAdvisor/);
+
+  const applicationsHtml = await getText(`${baseUrl}/?section=applications`);
+  assert.match(applicationsHtml, /Applications/);
+  assert.match(applicationsHtml, /Deploy/);
+  assert.match(applicationsHtml, /Rollback/);
 
   const overview = await getJson(`${baseUrl}/control/overview`);
   assert.equal(overview.title, "Stexor Control Center");
@@ -114,6 +121,42 @@ test("Stexor Control Center local foundation", async (t) => {
   });
   assert.equal(invalidWebspace.status, 422);
   assert.match(invalidWebspace.body.message, /Invalid webspace path/);
+
+  const deployPlan = await postJson(`${baseUrl}/control/applications/stexor/deploy`, {
+    branch: "main",
+    commit: "abc1234",
+    cloudflareToken: "super-secret-token-should-not-leak",
+  });
+  assert.equal(deployPlan.status, 202);
+  assert.equal(deployPlan.body.type, "application.deploy");
+  assert.equal(deployPlan.body.dryRun, true);
+  assert.equal(deployPlan.body.projectId, "stexor");
+  assert.equal(deployPlan.body.deployment.action, "deploy");
+  assert.equal(deployPlan.body.deployment.status, "planned");
+  assert.equal(deployPlan.body.deployment.releaseEvidence, "local-plan-only");
+  assert.equal(deployPlan.body.deployment.productionApproval, "required-for-production");
+  assert.doesNotMatch(JSON.stringify(deployPlan.body), /super-secret-token-should-not-leak/);
+  assert.doesNotMatch(JSON.stringify(deployPlan.body), /cloudflareToken/);
+
+  const rollbackPlan = await postJson(`${baseUrl}/control/applications/stexor/rollback`, {
+    rollbackTarget: "previous-release",
+  });
+  assert.equal(rollbackPlan.status, 202);
+  assert.equal(rollbackPlan.body.type, "application.rollback");
+  assert.equal(rollbackPlan.body.deployment.action, "rollback");
+
+  const deployments = await getJson(`${baseUrl}/control/deployments`);
+  assert.equal(deployments.deployments.some((deployment) => deployment.id === deployPlan.body.deployment.id), true);
+  assert.equal(deployments.deployments.some((deployment) => deployment.id === rollbackPlan.body.deployment.id), true);
+  assert.equal(existsSync(deploymentsFile), true);
+  const deploymentText = readFileSync(deploymentsFile, "utf8");
+  assert.doesNotMatch(deploymentText, /super-secret-token-should-not-leak/);
+  assert.doesNotMatch(deploymentText, /cloudflareToken/);
+  assert.equal(deploymentText.trim().split(/\r?\n/).length >= 2, true);
+
+  const deploymentHtml = await getText(`${baseUrl}/?mode=advanced&section=deployments`);
+  assert.match(deploymentHtml, /Deployments/);
+  assert.match(deploymentHtml, /local-plan-only|planned/);
 
   const localApply = await postJson(`${baseUrl}/control/subdomains/apply`, {
     environment: "local",
@@ -215,6 +258,7 @@ test("Stexor Control Center admin guard", async (t) => {
       PROJECT_STATE_FILE: stateFile,
       PROJECT_AUDIT_FILE: auditFile,
       PROJECT_OPERATIONS_FILE: operationsFile,
+      PROJECT_DEPLOYMENTS_FILE: deploymentsFile,
       PROJECTS_HOST: "projects.localhost.com",
       PROJECT_HOST_SUFFIX: ".localhost.com",
       NODE_PROJECT_HOSTS: "stexor=stexor.localhost.com",

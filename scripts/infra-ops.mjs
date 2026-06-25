@@ -9850,6 +9850,7 @@ async function staticSecurityCheck() {
   assertMatch(compose, /project-router:[\s\S]*CONTROL_CENTER_UPSTREAM:\s+http:\/\/control-center:8080/, "Project router must send the projects host to the Node Control Center.");
   assertMatch(compose, /control-center:[\s\S]*PROJECT_AUDIT_FILE:\s+\/var\/www\/project-state\/audit\.jsonl/, "Control Center must write local audit evidence.");
   assertMatch(compose, /control-center:[\s\S]*PROJECT_OPERATIONS_FILE:\s+\/var\/www\/project-state\/operations\.jsonl/, "Control Center must write local Operation and OperationStep records from the Node service.");
+  assertMatch(compose, /control-center:[\s\S]*PROJECT_DEPLOYMENTS_FILE:\s+\/var\/www\/project-state\/deployments\.jsonl/, "Control Center must persist local deployment records from the Node service.");
   assertMatch(compose, /control-center:[\s\S]*\.\/control-center:\/app:ro/, "Control Center code must be mounted read-only into the Node runtime.");
   assertMatch(compose, /control-center:[\s\S]*CONTROL_CENTER_AUTH_REQUIRED:\s+\$\{CONTROL_CENTER_AUTH_REQUIRED:-false\}/, "Control Center must expose an explicit admin auth gate.");
   assertMatch(compose, /control-center:[\s\S]*CONTROL_CENTER_SESSION_KEYS_FILE:\s+\/run\/secrets\/projects_gateway_signing_keys[\s\S]*secrets:[\s\S]*projects_gateway_signing_keys/, "Control Center must sign admin sessions with Docker secret material.");
@@ -9859,7 +9860,10 @@ async function staticSecurityCheck() {
   assertMatch(controlCenterServer, /handleApi[\s\S]*\/control\/overview/, "Control Center must expose operational API endpoints.");
   assertMatch(controlCenterServer, /appendAudit/, "Control Center must audit every local control action.");
   assertMatch(controlCenterServer, /operationsFile[\s\S]*appendOperation[\s\S]*readOperations/, "Control Center must persist operations in a dedicated Node-managed JSONL store.");
+  assertMatch(controlCenterServer, /deploymentsFile[\s\S]*appendDeployment[\s\S]*readDeployments/, "Control Center must persist deployment records in a dedicated Node-managed JSONL store.");
   assertMatch(controlCenterServer, /operationId[\s\S]*requestedBy[\s\S]*resultSummary[\s\S]*reportPath[\s\S]*errorMessage[\s\S]*steps:/, "Control Center Operation records must include the enterprise operation fields and OperationStep list.");
+  assertMatch(controlCenterServer, /planApplicationLifecycle[\s\S]*deploy[\s\S]*rollback[\s\S]*planApplicationDeployment/, "Control Center must expose deploy and rollback as safe application operation plans.");
+  assertMatch(controlCenterServer, /renderApplications[\s\S]*\["start", "stop", "restart", "deploy", "rollback"\]/, "Control Center Applications UI must show lifecycle, deploy and rollback controls.");
   assertMatch(controlCenterServer, /sanitizeOperationDetails[\s\S]*sanitizeValue/, "Control Center operation details must be recursively sanitized before persistence.");
   assertMatch(controlCenterServer, /handleLogin[\s\S]*admin\.login\.success[\s\S]*admin\.login\.failed/, "Control Center must audit admin login success and failure without storing passwords.");
   assertMatch(controlCenterServer, /authenticateRequest[\s\S]*admin_auth_required/, "Control Center must enforce admin authentication when configured.");
@@ -9878,6 +9882,7 @@ async function staticSecurityCheck() {
   assertMatch(controlCenterTest, /\.\.\/secret[\s\S]*Invalid webspace path/, "Control Center tests must cover path traversal rejection.");
   assertMatch(controlCenterTest, /super-secret-token-should-not-leak[\s\S]*doesNotMatch/, "Control Center tests must prove supplied secret-like payloads are not serialized to audit/API output.");
   assertMatch(controlCenterTest, /operations\.jsonl[\s\S]*\/control\/operations[\s\S]*operationId[\s\S]*output/, "Control Center tests must prove Operation and OperationStep records are persisted and exposed safely.");
+  assertMatch(controlCenterTest, /deployments\.jsonl[\s\S]*\/control\/applications\/stexor\/deploy[\s\S]*\/control\/applications\/stexor\/rollback[\s\S]*\/control\/deployments/, "Control Center tests must prove deployment and rollback plans are persisted and exposed safely.");
   assertMatch(controlCenterTest, /mode=advanced[\s\S]*Infrastructure/, "Control Center tests must cover Advanced Mode routing.");
   assertMatch(controlCenterTest, /local evidence only[\s\S]*notEqual[\s\S]*production evidence/, "Control Center tests must prove local evidence is not accepted as production evidence.");
   assertMatch(controlCenterTest, /admin guard[\s\S]*admin_auth_required[\s\S]*HttpOnly[\s\S]*Secure[\s\S]*SameSite=Lax/, "Control Center tests must cover the admin auth gate and hardened session cookie.");
