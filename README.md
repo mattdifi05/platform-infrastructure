@@ -82,10 +82,10 @@ docker compose -p platform_infra_local down -v
 | Keycloak | `https://auth.localhost.com` |
 | MinIO console | `https://minio.localhost.com` |
 | Grafana | `https://grafana.localhost.com` |
-| Projects control | `https://projects.localhost.com` |
+| Stexor Control Center | `https://projects.localhost.com` |
 | phpMyAdmin locale | `https://phpmyadmin.localhost.com` |
 
-`projects.localhost.com` e' la console locale dei link operativi. Senza sessione mostra solo il gateway OTP; il codice viene inviato a `PROJECTS_GATEWAY_EMAIL` e la sessione permanente viene firmata con `projects_gateway_signing_keys`.
+`projects.localhost.com` serve lo Stexor Control Center, un servizio Node separato da PHP Apache. Il pannello legge i progetti da `PHP_PROJECTS_DIR`, divide runtime PHP e Node, permette enable/disable locale, scrive audit in `projects-portal/state/audit.jsonl` e usa API dry-run per operazioni avanzate. PHP Apache resta solo il runtime dei progetti PHP.
 
 Alertmanager resta interno alla rete Docker. Prometheus invia gli alert ad Alertmanager, che li inoltra al worker notifiche su `/alerts/prometheus` con token Bearer da Docker secret; il worker produce log Loki, metriche `notification_alert_*`, email reali verso `ALERT_EMAIL_TO` quando SMTP e' configurato, e canali opzionali Discord/Telegram tramite secret file. `node-exporter` e `cadvisor` forniscono metriche CPU, RAM, disco e container per alert operativi.
 
@@ -541,7 +541,7 @@ Nel profilo VPS:
 - SSL, redirect HTTPS e CDN stanno all'edge esterno, per esempio VPS/Cloudflare.
 - PostgreSQL, MariaDB, Redis, NATS, MinIO, Prometheus, Loki, Grafana, phpMyAdmin e dashboard Traefik non sono pubblici.
 - Le app Node di piattaforma usano `ACCOUNT_HOST`, `API_HOST` e `AUTH_HOST`; `UI_HOST` passa dal router progetti quando vuoi gestirlo dalla dashboard locale.
-- I progetti PHP e Node condividono `PHP_PROJECTS_DIR` come sorgente universale. `PROJECTS_HOST` apre la dashboard, `PROJECTS_WILDCARD_HOST_REGEXP` accetta i domini progetto, `PROJECT_HOST_SUFFIX` costruisce gli host e `NODE_PROJECT_UPSTREAMS` collega progetti Node a servizi Docker gia' avviati.
+- I progetti PHP e Node condividono `PHP_PROJECTS_DIR` come sorgente universale. `PROJECTS_HOST` apre lo Stexor Control Center Node, `PROJECTS_WILDCARD_HOST_REGEXP` accetta i domini progetto, `PROJECT_HOST_SUFFIX` costruisce gli host e `NODE_PROJECT_UPSTREAMS` collega progetti Node a servizi Docker gia' avviati.
 - MariaDB usa `secrets/mariadb_root_password.txt` tramite Docker secret, non una password root in `.env`.
 - `phpmyadmin` resta fuori dal profilo di default; su VPS pubblica usa preferibilmente SSH e client CLI, non una UI DB esposta.
 

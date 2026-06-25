@@ -59,6 +59,9 @@ services:
   project-router:
     restart: always
 
+  control-center:
+    restart: always
+
   phpmyadmin:
     profiles:
       - admin

@@ -290,7 +290,7 @@ sh ./scripts/secret-rotation-evidence.sh --enforce
 
 `secret-rotation-evidence.sh --enforce` validates the encrypted store, materialized Docker secret files, audit log, Platform Local KMS age and every secret `rotationDays` window without printing secret values. Archive `reports/secret-rotation/secret-rotation-evidence-*.json` outside Git before production go/no-go.
 
-`projects.localhost.com` is a protected local control page. It sends OTP codes to `PROJECTS_GATEWAY_EMAIL`, then writes a signed `HttpOnly`, `Secure`, `SameSite=Lax` cookie using `projects_gateway_signing_keys`. The cookie is intentionally long-lived for the local browser. To revoke all sessions, rotate `projects_gateway_signing_keys` and recreate `php-apache`.
+`projects.localhost.com` is the Node-based Stexor Control Center. It stays separate from PHP Apache, reads project inventory from `PHP_PROJECTS_DIR`, stores local enable/disable state in `projects-portal/state/projects.json`, and appends sanitized local audit events to `projects-portal/state/audit.jsonl`. Production/provider operations are plan-only from this foundation unless an explicit adapter and confirmation gate are added.
 
 ## Restore test
 

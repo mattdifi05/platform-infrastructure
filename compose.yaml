@@ -258,6 +258,45 @@ services:
       timeout: 5s
       retries: 10
 
+  control-center:
+    image: ${NODE_IMAGE:-node:26.3.1-alpine@sha256:a2dc166a387cc6ca1e62d0c8e265e49ca985d6e60abc9fe6e6c3d6ce8e63f606}
+    container_name: enterprise-control-center
+    init: true
+    pids_limit: 512
+    logging: *default_logging
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    working_dir: /app
+    command:
+      - node
+      - /app/server.mjs
+    expose:
+      - "8080"
+    environment:
+      CONTROL_CENTER_PORT: 8080
+      CONTROL_CENTER_ENV: ${CONTROL_CENTER_ENV:-local}
+      CONTROL_CENTER_DOCS_ROOT: /var/www/infra-docs
+      PROJECTS_ROOT: /var/www/projects
+      PROJECT_STATE_FILE: /var/www/project-state/projects.json
+      PROJECT_AUDIT_FILE: /var/www/project-state/audit.jsonl
+      PROJECTS_HOST: ${PROJECTS_HOST:-projects.localhost.com}
+      PROJECT_HOST_SUFFIX: ${PROJECT_HOST_SUFFIX:-.localhost.com}
+      NODE_PROJECT_HOSTS: ${NODE_PROJECT_HOSTS:-}
+    volumes:
+      - ./control-center:/app:ro
+      - .:/var/www/infra-docs:ro
+      - ${PHP_PROJECTS_DIR:-../src}:/var/www/projects:ro
+      - ${PROJECTS_SYMLINK_TARGET_ROOT:-..}:/mnt/host/d/docker:ro
+      - ./projects-portal/state:/var/www/project-state
+    networks:
+      - enterprise_net
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:8080/__health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
   project-router:
     image: ${NODE_IMAGE:-node:26.3.1-alpine@sha256:a2dc166a387cc6ca1e62d0c8e265e49ca985d6e60abc9fe6e6c3d6ce8e63f606}
     container_name: enterprise-project-router
@@ -280,6 +319,7 @@ services:
       PROJECTS_HOST: ${PROJECTS_HOST:-projects.localhost.com}
       PROJECT_HOST_SUFFIX: ${PROJECT_HOST_SUFFIX:-.localhost.com}
       PHP_UPSTREAM: http://php-apache:80
+      CONTROL_CENTER_UPSTREAM: http://control-center:8080
       NODE_PROJECT_HOSTS: ${NODE_PROJECT_HOSTS:-}
       NODE_PROJECT_UPSTREAMS: ${NODE_PROJECT_UPSTREAMS:-}
       NODE_PROJECT_COMMANDS: ${NODE_PROJECT_COMMANDS:-}
@@ -291,6 +331,8 @@ services:
       - ./projects-portal/state:/var/www/project-state
     depends_on:
       php-apache:
+        condition: service_healthy
+      control-center:
         condition: service_healthy
     networks:
       - enterprise_net

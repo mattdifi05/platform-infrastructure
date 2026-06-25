@@ -7487,6 +7487,7 @@ function repoCoverageCategory(filePath) {
     ["identity", /^keycloak\//],
     ["database", /^(?:postgres|mariadb)\//],
     ["messaging", /^nats\//],
+    ["control-plane", /^control-center\//],
     ["php-runtime", /^(?:php-apache|phpmyadmin|projects-portal)\//],
     ["reverse-proxy", /^(?:traefik|project-router)\//],
     ["waf", /^waf\//],
@@ -9578,6 +9579,8 @@ async function staticSecurityCheck() {
   const traefikConfig = readText(path.join(infraRoot, "traefik", "traefik.yml"));
   const localProjectsPagePath = path.resolve(infraRoot, "projects-portal", "public", "index.php");
   const localProjectsPage = fs.existsSync(localProjectsPagePath) ? readText(localProjectsPagePath) : "";
+  const controlCenterServerPath = path.resolve(infraRoot, "control-center", "server.mjs");
+  const controlCenterServer = fs.existsSync(controlCenterServerPath) ? readText(controlCenterServerPath) : "";
   const prometheusConfig = readText(path.join(infraRoot, "prometheus", "prometheus.yml"));
   const localWafPreRules = readText(path.join(infraRoot, "waf", "REQUEST-900-EXCLUSION-RULES-BEFORE-CRS.conf"));
   const vpsWafPreRules = readText(path.join(infraRoot, "waf", "REQUEST-900-VPS-RULES-BEFORE-CRS.conf"));
@@ -9810,13 +9813,20 @@ async function staticSecurityCheck() {
   assertNoMatch(traefikConfig, /dashboard:\s+true/, "Traefik dashboard must be disabled unless protected by an explicit auth gateway.");
   assertNoMatch(compose, /8090:8080|api@internal|traefik\.localhost\.com/, "Traefik dashboard must not be routed or exposed in the local stack.");
   assertNoMatch(compose, /prometheus\.localhost\.com|alertmanager\.localhost\.com/, "Prometheus and Alertmanager must remain internal; use authenticated Grafana for browser access.");
-  if (localProjectsPage) {
-    assertMatch(localProjectsPage, /Projects dashboard/, "Fallback projects page must title the local projects dashboard.");
-    assertMatch(localProjectsPage, /README\.md[\s\S]*RUNBOOK\.md/, "Fallback projects page must link core operational docs.");
-    assertMatch(localProjectsPage, /discoverProjects/, "Fallback projects page must provide project discovery.");
-    assertMatch(localProjectsPage, /handleProjectAction[\s\S]*saveProjectState/, "Projects page must support enabling and disabling mounted projects.");
-    assertNoMatch(localProjectsPage, /prometheus\.localhost\.com|alertmanager\.localhost\.com|traefik\.localhost\.com/, "Projects page must not link unauthenticated internal consoles.");
-  }
+  assertMatch(compose, /control-center:[\s\S]*image:\s+\$\{NODE_IMAGE:-node:26\.3\.1-alpine@sha256:[a-f0-9]{64}\}/, "Control Center must run as a digest-pinned Node service.");
+  assertMatch(compose, /project-router:[\s\S]*CONTROL_CENTER_UPSTREAM:\s+http:\/\/control-center:8080/, "Project router must send the projects host to the Node Control Center.");
+  assertMatch(compose, /control-center:[\s\S]*PROJECT_AUDIT_FILE:\s+\/var\/www\/project-state\/audit\.jsonl/, "Control Center must write local audit evidence.");
+  assertMatch(compose, /control-center:[\s\S]*\.\/control-center:\/app:ro/, "Control Center code must be mounted read-only into the Node runtime.");
+  assertMatch(controlCenterServer, /Stexor Control Center/, "Control Center must title the operational panel.");
+  assertMatch(controlCenterServer, /handleApi[\s\S]*\/control\/overview/, "Control Center must expose operational API endpoints.");
+  assertMatch(controlCenterServer, /appendAudit/, "Control Center must audit every local control action.");
+  assertMatch(controlCenterServer, /planSubdomain[\s\S]*APPLY-PRODUCTION/, "Control Center must keep production subdomain changes behind explicit apply confirmation.");
+  assertMatch(controlCenterServer, /validateHostname/, "Control Center must validate hostnames before planning DNS changes.");
+  assertMatch(controlCenterServer, /validateWebspacePath/, "Control Center must reject unsafe webspace paths.");
+  assertNoMatch(controlCenterServer, /node:child_process|child_process|shell_exec|execSync|spawn\(/, "Control Center must not execute shell commands from the web panel.");
+  assertNoMatch(controlCenterServer, /C:\\|powershell|pwsh/i, "Control Center must not depend on Windows host paths or PowerShell.");
+  assertNoMatch(controlCenterServer, /CLOUDFLARE_API_TOKEN|api\.github\.com|cloudflare\.com\/client\/v4/i, "Control Center foundation must not make live provider calls or expose provider secrets.");
+  assertNoMatch(`${controlCenterServer}\n${localProjectsPage}`, /prometheus\.localhost\.com|alertmanager\.localhost\.com|traefik\.localhost\.com/, "Projects UI must not link unauthenticated internal consoles.");
   assertMatch(composeHa, /failure_action:\s+rollback/, "HA overlay must rollback failed rolling updates.");
   assertMatch(composeHa, /max_replicas_per_node:\s+1/, "HA overlay must spread stateless replicas across nodes.");
   assertMatch(composeManagedSecrets, /SESSION_SECRET_FILE:\s+\/run\/secrets\/session_secret/, "Managed secret overlay must consume session secret through a file.");
