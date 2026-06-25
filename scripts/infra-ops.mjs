@@ -6075,9 +6075,10 @@ async function githubActionsRunEvidence() {
 }
 
 function gitEvidence() {
-  const rev = run("git", ["rev-parse", "HEAD"], { capture: true, allowFailure: true });
-  const branch = run("git", ["rev-parse", "--abbrev-ref", "HEAD"], { capture: true, allowFailure: true });
-  const status = run("git", ["status", "--short"], { capture: true, allowFailure: true });
+  const gitArgs = (...args) => ["-c", "safe.directory=*", ...args];
+  const rev = run("git", gitArgs("rev-parse", "HEAD"), { capture: true, allowFailure: true });
+  const branch = run("git", gitArgs("rev-parse", "--abbrev-ref", "HEAD"), { capture: true, allowFailure: true });
+  const status = run("git", gitArgs("status", "--short"), { capture: true, allowFailure: true });
   return {
     commit: rev.status === 0 ? String(rev.stdout ?? "").trim() : null,
     branch: branch.status === 0 ? String(branch.stdout ?? "").trim() : null,
