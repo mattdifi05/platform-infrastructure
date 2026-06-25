@@ -232,6 +232,72 @@ test("Stexor Control Center local foundation", async (t) => {
     ["stexor", "Node"],
   ]);
 
+  const duplicateProject = await postJson(`${baseUrl}/control/projects`, {
+    slug: "stexor",
+  });
+  assert.equal(duplicateProject.status, 422);
+  assert.match(duplicateProject.body.message, /already exists/);
+
+  const projectPlan = await postJson(`${baseUrl}/control/projects`, {
+    slug: "client-portal",
+    displayName: "Client Portal",
+    runtime: "node",
+    host: "client-portal.localhost.com",
+    secret: "project-secret-should-not-leak",
+  });
+  assert.equal(projectPlan.status, 202);
+  assert.equal(projectPlan.body.type, "project.create");
+  assert.equal(projectPlan.body.dryRun, true);
+  assert.equal(projectPlan.body.details.confirmationRequired, "CREATE-PROJECT");
+  assert.equal(projectPlan.body.details.filesystemTouched, false);
+  assert.equal(projectPlan.body.details.dockerTouched, false);
+  assert.equal(projectPlan.body.details.databaseTouched, false);
+  assert.equal(projectPlan.body.details.providerTouched, false);
+  assert.equal(projectPlan.body.details.productionEvidence, false);
+  assert.doesNotMatch(JSON.stringify(projectPlan.body), /project-secret-should-not-leak/);
+
+  const projectApply = await postJson(`${baseUrl}/control/projects`, {
+    slug: "client-portal",
+    displayName: "Client Portal",
+    runtime: "node",
+    host: "client-portal.localhost.com",
+    confirm: "CREATE-PROJECT",
+    secret: "project-secret-should-not-leak",
+  });
+  assert.equal(projectApply.status, 202);
+  assert.equal(projectApply.body.type, "project.create.local");
+  assert.equal(projectApply.body.project.slug, "client-portal");
+  assert.equal(projectApply.body.project.status, "declared");
+  assert.equal(projectApply.body.project.enabled, false);
+  assert.equal(projectApply.body.project.filesystemExists, false);
+  assert.equal(projectApply.body.project.filesystemTouched, false);
+  assert.equal(projectApply.body.project.dockerTouched, false);
+  assert.equal(projectApply.body.project.databaseTouched, false);
+
+  const declaredProject = await getJson(`${baseUrl}/control/projects/client-portal`);
+  assert.equal(declaredProject.slug, "client-portal");
+  assert.equal(declaredProject.status, "declared");
+  assert.equal(declaredProject.filesystemExists, false);
+
+  const declaredProjectEnableRejected = await postJson(`${baseUrl}/actions/toggle-project`, {
+    slug: "client-portal",
+    enabled: "1",
+  });
+  assert.equal(declaredProjectEnableRejected.status, 409);
+  assert.match(declaredProjectEnableRejected.body.message, /source files/);
+
+  const projectsAfterCreate = await getJson(`${baseUrl}/control/projects`);
+  assert.equal(projectsAfterCreate.projects.some((project) => project.slug === "client-portal" && project.status === "declared"), true);
+  assert.equal(existsSync(stateFile), true);
+  const projectStateText = readFileSync(stateFile, "utf8");
+  assert.doesNotMatch(projectStateText, /project-secret-should-not-leak/);
+  assert.equal(JSON.parse(projectStateText).projects["client-portal"].declaredProject, true);
+
+  const projectsHtmlAfterCreate = await getText(`${baseUrl}/?section=projects`);
+  assert.match(projectsHtmlAfterCreate, /Create project/);
+  assert.match(projectsHtmlAfterCreate, /Client Portal/);
+  assert.match(projectsHtmlAfterCreate, /Routing waits for mounted source files/);
+
   const applicationPlan = await postJson(`${baseUrl}/control/applications`, {
     projectId: "stexor",
     name: "events-worker",

@@ -293,11 +293,16 @@ async function handleApi(req, res, url, context) {
 async function handleToggleProject(req, res, projects) {
   const payload = await readPayload(req);
   const slug = slugify(payload.slug || "");
-  if (!projects.some((project) => project.slug === slug)) {
+  const project = projects.find((item) => item.slug === slug);
+  if (!project) {
     json(res, { error: "not_found", message: "Project not found." }, 404);
     return;
   }
   const enabled = String(payload.enabled || "") === "1";
+  if (enabled && project.filesystemExists === false) {
+    json(res, { error: "operation_rejected", message: "Project routing cannot be enabled until source files are mounted under the projects directory." }, 409);
+    return;
+  }
   const state = readState();
   state.projects[slug] = { ...(state.projects[slug] || {}), enabled, archivedAt: enabled ? null : state.projects[slug]?.archivedAt || null, updatedAt: new Date().toISOString() };
   writeState(state);
@@ -319,7 +324,8 @@ async function handleProjectCommand(req, res, context) {
   const action = String(payload.action || "");
   let operation;
   try {
-    if (action === "archive") operation = applyProjectArchive(id, payload, context);
+    if (action === "create") operation = planProjectCreate(payload, context);
+    else if (action === "archive") operation = applyProjectArchive(id, payload, context);
     else if (action === "delete") operation = applyProjectDelete(id, payload, context);
     else if (action === "update") operation = planOrApplyProjectUpdate(id, payload, context);
     else throw new ValidationError("Unsupported project action.");
@@ -1258,7 +1264,39 @@ function discoverProjects(state) {
       status: archived ? "archived" : enabled ? "active" : "disabled",
       archivedAt: metadata.archivedAt || null,
       updatedAt: metadata.updatedAt || null,
+      source: "project-discovery",
+      filesystemExists: true,
+      filesystemTouched: false,
+      databaseTouched: false,
       summary: archived ? "Archived in local Control Center state" : type === "PHP" ? "Apache/PHP local host" : "Node routed service",
+    });
+    seen.add(slug);
+  }
+  for (const [key, metadata] of Object.entries(state.projects || {})) {
+    const slug = slugify(key);
+    if (!slug || seen.has(slug) || metadata?.deletedAt || metadata?.declaredProject !== true) continue;
+    const runtime = ["node", "php"].includes(metadata.runtime) ? metadata.runtime : "node";
+    const type = runtime === "php" ? "PHP" : "Node";
+    const archived = Boolean(metadata.archivedAt);
+    const enabled = metadata.enabled === true && !archived;
+    const host = normalizeHost(metadata.host || `${slug}${hostSuffix}`);
+    projects.push({
+      id: slug,
+      slug,
+      name: metadata.displayName || humanName(slug),
+      type,
+      runtime,
+      host,
+      href: `https://${host}/`,
+      enabled,
+      status: archived ? "archived" : enabled ? "active" : "declared",
+      archivedAt: metadata.archivedAt || null,
+      updatedAt: metadata.updatedAt || metadata.createdAt || null,
+      source: "control-center-state",
+      filesystemExists: false,
+      filesystemTouched: false,
+      databaseTouched: false,
+      summary: archived ? "Archived in local Control Center state" : "Declared in Control Center state; add source files or link applications before enabling routing.",
     });
     seen.add(slug);
   }
@@ -1404,23 +1442,34 @@ function renderOverview(context) {
 
 function renderProjects(projects) {
   return `<section class="panel"><div class="panel-head"><span>PRJ</span><div><h2>Projects</h2><p>Routing toggle is local and audited. Create/archive/delete are API planned.</p></div></div>
+  <form class="inline-confirm project-create-form" method="post" action="/actions/project-command">
+    <input type="hidden" name="action" value="create">
+    <input name="slug" placeholder="project-slug" aria-label="Project slug">
+    <input name="displayName" placeholder="Display name" aria-label="Project display name">
+    <select name="runtime" aria-label="Default project runtime"><option value="node">Node.js</option><option value="php">PHP</option></select>
+    <input name="host" placeholder="project.localhost.com" aria-label="Project host">
+    <input type="hidden" name="confirm" value="CREATE-PROJECT">
+    <button class="button enable" type="submit">Create project</button>
+  </form>
   <div class="cards project-cards">${projects.map(renderProjectCard).join("") || empty("No projects", "No mounted projects found.")}</div></section>`;
 }
 
 function renderProjectCard(project) {
+  const canRoute = project.filesystemExists !== false;
   return `<div id="project-${escapeHtml(project.slug)}" class="card project-card ${project.enabled ? "" : "is-off"}">
     <div class="card-title"><strong>${escapeHtml(project.name)}</strong><em>${escapeHtml(project.type)}</em></div>
     <span class="host">${escapeHtml(project.host)}</span>
     <span>${escapeHtml(project.summary)}</span>
     ${project.archivedAt ? `<span>Archived at ${escapeHtml(project.archivedAt)}</span>` : ""}
+    ${canRoute ? "" : "<span>Routing waits for mounted source files.</span>"}
     <div class="project-actions">
       <span class="state ${project.enabled ? "on" : "off"}">${escapeHtml(humanName(project.status))}</span>
-      ${project.enabled ? `<a class="button open" href="${escapeHtml(project.href)}">Open</a>` : `<span class="button muted">Open</span>`}
-      <form method="post" action="/actions/toggle-project">
+      ${project.enabled && canRoute ? `<a class="button open" href="${escapeHtml(project.href)}">Open</a>` : `<span class="button muted">Open</span>`}
+      ${canRoute ? `<form method="post" action="/actions/toggle-project">
         <input type="hidden" name="slug" value="${escapeHtml(project.slug)}">
         <input type="hidden" name="enabled" value="${project.enabled ? "0" : "1"}">
         <button class="button ${project.enabled ? "danger" : "enable"}" type="submit">${project.enabled ? "Disable" : "Enable"}</button>
-      </form>
+      </form>` : '<span class="button muted">Enable</span>'}
       <form class="inline-confirm" method="post" action="/actions/project-command">
         <input type="hidden" name="slug" value="${escapeHtml(project.slug)}">
         <input type="hidden" name="action" value="archive">
@@ -1850,8 +1899,51 @@ function renderAudit(audit, title) {
 function planProjectCreate(payload, context) {
   const slug = slugify(payload.slug || payload.name || "");
   validateSlug(slug);
+  if (context.projects.some((project) => project.slug === slug)) throw new ValidationError("Project already exists.");
+  const displayName = sanitizeDisplayName(payload.displayName || payload.name || humanName(slug));
+  const runtime = choice(String(payload.runtime || "node").toLowerCase(), ["node", "php"], "runtime");
+  const host = normalizeHost(payload.host || `${slug}${hostSuffix}`);
+  validateHostname(host, context.environment);
+  const details = {
+    projectId: slug,
+    displayName,
+    runtime,
+    type: runtime === "php" ? "PHP" : "Node",
+    host,
+    source: "control-center-state",
+    filesystemExists: false,
+    filesystemTouched: false,
+    dockerTouched: false,
+    databaseTouched: false,
+    providerTouched: false,
+    productionEvidence: false,
+  };
+  if (payload.confirm === "CREATE-PROJECT") {
+    const state = readState();
+    state.projects[slug] = {
+      ...(state.projects[slug] || {}),
+      declaredProject: true,
+      displayName,
+      runtime,
+      host,
+      enabled: false,
+      source: "control-center-state",
+      filesystemExists: false,
+      filesystemTouched: false,
+      dockerTouched: false,
+      databaseTouched: false,
+      providerTouched: false,
+      productionEvidence: false,
+      createdAt: state.projects[slug]?.createdAt || new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    writeState(state);
+    appendAudit({ action: "project.create.apply", target: slug, environment: context.environment, risk: "low", result: "success", dryRun: false, summary: "Project metadata declared locally; no filesystem, database, Docker or provider changes applied." });
+    const operation = operationPlan("project.create.local", context.environment, false, ["validate slug", "create local project metadata", "leave filesystem untouched", "leave Docker and providers unchanged", "write audit event"], details);
+    return { ...operation, project: { id: slug, slug, name: displayName, status: "declared", enabled: false, ...details } };
+  }
   appendAudit({ action: "project.create.plan", target: slug, environment: context.environment, risk: "low", result: "planned", dryRun: true, summary: "Project creation plan generated; no filesystem changes applied." });
-  return operationPlan("project.create", context.environment, true, ["validate slug", "create project metadata", "create optional webspace", "link applications/domains/databases", "write audit event"], { projectId: slug });
+  return operationPlan("project.create", context.environment, true, ["validate slug", "prepare project metadata", "require apply confirmation", "leave filesystem untouched", "write audit event"], { ...details, confirmationRequired: "CREATE-PROJECT" });
 }
 
 function planOrApplyProjectUpdate(id, payload, context) {
