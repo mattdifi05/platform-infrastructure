@@ -257,6 +257,8 @@ async function handleApi(req, res, url, context) {
     if (method === "POST" && route(parts, "control", "restore", "plan")) return json(res, planRestore(payload, context), 202);
 
     if (method === "GET" && route(parts, "control", "deployments")) return json(res, { deployments: context.deployments });
+    if (method === "GET" && route(parts, "control", "advanced")) return json(res, advancedControlOverview(context));
+    if (method === "GET" && parts.length === 3 && route(parts.slice(0, 2), "control", "advanced")) return json(res, advancedControlSection(parts[2], context));
     if (method === "GET" && route(parts, "control", "operations")) return json(res, { operations: context.operations });
     if (method === "GET" && parts.length === 3 && route(parts.slice(0, 2), "control", "operations")) return json(res, findById(context.operations, parts[2], "Operation"));
     if (method === "GET" && route(parts, "control", "audit")) return json(res, { audit: context.audit });
@@ -713,6 +715,216 @@ function buildContext({ projects, state }) {
     environment,
     advancedServices: advancedServices(),
   };
+}
+
+function advancedControlOverview(context) {
+  const sections = navigationForMode("advanced").map((item) => ({
+    id: item.id,
+    label: item.label,
+    endpoint: `/control/advanced/${item.id}`,
+    capabilityCount: advancedItems(item.id).length,
+    adapterStatus: advancedAdapterStatus(item.id),
+    dryRunDefault: true,
+    providerTouched: false,
+    productionEvidence: false,
+  }));
+  return sanitizeEvent({
+    title: "Stexor Control Center Advanced API",
+    environment: context.environment,
+    modeEvidence: context.overview.modeEvidence,
+    endpointPrefix: "/control/advanced",
+    dryRunDefault: true,
+    providerTouched: false,
+    liveProviderTouched: false,
+    productionEvidence: false,
+    sections,
+  });
+}
+
+function advancedControlSection(section, context) {
+  const cleanSection = sanitizeIdentifier(section);
+  const navItem = navigationForMode("advanced").find((item) => item.id === cleanSection);
+  if (!navItem) throw new ValidationError("Advanced section not found.");
+  return sanitizeEvent({
+    id: navItem.id,
+    label: navItem.label,
+    environment: context.environment,
+    modeEvidence: context.overview.modeEvidence,
+    adapterStatus: advancedAdapterStatus(navItem.id),
+    capabilities: advancedItems(navItem.id),
+    dryRunDefault: true,
+    providerTouched: false,
+    liveProviderTouched: false,
+    dockerTouched: false,
+    destructiveActionExecuted: false,
+    productionEvidence: false,
+    guardrails: {
+      applyRequiresExplicitAdapter: true,
+      productionRequiresVerifyRemote: true,
+      localEvidenceIsProductionEvidence: false,
+      sensitiveValuesExposed: false,
+    },
+    evidencePath: {
+      auditEvents: context.audit.length,
+      operations: context.operations.length,
+      deployments: context.deployments.length,
+      backupRecords: context.backupRecords.length,
+      openAlerts: context.logsAlerts.openAlerts.length,
+    },
+    data: advancedSectionData(navItem.id, context),
+  });
+}
+
+function advancedAdapterStatus(section) {
+  const readOnlySections = new Set(["infrastructure", "deployments", "monitoring", "logs-advanced", "alerts-advanced", "backup-restore", "security-advanced", "audit"]);
+  return readOnlySections.has(section) ? "read-only-evidence" : "planned-adapter";
+}
+
+function advancedSectionData(section, context) {
+  switch (section) {
+    case "infrastructure":
+      return {
+        services: context.advancedServices,
+        configuredServices: context.advancedServices.filter((service) => service.status === "configured").length,
+      };
+    case "network":
+      return {
+        domains: context.domains,
+        subdomains: context.subdomains,
+        routeTest: "plan-only through existing local Traefik wildcard routing",
+        originLockStatus: context.environment === "production" ? "requires-verify-remote" : "not-required-local",
+      };
+    case "databases":
+      return {
+        engines: ["MariaDB", "PostgreSQL"].map((name) => ({ name, status: "configured", operations: ["create database", "backup DB", "restore DB", "users and permissions"] })),
+        slowQueries: "planned adapter",
+        connectionStatus: "planned adapter",
+      };
+    case "storage":
+      return {
+        webspaces: context.webspaces,
+        buckets: [{ name: "MinIO", status: "planned adapter", policy: "metadata-only", valueExposed: false }],
+      };
+    case "workers-jobs":
+      return {
+        workers: context.applications.filter((app) => app.runtime === "worker"),
+        failedJobs: context.operations.filter((operation) => /worker|job/i.test(operation.type || "") && operation.status === "failed"),
+        scheduler: "containerized scheduler adapter planned",
+        retryControls: "planned adapter",
+      };
+    case "deployments":
+      return {
+        deployments: context.deployments,
+        latest: context.deployments.slice(0, 5),
+        productionApproval: "required before production apply",
+      };
+    case "cicd-github":
+      return {
+        githubConnectionStatus: context.settings.githubConnectionStatus,
+        branchProtection: "planned adapter",
+        environments: "planned adapter",
+        variablesVerification: "planned adapter with no values exposed",
+        workflowStatus: "reported by GitHub Actions evidence",
+        deployApprovals: "required for production",
+      };
+    case "cloudflare":
+      return {
+        connectionStatus: context.settings.cloudflareConnectionStatus,
+        dnsRecords: context.subdomains.map((item) => ({ hostname: item.hostname, status: item.status, environment: item.environment, proxied: context.environment === "production" ? "requires-verify-remote" : "not-used-local" })),
+        accessPolicies: "planned adapter",
+        wafRules: context.security.waf,
+        cacheRules: "planned adapter",
+        apply: "blocked without explicit adapter, confirmation and provider secrets",
+        verifyRemote: "required before production evidence",
+      };
+    case "monitoring":
+      return {
+        resources: context.resources,
+        openAlerts: context.logsAlerts.openAlerts,
+        metrics: ["Prometheus", "cAdvisor", "node-exporter", "latency", "error rate"],
+      };
+    case "logs-advanced":
+      return {
+        recentErrors: context.logsAlerts.recentErrors,
+        query: { backend: "Loki planned adapter", filters: ["project", "application", "container", "request id", "user id", "level"] },
+        export: "non-sensitive export only",
+      };
+    case "alerts-advanced":
+      return {
+        alerts: context.alertRecords,
+        notificationChannels: context.notificationChannels,
+        deliveryEvidence: "verified through infra-ops evidence before production",
+        escalation: "planned adapter",
+      };
+    case "backup-restore":
+      return {
+        backups: context.backups,
+        records: context.backupRecords,
+        retention: "configured by backup scheduler evidence",
+      };
+    case "disaster-recovery":
+      return {
+        rpoRto: context.backups.rpoRto,
+        offsite: context.backups.offsite,
+        latestBackup: context.backupRecords[0] || null,
+        walArchive: "planned adapter",
+        restoreP95: "reported by DR evidence",
+        offsiteRestoreEvidence: "required before production go/no-go",
+      };
+    case "release-evidence":
+      return {
+        deployments: context.deployments,
+        requirements: ["SBOM", "digest-pinned images", "provenance", "signature", "previous-images.json", "rollback validation"],
+        localEvidenceOnly: context.environment !== "production",
+      };
+    case "go-no-go":
+      return {
+        environment: context.environment,
+        blockers: context.environment === "production" ? ["verifyRemote evidence required"] : ["local evidence only is not production evidence"],
+        reports: ["JSON", "Markdown", "evidence bundle"],
+      };
+    case "security-advanced":
+      return {
+        security: context.security,
+        controls: advancedItems("security-advanced"),
+        adminRouteProtection: context.security.adminProtection,
+      };
+    case "identity":
+      return {
+        adminAuthRequired: authRequired,
+        adminVerifierConfigured: authVerifierConfigured(),
+        sessionPolicy: "HttpOnly; Secure; SameSite=Lax",
+        passkeyAdminAuth: context.security.passkeyAdminAuth,
+        adminUsers: "identity adapter planned",
+      };
+    case "secrets":
+      return {
+        stores: [
+          { name: "Docker secrets", status: "configured by compose secret files", valueExposed: false },
+          { name: "Control Center session keys", status: sessionKeysFile ? "configured by secret file" : "not configured", valueExposed: false },
+          { name: "Admin password verifier", status: authVerifierConfigured() ? "configured verifier only" : "not configured", valueExposed: false },
+          { name: "Alert delivery secrets", status: context.notificationChannels.some((channel) => channel.status === "configured") ? "partially configured" : "metadata only", valueExposed: false },
+        ],
+        rotation: "tracked through infra-ops secret evidence",
+        usageMap: "planned adapter",
+      };
+    case "audit":
+      return {
+        events: context.audit,
+        appendOnly: true,
+        fields: ["actor", "project", "environment", "action", "result", "timestamp", "risk", "request id"],
+      };
+    case "billing":
+      return {
+        vpsPlanMetadata: "operator supplied",
+        resourceBudget: context.resources.projectLimits,
+        cloudflarePlan: "operator supplied",
+        backupStorage: context.backups.offsite,
+        costReview: "planned adapter",
+      };
+    default:
+      return { status: "planned adapter" };
+  }
 }
 
 function discoverProjects(state) {

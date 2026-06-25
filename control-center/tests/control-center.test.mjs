@@ -148,6 +148,36 @@ test("Stexor Control Center local foundation", async (t) => {
   assert.equal(overview.subdomains.active, 2);
   assert.notEqual(overview.modeEvidence, "production evidence");
 
+  const advancedApi = await getJson(`${baseUrl}/control/advanced`);
+  assert.equal(advancedApi.dryRunDefault, true);
+  assert.equal(advancedApi.liveProviderTouched, false);
+  assert.equal(advancedApi.productionEvidence, false);
+  assert.equal(advancedApi.sections.some((section) => section.id === "cloudflare" && section.endpoint === "/control/advanced/cloudflare"), true);
+  assert.equal(advancedApi.sections.some((section) => section.id === "release-evidence"), true);
+
+  const advancedCloudflare = await getJson(`${baseUrl}/control/advanced/cloudflare`);
+  assert.equal(advancedCloudflare.label, "Cloudflare");
+  assert.equal(advancedCloudflare.dryRunDefault, true);
+  assert.equal(advancedCloudflare.providerTouched, false);
+  assert.equal(advancedCloudflare.productionEvidence, false);
+  assert.match(advancedCloudflare.data.apply, /blocked without explicit adapter/);
+  assert.match(advancedCloudflare.data.verifyRemote, /required before production evidence/);
+  assert.doesNotMatch(JSON.stringify(advancedCloudflare), /cloudflareToken|CLOUDFLARE_API_TOKEN|super-secret-token-should-not-leak/);
+
+  const advancedReleaseApi = await getJson(`${baseUrl}/control/advanced/release-evidence`);
+  assert.equal(advancedReleaseApi.label, "Release Evidence");
+  assert.equal(advancedReleaseApi.data.requirements.includes("SBOM"), true);
+  assert.equal(advancedReleaseApi.data.requirements.includes("rollback validation"), true);
+  assert.equal(advancedReleaseApi.productionEvidence, false);
+
+  const advancedIdentityApi = await getJson(`${baseUrl}/control/advanced/identity`);
+  assert.equal(advancedIdentityApi.data.sessionPolicy, "HttpOnly; Secure; SameSite=Lax");
+  assert.equal(advancedIdentityApi.data.adminVerifierConfigured, false);
+
+  const advancedSecretsApi = await getJson(`${baseUrl}/control/advanced/secrets`);
+  assert.equal(advancedSecretsApi.data.stores.every((store) => store.valueExposed === false), true);
+  assert.doesNotMatch(JSON.stringify(advancedSecretsApi), /example-control-center-admin-login|cloudflareToken|CLOUDFLARE_API_TOKEN/);
+
   const projects = await getJson(`${baseUrl}/control/projects`);
   assert.deepEqual(projects.projects.map((project) => [project.slug, project.type]), [
     ["anniversary", "PHP"],
