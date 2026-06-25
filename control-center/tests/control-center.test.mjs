@@ -20,6 +20,7 @@ const stateFile = path.join(stateDir, "projects.json");
 const auditFile = path.join(stateDir, "audit.jsonl");
 const operationsFile = path.join(stateDir, "operations.jsonl");
 const deploymentsFile = path.join(stateDir, "deployments.jsonl");
+const backupRecordsFile = path.join(stateDir, "backups.jsonl");
 const webspacesFile = path.join(stateDir, "webspaces.json");
 
 test("Stexor Control Center local foundation", async (t) => {
@@ -37,6 +38,7 @@ test("Stexor Control Center local foundation", async (t) => {
       PROJECT_AUDIT_FILE: auditFile,
       PROJECT_OPERATIONS_FILE: operationsFile,
       PROJECT_DEPLOYMENTS_FILE: deploymentsFile,
+      PROJECT_BACKUP_RECORDS_FILE: backupRecordsFile,
       PROJECT_WEBSPACES_FILE: webspacesFile,
       PROJECTS_HOST: "projects.localhost.com",
       PROJECT_HOST_SUFFIX: ".localhost.com",
@@ -325,6 +327,45 @@ test("Stexor Control Center local foundation", async (t) => {
   assert.match(deploymentHtml, /Deployments/);
   assert.match(deploymentHtml, /local-plan-only|planned/);
 
+  const backupsHtml = await getText(`${baseUrl}/?section=backups`);
+  assert.match(backupsHtml, /Manual backup/);
+  assert.match(backupsHtml, /Restore drill/);
+  assert.match(backupsHtml, /Plan manual backup/);
+
+  const backupPlan = await postJson(`${baseUrl}/actions/backup-command`, {
+    action: "backup",
+    scope: "all",
+    secret: "backup-secret-should-not-leak",
+  });
+  assert.equal(backupPlan.status, 202);
+  assert.equal(backupPlan.body.type, "backup.run");
+  assert.equal(backupPlan.body.dryRun, true);
+  assert.equal(backupPlan.body.backup.action, "backup");
+  assert.equal(backupPlan.body.backup.status, "planned");
+  assert.equal(backupPlan.body.backup.productionEvidence, false);
+  assert.doesNotMatch(JSON.stringify(backupPlan.body), /backup-secret-should-not-leak/);
+
+  const restorePlan = await postJson(`${baseUrl}/actions/backup-command`, {
+    action: "restore",
+    scope: "all",
+    backupRef: "latest",
+  });
+  assert.equal(restorePlan.status, 202);
+  assert.equal(restorePlan.body.type, "restore.plan");
+  assert.equal(restorePlan.body.dryRun, true);
+  assert.equal(restorePlan.body.details.dataChanged, false);
+  assert.equal(restorePlan.body.backup.action, "restore-drill");
+  assert.equal(restorePlan.body.backup.backupRef, "latest");
+
+  const backupRecords = await getJson(`${baseUrl}/control/backups/records`);
+  assert.equal(backupRecords.records.some((record) => record.id === backupPlan.body.backup.id), true);
+  assert.equal(backupRecords.records.some((record) => record.id === restorePlan.body.backup.id), true);
+  assert.equal(existsSync(backupRecordsFile), true);
+  const backupRecordsText = readFileSync(backupRecordsFile, "utf8");
+  assert.equal(backupRecordsText.trim().split(/\r?\n/).length >= 2, true);
+  assert.doesNotMatch(backupRecordsText, /backup-secret-should-not-leak/);
+  assert.match(await getText(`${baseUrl}/?mode=advanced&section=backup-restore`), /Backup History/);
+
   const localApply = await postJson(`${baseUrl}/control/subdomains/apply`, {
     environment: "local",
     projectId: "stexor",
@@ -426,6 +467,7 @@ test("Stexor Control Center admin guard", async (t) => {
       PROJECT_AUDIT_FILE: auditFile,
       PROJECT_OPERATIONS_FILE: operationsFile,
       PROJECT_DEPLOYMENTS_FILE: deploymentsFile,
+      PROJECT_BACKUP_RECORDS_FILE: backupRecordsFile,
       PROJECT_WEBSPACES_FILE: webspacesFile,
       PROJECTS_HOST: "projects.localhost.com",
       PROJECT_HOST_SUFFIX: ".localhost.com",

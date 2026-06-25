@@ -9408,6 +9408,8 @@ function staticSecurityInfraOnlyCheck() {
   const localWafPreRules = readText(path.join(infraRoot, "waf", "REQUEST-900-EXCLUSION-RULES-BEFORE-CRS.conf"));
   const vpsWafPreRules = readText(path.join(infraRoot, "waf", "REQUEST-900-VPS-RULES-BEFORE-CRS.conf"));
   const phpMyAdminConfig = readText(path.join(infraRoot, "phpmyadmin", "config.user.inc.php"));
+  const controlCenterServer = readText(path.join(infraRoot, "control-center", "server.mjs"));
+  const controlCenterTest = readText(path.join(infraRoot, "control-center", "tests", "control-center.test.mjs"));
 
   const infrastructureText = [
     compose,
@@ -9485,6 +9487,10 @@ function staticSecurityInfraOnlyCheck() {
   assertMatch(opsScript, /async function enterpriseTenCheck\(\)[\s\S]*await staticSecurityCheck\(\);[\s\S]*await controlCenterTests\(\);[\s\S]*await testingHygiene\(\);/, "Enterprise gate must always test the infra Control Center before optional app-only checks.");
   assertMatch(opsScript, /async function testingHygiene\(\)[\s\S]*requireSupportedProjectSource\("application testing hygiene"\)[\s\S]*return;/, "Testing hygiene must skip cleanly when the project source is not mounted.");
   assertMatch(opsScript, /async function performanceHygiene\(\)[\s\S]*requireSupportedProjectSource\("application performance hygiene"\)[\s\S]*return;/, "Performance hygiene must skip cleanly when the project source is not mounted.");
+  assertMatch(compose, /control-center:[\s\S]*PROJECT_BACKUP_RECORDS_FILE:\s+\/var\/www\/project-state\/backups\.jsonl/, "Control Center must persist local backup and restore drill records from the Node service.");
+  assertMatch(controlCenterServer, /backupRecordsFile[\s\S]*handleBackupCommand[\s\S]*appendBackupRecord[\s\S]*readBackupRecords/, "Control Center must persist backup/restore plan records in a dedicated Node-managed JSONL store.");
+  assertMatch(controlCenterServer, /renderBackups[\s\S]*Manual backup[\s\S]*Restore drill[\s\S]*Backup History/, "Control Center Backups UI must expose manual backup and restore drill planning with local history.");
+  assertMatch(controlCenterTest, /backups\.jsonl[\s\S]*\/actions\/backup-command[\s\S]*backup-secret-should-not-leak[\s\S]*\/control\/backups\/records/, "Control Center tests must prove backup and restore drill plans are persisted and secret-redacted.");
   assertNoMatch(githubWorkflow, /project-repository|PROJECT_REPO_TOKEN|Checkout application source/, "Infrastructure CI must not checkout or require project repositories.");
   assertMatch(githubWorkflow, /\.tmp\/optional-project-source/, "Infrastructure CI must use a local optional project source placeholder for Compose rendering.");
   assertMatch(githubWorkflow, /GitHub Actions workflow lint[\s\S]*rhysd\/actionlint:1\.7\.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667[\s\S]*-color/, "Infrastructure CI must lint GitHub Actions workflows with a digest-pinned actionlint image.");
@@ -9852,6 +9858,7 @@ async function staticSecurityCheck() {
   assertMatch(compose, /php-apache:[\s\S]*\$\{PHP_SOURCE_DIR:-\.\/php-runtime-root\}:\/var\/www\/html[\s\S]*project-router:[\s\S]*CONTROL_CENTER_UPSTREAM:\s+http:\/\/control-center:8080/, "PHP Apache must be runtime-only while the projects host resolves through the Node Control Center.");
   assertNoMatch(`${compose}\n${phpRuntimeRootPage}`, /projects-portal\/public|<\?php|\/control\//i, "The PHP runtime root must not implement or expose the Control Center surface.");
   assertMatch(compose, /control-center:[\s\S]*PROJECT_AUDIT_FILE:\s+\/var\/www\/project-state\/audit\.jsonl/, "Control Center must write local audit evidence.");
+  assertMatch(compose, /control-center:[\s\S]*PROJECT_BACKUP_RECORDS_FILE:\s+\/var\/www\/project-state\/backups\.jsonl/, "Control Center must persist local backup and restore drill records from the Node service.");
   assertMatch(compose, /control-center:[\s\S]*PROJECT_OPERATIONS_FILE:\s+\/var\/www\/project-state\/operations\.jsonl/, "Control Center must write local Operation and OperationStep records from the Node service.");
   assertMatch(compose, /control-center:[\s\S]*PROJECT_DEPLOYMENTS_FILE:\s+\/var\/www\/project-state\/deployments\.jsonl/, "Control Center must persist local deployment records from the Node service.");
   assertMatch(compose, /control-center:[\s\S]*PROJECT_WEBSPACES_FILE:\s+\/var\/www\/project-state\/webspaces\.json/, "Control Center must persist local webspace metadata from the Node service.");
@@ -9868,9 +9875,11 @@ async function staticSecurityCheck() {
   assertMatch(controlCenterServer, /webspacesFile[\s\S]*CREATE-WEBSPACE[\s\S]*UPDATE-QUOTA[\s\S]*readWebspacesState[\s\S]*writeWebspacesState/, "Control Center must persist declarative webspaces and quota metadata with explicit local confirmations.");
   assertMatch(controlCenterServer, /operationsFile[\s\S]*appendOperation[\s\S]*readOperations/, "Control Center must persist operations in a dedicated Node-managed JSONL store.");
   assertMatch(controlCenterServer, /deploymentsFile[\s\S]*appendDeployment[\s\S]*readDeployments/, "Control Center must persist deployment records in a dedicated Node-managed JSONL store.");
+  assertMatch(controlCenterServer, /backupRecordsFile[\s\S]*handleBackupCommand[\s\S]*appendBackupRecord[\s\S]*readBackupRecords/, "Control Center must persist backup/restore plan records in a dedicated Node-managed JSONL store.");
   assertMatch(controlCenterServer, /operationId[\s\S]*requestedBy[\s\S]*resultSummary[\s\S]*reportPath[\s\S]*errorMessage[\s\S]*steps:/, "Control Center Operation records must include the enterprise operation fields and OperationStep list.");
   assertMatch(controlCenterServer, /planApplicationLifecycle[\s\S]*deploy[\s\S]*rollback[\s\S]*planApplicationDeployment/, "Control Center must expose deploy and rollback as safe application operation plans.");
   assertMatch(controlCenterServer, /renderApplications[\s\S]*\["start", "stop", "restart", "deploy", "rollback"\]/, "Control Center Applications UI must show lifecycle, deploy and rollback controls.");
+  assertMatch(controlCenterServer, /renderBackups[\s\S]*Manual backup[\s\S]*Restore drill[\s\S]*Backup History/, "Control Center Backups UI must expose manual backup and restore drill planning with local history.");
   assertMatch(controlCenterServer, /sanitizeOperationDetails[\s\S]*sanitizeValue/, "Control Center operation details must be recursively sanitized before persistence.");
   assertMatch(controlCenterServer, /handleLogin[\s\S]*admin\.login\.success[\s\S]*admin\.login\.failed/, "Control Center must audit admin login success and failure without storing passwords.");
   assertMatch(controlCenterServer, /authenticateRequest[\s\S]*admin_auth_required/, "Control Center must enforce admin authentication when configured.");
@@ -9895,6 +9904,7 @@ async function staticSecurityCheck() {
   assertMatch(controlCenterTest, /super-secret-token-should-not-leak[\s\S]*doesNotMatch/, "Control Center tests must prove supplied secret-like payloads are not serialized to audit/API output.");
   assertMatch(controlCenterTest, /operations\.jsonl[\s\S]*\/control\/operations[\s\S]*operationId[\s\S]*output/, "Control Center tests must prove Operation and OperationStep records are persisted and exposed safely.");
   assertMatch(controlCenterTest, /deployments\.jsonl[\s\S]*\/control\/applications\/stexor\/deploy[\s\S]*\/control\/applications\/stexor\/rollback[\s\S]*\/control\/deployments/, "Control Center tests must prove deployment and rollback plans are persisted and exposed safely.");
+  assertMatch(controlCenterTest, /backups\.jsonl[\s\S]*\/actions\/backup-command[\s\S]*backup-secret-should-not-leak[\s\S]*\/control\/backups\/records/, "Control Center tests must prove backup and restore drill plans are persisted and secret-redacted.");
   assertMatch(controlCenterTest, /mode=advanced[\s\S]*Infrastructure/, "Control Center tests must cover Advanced Mode routing.");
   assertMatch(controlCenterTest, /local evidence only[\s\S]*notEqual[\s\S]*production evidence/, "Control Center tests must prove local evidence is not accepted as production evidence.");
   assertMatch(controlCenterTest, /admin guard[\s\S]*admin_auth_required[\s\S]*HttpOnly[\s\S]*Secure[\s\S]*SameSite=Lax/, "Control Center tests must cover the admin auth gate and hardened session cookie.");

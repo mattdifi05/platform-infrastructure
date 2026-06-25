@@ -285,6 +285,7 @@ services:
       PROJECT_AUDIT_FILE: /var/www/project-state/audit.jsonl
       PROJECT_OPERATIONS_FILE: /var/www/project-state/operations.jsonl
       PROJECT_DEPLOYMENTS_FILE: /var/www/project-state/deployments.jsonl
+      PROJECT_BACKUP_RECORDS_FILE: /var/www/project-state/backups.jsonl
       PROJECT_WEBSPACES_FILE: /var/www/project-state/webspaces.json
       PROJECTS_HOST: ${PROJECTS_HOST:-projects.localhost.com}
       PROJECT_HOST_SUFFIX: ${PROJECT_HOST_SUFFIX:-.localhost.com}

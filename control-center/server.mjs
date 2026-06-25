@@ -10,6 +10,7 @@ const stateFile = process.env.PROJECT_STATE_FILE || "/var/www/project-state/proj
 const auditFile = process.env.PROJECT_AUDIT_FILE || "/var/www/project-state/audit.jsonl";
 const operationsFile = process.env.PROJECT_OPERATIONS_FILE || "/var/www/project-state/operations.jsonl";
 const deploymentsFile = process.env.PROJECT_DEPLOYMENTS_FILE || "/var/www/project-state/deployments.jsonl";
+const backupRecordsFile = process.env.PROJECT_BACKUP_RECORDS_FILE || "/var/www/project-state/backups.jsonl";
 const webspacesFile = process.env.PROJECT_WEBSPACES_FILE || "/var/www/project-state/webspaces.json";
 const sessionKeysFile = process.env.CONTROL_CENTER_SESSION_KEYS_FILE || "";
 const adminPasswordFile = process.env.CONTROL_CENTER_ADMIN_PASSWORD_FILE || "";
@@ -99,6 +100,11 @@ const server = createServer(async (req, res) => {
 
     if (req.method === "POST" && url.pathname === "/actions/webspace-command") {
       await handleWebspaceCommand(req, res, context);
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/actions/backup-command") {
+      await handleBackupCommand(req, res, context);
       return;
     }
 
@@ -210,6 +216,7 @@ async function handleApi(req, res, url, context) {
     if (method === "GET" && route(parts, "control", "resources", "summary")) return json(res, context.resources);
     if (method === "GET" && route(parts, "control", "security", "summary")) return json(res, context.security);
     if (method === "GET" && route(parts, "control", "backups", "summary")) return json(res, context.backups);
+    if (method === "GET" && route(parts, "control", "backups", "records")) return json(res, { records: context.backupRecords });
     if (method === "POST" && route(parts, "control", "backups", "run")) return json(res, planBackupRun(payload, context), 202);
     if (method === "POST" && route(parts, "control", "restore", "plan")) return json(res, planRestore(payload, context), 202);
 
@@ -355,6 +362,32 @@ async function handleWebspaceCommand(req, res, context) {
   redirect(res, `/?section=webspaces#webspace-${encodeURIComponent(operation.details?.webspaceId || operation.details?.id || "")}`);
 }
 
+async function handleBackupCommand(req, res, context) {
+  const payload = await readPayload(req);
+  const action = String(payload.action || "");
+  let operation;
+  try {
+    if (action === "backup") operation = planBackupRun(payload, context);
+    else if (action === "restore") operation = planRestore(payload, context);
+    else throw new ValidationError("Unsupported backup action.");
+  } catch (error) {
+    if (error instanceof ValidationError) {
+      json(res, { error: "validation_failed", message: error.message }, 422);
+      return;
+    }
+    if (error instanceof RejectedOperationError) {
+      json(res, { error: "operation_rejected", message: error.message }, 409);
+      return;
+    }
+    throw error;
+  }
+  if (wantsJson(req)) {
+    json(res, operation, 202);
+    return;
+  }
+  redirect(res, "/?section=backups");
+}
+
 function buildContext({ projects, state }) {
   const applications = projects.map((project) => ({
     id: project.slug,
@@ -407,6 +440,7 @@ function buildContext({ projects, state }) {
     ...storedActiveWebspaces.filter((space) => !defaultIds.has(space.id)),
   ];
   const deployments = readDeployments();
+  const backupRecords = readBackupRecords();
   const audit = readAudit();
   const operations = readOperations();
   const activeProjects = projects.filter((project) => project.enabled && project.status === "active").length;
@@ -440,6 +474,7 @@ function buildContext({ projects, state }) {
     restoreDrill: "available-through-infra-ops",
     offsite: process.env.BACKUP_SCHEDULER_ENABLE_OFFSITE === "true" ? "configured" : "not-configured",
     rpoRto: "reported-by-production-go-no-go-evidence",
+    latest: backupRecords.slice(0, 5),
   };
   const domains = [{
     id: "local",
@@ -471,6 +506,7 @@ function buildContext({ projects, state }) {
     resources,
     security,
     backups,
+    backupRecords,
     deployments,
     operations,
     audit,
@@ -540,7 +576,7 @@ function renderControlCenter(context, params) {
     else if (section === "webspaces") body = renderWebspaces(scoped(context.webspaces), context.projects);
     else if (section === "resources") body = renderJsonPanel("Resources", context.resources);
     else if (section === "security") body = renderJsonPanel("Security", context.security);
-    else if (section === "backups") body = renderJsonPanel("Backups", context.backups);
+    else if (section === "backups") body = renderBackups(context.backups, context.backupRecords);
     else if (section === "logs") body = renderAudit(context.audit, "Logs / Alerts minimal");
     else body = renderSettings(context);
   } else {
@@ -548,7 +584,7 @@ function renderControlCenter(context, params) {
     else if (section === "network") body = renderDomains(context.domains, scoped(context.subdomains), context.projects);
     else if (section === "infrastructure") body = renderInfrastructure(context.advancedServices);
     else if (section === "deployments") body = renderDeployments(scoped(context.deployments));
-    else if (section === "backup-restore") body = renderJsonPanel("Backup & Restore Advanced", context.backups);
+    else if (section === "backup-restore") body = renderBackups(context.backups, context.backupRecords);
     else body = renderPlanOnlyPanel(title, advancedItems(section));
   }
 
@@ -796,6 +832,43 @@ function renderInfrastructure(services) {
 
 function renderDeployments(deployments) {
   return `<section class="panel"><div class="panel-head"><span>DEP</span><div><h2>Deployments</h2><p>Local deployment records are plan evidence only until production verifyRemote passes.</p></div></div>${deployments.length ? `<div class="cards">${deployments.slice(0, 24).map((deployment) => `<div class="card compact"><strong>${escapeHtml(`${deployment.action} / ${deployment.applicationId}`)}</strong><span>${escapeHtml(`${deployment.createdAt} / ${deployment.status} / ${deployment.environment}`)}</span><span>${escapeHtml(`branch ${deployment.branch} / commit ${deployment.commit}`)}</span></div>`).join("")}</div>` : empty("No deployments", "Deploy and rollback plans will appear here after you run them from Applications.")}</section>`;
+}
+
+function renderBackups(summary, records) {
+  const latest = records.slice(0, 24);
+  return `<section class="grid two">
+    <div class="panel"><div class="panel-head"><span>BKP</span><div><h2>Backups</h2><p>Manual backup and restore drill controls create safe local operation plans.</p></div></div>
+      <div class="cards">
+        <div class="card compact"><strong>Manual backup</strong><span>${escapeHtml(summary.manualBackup)}</span></div>
+        <div class="card compact"><strong>Restore drill</strong><span>${escapeHtml(summary.restoreDrill)}</span></div>
+        <div class="card compact"><strong>Off-site</strong><span>${escapeHtml(summary.offsite)}</span></div>
+        <div class="card compact"><strong>RPO/RTO</strong><span>${escapeHtml(summary.rpoRto)}</span></div>
+      </div>
+      <form method="post" action="/actions/backup-command" class="inline-confirm backup-form">
+        <input type="hidden" name="action" value="backup">
+        <input name="scope" value="all" aria-label="Backup scope">
+        <button class="button enable" type="submit">Plan manual backup</button>
+      </form>
+      <form method="post" action="/actions/backup-command" class="inline-confirm backup-form">
+        <input type="hidden" name="action" value="restore">
+        <input name="scope" value="all" aria-label="Restore scope">
+        <input name="backupRef" value="latest" aria-label="Backup reference">
+        <button class="button danger" type="submit">Plan restore drill</button>
+      </form>
+    </div>
+    <div class="panel"><div class="panel-head"><span>HIS</span><div><h2>Backup History</h2><p>Local records are plan evidence, not production restore proof.</p></div></div>
+      ${latest.length ? `<div class="cards">${latest.map(renderBackupRecord).join("")}</div>` : empty("No backup records", "Plan a manual backup or restore drill to create a local audit record.")}
+    </div>
+  </section>`;
+}
+
+function renderBackupRecord(record) {
+  return `<div id="backup-${escapeHtml(record.id)}" class="card compact">
+    <div class="card-title"><strong>${escapeHtml(humanName(record.action))}</strong><em>${escapeHtml(record.status)}</em></div>
+    <span>${escapeHtml(record.scope)} / ${escapeHtml(record.environment)} / ${record.dryRun ? "dry-run" : "accepted"}</span>
+    <span>${escapeHtml(record.createdAt)} / off-site ${escapeHtml(record.offsite)}</span>
+    <span>${escapeHtml(record.resultSummary)}</span>
+  </div>`;
 }
 
 function renderPlanOnlyPanel(title, items) {
@@ -1050,13 +1123,37 @@ function planWebspaceQuota(id, payload, context) {
 function planBackupRun(payload, context) {
   const scope = sanitizeIdentifier(payload.scope || "all") || "all";
   appendAudit({ action: "backup.run.plan", target: scope, environment: context.environment, risk: "medium", result: "planned", dryRun: true, summary: "Manual backup plan generated." });
-  return operationPlan("backup.run", context.environment, true, ["select scope", "invoke backup adapter", "verify artifact", "write evidence"], { scope });
+  const operation = operationPlan("backup.run", context.environment, true, ["select scope", "invoke backup adapter", "verify artifact", "write evidence"], { scope, productionEvidence: false });
+  const backup = backupRecord({
+    operationId: operation.id,
+    action: "backup",
+    scope,
+    environment: context.environment,
+    status: "planned",
+    dryRun: true,
+    resultSummary: "Manual backup plan generated. No backup command executed from the web panel.",
+  });
+  appendBackupRecord(backup);
+  return { ...operation, backup };
 }
 
 function planRestore(payload, context) {
   const scope = sanitizeIdentifier(payload.scope || "all") || "all";
+  const backupRef = sanitizeRef(payload.backupRef || payload.backupId || "latest");
   appendAudit({ action: "restore.plan", target: scope, environment: context.environment, risk: "high", result: "planned", dryRun: true, summary: "Restore plan generated; no data changed." });
-  return operationPlan("restore.plan", context.environment, true, ["validate backup artifact", "create disposable restore target", "run restore drill", "generate evidence"], { scope });
+  const operation = operationPlan("restore.plan", context.environment, true, ["validate backup artifact", "create disposable restore target", "run restore drill", "generate evidence"], { scope, backupRef, productionEvidence: false, dataChanged: false });
+  const backup = backupRecord({
+    operationId: operation.id,
+    action: "restore-drill",
+    scope,
+    environment: context.environment,
+    status: "planned",
+    dryRun: true,
+    backupRef,
+    resultSummary: "Restore drill plan generated. No live data was changed.",
+  });
+  appendBackupRecord(backup);
+  return { ...operation, backup };
 }
 
 function operationPlan(type, targetEnv, dryRun, steps, details = {}) {
@@ -1166,6 +1263,40 @@ function appendDeployment(deployment) {
 function readDeployments() {
   try {
     return readFileSync(deploymentsFile, "utf8").split(/\r?\n/).filter(Boolean).reverse().slice(0, 100).map((line) => JSON.parse(line));
+  } catch {
+    return [];
+  }
+}
+
+function backupRecord({ operationId, action, scope, environment: targetEnv, status, dryRun, backupRef = "", resultSummary }) {
+  return sanitizeEvent({
+    id: rid(),
+    operationId,
+    action,
+    scope,
+    environment: targetEnv,
+    status,
+    dryRun,
+    backupRef,
+    artifactPath: null,
+    offsite: process.env.BACKUP_SCHEDULER_ENABLE_OFFSITE === "true" ? "configured" : "not-configured",
+    rpo: "reported-by-dr-evidence",
+    rto: "reported-by-dr-evidence",
+    restoreDrill: action === "restore-drill" ? "planned" : "not-run",
+    productionEvidence: false,
+    resultSummary,
+    createdAt: new Date().toISOString(),
+  });
+}
+
+function appendBackupRecord(record) {
+  mkdirSync(path.dirname(backupRecordsFile), { recursive: true });
+  appendFileSync(backupRecordsFile, `${JSON.stringify(sanitizeEvent(record))}\n`);
+}
+
+function readBackupRecords() {
+  try {
+    return readFileSync(backupRecordsFile, "utf8").split(/\r?\n/).filter(Boolean).reverse().slice(0, 100).map((line) => JSON.parse(line));
   } catch {
     return [];
   }
