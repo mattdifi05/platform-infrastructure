@@ -8,6 +8,7 @@ SSH_PORT="${SSH_PORT:-22}"
 REPLACE_DOCKER_DAEMON_CONFIG=0
 DOCKER_DAEMON_CONFIG_CHANGED=0
 RELOAD_SSHD=0
+SSH_HARDENING_CONFIG="/etc/ssh/sshd_config.d/01-platform-hardening.conf"
 
 usage() {
   cat <<'EOF'
@@ -289,7 +290,7 @@ run apt-get update
 run apt-get install -y ca-certificates curl gnupg ufw fail2ban unattended-upgrades auditd apparmor apparmor-utils
 
 echo "==> SSH hardening"
-write_file /etc/ssh/sshd_config.d/99-platform-hardening.conf 0644 "Port ${SSH_PORT}
+write_file "$SSH_HARDENING_CONFIG" 0644 "Port ${SSH_PORT}
 PermitRootLogin no
 PasswordAuthentication no
 KbdInteractiveAuthentication no
@@ -298,6 +299,7 @@ X11Forwarding no
 MaxAuthTries 3
 ClientAliveInterval 300
 ClientAliveCountMax 2"
+add_step "ssh-cloud-init-precedence" "$([ "$APPLY" -eq 1 ] && printf applied || printf planned)" "$SSH_HARDENING_CONFIG" "early sshd_config.d order keeps Platform hardening before cloud-init fragments"
 
 echo "==> Kernel network hardening"
 write_file /etc/sysctl.d/99-platform-hardening.conf 0644 "net.ipv4.conf.all.rp_filter = 1

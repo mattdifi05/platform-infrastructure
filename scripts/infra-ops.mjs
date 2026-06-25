@@ -10296,6 +10296,7 @@ async function staticSecurityCheck() {
   assertNoMatch(vpsBootstrapScript, /(^|\n)\s*\.\s+\/etc\/os-release/, "VPS bootstrap must not source /etc/os-release.");
   assertMatch(vpsBootstrapScript, /APPLY=0[\s\S]*--apply[\s\S]*APPLY=1[\s\S]*apply mode requires root/, "VPS bootstrap must default to plan mode and require root only for apply.");
   assertMatch(vpsHardeningScript, /PasswordAuthentication no/, "VPS hardening must disable SSH password authentication.");
+  assertMatch(vpsHardeningScript, /SSH_HARDENING_CONFIG="\/etc\/ssh\/sshd_config\.d\/01-platform-hardening\.conf"[\s\S]*ssh-cloud-init-precedence/, "VPS hardening must install SSH hardening before cloud-init fragments so effective sshd config disables password auth.");
   assertMatch(vpsHardeningScript, /--reload-sshd[\s\S]*sshd -t[\s\S]*ssh-service-reload[\s\S]*systemctl reload ssh/, "VPS hardening must validate and reload SSH only when explicitly requested.");
   assertMatch(vpsHardeningScript, /fail2ban/, "VPS hardening must install fail2ban.");
   assertMatch(vpsHardeningScript, /reports\/vps-hardening[\s\S]*JSON_REPORT[\s\S]*MD_REPORT/, "VPS hardening must write JSON and Markdown evidence reports.");
