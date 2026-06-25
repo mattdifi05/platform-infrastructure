@@ -22,6 +22,7 @@ const operationsFile = path.join(stateDir, "operations.jsonl");
 const applicationsFile = path.join(stateDir, "applications.json");
 const domainsFile = path.join(stateDir, "domains.json");
 const databasesFile = path.join(stateDir, "databases.json");
+const storageBucketsFile = path.join(stateDir, "storage-buckets.json");
 const deploymentsFile = path.join(stateDir, "deployments.jsonl");
 const backupRecordsFile = path.join(stateDir, "backups.jsonl");
 const resourceLimitsFile = path.join(stateDir, "resource-limits.json");
@@ -49,6 +50,7 @@ test("Stexor Control Center local foundation", async (t) => {
       PROJECT_APPLICATIONS_FILE: applicationsFile,
       PROJECT_DOMAINS_FILE: domainsFile,
       PROJECT_DATABASES_FILE: databasesFile,
+      PROJECT_STORAGE_BUCKETS_FILE: storageBucketsFile,
       PROJECT_DEPLOYMENTS_FILE: deploymentsFile,
       PROJECT_BACKUP_RECORDS_FILE: backupRecordsFile,
       PROJECT_RESOURCE_LIMITS_FILE: resourceLimitsFile,
@@ -663,6 +665,114 @@ test("Stexor Control Center local foundation", async (t) => {
   assert.equal(databaseRestore.body.type, "database.restore.plan");
   assert.equal(databaseRestore.body.details.dataChanged, false);
   assert.equal(databaseRestore.body.details.databaseTouched, false);
+
+  const storageHtml = await getText(`${baseUrl}/?mode=advanced&section=storage`);
+  assert.match(storageHtml, /Storage/);
+  assert.match(storageHtml, /Declare bucket/);
+  assert.match(storageHtml, /Access keys/);
+
+  const invalidBucket = await postJson(`${baseUrl}/control/storage/buckets`, {
+    projectId: "stexor",
+    name: "Bad_Bucket",
+  });
+  assert.equal(invalidBucket.status, 422);
+  assert.match(invalidBucket.body.message, /Invalid bucket name/);
+
+  const bucketPlan = await postJson(`${baseUrl}/control/storage/buckets`, {
+    projectId: "stexor",
+    name: "stexor-assets",
+    quotaBytes: 1048576,
+    accessPolicy: "private",
+    accessKeyStatus: "requires-secret-file",
+    secret: "storage-secret-should-not-leak",
+  });
+  assert.equal(bucketPlan.status, 202);
+  assert.equal(bucketPlan.body.type, "storage.bucket.create");
+  assert.equal(bucketPlan.body.dryRun, true);
+  assert.equal(bucketPlan.body.details.confirmationRequired, "CREATE-BUCKET");
+  assert.equal(bucketPlan.body.details.minioTouched, false);
+  assert.equal(bucketPlan.body.details.credentialsExposed, false);
+  assert.doesNotMatch(JSON.stringify(bucketPlan.body), /storage-secret-should-not-leak/);
+
+  const bucketApply = await postJson(`${baseUrl}/control/storage/buckets`, {
+    projectId: "stexor",
+    name: "stexor-assets",
+    quotaBytes: 1048576,
+    accessPolicy: "private",
+    accessKeyStatus: "requires-secret-file",
+    confirm: "CREATE-BUCKET",
+    secret: "storage-secret-should-not-leak",
+  });
+  assert.equal(bucketApply.status, 202);
+  assert.equal(bucketApply.body.type, "storage.bucket.create.local");
+  assert.equal(bucketApply.body.bucket.id, "stexor-stexor-assets");
+  assert.equal(bucketApply.body.details.minioTouched, false);
+  assert.equal(bucketApply.body.details.credentialsExposed, false);
+
+  const storageAfterApply = await getJson(`${baseUrl}/control/storage`);
+  assert.equal(storageAfterApply.provider.id, "minio");
+  assert.equal(storageAfterApply.buckets.some((bucket) => bucket.id === "stexor-stexor-assets"), true);
+  assert.equal(existsSync(storageBucketsFile), true);
+  const storageStateText = readFileSync(storageBucketsFile, "utf8");
+  assert.doesNotMatch(storageStateText, /storage-secret-should-not-leak/);
+  assert.equal(JSON.parse(storageStateText)["stexor-stexor-assets"].credentialsExposed, false);
+
+  const storageHtmlAfterApply = await getText(`${baseUrl}/?mode=advanced&section=storage`);
+  assert.match(storageHtmlAfterApply, /Update policy/);
+  assert.match(storageHtmlAfterApply, /Update lifecycle/);
+  assert.match(storageHtmlAfterApply, /Update access key/);
+  assert.match(storageHtmlAfterApply, /Plan backup/);
+  assert.match(storageHtmlAfterApply, /Plan restore/);
+
+  const bucketPolicy = await postJson(`${baseUrl}/control/storage/buckets/stexor-stexor-assets/policy`, {
+    accessPolicy: "project-private",
+    confirm: "UPDATE-BUCKET-POLICY",
+    secret: "storage-secret-should-not-leak",
+  });
+  assert.equal(bucketPolicy.status, 202);
+  assert.equal(bucketPolicy.body.type, "storage.bucket.policy.local");
+  assert.equal(bucketPolicy.body.bucket.accessPolicy, "project-private");
+  assert.equal(bucketPolicy.body.details.minioTouched, false);
+  assert.doesNotMatch(JSON.stringify(bucketPolicy.body), /storage-secret-should-not-leak/);
+
+  const bucketLifecycle = await postJson(`${baseUrl}/control/storage/buckets/stexor-stexor-assets/lifecycle`, {
+    retentionDays: 45,
+    confirm: "UPDATE-BUCKET-LIFECYCLE",
+  });
+  assert.equal(bucketLifecycle.status, 202);
+  assert.equal(bucketLifecycle.body.type, "storage.bucket.lifecycle.local");
+  assert.equal(bucketLifecycle.body.bucket.retentionDays, 45);
+  assert.equal(bucketLifecycle.body.details.minioTouched, false);
+
+  const bucketAccessKey = await postJson(`${baseUrl}/control/storage/buckets/stexor-stexor-assets/access-key`, {
+    accessKeyStatus: "configured",
+    confirm: "UPDATE-BUCKET-ACCESS-KEY",
+    secret: "storage-secret-should-not-leak",
+  });
+  assert.equal(bucketAccessKey.status, 202);
+  assert.equal(bucketAccessKey.body.type, "storage.bucket.access_key.local");
+  assert.equal(bucketAccessKey.body.bucket.accessKeyStatus, "configured");
+  assert.equal(bucketAccessKey.body.details.secretMaterialChanged, "[redacted]");
+  assert.equal(bucketAccessKey.body.details.credentialsExposed, false);
+  assert.doesNotMatch(JSON.stringify(bucketAccessKey.body), /storage-secret-should-not-leak/);
+
+  const bucketBackup = await postJson(`${baseUrl}/control/storage/buckets/stexor-stexor-assets/backup`, {
+    secret: "storage-secret-should-not-leak",
+  });
+  assert.equal(bucketBackup.status, 202);
+  assert.equal(bucketBackup.body.type, "storage.bucket.backup");
+  assert.equal(bucketBackup.body.dryRun, true);
+  assert.equal(bucketBackup.body.details.minioTouched, false);
+  assert.equal(bucketBackup.body.details.credentialsExposed, false);
+  assert.doesNotMatch(JSON.stringify(bucketBackup.body), /storage-secret-should-not-leak/);
+
+  const bucketRestore = await postJson(`${baseUrl}/control/storage/buckets/stexor-stexor-assets/restore/plan`, {
+    backupRef: "latest",
+  });
+  assert.equal(bucketRestore.status, 202);
+  assert.equal(bucketRestore.body.type, "storage.bucket.restore.plan");
+  assert.equal(bucketRestore.body.details.dataChanged, false);
+  assert.equal(bucketRestore.body.details.minioTouched, false);
 
   const resourcesHtml = await getText(`${baseUrl}/?section=resources`);
   assert.match(resourcesHtml, /Resources/);

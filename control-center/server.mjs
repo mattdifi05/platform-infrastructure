@@ -12,6 +12,7 @@ const operationsFile = process.env.PROJECT_OPERATIONS_FILE || "/var/www/project-
 const applicationsFile = process.env.PROJECT_APPLICATIONS_FILE || "/var/www/project-state/applications.json";
 const domainsFile = process.env.PROJECT_DOMAINS_FILE || "/var/www/project-state/domains.json";
 const databasesFile = process.env.PROJECT_DATABASES_FILE || "/var/www/project-state/databases.json";
+const storageBucketsFile = process.env.PROJECT_STORAGE_BUCKETS_FILE || "/var/www/project-state/storage-buckets.json";
 const deploymentsFile = process.env.PROJECT_DEPLOYMENTS_FILE || "/var/www/project-state/deployments.jsonl";
 const backupRecordsFile = process.env.PROJECT_BACKUP_RECORDS_FILE || "/var/www/project-state/backups.jsonl";
 const resourceLimitsFile = process.env.PROJECT_RESOURCE_LIMITS_FILE || "/var/www/project-state/resource-limits.json";
@@ -114,6 +115,11 @@ const server = createServer(async (req, res) => {
 
     if (req.method === "POST" && url.pathname === "/actions/database-command") {
       await handleDatabaseCommand(req, res, context);
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/actions/storage-command") {
+      await handleStorageCommand(req, res, context);
       return;
     }
 
@@ -255,6 +261,24 @@ async function handleApi(req, res, url, context) {
     }
     if (method === "POST" && parts.length === 5 && route([parts[0], parts[1], parts[3], parts[4]], "control", "databases", "restore", "plan")) {
       return json(res, planDatabaseRestore(parts[2], payload, context), 202);
+    }
+
+    if (method === "GET" && route(parts, "control", "storage")) return json(res, { buckets: context.storageBuckets, provider: context.storageProvider });
+    if (method === "POST" && route(parts, "control", "storage", "buckets")) return json(res, planStorageBucketCreate(payload, context), 202);
+    if (method === "POST" && parts.length === 5 && route([parts[0], parts[1], parts[2], parts[4]], "control", "storage", "buckets", "policy")) {
+      return json(res, planStorageBucketPolicy(parts[3], payload, context), 202);
+    }
+    if (method === "POST" && parts.length === 5 && route([parts[0], parts[1], parts[2], parts[4]], "control", "storage", "buckets", "lifecycle")) {
+      return json(res, planStorageBucketLifecycle(parts[3], payload, context), 202);
+    }
+    if (method === "POST" && parts.length === 5 && route([parts[0], parts[1], parts[2], parts[4]], "control", "storage", "buckets", "access-key")) {
+      return json(res, planStorageBucketAccessKey(parts[3], payload, context), 202);
+    }
+    if (method === "POST" && parts.length === 5 && route([parts[0], parts[1], parts[2], parts[4]], "control", "storage", "buckets", "backup")) {
+      return json(res, planStorageBucketBackup(parts[3], payload, context), 202);
+    }
+    if (method === "POST" && parts.length === 6 && route([parts[0], parts[1], parts[2], parts[4], parts[5]], "control", "storage", "buckets", "restore", "plan")) {
+      return json(res, planStorageBucketRestore(parts[3], payload, context), 202);
     }
 
     if (method === "GET" && route(parts, "control", "resources", "summary")) return json(res, context.resources);
@@ -469,6 +493,36 @@ async function handleDatabaseCommand(req, res, context) {
   redirect(res, `/?mode=advanced&section=databases#database-${encodeURIComponent(operation.details?.databaseId || operation.database?.id || "")}`);
 }
 
+async function handleStorageCommand(req, res, context) {
+  const payload = await readPayload(req);
+  const action = String(payload.action || "");
+  let operation;
+  try {
+    if (action === "create") operation = planStorageBucketCreate(payload, context);
+    else if (action === "policy") operation = planStorageBucketPolicy(payload.id || payload.bucketId || "", payload, context);
+    else if (action === "lifecycle") operation = planStorageBucketLifecycle(payload.id || payload.bucketId || "", payload, context);
+    else if (action === "access-key") operation = planStorageBucketAccessKey(payload.id || payload.bucketId || "", payload, context);
+    else if (action === "backup") operation = planStorageBucketBackup(payload.id || payload.bucketId || "", payload, context);
+    else if (action === "restore") operation = planStorageBucketRestore(payload.id || payload.bucketId || "", payload, context);
+    else throw new ValidationError("Unsupported storage action.");
+  } catch (error) {
+    if (error instanceof ValidationError) {
+      json(res, { error: "validation_failed", message: error.message }, 422);
+      return;
+    }
+    if (error instanceof RejectedOperationError) {
+      json(res, { error: "operation_rejected", message: error.message }, 409);
+      return;
+    }
+    throw error;
+  }
+  if (wantsJson(req)) {
+    json(res, operation, 202);
+    return;
+  }
+  redirect(res, `/?mode=advanced&section=storage#bucket-${encodeURIComponent(operation.details?.bucketId || operation.bucket?.id || "")}`);
+}
+
 async function handleBackupCommand(req, res, context) {
   const payload = await readPayload(req);
   const action = String(payload.action || "");
@@ -669,6 +723,18 @@ function buildContext({ projects, state }) {
     .filter((database) => database && !database.deletedAt)
     .map((database) => databaseRecord(database))
     .sort((a, b) => `${a.projectId}:${a.engine}:${a.name}`.localeCompare(`${b.projectId}:${b.engine}:${b.name}`));
+  const storageProvider = {
+    id: "minio",
+    name: "MinIO",
+    status: "configured",
+    service: "minio",
+    liveAdapter: "MinioAdapter",
+    productionEvidence: false,
+  };
+  const storageBuckets = Object.values(readStorageBucketsState())
+    .filter((bucket) => bucket && !bucket.deletedAt)
+    .map((bucket) => storageBucketRecord(bucket))
+    .sort((a, b) => `${a.projectId}:${a.name}`.localeCompare(`${b.projectId}:${b.name}`));
   const deployments = readDeployments();
   const backupRecords = readBackupRecords();
   const storedResourceLimits = readResourceLimitsState();
@@ -793,6 +859,7 @@ function buildContext({ projects, state }) {
     resources,
     subdomains: { total: subdomains.length, active: subdomains.filter((item) => item.status === "active").length },
     databases: { total: databases.length, declared: databases.filter((item) => item.status === "declared").length },
+    storage: { buckets: storageBuckets.length, provider: storageProvider.status },
     alerts: { open: openAlerts.length, source: "Control Center local alert metadata and Alertmanager evidence tooling" },
     deployments: { latest: deployments.slice(0, 5) },
     backups,
@@ -806,6 +873,8 @@ function buildContext({ projects, state }) {
     webspaces,
     databases,
     databaseEngines,
+    storageProvider,
+    storageBuckets,
     resources,
     security,
     backups,
@@ -1162,7 +1231,9 @@ function advancedSectionData(section, context) {
     case "storage":
       return {
         webspaces: context.webspaces,
-        buckets: [{ name: "MinIO", status: "planned adapter", policy: "metadata-only", valueExposed: false }],
+        provider: context.storageProvider,
+        buckets: context.storageBuckets,
+        operations: ["create bucket", "quota bucket", "access key metadata", "policy", "lifecycle", "backup bucket", "restore bucket"],
       };
     case "workers-jobs":
       return {
@@ -1388,6 +1459,7 @@ function renderControlCenter(context, params) {
     else if (section === "network") body = renderDomains(context.domains, scoped(context.subdomains), context.projects);
     else if (section === "infrastructure") body = renderInfrastructure(context.advancedServices);
     else if (section === "databases") body = renderDatabases(scoped(context.databases), context.databaseEngines, context.projects);
+    else if (section === "storage") body = renderStorage(scoped(context.storageBuckets), context.storageProvider, context.projects);
     else if (section === "deployments") body = renderDeployments(scoped(context.deployments));
     else if (section === "logs-advanced") body = renderAdvancedPanel(title, section, context, "Loki query and export surfaces stay metadata-only here.");
     else if (section === "alerts-advanced") body = renderAdvancedPanel(title, section, context, "Alert delivery evidence is verified through the ops runner before production use.");
@@ -1851,6 +1923,72 @@ function renderDatabaseCard(database) {
     <form method="post" action="/actions/database-command" class="inline-confirm">
       <input type="hidden" name="action" value="restore">
       <input type="hidden" name="id" value="${escapeHtml(database.id)}">
+      <input name="backupRef" value="latest" aria-label="Backup reference">
+      <button class="button danger" type="submit">Plan restore</button>
+    </form>
+  </div>`;
+}
+
+function renderStorage(buckets, provider, projects) {
+  const projectOptions = projects.map((project) => `<option value="${escapeHtml(project.slug)}">${escapeHtml(project.name)}</option>`).join("");
+  return `<section class="grid two">
+    <div class="panel"><div class="panel-head"><span>S3</span><div><h2>Storage</h2><p>MinIO bucket inventory and controls are metadata-only until a live MinioAdapter is explicitly enabled.</p></div></div>
+      <div class="cards">
+        <div class="card compact"><strong>${escapeHtml(provider.name)}</strong><span>${escapeHtml(provider.service)} / ${escapeHtml(provider.status)} / production evidence ${provider.productionEvidence ? "yes" : "no"}</span></div>
+        <div class="card compact"><strong>Access keys</strong><span>tracked as configured/not-configured metadata; values are never exposed.</span></div>
+        <div class="card compact"><strong>Lifecycle</strong><span>retention and transition metadata only until adapter apply.</span></div>
+      </div>
+      <form method="post" action="/actions/storage-command" class="inline-confirm storage-form">
+        <input type="hidden" name="action" value="create">
+        <select name="projectId" aria-label="Bucket project">${projectOptions}</select>
+        <input name="name" value="project-assets" aria-label="Bucket name">
+        <input name="quotaBytes" value="0" aria-label="Bucket quota bytes">
+        <select name="accessPolicy" aria-label="Access policy"><option value="private">private</option><option value="project-private">project-private</option><option value="public-read">public-read</option><option value="admin-only">admin-only</option></select>
+        <select name="accessKeyStatus" aria-label="Access key status"><option value="not-configured">not-configured</option><option value="requires-secret-file">requires-secret-file</option><option value="configured">configured</option><option value="rotating">rotating</option></select>
+        <input type="hidden" name="confirm" value="CREATE-BUCKET">
+        <button class="button enable" type="submit">Declare bucket</button>
+      </form>
+    </div>
+    <div class="panel"><div class="panel-head"><span>INV</span><div><h2>Bucket Inventory</h2><p>Policy, lifecycle, backup and restore plans are audited and do not call MinIO live.</p></div></div>
+      ${buckets.length ? `<div class="cards">${buckets.map(renderStorageBucketCard).join("")}</div>` : empty("No buckets declared", "Declare a project bucket to track storage policy, lifecycle and backup plans from the Control Center.")}
+    </div>
+  </section>`;
+}
+
+function renderStorageBucketCard(bucket) {
+  return `<div id="bucket-${escapeHtml(bucket.id)}" class="card compact">
+    <div class="card-title"><strong>${escapeHtml(bucket.name)}</strong><em>${escapeHtml(bucket.accessPolicy)}</em></div>
+    <span>${escapeHtml(bucket.projectId)} / ${escapeHtml(bucket.status)} / quota ${escapeHtml(String(bucket.quotaBytes))} bytes</span>
+    <span>lifecycle ${escapeHtml(bucket.lifecycleStatus)} / retention ${escapeHtml(String(bucket.retentionDays))} days / access key ${escapeHtml(bucket.accessKeyStatus)}</span>
+    <form method="post" action="/actions/storage-command" class="inline-confirm">
+      <input type="hidden" name="action" value="policy">
+      <input type="hidden" name="id" value="${escapeHtml(bucket.id)}">
+      <select name="accessPolicy" aria-label="Access policy"><option value="private">private</option><option value="project-private">project-private</option><option value="public-read">public-read</option><option value="admin-only">admin-only</option></select>
+      <input type="hidden" name="confirm" value="UPDATE-BUCKET-POLICY">
+      <button class="button" type="submit">Update policy</button>
+    </form>
+    <form method="post" action="/actions/storage-command" class="inline-confirm">
+      <input type="hidden" name="action" value="lifecycle">
+      <input type="hidden" name="id" value="${escapeHtml(bucket.id)}">
+      <input name="retentionDays" value="${escapeHtml(String(bucket.retentionDays || 30))}" aria-label="Retention days">
+      <input type="hidden" name="confirm" value="UPDATE-BUCKET-LIFECYCLE">
+      <button class="button" type="submit">Update lifecycle</button>
+    </form>
+    <form method="post" action="/actions/storage-command" class="inline-confirm">
+      <input type="hidden" name="action" value="access-key">
+      <input type="hidden" name="id" value="${escapeHtml(bucket.id)}">
+      <select name="accessKeyStatus" aria-label="Access key status"><option value="not-configured">not-configured</option><option value="requires-secret-file">requires-secret-file</option><option value="configured">configured</option><option value="rotating">rotating</option></select>
+      <input type="hidden" name="confirm" value="UPDATE-BUCKET-ACCESS-KEY">
+      <button class="button" type="submit">Update access key</button>
+    </form>
+    <form method="post" action="/actions/storage-command" class="inline-confirm">
+      <input type="hidden" name="action" value="backup">
+      <input type="hidden" name="id" value="${escapeHtml(bucket.id)}">
+      <button class="button enable" type="submit">Plan backup</button>
+    </form>
+    <form method="post" action="/actions/storage-command" class="inline-confirm">
+      <input type="hidden" name="action" value="restore">
+      <input type="hidden" name="id" value="${escapeHtml(bucket.id)}">
       <input name="backupRef" value="latest" aria-label="Backup reference">
       <button class="button danger" type="submit">Plan restore</button>
     </form>
@@ -2405,6 +2543,130 @@ function planDatabaseRestore(id, payload, context) {
   return { ...operation, database };
 }
 
+function planStorageBucketCreate(payload, context) {
+  const projectId = slugify(payload.projectId || "");
+  validateSlug(projectId);
+  findById(context.projects, projectId, "Project");
+  const name = validateBucketName(payload.name || `${projectId}-assets`);
+  const quotaBytes = parseQuotaBytes(payload.quotaBytes || 0);
+  const accessPolicy = choice(String(payload.accessPolicy || "private"), ["private", "project-private", "public-read", "admin-only"], "bucket access policy");
+  const accessKeyStatus = choice(String(payload.accessKeyStatus || "not-configured"), ["not-configured", "configured", "requires-secret-file", "rotating"], "access key status");
+  const id = bucketId(projectId, name);
+  const details = storageBucketRecord({ id, projectId, name, quotaBytes, accessPolicy, accessKeyStatus });
+  if (payload.confirm === "CREATE-BUCKET") {
+    const state = readStorageBucketsState();
+    state[id] = {
+      ...(state[id] || {}),
+      ...details,
+      status: "declared",
+      updatedAt: new Date().toISOString(),
+      createdAt: state[id]?.createdAt || new Date().toISOString(),
+    };
+    writeStorageBucketsState(state);
+    appendAudit({ action: "storage.bucket.create.apply", target: `${projectId}/${name}`, environment: context.environment, risk: "medium", result: "success", dryRun: false, summary: "Storage bucket metadata declared locally; no MinIO mutation executed." });
+    const operation = operationPlan("storage.bucket.create.local", context.environment, false, ["validate project", "validate S3 bucket name", "declare quota and access policy metadata", "leave MinIO unchanged", "write audit event"], { ...state[id], minioTouched: false, credentialsExposed: false, productionEvidence: false });
+    return { ...operation, bucket: state[id] };
+  }
+  appendAudit({ action: "storage.bucket.create.plan", target: `${projectId}/${name}`, environment: context.environment, risk: "medium", result: "planned", dryRun: true, summary: "Storage bucket creation plan generated; no MinIO mutation executed." });
+  return operationPlan("storage.bucket.create", context.environment, true, ["validate project", "validate S3 bucket name", "prepare local metadata", "require apply confirmation", "write audit event"], { ...details, minioTouched: false, credentialsExposed: false, productionEvidence: false, confirmationRequired: "CREATE-BUCKET" });
+}
+
+function planStorageBucketPolicy(id, payload, context) {
+  const bucket = findById(context.storageBuckets, id, "Storage bucket");
+  const accessPolicy = choice(String(payload.accessPolicy || bucket.accessPolicy || "private"), ["private", "project-private", "public-read", "admin-only"], "bucket access policy");
+  if (payload.confirm === "UPDATE-BUCKET-POLICY") {
+    const state = readStorageBucketsState();
+    state[bucket.id] = {
+      ...storageBucketRecord(bucket),
+      ...(state[bucket.id] || {}),
+      accessPolicy,
+      policyStatus: "declared",
+      updatedAt: new Date().toISOString(),
+      createdAt: state[bucket.id]?.createdAt || bucket.createdAt || new Date().toISOString(),
+    };
+    writeStorageBucketsState(state);
+    appendAudit({ action: "storage.bucket.policy.apply", target: bucket.id, environment: context.environment, risk: accessPolicy === "public-read" ? "high" : "medium", result: "success", dryRun: false, summary: "Storage bucket policy metadata updated locally; no MinIO policy mutation executed." });
+    const operation = operationPlan("storage.bucket.policy.local", context.environment, false, ["validate bucket", "validate access policy", "update local policy metadata", "leave MinIO unchanged", "write audit event"], { ...state[bucket.id], minioTouched: false, credentialsExposed: false, productionEvidence: false });
+    return { ...operation, bucket: state[bucket.id] };
+  }
+  appendAudit({ action: "storage.bucket.policy.plan", target: bucket.id, environment: context.environment, risk: accessPolicy === "public-read" ? "high" : "medium", result: "planned", dryRun: true, summary: "Storage bucket policy update plan generated; no MinIO policy mutation executed." });
+  return operationPlan("storage.bucket.policy", context.environment, true, ["validate bucket", "validate access policy", "prepare local policy update", "require apply confirmation", "write audit event"], { ...bucket, accessPolicy, minioTouched: false, credentialsExposed: false, productionEvidence: false, confirmationRequired: "UPDATE-BUCKET-POLICY" });
+}
+
+function planStorageBucketLifecycle(id, payload, context) {
+  const bucket = findById(context.storageBuckets, id, "Storage bucket");
+  const retentionDays = parseRetentionDays(payload.retentionDays || bucket.retentionDays || 30);
+  if (payload.confirm === "UPDATE-BUCKET-LIFECYCLE") {
+    const state = readStorageBucketsState();
+    state[bucket.id] = {
+      ...storageBucketRecord(bucket),
+      ...(state[bucket.id] || {}),
+      retentionDays,
+      lifecycleStatus: "declared",
+      updatedAt: new Date().toISOString(),
+      createdAt: state[bucket.id]?.createdAt || bucket.createdAt || new Date().toISOString(),
+    };
+    writeStorageBucketsState(state);
+    appendAudit({ action: "storage.bucket.lifecycle.apply", target: bucket.id, environment: context.environment, risk: "medium", result: "success", dryRun: false, summary: "Storage bucket lifecycle metadata updated locally; no MinIO lifecycle mutation executed." });
+    const operation = operationPlan("storage.bucket.lifecycle.local", context.environment, false, ["validate bucket", "validate retention days", "update local lifecycle metadata", "leave MinIO unchanged", "write audit event"], { ...state[bucket.id], minioTouched: false, credentialsExposed: false, productionEvidence: false });
+    return { ...operation, bucket: state[bucket.id] };
+  }
+  appendAudit({ action: "storage.bucket.lifecycle.plan", target: bucket.id, environment: context.environment, risk: "medium", result: "planned", dryRun: true, summary: "Storage bucket lifecycle update plan generated; no MinIO lifecycle mutation executed." });
+  return operationPlan("storage.bucket.lifecycle", context.environment, true, ["validate bucket", "validate retention days", "prepare local lifecycle update", "require apply confirmation", "write audit event"], { ...bucket, retentionDays, minioTouched: false, credentialsExposed: false, productionEvidence: false, confirmationRequired: "UPDATE-BUCKET-LIFECYCLE" });
+}
+
+function planStorageBucketAccessKey(id, payload, context) {
+  const bucket = findById(context.storageBuckets, id, "Storage bucket");
+  const accessKeyStatus = choice(String(payload.accessKeyStatus || bucket.accessKeyStatus || "not-configured"), ["not-configured", "configured", "requires-secret-file", "rotating"], "access key status");
+  if (payload.confirm === "UPDATE-BUCKET-ACCESS-KEY") {
+    const state = readStorageBucketsState();
+    state[bucket.id] = {
+      ...storageBucketRecord(bucket),
+      ...(state[bucket.id] || {}),
+      accessKeyStatus,
+      updatedAt: new Date().toISOString(),
+      createdAt: state[bucket.id]?.createdAt || bucket.createdAt || new Date().toISOString(),
+    };
+    writeStorageBucketsState(state);
+    appendAudit({ action: "storage.bucket.access_key.apply", target: bucket.id, environment: context.environment, risk: "medium", result: "success", dryRun: false, summary: "Storage bucket access key metadata updated locally; no key value was generated or exposed." });
+    const operation = operationPlan("storage.bucket.access_key.local", context.environment, false, ["validate bucket", "validate access key status", "update local access key metadata", "leave secret material unchanged", "write audit event"], { ...state[bucket.id], minioTouched: false, secretMaterialChanged: false, credentialsExposed: false, productionEvidence: false });
+    return { ...operation, bucket: state[bucket.id] };
+  }
+  appendAudit({ action: "storage.bucket.access_key.plan", target: bucket.id, environment: context.environment, risk: "medium", result: "planned", dryRun: true, summary: "Storage bucket access key metadata plan generated; no key value was generated or exposed." });
+  return operationPlan("storage.bucket.access_key", context.environment, true, ["validate bucket", "validate access key status", "prepare local access key metadata update", "require apply confirmation", "write audit event"], { ...bucket, accessKeyStatus, minioTouched: false, secretMaterialChanged: false, credentialsExposed: false, productionEvidence: false, confirmationRequired: "UPDATE-BUCKET-ACCESS-KEY" });
+}
+
+function planStorageBucketBackup(id, payload, context) {
+  const bucket = findById(context.storageBuckets, id, "Storage bucket");
+  const scope = `bucket:${bucket.id}`;
+  appendAudit({ action: "storage.bucket.backup.plan", target: bucket.id, environment: context.environment, risk: "medium", result: "planned", dryRun: true, summary: "Storage bucket backup plan generated; no object storage command executed from the web panel." });
+  const operation = operationPlan("storage.bucket.backup", context.environment, true, ["validate bucket record", "select MinIO bucket", "invoke MinioAdapter backup in ops runner", "verify backup artifact", "write evidence"], {
+    bucketId: bucket.id,
+    projectId: bucket.projectId,
+    scope,
+    minioTouched: false,
+    credentialsExposed: false,
+    productionEvidence: false,
+  });
+  return { ...operation, bucket };
+}
+
+function planStorageBucketRestore(id, payload, context) {
+  const bucket = findById(context.storageBuckets, id, "Storage bucket");
+  const backupRef = sanitizeRef(payload.backupRef || payload.backupId || "latest");
+  appendAudit({ action: "storage.bucket.restore.plan", target: bucket.id, environment: context.environment, risk: "high", result: "planned", dryRun: true, summary: "Storage bucket restore drill plan generated; no live objects changed." });
+  const operation = operationPlan("storage.bucket.restore.plan", context.environment, true, ["validate bucket record", "validate backup reference", "create disposable restore target", "run restore drill through MinioAdapter", "generate evidence"], {
+    bucketId: bucket.id,
+    projectId: bucket.projectId,
+    backupRef,
+    minioTouched: false,
+    dataChanged: false,
+    credentialsExposed: false,
+    productionEvidence: false,
+  });
+  return { ...operation, bucket };
+}
+
 function planResourceLimitUpdate(payload, context) {
   const projectId = slugify(payload.projectId || "");
   validateSlug(projectId);
@@ -2762,6 +3024,20 @@ function writeDatabasesState(state) {
   writeFileSync(databasesFile, `${JSON.stringify(sanitizeEvent(state), null, 2)}\n`);
 }
 
+function readStorageBucketsState() {
+  try {
+    const parsed = JSON.parse(readFileSync(storageBucketsFile, "utf8"));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeStorageBucketsState(state) {
+  mkdirSync(path.dirname(storageBucketsFile), { recursive: true });
+  writeFileSync(storageBucketsFile, `${JSON.stringify(sanitizeEvent(state), null, 2)}\n`);
+}
+
 function readResourceLimitsState() {
   try {
     const parsed = JSON.parse(readFileSync(resourceLimitsFile, "utf8"));
@@ -3037,10 +3313,25 @@ function validateDatabaseName(value) {
   return name;
 }
 
+function validateBucketName(value) {
+  const name = String(value || "").trim().toLowerCase();
+  if (name.length < 3 || name.length > 63) throw new ValidationError("Invalid bucket name.");
+  if (!/^[a-z0-9][a-z0-9.-]*[a-z0-9]$/.test(name)) throw new ValidationError("Invalid bucket name.");
+  if (name.includes("..") || name.includes(".-") || name.includes("-.")) throw new ValidationError("Invalid bucket name.");
+  if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(name)) throw new ValidationError("Invalid bucket name.");
+  return name;
+}
+
 function parseQuotaBytes(value) {
   const quotaBytes = Number(value || 0);
   if (!Number.isSafeInteger(quotaBytes) || quotaBytes < 0) throw new ValidationError("Quota must be zero or a positive safe integer.");
   return quotaBytes;
+}
+
+function parseRetentionDays(value) {
+  const retentionDays = Number(value || 0);
+  if (!Number.isSafeInteger(retentionDays) || retentionDays < 0 || retentionDays > 3650) throw new ValidationError("Retention days must be zero or a positive safe integer within policy.");
+  return retentionDays;
 }
 
 function parseResourceLimitNumber(value, label, max) {
@@ -3062,6 +3353,10 @@ function webspaceId(projectId, name) {
 
 function databaseId(projectId, engine, name) {
   return sanitizeIdentifier(`${projectId}-${engine}-${name.replace(/_/g, "-")}`);
+}
+
+function bucketId(projectId, name) {
+  return sanitizeIdentifier(`${projectId}-${name.replace(/\./g, "-")}`);
 }
 
 function domainRecord({
@@ -3179,6 +3474,57 @@ function databaseRecord({
     restoreStatus,
     source,
     databaseTouched: false,
+    credentialsExposed: false,
+    providerTouched: false,
+    productionEvidence: false,
+    createdAt,
+    updatedAt,
+    deletedAt,
+  });
+}
+
+function storageBucketRecord({
+  id = "",
+  projectId = "",
+  name = "",
+  quotaBytes = 0,
+  usedBytes = 0,
+  accessPolicy = "private",
+  accessKeyStatus = "not-configured",
+  policyStatus = "metadata-only",
+  lifecycleStatus = "metadata-only",
+  retentionDays = 0,
+  status = "declared",
+  backupPolicy = "manual-plan-only",
+  restoreStatus = "restore-drill-plan-only",
+  source = "control-center-state",
+  createdAt = null,
+  updatedAt = null,
+  deletedAt = null,
+} = {}) {
+  const cleanProjectId = sanitizeIdentifier(projectId);
+  const fallbackProject = cleanProjectId || "platform";
+  const cleanName = validateBucketName(name || `${fallbackProject}-assets`);
+  const cleanAccessPolicy = choice(String(accessPolicy || "private"), ["private", "project-private", "public-read", "admin-only"], "bucket access policy");
+  const cleanRetentionDays = parseRetentionDays(retentionDays || 0);
+  return sanitizeEvent({
+    id: sanitizeIdentifier(id || bucketId(fallbackProject, cleanName)),
+    projectId: cleanProjectId,
+    provider: "minio",
+    name: cleanName,
+    environment: "local",
+    quotaBytes: parseQuotaBytes(quotaBytes || 0),
+    usedBytes: Number.isSafeInteger(Number(usedBytes)) && Number(usedBytes) >= 0 ? Number(usedBytes) : 0,
+    accessPolicy: cleanAccessPolicy,
+    accessKeyStatus: choice(String(accessKeyStatus || "not-configured"), ["not-configured", "configured", "requires-secret-file", "rotating"], "access key status"),
+    policyStatus,
+    lifecycleStatus,
+    retentionDays: cleanRetentionDays,
+    status,
+    backupPolicy,
+    restoreStatus,
+    source,
+    minioTouched: false,
     credentialsExposed: false,
     providerTouched: false,
     productionEvidence: false,

@@ -287,6 +287,7 @@ services:
       PROJECT_APPLICATIONS_FILE: /var/www/project-state/applications.json
       PROJECT_DOMAINS_FILE: /var/www/project-state/domains.json
       PROJECT_DATABASES_FILE: /var/www/project-state/databases.json
+      PROJECT_STORAGE_BUCKETS_FILE: /var/www/project-state/storage-buckets.json
       PROJECT_DEPLOYMENTS_FILE: /var/www/project-state/deployments.jsonl
       PROJECT_BACKUP_RECORDS_FILE: /var/www/project-state/backups.jsonl
       PROJECT_RESOURCE_LIMITS_FILE: /var/www/project-state/resource-limits.json
