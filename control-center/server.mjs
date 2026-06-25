@@ -3470,17 +3470,17 @@ function advancedItems(section) {
 }
 
 function json(res, payload, status = 200) {
-  res.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
+  res.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store", "x-stexor-control-center-runtime": "node" });
   res.end(`${JSON.stringify(payload, null, 2)}\n`);
 }
 
 function html(res, content, status = 200) {
-  res.writeHead(status, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
+  res.writeHead(status, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "x-stexor-control-center-runtime": "node" });
   res.end(content);
 }
 
 function redirect(res, location) {
-  res.writeHead(303, { location, "cache-control": "no-store" });
+  res.writeHead(303, { location, "cache-control": "no-store", "x-stexor-control-center-runtime": "node" });
   res.end();
 }
 

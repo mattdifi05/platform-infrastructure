@@ -917,7 +917,7 @@ configs:
               - web
             middlewares:
               - enterprise-redirect-https@file
-            service: local-php
+            service: enterprise-web
 
           enterprise-web:
             rule: Host(`${UI_HOST:-ui.localhost.com}`)
@@ -927,7 +927,7 @@ configs:
             middlewares:
               - enterprise-security-headers@file
               - enterprise-compress@file
-            service: local-php
+            service: enterprise-web
 
           enterprise-account-http:
             rule: Host(`${ACCOUNT_HOST:-account.localhost.com}`)
@@ -1067,16 +1067,16 @@ configs:
               - enterprise-compress@file
             service: enterprise-minio-api
 
-          local-php-http:
+          local-projects-http:
             rule: Host(`${PROJECTS_HOST:-projects.localhost.com}`) || HostRegexp(`${PROJECTS_WILDCARD_HOST_REGEXP:-[a-z0-9-]+\.localhost\.com}`)
             entryPoints:
               - web
             priority: 1
             middlewares:
               - enterprise-redirect-https@file
-            service: local-php
+            service: local-projects
 
-          local-php:
+          local-projects:
             rule: Host(`${PROJECTS_HOST:-projects.localhost.com}`) || HostRegexp(`${PROJECTS_WILDCARD_HOST_REGEXP:-[a-z0-9-]+\.localhost\.com}`)
             entryPoints:
               - websecure
@@ -1085,7 +1085,7 @@ configs:
             middlewares:
               - enterprise-security-headers@file
               - enterprise-compress@file
-            service: local-php
+            service: local-projects
 
         services:
           enterprise-web:
@@ -1116,7 +1116,7 @@ configs:
             loadBalancer:
               servers:
                 - url: http://phpmyadmin:80
-          local-php:
+          local-projects:
             loadBalancer:
               servers:
                 - url: http://project-router:8080

@@ -9907,7 +9907,10 @@ async function staticSecurityCheck() {
   assertNoMatch(compose, /8090:8080|api@internal|traefik\.localhost\.com/, "Traefik dashboard must not be routed or exposed in the local stack.");
   assertNoMatch(compose, /prometheus\.localhost\.com|alertmanager\.localhost\.com/, "Prometheus and Alertmanager must remain internal; use authenticated Grafana for browser access.");
   assertMatch(compose, /control-center:[\s\S]*image:\s+\$\{NODE_IMAGE:-node:26\.3\.1-alpine@sha256:[a-f0-9]{64}\}/, "Control Center must run as a digest-pinned Node service.");
+  assertMatch(controlCenterServer, /x-stexor-control-center-runtime[^\n]*node/, "Control Center responses must expose Node runtime evidence headers.");
   assertMatch(compose, /project-router:[\s\S]*CONTROL_CENTER_UPSTREAM:\s+http:\/\/control-center:8080/, "Project router must send the projects host to the Node Control Center.");
+  assertMatch(compose, /local-projects:[\s\S]*url:\s+http:\/\/project-router:8080/, "Traefik project routes must target the shared Node project-router service.");
+  assertNoMatch(compose, /local-php/, "Traefik project routing must not be named local-php; PHP is only one runtime behind project-router.");
   assertMatch(compose, /php-apache:[\s\S]*\$\{PHP_SOURCE_DIR:-\.\/php-runtime-root\}:\/var\/www\/html[\s\S]*project-router:[\s\S]*CONTROL_CENTER_UPSTREAM:\s+http:\/\/control-center:8080/, "PHP Apache must be runtime-only while the projects host resolves through the Node Control Center.");
   assertMatch(projectRouterServer, /stopManagedProject[\s\S]*Project disabled[\s\S]*nodeUpstream/, "Project Router must stop managed Node projects when local routing is disabled.");
   assertMatch(projectRouterTest, /anniversary\.localhost\.com[\s\S]*stexor\.localhost\.com[\s\S]*Project disabled[\s\S]*notEqual\(nodeAfterEnablePayload\.pid/, "Project Router tests must prove simultaneous PHP and Node hosting plus disable/re-enable restart behavior.");
