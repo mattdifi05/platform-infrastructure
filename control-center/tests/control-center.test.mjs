@@ -21,6 +21,7 @@ const auditFile = path.join(stateDir, "audit.jsonl");
 const operationsFile = path.join(stateDir, "operations.jsonl");
 const deploymentsFile = path.join(stateDir, "deployments.jsonl");
 const backupRecordsFile = path.join(stateDir, "backups.jsonl");
+const resourceLimitsFile = path.join(stateDir, "resource-limits.json");
 const webspacesFile = path.join(stateDir, "webspaces.json");
 
 test("Stexor Control Center local foundation", async (t) => {
@@ -39,6 +40,7 @@ test("Stexor Control Center local foundation", async (t) => {
       PROJECT_OPERATIONS_FILE: operationsFile,
       PROJECT_DEPLOYMENTS_FILE: deploymentsFile,
       PROJECT_BACKUP_RECORDS_FILE: backupRecordsFile,
+      PROJECT_RESOURCE_LIMITS_FILE: resourceLimitsFile,
       PROJECT_WEBSPACES_FILE: webspacesFile,
       PROJECTS_HOST: "projects.localhost.com",
       PROJECT_HOST_SUFFIX: ".localhost.com",
@@ -291,6 +293,61 @@ test("Stexor Control Center local foundation", async (t) => {
   assert.doesNotMatch(webspaceStateText, /webspace-secret-should-not-leak/);
   assert.equal(JSON.parse(webspaceStateText)["stexor-media"].quotaBytes, 8192);
 
+  const resourcesHtml = await getText(`${baseUrl}/?section=resources`);
+  assert.match(resourcesHtml, /Resources/);
+  assert.match(resourcesHtml, /Quota per project/);
+  assert.match(resourcesHtml, /Set limits/);
+
+  const invalidResourceLimit = await postJson(`${baseUrl}/control/resources/limits`, {
+    projectId: "stexor",
+    memoryMb: -1,
+  });
+  assert.equal(invalidResourceLimit.status, 422);
+  assert.match(invalidResourceLimit.body.message, /Memory MB/);
+
+  const resourceLimitPlan = await postJson(`${baseUrl}/control/resources/limits`, {
+    projectId: "stexor",
+    cpuMillicores: 500,
+    memoryMb: 256,
+    diskMb: 1024,
+    secret: "resource-limit-secret-should-not-leak",
+  });
+  assert.equal(resourceLimitPlan.status, 202);
+  assert.equal(resourceLimitPlan.body.type, "resources.limits");
+  assert.equal(resourceLimitPlan.body.dryRun, true);
+  assert.equal(resourceLimitPlan.body.details.confirmationRequired, "UPDATE-RESOURCE-LIMITS");
+  assert.equal(resourceLimitPlan.body.details.dockerTouched, false);
+  assert.doesNotMatch(JSON.stringify(resourceLimitPlan.body), /resource-limit-secret-should-not-leak/);
+
+  const resourceLimitApply = await postJson(`${baseUrl}/actions/resource-command`, {
+    action: "limits",
+    projectId: "stexor",
+    cpuMillicores: 750,
+    memoryMb: 512,
+    diskMb: 2048,
+    confirm: "UPDATE-RESOURCE-LIMITS",
+    secret: "resource-limit-secret-should-not-leak",
+  });
+  assert.equal(resourceLimitApply.status, 202);
+  assert.equal(resourceLimitApply.body.type, "resources.limits.local");
+  assert.equal(resourceLimitApply.body.dryRun, false);
+  assert.equal(resourceLimitApply.body.resourceLimit.projectId, "stexor");
+  assert.equal(resourceLimitApply.body.resourceLimit.cpuMillicores, 750);
+  assert.equal(resourceLimitApply.body.resourceLimit.memoryMb, 512);
+  assert.equal(resourceLimitApply.body.resourceLimit.diskMb, 2048);
+  assert.equal(resourceLimitApply.body.resourceLimit.dockerTouched, false);
+  assert.doesNotMatch(JSON.stringify(resourceLimitApply.body), /resource-limit-secret-should-not-leak/);
+
+  const resourceSummary = await getJson(`${baseUrl}/control/resources/summary`);
+  const stexorLimit = resourceSummary.projectLimits.find((limit) => limit.projectId === "stexor");
+  assert.equal(stexorLimit.cpuMillicores, 750);
+  assert.equal(stexorLimit.memoryMb, 512);
+  assert.equal(stexorLimit.diskMb, 2048);
+  assert.equal(existsSync(resourceLimitsFile), true);
+  const resourceLimitText = readFileSync(resourceLimitsFile, "utf8");
+  assert.doesNotMatch(resourceLimitText, /resource-limit-secret-should-not-leak/);
+  assert.equal(JSON.parse(resourceLimitText).stexor.diskMb, 2048);
+
   const deployPlan = await postJson(`${baseUrl}/control/applications/stexor/deploy`, {
     branch: "main",
     commit: "abc1234",
@@ -468,6 +525,7 @@ test("Stexor Control Center admin guard", async (t) => {
       PROJECT_OPERATIONS_FILE: operationsFile,
       PROJECT_DEPLOYMENTS_FILE: deploymentsFile,
       PROJECT_BACKUP_RECORDS_FILE: backupRecordsFile,
+      PROJECT_RESOURCE_LIMITS_FILE: resourceLimitsFile,
       PROJECT_WEBSPACES_FILE: webspacesFile,
       PROJECTS_HOST: "projects.localhost.com",
       PROJECT_HOST_SUFFIX: ".localhost.com",

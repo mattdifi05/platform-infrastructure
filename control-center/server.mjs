@@ -11,6 +11,7 @@ const auditFile = process.env.PROJECT_AUDIT_FILE || "/var/www/project-state/audi
 const operationsFile = process.env.PROJECT_OPERATIONS_FILE || "/var/www/project-state/operations.jsonl";
 const deploymentsFile = process.env.PROJECT_DEPLOYMENTS_FILE || "/var/www/project-state/deployments.jsonl";
 const backupRecordsFile = process.env.PROJECT_BACKUP_RECORDS_FILE || "/var/www/project-state/backups.jsonl";
+const resourceLimitsFile = process.env.PROJECT_RESOURCE_LIMITS_FILE || "/var/www/project-state/resource-limits.json";
 const webspacesFile = process.env.PROJECT_WEBSPACES_FILE || "/var/www/project-state/webspaces.json";
 const sessionKeysFile = process.env.CONTROL_CENTER_SESSION_KEYS_FILE || "";
 const adminPasswordFile = process.env.CONTROL_CENTER_ADMIN_PASSWORD_FILE || "";
@@ -105,6 +106,11 @@ const server = createServer(async (req, res) => {
 
     if (req.method === "POST" && url.pathname === "/actions/backup-command") {
       await handleBackupCommand(req, res, context);
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/actions/resource-command") {
+      await handleResourceCommand(req, res, context);
       return;
     }
 
@@ -214,6 +220,7 @@ async function handleApi(req, res, url, context) {
     }
 
     if (method === "GET" && route(parts, "control", "resources", "summary")) return json(res, context.resources);
+    if (method === "POST" && route(parts, "control", "resources", "limits")) return json(res, planResourceLimitUpdate(payload, context), 202);
     if (method === "GET" && route(parts, "control", "security", "summary")) return json(res, context.security);
     if (method === "GET" && route(parts, "control", "backups", "summary")) return json(res, context.backups);
     if (method === "GET" && route(parts, "control", "backups", "records")) return json(res, { records: context.backupRecords });
@@ -388,6 +395,31 @@ async function handleBackupCommand(req, res, context) {
   redirect(res, "/?section=backups");
 }
 
+async function handleResourceCommand(req, res, context) {
+  const payload = await readPayload(req);
+  const action = String(payload.action || "");
+  let operation;
+  try {
+    if (action === "limits") operation = planResourceLimitUpdate(payload, context);
+    else throw new ValidationError("Unsupported resource action.");
+  } catch (error) {
+    if (error instanceof ValidationError) {
+      json(res, { error: "validation_failed", message: error.message }, 422);
+      return;
+    }
+    if (error instanceof RejectedOperationError) {
+      json(res, { error: "operation_rejected", message: error.message }, 409);
+      return;
+    }
+    throw error;
+  }
+  if (wantsJson(req)) {
+    json(res, operation, 202);
+    return;
+  }
+  redirect(res, `/?section=resources#resources-${encodeURIComponent(operation.details?.projectId || operation.resourceLimit?.projectId || "")}`);
+}
+
 function buildContext({ projects, state }) {
   const applications = projects.map((project) => ({
     id: project.slug,
@@ -441,6 +473,7 @@ function buildContext({ projects, state }) {
   ];
   const deployments = readDeployments();
   const backupRecords = readBackupRecords();
+  const storedResourceLimits = readResourceLimitsState();
   const audit = readAudit();
   const operations = readOperations();
   const activeProjects = projects.filter((project) => project.enabled && project.status === "active").length;
@@ -458,6 +491,8 @@ function buildContext({ projects, state }) {
       runtime: app.runtime,
       status: app.status,
     })),
+    projectLimits: projects.map((project) => resourceLimitRecord({ projectId: project.slug, ...(storedResourceLimits[project.slug] || {}) })),
+    trend: "delegated-to-prometheus-and-cadvisor",
   };
   const security = {
     waf: "configured",
@@ -574,7 +609,7 @@ function renderControlCenter(context, params) {
     else if (section === "applications") body = renderApplications(scoped(context.applications));
     else if (section === "domains") body = renderDomains(context.domains, scoped(context.subdomains), context.projects);
     else if (section === "webspaces") body = renderWebspaces(scoped(context.webspaces), context.projects);
-    else if (section === "resources") body = renderJsonPanel("Resources", context.resources);
+    else if (section === "resources") body = renderResources(context.resources, context.projects);
     else if (section === "security") body = renderJsonPanel("Security", context.security);
     else if (section === "backups") body = renderBackups(context.backups, context.backupRecords);
     else if (section === "logs") body = renderAudit(context.audit, "Logs / Alerts minimal");
@@ -806,6 +841,43 @@ function renderWebspaceCard(space) {
       <input type="hidden" name="confirm" value="UPDATE-QUOTA">
       <button class="button" type="submit">Set quota</button>
     </form>
+  </div>`;
+}
+
+function renderResources(resources, projects) {
+  const limits = resources.projectLimits || [];
+  return `<section class="grid two">
+    <div class="panel"><div class="panel-head"><span>RES</span><div><h2>Resources</h2><p>CPU, RAM and disk quota metadata per project. Runtime enforcement stays behind Docker adapters.</p></div></div>
+      <div class="cards">
+        <div class="card compact"><strong>CPU</strong><span>${escapeHtml(resources.cpu.status)} / ${escapeHtml(resources.cpu.summary)}</span></div>
+        <div class="card compact"><strong>RAM</strong><span>${escapeHtml(resources.memory.status)} / ${escapeHtml(resources.memory.summary)}</span></div>
+        <div class="card compact"><strong>Disk</strong><span>${escapeHtml(resources.disk.status)} / web spaces ${bytesLabel(resources.disk.webspacesBytes)}</span></div>
+        <div class="card compact"><strong>Trend</strong><span>${escapeHtml(resources.trend)}</span></div>
+      </div>
+      <form method="post" action="/actions/resource-command" class="inline-confirm resource-form">
+        <input type="hidden" name="action" value="limits">
+        <select name="projectId" aria-label="Project for resource limits">${projects.map((project) => `<option value="${escapeHtml(project.slug)}">${escapeHtml(project.name)}</option>`).join("")}</select>
+        <input name="cpuMillicores" value="0" inputmode="numeric" aria-label="CPU millicores">
+        <input name="memoryMb" value="0" inputmode="numeric" aria-label="Memory MB">
+        <input name="diskMb" value="0" inputmode="numeric" aria-label="Disk MB">
+        <input type="hidden" name="confirm" value="UPDATE-RESOURCE-LIMITS">
+        <button class="button enable" type="submit">Set limits</button>
+      </form>
+    </div>
+    <div class="panel"><div class="panel-head"><span>QTA</span><div><h2>Quota per project</h2><p>Zero means unbounded metadata. No live container mutation is executed here.</p></div></div>
+      <div class="cards">${limits.map(renderResourceLimitCard).join("") || empty("No resource limits", "Mount projects to create per-project resource cards.")}</div>
+    </div>
+    <div class="panel"><div class="panel-head"><span>RUN</span><div><h2>Containers</h2><p>Discovered application runtime state per project.</p></div></div>
+      <div class="cards">${resources.containersByProject.map((item) => `<div class="card compact"><strong>${escapeHtml(item.projectId)}</strong><span>${escapeHtml(item.runtime)} / ${escapeHtml(item.status)}</span></div>`).join("") || empty("No containers", "No project applications were discovered.")}</div>
+    </div>
+  </section>`;
+}
+
+function renderResourceLimitCard(limit) {
+  return `<div id="resources-${escapeHtml(limit.projectId)}" class="card compact">
+    <div class="card-title"><strong>${escapeHtml(limit.projectId)}</strong><em>${escapeHtml(limit.status)}</em></div>
+    <span>CPU ${limit.cpuMillicores}m / RAM ${limit.memoryMb} MB / Disk ${limit.diskMb} MB</span>
+    <span>${escapeHtml(limit.updatedAt ? `updated ${limit.updatedAt}` : "no local quota metadata yet")}</span>
   </div>`;
 }
 
@@ -1120,6 +1192,28 @@ function planWebspaceQuota(id, payload, context) {
   return operationPlan("webspace.quota", context.environment, true, ["validate quota", "prepare quota metadata update", "write audit event"], { webspaceId: space.id, projectId: space.projectId, quotaBytes, confirmationRequired: "UPDATE-QUOTA" });
 }
 
+function planResourceLimitUpdate(payload, context) {
+  const projectId = slugify(payload.projectId || "");
+  validateSlug(projectId);
+  findById(context.projects, projectId, "Project");
+  const details = resourceLimitRecord({
+    projectId,
+    cpuMillicores: parseResourceLimitNumber(payload.cpuMillicores || 0, "CPU millicores", 128000),
+    memoryMb: parseResourceLimitNumber(payload.memoryMb || 0, "Memory MB", 1048576),
+    diskMb: parseResourceLimitNumber(payload.diskMb || 0, "Disk MB", 1073741824),
+  });
+  if (payload.confirm === "UPDATE-RESOURCE-LIMITS") {
+    const state = readResourceLimitsState();
+    state[projectId] = { ...(state[projectId] || {}), ...details, status: "configured", updatedAt: new Date().toISOString(), createdAt: state[projectId]?.createdAt || new Date().toISOString() };
+    writeResourceLimitsState(state);
+    appendAudit({ action: "resources.limits.apply", target: projectId, environment: context.environment, risk: "low", result: "success", dryRun: false, summary: "Resource quota metadata updated locally; no live container mutation executed." });
+    const operation = operationPlan("resources.limits.local", context.environment, false, ["validate project", "validate resource limits", "update local quota metadata", "leave Docker runtime unchanged", "write audit event"], { ...state[projectId], dockerTouched: false });
+    return { ...operation, resourceLimit: state[projectId] };
+  }
+  appendAudit({ action: "resources.limits.plan", target: projectId, environment: context.environment, risk: "low", result: "planned", dryRun: true, summary: "Resource quota metadata update plan generated." });
+  return operationPlan("resources.limits", context.environment, true, ["validate project", "validate resource limits", "prepare quota metadata update", "require apply confirmation", "write audit event"], { ...details, dockerTouched: false, confirmationRequired: "UPDATE-RESOURCE-LIMITS" });
+}
+
 function planBackupRun(payload, context) {
   const scope = sanitizeIdentifier(payload.scope || "all") || "all";
   appendAudit({ action: "backup.run.plan", target: scope, environment: context.environment, risk: "medium", result: "planned", dryRun: true, summary: "Manual backup plan generated." });
@@ -1253,6 +1347,20 @@ function readWebspacesState() {
 function writeWebspacesState(state) {
   mkdirSync(path.dirname(webspacesFile), { recursive: true });
   writeFileSync(webspacesFile, `${JSON.stringify(sanitizeEvent(state), null, 2)}\n`);
+}
+
+function readResourceLimitsState() {
+  try {
+    const parsed = JSON.parse(readFileSync(resourceLimitsFile, "utf8"));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeResourceLimitsState(state) {
+  mkdirSync(path.dirname(resourceLimitsFile), { recursive: true });
+  writeFileSync(resourceLimitsFile, `${JSON.stringify(sanitizeEvent(state), null, 2)}\n`);
 }
 
 function appendDeployment(deployment) {
@@ -1446,6 +1554,12 @@ function parseQuotaBytes(value) {
   return quotaBytes;
 }
 
+function parseResourceLimitNumber(value, label, max) {
+  const next = Number(value || 0);
+  if (!Number.isSafeInteger(next) || next < 0 || next > max) throw new ValidationError(`${label} must be zero or a positive safe integer within policy.`);
+  return next;
+}
+
 function webspaceId(projectId, name) {
   return name === projectId ? projectId : `${projectId}-${name}`;
 }
@@ -1463,6 +1577,22 @@ function webspaceRecord({ id, projectId, name, basePath, quotaBytes = 0, usedByt
     linkedApps: linkedApps || [projectId],
     status,
     source: "control-center-state",
+    createdAt,
+    updatedAt,
+  });
+}
+
+function resourceLimitRecord({ projectId, cpuMillicores = 0, memoryMb = 0, diskMb = 0, status = "", createdAt = null, updatedAt = null }) {
+  return sanitizeEvent({
+    id: projectId,
+    projectId,
+    environment: "local",
+    cpuMillicores: Number(cpuMillicores || 0),
+    memoryMb: Number(memoryMb || 0),
+    diskMb: Number(diskMb || 0),
+    status: status || (Number(cpuMillicores || 0) || Number(memoryMb || 0) || Number(diskMb || 0) ? "configured" : "not-set"),
+    source: "control-center-state",
+    dockerTouched: false,
     createdAt,
     updatedAt,
   });
