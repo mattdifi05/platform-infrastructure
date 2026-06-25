@@ -77,7 +77,9 @@ function positiveInteger(value, optionName, minimum = 1) {
 }
 
 function hasSupportedProjectSource() {
-  return fs.existsSync(path.join(sourceRoot, "package.json")) && fs.existsSync(path.join(sourceRoot, ".github", "workflows"));
+  return fs.existsSync(path.join(sourceRoot, "package.json"))
+    && fs.existsSync(path.join(sourceRoot, ".github", "workflows"))
+    && fs.existsSync(path.join(sourceRoot, "scripts", "run-infra-ops.mjs"));
 }
 
 function projectSourceChecksRequired() {
@@ -91,6 +93,15 @@ function requireSupportedProjectSource(label) {
   }
   log(`Skipping ${label}; no supported project source found at ${sourceRoot}.`);
   return false;
+}
+
+function localProductionImageEnv() {
+  return {
+    BACKEND_IMAGE: process.env.BACKEND_IMAGE || "platform/backend:local",
+    WEB_IMAGE: process.env.WEB_IMAGE || "platform/web:local",
+    WORKER_NOTIFICATIONS_IMAGE: process.env.WORKER_NOTIFICATIONS_IMAGE || "platform/worker-notifications:local",
+    WORKER_JOBS_IMAGE: process.env.WORKER_JOBS_IMAGE || "platform/worker-jobs:local",
+  };
 }
 
 function parseCronTime(value, optionName) {
@@ -3758,7 +3769,7 @@ async function haConfigCheck() {
     "compose.ha.yaml",
     "config",
     "--quiet",
-  ]);
+  ], { env: localProductionImageEnv() });
   log("HA multi-node configuration check passed.");
 }
 
@@ -3808,7 +3819,7 @@ async function managedSecretsPreflight() {
     "compose.managed-secrets.yaml",
     "config",
     "--quiet",
-  ]);
+  ], { env: localProductionImageEnv() });
   log("Managed secrets / KMS preflight passed.");
 }
 
@@ -4315,7 +4326,7 @@ async function auditLogEvidence(options = {}) {
       category: "source",
       sourceFile: true,
       filePath: backendAudit,
-      pattern: /await client\.query\("begin"\)[\s\S]*insert into app_account\.audit_events[\s\S]*insert into app_account\.audit_outbox[\s\S]*await client\.query\("commit"\)[\s\S]*rollback/,
+      pattern: /await client\.query\("begin"\)[\s\S]*insert into (?:app_account|stexor_account)\.audit_events[\s\S]*insert into (?:app_account|stexor_account)\.audit_outbox[\s\S]*await client\.query\("commit"\)[\s\S]*rollback/,
       detail: "Backend writes audit_events and audit_outbox in one transaction with rollback.",
     });
     addAuditLogPatternCheck(checks, issues, {
@@ -4360,7 +4371,7 @@ async function auditLogEvidence(options = {}) {
       category: "source",
       sourceFile: true,
       filePath: workerAuditStore,
-      pattern: /for update skip locked[\s\S]*set status = 'dead'[\s\S]*from app_account\.audit_outbox/,
+      pattern: /for update skip locked[\s\S]*set status = 'dead'[\s\S]*from (?:app_account|stexor_account)\.audit_outbox/,
       detail: "Worker claims audit rows safely and moves exhausted delivery attempts to dead-letter.",
     });
     addAuditLogPatternCheck(checks, issues, {
@@ -5392,7 +5403,7 @@ async function drReadinessCheck() {
     "compose.dr.yaml",
     "config",
     "--quiet",
-  ]);
+  ], { env: localProductionImageEnv() });
   log("DR / PITR readiness check passed.");
 }
 
@@ -9522,7 +9533,7 @@ function staticSecurityInfraOnlyCheck() {
   assertMatch(backupSchedulerScript, /BACKUP_SCHEDULER_DRY_RUN/, "Backup scheduler must support CI dry-run mode.");
   assertMatch(opsScript, /async function staticSecurityCheck/, "Ops script must expose the full static security gate.");
   assertMatch(opsScript, /No supported project source found[\s\S]*staticSecurityInfraOnlyCheck\(\);[\s\S]*return;/, "Full static security must fall back to infra-only checks when no project is mounted.");
-  assertMatch(opsScript, /function hasSupportedProjectSource\(\)[\s\S]*package\.json[\s\S]*\.github/, "Ops runner must detect optional project source before running app-only gates.");
+  assertMatch(opsScript, /function hasSupportedProjectSource\(\)[\s\S]*package\.json[\s\S]*\.github[\s\S]*run-infra-ops\.mjs/, "Ops runner must detect complete optional project source before running app-only gates.");
   assertMatch(opsScript, /async function enterpriseTenCheck\(\)[\s\S]*await staticSecurityCheck\(\);[\s\S]*await controlCenterTests\(\);[\s\S]*await projectRouterTests\(\);[\s\S]*await testingHygiene\(\);/, "Enterprise gate must always test the infra Control Center and project router before optional app-only checks.");
   assertMatch(opsScript, /async function testingHygiene\(\)[\s\S]*requireSupportedProjectSource\("application testing hygiene"\)[\s\S]*return;/, "Testing hygiene must skip cleanly when the project source is not mounted.");
   assertMatch(opsScript, /async function performanceHygiene\(\)[\s\S]*requireSupportedProjectSource\("application performance hygiene"\)[\s\S]*return;/, "Performance hygiene must skip cleanly when the project source is not mounted.");
