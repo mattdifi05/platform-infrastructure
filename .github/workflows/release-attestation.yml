@@ -1,0 +1,293 @@
+name: release-attestation
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_name:
+        description: Release name shown in the signed release manifest
+        required: false
+        type: string
+      release_images_json:
+        description: Optional JSON map/list of already digest-pinned release image refs to include in the manifest
+        required: false
+        type: string
+  push:
+    tags:
+      - "v*"
+      - "release-*"
+
+permissions:
+  contents: read
+  id-token: write
+  attestations: write
+  packages: write
+
+concurrency:
+  group: release-attestation-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  github-sigstore-release-evidence:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      RELEASE_NAME: ${{ github.event.inputs.release_name || github.ref_name || github.sha }}
+      RELEASE_IMAGES_JSON: ${{ github.event.inputs.release_images_json || '{}' }}
+    steps:
+      - name: Checkout infrastructure
+        uses: actions/checkout@v7
+
+      - name: Prepare GHCR image names
+        run: |
+          owner="$(printf '%s' "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
+          echo "PHP_APACHE_IMAGE=ghcr.io/${owner}/platform-infrastructure-php-apache" >> "$GITHUB_ENV"
+
+      - name: Login to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Build and push infra PHP Apache image
+        id: php-apache
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: docker/php-apache.Dockerfile
+          push: true
+          sbom: true
+          tags: |
+            ${{ env.PHP_APACHE_IMAGE }}:${{ github.sha }}
+            ${{ env.PHP_APACHE_IMAGE }}:${{ github.ref_name }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.title=platform-infrastructure-php-apache
+
+      - name: Attest infra PHP Apache image provenance
+        id: attest-php-apache
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-name: ${{ env.PHP_APACHE_IMAGE }}
+          subject-digest: ${{ steps.php-apache.outputs.digest }}
+          push-to-registry: true
+
+      - name: Generate release subject manifest
+        env:
+          PHP_APACHE_DIGEST: ${{ steps.php-apache.outputs.digest }}
+          PHP_APACHE_ATTESTATION_URL: ${{ steps.attest-php-apache.outputs.attestation-url }}
+        run: |
+          mkdir -p .tmp/release-attestation reports/release
+          node <<'NODE'
+          const fs = require("node:fs");
+          const crypto = require("node:crypto");
+
+          function digestFromImageRef(value) {
+            const match = String(value || "").match(/@sha256:([a-f0-9]{64})$/i);
+            return match ? `sha256:${match[1].toLowerCase()}` : null;
+          }
+
+          const raw = process.env.RELEASE_IMAGES_JSON || "{}";
+          let configuredImages = {};
+          try {
+            configuredImages = raw.trim() ? JSON.parse(raw) : {};
+          } catch (error) {
+            console.error(`release_images_json is not valid JSON: ${error.message}`);
+            process.exit(1);
+          }
+
+          const configuredSubjects = [];
+          if (Array.isArray(configuredImages)) {
+            for (const entry of configuredImages) {
+              const image = typeof entry === "string" ? entry : entry.image;
+              const digest = digestFromImageRef(image) || entry.digest || entry.subjectDigest;
+              if (image && digest) {
+                configuredSubjects.push({ name: image.replace(/@sha256:[a-f0-9]{64}$/i, ""), digest });
+              }
+            }
+          } else {
+            for (const [key, image] of Object.entries(configuredImages)) {
+              const digest = digestFromImageRef(image);
+              if (digest) {
+                configuredSubjects.push({ key, image, name: image.replace(/@sha256:[a-f0-9]{64}$/i, ""), digest });
+              }
+            }
+          }
+
+          const phpApacheSubject = {
+            key: "PHP_APACHE_IMAGE",
+            name: process.env.PHP_APACHE_IMAGE,
+            digest: process.env.PHP_APACHE_DIGEST,
+            attestationUrl: process.env.PHP_APACHE_ATTESTATION_URL || null,
+          };
+          const subjects = [phpApacheSubject, ...configuredSubjects];
+          const manifest = {
+            version: 1,
+            generatedAt: new Date().toISOString(),
+            releaseName: process.env.RELEASE_NAME || process.env.GITHUB_REF_NAME || process.env.GITHUB_SHA,
+            repository: process.env.GITHUB_REPOSITORY,
+            commitSha: process.env.GITHUB_SHA,
+            workflowRunId: process.env.GITHUB_RUN_ID,
+            workflowRunUrl: `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`,
+            subjects,
+          };
+          const manifestPath = ".tmp/release-attestation/release-subjects.json";
+          fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+          const sha256 = crypto.createHash("sha256").update(fs.readFileSync(manifestPath)).digest("hex");
+          fs.writeFileSync(".tmp/release-attestation/release-subjects.sha256", `${sha256}  release-subjects.json\n`, "utf8");
+          const sbom = {
+            bomFormat: "CycloneDX",
+            specVersion: "1.5",
+            serialNumber: `urn:uuid:${crypto.randomUUID()}`,
+            version: 1,
+            metadata: {
+              timestamp: manifest.generatedAt,
+              component: {
+                type: "application",
+                name: manifest.releaseName,
+                version: process.env.GITHUB_SHA,
+                purl: `pkg:github/${process.env.GITHUB_REPOSITORY}@${process.env.GITHUB_SHA}`,
+              },
+              properties: [
+                { name: "repository", value: process.env.GITHUB_REPOSITORY },
+                { name: "commitSha", value: process.env.GITHUB_SHA },
+                { name: "workflowRunId", value: process.env.GITHUB_RUN_ID },
+                { name: "sbom.source", value: "docker-buildx-sbom-attestation-and-release-subject-index" },
+              ],
+            },
+            components: subjects.map((subject) => ({
+              type: "container",
+              name: subject.name,
+              version: subject.digest,
+              hashes: [{ alg: "SHA-256", content: String(subject.digest).replace(/^sha256:/, "") }],
+              purl: `pkg:oci/${subject.name}@${subject.digest}`,
+              properties: [
+                { name: "releaseSubjectKey", value: subject.key || subject.name },
+                { name: "attestationUrl", value: subject.attestationUrl || "" },
+              ],
+            })),
+          };
+          fs.writeFileSync(`reports/release/github-release-sbom-${process.env.GITHUB_RUN_ID}.cdx.json`, `${JSON.stringify(sbom, null, 2)}\n`, "utf8");
+          fs.appendFileSync(process.env.GITHUB_ENV, `RELEASE_SUBJECTS_SHA256=${sha256}\n`);
+          NODE
+
+      - name: Attest release subject manifest provenance
+        id: attest-release-manifest
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: .tmp/release-attestation/release-subjects.json
+
+      - name: Verify GHCR image attestation
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PHP_APACHE_DIGEST: ${{ steps.php-apache.outputs.digest }}
+        run: |
+          gh attestation verify "oci://${PHP_APACHE_IMAGE}@${PHP_APACHE_DIGEST}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --format json > .tmp/release-attestation/php-apache-gh-verify.raw.json
+
+      - name: Verify release manifest attestation
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh attestation verify .tmp/release-attestation/release-subjects.json \
+            --repo "${GITHUB_REPOSITORY}" \
+            --format json > .tmp/release-attestation/release-manifest-gh-verify.raw.json
+
+      - name: Normalize verified attestation evidence
+        env:
+          PHP_APACHE_DIGEST: ${{ steps.php-apache.outputs.digest }}
+        run: |
+          node <<'NODE'
+          const fs = require("node:fs");
+
+          function countResults(file) {
+            const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
+            return Array.isArray(parsed) ? parsed.length : 1;
+          }
+
+          const releaseManifest = JSON.parse(fs.readFileSync(".tmp/release-attestation/release-subjects.json", "utf8"));
+          const releaseManifestSubjects = Array.isArray(releaseManifest.subjects)
+            ? releaseManifest.subjects.map((subject) => ({
+              name: subject.name,
+              digest: subject.digest,
+              key: subject.key || subject.name,
+              source: "signed-release-subject-manifest",
+            }))
+            : [];
+          const runUrl = `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`;
+          const common = {
+            version: 1,
+            provider: "github-artifact-attestations",
+            verified: true,
+            repository: process.env.GITHUB_REPOSITORY,
+            commitSha: process.env.GITHUB_SHA,
+            workflowRunId: process.env.GITHUB_RUN_ID,
+            workflowRunUrl: runUrl,
+            verifiedAt: new Date().toISOString(),
+          };
+          const imageReport = {
+            ...common,
+            subjectName: process.env.PHP_APACHE_IMAGE,
+            subjectDigest: process.env.PHP_APACHE_DIGEST,
+            subjects: [{ name: process.env.PHP_APACHE_IMAGE, digest: process.env.PHP_APACHE_DIGEST }],
+            verification: {
+              command: "gh attestation verify oci://<image>@<digest> --repo <repo> --format json",
+              rawPath: "php-apache-gh-verify.raw.json",
+              resultCount: countResults(".tmp/release-attestation/php-apache-gh-verify.raw.json"),
+            },
+          };
+          const manifestReport = {
+            ...common,
+            subjectName: "release-subjects.json",
+            subjectDigest: `sha256:${process.env.RELEASE_SUBJECTS_SHA256}`,
+            subjects: [
+              { name: "release-subjects.json", digest: `sha256:${process.env.RELEASE_SUBJECTS_SHA256}` },
+              ...releaseManifestSubjects,
+            ],
+            signedManifest: {
+              path: "release-subjects.json",
+              sha256: process.env.RELEASE_SUBJECTS_SHA256,
+              subjectCount: releaseManifestSubjects.length,
+            },
+            verification: {
+              command: "gh attestation verify release-subjects.json --repo <repo> --format json",
+              rawPath: "release-manifest-gh-verify.raw.json",
+              resultCount: countResults(".tmp/release-attestation/release-manifest-gh-verify.raw.json"),
+            },
+          };
+          fs.writeFileSync(".tmp/release-attestation/php-apache-gh-verify.json", `${JSON.stringify(imageReport, null, 2)}\n`, "utf8");
+          fs.writeFileSync(".tmp/release-attestation/release-manifest-gh-verify.json", `${JSON.stringify(manifestReport, null, 2)}\n`, "utf8");
+          NODE
+
+      - name: Write non-sensitive attestation evidence reports
+        env:
+          PHP_APACHE_DIGEST: ${{ steps.php-apache.outputs.digest }}
+        run: |
+          sh ./scripts/github-attestation-evidence.sh \
+            --verification .tmp/release-attestation/php-apache-gh-verify.json \
+            --expectedSubjectName "${PHP_APACHE_IMAGE}" \
+            --expectedSubjectDigest "${PHP_APACHE_DIGEST}" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --releaseSha "${GITHUB_SHA}"
+          sh ./scripts/github-attestation-evidence.sh \
+            --verification .tmp/release-attestation/release-manifest-gh-verify.json \
+            --expectedSubjectName release-subjects.json \
+            --expectedSubjectDigest "sha256:${RELEASE_SUBJECTS_SHA256}" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --releaseSha "${GITHUB_SHA}"
+
+      - name: Upload GitHub Sigstore release evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: github-sigstore-release-evidence
+          path: |
+            reports/release/github-sigstore-attestation-*.json
+            reports/release/github-sigstore-attestation-*.md
+            reports/release/github-release-sbom-*.cdx.json
+            .tmp/release-attestation/release-subjects.json
+            .tmp/release-attestation/release-subjects.sha256
+            .tmp/release-attestation/*-gh-verify.json
+          retention-days: 30

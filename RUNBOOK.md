@@ -60,7 +60,7 @@ Expected blocks:
 
 ```sh
 curl -k -o /dev/null -s -w "%{http_code}\n" "https://api.localhost.com/health?x=<script>alert(1)</script>"
-curl -k -o /dev/null -s -w "%{http_code}\n" "https://projects.localhost.com/.env"
+curl -k -o /dev/null -s -w "%{http_code}\n" "https://admin.localhost.com/.env"
 ```
 
 Both should return `403`. If a real workflow is blocked, keep `WAF_BLOCKING_PARANOIA=2`, inspect the JSON audit event in `enterprise-waf`, then add the smallest possible exclusion to `waf/RESPONSE-999-EXCLUSION-RULES-AFTER-CRS.conf` or `waf/REQUEST-900-EXCLUSION-RULES-BEFORE-CRS.conf`. Raise to PL3/PL4 only after the audit log is clean for the affected apps.
@@ -277,7 +277,7 @@ DEPLOY_API_BASE=http://api.192.168.1.164.sslip.io \
 DEPLOY_UI_BASE=http://app.192.168.1.164.sslip.io \
 DEPLOY_ACCOUNT_BASE=http://account.192.168.1.164.sslip.io \
 DEPLOY_ACCOUNT_ORIGIN=https://account.192.168.1.164.sslip.io \
-DEPLOY_PROJECTS_BASE=http://projects.192.168.1.164.sslip.io \
+DEPLOY_ADMIN_BASE=http://admin.192.168.1.164.sslip.io \
 DEPLOY_GRAFANA_BASE=http://grafana.192.168.1.164.sslip.io/login \
 DEPLOY_GRAFANA_BLOCKED=1 \
 DEPLOY_ADMIN_SCHEME=http \
@@ -313,8 +313,8 @@ sh ./scripts/secret-rotation-evidence.sh --enforce
 
 `secret-rotation-evidence.sh --enforce` validates the encrypted store, materialized Docker secret files, audit log, Platform Local KMS age and every secret `rotationDays` window without printing secret values. Archive `reports/secret-rotation/secret-rotation-evidence-*.json` outside Git before production go/no-go.
 
-`projects.localhost.com` is the Node-based Stexor Control Center served by the `control-center` container. It stays separate from PHP Apache, is declared as the local Node project `@stexor/control-center`, and uses a local Control Center visual system: components are declared in `control-center/components/ui/controlCenterUi.mjs`, `--cc-*` tokens and the premium dashboard skin live in `control-center/styles/control-center.css`, the stylesheet is served from `/assets/control-center/control-center.css`, and `/control/ui-package` exposes that local contract. The vendored `control-center/vendor/@stexor/ui` package stays in the repository for compatibility with the rest of the platform, but Control Center does not declare it as a dependency and does not load visual assets from it. Control Center reads project inventory from `PHP_PROJECTS_DIR`, exposes read-only Advanced Network topology from `/control/network` by parsing Compose and Traefik dynamic config, exposes read-only Advanced Monitoring topology from `/control/monitoring` by parsing Prometheus, Grafana, Loki and Alertmanager config without live queries, stores local project create metadata, enable/disable, metadata update, archive and soft-delete state in `projects-portal/state/projects.json`, stores declarative application metadata in `projects-portal/state/applications.json`, stores declarative domain metadata in `projects-portal/state/domains.json`, stores declarative database metadata in `projects-portal/state/databases.json`, stores declarative storage bucket metadata in `projects-portal/state/storage-buckets.json`, stores metadata-only sensitive material inventory in `projects-portal/state/sensitive-materials.json`, stores worker/queue/job/scheduler metadata in `projects-portal/state/worker-jobs.json`, stores admin users/teams/roles/session policy/access review metadata in `projects-portal/state/identity-access.json`, stores declarative web spaces and quota metadata in `projects-portal/state/webspaces.json`, stores per-project resource limits in `projects-portal/state/resource-limits.json`, stores local security policy metadata in `projects-portal/state/security-policies.json`, stores local alert metadata in `projects-portal/state/alerts.json`, stores notification-channel metadata in `projects-portal/state/notification-channels.json`, stores provider connection metadata in `projects-portal/state/provider-connections.json`, stores local settings preferences in `projects-portal/state/settings.json`, appends sanitized local audit events to `projects-portal/state/audit.jsonl`, persists Operation/OperationStep records in `projects-portal/state/operations.jsonl`, stores deploy/rollback plans in `projects-portal/state/deployments.jsonl`, and stores backup/restore drill plans in `projects-portal/state/backups.jsonl`. `PHP_SOURCE_DIR` points at `php-runtime-root`, a neutral static Apache root; PHP Apache is only the runtime for PHP projects and does not own the Control Center UI or API. Production/provider operations are plan-only from this foundation unless an explicit adapter and confirmation gate are added. For staging/VPS set `CONTROL_CENTER_AUTH_REQUIRED=true` and set `CONTROL_CENTER_ADMIN_PASSWORD_SHA256` to the SHA-256 hash of the admin password; the session cookie is signed with the existing `projects_gateway_signing_keys` Docker secret and login success/failure is audited without storing passwords.
-`project-router` is the shared local project entrypoint for PHP and Node project hosts. Traefik names that route/service `local-projects` so the Control Center cannot be confused with a PHP portal: `PROJECTS_HOST` is forwarded to the Node Control Center, while PHP projects proxy to Apache only after a project host is selected. Node projects either proxy to `NODE_PROJECT_UPSTREAMS` or run a managed local Node command inside the router container; disabling a managed Node project through Control Center state stops that process, and `project-router-tests` verifies PHP and Node can be served together before CI accepts the infrastructure.
+`admin.localhost.com` is the Node-based Admin Control Center served by the `control-center` container. It stays separate from PHP Apache, is declared as the local Node project `@platform/control-center`, and uses a local Control Center visual system: components are declared in `control-center/components/ui/controlCenterUi.mjs`, `--cc-*` tokens live in `control-center/styles/control-center.css`, the stylesheet is served from `/assets/control-center/control-center.css`, and `/control/ui-package` exposes that local contract. Control Center reads project inventory from `PHP_PROJECTS_DIR`, exposes read-only Advanced Network topology from `/control/network`, exposes read-only Advanced Monitoring topology from `/control/monitoring`, and stores local metadata/audit state in `projects-portal/state/`. `PHP_SOURCE_DIR` points at `php-runtime-root`, a neutral static Apache root; PHP Apache is only the runtime for PHP projects and does not own the Control Center UI or API. Production/provider operations are plan-only from this foundation unless an explicit adapter and confirmation gate are added. For staging/VPS set `CONTROL_CENTER_AUTH_REQUIRED=true` and set `CONTROL_CENTER_ADMIN_PASSWORD_SHA256` to the SHA-256 hash of the admin password; the session cookie is signed with the existing `projects_gateway_signing_keys` Docker secret and login success/failure is audited without storing passwords.
+`project-router` is the shared local project entrypoint for PHP and Node project hosts. Traefik names that route/service `local-projects` so the Control Center cannot be confused with a PHP portal: `CONTROL_CENTER_HOST` is forwarded to the Node Control Center, `PROJECTS_HOST` is only a deprecated compatibility alias, and PHP projects proxy to Apache only after a project host is selected. Node projects either proxy to `NODE_PROJECT_UPSTREAMS` or run a managed local Node command inside the router container; disabling a managed Node project through Control Center state stops that process, and `project-router-tests` verifies PHP and Node can be served together before CI accepts the infrastructure.
 Advanced Mode exposes the requested enterprise skeleton areas, including Workers & Jobs, CI/CD & GitHub Governance, Logs/Alerts Advanced, Disaster Recovery, Release Evidence, Security Advanced and Billing / Plans. These surfaces remain plan/evidence-only until an explicit adapter performs apply plus verifyRemote.
 The read-only Advanced API is available at `/control/advanced` and `/control/advanced/:section`; it exposes capabilities, guardrails and evidence metadata without live provider calls, Docker mutations or production evidence claims. `/control/readiness` reads the read-only governance manifests, exposes a sanitized repository/live-proof readiness matrix and keeps production evidence false until real VPS/provider proof is verified.
 The backend adapter registry is available at `/control/adapters` and `/control/adapters/:id`; it covers Cloudflare, Traefik, Docker, GitHub, Prometheus, Loki, Alertmanager, Backup, Restore, MinIO, Database, Security and Go/No-Go. `/control/adapters/:id/plan` and `/verify` create audited plans, while `/apply` is rejected until an explicit live backend implementation, strong confirmation and verifyRemote are added.
@@ -531,16 +531,24 @@ attestation, rollback target and the output of:
 
 ```sh
 sh ./scripts/infra-ops.sh release-artifact-gate --requireProvenance
-sh ./scripts/release-evidence.sh --requireProvenance --provenance ./release/provenance.json --previousImagesFile ./release/previous-images.json
+gh workflow run release-attestation.yml --repo OWNER/REPO --ref main
+sh ./scripts/release-evidence.sh --requireProvenance --imageManifest .tmp/release-attestation/release-subjects.json --sbom reports/release/github-release-sbom-<run-id>.cdx.json --githubAttestation reports/release/github-sigstore-attestation-<stamp>.json --previousImagesFile ./release/previous-images.json
 sh ./scripts/infra-ops.sh governance-check
 sh ./scripts/infra-ops.sh enterprise-10-check
 ```
 
-The provenance artifact must be an in-toto statement, DSSE envelope or bundle
-using SLSA v1 `predicateType`, must include `predicate.buildDefinition.buildType`,
-must bind every release image digest as a subject, and must reference the release
-commit. Use `--skipProvenanceCommitCheck` only for a documented provider-format
-exception reviewed before approval.
+The local provenance artifact may be an in-toto statement, DSSE envelope or
+bundle using SLSA v1 `predicateType`, but it is classified as partial evidence.
+Complete release provenance requires GitHub Artifact Attestations/Sigstore
+verification reports generated from successful `gh attestation verify` runs.
+Those reports must include `verified=true`, repository, workflow run id, release
+commit SHA, subject name and subject digest, and the union of subjects must bind
+every release image digest. `release-attestation.yml` publishes a digest-pinned
+GHCR infra image, enables Docker BuildKit SBOM attestation, signs the release
+subject manifest and uploads the non-sensitive `reports/release/` evidence
+artifact. Use `release_images_json` only for images that are already immutable
+`@sha256` refs. Use `--skipProvenanceCommitCheck` only for a documented
+provider-format exception reviewed before approval.
 
 Before the first production deploy, apply the branch protection policy from
 `governance/github-branch-protection.json` to the live GitHub repository. The
@@ -692,12 +700,16 @@ checks every entry's size and SHA256, confirms the anti-secret policy and, with
    sh ./scripts/sign-images.sh
    ```
 
-8. Generate the release evidence pack and rollback target:
+8. Generate GitHub/Sigstore release attestation evidence, then the release
+   evidence pack and rollback target:
 
    ```sh
+   gh workflow run release-attestation.yml --repo mattdifi05/platform-infrastructure --ref main
+   gh run watch --repo mattdifi05/platform-infrastructure
+   gh run download --repo mattdifi05/platform-infrastructure --name github-sigstore-release-evidence --dir .tmp/github-sigstore-release-evidence
    sh ./scripts/release-evidence.sh \
      --requireProvenance \
-     --provenance ./release/provenance.json \
+     --githubAttestation reports/release/github-sigstore-attestation-<stamp>.json \
      --previousImagesFile ./release/previous-images.json
    ```
 
@@ -707,7 +719,8 @@ checks every entry's size and SHA256, confirms the anti-secret policy and, with
      rollback dry-run, validates the rollback compose configuration and links the
      generated `reports/rollback/rollback-plan-*.json` in the release evidence.
      Failed validation still writes a diagnostic release report with `status=failed`
-     and `issues`, but production go/no-go accepts only `status=passed`.
+     and `issues`, but production go/no-go accepts only `status=passed` with a
+     complete `github-signed-attestation`.
      For an initial deployment with no previous images, pass `--firstDeploy` and
      record that exception in the approval.
 
@@ -801,7 +814,7 @@ Use this path when TLS and public certificates are terminated by VPS, Cloudflare
    approved_by=<reviewer>
    images=<digest-pinned image refs>
    sbom=<archived sbom artifact>
-   provenance=<attestation artifact>
+   provenance=<github-sigstore-attestation report paths>
    rollback_target=<previous image refs>
    deployed_at=<utc timestamp>
    ```
@@ -813,10 +826,8 @@ Use this path when TLS and public certificates are terminated by VPS, Cloudflare
 
    ```json
    {
-     "BACKEND_IMAGE": "registry.example.com/platform/backend@sha256:...",
-     "WEB_IMAGE": "registry.example.com/platform/web@sha256:...",
-     "WORKER_NOTIFICATIONS_IMAGE": "registry.example.com/platform/worker-notifications@sha256:...",
-     "WORKER_JOBS_IMAGE": "registry.example.com/platform/worker-jobs@sha256:..."
+     "APP_IMAGE": "registry.example.com/client-portal/app@sha256:...",
+     "WORKER_IMAGE": "registry.example.com/client-portal/worker@sha256:..."
    }
    ```
 

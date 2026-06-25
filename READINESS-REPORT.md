@@ -6,7 +6,7 @@ Current scope: repository and local Docker evidence before VPS deployment.
 
 | Area | Score | Evidence |
 | --- | ---: | --- |
-| Development | 9/10 | Local stack, projects gateway, secret manager, WAF and health gates are operational. |
+| Development | 9/10 | Local stack, admin gateway, secret manager, WAF and health gates are operational. |
 | Staging | 8/10 | Staging overlays and gates exist; a real staging host/domain still has to be exercised. |
 | Production | 7.5/10 | Production/VPS overlays, preflight, rollback and release evidence tooling exist; real VPS deploy remains required. |
 | Security | 8.5/10 | Secrets, WAF, rate limits, CSP, audit, passkeys, smoke tests and hardening scripts are in place. |

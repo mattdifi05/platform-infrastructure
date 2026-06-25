@@ -36,7 +36,7 @@ const providerConnectionsFile = path.join(stateDir, "provider-connections.json")
 const settingsFile = path.join(stateDir, "settings.json");
 const webspacesFile = path.join(stateDir, "webspaces.json");
 
-test("Stexor Control Center local foundation", async (t) => {
+test("Admin Control Center local foundation", async (t) => {
   prepareFixture();
   const port = await freePort();
   const child = spawn(process.execPath, [path.join(infraRoot, "control-center", "server.mjs")], {
@@ -66,9 +66,9 @@ test("Stexor Control Center local foundation", async (t) => {
       PROJECT_PROVIDER_CONNECTIONS_FILE: providerConnectionsFile,
       PROJECT_SETTINGS_FILE: settingsFile,
       PROJECT_WEBSPACES_FILE: webspacesFile,
-      PROJECTS_HOST: "projects.localhost.com",
+      CONTROL_CENTER_HOST: "admin.localhost.com",
       PROJECT_HOST_SUFFIX: ".localhost.com",
-      NODE_PROJECT_HOSTS: "stexor=stexor.localhost.com",
+      NODE_PROJECT_HOSTS: "node-demo=node-demo.localhost.com",
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -88,11 +88,11 @@ test("Stexor Control Center local foundation", async (t) => {
   assert.equal(health.service, "control-center");
 
   const html = await getText(`${baseUrl}/`);
-  assert.match(html, /Stexor Control Center/);
+  assert.match(html, /Admin Control Center/);
   assert.match(html, /Simple/);
   assert.match(html, /Advanced/);
-  assert.match(html, /Anniversary/);
-  assert.match(html, /Stexor/);
+  assert.match(html, /Php Demo/);
+  assert.match(html, /Node Demo/);
   assert.match(html, /\/assets\/control-center\/control-center\.css/);
   assert.match(html, /\/assets\/control-center\/control-center\.js/);
   assert.match(html, /cc-app-shell/);
@@ -110,9 +110,9 @@ test("Stexor Control Center local foundation", async (t) => {
   assert.match(html, /data-cc-theme="light"/);
   assert.doesNotMatch(html, /data-cc-theme="dark"/);
   assert.doesNotMatch(html, /onchange=/);
-  assert.equal(html.includes(["/assets", "stexor", "ui"].join("/") + "/"), false);
+  assert.equal(html.includes(["/assets", "node-demo", "ui"].join("/") + "/"), false);
   assert.doesNotMatch(html, new RegExp(`${["ui", "shell"].join("-")}|${["pill", "sidebar", "nav"].join("-")}|${["pill", "tabs"].join("-")}`));
-  assert.match(html, /stexor-wordmark/);
+  assert.match(html, /platform-wordmark/);
   assert.match(html, /hosting-dashboard/);
   assert.match(html, /Pannello infrastruttura/);
   assert.match(html, /Gestisci la tua piattaforma da un solo posto/);
@@ -155,12 +155,12 @@ test("Stexor Control Center local foundation", async (t) => {
   assert.match(localClient, /addEventListener\("popstate"/);
   assert.match(localClient, /htmlCache/);
   assert.match(localClient, /ccBootId/);
-  assert.match(localClient, /stexor-control-center-sidebar/);
+  assert.match(localClient, /platform-control-center-sidebar/);
   assert.match(localClient, /toggleSidebarGroup/);
   assert.doesNotMatch(localClient, /window\.location\.reload/);
   const localUiPackage = await getJson(`${baseUrl}/control/ui-package`);
-  assert.equal(localUiPackage.name, "@stexor/control-center-local-ui");
-  assert.equal(localUiPackage.controlCenterProject, "@stexor/control-center");
+  assert.equal(localUiPackage.name, "@platform/control-center-local-ui");
+  assert.equal(localUiPackage.controlCenterProject, "@platform/control-center");
   assert.equal(localUiPackage.controlCenterPackageLoaded, true);
   assert.equal(localUiPackage.declaredDependency, "none");
   assert.equal(localUiPackage.packageMountedInControlCenterProject, true);
@@ -205,7 +205,7 @@ test("Stexor Control Center local foundation", async (t) => {
   assert.equal(networkApi.networkProbeExecuted, false);
   assert.equal(networkApi.productionEvidence, false);
   assert.equal(networkApi.routers.some((router) => router.id === "enterprise-backend" && router.tls === true && router.middlewares.includes("enterprise-rate-limit@file")), true);
-  assert.equal(networkApi.routers.some((router) => router.id === "local-projects" && router.sampleHost === "projects.localhost.com"), true);
+  assert.equal(networkApi.routers.some((router) => router.id === "local-projects" && router.sampleHost === "admin.localhost.com"), true);
   assert.equal(networkApi.middlewares.some((middleware) => middleware.id === "enterprise-rate-limit" && middleware.type === "rateLimit" && /average 120/.test(middleware.summary)), true);
   assert.equal(networkApi.exposedPorts.some((port) => port.hostPort === "80" && port.containerPort === "80" && port.loopbackOnly === true && port.publicExposure === false), true);
   assert.equal(networkApi.exposedPorts.some((port) => port.hostPort === "443" && port.containerPort === "443" && port.loopbackOnly === true && port.publicExposure === false), true);
@@ -320,7 +320,7 @@ test("Stexor Control Center local foundation", async (t) => {
   assert.match(applicationsHtml, /Rollback/);
 
   const overview = await getJson(`${baseUrl}/control/overview`);
-  assert.equal(overview.title, "Stexor Control Center");
+  assert.equal(overview.title, "Admin Control Center");
   assert.equal(overview.environment, "local");
   assert.equal(overview.modeEvidence, "local evidence only");
   assert.equal(overview.projects.total, 2);
@@ -362,7 +362,7 @@ test("Stexor Control Center local foundation", async (t) => {
   assert.equal(advancedReleaseApi.productionEvidence, false);
 
   const readiness = await getJson(`${baseUrl}/control/readiness`);
-  assert.equal(readiness.title, "Stexor Control Center Readiness Matrix");
+  assert.equal(readiness.title, "Admin Control Center Readiness Matrix");
   assert.equal(readiness.dryRunDefault, true);
   assert.equal(readiness.providerTouched, false);
   assert.equal(readiness.liveProviderTouched, false);
@@ -441,12 +441,12 @@ test("Stexor Control Center local foundation", async (t) => {
 
   const projects = await getJson(`${baseUrl}/control/projects`);
   assert.deepEqual(projects.projects.map((project) => [project.slug, project.type]), [
-    ["anniversary", "PHP"],
-    ["stexor", "Node"],
+    ["php-demo", "PHP"],
+    ["node-demo", "Node"],
   ]);
 
   const duplicateProject = await postJson(`${baseUrl}/control/projects`, {
-    slug: "stexor",
+    slug: "node-demo",
   });
   assert.equal(duplicateProject.status, 422);
   assert.match(duplicateProject.body.message, /already exists/);
@@ -512,11 +512,11 @@ test("Stexor Control Center local foundation", async (t) => {
   assert.match(projectsHtmlAfterCreate, /Routing waits for mounted source files/);
 
   const applicationPlan = await postJson(`${baseUrl}/control/applications`, {
-    projectId: "stexor",
+    projectId: "node-demo",
     name: "events-worker",
     runtime: "worker",
-    webspaceId: "stexor",
-    repositoryUrl: "https://github.com/mattdifi05/events-worker",
+    webspaceId: "node-demo",
+    repositoryUrl: "https://github.com/example/events-worker",
     secret: "application-secret-should-not-leak",
   });
   assert.equal(applicationPlan.status, 202);
@@ -529,47 +529,47 @@ test("Stexor Control Center local foundation", async (t) => {
   assert.doesNotMatch(JSON.stringify(applicationPlan.body), /application-secret-should-not-leak/);
 
   const applicationApply = await postJson(`${baseUrl}/control/applications`, {
-    projectId: "stexor",
+    projectId: "node-demo",
     name: "events-worker",
     runtime: "worker",
-    webspaceId: "stexor",
-    repositoryUrl: "https://github.com/mattdifi05/events-worker",
+    webspaceId: "node-demo",
+    repositoryUrl: "https://github.com/example/events-worker",
     confirm: "CREATE-APPLICATION",
     secret: "application-secret-should-not-leak",
   });
   assert.equal(applicationApply.status, 202);
   assert.equal(applicationApply.body.type, "application.create.local");
   assert.equal(applicationApply.body.dryRun, false);
-  assert.equal(applicationApply.body.application.id, "stexor-events-worker");
+  assert.equal(applicationApply.body.application.id, "node-demo-events-worker");
   assert.equal(applicationApply.body.application.runtime, "worker");
-  assert.equal(applicationApply.body.application.webspaceId, "stexor");
+  assert.equal(applicationApply.body.application.webspaceId, "node-demo");
   assert.equal(applicationApply.body.application.filesystemTouched, false);
   assert.equal(applicationApply.body.application.dockerTouched, false);
 
   const applications = await getJson(`${baseUrl}/control/applications`);
-  const workerApp = applications.applications.find((app) => app.id === "stexor-events-worker");
+  const workerApp = applications.applications.find((app) => app.id === "node-demo-events-worker");
   assert.equal(workerApp.runtime, "worker");
   assert.equal(workerApp.status, "declared");
   assert.equal(workerApp.source, "control-center-state");
   assert.equal(existsSync(applicationsFile), true);
   const applicationsText = readFileSync(applicationsFile, "utf8");
   assert.doesNotMatch(applicationsText, /application-secret-should-not-leak/);
-  assert.equal(JSON.parse(applicationsText)["stexor-events-worker"].runtime, "worker");
+  assert.equal(JSON.parse(applicationsText)["node-demo-events-worker"].runtime, "worker");
 
-  const startPlan = await postJson(`${baseUrl}/control/applications/stexor-events-worker/start`, {
+  const startPlan = await postJson(`${baseUrl}/control/applications/node-demo-events-worker/start`, {
     secret: "lifecycle-secret-should-not-leak",
   });
   assert.equal(startPlan.status, 202);
   assert.equal(startPlan.body.type, "application.start");
   assert.equal(startPlan.body.dryRun, true);
-  assert.equal(startPlan.body.details.confirmationRequired, "START-APPLICATION:stexor-events-worker");
+  assert.equal(startPlan.body.details.confirmationRequired, "START-APPLICATION:node-demo-events-worker");
   assert.equal(startPlan.body.details.commandExecuted, false);
   assert.equal(startPlan.body.details.dockerTouched, false);
   assert.equal(startPlan.body.details.healthcheckNetworkTouched, false);
   assert.doesNotMatch(JSON.stringify(startPlan.body), /lifecycle-secret-should-not-leak/);
 
-  const startApply = await postJson(`${baseUrl}/control/applications/stexor-events-worker/start`, {
-    confirm: "START-APPLICATION:stexor-events-worker",
+  const startApply = await postJson(`${baseUrl}/control/applications/node-demo-events-worker/start`, {
+    confirm: "START-APPLICATION:node-demo-events-worker",
     secret: "lifecycle-secret-should-not-leak",
   });
   assert.equal(startApply.status, 202);
@@ -581,24 +581,24 @@ test("Stexor Control Center local foundation", async (t) => {
   assert.equal(startApply.body.details.commandExecuted, false);
   assert.doesNotMatch(JSON.stringify(startApply.body), /lifecycle-secret-should-not-leak/);
 
-  const healthApply = await postJson(`${baseUrl}/control/applications/stexor-events-worker/healthcheck`, {
-    confirm: "HEALTHCHECK-APPLICATION:stexor-events-worker",
+  const healthApply = await postJson(`${baseUrl}/control/applications/node-demo-events-worker/healthcheck`, {
+    confirm: "HEALTHCHECK-APPLICATION:node-demo-events-worker",
   });
   assert.equal(healthApply.status, 202);
   assert.equal(healthApply.body.type, "application.healthcheck.local");
   assert.equal(healthApply.body.application.healthStatus, "metadata-routable");
   assert.equal(healthApply.body.details.healthcheckNetworkTouched, false);
 
-  const stopApply = await postJson(`${baseUrl}/control/applications/stexor-events-worker/stop`, {
-    confirm: "STOP-APPLICATION:stexor-events-worker",
+  const stopApply = await postJson(`${baseUrl}/control/applications/node-demo-events-worker/stop`, {
+    confirm: "STOP-APPLICATION:node-demo-events-worker",
   });
   assert.equal(stopApply.status, 202);
   assert.equal(stopApply.body.type, "application.stop.local");
   assert.equal(stopApply.body.application.status, "offline");
   assert.equal(stopApply.body.application.healthStatus, "metadata-disabled");
 
-  const restartApply = await postJson(`${baseUrl}/control/applications/stexor-events-worker/restart`, {
-    confirm: "RESTART-APPLICATION:stexor-events-worker",
+  const restartApply = await postJson(`${baseUrl}/control/applications/node-demo-events-worker/restart`, {
+    confirm: "RESTART-APPLICATION:node-demo-events-worker",
   });
   assert.equal(restartApply.status, 202);
   assert.equal(restartApply.body.type, "application.restart.local");
@@ -607,10 +607,10 @@ test("Stexor Control Center local foundation", async (t) => {
   assert.equal(restartApply.body.details.commandExecuted, false);
 
   const applicationsAfterLifecycle = await getJson(`${baseUrl}/control/applications`);
-  const workerAppAfterLifecycle = applicationsAfterLifecycle.applications.find((app) => app.id === "stexor-events-worker");
+  const workerAppAfterLifecycle = applicationsAfterLifecycle.applications.find((app) => app.id === "node-demo-events-worker");
   assert.equal(workerAppAfterLifecycle.status, "online");
   assert.equal(workerAppAfterLifecycle.lifecycleMode, "local-metadata-only");
-  assert.equal(JSON.parse(readFileSync(applicationsFile, "utf8"))["stexor-events-worker"].lastLifecycleAction, "restart");
+  assert.equal(JSON.parse(readFileSync(applicationsFile, "utf8"))["node-demo-events-worker"].lastLifecycleAction, "restart");
   assert.doesNotMatch(readFileSync(applicationsFile, "utf8"), /lifecycle-secret-should-not-leak/);
 
   const applicationsHtmlAfterCreate = await getText(`${baseUrl}/?section=applications`);
@@ -622,19 +622,19 @@ test("Stexor Control Center local foundation", async (t) => {
 
   const workerInventoryInitial = await getJson(`${baseUrl}/control/workers-jobs`);
   assert.equal(workerInventoryInitial.workers.some((worker) => worker.id === "enterprise-worker-jobs"), true);
-  assert.equal(workerInventoryInitial.workers.some((worker) => worker.id === "stexor-events-worker"), true);
+  assert.equal(workerInventoryInitial.workers.some((worker) => worker.id === "node-demo-events-worker"), true);
   assert.equal(workerInventoryInitial.queues.some((queue) => queue.id === "audit-outbox"), true);
   assert.equal(workerInventoryInitial.schedules.some((schedule) => schedule.id === "backup-scheduler" && schedule.containerizedCron === true), true);
 
   const workerInvalid = await postJson(`${baseUrl}/control/workers-jobs/queues`, {
-    projectId: "stexor",
+    projectId: "node-demo",
     name: "../bad",
   });
   assert.equal(workerInvalid.status, 422);
   assert.match(workerInvalid.body.message, /Invalid queue/);
 
   const workerPlan = await postJson(`${baseUrl}/control/workers-jobs/workers`, {
-    projectId: "stexor",
+    projectId: "node-demo",
     name: "events-processor",
     service: "worker-events",
     status: "configured",
@@ -652,7 +652,7 @@ test("Stexor Control Center local foundation", async (t) => {
   assert.doesNotMatch(JSON.stringify(workerPlan.body), /worker-secret-should-not-leak/);
 
   const workerApply = await postJson(`${baseUrl}/control/workers-jobs/workers`, {
-    projectId: "stexor",
+    projectId: "node-demo",
     name: "events-processor",
     service: "worker-events",
     status: "configured",
@@ -664,12 +664,12 @@ test("Stexor Control Center local foundation", async (t) => {
   });
   assert.equal(workerApply.status, 202);
   assert.equal(workerApply.body.type, "worker.declare.local");
-  assert.equal(workerApply.body.worker.id, "stexor-events-processor");
+  assert.equal(workerApply.body.worker.id, "node-demo-events-processor");
   assert.equal(workerApply.body.worker.dockerTouched, false);
   assert.equal(workerApply.body.worker.commandExecuted, false);
 
   const queueApply = await postJson(`${baseUrl}/control/workers-jobs/queues`, {
-    projectId: "stexor",
+    projectId: "node-demo",
     name: "events",
     backend: "nats",
     status: "configured",
@@ -679,13 +679,13 @@ test("Stexor Control Center local foundation", async (t) => {
   });
   assert.equal(queueApply.status, 202);
   assert.equal(queueApply.body.type, "worker.queue.local");
-  assert.equal(queueApply.body.queue.id, "stexor-events");
+  assert.equal(queueApply.body.queue.id, "node-demo-events");
   assert.equal(queueApply.body.queue.brokerTouched, false);
 
   const jobApply = await postJson(`${baseUrl}/control/workers-jobs/jobs`, {
-    projectId: "stexor",
-    queueId: "stexor-events",
-    workerId: "stexor-events-processor",
+    projectId: "node-demo",
+    queueId: "node-demo-events",
+    workerId: "node-demo-events-processor",
     jobName: "sync-events",
     status: "failed",
     attempts: 2,
@@ -695,12 +695,12 @@ test("Stexor Control Center local foundation", async (t) => {
   });
   assert.equal(jobApply.status, 202);
   assert.equal(jobApply.body.type, "worker.job.record.local");
-  assert.equal(jobApply.body.job.id, "stexor-stexor-events-sync-events");
+  assert.equal(jobApply.body.job.id, "node-demo-node-demo-events-sync-events");
   assert.equal(jobApply.body.job.handlerExecuted, false);
   assert.equal(jobApply.body.job.dockerTouched, false);
   assert.doesNotMatch(JSON.stringify(jobApply.body), /worker-secret-should-not-leak/);
 
-  const retryApply = await postJson(`${baseUrl}/control/workers-jobs/jobs/stexor-stexor-events-sync-events/retry`, {
+  const retryApply = await postJson(`${baseUrl}/control/workers-jobs/jobs/node-demo-node-demo-events-sync-events/retry`, {
     retryAfterSeconds: 120,
     confirm: "PLAN-JOB-RETRY",
     secret: "worker-secret-should-not-leak",
@@ -712,9 +712,9 @@ test("Stexor Control Center local foundation", async (t) => {
   assert.equal(retryApply.body.details.brokerTouched, false);
 
   const badSchedule = await postJson(`${baseUrl}/control/workers-jobs/schedules`, {
-    projectId: "stexor",
-    workerId: "stexor-events-processor",
-    queueId: "stexor-events",
+    projectId: "node-demo",
+    workerId: "node-demo-events-processor",
+    queueId: "node-demo-events",
     name: "bad schedule",
     cronExpression: "* * *",
   });
@@ -722,9 +722,9 @@ test("Stexor Control Center local foundation", async (t) => {
   assert.match(badSchedule.body.message, /Cron expression/);
 
   const scheduleApply = await postJson(`${baseUrl}/control/workers-jobs/schedules`, {
-    projectId: "stexor",
-    workerId: "stexor-events-processor",
-    queueId: "stexor-events",
+    projectId: "node-demo",
+    workerId: "node-demo-events-processor",
+    queueId: "node-demo-events",
     name: "nightly-events-sync",
     cronExpression: "15 3 * * *",
     status: "enabled",
@@ -732,12 +732,12 @@ test("Stexor Control Center local foundation", async (t) => {
   });
   assert.equal(scheduleApply.status, 202);
   assert.equal(scheduleApply.body.type, "worker.schedule.local");
-  assert.equal(scheduleApply.body.schedule.id, "stexor-nightly-events-sync");
+  assert.equal(scheduleApply.body.schedule.id, "node-demo-nightly-events-sync");
   assert.equal(scheduleApply.body.schedule.containerizedCron, true);
   assert.equal(scheduleApply.body.schedule.dockerTouched, false);
   assert.equal(scheduleApply.body.schedule.crontabTouched, false);
 
-  const schedulePause = await postJson(`${baseUrl}/control/workers-jobs/schedules/stexor-nightly-events-sync/status`, {
+  const schedulePause = await postJson(`${baseUrl}/control/workers-jobs/schedules/node-demo-nightly-events-sync/status`, {
     status: "paused",
     confirm: "UPDATE-SCHEDULE",
   });
@@ -747,19 +747,19 @@ test("Stexor Control Center local foundation", async (t) => {
   assert.equal(schedulePause.body.details.crontabTouched, false);
 
   const workerInventory = await getJson(`${baseUrl}/control/workers-jobs`);
-  assert.equal(workerInventory.workers.some((worker) => worker.id === "stexor-events-processor" && worker.commandExecuted === false), true);
-  assert.equal(workerInventory.queues.some((queue) => queue.id === "stexor-events" && queue.brokerTouched === false), true);
-  assert.equal(workerInventory.jobs.some((job) => job.id === "stexor-stexor-events-sync-events" && job.status === "retry-planned"), true);
-  assert.equal(workerInventory.schedules.some((schedule) => schedule.id === "stexor-nightly-events-sync" && schedule.status === "paused"), true);
+  assert.equal(workerInventory.workers.some((worker) => worker.id === "node-demo-events-processor" && worker.commandExecuted === false), true);
+  assert.equal(workerInventory.queues.some((queue) => queue.id === "node-demo-events" && queue.brokerTouched === false), true);
+  assert.equal(workerInventory.jobs.some((job) => job.id === "node-demo-node-demo-events-sync-events" && job.status === "retry-planned"), true);
+  assert.equal(workerInventory.schedules.some((schedule) => schedule.id === "node-demo-nightly-events-sync" && schedule.status === "paused"), true);
   assert.equal(existsSync(workerJobsFile), true);
   const workerJobsText = readFileSync(workerJobsFile, "utf8");
   assert.doesNotMatch(workerJobsText, /worker-secret-should-not-leak/);
-  assert.equal(JSON.parse(workerJobsText).workers["stexor-events-processor"].service, "worker-events");
+  assert.equal(JSON.parse(workerJobsText).workers["node-demo-events-processor"].service, "worker-events");
 
   const advancedWorkersAfterApply = await getJson(`${baseUrl}/control/advanced/workers-jobs`);
-  assert.equal(advancedWorkersAfterApply.data.queues.some((queue) => queue.id === "stexor-events"), true);
-  assert.equal(advancedWorkersAfterApply.data.jobs.some((job) => job.id === "stexor-stexor-events-sync-events"), true);
-  assert.equal(advancedWorkersAfterApply.data.scheduler.some((schedule) => schedule.id === "stexor-nightly-events-sync"), true);
+  assert.equal(advancedWorkersAfterApply.data.queues.some((queue) => queue.id === "node-demo-events"), true);
+  assert.equal(advancedWorkersAfterApply.data.jobs.some((job) => job.id === "node-demo-node-demo-events-sync-events"), true);
+  assert.equal(advancedWorkersAfterApply.data.scheduler.some((schedule) => schedule.id === "node-demo-nightly-events-sync"), true);
   assert.equal(advancedWorkersAfterApply.productionEvidence, false);
 
   const workersHtmlAfterApply = await getText(`${baseUrl}/?mode=advanced&section=workers-jobs`);
@@ -770,34 +770,34 @@ test("Stexor Control Center local foundation", async (t) => {
 
   const projectsHtml = await getText(`${baseUrl}/?section=projects`);
   assert.match(projectsHtml, /ARCHIVE-PROJECT/);
-  assert.match(projectsHtml, /DELETE-PROJECT:anniversary/);
+  assert.match(projectsHtml, /DELETE-PROJECT:php-demo/);
 
-  const updatePlan = await postJson(`${baseUrl}/control/projects/stexor/update`, {
-    displayName: "Stexor Local",
+  const updatePlan = await postJson(`${baseUrl}/control/projects/node-demo/update`, {
+    displayName: "Node Demo Local",
   });
   assert.equal(updatePlan.status, 202);
   assert.equal(updatePlan.body.type, "project.update");
   assert.equal(updatePlan.body.dryRun, true);
 
-  const updateApply = await postJson(`${baseUrl}/control/projects/stexor/update`, {
-    displayName: "Stexor Local",
+  const updateApply = await postJson(`${baseUrl}/control/projects/node-demo/update`, {
+    displayName: "Node Demo Local",
     confirm: "UPDATE-PROJECT",
   });
   assert.equal(updateApply.status, 202);
   assert.equal(updateApply.body.type, "project.update.local");
   assert.equal(updateApply.body.dryRun, false);
 
-  const archivePlan = await postJson(`${baseUrl}/control/projects/anniversary/archive/plan`, {});
+  const archivePlan = await postJson(`${baseUrl}/control/projects/php-demo/archive/plan`, {});
   assert.equal(archivePlan.status, 202);
   assert.equal(archivePlan.body.type, "project.archive");
   assert.equal(archivePlan.body.details.confirmationRequired, "ARCHIVE-PROJECT");
 
-  const archiveRejected = await postJson(`${baseUrl}/control/projects/anniversary/archive/apply`, {
+  const archiveRejected = await postJson(`${baseUrl}/control/projects/php-demo/archive/apply`, {
     confirm: "wrong",
   });
   assert.equal(archiveRejected.status, 409);
 
-  const archiveApply = await postJson(`${baseUrl}/control/projects/anniversary/archive/apply`, {
+  const archiveApply = await postJson(`${baseUrl}/control/projects/php-demo/archive/apply`, {
     confirm: "ARCHIVE-PROJECT",
   });
   assert.equal(archiveApply.status, 202);
@@ -805,38 +805,38 @@ test("Stexor Control Center local foundation", async (t) => {
   assert.equal(archiveApply.body.details.filesystemTouched, false);
 
   const projectsAfterArchive = await getJson(`${baseUrl}/control/projects`);
-  const archivedProject = projectsAfterArchive.projects.find((project) => project.slug === "anniversary");
+  const archivedProject = projectsAfterArchive.projects.find((project) => project.slug === "php-demo");
   assert.equal(archivedProject.status, "archived");
   assert.equal(archivedProject.enabled, false);
   const overviewAfterArchive = await getJson(`${baseUrl}/control/overview`);
   assert.equal(overviewAfterArchive.projects.archived, 1);
 
-  const deletePlan = await postJson(`${baseUrl}/control/projects/anniversary/delete/plan`, {});
+  const deletePlan = await postJson(`${baseUrl}/control/projects/php-demo/delete/plan`, {});
   assert.equal(deletePlan.status, 202);
   assert.equal(deletePlan.body.type, "project.delete");
-  assert.equal(deletePlan.body.details.confirmationRequired, "DELETE-PROJECT:anniversary");
+  assert.equal(deletePlan.body.details.confirmationRequired, "DELETE-PROJECT:php-demo");
 
-  const deleteRejected = await postJson(`${baseUrl}/control/projects/anniversary/delete/apply`, {
+  const deleteRejected = await postJson(`${baseUrl}/control/projects/php-demo/delete/apply`, {
     confirm: "DELETE-PROJECT",
   });
   assert.equal(deleteRejected.status, 409);
 
-  const deleteApply = await postJson(`${baseUrl}/control/projects/anniversary/delete/apply`, {
-    confirm: "DELETE-PROJECT:anniversary",
+  const deleteApply = await postJson(`${baseUrl}/control/projects/php-demo/delete/apply`, {
+    confirm: "DELETE-PROJECT:php-demo",
   });
   assert.equal(deleteApply.status, 202);
   assert.equal(deleteApply.body.type, "project.delete.local");
   assert.equal(deleteApply.body.details.filesystemTouched, false);
   assert.equal(deleteApply.body.details.databaseTouched, false);
-  assert.equal(existsSync(path.join(projectsRoot, "anniversary", "public", "index.php")), true);
+  assert.equal(existsSync(path.join(projectsRoot, "php-demo", "public", "index.php")), true);
 
   const projectsAfterDelete = await getJson(`${baseUrl}/control/projects`);
-  assert.equal(projectsAfterDelete.projects.some((project) => project.slug === "anniversary"), false);
-  assert.equal(projectsAfterDelete.projects.some((project) => project.slug === "stexor"), true);
+  assert.equal(projectsAfterDelete.projects.some((project) => project.slug === "php-demo"), false);
+  assert.equal(projectsAfterDelete.projects.some((project) => project.slug === "node-demo"), true);
 
   const prodLocalhostPlan = await postJson(`${baseUrl}/control/subdomains/plan`, {
     environment: "production",
-    projectId: "stexor",
+    projectId: "node-demo",
     hostname: "bad.localhost.com",
   });
   assert.equal(prodLocalhostPlan.status, 422);
@@ -844,7 +844,7 @@ test("Stexor Control Center local foundation", async (t) => {
 
   const prodApplyWithoutConfirm = await postJson(`${baseUrl}/control/subdomains/apply`, {
     environment: "production",
-    projectId: "stexor",
+    projectId: "node-demo",
     hostname: "app.example.com",
   });
   assert.equal(prodApplyWithoutConfirm.status, 409);
@@ -852,7 +852,7 @@ test("Stexor Control Center local foundation", async (t) => {
 
   const prodApplyDisabled = await postJson(`${baseUrl}/control/subdomains/apply`, {
     environment: "production",
-    projectId: "stexor",
+    projectId: "node-demo",
     hostname: "app.example.com",
     confirm: "APPLY-PRODUCTION",
   });
@@ -911,7 +911,7 @@ test("Stexor Control Center local foundation", async (t) => {
 
   const uiSubdomainApply = await postJson(`${baseUrl}/actions/subdomain-command`, {
     action: "apply-local",
-    projectId: "stexor",
+    projectId: "node-demo",
     hostname: "ui-catalog.localhost.com",
     visibility: "admin",
     protection: "passkey",
@@ -950,7 +950,7 @@ test("Stexor Control Center local foundation", async (t) => {
   assert.equal(domainsAfterUiRemove.subdomains.some((item) => item.hostname === "ui-catalog.localhost.com"), false);
 
   const invalidWebspace = await postJson(`${baseUrl}/control/webspaces`, {
-    projectId: "stexor",
+    projectId: "node-demo",
     basePath: "../secret",
   });
   assert.equal(invalidWebspace.status, 422);
@@ -961,7 +961,7 @@ test("Stexor Control Center local foundation", async (t) => {
   assert.match(webspacesHtml, /public, private, uploads, backups, config/);
 
   const webspacePlan = await postJson(`${baseUrl}/control/webspaces`, {
-    projectId: "stexor",
+    projectId: "node-demo",
     name: "media",
     quotaBytes: 4096,
     secret: "webspace-secret-should-not-leak",
@@ -974,7 +974,7 @@ test("Stexor Control Center local foundation", async (t) => {
   assert.doesNotMatch(JSON.stringify(webspacePlan.body), /webspace-secret-should-not-leak/);
 
   const webspaceApply = await postJson(`${baseUrl}/control/webspaces`, {
-    projectId: "stexor",
+    projectId: "node-demo",
     name: "media",
     quotaBytes: 4096,
     confirm: "CREATE-WEBSPACE",
@@ -983,18 +983,18 @@ test("Stexor Control Center local foundation", async (t) => {
   assert.equal(webspaceApply.status, 202);
   assert.equal(webspaceApply.body.type, "webspace.create.local");
   assert.equal(webspaceApply.body.dryRun, false);
-  assert.equal(webspaceApply.body.webspace.id, "stexor-media");
+  assert.equal(webspaceApply.body.webspace.id, "node-demo-media");
   assert.deepEqual(webspaceApply.body.webspace.mounts, ["public", "private", "uploads", "backups", "config"]);
   assert.equal(webspaceApply.body.details.filesystemTouched, false);
 
-  const quotaPlan = await postJson(`${baseUrl}/control/webspaces/stexor-media/quota`, {
+  const quotaPlan = await postJson(`${baseUrl}/control/webspaces/node-demo-media/quota`, {
     quotaBytes: 8192,
   });
   assert.equal(quotaPlan.status, 202);
   assert.equal(quotaPlan.body.type, "webspace.quota");
   assert.equal(quotaPlan.body.details.confirmationRequired, "UPDATE-QUOTA");
 
-  const quotaApply = await postJson(`${baseUrl}/control/webspaces/stexor-media/quota`, {
+  const quotaApply = await postJson(`${baseUrl}/control/webspaces/node-demo-media/quota`, {
     quotaBytes: 8192,
     confirm: "UPDATE-QUOTA",
   });
@@ -1003,20 +1003,20 @@ test("Stexor Control Center local foundation", async (t) => {
   assert.equal(quotaApply.body.webspace.quotaBytes, 8192);
 
   const webspacesAfterApply = await getJson(`${baseUrl}/control/webspaces`);
-  const mediaSpace = webspacesAfterApply.webspaces.find((space) => space.id === "stexor-media");
+  const mediaSpace = webspacesAfterApply.webspaces.find((space) => space.id === "node-demo-media");
   assert.equal(mediaSpace.quotaBytes, 8192);
-  assert.equal(mediaSpace.basePath, "webspaces/stexor/media");
+  assert.equal(mediaSpace.basePath, "webspaces/node-demo/media");
   assert.equal(existsSync(webspacesFile), true);
   const webspaceStateText = readFileSync(webspacesFile, "utf8");
   assert.doesNotMatch(webspaceStateText, /webspace-secret-should-not-leak/);
-  assert.equal(JSON.parse(webspaceStateText)["stexor-media"].quotaBytes, 8192);
+  assert.equal(JSON.parse(webspaceStateText)["node-demo-media"].quotaBytes, 8192);
 
   const databasesHtml = await getText(`${baseUrl}/?mode=advanced&section=databases`);
   assert.match(databasesHtml, /Databases/);
   assert.match(databasesHtml, /Declare database/);
 
   const invalidDatabase = await postJson(`${baseUrl}/control/databases`, {
-    projectId: "stexor",
+    projectId: "node-demo",
     engine: "mariadb",
     name: "bad-name",
   });
@@ -1024,10 +1024,10 @@ test("Stexor Control Center local foundation", async (t) => {
   assert.match(invalidDatabase.body.message, /Invalid database identifier/);
 
   const databasePlan = await postJson(`${baseUrl}/control/databases`, {
-    projectId: "stexor",
+    projectId: "node-demo",
     engine: "mariadb",
-    name: "stexor_app",
-    ownerRole: "stexor_user",
+    name: "node_demo_app",
+    ownerRole: "node_demo_user",
     secret: "database-secret-should-not-leak",
   });
   assert.equal(databasePlan.status, 202);
@@ -1039,33 +1039,33 @@ test("Stexor Control Center local foundation", async (t) => {
   assert.doesNotMatch(JSON.stringify(databasePlan.body), /database-secret-should-not-leak/);
 
   const databaseApply = await postJson(`${baseUrl}/control/databases`, {
-    projectId: "stexor",
+    projectId: "node-demo",
     engine: "mariadb",
-    name: "stexor_app",
-    ownerRole: "stexor_user",
+    name: "node_demo_app",
+    ownerRole: "node_demo_user",
     confirm: "CREATE-DATABASE",
     secret: "database-secret-should-not-leak",
   });
   assert.equal(databaseApply.status, 202);
   assert.equal(databaseApply.body.type, "database.create.local");
   assert.equal(databaseApply.body.dryRun, false);
-  assert.equal(databaseApply.body.database.id, "stexor-mariadb-stexor-app");
+  assert.equal(databaseApply.body.database.id, "node-demo-mariadb-node-demo-app");
   assert.equal(databaseApply.body.details.databaseTouched, false);
   assert.equal(databaseApply.body.details.credentialsExposed, false);
 
   const databasesAfterApply = await getJson(`${baseUrl}/control/databases`);
   assert.equal(databasesAfterApply.engines.some((engine) => engine.id === "mariadb"), true);
-  assert.equal(databasesAfterApply.databases.some((database) => database.id === "stexor-mariadb-stexor-app"), true);
+  assert.equal(databasesAfterApply.databases.some((database) => database.id === "node-demo-mariadb-node-demo-app"), true);
   assert.equal(existsSync(databasesFile), true);
   const databaseStateText = readFileSync(databasesFile, "utf8");
   assert.doesNotMatch(databaseStateText, /database-secret-should-not-leak/);
-  assert.equal(JSON.parse(databaseStateText)["stexor-mariadb-stexor-app"].credentialsExposed, false);
+  assert.equal(JSON.parse(databaseStateText)["node-demo-mariadb-node-demo-app"].credentialsExposed, false);
 
   const databasesHtmlAfterApply = await getText(`${baseUrl}/?mode=advanced&section=databases`);
   assert.match(databasesHtmlAfterApply, /Plan backup/);
   assert.match(databasesHtmlAfterApply, /Plan restore/);
 
-  const databaseBackup = await postJson(`${baseUrl}/control/databases/stexor-mariadb-stexor-app/backup`, {
+  const databaseBackup = await postJson(`${baseUrl}/control/databases/node-demo-mariadb-node-demo-app/backup`, {
     secret: "database-secret-should-not-leak",
   });
   assert.equal(databaseBackup.status, 202);
@@ -1075,7 +1075,7 @@ test("Stexor Control Center local foundation", async (t) => {
   assert.equal(databaseBackup.body.details.credentialsExposed, false);
   assert.doesNotMatch(JSON.stringify(databaseBackup.body), /database-secret-should-not-leak/);
 
-  const databaseRestore = await postJson(`${baseUrl}/control/databases/stexor-mariadb-stexor-app/restore/plan`, {
+  const databaseRestore = await postJson(`${baseUrl}/control/databases/node-demo-mariadb-node-demo-app/restore/plan`, {
     backupRef: "latest",
   });
   assert.equal(databaseRestore.status, 202);
@@ -1089,15 +1089,15 @@ test("Stexor Control Center local foundation", async (t) => {
   assert.match(storageHtml, /Access keys/);
 
   const invalidBucket = await postJson(`${baseUrl}/control/storage/buckets`, {
-    projectId: "stexor",
+    projectId: "node-demo",
     name: "Bad_Bucket",
   });
   assert.equal(invalidBucket.status, 422);
   assert.match(invalidBucket.body.message, /Invalid bucket name/);
 
   const bucketPlan = await postJson(`${baseUrl}/control/storage/buckets`, {
-    projectId: "stexor",
-    name: "stexor-assets",
+    projectId: "node-demo",
+    name: "node-demo-assets",
     quotaBytes: 1048576,
     accessPolicy: "private",
     accessKeyStatus: "requires-secret-file",
@@ -1112,8 +1112,8 @@ test("Stexor Control Center local foundation", async (t) => {
   assert.doesNotMatch(JSON.stringify(bucketPlan.body), /storage-secret-should-not-leak/);
 
   const bucketApply = await postJson(`${baseUrl}/control/storage/buckets`, {
-    projectId: "stexor",
-    name: "stexor-assets",
+    projectId: "node-demo",
+    name: "node-demo-assets",
     quotaBytes: 1048576,
     accessPolicy: "private",
     accessKeyStatus: "requires-secret-file",
@@ -1122,17 +1122,17 @@ test("Stexor Control Center local foundation", async (t) => {
   });
   assert.equal(bucketApply.status, 202);
   assert.equal(bucketApply.body.type, "storage.bucket.create.local");
-  assert.equal(bucketApply.body.bucket.id, "stexor-stexor-assets");
+  assert.equal(bucketApply.body.bucket.id, "node-demo-node-demo-assets");
   assert.equal(bucketApply.body.details.minioTouched, false);
   assert.equal(bucketApply.body.details.credentialsExposed, false);
 
   const storageAfterApply = await getJson(`${baseUrl}/control/storage`);
   assert.equal(storageAfterApply.provider.id, "minio");
-  assert.equal(storageAfterApply.buckets.some((bucket) => bucket.id === "stexor-stexor-assets"), true);
+  assert.equal(storageAfterApply.buckets.some((bucket) => bucket.id === "node-demo-node-demo-assets"), true);
   assert.equal(existsSync(storageBucketsFile), true);
   const storageStateText = readFileSync(storageBucketsFile, "utf8");
   assert.doesNotMatch(storageStateText, /storage-secret-should-not-leak/);
-  assert.equal(JSON.parse(storageStateText)["stexor-stexor-assets"].credentialsExposed, false);
+  assert.equal(JSON.parse(storageStateText)["node-demo-node-demo-assets"].credentialsExposed, false);
 
   const storageHtmlAfterApply = await getText(`${baseUrl}/?mode=advanced&section=storage`);
   assert.match(storageHtmlAfterApply, /Update policy/);
@@ -1141,7 +1141,7 @@ test("Stexor Control Center local foundation", async (t) => {
   assert.match(storageHtmlAfterApply, /Plan backup/);
   assert.match(storageHtmlAfterApply, /Plan restore/);
 
-  const bucketPolicy = await postJson(`${baseUrl}/control/storage/buckets/stexor-stexor-assets/policy`, {
+  const bucketPolicy = await postJson(`${baseUrl}/control/storage/buckets/node-demo-node-demo-assets/policy`, {
     accessPolicy: "project-private",
     confirm: "UPDATE-BUCKET-POLICY",
     secret: "storage-secret-should-not-leak",
@@ -1152,7 +1152,7 @@ test("Stexor Control Center local foundation", async (t) => {
   assert.equal(bucketPolicy.body.details.minioTouched, false);
   assert.doesNotMatch(JSON.stringify(bucketPolicy.body), /storage-secret-should-not-leak/);
 
-  const bucketLifecycle = await postJson(`${baseUrl}/control/storage/buckets/stexor-stexor-assets/lifecycle`, {
+  const bucketLifecycle = await postJson(`${baseUrl}/control/storage/buckets/node-demo-node-demo-assets/lifecycle`, {
     retentionDays: 45,
     confirm: "UPDATE-BUCKET-LIFECYCLE",
   });
@@ -1161,7 +1161,7 @@ test("Stexor Control Center local foundation", async (t) => {
   assert.equal(bucketLifecycle.body.bucket.retentionDays, 45);
   assert.equal(bucketLifecycle.body.details.minioTouched, false);
 
-  const bucketAccessKey = await postJson(`${baseUrl}/control/storage/buckets/stexor-stexor-assets/access-key`, {
+  const bucketAccessKey = await postJson(`${baseUrl}/control/storage/buckets/node-demo-node-demo-assets/access-key`, {
     accessKeyStatus: "configured",
     confirm: "UPDATE-BUCKET-ACCESS-KEY",
     secret: "storage-secret-should-not-leak",
@@ -1173,7 +1173,7 @@ test("Stexor Control Center local foundation", async (t) => {
   assert.equal(bucketAccessKey.body.details.credentialsExposed, false);
   assert.doesNotMatch(JSON.stringify(bucketAccessKey.body), /storage-secret-should-not-leak/);
 
-  const bucketBackup = await postJson(`${baseUrl}/control/storage/buckets/stexor-stexor-assets/backup`, {
+  const bucketBackup = await postJson(`${baseUrl}/control/storage/buckets/node-demo-node-demo-assets/backup`, {
     secret: "storage-secret-should-not-leak",
   });
   assert.equal(bucketBackup.status, 202);
@@ -1183,7 +1183,7 @@ test("Stexor Control Center local foundation", async (t) => {
   assert.equal(bucketBackup.body.details.credentialsExposed, false);
   assert.doesNotMatch(JSON.stringify(bucketBackup.body), /storage-secret-should-not-leak/);
 
-  const bucketRestore = await postJson(`${baseUrl}/control/storage/buckets/stexor-stexor-assets/restore/plan`, {
+  const bucketRestore = await postJson(`${baseUrl}/control/storage/buckets/node-demo-node-demo-assets/restore/plan`, {
     backupRef: "latest",
   });
   assert.equal(bucketRestore.status, 202);
@@ -1198,7 +1198,7 @@ test("Stexor Control Center local foundation", async (t) => {
   assert.match(secretsHtml, /Docker secrets/);
 
   const invalidMaterial = await postJson(`${baseUrl}/control/secrets/materials`, {
-    projectId: "stexor",
+    projectId: "node-demo",
     targetEnv: "staging",
     materialName: "bad-name",
   });
@@ -1206,7 +1206,7 @@ test("Stexor Control Center local foundation", async (t) => {
   assert.match(invalidMaterial.body.message, /Invalid material name/);
 
   const materialPlan = await postJson(`${baseUrl}/control/secrets/materials`, {
-    projectId: "stexor",
+    projectId: "node-demo",
     targetEnv: "staging",
     materialName: "APP_CONFIG",
     materialKind: "application",
@@ -1224,7 +1224,7 @@ test("Stexor Control Center local foundation", async (t) => {
   assert.doesNotMatch(JSON.stringify(materialPlan.body), /material-plain-value-should-not-leak/);
 
   const materialApply = await postJson(`${baseUrl}/control/secrets/materials`, {
-    projectId: "stexor",
+    projectId: "node-demo",
     targetEnv: "staging",
     materialName: "APP_CONFIG",
     materialKind: "application",
@@ -1236,25 +1236,25 @@ test("Stexor Control Center local foundation", async (t) => {
   });
   assert.equal(materialApply.status, 202);
   assert.equal(materialApply.body.type, "material.declare.local");
-  assert.equal(materialApply.body.material.id, "stexor-staging-app-config");
+  assert.equal(materialApply.body.material.id, "node-demo-staging-app-config");
   assert.equal(materialApply.body.material.valueExposed, false);
   assert.equal(materialApply.body.material.materialValueChanged, false);
   assert.doesNotMatch(JSON.stringify(materialApply.body), /material-plain-value-should-not-leak/);
 
   const materialInventory = await getJson(`${baseUrl}/control/secrets`);
   assert.equal(materialInventory.stores.some((store) => store.id === "docker-compose-files" && store.valueExposed === false), true);
-  assert.equal(materialInventory.inventory.some((item) => item.id === "stexor-staging-app-config"), true);
+  assert.equal(materialInventory.inventory.some((item) => item.id === "node-demo-staging-app-config"), true);
   assert.equal(existsSync(sensitiveMaterialsFile), true);
   const materialStateText = readFileSync(sensitiveMaterialsFile, "utf8");
   assert.doesNotMatch(materialStateText, /material-plain-value-should-not-leak/);
-  assert.equal(JSON.parse(materialStateText)["stexor-staging-app-config"].valueExposed, false);
+  assert.equal(JSON.parse(materialStateText)["node-demo-staging-app-config"].valueExposed, false);
 
   const secretsHtmlAfterApply = await getText(`${baseUrl}/?mode=advanced&section=secrets`);
   assert.match(secretsHtmlAfterApply, /Update rotation/);
   assert.match(secretsHtmlAfterApply, /Update usage/);
   assert.match(secretsHtmlAfterApply, /Record access/);
 
-  const materialRotation = await postJson(`${baseUrl}/control/secrets/materials/stexor-staging-app-config/rotation`, {
+  const materialRotation = await postJson(`${baseUrl}/control/secrets/materials/node-demo-staging-app-config/rotation`, {
     rotationDays: 30,
     confirm: "UPDATE-MATERIAL-ROTATION",
     plainValue: "material-plain-value-should-not-leak",
@@ -1265,7 +1265,7 @@ test("Stexor Control Center local foundation", async (t) => {
   assert.equal(materialRotation.body.details.valueExposed, false);
   assert.doesNotMatch(JSON.stringify(materialRotation.body), /material-plain-value-should-not-leak/);
 
-  const materialUsage = await postJson(`${baseUrl}/control/secrets/materials/stexor-staging-app-config/usage`, {
+  const materialUsage = await postJson(`${baseUrl}/control/secrets/materials/node-demo-staging-app-config/usage`, {
     usageTarget: "worker-jobs",
     confirm: "UPDATE-MATERIAL-USAGE",
   });
@@ -1273,7 +1273,7 @@ test("Stexor Control Center local foundation", async (t) => {
   assert.equal(materialUsage.body.type, "material.usage.local");
   assert.deepEqual(materialUsage.body.material.usageTargets, ["worker-jobs"]);
 
-  const materialAccess = await postJson(`${baseUrl}/control/secrets/materials/stexor-staging-app-config/access`, {
+  const materialAccess = await postJson(`${baseUrl}/control/secrets/materials/node-demo-staging-app-config/access`, {
     purpose: "incident-review",
     confirm: "RECORD-MATERIAL-ACCESS",
     plainValue: "material-plain-value-should-not-leak",
@@ -1290,14 +1290,14 @@ test("Stexor Control Center local foundation", async (t) => {
   assert.match(resourcesHtml, /Set limits/);
 
   const invalidResourceLimit = await postJson(`${baseUrl}/control/resources/limits`, {
-    projectId: "stexor",
+    projectId: "node-demo",
     memoryMb: -1,
   });
   assert.equal(invalidResourceLimit.status, 422);
   assert.match(invalidResourceLimit.body.message, /Memory MB/);
 
   const resourceLimitPlan = await postJson(`${baseUrl}/control/resources/limits`, {
-    projectId: "stexor",
+    projectId: "node-demo",
     cpuMillicores: 500,
     memoryMb: 256,
     diskMb: 1024,
@@ -1312,7 +1312,7 @@ test("Stexor Control Center local foundation", async (t) => {
 
   const resourceLimitApply = await postJson(`${baseUrl}/actions/resource-command`, {
     action: "limits",
-    projectId: "stexor",
+    projectId: "node-demo",
     cpuMillicores: 750,
     memoryMb: 512,
     diskMb: 2048,
@@ -1322,7 +1322,7 @@ test("Stexor Control Center local foundation", async (t) => {
   assert.equal(resourceLimitApply.status, 202);
   assert.equal(resourceLimitApply.body.type, "resources.limits.local");
   assert.equal(resourceLimitApply.body.dryRun, false);
-  assert.equal(resourceLimitApply.body.resourceLimit.projectId, "stexor");
+  assert.equal(resourceLimitApply.body.resourceLimit.projectId, "node-demo");
   assert.equal(resourceLimitApply.body.resourceLimit.cpuMillicores, 750);
   assert.equal(resourceLimitApply.body.resourceLimit.memoryMb, 512);
   assert.equal(resourceLimitApply.body.resourceLimit.diskMb, 2048);
@@ -1330,14 +1330,14 @@ test("Stexor Control Center local foundation", async (t) => {
   assert.doesNotMatch(JSON.stringify(resourceLimitApply.body), /resource-limit-secret-should-not-leak/);
 
   const resourceSummary = await getJson(`${baseUrl}/control/resources/summary`);
-  const stexorLimit = resourceSummary.projectLimits.find((limit) => limit.projectId === "stexor");
-  assert.equal(stexorLimit.cpuMillicores, 750);
-  assert.equal(stexorLimit.memoryMb, 512);
-  assert.equal(stexorLimit.diskMb, 2048);
+  const nodeDemoLimit = resourceSummary.projectLimits.find((limit) => limit.projectId === "node-demo");
+  assert.equal(nodeDemoLimit.cpuMillicores, 750);
+  assert.equal(nodeDemoLimit.memoryMb, 512);
+  assert.equal(nodeDemoLimit.diskMb, 2048);
   assert.equal(existsSync(resourceLimitsFile), true);
   const resourceLimitText = readFileSync(resourceLimitsFile, "utf8");
   assert.doesNotMatch(resourceLimitText, /resource-limit-secret-should-not-leak/);
-  assert.equal(JSON.parse(resourceLimitText).stexor.diskMb, 2048);
+  assert.equal(JSON.parse(resourceLimitText)["node-demo"].diskMb, 2048);
 
   const securityHtml = await getText(`${baseUrl}/?section=security`);
   assert.match(securityHtml, /Security/);
@@ -1362,7 +1362,7 @@ test("Stexor Control Center local foundation", async (t) => {
     adminProtection: "local-only",
     securityHeaders: "report-only",
     cloudflareAccess: "plan-only-local",
-    passkeyAdminAuth: "available-through-stexor-account-app",
+    passkeyAdminAuth: "external-idp-or-passkey-app",
     secret: "security-secret-should-not-leak",
   });
   assert.equal(securityPolicyPlan.status, 202);
@@ -1620,8 +1620,8 @@ test("Stexor Control Center local foundation", async (t) => {
   assert.match(settingsHtml, /GitHub connection/);
   assert.match(settingsHtml, /SMTP\/alert status/);
   assert.match(settingsHtml, /Control Center UI/);
-  assert.match(settingsHtml, /@stexor\/control-center-local-ui/);
-  assert.match(settingsHtml, /@stexor\/control-center/);
+  assert.match(settingsHtml, /@platform\/control-center-local-ui/);
+  assert.match(settingsHtml, /@platform\/control-center/);
   assert.match(settingsHtml, /\/assets\/control-center\/control-center\.css/);
   assert.match(settingsHtml, /AppShell/);
   assert.equal(settingsHtml.includes(["file", "vendor"].join(":")), false);
@@ -1636,7 +1636,7 @@ test("Stexor Control Center local foundation", async (t) => {
 
   const providerPlan = await postJson(`${baseUrl}/control/provider-connections/cloudflare`, {
     status: "requires-verify-remote",
-    accountLabel: "stexor-zone",
+    accountLabel: "node-demo-zone",
     scope: "localhost.com",
     cloudflareToken: "provider-secret-should-not-leak",
   });
@@ -1653,7 +1653,7 @@ test("Stexor Control Center local foundation", async (t) => {
     action: "provider-connection",
     id: "cloudflare",
     status: "requires-verify-remote",
-    accountLabel: "stexor-zone",
+    accountLabel: "node-demo-zone",
     scope: "localhost.com",
     confirm: "UPDATE-PROVIDER-CONNECTION",
     cloudflareToken: "provider-secret-should-not-leak",
@@ -1727,7 +1727,7 @@ test("Stexor Control Center local foundation", async (t) => {
   assert.doesNotMatch(settingsText, /settings-secret-should-not-leak/);
   assert.equal(JSON.parse(settingsText).preferredMode, "advanced");
 
-  const deployPlan = await postJson(`${baseUrl}/control/applications/stexor/deploy`, {
+  const deployPlan = await postJson(`${baseUrl}/control/applications/node-demo/deploy`, {
     branch: "main",
     commit: "abc1234",
     cloudflareToken: "super-secret-token-should-not-leak",
@@ -1735,7 +1735,7 @@ test("Stexor Control Center local foundation", async (t) => {
   assert.equal(deployPlan.status, 202);
   assert.equal(deployPlan.body.type, "application.deploy");
   assert.equal(deployPlan.body.dryRun, true);
-  assert.equal(deployPlan.body.projectId, "stexor");
+  assert.equal(deployPlan.body.projectId, "node-demo");
   assert.equal(deployPlan.body.deployment.action, "deploy");
   assert.equal(deployPlan.body.deployment.status, "planned");
   assert.equal(deployPlan.body.deployment.releaseEvidence, "local-plan-only");
@@ -1743,7 +1743,7 @@ test("Stexor Control Center local foundation", async (t) => {
   assert.doesNotMatch(JSON.stringify(deployPlan.body), /super-secret-token-should-not-leak/);
   assert.doesNotMatch(JSON.stringify(deployPlan.body), /cloudflareToken/);
 
-  const rollbackPlan = await postJson(`${baseUrl}/control/applications/stexor/rollback`, {
+  const rollbackPlan = await postJson(`${baseUrl}/control/applications/node-demo/rollback`, {
     rollbackTarget: "previous-release",
   });
   assert.equal(rollbackPlan.status, 202);
@@ -1804,15 +1804,15 @@ test("Stexor Control Center local foundation", async (t) => {
 
   const localApply = await postJson(`${baseUrl}/control/subdomains/apply`, {
     environment: "local",
-    projectId: "stexor",
-    hostname: "stexor-preview.localhost.com",
+    projectId: "node-demo",
+    hostname: "node-demo-preview.localhost.com",
     confirm: "APPLY-LOCAL",
     cloudflareToken: "super-secret-token-should-not-leak",
   });
   assert.equal(localApply.status, 202);
   assert.equal(localApply.body.type, "subdomain.apply.local");
   assert.equal(localApply.body.id, localApply.body.operationId);
-  assert.equal(localApply.body.projectId, "stexor");
+  assert.equal(localApply.body.projectId, "node-demo");
   assert.equal(localApply.body.environment, "local");
   assert.equal(localApply.body.dryRun, false);
   assert.equal(localApply.body.details.productionEvidence, false);
@@ -1822,7 +1822,7 @@ test("Stexor Control Center local foundation", async (t) => {
   assert.doesNotMatch(JSON.stringify(localApply.body), /cloudflareToken/);
 
   const domainsWithPreview = await getJson(`${baseUrl}/control/domains`);
-  assert.equal(domainsWithPreview.subdomains.some((item) => item.hostname === "stexor-preview.localhost.com"), true);
+  assert.equal(domainsWithPreview.subdomains.some((item) => item.hostname === "node-demo-preview.localhost.com"), true);
 
   const operations = await getJson(`${baseUrl}/control/operations`);
   const applyOperation = operations.operations.find((operation) => operation.id === localApply.body.id);
@@ -1855,13 +1855,13 @@ test("Stexor Control Center local foundation", async (t) => {
     assert.equal(Array.isArray(operation.steps), true);
   }
 
-  const removePreview = await postJson(`${baseUrl}/control/subdomains/stexor-preview-localhost-com/remove/apply`, {
+  const removePreview = await postJson(`${baseUrl}/control/subdomains/node-demo-preview-localhost-com/remove/apply`, {
     confirm: "REMOVE-SUBDOMAIN",
   });
   assert.equal(removePreview.status, 202);
 
   const domainsAfterRemove = await getJson(`${baseUrl}/control/domains`);
-  assert.equal(domainsAfterRemove.subdomains.some((item) => item.hostname === "stexor-preview.localhost.com"), false);
+  assert.equal(domainsAfterRemove.subdomains.some((item) => item.hostname === "node-demo-preview.localhost.com"), false);
 
   const audit = await getJson(`${baseUrl}/control/audit`);
   assert.equal(audit.audit.length >= 2, true);
@@ -1881,7 +1881,7 @@ test("Stexor Control Center local foundation", async (t) => {
   assert.equal(stderr, "");
 });
 
-test("Stexor Control Center admin guard", async (t) => {
+test("Admin Control Center admin guard", async (t) => {
   prepareFixture();
   const port = await freePort();
   const adminInput = "example-control-center-admin-login";
@@ -1914,9 +1914,9 @@ test("Stexor Control Center admin guard", async (t) => {
       PROJECT_PROVIDER_CONNECTIONS_FILE: providerConnectionsFile,
       PROJECT_SETTINGS_FILE: settingsFile,
       PROJECT_WEBSPACES_FILE: webspacesFile,
-      PROJECTS_HOST: "projects.localhost.com",
+      CONTROL_CENTER_HOST: "admin.localhost.com",
       PROJECT_HOST_SUFFIX: ".localhost.com",
-      NODE_PROJECT_HOSTS: "stexor=stexor.localhost.com",
+      NODE_PROJECT_HOSTS: "node-demo=node-demo.localhost.com",
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -1966,12 +1966,12 @@ test("Stexor Control Center admin guard", async (t) => {
     headers: { cookie: sessionCookie, accept: "application/json" },
   });
   assert.equal(authedOverview.status, 200);
-  assert.equal((await authedOverview.json()).title, "Stexor Control Center");
+  assert.equal((await authedOverview.json()).title, "Admin Control Center");
 
   const deniedMutation = await fetch(`${baseUrl}/actions/toggle-project`, {
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded", accept: "application/json" },
-    body: new URLSearchParams({ slug: "stexor", enabled: "0" }),
+    body: new URLSearchParams({ slug: "node-demo", enabled: "0" }),
   });
   assert.equal(deniedMutation.status, 401);
 
@@ -1987,11 +1987,11 @@ test("Stexor Control Center admin guard", async (t) => {
 
 function prepareFixture() {
   rmSync(testRoot, { recursive: true, force: true });
-  mkdirSync(path.join(projectsRoot, "anniversary", "public"), { recursive: true });
-  mkdirSync(path.join(projectsRoot, "stexor"), { recursive: true });
+  mkdirSync(path.join(projectsRoot, "php-demo", "public"), { recursive: true });
+  mkdirSync(path.join(projectsRoot, "node-demo"), { recursive: true });
   mkdirSync(stateDir, { recursive: true });
-  writeFileSync(path.join(projectsRoot, "anniversary", "public", "index.php"), "<?php echo 'anniversary';\n");
-  writeFileSync(path.join(projectsRoot, "stexor", "package.json"), `${JSON.stringify({ scripts: { start: "node server.js" } }, null, 2)}\n`);
+  writeFileSync(path.join(projectsRoot, "php-demo", "public", "index.php"), "<?php echo 'php-demo';\n");
+  writeFileSync(path.join(projectsRoot, "node-demo", "package.json"), `${JSON.stringify({ scripts: { start: "node server.js" } }, null, 2)}\n`);
 }
 
 function freePort() {

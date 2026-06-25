@@ -188,7 +188,7 @@ configs:
             service: enterprise-keycloak
 
           php-projects:
-            rule: Host(`${PROJECTS_HOST:?Set PROJECTS_HOST}`) || HostRegexp(`${PROJECTS_WILDCARD_HOST_REGEXP:?Set PROJECTS_WILDCARD_HOST_REGEXP}`)
+            rule: Host(`${CONTROL_CENTER_HOST:-${ADMIN_HOST:-admin.${DOMAIN:?Set DOMAIN}}}`) || Host(`${PROJECTS_HOST:-${CONTROL_CENTER_HOST:-${ADMIN_HOST:-admin.${DOMAIN:?Set DOMAIN}}}}`) || HostRegexp(`${PROJECTS_WILDCARD_HOST_REGEXP:?Set PROJECTS_WILDCARD_HOST_REGEXP}`)
             entryPoints:
               - web
             priority: 1

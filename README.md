@@ -76,16 +76,16 @@ docker compose -p platform_infra_local down -v
 
 | Servizio | URL |
 | --- | --- |
-| UI principale | `https://ui.localhost.com` |
+| UI principale | `https://app.localhost.com` |
 | Account center | `https://account.localhost.com` |
 | API backend | `https://api.localhost.com` |
 | Keycloak | `https://auth.localhost.com` |
-| MinIO console | `https://minio.localhost.com` |
+| Object storage console | `https://storage.localhost.com` |
 | Grafana | `https://grafana.localhost.com` |
-| Stexor Control Center | `https://projects.localhost.com` |
+| Admin Control Center | `https://admin.localhost.com` |
 | phpMyAdmin locale | `https://phpmyadmin.localhost.com` |
 
-`projects.localhost.com` serve lo Stexor Control Center dal servizio Node `control-center`, separato da PHP Apache. Il pannello e' il progetto Node `@stexor/control-center` e usa un sistema visivo locale del Control Center: componenti dichiarati in `control-center/components/ui/controlCenterUi.mjs`, token `--cc-*` e CSS premium in `control-center/styles/control-center.css`, servito da `/assets/control-center/control-center.css` ed esposto da `/control/ui-package`. Il vendor `control-center/vendor/@stexor/ui` resta nel repository per compatibilita' con il resto della piattaforma, ma il Control Center non lo dichiara come dipendenza e non carica asset visuali da quel pacchetto; poi legge i progetti da `PHP_PROJECTS_DIR`, divide runtime PHP e Node, espone la topologia Network Advanced da `/control/network` leggendo Compose e Traefik dynamic config in modalita' read-only, espone la mappa Monitoring Advanced da `/control/monitoring` leggendo Prometheus, Grafana, Loki e Alertmanager config senza query live, permette create metadata-only, enable/disable locale, update metadata, archive e soft delete solo nello stato Control Center, scrive stato in `projects-portal/state/projects.json`, app dichiarative in `projects-portal/state/applications.json`, domini dichiarativi in `projects-portal/state/domains.json`, database dichiarativi in `projects-portal/state/databases.json`, bucket storage dichiarativi in `projects-portal/state/storage-buckets.json`, inventario metadata-only dei materiali sensibili in `projects-portal/state/sensitive-materials.json`, worker/queue/job/scheduler metadata in `projects-portal/state/worker-jobs.json`, admin users/teams/roles/sessioni/access review in `projects-portal/state/identity-access.json`, web spaces in `projects-portal/state/webspaces.json`, resource limits in `projects-portal/state/resource-limits.json`, security policies in `projects-portal/state/security-policies.json`, alert locali in `projects-portal/state/alerts.json`, canali notifica in `projects-portal/state/notification-channels.json`, provider connection metadata in `projects-portal/state/provider-connections.json`, preferenze Settings in `projects-portal/state/settings.json`, audit in `projects-portal/state/audit.jsonl`, operazioni/step in `projects-portal/state/operations.jsonl`, piani deploy/rollback in `projects-portal/state/deployments.jsonl` e piani backup/restore drill in `projects-portal/state/backups.jsonl`. `PHP_SOURCE_DIR` punta a `php-runtime-root`, una root statica neutra: PHP Apache resta solo il runtime dei progetti PHP e non contiene la UI/API del Control Center. In locale `CONTROL_CENTER_AUTH_REQUIRED=false` mantiene il flusso rapido; in staging/VPS imposta `CONTROL_CENTER_AUTH_REQUIRED=true` e `CONTROL_CENTER_ADMIN_PASSWORD_SHA256` con lo SHA-256 della password admin. La sessione e' firmata con `projects_gateway_signing_keys` da Docker secret e il valore password non va mai in `.env`.
+`admin.localhost.com` serve l'Admin Control Center dal servizio Node `control-center`, separato da PHP Apache. Il pannello e' il progetto Node `@platform/control-center` e usa un sistema visivo locale: componenti dichiarati in `control-center/components/ui/controlCenterUi.mjs`, token `--cc-*` e CSS in `control-center/styles/control-center.css`, servito da `/assets/control-center/control-center.css` ed esposto da `/control/ui-package`. Il Control Center legge i progetti da `PHP_PROJECTS_DIR`, divide runtime PHP e Node, espone la topologia Network Advanced da `/control/network` leggendo Compose e Traefik dynamic config in modalita' read-only, espone la mappa Monitoring Advanced da `/control/monitoring` leggendo Prometheus, Grafana, Loki e Alertmanager config senza query live, permette create metadata-only, enable/disable locale, update metadata, archive e soft delete solo nello stato Control Center, scrive stato in `projects-portal/state/*.json` e audit/operazioni in `projects-portal/state/*.jsonl`. `PHP_SOURCE_DIR` punta a `php-runtime-root`, una root statica neutra: PHP Apache resta solo il runtime dei progetti PHP e non contiene la UI/API del Control Center. In locale `CONTROL_CENTER_AUTH_REQUIRED=false` mantiene il flusso rapido; in staging/VPS imposta `CONTROL_CENTER_AUTH_REQUIRED=true` e `CONTROL_CENTER_ADMIN_PASSWORD_SHA256` con lo SHA-256 della password admin. La sessione e' firmata con `projects_gateway_signing_keys` da Docker secret e il valore password non va mai in `.env`. `PROJECTS_HOST` e' solo un alias legacy opzionale di `CONTROL_CENTER_HOST`.
 Advanced Mode espone lo scheletro delle aree enterprise richieste, inclusi Workers & Jobs, CI/CD & GitHub Governance, Logs/Alerts Advanced, Disaster Recovery, Release Evidence, Security Advanced e Billing / Plans. Queste superfici restano plan/evidence-only finche' un adapter esplicito non esegue apply e verifyRemote.
 L'API Advanced read-only e' disponibile su `/control/advanced` e `/control/advanced/:section`; espone capability, guardrail ed evidence metadata senza chiamare provider live, senza toccare Docker e senza marcare evidenza production. `/control/readiness` legge i manifest `governance/enterprise-requirements.json` e `governance/production-readiness.json` montati read-only, pubblica una matrice repo/live-proof sanificata e mantiene `productionEvidence=false` finche' non passano le prove live.
 Il registry adapter backend e' disponibile su `/control/adapters` e `/control/adapters/:id`; include Cloudflare, Traefik, Docker, GitHub, Prometheus, Loki, Alertmanager, Backup, Restore, MinIO, Database, Security e Go/No-Go. `/control/adapters/:id/plan` e `/verify` producono piani auditati, mentre `/apply` viene respinto finche' non esiste un backend live esplicito con conferma forte e verifyRemote.
@@ -120,7 +120,7 @@ Il go/no-go accetta `reports/uptime/` solo se i target pubblici sono coperti da 
 ```sh
 cd /opt/platform/platform-infrastructure
 mkcert -install
-mkcert -cert-file ./traefik/certs/local-cert.pem -key-file ./traefik/certs/local-key.pem localhost 127.0.0.1 ::1 ui.localhost.com account.localhost.com api.localhost.com auth.localhost.com minio.localhost.com grafana.localhost.com
+mkcert -cert-file ./traefik/certs/local-cert.pem -key-file ./traefik/certs/local-key.pem localhost 127.0.0.1 ::1 app.localhost.com admin.localhost.com account.localhost.com api.localhost.com auth.localhost.com storage.localhost.com grafana.localhost.com
 docker compose -f compose.yaml -f compose.build.yaml --env-file .env -p platform_infra_local up -d --build traefik
 curl https://api.localhost.com/health
 ```
@@ -128,7 +128,7 @@ curl https://api.localhost.com/health
 Su Windows, apri PowerShell come amministratore e aggiungi gli host locali:
 
 ```powershell
-Add-Content -Path "$env:SystemRoot\System32\drivers\etc\hosts" -Value "127.0.0.1 ui.localhost.com account.localhost.com api.localhost.com auth.localhost.com minio.localhost.com grafana.localhost.com"
+Add-Content -Path "$env:SystemRoot\System32\drivers\etc\hosts" -Value "127.0.0.1 app.localhost.com admin.localhost.com account.localhost.com api.localhost.com auth.localhost.com storage.localhost.com grafana.localhost.com"
 ```
 
 I file in `traefik/certs/` sono ignorati da Git. In container isolati monta la CA mkcert oppure passa `--cacert`.
@@ -336,8 +336,25 @@ release con
 il report finisce in `reports/github-actions/` e deve avere `status=passed` e
 `run.conclusion=success`. La workflow `enterprise-infra-run-evidence` produce
 automaticamente la stessa evidenza dopo ogni completamento di `enterprise-infra`
-su `main` e carica `reports/github-actions/` come artifact non-secret. La CI dell'infra non esegue checkout di repository progetto: collega
-Collega i repository applicativi solo tramite `PROJECT_SOURCE_DIR` quando devi buildarli.
+su `main` e carica `reports/github-actions/` come artifact non-secret. La CI dell'infra non esegue checkout di repository progetto:
+collega i repository applicativi solo tramite `PROJECT_SOURCE_DIR` quando devi buildarli.
+La workflow `release-attestation` usa GitHub Artifact Attestations/Sigstore
+ufficiale, OIDC (`id-token: write`) e GHCR (`packages: write`) per produrre
+provenance firmata senza dominio reale:
+
+```sh
+gh workflow run release-attestation.yml --repo mattdifi05/platform-infrastructure --ref main
+gh run watch --repo mattdifi05/platform-infrastructure
+gh run download --repo mattdifi05/platform-infrastructure --name github-sigstore-release-evidence --dir .tmp/github-sigstore-release-evidence
+```
+
+Per una release applicativa completa, dichiara le immagini in un manifest come
+`config/project-manifest.example.json` e passa `--imageManifest <file>` ai gate
+release. Ogni immagine deve essere digest-pinned e avere un report verificato da
+`gh attestation verify` che copre il relativo digest. I vecchi env
+`BACKEND_IMAGE`, `WEB_IMAGE` e `WORKER_*_IMAGE` restano fallback compatibile. La
+provenance locale SLSA resta accettata come evidenza parziale; il go/no-go
+richiede `github-signed-attestation` completa.
 La workflow manuale `enterprise-live-evidence` gira nell'environment GitHub
 `production` e raccoglie prove live non mutanti: uptime provider, load benchmark
 pubblico via Cloudflare, Cloudflare Access `--verifyRemote`, go/no-go live e
@@ -399,10 +416,11 @@ Per ogni release candidata genera anche il manifest operativo:
 
 ```sh
 sh ./scripts/release-evidence.sh --planOnly
-sh ./scripts/release-evidence.sh --requireProvenance --provenance ./release/provenance.json --previousImagesFile ./release/previous-images.json
+gh workflow run release-attestation.yml --repo OWNER/REPO --ref main
+sh ./scripts/release-evidence.sh --requireProvenance --imageManifest .tmp/release-attestation/release-subjects.json --sbom reports/release/github-release-sbom-<run-id>.cdx.json --githubAttestation reports/release/github-sigstore-attestation-<stamp>.json --previousImagesFile ./release/previous-images.json
 ```
 
-  Il comando valida immagini digest-pinned, SBOM, provenance opzionale, firma opzionale con `--verifyCosign`, scrive report in `reports/release/` con `status`/`issues` e, quando riceve i digest precedenti, produce `release/previous-images.json`. La provenance deve essere una statement/bundle DSSE in-toto con `predicateType` SLSA v1, `predicate.buildDefinition.buildType`, subject `sha256` per ogni immagine di release e riferimento al commit di release; `--skipProvenanceCommitCheck` e' solo per eccezioni provider revisionate. In evidence mode esegue anche la dry-run di rollback non distruttiva, valida `docker compose config` con i digest precedenti e collega il report `reports/rollback/rollback-plan-*.json` dentro l'evidence pack della release. I fallimenti scrivono comunque report diagnostici, ma il go/no-go accetta solo `status=passed`.
+  Il workflow `release-attestation.yml` usa GitHub Artifact Attestations/Sigstore, builda l'immagine infra PHP Apache su GHCR, abilita SBOM BuildKit, firma anche `release-subjects.json` e carica artifact non sensibili. Per release multi-immagine passa `release_images_json` con riferimenti gia' digest-pinned: il manifest firmato viene usato dal gate per coprire tutti i subject dichiarati. Il comando valida immagini digest-pinned, SBOM, provenance opzionale, firma opzionale con `--verifyCosign`, scrive report in `reports/release/` con `status`/`issues` e, quando riceve i digest precedenti, produce `release/previous-images.json`. `--provenance` accetta una statement/bundle DSSE in-toto SLSA v1 come evidenza locale parziale; `--githubAttestation` accetta uno o piu' report GitHub/Sigstore normalizzati e verificati. Per essere completa, la GitHub attestation deve risultare `verified=true`, indicare repository, workflow run id, commit SHA, subject name e subject digest, e coprire ogni digest immagine della release. In evidence mode esegue anche la dry-run di rollback non distruttiva, valida `docker compose config` con i digest precedenti e collega il report `reports/rollback/rollback-plan-*.json` dentro l'evidence pack della release. I fallimenti scrivono comunque report diagnostici, ma il go/no-go accetta solo `status=passed` con `github-signed-attestation` completa.
 
 ## Produzione
 
@@ -537,7 +555,7 @@ DEPLOY_API_BASE=http://api.192.168.1.164.sslip.io \
 DEPLOY_UI_BASE=http://app.192.168.1.164.sslip.io \
 DEPLOY_ACCOUNT_BASE=http://account.192.168.1.164.sslip.io \
 DEPLOY_ACCOUNT_ORIGIN=https://account.192.168.1.164.sslip.io \
-DEPLOY_PROJECTS_BASE=http://projects.192.168.1.164.sslip.io \
+DEPLOY_ADMIN_BASE=http://admin.192.168.1.164.sslip.io \
 DEPLOY_GRAFANA_BASE=http://grafana.192.168.1.164.sslip.io/login \
 DEPLOY_GRAFANA_BLOCKED=1 \
 DEPLOY_ADMIN_SCHEME=http \
@@ -580,8 +598,8 @@ Nel profilo VPS:
 - Il WAF pubblica la porta 80; Traefik resta interno e riceve solo traffico filtrato.
 - SSL, redirect HTTPS e CDN stanno all'edge esterno, per esempio VPS/Cloudflare.
 - PostgreSQL, MariaDB, Redis, NATS, MinIO, Prometheus, Loki, Grafana, phpMyAdmin e dashboard Traefik non sono pubblici.
-- Le app Node di piattaforma usano `UI_HOST`, `ACCOUNT_HOST`, `API_HOST` e `AUTH_HOST`; `PROJECTS_HOST` resta la dashboard locale del Control Center Node.
-- I progetti PHP e Node condividono `PHP_PROJECTS_DIR` come sorgente universale. `PROJECTS_HOST` apre lo Stexor Control Center Node, `PHP_SOURCE_DIR` resta una root Apache neutra per il solo runtime PHP, `PROJECTS_WILDCARD_HOST_REGEXP` accetta i domini progetto, `PROJECT_HOST_SUFFIX` costruisce gli host e `NODE_PROJECT_UPSTREAMS` collega progetti Node a servizi Docker gia' avviati. Traefik espone i domini progetto tramite `local-projects`, che punta al `project-router` Node e non a un portale PHP. Il `project-router` prova PHP e Node contemporanei con `project-router-tests`; quando un progetto Node gestito viene disabilitato dal Control Center, il processo locale viene fermato e riparte solo alla riabilitazione.
+- Le app Node di piattaforma usano `APP_HOST`/`UI_HOST`, `ACCOUNT_HOST`, `API_HOST` e `AUTH_HOST`; `CONTROL_CENTER_HOST` e' la dashboard Admin Control Center Node.
+- I progetti PHP e Node condividono `PHP_PROJECTS_DIR` come sorgente universale. `CONTROL_CENTER_HOST` apre l'Admin Control Center Node, `PROJECTS_HOST` resta solo alias legacy, `PHP_SOURCE_DIR` resta una root Apache neutra per il solo runtime PHP, `PROJECTS_WILDCARD_HOST_REGEXP` accetta i domini progetto, `PROJECT_HOST_SUFFIX` costruisce gli host e `NODE_PROJECT_UPSTREAMS` collega progetti Node a servizi Docker gia' avviati. Traefik espone i domini progetto tramite `local-projects`, che punta al `project-router` Node e non a un portale PHP. Il `project-router` prova PHP e Node contemporanei con `project-router-tests`; quando un progetto Node gestito viene disabilitato dal Control Center, il processo locale viene fermato e riparte solo alla riabilitazione.
 - MariaDB usa `secrets/mariadb_root_password.txt` tramite Docker secret, non una password root in `.env`.
 - `phpmyadmin` resta fuori dal profilo di default; su VPS pubblica usa preferibilmente SSH e client CLI, non una UI DB esposta.
 

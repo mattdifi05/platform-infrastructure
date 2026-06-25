@@ -1,0 +1,30 @@
+{
+  "platformName": "Platform Infrastructure",
+  "projectName": "platform",
+  "domain": "localhost.com",
+  "localDomain": "localhost.com",
+  "providerProfile": "local",
+  "adminHost": "admin.localhost.com",
+  "controlCenterHost": "admin.localhost.com",
+  "defaultPublicAppHost": "app.localhost.com",
+  "defaultApiHost": "api.localhost.com",
+  "supportedProviderProfiles": [
+    "local",
+    "home-vps",
+    "generic-vps",
+    "hostinger",
+    "aws",
+    "custom"
+  ],
+  "supportedRuntimes": [
+    "node",
+    "php",
+    "static",
+    "python",
+    "docker-custom",
+    "worker"
+  ],
+  "legacyAliases": {
+    "PROJECTS_HOST": "Deprecated alias for CONTROL_CENTER_HOST. Projects is now an internal Admin Control Center section, not the admin hostname."
+  }
+}

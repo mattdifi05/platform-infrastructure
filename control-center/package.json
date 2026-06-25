@@ -1,9 +1,9 @@
 {
-  "name": "@stexor/control-center",
+  "name": "@platform/control-center",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Docker-first Stexor infrastructure dashboard and Control Center.",
+  "description": "Docker-first generic infrastructure dashboard and Admin Control Center.",
   "main": "./server.mjs",
   "dependencies": {},
   "scripts": {

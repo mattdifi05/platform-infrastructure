@@ -34,12 +34,12 @@ test("project-router hosts PHP and Node projects together and honors local enabl
       PROJECT_ROUTER_PORT: String(routerPort),
       PROJECTS_ROOT: projectsRoot,
       PROJECT_STATE_FILE: stateFile,
-      PROJECTS_HOST: "projects.localhost.com",
+      CONTROL_CENTER_HOST: "admin.localhost.com",
       PROJECT_HOST_SUFFIX: ".localhost.com",
       PHP_UPSTREAM: `http://127.0.0.1:${serverPort(phpServer)}`,
       CONTROL_CENTER_UPSTREAM: `http://127.0.0.1:${serverPort(controlServer)}`,
-      NODE_PROJECT_HOSTS: "stexor=stexor.localhost.com",
-      NODE_PROJECT_COMMANDS: `stexor=${process.execPath} server.mjs`,
+      NODE_PROJECT_HOSTS: "node-demo=node-demo.localhost.com",
+      NODE_PROJECT_COMMANDS: `node-demo=${process.execPath} server.mjs`,
       NODE_PROJECT_ENV: "test",
     },
     stdio: ["ignore", "pipe", "pipe"],
@@ -57,38 +57,38 @@ test("project-router hosts PHP and Node projects together and honors local enabl
 
   await waitForHealth(routerPort);
 
-  const control = await httpGet(routerPort, "projects.localhost.com", "/");
+  const control = await httpGet(routerPort, "admin.localhost.com", "/");
   assert.equal(control.statusCode, 200);
-  assert.match(control.body, /control-center:projects\.localhost\.com:\//);
+  assert.match(control.body, /control-center:admin\.localhost\.com:\//);
 
-  const php = await httpGet(routerPort, "anniversary.localhost.com", "/calendar?day=1");
+  const php = await httpGet(routerPort, "php-demo.localhost.com", "/calendar?day=1");
   assert.equal(php.statusCode, 200);
-  assert.equal(php.body, "php:anniversary.localhost.com:/calendar?day=1");
+  assert.equal(php.body, "php:php-demo.localhost.com:/calendar?day=1");
 
-  const nodeFirst = await httpGet(routerPort, "stexor.localhost.com", "/api/ping");
+  const nodeFirst = await httpGet(routerPort, "node-demo.localhost.com", "/api/ping");
   assert.equal(nodeFirst.statusCode, 200);
   const nodeFirstPayload = JSON.parse(nodeFirst.body);
   assert.equal(nodeFirstPayload.runtime, "node");
-  assert.equal(nodeFirstPayload.host, "stexor.localhost.com");
+  assert.equal(nodeFirstPayload.host, "node-demo.localhost.com");
   assert.equal(nodeFirstPayload.path, "/api/ping");
   assert.equal(nodeFirstPayload.env, "test");
   assert.ok(Number.isInteger(nodeFirstPayload.pid));
 
-  const phpStillAvailable = await httpGet(routerPort, "anniversary.localhost.com", "/after-node");
+  const phpStillAvailable = await httpGet(routerPort, "php-demo.localhost.com", "/after-node");
   assert.equal(phpStillAvailable.statusCode, 200);
-  assert.equal(phpStillAvailable.body, "php:anniversary.localhost.com:/after-node");
+  assert.equal(phpStillAvailable.body, "php:php-demo.localhost.com:/after-node");
 
-  writeFileSync(stateFile, `${JSON.stringify({ projects: { stexor: { enabled: false } } }, null, 2)}\n`);
-  const disabledNode = await httpGet(routerPort, "stexor.localhost.com", "/api/ping");
+  writeFileSync(stateFile, `${JSON.stringify({ projects: { "node-demo": { enabled: false } } }, null, 2)}\n`);
+  const disabledNode = await httpGet(routerPort, "node-demo.localhost.com", "/api/ping");
   assert.equal(disabledNode.statusCode, 404);
   assert.match(disabledNode.body, /Project disabled/);
 
-  writeFileSync(stateFile, `${JSON.stringify({ projects: { stexor: { enabled: true } } }, null, 2)}\n`);
-  const nodeAfterEnable = await httpGet(routerPort, "stexor.localhost.com", "/api/ping");
+  writeFileSync(stateFile, `${JSON.stringify({ projects: { "node-demo": { enabled: true } } }, null, 2)}\n`);
+  const nodeAfterEnable = await httpGet(routerPort, "node-demo.localhost.com", "/api/ping");
   assert.equal(nodeAfterEnable.statusCode, 200);
   const nodeAfterEnablePayload = JSON.parse(nodeAfterEnable.body);
   assert.equal(nodeAfterEnablePayload.runtime, "node");
-  assert.equal(nodeAfterEnablePayload.host, "stexor.localhost.com");
+  assert.equal(nodeAfterEnablePayload.host, "node-demo.localhost.com");
   assert.equal(nodeAfterEnablePayload.path, "/api/ping");
   assert.ok(Number.isInteger(nodeAfterEnablePayload.pid));
 
@@ -96,18 +96,18 @@ test("project-router hosts PHP and Node projects together and honors local enabl
   assert.equal(missing.statusCode, 404);
   assert.match(missing.body, /Project not found/);
 
-  assert.equal(existsSync(path.join(projectsRoot, "anniversary", "public", "index.php")), true);
+  assert.equal(existsSync(path.join(projectsRoot, "php-demo", "public", "index.php")), true);
   assert.equal(stderr.includes("project-router error"), false);
 });
 
 function prepareFixture() {
   rmSync(testRoot, { recursive: true, force: true });
-  mkdirSync(path.join(projectsRoot, "anniversary", "public"), { recursive: true });
-  mkdirSync(path.join(projectsRoot, "stexor"), { recursive: true });
+  mkdirSync(path.join(projectsRoot, "php-demo", "public"), { recursive: true });
+  mkdirSync(path.join(projectsRoot, "node-demo"), { recursive: true });
   mkdirSync(stateDir, { recursive: true });
-  writeFileSync(path.join(projectsRoot, "anniversary", "public", "index.php"), "<?php echo 'anniversary';\n");
-  writeFileSync(path.join(projectsRoot, "stexor", "package.json"), `${JSON.stringify({ scripts: { start: "node server.mjs" } }, null, 2)}\n`);
-  writeFileSync(path.join(projectsRoot, "stexor", "server.mjs"), `import { createServer } from "node:http";
+  writeFileSync(path.join(projectsRoot, "php-demo", "public", "index.php"), "<?php echo 'php-demo';\n");
+  writeFileSync(path.join(projectsRoot, "node-demo", "package.json"), `${JSON.stringify({ scripts: { start: "node server.mjs" } }, null, 2)}\n`);
+  writeFileSync(path.join(projectsRoot, "node-demo", "server.mjs"), `import { createServer } from "node:http";
 const server = createServer((req, res) => {
   res.writeHead(200, { "content-type": "application/json" });
   res.end(JSON.stringify({
@@ -151,7 +151,7 @@ async function waitForHealth(port) {
   const started = Date.now();
   while (Date.now() - started < 10000) {
     try {
-      const response = await httpGet(port, "projects.localhost.com", "/__health");
+      const response = await httpGet(port, "admin.localhost.com", "/__health");
       if (response.statusCode === 200) return;
     } catch {
       // Keep probing until the router has bound its port.
@@ -189,6 +189,15 @@ function stopChild(child) {
   return new Promise((resolve) => {
     if (child.exitCode !== null || child.signalCode) {
       resolve();
+      return;
+    }
+    if (process.platform === "win32") {
+      const killer = spawn("taskkill", ["/pid", String(child.pid), "/t", "/f"], { stdio: "ignore" });
+      killer.once("exit", () => resolve());
+      killer.once("error", () => {
+        child.kill("SIGKILL");
+        resolve();
+      });
       return;
     }
     const timer = setTimeout(() => {

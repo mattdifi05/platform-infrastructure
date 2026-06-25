@@ -29,11 +29,11 @@
       "directAccessGrantsEnabled": false,
       "redirectUris": [
         "https://account.localhost.com/*",
-        "https://ui.localhost.com/*"
+        "https://app.localhost.com/*"
       ],
       "webOrigins": [
         "https://account.localhost.com",
-        "https://ui.localhost.com"
+        "https://app.localhost.com"
       ]
     }
   ],

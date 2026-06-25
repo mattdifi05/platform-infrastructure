@@ -261,9 +261,11 @@
       "evidence": [
         { "type": "command", "name": "rollback-release" },
         { "type": "command", "name": "release-evidence" },
-        { "type": "workflow", "pattern": "Release evidence plan[\\s\\S]*release-evidence --planOnly" }
+        { "type": "command", "name": "github-attestation-evidence" },
+        { "type": "workflow", "pattern": "Release evidence plan[\\s\\S]*release-evidence --planOnly" },
+        { "type": "workflow", "pattern": "release-attestation[\\s\\S]*actions/attest-build-provenance@v4[\\s\\S]*gh attestation verify" }
       ],
-      "liveProof": "Archive release evidence with previous digests and a validated rollback dry-run.",
+      "liveProof": "Archive release evidence with previous digests, complete GitHub/Sigstore attestation and a validated rollback dry-run.",
       "liveProofChecks": ["release-evidence-and-rollback"]
     }
   ]

@@ -68,6 +68,13 @@ function booleanFlag(value) {
   return value === true || value === "true" || value === "1" || value === "yes";
 }
 
+function noDockerMode(options = {}) {
+  return Boolean(options.noDocker)
+    || booleanFlag(argv.noDocker)
+    || booleanFlag(argv.skipDocker)
+    || booleanFlag(argv.repoOnly);
+}
+
 function positiveInteger(value, optionName, minimum = 1) {
   const next = Number(value);
   if (!Number.isInteger(next) || next < minimum) {
@@ -846,6 +853,56 @@ const releaseImageKeys = [
   "WORKER_JOBS_IMAGE",
 ];
 
+function releaseImageEntriesFromManifest(manifestPath) {
+  if (!manifestPath) {
+    return [];
+  }
+  const resolved = path.resolve(manifestPath);
+  const manifest = readJsonFile(resolved, resolved);
+  const source = manifest.releaseImages ?? manifest.images ?? manifest.artifacts?.images ?? manifest.subjects ?? [];
+  const entries = Array.isArray(source)
+    ? source.map((entry, index) => {
+      const name = String(entry.name ?? "").trim();
+      const digest = String(entry.digest ?? entry.subjectDigest ?? "").trim();
+      const image = String(entry.image ?? entry.ref ?? entry.value ?? (name && digest ? `${name}@${digest}` : "")).trim();
+      return {
+        key: String(entry.key ?? entry.name ?? `IMAGE_${index + 1}`).trim(),
+        image,
+      };
+    })
+    : Object.entries(source).map(([key, value]) => ({
+      key,
+      image: typeof value === "string" ? value : String(value?.image ?? value?.ref ?? value?.value ?? "").trim(),
+    }));
+  return entries.filter((entry) => entry.key && entry.image);
+}
+
+function releaseImageEntriesFromEnv(env) {
+  return releaseImageKeys
+    .map((key) => ({ key, image: env[key] ?? null }))
+    .filter((entry) => entry.image);
+}
+
+function releaseImageEntries({ env = {}, imagesArg = null, manifestPath = null } = {}) {
+  if (manifestPath) {
+    const manifestEntries = releaseImageEntriesFromManifest(manifestPath);
+    if (manifestEntries.length) {
+      return manifestEntries;
+    }
+  }
+  if (imagesArg) {
+    return String(imagesArg)
+      .split(",")
+      .map((image, index) => ({ key: `IMAGE_${index + 1}`, image: image.trim() }))
+      .filter((entry) => entry.image);
+  }
+  return releaseImageEntriesFromEnv(env);
+}
+
+function imageMapFromEntries(entries) {
+  return Object.fromEntries(entries.map((entry) => [entry.key, entry.image]));
+}
+
 function assertImmutableImageRef(key, image) {
   if (!image) {
     fail(`Missing rollback image for ${key}.`);
@@ -997,6 +1054,201 @@ function validateSlsaProvenance({ provenancePath, images, releaseSha, requireRel
     releaseSha,
     releaseShaMatched,
     requireReleaseSha,
+  };
+}
+
+function uniqueBy(items, keyFn) {
+  const seen = new Set();
+  return items.filter((item) => {
+    const key = keyFn(item);
+    if (!key || seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
+}
+
+function collectGithubAttestationSubjects(document) {
+  const explicitSubjects = [];
+  const addSubject = (entry) => {
+    if (!entry || typeof entry !== "object") {
+      return;
+    }
+    const digest = normalizeDigestValue(entry.digest ?? entry.subjectDigest ?? entry.sha256 ?? entry?.digest?.sha256);
+    const name = entry.name ?? entry.subjectName ?? entry.image ?? null;
+    if (digest) {
+      explicitSubjects.push({ name, sha256: digest });
+    }
+  };
+
+  addSubject(document);
+  if (Array.isArray(document.subjects)) {
+    document.subjects.forEach(addSubject);
+  }
+  if (Array.isArray(document.attestation?.subjects)) {
+    document.attestation.subjects.forEach(addSubject);
+  }
+  if (Array.isArray(document.images)) {
+    document.images.forEach(addSubject);
+  }
+
+  let statementSubjects = [];
+  try {
+    statementSubjects = inTotoStatementsFromDocument(document).flatMap(collectSubjectDigests);
+  } catch {
+    statementSubjects = [];
+  }
+
+  return uniqueBy([...explicitSubjects, ...statementSubjects], (subject) => `${subject.name ?? ""}@${subject.sha256}`);
+}
+
+function validateGithubSigstoreAttestation({
+  attestationPath,
+  images,
+  releaseSha,
+  requireReleaseSha = true,
+  repository = null,
+  expectedSubjectName = null,
+  expectedSubjectDigest = null,
+  requireSubjectCoverage = true,
+}) {
+  const resolved = path.resolve(attestationPath);
+  const document = readJsonFile(resolved, resolved);
+  const verified = document.verified === true
+    || document.status === "verified"
+    || document.status === "passed"
+    || document.verification?.verified === true
+    || document.attestation?.verified === true
+    || document.attestation?.status === "passed";
+  if (!verified) {
+    fail("GitHub/Sigstore attestation report is not marked verified. Generate it from a successful gh attestation verify run.");
+  }
+
+  const subjects = collectGithubAttestationSubjects(document);
+  const expectedDigest = normalizeDigestValue(expectedSubjectDigest);
+  if (expectedSubjectName && !subjects.some((subject) => subject.name === expectedSubjectName)) {
+    fail(`GitHub/Sigstore attestation subject name mismatch: expected ${expectedSubjectName}.`);
+  }
+  if (expectedDigest && !subjects.some((subject) => subject.sha256 === expectedDigest)) {
+    fail(`GitHub/Sigstore attestation subject digest mismatch: expected sha256:${expectedDigest}.`);
+  }
+
+  const expectedRepository = repository ?? argv.repository ?? argv.repo ?? process.env.GITHUB_REPOSITORY ?? null;
+  const reportRepository = document.repository ?? document.github?.repository ?? document.sourceRepository ?? document.attestation?.repository ?? null;
+  if (expectedRepository && !reportRepository) {
+    fail(`GitHub/Sigstore attestation repository is missing; expected ${expectedRepository}.`);
+  }
+  if (expectedRepository && reportRepository && String(reportRepository).toLowerCase() !== String(expectedRepository).toLowerCase()) {
+    fail(`GitHub/Sigstore attestation repository mismatch: expected ${expectedRepository}, got ${reportRepository}.`);
+  }
+  const workflowRunId = document.workflowRunId ?? document.github?.runId ?? document.runId ?? document.attestation?.workflowRunId ?? null;
+  if (!workflowRunId) {
+    fail("GitHub/Sigstore attestation workflow run id is missing.");
+  }
+
+  const imageDigests = images
+    .map((image) => ({ image, sha256: digestFromImageRef(image) }))
+    .filter((entry) => entry.image);
+  const missingImageDigest = imageDigests.find((entry) => !entry.sha256);
+  if (missingImageDigest) {
+    fail(`Cannot validate GitHub/Sigstore attestation for unpinned image: ${missingImageDigest.image}`);
+  }
+
+  const subjectDigestSet = new Set(subjects.map((subject) => subject.sha256));
+  const missingSubjects = imageDigests.filter((entry) => !subjectDigestSet.has(entry.sha256));
+  const releaseShaMatched = !releaseSha
+    || String(document.commitSha ?? document.commit ?? document.github?.sha ?? "").toLowerCase() === String(releaseSha).toLowerCase()
+    || String(document.attestation?.commitSha ?? "").toLowerCase() === String(releaseSha).toLowerCase()
+    || valueContainsText(document, releaseSha);
+  if (requireReleaseSha && releaseSha && !releaseShaMatched) {
+    fail(`GitHub/Sigstore attestation does not reference release commit ${releaseSha}.`);
+  }
+  if (requireSubjectCoverage && missingSubjects.length) {
+    fail(`GitHub/Sigstore attestation subjects do not cover release images: ${missingSubjects.map((entry) => entry.image).join(", ")}`);
+  }
+
+  return {
+    status: "passed",
+    kind: "github-signed-attestation",
+    provider: document.provider ?? "github-artifact-attestations",
+    verified: true,
+    completeness: "complete",
+    repository: reportRepository ?? expectedRepository,
+    workflowRunId,
+    workflowRunUrl: document.workflowRunUrl ?? document.github?.runUrl ?? document.attestation?.workflowRunUrl ?? null,
+    commitSha: document.commitSha ?? document.commit ?? document.github?.sha ?? document.attestation?.commitSha ?? releaseSha ?? null,
+    commitShaMatched: releaseShaMatched,
+    subjectCount: subjects.length,
+    subjects,
+    releaseImageDigests: imageDigests.map((entry) => entry.sha256),
+    matchedSubjects: imageDigests.map((entry) => ({
+      image: entry.image,
+      sha256: entry.sha256,
+      subjects: subjects.filter((subject) => subject.sha256 === entry.sha256).map((subject) => subject.name),
+    })),
+    missingSubjects: missingSubjects.map((entry) => entry.image),
+  };
+}
+
+function githubAttestationPathList(value) {
+  return csvList(value, "").map((entry) => path.resolve(entry));
+}
+
+function validateGithubSigstoreAttestations({
+  attestationPaths,
+  images,
+  releaseSha,
+  requireReleaseSha = true,
+  repository = null,
+}) {
+  const paths = attestationPaths.filter(Boolean);
+  if (!paths.length) {
+    return null;
+  }
+  const validations = paths.map((attestationPath) => validateGithubSigstoreAttestation({
+    attestationPath,
+    images,
+    releaseSha,
+    requireReleaseSha,
+    repository,
+    requireSubjectCoverage: false,
+  }));
+  const subjects = uniqueBy(validations.flatMap((validation) => validation.subjects), (subject) => `${subject.name ?? ""}@${subject.sha256}`);
+  const subjectDigestSet = new Set(subjects.map((subject) => subject.sha256));
+  const imageDigests = images
+    .map((image) => ({ image, sha256: digestFromImageRef(image) }))
+    .filter((entry) => entry.image);
+  const missingSubjects = imageDigests.filter((entry) => !subjectDigestSet.has(entry.sha256));
+  if (missingSubjects.length) {
+    fail(`GitHub/Sigstore attestations do not cover release images: ${missingSubjects.map((entry) => entry.image).join(", ")}`);
+  }
+
+  return {
+    status: "passed",
+    kind: "github-signed-attestation",
+    provider: "github-artifact-attestations",
+    verified: true,
+    completeness: "complete",
+    repository: validations.find((validation) => validation.repository)?.repository ?? repository,
+    workflowRunIds: uniqueBy(validations.map((validation) => validation.workflowRunId).filter(Boolean), (id) => String(id)),
+    commitSha: validations.find((validation) => validation.commitSha)?.commitSha ?? releaseSha ?? null,
+    commitShaMatched: validations.every((validation) => validation.commitShaMatched !== false),
+    attestationCount: validations.length,
+    attestations: validations.map((validation, index) => ({
+      path: paths[index],
+      workflowRunId: validation.workflowRunId,
+      subjectCount: validation.subjectCount,
+      subjects: validation.subjects,
+    })),
+    subjectCount: subjects.length,
+    subjects,
+    releaseImageDigests: imageDigests.map((entry) => entry.sha256),
+    matchedSubjects: imageDigests.map((entry) => ({
+      image: entry.image,
+      sha256: entry.sha256,
+      subjects: subjects.filter((subject) => subject.sha256 === entry.sha256).map((subject) => subject.name),
+    })),
   };
 }
 
@@ -1204,11 +1456,12 @@ const localTlsHostnames = new Set([
   "localhost",
   "127.0.0.1",
   "::1",
-  "ui.localhost.com",
+  "app.localhost.com",
+  "admin.localhost.com",
   "account.localhost.com",
   "api.localhost.com",
   "auth.localhost.com",
-  "minio.localhost.com",
+  "storage.localhost.com",
   "grafana.localhost.com",
 ]);
 
@@ -1536,7 +1789,7 @@ async function backupPostgres(options = {}) {
 async function certificateExpiryCheck() {
   const env = parseEnv(path.join(infraRoot, ".env"));
   const defaultHosts = [
-    env.UI_HOST ?? "ui.localhost.com",
+    env.UI_HOST ?? "app.localhost.com",
     env.ACCOUNT_HOST ?? "account.localhost.com",
     env.API_HOST ?? "api.localhost.com",
   ].join(",");
@@ -1627,7 +1880,7 @@ async function enterpriseHardeningAudit() {
 async function browserE2eTests() {
   log("==> Browser E2E tests");
   const env = parseEnv(path.join(infraRoot, ".env"));
-  const playwrightBaseUrl = env.NEXT_PUBLIC_UI_URL ?? env.UI_PUBLIC_URL ?? "https://ui.localhost.com";
+  const playwrightBaseUrl = env.NEXT_PUBLIC_UI_URL ?? env.UI_PUBLIC_URL ?? "https://app.localhost.com";
   const sourceMount = hostPathForContainerMount(sourceRoot);
   const bootstrap = [
     "set -eu",
@@ -2398,7 +2651,7 @@ function writeExternalUptimeReport({ manifestPath, providerEvidence, results, mo
 
 async function externalUptimeCheck(options = {}) {
   log("==> External uptime check");
-  const envFile = path.resolve(argv.envFile ?? path.join(infraRoot, ".env"));
+  const envFile = path.resolve(options.envFile ?? argv.envFile ?? path.join(infraRoot, ".env"));
   const variables = { ...parseEnv(envFile), ...process.env };
   const { manifestPath, manifest } = readExternalUptimeManifest();
   const defaults = manifest.defaults ?? {};
@@ -3786,7 +4039,7 @@ async function productionPreflight() {
   log("Production preflight passed.");
 }
 
-async function haConfigCheck() {
+async function haConfigCheck(options = {}) {
   log("==> HA multi-node configuration check");
   const haCompose = readText(path.join(infraRoot, "compose.ha.yaml"));
   for (const service of ["backend", "web", "worker-notifications", "worker-jobs"]) {
@@ -3798,25 +4051,29 @@ async function haConfigCheck() {
   for (const service of ["postgres", "redis", "nats", "minio"]) {
     assertMatch(haCompose, new RegExp(`^\\s{2}${service}:[\\s\\S]*?node\\.labels\\.platform\\.stateful == true`, "m"), `${service} must be pinned to stateful nodes or replaced by a managed tier.`);
   }
-  run("docker", [
-    "compose",
-    "--env-file",
-    ".env",
-    "-p",
-    "enterprise_prod_ha",
-    "-f",
-    "compose.yaml",
-    "-f",
-    "compose.prod.yaml",
-    "-f",
-    "compose.ha.yaml",
-    "config",
-    "--quiet",
-  ], { env: localProductionImageEnv() });
+  if (noDockerMode(options)) {
+    log("Skipping Docker Compose HA render in --noDocker/--repoOnly mode.");
+  } else {
+    run("docker", [
+      "compose",
+      "--env-file",
+      ".env",
+      "-p",
+      "enterprise_prod_ha",
+      "-f",
+      "compose.yaml",
+      "-f",
+      "compose.prod.yaml",
+      "-f",
+      "compose.ha.yaml",
+      "config",
+      "--quiet",
+    ], { env: localProductionImageEnv() });
+  }
   log("HA multi-node configuration check passed.");
 }
 
-async function managedSecretsPreflight() {
+async function managedSecretsPreflight(options = {}) {
   log("==> Managed secrets / KMS preflight");
   const managedCompose = readText(path.join(infraRoot, "compose.managed-secrets.yaml"));
   for (const secretName of [
@@ -3848,21 +4105,25 @@ async function managedSecretsPreflight() {
     assertMatch(managedCompose, new RegExp(`${fileEnv}:\\s+/run/secrets/`), `${fileEnv} must point at /run/secrets.`);
   }
   assertMatch(managedCompose, /GOOGLE_OAUTH_CLIENT_SECRET_FILE:\s+\$\{GOOGLE_OAUTH_CLIENT_SECRET_FILE-\}/, "Optional Google OAuth secret file must be externally configured when OAuth is enabled.");
-  run("docker", [
-    "compose",
-    "--env-file",
-    ".env",
-    "-p",
-    "enterprise_prod_managed_secrets",
-    "-f",
-    "compose.yaml",
-    "-f",
-    "compose.prod.yaml",
-    "-f",
-    "compose.managed-secrets.yaml",
-    "config",
-    "--quiet",
-  ], { env: localProductionImageEnv() });
+  if (noDockerMode(options)) {
+    log("Skipping Docker Compose managed-secret render in --noDocker/--repoOnly mode.");
+  } else {
+    run("docker", [
+      "compose",
+      "--env-file",
+      ".env",
+      "-p",
+      "enterprise_prod_managed_secrets",
+      "-f",
+      "compose.yaml",
+      "-f",
+      "compose.prod.yaml",
+      "-f",
+      "compose.managed-secrets.yaml",
+      "config",
+      "--quiet",
+    ], { env: localProductionImageEnv() });
+  }
   log("Managed secrets / KMS preflight passed.");
 }
 
@@ -4369,7 +4630,7 @@ async function auditLogEvidence(options = {}) {
       category: "source",
       sourceFile: true,
       filePath: backendAudit,
-      pattern: /await client\.query\("begin"\)[\s\S]*insert into (?:app_account|stexor_account)\.audit_events[\s\S]*insert into (?:app_account|stexor_account)\.audit_outbox[\s\S]*await client\.query\("commit"\)[\s\S]*rollback/,
+      pattern: /await client\.query\("begin"\)[\s\S]*insert into (?:app_account|platform_account)\.audit_events[\s\S]*insert into (?:app_account|platform_account)\.audit_outbox[\s\S]*await client\.query\("commit"\)[\s\S]*rollback/,
       detail: "Backend writes audit_events and audit_outbox in one transaction with rollback.",
     });
     addAuditLogPatternCheck(checks, issues, {
@@ -4414,7 +4675,7 @@ async function auditLogEvidence(options = {}) {
       category: "source",
       sourceFile: true,
       filePath: workerAuditStore,
-      pattern: /for update skip locked[\s\S]*set status = 'dead'[\s\S]*from (?:app_account|stexor_account)\.audit_outbox/,
+      pattern: /for update skip locked[\s\S]*set status = 'dead'[\s\S]*from (?:app_account|platform_account)\.audit_outbox/,
       detail: "Worker claims audit rows safely and moves exhausted delivery attempts to dead-letter.",
     });
     addAuditLogPatternCheck(checks, issues, {
@@ -5075,12 +5336,17 @@ async function secretRotationEvidence(options = {}) {
   }
 }
 
-async function releaseArtifactGate() {
+async function releaseArtifactGate(options = {}) {
   log("==> Release artifact admission gate");
-  const env = parseEnv(path.resolve(argv.envFile ?? path.join(infraRoot, ".env")));
-  const images = (argv.images ? argv.images.split(",") : releaseImageKeys.map((key) => env[key])).filter(Boolean);
+  const env = parseEnv(path.resolve(options.envFile ?? argv.envFile ?? path.join(infraRoot, ".env")));
+  const imageEntries = releaseImageEntries({
+    env,
+    imagesArg: options.images ?? argv.images,
+    manifestPath: options.imageManifest ?? argv.imageManifest ?? argv.projectManifest ?? argv.appManifest,
+  });
+  const images = imageEntries.map((entry) => entry.image);
   if (!images.length) {
-    fail("No release images found. Set BACKEND_IMAGE, WEB_IMAGE, WORKER_NOTIFICATIONS_IMAGE and WORKER_JOBS_IMAGE or pass --images.");
+    fail("No release images found. Pass --imageManifest <file>, --images <ref[,ref]> or legacy BACKEND_IMAGE/WEB_IMAGE/WORKER_* env values.");
   }
   for (const image of images) {
     if (/:latest(?:@|$)/.test(image)) {
@@ -5091,7 +5357,7 @@ async function releaseArtifactGate() {
     }
   }
 
-  const sbomFile = argv.sbom ?? latestFileByMtime(path.join(infraRoot, "security", "sbom"), (file) => /sbom.*\.(json|cdx\.json)$/i.test(path.basename(file)));
+  const sbomFile = options.sbom ?? argv.sbom ?? latestFileByMtime(path.join(infraRoot, "security", "sbom"), (file) => /sbom.*\.(json|cdx\.json)$/i.test(path.basename(file)));
   if (!sbomFile || !fs.existsSync(sbomFile)) {
     fail("A release SBOM artifact is required. Run generate-sbom or pass --sbom <file>.");
   }
@@ -5101,19 +5367,32 @@ async function releaseArtifactGate() {
   assertMatch(policy, /cosign\.sigstore\.dev\/verified/, "Admission policy must require cosign verification annotation.");
   assertMatch(policy, /slsa\.dev\/provenance/, "Admission policy must require SLSA provenance annotation.");
 
-  if (booleanFlag(argv.requireProvenance)) {
-    const provenance = argv.provenance;
-    if (!provenance || !fs.existsSync(path.resolve(provenance))) {
-      fail("SLSA provenance is required. Pass --provenance <file>.");
+  const githubAttestationPaths = githubAttestationPathList(options.githubAttestation ?? options.githubAttestations ?? argv.githubAttestation ?? argv.githubAttestations);
+  if (options.requireProvenance ?? booleanFlag(argv.requireProvenance)) {
+    const provenance = options.provenance ?? argv.provenance;
+    const hasLocalProvenance = provenance && fs.existsSync(path.resolve(provenance));
+    const hasGithubAttestation = githubAttestationPaths.length > 0 && githubAttestationPaths.every((file) => fs.existsSync(file));
+    if (!hasLocalProvenance && !hasGithubAttestation) {
+      fail("Release provenance is required. Pass --provenance <file> for local SLSA provenance or --githubAttestation <file[,file]> for GitHub/Sigstore verification reports.");
     }
   }
-  const provenancePath = argv.provenance ? path.resolve(argv.provenance) : null;
+  const provenance = options.provenance ?? argv.provenance;
+  const provenancePath = provenance ? path.resolve(provenance) : null;
   const provenanceValidation = provenancePath
     ? validateSlsaProvenance({
       provenancePath,
       images,
-      releaseSha: argv.releaseSha ?? gitEvidence().commit,
-      requireReleaseSha: !booleanFlag(argv.skipProvenanceCommitCheck),
+      releaseSha: options.releaseSha ?? argv.releaseSha ?? gitEvidence().commit,
+      requireReleaseSha: !(options.skipProvenanceCommitCheck ?? booleanFlag(argv.skipProvenanceCommitCheck)),
+    })
+    : null;
+  const githubAttestationValidation = githubAttestationPaths.length
+    ? validateGithubSigstoreAttestations({
+      attestationPaths: githubAttestationPaths,
+      images,
+      releaseSha: options.releaseSha ?? argv.releaseSha ?? gitEvidence().commit,
+      requireReleaseSha: !(options.skipProvenanceCommitCheck ?? booleanFlag(argv.skipProvenanceCommitCheck)),
+      repository: options.repository ?? options.repo ?? argv.repository ?? argv.repo ?? process.env.GITHUB_REPOSITORY ?? null,
     })
     : null;
   if (booleanFlag(argv.verifyCosign)) {
@@ -5122,14 +5401,14 @@ async function releaseArtifactGate() {
     }
   }
   log(`Release artifact admission gate passed with SBOM ${sbomFile}.`);
-  return { sbomFile, provenanceValidation };
+  return { sbomFile, provenanceValidation, githubAttestationValidation };
 }
 
-function releaseImageMapFromEnv(env) {
-  return Object.fromEntries(releaseImageKeys.map((key) => [key, env[key] ?? null]));
+function releaseImageMapFromEnv(env, manifestPath = null) {
+  return imageMapFromEntries(releaseImageEntries({ env, manifestPath }));
 }
 
-function previousReleaseImageMap(env, fileImages = {}) {
+function previousReleaseImageMap(env, fileImages = {}, imageKeys = releaseImageKeys) {
   const aliases = {
     BACKEND_IMAGE: ["BACKEND_IMAGE", "backendImage", "PREVIOUS_BACKEND_IMAGE"],
     WEB_IMAGE: ["WEB_IMAGE", "webImage", "PREVIOUS_WEB_IMAGE"],
@@ -5142,10 +5421,11 @@ function previousReleaseImageMap(env, fileImages = {}) {
     WORKER_NOTIFICATIONS_IMAGE: "previousWorkerNotificationsImage",
     WORKER_JOBS_IMAGE: "previousWorkerJobsImage",
   };
-  return Object.fromEntries(releaseImageKeys.map((key) => {
+  return Object.fromEntries(imageKeys.map((key) => {
     const value = argv[previousArgNames[key]]
-      ?? aliases[key].map((alias) => fileImages[alias]).find(Boolean)
+      ?? (aliases[key] ?? [key, `PREVIOUS_${key}`]).map((alias) => fileImages[alias]).find(Boolean)
       ?? env[`PREVIOUS_${key}`]
+      ?? fileImages[key]
       ?? null;
     return [key, value];
   }));
@@ -5180,10 +5460,15 @@ function safeReleaseArtifactRef(filePath, issues, label) {
   return releaseArtifactRef(resolved);
 }
 
+function safeReleaseArtifactRefs(filePaths, issues, label) {
+  return filePaths.map((filePath, index) => safeReleaseArtifactRef(filePath, issues, `${label} #${index + 1}`)).filter(Boolean);
+}
+
 function writeReleaseEvidenceReport(payload) {
   const stamp = reportTimestamp();
   const currentImages = payload.currentImages ?? {};
   const previousImages = payload.previousImages ?? {};
+  const imageKeys = Object.keys(currentImages);
   const firstDeploy = Boolean(payload.rollback?.firstDeploy);
   const rollbackFilePath = payload.rollback?.file ?? null;
   const rollbackDryRun = payload.rollback?.dryRun ?? null;
@@ -5201,12 +5486,15 @@ function writeReleaseEvidenceReport(payload) {
     "",
     "| Image variable | Current image | Rollback image |",
     "| --- | --- | --- |",
-    ...releaseImageKeys.map((key) => `| ${key} | \`${currentImages[key] ?? "n/a"}\` | \`${previousImages[key] ?? (firstDeploy ? "first deploy" : "missing")}\` |`),
+    ...imageKeys.map((key) => `| ${key} | \`${currentImages[key] ?? "n/a"}\` | \`${previousImages[key] ?? (firstDeploy ? "first deploy" : "missing")}\` |`),
     "",
     "| Artifact | Path | SHA256 |",
     "| --- | --- | --- |",
     `| SBOM | ${payload.artifacts?.sbom?.path ?? "n/a"} | ${payload.artifacts?.sbom?.sha256 ?? "n/a"} |`,
     `| Provenance | ${payload.artifacts?.provenance?.path ?? "n/a"} | ${payload.artifacts?.provenance?.sha256 ?? "n/a"} |`,
+    ...(payload.artifacts?.githubAttestations?.length
+      ? payload.artifacts.githubAttestations.map((artifact, index) => `| GitHub/Sigstore attestation ${index + 1} | ${artifact.path} | ${artifact.sha256} |`)
+      : ["| GitHub/Sigstore attestation | n/a | n/a |"]),
     `| Signature bundle | ${payload.artifacts?.signatureBundle?.path ?? "n/a"} | ${payload.artifacts?.signatureBundle?.sha256 ?? "n/a"} |`,
     "",
     `Rollback file: ${rollbackFilePath ?? (firstDeploy ? "first deploy" : "n/a")}`,
@@ -5230,16 +5518,23 @@ async function releaseEvidence(options = {}) {
   const allowUnpinned = options.allowUnpinnedReleaseImages ?? booleanFlag(argv.allowUnpinnedReleaseImages);
   const envFile = path.resolve(options.envFile ?? argv.envFile ?? path.join(infraRoot, ".env"));
   const env = fs.existsSync(envFile) ? parseEnv(envFile) : {};
-  const currentImages = releaseImageMapFromEnv(env);
+  const imageManifest = options.imageManifest ?? argv.imageManifest ?? argv.projectManifest ?? argv.appManifest ?? null;
+  const currentImageEntries = releaseImageEntries({
+    env,
+    imagesArg: options.images ?? argv.images,
+    manifestPath: imageManifest,
+  });
+  const currentImages = imageMapFromEntries(currentImageEntries);
   const previousImagesFileArg = options.previousImagesFile ?? argv.previousImagesFile;
   const previousImagesFile = previousImagesFileArg ? path.resolve(previousImagesFileArg) : null;
   const previousFileImages = previousImagesFile && fs.existsSync(previousImagesFile) ? readJsonFile(previousImagesFile, previousImagesFile) : {};
-  const previousImages = previousReleaseImageMap(env, previousFileImages);
+  const previousImages = previousReleaseImageMap(env, previousFileImages, Object.keys(currentImages));
   const sbomPath = options.sbom ?? argv.sbom ?? latestFileByMtime(path.join(infraRoot, "security", "sbom"), (file) => /sbom.*\.(json|cdx\.json)$/i.test(path.basename(file)));
   const provenanceArg = options.provenance ?? argv.provenance;
   const provenancePath = provenanceArg ? path.resolve(provenanceArg) : null;
   const signatureBundleArg = options.signatureBundle ?? argv.signatureBundle;
   const signatureBundlePath = signatureBundleArg ? path.resolve(signatureBundleArg) : null;
+  const githubAttestationPaths = githubAttestationPathList(options.githubAttestation ?? options.githubAttestations ?? argv.githubAttestation ?? argv.githubAttestations);
   const releaseSha = options.releaseSha ?? argv.releaseSha ?? gitEvidence().commit;
   const releaseName = options.releaseName ?? argv.releaseName ?? releaseSha?.slice(0, 12) ?? `release-${reportTimestamp()}`;
   const rollbackProjectName = options.rollbackProjectName ?? argv.rollbackProjectName ?? argv.projectName ?? "enterprise_prod";
@@ -5248,6 +5543,7 @@ async function releaseEvidence(options = {}) {
   const generatedAt = new Date().toISOString();
   const issues = [];
   let provenanceValidation = null;
+  let githubAttestationValidation = null;
 
   if (!planOnly) {
     try {
@@ -5270,17 +5566,34 @@ async function releaseEvidence(options = {}) {
       }
       readJsonFile(path.resolve(sbomPath), sbomPath);
       const requireProvenance = options.requireProvenance ?? booleanFlag(argv.requireProvenance);
-      if (requireProvenance && !provenancePath) {
-        fail("SLSA provenance is required. Pass --provenance <file>.");
+      if (requireProvenance && !provenancePath && !githubAttestationPaths.length) {
+        fail("Release provenance is required. Pass --provenance <file> or --githubAttestation <file[,file]>.");
       }
       if (provenancePath && !fs.existsSync(provenancePath)) {
         fail(`SLSA provenance artifact not found: ${provenancePath}`);
       }
+      for (const githubAttestationPath of githubAttestationPaths) {
+        if (!fs.existsSync(githubAttestationPath)) {
+          fail(`GitHub/Sigstore attestation report not found: ${githubAttestationPath}`);
+        }
+      }
       if (signatureBundlePath && !fs.existsSync(signatureBundlePath)) {
         fail(`Signature bundle artifact not found: ${signatureBundlePath}`);
       }
-      const artifactGate = await releaseArtifactGate();
+      const artifactGate = await releaseArtifactGate({
+        envFile,
+        images: options.images ?? argv.images,
+        imageManifest,
+        sbom: sbomPath,
+        provenance: provenancePath,
+        githubAttestation: githubAttestationPaths,
+        requireProvenance,
+        releaseSha,
+        skipProvenanceCommitCheck: options.skipProvenanceCommitCheck ?? booleanFlag(argv.skipProvenanceCommitCheck),
+        repository: options.repository ?? options.repo ?? argv.repository ?? argv.repo ?? process.env.GITHUB_REPOSITORY ?? null,
+      });
       provenanceValidation = artifactGate.provenanceValidation;
+      githubAttestationValidation = artifactGate.githubAttestationValidation;
     } catch (error) {
       issues.push(String(error?.message ?? error));
     }
@@ -5288,8 +5601,9 @@ async function releaseEvidence(options = {}) {
 
   const sbom = planOnly && !sbomPath ? null : safeReleaseArtifactRef(sbomPath, issues, "SBOM");
   const provenance = safeReleaseArtifactRef(provenancePath, issues, "SLSA provenance");
+  const githubAttestations = safeReleaseArtifactRefs(githubAttestationPaths, issues, "GitHub/Sigstore attestation");
   const signatureBundle = safeReleaseArtifactRef(signatureBundlePath, issues, "Signature bundle");
-  const rollbackComplete = releaseImageKeys.every((key) => Boolean(previousImages[key]));
+  const rollbackComplete = Object.keys(currentImages).length > 0 && Object.keys(currentImages).every((key) => Boolean(previousImages[key]));
   const releaseRoot = path.join(infraRoot, "release");
   let rollbackFilePath = null;
   let rollbackDryRun = null;
@@ -5331,6 +5645,7 @@ async function releaseEvidence(options = {}) {
     environment: argv.environment ?? "production",
     git: gitEvidence(),
     envFile: fs.existsSync(envFile) ? envFile : null,
+    imageManifest: imageManifest ? path.resolve(imageManifest) : null,
     currentImages,
     previousImages,
     rollback: {
@@ -5343,11 +5658,14 @@ async function releaseEvidence(options = {}) {
     artifacts: {
       sbom,
       provenance,
+      githubAttestations,
       signatureBundle,
     },
     attestations: {
       provenanceRequired: options.requireProvenance ?? booleanFlag(argv.requireProvenance),
-      slsaProvenance: provenanceValidation,
+      localProvenance: provenanceValidation ? { ...provenanceValidation, kind: "local-provenance", completeness: "partial" } : null,
+      slsaProvenance: provenanceValidation ? { ...provenanceValidation, kind: "local-provenance", completeness: "partial" } : null,
+      githubSigstore: githubAttestationValidation,
       cosignVerified: (options.verifyCosign ?? booleanFlag(argv.verifyCosign)) && !planOnly,
     },
     issues,
@@ -5374,6 +5692,60 @@ async function releaseEvidence(options = {}) {
   }
 }
 
+async function githubAttestationEvidence() {
+  log("==> GitHub/Sigstore attestation evidence");
+  const verificationArg = argv.verification ?? argv.githubAttestation ?? argv.githubAttestationReport;
+  if (!verificationArg) {
+    fail("Pass --verification <file> with a GitHub/Sigstore attestation verification report.");
+  }
+  const verificationPath = path.resolve(verificationArg);
+  if (!fs.existsSync(verificationPath)) {
+    fail(`GitHub/Sigstore attestation verification report not found: ${verificationPath}`);
+  }
+  const images = (argv.images ? argv.images.split(",") : []).map((image) => image.trim()).filter(Boolean);
+  const releaseSha = argv.releaseSha ?? argv.sha ?? gitEvidence().commit;
+  const validation = validateGithubSigstoreAttestation({
+    attestationPath: verificationPath,
+    images,
+    releaseSha,
+    requireReleaseSha: !booleanFlag(argv.skipProvenanceCommitCheck),
+    repository: argv.repository ?? argv.repo ?? process.env.GITHUB_REPOSITORY ?? null,
+    expectedSubjectName: argv.expectedSubjectName ?? argv.subjectName ?? null,
+    expectedSubjectDigest: argv.expectedSubjectDigest ?? argv.subjectDigest ?? null,
+    requireSubjectCoverage: images.length > 0,
+  });
+  const stamp = reportTimestamp();
+  const payload = {
+    generatedAt: new Date().toISOString(),
+    status: "passed",
+    mode: "verify",
+    releaseSha,
+    git: gitEvidence(),
+    source: releaseArtifactRef(verificationPath),
+    attestation: validation,
+    nextCommands: [
+      "sh ./scripts/release-evidence.sh --requireProvenance --githubAttestation reports/release/github-sigstore-attestation-<stamp>.json --previousImagesFile release/previous-images.json",
+    ],
+  };
+  const jsonPath = writeJsonReport("release", `github-sigstore-attestation-${stamp}`, payload);
+  const markdownPath = writeMarkdownReport("release", `github-sigstore-attestation-${stamp}`, [
+    "# GitHub/Sigstore Attestation Evidence",
+    "",
+    `Status: ${payload.status}`,
+    `Mode: ${payload.mode}`,
+    `Generated at: ${payload.generatedAt}`,
+    `Repository: ${validation.repository ?? "n/a"}`,
+    `Commit: ${validation.commitSha ?? "n/a"}`,
+    `Workflow run id: ${validation.workflowRunId ?? "n/a"}`,
+    `Subject count: ${validation.subjectCount}`,
+    "",
+    "| Subject | SHA256 |",
+    "| --- | --- |",
+    ...validation.subjects.map((subject) => `| ${subject.name ?? "n/a"} | ${subject.sha256} |`),
+  ]);
+  log(`GitHub/Sigstore attestation evidence written to ${jsonPath} and ${markdownPath}`);
+}
+
 async function rollbackRelease() {
   log("==> Release rollback");
   const envFile = path.resolve(argv.envFile ?? path.join(infraRoot, ".env"));
@@ -5382,12 +5754,25 @@ async function rollbackRelease() {
   }
   const rollbackFile = argv.rollbackFile ? path.resolve(argv.rollbackFile) : null;
   const fileImages = rollbackFile ? readJsonFile(rollbackFile, rollbackFile) : {};
-  const imageOverrides = {
-    BACKEND_IMAGE: argv.backendImage ?? fileImages.BACKEND_IMAGE ?? fileImages.backendImage,
-    WEB_IMAGE: argv.webImage ?? fileImages.WEB_IMAGE ?? fileImages.webImage,
-    WORKER_NOTIFICATIONS_IMAGE: argv.workerNotificationsImage ?? fileImages.WORKER_NOTIFICATIONS_IMAGE ?? fileImages.workerNotificationsImage,
-    WORKER_JOBS_IMAGE: argv.workerJobsImage ?? fileImages.WORKER_JOBS_IMAGE ?? fileImages.workerJobsImage,
+  const imageOverrides = Object.fromEntries(
+    Object.entries(fileImages)
+      .filter(([key, value]) => /^[A-Z0-9_]+_IMAGE$/.test(key) && value)
+      .map(([key, value]) => [key, value]),
+  );
+  const legacyImageOverrides = {
+    BACKEND_IMAGE: argv.backendImage ?? fileImages.backendImage,
+    WEB_IMAGE: argv.webImage ?? fileImages.webImage,
+    WORKER_NOTIFICATIONS_IMAGE: argv.workerNotificationsImage ?? fileImages.workerNotificationsImage,
+    WORKER_JOBS_IMAGE: argv.workerJobsImage ?? fileImages.workerJobsImage,
   };
+  for (const [key, value] of Object.entries(legacyImageOverrides)) {
+    if (value) {
+      imageOverrides[key] = value;
+    }
+  }
+  if (Object.keys(imageOverrides).length === 0) {
+    fail("No rollback images found. Pass --rollbackFile with *_IMAGE keys or legacy --backendImage/--webImage worker image arguments.");
+  }
   for (const [key, image] of Object.entries(imageOverrides)) {
     assertImmutableImageRef(key, image);
   }
@@ -5420,7 +5805,7 @@ async function rollbackRelease() {
   log(`Rollback applied. Previous env copied to ${backupEnvPath}. Plan: ${rollbackPlan.jsonPath}`);
 }
 
-async function drReadinessCheck() {
+async function drReadinessCheck(options = {}) {
   log("==> DR / PITR readiness check");
   const drCompose = readText(path.join(infraRoot, "compose.dr.yaml"));
   const plan = readText(path.join(infraRoot, "ENTERPRISE-10-PLAN.md"));
@@ -5432,21 +5817,25 @@ async function drReadinessCheck() {
   assertMatch(plan, /RTO:\s+60 minutes/i, "Enterprise plan must declare the RTO target.");
   assertMatch(runbook, /offsite-backup-restic/, "Runbook must include encrypted off-site backup procedure.");
   assertMatch(runbook, /backup-restore-drill/, "Runbook must include scheduled restore drill procedure.");
-  run("docker", [
-    "compose",
-    "--env-file",
-    ".env",
-    "-p",
-    "enterprise_prod_dr",
-    "-f",
-    "compose.yaml",
-    "-f",
-    "compose.prod.yaml",
-    "-f",
-    "compose.dr.yaml",
-    "config",
-    "--quiet",
-  ], { env: localProductionImageEnv() });
+  if (noDockerMode(options)) {
+    log("Skipping Docker Compose DR render in --noDocker/--repoOnly mode.");
+  } else {
+    run("docker", [
+      "compose",
+      "--env-file",
+      ".env",
+      "-p",
+      "enterprise_prod_dr",
+      "-f",
+      "compose.yaml",
+      "-f",
+      "compose.prod.yaml",
+      "-f",
+      "compose.dr.yaml",
+      "config",
+      "--quiet",
+    ], { env: localProductionImageEnv() });
+  }
   log("DR / PITR readiness check passed.");
 }
 
@@ -7394,12 +7783,21 @@ async function productionGoNoGo() {
   const releaseFresh = reportFreshDetail(release, maxAge.release);
   const latestReleaseFresh = reportFreshDetail(latestReleaseReport, maxAge.release);
   const releasePayload = release?.payload ?? {};
-  const releaseProvenanceOk = !policy.requireReleaseProvenance || Boolean(
+  const releaseGithubProvenanceOk = Boolean(
+    releasePayload.artifacts?.githubAttestations?.length
+      && releasePayload.attestations?.provenanceRequired
+      && releasePayload.attestations?.githubSigstore?.status === "passed"
+      && releasePayload.attestations?.githubSigstore?.verified === true
+      && releasePayload.attestations?.githubSigstore?.completeness === "complete"
+      && releasePayload.attestations?.githubSigstore?.commitShaMatched !== false,
+  );
+  const releaseLocalProvenancePartial = Boolean(
     releasePayload.artifacts?.provenance
       && releasePayload.attestations?.provenanceRequired
       && releasePayload.attestations?.slsaProvenance?.status === "passed"
       && releasePayload.attestations?.slsaProvenance?.releaseShaMatched !== false,
   );
+  const releaseProvenanceOk = !policy.requireReleaseProvenance || releaseGithubProvenanceOk;
   const releaseGitOk = !policy.requireCleanReleaseGit || releasePayload.git?.dirty === false;
   const releaseRollbackOk = Boolean(
     releasePayload.rollback?.complete
@@ -7409,7 +7807,7 @@ async function productionGoNoGo() {
     name: "release-evidence-and-rollback",
     passed: Boolean(release && releaseFresh.fresh && releasePayload.mode === "evidence" && releasePayload.status === "passed" && releaseRollbackOk && releasePayload.artifacts?.sbom && releaseProvenanceOk && releaseGitOk),
     detail: release
-      ? `${releaseFresh.detail}; mode=${releasePayload.mode}; status=${releasePayload.status ?? "unknown"}; rollback=${releaseRollbackOk ? "validated" : "missing"}; provenance=${releaseProvenanceOk ? "yes" : "no"}; cleanGit=${releaseGitOk ? "yes" : "no"}`
+      ? `${releaseFresh.detail}; mode=${releasePayload.mode}; status=${releasePayload.status ?? "unknown"}; rollback=${releaseRollbackOk ? "validated" : "missing"}; provenance=${releaseGithubProvenanceOk ? "github-signed-attestation" : releaseLocalProvenancePartial ? "local-provenance-partial" : "missing"}; cleanGit=${releaseGitOk ? "yes" : "no"}`
       : latestReleaseReport
         ? `missing evidence report; latestReleaseMode=${latestReleaseReport.payload.mode ?? "unknown"}; latestStatus=${latestReleaseReport.payload.status ?? "unknown"}; ${latestReleaseFresh.detail}`
         : releaseFresh.detail,
@@ -8008,12 +8406,18 @@ async function enterpriseRequirementsCheck() {
 
 async function enterpriseTenCheck() {
   log("==> Enterprise 10 readiness gate");
-  await haConfigCheck();
-  await managedSecretsPreflight();
-  await releaseArtifactGate();
-  await drReadinessCheck();
+  const repoOnly = booleanFlag(argv.repoOnly);
+  const noDocker = noDockerMode({ noDocker: repoOnly });
+  await haConfigCheck({ noDocker });
+  await managedSecretsPreflight({ noDocker });
+  if (repoOnly) {
+    log("Skipping release artifact admission in --repoOnly mode; run with real release image manifest and SBOM for release go/no-go.");
+  } else {
+    await releaseArtifactGate();
+  }
+  await drReadinessCheck({ noDocker });
   await governanceCheck();
-  await externalUptimeCheck({ dryRun: true });
+  await externalUptimeCheck({ dryRun: true, envFile: repoOnly ? path.join(infraRoot, ".env.example") : undefined });
   await linuxPortabilityCheck();
   await staticSecurityCheck();
   await controlCenterTests();
@@ -9293,7 +9697,7 @@ async function secretScan() {
 
 async function securitySmoke() {
   const env = parseEnv(path.join(infraRoot, ".env"));
-  const uiPublicUrl = argv.uiBase ?? env.UI_PUBLIC_URL ?? env.NEXT_PUBLIC_UI_URL ?? "https://ui.localhost.com";
+  const uiPublicUrl = argv.uiBase ?? env.UI_PUBLIC_URL ?? env.NEXT_PUBLIC_UI_URL ?? "https://app.localhost.com";
   const accountPublicUrl = argv.accountBase ?? env.ACCOUNT_PUBLIC_URL ?? env.NEXT_PUBLIC_ACCOUNT_URL ?? "https://account.localhost.com";
   const apiPublicUrl = argv.apiBase ?? env.API_PUBLIC_URL ?? env.NEXT_PUBLIC_API_URL ?? "https://api.localhost.com";
   const uiBase = String(uiPublicUrl).replace(/\/$/, "");
@@ -9337,7 +9741,7 @@ async function securitySmoke() {
 
 async function wafSmoke() {
   const apiBase = (argv.apiBase ?? "https://api.localhost.com").replace(/\/$/, "");
-  const phpBase = (argv.phpBase ?? "https://projects.localhost.com").replace(/\/$/, "");
+  const phpBase = (argv.phpBase ?? "https://admin.localhost.com").replace(/\/$/, "");
   const smokeHeaders = { "User-Agent": "platform-waf-smoke/1.0" };
   log("==> WAF smoke checks");
 
@@ -9391,9 +9795,9 @@ async function infraHealth() {
     .map((container) => container.trim())
     .filter(Boolean);
   const apiBase = (argv.apiBase ?? "https://api.localhost.com").replace(/\/$/, "");
-  const uiBase = (argv.uiBase ?? "https://ui.localhost.com").replace(/\/$/, "");
+  const uiBase = (argv.uiBase ?? "https://app.localhost.com").replace(/\/$/, "");
   const accountBase = (argv.accountBase ?? "https://account.localhost.com").replace(/\/$/, "");
-  const projectsBase = (argv.projectsBase ?? "https://projects.localhost.com").replace(/\/$/, "");
+  const adminBase = (argv.adminBase ?? argv.projectsBase ?? "https://admin.localhost.com").replace(/\/$/, "");
   let inferredAdminScheme = "https";
   try {
     inferredAdminScheme = new URL(apiBase).protocol === "http:" ? "http" : "https";
@@ -9434,13 +9838,13 @@ async function infraHealth() {
     { name: "api-health", method: "GET", url: `${apiBase}/health`, statuses: [200] },
     { name: "ui-home", method: "HEAD", url: `${uiBase}/`, statuses: [200, 308] },
     { name: "account-home", method: "HEAD", url: `${accountBase}/`, statuses: [200, 308] },
-    { name: "projects-gateway", method: "GET", url: `${projectsBase}/`, statuses: [200], body: /Stexor Control Center|Documentation and project launcher|Local infrastructure/ },
+    { name: "admin-control-center", method: "GET", url: `${adminBase}/`, statuses: [200], body: /Admin Control Center|Documentation and project launcher|Local infrastructure/ },
     { name: "grafana-login", method: "GET", url: grafanaBase, statuses: grafanaStatuses },
     { name: "admin-traefik-block", method: "GET", url: adminBlockUrl("traefik.localhost.com", "/dashboard/"), statuses: [403, 404], headers: adminBlockHeaders("traefik.localhost.com") },
     { name: "admin-prometheus-block", method: "GET", url: adminBlockUrl("prometheus.localhost.com"), statuses: [403, 404], headers: adminBlockHeaders("prometheus.localhost.com") },
     { name: "admin-alertmanager-block", method: "GET", url: adminBlockUrl("alertmanager.localhost.com"), statuses: [403, 404], headers: adminBlockHeaders("alertmanager.localhost.com") },
     { name: "waf-xss-block", method: "GET", url: `${apiBase}/health?x=%3Cscript%3Ealert(1)%3C%2Fscript%3E`, statuses: [403, 406] },
-    { name: "waf-sensitive-file-block", method: "GET", url: `${projectsBase}/.env`, statuses: [403, 404] },
+    { name: "waf-sensitive-file-block", method: "GET", url: `${adminBase}/.env`, statuses: [403, 404] },
   ];
   for (const check of httpChecks) {
     const started = Date.now();
@@ -9520,6 +9924,7 @@ function staticSecurityInfraOnlyCheck() {
   const githubRunEvidenceWorkflow = readText(path.join(infraRoot, ".github", "workflows", "enterprise-infra-run-evidence.yml"));
   const githubLiveEvidenceWorkflow = readText(path.join(infraRoot, ".github", "workflows", "enterprise-live-evidence.yml"));
   const githubVpsEvidenceWorkflow = readText(path.join(infraRoot, ".github", "workflows", "enterprise-vps-evidence.yml"));
+  const releaseAttestationWorkflow = readText(path.join(infraRoot, ".github", "workflows", "release-attestation.yml"));
   const readme = readText(path.join(infraRoot, "README.md"));
   const runbook = readText(path.join(infraRoot, "RUNBOOK.md"));
   const envExample = readText(path.join(infraRoot, ".env.example"));
@@ -9534,10 +9939,6 @@ function staticSecurityInfraOnlyCheck() {
   const controlCenterServer = readText(path.join(infraRoot, "control-center", "server.mjs"));
   const controlCenterPackage = readText(path.join(infraRoot, "control-center", "package.json"));
   const controlCenterTest = readText(path.join(infraRoot, "control-center", "tests", "control-center.test.mjs"));
-  const controlCenterUiPackage = readText(path.join(infraRoot, "control-center", "vendor", "@stexor", "ui", "package.json"));
-  const controlCenterUiManifest = readText(path.join(infraRoot, "control-center", "vendor", "@stexor", "ui", "api-manifest.json"));
-  const controlCenterUiStyles = readText(path.join(infraRoot, "control-center", "vendor", "@stexor", "ui", "src", "styles.css"));
-  const controlCenterUiAppStyles = readText(path.join(infraRoot, "control-center", "vendor", "@stexor", "ui", "src", "ui.css"));
   const controlCenterLocalStyles = readText(path.join(infraRoot, "control-center", "styles", "control-center.css"));
   const controlCenterLocalComponents = readText(path.join(infraRoot, "control-center", "components", "ui", "controlCenterUi.mjs"));
   const projectRouterServer = readText(path.join(infraRoot, "project-router", "server.mjs"));
@@ -9568,6 +9969,7 @@ function staticSecurityInfraOnlyCheck() {
     githubRunEvidenceWorkflow,
     githubLiveEvidenceWorkflow,
     githubVpsEvidenceWorkflow,
+    releaseAttestationWorkflow,
     readme,
     runbook,
     envExample,
@@ -9603,8 +10005,8 @@ function staticSecurityInfraOnlyCheck() {
   assertMatch(phpApacheDockerfile, /a2enmod(?=[^\n]*rewrite)(?=[^\n]*headers)(?=[^\n]*ssl)(?=[^\n]*proxy)(?=[^\n]*proxy_http)(?=[^\n]*vhost_alias)/, "PHP Apache image must enable the required hosting modules.");
   assertMatch(`${phpApacheHttpVhost}\n${phpApacheHttpsVhost}`, /VirtualDocumentRoot\s+\/var\/www\/projects\/%1\/public/, "PHP Apache must route project subdomains to /var/www/projects/<name>/public dynamically.");
   assertMatch(projectRouterServer, /stopManagedProject[\s\S]*Project disabled[\s\S]*nodeUpstream/, "Project Router must stop managed Node projects when local routing is disabled.");
-  assertMatch(projectRouterTest, /NODE_PROJECT_COMMANDS[\s\S]*anniversary\.localhost\.com[\s\S]*stexor\.localhost\.com[\s\S]*Project disabled[\s\S]*nodeAfterEnablePayload\.runtime[\s\S]*nodeAfterEnablePayload\.host/, "Project Router tests must prove simultaneous PHP and Node hosting plus disable/re-enable behavior without host npm.");
-  assertNoMatch(infrastructureText, /PHP_(?:STREAM|ANNIVERSARY|WORKCALENDAR|FIREPORT)_SOURCE_DIR|(?:STREAM|ANNIVERSARY|WORKCALENDAR|FIREPORT)_HOST|stream\.localhost|anniversary\.localhost|workcalendar\.localhost|fireport\.localhost|fireport\.top/, "Infrastructure must not hardcode individual PHP project mounts or hostnames.");
+  assertMatch(projectRouterTest, /NODE_PROJECT_COMMANDS[\s\S]*php-demo\.localhost\.com[\s\S]*node-demo\.localhost\.com[\s\S]*Project disabled[\s\S]*nodeAfterEnablePayload\.runtime[\s\S]*nodeAfterEnablePayload\.host/, "Project Router tests must prove simultaneous PHP and Node hosting plus disable/re-enable behavior without host npm.");
+  assertNoMatch(infrastructureText, /PHP_(?!(?:PROJECTS|SOURCE)_)[A-Z0-9]+_SOURCE_DIR/, "Infrastructure must not hardcode individual PHP project source mounts.");
   assertMatch(envExample, /PHP_PROJECTS_DIR=\.\.\/src/, "Environment example must point PHP projects at the generic src directory.");
   assertMatch(envExample, /PROJECTS_WILDCARD_HOST_REGEXP=/, "Environment example must expose the project wildcard host regexp.");
   assertMatch(opsDockerfile, /docker-cli[\s\S]*docker-cli-compose/, "Ops container must include Docker CLI and Compose plugin.");
@@ -9638,20 +10040,15 @@ function staticSecurityInfraOnlyCheck() {
   assertMatch(compose, /control-center:[\s\S]*PROJECT_SENSITIVE_MATERIALS_FILE:\s+\/var\/www\/project-state\/sensitive-materials\.json/, "Control Center must persist metadata-only sensitive material inventory from the Node service.");
   assertMatch(controlCenterServer, /sensitiveMaterialsFile[\s\S]*handleMaterialCommand[\s\S]*planMaterialDeclare[\s\S]*planMaterialRotation[\s\S]*planMaterialUsage[\s\S]*planMaterialAccessAudit[\s\S]*readSensitiveMaterialsState[\s\S]*writeSensitiveMaterialsState/, "Control Center must manage sensitive material inventory, rotation, usage and access audit through a dedicated Node-managed JSON store.");
   assertMatch(controlCenterTest, /sensitive-materials\.json[\s\S]*\/control\/secrets\/materials[\s\S]*DECLARE-MATERIAL[\s\S]*material-plain-value-should-not-leak/, "Control Center tests must cover metadata-only sensitive material persistence, rotation, usage/access audit and plaintext redaction.");
-  assertMatch(controlCenterPackage, /"name":\s+"@stexor\/control-center"/, "Control Center project identity must stay intact.");
-  assertNoMatch(controlCenterPackage, /"@stexor\/ui"/, "Control Center project must not depend on @stexor/ui.");
-  assertMatch(controlCenterUiPackage, /"name":\s+"@stexor\/ui"[\s\S]*"exports"[\s\S]*"\.\/styles\.css"[\s\S]*"\.\/ui\.css"/, "Vendored @stexor/ui package must remain available in the repository for non-Control-Center use.");
-  assertMatch(controlCenterUiManifest, /(?=[\s\S]*"package":\s+"@stexor\/ui")(?=[\s\S]*"UiShell")(?=[\s\S]*"PillSidebarNav")(?=[\s\S]*"StatusPill")/, "Vendored @stexor/ui API manifest must remain intact even though Control Center no longer uses it visually.");
-  assertMatch(controlCenterUiStyles, /base-01-foundation\.css[\s\S]*ui-02-controls\.css/, "Vendored @stexor/ui styles.css must remain intact for the rest of the platform.");
-  assertMatch(controlCenterUiAppStyles, /ui-04-app\.css[\s\S]*ui-03-monochrome-surfaces\.css/, "Vendored @stexor/ui ui.css must remain intact for the rest of the platform.");
+  assertMatch(controlCenterPackage, /"name":\s+"@platform\/control-center"/, "Control Center project identity must stay generic.");
   assertMatch(controlCenterLocalStyles, /(?=[\s\S]*--cc-bg)(?=[\s\S]*--cc-surface)(?=[\s\S]*--cc-surface-raised)(?=[\s\S]*--cc-text)(?=[\s\S]*--cc-muted)(?=[\s\S]*--cc-accent)(?=[\s\S]*--cc-radius)(?=[\s\S]*--cc-shadow)(?=[\s\S]*\.cc-app-shell)(?=[\s\S]*\.cc-sidebar)(?=[\s\S]*\.cc-nav-toggle)(?=[\s\S]*\.cc-nav-panel)(?=[\s\S]*\.cc-nav-child)/, "Control Center must provide a local --cc-* visual system with app shell and expandable sidebar navigation.");
   assertNoMatch(controlCenterLocalStyles, /\.card[\s\S]*border:\s*1px\s+solid/i, "Control Center cards must not use border: 1px solid for contrast.");
   assertMatch(controlCenterLocalComponents, /(?=[\s\S]*AppShell)(?=[\s\S]*Sidebar)(?=[\s\S]*Topbar)(?=[\s\S]*PageHeader)(?=[\s\S]*Section)(?=[\s\S]*Card)(?=[\s\S]*MetricCard)(?=[\s\S]*StatusPill)(?=[\s\S]*ActionButton)(?=[\s\S]*TabGroup)(?=[\s\S]*DataList)(?=[\s\S]*EmptyState)(?=[\s\S]*AlertBanner)(?=[\s\S]*EnvironmentBadge)(?=[\s\S]*ProjectSwitcher)(?=[\s\S]*SimpleAdvancedToggle)/, "Control Center must define the requested local UI component contract.");
   assertMatch(`${controlCenterServer}\n${controlCenterLocalComponents}`, /(?=[\s\S]*serveStaticAsset[\s\S]*\/assets\/control-center\/)(?=[\s\S]*route\(parts, "control", "ui-package"\))(?=[\s\S]*readControlCenterUiPackage)(?=[\s\S]*controlCenterStylesheetLinks)(?=[\s\S]*\/assets\/control-center\/control-center\.css)(?=[\s\S]*cc-app-shell)(?=[\s\S]*cc-sidebar)(?=[\s\S]*cc-nav-toggle)(?=[\s\S]*cc-nav-panel)/, "Control Center must serve and render through its local expandable-sidebar visual system.");
-  assertNoMatch(`${controlCenterServer}\n${controlCenterPackage}\n${compose}`, /@stexor\/ui|\/assets\/stexor-ui\/|ui-shell|pill-sidebar-nav|pill-tabs|STEXOR_UI_PACKAGE_ROOT/, "Control Center runtime must not use the Stexor UI visual dependency, assets or shell classes.");
+  assertNoMatch(`${controlCenterServer}\n${controlCenterPackage}\n${compose}`, /ui-shell|pill-sidebar-nav|pill-tabs/, "Control Center runtime must not use retired visual dependency assets or shell classes.");
   assertMatch(controlCenterServer, /function navigationGroupsForMode[\s\S]*navGroup\("platform", "Infrastructure"[\s\S]*navGroup\("delivery", "Delivery"[\s\S]*navGroup\("observability", "Observability"[\s\S]*navGroup\("security", "Security"/, "Control Center Advanced navigation must group enterprise sections into macro sidebar areas with page tabs.");
   assertMatch(controlCenterServer, /Control Center UI[\s\S]*Local components[\s\S]*loaded from local Control Center files/, "Control Center Settings UI must display the local UI contract.");
-  assertMatch(controlCenterTest, /(?=[\s\S]*\/assets\/control-center\/control-center\.css)(?=[\s\S]*\/control\/ui-package)(?=[\s\S]*@stexor\/control-center-local-ui)(?=[\s\S]*cc-app-shell)(?=[\s\S]*cc-sidebar)(?=[\s\S]*cc-nav-toggle)(?=[\s\S]*AppShell)(?=[\s\S]*Control Center UI)/, "Control Center tests must prove the local CSS, shell, expandable navigation and UI contract are served.");
+  assertMatch(controlCenterTest, /(?=[\s\S]*\/assets\/control-center\/control-center\.css)(?=[\s\S]*\/control\/ui-package)(?=[\s\S]*@platform\/control-center-local-ui)(?=[\s\S]*cc-app-shell)(?=[\s\S]*cc-sidebar)(?=[\s\S]*cc-nav-toggle)(?=[\s\S]*AppShell)(?=[\s\S]*Control Center UI)/, "Control Center tests must prove the local CSS, shell, expandable navigation and UI contract are served.");
   assertMatch(controlCenterServer, /route\(parts, "control", "readiness"\)[\s\S]*buildControlReadiness[\s\S]*readGovernanceManifest\("enterprise-requirements\.json"\)[\s\S]*readGovernanceManifest\("production-readiness\.json"\)[\s\S]*productionEvidence:\s+false[\s\S]*localEvidenceIsProductionEvidence:\s+false/, "Control Center must expose a sanitized readiness matrix from governance manifests without production evidence claims.");
   assertMatch(controlCenterServer, /(?=[\s\S]*Readiness Matrix)(?=[\s\S]*renderReadiness)(?=[\s\S]*Production readiness checklist)(?=[\s\S]*pending live proofs)/, "Control Center Advanced UI must expose the readiness matrix and pending live-proof state.");
   assertMatch(controlCenterTest, /(?=[\s\S]*\/control\/readiness)(?=[\s\S]*productionReadiness\.requirementCount,\s+20)(?=[\s\S]*tls-https-production-ready)(?=[\s\S]*pending-live-proof)(?=[\s\S]*localEvidenceIsProductionEvidence,\s+false)/, "Control Center tests must cover the readiness API, 20-point checklist and live-proof separation.");
@@ -9710,6 +10107,11 @@ function staticSecurityInfraOnlyCheck() {
   assertMatch(githubWorkflow, /GitHub Actions run evidence plan[\s\S]*github-actions-run-evidence/, "Infrastructure CI must generate a GitHub Actions run evidence plan.");
   assertMatch(githubRunEvidenceWorkflow, /workflow_run:[\s\S]*enterprise-infra[\s\S]*GITHUB_TOKEN:[\s\S]*github\.token[\s\S]*github-actions-run-evidence[\s\S]*--verifyRemote/, "Infrastructure CI must verify completed enterprise-infra runs through a workflow_run evidence workflow.");
   assertMatch(githubRunEvidenceWorkflow, /permissions:[\s\S]*contents:\s+read[\s\S]*actions:\s+read/, "GitHub Actions run evidence workflow must use least-privilege read permissions.");
+  assertMatch(releaseAttestationWorkflow, /name:\s+release-attestation[\s\S]*workflow_dispatch:[\s\S]*push:[\s\S]*tags:/, "Release attestation workflow must run manually and for release tags.");
+  assertMatch(releaseAttestationWorkflow, /permissions:[\s\S]*contents:\s+read[\s\S]*id-token:\s+write[\s\S]*attestations:\s+write[\s\S]*packages:\s+write/, "Release attestation workflow must grant GitHub Artifact Attestations and GHCR push permissions.");
+  assertMatch(releaseAttestationWorkflow, /PHP_APACHE_IMAGE=ghcr\.io[\s\S]*docker\/build-push-action@v7[\s\S]*push:\s+true/, "Release attestation workflow must push digest-addressable images to GHCR.");
+  assertMatch(releaseAttestationWorkflow, /actions\/attest-build-provenance@v4[\s\S]*push-to-registry:\s+true/, "Release attestation workflow must create GitHub/Sigstore provenance for GHCR images.");
+  assertMatch(releaseAttestationWorkflow, /gh attestation verify[\s\S]*--format json[\s\S]*github-attestation-evidence/, "Release attestation workflow must verify attestations and write non-sensitive evidence reports.");
   assertMatch(githubLiveEvidenceWorkflow, /name:\s+enterprise-live-evidence[\s\S]*workflow_dispatch:/, "Infrastructure must provide a manual production live evidence workflow.");
   assertMatch(githubLiveEvidenceWorkflow, /environment:[\s\S]*name:\s+production/, "Live evidence workflow must run in the production environment.");
   assertMatch(githubLiveEvidenceWorkflow, /EXTERNAL_UPTIME_PROVIDER_EVIDENCE_JSON[\s\S]*external-uptime-check[\s\S]*--requireProviderEvidence/, "Live evidence workflow must validate provider-backed external uptime evidence.");
@@ -9897,6 +10299,7 @@ async function staticSecurityCheck() {
   const githubRunEvidenceWorkflow = readText(path.join(infraRoot, ".github", "workflows", "enterprise-infra-run-evidence.yml"));
   const githubLiveEvidenceWorkflow = readText(path.join(infraRoot, ".github", "workflows", "enterprise-live-evidence.yml"));
   const githubVpsEvidenceWorkflow = readText(path.join(infraRoot, ".github", "workflows", "enterprise-vps-evidence.yml"));
+  const releaseAttestationWorkflow = readText(path.join(infraRoot, ".github", "workflows", "release-attestation.yml"));
   const externalUptimeManifest = readText(path.join(infraRoot, "monitoring", "external-uptime.example.json"));
   const cloudflareReadme = readText(path.join(infraRoot, "cloudflare", "README.md"));
   const cloudflareFromZeroManifest = readText(path.join(infraRoot, "cloudflare", "from-zero.example.json"));
@@ -9995,6 +10398,9 @@ async function staticSecurityCheck() {
   assertMatch(githubRunEvidenceWorkflow, /permissions:[\s\S]*contents:\s+read[\s\S]*actions:\s+read/, "GitHub Actions run evidence workflow must use least-privilege read permissions.");
   assertMatch(githubRunEvidenceWorkflow, /GITHUB_TOKEN:[\s\S]*github\.token[\s\S]*github-actions-run-evidence[\s\S]*--verifyRemote/, "GitHub Actions run evidence workflow must verify completed runs remotely.");
   assertMatch(githubRunEvidenceWorkflow, /Upload GitHub Actions run evidence[\s\S]*reports\/github-actions\/[\s\S]*retention-days:\s+30/, "GitHub Actions run evidence workflow must upload its non-secret report artifact.");
+  assertMatch(releaseAttestationWorkflow, /name:\s+release-attestation[\s\S]*workflow_dispatch:[\s\S]*push:[\s\S]*tags:/, "GitHub Actions must define a manual/tag release attestation workflow.");
+  assertMatch(releaseAttestationWorkflow, /permissions:[\s\S]*contents:\s+read[\s\S]*id-token:\s+write[\s\S]*attestations:\s+write[\s\S]*packages:\s+write/, "Release attestation workflow must use GitHub Artifact Attestations and GHCR permissions.");
+  assertMatch(releaseAttestationWorkflow, /actions\/attest-build-provenance@v4[\s\S]*gh attestation verify[\s\S]*github-attestation-evidence/, "Release attestation workflow must attest, verify and write release evidence.");
   assertMatch(githubWorkflow, /GitHub Actions workflow lint[\s\S]*rhysd\/actionlint:1\.7\.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667[\s\S]*-color/, "Infra workflow must lint GitHub Actions workflows with a digest-pinned actionlint image.");
   assertMatch(githubLiveEvidenceWorkflow, /name:\s+enterprise-live-evidence[\s\S]*workflow_dispatch:/, "GitHub Actions must define a manual production live evidence workflow.");
   assertMatch(githubLiveEvidenceWorkflow, /environment:[\s\S]*name:\s+production/, "Live evidence workflow must use the production environment protection.");
@@ -10067,13 +10473,13 @@ async function staticSecurityCheck() {
   assertNoMatch(compose, /8090:8080|api@internal|traefik\.localhost\.com/, "Traefik dashboard must not be routed or exposed in the local stack.");
   assertNoMatch(compose, /prometheus\.localhost\.com|alertmanager\.localhost\.com/, "Prometheus and Alertmanager must remain internal; use authenticated Grafana for browser access.");
   assertMatch(compose, /control-center:[\s\S]*image:\s+\$\{NODE_IMAGE:-node:26\.3\.1-alpine@sha256:[a-f0-9]{64}\}/, "Control Center must run as a digest-pinned Node service.");
-  assertMatch(controlCenterServer, /x-stexor-control-center-runtime[^\n]*node/, "Control Center responses must expose Node runtime evidence headers.");
-  assertMatch(compose, /project-router:[\s\S]*CONTROL_CENTER_UPSTREAM:\s+http:\/\/control-center:8080/, "Project router must send the projects host to the Node Control Center.");
+  assertMatch(controlCenterServer, /x-platform-control-center-runtime[^\n]*node/, "Control Center responses must expose Node runtime evidence headers.");
+  assertMatch(compose, /project-router:[\s\S]*CONTROL_CENTER_UPSTREAM:\s+http:\/\/control-center:8080/, "Project router must send the admin host to the Node Control Center.");
   assertMatch(compose, /local-projects:[\s\S]*url:\s+http:\/\/project-router:8080/, "Traefik project routes must target the shared Node project-router service.");
   assertNoMatch(compose, /local-php/, "Traefik project routing must not be named local-php; PHP is only one runtime behind project-router.");
-  assertMatch(compose, /php-apache:[\s\S]*\$\{PHP_SOURCE_DIR:-\.\/php-runtime-root\}:\/var\/www\/html[\s\S]*project-router:[\s\S]*CONTROL_CENTER_UPSTREAM:\s+http:\/\/control-center:8080/, "PHP Apache must be runtime-only while the projects host resolves through the Node Control Center.");
+  assertMatch(compose, /php-apache:[\s\S]*\$\{PHP_SOURCE_DIR:-\.\/php-runtime-root\}:\/var\/www\/html[\s\S]*project-router:[\s\S]*CONTROL_CENTER_UPSTREAM:\s+http:\/\/control-center:8080/, "PHP Apache must be runtime-only while the admin host resolves through the Node Control Center.");
   assertMatch(projectRouterServer, /stopManagedProject[\s\S]*Project disabled[\s\S]*nodeUpstream/, "Project Router must stop managed Node projects when local routing is disabled.");
-  assertMatch(projectRouterTest, /NODE_PROJECT_COMMANDS[\s\S]*anniversary\.localhost\.com[\s\S]*stexor\.localhost\.com[\s\S]*Project disabled[\s\S]*nodeAfterEnablePayload\.runtime[\s\S]*nodeAfterEnablePayload\.host/, "Project Router tests must prove simultaneous PHP and Node hosting plus disable/re-enable behavior without host npm.");
+  assertMatch(projectRouterTest, /NODE_PROJECT_COMMANDS[\s\S]*php-demo\.localhost\.com[\s\S]*node-demo\.localhost\.com[\s\S]*Project disabled[\s\S]*nodeAfterEnablePayload\.runtime[\s\S]*nodeAfterEnablePayload\.host/, "Project Router tests must prove simultaneous PHP and Node hosting plus disable/re-enable behavior without host npm.");
   assertNoMatch(`${compose}\n${phpRuntimeRootPage}`, /projects-portal\/public|<\?php|\/control\//i, "The PHP runtime root must not implement or expose the Control Center surface.");
   assertMatch(compose, /control-center:[\s\S]*PROJECT_AUDIT_FILE:\s+\/var\/www\/project-state\/audit\.jsonl/, "Control Center must write local audit evidence.");
   assertMatch(compose, /control-center:[\s\S]*PROJECT_APPLICATIONS_FILE:\s+\/var\/www\/project-state\/applications\.json/, "Control Center must persist local application metadata from the Node service.");
@@ -10090,7 +10496,7 @@ async function staticSecurityCheck() {
   assertMatch(compose, /control-center:[\s\S]*CONTROL_CENTER_SESSION_KEYS_FILE:\s+\/run\/secrets\/projects_gateway_signing_keys[\s\S]*secrets:[\s\S]*projects_gateway_signing_keys/, "Control Center must sign admin sessions with Docker secret material.");
   assertMatch(envVpsExample, /CONTROL_CENTER_AUTH_REQUIRED=true[\s\S]*CONTROL_CENTER_ADMIN_PASSWORD_SHA256=replace_with_sha256_of_admin_password/, "VPS example env must require Control Center admin auth.");
   assertMatch(envStagingExample, /CONTROL_CENTER_AUTH_REQUIRED=true[\s\S]*CONTROL_CENTER_ADMIN_PASSWORD_SHA256=replace_with_sha256_of_admin_password/, "Staging example env must require Control Center admin auth.");
-  assertMatch(controlCenterServer, /Stexor Control Center/, "Control Center must title the operational panel.");
+  assertMatch(controlCenterServer, /Admin Control Center/, "Control Center must title the operational panel.");
   assertMatch(controlCenterServer, /handleApi[\s\S]*\/control\/overview/, "Control Center must expose operational API endpoints.");
   assertMatch(controlCenterServer, /appendAudit/, "Control Center must audit every local control action.");
   assertMatch(controlCenterServer, /planProjectCreate[\s\S]*CREATE-PROJECT[\s\S]*filesystemTouched:\s+false[\s\S]*dockerTouched:\s+false/, "Control Center must expose safe project create metadata operations.");
@@ -10116,20 +10522,15 @@ async function staticSecurityCheck() {
   assertMatch(compose, /control-center:[\s\S]*PROJECT_SENSITIVE_MATERIALS_FILE:\s+\/var\/www\/project-state\/sensitive-materials\.json/, "Control Center must persist metadata-only sensitive material inventory from the Node service.");
   assertMatch(controlCenterServer, /sensitiveMaterialsFile[\s\S]*handleMaterialCommand[\s\S]*planMaterialDeclare[\s\S]*planMaterialRotation[\s\S]*planMaterialUsage[\s\S]*planMaterialAccessAudit[\s\S]*readSensitiveMaterialsState[\s\S]*writeSensitiveMaterialsState/, "Control Center must manage sensitive material inventory, rotation, usage and access audit through a dedicated Node-managed JSON store.");
   assertMatch(controlCenterTest, /sensitive-materials\.json[\s\S]*\/control\/secrets\/materials[\s\S]*DECLARE-MATERIAL[\s\S]*material-plain-value-should-not-leak/, "Control Center tests must cover metadata-only sensitive material persistence, rotation, usage/access audit and plaintext redaction.");
-  assertMatch(controlCenterPackage, /"name":\s+"@stexor\/control-center"/, "Control Center project identity must stay intact.");
-  assertNoMatch(controlCenterPackage, /"@stexor\/ui"/, "Control Center project must not depend on @stexor/ui.");
-  assertMatch(controlCenterUiPackage, /"name":\s+"@stexor\/ui"[\s\S]*"exports"[\s\S]*"\.\/styles\.css"[\s\S]*"\.\/ui\.css"/, "Vendored @stexor/ui package must remain available in the repository for non-Control-Center use.");
-  assertMatch(controlCenterUiManifest, /(?=[\s\S]*"package":\s+"@stexor\/ui")(?=[\s\S]*"UiShell")(?=[\s\S]*"PillSidebarNav")(?=[\s\S]*"StatusPill")/, "Vendored @stexor/ui API manifest must remain intact even though Control Center no longer uses it visually.");
-  assertMatch(controlCenterUiStyles, /base-01-foundation\.css[\s\S]*ui-02-controls\.css/, "Vendored @stexor/ui styles.css must remain intact for the rest of the platform.");
-  assertMatch(controlCenterUiAppStyles, /ui-04-app\.css[\s\S]*ui-03-monochrome-surfaces\.css/, "Vendored @stexor/ui ui.css must remain intact for the rest of the platform.");
+  assertMatch(controlCenterPackage, /"name":\s+"@platform\/control-center"/, "Control Center project identity must stay generic.");
   assertMatch(controlCenterLocalStyles, /(?=[\s\S]*--cc-bg)(?=[\s\S]*--cc-surface)(?=[\s\S]*--cc-surface-raised)(?=[\s\S]*--cc-text)(?=[\s\S]*--cc-muted)(?=[\s\S]*--cc-accent)(?=[\s\S]*--cc-radius)(?=[\s\S]*--cc-shadow)(?=[\s\S]*\.cc-app-shell)(?=[\s\S]*\.cc-sidebar)(?=[\s\S]*\.cc-nav-toggle)(?=[\s\S]*\.cc-nav-panel)(?=[\s\S]*\.cc-nav-child)/, "Control Center must provide a local --cc-* visual system with app shell and expandable sidebar navigation.");
   assertNoMatch(controlCenterLocalStyles, /\.card[\s\S]*border:\s*1px\s+solid/i, "Control Center cards must not use border: 1px solid for contrast.");
   assertMatch(controlCenterLocalComponents, /(?=[\s\S]*AppShell)(?=[\s\S]*Sidebar)(?=[\s\S]*Topbar)(?=[\s\S]*PageHeader)(?=[\s\S]*Section)(?=[\s\S]*Card)(?=[\s\S]*MetricCard)(?=[\s\S]*StatusPill)(?=[\s\S]*ActionButton)(?=[\s\S]*TabGroup)(?=[\s\S]*DataList)(?=[\s\S]*EmptyState)(?=[\s\S]*AlertBanner)(?=[\s\S]*EnvironmentBadge)(?=[\s\S]*ProjectSwitcher)(?=[\s\S]*SimpleAdvancedToggle)/, "Control Center must define the requested local UI component contract.");
   assertMatch(`${controlCenterServer}\n${controlCenterLocalComponents}`, /(?=[\s\S]*serveStaticAsset[\s\S]*\/assets\/control-center\/)(?=[\s\S]*route\(parts, "control", "ui-package"\))(?=[\s\S]*readControlCenterUiPackage)(?=[\s\S]*controlCenterStylesheetLinks)(?=[\s\S]*\/assets\/control-center\/control-center\.css)(?=[\s\S]*cc-app-shell)(?=[\s\S]*cc-sidebar)(?=[\s\S]*cc-nav-toggle)(?=[\s\S]*cc-nav-panel)/, "Control Center must serve and render through its local expandable-sidebar visual system.");
-  assertNoMatch(`${controlCenterServer}\n${controlCenterPackage}\n${compose}`, /@stexor\/ui|\/assets\/stexor-ui\/|ui-shell|pill-sidebar-nav|pill-tabs|STEXOR_UI_PACKAGE_ROOT/, "Control Center runtime must not use the Stexor UI visual dependency, assets or shell classes.");
+  assertNoMatch(`${controlCenterServer}\n${controlCenterPackage}\n${compose}`, /ui-shell|pill-sidebar-nav|pill-tabs/, "Control Center runtime must not use retired visual dependency assets or shell classes.");
   assertMatch(controlCenterServer, /function navigationGroupsForMode[\s\S]*navGroup\("platform", "Infrastructure"[\s\S]*navGroup\("delivery", "Delivery"[\s\S]*navGroup\("observability", "Observability"[\s\S]*navGroup\("security", "Security"/, "Control Center Advanced navigation must group enterprise sections into macro sidebar areas with page tabs.");
   assertMatch(controlCenterServer, /Control Center UI[\s\S]*Local components[\s\S]*loaded from local Control Center files/, "Control Center Settings UI must display the local UI contract.");
-  assertMatch(controlCenterTest, /(?=[\s\S]*\/assets\/control-center\/control-center\.css)(?=[\s\S]*\/control\/ui-package)(?=[\s\S]*@stexor\/control-center-local-ui)(?=[\s\S]*cc-app-shell)(?=[\s\S]*cc-sidebar)(?=[\s\S]*cc-nav-toggle)(?=[\s\S]*AppShell)(?=[\s\S]*Control Center UI)/, "Control Center tests must prove the local CSS, shell, expandable navigation and UI contract are served.");
+  assertMatch(controlCenterTest, /(?=[\s\S]*\/assets\/control-center\/control-center\.css)(?=[\s\S]*\/control\/ui-package)(?=[\s\S]*@platform\/control-center-local-ui)(?=[\s\S]*cc-app-shell)(?=[\s\S]*cc-sidebar)(?=[\s\S]*cc-nav-toggle)(?=[\s\S]*AppShell)(?=[\s\S]*Control Center UI)/, "Control Center tests must prove the local CSS, shell, expandable navigation and UI contract are served.");
   assertMatch(compose, /control-center:[\s\S]*PROJECT_WORKER_JOBS_FILE:\s+\/var\/www\/project-state\/worker-jobs\.json/, "Control Center must persist worker/job metadata from the Node service.");
   assertMatch(controlCenterServer, /workerJobsFile[\s\S]*handleWorkerJobCommand[\s\S]*planWorkerDeclare[\s\S]*planQueueDeclare[\s\S]*planJobRecord[\s\S]*planJobRetry[\s\S]*planScheduleDeclare[\s\S]*planScheduleStatus[\s\S]*readWorkerJobsState[\s\S]*writeWorkerJobsState/, "Control Center must manage workers, queues, failed jobs, retries and schedules through a dedicated Node-managed JSON store.");
   assertMatch(controlCenterTest, /worker-jobs\.json[\s\S]*\/control\/workers-jobs\/workers[\s\S]*DECLARE-WORKER[\s\S]*\/control\/workers-jobs\/jobs[\s\S]*PLAN-JOB-RETRY[\s\S]*worker-secret-should-not-leak/, "Control Center tests must cover worker/job metadata persistence, retry planning, schedules and secret redaction.");
@@ -10182,10 +10583,10 @@ async function staticSecurityCheck() {
   assertMatch(controlCenterTest, /production[\s\S]*bad\.localhost\.com[\s\S]*422/, "Control Center tests must reject localhost production subdomain plans.");
   assertMatch(controlCenterTest, /actions\/subdomain-command[\s\S]*apply-local[\s\S]*subdomain-ui-secret-should-not-leak[\s\S]*REMOVE-SUBDOMAIN/, "Control Center tests must cover UI-driven local subdomain apply, verify, removal and secret redaction.");
   assertMatch(controlCenterTest, /applications\.json[\s\S]*\/control\/applications[\s\S]*CREATE-APPLICATION[\s\S]*application-secret-should-not-leak/, "Control Center tests must cover application create persistence and secret redaction.");
-  assertMatch(controlCenterTest, /\/control\/applications\/stexor-events-worker\/start[\s\S]*START-APPLICATION:stexor-events-worker[\s\S]*\/control\/applications\/stexor-events-worker\/healthcheck[\s\S]*lifecycle-secret-should-not-leak/, "Control Center tests must cover lifecycle metadata apply, healthcheck and secret redaction.");
+  assertMatch(controlCenterTest, /\/control\/applications\/node-demo-events-worker\/start[\s\S]*START-APPLICATION:node-demo-events-worker[\s\S]*\/control\/applications\/node-demo-events-worker\/healthcheck[\s\S]*lifecycle-secret-should-not-leak/, "Control Center tests must cover lifecycle metadata apply, healthcheck and secret redaction.");
   assertMatch(controlCenterTest, /domains\.json[\s\S]*\/control\/domains[\s\S]*CREATE-DOMAIN[\s\S]*domain-secret-should-not-leak/, "Control Center tests must cover domain metadata persistence and secret redaction.");
   assertMatch(controlCenterTest, /provider-connections\.json[\s\S]*\/control\/provider-connections[\s\S]*UPDATE-PROVIDER-CONNECTION[\s\S]*provider-secret-should-not-leak/, "Control Center tests must cover provider connection metadata persistence and secret redaction.");
-  assertMatch(controlCenterTest, /project\.archive[\s\S]*ARCHIVE-PROJECT[\s\S]*project\.delete[\s\S]*DELETE-PROJECT:anniversary[\s\S]*filesystemTouched/, "Control Center tests must cover project archive and soft-delete confirmation without deleting files.");
+  assertMatch(controlCenterTest, /project\.archive[\s\S]*ARCHIVE-PROJECT[\s\S]*project\.delete[\s\S]*DELETE-PROJECT:php-demo[\s\S]*filesystemTouched/, "Control Center tests must cover project archive and soft-delete confirmation without deleting files.");
   assertMatch(controlCenterTest, /APPLY-PRODUCTION[\s\S]*409/, "Control Center tests must reject production apply without valid production execution.");
   assertMatch(controlCenterTest, /\.\.\/secret[\s\S]*Invalid webspace path/, "Control Center tests must cover path traversal rejection.");
   assertMatch(controlCenterTest, /webspaces\.json[\s\S]*CREATE-WEBSPACE[\s\S]*UPDATE-QUOTA[\s\S]*webspace-secret-should-not-leak/, "Control Center tests must cover local webspace create/quota persistence and secret redaction.");
@@ -10195,7 +10596,7 @@ async function staticSecurityCheck() {
   assertMatch(controlCenterTest, /settings\.json[\s\S]*\/actions\/settings-command[\s\S]*settings-secret-should-not-leak[\s\S]*\/control\/settings/, "Control Center tests must cover settings persistence, UI action and secret redaction.");
   assertMatch(controlCenterTest, /super-secret-token-should-not-leak[\s\S]*doesNotMatch/, "Control Center tests must prove supplied secret-like payloads are not serialized to audit/API output.");
   assertMatch(controlCenterTest, /operations\.jsonl[\s\S]*\/control\/operations[\s\S]*operationId[\s\S]*output/, "Control Center tests must prove Operation and OperationStep records are persisted and exposed safely.");
-  assertMatch(controlCenterTest, /deployments\.jsonl[\s\S]*\/control\/applications\/stexor\/deploy[\s\S]*\/control\/applications\/stexor\/rollback[\s\S]*\/control\/deployments/, "Control Center tests must prove deployment and rollback plans are persisted and exposed safely.");
+  assertMatch(controlCenterTest, /deployments\.jsonl[\s\S]*\/control\/applications\/node-demo\/deploy[\s\S]*\/control\/applications\/node-demo\/rollback[\s\S]*\/control\/deployments/, "Control Center tests must prove deployment and rollback plans are persisted and exposed safely.");
   assertMatch(controlCenterTest, /backups\.jsonl[\s\S]*\/actions\/backup-command[\s\S]*backup-secret-should-not-leak[\s\S]*\/control\/backups\/records/, "Control Center tests must prove backup and restore drill plans are persisted and secret-redacted.");
   assertMatch(controlCenterTest, /(?=[\s\S]*mode=advanced)(?=[\s\S]*workers-jobs)(?=[\s\S]*cicd-github)(?=[\s\S]*logs-advanced)(?=[\s\S]*alerts-advanced)(?=[\s\S]*disaster-recovery)(?=[\s\S]*release-evidence)(?=[\s\S]*security-advanced)/, "Control Center tests must cover Advanced Mode routing and requested enterprise section skeletons.");
   assertMatch(controlCenterTest, /(?=[\s\S]*\/control\/advanced)(?=[\s\S]*\/control\/network)(?=[\s\S]*\/control\/advanced\/network)(?=[\s\S]*enterprise-backend)(?=[\s\S]*enterprise-rate-limit)(?=[\s\S]*Route Test Plan)(?=[\s\S]*\/control\/monitoring)(?=[\s\S]*\/control\/advanced\/monitoring)(?=[\s\S]*Backend errors)(?=[\s\S]*Auth failures)(?=[\s\S]*\/control\/advanced\/cloudflare)(?=[\s\S]*\/control\/advanced\/release-evidence)(?=[\s\S]*\/control\/advanced\/identity)(?=[\s\S]*\/control\/advanced\/secrets)/, "Control Center tests must cover Advanced Mode API evidence endpoints including Network and Monitoring topology.");
@@ -10207,12 +10608,12 @@ async function staticSecurityCheck() {
   assertMatch(controlCenterTest, /admin guard[\s\S]*admin_auth_required[\s\S]*HttpOnly[\s\S]*Secure[\s\S]*SameSite=Lax/, "Control Center tests must cover the admin auth gate and hardened session cookie.");
   assertNoMatch(controlCenterTest, /CLOUDFLARE_API_TOKEN|api\.github\.com|cloudflare\.com\/client\/v4/i, "Control Center tests must not make live provider calls.");
   assertNoMatch(phpRuntimeRootPage, /control-shell|\/control\//i, "PHP runtime root must not implement the Control Center UI or API surface.");
-  assertNoMatch(`${controlCenterServer}\n${phpRuntimeRootPage}`, /prometheus\.localhost\.com|alertmanager\.localhost\.com|traefik\.localhost\.com/, "Projects UI must not link unauthenticated internal consoles.");
+  assertNoMatch(`${controlCenterServer}\n${phpRuntimeRootPage}`, /prometheus\.localhost\.com|alertmanager\.localhost\.com|traefik\.localhost\.com/, "Control Center UI must not link unauthenticated internal consoles.");
   assertMatch(composeHa, /failure_action:\s+rollback/, "HA overlay must rollback failed rolling updates.");
   assertMatch(composeHa, /max_replicas_per_node:\s+1/, "HA overlay must spread stateless replicas across nodes.");
   assertMatch(composeManagedSecrets, /SESSION_SECRET_FILE:\s+\/run\/secrets\/session_secret/, "Managed secret overlay must consume session secret through a file.");
   assertMatch(composeManagedSecrets, /SESSION_SIGNING_KEYS_FILE:\s+\/run\/secrets\/session_signing_keys/, "Managed secret overlay must consume session signing keys through a file.");
-  assertMatch(composeManagedSecrets, /PROJECTS_GATEWAY_SIGNING_KEYS_FILE:\s+\/run\/secrets\/projects_gateway_signing_keys/, "Managed secret overlay must consume projects gateway signing keys through a file.");
+  assertMatch(composeManagedSecrets, /PROJECTS_GATEWAY_SIGNING_KEYS_FILE:\s+\/run\/secrets\/projects_gateway_signing_keys/, "Managed secret overlay must consume admin gateway signing keys through a file.");
   assertMatch(composeManagedSecrets, /GOOGLE_RECAPTCHA_SECRET_KEY_FILE:\s+\/run\/secrets\/google_recaptcha_secret_key/, "Managed secret overlay must consume Google reCAPTCHA secret through a file.");
   assertMatch(composeManagedSecrets, /CLOUDFLARE_TURNSTILE_SECRET_KEY_FILE:\s+\/run\/secrets\/cloudflare_turnstile_secret_key/, "Managed secret overlay must consume Cloudflare Turnstile secret through a file.");
   assertMatch(composeManagedSecrets, /GOOGLE_OAUTH_CLIENT_SECRET_FILE:\s+\$\{GOOGLE_OAUTH_CLIENT_SECRET_FILE-\}/, "Managed secret overlay must expose optional Google OAuth client secret-file configuration.");
@@ -10223,7 +10624,7 @@ async function staticSecurityCheck() {
   assertMatch(composeManagedSecrets, /^ {2}phpmyadmin_control_password:\s*\r?\n {4}external:\s+true/m, "Managed secret overlay must declare phpMyAdmin control password as an external Docker secret.");
   assertMatch(composeManagedSecrets, /external:\s+true/, "Managed secret overlay must use external Docker secrets.");
   assertMatch(composeSecrets, /SESSION_SIGNING_KEYS_FILE:\s+\/run\/secrets\/session_signing_keys/, "Local secret overlay must consume session signing keys through a Docker secret file.");
-  assertMatch(composeSecrets, /PROJECTS_GATEWAY_SIGNING_KEYS_FILE:\s+\/run\/secrets\/projects_gateway_signing_keys/, "Local secret overlay must consume projects gateway signing keys through a Docker secret file.");
+  assertMatch(composeSecrets, /PROJECTS_GATEWAY_SIGNING_KEYS_FILE:\s+\/run\/secrets\/projects_gateway_signing_keys/, "Local secret overlay must consume admin gateway signing keys through a Docker secret file.");
   assertMatch(composeSecrets, /GOOGLE_RECAPTCHA_SECRET_KEY_FILE:\s+\/run\/secrets\/google_recaptcha_secret_key/, "Local secret overlay must consume Google reCAPTCHA secret through a Docker secret file.");
   assertMatch(composeSecrets, /CLOUDFLARE_TURNSTILE_SECRET_KEY_FILE:\s+\/run\/secrets\/cloudflare_turnstile_secret_key/, "Local secret overlay must consume Cloudflare Turnstile secret through a Docker secret file.");
   assertMatch(composeSecrets, /GOOGLE_OAUTH_CLIENT_SECRET_FILE:\s+\$\{GOOGLE_OAUTH_CLIENT_SECRET_FILE-\}/, "Local secret overlay must expose optional Google OAuth client secret-file configuration.");
@@ -10257,7 +10658,7 @@ async function staticSecurityCheck() {
   assertMatch(githubWorkflow, /name:\s+enterprise-infra/, "GitHub Actions must define an enterprise infra workflow.");
   assertMatch(githubWorkflow, /dast-zap/, "GitHub Actions must include an opt-in DAST job.");
   assertMatch(githubWorkflow, /deploy-vps/, "GitHub Actions must include a controlled VPS deploy job.");
-  assertMatch(githubWorkflow, /projects_gateway_signing_keys/, "GitHub Actions compose render must provide the Projects gateway signing secret placeholder.");
+  assertMatch(githubWorkflow, /projects_gateway_signing_keys/, "GitHub Actions compose render must provide the legacy admin gateway signing secret placeholder.");
   assertMatch(githubWorkflow, /Backup scheduler dry run[\s\S]*BACKUP_SCHEDULER_DRY_RUN=true/, "Infrastructure CI must exercise the Dockerized backup scheduler in dry-run mode.");
   assertMatch(githubWorkflow, /External uptime manifest dry run[\s\S]*external-uptime-check --dryRun/, "Infrastructure CI must validate the external uptime manifest.");
   assertMatch(githubWorkflow, /Cloudflare from-zero dry run[\s\S]*cloudflare-from-zero --manifest cloudflare\/from-zero\.example\.json/, "Infrastructure CI must validate the additive-only Cloudflare bootstrap manifest.");
@@ -10844,7 +11245,10 @@ async function staticSecurityCheck() {
   assertMatch(opsScript, /latestJsonReport\("release", "release-evidence-", \(payload\) => payload\.mode === "evidence"\)/, "Production go/no-go must ignore release plan reports.");
   assertMatch(opsScript, /releasePayload\.status === "passed"/, "Production go/no-go must require passed release evidence.");
   assertMatch(opsScript, /function validateSlsaProvenance[\s\S]*https:\/\/slsa\.dev\/provenance\/v1[\s\S]*predicate\.buildDefinition\.buildType/, "Release evidence must validate SLSA v1 provenance structure.");
-  assertMatch(opsScript, /slsaProvenance\?\.status === "passed"/, "Production go/no-go must require validated SLSA provenance.");
+  assertMatch(opsScript, /validateGithubSigstoreAttestations[\s\S]*github-signed-attestation[\s\S]*completeness:\s+"complete"/, "Release evidence must validate complete GitHub/Sigstore attestations.");
+  assertMatch(opsScript, /githubSigstore\?\.status === "passed"[\s\S]*githubSigstore\?\.verified === true[\s\S]*githubSigstore\?\.completeness === "complete"/, "Production go/no-go must require complete verified GitHub/Sigstore provenance.");
+  assertMatch(opsScript, /kind:\s+"local-provenance"[\s\S]*completeness:\s+"partial"/, "Release evidence must classify local provenance as partial.");
+  assertMatch(opsScript, /"github-attestation-evidence": githubAttestationEvidence/, "Ops command map must expose GitHub/Sigstore attestation evidence normalization.");
   assertMatch(opsScript, /"release-evidence": releaseEvidence/, "Ops command map must expose release-evidence.");
   assertMatch(opsScript, /await collectEvidenceStep\(steps, \{ name: "release-evidence-plan"/, "Pre go-live evidence must include a release evidence plan.");
   assertMatch(opsScript, /async function drReadinessCheck/, "Ops script must provide a DR/PITR readiness gate.");
@@ -11234,6 +11638,7 @@ Commands:
   full-restore-drill
   generate-sbom
   github-actions-config
+  github-attestation-evidence
   github-actions-run-evidence
   github-branch-protection
   github-environments
@@ -11322,6 +11727,7 @@ const commands = {
   "full-restore-drill": fullRestoreDrill,
   "generate-sbom": generateSbom,
   "github-actions-config": githubActionsConfig,
+  "github-attestation-evidence": githubAttestationEvidence,
   "github-actions-run-evidence": githubActionsRunEvidence,
   "github-branch-protection": githubBranchProtection,
   "github-environments": githubEnvironments,

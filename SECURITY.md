@@ -30,13 +30,13 @@ Roles are stored in `app_account.account_roles` and must not be trusted from the
 - Local secret files and manager runtime files are ignored by Git and mounted as `/run/secrets/*`.
 - Runtime code must consume secret material only through `*_FILE` values or approved managed secret references.
 - `SESSION_SECRET` must be random, long and rotated per environment.
-- SMTP, DB, MinIO, NATS, Redis, Grafana, projects gateway and Alertmanager webhook secrets must be managed through `infra-secret-manager` or a stronger external KMS before serious VPS usage.
+- SMTP, DB, MinIO, NATS, Redis, Grafana, admin gateway and Alertmanager webhook secrets must be managed through `infra-secret-manager` or a stronger external KMS before serious VPS usage.
 
 ## Local control access
 
-- `projects.localhost.com` is not a public app surface. It requires an email OTP before exposing project/admin links.
+- `admin.localhost.com` is not a public app surface. It requires the Control Center admin gate before exposing project/admin links.
 - Its persistent cookie is `HttpOnly`, `Secure`, `SameSite=Lax` and signed with `projects_gateway_signing_keys`.
-- Rotate `projects_gateway_signing_keys` to revoke every local Projects Control session.
+- Rotate `projects_gateway_signing_keys` to revoke every local Admin Control Center session.
 
 ## Alert delivery
 

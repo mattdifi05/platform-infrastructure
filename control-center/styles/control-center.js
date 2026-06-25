@@ -3,7 +3,7 @@
 
   var appSelector = ".cc-app-shell, .login-shell";
   var cacheLimit = 8;
-  var sidebarStateKey = "stexor-control-center-sidebar";
+  var sidebarStateKey = "platform-control-center-sidebar";
   var htmlCache = new Map();
   var activeRequest = null;
   var initialized = false;
@@ -77,7 +77,7 @@
 
     var headers = new Headers(options && options.headers ? options.headers : {});
     headers.set("Accept", "text/html,*/*;q=0.8");
-    headers.set("X-Requested-With", "stexor-control-center");
+    headers.set("X-Requested-With", "platform-control-center");
 
     var response = await fetch(url.href, {
       body: options ? options.body : undefined,

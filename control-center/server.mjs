@@ -35,8 +35,15 @@ const adminPasswordFile = process.env.CONTROL_CENTER_ADMIN_PASSWORD_FILE || "";
 const adminPasswordSha256 = String(process.env.CONTROL_CENTER_ADMIN_PASSWORD_SHA256 || "").trim().toLowerCase();
 const authRequired = parseBoolean(process.env.CONTROL_CENTER_AUTH_REQUIRED || "") || Boolean(adminPasswordSha256 || adminPasswordFile);
 const environment = normalizeEnvironment(process.env.CONTROL_CENTER_ENV || "local");
-const projectsHost = normalizeHost(process.env.PROJECTS_HOST || "projects.localhost.com");
-const hostSuffix = normalizeHostSuffix(process.env.PROJECT_HOST_SUFFIX || ".localhost.com");
+const platformName = String(process.env.PLATFORM_NAME || "Platform Infrastructure").trim() || "Platform Infrastructure";
+const domain = normalizeHost(process.env.DOMAIN || process.env.LOCAL_DOMAIN || "localhost.com");
+const adminHost = normalizeHost(process.env.ADMIN_HOST || `admin.${domain}`);
+const controlCenterHost = normalizeHost(process.env.CONTROL_CENTER_HOST || process.env.PROJECTS_HOST || adminHost);
+const authHost = normalizeHost(process.env.AUTH_HOST || `auth.${domain}`);
+const storageHost = normalizeHost(process.env.STORAGE_HOST || process.env.MINIO_CONSOLE_HOST || `storage.${domain}`);
+const grafanaHost = normalizeHost(process.env.GRAFANA_HOST || `grafana.${domain}`);
+const projectsHost = controlCenterHost;
+const hostSuffix = normalizeHostSuffix(process.env.PROJECT_HOST_SUFFIX || `.${domain}`);
 const nodeHosts = parsePairs(process.env.NODE_PROJECT_HOSTS || "");
 
 const docs = {
@@ -60,7 +67,7 @@ const docs = {
 
 const server = createServer(async (req, res) => {
   try {
-    const url = new URL(req.url || "/", `https://${req.headers.host || projectsHost}`);
+    const url = new URL(req.url || "/", `https://${req.headers.host || controlCenterHost}`);
     if (url.pathname === "/__health") {
       json(res, { ok: true, service: "control-center" });
       return;
@@ -1000,7 +1007,7 @@ function buildContext({ projects, state }) {
     adminProtection: authRequired ? "required" : "local-only",
     securityHeaders: "configured",
     cloudflareAccess: environment === "production" ? "requires-verify-remote" : "plan-only-local",
-    passkeyAdminAuth: "available-through-stexor-account-app",
+    passkeyAdminAuth: "external-idp-or-passkey-app",
     status: "discovered",
     source: "control-center-default",
   });
@@ -1100,7 +1107,7 @@ function buildContext({ projects, state }) {
     uiPackage,
   });
   const overview = {
-    title: "Stexor Control Center",
+    title: "Admin Control Center",
     environment,
     modeEvidence: environment === "production" ? "production evidence requires verifyRemote" : "local evidence only",
     projects: { total: projects.length, active: activeProjects, archived: archivedProjects },
@@ -1412,7 +1419,7 @@ function advancedControlOverview(context) {
     productionEvidence: false,
   }));
   return sanitizeEvent({
-    title: "Stexor Control Center Advanced API",
+    title: "Admin Control Center Advanced API",
     environment: context.environment,
     modeEvidence: context.overview.modeEvidence,
     endpointPrefix: "/control/advanced",
@@ -1640,7 +1647,7 @@ function buildControlReadiness(context) {
       id: "control-center-local-ui",
       title: "Control Center local UI contract",
       status: context.uiPackage.controlCenterPackageLoaded && context.uiPackage.packageMountedInControlCenterProject && context.uiPackage.apiManifestLoaded && context.uiPackage.missingRequiredExports.length === 0 ? "passed" : "needs-work",
-      evidence: ["@stexor/control-center package", "control-center/components", "control-center/styles/control-center.css", "local AppShell/Sidebar/TabGroup contract"],
+      evidence: ["@platform/control-center package", "control-center/components", "control-center/styles/control-center.css", "local AppShell/Sidebar/TabGroup contract"],
       nextAction: "Keep Control Center visual changes scoped to local components and --cc-* tokens.",
     }),
     readinessCheck({
@@ -1689,7 +1696,7 @@ function buildControlReadiness(context) {
   ];
   const allChecks = [...controlChecks, ...enterprise.requirements, ...production.requirements];
   return sanitizeEvent({
-    title: "Stexor Control Center Readiness Matrix",
+    title: "Admin Control Center Readiness Matrix",
     environment,
     source: "governance manifests plus live Control Center context",
     endpoint: "/control/readiness",
@@ -1944,7 +1951,7 @@ function renderControlCenter(context, params) {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="icon" href="data:,">
-<title>Stexor Control Center</title>
+<title>Admin Control Center</title>
 ${controlCenterStylesheetLinks()}
 ${controlCenterScriptTags()}
 </head>
@@ -2014,7 +2021,7 @@ function renderControlSidebar(groups, activeGroupId, activeSection, mode, select
     </div>`;
   }).join("");
   return `<aside aria-label="Control Center navigation" class="cc-sidebar" data-cc-sidebar-active-index="${activeIndex}" data-cc-sidebar-id="control-sidebar">
-    <a class="brand stexor-wordmark" href="/?mode=simple&section=overview" aria-label="Stexor Control Center"><span class="brand-mark">S</span><div><strong>Control Center</strong><small>Stexor Platform</small></div></a>
+    <a class="brand platform-wordmark" href="/?mode=simple&section=overview" aria-label="Admin Control Center"><span class="brand-mark">P</span><div><strong>Control Center</strong><small>${escapeHtml(platformName)}</small></div></a>
     <div class="cc-nav-groups">${navGroups}</div>
     <div class="mode-card">
       <small>Simple Mode</small>
@@ -2025,7 +2032,7 @@ function renderControlSidebar(groups, activeGroupId, activeSection, mode, select
     </div>
     <div class="cc-admin-card">
       <span class="cc-admin-avatar" aria-hidden="true">A</span>
-      <span><strong>admin@stexor.local</strong><small>Administrator</small></span>
+      <span><strong>admin@${escapeHtml(domain)}</strong><small>Administrator</small></span>
       <span class="cc-admin-arrow" aria-hidden="true">${controlIcon("chevron")}</span>
     </div>
   </aside>`;
@@ -2064,7 +2071,7 @@ function renderControlTopbar(context, mode) {
   return `<header class="cc-topbar">
     <a class="cc-platform-switch" href="/?mode=${escapeHtml(mode)}&section=overview">
       <span aria-hidden="true">${controlIcon("cube")}</span>
-      <strong>Stexor Platform</strong>
+      <strong>${escapeHtml(platformName)}</strong>
       <span aria-hidden="true">${controlIcon("chevron-down")}</span>
     </a>
     <span class="cc-env-pill ${escapeHtml(envClass)}">${escapeHtml(envLabel)}</span>
@@ -2090,7 +2097,7 @@ function renderLogin(message) {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="icon" href="data:,">
-<title>Stexor Control Center Sign In</title>
+<title>Admin Control Center Sign In</title>
 ${controlCenterStylesheetLinks()}
 ${controlCenterScriptTags()}
 </head>
@@ -2239,9 +2246,9 @@ function hostingServiceRows(context) {
     { name: "MariaDB", role: "Database PHP locali", status: "configurato", icon: "databases", href: "/?mode=advanced&section=databases", tone: "good" },
     { name: "PostgreSQL", role: "Database piattaforma", status: "configurato", icon: "databases", href: "/?mode=advanced&section=databases", tone: "good" },
     { name: "phpMyAdmin", role: "Console database MariaDB", status: "admin", icon: "databases", href: "https://phpmyadmin.localhost.com", tone: "info" },
-    { name: "Keycloak", role: "Identity provider", status: "admin", icon: "security", href: "https://auth.localhost.com", tone: "info" },
-    { name: "MinIO", role: "Object storage e bucket", status: hostingStatusLabel(context.storageProvider.status), icon: "storage", href: "https://minio.localhost.com", tone: "good" },
-    { name: "Grafana", role: "Metriche, log e dashboard", status: `${context.monitoring.dashboardPanels.length} pannelli`, icon: "resources", href: "https://grafana.localhost.com", tone: "good" },
+    { name: "Keycloak", role: "Identity provider", status: "admin", icon: "security", href: `https://${authHost}`, tone: "info" },
+    { name: "MinIO", role: "Object storage e bucket", status: hostingStatusLabel(context.storageProvider.status), icon: "storage", href: `https://${storageHost}`, tone: "good" },
+    { name: "Grafana", role: "Metriche, log e dashboard", status: `${context.monitoring.dashboardPanels.length} pannelli`, icon: "resources", href: `https://${grafanaHost}`, tone: "good" },
     { name: "Alertmanager", role: "Routing alert", status: `${context.alertRecords.length} alert`, icon: "logs", href: "/?section=logs", tone: context.overview.alerts.open ? "warning" : "good" },
   ];
 }
@@ -2729,7 +2736,7 @@ function renderSecurity(security) {
         ${selectOptions("adminProtection", globalPolicy.adminProtection, ["local-only", "required", "cloudflare-access", "vpn-required"], "Admin protection")}
         ${selectOptions("securityHeaders", globalPolicy.securityHeaders, ["configured", "strict", "report-only", "disabled"], "Security headers")}
         ${selectOptions("cloudflareAccess", globalPolicy.cloudflareAccess, ["plan-only-local", "requires-verify-remote", "configured"], "Cloudflare Access status")}
-        ${selectOptions("passkeyAdminAuth", globalPolicy.passkeyAdminAuth, ["available-through-stexor-account-app", "required", "not-configured"], "Passkey admin auth")}
+        ${selectOptions("passkeyAdminAuth", globalPolicy.passkeyAdminAuth, ["external-idp-or-passkey-app", "required", "not-configured"], "Passkey admin auth")}
         <input type="hidden" name="confirm" value="UPDATE-SECURITY-POLICY">
         <button class="button enable" type="submit">Update policy</button>
       </form>
@@ -2791,7 +2798,7 @@ function renderSettings(context) {
     <div class="panel"><div class="panel-head"><span>UI</span><div><h2>Control Center UI</h2><p>The Control Center uses a local visual system scoped to this Node dashboard.</p></div></div>
       <div class="cards">
         <div class="card compact"><strong>${escapeHtml(uiPackage.name)}</strong><span>version ${escapeHtml(uiPackage.version)} / ${escapeHtml(uiPackage.source)}</span></div>
-        <div class="card compact"><strong>${escapeHtml(uiPackage.controlCenterProject || "@stexor/control-center")}</strong><span>${escapeHtml(uiPackage.declaredDependency || "none")} / local scope ${uiPackage.packageMountedInControlCenterProject ? "yes" : "no"}</span></div>
+        <div class="card compact"><strong>${escapeHtml(uiPackage.controlCenterProject || "@platform/control-center")}</strong><span>${escapeHtml(uiPackage.declaredDependency || "none")} / local scope ${uiPackage.packageMountedInControlCenterProject ? "yes" : "no"}</span></div>
         <div class="card compact"><strong>Local entrypoints</strong><span>${escapeHtml(uiAssets)}</span></div>
         <div class="card compact"><strong>Local components</strong><span>${escapeHtml(uiComponents)}</span></div>
         <div class="card compact"><strong>Visual contract</strong><span>${uiPackage.apiManifestLoaded && uiPackage.missingRequiredExports?.length === 0 ? "loaded from local Control Center files" : "needs package review"}</span></div>
@@ -3733,7 +3740,7 @@ function applySubdomain(payload, context) {
   const plan = planSubdomain(payload, context);
   if (plan.environment === "production") {
     if (payload.confirm !== "APPLY-PRODUCTION") throw new RejectedOperationError("Production apply requires confirm=APPLY-PRODUCTION and verified provider secrets.");
-    throw new RejectedOperationError("Production apply is disabled in local Control Center foundation; use the backend Cloudflare adapter with verifyRemote.");
+    throw new RejectedOperationError("Production apply is disabled in local Control Center foundation; use an explicit provider adapter with verifyRemote.");
   }
   if (payload.confirm !== "APPLY-LOCAL") throw new RejectedOperationError("Local apply requires confirm=APPLY-LOCAL.");
   const state = readState();
@@ -4458,7 +4465,7 @@ function planSecurityPolicyUpdate(payload, context) {
     adminProtection: choice(String(payload.adminProtection || "local-only"), ["local-only", "required", "cloudflare-access", "vpn-required"], "admin protection"),
     securityHeaders: choice(String(payload.securityHeaders || "configured"), ["configured", "strict", "report-only", "disabled"], "security headers"),
     cloudflareAccess: choice(String(payload.cloudflareAccess || "plan-only-local"), ["plan-only-local", "requires-verify-remote", "configured"], "Cloudflare Access status"),
-    passkeyAdminAuth: choice(String(payload.passkeyAdminAuth || "available-through-stexor-account-app"), ["available-through-stexor-account-app", "required", "not-configured"], "passkey admin auth"),
+    passkeyAdminAuth: choice(String(payload.passkeyAdminAuth || "external-idp-or-passkey-app"), ["external-idp-or-passkey-app", "required", "not-configured"], "passkey admin auth"),
     status: "configured",
     source: "control-center-state",
   });
@@ -6153,6 +6160,7 @@ function middlewareSummary(type, block) {
 }
 
 function sampleHostFromRule(rule) {
+  if (/\b(?:CONTROL_CENTER_HOST|ADMIN_HOST|PROJECTS_HOST)\b/.test(rule)) return controlCenterHost;
   const defaultHost = rule.match(/\$\{[^:}]+:-([^}]+)\}/);
   if (defaultHost) return normalizeHost(defaultHost[1]);
   const literalHost = rule.match(/Host\(`([^`]+)`\)/);
@@ -6413,7 +6421,7 @@ function securityPolicyRecord({
   adminProtection = "local-only",
   securityHeaders = "configured",
   cloudflareAccess = "plan-only-local",
-  passkeyAdminAuth = "available-through-stexor-account-app",
+  passkeyAdminAuth = "external-idp-or-passkey-app",
   status = "configured",
   source = "control-center-state",
   createdAt = null,
@@ -6521,9 +6529,9 @@ function defaultProviderConnections(notificationChannels = []) {
       source: "notification-channel-metadata",
     }),
     providerConnectionRecord({
-      id: "hostinger",
-      provider: "hostinger",
-      name: "Hostinger VPS",
+      id: "generic-vps",
+      provider: "generic-vps",
+      name: "Generic VPS",
       status: "metadata-only",
       scope: "vps-go-live",
       source: "control-center-default",
@@ -6696,7 +6704,7 @@ function choice(value, allowed, label) {
 }
 
 function choiceProvider(value) {
-  return choice(String(value || "").toLowerCase().trim(), ["cloudflare", "github", "smtp", "hostinger", "restic"], "provider");
+  return choice(String(value || "").toLowerCase().trim(), ["cloudflare", "github", "smtp", "generic-vps", "hostinger", "aws", "custom", "restic"], "provider");
 }
 
 function parsePairs(value) {
@@ -6933,17 +6941,17 @@ function advancedItems(section) {
 }
 
 function json(res, payload, status = 200) {
-  res.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store", "x-stexor-control-center-runtime": "node" });
+  res.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store", "x-platform-control-center-runtime": "node" });
   res.end(`${JSON.stringify(payload, null, 2)}\n`);
 }
 
 function html(res, content, status = 200) {
-  res.writeHead(status, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "x-stexor-control-center-runtime": "node" });
+  res.writeHead(status, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "x-platform-control-center-runtime": "node" });
   res.end(content);
 }
 
 function redirect(res, location) {
-  res.writeHead(303, { location, "cache-control": "no-store", "x-stexor-control-center-runtime": "node" });
+  res.writeHead(303, { location, "cache-control": "no-store", "x-platform-control-center-runtime": "node" });
   res.end();
 }
 
@@ -6986,7 +6994,7 @@ function serveStaticAsset(req, res, url, rootDir, prefix) {
   res.writeHead(200, {
     "content-type": contentTypes[extension] || "application/octet-stream",
     "cache-control": "no-store",
-    "x-stexor-control-center-runtime": "node",
+    "x-platform-control-center-runtime": "node",
   });
   res.end(readFileSync(target));
 }

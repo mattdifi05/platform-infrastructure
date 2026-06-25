@@ -29,21 +29,22 @@ env_or_default() {
 }
 
 api_host=$(env_or_default API_HOST api.localhost.com)
-ui_host=$(env_or_default UI_HOST ui.localhost.com)
+ui_host=$(env_or_default UI_HOST app.localhost.com)
 account_host=$(env_or_default ACCOUNT_HOST account.localhost.com)
-projects_host=$(env_or_default PROJECTS_HOST projects.localhost.com)
+admin_host=$(env_or_default CONTROL_CENTER_HOST "$(env_or_default ADMIN_HOST admin.localhost.com)")
+control_center_host=$(env_or_default PROJECTS_HOST "$admin_host")
 api_base="${DEPLOY_API_BASE:-$(env_or_default API_PUBLIC_URL "https://$api_host")}"
 ui_base="${DEPLOY_UI_BASE:-$(env_or_default UI_PUBLIC_URL "https://$ui_host")}"
 account_base="${DEPLOY_ACCOUNT_BASE:-$(env_or_default ACCOUNT_PUBLIC_URL "https://$account_host")}"
 account_origin="${DEPLOY_ACCOUNT_ORIGIN:-$(env_or_default ACCOUNT_PUBLIC_URL "$account_base")}"
-projects_base="${DEPLOY_PROJECTS_BASE:-$(env_or_default PROJECTS_PUBLIC_URL "https://$projects_host")}"
+admin_base="${DEPLOY_ADMIN_BASE:-${DEPLOY_PROJECTS_BASE:-$(env_or_default CONTROL_CENTER_PUBLIC_URL "https://$control_center_host")}}"
 grafana_base="${DEPLOY_GRAFANA_BASE:-$(env_or_default GRAFANA_PUBLIC_URL "")}"
 grafana_blocked="${DEPLOY_GRAFANA_BLOCKED:-0}"
 admin_scheme="${DEPLOY_ADMIN_SCHEME:-}"
 allow_http_no_hsts="${DEPLOY_ALLOW_HTTP_NO_HSTS:-0}"
 
 if [ "${DEPLOY_RUN_WAF_SMOKE:-1}" = "1" ]; then
-  sh ./scripts/waf-smoke.sh --apiBase "$api_base" --phpBase "$projects_base"
+  sh ./scripts/waf-smoke.sh --apiBase "$api_base" --phpBase "$admin_base"
 fi
 
 if [ "${DEPLOY_RUN_RATE_LIMIT_EVIDENCE:-1}" = "1" ]; then
@@ -59,7 +60,7 @@ if [ "${DEPLOY_RUN_RETENTION_EVIDENCE:-1}" = "1" ]; then
 fi
 
 if [ "${DEPLOY_RUN_INFRA_HEALTH:-1}" = "1" ]; then
-  set -- --apiBase "$api_base" --uiBase "$ui_base" --accountBase "$account_base" --projectsBase "$projects_base"
+  set -- --apiBase "$api_base" --uiBase "$ui_base" --accountBase "$account_base" --adminBase "$admin_base"
   if [ -n "$grafana_base" ]; then
     set -- "$@" --grafanaBase "$grafana_base"
   fi
@@ -98,8 +99,8 @@ if [ "${DEPLOY_RUN_PRE_GO_LIVE:-0}" = "1" ]; then
     --apiBase "$api_base" \
     --uiBase "$ui_base" \
     --accountBase "$account_base" \
-    --projectsBase "$projects_base" \
-    --phpBase "$projects_base" \
+    --adminBase "$admin_base" \
+    --phpBase "$admin_base" \
     --accountOrigin "$account_origin"
   if [ -n "$grafana_base" ]; then
     set -- "$@" --grafanaBase "$grafana_base"

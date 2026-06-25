@@ -297,9 +297,11 @@
         { "type": "command", "name": "generate-sbom" },
         { "type": "command", "name": "sign-images" },
         { "type": "command", "name": "release-artifact-gate" },
+        { "type": "command", "name": "github-attestation-evidence" },
+        { "type": "workflow", "pattern": "release-attestation[\\s\\S]*actions/attest-build-provenance@v4[\\s\\S]*gh attestation verify" },
         { "type": "pattern", "path": "security/admission/cosign-digest-policy.rego", "pattern": "slsa\\.dev/provenance" }
       ],
-      "liveProof": "Verify signed production images, SBOM and SLSA provenance in every release evidence pack."
+      "liveProof": "Verify signed production images, SBOM and GitHub/Sigstore provenance in every release evidence pack."
     },
     {
       "id": "compliance-gdpr-soc2-like",

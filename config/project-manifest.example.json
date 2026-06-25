@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "project": {
+    "id": "client-portal",
+    "name": "Client Portal",
+    "runtime": "node"
+  },
+  "releaseImages": [
+    {
+      "key": "APP_IMAGE",
+      "name": "app",
+      "image": "registry.example.com/client-portal/app:1.0.0@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "key": "WORKER_IMAGE",
+      "name": "worker",
+      "image": "registry.example.com/client-portal/worker:1.0.0@sha256:1111111111111111111111111111111111111111111111111111111111111111"
+    }
+  ]
+}

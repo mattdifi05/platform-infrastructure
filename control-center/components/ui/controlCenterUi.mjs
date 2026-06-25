@@ -35,12 +35,12 @@ export function controlCenterScriptTags() {
 
 export function controlCenterUiContract(controlCenterPackage = {}) {
   return {
-    name: "@stexor/control-center-local-ui",
+    name: "@platform/control-center-local-ui",
     version: controlCenterPackage.version || "0.1.0",
     source: "control-center/components + control-center/styles",
     mountedRoot: "/app",
-    controlCenterProject: controlCenterPackage.name || "@stexor/control-center",
-    controlCenterPackageLoaded: controlCenterPackage.name === "@stexor/control-center",
+    controlCenterProject: controlCenterPackage.name || "@platform/control-center",
+    controlCenterPackageLoaded: controlCenterPackage.name === "@platform/control-center",
     declaredDependency: "none",
     dependencyTarget: "local-control-center-files",
     packageMountedInControlCenterProject: true,

@@ -9,6 +9,9 @@ const projectsRoot = process.env.PROJECTS_ROOT || "/var/www/projects";
 const stateFile = process.env.PROJECT_STATE_FILE || "/var/www/project-state/projects.json";
 const phpUpstream = new URL(process.env.PHP_UPSTREAM || "http://php-apache:80");
 const controlCenterUpstream = new URL(process.env.CONTROL_CENTER_UPSTREAM || "http://control-center:8080");
+const domain = normalizeHost(process.env.DOMAIN || process.env.LOCAL_DOMAIN || "localhost.com");
+const adminHost = normalizeHost(process.env.ADMIN_HOST || `admin.${domain}`);
+const controlCenterHost = normalizeHost(process.env.CONTROL_CENTER_HOST || process.env.PROJECTS_HOST || adminHost);
 const hostSuffix = process.env.PROJECT_HOST_SUFFIX || ".localhost.com";
 const nodeHosts = parsePairs(process.env.NODE_PROJECT_HOSTS || "");
 const nodeUpstreams = parsePairs(process.env.NODE_PROJECT_UPSTREAMS || "");
@@ -24,7 +27,7 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    if (!host || host === normalizeHost(process.env.PROJECTS_HOST || "projects.localhost.com")) {
+    if (!host || host === controlCenterHost || (process.env.PROJECTS_HOST && host === normalizeHost(process.env.PROJECTS_HOST))) {
       proxy(req, res, controlCenterUpstream);
       return;
     }
@@ -229,7 +232,7 @@ function disabled(res, title, host, status = 404) {
     "content-type": "text/html; charset=utf-8",
     "cache-control": "no-store",
   });
-  res.end(`<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(title)}</title><style>body{margin:0;background:#0b1117;color:#eef5ff;font-family:system-ui;display:grid;place-items:center;min-height:100vh}.box{max-width:560px;padding:28px;border:1px solid #263547;border-radius:10px;background:#121a23}a{color:#76e4c5}</style></head><body><div class="box"><h1>${escapeHtml(title)}</h1><p>${escapeHtml(host)} is managed from the Stexor Control Center.</p><p><a href="https://projects.localhost.com/">Open Control Center</a></p></div></body></html>`);
+  res.end(`<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(title)}</title><style>body{margin:0;background:#0b1117;color:#eef5ff;font-family:system-ui;display:grid;place-items:center;min-height:100vh}.box{max-width:560px;padding:28px;border:1px solid #263547;border-radius:10px;background:#121a23}a{color:#76e4c5}</style></head><body><div class="box"><h1>${escapeHtml(title)}</h1><p>${escapeHtml(host)} is managed from the Admin Control Center.</p><p><a href="https://${escapeHtml(controlCenterHost)}/">Open Control Center</a></p></div></body></html>`);
 }
 
 function parsePairs(value) {
