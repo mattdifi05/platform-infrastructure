@@ -8838,20 +8838,36 @@ async function fullRestoreDrill() {
     ["secret-manager-metadata", backupRestoreDrillSecretManagerMetadata],
   ];
   const results = [];
+  let failure = null;
   for (const [name, fn] of steps) {
     const stepStarted = Date.now();
-    await fn();
-    results.push({ name, durationMs: Date.now() - stepStarted, status: "success" });
+    try {
+      await fn();
+      results.push({ name, durationMs: Date.now() - stepStarted, status: "success" });
+    } catch (error) {
+      failure = error;
+      results.push({ name, durationMs: Date.now() - stepStarted, status: "failed", error: String(error?.message ?? error) });
+      break;
+    }
   }
-  const healthStarted = Date.now();
-  await infraHealth();
-  results.push({ name: "infra-health", durationMs: Date.now() - healthStarted, status: "success" });
+  if (!failure) {
+    const healthStarted = Date.now();
+    try {
+      await infraHealth();
+      results.push({ name: "infra-health", durationMs: Date.now() - healthStarted, status: "success" });
+    } catch (error) {
+      failure = error;
+      results.push({ name: "infra-health", durationMs: Date.now() - healthStarted, status: "failed", error: String(error?.message ?? error) });
+    }
+  }
   const finishedAt = new Date();
   const payload = {
     generatedAt: finishedAt.toISOString(),
     startedAt: startedAt.toISOString(),
     finishedAt: finishedAt.toISOString(),
     durationMs: finishedAt.getTime() - startedAt.getTime(),
+    status: failure ? "failed" : "success",
+    error: failure ? String(failure?.message ?? failure) : null,
     steps: results,
   };
   const stamp = reportTimestamp();
@@ -8868,6 +8884,9 @@ async function fullRestoreDrill() {
     ...results.map((result) => `| ${result.name} | ${result.status} | ${result.durationMs} |`),
   ]);
   log(`Full restore drill report written to ${jsonPath} and ${markdownPath}`);
+  if (failure) {
+    throw failure;
+  }
 }
 
 const drEvidenceFamilies = [
