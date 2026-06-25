@@ -528,6 +528,26 @@ DEPLOY_REPO=OWNER/REPO \
 sh ./scripts/deploy-vps.sh
 ```
 
+Per il server home-VPS/LAN senza TLS locale, mantieni i valori production in
+`.env` e passa override espliciti solo al post-deploy evidence. Questo valida
+il runtime via HTTP LAN senza abbassare i gate production HTTPS:
+
+```sh
+DEPLOY_API_BASE=http://api.192.168.1.164.sslip.io \
+DEPLOY_UI_BASE=http://app.192.168.1.164.sslip.io \
+DEPLOY_ACCOUNT_BASE=http://account.192.168.1.164.sslip.io \
+DEPLOY_ACCOUNT_ORIGIN=https://account.192.168.1.164.sslip.io \
+DEPLOY_PROJECTS_BASE=http://projects.192.168.1.164.sslip.io \
+DEPLOY_GRAFANA_BASE=http://grafana.192.168.1.164.sslip.io/login \
+DEPLOY_GRAFANA_BLOCKED=1 \
+DEPLOY_ADMIN_SCHEME=http \
+DEPLOY_ALLOW_HTTP_NO_HSTS=1 \
+DEPLOY_RUN_PRE_GO_LIVE=1 \
+DEPLOY_PRE_GO_LIVE_PRODUCTION_PREFLIGHT=0 \
+DEPLOY_REPO=OWNER/REPO \
+sh ./scripts/vps-postdeploy.sh .env
+```
+
 I drill piu' pesanti restano opt-in: usa
 `DEPLOY_PRE_GO_LIVE_RESTORE_DRILL=1`,
 `DEPLOY_PRE_GO_LIVE_OFFSITE_RESTORE_DRY_RUN=1` e

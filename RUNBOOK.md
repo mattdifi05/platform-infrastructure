@@ -265,6 +265,29 @@ docker exec enterprise-backup-scheduler crontab -l
 
 This keeps scheduling inside Docker. The host only needs Docker, Compose and Git. The scheduler autodetects Docker mount sources; set `PLATFORM_INFRA_HOST_ROOT` and `PROJECT_SOURCE_HOST_ROOT` only when the VPS uses nonstandard paths. Enable off-site upload with `BACKUP_SCHEDULER_ENABLE_OFFSITE=true` after `RESTIC_REPOSITORY`, `RESTIC_PASSWORD_FILE` and provider credentials are valid. Scheduled jobs call `backup-scheduler.sh --run <command>` and parse the private runtime env file as data instead of sourcing it as shell code.
 
+## Home VPS LAN evidence
+
+Use explicit runtime overrides when the home VPS is reachable only over LAN
+HTTP while production TLS is still provided by the future edge provider. This
+keeps production HTTPS checks intact and only changes the local evidence
+target:
+
+```sh
+DEPLOY_API_BASE=http://api.192.168.1.164.sslip.io \
+DEPLOY_UI_BASE=http://app.192.168.1.164.sslip.io \
+DEPLOY_ACCOUNT_BASE=http://account.192.168.1.164.sslip.io \
+DEPLOY_ACCOUNT_ORIGIN=https://account.192.168.1.164.sslip.io \
+DEPLOY_PROJECTS_BASE=http://projects.192.168.1.164.sslip.io \
+DEPLOY_GRAFANA_BASE=http://grafana.192.168.1.164.sslip.io/login \
+DEPLOY_GRAFANA_BLOCKED=1 \
+DEPLOY_ADMIN_SCHEME=http \
+DEPLOY_ALLOW_HTTP_NO_HSTS=1 \
+DEPLOY_RUN_PRE_GO_LIVE=1 \
+DEPLOY_PRE_GO_LIVE_PRODUCTION_PREFLIGHT=0 \
+DEPLOY_REPO=OWNER/REPO \
+sh ./scripts/vps-postdeploy.sh .env
+```
+
 ## Local secrets
 
 ```sh

@@ -32,10 +32,15 @@ api_host=$(env_or_default API_HOST api.localhost.com)
 ui_host=$(env_or_default UI_HOST ui.localhost.com)
 account_host=$(env_or_default ACCOUNT_HOST account.localhost.com)
 projects_host=$(env_or_default PROJECTS_HOST projects.localhost.com)
-api_base=$(env_or_default API_PUBLIC_URL "https://$api_host")
-ui_base=$(env_or_default UI_PUBLIC_URL "https://$ui_host")
-account_base=$(env_or_default ACCOUNT_PUBLIC_URL "https://$account_host")
-projects_base="https://$projects_host"
+api_base="${DEPLOY_API_BASE:-$(env_or_default API_PUBLIC_URL "https://$api_host")}"
+ui_base="${DEPLOY_UI_BASE:-$(env_or_default UI_PUBLIC_URL "https://$ui_host")}"
+account_base="${DEPLOY_ACCOUNT_BASE:-$(env_or_default ACCOUNT_PUBLIC_URL "https://$account_host")}"
+account_origin="${DEPLOY_ACCOUNT_ORIGIN:-$(env_or_default ACCOUNT_PUBLIC_URL "$account_base")}"
+projects_base="${DEPLOY_PROJECTS_BASE:-$(env_or_default PROJECTS_PUBLIC_URL "https://$projects_host")}"
+grafana_base="${DEPLOY_GRAFANA_BASE:-$(env_or_default GRAFANA_PUBLIC_URL "")}"
+grafana_blocked="${DEPLOY_GRAFANA_BLOCKED:-0}"
+admin_scheme="${DEPLOY_ADMIN_SCHEME:-}"
+allow_http_no_hsts="${DEPLOY_ALLOW_HTTP_NO_HSTS:-0}"
 
 if [ "${DEPLOY_RUN_WAF_SMOKE:-1}" = "1" ]; then
   sh ./scripts/waf-smoke.sh --apiBase "$api_base" --phpBase "$projects_base"
@@ -54,11 +59,17 @@ if [ "${DEPLOY_RUN_RETENTION_EVIDENCE:-1}" = "1" ]; then
 fi
 
 if [ "${DEPLOY_RUN_INFRA_HEALTH:-1}" = "1" ]; then
-  sh ./scripts/infra-health.sh \
-    --apiBase "$api_base" \
-    --uiBase "$ui_base" \
-    --accountBase "$account_base" \
-    --projectsBase "$projects_base"
+  set -- --apiBase "$api_base" --uiBase "$ui_base" --accountBase "$account_base" --projectsBase "$projects_base"
+  if [ -n "$grafana_base" ]; then
+    set -- "$@" --grafanaBase "$grafana_base"
+  fi
+  if [ "$grafana_blocked" = "1" ] || [ "$grafana_blocked" = "true" ]; then
+    set -- "$@" --grafanaBlocked true
+  fi
+  if [ -n "$admin_scheme" ]; then
+    set -- "$@" --adminScheme "$admin_scheme"
+  fi
+  sh ./scripts/infra-health.sh "$@"
 fi
 
 if [ "${DEPLOY_RUN_PRODUCTION_PREFLIGHT:-0}" = "1" ]; then
@@ -82,6 +93,25 @@ if [ "${DEPLOY_RUN_PRE_GO_LIVE:-0}" = "1" ]; then
   fi
   if [ "${DEPLOY_PRE_GO_LIVE_GITHUB_REMOTE:-0}" = "1" ]; then
     set -- "$@" --verifyGithubRemote
+  fi
+  set -- "$@" \
+    --apiBase "$api_base" \
+    --uiBase "$ui_base" \
+    --accountBase "$account_base" \
+    --projectsBase "$projects_base" \
+    --phpBase "$projects_base" \
+    --accountOrigin "$account_origin"
+  if [ -n "$grafana_base" ]; then
+    set -- "$@" --grafanaBase "$grafana_base"
+  fi
+  if [ "$grafana_blocked" = "1" ] || [ "$grafana_blocked" = "true" ]; then
+    set -- "$@" --grafanaBlocked true
+  fi
+  if [ -n "$admin_scheme" ]; then
+    set -- "$@" --adminScheme "$admin_scheme"
+  fi
+  if [ "$allow_http_no_hsts" = "1" ] || [ "$allow_http_no_hsts" = "true" ]; then
+    set -- "$@" --allowHttpNoHsts
   fi
   sh ./scripts/pre-go-live-evidence.sh "$@"
 fi
