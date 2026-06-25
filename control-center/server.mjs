@@ -365,6 +365,7 @@ async function handleApi(req, res, url, context) {
     }
     if (method === "GET" && route(parts, "control", "settings")) return json(res, context.settings);
     if (method === "GET" && route(parts, "control", "ui-package")) return json(res, context.uiPackage);
+    if (method === "GET" && route(parts, "control", "readiness")) return json(res, context.readiness);
     if (method === "POST" && route(parts, "control", "settings", "local")) return json(res, planSettingsUpdate(payload, context), 202);
     if (method === "GET" && route(parts, "control", "backups", "summary")) return json(res, context.backups);
     if (method === "GET" && route(parts, "control", "backups", "records")) return json(res, { records: context.backupRecords });
@@ -1082,6 +1083,21 @@ function buildContext({ projects, state }) {
       .map((domain) => domainRecord(domain)),
   ];
   const network = buildNetworkTopology({ subdomains, domains, security, settings });
+  const readiness = buildControlReadiness({
+    projects,
+    applications,
+    subdomains,
+    webspaces,
+    network,
+    monitoring,
+    security,
+    backups,
+    operations,
+    audit,
+    deployments,
+    providerConnections,
+    uiPackage,
+  });
   const overview = {
     title: "Stexor Control Center",
     environment,
@@ -1098,6 +1114,7 @@ function buildContext({ projects, state }) {
     workersJobs: { workers: workerRuntimes.length, queues: jobQueues.length, failedJobs: jobRecords.filter((job) => job.status === "failed").length, schedules: jobSchedules.length },
     identityAccess: { adminUsers: identityAccess.adminUsers.length, roles: identityAccess.roles.length, sessions: identityAccess.sessionPolicies.length },
     designSystem: { package: uiPackage.name, version: uiPackage.version, source: uiPackage.source, manifestLoaded: uiPackage.apiManifestLoaded },
+    readiness: readiness.summary,
     alerts: { open: openAlerts.length, source: "Control Center local alert metadata and Alertmanager evidence tooling" },
     deployments: { latest: deployments.slice(0, 5) },
     backups,
@@ -1127,6 +1144,7 @@ function buildContext({ projects, state }) {
     monitoring,
     settings,
     uiPackage,
+    readiness,
     identityAccess,
     alertRecords,
     notificationChannels,
@@ -1451,7 +1469,7 @@ function advancedControlSection(section, context) {
 }
 
 function advancedAdapterStatus(section) {
-  const readOnlySections = new Set(["infrastructure", "deployments", "monitoring", "logs-advanced", "alerts-advanced", "backup-restore", "security-advanced", "audit"]);
+  const readOnlySections = new Set(["infrastructure", "deployments", "monitoring", "logs-advanced", "alerts-advanced", "backup-restore", "security-advanced", "audit", "readiness"]);
   return readOnlySections.has(section) ? "read-only-evidence" : "planned-adapter";
 }
 
@@ -1565,6 +1583,8 @@ function advancedSectionData(section, context) {
         blockers: context.environment === "production" ? ["verifyRemote evidence required"] : ["local evidence only is not production evidence"],
         reports: ["JSON", "Markdown", "evidence bundle"],
       };
+    case "readiness":
+      return context.readiness;
     case "security-advanced":
       return {
         security: context.security,
@@ -1608,6 +1628,195 @@ function advancedSectionData(section, context) {
       };
     default:
       return { status: "planned adapter" };
+  }
+}
+
+function buildControlReadiness(context) {
+  const enterprise = manifestReadiness("enterprise-requirements", "Enterprise requirements", readGovernanceManifest("enterprise-requirements.json"));
+  const production = manifestReadiness("production-readiness", "Production readiness checklist", readGovernanceManifest("production-readiness.json"));
+  const controlChecks = [
+    readinessCheck({
+      id: "stexor-ui-shell",
+      title: "Stexor UI Shell contract",
+      status: context.uiPackage.controlCenterPackageLoaded && context.uiPackage.packageMountedInControlCenterProject && context.uiPackage.apiManifestLoaded && context.uiPackage.missingRequiredExports.length === 0 ? "passed" : "needs-work",
+      evidence: ["@stexor/control-center package", "@stexor/ui vendored package", "UiShell/PillSidebarNav/PillTabs DOM contract"],
+      nextAction: "Keep the vendored @stexor/ui package in sync with Stexor Account before visual changes.",
+    }),
+    readinessCheck({
+      id: "simple-mode-mvp",
+      title: "Simple Mode operational MVP",
+      status: context.projects.length >= 0 && context.applications.length >= 0 && context.subdomains.length >= 0 && context.webspaces.length >= 0 ? "passed" : "needs-work",
+      evidence: ["/control/projects", "/control/applications", "/control/domains", "/control/webspaces", "/control/resources/summary", "/control/security/summary", "/control/backups/summary"],
+      nextAction: "Promote selected plan-only actions only after backend adapters are implemented and audited.",
+    }),
+    readinessCheck({
+      id: "advanced-mode-skeleton",
+      title: "Advanced Mode enterprise sections",
+      status: navigationForMode("advanced").length >= 20 ? "passed" : "needs-work",
+      evidence: ["/control/advanced", "/control/network", "/control/monitoring", "/control/adapters", "/control/readiness"],
+      nextAction: "Attach live provider evidence summaries after production verifyRemote runs.",
+    }),
+    readinessCheck({
+      id: "audit-operations-model",
+      title: "Audit and Operation records",
+      status: "passed",
+      evidence: ["projects-portal/state/audit.jsonl", "projects-portal/state/operations.jsonl", "sanitized OperationStep list"],
+      nextAction: "Forward production audit events to the durable backend/outbox when the live adapter is enabled.",
+    }),
+    readinessCheck({
+      id: "safe-adapter-boundary",
+      title: "Provider and infrastructure adapter boundary",
+      status: "plan-only",
+      evidence: ["CloudflareAdapter", "DockerAdapter", "GitHubAdapter", "GoNoGoAdapter", "apply rejected without live implementation"],
+      nextAction: "Add backend adapter implementations one at a time with strong confirmation and verifyRemote.",
+    }),
+    readinessCheck({
+      id: "local-network-monitoring-evidence",
+      title: "Local network and monitoring evidence",
+      status: context.network.routeTests.length > 0 && context.monitoring.scrapeJobs.length > 0 ? "passed" : "needs-work",
+      evidence: ["/control/network", "/control/monitoring", "Traefik route parser", "Prometheus/Grafana/Loki/Alertmanager config parser"],
+      nextAction: "Keep browser-exposed raw consoles blocked; use Grafana and ops runner evidence for deeper inspection.",
+    }),
+    readinessCheck({
+      id: "production-live-proof",
+      title: "Production live proof separation",
+      status: "pending-live-proof",
+      liveProofRequired: true,
+      evidence: ["localEvidenceIsProductionEvidence=false", "productionEvidence=false", "production-readiness liveProofChecks"],
+      nextAction: "Run production-go-no-go, production-readiness-live and evidence-bundle verification on the real VPS/provider environment.",
+    }),
+  ];
+  const allChecks = [...controlChecks, ...enterprise.requirements, ...production.requirements];
+  return sanitizeEvent({
+    title: "Stexor Control Center Readiness Matrix",
+    environment,
+    source: "governance manifests plus live Control Center context",
+    endpoint: "/control/readiness",
+    dryRunDefault: true,
+    providerTouched: false,
+    liveProviderTouched: false,
+    dockerTouched: false,
+    productionEvidence: false,
+    localEvidenceIsProductionEvidence: false,
+    summary: readinessSummary(allChecks),
+    controlCenter: {
+      checks: controlChecks,
+      endpointsCovered: ["/control/overview", "/control/projects", "/control/applications", "/control/domains", "/control/webspaces", "/control/resources/summary", "/control/security/summary", "/control/backups/summary", "/control/operations", "/control/audit", "/control/readiness"],
+      auditEventsLoaded: context.audit.length,
+      operationsLoaded: context.operations.length,
+      designSystem: {
+        project: context.uiPackage.controlCenterProject,
+        package: context.uiPackage.name,
+        dependency: context.uiPackage.declaredDependency,
+        missingRequiredExports: context.uiPackage.missingRequiredExports,
+      },
+    },
+    manifests: {
+      enterprise,
+      productionReadiness: production,
+    },
+    productionBlockers: allChecks
+      .filter((item) => item.status === "needs-work" || item.status === "pending-live-proof")
+      .map((item) => ({ id: item.id, status: item.status, nextAction: item.nextAction }))
+      .slice(0, 40),
+  });
+}
+
+function readinessCheck({ id, title, status, evidence = [], nextAction = "", liveProofRequired = false }) {
+  return {
+    id,
+    title,
+    status,
+    repoEvidenceStatus: status === "needs-work" ? "incomplete" : "tracked",
+    liveProofRequired: Boolean(liveProofRequired),
+    evidence,
+    nextAction,
+  };
+}
+
+function readinessSummary(checks) {
+  const byStatus = {};
+  for (const check of checks) byStatus[check.status] = (byStatus[check.status] || 0) + 1;
+  const needsWork = byStatus["needs-work"] || 0;
+  const pendingLiveProof = byStatus["pending-live-proof"] || 0;
+  const passed = byStatus.passed || 0;
+  const total = checks.length;
+  return {
+    total,
+    passed,
+    planOnly: byStatus["plan-only"] || 0,
+    pendingLiveProof,
+    needsWork,
+    repositoryEvidenceTracked: total - needsWork,
+    localModeReady: needsWork === 0,
+    productionReady: needsWork === 0 && pendingLiveProof === 0,
+    byStatus,
+  };
+}
+
+function manifestReadiness(id, title, manifest) {
+  const requirements = Array.isArray(manifest.requirements) ? manifest.requirements.map((requirement) => manifestRequirementRecord(requirement)) : [];
+  const summary = readinessSummary(requirements);
+  const states = {};
+  for (const item of requirements) states[item.sourceState] = (states[item.sourceState] || 0) + 1;
+  return {
+    id,
+    title: manifest.title || title,
+    loaded: manifest.loaded === true,
+    scope: manifest.scope || "platform-infrastructure",
+    expectedCount: Number(manifest.expectedCount || requirements.length),
+    requirementCount: requirements.length,
+    manifestPath: `governance/${manifest.fileName || `${id}.json`}`,
+    liveProofCheckRequired: Boolean(manifest.liveProofCheckRequired),
+    states,
+    summary,
+    requirements,
+  };
+}
+
+function manifestRequirementRecord(requirement) {
+  const sourceState = sanitizeIdentifier(requirement.state || "unknown") || "unknown";
+  const liveProofRequired = Boolean(requirement.liveProof);
+  const evidence = Array.isArray(requirement.evidence) ? requirement.evidence : [];
+  const status = manifestRequirementStatus(sourceState, liveProofRequired);
+  return {
+    id: sanitizeIdentifier(requirement.id || "unknown"),
+    title: sanitizeMessage(requirement.title || "Untitled requirement"),
+    status,
+    sourceState,
+    repoEvidenceStatus: status === "needs-work" ? "incomplete" : "tracked",
+    liveProofRequired,
+    liveProofChecks: Array.isArray(requirement.liveProofChecks) ? requirement.liveProofChecks.map((item) => sanitizeIdentifier(item)).filter(Boolean) : [],
+    evidenceCount: evidence.length,
+    evidenceRefs: evidence.map((item) => ({
+      type: sanitizeIdentifier(item.type || "unknown"),
+      path: item.path ? sanitizeRef(item.path) : "",
+      name: item.name ? sanitizeRef(item.name) : "",
+    })),
+    nextAction: liveProofRequired ? sanitizeMessage(requirement.liveProof || "Archive production live proof.") : "Keep repository evidence current.",
+  };
+}
+
+function manifestRequirementStatus(sourceState, liveProofRequired) {
+  if (["repo-ready", "gate-ready", "environment-ready", "proprietary-integrated", "repo-ready-plus-environment-action"].includes(sourceState)) {
+    return liveProofRequired ? "pending-live-proof" : "passed";
+  }
+  if (sourceState === "planned" || sourceState === "plan-only") return "plan-only";
+  return "needs-work";
+}
+
+function readGovernanceManifest(fileName) {
+  const cleanFile = path.basename(fileName);
+  const root = path.resolve(docsRoot, "governance");
+  const target = path.resolve(root, cleanFile);
+  if (!(target === root || target.startsWith(`${root}${path.sep}`)) || !existsSync(target)) {
+    return { loaded: false, fileName: cleanFile, requirements: [] };
+  }
+  try {
+    const parsed = JSON.parse(readFileSync(target, "utf8"));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? { ...parsed, loaded: true, fileName: cleanFile } : { loaded: false, fileName: cleanFile, requirements: [] };
+  } catch {
+    return { loaded: false, fileName: cleanFile, requirements: [] };
   }
 }
 
@@ -1718,6 +1927,7 @@ function renderControlCenter(context, params) {
     else if (section === "secrets") body = renderSecrets(scoped(context.sensitiveMaterials), context.materialStores, context.projects);
     else if (section === "workers-jobs") body = renderWorkersJobs(scoped(context.workerRuntimes), scoped(context.jobQueues), scoped(context.jobRecords), scoped(context.jobSchedules), context.projects);
     else if (section === "deployments") body = renderDeployments(scoped(context.deployments));
+    else if (section === "readiness") body = renderReadiness(context.readiness);
     else if (section === "monitoring") body = renderMonitoringAdvanced(context.monitoring);
     else if (section === "logs-advanced") body = renderAdvancedPanel(title, section, context, "Loki query and export surfaces stay metadata-only here.");
     else if (section === "alerts-advanced") body = renderAdvancedPanel(title, section, context, "Alert delivery evidence is verified through the ops runner before production use.");
@@ -2832,6 +3042,44 @@ function renderNotificationChannelCard(channel) {
     <div class="card-title"><strong>${escapeHtml(humanName(channel.channel))}</strong><em>${escapeHtml(channel.status)}</em></div>
     <span>${escapeHtml(channel.deliveryMode)} / ${escapeHtml(channel.source)}</span>
     <span>${escapeHtml(channel.updatedAt ? `updated ${channel.updatedAt}` : "no local override")}</span>
+  </div>`;
+}
+
+function renderReadiness(readiness) {
+  const summary = readiness.summary || {};
+  const controlChecks = readiness.controlCenter?.checks || [];
+  const productionRequirements = readiness.manifests?.productionReadiness?.requirements || [];
+  const enterpriseRequirements = readiness.manifests?.enterprise?.requirements || [];
+  return `<section class="metric-grid">
+    <div class="metric"><span>${summary.passed || 0}</span><small>passed checks</small></div>
+    <div class="metric"><span>${summary.pendingLiveProof || 0}</span><small>pending live proofs</small></div>
+    <div class="metric"><span>${summary.planOnly || 0}</span><small>plan-only controls</small></div>
+    <div class="metric"><span>${summary.needsWork || 0}</span><small>repo gaps</small></div>
+  </section>
+  <section class="grid two">
+    <div class="panel"><div class="panel-head"><span>RDY</span><div><h2>Control Center coverage</h2><p>Local control-plane capabilities are separated from production live evidence.</p></div></div>
+      <div class="cards">${controlChecks.map(renderReadinessCard).join("")}</div>
+    </div>
+    <div class="panel"><div class="panel-head"><span>LIVE</span><div><h2>Production blockers</h2><p>These items need real VPS/provider proof before production evidence can be accepted.</p></div></div>
+      <div class="cards">${readiness.productionBlockers.slice(0, 8).map((item) => `<div class="card compact"><strong>${escapeHtml(item.id)}</strong><span>${escapeHtml(item.status)} / ${escapeHtml(item.nextAction)}</span></div>`).join("") || empty("No blockers", "No pending live-proof blockers were found.")}</div>
+    </div>
+  </section>
+  <section class="grid two">
+    <div class="panel"><div class="panel-head"><span>20</span><div><h2>Production readiness checklist</h2><p>${escapeHtml(readiness.manifests?.productionReadiness?.requirementCount || 0)} tracked requirements from governance/production-readiness.json.</p></div></div>
+      <div class="cards">${productionRequirements.slice(0, 20).map(renderReadinessCard).join("")}</div>
+    </div>
+    <div class="panel"><div class="panel-head"><span>ENT</span><div><h2>Enterprise requirements</h2><p>${escapeHtml(readiness.manifests?.enterprise?.requirementCount || 0)} tracked requirements from governance/enterprise-requirements.json.</p></div></div>
+      <div class="cards">${enterpriseRequirements.slice(0, 12).map(renderReadinessCard).join("")}</div>
+    </div>
+  </section>`;
+}
+
+function renderReadinessCard(item) {
+  const statusClass = item.status === "needs-work" ? "danger" : item.status === "pending-live-proof" || item.status === "plan-only" ? "off" : "on";
+  return `<div id="readiness-${escapeHtml(item.id)}" class="card compact">
+    <div class="card-title"><strong>${escapeHtml(item.title || item.id)}</strong><em class="state ${statusClass}">${escapeHtml(item.status)}</em></div>
+    <span>${escapeHtml(item.repoEvidenceStatus || "tracked")} / live proof ${item.liveProofRequired ? "required" : "not required"}</span>
+    <span>${escapeHtml(item.nextAction || "Keep evidence current.")}</span>
   </div>`;
 }
 
@@ -6369,7 +6617,7 @@ function navigationGroupsForMode(mode) {
         ["infrastructure", "Infrastructure", "INF"], ["network", "Network", "NET"], ["databases", "Databases", "DB"], ["storage", "Storage", "S3"], ["workers-jobs", "Workers & Jobs", "JOB"],
       ]),
       navGroup("delivery", "Delivery", "DEP", [
-        ["deployments", "Deployments", "DEP"], ["cicd-github", "CI/CD & GitHub Governance", "CI"], ["cloudflare", "Cloudflare", "CF"], ["release-evidence", "Release Evidence", "EVD"], ["go-no-go", "Production Go/No-Go", "GO"],
+        ["deployments", "Deployments", "DEP"], ["cicd-github", "CI/CD & GitHub Governance", "CI"], ["cloudflare", "Cloudflare", "CF"], ["release-evidence", "Release Evidence", "EVD"], ["go-no-go", "Production Go/No-Go", "GO"], ["readiness", "Readiness Matrix", "RDY"],
       ]),
       navGroup("observability", "Observability", "OBS", [
         ["monitoring", "Monitoring", "MON"], ["logs-advanced", "Logs Advanced", "LOG"], ["alerts-advanced", "Alerts Advanced", "ALT"],
@@ -6422,6 +6670,7 @@ function advancedItems(section) {
     "disaster-recovery": ["DR evidence", "RTO/RPO", "backup freshness", "restore p95", "WAL archive", "off-site restore evidence"],
     "release-evidence": ["SBOM", "digest-pinned images", "provenance", "signature", "previous-images.json", "rollback validation"],
     "go-no-go": ["production-go-no-go", "evidence bundle", "live blockers", "JSON/Markdown reports"],
+    readiness: ["Control Center coverage", "enterprise requirements", "production readiness checklist", "pending live proof", "repo evidence status"],
     "security-advanced": ["WAF", "rate limit", "brute force", "CSP", "CORS", "headers", "secret scan", "vulnerability scan", "Cloudflare Access", "admin route protection"],
     identity: ["users", "teams", "roles", "passkeys", "sessions", "login audit"],
     secrets: ["Docker secrets", "KMS metadata", "rotation", "usage map", "no plaintext values"],

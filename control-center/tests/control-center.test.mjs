@@ -220,6 +220,7 @@ test("Stexor Control Center local foundation", async (t) => {
   assert.match(advancedGithubHtml, /Cloudflare/);
   assert.match(advancedGithubHtml, /Release Evidence/);
   assert.match(advancedGithubHtml, /Production Go\/No-Go/);
+  assert.match(advancedGithubHtml, /Readiness Matrix/);
   assert.match(advancedGithubHtml, /branch protection/);
   assert.match(advancedGithubHtml, /workflow status/);
   assert.match(advancedGithubHtml, /deploy approvals/);
@@ -277,6 +278,8 @@ test("Stexor Control Center local foundation", async (t) => {
   assert.equal(overview.monitoring.scrapeJobs > 0, true);
   assert.equal(overview.monitoring.dashboardPanels > 0, true);
   assert.equal(overview.monitoring.alertRules > 0, true);
+  assert.equal(overview.readiness.productionReady, false);
+  assert.equal(overview.readiness.pendingLiveProof > 0, true);
   assert.notEqual(overview.modeEvidence, "production evidence");
 
   const advancedApi = await getJson(`${baseUrl}/control/advanced`);
@@ -285,6 +288,7 @@ test("Stexor Control Center local foundation", async (t) => {
   assert.equal(advancedApi.productionEvidence, false);
   assert.equal(advancedApi.sections.some((section) => section.id === "cloudflare" && section.endpoint === "/control/advanced/cloudflare"), true);
   assert.equal(advancedApi.sections.some((section) => section.id === "release-evidence"), true);
+  assert.equal(advancedApi.sections.some((section) => section.id === "readiness" && section.endpoint === "/control/advanced/readiness"), true);
 
   const advancedCloudflare = await getJson(`${baseUrl}/control/advanced/cloudflare`);
   assert.equal(advancedCloudflare.label, "Cloudflare");
@@ -301,6 +305,33 @@ test("Stexor Control Center local foundation", async (t) => {
   assert.equal(advancedReleaseApi.data.requirements.includes("SBOM"), true);
   assert.equal(advancedReleaseApi.data.requirements.includes("rollback validation"), true);
   assert.equal(advancedReleaseApi.productionEvidence, false);
+
+  const readiness = await getJson(`${baseUrl}/control/readiness`);
+  assert.equal(readiness.title, "Stexor Control Center Readiness Matrix");
+  assert.equal(readiness.dryRunDefault, true);
+  assert.equal(readiness.providerTouched, false);
+  assert.equal(readiness.liveProviderTouched, false);
+  assert.equal(readiness.dockerTouched, false);
+  assert.equal(readiness.productionEvidence, false);
+  assert.equal(readiness.localEvidenceIsProductionEvidence, false);
+  assert.equal(readiness.controlCenter.checks.some((check) => check.id === "stexor-ui-shell" && check.status === "passed"), true);
+  assert.equal(readiness.controlCenter.checks.some((check) => check.id === "safe-adapter-boundary" && check.status === "plan-only"), true);
+  assert.equal(readiness.manifests.productionReadiness.loaded, true);
+  assert.equal(readiness.manifests.productionReadiness.requirementCount, 20);
+  assert.equal(readiness.manifests.productionReadiness.requirements.some((item) => item.id === "tls-https-production-ready" && item.status === "pending-live-proof"), true);
+  assert.equal(readiness.manifests.enterprise.loaded, true);
+  assert.equal(readiness.summary.needsWork, 0);
+  assert.equal(readiness.summary.localModeReady, true);
+  assert.equal(readiness.summary.productionReady, false);
+  assert.equal(readiness.summary.pendingLiveProof > 0, true);
+  assert.equal(readiness.productionBlockers.some((item) => item.id === "production-live-proof"), true);
+  assert.doesNotMatch(JSON.stringify(readiness), /CLOUDFLARE_API_TOKEN|super-secret-token-should-not-leak/);
+
+  const readinessHtml = await getText(`${baseUrl}/?mode=advanced&section=readiness`);
+  assert.match(readinessHtml, /Readiness Matrix/);
+  assert.match(readinessHtml, /Control Center coverage/);
+  assert.match(readinessHtml, /Production readiness checklist/);
+  assert.match(readinessHtml, /pending-live-proof/);
 
   const advancedIdentityApi = await getJson(`${baseUrl}/control/advanced/identity`);
   assert.equal(advancedIdentityApi.data.sessionPolicy, "HttpOnly; Secure; SameSite=Lax");
