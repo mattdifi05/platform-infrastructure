@@ -234,6 +234,7 @@ services:
       SMTP_USER: ${SMTP_USER:-}
       SMTP_PASSWORD_FILE: /run/secrets/smtp_password
       NODE_PROJECT_HOSTS: ${NODE_PROJECT_HOSTS:-}
+      PROJECT_STATE_FILE: /var/www/project-state/projects.json
     secrets:
       - projects_gateway_signing_keys
       - smtp_password
@@ -242,6 +243,7 @@ services:
       - .:/var/www/infra-docs:ro
       - ${PHP_PROJECTS_DIR:-../src}:/var/www/projects
       - ${PROJECTS_SYMLINK_TARGET_ROOT:-..}:/mnt/host/d/docker:ro
+      - ./projects-portal/state:/var/www/project-state
       - ./php-apache/php/custom.ini:/usr/local/etc/php/conf.d/zz-custom.ini:ro
       - ./php-apache/apache:/etc/apache2/sites-available
       - ./traefik/certs:/etc/apache2/certs:ro
@@ -253,6 +255,48 @@ services:
     healthcheck:
       test: ["CMD-SHELL", "apache2ctl -t >/dev/null"]
       interval: 20s
+      timeout: 5s
+      retries: 10
+
+  project-router:
+    image: ${NODE_IMAGE:-node:26.3.1-alpine@sha256:a2dc166a387cc6ca1e62d0c8e265e49ca985d6e60abc9fe6e6c3d6ce8e63f606}
+    container_name: enterprise-project-router
+    init: true
+    pids_limit: 512
+    logging: *default_logging
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    working_dir: /app
+    command:
+      - node
+      - /app/server.mjs
+    expose:
+      - "8080"
+    environment:
+      PROJECT_ROUTER_PORT: 8080
+      PROJECTS_ROOT: /var/www/projects
+      PROJECT_STATE_FILE: /var/www/project-state/projects.json
+      PROJECTS_HOST: ${PROJECTS_HOST:-projects.localhost.com}
+      PROJECT_HOST_SUFFIX: ${PROJECT_HOST_SUFFIX:-.localhost.com}
+      PHP_UPSTREAM: http://php-apache:80
+      NODE_PROJECT_HOSTS: ${NODE_PROJECT_HOSTS:-}
+      NODE_PROJECT_UPSTREAMS: ${NODE_PROJECT_UPSTREAMS:-}
+      NODE_PROJECT_COMMANDS: ${NODE_PROJECT_COMMANDS:-}
+      NODE_PROJECT_ENV: ${NODE_PROJECT_ENV:-development}
+    volumes:
+      - ./project-router:/app:ro
+      - ${PHP_PROJECTS_DIR:-../src}:/var/www/projects
+      - ${PROJECTS_SYMLINK_TARGET_ROOT:-..}:/mnt/host/d/docker
+      - ./projects-portal/state:/var/www/project-state
+    depends_on:
+      php-apache:
+        condition: service_healthy
+    networks:
+      - enterprise_net
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:8080/__health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      interval: 15s
       timeout: 5s
       retries: 10
 
@@ -448,11 +492,7 @@ services:
     networks:
       - enterprise_net
     labels:
-      traefik.enable: "true"
-      traefik.http.routers.enterprise-web.rule: Host(`${UI_HOST:-ui.localhost.com}`)
-      traefik.http.routers.enterprise-web.entrypoints: web
-      traefik.http.routers.enterprise-web.middlewares: enterprise-security-headers@file,enterprise-compress@file
-      traefik.http.services.enterprise-web.loadbalancer.server.port: "3000"
+      traefik.enable: "false"
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:3000/health"]
       interval: 15s
@@ -818,7 +858,7 @@ configs:
               - web
             middlewares:
               - enterprise-redirect-https@file
-            service: enterprise-web
+            service: local-php
 
           enterprise-web:
             rule: Host(`${UI_HOST:-ui.localhost.com}`)
@@ -828,7 +868,7 @@ configs:
             middlewares:
               - enterprise-security-headers@file
               - enterprise-compress@file
-            service: enterprise-web
+            service: local-php
 
           enterprise-account-http:
             rule: Host(`${ACCOUNT_HOST:-account.localhost.com}`)
@@ -1020,7 +1060,7 @@ configs:
           local-php:
             loadBalancer:
               servers:
-                - url: http://php-apache:80
+                - url: http://project-router:8080
 
 secrets:
   projects_gateway_signing_keys:

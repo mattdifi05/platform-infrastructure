@@ -31,6 +31,9 @@ services:
   php-apache:
     container_name: !reset null
 
+  project-router:
+    container_name: !reset null
+
   phpmyadmin:
     container_name: !reset null
     profiles:

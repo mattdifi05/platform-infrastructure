@@ -540,8 +540,8 @@ Nel profilo VPS:
 - Il WAF pubblica la porta 80; Traefik resta interno e riceve solo traffico filtrato.
 - SSL, redirect HTTPS e CDN stanno all'edge esterno, per esempio VPS/Cloudflare.
 - PostgreSQL, MariaDB, Redis, NATS, MinIO, Prometheus, Loki, Grafana, phpMyAdmin e dashboard Traefik non sono pubblici.
-- Le app Node usano `UI_HOST`, `ACCOUNT_HOST`, `API_HOST` e `AUTH_HOST`.
-- I progetti PHP usano `PROJECTS_HOST` per la pagina documentazione e `PROJECTS_WILDCARD_HOST_REGEXP` per i sottodomini progetto; i sorgenti stanno in `PHP_PROJECTS_DIR/nomeprogetto`.
+- Le app Node di piattaforma usano `ACCOUNT_HOST`, `API_HOST` e `AUTH_HOST`; `UI_HOST` passa dal router progetti quando vuoi gestirlo dalla dashboard locale.
+- I progetti PHP e Node condividono `PHP_PROJECTS_DIR` come sorgente universale. `PROJECTS_HOST` apre la dashboard, `PROJECTS_WILDCARD_HOST_REGEXP` accetta i domini progetto, `PROJECT_HOST_SUFFIX` costruisce gli host e `NODE_PROJECT_UPSTREAMS` collega progetti Node a servizi Docker gia' avviati.
 - MariaDB usa `secrets/mariadb_root_password.txt` tramite Docker secret, non una password root in `.env`.
 - `phpmyadmin` resta fuori dal profilo di default; su VPS pubblica usa preferibilmente SSH e client CLI, non una UI DB esposta.
 

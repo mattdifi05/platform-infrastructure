@@ -7487,7 +7487,7 @@ function repoCoverageCategory(filePath) {
     ["database", /^(?:postgres|mariadb)\//],
     ["messaging", /^nats\//],
     ["php-runtime", /^(?:php-apache|phpmyadmin|projects-portal)\//],
-    ["reverse-proxy", /^traefik\//],
+    ["reverse-proxy", /^(?:traefik|project-router)\//],
     ["waf", /^waf\//],
     ["security-policy", /^security\//],
   ];
@@ -9810,9 +9810,10 @@ async function staticSecurityCheck() {
   assertNoMatch(compose, /8090:8080|api@internal|traefik\.localhost\.com/, "Traefik dashboard must not be routed or exposed in the local stack.");
   assertNoMatch(compose, /prometheus\.localhost\.com|alertmanager\.localhost\.com/, "Prometheus and Alertmanager must remain internal; use authenticated Grafana for browser access.");
   if (localProjectsPage) {
-    assertMatch(localProjectsPage, /Documentation and project launcher/, "Fallback projects page must title the local documentation launcher.");
+    assertMatch(localProjectsPage, /Projects dashboard/, "Fallback projects page must title the local projects dashboard.");
     assertMatch(localProjectsPage, /README\.md[\s\S]*RUNBOOK\.md/, "Fallback projects page must link core operational docs.");
     assertMatch(localProjectsPage, /discoverProjects/, "Fallback projects page must provide project discovery.");
+    assertMatch(localProjectsPage, /handleProjectAction[\s\S]*saveProjectState/, "Projects page must support enabling and disabling mounted projects.");
     assertNoMatch(localProjectsPage, /prometheus\.localhost\.com|alertmanager\.localhost\.com|traefik\.localhost\.com/, "Projects page must not link unauthenticated internal consoles.");
   }
   assertMatch(composeHa, /failure_action:\s+rollback/, "HA overlay must rollback failed rolling updates.");

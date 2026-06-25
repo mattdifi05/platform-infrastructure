@@ -19,6 +19,9 @@ traefik/acme/*
 traefik/certs/*
 !traefik/certs/.gitkeep
 
+projects-portal/state/*
+!projects-portal/state/.gitkeep
+
 *.log
 *.tmp
 *.pid

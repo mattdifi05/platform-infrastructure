@@ -56,6 +56,9 @@ services:
       mariadb:
         condition: service_healthy
 
+  project-router:
+    restart: always
+
   phpmyadmin:
     profiles:
       - admin
@@ -137,7 +140,7 @@ configs:
               - enterprise-edge-forwarded-https@file
               - enterprise-security-headers@file
               - enterprise-compress@file
-            service: enterprise-web
+            service: local-php
 
           enterprise-account:
             rule: Host(`${ACCOUNT_HOST:?Set ACCOUNT_HOST}`)
@@ -208,7 +211,7 @@ configs:
           local-php:
             loadBalancer:
               servers:
-                - url: http://php-apache:80
+                - url: http://project-router:8080
 
 secrets:
   mariadb_root_password:
