@@ -544,7 +544,7 @@ Nel profilo VPS:
 - SSL, redirect HTTPS e CDN stanno all'edge esterno, per esempio VPS/Cloudflare.
 - PostgreSQL, MariaDB, Redis, NATS, MinIO, Prometheus, Loki, Grafana, phpMyAdmin e dashboard Traefik non sono pubblici.
 - Le app Node di piattaforma usano `ACCOUNT_HOST`, `API_HOST` e `AUTH_HOST`; `UI_HOST` passa dal router progetti quando vuoi gestirlo dalla dashboard locale.
-- I progetti PHP e Node condividono `PHP_PROJECTS_DIR` come sorgente universale. `PROJECTS_HOST` apre lo Stexor Control Center Node, `PHP_SOURCE_DIR` resta una root Apache neutra per il solo runtime PHP, `PROJECTS_WILDCARD_HOST_REGEXP` accetta i domini progetto, `PROJECT_HOST_SUFFIX` costruisce gli host e `NODE_PROJECT_UPSTREAMS` collega progetti Node a servizi Docker gia' avviati.
+- I progetti PHP e Node condividono `PHP_PROJECTS_DIR` come sorgente universale. `PROJECTS_HOST` apre lo Stexor Control Center Node, `PHP_SOURCE_DIR` resta una root Apache neutra per il solo runtime PHP, `PROJECTS_WILDCARD_HOST_REGEXP` accetta i domini progetto, `PROJECT_HOST_SUFFIX` costruisce gli host e `NODE_PROJECT_UPSTREAMS` collega progetti Node a servizi Docker gia' avviati. Il `project-router` prova PHP e Node contemporanei con `project-router-tests`; quando un progetto Node gestito viene disabilitato dal Control Center, il processo locale viene fermato e riparte solo alla riabilitazione.
 - MariaDB usa `secrets/mariadb_root_password.txt` tramite Docker secret, non una password root in `.env`.
 - `phpmyadmin` resta fuori dal profilo di default; su VPS pubblica usa preferibilmente SSH e client CLI, non una UI DB esposta.
 

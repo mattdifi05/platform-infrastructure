@@ -1889,6 +1889,12 @@ async function controlCenterTests() {
   log("Control Center tests passed.");
 }
 
+async function projectRouterTests() {
+  log("==> Project Router tests");
+  run(process.execPath, ["--test", "project-router/tests/project-router.test.mjs"], { cwd: infraRoot });
+  log("Project Router tests passed.");
+}
+
 async function faultInjectionTests() {
   log("==> Fault injection tests");
   const testOutput = sourceWorkspaceOutput([
@@ -7956,6 +7962,7 @@ async function enterpriseTenCheck() {
   await linuxPortabilityCheck();
   await staticSecurityCheck();
   await controlCenterTests();
+  await projectRouterTests();
   await testingHygiene();
   await performanceHygiene();
   log("Enterprise 10 readiness gate passed.");
@@ -9410,6 +9417,8 @@ function staticSecurityInfraOnlyCheck() {
   const phpMyAdminConfig = readText(path.join(infraRoot, "phpmyadmin", "config.user.inc.php"));
   const controlCenterServer = readText(path.join(infraRoot, "control-center", "server.mjs"));
   const controlCenterTest = readText(path.join(infraRoot, "control-center", "tests", "control-center.test.mjs"));
+  const projectRouterServer = readText(path.join(infraRoot, "project-router", "server.mjs"));
+  const projectRouterTest = readText(path.join(infraRoot, "project-router", "tests", "project-router.test.mjs"));
 
   const infrastructureText = [
     compose,
@@ -9470,6 +9479,8 @@ function staticSecurityInfraOnlyCheck() {
   assertMatch(phpApacheDockerfile, /php:8\.5-apache@sha256:[a-f0-9]{64}/, "PHP Apache image must be pinned to a digest.");
   assertMatch(phpApacheDockerfile, /a2enmod(?=[^\n]*rewrite)(?=[^\n]*headers)(?=[^\n]*ssl)(?=[^\n]*proxy)(?=[^\n]*proxy_http)(?=[^\n]*vhost_alias)/, "PHP Apache image must enable the required hosting modules.");
   assertMatch(`${phpApacheHttpVhost}\n${phpApacheHttpsVhost}`, /VirtualDocumentRoot\s+\/var\/www\/projects\/%1\/public/, "PHP Apache must route project subdomains to /var/www/projects/<name>/public dynamically.");
+  assertMatch(projectRouterServer, /stopManagedProject[\s\S]*Project disabled[\s\S]*nodeUpstream/, "Project Router must stop managed Node projects when local routing is disabled.");
+  assertMatch(projectRouterTest, /anniversary\.localhost\.com[\s\S]*stexor\.localhost\.com[\s\S]*Project disabled[\s\S]*notEqual\(nodeAfterEnablePayload\.pid/, "Project Router tests must prove simultaneous PHP and Node hosting plus disable/re-enable restart behavior.");
   assertNoMatch(infrastructureText, /PHP_(?:STREAM|ANNIVERSARY|WORKCALENDAR|FIREPORT)_SOURCE_DIR|(?:STREAM|ANNIVERSARY|WORKCALENDAR|FIREPORT)_HOST|stream\.localhost|anniversary\.localhost|workcalendar\.localhost|fireport\.localhost|fireport\.top/, "Infrastructure must not hardcode individual PHP project mounts or hostnames.");
   assertMatch(envExample, /PHP_PROJECTS_DIR=\.\.\/src/, "Environment example must point PHP projects at the generic src directory.");
   assertMatch(envExample, /PROJECTS_WILDCARD_HOST_REGEXP=/, "Environment example must expose the project wildcard host regexp.");
@@ -9484,7 +9495,7 @@ function staticSecurityInfraOnlyCheck() {
   assertMatch(opsScript, /async function staticSecurityCheck/, "Ops script must expose the full static security gate.");
   assertMatch(opsScript, /No supported project source found[\s\S]*staticSecurityInfraOnlyCheck\(\);[\s\S]*return;/, "Full static security must fall back to infra-only checks when no project is mounted.");
   assertMatch(opsScript, /function hasSupportedProjectSource\(\)[\s\S]*package\.json[\s\S]*\.github/, "Ops runner must detect optional project source before running app-only gates.");
-  assertMatch(opsScript, /async function enterpriseTenCheck\(\)[\s\S]*await staticSecurityCheck\(\);[\s\S]*await controlCenterTests\(\);[\s\S]*await testingHygiene\(\);/, "Enterprise gate must always test the infra Control Center before optional app-only checks.");
+  assertMatch(opsScript, /async function enterpriseTenCheck\(\)[\s\S]*await staticSecurityCheck\(\);[\s\S]*await controlCenterTests\(\);[\s\S]*await projectRouterTests\(\);[\s\S]*await testingHygiene\(\);/, "Enterprise gate must always test the infra Control Center and project router before optional app-only checks.");
   assertMatch(opsScript, /async function testingHygiene\(\)[\s\S]*requireSupportedProjectSource\("application testing hygiene"\)[\s\S]*return;/, "Testing hygiene must skip cleanly when the project source is not mounted.");
   assertMatch(opsScript, /async function performanceHygiene\(\)[\s\S]*requireSupportedProjectSource\("application performance hygiene"\)[\s\S]*return;/, "Performance hygiene must skip cleanly when the project source is not mounted.");
   assertMatch(compose, /control-center:[\s\S]*PROJECT_APPLICATIONS_FILE:\s+\/var\/www\/project-state\/applications\.json/, "Control Center must persist local application metadata from the Node service.");
@@ -9655,6 +9666,10 @@ async function staticSecurityCheck() {
   const controlCenterServer = fs.existsSync(controlCenterServerPath) ? readText(controlCenterServerPath) : "";
   const controlCenterTestPath = path.resolve(infraRoot, "control-center", "tests", "control-center.test.mjs");
   const controlCenterTest = fs.existsSync(controlCenterTestPath) ? readText(controlCenterTestPath) : "";
+  const projectRouterServerPath = path.resolve(infraRoot, "project-router", "server.mjs");
+  const projectRouterServer = fs.existsSync(projectRouterServerPath) ? readText(projectRouterServerPath) : "";
+  const projectRouterTestPath = path.resolve(infraRoot, "project-router", "tests", "project-router.test.mjs");
+  const projectRouterTest = fs.existsSync(projectRouterTestPath) ? readText(projectRouterTestPath) : "";
   const prometheusConfig = readText(path.join(infraRoot, "prometheus", "prometheus.yml"));
   const localWafPreRules = readText(path.join(infraRoot, "waf", "REQUEST-900-EXCLUSION-RULES-BEFORE-CRS.conf"));
   const vpsWafPreRules = readText(path.join(infraRoot, "waf", "REQUEST-900-VPS-RULES-BEFORE-CRS.conf"));
@@ -9892,6 +9907,8 @@ async function staticSecurityCheck() {
   assertMatch(compose, /control-center:[\s\S]*image:\s+\$\{NODE_IMAGE:-node:26\.3\.1-alpine@sha256:[a-f0-9]{64}\}/, "Control Center must run as a digest-pinned Node service.");
   assertMatch(compose, /project-router:[\s\S]*CONTROL_CENTER_UPSTREAM:\s+http:\/\/control-center:8080/, "Project router must send the projects host to the Node Control Center.");
   assertMatch(compose, /php-apache:[\s\S]*\$\{PHP_SOURCE_DIR:-\.\/php-runtime-root\}:\/var\/www\/html[\s\S]*project-router:[\s\S]*CONTROL_CENTER_UPSTREAM:\s+http:\/\/control-center:8080/, "PHP Apache must be runtime-only while the projects host resolves through the Node Control Center.");
+  assertMatch(projectRouterServer, /stopManagedProject[\s\S]*Project disabled[\s\S]*nodeUpstream/, "Project Router must stop managed Node projects when local routing is disabled.");
+  assertMatch(projectRouterTest, /anniversary\.localhost\.com[\s\S]*stexor\.localhost\.com[\s\S]*Project disabled[\s\S]*notEqual\(nodeAfterEnablePayload\.pid/, "Project Router tests must prove simultaneous PHP and Node hosting plus disable/re-enable restart behavior.");
   assertNoMatch(`${compose}\n${phpRuntimeRootPage}`, /projects-portal\/public|<\?php|\/control\//i, "The PHP runtime root must not implement or expose the Control Center surface.");
   assertMatch(compose, /control-center:[\s\S]*PROJECT_AUDIT_FILE:\s+\/var\/www\/project-state\/audit\.jsonl/, "Control Center must write local audit evidence.");
   assertMatch(compose, /control-center:[\s\S]*PROJECT_APPLICATIONS_FILE:\s+\/var\/www\/project-state\/applications\.json/, "Control Center must persist local application metadata from the Node service.");
@@ -9956,7 +9973,10 @@ async function staticSecurityCheck() {
   assertNoMatch(controlCenterServer, /C:\\|powershell|pwsh/i, "Control Center must not depend on Windows host paths or PowerShell.");
   assertNoMatch(controlCenterServer, /CLOUDFLARE_API_TOKEN|api\.github\.com|cloudflare\.com\/client\/v4/i, "Control Center foundation must not make live provider calls or expose provider secrets.");
   assertMatch(githubWorkflow, /Control Center tests[\s\S]*control-center-tests/, "Infrastructure CI must run the Control Center API/UI regression tests.");
+  assertMatch(githubWorkflow, /Project Router tests[\s\S]*project-router-tests/, "Infrastructure CI must run the Project Router PHP/Node routing regression tests.");
   assertMatch(opsScript, /async function controlCenterTests[\s\S]*control-center\/tests\/control-center\.test\.mjs[\s\S]*"control-center-tests": controlCenterTests/, "Ops runner must expose container-first Control Center tests.");
+  assertMatch(opsScript, /async function projectRouterTests[\s\S]*project-router\/tests\/project-router\.test\.mjs[\s\S]*"project-router-tests": projectRouterTests/, "Ops runner must expose container-first Project Router tests.");
+  assertMatch(controlCenterTest, /admin guard[\s\S]*actions\/toggle-project/, "Control Center tests must keep mutation routes behind the admin guard.");
   assertMatch(controlCenterTest, /production[\s\S]*bad\.localhost\.com[\s\S]*422/, "Control Center tests must reject localhost production subdomain plans.");
   assertMatch(controlCenterTest, /actions\/subdomain-command[\s\S]*apply-local[\s\S]*subdomain-ui-secret-should-not-leak[\s\S]*REMOVE-SUBDOMAIN/, "Control Center tests must cover UI-driven local subdomain apply, verify, removal and secret redaction.");
   assertMatch(controlCenterTest, /applications\.json[\s\S]*\/control\/applications[\s\S]*CREATE-APPLICATION[\s\S]*application-secret-should-not-leak/, "Control Center tests must cover application create persistence and secret redaction.");
@@ -11027,6 +11047,7 @@ Commands:
   offsite-restore-drill-restic
   performance-hygiene
   pre-go-live-evidence
+  project-router-tests
   prune-postgres-backups
   production-go-no-go
   production-preflight
@@ -11114,6 +11135,7 @@ const commands = {
   "offsite-restore-drill-restic": offsiteRestoreDrillRestic,
   "performance-hygiene": performanceHygiene,
   "pre-go-live-evidence": preGoLiveEvidence,
+  "project-router-tests": projectRouterTests,
   "prune-postgres-backups": prunePostgresBackups,
   "production-go-no-go": productionGoNoGo,
   "production-preflight": productionPreflight,

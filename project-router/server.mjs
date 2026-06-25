@@ -38,6 +38,7 @@ const server = createServer(async (req, res) => {
     }
 
     if (!isEnabled(slug)) {
+      stopManagedProject(slug);
       disabled(res, "Project disabled", host);
       return;
     }
@@ -64,6 +65,8 @@ server.listen(port, "0.0.0.0", () => {
 });
 
 setInterval(stopDisabledProcesses, 10000).unref();
+process.once("SIGTERM", shutdown);
+process.once("SIGINT", shutdown);
 
 function proxy(clientReq, clientRes, upstream) {
   const headers = { ...clientReq.headers };
@@ -203,10 +206,22 @@ function readState() {
 function stopDisabledProcesses() {
   for (const [slug, item] of managed) {
     if (!isEnabled(slug)) {
-      item.process.kill("SIGTERM");
-      managed.delete(slug);
+      stopManagedProject(slug);
     }
   }
+}
+
+function stopManagedProject(slug) {
+  const item = managed.get(slug);
+  if (!item) return;
+  item.process.kill("SIGTERM");
+  managed.delete(slug);
+}
+
+function shutdown() {
+  for (const slug of managed.keys()) stopManagedProject(slug);
+  server.close(() => process.exit(0));
+  setTimeout(() => process.exit(0), 3000).unref();
 }
 
 function disabled(res, title, host, status = 404) {

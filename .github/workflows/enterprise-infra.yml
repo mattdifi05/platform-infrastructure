@@ -199,6 +199,9 @@ jobs:
       - name: Control Center tests
         run: sh ./scripts/infra-ops.sh control-center-tests
 
+      - name: Project Router tests
+        run: sh ./scripts/infra-ops.sh project-router-tests
+
       - name: Run infrastructure static policy gate
         run: sh ./scripts/infra-ops.sh static-security-check --infraOnly
 
