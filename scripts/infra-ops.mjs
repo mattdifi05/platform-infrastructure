@@ -8271,12 +8271,31 @@ async function restoreTestMariadb(options = {}) {
   }
 }
 
+function countMariadbUserSchemas(container) {
+  const schemaSql = "select count(*) from information_schema.schemata where schema_name not in ('information_schema','mysql','performance_schema','sys')";
+  const outputText = dockerExecOutput(container, [
+    "sh",
+    "-ec",
+    [
+      "test -s /run/secrets/mariadb_root_password",
+      'MARIADB_ROOT_PASSWORD="$(cat /run/secrets/mariadb_root_password)"',
+      `mariadb -N -uroot -p"$MARIADB_ROOT_PASSWORD" -e ${shellQuote(schemaSql)}`,
+    ].join(" && "),
+  ]).trim();
+  const schemaCount = Number(outputText);
+  if (!Number.isFinite(schemaCount) || schemaCount < 1) {
+    fail(`MariaDB source has no restorable user schemas: ${outputText || "0"}`);
+  }
+  return schemaCount;
+}
+
 async function backupRestoreDrillMariadb() {
   log("==> MariaDB backup/restore drill");
   const container = argv.container ?? "mariadb";
   const outputDir = path.resolve(argv.outputDir ?? path.join(infraRoot, "backups", "mariadb", "drills"));
+  const sourceSchemaCount = countMariadbUserSchemas(container);
   const backup = await backupMariadb({ container, outputDir });
-  await restoreTestMariadb({ container, backupFile: backup.hostPath });
+  await restoreTestMariadb({ container, backupFile: backup.hostPath, minSchemas: sourceSchemaCount });
   log(`MariaDB backup/restore drill completed for ${path.basename(backup.hostPath)}.`);
 }
 
