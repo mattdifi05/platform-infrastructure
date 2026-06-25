@@ -239,7 +239,7 @@ services:
       - projects_gateway_signing_keys
       - smtp_password
     volumes:
-      - ${PHP_SOURCE_DIR:-./projects-portal}:/var/www/html
+      - ${PHP_SOURCE_DIR:-./php-runtime-root}:/var/www/html
       - .:/var/www/infra-docs:ro
       - ${PHP_PROJECTS_DIR:-../src}:/var/www/projects
       - ${PROJECTS_SYMLINK_TARGET_ROOT:-..}:/mnt/host/d/docker:ro

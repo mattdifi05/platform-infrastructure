@@ -7515,7 +7515,7 @@ function repoCoverageCategory(filePath) {
     ["database", /^(?:postgres|mariadb)\//],
     ["messaging", /^nats\//],
     ["control-plane", /^control-center\//],
-    ["php-runtime", /^(?:php-apache|phpmyadmin|projects-portal)\//],
+    ["php-runtime", /^(?:php-apache|phpmyadmin|php-runtime-root|projects-portal)\//],
     ["reverse-proxy", /^(?:traefik|project-router)\//],
     ["waf", /^waf\//],
     ["security-policy", /^security\//],
@@ -9442,7 +9442,8 @@ function staticSecurityInfraOnlyCheck() {
   assertNoMatch(infrastructureText, /(?:\.\.\/web-php-infrastructure|src\/infrastructure|enterprise-infrastructure)/, "Infrastructure must not reference retired duplicate infra directories.");
   assertMatch(compose, /^name:\s+platform_infra_local/m, "Compose must set a stable local project name.");
   assertMatch(compose, /dockerfile:\s+docker\/php-apache\.Dockerfile/, "Compose must build PHP hosting from the unified infra Dockerfile.");
-  assertMatch(compose, /\$\{PHP_SOURCE_DIR:-\.\/projects-portal\}:\/var\/www\/html/, "Compose must default the PHP root to the built-in documentation portal.");
+  assertMatch(compose, /\$\{PHP_SOURCE_DIR:-\.\/php-runtime-root\}:\/var\/www\/html/, "Compose must default the PHP root to a neutral runtime-only document root.");
+  assertNoMatch(compose, /\$\{PHP_SOURCE_DIR:-\.\/projects-portal\}:\/var\/www\/html/, "Compose must not mount a PHP projects portal as the Control Center.");
   assertMatch(compose, /\$\{PHP_PROJECTS_DIR:-\.\.\/src\}:\/var\/www\/projects/, "Compose must mount PHP projects through one generic projects directory.");
   assertMatch(compose, /HostRegexp\(`\$\{PROJECTS_WILDCARD_HOST_REGEXP:-\[a-z0-9-\]\+\\\.localhost\\\.com\}`\)/, "Compose must route PHP project subdomains through a generic wildcard rule.");
   assertMatch(compose, /\.:\s*\/var\/www\/infra-docs:ro/, "Compose must mount infrastructure documentation read-only for the fallback portal.");
@@ -9606,8 +9607,8 @@ async function staticSecurityCheck() {
   const composeManagedSecrets = readText(path.join(infraRoot, "compose.managed-secrets.yaml"));
   const composeDr = readText(path.join(infraRoot, "compose.dr.yaml"));
   const traefikConfig = readText(path.join(infraRoot, "traefik", "traefik.yml"));
-  const localProjectsPagePath = path.resolve(infraRoot, "projects-portal", "public", "index.php");
-  const localProjectsPage = fs.existsSync(localProjectsPagePath) ? readText(localProjectsPagePath) : "";
+  const phpRuntimeRootPath = path.resolve(infraRoot, "php-runtime-root", "public", "index.html");
+  const phpRuntimeRootPage = fs.existsSync(phpRuntimeRootPath) ? readText(phpRuntimeRootPath) : "";
   const controlCenterServerPath = path.resolve(infraRoot, "control-center", "server.mjs");
   const controlCenterServer = fs.existsSync(controlCenterServerPath) ? readText(controlCenterServerPath) : "";
   const controlCenterTestPath = path.resolve(infraRoot, "control-center", "tests", "control-center.test.mjs");
@@ -9848,6 +9849,8 @@ async function staticSecurityCheck() {
   assertNoMatch(compose, /prometheus\.localhost\.com|alertmanager\.localhost\.com/, "Prometheus and Alertmanager must remain internal; use authenticated Grafana for browser access.");
   assertMatch(compose, /control-center:[\s\S]*image:\s+\$\{NODE_IMAGE:-node:26\.3\.1-alpine@sha256:[a-f0-9]{64}\}/, "Control Center must run as a digest-pinned Node service.");
   assertMatch(compose, /project-router:[\s\S]*CONTROL_CENTER_UPSTREAM:\s+http:\/\/control-center:8080/, "Project router must send the projects host to the Node Control Center.");
+  assertMatch(compose, /php-apache:[\s\S]*\$\{PHP_SOURCE_DIR:-\.\/php-runtime-root\}:\/var\/www\/html[\s\S]*project-router:[\s\S]*CONTROL_CENTER_UPSTREAM:\s+http:\/\/control-center:8080/, "PHP Apache must be runtime-only while the projects host resolves through the Node Control Center.");
+  assertNoMatch(`${compose}\n${phpRuntimeRootPage}`, /projects-portal\/public|<\?php|\/control\//i, "The PHP runtime root must not implement or expose the Control Center surface.");
   assertMatch(compose, /control-center:[\s\S]*PROJECT_AUDIT_FILE:\s+\/var\/www\/project-state\/audit\.jsonl/, "Control Center must write local audit evidence.");
   assertMatch(compose, /control-center:[\s\S]*PROJECT_OPERATIONS_FILE:\s+\/var\/www\/project-state\/operations\.jsonl/, "Control Center must write local Operation and OperationStep records from the Node service.");
   assertMatch(compose, /control-center:[\s\S]*PROJECT_DEPLOYMENTS_FILE:\s+\/var\/www\/project-state\/deployments\.jsonl/, "Control Center must persist local deployment records from the Node service.");
@@ -9896,8 +9899,8 @@ async function staticSecurityCheck() {
   assertMatch(controlCenterTest, /local evidence only[\s\S]*notEqual[\s\S]*production evidence/, "Control Center tests must prove local evidence is not accepted as production evidence.");
   assertMatch(controlCenterTest, /admin guard[\s\S]*admin_auth_required[\s\S]*HttpOnly[\s\S]*Secure[\s\S]*SameSite=Lax/, "Control Center tests must cover the admin auth gate and hardened session cookie.");
   assertNoMatch(controlCenterTest, /CLOUDFLARE_API_TOKEN|api\.github\.com|cloudflare\.com\/client\/v4/i, "Control Center tests must not make live provider calls.");
-  assertNoMatch(localProjectsPage, /<main|control-shell|\/control\//i, "PHP fallback must not implement the Control Center UI or API surface.");
-  assertNoMatch(`${controlCenterServer}\n${localProjectsPage}`, /prometheus\.localhost\.com|alertmanager\.localhost\.com|traefik\.localhost\.com/, "Projects UI must not link unauthenticated internal consoles.");
+  assertNoMatch(phpRuntimeRootPage, /control-shell|\/control\//i, "PHP runtime root must not implement the Control Center UI or API surface.");
+  assertNoMatch(`${controlCenterServer}\n${phpRuntimeRootPage}`, /prometheus\.localhost\.com|alertmanager\.localhost\.com|traefik\.localhost\.com/, "Projects UI must not link unauthenticated internal consoles.");
   assertMatch(composeHa, /failure_action:\s+rollback/, "HA overlay must rollback failed rolling updates.");
   assertMatch(composeHa, /max_replicas_per_node:\s+1/, "HA overlay must spread stateless replicas across nodes.");
   assertMatch(composeManagedSecrets, /SESSION_SECRET_FILE:\s+\/run\/secrets\/session_secret/, "Managed secret overlay must consume session secret through a file.");
