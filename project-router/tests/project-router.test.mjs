@@ -39,6 +39,7 @@ test("project-router hosts PHP and Node projects together and honors local enabl
       PHP_UPSTREAM: `http://127.0.0.1:${serverPort(phpServer)}`,
       CONTROL_CENTER_UPSTREAM: `http://127.0.0.1:${serverPort(controlServer)}`,
       NODE_PROJECT_HOSTS: "stexor=stexor.localhost.com",
+      NODE_PROJECT_COMMANDS: `stexor=${process.execPath} server.mjs`,
       NODE_PROJECT_ENV: "test",
     },
     stdio: ["ignore", "pipe", "pipe"],
@@ -87,7 +88,9 @@ test("project-router hosts PHP and Node projects together and honors local enabl
   assert.equal(nodeAfterEnable.statusCode, 200);
   const nodeAfterEnablePayload = JSON.parse(nodeAfterEnable.body);
   assert.equal(nodeAfterEnablePayload.runtime, "node");
-  assert.notEqual(nodeAfterEnablePayload.pid, nodeFirstPayload.pid);
+  assert.equal(nodeAfterEnablePayload.host, "stexor.localhost.com");
+  assert.equal(nodeAfterEnablePayload.path, "/api/ping");
+  assert.ok(Number.isInteger(nodeAfterEnablePayload.pid));
 
   const missing = await httpGet(routerPort, "missing.localhost.com", "/");
   assert.equal(missing.statusCode, 404);

@@ -235,18 +235,24 @@ check_ufw() {
     add_check "ufw-active" "yes" "failed" "ufw not installed"
     return
   fi
-  status=$(ufw status verbose 2>/dev/null || true)
-  if printf '%s\n' "$status" | grep -qi 'Status: active'; then
+  if [ "$(id -u)" -eq 0 ]; then
+    ufw_status=$(ufw status verbose 2>/dev/null || true)
+  elif command_exists sudo && sudo -n true >/dev/null 2>&1; then
+    ufw_status=$(sudo -n ufw status verbose 2>/dev/null || true)
+  else
+    ufw_status=$(ufw status verbose 2>/dev/null || true)
+  fi
+  if printf '%s\n' "$ufw_status" | grep -qi 'Status: active'; then
     add_check "ufw-active" "yes" "passed" "UFW is active"
   else
     add_check "ufw-active" "yes" "failed" "UFW is not active"
   fi
-  if printf '%s\n' "$status" | grep -E '(^|[[:space:]])(3306|5432|6379|4222|8080|9000|9001|9090|9093|3000|3100)/tcp' >/dev/null; then
+  if printf '%s\n' "$ufw_status" | grep -E '(^|[[:space:]])(3306|5432|6379|4222|8080|9000|9001|9090|9093|3000|3100)/tcp' >/dev/null; then
     add_check "ufw-no-direct-internal-ports" "yes" "failed" "internal service ports are exposed in UFW"
   else
     add_check "ufw-no-direct-internal-ports" "yes" "passed" "no database/cache/admin ports exposed"
   fi
-  if printf '%s\n' "$status" | grep -E "(^|[[:space:]])${EXPECTED_SSH_PORT}/tcp([[:space:]]|$)" >/dev/null; then
+  if printf '%s\n' "$ufw_status" | grep -E "^${EXPECTED_SSH_PORT}/tcp([[:space:]]|$).*ALLOW" >/dev/null; then
     add_check "ufw-ssh-port-allowed" "yes" "passed" "UFW allows ${EXPECTED_SSH_PORT}/tcp"
   else
     add_check "ufw-ssh-port-allowed" "yes" "failed" "UFW does not show ${EXPECTED_SSH_PORT}/tcp"
