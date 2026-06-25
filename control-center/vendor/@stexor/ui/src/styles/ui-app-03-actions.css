@@ -1,0 +1,174 @@
+.ui-actions-layout {
+  display: grid;
+  gap: 18px;
+  min-width: 0;
+}
+
+.ui-actions-block {
+  contain: layout style;
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+  padding: 6px;
+}
+
+.ui-actions-block[data-ui-surface="gray"] {
+  background: var(--mono-cell-muted);
+  border: 0;
+  border-radius: var(--ui-radius-30);
+  display: grid;
+  padding: 16px;
+}
+
+.ui-actions-block-head {
+  align-items: end;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+  min-width: 0;
+  padding-inline: 4px;
+}
+
+.ui-actions-block-head strong {
+  color: var(--text);
+  font-size: 0.98rem;
+  font-weight: 850;
+  line-height: 1.2;
+}
+
+.ui-actions-block-head span {
+  color: var(--ui-text-muted-strong);
+  font-size: 0.75rem;
+  font-weight: 800;
+  line-height: 1.35;
+  text-align: right;
+}
+
+.ui-actions-column-label {
+  color: var(--ui-text-muted-strong);
+  font-size: 0.72rem;
+  font-weight: 850;
+  line-height: 1.15;
+  text-transform: uppercase;
+}
+
+.ui-actions-surface-grid {
+  display: grid;
+  gap: var(--ui-density-card-gap);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  min-width: 0;
+}
+
+.ui-actions-surface-panel {
+  background: var(--mono-cell);
+  border-radius: var(--ui-radius-card);
+  display: grid;
+  gap: var(--ui-density-gap);
+  min-width: 0;
+  padding: var(--ui-density-block-padding);
+}
+
+.ui-actions-surface-panel[data-ui-surface="gray"] {
+  background: var(--mono-cell-muted);
+}
+
+.ui-actions-surface-panel .ui-choice-card-board {
+  padding-top: 0;
+}
+
+.ui-actions-surface-panel .ui-choice-card-grid {
+  grid-template-columns: 1fr;
+}
+
+.ui-actions-surface-panel .ui-range-list {
+  width: 100%;
+}
+
+.ui-button-strip {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  min-width: 0;
+}
+
+.ui-action-flow-controls {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  min-width: 0;
+  padding-inline: 4px;
+}
+
+.ui-choice-card-board {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  padding-top: 2px;
+}
+
+.ui-choice-card-board-head {
+  align-items: end;
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+  min-width: 0;
+}
+
+.ui-choice-card-board-head strong {
+  color: var(--text);
+  font-size: 0.82rem;
+  font-weight: 760;
+  line-height: 1.2;
+}
+
+.ui-choice-card-board-head span {
+  color: var(--ui-text-muted-strong);
+  font-size: 0.72rem;
+  font-weight: 620;
+  line-height: 1.3;
+  text-align: right;
+}
+
+.ui-choice-card-grid {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  min-width: 0;
+}
+
+[data-ui-theme="dark"] .ui-actions-block .ui-choice-card {
+  --choice-card-active-ring: transparent;
+}
+
+[data-ui-theme="dark"] .ui-actions-block .ui-choice-card::after {
+  box-shadow: none;
+}
+
+.ui-choice-card-board[data-ui-surface="gray"] .ui-choice-card {
+  --choice-card-bg: var(--mono-cell);
+  --choice-card-active-bg: var(--ui-choice-card-active-bg);
+  --choice-card-active-ring: var(--ui-choice-card-active-ring);
+}
+
+.ui-switch-list {
+  align-items: start;
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+  width: 100%;
+}
+
+.ui-range-list {
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+  width: min(100%, 320px);
+}
+
+@supports (corner-shape: squircle) {
+  .ui-actions-surface-panel {
+    corner-shape: var(--ui-corner-shape);
+  }
+}

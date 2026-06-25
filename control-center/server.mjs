@@ -2,8 +2,12 @@ import { createServer } from "node:http";
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync, appendFileSync } from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 const port = Number(process.env.CONTROL_CENTER_PORT || 8080);
+const appRoot = path.dirname(fileURLToPath(import.meta.url));
+const stexorUiPackageRoot = process.env.STEXOR_UI_PACKAGE_ROOT || path.join(appRoot, "vendor", "@stexor", "ui");
+const publicRoot = process.env.CONTROL_CENTER_PUBLIC_ROOT || path.join(appRoot, "public");
 const projectsRoot = process.env.PROJECTS_ROOT || "/var/www/projects";
 const docsRoot = process.env.CONTROL_CENTER_DOCS_ROOT || "/var/www/infra-docs";
 const stateFile = process.env.PROJECT_STATE_FILE || "/var/www/project-state/projects.json";
@@ -14,6 +18,7 @@ const domainsFile = process.env.PROJECT_DOMAINS_FILE || "/var/www/project-state/
 const databasesFile = process.env.PROJECT_DATABASES_FILE || "/var/www/project-state/databases.json";
 const storageBucketsFile = process.env.PROJECT_STORAGE_BUCKETS_FILE || "/var/www/project-state/storage-buckets.json";
 const sensitiveMaterialsFile = process.env.PROJECT_SENSITIVE_MATERIALS_FILE || "/var/www/project-state/sensitive-materials.json";
+const workerJobsFile = process.env.PROJECT_WORKER_JOBS_FILE || "/var/www/project-state/worker-jobs.json";
 const deploymentsFile = process.env.PROJECT_DEPLOYMENTS_FILE || "/var/www/project-state/deployments.jsonl";
 const backupRecordsFile = process.env.PROJECT_BACKUP_RECORDS_FILE || "/var/www/project-state/backups.jsonl";
 const resourceLimitsFile = process.env.PROJECT_RESOURCE_LIMITS_FILE || "/var/www/project-state/resource-limits.json";
@@ -56,6 +61,16 @@ const server = createServer(async (req, res) => {
     const url = new URL(req.url || "/", `https://${req.headers.host || projectsHost}`);
     if (url.pathname === "/__health") {
       json(res, { ok: true, service: "control-center" });
+      return;
+    }
+
+    if (url.pathname.startsWith("/assets/stexor-ui/")) {
+      serveStaticAsset(req, res, url, stexorUiPackageRoot, "/assets/stexor-ui/");
+      return;
+    }
+
+    if (url.pathname.startsWith("/fonts/")) {
+      serveStaticAsset(req, res, url, path.join(publicRoot, "fonts"), "/fonts/");
       return;
     }
 
@@ -126,6 +141,11 @@ const server = createServer(async (req, res) => {
 
     if (req.method === "POST" && url.pathname === "/actions/material-command") {
       await handleMaterialCommand(req, res, context);
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/actions/worker-job-command") {
+      await handleWorkerJobCommand(req, res, context);
       return;
     }
 
@@ -297,6 +317,20 @@ async function handleApi(req, res, url, context) {
     }
     if (method === "POST" && parts.length === 5 && route([parts[0], parts[1], parts[2], parts[4]], "control", "secrets", "materials", "access")) {
       return json(res, planMaterialAccessAudit(parts[3], payload, context), 202);
+    }
+
+    if (method === "GET" && route(parts, "control", "workers-jobs")) {
+      return json(res, { workers: context.workerRuntimes, queues: context.jobQueues, jobs: context.jobRecords, schedules: context.jobSchedules });
+    }
+    if (method === "POST" && route(parts, "control", "workers-jobs", "workers")) return json(res, planWorkerDeclare(payload, context), 202);
+    if (method === "POST" && route(parts, "control", "workers-jobs", "queues")) return json(res, planQueueDeclare(payload, context), 202);
+    if (method === "POST" && route(parts, "control", "workers-jobs", "jobs")) return json(res, planJobRecord(payload, context), 202);
+    if (method === "POST" && parts.length === 5 && route([parts[0], parts[1], parts[2], parts[4]], "control", "workers-jobs", "jobs", "retry")) {
+      return json(res, planJobRetry(parts[3], payload, context), 202);
+    }
+    if (method === "POST" && route(parts, "control", "workers-jobs", "schedules")) return json(res, planScheduleDeclare(payload, context), 202);
+    if (method === "POST" && parts.length === 5 && route([parts[0], parts[1], parts[2], parts[4]], "control", "workers-jobs", "schedules", "status")) {
+      return json(res, planScheduleStatus(parts[3], payload, context), 202);
     }
 
     if (method === "GET" && route(parts, "control", "resources", "summary")) return json(res, context.resources);
@@ -569,6 +603,36 @@ async function handleMaterialCommand(req, res, context) {
   redirect(res, `/?mode=advanced&section=secrets#material-${encodeURIComponent(operation.details?.materialId || operation.material?.id || "")}`);
 }
 
+async function handleWorkerJobCommand(req, res, context) {
+  const payload = await readPayload(req);
+  const action = String(payload.action || "");
+  let operation;
+  try {
+    if (action === "declare-worker") operation = planWorkerDeclare(payload, context);
+    else if (action === "declare-queue") operation = planQueueDeclare(payload, context);
+    else if (action === "record-job") operation = planJobRecord(payload, context);
+    else if (action === "retry-job") operation = planJobRetry(payload.id || payload.jobId || "", payload, context);
+    else if (action === "declare-schedule") operation = planScheduleDeclare(payload, context);
+    else if (action === "schedule-status") operation = planScheduleStatus(payload.id || payload.scheduleId || "", payload, context);
+    else throw new ValidationError("Unsupported worker/job action.");
+  } catch (error) {
+    if (error instanceof ValidationError) {
+      json(res, { error: "validation_failed", message: error.message }, 422);
+      return;
+    }
+    if (error instanceof RejectedOperationError) {
+      json(res, { error: "operation_rejected", message: error.message }, 409);
+      return;
+    }
+    throw error;
+  }
+  if (wantsJson(req)) {
+    json(res, operation, 202);
+    return;
+  }
+  redirect(res, `/?mode=advanced&section=workers-jobs#worker-job-${encodeURIComponent(operation.details?.workerId || operation.details?.queueId || operation.details?.jobId || operation.details?.scheduleId || "")}`);
+}
+
 async function handleBackupCommand(req, res, context) {
   const payload = await readPayload(req);
   const action = String(payload.action || "");
@@ -785,6 +849,73 @@ function buildContext({ projects, state }) {
     .filter((material) => material && !material.deletedAt)
     .map((material) => sensitiveMaterialRecord(material))
     .sort((a, b) => `${a.projectId}:${a.environment}:${a.materialName}`.localeCompare(`${b.projectId}:${b.environment}:${b.materialName}`));
+  const workerJobsState = readWorkerJobsState();
+  const defaultWorkerRuntimes = [
+    workerRuntimeRecord({
+      id: "enterprise-worker-notifications",
+      projectId: "platform",
+      name: "Notification worker",
+      service: "worker-notifications",
+      status: "configured",
+      queueName: "alerts",
+      source: "compose-service",
+    }),
+    workerRuntimeRecord({
+      id: "enterprise-worker-jobs",
+      projectId: "platform",
+      name: "Jobs worker",
+      service: "worker-jobs",
+      status: "configured",
+      queueName: "jobs",
+      source: "compose-service",
+    }),
+    ...applications
+      .filter((app) => app.runtime === "worker")
+      .map((app) => workerRuntimeRecord({
+        id: app.id,
+        projectId: app.projectId,
+        name: app.name,
+        service: app.id,
+        status: app.status === "online" ? "running" : app.status,
+        queueName: `${app.projectId}-jobs`,
+        source: app.source || "application-metadata",
+      })),
+  ];
+  const defaultWorkerIds = new Set(defaultWorkerRuntimes.map((worker) => worker.id));
+  const workerRuntimes = [
+    ...defaultWorkerRuntimes.map((worker) => workerRuntimeRecord({ ...worker, ...(workerJobsState.workers[worker.id] || {}) })),
+    ...Object.values(workerJobsState.workers)
+      .filter((worker) => worker && !worker.deletedAt && !defaultWorkerIds.has(worker.id))
+      .map((worker) => workerRuntimeRecord(worker)),
+  ].sort((a, b) => `${a.projectId}:${a.name}`.localeCompare(`${b.projectId}:${b.name}`));
+  const defaultJobQueues = [
+    jobQueueRecord({ id: "alerts", projectId: "platform", name: "alerts", backend: "alertmanager-webhook", status: "configured", retryPolicy: "bounded-worker-retry", source: "compose-service" }),
+    jobQueueRecord({ id: "jobs", projectId: "platform", name: "jobs", backend: "nats", status: "configured", retryPolicy: "bounded-worker-retry", source: "compose-service" }),
+    jobQueueRecord({ id: "audit-outbox", projectId: "platform", name: "audit-outbox", backend: "postgres-outbox", status: "configured", retryPolicy: "max-8-attempts", source: "compose-service" }),
+    jobQueueRecord({ id: "maintenance", projectId: "platform", name: "maintenance", backend: "container-cron", status: "configured", retryPolicy: "ops-runner-evidence", source: "backup-scheduler" }),
+  ];
+  const defaultQueueIds = new Set(defaultJobQueues.map((queue) => queue.id));
+  const jobQueues = [
+    ...defaultJobQueues.map((queue) => jobQueueRecord({ ...queue, ...(workerJobsState.queues[queue.id] || {}) })),
+    ...Object.values(workerJobsState.queues)
+      .filter((queue) => queue && !queue.deletedAt && !defaultQueueIds.has(queue.id))
+      .map((queue) => jobQueueRecord(queue)),
+  ].sort((a, b) => `${a.projectId}:${a.name}`.localeCompare(`${b.projectId}:${b.name}`));
+  const jobRecords = Object.values(workerJobsState.jobs)
+    .filter((job) => job && !job.deletedAt)
+    .map((job) => jobRecord(job))
+    .sort((a, b) => String(b.updatedAt || b.createdAt).localeCompare(String(a.updatedAt || a.createdAt)));
+  const defaultJobSchedules = [
+    jobScheduleRecord({ id: "backup-scheduler", projectId: "platform", name: "Backup scheduler", workerId: "enterprise-worker-jobs", queueId: "maintenance", cronExpression: "15 3 * * *", status: "configured", source: "compose-backup-scheduler", containerizedCron: true }),
+    jobScheduleRecord({ id: "audit-outbox-dispatcher", projectId: "platform", name: "Audit outbox dispatcher", workerId: "enterprise-worker-jobs", queueId: "audit-outbox", cronExpression: "*/1 * * * *", status: "configured", source: "worker-jobs", containerizedCron: true }),
+  ];
+  const defaultScheduleIds = new Set(defaultJobSchedules.map((schedule) => schedule.id));
+  const jobSchedules = [
+    ...defaultJobSchedules.map((schedule) => jobScheduleRecord({ ...schedule, ...(workerJobsState.schedules[schedule.id] || {}) })),
+    ...Object.values(workerJobsState.schedules)
+      .filter((schedule) => schedule && !schedule.deletedAt && !defaultScheduleIds.has(schedule.id))
+      .map((schedule) => jobScheduleRecord(schedule)),
+  ].sort((a, b) => `${a.projectId}:${a.name}`.localeCompare(`${b.projectId}:${b.name}`));
   const deployments = readDeployments();
   const backupRecords = readBackupRecords();
   const storedResourceLimits = readResourceLimitsState();
@@ -912,6 +1043,7 @@ function buildContext({ projects, state }) {
     databases: { total: databases.length, declared: databases.filter((item) => item.status === "declared").length },
     storage: { buckets: storageBuckets.length, provider: storageProvider.status },
     sensitiveMaterials: { total: sensitiveMaterials.length, rotationDue: sensitiveMaterials.filter((item) => item.rotationStatus === "due").length },
+    workersJobs: { workers: workerRuntimes.length, queues: jobQueues.length, failedJobs: jobRecords.filter((job) => job.status === "failed").length, schedules: jobSchedules.length },
     alerts: { open: openAlerts.length, source: "Control Center local alert metadata and Alertmanager evidence tooling" },
     deployments: { latest: deployments.slice(0, 5) },
     backups,
@@ -929,6 +1061,10 @@ function buildContext({ projects, state }) {
     storageBuckets,
     materialStores,
     sensitiveMaterials,
+    workerRuntimes,
+    jobQueues,
+    jobRecords,
+    jobSchedules,
     resources,
     security,
     backups,
@@ -1291,10 +1427,13 @@ function advancedSectionData(section, context) {
       };
     case "workers-jobs":
       return {
-        workers: context.applications.filter((app) => app.runtime === "worker"),
-        failedJobs: context.operations.filter((operation) => /worker|job/i.test(operation.type || "") && operation.status === "failed"),
-        scheduler: "containerized scheduler adapter planned",
-        retryControls: "planned adapter",
+        workers: context.workerRuntimes,
+        queues: context.jobQueues,
+        jobs: context.jobRecords,
+        failedJobs: context.jobRecords.filter((job) => job.status === "failed"),
+        retryControls: context.jobRecords.filter((job) => job.status === "failed").map((job) => ({ id: job.id, endpoint: `/control/workers-jobs/jobs/${job.id}/retry`, dockerTouched: false })),
+        scheduler: context.jobSchedules,
+        containerizedCron: context.jobSchedules.filter((schedule) => schedule.containerizedCron),
       };
     case "deployments":
       return {
@@ -1511,6 +1650,7 @@ function renderControlCenter(context, params) {
     else if (section === "databases") body = renderDatabases(scoped(context.databases), context.databaseEngines, context.projects);
     else if (section === "storage") body = renderStorage(scoped(context.storageBuckets), context.storageProvider, context.projects);
     else if (section === "secrets") body = renderSecrets(scoped(context.sensitiveMaterials), context.materialStores, context.projects);
+    else if (section === "workers-jobs") body = renderWorkersJobs(scoped(context.workerRuntimes), scoped(context.jobQueues), scoped(context.jobRecords), scoped(context.jobSchedules), context.projects);
     else if (section === "deployments") body = renderDeployments(scoped(context.deployments));
     else if (section === "logs-advanced") body = renderAdvancedPanel(title, section, context, "Loki query and export surfaces stay metadata-only here.");
     else if (section === "alerts-advanced") body = renderAdvancedPanel(title, section, context, "Alert delivery evidence is verified through the ops runner before production use.");
@@ -1525,12 +1665,14 @@ function renderControlCenter(context, params) {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Stexor Control Center</title>
+<link rel="stylesheet" href="/assets/stexor-ui/src/styles.css">
+<link rel="stylesheet" href="/assets/stexor-ui/src/ui.css">
 ${styleTag()}
 </head>
-<body>
-<main class="control-shell">
-  <aside class="sidebar">
-    <div class="brand"><span class="brand-mark">SX</span><div><strong>Stexor</strong><small>Control Center</small></div></div>
+<body data-ui-theme="dark" data-ui-accent="blue">
+<main class="control-shell ui-experience">
+  <aside class="sidebar ui-dock">
+    <div class="brand stexor-wordmark"><span class="brand-mark">SX</span><div><strong>Stexor</strong><small>Control Center</small></div></div>
     <nav aria-label="Control navigation">
       ${nav.map((item) => `<a class="${section === item.id ? "active" : ""}" href="/?mode=${mode}&section=${item.id}"><span>${escapeHtml(item.short)}</span>${escapeHtml(item.label)}</a>`).join("")}
     </nav>
@@ -1542,8 +1684,8 @@ ${styleTag()}
       </div>
     </div>
   </aside>
-  <section class="workspace">
-    <header class="topbar">
+  <section class="workspace ui-scene">
+    <header class="topbar ui-homebar">
       <div><p class="eyebrow">${escapeHtml(environment.toUpperCase())} MODE</p><h1>${escapeHtml(title)}</h1></div>
       <div class="top-actions">
         <span class="pill ${environment === "production" ? "danger" : "info"}">${escapeHtml(context.overview.modeEvidence)}</span>
@@ -1572,11 +1714,13 @@ function renderLogin(message) {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Stexor Control Center Sign In</title>
+<link rel="stylesheet" href="/assets/stexor-ui/src/styles.css">
+<link rel="stylesheet" href="/assets/stexor-ui/src/ui.css">
 ${styleTag()}
 </head>
-<body>
-<main class="login-shell">
-  <section class="login-panel">
+<body data-ui-theme="dark" data-ui-accent="blue">
+<main class="login-shell ui-experience">
+  <section class="login-panel ui-panel-stack">
     <span class="brand-mark">SX</span>
     <p class="eyebrow">${escapeHtml(environment.toUpperCase())} MODE</p>
     <h1>Admin Sign In</h1>
@@ -2098,6 +2242,129 @@ function renderMaterialCard(material) {
       <input name="purpose" value="admin-review" aria-label="Access purpose">
       <input type="hidden" name="confirm" value="RECORD-MATERIAL-ACCESS">
       <button class="button danger" type="submit">Record access</button>
+    </form>
+  </div>`;
+}
+
+function renderWorkersJobs(workers, queues, jobs, schedules, projects) {
+  const projectOptions = projects.map((project) => `<option value="${escapeHtml(project.slug)}">${escapeHtml(project.name)}</option>`).join("");
+  const queueOptions = queues.map((queue) => `<option value="${escapeHtml(queue.id)}">${escapeHtml(`${queue.projectId}/${queue.name}`)}</option>`).join("");
+  const workerOptions = workers.map((worker) => `<option value="${escapeHtml(worker.id)}">${escapeHtml(`${worker.projectId}/${worker.name}`)}</option>`).join("");
+  const failedJobs = jobs.filter((job) => job.status === "failed");
+  return `<section class="grid two">
+    <div class="panel"><div class="panel-head"><span>JOB</span><div><h2>Workers &amp; Jobs</h2><p>Worker, queue, failed job, retry and scheduler metadata. No job execution or Docker command runs from this panel.</p></div></div>
+      <div class="cards">
+        <div class="card compact"><strong>Worker status</strong><span>${workers.length} runtime records / Docker touched no</span></div>
+        <div class="card compact"><strong>Queues</strong><span>${queues.length} queue records / providers touched no</span></div>
+        <div class="card compact"><strong>Failed jobs</strong><span>${failedJobs.length} local records / retry controls metadata-only</span></div>
+        <div class="card compact"><strong>Containerized scheduler</strong><span>${schedules.filter((schedule) => schedule.containerizedCron).length} cron records</span></div>
+      </div>
+      <form method="post" action="/actions/worker-job-command" class="inline-confirm worker-form">
+        <input type="hidden" name="action" value="declare-worker">
+        <select name="projectId" aria-label="Worker project">${projectOptions}</select>
+        <input name="name" value="jobs-worker" aria-label="Worker name">
+        <input name="service" value="worker-jobs" aria-label="Worker service">
+        <select name="status" aria-label="Worker status"><option value="declared">declared</option><option value="configured">configured</option><option value="running">running</option><option value="stopped">stopped</option><option value="degraded">degraded</option></select>
+        <input name="queueName" value="jobs" aria-label="Worker queue name">
+        <input name="concurrency" value="1" inputmode="numeric" aria-label="Worker concurrency">
+        <input name="maxAttempts" value="3" inputmode="numeric" aria-label="Max retry attempts">
+        <input type="hidden" name="confirm" value="DECLARE-WORKER">
+        <button class="button enable" type="submit">Declare worker</button>
+      </form>
+      <form method="post" action="/actions/worker-job-command" class="inline-confirm worker-form">
+        <input type="hidden" name="action" value="declare-queue">
+        <select name="projectId" aria-label="Queue project">${projectOptions}</select>
+        <input name="name" value="jobs" aria-label="Queue name">
+        <select name="backend" aria-label="Queue backend"><option value="nats">nats</option><option value="postgres-outbox">postgres-outbox</option><option value="container-cron">container-cron</option><option value="http-webhook">http-webhook</option><option value="alertmanager-webhook">alertmanager-webhook</option></select>
+        <select name="status" aria-label="Queue status"><option value="declared">declared</option><option value="configured">configured</option><option value="draining">draining</option><option value="paused">paused</option></select>
+        <input name="retryPolicy" value="bounded-worker-retry" aria-label="Retry policy">
+        <input type="hidden" name="confirm" value="DECLARE-QUEUE">
+        <button class="button enable" type="submit">Declare queue</button>
+      </form>
+    </div>
+    <div class="panel"><div class="panel-head"><span>WRK</span><div><h2>Worker Runtime</h2><p>Status is local metadata plus discovered Compose services; health proof comes from ops evidence.</p></div></div>
+      ${workers.length ? `<div class="cards">${workers.map(renderWorkerRuntimeCard).join("")}</div>` : empty("No worker records", "Declare a worker or create an application with runtime worker.")}
+    </div>
+    <div class="panel"><div class="panel-head"><span>QUE</span><div><h2>Queues</h2><p>Queue depth and dead-letter metadata are safe local records until adapters read metrics.</p></div></div>
+      ${queues.length ? `<div class="cards">${queues.map(renderJobQueueCard).join("")}</div>` : empty("No queues", "Declare a queue to map worker routing and retry policy.")}
+    </div>
+    <div class="panel"><div class="panel-head"><span>FAIL</span><div><h2>Jobs</h2><p>Record failed jobs and retry plans without running handlers from the web panel.</p></div></div>
+      <form method="post" action="/actions/worker-job-command" class="inline-confirm job-form">
+        <input type="hidden" name="action" value="record-job">
+        <select name="projectId" aria-label="Job project">${projectOptions}</select>
+        <select name="queueId" aria-label="Job queue">${queueOptions || '<option value="jobs">jobs</option>'}</select>
+        <select name="workerId" aria-label="Job worker">${workerOptions || '<option value="enterprise-worker-jobs">enterprise-worker-jobs</option>'}</select>
+        <input name="jobName" value="sync-task" aria-label="Job name">
+        <select name="status" aria-label="Job status"><option value="failed">failed</option><option value="queued">queued</option><option value="running">running</option><option value="succeeded">succeeded</option><option value="dead">dead</option></select>
+        <input name="attempts" value="1" inputmode="numeric" aria-label="Attempts">
+        <input name="maxAttempts" value="3" inputmode="numeric" aria-label="Max attempts">
+        <input name="lastError" value="sanitized failure note" aria-label="Last error summary">
+        <input type="hidden" name="confirm" value="RECORD-JOB">
+        <button class="button enable" type="submit">Record job</button>
+      </form>
+      ${jobs.length ? `<div class="cards">${jobs.map(renderJobRecordCard).join("")}</div>` : empty("No job records", "Failed job and retry metadata will appear here.")}
+    </div>
+    <div class="panel"><div class="panel-head"><span>CRON</span><div><h2>Containerized Scheduler</h2><p>Cron expressions are metadata only; production proof comes from the Dockerized scheduler evidence.</p></div></div>
+      <form method="post" action="/actions/worker-job-command" class="inline-confirm schedule-form">
+        <input type="hidden" name="action" value="declare-schedule">
+        <select name="projectId" aria-label="Schedule project">${projectOptions}</select>
+        <select name="workerId" aria-label="Schedule worker">${workerOptions || '<option value="enterprise-worker-jobs">enterprise-worker-jobs</option>'}</select>
+        <select name="queueId" aria-label="Schedule queue">${queueOptions || '<option value="maintenance">maintenance</option>'}</select>
+        <input name="name" value="nightly-maintenance" aria-label="Schedule name">
+        <input name="cronExpression" value="15 3 * * *" aria-label="Cron expression">
+        <select name="status" aria-label="Schedule status"><option value="enabled">enabled</option><option value="paused">paused</option><option value="metadata-only">metadata-only</option></select>
+        <input type="hidden" name="confirm" value="DECLARE-SCHEDULE">
+        <button class="button enable" type="submit">Declare schedule</button>
+      </form>
+      ${schedules.length ? `<div class="cards">${schedules.map(renderJobScheduleCard).join("")}</div>` : empty("No schedules", "Declare containerized cron metadata to track scheduler intent.")}
+    </div>
+  </section>`;
+}
+
+function renderWorkerRuntimeCard(worker) {
+  return `<div id="worker-job-${escapeHtml(worker.id)}" class="card compact">
+    <div class="card-title"><strong>${escapeHtml(worker.name)}</strong><em>${escapeHtml(worker.status)}</em></div>
+    <span>${escapeHtml(worker.projectId)} / service ${escapeHtml(worker.service)} / queue ${escapeHtml(worker.queueName)}</span>
+    <span>concurrency ${escapeHtml(String(worker.concurrency))} / max attempts ${escapeHtml(String(worker.maxAttempts))} / health ${escapeHtml(worker.healthStatus)}</span>
+    <span>${escapeHtml(worker.source)} / command executed ${worker.commandExecuted ? "yes" : "no"}</span>
+  </div>`;
+}
+
+function renderJobQueueCard(queue) {
+  return `<div id="worker-job-${escapeHtml(queue.id)}" class="card compact">
+    <div class="card-title"><strong>${escapeHtml(queue.name)}</strong><em>${escapeHtml(queue.status)}</em></div>
+    <span>${escapeHtml(queue.projectId)} / ${escapeHtml(queue.backend)} / depth ${escapeHtml(String(queue.depth))}</span>
+    <span>failed ${escapeHtml(String(queue.failedCount))} / retry ${escapeHtml(queue.retryPolicy)} / dead letter ${escapeHtml(queue.deadLetterQueue || "not-set")}</span>
+  </div>`;
+}
+
+function renderJobRecordCard(job) {
+  return `<div id="worker-job-${escapeHtml(job.id)}" class="card compact">
+    <div class="card-title"><strong>${escapeHtml(job.jobName)}</strong><em>${escapeHtml(job.status)}</em></div>
+    <span>${escapeHtml(job.projectId)} / queue ${escapeHtml(job.queueId)} / worker ${escapeHtml(job.workerId)}</span>
+    <span>attempts ${escapeHtml(String(job.attempts))}/${escapeHtml(String(job.maxAttempts))} / retry after ${escapeHtml(String(job.retryAfterSeconds))}s</span>
+    <span>${escapeHtml(job.lastError || "no error summary")}</span>
+    ${["failed", "dead", "retry-planned"].includes(job.status) ? `<form method="post" action="/actions/worker-job-command" class="inline-confirm">
+      <input type="hidden" name="action" value="retry-job">
+      <input type="hidden" name="id" value="${escapeHtml(job.id)}">
+      <input name="retryAfterSeconds" value="${escapeHtml(String(job.retryAfterSeconds || 60))}" inputmode="numeric" aria-label="Retry delay seconds">
+      <input type="hidden" name="confirm" value="PLAN-JOB-RETRY">
+      <button class="button danger" type="submit">Plan retry</button>
+    </form>` : ""}
+  </div>`;
+}
+
+function renderJobScheduleCard(schedule) {
+  return `<div id="worker-job-${escapeHtml(schedule.id)}" class="card compact">
+    <div class="card-title"><strong>${escapeHtml(schedule.name)}</strong><em>${escapeHtml(schedule.status)}</em></div>
+    <span>${escapeHtml(schedule.projectId)} / worker ${escapeHtml(schedule.workerId)} / queue ${escapeHtml(schedule.queueId)}</span>
+    <span>cron ${escapeHtml(schedule.cronExpression)} / containerized ${schedule.containerizedCron ? "yes" : "no"} / last ${escapeHtml(schedule.lastRunStatus)}</span>
+    <form method="post" action="/actions/worker-job-command" class="inline-confirm">
+      <input type="hidden" name="action" value="schedule-status">
+      <input type="hidden" name="id" value="${escapeHtml(schedule.id)}">
+      <select name="status" aria-label="Schedule status for ${escapeHtml(schedule.id)}"><option value="enabled">enabled</option><option value="paused">paused</option><option value="metadata-only">metadata-only</option></select>
+      <input type="hidden" name="confirm" value="UPDATE-SCHEDULE">
+      <button class="button" type="submit">Update schedule</button>
     </form>
   </div>`;
 }
@@ -2868,6 +3135,196 @@ function planMaterialAccessAudit(id, payload, context) {
   return operationPlan("material.access", material.environment, true, ["validate material", "prepare access audit metadata", "do not read value material", "require apply confirmation", "write audit event"], { materialId: material.id, projectId: material.projectId, purpose, valueRead: false, valueExposed: false, productionEvidence: false, confirmationRequired: "RECORD-MATERIAL-ACCESS" });
 }
 
+function planWorkerDeclare(payload, context) {
+  const projectId = validateProjectOrPlatform(payload.projectId || "platform", context);
+  const name = sanitizeDisplayName(payload.name || "worker");
+  const service = sanitizeOptionalRef(payload.service || slugify(name));
+  const queueName = validateQueueName(payload.queueName || "jobs");
+  const id = sanitizeIdentifier(payload.id || `${projectId}-${slugify(name)}`) || rid();
+  const status = choice(String(payload.status || "declared"), ["declared", "configured", "running", "stopped", "degraded"], "worker status");
+  const details = workerRuntimeRecord({
+    id,
+    projectId,
+    name,
+    service,
+    status,
+    queueName,
+    concurrency: parseBoundedInteger(payload.concurrency || 1, "worker concurrency", 256),
+    maxAttempts: parseBoundedInteger(payload.maxAttempts || 3, "worker max attempts", 100),
+    healthStatus: payload.healthStatus || "metadata-only",
+    source: "control-center-state",
+  });
+  if (payload.confirm === "DECLARE-WORKER") {
+    const state = readWorkerJobsState();
+    state.workers[id] = {
+      ...(state.workers[id] || {}),
+      ...details,
+      updatedAt: new Date().toISOString(),
+      createdAt: state.workers[id]?.createdAt || new Date().toISOString(),
+    };
+    writeWorkerJobsState(state);
+    appendAudit({ action: "worker.declare.apply", target: id, environment: context.environment, risk: "low", result: "success", dryRun: false, summary: "Worker runtime metadata declared locally; no process or Docker command executed." });
+    const operation = operationPlan("worker.declare.local", context.environment, false, ["validate project", "validate worker metadata", "record local worker runtime state", "leave Docker runtime unchanged", "write audit event"], { ...state.workers[id], dockerTouched: false, commandExecuted: false, productionEvidence: false });
+    return { ...operation, worker: state.workers[id] };
+  }
+  appendAudit({ action: "worker.declare.plan", target: id, environment: context.environment, risk: "low", result: "planned", dryRun: true, summary: "Worker runtime declaration plan generated." });
+  return operationPlan("worker.declare", context.environment, true, ["validate project", "validate worker metadata", "prepare local worker state", "require apply confirmation", "write audit event"], { ...details, dockerTouched: false, commandExecuted: false, productionEvidence: false, confirmationRequired: "DECLARE-WORKER" });
+}
+
+function planQueueDeclare(payload, context) {
+  const projectId = validateProjectOrPlatform(payload.projectId || "platform", context);
+  const name = validateQueueName(payload.name || "jobs");
+  const backend = choice(String(payload.backend || "nats"), ["nats", "postgres-outbox", "container-cron", "http-webhook", "alertmanager-webhook"], "queue backend");
+  const status = choice(String(payload.status || "declared"), ["declared", "configured", "draining", "paused"], "queue status");
+  const id = sanitizeIdentifier(payload.id || `${projectId}-${name}`) || rid();
+  const details = jobQueueRecord({
+    id,
+    projectId,
+    name,
+    backend,
+    status,
+    retryPolicy: sanitizeOptionalRef(payload.retryPolicy || "bounded-worker-retry"),
+    deadLetterQueue: sanitizeOptionalRef(payload.deadLetterQueue || ""),
+    source: "control-center-state",
+  });
+  if (payload.confirm === "DECLARE-QUEUE") {
+    const state = readWorkerJobsState();
+    state.queues[id] = {
+      ...(state.queues[id] || {}),
+      ...details,
+      updatedAt: new Date().toISOString(),
+      createdAt: state.queues[id]?.createdAt || new Date().toISOString(),
+    };
+    writeWorkerJobsState(state);
+    appendAudit({ action: "worker.queue.apply", target: id, environment: context.environment, risk: "low", result: "success", dryRun: false, summary: "Queue metadata declared locally; no broker, outbox or webhook mutation executed." });
+    const operation = operationPlan("worker.queue.local", context.environment, false, ["validate project", "validate queue metadata", "record local queue state", "leave broker unchanged", "write audit event"], { ...state.queues[id], brokerTouched: false, providerTouched: false, productionEvidence: false });
+    return { ...operation, queue: state.queues[id] };
+  }
+  appendAudit({ action: "worker.queue.plan", target: id, environment: context.environment, risk: "low", result: "planned", dryRun: true, summary: "Queue metadata declaration plan generated." });
+  return operationPlan("worker.queue", context.environment, true, ["validate project", "validate queue metadata", "prepare local queue state", "require apply confirmation", "write audit event"], { ...details, brokerTouched: false, providerTouched: false, productionEvidence: false, confirmationRequired: "DECLARE-QUEUE" });
+}
+
+function planJobRecord(payload, context) {
+  const projectId = validateProjectOrPlatform(payload.projectId || "platform", context);
+  const queueId = sanitizeIdentifier(payload.queueId || "jobs");
+  const workerId = sanitizeIdentifier(payload.workerId || "enterprise-worker-jobs");
+  findById(context.jobQueues, queueId, "Queue");
+  findById(context.workerRuntimes, workerId, "Worker");
+  const jobName = validateQueueName(payload.jobName || payload.name || "job");
+  const status = choice(String(payload.status || "failed"), ["queued", "running", "failed", "succeeded", "dead"], "job status");
+  const id = sanitizeIdentifier(payload.id || `${projectId}-${queueId}-${jobName}`) || rid();
+  const details = jobRecord({
+    id,
+    projectId,
+    queueId,
+    workerId,
+    jobName,
+    status,
+    attempts: parseBoundedInteger(payload.attempts || (status === "failed" ? 1 : 0), "job attempts", 1000),
+    maxAttempts: parseBoundedInteger(payload.maxAttempts || 3, "job max attempts", 1000),
+    lastError: payload.lastError || "",
+    source: "control-center-state",
+  });
+  if (payload.confirm === "RECORD-JOB") {
+    const state = readWorkerJobsState();
+    state.jobs[id] = {
+      ...(state.jobs[id] || {}),
+      ...details,
+      updatedAt: new Date().toISOString(),
+      createdAt: state.jobs[id]?.createdAt || new Date().toISOString(),
+    };
+    writeWorkerJobsState(state);
+    appendAudit({ action: "worker.job.record.apply", target: id, environment: context.environment, risk: status === "failed" || status === "dead" ? "medium" : "low", result: "success", dryRun: false, summary: "Job metadata recorded locally; no handler execution attempted." });
+    const operation = operationPlan("worker.job.record.local", context.environment, false, ["validate queue", "validate worker", "record local job metadata", "leave job handler unexecuted", "write audit event"], { ...state.jobs[id], handlerExecuted: false, dockerTouched: false, brokerTouched: false, productionEvidence: false });
+    return { ...operation, job: state.jobs[id] };
+  }
+  appendAudit({ action: "worker.job.record.plan", target: id, environment: context.environment, risk: status === "failed" || status === "dead" ? "medium" : "low", result: "planned", dryRun: true, summary: "Job record plan generated; no handler execution attempted." });
+  return operationPlan("worker.job.record", context.environment, true, ["validate queue", "validate worker", "prepare local job metadata", "require apply confirmation", "write audit event"], { ...details, handlerExecuted: false, dockerTouched: false, brokerTouched: false, productionEvidence: false, confirmationRequired: "RECORD-JOB" });
+}
+
+function planJobRetry(id, payload, context) {
+  const job = findById(context.jobRecords, id, "Job");
+  if (!["failed", "dead"].includes(job.status)) throw new ValidationError("Only failed or dead jobs can receive a retry plan.");
+  const retryAfterSeconds = parseBoundedInteger(payload.retryAfterSeconds || job.retryAfterSeconds || 60, "retry delay seconds", 86400);
+  if (payload.confirm === "PLAN-JOB-RETRY") {
+    const state = readWorkerJobsState();
+    state.jobs[job.id] = {
+      ...jobRecord(job),
+      ...(state.jobs[job.id] || {}),
+      status: "retry-planned",
+      retryAfterSeconds,
+      retryPlannedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      createdAt: state.jobs[job.id]?.createdAt || job.createdAt || new Date().toISOString(),
+    };
+    writeWorkerJobsState(state);
+    appendAudit({ action: "worker.job.retry.apply", target: job.id, environment: context.environment, risk: "medium", result: "success", dryRun: false, summary: "Job retry metadata recorded locally; no handler execution attempted." });
+    const operation = operationPlan("worker.job.retry.local", context.environment, false, ["validate failed job", "record retry plan metadata", "leave queue untouched", "leave handler unexecuted", "write audit event"], { jobId: job.id, projectId: job.projectId, queueId: job.queueId, workerId: job.workerId, retryAfterSeconds, handlerExecuted: false, dockerTouched: false, brokerTouched: false, productionEvidence: false });
+    return { ...operation, job: state.jobs[job.id] };
+  }
+  appendAudit({ action: "worker.job.retry.plan", target: job.id, environment: context.environment, risk: "medium", result: "planned", dryRun: true, summary: "Job retry plan generated; no handler execution attempted." });
+  return operationPlan("worker.job.retry", context.environment, true, ["validate failed job", "prepare retry metadata", "require apply confirmation", "leave queue untouched", "write audit event"], { jobId: job.id, projectId: job.projectId, queueId: job.queueId, workerId: job.workerId, retryAfterSeconds, handlerExecuted: false, dockerTouched: false, brokerTouched: false, productionEvidence: false, confirmationRequired: "PLAN-JOB-RETRY" });
+}
+
+function planScheduleDeclare(payload, context) {
+  const projectId = validateProjectOrPlatform(payload.projectId || "platform", context);
+  const workerId = sanitizeIdentifier(payload.workerId || "enterprise-worker-jobs");
+  const queueId = sanitizeIdentifier(payload.queueId || "maintenance");
+  findById(context.workerRuntimes, workerId, "Worker");
+  findById(context.jobQueues, queueId, "Queue");
+  const name = sanitizeDisplayName(payload.name || "scheduled-job");
+  const cronExpression = validateCronExpression(payload.cronExpression || "15 3 * * *");
+  const status = choice(String(payload.status || "enabled"), ["enabled", "paused", "metadata-only"], "schedule status");
+  const id = sanitizeIdentifier(payload.id || `${projectId}-${slugify(name)}`) || rid();
+  const details = jobScheduleRecord({
+    id,
+    projectId,
+    name,
+    workerId,
+    queueId,
+    cronExpression,
+    status,
+    containerizedCron: true,
+    source: "control-center-state",
+  });
+  if (payload.confirm === "DECLARE-SCHEDULE") {
+    const state = readWorkerJobsState();
+    state.schedules[id] = {
+      ...(state.schedules[id] || {}),
+      ...details,
+      updatedAt: new Date().toISOString(),
+      createdAt: state.schedules[id]?.createdAt || new Date().toISOString(),
+    };
+    writeWorkerJobsState(state);
+    appendAudit({ action: "worker.schedule.apply", target: id, environment: context.environment, risk: "medium", result: "success", dryRun: false, summary: "Containerized schedule metadata declared locally; no crontab or container changed." });
+    const operation = operationPlan("worker.schedule.local", context.environment, false, ["validate worker", "validate queue", "validate cron expression", "record local schedule metadata", "leave container crontab unchanged", "write audit event"], { ...state.schedules[id], crontabTouched: false, dockerTouched: false, productionEvidence: false });
+    return { ...operation, schedule: state.schedules[id] };
+  }
+  appendAudit({ action: "worker.schedule.plan", target: id, environment: context.environment, risk: "medium", result: "planned", dryRun: true, summary: "Containerized schedule declaration plan generated." });
+  return operationPlan("worker.schedule", context.environment, true, ["validate worker", "validate queue", "validate cron expression", "prepare local schedule metadata", "require apply confirmation", "write audit event"], { ...details, crontabTouched: false, dockerTouched: false, productionEvidence: false, confirmationRequired: "DECLARE-SCHEDULE" });
+}
+
+function planScheduleStatus(id, payload, context) {
+  const schedule = findById(context.jobSchedules, id, "Schedule");
+  const status = choice(String(payload.status || schedule.status || "paused"), ["enabled", "paused", "metadata-only"], "schedule status");
+  if (payload.confirm === "UPDATE-SCHEDULE") {
+    const state = readWorkerJobsState();
+    state.schedules[schedule.id] = {
+      ...jobScheduleRecord(schedule),
+      ...(state.schedules[schedule.id] || {}),
+      status,
+      updatedAt: new Date().toISOString(),
+      createdAt: state.schedules[schedule.id]?.createdAt || schedule.createdAt || new Date().toISOString(),
+    };
+    writeWorkerJobsState(state);
+    appendAudit({ action: "worker.schedule.status.apply", target: schedule.id, environment: context.environment, risk: "medium", result: "success", dryRun: false, summary: "Schedule status metadata updated locally; no crontab or container changed." });
+    const operation = operationPlan("worker.schedule.status.local", context.environment, false, ["validate schedule", "update local schedule status", "leave container crontab unchanged", "write audit event"], { scheduleId: schedule.id, projectId: schedule.projectId, status, crontabTouched: false, dockerTouched: false, productionEvidence: false });
+    return { ...operation, schedule: state.schedules[schedule.id] };
+  }
+  appendAudit({ action: "worker.schedule.status.plan", target: schedule.id, environment: context.environment, risk: "medium", result: "planned", dryRun: true, summary: "Schedule status update plan generated." });
+  return operationPlan("worker.schedule.status", context.environment, true, ["validate schedule", "prepare status metadata update", "require apply confirmation", "write audit event"], { scheduleId: schedule.id, projectId: schedule.projectId, status, crontabTouched: false, dockerTouched: false, productionEvidence: false, confirmationRequired: "UPDATE-SCHEDULE" });
+}
+
 function planResourceLimitUpdate(payload, context) {
   const projectId = slugify(payload.projectId || "");
   validateSlug(projectId);
@@ -3253,6 +3710,30 @@ function writeSensitiveMaterialsState(state) {
   writeFileSync(sensitiveMaterialsFile, `${JSON.stringify(sanitizeEvent(state), null, 2)}\n`);
 }
 
+function readWorkerJobsState() {
+  try {
+    const parsed = JSON.parse(readFileSync(workerJobsFile, "utf8"));
+    return {
+      workers: parsed && typeof parsed.workers === "object" && !Array.isArray(parsed.workers) ? parsed.workers : {},
+      queues: parsed && typeof parsed.queues === "object" && !Array.isArray(parsed.queues) ? parsed.queues : {},
+      jobs: parsed && typeof parsed.jobs === "object" && !Array.isArray(parsed.jobs) ? parsed.jobs : {},
+      schedules: parsed && typeof parsed.schedules === "object" && !Array.isArray(parsed.schedules) ? parsed.schedules : {},
+    };
+  } catch {
+    return { workers: {}, queues: {}, jobs: {}, schedules: {} };
+  }
+}
+
+function writeWorkerJobsState(state) {
+  mkdirSync(path.dirname(workerJobsFile), { recursive: true });
+  writeFileSync(workerJobsFile, `${JSON.stringify(sanitizeEvent({
+    workers: state.workers || {},
+    queues: state.queues || {},
+    jobs: state.jobs || {},
+    schedules: state.schedules || {},
+  }), null, 2)}\n`);
+}
+
 function readResourceLimitsState() {
   try {
     const parsed = JSON.parse(readFileSync(resourceLimitsFile, "utf8"));
@@ -3543,6 +4024,18 @@ function validateMaterialName(value) {
   return name;
 }
 
+function validateQueueName(value) {
+  const name = String(value || "").trim().toLowerCase();
+  if (!/^[a-z0-9](?:[a-z0-9_.-]{0,78}[a-z0-9])?$/.test(name)) throw new ValidationError("Invalid queue or job name.");
+  return name;
+}
+
+function validateProjectOrPlatform(value, context) {
+  const projectId = sanitizeIdentifier(value || "platform") || "platform";
+  if (projectId !== "platform") findById(context.projects, projectId, "Project");
+  return projectId;
+}
+
 function parseQuotaBytes(value) {
   const quotaBytes = Number(value || 0);
   if (!Number.isSafeInteger(quotaBytes) || quotaBytes < 0) throw new ValidationError("Quota must be zero or a positive safe integer.");
@@ -3572,6 +4065,20 @@ function parseResourceLimitNumber(value, label, max) {
   const next = Number(value || 0);
   if (!Number.isSafeInteger(next) || next < 0 || next > max) throw new ValidationError(`${label} must be zero or a positive safe integer within policy.`);
   return next;
+}
+
+function parseBoundedInteger(value, label, max) {
+  const next = Number(value || 0);
+  if (!Number.isSafeInteger(next) || next < 0 || next > max) throw new ValidationError(`${label} must be zero or a positive safe integer within policy.`);
+  return next;
+}
+
+function validateCronExpression(value) {
+  const expression = sanitizeMessage(value || "").trim().replace(/\s+/g, " ");
+  const fields = expression.split(" ");
+  if (fields.length !== 5) throw new ValidationError("Cron expression must have five fields.");
+  if (!fields.every((field) => /^[A-Za-z0-9*/,.-]+$/.test(field) && field.length <= 32)) throw new ValidationError("Invalid cron expression.");
+  return expression;
 }
 
 function validateBaseDomain(value) {
@@ -3818,6 +4325,169 @@ function sensitiveMaterialRecord({
     providerTouched: false,
     productionEvidence: false,
     source,
+    createdAt,
+    updatedAt,
+    deletedAt,
+  });
+}
+
+function workerRuntimeRecord({
+  id = "",
+  projectId = "platform",
+  name = "Worker",
+  service = "worker",
+  status = "declared",
+  queueName = "jobs",
+  concurrency = 1,
+  maxAttempts = 3,
+  healthStatus = "metadata-only",
+  source = "control-center-state",
+  createdAt = null,
+  updatedAt = null,
+  deletedAt = null,
+} = {}) {
+  const cleanProjectId = sanitizeIdentifier(projectId || "platform") || "platform";
+  const cleanName = sanitizeMessage(name || "Worker").replace(/\s+/g, " ").trim().slice(0, 80) || "Worker";
+  const cleanService = sanitizeOptionalRef(service || slugify(cleanName));
+  const cleanQueueName = validateQueueName(queueName || "jobs");
+  return sanitizeEvent({
+    id: sanitizeIdentifier(id || `${cleanProjectId}-${slugify(cleanName)}`) || rid(),
+    projectId: cleanProjectId,
+    name: cleanName,
+    service: cleanService,
+    environment: "local",
+    status: choice(String(status || "declared"), ["declared", "configured", "running", "stopped", "degraded", "online", "offline"], "worker status"),
+    queueName: cleanQueueName,
+    concurrency: parseBoundedInteger(concurrency || 1, "worker concurrency", 256),
+    maxAttempts: parseBoundedInteger(maxAttempts || 3, "worker max attempts", 100),
+    healthStatus: sanitizeOptionalRef(healthStatus || "metadata-only") || "metadata-only",
+    source,
+    dockerTouched: false,
+    commandExecuted: false,
+    providerTouched: false,
+    productionEvidence: false,
+    createdAt,
+    updatedAt,
+    deletedAt,
+  });
+}
+
+function jobQueueRecord({
+  id = "",
+  projectId = "platform",
+  name = "jobs",
+  backend = "nats",
+  status = "declared",
+  depth = 0,
+  failedCount = 0,
+  retryPolicy = "bounded-worker-retry",
+  deadLetterQueue = "",
+  source = "control-center-state",
+  createdAt = null,
+  updatedAt = null,
+  deletedAt = null,
+} = {}) {
+  const cleanProjectId = sanitizeIdentifier(projectId || "platform") || "platform";
+  const cleanName = validateQueueName(name || "jobs");
+  return sanitizeEvent({
+    id: sanitizeIdentifier(id || `${cleanProjectId}-${cleanName}`) || rid(),
+    projectId: cleanProjectId,
+    name: cleanName,
+    backend: choice(String(backend || "nats"), ["nats", "postgres-outbox", "container-cron", "http-webhook", "alertmanager-webhook"], "queue backend"),
+    environment: "local",
+    status: choice(String(status || "declared"), ["declared", "configured", "draining", "paused"], "queue status"),
+    depth: parseBoundedInteger(depth || 0, "queue depth", 100000000),
+    failedCount: parseBoundedInteger(failedCount || 0, "failed job count", 100000000),
+    retryPolicy: sanitizeOptionalRef(retryPolicy || "bounded-worker-retry") || "bounded-worker-retry",
+    deadLetterQueue: sanitizeOptionalRef(deadLetterQueue),
+    source,
+    brokerTouched: false,
+    providerTouched: false,
+    productionEvidence: false,
+    createdAt,
+    updatedAt,
+    deletedAt,
+  });
+}
+
+function jobRecord({
+  id = "",
+  projectId = "platform",
+  queueId = "jobs",
+  workerId = "enterprise-worker-jobs",
+  jobName = "job",
+  status = "failed",
+  attempts = 0,
+  maxAttempts = 3,
+  retryAfterSeconds = 60,
+  retryPlannedAt = null,
+  lastError = "",
+  source = "control-center-state",
+  createdAt = null,
+  updatedAt = null,
+  deletedAt = null,
+} = {}) {
+  const cleanProjectId = sanitizeIdentifier(projectId || "platform") || "platform";
+  const cleanQueueId = sanitizeIdentifier(queueId || "jobs") || "jobs";
+  const cleanWorkerId = sanitizeIdentifier(workerId || "enterprise-worker-jobs") || "enterprise-worker-jobs";
+  const cleanJobName = validateQueueName(jobName || "job");
+  return sanitizeEvent({
+    id: sanitizeIdentifier(id || `${cleanProjectId}-${cleanQueueId}-${cleanJobName}`) || rid(),
+    projectId: cleanProjectId,
+    queueId: cleanQueueId,
+    workerId: cleanWorkerId,
+    jobName: cleanJobName,
+    environment: "local",
+    status: choice(String(status || "failed"), ["queued", "running", "failed", "succeeded", "dead", "retry-planned"], "job status"),
+    attempts: parseBoundedInteger(attempts || 0, "job attempts", 1000),
+    maxAttempts: parseBoundedInteger(maxAttempts || 3, "job max attempts", 1000),
+    retryAfterSeconds: parseBoundedInteger(retryAfterSeconds || 60, "retry delay seconds", 86400),
+    retryPlannedAt,
+    lastError: sanitizeMessage(lastError || "").replace(/\s+/g, " ").trim().slice(0, 180),
+    source,
+    handlerExecuted: false,
+    dockerTouched: false,
+    brokerTouched: false,
+    providerTouched: false,
+    productionEvidence: false,
+    createdAt,
+    updatedAt,
+    deletedAt,
+  });
+}
+
+function jobScheduleRecord({
+  id = "",
+  projectId = "platform",
+  name = "Schedule",
+  workerId = "enterprise-worker-jobs",
+  queueId = "maintenance",
+  cronExpression = "15 3 * * *",
+  status = "metadata-only",
+  lastRunStatus = "not-run",
+  containerizedCron = true,
+  source = "control-center-state",
+  createdAt = null,
+  updatedAt = null,
+  deletedAt = null,
+} = {}) {
+  const cleanProjectId = sanitizeIdentifier(projectId || "platform") || "platform";
+  const cleanName = sanitizeMessage(name || "Schedule").replace(/\s+/g, " ").trim().slice(0, 80) || "Schedule";
+  return sanitizeEvent({
+    id: sanitizeIdentifier(id || `${cleanProjectId}-${slugify(cleanName)}`) || rid(),
+    projectId: cleanProjectId,
+    name: cleanName,
+    workerId: sanitizeIdentifier(workerId || "enterprise-worker-jobs") || "enterprise-worker-jobs",
+    queueId: sanitizeIdentifier(queueId || "maintenance") || "maintenance",
+    environment: "local",
+    cronExpression: validateCronExpression(cronExpression || "15 3 * * *"),
+    status: choice(String(status || "metadata-only"), ["enabled", "paused", "metadata-only", "configured"], "schedule status"),
+    lastRunStatus: sanitizeOptionalRef(lastRunStatus || "not-run") || "not-run",
+    containerizedCron: Boolean(containerizedCron),
+    source,
+    crontabTouched: false,
+    dockerTouched: false,
+    productionEvidence: false,
     createdAt,
     updatedAt,
     deletedAt,
@@ -4369,6 +5039,45 @@ function notFound(res) {
   json(res, { error: "not_found", message: "Control endpoint not found." }, 404);
 }
 
+function serveStaticAsset(req, res, url, rootDir, prefix) {
+  if ((req.method || "GET").toUpperCase() !== "GET") {
+    notFound(res);
+    return;
+  }
+  let relative = "";
+  try {
+    relative = decodeURIComponent(url.pathname.slice(prefix.length));
+  } catch {
+    notFound(res);
+    return;
+  }
+  const normalized = relative.replaceAll("\\", "/");
+  const extension = path.extname(normalized).toLowerCase();
+  if (!normalized || normalized.includes("..") || normalized.startsWith("/") || ![".css", ".ttf", ".woff", ".woff2", ".svg"].includes(extension)) {
+    notFound(res);
+    return;
+  }
+  const root = path.resolve(rootDir);
+  const target = path.resolve(root, normalized);
+  if (!(target === root || target.startsWith(`${root}${path.sep}`)) || !existsSync(target)) {
+    notFound(res);
+    return;
+  }
+  const contentTypes = {
+    ".css": "text/css; charset=utf-8",
+    ".ttf": "font/ttf",
+    ".woff": "font/woff",
+    ".woff2": "font/woff2",
+    ".svg": "image/svg+xml; charset=utf-8",
+  };
+  res.writeHead(200, {
+    "content-type": contentTypes[extension] || "application/octet-stream",
+    "cache-control": "no-store",
+    "x-stexor-control-center-runtime": "node",
+  });
+  res.end(readFileSync(target));
+}
+
 function escapeHtml(value) {
   return String(value).replace(/[&<>"']/g, (char) => ({
     "&": "&amp;",
@@ -4381,8 +5090,198 @@ function escapeHtml(value) {
 
 function styleTag() {
   return `<style>
-.inline-confirm select{width:190px;min-height:34px;padding:0 10px;border:1px solid var(--line);border-radius:8px;background:#090f15;color:var(--text);font-size:12px}
-:root{color-scheme:dark;--bg:#0b1117;--panel:#121a23;--panel-2:#172231;--text:#eef5ff;--muted:#9eb0c5;--line:#263547;--accent:#76e4c5;--accent-2:#8fb7ff;--danger:#ff8b8b;--warn:#f6d66f;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text)}a{color:inherit;text-decoration:none}button,input,select{font:inherit}.control-shell{display:grid;grid-template-columns:280px minmax(0,1fr);min-height:100vh}.sidebar{position:sticky;top:0;height:100vh;padding:18px;border-right:1px solid var(--line);background:#090f15;overflow:auto}.brand{display:flex;gap:12px;align-items:center;padding-bottom:18px;border-bottom:1px solid var(--line)}.brand-mark{display:grid;place-items:center;width:42px;height:42px;border:1px solid var(--accent);border-radius:8px;color:var(--accent);font-weight:900}.brand strong,.brand small{display:block}.brand small{color:var(--muted)}nav{display:grid;gap:8px;margin-top:18px}nav a{display:flex;align-items:center;gap:10px;min-height:40px;padding:8px 10px;border:1px solid transparent;border-radius:8px;color:var(--muted);font-weight:800}nav a span{display:inline-grid;place-items:center;min-width:38px;min-height:26px;border:1px solid var(--line);border-radius:7px;color:var(--accent-2);font-size:11px}nav a.active,nav a:hover{color:var(--text);background:var(--panel);border-color:var(--line)}.mode-card{margin-top:18px;padding:12px;border:1px solid var(--line);border-radius:8px;background:var(--panel)}.mode-card small{color:var(--muted)}.segmented{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:8px}.segmented a{display:grid;place-items:center;min-height:34px;border:1px solid var(--line);border-radius:8px;color:var(--muted);font-weight:850}.segmented a.selected{color:var(--accent);border-color:var(--accent)}.workspace{width:min(1240px,calc(100% - 32px));margin:0 auto;padding:28px 0 48px}.topbar{display:flex;justify-content:space-between;align-items:end;gap:18px;padding-bottom:22px;border-bottom:1px solid var(--line)}.eyebrow{margin:0 0 8px;color:var(--accent);font-size:13px;font-weight:850;letter-spacing:0}h1{margin:0;font-size:48px;line-height:1;letter-spacing:0}h2{margin:0;font-size:22px}h3{margin:18px 0 10px;color:var(--muted);font-size:13px;text-transform:uppercase;letter-spacing:0}.top-actions{display:flex;align-items:center;justify-content:end;gap:10px;flex-wrap:wrap}.switcher select{min-height:38px;border:1px solid var(--line);border-radius:8px;background:var(--panel);color:var(--text);padding:0 10px}.pill,.state{display:inline-flex;align-items:center;min-height:30px;padding:0 10px;border:1px solid var(--line);border-radius:999px;font-size:12px;font-weight:850;color:var(--muted)}.pill.info,.state.on{color:var(--accent);border-color:color-mix(in srgb,var(--accent) 55%,var(--line))}.pill.danger,.state.off{color:var(--warn);border-color:color-mix(in srgb,var(--warn) 55%,var(--line))}.metric-grid{display:grid;grid-template-columns:repeat(4,minmax(140px,1fr));gap:12px;margin-top:22px}.metric{min-height:96px;padding:16px;background:var(--panel);border:1px solid var(--line);border-radius:8px}.metric span{display:block;font-size:34px;font-weight:900;color:var(--accent-2)}.metric small{color:var(--muted)}.grid{display:grid;gap:16px;margin-top:22px}.grid.two{grid-template-columns:minmax(0,1.15fr) minmax(320px,.85fr)}.panel{margin-top:22px;padding:18px;background:var(--panel);border:1px solid var(--line);border-radius:8px}.grid .panel{margin-top:0}.panel-head{display:flex;gap:12px;align-items:center;margin-bottom:16px}.panel-head>span{display:inline-grid;place-items:center;width:42px;height:42px;border:1px solid var(--accent);border-radius:8px;color:var(--accent);font-size:12px;font-weight:900}.panel-head p{margin:4px 0 0;color:var(--muted);font-size:13px}.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:10px}.card{min-height:96px;padding:14px;background:var(--panel-2);border:1px solid var(--line);border-radius:8px;transition:transform .18s ease,border-color .18s ease,background .18s ease}a.card:hover,.project-card:hover{transform:translateY(-2px);border-color:var(--accent);background:#1a2838}.card strong{display:block;font-size:15px}.card span{display:block;margin-top:8px;color:var(--muted);font-size:13px;line-height:1.45}.card.compact{min-height:78px}.project-cards{margin-top:16px}.project-card{min-height:164px;display:flex;flex-direction:column;gap:4px}.project-card.is-off{opacity:.76}.card-title{display:flex;align-items:start;justify-content:space-between;gap:10px}.card-title em{padding:4px 8px;border:1px solid var(--line);border-radius:999px;color:var(--accent);font-size:11px;font-style:normal;font-weight:850}.card .host{color:var(--accent-2);font-weight:850;overflow-wrap:anywhere}.project-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:auto;padding-top:12px}.button{display:inline-flex;align-items:center;justify-content:center;min-height:34px;padding:0 12px;border:1px solid var(--line);border-radius:8px;background:#101820;color:var(--text);font-size:13px;font-weight:850;cursor:pointer}.button.open,.button.enable{border-color:color-mix(in srgb,var(--accent) 60%,var(--line));color:var(--accent)}.button.danger{border-color:color-mix(in srgb,var(--danger) 60%,var(--line));color:var(--danger)}.button.muted{color:var(--muted);cursor:not-allowed;opacity:.55}.status-list{display:grid;gap:10px;padding:0;margin:0;list-style:none}.status-list li{display:flex;justify-content:space-between;gap:16px;padding:12px;background:var(--panel-2);border:1px solid var(--line);border-radius:8px}.status-list span{color:var(--muted);text-align:right}.json-block,pre{overflow:auto;white-space:pre-wrap;margin:0;color:#dce8f7;line-height:1.55;font-size:14px}.empty{padding:18px;background:#101820;border:1px dashed var(--line);border-radius:8px;color:var(--muted)}.disabled{opacity:.45;pointer-events:none}.login-shell{display:grid;place-items:center;min-height:100vh;padding:24px}.login-panel{width:min(460px,100%);padding:24px;border:1px solid var(--line);border-radius:8px;background:var(--panel)}.login-panel h1{font-size:38px}.login-copy{color:var(--muted);line-height:1.55}.login-form{display:grid;gap:12px;margin-top:20px}.login-form label{color:var(--muted);font-size:13px;font-weight:850}.login-form input{min-height:42px;padding:0 12px;border:1px solid var(--line);border-radius:8px;background:#090f15;color:var(--text)}.inline-confirm{display:flex;align-items:center;gap:6px;flex-wrap:wrap}.inline-confirm input{width:190px;min-height:34px;padding:0 10px;border:1px solid var(--line);border-radius:8px;background:#090f15;color:var(--text);font-size:12px}@media(max-width:980px){.control-shell{display:block}.sidebar{position:static;height:auto}.workspace{width:min(100% - 24px,1240px)}.topbar,.grid.two{display:block}.metric-grid{grid-template-columns:repeat(2,1fr)}h1{font-size:36px}.top-actions{justify-content:start;margin-top:14px}}
+/* Control Center composition layer over the vendored @stexor/ui package. */
+:root{
+  color-scheme:dark;
+  --ui-white:#ffffff;
+  --ui-dark-mono-bg:#0f1115;
+  --ui-dark-panel:#171a21;
+  --ui-dark-cell:#20242d;
+  --ui-dark-cell-muted:#151922;
+  --ui-dark-line:rgba(235,238,245,.12);
+  --ui-dark-text:#f5f7fb;
+  --ui-dark-muted:#a9b0bf;
+  --ui-dark-primary-bg:#86b7ff;
+  --ui-dark-primary-border:#5f8fce;
+  --ui-dark-primary-hover-bg:#acd0ff;
+  --ui-mono-bg:var(--ui-dark-mono-bg);
+  --ui-mono-bg-soft:#14171d;
+  --ui-mono-text:var(--ui-dark-text);
+  --ui-mono-muted:var(--ui-dark-muted);
+  --ui-mono-line:var(--ui-dark-line);
+  --ui-mono-focus:0 0 0 4px rgba(134,183,255,.18);
+  --ui-mono-shadow:0 18px 42px rgba(0,0,0,.28);
+  --ui-mono-shadow-soft:0 8px 24px rgba(0,0,0,.2);
+  --ui-body-background:linear-gradient(180deg,#0f1115 0%,#12151b 48%,#0f1115 100%);
+  --ui-shell-glow-blue:rgba(134,183,255,.13);
+  --ui-shell-glow-green:rgba(118,228,197,.08);
+  --ui-shell-grid-blue:rgba(134,183,255,.05);
+  --ui-shell-glass-start:rgba(15,17,21,.88);
+  --ui-shell-glass-end:rgba(15,17,21,.22);
+  --ui-shell-grid-line:rgba(235,238,245,.035);
+  --ui-accent:var(--ui-dark-primary-bg);
+  --ui-accent-action:var(--ui-dark-primary-bg);
+  --ui-accent-strong:var(--ui-dark-primary-hover-bg);
+  --ui-accent-soft:rgba(134,183,255,.14);
+  --ui-accent-focus-ring:rgba(134,183,255,.16);
+  --ui-accent-ring:rgba(134,183,255,.18);
+  --ui-accent-shadow:rgba(134,183,255,.12);
+  --ui-action-primary-bg:var(--ui-dark-primary-bg);
+  --ui-action-primary-soft-bg:rgba(134,183,255,.15);
+  --ui-action-primary-soft-bg-on-gray:rgba(134,183,255,.19);
+  --ui-action-primary-soft-fg:#d9e8ff;
+  --ui-action-danger-bg:rgba(255,139,139,.18);
+  --ui-action-warning-bg:rgba(246,214,111,.18);
+  --ui-action-cyan-bg:rgba(118,228,197,.16);
+  --ui-action-slate-bg:rgba(174,184,199,.15);
+  --ui-feedback-good-bg:rgba(118,228,197,.16);
+  --ui-feedback-warn-bg:rgba(246,214,111,.16);
+  --ui-feedback-danger-bg:rgba(255,139,139,.18);
+  --ui-feedback-info-bg:rgba(134,183,255,.16);
+  --ui-control-bg:#20242d;
+  --ui-control-hover-bg:#252a35;
+  --ui-input-icon-bg:rgba(134,183,255,.16);
+  --ui-input-icon-bg-on-gray:rgba(134,183,255,.22);
+  --ui-input-icon-fg:#d9e8ff;
+  --ui-choice-card-icon-bg:var(--ui-input-icon-bg);
+  --ui-choice-card-active-fg:var(--ui-input-icon-fg);
+  --ui-pill-active-bg-surface:var(--ui-action-primary-soft-bg);
+  --ui-pill-active-bg-gray:var(--ui-action-primary-soft-bg-on-gray);
+  --radius-pill:999px;
+  --ui-radius-12:12px;
+  --ui-radius-16:16px;
+  --ui-radius-22:22px;
+  --ui-radius-24:24px;
+  --ui-radius-26:26px;
+  --ui-radius-28:28px;
+  --ui-radius-32:32px;
+  --ui-radius-48:48px;
+  --ui-radius-panel:48px;
+  --ui-radius-section:32px;
+  --ui-density-gap:8px;
+  --ui-density-card-gap:10px;
+  --ui-density-control-height:38px;
+  --ui-density-choice-slot:34px;
+  --ui-motion-ease-standard:cubic-bezier(.16,1,.3,1);
+  --ui-motion-ease-emphasized:cubic-bezier(.22,1,.36,1);
+  --ui-motion-ease-linear:linear;
+  --ui-ease:var(--ui-motion-ease-standard);
+  --ui-motion-tiny:40ms;
+  --ui-motion-delay-short:80ms;
+  --ui-motion-delay-medium:100ms;
+  --ui-motion-short:160ms;
+  --ui-motion-fast:180ms;
+  --ui-motion-hover:200ms;
+  --ui-motion-base:220ms;
+  --ui-motion-medium:240ms;
+  --ui-motion-smooth:260ms;
+  --ui-motion-panel:380ms;
+  --ui-motion-enter:520ms;
+  --ui-z-shell:20;
+  --mono-bg:var(--ui-mono-bg);
+  --mono-cell:var(--ui-dark-cell);
+  --mono-cell-muted:var(--ui-dark-cell-muted);
+  --mono-text:var(--ui-mono-text);
+  --mono-muted:var(--ui-mono-muted);
+  --mono-line:var(--ui-mono-line);
+  --mono-radius-lg:var(--ui-radius-panel);
+  --mono-radius-md:var(--ui-radius-section);
+  --mono-control-radius:var(--radius-pill);
+  --text:var(--ui-mono-text);
+  --muted:var(--ui-mono-muted);
+  --bg:var(--ui-mono-bg);
+  --panel:var(--mono-cell);
+  --panel-2:var(--mono-cell-muted);
+  --line:var(--ui-mono-line);
+  --accent:var(--ui-accent);
+  --accent-2:var(--ui-action-primary-soft-fg);
+  --danger:#ff8b8b;
+  --warn:#f6d66f;
+  font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+}
+*{box-sizing:border-box}
+html,body{margin:0;min-height:100%;background:var(--mono-bg);color:var(--text)}
+body{background:var(--ui-body-background)}
+a{color:inherit;text-decoration:none}
+button,input,select{font:inherit}
+.ui-experience{background:var(--ui-body-background);color:var(--text)}
+.control-shell{display:grid;grid-template-columns:236px minmax(0,1fr);min-height:100vh;padding:18px clamp(12px,3vw,36px);gap:clamp(16px,2vw,24px);position:relative;overflow:hidden}
+.control-shell::before{background:linear-gradient(115deg,var(--ui-shell-glow-blue),transparent 32%),linear-gradient(245deg,var(--ui-shell-glow-green),transparent 38%),repeating-linear-gradient(90deg,var(--ui-shell-grid-blue) 0 1px,transparent 1px 72px);content:"";inset:0;position:fixed;pointer-events:none;z-index:0}
+.control-shell::after{background:linear-gradient(180deg,var(--ui-shell-glass-start),var(--ui-shell-glass-end)),repeating-linear-gradient(0deg,transparent 0 72px,var(--ui-shell-grid-line) 72px 73px);content:"";inset:0;position:fixed;pointer-events:none;z-index:0}
+.sidebar,.workspace{position:relative;z-index:1}
+.sidebar,.ui-dock{align-self:start;background:transparent;border:0;border-radius:var(--ui-radius-32);height:calc(100vh - 36px);overflow:auto;padding:0;position:sticky;top:18px}
+.brand,.stexor-wordmark{align-items:flex-start;background:transparent;border:0;display:flex;gap:10px;margin:0 0 18px;padding:0}
+.brand-mark{align-items:center;background:var(--ui-choice-card-icon-bg);border:0;border-radius:var(--ui-radius-16);color:var(--ui-choice-card-active-fg);display:inline-flex;font-size:13px;font-weight:950;height:42px;justify-content:center;width:42px}
+.brand strong,.brand small{display:block}
+.brand strong{color:var(--text);font-size:22px;font-weight:900;line-height:1}
+.brand small{color:var(--muted);font-size:10px;font-weight:800;text-transform:uppercase}
+nav{display:grid;gap:8px}
+nav a{align-items:center;border:0;border-radius:var(--radius-pill);color:var(--muted);display:grid;font-size:13px;font-weight:800;gap:9px;grid-template-columns:34px minmax(0,1fr);min-height:42px;padding:4px 10px 4px 4px;transition:background var(--ui-motion-medium) var(--ui-ease),color var(--ui-motion-medium) var(--ui-ease),transform var(--ui-motion-hover) var(--ui-ease)}
+nav a span{align-items:center;background:var(--ui-input-icon-bg);border:0;border-radius:var(--ui-radius-16);color:var(--ui-input-icon-fg);display:inline-flex;font-size:10px;font-weight:900;height:34px;justify-content:center;width:34px}
+nav a.active,nav a:hover{background:var(--ui-action-primary-soft-bg);color:var(--ui-action-primary-soft-fg)}
+nav a:hover{transform:translateY(-1px)}
+.mode-card{background:var(--mono-cell-muted);border:0;border-radius:var(--ui-radius-28);display:grid;gap:10px;margin-top:18px;padding:12px}
+.mode-card small{color:var(--muted);font-size:11px;font-weight:850;text-transform:uppercase}
+.segmented{background:var(--mono-cell);border-radius:var(--radius-pill);display:grid;gap:4px;grid-template-columns:1fr 1fr;padding:4px}
+.segmented a{align-items:center;border:0;border-radius:var(--radius-pill);color:var(--muted);display:flex;font-size:12px;font-weight:850;justify-content:center;min-height:32px;padding:0 10px}
+.segmented a.selected{background:var(--ui-action-primary-soft-bg);color:var(--ui-action-primary-soft-fg)}
+.workspace,.ui-scene{min-width:0;overflow:visible;padding:0 0 38px}
+.topbar,.ui-homebar{align-items:center;background:transparent;border:0;display:flex;gap:20px;justify-content:space-between;margin:0 0 24px;min-height:44px;padding:0;pointer-events:auto;position:relative;top:auto;width:100%;z-index:2}
+.eyebrow{color:var(--accent);font-size:11px;font-weight:900;letter-spacing:0;margin:0 0 6px;text-transform:uppercase}
+h1{font-size:clamp(36px,5vw,64px);font-weight:920;letter-spacing:0;line-height:.95;margin:0}
+h2{font-size:1.04rem;font-weight:850;letter-spacing:0;line-height:1.2;margin:0}
+h3{color:var(--muted);font-size:12px;font-weight:850;letter-spacing:0;margin:18px 0 10px;text-transform:uppercase}
+.top-actions{align-items:center;display:flex;flex-wrap:wrap;gap:10px;justify-content:end}
+.switcher select,.inline-confirm input,.inline-confirm select,.login-form input{background:var(--ui-control-bg);border:0;border-radius:var(--mono-control-radius);color:var(--text);min-height:var(--ui-density-control-height);padding:0 13px}
+.switcher select:focus-visible,.inline-confirm input:focus-visible,.inline-confirm select:focus-visible,.login-form input:focus-visible,.button:focus-visible{box-shadow:var(--ui-mono-focus);outline:0}
+.pill,.state{align-items:center;background:var(--ui-action-primary-soft-bg);border:0;border-radius:var(--radius-pill);color:var(--ui-action-primary-soft-fg);display:inline-flex;font-size:12px;font-weight:850;min-height:30px;padding:0 11px}
+.pill.danger,.state.off{background:var(--ui-feedback-warn-bg);color:var(--warn)}
+.metric-grid{display:grid;gap:12px;grid-template-columns:repeat(4,minmax(140px,1fr));margin-top:22px}
+.metric{animation:ui-block-enterprise-card-in var(--ui-motion-panel) var(--ui-ease) both;background:var(--mono-cell);border:0;border-radius:var(--ui-radius-28);min-height:98px;padding:16px}
+.metric span{color:var(--accent);display:block;font-size:34px;font-weight:930}
+.metric small{color:var(--muted);font-weight:760}
+.grid{display:grid;gap:16px;margin-top:22px}
+.grid.two{grid-template-columns:minmax(0,1.15fr) minmax(320px,.85fr)}
+.panel,.ui-section{background:var(--mono-cell);border:0;border-radius:var(--ui-radius-32);box-shadow:none;display:grid;gap:16px;margin-top:22px;min-width:0;overflow:hidden;padding:18px}
+.grid .panel{margin-top:0}
+.panel-head,.ui-section-head{align-items:center;display:grid;gap:12px;grid-template-columns:38px minmax(0,1fr);margin:0}
+.panel-head>span,.ui-section-icon{align-items:center;background:var(--ui-choice-card-icon-bg);border:0;border-radius:var(--ui-radius-16);color:var(--ui-choice-card-active-fg);display:inline-flex;font-size:11px;font-weight:950;height:38px;justify-content:center;width:38px}
+.panel-head p{color:var(--muted);font-size:.84rem;font-weight:700;line-height:1.45;margin:3px 0 0}
+.cards{display:grid;gap:10px;grid-template-columns:repeat(auto-fit,minmax(210px,1fr))}
+.card,.ui-block-card{animation:ui-block-enterprise-card-in var(--ui-motion-panel) var(--ui-ease) both;background:var(--mono-cell-muted);border:0;border-radius:var(--ui-radius-28);color:var(--text);display:grid;gap:8px;min-height:96px;min-width:0;overflow:hidden;padding:16px;position:relative;transition:background var(--ui-motion-smooth) var(--ui-ease),transform var(--ui-motion-hover) var(--ui-ease)}
+a.card:hover,.project-card:hover{background:#252a35;transform:translateY(-2px)}
+.card strong{color:var(--text);display:block;font-size:.98rem;font-weight:850;line-height:1.2}
+.card span{color:var(--muted);display:block;font-size:.79rem;font-weight:720;line-height:1.4}
+.card.compact{min-height:78px}
+.project-cards{margin-top:16px}
+.project-card{min-height:164px}
+.project-card.is-off{opacity:.72}
+.card-title{align-items:start;display:flex;gap:10px;justify-content:space-between}
+.card-title em{background:var(--ui-action-primary-soft-bg);border:0;border-radius:var(--radius-pill);color:var(--ui-action-primary-soft-fg);font-size:11px;font-style:normal;font-weight:850;padding:4px 8px}
+.card .host{color:var(--accent);font-weight:850;overflow-wrap:anywhere}
+.project-actions{align-items:center;display:flex;flex-wrap:wrap;gap:8px;margin-top:auto;padding-top:12px}
+.button,.primary-button,.muted-button,.danger-button{align-items:center;background:var(--mono-cell-muted);border:0;border-radius:var(--radius-pill);color:var(--text);cursor:pointer;display:inline-flex;font-size:.82rem;font-weight:760;gap:8px;justify-content:center;min-height:34px;padding:0 13px;transition:background var(--ui-motion-medium) var(--ui-ease),color var(--ui-motion-medium) var(--ui-ease),transform var(--ui-motion-content) var(--ui-ease)}
+.button:hover{transform:translateY(-1px)}
+.button.open,.button.enable,.primary-button{background:var(--ui-action-primary-soft-bg);color:var(--ui-action-primary-soft-fg)}
+.button.danger,.danger-button{background:var(--ui-action-danger-bg);color:var(--danger)}
+.button.muted,.muted-button{background:var(--mono-cell);color:var(--muted);cursor:not-allowed;opacity:.65}
+.status-list{display:grid;gap:10px;list-style:none;margin:0;padding:0}
+.status-list li{align-items:center;background:var(--mono-cell-muted);border:0;border-radius:var(--ui-radius-24);display:flex;gap:16px;justify-content:space-between;padding:12px}
+.status-list span{color:var(--muted);text-align:right}
+.json-block,pre{color:#dce8f7;font-size:14px;line-height:1.55;margin:0;overflow:auto;white-space:pre-wrap}
+.empty{background:var(--mono-cell-muted);border:1px dashed var(--line);border-radius:var(--ui-radius-24);color:var(--muted);padding:18px}
+.disabled{opacity:.45;pointer-events:none}
+.login-shell{align-content:center;display:grid;min-height:100vh;padding:24px;place-items:center}
+.login-panel{background:var(--mono-cell);border:0;border-radius:var(--ui-radius-32);display:grid;gap:14px;max-width:460px;padding:24px;width:100%}
+.login-panel h1{font-size:38px}
+.login-copy{color:var(--muted);line-height:1.55}
+.login-form{display:grid;gap:12px;margin-top:8px}
+.login-form label{color:var(--muted);font-size:13px;font-weight:850}
+.inline-confirm{align-items:center;display:flex;flex-wrap:wrap;gap:6px}
+.inline-confirm input,.inline-confirm select{font-size:12px;width:190px}
+@keyframes ui-block-enterprise-card-in{from{opacity:0;transform:translateY(8px) scale(.985)}to{opacity:1;transform:translateY(0) scale(1)}}
+@media (prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important}}
+@media(max-width:980px){.control-shell{display:block;padding:14px}.sidebar{height:auto;position:relative;top:auto}.workspace{margin-top:18px}.topbar,.grid.two{display:block}.metric-grid{grid-template-columns:repeat(2,1fr)}.top-actions{justify-content:start;margin-top:14px}}
 </style>`;
 }
 

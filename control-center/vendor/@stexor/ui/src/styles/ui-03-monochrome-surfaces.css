@@ -1,0 +1,630 @@
+/* Core UI surface hooks for automatic white/gray surface adaptation. */
+
+:root {
+  --mono-bg: var(--ui-mono-bg);
+  --mono-bg-soft: var(--ui-mono-bg-soft);
+  --mono-surface: var(--ui-white);
+  --mono-cell: var(--ui-white);
+  --mono-cell-muted: var(--ui-control-bg);
+  --mono-text: var(--ui-mono-text);
+  --mono-muted: var(--ui-mono-muted);
+  --mono-line: var(--ui-mono-line);
+  --mono-focus: var(--ui-mono-focus);
+  --mono-shadow: var(--ui-mono-shadow);
+  --mono-shadow-soft: var(--ui-mono-shadow-soft);
+  --mono-radius-lg: var(--ui-radius-panel);
+  --mono-radius-md: var(--ui-radius-section);
+  --mono-radius-sm: var(--ui-radius-22);
+  --mono-button-radius: var(--radius-pill);
+  --mono-control-radius: var(--radius-pill);
+  --mono-textarea-radius: var(--ui-radius-24);
+  --mono-avatar-radius: var(--radius-pill);
+  --ui-pill-active-bg: var(--ui-pill-active-bg-surface);
+  --ui-pill-active-shadow: var(--ui-pill-active-shadow-raised);
+}
+
+.ui-page,
+.ui-modal,
+.ui-overlay-panel,
+.ui-page [data-ui-surface="white"],
+.ui-modal [data-ui-surface="white"],
+.ui-overlay-panel[data-ui-surface="white"],
+.ui-page .ui-block-demo-surface[data-ui-surface="gray"] .ui-block-card,
+.ui-page :is(.field-control, .custom-select-button, .ui-date-button, .ui-search),
+.ui-overlay-panel :is(.field-control, .custom-select-button, .ui-date-button, .ui-search) {
+  --ui-auto-control-bg: var(--ui-control-bg);
+  --ui-auto-muted-button-bg: var(--ui-control-bg);
+  --ui-auto-primary-soft-button-bg: var(--ui-action-primary-soft-bg);
+  --ui-auto-cyan-button-bg: var(--ui-action-cyan-bg);
+  --ui-auto-warning-button-bg: var(--ui-action-warning-bg);
+  --ui-auto-violet-button-bg: var(--ui-action-violet-bg);
+  --ui-auto-danger-button-bg: var(--ui-action-danger-bg);
+  --ui-auto-edit-button-bg: var(--ui-action-edit-bg);
+  --ui-auto-rose-button-bg: var(--ui-action-rose-bg);
+  --ui-auto-slate-button-bg: var(--ui-action-slate-bg);
+  --ui-auto-teal-button-bg: var(--ui-action-teal-bg);
+  --ui-auto-input-icon-bg: var(--ui-input-icon-bg-on-gray);
+  --ui-auto-input-icon-fg: var(--ui-input-icon-fg);
+  --ui-auto-input-icon-brand-bg: var(--ui-auto-input-icon-bg);
+  --ui-auto-input-icon-email-bg: var(--ui-auto-input-icon-bg);
+  --ui-auto-input-icon-date-bg: var(--ui-auto-input-icon-bg);
+  --ui-auto-input-icon-country-bg: var(--ui-auto-input-icon-bg);
+  --ui-auto-input-icon-language-bg: var(--ui-auto-input-icon-bg);
+  --ui-auto-neutral-pill-bg: var(--ui-feedback-neutral-bg);
+  --ui-auto-good-pill-bg: var(--ui-feedback-good-bg);
+  --ui-auto-warn-pill-bg: var(--ui-feedback-warn-bg);
+  --ui-auto-info-pill-bg: var(--ui-feedback-info-bg);
+  --ui-auto-danger-pill-bg: var(--ui-feedback-danger-bg);
+  --ui-list-option-active-bg: var(--ui-pill-active-bg-surface);
+  --ui-choice-card-icon-bg: var(--ui-input-icon-bg);
+  --ui-choice-card-idle-icon-bg: var(--ui-input-icon-bg-on-gray);
+  --ui-choice-card-hover-icon-bg: var(--ui-input-icon-bg);
+  --ui-choice-card-active-bg: var(--ui-choice-card-icon-bg);
+  --ui-choice-card-active-fg: var(--ui-auto-input-icon-fg);
+  --ui-auto-choice-bg: var(--ui-control-bg);
+  --ui-auto-range-track-bg: var(--ui-range-track-bg);
+  --ui-auto-range-thumb-bg: var(--ui-white);
+  --ui-auto-switch-thumb-bg: var(--ui-white);
+}
+
+.ui-page [data-ui-surface="gray"],
+.ui-modal [data-ui-surface="gray"],
+.ui-overlay-panel[data-ui-surface="gray"],
+.ui-page .ui-block-demo-surface[data-ui-surface="white"] .ui-block-card {
+  --ui-auto-control-bg: var(--mono-cell);
+  --ui-auto-muted-button-bg: var(--mono-cell);
+  --ui-auto-primary-soft-button-bg: var(--ui-action-primary-soft-bg-on-gray);
+  --ui-auto-cyan-button-bg: var(--ui-action-cyan-bg-on-gray);
+  --ui-auto-warning-button-bg: var(--ui-action-warning-bg-on-gray);
+  --ui-auto-violet-button-bg: var(--ui-action-violet-bg-on-gray);
+  --ui-auto-danger-button-bg: var(--ui-action-danger-bg-on-gray);
+  --ui-auto-edit-button-bg: var(--ui-action-edit-bg-on-gray);
+  --ui-auto-rose-button-bg: var(--ui-action-rose-bg-on-gray);
+  --ui-auto-slate-button-bg: var(--ui-action-slate-bg-on-gray);
+  --ui-auto-teal-button-bg: var(--ui-action-teal-bg-on-gray);
+  --ui-auto-input-icon-bg: var(--ui-input-icon-bg);
+  --ui-auto-input-icon-fg: var(--ui-input-icon-fg-on-gray, var(--ui-input-icon-fg));
+  --ui-auto-input-icon-brand-bg: var(--ui-auto-input-icon-bg);
+  --ui-auto-input-icon-email-bg: var(--ui-auto-input-icon-bg);
+  --ui-auto-input-icon-date-bg: var(--ui-auto-input-icon-bg);
+  --ui-auto-input-icon-country-bg: var(--ui-auto-input-icon-bg);
+  --ui-auto-input-icon-language-bg: var(--ui-auto-input-icon-bg);
+  --ui-auto-neutral-pill-bg: var(--ui-feedback-neutral-bg-on-gray);
+  --ui-auto-good-pill-bg: var(--ui-feedback-good-bg-on-gray);
+  --ui-auto-warn-pill-bg: var(--ui-feedback-warn-bg-on-gray);
+  --ui-auto-info-pill-bg: var(--ui-feedback-info-bg-on-gray);
+  --ui-auto-danger-pill-bg: var(--ui-feedback-danger-bg-on-gray);
+  --ui-pill-active-bg: var(--ui-pill-active-bg-gray);
+  --ui-list-option-active-bg: var(--ui-list-option-active-bg-on-gray);
+  --ui-choice-card-icon-bg: var(--ui-input-icon-bg-on-gray);
+  --ui-choice-card-idle-icon-bg: var(--ui-input-icon-bg);
+  --ui-choice-card-hover-icon-bg: var(--ui-input-icon-bg-on-gray);
+  --ui-choice-card-active-bg: var(--ui-choice-card-icon-bg);
+  --ui-choice-card-active-fg: var(--ui-auto-input-icon-fg);
+  --ui-auto-choice-bg: var(--mono-cell);
+  --ui-auto-range-track-bg: var(--mono-cell);
+  --ui-auto-range-thumb-bg: var(--mono-cell);
+  --ui-auto-switch-thumb-bg: var(--mono-cell-muted);
+}
+
+:is(.ui-page, .ui-modal) [data-ui-surface="gray"] :is(.field-control, .custom-select-button, .ui-date-button, .ui-search),
+.ui-overlay-panel[data-ui-surface="gray"] :is(.field-control, .custom-select-button, .ui-date-button, .ui-search) {
+  --ui-auto-control-bg: var(--mono-cell);
+}
+
+:is(.ui-page, .ui-modal, .ui-overlay-panel) :is(.field-control, .custom-select-button, .ui-date-button, .ui-search)[data-ui-resolved-surface="white"] {
+  --ui-auto-control-bg: var(--ui-control-bg);
+  --ui-auto-input-icon-bg: var(--ui-input-icon-bg-on-gray);
+  --ui-auto-input-icon-fg: var(--ui-input-icon-fg);
+  --ui-auto-input-icon-brand-bg: var(--ui-auto-input-icon-bg);
+  --ui-auto-input-icon-email-bg: var(--ui-auto-input-icon-bg);
+  --ui-auto-input-icon-date-bg: var(--ui-auto-input-icon-bg);
+  --ui-auto-input-icon-country-bg: var(--ui-auto-input-icon-bg);
+  --ui-auto-input-icon-language-bg: var(--ui-auto-input-icon-bg);
+}
+
+:is(.ui-page, .ui-modal, .ui-overlay-panel) :is(.field-control, .custom-select-button, .ui-date-button, .ui-search)[data-ui-resolved-surface="gray"] {
+  --ui-auto-control-bg: var(--mono-cell);
+  --ui-auto-input-icon-bg: var(--ui-input-icon-bg);
+  --ui-auto-input-icon-fg: var(--ui-input-icon-fg-on-gray, var(--ui-input-icon-fg));
+  --ui-auto-input-icon-brand-bg: var(--ui-auto-input-icon-bg);
+  --ui-auto-input-icon-email-bg: var(--ui-auto-input-icon-bg);
+  --ui-auto-input-icon-date-bg: var(--ui-auto-input-icon-bg);
+  --ui-auto-input-icon-country-bg: var(--ui-auto-input-icon-bg);
+  --ui-auto-input-icon-language-bg: var(--ui-auto-input-icon-bg);
+}
+
+.ui-page .ui-async-loading-card {
+  --ui-auto-neutral-pill-bg: var(--mono-cell);
+  --ui-auto-good-pill-bg: var(--ui-feedback-good-bg-on-gray);
+  --ui-auto-warn-pill-bg: var(--ui-feedback-warn-bg-on-gray);
+  --ui-auto-info-pill-bg: var(--ui-feedback-info-bg-on-gray);
+  --ui-auto-danger-pill-bg: var(--ui-feedback-danger-bg-on-gray);
+}
+
+.ui-page :is(
+  .ui-async-loading-surface[data-ui-surface="gray"] .ui-async-loading-card,
+  .ui-block-demo-surface[data-ui-surface="gray"] .ui-block-card
+) {
+  --ui-auto-neutral-pill-bg: var(--ui-feedback-neutral-bg);
+  --ui-auto-good-pill-bg: var(--ui-feedback-good-bg);
+  --ui-auto-warn-pill-bg: var(--ui-feedback-warn-bg);
+  --ui-auto-info-pill-bg: var(--ui-feedback-info-bg);
+  --ui-auto-danger-pill-bg: var(--ui-feedback-danger-bg);
+}
+
+html,
+body,
+.ui-experience {
+  background: var(--mono-bg);
+}
+
+body,
+.ui-experience {
+  color: var(--mono-text);
+}
+
+.ui-canvas,
+.ui-canvas::before,
+.ui-canvas::after {
+  background: none;
+  background-image: none;
+}
+
+.ui-content-sheet {
+  background: var(--mono-bg);
+  border-radius: var(--mono-radius-lg);
+  overflow: visible;
+}
+
+.ui-panel-stack {
+  border-radius: var(--mono-radius-lg);
+  overflow: visible;
+}
+
+.ui-page .ui-metric {
+  background: var(--mono-cell);
+  border: 0;
+  border-radius: var(--mono-radius-md);
+  box-shadow: none;
+}
+
+.ui-facts > div {
+  corner-shape: var(--ui-corner-shape);
+}
+
+.ui-navigation-facts > div {
+  corner-shape: var(--ui-corner-shape);
+}
+
+.ui-page :is(.field-control, .custom-select-button, .ui-date-button, .ui-search),
+.ui-modal :is(.field-control, .custom-select-button, .ui-date-button, .ui-search),
+.ui-overlay-panel :is(.field-control, .custom-select-button, .ui-date-button, .ui-search) {
+  background: var(--ui-auto-control-bg, var(--ui-control-bg));
+  border: 0;
+  box-shadow: none;
+  transform: none;
+}
+
+:is(.ui-page, .ui-modal, .ui-overlay-panel) .field-control.is-active:not(:focus-within),
+:is(.ui-page, .ui-modal, .ui-overlay-panel) .custom-select.has-value .custom-select-button:not([aria-expanded="true"]) {
+  background: var(--ui-auto-control-bg, var(--ui-control-bg));
+  border: 0;
+  box-shadow: none;
+  transform: none;
+}
+
+.ui-page :is(
+  .field-control,
+  .custom-select-button,
+  .ui-date-button,
+  .ui-search
+):is(
+  .has-icon-tone-brand,
+  .has-icon-tone-email,
+  .has-icon-tone-date,
+  .has-icon-tone-country,
+  .has-icon-tone-language
+):hover,
+.ui-page .field-control.has-icon-tone-brand:focus-within,
+.ui-page .field-control.has-icon-tone-email:focus-within,
+.ui-page .field-control.has-icon-tone-date:focus-within,
+.ui-page .field-control.has-icon-tone-country:focus-within,
+.ui-page .field-control.has-icon-tone-language:focus-within,
+.ui-page .custom-select-button.has-icon-tone-brand:focus-visible,
+.ui-page .custom-select-button.has-icon-tone-email:focus-visible,
+.ui-page .custom-select-button.has-icon-tone-date:focus-visible,
+.ui-page .custom-select-button.has-icon-tone-country:focus-visible,
+.ui-page .custom-select-button.has-icon-tone-language:focus-visible,
+.ui-page .custom-select-button.has-icon-tone-brand[aria-expanded="true"],
+.ui-page .custom-select-button.has-icon-tone-email[aria-expanded="true"],
+.ui-page .custom-select-button.has-icon-tone-date[aria-expanded="true"],
+.ui-page .custom-select-button.has-icon-tone-country[aria-expanded="true"],
+.ui-page .custom-select-button.has-icon-tone-language[aria-expanded="true"],
+.ui-page .custom-select.is-open .custom-select-button.has-icon-tone-brand,
+.ui-page .custom-select.is-open .custom-select-button.has-icon-tone-email,
+.ui-page .custom-select.is-open .custom-select-button.has-icon-tone-date,
+.ui-page .custom-select.is-open .custom-select-button.has-icon-tone-country,
+.ui-page .custom-select.is-open .custom-select-button.has-icon-tone-language,
+.ui-page .ui-date-button.has-icon-tone-brand:focus-visible,
+.ui-page .ui-date-button.has-icon-tone-email:focus-visible,
+.ui-page .ui-date-button.has-icon-tone-date:focus-visible,
+.ui-page .ui-date-button.has-icon-tone-country:focus-visible,
+.ui-page .ui-date-button.has-icon-tone-language:focus-visible,
+.ui-page .ui-date-button.has-icon-tone-brand[aria-expanded="true"],
+.ui-page .ui-date-button.has-icon-tone-email[aria-expanded="true"],
+.ui-page .ui-date-button.has-icon-tone-date[aria-expanded="true"],
+.ui-page .ui-date-button.has-icon-tone-country[aria-expanded="true"],
+.ui-page .ui-date-button.has-icon-tone-language[aria-expanded="true"],
+.ui-page .ui-date-input.is-open .ui-date-button.has-icon-tone-brand,
+.ui-page .ui-date-input.is-open .ui-date-button.has-icon-tone-email,
+.ui-page .ui-date-input.is-open .ui-date-button.has-icon-tone-date,
+.ui-page .ui-date-input.is-open .ui-date-button.has-icon-tone-country,
+.ui-page .ui-date-input.is-open .ui-date-button.has-icon-tone-language,
+.ui-page .ui-search.has-icon-tone-brand:focus-within,
+.ui-page .ui-search.has-icon-tone-email:focus-within,
+.ui-page .ui-search.has-icon-tone-date:focus-within,
+.ui-page .ui-search.has-icon-tone-country:focus-within,
+.ui-page .ui-search.has-icon-tone-language:focus-within,
+.ui-overlay-panel .ui-search:is(
+  .has-icon-tone-brand,
+  .has-icon-tone-email,
+  .has-icon-tone-date,
+  .has-icon-tone-country,
+  .has-icon-tone-language
+):hover,
+.ui-overlay-panel .ui-search.has-icon-tone-brand:focus-within,
+.ui-overlay-panel .ui-search.has-icon-tone-email:focus-within,
+.ui-overlay-panel .ui-search.has-icon-tone-date:focus-within,
+.ui-overlay-panel .ui-search.has-icon-tone-country:focus-within,
+.ui-overlay-panel .ui-search.has-icon-tone-language:focus-within {
+  background: var(--ui-auto-control-bg, var(--ui-control-bg));
+  border: 0;
+  box-shadow: inset 0 0 0 1.5px var(--ui-control-tone-border);
+  transform: none;
+}
+
+.ui-modal .ui-search:is(
+  .has-icon-tone-brand,
+  .has-icon-tone-email,
+  .has-icon-tone-date,
+  .has-icon-tone-country,
+  .has-icon-tone-language
+):hover,
+.ui-modal .ui-search.has-icon-tone-brand:focus-within,
+.ui-modal .ui-search.has-icon-tone-email:focus-within,
+.ui-modal .ui-search.has-icon-tone-date:focus-within,
+.ui-modal .ui-search.has-icon-tone-country:focus-within,
+.ui-modal .ui-search.has-icon-tone-language:focus-within {
+  background: var(--ui-auto-control-bg, var(--ui-control-bg));
+  border: 0;
+  box-shadow: inset 0 0 0 1.5px var(--ui-control-tone-border);
+  transform: none;
+}
+
+:is(.ui-page, .ui-modal, .ui-overlay-panel) :is(
+  .field-control,
+  .custom-select-button,
+  .ui-date-button,
+  .ui-search
+):is(
+  .has-icon-tone-brand,
+  .has-icon-tone-email,
+  .has-icon-tone-date,
+  .has-icon-tone-country,
+  .has-icon-tone-language
+):hover,
+:is(.ui-page, .ui-modal, .ui-overlay-panel) :is(
+  .field-control,
+  .ui-search
+):is(
+  .has-icon-tone-brand,
+  .has-icon-tone-email,
+  .has-icon-tone-date,
+  .has-icon-tone-country,
+  .has-icon-tone-language
+):focus-within,
+:is(.ui-page, .ui-modal, .ui-overlay-panel) .custom-select-button:is(
+  .has-icon-tone-brand,
+  .has-icon-tone-email,
+  .has-icon-tone-date,
+  .has-icon-tone-country,
+  .has-icon-tone-language
+):is(:focus-visible, [aria-expanded="true"]),
+:is(.ui-page, .ui-modal, .ui-overlay-panel) .custom-select.is-open .custom-select-button:is(
+  .has-icon-tone-brand,
+  .has-icon-tone-email,
+  .has-icon-tone-date,
+  .has-icon-tone-country,
+  .has-icon-tone-language
+),
+:is(.ui-page, .ui-modal, .ui-overlay-panel) .ui-date-button:is(
+  .has-icon-tone-brand,
+  .has-icon-tone-email,
+  .has-icon-tone-date,
+  .has-icon-tone-country,
+  .has-icon-tone-language
+):is(:focus-visible, [aria-expanded="true"]),
+:is(.ui-page, .ui-modal, .ui-overlay-panel) .ui-date-input.is-open .ui-date-button:is(
+  .has-icon-tone-brand,
+  .has-icon-tone-email,
+  .has-icon-tone-date,
+  .has-icon-tone-country,
+  .has-icon-tone-language
+) {
+  background: var(--ui-auto-control-bg, var(--ui-control-bg));
+  border: 0;
+  box-shadow: inset 0 0 0 1.5px var(--ui-control-tone-border);
+  transform: none;
+}
+
+:is(.ui-page, .ui-modal, .ui-overlay-panel) .custom-select.has-value .custom-select-button:is(
+  .has-icon-tone-brand,
+  .has-icon-tone-email,
+  .has-icon-tone-date,
+  .has-icon-tone-country,
+  .has-icon-tone-language
+):hover {
+  background: var(--ui-auto-control-bg, var(--ui-control-bg));
+  border: 0;
+  box-shadow: inset 0 0 0 1.5px var(--ui-control-tone-border);
+  transform: none;
+}
+
+:is(.ui-page, .ui-modal, .ui-overlay-panel) :is(.field-control, .custom-select-button, .ui-date-button, .ui-search) :is(.field-icon, .custom-select-icon, .ui-search-icon):is(.is-brand, .is-email, .is-date, .is-country, .is-language),
+:is(.ui-page, .ui-modal, .ui-overlay-panel) :is(.field-control, .custom-select-button, .ui-date-button, .ui-search) :is(.field-icon, .custom-select-icon, .ui-search-icon):is(.is-brand, .is-email, .is-date, .is-country, .is-language) svg {
+  color: var(--ui-setting-icon-fg);
+  transform: none;
+}
+
+:is(.ui-page, .ui-modal) :is(.muted-button, .muted-button:hover:not([aria-disabled="true"]), .muted-button:focus-visible:not([aria-disabled="true"])) {
+  background: var(--ui-auto-muted-button-bg, var(--ui-control-bg));
+  border: 0;
+  box-shadow: none;
+  color: var(--mono-text);
+}
+
+:is(.ui-page, .ui-modal) :is(.cyan-button, .cyan-button:hover:not([aria-disabled="true"]), .cyan-button:focus-visible:not([aria-disabled="true"])) {
+  background: var(--ui-auto-cyan-button-bg, var(--ui-action-cyan-bg));
+  color: var(--ui-action-cyan-fg);
+}
+
+:is(.ui-page, .ui-modal) :is(.warning-button, .warning-button:hover:not([aria-disabled="true"]), .warning-button:focus-visible:not([aria-disabled="true"])) {
+  background: var(--ui-auto-warning-button-bg, var(--ui-action-warning-bg));
+  color: var(--ui-action-warning-fg);
+}
+
+:is(.ui-page, .ui-modal) :is(.rose-button, .rose-button:hover:not([aria-disabled="true"]), .rose-button:focus-visible:not([aria-disabled="true"])) {
+  background: var(--ui-auto-rose-button-bg, var(--ui-action-rose-bg));
+  color: var(--ui-action-rose-fg);
+}
+
+:is(.ui-page, .ui-modal) :is(.slate-button, .slate-button:hover:not([aria-disabled="true"]), .slate-button:focus-visible:not([aria-disabled="true"])) {
+  background: var(--ui-auto-slate-button-bg, var(--ui-action-slate-bg));
+  color: var(--ui-action-slate-fg);
+}
+
+:is(.ui-page, .ui-modal) :is(.teal-button, .teal-button:hover:not([aria-disabled="true"]), .teal-button:focus-visible:not([aria-disabled="true"])) {
+  background: var(--ui-auto-teal-button-bg, var(--ui-action-teal-bg));
+  color: var(--ui-action-teal-fg);
+}
+
+:is(.ui-page, .ui-modal) :is(.violet-button, .violet-button:hover:not([aria-disabled="true"]), .violet-button:focus-visible:not([aria-disabled="true"])) {
+  background: var(--ui-auto-violet-button-bg, var(--ui-action-violet-bg));
+  color: var(--ui-action-violet-fg);
+}
+
+:is(.ui-page, .ui-modal) :is(.danger-button, .danger-button:hover:not([aria-disabled="true"]), .danger-button:focus-visible:not([aria-disabled="true"])) {
+  background: var(--ui-auto-danger-button-bg, var(--ui-action-danger-bg));
+  color: var(--ui-action-danger-fg);
+}
+
+:is(.ui-page, .ui-modal) :is(.edit-button, .edit-button:hover:not([aria-disabled="true"]), .edit-button:focus-visible:not([aria-disabled="true"])) {
+  background: var(--ui-auto-edit-button-bg, var(--ui-action-edit-bg));
+  color: var(--ui-action-edit-fg);
+}
+
+:is(.ui-page, .ui-modal) :is(.primary-button.is-soft-tone, .primary-button.is-soft-tone:hover:not([aria-disabled="true"]), .primary-button.is-soft-tone:focus-visible:not([aria-disabled="true"])) {
+  background: var(--ui-auto-primary-soft-button-bg, var(--ui-action-primary-soft-bg));
+  box-shadow: none;
+  color: var(--ui-action-primary-soft-fg);
+}
+
+:is(.ui-page, .ui-modal) .primary-button.is-soft-tone > .button-label {
+  color: currentColor;
+}
+
+:is(.ui-page, .ui-modal) :is(.cyan-button.is-solid-tone, .cyan-button.is-solid-tone:hover:not([aria-disabled="true"]), .cyan-button.is-solid-tone:focus-visible:not([aria-disabled="true"])) {
+  background: var(--ui-action-cyan-fg);
+  color: var(--ui-action-solid-fg);
+}
+
+:is(.ui-page, .ui-modal) :is(.danger-button.is-solid-tone, .danger-button.is-solid-tone:hover:not([aria-disabled="true"]), .danger-button.is-solid-tone:focus-visible:not([aria-disabled="true"])) {
+  background: var(--ui-action-danger-fg);
+  color: var(--ui-action-solid-fg);
+}
+
+:is(.ui-page, .ui-modal) :is(.edit-button.is-solid-tone, .edit-button.is-solid-tone:hover:not([aria-disabled="true"]), .edit-button.is-solid-tone:focus-visible:not([aria-disabled="true"])) {
+  background: var(--ui-action-edit-fg);
+  color: var(--ui-action-solid-fg);
+}
+
+:is(.ui-page, .ui-modal) :is(.rose-button.is-solid-tone, .rose-button.is-solid-tone:hover:not([aria-disabled="true"]), .rose-button.is-solid-tone:focus-visible:not([aria-disabled="true"])) {
+  background: var(--ui-action-rose-fg);
+  color: var(--ui-action-solid-fg);
+}
+
+:is(.ui-page, .ui-modal) :is(.slate-button.is-solid-tone, .slate-button.is-solid-tone:hover:not([aria-disabled="true"]), .slate-button.is-solid-tone:focus-visible:not([aria-disabled="true"])) {
+  background: var(--ui-action-slate-fg);
+  color: var(--ui-action-solid-fg);
+}
+
+:is(.ui-page, .ui-modal) :is(.teal-button.is-solid-tone, .teal-button.is-solid-tone:hover:not([aria-disabled="true"]), .teal-button.is-solid-tone:focus-visible:not([aria-disabled="true"])) {
+  background: var(--ui-action-teal-fg);
+  color: var(--ui-action-solid-fg);
+}
+
+:is(.ui-page, .ui-modal) :is(.violet-button.is-solid-tone, .violet-button.is-solid-tone:hover:not([aria-disabled="true"]), .violet-button.is-solid-tone:focus-visible:not([aria-disabled="true"])) {
+  background: var(--ui-action-violet-fg);
+  color: var(--ui-action-solid-fg);
+}
+
+:is(.ui-page, .ui-modal) :is(.warning-button.is-solid-tone, .warning-button.is-solid-tone:hover:not([aria-disabled="true"]), .warning-button.is-solid-tone:focus-visible:not([aria-disabled="true"])) {
+  background: var(--ui-action-warning-fg);
+  color: var(--ui-action-solid-fg);
+}
+
+:is(.ui-page, .ui-modal) .checkbox-field input:not(:checked) + .checkbox-control,
+:is(.ui-page, .ui-modal) .radio-field input:not(:checked) + .radio-control,
+:is(.ui-page, .ui-modal) .switch-field input:not(:checked) + .switch-track,
+:is(.ui-page, .ui-modal) .checkbox-field:hover input:not(:checked) + .checkbox-control,
+:is(.ui-page, .ui-modal) .radio-field:hover input:not(:checked) + .radio-control,
+:is(.ui-page, .ui-modal) .switch-field:hover input:not(:checked) + .switch-track,
+:is(.ui-page, .ui-modal) .checkbox-field:focus-within input:not(:checked) + .checkbox-control,
+:is(.ui-page, .ui-modal) .radio-field:focus-within input:not(:checked) + .radio-control,
+:is(.ui-page, .ui-modal) .switch-field:focus-within input:not(:checked) + .switch-track {
+  background: var(--ui-auto-choice-bg, var(--ui-control-bg));
+  border: 0;
+  box-shadow: none;
+}
+
+:is(.ui-page, .ui-modal) .switch-field input:not(:checked) + .switch-track .switch-thumb,
+:is(.ui-page, .ui-modal) .switch-field:hover input:not(:checked) + .switch-track .switch-thumb,
+:is(.ui-page, .ui-modal) .switch-field:focus-within input:not(:checked) + .switch-track .switch-thumb {
+  background: var(--ui-auto-switch-thumb-bg);
+}
+
+:is(.ui-page, .ui-modal) .switch-field input:checked + .switch-track .switch-thumb {
+  background: var(--mono-cell);
+}
+
+:is(.ui-page, .ui-modal) .range-control {
+  --range-border: transparent;
+  --range-track-bg: var(--ui-auto-range-track-bg);
+  --range-thumb-bg: var(--ui-auto-range-thumb-bg);
+  --range-thumb-shadow: var(--ui-range-thumb-shadow-soft);
+}
+
+:is(.ui-page, .ui-modal) :is(.badge, .ui-status, .ui-status-pill) {
+  align-items: center;
+  border: 0;
+  border-radius: var(--mono-button-radius);
+  box-shadow: none;
+  corner-shape: round;
+  display: inline-flex;
+  font-size: 0.8rem;
+  font-weight: var(--ui-button-font-weight);
+  gap: 7px;
+  line-height: 1;
+  min-height: 30px;
+  padding: 0 11px;
+  white-space: nowrap;
+}
+
+.ui-page :is(.badge.neutral, .ui-status.neutral, .ui-status-pill.is-neutral),
+.ui-modal :is(.badge.neutral, .ui-status.neutral, .ui-status-pill.is-neutral) {
+  background: var(--ui-auto-neutral-pill-bg, var(--ui-feedback-neutral-bg));
+  color: var(--ui-feedback-neutral-fg);
+}
+
+.ui-page :is(.badge.good, .ui-status.good, .ui-status-pill.is-good),
+.ui-modal :is(.badge.good, .ui-status.good, .ui-status-pill.is-good) {
+  background: var(--ui-auto-good-pill-bg, var(--ui-feedback-good-bg));
+  color: var(--ui-feedback-good-fg);
+}
+
+.ui-page :is(.badge.warn, .ui-status.warn, .ui-status-pill.is-warning),
+.ui-modal :is(.badge.warn, .ui-status.warn, .ui-status-pill.is-warning) {
+  background: var(--ui-auto-warn-pill-bg, var(--ui-feedback-warn-bg));
+  color: var(--ui-feedback-warn-fg);
+}
+
+.ui-page .badge.current,
+.ui-modal .badge.current {
+  background: var(--ui-list-option-active-bg, var(--ui-action-primary-soft-bg));
+  color: var(--ui-current-pill-fg, var(--ui-action-primary-soft-fg));
+}
+
+.ui-page :is(.badge.danger, .ui-status.danger, .ui-status-pill.is-danger),
+.ui-modal :is(.badge.danger, .ui-status.danger, .ui-status-pill.is-danger) {
+  background: var(--ui-auto-danger-pill-bg, var(--ui-feedback-danger-bg));
+  color: var(--ui-feedback-danger-fg);
+}
+
+:is(.ui-page, .ui-modal) :is(.badge, .ui-status, .ui-status-pill) svg {
+  color: currentColor;
+  flex: 0 0 auto;
+}
+
+.ui-page :is(.ui-section-icon, .ui-block-card-icon) {
+  background: var(--ui-choice-card-icon-bg, var(--ui-input-icon-bg));
+  color: var(--ui-choice-card-active-fg, var(--ui-auto-input-icon-fg, var(--ui-input-icon-fg)));
+}
+
+.ui-page :is(.ui-modal-pattern-icon, .ui-date-summary-icon) {
+  background: var(--ui-auto-input-icon-bg, var(--ui-input-icon-bg));
+  color: var(--ui-auto-input-icon-fg, var(--ui-input-icon-fg));
+}
+
+.ui-page :is(.ui-section-icon, .ui-modal-pattern-icon, .ui-date-summary-icon, .ui-block-card-icon) svg {
+  color: currentColor;
+}
+
+@supports (corner-shape: squircle) {
+.ui-content-sheet,
+.ui-panel-stack,
+.ui-page .ui-metric,
+.ui-facts > div,
+.ui-token,
+.ui-overview-cluster,
+.ui-actions-block,
+.ui-choice-card-board,
+.ui-choice-card,
+.ui-choice-card::before,
+.ui-choice-card::after,
+.ui-choice-card svg,
+.ui-feedback-board,
+.ui-feedback-panel,
+.ui-feedback-alert,
+.ui-feedback-empty,
+.ui-feedback-empty > svg,
+.ui-async-board,
+.ui-async-panel,
+.ui-async-loading-card,
+.ui-async-loading-surface,
+.ui-async-skeleton-card,
+.ui-async-skeleton-surface,
+.ui-async-queue-surface,
+.ui-async-job,
+.ui-modal-group,
+.ui-modal-pattern,
+.ui-modal-pattern-icon,
+.ui-modal-choice-card,
+.ui-modal-choice-card::before,
+.ui-modal-choice-card::after,
+.ui-modal-choice-card svg,
+.ui-navigation-surface,
+.ui-navigation-sidebar-shell,
+.ui-navigation-preview,
+.ui-navigation-facts > div,
+.ui-section-icon {
+    corner-shape: var(--ui-corner-shape);
+  }
+
+.ui-round-icon,
+.ui-page :is(.badge, .ui-status, .ui-status-pill),
+  .ui-page :is(
+    .primary-button,
+    .cyan-button,
+    .danger-button,
+    .edit-button,
+    .muted-button,
+    .rose-button,
+    .slate-button,
+    .teal-button,
+    .violet-button,
+    .warning-button
+  ) {
+    corner-shape: round;
+  }
+}

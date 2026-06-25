@@ -289,6 +289,7 @@ services:
       PROJECT_DATABASES_FILE: /var/www/project-state/databases.json
       PROJECT_STORAGE_BUCKETS_FILE: /var/www/project-state/storage-buckets.json
       PROJECT_SENSITIVE_MATERIALS_FILE: /var/www/project-state/sensitive-materials.json
+      PROJECT_WORKER_JOBS_FILE: /var/www/project-state/worker-jobs.json
       PROJECT_DEPLOYMENTS_FILE: /var/www/project-state/deployments.jsonl
       PROJECT_BACKUP_RECORDS_FILE: /var/www/project-state/backups.jsonl
       PROJECT_RESOURCE_LIMITS_FILE: /var/www/project-state/resource-limits.json
@@ -298,6 +299,8 @@ services:
       PROJECT_PROVIDER_CONNECTIONS_FILE: /var/www/project-state/provider-connections.json
       PROJECT_SETTINGS_FILE: /var/www/project-state/settings.json
       PROJECT_WEBSPACES_FILE: /var/www/project-state/webspaces.json
+      STEXOR_UI_PACKAGE_ROOT: /app/vendor/@stexor/ui
+      CONTROL_CENTER_PUBLIC_ROOT: /app/public
       PROJECTS_HOST: ${PROJECTS_HOST:-projects.localhost.com}
       PROJECT_HOST_SUFFIX: ${PROJECT_HOST_SUFFIX:-.localhost.com}
       NODE_PROJECT_HOSTS: ${NODE_PROJECT_HOSTS:-}

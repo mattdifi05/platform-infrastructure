@@ -24,6 +24,7 @@ const domainsFile = path.join(stateDir, "domains.json");
 const databasesFile = path.join(stateDir, "databases.json");
 const storageBucketsFile = path.join(stateDir, "storage-buckets.json");
 const sensitiveMaterialsFile = path.join(stateDir, "sensitive-materials.json");
+const workerJobsFile = path.join(stateDir, "worker-jobs.json");
 const deploymentsFile = path.join(stateDir, "deployments.jsonl");
 const backupRecordsFile = path.join(stateDir, "backups.jsonl");
 const resourceLimitsFile = path.join(stateDir, "resource-limits.json");
@@ -53,6 +54,7 @@ test("Stexor Control Center local foundation", async (t) => {
       PROJECT_DATABASES_FILE: databasesFile,
       PROJECT_STORAGE_BUCKETS_FILE: storageBucketsFile,
       PROJECT_SENSITIVE_MATERIALS_FILE: sensitiveMaterialsFile,
+      PROJECT_WORKER_JOBS_FILE: workerJobsFile,
       PROJECT_DEPLOYMENTS_FILE: deploymentsFile,
       PROJECT_BACKUP_RECORDS_FILE: backupRecordsFile,
       PROJECT_RESOURCE_LIMITS_FILE: resourceLimitsFile,
@@ -89,6 +91,19 @@ test("Stexor Control Center local foundation", async (t) => {
   assert.match(html, /Advanced/);
   assert.match(html, /Anniversary/);
   assert.match(html, /Stexor/);
+  assert.match(html, /\/assets\/stexor-ui\/src\/styles\.css/);
+  assert.match(html, /\/assets\/stexor-ui\/src\/ui\.css/);
+  assert.match(html, /ui-experience/);
+  assert.match(html, /ui-dock/);
+  assert.match(html, /stexor-wordmark/);
+
+  const stexorStyles = await getText(`${baseUrl}/assets/stexor-ui/src/styles.css`);
+  assert.match(stexorStyles, /@import "\.\/styles\/base-01-foundation\.css"/);
+  const stexorUiStyles = await getText(`${baseUrl}/assets/stexor-ui/src/ui.css`);
+  assert.match(stexorUiStyles, /@import "\.\/styles\/ui-04-app\.css"/);
+  const stexorUiShellCss = await getText(`${baseUrl}/assets/stexor-ui/src/styles/ui-app-01-shell.css`);
+  assert.match(stexorUiShellCss, /\.ui-experience/);
+  assert.match(stexorUiShellCss, /\.ui-stage-grid/);
 
   const advancedHtml = await getText(`${baseUrl}/?mode=advanced&section=infrastructure`);
   assert.match(advancedHtml, /Infrastructure/);
@@ -107,7 +122,8 @@ test("Stexor Control Center local foundation", async (t) => {
   assert.match(advancedWorkersHtml, /Workers &amp; Jobs/);
   assert.match(advancedWorkersHtml, /failed jobs/);
   assert.match(advancedWorkersHtml, /retry controls/);
-  assert.match(advancedWorkersHtml, /Execution Guardrails/);
+  assert.match(advancedWorkersHtml, /Containerized Scheduler/);
+  assert.match(advancedWorkersHtml, /Declare worker/);
 
   const advancedGithubHtml = await getText(`${baseUrl}/?mode=advanced&section=cicd-github`);
   assert.match(advancedGithubHtml, /CI\/CD &amp; GitHub Governance/);
@@ -352,6 +368,154 @@ test("Stexor Control Center local foundation", async (t) => {
   const applicationsHtmlAfterCreate = await getText(`${baseUrl}/?section=applications`);
   assert.match(applicationsHtmlAfterCreate, /Events Worker/);
   assert.match(applicationsHtmlAfterCreate, /control-center-state/);
+
+  const workerInventoryInitial = await getJson(`${baseUrl}/control/workers-jobs`);
+  assert.equal(workerInventoryInitial.workers.some((worker) => worker.id === "enterprise-worker-jobs"), true);
+  assert.equal(workerInventoryInitial.workers.some((worker) => worker.id === "stexor-events-worker"), true);
+  assert.equal(workerInventoryInitial.queues.some((queue) => queue.id === "audit-outbox"), true);
+  assert.equal(workerInventoryInitial.schedules.some((schedule) => schedule.id === "backup-scheduler" && schedule.containerizedCron === true), true);
+
+  const workerInvalid = await postJson(`${baseUrl}/control/workers-jobs/queues`, {
+    projectId: "stexor",
+    name: "../bad",
+  });
+  assert.equal(workerInvalid.status, 422);
+  assert.match(workerInvalid.body.message, /Invalid queue/);
+
+  const workerPlan = await postJson(`${baseUrl}/control/workers-jobs/workers`, {
+    projectId: "stexor",
+    name: "events-processor",
+    service: "worker-events",
+    status: "configured",
+    queueName: "events",
+    concurrency: 2,
+    maxAttempts: 5,
+    secret: "worker-secret-should-not-leak",
+  });
+  assert.equal(workerPlan.status, 202);
+  assert.equal(workerPlan.body.type, "worker.declare");
+  assert.equal(workerPlan.body.dryRun, true);
+  assert.equal(workerPlan.body.details.confirmationRequired, "DECLARE-WORKER");
+  assert.equal(workerPlan.body.details.dockerTouched, false);
+  assert.equal(workerPlan.body.details.commandExecuted, false);
+  assert.doesNotMatch(JSON.stringify(workerPlan.body), /worker-secret-should-not-leak/);
+
+  const workerApply = await postJson(`${baseUrl}/control/workers-jobs/workers`, {
+    projectId: "stexor",
+    name: "events-processor",
+    service: "worker-events",
+    status: "configured",
+    queueName: "events",
+    concurrency: 2,
+    maxAttempts: 5,
+    confirm: "DECLARE-WORKER",
+    secret: "worker-secret-should-not-leak",
+  });
+  assert.equal(workerApply.status, 202);
+  assert.equal(workerApply.body.type, "worker.declare.local");
+  assert.equal(workerApply.body.worker.id, "stexor-events-processor");
+  assert.equal(workerApply.body.worker.dockerTouched, false);
+  assert.equal(workerApply.body.worker.commandExecuted, false);
+
+  const queueApply = await postJson(`${baseUrl}/control/workers-jobs/queues`, {
+    projectId: "stexor",
+    name: "events",
+    backend: "nats",
+    status: "configured",
+    retryPolicy: "max-5-attempts",
+    confirm: "DECLARE-QUEUE",
+    secret: "worker-secret-should-not-leak",
+  });
+  assert.equal(queueApply.status, 202);
+  assert.equal(queueApply.body.type, "worker.queue.local");
+  assert.equal(queueApply.body.queue.id, "stexor-events");
+  assert.equal(queueApply.body.queue.brokerTouched, false);
+
+  const jobApply = await postJson(`${baseUrl}/control/workers-jobs/jobs`, {
+    projectId: "stexor",
+    queueId: "stexor-events",
+    workerId: "stexor-events-processor",
+    jobName: "sync-events",
+    status: "failed",
+    attempts: 2,
+    maxAttempts: 5,
+    lastError: "request failed token=worker-secret-should-not-leak",
+    confirm: "RECORD-JOB",
+  });
+  assert.equal(jobApply.status, 202);
+  assert.equal(jobApply.body.type, "worker.job.record.local");
+  assert.equal(jobApply.body.job.id, "stexor-stexor-events-sync-events");
+  assert.equal(jobApply.body.job.handlerExecuted, false);
+  assert.equal(jobApply.body.job.dockerTouched, false);
+  assert.doesNotMatch(JSON.stringify(jobApply.body), /worker-secret-should-not-leak/);
+
+  const retryApply = await postJson(`${baseUrl}/control/workers-jobs/jobs/stexor-stexor-events-sync-events/retry`, {
+    retryAfterSeconds: 120,
+    confirm: "PLAN-JOB-RETRY",
+    secret: "worker-secret-should-not-leak",
+  });
+  assert.equal(retryApply.status, 202);
+  assert.equal(retryApply.body.type, "worker.job.retry.local");
+  assert.equal(retryApply.body.job.status, "retry-planned");
+  assert.equal(retryApply.body.details.handlerExecuted, false);
+  assert.equal(retryApply.body.details.brokerTouched, false);
+
+  const badSchedule = await postJson(`${baseUrl}/control/workers-jobs/schedules`, {
+    projectId: "stexor",
+    workerId: "stexor-events-processor",
+    queueId: "stexor-events",
+    name: "bad schedule",
+    cronExpression: "* * *",
+  });
+  assert.equal(badSchedule.status, 422);
+  assert.match(badSchedule.body.message, /Cron expression/);
+
+  const scheduleApply = await postJson(`${baseUrl}/control/workers-jobs/schedules`, {
+    projectId: "stexor",
+    workerId: "stexor-events-processor",
+    queueId: "stexor-events",
+    name: "nightly-events-sync",
+    cronExpression: "15 3 * * *",
+    status: "enabled",
+    confirm: "DECLARE-SCHEDULE",
+  });
+  assert.equal(scheduleApply.status, 202);
+  assert.equal(scheduleApply.body.type, "worker.schedule.local");
+  assert.equal(scheduleApply.body.schedule.id, "stexor-nightly-events-sync");
+  assert.equal(scheduleApply.body.schedule.containerizedCron, true);
+  assert.equal(scheduleApply.body.schedule.dockerTouched, false);
+  assert.equal(scheduleApply.body.schedule.crontabTouched, false);
+
+  const schedulePause = await postJson(`${baseUrl}/control/workers-jobs/schedules/stexor-nightly-events-sync/status`, {
+    status: "paused",
+    confirm: "UPDATE-SCHEDULE",
+  });
+  assert.equal(schedulePause.status, 202);
+  assert.equal(schedulePause.body.type, "worker.schedule.status.local");
+  assert.equal(schedulePause.body.schedule.status, "paused");
+  assert.equal(schedulePause.body.details.crontabTouched, false);
+
+  const workerInventory = await getJson(`${baseUrl}/control/workers-jobs`);
+  assert.equal(workerInventory.workers.some((worker) => worker.id === "stexor-events-processor" && worker.commandExecuted === false), true);
+  assert.equal(workerInventory.queues.some((queue) => queue.id === "stexor-events" && queue.brokerTouched === false), true);
+  assert.equal(workerInventory.jobs.some((job) => job.id === "stexor-stexor-events-sync-events" && job.status === "retry-planned"), true);
+  assert.equal(workerInventory.schedules.some((schedule) => schedule.id === "stexor-nightly-events-sync" && schedule.status === "paused"), true);
+  assert.equal(existsSync(workerJobsFile), true);
+  const workerJobsText = readFileSync(workerJobsFile, "utf8");
+  assert.doesNotMatch(workerJobsText, /worker-secret-should-not-leak/);
+  assert.equal(JSON.parse(workerJobsText).workers["stexor-events-processor"].service, "worker-events");
+
+  const advancedWorkersAfterApply = await getJson(`${baseUrl}/control/advanced/workers-jobs`);
+  assert.equal(advancedWorkersAfterApply.data.queues.some((queue) => queue.id === "stexor-events"), true);
+  assert.equal(advancedWorkersAfterApply.data.jobs.some((job) => job.id === "stexor-stexor-events-sync-events"), true);
+  assert.equal(advancedWorkersAfterApply.data.scheduler.some((schedule) => schedule.id === "stexor-nightly-events-sync"), true);
+  assert.equal(advancedWorkersAfterApply.productionEvidence, false);
+
+  const workersHtmlAfterApply = await getText(`${baseUrl}/?mode=advanced&section=workers-jobs`);
+  assert.match(workersHtmlAfterApply, /Worker Runtime/);
+  assert.match(workersHtmlAfterApply, /events-processor/);
+  assert.match(workersHtmlAfterApply, /Plan retry/);
+  assert.match(workersHtmlAfterApply, /nightly-events-sync/);
 
   const projectsHtml = await getText(`${baseUrl}/?section=projects`);
   assert.match(projectsHtml, /ARCHIVE-PROJECT/);
