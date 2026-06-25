@@ -19,6 +19,7 @@ const stateDir = path.join(testRoot, "state");
 const stateFile = path.join(stateDir, "projects.json");
 const auditFile = path.join(stateDir, "audit.jsonl");
 const operationsFile = path.join(stateDir, "operations.jsonl");
+const applicationsFile = path.join(stateDir, "applications.json");
 const deploymentsFile = path.join(stateDir, "deployments.jsonl");
 const backupRecordsFile = path.join(stateDir, "backups.jsonl");
 const resourceLimitsFile = path.join(stateDir, "resource-limits.json");
@@ -42,6 +43,7 @@ test("Stexor Control Center local foundation", async (t) => {
       PROJECT_STATE_FILE: stateFile,
       PROJECT_AUDIT_FILE: auditFile,
       PROJECT_OPERATIONS_FILE: operationsFile,
+      PROJECT_APPLICATIONS_FILE: applicationsFile,
       PROJECT_DEPLOYMENTS_FILE: deploymentsFile,
       PROJECT_BACKUP_RECORDS_FILE: backupRecordsFile,
       PROJECT_RESOURCE_LIMITS_FILE: resourceLimitsFile,
@@ -135,6 +137,7 @@ test("Stexor Control Center local foundation", async (t) => {
 
   const applicationsHtml = await getText(`${baseUrl}/?section=applications`);
   assert.match(applicationsHtml, /Applications/);
+  assert.match(applicationsHtml, /Create app/);
   assert.match(applicationsHtml, /Deploy/);
   assert.match(applicationsHtml, /Rollback/);
 
@@ -224,6 +227,55 @@ test("Stexor Control Center local foundation", async (t) => {
     ["anniversary", "PHP"],
     ["stexor", "Node"],
   ]);
+
+  const applicationPlan = await postJson(`${baseUrl}/control/applications`, {
+    projectId: "stexor",
+    name: "events-worker",
+    runtime: "worker",
+    webspaceId: "stexor",
+    repositoryUrl: "https://github.com/mattdifi05/events-worker",
+    secret: "application-secret-should-not-leak",
+  });
+  assert.equal(applicationPlan.status, 202);
+  assert.equal(applicationPlan.body.type, "application.create");
+  assert.equal(applicationPlan.body.dryRun, true);
+  assert.equal(applicationPlan.body.details.confirmationRequired, "CREATE-APPLICATION");
+  assert.equal(applicationPlan.body.details.filesystemTouched, false);
+  assert.equal(applicationPlan.body.details.dockerTouched, false);
+  assert.equal(applicationPlan.body.details.productionEvidence, false);
+  assert.doesNotMatch(JSON.stringify(applicationPlan.body), /application-secret-should-not-leak/);
+
+  const applicationApply = await postJson(`${baseUrl}/control/applications`, {
+    projectId: "stexor",
+    name: "events-worker",
+    runtime: "worker",
+    webspaceId: "stexor",
+    repositoryUrl: "https://github.com/mattdifi05/events-worker",
+    confirm: "CREATE-APPLICATION",
+    secret: "application-secret-should-not-leak",
+  });
+  assert.equal(applicationApply.status, 202);
+  assert.equal(applicationApply.body.type, "application.create.local");
+  assert.equal(applicationApply.body.dryRun, false);
+  assert.equal(applicationApply.body.application.id, "stexor-events-worker");
+  assert.equal(applicationApply.body.application.runtime, "worker");
+  assert.equal(applicationApply.body.application.webspaceId, "stexor");
+  assert.equal(applicationApply.body.application.filesystemTouched, false);
+  assert.equal(applicationApply.body.application.dockerTouched, false);
+
+  const applications = await getJson(`${baseUrl}/control/applications`);
+  const workerApp = applications.applications.find((app) => app.id === "stexor-events-worker");
+  assert.equal(workerApp.runtime, "worker");
+  assert.equal(workerApp.status, "declared");
+  assert.equal(workerApp.source, "control-center-state");
+  assert.equal(existsSync(applicationsFile), true);
+  const applicationsText = readFileSync(applicationsFile, "utf8");
+  assert.doesNotMatch(applicationsText, /application-secret-should-not-leak/);
+  assert.equal(JSON.parse(applicationsText)["stexor-events-worker"].runtime, "worker");
+
+  const applicationsHtmlAfterCreate = await getText(`${baseUrl}/?section=applications`);
+  assert.match(applicationsHtmlAfterCreate, /Events Worker/);
+  assert.match(applicationsHtmlAfterCreate, /control-center-state/);
 
   const projectsHtml = await getText(`${baseUrl}/?section=projects`);
   assert.match(projectsHtml, /ARCHIVE-PROJECT/);
@@ -875,6 +927,7 @@ test("Stexor Control Center admin guard", async (t) => {
       PROJECT_STATE_FILE: stateFile,
       PROJECT_AUDIT_FILE: auditFile,
       PROJECT_OPERATIONS_FILE: operationsFile,
+      PROJECT_APPLICATIONS_FILE: applicationsFile,
       PROJECT_DEPLOYMENTS_FILE: deploymentsFile,
       PROJECT_BACKUP_RECORDS_FILE: backupRecordsFile,
       PROJECT_RESOURCE_LIMITS_FILE: resourceLimitsFile,

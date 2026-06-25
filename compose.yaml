@@ -284,6 +284,7 @@ services:
       PROJECT_STATE_FILE: /var/www/project-state/projects.json
       PROJECT_AUDIT_FILE: /var/www/project-state/audit.jsonl
       PROJECT_OPERATIONS_FILE: /var/www/project-state/operations.jsonl
+      PROJECT_APPLICATIONS_FILE: /var/www/project-state/applications.json
       PROJECT_DEPLOYMENTS_FILE: /var/www/project-state/deployments.jsonl
       PROJECT_BACKUP_RECORDS_FILE: /var/www/project-state/backups.jsonl
       PROJECT_RESOURCE_LIMITS_FILE: /var/www/project-state/resource-limits.json

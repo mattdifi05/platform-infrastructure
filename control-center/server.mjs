@@ -9,6 +9,7 @@ const docsRoot = process.env.CONTROL_CENTER_DOCS_ROOT || "/var/www/infra-docs";
 const stateFile = process.env.PROJECT_STATE_FILE || "/var/www/project-state/projects.json";
 const auditFile = process.env.PROJECT_AUDIT_FILE || "/var/www/project-state/audit.jsonl";
 const operationsFile = process.env.PROJECT_OPERATIONS_FILE || "/var/www/project-state/operations.jsonl";
+const applicationsFile = process.env.PROJECT_APPLICATIONS_FILE || "/var/www/project-state/applications.json";
 const deploymentsFile = process.env.PROJECT_DEPLOYMENTS_FILE || "/var/www/project-state/deployments.jsonl";
 const backupRecordsFile = process.env.PROJECT_BACKUP_RECORDS_FILE || "/var/www/project-state/backups.jsonl";
 const resourceLimitsFile = process.env.PROJECT_RESOURCE_LIMITS_FILE || "/var/www/project-state/resource-limits.json";
@@ -339,7 +340,8 @@ async function handleApplicationCommand(req, res, context) {
   const action = String(payload.action || "");
   let operation;
   try {
-    operation = planApplicationLifecycle(id, action, payload, context);
+    if (action === "create") operation = planApplicationCreate(payload, context);
+    else operation = planApplicationLifecycle(id, action, payload, context);
   } catch (error) {
     if (error instanceof ValidationError) {
       json(res, { error: "validation_failed", message: error.message }, 422);
@@ -540,7 +542,8 @@ async function handleSettingsCommand(req, res, context) {
 }
 
 function buildContext({ projects, state }) {
-  const applications = projects.map((project) => ({
+  const storedApplications = readApplicationsState();
+  const discoveredApplications = projects.map((project) => applicationRecord({
     id: project.slug,
     projectId: project.slug,
     name: project.name,
@@ -549,7 +552,17 @@ function buildContext({ projects, state }) {
     host: project.host,
     status: project.enabled ? "online" : "offline",
     healthcheck: `https://${project.host}/`,
+    source: "project-discovery",
+    filesystemTouched: false,
+    dockerTouched: false,
   }));
+  const discoveredApplicationIds = new Set(discoveredApplications.map((app) => app.id));
+  const applications = [
+    ...discoveredApplications.map((app) => applicationRecord({ ...app, ...(storedApplications[app.id] || {}) })),
+    ...Object.values(storedApplications)
+      .filter((app) => app && !app.deletedAt && !discoveredApplicationIds.has(app.id))
+      .map((app) => applicationRecord(app)),
+  ];
   const subdomains = [
     ...projects.map((project) => ({
       id: slugify(project.host),
@@ -1243,7 +1256,7 @@ function renderControlCenter(context, params) {
   if (mode === "simple") {
     if (section === "overview") body = renderOverview(context);
     else if (section === "projects") body = renderProjects(scoped(context.projects));
-    else if (section === "applications") body = renderApplications(scoped(context.applications));
+    else if (section === "applications") body = renderApplications(scoped(context.applications), context.projects, context.webspaces);
     else if (section === "domains") body = renderDomains(context.domains, scoped(context.subdomains), context.projects);
     else if (section === "webspaces") body = renderWebspaces(scoped(context.webspaces), context.projects);
     else if (section === "resources") body = renderResources(context.resources, context.projects);
@@ -1398,8 +1411,19 @@ function renderProjectCard(project) {
   </div>`;
 }
 
-function renderApplications(applications) {
-  return `<section class="panel"><div class="panel-head"><span>APP</span><div><h2>Applications</h2><p>Start, stop, restart, deploy and rollback create safe dry-run operation plans.</p></div></div><div class="cards app-cards">${applications.map(renderApplicationCard).join("") || empty("No applications", "No Node, PHP, static, API or worker applications were discovered.")}</div></section>`;
+function renderApplications(applications, projects, webspaces) {
+  return `<section class="panel"><div class="panel-head"><span>APP</span><div><h2>Applications</h2><p>Create app records and lifecycle plans without touching Docker or project files from the browser.</p></div></div>
+  <form method="post" action="/actions/application-command" class="inline-confirm app-create-form">
+    <select name="projectId" aria-label="Project for application">${projects.map((project) => `<option value="${escapeHtml(project.slug)}">${escapeHtml(project.name)}</option>`).join("")}</select>
+    <input name="name" placeholder="app name" aria-label="Application name">
+    <select name="runtime" aria-label="Runtime"><option value="node">Node.js</option><option value="php">PHP</option><option value="static">static site</option><option value="api">API backend</option><option value="worker">worker</option></select>
+    <select name="webspaceId" aria-label="Linked web space"><option value="">no web space</option>${webspaces.map((space) => `<option value="${escapeHtml(space.id)}">${escapeHtml(space.projectId)}/${escapeHtml(space.name)}</option>`).join("")}</select>
+    <input name="repositoryUrl" placeholder="git repo or folder ref" aria-label="Repository or folder reference">
+    <input type="hidden" name="action" value="create">
+    <input type="hidden" name="confirm" value="CREATE-APPLICATION">
+    <button class="button enable" type="submit">Create app</button>
+  </form>
+  <div class="cards app-cards">${applications.map(renderApplicationCard).join("") || empty("No applications", "No Node, PHP, static, API or worker applications were discovered.")}</div></section>`;
 }
 
 function renderApplicationCard(app) {
@@ -1408,6 +1432,7 @@ function renderApplicationCard(app) {
     <div class="card-title"><strong>${escapeHtml(app.name)}</strong><em>${escapeHtml(app.runtime)}</em></div>
     <span class="host">${escapeHtml(app.host)}</span>
     <span>Healthcheck: ${escapeHtml(app.healthcheck)}</span>
+    <span>${escapeHtml(app.source || "control-center-state")} / webspace ${escapeHtml(app.webspaceId || "not-linked")}</span>
     <div class="project-actions app-actions">
       <span class="state ${app.status === "online" ? "on" : "off"}">${escapeHtml(app.status)}</span>
       ${actions.map((action) => `<form method="post" action="/actions/application-command">
@@ -1826,10 +1851,45 @@ function applyProjectDelete(id, payload, context) {
 }
 
 function planApplicationCreate(payload, context) {
-  const runtime = String(payload.runtime || "");
-  if (!["node", "php", "static", "api", "worker"].includes(runtime)) throw new ValidationError("Unsupported application runtime.");
-  appendAudit({ action: "application.create.plan", target: sanitizeIdentifier(payload.projectId || "unknown"), environment: context.environment, risk: "low", result: "planned", dryRun: true, summary: "Application creation plan generated." });
-  return operationPlan("application.create", context.environment, true, ["validate runtime", "link repository or webspace", "create healthcheck", "prepare route plan", "write audit event"], { runtime });
+  const projectId = slugify(payload.projectId || "");
+  validateSlug(projectId);
+  findById(context.projects, projectId, "Project");
+  const runtime = choice(String(payload.runtime || ""), ["node", "php", "static", "api", "worker"], "runtime");
+  const name = slugify(payload.name || payload.id || runtime);
+  validateSlug(name);
+  const id = sanitizeIdentifier(payload.id || `${projectId}-${name}`);
+  validateSlug(id);
+  if (context.applications.some((app) => app.id === id)) throw new ValidationError("Application already exists.");
+  const webspaceId = slugify(payload.webspaceId || "");
+  if (webspaceId) {
+    const space = findById(context.webspaces, webspaceId, "Webspace");
+    if (space.projectId !== projectId) throw new ValidationError("Application webspace must belong to the selected project.");
+  }
+  const host = normalizeHost(payload.host || `${id}${hostSuffix}`);
+  validateHostname(host, context.environment);
+  const details = applicationRecord({
+    id,
+    projectId,
+    name: sanitizeDisplayName(payload.displayName || humanName(payload.name || name)),
+    runtime,
+    kind: applicationKind(runtime, payload.kind),
+    host,
+    status: "declared",
+    healthcheck: `https://${host}/`,
+    repositoryUrl: sanitizeOptionalRef(payload.repositoryUrl || payload.repository || payload.sourceRef || ""),
+    webspaceId,
+    source: "control-center-state",
+  });
+  if (payload.confirm === "CREATE-APPLICATION") {
+    const state = readApplicationsState();
+    state[id] = { ...(state[id] || {}), ...details, createdAt: state[id]?.createdAt || new Date().toISOString(), updatedAt: new Date().toISOString() };
+    writeApplicationsState(state);
+    appendAudit({ action: "application.create.apply", target: id, environment: context.environment, risk: "low", result: "success", dryRun: false, summary: "Application metadata declared locally; no files, containers or providers were changed." });
+    const operation = operationPlan("application.create.local", context.environment, false, ["validate project", "validate runtime", "link repository or webspace metadata", "create healthcheck metadata", "write audit event"], { ...details, filesystemTouched: false, dockerTouched: false, providerTouched: false, productionEvidence: false });
+    return { ...operation, application: state[id] };
+  }
+  appendAudit({ action: "application.create.plan", target: id, environment: context.environment, risk: "low", result: "planned", dryRun: true, summary: "Application creation plan generated." });
+  return operationPlan("application.create", context.environment, true, ["validate project", "validate runtime", "link repository or webspace metadata", "create healthcheck metadata", "prepare route plan", "write audit event"], { ...details, filesystemTouched: false, dockerTouched: false, providerTouched: false, productionEvidence: false, confirmationRequired: "CREATE-APPLICATION" });
 }
 
 function planApplicationLifecycle(id, action, payload, context) {
@@ -2263,6 +2323,20 @@ function readOperations() {
   }
 }
 
+function readApplicationsState() {
+  try {
+    const parsed = JSON.parse(readFileSync(applicationsFile, "utf8"));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeApplicationsState(state) {
+  mkdirSync(path.dirname(applicationsFile), { recursive: true });
+  writeFileSync(applicationsFile, `${JSON.stringify(sanitizeEvent(state), null, 2)}\n`);
+}
+
 function readWebspacesState() {
   try {
     const parsed = JSON.parse(readFileSync(webspacesFile, "utf8"));
@@ -2589,6 +2663,62 @@ function resourceLimitRecord({ projectId, cpuMillicores = 0, memoryMb = 0, diskM
   });
 }
 
+function applicationRecord({
+  id = "",
+  projectId = "",
+  name = "",
+  runtime = "node",
+  kind = "",
+  host = "",
+  status = "declared",
+  healthcheck = "",
+  repositoryUrl = "",
+  webspaceId = "",
+  source = "control-center-state",
+  filesystemTouched = false,
+  dockerTouched = false,
+  providerTouched = false,
+  productionEvidence = false,
+  createdAt = null,
+  updatedAt = null,
+  deletedAt = null,
+} = {}) {
+  const cleanProjectId = sanitizeIdentifier(projectId);
+  const cleanRuntime = ["node", "php", "static", "api", "worker"].includes(runtime) ? runtime : "node";
+  const cleanId = sanitizeIdentifier(id || `${cleanProjectId}-${cleanRuntime}`) || rid();
+  const cleanHost = normalizeHost(host || `${cleanId}${hostSuffix}`);
+  return sanitizeEvent({
+    id: cleanId,
+    projectId: cleanProjectId,
+    name: sanitizeMessage(name || humanName(cleanId)).replace(/\s+/g, " ").trim().slice(0, 80),
+    runtime: cleanRuntime,
+    kind: kind || applicationKind(cleanRuntime),
+    host: cleanHost,
+    status,
+    healthcheck: healthcheck || `https://${cleanHost}/`,
+    repositoryUrl,
+    webspaceId: sanitizeIdentifier(webspaceId),
+    source,
+    filesystemTouched,
+    dockerTouched,
+    providerTouched,
+    productionEvidence,
+    createdAt,
+    updatedAt,
+    deletedAt,
+  });
+}
+
+function applicationKind(runtime, requested = "") {
+  const normalized = String(requested || "").toLowerCase().trim();
+  if (["frontend", "php", "static", "api", "worker"].includes(normalized)) return normalized;
+  if (runtime === "php") return "php";
+  if (runtime === "static") return "static";
+  if (runtime === "api") return "api";
+  if (runtime === "worker") return "worker";
+  return "frontend";
+}
+
 function securityPolicyRecord({
   scope = "global",
   wafMode = "configured",
@@ -2829,6 +2959,11 @@ function sanitizeDisplayName(value) {
 
 function sanitizeRef(value) {
   return String(value || "").trim().replace(/[^a-zA-Z0-9._/@:-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 120) || "unknown";
+}
+
+function sanitizeOptionalRef(value) {
+  const raw = String(value || "").trim();
+  return raw ? sanitizeRef(raw) : "";
 }
 
 function sanitizeMessage(message) {
