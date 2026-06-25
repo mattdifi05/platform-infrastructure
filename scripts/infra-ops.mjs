@@ -9200,31 +9200,45 @@ async function secretScan() {
 
 async function securitySmoke() {
   const env = parseEnv(path.join(infraRoot, ".env"));
-  const uiPublicUrl = env.UI_PUBLIC_URL ?? env.NEXT_PUBLIC_UI_URL ?? "https://ui.localhost.com";
-  const accountPublicUrl = env.ACCOUNT_PUBLIC_URL ?? env.NEXT_PUBLIC_ACCOUNT_URL ?? "https://account.localhost.com";
-  const apiPublicUrl = env.API_PUBLIC_URL ?? env.NEXT_PUBLIC_API_URL ?? "https://api.localhost.com";
+  const uiPublicUrl = argv.uiBase ?? env.UI_PUBLIC_URL ?? env.NEXT_PUBLIC_UI_URL ?? "https://ui.localhost.com";
+  const accountPublicUrl = argv.accountBase ?? env.ACCOUNT_PUBLIC_URL ?? env.NEXT_PUBLIC_ACCOUNT_URL ?? "https://account.localhost.com";
+  const apiPublicUrl = argv.apiBase ?? env.API_PUBLIC_URL ?? env.NEXT_PUBLIC_API_URL ?? "https://api.localhost.com";
+  const uiBase = String(uiPublicUrl).replace(/\/$/, "");
+  const accountBase = String(accountPublicUrl).replace(/\/$/, "");
+  const apiBase = String(apiPublicUrl).replace(/\/$/, "");
+  const accountOrigin = String(argv.accountOrigin ?? env.ACCOUNT_PUBLIC_URL ?? env.NEXT_PUBLIC_ACCOUNT_URL ?? accountBase).replace(/\/$/, "");
   const defaultUrls = [
-    `${uiPublicUrl.replace(/\/$/, "")}/`,
-    `${accountPublicUrl.replace(/\/$/, "")}/`,
-    `${apiPublicUrl.replace(/\/$/, "")}/health`,
+    `${uiBase}/`,
+    `${accountBase}/`,
+    `${apiBase}/health`,
   ].join(",");
   const urls = (argv.urls ?? defaultUrls).split(",").map((url) => url.trim()).filter(Boolean);
   for (const url of urls) {
     log(`Checking ${url}`);
     const response = await request("HEAD", url);
     const headers = headerText(response.headers);
-    for (const required of ["strict-transport-security", "x-content-type-options", "referrer-policy", "permissions-policy"]) {
+    const requiredHeaders = ["x-content-type-options", "referrer-policy", "permissions-policy"];
+    let isHttpUrl = false;
+    try {
+      isHttpUrl = new URL(url).protocol === "http:";
+    } catch {
+      isHttpUrl = false;
+    }
+    if (!(booleanFlag(argv.allowHttpNoHsts) && isHttpUrl)) {
+      requiredHeaders.unshift("strict-transport-security");
+    }
+    for (const required of requiredHeaders) {
       if (!headers.includes(required)) {
         fail(`Missing ${required} on ${url}`);
       }
     }
   }
 
-  assertStatus(await request("GET", "https://api.localhost.com/account/snapshot"), 401, "unauthenticated account snapshot");
-  assertStatus(await request("POST", "https://api.localhost.com/auth/logout", { headers: { Origin: "https://evil.example" } }), 403, "untrusted Origin");
-  assertStatus(await request("POST", "https://api.localhost.com/auth/logout", { headers: { "Sec-Fetch-Site": "cross-site" } }), 403, "cross-site Fetch Metadata");
-  assertStatus(await request("POST", "https://api.localhost.com/auth/logout", { headers: { Origin: "https://account.localhost.com", "Sec-Fetch-Site": "same-site" } }), 200, "same-site logout");
-  assertStatus(await request("POST", "https://api.localhost.com/auth/logout", { headers: { Origin: "https://account.localhost.com", "Sec-Fetch-Site": "cross-site" } }), 200, "trusted cross-site logout");
+  assertStatus(await request("GET", `${apiBase}/account/snapshot`), 401, "unauthenticated account snapshot");
+  assertStatus(await request("POST", `${apiBase}/auth/logout`, { headers: { Origin: "https://evil.example" } }), 403, "untrusted Origin");
+  assertStatus(await request("POST", `${apiBase}/auth/logout`, { headers: { "Sec-Fetch-Site": "cross-site" } }), 403, "cross-site Fetch Metadata");
+  assertStatus(await request("POST", `${apiBase}/auth/logout`, { headers: { Origin: accountOrigin, "Sec-Fetch-Site": "same-site" } }), 200, "same-site logout");
+  assertStatus(await request("POST", `${apiBase}/auth/logout`, { headers: { Origin: accountOrigin, "Sec-Fetch-Site": "cross-site" } }), 200, "trusted cross-site logout");
   log("Security smoke checks passed.");
 }
 
