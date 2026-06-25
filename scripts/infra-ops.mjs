@@ -3759,9 +3759,10 @@ async function managedSecretsPreflight() {
   ]) {
     assertMatch(managedCompose, new RegExp(`^\\s{2}${secretName}:\\s*\\r?\\n\\s+external:\\s+true`, "m"), `${secretName} must be declared as an external Docker secret.`);
   }
-  for (const fileEnv of ["SESSION_SECRET_FILE", "SESSION_SIGNING_KEYS_FILE", "PROJECTS_GATEWAY_SIGNING_KEYS_FILE", "SECRET_HASH_KEYS_FILE", "DATABASE_URL_FILE", "SMTP_PASSWORD_FILE", "GOOGLE_RECAPTCHA_SECRET_KEY_FILE", "CLOUDFLARE_TURNSTILE_SECRET_KEY_FILE", "GOOGLE_OAUTH_CLIENT_SECRET_FILE"]) {
+  for (const fileEnv of ["SESSION_SECRET_FILE", "SESSION_SIGNING_KEYS_FILE", "PROJECTS_GATEWAY_SIGNING_KEYS_FILE", "SECRET_HASH_KEYS_FILE", "DATABASE_URL_FILE", "SMTP_PASSWORD_FILE", "GOOGLE_RECAPTCHA_SECRET_KEY_FILE", "CLOUDFLARE_TURNSTILE_SECRET_KEY_FILE"]) {
     assertMatch(managedCompose, new RegExp(`${fileEnv}:\\s+/run/secrets/`), `${fileEnv} must point at /run/secrets.`);
   }
+  assertMatch(managedCompose, /GOOGLE_OAUTH_CLIENT_SECRET_FILE:\s+\$\{GOOGLE_OAUTH_CLIENT_SECRET_FILE-\}/, "Optional Google OAuth secret file must be externally configured when OAuth is enabled.");
   run("docker", [
     "compose",
     "--env-file",
