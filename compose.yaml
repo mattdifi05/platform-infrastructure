@@ -290,6 +290,7 @@ services:
       PROJECT_STORAGE_BUCKETS_FILE: /var/www/project-state/storage-buckets.json
       PROJECT_SENSITIVE_MATERIALS_FILE: /var/www/project-state/sensitive-materials.json
       PROJECT_WORKER_JOBS_FILE: /var/www/project-state/worker-jobs.json
+      PROJECT_IDENTITY_ACCESS_FILE: /var/www/project-state/identity-access.json
       PROJECT_DEPLOYMENTS_FILE: /var/www/project-state/deployments.jsonl
       PROJECT_BACKUP_RECORDS_FILE: /var/www/project-state/backups.jsonl
       PROJECT_RESOURCE_LIMITS_FILE: /var/www/project-state/resource-limits.json

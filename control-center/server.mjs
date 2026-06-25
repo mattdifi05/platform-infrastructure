@@ -19,6 +19,7 @@ const databasesFile = process.env.PROJECT_DATABASES_FILE || "/var/www/project-st
 const storageBucketsFile = process.env.PROJECT_STORAGE_BUCKETS_FILE || "/var/www/project-state/storage-buckets.json";
 const sensitiveMaterialsFile = process.env.PROJECT_SENSITIVE_MATERIALS_FILE || "/var/www/project-state/sensitive-materials.json";
 const workerJobsFile = process.env.PROJECT_WORKER_JOBS_FILE || "/var/www/project-state/worker-jobs.json";
+const identityAccessFile = process.env.PROJECT_IDENTITY_ACCESS_FILE || "/var/www/project-state/identity-access.json";
 const deploymentsFile = process.env.PROJECT_DEPLOYMENTS_FILE || "/var/www/project-state/deployments.jsonl";
 const backupRecordsFile = process.env.PROJECT_BACKUP_RECORDS_FILE || "/var/www/project-state/backups.jsonl";
 const resourceLimitsFile = process.env.PROJECT_RESOURCE_LIMITS_FILE || "/var/www/project-state/resource-limits.json";
@@ -146,6 +147,11 @@ const server = createServer(async (req, res) => {
 
     if (req.method === "POST" && url.pathname === "/actions/worker-job-command") {
       await handleWorkerJobCommand(req, res, context);
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/actions/identity-command") {
+      await handleIdentityCommand(req, res, context);
       return;
     }
 
@@ -333,6 +339,13 @@ async function handleApi(req, res, url, context) {
       return json(res, planScheduleStatus(parts[3], payload, context), 202);
     }
 
+    if (method === "GET" && route(parts, "control", "identity")) return json(res, context.identityAccess);
+    if (method === "POST" && route(parts, "control", "identity", "admin-users")) return json(res, planIdentityAdminUser(payload, context), 202);
+    if (method === "POST" && route(parts, "control", "identity", "teams")) return json(res, planIdentityTeam(payload, context), 202);
+    if (method === "POST" && route(parts, "control", "identity", "roles")) return json(res, planIdentityRole(payload, context), 202);
+    if (method === "POST" && route(parts, "control", "identity", "sessions")) return json(res, planIdentitySessionPolicy(payload, context), 202);
+    if (method === "POST" && route(parts, "control", "identity", "access-reviews")) return json(res, planIdentityAccessReview(payload, context), 202);
+
     if (method === "GET" && route(parts, "control", "resources", "summary")) return json(res, context.resources);
     if (method === "POST" && route(parts, "control", "resources", "limits")) return json(res, planResourceLimitUpdate(payload, context), 202);
     if (method === "GET" && route(parts, "control", "security", "summary")) return json(res, context.security);
@@ -349,6 +362,7 @@ async function handleApi(req, res, url, context) {
       return json(res, planProviderConnectionUpdate(parts[2], payload, context), 202);
     }
     if (method === "GET" && route(parts, "control", "settings")) return json(res, context.settings);
+    if (method === "GET" && route(parts, "control", "ui-package")) return json(res, context.uiPackage);
     if (method === "POST" && route(parts, "control", "settings", "local")) return json(res, planSettingsUpdate(payload, context), 202);
     if (method === "GET" && route(parts, "control", "backups", "summary")) return json(res, context.backups);
     if (method === "GET" && route(parts, "control", "backups", "records")) return json(res, { records: context.backupRecords });
@@ -631,6 +645,35 @@ async function handleWorkerJobCommand(req, res, context) {
     return;
   }
   redirect(res, `/?mode=advanced&section=workers-jobs#worker-job-${encodeURIComponent(operation.details?.workerId || operation.details?.queueId || operation.details?.jobId || operation.details?.scheduleId || "")}`);
+}
+
+async function handleIdentityCommand(req, res, context) {
+  const payload = await readPayload(req);
+  const action = String(payload.action || "");
+  let operation;
+  try {
+    if (action === "admin-user") operation = planIdentityAdminUser(payload, context);
+    else if (action === "team") operation = planIdentityTeam(payload, context);
+    else if (action === "role") operation = planIdentityRole(payload, context);
+    else if (action === "session-policy") operation = planIdentitySessionPolicy(payload, context);
+    else if (action === "access-review") operation = planIdentityAccessReview(payload, context);
+    else throw new ValidationError("Unsupported identity action.");
+  } catch (error) {
+    if (error instanceof ValidationError) {
+      json(res, { error: "validation_failed", message: error.message }, 422);
+      return;
+    }
+    if (error instanceof RejectedOperationError) {
+      json(res, { error: "operation_rejected", message: error.message }, 409);
+      return;
+    }
+    throw error;
+  }
+  if (wantsJson(req)) {
+    json(res, operation, 202);
+    return;
+  }
+  redirect(res, `/?mode=advanced&section=identity#identity-${encodeURIComponent(operation.details?.userId || operation.details?.teamId || operation.details?.roleId || operation.details?.sessionPolicyId || operation.details?.reviewId || "")}`);
 }
 
 async function handleBackupCommand(req, res, context) {
@@ -924,6 +967,8 @@ function buildContext({ projects, state }) {
   const storedNotificationChannels = readNotificationChannelsState();
   const storedProviderConnections = readProviderConnectionsState();
   const storedSettings = readSettingsState();
+  const storedIdentityAccess = readIdentityAccessState();
+  const uiPackage = readStexorUiPackage();
   const audit = readAudit();
   const operations = readOperations();
   const activeProjects = projects.filter((project) => project.enabled && project.status === "active").length;
@@ -1017,6 +1062,7 @@ function buildContext({ projects, state }) {
     source: "control-center-default",
     ...storedSettings,
   });
+  const identityAccess = buildIdentityAccess(storedIdentityAccess, { audit, security, settings });
   const defaultDomain = domainRecord({
     id: "local",
     environment: "local",
@@ -1044,6 +1090,8 @@ function buildContext({ projects, state }) {
     storage: { buckets: storageBuckets.length, provider: storageProvider.status },
     sensitiveMaterials: { total: sensitiveMaterials.length, rotationDue: sensitiveMaterials.filter((item) => item.rotationStatus === "due").length },
     workersJobs: { workers: workerRuntimes.length, queues: jobQueues.length, failedJobs: jobRecords.filter((job) => job.status === "failed").length, schedules: jobSchedules.length },
+    identityAccess: { adminUsers: identityAccess.adminUsers.length, roles: identityAccess.roles.length, sessions: identityAccess.sessionPolicies.length },
+    designSystem: { package: uiPackage.name, version: uiPackage.version, source: uiPackage.source, manifestLoaded: uiPackage.apiManifestLoaded },
     alerts: { open: openAlerts.length, source: "Control Center local alert metadata and Alertmanager evidence tooling" },
     deployments: { latest: deployments.slice(0, 5) },
     backups,
@@ -1070,6 +1118,8 @@ function buildContext({ projects, state }) {
     backups,
     logsAlerts,
     settings,
+    uiPackage,
+    identityAccess,
     alertRecords,
     notificationChannels,
     providerConnections,
@@ -1345,6 +1395,7 @@ function advancedControlOverview(context) {
     productionEvidence: false,
     adapterEndpoint: "/control/adapters",
     adapterCount: adapterRegistry(context).length,
+    designSystem: context.uiPackage,
     sections,
   });
 }
@@ -1519,7 +1570,12 @@ function advancedSectionData(section, context) {
         adminVerifierConfigured: authVerifierConfigured(),
         sessionPolicy: "HttpOnly; Secure; SameSite=Lax",
         passkeyAdminAuth: context.security.passkeyAdminAuth,
-        adminUsers: "identity adapter planned",
+        adminUsers: context.identityAccess.adminUsers,
+        teams: context.identityAccess.teams,
+        roles: context.identityAccess.roles,
+        sessions: context.identityAccess.sessionPolicies,
+        loginAudit: context.identityAccess.loginAudit,
+        accessReviews: context.identityAccess.accessReviews,
       };
     case "secrets":
       return {
@@ -1655,6 +1711,7 @@ function renderControlCenter(context, params) {
     else if (section === "logs-advanced") body = renderAdvancedPanel(title, section, context, "Loki query and export surfaces stay metadata-only here.");
     else if (section === "alerts-advanced") body = renderAdvancedPanel(title, section, context, "Alert delivery evidence is verified through the ops runner before production use.");
     else if (section === "security-advanced") body = renderAdvancedPanel(title, section, context, "Security controls stay behind explicit adapters and confirmation gates.");
+    else if (section === "identity") body = renderIdentityAccess(context.identityAccess);
     else if (section === "backup-restore") body = renderBackups(context.backups, context.backupRecords);
     else body = renderAdvancedPanel(title, section, context);
   }
@@ -2016,6 +2073,9 @@ function renderSecurityPolicyCard(policy) {
 
 function renderSettings(context) {
   const settings = context.settings || settingsRecord();
+  const uiPackage = context.uiPackage || readStexorUiPackage();
+  const uiComponents = (uiPackage.requiredComponents || []).join(", ");
+  const uiAssets = (uiPackage.servedAssets || []).join(", ");
   const optionList = (name, selected, values, label) => `<select name="${escapeHtml(name)}" aria-label="${escapeHtml(label)}">${values.map((value) => `<option value="${escapeHtml(value)}" ${selected === value ? "selected" : ""}>${escapeHtml(value)}</option>`).join("")}</select>`;
   return `<section class="grid two">
     <div class="panel"><div class="panel-head"><span>SET</span><div><h2>Settings</h2><p>Local preferences and connection statuses. Tokens stay in Docker secrets and provider changes stay behind explicit adapters.</p></div></div>
@@ -2045,6 +2105,14 @@ function renderSettings(context) {
         <div class="card compact"><strong>Preference source</strong><span>${escapeHtml(settings.source)}</span></div>
         <div class="card compact"><strong>Production guard</strong><span>${escapeHtml(settings.productionGuard)}</span></div>
         <div class="card compact"><strong>Provider touched</strong><span>${settings.providerTouched ? "yes" : "no"}</span></div>
+      </div>
+    </div>
+    <div class="panel"><div class="panel-head"><span>UI</span><div><h2>Design System</h2><p>The Control Center loads the vendored Stexor UI package, not a parallel dashboard theme.</p></div></div>
+      <div class="cards">
+        <div class="card compact"><strong>${escapeHtml(uiPackage.name)}</strong><span>version ${escapeHtml(uiPackage.version)} / ${escapeHtml(uiPackage.source)}</span></div>
+        <div class="card compact"><strong>Official entrypoints</strong><span>${escapeHtml(uiAssets)}</span></div>
+        <div class="card compact"><strong>Manifest components</strong><span>${escapeHtml(uiComponents)}</span></div>
+        <div class="card compact"><strong>Package contract</strong><span>${uiPackage.usingVendoredPackage && uiPackage.apiManifestLoaded && uiPackage.missingRequiredExports?.length === 0 ? "loaded from @stexor/ui" : "needs package review"}</span></div>
       </div>
     </div>
     <div class="panel"><div class="panel-head"><span>CON</span><div><h2>Provider Connections</h2><p>Connection metadata only. Tokens and provider credentials stay in Docker secrets or private ops material.</p></div></div>
@@ -2249,6 +2317,120 @@ function renderMaterialCard(material) {
       <input type="hidden" name="confirm" value="RECORD-MATERIAL-ACCESS">
       <button class="button danger" type="submit">Record access</button>
     </form>
+  </div>`;
+}
+
+function renderIdentityAccess(identity) {
+  return `<section class="grid two">
+    <div class="panel"><div class="panel-head"><span>IAM</span><div><h2>Identity &amp; Access</h2><p>Admin users, roles, teams, sessions and access reviews are metadata-only until Keycloak or Cloudflare Access adapters verify remote state.</p></div></div>
+      <div class="cards">
+        <div class="card compact"><strong>Admin users</strong><span>${identity.adminUsers.length} records / credentials exposed no</span></div>
+        <div class="card compact"><strong>Roles</strong><span>${identity.roles.length} roles / permissions metadata</span></div>
+        <div class="card compact"><strong>Sessions</strong><span>${identity.sessionPolicies.length} policies / ${escapeHtml(identity.sessionPolicies[0]?.cookieFlags?.join(", ") || "HttpOnly, Secure")}</span></div>
+        <div class="card compact"><strong>Login audit</strong><span>${identity.loginAudit.length} recent admin login events</span></div>
+      </div>
+      <form method="post" action="/actions/identity-command" class="inline-confirm identity-form">
+        <input type="hidden" name="action" value="admin-user">
+        <input name="email" value="admin@localhost.com" aria-label="Admin email">
+        <input name="displayName" value="Platform Admin" aria-label="Admin display name">
+        <input name="roleIds" value="platform-owner" aria-label="Role ids">
+        <input name="teamIds" value="platform-admins" aria-label="Team ids">
+        <select name="mfaRequired" aria-label="MFA required"><option value="true">MFA required</option><option value="false">MFA metadata only</option></select>
+        <select name="passkeyRequired" aria-label="Passkey required"><option value="true">passkey required</option><option value="false">passkey optional</option></select>
+        <input type="hidden" name="confirm" value="DECLARE-ADMIN-USER">
+        <button class="button enable" type="submit">Declare admin user</button>
+      </form>
+      <form method="post" action="/actions/identity-command" class="inline-confirm identity-form">
+        <input type="hidden" name="action" value="role">
+        <input name="id" value="platform-operator" aria-label="Role id">
+        <input name="name" value="Platform Operator" aria-label="Role name">
+        <input name="permissions" value="control:read,projects:write,audit:read" aria-label="Permissions">
+        <input type="hidden" name="confirm" value="DECLARE-IDENTITY-ROLE">
+        <button class="button enable" type="submit">Declare role</button>
+      </form>
+      <form method="post" action="/actions/identity-command" class="inline-confirm identity-form">
+        <input type="hidden" name="action" value="team">
+        <input name="id" value="platform-ops" aria-label="Team id">
+        <input name="name" value="Platform Ops" aria-label="Team name">
+        <input name="roleIds" value="platform-operator" aria-label="Team role ids">
+        <input name="members" value="local-admin" aria-label="Team members">
+        <input type="hidden" name="confirm" value="DECLARE-IDENTITY-TEAM">
+        <button class="button enable" type="submit">Declare team</button>
+      </form>
+    </div>
+    <div class="panel"><div class="panel-head"><span>USR</span><div><h2>Admin Users</h2><p>No passwords, passkey credentials or OAuth tokens are stored in this inventory.</p></div></div>
+      ${identity.adminUsers.length ? `<div class="cards">${identity.adminUsers.map(renderIdentityUserCard).join("")}</div>` : empty("No admin users", "Declare admin users to track ownership and access reviews.")}
+    </div>
+    <div class="panel"><div class="panel-head"><span>ROL</span><div><h2>Roles &amp; Teams</h2><p>Permissions are reviewed locally; live IdP changes require an explicit adapter.</p></div></div>
+      <div class="cards">${[...identity.roles.map(renderIdentityRoleCard), ...identity.teams.map(renderIdentityTeamCard)].join("")}</div>
+    </div>
+    <div class="panel"><div class="panel-head"><span>SES</span><div><h2>Sessions &amp; Reviews</h2><p>Session policy and access review evidence stay local until production verifyRemote passes.</p></div></div>
+      <form method="post" action="/actions/identity-command" class="inline-confirm identity-form">
+        <input type="hidden" name="action" value="session-policy">
+        <input name="id" value="control-center-session" aria-label="Session policy id">
+        <input name="maxAgeMinutes" value="480" inputmode="numeric" aria-label="Session max age minutes">
+        <input name="cookieFlags" value="HttpOnly,Secure,SameSite=Lax" aria-label="Cookie flags">
+        <input type="hidden" name="confirm" value="UPDATE-SESSION-POLICY">
+        <button class="button" type="submit">Update session policy</button>
+      </form>
+      <form method="post" action="/actions/identity-command" class="inline-confirm identity-form">
+        <input type="hidden" name="action" value="access-review">
+        <input name="scope" value="admin-users" aria-label="Access review scope">
+        <input name="reviewer" value="local-admin" aria-label="Reviewer">
+        <select name="status" aria-label="Review status"><option value="planned">planned</option><option value="passed">passed</option><option value="needs-action">needs-action</option></select>
+        <input type="hidden" name="confirm" value="RECORD-ACCESS-REVIEW">
+        <button class="button" type="submit">Record access review</button>
+      </form>
+      <div class="cards">${[...identity.sessionPolicies.map(renderIdentitySessionPolicyCard), ...identity.accessReviews.map(renderIdentityAccessReviewCard), ...identity.loginAudit.map(renderIdentityLoginAuditCard)].join("") || empty("No session evidence", "Session policy and access review records appear here.")}</div>
+    </div>
+  </section>`;
+}
+
+function renderIdentityUserCard(user) {
+  return `<div id="identity-${escapeHtml(user.id)}" class="card compact">
+    <div class="card-title"><strong>${escapeHtml(user.displayName)}</strong><em>${escapeHtml(user.status)}</em></div>
+    <span>${escapeHtml(user.email)} / roles ${escapeHtml(user.roleIds.join(", ") || "none")}</span>
+    <span>MFA ${escapeHtml(user.mfaStatus)} / passkey ${escapeHtml(user.passkeyStatus)} / VPN ${escapeHtml(user.vpnStatus)}</span>
+    <span>credentials exposed ${user.credentialsExposed ? "yes" : "no"} / provider touched ${user.providerTouched ? "yes" : "no"}</span>
+  </div>`;
+}
+
+function renderIdentityRoleCard(role) {
+  return `<div id="identity-${escapeHtml(role.id)}" class="card compact">
+    <div class="card-title"><strong>${escapeHtml(role.name)}</strong><em>role</em></div>
+    <span>${escapeHtml(role.permissions.join(", ") || "no permissions")}</span>
+    <span>${escapeHtml(role.source)} / IdP touched ${role.providerTouched ? "yes" : "no"}</span>
+  </div>`;
+}
+
+function renderIdentityTeamCard(team) {
+  return `<div id="identity-${escapeHtml(team.id)}" class="card compact">
+    <div class="card-title"><strong>${escapeHtml(team.name)}</strong><em>team</em></div>
+    <span>roles ${escapeHtml(team.roleIds.join(", ") || "none")} / members ${escapeHtml(team.members.join(", ") || "none")}</span>
+    <span>${escapeHtml(team.source)} / production evidence ${team.productionEvidence ? "yes" : "no"}</span>
+  </div>`;
+}
+
+function renderIdentitySessionPolicyCard(policy) {
+  return `<div id="identity-${escapeHtml(policy.id)}" class="card compact">
+    <div class="card-title"><strong>${escapeHtml(policy.name)}</strong><em>${escapeHtml(policy.status)}</em></div>
+    <span>max age ${escapeHtml(String(policy.maxAgeMinutes))}m / flags ${escapeHtml(policy.cookieFlags.join(", "))}</span>
+    <span>secret file ${policy.sessionSecretConfigured ? "configured" : "not configured"} / value exposed ${policy.valueExposed ? "yes" : "no"}</span>
+  </div>`;
+}
+
+function renderIdentityAccessReviewCard(review) {
+  return `<div id="identity-${escapeHtml(review.id)}" class="card compact">
+    <div class="card-title"><strong>${escapeHtml(review.scope)}</strong><em>${escapeHtml(review.status)}</em></div>
+    <span>reviewer ${escapeHtml(review.reviewer)} / ${escapeHtml(review.reviewedAt || "not-reviewed")}</span>
+    <span>provider touched ${review.providerTouched ? "yes" : "no"} / production evidence ${review.productionEvidence ? "yes" : "no"}</span>
+  </div>`;
+}
+
+function renderIdentityLoginAuditCard(event) {
+  return `<div class="card compact">
+    <div class="card-title"><strong>${escapeHtml(event.action || "admin.login")}</strong><em>${escapeHtml(event.result || "unknown")}</em></div>
+    <span>${escapeHtml(event.timestamp || "")} / ${escapeHtml(event.risk || "low")} / ${escapeHtml(event.requestId || "")}</span>
   </div>`;
 }
 
@@ -3393,6 +3575,137 @@ function planScheduleStatus(id, payload, context) {
   return operationPlan("worker.schedule.status", context.environment, true, ["validate schedule", "prepare status metadata update", "require apply confirmation", "write audit event"], { scheduleId: schedule.id, projectId: schedule.projectId, status, crontabTouched: false, dockerTouched: false, productionEvidence: false, confirmationRequired: "UPDATE-SCHEDULE" });
 }
 
+function planIdentityAdminUser(payload, context) {
+  const email = validateEmail(payload.email || "");
+  const id = sanitizeIdentifier(payload.id || email.split("@")[0]) || rid();
+  const roleIds = parseCsvList(payload.roleIds || payload.roleId || "platform-viewer");
+  const teamIds = parseCsvList(payload.teamIds || payload.teamId || "platform-admins");
+  for (const roleId of roleIds) findById(context.identityAccess.roles, roleId, "Role");
+  for (const teamId of teamIds) findById(context.identityAccess.teams, teamId, "Team");
+  const details = identityAdminUserRecord({
+    id,
+    email,
+    displayName: payload.displayName || humanName(id),
+    status: payload.status || "declared",
+    roleIds,
+    teamIds,
+    mfaStatus: parseBoolean(payload.mfaRequired) ? "required" : "metadata-only",
+    passkeyStatus: parseBoolean(payload.passkeyRequired) ? "required" : context.security.passkeyAdminAuth,
+    vpnStatus: parseBoolean(payload.vpnRequired) ? "required" : "metadata-only",
+    source: "control-center-state",
+  });
+  if (payload.confirm === "DECLARE-ADMIN-USER") {
+    const state = readIdentityAccessState();
+    state.users[id] = {
+      ...(state.users[id] || {}),
+      ...details,
+      updatedAt: new Date().toISOString(),
+      createdAt: state.users[id]?.createdAt || new Date().toISOString(),
+    };
+    writeIdentityAccessState(state);
+    appendAudit({ action: "identity.admin-user.apply", target: id, environment: context.environment, risk: "medium", result: "success", dryRun: false, summary: "Admin user metadata declared locally; no credentials, Keycloak user or Cloudflare policy changed." });
+    const operation = operationPlan("identity.admin-user.local", context.environment, false, ["validate email", "validate role and team metadata", "record local admin user", "leave identity providers unchanged", "write audit event"], { ...state.users[id], credentialsStored: false, credentialsExposed: false, providerTouched: false, productionEvidence: false });
+    return { ...operation, adminUser: state.users[id] };
+  }
+  appendAudit({ action: "identity.admin-user.plan", target: id, environment: context.environment, risk: "medium", result: "planned", dryRun: true, summary: "Admin user declaration plan generated." });
+  return operationPlan("identity.admin-user", context.environment, true, ["validate email", "validate role and team metadata", "prepare local admin user", "require apply confirmation", "write audit event"], { ...details, credentialsStored: false, credentialsExposed: false, providerTouched: false, productionEvidence: false, confirmationRequired: "DECLARE-ADMIN-USER" });
+}
+
+function planIdentityTeam(payload, context) {
+  const id = sanitizeIdentifier(payload.id || slugify(payload.name || "platform-admins")) || "platform-admins";
+  const roleIds = parseCsvList(payload.roleIds || payload.roleId || "platform-viewer");
+  const members = parseCsvList(payload.members || "");
+  for (const roleId of roleIds) findById(context.identityAccess.roles, roleId, "Role");
+  const details = identityTeamRecord({
+    id,
+    name: payload.name || humanName(id),
+    roleIds,
+    members,
+    status: payload.status || "declared",
+    source: "control-center-state",
+  });
+  if (payload.confirm === "DECLARE-IDENTITY-TEAM") {
+    const state = readIdentityAccessState();
+    state.teams[id] = { ...(state.teams[id] || {}), ...details, updatedAt: new Date().toISOString(), createdAt: state.teams[id]?.createdAt || new Date().toISOString() };
+    writeIdentityAccessState(state);
+    appendAudit({ action: "identity.team.apply", target: id, environment: context.environment, risk: "low", result: "success", dryRun: false, summary: "Identity team metadata declared locally; no identity provider group changed." });
+    const operation = operationPlan("identity.team.local", context.environment, false, ["validate team", "validate role metadata", "record local team", "leave identity providers unchanged", "write audit event"], { ...state.teams[id], providerTouched: false, productionEvidence: false });
+    return { ...operation, team: state.teams[id] };
+  }
+  appendAudit({ action: "identity.team.plan", target: id, environment: context.environment, risk: "low", result: "planned", dryRun: true, summary: "Identity team declaration plan generated." });
+  return operationPlan("identity.team", context.environment, true, ["validate team", "validate role metadata", "prepare local team", "require apply confirmation", "write audit event"], { ...details, providerTouched: false, productionEvidence: false, confirmationRequired: "DECLARE-IDENTITY-TEAM" });
+}
+
+function planIdentityRole(payload, context) {
+  const id = sanitizeIdentifier(payload.id || slugify(payload.name || "platform-viewer")) || "platform-viewer";
+  const permissions = parsePermissionList(payload.permissions || "control:read");
+  const details = identityRoleRecord({
+    id,
+    name: payload.name || humanName(id),
+    permissions,
+    status: payload.status || "declared",
+    source: "control-center-state",
+  });
+  if (payload.confirm === "DECLARE-IDENTITY-ROLE") {
+    const state = readIdentityAccessState();
+    state.roles[id] = { ...(state.roles[id] || {}), ...details, updatedAt: new Date().toISOString(), createdAt: state.roles[id]?.createdAt || new Date().toISOString() };
+    writeIdentityAccessState(state);
+    appendAudit({ action: "identity.role.apply", target: id, environment: context.environment, risk: "medium", result: "success", dryRun: false, summary: "Identity role metadata declared locally; no IdP permission model changed." });
+    const operation = operationPlan("identity.role.local", context.environment, false, ["validate role", "validate permission list", "record local role", "leave identity providers unchanged", "write audit event"], { ...state.roles[id], providerTouched: false, productionEvidence: false });
+    return { ...operation, role: state.roles[id] };
+  }
+  appendAudit({ action: "identity.role.plan", target: id, environment: context.environment, risk: "medium", result: "planned", dryRun: true, summary: "Identity role declaration plan generated." });
+  return operationPlan("identity.role", context.environment, true, ["validate role", "validate permission list", "prepare local role", "require apply confirmation", "write audit event"], { ...details, providerTouched: false, productionEvidence: false, confirmationRequired: "DECLARE-IDENTITY-ROLE" });
+}
+
+function planIdentitySessionPolicy(payload, context) {
+  const id = sanitizeIdentifier(payload.id || "control-center-session") || "control-center-session";
+  const details = identitySessionPolicyRecord({
+    id,
+    name: payload.name || humanName(id),
+    maxAgeMinutes: parseBoundedInteger(payload.maxAgeMinutes || 480, "session max age minutes", 43200),
+    cookieFlags: parseCookieFlags(payload.cookieFlags || "HttpOnly,Secure,SameSite=Lax"),
+    status: payload.status || "configured",
+    source: "control-center-state",
+  });
+  if (payload.confirm === "UPDATE-SESSION-POLICY") {
+    const state = readIdentityAccessState();
+    state.sessions[id] = { ...(state.sessions[id] || {}), ...details, updatedAt: new Date().toISOString(), createdAt: state.sessions[id]?.createdAt || new Date().toISOString() };
+    writeIdentityAccessState(state);
+    appendAudit({ action: "identity.session.apply", target: id, environment: context.environment, risk: "medium", result: "success", dryRun: false, summary: "Session policy metadata updated locally; no cookie secret or runtime auth model changed." });
+    const operation = operationPlan("identity.session.local", context.environment, false, ["validate session policy", "record local session metadata", "leave session secrets unchanged", "write audit event"], { ...state.sessions[id], secretTouched: false, valueExposed: false, productionEvidence: false });
+    return { ...operation, sessionPolicy: state.sessions[id] };
+  }
+  appendAudit({ action: "identity.session.plan", target: id, environment: context.environment, risk: "medium", result: "planned", dryRun: true, summary: "Session policy update plan generated." });
+  return operationPlan("identity.session", context.environment, true, ["validate session policy", "prepare local session metadata", "require apply confirmation", "write audit event"], { ...details, secretTouched: false, valueExposed: false, productionEvidence: false, confirmationRequired: "UPDATE-SESSION-POLICY" });
+}
+
+function planIdentityAccessReview(payload, context) {
+  const scope = sanitizeIdentifier(payload.scope || "admin-users") || "admin-users";
+  const reviewer = sanitizeIdentifier(payload.reviewer || "local-admin") || "local-admin";
+  const status = choice(String(payload.status || "planned"), ["planned", "passed", "needs-action"], "access review status");
+  const id = sanitizeIdentifier(payload.id || `${scope}-${reviewer}-${new Date().toISOString().slice(0, 10)}`) || rid();
+  const details = identityAccessReviewRecord({
+    id,
+    scope,
+    reviewer,
+    status,
+    notes: payload.notes || "",
+    reviewedAt: status === "planned" ? null : new Date().toISOString(),
+    source: "control-center-state",
+  });
+  if (payload.confirm === "RECORD-ACCESS-REVIEW") {
+    const state = readIdentityAccessState();
+    state.accessReviews[id] = { ...(state.accessReviews[id] || {}), ...details, updatedAt: new Date().toISOString(), createdAt: state.accessReviews[id]?.createdAt || new Date().toISOString() };
+    writeIdentityAccessState(state);
+    appendAudit({ action: "identity.access-review.apply", target: id, environment: context.environment, risk: status === "needs-action" ? "medium" : "low", result: "success", dryRun: false, summary: "Access review metadata recorded locally; no IdP state changed." });
+    const operation = operationPlan("identity.access-review.local", context.environment, false, ["validate review scope", "record local access review", "leave identity providers unchanged", "write audit event"], { ...state.accessReviews[id], providerTouched: false, productionEvidence: false });
+    return { ...operation, accessReview: state.accessReviews[id] };
+  }
+  appendAudit({ action: "identity.access-review.plan", target: id, environment: context.environment, risk: "low", result: "planned", dryRun: true, summary: "Access review record plan generated." });
+  return operationPlan("identity.access-review", context.environment, true, ["validate review scope", "prepare local access review", "require apply confirmation", "write audit event"], { ...details, providerTouched: false, productionEvidence: false, confirmationRequired: "RECORD-ACCESS-REVIEW" });
+}
+
 function planResourceLimitUpdate(payload, context) {
   const projectId = slugify(payload.projectId || "");
   validateSlug(projectId);
@@ -3802,6 +4115,32 @@ function writeWorkerJobsState(state) {
   }), null, 2)}\n`);
 }
 
+function readIdentityAccessState() {
+  try {
+    const parsed = JSON.parse(readFileSync(identityAccessFile, "utf8"));
+    return {
+      users: parsed && typeof parsed.users === "object" && !Array.isArray(parsed.users) ? parsed.users : {},
+      teams: parsed && typeof parsed.teams === "object" && !Array.isArray(parsed.teams) ? parsed.teams : {},
+      roles: parsed && typeof parsed.roles === "object" && !Array.isArray(parsed.roles) ? parsed.roles : {},
+      sessions: parsed && typeof parsed.sessions === "object" && !Array.isArray(parsed.sessions) ? parsed.sessions : {},
+      accessReviews: parsed && typeof parsed.accessReviews === "object" && !Array.isArray(parsed.accessReviews) ? parsed.accessReviews : {},
+    };
+  } catch {
+    return { users: {}, teams: {}, roles: {}, sessions: {}, accessReviews: {} };
+  }
+}
+
+function writeIdentityAccessState(state) {
+  mkdirSync(path.dirname(identityAccessFile), { recursive: true });
+  writeFileSync(identityAccessFile, `${JSON.stringify(sanitizeEvent({
+    users: state.users || {},
+    teams: state.teams || {},
+    roles: state.roles || {},
+    sessions: state.sessions || {},
+    accessReviews: state.accessReviews || {},
+  }), null, 2)}\n`);
+}
+
 function readResourceLimitsState() {
   try {
     const parsed = JSON.parse(readFileSync(resourceLimitsFile, "utf8"));
@@ -3884,6 +4223,45 @@ function readSettingsState() {
 function writeSettingsState(state) {
   mkdirSync(path.dirname(settingsFile), { recursive: true });
   writeFileSync(settingsFile, `${JSON.stringify(sanitizeEvent(state), null, 2)}\n`);
+}
+
+function readStexorUiPackage() {
+  const packageJson = readStexorUiJson("package.json");
+  const manifest = readStexorUiJson("api-manifest.json");
+  const packageExports = packageJson.exports && typeof packageJson.exports === "object" && !Array.isArray(packageJson.exports) ? Object.keys(packageJson.exports) : [];
+  const entrypoints = Array.isArray(manifest.entrypoints) && manifest.entrypoints.length ? manifest.entrypoints : packageExports;
+  const coreExports = Array.isArray(manifest.coreExports) ? manifest.coreExports : [];
+  const requiredComponents = ["UiShell", "PillSidebarNav", "Button", "StatusPill", "UiMetricGrid", "UiSectionCard"];
+  const missingRequiredExports = requiredComponents.filter((name) => !coreExports.includes(name));
+  return sanitizeEvent({
+    name: packageJson.name || "@stexor/ui",
+    version: packageJson.version || "unknown",
+    source: "control-center/vendor/@stexor/ui",
+    mountedRoot: "/app/vendor/@stexor/ui",
+    usingVendoredPackage: packageJson.name === "@stexor/ui",
+    packageJsonLoaded: packageJson.name === "@stexor/ui",
+    apiManifestLoaded: manifest.package === "@stexor/ui",
+    runtimeFramework: "node-rendered-html-with-stexor-ui-package-assets",
+    hostInstallRequired: false,
+    entrypoints,
+    cssEntrypoints: ["./styles.css", "./ui.css"],
+    servedAssets: ["/assets/stexor-ui/src/styles.css", "/assets/stexor-ui/src/ui.css"],
+    coreExports,
+    requiredComponents,
+    missingRequiredExports,
+  });
+}
+
+function readStexorUiJson(fileName) {
+  try {
+    const root = path.resolve(stexorUiPackageRoot);
+    const target = path.resolve(root, fileName);
+    if (!(target === root || target.startsWith(`${root}${path.sep}`)) || !existsSync(target)) return {};
+    const parsed = JSON.parse(readFileSync(target, "utf8"));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
 }
 
 function appendDeployment(deployment) {
@@ -4098,6 +4476,14 @@ function validateQueueName(value) {
   return name;
 }
 
+function validateEmail(value) {
+  const email = String(value || "").trim().toLowerCase();
+  if (email.length > 254 || !/^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/.test(email)) {
+    throw new ValidationError("Invalid admin email.");
+  }
+  return email;
+}
+
 function validateProjectOrPlatform(value, context) {
   const projectId = sanitizeIdentifier(value || "platform") || "platform";
   if (projectId !== "platform") findById(context.projects, projectId, "Project");
@@ -4127,6 +4513,34 @@ function parseUsageTargets(value) {
   const cleaned = values.map((item) => sanitizeOptionalRef(item)).filter(Boolean);
   if (!cleaned.length) throw new ValidationError("At least one usage target is required.");
   return [...new Set(cleaned)].slice(0, 20);
+}
+
+function parseCsvList(value) {
+  const values = Array.isArray(value) ? value : String(value || "").split(",");
+  return [...new Set(values.map((item) => sanitizeOptionalRef(item)).filter(Boolean))].slice(0, 40);
+}
+
+function normalizeIdentifierList(value) {
+  return parseCsvList(value).map((item) => sanitizeIdentifier(item)).filter(Boolean).slice(0, 40);
+}
+
+function parsePermissionList(value) {
+  const values = Array.isArray(value) ? value : String(value || "").split(",");
+  const permissions = [...new Set(values.map((item) => String(item || "").trim().toLowerCase()).filter(Boolean))].slice(0, 80);
+  if (!permissions.length) throw new ValidationError("At least one permission is required.");
+  for (const permission of permissions) {
+    if (!/^[a-z0-9:*._-]{1,80}$/.test(permission)) throw new ValidationError("Invalid permission identifier.");
+  }
+  return permissions.slice(0, 80);
+}
+
+function parseCookieFlags(value) {
+  const values = Array.isArray(value) ? value : String(value || "").split(",");
+  const flags = [...new Set(values.map((item) => String(item || "").trim()).filter(Boolean))].slice(0, 8);
+  for (const flag of flags) {
+    if (!/^[A-Za-z0-9=/_:; -]{1,80}$/.test(flag)) throw new ValidationError(`Invalid cookie flag: ${sanitizeMessage(flag).slice(0, 40)}`);
+  }
+  return flags;
 }
 
 function parseResourceLimitNumber(value, label, max) {
@@ -4562,6 +4976,186 @@ function jobScheduleRecord({
   });
 }
 
+function buildIdentityAccess(stored, { audit, security, settings }) {
+  const defaultRoles = [
+    identityRoleRecord({ id: "platform-owner", name: "Platform Owner", permissions: ["control:*", "projects:*", "security:*", "audit:read"], status: "configured", source: "control-center-default" }),
+    identityRoleRecord({ id: "platform-viewer", name: "Platform Viewer", permissions: ["control:read", "projects:read", "audit:read"], status: "configured", source: "control-center-default" }),
+  ];
+  const roleIds = new Set(defaultRoles.map((role) => role.id));
+  const roles = [
+    ...defaultRoles.map((role) => identityRoleRecord({ ...role, ...(stored.roles[role.id] || {}) })),
+    ...Object.values(stored.roles).filter((role) => role && !role.deletedAt && !roleIds.has(role.id)).map((role) => identityRoleRecord(role)),
+  ].sort((a, b) => a.name.localeCompare(b.name));
+  const defaultTeams = [
+    identityTeamRecord({ id: "platform-admins", name: "Platform Admins", roleIds: ["platform-owner"], members: ["local-admin"], status: "configured", source: "control-center-default" }),
+  ];
+  const teamIds = new Set(defaultTeams.map((team) => team.id));
+  const teams = [
+    ...defaultTeams.map((team) => identityTeamRecord({ ...team, ...(stored.teams[team.id] || {}) })),
+    ...Object.values(stored.teams).filter((team) => team && !team.deletedAt && !teamIds.has(team.id)).map((team) => identityTeamRecord(team)),
+  ].sort((a, b) => a.name.localeCompare(b.name));
+  const defaultUsers = [
+    identityAdminUserRecord({
+      id: "local-admin",
+      email: `local-admin@${settings.baseDomain || "localhost.com"}`,
+      displayName: "Local Admin",
+      roleIds: ["platform-owner"],
+      teamIds: ["platform-admins"],
+      mfaStatus: authRequired ? "required" : "local-dev-disabled",
+      passkeyStatus: security.passkeyAdminAuth,
+      vpnStatus: security.adminProtection === "vpn-required" ? "required" : "metadata-only",
+      status: authRequired ? "configured" : "local-dev",
+      source: "control-center-auth",
+    }),
+  ];
+  const userIds = new Set(defaultUsers.map((user) => user.id));
+  const adminUsers = [
+    ...defaultUsers.map((user) => identityAdminUserRecord({ ...user, ...(stored.users[user.id] || {}) })),
+    ...Object.values(stored.users).filter((user) => user && !user.deletedAt && !userIds.has(user.id)).map((user) => identityAdminUserRecord(user)),
+  ].sort((a, b) => a.displayName.localeCompare(b.displayName));
+  const defaultSessions = [
+    identitySessionPolicyRecord({
+      id: "control-center-session",
+      name: "Control Center session",
+      maxAgeMinutes: 480,
+      cookieFlags: ["HttpOnly", "Secure", "SameSite=Lax"],
+      status: sessionKeysFile ? "configured" : "needs-secret-file",
+      sessionSecretConfigured: Boolean(sessionKeysFile),
+      source: "control-center-auth",
+    }),
+  ];
+  const sessionIds = new Set(defaultSessions.map((session) => session.id));
+  const sessionPolicies = [
+    ...defaultSessions.map((session) => identitySessionPolicyRecord({ ...session, ...(stored.sessions[session.id] || {}) })),
+    ...Object.values(stored.sessions).filter((session) => session && !session.deletedAt && !sessionIds.has(session.id)).map((session) => identitySessionPolicyRecord(session)),
+  ].sort((a, b) => a.name.localeCompare(b.name));
+  const accessReviews = Object.values(stored.accessReviews)
+    .filter((review) => review && !review.deletedAt)
+    .map((review) => identityAccessReviewRecord(review))
+    .sort((a, b) => String(b.updatedAt || b.reviewedAt || b.createdAt || "").localeCompare(String(a.updatedAt || a.reviewedAt || a.createdAt || "")));
+  return {
+    adminUsers,
+    teams,
+    roles,
+    sessionPolicies,
+    accessReviews,
+    loginAudit: audit.filter((event) => /^admin\.login\./.test(String(event.action || ""))).slice(0, 12),
+    guardrails: {
+      credentialsExposed: false,
+      providerTouched: false,
+      productionEvidence: false,
+      liveIdentityProviderTouched: false,
+    },
+  };
+}
+
+function identityAdminUserRecord({
+  id = "",
+  email = "admin@localhost.com",
+  displayName = "Admin",
+  status = "declared",
+  roleIds = [],
+  teamIds = [],
+  mfaStatus = "metadata-only",
+  passkeyStatus = "metadata-only",
+  vpnStatus = "metadata-only",
+  source = "control-center-state",
+  createdAt = null,
+  updatedAt = null,
+  deletedAt = null,
+} = {}) {
+  const cleanEmail = validateEmail(email);
+  return sanitizeEvent({
+    id: sanitizeIdentifier(id || cleanEmail.split("@")[0]) || rid(),
+    email: cleanEmail,
+    displayName: sanitizeDisplayName(displayName || cleanEmail.split("@")[0]),
+    status: choice(String(status || "declared"), ["declared", "configured", "active", "suspended", "pending-review", "local-dev"], "admin user status"),
+    roleIds: normalizeIdentifierList(roleIds),
+    teamIds: normalizeIdentifierList(teamIds),
+    mfaStatus: sanitizeOptionalRef(mfaStatus || "metadata-only") || "metadata-only",
+    passkeyStatus: sanitizeOptionalRef(passkeyStatus || "metadata-only") || "metadata-only",
+    vpnStatus: sanitizeOptionalRef(vpnStatus || "metadata-only") || "metadata-only",
+    source,
+    credentialsStored: false,
+    credentialsExposed: false,
+    providerTouched: false,
+    liveIdentityProviderTouched: false,
+    productionEvidence: false,
+    createdAt,
+    updatedAt,
+    deletedAt,
+  });
+}
+
+function identityTeamRecord({ id = "", name = "Platform Admins", roleIds = [], members = [], status = "declared", source = "control-center-state", createdAt = null, updatedAt = null, deletedAt = null } = {}) {
+  return sanitizeEvent({
+    id: sanitizeIdentifier(id || slugify(name)) || rid(),
+    name: sanitizeDisplayName(name || "Platform Admins"),
+    roleIds: normalizeIdentifierList(roleIds),
+    members: normalizeIdentifierList(members),
+    status: choice(String(status || "declared"), ["declared", "configured", "active", "archived"], "identity team status"),
+    source,
+    providerTouched: false,
+    liveIdentityProviderTouched: false,
+    productionEvidence: false,
+    createdAt,
+    updatedAt,
+    deletedAt,
+  });
+}
+
+function identityRoleRecord({ id = "", name = "Platform Viewer", permissions = [], status = "declared", source = "control-center-state", createdAt = null, updatedAt = null, deletedAt = null } = {}) {
+  return sanitizeEvent({
+    id: sanitizeIdentifier(id || slugify(name)) || rid(),
+    name: sanitizeDisplayName(name || "Platform Viewer"),
+    permissions: parsePermissionList(permissions),
+    status: choice(String(status || "declared"), ["declared", "configured", "active", "archived"], "identity role status"),
+    source,
+    providerTouched: false,
+    liveIdentityProviderTouched: false,
+    productionEvidence: false,
+    createdAt,
+    updatedAt,
+    deletedAt,
+  });
+}
+
+function identitySessionPolicyRecord({ id = "control-center-session", name = "Control Center session", maxAgeMinutes = 480, cookieFlags = [], status = "configured", sessionSecretConfigured = false, source = "control-center-state", createdAt = null, updatedAt = null, deletedAt = null } = {}) {
+  return sanitizeEvent({
+    id: sanitizeIdentifier(id || "control-center-session") || "control-center-session",
+    name: sanitizeDisplayName(name || "Control Center session"),
+    maxAgeMinutes: parseBoundedInteger(maxAgeMinutes || 480, "session max age minutes", 43200),
+    cookieFlags: parseCookieFlags(cookieFlags.length ? cookieFlags : "HttpOnly,Secure,SameSite=Lax"),
+    status: choice(String(status || "configured"), ["declared", "configured", "needs-secret-file", "pending-review"], "session policy status"),
+    sessionSecretConfigured: Boolean(sessionSecretConfigured),
+    source,
+    valueExposed: false,
+    secretTouched: false,
+    productionEvidence: false,
+    createdAt,
+    updatedAt,
+    deletedAt,
+  });
+}
+
+function identityAccessReviewRecord({ id = "", scope = "admin-users", reviewer = "local-admin", status = "planned", notes = "", reviewedAt = null, source = "control-center-state", createdAt = null, updatedAt = null, deletedAt = null } = {}) {
+  return sanitizeEvent({
+    id: sanitizeIdentifier(id || `${scope}-${reviewer}`) || rid(),
+    scope: sanitizeIdentifier(scope || "admin-users") || "admin-users",
+    reviewer: sanitizeIdentifier(reviewer || "local-admin") || "local-admin",
+    status: choice(String(status || "planned"), ["planned", "passed", "needs-action"], "access review status"),
+    notes: sanitizeMessage(notes || "").slice(0, 180),
+    reviewedAt,
+    source,
+    providerTouched: false,
+    liveIdentityProviderTouched: false,
+    productionEvidence: false,
+    createdAt,
+    updatedAt,
+    deletedAt,
+  });
+}
+
 function applicationRecord({
   id = "",
   projectId = "",
@@ -4989,7 +5583,7 @@ function sanitizeOperationDetails(details) {
 }
 
 function sanitizeValue(value, keyName = "") {
-  if (/(secret|token|password|authorization|cookie)/i.test(keyName)) return "[redacted]";
+  if (!/^cookieFlags$/i.test(keyName) && /(secret|token|password|authorization|cookie)/i.test(keyName)) return "[redacted]";
   if (typeof value === "string") return sanitizeMessage(value);
   if (Array.isArray(value)) return value.map((item) => sanitizeValue(item));
   if (value && typeof value === "object") {

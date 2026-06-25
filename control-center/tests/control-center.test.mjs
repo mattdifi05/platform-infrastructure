@@ -25,6 +25,7 @@ const databasesFile = path.join(stateDir, "databases.json");
 const storageBucketsFile = path.join(stateDir, "storage-buckets.json");
 const sensitiveMaterialsFile = path.join(stateDir, "sensitive-materials.json");
 const workerJobsFile = path.join(stateDir, "worker-jobs.json");
+const identityAccessFile = path.join(stateDir, "identity-access.json");
 const deploymentsFile = path.join(stateDir, "deployments.jsonl");
 const backupRecordsFile = path.join(stateDir, "backups.jsonl");
 const resourceLimitsFile = path.join(stateDir, "resource-limits.json");
@@ -55,6 +56,7 @@ test("Stexor Control Center local foundation", async (t) => {
       PROJECT_STORAGE_BUCKETS_FILE: storageBucketsFile,
       PROJECT_SENSITIVE_MATERIALS_FILE: sensitiveMaterialsFile,
       PROJECT_WORKER_JOBS_FILE: workerJobsFile,
+      PROJECT_IDENTITY_ACCESS_FILE: identityAccessFile,
       PROJECT_DEPLOYMENTS_FILE: deploymentsFile,
       PROJECT_BACKUP_RECORDS_FILE: backupRecordsFile,
       PROJECT_RESOURCE_LIMITS_FILE: resourceLimitsFile,
@@ -104,6 +106,18 @@ test("Stexor Control Center local foundation", async (t) => {
   const stexorUiShellCss = await getText(`${baseUrl}/assets/stexor-ui/src/styles/ui-app-01-shell.css`);
   assert.match(stexorUiShellCss, /\.ui-experience/);
   assert.match(stexorUiShellCss, /\.ui-stage-grid/);
+  const stexorUiPackage = await getJson(`${baseUrl}/control/ui-package`);
+  assert.equal(stexorUiPackage.name, "@stexor/ui");
+  assert.equal(stexorUiPackage.usingVendoredPackage, true);
+  assert.equal(stexorUiPackage.apiManifestLoaded, true);
+  assert.equal(stexorUiPackage.hostInstallRequired, false);
+  assert.equal(stexorUiPackage.entrypoints.includes("./styles.css"), true);
+  assert.equal(stexorUiPackage.entrypoints.includes("./ui.css"), true);
+  assert.equal(stexorUiPackage.servedAssets.includes("/assets/stexor-ui/src/styles.css"), true);
+  assert.equal(stexorUiPackage.servedAssets.includes("/assets/stexor-ui/src/ui.css"), true);
+  assert.equal(stexorUiPackage.coreExports.includes("UiShell"), true);
+  assert.equal(stexorUiPackage.coreExports.includes("PillSidebarNav"), true);
+  assert.deepEqual(stexorUiPackage.missingRequiredExports, []);
 
   const advancedHtml = await getText(`${baseUrl}/?mode=advanced&section=infrastructure`);
   assert.match(advancedHtml, /Infrastructure/);
@@ -203,6 +217,9 @@ test("Stexor Control Center local foundation", async (t) => {
   const advancedIdentityApi = await getJson(`${baseUrl}/control/advanced/identity`);
   assert.equal(advancedIdentityApi.data.sessionPolicy, "HttpOnly; Secure; SameSite=Lax");
   assert.equal(advancedIdentityApi.data.adminVerifierConfigured, false);
+  assert.equal(advancedIdentityApi.data.adminUsers.some((user) => user.id === "local-admin" && user.credentialsExposed === false), true);
+  assert.equal(advancedIdentityApi.data.roles.some((role) => role.id === "platform-owner" && role.permissions.includes("control:*")), true);
+  assert.equal(advancedIdentityApi.data.sessions.some((session) => session.id === "control-center-session" && session.valueExposed === false), true);
 
   const advancedSecretsApi = await getJson(`${baseUrl}/control/advanced/secrets`);
   assert.equal(advancedSecretsApi.data.stores.every((store) => store.valueExposed === false), true);
@@ -1217,6 +1234,122 @@ test("Stexor Control Center local foundation", async (t) => {
   assert.doesNotMatch(securityPoliciesText, /security-secret-should-not-leak/);
   assert.equal(JSON.parse(securityPoliciesText).global.wafMode, "blocking");
 
+  const identityInitial = await getJson(`${baseUrl}/control/identity`);
+  assert.equal(identityInitial.adminUsers.some((user) => user.id === "local-admin" && user.credentialsExposed === false), true);
+  assert.equal(identityInitial.roles.some((role) => role.permissions.includes("control:*")), true);
+  assert.equal(identityInitial.guardrails.liveIdentityProviderTouched, false);
+
+  const invalidIdentityUser = await postJson(`${baseUrl}/control/identity/admin-users`, {
+    email: "not-an-email",
+  });
+  assert.equal(invalidIdentityUser.status, 422);
+  assert.match(invalidIdentityUser.body.message, /Invalid admin email/);
+
+  const roleApply = await postJson(`${baseUrl}/control/identity/roles`, {
+    id: "platform-operator",
+    name: "Platform Operator",
+    permissions: "control:read,projects:write,audit:read",
+    confirm: "DECLARE-IDENTITY-ROLE",
+    secret: "identity-secret-should-not-leak",
+  });
+  assert.equal(roleApply.status, 202);
+  assert.equal(roleApply.body.type, "identity.role.local");
+  assert.equal(roleApply.body.role.id, "platform-operator");
+  assert.equal(roleApply.body.role.permissions.includes("projects:write"), true);
+  assert.equal(roleApply.body.role.providerTouched, false);
+  assert.doesNotMatch(JSON.stringify(roleApply.body), /identity-secret-should-not-leak/);
+
+  const teamApply = await postJson(`${baseUrl}/actions/identity-command`, {
+    action: "team",
+    id: "platform-ops",
+    name: "Platform Ops",
+    roleIds: "platform-operator",
+    members: "local-admin",
+    confirm: "DECLARE-IDENTITY-TEAM",
+    secret: "identity-secret-should-not-leak",
+  });
+  assert.equal(teamApply.status, 202);
+  assert.equal(teamApply.body.type, "identity.team.local");
+  assert.equal(teamApply.body.team.roleIds.includes("platform-operator"), true);
+  assert.equal(teamApply.body.team.providerTouched, false);
+
+  const adminUserPlan = await postJson(`${baseUrl}/control/identity/admin-users`, {
+    email: "ops-admin@example.com",
+    displayName: "Ops Admin",
+    roleIds: "platform-operator",
+    teamIds: "platform-ops",
+    mfaRequired: true,
+    passkeyRequired: true,
+    secret: "identity-secret-should-not-leak",
+  });
+  assert.equal(adminUserPlan.status, 202);
+  assert.equal(adminUserPlan.body.type, "identity.admin-user");
+  assert.equal(adminUserPlan.body.dryRun, true);
+  assert.equal(adminUserPlan.body.details.confirmationRequired, "DECLARE-ADMIN-USER");
+  assert.equal(adminUserPlan.body.details.credentialsStored, false);
+  assert.equal(adminUserPlan.body.details.credentialsExposed, false);
+  assert.doesNotMatch(JSON.stringify(adminUserPlan.body), /identity-secret-should-not-leak/);
+
+  const adminUserApply = await postJson(`${baseUrl}/control/identity/admin-users`, {
+    email: "ops-admin@example.com",
+    displayName: "Ops Admin",
+    roleIds: "platform-operator",
+    teamIds: "platform-ops",
+    mfaRequired: true,
+    passkeyRequired: true,
+    confirm: "DECLARE-ADMIN-USER",
+    secret: "identity-secret-should-not-leak",
+  });
+  assert.equal(adminUserApply.status, 202);
+  assert.equal(adminUserApply.body.type, "identity.admin-user.local");
+  assert.equal(adminUserApply.body.adminUser.email, "ops-admin@example.com");
+  assert.equal(adminUserApply.body.adminUser.mfaStatus, "required");
+  assert.equal(adminUserApply.body.adminUser.passkeyStatus, "required");
+  assert.equal(adminUserApply.body.adminUser.credentialsExposed, false);
+
+  const sessionApply = await postJson(`${baseUrl}/control/identity/sessions`, {
+    id: "control-center-session",
+    maxAgeMinutes: 240,
+    cookieFlags: "HttpOnly,Secure,SameSite=Lax",
+    confirm: "UPDATE-SESSION-POLICY",
+    token: "identity-secret-should-not-leak",
+  });
+  assert.equal(sessionApply.status, 202);
+  assert.equal(sessionApply.body.type, "identity.session.local");
+  assert.equal(sessionApply.body.sessionPolicy.maxAgeMinutes, 240);
+  assert.equal(sessionApply.body.sessionPolicy.cookieFlags.includes("SameSite=Lax"), true);
+  assert.equal(sessionApply.body.sessionPolicy.valueExposed, false);
+
+  const reviewApply = await postJson(`${baseUrl}/control/identity/access-reviews`, {
+    scope: "admin-users",
+    reviewer: "local-admin",
+    status: "passed",
+    notes: "quarterly review token=identity-secret-should-not-leak",
+    confirm: "RECORD-ACCESS-REVIEW",
+  });
+  assert.equal(reviewApply.status, 202);
+  assert.equal(reviewApply.body.type, "identity.access-review.local");
+  assert.equal(reviewApply.body.accessReview.status, "passed");
+  assert.equal(reviewApply.body.accessReview.providerTouched, false);
+  assert.doesNotMatch(JSON.stringify(reviewApply.body), /identity-secret-should-not-leak/);
+
+  const identityAfterApply = await getJson(`${baseUrl}/control/identity`);
+  assert.equal(identityAfterApply.adminUsers.some((user) => user.email === "ops-admin@example.com" && user.credentialsExposed === false), true);
+  assert.equal(identityAfterApply.teams.some((team) => team.id === "platform-ops"), true);
+  assert.equal(identityAfterApply.sessionPolicies.some((policy) => policy.id === "control-center-session" && policy.maxAgeMinutes === 240), true);
+  assert.equal(identityAfterApply.accessReviews.some((review) => review.scope === "admin-users" && review.status === "passed"), true);
+  assert.equal(existsSync(identityAccessFile), true);
+  const identityAccessText = readFileSync(identityAccessFile, "utf8");
+  assert.doesNotMatch(identityAccessText, /identity-secret-should-not-leak/);
+  assert.equal(JSON.parse(identityAccessText).users["ops-admin"].email, "ops-admin@example.com");
+
+  const identityHtml = await getText(`${baseUrl}/?mode=advanced&section=identity`);
+  assert.match(identityHtml, /Identity &amp; Access/);
+  assert.match(identityHtml, /Declare admin user/);
+  assert.match(identityHtml, /Roles &amp; Teams/);
+  assert.match(identityHtml, /Sessions &amp; Reviews/);
+  assert.match(identityHtml, /Ops Admin/);
+
   const logsHtml = await getText(`${baseUrl}/?section=logs`);
   assert.match(logsHtml, /Logs \/ Alerts/);
   assert.match(logsHtml, /Open alerts/);
@@ -1312,6 +1445,10 @@ test("Stexor Control Center local foundation", async (t) => {
   assert.match(settingsHtml, /Cloudflare connection/);
   assert.match(settingsHtml, /GitHub connection/);
   assert.match(settingsHtml, /SMTP\/alert status/);
+  assert.match(settingsHtml, /Design System/);
+  assert.match(settingsHtml, /@stexor\/ui/);
+  assert.match(settingsHtml, /UiShell/);
+  assert.match(settingsHtml, /\/assets\/stexor-ui\/src\/ui\.css/);
   assert.match(settingsHtml, /Provider Connections/);
   assert.match(settingsHtml, /Cloudflare/);
   assert.match(settingsHtml, /Update settings/);
@@ -1591,6 +1728,7 @@ test("Stexor Control Center admin guard", async (t) => {
       PROJECT_OPERATIONS_FILE: operationsFile,
       PROJECT_APPLICATIONS_FILE: applicationsFile,
       PROJECT_DOMAINS_FILE: domainsFile,
+      PROJECT_IDENTITY_ACCESS_FILE: identityAccessFile,
       PROJECT_DEPLOYMENTS_FILE: deploymentsFile,
       PROJECT_BACKUP_RECORDS_FILE: backupRecordsFile,
       PROJECT_RESOURCE_LIMITS_FILE: resourceLimitsFile,
