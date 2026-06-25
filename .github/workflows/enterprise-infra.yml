@@ -11,6 +11,141 @@ permissions:
   contents: read
 
 jobs:
+  quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout infrastructure
+        uses: actions/checkout@v7
+
+      - name: Check shell scripts parse
+        run: |
+          for file in scripts/*.sh; do
+            sh -n "$file"
+          done
+
+      - name: Control Center tests
+        run: sh ./scripts/infra-ops.sh control-center-tests
+
+      - name: Project Router tests
+        run: sh ./scripts/infra-ops.sh project-router-tests
+
+  compose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout infrastructure
+        uses: actions/checkout@v7
+
+      - name: Prepare optional source placeholder
+        run: |
+          mkdir -p .tmp/optional-project-source
+          printf 'Infrastructure CI source placeholder; project repositories are intentionally not checked out here.\n' > .tmp/optional-project-source/.infra-only
+
+      - name: Prepare local secret files
+        run: |
+          mkdir -p secrets traefik/certs
+          for name in postgres_superuser_password app_db_password keycloak_db_password redis_password keycloak_admin_password nats_password minio_root_password grafana_admin_password session_secret session_signing_keys projects_gateway_signing_keys hash_pepper_keys database_url nats_url smtp_password mariadb_root_password phpmyadmin_control_password google_recaptcha_secret_key cloudflare_turnstile_secret_key google_oauth_client_secret alertmanager_webhook_token backup_signing_keys restic_password; do
+            printf 'ci-placeholder-%s-00000000000000000000000000000000\n' "$name" > "secrets/$name.txt"
+          done
+          printf 'dummy-cert\n' > traefik/certs/local-cert.pem
+          printf 'dummy-key\n' > traefik/certs/local-key.pem
+
+      - name: Render local WAF compose
+        run: |
+          cp .env.example .env
+          printf '\nPROJECT_SOURCE_DIR=./.tmp/optional-project-source\n' >> .env
+          docker network create enterprise_net || true
+          docker volume create enterprise_mariadb_data || true
+          docker compose --env-file .env -p platform_ops_ci \
+            -f compose.yaml \
+            -f compose.build.yaml \
+            -f compose.secrets.yaml \
+            -f compose.waf.yaml \
+            config --quiet
+
+      - name: Render VPS WAF compose
+        run: |
+          docker compose --env-file .env.vps.example -p platform_infra_vps_ci \
+            -f compose.yaml \
+            -f compose.build.yaml \
+            -f compose.secrets.yaml \
+            -f compose.vps.yaml \
+            -f compose.waf.yaml \
+            -f compose.vps-waf.yaml \
+            config --quiet
+
+      - name: Render staging and backup compose
+        run: |
+          docker compose --env-file .env -p platform_infra_staging_ci \
+            -f compose.yaml \
+            -f compose.build.yaml \
+            -f compose.secrets.yaml \
+            -f compose.waf.yaml \
+            -f compose.staging.yaml \
+            config --quiet
+          docker compose --env-file .env -p platform_ops_backup_ci \
+            -f compose.yaml \
+            -f compose.secrets.yaml \
+            -f compose.backup-scheduler.yaml \
+            config --quiet
+
+      - name: Compose healthcheck coverage
+        run: sh ./scripts/infra-ops.sh compose-healthcheck-coverage
+
+  supply-chain:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout infrastructure
+        uses: actions/checkout@v7
+
+      - name: Secret scan
+        run: sh ./scripts/infra-ops.sh secret-scan
+
+      - name: Static security checks
+        run: sh ./scripts/infra-ops.sh static-security-check --infraOnly
+
+      - name: Release artifact gate dry run
+        run: |
+          mkdir -p .tmp/ci-sbom
+          printf '%s\n' \
+            'BACKEND_IMAGE=registry.example/platform/backend:ci@sha256:1111111111111111111111111111111111111111111111111111111111111111' \
+            'WEB_IMAGE=registry.example/platform/web:ci@sha256:2222222222222222222222222222222222222222222222222222222222222222' \
+            'WORKER_NOTIFICATIONS_IMAGE=registry.example/platform/worker-notifications:ci@sha256:3333333333333333333333333333333333333333333333333333333333333333' \
+            'WORKER_JOBS_IMAGE=registry.example/platform/worker-jobs:ci@sha256:4444444444444444444444444444444444444444444444444444444444444444' \
+            > .tmp/ci-release.env
+          printf '%s\n' '{"bomFormat":"CycloneDX","specVersion":"1.5","components":[]}' > .tmp/ci-sbom/pnpm-sbom-ci.json
+          sh ./scripts/infra-ops.sh release-artifact-gate --envFile .tmp/ci-release.env --sbom .tmp/ci-sbom/pnpm-sbom-ci.json
+
+  enterprise-readiness:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout infrastructure
+        uses: actions/checkout@v7
+
+      - name: GitHub branch protection policy dry run
+        run: sh ./scripts/infra-ops.sh github-branch-protection --repo "${{ github.repository }}" --branch main --dryRun
+
+      - name: GitHub environments policy dry run
+        run: sh ./scripts/infra-ops.sh github-environments --repo "${{ github.repository }}" --dryRun
+
+      - name: GitHub Actions runtime policy dry run
+        run: sh ./scripts/infra-ops.sh github-actions-config --repo "${{ github.repository }}"
+
+      - name: Production go-no-go summary
+        run: sh ./scripts/infra-ops.sh production-go-no-go
+
+      - name: Enterprise requirements traceability
+        run: sh ./scripts/infra-ops.sh enterprise-requirements-check
+
+      - name: Production readiness checklist
+        run: sh ./scripts/infra-ops.sh enterprise-requirements-check --manifest governance/production-readiness.json
+
+      - name: Repository coverage audit
+        run: sh ./scripts/infra-ops.sh repo-coverage-check
+
   compose-and-policy:
     runs-on: ubuntu-latest
     timeout-minutes: 45
