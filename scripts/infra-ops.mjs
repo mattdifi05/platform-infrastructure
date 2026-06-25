@@ -7962,6 +7962,7 @@ function repoCoverageCategory(filePath) {
   const rules = [
     ["workflow", /^\.github\/workflows\/[^/]+\.ya?ml$/],
     ["root-policy", /^(?:\.env(?:\..*)?|\.gitattributes|\.gitignore|renovate\.json|SECURITY\.md|THREAT-MODEL\.md)$/],
+    ["platform-config", /^config\/.+\.json$/],
     ["object-storage", /^minio\//],
     ["documentation", /^(?:README|RUNBOOK|ENTERPRISE-10-PLAN|ENTERPRISE-MATURITY|FINAL-READINESS-AUDIT|READINESS-REPORT|VPS-PREDEPLOY-CHECKLIST)\.md$|^(?:cloudflare|keycloak|minio|secrets)\/README\.md$/],
     ["compose", /^compose(?:\.[^.]+)?\.ya?ml$/],
@@ -8017,6 +8018,7 @@ async function repoCoverageCheck() {
   const requiredCategories = [
     "workflow",
     "root-policy",
+    "platform-config",
     "documentation",
     "compose",
     "docker-build",
