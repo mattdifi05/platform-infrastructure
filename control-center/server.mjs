@@ -783,8 +783,11 @@ function renderControlCenter(context, params) {
     else if (section === "network") body = renderDomains(context.domains, scoped(context.subdomains), context.projects);
     else if (section === "infrastructure") body = renderInfrastructure(context.advancedServices);
     else if (section === "deployments") body = renderDeployments(scoped(context.deployments));
+    else if (section === "logs-advanced") body = renderAdvancedPanel(title, section, context, "Loki query and export surfaces stay metadata-only here.");
+    else if (section === "alerts-advanced") body = renderAdvancedPanel(title, section, context, "Alert delivery evidence is verified through the ops runner before production use.");
+    else if (section === "security-advanced") body = renderAdvancedPanel(title, section, context, "Security controls stay behind explicit adapters and confirmation gates.");
     else if (section === "backup-restore") body = renderBackups(context.backups, context.backupRecords);
-    else body = renderPlanOnlyPanel(title, advancedItems(section));
+    else body = renderAdvancedPanel(title, section, context);
   }
 
   return `<!doctype html>
@@ -1240,6 +1243,32 @@ function renderNotificationChannelCard(channel) {
     <span>${escapeHtml(channel.deliveryMode)} / ${escapeHtml(channel.source)}</span>
     <span>${escapeHtml(channel.updatedAt ? `updated ${channel.updatedAt}` : "no local override")}</span>
   </div>`;
+}
+
+function renderAdvancedPanel(title, section, context, note = "Advanced control is dry-run/plan by default in this foundation.") {
+  const items = advancedItems(section);
+  const statusCards = [
+    ["Environment", context.environment],
+    ["Evidence mode", context.overview.modeEvidence],
+    ["Provider apply", "requires explicit adapter and confirmation"],
+    ["Production proof", "requires verifyRemote before evidence is accepted"],
+  ];
+  return `<section class="grid two">
+    <div class="panel"><div class="panel-head"><span>ADV</span><div><h2>${escapeHtml(title)}</h2><p>${escapeHtml(note)}</p></div></div>
+      <div class="cards">${items.map((item) => `<div class="card compact"><strong>${escapeHtml(item)}</strong><span>planned adapter surface</span></div>`).join("")}</div>
+    </div>
+    <div class="panel"><div class="panel-head"><span>GATE</span><div><h2>Execution Guardrails</h2><p>No live provider, Docker or destructive operation is executed from this skeleton.</p></div></div>
+      <div class="cards">${statusCards.map(([name, value]) => `<div class="card compact"><strong>${escapeHtml(name)}</strong><span>${escapeHtml(value)}</span></div>`).join("")}</div>
+    </div>
+    <div class="panel"><div class="panel-head"><span>EVD</span><div><h2>Evidence Path</h2><p>Use containerized infra-ops commands for live proof, then surface sanitized summaries here.</p></div></div>
+      <div class="cards">
+        <div class="card compact"><strong>Audit</strong><span>${context.audit.length} recent Control Center events available.</span></div>
+        <div class="card compact"><strong>Operations</strong><span>${context.operations.length} local operation records available.</span></div>
+        <div class="card compact"><strong>Deployments</strong><span>${context.deployments.length} deployment records available.</span></div>
+        <div class="card compact"><strong>Alerts</strong><span>${context.logsAlerts.openAlerts.length} open local alert records.</span></div>
+      </div>
+    </div>
+  </section>`;
 }
 
 function renderPlanOnlyPanel(title, items) {
@@ -2415,8 +2444,11 @@ function navigationForMode(mode) {
   if (mode === "advanced") {
     return [
       ["infrastructure", "Infrastructure", "INF"], ["network", "Network", "NET"], ["databases", "Databases", "DB"], ["storage", "Storage", "S3"],
-      ["deployments", "Deployments", "DEP"], ["cloudflare", "Cloudflare", "CF"], ["monitoring", "Monitoring", "MON"], ["backup-restore", "Backup & Restore", "BKP"],
-      ["go-no-go", "Production Go/No-Go", "GO"], ["identity", "Identity & Access", "IAM"], ["secrets", "Secrets", "SEC"], ["audit", "Audit Log", "AUD"],
+      ["workers-jobs", "Workers & Jobs", "JOB"], ["deployments", "Deployments", "DEP"], ["cicd-github", "CI/CD & GitHub Governance", "CI"],
+      ["cloudflare", "Cloudflare", "CF"], ["monitoring", "Monitoring", "MON"], ["logs-advanced", "Logs Advanced", "LOG"], ["alerts-advanced", "Alerts Advanced", "ALT"],
+      ["backup-restore", "Backup & Restore", "BKP"], ["disaster-recovery", "Disaster Recovery", "DR"], ["release-evidence", "Release Evidence", "EVD"],
+      ["go-no-go", "Production Go/No-Go", "GO"], ["security-advanced", "Security Advanced", "SEC"], ["identity", "Identity & Access", "IAM"],
+      ["secrets", "Secrets", "KEY"], ["audit", "Audit Log", "AUD"], ["billing", "Billing / Plans", "BIL"],
     ].map(([id, label, short]) => ({ id, label, short }));
   }
   return [
@@ -2430,12 +2462,20 @@ function advancedItems(section) {
   const map = {
     databases: ["MariaDB", "PostgreSQL", "backup DB", "restore DB", "users and permissions"],
     storage: ["MinIO buckets", "quota", "access key policy", "lifecycle", "bucket restore"],
+    "workers-jobs": ["worker status", "queues", "failed jobs", "retry controls", "containerized scheduler"],
     deployments: ["deploy history", "image digest", "SBOM", "provenance", "rollback target"],
+    "cicd-github": ["branch protection", "environments", "secrets/vars verification", "workflow status", "deploy approvals"],
     cloudflare: ["DNS records", "Access policies", "WAF rules", "Cache rules", "Remote verification"],
     monitoring: ["Prometheus", "cAdvisor", "node-exporter", "latency", "error rate"],
+    "logs-advanced": ["query Loki", "project/app/container filters", "request id", "user id", "non-sensitive export"],
+    "alerts-advanced": ["alert rules", "channels", "delivery evidence", "failure evidence", "escalation"],
+    "disaster-recovery": ["DR evidence", "RTO/RPO", "backup freshness", "restore p95", "WAL archive", "off-site restore evidence"],
+    "release-evidence": ["SBOM", "digest-pinned images", "provenance", "signature", "previous-images.json", "rollback validation"],
     "go-no-go": ["production-go-no-go", "evidence bundle", "live blockers", "JSON/Markdown reports"],
+    "security-advanced": ["WAF", "rate limit", "brute force", "CSP", "CORS", "headers", "secret scan", "vulnerability scan", "Cloudflare Access", "admin route protection"],
     identity: ["users", "teams", "roles", "passkeys", "sessions", "login audit"],
     secrets: ["Docker secrets", "KMS metadata", "rotation", "usage map", "no plaintext values"],
+    billing: ["VPS plan metadata", "resource budget", "Cloudflare plan", "backup storage", "cost review"],
   };
   return map[section] || ["dry-run adapter", "apply confirmation", "verify evidence"];
 }

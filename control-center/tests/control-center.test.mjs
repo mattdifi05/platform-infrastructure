@@ -82,6 +82,56 @@ test("Stexor Control Center local foundation", async (t) => {
   assert.match(advancedHtml, /Infrastructure/);
   assert.match(advancedHtml, /Traefik/);
   assert.match(advancedHtml, /cAdvisor/);
+  assert.match(advancedHtml, /Workers &amp; Jobs/);
+  assert.match(advancedHtml, /CI\/CD &amp; GitHub Governance/);
+  assert.match(advancedHtml, /Logs Advanced/);
+  assert.match(advancedHtml, /Alerts Advanced/);
+  assert.match(advancedHtml, /Disaster Recovery/);
+  assert.match(advancedHtml, /Release Evidence/);
+  assert.match(advancedHtml, /Security Advanced/);
+  assert.match(advancedHtml, /Billing \/ Plans/);
+
+  const advancedWorkersHtml = await getText(`${baseUrl}/?mode=advanced&section=workers-jobs`);
+  assert.match(advancedWorkersHtml, /Workers &amp; Jobs/);
+  assert.match(advancedWorkersHtml, /failed jobs/);
+  assert.match(advancedWorkersHtml, /retry controls/);
+  assert.match(advancedWorkersHtml, /Execution Guardrails/);
+
+  const advancedGithubHtml = await getText(`${baseUrl}/?mode=advanced&section=cicd-github`);
+  assert.match(advancedGithubHtml, /CI\/CD &amp; GitHub Governance/);
+  assert.match(advancedGithubHtml, /branch protection/);
+  assert.match(advancedGithubHtml, /workflow status/);
+  assert.match(advancedGithubHtml, /deploy approvals/);
+
+  const advancedLogsHtml = await getText(`${baseUrl}/?mode=advanced&section=logs-advanced`);
+  assert.match(advancedLogsHtml, /Logs Advanced/);
+  assert.match(advancedLogsHtml, /query Loki/);
+  assert.match(advancedLogsHtml, /request id/);
+  assert.match(advancedLogsHtml, /non-sensitive export/);
+
+  const advancedAlertsHtml = await getText(`${baseUrl}/?mode=advanced&section=alerts-advanced`);
+  assert.match(advancedAlertsHtml, /Alerts Advanced/);
+  assert.match(advancedAlertsHtml, /delivery evidence/);
+  assert.match(advancedAlertsHtml, /failure evidence/);
+  assert.match(advancedAlertsHtml, /escalation/);
+
+  const advancedDrHtml = await getText(`${baseUrl}/?mode=advanced&section=disaster-recovery`);
+  assert.match(advancedDrHtml, /Disaster Recovery/);
+  assert.match(advancedDrHtml, /RTO\/RPO/);
+  assert.match(advancedDrHtml, /WAL archive/);
+  assert.match(advancedDrHtml, /off-site restore evidence/);
+
+  const advancedReleaseHtml = await getText(`${baseUrl}/?mode=advanced&section=release-evidence`);
+  assert.match(advancedReleaseHtml, /Release Evidence/);
+  assert.match(advancedReleaseHtml, /SBOM/);
+  assert.match(advancedReleaseHtml, /provenance/);
+  assert.match(advancedReleaseHtml, /rollback validation/);
+
+  const advancedSecurityHtml = await getText(`${baseUrl}/?mode=advanced&section=security-advanced`);
+  assert.match(advancedSecurityHtml, /Security Advanced/);
+  assert.match(advancedSecurityHtml, /secret scan/);
+  assert.match(advancedSecurityHtml, /vulnerability scan/);
+  assert.match(advancedSecurityHtml, /Cloudflare Access/);
 
   const applicationsHtml = await getText(`${baseUrl}/?section=applications`);
   assert.match(applicationsHtml, /Applications/);
