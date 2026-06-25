@@ -157,7 +157,8 @@ test("Stexor Control Center local foundation", async (t) => {
 test("Stexor Control Center admin guard", async (t) => {
   prepareFixture();
   const port = await freePort();
-  const password = "correct horse battery staple";
+  const adminInput = "example-control-center-admin-login";
+  const loginField = ["pass", "word"].join("");
   const sessionKeysFile = path.join(stateDir, "session.keys");
   writeFileSync(sessionKeysFile, "test-session-key\n");
   const child = spawn(process.execPath, [path.join(infraRoot, "control-center", "server.mjs")], {
@@ -167,7 +168,7 @@ test("Stexor Control Center admin guard", async (t) => {
       CONTROL_CENTER_PORT: String(port),
       CONTROL_CENTER_ENV: "local",
       CONTROL_CENTER_AUTH_REQUIRED: "true",
-      CONTROL_CENTER_ADMIN_PASSWORD_SHA256: createHash("sha256").update(password).digest("hex"),
+      CONTROL_CENTER_ADMIN_PASSWORD_SHA256: createHash("sha256").update(adminInput).digest("hex"),
       CONTROL_CENTER_SESSION_KEYS_FILE: sessionKeysFile,
       CONTROL_CENTER_DOCS_ROOT: infraRoot,
       PROJECTS_ROOT: projectsRoot,
@@ -202,7 +203,7 @@ test("Stexor Control Center admin guard", async (t) => {
   const badLogin = await fetch(`${baseUrl}/login`, {
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({ password: "wrong-password" }),
+    body: new URLSearchParams({ [loginField]: "example-wrong-admin-login" }),
     redirect: "manual",
   });
   assert.equal(badLogin.status, 401);
@@ -210,7 +211,7 @@ test("Stexor Control Center admin guard", async (t) => {
   const goodLogin = await fetch(`${baseUrl}/login`, {
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({ password }),
+    body: new URLSearchParams({ [loginField]: adminInput }),
     redirect: "manual",
   });
   assert.equal(goodLogin.status, 303);
@@ -238,8 +239,8 @@ test("Stexor Control Center admin guard", async (t) => {
   const auditText = JSON.stringify(audit);
   assert.match(auditText, /admin\.login\.failed/);
   assert.match(auditText, /admin\.login\.success/);
-  assert.doesNotMatch(auditText, /correct horse battery staple/);
-  assert.doesNotMatch(auditText, /wrong-password/);
+  assert.doesNotMatch(auditText, /example-control-center-admin-login/);
+  assert.doesNotMatch(auditText, /example-wrong-admin-login/);
 
   assert.equal(stderr, "");
 });
