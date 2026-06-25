@@ -25,6 +25,7 @@ const resourceLimitsFile = path.join(stateDir, "resource-limits.json");
 const securityPoliciesFile = path.join(stateDir, "security-policies.json");
 const alertsFile = path.join(stateDir, "alerts.json");
 const notificationChannelsFile = path.join(stateDir, "notification-channels.json");
+const settingsFile = path.join(stateDir, "settings.json");
 const webspacesFile = path.join(stateDir, "webspaces.json");
 
 test("Stexor Control Center local foundation", async (t) => {
@@ -47,6 +48,7 @@ test("Stexor Control Center local foundation", async (t) => {
       PROJECT_SECURITY_POLICIES_FILE: securityPoliciesFile,
       PROJECT_ALERTS_FILE: alertsFile,
       PROJECT_NOTIFICATION_CHANNELS_FILE: notificationChannelsFile,
+      PROJECT_SETTINGS_FILE: settingsFile,
       PROJECT_WEBSPACES_FILE: webspacesFile,
       PROJECTS_HOST: "projects.localhost.com",
       PROJECT_HOST_SUFFIX: ".localhost.com",
@@ -511,6 +513,72 @@ test("Stexor Control Center local foundation", async (t) => {
   assert.equal(JSON.parse(alertsText)[alertApply.body.alert.id].status, "resolved");
   assert.equal(JSON.parse(notificationChannelsText).email.status, "configured");
 
+  const settingsHtml = await getText(`${baseUrl}/?section=settings`);
+  assert.match(settingsHtml, /Settings/);
+  assert.match(settingsHtml, /Default mode/);
+  assert.match(settingsHtml, /Base domain/);
+  assert.match(settingsHtml, /Cloudflare connection/);
+  assert.match(settingsHtml, /GitHub connection/);
+  assert.match(settingsHtml, /SMTP\/alert status/);
+  assert.match(settingsHtml, /Update settings/);
+
+  const invalidSettings = await postJson(`${baseUrl}/control/settings/local`, {
+    preferredMode: "simple",
+    environmentMode: "local",
+    baseDomain: "../secret",
+  });
+  assert.equal(invalidSettings.status, 422);
+  assert.match(invalidSettings.body.message, /base domain/);
+
+  const settingsPlan = await postJson(`${baseUrl}/control/settings/local`, {
+    preferredMode: "advanced",
+    environmentMode: "staging",
+    baseDomain: "localhost.com",
+    cloudflareConnectionStatus: "requires-verify-remote",
+    githubConnectionStatus: "dry-run",
+    smtpAlertStatus: "requires-secret-file",
+    secret: "settings-secret-should-not-leak",
+  });
+  assert.equal(settingsPlan.status, 202);
+  assert.equal(settingsPlan.body.type, "settings.update");
+  assert.equal(settingsPlan.body.dryRun, true);
+  assert.equal(settingsPlan.body.details.confirmationRequired, "UPDATE-SETTINGS");
+  assert.equal(settingsPlan.body.details.runtimeEnvironmentChanged, false);
+  assert.equal(settingsPlan.body.details.providerTouched, false);
+  assert.equal(settingsPlan.body.details.productionEvidence, false);
+  assert.doesNotMatch(JSON.stringify(settingsPlan.body), /settings-secret-should-not-leak/);
+
+  const settingsApply = await postJson(`${baseUrl}/actions/settings-command`, {
+    action: "update",
+    preferredMode: "advanced",
+    environmentMode: "staging",
+    baseDomain: "localhost.com",
+    cloudflareConnectionStatus: "requires-verify-remote",
+    githubConnectionStatus: "dry-run",
+    smtpAlertStatus: "requires-secret-file",
+    confirm: "UPDATE-SETTINGS",
+    secret: "settings-secret-should-not-leak",
+  });
+  assert.equal(settingsApply.status, 202);
+  assert.equal(settingsApply.body.type, "settings.update.local");
+  assert.equal(settingsApply.body.dryRun, false);
+  assert.equal(settingsApply.body.settings.preferredMode, "advanced");
+  assert.equal(settingsApply.body.settings.environmentMode, "staging");
+  assert.equal(settingsApply.body.settings.baseDomain, "localhost.com");
+  assert.equal(settingsApply.body.settings.runtimeEnvironmentChanged, false);
+  assert.equal(settingsApply.body.settings.providerTouched, false);
+  assert.equal(settingsApply.body.settings.productionEvidence, false);
+
+  const settingsSummary = await getJson(`${baseUrl}/control/settings`);
+  assert.equal(settingsSummary.preferredMode, "advanced");
+  assert.equal(settingsSummary.environmentMode, "staging");
+  assert.equal(settingsSummary.baseDomain, "localhost.com");
+  assert.equal(settingsSummary.providerTouched, false);
+  assert.equal(existsSync(settingsFile), true);
+  const settingsText = readFileSync(settingsFile, "utf8");
+  assert.doesNotMatch(settingsText, /settings-secret-should-not-leak/);
+  assert.equal(JSON.parse(settingsText).preferredMode, "advanced");
+
   const deployPlan = await postJson(`${baseUrl}/control/applications/stexor/deploy`, {
     branch: "main",
     commit: "abc1234",
@@ -692,6 +760,7 @@ test("Stexor Control Center admin guard", async (t) => {
       PROJECT_SECURITY_POLICIES_FILE: securityPoliciesFile,
       PROJECT_ALERTS_FILE: alertsFile,
       PROJECT_NOTIFICATION_CHANNELS_FILE: notificationChannelsFile,
+      PROJECT_SETTINGS_FILE: settingsFile,
       PROJECT_WEBSPACES_FILE: webspacesFile,
       PROJECTS_HOST: "projects.localhost.com",
       PROJECT_HOST_SUFFIX: ".localhost.com",

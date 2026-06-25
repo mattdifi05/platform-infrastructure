@@ -290,6 +290,7 @@ services:
       PROJECT_SECURITY_POLICIES_FILE: /var/www/project-state/security-policies.json
       PROJECT_ALERTS_FILE: /var/www/project-state/alerts.json
       PROJECT_NOTIFICATION_CHANNELS_FILE: /var/www/project-state/notification-channels.json
+      PROJECT_SETTINGS_FILE: /var/www/project-state/settings.json
       PROJECT_WEBSPACES_FILE: /var/www/project-state/webspaces.json
       PROJECTS_HOST: ${PROJECTS_HOST:-projects.localhost.com}
       PROJECT_HOST_SUFFIX: ${PROJECT_HOST_SUFFIX:-.localhost.com}

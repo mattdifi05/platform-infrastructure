@@ -15,6 +15,7 @@ const resourceLimitsFile = process.env.PROJECT_RESOURCE_LIMITS_FILE || "/var/www
 const securityPoliciesFile = process.env.PROJECT_SECURITY_POLICIES_FILE || "/var/www/project-state/security-policies.json";
 const alertsFile = process.env.PROJECT_ALERTS_FILE || "/var/www/project-state/alerts.json";
 const notificationChannelsFile = process.env.PROJECT_NOTIFICATION_CHANNELS_FILE || "/var/www/project-state/notification-channels.json";
+const settingsFile = process.env.PROJECT_SETTINGS_FILE || "/var/www/project-state/settings.json";
 const webspacesFile = process.env.PROJECT_WEBSPACES_FILE || "/var/www/project-state/webspaces.json";
 const sessionKeysFile = process.env.CONTROL_CENTER_SESSION_KEYS_FILE || "";
 const adminPasswordFile = process.env.CONTROL_CENTER_ADMIN_PASSWORD_FILE || "";
@@ -124,6 +125,11 @@ const server = createServer(async (req, res) => {
 
     if (req.method === "POST" && url.pathname === "/actions/alert-command") {
       await handleAlertCommand(req, res, context);
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/actions/settings-command") {
+      await handleSettingsCommand(req, res, context);
       return;
     }
 
@@ -243,6 +249,8 @@ async function handleApi(req, res, url, context) {
       return json(res, planAlertResolution(parts[2], payload, context), 202);
     }
     if (method === "POST" && route(parts, "control", "notifications", "channel")) return json(res, planNotificationChannelUpdate(payload, context), 202);
+    if (method === "GET" && route(parts, "control", "settings")) return json(res, context.settings);
+    if (method === "POST" && route(parts, "control", "settings", "local")) return json(res, planSettingsUpdate(payload, context), 202);
     if (method === "GET" && route(parts, "control", "backups", "summary")) return json(res, context.backups);
     if (method === "GET" && route(parts, "control", "backups", "records")) return json(res, { records: context.backupRecords });
     if (method === "POST" && route(parts, "control", "backups", "run")) return json(res, planBackupRun(payload, context), 202);
@@ -493,6 +501,31 @@ async function handleAlertCommand(req, res, context) {
   redirect(res, `/?section=logs#alert-${encodeURIComponent(operation.details?.alertId || operation.alert?.id || operation.notificationChannel?.channel || "")}`);
 }
 
+async function handleSettingsCommand(req, res, context) {
+  const payload = await readPayload(req);
+  const action = String(payload.action || "");
+  let operation;
+  try {
+    if (action === "update") operation = planSettingsUpdate(payload, context);
+    else throw new ValidationError("Unsupported settings action.");
+  } catch (error) {
+    if (error instanceof ValidationError) {
+      json(res, { error: "validation_failed", message: error.message }, 422);
+      return;
+    }
+    if (error instanceof RejectedOperationError) {
+      json(res, { error: "operation_rejected", message: error.message }, 409);
+      return;
+    }
+    throw error;
+  }
+  if (wantsJson(req)) {
+    json(res, operation, 202);
+    return;
+  }
+  redirect(res, "/?section=settings#settings-local");
+}
+
 function buildContext({ projects, state }) {
   const applications = projects.map((project) => ({
     id: project.slug,
@@ -550,6 +583,7 @@ function buildContext({ projects, state }) {
   const storedSecurityPolicies = readSecurityPoliciesState();
   const storedAlerts = readAlertsState();
   const storedNotificationChannels = readNotificationChannelsState();
+  const storedSettings = readSettingsState();
   const audit = readAudit();
   const operations = readOperations();
   const activeProjects = projects.filter((project) => project.enabled && project.status === "active").length;
@@ -626,6 +660,17 @@ function buildContext({ projects, state }) {
     alertRouting: "Prometheus routes to internal Alertmanager, then to worker-notifications with secret-backed delivery.",
     rawConsoles: "Prometheus, Alertmanager and Traefik raw consoles are intentionally not linked from Projects.",
   };
+  const settings = settingsRecord({
+    preferredMode: "simple",
+    environmentMode: environment,
+    baseDomain: hostSuffix.replace(/^\./, ""),
+    cloudflareConnectionStatus: globalSecurityPolicy.cloudflareAccess,
+    githubConnectionStatus: "dry-run",
+    smtpAlertStatus: notificationChannels.find((channel) => channel.channel === "email")?.status || "not-configured",
+    productionGuard: environment === "production" ? "requires-verify-remote" : "local-evidence-only",
+    source: "control-center-default",
+    ...storedSettings,
+  });
   const domains = [{
     id: "local",
     environment: "local",
@@ -657,6 +702,7 @@ function buildContext({ projects, state }) {
     security,
     backups,
     logsAlerts,
+    settings,
     alertRecords,
     notificationChannels,
     backupRecords,
@@ -1045,13 +1091,40 @@ function renderSecurityPolicyCard(policy) {
 }
 
 function renderSettings(context) {
-  return `<section class="grid two"><div class="panel"><div class="panel-head"><span>SET</span><div><h2>Settings</h2><p>Connections are status-only here; tokens stay in Docker secrets.</p></div></div><ul class="status-list">
-    <li><strong>Environment</strong><span>${escapeHtml(context.environment)}</span></li>
-    <li><strong>Base domain</strong><span>${escapeHtml(hostSuffix.replace(/^\./, ""))}</span></li>
-    <li><strong>Cloudflare</strong><span>${escapeHtml(context.security.cloudflareAccess)}</span></li>
-    <li><strong>GitHub</strong><span>governance dry-run through infra ops</span></li>
-    <li><strong>SMTP alerts</strong><span>configured through secret-backed environment</span></li>
-  </ul></div><div class="panel"><div class="panel-head"><span>DOC</span><div><h2>Documentation</h2><p>${context.docsAvailable} local docs</p></div></div>${renderDocs()}</div></section>`;
+  const settings = context.settings || settingsRecord();
+  const optionList = (name, selected, values, label) => `<select name="${escapeHtml(name)}" aria-label="${escapeHtml(label)}">${values.map((value) => `<option value="${escapeHtml(value)}" ${selected === value ? "selected" : ""}>${escapeHtml(value)}</option>`).join("")}</select>`;
+  return `<section class="grid two">
+    <div class="panel"><div class="panel-head"><span>SET</span><div><h2>Settings</h2><p>Local preferences and connection statuses. Tokens stay in Docker secrets and provider changes stay behind explicit adapters.</p></div></div>
+      <ul class="status-list">
+        <li><strong>Environment</strong><span>${escapeHtml(settings.environmentMode)}</span></li>
+        <li><strong>Base domain</strong><span>${escapeHtml(settings.baseDomain)}</span></li>
+        <li><strong>Cloudflare connection</strong><span>${escapeHtml(settings.cloudflareConnectionStatus)}</span></li>
+        <li><strong>GitHub connection</strong><span>${escapeHtml(settings.githubConnectionStatus)}</span></li>
+        <li><strong>SMTP/alert status</strong><span>${escapeHtml(settings.smtpAlertStatus)}</span></li>
+        <li><strong>Default mode</strong><span>${escapeHtml(settings.preferredMode)}</span></li>
+      </ul>
+      <form id="settings-local" method="post" action="/actions/settings-command" class="inline-confirm settings-form">
+        <input type="hidden" name="action" value="update">
+        ${optionList("preferredMode", settings.preferredMode, ["simple", "advanced"], "Default mode preference")}
+        ${optionList("environmentMode", settings.environmentMode, ["local", "staging", "production"], "Environment mode")}
+        <input name="baseDomain" value="${escapeHtml(settings.baseDomain)}" aria-label="Base domain">
+        ${optionList("cloudflareConnectionStatus", settings.cloudflareConnectionStatus, ["not-configured", "plan-only-local", "requires-verify-remote", "configured"], "Cloudflare connection status")}
+        ${optionList("githubConnectionStatus", settings.githubConnectionStatus, ["not-configured", "dry-run", "requires-verify", "configured"], "GitHub connection status")}
+        ${optionList("smtpAlertStatus", settings.smtpAlertStatus, ["not-configured", "requires-secret-file", "configured", "disabled", "verified-production"], "SMTP alert status")}
+        <input type="hidden" name="confirm" value="UPDATE-SETTINGS">
+        <button class="button enable" type="submit">Update settings</button>
+      </form>
+    </div>
+    <div class="panel"><div class="panel-head"><span>SAFE</span><div><h2>Production Guard</h2><p>Changing this metadata does not mutate Compose, DNS, Cloudflare, GitHub or SMTP.</p></div></div>
+      <div class="cards">
+        <div class="card compact"><strong>Runtime env</strong><span>${escapeHtml(environment)}</span></div>
+        <div class="card compact"><strong>Preference source</strong><span>${escapeHtml(settings.source)}</span></div>
+        <div class="card compact"><strong>Production guard</strong><span>${escapeHtml(settings.productionGuard)}</span></div>
+        <div class="card compact"><strong>Provider touched</strong><span>${settings.providerTouched ? "yes" : "no"}</span></div>
+      </div>
+    </div>
+    <div class="panel"><div class="panel-head"><span>DOC</span><div><h2>Documentation</h2><p>${context.docsAvailable} local docs</p></div></div>${renderDocs()}</div>
+  </section>`;
 }
 
 function renderDocs() {
@@ -1539,6 +1612,34 @@ function planNotificationChannelUpdate(payload, context) {
   return operationPlan("alerts.channel", context.environment, true, ["validate channel", "prepare local notification metadata", "require apply confirmation", "write audit event"], { ...details, deliveryAttempted: false, productionEvidence: false, confirmationRequired: "UPDATE-NOTIFICATION-CHANNEL" });
 }
 
+function planSettingsUpdate(payload, context) {
+  const details = settingsRecord({
+    preferredMode: choice(String(payload.preferredMode || "simple"), ["simple", "advanced"], "default mode preference"),
+    environmentMode: choice(String(payload.environmentMode || context.environment), ["local", "staging", "production"], "environment mode"),
+    baseDomain: validateBaseDomain(payload.baseDomain || hostSuffix.replace(/^\./, "")),
+    cloudflareConnectionStatus: choice(String(payload.cloudflareConnectionStatus || "plan-only-local"), ["not-configured", "plan-only-local", "requires-verify-remote", "configured"], "Cloudflare connection status"),
+    githubConnectionStatus: choice(String(payload.githubConnectionStatus || "dry-run"), ["not-configured", "dry-run", "requires-verify", "configured"], "GitHub connection status"),
+    smtpAlertStatus: choice(String(payload.smtpAlertStatus || "not-configured"), ["not-configured", "requires-secret-file", "configured", "disabled", "verified-production"], "SMTP alert status"),
+    productionGuard: String(payload.environmentMode || context.environment) === "production" ? "requires-verify-remote" : "local-evidence-only",
+    source: "control-center-state",
+  });
+  if (payload.confirm === "UPDATE-SETTINGS") {
+    const current = readSettingsState();
+    const next = {
+      ...current,
+      ...details,
+      updatedAt: new Date().toISOString(),
+      createdAt: current.createdAt || new Date().toISOString(),
+    };
+    writeSettingsState(next);
+    appendAudit({ action: "settings.update.apply", target: "control-center", environment: context.environment, risk: details.environmentMode === "production" ? "medium" : "low", result: "success", dryRun: false, summary: "Control Center settings metadata updated locally; no runtime or provider configuration changed." });
+    const operation = operationPlan("settings.update.local", context.environment, false, ["validate settings", "update local settings metadata", "leave runtime environment unchanged", "leave providers unchanged", "write audit event"], { ...next, runtimeEnvironmentChanged: false, providerTouched: false, productionEvidence: false });
+    return { ...operation, settings: next };
+  }
+  appendAudit({ action: "settings.update.plan", target: "control-center", environment: context.environment, risk: details.environmentMode === "production" ? "medium" : "low", result: "planned", dryRun: true, summary: "Control Center settings update plan generated." });
+  return operationPlan("settings.update", context.environment, true, ["validate settings", "prepare local settings metadata", "require apply confirmation", "write audit event"], { ...details, runtimeEnvironmentChanged: false, providerTouched: false, productionEvidence: false, confirmationRequired: "UPDATE-SETTINGS" });
+}
+
 function planBackupRun(payload, context) {
   const scope = sanitizeIdentifier(payload.scope || "all") || "all";
   appendAudit({ action: "backup.run.plan", target: scope, environment: context.environment, risk: "medium", result: "planned", dryRun: true, summary: "Manual backup plan generated." });
@@ -1728,6 +1829,20 @@ function readNotificationChannelsState() {
 function writeNotificationChannelsState(state) {
   mkdirSync(path.dirname(notificationChannelsFile), { recursive: true });
   writeFileSync(notificationChannelsFile, `${JSON.stringify(sanitizeEvent(state), null, 2)}\n`);
+}
+
+function readSettingsState() {
+  try {
+    const parsed = JSON.parse(readFileSync(settingsFile, "utf8"));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeSettingsState(state) {
+  mkdirSync(path.dirname(settingsFile), { recursive: true });
+  writeFileSync(settingsFile, `${JSON.stringify(sanitizeEvent(state), null, 2)}\n`);
 }
 
 function appendDeployment(deployment) {
@@ -1927,6 +2042,13 @@ function parseResourceLimitNumber(value, label, max) {
   return next;
 }
 
+function validateBaseDomain(value) {
+  const domain = normalizeHost(value || "");
+  if (!domain || domain.includes("/") || domain.includes("_") || domain.includes("..") || domain.length > 253) throw new ValidationError("Invalid base domain.");
+  if (!/^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])$/.test(domain)) throw new ValidationError("Invalid base domain.");
+  return domain;
+}
+
 function webspaceId(projectId, name) {
   return name === projectId ? projectId : `${projectId}-${name}`;
 }
@@ -2046,6 +2168,39 @@ function notificationChannelRecord({
     plainValueExposed: false,
     deliveryAttempted: false,
     productionEvidence: false,
+    createdAt,
+    updatedAt,
+  });
+}
+
+function settingsRecord({
+  preferredMode = "simple",
+  environmentMode = "local",
+  baseDomain = hostSuffix.replace(/^\./, ""),
+  cloudflareConnectionStatus = "plan-only-local",
+  githubConnectionStatus = "dry-run",
+  smtpAlertStatus = "not-configured",
+  productionGuard = "local-evidence-only",
+  source = "control-center-state",
+  providerTouched = false,
+  productionEvidence = false,
+  runtimeEnvironmentChanged = false,
+  createdAt = null,
+  updatedAt = null,
+} = {}) {
+  return sanitizeEvent({
+    id: "local",
+    preferredMode,
+    environmentMode,
+    baseDomain,
+    cloudflareConnectionStatus,
+    githubConnectionStatus,
+    smtpAlertStatus,
+    productionGuard,
+    source,
+    providerTouched,
+    productionEvidence,
+    runtimeEnvironmentChanged,
     createdAt,
     updatedAt,
   });
