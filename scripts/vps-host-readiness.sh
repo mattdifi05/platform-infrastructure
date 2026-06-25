@@ -155,6 +155,17 @@ command_exists() {
   command -v "$1" >/dev/null 2>&1
 }
 
+write_effective_sshd_config() {
+  output_file="$1"
+  for candidate in "sshd" "/usr/sbin/sshd" "sudo -n sshd" "sudo -n /usr/sbin/sshd"; do
+    # shellcheck disable=SC2086
+    if $candidate -T >"$output_file" 2>/dev/null; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 service_active() {
   service="$1"
   if command_exists systemctl; then
@@ -270,8 +281,8 @@ check_services() {
 }
 
 check_ssh_hardening() {
-  if command_exists sshd && sshd -T >/tmp/platform-sshd-effective.$$ 2>/dev/null; then
-    effective=/tmp/platform-sshd-effective.$$
+  effective=$(mktemp)
+  if write_effective_sshd_config "$effective"; then
     if grep -qi '^passwordauthentication no' "$effective"; then
       add_check "ssh-password-auth-disabled" "yes" "passed" "PasswordAuthentication no"
     else
@@ -290,6 +301,7 @@ check_ssh_hardening() {
     fi
     rm -f "$effective"
   elif [ -r /etc/ssh/sshd_config.d/99-platform-hardening.conf ]; then
+    rm -f "$effective"
     config=/etc/ssh/sshd_config.d/99-platform-hardening.conf
     grep -qi '^PasswordAuthentication no' "$config" \
       && add_check "ssh-password-auth-disabled" "yes" "passed" "$config contains PasswordAuthentication no" \
@@ -301,6 +313,7 @@ check_ssh_hardening() {
       && add_check "ssh-port-expected" "yes" "passed" "$config contains Port ${EXPECTED_SSH_PORT}" \
       || add_check "ssh-port-expected" "yes" "failed" "$config does not set Port ${EXPECTED_SSH_PORT}"
   else
+    rm -f "$effective"
     add_check "ssh-hardening" "yes" "failed" "cannot inspect sshd effective config or Platform hardening file"
   fi
 }

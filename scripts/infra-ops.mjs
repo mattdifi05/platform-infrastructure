@@ -10310,7 +10310,7 @@ async function staticSecurityCheck() {
   assertMatch(vpsHostReadinessScript, /ufw status verbose[\s\S]*ufw-no-direct-internal-ports/, "VPS host readiness must verify UFW and blocked internal ports.");
   assertMatch(vpsHostReadinessScript, /--ssh-port[\s\S]*EXPECTED_SSH_PORT[\s\S]*expectedSshPort/, "VPS host readiness must expose and report the expected hardened SSH port.");
   assertMatch(vpsHostReadinessScript, /ufw-ssh-port-allowed[\s\S]*ssh-port-expected/, "VPS host readiness must verify UFW allows and sshd listens on the expected SSH port.");
-  assertMatch(vpsHostReadinessScript, /fail2ban[\s\S]*sshd -T/, "VPS host readiness must verify fail2ban and SSH hardening.");
+  assertMatch(vpsHostReadinessScript, /fail2ban[\s\S]*write_effective_sshd_config[\s\S]*sudo -n sshd[\s\S]*sshd -T/, "VPS host readiness must verify fail2ban and effective SSH hardening, including sudo-accessible sshd -T.");
   assertMatch(vpsHostReadinessScript, /docker-daemon-hardening[\s\S]*live-restore[\s\S]*no-new-privileges/, "VPS host readiness must verify Docker daemon hardening.");
   assertMatch(vpsHostReadinessScript, /--enforce[\s\S]*ALLOW_FAILURES=0/, "VPS host readiness must expose an explicit enforce mode for production evidence.");
   assertMatch(vpsHostReadinessScript, /--diagnostic[\s\S]*reports\/vps-host-diagnostics[\s\S]*productionEvidence[\s\S]*false/, "VPS host readiness diagnostics must be separated from production VPS evidence.");
