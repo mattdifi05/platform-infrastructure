@@ -143,7 +143,7 @@ configs:
               - enterprise-edge-forwarded-https@file
               - enterprise-security-headers@file
               - enterprise-compress@file
-            service: local-php
+            service: enterprise-web
 
           enterprise-account:
             rule: Host(`${ACCOUNT_HOST:?Set ACCOUNT_HOST}`)
