@@ -23,6 +23,7 @@ const applicationsFile = path.join(stateDir, "applications.json");
 const domainsFile = path.join(stateDir, "domains.json");
 const databasesFile = path.join(stateDir, "databases.json");
 const storageBucketsFile = path.join(stateDir, "storage-buckets.json");
+const sensitiveMaterialsFile = path.join(stateDir, "sensitive-materials.json");
 const deploymentsFile = path.join(stateDir, "deployments.jsonl");
 const backupRecordsFile = path.join(stateDir, "backups.jsonl");
 const resourceLimitsFile = path.join(stateDir, "resource-limits.json");
@@ -51,6 +52,7 @@ test("Stexor Control Center local foundation", async (t) => {
       PROJECT_DOMAINS_FILE: domainsFile,
       PROJECT_DATABASES_FILE: databasesFile,
       PROJECT_STORAGE_BUCKETS_FILE: storageBucketsFile,
+      PROJECT_SENSITIVE_MATERIALS_FILE: sensitiveMaterialsFile,
       PROJECT_DEPLOYMENTS_FILE: deploymentsFile,
       PROJECT_BACKUP_RECORDS_FILE: backupRecordsFile,
       PROJECT_RESOURCE_LIMITS_FILE: resourceLimitsFile,
@@ -773,6 +775,99 @@ test("Stexor Control Center local foundation", async (t) => {
   assert.equal(bucketRestore.body.type, "storage.bucket.restore.plan");
   assert.equal(bucketRestore.body.details.dataChanged, false);
   assert.equal(bucketRestore.body.details.minioTouched, false);
+
+  const secretsHtml = await getText(`${baseUrl}/?mode=advanced&section=secrets`);
+  assert.match(secretsHtml, /Secrets/);
+  assert.match(secretsHtml, /Declare material/);
+  assert.match(secretsHtml, /Material Inventory/);
+  assert.match(secretsHtml, /Docker secrets/);
+
+  const invalidMaterial = await postJson(`${baseUrl}/control/secrets/materials`, {
+    projectId: "stexor",
+    targetEnv: "staging",
+    materialName: "bad-name",
+  });
+  assert.equal(invalidMaterial.status, 422);
+  assert.match(invalidMaterial.body.message, /Invalid material name/);
+
+  const materialPlan = await postJson(`${baseUrl}/control/secrets/materials`, {
+    projectId: "stexor",
+    targetEnv: "staging",
+    materialName: "APP_CONFIG",
+    materialKind: "application",
+    materialConfigured: "true",
+    rotationDays: 90,
+    usageTarget: "web",
+    plainValue: "material-plain-value-should-not-leak",
+  });
+  assert.equal(materialPlan.status, 202);
+  assert.equal(materialPlan.body.type, "material.declare");
+  assert.equal(materialPlan.body.dryRun, true);
+  assert.equal(materialPlan.body.details.confirmationRequired, "DECLARE-MATERIAL");
+  assert.equal(materialPlan.body.details.valueExposed, false);
+  assert.equal(materialPlan.body.details.materialValueChanged, false);
+  assert.doesNotMatch(JSON.stringify(materialPlan.body), /material-plain-value-should-not-leak/);
+
+  const materialApply = await postJson(`${baseUrl}/control/secrets/materials`, {
+    projectId: "stexor",
+    targetEnv: "staging",
+    materialName: "APP_CONFIG",
+    materialKind: "application",
+    materialConfigured: "true",
+    rotationDays: 90,
+    usageTarget: "web",
+    confirm: "DECLARE-MATERIAL",
+    plainValue: "material-plain-value-should-not-leak",
+  });
+  assert.equal(materialApply.status, 202);
+  assert.equal(materialApply.body.type, "material.declare.local");
+  assert.equal(materialApply.body.material.id, "stexor-staging-app-config");
+  assert.equal(materialApply.body.material.valueExposed, false);
+  assert.equal(materialApply.body.material.materialValueChanged, false);
+  assert.doesNotMatch(JSON.stringify(materialApply.body), /material-plain-value-should-not-leak/);
+
+  const materialInventory = await getJson(`${baseUrl}/control/secrets`);
+  assert.equal(materialInventory.stores.some((store) => store.id === "docker-compose-files" && store.valueExposed === false), true);
+  assert.equal(materialInventory.inventory.some((item) => item.id === "stexor-staging-app-config"), true);
+  assert.equal(existsSync(sensitiveMaterialsFile), true);
+  const materialStateText = readFileSync(sensitiveMaterialsFile, "utf8");
+  assert.doesNotMatch(materialStateText, /material-plain-value-should-not-leak/);
+  assert.equal(JSON.parse(materialStateText)["stexor-staging-app-config"].valueExposed, false);
+
+  const secretsHtmlAfterApply = await getText(`${baseUrl}/?mode=advanced&section=secrets`);
+  assert.match(secretsHtmlAfterApply, /Update rotation/);
+  assert.match(secretsHtmlAfterApply, /Update usage/);
+  assert.match(secretsHtmlAfterApply, /Record access/);
+
+  const materialRotation = await postJson(`${baseUrl}/control/secrets/materials/stexor-staging-app-config/rotation`, {
+    rotationDays: 30,
+    confirm: "UPDATE-MATERIAL-ROTATION",
+    plainValue: "material-plain-value-should-not-leak",
+  });
+  assert.equal(materialRotation.status, 202);
+  assert.equal(materialRotation.body.type, "material.rotation.local");
+  assert.equal(materialRotation.body.material.rotationDays, 30);
+  assert.equal(materialRotation.body.details.valueExposed, false);
+  assert.doesNotMatch(JSON.stringify(materialRotation.body), /material-plain-value-should-not-leak/);
+
+  const materialUsage = await postJson(`${baseUrl}/control/secrets/materials/stexor-staging-app-config/usage`, {
+    usageTarget: "worker-jobs",
+    confirm: "UPDATE-MATERIAL-USAGE",
+  });
+  assert.equal(materialUsage.status, 202);
+  assert.equal(materialUsage.body.type, "material.usage.local");
+  assert.deepEqual(materialUsage.body.material.usageTargets, ["worker-jobs"]);
+
+  const materialAccess = await postJson(`${baseUrl}/control/secrets/materials/stexor-staging-app-config/access`, {
+    purpose: "incident-review",
+    confirm: "RECORD-MATERIAL-ACCESS",
+    plainValue: "material-plain-value-should-not-leak",
+  });
+  assert.equal(materialAccess.status, 202);
+  assert.equal(materialAccess.body.type, "material.access.local");
+  assert.equal(materialAccess.body.details.valueRead, false);
+  assert.equal(materialAccess.body.details.valueExposed, false);
+  assert.doesNotMatch(JSON.stringify(materialAccess.body), /material-plain-value-should-not-leak/);
 
   const resourcesHtml = await getText(`${baseUrl}/?section=resources`);
   assert.match(resourcesHtml, /Resources/);

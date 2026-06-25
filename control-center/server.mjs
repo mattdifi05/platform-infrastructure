@@ -13,6 +13,7 @@ const applicationsFile = process.env.PROJECT_APPLICATIONS_FILE || "/var/www/proj
 const domainsFile = process.env.PROJECT_DOMAINS_FILE || "/var/www/project-state/domains.json";
 const databasesFile = process.env.PROJECT_DATABASES_FILE || "/var/www/project-state/databases.json";
 const storageBucketsFile = process.env.PROJECT_STORAGE_BUCKETS_FILE || "/var/www/project-state/storage-buckets.json";
+const sensitiveMaterialsFile = process.env.PROJECT_SENSITIVE_MATERIALS_FILE || "/var/www/project-state/sensitive-materials.json";
 const deploymentsFile = process.env.PROJECT_DEPLOYMENTS_FILE || "/var/www/project-state/deployments.jsonl";
 const backupRecordsFile = process.env.PROJECT_BACKUP_RECORDS_FILE || "/var/www/project-state/backups.jsonl";
 const resourceLimitsFile = process.env.PROJECT_RESOURCE_LIMITS_FILE || "/var/www/project-state/resource-limits.json";
@@ -120,6 +121,11 @@ const server = createServer(async (req, res) => {
 
     if (req.method === "POST" && url.pathname === "/actions/storage-command") {
       await handleStorageCommand(req, res, context);
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/actions/material-command") {
+      await handleMaterialCommand(req, res, context);
       return;
     }
 
@@ -279,6 +285,18 @@ async function handleApi(req, res, url, context) {
     }
     if (method === "POST" && parts.length === 6 && route([parts[0], parts[1], parts[2], parts[4], parts[5]], "control", "storage", "buckets", "restore", "plan")) {
       return json(res, planStorageBucketRestore(parts[3], payload, context), 202);
+    }
+
+    if (method === "GET" && route(parts, "control", "secrets")) return json(res, { inventory: context.sensitiveMaterials, stores: context.materialStores });
+    if (method === "POST" && route(parts, "control", "secrets", "materials")) return json(res, planMaterialDeclare(payload, context), 202);
+    if (method === "POST" && parts.length === 5 && route([parts[0], parts[1], parts[2], parts[4]], "control", "secrets", "materials", "rotation")) {
+      return json(res, planMaterialRotation(parts[3], payload, context), 202);
+    }
+    if (method === "POST" && parts.length === 5 && route([parts[0], parts[1], parts[2], parts[4]], "control", "secrets", "materials", "usage")) {
+      return json(res, planMaterialUsage(parts[3], payload, context), 202);
+    }
+    if (method === "POST" && parts.length === 5 && route([parts[0], parts[1], parts[2], parts[4]], "control", "secrets", "materials", "access")) {
+      return json(res, planMaterialAccessAudit(parts[3], payload, context), 202);
     }
 
     if (method === "GET" && route(parts, "control", "resources", "summary")) return json(res, context.resources);
@@ -523,6 +541,34 @@ async function handleStorageCommand(req, res, context) {
   redirect(res, `/?mode=advanced&section=storage#bucket-${encodeURIComponent(operation.details?.bucketId || operation.bucket?.id || "")}`);
 }
 
+async function handleMaterialCommand(req, res, context) {
+  const payload = await readPayload(req);
+  const action = String(payload.action || "");
+  let operation;
+  try {
+    if (action === "declare") operation = planMaterialDeclare(payload, context);
+    else if (action === "rotation") operation = planMaterialRotation(payload.id || payload.materialId || "", payload, context);
+    else if (action === "usage") operation = planMaterialUsage(payload.id || payload.materialId || "", payload, context);
+    else if (action === "access") operation = planMaterialAccessAudit(payload.id || payload.materialId || "", payload, context);
+    else throw new ValidationError("Unsupported material action.");
+  } catch (error) {
+    if (error instanceof ValidationError) {
+      json(res, { error: "validation_failed", message: error.message }, 422);
+      return;
+    }
+    if (error instanceof RejectedOperationError) {
+      json(res, { error: "operation_rejected", message: error.message }, 409);
+      return;
+    }
+    throw error;
+  }
+  if (wantsJson(req)) {
+    json(res, operation, 202);
+    return;
+  }
+  redirect(res, `/?mode=advanced&section=secrets#material-${encodeURIComponent(operation.details?.materialId || operation.material?.id || "")}`);
+}
+
 async function handleBackupCommand(req, res, context) {
   const payload = await readPayload(req);
   const action = String(payload.action || "");
@@ -735,6 +781,10 @@ function buildContext({ projects, state }) {
     .filter((bucket) => bucket && !bucket.deletedAt)
     .map((bucket) => storageBucketRecord(bucket))
     .sort((a, b) => `${a.projectId}:${a.name}`.localeCompare(`${b.projectId}:${b.name}`));
+  const sensitiveMaterials = Object.values(readSensitiveMaterialsState())
+    .filter((material) => material && !material.deletedAt)
+    .map((material) => sensitiveMaterialRecord(material))
+    .sort((a, b) => `${a.projectId}:${a.environment}:${a.materialName}`.localeCompare(`${b.projectId}:${b.environment}:${b.materialName}`));
   const deployments = readDeployments();
   const backupRecords = readBackupRecords();
   const storedResourceLimits = readResourceLimitsState();
@@ -808,6 +858,7 @@ function buildContext({ projects, state }) {
     ...channel,
     ...(storedNotificationChannels[channel.channel] || {}),
   }));
+  const materialStores = defaultMaterialStores(notificationChannels);
   const openAlerts = alertRecords.filter((alert) => ["open", "firing"].includes(alert.status));
   const providerConnections = defaultProviderConnections(notificationChannels).map((connection) => providerConnectionRecord({
     ...connection,
@@ -860,6 +911,7 @@ function buildContext({ projects, state }) {
     subdomains: { total: subdomains.length, active: subdomains.filter((item) => item.status === "active").length },
     databases: { total: databases.length, declared: databases.filter((item) => item.status === "declared").length },
     storage: { buckets: storageBuckets.length, provider: storageProvider.status },
+    sensitiveMaterials: { total: sensitiveMaterials.length, rotationDue: sensitiveMaterials.filter((item) => item.rotationStatus === "due").length },
     alerts: { open: openAlerts.length, source: "Control Center local alert metadata and Alertmanager evidence tooling" },
     deployments: { latest: deployments.slice(0, 5) },
     backups,
@@ -875,6 +927,8 @@ function buildContext({ projects, state }) {
     databaseEngines,
     storageProvider,
     storageBuckets,
+    materialStores,
+    sensitiveMaterials,
     resources,
     security,
     backups,
@@ -1330,15 +1384,11 @@ function advancedSectionData(section, context) {
       };
     case "secrets":
       return {
-        stores: [
-          { name: "Docker secrets", status: "configured by compose secret files", valueExposed: false },
-          { name: "Control Center session keys", status: sessionKeysFile ? "configured by secret file" : "not configured", valueExposed: false },
-          { name: "Admin password verifier", status: authVerifierConfigured() ? "configured verifier only" : "not configured", valueExposed: false },
-          { name: "Alert delivery secrets", status: context.notificationChannels.some((channel) => channel.status === "configured") ? "partially configured" : "metadata only", valueExposed: false },
-        ],
-        providerConnections: context.providerConnections.map((connection) => ({ id: connection.id, privateMaterialConfigured: connection.privateMaterialConfigured, credentialValueExposed: connection.credentialValueExposed })),
-        rotation: "tracked through infra-ops secret evidence",
-        usageMap: "planned adapter",
+        stores: context.materialStores,
+        inventory: context.sensitiveMaterials,
+        providerConnections: context.providerConnections.map((connection) => ({ id: connection.id, materialConfigured: connection.privateMaterialConfigured, valueExposed: connection.credentialValueExposed })),
+        rotation: "metadata tracked locally; real rotation remains in infra-ops/private material",
+        usageMap: context.sensitiveMaterials.map((item) => ({ id: item.id, projectId: item.projectId, usageTargets: item.usageTargets, valueExposed: item.valueExposed })),
       };
     case "audit":
       return {
@@ -1460,6 +1510,7 @@ function renderControlCenter(context, params) {
     else if (section === "infrastructure") body = renderInfrastructure(context.advancedServices);
     else if (section === "databases") body = renderDatabases(scoped(context.databases), context.databaseEngines, context.projects);
     else if (section === "storage") body = renderStorage(scoped(context.storageBuckets), context.storageProvider, context.projects);
+    else if (section === "secrets") body = renderSecrets(scoped(context.sensitiveMaterials), context.materialStores, context.projects);
     else if (section === "deployments") body = renderDeployments(scoped(context.deployments));
     else if (section === "logs-advanced") body = renderAdvancedPanel(title, section, context, "Loki query and export surfaces stay metadata-only here.");
     else if (section === "alerts-advanced") body = renderAdvancedPanel(title, section, context, "Alert delivery evidence is verified through the ops runner before production use.");
@@ -1991,6 +2042,62 @@ function renderStorageBucketCard(bucket) {
       <input type="hidden" name="id" value="${escapeHtml(bucket.id)}">
       <input name="backupRef" value="latest" aria-label="Backup reference">
       <button class="button danger" type="submit">Plan restore</button>
+    </form>
+  </div>`;
+}
+
+function renderSecrets(materials, stores, projects) {
+  const projectOptions = projects.map((project) => `<option value="${escapeHtml(project.slug)}">${escapeHtml(project.name)}</option>`).join("");
+  return `<section class="grid two">
+    <div class="panel"><div class="panel-head"><span>KEY</span><div><h2>Secrets</h2><p>Inventory tracks sensitive material metadata only. Plaintext values never enter the Control Center.</p></div></div>
+      <div class="cards">
+        ${stores.map((store) => `<div class="card compact"><strong>${escapeHtml(store.name)}</strong><span>${escapeHtml(store.status)} / value exposed ${store.valueExposed ? "yes" : "no"}</span></div>`).join("")}
+      </div>
+      <form method="post" action="/actions/material-command" class="inline-confirm material-form">
+        <input type="hidden" name="action" value="declare">
+        <select name="projectId" aria-label="Material project">${projectOptions}</select>
+        <select name="targetEnv" aria-label="Material environment"><option value="local">local</option><option value="staging">staging</option><option value="production">production</option></select>
+        <input name="materialName" value="APP_CONFIG" aria-label="Material name">
+        <select name="materialKind" aria-label="Material kind"><option value="application">application</option><option value="docker">docker</option><option value="provider">provider</option><option value="kms">kms</option><option value="database">database</option><option value="storage">storage</option></select>
+        <select name="materialConfigured" aria-label="Material configured"><option value="false">not configured</option><option value="true">configured</option></select>
+        <input name="rotationDays" value="90" aria-label="Rotation days">
+        <input name="usageTarget" value="app" aria-label="Usage target">
+        <input type="hidden" name="confirm" value="DECLARE-MATERIAL">
+        <button class="button enable" type="submit">Declare material</button>
+      </form>
+    </div>
+    <div class="panel"><div class="panel-head"><span>INV</span><div><h2>Material Inventory</h2><p>Rotation, usage and access audit are local metadata records, not value reads.</p></div></div>
+      ${materials.length ? `<div class="cards">${materials.map(renderMaterialCard).join("")}</div>` : empty("No materials declared", "Declare sensitive material metadata to track usage, rotation and access audits without exposing values.")}
+    </div>
+  </section>`;
+}
+
+function renderMaterialCard(material) {
+  return `<div id="material-${escapeHtml(material.id)}" class="card compact">
+    <div class="card-title"><strong>${escapeHtml(material.materialName)}</strong><em>${escapeHtml(material.materialKind)}</em></div>
+    <span>${escapeHtml(material.projectId)} / ${escapeHtml(material.environment)} / configured ${material.materialConfigured ? "yes" : "no"}</span>
+    <span>rotation ${escapeHtml(material.rotationStatus)} every ${escapeHtml(String(material.rotationDays))} days / value exposed ${material.valueExposed ? "yes" : "no"}</span>
+    <span>usage ${escapeHtml(material.usageTargets.join(", ") || "not mapped")}</span>
+    <form method="post" action="/actions/material-command" class="inline-confirm">
+      <input type="hidden" name="action" value="rotation">
+      <input type="hidden" name="id" value="${escapeHtml(material.id)}">
+      <input name="rotationDays" value="${escapeHtml(String(material.rotationDays || 90))}" aria-label="Rotation days">
+      <input type="hidden" name="confirm" value="UPDATE-MATERIAL-ROTATION">
+      <button class="button" type="submit">Update rotation</button>
+    </form>
+    <form method="post" action="/actions/material-command" class="inline-confirm">
+      <input type="hidden" name="action" value="usage">
+      <input type="hidden" name="id" value="${escapeHtml(material.id)}">
+      <input name="usageTarget" value="${escapeHtml(material.usageTargets[0] || "app")}" aria-label="Usage target">
+      <input type="hidden" name="confirm" value="UPDATE-MATERIAL-USAGE">
+      <button class="button" type="submit">Update usage</button>
+    </form>
+    <form method="post" action="/actions/material-command" class="inline-confirm">
+      <input type="hidden" name="action" value="access">
+      <input type="hidden" name="id" value="${escapeHtml(material.id)}">
+      <input name="purpose" value="admin-review" aria-label="Access purpose">
+      <input type="hidden" name="confirm" value="RECORD-MATERIAL-ACCESS">
+      <button class="button danger" type="submit">Record access</button>
     </form>
   </div>`;
 }
@@ -2667,6 +2774,100 @@ function planStorageBucketRestore(id, payload, context) {
   return { ...operation, bucket };
 }
 
+function planMaterialDeclare(payload, context) {
+  const projectId = slugify(payload.projectId || "");
+  validateSlug(projectId);
+  findById(context.projects, projectId, "Project");
+  const targetEnv = normalizeEnvironment(payload.targetEnv || context.environment);
+  const materialName = validateMaterialName(payload.materialName || "APP_CONFIG");
+  const materialKind = choice(String(payload.materialKind || "application"), ["application", "docker", "provider", "kms", "database", "storage"], "material kind");
+  const materialConfigured = parseBoolean(payload.materialConfigured || "");
+  const rotationDays = parseRotationDays(payload.rotationDays || 0);
+  const usageTargets = parseUsageTargets(payload.usageTargets || payload.usageTarget || projectId);
+  const id = materialId(projectId, targetEnv, materialName);
+  const details = sensitiveMaterialRecord({ id, projectId, environment: targetEnv, materialName, materialKind, materialConfigured, rotationDays, usageTargets });
+  if (payload.confirm === "DECLARE-MATERIAL") {
+    const state = readSensitiveMaterialsState();
+    state[id] = {
+      ...(state[id] || {}),
+      ...details,
+      updatedAt: new Date().toISOString(),
+      createdAt: state[id]?.createdAt || new Date().toISOString(),
+    };
+    writeSensitiveMaterialsState(state);
+    appendAudit({ action: "material.declare.apply", target: `${projectId}/${targetEnv}/${materialName}`, environment: targetEnv, risk: "medium", result: "success", dryRun: false, summary: "Sensitive material metadata declared locally; no value was stored or read." });
+    const operation = operationPlan("material.declare.local", targetEnv, false, ["validate project", "validate material metadata", "record usage map", "leave value material unchanged", "write audit event"], { ...state[id], materialValueChanged: false, valueExposed: false, productionEvidence: false });
+    return { ...operation, material: state[id] };
+  }
+  appendAudit({ action: "material.declare.plan", target: `${projectId}/${targetEnv}/${materialName}`, environment: targetEnv, risk: "medium", result: "planned", dryRun: true, summary: "Sensitive material declaration plan generated; no value was stored or read." });
+  return operationPlan("material.declare", targetEnv, true, ["validate project", "validate material metadata", "prepare local inventory metadata", "require apply confirmation", "write audit event"], { ...details, materialValueChanged: false, valueExposed: false, productionEvidence: false, confirmationRequired: "DECLARE-MATERIAL" });
+}
+
+function planMaterialRotation(id, payload, context) {
+  const material = findById(context.sensitiveMaterials, id, "Sensitive material");
+  const rotationDays = parseRotationDays(payload.rotationDays || material.rotationDays || 90);
+  if (payload.confirm === "UPDATE-MATERIAL-ROTATION") {
+    const state = readSensitiveMaterialsState();
+    state[material.id] = {
+      ...sensitiveMaterialRecord(material),
+      ...(state[material.id] || {}),
+      rotationDays,
+      rotationStatus: rotationDays > 0 ? "planned" : "not-set",
+      updatedAt: new Date().toISOString(),
+      createdAt: state[material.id]?.createdAt || material.createdAt || new Date().toISOString(),
+    };
+    writeSensitiveMaterialsState(state);
+    appendAudit({ action: "material.rotation.apply", target: material.id, environment: material.environment, risk: "medium", result: "success", dryRun: false, summary: "Sensitive material rotation metadata updated locally; value material was not changed." });
+    const operation = operationPlan("material.rotation.local", material.environment, false, ["validate material", "validate rotation policy", "update local rotation metadata", "leave value material unchanged", "write audit event"], { ...state[material.id], materialValueChanged: false, valueExposed: false, productionEvidence: false });
+    return { ...operation, material: state[material.id] };
+  }
+  appendAudit({ action: "material.rotation.plan", target: material.id, environment: material.environment, risk: "medium", result: "planned", dryRun: true, summary: "Sensitive material rotation metadata plan generated; value material was not changed." });
+  return operationPlan("material.rotation", material.environment, true, ["validate material", "validate rotation policy", "prepare local rotation metadata", "require apply confirmation", "write audit event"], { ...material, rotationDays, materialValueChanged: false, valueExposed: false, productionEvidence: false, confirmationRequired: "UPDATE-MATERIAL-ROTATION" });
+}
+
+function planMaterialUsage(id, payload, context) {
+  const material = findById(context.sensitiveMaterials, id, "Sensitive material");
+  const usageTargets = parseUsageTargets(payload.usageTargets || payload.usageTarget || material.usageTargets || material.projectId);
+  if (payload.confirm === "UPDATE-MATERIAL-USAGE") {
+    const state = readSensitiveMaterialsState();
+    state[material.id] = {
+      ...sensitiveMaterialRecord(material),
+      ...(state[material.id] || {}),
+      usageTargets,
+      updatedAt: new Date().toISOString(),
+      createdAt: state[material.id]?.createdAt || material.createdAt || new Date().toISOString(),
+    };
+    writeSensitiveMaterialsState(state);
+    appendAudit({ action: "material.usage.apply", target: material.id, environment: material.environment, risk: "low", result: "success", dryRun: false, summary: "Sensitive material usage map updated locally; value material was not read." });
+    const operation = operationPlan("material.usage.local", material.environment, false, ["validate material", "validate usage targets", "update local usage map", "leave value material unread", "write audit event"], { ...state[material.id], materialValueChanged: false, valueExposed: false, productionEvidence: false });
+    return { ...operation, material: state[material.id] };
+  }
+  appendAudit({ action: "material.usage.plan", target: material.id, environment: material.environment, risk: "low", result: "planned", dryRun: true, summary: "Sensitive material usage map plan generated; value material was not read." });
+  return operationPlan("material.usage", material.environment, true, ["validate material", "validate usage targets", "prepare local usage map update", "require apply confirmation", "write audit event"], { ...material, usageTargets, materialValueChanged: false, valueExposed: false, productionEvidence: false, confirmationRequired: "UPDATE-MATERIAL-USAGE" });
+}
+
+function planMaterialAccessAudit(id, payload, context) {
+  const material = findById(context.sensitiveMaterials, id, "Sensitive material");
+  const purpose = sanitizeMessage(payload.purpose || "admin-review").replace(/\s+/g, " ").trim().slice(0, 120) || "admin-review";
+  if (payload.confirm === "RECORD-MATERIAL-ACCESS") {
+    const state = readSensitiveMaterialsState();
+    state[material.id] = {
+      ...sensitiveMaterialRecord(material),
+      ...(state[material.id] || {}),
+      lastAccessAuditAt: new Date().toISOString(),
+      lastAccessPurpose: purpose,
+      updatedAt: new Date().toISOString(),
+      createdAt: state[material.id]?.createdAt || material.createdAt || new Date().toISOString(),
+    };
+    writeSensitiveMaterialsState(state);
+    appendAudit({ action: "material.access.apply", target: material.id, environment: material.environment, risk: "high", result: "success", dryRun: false, summary: "Sensitive material access audit recorded without reading or exposing the value." });
+    const operation = operationPlan("material.access.local", material.environment, false, ["validate material", "record access purpose metadata", "do not read value material", "write audit event"], { materialId: material.id, projectId: material.projectId, purpose, valueRead: false, valueExposed: false, productionEvidence: false });
+    return { ...operation, material: state[material.id] };
+  }
+  appendAudit({ action: "material.access.plan", target: material.id, environment: material.environment, risk: "high", result: "planned", dryRun: true, summary: "Sensitive material access audit plan generated; value material will not be read." });
+  return operationPlan("material.access", material.environment, true, ["validate material", "prepare access audit metadata", "do not read value material", "require apply confirmation", "write audit event"], { materialId: material.id, projectId: material.projectId, purpose, valueRead: false, valueExposed: false, productionEvidence: false, confirmationRequired: "RECORD-MATERIAL-ACCESS" });
+}
+
 function planResourceLimitUpdate(payload, context) {
   const projectId = slugify(payload.projectId || "");
   validateSlug(projectId);
@@ -3038,6 +3239,20 @@ function writeStorageBucketsState(state) {
   writeFileSync(storageBucketsFile, `${JSON.stringify(sanitizeEvent(state), null, 2)}\n`);
 }
 
+function readSensitiveMaterialsState() {
+  try {
+    const parsed = JSON.parse(readFileSync(sensitiveMaterialsFile, "utf8"));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeSensitiveMaterialsState(state) {
+  mkdirSync(path.dirname(sensitiveMaterialsFile), { recursive: true });
+  writeFileSync(sensitiveMaterialsFile, `${JSON.stringify(sanitizeEvent(state), null, 2)}\n`);
+}
+
 function readResourceLimitsState() {
   try {
     const parsed = JSON.parse(readFileSync(resourceLimitsFile, "utf8"));
@@ -3322,16 +3537,35 @@ function validateBucketName(value) {
   return name;
 }
 
+function validateMaterialName(value) {
+  const name = String(value || "").trim().toUpperCase();
+  if (!/^[A-Z][A-Z0-9_]{1,127}$/.test(name)) throw new ValidationError("Invalid material name.");
+  return name;
+}
+
 function parseQuotaBytes(value) {
   const quotaBytes = Number(value || 0);
   if (!Number.isSafeInteger(quotaBytes) || quotaBytes < 0) throw new ValidationError("Quota must be zero or a positive safe integer.");
   return quotaBytes;
 }
 
+function parseRotationDays(value) {
+  const rotationDays = Number(value || 0);
+  if (!Number.isSafeInteger(rotationDays) || rotationDays < 0 || rotationDays > 3650) throw new ValidationError("Rotation days must be zero or a positive safe integer within policy.");
+  return rotationDays;
+}
+
 function parseRetentionDays(value) {
   const retentionDays = Number(value || 0);
   if (!Number.isSafeInteger(retentionDays) || retentionDays < 0 || retentionDays > 3650) throw new ValidationError("Retention days must be zero or a positive safe integer within policy.");
   return retentionDays;
+}
+
+function parseUsageTargets(value) {
+  const values = Array.isArray(value) ? value : String(value || "").split(",");
+  const cleaned = values.map((item) => sanitizeOptionalRef(item)).filter(Boolean);
+  if (!cleaned.length) throw new ValidationError("At least one usage target is required.");
+  return [...new Set(cleaned)].slice(0, 20);
 }
 
 function parseResourceLimitNumber(value, label, max) {
@@ -3357,6 +3591,10 @@ function databaseId(projectId, engine, name) {
 
 function bucketId(projectId, name) {
   return sanitizeIdentifier(`${projectId}-${name.replace(/\./g, "-")}`);
+}
+
+function materialId(projectId, targetEnv, materialName) {
+  return sanitizeIdentifier(`${projectId}-${targetEnv}-${materialName.replace(/_/g, "-").toLowerCase()}`);
 }
 
 function domainRecord({
@@ -3528,6 +3766,58 @@ function storageBucketRecord({
     credentialsExposed: false,
     providerTouched: false,
     productionEvidence: false,
+    createdAt,
+    updatedAt,
+    deletedAt,
+  });
+}
+
+function sensitiveMaterialRecord({
+  id = "",
+  projectId = "",
+  environment: targetEnv = "local",
+  materialName = "APP_CONFIG",
+  materialKind = "application",
+  materialConfigured = false,
+  scope = "",
+  usageTargets = [],
+  rotationDays = 0,
+  rotationStatus = "",
+  lastRotatedAt = null,
+  nextRotationDueAt = null,
+  lastAccessAuditAt = null,
+  lastAccessPurpose = "",
+  source = "control-center-state",
+  createdAt = null,
+  updatedAt = null,
+  deletedAt = null,
+} = {}) {
+  const cleanProjectId = sanitizeIdentifier(projectId);
+  const cleanEnv = normalizeEnvironment(targetEnv);
+  const cleanName = validateMaterialName(materialName || "APP_CONFIG");
+  const cleanKind = choice(String(materialKind || "application"), ["application", "docker", "provider", "kms", "database", "storage"], "material kind");
+  const cleanRotationDays = parseRotationDays(rotationDays || 0);
+  const cleanUsageTargets = usageTargets?.length ? parseUsageTargets(usageTargets) : [];
+  return sanitizeEvent({
+    id: sanitizeIdentifier(id || materialId(cleanProjectId || "platform", cleanEnv, cleanName)),
+    projectId: cleanProjectId,
+    environment: cleanEnv,
+    materialName: cleanName,
+    materialKind: cleanKind,
+    materialConfigured: Boolean(materialConfigured),
+    scope: sanitizeOptionalRef(scope || cleanProjectId || "platform"),
+    usageTargets: cleanUsageTargets,
+    rotationDays: cleanRotationDays,
+    rotationStatus: rotationStatus || (Boolean(materialConfigured) ? (cleanRotationDays > 0 ? "planned" : "not-set") : "not-configured"),
+    lastRotatedAt,
+    nextRotationDueAt,
+    lastAccessAuditAt,
+    lastAccessPurpose: sanitizeOptionalRef(lastAccessPurpose),
+    valueExposed: false,
+    materialValueChanged: false,
+    providerTouched: false,
+    productionEvidence: false,
+    source,
     createdAt,
     updatedAt,
     deletedAt,
@@ -3792,6 +4082,18 @@ function settingsRecord({
     createdAt,
     updatedAt,
   });
+}
+
+function defaultMaterialStores(notificationChannels = []) {
+  const alertDeliveryConfigured = notificationChannels.some((channel) => channel.status === "configured" || channel.status === "verified-production");
+  return [
+    { id: "docker-compose-files", name: "Docker secrets", status: "configured by compose files", materialConfigured: true, valueExposed: false, productionEvidence: false },
+    { id: "control-center-session", name: "Control Center session material", status: sessionKeysFile ? "configured by file" : "not configured", materialConfigured: Boolean(sessionKeysFile), valueExposed: false, productionEvidence: false },
+    { id: "admin-verifier", name: "Admin password verifier", status: authVerifierConfigured() ? "configured verifier only" : "not configured", materialConfigured: authVerifierConfigured(), valueExposed: false, productionEvidence: false },
+    { id: "alert-delivery", name: "Alert delivery material", status: alertDeliveryConfigured ? "partially configured" : "metadata only", materialConfigured: alertDeliveryConfigured, valueExposed: false, productionEvidence: false },
+    { id: "provider-private-material", name: "Provider private material", status: "tracked by provider connections", materialConfigured: false, valueExposed: false, productionEvidence: false },
+    { id: "kms-metadata", name: "Platform Local KMS metadata", status: "evidence through infra-ops", materialConfigured: false, valueExposed: false, productionEvidence: false },
+  ].map((store) => sanitizeEvent(store));
 }
 
 function defaultNotificationChannels() {
