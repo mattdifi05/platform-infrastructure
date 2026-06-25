@@ -349,6 +349,7 @@ async function handleApi(req, res, url, context) {
 
     if (method === "GET" && route(parts, "control", "resources", "summary")) return json(res, context.resources);
     if (method === "POST" && route(parts, "control", "resources", "limits")) return json(res, planResourceLimitUpdate(payload, context), 202);
+    if (method === "GET" && route(parts, "control", "monitoring")) return json(res, context.monitoring);
     if (method === "GET" && route(parts, "control", "security", "summary")) return json(res, context.security);
     if (method === "POST" && route(parts, "control", "security", "policy")) return json(res, planSecurityPolicyUpdate(payload, context), 202);
     if (method === "GET" && route(parts, "control", "logs", "summary")) return json(res, context.logsAlerts);
@@ -1052,6 +1053,7 @@ function buildContext({ projects, state }) {
     alertRouting: "Prometheus routes to internal Alertmanager, then to worker-notifications with secret-backed delivery.",
     rawConsoles: "Prometheus, Alertmanager and Traefik raw consoles are intentionally not linked from Projects.",
   };
+  const monitoring = buildMonitoringTopology({ resources, logsAlerts, alertRecords });
   const settings = settingsRecord({
     preferredMode: "simple",
     environmentMode: environment,
@@ -1089,6 +1091,7 @@ function buildContext({ projects, state }) {
     resources,
     subdomains: { total: subdomains.length, active: subdomains.filter((item) => item.status === "active").length },
     network: { routers: network.routers.length, middlewares: network.middlewares.length, exposedPorts: network.exposedPorts.length, routeTests: network.routeTests.length },
+    monitoring: { scrapeJobs: monitoring.scrapeJobs.length, dashboardPanels: monitoring.dashboardPanels.length, alertRules: monitoring.alertRules.length, signals: monitoring.signals.length },
     databases: { total: databases.length, declared: databases.filter((item) => item.status === "declared").length },
     storage: { buckets: storageBuckets.length, provider: storageProvider.status },
     sensitiveMaterials: { total: sensitiveMaterials.length, rotationDue: sensitiveMaterials.filter((item) => item.rotationStatus === "due").length },
@@ -1121,6 +1124,7 @@ function buildContext({ projects, state }) {
     security,
     backups,
     logsAlerts,
+    monitoring,
     settings,
     uiPackage,
     identityAccess,
@@ -1517,9 +1521,9 @@ function advancedSectionData(section, context) {
       };
     case "monitoring":
       return {
+        ...context.monitoring,
         resources: context.resources,
         openAlerts: context.logsAlerts.openAlerts,
-        metrics: ["Prometheus", "cAdvisor", "node-exporter", "latency", "error rate"],
       };
     case "logs-advanced":
       return {
@@ -1684,8 +1688,11 @@ function discoverProjects(state) {
 function renderControlCenter(context, params) {
   const mode = params.get("mode") === "advanced" ? "advanced" : "simple";
   const nav = navigationForMode(mode);
-  const requestedSection = params.get("section") || (mode === "advanced" ? "infrastructure" : "overview");
-  const section = nav.some((item) => item.id === requestedSection) ? requestedSection : nav[0].id;
+  const groups = navigationGroupsForMode(mode);
+  const defaultSection = groups[0]?.tabs[0]?.id || nav[0]?.id || "overview";
+  const requestedSection = params.get("section") || defaultSection;
+  const section = nav.some((item) => item.id === requestedSection) ? requestedSection : defaultSection;
+  const activeGroup = groups.find((group) => group.tabs.some((item) => item.id === section)) || groups[0];
   const selectedProject = context.projects.some((project) => project.slug === params.get("project")) ? params.get("project") : "";
   const scoped = (items) => selectedProject ? items.filter((item) => (item.projectId || item.slug) === selectedProject) : items;
   const title = nav.find((item) => item.id === section)?.label || "Overview";
@@ -1711,6 +1718,7 @@ function renderControlCenter(context, params) {
     else if (section === "secrets") body = renderSecrets(scoped(context.sensitiveMaterials), context.materialStores, context.projects);
     else if (section === "workers-jobs") body = renderWorkersJobs(scoped(context.workerRuntimes), scoped(context.jobQueues), scoped(context.jobRecords), scoped(context.jobSchedules), context.projects);
     else if (section === "deployments") body = renderDeployments(scoped(context.deployments));
+    else if (section === "monitoring") body = renderMonitoringAdvanced(context.monitoring);
     else if (section === "logs-advanced") body = renderAdvancedPanel(title, section, context, "Loki query and export surfaces stay metadata-only here.");
     else if (section === "alerts-advanced") body = renderAdvancedPanel(title, section, context, "Alert delivery evidence is verified through the ops runner before production use.");
     else if (section === "security-advanced") body = renderAdvancedPanel(title, section, context, "Security controls stay behind explicit adapters and confirmation gates.");
@@ -1730,41 +1738,86 @@ function renderControlCenter(context, params) {
 ${styleTag()}
 </head>
 <body data-ui-theme="dark" data-ui-accent="blue">
-<main class="control-shell ui-experience">
-  <aside class="sidebar ui-dock">
-    <div class="brand stexor-wordmark"><span class="brand-mark">SX</span><div><strong>Stexor</strong><small>Control Center</small></div></div>
-    <nav aria-label="Control navigation">
-      ${nav.map((item) => `<a class="${section === item.id ? "active" : ""}" href="/?mode=${mode}&section=${item.id}"><span>${escapeHtml(item.short)}</span>${escapeHtml(item.label)}</a>`).join("")}
-    </nav>
+<main aria-busy="false" class="shell ui-shell ui-experience sx-control-shell">
+  <div class="ui-canvas" aria-hidden="true"></div>
+  <header class="ui-shell-header-surface ui-shell-header ui-homebar sx-control-homebar">
+    <a class="brand stexor-wordmark" href="/?mode=simple&section=overview" aria-label="Stexor Control Center"><span class="brand-mark">SX</span><div><strong>STEXOR</strong><small>Control Center</small></div></a>
+  </header>
+  <div class="ui-shell-stage ui-stage-grid sx-control-stage">
+    ${renderControlSidebar(groups, activeGroup.id, mode, selectedProject)}
+    <section aria-label="${escapeHtml(activeGroup.label)}" class="ui-shell-scene ui-scene sx-control-scene" data-scroll-root="" tabindex="0">
+      <div class="ui-shell-sheet ui-content-sheet sx-control-sheet">
+        <header class="control-page-head">
+          <div>
+            <p class="eyebrow">${escapeHtml(environment.toUpperCase())} MODE / ${escapeHtml(activeGroup.label)}</p>
+            <h1>${escapeHtml(title)}</h1>
+          </div>
+          <div class="top-actions">
+            <span class="pill ${environment === "production" ? "danger" : "info"}">${escapeHtml(context.overview.modeEvidence)}</span>
+            ${authRequired ? '<a class="button" href="/logout">Logout</a>' : ""}
+            <form method="get" class="switcher">
+              <input type="hidden" name="mode" value="${escapeHtml(mode)}">
+              <input type="hidden" name="section" value="${escapeHtml(section)}">
+              <select name="project" onchange="this.form.submit()" aria-label="Project switcher">
+                <option value="">All projects</option>
+                ${context.projects.map((project) => `<option value="${escapeHtml(project.slug)}" ${selectedProject === project.slug ? "selected" : ""}>${escapeHtml(project.name)}</option>`).join("")}
+              </select>
+            </form>
+          </div>
+        </header>
+        ${renderSectionTabs(activeGroup.tabs, section, mode, selectedProject)}
+        <section class="ui-panel-stack control-tab-panel" id="control-${escapeHtml(section)}-panel" role="tabpanel" aria-labelledby="control-${escapeHtml(section)}-tab">
+          ${body}
+        </section>
+      </div>
+    </section>
+  </div>
+</main>
+</body>
+  </html>`;
+}
+
+function renderControlSidebar(groups, activeGroupId, mode, selectedProject) {
+  const activeIndex = Math.max(0, groups.findIndex((group) => group.id === activeGroupId));
+  return `<aside aria-label="Control Center navigation" class="ui-shell-navbar-surface pill-sidebar-nav ui-shell-navbar ui-dock sx-control-dock" data-pill-sidebar-active-index="${activeIndex}" data-pill-sidebar-id="control-sidebar">
+    ${groups.length ? '<span aria-hidden="true" class="nav-active-pill" data-pill-sidebar-pill=""></span>' : ""}
+    ${groups.map((group) => {
+      const active = group.id === activeGroupId;
+      const href = controlUrl({ mode, section: group.tabs[0]?.id || "overview", project: selectedProject });
+      return `<a class="nav-item ${active ? "active" : ""}" ${active ? 'aria-current="page"' : ""} href="${escapeHtml(href)}" title="${escapeHtml(group.label)}">
+        <span class="nav-code" aria-hidden="true">${escapeHtml(group.short)}</span>
+        <span>${escapeHtml(group.label)}</span>
+      </a>`;
+    }).join("")}
     <div class="mode-card">
       <small>Mode</small>
       <div class="segmented">
-        <a class="${mode === "simple" ? "selected" : ""}" href="/?mode=simple&section=overview">Simple</a>
-        <a class="${mode === "advanced" ? "selected" : ""}" href="/?mode=advanced&section=infrastructure">Advanced</a>
+        <a class="${mode === "simple" ? "selected" : ""}" href="${escapeHtml(controlUrl({ mode: "simple", section: "overview", project: selectedProject }))}">Simple</a>
+        <a class="${mode === "advanced" ? "selected" : ""}" href="${escapeHtml(controlUrl({ mode: "advanced", section: "infrastructure", project: selectedProject }))}">Advanced</a>
       </div>
     </div>
-  </aside>
-  <section class="workspace ui-scene">
-    <header class="topbar ui-homebar">
-      <div><p class="eyebrow">${escapeHtml(environment.toUpperCase())} MODE</p><h1>${escapeHtml(title)}</h1></div>
-      <div class="top-actions">
-        <span class="pill ${environment === "production" ? "danger" : "info"}">${escapeHtml(context.overview.modeEvidence)}</span>
-        ${authRequired ? '<a class="button" href="/logout">Logout</a>' : ""}
-        <form method="get" class="switcher">
-          <input type="hidden" name="mode" value="${escapeHtml(mode)}">
-          <input type="hidden" name="section" value="${escapeHtml(section)}">
-          <select name="project" onchange="this.form.submit()" aria-label="Project switcher">
-            <option value="">All projects</option>
-            ${context.projects.map((project) => `<option value="${escapeHtml(project.slug)}" ${selectedProject === project.slug ? "selected" : ""}>${escapeHtml(project.name)}</option>`).join("")}
-          </select>
-        </form>
-      </div>
-    </header>
-    ${body}
-  </section>
-</main>
-</body>
-</html>`;
+  </aside>`;
+}
+
+function renderSectionTabs(tabs, activeSection, mode, selectedProject) {
+  const activeIndex = Math.max(0, tabs.findIndex((item) => item.id === activeSection));
+  if (!tabs.length) return "";
+  return `<nav aria-label="Control Center page sections" class="pill-tabs sx-control-tabs" data-ui-surface="gray" data-pill-tabs-id="control-tabs" role="tablist" style="--sx-tab-x:${6 + activeIndex * 132}px">
+    <span aria-hidden="true" class="pill-tabs-backdrop"></span>
+    <span aria-hidden="true" class="pill-tabs-pill"></span>
+    ${tabs.map((item) => {
+      const active = item.id === activeSection;
+      return `<a aria-controls="control-${escapeHtml(item.id)}-panel" aria-selected="${active ? "true" : "false"}" class="pill-tab ${active ? "active" : ""}" href="${escapeHtml(controlUrl({ mode, section: item.id, project: selectedProject }))}" id="control-${escapeHtml(item.id)}-tab" role="tab"><span>${escapeHtml(item.label)}</span></a>`;
+    }).join("")}
+  </nav>`;
+}
+
+function controlUrl({ mode, section, project = "" }) {
+  const params = new URLSearchParams();
+  params.set("mode", mode);
+  params.set("section", section);
+  if (project) params.set("project", project);
+  return `/?${params.toString()}`;
 }
 
 function renderLogin(message) {
@@ -2023,6 +2076,67 @@ function renderNetworkRouteTestCard(testPlan) {
   </div>`;
 }
 
+function renderMonitoringAdvanced(monitoring) {
+  const scrapeJobs = monitoring.scrapeJobs || [];
+  const dashboards = monitoring.dashboardPanels || [];
+  const alerts = monitoring.alertRules || [];
+  const datasources = monitoring.datasources || [];
+  return `<section class="grid two">
+    <div class="panel"><div class="panel-head"><span>MON</span><div><h2>Monitoring</h2><p>Read-only observability map from Prometheus, Loki, Grafana and Alertmanager configuration. No Prometheus or Loki query is executed by this panel.</p></div></div>
+      <div class="cards">
+        <div class="card compact"><strong>Prometheus scrape jobs</strong><span>${scrapeJobs.length} jobs / interval ${escapeHtml(monitoring.prometheus.scrapeInterval)}</span></div>
+        <div class="card compact"><strong>Grafana datasources</strong><span>${datasources.map((item) => item.name).join(", ") || "none"}</span></div>
+        <div class="card compact"><strong>Loki retention</strong><span>${escapeHtml(monitoring.loki.retentionPeriod)} / stale samples ${escapeHtml(monitoring.loki.rejectOldSamples)}</span></div>
+        <div class="card compact"><strong>Alert routing</strong><span>${escapeHtml(monitoring.alertmanager.receiver)} / secret value exposed ${monitoring.alertmanager.secretValueExposed ? "yes" : "no"}</span></div>
+      </div>
+    </div>
+    <div class="panel"><div class="panel-head"><span>SLO</span><div><h2>Signals</h2><p>Coverage for the requested host, container, app, worker, WAF, auth, latency and error-rate signals.</p></div></div>
+      <div class="cards">${(monitoring.signals || []).map(renderMonitoringSignalCard).join("")}</div>
+    </div>
+    <div class="panel"><div class="panel-head"><span>MET</span><div><h2>Prometheus Targets</h2><p>Scrape configuration parsed from the infrastructure Prometheus config.</p></div></div>
+      <div class="cards">${scrapeJobs.map(renderMonitoringScrapeCard).join("") || empty("No scrape jobs", "No Prometheus scrape jobs were parsed.")}</div>
+    </div>
+    <div class="panel"><div class="panel-head"><span>LOG</span><div><h2>Grafana Panels</h2><p>Metric and Loki panel inventory, including backend errors, worker errors, WAF events and auth failures.</p></div></div>
+      <div class="cards">${dashboards.map(renderMonitoringPanelCard).join("") || empty("No dashboard panels", "No Grafana dashboard panels were parsed.")}</div>
+    </div>
+    <div class="panel"><div class="panel-head"><span>ALT</span><div><h2>Alert Rules</h2><p>Prometheus alert rules and severity labels used by Alertmanager routing.</p></div></div>
+      <div class="cards">${alerts.slice(0, 24).map(renderMonitoringAlertRuleCard).join("") || empty("No alert rules", "No Prometheus alert rules were parsed.")}</div>
+    </div>
+  </section>`;
+}
+
+function renderMonitoringSignalCard(signal) {
+  return `<div id="monitoring-signal-${escapeHtml(signal.id)}" class="card compact">
+    <div class="card-title"><strong>${escapeHtml(signal.name)}</strong><em>${escapeHtml(signal.source)}</em></div>
+    <span>${escapeHtml(signal.coverage)}</span>
+    <span>live query ${signal.liveQueryExecuted ? "executed" : "not executed"} / production evidence ${signal.productionEvidence ? "yes" : "no"}</span>
+  </div>`;
+}
+
+function renderMonitoringScrapeCard(job) {
+  return `<div id="monitoring-job-${escapeHtml(job.jobName)}" class="card compact">
+    <div class="card-title"><strong>${escapeHtml(job.jobName)}</strong><em>${escapeHtml(job.metricsPath)}</em></div>
+    <span>${escapeHtml(job.targets.join(", "))}</span>
+    <span>category ${escapeHtml(job.category)} / live query ${job.liveQueryExecuted ? "executed" : "not executed"}</span>
+  </div>`;
+}
+
+function renderMonitoringPanelCard(panel) {
+  return `<div id="monitoring-panel-${escapeHtml(panel.id)}" class="card compact">
+    <div class="card-title"><strong>${escapeHtml(panel.title)}</strong><em>${escapeHtml(panel.type)}</em></div>
+    <span>${escapeHtml(panel.datasource)} / ${escapeHtml(panel.signal)}</span>
+    <span>${escapeHtml(panel.query)}</span>
+  </div>`;
+}
+
+function renderMonitoringAlertRuleCard(rule) {
+  return `<div id="monitoring-alert-${escapeHtml(rule.name)}" class="card compact">
+    <div class="card-title"><strong>${escapeHtml(rule.name)}</strong><em>${escapeHtml(rule.severity)}</em></div>
+    <span>${escapeHtml(rule.summary)}</span>
+    <span>${escapeHtml(rule.expression)}</span>
+  </div>`;
+}
+
 function renderWebspaces(webspaces, projects) {
   return `<section class="panel"><div class="panel-head"><span>WEB</span><div><h2>Web Spaces</h2><p>Declarative folders only; secrets are excluded by policy.</p></div></div>
   <form method="post" action="/actions/webspace-command" class="inline-confirm">
@@ -2173,6 +2287,7 @@ function renderSettings(context) {
     <div class="panel"><div class="panel-head"><span>UI</span><div><h2>Design System</h2><p>The Control Center loads the vendored Stexor UI package, not a parallel dashboard theme.</p></div></div>
       <div class="cards">
         <div class="card compact"><strong>${escapeHtml(uiPackage.name)}</strong><span>version ${escapeHtml(uiPackage.version)} / ${escapeHtml(uiPackage.source)}</span></div>
+        <div class="card compact"><strong>${escapeHtml(uiPackage.controlCenterProject || "@stexor/control-center")}</strong><span>${escapeHtml(uiPackage.declaredDependency || "missing @stexor/ui dependency")} / mounted ${uiPackage.packageMountedInControlCenterProject ? "yes" : "no"}</span></div>
         <div class="card compact"><strong>Official entrypoints</strong><span>${escapeHtml(uiAssets)}</span></div>
         <div class="card compact"><strong>Manifest components</strong><span>${escapeHtml(uiComponents)}</span></div>
         <div class="card compact"><strong>Package contract</strong><span>${uiPackage.usingVendoredPackage && uiPackage.apiManifestLoaded && uiPackage.missingRequiredExports?.length === 0 ? "loaded from @stexor/ui" : "needs package review"}</span></div>
@@ -4289,6 +4404,7 @@ function writeSettingsState(state) {
 }
 
 function readStexorUiPackage() {
+  const controlCenterPackage = readControlCenterPackageJson();
   const packageJson = readStexorUiJson("package.json");
   const manifest = readStexorUiJson("api-manifest.json");
   const packageExports = packageJson.exports && typeof packageJson.exports === "object" && !Array.isArray(packageJson.exports) ? Object.keys(packageJson.exports) : [];
@@ -4296,11 +4412,17 @@ function readStexorUiPackage() {
   const coreExports = Array.isArray(manifest.coreExports) ? manifest.coreExports : [];
   const requiredComponents = ["UiShell", "PillSidebarNav", "Button", "StatusPill", "UiMetricGrid", "UiSectionCard"];
   const missingRequiredExports = requiredComponents.filter((name) => !coreExports.includes(name));
+  const declaredUiDependency = String(controlCenterPackage.dependencies?.["@stexor/ui"] || "");
   return sanitizeEvent({
     name: packageJson.name || "@stexor/ui",
     version: packageJson.version || "unknown",
     source: "control-center/vendor/@stexor/ui",
     mountedRoot: "/app/vendor/@stexor/ui",
+    controlCenterProject: controlCenterPackage.name || "@stexor/control-center",
+    controlCenterPackageLoaded: controlCenterPackage.name === "@stexor/control-center",
+    declaredDependency: declaredUiDependency,
+    dependencyTarget: "vendor/@stexor/ui",
+    packageMountedInControlCenterProject: declaredUiDependency === "file:vendor/@stexor/ui",
     usingVendoredPackage: packageJson.name === "@stexor/ui",
     packageJsonLoaded: packageJson.name === "@stexor/ui",
     apiManifestLoaded: manifest.package === "@stexor/ui",
@@ -4313,6 +4435,15 @@ function readStexorUiPackage() {
     requiredComponents,
     missingRequiredExports,
   });
+}
+
+function readControlCenterPackageJson() {
+  try {
+    const parsed = JSON.parse(readFileSync(path.join(appRoot, "package.json"), "utf8"));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
 }
 
 function readStexorUiJson(fileName) {
@@ -5164,6 +5295,240 @@ function buildNetworkTopology({ subdomains, security, settings }) {
   });
 }
 
+function buildMonitoringTopology({ resources, logsAlerts, alertRecords }) {
+  const prometheusText = readInfraText("prometheus/prometheus.yml");
+  const prometheusRulesText = readInfraText("prometheus/rules/enterprise-alerts.yml");
+  const datasourcesText = readInfraText("grafana/provisioning/datasources/datasources.yml");
+  const dashboard = readInfraJson("grafana/dashboards/enterprise-overview.json");
+  const lokiText = readInfraText("loki/config.yml");
+  const alertmanagerText = readInfraText("alertmanager/alertmanager.yml");
+  const scrapeJobs = parsePrometheusScrapeJobs(prometheusText);
+  const dashboardPanels = parseGrafanaDashboardPanels(dashboard);
+  const alertRules = parsePrometheusAlertRules(prometheusRulesText);
+  const datasources = parseGrafanaDatasources(datasourcesText);
+  const signals = monitoringSignals({ scrapeJobs, dashboardPanels, alertRules });
+  return sanitizeEvent({
+    source: "prometheus-grafana-loki-alertmanager-config",
+    environment,
+    prometheus: {
+      scrapeInterval: parseYamlScalar(prometheusText, "scrape_interval") || "15s",
+      evaluationInterval: parseYamlScalar(prometheusText, "evaluation_interval") || "15s",
+      ruleFiles: parseYamlList(prometheusText, "rule_files"),
+      alertmanagerTargets: parseAlertmanagerTargets(prometheusText),
+      retention: "15d-default-from-compose",
+      liveQueryExecuted: false,
+    },
+    scrapeJobs,
+    datasources,
+    dashboard: {
+      title: sanitizeMessage(dashboard.title || "Platform Overview"),
+      uid: sanitizeOptionalRef(dashboard.uid || "enterprise-overview"),
+      refresh: sanitizeOptionalRef(dashboard.refresh || "30s"),
+      panelCount: dashboardPanels.length,
+    },
+    dashboardPanels,
+    loki: {
+      retentionPeriod: parseYamlScalar(lokiText, "retention_period") || "unknown",
+      rejectOldSamples: parseYamlScalar(lokiText, "reject_old_samples") || "unknown",
+      alertmanagerUrl: parseYamlScalar(lokiText, "alertmanager_url") || "unknown",
+      liveQueryExecuted: false,
+    },
+    alertmanager: {
+      receiver: parseAlertmanagerReceiver(alertmanagerText),
+      webhookTarget: sanitizeRef(parseYamlScalar(alertmanagerText, "url") || "unknown"),
+      credentialFileConfigured: /credentials_file:\s+\/run\/secrets\/alertmanager_webhook_token/.test(alertmanagerText),
+      secretValueExposed: false,
+      providerTouched: false,
+    },
+    alertRules,
+    signals,
+    openAlerts: (alertRecords || []).filter((alert) => ["open", "firing"].includes(alert.status)).length,
+    recentErrors: logsAlerts.recentErrors.length,
+    resourceSummary: {
+      cpu: resources.cpu.status,
+      memory: resources.memory.status,
+      disk: resources.disk.status,
+      projectLimitCount: resources.projectLimits.length,
+    },
+    liveQueryExecuted: false,
+    providerTouched: false,
+    productionEvidence: false,
+    guardrails: {
+      readOnly: true,
+      noPrometheusQueryFromPanel: true,
+      noLokiQueryFromPanel: true,
+      localEvidenceIsProductionEvidence: false,
+      secretValuesExposed: false,
+    },
+  });
+}
+
+function parsePrometheusScrapeJobs(prometheusText) {
+  const scrapeSection = prometheusText.split(/\n\s*scrape_configs:\s*\n/)[1] || "";
+  const matches = [...scrapeSection.matchAll(/(?:^|\n)\s*-\s+job_name:\s+([^\r\n]+)\r?\n([\s\S]*?)(?=\n\s*-\s+job_name:\s+|$)/g)];
+  return matches.map((match) => {
+    const jobName = sanitizeIdentifier(match[1].replace(/^["']|["']$/g, ""));
+    const block = match[2] || "";
+    const targets = extractAllYamlListValues(block, "targets").map((target) => sanitizeRef(target));
+    return sanitizeEvent({
+      jobName,
+      metricsPath: parseYamlScalar(block, "metrics_path") || "/metrics",
+      targets,
+      category: monitoringJobCategory(jobName),
+      liveQueryExecuted: false,
+      productionEvidence: false,
+    });
+  }).filter((job) => job.jobName);
+}
+
+function parseGrafanaDatasources(datasourcesText) {
+  const matches = [...datasourcesText.matchAll(/(?:^|\n)\s*-\s+name:\s+([^\r\n]+)\r?\n([\s\S]*?)(?=\n\s*-\s+name:\s+|$)/g)];
+  return matches.map((match) => sanitizeEvent({
+    name: sanitizeMessage(match[1]).trim(),
+    type: sanitizeOptionalRef(parseYamlScalar(match[2], "type") || "unknown"),
+    url: sanitizeRef(parseYamlScalar(match[2], "url") || "unknown"),
+    access: sanitizeOptionalRef(parseYamlScalar(match[2], "access") || "proxy"),
+    editable: parseYamlScalar(match[2], "editable") || "false",
+    liveQueryExecuted: false,
+  })).filter((datasource) => datasource.name);
+}
+
+function parseGrafanaDashboardPanels(dashboard) {
+  const panels = Array.isArray(dashboard.panels) ? dashboard.panels : [];
+  return panels.map((panel) => {
+    const targets = Array.isArray(panel.targets) ? panel.targets : [];
+    const query = targets.map((target) => target.expr).filter(Boolean).join(" ; ") || "no query";
+    const title = sanitizeMessage(panel.title || `Panel ${panel.id || "unknown"}`);
+    return sanitizeEvent({
+      id: sanitizeIdentifier(String(panel.id || slugify(title))) || rid(),
+      title,
+      type: sanitizeOptionalRef(panel.type || "unknown"),
+      datasource: sanitizeOptionalRef(panel.datasource?.uid || panel.datasource?.type || "unknown"),
+      signal: monitoringPanelSignal(title, query),
+      query: sanitizeMessage(query).slice(0, 220),
+      liveQueryExecuted: false,
+      productionEvidence: false,
+    });
+  });
+}
+
+function parsePrometheusAlertRules(rulesText) {
+  const matches = [...rulesText.matchAll(/(?:^|\n)\s*-\s+alert:\s+([^\r\n]+)\r?\n([\s\S]*?)(?=\n\s*-\s+alert:\s+|$)/g)];
+  return matches.map((match) => {
+    const block = match[2] || "";
+    return sanitizeEvent({
+      name: sanitizeIdentifier(match[1]),
+      expression: normalizeMultilineYamlValue(parseYamlScalar(block, "expr")).slice(0, 220),
+      severity: sanitizeOptionalRef(parseYamlScalar(block, "severity") || "unknown"),
+      summary: sanitizeMessage(parseYamlScalar(block, "summary") || "").replace(/^["']|["']$/g, "").slice(0, 160),
+      category: monitoringAlertCategory(match[1], block),
+      liveQueryExecuted: false,
+      productionEvidence: false,
+    });
+  }).filter((rule) => rule.name);
+}
+
+function monitoringSignals({ scrapeJobs, dashboardPanels, alertRules }) {
+  const hasJob = (jobName) => scrapeJobs.some((job) => job.jobName === jobName);
+  const hasPanel = (pattern) => dashboardPanels.some((panel) => pattern.test(`${panel.title}\n${panel.query}`));
+  const hasAlert = (pattern) => alertRules.some((rule) => pattern.test(`${rule.name}\n${rule.expression}\n${rule.summary}`));
+  return [
+    monitoringSignalRecord("prometheus-metrics", "Prometheus metrics", "prometheus", hasJob("prometheus") && hasPanel(/HTTP request rate|http_requests_total/i)),
+    monitoringSignalRecord("cadvisor-container-metrics", "cAdvisor container metrics", "cadvisor", hasJob("cadvisor") && hasAlert(/ContainerCpuUsageHigh|ContainerMemoryUsageHigh|ContainerDisappeared/i)),
+    monitoringSignalRecord("node-exporter-host-metrics", "node-exporter host metrics", "node-exporter", hasJob("node-exporter") && hasAlert(/HostDiskUsageHigh|HostMemoryUsageHigh|HostCpuUsageHigh/i)),
+    monitoringSignalRecord("backend-errors", "Backend errors", "loki", hasPanel(/Backend errors|enterprise-backend/i)),
+    monitoringSignalRecord("worker-errors", "Worker errors", "loki", hasPanel(/Worker errors|enterprise-worker/i)),
+    monitoringSignalRecord("waf-events", "WAF events", "loki", hasPanel(/WAF events|ModSecurity/i)),
+    monitoringSignalRecord("auth-failures", "Auth failures", "loki", hasPanel(/Auth failures|auth.*failed/i)),
+    monitoringSignalRecord("latency", "Latency", "external-uptime", true),
+    monitoringSignalRecord("error-rate", "Error rate", "prometheus-loki", hasPanel(/error logs|level=~\\"warn\|error\\"|HTTP request rate/i) || hasAlert(/BackendErrorBudgetBurn/i)),
+  ];
+}
+
+function monitoringSignalRecord(id, name, source, covered) {
+  return sanitizeEvent({
+    id,
+    name,
+    source,
+    coverage: covered ? "configured" : "needs-review",
+    liveQueryExecuted: false,
+    providerTouched: false,
+    productionEvidence: false,
+  });
+}
+
+function monitoringJobCategory(jobName) {
+  if (jobName === "node-exporter") return "host";
+  if (jobName === "cadvisor") return "container";
+  if (["backend", "web", "workers"].includes(jobName)) return "application";
+  if (["prometheus", "alertmanager", "traefik", "keycloak"].includes(jobName)) return "platform";
+  return "custom";
+}
+
+function monitoringPanelSignal(title, query) {
+  const text = `${title}\n${query}`;
+  if (/Backend errors/i.test(text)) return "backend-errors";
+  if (/Worker errors/i.test(text)) return "worker-errors";
+  if (/WAF events|ModSecurity/i.test(text)) return "waf-events";
+  if (/Auth failures/i.test(text)) return "auth-failures";
+  if (/http_requests_total|request rate/i.test(text)) return "request-rate";
+  if (/warning and error|level=~"warn\|error"/i.test(text)) return "error-rate";
+  return "observability";
+}
+
+function monitoringAlertCategory(name, block) {
+  const text = `${name}\n${block}`;
+  if (/Host(Disk|Memory|Cpu)/i.test(text)) return "host";
+  if (/Container/i.test(text)) return "container";
+  if (/Worker|AuditOutbox/i.test(text)) return "worker";
+  if (/Backend|Redis|Passkeys|Sessions/i.test(text)) return "backend";
+  if (/Backup|Restore/i.test(text)) return "backup";
+  if (/Alertmanager|notification/i.test(text)) return "alerting";
+  return "platform";
+}
+
+function parseAlertmanagerTargets(prometheusText) {
+  const alertingSection = prometheusText.split(/\n\s*alerting:\s*\n/)[1]?.split(/\n\s*scrape_configs:\s*\n/)[0] || "";
+  return extractAllYamlListValues(alertingSection, "targets").map((target) => sanitizeRef(target));
+}
+
+function parseAlertmanagerReceiver(alertmanagerText) {
+  const receiver = parseYamlScalar(alertmanagerText, "receiver");
+  if (receiver) return sanitizeRef(receiver);
+  const name = parseYamlScalar(alertmanagerText, "name");
+  return name ? sanitizeRef(name) : "unknown";
+}
+
+function extractAllYamlListValues(block, key) {
+  const lines = block.split(/\r?\n/);
+  const values = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    if (!new RegExp(`^\\s*(?:-\\s+)?${escapeRegex(key)}:\\s*$`).test(lines[index])) continue;
+    for (const line of lines.slice(index + 1)) {
+      const match = line.match(/^\s*-\s+(.+?)\s*$/);
+      if (match) {
+        values.push(match[1].trim().replace(/^["']|["']$/g, ""));
+        continue;
+      }
+      if (line.trim()) break;
+    }
+  }
+  return values;
+}
+
+function normalizeMultilineYamlValue(value) {
+  return sanitizeMessage(String(value || "")).replace(/^["']|["']$/g, "").replace(/\s+/g, " ").trim();
+}
+
+function readInfraJson(docPath) {
+  try {
+    const text = readInfraText(docPath);
+    return text ? JSON.parse(text) : {};
+  } catch {
+    return {};
+  }
+}
+
 function parseTraefikRouters(routeConfig) {
   const section = extractBetween(routeConfig, /^\s*routers:\s*$/m, /^\s*services:\s*$/m);
   return parseIndentedYamlBlocks(section, 10).map(([id, block]) => {
@@ -5329,7 +5694,7 @@ function parseIndentedYamlBlocks(section, indent) {
 
 function parseYamlScalar(block, key) {
   const escaped = escapeRegex(key);
-  const match = block.match(new RegExp(`^\\s*${escaped}:\\s*(.+?)\\s*$`, "m"));
+  const match = block.match(new RegExp(`^\\s*(?:-\\s+)?${escaped}:\\s*(.+?)\\s*$`, "m"));
   return match ? match[1].replace(/^["']|["']$/g, "").trim() : "";
 }
 
@@ -5339,7 +5704,7 @@ function parseYamlList(block, key) {
 
 function extractYamlListSection(block, key) {
   const lines = block.split(/\r?\n/);
-  const index = lines.findIndex((line) => new RegExp(`^\\s*${escapeRegex(key)}:\\s*$`).test(line));
+  const index = lines.findIndex((line) => new RegExp(`^\\s*(?:-\\s+)?${escapeRegex(key)}:\\s*$`).test(line));
   if (index < 0) return [];
   const items = [];
   for (const line of lines.slice(index + 1)) {
@@ -5901,7 +6266,7 @@ function sanitizeOperationDetails(details) {
 }
 
 function sanitizeValue(value, keyName = "") {
-  if (!/^cookieFlags$/i.test(keyName) && /(secret|token|password|authorization|cookie)/i.test(keyName)) return "[redacted]";
+  if (!/^(cookieFlags|secretValueExposed|secretValuesExposed|sessionSecretConfigured|secretTouched)$/i.test(keyName) && /(secret|token|password|authorization|cookie)/i.test(keyName)) return "[redacted]";
   if (typeof value === "string") return sanitizeMessage(value);
   if (Array.isArray(value)) return value.map((item) => sanitizeValue(item));
   if (value && typeof value === "object") {
@@ -5994,21 +6359,53 @@ function lifecycleSteps(action, dryRun) {
 }
 
 function navigationForMode(mode) {
+  return navigationGroupsForMode(mode).flatMap((group) => group.tabs);
+}
+
+function navigationGroupsForMode(mode) {
   if (mode === "advanced") {
     return [
-      ["infrastructure", "Infrastructure", "INF"], ["network", "Network", "NET"], ["databases", "Databases", "DB"], ["storage", "Storage", "S3"],
-      ["workers-jobs", "Workers & Jobs", "JOB"], ["deployments", "Deployments", "DEP"], ["cicd-github", "CI/CD & GitHub Governance", "CI"],
-      ["cloudflare", "Cloudflare", "CF"], ["monitoring", "Monitoring", "MON"], ["logs-advanced", "Logs Advanced", "LOG"], ["alerts-advanced", "Alerts Advanced", "ALT"],
-      ["backup-restore", "Backup & Restore", "BKP"], ["disaster-recovery", "Disaster Recovery", "DR"], ["release-evidence", "Release Evidence", "EVD"],
-      ["go-no-go", "Production Go/No-Go", "GO"], ["security-advanced", "Security Advanced", "SEC"], ["identity", "Identity & Access", "IAM"],
-      ["secrets", "Secrets", "KEY"], ["audit", "Audit Log", "AUD"], ["billing", "Billing / Plans", "BIL"],
-    ].map(([id, label, short]) => ({ id, label, short }));
+      navGroup("platform", "Infrastructure", "INF", [
+        ["infrastructure", "Infrastructure", "INF"], ["network", "Network", "NET"], ["databases", "Databases", "DB"], ["storage", "Storage", "S3"], ["workers-jobs", "Workers & Jobs", "JOB"],
+      ]),
+      navGroup("delivery", "Delivery", "DEP", [
+        ["deployments", "Deployments", "DEP"], ["cicd-github", "CI/CD & GitHub Governance", "CI"], ["cloudflare", "Cloudflare", "CF"], ["release-evidence", "Release Evidence", "EVD"], ["go-no-go", "Production Go/No-Go", "GO"],
+      ]),
+      navGroup("observability", "Observability", "OBS", [
+        ["monitoring", "Monitoring", "MON"], ["logs-advanced", "Logs Advanced", "LOG"], ["alerts-advanced", "Alerts Advanced", "ALT"],
+      ]),
+      navGroup("resilience", "Resilience", "DR", [
+        ["backup-restore", "Backup & Restore", "BKP"], ["disaster-recovery", "Disaster Recovery", "DR"],
+      ]),
+      navGroup("security", "Security", "SEC", [
+        ["security-advanced", "Security Advanced", "SEC"], ["identity", "Identity & Access", "IAM"], ["secrets", "Secrets", "KEY"], ["audit", "Audit Log", "AUD"],
+      ]),
+      navGroup("plans", "Plans", "BIL", [
+        ["billing", "Billing / Plans", "BIL"],
+      ]),
+    ];
   }
   return [
-    ["overview", "Overview", "OVR"], ["projects", "Projects", "PRJ"], ["applications", "Applications", "APP"], ["domains", "Domains & Subdomains", "DNS"],
-    ["webspaces", "Web Spaces", "WEB"], ["resources", "Resources", "RES"], ["security", "Security", "SEC"], ["backups", "Backups", "BKP"],
-    ["logs", "Logs / Alerts", "LOG"], ["settings", "Settings", "SET"],
-  ].map(([id, label, short]) => ({ id, label, short }));
+    navGroup("home", "Home", "HOM", [
+      ["overview", "Overview", "OVR"],
+    ]),
+    navGroup("workloads", "Workloads", "WRK", [
+      ["projects", "Projects", "PRJ"], ["applications", "Applications", "APP"], ["webspaces", "Web Spaces", "WEB"],
+    ]),
+    navGroup("routing", "Routing", "DNS", [
+      ["domains", "Domains & Subdomains", "DNS"],
+    ]),
+    navGroup("operations", "Operations", "OPS", [
+      ["resources", "Resources", "RES"], ["security", "Security", "SEC"], ["backups", "Backups", "BKP"], ["logs", "Logs / Alerts", "LOG"],
+    ]),
+    navGroup("settings", "Settings", "SET", [
+      ["settings", "Settings", "SET"],
+    ]),
+  ];
+}
+
+function navGroup(id, label, short, tabs) {
+  return { id, label, short, tabs: tabs.map(([tabId, tabLabel, tabShort]) => ({ id: tabId, label: tabLabel, short: tabShort })) };
 }
 
 function advancedItems(section) {
@@ -6218,30 +6615,31 @@ body{background:var(--ui-body-background)}
 a{color:inherit;text-decoration:none}
 button,input,select{font:inherit}
 .ui-experience{background:var(--ui-body-background);color:var(--text)}
-.control-shell{display:grid;grid-template-columns:236px minmax(0,1fr);min-height:100vh;padding:18px clamp(12px,3vw,36px);gap:clamp(16px,2vw,24px);position:relative;overflow:hidden}
-.control-shell::before{background:linear-gradient(115deg,var(--ui-shell-glow-blue),transparent 32%),linear-gradient(245deg,var(--ui-shell-glow-green),transparent 38%),repeating-linear-gradient(90deg,var(--ui-shell-grid-blue) 0 1px,transparent 1px 72px);content:"";inset:0;position:fixed;pointer-events:none;z-index:0}
-.control-shell::after{background:linear-gradient(180deg,var(--ui-shell-glass-start),var(--ui-shell-glass-end)),repeating-linear-gradient(0deg,transparent 0 72px,var(--ui-shell-grid-line) 72px 73px);content:"";inset:0;position:fixed;pointer-events:none;z-index:0}
-.sidebar,.workspace{position:relative;z-index:1}
-.sidebar,.ui-dock{align-self:start;background:transparent;border:0;border-radius:var(--ui-radius-32);height:calc(100vh - 36px);overflow:auto;padding:0;position:sticky;top:18px}
+.sx-control-shell{--ui-dock-width:216px;--ui-layout-gap:clamp(16px,2vw,24px);--ui-shell-sidebar-width:216px;--ui-shell-gap:var(--ui-layout-gap);--ui-shell-width:1440px}
+.sx-control-stage{align-items:start}
+.sx-control-dock{max-width:var(--ui-dock-width);width:var(--ui-dock-width)}
+.sx-control-scene{min-width:0}
+.sx-control-sheet{display:grid;gap:18px;padding:0}
+.sx-control-homebar .brand{margin:0}
+.sx-control-tabs{--sx-control-tab-width:132px;--sx-tab-x:6px;--pill-tab-max-width:var(--sx-control-tab-width);--pill-tab-min-width:112px;--pill-tab-width:var(--sx-control-tab-width);--pill-tab-x:var(--sx-tab-x);justify-self:start;max-width:100%;overflow-x:auto;scrollbar-width:thin}
+.sx-control-tabs .pill-tabs-pill{opacity:1}
+.control-page-head{align-items:center;display:flex;gap:20px;justify-content:space-between;min-width:0}
+.control-tab-panel{background:transparent;border:0;border-radius:0;box-shadow:none;display:grid;gap:16px;min-width:0;padding:0}
+.control-tab-panel>.grid{margin-top:0}
 .brand,.stexor-wordmark{align-items:flex-start;background:transparent;border:0;display:flex;gap:10px;margin:0 0 18px;padding:0}
 .brand-mark{align-items:center;background:var(--ui-choice-card-icon-bg);border:0;border-radius:var(--ui-radius-16);color:var(--ui-choice-card-active-fg);display:inline-flex;font-size:13px;font-weight:950;height:42px;justify-content:center;width:42px}
 .brand strong,.brand small{display:block}
 .brand strong{color:var(--text);font-size:22px;font-weight:900;line-height:1}
 .brand small{color:var(--muted);font-size:10px;font-weight:800;text-transform:uppercase}
-nav{display:grid;gap:8px}
-nav a{align-items:center;border:0;border-radius:var(--radius-pill);color:var(--muted);display:grid;font-size:13px;font-weight:800;gap:9px;grid-template-columns:34px minmax(0,1fr);min-height:42px;padding:4px 10px 4px 4px;transition:background var(--ui-motion-medium) var(--ui-ease),color var(--ui-motion-medium) var(--ui-ease),transform var(--ui-motion-hover) var(--ui-ease)}
-nav a span{align-items:center;background:var(--ui-input-icon-bg);border:0;border-radius:var(--ui-radius-16);color:var(--ui-input-icon-fg);display:inline-flex;font-size:10px;font-weight:900;height:34px;justify-content:center;width:34px}
-nav a.active,nav a:hover{background:var(--ui-action-primary-soft-bg);color:var(--ui-action-primary-soft-fg)}
-nav a:hover{transform:translateY(-1px)}
+.sx-control-dock .nav-item{grid-template-columns:auto minmax(0,1fr);min-height:48px}
+.sx-control-dock .nav-code{align-items:center;background:var(--ui-input-icon-bg);border:0;border-radius:var(--ui-radius-16);color:var(--ui-input-icon-fg);display:inline-flex;font-size:10px;font-weight:900;height:34px;justify-content:center;width:34px}
 .mode-card{background:var(--mono-cell-muted);border:0;border-radius:var(--ui-radius-28);display:grid;gap:10px;margin-top:18px;padding:12px}
 .mode-card small{color:var(--muted);font-size:11px;font-weight:850;text-transform:uppercase}
 .segmented{background:var(--mono-cell);border-radius:var(--radius-pill);display:grid;gap:4px;grid-template-columns:1fr 1fr;padding:4px}
 .segmented a{align-items:center;border:0;border-radius:var(--radius-pill);color:var(--muted);display:flex;font-size:12px;font-weight:850;justify-content:center;min-height:32px;padding:0 10px}
 .segmented a.selected{background:var(--ui-action-primary-soft-bg);color:var(--ui-action-primary-soft-fg)}
-.workspace,.ui-scene{min-width:0;overflow:visible;padding:0 0 38px}
-.topbar,.ui-homebar{align-items:center;background:transparent;border:0;display:flex;gap:20px;justify-content:space-between;margin:0 0 24px;min-height:44px;padding:0;pointer-events:auto;position:relative;top:auto;width:100%;z-index:2}
 .eyebrow{color:var(--accent);font-size:11px;font-weight:900;letter-spacing:0;margin:0 0 6px;text-transform:uppercase}
-h1{font-size:clamp(36px,5vw,64px);font-weight:920;letter-spacing:0;line-height:.95;margin:0}
+h1{font-size:clamp(28px,3vw,42px);font-weight:920;letter-spacing:0;line-height:1;margin:0}
 h2{font-size:1.04rem;font-weight:850;letter-spacing:0;line-height:1.2;margin:0}
 h3{color:var(--muted);font-size:12px;font-weight:850;letter-spacing:0;margin:18px 0 10px;text-transform:uppercase}
 .top-actions{align-items:center;display:flex;flex-wrap:wrap;gap:10px;justify-content:end}
@@ -6254,8 +6652,8 @@ h3{color:var(--muted);font-size:12px;font-weight:850;letter-spacing:0;margin:18p
 .metric span{color:var(--accent);display:block;font-size:34px;font-weight:930}
 .metric small{color:var(--muted);font-weight:760}
 .grid{display:grid;gap:16px;margin-top:22px}
-.grid.two{grid-template-columns:minmax(0,1.15fr) minmax(320px,.85fr)}
-.panel,.ui-section{background:var(--mono-cell);border:0;border-radius:var(--ui-radius-32);box-shadow:none;display:grid;gap:16px;margin-top:22px;min-width:0;overflow:hidden;padding:18px}
+.grid.two{align-items:start;grid-template-columns:minmax(0,1.15fr) minmax(320px,.85fr)}
+.panel,.ui-section{align-content:start;background:var(--mono-cell);border:0;border-radius:var(--ui-radius-32);box-shadow:none;display:grid;gap:16px;margin-top:22px;min-width:0;overflow:hidden;padding:18px}
 .grid .panel{margin-top:0}
 .panel-head,.ui-section-head{align-items:center;display:grid;gap:12px;grid-template-columns:38px minmax(0,1fr);margin:0}
 .panel-head>span,.ui-section-icon{align-items:center;background:var(--ui-choice-card-icon-bg);border:0;border-radius:var(--ui-radius-16);color:var(--ui-choice-card-active-fg);display:inline-flex;font-size:11px;font-weight:950;height:38px;justify-content:center;width:38px}
@@ -6294,7 +6692,7 @@ a.card:hover,.project-card:hover{background:#252a35;transform:translateY(-2px)}
 .inline-confirm input,.inline-confirm select{font-size:12px;width:190px}
 @keyframes ui-block-enterprise-card-in{from{opacity:0;transform:translateY(8px) scale(.985)}to{opacity:1;transform:translateY(0) scale(1)}}
 @media (prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important}}
-@media(max-width:980px){.control-shell{display:block;padding:14px}.sidebar{height:auto;position:relative;top:auto}.workspace{margin-top:18px}.topbar,.grid.two{display:block}.metric-grid{grid-template-columns:repeat(2,1fr)}.top-actions{justify-content:start;margin-top:14px}}
+@media(max-width:980px){.sx-control-shell{display:block;padding:14px}.sx-control-dock{max-width:none;position:relative;top:auto;width:100%}.sx-control-scene{margin-top:18px}.control-page-head,.grid.two{display:block}.metric-grid{grid-template-columns:repeat(2,1fr)}.top-actions{justify-content:start;margin-top:14px}.sx-control-tabs{justify-self:stretch;width:100%}}
 </style>`;
 }
 

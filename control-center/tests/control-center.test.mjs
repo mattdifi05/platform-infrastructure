@@ -96,8 +96,14 @@ test("Stexor Control Center local foundation", async (t) => {
   assert.match(html, /\/assets\/stexor-ui\/src\/styles\.css/);
   assert.match(html, /\/assets\/stexor-ui\/src\/ui\.css/);
   assert.match(html, /ui-experience/);
+  assert.match(html, /ui-shell/);
+  assert.match(html, /ui-stage-grid/);
   assert.match(html, /ui-dock/);
+  assert.match(html, /pill-sidebar-nav/);
+  assert.match(html, /pill-tabs/);
   assert.match(html, /stexor-wordmark/);
+  assert.match(html, /Workloads/);
+  assert.match(html, /Operations/);
 
   const stexorStyles = await getText(`${baseUrl}/assets/stexor-ui/src/styles.css`);
   assert.match(stexorStyles, /@import "\.\/styles\/base-01-foundation\.css"/);
@@ -108,6 +114,10 @@ test("Stexor Control Center local foundation", async (t) => {
   assert.match(stexorUiShellCss, /\.ui-stage-grid/);
   const stexorUiPackage = await getJson(`${baseUrl}/control/ui-package`);
   assert.equal(stexorUiPackage.name, "@stexor/ui");
+  assert.equal(stexorUiPackage.controlCenterProject, "@stexor/control-center");
+  assert.equal(stexorUiPackage.controlCenterPackageLoaded, true);
+  assert.equal(stexorUiPackage.declaredDependency, "file:vendor/@stexor/ui");
+  assert.equal(stexorUiPackage.packageMountedInControlCenterProject, true);
   assert.equal(stexorUiPackage.usingVendoredPackage, true);
   assert.equal(stexorUiPackage.apiManifestLoaded, true);
   assert.equal(stexorUiPackage.hostInstallRequired, false);
@@ -123,14 +133,15 @@ test("Stexor Control Center local foundation", async (t) => {
   assert.match(advancedHtml, /Infrastructure/);
   assert.match(advancedHtml, /Traefik/);
   assert.match(advancedHtml, /cAdvisor/);
+  assert.match(advancedHtml, /pill-sidebar-nav/);
+  assert.match(advancedHtml, /pill-tabs/);
+  assert.match(advancedHtml, /Delivery/);
+  assert.match(advancedHtml, /Observability/);
+  assert.match(advancedHtml, /Resilience/);
   assert.match(advancedHtml, /Workers &amp; Jobs/);
-  assert.match(advancedHtml, /CI\/CD &amp; GitHub Governance/);
-  assert.match(advancedHtml, /Logs Advanced/);
-  assert.match(advancedHtml, /Alerts Advanced/);
-  assert.match(advancedHtml, /Disaster Recovery/);
-  assert.match(advancedHtml, /Release Evidence/);
-  assert.match(advancedHtml, /Security Advanced/);
-  assert.match(advancedHtml, /Billing \/ Plans/);
+  assert.match(advancedHtml, /Network/);
+  assert.match(advancedHtml, /Databases/);
+  assert.doesNotMatch(advancedHtml, /CI\/CD &amp; GitHub Governance[\s\S]*Logs Advanced[\s\S]*Billing \/ Plans/);
 
   const networkApi = await getJson(`${baseUrl}/control/network`);
   assert.equal(networkApi.guardrails.readOnly, true);
@@ -159,6 +170,43 @@ test("Stexor Control Center local foundation", async (t) => {
   assert.match(advancedNetworkHtml, /Route Test Plan/);
   assert.match(advancedNetworkHtml, /enterprise-backend/);
 
+  const monitoringApi = await getJson(`${baseUrl}/control/monitoring`);
+  assert.equal(monitoringApi.guardrails.readOnly, true);
+  assert.equal(monitoringApi.guardrails.noPrometheusQueryFromPanel, true);
+  assert.equal(monitoringApi.guardrails.noLokiQueryFromPanel, true);
+  assert.equal(monitoringApi.liveQueryExecuted, false);
+  assert.equal(monitoringApi.productionEvidence, false);
+  assert.equal(monitoringApi.scrapeJobs.some((job) => job.jobName === "backend" && job.targets.includes("backend:3000")), true);
+  assert.equal(monitoringApi.scrapeJobs.some((job) => job.jobName === "workers" && job.targets.includes("worker-jobs:3000")), true);
+  assert.equal(monitoringApi.scrapeJobs.some((job) => job.jobName === "node-exporter" && job.category === "host"), true);
+  assert.equal(monitoringApi.scrapeJobs.some((job) => job.jobName === "cadvisor" && job.category === "container"), true);
+  assert.equal(monitoringApi.datasources.some((datasource) => datasource.name === "Prometheus" && datasource.url === "http://prometheus:9090"), true);
+  assert.equal(monitoringApi.datasources.some((datasource) => datasource.name === "Loki" && datasource.url === "http://loki:3100"), true);
+  assert.equal(monitoringApi.dashboardPanels.some((panel) => panel.title === "Backend errors" && panel.signal === "backend-errors"), true);
+  assert.equal(monitoringApi.dashboardPanels.some((panel) => panel.title === "Worker errors" && panel.signal === "worker-errors"), true);
+  assert.equal(monitoringApi.dashboardPanels.some((panel) => panel.title === "WAF events" && panel.signal === "waf-events"), true);
+  assert.equal(monitoringApi.dashboardPanels.some((panel) => panel.title === "Auth failures" && panel.signal === "auth-failures"), true);
+  assert.equal(monitoringApi.signals.every((signal) => signal.coverage === "configured" && signal.liveQueryExecuted === false), true);
+  assert.equal(monitoringApi.alertmanager.credentialFileConfigured, true);
+  assert.equal(monitoringApi.alertmanager.secretValueExposed, false);
+  assert.equal(monitoringApi.loki.retentionPeriod, "168h");
+
+  const advancedMonitoringApi = await getJson(`${baseUrl}/control/advanced/monitoring`);
+  assert.equal(advancedMonitoringApi.data.signals.some((signal) => signal.id === "error-rate"), true);
+  assert.equal(advancedMonitoringApi.data.prometheus.liveQueryExecuted, false);
+  assert.equal(advancedMonitoringApi.productionEvidence, false);
+
+  const advancedMonitoringHtml = await getText(`${baseUrl}/?mode=advanced&section=monitoring`);
+  assert.match(advancedMonitoringHtml, /Monitoring/);
+  assert.match(advancedMonitoringHtml, /Logs Advanced/);
+  assert.match(advancedMonitoringHtml, /Alerts Advanced/);
+  assert.match(advancedMonitoringHtml, /Prometheus Targets/);
+  assert.match(advancedMonitoringHtml, /Grafana Panels/);
+  assert.match(advancedMonitoringHtml, /Alert Rules/);
+  assert.match(advancedMonitoringHtml, /Backend errors/);
+  assert.match(advancedMonitoringHtml, /WAF events/);
+  assert.match(advancedMonitoringHtml, /Auth failures/);
+
   const advancedWorkersHtml = await getText(`${baseUrl}/?mode=advanced&section=workers-jobs`);
   assert.match(advancedWorkersHtml, /Workers &amp; Jobs/);
   assert.match(advancedWorkersHtml, /failed jobs/);
@@ -168,6 +216,10 @@ test("Stexor Control Center local foundation", async (t) => {
 
   const advancedGithubHtml = await getText(`${baseUrl}/?mode=advanced&section=cicd-github`);
   assert.match(advancedGithubHtml, /CI\/CD &amp; GitHub Governance/);
+  assert.match(advancedGithubHtml, /Deployments/);
+  assert.match(advancedGithubHtml, /Cloudflare/);
+  assert.match(advancedGithubHtml, /Release Evidence/);
+  assert.match(advancedGithubHtml, /Production Go\/No-Go/);
   assert.match(advancedGithubHtml, /branch protection/);
   assert.match(advancedGithubHtml, /workflow status/);
   assert.match(advancedGithubHtml, /deploy approvals/);
@@ -198,6 +250,9 @@ test("Stexor Control Center local foundation", async (t) => {
 
   const advancedSecurityHtml = await getText(`${baseUrl}/?mode=advanced&section=security-advanced`);
   assert.match(advancedSecurityHtml, /Security Advanced/);
+  assert.match(advancedSecurityHtml, /Identity &amp; Access/);
+  assert.match(advancedSecurityHtml, /Secrets/);
+  assert.match(advancedSecurityHtml, /Audit Log/);
   assert.match(advancedSecurityHtml, /secret scan/);
   assert.match(advancedSecurityHtml, /vulnerability scan/);
   assert.match(advancedSecurityHtml, /Cloudflare Access/);
@@ -219,6 +274,9 @@ test("Stexor Control Center local foundation", async (t) => {
   assert.equal(overview.network.routers > 0, true);
   assert.equal(overview.network.middlewares > 0, true);
   assert.equal(overview.network.routeTests > 0, true);
+  assert.equal(overview.monitoring.scrapeJobs > 0, true);
+  assert.equal(overview.monitoring.dashboardPanels > 0, true);
+  assert.equal(overview.monitoring.alertRules > 0, true);
   assert.notEqual(overview.modeEvidence, "production evidence");
 
   const advancedApi = await getJson(`${baseUrl}/control/advanced`);
@@ -1477,6 +1535,8 @@ test("Stexor Control Center local foundation", async (t) => {
   assert.match(settingsHtml, /SMTP\/alert status/);
   assert.match(settingsHtml, /Design System/);
   assert.match(settingsHtml, /@stexor\/ui/);
+  assert.match(settingsHtml, /@stexor\/control-center/);
+  assert.match(settingsHtml, /file:vendor\/@stexor\/ui/);
   assert.match(settingsHtml, /UiShell/);
   assert.match(settingsHtml, /\/assets\/stexor-ui\/src\/ui\.css/);
   assert.match(settingsHtml, /Provider Connections/);

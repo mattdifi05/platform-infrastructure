@@ -1,0 +1,15 @@
+{
+  "name": "@stexor/control-center",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Docker-first Stexor infrastructure dashboard and Control Center.",
+  "main": "./server.mjs",
+  "dependencies": {
+    "@stexor/ui": "file:vendor/@stexor/ui"
+  },
+  "scripts": {
+    "start": "node server.mjs",
+    "test": "node --test tests/control-center.test.mjs"
+  }
+}
