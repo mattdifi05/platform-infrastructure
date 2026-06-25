@@ -92,6 +92,11 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    if (req.method === "POST" && url.pathname === "/actions/subdomain-command") {
+      await handleSubdomainCommand(req, res, context);
+      return;
+    }
+
     if (req.method === "POST" && url.pathname === "/actions/webspace-command") {
       await handleWebspaceCommand(req, res, context);
       return;
@@ -295,6 +300,33 @@ async function handleApplicationCommand(req, res, context) {
     return;
   }
   redirect(res, `/?section=applications&project=${encodeURIComponent(operation.projectId || "")}#app-${encodeURIComponent(id)}`);
+}
+
+async function handleSubdomainCommand(req, res, context) {
+  const payload = await readPayload(req);
+  const action = String(payload.action || "");
+  let operation;
+  try {
+    if (action === "apply-local") operation = applySubdomain({ ...payload, environment: "local", confirm: "APPLY-LOCAL" }, context);
+    else if (action === "verify") operation = verifySubdomain(payload.id || payload.subdomainId || "", context);
+    else if (action === "remove") operation = applySubdomainRemoval(payload.id || payload.subdomainId || "", payload, context);
+    else throw new ValidationError("Unsupported subdomain action.");
+  } catch (error) {
+    if (error instanceof ValidationError) {
+      json(res, { error: "validation_failed", message: error.message }, 422);
+      return;
+    }
+    if (error instanceof RejectedOperationError) {
+      json(res, { error: "operation_rejected", message: error.message }, 409);
+      return;
+    }
+    throw error;
+  }
+  if (wantsJson(req)) {
+    json(res, operation, 202);
+    return;
+  }
+  redirect(res, "/?section=domains");
 }
 
 async function handleWebspaceCommand(req, res, context) {
@@ -504,7 +536,7 @@ function renderControlCenter(context, params) {
     if (section === "overview") body = renderOverview(context);
     else if (section === "projects") body = renderProjects(scoped(context.projects));
     else if (section === "applications") body = renderApplications(scoped(context.applications));
-    else if (section === "domains") body = renderDomains(context.domains, scoped(context.subdomains));
+    else if (section === "domains") body = renderDomains(context.domains, scoped(context.subdomains), context.projects);
     else if (section === "webspaces") body = renderWebspaces(scoped(context.webspaces), context.projects);
     else if (section === "resources") body = renderJsonPanel("Resources", context.resources);
     else if (section === "security") body = renderJsonPanel("Security", context.security);
@@ -513,7 +545,7 @@ function renderControlCenter(context, params) {
     else body = renderSettings(context);
   } else {
     if (section === "audit") body = renderAudit(context.audit, "Audit Log");
-    else if (section === "network") body = renderDomains(context.domains, scoped(context.subdomains));
+    else if (section === "network") body = renderDomains(context.domains, scoped(context.subdomains), context.projects);
     else if (section === "infrastructure") body = renderInfrastructure(context.advancedServices);
     else if (section === "deployments") body = renderDeployments(scoped(context.deployments));
     else if (section === "backup-restore") body = renderJsonPanel("Backup & Restore Advanced", context.backups);
@@ -676,9 +708,40 @@ function renderApplicationCard(app) {
   </div>`;
 }
 
-function renderDomains(domains, subdomains) {
-  return `<section class="grid two"><div class="panel"><div class="panel-head"><span>DNS</span><div><h2>Domains</h2><p>Local DNS is simulated; production requires Cloudflare dry-run/apply/verify.</p></div></div><div class="cards">${domains.map((domain) => `<div class="card compact"><strong>${escapeHtml(domain.baseDomain)}</strong><span>${escapeHtml(domain.environment)} / ${escapeHtml(domain.tlsStatus)}</span></div>`).join("")}</div></div>
-  <div class="panel"><div class="panel-head"><span>SUB</span><div><h2>Subdomains</h2><p>Wildcard local routing maps hostnames to apps by project slug.</p></div></div><div class="cards">${subdomains.map((item) => `<div class="card compact"><strong>${escapeHtml(item.hostname)}</strong><span>${escapeHtml(item.type)} / ${escapeHtml(item.visibility)} / ${escapeHtml(item.healthStatus)}</span></div>`).join("")}</div></div></section>`;
+function renderDomains(domains, subdomains, projects) {
+  return `<section class="grid two"><div class="panel"><div class="panel-head"><span>DNS</span><div><h2>Domains</h2><p>Local DNS is simulated; production requires Cloudflare dry-run/apply/verify.</p></div></div><div class="cards">${domains.map((domain) => `<div class="card compact"><strong>${escapeHtml(domain.baseDomain)}</strong><span>${escapeHtml(domain.environment)} / ${escapeHtml(domain.tlsStatus)}</span><span>${escapeHtml(domain.cloudflareStatus)}</span></div>`).join("")}</div></div>
+  <div class="panel"><div class="panel-head"><span>SUB</span><div><h2>Subdomains</h2><p>Local apply writes routing state only; production remains dry-run until explicit provider adapters verify remote evidence.</p></div></div>
+    <form method="post" action="/actions/subdomain-command" class="inline-confirm">
+      <select name="projectId" aria-label="Project for subdomain">${projects.map((project) => `<option value="${escapeHtml(project.slug)}">${escapeHtml(project.name)}</option>`).join("")}</select>
+      <input name="hostname" placeholder="preview.localhost.com" aria-label="Local hostname">
+      <select name="visibility" aria-label="Visibility"><option value="public">public</option><option value="admin">admin</option><option value="private">private</option></select>
+      <select name="protection" aria-label="Protection"><option value="none">none</option><option value="passkey">passkey</option><option value="cloudflare-access">cloudflare-access</option></select>
+      <input type="hidden" name="action" value="apply-local">
+      <button class="button enable" type="submit">Add local</button>
+    </form>
+    <div class="cards">${subdomains.map(renderSubdomainCard).join("") || empty("No subdomains", "Create a local subdomain to test routing without Cloudflare.")}</div></div></section>`;
+}
+
+function renderSubdomainCard(item) {
+  const removable = item.createdBy !== "control-center-discovery";
+  return `<div id="subdomain-${escapeHtml(item.id)}" class="card compact">
+    <div class="card-title"><strong>${escapeHtml(item.hostname)}</strong><em>${escapeHtml(item.visibility || "public")}</em></div>
+    <span>${escapeHtml(item.type)} / ${escapeHtml(item.protection)} / ${escapeHtml(item.healthStatus)}</span>
+    <span>DNS ${escapeHtml(item.dnsStatus || "unknown")} / TLS ${escapeHtml(item.tlsStatus || "unknown")}</span>
+    <div class="project-actions">
+      <form method="post" action="/actions/subdomain-command">
+        <input type="hidden" name="id" value="${escapeHtml(item.id)}">
+        <input type="hidden" name="action" value="verify">
+        <button class="button" type="submit">Verify</button>
+      </form>
+      ${removable ? `<form method="post" action="/actions/subdomain-command" class="inline-confirm">
+        <input type="hidden" name="id" value="${escapeHtml(item.id)}">
+        <input type="hidden" name="action" value="remove">
+        <input name="confirm" placeholder="REMOVE-SUBDOMAIN" aria-label="Remove confirmation for ${escapeHtml(item.hostname)}">
+        <button class="button danger" type="submit">Remove</button>
+      </form>` : `<span class="button muted">Discovered route</span>`}
+    </div>
+  </div>`;
 }
 
 function renderWebspaces(webspaces, projects) {
@@ -1491,6 +1554,7 @@ function escapeHtml(value) {
 
 function styleTag() {
   return `<style>
+.inline-confirm select{width:190px;min-height:34px;padding:0 10px;border:1px solid var(--line);border-radius:8px;background:#090f15;color:var(--text);font-size:12px}
 :root{color-scheme:dark;--bg:#0b1117;--panel:#121a23;--panel-2:#172231;--text:#eef5ff;--muted:#9eb0c5;--line:#263547;--accent:#76e4c5;--accent-2:#8fb7ff;--danger:#ff8b8b;--warn:#f6d66f;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text)}a{color:inherit;text-decoration:none}button,input,select{font:inherit}.control-shell{display:grid;grid-template-columns:280px minmax(0,1fr);min-height:100vh}.sidebar{position:sticky;top:0;height:100vh;padding:18px;border-right:1px solid var(--line);background:#090f15;overflow:auto}.brand{display:flex;gap:12px;align-items:center;padding-bottom:18px;border-bottom:1px solid var(--line)}.brand-mark{display:grid;place-items:center;width:42px;height:42px;border:1px solid var(--accent);border-radius:8px;color:var(--accent);font-weight:900}.brand strong,.brand small{display:block}.brand small{color:var(--muted)}nav{display:grid;gap:8px;margin-top:18px}nav a{display:flex;align-items:center;gap:10px;min-height:40px;padding:8px 10px;border:1px solid transparent;border-radius:8px;color:var(--muted);font-weight:800}nav a span{display:inline-grid;place-items:center;min-width:38px;min-height:26px;border:1px solid var(--line);border-radius:7px;color:var(--accent-2);font-size:11px}nav a.active,nav a:hover{color:var(--text);background:var(--panel);border-color:var(--line)}.mode-card{margin-top:18px;padding:12px;border:1px solid var(--line);border-radius:8px;background:var(--panel)}.mode-card small{color:var(--muted)}.segmented{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:8px}.segmented a{display:grid;place-items:center;min-height:34px;border:1px solid var(--line);border-radius:8px;color:var(--muted);font-weight:850}.segmented a.selected{color:var(--accent);border-color:var(--accent)}.workspace{width:min(1240px,calc(100% - 32px));margin:0 auto;padding:28px 0 48px}.topbar{display:flex;justify-content:space-between;align-items:end;gap:18px;padding-bottom:22px;border-bottom:1px solid var(--line)}.eyebrow{margin:0 0 8px;color:var(--accent);font-size:13px;font-weight:850;letter-spacing:0}h1{margin:0;font-size:48px;line-height:1;letter-spacing:0}h2{margin:0;font-size:22px}h3{margin:18px 0 10px;color:var(--muted);font-size:13px;text-transform:uppercase;letter-spacing:0}.top-actions{display:flex;align-items:center;justify-content:end;gap:10px;flex-wrap:wrap}.switcher select{min-height:38px;border:1px solid var(--line);border-radius:8px;background:var(--panel);color:var(--text);padding:0 10px}.pill,.state{display:inline-flex;align-items:center;min-height:30px;padding:0 10px;border:1px solid var(--line);border-radius:999px;font-size:12px;font-weight:850;color:var(--muted)}.pill.info,.state.on{color:var(--accent);border-color:color-mix(in srgb,var(--accent) 55%,var(--line))}.pill.danger,.state.off{color:var(--warn);border-color:color-mix(in srgb,var(--warn) 55%,var(--line))}.metric-grid{display:grid;grid-template-columns:repeat(4,minmax(140px,1fr));gap:12px;margin-top:22px}.metric{min-height:96px;padding:16px;background:var(--panel);border:1px solid var(--line);border-radius:8px}.metric span{display:block;font-size:34px;font-weight:900;color:var(--accent-2)}.metric small{color:var(--muted)}.grid{display:grid;gap:16px;margin-top:22px}.grid.two{grid-template-columns:minmax(0,1.15fr) minmax(320px,.85fr)}.panel{margin-top:22px;padding:18px;background:var(--panel);border:1px solid var(--line);border-radius:8px}.grid .panel{margin-top:0}.panel-head{display:flex;gap:12px;align-items:center;margin-bottom:16px}.panel-head>span{display:inline-grid;place-items:center;width:42px;height:42px;border:1px solid var(--accent);border-radius:8px;color:var(--accent);font-size:12px;font-weight:900}.panel-head p{margin:4px 0 0;color:var(--muted);font-size:13px}.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:10px}.card{min-height:96px;padding:14px;background:var(--panel-2);border:1px solid var(--line);border-radius:8px;transition:transform .18s ease,border-color .18s ease,background .18s ease}a.card:hover,.project-card:hover{transform:translateY(-2px);border-color:var(--accent);background:#1a2838}.card strong{display:block;font-size:15px}.card span{display:block;margin-top:8px;color:var(--muted);font-size:13px;line-height:1.45}.card.compact{min-height:78px}.project-cards{margin-top:16px}.project-card{min-height:164px;display:flex;flex-direction:column;gap:4px}.project-card.is-off{opacity:.76}.card-title{display:flex;align-items:start;justify-content:space-between;gap:10px}.card-title em{padding:4px 8px;border:1px solid var(--line);border-radius:999px;color:var(--accent);font-size:11px;font-style:normal;font-weight:850}.card .host{color:var(--accent-2);font-weight:850;overflow-wrap:anywhere}.project-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:auto;padding-top:12px}.button{display:inline-flex;align-items:center;justify-content:center;min-height:34px;padding:0 12px;border:1px solid var(--line);border-radius:8px;background:#101820;color:var(--text);font-size:13px;font-weight:850;cursor:pointer}.button.open,.button.enable{border-color:color-mix(in srgb,var(--accent) 60%,var(--line));color:var(--accent)}.button.danger{border-color:color-mix(in srgb,var(--danger) 60%,var(--line));color:var(--danger)}.button.muted{color:var(--muted);cursor:not-allowed;opacity:.55}.status-list{display:grid;gap:10px;padding:0;margin:0;list-style:none}.status-list li{display:flex;justify-content:space-between;gap:16px;padding:12px;background:var(--panel-2);border:1px solid var(--line);border-radius:8px}.status-list span{color:var(--muted);text-align:right}.json-block,pre{overflow:auto;white-space:pre-wrap;margin:0;color:#dce8f7;line-height:1.55;font-size:14px}.empty{padding:18px;background:#101820;border:1px dashed var(--line);border-radius:8px;color:var(--muted)}.disabled{opacity:.45;pointer-events:none}.login-shell{display:grid;place-items:center;min-height:100vh;padding:24px}.login-panel{width:min(460px,100%);padding:24px;border:1px solid var(--line);border-radius:8px;background:var(--panel)}.login-panel h1{font-size:38px}.login-copy{color:var(--muted);line-height:1.55}.login-form{display:grid;gap:12px;margin-top:20px}.login-form label{color:var(--muted);font-size:13px;font-weight:850}.login-form input{min-height:42px;padding:0 12px;border:1px solid var(--line);border-radius:8px;background:#090f15;color:var(--text)}.inline-confirm{display:flex;align-items:center;gap:6px;flex-wrap:wrap}.inline-confirm input{width:190px;min-height:34px;padding:0 10px;border:1px solid var(--line);border-radius:8px;background:#090f15;color:var(--text);font-size:12px}@media(max-width:980px){.control-shell{display:block}.sidebar{position:static;height:auto}.workspace{width:min(100% - 24px,1240px)}.topbar,.grid.two{display:block}.metric-grid{grid-template-columns:repeat(2,1fr)}h1{font-size:36px}.top-actions{justify-content:start;margin-top:14px}}
 </style>`;
 }

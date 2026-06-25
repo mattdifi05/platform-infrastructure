@@ -183,6 +183,50 @@ test("Stexor Control Center local foundation", async (t) => {
   assert.equal(prodApplyDisabled.status, 409);
   assert.match(prodApplyDisabled.body.message, /disabled/);
 
+  const domainsHtml = await getText(`${baseUrl}/?section=domains`);
+  assert.match(domainsHtml, /Add local/);
+  assert.match(domainsHtml, /Discovered route/);
+
+  const uiSubdomainApply = await postJson(`${baseUrl}/actions/subdomain-command`, {
+    action: "apply-local",
+    projectId: "stexor",
+    hostname: "stexor-ui.localhost.com",
+    visibility: "admin",
+    protection: "passkey",
+    secret: "subdomain-ui-secret-should-not-leak",
+  });
+  assert.equal(uiSubdomainApply.status, 202);
+  assert.equal(uiSubdomainApply.body.type, "subdomain.apply.local");
+  assert.equal(uiSubdomainApply.body.details.hostname, "stexor-ui.localhost.com");
+  assert.equal(uiSubdomainApply.body.details.visibility, "admin");
+  assert.equal(uiSubdomainApply.body.details.protection, "passkey");
+  assert.doesNotMatch(JSON.stringify(uiSubdomainApply.body), /subdomain-ui-secret-should-not-leak/);
+
+  const uiSubdomainVerify = await postJson(`${baseUrl}/actions/subdomain-command`, {
+    action: "verify",
+    id: "stexor-ui-localhost-com",
+  });
+  assert.equal(uiSubdomainVerify.status, 202);
+  assert.equal(uiSubdomainVerify.body.type, "subdomain.verify");
+
+  const uiRemoveRejected = await postJson(`${baseUrl}/actions/subdomain-command`, {
+    action: "remove",
+    id: "stexor-ui-localhost-com",
+    confirm: "wrong",
+  });
+  assert.equal(uiRemoveRejected.status, 409);
+
+  const uiRemoveApply = await postJson(`${baseUrl}/actions/subdomain-command`, {
+    action: "remove",
+    id: "stexor-ui-localhost-com",
+    confirm: "REMOVE-SUBDOMAIN",
+  });
+  assert.equal(uiRemoveApply.status, 202);
+  assert.equal(uiRemoveApply.body.type, "subdomain.remove");
+
+  const domainsAfterUiRemove = await getJson(`${baseUrl}/control/domains`);
+  assert.equal(domainsAfterUiRemove.subdomains.some((item) => item.hostname === "stexor-ui.localhost.com"), false);
+
   const invalidWebspace = await postJson(`${baseUrl}/control/webspaces`, {
     projectId: "stexor",
     basePath: "../secret",

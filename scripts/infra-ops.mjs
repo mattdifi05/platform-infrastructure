@@ -9874,6 +9874,8 @@ async function staticSecurityCheck() {
   assertMatch(controlCenterServer, /timingSafeEqual[\s\S]*CONTROL_CENTER_ADMIN_PASSWORD_SHA256/, "Control Center admin password verification must use timing-safe hash comparison.");
   assertMatch(controlCenterServer, /HttpOnly; Secure; SameSite=Lax/, "Control Center admin session cookie must be HttpOnly, Secure and SameSite=Lax.");
   assertMatch(controlCenterServer, /planSubdomain[\s\S]*APPLY-PRODUCTION/, "Control Center must keep production subdomain changes behind explicit apply confirmation.");
+  assertMatch(controlCenterServer, /handleSubdomainCommand[\s\S]*apply-local[\s\S]*verify[\s\S]*remove[\s\S]*REMOVE-SUBDOMAIN/, "Control Center must expose safe UI actions for local subdomain apply, verify and removal.");
+  assertMatch(controlCenterServer, /renderDomains[\s\S]*Add local[\s\S]*renderSubdomainCard[\s\S]*Discovered route/, "Control Center Domains UI must include local subdomain creation and protected removal controls.");
   assertMatch(controlCenterServer, /validateHostname/, "Control Center must validate hostnames before planning DNS changes.");
   assertMatch(controlCenterServer, /validateWebspacePath/, "Control Center must reject unsafe webspace paths.");
   assertNoMatch(controlCenterServer, /node:child_process|child_process|shell_exec|execSync|spawn\(/, "Control Center must not execute shell commands from the web panel.");
@@ -9882,6 +9884,7 @@ async function staticSecurityCheck() {
   assertMatch(githubWorkflow, /Control Center tests[\s\S]*control-center-tests/, "Infrastructure CI must run the Control Center API/UI regression tests.");
   assertMatch(opsScript, /async function controlCenterTests[\s\S]*control-center\/tests\/control-center\.test\.mjs[\s\S]*"control-center-tests": controlCenterTests/, "Ops runner must expose container-first Control Center tests.");
   assertMatch(controlCenterTest, /production[\s\S]*bad\.localhost\.com[\s\S]*422/, "Control Center tests must reject localhost production subdomain plans.");
+  assertMatch(controlCenterTest, /actions\/subdomain-command[\s\S]*apply-local[\s\S]*subdomain-ui-secret-should-not-leak[\s\S]*REMOVE-SUBDOMAIN/, "Control Center tests must cover UI-driven local subdomain apply, verify, removal and secret redaction.");
   assertMatch(controlCenterTest, /project\.archive[\s\S]*ARCHIVE-PROJECT[\s\S]*project\.delete[\s\S]*DELETE-PROJECT:anniversary[\s\S]*filesystemTouched/, "Control Center tests must cover project archive and soft-delete confirmation without deleting files.");
   assertMatch(controlCenterTest, /APPLY-PRODUCTION[\s\S]*409/, "Control Center tests must reject production apply without valid production execution.");
   assertMatch(controlCenterTest, /\.\.\/secret[\s\S]*Invalid webspace path/, "Control Center tests must cover path traversal rejection.");
