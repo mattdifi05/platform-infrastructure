@@ -16,6 +16,7 @@ const resourceLimitsFile = process.env.PROJECT_RESOURCE_LIMITS_FILE || "/var/www
 const securityPoliciesFile = process.env.PROJECT_SECURITY_POLICIES_FILE || "/var/www/project-state/security-policies.json";
 const alertsFile = process.env.PROJECT_ALERTS_FILE || "/var/www/project-state/alerts.json";
 const notificationChannelsFile = process.env.PROJECT_NOTIFICATION_CHANNELS_FILE || "/var/www/project-state/notification-channels.json";
+const providerConnectionsFile = process.env.PROJECT_PROVIDER_CONNECTIONS_FILE || "/var/www/project-state/provider-connections.json";
 const settingsFile = process.env.PROJECT_SETTINGS_FILE || "/var/www/project-state/settings.json";
 const webspacesFile = process.env.PROJECT_WEBSPACES_FILE || "/var/www/project-state/webspaces.json";
 const sessionKeysFile = process.env.CONTROL_CENTER_SESSION_KEYS_FILE || "";
@@ -250,6 +251,10 @@ async function handleApi(req, res, url, context) {
       return json(res, planAlertResolution(parts[2], payload, context), 202);
     }
     if (method === "POST" && route(parts, "control", "notifications", "channel")) return json(res, planNotificationChannelUpdate(payload, context), 202);
+    if (method === "GET" && route(parts, "control", "provider-connections")) return json(res, { providerConnections: context.providerConnections });
+    if (method === "POST" && parts.length === 3 && route(parts.slice(0, 2), "control", "provider-connections")) {
+      return json(res, planProviderConnectionUpdate(parts[2], payload, context), 202);
+    }
     if (method === "GET" && route(parts, "control", "settings")) return json(res, context.settings);
     if (method === "POST" && route(parts, "control", "settings", "local")) return json(res, planSettingsUpdate(payload, context), 202);
     if (method === "GET" && route(parts, "control", "backups", "summary")) return json(res, context.backups);
@@ -522,6 +527,7 @@ async function handleSettingsCommand(req, res, context) {
   let operation;
   try {
     if (action === "update") operation = planSettingsUpdate(payload, context);
+    else if (action === "provider-connection") operation = planProviderConnectionUpdate(payload.id || payload.providerId || "", payload, context);
     else throw new ValidationError("Unsupported settings action.");
   } catch (error) {
     if (error instanceof ValidationError) {
@@ -609,6 +615,7 @@ function buildContext({ projects, state }) {
   const storedSecurityPolicies = readSecurityPoliciesState();
   const storedAlerts = readAlertsState();
   const storedNotificationChannels = readNotificationChannelsState();
+  const storedProviderConnections = readProviderConnectionsState();
   const storedSettings = readSettingsState();
   const audit = readAudit();
   const operations = readOperations();
@@ -676,6 +683,11 @@ function buildContext({ projects, state }) {
     ...(storedNotificationChannels[channel.channel] || {}),
   }));
   const openAlerts = alertRecords.filter((alert) => ["open", "firing"].includes(alert.status));
+  const providerConnections = defaultProviderConnections(notificationChannels).map((connection) => providerConnectionRecord({
+    ...connection,
+    ...(storedProviderConnections[connection.id] || {}),
+  }));
+  const providerById = new Map(providerConnections.map((connection) => [connection.id, connection]));
   const logsAlerts = {
     mode: environment,
     source: "local-control-plane",
@@ -690,9 +702,9 @@ function buildContext({ projects, state }) {
     preferredMode: "simple",
     environmentMode: environment,
     baseDomain: hostSuffix.replace(/^\./, ""),
-    cloudflareConnectionStatus: globalSecurityPolicy.cloudflareAccess,
-    githubConnectionStatus: "dry-run",
-    smtpAlertStatus: notificationChannels.find((channel) => channel.channel === "email")?.status || "not-configured",
+    cloudflareConnectionStatus: providerById.get("cloudflare")?.status || globalSecurityPolicy.cloudflareAccess,
+    githubConnectionStatus: providerById.get("github")?.status || "dry-run",
+    smtpAlertStatus: providerById.get("smtp")?.status || notificationChannels.find((channel) => channel.channel === "email")?.status || "not-configured",
     productionGuard: environment === "production" ? "requires-verify-remote" : "local-evidence-only",
     source: "control-center-default",
     ...storedSettings,
@@ -731,6 +743,7 @@ function buildContext({ projects, state }) {
     settings,
     alertRecords,
     notificationChannels,
+    providerConnections,
     backupRecords,
     deployments,
     operations,
@@ -1094,7 +1107,7 @@ function advancedSectionData(section, context) {
       };
     case "cicd-github":
       return {
-        githubConnectionStatus: context.settings.githubConnectionStatus,
+        githubConnectionStatus: context.providerConnections.find((connection) => connection.id === "github")?.status || context.settings.githubConnectionStatus,
         branchProtection: "planned adapter",
         environments: "planned adapter",
         variablesVerification: "planned adapter with no values exposed",
@@ -1103,7 +1116,8 @@ function advancedSectionData(section, context) {
       };
     case "cloudflare":
       return {
-        connectionStatus: context.settings.cloudflareConnectionStatus,
+        connectionStatus: context.providerConnections.find((connection) => connection.id === "cloudflare")?.status || context.settings.cloudflareConnectionStatus,
+        providerConnection: context.providerConnections.find((connection) => connection.id === "cloudflare") || null,
         dnsRecords: context.subdomains.map((item) => ({ hostname: item.hostname, status: item.status, environment: item.environment, proxied: context.environment === "production" ? "requires-verify-remote" : "not-used-local" })),
         accessPolicies: "planned adapter",
         wafRules: context.security.waf,
@@ -1179,6 +1193,7 @@ function advancedSectionData(section, context) {
           { name: "Admin password verifier", status: authVerifierConfigured() ? "configured verifier only" : "not configured", valueExposed: false },
           { name: "Alert delivery secrets", status: context.notificationChannels.some((channel) => channel.status === "configured") ? "partially configured" : "metadata only", valueExposed: false },
         ],
+        providerConnections: context.providerConnections.map((connection) => ({ id: connection.id, privateMaterialConfigured: connection.privateMaterialConfigured, credentialValueExposed: connection.credentialValueExposed })),
         rotation: "tracked through infra-ops secret evidence",
         usageMap: "planned adapter",
       };
@@ -1624,8 +1639,29 @@ function renderSettings(context) {
         <div class="card compact"><strong>Provider touched</strong><span>${settings.providerTouched ? "yes" : "no"}</span></div>
       </div>
     </div>
+    <div class="panel"><div class="panel-head"><span>CON</span><div><h2>Provider Connections</h2><p>Connection metadata only. Tokens and provider credentials stay in Docker secrets or private ops material.</p></div></div>
+      <div class="cards">${(context.providerConnections || []).map(renderProviderConnectionCard).join("")}</div>
+      <form method="post" action="/actions/settings-command" class="inline-confirm settings-form">
+        <input type="hidden" name="action" value="provider-connection">
+        <select name="id" aria-label="Provider connection">${(context.providerConnections || []).map((connection) => `<option value="${escapeHtml(connection.id)}">${escapeHtml(connection.name)}</option>`).join("")}</select>
+        ${optionList("status", "metadata-only", ["not-configured", "metadata-only", "requires-secret-file", "requires-verify-remote", "configured", "verified-production"], "Provider connection status")}
+        <input name="accountLabel" placeholder="account or zone label" aria-label="Account or zone label">
+        <input name="scope" placeholder="scope" aria-label="Provider scope">
+        <input type="hidden" name="confirm" value="UPDATE-PROVIDER-CONNECTION">
+        <button class="button enable" type="submit">Update connection</button>
+      </form>
+    </div>
     <div class="panel"><div class="panel-head"><span>DOC</span><div><h2>Documentation</h2><p>${context.docsAvailable} local docs</p></div></div>${renderDocs()}</div>
   </section>`;
+}
+
+function renderProviderConnectionCard(connection) {
+  return `<div id="provider-${escapeHtml(connection.id)}" class="card compact">
+    <div class="card-title"><strong>${escapeHtml(connection.name)}</strong><em>${escapeHtml(connection.status)}</em></div>
+    <span>${escapeHtml(connection.provider)} / ${escapeHtml(connection.environment)} / ${escapeHtml(connection.scope || "global")}</span>
+    <span>${escapeHtml(connection.accountLabel || "no account label")} / material ${escapeHtml(connection.privateMaterialConfigured ? "configured" : "not configured")}</span>
+    <span>verified ${escapeHtml(connection.lastVerifiedAt || "never")} / production evidence ${connection.productionEvidence ? "yes" : "no"}</span>
+  </div>`;
 }
 
 function renderDocs() {
@@ -2202,6 +2238,37 @@ function planSettingsUpdate(payload, context) {
   return operationPlan("settings.update", context.environment, true, ["validate settings", "prepare local settings metadata", "require apply confirmation", "write audit event"], { ...details, runtimeEnvironmentChanged: false, providerTouched: false, productionEvidence: false, confirmationRequired: "UPDATE-SETTINGS" });
 }
 
+function planProviderConnectionUpdate(id, payload, context) {
+  const current = findById(context.providerConnections, id, "Provider connection");
+  const status = choice(String(payload.status || current.status || "metadata-only"), ["not-configured", "metadata-only", "requires-secret-file", "requires-verify-remote", "configured", "verified-production"], "provider connection status");
+  const details = providerConnectionRecord({
+    ...current,
+    status,
+    accountLabel: sanitizeOptionalRef(payload.accountLabel || current.accountLabel || ""),
+    scope: sanitizeOptionalRef(payload.scope || current.scope || "global") || "global",
+    privateMaterialConfigured: parseBoolean(payload.privateMaterialConfigured || "") || current.privateMaterialConfigured || ["requires-verify-remote", "configured", "verified-production"].includes(status),
+    verificationStatus: status === "verified-production" ? "verified" : status === "requires-verify-remote" ? "requires-verify-remote" : "not-verified",
+    lastVerifiedAt: status === "verified-production" ? (current.lastVerifiedAt || new Date().toISOString()) : current.lastVerifiedAt || null,
+    source: "control-center-state",
+    updatedAt: new Date().toISOString(),
+  });
+  if (payload.confirm === "UPDATE-PROVIDER-CONNECTION") {
+    const state = readProviderConnectionsState();
+    state[current.id] = {
+      ...(state[current.id] || {}),
+      ...details,
+      createdAt: state[current.id]?.createdAt || new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    writeProviderConnectionsState(state);
+    appendAudit({ action: "provider.connection.apply", target: current.id, environment: context.environment, risk: status === "verified-production" ? "medium" : "low", result: "success", dryRun: false, summary: "Provider connection metadata updated locally; no provider API call or secret write occurred." });
+    const operation = operationPlan("provider.connection.local", context.environment, false, ["validate provider", "sanitize metadata", "update local connection metadata", "leave provider credentials unchanged", "write audit event"], { ...state[current.id], providerTouched: false, liveProviderTouched: false, productionEvidence: false });
+    return { ...operation, providerConnection: state[current.id] };
+  }
+  appendAudit({ action: "provider.connection.plan", target: current.id, environment: context.environment, risk: "low", result: "planned", dryRun: true, summary: "Provider connection metadata update plan generated." });
+  return operationPlan("provider.connection", context.environment, true, ["validate provider", "sanitize metadata", "prepare local connection metadata", "require apply confirmation", "write audit event"], { ...details, providerTouched: false, liveProviderTouched: false, productionEvidence: false, confirmationRequired: "UPDATE-PROVIDER-CONNECTION" });
+}
+
 function planBackupRun(payload, context) {
   const scope = sanitizeIdentifier(payload.scope || "all") || "all";
   appendAudit({ action: "backup.run.plan", target: scope, environment: context.environment, risk: "medium", result: "planned", dryRun: true, summary: "Manual backup plan generated." });
@@ -2405,6 +2472,20 @@ function readNotificationChannelsState() {
 function writeNotificationChannelsState(state) {
   mkdirSync(path.dirname(notificationChannelsFile), { recursive: true });
   writeFileSync(notificationChannelsFile, `${JSON.stringify(sanitizeEvent(state), null, 2)}\n`);
+}
+
+function readProviderConnectionsState() {
+  try {
+    const parsed = JSON.parse(readFileSync(providerConnectionsFile, "utf8"));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeProviderConnectionsState(state) {
+  mkdirSync(path.dirname(providerConnectionsFile), { recursive: true });
+  writeFileSync(providerConnectionsFile, `${JSON.stringify(sanitizeEvent(state), null, 2)}\n`);
 }
 
 function readSettingsState() {
@@ -2805,6 +2886,91 @@ function notificationChannelRecord({
   });
 }
 
+function defaultProviderConnections(notificationChannels = []) {
+  const emailStatus = notificationChannels.find((channel) => channel.channel === "email")?.status || "not-configured";
+  return [
+    providerConnectionRecord({
+      id: "cloudflare",
+      provider: "cloudflare",
+      name: "Cloudflare",
+      status: environment === "production" ? "requires-verify-remote" : "metadata-only",
+      scope: hostSuffix.replace(/^\./, ""),
+      source: "control-center-default",
+    }),
+    providerConnectionRecord({
+      id: "github",
+      provider: "github",
+      name: "GitHub",
+      status: "metadata-only",
+      scope: "repository-governance",
+      source: "control-center-default",
+    }),
+    providerConnectionRecord({
+      id: "smtp",
+      provider: "smtp",
+      name: "SMTP Alerts",
+      status: emailStatus,
+      scope: "alert-delivery",
+      privateMaterialConfigured: emailStatus === "configured",
+      source: "notification-channel-metadata",
+    }),
+    providerConnectionRecord({
+      id: "hostinger",
+      provider: "hostinger",
+      name: "Hostinger VPS",
+      status: "metadata-only",
+      scope: "vps-go-live",
+      source: "control-center-default",
+    }),
+    providerConnectionRecord({
+      id: "restic",
+      provider: "restic",
+      name: "Restic Off-site Backups",
+      status: process.env.BACKUP_SCHEDULER_ENABLE_OFFSITE === "true" ? "configured" : "not-configured",
+      scope: "off-site-backup",
+      privateMaterialConfigured: process.env.BACKUP_SCHEDULER_ENABLE_OFFSITE === "true",
+      source: "backup-scheduler-metadata",
+    }),
+  ];
+}
+
+function providerConnectionRecord({
+  id = "",
+  provider = "",
+  name = "",
+  status = "metadata-only",
+  accountLabel = "",
+  scope = "global",
+  privateMaterialConfigured = false,
+  verificationStatus = "not-verified",
+  lastVerifiedAt = null,
+  source = "control-center-state",
+  createdAt = null,
+  updatedAt = null,
+} = {}) {
+  const cleanProvider = choiceProvider(provider || id || "provider");
+  const cleanId = sanitizeIdentifier(id || cleanProvider);
+  return sanitizeEvent({
+    id: cleanId,
+    provider: cleanProvider,
+    name: sanitizeMessage(name || humanName(cleanProvider)).replace(/\s+/g, " ").trim().slice(0, 80),
+    environment,
+    status,
+    accountLabel: sanitizeOptionalRef(accountLabel),
+    scope: sanitizeOptionalRef(scope) || "global",
+    privateMaterialConfigured: Boolean(privateMaterialConfigured),
+    credentialValueExposed: false,
+    providerTouched: false,
+    liveProviderTouched: false,
+    productionEvidence: false,
+    verificationStatus,
+    lastVerifiedAt,
+    source,
+    createdAt,
+    updatedAt,
+  });
+}
+
 function settingsRecord({
   preferredMode = "simple",
   environmentMode = "local",
@@ -2909,6 +3075,10 @@ function route(parts, ...expected) {
 function choice(value, allowed, label) {
   if (!allowed.includes(value)) throw new ValidationError(`Invalid ${label}.`);
   return value;
+}
+
+function choiceProvider(value) {
+  return choice(String(value || "").toLowerCase().trim(), ["cloudflare", "github", "smtp", "hostinger", "restic"], "provider");
 }
 
 function parsePairs(value) {

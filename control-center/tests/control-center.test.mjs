@@ -26,6 +26,7 @@ const resourceLimitsFile = path.join(stateDir, "resource-limits.json");
 const securityPoliciesFile = path.join(stateDir, "security-policies.json");
 const alertsFile = path.join(stateDir, "alerts.json");
 const notificationChannelsFile = path.join(stateDir, "notification-channels.json");
+const providerConnectionsFile = path.join(stateDir, "provider-connections.json");
 const settingsFile = path.join(stateDir, "settings.json");
 const webspacesFile = path.join(stateDir, "webspaces.json");
 
@@ -50,6 +51,7 @@ test("Stexor Control Center local foundation", async (t) => {
       PROJECT_SECURITY_POLICIES_FILE: securityPoliciesFile,
       PROJECT_ALERTS_FILE: alertsFile,
       PROJECT_NOTIFICATION_CHANNELS_FILE: notificationChannelsFile,
+      PROJECT_PROVIDER_CONNECTIONS_FILE: providerConnectionsFile,
       PROJECT_SETTINGS_FILE: settingsFile,
       PROJECT_WEBSPACES_FILE: webspacesFile,
       PROJECTS_HOST: "projects.localhost.com",
@@ -693,7 +695,50 @@ test("Stexor Control Center local foundation", async (t) => {
   assert.match(settingsHtml, /Cloudflare connection/);
   assert.match(settingsHtml, /GitHub connection/);
   assert.match(settingsHtml, /SMTP\/alert status/);
+  assert.match(settingsHtml, /Provider Connections/);
+  assert.match(settingsHtml, /Cloudflare/);
   assert.match(settingsHtml, /Update settings/);
+
+  const providerConnections = await getJson(`${baseUrl}/control/provider-connections`);
+  assert.equal(providerConnections.providerConnections.some((connection) => connection.id === "cloudflare"), true);
+  assert.equal(providerConnections.providerConnections.some((connection) => connection.id === "github"), true);
+  assert.equal(providerConnections.providerConnections.every((connection) => connection.credentialValueExposed === false && connection.liveProviderTouched === false), true);
+
+  const providerPlan = await postJson(`${baseUrl}/control/provider-connections/cloudflare`, {
+    status: "requires-verify-remote",
+    accountLabel: "stexor-zone",
+    scope: "localhost.com",
+    cloudflareToken: "provider-secret-should-not-leak",
+  });
+  assert.equal(providerPlan.status, 202);
+  assert.equal(providerPlan.body.type, "provider.connection");
+  assert.equal(providerPlan.body.dryRun, true);
+  assert.equal(providerPlan.body.details.confirmationRequired, "UPDATE-PROVIDER-CONNECTION");
+  assert.equal(providerPlan.body.details.privateMaterialConfigured, true);
+  assert.equal(providerPlan.body.details.providerTouched, false);
+  assert.equal(providerPlan.body.details.productionEvidence, false);
+  assert.doesNotMatch(JSON.stringify(providerPlan.body), /provider-secret-should-not-leak/);
+
+  const providerApply = await postJson(`${baseUrl}/actions/settings-command`, {
+    action: "provider-connection",
+    id: "cloudflare",
+    status: "requires-verify-remote",
+    accountLabel: "stexor-zone",
+    scope: "localhost.com",
+    confirm: "UPDATE-PROVIDER-CONNECTION",
+    cloudflareToken: "provider-secret-should-not-leak",
+  });
+  assert.equal(providerApply.status, 202);
+  assert.equal(providerApply.body.type, "provider.connection.local");
+  assert.equal(providerApply.body.dryRun, false);
+  assert.equal(providerApply.body.providerConnection.id, "cloudflare");
+  assert.equal(providerApply.body.providerConnection.status, "requires-verify-remote");
+  assert.equal(providerApply.body.providerConnection.credentialValueExposed, false);
+  assert.equal(providerApply.body.providerConnection.productionEvidence, false);
+  assert.equal(existsSync(providerConnectionsFile), true);
+  const providerConnectionsText = readFileSync(providerConnectionsFile, "utf8");
+  assert.doesNotMatch(providerConnectionsText, /provider-secret-should-not-leak/);
+  assert.equal(JSON.parse(providerConnectionsText).cloudflare.status, "requires-verify-remote");
 
   const invalidSettings = await postJson(`${baseUrl}/control/settings/local`, {
     preferredMode: "simple",
@@ -934,6 +979,7 @@ test("Stexor Control Center admin guard", async (t) => {
       PROJECT_SECURITY_POLICIES_FILE: securityPoliciesFile,
       PROJECT_ALERTS_FILE: alertsFile,
       PROJECT_NOTIFICATION_CHANNELS_FILE: notificationChannelsFile,
+      PROJECT_PROVIDER_CONNECTIONS_FILE: providerConnectionsFile,
       PROJECT_SETTINGS_FILE: settingsFile,
       PROJECT_WEBSPACES_FILE: webspacesFile,
       PROJECTS_HOST: "projects.localhost.com",
