@@ -1825,19 +1825,25 @@ function renderApplications(applications, projects, webspaces) {
 }
 
 function renderApplicationCard(app) {
-  const actions = ["start", "stop", "restart", "deploy", "rollback"];
+  const actions = ["start", "stop", "restart", "healthcheck", "deploy", "rollback"];
+  const actionForms = actions.map((action) => {
+    const confirmValue = applicationLifecycleConfirmation(action, app.id);
+    return `<form method="post" action="/actions/application-command">
+        <input type="hidden" name="id" value="${escapeHtml(app.id)}">
+        <input type="hidden" name="action" value="${escapeHtml(action)}">
+        ${confirmValue ? `<input type="hidden" name="confirm" value="${escapeHtml(confirmValue)}">` : ""}
+        <button class="button ${action === "stop" || action === "rollback" ? "danger" : action === "deploy" || action === "start" ? "enable" : ""}" type="submit">${escapeHtml(humanName(action))}</button>
+      </form>`;
+  }).join("");
   return `<div id="app-${escapeHtml(app.id)}" class="card app-card">
     <div class="card-title"><strong>${escapeHtml(app.name)}</strong><em>${escapeHtml(app.runtime)}</em></div>
     <span class="host">${escapeHtml(app.host)}</span>
-    <span>Healthcheck: ${escapeHtml(app.healthcheck)}</span>
+    <span>Healthcheck: ${escapeHtml(app.healthcheck)} / ${escapeHtml(app.healthStatus || "not-checked")}</span>
     <span>${escapeHtml(app.source || "control-center-state")} / webspace ${escapeHtml(app.webspaceId || "not-linked")}</span>
+    <span>Lifecycle: ${escapeHtml(app.lastLifecycleAction || "none")} / ${escapeHtml(app.lifecycleMode || "metadata-only")}</span>
     <div class="project-actions app-actions">
       <span class="state ${app.status === "online" ? "on" : "off"}">${escapeHtml(app.status)}</span>
-      ${actions.map((action) => `<form method="post" action="/actions/application-command">
-        <input type="hidden" name="id" value="${escapeHtml(app.id)}">
-        <input type="hidden" name="action" value="${escapeHtml(action)}">
-        <button class="button ${action === "stop" || action === "rollback" ? "danger" : action === "deploy" ? "enable" : ""}" type="submit">${escapeHtml(humanName(action))}</button>
-      </form>`).join("")}
+      ${actionForms}
     </div>
   </div>`;
 }
@@ -2662,11 +2668,73 @@ function planApplicationCreate(payload, context) {
 }
 
 function planApplicationLifecycle(id, action, payload, context) {
-  if (!["start", "stop", "restart", "deploy", "rollback"].includes(action)) throw new ValidationError("Unsupported lifecycle action.");
+  if (!["start", "stop", "restart", "healthcheck", "deploy", "rollback"].includes(action)) throw new ValidationError("Unsupported lifecycle action.");
   const app = findById(context.applications, id, "Application");
   if (action === "deploy" || action === "rollback") return planApplicationDeployment(app, action, payload, context);
+  if (payload.confirm === applicationLifecycleConfirmation(action, app.id)) return applyApplicationLifecycle(app, action, payload, context);
   appendAudit({ action: `application.${action}.plan`, target: sanitizeIdentifier(id), environment: context.environment, risk: action === "stop" ? "medium" : "low", result: "planned", dryRun: true, summary: "Lifecycle action planned; no container command executed." });
-  return operationPlan(`application.${action}`, context.environment, true, ["validate application", "check current health", "prepare Docker adapter command", "require confirmation for apply", "write audit event"], { projectId: app.projectId, applicationId: app.id });
+  return operationPlan(`application.${action}`, context.environment, true, lifecycleSteps(action, true), {
+    projectId: app.projectId,
+    applicationId: app.id,
+    confirmationRequired: applicationLifecycleConfirmation(action, app.id),
+    dockerTouched: false,
+    providerTouched: false,
+    commandExecuted: false,
+    healthcheckNetworkTouched: false,
+    productionEvidence: false,
+  });
+}
+
+function applyApplicationLifecycle(app, action, payload, context) {
+  const now = new Date().toISOString();
+  const state = readApplicationsState();
+  const previous = state[app.id] || {};
+  const nextStatus = applicationLifecycleStatus(action, app.status);
+  const healthStatus = action === "healthcheck"
+    ? (app.status === "offline" || app.status === "stopped" ? "metadata-disabled" : "metadata-routable")
+    : (nextStatus === "offline" || nextStatus === "stopped" ? "metadata-disabled" : "metadata-pending-healthcheck");
+  const updated = applicationRecord({
+    ...app,
+    ...previous,
+    status: nextStatus,
+    healthStatus,
+    lastLifecycleAction: action,
+    lastLifecycleAt: now,
+    lastHealthcheckAt: action === "healthcheck" ? now : previous.lastHealthcheckAt || app.lastHealthcheckAt || null,
+    lifecycleMode: "local-metadata-only",
+    source: previous.source || app.source || "control-center-state",
+    updatedAt: now,
+    createdAt: previous.createdAt || app.createdAt || now,
+    filesystemTouched: false,
+    dockerTouched: false,
+    providerTouched: false,
+    productionEvidence: false,
+  });
+  state[app.id] = updated;
+  writeApplicationsState(state);
+  appendAudit({
+    action: `application.${action}.apply`,
+    target: app.id,
+    environment: context.environment,
+    risk: action === "stop" ? "medium" : "low",
+    result: "success",
+    dryRun: false,
+    summary: "Application lifecycle metadata updated locally; no Docker command, network healthcheck or provider action executed.",
+  });
+  const operation = operationPlan(`application.${action}.local`, context.environment, false, lifecycleSteps(action, false), {
+    projectId: app.projectId,
+    applicationId: app.id,
+    previousStatus: app.status,
+    status: nextStatus,
+    healthStatus,
+    filesystemTouched: false,
+    dockerTouched: false,
+    providerTouched: false,
+    commandExecuted: false,
+    healthcheckNetworkTouched: false,
+    productionEvidence: false,
+  });
+  return { ...operation, application: updated };
 }
 
 function planApplicationDeployment(app, action, payload, context) {
@@ -4510,6 +4578,11 @@ function applicationRecord({
   dockerTouched = false,
   providerTouched = false,
   productionEvidence = false,
+  lifecycleMode = "metadata-only",
+  lastLifecycleAction = "",
+  lastLifecycleAt = null,
+  healthStatus = "not-checked",
+  lastHealthcheckAt = null,
   createdAt = null,
   updatedAt = null,
   deletedAt = null,
@@ -4534,6 +4607,11 @@ function applicationRecord({
     dockerTouched,
     providerTouched,
     productionEvidence,
+    lifecycleMode: sanitizeOptionalRef(lifecycleMode || "metadata-only") || "metadata-only",
+    lastLifecycleAction: sanitizeIdentifier(lastLifecycleAction),
+    lastLifecycleAt,
+    healthStatus: sanitizeOptionalRef(healthStatus || "not-checked") || "not-checked",
+    lastHealthcheckAt,
     createdAt,
     updatedAt,
     deletedAt,
@@ -4978,6 +5056,29 @@ function deploymentSteps(action) {
     return ["validate application", "select rollback target", "verify previous image digest", "prepare Compose override", "require production approval before apply", "write deployment evidence"];
   }
   return ["validate application", "resolve branch and commit", "prepare image build plan", "require SBOM and provenance", "prepare healthcheck", "write deployment evidence"];
+}
+
+function applicationLifecycleConfirmation(action, appId) {
+  const normalized = sanitizeIdentifier(action);
+  if (!["start", "stop", "restart", "healthcheck"].includes(normalized)) return "";
+  return `${normalized.toUpperCase()}-APPLICATION:${sanitizeIdentifier(appId)}`;
+}
+
+function applicationLifecycleStatus(action, currentStatus) {
+  if (action === "stop") return "offline";
+  if (action === "start" || action === "restart") return "online";
+  return currentStatus || "declared";
+}
+
+function lifecycleSteps(action, dryRun) {
+  if (action === "healthcheck") {
+    return dryRun
+      ? ["validate application", "prepare local healthcheck metadata", "require confirmation for metadata update", "write audit event"]
+      : ["validate confirmation", "record local healthcheck metadata", "avoid network probe from browser action", "write audit event"];
+  }
+  return dryRun
+    ? ["validate application", "prepare lifecycle metadata update", "require confirmation for apply", "write audit event"]
+    : ["validate confirmation", "update local application lifecycle metadata", "avoid Docker command execution", "write audit event"];
 }
 
 function navigationForMode(mode) {

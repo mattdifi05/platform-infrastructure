@@ -365,9 +365,69 @@ test("Stexor Control Center local foundation", async (t) => {
   assert.doesNotMatch(applicationsText, /application-secret-should-not-leak/);
   assert.equal(JSON.parse(applicationsText)["stexor-events-worker"].runtime, "worker");
 
+  const startPlan = await postJson(`${baseUrl}/control/applications/stexor-events-worker/start`, {
+    secret: "lifecycle-secret-should-not-leak",
+  });
+  assert.equal(startPlan.status, 202);
+  assert.equal(startPlan.body.type, "application.start");
+  assert.equal(startPlan.body.dryRun, true);
+  assert.equal(startPlan.body.details.confirmationRequired, "START-APPLICATION:stexor-events-worker");
+  assert.equal(startPlan.body.details.commandExecuted, false);
+  assert.equal(startPlan.body.details.dockerTouched, false);
+  assert.equal(startPlan.body.details.healthcheckNetworkTouched, false);
+  assert.doesNotMatch(JSON.stringify(startPlan.body), /lifecycle-secret-should-not-leak/);
+
+  const startApply = await postJson(`${baseUrl}/control/applications/stexor-events-worker/start`, {
+    confirm: "START-APPLICATION:stexor-events-worker",
+    secret: "lifecycle-secret-should-not-leak",
+  });
+  assert.equal(startApply.status, 202);
+  assert.equal(startApply.body.type, "application.start.local");
+  assert.equal(startApply.body.dryRun, false);
+  assert.equal(startApply.body.application.status, "online");
+  assert.equal(startApply.body.application.lastLifecycleAction, "start");
+  assert.equal(startApply.body.application.dockerTouched, false);
+  assert.equal(startApply.body.details.commandExecuted, false);
+  assert.doesNotMatch(JSON.stringify(startApply.body), /lifecycle-secret-should-not-leak/);
+
+  const healthApply = await postJson(`${baseUrl}/control/applications/stexor-events-worker/healthcheck`, {
+    confirm: "HEALTHCHECK-APPLICATION:stexor-events-worker",
+  });
+  assert.equal(healthApply.status, 202);
+  assert.equal(healthApply.body.type, "application.healthcheck.local");
+  assert.equal(healthApply.body.application.healthStatus, "metadata-routable");
+  assert.equal(healthApply.body.details.healthcheckNetworkTouched, false);
+
+  const stopApply = await postJson(`${baseUrl}/control/applications/stexor-events-worker/stop`, {
+    confirm: "STOP-APPLICATION:stexor-events-worker",
+  });
+  assert.equal(stopApply.status, 202);
+  assert.equal(stopApply.body.type, "application.stop.local");
+  assert.equal(stopApply.body.application.status, "offline");
+  assert.equal(stopApply.body.application.healthStatus, "metadata-disabled");
+
+  const restartApply = await postJson(`${baseUrl}/control/applications/stexor-events-worker/restart`, {
+    confirm: "RESTART-APPLICATION:stexor-events-worker",
+  });
+  assert.equal(restartApply.status, 202);
+  assert.equal(restartApply.body.type, "application.restart.local");
+  assert.equal(restartApply.body.application.status, "online");
+  assert.equal(restartApply.body.application.lastLifecycleAction, "restart");
+  assert.equal(restartApply.body.details.commandExecuted, false);
+
+  const applicationsAfterLifecycle = await getJson(`${baseUrl}/control/applications`);
+  const workerAppAfterLifecycle = applicationsAfterLifecycle.applications.find((app) => app.id === "stexor-events-worker");
+  assert.equal(workerAppAfterLifecycle.status, "online");
+  assert.equal(workerAppAfterLifecycle.lifecycleMode, "local-metadata-only");
+  assert.equal(JSON.parse(readFileSync(applicationsFile, "utf8"))["stexor-events-worker"].lastLifecycleAction, "restart");
+  assert.doesNotMatch(readFileSync(applicationsFile, "utf8"), /lifecycle-secret-should-not-leak/);
+
   const applicationsHtmlAfterCreate = await getText(`${baseUrl}/?section=applications`);
   assert.match(applicationsHtmlAfterCreate, /Events Worker/);
   assert.match(applicationsHtmlAfterCreate, /control-center-state/);
+  assert.match(applicationsHtmlAfterCreate, /Healthcheck:/);
+  assert.match(applicationsHtmlAfterCreate, /Lifecycle:/);
+  assert.match(applicationsHtmlAfterCreate, /Healthcheck<\/button>/);
 
   const workerInventoryInitial = await getJson(`${baseUrl}/control/workers-jobs`);
   assert.equal(workerInventoryInitial.workers.some((worker) => worker.id === "enterprise-worker-jobs"), true);
