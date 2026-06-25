@@ -268,6 +268,7 @@ async function handleApi(req, res, url, context) {
 
     if (method === "GET" && route(parts, "control", "domains")) return json(res, { domains: context.domains, subdomains: context.subdomains });
     if (method === "POST" && route(parts, "control", "domains")) return json(res, planDomainCreate(payload, context), 202);
+    if (method === "GET" && route(parts, "control", "network")) return json(res, context.network);
     if (method === "POST" && route(parts, "control", "subdomains", "plan")) return json(res, planSubdomain(payload, context), 202);
     if (method === "POST" && route(parts, "control", "subdomains", "apply")) return json(res, applySubdomain(payload, context), 202);
     if (method === "POST" && parts.length === 5 && route([parts[0], parts[1], parts[3], parts[4]], "control", "subdomains", "remove", "plan")) {
@@ -1078,6 +1079,7 @@ function buildContext({ projects, state }) {
       .filter((domain) => domain && !domain.deletedAt && domain.id !== defaultDomain.id)
       .map((domain) => domainRecord(domain)),
   ];
+  const network = buildNetworkTopology({ subdomains, domains, security, settings });
   const overview = {
     title: "Stexor Control Center",
     environment,
@@ -1086,6 +1088,7 @@ function buildContext({ projects, state }) {
     applications: { total: applications.length, online: onlineApps, offline: applications.length - onlineApps },
     resources,
     subdomains: { total: subdomains.length, active: subdomains.filter((item) => item.status === "active").length },
+    network: { routers: network.routers.length, middlewares: network.middlewares.length, exposedPorts: network.exposedPorts.length, routeTests: network.routeTests.length },
     databases: { total: databases.length, declared: databases.filter((item) => item.status === "declared").length },
     storage: { buckets: storageBuckets.length, provider: storageProvider.status },
     sensitiveMaterials: { total: sensitiveMaterials.length, rotationDue: sensitiveMaterials.filter((item) => item.rotationStatus === "due").length },
@@ -1102,6 +1105,7 @@ function buildContext({ projects, state }) {
     applications,
     domains,
     subdomains,
+    network,
     webspaces,
     databases,
     databaseEngines,
@@ -1456,10 +1460,9 @@ function advancedSectionData(section, context) {
       };
     case "network":
       return {
+        ...context.network,
         domains: context.domains,
         subdomains: context.subdomains,
-        routeTest: "plan-only through existing local Traefik wildcard routing",
-        originLockStatus: context.environment === "production" ? "requires-verify-remote" : "not-required-local",
       };
     case "databases":
       return {
@@ -1701,7 +1704,7 @@ function renderControlCenter(context, params) {
     else body = renderSettings(context);
   } else {
     if (section === "audit") body = renderAudit(context.audit, "Audit Log");
-    else if (section === "network") body = renderDomains(context.domains, scoped(context.subdomains), context.projects);
+    else if (section === "network") body = renderNetworkAdvanced(context.network);
     else if (section === "infrastructure") body = renderInfrastructure(context.advancedServices);
     else if (section === "databases") body = renderDatabases(scoped(context.databases), context.databaseEngines, context.projects);
     else if (section === "storage") body = renderStorage(scoped(context.storageBuckets), context.storageProvider, context.projects);
@@ -1957,6 +1960,66 @@ function renderSubdomainCard(item) {
         <button class="button danger" type="submit">Remove</button>
       </form>` : `<span class="button muted">Discovered route</span>`}
     </div>
+  </div>`;
+}
+
+function renderNetworkAdvanced(network) {
+  const routers = network.routers || [];
+  const middlewares = network.middlewares || [];
+  const exposedPorts = network.exposedPorts || [];
+  const routeTests = network.routeTests || [];
+  return `<section class="grid two">
+    <div class="panel"><div class="panel-head"><span>NET</span><div><h2>Traefik Network</h2><p>Read-only topology from Compose and Traefik dynamic config. No live route probe or provider mutation is executed here.</p></div></div>
+      <div class="cards">
+        <div class="card compact"><strong>Router topology</strong><span>${routers.length} routers / ${network.services?.length || 0} services / ${network.source}</span></div>
+        <div class="card compact"><strong>Middleware chain</strong><span>${middlewares.length} middlewares / redirect ${network.redirectStatus}</span></div>
+        <div class="card compact"><strong>Loopback host ports</strong><span>${exposedPorts.map((port) => `${port.hostPort}->${port.containerPort}`).join(", ") || "none"}</span></div>
+        <div class="card compact"><strong>Origin lock</strong><span>${escapeHtml(network.originLockStatus)} / Cloudflare ${escapeHtml(network.cloudflareProxyStatus)}</span></div>
+      </div>
+    </div>
+    <div class="panel"><div class="panel-head"><span>TLS</span><div><h2>TLS & Redirect</h2><p>Local TLS uses the mounted Traefik certificate bundle; production proof still requires external HTTPS verification.</p></div></div>
+      <div class="cards">
+        <div class="card compact"><strong>TLS store</strong><span>${escapeHtml(network.tls.defaultStore)} / certificates ${network.tls.certificateCount}</span></div>
+        <div class="card compact"><strong>HTTPS routers</strong><span>${network.tlsRouters} TLS routers configured</span></div>
+        <div class="card compact"><strong>HTTP redirects</strong><span>${network.redirectRouters} redirect routers configured</span></div>
+        <div class="card compact"><strong>Production evidence</strong><span>${network.productionEvidence ? "yes" : "no"} / verifyRemote required</span></div>
+      </div>
+    </div>
+    <div class="panel"><div class="panel-head"><span>RTR</span><div><h2>Router Topology</h2><p>Traefik routers and target services declared by the infrastructure config.</p></div></div>
+      <div class="cards">${routers.map(renderNetworkRouterCard).join("") || empty("No routers", "No Traefik routers were parsed from the local config.")}</div>
+    </div>
+    <div class="panel"><div class="panel-head"><span>MID</span><div><h2>Middleware Chain</h2><p>Security headers, compression, rate limiting and HTTPS redirect middlewares.</p></div></div>
+      <div class="cards">${middlewares.map(renderNetworkMiddlewareCard).join("") || empty("No middlewares", "No Traefik middlewares were parsed from the local config.")}</div>
+    </div>
+    <div class="panel"><div class="panel-head"><span>CHK</span><div><h2>Route Test Plan</h2><p>Dry-run route checks generated for operators and CI evidence. The web panel does not probe the network.</p></div></div>
+      <div class="cards">${routeTests.slice(0, 24).map(renderNetworkRouteTestCard).join("") || empty("No route tests", "Route test plans appear when routers are parsed.")}</div>
+    </div>
+  </section>`;
+}
+
+function renderNetworkRouterCard(router) {
+  return `<div id="network-router-${escapeHtml(router.id)}" class="card compact">
+    <div class="card-title"><strong>${escapeHtml(router.id)}</strong><em>${escapeHtml(router.entryPoints.join(", ") || "none")}</em></div>
+    <span>${escapeHtml(router.rule)}</span>
+    <span>service ${escapeHtml(router.service)} / host ${escapeHtml(router.sampleHost)}</span>
+    <span>TLS ${router.tls ? "enabled" : "disabled"} / redirect ${router.redirect ? "yes" : "no"} / probe ${router.networkProbeExecuted ? "executed" : "not executed"}</span>
+  </div>`;
+}
+
+function renderNetworkMiddlewareCard(middleware) {
+  return `<div id="network-middleware-${escapeHtml(middleware.id)}" class="card compact">
+    <div class="card-title"><strong>${escapeHtml(middleware.id)}</strong><em>${escapeHtml(middleware.type)}</em></div>
+    <span>${escapeHtml(middleware.summary)}</span>
+    <span>provider touched ${middleware.providerTouched ? "yes" : "no"} / production evidence ${middleware.productionEvidence ? "yes" : "no"}</span>
+  </div>`;
+}
+
+function renderNetworkRouteTestCard(testPlan) {
+  return `<div id="network-route-test-${escapeHtml(testPlan.routerId)}" class="card compact">
+    <div class="card-title"><strong>${escapeHtml(testPlan.routerId)}</strong><em>${escapeHtml(testPlan.method)}</em></div>
+    <span>${escapeHtml(testPlan.url)}</span>
+    <span>expected ${escapeHtml(testPlan.expectedStatus)} / network probe ${testPlan.networkProbeExecuted ? "executed" : "not executed"}</span>
+    <span>local evidence ${testPlan.localEvidence ? "yes" : "no"} / production evidence ${testPlan.productionEvidence ? "yes" : "no"}</span>
   </div>`;
 }
 
@@ -5047,6 +5110,261 @@ function buildIdentityAccess(stored, { audit, security, settings }) {
       liveIdentityProviderTouched: false,
     },
   };
+}
+
+function buildNetworkTopology({ subdomains, security, settings }) {
+  const composeText = readInfraText("compose.yaml");
+  const middlewareText = readInfraText("traefik/dynamic/middlewares.yml");
+  const tlsText = readInfraText("traefik/dynamic/tls-local.yml");
+  const routeConfig = extractTraefikRoutesConfig(composeText);
+  const routers = parseTraefikRouters(routeConfig);
+  const services = parseTraefikServices(routeConfig);
+  const middlewares = parseTraefikMiddlewares(middlewareText);
+  const exposedPorts = parseTraefikExposedPorts(composeText);
+  const routeTests = routers.map((router) => networkRouteTestRecord(router));
+  const tls = parseTraefikTls(tlsText);
+  const redirectRouters = routers.filter((router) => router.redirect).length;
+  const tlsRouters = routers.filter((router) => router.tls).length;
+  return sanitizeEvent({
+    source: routeConfig ? "compose:enterprise_traefik_routes" : "not-found",
+    environment,
+    mode: environment,
+    routers,
+    services,
+    middlewares,
+    exposedPorts,
+    tls,
+    redirectStatus: redirectRouters > 0 ? "configured" : "missing",
+    redirectRouters,
+    tlsRouters,
+    routeTests,
+    localSubdomainRoutes: (subdomains || []).map((item) => ({
+      id: item.id,
+      hostname: item.hostname,
+      projectId: item.projectId,
+      tlsStatus: item.tlsStatus,
+      dnsStatus: item.dnsStatus,
+      healthStatus: item.healthStatus,
+      traefikRouteId: item.traefikRouteId || "local-projects",
+      productionEvidence: false,
+    })),
+    cloudflareProxyStatus: environment === "production" ? settings.cloudflareConnectionStatus || "requires-verify-remote" : "not-used-local",
+    originLockStatus: environment === "production" ? "requires-origin-lock-verify" : "not-required-local-loopback",
+    wafStatus: security.waf,
+    providerTouched: false,
+    dockerTouched: false,
+    networkProbeExecuted: false,
+    productionEvidence: false,
+    guardrails: {
+      readOnly: true,
+      routeTestsArePlans: true,
+      liveProviderTouched: false,
+      localEvidenceIsProductionEvidence: false,
+    },
+  });
+}
+
+function parseTraefikRouters(routeConfig) {
+  const section = extractBetween(routeConfig, /^\s*routers:\s*$/m, /^\s*services:\s*$/m);
+  return parseIndentedYamlBlocks(section, 10).map(([id, block]) => {
+    const entryPoints = parseYamlList(block, "entryPoints");
+    const middlewares = parseYamlList(block, "middlewares");
+    const rule = sanitizeMessage(parseYamlScalar(block, "rule") || "unknown");
+    const service = sanitizeIdentifier(parseYamlScalar(block, "service") || id);
+    const sampleHost = sampleHostFromRule(rule);
+    return sanitizeEvent({
+      id: sanitizeIdentifier(id),
+      rule,
+      entryPoints,
+      service,
+      middlewares,
+      priority: Number(parseYamlScalar(block, "priority") || 0),
+      tls: /^\s*tls:\s*(?:\{\}\s*)?$/m.test(block),
+      redirect: middlewares.includes("enterprise-redirect-https@file"),
+      sampleHost,
+      source: "compose-config",
+      providerTouched: false,
+      dockerTouched: false,
+      networkProbeExecuted: false,
+      productionEvidence: false,
+    });
+  }).filter((router) => router.id);
+}
+
+function parseTraefikServices(routeConfig) {
+  const match = routeConfig.match(/^\s*services:\s*$([\s\S]*)/m);
+  const section = match ? match[1] : "";
+  return parseIndentedYamlBlocks(section, 10).map(([id, block]) => sanitizeEvent({
+    id: sanitizeIdentifier(id),
+    url: sanitizeRef(parseYamlScalar(block, "url") || "unknown"),
+    source: "compose-config",
+    providerTouched: false,
+    productionEvidence: false,
+  })).filter((service) => service.id);
+}
+
+function parseTraefikMiddlewares(middlewareText) {
+  const match = middlewareText.match(/^\s*middlewares:\s*$([\s\S]*)/m);
+  const section = match ? match[1] : "";
+  return parseIndentedYamlBlocks(section, 4).map(([id, block]) => {
+    const type = block.includes("rateLimit:") ? "rateLimit"
+      : block.includes("redirectScheme:") ? "redirectScheme"
+        : block.includes("compress:") ? "compress"
+          : block.includes("headers:") ? "headers"
+            : "unknown";
+    return sanitizeEvent({
+      id: sanitizeIdentifier(id),
+      type,
+      summary: middlewareSummary(type, block),
+      source: "traefik/dynamic/middlewares.yml",
+      providerTouched: false,
+      dockerTouched: false,
+      productionEvidence: false,
+    });
+  }).filter((middleware) => middleware.id);
+}
+
+function parseTraefikExposedPorts(composeText) {
+  const block = extractComposeServiceBlock(composeText, "traefik");
+  const portsSection = extractYamlListSection(block, "ports");
+  return portsSection.map((raw) => {
+    const value = raw.replace(/^["']|["']$/g, "");
+    const parts = value.split(":");
+    const bind = parts.length === 3 ? parts[0] : "0.0.0.0";
+    const hostPort = parts.length === 3 ? parts[1] : parts[0] || "";
+    const containerPort = parts.length === 3 ? parts[2] : parts[1] || "";
+    const loopbackOnly = ["127.0.0.1", "localhost", "::1"].includes(bind);
+    return sanitizeEvent({
+      bind,
+      hostPort,
+      containerPort,
+      loopbackOnly,
+      publicExposure: !loopbackOnly,
+      source: "compose:traefik.ports",
+      providerTouched: false,
+      productionEvidence: false,
+    });
+  }).filter((port) => port.hostPort && port.containerPort);
+}
+
+function parseTraefikTls(tlsText) {
+  const certificateCount = (tlsText.match(/certFile:/g) || []).length;
+  return sanitizeEvent({
+    status: tlsText.includes("defaultCertificate") ? "configured" : "missing",
+    defaultStore: tlsText.includes("defaultCertificate") ? "defaultCertificate configured" : "not configured",
+    certificateCount,
+    source: "traefik/dynamic/tls-local.yml",
+    localCertificateBundle: certificateCount > 0,
+    providerTouched: false,
+    productionEvidence: false,
+  });
+}
+
+function networkRouteTestRecord(router) {
+  const scheme = router.tls || router.entryPoints.includes("websecure") ? "https" : "http";
+  const expectedStatus = router.redirect ? "301/308" : "200/301/302";
+  return sanitizeEvent({
+    routerId: router.id,
+    method: "GET",
+    url: `${scheme}://${router.sampleHost || projectsHost}/`,
+    expectedStatus,
+    service: router.service,
+    localEvidence: environment !== "production",
+    networkProbeExecuted: false,
+    providerTouched: false,
+    productionEvidence: false,
+  });
+}
+
+function middlewareSummary(type, block) {
+  if (type === "rateLimit") {
+    return `average ${parseYamlScalar(block, "average") || "unknown"} / burst ${parseYamlScalar(block, "burst") || "unknown"} / period ${parseYamlScalar(block, "period") || "unknown"}`;
+  }
+  if (type === "redirectScheme") return `redirect to ${parseYamlScalar(block, "scheme") || "https"} / permanent ${parseYamlScalar(block, "permanent") || "true"}`;
+  if (type === "compress") return "response compression enabled";
+  if (type === "headers") return "security headers and HSTS configured";
+  return "middleware parsed without a known type";
+}
+
+function sampleHostFromRule(rule) {
+  const defaultHost = rule.match(/\$\{[^:}]+:-([^}]+)\}/);
+  if (defaultHost) return normalizeHost(defaultHost[1]);
+  const literalHost = rule.match(/Host\(`([^`]+)`\)/);
+  if (literalHost && !literalHost[1].includes("${")) return normalizeHost(literalHost[1]);
+  if (rule.includes("HostRegexp")) return projectsHost;
+  return projectsHost;
+}
+
+function extractTraefikRoutesConfig(composeText) {
+  const match = composeText.match(/enterprise_traefik_routes:\s*\r?\n\s+content:\s+\|\r?\n([\s\S]*?)\r?\nsecrets:/);
+  return match ? match[1] : "";
+}
+
+function extractComposeServiceBlock(composeText, serviceName) {
+  const escaped = escapeRegex(serviceName);
+  const match = `\n${composeText}`.match(new RegExp(`\\n  ${escaped}:\\s*\\r?\\n([\\s\\S]*?)(?=\\n  [a-zA-Z0-9_-]+:\\s*\\r?\\n|\\n[a-zA-Z].*:\\s*\\r?\\n|$)`));
+  return match ? match[1] : "";
+}
+
+function extractBetween(text, startPattern, endPattern) {
+  if (!text) return "";
+  const start = text.search(startPattern);
+  if (start < 0) return "";
+  const afterStart = text.slice(start).replace(/^.*\r?\n/, "");
+  const end = afterStart.search(endPattern);
+  return end >= 0 ? afterStart.slice(0, end) : afterStart;
+}
+
+function parseIndentedYamlBlocks(section, indent) {
+  const blocks = [];
+  const pattern = new RegExp(`^\\s{${indent}}([a-zA-Z0-9_-]+):\\s*$`, "gm");
+  const matches = [...section.matchAll(pattern)];
+  for (let index = 0; index < matches.length; index += 1) {
+    const current = matches[index];
+    const next = matches[index + 1];
+    blocks.push([current[1], section.slice(current.index + current[0].length, next ? next.index : section.length)]);
+  }
+  return blocks;
+}
+
+function parseYamlScalar(block, key) {
+  const escaped = escapeRegex(key);
+  const match = block.match(new RegExp(`^\\s*${escaped}:\\s*(.+?)\\s*$`, "m"));
+  return match ? match[1].replace(/^["']|["']$/g, "").trim() : "";
+}
+
+function parseYamlList(block, key) {
+  return extractYamlListSection(block, key).map((item) => sanitizeRef(item));
+}
+
+function extractYamlListSection(block, key) {
+  const lines = block.split(/\r?\n/);
+  const index = lines.findIndex((line) => new RegExp(`^\\s*${escapeRegex(key)}:\\s*$`).test(line));
+  if (index < 0) return [];
+  const items = [];
+  for (const line of lines.slice(index + 1)) {
+    const match = line.match(/^\s*-\s+(.+?)\s*$/);
+    if (match) {
+      items.push(match[1].trim());
+      continue;
+    }
+    if (line.trim()) break;
+  }
+  return items;
+}
+
+function readInfraText(docPath) {
+  try {
+    const target = safeDocPath(docPath);
+    if (!existsSync(target)) return "";
+    return readFileSync(target, "utf8");
+  } catch {
+    return "";
+  }
+}
+
+function escapeRegex(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function identityAdminUserRecord({

@@ -132,6 +132,33 @@ test("Stexor Control Center local foundation", async (t) => {
   assert.match(advancedHtml, /Security Advanced/);
   assert.match(advancedHtml, /Billing \/ Plans/);
 
+  const networkApi = await getJson(`${baseUrl}/control/network`);
+  assert.equal(networkApi.guardrails.readOnly, true);
+  assert.equal(networkApi.guardrails.routeTestsArePlans, true);
+  assert.equal(networkApi.providerTouched, false);
+  assert.equal(networkApi.networkProbeExecuted, false);
+  assert.equal(networkApi.productionEvidence, false);
+  assert.equal(networkApi.routers.some((router) => router.id === "enterprise-backend" && router.tls === true && router.middlewares.includes("enterprise-rate-limit@file")), true);
+  assert.equal(networkApi.routers.some((router) => router.id === "local-projects" && router.sampleHost === "projects.localhost.com"), true);
+  assert.equal(networkApi.middlewares.some((middleware) => middleware.id === "enterprise-rate-limit" && middleware.type === "rateLimit" && /average 120/.test(middleware.summary)), true);
+  assert.equal(networkApi.exposedPorts.some((port) => port.hostPort === "80" && port.containerPort === "80" && port.loopbackOnly === true && port.publicExposure === false), true);
+  assert.equal(networkApi.exposedPorts.some((port) => port.hostPort === "443" && port.containerPort === "443" && port.loopbackOnly === true && port.publicExposure === false), true);
+  assert.equal(networkApi.tls.status, "configured");
+  assert.equal(networkApi.routeTests.some((testPlan) => testPlan.routerId === "enterprise-backend" && testPlan.url === "https://api.localhost.com/" && testPlan.networkProbeExecuted === false), true);
+
+  const advancedNetworkApi = await getJson(`${baseUrl}/control/advanced/network`);
+  assert.equal(advancedNetworkApi.data.routers.some((router) => router.id === "enterprise-backend"), true);
+  assert.equal(advancedNetworkApi.data.routeTests.some((testPlan) => testPlan.productionEvidence === false), true);
+  assert.equal(advancedNetworkApi.data.originLockStatus, "not-required-local-loopback");
+
+  const advancedNetworkHtml = await getText(`${baseUrl}/?mode=advanced&section=network`);
+  assert.match(advancedNetworkHtml, /Traefik Network/);
+  assert.match(advancedNetworkHtml, /Router Topology/);
+  assert.match(advancedNetworkHtml, /Middleware Chain/);
+  assert.match(advancedNetworkHtml, /Loopback host ports/);
+  assert.match(advancedNetworkHtml, /Route Test Plan/);
+  assert.match(advancedNetworkHtml, /enterprise-backend/);
+
   const advancedWorkersHtml = await getText(`${baseUrl}/?mode=advanced&section=workers-jobs`);
   assert.match(advancedWorkersHtml, /Workers &amp; Jobs/);
   assert.match(advancedWorkersHtml, /failed jobs/);
@@ -189,6 +216,9 @@ test("Stexor Control Center local foundation", async (t) => {
   assert.equal(overview.projects.active, 2);
   assert.equal(overview.subdomains.total, 2);
   assert.equal(overview.subdomains.active, 2);
+  assert.equal(overview.network.routers > 0, true);
+  assert.equal(overview.network.middlewares > 0, true);
+  assert.equal(overview.network.routeTests > 0, true);
   assert.notEqual(overview.modeEvidence, "production evidence");
 
   const advancedApi = await getJson(`${baseUrl}/control/advanced`);
