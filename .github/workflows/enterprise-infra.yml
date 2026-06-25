@@ -196,6 +196,9 @@ jobs:
       - name: Repository coverage audit
         run: sh ./scripts/infra-ops.sh repo-coverage-check
 
+      - name: Control Center tests
+        run: sh ./scripts/infra-ops.sh control-center-tests
+
       - name: Run infrastructure static policy gate
         run: sh ./scripts/infra-ops.sh static-security-check --infraOnly
 

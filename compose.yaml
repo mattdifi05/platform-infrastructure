@@ -276,6 +276,9 @@ services:
     environment:
       CONTROL_CENTER_PORT: 8080
       CONTROL_CENTER_ENV: ${CONTROL_CENTER_ENV:-local}
+      CONTROL_CENTER_AUTH_REQUIRED: ${CONTROL_CENTER_AUTH_REQUIRED:-false}
+      CONTROL_CENTER_ADMIN_PASSWORD_SHA256: ${CONTROL_CENTER_ADMIN_PASSWORD_SHA256:-}
+      CONTROL_CENTER_SESSION_KEYS_FILE: /run/secrets/projects_gateway_signing_keys
       CONTROL_CENTER_DOCS_ROOT: /var/www/infra-docs
       PROJECTS_ROOT: /var/www/projects
       PROJECT_STATE_FILE: /var/www/project-state/projects.json
@@ -289,6 +292,8 @@ services:
       - ${PHP_PROJECTS_DIR:-../src}:/var/www/projects:ro
       - ${PROJECTS_SYMLINK_TARGET_ROOT:-..}:/mnt/host/d/docker:ro
       - ./projects-portal/state:/var/www/project-state
+    secrets:
+      - projects_gateway_signing_keys
     networks:
       - enterprise_net
     healthcheck:

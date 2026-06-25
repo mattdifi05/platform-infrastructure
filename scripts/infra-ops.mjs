@@ -1865,6 +1865,12 @@ async function testingHygiene() {
   run(process.execPath, ["scripts/testing-hygiene.mjs"], { cwd: sourceRoot });
 }
 
+async function controlCenterTests() {
+  log("==> Control Center tests");
+  run(process.execPath, ["--test", "control-center/tests/control-center.test.mjs"], { cwd: infraRoot });
+  log("Control Center tests passed.");
+}
+
 async function faultInjectionTests() {
   log("==> Fault injection tests");
   const testOutput = sourceWorkspaceOutput([
@@ -6077,6 +6083,7 @@ function buildPreGoLiveReadinessMatrix({ steps, options, repo }) {
     "ha-config-check",
     "managed-secrets-preflight",
     "compose-healthcheck-coverage",
+    "control-center-tests",
     "rate-limit-evidence",
     "audit-log-evidence",
     "retention-evidence",
@@ -6183,6 +6190,7 @@ async function preGoLiveEvidence() {
   await collectEvidenceStep(steps, { name: "ha-config-check", category: "local-policy", fn: haConfigCheck });
   await collectEvidenceStep(steps, { name: "managed-secrets-preflight", category: "local-policy", fn: managedSecretsPreflight });
   await collectEvidenceStep(steps, { name: "compose-healthcheck-coverage", category: "local-policy", fn: composeHealthcheckCoverage });
+  await collectEvidenceStep(steps, { name: "control-center-tests", category: "local-policy", fn: controlCenterTests });
   await collectEvidenceStep(steps, { name: "rate-limit-evidence", category: "local-policy", fn: rateLimitEvidence });
   await collectEvidenceStep(steps, { name: "audit-log-evidence", category: "local-policy", fn: auditLogEvidence });
   await collectEvidenceStep(steps, { name: "retention-evidence", category: "local-policy", fn: retentionEvidence });
@@ -9581,6 +9589,8 @@ async function staticSecurityCheck() {
   const localProjectsPage = fs.existsSync(localProjectsPagePath) ? readText(localProjectsPagePath) : "";
   const controlCenterServerPath = path.resolve(infraRoot, "control-center", "server.mjs");
   const controlCenterServer = fs.existsSync(controlCenterServerPath) ? readText(controlCenterServerPath) : "";
+  const controlCenterTestPath = path.resolve(infraRoot, "control-center", "tests", "control-center.test.mjs");
+  const controlCenterTest = fs.existsSync(controlCenterTestPath) ? readText(controlCenterTestPath) : "";
   const prometheusConfig = readText(path.join(infraRoot, "prometheus", "prometheus.yml"));
   const localWafPreRules = readText(path.join(infraRoot, "waf", "REQUEST-900-EXCLUSION-RULES-BEFORE-CRS.conf"));
   const vpsWafPreRules = readText(path.join(infraRoot, "waf", "REQUEST-900-VPS-RULES-BEFORE-CRS.conf"));
@@ -9631,6 +9641,8 @@ async function staticSecurityCheck() {
   const readme = readText(path.join(infraRoot, "README.md"));
   const runbook = readText(path.join(infraRoot, "RUNBOOK.md"));
   const envExample = readText(path.join(infraRoot, ".env.example"));
+  const envVpsExample = readText(path.join(infraRoot, ".env.vps.example"));
+  const envStagingExample = readText(path.join(infraRoot, ".env.staging.example"));
   const admissionPolicy = readText(path.join(infraRoot, "security", "admission", "cosign-digest-policy.rego"));
   const branchProtection = readText(path.join(infraRoot, "governance", "github-branch-protection.json"));
   const githubEnvironmentsPolicyText = readText(path.join(infraRoot, "governance", "github-environments.json"));
@@ -9817,15 +9829,33 @@ async function staticSecurityCheck() {
   assertMatch(compose, /project-router:[\s\S]*CONTROL_CENTER_UPSTREAM:\s+http:\/\/control-center:8080/, "Project router must send the projects host to the Node Control Center.");
   assertMatch(compose, /control-center:[\s\S]*PROJECT_AUDIT_FILE:\s+\/var\/www\/project-state\/audit\.jsonl/, "Control Center must write local audit evidence.");
   assertMatch(compose, /control-center:[\s\S]*\.\/control-center:\/app:ro/, "Control Center code must be mounted read-only into the Node runtime.");
+  assertMatch(compose, /control-center:[\s\S]*CONTROL_CENTER_AUTH_REQUIRED:\s+\$\{CONTROL_CENTER_AUTH_REQUIRED:-false\}/, "Control Center must expose an explicit admin auth gate.");
+  assertMatch(compose, /control-center:[\s\S]*CONTROL_CENTER_SESSION_KEYS_FILE:\s+\/run\/secrets\/projects_gateway_signing_keys[\s\S]*secrets:[\s\S]*projects_gateway_signing_keys/, "Control Center must sign admin sessions with Docker secret material.");
+  assertMatch(envVpsExample, /CONTROL_CENTER_AUTH_REQUIRED=true[\s\S]*CONTROL_CENTER_ADMIN_PASSWORD_SHA256=replace_with_sha256_of_admin_password/, "VPS example env must require Control Center admin auth.");
+  assertMatch(envStagingExample, /CONTROL_CENTER_AUTH_REQUIRED=true[\s\S]*CONTROL_CENTER_ADMIN_PASSWORD_SHA256=replace_with_sha256_of_admin_password/, "Staging example env must require Control Center admin auth.");
   assertMatch(controlCenterServer, /Stexor Control Center/, "Control Center must title the operational panel.");
   assertMatch(controlCenterServer, /handleApi[\s\S]*\/control\/overview/, "Control Center must expose operational API endpoints.");
   assertMatch(controlCenterServer, /appendAudit/, "Control Center must audit every local control action.");
+  assertMatch(controlCenterServer, /handleLogin[\s\S]*admin\.login\.success[\s\S]*admin\.login\.failed/, "Control Center must audit admin login success and failure without storing passwords.");
+  assertMatch(controlCenterServer, /authenticateRequest[\s\S]*admin_auth_required/, "Control Center must enforce admin authentication when configured.");
+  assertMatch(controlCenterServer, /timingSafeEqual[\s\S]*CONTROL_CENTER_ADMIN_PASSWORD_SHA256/, "Control Center admin password verification must use timing-safe hash comparison.");
+  assertMatch(controlCenterServer, /HttpOnly; Secure; SameSite=Lax/, "Control Center admin session cookie must be HttpOnly, Secure and SameSite=Lax.");
   assertMatch(controlCenterServer, /planSubdomain[\s\S]*APPLY-PRODUCTION/, "Control Center must keep production subdomain changes behind explicit apply confirmation.");
   assertMatch(controlCenterServer, /validateHostname/, "Control Center must validate hostnames before planning DNS changes.");
   assertMatch(controlCenterServer, /validateWebspacePath/, "Control Center must reject unsafe webspace paths.");
   assertNoMatch(controlCenterServer, /node:child_process|child_process|shell_exec|execSync|spawn\(/, "Control Center must not execute shell commands from the web panel.");
   assertNoMatch(controlCenterServer, /C:\\|powershell|pwsh/i, "Control Center must not depend on Windows host paths or PowerShell.");
   assertNoMatch(controlCenterServer, /CLOUDFLARE_API_TOKEN|api\.github\.com|cloudflare\.com\/client\/v4/i, "Control Center foundation must not make live provider calls or expose provider secrets.");
+  assertMatch(githubWorkflow, /Control Center tests[\s\S]*control-center-tests/, "Infrastructure CI must run the Control Center API/UI regression tests.");
+  assertMatch(opsScript, /async function controlCenterTests[\s\S]*control-center\/tests\/control-center\.test\.mjs[\s\S]*"control-center-tests": controlCenterTests/, "Ops runner must expose container-first Control Center tests.");
+  assertMatch(controlCenterTest, /production[\s\S]*bad\.localhost\.com[\s\S]*422/, "Control Center tests must reject localhost production subdomain plans.");
+  assertMatch(controlCenterTest, /APPLY-PRODUCTION[\s\S]*409/, "Control Center tests must reject production apply without valid production execution.");
+  assertMatch(controlCenterTest, /\.\.\/secret[\s\S]*Invalid webspace path/, "Control Center tests must cover path traversal rejection.");
+  assertMatch(controlCenterTest, /super-secret-token-should-not-leak[\s\S]*doesNotMatch/, "Control Center tests must prove supplied secret-like payloads are not serialized to audit/API output.");
+  assertMatch(controlCenterTest, /mode=advanced[\s\S]*Infrastructure/, "Control Center tests must cover Advanced Mode routing.");
+  assertMatch(controlCenterTest, /local evidence only[\s\S]*notEqual[\s\S]*production evidence/, "Control Center tests must prove local evidence is not accepted as production evidence.");
+  assertMatch(controlCenterTest, /admin guard[\s\S]*admin_auth_required[\s\S]*HttpOnly[\s\S]*Secure[\s\S]*SameSite=Lax/, "Control Center tests must cover the admin auth gate and hardened session cookie.");
+  assertNoMatch(controlCenterTest, /CLOUDFLARE_API_TOKEN|api\.github\.com|cloudflare\.com\/client\/v4/i, "Control Center tests must not make live provider calls.");
   assertNoMatch(`${controlCenterServer}\n${localProjectsPage}`, /prometheus\.localhost\.com|alertmanager\.localhost\.com|traefik\.localhost\.com/, "Projects UI must not link unauthenticated internal consoles.");
   assertMatch(composeHa, /failure_action:\s+rollback/, "HA overlay must rollback failed rolling updates.");
   assertMatch(composeHa, /max_replicas_per_node:\s+1/, "HA overlay must spread stateless replicas across nodes.");
@@ -10836,6 +10866,7 @@ Commands:
   cloudflare-access-admin
   cloudflare-from-zero
   compose-healthcheck-coverage
+  control-center-tests
   dependency-hygiene
   dr-readiness-check
   dr-evidence
@@ -10922,6 +10953,7 @@ const commands = {
   "cloudflare-access-admin": cloudflareAccessAdmin,
   "cloudflare-from-zero": cloudflareFromZero,
   "compose-healthcheck-coverage": composeHealthcheckCoverage,
+  "control-center-tests": controlCenterTests,
   "dependency-hygiene": dependencyHygiene,
   "dr-readiness-check": drReadinessCheck,
   "dr-evidence": drEvidence,
