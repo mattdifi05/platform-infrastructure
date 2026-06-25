@@ -2711,12 +2711,41 @@ async function loadSmoke() {
   const requests = positiveInteger(argv.requests ?? 80, "requests");
   const concurrency = positiveInteger(argv.concurrency ?? 8, "concurrency");
   const maxP95Ms = Number(argv.maxP95Ms ?? 750);
+  let target = "container:enterprise-backend/health";
+  let metric = null;
   if (!argv.url && !booleanFlag(argv.edge)) {
-    runInternalBackendLoadProbe({ label: "Internal backend load smoke", requests, concurrency, maxP95Ms });
-    return;
+    metric = runInternalBackendLoadProbe({ label: "Internal backend load smoke", requests, concurrency, maxP95Ms });
+  } else {
+    const url = argv.url ?? "https://api.localhost.com/health";
+    target = url;
+    metric = await runLoadProbe({ label: "Load smoke", url, requests, concurrency, maxP95Ms });
   }
-  const url = argv.url ?? "https://api.localhost.com/health";
-  await runLoadProbe({ label: "Load smoke", url, requests, concurrency, maxP95Ms });
+  writeLoadSmokeReport({
+    generatedAt: new Date().toISOString(),
+    status: "passed",
+    target,
+    requests,
+    concurrency,
+    maxP95Ms,
+    metric,
+  });
+}
+
+function writeLoadSmokeReport(payload) {
+  const stamp = reportTimestamp();
+  const jsonPath = writeJsonReport("load", `load-smoke-${stamp}`, payload);
+  const markdownPath = writeMarkdownReport("load", `load-smoke-${stamp}`, [
+    "# Platform Load Smoke",
+    "",
+    `Generated at: ${payload.generatedAt}`,
+    `Status: ${payload.status}`,
+    `Target: ${payload.target}`,
+    "",
+    "| Requests | Concurrency | Avg ms | P95 ms | Max P95 ms | Errors |",
+    "| ---: | ---: | ---: | ---: | ---: | ---: |",
+    `| ${payload.requests} | ${payload.concurrency} | ${Number(payload.metric.avg).toFixed(2)} | ${payload.metric.p95} | ${payload.maxP95Ms} | ${payload.metric.errors ?? 0} |`,
+  ]);
+  log(`Load smoke reports written to ${jsonPath} and ${markdownPath}`);
 }
 
 async function loadProfile() {
