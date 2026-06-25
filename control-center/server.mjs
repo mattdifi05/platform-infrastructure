@@ -10,6 +10,7 @@ const stateFile = process.env.PROJECT_STATE_FILE || "/var/www/project-state/proj
 const auditFile = process.env.PROJECT_AUDIT_FILE || "/var/www/project-state/audit.jsonl";
 const operationsFile = process.env.PROJECT_OPERATIONS_FILE || "/var/www/project-state/operations.jsonl";
 const applicationsFile = process.env.PROJECT_APPLICATIONS_FILE || "/var/www/project-state/applications.json";
+const domainsFile = process.env.PROJECT_DOMAINS_FILE || "/var/www/project-state/domains.json";
 const deploymentsFile = process.env.PROJECT_DEPLOYMENTS_FILE || "/var/www/project-state/deployments.jsonl";
 const backupRecordsFile = process.env.PROJECT_BACKUP_RECORDS_FILE || "/var/www/project-state/backups.jsonl";
 const resourceLimitsFile = process.env.PROJECT_RESOURCE_LIMITS_FILE || "/var/www/project-state/resource-limits.json";
@@ -222,6 +223,7 @@ async function handleApi(req, res, url, context) {
     }
 
     if (method === "GET" && route(parts, "control", "domains")) return json(res, { domains: context.domains, subdomains: context.subdomains });
+    if (method === "POST" && route(parts, "control", "domains")) return json(res, planDomainCreate(payload, context), 202);
     if (method === "POST" && route(parts, "control", "subdomains", "plan")) return json(res, planSubdomain(payload, context), 202);
     if (method === "POST" && route(parts, "control", "subdomains", "apply")) return json(res, applySubdomain(payload, context), 202);
     if (method === "POST" && parts.length === 5 && route([parts[0], parts[1], parts[3], parts[4]], "control", "subdomains", "remove", "plan")) {
@@ -370,7 +372,8 @@ async function handleSubdomainCommand(req, res, context) {
   const action = String(payload.action || "");
   let operation;
   try {
-    if (action === "apply-local") operation = applySubdomain({ ...payload, environment: "local", confirm: "APPLY-LOCAL" }, context);
+    if (action === "create-domain") operation = planDomainCreate(payload, context);
+    else if (action === "apply-local") operation = applySubdomain({ ...payload, environment: "local", confirm: "APPLY-LOCAL" }, context);
     else if (action === "verify") operation = verifySubdomain(payload.id || payload.subdomainId || "", context);
     else if (action === "remove") operation = applySubdomainRemoval(payload.id || payload.subdomainId || "", payload, context);
     else throw new ValidationError("Unsupported subdomain action.");
@@ -549,6 +552,7 @@ async function handleSettingsCommand(req, res, context) {
 
 function buildContext({ projects, state }) {
   const storedApplications = readApplicationsState();
+  const storedDomains = readDomainsState();
   const discoveredApplications = projects.map((project) => applicationRecord({
     id: project.slug,
     projectId: project.slug,
@@ -709,14 +713,21 @@ function buildContext({ projects, state }) {
     source: "control-center-default",
     ...storedSettings,
   });
-  const domains = [{
+  const defaultDomain = domainRecord({
     id: "local",
     environment: "local",
     baseDomain: hostSuffix.replace(/^\./, ""),
     dnsStatus: "local-hosts-or-resolver",
     tlsStatus: "local-certificate",
     cloudflareStatus: "not-used-in-local-mode",
-  }];
+    source: "control-center-default",
+  });
+  const domains = [
+    domainRecord({ ...defaultDomain, ...(storedDomains[defaultDomain.id] || {}) }),
+    ...Object.values(storedDomains)
+      .filter((domain) => domain && !domain.deletedAt && domain.id !== defaultDomain.id)
+      .map((domain) => domainRecord(domain)),
+  ];
   const overview = {
     title: "Stexor Control Center",
     environment,
@@ -1460,7 +1471,17 @@ function renderApplicationCard(app) {
 }
 
 function renderDomains(domains, subdomains, projects) {
-  return `<section class="grid two"><div class="panel"><div class="panel-head"><span>DNS</span><div><h2>Domains</h2><p>Local DNS is simulated; production requires Cloudflare dry-run/apply/verify.</p></div></div><div class="cards">${domains.map((domain) => `<div class="card compact"><strong>${escapeHtml(domain.baseDomain)}</strong><span>${escapeHtml(domain.environment)} / ${escapeHtml(domain.tlsStatus)}</span><span>${escapeHtml(domain.cloudflareStatus)}</span></div>`).join("")}</div></div>
+  return `<section class="grid two"><div class="panel"><div class="panel-head"><span>DNS</span><div><h2>Domains</h2><p>Local DNS is simulated; production domains remain metadata-only until Cloudflare verifyRemote passes.</p></div></div>
+    <form method="post" action="/actions/subdomain-command" class="inline-confirm">
+      <input type="hidden" name="action" value="create-domain">
+      <input name="baseDomain" placeholder="example.com" aria-label="Base domain">
+      <select name="environment" aria-label="Domain environment"><option value="local">local</option><option value="staging">staging</option><option value="production">production</option></select>
+      <select name="visibility" aria-label="Domain visibility"><option value="public">public</option><option value="admin">admin</option><option value="private">private</option></select>
+      <input name="providerConnectionId" placeholder="cloudflare" aria-label="Provider connection id">
+      <input type="hidden" name="confirm" value="CREATE-DOMAIN">
+      <button class="button enable" type="submit">Add domain</button>
+    </form>
+    <div class="cards">${domains.map(renderDomainCard).join("")}</div></div>
   <div class="panel"><div class="panel-head"><span>SUB</span><div><h2>Subdomains</h2><p>Local apply writes routing state only; production remains dry-run until explicit provider adapters verify remote evidence.</p></div></div>
     <form method="post" action="/actions/subdomain-command" class="inline-confirm">
       <select name="projectId" aria-label="Project for subdomain">${projects.map((project) => `<option value="${escapeHtml(project.slug)}">${escapeHtml(project.name)}</option>`).join("")}</select>
@@ -1471,6 +1492,15 @@ function renderDomains(domains, subdomains, projects) {
       <button class="button enable" type="submit">Add local</button>
     </form>
     <div class="cards">${subdomains.map(renderSubdomainCard).join("") || empty("No subdomains", "Create a local subdomain to test routing without Cloudflare.")}</div></div></section>`;
+}
+
+function renderDomainCard(domain) {
+  return `<div id="domain-${escapeHtml(domain.id)}" class="card compact">
+    <div class="card-title"><strong>${escapeHtml(domain.baseDomain)}</strong><em>${escapeHtml(domain.environment)}</em></div>
+    <span>DNS ${escapeHtml(domain.dnsStatus)} / TLS ${escapeHtml(domain.tlsStatus)}</span>
+    <span>Cloudflare ${escapeHtml(domain.cloudflareStatus)} / provider ${escapeHtml(domain.providerConnectionId || "none")}</span>
+    <span>${escapeHtml(domain.source || "control-center-state")} / production evidence ${domain.productionEvidence ? "yes" : "no"}</span>
+  </div>`;
 }
 
 function renderSubdomainCard(item) {
@@ -1975,6 +2005,41 @@ function planApplicationDeployment(app, action, payload, context) {
   return { ...operation, deployment };
 }
 
+function planDomainCreate(payload, context) {
+  const targetEnv = normalizeEnvironment(payload.environment || context.environment);
+  const baseDomain = validateBaseDomain(payload.baseDomain || "");
+  if (targetEnv === "production" && /(?:^|\.)localhost(?:\.com)?$/i.test(baseDomain)) {
+    throw new ValidationError("Production domain metadata requires a real domain, not localhost.");
+  }
+  const id = sanitizeIdentifier(payload.id || `${targetEnv}-${baseDomain.replace(/\./g, "-")}`);
+  validateSlug(id);
+  if (context.domains.some((domain) => domain.id === id || domain.baseDomain === baseDomain)) throw new ValidationError("Domain already exists.");
+  const visibility = choice(payload.visibility || "public", ["public", "admin", "private"], "visibility");
+  const providerConnectionId = sanitizeIdentifier(payload.providerConnectionId || (targetEnv === "production" ? "cloudflare" : ""));
+  if (providerConnectionId) findById(context.providerConnections, providerConnectionId, "Provider connection");
+  const details = domainRecord({
+    id,
+    environment: targetEnv,
+    baseDomain,
+    visibility,
+    providerConnectionId,
+    dnsStatus: targetEnv === "local" ? "local-hosts-or-resolver" : "requires-verify-remote",
+    tlsStatus: targetEnv === "local" ? "local-certificate" : "requires-https-verify",
+    cloudflareStatus: providerConnectionId === "cloudflare" ? "metadata-only-requires-verify" : "not-linked",
+    source: "control-center-state",
+  });
+  if (payload.confirm === "CREATE-DOMAIN") {
+    const state = readDomainsState();
+    state[id] = { ...(state[id] || {}), ...details, createdAt: state[id]?.createdAt || new Date().toISOString(), updatedAt: new Date().toISOString() };
+    writeDomainsState(state);
+    appendAudit({ action: "domain.create.apply", target: baseDomain, environment: targetEnv, risk: targetEnv === "production" ? "medium" : "low", result: "success", dryRun: false, summary: "Domain metadata declared locally; no DNS, TLS, Traefik or Cloudflare changes applied." });
+    const operation = operationPlan("domain.create.local", targetEnv, false, ["validate domain", "validate provider metadata", "record local domain metadata", "leave DNS/TLS/providers unchanged", "write audit event"], { ...state[id], dnsTouched: false, tlsTouched: false, traefikTouched: false, providerTouched: false, productionEvidence: false });
+    return { ...operation, domain: state[id] };
+  }
+  appendAudit({ action: "domain.create.plan", target: baseDomain, environment: targetEnv, risk: targetEnv === "production" ? "medium" : "low", result: "planned", dryRun: true, summary: "Domain metadata creation plan generated." });
+  return operationPlan("domain.create", targetEnv, true, ["validate domain", "validate provider metadata", "prepare local domain metadata", "require apply confirmation", "write audit event"], { ...details, dnsTouched: false, tlsTouched: false, traefikTouched: false, providerTouched: false, productionEvidence: false, confirmationRequired: "CREATE-DOMAIN" });
+}
+
 function planSubdomain(payload, context) {
   const targetEnv = normalizeEnvironment(payload.environment || context.environment);
   const projectId = slugify(payload.projectId || "");
@@ -2404,6 +2469,20 @@ function writeApplicationsState(state) {
   writeFileSync(applicationsFile, `${JSON.stringify(sanitizeEvent(state), null, 2)}\n`);
 }
 
+function readDomainsState() {
+  try {
+    const parsed = JSON.parse(readFileSync(domainsFile, "utf8"));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeDomainsState(state) {
+  mkdirSync(path.dirname(domainsFile), { recursive: true });
+  writeFileSync(domainsFile, `${JSON.stringify(sanitizeEvent(state), null, 2)}\n`);
+}
+
 function readWebspacesState() {
   try {
     const parsed = JSON.parse(readFileSync(webspacesFile, "utf8"));
@@ -2708,6 +2787,46 @@ function validateBaseDomain(value) {
 
 function webspaceId(projectId, name) {
   return name === projectId ? projectId : `${projectId}-${name}`;
+}
+
+function domainRecord({
+  id = "",
+  environment: targetEnv = "local",
+  baseDomain = hostSuffix.replace(/^\./, ""),
+  visibility = "public",
+  providerConnectionId = "",
+  dnsStatus = "local-hosts-or-resolver",
+  tlsStatus = "local-certificate",
+  cloudflareStatus = "not-used-in-local-mode",
+  source = "control-center-state",
+  providerTouched = false,
+  productionEvidence = false,
+  createdAt = null,
+  updatedAt = null,
+  deletedAt = null,
+} = {}) {
+  const cleanEnv = normalizeEnvironment(targetEnv);
+  const cleanBaseDomain = validateBaseDomain(baseDomain || hostSuffix.replace(/^\./, ""));
+  const cleanId = sanitizeIdentifier(id || `${cleanEnv}-${cleanBaseDomain.replace(/\./g, "-")}`) || rid();
+  return sanitizeEvent({
+    id: cleanId,
+    environment: cleanEnv,
+    baseDomain: cleanBaseDomain,
+    visibility: choice(visibility || "public", ["public", "admin", "private"], "visibility"),
+    providerConnectionId: sanitizeIdentifier(providerConnectionId),
+    dnsStatus,
+    tlsStatus,
+    cloudflareStatus,
+    source,
+    dnsTouched: false,
+    tlsTouched: false,
+    traefikTouched: false,
+    providerTouched,
+    productionEvidence,
+    createdAt,
+    updatedAt,
+    deletedAt,
+  });
 }
 
 function webspaceRecord({ id, projectId, name, basePath, quotaBytes = 0, usedBytes = 0, linkedApps = null, status = "active", createdAt = null, updatedAt = null }) {

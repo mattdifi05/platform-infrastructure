@@ -20,6 +20,7 @@ const stateFile = path.join(stateDir, "projects.json");
 const auditFile = path.join(stateDir, "audit.jsonl");
 const operationsFile = path.join(stateDir, "operations.jsonl");
 const applicationsFile = path.join(stateDir, "applications.json");
+const domainsFile = path.join(stateDir, "domains.json");
 const deploymentsFile = path.join(stateDir, "deployments.jsonl");
 const backupRecordsFile = path.join(stateDir, "backups.jsonl");
 const resourceLimitsFile = path.join(stateDir, "resource-limits.json");
@@ -45,6 +46,7 @@ test("Stexor Control Center local foundation", async (t) => {
       PROJECT_AUDIT_FILE: auditFile,
       PROJECT_OPERATIONS_FILE: operationsFile,
       PROJECT_APPLICATIONS_FILE: applicationsFile,
+      PROJECT_DOMAINS_FILE: domainsFile,
       PROJECT_DEPLOYMENTS_FILE: deploymentsFile,
       PROJECT_BACKUP_RECORDS_FILE: backupRecordsFile,
       PROJECT_RESOURCE_LIMITS_FILE: resourceLimitsFile,
@@ -371,8 +373,54 @@ test("Stexor Control Center local foundation", async (t) => {
   assert.match(prodApplyDisabled.body.message, /disabled/);
 
   const domainsHtml = await getText(`${baseUrl}/?section=domains`);
+  assert.match(domainsHtml, /Add domain/);
+  assert.match(domainsHtml, /Provider connection/);
   assert.match(domainsHtml, /Add local/);
   assert.match(domainsHtml, /Discovered route/);
+
+  const prodLocalhostDomain = await postJson(`${baseUrl}/control/domains`, {
+    environment: "production",
+    baseDomain: "localhost.com",
+  });
+  assert.equal(prodLocalhostDomain.status, 422);
+  assert.match(prodLocalhostDomain.body.message, /real domain/);
+
+  const domainPlan = await postJson(`${baseUrl}/control/domains`, {
+    environment: "staging",
+    baseDomain: "staging.example.com",
+    visibility: "admin",
+    providerConnectionId: "cloudflare",
+    cloudflareToken: "domain-secret-should-not-leak",
+  });
+  assert.equal(domainPlan.status, 202);
+  assert.equal(domainPlan.body.type, "domain.create");
+  assert.equal(domainPlan.body.dryRun, true);
+  assert.equal(domainPlan.body.details.confirmationRequired, "CREATE-DOMAIN");
+  assert.equal(domainPlan.body.details.providerTouched, false);
+  assert.equal(domainPlan.body.details.productionEvidence, false);
+  assert.doesNotMatch(JSON.stringify(domainPlan.body), /domain-secret-should-not-leak/);
+
+  const domainApply = await postJson(`${baseUrl}/actions/subdomain-command`, {
+    action: "create-domain",
+    environment: "staging",
+    baseDomain: "staging.example.com",
+    visibility: "admin",
+    providerConnectionId: "cloudflare",
+    confirm: "CREATE-DOMAIN",
+    cloudflareToken: "domain-secret-should-not-leak",
+  });
+  assert.equal(domainApply.status, 202);
+  assert.equal(domainApply.body.type, "domain.create.local");
+  assert.equal(domainApply.body.domain.baseDomain, "staging.example.com");
+  assert.equal(domainApply.body.domain.providerTouched, false);
+  assert.equal(domainApply.body.domain.productionEvidence, false);
+  assert.equal(existsSync(domainsFile), true);
+  const domainsText = readFileSync(domainsFile, "utf8");
+  assert.doesNotMatch(domainsText, /domain-secret-should-not-leak/);
+  assert.equal(JSON.parse(domainsText)["staging-staging-example-com"].baseDomain, "staging.example.com");
+
+  const domainsAfterDomainApply = await getJson(`${baseUrl}/control/domains`);
+  assert.equal(domainsAfterDomainApply.domains.some((domain) => domain.baseDomain === "staging.example.com"), true);
 
   const uiSubdomainApply = await postJson(`${baseUrl}/actions/subdomain-command`, {
     action: "apply-local",
@@ -973,6 +1021,7 @@ test("Stexor Control Center admin guard", async (t) => {
       PROJECT_AUDIT_FILE: auditFile,
       PROJECT_OPERATIONS_FILE: operationsFile,
       PROJECT_APPLICATIONS_FILE: applicationsFile,
+      PROJECT_DOMAINS_FILE: domainsFile,
       PROJECT_DEPLOYMENTS_FILE: deploymentsFile,
       PROJECT_BACKUP_RECORDS_FILE: backupRecordsFile,
       PROJECT_RESOURCE_LIMITS_FILE: resourceLimitsFile,
