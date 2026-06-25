@@ -18,6 +18,7 @@ const projectsRoot = path.join(testRoot, "projects");
 const stateDir = path.join(testRoot, "state");
 const stateFile = path.join(stateDir, "projects.json");
 const auditFile = path.join(stateDir, "audit.jsonl");
+const operationsFile = path.join(stateDir, "operations.jsonl");
 
 test("Stexor Control Center local foundation", async (t) => {
   prepareFixture();
@@ -32,6 +33,7 @@ test("Stexor Control Center local foundation", async (t) => {
       PROJECTS_ROOT: projectsRoot,
       PROJECT_STATE_FILE: stateFile,
       PROJECT_AUDIT_FILE: auditFile,
+      PROJECT_OPERATIONS_FILE: operationsFile,
       PROJECTS_HOST: "projects.localhost.com",
       PROJECT_HOST_SUFFIX: ".localhost.com",
       NODE_PROJECT_HOSTS: "stexor=stexor.localhost.com",
@@ -121,12 +123,50 @@ test("Stexor Control Center local foundation", async (t) => {
     cloudflareToken: "super-secret-token-should-not-leak",
   });
   assert.equal(localApply.status, 202);
-  assert.equal(localApply.body.type, "subdomain.plan");
+  assert.equal(localApply.body.type, "subdomain.apply.local");
+  assert.equal(localApply.body.id, localApply.body.operationId);
+  assert.equal(localApply.body.projectId, "stexor");
+  assert.equal(localApply.body.environment, "local");
   assert.equal(localApply.body.dryRun, false);
   assert.equal(localApply.body.details.productionEvidence, false);
+  assert.equal(localApply.body.steps.every((step) => step.operationId === localApply.body.id), true);
+  assert.equal(localApply.body.steps.every((step) => step.output === "sanitized"), true);
+  assert.doesNotMatch(JSON.stringify(localApply.body), /super-secret-token-should-not-leak/);
+  assert.doesNotMatch(JSON.stringify(localApply.body), /cloudflareToken/);
 
   const domainsWithPreview = await getJson(`${baseUrl}/control/domains`);
   assert.equal(domainsWithPreview.subdomains.some((item) => item.hostname === "stexor-preview.localhost.com"), true);
+
+  const operations = await getJson(`${baseUrl}/control/operations`);
+  const applyOperation = operations.operations.find((operation) => operation.id === localApply.body.id);
+  assert.ok(applyOperation);
+  assert.equal(applyOperation.type, "subdomain.apply.local");
+  assert.equal(applyOperation.requestedBy, "local-admin");
+  assert.equal(applyOperation.reportPath, null);
+  assert.equal(applyOperation.errorCode, null);
+  assert.equal(applyOperation.errorMessage, null);
+  assert.ok(applyOperation.startedAt);
+  assert.ok(applyOperation.finishedAt);
+  assert.equal(Array.isArray(applyOperation.steps), true);
+  assert.equal(applyOperation.steps.every((step) => step.operationId === applyOperation.id), true);
+  assert.equal(applyOperation.steps.every((step) => step.startedAt && step.finishedAt && step.output === "sanitized"), true);
+
+  const operationById = await getJson(`${baseUrl}/control/operations/${localApply.body.id}`);
+  assert.equal(operationById.id, localApply.body.id);
+  assert.equal(existsSync(operationsFile), true);
+  const operationText = readFileSync(operationsFile, "utf8");
+  assert.doesNotMatch(operationText, /super-secret-token-should-not-leak/);
+  assert.doesNotMatch(operationText, /cloudflareToken/);
+  const operationLines = operationText.trim().split(/\r?\n/);
+  assert.equal(operationLines.length >= 2, true);
+  for (const line of operationLines) {
+    const operation = JSON.parse(line);
+    assert.ok(operation.id);
+    assert.ok(operation.operationId);
+    assert.ok(operation.type);
+    assert.ok(operation.environment);
+    assert.equal(Array.isArray(operation.steps), true);
+  }
 
   const removePreview = await postJson(`${baseUrl}/control/subdomains/stexor-preview-localhost-com/remove/apply`, {
     confirm: "REMOVE-SUBDOMAIN",
@@ -174,6 +214,7 @@ test("Stexor Control Center admin guard", async (t) => {
       PROJECTS_ROOT: projectsRoot,
       PROJECT_STATE_FILE: stateFile,
       PROJECT_AUDIT_FILE: auditFile,
+      PROJECT_OPERATIONS_FILE: operationsFile,
       PROJECTS_HOST: "projects.localhost.com",
       PROJECT_HOST_SUFFIX: ".localhost.com",
       NODE_PROJECT_HOSTS: "stexor=stexor.localhost.com",

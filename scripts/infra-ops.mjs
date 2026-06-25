@@ -76,6 +76,23 @@ function positiveInteger(value, optionName, minimum = 1) {
   return next;
 }
 
+function hasSupportedProjectSource() {
+  return fs.existsSync(path.join(sourceRoot, "package.json")) && fs.existsSync(path.join(sourceRoot, ".github", "workflows"));
+}
+
+function projectSourceChecksRequired() {
+  return booleanFlag(argv.requireProject ?? process.env.PROJECT_REQUIRE_SOURCE_ROOT);
+}
+
+function requireSupportedProjectSource(label) {
+  if (hasSupportedProjectSource()) return true;
+  if (projectSourceChecksRequired()) {
+    fail(`Project source checks were required, but no supported project was found at ${sourceRoot}.`);
+  }
+  log(`Skipping ${label}; no supported project source found at ${sourceRoot}.`);
+  return false;
+}
+
 function parseCronTime(value, optionName) {
   const [hour, minute] = String(value).split(":").map(Number);
   if (!Number.isInteger(hour) || !Number.isInteger(minute) || hour < 0 || hour > 23 || minute < 0 || minute > 59) {
@@ -1862,6 +1879,7 @@ async function supplyChainHygiene() {
 
 async function testingHygiene() {
   log("==> Testing hygiene");
+  if (!requireSupportedProjectSource("application testing hygiene")) return;
   run(process.execPath, ["scripts/testing-hygiene.mjs"], { cwd: sourceRoot });
 }
 
@@ -1997,6 +2015,7 @@ async function maintainabilityHygiene() {
 
 async function performanceHygiene() {
   log("==> Performance hygiene");
+  if (!requireSupportedProjectSource("application performance hygiene")) return;
   run(process.execPath, ["scripts/performance-hygiene.mjs"], { cwd: sourceRoot });
 }
 
@@ -7936,6 +7955,7 @@ async function enterpriseTenCheck() {
   await externalUptimeCheck({ dryRun: true });
   await linuxPortabilityCheck();
   await staticSecurityCheck();
+  await controlCenterTests();
   await testingHygiene();
   await performanceHygiene();
   log("Enterprise 10 readiness gate passed.");
@@ -9460,6 +9480,10 @@ function staticSecurityInfraOnlyCheck() {
   assertMatch(backupSchedulerScript, /BACKUP_SCHEDULER_DRY_RUN/, "Backup scheduler must support CI dry-run mode.");
   assertMatch(opsScript, /async function staticSecurityCheck/, "Ops script must expose the full static security gate.");
   assertMatch(opsScript, /No supported project source found[\s\S]*staticSecurityInfraOnlyCheck\(\);[\s\S]*return;/, "Full static security must fall back to infra-only checks when no project is mounted.");
+  assertMatch(opsScript, /function hasSupportedProjectSource\(\)[\s\S]*package\.json[\s\S]*\.github/, "Ops runner must detect optional project source before running app-only gates.");
+  assertMatch(opsScript, /async function enterpriseTenCheck\(\)[\s\S]*await staticSecurityCheck\(\);[\s\S]*await controlCenterTests\(\);[\s\S]*await testingHygiene\(\);/, "Enterprise gate must always test the infra Control Center before optional app-only checks.");
+  assertMatch(opsScript, /async function testingHygiene\(\)[\s\S]*requireSupportedProjectSource\("application testing hygiene"\)[\s\S]*return;/, "Testing hygiene must skip cleanly when the project source is not mounted.");
+  assertMatch(opsScript, /async function performanceHygiene\(\)[\s\S]*requireSupportedProjectSource\("application performance hygiene"\)[\s\S]*return;/, "Performance hygiene must skip cleanly when the project source is not mounted.");
   assertNoMatch(githubWorkflow, /project-repository|PROJECT_REPO_TOKEN|Checkout application source/, "Infrastructure CI must not checkout or require project repositories.");
   assertMatch(githubWorkflow, /\.tmp\/optional-project-source/, "Infrastructure CI must use a local optional project source placeholder for Compose rendering.");
   assertMatch(githubWorkflow, /GitHub Actions workflow lint[\s\S]*rhysd\/actionlint:1\.7\.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667[\s\S]*-color/, "Infrastructure CI must lint GitHub Actions workflows with a digest-pinned actionlint image.");
@@ -9561,11 +9585,8 @@ async function staticSecurityCheck() {
     staticSecurityInfraOnlyCheck();
     return;
   }
-  const projectPackagePath = path.join(sourceRoot, "package.json");
-  const projectCiPath = path.join(sourceRoot, ".github", "workflows");
-  const projectChecksRequired = booleanFlag(argv.requireProject ?? process.env.PROJECT_REQUIRE_SOURCE_ROOT);
-  if (!fs.existsSync(projectPackagePath) || !fs.existsSync(projectCiPath)) {
-    if (projectChecksRequired) {
+  if (!hasSupportedProjectSource()) {
+    if (projectSourceChecksRequired()) {
       fail(`Project source checks were required, but no supported project was found at ${sourceRoot}.`);
     }
     log(`No supported project source found at ${sourceRoot}; running infrastructure-only static checks.`);
@@ -9828,6 +9849,7 @@ async function staticSecurityCheck() {
   assertMatch(compose, /control-center:[\s\S]*image:\s+\$\{NODE_IMAGE:-node:26\.3\.1-alpine@sha256:[a-f0-9]{64}\}/, "Control Center must run as a digest-pinned Node service.");
   assertMatch(compose, /project-router:[\s\S]*CONTROL_CENTER_UPSTREAM:\s+http:\/\/control-center:8080/, "Project router must send the projects host to the Node Control Center.");
   assertMatch(compose, /control-center:[\s\S]*PROJECT_AUDIT_FILE:\s+\/var\/www\/project-state\/audit\.jsonl/, "Control Center must write local audit evidence.");
+  assertMatch(compose, /control-center:[\s\S]*PROJECT_OPERATIONS_FILE:\s+\/var\/www\/project-state\/operations\.jsonl/, "Control Center must write local Operation and OperationStep records from the Node service.");
   assertMatch(compose, /control-center:[\s\S]*\.\/control-center:\/app:ro/, "Control Center code must be mounted read-only into the Node runtime.");
   assertMatch(compose, /control-center:[\s\S]*CONTROL_CENTER_AUTH_REQUIRED:\s+\$\{CONTROL_CENTER_AUTH_REQUIRED:-false\}/, "Control Center must expose an explicit admin auth gate.");
   assertMatch(compose, /control-center:[\s\S]*CONTROL_CENTER_SESSION_KEYS_FILE:\s+\/run\/secrets\/projects_gateway_signing_keys[\s\S]*secrets:[\s\S]*projects_gateway_signing_keys/, "Control Center must sign admin sessions with Docker secret material.");
@@ -9836,6 +9858,9 @@ async function staticSecurityCheck() {
   assertMatch(controlCenterServer, /Stexor Control Center/, "Control Center must title the operational panel.");
   assertMatch(controlCenterServer, /handleApi[\s\S]*\/control\/overview/, "Control Center must expose operational API endpoints.");
   assertMatch(controlCenterServer, /appendAudit/, "Control Center must audit every local control action.");
+  assertMatch(controlCenterServer, /operationsFile[\s\S]*appendOperation[\s\S]*readOperations/, "Control Center must persist operations in a dedicated Node-managed JSONL store.");
+  assertMatch(controlCenterServer, /operationId[\s\S]*requestedBy[\s\S]*resultSummary[\s\S]*reportPath[\s\S]*errorMessage[\s\S]*steps:/, "Control Center Operation records must include the enterprise operation fields and OperationStep list.");
+  assertMatch(controlCenterServer, /sanitizeOperationDetails[\s\S]*sanitizeValue/, "Control Center operation details must be recursively sanitized before persistence.");
   assertMatch(controlCenterServer, /handleLogin[\s\S]*admin\.login\.success[\s\S]*admin\.login\.failed/, "Control Center must audit admin login success and failure without storing passwords.");
   assertMatch(controlCenterServer, /authenticateRequest[\s\S]*admin_auth_required/, "Control Center must enforce admin authentication when configured.");
   assertMatch(controlCenterServer, /timingSafeEqual[\s\S]*CONTROL_CENTER_ADMIN_PASSWORD_SHA256/, "Control Center admin password verification must use timing-safe hash comparison.");
@@ -9852,10 +9877,12 @@ async function staticSecurityCheck() {
   assertMatch(controlCenterTest, /APPLY-PRODUCTION[\s\S]*409/, "Control Center tests must reject production apply without valid production execution.");
   assertMatch(controlCenterTest, /\.\.\/secret[\s\S]*Invalid webspace path/, "Control Center tests must cover path traversal rejection.");
   assertMatch(controlCenterTest, /super-secret-token-should-not-leak[\s\S]*doesNotMatch/, "Control Center tests must prove supplied secret-like payloads are not serialized to audit/API output.");
+  assertMatch(controlCenterTest, /operations\.jsonl[\s\S]*\/control\/operations[\s\S]*operationId[\s\S]*output/, "Control Center tests must prove Operation and OperationStep records are persisted and exposed safely.");
   assertMatch(controlCenterTest, /mode=advanced[\s\S]*Infrastructure/, "Control Center tests must cover Advanced Mode routing.");
   assertMatch(controlCenterTest, /local evidence only[\s\S]*notEqual[\s\S]*production evidence/, "Control Center tests must prove local evidence is not accepted as production evidence.");
   assertMatch(controlCenterTest, /admin guard[\s\S]*admin_auth_required[\s\S]*HttpOnly[\s\S]*Secure[\s\S]*SameSite=Lax/, "Control Center tests must cover the admin auth gate and hardened session cookie.");
   assertNoMatch(controlCenterTest, /CLOUDFLARE_API_TOKEN|api\.github\.com|cloudflare\.com\/client\/v4/i, "Control Center tests must not make live provider calls.");
+  assertNoMatch(localProjectsPage, /<main|control-shell|\/control\//i, "PHP fallback must not implement the Control Center UI or API surface.");
   assertNoMatch(`${controlCenterServer}\n${localProjectsPage}`, /prometheus\.localhost\.com|alertmanager\.localhost\.com|traefik\.localhost\.com/, "Projects UI must not link unauthenticated internal consoles.");
   assertMatch(composeHa, /failure_action:\s+rollback/, "HA overlay must rollback failed rolling updates.");
   assertMatch(composeHa, /max_replicas_per_node:\s+1/, "HA overlay must spread stateless replicas across nodes.");

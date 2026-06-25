@@ -8,6 +8,7 @@ const projectsRoot = process.env.PROJECTS_ROOT || "/var/www/projects";
 const docsRoot = process.env.CONTROL_CENTER_DOCS_ROOT || "/var/www/infra-docs";
 const stateFile = process.env.PROJECT_STATE_FILE || "/var/www/project-state/projects.json";
 const auditFile = process.env.PROJECT_AUDIT_FILE || "/var/www/project-state/audit.jsonl";
+const operationsFile = process.env.PROJECT_OPERATIONS_FILE || "/var/www/project-state/operations.jsonl";
 const sessionKeysFile = process.env.CONTROL_CENTER_SESSION_KEYS_FILE || "";
 const adminPasswordFile = process.env.CONTROL_CENTER_ADMIN_PASSWORD_FILE || "";
 const adminPasswordSha256 = String(process.env.CONTROL_CENTER_ADMIN_PASSWORD_SHA256 || "").trim().toLowerCase();
@@ -254,21 +255,7 @@ function buildContext({ projects, state }) {
     status: project.enabled ? "active" : "disabled",
   }));
   const audit = readAudit();
-  const operations = audit.map((event) => ({
-    id: event.id || rid(),
-    type: event.action || "unknown",
-    status: event.result || "unknown",
-    projectId: event.target || "",
-    environment: event.environment || "local",
-    requestedBy: event.actor || "local-admin",
-    dryRun: Boolean(event.dryRun),
-    startedAt: event.timestamp || "",
-    finishedAt: event.timestamp || "",
-    resultSummary: event.summary || "",
-    reportPath: null,
-    errorCode: null,
-    errorMessage: null,
-  }));
+  const operations = readOperations();
   const activeProjects = projects.filter((project) => project.enabled).length;
   const onlineApps = applications.filter((app) => app.status === "online").length;
   const resources = {
@@ -632,7 +619,14 @@ function applySubdomain(payload, context) {
   };
   writeState(state);
   appendAudit({ action: "subdomain.apply.local", target: plan.details.hostname, environment: "local", risk: "medium", result: "success", dryRun: false, summary: "Local subdomain state recorded; routing uses existing wildcard Traefik rule." });
-  return { ...plan, dryRun: false, status: "applied" };
+  return operationPlan("subdomain.apply.local", "local", false, ["record local subdomain state", "use existing wildcard Traefik route", "write audit event"], {
+    subdomainId: id,
+    hostname: plan.details.hostname,
+    projectId: plan.details.projectId,
+    visibility: plan.details.visibility,
+    protection: plan.details.protection,
+    productionEvidence: false,
+  });
 }
 
 function planSubdomainRemoval(id, context) {
@@ -689,18 +683,37 @@ function planRestore(payload, context) {
 }
 
 function operationPlan(type, targetEnv, dryRun, steps, details = {}) {
-  return {
-    operationId: rid(),
+  const now = new Date().toISOString();
+  const operationId = rid();
+  const cleanDetails = sanitizeOperationDetails(details);
+  const operation = sanitizeEvent({
+    id: operationId,
+    operationId,
     type,
     status: dryRun ? "planned" : "accepted",
+    projectId: cleanDetails.projectId || cleanDetails.project || cleanDetails.applicationId || cleanDetails.webspaceId || cleanDetails.subdomainId || "",
     environment: targetEnv,
+    requestedBy: "local-admin",
     dryRun,
-    startedAt: new Date().toISOString(),
-    finishedAt: new Date().toISOString(),
+    startedAt: now,
+    finishedAt: now,
     resultSummary: dryRun ? "Plan generated. No external provider or destructive action executed." : "Local operation accepted.",
-    steps: steps.map((name) => ({ name, status: "planned", output: "sanitized" })),
-    details,
-  };
+    reportPath: null,
+    errorCode: null,
+    errorMessage: null,
+    steps: steps.map((name) => ({
+      id: rid(),
+      operationId,
+      name,
+      status: dryRun ? "planned" : "accepted",
+      startedAt: now,
+      finishedAt: now,
+      output: "sanitized",
+    })),
+    details: cleanDetails,
+  });
+  appendOperation(operation);
+  return operation;
 }
 
 function readState() {
@@ -736,6 +749,19 @@ function appendAudit(event) {
 function readAudit() {
   try {
     return readFileSync(auditFile, "utf8").split(/\r?\n/).filter(Boolean).reverse().slice(0, 100).map((line) => JSON.parse(line));
+  } catch {
+    return [];
+  }
+}
+
+function appendOperation(operation) {
+  mkdirSync(path.dirname(operationsFile), { recursive: true });
+  appendFileSync(operationsFile, `${JSON.stringify(sanitizeEvent(operation))}\n`);
+}
+
+function readOperations() {
+  try {
+    return readFileSync(operationsFile, "utf8").split(/\r?\n/).filter(Boolean).reverse().slice(0, 100).map((line) => JSON.parse(line));
   } catch {
     return [];
   }
@@ -945,16 +971,27 @@ function sanitizeIdentifier(value) {
 }
 
 function sanitizeMessage(message) {
-  return String(message || "sanitized").replace(/\b(token|secret|password|authorization|cookie)=([^\s]+)/gi, "$1=[redacted]");
+  return String(message || "").replace(/\b(token|secret|password|authorization|cookie)=([^\s]+)/gi, "$1=[redacted]");
 }
 
 function sanitizeEvent(event) {
-  const clean = {};
-  for (const [key, value] of Object.entries(event)) {
-    if (/(secret|token|password|authorization|cookie)/i.test(key)) clean[key] = "[redacted]";
-    else clean[key] = typeof value === "string" ? sanitizeMessage(value) : value;
+  return sanitizeValue(event);
+}
+
+function sanitizeOperationDetails(details) {
+  return sanitizeValue(details && typeof details === "object" ? details : {});
+}
+
+function sanitizeValue(value, keyName = "") {
+  if (/(secret|token|password|authorization|cookie)/i.test(keyName)) return "[redacted]";
+  if (typeof value === "string") return sanitizeMessage(value);
+  if (Array.isArray(value)) return value.map((item) => sanitizeValue(item));
+  if (value && typeof value === "object") {
+    const clean = {};
+    for (const [key, childValue] of Object.entries(value)) clean[key] = sanitizeValue(childValue, key);
+    return clean;
   }
-  return clean;
+  return value;
 }
 
 function safeIsDirectory(value) {
