@@ -7,9 +7,9 @@
   "maxAgeHours": 24,
   "monitors": [
     {
-      "targetName": "portal-public-home",
+      "targetName": "admin-public-home",
       "monitorId": "replace-with-provider-monitor-id",
-      "url": "${CONTROL_CENTER_PUBLIC_URL:-https://portal.platform.example.com}/",
+      "url": "${CONTROL_CENTER_PUBLIC_URL:-https://admin.platform.example.com}/",
       "intervalSeconds": 60,
       "regions": ["eu-west", "us-east"],
       "enabled": true,

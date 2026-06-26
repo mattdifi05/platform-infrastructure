@@ -67,7 +67,7 @@ test("Admin Control Center local foundation", async (t) => {
       PROJECT_PROVIDER_CONNECTIONS_FILE: providerConnectionsFile,
       PROJECT_SETTINGS_FILE: settingsFile,
       PROJECT_WEBSPACES_FILE: webspacesFile,
-      CONTROL_CENTER_HOST: "portal.localhost.com",
+      CONTROL_CENTER_HOST: "admin.localhost.com",
       DOCS_HOST: "docs.localhost.com",
       PROJECT_HOST_SUFFIX: ".localhost.com",
       NODE_PROJECT_HOSTS: "node-demo=node-demo.localhost.com",
@@ -130,14 +130,15 @@ test("Admin Control Center local foundation", async (t) => {
   assert.match(html, /Avanzato/);
 
   const docsHtml = await getTextWithHost(`${baseUrl}/`, "docs.localhost.com");
-  assert.match(docsHtml, /Platform Documentation/);
-  assert.match(docsHtml, /Runbook, security, readiness and service documentation/);
-  assert.match(docsHtml, /README\.md/);
-  assert.match(docsHtml, /RUNBOOK\.md/);
-  assert.doesNotMatch(docsHtml, /Admin Control Center/);
+  assert.match(docsHtml, /Docs .* Platform Infrastructure/);
+  assert.match(docsHtml, /Quickstart/);
+  assert.match(docsHtml, /Architecture/);
+  assert.match(docsHtml, /Runbook/);
+  assert.match(docsHtml, /GitHub\/Sigstore/);
+  assert.match(docsHtml, /Admin Control Center/);
   const readmeHtml = await getTextWithHost(`${baseUrl}/docs/README.md`, "docs.localhost.com");
-  assert.match(readmeHtml, /README\.md/);
-  assert.match(readmeHtml, /Platform Infrastructure|URL locali/);
+  assert.match(readmeHtml, /Platform Infrastructure/);
+  assert.match(readmeHtml, /Docker-first, white-label infrastructure/);
 
   const localStyles = await getText(`${baseUrl}/assets/control-center/control-center.css`);
   assert.match(localStyles, /--cc-bg/);
@@ -216,7 +217,7 @@ test("Admin Control Center local foundation", async (t) => {
   assert.equal(networkApi.providerTouched, false);
   assert.equal(networkApi.networkProbeExecuted, false);
   assert.equal(networkApi.productionEvidence, false);
-  assert.equal(networkApi.routers.some((router) => router.id === "enterprise-portal" && router.tls === true && router.sampleHost === "portal.localhost.com" && router.middlewares.includes("enterprise-rate-limit@file")), true);
+  assert.equal(networkApi.routers.some((router) => router.id === "enterprise-admin" && router.tls === true && router.sampleHost === "admin.localhost.com" && router.middlewares.includes("enterprise-rate-limit@file")), true);
   assert.equal(networkApi.routers.some((router) => router.id === "enterprise-docs" && router.tls === true && router.sampleHost === "docs.localhost.com" && router.middlewares.includes("enterprise-rate-limit@file")), true);
   assert.equal(networkApi.routers.some((router) => router.id === "enterprise-backend"), false);
   assert.equal(networkApi.routers.some((router) => router.id === "local-projects"), false);
@@ -224,10 +225,10 @@ test("Admin Control Center local foundation", async (t) => {
   assert.equal(networkApi.exposedPorts.some((port) => port.hostPort === "80" && port.containerPort === "80" && port.loopbackOnly === true && port.publicExposure === false), true);
   assert.equal(networkApi.exposedPorts.some((port) => port.hostPort === "443" && port.containerPort === "443" && port.loopbackOnly === true && port.publicExposure === false), true);
   assert.equal(networkApi.tls.status, "configured");
-  assert.equal(networkApi.routeTests.some((testPlan) => testPlan.routerId === "enterprise-portal" && testPlan.url === "https://portal.localhost.com/" && testPlan.networkProbeExecuted === false), true);
+  assert.equal(networkApi.routeTests.some((testPlan) => testPlan.routerId === "enterprise-admin" && testPlan.url === "https://admin.localhost.com/" && testPlan.networkProbeExecuted === false), true);
 
   const advancedNetworkApi = await getJson(`${baseUrl}/control/advanced/network`);
-  assert.equal(advancedNetworkApi.data.routers.some((router) => router.id === "enterprise-portal"), true);
+  assert.equal(advancedNetworkApi.data.routers.some((router) => router.id === "enterprise-admin"), true);
   assert.equal(advancedNetworkApi.data.routers.some((router) => router.id === "enterprise-backend"), false);
   assert.equal(advancedNetworkApi.data.routeTests.some((testPlan) => testPlan.productionEvidence === false), true);
   assert.equal(advancedNetworkApi.data.originLockStatus, "not-required-local-loopback");
@@ -238,7 +239,7 @@ test("Admin Control Center local foundation", async (t) => {
   assert.match(advancedNetworkHtml, /Middleware Chain/);
   assert.match(advancedNetworkHtml, /Loopback host ports/);
   assert.match(advancedNetworkHtml, /Route Test Plan/);
-  assert.match(advancedNetworkHtml, /enterprise-portal/);
+  assert.match(advancedNetworkHtml, /enterprise-admin/);
 
   const monitoringApi = await getJson(`${baseUrl}/control/monitoring`);
   assert.equal(monitoringApi.guardrails.readOnly, true);
@@ -470,7 +471,7 @@ test("Admin Control Center local foundation", async (t) => {
     slug: "client-portal",
     displayName: "Client Portal",
     runtime: "node",
-    host: "client-portal.localhost.com",
+    host: "client.localhost.com",
     secret: "project-secret-should-not-leak",
   });
   assert.equal(projectPlan.status, 202);
@@ -488,7 +489,7 @@ test("Admin Control Center local foundation", async (t) => {
     slug: "client-portal",
     displayName: "Client Portal",
     runtime: "node",
-    host: "client-portal.localhost.com",
+    host: "client.localhost.com",
     confirm: "CREATE-PROJECT",
     secret: "project-secret-should-not-leak",
   });
@@ -1929,7 +1930,7 @@ test("Admin Control Center admin guard", async (t) => {
       PROJECT_PROVIDER_CONNECTIONS_FILE: providerConnectionsFile,
       PROJECT_SETTINGS_FILE: settingsFile,
       PROJECT_WEBSPACES_FILE: webspacesFile,
-      CONTROL_CENTER_HOST: "portal.localhost.com",
+      CONTROL_CENTER_HOST: "admin.localhost.com",
       DOCS_HOST: "docs.localhost.com",
       PROJECT_HOST_SUFFIX: ".localhost.com",
       NODE_PROJECT_HOSTS: "node-demo=node-demo.localhost.com",

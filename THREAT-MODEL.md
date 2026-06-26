@@ -1,40 +1,70 @@
-# Platform Threat Model
+# Threat Model
+
+## Scope
+
+This threat model covers the infrastructure repository, local/VPS runtime, Admin Control Center, evidence generation, provider integration points and attached external application manifests.
+
+Application source repositories have their own threat models.
 
 ## Assets
 
-- Account profile and recovery data.
-- Passkey public credentials and counters.
-- PostgreSQL application data.
-- SMTP credentials and OTP delivery.
-- MinIO objects.
-- Observability logs and metrics.
+- Docker secret files and external secret references.
+- Session signing keys and admin credentials.
+- PostgreSQL and MariaDB data.
+- Redis, NATS and MinIO data.
+- Keycloak realm configuration.
+- Backup archives and restore material.
+- Release image digests, SBOMs and provenance.
+- Provider tokens and remote configuration.
+- Evidence reports and go/no-go decisions.
 
 ## Trust boundaries
 
-- Browser to Traefik over HTTPS.
-- Traefik to internal services on `enterprise_net`.
-- Backend to PostgreSQL/Redis/NATS/MinIO.
-- SMTP provider outside the infrastructure boundary.
+- Browser to WAF/Traefik.
+- Public app/API surfaces to internal services.
+- Admin Control Center to internal metadata and ops plans.
+- Docker network to databases, queues and storage.
+- Ops runner to Docker socket and provider APIs.
+- GitHub Actions to GHCR, attestations and artifacts.
+- Off-site backup provider to restore drills.
 
 ## Primary threats
 
-- Session theft: mitigated by `HttpOnly`, `Secure`, signed cookies and server-side session state.
-- CSRF on mutating endpoints: mitigated by Origin checks and JSON APIs.
-- Account enumeration: UI should keep generic error copy; backend should continue avoiding detailed public errors.
-- Secret leakage: `.env` ignored; production should move to secret manager.
-- Backup compromise: backups must be encrypted before offsite storage.
-- Supply-chain drift: CI must run lockfile install, typecheck, build, audit and image scanning.
+- Secret leakage through Git, logs, reports or artifacts.
+- Accidental public exposure of admin/database surfaces.
+- Session theft or privilege escalation.
+- WAF bypass or unsafe WAF exclusion.
+- Supply-chain substitution through mutable images.
+- Missing rollback target during deployment failure.
+- Backup corruption or untested restore.
+- Provider drift between intended state and live state.
+- False production readiness claims based on dry-run evidence.
 
-## Accepted local-development risks
+## Mitigations
 
-- Local direct ports are bound to `127.0.0.1` for development convenience.
-- `.env` exists locally and must not be copied to shared systems.
-- The custom account layer is active while Keycloak remains prepared for OIDC hardening.
+- `.gitignore` excludes `.env`, secrets, reports, backups and bundles.
+- Docker secrets and `*_FILE` conventions keep secret values out of configs.
+- Admin surfaces are internal or protected by explicit access controls.
+- WAF, rate limit and security headers protect routed HTTP surfaces.
+- Images should be digest-pinned.
+- SBOM and GitHub/Sigstore attestations support release verification.
+- Restore drills and off-site restore evidence prove recoverability.
+- External uptime and alert evidence prove live monitoring.
+- Production go/no-go fails when required evidence is missing.
+
+## Accepted local risks
+
+- Local development may use relaxed auth.
+- Local TLS may rely on mkcert or browser trust overrides.
+- Some services may exist as containers while not being publicly routed.
+- Dry-run evidence is acceptable for development but not for production approval.
 
 ## Production non-negotiables
 
-- Public exposure limited to Traefik `80/443`.
-- No public PostgreSQL, Redis, NATS, Prometheus, Loki, MinIO admin or Traefik dashboard.
-- Real DNS and Let's Encrypt certificates.
-- Firewall denies everything except required ingress.
-- Backup restore test before go-live.
+- No public database, queue, storage admin or observability admin surface without an access layer.
+- Real DNS and TLS for public surfaces.
+- Firewall and host hardening.
+- External uptime provider evidence.
+- Real alert delivery evidence.
+- Off-site backup and restore evidence.
+- Signed release evidence for production release subjects.

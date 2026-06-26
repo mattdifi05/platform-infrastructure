@@ -29,7 +29,7 @@ env_or_default() {
 }
 
 docs_host=$(env_or_default DOCS_HOST docs.localhost.com)
-admin_host=$(env_or_default CONTROL_CENTER_HOST "$(env_or_default ADMIN_HOST portal.localhost.com)")
+admin_host=$(env_or_default CONTROL_CENTER_HOST "$(env_or_default ADMIN_HOST admin.localhost.com)")
 ui_base="${DEPLOY_UI_BASE:-$(env_or_default DOCS_PUBLIC_URL "https://$docs_host")}"
 api_base="${DEPLOY_API_BASE:-}"
 account_base="${DEPLOY_ACCOUNT_BASE:-}"

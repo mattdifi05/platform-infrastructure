@@ -40,7 +40,7 @@ Questo documento traduce i 30 punti enterprise in controlli concreti. Le voci `r
 ## Gate locale
 
 ```sh
-cd /opt/platform/src
+cd /opt/platform/applications/<external-app-repo>
 pnpm enterprise:check
 ```
 

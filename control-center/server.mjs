@@ -37,7 +37,7 @@ const authRequired = parseBoolean(process.env.CONTROL_CENTER_AUTH_REQUIRED || ""
 const environment = normalizeEnvironment(process.env.CONTROL_CENTER_ENV || "local");
 const platformName = String(process.env.PLATFORM_NAME || "Platform Infrastructure").trim() || "Platform Infrastructure";
 const domain = normalizeHost(process.env.DOMAIN || process.env.LOCAL_DOMAIN || "localhost.com");
-const adminHost = normalizeHost(process.env.ADMIN_HOST || `portal.${domain}`);
+const adminHost = normalizeHost(process.env.ADMIN_HOST || `admin.${domain}`);
 const controlCenterHost = normalizeHost(process.env.CONTROL_CENTER_HOST || process.env.PROJECTS_HOST || adminHost);
 const docsHost = normalizeHost(process.env.DOCS_HOST || `docs.${domain}`);
 const projectsHost = controlCenterHost;
@@ -46,28 +46,47 @@ const nodeHosts = parsePairs(process.env.NODE_PROJECT_HOSTS || "");
 
 const docs = {
   "Overview": [
-    ["README.md", "Platform overview, local usage, hosts and commands"],
-    ["READINESS-REPORT.md", "Current readiness status and remaining gaps"],
-    ["FINAL-READINESS-AUDIT.md", "Final audit notes and evidence summary"],
+    ["README.md", "Overview", "Platform landing page and maintainer entrypoint"],
+    ["docs/quickstart.md", "Quickstart", "Local setup and first health checks"],
+    ["docs/architecture.md", "Architecture", "Components, trust boundaries and evidence flow"],
+    ["docs/configuration.md", "Configuration", "Environment files, provider profiles and secrets"],
+    ["docs/faq.md", "FAQ", "Common maintainer and operator questions"],
+    ["docs/glossary.md", "Glossary", "Terminology used by the platform"],
   ],
   "Operations": [
-    ["RUNBOOK.md", "Day-2 operations, incident response and recovery"],
-    ["VPS-PREDEPLOY-CHECKLIST.md", "VPS pre-deploy checklist"],
-    ["ENTERPRISE-10-PLAN.md", "Enterprise roadmap and acceptance criteria"],
+    ["RUNBOOK.md", "Runbook", "Day-2 operations, incidents and recovery"],
+    ["docs/local-development.md", "Local Development", "Docker-first local workflow"],
+    ["docs/vps-deployment.md", "VPS Deployment", "Linux VPS deployment flow"],
+    ["VPS-PREDEPLOY-CHECKLIST.md", "VPS Checklist", "Pre-deploy checklist"],
+    ["docs/backup-restore.md", "Backup/Restore", "Backup families and restore tests"],
+    ["docs/disaster-recovery.md", "Disaster Recovery", "RPO/RTO and off-site restore evidence"],
+    ["docs/troubleshooting.md", "Troubleshooting", "Common failures and remediation"],
   ],
   "Security": [
-    ["SECURITY.md", "Security model"],
-    ["THREAT-MODEL.md", "Threat model"],
-    ["ENTERPRISE-MATURITY.md", "Enterprise maturity matrix"],
+    ["SECURITY.md", "Security Baseline", "Disclosure and baseline expectations"],
+    ["docs/security-model.md", "Security Model", "Auth, secrets, WAF and supply-chain controls"],
+    ["THREAT-MODEL.md", "Threat Model", "Root threat model"],
+    ["docs/threat-model.md", "Threat Model Summary", "Maintainer-oriented threat model summary"],
+    ["ENTERPRISE-MATURITY.md", "Enterprise Maturity", "Maturity matrix"],
+    ["docs/production-go-no-go.md", "Production Go/No-Go", "Hard production readiness gate"],
+  ],
+  "Release": [
+    ["docs/github-sigstore-attestations.md", "GitHub/Sigstore", "GitHub Artifact Attestations flow"],
+    ["docs/release-evidence.md", "Release Evidence", "SBOM, provenance and rollback evidence"],
+    ["docs/evidence-bundles.md", "Evidence Bundles", "Evidence packaging and verification"],
+    ["READINESS-REPORT.md", "Readiness Report", "Current readiness status"],
+    ["FINAL-READINESS-AUDIT.md", "Final Readiness Audit", "Final audit notes and evidence summary"],
+    ["ENTERPRISE-10-PLAN.md", "Enterprise Plan", "Enterprise roadmap and acceptance criteria"],
   ],
   "Services": [
-    ["keycloak/README.md", "Identity provider notes"],
-    ["minio/README.md", "Object storage notes"],
-    ["secrets/README.md", "Secret store and rotation notes"],
-  ],
-  "Cloud And Edge": [
-    ["cloudflare/README.md", "Cloudflare setup"],
-    ["cloudflare/LIVE-CHANGES.md", "Cloudflare live change log"],
+    ["docs/control-center.md", "Control Center", "Admin Control Center behavior and surfaces"],
+    ["docs/project-manifest.md", "Project Manifest", "External application attachment"],
+    ["docs/providers.md", "Providers", "Provider profiles and live evidence"],
+    ["docs/observability.md", "Observability", "Metrics, logs, alerts and uptime evidence"],
+    ["docs/cloudflare.md", "Cloudflare", "Optional Cloudflare DNS/CDN/WAF/Access"],
+    ["keycloak/README.md", "Keycloak", "Identity provider notes"],
+    ["minio/README.md", "MinIO", "Object storage notes"],
+    ["secrets/README.md", "Secrets", "Secret store and rotation notes"],
   ],
 };
 
@@ -2237,7 +2256,7 @@ function renderHostingServiceHealth(context) {
     <div class="hosting-panel-head">
       <div>
         <h2>Superfici pubbliche</h2>
-        <p>Solo portal e docs sono pubblicati; i servizi operativi restano interni.</p>
+        <p>Solo Admin Control Center e docs sono pubblicati nel profilo minimale; i servizi operativi restano interni o protetti.</p>
       </div>
       <a class="button" href="/?mode=advanced&section=infrastructure">Inventario</a>
     </div>
@@ -2253,7 +2272,7 @@ function renderHostingServiceHealth(context) {
 
 function hostingServiceRows(context) {
   return [
-    { name: "Portal", role: "Control Center Node", status: context.network.routers.some((router) => router.id === "enterprise-portal") ? "pubblico" : "da verificare", icon: "domains", href: `https://${controlCenterHost}`, tone: "good" },
+    { name: "Admin Control Center", role: "Control plane Node", status: context.network.routers.some((router) => router.id === "enterprise-admin") ? "pubblico" : "da verificare", icon: "domains", href: `https://${controlCenterHost}`, tone: "good" },
     { name: "Docs", role: "Documentazione operativa", status: context.network.routers.some((router) => router.id === "enterprise-docs") ? "pubblico" : "da verificare", icon: "logs", href: `https://${docsHost}`, tone: "good" },
   ];
 }
@@ -2835,16 +2854,16 @@ function renderProviderConnectionCard(connection) {
 }
 
 function renderDocs() {
-  return Object.entries(docs).map(([group, items]) => `<h3>${escapeHtml(group)}</h3><div class="cards">${items.map(([docPath, description]) => {
+  return Object.entries(docs).map(([group, items]) => `<h3>${escapeHtml(group)}</h3><div class="cards">${items.map(([docPath, title, description]) => {
     const exists = existsSync(safeDocPath(docPath));
     const href = exists ? `https://${docsHost}/docs/${encodeURIComponent(docPath)}` : "#";
-    return `<a class="card compact ${exists ? "" : "disabled"}" href="${escapeHtml(href)}"><strong>${escapeHtml(path.basename(docPath))}</strong><span>${escapeHtml(description)}</span></a>`;
+    return `<a class="card compact ${exists ? "" : "disabled"}" href="${escapeHtml(href)}"><strong>${escapeHtml(title || path.basename(docPath))}</strong><span>${escapeHtml(description)}</span></a>`;
   }).join("")}</div>`).join("");
 }
 
-function renderDocsPortal(selectedDocPath = "") {
+function renderDocsSite(selectedDocPath = "") {
   const selected = selectedDocPath ? findDoc(selectedDocPath) : null;
-  const title = selected ? `${path.basename(selected.path)} / Platform Docs` : "Platform Docs";
+  const title = selected ? `${selected.title} / Platform Docs` : "Platform Docs";
   const body = selected ? renderDocArticle(selected) : renderDocsIndex();
   return `<!doctype html>
 <html lang="en">
@@ -2860,12 +2879,12 @@ ${controlCenterStylesheetLinks()}
   <aside class="docs-sidebar" aria-label="Documentation navigation">
     <a class="brand platform-wordmark" href="/" aria-label="Platform Docs"><span class="brand-mark">D</span><div><strong>Docs</strong><small>${escapeHtml(platformName)}</small></div></a>
     <nav class="docs-nav">${renderDocsNavigation(selectedDocPath)}</nav>
-    <div class="docs-note"><strong>Portal</strong><span>${escapeHtml(controlCenterHost)}</span></div>
+    <div class="docs-note"><strong>Admin Control Center</strong><span>${escapeHtml(controlCenterHost)}</span></div>
   </aside>
   <section class="docs-content">
     <header class="docs-hero">
       <p class="eyebrow">${escapeHtml(environment.toUpperCase())} / DOCUMENTATION</p>
-      <h1>${escapeHtml(selected ? path.basename(selected.path) : "Platform Documentation")}</h1>
+      <h1>${escapeHtml(selected ? selected.title : "Docs — Platform Infrastructure")}</h1>
       <p>${escapeHtml(selected ? selected.description : "Runbook, security, readiness and service documentation organized for operations.")}</p>
     </header>
     ${body}
@@ -2880,10 +2899,10 @@ function renderDocsIndex() {
     <article class="docs-card">
       <h2>${escapeHtml(group)}</h2>
       <div class="docs-link-list">
-        ${items.map(([docPath, description]) => {
+        ${items.map(([docPath, title, description]) => {
           const exists = existsSync(safeDocPath(docPath));
           const href = exists ? `/docs/${encodeURIComponent(docPath)}` : "#";
-          return `<a class="${exists ? "" : "disabled"}" href="${escapeHtml(href)}"><strong>${escapeHtml(docPath)}</strong><span>${escapeHtml(description)}</span></a>`;
+          return `<a class="${exists ? "" : "disabled"}" href="${escapeHtml(href)}"><strong>${escapeHtml(title || docPath)}</strong><span>${escapeHtml(description)}</span></a>`;
         }).join("")}
       </div>
     </article>`).join("")}</section>`;
@@ -2892,10 +2911,10 @@ function renderDocsIndex() {
 function renderDocsNavigation(selectedDocPath = "") {
   return Object.entries(docs).map(([group, items]) => `<div class="docs-nav-group">
     <strong>${escapeHtml(group)}</strong>
-    ${items.map(([docPath]) => {
+    ${items.map(([docPath, title]) => {
       const exists = existsSync(safeDocPath(docPath));
       const href = exists ? `/docs/${encodeURIComponent(docPath)}` : "#";
-      return `<a class="${selectedDocPath === docPath ? "active" : ""} ${exists ? "" : "disabled"}" href="${escapeHtml(href)}">${escapeHtml(path.basename(docPath))}</a>`;
+      return `<a class="${selectedDocPath === docPath ? "active" : ""} ${exists ? "" : "disabled"}" href="${escapeHtml(href)}">${escapeHtml(title || path.basename(docPath))}</a>`;
     }).join("")}
   </div>`).join("");
 }
@@ -6929,9 +6948,10 @@ function safeDocPath(docPath) {
 }
 
 function docsEntries() {
-  return Object.entries(docs).flatMap(([group, items]) => items.map(([docPath, description]) => ({
+  return Object.entries(docs).flatMap(([group, items]) => items.map(([docPath, title, description]) => ({
     group,
     path: docPath,
+    title: title || path.basename(docPath),
     description,
   })));
 }
@@ -6948,7 +6968,7 @@ function isDocsRequest(req) {
 
 function handleDocsRequest(res, url) {
   if (url.pathname === "/" || url.pathname === "/index.html") {
-    html(res, renderDocsPortal());
+    html(res, renderDocsSite());
     return;
   }
   if (!url.pathname.startsWith("/docs/")) {
@@ -6967,7 +6987,7 @@ function handleDocsRequest(res, url) {
     notFound(res);
     return;
   }
-  html(res, renderDocsPortal(doc.path));
+  html(res, renderDocsSite(doc.path));
 }
 
 function countAvailableDocs() {

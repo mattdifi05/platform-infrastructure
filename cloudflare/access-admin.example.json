@@ -17,7 +17,7 @@
     { "name": "Platform MinIO Console", "domain": "minio.example.com" },
     { "name": "Platform Traefik Dashboard", "domain": "traefik.example.com" },
     { "name": "Platform phpMyAdmin", "domain": "phpmyadmin.example.com" },
-    { "name": "Platform Portal Control Center", "domain": "portal.example.com" },
+    { "name": "Platform Admin Control Center", "domain": "admin.example.com" },
     { "name": "Platform Keycloak Admin", "domain": "keycloak-admin.example.com" }
   ]
 }

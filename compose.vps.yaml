@@ -79,7 +79,7 @@ services:
       API_PUBLIC_URL: ${API_PUBLIC_URL:-http://backend:3000}
       ACCOUNT_PUBLIC_URL: ${ACCOUNT_PUBLIC_URL:-${CONTROL_CENTER_PUBLIC_URL:-http://control-center:8080}}
       UI_PUBLIC_URL: ${UI_PUBLIC_URL:-${CONTROL_CENTER_PUBLIC_URL:-http://control-center:8080}}
-      WEBAUTHN_RP_ID: ${WEBAUTHN_RP_ID:-${CONTROL_CENTER_HOST:-portal.${DOMAIN:?Set DOMAIN}}}
+      WEBAUTHN_RP_ID: ${WEBAUTHN_RP_ID:-${CONTROL_CENTER_HOST:-admin.${DOMAIN:?Set DOMAIN}}}
       WEBAUTHN_ORIGINS: ${WEBAUTHN_ORIGINS:-${CONTROL_CENTER_PUBLIC_URL:-http://control-center:8080}}
       CORS_ORIGINS: ${CORS_ORIGINS:-${CONTROL_CENTER_PUBLIC_URL:-http://control-center:8080}}
       GOOGLE_OAUTH_REDIRECT_URI: ${GOOGLE_OAUTH_REDIRECT_URI:-http://backend:3000/auth/google/callback}
@@ -100,7 +100,7 @@ services:
       ACCOUNT_HOST: ${ACCOUNT_HOST:-account.local}
       ACCOUNT_PUBLIC_URL: ${ACCOUNT_PUBLIC_URL:-${CONTROL_CENTER_PUBLIC_URL:-http://control-center:8080}}
       NEXTAUTH_URL: ${NEXTAUTH_URL:-${CONTROL_CENTER_PUBLIC_URL:-http://control-center:8080}}
-      KEYCLOAK_ISSUER: ${KEYCLOAK_ISSUER:-http://keycloak:8080/realms/stexor}
+      KEYCLOAK_ISSUER: ${KEYCLOAK_ISSUER:-http://keycloak:8080/realms/platform}
 
   worker-notifications:
     restart: always
@@ -135,8 +135,8 @@ configs:
     content: |
       http:
         routers:
-          enterprise-portal:
-            rule: Host(`${CONTROL_CENTER_HOST:-${ADMIN_HOST:-portal.${DOMAIN:?Set DOMAIN}}}`)
+          enterprise-admin:
+            rule: Host(`${CONTROL_CENTER_HOST:-${ADMIN_HOST:-admin.${DOMAIN:?Set DOMAIN}}}`)
             entryPoints:
               - web
             priority: 100
@@ -145,7 +145,7 @@ configs:
               - enterprise-security-headers@file
               - enterprise-rate-limit@file
               - enterprise-compress@file
-            service: enterprise-portal
+            service: enterprise-admin
 
           enterprise-docs:
             rule: Host(`${DOCS_HOST:-docs.${DOMAIN:?Set DOMAIN}}`)
@@ -160,7 +160,7 @@ configs:
             service: enterprise-docs
 
         services:
-          enterprise-portal:
+          enterprise-admin:
             loadBalancer:
               servers:
                 - url: http://control-center:8080
