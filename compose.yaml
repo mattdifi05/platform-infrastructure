@@ -119,7 +119,7 @@ services:
       KC_METRICS_ENABLED: "true"
       KC_HTTP_ENABLED: "true"
       KC_PROXY_HEADERS: xforwarded
-      KC_HOSTNAME: ${KEYCLOAK_HOSTNAME:-auth.localhost.com}
+      KC_HOSTNAME: ${KEYCLOAK_HOSTNAME:-keycloak.local}
       KC_HOSTNAME_STRICT: ${KEYCLOAK_HOSTNAME_STRICT:-true}
     depends_on:
       postgres:
@@ -130,11 +130,7 @@ services:
     networks:
       - enterprise_net
     labels:
-      traefik.enable: "true"
-      traefik.http.routers.enterprise-keycloak.rule: Host(`${AUTH_HOST:-auth.localhost.com}`)
-      traefik.http.routers.enterprise-keycloak.entrypoints: web
-      traefik.http.routers.enterprise-keycloak.middlewares: keycloak-security-headers@file,enterprise-compress@file
-      traefik.http.services.enterprise-keycloak.loadbalancer.server.port: "8080"
+      traefik.enable: "false"
     healthcheck:
       test: ["CMD-SHELL", "bash -ec 'true < /dev/tcp/127.0.0.1/8080'"]
       interval: 20s
@@ -186,18 +182,14 @@ services:
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minio_admin}
       MINIO_ROOT_PASSWORD_FILE: /run/secrets/minio_root_password
-      MINIO_BROWSER_REDIRECT_URL: ${MINIO_BROWSER_REDIRECT_URL:-https://storage.localhost.com}
-      MINIO_SERVER_URL: ${MINIO_SERVER_URL:-https://s3.localhost.com}
+      MINIO_BROWSER_REDIRECT_URL: ${MINIO_BROWSER_REDIRECT_URL:-http://minio:9001}
+      MINIO_SERVER_URL: ${MINIO_SERVER_URL:-http://minio:9000}
     volumes:
       - enterprise_minio_data:/data
     networks:
       - enterprise_net
     labels:
-      traefik.enable: "true"
-      traefik.http.routers.enterprise-minio.rule: Host(`${MINIO_CONSOLE_HOST:-storage.localhost.com}`)
-      traefik.http.routers.enterprise-minio.entrypoints: web
-      traefik.http.routers.enterprise-minio.middlewares: enterprise-security-headers@file,enterprise-compress@file
-      traefik.http.services.enterprise-minio.loadbalancer.server.port: "9001"
+      traefik.enable: "false"
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9000/minio/health/live >/dev/null"]
       interval: 15s
@@ -464,21 +456,21 @@ services:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minio_admin}
       MINIO_ROOT_PASSWORD_FILE: /run/secrets/minio_root_password
       MINIO_DEFAULT_BUCKET: ${MINIO_DEFAULT_BUCKET:-local-bucket}
-      API_PUBLIC_URL: ${API_PUBLIC_URL:-https://api.localhost.com}
-      ACCOUNT_PUBLIC_URL: ${ACCOUNT_PUBLIC_URL:-https://account.localhost.com}
+      API_PUBLIC_URL: ${API_PUBLIC_URL:-http://backend:3000}
+      ACCOUNT_PUBLIC_URL: ${ACCOUNT_PUBLIC_URL:-https://portal.localhost.com}
       UI_PUBLIC_URL: ${UI_PUBLIC_URL:-https://portal.localhost.com}
-      WEBAUTHN_RP_ID: ${WEBAUTHN_RP_ID:-account.localhost.com}
-      WEBAUTHN_ORIGINS: ${WEBAUTHN_ORIGINS:-https://account.localhost.com}
-      CORS_ORIGINS: ${CORS_ORIGINS:-https://account.localhost.com,https://portal.localhost.com}
+      WEBAUTHN_RP_ID: ${WEBAUTHN_RP_ID:-portal.localhost.com}
+      WEBAUTHN_ORIGINS: ${WEBAUTHN_ORIGINS:-https://portal.localhost.com}
+      CORS_ORIGINS: ${CORS_ORIGINS:-https://portal.localhost.com}
       BOT_PROTECTION_PROVIDER: ${BOT_PROTECTION_PROVIDER:-disabled}
       BOT_PROTECTION_REQUIRED: ${BOT_PROTECTION_REQUIRED:-}
       BOT_PROTECTION_MIN_SCORE: ${BOT_PROTECTION_MIN_SCORE:-0.5}
-      BOT_PROTECTION_EXPECTED_HOSTNAMES: ${BOT_PROTECTION_EXPECTED_HOSTNAMES:-account.localhost.com,portal.localhost.com}
+      BOT_PROTECTION_EXPECTED_HOSTNAMES: ${BOT_PROTECTION_EXPECTED_HOSTNAMES:-portal.localhost.com}
       GOOGLE_RECAPTCHA_SECRET_KEY_FILE: /run/secrets/google_recaptcha_secret_key
       CLOUDFLARE_TURNSTILE_SECRET_KEY_FILE: /run/secrets/cloudflare_turnstile_secret_key
       GOOGLE_OAUTH_CLIENT_ID: ${GOOGLE_OAUTH_CLIENT_ID:-}
       GOOGLE_OAUTH_CLIENT_SECRET_FILE: ${GOOGLE_OAUTH_CLIENT_SECRET_FILE-}
-      GOOGLE_OAUTH_REDIRECT_URI: ${GOOGLE_OAUTH_REDIRECT_URI:-https://api.localhost.com/auth/google/callback}
+      GOOGLE_OAUTH_REDIRECT_URI: ${GOOGLE_OAUTH_REDIRECT_URI:-http://backend:3000/auth/google/callback}
       GOOGLE_OAUTH_SCOPES: ${GOOGLE_OAUTH_SCOPES:-openid email profile https://www.googleapis.com/auth/user.birthday.read}
       RATE_LIMIT_TTL_SECONDS: ${RATE_LIMIT_TTL_SECONDS:-60}
       RATE_LIMIT_MAX_REQUESTS: ${RATE_LIMIT_MAX_REQUESTS:-120}
@@ -520,11 +512,7 @@ services:
     networks:
       - enterprise_net
     labels:
-      traefik.enable: "true"
-      traefik.http.routers.enterprise-backend.rule: Host(`${API_HOST:-api.localhost.com}`)
-      traefik.http.routers.enterprise-backend.entrypoints: web
-      traefik.http.routers.enterprise-backend.middlewares: enterprise-security-headers@file,enterprise-rate-limit@file,enterprise-compress@file
-      traefik.http.services.enterprise-backend.loadbalancer.server.port: "3000"
+      traefik.enable: "false"
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:3000/health"]
       interval: 15s
@@ -543,17 +531,17 @@ services:
       NODE_ENV: production
       NEXT_TELEMETRY_DISABLED: "1"
       PORT: 3000
-      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-https://api.localhost.com}
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://backend:3000}
       NEXT_PUBLIC_UI_URL: ${NEXT_PUBLIC_UI_URL:-https://portal.localhost.com}
-      NEXT_PUBLIC_ACCOUNT_URL: ${NEXT_PUBLIC_ACCOUNT_URL:-https://account.localhost.com}
+      NEXT_PUBLIC_ACCOUNT_URL: ${NEXT_PUBLIC_ACCOUNT_URL:-https://portal.localhost.com}
       NEXT_PUBLIC_BOT_PROTECTION_PROVIDER: ${NEXT_PUBLIC_BOT_PROTECTION_PROVIDER:-disabled}
       NEXT_PUBLIC_GOOGLE_RECAPTCHA_SITE_KEY: ${NEXT_PUBLIC_GOOGLE_RECAPTCHA_SITE_KEY:-}
       NEXT_PUBLIC_CLOUDFLARE_TURNSTILE_SITE_KEY: ${NEXT_PUBLIC_CLOUDFLARE_TURNSTILE_SITE_KEY:-}
       INTERNAL_API_URL: http://backend:3000
-      ACCOUNT_HOST: ${ACCOUNT_HOST:-account.localhost.com}
-      ACCOUNT_PUBLIC_URL: ${ACCOUNT_PUBLIC_URL:-https://account.localhost.com}
-      NEXTAUTH_URL: ${NEXTAUTH_URL:-https://account.localhost.com}
-      KEYCLOAK_ISSUER: ${KEYCLOAK_ISSUER:-https://auth.localhost.com/realms/platform}
+      ACCOUNT_HOST: ${ACCOUNT_HOST:-account.local}
+      ACCOUNT_PUBLIC_URL: ${ACCOUNT_PUBLIC_URL:-https://portal.localhost.com}
+      NEXTAUTH_URL: ${NEXTAUTH_URL:-https://portal.localhost.com}
+      KEYCLOAK_ISSUER: ${KEYCLOAK_ISSUER:-http://keycloak:8080/realms/platform}
     depends_on:
       backend:
         condition: service_healthy
@@ -815,7 +803,7 @@ services:
       GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
       GF_SECURITY_ADMIN_PASSWORD__FILE: /run/secrets/grafana_admin_password
       GF_USERS_ALLOW_SIGN_UP: "false"
-      GF_SERVER_ROOT_URL: ${GRAFANA_ROOT_URL:-https://grafana.localhost.com}
+      GF_SERVER_ROOT_URL: ${GRAFANA_ROOT_URL:-http://grafana:3000}
       GF_ANALYTICS_REPORTING_ENABLED: "false"
       GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
       GF_PLUGINS_PREINSTALL_DISABLED: "true"
@@ -834,11 +822,7 @@ services:
     networks:
       - enterprise_net
     labels:
-      traefik.enable: "true"
-      traefik.http.routers.enterprise-grafana.rule: Host(`${GRAFANA_HOST:-grafana.localhost.com}`)
-      traefik.http.routers.enterprise-grafana.entrypoints: web
-      traefik.http.routers.enterprise-grafana.middlewares: enterprise-security-headers@file,enterprise-compress@file
-      traefik.http.services.enterprise-grafana.loadbalancer.server.port: "3000"
+      traefik.enable: "false"
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:3000/api/health"]
       interval: 15s
@@ -944,204 +928,40 @@ configs:
             tls: {}
             middlewares:
               - enterprise-security-headers@file
+              - enterprise-rate-limit@file
               - enterprise-compress@file
             service: enterprise-docs
 
-          enterprise-account-http:
-            rule: Host(`${ACCOUNT_HOST:-account.localhost.com}`)
+          enterprise-portal-http:
+            rule: Host(`${CONTROL_CENTER_HOST:-${ADMIN_HOST:-portal.${DOMAIN:-localhost.com}}}`)
             entryPoints:
               - web
             middlewares:
               - enterprise-redirect-https@file
-            service: enterprise-web
+            priority: 100
+            service: enterprise-portal
 
-          enterprise-account:
-            rule: Host(`${ACCOUNT_HOST:-account.localhost.com}`)
+          enterprise-portal:
+            rule: Host(`${CONTROL_CENTER_HOST:-${ADMIN_HOST:-portal.${DOMAIN:-localhost.com}}}`)
             entryPoints:
               - websecure
-            tls: {}
-            middlewares:
-              - enterprise-security-headers@file
-              - enterprise-compress@file
-            service: enterprise-web
-
-          enterprise-backend-http:
-            rule: Host(`${API_HOST:-api.localhost.com}`)
-            entryPoints:
-              - web
-            middlewares:
-              - enterprise-redirect-https@file
-            service: enterprise-backend
-
-          enterprise-backend:
-            rule: Host(`${API_HOST:-api.localhost.com}`)
-            entryPoints:
-              - websecure
+            priority: 100
             tls: {}
             middlewares:
               - enterprise-security-headers@file
               - enterprise-rate-limit@file
               - enterprise-compress@file
-            service: enterprise-backend
-
-          enterprise-backend-preflight:
-            rule: Host(`${API_HOST:-api.localhost.com}`) && Method(`OPTIONS`)
-            entryPoints:
-              - websecure
-            tls: {}
-            priority: 100
-            middlewares:
-              - enterprise-security-headers@file
-              - enterprise-compress@file
-            service: enterprise-backend
-
-          enterprise-keycloak-http:
-            rule: Host(`${AUTH_HOST:-auth.localhost.com}`)
-            entryPoints:
-              - web
-            middlewares:
-              - enterprise-redirect-https@file
-            service: enterprise-keycloak
-
-          enterprise-keycloak:
-            rule: Host(`${AUTH_HOST:-auth.localhost.com}`)
-            entryPoints:
-              - websecure
-            tls: {}
-            middlewares:
-              - keycloak-security-headers@file
-              - enterprise-compress@file
-            service: enterprise-keycloak
-
-          enterprise-minio-http:
-            rule: Host(`${MINIO_CONSOLE_HOST:-storage.localhost.com}`)
-            entryPoints:
-              - web
-            middlewares:
-              - enterprise-redirect-https@file
-            service: enterprise-minio
-
-          enterprise-minio:
-            rule: Host(`${MINIO_CONSOLE_HOST:-storage.localhost.com}`)
-            entryPoints:
-              - websecure
-            tls: {}
-            middlewares:
-              - enterprise-security-headers@file
-              - enterprise-compress@file
-            service: enterprise-minio
-
-          enterprise-grafana-http:
-            rule: Host(`${GRAFANA_HOST:-grafana.localhost.com}`)
-            entryPoints:
-              - web
-            middlewares:
-              - enterprise-redirect-https@file
-            service: enterprise-grafana
-
-          enterprise-grafana:
-            rule: Host(`${GRAFANA_HOST:-grafana.localhost.com}`)
-            entryPoints:
-              - websecure
-            tls: {}
-            middlewares:
-              - enterprise-security-headers@file
-              - enterprise-compress@file
-            service: enterprise-grafana
-
-          enterprise-phpmyadmin-http:
-            rule: Host(`${PHPMYADMIN_HOST:-phpmyadmin.localhost.com}`)
-            entryPoints:
-              - web
-            middlewares:
-              - enterprise-redirect-https@file
-            service: enterprise-phpmyadmin
-
-          enterprise-phpmyadmin:
-            rule: Host(`${PHPMYADMIN_HOST:-phpmyadmin.localhost.com}`)
-            entryPoints:
-              - websecure
-            tls: {}
-            middlewares:
-              - enterprise-security-headers@file
-              - enterprise-compress@file
-            service: enterprise-phpmyadmin
-
-          enterprise-minio-api-http:
-            rule: Host(`s3.localhost.com`)
-            entryPoints:
-              - web
-            middlewares:
-              - enterprise-redirect-https@file
-            service: enterprise-minio-api
-
-          enterprise-minio-api:
-            rule: Host(`s3.localhost.com`)
-            entryPoints:
-              - websecure
-            tls: {}
-            middlewares:
-              - enterprise-security-headers@file
-              - enterprise-compress@file
-            service: enterprise-minio-api
-
-          local-projects-http:
-            rule: Host(`${CONTROL_CENTER_HOST:-${ADMIN_HOST:-portal.${DOMAIN:-localhost.com}}}`) || HostRegexp(`${PROJECTS_WILDCARD_HOST_REGEXP:-[a-z0-9-]+\.localhost\.com}`)
-            entryPoints:
-              - web
-            priority: 1
-            middlewares:
-              - enterprise-redirect-https@file
-            service: local-projects
-
-          local-projects:
-            rule: Host(`${CONTROL_CENTER_HOST:-${ADMIN_HOST:-portal.${DOMAIN:-localhost.com}}}`) || HostRegexp(`${PROJECTS_WILDCARD_HOST_REGEXP:-[a-z0-9-]+\.localhost\.com}`)
-            entryPoints:
-              - websecure
-            priority: 1
-            tls: {}
-            middlewares:
-              - enterprise-security-headers@file
-              - enterprise-compress@file
-            service: local-projects
+            service: enterprise-portal
 
         services:
-          enterprise-web:
-            loadBalancer:
-              servers:
-                - url: http://web:3000
           enterprise-docs:
             loadBalancer:
               servers:
                 - url: http://control-center:8080
-          enterprise-backend:
+          enterprise-portal:
             loadBalancer:
               servers:
-                - url: http://backend:3000
-          enterprise-keycloak:
-            loadBalancer:
-              servers:
-                - url: http://keycloak:8080
-          enterprise-minio:
-            loadBalancer:
-              servers:
-                - url: http://minio:9001
-          enterprise-minio-api:
-            loadBalancer:
-              servers:
-                - url: http://minio:9000
-          enterprise-grafana:
-            loadBalancer:
-              servers:
-                - url: http://grafana:3000
-          enterprise-phpmyadmin:
-            loadBalancer:
-              servers:
-                - url: http://phpmyadmin:80
-          local-projects:
-            loadBalancer:
-              servers:
-                - url: http://project-router:8080
+                - url: http://control-center:8080
 
 secrets:
   projects_gateway_signing_keys:

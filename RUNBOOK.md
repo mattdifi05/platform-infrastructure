@@ -26,7 +26,7 @@ The shell wrappers are container-first. On Linux they run the ops container with
    sh ./scripts/enterprise-hardening-audit.sh
    sh ./scripts/security-smoke.sh
    sh ./scripts/waf-smoke.sh
-   curl https://api.localhost.com/health
+   curl https://portal.localhost.com/__health
    ```
 
 3. Read scoped logs:
@@ -59,7 +59,7 @@ Prometheus, Alertmanager and the Traefik dashboard are intentionally not routed 
 Expected blocks:
 
 ```sh
-curl -k -o /dev/null -s -w "%{http_code}\n" "https://api.localhost.com/health?x=<script>alert(1)</script>"
+curl -k -o /dev/null -s -w "%{http_code}\n" "https://portal.localhost.com/?x=<script>alert(1)</script>"
 curl -k -o /dev/null -s -w "%{http_code}\n" "https://portal.localhost.com/.env"
 ```
 
@@ -314,7 +314,7 @@ sh ./scripts/secret-rotation-evidence.sh --enforce
 `secret-rotation-evidence.sh --enforce` validates the encrypted store, materialized Docker secret files, audit log, Platform Local KMS age and every secret `rotationDays` window without printing secret values. Archive `reports/secret-rotation/secret-rotation-evidence-*.json` outside Git before production go/no-go.
 
 `portal.localhost.com` is the Node-based Admin Control Center served by the `control-center` container. It stays separate from PHP Apache, is declared as the local Node project `@platform/control-center`, and uses a local Control Center visual system: components are declared in `control-center/components/ui/controlCenterUi.mjs`, `--cc-*` tokens live in `control-center/styles/control-center.css`, the stylesheet is served from `/assets/control-center/control-center.css`, and `/control/ui-package` exposes that local contract. Control Center reads project inventory from `PHP_PROJECTS_DIR`, exposes read-only Advanced Network topology from `/control/network`, exposes read-only Advanced Monitoring topology from `/control/monitoring`, and stores local metadata/audit state in `projects-portal/state/`. `docs.localhost.com` is served by the same Node process but only renders whitelisted Markdown documentation from the repository. `PHP_SOURCE_DIR` points at `php-runtime-root`, a neutral static Apache root; PHP Apache is only the runtime for PHP projects and does not own the Control Center UI or API. Production/provider operations are plan-only from this foundation unless an explicit adapter and confirmation gate are added. For staging/VPS set `CONTROL_CENTER_AUTH_REQUIRED=true` and set `CONTROL_CENTER_ADMIN_PASSWORD_SHA256` to the SHA-256 hash of the admin password; the session cookie is signed with the existing `projects_gateway_signing_keys` Docker secret and login success/failure is audited without storing passwords.
-`project-router` is the shared local project entrypoint for PHP and Node project hosts. Traefik names that route/service `local-projects`: `CONTROL_CENTER_HOST` is forwarded to the Node Control Center, `DOCS_HOST` is forwarded to the docs surface, `PROJECTS_HOST` is deprecated and should stay empty, and PHP projects proxy to Apache only after a project host is selected. Node projects either proxy to `NODE_PROJECT_UPSTREAMS` or run a managed local Node command inside the router container; disabling a managed Node project through Control Center state stops that process, and `project-router-tests` verifies PHP and Node can be served together before CI accepts the infrastructure.
+`project-router` remains the shared internal project entrypoint for PHP and Node project hosts, but Traefik no longer publishes wildcard project routes by default. `CONTROL_CENTER_HOST` forwards to the Node Control Center, `DOCS_HOST` forwards to the docs surface, and `PROJECTS_HOST` stays deprecated and empty. Node/PHP routing behavior remains covered by `project-router-tests` as an internal capability.
 Advanced Mode exposes the requested enterprise skeleton areas, including Workers & Jobs, CI/CD & GitHub Governance, Logs/Alerts Advanced, Disaster Recovery, Release Evidence, Security Advanced and Billing / Plans. These surfaces remain plan/evidence-only until an explicit adapter performs apply plus verifyRemote.
 The read-only Advanced API is available at `/control/advanced` and `/control/advanced/:section`; it exposes capabilities, guardrails and evidence metadata without live provider calls, Docker mutations or production evidence claims. `/control/readiness` reads the read-only governance manifests, exposes a sanitized repository/live-proof readiness matrix and keeps production evidence false until real VPS/provider proof is verified.
 The backend adapter registry is available at `/control/adapters` and `/control/adapters/:id`; it covers Cloudflare, Traefik, Docker, GitHub, Prometheus, Loki, Alertmanager, Backup, Restore, MinIO, Database, Security and Go/No-Go. `/control/adapters/:id/plan` and `/verify` create audited plans, while `/apply` is rejected until an explicit live backend implementation, strong confirmation and verifyRemote are added.

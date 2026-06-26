@@ -24,44 +24,6 @@
       "url": "${DOCS_PUBLIC_URL:-https://docs.platform.example.com}/",
       "expectedStatuses": [200, 301, 302],
       "maxLatencyMs": 2500
-    },
-    {
-      "name": "api-public-health",
-      "url": "${API_PUBLIC_URL:-https://api.platform.example.com}/health",
-      "expectedStatuses": [200],
-      "maxLatencyMs": 1500,
-      "expectedBodyIncludes": "ok"
-    },
-    {
-      "name": "account-public-home",
-      "url": "${ACCOUNT_PUBLIC_URL:-https://account.platform.example.com}/",
-      "expectedStatuses": [200, 301, 302],
-      "maxLatencyMs": 2500
-    },
-    {
-      "name": "keycloak-issuer-discovery",
-      "url": "${KEYCLOAK_ISSUER:-https://auth.platform.example.com/realms/platform}/.well-known/openid-configuration",
-      "expectedStatuses": [200],
-      "maxLatencyMs": 2500,
-      "expectedBodyIncludes": "issuer"
-    },
-    {
-      "name": "blocked-phpmyadmin-public",
-      "url": "https://phpmyadmin.${PUBLIC_ROOT_DOMAIN:-platform.example.com}/",
-      "expectedStatuses": [403, 404],
-      "maxLatencyMs": 2000
-    },
-    {
-      "name": "blocked-prometheus-public",
-      "url": "https://prometheus.${PUBLIC_ROOT_DOMAIN:-platform.example.com}/",
-      "expectedStatuses": [403, 404],
-      "maxLatencyMs": 2000
-    },
-    {
-      "name": "blocked-alertmanager-public",
-      "url": "https://alertmanager.${PUBLIC_ROOT_DOMAIN:-platform.example.com}/",
-      "expectedStatuses": [403, 404],
-      "maxLatencyMs": 2000
     }
   ],
   "providerNotes": {

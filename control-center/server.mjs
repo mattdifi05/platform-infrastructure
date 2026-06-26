@@ -40,9 +40,6 @@ const domain = normalizeHost(process.env.DOMAIN || process.env.LOCAL_DOMAIN || "
 const adminHost = normalizeHost(process.env.ADMIN_HOST || `portal.${domain}`);
 const controlCenterHost = normalizeHost(process.env.CONTROL_CENTER_HOST || process.env.PROJECTS_HOST || adminHost);
 const docsHost = normalizeHost(process.env.DOCS_HOST || `docs.${domain}`);
-const authHost = normalizeHost(process.env.AUTH_HOST || `auth.${domain}`);
-const storageHost = normalizeHost(process.env.STORAGE_HOST || process.env.MINIO_CONSOLE_HOST || `storage.${domain}`);
-const grafanaHost = normalizeHost(process.env.GRAFANA_HOST || `grafana.${domain}`);
 const projectsHost = controlCenterHost;
 const hostSuffix = normalizeHostSuffix(process.env.PROJECT_HOST_SUFFIX || `.${domain}`);
 const nodeHosts = parsePairs(process.env.NODE_PROJECT_HOSTS || "");
@@ -2239,8 +2236,8 @@ function renderHostingServiceHealth(context) {
   return `<section class="hosting-panel hosting-health-panel">
     <div class="hosting-panel-head">
       <div>
-        <h2>Servizi infrastruttura</h2>
-        <p>Solo i servizi utili alla gestione quotidiana, con link diretti dove serve.</p>
+        <h2>Superfici pubbliche</h2>
+        <p>Solo portal e docs sono pubblicati; i servizi operativi restano interni.</p>
       </div>
       <a class="button" href="/?mode=advanced&section=infrastructure">Inventario</a>
     </div>
@@ -2256,14 +2253,8 @@ function renderHostingServiceHealth(context) {
 
 function hostingServiceRows(context) {
   return [
-    { name: "Traefik", role: "Reverse proxy e routing HTTPS", status: context.network.routers.length ? "configurato" : "da verificare", icon: "domains", href: "/?mode=advanced&section=network", tone: "good" },
-    { name: "MariaDB", role: "Database PHP locali", status: "configurato", icon: "databases", href: "/?mode=advanced&section=databases", tone: "good" },
-    { name: "PostgreSQL", role: "Database piattaforma", status: "configurato", icon: "databases", href: "/?mode=advanced&section=databases", tone: "good" },
-    { name: "phpMyAdmin", role: "Console database MariaDB", status: "admin", icon: "databases", href: "https://phpmyadmin.localhost.com", tone: "info" },
-    { name: "Keycloak", role: "Identity provider", status: "admin", icon: "security", href: `https://${authHost}`, tone: "info" },
-    { name: "MinIO", role: "Object storage e bucket", status: hostingStatusLabel(context.storageProvider.status), icon: "storage", href: `https://${storageHost}`, tone: "good" },
-    { name: "Grafana", role: "Metriche, log e dashboard", status: `${context.monitoring.dashboardPanels.length} pannelli`, icon: "resources", href: `https://${grafanaHost}`, tone: "good" },
-    { name: "Alertmanager", role: "Routing alert", status: `${context.alertRecords.length} alert`, icon: "logs", href: "/?section=logs", tone: context.overview.alerts.open ? "warning" : "good" },
+    { name: "Portal", role: "Control Center Node", status: context.network.routers.some((router) => router.id === "enterprise-portal") ? "pubblico" : "da verificare", icon: "domains", href: `https://${controlCenterHost}`, tone: "good" },
+    { name: "Docs", role: "Documentazione operativa", status: context.network.routers.some((router) => router.id === "enterprise-docs") ? "pubblico" : "da verificare", icon: "logs", href: `https://${docsHost}`, tone: "good" },
   ];
 }
 

@@ -78,25 +78,14 @@ docker compose -p platform_infra_local down -v
 | --- | --- |
 | Portal / Control Center | `https://portal.localhost.com` |
 | Docs | `https://docs.localhost.com` |
-| Account center, opzionale | `https://account.localhost.com` |
-| API backend, tecnica | `https://api.localhost.com` |
-| Keycloak | `https://auth.localhost.com` |
-| Object storage console | `https://storage.localhost.com` |
-| Grafana | `https://grafana.localhost.com` |
-| phpMyAdmin locale | `https://phpmyadmin.localhost.com` |
 
 Superficie HTTP consigliata:
 
 - `portal.localhost.com`: pannello principale per gestire infrastruttura, progetti PHP/Node, runtime, backup, sicurezza, observability e operazioni. E' il Control Center Node.
 - `docs.localhost.com`: documentazione operativa organizzata. Serve solo file Markdown whitelisted dal repo, non espone il filesystem.
-- `api.localhost.com`: backend tecnico. Serve healthcheck, auth callback e API applicative; non e' una pagina da navigare.
-- `account.localhost.com`: account center applicativo. Tienilo solo se usi login/account/passkey/OAuth della piattaforma.
-- `auth.localhost.com`: Keycloak/OIDC. Serve quando vuoi identity provider separato.
-- `storage.localhost.com`: console MinIO/S3. Superficie admin, da proteggere in produzione.
-- `grafana.localhost.com`: observability UI. Superficie admin, da proteggere in produzione.
-- `phpmyadmin.localhost.com`: console MariaDB locale, profilo admin; non esporla pubblicamente.
+- Backend, account, Keycloak, MinIO, Grafana e phpMyAdmin restano servizi interni Docker. Non hanno route Traefik pubbliche nel profilo default/VPS/prod.
 - `app.localhost.com`: rimosso dalla route ufficiale. Il container `web` puo' restare per `account` o per app legacy, ma non e' piu' la home della piattaforma.
-- `projects.localhost.com`: deprecato. I progetti si aprono come `<nome-progetto>.localhost.com`; la lista e enable/disable stanno in `portal`.
+- `projects.localhost.com` e wildcard progetto: disabilitati nella route pubblica. La lista e enable/disable restano in `portal`.
 
 `portal.localhost.com` serve l'Admin Control Center dal servizio Node `control-center`, separato da PHP Apache. Il pannello e' il progetto Node `@platform/control-center` e usa un sistema visivo locale: componenti dichiarati in `control-center/components/ui/controlCenterUi.mjs`, token `--cc-*` e CSS in `control-center/styles/control-center.css`, servito da `/assets/control-center/control-center.css` ed esposto da `/control/ui-package`. Il Control Center legge i progetti da `PHP_PROJECTS_DIR`, divide runtime PHP e Node, espone la topologia Network Advanced da `/control/network` leggendo Compose e Traefik dynamic config in modalita' read-only, espone la mappa Monitoring Advanced da `/control/monitoring` leggendo Prometheus, Grafana, Loki e Alertmanager config senza query live, permette create metadata-only, enable/disable locale, update metadata, archive e soft delete solo nello stato Control Center, scrive stato in `projects-portal/state/*.json` e audit/operazioni in `projects-portal/state/*.jsonl`. `PHP_SOURCE_DIR` punta a `php-runtime-root`, una root statica neutra: PHP Apache resta solo il runtime dei progetti PHP e non contiene la UI/API del Control Center. In locale `CONTROL_CENTER_AUTH_REQUIRED=false` mantiene il flusso rapido; in staging/VPS imposta `CONTROL_CENTER_AUTH_REQUIRED=true` e setta `CONTROL_CENTER_ADMIN_PASSWORD_SHA256` con lo SHA-256 della password admin. La sessione e' firmata con `projects_gateway_signing_keys` da Docker secret e il valore password non va mai in `.env`. `PROJECTS_HOST` resta solo alias legacy opzionale e non va configurato per nuove installazioni.
 Advanced Mode espone lo scheletro delle aree enterprise richieste, inclusi Workers & Jobs, CI/CD & GitHub Governance, Logs/Alerts Advanced, Disaster Recovery, Release Evidence, Security Advanced e Billing / Plans. Queste superfici restano plan/evidence-only finche' un adapter esplicito non esegue apply e verifyRemote.
@@ -133,15 +122,15 @@ Il go/no-go accetta `reports/uptime/` solo se i target pubblici sono coperti da 
 ```sh
 cd /opt/platform/platform-infrastructure
 mkcert -install
-mkcert -cert-file ./traefik/certs/local-cert.pem -key-file ./traefik/certs/local-key.pem localhost 127.0.0.1 ::1 portal.localhost.com docs.localhost.com account.localhost.com api.localhost.com auth.localhost.com storage.localhost.com grafana.localhost.com
+mkcert -cert-file ./traefik/certs/local-cert.pem -key-file ./traefik/certs/local-key.pem localhost 127.0.0.1 ::1 portal.localhost.com docs.localhost.com
 docker compose -f compose.yaml -f compose.build.yaml --env-file .env -p platform_infra_local up -d --build traefik
-curl https://api.localhost.com/health
+curl https://portal.localhost.com/__health
 ```
 
 Su Windows, apri PowerShell come amministratore e aggiungi gli host locali:
 
 ```powershell
-Add-Content -Path "$env:SystemRoot\System32\drivers\etc\hosts" -Value "127.0.0.1 portal.localhost.com docs.localhost.com account.localhost.com api.localhost.com auth.localhost.com storage.localhost.com grafana.localhost.com"
+Add-Content -Path "$env:SystemRoot\System32\drivers\etc\hosts" -Value "127.0.0.1 portal.localhost.com docs.localhost.com"
 ```
 
 I file in `traefik/certs/` sono ignorati da Git. In container isolati monta la CA mkcert oppure passa `--cacert`.
@@ -611,8 +600,8 @@ Nel profilo VPS:
 - Il WAF pubblica la porta 80; Traefik resta interno e riceve solo traffico filtrato.
 - SSL, redirect HTTPS e CDN stanno all'edge esterno, per esempio VPS/Cloudflare.
 - PostgreSQL, MariaDB, Redis, NATS, MinIO, Prometheus, Loki, Grafana, phpMyAdmin e dashboard Traefik non sono pubblici.
-- `CONTROL_CENTER_HOST` apre il portal Node, `DOCS_HOST` apre la documentazione operativa, `API_HOST` resta il backend tecnico, `ACCOUNT_HOST` resta opzionale per account/login e `AUTH_HOST` resta Keycloak/OIDC.
-- I progetti PHP e Node condividono `PHP_PROJECTS_DIR` come sorgente universale. `PROJECTS_HOST` resta solo alias legacy e deve restare vuoto nelle nuove installazioni, `PHP_SOURCE_DIR` resta una root Apache neutra per il solo runtime PHP, `PROJECTS_WILDCARD_HOST_REGEXP` accetta i domini progetto, `PROJECT_HOST_SUFFIX` costruisce gli host e `NODE_PROJECT_UPSTREAMS` collega progetti Node a servizi Docker gia' avviati. Traefik espone i domini progetto tramite `local-projects`, che punta al `project-router` Node e non a un portale PHP. Il `project-router` prova PHP e Node contemporanei con `project-router-tests`; quando un progetto Node gestito viene disabilitato dal Control Center, il processo locale viene fermato e riparte solo alla riabilitazione.
+- `CONTROL_CENTER_HOST` apre il portal Node e `DOCS_HOST` apre la documentazione operativa. Sono le sole route pubbliche previste.
+- I progetti PHP e Node condividono `PHP_PROJECTS_DIR` come sorgente universale. `PROJECTS_HOST` resta solo alias legacy e deve restare vuoto nelle nuove installazioni, `PROJECTS_WILDCARD_HOST_REGEXP` resta vuoto di default e Traefik non espone wildcard progetto. Il `project-router` resta disponibile come servizio interno e continua a essere coperto da `project-router-tests`.
 - MariaDB usa `secrets/mariadb_root_password.txt` tramite Docker secret, non una password root in `.env`.
 - `phpmyadmin` resta fuori dal profilo di default; su VPS pubblica usa preferibilmente SSH e client CLI, non una UI DB esposta.
 

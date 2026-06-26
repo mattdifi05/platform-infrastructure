@@ -72,15 +72,7 @@ LOCAL_HOST_ARGS=""
 for host in \
   localhost.com \
   portal.localhost.com \
-  docs.localhost.com \
-  api.localhost.com \
-  account.localhost.com \
-  auth.localhost.com \
-  phpmyadmin.localhost.com \
-  grafana.localhost.com \
-  traefik.localhost.com \
-  prometheus.localhost.com \
-  alertmanager.localhost.com
+  docs.localhost.com
 do
   LOCAL_HOST_ARGS="$LOCAL_HOST_ARGS --add-host $host:$LOCAL_HOST_TARGET"
 done

@@ -1458,11 +1458,6 @@ const localTlsHostnames = new Set([
   "::1",
   "portal.localhost.com",
   "docs.localhost.com",
-  "account.localhost.com",
-  "api.localhost.com",
-  "auth.localhost.com",
-  "storage.localhost.com",
-  "grafana.localhost.com",
 ]);
 
 function isLocalTlsHostname(hostname) {
@@ -1791,8 +1786,6 @@ async function certificateExpiryCheck() {
   const defaultHosts = [
     env.CONTROL_CENTER_HOST ?? env.ADMIN_HOST ?? "portal.localhost.com",
     env.DOCS_HOST ?? "docs.localhost.com",
-    env.ACCOUNT_HOST ?? "account.localhost.com",
-    env.API_HOST ?? "api.localhost.com",
   ].join(",");
   const hosts = (argv.hosts ?? defaultHosts).split(",").map((host) => host.trim()).filter(Boolean);
   const warnDays = Number(argv.warnDays ?? 30);
@@ -4329,18 +4322,18 @@ async function rateLimitEvidence(options = {}) {
     detail: "Traefik defines enterprise-rate-limit with average=120, burst=60, period=1m.",
   });
   addRateLimitPatternCheck(checks, issues, {
-    name: "local-api-router-uses-edge-rate-limit",
+    name: "local-portal-router-uses-edge-rate-limit",
     category: "infra",
     filePath: path.join(infraRoot, "compose.yaml"),
-    pattern: /traefik\.http\.routers\.enterprise-backend\.middlewares:[^\r\n]*enterprise-rate-limit@file/,
-    detail: "Local API router attaches enterprise-rate-limit@file.",
+    pattern: /enterprise-portal:[\s\S]*middlewares:[\s\S]*enterprise-rate-limit@file/,
+    detail: "Local portal router attaches enterprise-rate-limit@file.",
   });
   addRateLimitPatternCheck(checks, issues, {
-    name: "vps-api-router-uses-edge-rate-limit",
+    name: "vps-portal-router-uses-edge-rate-limit",
     category: "infra",
     filePath: path.join(infraRoot, "compose.vps.yaml"),
-    pattern: /enterprise-backend:[\s\S]*middlewares:[\s\S]*enterprise-rate-limit@file/,
-    detail: "VPS API router attaches enterprise-rate-limit@file.",
+    pattern: /enterprise-portal:[\s\S]*middlewares:[\s\S]*enterprise-rate-limit@file/,
+    detail: "VPS portal router attaches enterprise-rate-limit@file.",
   });
   addRateLimitPatternCheck(checks, issues, {
     name: "backend-rate-limit-env-defaults",
@@ -9701,17 +9694,16 @@ async function secretScan() {
 async function securitySmoke() {
   const env = parseEnv(path.join(infraRoot, ".env"));
   const uiPublicUrl = argv.uiBase ?? env.DOCS_PUBLIC_URL ?? env.UI_PUBLIC_URL ?? env.NEXT_PUBLIC_UI_URL ?? "https://docs.localhost.com";
-  const accountPublicUrl = argv.accountBase ?? env.ACCOUNT_PUBLIC_URL ?? env.NEXT_PUBLIC_ACCOUNT_URL ?? "https://account.localhost.com";
-  const apiPublicUrl = argv.apiBase ?? env.API_PUBLIC_URL ?? env.NEXT_PUBLIC_API_URL ?? "https://api.localhost.com";
   const uiBase = String(uiPublicUrl).replace(/\/$/, "");
-  const accountBase = String(accountPublicUrl).replace(/\/$/, "");
-  const apiBase = String(apiPublicUrl).replace(/\/$/, "");
-  const accountOrigin = String(argv.accountOrigin ?? env.ACCOUNT_PUBLIC_URL ?? env.NEXT_PUBLIC_ACCOUNT_URL ?? accountBase).replace(/\/$/, "");
-  const defaultUrls = [
-    `${uiBase}/`,
-    `${accountBase}/`,
-    `${apiBase}/health`,
-  ].join(",");
+  const accountPublicUrl = argv.accountBase ?? env.ACCOUNT_PUBLIC_URL ?? env.NEXT_PUBLIC_ACCOUNT_URL ?? "";
+  const apiPublicUrl = argv.apiBase ?? env.API_PUBLIC_URL ?? env.NEXT_PUBLIC_API_URL ?? "";
+  const accountBase = String(accountPublicUrl || "").replace(/\/$/, "");
+  const apiBase = String(apiPublicUrl || "").replace(/\/$/, "");
+  const accountOrigin = String(argv.accountOrigin ?? env.ACCOUNT_PUBLIC_URL ?? env.NEXT_PUBLIC_ACCOUNT_URL ?? accountBase ?? uiBase).replace(/\/$/, "");
+  const defaultUrlList = [`${uiBase}/`];
+  if (accountBase) defaultUrlList.push(`${accountBase}/`);
+  if (apiBase) defaultUrlList.push(`${apiBase}/health`);
+  const defaultUrls = defaultUrlList.join(",");
   const urls = (argv.urls ?? defaultUrls).split(",").map((url) => url.trim()).filter(Boolean);
   for (const url of urls) {
     log(`Checking ${url}`);
@@ -9734,27 +9726,32 @@ async function securitySmoke() {
     }
   }
 
-  assertStatus(await request("GET", `${apiBase}/account/snapshot`), 401, "unauthenticated account snapshot");
-  assertStatus(await request("POST", `${apiBase}/auth/logout`, { headers: { Origin: "https://evil.example" } }), 403, "untrusted Origin");
-  assertStatus(await request("POST", `${apiBase}/auth/logout`, { headers: { "Sec-Fetch-Site": "cross-site" } }), 403, "cross-site Fetch Metadata");
-  assertStatus(await request("POST", `${apiBase}/auth/logout`, { headers: { Origin: accountOrigin, "Sec-Fetch-Site": "same-site" } }), 200, "same-site logout");
-  assertStatus(await request("POST", `${apiBase}/auth/logout`, { headers: { Origin: accountOrigin, "Sec-Fetch-Site": "cross-site" } }), 200, "trusted cross-site logout");
+  if (apiBase) {
+    assertStatus(await request("GET", `${apiBase}/account/snapshot`), 401, "unauthenticated account snapshot");
+    assertStatus(await request("POST", `${apiBase}/auth/logout`, { headers: { Origin: "https://evil.example" } }), 403, "untrusted Origin");
+    assertStatus(await request("POST", `${apiBase}/auth/logout`, { headers: { "Sec-Fetch-Site": "cross-site" } }), 403, "cross-site Fetch Metadata");
+    assertStatus(await request("POST", `${apiBase}/auth/logout`, { headers: { Origin: accountOrigin, "Sec-Fetch-Site": "same-site" } }), 200, "same-site logout");
+    assertStatus(await request("POST", `${apiBase}/auth/logout`, { headers: { Origin: accountOrigin, "Sec-Fetch-Site": "cross-site" } }), 200, "trusted cross-site logout");
+  } else {
+    log("Skipping backend security smoke because no public API base was provided.");
+  }
   log("Security smoke checks passed.");
 }
 
 async function wafSmoke() {
-  const apiBase = (argv.apiBase ?? "https://api.localhost.com").replace(/\/$/, "");
-  const phpBase = (argv.phpBase ?? "https://portal.localhost.com").replace(/\/$/, "");
+  const apiBase = argv.apiBase ? String(argv.apiBase).replace(/\/$/, "") : "";
+  const phpBase = String(argv.phpBase ?? argv.portalBase ?? "https://portal.localhost.com").replace(/\/$/, "");
+  const probeBase = apiBase || phpBase;
   const smokeHeaders = { "User-Agent": "platform-waf-smoke/1.0" };
   log("==> WAF smoke checks");
 
-  assertStatus(await request("GET", `${apiBase}/health`, { headers: smokeHeaders }), 200, "WAF pass-through health");
-  const sqlInjection = await request("GET", `${apiBase}/health?search=%27%20OR%201%3D1--`, { headers: smokeHeaders });
+  assertStatus(await request("GET", apiBase ? `${apiBase}/health` : `${phpBase}/__health`, { headers: smokeHeaders }), 200, "WAF pass-through health");
+  const sqlInjection = await request("GET", `${probeBase}/?search=%27%20OR%201%3D1--`, { headers: smokeHeaders });
   if (![403, 406].includes(sqlInjection.status)) {
     fail(`WAF SQL injection probe expected HTTP 403/406, got ${sqlInjection.status}: ${sqlInjection.text}`);
   }
 
-  const xssProbe = await request("GET", `${apiBase}/health?x=%3Cscript%3Ealert(1)%3C/script%3E`, { headers: smokeHeaders });
+  const xssProbe = await request("GET", `${probeBase}/?x=%3Cscript%3Ealert(1)%3C/script%3E`, { headers: smokeHeaders });
   if (![403, 406].includes(xssProbe.status)) {
     fail(`WAF XSS probe expected HTTP 403/406, got ${xssProbe.status}: ${xssProbe.text}`);
   }
@@ -9797,24 +9794,19 @@ async function infraHealth() {
   const containers = (argv.containers ? String(argv.containers).split(",") : defaultContainers)
     .map((container) => container.trim())
     .filter(Boolean);
-  const apiBase = (argv.apiBase ?? "https://api.localhost.com").replace(/\/$/, "");
+  const apiBase = argv.apiBase ? String(argv.apiBase).replace(/\/$/, "") : "";
   const uiBase = (argv.uiBase ?? argv.docsBase ?? "https://docs.localhost.com").replace(/\/$/, "");
-  const accountBase = (argv.accountBase ?? "https://account.localhost.com").replace(/\/$/, "");
+  const accountBase = argv.accountBase ? String(argv.accountBase).replace(/\/$/, "") : "";
   const adminBase = (argv.adminBase ?? argv.projectsBase ?? "https://portal.localhost.com").replace(/\/$/, "");
   let inferredAdminScheme = "https";
   try {
-    inferredAdminScheme = new URL(apiBase).protocol === "http:" ? "http" : "https";
+    inferredAdminScheme = new URL(adminBase).protocol === "http:" ? "http" : "https";
   } catch {
     inferredAdminScheme = "https";
   }
   const adminScheme = String(argv.adminScheme ?? inferredAdminScheme).replace(/:$/, "");
-  const grafanaBase = (argv.grafanaBase ?? `${adminScheme}://grafana.localhost.com/login`).replace(/\/$/, "");
+  const grafanaBase = argv.grafanaBase ? String(argv.grafanaBase).replace(/\/$/, "") : "";
   const grafanaStatuses = booleanFlag(argv.grafanaBlocked) ? [403, 404] : [200];
-  const useAdminHostnames = process.env.PLATFORM_OPS_CONTAINER === "1" || booleanFlag(argv.adminHostnames);
-  const adminBlockUrl = (host, requestPath = "/") => (
-    useAdminHostnames ? `${adminScheme}://${host}${requestPath}` : `${adminScheme}://127.0.0.1${requestPath}`
-  );
-  const adminBlockHeaders = (host) => (useAdminHostnames ? {} : { Host: host });
   const checks = [];
   const addCheck = (name, ok, detail = "") => {
     checks.push({ name, ok, detail });
@@ -9838,17 +9830,20 @@ async function infraHealth() {
   }
 
   const httpChecks = [
-    { name: "api-health", method: "GET", url: `${apiBase}/health`, statuses: [200] },
     { name: "docs-home", method: "HEAD", url: `${uiBase}/`, statuses: [200, 308] },
-    { name: "account-home", method: "HEAD", url: `${accountBase}/`, statuses: [200, 308] },
-    { name: "admin-control-center", method: "GET", url: `${adminBase}/`, statuses: [200], body: /Admin Control Center|Documentation and project launcher|Local infrastructure/ },
-    { name: "grafana-login", method: "GET", url: grafanaBase, statuses: grafanaStatuses },
-    { name: "admin-traefik-block", method: "GET", url: adminBlockUrl("traefik.localhost.com", "/dashboard/"), statuses: [403, 404], headers: adminBlockHeaders("traefik.localhost.com") },
-    { name: "admin-prometheus-block", method: "GET", url: adminBlockUrl("prometheus.localhost.com"), statuses: [403, 404], headers: adminBlockHeaders("prometheus.localhost.com") },
-    { name: "admin-alertmanager-block", method: "GET", url: adminBlockUrl("alertmanager.localhost.com"), statuses: [403, 404], headers: adminBlockHeaders("alertmanager.localhost.com") },
-    { name: "waf-xss-block", method: "GET", url: `${apiBase}/health?x=%3Cscript%3Ealert(1)%3C%2Fscript%3E`, statuses: [403, 406] },
+    { name: "admin-control-center", method: "GET", url: `${adminBase}/`, statuses: [200], body: /Admin Control Center|Documentation and project launcher|Local infrastructure|Pannello infrastruttura/ },
+    { name: "waf-xss-block", method: "GET", url: `${adminBase}/?x=%3Cscript%3Ealert(1)%3C%2Fscript%3E`, statuses: [403, 406] },
     { name: "waf-sensitive-file-block", method: "GET", url: `${adminBase}/.env`, statuses: [403, 404] },
   ];
+  if (apiBase) {
+    httpChecks.push({ name: "api-health", method: "GET", url: `${apiBase}/health`, statuses: [200] });
+  }
+  if (accountBase) {
+    httpChecks.push({ name: "account-home", method: "HEAD", url: `${accountBase}/`, statuses: [200, 308] });
+  }
+  if (grafanaBase) {
+    httpChecks.push({ name: "grafana-login", method: "GET", url: grafanaBase, statuses: grafanaStatuses });
+  }
   for (const check of httpChecks) {
     const started = Date.now();
     try {
@@ -9984,7 +9979,8 @@ function staticSecurityInfraOnlyCheck() {
   assertMatch(compose, /\$\{PHP_SOURCE_DIR:-\.\/php-runtime-root\}:\/var\/www\/html/, "Compose must default the PHP root to a neutral runtime-only document root.");
   assertNoMatch(compose, /\$\{PHP_SOURCE_DIR:-\.\/projects-portal\}:\/var\/www\/html/, "Compose must not mount a PHP projects portal as the Control Center.");
   assertMatch(compose, /\$\{PHP_PROJECTS_DIR:-\.\.\/src\}:\/var\/www\/projects/, "Compose must mount PHP projects through one generic projects directory.");
-  assertMatch(compose, /HostRegexp\(`\$\{PROJECTS_WILDCARD_HOST_REGEXP:-\[a-z0-9-\]\+\\\.localhost\\\.com\}`\)/, "Compose must route PHP project subdomains through a generic wildcard rule.");
+  assertNoMatch(compose, /HostRegexp\(/, "Compose must not expose wildcard project hosts publicly.");
+  assertMatch(compose, /enterprise-portal:[\s\S]*rule:\s+Host\(`\$\{CONTROL_CENTER_HOST:-\$\{ADMIN_HOST:-portal\.\$\{DOMAIN:-localhost\.com\}\}\}`\)/, "Compose must expose the Node Control Center only on the portal host.");
   assertMatch(compose, /\.:\s*\/var\/www\/infra-docs:ro/, "Compose must mount infrastructure documentation read-only for the fallback portal.");
   assertMatch(compose, /\.\/php-apache\/apache:\/etc\/apache2\/sites-available/, "Compose must mount the unified PHP Apache vhost configs.");
   assertMatch(compose, /\.\/php-apache\/php\/custom\.ini/, "Compose must mount the unified PHP runtime config.");
@@ -10011,7 +10007,7 @@ function staticSecurityInfraOnlyCheck() {
   assertMatch(projectRouterTest, /NODE_PROJECT_COMMANDS[\s\S]*php-demo\.localhost\.com[\s\S]*node-demo\.localhost\.com[\s\S]*Project disabled[\s\S]*nodeAfterEnablePayload\.runtime[\s\S]*nodeAfterEnablePayload\.host/, "Project Router tests must prove simultaneous PHP and Node hosting plus disable/re-enable behavior without host npm.");
   assertNoMatch(infrastructureText, /PHP_(?!(?:PROJECTS|SOURCE)_)[A-Z0-9]+_SOURCE_DIR/, "Infrastructure must not hardcode individual PHP project source mounts.");
   assertMatch(envExample, /PHP_PROJECTS_DIR=\.\.\/src/, "Environment example must point PHP projects at the generic src directory.");
-  assertMatch(envExample, /PROJECTS_WILDCARD_HOST_REGEXP=/, "Environment example must expose the project wildcard host regexp.");
+  assertMatch(envExample, /PROJECTS_WILDCARD_HOST_REGEXP=/, "Environment example must keep the project wildcard setting explicit and disabled by default.");
   assertMatch(opsDockerfile, /docker-cli[\s\S]*docker-cli-compose/, "Ops container must include Docker CLI and Compose plugin.");
   assertMatch(opsWrapper, /docker build[\s\S]*docker\/ops\.Dockerfile[\s\S]*docker run --rm/, "Ops wrapper must execute commands through the containerized runner.");
   assertMatch(opsWrapper, /\/var\/run\/docker\.sock/, "Ops wrapper must mount the Docker socket for controlled Docker operations.");
@@ -10478,7 +10474,8 @@ async function staticSecurityCheck() {
   assertMatch(compose, /control-center:[\s\S]*image:\s+\$\{NODE_IMAGE:-node:26\.3\.1-alpine@sha256:[a-f0-9]{64}\}/, "Control Center must run as a digest-pinned Node service.");
   assertMatch(controlCenterServer, /x-platform-control-center-runtime[^\n]*node/, "Control Center responses must expose Node runtime evidence headers.");
   assertMatch(compose, /project-router:[\s\S]*CONTROL_CENTER_UPSTREAM:\s+http:\/\/control-center:8080/, "Project router must send the admin host to the Node Control Center.");
-  assertMatch(compose, /local-projects:[\s\S]*url:\s+http:\/\/project-router:8080/, "Traefik project routes must target the shared Node project-router service.");
+  assertNoMatch(compose, /local-projects:[\s\S]*url:\s+http:\/\/project-router:8080/, "Traefik must not publish project-router wildcard routes by default.");
+  assertMatch(compose, /enterprise-portal:[\s\S]*url:\s+http:\/\/control-center:8080/, "Traefik portal route must target the Node Control Center service.");
   assertNoMatch(compose, /local-php/, "Traefik project routing must not be named local-php; PHP is only one runtime behind project-router.");
   assertMatch(compose, /php-apache:[\s\S]*\$\{PHP_SOURCE_DIR:-\.\/php-runtime-root\}:\/var\/www\/html[\s\S]*project-router:[\s\S]*CONTROL_CENTER_UPSTREAM:\s+http:\/\/control-center:8080/, "PHP Apache must be runtime-only while the admin host resolves through the Node Control Center.");
   assertMatch(projectRouterServer, /stopManagedProject[\s\S]*Project disabled[\s\S]*nodeUpstream/, "Project Router must stop managed Node projects when local routing is disabled.");
@@ -10727,9 +10724,8 @@ async function staticSecurityCheck() {
   assertMatch(finalReadinessAudit, /Evidence bundle verifier[\s\S]*SHA256/, "Final readiness audit must include evidence bundle verifier coverage.");
   assertMatch(finalReadinessAudit, /vps-postdeploy\.sh[\s\S]*infra-health/, "Final readiness audit must include VPS post-deploy health checks.");
   assertMatch(finalReadinessAudit, /mode=dry-run[\s\S]*providerEvidence\.verified=false/, "Final readiness audit must document uptime dry-run evidence semantics.");
-  assertMatch(externalUptimeManifest, /api-public-health[\s\S]*API_PUBLIC_URL/, "External uptime manifest must monitor the public API health endpoint.");
-  assertMatch(externalUptimeManifest, /keycloak-issuer-discovery[\s\S]*KEYCLOAK_ISSUER/, "External uptime manifest must monitor OIDC issuer discovery.");
-  assertMatch(externalUptimeManifest, /blocked-phpmyadmin-public[\s\S]*blocked-prometheus-public[\s\S]*blocked-alertmanager-public/, "External uptime manifest must assert public admin hosts stay blocked.");
+  assertMatch(externalUptimeManifest, /portal-public-home[\s\S]*CONTROL_CENTER_PUBLIC_URL[\s\S]*docs-public-home[\s\S]*DOCS_PUBLIC_URL/, "External uptime manifest must monitor only the public portal and docs surfaces.");
+  assertNoMatch(externalUptimeManifest, /api-public-health|account-public-home|keycloak-issuer-discovery|blocked-phpmyadmin-public|blocked-prometheus-public|blocked-alertmanager-public/, "External uptime manifest must not declare removed public API, account, auth or admin-host targets.");
   assertMatch(externalUptimeManifest, /providerNotes[\s\S]*cloudflare[\s\S]*betterstack[\s\S]*uptimerobot/, "External uptime manifest must map to common external monitoring providers.");
   assertMatch(externalUptimeWrapper, /external-uptime-check/, "External uptime wrapper must delegate to the Dockerized ops runner.");
   assertMatch(opsScript, /async function externalUptimeCheck/, "Ops script must provide an external uptime monitor check.");

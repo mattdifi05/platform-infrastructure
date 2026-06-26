@@ -119,12 +119,12 @@ test("Admin Control Center local foundation", async (t) => {
   assert.match(html, /Pannello infrastruttura/);
   assert.match(html, /Gestisci la tua piattaforma da un solo posto/);
   assert.match(html, /Siti e applicazioni/);
-  assert.match(html, /Servizi infrastruttura/);
+  assert.match(html, /Superfici pubbliche/);
   assert.match(html, /Operazioni rapide/);
   assert.match(html, /runtime-badge php/);
   assert.match(html, /runtime-badge node/);
-  assert.match(html, /phpmyadmin\.localhost\.com/);
-  assert.match(html, /grafana\.localhost\.com/);
+  assert.doesNotMatch(html, /phpmyadmin\.localhost\.com/);
+  assert.doesNotMatch(html, /grafana\.localhost\.com/);
   assert.match(html, /Gestione/);
   assert.match(html, /Sicurezza/);
   assert.match(html, /Avanzato/);
@@ -216,16 +216,19 @@ test("Admin Control Center local foundation", async (t) => {
   assert.equal(networkApi.providerTouched, false);
   assert.equal(networkApi.networkProbeExecuted, false);
   assert.equal(networkApi.productionEvidence, false);
-  assert.equal(networkApi.routers.some((router) => router.id === "enterprise-backend" && router.tls === true && router.middlewares.includes("enterprise-rate-limit@file")), true);
-  assert.equal(networkApi.routers.some((router) => router.id === "local-projects" && router.sampleHost === "portal.localhost.com"), true);
+  assert.equal(networkApi.routers.some((router) => router.id === "enterprise-portal" && router.tls === true && router.sampleHost === "portal.localhost.com" && router.middlewares.includes("enterprise-rate-limit@file")), true);
+  assert.equal(networkApi.routers.some((router) => router.id === "enterprise-docs" && router.tls === true && router.sampleHost === "docs.localhost.com" && router.middlewares.includes("enterprise-rate-limit@file")), true);
+  assert.equal(networkApi.routers.some((router) => router.id === "enterprise-backend"), false);
+  assert.equal(networkApi.routers.some((router) => router.id === "local-projects"), false);
   assert.equal(networkApi.middlewares.some((middleware) => middleware.id === "enterprise-rate-limit" && middleware.type === "rateLimit" && /average 120/.test(middleware.summary)), true);
   assert.equal(networkApi.exposedPorts.some((port) => port.hostPort === "80" && port.containerPort === "80" && port.loopbackOnly === true && port.publicExposure === false), true);
   assert.equal(networkApi.exposedPorts.some((port) => port.hostPort === "443" && port.containerPort === "443" && port.loopbackOnly === true && port.publicExposure === false), true);
   assert.equal(networkApi.tls.status, "configured");
-  assert.equal(networkApi.routeTests.some((testPlan) => testPlan.routerId === "enterprise-backend" && testPlan.url === "https://api.localhost.com/" && testPlan.networkProbeExecuted === false), true);
+  assert.equal(networkApi.routeTests.some((testPlan) => testPlan.routerId === "enterprise-portal" && testPlan.url === "https://portal.localhost.com/" && testPlan.networkProbeExecuted === false), true);
 
   const advancedNetworkApi = await getJson(`${baseUrl}/control/advanced/network`);
-  assert.equal(advancedNetworkApi.data.routers.some((router) => router.id === "enterprise-backend"), true);
+  assert.equal(advancedNetworkApi.data.routers.some((router) => router.id === "enterprise-portal"), true);
+  assert.equal(advancedNetworkApi.data.routers.some((router) => router.id === "enterprise-backend"), false);
   assert.equal(advancedNetworkApi.data.routeTests.some((testPlan) => testPlan.productionEvidence === false), true);
   assert.equal(advancedNetworkApi.data.originLockStatus, "not-required-local-loopback");
 
@@ -235,7 +238,7 @@ test("Admin Control Center local foundation", async (t) => {
   assert.match(advancedNetworkHtml, /Middleware Chain/);
   assert.match(advancedNetworkHtml, /Loopback host ports/);
   assert.match(advancedNetworkHtml, /Route Test Plan/);
-  assert.match(advancedNetworkHtml, /enterprise-backend/);
+  assert.match(advancedNetworkHtml, /enterprise-portal/);
 
   const monitoringApi = await getJson(`${baseUrl}/control/monitoring`);
   assert.equal(monitoringApi.guardrails.readOnly, true);
