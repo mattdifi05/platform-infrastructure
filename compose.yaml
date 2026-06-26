@@ -233,7 +233,7 @@ services:
     volumes:
       - ${PHP_SOURCE_DIR:-./php-runtime-root}:/var/www/html
       - .:/var/www/infra-docs:ro
-      - ${PHP_PROJECTS_DIR:-../src}:/var/www/projects
+      - ${PHP_PROJECTS_DIR:-../applications}:/var/www/projects
       - ${PROJECTS_SYMLINK_TARGET_ROOT:-..}:/mnt/host/d/docker:ro
       - ./projects-portal/state:/var/www/project-state
       - ./php-apache/php/custom.ini:/usr/local/etc/php/conf.d/zz-custom.ini:ro
@@ -297,8 +297,8 @@ services:
       DOMAIN: ${DOMAIN:-localhost.com}
       LOCAL_DOMAIN: ${LOCAL_DOMAIN:-localhost.com}
       PROVIDER_PROFILE: ${PROVIDER_PROFILE:-local}
-      ADMIN_HOST: ${ADMIN_HOST:-portal.${DOMAIN:-localhost.com}}
-      CONTROL_CENTER_HOST: ${CONTROL_CENTER_HOST:-${ADMIN_HOST:-portal.${DOMAIN:-localhost.com}}}
+      ADMIN_HOST: ${ADMIN_HOST:-admin.${DOMAIN:-localhost.com}}
+      CONTROL_CENTER_HOST: ${CONTROL_CENTER_HOST:-${ADMIN_HOST:-admin.${DOMAIN:-localhost.com}}}
       DOCS_HOST: ${DOCS_HOST:-docs.${DOMAIN:-localhost.com}}
       CONTROL_CENTER_PUBLIC_ROOT: /app/public
       PROJECTS_HOST: ${PROJECTS_HOST:-}
@@ -307,7 +307,7 @@ services:
     volumes:
       - ./control-center:/app:ro
       - .:/var/www/infra-docs:ro
-      - ${PHP_PROJECTS_DIR:-../src}:/var/www/projects:ro
+      - ${PHP_PROJECTS_DIR:-../applications}:/var/www/projects:ro
       - ${PROJECTS_SYMLINK_TARGET_ROOT:-..}:/mnt/host/d/docker:ro
       - ./projects-portal/state:/var/www/project-state
     secrets:
@@ -339,8 +339,8 @@ services:
       PROJECT_ROUTER_PORT: 8080
       PROJECTS_ROOT: /var/www/projects
       PROJECT_STATE_FILE: /var/www/project-state/projects.json
-      CONTROL_CENTER_HOST: ${CONTROL_CENTER_HOST:-${ADMIN_HOST:-portal.${DOMAIN:-localhost.com}}}
-      ADMIN_HOST: ${ADMIN_HOST:-portal.${DOMAIN:-localhost.com}}
+      CONTROL_CENTER_HOST: ${CONTROL_CENTER_HOST:-${ADMIN_HOST:-admin.${DOMAIN:-localhost.com}}}
+      ADMIN_HOST: ${ADMIN_HOST:-admin.${DOMAIN:-localhost.com}}
       PROJECTS_HOST: ${PROJECTS_HOST:-}
       PROJECT_HOST_SUFFIX: ${PROJECT_HOST_SUFFIX:-.localhost.com}
       PHP_UPSTREAM: http://php-apache:80
@@ -351,7 +351,7 @@ services:
       NODE_PROJECT_ENV: ${NODE_PROJECT_ENV:-development}
     volumes:
       - ./project-router:/app:ro
-      - ${PHP_PROJECTS_DIR:-../src}:/var/www/projects
+      - ${PHP_PROJECTS_DIR:-../applications}:/var/www/projects
       - ${PROJECTS_SYMLINK_TARGET_ROOT:-..}:/mnt/host/d/docker
       - ./projects-portal/state:/var/www/project-state
     depends_on:
@@ -457,15 +457,15 @@ services:
       MINIO_ROOT_PASSWORD_FILE: /run/secrets/minio_root_password
       MINIO_DEFAULT_BUCKET: ${MINIO_DEFAULT_BUCKET:-local-bucket}
       API_PUBLIC_URL: ${API_PUBLIC_URL:-http://backend:3000}
-      ACCOUNT_PUBLIC_URL: ${ACCOUNT_PUBLIC_URL:-https://portal.localhost.com}
-      UI_PUBLIC_URL: ${UI_PUBLIC_URL:-https://portal.localhost.com}
-      WEBAUTHN_RP_ID: ${WEBAUTHN_RP_ID:-portal.localhost.com}
-      WEBAUTHN_ORIGINS: ${WEBAUTHN_ORIGINS:-https://portal.localhost.com}
-      CORS_ORIGINS: ${CORS_ORIGINS:-https://portal.localhost.com}
+      ACCOUNT_PUBLIC_URL: ${ACCOUNT_PUBLIC_URL:-https://admin.localhost.com}
+      UI_PUBLIC_URL: ${UI_PUBLIC_URL:-https://admin.localhost.com}
+      WEBAUTHN_RP_ID: ${WEBAUTHN_RP_ID:-admin.localhost.com}
+      WEBAUTHN_ORIGINS: ${WEBAUTHN_ORIGINS:-https://admin.localhost.com}
+      CORS_ORIGINS: ${CORS_ORIGINS:-https://admin.localhost.com}
       BOT_PROTECTION_PROVIDER: ${BOT_PROTECTION_PROVIDER:-disabled}
       BOT_PROTECTION_REQUIRED: ${BOT_PROTECTION_REQUIRED:-}
       BOT_PROTECTION_MIN_SCORE: ${BOT_PROTECTION_MIN_SCORE:-0.5}
-      BOT_PROTECTION_EXPECTED_HOSTNAMES: ${BOT_PROTECTION_EXPECTED_HOSTNAMES:-portal.localhost.com}
+      BOT_PROTECTION_EXPECTED_HOSTNAMES: ${BOT_PROTECTION_EXPECTED_HOSTNAMES:-admin.localhost.com}
       GOOGLE_RECAPTCHA_SECRET_KEY_FILE: /run/secrets/google_recaptcha_secret_key
       CLOUDFLARE_TURNSTILE_SECRET_KEY_FILE: /run/secrets/cloudflare_turnstile_secret_key
       GOOGLE_OAUTH_CLIENT_ID: ${GOOGLE_OAUTH_CLIENT_ID:-}
@@ -532,15 +532,15 @@ services:
       NEXT_TELEMETRY_DISABLED: "1"
       PORT: 3000
       NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://backend:3000}
-      NEXT_PUBLIC_UI_URL: ${NEXT_PUBLIC_UI_URL:-https://portal.localhost.com}
-      NEXT_PUBLIC_ACCOUNT_URL: ${NEXT_PUBLIC_ACCOUNT_URL:-https://portal.localhost.com}
+      NEXT_PUBLIC_UI_URL: ${NEXT_PUBLIC_UI_URL:-https://admin.localhost.com}
+      NEXT_PUBLIC_ACCOUNT_URL: ${NEXT_PUBLIC_ACCOUNT_URL:-https://admin.localhost.com}
       NEXT_PUBLIC_BOT_PROTECTION_PROVIDER: ${NEXT_PUBLIC_BOT_PROTECTION_PROVIDER:-disabled}
       NEXT_PUBLIC_GOOGLE_RECAPTCHA_SITE_KEY: ${NEXT_PUBLIC_GOOGLE_RECAPTCHA_SITE_KEY:-}
       NEXT_PUBLIC_CLOUDFLARE_TURNSTILE_SITE_KEY: ${NEXT_PUBLIC_CLOUDFLARE_TURNSTILE_SITE_KEY:-}
       INTERNAL_API_URL: http://backend:3000
       ACCOUNT_HOST: ${ACCOUNT_HOST:-account.local}
-      ACCOUNT_PUBLIC_URL: ${ACCOUNT_PUBLIC_URL:-https://portal.localhost.com}
-      NEXTAUTH_URL: ${NEXTAUTH_URL:-https://portal.localhost.com}
+      ACCOUNT_PUBLIC_URL: ${ACCOUNT_PUBLIC_URL:-https://admin.localhost.com}
+      NEXTAUTH_URL: ${NEXTAUTH_URL:-https://admin.localhost.com}
       KEYCLOAK_ISSUER: ${KEYCLOAK_ISSUER:-http://keycloak:8080/realms/platform}
     depends_on:
       backend:
@@ -932,17 +932,17 @@ configs:
               - enterprise-compress@file
             service: enterprise-docs
 
-          enterprise-portal-http:
-            rule: Host(`${CONTROL_CENTER_HOST:-${ADMIN_HOST:-portal.${DOMAIN:-localhost.com}}}`)
+          enterprise-admin-http:
+            rule: Host(`${CONTROL_CENTER_HOST:-${ADMIN_HOST:-admin.${DOMAIN:-localhost.com}}}`)
             entryPoints:
               - web
             middlewares:
               - enterprise-redirect-https@file
             priority: 100
-            service: enterprise-portal
+            service: enterprise-admin
 
-          enterprise-portal:
-            rule: Host(`${CONTROL_CENTER_HOST:-${ADMIN_HOST:-portal.${DOMAIN:-localhost.com}}}`)
+          enterprise-admin:
+            rule: Host(`${CONTROL_CENTER_HOST:-${ADMIN_HOST:-admin.${DOMAIN:-localhost.com}}}`)
             entryPoints:
               - websecure
             priority: 100
@@ -951,14 +951,14 @@ configs:
               - enterprise-security-headers@file
               - enterprise-rate-limit@file
               - enterprise-compress@file
-            service: enterprise-portal
+            service: enterprise-admin
 
         services:
           enterprise-docs:
             loadBalancer:
               servers:
                 - url: http://control-center:8080
-          enterprise-portal:
+          enterprise-admin:
             loadBalancer:
               servers:
                 - url: http://control-center:8080

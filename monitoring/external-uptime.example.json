@@ -14,8 +14,8 @@
   },
   "targets": [
     {
-      "name": "portal-public-home",
-      "url": "${CONTROL_CENTER_PUBLIC_URL:-https://portal.platform.example.com}/",
+      "name": "admin-public-home",
+      "url": "${CONTROL_CENTER_PUBLIC_URL:-https://admin.platform.example.com}/",
       "expectedStatuses": [200, 301, 302],
       "maxLatencyMs": 2500
     },

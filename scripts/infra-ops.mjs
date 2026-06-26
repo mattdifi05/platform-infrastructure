@@ -1456,7 +1456,7 @@ const localTlsHostnames = new Set([
   "localhost",
   "127.0.0.1",
   "::1",
-  "portal.localhost.com",
+  "admin.localhost.com",
   "docs.localhost.com",
 ]);
 
@@ -1784,7 +1784,7 @@ async function backupPostgres(options = {}) {
 async function certificateExpiryCheck() {
   const env = parseEnv(path.join(infraRoot, ".env"));
   const defaultHosts = [
-    env.CONTROL_CENTER_HOST ?? env.ADMIN_HOST ?? "portal.localhost.com",
+    env.CONTROL_CENTER_HOST ?? env.ADMIN_HOST ?? "admin.localhost.com",
     env.DOCS_HOST ?? "docs.localhost.com",
   ].join(",");
   const hosts = (argv.hosts ?? defaultHosts).split(",").map((host) => host.trim()).filter(Boolean);
@@ -1874,7 +1874,7 @@ async function enterpriseHardeningAudit() {
 async function browserE2eTests() {
   log("==> Browser E2E tests");
   const env = parseEnv(path.join(infraRoot, ".env"));
-  const playwrightBaseUrl = env.NEXT_PUBLIC_UI_URL ?? env.UI_PUBLIC_URL ?? "https://portal.localhost.com";
+  const playwrightBaseUrl = env.NEXT_PUBLIC_UI_URL ?? env.UI_PUBLIC_URL ?? "https://admin.localhost.com";
   const sourceMount = hostPathForContainerMount(sourceRoot);
   const bootstrap = [
     "set -eu",
@@ -4322,18 +4322,18 @@ async function rateLimitEvidence(options = {}) {
     detail: "Traefik defines enterprise-rate-limit with average=120, burst=60, period=1m.",
   });
   addRateLimitPatternCheck(checks, issues, {
-    name: "local-portal-router-uses-edge-rate-limit",
+    name: "local-admin-router-uses-edge-rate-limit",
     category: "infra",
     filePath: path.join(infraRoot, "compose.yaml"),
-    pattern: /enterprise-portal:[\s\S]*middlewares:[\s\S]*enterprise-rate-limit@file/,
-    detail: "Local portal router attaches enterprise-rate-limit@file.",
+    pattern: /enterprise-admin:[\s\S]*middlewares:[\s\S]*enterprise-rate-limit@file/,
+    detail: "Local admin router attaches enterprise-rate-limit@file.",
   });
   addRateLimitPatternCheck(checks, issues, {
-    name: "vps-portal-router-uses-edge-rate-limit",
+    name: "vps-admin-router-uses-edge-rate-limit",
     category: "infra",
     filePath: path.join(infraRoot, "compose.vps.yaml"),
-    pattern: /enterprise-portal:[\s\S]*middlewares:[\s\S]*enterprise-rate-limit@file/,
-    detail: "VPS portal router attaches enterprise-rate-limit@file.",
+    pattern: /enterprise-admin:[\s\S]*middlewares:[\s\S]*enterprise-rate-limit@file/,
+    detail: "VPS admin router attaches enterprise-rate-limit@file.",
   });
   addRateLimitPatternCheck(checks, issues, {
     name: "backend-rate-limit-env-defaults",
@@ -9740,7 +9740,7 @@ async function securitySmoke() {
 
 async function wafSmoke() {
   const apiBase = argv.apiBase ? String(argv.apiBase).replace(/\/$/, "") : "";
-  const phpBase = String(argv.phpBase ?? argv.portalBase ?? "https://portal.localhost.com").replace(/\/$/, "");
+  const phpBase = String(argv.phpBase ?? argv.adminBase ?? "https://admin.localhost.com").replace(/\/$/, "");
   const probeBase = apiBase || phpBase;
   const smokeHeaders = { "User-Agent": "platform-waf-smoke/1.0" };
   log("==> WAF smoke checks");
@@ -9797,7 +9797,7 @@ async function infraHealth() {
   const apiBase = argv.apiBase ? String(argv.apiBase).replace(/\/$/, "") : "";
   const uiBase = (argv.uiBase ?? argv.docsBase ?? "https://docs.localhost.com").replace(/\/$/, "");
   const accountBase = argv.accountBase ? String(argv.accountBase).replace(/\/$/, "") : "";
-  const adminBase = (argv.adminBase ?? argv.projectsBase ?? "https://portal.localhost.com").replace(/\/$/, "");
+  const adminBase = (argv.adminBase ?? argv.projectsBase ?? "https://admin.localhost.com").replace(/\/$/, "");
   let inferredAdminScheme = "https";
   try {
     inferredAdminScheme = new URL(adminBase).protocol === "http:" ? "http" : "https";
@@ -9925,6 +9925,11 @@ function staticSecurityInfraOnlyCheck() {
   const releaseAttestationWorkflow = readText(path.join(infraRoot, ".github", "workflows", "release-attestation.yml"));
   const readme = readText(path.join(infraRoot, "README.md"));
   const runbook = readText(path.join(infraRoot, "RUNBOOK.md"));
+  const maintainerDocs = [
+    readme,
+    readSourceTreeText(path.join(infraRoot, "docs"), new Set([".md"])),
+    runbook,
+  ].join("\n");
   const envExample = readText(path.join(infraRoot, ".env.example"));
   const productionReadinessManifest = readText(path.join(infraRoot, "governance", "production-readiness.json"));
   const productionGoNoGoPolicyText = readText(path.join(infraRoot, "governance", "production-go-no-go.json"));
@@ -9978,10 +9983,10 @@ function staticSecurityInfraOnlyCheck() {
   assertMatch(compose, /dockerfile:\s+docker\/php-apache\.Dockerfile/, "Compose must build PHP hosting from the unified infra Dockerfile.");
   assertMatch(compose, /\$\{PHP_SOURCE_DIR:-\.\/php-runtime-root\}:\/var\/www\/html/, "Compose must default the PHP root to a neutral runtime-only document root.");
   assertNoMatch(compose, /\$\{PHP_SOURCE_DIR:-\.\/projects-portal\}:\/var\/www\/html/, "Compose must not mount a PHP projects portal as the Control Center.");
-  assertMatch(compose, /\$\{PHP_PROJECTS_DIR:-\.\.\/src\}:\/var\/www\/projects/, "Compose must mount PHP projects through one generic projects directory.");
+  assertMatch(compose, /\$\{PHP_PROJECTS_DIR:-\.\.\/applications\}:\/var\/www\/projects/, "Compose must mount PHP projects through one generic external applications directory.");
   assertNoMatch(compose, /HostRegexp\(/, "Compose must not expose wildcard project hosts publicly.");
-  assertMatch(compose, /enterprise-portal:[\s\S]*rule:\s+Host\(`\$\{CONTROL_CENTER_HOST:-\$\{ADMIN_HOST:-portal\.\$\{DOMAIN:-localhost\.com\}\}\}`\)/, "Compose must expose the Node Control Center only on the portal host.");
-  assertMatch(compose, /\.:\s*\/var\/www\/infra-docs:ro/, "Compose must mount infrastructure documentation read-only for the fallback portal.");
+  assertMatch(compose, /enterprise-admin:[\s\S]*rule:\s+Host\(`\$\{CONTROL_CENTER_HOST:-\$\{ADMIN_HOST:-admin\.\$\{DOMAIN:-localhost\.com\}\}\}`\)/, "Compose must expose the Node Control Center only on the admin host.");
+  assertMatch(compose, /\.:\s*\/var\/www\/infra-docs:ro/, "Compose must mount infrastructure documentation read-only for the docs surface.");
   assertMatch(compose, /\.\/php-apache\/apache:\/etc\/apache2\/sites-available/, "Compose must mount the unified PHP Apache vhost configs.");
   assertMatch(compose, /\.\/php-apache\/php\/custom\.ini/, "Compose must mount the unified PHP runtime config.");
   assertMatch(compose, /\.\/mariadb\/initdb:/, "Compose must initialize MariaDB from the unified infra tree.");
@@ -10006,7 +10011,7 @@ function staticSecurityInfraOnlyCheck() {
   assertMatch(projectRouterServer, /stopManagedProject[\s\S]*Project disabled[\s\S]*nodeUpstream/, "Project Router must stop managed Node projects when local routing is disabled.");
   assertMatch(projectRouterTest, /NODE_PROJECT_COMMANDS[\s\S]*php-demo\.localhost\.com[\s\S]*node-demo\.localhost\.com[\s\S]*Project disabled[\s\S]*nodeAfterEnablePayload\.runtime[\s\S]*nodeAfterEnablePayload\.host/, "Project Router tests must prove simultaneous PHP and Node hosting plus disable/re-enable behavior without host npm.");
   assertNoMatch(infrastructureText, /PHP_(?!(?:PROJECTS|SOURCE)_)[A-Z0-9]+_SOURCE_DIR/, "Infrastructure must not hardcode individual PHP project source mounts.");
-  assertMatch(envExample, /PHP_PROJECTS_DIR=\.\.\/src/, "Environment example must point PHP projects at the generic src directory.");
+  assertMatch(envExample, /PHP_PROJECTS_DIR=\.\.\/applications/, "Environment example must point PHP projects at a generic external applications directory.");
   assertMatch(envExample, /PROJECTS_WILDCARD_HOST_REGEXP=/, "Environment example must keep the project wildcard setting explicit and disabled by default.");
   assertMatch(opsDockerfile, /docker-cli[\s\S]*docker-cli-compose/, "Ops container must include Docker CLI and Compose plugin.");
   assertMatch(opsWrapper, /docker build[\s\S]*docker\/ops\.Dockerfile[\s\S]*docker run --rm/, "Ops wrapper must execute commands through the containerized runner.");
@@ -10184,7 +10189,7 @@ function staticSecurityInfraOnlyCheck() {
   assertMatch(vpsPostdeployScript, /secret-rotation-evidence\.sh --enforce[\s\S]*production-go-no-go\.sh --enforce[\s\S]*production-readiness-live\.sh/, "VPS post-deploy must enforce secret rotation evidence, production go/no-go and live readiness.");
   assertMatch(productionReadinessLiveWrapper, /enterprise-requirements-check --manifest governance\/production-readiness\.json --requireLiveProofs/, "Production readiness live wrapper must enforce the 20-point live checklist.");
   assertMatch(opsScript, /directory: "production-readiness"[\s\S]*prefix: "production-readiness-"[\s\S]*required: true/, "Evidence bundle must require the live production readiness report.");
-  assertMatch(readme, /production-readiness-live\.sh[\s\S]*reports\/production-readiness/, "README must document the live production readiness report.");
+  assertMatch(maintainerDocs, /production-readiness-live\.sh[\s\S]*reports\/production-readiness/, "README must document the live production readiness report.");
   assertMatch(runbook, /production-readiness-live\.sh[\s\S]*reports\/production-readiness/, "Runbook must document the live production readiness report.");
   assertMatch(opsScript, /workerNotificationsServerPath[\s\S]*fs\.existsSync\(workerNotificationsServerPath\)/, "Alert evidence must treat Platform source checks as optional.");
   assertMatch(githubWorkflow, /Backup scheduler dry run[\s\S]*BACKUP_SCHEDULER_DRY_RUN=true/, "Infrastructure CI must exercise the Dockerized backup scheduler in dry-run mode.");
@@ -10282,6 +10287,11 @@ async function staticSecurityCheck() {
   const enterprisePlan = readText(path.join(infraRoot, "ENTERPRISE-10-PLAN.md"));
   const readme = readText(path.join(infraRoot, "README.md"));
   const runbook = readText(path.join(infraRoot, "RUNBOOK.md"));
+  const maintainerDocs = [
+    readme,
+    readSourceTreeText(path.join(infraRoot, "docs"), new Set([".md"])),
+    runbook,
+  ].join("\n");
   const envExample = readText(path.join(infraRoot, ".env.example"));
   const envVpsExample = readText(path.join(infraRoot, ".env.vps.example"));
   const envStagingExample = readText(path.join(infraRoot, ".env.staging.example"));
@@ -10475,7 +10485,7 @@ async function staticSecurityCheck() {
   assertMatch(controlCenterServer, /x-platform-control-center-runtime[^\n]*node/, "Control Center responses must expose Node runtime evidence headers.");
   assertMatch(compose, /project-router:[\s\S]*CONTROL_CENTER_UPSTREAM:\s+http:\/\/control-center:8080/, "Project router must send the admin host to the Node Control Center.");
   assertNoMatch(compose, /local-projects:[\s\S]*url:\s+http:\/\/project-router:8080/, "Traefik must not publish project-router wildcard routes by default.");
-  assertMatch(compose, /enterprise-portal:[\s\S]*url:\s+http:\/\/control-center:8080/, "Traefik portal route must target the Node Control Center service.");
+  assertMatch(compose, /enterprise-admin:[\s\S]*url:\s+http:\/\/control-center:8080/, "Traefik admin route must target the Node Control Center service.");
   assertNoMatch(compose, /local-php/, "Traefik project routing must not be named local-php; PHP is only one runtime behind project-router.");
   assertMatch(compose, /php-apache:[\s\S]*\$\{PHP_SOURCE_DIR:-\.\/php-runtime-root\}:\/var\/www\/html[\s\S]*project-router:[\s\S]*CONTROL_CENTER_UPSTREAM:\s+http:\/\/control-center:8080/, "PHP Apache must be runtime-only while the admin host resolves through the Node Control Center.");
   assertMatch(projectRouterServer, /stopManagedProject[\s\S]*Project disabled[\s\S]*nodeUpstream/, "Project Router must stop managed Node projects when local routing is disabled.");
@@ -10683,17 +10693,17 @@ async function staticSecurityCheck() {
   assertMatch(vpsGoLiveScript, /RELOAD_SSHD" -eq 1[\s\S]*APPLY_HARDENING" -ne 1[\s\S]*requires --apply-hardening/, "VPS go-live must reject SSH reload without --apply-hardening.");
   assertMatch(vpsGoLiveScript, /reports\/vps-go-live[\s\S]*JSON_REPORT[\s\S]*MD_REPORT/, "VPS go-live orchestrator must write JSON and Markdown reports.");
   assertNoMatch(vpsGoLiveScript, /(?:^|\n)\s*\.\s+"\$ENV_FILE"|set -a[\s\S]*"\$ENV_FILE"|eval\s/, "VPS go-live orchestrator must not source/eval the production env file.");
-  assertMatch(readme, /vps-preflight\.sh[\s\S]*compose\.waf\.yaml[\s\S]*compose\.vps-waf\.yaml/, "README must document that VPS preflight renders the WAF overlays.");
+  assertMatch(maintainerDocs, /vps-preflight\.sh[\s\S]*compose\.waf\.yaml[\s\S]*compose\.vps-waf\.yaml/, "README must document that VPS preflight renders the WAF overlays.");
   assertMatch(runbook, /vps-preflight\.sh[\s\S]*compose\.waf\.yaml[\s\S]*compose\.vps-waf\.yaml/, "Runbook must document that VPS preflight renders the WAF overlays.");
   assertMatch(vpsPredeployChecklist, /vps-preflight\.sh[\s\S]*VPS\+WAF/, "VPS checklist must require VPS+WAF preflight coverage.");
-  assertMatch(readme, /vps-postdeploy\.sh[\s\S]*DEPLOY_RUN_PRE_GO_LIVE/, "README must document VPS post-deploy evidence options.");
+  assertMatch(maintainerDocs, /vps-postdeploy\.sh[\s\S]*DEPLOY_RUN_PRE_GO_LIVE/, "README must document VPS post-deploy evidence options.");
   assertMatch(runbook, /vps-postdeploy\.sh[\s\S]*DEPLOY_PRE_GO_LIVE_OFFSITE_RESTORE_DRY_RUN/, "Runbook must document VPS post-deploy evidence flags.");
   assertMatch(vpsPredeployChecklist, /vps-postdeploy\.sh[\s\S]*DEPLOY_RUN_GO_NO_GO/, "VPS checklist must require VPS post-deploy checks.");
-  assertMatch(readme, /vps-go-live\.sh --planOnly[\s\S]*vps-go-live\.sh --confirmLive/, "README must document the VPS go-live orchestrator plan and live modes.");
+  assertMatch(maintainerDocs, /vps-go-live\.sh --planOnly[\s\S]*vps-go-live\.sh --confirmLive/, "README must document the VPS go-live orchestrator plan and live modes.");
   assertMatch(runbook, /vps-go-live\.sh --planOnly[\s\S]*vps-go-live\.sh --confirmLive/, "Runbook must document the VPS go-live orchestrator plan and live modes.");
-  assertMatch(readme, /vps-go-live\.sh[\s\S]*--reload-sshd/, "README must document VPS go-live SSH reload mode.");
+  assertMatch(maintainerDocs, /vps-go-live\.sh[\s\S]*--reload-sshd/, "README must document VPS go-live SSH reload mode.");
   assertMatch(runbook, /vps-go-live\.sh[\s\S]*--reload-sshd/, "Runbook must document VPS go-live SSH reload mode.");
-  assertMatch(readme, /vps-go-live\.sh[\s\S]*--replace-docker-daemon-config/, "README must document VPS go-live Docker daemon replacement mode.");
+  assertMatch(maintainerDocs, /vps-go-live\.sh[\s\S]*--replace-docker-daemon-config/, "README must document VPS go-live Docker daemon replacement mode.");
   assertMatch(runbook, /vps-go-live\.sh[\s\S]*--replace-docker-daemon-config/, "Runbook must document VPS go-live Docker daemon replacement mode.");
   assertMatch(vpsPredeployChecklist, /vps-go-live\.sh --planOnly[\s\S]*reports\/vps-go-live/, "VPS checklist must require the VPS go-live plan report.");
   assertMatch(vpsPredeployChecklist, /vps-go-live\.sh --planOnly[\s\S]*--reload-sshd/, "VPS checklist must require reviewed planning for SSH reload.");
@@ -10711,8 +10721,8 @@ async function staticSecurityCheck() {
   assertMatch(opsScript, /directory: "vps-hardening"[\s\S]*prefix: "vps-hardening-apply-"[\s\S]*required: true/, "Evidence bundle must require VPS hardening apply reports.");
   assertMatch(opsScript, /directory: "vps-go-live"[\s\S]*prefix: "vps-go-live-"/, "Evidence bundle must include VPS go-live orchestration reports when present.");
   assertMatch(opsScript, /"evidence-bundle": evidenceBundle/, "Ops command map must expose evidence-bundle.");
-  assertMatch(readme, /evidence-bundle\.sh[\s\S]*\.tmp\/evidence-bundles/, "README must document the evidence bundle output.");
-  assertMatch(readme, /evidence-bundle-verify\.sh --requireComplete[\s\S]*SHA256/, "README must document final evidence bundle verification.");
+  assertMatch(maintainerDocs, /evidence-bundle\.sh[\s\S]*\.tmp\/evidence-bundles/, "README must document the evidence bundle output.");
+  assertMatch(maintainerDocs, /evidence-bundle-verify\.sh --requireComplete[\s\S]*SHA256/, "README must document final evidence bundle verification.");
   assertMatch(runbook, /evidence-bundle\.sh[\s\S]*secrets\//, "Runbook must document evidence bundle secret exclusions.");
   assertMatch(runbook, /evidence-bundle-verify\.sh --requireComplete[\s\S]*SHA256/, "Runbook must document final evidence bundle verification.");
   assertMatch(vpsPredeployChecklist, /evidence-bundle\.sh[\s\S]*manifest\.json/, "VPS checklist must require the evidence bundle manifest review.");
@@ -10724,7 +10734,7 @@ async function staticSecurityCheck() {
   assertMatch(finalReadinessAudit, /Evidence bundle verifier[\s\S]*SHA256/, "Final readiness audit must include evidence bundle verifier coverage.");
   assertMatch(finalReadinessAudit, /vps-postdeploy\.sh[\s\S]*infra-health/, "Final readiness audit must include VPS post-deploy health checks.");
   assertMatch(finalReadinessAudit, /mode=dry-run[\s\S]*providerEvidence\.verified=false/, "Final readiness audit must document uptime dry-run evidence semantics.");
-  assertMatch(externalUptimeManifest, /portal-public-home[\s\S]*CONTROL_CENTER_PUBLIC_URL[\s\S]*docs-public-home[\s\S]*DOCS_PUBLIC_URL/, "External uptime manifest must monitor only the public portal and docs surfaces.");
+  assertMatch(externalUptimeManifest, /admin-public-home[\s\S]*CONTROL_CENTER_PUBLIC_URL[\s\S]*docs-public-home[\s\S]*DOCS_PUBLIC_URL/, "External uptime manifest must monitor only the public admin and docs surfaces.");
   assertNoMatch(externalUptimeManifest, /api-public-health|account-public-home|keycloak-issuer-discovery|blocked-phpmyadmin-public|blocked-prometheus-public|blocked-alertmanager-public/, "External uptime manifest must not declare removed public API, account, auth or admin-host targets.");
   assertMatch(externalUptimeManifest, /providerNotes[\s\S]*cloudflare[\s\S]*betterstack[\s\S]*uptimerobot/, "External uptime manifest must map to common external monitoring providers.");
   assertMatch(externalUptimeWrapper, /external-uptime-check/, "External uptime wrapper must delegate to the Dockerized ops runner.");
@@ -10803,13 +10813,13 @@ async function staticSecurityCheck() {
   assertMatch(vpsPredeployChecklist, /cloudflare-access-admin\.sh --verifyRemote/, "VPS checklist must verify Cloudflare Access admin applications.");
   assertMatch(vpsPredeployChecklist, /Node, pnpm, PHP CLI and build toolchains are not required on the host/, "VPS checklist must keep host dependencies limited to Docker, Compose and Git.");
   assertMatch(vpsPredeployChecklist, /compose\.backup-scheduler\.yaml/, "VPS checklist must require the Dockerized backup scheduler or approved equivalent.");
-  assertMatch(readme, /vps-bootstrap-ubuntu\.sh[\s\S]*reports\/vps-bootstrap/, "README must document VPS bootstrap evidence reports.");
+  assertMatch(maintainerDocs, /vps-bootstrap-ubuntu\.sh[\s\S]*reports\/vps-bootstrap/, "README must document VPS bootstrap evidence reports.");
   assertMatch(runbook, /vps-bootstrap-ubuntu\.sh[\s\S]*reports\/vps-bootstrap/, "Runbook must document VPS bootstrap evidence reports.");
   assertMatch(vpsPredeployChecklist, /vps-bootstrap-ubuntu\.sh[\s\S]*reports\/vps-bootstrap/, "VPS checklist must require VPS bootstrap evidence reports.");
-  assertMatch(readme, /vps-hardening-ubuntu\.sh[\s\S]*reports\/vps-hardening/, "README must document VPS hardening evidence reports.");
+  assertMatch(maintainerDocs, /vps-hardening-ubuntu\.sh[\s\S]*reports\/vps-hardening/, "README must document VPS hardening evidence reports.");
   assertMatch(runbook, /vps-hardening-ubuntu\.sh[\s\S]*reports\/vps-hardening/, "Runbook must document VPS hardening evidence reports.");
   assertMatch(vpsPredeployChecklist, /vps-hardening-ubuntu\.sh[\s\S]*reports\/vps-hardening/, "VPS checklist must require VPS hardening evidence reports.");
-  assertMatch(readme, /vps-host-readiness\.sh[\s\S]*reports\/vps-host/, "README must document VPS host readiness evidence reports.");
+  assertMatch(maintainerDocs, /vps-host-readiness\.sh[\s\S]*reports\/vps-host/, "README must document VPS host readiness evidence reports.");
   assertMatch(runbook, /vps-host-readiness\.sh[\s\S]*reports\/vps-host/, "Runbook must document VPS host readiness evidence reports.");
   assertMatch(vpsPredeployChecklist, /vps-host-readiness\.sh[\s\S]*reports\/vps-host/, "VPS checklist must require VPS host readiness evidence.");
   assertMatch(finalReadinessAudit, /VPS host readiness script/, "Final readiness audit must include the VPS host readiness script.");
@@ -10820,76 +10830,76 @@ async function staticSecurityCheck() {
   assertMatch(readinessReport, /Cloudflare Access admin manifest/, "Readiness report must record the Cloudflare Access manifest.");
   assertMatch(finalReadinessAudit, /Cloudflare Access admin application/, "Final audit must record Cloudflare Access admin application evidence.");
   assertMatch(readinessReport, /Dockerized backup scheduler profile/, "Readiness report must record the Dockerized backup scheduler.");
-  assertMatch(readme, /reports\/backups/, "README must document backup execution reports.");
+  assertMatch(maintainerDocs, /reports\/backups/, "README must document backup execution reports.");
   assertMatch(runbook, /reports\/backups/, "Runbook must document backup execution reports.");
-  assertMatch(readme, /dr-evidence\.sh[\s\S]*RTO\/RPO/, "README must document DR evidence RTO/RPO summaries.");
+  assertMatch(maintainerDocs, /dr-evidence\.sh[\s\S]*RTO\/RPO/, "README must document DR evidence RTO/RPO summaries.");
   assertMatch(runbook, /dr-evidence\.sh[\s\S]*--enforce/, "Runbook must document enforced DR evidence checks.");
   assertMatch(vpsPredeployChecklist, /dr-evidence\.sh --enforce[\s\S]*reports\/dr/, "VPS checklist must require enforced DR evidence reports.");
   assertMatch(finalReadinessAudit, /DR evidence summary/, "Final readiness audit must mention DR evidence summaries.");
-  assertMatch(readme, /alert-evidence\.sh[\s\S]*--sendTest/, "README must document alert evidence runtime testing.");
+  assertMatch(maintainerDocs, /alert-evidence\.sh[\s\S]*--sendTest/, "README must document alert evidence runtime testing.");
   assertMatch(runbook, /Alert evidence:[\s\S]*alert-evidence\.sh --sendTest/, "Runbook must document alert evidence runtime testing.");
   assertMatch(vpsPredeployChecklist, /alert-evidence\.sh --sendTest --requireEmailDelivery[\s\S]*reports\/alerts/, "VPS checklist must require alert delivery evidence reports.");
   assertMatch(readinessReport, /alert-evidence\.sh/, "Readiness report must include alert evidence tooling.");
   assertMatch(finalReadinessAudit, /Alert evidence command/, "Final readiness audit must mention alert evidence tooling.");
-  assertMatch(readme, /monitoring\/external-uptime\.example\.json[\s\S]*external-uptime-check\.sh --dryRun/, "README must document external uptime manifest validation.");
-  assertMatch(readme, /mode=dry-run[\s\S]*production go[/-]no-go/, "README must explain that uptime dry-run reports do not satisfy production go/no-go.");
+  assertMatch(maintainerDocs, /monitoring\/external-uptime\.example\.json[\s\S]*external-uptime-check\.sh --dryRun/, "README must document external uptime manifest validation.");
+  assertMatch(maintainerDocs, /mode=dry-run[\s\S]*production go[/-]no-go/, "README must explain that uptime dry-run reports do not satisfy production go/no-go.");
   assertMatch(runbook, /External uptime monitoring[\s\S]*external-uptime-check\.sh --dryRun/, "Runbook must document external uptime monitoring setup.");
   assertMatch(runbook, /mode=dry-run[\s\S]*production go[/-]no-go/, "Runbook must explain that uptime dry-run reports do not satisfy production go/no-go.");
   assertMatch(vpsPredeployChecklist, /external-uptime-check\.sh --dryRun[\s\S]*External uptime monitoring delivered a real green check/, "VPS checklist must include external uptime dry-run and provider confirmation.");
-  assertMatch(readme, /github-branch-protection\.sh[\s\S]*--verifyRemote/, "README must document GitHub branch protection apply/verify.");
+  assertMatch(maintainerDocs, /github-branch-protection\.sh[\s\S]*--verifyRemote/, "README must document GitHub branch protection apply/verify.");
   assertMatch(runbook, /github-branch-protection\.sh[\s\S]*--apply[\s\S]*--verifyRemote/, "Runbook must document GitHub branch protection apply and remote verification.");
   assertMatch(vpsPredeployChecklist, /github-branch-protection\.sh[\s\S]*--verifyRemote/, "VPS checklist must require live GitHub branch protection verification.");
-  assertMatch(readme, /github-environments\.sh[\s\S]*GITHUB_PRODUCTION_REVIEWERS[\s\S]*--verifyRemote/, "README must document GitHub deployment environments apply/verify.");
+  assertMatch(maintainerDocs, /github-environments\.sh[\s\S]*GITHUB_PRODUCTION_REVIEWERS[\s\S]*--verifyRemote/, "README must document GitHub deployment environments apply/verify.");
   assertMatch(runbook, /github-environments\.sh[\s\S]*GITHUB_PRODUCTION_REVIEWERS[\s\S]*--verifyRemote/, "Runbook must document GitHub deployment environments apply and remote verification.");
   assertMatch(vpsPredeployChecklist, /github-environments\.sh[\s\S]*--verifyRemote/, "VPS checklist must require live GitHub deployment environment verification.");
-  assertMatch(readme, /github-actions-config\.sh[\s\S]*DEPLOY_SSH_KEY[\s\S]*--verifyRemote/, "README must document GitHub Actions runtime config verification.");
-  assertMatch(readme, /github-actions-run-evidence\.sh[\s\S]*reports\/github-actions/, "README must document GitHub Actions run evidence.");
+  assertMatch(maintainerDocs, /github-actions-config\.sh[\s\S]*DEPLOY_SSH_KEY[\s\S]*--verifyRemote/, "README must document GitHub Actions runtime config verification.");
+  assertMatch(maintainerDocs, /github-actions-run-evidence\.sh[\s\S]*reports\/github-actions/, "README must document GitHub Actions run evidence.");
   assertMatch(runbook, /github-actions-config\.sh[\s\S]*DEPLOY_SSH_KEY/, "Runbook must document required GitHub Actions runtime secrets and variables.");
   assertMatch(runbook, /github-actions-run-evidence\.sh[\s\S]*reports\/github-actions/, "Runbook must document GitHub Actions run evidence.");
   assertMatch(vpsPredeployChecklist, /github-actions-config\.sh[\s\S]*DEPLOY_REMOTE_DIR/, "VPS checklist must require live GitHub Actions runtime config verification.");
   assertMatch(vpsPredeployChecklist, /github-actions-run-evidence\.sh[\s\S]*reports\/github-actions/, "VPS checklist must require GitHub Actions run evidence.");
-  assertMatch(readme, /enterprise-live-evidence[\s\S]*Cloudflare Access[\s\S]*bundle completo/, "README must document the production live evidence workflow.");
+  assertMatch(maintainerDocs, /enterprise-live-evidence[\s\S]*Cloudflare Access[\s\S]*bundle completo/, "README must document the production live evidence workflow.");
   assertMatch(runbook, /enterprise-live-evidence[\s\S]*external uptime[\s\S]*complete evidence bundle/, "Runbook must document the production live evidence workflow.");
   assertMatch(vpsPredeployChecklist, /enterprise-live-evidence[\s\S]*production[\s\S]*artifact/, "VPS checklist must require the production live evidence workflow artifact.");
-  assertMatch(readme, /enterprise-vps-evidence[\s\S]*VPS_HARDENED_SSH_PORT[\s\S]*reports\/vps-/, "README must document the protected VPS evidence workflow.");
+  assertMatch(maintainerDocs, /enterprise-vps-evidence[\s\S]*VPS_HARDENED_SSH_PORT[\s\S]*reports\/vps-/, "README must document the protected VPS evidence workflow.");
   assertMatch(runbook, /enterprise-vps-evidence[\s\S]*confirm_mutating_vps=true[\s\S]*reports\/vps-/, "Runbook must document the protected VPS evidence workflow.");
   assertMatch(vpsPredeployChecklist, /enterprise-vps-evidence[\s\S]*`enterprise-vps-evidence` artifact/, "VPS checklist must require archiving the VPS evidence workflow artifact.");
-  assertMatch(readme, /pre-go-live-evidence\.sh[\s\S]*reports\/go-live/, "README must document the pre go-live evidence pack.");
+  assertMatch(maintainerDocs, /pre-go-live-evidence\.sh[\s\S]*reports\/go-live/, "README must document the pre go-live evidence pack.");
   assertMatch(runbook, /pre-go-live-evidence\.sh[\s\S]*includeRuntime[\s\S]*includeRestoreDrill/, "Runbook must document runtime and restore evidence options.");
   assertMatch(vpsPredeployChecklist, /pre-go-live-evidence\.sh[\s\S]*reports\/go-live/, "VPS checklist must require the go-live evidence report.");
   assertMatch(opsScript, /const readinessMissing = readinessMatrix\.filter[\s\S]*missingOptions[\s\S]*status: issues\.length \? "failed" : "passed"/, "Pre go-live evidence must write status, missing options and readiness issues.");
   assertMatch(opsScript, /preGoLive\.payload\.status === "passed"/, "Production go/no-go must require passed pre go-live evidence.");
-  assertMatch(readme, /release-evidence\.sh[\s\S]*reports\/release/, "README must document release evidence reports.");
+  assertMatch(maintainerDocs, /release-evidence\.sh[\s\S]*reports\/release/, "README must document release evidence reports.");
   assertMatch(runbook, /release-evidence\.sh[\s\S]*reports\/release/, "Runbook must document release evidence reports.");
   assertMatch(vpsPredeployChecklist, /release-evidence\.sh[\s\S]*reports\/release/, "VPS checklist must require release evidence reports.");
   assertMatch(readinessReport, /release-evidence\.sh/, "Readiness report must include release evidence tooling.");
-  assertMatch(readme, /production-go-no-go\.sh[\s\S]*reports\/go-no-go/, "README must document the production go/no-go evidence gate.");
+  assertMatch(maintainerDocs, /production-go-no-go\.sh[\s\S]*reports\/go-no-go/, "README must document the production go/no-go evidence gate.");
   assertMatch(runbook, /Production go\/no-go[\s\S]*production-go-no-go\.sh --enforce/, "Runbook must document enforcing the production go/no-go gate.");
   assertMatch(vpsPredeployChecklist, /production-go-no-go\.sh --enforce[\s\S]*reports\/go-no-go/, "VPS checklist must require the production go/no-go report.");
-  assertMatch(readme, /production-readiness-live\.sh[\s\S]*reports\/production-readiness/, "README must document the live production readiness gate.");
+  assertMatch(maintainerDocs, /production-readiness-live\.sh[\s\S]*reports\/production-readiness/, "README must document the live production readiness gate.");
   assertMatch(runbook, /production-readiness-live\.sh[\s\S]*reports\/production-readiness/, "Runbook must document the live production readiness gate.");
   assertMatch(vpsPredeployChecklist, /production-readiness-live\.sh[\s\S]*reports\/production-readiness/, "VPS checklist must require the live production readiness report.");
   assertMatch(readinessReport, /production-go-no-go\.sh/, "Readiness report must include production go/no-go tooling.");
   assertMatch(finalReadinessAudit, /production-go-no-go/, "Final readiness audit must mention the production go/no-go gate.");
   assertMatch(readinessReport, /production-readiness-live\.sh/, "Readiness report must include live production readiness tooling.");
   assertMatch(finalReadinessAudit, /production-readiness/, "Final readiness audit must mention the live production readiness report.");
-  assertMatch(readme, /linux-portability-check\.sh[\s\S]*reports\/linux-portability/, "README must document Linux portability evidence reports.");
+  assertMatch(maintainerDocs, /linux-portability-check\.sh[\s\S]*reports\/linux-portability/, "README must document Linux portability evidence reports.");
   assertMatch(runbook, /Linux portability[\s\S]*linux-portability-check\.sh --fix/, "Runbook must document the Linux portability check and fix mode.");
   assertMatch(vpsPredeployChecklist, /linux-portability-check\.sh[\s\S]*reports\/linux-portability/, "VPS checklist must require Linux portability evidence reports.");
   assertMatch(readinessReport, /linux-portability-check\.sh/, "Readiness report must include Linux portability tooling.");
   assertMatch(finalReadinessAudit, /linux-portability-check/, "Final readiness audit must mention the Linux portability gate.");
-  assertMatch(readme, /offsite-restore-drill-restic\.sh[\s\S]*--dryRun/, "README must document the off-site Restic restore drill dry-run.");
+  assertMatch(maintainerDocs, /offsite-restore-drill-restic\.sh[\s\S]*--dryRun/, "README must document the off-site Restic restore drill dry-run.");
   assertMatch(runbook, /Off-site restore drill[\s\S]*offsite-restore-drill-restic\.sh/, "Runbook must document the off-site Restic restore drill.");
   assertMatch(vpsPredeployChecklist, /offsite-restore-drill-restic\.sh[\s\S]*off-site repository/, "VPS checklist must require the off-site restore drill.");
   assertMatch(finalReadinessAudit, /offsite-restore-drill-restic/, "Final readiness audit must mention the off-site Restic restore drill.");
   assertMatch(finalReadinessAudit, /## Modified Files[\s\S]*## New Components[\s\S]*## Tests Executed[\s\S]*## Problems Found And Fixed/, "Final readiness audit must include files, components, tests and problems.");
   assertMatch(finalReadinessAudit, /## Requirement Status[\s\S]*## Readiness Scores[\s\S]*## Requires Real VPS Or External Provider[\s\S]*## Final VPS Pre-Deploy Checklist/, "Final readiness audit must include requirement status, scores, VPS-only work and checklist.");
   assertMatch(finalReadinessAudit, /Dockerized backup scheduler/, "Final readiness audit must include the Dockerized backup scheduler.");
-  assertMatch(readme, /Docker Engine, Docker Compose plugin e Git/, "README must document the minimal VPS host dependency set.");
-  assertMatch(readme, /compose\.backup-scheduler\.yaml[\s\S]*--profile backup/, "README must document enabling the Dockerized backup scheduler.");
+  assertMatch(maintainerDocs, /Docker Engine, Docker Compose plugin e Git/, "README must document the minimal VPS host dependency set.");
+  assertMatch(maintainerDocs, /compose\.backup-scheduler\.yaml[\s\S]*--profile backup/, "README must document enabling the Dockerized backup scheduler.");
   assertMatch(runbook, /docker exec enterprise-backup-scheduler crontab -l/, "Runbook must document verifying the backup scheduler crontab.");
   assertMatch(envExample, /BACKUP_SCHEDULER_POSTGRES_AT[\s\S]*BACKUP_SCHEDULER_ENABLE_OFFSITE/, ".env.example must expose backup scheduler timing and off-site toggles.");
-  assertNoMatch(`${readme}\n${runbook}\n${enterprisePlan}`, /node\s+(?:\.\/)?scripts\/infra-ops\.mjs/, "Infra operator docs must use the Dockerized ops wrapper, not host Node.");
+  assertNoMatch(`${maintainerDocs}\n${enterprisePlan}`, /node\s+(?:\.\/)?scripts\/infra-ops\.mjs/, "Infra operator docs must use the Dockerized ops wrapper, not host Node.");
   const secretInterpolationPattern = /\b(?:POSTGRES_PASSWORD|APP_DB_PASSWORD|KEYCLOAK_DB_PASSWORD|REDIS_PASSWORD|KC_BOOTSTRAP_ADMIN_PASSWORD|KC_DB_PASSWORD|NATS_PASSWORD|MINIO_ROOT_PASSWORD|SESSION_SECRET|SESSION_SIGNING_KEYS|SECRET_HASH_KEYS|DATABASE_URL|NATS_URL|SMTP_PASSWORD|GF_SECURITY_ADMIN_PASSWORD|GOOGLE_RECAPTCHA_SECRET_KEY|CLOUDFLARE_TURNSTILE_SECRET_KEY|GOOGLE_OAUTH_CLIENT_SECRET)\s*:\s*\$\{/;
   for (const [label, text] of [["compose.yaml", compose], ["compose.prod.yaml", composeProd], ["compose.secrets.yaml", composeSecrets]]) {
     assertNoMatch(text, secretInterpolationPattern, `${label} must not interpolate secret values from process environment.`);

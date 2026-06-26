@@ -71,7 +71,7 @@ fi
 LOCAL_HOST_ARGS=""
 for host in \
   localhost.com \
-  portal.localhost.com \
+  admin.localhost.com \
   docs.localhost.com
 do
   LOCAL_HOST_ARGS="$LOCAL_HOST_ARGS --add-host $host:$LOCAL_HOST_TARGET"
