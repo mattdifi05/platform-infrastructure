@@ -135,15 +135,16 @@ configs:
     content: |
       http:
         routers:
-          enterprise-web:
-            rule: Host(`${UI_HOST:?Set UI_HOST}`)
+          enterprise-docs:
+            rule: Host(`${DOCS_HOST:-docs.${DOMAIN:?Set DOMAIN}}`)
             entryPoints:
               - web
+            priority: 100
             middlewares:
               - enterprise-edge-forwarded-https@file
               - enterprise-security-headers@file
               - enterprise-compress@file
-            service: enterprise-web
+            service: enterprise-docs
 
           enterprise-account:
             rule: Host(`${ACCOUNT_HOST:?Set ACCOUNT_HOST}`)
@@ -188,7 +189,7 @@ configs:
             service: enterprise-keycloak
 
           php-projects:
-            rule: Host(`${CONTROL_CENTER_HOST:-${ADMIN_HOST:-admin.${DOMAIN:?Set DOMAIN}}}`) || Host(`${PROJECTS_HOST:-${CONTROL_CENTER_HOST:-${ADMIN_HOST:-admin.${DOMAIN:?Set DOMAIN}}}}`) || HostRegexp(`${PROJECTS_WILDCARD_HOST_REGEXP:?Set PROJECTS_WILDCARD_HOST_REGEXP}`)
+            rule: Host(`${CONTROL_CENTER_HOST:-${ADMIN_HOST:-portal.${DOMAIN:?Set DOMAIN}}}`) || HostRegexp(`${PROJECTS_WILDCARD_HOST_REGEXP:?Set PROJECTS_WILDCARD_HOST_REGEXP}`)
             entryPoints:
               - web
             priority: 1
@@ -203,6 +204,10 @@ configs:
             loadBalancer:
               servers:
                 - url: http://web:3000
+          enterprise-docs:
+            loadBalancer:
+              servers:
+                - url: http://control-center:8080
           enterprise-backend:
             loadBalancer:
               servers:

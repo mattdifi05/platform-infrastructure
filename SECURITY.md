@@ -34,7 +34,7 @@ Roles are stored in `app_account.account_roles` and must not be trusted from the
 
 ## Local control access
 
-- `admin.localhost.com` is not a public app surface. It requires the Control Center admin gate before exposing project/admin links.
+- `portal.localhost.com` is not a public app surface. It requires the Control Center admin gate before exposing project/admin links.
 - Its persistent cookie is `HttpOnly`, `Secure`, `SameSite=Lax` and signed with `projects_gateway_signing_keys`.
 - Rotate `projects_gateway_signing_keys` to revoke every local Admin Control Center session.
 

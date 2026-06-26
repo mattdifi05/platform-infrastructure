@@ -1456,8 +1456,8 @@ const localTlsHostnames = new Set([
   "localhost",
   "127.0.0.1",
   "::1",
-  "app.localhost.com",
-  "admin.localhost.com",
+  "portal.localhost.com",
+  "docs.localhost.com",
   "account.localhost.com",
   "api.localhost.com",
   "auth.localhost.com",
@@ -1789,7 +1789,8 @@ async function backupPostgres(options = {}) {
 async function certificateExpiryCheck() {
   const env = parseEnv(path.join(infraRoot, ".env"));
   const defaultHosts = [
-    env.UI_HOST ?? "app.localhost.com",
+    env.CONTROL_CENTER_HOST ?? env.ADMIN_HOST ?? "portal.localhost.com",
+    env.DOCS_HOST ?? "docs.localhost.com",
     env.ACCOUNT_HOST ?? "account.localhost.com",
     env.API_HOST ?? "api.localhost.com",
   ].join(",");
@@ -1880,7 +1881,7 @@ async function enterpriseHardeningAudit() {
 async function browserE2eTests() {
   log("==> Browser E2E tests");
   const env = parseEnv(path.join(infraRoot, ".env"));
-  const playwrightBaseUrl = env.NEXT_PUBLIC_UI_URL ?? env.UI_PUBLIC_URL ?? "https://app.localhost.com";
+  const playwrightBaseUrl = env.NEXT_PUBLIC_UI_URL ?? env.UI_PUBLIC_URL ?? "https://portal.localhost.com";
   const sourceMount = hostPathForContainerMount(sourceRoot);
   const bootstrap = [
     "set -eu",
@@ -9699,7 +9700,7 @@ async function secretScan() {
 
 async function securitySmoke() {
   const env = parseEnv(path.join(infraRoot, ".env"));
-  const uiPublicUrl = argv.uiBase ?? env.UI_PUBLIC_URL ?? env.NEXT_PUBLIC_UI_URL ?? "https://app.localhost.com";
+  const uiPublicUrl = argv.uiBase ?? env.DOCS_PUBLIC_URL ?? env.UI_PUBLIC_URL ?? env.NEXT_PUBLIC_UI_URL ?? "https://docs.localhost.com";
   const accountPublicUrl = argv.accountBase ?? env.ACCOUNT_PUBLIC_URL ?? env.NEXT_PUBLIC_ACCOUNT_URL ?? "https://account.localhost.com";
   const apiPublicUrl = argv.apiBase ?? env.API_PUBLIC_URL ?? env.NEXT_PUBLIC_API_URL ?? "https://api.localhost.com";
   const uiBase = String(uiPublicUrl).replace(/\/$/, "");
@@ -9743,7 +9744,7 @@ async function securitySmoke() {
 
 async function wafSmoke() {
   const apiBase = (argv.apiBase ?? "https://api.localhost.com").replace(/\/$/, "");
-  const phpBase = (argv.phpBase ?? "https://admin.localhost.com").replace(/\/$/, "");
+  const phpBase = (argv.phpBase ?? "https://portal.localhost.com").replace(/\/$/, "");
   const smokeHeaders = { "User-Agent": "platform-waf-smoke/1.0" };
   log("==> WAF smoke checks");
 
@@ -9797,9 +9798,9 @@ async function infraHealth() {
     .map((container) => container.trim())
     .filter(Boolean);
   const apiBase = (argv.apiBase ?? "https://api.localhost.com").replace(/\/$/, "");
-  const uiBase = (argv.uiBase ?? "https://app.localhost.com").replace(/\/$/, "");
+  const uiBase = (argv.uiBase ?? argv.docsBase ?? "https://docs.localhost.com").replace(/\/$/, "");
   const accountBase = (argv.accountBase ?? "https://account.localhost.com").replace(/\/$/, "");
-  const adminBase = (argv.adminBase ?? argv.projectsBase ?? "https://admin.localhost.com").replace(/\/$/, "");
+  const adminBase = (argv.adminBase ?? argv.projectsBase ?? "https://portal.localhost.com").replace(/\/$/, "");
   let inferredAdminScheme = "https";
   try {
     inferredAdminScheme = new URL(apiBase).protocol === "http:" ? "http" : "https";
@@ -9838,7 +9839,7 @@ async function infraHealth() {
 
   const httpChecks = [
     { name: "api-health", method: "GET", url: `${apiBase}/health`, statuses: [200] },
-    { name: "ui-home", method: "HEAD", url: `${uiBase}/`, statuses: [200, 308] },
+    { name: "docs-home", method: "HEAD", url: `${uiBase}/`, statuses: [200, 308] },
     { name: "account-home", method: "HEAD", url: `${accountBase}/`, statuses: [200, 308] },
     { name: "admin-control-center", method: "GET", url: `${adminBase}/`, statuses: [200], body: /Admin Control Center|Documentation and project launcher|Local infrastructure/ },
     { name: "grafana-login", method: "GET", url: grafanaBase, statuses: grafanaStatuses },

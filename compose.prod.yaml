@@ -139,13 +139,7 @@ services:
       NEXTAUTH_URL: ${NEXTAUTH_URL:?Set NEXTAUTH_URL}
       KEYCLOAK_ISSUER: ${KEYCLOAK_ISSUER:?Set KEYCLOAK_ISSUER}
     labels:
-      traefik.enable: "true"
-      traefik.http.routers.enterprise-web.rule: Host(`${UI_HOST:?Set UI_HOST}`)
-      traefik.http.routers.enterprise-web.entrypoints: websecure
-      traefik.http.routers.enterprise-web.tls: "true"
-      traefik.http.routers.enterprise-web.tls.certresolver: letsencrypt
-      traefik.http.routers.enterprise-web.middlewares: enterprise-security-headers@file,enterprise-compress@file
-      traefik.http.services.enterprise-web.loadbalancer.server.port: "3000"
+      traefik.enable: "false"
 
   worker-notifications:
     image: ${WORKER_NOTIFICATIONS_IMAGE:?Set WORKER_NOTIFICATIONS_IMAGE for production}
@@ -207,16 +201,29 @@ configs:
     content: |
       http:
         routers:
-          enterprise-web:
-            rule: Host(`${UI_HOST:?Set UI_HOST}`)
+          enterprise-portal:
+            rule: Host(`${CONTROL_CENTER_HOST:-${ADMIN_HOST:-portal.${DOMAIN:?Set DOMAIN}}}`)
             entryPoints:
               - websecure
+            priority: 100
             tls:
               certResolver: letsencrypt
             middlewares:
               - enterprise-security-headers@file
               - enterprise-compress@file
-            service: enterprise-web
+            service: enterprise-portal
+
+          enterprise-docs:
+            rule: Host(`${DOCS_HOST:-docs.${DOMAIN:?Set DOMAIN}}`)
+            entryPoints:
+              - websecure
+            priority: 100
+            tls:
+              certResolver: letsencrypt
+            middlewares:
+              - enterprise-security-headers@file
+              - enterprise-compress@file
+            service: enterprise-docs
 
           enterprise-account:
             rule: Host(`${ACCOUNT_HOST:?Set ACCOUNT_HOST}`)
@@ -269,6 +276,14 @@ configs:
             loadBalancer:
               servers:
                 - url: http://web:3000
+          enterprise-docs:
+            loadBalancer:
+              servers:
+                - url: http://control-center:8080
+          enterprise-portal:
+            loadBalancer:
+              servers:
+                - url: http://control-center:8080
           enterprise-backend:
             loadBalancer:
               servers:

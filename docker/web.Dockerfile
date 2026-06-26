@@ -3,7 +3,7 @@ ARG NODE_IMAGE=node:26.3.1-alpine@sha256:a2dc166a387cc6ca1e62d0c8e265e49ca985d6e
 FROM ${NODE_IMAGE} AS build
 ARG PNPM_VERSION=11.9.0
 ARG NEXT_PUBLIC_API_URL=https://api.localhost.com
-ARG NEXT_PUBLIC_UI_URL=https://app.localhost.com
+ARG NEXT_PUBLIC_UI_URL=https://portal.localhost.com
 ARG NEXT_PUBLIC_ACCOUNT_URL=https://account.localhost.com
 ARG NEXT_PUBLIC_BOT_PROTECTION_PROVIDER=disabled
 ARG NEXT_PUBLIC_GOOGLE_RECAPTCHA_SITE_KEY=
@@ -54,7 +54,7 @@ RUN --mount=type=cache,target=/workspace/apps/web/.next/cache,uid=1000,gid=1000 
 
 FROM ${NODE_IMAGE} AS runtime
 ARG NEXT_PUBLIC_API_URL=https://api.localhost.com
-ARG NEXT_PUBLIC_UI_URL=https://app.localhost.com
+ARG NEXT_PUBLIC_UI_URL=https://portal.localhost.com
 ARG NEXT_PUBLIC_ACCOUNT_URL=https://account.localhost.com
 ARG NEXT_PUBLIC_BOT_PROTECTION_PROVIDER=disabled
 ARG NEXT_PUBLIC_GOOGLE_RECAPTCHA_SITE_KEY=

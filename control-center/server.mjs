@@ -37,8 +37,9 @@ const authRequired = parseBoolean(process.env.CONTROL_CENTER_AUTH_REQUIRED || ""
 const environment = normalizeEnvironment(process.env.CONTROL_CENTER_ENV || "local");
 const platformName = String(process.env.PLATFORM_NAME || "Platform Infrastructure").trim() || "Platform Infrastructure";
 const domain = normalizeHost(process.env.DOMAIN || process.env.LOCAL_DOMAIN || "localhost.com");
-const adminHost = normalizeHost(process.env.ADMIN_HOST || `admin.${domain}`);
+const adminHost = normalizeHost(process.env.ADMIN_HOST || `portal.${domain}`);
 const controlCenterHost = normalizeHost(process.env.CONTROL_CENTER_HOST || process.env.PROJECTS_HOST || adminHost);
+const docsHost = normalizeHost(process.env.DOCS_HOST || `docs.${domain}`);
 const authHost = normalizeHost(process.env.AUTH_HOST || `auth.${domain}`);
 const storageHost = normalizeHost(process.env.STORAGE_HOST || process.env.MINIO_CONSOLE_HOST || `storage.${domain}`);
 const grafanaHost = normalizeHost(process.env.GRAFANA_HOST || `grafana.${domain}`);
@@ -47,17 +48,25 @@ const hostSuffix = normalizeHostSuffix(process.env.PROJECT_HOST_SUFFIX || `.${do
 const nodeHosts = parsePairs(process.env.NODE_PROJECT_HOSTS || "");
 
 const docs = {
-  "Start Here": [
-    ["README.md", "Overview and local usage"],
-    ["RUNBOOK.md", "Operations runbook"],
-    ["VPS-PREDEPLOY-CHECKLIST.md", "VPS pre-deploy checklist"],
+  "Overview": [
+    ["README.md", "Platform overview, local usage, hosts and commands"],
+    ["READINESS-REPORT.md", "Current readiness status and remaining gaps"],
+    ["FINAL-READINESS-AUDIT.md", "Final audit notes and evidence summary"],
   ],
-  "Security And Readiness": [
+  "Operations": [
+    ["RUNBOOK.md", "Day-2 operations, incident response and recovery"],
+    ["VPS-PREDEPLOY-CHECKLIST.md", "VPS pre-deploy checklist"],
+    ["ENTERPRISE-10-PLAN.md", "Enterprise roadmap and acceptance criteria"],
+  ],
+  "Security": [
     ["SECURITY.md", "Security model"],
     ["THREAT-MODEL.md", "Threat model"],
     ["ENTERPRISE-MATURITY.md", "Enterprise maturity matrix"],
-    ["READINESS-REPORT.md", "Readiness report"],
-    ["FINAL-READINESS-AUDIT.md", "Final audit notes"],
+  ],
+  "Services": [
+    ["keycloak/README.md", "Identity provider notes"],
+    ["minio/README.md", "Object storage notes"],
+    ["secrets/README.md", "Secret store and rotation notes"],
   ],
   "Cloud And Edge": [
     ["cloudflare/README.md", "Cloudflare setup"],
@@ -80,6 +89,11 @@ const server = createServer(async (req, res) => {
 
     if (url.pathname.startsWith("/fonts/")) {
       serveStaticAsset(req, res, url, path.join(publicRoot, "fonts"), "/fonts/");
+      return;
+    }
+
+    if (isDocsRequest(req) && ["GET", "HEAD"].includes((req.method || "GET").toUpperCase())) {
+      handleDocsRequest(res, url);
       return;
     }
 
@@ -2832,8 +2846,131 @@ function renderProviderConnectionCard(connection) {
 function renderDocs() {
   return Object.entries(docs).map(([group, items]) => `<h3>${escapeHtml(group)}</h3><div class="cards">${items.map(([docPath, description]) => {
     const exists = existsSync(safeDocPath(docPath));
-    return `<a class="card compact ${exists ? "" : "disabled"}" href="#"><strong>${escapeHtml(path.basename(docPath))}</strong><span>${escapeHtml(description)}</span></a>`;
+    const href = exists ? `https://${docsHost}/docs/${encodeURIComponent(docPath)}` : "#";
+    return `<a class="card compact ${exists ? "" : "disabled"}" href="${escapeHtml(href)}"><strong>${escapeHtml(path.basename(docPath))}</strong><span>${escapeHtml(description)}</span></a>`;
   }).join("")}</div>`).join("");
+}
+
+function renderDocsPortal(selectedDocPath = "") {
+  const selected = selectedDocPath ? findDoc(selectedDocPath) : null;
+  const title = selected ? `${path.basename(selected.path)} / Platform Docs` : "Platform Docs";
+  const body = selected ? renderDocArticle(selected) : renderDocsIndex();
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:,">
+<title>${escapeHtml(title)}</title>
+${controlCenterStylesheetLinks()}
+</head>
+<body data-cc-theme="light">
+<main class="docs-shell">
+  <aside class="docs-sidebar" aria-label="Documentation navigation">
+    <a class="brand platform-wordmark" href="/" aria-label="Platform Docs"><span class="brand-mark">D</span><div><strong>Docs</strong><small>${escapeHtml(platformName)}</small></div></a>
+    <nav class="docs-nav">${renderDocsNavigation(selectedDocPath)}</nav>
+    <div class="docs-note"><strong>Portal</strong><span>${escapeHtml(controlCenterHost)}</span></div>
+  </aside>
+  <section class="docs-content">
+    <header class="docs-hero">
+      <p class="eyebrow">${escapeHtml(environment.toUpperCase())} / DOCUMENTATION</p>
+      <h1>${escapeHtml(selected ? path.basename(selected.path) : "Platform Documentation")}</h1>
+      <p>${escapeHtml(selected ? selected.description : "Runbook, security, readiness and service documentation organized for operations.")}</p>
+    </header>
+    ${body}
+  </section>
+</main>
+</body>
+</html>`;
+}
+
+function renderDocsIndex() {
+  return `<section class="docs-grid">${Object.entries(docs).map(([group, items]) => `
+    <article class="docs-card">
+      <h2>${escapeHtml(group)}</h2>
+      <div class="docs-link-list">
+        ${items.map(([docPath, description]) => {
+          const exists = existsSync(safeDocPath(docPath));
+          const href = exists ? `/docs/${encodeURIComponent(docPath)}` : "#";
+          return `<a class="${exists ? "" : "disabled"}" href="${escapeHtml(href)}"><strong>${escapeHtml(docPath)}</strong><span>${escapeHtml(description)}</span></a>`;
+        }).join("")}
+      </div>
+    </article>`).join("")}</section>`;
+}
+
+function renderDocsNavigation(selectedDocPath = "") {
+  return Object.entries(docs).map(([group, items]) => `<div class="docs-nav-group">
+    <strong>${escapeHtml(group)}</strong>
+    ${items.map(([docPath]) => {
+      const exists = existsSync(safeDocPath(docPath));
+      const href = exists ? `/docs/${encodeURIComponent(docPath)}` : "#";
+      return `<a class="${selectedDocPath === docPath ? "active" : ""} ${exists ? "" : "disabled"}" href="${escapeHtml(href)}">${escapeHtml(path.basename(docPath))}</a>`;
+    }).join("")}
+  </div>`).join("");
+}
+
+function renderDocArticle(doc) {
+  const filePath = safeDocPath(doc.path);
+  const content = existsSync(filePath) ? readFileSync(filePath, "utf8") : "";
+  return `<article class="docs-article">
+    <div class="docs-article-meta"><a href="/">Docs index</a><span>${escapeHtml(doc.group)}</span><span>${escapeHtml(doc.path)}</span></div>
+    ${renderMarkdown(content)}
+  </article>`;
+}
+
+function renderMarkdown(content) {
+  const lines = String(content || "").replace(/\r\n/g, "\n").split("\n");
+  const htmlParts = [];
+  let inCode = false;
+  let codeLines = [];
+  let listItems = [];
+  const flushList = () => {
+    if (!listItems.length) return;
+    htmlParts.push(`<ul>${listItems.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>`);
+    listItems = [];
+  };
+  const flushCode = () => {
+    htmlParts.push(`<pre><code>${escapeHtml(codeLines.join("\n"))}</code></pre>`);
+    codeLines = [];
+  };
+  for (const rawLine of lines) {
+    const line = rawLine.replace(/\s+$/, "");
+    if (line.startsWith("```")) {
+      if (inCode) {
+        flushCode();
+        inCode = false;
+      } else {
+        flushList();
+        inCode = true;
+      }
+      continue;
+    }
+    if (inCode) {
+      codeLines.push(rawLine);
+      continue;
+    }
+    if (!line.trim()) {
+      flushList();
+      continue;
+    }
+    const heading = line.match(/^(#{1,4})\s+(.+)$/);
+    if (heading) {
+      flushList();
+      const level = Math.min(4, heading[1].length + 1);
+      htmlParts.push(`<h${level}>${escapeHtml(heading[2])}</h${level}>`);
+      continue;
+    }
+    const bullet = line.match(/^\s*[-*]\s+(.+)$/);
+    if (bullet) {
+      listItems.push(bullet[1]);
+      continue;
+    }
+    flushList();
+    htmlParts.push(`<p>${escapeHtml(line)}</p>`);
+  }
+  flushList();
+  if (inCode) flushCode();
+  return htmlParts.join("\n");
 }
 
 function renderInfrastructure(services) {
@@ -6798,6 +6935,48 @@ function safeDocPath(docPath) {
   const normalized = String(docPath || "").replaceAll("\\", "/");
   if (normalized.includes("..")) return path.join(docsRoot, "__invalid__");
   return path.join(docsRoot, normalized);
+}
+
+function docsEntries() {
+  return Object.entries(docs).flatMap(([group, items]) => items.map(([docPath, description]) => ({
+    group,
+    path: docPath,
+    description,
+  })));
+}
+
+function findDoc(docPath) {
+  const normalized = String(docPath || "").replaceAll("\\", "/");
+  return docsEntries().find((doc) => doc.path === normalized) || null;
+}
+
+function isDocsRequest(req) {
+  const host = normalizeHost(req.headers.host || "");
+  return Boolean(docsHost && host === docsHost);
+}
+
+function handleDocsRequest(res, url) {
+  if (url.pathname === "/" || url.pathname === "/index.html") {
+    html(res, renderDocsPortal());
+    return;
+  }
+  if (!url.pathname.startsWith("/docs/")) {
+    notFound(res);
+    return;
+  }
+  let docPath = "";
+  try {
+    docPath = decodeURIComponent(url.pathname.slice("/docs/".length));
+  } catch {
+    notFound(res);
+    return;
+  }
+  const doc = findDoc(docPath);
+  if (!doc || !existsSync(safeDocPath(doc.path))) {
+    notFound(res);
+    return;
+  }
+  html(res, renderDocsPortal(doc.path));
 }
 
 function countAvailableDocs() {

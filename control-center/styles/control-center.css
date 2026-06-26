@@ -6,12 +6,17 @@
   --cc-surface-soft: #f7f9fc;
   --cc-surface-muted: #eef2f7;
   --cc-surface-raised: #ffffff;
+  --cc-sidebar-bg: #ffffff;
+  --cc-code-bg: #f8fafc;
   --cc-text: #101828;
   --cc-muted: #65758a;
+  --cc-soft-text: #475467;
   --cc-subtle: #91a0b4;
   --cc-border: #d9e1ec;
   --cc-border-soft: #e8edf4;
   --cc-line: 1px solid var(--cc-border);
+  --cc-line-transparent: 1px solid transparent;
+  --cc-line-strong: #b8c4d6;
   --cc-accent: #6f63ff;
   --cc-accent-strong: #5447d9;
   --cc-accent-soft: #eceafe;
@@ -44,6 +49,7 @@
   --cc-fast: 160ms;
   --cc-smooth: 260ms;
   --cc-enter: 420ms;
+  --cc-font-mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
   font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 
@@ -1977,8 +1983,207 @@ pre {
     min-height: 118px;
   }
 
-  .inline-confirm input,
-  .inline-confirm select {
-    width: min(100%, 260px);
+.inline-confirm input,
+.inline-confirm select {
+  width: min(100%, 260px);
+}
+}
+
+.docs-shell {
+  min-height: 100vh;
+  display: grid;
+  grid-template-columns: 300px minmax(0, 1fr);
+  background: var(--cc-bg);
+  color: var(--cc-text);
+}
+
+.docs-sidebar {
+  border-right: 1px solid var(--cc-line);
+  padding: 24px;
+  background: var(--cc-sidebar-bg);
+}
+
+.docs-nav {
+  display: grid;
+  gap: 22px;
+  margin-top: 28px;
+}
+
+.docs-nav-group {
+  display: grid;
+  gap: 8px;
+}
+
+.docs-nav-group strong {
+  color: var(--cc-muted);
+  font-size: 12px;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+.docs-nav-group a,
+.docs-link-list a,
+.docs-article-meta a {
+  color: var(--cc-text);
+  text-decoration: none;
+}
+
+.docs-nav-group a {
+  border: var(--cc-line-transparent);
+  border-radius: 10px;
+  padding: 9px 10px;
+  color: var(--cc-soft-text);
+}
+
+.docs-nav-group a:hover,
+.docs-nav-group a.active {
+  border-color: var(--cc-line-strong);
+  background: var(--cc-surface);
+  color: var(--cc-text);
+}
+
+.docs-nav-group a.disabled,
+.docs-link-list a.disabled {
+  opacity: .42;
+  pointer-events: none;
+}
+
+.docs-note {
+  border: var(--cc-line);
+  border-radius: var(--cc-radius-md);
+  display: grid;
+  gap: 4px;
+  margin-top: 32px;
+  padding: 14px;
+}
+
+.docs-note span {
+  color: var(--cc-muted);
+  font-size: 13px;
+}
+
+.docs-content {
+  padding: 42px;
+}
+
+.docs-hero,
+.docs-card,
+.docs-article {
+  background: var(--cc-surface);
+  border: var(--cc-line);
+  border-radius: var(--cc-radius-lg);
+}
+
+.docs-hero {
+  margin-bottom: 22px;
+  padding: 28px;
+}
+
+.docs-hero h1 {
+  font-size: 36px;
+  margin: 8px 0;
+}
+
+.docs-hero p {
+  color: var(--cc-soft-text);
+  margin: 0;
+  max-width: 760px;
+}
+
+.docs-grid {
+  display: grid;
+  gap: 18px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.docs-card {
+  padding: 22px;
+}
+
+.docs-card h2 {
+  font-size: 18px;
+  margin: 0 0 16px;
+}
+
+.docs-link-list {
+  display: grid;
+  gap: 10px;
+}
+
+.docs-link-list a {
+  border: var(--cc-line);
+  border-radius: 12px;
+  display: grid;
+  gap: 3px;
+  padding: 14px;
+}
+
+.docs-link-list a:hover {
+  border-color: var(--cc-line-strong);
+  background: var(--cc-surface-raised);
+}
+
+.docs-link-list span,
+.docs-article-meta,
+.docs-article p,
+.docs-article li {
+  color: var(--cc-soft-text);
+}
+
+.docs-article {
+  padding: 30px;
+}
+
+.docs-article-meta {
+  border-bottom: 1px solid var(--cc-line);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 24px;
+  padding-bottom: 14px;
+  font-size: 13px;
+}
+
+.docs-article h2,
+.docs-article h3,
+.docs-article h4,
+.docs-article h5 {
+  color: var(--cc-text);
+  margin: 24px 0 10px;
+}
+
+.docs-article p {
+  line-height: 1.7;
+}
+
+.docs-article pre {
+  background: var(--cc-code-bg);
+  border: var(--cc-line);
+  border-radius: var(--cc-radius-md);
+  overflow: auto;
+  padding: 16px;
+}
+
+.docs-article code {
+  font-family: var(--cc-font-mono);
+  font-size: 13px;
+}
+
+@media (max-width: 920px) {
+  .docs-shell {
+    grid-template-columns: 1fr;
+  }
+
+  .docs-sidebar {
+    border-right: 0;
+    border-bottom: 1px solid var(--cc-line);
+  }
+
+  .docs-content {
+    padding: 22px;
+  }
+
+  .docs-grid {
+    grid-template-columns: 1fr;
   }
 }

@@ -14,8 +14,14 @@
   },
   "targets": [
     {
-      "name": "web-public-home",
-      "url": "${UI_PUBLIC_URL:-https://platform.example.com}/",
+      "name": "portal-public-home",
+      "url": "${CONTROL_CENTER_PUBLIC_URL:-https://portal.platform.example.com}/",
+      "expectedStatuses": [200, 301, 302],
+      "maxLatencyMs": 2500
+    },
+    {
+      "name": "docs-public-home",
+      "url": "${DOCS_PUBLIC_URL:-https://docs.platform.example.com}/",
       "expectedStatuses": [200, 301, 302],
       "maxLatencyMs": 2500
     },

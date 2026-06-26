@@ -23,7 +23,7 @@ File principali:
 - `infra-secret-manager-master.key`: master key locale, da proteggere fuori dal repo e includere nel backup sicuro dell'host;
 - `infra-secret-manager-audit.log`: audit JSONL delle operazioni;
 - `*.txt`: secret materializzati per Docker Compose.
-- `projects_gateway_signing_keys.txt`: keyring per il cookie permanente firmato di `projects.localhost.com`.
+- `projects_gateway_signing_keys.txt`: keyring per il cookie permanente firmato del Control Center su `portal.localhost.com`.
 - `mariadb_root_password.txt`: richiesto da `compose.secrets.yaml` e dal profilo `compose.vps.yaml` per evitare password root MariaDB in `.env`.
 - `phpmyadmin_control_password.txt`: password dell'utente tecnico `pma`, usata solo quando abiliti manualmente il profilo `admin`.
 

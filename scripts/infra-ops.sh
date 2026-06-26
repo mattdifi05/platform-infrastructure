@@ -71,8 +71,8 @@ fi
 LOCAL_HOST_ARGS=""
 for host in \
   localhost.com \
-  app.localhost.com \
-  admin.localhost.com \
+  portal.localhost.com \
+  docs.localhost.com \
   api.localhost.com \
   account.localhost.com \
   auth.localhost.com \

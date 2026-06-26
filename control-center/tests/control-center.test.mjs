@@ -8,6 +8,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { createServer } from "node:net";
+import { request as httpRequest } from "node:http";
 import path from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -66,7 +67,8 @@ test("Admin Control Center local foundation", async (t) => {
       PROJECT_PROVIDER_CONNECTIONS_FILE: providerConnectionsFile,
       PROJECT_SETTINGS_FILE: settingsFile,
       PROJECT_WEBSPACES_FILE: webspacesFile,
-      CONTROL_CENTER_HOST: "admin.localhost.com",
+      CONTROL_CENTER_HOST: "portal.localhost.com",
+      DOCS_HOST: "docs.localhost.com",
       PROJECT_HOST_SUFFIX: ".localhost.com",
       NODE_PROJECT_HOSTS: "node-demo=node-demo.localhost.com",
     },
@@ -126,6 +128,16 @@ test("Admin Control Center local foundation", async (t) => {
   assert.match(html, /Gestione/);
   assert.match(html, /Sicurezza/);
   assert.match(html, /Avanzato/);
+
+  const docsHtml = await getTextWithHost(`${baseUrl}/`, "docs.localhost.com");
+  assert.match(docsHtml, /Platform Documentation/);
+  assert.match(docsHtml, /Runbook, security, readiness and service documentation/);
+  assert.match(docsHtml, /README\.md/);
+  assert.match(docsHtml, /RUNBOOK\.md/);
+  assert.doesNotMatch(docsHtml, /Admin Control Center/);
+  const readmeHtml = await getTextWithHost(`${baseUrl}/docs/README.md`, "docs.localhost.com");
+  assert.match(readmeHtml, /README\.md/);
+  assert.match(readmeHtml, /Platform Infrastructure|URL locali/);
 
   const localStyles = await getText(`${baseUrl}/assets/control-center/control-center.css`);
   assert.match(localStyles, /--cc-bg/);
@@ -205,7 +217,7 @@ test("Admin Control Center local foundation", async (t) => {
   assert.equal(networkApi.networkProbeExecuted, false);
   assert.equal(networkApi.productionEvidence, false);
   assert.equal(networkApi.routers.some((router) => router.id === "enterprise-backend" && router.tls === true && router.middlewares.includes("enterprise-rate-limit@file")), true);
-  assert.equal(networkApi.routers.some((router) => router.id === "local-projects" && router.sampleHost === "admin.localhost.com"), true);
+  assert.equal(networkApi.routers.some((router) => router.id === "local-projects" && router.sampleHost === "portal.localhost.com"), true);
   assert.equal(networkApi.middlewares.some((middleware) => middleware.id === "enterprise-rate-limit" && middleware.type === "rateLimit" && /average 120/.test(middleware.summary)), true);
   assert.equal(networkApi.exposedPorts.some((port) => port.hostPort === "80" && port.containerPort === "80" && port.loopbackOnly === true && port.publicExposure === false), true);
   assert.equal(networkApi.exposedPorts.some((port) => port.hostPort === "443" && port.containerPort === "443" && port.loopbackOnly === true && port.publicExposure === false), true);
@@ -845,7 +857,7 @@ test("Admin Control Center local foundation", async (t) => {
   const prodApplyWithoutConfirm = await postJson(`${baseUrl}/control/subdomains/apply`, {
     environment: "production",
     projectId: "node-demo",
-    hostname: "app.example.com",
+    hostname: "site.example.com",
   });
   assert.equal(prodApplyWithoutConfirm.status, 409);
   assert.match(prodApplyWithoutConfirm.body.message, /APPLY-PRODUCTION/);
@@ -853,7 +865,7 @@ test("Admin Control Center local foundation", async (t) => {
   const prodApplyDisabled = await postJson(`${baseUrl}/control/subdomains/apply`, {
     environment: "production",
     projectId: "node-demo",
-    hostname: "app.example.com",
+    hostname: "site.example.com",
     confirm: "APPLY-PRODUCTION",
   });
   assert.equal(prodApplyDisabled.status, 409);
@@ -1914,7 +1926,8 @@ test("Admin Control Center admin guard", async (t) => {
       PROJECT_PROVIDER_CONNECTIONS_FILE: providerConnectionsFile,
       PROJECT_SETTINGS_FILE: settingsFile,
       PROJECT_WEBSPACES_FILE: webspacesFile,
-      CONTROL_CENTER_HOST: "admin.localhost.com",
+      CONTROL_CENTER_HOST: "portal.localhost.com",
+      DOCS_HOST: "docs.localhost.com",
       PROJECT_HOST_SUFFIX: ".localhost.com",
       NODE_PROJECT_HOSTS: "node-demo=node-demo.localhost.com",
     },
@@ -2045,10 +2058,39 @@ async function getJson(url, init = {}) {
   return response.json();
 }
 
-async function getText(url) {
-  const response = await fetch(url);
+async function getText(url, init = {}) {
+  const response = await fetch(url, init);
   assert.equal(response.ok, true, `${url} returned ${response.status}`);
   return response.text();
+}
+
+async function getTextWithHost(url, host) {
+  const target = new URL(url);
+  return new Promise((resolve, reject) => {
+    const req = httpRequest({
+      hostname: target.hostname,
+      port: target.port,
+      path: `${target.pathname}${target.search}`,
+      method: "GET",
+      headers: { Host: host },
+    }, (res) => {
+      let body = "";
+      res.setEncoding("utf8");
+      res.on("data", (chunk) => {
+        body += chunk;
+      });
+      res.on("end", () => {
+        try {
+          assert.equal(res.statusCode && res.statusCode >= 200 && res.statusCode < 300, true, `${url} returned ${res.statusCode}`);
+          resolve(body);
+        } catch (error) {
+          reject(error);
+        }
+      });
+    });
+    req.on("error", reject);
+    req.end();
+  });
 }
 
 async function postJson(url, body) {

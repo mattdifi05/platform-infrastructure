@@ -34,7 +34,7 @@ test("project-router hosts PHP and Node projects together and honors local enabl
       PROJECT_ROUTER_PORT: String(routerPort),
       PROJECTS_ROOT: projectsRoot,
       PROJECT_STATE_FILE: stateFile,
-      CONTROL_CENTER_HOST: "admin.localhost.com",
+      CONTROL_CENTER_HOST: "portal.localhost.com",
       PROJECT_HOST_SUFFIX: ".localhost.com",
       PHP_UPSTREAM: `http://127.0.0.1:${serverPort(phpServer)}`,
       CONTROL_CENTER_UPSTREAM: `http://127.0.0.1:${serverPort(controlServer)}`,
@@ -57,9 +57,9 @@ test("project-router hosts PHP and Node projects together and honors local enabl
 
   await waitForHealth(routerPort);
 
-  const control = await httpGet(routerPort, "admin.localhost.com", "/");
+  const control = await httpGet(routerPort, "portal.localhost.com", "/");
   assert.equal(control.statusCode, 200);
-  assert.match(control.body, /control-center:admin\.localhost\.com:\//);
+  assert.match(control.body, /control-center:portal\.localhost\.com:\//);
 
   const php = await httpGet(routerPort, "php-demo.localhost.com", "/calendar?day=1");
   assert.equal(php.statusCode, 200);
@@ -151,7 +151,7 @@ async function waitForHealth(port) {
   const started = Date.now();
   while (Date.now() - started < 10000) {
     try {
-      const response = await httpGet(port, "admin.localhost.com", "/__health");
+      const response = await httpGet(port, "portal.localhost.com", "/__health");
       if (response.statusCode === 200) return;
     } catch {
       // Keep probing until the router has bound its port.

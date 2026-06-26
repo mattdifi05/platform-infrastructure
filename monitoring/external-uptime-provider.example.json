@@ -7,9 +7,21 @@
   "maxAgeHours": 24,
   "monitors": [
     {
-      "targetName": "web-public-home",
+      "targetName": "portal-public-home",
       "monitorId": "replace-with-provider-monitor-id",
-      "url": "${UI_PUBLIC_URL:-https://platform.example.com}/",
+      "url": "${CONTROL_CENTER_PUBLIC_URL:-https://portal.platform.example.com}/",
+      "intervalSeconds": 60,
+      "regions": ["eu-west", "us-east"],
+      "enabled": true,
+      "lastStatus": "up",
+      "lastStatusCode": 200,
+      "lastLatencyMs": 350,
+      "lastCheckedAt": "replace-with-current-utc-timestamp"
+    },
+    {
+      "targetName": "docs-public-home",
+      "monitorId": "replace-with-provider-monitor-id",
+      "url": "${DOCS_PUBLIC_URL:-https://docs.platform.example.com}/",
       "intervalSeconds": 60,
       "regions": ["eu-west", "us-east"],
       "enabled": true,

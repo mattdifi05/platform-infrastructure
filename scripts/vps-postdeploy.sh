@@ -29,15 +29,14 @@ env_or_default() {
 }
 
 api_host=$(env_or_default API_HOST api.localhost.com)
-ui_host=$(env_or_default UI_HOST app.localhost.com)
+docs_host=$(env_or_default DOCS_HOST docs.localhost.com)
 account_host=$(env_or_default ACCOUNT_HOST account.localhost.com)
-admin_host=$(env_or_default CONTROL_CENTER_HOST "$(env_or_default ADMIN_HOST admin.localhost.com)")
-control_center_host=$(env_or_default PROJECTS_HOST "$admin_host")
+admin_host=$(env_or_default CONTROL_CENTER_HOST "$(env_or_default ADMIN_HOST portal.localhost.com)")
 api_base="${DEPLOY_API_BASE:-$(env_or_default API_PUBLIC_URL "https://$api_host")}"
-ui_base="${DEPLOY_UI_BASE:-$(env_or_default UI_PUBLIC_URL "https://$ui_host")}"
+ui_base="${DEPLOY_UI_BASE:-$(env_or_default DOCS_PUBLIC_URL "https://$docs_host")}"
 account_base="${DEPLOY_ACCOUNT_BASE:-$(env_or_default ACCOUNT_PUBLIC_URL "https://$account_host")}"
 account_origin="${DEPLOY_ACCOUNT_ORIGIN:-$(env_or_default ACCOUNT_PUBLIC_URL "$account_base")}"
-admin_base="${DEPLOY_ADMIN_BASE:-${DEPLOY_PROJECTS_BASE:-$(env_or_default CONTROL_CENTER_PUBLIC_URL "https://$control_center_host")}}"
+admin_base="${DEPLOY_ADMIN_BASE:-${DEPLOY_PROJECTS_BASE:-$(env_or_default CONTROL_CENTER_PUBLIC_URL "https://$admin_host")}}"
 grafana_base="${DEPLOY_GRAFANA_BASE:-$(env_or_default GRAFANA_PUBLIC_URL "")}"
 grafana_blocked="${DEPLOY_GRAFANA_BLOCKED:-0}"
 admin_scheme="${DEPLOY_ADMIN_SCHEME:-}"

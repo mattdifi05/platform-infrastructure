@@ -4,9 +4,10 @@
   "domain": "localhost.com",
   "localDomain": "localhost.com",
   "providerProfile": "local",
-  "adminHost": "admin.localhost.com",
-  "controlCenterHost": "admin.localhost.com",
-  "defaultPublicAppHost": "app.localhost.com",
+  "adminHost": "portal.localhost.com",
+  "controlCenterHost": "portal.localhost.com",
+  "docsHost": "docs.localhost.com",
+  "defaultPublicAppHost": "",
   "defaultApiHost": "api.localhost.com",
   "supportedProviderProfiles": [
     "local",
