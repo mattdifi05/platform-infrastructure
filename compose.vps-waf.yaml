@@ -1,6 +1,6 @@
 # VPS WAF overlay.
-# Use after compose.vps.yaml and compose.waf.yaml. The provider/CDN owns
-# public HTTPS; the WAF receives HTTP from the edge and forwards trusted
+# Use after compose.vps.yaml and compose.waf.yaml. The WAF owns public
+# HTTP/HTTPS, redirects HTTP to HTTPS, and forwards trusted
 # X-Forwarded-Proto=https to Traefik.
 
 services:
@@ -11,11 +11,14 @@ services:
     restart: always
     ports: !override
       - "${WAF_HTTP_BIND:-0.0.0.0:80}:8080"
+      - "${WAF_HTTPS_BIND:-0.0.0.0:443}:8443"
     environment:
       BACKEND: ${WAF_BACKEND:-http://traefik:80}
-      NGINX_ALWAYS_TLS_REDIRECT: ${WAF_NGINX_ALWAYS_TLS_REDIRECT:-off}
+      NGINX_ALWAYS_TLS_REDIRECT: ${WAF_NGINX_ALWAYS_TLS_REDIRECT:-on}
       NGINX_X_FORWARDED_PROTO: ${WAF_X_FORWARDED_PROTO:-https}
       PROXY_SSL_VERIFY: "off"
     volumes: !override
       - ./waf/REQUEST-900-VPS-RULES-BEFORE-CRS.conf:/etc/modsecurity.d/owasp-crs/rules/REQUEST-900-EXCLUSION-RULES-BEFORE-CRS.conf:ro
       - ./waf/RESPONSE-999-EXCLUSION-RULES-AFTER-CRS.conf:/etc/modsecurity.d/owasp-crs/rules/RESPONSE-999-EXCLUSION-RULES-AFTER-CRS.conf:ro
+      - ./traefik/certs/local-cert.pem:/etc/nginx/conf/server.crt:ro
+      - ./traefik/certs/local-key.pem:/etc/nginx/conf/server.key:ro

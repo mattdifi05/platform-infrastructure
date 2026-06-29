@@ -104,6 +104,9 @@ elif [ -f "$INFRA_ROOT/traefik/certs/ca.pem" ]; then
   NODE_CA_ARGS="-e NODE_EXTRA_CA_CERTS=$INFRA_CONTAINER_ROOT/traefik/certs/ca.pem"
 fi
 
+GITHUB_TOKEN_FILE="${GITHUB_TOKEN_FILE:-$INFRA_CONTAINER_ROOT/secrets/github_token.txt}"
+export GITHUB_TOKEN_FILE
+
 ENV_FORWARD_ARGS=""
 for name in \
   BACKEND_IMAGE \
@@ -120,6 +123,8 @@ for name in \
   GITHUB_REPOSITORY \
   GITHUB_SHA \
   GITHUB_TOKEN \
+  GITHUB_TOKEN_FILE \
+  GH_TOKEN_FILE \
   NODE_EXTRA_CA_CERTS \
   RESTIC_PASSWORD_FILE \
   RESTIC_REPOSITORY \
@@ -131,7 +136,7 @@ do
 done
 
 # shellcheck disable=SC2086
-exec docker run --rm \
+exec docker run --rm -i \
   $SOCKET_ARGS \
   $SOURCE_MOUNT_ARGS \
   $NETWORK_ARGS \

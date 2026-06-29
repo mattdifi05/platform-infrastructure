@@ -45,7 +45,6 @@ jobs:
       - name: Prepare local secret files
         run: |
           mkdir -p secrets traefik/certs
-          for name in postgres_superuser_password app_db_password keycloak_db_password redis_password keycloak_admin_password nats_password minio_root_password grafana_admin_password session_secret session_signing_keys projects_gateway_signing_keys hash_pepper_keys database_url nats_url smtp_password mariadb_root_password phpmyadmin_control_password cloudflare_turnstile_secret_key alertmanager_webhook_token backup_signing_keys restic_password; do
             printf 'ci-placeholder-%s-00000000000000000000000000000000\n' "$name" > "secrets/$name.txt"
           done
           printf 'dummy-cert\n' > traefik/certs/local-cert.pem
@@ -169,7 +168,6 @@ jobs:
       - name: Prepare local secret files
         run: |
           mkdir -p secrets traefik/certs
-          for name in postgres_superuser_password app_db_password keycloak_db_password redis_password keycloak_admin_password nats_password minio_root_password grafana_admin_password session_secret session_signing_keys projects_gateway_signing_keys hash_pepper_keys database_url nats_url smtp_password mariadb_root_password phpmyadmin_control_password cloudflare_turnstile_secret_key alertmanager_webhook_token backup_signing_keys restic_password; do
             printf 'ci-placeholder-%s-00000000000000000000000000000000\n' "$name" > "secrets/$name.txt"
           done
           printf 'dummy-cert\n' > traefik/certs/local-cert.pem

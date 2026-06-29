@@ -372,7 +372,7 @@ sh ./scripts/infra-secret-manager.sh verify
 docker compose -f compose.yaml -f compose.secrets.yaml --env-file .env -p platform_infra_local up -d
 ```
 
-`infra-secret-manager` is the proprietary local secret manager. It encrypts the canonical store, writes an audit log and materializes `secrets/*.txt` only for Docker Compose. Use `--sanitizeEnv` on `init-local-secrets` only after you are committed to starting local with `compose.secrets.yaml`.
+`infra-secret-manager` is the proprietary local secret manager and local secret vault. It encrypts the canonical store, writes an audit log and materializes `secrets/*.txt` only for Docker Compose. Use `--sanitizeEnv` on `init-local-secrets` only after you are committed to starting local with `compose.secrets.yaml`.
 
 Useful operations:
 
@@ -384,8 +384,11 @@ sh ./scripts/infra-secret-manager.sh rotate --name session_signing_keys
 sh ./scripts/infra-secret-manager.sh rotate --name projects_gateway_signing_keys
 sh ./scripts/infra-secret-manager.sh rotate --name backup_signing_keys
 sh ./scripts/infra-secret-manager.sh rotate --name alertmanager_webhook_token
+printf '%s\n' "$TOKEN" | sh ./scripts/infra-secret-manager.sh set --name github_token --stdin --owner github --minLength 40
 sh ./scripts/secret-rotation-evidence.sh --enforce
 ```
+
+Unknown safe names passed to `set --name` become vault secrets with owner/rotation metadata. `status` and evidence reports print only metadata and fingerprints, never secret values. GitHub ops auto-load `secrets/github_token.txt` as `GITHUB_TOKEN` inside the ops container when present and no GitHub token is already exported.
 
 `secret-rotation-evidence.sh --enforce` validates the encrypted store, materialized Docker secret files, audit log, Platform Local KMS age and every secret `rotationDays` window without printing secret values. Archive `reports/secret-rotation/secret-rotation-evidence-*.json` outside Git before production go/no-go.
 
