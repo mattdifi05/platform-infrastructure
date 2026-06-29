@@ -4,13 +4,16 @@
 
 Report suspected vulnerabilities privately to the project owner or the configured production security contact. Do not open public issues with exploit details, credentials, personal data or live target output. Every accepted report should receive an acknowledgement, severity triage, remediation owner and follow-up evidence once the fix is deployed.
 
-## Authentication and sessions
+## Admin Control Plane
 
-- Account sessions are signed server-side and stored in `HttpOnly`, `Secure`, `SameSite=Lax` cookies by default.
-- Mutating API calls reject untrusted `Origin` headers and hostile Fetch Metadata.
-- Passkeys are the preferred high-assurance factor.
-- Redis stores only short-lived auth state; PostgreSQL remains the durable source of truth.
-- Fastify rate limiting uses Redis when available, so limits remain consistent across backend replicas.
+- Control Center sessions are signed server-side and stored in `HttpOnly`,
+  `Secure`, `SameSite=Lax` cookies by default when local auth is enabled.
+- Mutating Control Center API calls reject untrusted `Origin` headers and hostile
+  Fetch Metadata.
+- Cloudflare Access or equivalent provider MFA is required for production admin
+  surfaces.
+- Redis-backed rate limiting is an infrastructure capability; hosted app auth
+  factors are app-owned and not platform go-live gates.
 
 ## Roles
 
@@ -20,7 +23,10 @@ Report suspected vulnerabilities privately to the project owner or the configure
 - `billing`: services and subscription management.
 - `viewer`: read-only baseline.
 
-Roles are stored in `app_account.account_roles` and must not be trusted from the client.
+Infrastructure admin authorization is tracked through Control Center identity
+metadata, Cloudflare Access policy evidence and platform-admin-audit reports.
+Hosted application account schemas such as `app_account` are workload concerns
+and are not platform go-live gates.
 
 ## Secrets
 
@@ -34,9 +40,9 @@ Roles are stored in `app_account.account_roles` and must not be trusted from the
 
 ## Local control access
 
-- `portal.localhost.com` is not a public app surface. It requires the Control Center admin gate before exposing project/admin links.
+- `portal.localhost.com` is the local Infrastructure Portal host, not a public app surface. It requires the Control Center admin gate before exposing project/admin links.
 - Its persistent cookie is `HttpOnly`, `Secure`, `SameSite=Lax` and signed with `projects_gateway_signing_keys`.
-- Rotate `projects_gateway_signing_keys` to revoke every local Admin Control Center session.
+- Rotate `projects_gateway_signing_keys` to revoke every local Infrastructure Portal / Control Center session.
 
 ## Alert delivery
 
@@ -48,7 +54,7 @@ Roles are stored in `app_account.account_roles` and must not be trusted from the
 
 - PostgreSQL is not public in production.
 - Query execution is statement-time-limited and row-limited.
-- Operational logs are centralized in Loki/Promtail with shared application redaction in `@platform/observability`; durable security events are stored in append-only audit tables and dispatched through the audit outbox.
+- Operational logs are centralized in Loki/Promtail with shared redaction in `@platform/observability`; durable platform security events are stored in append-only audit tables and dispatched through the audit outbox.
 
 ## Required recurring checks
 
@@ -72,7 +78,7 @@ Roles are stored in `app_account.account_roles` and must not be trusted from the
 - `sh ./scripts/production-preflight.sh` before every VPS release.
 - `sh ./scripts/load-smoke.sh` after every deploy.
 - `sh ./scripts/load-benchmark.sh --profiles 50,100,500` before production cutover and after capacity changes.
-- `sh ./scripts/access-review.sh` monthly.
+- `sh ./scripts/platform-admin-audit.sh` monthly and after admin/provider changes.
 - `sh ./scripts/offsite-backup-restic.sh` after the full local backup set in production.
 - `sh ./scripts/rollback-release.sh` as a dry-run before every approved rollback.
 - `sh ./scripts/sign-images.sh` for immutable production images.

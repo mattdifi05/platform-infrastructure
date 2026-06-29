@@ -31,6 +31,7 @@ services:
     environment:
       BACKEND: ${WAF_BACKEND:-https://traefik:443}
       SERVER_NAME: ${WAF_SERVER_NAME:-localhost}
+      CORS_HEADER_ACCESS_CONTROL_ALLOW_HEADERS: ${WAF_CORS_ALLOW_HEADERS:-accept,authorization,content-type,x-request-id,x-platform-csrf,x-platform-session-client}
       PORT: "8080"
       SSL_PORT: "8443"
       SSL_CERT_FILE: /etc/nginx/conf/server.crt

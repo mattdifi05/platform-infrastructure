@@ -1,6 +1,7 @@
-import { createServer } from "node:http";
+import { createServer, request as httpRequest } from "node:http";
+import { request as httpsRequest } from "node:https";
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync, appendFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, statfsSync, writeFileSync, appendFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { controlCenterScriptTags, controlCenterStylesheetLinks, controlCenterUiContract } from "./components/ui/controlCenterUi.mjs";
@@ -30,8 +31,11 @@ const notificationChannelsFile = process.env.PROJECT_NOTIFICATION_CHANNELS_FILE 
 const providerConnectionsFile = process.env.PROJECT_PROVIDER_CONNECTIONS_FILE || "/var/www/project-state/provider-connections.json";
 const settingsFile = process.env.PROJECT_SETTINGS_FILE || "/var/www/project-state/settings.json";
 const webspacesFile = process.env.PROJECT_WEBSPACES_FILE || "/var/www/project-state/webspaces.json";
+const dockerStatsFile = process.env.PROJECT_DOCKER_STATS_FILE || "/var/www/project-state/docker-stats.json";
+const statusRunsFile = process.env.PROJECT_STATUS_RUNS_FILE || "/var/www/project-state/status-runs.jsonl";
 const sessionKeysFile = process.env.CONTROL_CENTER_SESSION_KEYS_FILE || "";
 const adminPasswordFile = process.env.CONTROL_CENTER_ADMIN_PASSWORD_FILE || "";
+const postgresAppPasswordFile = process.env.CONTROL_CENTER_POSTGRES_APP_PASSWORD_FILE || "";
 const adminPasswordSha256 = String(process.env.CONTROL_CENTER_ADMIN_PASSWORD_SHA256 || "").trim().toLowerCase();
 const authRequired = parseBoolean(process.env.CONTROL_CENTER_AUTH_REQUIRED || "") || Boolean(adminPasswordSha256 || adminPasswordFile);
 const environment = normalizeEnvironment(process.env.CONTROL_CENTER_ENV || "local");
@@ -43,17 +47,42 @@ const docsHost = normalizeHost(process.env.DOCS_HOST || `docs.${domain}`);
 const projectsHost = controlCenterHost;
 const hostSuffix = normalizeHostSuffix(process.env.PROJECT_HOST_SUFFIX || `.${domain}`);
 const nodeHosts = parsePairs(process.env.NODE_PROJECT_HOSTS || "");
+const discoverHostedProjects = parseBoolean(process.env.CONTROL_CENTER_DISCOVER_HOSTED_PROJECTS || "");
+const prometheusUrl = String(process.env.CONTROL_CENTER_PROMETHEUS_URL || "http://prometheus:9090").trim();
+const resourceProbeTimeoutMs = clampNumber(Number(process.env.CONTROL_CENTER_RESOURCE_PROBE_TIMEOUT_MS || 900), 250, 5000);
+const resourceMetricsTtlMs = clampNumber(Number(process.env.CONTROL_CENTER_RESOURCE_METRICS_TTL_MS || 10000), 1000, 60000);
+const resourceProbeFailureCooldownMs = clampNumber(Number(process.env.CONTROL_CENTER_RESOURCE_PROBE_FAILURE_COOLDOWN_MS || 15000), 1000, 120000);
+const resourceMetricsCache = { value: null, expiresAt: 0, failedUntil: 0 };
+const projectDiskUsageTtlMs = clampNumber(Number(process.env.CONTROL_CENTER_PROJECT_DISK_USAGE_TTL_MS || 30000), 1000, 300000);
+const projectDiskUsageCache = new Map();
+const phpMyAdminInternalUrl = String(process.env.CONTROL_CENTER_PHPMYADMIN_INTERNAL_URL || "http://phpmyadmin:80").replace(/\/$/, "");
+const phpPgAdminInternalUrl = String(process.env.CONTROL_CENTER_PHPPGADMIN_INTERNAL_URL || "http://phppgadmin:80").replace(/\/$/, "");
+const postgresHost = normalizeHost(process.env.CONTROL_CENTER_POSTGRES_HOST || "postgres");
+const postgresPort = clampNumber(Number(process.env.CONTROL_CENTER_POSTGRES_PORT || 5432), 1, 65535);
+const postgresAppUser = sanitizeDatabasePrincipal(process.env.CONTROL_CENTER_POSTGRES_APP_USER || process.env.APP_DB_USER || "app_user") || "app_user";
+const appStressProfiles = String(process.env.CONTROL_CENTER_APP_STRESS_PROFILES || "100,250,500,1000").trim();
+const appStressDurationSeconds = clampNumber(Number(process.env.CONTROL_CENTER_APP_STRESS_DURATION_SECONDS || 60), 5, 3600);
+const appStressPerUserRps = Number(process.env.CONTROL_CENTER_APP_STRESS_PER_USER_RPS || 0.5);
+const appStressMaxConcurrency = clampNumber(Number(process.env.CONTROL_CENTER_APP_STRESS_MAX_CONCURRENCY || 1000), 1, 10000);
+const appStressMaxP95Ms = clampNumber(Number(process.env.CONTROL_CENTER_APP_STRESS_MAX_P95_MS || 2500), 100, 60000);
+const statusWafUrl = String(process.env.CONTROL_CENTER_STATUS_WAF_URL || "https://waf:8443").replace(/\/$/, "");
+const statusProbeTimeoutMs = clampNumber(Number(process.env.CONTROL_CENTER_STATUS_PROBE_TIMEOUT_MS || 4000), 500, 15000);
+const statusProbeTlsVerify = parseBoolean(process.env.CONTROL_CENTER_STATUS_TLS_VERIFY || "");
 
 const docs = {
   "Overview": [
+    ["DOCUMENTATION-INDEX.md", "Documentation map and source-of-truth order"],
     ["README.md", "Platform overview, local usage, hosts and commands"],
+    ["INFRASTRUCTURE-DEEP-DIVE.md", "Complete infrastructure architecture and operations map"],
     ["READINESS-REPORT.md", "Current readiness status and remaining gaps"],
     ["FINAL-READINESS-AUDIT.md", "Final audit notes and evidence summary"],
   ],
   "Operations": [
+    ["CURRENT-OPERATING-MODEL.md", "Current reference server, compose profile and migration checklist"],
     ["RUNBOOK.md", "Day-2 operations, incident response and recovery"],
     ["VPS-PREDEPLOY-CHECKLIST.md", "VPS pre-deploy checklist"],
     ["ENTERPRISE-10-PLAN.md", "Enterprise roadmap and acceptance criteria"],
+    ["PLATFORM-APPLICATION-SEPARATION-AUDIT.md", "Platform/application boundary and hosted workload rules"],
   ],
   "Security": [
     ["SECURITY.md", "Security model"],
@@ -100,6 +129,15 @@ const server = createServer(async (req, res) => {
     }
 
     if (url.pathname === "/logout") {
+      appendAudit({
+        action: "admin.logout.success",
+        target: "control-center",
+        environment,
+        risk: "low",
+        result: "success",
+        dryRun: false,
+        summary: "Admin session cleared.",
+      });
       clearSession(res);
       redirect(res, "/");
       return;
@@ -117,7 +155,7 @@ const server = createServer(async (req, res) => {
 
     const state = readState();
     const projects = discoverProjects(state);
-    const context = buildContext({ projects, state });
+    const context = await buildContext({ projects, state });
 
     if (url.pathname.startsWith("/control/")) {
       await handleApi(req, res, url, context);
@@ -154,6 +192,21 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    if (req.method === "POST" && url.pathname === "/actions/database-admin-login") {
+      await handleDatabaseAdminLogin(req, res, context);
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/actions/phpmyadmin-login") {
+      await handlePhpMyAdminLogin(req, res, url, context);
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/actions/phppgadmin-login") {
+      await handlePhpPgAdminLogin(req, res, url, context);
+      return;
+    }
+
     if (req.method === "POST" && url.pathname === "/actions/storage-command") {
       await handleStorageCommand(req, res, context);
       return;
@@ -181,6 +234,11 @@ const server = createServer(async (req, res) => {
 
     if (req.method === "POST" && url.pathname === "/actions/resource-command") {
       await handleResourceCommand(req, res, context);
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/actions/status-check") {
+      await handleStatusCheck(req, res, context);
       return;
     }
 
@@ -219,6 +277,15 @@ async function handleLogin(req, res) {
   const payload = await readPayload(req);
   const password = String(payload.password || "");
   if (!authVerifierConfigured()) {
+    appendAudit({
+      action: "admin.login.unavailable",
+      target: "control-center",
+      environment,
+      risk: "low",
+      result: "skipped",
+      dryRun: true,
+      summary: "Admin login attempted while local password authentication is not configured.",
+    });
     json(res, { error: "admin_auth_not_configured", message: "Admin authentication is required but no password verifier is configured." }, 503);
     return;
   }
@@ -260,8 +327,13 @@ async function handleApi(req, res, url, context) {
 
   try {
     if (method === "GET" && route(parts, "control", "overview")) return json(res, context.overview);
+    if (method === "GET" && route(parts, "control", "status")) return json(res, { goNoGo: context.goNoGo, readiness: context.readiness, statusRun: context.statusRun });
+    if (method === "GET" && route(parts, "control", "go-no-go")) return json(res, context.goNoGo);
     if (method === "GET" && route(parts, "control", "projects")) return json(res, { projects: context.projects });
     if (method === "POST" && route(parts, "control", "projects")) return json(res, planProjectCreate(payload, context), 202);
+    if (method === "GET" && parts.length === 4 && route([parts[0], parts[1], parts[3]], "control", "projects", "files")) {
+      return json(res, readProjectFiles(parts[2], url.searchParams.get("path") || "", context));
+    }
     if (method === "GET" && parts.length === 3 && route(parts.slice(0, 2), "control", "projects")) return json(res, findById(context.projects, parts[2], "Project"));
     if (method === "POST" && parts.length === 4 && route([parts[0], parts[1], parts[3]], "control", "projects", "update")) {
       return json(res, planOrApplyProjectUpdate(parts[2], payload, context), 202);
@@ -366,9 +438,20 @@ async function handleApi(req, res, url, context) {
     if (method === "POST" && route(parts, "control", "identity", "sessions")) return json(res, planIdentitySessionPolicy(payload, context), 202);
     if (method === "POST" && route(parts, "control", "identity", "access-reviews")) return json(res, planIdentityAccessReview(payload, context), 202);
 
-    if (method === "GET" && route(parts, "control", "resources", "summary")) return json(res, context.resources);
+    if (method === "GET" && route(parts, "control", "resources", "summary")) return json(res, resourceControlPayload(context));
     if (method === "POST" && route(parts, "control", "resources", "limits")) return json(res, planResourceLimitUpdate(payload, context), 202);
-    if (method === "GET" && route(parts, "control", "monitoring")) return json(res, context.monitoring);
+    if (method === "GET" && route(parts, "control", "monitoring")) {
+      appendAudit({
+        action: "admin.monitoring.access",
+        target: "monitoring",
+        environment: context.environment,
+        risk: "low",
+        result: "success",
+        dryRun: true,
+        summary: "Monitoring topology viewed from Control Center.",
+      });
+      return json(res, context.monitoring);
+    }
     if (method === "GET" && route(parts, "control", "security", "summary")) return json(res, context.security);
     if (method === "POST" && route(parts, "control", "security", "policy")) return json(res, planSecurityPolicyUpdate(payload, context), 202);
     if (method === "GET" && route(parts, "control", "logs", "summary")) return json(res, context.logsAlerts);
@@ -378,13 +461,35 @@ async function handleApi(req, res, url, context) {
       return json(res, planAlertResolution(parts[2], payload, context), 202);
     }
     if (method === "POST" && route(parts, "control", "notifications", "channel")) return json(res, planNotificationChannelUpdate(payload, context), 202);
-    if (method === "GET" && route(parts, "control", "provider-connections")) return json(res, { providerConnections: context.providerConnections });
+    if (method === "GET" && route(parts, "control", "provider-connections")) {
+      appendAudit({
+        action: "admin.providers.access",
+        target: "provider-connections",
+        environment: context.environment,
+        risk: "low",
+        result: "success",
+        dryRun: true,
+        summary: "Provider connection metadata viewed from Control Center.",
+      });
+      return json(res, { providerConnections: context.providerConnections });
+    }
     if (method === "POST" && parts.length === 3 && route(parts.slice(0, 2), "control", "provider-connections")) {
       return json(res, planProviderConnectionUpdate(parts[2], payload, context), 202);
     }
     if (method === "GET" && route(parts, "control", "settings")) return json(res, context.settings);
     if (method === "GET" && route(parts, "control", "ui-package")) return json(res, context.uiPackage);
-    if (method === "GET" && route(parts, "control", "readiness")) return json(res, context.readiness);
+    if (method === "GET" && route(parts, "control", "readiness")) {
+      appendAudit({
+        action: "admin.readiness.access",
+        target: "readiness",
+        environment: context.environment,
+        risk: "low",
+        result: "success",
+        dryRun: true,
+        summary: "Readiness matrix viewed from Control Center.",
+      });
+      return json(res, context.readiness);
+    }
     if (method === "POST" && route(parts, "control", "settings", "local")) return json(res, planSettingsUpdate(payload, context), 202);
     if (method === "GET" && route(parts, "control", "backups", "summary")) return json(res, context.backups);
     if (method === "GET" && route(parts, "control", "backups", "records")) return json(res, { records: context.backupRecords });
@@ -443,6 +548,25 @@ async function handleToggleProject(req, res, projects) {
     summary: enabled ? "Project routing enabled locally." : "Project routing disabled locally.",
   });
   redirect(res, `/?section=projects#project-${encodeURIComponent(slug)}`);
+}
+
+async function handleStatusCheck(req, res, context) {
+  const run = await runStatusVerification(context);
+  appendStatusRun(run);
+  appendAudit({
+    action: "status.verify.run",
+    target: "platform-infrastructure",
+    environment: context.environment,
+    risk: "low",
+    result: run.status === "passed" ? "success" : run.status === "failed" ? "failed" : "warning",
+    dryRun: false,
+    summary: `Read-only status verification executed: ${run.summary.passed} passed, ${run.summary.failed} failed, ${run.summary.pending} pending.`,
+  });
+  if (wantsJson(req)) {
+    json(res, run, 202);
+    return;
+  }
+  redirect(res, "/?section=status#status-run");
 }
 
 async function handleProjectCommand(req, res, context) {
@@ -578,7 +702,88 @@ async function handleDatabaseCommand(req, res, context) {
     json(res, operation, 202);
     return;
   }
-  redirect(res, `/?mode=advanced&section=databases#database-${encodeURIComponent(operation.details?.databaseId || operation.database?.id || "")}`);
+  redirect(res, `/?section=databases#database-${encodeURIComponent(operation.details?.databaseId || operation.database?.id || "")}`);
+}
+
+async function handleDatabaseAdminLogin(req, res, context) {
+  const payload = await readPayload(req);
+  await openPhpMyAdminDatabase(res, context, payload);
+}
+
+async function handlePhpMyAdminLogin(req, res, url, context) {
+  await openPhpMyAdminDatabase(res, context, {
+    id: url.searchParams.get("databaseId") || url.searchParams.get("id") || "",
+    confirm: url.searchParams.get("confirm") || "",
+  });
+}
+
+async function openPhpMyAdminDatabase(res, context, payload) {
+  try {
+    const database = findById(context.databases, payload.id || payload.databaseId || "", "Database");
+    if (database.engine !== "mariadb") throw new ValidationError("phpMyAdmin is available only for MariaDB databases.");
+    const confirmation = `OPEN-PHPMYADMIN:${database.id}`;
+    if (payload.confirm !== confirmation) throw new ValidationError("Missing phpMyAdmin confirmation token.");
+    const project = resolveContextProject(context, database.projectId);
+    const credential = resolveMariaDbCredential(database, project);
+    if (!credential) {
+      appendAudit({ action: "database.phpmyadmin.login", target: database.id, environment: context.environment, risk: "medium", result: "rejected", dryRun: true, summary: "phpMyAdmin app-scoped login rejected because no per-app database credential was found." });
+      renderTransientMessage(res, 409, "Accesso phpMyAdmin non configurato", `Non ho trovato credenziali MariaDB limitate per ${databaseDisplayName(database)}. Configura DB_USER/DB_PASSWORD dell'app o metadata adminUser/adminPasswordFile.`);
+      return;
+    }
+    const login = await phpMyAdminLogin(database, credential);
+    if (!login.ok) {
+      appendAudit({ action: "database.phpmyadmin.login", target: database.id, environment: context.environment, risk: "medium", result: "failed", dryRun: true, summary: "phpMyAdmin app-scoped login failed without exposing credentials." });
+      renderTransientMessage(res, 502, "Login phpMyAdmin fallito", "phpMyAdmin non ha accettato la credenziale limitata dell'app. Controlla utente DB e grants.");
+      return;
+    }
+    appendAudit({ action: "database.phpmyadmin.login", target: database.id, environment: context.environment, risk: "medium", result: "success", dryRun: false, summary: "phpMyAdmin app-scoped session started; credential value not exposed." });
+    const location = phpMyAdminDatabaseLocation(database.name, login.token);
+    renderPhpMyAdminBridge(res, location, databaseDisplayName(database), [
+      ...expiredPhpMyAdminCookies(),
+      ...login.cookies,
+    ]);
+  } catch (error) {
+    if (error instanceof ValidationError || error instanceof RejectedOperationError) {
+      renderTransientMessage(res, error instanceof ValidationError ? 422 : 409, "Azione non valida", error.message);
+      return;
+    }
+    throw error;
+  }
+}
+
+async function handlePhpPgAdminLogin(req, res, url, context) {
+  const databaseId = String(url.searchParams.get("databaseId") || "").trim();
+  const confirm = String(url.searchParams.get("confirm") || "");
+  try {
+    const database = databaseId ? findById(context.databases, databaseId, "Database") : null;
+    if (!database || database.engine !== "postgres") throw new ValidationError("phpPgAdmin e disponibile solo per database PostgreSQL.");
+    const confirmation = `OPEN-PHPPGADMIN:${database.id}`;
+    if (confirm !== confirmation) throw new ValidationError("Missing phpPgAdmin confirmation token.");
+    const project = resolveContextProject(context, database.projectId);
+    const credential = resolvePostgresCredential(database, project);
+    if (!credential) {
+      appendAudit({ action: "database.phppgadmin.login", target: database.id, environment: context.environment, risk: "medium", result: "rejected", dryRun: true, summary: "phpPgAdmin app-scoped login rejected because no PostgreSQL credential was found." });
+      renderTransientMessage(res, 409, "Accesso phpPgAdmin non configurato", `Non ho trovato credenziali PostgreSQL limitate per ${databaseDisplayName(database)}. Configura adminPasswordFile oppure CONTROL_CENTER_POSTGRES_APP_PASSWORD_FILE.`);
+      return;
+    }
+    const login = await phpPgAdminLogin(database, credential);
+    if (!login.ok) {
+      appendAudit({ action: "database.phppgadmin.login", target: database.id, environment: context.environment, risk: "medium", result: "failed", dryRun: true, summary: "phpPgAdmin app-scoped login failed without exposing credentials." });
+      renderTransientMessage(res, 502, "Login phpPgAdmin fallito", "phpPgAdmin non ha accettato la credenziale limitata PostgreSQL. Controlla utente DB e grants.");
+      return;
+    }
+    appendAudit({ action: "database.phppgadmin.login", target: database.id, environment: context.environment, risk: "medium", result: "success", dryRun: false, summary: "phpPgAdmin app-scoped PostgreSQL session started; credential value not exposed." });
+    renderPhpPgAdminBridge(res, login.location, databaseDisplayName(database), [
+      ...expiredPhpPgAdminCookies(),
+      ...login.cookies,
+    ]);
+  } catch (error) {
+    if (error instanceof ValidationError || error instanceof RejectedOperationError) {
+      renderTransientMessage(res, error instanceof ValidationError ? 422 : 409, "Azione non valida", error.message);
+      return;
+    }
+    throw error;
+  }
 }
 
 async function handleStorageCommand(req, res, context) {
@@ -730,6 +935,7 @@ async function handleResourceCommand(req, res, context) {
   let operation;
   try {
     if (action === "limits") operation = planResourceLimitUpdate(payload, context);
+    else if (action === "stress-test") operation = planApplicationStressTest(payload, context);
     else throw new ValidationError("Unsupported resource action.");
   } catch (error) {
     if (error instanceof ValidationError) {
@@ -827,7 +1033,7 @@ async function handleSettingsCommand(req, res, context) {
   redirect(res, "/?section=settings#settings-local");
 }
 
-function buildContext({ projects, state }) {
+async function buildContext({ projects, state }) {
   const storedApplications = readApplicationsState();
   const storedDomains = readDomainsState();
   const discoveredApplications = projects.map((project) => applicationRecord({
@@ -894,6 +1100,7 @@ function buildContext({ projects, state }) {
     { id: "mariadb", name: "MariaDB", status: "configured", service: "mariadb", liveAdapter: "DatabaseAdapter", productionEvidence: false },
     { id: "postgres", name: "PostgreSQL", status: "configured", service: "postgres", liveAdapter: "DatabaseAdapter", productionEvidence: false },
   ];
+  const databaseNameHints = discoverProjectDatabaseHints(projects);
   const databases = Object.values(readDatabasesState())
     .filter((database) => database && !database.deletedAt)
     .map((database) => databaseRecord(database))
@@ -996,20 +1203,20 @@ function buildContext({ projects, state }) {
   const activeProjects = projects.filter((project) => project.enabled && project.status === "active").length;
   const archivedProjects = projects.filter((project) => project.status === "archived").length;
   const onlineApps = applications.filter((app) => app.status === "online").length;
+  const liveResources = await collectLiveResourceUsage({ projects, applications, webspaces });
   const resources = {
     mode: environment,
-    source: "local-control-plane",
-    cpu: { status: "configured", summary: "Container metrics are available through Grafana/Prometheus." },
-    memory: { status: "configured", summary: "Memory trend is delegated to Prometheus/cAdvisor." },
-    disk: { status: "local-estimate", webspacesBytes: webspaces.reduce((sum, item) => sum + item.usedBytes, 0) },
-    containersByProject: applications.map((app) => ({
-      projectId: app.projectId,
-      applicationId: app.id,
-      runtime: app.runtime,
-      status: app.status,
-    })),
+    source: liveResources.source,
+    capturedAt: liveResources.capturedAt,
+    totals: liveResources.totals,
+    cpu: { status: liveResources.totals.cpu.available ? cpuPercentLabel(liveResources.totals.cpu.usedPercent) : "non disponibile", summary: liveResources.totals.cpu.available ? `${coresLabel(liveResources.totals.cpu.cores)} disponibili, misurati da Prometheus` : liveResources.totals.cpu.message },
+    memory: { status: liveResources.totals.memory.available ? `${usageBytesLabel(liveResources.totals.memory.usedBytes)} / ${usageBytesLabel(liveResources.totals.memory.totalBytes)}` : "non disponibile", summary: liveResources.totals.memory.available ? `${percentLabel(liveResources.totals.memory.usedPercent)} RAM usata` : liveResources.totals.memory.message },
+    disk: { status: liveResources.totals.disk.available ? `${usageBytesLabel(liveResources.totals.disk.usedBytes)} / ${usageBytesLabel(liveResources.totals.disk.totalBytes)}` : "non disponibile", webspacesBytes: webspaces.reduce((sum, item) => sum + item.usedBytes, 0), ...liveResources.totals.disk },
+    containersByProject: liveResources.containersByProject,
+    projectUsage: liveResources.projectUsage,
+    containerMetricsAvailable: liveResources.containerMetricsAvailable,
     projectLimits: projects.map((project) => resourceLimitRecord({ projectId: project.slug, ...(storedResourceLimits[project.slug] || {}) })),
-    trend: "delegated-to-prometheus-and-cadvisor",
+    trend: liveResources.containerMetricsAvailable ? "container metrics disponibili" : "metriche container non disponibili: CPU/RAM per applicazione non attribuibili con precisione",
   };
   const defaultSecurityPolicy = securityPolicyRecord({
     scope: "global",
@@ -1103,9 +1310,9 @@ function buildContext({ projects, state }) {
   ];
   const network = buildNetworkTopology({ subdomains, domains, security, settings });
   const readiness = buildControlReadiness({
-    projects,
-    applications,
-    subdomains,
+      projects,
+      applications,
+      subdomains,
     webspaces,
     network,
     monitoring,
@@ -1115,8 +1322,10 @@ function buildContext({ projects, state }) {
     audit,
     deployments,
     providerConnections,
-    uiPackage,
+      uiPackage,
   });
+  const goNoGo = readLatestGoNoGoReport();
+  const statusRun = readLatestStatusRun();
   const overview = {
     title: "Admin Control Center",
     environment,
@@ -1134,6 +1343,21 @@ function buildContext({ projects, state }) {
     identityAccess: { adminUsers: identityAccess.adminUsers.length, roles: identityAccess.roles.length, sessions: identityAccess.sessionPolicies.length },
     designSystem: { package: uiPackage.name, version: uiPackage.version, source: uiPackage.source, manifestLoaded: uiPackage.apiManifestLoaded },
     readiness: readiness.summary,
+    goNoGo: {
+      status: goNoGo.status,
+      generatedAt: goNoGo.generatedAt,
+      passed: goNoGo.summary.passed,
+      failed: goNoGo.summary.failed,
+      pending: goNoGo.summary.pendingLiveProof + goNoGo.summary.pendingProvider,
+      blockers: goNoGo.blockers.length,
+    },
+    statusRun: statusRun ? {
+      status: statusRun.status,
+      generatedAt: statusRun.generatedAt,
+      passed: statusRun.summary?.passed || 0,
+      failed: statusRun.summary?.failed || 0,
+      pending: statusRun.summary?.pending || 0,
+    } : null,
     alerts: { open: openAlerts.length, source: "Control Center local alert metadata and Alertmanager evidence tooling" },
     deployments: { latest: deployments.slice(0, 5) },
     backups,
@@ -1148,6 +1372,7 @@ function buildContext({ projects, state }) {
     webspaces,
     databases,
     databaseEngines,
+    databaseNameHints,
     storageProvider,
     storageBuckets,
     materialStores,
@@ -1164,6 +1389,8 @@ function buildContext({ projects, state }) {
     settings,
     uiPackage,
     readiness,
+    goNoGo,
+    statusRun,
     identityAccess,
     alertRecords,
     notificationChannels,
@@ -1651,14 +1878,16 @@ function advancedSectionData(section, context) {
 }
 
 function buildControlReadiness(context) {
-  const enterprise = manifestReadiness("enterprise-requirements", "Enterprise requirements", readGovernanceManifest("enterprise-requirements.json"));
-  const production = manifestReadiness("production-readiness", "Production readiness checklist", readGovernanceManifest("production-readiness.json"));
+  const enterpriseLiveProofReport = readLatestEnterpriseRequirementsReport();
+  const enterprise = manifestReadiness("enterprise-requirements", "Enterprise requirements", readGovernanceManifest("enterprise-requirements.json"), enterpriseLiveProofReport);
+  const productionLiveProofReport = readLatestProductionReadinessReport();
+  const production = manifestReadiness("production-readiness", "Production readiness checklist", readGovernanceManifest("production-readiness.json"), productionLiveProofReport);
   const controlChecks = [
     readinessCheck({
       id: "control-center-local-ui",
       title: "Control Center local UI contract",
       status: context.uiPackage.controlCenterPackageLoaded && context.uiPackage.packageMountedInControlCenterProject && context.uiPackage.apiManifestLoaded && context.uiPackage.missingRequiredExports.length === 0 ? "passed" : "needs-work",
-      evidence: ["@platform/control-center package", "control-center/components", "control-center/styles/control-center.css", "local AppShell/Sidebar/TabGroup contract"],
+      evidence: ["@platform/control-center package", "control-center/components", "control-center/styles/control-center.css", "local operations shell contract"],
       nextAction: "Keep Control Center visual changes scoped to local components and --cc-* tokens.",
     }),
     readinessCheck({
@@ -1732,13 +1961,992 @@ function buildControlReadiness(context) {
     },
     manifests: {
       enterprise,
+      enterpriseLive: enterpriseLiveProofReport,
       productionReadiness: production,
+      productionReadinessLive: productionLiveProofReport,
     },
     productionBlockers: allChecks
       .filter((item) => item.status === "needs-work" || item.status === "pending-live-proof")
       .map((item) => ({ id: item.id, status: item.status, nextAction: item.nextAction }))
       .slice(0, 40),
   });
+}
+
+async function runStatusVerification(context) {
+  const startedAt = new Date().toISOString();
+  const startedMs = Date.now();
+  const checks = [];
+  const add = (check) => checks.push(statusRunCheck(check));
+
+  add(await statusHttpCheck({
+    id: "portal-through-waf",
+    title: "Portal attraverso WAF",
+    category: "routing",
+    source: "Test reale",
+    url: `${statusWafUrl}/`,
+    headers: statusProbeHeaders(),
+    okStatuses: [200],
+    bodyIncludes: "Admin Control Center",
+    okDetail: "La richiesta passa da WAF/Traefik e renderizza il Portal.",
+    failAction: "Verifica WAF, Traefik e host portal prima di dichiarare lo stato online.",
+  }));
+
+  add(await statusHttpCheck({
+    id: "waf-sensitive-file-block",
+    title: "WAF blocca file sensibili",
+    category: "security",
+    source: "Test reale",
+    url: `${statusWafUrl}/.env`,
+    headers: statusProbeHeaders(),
+    okStatuses: [403, 404, 406],
+    okDetail: "La route pubblica non espone file .env.",
+    failAction: "Blocca subito l'esposizione di file sensibili su WAF/Traefik.",
+  }));
+
+  const goNoGo = context.goNoGo || {};
+  add({
+    id: "go-no-go-report-readable",
+    title: "Report go/no-go leggibile",
+    category: "evidence",
+    source: "Report",
+    status: goNoGo.reportPath ? "passed" : "pending-live-proof",
+    detail: goNoGo.reportPath ? `Report caricato: ${goNoGo.reportPath}` : "Nessun report production-go-no-go trovato.",
+    nextAction: goNoGo.reportPath ? "Mantieni il report aggiornato dopo ogni cambio infrastruttura." : "Esegui il go/no-go completo dal server e conserva il report.",
+  });
+
+  add({
+    id: "go-no-go-verdict",
+    title: "Decisione produzione",
+    category: "evidence",
+    source: "Report",
+    status: goNoGo.status === "go" ? "passed" : goNoGo.reportPath ? "no-go" : "pending-live-proof",
+    detail: goNoGo.status === "go"
+      ? "Il report più recente dice GO LIVE."
+      : `Il report più recente dice ${String(goNoGo.status || "unknown").toUpperCase()} con ${Number(goNoGo.summary?.blockingRequired || goNoGo.blockers?.length || 0)} blocchi.`,
+    nextAction: goNoGo.status === "go" ? "Procedi solo con backup e rollback pronti." : "Chiudi i requisiti aperti, poi rilancia il controllo.",
+  });
+
+  const readinessTotal = Number(context.readiness?.summary?.total || 0);
+  add({
+    id: "readiness-matrix-readable",
+    title: "Matrice readiness caricata",
+    category: "evidence",
+    source: "Report",
+    status: readinessTotal > 0 ? "passed" : "needs-work",
+    detail: readinessTotal > 0 ? `${readinessTotal} controlli readiness letti dai manifest.` : "Nessun controllo readiness disponibile.",
+    nextAction: readinessTotal > 0 ? "Mantieni governance/production-readiness.json e enterprise-requirements.json coerenti." : "Ripristina i manifest governance prima del prossimo go live.",
+  });
+
+  const summary = statusRunSummary(checks);
+  return sanitizeEvent({
+    id: `status-${startedMs.toString(36)}`,
+    generatedAt: startedAt,
+    finishedAt: new Date().toISOString(),
+    durationMs: Date.now() - startedMs,
+    status: summary.failed ? "failed" : summary.pending ? "warning" : "passed",
+    scope: "platform-infrastructure",
+    destructive: false,
+    providerTouched: false,
+    dockerTouched: false,
+    summary,
+    checks,
+  });
+}
+
+function statusProbeHeaders(extra = {}) {
+  return {
+    Host: controlCenterHost,
+    "X-Forwarded-Host": controlCenterHost,
+    "X-Forwarded-Proto": "https",
+    "User-Agent": "platform-control-center-status/1.0",
+    ...extra,
+  };
+}
+
+async function statusHttpCheck({ id, title, category, source, url, headers = {}, okStatuses = [200], bodyIncludes = "", okDetail = "", failAction = "" }) {
+  const startedMs = Date.now();
+  try {
+    const response = await statusHttpRequest(url, headers);
+    const durationMs = Date.now() - startedMs;
+    const bodyOk = !bodyIncludes || response.body.includes(bodyIncludes);
+    const statusOk = okStatuses.includes(response.status);
+    return statusRunCheck({
+      id,
+      title,
+      category,
+      source,
+      status: statusOk && bodyOk ? "passed" : "failed",
+      detail: statusOk && bodyOk
+        ? `${okDetail} HTTP ${response.status}, ${durationMs} ms.`
+        : `Risposta inattesa: HTTP ${response.status}, body=${bodyOk ? "ok" : "non valido"}, ${durationMs} ms.`,
+      nextAction: statusOk && bodyOk ? "Nessuna azione immediata." : failAction,
+    });
+  } catch (error) {
+    return statusRunCheck({
+      id,
+      title,
+      category,
+      source,
+      status: "failed",
+      detail: sanitizeMessage(error?.message || String(error)),
+      nextAction: failAction || "Controlla rete interna e route prima di rilanciare il test.",
+    });
+  }
+}
+
+function statusHttpRequest(urlString, headers = {}) {
+  return new Promise((resolve, reject) => {
+    const target = new URL(urlString);
+    const isHttps = target.protocol === "https:";
+    if (target.protocol !== "http:" && !isHttps) {
+      reject(new Error("Status probe supports only internal HTTP/HTTPS targets."));
+      return;
+    }
+    const requestPath = `${target.pathname || "/"}${target.search || ""}`;
+    const requestFn = isHttps ? httpsRequest : httpRequest;
+    const req = requestFn({
+      method: "GET",
+      hostname: target.hostname,
+      port: target.port || (isHttps ? 443 : 80),
+      path: requestPath,
+      headers,
+      rejectUnauthorized: isHttps ? statusProbeTlsVerify : undefined,
+      timeout: statusProbeTimeoutMs,
+    }, (response) => {
+      const chunks = [];
+      response.on("data", (chunk) => chunks.push(chunk));
+      response.on("end", () => resolve({
+        status: response.statusCode || 0,
+        headers: response.headers,
+        body: Buffer.concat(chunks).toString("utf8"),
+      }));
+    });
+    req.on("timeout", () => req.destroy(new Error(`Status probe timed out for ${target.hostname}${requestPath}.`)));
+    req.on("error", reject);
+    req.end();
+  });
+}
+
+function statusRunCheck({ id, title, category = "general", source = "Test reale", status = "failed", detail = "", nextAction = "", required = true }) {
+  return {
+    id: sanitizeIdentifier(id || title || "status-check") || "status-check",
+    title: sanitizeMessage(title || humanName(id || "status-check")),
+    category: sanitizeIdentifier(category || "general") || "general",
+    source: sanitizeMessage(source || "Test reale"),
+    required: required !== false,
+    status: sanitizeIdentifier(status || "failed") || "failed",
+    detail: sanitizeMessage(detail || ""),
+    nextAction: sanitizeMessage(nextAction || ""),
+  };
+}
+
+function statusRunSummary(checks) {
+  const passed = checks.filter((check) => check.status === "passed").length;
+  const failed = checks.filter((check) => ["failed", "needs-work"].includes(check.status)).length;
+  const pending = checks.filter((check) => ["authorization-required", "pending-live-proof", "pending-provider", "plan-only"].includes(check.status)).length;
+  return {
+    total: checks.length,
+    passed,
+    failed,
+    pending,
+  };
+}
+
+const documentedStatusTitles = {
+  "audit-log-evidence": "Evidence audit log",
+  "alert-evidence": "Evidence alert reali",
+  "backup-keycloak": "Backup Keycloak",
+  "backup-mariadb": "Backup MariaDB",
+  "backup-minio": "Backup MinIO",
+  "backup-postgres": "Backup PostgreSQL",
+  "backup-restore-drill": "Restore drill PostgreSQL",
+  "backup-restore-drill-keycloak": "Restore drill Keycloak",
+  "backup-restore-drill-mariadb": "Restore drill MariaDB",
+  "backup-restore-drill-minio": "Restore drill MinIO",
+  "backup-restore-drill-secret-manager-metadata": "Restore drill metadata secrets",
+  "backup-secret-manager-metadata": "Backup metadata secrets",
+  "certificate-expiry-check": "Scadenza certificati",
+  "chaos-profile": "Profilo chaos",
+  "cloudflare-access-admin": "Cloudflare Access admin",
+  "cloudflare-from-zero": "Cloudflare from zero",
+  "cloudflare-origin-lock-ufw": "Origin lock UFW Cloudflare",
+  "compose-healthcheck-coverage": "Healthcheck Compose completi",
+  "control-center-tests": "Test codice Portal",
+  "dast-zap-baseline": "DAST ZAP baseline",
+  "dependency-hygiene": "Igiene dipendenze",
+  "deploy-vps": "Deploy VPS",
+  "dr-evidence": "Evidence disaster recovery",
+  "dr-readiness-check": "Readiness disaster recovery",
+  "enterprise-10-check": "Enterprise 10 check",
+  "enterprise-check": "Enterprise check",
+  "enterprise-hardening-audit": "Audit hardening enterprise",
+  "enterprise-requirements-check": "Requisiti enterprise",
+  "evidence-bundle": "Bundle evidence",
+  "evidence-bundle-verify": "Verifica bundle evidence",
+  "external-uptime-check": "Uptime esterno",
+  "failure-tests": "Failure test",
+  "fault-injection-tests": "Fault injection",
+  "full-restore-drill": "Restore drill completo",
+  "generate-sbom": "Generazione SBOM",
+  "github-actions-config": "Config GitHub Actions",
+  "github-actions-run-evidence": "Evidence run GitHub Actions",
+  "github-attestation-evidence": "Evidence attestazione GitHub",
+  "github-branch-protection": "Branch protection GitHub",
+  "github-environments": "Environment GitHub",
+  "governance-check": "Governance check",
+  "ha-config-check": "Configurazione alta disponibilita",
+  "infra-health": "Salute infrastruttura",
+  "infra-secret-manager-init": "Secret Manager init",
+  "infra-secret-manager-rotate": "Secret Manager rotazione",
+  "infra-secret-manager-verify": "Secret Manager verify",
+  "init-local-secrets": "Inizializzazione secrets locali",
+  "install-mariadb-backup-cron": "Cron backup MariaDB",
+  "install-offsite-backup-cron": "Cron backup off-site",
+  "install-postgres-backup-cron": "Cron backup PostgreSQL",
+  "linux-portability-check": "Portabilita Linux",
+  "load-benchmark": "Benchmark pubblico 50/100/500",
+  "load-profile": "Profilo carico locale",
+  "load-smoke": "Smoke test carico",
+  "local-secret-manager": "Secret manager locale",
+  "maintainability-hygiene": "Igiene manutenibilita",
+  "managed-secrets-preflight": "Preflight managed secrets",
+  "offsite-backup-restic": "Backup off-site Restic",
+  "offsite-restore-drill-restic": "Restore off-site Restic",
+  "performance-hygiene": "Igiene performance",
+  "platform-admin-audit": "Audit admin piattaforma",
+  "pre-go-live-evidence": "Evidence pre go-live",
+  "production-go-no-go": "Production go/no-go",
+  "production-preflight": "Preflight produzione",
+  "production-readiness-live": "Readiness produzione live",
+  "project-router-tests": "Test project-router",
+  "prune-postgres-backups": "Pulizia backup PostgreSQL",
+  "rate-limit-evidence": "Evidence rate limit",
+  "release-artifact-gate": "Gate artefatti release",
+  "release-evidence": "Evidence release",
+  "repo-coverage-check": "Copertura repository",
+  "restore-postgres": "Restore PostgreSQL",
+  "restore-test-keycloak": "Restore test Keycloak",
+  "restore-test-mariadb": "Restore test MariaDB",
+  "restore-test-minio": "Restore test MinIO",
+  "restore-test-postgres": "Restore test PostgreSQL",
+  "restore-test-secret-manager-metadata": "Restore test metadata secrets",
+  "retention-evidence": "Evidence retention log/metriche",
+  "rollback-release": "Rollback release",
+  "secret-manager": "Secret manager",
+  "secret-rotation-evidence": "Evidence rotazione secrets",
+  "secret-scan": "Secret scan",
+  "security-matrix": "Matrice sicurezza",
+  "security-smoke": "Security smoke",
+  "sign-existing-postgres-backups": "Firma backup PostgreSQL esistenti",
+  "sign-images": "Firma immagini",
+  "static-security-check": "Static security check",
+  "supply-chain-hygiene": "Supply chain hygiene",
+  "testing-hygiene": "Igiene test",
+  "validate-local-secrets": "Validazione secrets locali",
+  "vps-bootstrap-ubuntu": "Bootstrap Ubuntu VPS",
+  "vps-go-live": "Orchestrazione VPS go-live",
+  "vps-hardening-ubuntu": "Hardening Ubuntu VPS",
+  "vps-host-readiness": "Readiness host VPS",
+  "vps-postdeploy": "Post-deploy VPS",
+  "vps-preflight": "Preflight VPS",
+  "waf-smoke": "WAF smoke",
+};
+
+const documentedStatusGoNoGoLinks = {
+  "alert-evidence": "real-alert-delivery",
+  "cloudflare-access-admin": "cloudflare-access-admin-verified",
+  "compose-healthcheck-coverage": "healthcheck-coverage",
+  "dr-evidence": "disaster-recovery-rpo-rto-offsite",
+  "external-uptime-check": "external-uptime-provider",
+  "full-restore-drill": "disaster-recovery-rpo-rto-offsite",
+  "github-actions-run-evidence": "github-actions-run-success",
+  "infra-health": "infra-health-runtime",
+  "load-benchmark": "public-load-benchmark",
+  "offsite-backup-restic": "disaster-recovery-rpo-rto-offsite",
+  "offsite-restore-drill-restic": "disaster-recovery-rpo-rto-offsite",
+  "platform-admin-audit": "platform-admin-audit-evidence",
+  "pre-go-live-evidence": "pre-go-live-evidence-complete",
+  "release-artifact-gate": "release-evidence-and-rollback",
+  "release-evidence": "release-evidence-and-rollback",
+  "retention-evidence": "retention-evidence",
+  "rollback-release": "release-evidence-and-rollback",
+  "secret-rotation-evidence": "secret-rotation-evidence",
+  "vps-bootstrap-ubuntu": "vps-bootstrap-applied",
+  "vps-hardening-ubuntu": "vps-hardening-applied",
+  "vps-host-readiness": "vps-host-readiness",
+};
+
+const documentedStatusEvidenceSpecs = {
+  "audit-log-evidence": { directory: "audit-logs", prefix: "audit-log-evidence-", maxAgeHours: 168, pass: "summary-failed-zero" },
+  "backup-keycloak": { directory: "backups", prefix: "keycloak-backup-", maxAgeHours: 72, pass: "backup-success" },
+  "backup-mariadb": { directory: "backups", prefix: "mariadb-backup-", maxAgeHours: 72, pass: "backup-success" },
+  "backup-minio": { directory: "backups", prefix: "minio-backup-", maxAgeHours: 72, pass: "backup-success" },
+  "backup-postgres": { directory: "backups", prefix: "postgres-backup-", maxAgeHours: 72, pass: "backup-success" },
+  "backup-restore-drill": { directory: "restore-drills", prefix: "full-restore-drill-", maxAgeHours: 168, pass: "full-restore-step", step: "postgres" },
+  "backup-restore-drill-keycloak": { directory: "restore-drills", prefix: "full-restore-drill-", maxAgeHours: 168, pass: "full-restore-step", step: "keycloak" },
+  "backup-restore-drill-mariadb": { directory: "restore-drills", prefix: "full-restore-drill-", maxAgeHours: 168, pass: "full-restore-step", step: "mariadb" },
+  "backup-restore-drill-minio": { directory: "restore-drills", prefix: "full-restore-drill-", maxAgeHours: 168, pass: "full-restore-step", step: "minio" },
+  "backup-restore-drill-secret-manager-metadata": { directory: "restore-drills", prefix: "full-restore-drill-", maxAgeHours: 168, pass: "full-restore-step", step: "secret-manager-metadata" },
+  "backup-secret-manager-metadata": { directory: "backups", prefix: "secret-manager-backup-", maxAgeHours: 72, pass: "backup-success" },
+  "certificate-expiry-check": { directory: "local-checks", prefix: "certificate-expiry-check-", maxAgeHours: 168, pass: "local-check-passed", command: "certificate-expiry-check" },
+  "chaos-profile": { directory: "chaos", prefix: "chaos-profile-", maxAgeHours: 168, pass: "status-passed" },
+  "compose-healthcheck-coverage": { directory: "healthchecks", prefix: "healthcheck-coverage-", maxAgeHours: 168, pass: "healthcheck-coverage" },
+  "control-center-tests": { directory: "local-checks", prefix: "control-center-tests-", maxAgeHours: 168, pass: "local-check-passed", command: "control-center-tests" },
+  "dependency-hygiene": { directory: "local-checks", prefix: "dependency-hygiene-", maxAgeHours: 168, pass: "local-check-passed", command: "dependency-hygiene" },
+  "dr-readiness-check": { directory: "dr", prefix: "dr-evidence-", maxAgeHours: 168, pass: "status-passed-or-warning" },
+  "evidence-bundle": { directory: "local-checks", prefix: "evidence-bundle-", maxAgeHours: 168, pass: "local-check-passed", command: "evidence-bundle" },
+  "evidence-bundle-verify": { directory: "evidence-bundle-verify", prefix: "evidence-bundle-verify-", maxAgeHours: 168, pass: "status-passed" },
+  "enterprise-check": { directory: "local-checks", prefix: "enterprise-check-", maxAgeHours: 168, pass: "local-check-passed", command: "enterprise-check" },
+  "enterprise-hardening-audit": { directory: "local-checks", prefix: "enterprise-hardening-audit-", maxAgeHours: 168, pass: "local-check-passed", command: "enterprise-hardening-audit" },
+  "enterprise-requirements-check": { directory: "enterprise-requirements", prefix: "enterprise-requirements-", maxAgeHours: 168, pass: "repo-report-passed" },
+  "enterprise-10-check": { directory: "enterprise-requirements", prefix: "enterprise-requirements-", maxAgeHours: 168, pass: "repo-report-passed" },
+  "full-restore-drill": { directory: "restore-drills", prefix: "full-restore-drill-", maxAgeHours: 168, pass: "status-success" },
+  "failure-tests": { directory: "failure-tests", prefix: "failure-tests-", maxAgeHours: 168, pass: "failure-tests" },
+  "fault-injection-tests": { directory: "fault-injection", prefix: "fault-injection-tests-", maxAgeHours: 168, pass: "status-passed" },
+  "generate-sbom": { directory: "local-checks", prefix: "generate-sbom-", maxAgeHours: 168, pass: "local-check-passed", command: "generate-sbom" },
+  "governance-check": { directory: "local-checks", prefix: "governance-check-", maxAgeHours: 168, pass: "local-check-passed", command: "governance-check" },
+  "ha-config-check": { directory: "local-checks", prefix: "ha-config-check-", maxAgeHours: 168, pass: "local-check-passed", command: "ha-config-check" },
+  "infra-health": { directory: "local-checks", prefix: "infra-health-", maxAgeHours: 24, pass: "local-check-passed", command: "infra-health" },
+  "infra-secret-manager-init": { directory: "secret-rotation", prefix: "secret-rotation-evidence-", maxAgeHours: 168, pass: "secret-rotation" },
+  "infra-secret-manager-rotate": { directory: "secret-rotation", prefix: "secret-rotation-evidence-", maxAgeHours: 168, pass: "secret-rotation" },
+  "infra-secret-manager-verify": { directory: "secret-rotation", prefix: "secret-rotation-evidence-", maxAgeHours: 168, pass: "secret-rotation" },
+  "init-local-secrets": { directory: "secret-rotation", prefix: "secret-rotation-evidence-", maxAgeHours: 168, pass: "secret-rotation" },
+  "linux-portability-check": { directory: "linux-portability", prefix: "linux-portability-", maxAgeHours: 168, pass: "status-passed" },
+  "load-profile": { directory: "local-checks", prefix: "load-profile-", maxAgeHours: 168, pass: "local-check-passed", command: "load-profile" },
+  "load-smoke": { directory: "load", prefix: "load-smoke-", maxAgeHours: 168, pass: "status-passed" },
+  "maintainability-hygiene": { directory: "local-checks", prefix: "maintainability-hygiene-", maxAgeHours: 168, pass: "local-check-passed", command: "maintainability-hygiene" },
+  "managed-secrets-preflight": { directory: "local-checks", prefix: "managed-secrets-preflight-", maxAgeHours: 168, pass: "local-check-passed", command: "managed-secrets-preflight" },
+  "performance-hygiene": { directory: "local-checks", prefix: "performance-hygiene-", maxAgeHours: 168, pass: "local-check-passed", command: "performance-hygiene" },
+  "platform-admin-audit": { directory: "platform-admin-audit", prefix: "platform-admin-audit-", maxAgeHours: 168, pass: "platform-admin-audit" },
+  "local-secret-manager": { directory: "secret-rotation", prefix: "secret-rotation-evidence-", maxAgeHours: 168, pass: "secret-rotation" },
+  "project-router-tests": { directory: "local-checks", prefix: "project-router-tests-", maxAgeHours: 168, pass: "local-check-passed", command: "project-router-tests" },
+  "production-readiness-live": { directory: "production-readiness", prefix: "production-readiness-", maxAgeHours: 168, pass: "repo-report-passed" },
+  "rate-limit-evidence": { directory: "rate-limits", prefix: "rate-limit-evidence-", maxAgeHours: 168, pass: "summary-failed-zero" },
+  "release-artifact-gate": { directory: "local-checks", prefix: "release-artifact-gate-", maxAgeHours: 168, pass: "local-check-passed", command: "release-artifact-gate" },
+  "repo-coverage-check": { directory: "repo-coverage", prefix: "repo-coverage-", maxAgeHours: 168, pass: "status-passed" },
+  "retention-evidence": { directory: "retention", prefix: "retention-evidence-", maxAgeHours: 168, pass: "summary-failed-zero" },
+  "prune-postgres-backups": { directory: "postgres-backup-prune", prefix: "prune-postgres-backups-", maxAgeHours: 168, pass: "postgres-backup-prune" },
+  "restore-postgres": { directory: "postgres-restore", prefix: "restore-postgres-", maxAgeHours: 168, pass: "status-passed" },
+  "restore-test-keycloak": { directory: "restore-drills", prefix: "full-restore-drill-", maxAgeHours: 168, pass: "full-restore-step", step: "keycloak" },
+  "restore-test-mariadb": { directory: "restore-drills", prefix: "full-restore-drill-", maxAgeHours: 168, pass: "full-restore-step", step: "mariadb" },
+  "restore-test-minio": { directory: "restore-drills", prefix: "full-restore-drill-", maxAgeHours: 168, pass: "full-restore-step", step: "minio" },
+  "restore-test-postgres": { directory: "restore-drills", prefix: "full-restore-drill-", maxAgeHours: 168, pass: "full-restore-step", step: "postgres" },
+  "restore-test-secret-manager-metadata": { directory: "restore-drills", prefix: "full-restore-drill-", maxAgeHours: 168, pass: "full-restore-step", step: "secret-manager-metadata" },
+  "rollback-release": { directory: "rollback", prefix: "rollback-plan-", maxAgeHours: 168, pass: "rollback-plan" },
+  "secret-rotation-evidence": { directory: "secret-rotation", prefix: "secret-rotation-evidence-", maxAgeHours: 168, pass: "secret-rotation" },
+  "secret-manager": { directory: "secret-rotation", prefix: "secret-rotation-evidence-", maxAgeHours: 168, pass: "secret-rotation" },
+  "secret-scan": { directory: "local-checks", prefix: "secret-scan-", maxAgeHours: 168, pass: "local-check-passed", command: "secret-scan" },
+  "security-matrix": { directory: "local-checks", prefix: "security-matrix-", maxAgeHours: 168, pass: "local-check-passed", command: "security-matrix" },
+  "security-smoke": { directory: "local-checks", prefix: "security-smoke-", maxAgeHours: 168, pass: "local-check-passed", command: "security-smoke" },
+  "static-security-check": { directory: "local-checks", prefix: "static-security-check-", maxAgeHours: 168, pass: "local-check-passed", command: "static-security-check" },
+  "supply-chain-hygiene": { directory: "local-checks", prefix: "supply-chain-hygiene-", maxAgeHours: 168, pass: "local-check-passed", command: "supply-chain-hygiene" },
+  "testing-hygiene": { directory: "local-checks", prefix: "testing-hygiene-", maxAgeHours: 168, pass: "local-check-passed", command: "testing-hygiene" },
+  "validate-local-secrets": { directory: "secret-rotation", prefix: "secret-rotation-evidence-", maxAgeHours: 168, pass: "secret-rotation" },
+  "sign-existing-postgres-backups": { directory: "postgres-backup-signatures", prefix: "postgres-backup-signatures-", maxAgeHours: 168, pass: "postgres-backup-signatures" },
+  "vps-go-live": { directory: "vps-go-live", prefix: "vps-go-live-", maxAgeHours: 168, pass: "vps-go-live-live" },
+  "vps-postdeploy": { directory: "local-checks", prefix: "vps-postdeploy-", maxAgeHours: 168, pass: "local-check-passed", command: "vps-postdeploy" },
+  "vps-preflight": { directory: "local-checks", prefix: "vps-preflight-", maxAgeHours: 168, pass: "local-check-passed", command: "vps-preflight" },
+  "waf-smoke": { directory: "local-checks", prefix: "waf-smoke-", maxAgeHours: 168, pass: "local-check-passed", command: "waf-smoke" },
+};
+
+const documentedStatusGroups = [
+  {
+    category: "local-policy",
+    source: "Documentazione infra-ops",
+    status: "plan-only",
+    required: false,
+    detail: "Test documentato e sicuro da pianificare: non viene eseguito automaticamente dal Portal.",
+    nextAction: "Eseguilo dal server Ubuntu quando vuoi aggiornare l'evidence; poi rilancia go/no-go se e' un requisito.",
+    commands: [
+      "audit-log-evidence",
+      "certificate-expiry-check",
+      "compose-healthcheck-coverage",
+      "control-center-tests",
+      "dependency-hygiene",
+      "dr-readiness-check",
+      "enterprise-check",
+      "enterprise-hardening-audit",
+      "enterprise-requirements-check",
+      "enterprise-10-check",
+      "generate-sbom",
+      "governance-check",
+      "ha-config-check",
+      "infra-health",
+      "linux-portability-check",
+      "maintainability-hygiene",
+      "managed-secrets-preflight",
+      "performance-hygiene",
+      "platform-admin-audit",
+      "project-router-tests",
+      "rate-limit-evidence",
+      "repo-coverage-check",
+      "retention-evidence",
+      "secret-scan",
+      "security-matrix",
+      "security-smoke",
+      "static-security-check",
+      "supply-chain-hygiene",
+      "testing-hygiene",
+      "waf-smoke",
+    ],
+  },
+  {
+    category: "secret-protected",
+    source: "Checklist secrets",
+    status: "pending-live-proof",
+    required: true,
+    detail: "Test locale protetto: puo' leggere, generare, validare o ruotare materiale sensibile. Non viene eseguito automaticamente dal Portal.",
+    nextAction: "Eseguilo solo con autorizzazione esplicita sui secrets e senza stampare valori; poi archivia il report non-secret.",
+    commands: [
+      "infra-secret-manager-init",
+      "infra-secret-manager-verify",
+      "infra-secret-manager-rotate",
+      "init-local-secrets",
+      "local-secret-manager",
+      "secret-manager",
+      "validate-local-secrets",
+    ],
+  },
+  {
+    category: "runtime-evidence",
+    source: "Documentazione runtime",
+    status: "pending-live-proof",
+    required: true,
+    detail: "Serve una prova eseguita sul runtime Ubuntu/VPS corretto, non solo la presenza del comando nel repository.",
+    nextAction: "Esegui il comando nella finestra operativa corretta, conserva il report e rilancia production-go-no-go.",
+    commands: [
+      "alert-evidence",
+      "backup-keycloak",
+      "backup-mariadb",
+      "backup-minio",
+      "backup-postgres",
+      "backup-secret-manager-metadata",
+      "dr-evidence",
+      "evidence-bundle",
+      "evidence-bundle-verify",
+      "load-benchmark",
+      "load-profile",
+      "load-smoke",
+      "pre-go-live-evidence",
+      "production-go-no-go",
+      "production-preflight",
+      "production-readiness-live",
+      "release-artifact-gate",
+      "release-evidence",
+      "secret-rotation-evidence",
+      "vps-bootstrap-ubuntu",
+      "vps-hardening-ubuntu",
+      "vps-host-readiness",
+      "vps-postdeploy",
+      "vps-preflight",
+    ],
+  },
+  {
+    category: "protected-runtime",
+    source: "Checklist operativa",
+    status: "pending-live-proof",
+    required: true,
+    detail: "Test documentato ma protetto: puo' fermare servizi, usare backup o validare rollback. Non parte dal bottone Stato.",
+    nextAction: "Eseguilo solo con backup, finestra di manutenzione e conferma operativa; archivia il report fuori Git.",
+    commands: [
+      "backup-restore-drill",
+      "backup-restore-drill-keycloak",
+      "backup-restore-drill-mariadb",
+      "backup-restore-drill-minio",
+      "backup-restore-drill-secret-manager-metadata",
+      "chaos-profile",
+      "deploy-vps",
+      "failure-tests",
+      "fault-injection-tests",
+      "full-restore-drill",
+      "prune-postgres-backups",
+      "restore-postgres",
+      "restore-test-keycloak",
+      "restore-test-mariadb",
+      "restore-test-minio",
+      "restore-test-postgres",
+      "restore-test-secret-manager-metadata",
+      "rollback-release",
+      "sign-existing-postgres-backups",
+      "vps-go-live",
+    ],
+  },
+  {
+    category: "provider",
+    source: "Provider esterno",
+    status: "pending-provider",
+    required: true,
+    detail: "Richiede dominio, Cloudflare, GitHub, registry o monitor esterni configurati e verificati davvero.",
+    nextAction: "Completa il provider live, esegui la verifica remota indicata e conserva il report non-secret.",
+    commands: [
+      "cloudflare-access-admin",
+      "cloudflare-from-zero",
+      "cloudflare-origin-lock-ufw",
+      "dast-zap-baseline",
+      "external-uptime-check",
+      "github-actions-config",
+      "github-actions-run-evidence",
+      "github-attestation-evidence",
+      "github-branch-protection",
+      "github-environments",
+      "install-mariadb-backup-cron",
+      "install-offsite-backup-cron",
+      "install-postgres-backup-cron",
+      "offsite-backup-restic",
+      "offsite-restore-drill-restic",
+      "sign-images",
+    ],
+  },
+];
+
+function documentedStatusChecks(context) {
+  const checks = [];
+  const seen = new Set();
+  const push = (check) => {
+    const id = sanitizeIdentifier(check.id || "");
+    if (!id || seen.has(id)) return;
+    seen.add(id);
+    checks.push(statusRunCheck({ ...check, id }));
+  };
+
+  for (const group of documentedStatusGroups) {
+    for (const command of group.commands) {
+      push(resolveDocumentedStatusCheck({
+        id: command,
+        title: documentedStatusTitles[command] || humanName(command),
+        category: group.category,
+        source: group.source,
+        status: group.status,
+        detail: group.detail,
+        nextAction: group.nextAction,
+        required: group.required,
+        command,
+      }, context));
+    }
+  }
+
+  for (const check of documentedManifestStatusChecks(context, "enterprise", context.readiness?.manifests?.enterprise)) push(check);
+  for (const check of documentedManifestStatusChecks(context, "production-readiness", context.readiness?.manifests?.productionReadiness)) push(check);
+
+  return checks;
+}
+
+function resolveDocumentedStatusCheck(base, context) {
+  const evidence = readDocumentedStatusEvidence(base.command);
+  if (evidence) {
+    return {
+      ...base,
+      source: `${base.source} / report`,
+      status: evidence.status,
+      detail: evidence.detail,
+      nextAction: evidence.status === "passed"
+        ? "Report reale valido: mantienilo aggiornato dopo modifiche infrastrutturali."
+        : evidence.nextAction,
+      required: base.required,
+    };
+  }
+
+  const goNoGoName = documentedStatusGoNoGoLinks[base.command] || base.command;
+  const goNoGoCheck = (context.goNoGo?.checks || []).find((check) => check.name === goNoGoName);
+  if (goNoGoCheck) {
+    const displayCheck = goNoGoDisplayCheck(goNoGoCheck, base.category);
+    const passed = displayCheck.status === "passed";
+    return {
+      ...base,
+      source: `${base.source} / go-no-go`,
+      status: displayCheck.status,
+      detail: passed
+        ? (displayCheck.detail || `Evidence valida nel report go/no-go per ${goNoGoName}.`)
+        : simpleBlockerReason(displayCheck),
+      nextAction: passed ? "Mantieni il report aggiornato dopo ogni modifica." : simpleBlockerAction(displayCheck),
+      required: displayCheck.required,
+    };
+  }
+
+  if (base.command === "production-go-no-go") {
+    const report = context.goNoGo || {};
+    const passed = report.status === "go";
+    const hasReport = Boolean(report.reportPath);
+    return {
+      ...base,
+      status: passed ? "passed" : hasReport ? "no-go" : "pending-live-proof",
+      detail: report.reportPath
+        ? `Ultimo report ${report.status || "unknown"}: ${report.reportPath}.`
+        : "Manca il report production-go-no-go.",
+      nextAction: passed ? "Conserva il report come evidence di release." : "Esegui production-go-no-go sul server e chiudi i blocchi richiesti.",
+      required: true,
+    };
+  }
+
+  const readinessMatch = findReadinessRequirementForCommand(context, base.command);
+  if (readinessMatch) {
+    const requirementAction = documentedReadinessAction(readinessMatch.requirement);
+    const rawStatus = readinessMatch.requirement.status || base.status;
+    const status = classifiedEvidenceStatus(rawStatus, [
+      base.command,
+      base.source,
+      readinessMatch.manifestTitle,
+      readinessMatch.requirement.title,
+      readinessMatch.requirement.liveProofStatus,
+      ...(readinessMatch.requirement.liveProofChecks || []),
+      requirementAction,
+    ].join(" "), base.category);
+    return {
+      ...base,
+      source: `${base.source} / ${readinessMatch.manifestTitle}`,
+      status,
+      detail: `Checklist: ${readinessMatch.requirement.title}. Stato repo: ${readinessMatch.requirement.sourceState}; evidence: ${readinessMatch.requirement.evidenceCount}.`,
+      nextAction: requirementAction || base.nextAction,
+      required: readinessMatch.requirement.liveProofRequired || base.required,
+    };
+  }
+
+  return {
+    ...base,
+    status: classifiedEvidenceStatus(base.status, [
+      base.command,
+      base.source,
+      base.detail,
+      base.nextAction,
+    ].join(" "), base.category),
+  };
+}
+
+function readDocumentedStatusEvidence(command) {
+  const spec = documentedStatusEvidenceSpecs[command];
+  if (!spec) return null;
+  const report = latestDocumentedReport(spec.directory, spec.prefix);
+  if (!report) return null;
+  const age = reportAgeDetail(report.payload, spec.maxAgeHours);
+  const passed = age.fresh && documentedEvidencePassed(report.payload, spec);
+  const failed = !passed && documentedEvidenceExplicitlyFailed(report.payload, spec);
+  return {
+    status: passed ? "passed" : failed ? "failed" : "pending-live-proof",
+    detail: passed
+      ? `Report reale valido: ${report.reportPath}; ${age.detail}.`
+      : failed
+        ? `Report presente ma non superato: ${report.reportPath}; status=${report.payload?.status || "unknown"}.`
+        : `Report presente ma non fresco: ${report.reportPath}; ${age.detail}.`,
+    nextAction: failed
+      ? "Correggi il controllo fallito e rigenera il report senza forzare falsi positivi."
+      : `Rilancia il comando per generare evidence fresca entro ${spec.maxAgeHours}h.`,
+    reportPath: report.reportPath,
+  };
+}
+
+function documentedEvidenceExplicitlyFailed(payload, spec) {
+  const status = String(payload?.status || "").toLowerCase();
+  if (["failed", "failure", "error"].includes(status)) return true;
+  if (["planned", "plan", "dry-run", "skipped", "pending"].includes(status)) return false;
+  if (["passed", "success", "go"].includes(status)) return !documentedEvidencePassed(payload, spec);
+  return false;
+}
+
+function latestDocumentedReport(directoryName, prefix) {
+  const root = path.resolve(docsRoot);
+  const directory = path.resolve(root, "reports", path.basename(directoryName));
+  if (!directory.startsWith(`${root}${path.sep}`) || !existsSync(directory)) return null;
+  try {
+    const cleanPrefix = String(prefix || "").replace(/[^a-z0-9-]/gi, "");
+    const fileName = readdirSync(directory)
+      .filter((name) => name.startsWith(cleanPrefix) && name.endsWith(".json"))
+      .sort()
+      .at(-1);
+    if (!fileName) return null;
+    const target = path.resolve(directory, fileName);
+    if (!target.startsWith(`${directory}${path.sep}`)) return null;
+    const payload = JSON.parse(readFileSync(target, "utf8"));
+    return {
+      payload: payload && typeof payload === "object" && !Array.isArray(payload) ? payload : {},
+      reportPath: `reports/${path.basename(directoryName)}/${fileName}`,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function documentedEvidencePassed(payload, spec) {
+  const status = String(payload?.status || "").toLowerCase();
+  switch (spec.pass) {
+    case "backup-success":
+      return status === "success" && Boolean(payload.artifactSha256 || payload.artifactPath);
+    case "healthcheck-coverage":
+      return status === "passed" && Number(payload.summary?.missingHealthchecks || 0) === 0;
+    case "full-restore-step":
+      return status === "success"
+        && Array.isArray(payload.steps)
+        && payload.steps.some((step) => step?.name === spec.step && step.status === "success");
+    case "failure-tests":
+      return status === "passed"
+        && Array.isArray(payload.targets)
+        && payload.targets.length > 0
+        && payload.targets.every((target) => target?.detected === true && target?.recovered === true);
+    case "local-check-passed":
+      return status === "passed"
+        && payload.scope === "platform-infrastructure"
+        && (!spec.command || payload.command === spec.command);
+    case "platform-admin-audit":
+      return status === "passed"
+        && payload.mode === "runtime"
+        && payload.scope === "platform-infrastructure"
+        && Number(payload.summary?.failedChecks || 0) === 0
+        && Number(payload.summary?.sensitiveKeyFindings || 0) === 0;
+    case "repo-report-passed":
+      return status === "passed" && String(payload.repoStatus || "passed") === "passed" && Number(payload.failedCount || 0) === 0;
+    case "secret-rotation":
+      return status === "passed"
+        && payload.mode === "evidence"
+        && String(payload.verify?.status || "") === "passed"
+        && Number(payload.summary?.failedSecrets || 0) === 0
+        && Number(payload.summary?.expiredSecrets || 0) === 0
+        && Number(payload.summary?.missingMaterializedFiles || 0) === 0;
+    case "postgres-backup-prune":
+      return status === "passed"
+        && ["apply", "dry-run"].includes(String(payload.mode || ""))
+        && Number(payload.summary?.regular?.total || 0) >= Number(payload.summary?.regular?.kept || 0)
+        && Number(payload.summary?.drills?.total || 0) >= Number(payload.summary?.drills?.kept || 0);
+    case "postgres-backup-signatures":
+      return status === "passed"
+        && Number(payload.summary?.total || 0) > 0
+        && Number(payload.summary?.signed || 0) + Number(payload.summary?.verified || 0) >= Number(payload.summary?.total || 0);
+    case "rollback-plan":
+      return ["passed", ""].includes(status)
+        && ["dry-run", "apply"].includes(String(payload.mode || ""))
+        && payload.composeValidation?.status === "passed";
+    case "status-passed":
+      return status === "passed";
+    case "status-passed-or-warning":
+      return ["passed", "warning"].includes(status);
+    case "status-success":
+      return status === "success";
+    case "summary-failed-zero":
+      return status === "passed" && Number(payload.summary?.failed || payload.summary?.failedChecks || 0) === 0;
+    case "vps-go-live-live":
+      return status === "passed" && payload.mode === "live";
+    default:
+      return false;
+  }
+}
+
+function reportAgeDetail(payload, maxAgeHours) {
+  const generatedAt = payload?.generatedAt || payload?.finishedAt || payload?.startedAt || "";
+  const generatedMs = Date.parse(generatedAt);
+  if (!Number.isFinite(generatedMs)) {
+    return { fresh: false, detail: "timestamp report mancante o non valido" };
+  }
+  const ageHours = Math.max(0, (Date.now() - generatedMs) / 36e5);
+  return {
+    fresh: ageHours <= Number(maxAgeHours || 24),
+    detail: `eta' ${ageHours.toFixed(1)}h, massimo ${Number(maxAgeHours || 24)}h`,
+  };
+}
+
+function documentedManifestStatusChecks(context, prefix, manifest) {
+  if (!manifest?.requirements?.length) return [];
+  return manifest.requirements.map((requirement) => {
+    const linkedGoNoGo = (requirement.liveProofChecks || [])
+      .map((name) => (context.goNoGo?.checks || []).find((check) => check.name === name))
+      .find(Boolean);
+    const displayGoNoGo = linkedGoNoGo ? goNoGoDisplayCheck(linkedGoNoGo, prefix) : null;
+    const rawStatus = displayGoNoGo?.status || requirement.status;
+    const requirementAction = documentedReadinessAction(requirement);
+    const status = classifiedEvidenceStatus(rawStatus, [
+      prefix,
+      manifest.title || "Governance",
+      requirement.id,
+      requirement.title,
+      requirement.liveProofStatus,
+      ...(requirement.liveProofChecks || []),
+      displayGoNoGo?.detail || "",
+      displayGoNoGo ? simpleBlockerReason(displayGoNoGo) : "",
+      displayGoNoGo ? simpleBlockerAction(displayGoNoGo) : "",
+      requirementAction,
+    ].join(" "), prefix);
+    const passed = status === "passed";
+    return {
+      id: `${prefix}-${requirement.id}`,
+      title: requirement.title,
+      category: prefix,
+      source: manifest.title || "Governance",
+      status,
+      detail: displayGoNoGo
+        ? (passed ? (displayGoNoGo.detail || "Requirement coperto dal report go/no-go.") : simpleBlockerReason(displayGoNoGo))
+        : `Manifest governance: ${requirement.sourceState}; evidence repo: ${requirement.evidenceCount}; live proof: ${requirement.liveProofStatus}.`,
+      nextAction: displayGoNoGo
+        ? (passed ? "Mantieni il report aggiornato dopo ogni modifica." : simpleBlockerAction(displayGoNoGo))
+        : requirementAction,
+      required: requirement.liveProofRequired !== false,
+    };
+  });
+}
+
+function documentedReadinessAction(requirement) {
+  if (!requirement) return "";
+  const checks = Array.isArray(requirement.liveProofChecks) && requirement.liveProofChecks.length
+    ? ` Gate collegati: ${requirement.liveProofChecks.join(", ")}.`
+    : "";
+  if (requirement.liveProofRequired) {
+    return `Completa la prova live o provider per "${requirement.title}" e archivia il report non-secret.${checks}`;
+  }
+  return `Esegui la verifica documentata per "${requirement.title}" e conserva l'evidence aggiornata.${checks}`;
+}
+
+function findReadinessRequirementForCommand(context, command) {
+  const manifests = [
+    context.readiness?.manifests?.productionReadiness,
+    context.readiness?.manifests?.enterprise,
+  ].filter(Boolean);
+  for (const manifest of manifests) {
+    const requirement = (manifest.requirements || []).find((item) => (
+      (item.evidenceRefs || []).some((ref) => ref.name === command || ref.path === `scripts/${command}.sh`)
+    ));
+    if (requirement) return { manifestTitle: manifest.title || manifest.id || "Governance", requirement };
+  }
+  return null;
+}
+
+function readLatestProductionReadinessReport() {
+  return readLatestLiveProofReport("production-readiness", "production-readiness-", "production-readiness-live", "Production Readiness Live Proof");
+}
+
+function readLatestEnterpriseRequirementsReport() {
+  return readLatestLiveProofReport("enterprise-requirements", "enterprise-requirements-", "enterprise-requirements-live", "Enterprise Requirements Live Proof");
+}
+
+function readLatestGoNoGoReport() {
+  const root = path.resolve(docsRoot);
+  const dir = path.resolve(root, "reports", "go-no-go");
+  const fallback = {
+    status: "unknown",
+    generatedAt: "",
+    reportPath: "",
+    summary: { total: 1, required: 1, passed: 0, failed: 0, pendingLiveProof: 1, pendingProvider: 0, blockingRequired: 1, failedRequired: 0, pendingRequired: 1 },
+    blockers: [{
+      name: "production-go-no-go-report",
+      required: true,
+      status: "pending-live-proof",
+      blocker: "No production go/no-go report was found.",
+      detail: "Run sh ./scripts/production-go-no-go.sh before evaluating go-live.",
+      reportPath: "",
+      generatedAt: "",
+    }],
+    checks: [],
+  };
+  if (!dir.startsWith(`${root}${path.sep}`) || !existsSync(dir)) return fallback;
+  try {
+    const fileName = readdirSync(dir)
+      .filter((name) => /^production-go-no-go-\d+\.json$/.test(name))
+      .sort()
+      .at(-1);
+    if (!fileName) return fallback;
+    const parsed = JSON.parse(readFileSync(path.join(dir, fileName), "utf8"));
+    const checks = Array.isArray(parsed.checks) ? parsed.checks.map(goNoGoCheckRecord).filter(Boolean) : [];
+    return sanitizeEvent({
+      status: sanitizeIdentifier(parsed.status || "unknown") || "unknown",
+      generatedAt: sanitizeMessage(parsed.generatedAt || ""),
+      reportPath: `reports/go-no-go/${fileName}`,
+      markdownPath: `reports/go-no-go/${fileName.replace(/\.json$/, ".md")}`,
+      summary: {
+        total: Number(parsed.summary?.total || checks.length || 0),
+        required: Number(parsed.summary?.required || checks.filter((check) => check.required).length || 0),
+        passed: Number(parsed.summary?.passed || checks.filter((check) => check.status === "passed").length || 0),
+        failed: Number(parsed.summary?.failed || checks.filter((check) => check.status === "failed").length || 0),
+        pendingLiveProof: Number(parsed.summary?.pendingLiveProof || checks.filter((check) => check.status === "pending-live-proof").length || 0),
+        pendingProvider: Number(parsed.summary?.pendingProvider || checks.filter((check) => check.status === "pending-provider").length || 0),
+        blockingRequired: Number(parsed.summary?.blockingRequired || checks.filter((check) => check.required && check.status !== "passed").length || 0),
+        failedRequired: Number(parsed.summary?.failedRequired || 0),
+        pendingRequired: Number(parsed.summary?.pendingRequired || 0),
+      },
+      blockers: checks.filter((check) => check.required && check.status !== "passed"),
+      checks,
+    });
+  } catch {
+    return fallback;
+  }
+}
+
+function goNoGoCheckRecord(check) {
+  if (!check || typeof check !== "object") return null;
+  return {
+    name: sanitizeIdentifier(check.name || "unknown") || "unknown",
+    required: check.required !== false,
+    status: sanitizeIdentifier(check.status || "unknown") || "unknown",
+    blocker: sanitizeOptionalRef(check.blocker || ""),
+    detail: sanitizeMessage(check.detail || ""),
+    reportPath: check.reportPath ? readinessReportRef(check.reportPath) : "",
+    generatedAt: sanitizeMessage(check.generatedAt || ""),
+  };
+}
+
+function readLatestLiveProofReport(reportDirectory, reportPrefix, reportId, reportTitle) {
+  const root = path.resolve(docsRoot);
+  const cleanDirectory = path.basename(reportDirectory);
+  const cleanPrefix = String(reportPrefix || "").replace(/[^a-z0-9-]/gi, "");
+  const dir = path.resolve(root, "reports", cleanDirectory);
+  if (!(dir === root || dir.startsWith(`${root}${path.sep}`)) || !existsSync(dir)) return null;
+  try {
+    const pattern = new RegExp(`^${cleanPrefix}\\d+\\.json$`);
+    const files = readdirSync(dir)
+      .filter((name) => pattern.test(name))
+      .sort();
+    const fileName = files[files.length - 1];
+    if (!fileName) return null;
+    const target = path.resolve(dir, fileName);
+    if (!(target === dir || target.startsWith(`${dir}${path.sep}`))) return null;
+    const parsed = JSON.parse(readFileSync(target, "utf8"));
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+    return readinessLiveReportRecord(parsed, cleanDirectory, fileName, reportId, reportTitle);
+  } catch {
+    return null;
+  }
+}
+
+function readinessLiveReportRecord(report, reportDirectory, fileName, reportId, reportTitle) {
+  const requirements = (Array.isArray(report.requirements) ? report.requirements : [])
+    .map(readinessLiveRequirementRecord)
+    .filter(Boolean);
+  return {
+    id: sanitizeIdentifier(reportId || "live-proof-report"),
+    title: sanitizeMessage(reportTitle || "Live Proof Report"),
+    status: sanitizeIdentifier(report.status || "unknown"),
+    repoStatus: sanitizeIdentifier(report.repoStatus || "unknown"),
+    liveProofStatus: sanitizeIdentifier(report.liveProofStatus || "unknown"),
+    generatedAt: sanitizeMessage(report.generatedAt || ""),
+    reportPath: `reports/${path.basename(reportDirectory)}/${path.basename(fileName)}`,
+    markdownPath: `reports/${path.basename(reportDirectory)}/${path.basename(fileName).replace(/\.json$/, ".md")}`,
+    passedCount: Number(report.passedCount || 0),
+    failedCount: Number(report.failedCount || 0),
+    requirements,
+  };
+}
+
+function readinessLiveRequirementRecord(row) {
+  if (!row || typeof row !== "object") return null;
+  const id = sanitizeIdentifier(row.id || "unknown");
+  if (!id) return null;
+  const evidence = row.liveProofEvidence && typeof row.liveProofEvidence === "object" ? row.liveProofEvidence : {};
+  return {
+    id,
+    status: sanitizeIdentifier(row.status || "unknown"),
+    repoEvidenceStatus: sanitizeIdentifier(row.repoEvidenceStatus || "unknown"),
+    liveProofStatus: sanitizeIdentifier(row.liveProofStatus || "unknown"),
+    detail: sanitizeMessage(evidence.detail || ""),
+    reportPath: evidence.reportPath ? readinessReportRef(evidence.reportPath) : "",
+    checks: Array.isArray(evidence.checks) ? evidence.checks.map((check) => ({
+      name: sanitizeIdentifier(check?.name || "unknown"),
+      status: sanitizeIdentifier(check?.status || "unknown"),
+      reportPath: check?.reportPath ? readinessReportRef(check.reportPath) : "",
+    })) : [],
+  };
+}
+
+function readinessReportRef(reportPath) {
+  const value = String(reportPath || "");
+  if (value.startsWith("/infra/")) return sanitizeRef(value.slice("/infra/".length));
+  const root = path.resolve(docsRoot);
+  const resolved = path.resolve(value);
+  if (resolved.startsWith(`${root}${path.sep}`)) return sanitizeRef(path.relative(root, resolved));
+  return sanitizeRef(value);
 }
 
 function readinessCheck({ id, title, status, evidence = [], nextAction = "", liveProofRequired = false }) {
@@ -1773,8 +2981,11 @@ function readinessSummary(checks) {
   };
 }
 
-function manifestReadiness(id, title, manifest) {
-  const requirements = Array.isArray(manifest.requirements) ? manifest.requirements.map((requirement) => manifestRequirementRecord(requirement)) : [];
+function manifestReadiness(id, title, manifest, liveProofReport = null) {
+  const liveProofById = new Map((liveProofReport?.requirements || []).map((row) => [row.id, row]));
+  const requirements = Array.isArray(manifest.requirements)
+    ? manifest.requirements.map((requirement) => manifestRequirementRecord(requirement, liveProofById.get(sanitizeIdentifier(requirement.id || "unknown"))))
+    : [];
   const summary = readinessSummary(requirements);
   const states = {};
   for (const item of requirements) states[item.sourceState] = (states[item.sourceState] || 0) + 1;
@@ -1787,24 +2998,47 @@ function manifestReadiness(id, title, manifest) {
     requirementCount: requirements.length,
     manifestPath: `governance/${manifest.fileName || `${id}.json`}`,
     liveProofCheckRequired: Boolean(manifest.liveProofCheckRequired),
+    liveProofReport: liveProofReport ? {
+      status: liveProofReport.status,
+      liveProofStatus: liveProofReport.liveProofStatus,
+      generatedAt: liveProofReport.generatedAt,
+      reportPath: liveProofReport.reportPath,
+      passedCount: liveProofReport.passedCount,
+      failedCount: liveProofReport.failedCount,
+    } : null,
     states,
     summary,
     requirements,
   };
 }
 
-function manifestRequirementRecord(requirement) {
+function manifestRequirementRecord(requirement, liveProofRow = null) {
   const sourceState = sanitizeIdentifier(requirement.state || "unknown") || "unknown";
   const liveProofRequired = Boolean(requirement.liveProof);
   const evidence = Array.isArray(requirement.evidence) ? requirement.evidence : [];
-  const status = manifestRequirementStatus(sourceState, liveProofRequired);
+  const liveProofStatus = sanitizeIdentifier(liveProofRow?.liveProofStatus || "");
+  let status = manifestRequirementStatus(sourceState, liveProofRequired);
+  let repoEvidenceStatus = status === "needs-work" ? "incomplete" : "tracked";
+  let nextAction = liveProofRequired ? sanitizeMessage(requirement.liveProof || "Archive production live proof.") : "Keep repository evidence current.";
+  if (liveProofRequired && liveProofRow) {
+    repoEvidenceStatus = liveProofRow.repoEvidenceStatus || repoEvidenceStatus;
+    if (liveProofStatus === "passed") {
+      status = "passed";
+      nextAction = liveProofRow.detail ? `Live proof passed: ${liveProofRow.detail}` : "Live proof passed by production readiness evidence.";
+    } else if (liveProofStatus === "failed") {
+      status = "pending-live-proof";
+      nextAction = liveProofRow.detail || nextAction;
+    }
+  }
   return {
     id: sanitizeIdentifier(requirement.id || "unknown"),
     title: sanitizeMessage(requirement.title || "Untitled requirement"),
     status,
     sourceState,
-    repoEvidenceStatus: status === "needs-work" ? "incomplete" : "tracked",
+    repoEvidenceStatus,
     liveProofRequired,
+    liveProofStatus: liveProofStatus || (liveProofRequired ? "pending-external-evidence" : "not-required"),
+    liveProofReportPath: liveProofRow?.reportPath || "",
     liveProofChecks: Array.isArray(requirement.liveProofChecks) ? requirement.liveProofChecks.map((item) => sanitizeIdentifier(item)).filter(Boolean) : [],
     evidenceCount: evidence.length,
     evidenceRefs: evidence.map((item) => ({
@@ -1812,7 +3046,7 @@ function manifestRequirementRecord(requirement) {
       path: item.path ? sanitizeRef(item.path) : "",
       name: item.name ? sanitizeRef(item.name) : "",
     })),
-    nextAction: liveProofRequired ? sanitizeMessage(requirement.liveProof || "Archive production live proof.") : "Keep repository evidence current.",
+    nextAction: sanitizeMessage(nextAction),
   };
 }
 
@@ -1840,49 +3074,74 @@ function readGovernanceManifest(fileName) {
 }
 
 function discoverProjects(state) {
-  if (!existsSync(projectsRoot)) return [];
   const projects = [];
   const seen = new Set();
-  for (const entry of readdirSync(projectsRoot, { withFileTypes: true })) {
-    if (entry.name === "." || entry.name === "..") continue;
-    const slug = slugify(entry.name);
-    if (!slug || seen.has(slug) || ["public", "node-modules", "vendor"].includes(slug)) continue;
-    const projectPath = path.join(projectsRoot, entry.name);
-    if (!safeIsDirectory(projectPath)) continue;
-    const metadata = state.projects?.[slug] || {};
-    if (metadata.deletedAt) continue;
-    const isPhp = isPhpProject(projectPath);
-    const isNode = existsSync(path.join(projectPath, "package.json"));
-    if (!isPhp && !isNode) continue;
-    const type = isPhp ? "PHP" : "Node";
-    const host = type === "Node" && nodeHosts.has(slug) ? nodeHosts.get(slug) : `${slug}${hostSuffix}`;
-    const archived = Boolean(metadata.archivedAt);
-    const enabled = metadata.enabled !== false && !archived;
-    projects.push({
-      id: slug,
-      slug,
-      name: metadata.displayName || humanName(entry.name),
-      type,
-      runtime: type.toLowerCase(),
-      host,
-      href: `https://${host}/`,
-      enabled,
-      status: archived ? "archived" : enabled ? "active" : "disabled",
-      archivedAt: metadata.archivedAt || null,
-      updatedAt: metadata.updatedAt || null,
-      source: "project-discovery",
-      filesystemExists: true,
-      filesystemTouched: false,
-      databaseTouched: false,
-      summary: archived ? "Archived in local Control Center state" : type === "PHP" ? "Apache/PHP local host" : "Node routed service",
-    });
-    seen.add(slug);
+  const seenRealPaths = new Set();
+  const rootRealPath = existsSync(projectsRoot) ? safeRealpath(projectsRoot) : "";
+  if (discoverHostedProjects && existsSync(projectsRoot)) {
+    for (const entry of readdirSync(projectsRoot, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+      if (entry.name === "." || entry.name === "..") continue;
+      const directorySlug = slugify(entry.name);
+      if (!directorySlug || seen.has(directorySlug) || ["public", "node-modules", "vendor"].includes(directorySlug)) continue;
+      const projectPath = path.join(projectsRoot, entry.name);
+      if (!safeIsDirectory(projectPath)) continue;
+      const realProjectPath = safeRealpath(projectPath);
+      if (rootRealPath && !(realProjectPath === rootRealPath || realProjectPath.startsWith(`${rootRealPath}${path.sep}`))) continue;
+      if (seenRealPaths.has(realProjectPath)) continue;
+      const manifest = readProjectManifest(projectPath);
+      const isPhp = isPhpProject(projectPath);
+      const isNode = existsSync(path.join(projectPath, "package.json"));
+      const isStatic = isStaticProject(projectPath);
+      if (!isPhp && !isNode && !isStatic) continue;
+      const manifestProjects = manifestProjectEntries(manifest);
+      const projectEntries = manifestProjects.length ? manifestProjects : [{}];
+      const baseAlias = projectEntries.length === 1 ? directorySlug : "";
+      for (const manifestProject of projectEntries) {
+        const slug = slugify(manifestProject?.slug || directorySlug);
+        if (!slug || seen.has(slug) || ["public", "node-modules", "vendor"].includes(slug)) continue;
+        const metadata = state.projects?.[slug] || state.projects?.[directorySlug] || {};
+        if (metadata.deletedAt) continue;
+        const manifestRuntime = normalizeProjectRuntime(manifestProject?.type || manifest.type || "");
+        const runtime = manifestRuntime || (isPhp ? "php" : isNode ? "node" : "static");
+        const type = projectRuntimeLabel(runtime);
+        const explicitHost = normalizeHost(typeof manifestProject?.host === "string" ? manifestProject.host : "");
+        const host = explicitHost || (runtime === "node" && nodeHosts.has(slug) ? nodeHosts.get(slug) : `${slug}${hostSuffix}`);
+        const archived = Boolean(metadata.archivedAt);
+        const enabled = metadata.enabled !== false && !archived;
+        const aliases = projectAliases(slug, directorySlug, manifestProject, baseAlias);
+        projects.push({
+          id: slug,
+          slug,
+          aliases,
+          name: metadata.displayName || manifestProject?.name || humanName(slug),
+          type,
+          runtime,
+          description: sanitizeOptionalDescription(metadata.description || manifestProject?.summary || manifestProject?.description || ""),
+          host,
+          href: `https://${host}/`,
+          enabled,
+          status: archived ? "archived" : enabled ? "active" : "disabled",
+          archivedAt: metadata.archivedAt || null,
+          updatedAt: metadata.updatedAt || null,
+          source: "project-discovery",
+          filesystemExists: true,
+          filesAvailable: true,
+          relativePath: relativeProjectPathFromRealpath(realProjectPath, rootRealPath) || entry.name,
+          filesystemTouched: false,
+          databaseTouched: false,
+          summary: archived ? "Archived in local Control Center state" : metadata.description || manifestProject?.summary || (runtime === "php" ? "Apache/PHP local host" : runtime === "static" ? "Static site" : "Node routed service"),
+        });
+        seen.add(slug);
+        for (const alias of aliases) seen.add(alias);
+      }
+      seenRealPaths.add(realProjectPath);
+    }
   }
   for (const [key, metadata] of Object.entries(state.projects || {})) {
     const slug = slugify(key);
     if (!slug || seen.has(slug) || metadata?.deletedAt || metadata?.declaredProject !== true) continue;
-    const runtime = ["node", "php"].includes(metadata.runtime) ? metadata.runtime : "node";
-    const type = runtime === "php" ? "PHP" : "Node";
+    const runtime = ["node", "php", "static"].includes(metadata.runtime) ? metadata.runtime : "node";
+    const type = projectRuntimeLabel(runtime);
     const archived = Boolean(metadata.archivedAt);
     const enabled = metadata.enabled === true && !archived;
     const host = normalizeHost(metadata.host || `${slug}${hostSuffix}`);
@@ -1892,6 +3151,7 @@ function discoverProjects(state) {
       name: metadata.displayName || humanName(slug),
       type,
       runtime,
+      description: sanitizeOptionalDescription(metadata.description || ""),
       host,
       href: `https://${host}/`,
       enabled,
@@ -1900,64 +3160,261 @@ function discoverProjects(state) {
       updatedAt: metadata.updatedAt || metadata.createdAt || null,
       source: "control-center-state",
       filesystemExists: false,
+      filesAvailable: false,
+      relativePath: "",
       filesystemTouched: false,
       databaseTouched: false,
-      summary: archived ? "Archived in local Control Center state" : "Declared in Control Center state; add source files or link applications before enabling routing.",
+      summary: archived ? "Archived in local Control Center state" : metadata.description || "Declared in Control Center state; add source files or link applications before enabling routing.",
     });
     seen.add(slug);
   }
   projects.sort((a, b) => {
-    const typeOrder = { PHP: 0, Node: 1 };
-    return (typeOrder[a.type] - typeOrder[b.type]) || a.name.localeCompare(b.name);
+    const typeOrder = { php: 0, node: 1, static: 2 };
+    return ((typeOrder[a.runtime] ?? 9) - (typeOrder[b.runtime] ?? 9)) || a.name.localeCompare(b.name);
   });
   return projects;
 }
 
-function renderControlCenter(context, params) {
-  const mode = params.get("mode") === "advanced" ? "advanced" : "simple";
-  const nav = navigationForMode(mode);
-  const groups = navigationGroupsForMode(mode);
-  const defaultSection = groups[0]?.tabs[0]?.id || nav[0]?.id || "overview";
-  const requestedSection = params.get("section") || defaultSection;
-  const section = nav.some((item) => item.id === requestedSection) ? requestedSection : defaultSection;
-  const activeGroup = groups.find((group) => group.tabs.some((item) => item.id === section)) || groups[0];
-  const selectedProject = context.projects.some((project) => project.slug === params.get("project")) ? params.get("project") : "";
-  const scoped = (items) => selectedProject ? items.filter((item) => (item.projectId || item.slug) === selectedProject) : items;
-  const title = nav.find((item) => item.id === section)?.label || "Overview";
-
-  let body = "";
-  if (mode === "simple") {
-    if (section === "overview") body = renderOverview(context);
-    else if (section === "projects") body = renderProjects(scoped(context.projects));
-    else if (section === "applications") body = renderApplications(scoped(context.applications), context.projects, context.webspaces);
-    else if (section === "domains") body = renderDomains(context.domains, scoped(context.subdomains), context.projects);
-    else if (section === "webspaces") body = renderWebspaces(scoped(context.webspaces), context.projects);
-    else if (section === "resources") body = renderResources(context.resources, context.projects);
-    else if (section === "security") body = renderSecurity(context.security);
-    else if (section === "backups") body = renderBackups(context.backups, context.backupRecords);
-    else if (section === "logs") body = renderLogsAlerts(context.logsAlerts);
-    else body = renderSettings(context);
-  } else {
-    if (section === "audit") body = renderAudit(context.audit, "Audit Log");
-    else if (section === "network") body = renderNetworkAdvanced(context.network);
-    else if (section === "infrastructure") body = renderInfrastructure(context.advancedServices);
-    else if (section === "databases") body = renderDatabases(scoped(context.databases), context.databaseEngines, context.projects);
-    else if (section === "storage") body = renderStorage(scoped(context.storageBuckets), context.storageProvider, context.projects);
-    else if (section === "secrets") body = renderSecrets(scoped(context.sensitiveMaterials), context.materialStores, context.projects);
-    else if (section === "workers-jobs") body = renderWorkersJobs(scoped(context.workerRuntimes), scoped(context.jobQueues), scoped(context.jobRecords), scoped(context.jobSchedules), context.projects);
-    else if (section === "deployments") body = renderDeployments(scoped(context.deployments));
-    else if (section === "readiness") body = renderReadiness(context.readiness);
-    else if (section === "monitoring") body = renderMonitoringAdvanced(context.monitoring);
-    else if (section === "logs-advanced") body = renderAdvancedPanel(title, section, context, "Loki query and export surfaces stay metadata-only here.");
-    else if (section === "alerts-advanced") body = renderAdvancedPanel(title, section, context, "Alert delivery evidence is verified through the ops runner before production use.");
-    else if (section === "security-advanced") body = renderAdvancedPanel(title, section, context, "Security controls stay behind explicit adapters and confirmation gates.");
-    else if (section === "identity") body = renderIdentityAccess(context.identityAccess);
-    else if (section === "backup-restore") body = renderBackups(context.backups, context.backupRecords);
-    else body = renderAdvancedPanel(title, section, context);
+function readProjectManifest(projectPath) {
+  const target = path.join(projectPath, ".platform", "project.json");
+  if (!existsSync(target)) return {};
+  try {
+    const stat = statSync(target);
+    if (!stat.isFile() || stat.size > 200000) return {};
+    const parsed = JSON.parse(readFileSync(target, "utf8"));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
   }
+}
+
+function manifestProjectEntries(manifest) {
+  const projects = Array.isArray(manifest.projects) ? manifest.projects : [];
+  return projects.filter((item) => item && typeof item === "object" && !Array.isArray(item) && (item.slug || item.name || item.type));
+}
+
+function normalizeProjectRuntime(value) {
+  const next = String(value || "").toLowerCase().trim();
+  if (next === "php" || next === "node" || next === "static") return next;
+  return "";
+}
+
+function projectAliases(slug, directorySlug, manifestProject, baseAlias = directorySlug) {
+  const aliases = [
+    baseAlias,
+    ...(Array.isArray(manifestProject?.aliases) ? manifestProject.aliases : []),
+  ].map((item) => slugify(item)).filter((item) => item && item !== slug);
+  return [...new Set(aliases)].slice(0, 20);
+}
+
+function relativeProjectPathFromRealpath(realProjectPath, rootRealPath) {
+  if (!rootRealPath || !(realProjectPath === rootRealPath || realProjectPath.startsWith(`${rootRealPath}${path.sep}`))) return "";
+  return path.relative(rootRealPath, realProjectPath).replaceAll(path.sep, "/");
+}
+
+function discoverProjectDatabaseHints(projects) {
+  const hints = {};
+  for (const project of projects) {
+    const names = readProjectDatabaseHints(project);
+    if (names.length) hints[project.slug] = names;
+  }
+  return hints;
+}
+
+function readProjectDatabaseHints(project) {
+  if (!project.filesAvailable || !project.relativePath) return [];
+  const candidateFiles = [
+    ".env",
+    ".env.local",
+    ".env.production",
+    "private/.env",
+    "config/config.php",
+    "config/database.php",
+    "config/database.json",
+    ".platform/project.json",
+  ];
+  const names = new Set();
+  let root = "";
+  try {
+    root = resolveProjectRoot(project);
+  } catch {
+    return [];
+  }
+  for (const relative of candidateFiles) {
+    const target = path.resolve(root, relative);
+    if (!(target === root || target.startsWith(`${root}${path.sep}`)) || !existsSync(target)) continue;
+    try {
+      const stat = statSync(target);
+      if (!stat.isFile() || stat.size > 200000) continue;
+      for (const name of extractDatabaseNames(readFileSync(target, "utf8"))) names.add(name);
+    } catch {
+      // Ignore unreadable optional app config files.
+    }
+  }
+  return [...names].sort();
+}
+
+function extractDatabaseNames(text) {
+  const names = new Set();
+  const patterns = [
+    /(?:^|\n)\s*(?:export\s+)?(?:DB_NAME|DB_DATABASE|DATABASE_NAME|MYSQL_DATABASE|MARIADB_DATABASE|POSTGRES_DB)\s*=\s*["']?([A-Za-z][A-Za-z0-9_]{0,62})/gi,
+    /["'](?:db|database|mysql|mariadb|postgres)["']\s*=>[\s\S]{0,400}?["']name["']\s*=>\s*["']([A-Za-z][A-Za-z0-9_]{0,62})["']/gi,
+    /"database"\s*:\s*"([A-Za-z][A-Za-z0-9_]{0,62})"/gi,
+  ];
+  for (const pattern of patterns) {
+    for (const match of text.matchAll(pattern)) {
+      try {
+        names.add(validateDatabaseName(match[1]));
+      } catch {
+        // Ignore non-database values.
+      }
+    }
+  }
+  return [...names];
+}
+
+function readProjectFiles(id, requestedPath, context) {
+  const project = findById(context.projects, id, "Project");
+  if (!project.filesAvailable || !project.relativePath) {
+    return sanitizeEvent({
+      projectId: project.slug,
+      available: false,
+      path: "",
+      parentPath: "",
+      entries: [],
+      message: "Project source files are not mounted.",
+    });
+  }
+  const projectRoot = resolveProjectRoot(project);
+  const relativePath = safeRelativeProjectPath(requestedPath || "");
+  const target = path.resolve(projectRoot, relativePath);
+  if (!(target === projectRoot || target.startsWith(`${projectRoot}${path.sep}`))) {
+    throw new ValidationError("Invalid project file path.");
+  }
+  if (!existsSync(target)) {
+    throw new ValidationError("Project file path not found.");
+  }
+  assertNoProjectPathSymlink(projectRoot, relativePath);
+  const targetStat = lstatSync(target);
+  if (targetStat.isSymbolicLink()) {
+    throw new ValidationError("Symbolic links are not browsed from the Control Center.");
+  }
+  if (!targetStat.isDirectory()) {
+    return sanitizeEvent({
+      projectId: project.slug,
+      available: true,
+      path: relativePath,
+      parentPath: parentRelativePath(relativePath),
+      entries: [fileEntryRecord(target, path.basename(target), relativePath)],
+      message: "",
+    });
+  }
+  const entries = readdirSync(target, { withFileTypes: true })
+    .filter((entry) => !hiddenProjectFile(entry.name))
+    .slice(0, 250)
+    .map((entry) => fileEntryRecord(path.join(target, entry.name), entry.name, joinRelativePath(relativePath, entry.name)))
+    .filter(Boolean)
+    .sort((a, b) => (a.type === b.type ? a.name.localeCompare(b.name) : a.type === "directory" ? -1 : 1));
+  return sanitizeEvent({
+    projectId: project.slug,
+    available: true,
+    path: relativePath,
+    parentPath: parentRelativePath(relativePath),
+    entries,
+    message: "",
+  });
+}
+
+function resolveProjectRoot(project) {
+  const root = path.resolve(projectsRoot);
+  const relativePath = safeRelativeProjectPath(project.relativePath || project.slug);
+  const target = path.resolve(root, relativePath);
+  if (!(target === root || target.startsWith(`${root}${path.sep}`))) {
+    throw new ValidationError("Invalid project root.");
+  }
+  if (!existsSync(target)) {
+    throw new ValidationError("Project root not found.");
+  }
+  const rootRealPath = safeRealpath(root);
+  const targetRealPath = safeRealpath(target);
+  if (!(targetRealPath === rootRealPath || targetRealPath.startsWith(`${rootRealPath}${path.sep}`))) {
+    throw new ValidationError("Project root leaves the projects directory.");
+  }
+  return targetRealPath;
+}
+
+function safeRelativeProjectPath(value) {
+  const normalized = String(value || "").replaceAll("\\", "/").replace(/^\/+|\/+$/g, "");
+  if (!normalized) return "";
+  if (normalized.includes("..") || /^[A-Za-z]:/.test(normalized)) throw new ValidationError("Invalid project file path.");
+  if (!/^[A-Za-z0-9._/@ -]+$/.test(normalized)) throw new ValidationError("Invalid project file path.");
+  return normalized;
+}
+
+function safeRealpath(value) {
+  try {
+    return realpathSync(value);
+  } catch {
+    throw new ValidationError("Project file path not found.");
+  }
+}
+
+function assertNoProjectPathSymlink(projectRoot, relativePath) {
+  const parts = safeRelativeProjectPath(relativePath).split("/").filter(Boolean);
+  let current = projectRoot;
+  for (const part of parts) {
+    current = path.join(current, part);
+    const stat = lstatSync(current);
+    if (stat.isSymbolicLink()) {
+      throw new ValidationError("Symbolic links are not browsed from the Control Center.");
+    }
+  }
+}
+
+function joinRelativePath(base, name) {
+  return [base, name].filter(Boolean).join("/");
+}
+
+function parentRelativePath(value) {
+  const normalized = safeRelativeProjectPath(value);
+  if (!normalized) return "";
+  const parent = path.posix.dirname(normalized.replaceAll("\\", "/"));
+  return parent === "." ? "" : parent;
+}
+
+function hiddenProjectFile(name) {
+  return [".git", "node_modules", "vendor", ".next", "dist", "build", ".turbo", ".cache", ".env", ".env.local", ".env.production"].includes(name);
+}
+
+function fileEntryRecord(filePath, name, relativePath) {
+  try {
+    const stat = lstatSync(filePath);
+    const isSymlink = stat.isSymbolicLink();
+    return {
+      name: sanitizeRef(name),
+      path: sanitizeRef(relativePath),
+      type: isSymlink ? "symlink" : stat.isDirectory() ? "directory" : "file",
+      sizeBytes: stat.isDirectory() || isSymlink ? 0 : stat.size,
+      sizeLabel: stat.isDirectory() ? "" : bytesLabel(stat.size),
+      modifiedAt: stat.mtime.toISOString(),
+      browsable: stat.isDirectory() && !isSymlink,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function renderControlCenter(context, params) {
+  const sections = operationsPortalSections();
+  const requestedSection = params.get("section") || "status";
+  const section = sections.some((item) => item.id === requestedSection) ? requestedSection : "status";
+  const selectedProject = context.projects.some((project) => project.slug === params.get("project")) ? params.get("project") : context.projects[0]?.slug || "";
+  const currentProject = context.projects.find((project) => project.slug === selectedProject) || null;
+  const title = sections.find((item) => item.id === section)?.label || "Status";
+  const body = renderOperationsSection(section, context, params, currentProject);
 
   return `<!doctype html>
-<html lang="en">
+<html lang="it">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -1967,40 +3424,2144 @@ ${controlCenterStylesheetLinks()}
 ${controlCenterScriptTags()}
 </head>
 <body data-cc-theme="light">
-<main aria-busy="false" class="cc-app-shell section-${escapeHtml(section)}">
-  <div class="cc-shell-bg" aria-hidden="true"></div>
-  <div class="cc-stage">
-    ${renderControlSidebar(groups, activeGroup.id, section, mode, selectedProject)}
-    <section aria-label="${escapeHtml(activeGroup.label)}" class="cc-scene" data-scroll-root="" tabindex="0">
-      ${renderControlTopbar(context, mode)}
-      <div class="cc-sheet">
-        <header class="control-page-head">
-          <div>
-            <p class="eyebrow">${escapeHtml(environment.toUpperCase())} MODE / ${escapeHtml(activeGroup.label)}</p>
-            <h1 id="control-page-title">${escapeHtml(title)}</h1>
-          </div>
-          <div class="top-actions">
-            <span class="pill ${environment === "production" ? "danger" : "info"}">${escapeHtml(context.overview.modeEvidence)}</span>
-            ${authRequired ? '<a class="button" href="/logout">Logout</a>' : ""}
-            <form method="get" class="switcher">
-              <input type="hidden" name="mode" value="${escapeHtml(mode)}">
-              <input type="hidden" name="section" value="${escapeHtml(section)}">
-              <select name="project" aria-label="Project switcher">
-                <option value="">All projects</option>
-                ${context.projects.map((project) => `<option value="${escapeHtml(project.slug)}" ${selectedProject === project.slug ? "selected" : ""}>${escapeHtml(project.name)}</option>`).join("")}
-              </select>
-            </form>
-          </div>
-        </header>
-        <section class="ui-panel-stack control-tab-panel" id="control-${escapeHtml(section)}-panel" role="region" aria-labelledby="control-page-title">
-          ${body}
-        </section>
+<main aria-busy="false" class="cc-app-shell ops-shell section-${escapeHtml(section)}">
+  <div class="ops-layout">
+    <aside class="ops-topbar ops-sidebar" aria-label="Menu principale">
+      <a class="ops-brand" href="/?section=status" aria-label="Platform operations"><span class="ops-brand-mark">P</span><strong>Platform</strong></a>
+      <span class="ops-status-pill ${context.goNoGo.status === "go" ? "go" : "no-go"}">${context.goNoGo.status === "go" ? "GO LIVE" : "NO GO LIVE"}</span>
+      <nav class="ops-nav" aria-label="Sezioni portal">
+        ${sections.filter((item) => !item.hidden).map((item) => `<a class="${item.id === section ? "active" : ""}" ${item.id === section ? 'aria-current="page"' : ""} href="/?section=${escapeHtml(item.id)}">${controlIcon(item.icon)}<span>${escapeHtml(item.label)}</span></a>`).join("")}
+      </nav>
+      ${authRequired ? '<a class="ops-icon-link" href="/logout" aria-label="Logout">Logout</a>' : ""}
+    </aside>
+    <section class="ops-page" aria-labelledby="control-page-title">
+      <div class="ops-page-head">
+        <div>
+          <h1 id="control-page-title">${escapeHtml(title)}</h1>
+          <span>${escapeHtml(operationPageHint(section, context))}</span>
+        </div>
       </div>
+      ${body}
     </section>
   </div>
 </main>
 </body>
   </html>`;
+}
+
+function operationsPortalSections() {
+  return [
+    { id: "status", label: "Stato", icon: "overview" },
+    { id: "projects", label: "Applicazioni", icon: "projects" },
+    { id: "files", label: "File", icon: "file", hidden: true },
+    { id: "databases", label: "Database", icon: "databases", hidden: true },
+    { id: "activity", label: "Attività", icon: "logs" },
+    { id: "resources", label: "Risorse", icon: "resources" },
+  ];
+}
+
+function operationPageHint(section, context) {
+  const hints = {
+    status: context.goNoGo.status === "go" ? "La piattaforma ha superato i controlli obbligatori." : "Qui vedi solo cosa blocca la messa online.",
+    projects: "Aggiungi, ferma, avvia e archivia applicazioni senza cancellare file o database.",
+    files: "Inventario file applicazione in sola lettura.",
+    databases: "Database collegati alle applicazioni e azioni metadata.",
+    activity: "Errori, avvisi, problemi e operazioni recenti.",
+    resources: "Uso reale risorse, limiti e runtime applicazioni.",
+  };
+  return hints[section] || "";
+}
+
+function renderOperationsSection(section, context, params, currentProject) {
+  if (section === "projects") return renderOpsProjects(context);
+  if (section === "files") return renderOpsFiles(context, params, currentProject);
+  if (section === "databases") return renderOpsDatabases(context, currentProject);
+  if (section === "activity") return renderOpsActivity(context);
+  if (section === "resources") return renderOpsResources(context);
+  return renderOpsStatus(context);
+}
+
+function renderOpsStatus(context) {
+  const report = context.goNoGo;
+  const isGo = report.status === "go";
+  const status = isGo ? "GO LIVE" : "NO GO LIVE";
+  const rows = opsStatusRows(context);
+  const passedRows = rows.filter((row) => row.status === "passed");
+  const missingRows = rows.filter((row) => ["authorization-required", "pending-live-proof", "pending-provider"].includes(row.status));
+  const fixRows = rows.filter((row) => ["failed", "needs-work", "plan-only"].includes(row.status));
+  const notPassedRows = rows.filter((row) => row.status !== "passed");
+  const lastRun = context.statusRun;
+  const nextStep = isGo
+    ? "Mantieni il report salvato come prova di rilascio e verifica che non siano cambiate configurazioni, DNS o provider."
+    : notPassedRows.length
+      ? "Controlla le righe aperte, chiudi i requisiti e rilancia i test."
+      : "Genera un nuovo report di produzione per avere una decisione aggiornata.";
+  return `<section class="ops-section">
+    <div class="ops-command-band" id="status-run">
+      <div>
+        <strong>Verifica stato adesso</strong>
+        <span>${escapeHtml(nextStep)}</span>
+      </div>
+      <form method="post" action="/actions/status-check">
+        <button class="ops-button primary" type="submit">${controlIcon("play")} Avvia test reali</button>
+      </form>
+    </div>
+    ${renderStatusRunSummary(lastRun)}
+    <div class="ops-panel" data-status-tabs>
+      <div class="ops-panel-head ops-status-tabs-head">
+        <div>
+          <h2>Controlli go live</h2>
+          <p>Mostra solo platform-infrastructure: test reali del Portal, report go/no-go e prove produzione.</p>
+        </div>
+        <span class="ops-badge ${isGo ? "good" : "bad"}">${escapeHtml(status)}</span>
+      </div>
+      <div class="ops-status-tabs" role="tablist" aria-label="Filtro controlli stato">
+        ${renderStatusTabButton("all", "Controlli", rows.length, true)}
+        ${renderStatusTabButton("ok", "OK", passedRows.length)}
+        ${renderStatusTabButton("fix", "Da sistemare", fixRows.length)}
+        ${renderStatusTabButton("missing", "Prove mancanti", missingRows.length)}
+      </div>
+      <div class="ops-status-panel active" id="status-tab-all" role="tabpanel" data-status-panel="all">
+        ${renderStatusAllPanel(passedRows, notPassedRows)}
+      </div>
+      <div class="ops-status-panel" id="status-tab-ok" role="tabpanel" data-status-panel="ok" hidden>
+        ${renderStatusRowsTable(passedRows, "Tutto OK", "Nessun controllo superato ancora disponibile.")}
+      </div>
+      <div class="ops-status-panel" id="status-tab-fix" role="tabpanel" data-status-panel="fix" hidden>
+        ${renderStatusRowsTable(fixRows, "Niente da sistemare", "Non ci sono controlli falliti o solo pianificati.")}
+      </div>
+      <div class="ops-status-panel" id="status-tab-missing" role="tabpanel" data-status-panel="missing" hidden>
+        ${renderStatusRowsTable(missingRows, "Nessuna prova mancante", "Non risultano prove live o provider mancanti.")}
+      </div>
+    </div>
+  </section>`;
+}
+
+function renderOpsProjects(context) {
+  const resourcesByProject = projectResourceRowsByProject(context);
+  const activeProjects = context.projects.filter((project) => project.enabled && !project.archivedAt).length;
+  const projectsWithDatabases = context.projects.filter((project) => projectDatabases(context, project).length > 0).length;
+  const dedicatedRuntimeCount = context.resources.containersByProject.filter((item) => item.attribution === "container-dedicato" || item.attribution === "docker-stats").length;
+  const runtimeGroups = [
+    { id: "php", label: "PHP Apache" },
+    { id: "node", label: "Node/Next" },
+    { id: "static", label: "Static" },
+  ];
+  const groupedRuntimeIds = new Set(runtimeGroups.map((group) => group.id));
+  const groupedSections = runtimeGroups
+    .map((group) => renderOpsProjectGroup({
+      ...group,
+      projects: context.projects.filter((project) => project.runtime === group.id),
+      context,
+      resourcesByProject,
+    }))
+    .join("");
+  const otherProjects = context.projects.filter((project) => !groupedRuntimeIds.has(project.runtime));
+  const otherSection = otherProjects.length ? renderOpsProjectGroup({
+    id: "other",
+    label: "Altro",
+    projects: otherProjects,
+    context,
+    resourcesByProject,
+  }) : "";
+  return `<section class="ops-section">
+    <div class="ops-metrics">
+      ${renderOpsMetric("Applicazioni", context.projects.length, `${activeProjects} online`, activeProjects === context.projects.length ? "good" : "warn")}
+      ${renderOpsMetric("Con database", projectsWithDatabases, "Mostrate nella vista database", projectsWithDatabases ? "info" : "warn")}
+      ${renderOpsMetric("Runtime dedicati", `${dedicatedRuntimeCount}/${context.applications.length}`, context.resources.containerMetricsAvailable ? "Misurati da cAdvisor" : "Metriche container non disponibili", dedicatedRuntimeCount ? "good" : "warn")}
+      ${renderOpsMetric("Host", context.subdomains.length, "Routing applicazioni dichiarato", "info")}
+    </div>
+    <div class="ops-panel">
+      <div class="ops-panel-head">
+        <div>
+          <h2>Aggiungi applicazione</h2>
+          <p>Scegli tipo, nome e descrizione. Slug, host e metadata tecnici vengono generati automaticamente.</p>
+        </div>
+      </div>
+      <form class="ops-form" method="post" action="/actions/project-command">
+        <input type="hidden" name="action" value="create">
+        <select name="runtime" aria-label="Tipo applicazione"><option value="php">PHP Apache</option><option value="node">Node/Next</option><option value="static">Static</option></select>
+        <input name="displayName" placeholder="Nome applicazione" aria-label="Nome applicazione">
+        <input name="description" placeholder="Descrizione breve" aria-label="Descrizione applicazione">
+        <input type="hidden" name="confirm" value="CREATE-PROJECT">
+        <button class="ops-button primary" type="submit">${controlIcon("plus")} Aggiungi applicazione</button>
+      </form>
+    </div>
+    <div class="ops-project-board">
+      ${groupedSections}${otherSection || ""}
+      ${context.projects.length ? "" : `<div class="ops-panel">${empty("Nessuna applicazione", "Monta o dichiara una applicazione per gestirla dal portal.")}</div>`}
+    </div>
+    <div class="ops-panel">
+      <div class="ops-panel-head">
+        <div>
+          <h2>Archivia applicazione</h2>
+          <p>Archivia i metadata e disabilita il routing; non elimina file, database o volumi.</p>
+        </div>
+      </div>
+      <form class="ops-form" method="post" action="/actions/project-command">
+        <input type="hidden" name="action" value="archive">
+        <select name="slug" aria-label="Applicazione da archiviare">${context.projects.map((project) => `<option value="${escapeHtml(project.slug)}">${escapeHtml(project.name)}</option>`).join("")}</select>
+        <input name="confirm" placeholder="ARCHIVE-PROJECT" aria-label="Conferma archiviazione">
+        <button class="ops-button danger" type="submit">${controlIcon("archive")} Archivia</button>
+      </form>
+    </div>
+  </section>`;
+}
+
+function renderOpsProjectGroup({ id, label, projects, context, resourcesByProject }) {
+  if (!projects.length) return "";
+  const online = projects.filter((project) => project.enabled && !project.archivedAt).length;
+  return `<div class="ops-project-group ${escapeHtml(id)}">
+    <div class="ops-project-group-head">
+      <div>
+        <h2>${escapeHtml(label)}</h2>
+        <span>${escapeHtml(String(projects.length))} applicazioni, ${escapeHtml(String(online))} online</span>
+      </div>
+      <span class="ops-runtime ${escapeHtml(id)}">${escapeHtml(label)}</span>
+    </div>
+    <div class="ops-project-grid">
+      ${projects.map((project) => renderOpsProjectCard(project, context, resourcesByProject.get(project.slug))).join("")}
+    </div>
+  </div>`;
+}
+
+function renderOpsProjectCard(project, context, resourceSummary) {
+  const databases = projectDatabases(context, project);
+  const storage = projectStorage(context, project);
+  const summary = resourceSummary || projectResourceSummary(context, project);
+  const state = projectOpsState(project);
+  const hasFiles = project.filesystemExists !== false;
+  const canRoute = hasFiles && !project.archivedAt;
+  const databaseLinks = databases.length
+    ? databases.map((database) => `<a class="ops-mini-link" href="/?section=databases#database-${escapeHtml(database.id)}">${escapeHtml(databaseDisplayName(database))}</a>`).join("")
+    : '<span class="ops-muted">Nessun database</span>';
+  const storageLinks = [
+    ...storage.webspaces.map((space) => `<span class="ops-mini-link">webspace: ${escapeHtml(space.name)}</span>`),
+    ...storage.buckets.map((bucket) => `<span class="ops-mini-link">bucket: ${escapeHtml(bucket.name)}</span>`),
+  ].join("");
+  return `<article class="ops-app-card" id="project-${escapeHtml(project.slug)}">
+    <div class="ops-app-card-head">
+      <div class="ops-app-title">
+        <h3>${escapeHtml(project.name)}</h3>
+        <span>${escapeHtml(project.slug)}${project.description ? ` / ${escapeHtml(project.description)}` : ""}</span>
+      </div>
+      <span class="ops-state ${statusClass(state.status)}">${escapeHtml(state.label)}</span>
+    </div>
+    <div class="ops-app-meta">
+      <div>
+        <span>Host</span>
+        ${project.enabled ? `<a href="${escapeHtml(project.href)}">${escapeHtml(project.host)}</a>` : `<strong>${escapeHtml(project.host)}</strong>`}
+      </div>
+      <div>
+        <span>Runtime</span>
+        <strong>${escapeHtml(dedicatedRuntimeName(project))}</strong>
+      </div>
+      <div>
+        <span>Stato</span>
+        <strong>${escapeHtml(state.detail)}</strong>
+      </div>
+    </div>
+    <div class="ops-app-resource-grid" aria-label="Risorse ${escapeHtml(project.name)}">
+      <span><strong>CPU</strong><em>${escapeHtml(summary.cpu)}</em></span>
+      <span><strong>RAM</strong><em>${escapeHtml(summary.memory)}</em></span>
+      <span><strong>Disco</strong><em>${escapeHtml(summary.disk)}</em></span>
+      <span><strong>Fonte</strong><em>${escapeHtml(summary.measuredFrom)}</em></span>
+    </div>
+    <div class="ops-app-inventory">
+      <div>
+        <strong>Database</strong>
+        <div class="ops-chip-list">${databaseLinks}</div>
+      </div>
+      <div>
+        <strong>Storage</strong>
+        <div class="ops-chip-list">${storageLinks || '<span class="ops-muted">Nessuno storage</span>'}</div>
+      </div>
+      <div>
+        <strong>Limiti</strong>
+        <span>${escapeHtml(summary.limits)}</span>
+      </div>
+    </div>
+    <div class="ops-app-actions">
+      ${project.enabled ? `<a class="ops-button" href="${escapeHtml(project.href)}">${controlIcon("external")} Apri</a>` : ""}
+      ${hasFiles ? `<a class="ops-button" href="/?section=files&project=${escapeHtml(project.slug)}">${controlIcon("file")} File</a>` : `<span class="ops-button disabled">${controlIcon("file")} File</span>`}
+      ${databases.length ? `<a class="ops-button" href="/?section=databases#app-${escapeHtml(project.slug)}">${controlIcon("databases")} Database</a>` : `<span class="ops-button disabled">${controlIcon("databases")} Database</span>`}
+      <form method="post" action="/actions/resource-command">
+        <input type="hidden" name="action" value="stress-test">
+        <input type="hidden" name="projectId" value="${escapeHtml(project.slug)}">
+        <input type="hidden" name="confirm" value="RUN-STRESS:${escapeHtml(project.slug)}">
+        <button class="ops-button" type="submit">${controlIcon("resources")} Stress max</button>
+      </form>
+      ${canRoute ? `<form method="post" action="/actions/toggle-project">
+        <input type="hidden" name="slug" value="${escapeHtml(project.slug)}">
+        <input type="hidden" name="enabled" value="${project.enabled ? "0" : "1"}">
+        <button class="ops-button ${project.enabled ? "danger" : "primary"}" type="submit">${controlIcon(project.enabled ? "pause" : "play")} ${project.enabled ? "Ferma" : "Avvia"}</button>
+      </form>` : `<span class="ops-button disabled">${controlIcon("pause")} Non avviabile</span>`}
+    </div>
+  </article>`;
+}
+
+function projectOpsState(project) {
+  if (project.archivedAt || project.status === "archived") return { status: "archived", label: "Archiviata", detail: "Fuori dal routing" };
+  if (project.filesystemExists === false) return { status: "offline", label: "File mancanti", detail: "Sorgenti non montati" };
+  if (project.enabled) return { status: "online", label: "Online", detail: "Raggiungibile dal router" };
+  return { status: "offline", label: "Fermata", detail: "Routing disabilitato" };
+}
+
+function projectResourceRowsByProject(context) {
+  return new Map(context.projects.map((project) => [project.slug, projectResourceSummary(context, project)]));
+}
+
+function projectResourceSummary(context, project) {
+  const usage = context.resources.projectUsage.find((item) => item.projectId === project.slug) || {};
+  const containers = context.resources.containersByProject.filter((item) => item.projectId === project.slug || item.applicationId === project.slug);
+  const measuredContainers = containers.filter((item) => item.attribution === "container-dedicato" || item.attribution === "docker-stats");
+  const cpuCores = measuredContainers.length ? measuredContainers.reduce((sum, item) => sum + Number(item.cpuCores || 0), 0) : null;
+  const memoryBytes = measuredContainers.length ? measuredContainers.reduce((sum, item) => sum + Number(item.memoryBytes || 0), 0) : null;
+  const hostCores = Number(context.resources.totals?.cpu?.cores || 0);
+  const limit = context.resources.projectLimits.find((item) => item.projectId === project.slug) || resourceLimitRecord({ projectId: project.slug });
+  return {
+    cpu: measuredContainers.length ? measuredCpuLabel(measuredContainers, hostCores) : usage.cpuMessage || "Metriche container non disponibili",
+    memory: memoryBytes != null ? usageBytesLabel(memoryBytes) : usage.memoryMessage || "Metriche container non disponibili",
+    disk: usage.diskAvailable ? `${usageBytesLabel(usage.diskBytes)} (${Number(usage.files || 0)} file)` : "Non disponibile",
+    containers: containers.length ? containers.map((item) => `${item.container}:${item.status}`).join(", ") : `${dedicatedRuntimeName(project)} atteso`,
+    measuredFrom: measuredContainers.length ? (measuredContainers.some((item) => item.attribution === "docker-stats") ? "docker stats + filesystem" : "Prometheus/cAdvisor + filesystem") : "filesystem + container atteso",
+    limits: `${limit.cpuMillicores || 0}m CPU / ${limit.memoryMb || 0} MB RAM / ${limit.diskMb || 0} MB disk`,
+  };
+}
+
+function renderOpsFiles(context, params, currentProject) {
+  if (!currentProject) {
+    return `<section class="ops-section"><div class="ops-panel">${empty("Nessuna applicazione selezionata", "Aggiungi o monta una applicazione per vedere i file.")}</div></section>`;
+  }
+  let snapshot;
+  try {
+    snapshot = readProjectFiles(currentProject.slug, params.get("path") || "", context);
+  } catch (error) {
+    snapshot = { available: false, path: "", parentPath: "", entries: [], message: error instanceof ValidationError ? error.message : "File applicazione non disponibili." };
+  }
+  const projectOptions = context.projects.map((project) => `<option value="${escapeHtml(project.slug)}" ${project.slug === currentProject.slug ? "selected" : ""}>${escapeHtml(project.name)}</option>`).join("");
+  const entries = snapshot.entries.map((entry) => `<tr>
+    <td><strong>${entry.browsable ? `<a href="/?section=files&project=${escapeHtml(currentProject.slug)}&path=${encodeURIComponent(entry.path)}">${escapeHtml(entry.name)}</a>` : escapeHtml(entry.name)}</strong><span>${escapeHtml(entry.path)}</span></td>
+    <td><span class="ops-state ${statusClass(entry.type)}">${escapeHtml(entry.type)}</span></td>
+    <td>${escapeHtml(entry.sizeLabel || "")}</td>
+    <td>${escapeHtml(entry.modifiedAt || "")}</td>
+    <td>${entry.browsable ? `<a class="ops-icon-button" href="/?section=files&project=${escapeHtml(currentProject.slug)}&path=${encodeURIComponent(entry.path)}" aria-label="Apri ${escapeHtml(entry.name)}">${controlIcon("folder")}</a>` : '<span class="ops-muted">Sola lettura</span>'}</td>
+  </tr>`).join("");
+  const parentHref = snapshot.parentPath || snapshot.path ? `/?section=files&project=${escapeHtml(currentProject.slug)}&path=${encodeURIComponent(snapshot.parentPath || "")}` : "";
+  return `<section class="ops-section">
+    <div class="ops-panel">
+      <div class="ops-panel-head">
+        <div>
+          <h2>File applicazione</h2>
+          <p>Elenco in sola lettura. Secret, dipendenze, build output e symlink non vengono aperti.</p>
+        </div>
+        <form class="switcher ops-switcher" method="get" action="/">
+          <input type="hidden" name="section" value="files">
+          <select name="project" aria-label="Applicazione">${projectOptions}</select>
+        </form>
+      </div>
+      <div class="ops-file-toolbar">
+        <span><strong>${escapeHtml(currentProject.name)}</strong> / ${escapeHtml(snapshot.path || ".")}</span>
+        ${parentHref ? `<a class="ops-button" href="${parentHref}">${controlIcon("arrow-left")} Su</a>` : ""}
+      </div>
+      ${snapshot.available ? `<div class="ops-table-wrap">
+        <table class="ops-table">
+          <thead><tr><th>Nome</th><th>Tipo</th><th>Dimensione</th><th>Modificato</th><th>Azione</th></tr></thead>
+          <tbody>${entries || `<tr><td colspan="5">${empty("Cartella vuota", "Nessun elemento navigabile trovato in questo path.")}</td></tr>`}</tbody>
+        </table>
+      </div>` : empty("File non disponibili", snapshot.message || "I sorgenti applicazione non sono montati.")}
+    </div>
+  </section>`;
+}
+
+function renderOpsDatabases(context) {
+  const projectInventories = context.projects.map((project) => ({
+    project,
+    databases: projectDatabases(context, project),
+    storage: projectStorage(context, project),
+  }));
+  const databaseInventories = projectInventories.filter((item) => item.databases.length > 0);
+  const linkedDatabaseIds = new Set(projectInventories.flatMap((item) => item.databases.map((database) => database.id)));
+  const unlinkedDatabases = context.databases.filter((database) => !linkedDatabaseIds.has(database.id));
+  const projectOptions = databaseInventories.map(({ project }) => `<option value="${escapeHtml(project.slug)}">${escapeHtml(project.name)}</option>`).join("");
+  const appsWithDatabases = databaseInventories.length;
+  const linkedStorageCount = projectInventories.reduce((total, item) => total + item.storage.webspaces.length + item.storage.buckets.length, 0);
+  const engineSummary = context.databaseEngines.map((engine) => engine.name).join(" / ") || "Nessun motore";
+  const rows = databaseInventories.map(renderProjectDatabaseRow).join("");
+  const unlinkedRow = unlinkedDatabases.length ? `<tr id="app-unlinked">
+    <td><strong>Metadata non collegati</strong><span>Record senza applicazione valida</span></td>
+    <td>${renderDatabaseList(unlinkedDatabases)}</td>
+    <td>${renderDatabaseEngineList(unlinkedDatabases)}</td>
+    <td>${renderDatabaseStatusList(unlinkedDatabases)}</td>
+    <td><span class="ops-muted">Nessuno storage</span></td>
+    <td>${renderDatabaseBackupList(unlinkedDatabases)}</td>
+    <td>${renderDatabaseActions(unlinkedDatabases)}</td>
+  </tr>` : "";
+  const bodyRows = `${rows}${unlinkedRow}` || `<tr><td colspan="7">${empty("Nessun database collegato", "Quando una applicazione avrà metadata database, comparirà qui.")}</td></tr>`;
+  return `<section class="ops-section">
+    <div class="ops-metrics">
+      ${renderOpsMetric("Applicazioni con DB", appsWithDatabases, `su ${context.projects.length} applicazioni`, appsWithDatabases ? "info" : "warn")}
+      ${renderOpsMetric("Database", context.databases.length, engineSummary, "info")}
+      ${renderOpsMetric("Storage", linkedStorageCount, "Webspace e bucket collegati", "info")}
+      ${renderOpsMetric("Credenziali", "Nascoste", "Nessun valore esposto nel portal", "good")}
+    </div>
+    <div class="ops-panel">
+      <div class="ops-panel-head">
+        <div>
+          <h2>Aggiungi metadata database</h2>
+          <p>Dichiara solo inventario; MariaDB/PostgreSQL non vengono modificati dal browser.</p>
+        </div>
+      </div>
+      <form class="ops-form" method="post" action="/actions/database-command">
+        <input type="hidden" name="action" value="create">
+        <select name="projectId" aria-label="Applicazione">${projectOptions}</select>
+        <select name="engine" aria-label="Motore"><option value="mariadb">MariaDB</option><option value="postgres">PostgreSQL</option></select>
+        <input name="name" placeholder="database_name" aria-label="Nome database">
+        <input name="ownerRole" placeholder="owner_role" aria-label="Owner role">
+        <input type="hidden" name="confirm" value="CREATE-DATABASE">
+        <button class="ops-button primary" type="submit">${controlIcon("plus")} Aggiungi database</button>
+      </form>
+    </div>
+    <div class="ops-panel">
+      <div class="ops-panel-head">
+        <div>
+          <h2>Database per applicazione</h2>
+          <p>Vista unica di tutti i metadata: nome visibile, nome fisico, motore, storage e piani operativi.</p>
+        </div>
+      </div>
+      <div class="ops-table-wrap">
+        <table class="ops-table">
+          <thead><tr><th>Applicazione</th><th>Database</th><th>Motore / owner</th><th>Stato</th><th>Storage</th><th>Backup / restore</th><th>Azioni</th></tr></thead>
+          <tbody>${bodyRows}</tbody>
+        </table>
+      </div>
+    </div>
+  </section>`;
+}
+
+function renderProjectDatabaseRow({ project, databases, storage }) {
+  const status = project.archivedAt ? "archived" : project.enabled ? "active" : project.status;
+  return `<tr id="app-${escapeHtml(project.slug)}">
+    <td><strong>${escapeHtml(project.name)}</strong><span>${escapeHtml(project.slug)} / ${escapeHtml(humanName(status))}</span></td>
+    <td>${renderDatabaseList(databases)}</td>
+    <td>${renderDatabaseEngineList(databases)}</td>
+    <td>${renderDatabaseStatusList(databases)}</td>
+    <td>${renderStorageList(storage)}</td>
+    <td>${renderDatabaseBackupList(databases)}</td>
+    <td>${renderDatabaseActions(databases)}</td>
+  </tr>`;
+}
+
+function renderDatabaseList(databases) {
+  if (!databases.length) return '<span class="ops-muted">Nessun database collegato</span>';
+  return `<div class="ops-db-list">${databases.map((database) => {
+    const displayName = databaseDisplayName(database);
+    const physicalName = displayName === database.name ? database.id : `${database.name} / ${database.id}`;
+    return `<div class="ops-db-item" id="database-${escapeHtml(database.id)}"><strong>${escapeHtml(displayName)}</strong><span>${escapeHtml(physicalName)}</span></div>`;
+  }).join("")}</div>`;
+}
+
+function renderDatabaseEngineList(databases) {
+  if (!databases.length) return '<span class="ops-muted">Non configurato</span>';
+  return `<div class="ops-stack-list">${databases.map((database) => `<div class="ops-stack-line">
+    <span class="ops-runtime ${database.engine === "mariadb" ? "php" : "node"}">${escapeHtml(database.engine)}</span>
+    <span>${escapeHtml(database.ownerRole)}</span>
+  </div>`).join("")}</div>`;
+}
+
+function renderDatabaseStatusList(databases) {
+  if (!databases.length) return '<span class="ops-state warn">mancante</span>';
+  return `<div class="ops-stack-list">${databases.map((database) => `<div class="ops-stack-line">
+    <span class="ops-state ${statusClass(database.status)}">${escapeHtml(database.status)}</span>
+    <span>${escapeHtml(bytesLabel(database.sizeBytes))}</span>
+  </div>`).join("")}</div>`;
+}
+
+function renderDatabaseBackupList(databases) {
+  if (!databases.length) return '<span class="ops-muted">Nessun piano</span>';
+  return `<div class="ops-stack-list">${databases.map((database) => `<div class="ops-stack-line"><span>${escapeHtml(database.backupPolicy)}</span><span>${escapeHtml(database.restoreStatus)}</span></div>`).join("")}</div>`;
+}
+
+function renderDatabaseActions(databases) {
+  if (!databases.length) return '<span class="ops-muted">Nessuna azione</span>';
+  return `<div class="ops-db-actions">${databases.map((database) => {
+    const admin = databaseAdminTool(database);
+    const phpMyAdminConfirm = `OPEN-PHPMYADMIN:${database.id}`;
+    const phpPgAdminConfirm = `OPEN-PHPPGADMIN:${database.id}`;
+    const phpMyAdminHref = `/actions/phpmyadmin-login?databaseId=${encodeURIComponent(database.id)}&confirm=${encodeURIComponent(phpMyAdminConfirm)}`;
+    const phpPgAdminHref = `/actions/phppgadmin-login?databaseId=${encodeURIComponent(database.id)}&confirm=${encodeURIComponent(phpPgAdminConfirm)}`;
+    return `<div class="ops-row-actions">
+    ${database.engine === "mariadb" ? `<a class="ops-icon-button" href="${escapeHtml(phpMyAdminHref)}" target="_blank" rel="noreferrer" aria-label="Apri ${escapeHtml(databaseDisplayName(database))} in phpMyAdmin con accesso limitato">${controlIcon("external")}</a>` : `<a class="ops-icon-button" href="${escapeHtml(phpPgAdminHref)}" target="_blank" rel="noreferrer" aria-label="Apri ${escapeHtml(databaseDisplayName(database))} in ${escapeHtml(admin.label)} con accesso limitato">${controlIcon("external")}</a>`}
+    <form method="post" action="/actions/database-command">
+      <input type="hidden" name="id" value="${escapeHtml(database.id)}">
+      <input type="hidden" name="action" value="backup">
+      <button class="ops-icon-button" type="submit" aria-label="Plan backup for ${escapeHtml(databaseDisplayName(database))}">${controlIcon("backups")}</button>
+    </form>
+    <form method="post" action="/actions/database-command">
+      <input type="hidden" name="id" value="${escapeHtml(database.id)}">
+      <input type="hidden" name="action" value="restore">
+      <input type="hidden" name="backupRef" value="latest">
+      <button class="ops-icon-button" type="submit" aria-label="Plan restore drill for ${escapeHtml(databaseDisplayName(database))}">${controlIcon("refresh")}</button>
+    </form>
+  </div>`;
+  }).join("")}</div>`;
+}
+
+function databaseAdminTool(database) {
+  if (database.engine === "postgres") {
+    return {
+      label: "phpPgAdmin",
+      href: `https://${controlCenterHost}/actions/phppgadmin-login?databaseId=${encodeURIComponent(database.id)}&confirm=${encodeURIComponent(`OPEN-PHPPGADMIN:${database.id}`)}`,
+    };
+  }
+  return {
+    label: "phpMyAdmin",
+    href: `https://${controlCenterHost}${phpMyAdminDatabaseLocation(database.name)}`,
+  };
+}
+
+function resolveMariaDbCredential(database, project) {
+  const metadataUser = sanitizeDatabasePrincipal(database.adminUser || database.ownerRole || "");
+  const metadataPassword = readCredentialPasswordFile(database.adminPasswordFile || database.passwordFile || "", project);
+  if (metadataUser && metadataPassword) return { user: metadataUser, password: metadataPassword, source: "database-metadata" };
+  const projectCredential = readProjectMariaDbCredential(database, project);
+  if (projectCredential) return projectCredential;
+  const phpCredential = readProjectPhpMariaDbCredential(database, project);
+  if (phpCredential) return phpCredential;
+  return null;
+}
+
+function resolvePostgresCredential(database, project) {
+  const metadataUser = sanitizeDatabasePrincipal(database.adminUser || database.ownerRole || "");
+  const metadataPassword = readCredentialPasswordFile(database.adminPasswordFile || database.passwordFile || "", project);
+  if (metadataUser && metadataPassword) return { user: metadataUser, password: metadataPassword, source: "database-metadata" };
+  const appPassword = readPostgresAppPassword();
+  if (appPassword && (!metadataUser || metadataUser === postgresAppUser)) {
+    return { user: metadataUser || postgresAppUser, password: appPassword, source: "postgres-app-secret" };
+  }
+  return null;
+}
+
+function readPostgresAppPassword() {
+  if (!postgresAppPasswordFile || !existsSync(postgresAppPasswordFile)) return "";
+  try {
+    return readFileSync(postgresAppPasswordFile, "utf8").trim();
+  } catch {
+    return "";
+  }
+}
+
+function readProjectMariaDbCredential(database, project) {
+  if (!project || !project.filesAvailable) return null;
+  let root = "";
+  try {
+    root = resolveProjectRoot(project);
+  } catch {
+    return null;
+  }
+  for (const fileName of [".env", ".env.local", ".env.production", "private/.env"]) {
+    const filePath = path.join(root, fileName);
+    if (!existsSync(filePath)) continue;
+    let env = {};
+    try {
+      env = parseEnvText(readFileSync(filePath, "utf8"));
+    } catch {
+      continue;
+    }
+    const dbName = firstEnvValue(env, ["DB_DATABASE", "DB_NAME", "DATABASE_NAME", "MYSQL_DATABASE", "MARIADB_DATABASE"]);
+    if (dbName && dbName !== database.name) continue;
+    const user = sanitizeDatabasePrincipal(firstEnvValue(env, ["PHPMYADMIN_USER", "PMA_USER", "DB_USERNAME", "DB_USER", "DATABASE_USER", "MYSQL_USER", "MARIADB_USER"]) || database.ownerRole || "");
+    const password = firstEnvValue(env, ["PHPMYADMIN_PASSWORD", "PMA_PASSWORD", "DB_PASSWORD", "DB_PASS", "DATABASE_PASSWORD", "DATABASE_PASS", "MYSQL_PASSWORD", "MYSQL_PASS", "MARIADB_PASSWORD", "MARIADB_PASS"]);
+    if (user && password) return { user, password, source: `project-env:${fileName}` };
+  }
+  return null;
+}
+
+function readProjectPhpMariaDbCredential(database, project) {
+  if (!project || !project.filesAvailable) return null;
+  let root = "";
+  try {
+    root = resolveProjectRoot(project);
+  } catch {
+    return null;
+  }
+  for (const fileName of ["private/config/database.php", "config/config.php", "config/database.php", "private/config/app.php"]) {
+    const filePath = path.join(root, fileName);
+    if (!existsSync(filePath)) continue;
+    let text = "";
+    try {
+      text = readFileSync(filePath, "utf8");
+    } catch {
+      continue;
+    }
+    const dbName = firstPhpConfigValue(text, ["database", "dbname", "db_name", "DB_DATABASE", "DB_NAME", "DATABASE_NAME"]);
+    if (dbName && dbName !== database.name) continue;
+    const user = sanitizeDatabasePrincipal(firstPhpConfigValue(text, ["username", "user", "db_user", "DB_USERNAME", "DB_USER", "DATABASE_USER"]) || database.ownerRole || "");
+    const password = firstPhpConfigValue(text, ["password", "pass", "db_pass", "db_password", "DB_PASSWORD", "DB_PASS", "DATABASE_PASSWORD", "DATABASE_PASS"]);
+    if (user && password) return { user, password, source: `project-php-config:${fileName}` };
+  }
+  return null;
+}
+
+function firstPhpConfigValue(text, keys) {
+  for (const key of keys) {
+    for (const pattern of phpConfigValuePatterns(key)) {
+      const match = String(text || "").match(pattern);
+      if (match && match[1] !== "") return match[1];
+    }
+  }
+  return "";
+}
+
+function phpConfigValuePatterns(key) {
+  const escaped = escapeRegExp(key);
+  return [
+    new RegExp(`['"]${escaped}['"]\\s*=>\\s*getenv\\([^)]*\\)\\s*\\?:\\s*['"]([^'"]*)['"]`, "i"),
+    new RegExp(`['"]${escaped}['"]\\s*=>\\s*\\$_ENV\\[[^\\]]+\\]\\s*\\?\\?\\s*['"]([^'"]*)['"]`, "i"),
+    new RegExp(`['"]${escaped}['"]\\s*=>\\s*['"]([^'"]*)['"]`, "i"),
+    new RegExp(`\\$${escaped}\\s*=\\s*['"]([^'"]*)['"]`, "i"),
+    new RegExp(`define\\(\\s*['"]${escaped}['"]\\s*,\\s*['"]([^'"]*)['"]\\s*\\)`, "i"),
+    new RegExp(`const\\s+${escaped}\\s*=\\s*['"]([^'"]*)['"]`, "i"),
+  ];
+}
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function readCredentialPasswordFile(filePath, project) {
+  const value = String(filePath || "").trim();
+  if (!value) return "";
+  const allowedRoots = ["/run/secrets", "/var/www/project-state"];
+  if (project) {
+    try {
+      allowedRoots.push(resolveProjectRoot(project));
+    } catch {
+      // Ignore unavailable project roots.
+    }
+  }
+  const resolved = path.resolve(value);
+  if (!allowedRoots.some((root) => resolved === root || resolved.startsWith(`${root}${path.sep}`))) return "";
+  try {
+    return readFileSync(resolved, "utf8").trim();
+  } catch {
+    return "";
+  }
+}
+
+function parseEnvText(text) {
+  const result = {};
+  for (const line of String(text || "").split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#") || !trimmed.includes("=")) continue;
+    const index = trimmed.indexOf("=");
+    const key = trimmed.slice(0, index).trim();
+    if (!/^[A-Z0-9_]+$/i.test(key)) continue;
+    let value = trimmed.slice(index + 1).trim();
+    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+      value = value.slice(1, -1);
+    }
+    result[key] = value;
+  }
+  return result;
+}
+
+function firstEnvValue(env, keys) {
+  for (const key of keys) {
+    const value = env[key];
+    if (value != null && String(value).trim() !== "") return String(value).trim();
+  }
+  return "";
+}
+
+function sanitizeDatabasePrincipal(value) {
+  const user = String(value || "").trim();
+  if (!/^[A-Za-z0-9_.$-]{1,80}$/.test(user)) return "";
+  if (user.toLowerCase() === "root") return "";
+  return user;
+}
+
+async function phpMyAdminLogin(database, credential) {
+  const target = phpMyAdminDatabaseLocation(database.name).replace(/^\/phpmyadmin\//, "");
+  const start = await phpMyAdminInternalRequest("GET", "/index.php?route=/");
+  const startCookies = mergeSetCookieHeaders(start.cookies.map(rewritePhpMyAdminCookie).filter(Boolean));
+  const token = htmlInputValue(start.body, "token");
+  const setSession = htmlInputValue(start.body, "set_session");
+  const body = new URLSearchParams({
+    ...(token ? { token } : {}),
+    ...(setSession ? { set_session: setSession } : {}),
+    pma_username: credential.user,
+    pma_password: credential.password,
+    server: "1",
+    target,
+  }).toString();
+  const login = await phpMyAdminInternalRequest("POST", "/index.php?route=/", body, {
+    "content-type": "application/x-www-form-urlencoded",
+    ...(startCookies.length ? { cookie: cookieHeaderFromSetCookies(startCookies) } : {}),
+  });
+  const cookies = mergeSetCookieHeaders([
+    ...startCookies,
+    ...login.cookies.map(rewritePhpMyAdminCookie).filter(Boolean),
+  ]);
+  if (!cookies.length) return { ok: false, cookies: [] };
+  const cookieHeader = cookieHeaderFromSetCookies(cookies);
+  const verify = await phpMyAdminInternalRequest("GET", `/index.php?route=/database/structure&server=1&db=${encodeURIComponent(database.name)}`, "", {
+    cookie: cookieHeader,
+  });
+  const loggedIn = phpMyAdminAuthCookiePresent(cookies) && phpMyAdminSessionLooksAuthenticated(verify);
+  return { ok: loggedIn, cookies, token: phpMyAdminPageToken(verify.body) };
+}
+
+function phpMyAdminSessionLooksAuthenticated(response) {
+  if (!response || response.status < 200 || response.status >= 400) return false;
+  const body = String(response.body || "");
+  if (/name=["']pma_username["']|name=["']pma_password["']/i.test(body)) return false;
+  if (/Access denied for user|Cannot log in to the MySQL server|mysqli::real_connect|Login without a password is forbidden/i.test(body)) return false;
+  return /phpMyAdmin|pma_navigation|server_databases|database\/structure/i.test(body);
+}
+
+function phpMyAdminAuthCookiePresent(cookies) {
+  return cookies.some((cookie) => /^(__Secure-)?pmaAuth-\d+(_https)?=/i.test(String(cookie || "")));
+}
+
+function phpMyAdminPageToken(htmlText) {
+  const inputToken = htmlInputValue(htmlText, "token");
+  if (inputToken) return inputToken;
+  const body = String(htmlText || "");
+  const patterns = [
+    /\btoken["']?\s*:\s*["']([^"']+)["']/i,
+    /\btoken=([a-f0-9]{16,})/i,
+  ];
+  for (const pattern of patterns) {
+    const match = body.match(pattern);
+    if (match) return decodeURIComponent(match[1]);
+  }
+  return "";
+}
+
+async function phpPgAdminLogin(database, credential) {
+  const server = phpPgAdminServerId();
+  const loginPath = `/phppgadmin/redirect.php?subject=server&server=${encodeURIComponent(server)}`;
+  const start = await phpPgAdminInternalRequest("GET", loginPath);
+  const startCookies = mergeSetCookieHeaders(start.cookies.map(rewritePhpPgAdminCookie).filter(Boolean));
+  const passwordField = htmlPasswordInputName(start.body);
+  if (!passwordField) return { ok: false, cookies: startCookies, location: phpPgAdminDatabaseLocation(database.name) };
+  const body = new URLSearchParams({
+    subject: "server",
+    server,
+    loginServer: server,
+    loginUsername: credential.user,
+    [passwordField]: credential.password,
+    loginSubmit: "Login",
+  }).toString();
+  const login = await phpPgAdminInternalRequest("POST", "/phppgadmin/redirect.php", body, {
+    "content-type": "application/x-www-form-urlencoded",
+    ...(startCookies.length ? { cookie: cookieHeaderFromSetCookies(startCookies) } : {}),
+  });
+  const cookies = mergeSetCookieHeaders([
+    ...startCookies,
+    ...login.cookies.map(rewritePhpPgAdminCookie).filter(Boolean),
+  ]);
+  if (!cookies.length) return { ok: false, cookies: [], location: phpPgAdminDatabaseLocation(database.name) };
+  const verify = await phpPgAdminInternalRequest("GET", phpPgAdminDatabaseLocation(database.name), "", {
+    cookie: cookieHeaderFromSetCookies(cookies),
+  });
+  const loggedIn = phpPgAdminSessionLooksAuthenticated(verify, database.name);
+  return {
+    ok: loggedIn,
+    cookies,
+    location: phpPgAdminDatabaseLocation(database.name),
+  };
+}
+
+function phpPgAdminSessionLooksAuthenticated(response, databaseName) {
+  if (!response || response.status < 200 || response.status >= 400) return false;
+  const body = String(response.body || "");
+  if (/name=["']loginUsername["']|name=["']loginPassword_/i.test(body)) return false;
+  if (/Login failed|Incorrect password|could not connect|FATAL:|password authentication failed/i.test(body)) return false;
+  return /phpPgAdmin/i.test(body)
+    && body.includes(databaseName)
+    && /You are logged in as user|Schemas|SQL History|Logout/i.test(body);
+}
+
+function phpPgAdminServerId() {
+  return `${postgresHost}:${postgresPort}:allow`;
+}
+
+function phpPgAdminDatabaseLocation(databaseName) {
+  const params = new URLSearchParams({
+    subject: "database",
+    server: phpPgAdminServerId(),
+    database: String(databaseName || ""),
+  });
+  return `/phppgadmin/redirect.php?${params.toString()}`;
+}
+
+function htmlPasswordInputName(htmlText) {
+  const inputPattern = /<input\b[^>]*>/gi;
+  let match;
+  while ((match = inputPattern.exec(String(htmlText || ""))) !== null) {
+    const input = match[0];
+    if (!/\btype=(["'])password\1/i.test(input)) continue;
+    const name = input.match(/\bname=(["'])(.*?)\1/i);
+    return name ? decodeHtmlAttribute(name[2]) : "";
+  }
+  return "";
+}
+
+function htmlInputValue(htmlText, inputName) {
+  const name = String(inputName || "");
+  if (!name) return "";
+  const inputPattern = /<input\b[^>]*>/gi;
+  const namePattern = new RegExp(`\\bname=(["'])${escapeRegExp(name)}\\1`, "i");
+  let match;
+  while ((match = inputPattern.exec(String(htmlText || ""))) !== null) {
+    const input = match[0];
+    if (!namePattern.test(input)) continue;
+    const value = input.match(/\bvalue=(["'])(.*?)\1/i);
+    return value ? decodeHtmlAttribute(value[2]) : "";
+  }
+  return "";
+}
+
+function decodeHtmlAttribute(value) {
+  return String(value || "")
+    .replace(/&quot;/g, "\"")
+    .replace(/&#039;|&apos;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&");
+}
+
+function cookieHeaderFromSetCookies(cookies) {
+  return cookies.map((cookie) => cookie.split(";")[0]).filter(Boolean).join("; ");
+}
+
+function mergeSetCookieHeaders(cookies) {
+  const byName = new Map();
+  for (const cookie of cookies) {
+    const name = String(cookie || "").split("=", 1)[0].trim();
+    if (!name) continue;
+    byName.set(name, cookie);
+  }
+  return [...byName.values()];
+}
+
+function phpMyAdminInternalRequest(method, requestPath, body = "", extraHeaders = {}) {
+  return new Promise((resolve, reject) => {
+    const base = new URL(phpMyAdminInternalUrl);
+    if (base.protocol !== "http:") {
+      reject(new Error("Only http phpMyAdmin internal URLs are supported."));
+      return;
+    }
+    const payload = body ? Buffer.from(body) : null;
+    const req = httpRequest({
+      method,
+      hostname: base.hostname,
+      port: base.port || 80,
+      path: requestPath,
+      headers: {
+        host: controlCenterHost,
+        "x-forwarded-host": controlCenterHost,
+        "x-forwarded-proto": "https",
+        "x-forwarded-prefix": "/phpmyadmin",
+        ...(payload ? { "content-length": payload.length } : {}),
+        ...extraHeaders,
+      },
+      timeout: 10000,
+    }, (response) => {
+      const chunks = [];
+      response.on("data", (chunk) => chunks.push(chunk));
+      response.on("end", () => resolve({
+        status: response.statusCode || 0,
+        headers: response.headers,
+        cookies: rawHeaderValues(response.rawHeaders, "set-cookie"),
+        body: Buffer.concat(chunks).toString("utf8"),
+      }));
+    });
+    req.on("timeout", () => req.destroy(new Error("phpMyAdmin login timed out.")));
+    req.on("error", reject);
+    if (payload) req.write(payload);
+    req.end();
+  });
+}
+
+function phpPgAdminInternalRequest(method, requestPath, body = "", extraHeaders = {}) {
+  return new Promise((resolve, reject) => {
+    const base = new URL(phpPgAdminInternalUrl);
+    if (base.protocol !== "http:") {
+      reject(new Error("Only http phpPgAdmin internal URLs are supported."));
+      return;
+    }
+    const payload = body ? Buffer.from(body) : null;
+    const req = httpRequest({
+      method,
+      hostname: base.hostname,
+      port: base.port || 80,
+      path: requestPath,
+      headers: {
+        host: controlCenterHost,
+        "x-forwarded-host": controlCenterHost,
+        "x-forwarded-proto": "https",
+        "x-forwarded-prefix": "/phppgadmin",
+        ...(payload ? { "content-length": payload.length } : {}),
+        ...extraHeaders,
+      },
+      timeout: 10000,
+    }, (response) => {
+      const chunks = [];
+      response.on("data", (chunk) => chunks.push(chunk));
+      response.on("end", () => resolve({
+        status: response.statusCode || 0,
+        headers: response.headers,
+        cookies: rawHeaderValues(response.rawHeaders, "set-cookie"),
+        body: Buffer.concat(chunks).toString("utf8"),
+      }));
+    });
+    req.on("timeout", () => req.destroy(new Error("phpPgAdmin login timed out.")));
+    req.on("error", reject);
+    if (payload) req.write(payload);
+    req.end();
+  });
+}
+
+function rawHeaderValues(rawHeaders, name) {
+  const values = [];
+  const wanted = String(name).toLowerCase();
+  for (let index = 0; index < rawHeaders.length; index += 2) {
+    if (String(rawHeaders[index]).toLowerCase() === wanted) values.push(String(rawHeaders[index + 1] || ""));
+  }
+  return values;
+}
+
+function rewritePhpMyAdminCookie(cookie) {
+  let next = String(cookie || "").replace(/;\s*Domain=[^;]*/i, "");
+  if (/;\s*Path=/i.test(next)) next = next.replace(/;\s*Path=[^;]*/i, "; Path=/phpmyadmin");
+  else next += "; Path=/phpmyadmin";
+  if (!/;\s*HttpOnly/i.test(next)) next += "; HttpOnly";
+  if (!/;\s*SameSite=/i.test(next)) next += "; SameSite=Lax";
+  return next;
+}
+
+function rewritePhpPgAdminCookie(cookie) {
+  let next = String(cookie || "").replace(/;\s*Domain=[^;]*/i, "");
+  if (/;\s*Path=/i.test(next)) next = next.replace(/;\s*Path=[^;]*/i, "; Path=/phppgadmin");
+  else next += "; Path=/phppgadmin";
+  if (!/;\s*HttpOnly/i.test(next)) next += "; HttpOnly";
+  if (!/;\s*Secure/i.test(next)) next += "; Secure";
+  if (!/;\s*SameSite=/i.test(next)) next += "; SameSite=Lax";
+  return next;
+}
+
+function phpMyAdminDatabaseLocation(databaseName, token = "") {
+  const params = new URLSearchParams({
+    route: "/database/structure",
+    server: "1",
+    db: String(databaseName || ""),
+  });
+  if (token) params.set("token", token);
+  return `/phpmyadmin/index.php?${params.toString()}`;
+}
+
+function renderPhpMyAdminBridge(res, location, label, cookies) {
+  const safeLocation = String(location || "/phpmyadmin/");
+  const safeLabel = String(label || "database");
+  res.writeHead(200, {
+    "cache-control": "no-store",
+    "content-type": "text/html; charset=utf-8",
+    "set-cookie": cookies,
+  });
+  res.end(`<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8">
+  <meta name="robots" content="noindex,nofollow">
+  <title>Apertura phpMyAdmin</title>
+</head>
+<body>
+  <p>Apertura phpMyAdmin per ${escapeHtml(safeLabel)}...</p>
+  <p><a href="${escapeHtml(safeLocation)}">Apri manualmente</a></p>
+  <script>
+    try {
+      var pattern = /phpmyadmin|pma_|pma-|navigation|server|database/i;
+      for (var index = localStorage.length - 1; index >= 0; index -= 1) {
+        var key = localStorage.key(index) || "";
+        if (pattern.test(key)) localStorage.removeItem(key);
+      }
+      sessionStorage.clear();
+    } catch (error) {}
+    location.replace(${JSON.stringify(safeLocation)});
+  </script>
+</body>
+</html>`);
+}
+
+function renderPhpPgAdminBridge(res, location, label, cookies) {
+  const safeLocation = String(location || "/phppgadmin/");
+  const safeLabel = String(label || "database");
+  res.writeHead(200, {
+    "cache-control": "no-store",
+    "content-type": "text/html; charset=utf-8",
+    "set-cookie": cookies,
+  });
+  res.end(`<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8">
+  <meta name="robots" content="noindex,nofollow">
+  <title>Apertura phpPgAdmin</title>
+</head>
+<body>
+  <p>Apertura phpPgAdmin per ${escapeHtml(safeLabel)}...</p>
+  <p><a href="${escapeHtml(safeLocation)}">Apri manualmente</a></p>
+  <script>
+    try {
+      var pattern = /phppgadmin|ppa_/i;
+      for (var index = localStorage.length - 1; index >= 0; index -= 1) {
+        var key = localStorage.key(index) || "";
+        if (pattern.test(key)) localStorage.removeItem(key);
+      }
+      sessionStorage.clear();
+    } catch (error) {}
+    location.replace(${JSON.stringify(safeLocation)});
+  </script>
+</body>
+</html>`);
+}
+
+function expiredPhpMyAdminCookies() {
+  const names = [
+    "__Secure-phpMyAdmin_https",
+    "__Secure-pmaUser-1_https",
+    "__Secure-pmaAuth-1_https",
+  ];
+  const paths = ["/", "/phpmyadmin", "/phpmyadmin/"];
+  return names.flatMap((name) => paths.map((pathName) => `${name}=; Max-Age=0; Path=${pathName}; Secure; SameSite=Lax`));
+}
+
+function expiredPhpPgAdminCookies() {
+  const names = ["PPA_ID"];
+  const paths = ["/", "/phppgadmin", "/phppgadmin/"];
+  return names.flatMap((name) => paths.map((pathName) => `${name}=; Max-Age=0; Path=${pathName}; Secure; SameSite=Lax`));
+}
+
+function renderStorageList(storage) {
+  const links = [
+    ...storage.webspaces.map((space) => `<span class="ops-mini-link">webspace: ${escapeHtml(space.name)}</span>`),
+    ...storage.buckets.map((bucket) => `<span class="ops-mini-link">bucket: ${escapeHtml(bucket.name)}</span>`),
+  ];
+  return links.length ? `<div class="ops-chip-list">${links.join("")}</div>` : '<span class="ops-muted">Nessuno storage</span>';
+}
+
+function renderOpsActivity(context) {
+  const problems = activityProblems(context);
+  const errors = problems.filter((item) => item.severity === "error");
+  const warnings = problems.filter((item) => item.severity === "warning");
+  const pending = problems.filter((item) => item.severity === "pending");
+  const rows = problems.map((item) => `<tr>
+    <td><span class="ops-state ${statusClass(item.severity)}">${escapeHtml(item.severity)}</span></td>
+    <td><strong>${escapeHtml(item.source)}</strong><span>${escapeHtml(item.name)}</span></td>
+    <td>${escapeHtml(item.summary)}</td>
+    <td>${escapeHtml(item.timestamp || "")}</td>
+    <td>${item.href ? `<a class="ops-button" href="${escapeHtml(item.href)}">${controlIcon("arrow-right")} Open</a>` : '<span class="ops-muted">No action</span>'}</td>
+  </tr>`).join("");
+  return `<section class="ops-section">
+    <div class="ops-metrics">
+      ${renderOpsMetric("Errori", errors.length, "Elementi falliti o critici", errors.length ? "bad" : "good")}
+      ${renderOpsMetric("Avvisi", warnings.length, "Avvisi aperti", warnings.length ? "warn" : "good")}
+      ${renderOpsMetric("In attesa", pending.length, "Prove o provider da completare", pending.length ? "warn" : "good")}
+      ${renderOpsMetric("Alert aperti", context.logsAlerts.openAlerts.length, "Record alert", context.logsAlerts.openAlerts.length ? "warn" : "good")}
+    </div>
+    <div class="ops-panel">
+      <div class="ops-panel-head">
+        <div>
+          <h2>Errori, avvisi e problemi</h2>
+          <p>I problemi operativi arrivano da go/no-go, alert, job, audit e log operazioni.</p>
+        </div>
+      </div>
+      <div class="ops-table-wrap">
+        <table class="ops-table">
+          <thead><tr><th>Gravità</th><th>Fonte</th><th>Problema</th><th>Ora</th><th>Azione</th></tr></thead>
+          <tbody>${rows || `<tr><td colspan="5">${empty("Nessun problema attivo", "Non sono stati trovati blocchi go/no-go, alert, job falliti o operazioni fallite.")}</td></tr>`}</tbody>
+        </table>
+      </div>
+    </div>
+  </section>`;
+}
+
+function renderOpsResources(context) {
+  const totals = context.resources.totals;
+  const rows = resourceUsageRows(context).map((item) => `<tr data-resource-row="${escapeHtml(item.applicationId)}">
+    <td><strong>${escapeHtml(item.applicationName)}</strong><span>${escapeHtml(item.applicationId)}</span></td>
+    <td><strong>${escapeHtml(item.projectName)}</strong><span>${escapeHtml(item.projectId)}</span></td>
+    <td>${escapeHtml(item.runtime)}</td>
+    <td data-resource-cell="status"><span class="ops-state ${statusClass(item.status)}">${escapeHtml(item.status)}</span></td>
+    <td data-resource-cell="cpu">${escapeHtml(item.cpu)}</td>
+    <td data-resource-cell="memory">${escapeHtml(item.memory)}</td>
+    <td data-resource-cell="disk">${escapeHtml(item.disk)}</td>
+    <td data-resource-cell="containers">${escapeHtml(item.containers)}</td>
+    <td data-resource-cell="measuredFrom">${escapeHtml(item.measuredFrom)}</td>
+    <td data-resource-cell="limits">${escapeHtml(item.limits)}</td>
+  </tr>`).join("");
+  return `<section class="ops-section" data-resource-live data-resource-live-url="/control/resources/summary" data-resource-refresh-ms="1000">
+    <div class="ops-metrics">
+      ${renderOpsMetric("CPU totale", context.resources.cpu.status, context.resources.cpu.summary, totals.cpu.available ? "info" : "warn", { resourceCard: "cpu" })}
+      ${renderOpsMetric("RAM totale", context.resources.memory.status, context.resources.memory.summary, totals.memory.available ? "info" : "warn", { resourceCard: "memory" })}
+      ${renderOpsMetric("Disco totale", context.resources.disk.status, totals.disk.available ? `${percentLabel(totals.disk.usedPercent)} usato` : totals.disk.message, totals.disk.available ? "info" : "warn", { resourceCard: "disk" })}
+      ${renderOpsMetric("Applicazioni", context.applications.length, context.resources.trend, context.resources.containerMetricsAvailable ? "good" : "warn", { resourceCard: "applications" })}
+    </div>
+    <div class="ops-resource-summary">
+      <div data-resource-summary="cpu">
+        <span>CPU host</span>
+        <strong>${escapeHtml(context.resources.cpu.status)}</strong>
+        <em>${escapeHtml(totals.cpu.available ? `${coresLabel(totals.cpu.cores)} disponibili` : totals.cpu.message || "non disponibile")}</em>
+      </div>
+      <div data-resource-summary="memory">
+        <span>RAM host</span>
+        <strong>${escapeHtml(context.resources.memory.status)}</strong>
+        <em>${escapeHtml(context.resources.memory.summary)}</em>
+      </div>
+      <div data-resource-summary="disk">
+        <span>Disco host</span>
+        <strong>${escapeHtml(context.resources.disk.status)}</strong>
+        <em>${escapeHtml(totals.disk.available ? `${percentLabel(totals.disk.usedPercent)} usato` : totals.disk.message || "non disponibile")}</em>
+      </div>
+      <div data-resource-summary="source">
+        <span>Fonte metriche</span>
+        <strong>${escapeHtml(context.resources.source)}</strong>
+        <em>${escapeHtml(context.resources.capturedAt)}</em>
+      </div>
+    </div>
+    <div class="ops-panel">
+      <div class="ops-panel-head">
+        <div>
+          <h2>Imposta limiti applicazione</h2>
+          <p>Aggiorna solo metadata Control Center; i limiti runtime Docker richiedono un adapter ops esplicito.</p>
+        </div>
+      </div>
+      <form method="post" action="/actions/resource-command" class="ops-form">
+        <input type="hidden" name="action" value="limits">
+        <select name="projectId" aria-label="Applicazione">${context.projects.map((project) => `<option value="${escapeHtml(project.slug)}">${escapeHtml(project.name)}</option>`).join("")}</select>
+        <input name="cpuMillicores" value="0" inputmode="numeric" aria-label="CPU millicores">
+        <input name="memoryMb" value="0" inputmode="numeric" aria-label="Memory MB">
+        <input name="diskMb" value="0" inputmode="numeric" aria-label="Disk MB">
+        <input type="hidden" name="confirm" value="UPDATE-RESOURCE-LIMITS">
+        <button class="ops-button primary" type="submit">${controlIcon("resources")} Salva limiti</button>
+      </form>
+    </div>
+    <div class="ops-panel">
+      <div class="ops-panel-head">
+        <div>
+          <h2>Uso risorse</h2>
+          <p>Totali da Prometheus/node-exporter. Per applicazione: CPU/RAM solo se attribuibili a container dedicati; disco sempre dalla cartella reale.</p>
+        </div>
+        <span class="ops-badge" data-resource-captured-at>${escapeHtml(context.resources.capturedAt)}</span>
+      </div>
+      <div class="ops-table-wrap">
+        <table class="ops-table">
+          <thead><tr><th>Applicazione</th><th>Progetto</th><th>Runtime</th><th>Stato</th><th>CPU</th><th>RAM</th><th>Disco app</th><th>Container</th><th>Fonte</th><th>Limiti</th></tr></thead>
+          <tbody>${rows || `<tr><td colspan="10">${empty("Nessuna riga risorse", "Nessun metadata applicazione disponibile.")}</td></tr>`}</tbody>
+        </table>
+      </div>
+    </div>
+  </section>`;
+}
+
+function renderOpsMetric(label, value, detail, tone = "info", options = {}) {
+  const attrs = options.resourceCard ? ` data-resource-card="${escapeHtml(options.resourceCard)}"` : "";
+  return `<div class="ops-metric ${escapeHtml(tone)}"${attrs}>
+    <span>${escapeHtml(label)}</span>
+    <strong>${escapeHtml(String(value))}</strong>
+    <small>${escapeHtml(String(detail || ""))}</small>
+  </div>`;
+}
+
+function renderStatusRunSummary(run) {
+  if (!run) {
+    return `<div class="ops-status-run empty-run">
+      <strong>Nessun test reale eseguito dal Portal</strong>
+      <span>Premi “Avvia test reali” per verificare WAF, report e prove attuali.</span>
+    </div>`;
+  }
+  return `<div class="ops-status-run ${statusClass(run.status)}">
+    <div>
+      <strong>Ultimo test reale</strong>
+      <span>${escapeHtml(`${run.generatedAt || "n.d."} / durata ${Number(run.durationMs || 0)} ms`)}</span>
+    </div>
+    <span class="ops-status-run-state">${escapeHtml(friendlyGoNoGoStatus(run.status))}</span>
+  </div>`;
+}
+
+function opsStatusRows(context) {
+  const rows = [];
+  const seen = new Set();
+  const push = (row) => {
+    const key = row.technicalId || row.id;
+    if (seen.has(key)) return;
+    seen.add(key);
+    rows.push(row);
+  };
+  for (const check of context.statusRun?.checks || []) {
+    if (isControlCenterOnlyStatusCheck(check.id)) continue;
+    push(statusTableRow({
+      id: `run:${check.id}`,
+      control: statusRunControlTitle(check),
+      technicalId: check.id,
+      source: check.source || "Test reale",
+      status: check.status,
+      reason: check.detail || "",
+      action: check.status === "passed" ? "Nessuna azione immediata." : check.nextAction,
+      required: check.required,
+    }));
+  }
+  for (const check of context.goNoGo?.checks || []) {
+    const displayCheck = goNoGoDisplayCheck(check);
+    const passed = displayCheck.status === "passed";
+    push(statusTableRow({
+      id: `go-no-go:${displayCheck.name}`,
+      control: friendlyCheckName(displayCheck.name),
+      technicalId: displayCheck.name,
+      source: "Go live",
+      status: displayCheck.status,
+      reason: passed ? (displayCheck.detail || "Controllo superato nel report go/no-go.") : simpleBlockerReason(displayCheck),
+      action: passed ? "Mantieni il report come evidence e rilancia dopo ogni modifica." : simpleBlockerAction(displayCheck),
+      required: displayCheck.required,
+      reportPath: displayCheck.reportPath || "",
+    }));
+  }
+  for (const check of documentedStatusChecks(context)) {
+    if (isControlCenterOnlyStatusCheck(check.id)) continue;
+    push(statusTableRow({
+      id: `documented:${check.id}`,
+      control: statusRunControlTitle(check),
+      technicalId: check.id,
+      source: check.source || "Documentazione",
+      status: check.status,
+      reason: check.detail || "",
+      action: check.status === "passed" ? "Nessuna azione immediata." : check.nextAction,
+      required: check.required,
+    }));
+  }
+  return rows;
+}
+
+function isControlCenterOnlyStatusCheck(id) {
+  return new Set([
+    "control-center-health",
+    "control-center-assets",
+  ]).has(String(id || ""));
+}
+
+function statusRunControlTitle(check) {
+  if (check?.id === "go-no-go-verdict") return "Decisione produzione";
+  return check?.title || friendlyCheckName(check?.id);
+}
+
+function statusTableRow({ id, control, technicalId, source, status, reason, action, required = true, reportPath = "" }) {
+  return sanitizeEvent({
+    id,
+    control,
+    technicalId,
+    source,
+    status,
+    reason,
+    action,
+    required,
+    reportPath,
+  });
+}
+
+function renderStatusTabButton(id, label, count, selected = false) {
+  return `<button class="ops-status-tab ${selected ? "active" : ""}" type="button" role="tab" data-status-tab="${escapeHtml(id)}" aria-controls="status-tab-${escapeHtml(id)}" aria-selected="${selected ? "true" : "false"}">
+    <span>${escapeHtml(label)}</span>
+    <strong>${escapeHtml(String(count))}</strong>
+  </button>`;
+}
+
+function renderStatusAllPanel(passedRows, notPassedRows) {
+  return `<div class="ops-status-split">
+    <div class="ops-status-column">
+      <div class="ops-status-column-head"><strong>Passati</strong><span>${escapeHtml(String(passedRows.length))}</span></div>
+      ${renderStatusRowsTable(passedRows, "Nessun controllo passato", "Avvia i test reali o genera un report go/no-go.")}
+    </div>
+    <div class="ops-status-column">
+      <div class="ops-status-column-head"><strong>Non passati</strong><span>${escapeHtml(String(notPassedRows.length))}</span></div>
+      ${renderStatusRowsTable(notPassedRows, "Nessun controllo aperto", "Non risultano blocchi nel set corrente.")}
+    </div>
+  </div>`;
+}
+
+function renderStatusRowsTable(rows, emptyTitle, emptyMessage) {
+  if (!rows.length) return empty(emptyTitle, emptyMessage);
+  const body = rows.map((row) => `<tr>
+    <td><strong>${escapeHtml(row.control)}</strong><span>${escapeHtml(row.technicalId)}</span></td>
+    <td><span class="ops-state ${statusClass(row.status)}">${escapeHtml(friendlyGoNoGoStatus(row.status))}</span></td>
+    <td>${escapeHtml(row.reason || "n.d.")}</td>
+    <td>${escapeHtml(row.action || "Nessuna azione indicata.")}${row.reportPath ? `<span>${escapeHtml(row.reportPath)}</span>` : ""}</td>
+    <td>${escapeHtml(row.source)}</td>
+  </tr>`).join("");
+  return `<div class="ops-table-wrap">
+    <table class="ops-table ops-status-table">
+      <thead><tr><th>Controllo</th><th>Stato</th><th>Motivo</th><th>Cosa fare</th><th>Fonte</th></tr></thead>
+      <tbody>${body}</tbody>
+    </table>
+  </div>`;
+}
+
+function renderOpsBlockersTable(blockers) {
+  const rows = blockers.map((check) => {
+    const displayCheck = goNoGoDisplayCheck(check);
+    return `<tr>
+    <td><strong>${escapeHtml(friendlyCheckName(displayCheck.name))}</strong><span>${escapeHtml(displayCheck.name)}</span></td>
+    <td><span class="ops-state ${statusClass(displayCheck.status)}">${escapeHtml(friendlyGoNoGoStatus(displayCheck.status))}</span></td>
+    <td>${escapeHtml(simpleBlockerReason(displayCheck))}</td>
+    <td>${escapeHtml(simpleBlockerAction(displayCheck))}</td>
+  </tr>`;
+  }).join("");
+  return `<div class="ops-table-wrap">
+    <table class="ops-table">
+      <thead><tr><th>Controllo</th><th>Stato</th><th>Motivo</th><th>Cosa fare</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+  </div>`;
+}
+
+function friendlyCheckName(name) {
+  const value = String(name || "").toLowerCase();
+  if (value.includes("go-no-go")) return "Report go live";
+  if (value.includes("preflight")) return "Preflight server";
+  if (value.includes("github")) return "GitHub Actions";
+  if (value.includes("cloudflare")) return "Cloudflare";
+  if (value.includes("secret")) return "Secrets e rotazione";
+  if (value.includes("restore")) return "Restore e recupero";
+  if (value.includes("backup")) return "Backup";
+  if (value.includes("waf")) return "WAF e protezione web";
+  if (value.includes("tls") || value.includes("https")) return "HTTPS e certificati";
+  if (value.includes("monitor")) return "Monitoraggio";
+  if (value.includes("release")) return "Release evidence";
+  if (value.includes("readiness")) return "Readiness";
+  return humanName(name);
+}
+
+function friendlyGoNoGoStatus(status) {
+  switch (String(status || "")) {
+    case "authorization-required":
+      return "Richiede autorizzazione";
+    case "passed":
+      return "Superato";
+    case "success":
+      return "Riuscito";
+    case "warning":
+      return "Attenzione";
+    case "failed":
+      return "Fallito";
+    case "pending-live-proof":
+      return "Manca prova live";
+    case "pending-provider":
+      return "Manca provider";
+    case "needs-work":
+      return "Da sistemare";
+    case "plan-only":
+      return "Solo pianificato";
+    case "go":
+      return "GO LIVE";
+    case "no-go":
+      return "NO GO LIVE";
+    default:
+      return humanName(status || "unknown");
+  }
+}
+
+function goNoGoDisplayCheck(check, fallbackCategory = "") {
+  return {
+    ...check,
+    status: goNoGoDisplayStatus(check, fallbackCategory),
+  };
+}
+
+function externalProviderEvidenceText(text) {
+  const clean = String(text || "").toLowerCase();
+  return [
+    "cloudflare",
+    "github",
+    "github-actions",
+    "github action",
+    "github-",
+    "external-uptime",
+    "provider",
+    "verifyremote",
+    "offsite",
+    "off-site",
+    "restic",
+    "sigstore",
+    "attestation",
+    "slsa",
+    "cosign",
+    "provenance",
+    "private registry",
+    "registry",
+    "public edge",
+    "edge/cdn",
+    "cdn",
+    "public target",
+    "public-target",
+    "dominio pubblico",
+    "monitor esterno",
+    "domain",
+    "dns",
+    "tls",
+    "https",
+  ].some((needle) => clean.includes(needle));
+}
+
+function protectedEvidenceText(text) {
+  const clean = String(text || "").toLowerCase();
+  return [
+    "alert-evidence",
+    "backup-",
+    "backup/",
+    "backupfailures=",
+    "chaos",
+    "deploy-vps",
+    "emailrequired",
+    "failure-tests",
+    "fault-injection",
+    "infra-secret-manager",
+    "migration",
+    "migrations",
+    "prune-postgres-backups",
+    "real-alert-delivery",
+    "restore drill",
+    "restore test",
+    "rotate",
+    "secret",
+    "vps-go-live",
+  ].some((needle) => clean.includes(needle));
+}
+
+function classifiedEvidenceStatus(status, text, fallbackCategory = "") {
+  const cleanStatus = sanitizeIdentifier(status || "unknown") || "unknown";
+  if (["passed", "success", "go"].includes(cleanStatus)) return cleanStatus;
+  const category = String(fallbackCategory || "").toLowerCase();
+  if (category === "secret-protected" || category === "protected-runtime") return "authorization-required";
+  if (category === "provider" || externalProviderEvidenceText(text)) return "pending-provider";
+  if (protectedEvidenceText(text)) return "authorization-required";
+  return cleanStatus;
+}
+
+function goNoGoDisplayStatus(check, fallbackCategory = "") {
+  const status = sanitizeIdentifier(check?.status || "unknown") || "unknown";
+  const category = String(fallbackCategory || "").toLowerCase();
+  const text = `${check?.name || ""} ${check?.blocker || ""} ${check?.detail || ""}`.toLowerCase();
+  const classified = classifiedEvidenceStatus(status, text, category);
+  if (status !== "failed") return classified;
+  if (classified === "pending-provider") return classified;
+  if (classified === "authorization-required") return classified;
+  const missingOrStaleEvidence = [
+    "latest report is",
+    "missing report",
+    "missing evidence",
+    "missing passing",
+    "missing public",
+    "external-live-proof",
+    "public-edge-benchmark",
+    "max ",
+  ].some((needle) => text.includes(needle));
+  if (missingOrStaleEvidence) return "pending-live-proof";
+  return status;
+}
+
+function simpleBlockerReason(check) {
+  const status = String(check.status || "");
+  const text = `${check.name || ""} ${check.blocker || ""} ${check.detail || ""}`.toLowerCase();
+  if (text.includes("production-go-no-go-report") || text.includes("no production go/no-go report")) {
+    return "Manca il report principale: senza quello il portale non può confermare il go live.";
+  }
+  if (text.includes("external-uptime") || text.includes("domain") || text.includes("dns") || text.includes("tls") || text.includes("https")) {
+    return "Manca una prova esterna che dominio, DNS e HTTPS siano raggiungibili come richiesto.";
+  }
+  if (text.includes("cloudflare")) return "Cloudflare non è ancora provato come configurato e funzionante per la produzione.";
+  if (text.includes("github") || text.includes("pre-go-live") || text.includes("release")) {
+    return "Manca una prova recente della pipeline o dell'evidence di rilascio richiesta.";
+  }
+  if (text.includes("load") || text.includes("benchmark")) {
+    return "Manca una prova recente che il dominio pubblico regga il carico minimo richiesto.";
+  }
+  if (text.includes("restore") || text.includes("disaster-recovery") || text.includes("rpo") || text.includes("rto")) {
+    return "Non c'è ancora prova sufficiente che backup e ripristino funzionino davvero.";
+  }
+  if (text.includes("backup")) return "Il sistema non ha abbastanza prova recente sui backup richiesti.";
+  if (text.includes("secret")) return "La gestione o rotazione dei secrets non è ancora provata per produzione.";
+  if (status === "authorization-required") {
+    return "Serve autorizzazione operativa prima di eseguire questa prova: può leggere secrets, usare backup, inviare alert, fermare servizi o validare rollback.";
+  }
+  if (status === "pending-live-proof") {
+    return "La prova esiste solo come configurazione o controllo locale; serve una verifica sull'ambiente reale.";
+  }
+  if (status === "pending-provider") {
+    return "Serve confermare un servizio esterno collegato.";
+  }
+  if (status === "failed") return "Il controllo obbligatorio è fallito.";
+  return check.blocker || check.detail || "Manca una prova obbligatoria per la produzione.";
+}
+
+function simpleBlockerAction(check) {
+  const status = String(check.status || "");
+  const text = `${check.name || ""} ${check.blocker || ""} ${check.detail || ""} ${check.nextAction || ""}`.toLowerCase();
+  const evidence = check.reportPath ? " La prova tecnica esiste già nel report collegato." : " Salva poi il nuovo report come prova tecnica.";
+  if (text.includes("production-go-no-go-report") || text.includes("no production go/no-go report")) {
+    return "Requisito go live: esegui il controllo completo e salva il report.";
+  }
+  if (text.includes("external-uptime") || text.includes("domain") || text.includes("dns") || text.includes("tls") || text.includes("https")) {
+    return `Requisito dominio: verifica DNS, HTTPS e monitor esterno sul dominio pubblico.${evidence}`;
+  }
+  if (text.includes("cloudflare")) {
+    return `Requisito Cloudflare: verifica Access, DNS/WAF o proxy Cloudflare sull'ambiente reale.${evidence}`;
+  }
+  if (text.includes("github") || text.includes("pre-go-live")) {
+    return `Requisito GitHub: fai passare la workflow di verifica richiesta e conserva l'evidence del run.${evidence}`;
+  }
+  if (text.includes("release")) {
+    return `Requisito GitHub/release: genera evidence di release e rollback prima del go live.${evidence}`;
+  }
+  if (text.includes("load") || text.includes("benchmark")) {
+    return `Requisito performance: esegui il benchmark pubblico sul dominio reale e aggiorna il report.${evidence}`;
+  }
+  if (text.includes("restore") || text.includes("disaster-recovery") || text.includes("rpo") || text.includes("rto")) {
+    return `Requisito backup/restore: esegui un restore drill controllato, includendo off-site/RPO/RTO se richiesto.${evidence}`;
+  }
+  if (text.includes("backup")) return `Requisito backup: esegui o verifica il backup richiesto e aggiorna il report.${evidence}`;
+  if (text.includes("secret")) return "Requisito secrets: completa verifica o rotazione senza stampare valori sensibili.";
+  if (status === "authorization-required") return "Autorizza esplicitamente la finestra operativa e lo scope, poi esegui la prova protetta con report non-secret e rollback pronto.";
+  if (status === "pending-live-proof") return `Requisito prova live: rilancia la verifica sull'ambiente server reale.${evidence}`;
+  if (status === "pending-provider") return `Requisito provider: collega o verifica il servizio esterno richiesto.${evidence}`;
+  if (check.nextAction) return `Requisito operativo: ${check.nextAction}`;
+  return "Requisito operativo: correggi il problema e rilancia il controllo completo.";
+}
+
+function projectDatabases(context, projectOrId) {
+  const project = resolveContextProject(context, projectOrId);
+  if (!project) return [];
+  const seen = new Set();
+  return context.databases.filter((database) => {
+    if (!databaseMatchesProject(context, database, project)) return false;
+    if (seen.has(database.id)) return false;
+    seen.add(database.id);
+    return true;
+  });
+}
+
+function projectStorage(context, projectOrId) {
+  const project = resolveContextProject(context, projectOrId);
+  if (!project) return { webspaces: [], buckets: [] };
+  const identities = projectIdentitySet(project);
+  const linked = (item) => identities.has(item.projectId) || (Array.isArray(item.linkedApps) && item.linkedApps.some((app) => identities.has(app)));
+  return {
+    webspaces: context.webspaces.filter(linked),
+    buckets: context.storageBuckets.filter(linked),
+  };
+}
+
+function resolveContextProject(context, projectOrId) {
+  if (projectOrId && typeof projectOrId === "object") return projectOrId;
+  const id = sanitizeIdentifier(projectOrId);
+  return context.projects.find((project) => project.slug === id || project.id === id || projectIdentitySet(project).has(id)) || null;
+}
+
+function databaseMatchesProject(context, database, project) {
+  const identities = projectIdentitySet(project);
+  if (identities.has(database.projectId)) return true;
+  if (databaseLinkedApps(database).some((app) => identities.has(app))) return true;
+  if (database.projectId && !identities.has(database.projectId)) return false;
+  const hints = new Set(context.databaseNameHints?.[project.slug] || []);
+  if (hints.has(database.name)) return true;
+  const databaseToken = resourceToken(database.name);
+  const projectTokens = [project.slug, project.name, ...(Array.isArray(project.aliases) ? project.aliases : [])]
+    .map((value) => resourceToken(value))
+    .filter((value) => value && value.length >= 4);
+  return projectTokens.some((token) => databaseToken === token || databaseToken.startsWith(`${token}_`) || databaseToken.endsWith(`_${token}`));
+}
+
+function projectIdentitySet(project) {
+  return new Set([project.slug, project.id, ...(Array.isArray(project.aliases) ? project.aliases : [])].map((item) => sanitizeIdentifier(item)).filter(Boolean));
+}
+
+function databaseLinkedApps(database) {
+  return Array.isArray(database.linkedApps) ? database.linkedApps.map((item) => sanitizeIdentifier(item)).filter(Boolean) : [];
+}
+
+function databaseDisplayName(database) {
+  return sanitizeOptionalDescription(database.displayName || "") || database.name;
+}
+
+function activityProblems(context) {
+  const problems = [];
+  for (const check of context.goNoGo.blockers || []) {
+    problems.push({
+      severity: check.status === "failed" || check.status === "needs-work" ? "error" : "pending",
+      source: "go-no-go",
+      name: check.name,
+      summary: check.blocker || check.detail || "Required production evidence is missing.",
+      timestamp: check.generatedAt || context.goNoGo.generatedAt || "",
+      href: "/?section=status",
+    });
+  }
+  for (const alert of context.logsAlerts.openAlerts || []) {
+    const severity = /critical|error/i.test(alert.severity) ? "error" : "warning";
+    problems.push({
+      severity,
+      source: `alert:${alert.service}`,
+      name: alert.id,
+      summary: alert.summary,
+      timestamp: alert.updatedAt || alert.createdAt || "",
+      href: "/?section=activity",
+    });
+  }
+  for (const error of context.logsAlerts.recentErrors || []) {
+    problems.push({
+      severity: "error",
+      source: error.source || "operation",
+      name: error.name || "failure",
+      summary: error.summary || "Failed operation or audit event.",
+      timestamp: error.timestamp || "",
+      href: "/?section=activity",
+    });
+  }
+  for (const job of context.jobRecords.filter((item) => item.status === "failed").slice(0, 20)) {
+    problems.push({
+      severity: "error",
+      source: `job:${job.projectId}`,
+      name: job.name || job.id,
+      summary: job.lastError || "Job failed.",
+      timestamp: job.updatedAt || job.createdAt || "",
+      href: "/?section=activity",
+    });
+  }
+  for (const item of context.readiness.productionBlockers || []) {
+    if (problems.some((problem) => problem.name === item.id)) continue;
+    problems.push({
+      severity: item.status === "needs-work" ? "error" : "pending",
+      source: "readiness",
+      name: item.id,
+      summary: item.nextAction || item.status,
+      timestamp: "",
+      href: "/?section=status",
+    });
+  }
+  return problems.slice(0, 80);
+}
+
+function resourceUsageRows(context) {
+  return context.applications.map((app) => {
+    const project = context.projects.find((item) => item.slug === app.projectId) || context.projects.find((item) => item.slug === app.id) || null;
+    const projectId = project?.slug || app.projectId || app.id;
+    const limit = context.resources.projectLimits.find((item) => item.projectId === projectId) || resourceLimitRecord({ projectId });
+    const usage = context.resources.projectUsage.find((item) => item.projectId === projectId) || {};
+    const containers = context.resources.containersByProject.filter((item) => item.applicationId === app.id || (app.id === projectId && item.projectId === projectId));
+    const measuredContainers = containers.filter((item) => item.attribution === "container-dedicato" || item.attribution === "docker-stats");
+    const cpuCores = measuredContainers.length ? measuredContainers.reduce((sum, item) => sum + Number(item.cpuCores || 0), 0) : null;
+    const memoryBytes = measuredContainers.length ? measuredContainers.reduce((sum, item) => sum + Number(item.memoryBytes || 0), 0) : null;
+    const hostCores = Number(context.resources.totals?.cpu?.cores || 0);
+    return {
+      applicationId: app.id,
+      applicationName: app.name,
+      projectId,
+      projectName: project?.name || humanName(projectId),
+      runtime: app.runtime,
+      status: app.status,
+      cpu: measuredContainers.length ? measuredCpuLabel(measuredContainers, hostCores) : "Metriche container non disponibili",
+      memory: memoryBytes != null ? usageBytesLabel(memoryBytes) : "Metriche container non disponibili",
+      disk: usage.diskAvailable ? usageBytesLabel(usage.diskBytes) : "Non disponibile",
+      containers: containers.length ? containers.map((item) => `${item.container}:${item.status}`).join(", ") : `${project ? dedicatedRuntimeName(project) : app.id} atteso`,
+      measuredFrom: measuredContainers.length ? (measuredContainers.some((item) => item.attribution === "docker-stats") ? "docker stats + filesystem" : "Prometheus/cAdvisor + filesystem") : "filesystem + container dedicato atteso",
+      limits: `${limit.cpuMillicores || 0}m / ${limit.memoryMb || 0} MB / ${limit.diskMb || 0} MB`,
+    };
+  });
+}
+
+function resourceControlPayload(context) {
+  const totals = context.resources.totals;
+  return {
+    ...context.resources,
+    cards: {
+      cpu: {
+        status: context.resources.cpu.status,
+        summary: context.resources.cpu.summary,
+        tone: totals.cpu.available ? "info" : "warn",
+      },
+      memory: {
+        status: context.resources.memory.status,
+        summary: context.resources.memory.summary,
+        tone: totals.memory.available ? "info" : "warn",
+      },
+      disk: {
+        status: context.resources.disk.status,
+        summary: totals.disk.available ? `${percentLabel(totals.disk.usedPercent)} usato` : totals.disk.message,
+        tone: totals.disk.available ? "info" : "warn",
+      },
+      applications: {
+        status: context.applications.length,
+        summary: context.resources.trend,
+        tone: context.resources.containerMetricsAvailable ? "good" : "warn",
+      },
+    },
+    summaries: {
+      cpu: {
+        status: context.resources.cpu.status,
+        detail: totals.cpu.available ? `${coresLabel(totals.cpu.cores)} disponibili` : totals.cpu.message || "non disponibile",
+      },
+      memory: {
+        status: context.resources.memory.status,
+        detail: context.resources.memory.summary,
+      },
+      disk: {
+        status: context.resources.disk.status,
+        detail: totals.disk.available ? `${percentLabel(totals.disk.usedPercent)} usato` : totals.disk.message || "non disponibile",
+      },
+      source: {
+        status: context.resources.source,
+        detail: context.resources.capturedAt,
+      },
+    },
+    rows: resourceUsageRows(context),
+  };
+}
+
+function measuredCpuLabel(containers, hostCores = 0) {
+  const dockerPercent = sumContainerCpuPercent(containers);
+  const cpuCores = containers.reduce((sum, item) => sum + Number(item.cpuCores || 0), 0);
+  if (dockerPercent != null) return `${cpuPercentLabel(dockerPercent)} (${preciseCoresLabel(cpuCores)})`;
+  return `${preciseCoresLabel(cpuCores)} (${percentLabel(hostCores ? (cpuCores / hostCores) * 100 : null)} host)`;
+}
+
+function sumContainerCpuPercent(containers) {
+  const values = containers
+    .map((item) => Number(item.cpuPercent))
+    .filter((value) => Number.isFinite(value));
+  if (!values.length) return null;
+  return values.reduce((sum, value) => sum + value, 0);
+}
+
+function cpuPercentLabel(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "n.d.";
+  if (number === 0) return "0.000%";
+  if (Math.abs(number) < 0.001) return "<0.001%";
+  return `${number.toFixed(3)}%`;
+}
+
+function preciseCoresLabel(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "n.d.";
+  if (number === 0) return "idle nel campione";
+  if (number > 0 && number < 0.001) return "<0.001 core stimati";
+  if (number === 1) return "1.000 core stimati";
+  return `${number.toFixed(3)} core stimati`;
+}
+
+function readDockerStatsSnapshot() {
+  if (!existsSync(dockerStatsFile)) return { available: false, capturedAt: "", containers: [] };
+  try {
+    const parsed = JSON.parse(readFileSync(dockerStatsFile, "utf8"));
+    const rawContainers = Array.isArray(parsed.containers) ? parsed.containers : [];
+    const containers = rawContainers.map(dockerStatsContainerRecord).filter(Boolean);
+    return {
+      available: containers.length > 0,
+      capturedAt: sanitizeMessage(parsed.capturedAt || ""),
+      containers,
+    };
+  } catch {
+    return { available: false, capturedAt: "", containers: [] };
+  }
+}
+
+function dockerStatsContainerRecord(item) {
+  if (!item || typeof item !== "object") return null;
+  const name = sanitizeRef(item.name || item.container || item.Name || item.Container || "");
+  if (!name || name === "unknown") return null;
+  const cpuPercent = parseDockerPercent(item.cpuPercent || item.CPUPerc || item.cpu || "");
+  const memoryBytes = parseDockerMemoryUsage(item.memoryUsage || item.MemUsage || item.memory || "");
+  return {
+    name,
+    cpuCores: cpuPercent != null ? cpuPercent / 100 : null,
+    cpuPercent,
+    memoryBytes,
+  };
+}
+
+function parseDockerPercent(value) {
+  const number = Number(String(value || "").replace("%", "").trim());
+  return Number.isFinite(number) ? number : null;
+}
+
+function parseDockerMemoryUsage(value) {
+  const first = String(value || "").split("/")[0]?.trim() || "";
+  return parseDockerSize(first);
+}
+
+function parseDockerSize(value) {
+  const match = String(value || "").trim().match(/^([0-9]+(?:\.[0-9]+)?)\s*([kmgtp]?i?b)$/i);
+  if (!match) return null;
+  const amount = Number(match[1]);
+  if (!Number.isFinite(amount)) return null;
+  const unit = match[2].toLowerCase();
+  const multipliers = {
+    b: 1,
+    kb: 1000,
+    mb: 1000 ** 2,
+    gb: 1000 ** 3,
+    tb: 1000 ** 4,
+    pb: 1000 ** 5,
+    kib: 1024,
+    mib: 1024 ** 2,
+    gib: 1024 ** 3,
+    tib: 1024 ** 4,
+    pib: 1024 ** 5,
+  };
+  return Math.round(amount * (multipliers[unit] || 1));
+}
+
+function matchDockerStatsContainers(app, project, containers) {
+  const exact = [app.id, app.id === project.slug ? dedicatedRuntimeName(project) : ""]
+    .map((value) => resourceToken(value))
+    .filter(Boolean);
+  const fallback = app.id === project.slug
+    ? [project.slug, project.name, ...(Array.isArray(project.aliases) ? project.aliases : [])]
+      .map((value) => resourceToken(value))
+      .filter((value) => value && value.length >= 4)
+    : [];
+  return containers.filter((container) => {
+    const haystack = resourceToken(container.name);
+    return exact.some((needle) => haystack === needle) || fallback.some((needle) => haystack === needle || haystack.includes(needle));
+  });
+}
+
+async function collectLiveResourceUsage({ projects, applications, webspaces }) {
+  const capturedAt = new Date().toISOString();
+  const prometheus = await readPrometheusResourceSnapshot();
+  const dockerStats = readDockerStatsSnapshot();
+  const projectDisks = new Map(projects.map((project) => [project.slug, readProjectDiskUsage(project)]));
+  const containersByProject = applications.flatMap((app) => {
+    const project = projects.find((item) => item.slug === app.projectId) || projects.find((item) => item.slug === app.id);
+    const exactContainers = project ? matchApplicationContainers(app, project, prometheus.containers) : [];
+    if (exactContainers.length) {
+      return exactContainers.map((container) => ({
+        projectId: app.projectId,
+        applicationId: app.id,
+        runtime: app.runtime,
+        status: app.status,
+        container: container.name,
+        cpuCores: container.cpuCores,
+        cpuPercent: null,
+        memoryBytes: container.memoryBytes,
+        attribution: "container-dedicato",
+      }));
+    }
+    const dockerContainers = project ? matchDockerStatsContainers(app, project, dockerStats.containers) : [];
+    if (dockerContainers.length) {
+      return dockerContainers.map((container) => ({
+        projectId: app.projectId,
+        applicationId: app.id,
+        runtime: app.runtime,
+        status: app.status,
+        container: container.name,
+        cpuCores: container.cpuCores,
+        cpuPercent: container.cpuPercent,
+        memoryBytes: container.memoryBytes,
+        attribution: "docker-stats",
+      }));
+    }
+    return [{
+      projectId: app.projectId,
+      applicationId: app.id,
+      runtime: app.runtime,
+      status: app.status,
+      container: project ? dedicatedRuntimeName(project) : "container dedicato atteso",
+      cpuCores: null,
+      memoryBytes: null,
+      attribution: "container-dedicato-atteso",
+    }];
+  });
+  const projectUsage = projects.map((project) => {
+    const projectApps = applications.filter((app) => app.projectId === project.slug || app.id === project.slug);
+    const exactContainers = projectApps.flatMap((app) => {
+      const prometheusMatches = matchApplicationContainers(app, project, prometheus.containers);
+      return prometheusMatches.length ? prometheusMatches : matchDockerStatsContainers(app, project, dockerStats.containers);
+    });
+    const disk = projectDisks.get(project.slug) || { available: false, bytes: 0, files: 0, directories: 0 };
+    const cpuCores = exactContainers.length ? exactContainers.reduce((sum, item) => sum + Number(item.cpuCores || 0), 0) : null;
+    const memoryBytes = exactContainers.length ? exactContainers.reduce((sum, item) => sum + Number(item.memoryBytes || 0), 0) : null;
+    const cpuPercent = cpuCores != null && prometheus.cpu.cores ? (cpuCores / prometheus.cpu.cores) * 100 : null;
+    return sanitizeEvent({
+      projectId: project.slug,
+      projectName: project.name,
+      status: project.status,
+      runtime: project.runtime,
+      diskAvailable: disk.available,
+      diskBytes: disk.bytes,
+      files: disk.files,
+      directories: disk.directories,
+      cpuCores,
+      cpuPercent: sumContainerCpuPercent(exactContainers) ?? cpuPercent,
+      memoryBytes,
+      cpuMessage: exactContainers.length ? "" : "Metriche container non disponibili",
+      memoryMessage: exactContainers.length ? "" : "Metriche container non disponibili",
+      containersLabel: exactContainers.length ? exactContainers.map((item) => item.name).join(", ") : `${dedicatedRuntimeName(project)} atteso`,
+      measuredFrom: exactContainers.length ? `${dockerStats.containers.length ? "docker stats" : "Prometheus/cAdvisor"} + filesystem` : "filesystem + container dedicato atteso",
+      applications: projectApps.map((app) => app.id),
+    });
+  });
+  const webspaceBytes = webspaces.reduce((sum, item) => sum + Number(item.usedBytes || 0), 0);
+  const containerMetricsAvailable = prometheus.containers.length > 0 || dockerStats.containers.length > 0;
+  return sanitizeEvent({
+    source: dockerStats.containers.length ? `docker-stats-file (${dockerStats.capturedAt || "no timestamp"})` : prometheus.available ? (prometheus.containers.length > 0 ? "prometheus-node-exporter-cadvisor" : "prometheus-node-exporter") : "local-filesystem",
+    capturedAt: dockerStats.capturedAt || capturedAt,
+    containerMetricsAvailable,
+    totals: {
+      cpu: prometheus.cpu,
+      memory: prometheus.memory,
+      disk: prometheus.disk.available ? prometheus.disk : readLocalFilesystemSnapshot(projectsRoot),
+      webspacesBytes: webspaceBytes,
+    },
+    containersByProject,
+    projectUsage,
+  });
+}
+
+async function readPrometheusResourceSnapshot() {
+  const now = Date.now();
+  if (resourceMetricsCache.value && resourceMetricsCache.expiresAt > now) return resourceMetricsCache.value;
+  if (resourceMetricsCache.failedUntil > now) return unavailableResourceSnapshot("Prometheus non disponibile o non raggiungibile.");
+  if (!prometheusUrl) return unavailableResourceSnapshot("Prometheus non configurato.");
+
+  const queries = {
+    cpuPercent: '100 * (1 - avg(rate(node_cpu_seconds_total{mode="idle"}[2m])))',
+    cpuCores: 'count(count by (cpu) (node_cpu_seconds_total{mode="idle"}))',
+    memoryTotal: "node_memory_MemTotal_bytes",
+    memoryAvailable: "node_memory_MemAvailable_bytes",
+    diskSize: 'node_filesystem_size_bytes{fstype!~"tmpfs|fuse.*|overlay|squashfs",mountpoint=~"/|/srv/platform-nvme"}',
+    diskAvailable: 'node_filesystem_avail_bytes{fstype!~"tmpfs|fuse.*|overlay|squashfs",mountpoint=~"/|/srv/platform-nvme"}',
+    containerCpuByName: 'sum by (name) (rate(container_cpu_usage_seconds_total{name!="",id!="/"}[2m]))',
+    containerMemoryByName: 'max by (name) (container_memory_working_set_bytes{name!="",id!="/"})',
+    containerCpuByContainer: 'sum by (container) (rate(container_cpu_usage_seconds_total{container!="",id!="/"}[2m]))',
+    containerMemoryByContainer: 'max by (container) (container_memory_working_set_bytes{container!="",id!="/"})',
+  };
+  const entries = await Promise.all(Object.entries(queries).map(async ([key, query]) => {
+    try {
+      return [key, await prometheusQuery(query)];
+    } catch {
+      return [key, []];
+    }
+  }));
+  const results = Object.fromEntries(entries);
+  const memoryTotal = firstPrometheusValue(results.memoryTotal);
+  const memoryAvailable = firstPrometheusValue(results.memoryAvailable);
+  const snapshot = sanitizeEvent({
+    available: [results.cpuPercent, results.cpuCores, results.memoryTotal, results.memoryAvailable, results.diskSize].some((items) => items.length > 0),
+    cpu: {
+      available: results.cpuPercent.length > 0 || results.cpuCores.length > 0,
+      usedPercent: firstPrometheusValue(results.cpuPercent),
+      cores: firstPrometheusValue(results.cpuCores),
+      message: results.cpuPercent.length ? "" : "Metriche CPU non disponibili da Prometheus.",
+    },
+    memory: {
+      available: Number.isFinite(memoryTotal) && Number.isFinite(memoryAvailable),
+      totalBytes: memoryTotal || 0,
+      availableBytes: memoryAvailable || 0,
+      usedBytes: Number.isFinite(memoryTotal) && Number.isFinite(memoryAvailable) ? Math.max(0, memoryTotal - memoryAvailable) : 0,
+      usedPercent: Number.isFinite(memoryTotal) && memoryTotal > 0 ? ((memoryTotal - memoryAvailable) / memoryTotal) * 100 : null,
+      message: Number.isFinite(memoryTotal) ? "" : "Metriche RAM non disponibili da Prometheus.",
+    },
+    disk: buildPrometheusDiskSnapshot(results.diskSize, results.diskAvailable),
+    containers: mergePrometheusContainerMetrics(
+      [...results.containerCpuByName, ...results.containerCpuByContainer],
+      [...results.containerMemoryByName, ...results.containerMemoryByContainer],
+    ),
+  });
+  if (!snapshot.available) {
+    resourceMetricsCache.failedUntil = now + resourceProbeFailureCooldownMs;
+    return unavailableResourceSnapshot("Prometheus non ha restituito metriche host.");
+  }
+  resourceMetricsCache.value = snapshot;
+  resourceMetricsCache.expiresAt = now + resourceMetricsTtlMs;
+  return snapshot;
+}
+
+async function prometheusQuery(query) {
+  const endpoint = new URL("/api/v1/query", prometheusUrl.endsWith("/") ? prometheusUrl : `${prometheusUrl}/`);
+  endpoint.searchParams.set("query", query);
+  const response = await fetch(endpoint, { signal: AbortSignal.timeout(resourceProbeTimeoutMs) });
+  if (!response.ok) throw new Error(`Prometheus returned ${response.status}`);
+  const payload = await response.json();
+  if (payload.status !== "success") throw new Error("Prometheus query failed.");
+  return Array.isArray(payload.data?.result) ? payload.data.result : [];
+}
+
+function unavailableResourceSnapshot(message) {
+  return {
+    available: false,
+    cpu: { available: false, usedPercent: null, cores: null, message },
+    memory: { available: false, totalBytes: 0, availableBytes: 0, usedBytes: 0, usedPercent: null, message },
+    disk: readLocalFilesystemSnapshot(projectsRoot),
+    containers: [],
+  };
+}
+
+function buildPrometheusDiskSnapshot(sizeRows, availableRows) {
+  const availableByMount = new Map(availableRows.map((row) => [row.metric?.mountpoint || "", firstPrometheusValue([row])]));
+  const rows = [];
+  const seenDevices = new Set();
+  for (const row of sizeRows) {
+    const mountpoint = row.metric?.mountpoint || "";
+    const device = row.metric?.device || mountpoint;
+    if (!mountpoint || seenDevices.has(device)) continue;
+    const totalBytes = firstPrometheusValue([row]);
+    const availableBytes = availableByMount.get(mountpoint);
+    if (!Number.isFinite(totalBytes) || !Number.isFinite(availableBytes)) continue;
+    seenDevices.add(device);
+    rows.push({
+      mountpoint,
+      device,
+      totalBytes,
+      availableBytes,
+      usedBytes: Math.max(0, totalBytes - availableBytes),
+      usedPercent: totalBytes > 0 ? ((totalBytes - availableBytes) / totalBytes) * 100 : null,
+    });
+  }
+  const totalBytes = rows.reduce((sum, row) => sum + row.totalBytes, 0);
+  const availableBytes = rows.reduce((sum, row) => sum + row.availableBytes, 0);
+  return sanitizeEvent({
+    available: rows.length > 0,
+    totalBytes,
+    availableBytes,
+    usedBytes: Math.max(0, totalBytes - availableBytes),
+    usedPercent: totalBytes > 0 ? ((totalBytes - availableBytes) / totalBytes) * 100 : null,
+    mounts: rows,
+    message: rows.length ? "" : "Metriche disco non disponibili da Prometheus.",
+  });
+}
+
+function mergePrometheusContainerMetrics(cpuRows, memoryRows) {
+  const byName = new Map();
+  for (const row of cpuRows) {
+    const name = prometheusContainerName(row.metric || {});
+    if (!name) continue;
+    const current = byName.get(name) || { name, cpuCores: 0, memoryBytes: 0 };
+    const value = firstPrometheusValue([row]);
+    if (Number.isFinite(value)) current.cpuCores = Math.max(current.cpuCores || 0, value);
+    byName.set(name, current);
+  }
+  for (const row of memoryRows) {
+    const name = prometheusContainerName(row.metric || {});
+    if (!name) continue;
+    const current = byName.get(name) || { name, cpuCores: 0, memoryBytes: 0 };
+    const value = firstPrometheusValue([row]);
+    if (Number.isFinite(value)) current.memoryBytes = Math.max(current.memoryBytes || 0, value);
+    byName.set(name, current);
+  }
+  return [...byName.values()].filter((item) => item.cpuCores || item.memoryBytes);
+}
+
+function prometheusContainerName(metric) {
+  return sanitizeIdentifier(metric.name || metric.container || metric.container_name || metric.container_label_com_docker_compose_service || "");
+}
+
+function firstPrometheusValue(rows) {
+  const row = rows.find((item) => Array.isArray(item.value) && item.value.length >= 2);
+  const value = Number(row?.value?.[1]);
+  return Number.isFinite(value) ? value : null;
+}
+
+function readLocalFilesystemSnapshot(targetPath) {
+  try {
+    const stats = statfsSync(existsSync(targetPath) ? targetPath : ".");
+    const totalBytes = Number(stats.blocks || 0) * Number(stats.bsize || 0);
+    const availableBytes = Number(stats.bavail || 0) * Number(stats.bsize || 0);
+    return sanitizeEvent({
+      available: totalBytes > 0,
+      totalBytes,
+      availableBytes,
+      usedBytes: Math.max(0, totalBytes - availableBytes),
+      usedPercent: totalBytes > 0 ? ((totalBytes - availableBytes) / totalBytes) * 100 : null,
+      mounts: [{ mountpoint: targetPath, device: "local-filesystem", totalBytes, availableBytes, usedBytes: Math.max(0, totalBytes - availableBytes) }],
+      message: totalBytes > 0 ? "" : "Filesystem non disponibile.",
+    });
+  } catch {
+    return { available: false, totalBytes: 0, availableBytes: 0, usedBytes: 0, usedPercent: null, mounts: [], message: "Filesystem non disponibile." };
+  }
+}
+
+function readProjectDiskUsage(project) {
+  if (!project.filesAvailable || !project.relativePath) return { available: false, bytes: 0, files: 0, directories: 0 };
+  try {
+    const root = resolveProjectRoot(project);
+    const key = `${project.slug}:${root}`;
+    const cached = projectDiskUsageCache.get(key);
+    const now = Date.now();
+    if (cached && cached.expiresAt > now) return cached.value;
+    const value = directoryUsage(root);
+    projectDiskUsageCache.set(key, { value, expiresAt: now + projectDiskUsageTtlMs });
+    return value;
+  } catch {
+    return { available: false, bytes: 0, files: 0, directories: 0 };
+  }
+}
+
+function directoryUsage(root) {
+  const stack = [root];
+  let bytes = 0;
+  let files = 0;
+  let directories = 0;
+  while (stack.length) {
+    const current = stack.pop();
+    let stat;
+    try {
+      stat = lstatSync(current);
+    } catch {
+      continue;
+    }
+    bytes += Number(stat.size || 0);
+    if (stat.isDirectory() && !stat.isSymbolicLink()) {
+      directories += 1;
+      let entries = [];
+      try {
+        entries = readdirSync(current);
+      } catch {
+        entries = [];
+      }
+      for (const entry of entries) stack.push(path.join(current, entry));
+    } else {
+      files += 1;
+    }
+  }
+  return { available: true, bytes, files, directories };
+}
+
+function matchApplicationContainers(app, project, containers) {
+  const needles = [app.id, app.name, project.slug, project.host]
+    .map((value) => resourceToken(value))
+    .filter(Boolean);
+  return containers.filter((container) => {
+    const haystack = resourceToken(container.name);
+    return needles.some((needle) => haystack === needle || (needle.length >= 4 && haystack.includes(needle)));
+  });
+}
+
+function dedicatedRuntimeName(project) {
+  const prefix = project.runtime === "static" ? "static" : project.runtime === "node" ? "node" : "php";
+  return `${prefix}-${project.slug}`;
+}
+
+function resourceToken(value) {
+  return sanitizeIdentifier(String(value || "").toLowerCase().replace(/https?:\/\//, "").replace(/\..*$/, ""));
+}
+
+function statusClass(status) {
+  const clean = String(status || "").toLowerCase();
+  if (["go", "good", "active", "online", "running", "configured", "declared", "file", "directory", "passed", "success"].includes(clean)) return "good";
+  if (["warning", "warn", "pending", "pending-live-proof", "pending-provider", "plan-only", "degraded", "local-estimate", "symlink"].includes(clean)) return "warn";
+  if (["error", "failed", "critical", "needs-work", "disabled", "offline", "archived", "bad", "no-go"].includes(clean)) return "bad";
+  return "info";
 }
 
 function renderControlSidebar(groups, activeGroupId, activeSection, mode, selectedProject) {
@@ -2358,38 +5919,47 @@ function sidebarItemLabel(label) {
 }
 
 function controlIcon(name) {
+  // Font Awesome Free solid icon paths, embedded inline to keep the portal self-hosted.
   const icons = {
-    overview: '<path d="M4 11.5 12 5l8 6.5v7a1.5 1.5 0 0 1-1.5 1.5H15v-5H9v5H5.5A1.5 1.5 0 0 1 4 18.5z"/>',
-    projects: '<path d="M3 7.5h7l2 2h9v8.5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M3 7.5V6a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v1.5"/>',
-    applications: '<path d="m12 3 8 4.5v9L12 21l-8-4.5v-9z"/><path d="m12 12 8-4.5"/><path d="M12 12v9"/><path d="m12 12-8-4.5"/>',
-    domains: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3c3 3.3 3 14.7 0 18"/><path d="M12 3c-3 3.3-3 14.7 0 18"/>',
-    databases: '<ellipse cx="12" cy="5" rx="7" ry="3"/><path d="M5 5v6c0 1.7 3.1 3 7 3s7-1.3 7-3V5"/><path d="M5 11v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"/>',
-    storage: '<path d="M5 8h14l-1.2 11H6.2z"/><path d="M8 8V5.5A1.5 1.5 0 0 1 9.5 4h5A1.5 1.5 0 0 1 16 5.5V8"/><path d="M9 12h6"/>',
-    webspaces: '<rect x="4" y="5" width="16" height="14" rx="2"/><path d="M4 10h16"/><path d="M8 15h3"/><path d="M14 15h2"/>',
-    resources: '<path d="M4 19V5"/><path d="M4 19h17"/><path d="m7 15 3-3 3 2 5-7"/><path d="M18 7h3v3"/>',
-    security: '<path d="M12 3 20 6v5c0 5-3.4 8.4-8 10-4.6-1.6-8-5-8-10V6z"/>',
-    backups: '<path d="M7 7h11a3 3 0 0 1 0 6H8a4 4 0 1 1 3.5-6"/><path d="M12 12v6"/><path d="m9 15 3 3 3-3"/>',
-    logs: '<path d="M18 8a6 6 0 1 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9"/><path d="M10 21h4"/>',
-    settings: '<path d="M12 15.5A3.5 3.5 0 1 0 12 8a3.5 3.5 0 0 0 0 7.5z"/><path d="M19.4 15a1.8 1.8 0 0 0 .36 2l.05.05a2 2 0 1 1-2.83 2.83l-.05-.05a1.8 1.8 0 0 0-2-.36 1.8 1.8 0 0 0-1 1.63V21a2 2 0 1 1-4 0v-.08a1.8 1.8 0 0 0-1-1.63 1.8 1.8 0 0 0-2 .36l-.05.05a2 2 0 1 1-2.83-2.83l.05-.05a1.8 1.8 0 0 0 .36-2 1.8 1.8 0 0 0-1.63-1H3a2 2 0 1 1 0-4h.08a1.8 1.8 0 0 0 1.63-1 1.8 1.8 0 0 0-.36-2l-.05-.05a2 2 0 1 1 2.83-2.83l.05.05a1.8 1.8 0 0 0 2 .36h.01A1.8 1.8 0 0 0 10 3.08V3a2 2 0 1 1 4 0v.08a1.8 1.8 0 0 0 1 1.63 1.8 1.8 0 0 0 2-.36l.05-.05a2 2 0 1 1 2.83 2.83l-.05.05a1.8 1.8 0 0 0-.36 2V9.2a1.8 1.8 0 0 0 1.63 1H21a2 2 0 1 1 0 4h-.08a1.8 1.8 0 0 0-1.52.8z"/>',
-    menu: '<path d="M4 7h16"/><path d="M4 12h16"/><path d="M4 17h16"/>',
-    search: '<circle cx="11" cy="11" r="7"/><path d="m16.5 16.5 4 4"/>',
-    bell: '<path d="M18 8a6 6 0 1 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9"/><path d="M10 21h4"/>',
-    help: '<path d="M9.2 9a3 3 0 1 1 5.2 2c-1.3.8-2.4 1.6-2.4 3"/><path d="M12 18h.01"/><circle cx="12" cy="12" r="9"/>',
-    sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/>',
-    folder: '<path d="M3 7.5h7l2 2h9v8.5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
-    cube: '<path d="m12 3 8 4.5v9L12 21l-8-4.5v-9z"/><path d="m12 12 8-4.5"/><path d="M12 12v9"/><path d="m12 12-8-4.5"/>',
-    globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3c3 3.3 3 14.7 0 18"/><path d="M12 3c-3 3.3-3 14.7 0 18"/>',
-    server: '<rect x="4" y="4" width="16" height="6" rx="2"/><rect x="4" y="14" width="16" height="6" rx="2"/><path d="M8 7h.01"/><path d="M8 17h.01"/>',
-    shield: '<path d="M12 3 20 6v5c0 5-3.4 8.4-8 10-4.6-1.6-8-5-8-10V6z"/>',
-    rocket: '<path d="M5 15c-1 1-1.5 3-1.5 5.5C6 20.5 8 20 9 19"/><path d="M15 5c3-2 5.5-1.5 5.5-1.5S21 6 19 9l-7 7-4-4z"/><path d="m9 15-4 4"/><path d="M15 5l4 4"/>',
-    user: '<circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/>',
-    plus: '<path d="M12 5v14"/><path d="M5 12h14"/>',
-    chevron: '<path d="m9 18 6-6-6-6"/>',
-    "chevron-down": '<path d="m6 9 6 6 6-6"/>',
-    "arrow-right": '<path d="M5 12h14"/><path d="m13 6 6 6-6 6"/>',
+    overview: [576, 512, '<path d="M575.8 255.5c0 18-15 32.1-32 32.1h-32l.7 160.2c.2 35.5-28.5 64.3-64 64.3H128.1c-35.3 0-64-28.7-64-64V287.6H32c-18 0-32-14-32-32.1c0-9 3.8-17.3 10.4-23.4L266.4 8c14.4-12.7 36-12.7 50.5 0l248.5 224.1c6.6 6.1 10.4 14.4 10.4 23.4z"/>'],
+    projects: [512, 512, '<path d="M64 480h384c35.3 0 64-28.7 64-64V160c0-35.3-28.7-64-64-64H288.8c-10.1 0-19.6-4.7-25.6-12.8L243.2 56C232.1 41.2 214.7 32 196.2 32H64C28.7 32 0 60.7 0 96v320c0 35.3 28.7 64 64 64z"/>'],
+    applications: [512, 512, '<path d="M234.5 5.7c13.9-7.6 30.9-7.6 44.8 0l192 104.7c15.4 8.4 24.7 24.5 24.7 41.9v207.4c0 17.4-9.3 33.5-24.7 41.9l-192 104.7c-13.9 7.6-30.9 7.6-44.8 0l-192-104.7C27.1 393.2 17.8 377.1 17.8 359.7V152.3c0-17.4 9.3-33.5 24.7-41.9l192-104.7zM256 53.3L72.5 153.4 256 253.5l183.5-100.1L256 53.3zM464 194.9 280 295.3v157l184-100.3V194.9zM232 452.3v-157L48 194.9V352l184 100.3z"/>'],
+    domains: [512, 512, '<path d="M352 256c0 22.2-1.2 43.6-3.3 64H163.3c-2.2-20.4-3.3-41.8-3.3-64s1.2-43.6 3.3-64h185.4c2.1 20.4 3.3 41.8 3.3 64zm28.8-64h123.1c5.3 20.5 8.1 41.9 8.1 64s-2.8 43.5-8.1 64H380.8c2.1-20.6 3.2-42 3.2-64s-1.1-43.4-3.2-64zm112.6-32H376.7c-10-63.9-29.8-117.4-55.3-151.6c78.3 20.7 142 77.5 172 151.6zm-149.1 0H167.7c6.1-36.4 15.5-68.6 27-94.7c10.5-23.6 22.2-40.7 33.5-51.5C239.4 3.2 248.7 0 256 0s16.6 3.2 27.8 13.8c11.3 10.8 23 27.9 33.5 51.5c11.5 26.1 20.9 58.3 27 94.7zm-209 0H18.6c30-74.1 93.7-130.9 172-151.6c-25.5 34.2-45.3 87.7-55.3 151.6zM8.1 192h123.1c-2.1 20.6-3.2 42-3.2 64s1.1 43.4 3.2 64H8.1C2.8 299.5 0 278.1 0 256s2.8-43.5 8.1-64zm159.6 160h176.6c-6.1 36.4-15.5 68.6-27 94.7c-10.5 23.6-22.2 40.7-33.5 51.5C272.6 508.8 263.3 512 256 512s-16.6-3.2-27.8-13.8c-11.3-10.8-23-27.9-33.5-51.5c-11.5-26.1-20.9-58.3-27-94.7zm-32.4 0c10 63.9 29.8 117.4 55.3 151.6c-78.3-20.7-142-77.5-172-151.6h116.7zm358.1 0c-30 74.1-93.7 130.9-172 151.6c25.5-34.2 45.3-87.7 55.3-151.6h116.7z"/>'],
+    databases: [448, 512, '<path d="M448 80v48c0 44.2-100.3 80-224 80S0 172.2 0 128V80C0 35.8 100.3 0 224 0s224 35.8 224 80zM393.2 214.7c20.8-7.4 39.9-16.9 54.8-28.6V288c0 44.2-100.3 80-224 80S0 332.2 0 288V186.1c14.9 11.8 34 21.2 54.8 28.6C99.7 230.7 159.5 240 224 240s124.3-9.3 169.2-25.3zM0 346.1c14.9 11.8 34 21.2 54.8 28.6C99.7 390.7 159.5 400 224 400s124.3-9.3 169.2-25.3c20.8-7.4 39.9-16.9 54.8-28.6V432c0 44.2-100.3 80-224 80S0 476.2 0 432v-85.9z"/>'],
+    storage: [512, 512, '<path d="M32 32C14.3 32 0 46.3 0 64v368c0 26.5 21.5 48 48 48h416c26.5 0 48-21.5 48-48V64c0-17.7-14.3-32-32-32H32zm64 352a32 32 0 1 1 0 64 32 32 0 1 1 0-64zm96 32a32 32 0 1 1-64 0 32 32 0 1 1 64 0zm-64-224h256c17.7 0 32 14.3 32 32s-14.3 32-32 32H128c-17.7 0-32-14.3-32-32s14.3-32 32-32z"/>'],
+    webspaces: [512, 512, '<path d="M64 64C28.7 64 0 92.7 0 128v256c0 35.3 28.7 64 64 64h384c35.3 0 64-28.7 64-64V128c0-35.3-28.7-64-64-64H64zm0 64h384v64H64v-64zm0 128h112v128H64V256zm176 0h208v128H240V256z"/>'],
+    resources: [512, 512, '<path d="M64 64c0-17.7-14.3-32-32-32S0 46.3 0 64v336c0 44.2 35.8 80 80 80h400c17.7 0 32-14.3 32-32s-14.3-32-32-32H80c-8.8 0-16-7.2-16-16V64zm406.6 86.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0L320 210.7l-57.4-57.4c-12.5-12.5-32.8-12.5-45.3 0l-112 112c-12.5 12.5-12.5 32.8 0 45.3s32.8 12.5 45.3 0l89.4-89.3 57.4 57.4c12.5 12.5 32.8 12.5 45.3 0l128-128z"/>'],
+    security: [512, 512, '<path d="M256 0c4.6 0 9.2 1 13.4 2.9l188.3 79.9c22 9.3 38.4 31 38.3 57.2c-.5 99.2-41.3 280.7-213.6 363.2c-16.7 8-36.1 8-52.8 0C57.3 420.7 16.5 239.2 16 140c-.1-26.2 16.3-47.9 38.3-57.2L242.6 2.9C246.8 1 251.4 0 256 0zm0 66.8v378c138-66.8 175.1-214.7 176-303.4L256 66.8z"/>'],
+    backups: [640, 512, '<path d="M144 480C64.5 480 0 415.5 0 336c0-62.8 40.2-116.2 96.2-135.9C97.4 125.6 158.2 64 232 64c54.8 0 102.6 30.1 128 74.6C373.6 132 388.9 128 405.3 128C464.8 128 512 177.1 512 236.6c0 4.1-.2 8.2-.7 12.2C584.9 260.3 640 323.9 640 400c0 44.2-35.8 80-80 80H144zm209-207c-9.4-9.4-24.6-9.4-33.9 0l-55 55V184c0-13.3-10.7-24-24-24s-24 10.7-24 24v144l-55-55c-9.4-9.4-24.6-9.4-33.9 0s-9.4 24.6 0 33.9l96 96c9.4 9.4 24.6 9.4 33.9 0l96-96c9.3-9.3 9.3-24.5-.1-33.9z"/>'],
+    logs: [448, 512, '<path d="M224 0c-17.7 0-32 14.3-32 32v17.9C119.5 61.4 64 124.2 64 200v33.4c0 45.4-15.5 89.5-43.8 124.9L5.3 377c-5.8 7.2-6.9 17.1-2.9 25.4S14.8 416 24 416h400c9.2 0 17.6-5.3 21.6-13.6s2.9-18.2-2.9-25.4l-14.9-18.6C399.5 322.9 384 278.8 384 233.4V200c0-75.8-55.5-138.6-128-150.1V32c0-17.7-14.3-32-32-32zm0 512c35.3 0 64-28.7 64-64H160c0 35.3 28.7 64 64 64z"/>'],
+    settings: [512, 512, '<path d="M495.9 166.6c3.2 8.7.5 18.4-6.4 24.6l-43.3 39.4c1.1 8.3 1.7 16.8 1.7 25.4s-.6 17.1-1.7 25.4l43.3 39.4c6.9 6.2 9.6 15.9 6.4 24.6c-4.4 11.9-9.7 23.3-15.8 34.3l-4.7 8.1c-6.6 11-14 21.4-22.1 31.2c-5.9 7.2-15.7 9.6-24.5 6.8l-55.7-17.7c-13.4 10.3-28.2 18.9-44 25.4l-12.5 57.1c-2 9.1-9 16.3-18.2 17.8c-13.8 2.3-27.9 3.5-42.4 3.5s-28.6-1.2-42.4-3.5c-9.2-1.5-16.2-8.7-18.2-17.8l-12.5-57.1c-15.8-6.5-30.6-15.1-44-25.4L83.1 425.9c-8.8 2.8-18.6.3-24.5-6.8c-8.1-9.8-15.5-20.2-22.1-31.2l-4.7-8.1c-6.1-11-11.4-22.4-15.8-34.3c-3.2-8.7-.5-18.4 6.4-24.6l43.3-39.4C64.6 273.1 64 264.6 64 256s.6-17.1 1.7-25.4L22.4 191.2c-6.9-6.2-9.6-15.9-6.4-24.6c4.4-11.9 9.7-23.3 15.8-34.3l4.7-8.1c6.6-11 14-21.4 22.1-31.2c5.9-7.2 15.7-9.6 24.5-6.8l55.7 17.7c13.4-10.3 28.2-18.9 44-25.4l12.5-57.1c2-9.1 9-16.3 18.2-17.8C227.4 1.2 241.5 0 256 0s28.6 1.2 42.4 3.5c9.2 1.5 16.2 8.7 18.2 17.8l12.5 57.1c15.8 6.5 30.6 15.1 44 25.4l55.7-17.7c8.8-2.8 18.6-.3 24.5 6.8c8.1 9.8 15.5 20.2 22.1 31.2l4.7 8.1c6.1 11 11.4 22.4 15.8 34.3zM256 336a80 80 0 1 0 0-160 80 80 0 1 0 0 160z"/>'],
+    file: [384, 512, '<path d="M64 0C28.7 0 0 28.7 0 64v384c0 35.3 28.7 64 64 64h256c35.3 0 64-28.7 64-64V160H256c-17.7 0-32-14.3-32-32V0H64zm192 0v128h128L256 0zM112 256h160c8.8 0 16 7.2 16 16s-7.2 16-16 16H112c-8.8 0-16-7.2-16-16s7.2-16 16-16zm0 64h160c8.8 0 16 7.2 16 16s-7.2 16-16 16H112c-8.8 0-16-7.2-16-16s7.2-16 16-16zm0 64h160c8.8 0 16 7.2 16 16s-7.2 16-16 16H112c-8.8 0-16-7.2-16-16s7.2-16 16-16z"/>'],
+    copy: [448, 512, '<path d="M208 0H332.1c12.7 0 24.9 5.1 33.9 14.1L433.9 82c9 9 14.1 21.2 14.1 33.9V336c0 26.5-21.5 48-48 48H208c-26.5 0-48-21.5-48-48V48c0-26.5 21.5-48 48-48zM48 128h80v64H64v256h192v-32h64v48c0 26.5-21.5 48-48 48H48c-26.5 0-48-21.5-48-48V176c0-26.5 21.5-48 48-48z"/>'],
+    refresh: [512, 512, '<path d="M105.1 202.6c7.7-21.8 20.2-42.3 37.8-59.9c62.5-62.5 163.8-62.5 226.3 0L386.7 160H336c-17.7 0-32 14.3-32 32s14.3 32 32 32H464c17.7 0 32-14.3 32-32V64c0-17.7-14.3-32-32-32s-32 14.3-32 32v51.2L414.4 97.6c-87.5-87.5-229.3-87.5-316.8 0c-24.7 24.7-42.3 53.9-52.8 84.9c-5.7 16.8 3.3 34.9 20 40.6s34.9-3.3 40.3-20.5zM39 289.3c-5 1.5-9 4.4-12.1 8.4c-4.7 6.1-6.1 14.1-3.7 21.4c7.1 21.5 18.7 42.1 34.4 60.4c87.5 87.5 229.3 87.5 316.8 0c24.7-24.7 42.3-53.9 52.8-84.9c5.7-16.8-3.3-34.9-20-40.6s-34.9 3.3-40.6 20c-7.7 21.8-20.2 42.3-37.8 59.9c-62.5 62.5-163.8 62.5-226.3 0L85.3 352H136c17.7 0 32-14.3 32-32s-14.3-32-32-32H40c-.3 0-.7 0-1 .1z"/>'],
+    play: [384, 512, '<path d="M73 39c-14.8-9.1-33.4-9.4-48.5-.9S0 62.6 0 80v352c0 17.4 9.4 33.4 24.5 41.9s33.7 8.1 48.5-.9l288-176c14.3-8.7 23-24.2 23-41s-8.7-32.2-23-41L73 39z"/>'],
+    pause: [320, 512, '<path d="M48 64C21.5 64 0 85.5 0 112v288c0 26.5 21.5 48 48 48h32c26.5 0 48-21.5 48-48V112c0-26.5-21.5-48-48-48H48zm192 0c-26.5 0-48 21.5-48 48v288c0 26.5 21.5 48 48 48h32c26.5 0 48-21.5 48-48V112c0-26.5-21.5-48-48-48h-32z"/>'],
+    archive: [512, 512, '<path d="M32 32C14.3 32 0 46.3 0 64v96c0 17.7 14.3 32 32 32h448c17.7 0 32-14.3 32-32V64c0-17.7-14.3-32-32-32H32zm32 192v224c0 17.7 14.3 32 32 32h320c17.7 0 32-14.3 32-32V224H64zm128 64h128c17.7 0 32 14.3 32 32s-14.3 32-32 32H192c-17.7 0-32-14.3-32-32s14.3-32 32-32z"/>'],
+    external: [512, 512, '<path d="M320 0c-17.7 0-32 14.3-32 32s14.3 32 32 32h82.7L201.4 265.4c-12.5 12.5-12.5 32.8 0 45.3s32.8 12.5 45.3 0L448 109.3V192c0 17.7 14.3 32 32 32s32-14.3 32-32V32c0-17.7-14.3-32-32-32H320zM80 32C35.8 32 0 67.8 0 112v320c0 44.2 35.8 80 80 80h320c44.2 0 80-35.8 80-80V320c0-17.7-14.3-32-32-32s-32 14.3-32 32v112c0 8.8-7.2 16-16 16H80c-8.8 0-16-7.2-16-16V112c0-8.8 7.2-16 16-16h112c17.7 0 32-14.3 32-32s-14.3-32-32-32H80z"/>'],
+    "arrow-left": [448, 512, '<path d="M9.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 288H416c17.7 0 32-14.3 32-32s-14.3-32-32-32H109.3L214.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/>'],
+    menu: [448, 512, '<path d="M0 96C0 78.3 14.3 64 32 64h384c17.7 0 32 14.3 32 32s-14.3 32-32 32H32C14.3 128 0 113.7 0 96zm0 160c0-17.7 14.3-32 32-32h384c17.7 0 32 14.3 32 32s-14.3 32-32 32H32c-17.7 0-32-14.3-32-32zm448 160c0 17.7-14.3 32-32 32H32c-17.7 0-32-14.3-32-32s14.3-32 32-32h384c17.7 0 32 14.3 32 32z"/>'],
+    search: [512, 512, '<path d="M416 208c0 45.9-14.9 88.3-40 122.7l126.6 126.7c12.5 12.5 12.5 32.8 0 45.3s-32.8 12.5-45.3 0L330.7 376C296.3 401.1 253.9 416 208 416C93.1 416 0 322.9 0 208S93.1 0 208 0s208 93.1 208 208zM208 352a144 144 0 1 0 0-288 144 144 0 1 0 0 288z"/>'],
+    bell: [448, 512, '<path d="M224 0c-17.7 0-32 14.3-32 32v17.9C119.5 61.4 64 124.2 64 200v33.4c0 45.4-15.5 89.5-43.8 124.9L5.3 377c-5.8 7.2-6.9 17.1-2.9 25.4S14.8 416 24 416h400c9.2 0 17.6-5.3 21.6-13.6s2.9-18.2-2.9-25.4l-14.9-18.6C399.5 322.9 384 278.8 384 233.4V200c0-75.8-55.5-138.6-128-150.1V32c0-17.7-14.3-32-32-32zm0 512c35.3 0 64-28.7 64-64H160c0 35.3 28.7 64 64 64z"/>'],
+    help: [512, 512, '<path d="M256 512A256 256 0 1 0 256 0a256 256 0 1 0 0 512zm0-384c-26.5 0-48 21.5-48 48c0 17.7-14.3 32-32 32s-32-14.3-32-32c0-61.9 50.1-112 112-112s112 50.1 112 112c0 39.8-20.8 74.8-52.1 94.6c-17.9 11.3-27.9 25.6-27.9 45.4v4c0 17.7-14.3 32-32 32s-32-14.3-32-32v-4c0-42.4 23.8-78.7 57.6-100.1c13.9-8.8 22.4-23.8 22.4-40.9c0-26.5-21.5-48-48-48zm0 320a40 40 0 1 1 0-80 40 40 0 1 1 0 80z"/>'],
+    sun: [512, 512, '<path d="M361.5 1.2c5 2.1 8.6 6.6 9.6 11.9L391 121l107.9 19.8c5.3 1 9.8 4.6 11.9 9.6s1.5 10.7-1.6 15.2L446.9 256l62.3 90.3c3.1 4.5 3.7 10.2 1.6 15.2s-6.6 8.6-11.9 9.6L391 391 371.1 498.9c-1 5.3-4.6 9.8-9.6 11.9s-10.7 1.5-15.2-1.6L256 446.9l-90.3 62.3c-4.5 3.1-10.2 3.7-15.2 1.6s-8.6-6.6-9.6-11.9L121 391 13.1 371.1c-5.3-1-9.8-4.6-11.9-9.6s-1.5-10.7 1.6-15.2L65.1 256 2.8 165.7c-3.1-4.5-3.7-10.2-1.6-15.2s6.6-8.6 11.9-9.6L121 121 140.9 13.1c1-5.3 4.6-9.8 9.6-11.9s10.7-1.5 15.2 1.6L256 65.1 346.3 2.8c4.5-3.1 10.2-3.7 15.2-1.6zM256 352a96 96 0 1 0 0-192 96 96 0 1 0 0 192z"/>'],
+    folder: [512, 512, '<path d="M64 480h384c35.3 0 64-28.7 64-64V160c0-35.3-28.7-64-64-64H288.8c-10.1 0-19.6-4.7-25.6-12.8L243.2 56C232.1 41.2 214.7 32 196.2 32H64C28.7 32 0 60.7 0 96v320c0 35.3 28.7 64 64 64z"/>'],
+    cube: [512, 512, '<path d="M234.5 5.7c13.9-7.6 30.9-7.6 44.8 0l192 104.7c15.4 8.4 24.7 24.5 24.7 41.9v207.4c0 17.4-9.3 33.5-24.7 41.9l-192 104.7c-13.9 7.6-30.9 7.6-44.8 0l-192-104.7C27.1 393.2 17.8 377.1 17.8 359.7V152.3c0-17.4 9.3-33.5 24.7-41.9l192-104.7z"/>'],
+    globe: [512, 512, '<path d="M352 256c0 22.2-1.2 43.6-3.3 64H163.3c-2.2-20.4-3.3-41.8-3.3-64s1.2-43.6 3.3-64h185.4c2.1 20.4 3.3 41.8 3.3 64zm151.9-64c5.3 20.5 8.1 41.9 8.1 64s-2.8 43.5-8.1 64H380.8c2.1-20.6 3.2-42 3.2-64s-1.1-43.4-3.2-64h123.1zM493.4 160H376.7c-10-63.9-29.8-117.4-55.3-151.6c78.3 20.7 142 77.5 172 151.6zM344.3 160H167.7c6.1-36.4 15.5-68.6 27-94.7C216 17.4 239.5 0 256 0s40 17.4 61.3 65.3c11.5 26.1 20.9 58.3 27 94.7zM135.3 160H18.6c30-74.1 93.7-130.9 172-151.6c-25.5 34.2-45.3 87.7-55.3 151.6zM8.1 192h123.1c-2.1 20.6-3.2 42-3.2 64s1.1 43.4 3.2 64H8.1C2.8 299.5 0 278.1 0 256s2.8-43.5 8.1-64zm159.6 160h176.6c-6.1 36.4-15.5 68.6-27 94.7C296 494.6 272.5 512 256 512s-40-17.4-61.3-65.3c-11.5-26.1-20.9-58.3-27-94.7zm-32.4 0c10 63.9 29.8 117.4 55.3 151.6c-78.3-20.7-142-77.5-172-151.6h116.7zm358.1 0c-30 74.1-93.7 130.9-172 151.6c25.5-34.2 45.3-87.7 55.3-151.6h116.7z"/>'],
+    server: [512, 512, '<path d="M64 32C28.7 32 0 60.7 0 96v64c0 35.3 28.7 64 64 64h384c35.3 0 64-28.7 64-64V96c0-35.3-28.7-64-64-64H64zm280 72a24 24 0 1 1 0 48 24 24 0 1 1 0-48zm64 0a24 24 0 1 1 0 48 24 24 0 1 1 0-48zM64 288c-35.3 0-64 28.7-64 64v64c0 35.3 28.7 64 64 64h384c35.3 0 64-28.7 64-64v-64c0-35.3-28.7-64-64-64H64zm280 72a24 24 0 1 1 0 48 24 24 0 1 1 0-48zm64 0a24 24 0 1 1 0 48 24 24 0 1 1 0-48z"/>'],
+    shield: [512, 512, '<path d="M256 0c4.6 0 9.2 1 13.4 2.9l188.3 79.9c22 9.3 38.4 31 38.3 57.2c-.5 99.2-41.3 280.7-213.6 363.2c-16.7 8-36.1 8-52.8 0C57.3 420.7 16.5 239.2 16 140c-.1-26.2 16.3-47.9 38.3-57.2L242.6 2.9C246.8 1 251.4 0 256 0z"/>'],
+    rocket: [512, 512, '<path d="M156.6 384.9L125.7 354c-8.5-8.5-11.5-20.8-7.7-32.2c17.2-51.6 45.8-98.9 84.2-137.3L320 66.7C372.7 14 443.3-7.9 511.9 2.4c10.1 68.6-11.8 139.2-64.5 191.9L329.6 312.1c-38.4 38.4-85.7 67-137.3 84.2c-11.4 3.8-23.7.8-32.2-7.7l-3.5-3.7zM384 168a40 40 0 1 0 0-80 40 40 0 1 0 0 80zM112 416c0 53-43 96-96 96c0-53 43-96 96-96z"/>'],
+    user: [448, 512, '<path d="M224 256A128 128 0 1 0 224 0a128 128 0 1 0 0 256zm-45.7 48C79.8 304 0 383.8 0 482.3C0 498.7 13.3 512 29.7 512h388.6c16.4 0 29.7-13.3 29.7-29.7C448 383.8 368.2 304 269.7 304h-91.4z"/>'],
+    plus: [448, 512, '<path d="M256 80c0-17.7-14.3-32-32-32s-32 14.3-32 32v144H48c-17.7 0-32 14.3-32 32s14.3 32 32 32h144v144c0 17.7 14.3 32 32 32s32-14.3 32-32V288h144c17.7 0 32-14.3 32-32s-14.3-32-32-32H256V80z"/>'],
+    chevron: [320, 512, '<path d="M310.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-192 192c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L242.7 256 73.4 86.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l192 192z"/>'],
+    "chevron-down": [512, 512, '<path d="M233.4 406.6c12.5 12.5 32.8 12.5 45.3 0l192-192c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0L256 338.7 86.6 169.4c-12.5-12.5-32.8-12.5-45.3 0s-12.5 32.8 0 45.3l192 192z"/>'],
+    "arrow-right": [448, 512, '<path d="M438.6 278.6c12.5-12.5 12.5-32.8 0-45.3l-160-160c-12.5-12.5-32.8-12.5-45.3 0s-12.5 32.8 0 45.3L338.7 224H32c-17.7 0-32 14.3-32 32s14.3 32 32 32h306.7L233.4 393.4c-12.5 12.5-12.5 32.8 0 45.3s32.8 12.5 45.3 0l160-160z"/>'],
   };
-  const body = icons[name] || icons.settings;
-  return `<svg viewBox="0 0 24 24" focusable="false" aria-hidden="true">${body}</svg>`;
+  const [width, height, body] = icons[name] || icons.settings;
+  return `<svg class="fa-icon" viewBox="0 0 ${width} ${height}" focusable="false" aria-hidden="true">${body}</svg>`;
 }
 
 function renderProjects(projects) {
@@ -2398,7 +5968,7 @@ function renderProjects(projects) {
     <input type="hidden" name="action" value="create">
     <input name="slug" placeholder="project-slug" aria-label="Project slug">
     <input name="displayName" placeholder="Display name" aria-label="Project display name">
-    <select name="runtime" aria-label="Default project runtime"><option value="node">Node.js</option><option value="php">PHP</option></select>
+    <select name="runtime" aria-label="Default project runtime"><option value="php">PHP Apache</option><option value="node">Node/Next</option><option value="static">Static</option></select>
     <input name="host" placeholder="project.localhost.com" aria-label="Project host">
     <input type="hidden" name="confirm" value="CREATE-PROJECT">
     <button class="button enable" type="submit">Create project</button>
@@ -2443,14 +6013,14 @@ function renderApplications(applications, projects, webspaces) {
   <form method="post" action="/actions/application-command" class="inline-confirm app-create-form">
     <select name="projectId" aria-label="Project for application">${projects.map((project) => `<option value="${escapeHtml(project.slug)}">${escapeHtml(project.name)}</option>`).join("")}</select>
     <input name="name" placeholder="app name" aria-label="Application name">
-    <select name="runtime" aria-label="Runtime"><option value="node">Node.js</option><option value="php">PHP</option><option value="static">static site</option><option value="api">API backend</option><option value="worker">worker</option></select>
+    <select name="runtime" aria-label="Runtime"><option value="php">PHP Apache</option><option value="node">Node/Next</option><option value="static">Static</option></select>
     <select name="webspaceId" aria-label="Linked web space"><option value="">no web space</option>${webspaces.map((space) => `<option value="${escapeHtml(space.id)}">${escapeHtml(space.projectId)}/${escapeHtml(space.name)}</option>`).join("")}</select>
     <input name="repositoryUrl" placeholder="git repo or folder ref" aria-label="Repository or folder reference">
     <input type="hidden" name="action" value="create">
     <input type="hidden" name="confirm" value="CREATE-APPLICATION">
     <button class="button enable" type="submit">Create app</button>
   </form>
-  <div class="cards app-cards">${applications.map(renderApplicationCard).join("") || empty("No applications", "No Node, PHP, static, API or worker applications were discovered.")}</div></section>`;
+  <div class="cards app-cards">${applications.map(renderApplicationCard).join("") || empty("No applications attached.", "Attach applications later through external manifests or local metadata.")}</div></section>`;
 }
 
 function renderApplicationCard(app) {
@@ -3551,18 +7121,20 @@ function renderAudit(audit, title) {
 }
 
 function planProjectCreate(payload, context) {
-  const slug = slugify(payload.slug || payload.name || "");
+  const slug = slugify(payload.slug || payload.displayName || payload.name || "");
   validateSlug(slug);
   if (context.projects.some((project) => project.slug === slug)) throw new ValidationError("Project already exists.");
   const displayName = sanitizeDisplayName(payload.displayName || payload.name || humanName(slug));
-  const runtime = choice(String(payload.runtime || "node").toLowerCase(), ["node", "php"], "runtime");
+  const description = sanitizeOptionalDescription(payload.description || payload.summary || "");
+  const runtime = choice(String(payload.runtime || "node").toLowerCase(), ["php", "node", "static"], "runtime");
   const host = normalizeHost(payload.host || `${slug}${hostSuffix}`);
   validateHostname(host, context.environment);
   const details = {
     projectId: slug,
     displayName,
+    description,
     runtime,
-    type: runtime === "php" ? "PHP" : "Node",
+    type: projectRuntimeLabel(runtime),
     host,
     source: "control-center-state",
     filesystemExists: false,
@@ -3578,6 +7150,7 @@ function planProjectCreate(payload, context) {
       ...(state.projects[slug] || {}),
       declaredProject: true,
       displayName,
+      description,
       runtime,
       host,
       enabled: false,
@@ -3594,7 +7167,7 @@ function planProjectCreate(payload, context) {
     writeState(state);
     appendAudit({ action: "project.create.apply", target: slug, environment: context.environment, risk: "low", result: "success", dryRun: false, summary: "Project metadata declared locally; no filesystem, database, Docker or provider changes applied." });
     const operation = operationPlan("project.create.local", context.environment, false, ["validate slug", "create local project metadata", "leave filesystem untouched", "leave Docker and providers unchanged", "write audit event"], details);
-    return { ...operation, project: { id: slug, slug, name: displayName, status: "declared", enabled: false, ...details } };
+    return { ...operation, project: { id: slug, slug, name: displayName, description, status: "declared", enabled: false, ...details } };
   }
   appendAudit({ action: "project.create.plan", target: slug, environment: context.environment, risk: "low", result: "planned", dryRun: true, summary: "Project creation plan generated; no filesystem changes applied." });
   return operationPlan("project.create", context.environment, true, ["validate slug", "prepare project metadata", "require apply confirmation", "leave filesystem untouched", "write audit event"], { ...details, confirmationRequired: "CREATE-PROJECT" });
@@ -3970,7 +7543,8 @@ function planDatabaseCreate(payload, context) {
   const name = validateDatabaseName(payload.name || `${projectId}_${engine}`);
   const ownerRole = validateDatabaseName(payload.ownerRole || `${projectId}_app`);
   const id = databaseId(projectId, engine, name);
-  const details = databaseRecord({ id, projectId, engine, name, ownerRole });
+  const displayName = sanitizeOptionalDescription(payload.displayName || "");
+  const details = databaseRecord({ id, projectId, engine, name, displayName, ownerRole });
   if (payload.confirm === "CREATE-DATABASE") {
     const state = readDatabasesState();
     state[id] = {
@@ -4583,6 +8157,67 @@ function planResourceLimitUpdate(payload, context) {
   return operationPlan("resources.limits", context.environment, true, ["validate project", "validate resource limits", "prepare quota metadata update", "require apply confirmation", "write audit event"], { ...details, dockerTouched: false, confirmationRequired: "UPDATE-RESOURCE-LIMITS" });
 }
 
+function planApplicationStressTest(payload, context) {
+  const projectId = slugify(payload.projectId || payload.slug || "");
+  validateSlug(projectId);
+  const project = findById(context.projects, projectId, "Project");
+  const confirmation = `RUN-STRESS:${project.slug}`;
+  const url = project.enabled ? project.href : `https://${project.host}/`;
+  const profiles = sanitizeStressProfiles(payload.profiles || appStressProfiles);
+  const durationSeconds = parseResourceLimitNumber(payload.durationSeconds || appStressDurationSeconds, "Duration seconds", 3600);
+  const maxConcurrency = parseResourceLimitNumber(payload.maxConcurrency || appStressMaxConcurrency, "Max concurrency", 10000);
+  const maxP95Ms = parseResourceLimitNumber(payload.maxP95Ms || appStressMaxP95Ms, "Max P95 ms", 60000);
+  const perUserRps = Number(payload.perUserRps || appStressPerUserRps);
+  if (durationSeconds < 1 || maxConcurrency < 1 || maxP95Ms < 1) throw new ValidationError("Stress parameters must be positive.");
+  if (!Number.isFinite(perUserRps) || perUserRps <= 0 || perUserRps > 10) throw new ValidationError("Per-user RPS must be between 0 and 10.");
+  const command = [
+    "sh",
+    "./scripts/app-stress-test.sh",
+    "--app", shellArg(project.slug),
+    "--url", shellArg(url),
+    "--profiles", shellArg(profiles),
+    "--durationSeconds", String(durationSeconds),
+    "--perUserRps", String(perUserRps),
+    "--maxConcurrency", String(maxConcurrency),
+    "--maxP95Ms", String(maxP95Ms),
+    "--confirm-max-load",
+  ].join(" ");
+  const details = {
+    projectId: project.slug,
+    application: project.name,
+    url,
+    profiles,
+    durationSeconds,
+    perUserRps,
+    maxConcurrency,
+    maxP95Ms,
+    command,
+    impact: "high-load",
+    confirmationRequired: confirmation,
+    executedFromPortal: false,
+    reportPattern: "reports/load/load-benchmark-*.json",
+  };
+  if (payload.confirm !== confirmation) {
+    appendAudit({ action: "resources.stress.plan", target: project.slug, environment: context.environment, risk: "high", result: "planned", dryRun: true, summary: "Per-app stress test plan generated; no traffic sent." });
+    return operationPlan("resources.stress", context.environment, true, ["validate application", "build max-load command", "require exact confirmation", "send no traffic from Control Center", "write audit event"], details);
+  }
+  appendAudit({ action: "resources.stress.prepare", target: project.slug, environment: context.environment, risk: "high", result: "planned", dryRun: true, summary: "Max-load stress test command prepared; execution remains manual from server shell." });
+  return operationPlan("resources.stress.command", context.environment, true, ["validate application", "prepare max-load command", "require server shell execution", "capture reports/load evidence", "watch resources during run"], { ...details, confirmationRequired: "" });
+}
+
+function sanitizeStressProfiles(value) {
+  const profiles = String(value || "")
+    .split(",")
+    .map((item) => Number(item.trim()))
+    .filter((number) => Number.isInteger(number) && number > 0 && number <= 10000);
+  if (!profiles.length) throw new ValidationError("Stress profiles must contain at least one positive integer.");
+  return profiles.join(",");
+}
+
+function shellArg(value) {
+  return `'${String(value).replace(/'/g, "'\\''")}'`;
+}
+
 function planSecurityPolicyUpdate(payload, context) {
   const scope = sanitizeIdentifier(payload.scope || "global") || "global";
   if (scope !== "global") findById(context.projects, scope, "Project");
@@ -4860,6 +8495,28 @@ function readOperations() {
   } catch {
     return [];
   }
+}
+
+function appendStatusRun(run) {
+  mkdirSync(path.dirname(statusRunsFile), { recursive: true });
+  appendFileSync(statusRunsFile, `${JSON.stringify(sanitizeEvent(run))}\n`);
+}
+
+function readStatusRuns(limit = 20) {
+  try {
+    return readFileSync(statusRunsFile, "utf8")
+      .split(/\r?\n/)
+      .filter(Boolean)
+      .reverse()
+      .slice(0, limit)
+      .map((line) => JSON.parse(line));
+  } catch {
+    return [];
+  }
+}
+
+function readLatestStatusRun() {
+  return readStatusRuns(1)[0] || null;
 }
 
 function readApplicationsState() {
@@ -5260,6 +8917,18 @@ function isPhpProject(projectPath) {
   }
 }
 
+function isStaticProject(projectPath) {
+  if (existsSync(path.join(projectPath, "public", "index.html"))) return true;
+  if (existsSync(path.join(projectPath, "index.html"))) return true;
+  return false;
+}
+
+function projectRuntimeLabel(runtime) {
+  if (runtime === "php") return "PHP Apache";
+  if (runtime === "static") return "Static";
+  return "Node/Next";
+}
+
 function validateSlug(value) {
   if (!/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(value)) throw new ValidationError("Invalid slug.");
 }
@@ -5495,6 +9164,7 @@ function databaseRecord({
   projectId = "",
   engine = "mariadb",
   name = "",
+  displayName = "",
   ownerRole = "",
   status = "declared",
   connectionStatus = "metadata-only",
@@ -5502,6 +9172,7 @@ function databaseRecord({
   slowQueries = "planned-adapter",
   users = [],
   permissions = [],
+  linkedApps = [],
   backupPolicy = "manual-plan-only",
   restoreStatus = "restore-drill-plan-only",
   source = "control-center-state",
@@ -5519,6 +9190,7 @@ function databaseRecord({
     projectId: cleanProjectId,
     engine: cleanEngine,
     name: cleanName,
+    displayName: sanitizeOptionalDescription(displayName || ""),
     ownerRole: cleanOwnerRole,
     environment: "local",
     status,
@@ -5527,6 +9199,7 @@ function databaseRecord({
     slowQueries,
     users: Array.isArray(users) ? users.map((user) => sanitizeOptionalRef(user)).filter(Boolean).slice(0, 20) : [],
     permissions: Array.isArray(permissions) ? permissions.map((permission) => sanitizeOptionalRef(permission)).filter(Boolean).slice(0, 20) : [],
+    linkedApps: Array.isArray(linkedApps) ? [...new Set(linkedApps.map((item) => sanitizeIdentifier(item)).filter(Boolean))].slice(0, 20) : [],
     backupPolicy,
     restoreStatus,
     source,
@@ -6881,6 +10554,10 @@ function sanitizeDisplayName(value) {
   return next;
 }
 
+function sanitizeOptionalDescription(value) {
+  return sanitizeMessage(value).replace(/\s+/g, " ").trim().slice(0, 160);
+}
+
 function sanitizeRef(value) {
   return String(value || "").trim().replace(/[^a-zA-Z0-9._/@:-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 120) || "unknown";
 }
@@ -6990,6 +10667,33 @@ function bytesLabel(bytes) {
   return `${Math.round(value * 10) / 10} ${units[index]}`;
 }
 
+function usageBytesLabel(bytes) {
+  const value = Number(bytes);
+  if (!Number.isFinite(value)) return "n.d.";
+  if (value <= 0) return "0 B";
+  return bytesLabel(value);
+}
+
+function percentLabel(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "n.d.";
+  const precision = Math.abs(number) < 10 ? 1 : 0;
+  return `${number.toFixed(precision)}%`;
+}
+
+function coresLabel(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "n.d.";
+  if (number === 1) return "1 core";
+  return `${Math.round(number * 100) / 100} core`;
+}
+
+function clampNumber(value, min, max) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return min;
+  return Math.min(max, Math.max(min, number));
+}
+
 function rid() {
   return randomBytes(8).toString("hex");
 }
@@ -7069,7 +10773,7 @@ function navigationGroupsForMode(mode) {
       ["overview", "Overview", "OVR"],
     ]),
     navGroup("workloads", "Workloads", "WRK", [
-      ["projects", "Progetti", "PRJ"], ["applications", "Applicazioni", "APP"], ["webspaces", "Web spaces", "WEB"],
+      ["projects", "Applicazioni", "APP"], ["applications", "Componenti app", "CMP"], ["webspaces", "Web spaces", "WEB"],
     ]),
     navGroup("routing", "Routing", "DNS", [
       ["domains", "Domini e sottodomini", "DNS"],
@@ -7103,7 +10807,7 @@ function advancedItems(section) {
     "go-no-go": ["production-go-no-go", "evidence bundle", "live blockers", "JSON/Markdown reports"],
     readiness: ["Control Center coverage", "enterprise requirements", "production readiness checklist", "pending live proof", "repo evidence status"],
     "security-advanced": ["WAF", "rate limit", "brute force", "CSP", "CORS", "headers", "secret scan", "vulnerability scan", "Cloudflare Access", "admin route protection"],
-    identity: ["users", "teams", "roles", "passkeys", "sessions", "login audit"],
+    identity: ["admin users", "teams", "roles", "sessions", "access reviews", "login audit"],
     secrets: ["Docker secrets", "KMS metadata", "rotation", "usage map", "no plaintext values"],
     billing: ["VPS plan metadata", "resource budget", "Cloudflare plan", "backup storage", "cost review"],
   };
@@ -7118,6 +10822,28 @@ function json(res, payload, status = 200) {
 function html(res, content, status = 200) {
   res.writeHead(status, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "x-platform-control-center-runtime": "node" });
   res.end(content);
+}
+
+function renderTransientMessage(res, status, title, message) {
+  html(res, `<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>${escapeHtml(title)}</title>
+  ${controlCenterStylesheetLinks()}
+</head>
+<body class="login-body">
+  <main class="login-shell">
+    <section class="login-copy">
+      <span>Platform</span>
+      <h1>${escapeHtml(title)}</h1>
+      <p>${escapeHtml(message)}</p>
+      <a class="ops-button" href="/?section=projects">Torna al portal</a>
+    </section>
+  </main>
+</body>
+</html>`, status);
 }
 
 function redirect(res, location) {

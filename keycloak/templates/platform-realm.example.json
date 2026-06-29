@@ -28,11 +28,11 @@
       "standardFlowEnabled": true,
       "directAccessGrantsEnabled": false,
       "redirectUris": [
-        "https://account.localhost.com/*",
+        "https://auth.localhost.com/*",
         "https://portal.localhost.com/*"
       ],
       "webOrigins": [
-        "https://account.localhost.com",
+        "https://auth.localhost.com",
         "https://portal.localhost.com"
       ]
     }

@@ -30,11 +30,18 @@ env_or_default() {
 
 docs_host=$(env_or_default DOCS_HOST docs.localhost.com)
 admin_host=$(env_or_default CONTROL_CENTER_HOST "$(env_or_default ADMIN_HOST portal.localhost.com)")
-ui_base="${DEPLOY_UI_BASE:-$(env_or_default DOCS_PUBLIC_URL "https://$docs_host")}"
+portal_base="${DEPLOY_PORTAL_BASE:-${DEPLOY_ADMIN_BASE:-${DEPLOY_PROJECTS_BASE:-$(env_or_default CONTROL_CENTER_PUBLIC_URL "https://$admin_host")}}}"
+docs_base="${DEPLOY_DOCS_BASE:-$(env_or_default DOCS_PUBLIC_URL "https://$docs_host")}"
+app_base="${DEPLOY_APP_BASE:-${DEPLOY_UI_BASE:-}}"
 api_base="${DEPLOY_API_BASE:-}"
-account_base="${DEPLOY_ACCOUNT_BASE:-}"
-account_origin="${DEPLOY_ACCOUNT_ORIGIN:-$account_base}"
-admin_base="${DEPLOY_ADMIN_BASE:-${DEPLOY_PROJECTS_BASE:-$(env_or_default CONTROL_CENTER_PUBLIC_URL "https://$admin_host")}}"
+auth_base="${DEPLOY_AUTH_BASE:-${DEPLOY_ACCOUNT_BASE:-}}"
+if [ "${DEPLOY_INCLUDE_APP_ENDPOINTS:-0}" = "1" ] || [ "${DEPLOY_INCLUDE_APP_ENDPOINTS:-0}" = "true" ]; then
+  app_base="${app_base:-$(env_or_default APP_PUBLIC_URL "")}"
+  api_base="${api_base:-$(env_or_default API_PUBLIC_URL "")}"
+  auth_base="${auth_base:-$(env_or_default AUTH_PUBLIC_URL "")}"
+fi
+auth_origin="${DEPLOY_AUTH_ORIGIN:-${DEPLOY_ACCOUNT_ORIGIN:-$auth_base}}"
+admin_base="$portal_base"
 grafana_base="${DEPLOY_GRAFANA_BASE:-$(env_or_default GRAFANA_PUBLIC_URL "")}"
 grafana_blocked="${DEPLOY_GRAFANA_BLOCKED:-0}"
 admin_scheme="${DEPLOY_ADMIN_SCHEME:-}"
@@ -61,12 +68,12 @@ if [ "${DEPLOY_RUN_RETENTION_EVIDENCE:-1}" = "1" ]; then
 fi
 
 if [ "${DEPLOY_RUN_INFRA_HEALTH:-1}" = "1" ]; then
-  set -- --uiBase "$ui_base" --adminBase "$admin_base"
+  set -- --docsBase "$docs_base" --adminBase "$admin_base"
   if [ -n "$api_base" ]; then
     set -- "$@" --apiBase "$api_base"
   fi
-  if [ -n "$account_base" ]; then
-    set -- "$@" --accountBase "$account_base"
+  if [ -n "$auth_base" ]; then
+    set -- "$@" --accountBase "$auth_base"
   fi
   if [ -n "$grafana_base" ]; then
     set -- "$@" --grafanaBase "$grafana_base"
@@ -103,17 +110,18 @@ if [ "${DEPLOY_RUN_PRE_GO_LIVE:-0}" = "1" ]; then
     set -- "$@" --verifyGithubRemote
   fi
   set -- "$@" \
-    --uiBase "$ui_base" \
+    --docsBase "$docs_base" \
+    --portalBase "$portal_base" \
     --adminBase "$admin_base" \
     --phpBase "$admin_base"
   if [ -n "$api_base" ]; then
     set -- "$@" --apiBase "$api_base"
   fi
-  if [ -n "$account_base" ]; then
-    set -- "$@" --accountBase "$account_base"
+  if [ -n "$auth_base" ]; then
+    set -- "$@" --accountBase "$auth_base"
   fi
-  if [ -n "$account_origin" ]; then
-    set -- "$@" --accountOrigin "$account_origin"
+  if [ -n "$auth_origin" ]; then
+    set -- "$@" --accountOrigin "$auth_origin"
   fi
   if [ -n "$grafana_base" ]; then
     set -- "$@" --grafanaBase "$grafana_base"

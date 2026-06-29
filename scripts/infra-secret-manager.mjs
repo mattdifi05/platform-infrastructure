@@ -12,7 +12,7 @@ const argv = parseArgs(process.argv.slice(3));
 
 const requiredSecrets = [
   { name: "postgres_superuser_password", kind: "opaque", bytes: 36, rotationDays: 90, manualRotation: true },
-  { name: "app_db_password", kind: "opaque", bytes: 36, rotationDays: 90, manualRotation: true },
+  { name: "app_db_password", kind: "opaque", bytes: 36, rotationDays: 90, manualRotation: true, fileMode: 0o640 },
   { name: "keycloak_db_password", kind: "opaque", bytes: 36, rotationDays: 90, manualRotation: true },
   { name: "redis_password", kind: "opaque", bytes: 36, rotationDays: 90 },
   { name: "keycloak_admin_password", kind: "opaque", bytes: 36, rotationDays: 90 },
@@ -28,9 +28,7 @@ const requiredSecrets = [
   { name: "backup_signing_keys", kind: "keyring", bytes: 48, keyPrefix: "b", rotationDays: 90 },
   { name: "alertmanager_webhook_token", kind: "opaque", bytes: 48, rotationDays: 90 },
   { name: "smtp_password", kind: "opaque", bytes: 36, minLength: 8, rotationDays: 90 },
-  { name: "google_recaptcha_secret_key", kind: "opaque", bytes: 36, minLength: 8, rotationDays: 90, manualRotation: true },
   { name: "cloudflare_turnstile_secret_key", kind: "opaque", bytes: 36, minLength: 8, rotationDays: 90, manualRotation: true },
-  { name: "google_oauth_client_secret", kind: "opaque", bytes: 36, minLength: 8, rotationDays: 90, manualRotation: true },
   { name: "database_url", kind: "derived", rotationDays: 90 },
   { name: "nats_url", kind: "derived", rotationDays: 90 },
 ];
@@ -116,11 +114,11 @@ function readFileIfExists(filePath) {
   return value || null;
 }
 
-function writePrivateFile(filePath, value) {
+function writePrivateFile(filePath, value, mode = 0o600) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.writeFileSync(filePath, value, "utf8");
   try {
-    fs.chmodSync(filePath, 0o600);
+    fs.chmodSync(filePath, mode);
   } catch {
     // Best effort on platforms without POSIX permissions.
   }
@@ -376,7 +374,7 @@ function validateValues(values) {
 function materialize(values = decryptStoreValues()) {
   validateValues(values);
   for (const spec of requiredSecrets) {
-    writePrivateFile(secretFilePath(spec.name), `${values[spec.name]}\n`);
+    writePrivateFile(secretFilePath(spec.name), `${values[spec.name]}\n`, spec.fileMode || 0o600);
   }
   audit("materialize", { names: requiredSecrets.map((secret) => secret.name) });
   log(`Materialized ${requiredSecrets.length} Docker secret files in ${secretsDir()}`);
@@ -542,7 +540,9 @@ async function setSecret() {
   if (!name) fail("Use set --name <secret_name>.");
   const spec = requiredByName.get(name);
   if (!spec) fail(`Unknown secret: ${name}`);
-  if (spec.kind === "derived") fail(`${name} is derived and cannot be set directly.`);
+  if (spec.kind === "derived" && !booleanFlag(argv.allowDerived ?? argv["allow-derived"])) {
+    fail(`${name} is derived and cannot be set directly. Re-run with --allowDerived only to adopt an already-verified materialized value.`);
+  }
 
   const store = readStore();
   const values = buildValues(store ? decryptStoreValues(store) : {});
@@ -561,7 +561,7 @@ async function setSecret() {
   validateValues(values);
   writeStore(values, store);
   materialize(values);
-  audit("set", { name });
+  audit("set", { name, derived: spec.kind === "derived" });
   log(`Updated ${name} in Infra Secret Manager and materialized Docker secret files.`);
 }
 
@@ -574,7 +574,7 @@ Commands:
   kms-status           Print proprietary KMS key metadata without secret values.
   kms-rotate           Rotate the active KMS KEK and rewrap all stored secrets.
   rotate --name <name> Rotate a keyring or opaque secret, then materialize.
-  set --name <name>    Import or replace a secret from --value-file or --stdin.
+  set --name <name>    Import or replace a secret from --value-file or --stdin. Derived secrets require --allowDerived.
   status               Print metadata and fingerprints without secret values.
   verify               Validate encrypted store and materialized Docker secret files.
 `);

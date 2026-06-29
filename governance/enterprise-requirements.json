@@ -13,7 +13,8 @@
         { "type": "pattern", "path": "scripts/vps-host-readiness.sh", "pattern": "ufw-active[\\s\\S]*fail2ban-active[\\s\\S]*ssh-hardening" },
         { "type": "workflow", "pattern": "Run VPS evidence on VPS[\\s\\S]*vps-hardening-ubuntu\\.sh[\\s\\S]*vps-host-readiness\\.sh" }
       ],
-      "liveProof": "Run vps-hardening-ubuntu.sh --apply and vps-host-readiness.sh --enforce on the VPS Ubuntu LTS VPS."
+      "liveProof": "Run vps-hardening-ubuntu.sh --apply and vps-host-readiness.sh --enforce on the VPS Ubuntu LTS VPS.",
+      "liveProofChecks": ["vps-hardening-applied", "vps-host-readiness"]
     },
     {
       "id": "real-dns",
@@ -24,7 +25,8 @@
         { "type": "command", "name": "production-preflight" },
         { "type": "pattern", "path": "scripts/infra-ops.mjs", "pattern": "async function productionPreflight[\\s\\S]*(dns|resolve|host)" }
       ],
-      "liveProof": "Run production-preflight with final production domains after Cloudflare DNS is configured."
+      "liveProof": "Run production-preflight with final production domains after Cloudflare DNS is configured.",
+      "liveProofChecks": ["pre-go-live-evidence-complete"]
     },
     {
       "id": "public-https-acme",
@@ -35,7 +37,8 @@
         { "type": "pattern", "path": "compose.prod.yaml", "pattern": "letsencrypt[\\s\\S]*httpchallenge" },
         { "type": "file", "path": "scripts/certificate-expiry-check.sh" }
       ],
-      "liveProof": "Verify issued certificates and run certificate-expiry-check against the live domain set."
+      "liveProof": "Verify issued certificates and run certificate-expiry-check against the live domain set.",
+      "liveProofChecks": ["external-uptime-provider", "pre-go-live-evidence-complete"]
     },
     {
       "id": "secrets-manager",
@@ -46,7 +49,8 @@
         { "type": "file", "path": "compose.managed-secrets.yaml" },
         { "type": "workflow", "pattern": "Managed secrets preflight[\\s\\S]*managed-secrets-preflight" }
       ],
-      "liveProof": "Materialize production Docker secrets from the encrypted store and run managed-secrets-preflight."
+      "liveProof": "Materialize production Docker secrets from the encrypted store and run managed-secrets-preflight.",
+      "liveProofChecks": ["secret-rotation-evidence"]
     },
     {
       "id": "credential-rotation",
@@ -57,7 +61,8 @@
         { "type": "pattern", "path": "scripts/infra-secret-manager.mjs", "pattern": "rotationDays" },
         { "type": "workflow", "pattern": "Secret scan[\\s\\S]*secret-scan" }
       ],
-      "liveProof": "Rotate production secrets according to the runbook and keep rotation evidence."
+      "liveProof": "Rotate production secrets according to the runbook and keep rotation evidence.",
+      "liveProofChecks": ["secret-rotation-evidence"]
     },
     {
       "id": "private-registry-images",
@@ -68,7 +73,8 @@
         { "type": "command", "name": "release-artifact-gate" },
         { "type": "workflow", "pattern": "Release artifact gate dry run[\\s\\S]*release-artifact-gate" }
       ],
-      "liveProof": "Publish signed digest-pinned release images to the production registry."
+      "liveProof": "Publish signed digest-pinned release images to the production registry.",
+      "liveProofChecks": ["release-evidence-and-rollback"]
     },
     {
       "id": "remote-ci-cd",
@@ -79,7 +85,8 @@
         { "type": "pattern", "path": ".github/workflows/enterprise-infra.yml", "pattern": "deploy-vps[\\s\\S]*environment:[\\s\\S]*production" },
         { "type": "command", "name": "github-actions-config" }
       ],
-      "liveProof": "Configure GitHub environments, secrets and deployment approvals on the live repository."
+      "liveProof": "Configure GitHub environments, secrets and deployment approvals on the live repository.",
+      "liveProofChecks": ["github-actions-run-success", "pre-go-live-evidence-complete"]
     },
     {
       "id": "offsite-backup-restore",
@@ -91,7 +98,8 @@
         { "type": "command", "name": "offsite-restore-drill-restic" },
         { "type": "workflow", "pattern": "Off-site restore drill plan[\\s\\S]*offsite-restore-drill-restic --planOnly" }
       ],
-      "liveProof": "Configure a remote Restic repository and archive a successful full off-site restore report."
+      "liveProof": "Configure a remote Restic repository and archive a successful full off-site restore report.",
+      "liveProofChecks": ["disaster-recovery-rpo-rto-offsite"]
     },
     {
       "id": "real-alerting",
@@ -102,18 +110,20 @@
         { "type": "command", "name": "alert-evidence" },
         { "type": "workflow", "pattern": "Alert evidence summary[\\s\\S]*alert-evidence" }
       ],
-      "liveProof": "Send and archive a real alert delivery to the production notification channel."
+      "liveProof": "Send and archive a real alert delivery to the production notification channel.",
+      "liveProofChecks": ["real-alert-delivery"]
     },
     {
       "id": "centralized-logs-audit",
-      "title": "Centralized logs, redaction and audit trail",
+      "title": "Centralized infrastructure logs, retention and alerting",
       "state": "gate-ready",
       "evidence": [
         { "type": "file", "path": "loki/config.yml" },
         { "type": "file", "path": "promtail/config.yml" },
-        { "type": "pattern", "path": "postgres/migrations/007_durable_audit_outbox.sql", "pattern": "audit_outbox" }
+        { "type": "pattern", "path": "RUNBOOK.md", "pattern": "Promtail[\\s\\S]*redacts|retention-evidence|Alertmanager" }
       ],
-      "liveProof": "Verify production log retention, alert routing and audit export during go-live."
+      "liveProof": "Verify production infrastructure log retention, redaction and alert routing during go-live.",
+      "liveProofChecks": ["retention-evidence", "real-alert-delivery"]
     },
     {
       "id": "waf-rate-limit-bot-protection",
@@ -124,29 +134,21 @@
         { "type": "file", "path": "cloudflare/zone-waf-rules.json" },
         { "type": "command", "name": "waf-smoke" }
       ],
-      "liveProof": "Apply Cloudflare WAF rules and pass WAF smoke tests from the public edge."
+      "liveProof": "Apply Cloudflare WAF rules and pass WAF smoke tests from the public edge.",
+      "liveProofChecks": ["pre-go-live-evidence-complete"]
     },
     {
       "id": "rbac",
       "title": "RBAC and admin authorization",
       "state": "repo-ready",
       "evidence": [
-        { "type": "file", "path": "scripts/access-review.sh" },
-        { "type": "command", "name": "access-review" },
-        { "type": "pattern", "path": "postgres/migrations/002_enterprise_rbac_governance.sql", "pattern": "account_roles" }
+        { "type": "file", "path": "control-center/server.mjs" },
+        { "type": "file", "path": "cloudflare/access-admin.example.json" },
+        { "type": "command", "name": "platform-admin-audit" },
+        { "type": "pattern", "path": "control-center/server.mjs", "pattern": "identityAccessFile" }
       ],
-      "liveProof": "Run access-review monthly and after every admin change."
-    },
-    {
-      "id": "account-recovery",
-      "title": "Account recovery, passkeys and backup codes",
-      "state": "repo-ready",
-      "evidence": [
-        { "type": "command", "name": "account-integration-tests" },
-        { "type": "pattern", "path": "scripts/infra-ops.mjs", "pattern": "backup code one-time reuse block" },
-        { "type": "pattern", "path": "scripts/infra-ops.mjs", "pattern": "passkey" }
-      ],
-      "liveProof": "Run account integration tests against staging before production promotion."
+      "liveProof": "Archive platform-admin-audit and Cloudflare Access evidence for Control Center, provider and deploy admin access.",
+      "liveProofChecks": ["platform-admin-audit-evidence", "cloudflare-access-admin-verified"]
     },
     {
       "id": "production-email-dns",
@@ -157,29 +159,47 @@
         { "type": "pattern", "path": "ENTERPRISE-MATURITY.md", "pattern": "SPF/DKIM/DMARC" },
         { "type": "command", "name": "alert-evidence" }
       ],
-      "liveProof": "Verify production DNS email records and SMTP alert delivery."
+      "liveProof": "Verify production DNS email records and SMTP alert delivery.",
+      "liveProofChecks": ["real-alert-delivery", "pre-go-live-evidence-complete"]
     },
     {
-      "id": "database-migrations",
-      "title": "Controlled database migrations",
+      "id": "hosted-workload-isolation",
+      "title": "Hosted workload isolation and routing boundary",
       "state": "repo-ready",
       "evidence": [
-        { "type": "file", "path": "scripts/apply-postgres-migrations.sh" },
-        { "type": "command", "name": "apply-postgres-migrations" },
-        { "type": "pattern", "path": "postgres/migrations/001_session_security_hardening.sql", "pattern": "schema_migrations" }
+        { "type": "file", "path": "PLATFORM-APPLICATION-SEPARATION-AUDIT.md" },
+        { "type": "file", "path": "project-router/server.mjs" },
+        { "type": "command", "name": "project-router-tests" },
+        { "type": "pattern", "path": "compose.yaml", "pattern": "project-router[\\s\\S]*PROJECT_HOST_SUFFIX" }
       ],
-      "liveProof": "Run migrations through the controlled deploy flow and archive schema_migrations output."
+      "liveProof": "Verify project-router and Traefik wildcard routing on the production host without coupling hosted app code into the infrastructure repo.",
+      "liveProofChecks": ["pre-go-live-evidence-complete"]
     },
     {
-      "id": "privacy-lifecycle",
-      "title": "GDPR and privacy data lifecycle",
+      "id": "application-onboarding-governance",
+      "title": "Application onboarding and lifecycle governance",
       "state": "repo-ready",
       "evidence": [
-        { "type": "file", "path": "THREAT-MODEL.md" },
-        { "type": "pattern", "path": "README.md", "pattern": "privacy|GDPR|retention" },
-        { "type": "pattern", "path": "postgres/migrations/008_audit_account_unlink.sql", "pattern": "account_id IS NULL" }
+        { "type": "file", "path": "config/project-manifest.example.json" },
+        { "type": "file", "path": "control-center/server.mjs" },
+        { "type": "command", "name": "control-center-tests" },
+        { "type": "pattern", "path": "control-center/server.mjs", "pattern": "planProjectCreate[\\s\\S]*planProjectArchive[\\s\\S]*planApplicationCreate" }
       ],
-      "liveProof": "Review and rehearse account export/deletion and audit unlink procedures."
+      "liveProof": "Archive platform-admin-audit evidence for add, archive, stop and lifecycle actions executed through the Control Center.",
+      "liveProofChecks": ["platform-admin-audit-evidence"]
+    },
+    {
+      "id": "database-service-governance",
+      "title": "Managed database service backup and restore governance",
+      "state": "repo-ready",
+      "evidence": [
+        { "type": "command", "name": "backup-postgres" },
+        { "type": "command", "name": "backup-mariadb" },
+        { "type": "command", "name": "full-restore-drill" },
+        { "type": "pattern", "path": "RUNBOOK.md", "pattern": "backup.*restore|restore drill" }
+      ],
+      "liveProof": "Archive backup, restore drill and off-site restore evidence for the managed database services without requiring hosted app schema migrations.",
+      "liveProofChecks": ["disaster-recovery-rpo-rto-offsite"]
     },
     {
       "id": "sast-dast-dependency-container-scan",
@@ -190,7 +210,8 @@
         { "type": "command", "name": "generate-sbom" },
         { "type": "command", "name": "supply-chain-hygiene" }
       ],
-      "liveProof": "Run ZAP against staging and archive dependency/container scan evidence."
+      "liveProof": "Run ZAP against staging and archive dependency/container scan evidence.",
+      "liveProofChecks": ["release-evidence-and-rollback"]
     },
     {
       "id": "pentest",
@@ -212,7 +233,8 @@
         { "type": "command", "name": "load-profile" },
         { "type": "pattern", "path": "governance/production-go-no-go.json", "pattern": "requiredLoadProfiles" }
       ],
-      "liveProof": "Run 50/100/500-user public edge benchmark and archive edge evidence."
+      "liveProof": "Run 50/100/500-user public edge benchmark and archive edge evidence.",
+      "liveProofChecks": ["public-load-benchmark"]
     },
     {
       "id": "incident-runbook-rto-rpo",
@@ -223,7 +245,8 @@
         { "type": "command", "name": "dr-evidence" },
         { "type": "workflow", "pattern": "DR evidence summary[\\s\\S]*dr-evidence" }
       ],
-      "liveProof": "Run dr-evidence --enforce after live backup and restore evidence exists."
+      "liveProof": "Run dr-evidence --enforce after live backup and restore evidence exists.",
+      "liveProofChecks": ["disaster-recovery-rpo-rto-offsite"]
     },
     {
       "id": "ha-multi-node",
@@ -234,7 +257,8 @@
         { "type": "command", "name": "ha-config-check" },
         { "type": "workflow", "pattern": "HA configuration check[\\s\\S]*ha-config-check" }
       ],
-      "liveProof": "Deploy to a real multi-node target or document the accepted single-node VPS risk."
+      "liveProof": "Deploy to a real multi-node target or document the accepted single-node VPS risk.",
+      "liveProofChecks": ["pre-go-live-evidence-complete"]
     },
     {
       "id": "zero-downtime-rollback",
@@ -245,7 +269,8 @@
         { "type": "command", "name": "release-evidence" },
         { "type": "pattern", "path": "compose.ha.yaml", "pattern": "failure_action:\\s+rollback" }
       ],
-      "liveProof": "Archive a release evidence pack with previous image digests and rollback dry-run."
+      "liveProof": "Archive a release evidence pack with previous image digests and rollback dry-run.",
+      "liveProofChecks": ["release-evidence-and-rollback"]
     },
     {
       "id": "staging-production-parity",
@@ -256,7 +281,8 @@
         { "type": "file", "path": ".env.staging.example" },
         { "type": "workflow", "pattern": "Render staging and backup compose[\\s\\S]*compose\\.staging\\.yaml" }
       ],
-      "liveProof": "Deploy the staging overlay to a separate host/project before production."
+      "liveProof": "Deploy the staging overlay to a separate host/project before production.",
+      "liveProofChecks": ["pre-go-live-evidence-complete"]
     },
     {
       "id": "feature-flags-kill-switch",
@@ -277,7 +303,8 @@
         { "type": "file", "path": "alertmanager/alertmanager.yml" },
         { "type": "command", "name": "alert-evidence" }
       ],
-      "liveProof": "Connect production logs/alerts to the chosen external SIEM or monitoring provider."
+      "liveProof": "Connect production logs/alerts to the chosen external SIEM or monitoring provider.",
+      "liveProofChecks": ["real-alert-delivery", "external-uptime-provider"]
     },
     {
       "id": "vulnerability-disclosure",
@@ -301,7 +328,8 @@
         { "type": "workflow", "pattern": "release-attestation[\\s\\S]*actions/attest-build-provenance@v4[\\s\\S]*gh attestation verify" },
         { "type": "pattern", "path": "security/admission/cosign-digest-policy.rego", "pattern": "slsa\\.dev/provenance" }
       ],
-      "liveProof": "Verify signed production images, SBOM and GitHub/Sigstore provenance in every release evidence pack."
+      "liveProof": "Verify signed production images, SBOM and GitHub/Sigstore provenance in every release evidence pack.",
+      "liveProofChecks": ["release-evidence-and-rollback"]
     },
     {
       "id": "compliance-gdpr-soc2-like",
@@ -330,11 +358,12 @@
       "title": "Periodic access review",
       "state": "repo-ready",
       "evidence": [
-        { "type": "file", "path": "scripts/access-review.sh" },
-        { "type": "command", "name": "access-review" },
+        { "type": "command", "name": "platform-admin-audit" },
+        { "type": "command", "name": "cloudflare-access-admin" },
         { "type": "pattern", "path": "RUNBOOK.md", "pattern": "access review|review.*access" }
       ],
-      "liveProof": "Archive monthly access-review output and reconcile admin access with Cloudflare/GitHub/VPS users."
+      "liveProof": "Archive monthly admin-plane access evidence and reconcile Control Center, Cloudflare, GitHub and VPS admin access.",
+      "liveProofChecks": ["platform-admin-audit-evidence", "cloudflare-access-admin-verified"]
     }
   ]
 }

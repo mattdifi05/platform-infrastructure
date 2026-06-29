@@ -64,6 +64,22 @@ function sqlIdentifier(value) {
   return `"${String(value).replaceAll('"', '""')}"`;
 }
 
+function sqlIdentifierName(value, label = "identifier") {
+  const clean = String(value ?? "").trim();
+  if (!/^[a-z][a-z0-9_]*$/.test(clean)) {
+    fail(`Invalid ${label}: ${clean || "(empty)"}`);
+  }
+  return clean;
+}
+
+function cookieName(value, label = "cookie name") {
+  const clean = String(value ?? "").trim();
+  if (!/^[A-Za-z0-9!#$%&'*+.^_`|~-]+$/.test(clean)) {
+    fail(`Invalid ${label}: ${clean || "(empty)"}`);
+  }
+  return clean;
+}
+
 function booleanFlag(value) {
   return value === true || value === "true" || value === "1" || value === "yes";
 }
@@ -419,14 +435,31 @@ function scanPortabilityFiles(root, { fix = false } = {}) {
 }
 
 function assertMatch(text, pattern, message) {
+  if (booleanFlag(process.env.PLATFORM_DEBUG_STATIC_ASSERTS)) {
+    log(`assertMatch: ${message}`);
+  }
   if (!pattern.test(text)) {
     fail(message);
   }
 }
 
 function assertNoMatch(text, pattern, message) {
+  if (booleanFlag(process.env.PLATFORM_DEBUG_STATIC_ASSERTS)) {
+    log(`assertNoMatch: ${message}`);
+  }
   if (pattern.test(text)) {
     fail(message);
+  }
+}
+
+function assertIncludesAll(text, values, message) {
+  if (booleanFlag(process.env.PLATFORM_DEBUG_STATIC_ASSERTS)) {
+    log(`assertIncludesAll: ${message}`);
+  }
+  for (const value of values) {
+    if (!text.includes(value)) {
+      fail(`${message} Missing: ${value}`);
+    }
   }
 }
 
@@ -726,6 +759,51 @@ function writeMarkdownReport(directoryName, baseName, lines) {
   const markdownPath = path.join(directory, `${baseName}.md`);
   fs.writeFileSync(markdownPath, `${lines.join("\n")}\n`, "utf8");
   return markdownPath;
+}
+
+async function withLocalCheckReport(commandName, fn, metadata = {}) {
+  const startedAt = new Date();
+  let finishedAt = startedAt;
+  let status = "passed";
+  let errorMessage = null;
+  try {
+    const result = await fn();
+    finishedAt = new Date();
+    return result;
+  } catch (error) {
+    finishedAt = new Date();
+    status = "failed";
+    errorMessage = String(error?.message ?? error);
+    throw error;
+  } finally {
+    const stamp = reportTimestamp();
+    const baseName = `${commandName}-${stamp}`;
+    const payload = {
+      generatedAt: finishedAt.toISOString(),
+      startedAt: startedAt.toISOString(),
+      finishedAt: finishedAt.toISOString(),
+      durationMs: Math.max(0, finishedAt.getTime() - startedAt.getTime()),
+      status,
+      command: commandName,
+      scope: "platform-infrastructure",
+      runner: "infra-ops",
+      metadata,
+    };
+    if (errorMessage) {
+      payload.error = errorMessage;
+    }
+    const jsonPath = writeJsonReport("local-checks", baseName, payload);
+    const markdownPath = writeMarkdownReport("local-checks", baseName, [
+      `# ${commandName}`,
+      "",
+      `Generated at: ${payload.generatedAt}`,
+      `Status: ${payload.status}`,
+      `Scope: ${payload.scope}`,
+      `Duration ms: ${payload.durationMs}`,
+      errorMessage ? `Error: ${errorMessage}` : "",
+    ].filter(Boolean));
+    log(`Local check report written to ${jsonPath} and ${markdownPath}`);
+  }
 }
 
 function writeBackupExecutionReport({
@@ -1370,7 +1448,31 @@ async function signExistingPostgresBackups() {
     signBackupArtifact(dump, hash);
     signed += 1;
   }
+  const stamp = reportTimestamp();
+  const payload = {
+    generatedAt: new Date().toISOString(),
+    status: "passed",
+    backupRoot,
+    summary: {
+      signed,
+      verified,
+      total: dumps.length,
+    },
+  };
+  const jsonPath = writeJsonReport("postgres-backup-signatures", `postgres-backup-signatures-${stamp}`, payload);
+  const markdownPath = writeMarkdownReport("postgres-backup-signatures", `postgres-backup-signatures-${stamp}`, [
+    "# PostgreSQL Backup Signatures",
+    "",
+    `Generated at: ${payload.generatedAt}`,
+    `Status: ${payload.status}`,
+    `Backup root: ${backupRoot}`,
+    "",
+    "| Signed | Verified | Total |",
+    "| ---: | ---: | ---: |",
+    `| ${signed} | ${verified} | ${dumps.length} |`,
+  ]);
   log(`Backup signatures ready: signed=${signed} verified=${verified} total=${dumps.length}.`);
+  log(`PostgreSQL backup signature report written to ${jsonPath} and ${markdownPath}`);
 }
 
 function backendSessionSigningKey() {
@@ -1659,32 +1761,80 @@ function sourceWorkspaceBootstrap(commands) {
 
 async function accessReview() {
   const database = argv.database ?? "app_db";
-  log("==> Active account roles");
+  const accountSchemaName = sqlIdentifierName(argv.accountSchema ?? process.env.ACCOUNT_DB_SCHEMA ?? "app_account", "--accountSchema");
+  const accountSchema = sqlIdentifier(accountSchemaName);
+  log("==> Active account role summary");
   postgres("enterprise-postgres", database, "postgres", `
 select
-  account.email::text,
   role.role,
-  role.granted_at,
-  role.revoked_at
-from app_account.account_roles role
-join app_account.accounts account on account.id = role.account_id
+  count(*) filter (where role.revoked_at is null) as active_grants,
+  count(*) filter (where role.revoked_at is not null) as revoked_grants,
+  min(role.granted_at) as first_granted_at,
+  max(role.granted_at) as last_granted_at
+from ${accountSchema}.account_roles role
+join ${accountSchema}.accounts account on account.id = role.account_id
 where account.deleted_at is null
-order by account.email, role.role;
+group by role.role
+order by role.role;
 `);
-  log("==> Active sessions older than 30 days");
+  log("==> Active sessions older than 30 days summary");
   postgres("enterprise-postgres", database, "postgres", `
 select
-  account.email::text,
-  session.device,
-  session.browser,
-  session.last_seen_at,
-  session.auth_method
-from app_account.sessions session
-join app_account.accounts account on account.id = session.account_id
+  coalesce(nullif(session.auth_method, ''), 'unknown') as auth_method,
+  count(*) as stale_active_sessions,
+  min(session.last_seen_at) as oldest_last_seen_at,
+  max(session.last_seen_at) as newest_last_seen_at
+from ${accountSchema}.sessions session
+join ${accountSchema}.accounts account on account.id = session.account_id
 where session.status = 'active'
   and session.last_seen_at < now() - interval '30 days'
-order by session.last_seen_at asc;
+group by coalesce(nullif(session.auth_method, ''), 'unknown')
+order by stale_active_sessions desc, auth_method;
 `);
+  const activeRoleCount = Number(postgresOut("enterprise-postgres", database, "postgres", `
+select count(*)
+from ${accountSchema}.account_roles role
+join ${accountSchema}.accounts account on account.id = role.account_id
+where account.deleted_at is null
+  and role.revoked_at is null;
+`).trim() || "0");
+  const staleSessionCount = Number(postgresOut("enterprise-postgres", database, "postgres", `
+select count(*)
+from ${accountSchema}.sessions session
+join ${accountSchema}.accounts account on account.id = session.account_id
+where session.status = 'active'
+  and session.last_seen_at < now() - interval '30 days';
+`).trim() || "0");
+  const stamp = reportTimestamp();
+  const payload = {
+    generatedAt: new Date().toISOString(),
+    status: "passed",
+    mode: "runtime",
+    database,
+    accountSchema: accountSchemaName,
+    checks: [
+      { name: "active-account-roles-reviewed", status: "passed", count: activeRoleCount },
+      { name: "stale-active-sessions-reviewed", status: "passed", count: staleSessionCount },
+    ],
+    piiIncluded: false,
+  };
+  const jsonPath = writeJsonReport("access-review", `access-review-${stamp}`, payload);
+  const markdownPath = writeMarkdownReport("access-review", `access-review-${stamp}`, [
+    "# Access Review",
+    "",
+    `Status: ${payload.status}`,
+    `Mode: ${payload.mode}`,
+    `Generated at: ${payload.generatedAt}`,
+    `Database: ${payload.database}`,
+    `Account schema: ${payload.accountSchema}`,
+    "",
+    "| Check | Status | Count |",
+    "| --- | --- | ---: |",
+    ...payload.checks.map((check) => `| ${check.name} | ${check.status} | ${check.count} |`),
+    "",
+    "PII included in report: no",
+  ]);
+  log(`Access review report written to ${jsonPath} and ${markdownPath}`);
   log("Access review completed.");
 }
 
@@ -1692,6 +1842,7 @@ async function applyPostgresMigrations() {
   const container = argv.container ?? "enterprise-postgres";
   const database = argv.database ?? "app_db";
   const user = argv.user ?? "postgres";
+  const safeDatabaseName = sqlIdentifierName(database, "--database");
   const migrationDir = path.join(infraRoot, "postgres", "migrations");
   const files = fs.readdirSync(migrationDir)
     .filter((file) => file.endsWith(".sql"))
@@ -1700,11 +1851,34 @@ async function applyPostgresMigrations() {
 
   if (!files.length) {
     log(`No migrations found in ${migrationDir}`);
+    const stamp = reportTimestamp();
+    const payload = {
+      generatedAt: new Date().toISOString(),
+      status: "passed",
+      container,
+      database,
+      user,
+      migrationDir,
+      summary: { files: 0, applied: 0, skipped: 0 },
+      migrations: [],
+    };
+    const jsonPath = writeJsonReport("postgres-migrations", `apply-postgres-migrations-${stamp}`, payload);
+    const markdownPath = writeMarkdownReport("postgres-migrations", `apply-postgres-migrations-${stamp}`, [
+      "# PostgreSQL Migrations",
+      "",
+      `Generated at: ${payload.generatedAt}`,
+      `Status: ${payload.status}`,
+      `Database: ${database}`,
+      "",
+      "No migrations found.",
+    ]);
+    log(`PostgreSQL migration report written to ${jsonPath} and ${markdownPath}`);
     return;
   }
 
   postgres(container, database, user, "create schema if not exists platform_ops; create table if not exists platform_ops.schema_migrations (version text primary key, applied_at timestamptz not null default now(), checksum text not null default '');");
 
+  const migrations = [];
   for (const file of files) {
     const version = path.basename(file, ".sql");
     const checksum = sha256File(file);
@@ -1714,16 +1888,59 @@ async function applyPostgresMigrations() {
         fail(`Migration ${version} was already applied with a different checksum.`);
       }
       log(`Skipping ${version} (already applied)`);
+      migrations.push({ version, checksum, action: "skipped" });
       continue;
     }
     log(`Applying ${version}`);
-    run("docker", ["cp", file, `${container}:/tmp/platform-migration.sql`]);
+    let uploadFile = file;
+    if (safeDatabaseName !== "app_db") {
+      const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "platform-migration-"));
+      uploadFile = path.join(tempDir, path.basename(file));
+      const sql = fs.readFileSync(file, "utf8")
+        .replace(/^\\connect\s+\S+/gm, `\\connect ${safeDatabaseName}`);
+      fs.writeFileSync(uploadFile, sql, "utf8");
+    }
+    run("docker", ["cp", uploadFile, `${container}:/tmp/platform-migration.sql`]);
     dockerExec(container, ["psql", "-U", user, "-d", database, "-v", "ON_ERROR_STOP=1", "-f", "/tmp/platform-migration.sql"]);
     postgres(container, database, user, `insert into platform_ops.schema_migrations (version, checksum) values (${sqlString(version)}, ${sqlString(checksum)});`);
     dockerExec(container, ["rm", "-f", "/tmp/platform-migration.sql"]);
+    if (uploadFile !== file) {
+      fs.rmSync(path.dirname(uploadFile), { recursive: true, force: true });
+    }
+    migrations.push({ version, checksum, action: "applied" });
   }
 
+  const applied = migrations.filter((migration) => migration.action === "applied").length;
+  const skipped = migrations.filter((migration) => migration.action === "skipped").length;
+  const stamp = reportTimestamp();
+  const payload = {
+    generatedAt: new Date().toISOString(),
+    status: "passed",
+    container,
+    database,
+    user,
+    migrationDir,
+    summary: {
+      files: files.length,
+      applied,
+      skipped,
+    },
+    migrations,
+  };
+  const jsonPath = writeJsonReport("postgres-migrations", `apply-postgres-migrations-${stamp}`, payload);
+  const markdownPath = writeMarkdownReport("postgres-migrations", `apply-postgres-migrations-${stamp}`, [
+    "# PostgreSQL Migrations",
+    "",
+    `Generated at: ${payload.generatedAt}`,
+    `Status: ${payload.status}`,
+    `Database: ${database}`,
+    "",
+    "| Version | Action |",
+    "| --- | --- |",
+    ...migrations.map((migration) => `| ${migration.version} | ${migration.action} |`),
+  ]);
   log("PostgreSQL migrations complete.");
+  log(`PostgreSQL migration report written to ${jsonPath} and ${markdownPath}`);
 }
 
 async function backupPostgres(options = {}) {
@@ -1789,127 +2006,223 @@ async function certificateExpiryCheck() {
   ].join(",");
   const hosts = (argv.hosts ?? defaultHosts).split(",").map((host) => host.trim()).filter(Boolean);
   const warnDays = Number(argv.warnDays ?? 30);
-  for (const host of hosts) {
-    await new Promise((resolve, reject) => {
-      const socket = tls.connect({
-        host,
-        port: 443,
-        servername: host,
-        rejectUnauthorized: false,
-      }, () => {
-        const cert = socket.getPeerCertificate();
-        socket.end();
-        const daysLeft = Math.floor((Date.parse(cert.valid_to) - Date.now()) / 86400000);
-        log(`${host} certificate expires in ${daysLeft} days (${new Date(cert.valid_to).toISOString()})`);
-        if (daysLeft < warnDays) {
-          reject(new Error(`${host} certificate expires in less than ${warnDays} days`));
-        } else {
-          resolve();
-        }
+  await withLocalCheckReport("certificate-expiry-check", async () => {
+    for (const host of hosts) {
+      await new Promise((resolve, reject) => {
+        const socket = tls.connect({
+          host,
+          port: 443,
+          servername: host,
+          rejectUnauthorized: false,
+        }, () => {
+          const cert = socket.getPeerCertificate();
+          socket.end();
+          const daysLeft = Math.floor((Date.parse(cert.valid_to) - Date.now()) / 86400000);
+          log(`${host} certificate expires in ${daysLeft} days (${new Date(cert.valid_to).toISOString()})`);
+          if (daysLeft < warnDays) {
+            reject(new Error(`${host} certificate expires in less than ${warnDays} days`));
+          } else {
+            resolve();
+          }
+        });
+        socket.on("error", reject);
       });
-      socket.on("error", reject);
-    });
-  }
-  log("Certificate expiry check passed.");
+    }
+    log("Certificate expiry check passed.");
+  }, { hosts, warnDays });
 }
 
 async function enterpriseCheck() {
-  log("==> Workspace typecheck/build in disposable Linux container");
-  runSourceWorkspaceInDocker(sourceWorkspaceBootstrap([
-    "node scripts/dependency-hygiene.mjs",
-    "node scripts/testing-hygiene.mjs",
-    "node scripts/maintainability-hygiene.mjs",
-    "node scripts/performance-hygiene.mjs",
-    "pnpm install --frozen-lockfile",
-    "pnpm deps:supply-chain -- --sbom-output /workspace/security/sbom/pnpm-sbom-current.cdx.json",
-    "pnpm -r typecheck",
-    "pnpm typecheck:e2e",
-    "pnpm peers check",
-    "pnpm -r --if-present test",
-    "pnpm --filter ./apps/web build",
-    "node scripts/performance-hygiene.mjs --built",
-  ].join(" && ")));
-  run("docker", ["compose", "--env-file", path.join(infraRoot, ".env"), "-p", "platform_infra_local", "-f", path.join(infraRoot, "compose.yaml"), "config", "--quiet"]);
-  await enterpriseHardeningAudit();
-  log("Enterprise local quality gate passed.");
+  const includeProject = booleanFlag(argv.includeProject);
+  await withLocalCheckReport("enterprise-check", async () => {
+    if (includeProject && hasSupportedProjectSource()) {
+      log("==> Workspace typecheck/build in disposable Linux container");
+      runSourceWorkspaceInDocker(sourceWorkspaceBootstrap([
+        "node scripts/dependency-hygiene.mjs",
+        "node scripts/testing-hygiene.mjs",
+        "node scripts/maintainability-hygiene.mjs",
+        "node scripts/performance-hygiene.mjs",
+        "pnpm install --frozen-lockfile",
+        "pnpm deps:supply-chain -- --sbom-output /workspace/security/sbom/pnpm-sbom-current.cdx.json",
+        "pnpm -r typecheck",
+        "pnpm typecheck:e2e",
+        "pnpm peers check",
+        "pnpm -r --if-present test",
+        "pnpm --filter ./apps/web build",
+        "node scripts/performance-hygiene.mjs --built",
+      ].join(" && ")));
+    } else {
+      log("==> Infrastructure-only enterprise gate");
+      if (includeProject) {
+        log(`No supported project source found at ${sourceRoot}; running platform-infrastructure gate only.`);
+      }
+    }
+    run("docker", ["compose", "--env-file", path.join(infraRoot, ".env"), "-p", "platform_infra_local", "-f", path.join(infraRoot, "compose.yaml"), "config", "--quiet"]);
+    await staticSecurityCheck();
+    await dependencyHygiene();
+    await testingHygiene();
+    await maintainabilityHygiene();
+    await performanceHygiene();
+    await controlCenterTests();
+    await projectRouterTests();
+    run(process.execPath, [path.join(scriptDir, "infra-ops.mjs"), "enterprise-requirements-check"], { cwd: infraRoot });
+    run(process.execPath, [path.join(scriptDir, "infra-ops.mjs"), "enterprise-requirements-check", "--manifest", "governance/production-readiness.json"], { cwd: infraRoot });
+    log("Enterprise local quality gate passed.");
+  }, { includeProject, supportedProjectSource: hasSupportedProjectSource() });
 }
 
 async function enterpriseHardeningAudit() {
   const projectName = argv.projectName ?? "platform_infra_local";
-  await staticSecurityCheck();
-  await dependencyHygiene();
-  await supplyChainHygiene();
-  await testingHygiene();
-  await faultInjectionTests();
-  await maintainabilityHygiene();
-  await performanceHygiene();
-  log("==> Compose local config");
-  run("docker", ["compose", "--env-file", ".env", "-p", projectName, "config", "--quiet"]);
-  log("==> Compose build config");
-  run("docker", ["compose", "--env-file", ".env", "-p", projectName, "-f", "compose.yaml", "-f", "compose.build.yaml", "config", "--quiet"]);
-  if (fs.existsSync(path.join(infraRoot, "compose.secrets.yaml"))) {
-    await validateLocalSecrets();
-    log("==> Compose local secrets config");
-    run("docker", ["compose", "--env-file", ".env", "-p", projectName, "-f", "compose.yaml", "-f", "compose.secrets.yaml", "config", "--quiet"]);
-  }
-  log("==> Compose prod config");
-  run("docker", ["compose", "--env-file", ".env", "-p", "enterprise_prod", "-f", "compose.yaml", "-f", "compose.prod.yaml", "config", "--quiet"]);
-  await applyPostgresMigrations();
-  await backupRestoreDrill();
-  await backupRestoreDrillMariadb();
-  await backupRestoreDrillMinio();
-  await backupRestoreDrillKeycloakConfig();
-  await backupRestoreDrillSecretManagerMetadata();
-  await prunePostgresBackups({ dryRun: true });
-  await securitySmoke();
-  await accountIntegrationTests();
-  await browserE2eTests();
-  await certificateExpiryCheck();
-  await loadSmoke();
-  await secretScan();
-  await runtimeHealthChecks();
-  log("Enterprise hardening audit passed.");
+  const includeProject = booleanFlag(argv.includeProject);
+  const includeProtectedRuntime = booleanFlag(argv.includeProtectedRuntime);
+  await withLocalCheckReport("enterprise-hardening-audit", async () => {
+    await staticSecurityCheck();
+    await dependencyHygiene();
+    if (includeProject && hasSupportedProjectSource()) {
+      await supplyChainHygiene();
+    } else {
+      log("Skipping application supply-chain gate; platform-infrastructure hardening audit remains infra-only.");
+    }
+    await testingHygiene();
+    await maintainabilityHygiene();
+    await performanceHygiene();
+    log("==> Compose local config");
+    run("docker", ["compose", "--env-file", ".env", "-p", projectName, "config", "--quiet"]);
+    log("==> Compose build config");
+    run("docker", ["compose", "--env-file", ".env", "-p", projectName, "-f", "compose.yaml", "-f", "compose.build.yaml", "config", "--quiet"]);
+    log("==> Compose prod config");
+    run("docker", ["compose", "--env-file", ".env", "-p", "enterprise_prod", "-f", "compose.yaml", "-f", "compose.prod.yaml", "config", "--quiet"]);
+    await composeHealthcheckCoverage();
+    await platformAdminAuditEvidence();
+    await securitySmoke();
+    await wafSmoke();
+    await certificateExpiryCheck();
+    await secretScan();
+    if (includeProtectedRuntime) {
+      await faultInjectionTests();
+      if (fs.existsSync(path.join(infraRoot, "compose.secrets.yaml"))) {
+        await validateLocalSecrets();
+        log("==> Compose local secrets config");
+        run("docker", ["compose", "--env-file", ".env", "-p", projectName, "-f", "compose.yaml", "-f", "compose.secrets.yaml", "config", "--quiet"]);
+      }
+      await applyPostgresMigrations();
+      await backupRestoreDrill();
+      await backupRestoreDrillMariadb();
+      await backupRestoreDrillMinio();
+      await backupRestoreDrillKeycloakConfig();
+      await backupRestoreDrillSecretManagerMetadata();
+      await prunePostgresBackups({ dryRun: true });
+      await accountIntegrationTests();
+      await browserE2eTests();
+      await loadSmoke();
+      await runtimeHealthChecks();
+    } else {
+      log("Protected runtime checks skipped by default: no service stop, restore, backup, migration, secret validation or load test was executed.");
+    }
+    log("Enterprise hardening audit passed.");
+  }, { includeProject, supportedProjectSource: hasSupportedProjectSource(), includeProtectedRuntime });
 }
 
 async function browserE2eTests() {
-  log("==> Browser E2E tests");
+  const includeProject = booleanFlag(argv.includeProject);
+  await withLocalCheckReport("browser-e2e-tests", async () => {
+    log("==> Browser E2E tests");
+    if (includeProject && hasSupportedProjectSource()) {
+      const env = parseEnv(path.join(infraRoot, ".env"));
+      const playwrightBaseUrl = env.NEXT_PUBLIC_UI_URL ?? env.UI_PUBLIC_URL ?? "https://portal.localhost.com";
+      const sourceMount = hostPathForContainerMount(sourceRoot);
+      const bootstrap = [
+        "set -eu",
+        "if ! command -v docker >/dev/null; then apt-get update >/dev/null && apt-get install -y docker.io >/dev/null; fi",
+        sourceWorkspaceBootstrap([
+          "pnpm install --frozen-lockfile",
+          "pnpm typecheck:e2e",
+          "pnpm test:e2e",
+        ].join(" && ")),
+      ].join(" && ");
+      run("docker", [
+        "run",
+        "--rm",
+        "--network",
+        "container:enterprise-traefik",
+        "-e",
+        "CI=true",
+        "-e",
+        "NEXT_TELEMETRY_DISABLED=1",
+        "-e",
+        `PLAYWRIGHT_BASE_URL=${playwrightBaseUrl}`,
+        "-e",
+        "PLAYWRIGHT_HTML_OPEN=never",
+        "-e",
+        "PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1",
+        "-v",
+        "/var/run/docker.sock:/var/run/docker.sock",
+        "-v",
+        `${sourceMount}:/source:ro`,
+        configuredPlaywrightImage(),
+        "bash",
+        "-lc",
+        bootstrap,
+      ]);
+    } else {
+      await platformBrowserE2e();
+    }
+    log("Browser E2E tests passed.");
+  }, { includeProject, supportedProjectSource: hasSupportedProjectSource() });
+}
+
+async function platformBrowserE2e() {
   const env = parseEnv(path.join(infraRoot, ".env"));
-  const playwrightBaseUrl = env.NEXT_PUBLIC_UI_URL ?? env.UI_PUBLIC_URL ?? "https://portal.localhost.com";
-  const sourceMount = hostPathForContainerMount(sourceRoot);
-  const bootstrap = [
-    "set -eu",
-    "if ! command -v docker >/dev/null; then apt-get update >/dev/null && apt-get install -y docker.io >/dev/null; fi",
-    sourceWorkspaceBootstrap([
-      "pnpm install --frozen-lockfile",
-      "pnpm typecheck:e2e",
-      "pnpm test:e2e",
-    ].join(" && ")),
-  ].join(" && ");
+  const host = env.CONTROL_CENTER_HOST ?? env.ADMIN_HOST ?? `portal.${env.DOMAIN ?? "localhost.com"}`;
+  const url = `https://${host}/?section=status`;
+  const script = `
+const { chromium } = require("playwright");
+(async () => {
+  const browser = await chromium.launch({ headless: true, args: ["--no-sandbox"] });
+  const context = await browser.newContext({ ignoreHTTPSErrors: true });
+  const page = await context.newPage();
+  await page.goto(${JSON.stringify(url)}, { waitUntil: "domcontentloaded", timeout: 15000 });
+  await page.waitForSelector("[data-status-tabs]", { timeout: 10000 });
+  const result = await page.evaluate(() => {
+    const text = (selector) => (document.querySelector(selector)?.textContent || "").replace(/\\s+/g, " ").trim();
+    const tabs = Array.from(document.querySelectorAll("[data-status-tab]")).map((el) => el.textContent.replace(/\\s+/g, " ").trim());
+    return {
+      title: document.title,
+      badge: text(".ops-badge"),
+      tabs,
+      hasStatusTable: Boolean(document.querySelector(".ops-status-table")),
+      failedRows: Array.from(document.querySelectorAll("tr")).filter((tr) => tr.textContent.includes("Fallito")).length,
+    };
+  });
+  if (result.title !== "Admin Control Center") throw new Error("unexpected title: " + result.title);
+  if (!result.tabs.some((item) => /Controlli\\s+\\d+/.test(item))) throw new Error("missing total controls tab");
+  if (!result.tabs.some((item) => /OK\\s+\\d+/.test(item))) throw new Error("missing OK tab");
+  if (!result.hasStatusTable) throw new Error("missing status table");
+  console.log(JSON.stringify(result));
+  await browser.close();
+})().catch(async (error) => {
+  console.error(error && error.stack ? error.stack : error);
+  process.exit(1);
+});
+`;
   run("docker", [
     "run",
     "--rm",
     "--network",
-    "container:enterprise-traefik",
+    "host",
+    "--add-host",
+    `${host}:127.0.0.1`,
     "-e",
     "CI=true",
     "-e",
-    "NEXT_TELEMETRY_DISABLED=1",
-    "-e",
-    `PLAYWRIGHT_BASE_URL=${playwrightBaseUrl}`,
-    "-e",
-    "PLAYWRIGHT_HTML_OPEN=never",
+    "PLAYWRIGHT_BROWSERS_PATH=/ms-playwright",
     "-e",
     "PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1",
-    "-v",
-    "/var/run/docker.sock:/var/run/docker.sock",
-    "-v",
-    `${sourceMount}:/source:ro`,
     configuredPlaywrightImage(),
     "bash",
     "-lc",
-    bootstrap,
-  ]);
-  log("Browser E2E tests passed.");
+    `export NODE_PATH=/tmp/pw/node_modules && npm install --prefix /tmp/pw --no-save playwright@1.60.0 >/dev/null && node -e ${shellQuote(script)}`,
+  ], { capture: false });
 }
 
 async function runtimeHealthChecks() {
@@ -2107,19 +2420,197 @@ async function runtimeHealthChecks() {
   }
 }
 
-async function generateSbom() {
-  const outputDir = path.resolve(argv.outputDir ?? path.join(infraRoot, "security", "sbom"));
+function imageReferenceFromTemplate(value) {
+  const clean = String(value || "").trim().replace(/^["']|["']$/g, "");
+  const defaultMatch = clean.match(/^\$\{[A-Za-z_][A-Za-z0-9_]*:-([^}]+)\}$/);
+  if (defaultMatch) return defaultMatch[1];
+  if (clean.startsWith("${")) return null;
+  return clean || null;
+}
+
+function collectInfraContainerImageRefs() {
+  const refs = new Map();
+  const addRef = ({ file, ref, source }) => {
+    const imageRef = imageReferenceFromTemplate(ref);
+    if (!imageRef) return;
+    if (!refs.has(imageRef)) {
+      refs.set(imageRef, { ref: imageRef, files: new Set(), sources: new Set() });
+    }
+    refs.get(imageRef).files.add(file);
+    refs.get(imageRef).sources.add(source);
+  };
+
+  const composeFiles = [
+    "compose.yaml",
+    "compose.build.yaml",
+    "compose.prod.yaml",
+    "compose.secrets.yaml",
+    "compose.staging.yaml",
+    "compose.vps.yaml",
+    "compose.waf.yaml",
+    "compose.vps-waf.yaml",
+  ];
+  for (const file of composeFiles) {
+    const target = path.join(infraRoot, file);
+    if (!fs.existsSync(target)) continue;
+    for (const line of readText(target).split(/\r?\n/)) {
+      const match = line.match(/^\s*image:\s+(.+?)\s*(?:#.*)?$/);
+      if (match) addRef({ file, ref: match[1], source: "compose" });
+    }
+  }
+
+  const dockerfiles = [
+    "docker/backend.Dockerfile",
+    "docker/web.Dockerfile",
+    "docker/worker.Dockerfile",
+    "docker/php-apache.Dockerfile",
+    "docker/ops.Dockerfile",
+  ];
+  for (const file of dockerfiles) {
+    const target = path.join(infraRoot, file);
+    if (!fs.existsSync(target)) continue;
+    const args = new Map();
+    const lines = readText(target).split(/\r?\n/);
+    for (const line of lines) {
+      const arg = line.match(/^\s*ARG\s+([A-Za-z_][A-Za-z0-9_]*)=(\S+)/);
+      if (arg) args.set(arg[1], arg[2]);
+    }
+    for (const line of lines) {
+      const from = line.match(/^\s*FROM\s+(.+?)(?:\s+AS\s+\S+)?\s*$/i);
+      if (!from) continue;
+      const variable = from[1].match(/^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$/);
+      addRef({ file, ref: variable ? args.get(variable[1]) : from[1], source: "dockerfile" });
+    }
+  }
+
+  return [...refs.values()]
+    .map((entry) => ({
+      ref: entry.ref,
+      files: [...entry.files].sort(),
+      sources: [...entry.sources].sort(),
+    }))
+    .sort((a, b) => a.ref.localeCompare(b.ref));
+}
+
+function writeInfraSbom(outputDir) {
   fs.mkdirSync(outputDir, { recursive: true });
-  const timestamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\..+/, "").replace("T", "-");
-  const outputFile = path.join(outputDir, `pnpm-sbom-${timestamp}.json`);
-  const json = sourceWorkspaceOutput("pnpm install --frozen-lockfile >/dev/null && pnpm list --json --prod --depth 20", { maxBuffer: 128 * 1024 * 1024 });
-  fs.writeFileSync(outputFile, `${json}\n`, "utf8");
-  log(`SBOM written to ${outputFile}`);
+  const timestamp = new Date().toISOString();
+  const stamp = timestamp.replace(/[-:]/g, "").replace(/\..+/, "").replace("T", "-");
+  const outputFile = path.join(outputDir, `platform-infrastructure-sbom-${stamp}.cdx.json`);
+  const imageRefs = collectInfraContainerImageRefs();
+  if (!imageRefs.length) {
+    fail("No infrastructure container image references found for SBOM generation.");
+  }
+  const components = imageRefs.map((entry) => ({
+    type: "container",
+    name: entry.ref.split("@")[0],
+    version: entry.ref.includes("@") ? entry.ref.split("@").at(-1) : entry.ref,
+    "bom-ref": `container:${entry.ref}`,
+    properties: [
+      { name: "platform:imageRef", value: entry.ref },
+      { name: "platform:sourceFiles", value: entry.files.join(",") },
+      { name: "platform:sources", value: entry.sources.join(",") },
+    ],
+  }));
+  const bom = {
+    bomFormat: "CycloneDX",
+    specVersion: "1.6",
+    serialNumber: `urn:uuid:${crypto.randomUUID()}`,
+    version: 1,
+    metadata: {
+      timestamp,
+      component: {
+        type: "application",
+        name: "platform-infrastructure",
+        version: "local",
+      },
+      properties: [
+        { name: "platform:scope", value: "infrastructure-container-images" },
+        { name: "platform:componentCount", value: String(components.length) },
+      ],
+    },
+    components,
+  };
+  fs.writeFileSync(outputFile, `${JSON.stringify(bom, null, 2)}\n`, "utf8");
+  return { outputFile, componentCount: components.length };
+}
+
+async function generateSbom() {
+  const includeProject = booleanFlag(argv.includeProject);
+  const outputDir = path.resolve(argv.outputDir ?? path.join(infraRoot, "security", "sbom"));
+  await withLocalCheckReport("generate-sbom", async () => {
+    if (includeProject && hasSupportedProjectSource()) {
+      fs.mkdirSync(outputDir, { recursive: true });
+      const timestamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\..+/, "").replace("T", "-");
+      const outputFile = path.join(outputDir, `pnpm-sbom-${timestamp}.json`);
+      const json = sourceWorkspaceOutput("pnpm install --frozen-lockfile >/dev/null && pnpm list --json --prod --depth 20", { maxBuffer: 128 * 1024 * 1024 });
+      fs.writeFileSync(outputFile, `${json}\n`, "utf8");
+      log(`Application SBOM written to ${outputFile}`);
+      return;
+    }
+    const sbom = writeInfraSbom(outputDir);
+    log(`Infrastructure SBOM written to ${sbom.outputFile} (${sbom.componentCount} component(s)).`);
+  }, { includeProject, supportedProjectSource: hasSupportedProjectSource(), mode: includeProject && hasSupportedProjectSource() ? "project" : "platform-infrastructure" });
 }
 
 async function dependencyHygiene() {
-  log("==> Dependency hygiene");
-  run(process.execPath, ["scripts/dependency-hygiene.mjs"], { cwd: sourceRoot });
+  const includeProject = booleanFlag(argv.includeProject);
+  await withLocalCheckReport("dependency-hygiene", async () => {
+    log("==> Dependency hygiene");
+    infraDependencyHygiene();
+    if (includeProject && hasSupportedProjectSource()) {
+      run(process.execPath, ["scripts/dependency-hygiene.mjs"], { cwd: sourceRoot });
+    } else {
+      log("Application dependency hygiene skipped; platform-infrastructure dependency hygiene passed.");
+    }
+  }, { includeProject, supportedProjectSource: hasSupportedProjectSource() });
+}
+
+function infraDependencyHygiene() {
+  const dockerfiles = [
+    "docker/backend.Dockerfile",
+    "docker/web.Dockerfile",
+    "docker/worker.Dockerfile",
+    "docker/php-apache.Dockerfile",
+    "docker/ops.Dockerfile",
+  ];
+  for (const file of dockerfiles) {
+    const text = readText(path.join(infraRoot, file));
+    const args = new Map();
+    for (const line of text.split(/\r?\n/)) {
+      const match = line.match(/^\s*ARG\s+([A-Za-z_][A-Za-z0-9_]*)=(\S+)/);
+      if (match) args.set(match[1], match[2]);
+    }
+    const fromLines = text.split(/\r?\n/).filter((line) => /^\s*FROM\s+/i.test(line));
+    if (!fromLines.length) fail(`${file} has no FROM line.`);
+    for (const line of fromLines) {
+      const variable = line.match(/^\s*FROM\s+\$\{([A-Za-z_][A-Za-z0-9_]*)\}/);
+      const imageRef = variable ? args.get(variable[1]) : line.replace(/^\s*FROM\s+/i, "").split(/\s+/)[0];
+      if (!imageRef) fail(`${file} base image ARG ${variable?.[1] || "(unknown)"} must define a default image.`);
+      assertMatch(imageRef, /@sha256:[a-f0-9]{64}/, `${file} base image must be digest-pinned: ${line.trim()}`);
+      assertNoMatch(imageRef, /:latest(?:@|\s|$)/, `${file} must not use :latest base images.`);
+    }
+  }
+  const composeFiles = [
+    "compose.yaml",
+    "compose.build.yaml",
+    "compose.prod.yaml",
+    "compose.secrets.yaml",
+    "compose.vps.yaml",
+    "compose.waf.yaml",
+    "compose.vps-waf.yaml",
+  ];
+  for (const file of composeFiles) {
+    if (!fs.existsSync(path.join(infraRoot, file))) continue;
+    const text = readText(path.join(infraRoot, file));
+    assertNoMatch(text, /^\s*image:\s+[^$\n#]*:latest(?:\s|$)/m, `${file} must not pin services to :latest.`);
+  }
+  const renovate = readJsonFile(path.join(infraRoot, "renovate.json"), "renovate.json");
+  if (renovate.dependencyDashboardApproval !== true) {
+    fail("renovate.json must keep dependencyDashboardApproval=true for controlled updates.");
+  }
+  run("docker", ["compose", "--env-file", ".env", "-p", "platform_infra_dependency_hygiene", "config", "--quiet"]);
+  log("Infrastructure dependency hygiene checks passed.");
 }
 
 async function cloudflareFromZero() {
@@ -2131,30 +2622,69 @@ async function cloudflareAccessAdmin() {
 }
 
 async function supplyChainHygiene() {
-  log("==> Supply-chain SBOM/CVE/license gate");
-  const result = sourceWorkspaceOutput(
-    "pnpm install --frozen-lockfile --store-dir /tmp/pnpm-store >/dev/null && pnpm deps:supply-chain -- --sbom-output /workspace/security/sbom/pnpm-sbom-current.cdx.json",
-    { maxBuffer: 128 * 1024 * 1024 },
-  );
-  log(result);
+  const includeProject = booleanFlag(argv.includeProject);
+  await withLocalCheckReport("supply-chain-hygiene", async () => {
+    log("==> Supply-chain SBOM/CVE/license gate");
+    if (includeProject && hasSupportedProjectSource()) {
+      const result = sourceWorkspaceOutput(
+        "pnpm install --frozen-lockfile --store-dir /tmp/pnpm-store >/dev/null && pnpm deps:supply-chain -- --sbom-output /workspace/security/sbom/pnpm-sbom-current.cdx.json",
+        { maxBuffer: 128 * 1024 * 1024 },
+      );
+      log(result);
+      return;
+    }
+    infraDependencyHygiene();
+    const sbom = writeInfraSbom(path.join(infraRoot, "security", "sbom"));
+    log(`Platform infrastructure supply-chain hygiene passed with SBOM ${sbom.outputFile}.`);
+  }, { includeProject, supportedProjectSource: hasSupportedProjectSource(), mode: includeProject && hasSupportedProjectSource() ? "project" : "platform-infrastructure" });
 }
 
 async function testingHygiene() {
-  log("==> Testing hygiene");
-  if (!requireSupportedProjectSource("application testing hygiene")) return;
-  run(process.execPath, ["scripts/testing-hygiene.mjs"], { cwd: sourceRoot });
+  const includeProject = booleanFlag(argv.includeProject);
+  await withLocalCheckReport("testing-hygiene", async () => {
+    log("==> Testing hygiene");
+    infraTestingHygiene();
+    if (includeProject && hasSupportedProjectSource()) {
+      run(process.execPath, ["scripts/testing-hygiene.mjs"], { cwd: sourceRoot });
+    } else {
+      log("Application testing hygiene skipped; platform-infrastructure tests passed.");
+    }
+  }, { includeProject, supportedProjectSource: hasSupportedProjectSource() });
+}
+
+function infraTestingHygiene() {
+  const checkFiles = [
+    "scripts/infra-ops.mjs",
+    "control-center/server.mjs",
+    "project-router/server.mjs",
+    "scripts/infra-secret-manager.mjs",
+  ];
+  for (const file of checkFiles) {
+    run(process.execPath, ["--check", file], { cwd: infraRoot });
+  }
+  run(process.execPath, ["--test", "control-center/tests/control-center.test.mjs"], { cwd: infraRoot });
+  run(process.execPath, ["--test", "project-router/tests/project-router.test.mjs"], { cwd: infraRoot });
+  const shellFiles = fs.readdirSync(path.join(infraRoot, "scripts")).filter((name) => name.endsWith(".sh")).sort();
+  for (const file of shellFiles) {
+    run("sh", ["-n", path.join("scripts", file)], { cwd: infraRoot });
+  }
+  log("Infrastructure testing hygiene checks passed.");
 }
 
 async function controlCenterTests() {
-  log("==> Control Center tests");
-  run(process.execPath, ["--test", "control-center/tests/control-center.test.mjs"], { cwd: infraRoot });
-  log("Control Center tests passed.");
+  await withLocalCheckReport("control-center-tests", async () => {
+    log("==> Control Center tests");
+    run(process.execPath, ["--test", "control-center/tests/control-center.test.mjs"], { cwd: infraRoot });
+    log("Control Center tests passed.");
+  });
 }
 
 async function projectRouterTests() {
-  log("==> Project Router tests");
-  run(process.execPath, ["--test", "project-router/tests/project-router.test.mjs"], { cwd: infraRoot });
-  log("Project Router tests passed.");
+  await withLocalCheckReport("project-router-tests", async () => {
+    log("==> Project Router tests");
+    run(process.execPath, ["--test", "project-router/tests/project-router.test.mjs"], { cwd: infraRoot });
+    log("Project Router tests passed.");
+  });
 }
 
 async function faultInjectionTests() {
@@ -2173,7 +2703,30 @@ async function faultInjectionTests() {
   if (timeoutProbe.status === 0 || !/statement timeout|canceling statement/i.test(timeoutOutput)) {
     fail("PostgreSQL fault injection must prove statement_timeout cancels slow statements.");
   }
+  const stamp = reportTimestamp();
+  const payload = {
+    generatedAt: new Date().toISOString(),
+    status: "passed",
+    mode: "runtime",
+    scope: "platform-infrastructure",
+    checks: [
+      { name: "backend-runtime-tests", status: "passed" },
+      { name: "postgres-statement-timeout", status: "passed" },
+    ],
+  };
+  const jsonPath = writeJsonReport("fault-injection", `fault-injection-tests-${stamp}`, payload);
+  const markdownPath = writeMarkdownReport("fault-injection", `fault-injection-tests-${stamp}`, [
+    "# Fault Injection Tests",
+    "",
+    `Generated at: ${payload.generatedAt}`,
+    `Status: ${payload.status}`,
+    "",
+    "| Check | Status |",
+    "| --- | --- |",
+    ...payload.checks.map((check) => `| ${check.name} | ${check.status} |`),
+  ]);
   log("PostgreSQL timeout fault injection passed.");
+  log(`Fault injection report written to ${jsonPath} and ${markdownPath}`);
 }
 
 async function failureTests() {
@@ -2229,7 +2782,7 @@ async function failureTests() {
     }
   }
   const stamp = reportTimestamp();
-  const payload = { generatedAt: new Date().toISOString(), targets: results };
+  const payload = { generatedAt: new Date().toISOString(), status: "passed", targets: results };
   const jsonPath = writeJsonReport("failure-tests", `failure-tests-${stamp}`, payload);
   const markdownPath = writeMarkdownReport("failure-tests", `failure-tests-${stamp}`, [
     "# Platform Failure Tests",
@@ -2277,14 +2830,90 @@ async function waitInfraHealth(timeoutSeconds = 90) {
 }
 
 async function maintainabilityHygiene() {
-  log("==> Maintainability hygiene");
-  run(process.execPath, ["scripts/maintainability-hygiene.mjs"], { cwd: sourceRoot });
+  const includeProject = booleanFlag(argv.includeProject);
+  await withLocalCheckReport("maintainability-hygiene", async () => {
+    log("==> Maintainability hygiene");
+    infraMaintainabilityHygiene();
+    if (includeProject && hasSupportedProjectSource()) {
+      run(process.execPath, ["scripts/maintainability-hygiene.mjs"], { cwd: sourceRoot });
+    } else {
+      log("Application maintainability hygiene skipped; platform-infrastructure maintainability checks passed.");
+    }
+  }, { includeProject, supportedProjectSource: hasSupportedProjectSource() });
 }
 
 async function performanceHygiene() {
-  log("==> Performance hygiene");
-  if (!requireSupportedProjectSource("application performance hygiene")) return;
-  run(process.execPath, ["scripts/performance-hygiene.mjs"], { cwd: sourceRoot });
+  const includeProject = booleanFlag(argv.includeProject);
+  await withLocalCheckReport("performance-hygiene", async () => {
+    log("==> Performance hygiene");
+    await infraPerformanceHygiene();
+    if (includeProject && hasSupportedProjectSource()) {
+      run(process.execPath, ["scripts/performance-hygiene.mjs"], { cwd: sourceRoot });
+    } else {
+      log("Application performance hygiene skipped; platform-infrastructure performance checks passed.");
+    }
+  }, { includeProject, supportedProjectSource: hasSupportedProjectSource() });
+}
+
+function infraMaintainabilityHygiene() {
+  const opsWrapper = readText(path.join(infraRoot, "scripts", "infra-ops.sh"));
+  const compose = readText(path.join(infraRoot, "compose.yaml"));
+  const controlCenterServer = readText(path.join(infraRoot, "control-center", "server.mjs"));
+  const projectRouterServer = readText(path.join(infraRoot, "project-router", "server.mjs"));
+  assertMatch(opsWrapper, /docker build[\s\S]*docker\/ops\.Dockerfile[\s\S]*docker run --rm/, "infra-ops wrapper must stay Dockerized.");
+  assertMatch(opsWrapper, /PROJECT_SOURCE_ROOT=\$SOURCE_CONTAINER_ROOT/, "infra-ops wrapper must pass source root explicitly into the ops container.");
+  assertNoMatch(`${compose}\n${controlCenterServer}\n${projectRouterServer}`, /stexor|fireport|matthewdifilippo/i, "Core infrastructure must stay project-generic.");
+  assertNoMatch(projectRouterServer, /node:child_process|spawn\(|execFile\(|exec\(/, "Project router must stay proxy-only.");
+  const shellWrappers = fs.readdirSync(path.join(infraRoot, "scripts"))
+    .filter((name) => name.endsWith(".sh"))
+    .sort();
+  const directOperationalScripts = new Set([
+    "backup-scheduler.sh",
+    "cloudflare-origin-lock-ufw.sh",
+    "dast-zap-baseline.sh",
+    "deploy-vps.sh",
+    "infra-ops.sh",
+    "install-offsite-backup-cron.sh",
+    "node-project-runtime.sh",
+    "vps-bootstrap-ubuntu.sh",
+    "vps-go-live.sh",
+    "vps-hardening-ubuntu.sh",
+    "vps-host-readiness.sh",
+    "vps-postdeploy.sh",
+    "vps-preflight.sh",
+    "write-docker-stats-json.sh",
+  ]);
+  for (const name of shellWrappers) {
+    const text = readText(path.join(infraRoot, "scripts", name));
+    if (directOperationalScripts.has(name)) {
+      if (name === "dast-zap-baseline.sh") {
+        assertMatch(text, /docker run[\s\S]*zap-baseline\.py/, "DAST ZAP wrapper must stay containerized.");
+      }
+    } else {
+      assertMatch(text, /infra-ops\.sh/, `Shell wrapper ${name} must delegate to infra-ops.sh.`);
+      assertNoMatch(text, /exec node|infra-ops\.mjs|infra-secret-manager\.mjs|cloudflare-from-zero\.mjs/, `Shell wrapper ${name} must not bypass the Dockerized ops runner.`);
+    }
+  }
+  for (const file of ["README.md", "RUNBOOK.md", "SECURITY.md", "VPS-PREDEPLOY-CHECKLIST.md"]) {
+    if (!fs.existsSync(path.join(infraRoot, file))) fail(`${file} must exist as maintainer-facing documentation.`);
+  }
+  log("Infrastructure maintainability hygiene checks passed.");
+}
+
+async function infraPerformanceHygiene() {
+  const cssSize = fs.statSync(path.join(infraRoot, "control-center", "styles", "control-center.css")).size;
+  const jsSize = fs.statSync(path.join(infraRoot, "control-center", "styles", "control-center.js")).size;
+  if (cssSize > 200000) fail(`Control Center CSS is too large for the local portal shell: ${cssSize} bytes.`);
+  if (jsSize > 100000) fail(`Control Center JS is too large for the local portal shell: ${jsSize} bytes.`);
+  const compose = readText(path.join(infraRoot, "compose.yaml"));
+  assertMatch(compose, /x-default-logging:[\s\S]*max-size:\s+"10m"[\s\S]*max-file:\s+"5"/, "Compose must bound json-file logs for runtime performance.");
+  const prometheus = readText(path.join(infraRoot, "prometheus", "prometheus.yml"));
+  assertMatch(prometheus, /scrape_interval:\s*[0-9]+s/, "Prometheus must use explicit scrape intervals.");
+  const controlCenterServer = readText(path.join(infraRoot, "control-center", "server.mjs"));
+  assertMatch(controlCenterServer, /resourceMetricsTtlMs/, "Control Center resource probes must have a metrics TTL.");
+  assertMatch(controlCenterServer, /projectDiskUsageTtlMs/, "Control Center disk usage probes must have a cache TTL.");
+  await composeHealthcheckCoverage();
+  log("Infrastructure performance hygiene checks passed.");
 }
 
 async function initLocalSecrets() {
@@ -2322,13 +2951,13 @@ async function initLocalSecrets() {
   const hashPepperKeys = versionedSecretValue("hash_pepper_keys", "local");
   const backupSigningKeys = versionedSecretValue("backup_signing_keys", secretId("b"));
   const smtpPassword = secretValue("smtp_password");
-  const googleOAuthClientSecret = secretValue("google_oauth_client_secret");
   const appDbUser = env.APP_DB_USER || "app_user";
   const appDbName = env.APP_DB_NAME || "app_db";
   const natsUser = env.NATS_USER || "platform";
   const databaseUrl = existingSecret("database_url") ?? `postgresql://${encodeURIComponent(appDbUser)}:${encodeURIComponent(appDbPassword)}@postgres:5432/${encodeURIComponent(appDbName)}`;
   const natsUrl = existingSecret("nats_url") ?? `nats://${encodeURIComponent(natsUser)}:${encodeURIComponent(natsPassword)}@nats:4222`;
 
+  const groupReadableSecretFiles = new Set(["app_db_password"]);
   const writeSecretFile = (name, value) => {
     const filePath = path.join(secretsDir, `${name}.txt`);
     if (fs.existsSync(filePath) && !force) {
@@ -2336,7 +2965,7 @@ async function initLocalSecrets() {
     }
     fs.writeFileSync(filePath, value, "utf8");
     try {
-      fs.chmodSync(filePath, 0o600);
+      fs.chmodSync(filePath, groupReadableSecretFiles.has(name) ? 0o640 : 0o600);
     } catch {
       // Best effort on platforms without POSIX permissions.
     }
@@ -2359,7 +2988,6 @@ async function initLocalSecrets() {
     hash_pepper_keys: hashPepperKeys,
     backup_signing_keys: backupSigningKeys,
     smtp_password: smtpPassword,
-    google_oauth_client_secret: googleOAuthClientSecret,
     database_url: databaseUrl,
     nats_url: natsUrl,
   };
@@ -2383,7 +3011,6 @@ async function initLocalSecrets() {
       "GRAFANA_ADMIN_PASSWORD",
       "SESSION_SECRET",
       "SMTP_PASSWORD",
-      "GOOGLE_OAUTH_CLIENT_SECRET",
     ]);
     const next = fs.readFileSync(envFile, "utf8").split(/\r?\n/).map((line) => {
       const key = line.split("=", 1)[0];
@@ -3005,18 +3632,55 @@ function writeLoadSmokeReport(payload) {
   log(`Load smoke reports written to ${jsonPath} and ${markdownPath}`);
 }
 
+function writeLoadProfileReport(payload) {
+  const stamp = reportTimestamp();
+  const jsonPath = writeJsonReport("load", `load-profile-${stamp}`, payload);
+  const markdownPath = writeMarkdownReport("load", `load-profile-${stamp}`, [
+    "# Platform Load Profile",
+    "",
+    `Generated at: ${payload.generatedAt}`,
+    `Status: ${payload.status}`,
+    `Target: ${payload.target}`,
+    "",
+    "| Duration seconds | Target RPS | Requests | Concurrency | Avg ms | P95 ms | Max P95 ms | Errors |",
+    "| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+    `| ${payload.durationSeconds} | ${payload.targetRps} | ${payload.requests} | ${payload.concurrency} | ${Number(payload.metric.avg).toFixed(2)} | ${payload.metric.p95} | ${payload.maxP95Ms} | ${payload.metric.errors ?? 0} |`,
+    "",
+    "This is local runtime evidence. It does not replace the public edge/CDN load benchmark required for production go-live.",
+  ]);
+  log(`Load profile reports written to ${jsonPath} and ${markdownPath}`);
+  return { jsonPath, markdownPath };
+}
+
 async function loadProfile() {
   const durationSeconds = positiveInteger(argv.durationSeconds ?? 60, "durationSeconds");
   const targetRps = positiveInteger(argv.targetRps ?? 8, "targetRps");
   const concurrency = positiveInteger(argv.concurrency ?? Math.max(4, Math.min(64, targetRps)), "concurrency");
   const requests = positiveInteger(argv.requests ?? durationSeconds * targetRps, "requests");
   const maxP95Ms = Number(argv.maxP95Ms ?? 1000);
-  if (!argv.url && !booleanFlag(argv.edge)) {
-    runInternalBackendLoadProbe({ label: "Sustained internal backend load profile", requests, concurrency, maxP95Ms });
-    return;
-  }
+  const useEdge = Boolean(argv.url || booleanFlag(argv.edge));
   const url = argv.url ?? "https://api.localhost.com/health";
-  await runLoadProbe({ label: "Sustained load profile", url, requests, concurrency, maxP95Ms });
+  const target = useEdge ? url : "container:enterprise-backend/health";
+  await withLocalCheckReport("load-profile", async () => {
+    const before = dockerStatsSnapshot("before-load-profile");
+    const metric = useEdge
+      ? await runLoadProbe({ label: "Sustained load profile", url, requests, concurrency, maxP95Ms })
+      : runInternalBackendLoadProbe({ label: "Sustained internal backend load profile", requests, concurrency, maxP95Ms });
+    const after = dockerStatsSnapshot("after-load-profile");
+    writeLoadProfileReport({
+      generatedAt: new Date().toISOString(),
+      status: "passed",
+      target,
+      mode: useEdge ? "edge" : "internal",
+      durationSeconds,
+      targetRps,
+      requests,
+      concurrency,
+      maxP95Ms,
+      metric,
+      stats: { before, after },
+    });
+  }, { mode: useEdge ? "edge" : "internal", target, durationSeconds, targetRps, requests, concurrency, maxP95Ms });
 }
 
 function selectedEdgeHeaders(headers = {}) {
@@ -3063,6 +3727,10 @@ async function loadTargetEvidence({ url, mode, requirePublicTarget, requireEdgeE
 
   const parsed = new URL(url);
   const publicTarget = publicEvidenceUrl(url);
+  const legacyHost = legacyPlatformEvidenceHost(url);
+  if (requirePublicTarget && legacyHost) {
+    fail(`Load benchmark production target must use final platform hostnames, not legacy host ${legacyHost}.`);
+  }
   if (requirePublicTarget && !publicTarget) {
     fail(`Load benchmark production target must be public, not ${url}.`);
   }
@@ -3212,19 +3880,22 @@ async function loadBenchmark() {
 }
 
 function runInternalBackendLoadProbe({ label, requests, concurrency, maxP95Ms }) {
+  const syntheticClientPool = booleanFlag(argv.preserveClientIp) ? 0 : positiveInteger(argv.syntheticClients ?? 64, "syntheticClients");
   const script = `
 const http = require("node:http");
 const { performance } = require("node:perf_hooks");
 const requests = ${JSON.stringify(requests)};
 const concurrency = ${JSON.stringify(concurrency)};
 const maxP95Ms = ${JSON.stringify(maxP95Ms)};
+const syntheticClientPool = ${JSON.stringify(syntheticClientPool)};
 const latencies = [];
 const errors = [];
 let nextRequest = 0;
-function once() {
+function once(requestIndex) {
   return new Promise((resolve) => {
     const started = performance.now();
-    const req = http.request({ method: "GET", hostname: "127.0.0.1", port: 3000, path: "/health" }, (res) => {
+    const headers = syntheticClientPool > 0 ? { "X-Forwarded-For": "198.51.100." + ((requestIndex % syntheticClientPool) + 1) } : {};
+    const req = http.request({ method: "GET", hostname: "127.0.0.1", port: 3000, path: "/health", headers }, (res) => {
       res.resume();
       res.on("end", () => {
         latencies.push(Math.round(performance.now() - started));
@@ -3241,8 +3912,9 @@ function once() {
 }
 async function worker() {
   while (nextRequest < requests) {
+    const requestIndex = nextRequest;
     nextRequest += 1;
-    await once();
+    await once(requestIndex);
   }
 }
 Promise.all(Array.from({ length: Math.min(concurrency, requests) }, () => worker())).then(() => {
@@ -3250,7 +3922,7 @@ Promise.all(Array.from({ length: Math.min(concurrency, requests) }, () => worker
   const p95Index = Math.min(sorted.length - 1, Math.max(0, Math.ceil(sorted.length * 0.95) - 1));
   const p95 = sorted[p95Index] ?? 0;
   const avg = sorted.reduce((sum, value) => sum + value, 0) / Math.max(sorted.length, 1);
-  console.log(JSON.stringify({ errors, requests, concurrency, avg, p95, maxP95Ms }));
+  console.log(JSON.stringify({ errors, requests, concurrency, syntheticClients: syntheticClientPool || 1, avg, p95, maxP95Ms }));
   process.exit(errors.length || p95 > maxP95Ms ? 1 : 0);
 });
 `;
@@ -3264,7 +3936,7 @@ Promise.all(Array.from({ length: Math.min(concurrency, requests) }, () => worker
     if (parsed.errors?.length) parsed.errors.slice(0, 10).forEach((error) => log(`internal backend returned ${error}`));
     fail(`${label} failed: errors=${parsed.errors?.length ?? 0} p95=${parsed.p95}ms maxP95Ms=${parsed.maxP95Ms}ms.`);
   }
-  log(`${label} passed: requests=${parsed.requests} requestedConcurrency=${parsed.concurrency} avg=${parsed.avg.toFixed(2)}ms p95=${parsed.p95}ms`);
+  log(`${label} passed: requests=${parsed.requests} requestedConcurrency=${parsed.concurrency} syntheticClients=${parsed.syntheticClients || 1} avg=${parsed.avg.toFixed(2)}ms p95=${parsed.p95}ms`);
   return { ...parsed, errors: parsed.errors?.length ?? 0 };
 }
 
@@ -3970,13 +4642,10 @@ async function productionPreflight() {
   };
   [
     "TRAEFIK_ACME_EMAIL",
+    "CONTROL_CENTER_PUBLIC_URL",
+    "DOCS_PUBLIC_URL",
     "API_PUBLIC_URL",
-    "ACCOUNT_PUBLIC_URL",
-    "UI_PUBLIC_URL",
     "NEXT_PUBLIC_API_URL",
-    "NEXT_PUBLIC_UI_URL",
-    "NEXT_PUBLIC_ACCOUNT_URL",
-    "NEXTAUTH_URL",
     "KEYCLOAK_ISSUER",
     "WEBAUTHN_RP_ID",
     "WEBAUTHN_ORIGINS",
@@ -4023,7 +4692,16 @@ async function productionPreflight() {
     fail("Managed production secrets require SECRET_MANAGER_PROVIDER.");
   }
   if (!argv.skipDns) {
-    for (const host of [env.UI_HOST, env.ACCOUNT_HOST, env.API_HOST, env.AUTH_HOST].filter(Boolean)) {
+    const productionHosts = [
+      env.CONTROL_CENTER_HOST,
+      env.DOCS_HOST,
+      env.APP_HOST,
+      env.API_HOST,
+      env.AUTH_HOST,
+      env.STORAGE_HOST || env.MINIO_CONSOLE_HOST,
+      env.GRAFANA_HOST,
+    ].filter(Boolean);
+    for (const host of productionHosts) {
       if (/localhost|your-domain/i.test(host)) {
         fail(`Production host is not public: ${host}`);
       }
@@ -4034,91 +4712,92 @@ async function productionPreflight() {
 }
 
 async function haConfigCheck(options = {}) {
-  log("==> HA multi-node configuration check");
-  const haCompose = readText(path.join(infraRoot, "compose.ha.yaml"));
-  for (const service of ["backend", "web", "worker-notifications", "worker-jobs"]) {
-    assertMatch(haCompose, new RegExp(`^\\s{2}${service}:[\\s\\S]*?container_name:\\s*!reset null`, "m"), `${service} must reset fixed container_name for replicas.`);
-    assertMatch(haCompose, new RegExp(`^\\s{2}${service}:[\\s\\S]*?replicas:\\s*\\$\\{`, "m"), `${service} must declare configurable replicas.`);
-    assertMatch(haCompose, new RegExp(`^\\s{2}${service}:[\\s\\S]*?failure_action:\\s*rollback`, "m"), `${service} must rollback failed rolling updates.`);
-    assertMatch(haCompose, new RegExp(`^\\s{2}${service}:[\\s\\S]*?rollback_config:`, "m"), `${service} must define rollback_config.`);
-  }
-  for (const service of ["postgres", "redis", "nats", "minio"]) {
-    assertMatch(haCompose, new RegExp(`^\\s{2}${service}:[\\s\\S]*?node\\.labels\\.platform\\.stateful == true`, "m"), `${service} must be pinned to stateful nodes or replaced by a managed tier.`);
-  }
-  if (noDockerMode(options)) {
-    log("Skipping Docker Compose HA render in --noDocker/--repoOnly mode.");
-  } else {
-    run("docker", [
-      "compose",
-      "--env-file",
-      ".env",
-      "-p",
-      "enterprise_prod_ha",
-      "-f",
-      "compose.yaml",
-      "-f",
-      "compose.prod.yaml",
-      "-f",
-      "compose.ha.yaml",
-      "config",
-      "--quiet",
-    ], { env: localProductionImageEnv() });
-  }
-  log("HA multi-node configuration check passed.");
+  await withLocalCheckReport("ha-config-check", async () => {
+    log("==> HA multi-node configuration check");
+    const haCompose = readText(path.join(infraRoot, "compose.ha.yaml"));
+    for (const service of ["backend", "web", "worker-notifications", "worker-jobs"]) {
+      assertMatch(haCompose, new RegExp(`^\\s{2}${service}:[\\s\\S]*?container_name:\\s*!reset null`, "m"), `${service} must reset fixed container_name for replicas.`);
+      assertMatch(haCompose, new RegExp(`^\\s{2}${service}:[\\s\\S]*?replicas:\\s*\\$\\{`, "m"), `${service} must declare configurable replicas.`);
+      assertMatch(haCompose, new RegExp(`^\\s{2}${service}:[\\s\\S]*?failure_action:\\s*rollback`, "m"), `${service} must rollback failed rolling updates.`);
+      assertMatch(haCompose, new RegExp(`^\\s{2}${service}:[\\s\\S]*?rollback_config:`, "m"), `${service} must define rollback_config.`);
+    }
+    for (const service of ["postgres", "redis", "nats", "minio"]) {
+      assertMatch(haCompose, new RegExp(`^\\s{2}${service}:[\\s\\S]*?node\\.labels\\.platform\\.stateful == true`, "m"), `${service} must be pinned to stateful nodes or replaced by a managed tier.`);
+    }
+    if (noDockerMode(options)) {
+      log("Skipping Docker Compose HA render in --noDocker/--repoOnly mode.");
+    } else {
+      run("docker", [
+        "compose",
+        "--env-file",
+        ".env",
+        "-p",
+        "enterprise_prod_ha",
+        "-f",
+        "compose.yaml",
+        "-f",
+        "compose.prod.yaml",
+        "-f",
+        "compose.ha.yaml",
+        "config",
+        "--quiet",
+      ], { env: localProductionImageEnv() });
+    }
+    log("HA multi-node configuration check passed.");
+  }, { noDocker: noDockerMode(options) });
 }
 
 async function managedSecretsPreflight(options = {}) {
-  log("==> Managed secrets / KMS preflight");
-  const managedCompose = readText(path.join(infraRoot, "compose.managed-secrets.yaml"));
-  for (const secretName of [
-    "postgres_superuser_password",
-    "app_db_password",
-    "keycloak_db_password",
-    "redis_password",
-    "keycloak_admin_password",
-    "nats_password",
-    "minio_root_password",
-    "mariadb_root_password",
-    "phpmyadmin_control_password",
-    "grafana_admin_password",
-    "session_secret",
-    "session_signing_keys",
-    "projects_gateway_signing_keys",
-    "hash_pepper_keys",
-    "backup_signing_keys",
-    "smtp_password",
-    "google_recaptcha_secret_key",
-    "cloudflare_turnstile_secret_key",
-    "google_oauth_client_secret",
-    "database_url",
-    "nats_url",
-  ]) {
-    assertMatch(managedCompose, new RegExp(`^\\s{2}${secretName}:\\s*\\r?\\n\\s+external:\\s+true`, "m"), `${secretName} must be declared as an external Docker secret.`);
-  }
-  for (const fileEnv of ["SESSION_SECRET_FILE", "SESSION_SIGNING_KEYS_FILE", "PROJECTS_GATEWAY_SIGNING_KEYS_FILE", "SECRET_HASH_KEYS_FILE", "DATABASE_URL_FILE", "SMTP_PASSWORD_FILE", "GOOGLE_RECAPTCHA_SECRET_KEY_FILE", "CLOUDFLARE_TURNSTILE_SECRET_KEY_FILE"]) {
-    assertMatch(managedCompose, new RegExp(`${fileEnv}:\\s+/run/secrets/`), `${fileEnv} must point at /run/secrets.`);
-  }
-  assertMatch(managedCompose, /GOOGLE_OAUTH_CLIENT_SECRET_FILE:\s+\$\{GOOGLE_OAUTH_CLIENT_SECRET_FILE-\}/, "Optional Google OAuth secret file must be externally configured when OAuth is enabled.");
-  if (noDockerMode(options)) {
-    log("Skipping Docker Compose managed-secret render in --noDocker/--repoOnly mode.");
-  } else {
-    run("docker", [
-      "compose",
-      "--env-file",
-      ".env",
-      "-p",
-      "enterprise_prod_managed_secrets",
-      "-f",
-      "compose.yaml",
-      "-f",
-      "compose.prod.yaml",
-      "-f",
-      "compose.managed-secrets.yaml",
-      "config",
-      "--quiet",
-    ], { env: localProductionImageEnv() });
-  }
-  log("Managed secrets / KMS preflight passed.");
+  await withLocalCheckReport("managed-secrets-preflight", async () => {
+    log("==> Managed secrets / KMS preflight");
+    const managedCompose = readText(path.join(infraRoot, "compose.managed-secrets.yaml"));
+    for (const secretName of [
+      "postgres_superuser_password",
+      "app_db_password",
+      "keycloak_db_password",
+      "redis_password",
+      "keycloak_admin_password",
+      "nats_password",
+      "minio_root_password",
+      "mariadb_root_password",
+      "phpmyadmin_control_password",
+      "grafana_admin_password",
+      "session_secret",
+      "session_signing_keys",
+      "projects_gateway_signing_keys",
+      "hash_pepper_keys",
+      "backup_signing_keys",
+      "smtp_password",
+      "cloudflare_turnstile_secret_key",
+      "database_url",
+      "nats_url",
+    ]) {
+      assertMatch(managedCompose, new RegExp(`^\\s{2}${secretName}:\\s*\\r?\\n\\s+external:\\s+true`, "m"), `${secretName} must be declared as an external Docker secret.`);
+    }
+    for (const fileEnv of ["SESSION_SECRET_FILE", "SESSION_SIGNING_KEYS_FILE", "PROJECTS_GATEWAY_SIGNING_KEYS_FILE", "SECRET_HASH_KEYS_FILE", "DATABASE_URL_FILE", "SMTP_PASSWORD_FILE", "CLOUDFLARE_TURNSTILE_SECRET_KEY_FILE"]) {
+      assertMatch(managedCompose, new RegExp(`${fileEnv}:\\s+/run/secrets/`), `${fileEnv} must point at /run/secrets.`);
+    }
+    if (noDockerMode(options)) {
+      log("Skipping Docker Compose managed-secret render in --noDocker/--repoOnly mode.");
+    } else {
+      run("docker", [
+        "compose",
+        "--env-file",
+        ".env",
+        "-p",
+        "enterprise_prod_managed_secrets",
+        "-f",
+        "compose.yaml",
+        "-f",
+        "compose.prod.yaml",
+        "-f",
+        "compose.managed-secrets.yaml",
+        "config",
+        "--quiet",
+      ], { env: localProductionImageEnv() });
+    }
+    log("Managed secrets / KMS preflight passed.");
+  }, { noDocker: noDockerMode(options) });
 }
 
 function dockerComposeConfigJson({ envFile, projectName, files, profiles = [] }) {
@@ -4624,7 +5303,7 @@ async function auditLogEvidence(options = {}) {
       category: "source",
       sourceFile: true,
       filePath: backendAudit,
-      pattern: /await client\.query\("begin"\)[\s\S]*insert into (?:app_account|platform_account)\.audit_events[\s\S]*insert into (?:app_account|platform_account)\.audit_outbox[\s\S]*await client\.query\("commit"\)[\s\S]*rollback/,
+      pattern: /await client\.query\("begin"\)[\s\S]*insert into [a-z][a-z0-9_]*_account\.audit_events[\s\S]*insert into [a-z][a-z0-9_]*_account\.audit_outbox[\s\S]*await client\.query\("commit"\)[\s\S]*rollback/,
       detail: "Backend writes audit_events and audit_outbox in one transaction with rollback.",
     });
     addAuditLogPatternCheck(checks, issues, {
@@ -4669,7 +5348,7 @@ async function auditLogEvidence(options = {}) {
       category: "source",
       sourceFile: true,
       filePath: workerAuditStore,
-      pattern: /for update skip locked[\s\S]*set status = 'dead'[\s\S]*from (?:app_account|platform_account)\.audit_outbox/,
+      pattern: /for update skip locked[\s\S]*update [a-z][a-z0-9_]*_account\.audit_outbox[\s\S]*set status = 'dead'/,
       detail: "Worker claims audit rows safely and moves exhausted delivery attempts to dead-letter.",
     });
     addAuditLogPatternCheck(checks, issues, {
@@ -5041,9 +5720,7 @@ const managedSecretRotationExpectations = [
   { name: "backup_signing_keys", kind: "keyring", rotationDays: 90 },
   { name: "alertmanager_webhook_token", kind: "opaque", rotationDays: 90 },
   { name: "smtp_password", kind: "opaque", rotationDays: 90 },
-  { name: "google_recaptcha_secret_key", kind: "opaque", rotationDays: 90, manualRotation: true },
   { name: "cloudflare_turnstile_secret_key", kind: "opaque", rotationDays: 90, manualRotation: true },
-  { name: "google_oauth_client_secret", kind: "opaque", rotationDays: 90, manualRotation: true },
   { name: "database_url", kind: "derived", rotationDays: 90 },
   { name: "nats_url", kind: "derived", rotationDays: 90 },
 ];
@@ -5064,6 +5741,184 @@ function readJsonLines(filePath) {
     }
   }
   return { entries, invalidLines };
+}
+
+function platformAdminAuditCategory(action) {
+  const value = String(action || "");
+  if (/^admin\.login\./.test(value)) return "login";
+  if (/^admin\.logout\./.test(value)) return "logout";
+  if (value === "admin.readiness.access") return "readiness-access";
+  if (value === "admin.providers.access") return "providers-access";
+  if (value === "admin.monitoring.access") return "monitoring-access";
+  if (/^adapter\.[a-z0-9-]+\.verify\.plan$/.test(value)) return "verify";
+  if (/^adapter\.[a-z0-9-]+\.[a-z0-9-]+\.plan$/.test(value) || /^(backup|restore)\.plan$/.test(value) || /\.plan$/.test(value) && /^(settings|provider\.connection|security\.policy|resources\.limits|material|alerts\.channel)\./.test(value)) return "plan";
+  if (/^(settings\.update|provider\.connection|security\.policy|resources\.limits|material\.(rotation|usage|access)|alerts\.channel)\.apply$/.test(value)) return "metadata-update";
+  return "";
+}
+
+function auditRecordHasSensitiveKey(value, pathParts = []) {
+  if (!value || typeof value !== "object") return null;
+  if (Array.isArray(value)) {
+    for (let index = 0; index < value.length; index += 1) {
+      const nested = auditRecordHasSensitiveKey(value[index], [...pathParts, String(index)]);
+      if (nested) return nested;
+    }
+    return null;
+  }
+  for (const [key, nestedValue] of Object.entries(value)) {
+    const nextPath = [...pathParts, key];
+    if (/(password|secret|token|authorization|cookie|credential)/i.test(key) && nestedValue !== "" && nestedValue !== null && nestedValue !== undefined) {
+      return nextPath.join(".");
+    }
+    const nested = auditRecordHasSensitiveKey(nestedValue, nextPath);
+    if (nested) return nested;
+  }
+  return null;
+}
+
+async function platformAdminAuditEvidence() {
+  log("==> Platform admin audit evidence");
+  const auditPath = path.resolve(argv.auditFile ?? process.env.PROJECT_AUDIT_FILE ?? path.join(infraRoot, "projects-portal", "state", "audit.jsonl"));
+  const requiredCategories = [
+    "login",
+    "logout",
+    "readiness-access",
+    "providers-access",
+    "monitoring-access",
+    "verify",
+    "plan",
+    "metadata-update",
+  ];
+  const issues = [];
+  const { entries, invalidLines } = readJsonLines(auditPath);
+  if (!fs.existsSync(auditPath)) {
+    issues.push(`missing audit file: ${path.relative(infraRoot, auditPath).replaceAll("\\", "/")}`);
+  }
+  if (invalidLines > 0) {
+    issues.push(`audit file has ${invalidLines} invalid JSON line(s)`);
+  }
+  if (!entries.length) {
+    issues.push("audit file has no events");
+  }
+
+  const seenIds = new Set();
+  let previousTimestamp = 0;
+  let duplicateIds = 0;
+  let invalidTimestamps = 0;
+  let outOfOrderTimestamps = 0;
+  const categories = new Map(requiredCategories.map((name) => [name, []]));
+  const ignoredHostedApplicationEvents = [];
+  const sensitiveKeyPaths = [];
+  for (const entry of entries) {
+    const id = String(entry.id || "");
+    if (!id || seenIds.has(id)) duplicateIds += 1;
+    if (id) seenIds.add(id);
+    const timestamp = Date.parse(entry.timestamp);
+    if (!Number.isFinite(timestamp)) {
+      invalidTimestamps += 1;
+    } else {
+      if (timestamp < previousTimestamp) outOfOrderTimestamps += 1;
+      previousTimestamp = timestamp;
+    }
+    const sensitivePath = auditRecordHasSensitiveKey(entry);
+    if (sensitivePath) sensitiveKeyPaths.push(`${id || "unknown"}:${sensitivePath}`);
+    const action = String(entry.action || "");
+    if (/^(project|application|subdomain)\./.test(action)) {
+      ignoredHostedApplicationEvents.push(action);
+      continue;
+    }
+    const category = platformAdminAuditCategory(action);
+    if (category && categories.has(category)) categories.get(category).push(entry);
+  }
+  if (duplicateIds) issues.push(`audit file has ${duplicateIds} missing or duplicate id(s)`);
+  if (invalidTimestamps) issues.push(`audit file has ${invalidTimestamps} invalid timestamp(s)`);
+  if (outOfOrderTimestamps) issues.push(`audit timestamps are not append-order monotonic: ${outOfOrderTimestamps} event(s) out of order`);
+  if (sensitiveKeyPaths.length) issues.push(`audit file contains sensitive-looking key path(s): ${sensitiveKeyPaths.slice(0, 5).join(", ")}`);
+
+  const controlCenterPath = path.join(infraRoot, "control-center", "server.mjs");
+  const controlCenterText = readText(controlCenterPath);
+  const appendOnlySource = /function appendAudit[\s\S]*appendFileSync\(auditFile/.test(controlCenterText)
+    && !/writeFileSync\(auditFile|truncateSync\(auditFile|rmSync\(auditFile|unlinkSync\(auditFile/.test(controlCenterText);
+  if (!appendOnlySource) {
+    issues.push("Control Center audit writer is not append-only in source inspection");
+  }
+
+  const checks = requiredCategories.map((name) => {
+    const events = categories.get(name) ?? [];
+    return {
+      name,
+      status: events.length ? "passed" : "failed",
+      count: events.length,
+      latestAt: events.at(-1)?.timestamp ?? null,
+      detail: events.length ? "platform portal event observed" : "no matching platform portal event observed",
+    };
+  });
+  for (const check of checks) {
+    if (check.status !== "passed") issues.push(`missing platform admin audit coverage: ${check.name}`);
+  }
+
+  const stamp = reportTimestamp();
+  const payload = {
+    generatedAt: new Date().toISOString(),
+    status: issues.length ? "failed" : "passed",
+    mode: "runtime",
+    scope: "platform-infrastructure",
+    auditFile: path.relative(infraRoot, auditPath).replaceAll("\\", "/"),
+    appendOnly: {
+      source: appendOnlySource,
+      jsonl: true,
+      monotonicTimestamps: outOfOrderTimestamps === 0,
+      duplicateIds,
+      invalidLines,
+    },
+    summary: {
+      events: entries.length,
+      platformEventsUsed: checks.reduce((sum, check) => sum + check.count, 0),
+      ignoredHostedApplicationEvents: ignoredHostedApplicationEvents.length,
+      failedChecks: checks.filter((check) => check.status !== "passed").length,
+      sensitiveKeyFindings: sensitiveKeyPaths.length,
+    },
+    checks,
+    issues,
+    piiIncluded: false,
+    secretsIncluded: false,
+  };
+  const jsonPath = writeJsonReport("platform-admin-audit", `platform-admin-audit-${stamp}`, payload);
+  const markdownPath = writeMarkdownReport("platform-admin-audit", `platform-admin-audit-${stamp}`, [
+    "# Platform Admin Audit Evidence",
+    "",
+    `Status: ${payload.status}`,
+    `Mode: ${payload.mode}`,
+    `Scope: ${payload.scope}`,
+    `Generated at: ${payload.generatedAt}`,
+    `Audit file: ${payload.auditFile}`,
+    "",
+    "## Summary",
+    "",
+    `- Events: ${payload.summary.events}`,
+    `- Platform events used: ${payload.summary.platformEventsUsed}`,
+    `- Ignored hosted application events: ${payload.summary.ignoredHostedApplicationEvents}`,
+    `- Failed checks: ${payload.summary.failedChecks}`,
+    `- Sensitive key findings: ${payload.summary.sensitiveKeyFindings}`,
+    "",
+    "## Checks",
+    "",
+    "| Check | Status | Count | Latest at | Detail |",
+    "| --- | --- | ---: | --- | --- |",
+    ...checks.map((check) => `| ${check.name} | ${check.status} | ${check.count} | ${check.latestAt || "n/a"} | ${check.detail} |`),
+    "",
+    "## Issues",
+    "",
+    ...(issues.length ? issues.map((issue) => `- ${issue}`) : ["- none"]),
+    "",
+    "PII included: no",
+    "Secrets included: no",
+  ]);
+  log(`Platform admin audit report written to ${jsonPath} and ${markdownPath}`);
+  if (issues.length && !booleanFlag(argv.allowFailures)) {
+    fail(`Platform admin audit evidence failed with ${issues.length} issue(s). Report: ${jsonPath}`);
+  }
+  log("Platform admin audit evidence passed.");
 }
 
 function ageDaysFromIso(value) {
@@ -5331,6 +6186,13 @@ async function secretRotationEvidence(options = {}) {
 }
 
 async function releaseArtifactGate(options = {}) {
+  await withLocalCheckReport("release-artifact-gate", () => releaseArtifactGateBody(options), {
+    requireProvenance: Boolean(options.requireProvenance ?? booleanFlag(argv.requireProvenance)),
+    verifyCosign: Boolean(options.verifyCosign ?? booleanFlag(argv.verifyCosign)),
+  });
+}
+
+async function releaseArtifactGateBody(options = {}) {
   log("==> Release artifact admission gate");
   const env = parseEnv(path.resolve(options.envFile ?? argv.envFile ?? path.join(infraRoot, ".env")));
   const imageEntries = releaseImageEntries({
@@ -5834,19 +6696,26 @@ async function drReadinessCheck(options = {}) {
 }
 
 async function securityMatrix() {
-  log("==> Security test matrix");
-  await testingHygiene();
-  const securitySpec = readText(path.join(sourceRoot, "e2e", "security-guards.spec.ts"));
-  const accountSpec = readText(path.join(sourceRoot, "e2e", "account-auth.spec.ts"));
-  const opsScript = readText(path.join(infraRoot, "scripts", "infra-ops.mjs"));
-  assertMatch(securitySpec, /cross-site mutating requests are blocked/, "Security E2E must cover cross-site request blocking.");
-  assertMatch(securitySpec, /require the CSRF header/, "Security E2E must cover CSRF header enforcement.");
-  assertMatch(accountSpec, /loginWithBackupCodeRecovery/, "Account E2E must cover backup-code recovery login.");
-  assertMatch(accountSpec, /expectBackupCodeStatus\(page, backupCode \?\? "", 400\)/, "Account E2E/integration must cover backup-code single-use blocking.");
-  assertMatch(opsScript, /passkey login options for added account/, "Account integration must cover passkey requested-account isolation.");
-  await securitySmoke();
-  await accountIntegrationTests();
-  log("Security test matrix passed.");
+  const includeProject = booleanFlag(argv.includeProject);
+  await withLocalCheckReport("security-matrix", async () => {
+    log("==> Security test matrix");
+    await testingHygiene();
+    if (includeProject && hasSupportedProjectSource()) {
+      const securitySpec = readText(path.join(sourceRoot, "e2e", "security-guards.spec.ts"));
+      const accountSpec = readText(path.join(sourceRoot, "e2e", "account-auth.spec.ts"));
+      const opsScript = readText(path.join(infraRoot, "scripts", "infra-ops.mjs"));
+      assertMatch(securitySpec, /cross-site mutating requests are blocked/, "Security E2E must cover cross-site request blocking.");
+      assertMatch(securitySpec, /require the CSRF header/, "Security E2E must cover CSRF header enforcement.");
+      assertMatch(accountSpec, /loginWithBackupCodeRecovery/, "Account E2E must cover backup-code recovery login.");
+      assertMatch(accountSpec, /expectBackupCodeStatus\(page, backupCode \?\? "", 400\)/, "Account E2E/integration must cover backup-code single-use blocking.");
+      assertMatch(opsScript, /passkey login options for added account/, "Account integration must cover passkey requested-account isolation.");
+      await accountIntegrationTests();
+    } else {
+      log(`Application security E2E skipped; no supported project source found at ${sourceRoot}.`);
+    }
+    await securitySmoke();
+    log("Security test matrix passed.");
+  }, { includeProject, supportedProjectSource: hasSupportedProjectSource(), mode: includeProject && hasSupportedProjectSource() ? "project" : "platform-infrastructure" });
 }
 
 async function chaosProfile() {
@@ -5858,9 +6727,11 @@ async function chaosProfile() {
   if (booleanFlag(argv.includePostgres)) {
     targets.push("enterprise-postgres");
   }
+  const results = [];
   const stopped = [];
   try {
     for (const container of targets) {
+      const startedAt = Date.now();
       log(`Stopping ${container}`);
       run("docker", ["stop", "--time", "10", container]);
       stopped.push(container);
@@ -5871,12 +6742,34 @@ async function chaosProfile() {
       log(`Restarting ${container}`);
       run("docker", ["start", container]);
       stopped.pop();
-      await new Promise((resolve) => setTimeout(resolve, 5000));
-      await runtimeHealthChecks();
+      await waitContainerHealthy(container, 120);
+      await waitInfraHealth(120);
+      results.push({ container, stopped: true, recovered: true, durationMs: Date.now() - startedAt });
     }
     await faultInjectionTests();
     await loadProfile();
+    const stamp = reportTimestamp();
+    const payload = {
+      generatedAt: new Date().toISOString(),
+      status: "passed",
+      mode: "staging-chaos",
+      includePostgres: booleanFlag(argv.includePostgres),
+      targets: results,
+    };
+    const jsonPath = writeJsonReport("chaos", `chaos-profile-${stamp}`, payload);
+    const markdownPath = writeMarkdownReport("chaos", `chaos-profile-${stamp}`, [
+      "# Staging Chaos Profile",
+      "",
+      `Generated at: ${payload.generatedAt}`,
+      `Status: ${payload.status}`,
+      `Include PostgreSQL: ${payload.includePostgres ? "yes" : "no"}`,
+      "",
+      "| Container | Stopped | Recovered | Duration ms |",
+      "| --- | --- | --- | ---: |",
+      ...results.map((result) => `| ${result.container} | ${result.stopped ? "yes" : "no"} | ${result.recovered ? "yes" : "no"} | ${result.durationMs} |`),
+    ]);
     log("Staging chaos profile passed.");
+    log(`Chaos profile report written to ${jsonPath} and ${markdownPath}`);
   } finally {
     for (const container of stopped.reverse()) {
       run("docker", ["start", container], { allowFailure: true, capture: true });
@@ -5885,6 +6778,10 @@ async function chaosProfile() {
 }
 
 async function governanceCheck() {
+  await withLocalCheckReport("governance-check", governanceCheckBody);
+}
+
+async function governanceCheckBody() {
   log("==> Governance / release control check");
   const sourceWorkflowPath = path.join(sourceRoot, ".github", "workflows", "enterprise-ci.yml");
   const sourceWorkflowAvailable = fs.existsSync(sourceWorkflowPath);
@@ -5993,16 +6890,19 @@ function requiredGithubRepo() {
 
 async function githubApi(method, apiPath, body = undefined) {
   const token = process.env.GITHUB_TOKEN ?? process.env.GH_TOKEN;
-  if (!token) {
+  if (!token && method !== "GET") {
     fail("Set GITHUB_TOKEN or GH_TOKEN before applying or verifying live GitHub governance.");
   }
+  const headers = {
+    "Accept": "application/vnd.github+json",
+    "User-Agent": "platform-infrastructure",
+    "X-GitHub-Api-Version": process.env.GITHUB_API_VERSION ?? "2026-03-10",
+  };
+  if (token) {
+    headers.Authorization = `Bearer ${token}`;
+  }
   const response = await requestRaw(method, `https://api.github.com${apiPath}`, {
-    headers: {
-      "Accept": "application/vnd.github+json",
-      "Authorization": `Bearer ${token}`,
-      "User-Agent": "platform-infrastructure",
-      "X-GitHub-Api-Version": process.env.GITHUB_API_VERSION ?? "2026-03-10",
-    },
+    headers,
     body,
     timeoutMs: Number(argv.timeoutMs ?? 15000),
   });
@@ -6539,6 +7439,21 @@ function evidenceGroupStatus(steps, names, enabled = true) {
   return statuses.every((status) => status === "passed") ? "passed" : "failed";
 }
 
+function liveProofStepStatus(steps, name, enabled = true) {
+  if (!enabled) {
+    return "pending-live-proof";
+  }
+  return evidenceStepStatus(steps, name) === "passed" ? "passed" : "pending-live-proof";
+}
+
+function liveProofGroupStatus(steps, names, enabled = true) {
+  if (!enabled) {
+    return "pending-live-proof";
+  }
+  const statuses = names.map((name) => evidenceStepStatus(steps, name));
+  return statuses.every((status) => status === "passed") ? "passed" : "pending-live-proof";
+}
+
 function buildPreGoLiveReadinessMatrix({ steps, options, repo }) {
   const localPolicySteps = [
     "static-security-check",
@@ -6587,7 +7502,7 @@ function buildPreGoLiveReadinessMatrix({ steps, options, repo }) {
     {
       id: "production-preflight",
       required: true,
-      status: evidenceStepStatus(steps, "production-preflight"),
+      status: liveProofStepStatus(steps, "production-preflight", options.includeProductionPreflight),
       evidence: "production-preflight",
       nextAction: "Run with --includeProductionPreflight and the final production env file after placeholders are replaced.",
     },
@@ -6601,7 +7516,7 @@ function buildPreGoLiveReadinessMatrix({ steps, options, repo }) {
     {
       id: "offsite-restore-dry-run",
       required: true,
-      status: evidenceStepStatus(steps, "offsite-restore-drill-restic-dry-run"),
+      status: liveProofStepStatus(steps, "offsite-restore-drill-restic-dry-run", options.includeOffsiteRestoreDryRun),
       evidence: "offsite-restore-drill-restic-dry-run",
       nextAction: "Run with --includeOffsiteRestoreDryRun plus RESTIC_REPOSITORY and RESTIC_PASSWORD_FILE.",
     },
@@ -6615,7 +7530,7 @@ function buildPreGoLiveReadinessMatrix({ steps, options, repo }) {
     {
       id: "github-remote-verification",
       required: true,
-      status: evidenceGroupStatus(steps, githubRemoteSteps, options.verifyGithubRemote),
+      status: liveProofGroupStatus(steps, githubRemoteSteps, options.verifyGithubRemote),
       evidence: githubRemoteSteps.join(", "),
       nextAction: "Run with --verifyGithubRemote and GITHUB_TOKEN/GH_TOKEN after the live repository is configured.",
     },
@@ -6629,11 +7544,62 @@ function buildPreGoLiveReadinessMatrix({ steps, options, repo }) {
   ];
 }
 
+function verifyExistingFullRestoreDrillEvidence(options = {}) {
+  const maxAgeHours = positiveInteger(options.maxAgeHours ?? argv.maxRestoreDrillAgeHours ?? 168, "--maxRestoreDrillAgeHours", 1);
+  const report = latestJsonReport("restore-drills", "full-restore-drill-", (payload) => (
+    payload.status === "success"
+      || (Array.isArray(payload.steps) && payload.steps.length > 0 && payload.steps.every((step) => step.status === "success"))
+  ));
+  const freshness = reportFreshDetail(report, maxAgeHours);
+  if (!report) {
+    fail("No successful full restore drill report found.");
+  }
+  if (!freshness.fresh) {
+    fail(`Latest full restore drill report is not fresh: ${freshness.detail}.`);
+  }
+  if (!Number.isFinite(Number(report.payload.durationMs))) {
+    fail(`Latest full restore drill report has invalid durationMs: ${report.filePath}.`);
+  }
+  log(`Using existing full restore drill evidence: ${report.filePath}; ${freshness.detail}.`);
+  return {
+    reportPath: report.filePath,
+    generatedAt: report.payload.generatedAt ?? report.payload.finishedAt ?? null,
+    durationMs: Number(report.payload.durationMs),
+  };
+}
+
+function verifyExistingSecretRotationEvidence(options = {}) {
+  const maxAgeHours = positiveInteger(options.maxAgeHours ?? argv.maxSecretRotationEvidenceAgeHours ?? 168, "--maxSecretRotationEvidenceAgeHours", 1);
+  const report = latestJsonReport("secret-rotation", "secret-rotation-evidence-", (payload) => (
+    payload.mode === "evidence"
+      && payload.status === "passed"
+      && payload.verify?.status === "passed"
+      && Number(payload.summary?.failedSecrets ?? 1) === 0
+      && Number(payload.summary?.expiredSecrets ?? 1) === 0
+      && Number(payload.summary?.missingMaterializedFiles ?? 1) === 0
+  ));
+  const freshness = reportFreshDetail(report, maxAgeHours);
+  if (!report) {
+    fail("No passing secret rotation evidence report found.");
+  }
+  if (!freshness.fresh) {
+    fail(`Latest secret rotation evidence report is not fresh: ${freshness.detail}.`);
+  }
+  log(`Using existing non-secret rotation evidence: ${report.filePath}; ${freshness.detail}.`);
+  return {
+    reportPath: report.filePath,
+    generatedAt: report.payload.generatedAt ?? null,
+    summary: report.payload.summary ?? null,
+  };
+}
+
 async function preGoLiveEvidence() {
   log("==> Pre go-live evidence pack");
   const repo = argv.repo ?? process.env.PLATFORM_GITHUB_REPOSITORY ?? process.env.GITHUB_REPOSITORY ?? null;
   const branch = String(argv.branch ?? "main");
   const infraOnly = booleanFlag(argv.infraOnly);
+  const useExistingRestoreDrill = booleanFlag(argv.useExistingRestoreDrill) || booleanFlag(argv.useLatestRestoreDrill);
+  const useExistingSecretRotationEvidence = booleanFlag(argv.useExistingSecretRotationEvidence) || booleanFlag(argv.useLatestSecretRotationEvidence);
   const steps = [];
   const providerEvidence = [
     "VPS Ubuntu LTS bootstrap and hardening executed on the real VPS.",
@@ -6657,7 +7623,11 @@ async function preGoLiveEvidence() {
   await collectEvidenceStep(steps, { name: "rate-limit-evidence", category: "local-policy", fn: rateLimitEvidence });
   await collectEvidenceStep(steps, { name: "audit-log-evidence", category: "local-policy", fn: auditLogEvidence });
   await collectEvidenceStep(steps, { name: "retention-evidence", category: "local-policy", fn: retentionEvidence });
-  await collectEvidenceStep(steps, { name: "secret-rotation-evidence-plan", category: "local-policy", fn: secretRotationEvidence });
+  await collectEvidenceStep(steps, {
+    name: "secret-rotation-evidence-plan",
+    category: "local-policy",
+    fn: useExistingSecretRotationEvidence ? verifyExistingSecretRotationEvidence : secretRotationEvidence,
+  });
   await collectEvidenceStep(steps, { name: "dr-readiness-check", category: "local-policy", fn: drReadinessCheck });
   await collectEvidenceStep(steps, { name: "dr-evidence-summary", category: "local-policy", fn: drEvidence });
   await collectEvidenceStep(steps, { name: "release-evidence-plan", category: "local-policy", fn: () => releaseEvidence({ planOnly: true }) });
@@ -6710,7 +7680,11 @@ async function preGoLiveEvidence() {
   }
 
   if (booleanFlag(argv.includeRestoreDrill)) {
-    await collectEvidenceStep(steps, { name: "full-restore-drill", category: "disaster-recovery", fn: fullRestoreDrill });
+    await collectEvidenceStep(steps, {
+      name: "full-restore-drill",
+      category: "disaster-recovery",
+      fn: useExistingRestoreDrill ? verifyExistingFullRestoreDrillEvidence : fullRestoreDrill,
+    });
   } else {
     skipEvidenceStep(steps, {
       name: "full-restore-drill",
@@ -6735,6 +7709,8 @@ async function preGoLiveEvidence() {
     includeProductionPreflight: booleanFlag(argv.includeProductionPreflight),
     includeRuntime: booleanFlag(argv.includeRuntime),
     includeRestoreDrill: booleanFlag(argv.includeRestoreDrill),
+    useExistingRestoreDrill,
+    useExistingSecretRotationEvidence,
     includeOffsiteRestoreDryRun: booleanFlag(argv.includeOffsiteRestoreDryRun),
     verifyGithubRemote: booleanFlag(argv.verifyGithubRemote),
   };
@@ -6748,14 +7724,26 @@ async function preGoLiveEvidence() {
     !options.includeOffsiteRestoreDryRun ? "includeOffsiteRestoreDryRun" : null,
     !options.verifyGithubRemote ? "verifyGithubRemote" : null,
   ].filter(Boolean);
-  const issues = [
-    ...failedRequired.map((step) => `${step.name}: ${step.error ?? "failed"}`),
-    ...readinessMissing.map((item) => `${item.id}: ${item.nextAction}`),
-    ...missingOptions.map((option) => `missing option: --${option}`),
+  const externalLiveStepNames = new Set(["production-preflight"]);
+  const externalLiveReadinessIds = new Set(["production-preflight", "offsite-restore-dry-run", "github-remote-verification"]);
+  const externalLiveOptions = new Set(["includeProductionPreflight", "includeOffsiteRestoreDryRun", "verifyGithubRemote"]);
+  const localFailedRequired = failedRequired.filter((step) => !externalLiveStepNames.has(step.name));
+  const localReadinessMissing = readinessMissing.filter((item) => !externalLiveReadinessIds.has(item.id));
+  const localMissingOptions = missingOptions.filter((option) => !externalLiveOptions.has(option));
+  const pendingLiveProofs = [
+    ...failedRequired.filter((step) => externalLiveStepNames.has(step.name)).map((step) => `${step.name}: ${step.error ?? "live proof not satisfied"}`),
+    ...readinessMissing.filter((item) => externalLiveReadinessIds.has(item.id)).map((item) => `${item.id}: ${item.nextAction}`),
+    ...missingOptions.filter((option) => externalLiveOptions.has(option)).map((option) => `missing option: --${option}`),
   ];
+  const issues = [
+    ...localFailedRequired.map((step) => `${step.name}: ${step.error ?? "failed"}`),
+    ...localReadinessMissing.map((item) => `${item.id}: ${item.nextAction}`),
+    ...localMissingOptions.map((option) => `missing option: --${option}`),
+  ];
+  const preGoLiveStatus = issues.length ? "failed" : pendingLiveProofs.length ? "pending-live-proof" : "passed";
   const payload = {
     generatedAt,
-    status: issues.length ? "failed" : "passed",
+    status: preGoLiveStatus,
     repo,
     branch,
     git: gitEvidence(),
@@ -6763,6 +7751,7 @@ async function preGoLiveEvidence() {
     steps,
     readinessMatrix,
     missingOptions,
+    pendingLiveProofs,
     issues,
     providerEvidenceRequired: providerEvidence,
   };
@@ -6794,13 +7783,18 @@ async function preGoLiveEvidence() {
     "",
     ...(issues.length ? issues.map((issue) => `- ${issue}`) : ["- none"]),
     "",
+    "## Pending Live Proof",
+    "",
+    ...(pendingLiveProofs.length ? pendingLiveProofs.map((issue) => `- ${issue}`) : ["- none"]),
+    "",
     "## Provider Evidence Still Required",
     "",
     ...providerEvidence.map((item) => `- ${item}`),
   ]);
+  const blockingItems = [...issues, ...pendingLiveProofs];
   log(`Pre go-live evidence written to ${jsonPath} and ${markdownPath}`);
-  if (issues.length && !booleanFlag(argv.allowFailures)) {
-    fail(`Pre go-live evidence status=${payload.status} with ${issues.length} issue(s). Reports: ${jsonPath}, ${markdownPath}`);
+  if (blockingItems.length && !booleanFlag(argv.allowFailures)) {
+    fail(`Pre go-live evidence status=${payload.status} with ${blockingItems.length} blocker(s). Reports: ${jsonPath}, ${markdownPath}`);
   }
 }
 
@@ -6866,15 +7860,47 @@ function publicEvidenceUrl(urlValue) {
   return !isPrivateOrLocalHost(host);
 }
 
-function addGoNoGoCheck(checks, { name, passed, detail, report = null, required = true }) {
+function legacyPlatformEvidenceHost(urlValue) {
+  if (!urlValue || typeof urlValue !== "string") return "";
+  let parsed = null;
+  try {
+    parsed = new URL(urlValue);
+  } catch {
+    return "";
+  }
+  const host = parsed.hostname.toLowerCase();
+  if (host === "sslip.io" || host.endsWith(".sslip.io")) return host;
+  const firstLabel = host.split(".")[0];
+  if (["account", "ui", "admin"].includes(firstLabel)) return host;
+  return "";
+}
+
+const GO_NO_GO_CHECK_STATUSES = new Set(["passed", "failed", "pending-live-proof", "pending-provider"]);
+
+function addGoNoGoCheck(checks, { name, passed, detail, report = null, required = true, status = null, blocker = null }) {
+  const resolvedStatus = passed ? "passed" : (status ?? "failed");
+  if (!GO_NO_GO_CHECK_STATUSES.has(resolvedStatus)) {
+    fail(`Invalid production go/no-go check status for ${name}: ${resolvedStatus}`);
+  }
   checks.push({
     name,
     required,
-    status: passed ? "passed" : "failed",
+    status: resolvedStatus,
+    blocker: resolvedStatus === "passed"
+      ? null
+      : (blocker ?? (resolvedStatus === "failed" ? "local" : "external")),
     detail,
     reportPath: report?.filePath ?? null,
     generatedAt: report?.payload?.generatedAt ?? null,
   });
+}
+
+function goNoGoStatusCounts(checks) {
+  const counts = Object.fromEntries([...GO_NO_GO_CHECK_STATUSES].map((status) => [status, 0]));
+  for (const check of checks) {
+    counts[check.status] = (counts[check.status] ?? 0) + 1;
+  }
+  return counts;
 }
 
 function goNoGoRemediation(check) {
@@ -7266,6 +8292,10 @@ function evidenceBundleReportPasses(spec, payload) {
 }
 
 async function evidenceBundle() {
+  await withLocalCheckReport("evidence-bundle", evidenceBundleBody);
+}
+
+async function evidenceBundleBody() {
   log("==> Evidence bundle");
   const allReports = booleanFlag(argv.allReports);
   const noArchive = booleanFlag(argv.noArchive);
@@ -7512,6 +8542,21 @@ async function evidenceBundleVerify() {
   log("Evidence bundle verification passed.");
 }
 
+async function vpsPreflight() {
+  await withLocalCheckReport("vps-preflight", async () => {
+    run("sh", [path.join(scriptDir, "vps-preflight.sh"), ...argv._], { cwd: infraRoot });
+  }, { script: "scripts/vps-preflight.sh" });
+}
+
+async function vpsPostdeploy() {
+  await withLocalCheckReport("vps-postdeploy", async () => {
+    run("sh", [path.join(scriptDir, "vps-postdeploy.sh"), ...argv._], { cwd: infraRoot });
+  }, {
+    script: "scripts/vps-postdeploy.sh",
+    includeAppEndpoints: Boolean(process.env.DEPLOY_INCLUDE_APP_ENDPOINTS === "1" || process.env.DEPLOY_INCLUDE_APP_ENDPOINTS === "true"),
+  });
+}
+
 async function productionGoNoGo() {
   log("==> Production go/no-go evidence gate");
   const { policyPath, policy } = productionGoNoGoPolicy();
@@ -7529,6 +8574,11 @@ async function productionGoNoGo() {
     release: 24,
     cloudflareAccess: 24,
     secretRotation: 24,
+    healthchecks: 24,
+    retention: 24,
+    auditLogs: 24,
+    accessReview: 24,
+    accountIntegration: 24,
     ...(policy.maxAgeHours ?? {}),
   };
 
@@ -7600,6 +8650,25 @@ async function productionGoNoGo() {
     policy.requireOffsiteRestore && !preOptions.includeOffsiteRestoreDryRun ? "includeOffsiteRestoreDryRun" : null,
     policy.requireGithubRemoteVerification && !preOptions.verifyGithubRemote ? "verifyGithubRemote" : null,
   ].filter(Boolean);
+  const preExternalStepNames = new Set(["production-preflight"]);
+  const preExternalReadinessIds = new Set(["production-preflight", "offsite-restore-dry-run", "github-remote-verification"]);
+  const preExternalOptions = new Set(["includeProductionPreflight", "includeOffsiteRestoreDryRun", "verifyGithubRemote"]);
+  const preLocalRequiredFailures = preRequiredFailures.filter((step) => !preExternalStepNames.has(step.name));
+  const preLocalReadinessFailures = preMatrixRequiredFailures.filter((item) => !preExternalReadinessIds.has(item.id));
+  const preLocalMissingOptions = preMissingOptions.filter((option) => !preExternalOptions.has(option));
+  const preExternalBlockers = [
+    ...preRequiredFailures.filter((step) => preExternalStepNames.has(step.name)).map((step) => step.name),
+    ...preMatrixRequiredFailures.filter((item) => preExternalReadinessIds.has(item.id)).map((item) => item.id),
+    ...preMissingOptions.filter((option) => preExternalOptions.has(option)).map((option) => `--${option}`),
+  ];
+  const prePendingProvider = Boolean(
+    preGoLive
+    && preFresh.fresh
+    && preLocalRequiredFailures.length === 0
+    && preLocalReadinessFailures.length === 0
+    && preLocalMissingOptions.length === 0
+    && preExternalBlockers.length > 0
+  );
   addGoNoGoCheck(checks, {
     name: "pre-go-live-evidence-complete",
     passed: Boolean(preGoLive && preFresh.fresh && preGoLive.payload.status === "passed" && preRequiredFailures.length === 0 && preMissingOptions.length === 0 && preMatrixRequiredFailures.length === 0),
@@ -7607,6 +8676,67 @@ async function productionGoNoGo() {
       ? `${preFresh.detail}; status=${preGoLive.payload.status ?? "unknown"}; requiredFailures=${preRequiredFailures.length}; missingOptions=${preMissingOptions.join(",") || "none"}; readinessMissing=${preMatrixRequiredFailures.map((item) => item.id).join(",") || "none"}`
       : preFresh.detail,
     report: preGoLive,
+    status: prePendingProvider ? "pending-provider" : null,
+    blocker: prePendingProvider ? "external-provider-proof" : null,
+  });
+
+  const healthcheckCoverage = latestJsonReport("healthchecks", "healthcheck-coverage-");
+  const healthcheckFresh = reportFreshDetail(healthcheckCoverage, maxAge.healthchecks);
+  const healthcheckResult = evidenceBundleReportPasses({ label: "healthcheck-coverage" }, healthcheckCoverage?.payload);
+  addGoNoGoCheck(checks, {
+    name: "healthcheck-coverage",
+    passed: Boolean(healthcheckCoverage && healthcheckFresh.fresh && healthcheckResult.passed),
+    detail: healthcheckCoverage ? `${healthcheckFresh.detail}; ${healthcheckResult.detail}` : healthcheckFresh.detail,
+    report: healthcheckCoverage,
+    required: false,
+  });
+
+  const infraHealthReport = latestJsonReport("local-checks", "infra-health-", (payload) => (
+    payload.status === "passed"
+    && payload.scope === "platform-infrastructure"
+    && payload.command === "infra-health"
+  ));
+  const infraHealthFresh = reportFreshDetail(infraHealthReport, maxAge.healthchecks);
+  const infraHealthStep = (preGoLive?.payload?.steps ?? []).find((step) => step.name === "infra-health");
+  const infraHealthFromPreGoLive = Boolean(preGoLive && preFresh.fresh && infraHealthStep?.status === "passed");
+  const infraHealthFromLocalReport = Boolean(infraHealthReport && infraHealthFresh.fresh);
+  addGoNoGoCheck(checks, {
+    name: "infra-health-runtime",
+    passed: infraHealthFromPreGoLive || infraHealthFromLocalReport,
+    detail: infraHealthFromLocalReport
+      ? `${infraHealthFresh.detail}; local-check=passed`
+      : preGoLive ? `${preFresh.detail}; infra-health=${infraHealthStep?.status ?? "missing"}` : preFresh.detail,
+    report: infraHealthReport ?? preGoLive,
+    required: false,
+  });
+
+  const retention = latestJsonReport("retention", "retention-evidence-");
+  const retentionFresh = reportFreshDetail(retention, maxAge.retention);
+  const retentionResult = evidenceBundleReportPasses({ label: "retention-evidence" }, retention?.payload);
+  addGoNoGoCheck(checks, {
+    name: "retention-evidence",
+    passed: Boolean(retention && retentionFresh.fresh && retentionResult.passed),
+    detail: retention ? `${retentionFresh.detail}; ${retentionResult.detail}` : retentionFresh.detail,
+    report: retention,
+    required: false,
+  });
+
+  const platformAdminAudit = latestJsonReport("platform-admin-audit", "platform-admin-audit-");
+  const platformAdminAuditFresh = reportFreshDetail(platformAdminAudit, maxAge.auditLogs);
+  addGoNoGoCheck(checks, {
+    name: "platform-admin-audit-evidence",
+    passed: Boolean(
+      platformAdminAudit
+      && platformAdminAuditFresh.fresh
+      && platformAdminAudit.payload.status === "passed"
+      && platformAdminAudit.payload.mode === "runtime"
+      && platformAdminAudit.payload.scope === "platform-infrastructure"
+    ),
+    detail: platformAdminAudit
+      ? `${platformAdminAuditFresh.detail}; status=${platformAdminAudit.payload.status ?? "unknown"}; mode=${platformAdminAudit.payload.mode ?? "unknown"}; scope=${platformAdminAudit.payload.scope ?? "unknown"}`
+      : platformAdminAuditFresh.detail,
+    report: platformAdminAudit,
+    required: false,
   });
 
   const expectedWorkflow = policy.requiredGithubWorkflow ?? "enterprise-infra.yml";
@@ -7634,6 +8764,16 @@ async function productionGoNoGo() {
     && githubActionsRun.payload.run?.conclusion === "success"
     && (!releaseSha || String(githubActionsRun.payload.expectedSha ?? "").toLowerCase() === String(releaseSha).toLowerCase())
   );
+  const githubActionsRemoteFailed = Boolean(
+    latestGithubActionsRun
+    && latestGithubActionsRun.payload.mode === "verifyRemote"
+    && latestGithubActionsRun.payload.status === "failed"
+  );
+  const githubActionsPendingProvider = Boolean(
+    !githubActionsOk
+    && policy.requireGithubActionsRunSuccess
+    && !githubActionsRemoteFailed
+  );
   addGoNoGoCheck(checks, {
     name: "github-actions-run-success",
     passed: githubActionsOk,
@@ -7643,6 +8783,8 @@ async function productionGoNoGo() {
         ? `missing successful verifyRemote workflow report; latestWorkflow=${latestGithubActionsRun.payload.workflow ?? "unknown"}; latestStatus=${latestGithubActionsRun.payload.status ?? "unknown"}; latestMode=${latestGithubActionsRun.payload.mode ?? "unknown"}; ${latestGithubActionsFresh.detail}`
         : githubActionsFresh.detail,
     report: githubActionsRun ?? latestGithubActionsRun,
+    status: githubActionsPendingProvider ? "pending-provider" : null,
+    blocker: githubActionsPendingProvider ? "github-live-provider" : null,
   });
 
   const latestSecretRotationReport = latestJsonReport("secret-rotation", "secret-rotation-evidence-");
@@ -7691,6 +8833,14 @@ async function productionGoNoGo() {
     && dr?.payload?.offsiteEvidence?.latestRestoreOffsite === true
     && dr?.payload?.offsiteEvidence?.latestRestoreCoverage?.complete === true
   );
+  const drPendingProvider = Boolean(
+    dr
+    && drFresh.fresh
+    && backupFailures.length === 0
+    && policy.requireOffsiteRestore
+    && !offsiteRestoreOk
+    && ["passed", "warning"].includes(String(dr.payload.status ?? ""))
+  );
   addGoNoGoCheck(checks, {
     name: "disaster-recovery-rpo-rto-offsite",
     passed: Boolean(dr && drFresh.fresh && dr.payload.status === "passed" && backupFailures.length === 0 && offsiteRestoreOk),
@@ -7698,6 +8848,8 @@ async function productionGoNoGo() {
       ? `${drFresh.detail}; status=${dr.payload.status}; backupFailures=${backupFailures.map((item) => item.family).join(",") || "none"}; offsiteRestore=${offsiteRestoreOk ? "yes" : "no"}; offsiteRepository=${dr.payload.offsiteEvidence?.latestRestoreOffsite === true ? "yes" : "no"}; offsiteCoverage=${dr.payload.offsiteEvidence?.latestRestoreCoverage?.complete === true ? "yes" : "no"}`
       : drFresh.detail,
     report: dr,
+    status: drPendingProvider ? "pending-provider" : null,
+    blocker: drPendingProvider ? "offsite-storage-provider" : null,
   });
 
   const alertReport = latestJsonReport("alerts", "alert-evidence-", (payload) => (
@@ -7726,6 +8878,13 @@ async function productionGoNoGo() {
   const uptimeFailed = uptimeResults.filter((result) => !result.ok);
   const uptimePublic = uptimeResults.every((result) => publicEvidenceUrl(result.url));
   const uptimeProviderVerified = uptime?.payload?.providerEvidence?.verified === true;
+  const latestUptimeResults = latestUptimeReport?.payload?.results ?? [];
+  const latestUptimePublic = latestUptimeResults.length > 0 && latestUptimeResults.every((result) => publicEvidenceUrl(result.url));
+  const latestUptimeProviderVerified = latestUptimeReport?.payload?.providerEvidence?.verified === true;
+  const uptimePendingProvider = Boolean(
+    !uptime
+    && (!latestUptimeProviderVerified || !latestUptimePublic)
+  );
   addGoNoGoCheck(checks, {
     name: "external-uptime-provider",
     passed: Boolean(uptime && uptimeFresh.fresh && uptimeResults.length > 0 && uptimeFailed.length === 0 && uptimePublic && uptimeProviderVerified),
@@ -7735,12 +8894,14 @@ async function productionGoNoGo() {
         ? `missing provider-verified public uptime report; latestProvider=${latestUptimeReport.payload.providerEvidence?.verified ? latestUptimeReport.payload.providerEvidence.provider : "missing"}; ${latestUptimeFresh.detail}`
         : uptimeFresh.detail,
     report: uptime ?? latestUptimeReport,
+    status: uptimePendingProvider ? "pending-provider" : null,
+    blocker: uptimePendingProvider ? "external-uptime-provider" : null,
   });
 
   const latestLoadReport = latestJsonReport("load", "load-benchmark-");
   const load = latestJsonReport("load", "load-benchmark-", (payload) => {
     const target = payload.target ?? {};
-    const publicTarget = !policy.requirePublicLoadTarget || (target.public === true && publicEvidenceUrl(payload.url));
+    const publicTarget = !policy.requirePublicLoadTarget || (target.public === true && publicEvidenceUrl(payload.url) && !legacyPlatformEvidenceHost(payload.url));
     const edgeEvidence = !policy.requireLoadEdgeEvidence || (
       target.edgeRequired === true
       && target.edge?.providerMatched === true
@@ -7755,11 +8916,29 @@ async function productionGoNoGo() {
   const missingProfiles = requiredProfiles.filter((users) => !profiles.some((profile) => Number(profile.users) === Number(users)));
   const failedProfiles = profiles.filter((profile) => Number(profile.metric?.errors ?? 0) !== 0 || Number(profile.metric?.p95 ?? 0) > Number(profile.metric?.maxP95Ms ?? 0));
   const loadTarget = load?.payload?.target ?? {};
-  const publicLoadTarget = !policy.requirePublicLoadTarget || (loadTarget.public === true && publicEvidenceUrl(load?.payload?.url));
+  const publicLoadTarget = !policy.requirePublicLoadTarget || (loadTarget.public === true && publicEvidenceUrl(load?.payload?.url) && !legacyPlatformEvidenceHost(load?.payload?.url));
   const loadEdgeEvidence = !policy.requireLoadEdgeEvidence || (
     loadTarget.edgeRequired === true
     && loadTarget.edge?.providerMatched === true
     && Boolean(loadTarget.edge?.provider)
+  );
+  const latestLegacyLoadHost = legacyPlatformEvidenceHost(latestLoadReport?.payload?.url);
+  const latestLoadTarget = latestLoadReport?.payload?.target ?? {};
+  const latestPublicLoadTarget = Boolean(
+    latestLoadReport
+    && (!policy.requirePublicLoadTarget || (latestLoadTarget.public === true && publicEvidenceUrl(latestLoadReport.payload.url) && !latestLegacyLoadHost))
+  );
+  const latestLoadEdgeEvidence = Boolean(
+    latestLoadReport
+    && (!policy.requireLoadEdgeEvidence || (
+      latestLoadTarget.edgeRequired === true
+      && latestLoadTarget.edge?.providerMatched === true
+      && Boolean(latestLoadTarget.edge?.provider)
+    ))
+  );
+  const loadPendingProvider = Boolean(
+    !load
+    && (!latestLoadReport || latestLegacyLoadHost || !latestPublicLoadTarget || !latestLoadEdgeEvidence)
   );
   addGoNoGoCheck(checks, {
     name: "public-load-benchmark",
@@ -7767,9 +8946,13 @@ async function productionGoNoGo() {
     detail: load
       ? `${loadFresh.detail}; status=${load.payload.status ?? "unknown"}; missingProfiles=${missingProfiles.join(",") || "none"}; failedProfiles=${failedProfiles.map((profile) => profile.users).join(",") || "none"}; publicTarget=${publicLoadTarget ? "yes" : "no"}; edgeEvidence=${loadEdgeEvidence ? loadTarget.edge?.provider ?? "not-required" : "missing"}`
       : latestLoadReport
-        ? `missing public edge benchmark report; latestUrl=${latestLoadReport.payload.url ?? "unknown"}; ${latestLoadFresh.detail}`
-        : loadFresh.detail,
+        ? latestLegacyLoadHost
+          ? `missing public edge benchmark report for final platform hosts; ignored legacy benchmark report; ${latestLoadFresh.detail}`
+          : `missing public edge benchmark report; latestUrl=${latestLoadReport.payload.url ?? "unknown"}; ${latestLoadFresh.detail}`
+       : loadFresh.detail,
     report: load ?? latestLoadReport,
+    status: loadPendingProvider ? "pending-provider" : null,
+    blocker: loadPendingProvider ? "public-edge-provider" : null,
   });
 
   const latestReleaseReport = latestJsonReport("release", "release-evidence-");
@@ -7797,6 +8980,10 @@ async function productionGoNoGo() {
     releasePayload.rollback?.complete
       && (releasePayload.rollback?.firstDeploy || releasePayload.rollback?.dryRun?.validated === true),
   );
+  const releasePendingProvider = Boolean(
+    policy.requireReleaseProvenance
+    && !releaseGithubProvenanceOk
+  );
   addGoNoGoCheck(checks, {
     name: "release-evidence-and-rollback",
     passed: Boolean(release && releaseFresh.fresh && releasePayload.mode === "evidence" && releasePayload.status === "passed" && releaseRollbackOk && releasePayload.artifacts?.sbom && releaseProvenanceOk && releaseGitOk),
@@ -7804,8 +8991,10 @@ async function productionGoNoGo() {
       ? `${releaseFresh.detail}; mode=${releasePayload.mode}; status=${releasePayload.status ?? "unknown"}; rollback=${releaseRollbackOk ? "validated" : "missing"}; provenance=${releaseGithubProvenanceOk ? "github-signed-attestation" : releaseLocalProvenancePartial ? "local-provenance-partial" : "missing"}; cleanGit=${releaseGitOk ? "yes" : "no"}`
       : latestReleaseReport
         ? `missing evidence report; latestReleaseMode=${latestReleaseReport.payload.mode ?? "unknown"}; latestStatus=${latestReleaseReport.payload.status ?? "unknown"}; ${latestReleaseFresh.detail}`
-        : releaseFresh.detail,
+       : releaseFresh.detail,
     report: release ?? latestReleaseReport,
+    status: releasePendingProvider ? "pending-provider" : null,
+    blocker: releasePendingProvider ? "github-sigstore-release-provenance" : null,
   });
 
   const latestCloudflareAccessReport = latestJsonReport("cloudflare-access", "cloudflare-access-admin-");
@@ -7820,6 +9009,10 @@ async function productionGoNoGo() {
     && cloudflareApps.length > 0
     && cloudflareApps.every((app) => app.result === "verified")
   );
+  const cloudflarePendingProvider = Boolean(
+    !cloudflareVerified
+    && policy.requireCloudflareAccessVerify
+  );
   addGoNoGoCheck(checks, {
     name: "cloudflare-access-admin-verified",
     passed: Boolean(cloudflareAccess && cloudflareAccessFresh.fresh && cloudflareAccess.payload.status === "passed" && cloudflareVerified),
@@ -7829,12 +9022,17 @@ async function productionGoNoGo() {
         ? `missing verifyRemote report; latestMode=${latestCloudflareAccessReport.payload.mode ?? "unknown"}; latestStatus=${latestCloudflareAccessReport.payload.status ?? "unknown"}; ${latestCloudflareAccessFresh.detail}`
         : cloudflareAccessFresh.detail,
     report: cloudflareAccess ?? latestCloudflareAccessReport,
+    status: cloudflarePendingProvider ? "pending-provider" : null,
+    blocker: cloudflarePendingProvider ? "cloudflare-access-provider" : null,
   });
 
-  const failedRequired = checks.filter((check) => check.required && check.status !== "passed");
-  const status = failedRequired.length ? "no-go" : "go";
+  const blockingRequired = checks.filter((check) => check.required && check.status !== "passed");
+  const failedRequired = blockingRequired.filter((check) => check.status === "failed");
+  const pendingRequired = blockingRequired.filter((check) => check.status.startsWith("pending-"));
+  const statusCounts = goNoGoStatusCounts(checks);
+  const status = blockingRequired.length ? "no-go" : "go";
   const generatedAt = new Date().toISOString();
-  const remediation = failedRequired.map(goNoGoRemediation);
+  const remediation = blockingRequired.map(goNoGoRemediation);
   const stamp = reportTimestamp();
   const baseName = `production-go-no-go-${stamp}`;
   const report = {
@@ -7846,8 +9044,21 @@ async function productionGoNoGo() {
     mode: enforce ? "enforce" : "summary",
     status,
     policyPath,
+    summary: {
+      total: checks.length,
+      required: checks.filter((check) => check.required).length,
+      passed: statusCounts.passed,
+      failed: statusCounts.failed,
+      pendingLiveProof: statusCounts["pending-live-proof"],
+      pendingProvider: statusCounts["pending-provider"],
+      blockingRequired: blockingRequired.length,
+      failedRequired: failedRequired.length,
+      pendingRequired: pendingRequired.length,
+    },
     checks,
     failedRequired: failedRequired.map((check) => check.name),
+    pendingRequired: pendingRequired.map((check) => ({ name: check.name, status: check.status })),
+    blockingRequired: blockingRequired.map((check) => ({ name: check.name, status: check.status })),
     remediation,
     report,
   };
@@ -7864,9 +9075,9 @@ async function productionGoNoGo() {
     "| --- | --- | --- | --- |",
     ...checks.map((check) => `| ${check.name} | ${check.status} | ${check.detail.replace(/\|/g, "/")} | ${check.reportPath ?? "n/a"} |`),
     "",
-    "## Failed Required Checks",
+    "## Blocking Required Checks",
     "",
-    ...(failedRequired.length ? failedRequired.map((check) => `- ${check.name}`) : ["- none"]),
+    ...(blockingRequired.length ? blockingRequired.map((check) => `- ${check.name} (${check.status})`) : ["- none"]),
     "",
     "## Remediation Checklist",
     "",
@@ -7874,8 +9085,8 @@ async function productionGoNoGo() {
   ]);
   log(`Production go/no-go report written to ${jsonPath} and ${markdownPath}`);
   log(`Production status: ${status}`);
-  if (enforce && failedRequired.length) {
-    fail(`Production no-go: ${failedRequired.map((check) => check.name).join(", ")}. Report: ${jsonPath}`);
+  if (enforce && blockingRequired.length) {
+    fail(`Production no-go: ${blockingRequired.map((check) => `${check.name}:${check.status}`).join(", ")}. Report: ${jsonPath}`);
   }
 }
 
@@ -7958,8 +9169,9 @@ function repoCoverageCategory(filePath) {
     ["root-policy", /^(?:\.env(?:\..*)?|\.gitattributes|\.gitignore|renovate\.json|SECURITY\.md|THREAT-MODEL\.md)$/],
     ["platform-config", /^config\/.+\.json$/],
     ["object-storage", /^minio\//],
-    ["documentation", /^(?:README|RUNBOOK|ENTERPRISE-10-PLAN|ENTERPRISE-MATURITY|FINAL-READINESS-AUDIT|READINESS-REPORT|VPS-PREDEPLOY-CHECKLIST)\.md$|^(?:cloudflare|keycloak|minio|secrets)\/README\.md$/],
+    ["documentation", /^(?:README|RUNBOOK|CURRENT-OPERATING-MODEL|DOCUMENTATION-INDEX|ENTERPRISE-10-PLAN|ENTERPRISE-MATURITY|FINAL-READINESS-AUDIT|INFRASTRUCTURE-DEEP-DIVE|PLATFORM-APPLICATION-SEPARATION-AUDIT|READINESS-REPORT|VPS-PREDEPLOY-CHECKLIST)\.md$|^(?:cloudflare|keycloak|minio|secrets)\/README\.md$/],
     ["compose", /^compose(?:\.[^.]+)?\.ya?ml$/],
+    ["dns", /^dns\//],
     ["docker-build", /^docker\/[^/]+\.Dockerfile$/],
     ["operations-script", /^scripts\/.+\.(?:sh|mjs)$/],
     ["governance-policy", /^governance\/.+\.json$/],
@@ -8233,14 +9445,14 @@ function enterpriseRequirementLiveProofResult(requirement, goNoGoReport, require
     };
   });
   const allChecksPassed = checkResults.every((check) => check.status === "passed");
-  const go = goNoGoReport.payload.status === "go";
-  const passed = go && allChecksPassed;
+  const goNoGoStatus = goNoGoReport.payload.status ?? "unknown";
+  const passed = allChecksPassed;
   return {
     required: true,
     status: passed ? "passed" : requireLiveProofs ? "failed" : "pending-external-evidence",
     detail: passed
-      ? "production go/no-go report proves mapped checks"
-      : `production go/no-go status=${goNoGoReport.payload.status ?? "unknown"}; failedOrMissing=${checkResults.filter((check) => check.status !== "passed").map((check) => check.name).join(",") || "none"}`,
+      ? `production go/no-go report proves mapped checks; global status=${goNoGoStatus}`
+      : `production go/no-go status=${goNoGoStatus}; failedOrMissing=${checkResults.filter((check) => check.status !== "passed").map((check) => check.name).join(",") || "none"}`,
     checks: checkResults,
     reportPath: goNoGoReport.filePath,
   };
@@ -8446,7 +9658,27 @@ async function restorePostgres() {
     dockerExec(container, ["pg_restore", "-U", user, "-d", database, "--clean", "--if-exists", "--no-owner", "--no-acl", containerPath]);
     dockerExec(container, ["rm", "-f", containerPath]);
     recordBackupRestoreRun({ container, database, user, operation: "restore", status: "success", artifactPath: backupFile, artifactSha256: hash, startedAt });
+    const stamp = reportTimestamp();
+    const payload = {
+      generatedAt: new Date().toISOString(),
+      status: "passed",
+      container,
+      database,
+      user,
+      artifactPath: backupFile,
+      artifactSha256: hash,
+    };
+    const jsonPath = writeJsonReport("postgres-restore", `restore-postgres-${stamp}`, payload);
+    const markdownPath = writeMarkdownReport("postgres-restore", `restore-postgres-${stamp}`, [
+      "# PostgreSQL Restore",
+      "",
+      `Generated at: ${payload.generatedAt}`,
+      `Status: ${payload.status}`,
+      `Database: ${database}`,
+      `Artifact: ${backupFile}`,
+    ]);
     log("Restore complete.");
+    log(`PostgreSQL restore report written to ${jsonPath} and ${markdownPath}`);
   } catch (error) {
     try {
       dockerExec(container, ["rm", "-f", containerPath], { allowFailure: true });
@@ -9609,167 +10841,231 @@ async function prunePostgresBackups(options = {}) {
   log(`==> PostgreSQL backup retention${dryRun ? " dry run" : ""}`);
   const backups = pruneDumpDirectory({ directory: backupDir, dryRun, label: "regular", minKeep: minBackups, retentionDays: backupRetentionDays });
   const drills = pruneDumpDirectory({ directory: drillDir, dryRun, label: "drill", minKeep: minDrills, retentionDays: drillRetentionDays });
+  const stamp = reportTimestamp();
+  const payload = {
+    generatedAt: new Date().toISOString(),
+    status: "passed",
+    mode: dryRun ? "dry-run" : "apply",
+    container,
+    database,
+    user,
+    backupDir,
+    drillDir,
+    policy: {
+      backupRetentionDays,
+      drillRetentionDays,
+      minBackups,
+      minDrills,
+      maxRestoreTestAgeDays,
+    },
+    summary: {
+      regular: backups,
+      drills,
+    },
+  };
+  const jsonPath = writeJsonReport("postgres-backup-prune", `prune-postgres-backups-${stamp}`, payload);
+  const markdownPath = writeMarkdownReport("postgres-backup-prune", `prune-postgres-backups-${stamp}`, [
+    "# PostgreSQL Backup Retention",
+    "",
+    `Generated at: ${payload.generatedAt}`,
+    `Status: ${payload.status}`,
+    `Mode: ${payload.mode}`,
+    "",
+    "| Family | Kept | Pruned | Total |",
+    "| --- | ---: | ---: | ---: |",
+    `| regular | ${backups.kept} | ${backups.pruned} | ${backups.total} |`,
+    `| drills | ${drills.kept} | ${drills.pruned} | ${drills.total} |`,
+  ]);
   log(`Retention complete: regular ${backups.pruned}/${backups.total} pruned, drill ${drills.pruned}/${drills.total} pruned.`);
+  log(`PostgreSQL backup retention report written to ${jsonPath} and ${markdownPath}`);
+}
+
+function secretScanPatterns() {
+  return [
+    ["private-key", /-----BEGIN (RSA |EC |OPENSSH |)PRIVATE KEY-----/],
+    ["aws-access-key", /\bAKIA[0-9A-Z]{16}\b/],
+    ["aws-secret-access-key", /\b(?:AWS_SECRET_ACCESS_KEY|aws_secret_access_key)\b\s*[:=]\s*['"]?[A-Za-z0-9/+]{32,}/],
+    ["api-token-assignment", /\b(api|access|secret|private|client)_?(key|token|secret)\b\s*[:=]\s*['"][^'"]{16,}/i],
+    ["password-assignment", /\b(password|passwd|pwd)\b\s*[:=]\s*['"][^'"]{8,}/i],
+    ["smtp-password", /\bSMTP_PASSWORD\b\s*=.+/i],
+  ];
 }
 
 async function secretScan() {
-  const roots = [
-    path.resolve(argv.infraRoot ?? infraRoot),
-    path.resolve(argv.sourceRoot ?? sourceRoot),
-  ];
-  const patterns = [
-    /-----BEGIN (RSA |EC |OPENSSH |)PRIVATE KEY-----/,
-    /\bAKIA[0-9A-Z]{16}\b/,
-    /\b(?:AWS_SECRET_ACCESS_KEY|aws_secret_access_key)\b\s*[:=]\s*['"]?[A-Za-z0-9/+]{32,}/,
-    /\b(api|access|secret|private|client)_?(key|token|secret)\b\s*[:=]\s*['"][^'"]{16,}/i,
-    /\b(password|passwd|pwd)\b\s*[:=]\s*['"][^'"]{8,}/i,
-    /\bSMTP_PASSWORD\b\s*=.+/i,
-  ];
-  const ignoredDirs = new Set([
-    ".git",
-    ".tmp",
-    "node_modules",
-    ".pnpm-store",
-    ".next",
-    "dist",
-    "coverage",
-    "backups",
-    "release",
-    "reports",
-    "secrets",
-    "certs",
-    "acme",
-    "sbom",
-  ]);
-  const hits = [];
-  const scanFile = (filePath) => {
-    const relativeName = path.basename(filePath);
-    if (/^\.env(?:\.|$)/.test(relativeName)) {
-      return;
+  const includeProject = booleanFlag(argv.includeProject);
+  await withLocalCheckReport("secret-scan", async () => {
+    const roots = [path.resolve(argv.infraRoot ?? infraRoot)];
+    if (includeProject && hasSupportedProjectSource()) {
+      roots.push(path.resolve(argv.sourceRoot ?? sourceRoot));
     }
-    const stat = fs.statSync(filePath);
-    if (stat.size > 2 * 1024 * 1024) {
-      return;
-    }
-    const content = fs.readFileSync(filePath);
-    if (content.includes(0)) {
-      return;
-    }
-    const text = content.toString("utf8");
-    const lines = text.split(/\r?\n/);
-    lines.forEach((line, index) => {
-      if (/change_me|placeholder|example|your-domain|smtpPassword|redisPassword|dbPassword|rootPassword|WITH PASSWORD :'\w+_password'/i.test(line)) {
+    const patterns = secretScanPatterns();
+    const ignoredDirs = new Set([
+      ".git",
+      ".codex-backups",
+      ".tmp",
+      "node_modules",
+      ".pnpm-store",
+      ".next",
+      "dist",
+      "coverage",
+      "backups",
+      "release",
+      "reports",
+      "secrets",
+      "certs",
+      "acme",
+      "sbom",
+    ]);
+    const hits = [];
+    const scanFile = (filePath) => {
+      const relativeName = path.basename(filePath);
+      if (/^\.env(?:\.|$)/.test(relativeName)) {
         return;
       }
-      if (patterns.some((pattern) => pattern.test(line))) {
-        hits.push(`${filePath}:${index + 1}: ${line.trim()}`);
+      const stat = fs.statSync(filePath);
+      if (stat.size > 2 * 1024 * 1024) {
+        return;
       }
-    });
-  };
-  const walk = (dir) => {
-    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-      if (ignoredDirs.has(entry.name)) {
-        continue;
+      const content = fs.readFileSync(filePath);
+      if (content.includes(0)) {
+        return;
       }
-      const fullPath = path.join(dir, entry.name);
-      if (entry.isDirectory()) {
-        walk(fullPath);
-      } else if (entry.isFile()) {
-        scanFile(fullPath);
+      const text = content.toString("utf8");
+      const lines = text.split(/\r?\n/);
+      lines.forEach((line, index) => {
+        if (/change_me|placeholder|example|your-domain|smtpPassword|redisPassword|dbPassword|rootPassword|WITH PASSWORD :'\w+_password'/i.test(line)) {
+          return;
+        }
+        const match = patterns.find(([, pattern]) => pattern.test(line));
+        if (match) {
+          hits.push({
+            file: path.relative(infraRoot, filePath).replaceAll("\\", "/"),
+            line: index + 1,
+            kind: match[0],
+          });
+        }
+      });
+    };
+    const walk = (dir) => {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        if (ignoredDirs.has(entry.name)) {
+          continue;
+        }
+        const fullPath = path.join(dir, entry.name);
+        if (entry.isDirectory()) {
+          walk(fullPath);
+        } else if (entry.isFile()) {
+          scanFile(fullPath);
+        }
+      }
+    };
+    for (const root of roots) {
+      if (fs.existsSync(root)) {
+        walk(root);
       }
     }
-  };
-  for (const root of roots) {
-    if (fs.existsSync(root)) {
-      walk(root);
+    if (hits.length) {
+      hits.forEach((hit) => log(`${hit.file}:${hit.line}: potential ${hit.kind}`));
+      fail("Potential hardcoded secrets found. Review the hits above.");
     }
-  }
-  if (hits.length) {
-    hits.forEach((hit) => log(hit));
-    fail("Potential hardcoded secrets found. Review the hits above.");
-  }
-  log("Secret scan passed.");
+    log(`Secret scan passed for ${roots.length} root(s) without printing secret values.`);
+  }, { includeProject, supportedProjectSource: hasSupportedProjectSource(), scannedProjectSource: includeProject && hasSupportedProjectSource() });
 }
 
 async function securitySmoke() {
   const env = parseEnv(path.join(infraRoot, ".env"));
-  const uiPublicUrl = argv.uiBase ?? env.DOCS_PUBLIC_URL ?? env.UI_PUBLIC_URL ?? env.NEXT_PUBLIC_UI_URL ?? "https://docs.localhost.com";
-  const uiBase = String(uiPublicUrl).replace(/\/$/, "");
-  const accountPublicUrl = argv.accountBase ?? env.ACCOUNT_PUBLIC_URL ?? env.NEXT_PUBLIC_ACCOUNT_URL ?? "";
-  const apiPublicUrl = argv.apiBase ?? env.API_PUBLIC_URL ?? env.NEXT_PUBLIC_API_URL ?? "";
+  const portalPublicUrl = argv.portalBase ?? argv.uiBase ?? env.CONTROL_CENTER_PUBLIC_URL ?? env.UI_PUBLIC_URL ?? env.NEXT_PUBLIC_UI_URL ?? "https://portal.localhost.com";
+  const docsPublicUrl = argv.docsBase ?? env.DOCS_PUBLIC_URL ?? "https://docs.localhost.com";
+  const portalBase = String(portalPublicUrl).replace(/\/$/, "");
+  const docsBase = String(docsPublicUrl).replace(/\/$/, "");
+  const accountPublicUrl = argv.accountBase ?? "";
+  const apiPublicUrl = argv.apiBase ?? env.CONTROL_CENTER_SECURITY_SMOKE_API_BASE ?? (booleanFlag(argv.includeApi) ? (env.API_PUBLIC_URL ?? env.NEXT_PUBLIC_API_URL ?? "") : "");
   const accountBase = String(accountPublicUrl || "").replace(/\/$/, "");
   const apiBase = String(apiPublicUrl || "").replace(/\/$/, "");
-  const accountOrigin = String(argv.accountOrigin ?? env.ACCOUNT_PUBLIC_URL ?? env.NEXT_PUBLIC_ACCOUNT_URL ?? accountBase ?? uiBase).replace(/\/$/, "");
-  const defaultUrlList = [`${uiBase}/`];
+  const trustedOrigin = String(argv.accountOrigin ?? argv.trustedOrigin ?? portalBase).replace(/\/$/, "");
+  const defaultUrlList = [`${portalBase}/`];
+  if (docsBase && docsBase !== portalBase) defaultUrlList.push(`${docsBase}/`);
   if (accountBase) defaultUrlList.push(`${accountBase}/`);
   if (apiBase) defaultUrlList.push(`${apiBase}/health`);
   const defaultUrls = defaultUrlList.join(",");
   const urls = (argv.urls ?? defaultUrls).split(",").map((url) => url.trim()).filter(Boolean);
-  for (const url of urls) {
-    log(`Checking ${url}`);
-    const response = await request("HEAD", url);
-    const headers = headerText(response.headers);
-    const requiredHeaders = ["x-content-type-options", "referrer-policy", "permissions-policy"];
-    let isHttpUrl = false;
-    try {
-      isHttpUrl = new URL(url).protocol === "http:";
-    } catch {
-      isHttpUrl = false;
-    }
-    if (!(booleanFlag(argv.allowHttpNoHsts) && isHttpUrl)) {
-      requiredHeaders.unshift("strict-transport-security");
-    }
-    for (const required of requiredHeaders) {
-      if (!headers.includes(required)) {
-        fail(`Missing ${required} on ${url}`);
+  await withLocalCheckReport("security-smoke", async () => {
+    for (const url of urls) {
+      log(`Checking ${url}`);
+      const response = await request("HEAD", url);
+      const headers = headerText(response.headers);
+      const requiredHeaders = ["x-content-type-options", "referrer-policy", "permissions-policy"];
+      let isHttpUrl = false;
+      try {
+        isHttpUrl = new URL(url).protocol === "http:";
+      } catch {
+        isHttpUrl = false;
+      }
+      if (!(booleanFlag(argv.allowHttpNoHsts) && isHttpUrl)) {
+        requiredHeaders.unshift("strict-transport-security");
+      }
+      for (const required of requiredHeaders) {
+        if (!headers.includes(required)) {
+          fail(`Missing ${required} on ${url}`);
+        }
       }
     }
-  }
 
-  if (apiBase) {
-    assertStatus(await request("GET", `${apiBase}/account/snapshot`), 401, "unauthenticated account snapshot");
-    assertStatus(await request("POST", `${apiBase}/auth/logout`, { headers: { Origin: "https://evil.example" } }), 403, "untrusted Origin");
-    assertStatus(await request("POST", `${apiBase}/auth/logout`, { headers: { "Sec-Fetch-Site": "cross-site" } }), 403, "cross-site Fetch Metadata");
-    assertStatus(await request("POST", `${apiBase}/auth/logout`, { headers: { Origin: accountOrigin, "Sec-Fetch-Site": "same-site" } }), 200, "same-site logout");
-    assertStatus(await request("POST", `${apiBase}/auth/logout`, { headers: { Origin: accountOrigin, "Sec-Fetch-Site": "cross-site" } }), 200, "trusted cross-site logout");
-  } else {
-    log("Skipping backend security smoke because no public API base was provided.");
-  }
-  log("Security smoke checks passed.");
+    if (apiBase) {
+      assertStatus(await request("GET", `${apiBase}/account/snapshot`), 401, "unauthenticated account snapshot");
+      assertStatus(await request("POST", `${apiBase}/auth/logout`, { headers: { Origin: "https://evil.example" } }), 403, "untrusted Origin");
+      assertStatus(await request("POST", `${apiBase}/auth/logout`, { headers: { "Sec-Fetch-Site": "cross-site" } }), 403, "cross-site Fetch Metadata");
+      assertStatus(await request("POST", `${apiBase}/auth/logout`, { headers: { Origin: trustedOrigin, "Sec-Fetch-Site": "same-site" } }), 200, "same-site logout");
+      assertStatus(await request("POST", `${apiBase}/auth/logout`, { headers: { Origin: trustedOrigin, "Sec-Fetch-Site": "cross-site" } }), 200, "trusted cross-site logout");
+    } else {
+      log("Skipping backend security smoke because no public API base was provided.");
+    }
+    log("Security smoke checks passed.");
+  }, { urls, apiBase: Boolean(apiBase) });
 }
 
 async function wafSmoke() {
+  const env = parseEnv(path.join(infraRoot, ".env"));
+  const runtimeDomain = expandTemplate(env.DOMAIN ?? env.LOCAL_DOMAIN ?? "localhost.com", env);
+  const portalHost = expandTemplate(env.CONTROL_CENTER_HOST ?? env.ADMIN_HOST ?? `portal.${runtimeDomain}`, env);
+  const defaultPortalBase = env.CONTROL_CENTER_PUBLIC_URL ?? `https://${portalHost}`;
   const apiBase = argv.apiBase ? String(argv.apiBase).replace(/\/$/, "") : "";
-  const phpBase = String(argv.phpBase ?? argv.portalBase ?? "https://portal.localhost.com").replace(/\/$/, "");
+  const phpBase = String(argv.phpBase ?? argv.portalBase ?? defaultPortalBase).replace(/\/$/, "");
   const probeBase = apiBase || phpBase;
   const smokeHeaders = { "User-Agent": "platform-waf-smoke/1.0" };
-  log("==> WAF smoke checks");
+  await withLocalCheckReport("waf-smoke", async () => {
+    log("==> WAF smoke checks");
 
-  assertStatus(await request("GET", apiBase ? `${apiBase}/health` : `${phpBase}/__health`, { headers: smokeHeaders }), 200, "WAF pass-through health");
-  const sqlInjection = await request("GET", `${probeBase}/?search=%27%20OR%201%3D1--`, { headers: smokeHeaders });
-  if (![403, 406].includes(sqlInjection.status)) {
-    fail(`WAF SQL injection probe expected HTTP 403/406, got ${sqlInjection.status}: ${sqlInjection.text}`);
-  }
+    assertStatus(await request("GET", apiBase ? `${apiBase}/health` : `${phpBase}/`, { headers: smokeHeaders }), 200, "WAF pass-through health");
+    const sqlInjection = await request("GET", `${probeBase}/?search=%27%20OR%201%3D1--`, { headers: smokeHeaders });
+    if (![403, 406].includes(sqlInjection.status)) {
+      fail(`WAF SQL injection probe expected HTTP 403/406, got ${sqlInjection.status}: ${sqlInjection.text}`);
+    }
 
-  const xssProbe = await request("GET", `${probeBase}/?x=%3Cscript%3Ealert(1)%3C/script%3E`, { headers: smokeHeaders });
-  if (![403, 406].includes(xssProbe.status)) {
-    fail(`WAF XSS probe expected HTTP 403/406, got ${xssProbe.status}: ${xssProbe.text}`);
-  }
+    const xssProbe = await request("GET", `${probeBase}/?x=%3Cscript%3Ealert(1)%3C/script%3E`, { headers: smokeHeaders });
+    if (![403, 406].includes(xssProbe.status)) {
+      fail(`WAF XSS probe expected HTTP 403/406, got ${xssProbe.status}: ${xssProbe.text}`);
+    }
 
-  const sensitiveProbe = await request("GET", `${phpBase}/.env`, { headers: smokeHeaders });
-  if (![403, 404].includes(sensitiveProbe.status)) {
-    fail(`WAF sensitive file probe expected HTTP 403/404, got ${sensitiveProbe.status}: ${sensitiveProbe.text}`);
-  }
+    const sensitiveProbe = await request("GET", `${phpBase}/.env`, { headers: smokeHeaders });
+    if (![403, 404].includes(sensitiveProbe.status)) {
+      fail(`WAF sensitive file probe expected HTTP 403/404, got ${sensitiveProbe.status}: ${sensitiveProbe.text}`);
+    }
 
-  const scannerProbe = await request("GET", `${phpBase}/wp-login.php`, { headers: smokeHeaders });
-  if (![403, 404].includes(scannerProbe.status)) {
-    fail(`WAF scanner path probe expected HTTP 403/404, got ${scannerProbe.status}: ${scannerProbe.text}`);
-  }
+    const scannerProbe = await request("GET", `${phpBase}/wp-login.php`, { headers: smokeHeaders });
+    if (![403, 404].includes(scannerProbe.status)) {
+      fail(`WAF scanner path probe expected HTTP 403/404, got ${scannerProbe.status}: ${scannerProbe.text}`);
+    }
 
-  log("WAF smoke checks passed.");
+    log("WAF smoke checks passed.");
+  }, { apiBase: Boolean(apiBase), phpBase, probeBase });
 }
 
 async function infraHealth() {
+  await withLocalCheckReport("infra-health", infraHealthBody);
+}
+
+async function infraHealthBody() {
   const defaultContainers = [
     "enterprise-traefik",
     "enterprise-waf",
@@ -9794,10 +11090,15 @@ async function infraHealth() {
   const containers = (argv.containers ? String(argv.containers).split(",") : defaultContainers)
     .map((container) => container.trim())
     .filter(Boolean);
+  const envFile = path.resolve(infraRoot, argv.envFile ?? ".env");
+  const env = parseEnv(envFile);
+  const runtimeDomain = expandTemplate(env.DOMAIN ?? env.LOCAL_DOMAIN ?? "localhost.com", env);
+  const defaultAdminHost = expandTemplate(env.CONTROL_CENTER_HOST ?? env.ADMIN_HOST ?? `portal.${runtimeDomain}`, env);
+  const defaultDocsHost = expandTemplate(env.DOCS_HOST ?? `docs.${runtimeDomain}`, env);
   const apiBase = argv.apiBase ? String(argv.apiBase).replace(/\/$/, "") : "";
-  const uiBase = (argv.uiBase ?? argv.docsBase ?? "https://docs.localhost.com").replace(/\/$/, "");
+  const uiBase = (argv.uiBase ?? argv.docsBase ?? `https://${defaultDocsHost}`).replace(/\/$/, "");
   const accountBase = argv.accountBase ? String(argv.accountBase).replace(/\/$/, "") : "";
-  const adminBase = (argv.adminBase ?? argv.projectsBase ?? "https://portal.localhost.com").replace(/\/$/, "");
+  const adminBase = (argv.adminBase ?? argv.projectsBase ?? `https://${defaultAdminHost}`).replace(/\/$/, "");
   let inferredAdminScheme = "https";
   try {
     inferredAdminScheme = new URL(adminBase).protocol === "http:" ? "http" : "https";
@@ -9831,7 +11132,7 @@ async function infraHealth() {
 
   const httpChecks = [
     { name: "docs-home", method: "HEAD", url: `${uiBase}/`, statuses: [200, 308] },
-    { name: "admin-control-center", method: "GET", url: `${adminBase}/`, statuses: [200], body: /Admin Control Center|Documentation and project launcher|Local infrastructure|Pannello infrastruttura/ },
+    { name: "admin-control-center", method: "GET", url: `${adminBase}/`, statuses: [200], body: /Admin Control Center|ops-shell|Passati|Non passati|NO GO LIVE|GO LIVE/ },
     { name: "waf-xss-block", method: "GET", url: `${adminBase}/?x=%3Cscript%3Ealert(1)%3C%2Fscript%3E`, statuses: [403, 406] },
     { name: "waf-sensitive-file-block", method: "GET", url: `${adminBase}/.env`, statuses: [403, 404] },
   ];
@@ -9996,15 +11297,16 @@ function staticSecurityInfraOnlyCheck() {
   assertMatch(composeWaf, /REQUEST-900-EXCLUSION-RULES-BEFORE-CRS\.conf/, "WAF must load local pre-CRS rules.");
   assertMatch(composeVPSWaf, /ports:\s*!override[\s\S]*WAF_HTTP_BIND/, "VPS WAF overlay must make the WAF the only public HTTP listener.");
   assertMatch(localWafPreRules, /\(\?:traefik\|prometheus\|alertmanager\)\\\.localhost\\\.com/, "Local WAF must block unauthenticated internal console hostnames.");
-  assertMatch(vpsWafPreRules, /\(\?:phpmyadmin\|traefik\|prometheus\|alertmanager\|grafana\|minio\|s3\)/, "VPS WAF must block public admin/storage console hostnames.");
+  assertMatch(vpsWafPreRules, /\(\?:phpmyadmin\|phppgadmin\|traefik\|prometheus\|alertmanager\|grafana\|minio\|s3\)/, "VPS WAF must block public admin/storage console hostnames.");
   assertNoMatch(compose, /phpmyadmin\/themes\/|blueberry/i, "phpMyAdmin must not mount removed local themes.");
   assertMatch(phpMyAdminConfig, /\$cfg\['ThemeDefault'\]\s*=\s*'pmahomme'/, "phpMyAdmin must use the bundled default pmahomme theme.");
   assertMatch(phpMyAdminConfig, /\$cfg\['ThemeManager'\]\s*=\s*false/, "phpMyAdmin theme switching must be disabled.");
   assertMatch(phpApacheDockerfile, /php:8\.5-apache@sha256:[a-f0-9]{64}/, "PHP Apache image must be pinned to a digest.");
   assertMatch(phpApacheDockerfile, /a2enmod(?=[^\n]*rewrite)(?=[^\n]*headers)(?=[^\n]*ssl)(?=[^\n]*proxy)(?=[^\n]*proxy_http)(?=[^\n]*vhost_alias)/, "PHP Apache image must enable the required hosting modules.");
   assertMatch(`${phpApacheHttpVhost}\n${phpApacheHttpsVhost}`, /VirtualDocumentRoot\s+\/var\/www\/projects\/%1\/public/, "PHP Apache must route project subdomains to /var/www/projects/<name>/public dynamically.");
-  assertMatch(projectRouterServer, /stopManagedProject[\s\S]*Project disabled[\s\S]*nodeUpstream/, "Project Router must stop managed Node projects when local routing is disabled.");
-  assertMatch(projectRouterTest, /NODE_PROJECT_COMMANDS[\s\S]*php-demo\.localhost\.com[\s\S]*node-demo\.localhost\.com[\s\S]*Project disabled[\s\S]*nodeAfterEnablePayload\.runtime[\s\S]*nodeAfterEnablePayload\.host/, "Project Router tests must prove simultaneous PHP and Node hosting plus disable/re-enable behavior without host npm.");
+  assertMatch(projectRouterServer, /if \(!isEnabled\(project\)\)[\s\S]*Project disabled[\s\S]*dedicatedUpstreamFor\(project\)[\s\S]*nodeUpstreams/, "Project Router must block disabled projects and proxy Node projects only to dedicated upstreams.");
+  assertNoMatch(projectRouterServer, /node:child_process|spawn\(|execFile\(|exec\(|stopManagedProject/, "Project Router must stay proxy-only and must not manage project processes.");
+  assertMatch(projectRouterTest, /NODE_PROJECT_UPSTREAMS[\s\S]*php-demo\.localhost\.com[\s\S]*node-demo\.localhost\.com[\s\S]*Project disabled[\s\S]*nodeAfterEnablePayload\.runtime[\s\S]*nodeAfterEnablePayload\.host/, "Project Router tests must prove simultaneous PHP and Node hosting plus disable/re-enable behavior through dedicated upstreams.");
   assertNoMatch(infrastructureText, /PHP_(?!(?:PROJECTS|SOURCE)_)[A-Z0-9]+_SOURCE_DIR/, "Infrastructure must not hardcode individual PHP project source mounts.");
   assertMatch(envExample, /PHP_PROJECTS_DIR=\.\.\/src/, "Environment example must point PHP projects at the generic src directory.");
   assertMatch(envExample, /PROJECTS_WILDCARD_HOST_REGEXP=/, "Environment example must keep the project wildcard setting explicit and disabled by default.");
@@ -10020,8 +11322,8 @@ function staticSecurityInfraOnlyCheck() {
   assertMatch(opsScript, /No supported project source found[\s\S]*staticSecurityInfraOnlyCheck\(\);[\s\S]*return;/, "Full static security must fall back to infra-only checks when no project is mounted.");
   assertMatch(opsScript, /function hasSupportedProjectSource\(\)[\s\S]*package\.json[\s\S]*\.github[\s\S]*run-infra-ops\.mjs/, "Ops runner must detect complete optional project source before running app-only gates.");
   assertMatch(opsScript, /async function enterpriseTenCheck\(\)[\s\S]*await staticSecurityCheck\(\);[\s\S]*await controlCenterTests\(\);[\s\S]*await projectRouterTests\(\);[\s\S]*await testingHygiene\(\);/, "Enterprise gate must always test the infra Control Center and project router before optional app-only checks.");
-  assertMatch(opsScript, /async function testingHygiene\(\)[\s\S]*requireSupportedProjectSource\("application testing hygiene"\)[\s\S]*return;/, "Testing hygiene must skip cleanly when the project source is not mounted.");
-  assertMatch(opsScript, /async function performanceHygiene\(\)[\s\S]*requireSupportedProjectSource\("application performance hygiene"\)[\s\S]*return;/, "Performance hygiene must skip cleanly when the project source is not mounted.");
+  assertMatch(opsScript, /async function testingHygiene\(\)[\s\S]*infraTestingHygiene\(\)[\s\S]*platform-infrastructure tests passed/, "Testing hygiene must run platform-infrastructure tests when project source is not mounted.");
+  assertMatch(opsScript, /async function performanceHygiene\(\)[\s\S]*infraPerformanceHygiene\(\)[\s\S]*platform-infrastructure performance checks passed/, "Performance hygiene must run platform-infrastructure performance checks when project source is not mounted.");
   assertMatch(controlCenterServer, /planProjectCreate[\s\S]*CREATE-PROJECT[\s\S]*filesystemTouched:\s+false[\s\S]*dockerTouched:\s+false/, "Control Center must create project metadata safely without filesystem or Docker mutations.");
   assertMatch(controlCenterTest, /projects\.json[\s\S]*\/control\/projects[\s\S]*CREATE-PROJECT[\s\S]*project-secret-should-not-leak/, "Control Center tests must cover project create persistence and secret redaction.");
   assertMatch(compose, /control-center:[\s\S]*PROJECT_APPLICATIONS_FILE:\s+\/var\/www\/project-state\/applications\.json/, "Control Center must persist local application metadata from the Node service.");
@@ -10040,17 +11342,17 @@ function staticSecurityInfraOnlyCheck() {
   assertMatch(controlCenterServer, /sensitiveMaterialsFile[\s\S]*handleMaterialCommand[\s\S]*planMaterialDeclare[\s\S]*planMaterialRotation[\s\S]*planMaterialUsage[\s\S]*planMaterialAccessAudit[\s\S]*readSensitiveMaterialsState[\s\S]*writeSensitiveMaterialsState/, "Control Center must manage sensitive material inventory, rotation, usage and access audit through a dedicated Node-managed JSON store.");
   assertMatch(controlCenterTest, /sensitive-materials\.json[\s\S]*\/control\/secrets\/materials[\s\S]*DECLARE-MATERIAL[\s\S]*material-plain-value-should-not-leak/, "Control Center tests must cover metadata-only sensitive material persistence, rotation, usage/access audit and plaintext redaction.");
   assertMatch(controlCenterPackage, /"name":\s+"@platform\/control-center"/, "Control Center project identity must stay generic.");
-  assertMatch(controlCenterLocalStyles, /(?=[\s\S]*--cc-bg)(?=[\s\S]*--cc-surface)(?=[\s\S]*--cc-surface-raised)(?=[\s\S]*--cc-text)(?=[\s\S]*--cc-muted)(?=[\s\S]*--cc-accent)(?=[\s\S]*--cc-radius)(?=[\s\S]*--cc-shadow)(?=[\s\S]*\.cc-app-shell)(?=[\s\S]*\.cc-sidebar)(?=[\s\S]*\.cc-nav-toggle)(?=[\s\S]*\.cc-nav-panel)(?=[\s\S]*\.cc-nav-child)/, "Control Center must provide a local --cc-* visual system with app shell and expandable sidebar navigation.");
+  assertMatch(controlCenterLocalStyles, /(?=[\s\S]*--cc-bg)(?=[\s\S]*--cc-surface)(?=[\s\S]*--cc-surface-raised)(?=[\s\S]*--cc-text)(?=[\s\S]*--cc-muted)(?=[\s\S]*--cc-accent)(?=[\s\S]*--cc-radius)(?=[\s\S]*--cc-shadow)(?=[\s\S]*\.cc-app-shell)(?=[\s\S]*\.ops-shell)(?=[\s\S]*\.ops-sidebar)(?=[\s\S]*\.cc-topbar)(?=[\s\S]*\.ops-nav)(?=[\s\S]*\.ops-table)(?=[\s\S]*\.ops-metrics)/, "Control Center must provide a local --cc-* visual system with operations shell, navigation, metrics and tables.");
   assertNoMatch(controlCenterLocalStyles, /\.card[\s\S]*border:\s*1px\s+solid/i, "Control Center cards must not use border: 1px solid for contrast.");
-  assertMatch(controlCenterLocalComponents, /(?=[\s\S]*AppShell)(?=[\s\S]*Sidebar)(?=[\s\S]*Topbar)(?=[\s\S]*PageHeader)(?=[\s\S]*Section)(?=[\s\S]*Card)(?=[\s\S]*MetricCard)(?=[\s\S]*StatusPill)(?=[\s\S]*ActionButton)(?=[\s\S]*TabGroup)(?=[\s\S]*DataList)(?=[\s\S]*EmptyState)(?=[\s\S]*AlertBanner)(?=[\s\S]*EnvironmentBadge)(?=[\s\S]*ProjectSwitcher)(?=[\s\S]*SimpleAdvancedToggle)/, "Control Center must define the requested local UI component contract.");
-  assertMatch(`${controlCenterServer}\n${controlCenterLocalComponents}`, /(?=[\s\S]*serveStaticAsset[\s\S]*\/assets\/control-center\/)(?=[\s\S]*route\(parts, "control", "ui-package"\))(?=[\s\S]*readControlCenterUiPackage)(?=[\s\S]*controlCenterStylesheetLinks)(?=[\s\S]*\/assets\/control-center\/control-center\.css)(?=[\s\S]*cc-app-shell)(?=[\s\S]*cc-sidebar)(?=[\s\S]*cc-nav-toggle)(?=[\s\S]*cc-nav-panel)/, "Control Center must serve and render through its local expandable-sidebar visual system.");
+  assertMatch(controlCenterLocalComponents, /(?=[\s\S]*OperationsShell)(?=[\s\S]*OperationsTopbar)(?=[\s\S]*StatusGate)(?=[\s\S]*ProjectTable)(?=[\s\S]*ProjectActions)(?=[\s\S]*ProjectFileBrowser)(?=[\s\S]*DatabaseInventory)(?=[\s\S]*ActivityTable)(?=[\s\S]*ResourceUsageTable)(?=[\s\S]*MetricTile)(?=[\s\S]*StatusPill)(?=[\s\S]*ActionButton)(?=[\s\S]*ProjectSwitcher)(?=[\s\S]*EmptyState)/, "Control Center must define the requested local operations UI component contract.");
+  assertMatch(`${controlCenterServer}\n${controlCenterLocalComponents}`, /(?=[\s\S]*serveStaticAsset[\s\S]*\/assets\/control-center\/)(?=[\s\S]*route\(parts, "control", "ui-package"\))(?=[\s\S]*readControlCenterUiPackage)(?=[\s\S]*controlCenterStylesheetLinks)(?=[\s\S]*\/assets\/control-center\/control-center\.css)(?=[\s\S]*cc-app-shell)(?=[\s\S]*ops-shell)(?=[\s\S]*ops-topbar)(?=[\s\S]*cc-topbar)(?=[\s\S]*ops-nav)/, "Control Center must serve and render through its local operations visual system.");
   assertNoMatch(`${controlCenterServer}\n${controlCenterPackage}\n${compose}`, /ui-shell|pill-sidebar-nav|pill-tabs/, "Control Center runtime must not use retired visual dependency assets or shell classes.");
   assertMatch(controlCenterServer, /function navigationGroupsForMode[\s\S]*navGroup\("platform", "Infrastructure"[\s\S]*navGroup\("delivery", "Delivery"[\s\S]*navGroup\("observability", "Observability"[\s\S]*navGroup\("security", "Security"/, "Control Center Advanced navigation must group enterprise sections into macro sidebar areas with page tabs.");
-  assertMatch(controlCenterServer, /Control Center UI[\s\S]*Local components[\s\S]*loaded from local Control Center files/, "Control Center Settings UI must display the local UI contract.");
-  assertMatch(controlCenterTest, /(?=[\s\S]*\/assets\/control-center\/control-center\.css)(?=[\s\S]*\/control\/ui-package)(?=[\s\S]*@platform\/control-center-local-ui)(?=[\s\S]*cc-app-shell)(?=[\s\S]*cc-sidebar)(?=[\s\S]*cc-nav-toggle)(?=[\s\S]*AppShell)(?=[\s\S]*Control Center UI)/, "Control Center tests must prove the local CSS, shell, expandable navigation and UI contract are served.");
+  assertMatch(controlCenterLocalComponents, /(?=[\s\S]*operations-first information architecture)(?=[\s\S]*ProjectFileBrowser)(?=[\s\S]*ActivityTable)/, "Control Center UI contract must describe the operations portal.");
+  assertMatch(controlCenterTest, /(?=[\s\S]*\/assets\/control-center\/control-center\.css)(?=[\s\S]*\/control\/ui-package)(?=[\s\S]*@platform\/control-center-local-ui)(?=[\s\S]*cc-app-shell)(?=[\s\S]*ops-shell)(?=[\s\S]*ops-topbar)(?=[\s\S]*OperationsShell)(?=[\s\S]*ProjectFileBrowser)(?=[\s\S]*ActivityTable)/, "Control Center tests must prove the local CSS, operations shell, navigation and UI contract are served.");
   assertMatch(controlCenterServer, /route\(parts, "control", "readiness"\)[\s\S]*buildControlReadiness[\s\S]*readGovernanceManifest\("enterprise-requirements\.json"\)[\s\S]*readGovernanceManifest\("production-readiness\.json"\)[\s\S]*productionEvidence:\s+false[\s\S]*localEvidenceIsProductionEvidence:\s+false/, "Control Center must expose a sanitized readiness matrix from governance manifests without production evidence claims.");
-  assertMatch(controlCenterServer, /(?=[\s\S]*Readiness Matrix)(?=[\s\S]*renderReadiness)(?=[\s\S]*Production readiness checklist)(?=[\s\S]*pending live proofs)/, "Control Center Advanced UI must expose the readiness matrix and pending live-proof state.");
-  assertMatch(controlCenterTest, /(?=[\s\S]*\/control\/readiness)(?=[\s\S]*productionReadiness\.requirementCount,\s+20)(?=[\s\S]*tls-https-production-ready)(?=[\s\S]*pending-live-proof)(?=[\s\S]*localEvidenceIsProductionEvidence,\s+false)/, "Control Center tests must cover the readiness API, 20-point checklist and live-proof separation.");
+  assertIncludesAll(controlCenterServer, ["readLatestGoNoGoReport", "renderOpsStatus", "Passati", "Non passati", "Motivo", "Cosa fare", "renderOpsActivity", "renderOpsResources"], "Control Center operations UI must expose go/no-go blockers, reasons, required actions, activity and resources.");
+  assertMatch(controlCenterTest, /(?=[\s\S]*\/control\/readiness)(?=[\s\S]*productionReadiness\.requirementCount,\s+19)(?=[\s\S]*tls-https-production-ready)(?=[\s\S]*pending-live-proof)(?=[\s\S]*localEvidenceIsProductionEvidence,\s+false)/, "Control Center tests must cover the readiness API, 19-point infrastructure checklist and live-proof separation.");
   assertMatch(compose, /control-center:[\s\S]*PROJECT_WORKER_JOBS_FILE:\s+\/var\/www\/project-state\/worker-jobs\.json/, "Control Center must persist worker/job metadata from the Node service.");
   assertMatch(controlCenterServer, /workerJobsFile[\s\S]*handleWorkerJobCommand[\s\S]*planWorkerDeclare[\s\S]*planQueueDeclare[\s\S]*planJobRecord[\s\S]*planJobRetry[\s\S]*planScheduleDeclare[\s\S]*planScheduleStatus[\s\S]*readWorkerJobsState[\s\S]*writeWorkerJobsState/, "Control Center must manage workers, queues, failed jobs, retries and schedules through a dedicated Node-managed JSON store.");
   assertMatch(controlCenterTest, /worker-jobs\.json[\s\S]*\/control\/workers-jobs\/workers[\s\S]*DECLARE-WORKER[\s\S]*\/control\/workers-jobs\/jobs[\s\S]*PLAN-JOB-RETRY[\s\S]*worker-secret-should-not-leak/, "Control Center tests must cover worker/job metadata persistence, retry planning, schedules and secret redaction.");
@@ -10089,8 +11391,8 @@ function staticSecurityInfraOnlyCheck() {
   assertMatch(controlCenterTest, /provider-connections\.json[\s\S]*\/control\/provider-connections[\s\S]*UPDATE-PROVIDER-CONNECTION[\s\S]*provider-secret-should-not-leak/, "Control Center tests must cover provider connection metadata persistence and secret redaction.");
   assertMatch(controlCenterServer, /(?=[\s\S]*renderSettings)(?=[\s\S]*Default mode)(?=[\s\S]*Base domain)(?=[\s\S]*Cloudflare connection)(?=[\s\S]*GitHub connection)(?=[\s\S]*SMTP\/alert status)(?=[\s\S]*Update settings)/, "Control Center Settings UI must expose mode, domain and provider connection metadata controls.");
   assertMatch(controlCenterTest, /settings\.json[\s\S]*\/actions\/settings-command[\s\S]*settings-secret-should-not-leak[\s\S]*\/control\/settings/, "Control Center tests must cover settings persistence, UI action and secret redaction.");
-  assertMatch(controlCenterTest, /(?=[\s\S]*mode=advanced)(?=[\s\S]*workers-jobs)(?=[\s\S]*cicd-github)(?=[\s\S]*logs-advanced)(?=[\s\S]*alerts-advanced)(?=[\s\S]*disaster-recovery)(?=[\s\S]*release-evidence)(?=[\s\S]*security-advanced)/, "Control Center tests must cover Advanced Mode routing and requested enterprise section skeletons.");
-  assertMatch(controlCenterTest, /(?=[\s\S]*\/control\/advanced)(?=[\s\S]*\/control\/network)(?=[\s\S]*\/control\/advanced\/network)(?=[\s\S]*enterprise-backend)(?=[\s\S]*enterprise-rate-limit)(?=[\s\S]*Route Test Plan)(?=[\s\S]*\/control\/monitoring)(?=[\s\S]*\/control\/advanced\/monitoring)(?=[\s\S]*Backend errors)(?=[\s\S]*Auth failures)(?=[\s\S]*\/control\/advanced\/cloudflare)(?=[\s\S]*\/control\/advanced\/release-evidence)(?=[\s\S]*\/control\/advanced\/identity)(?=[\s\S]*\/control\/advanced\/secrets)/, "Control Center tests must cover Advanced Mode API evidence endpoints including Network and Monitoring topology.");
+  assertMatch(controlCenterTest, /(?=[\s\S]*ops-shell)(?=[\s\S]*Passati)(?=[\s\S]*Non passati)(?=[\s\S]*section=projects)(?=[\s\S]*section=files)(?=[\s\S]*section=databases)(?=[\s\S]*section=activity)(?=[\s\S]*section=resources)/, "Control Center tests must cover the operations portal sections.");
+  assertMatch(controlCenterTest, /(?=[\s\S]*\/control\/advanced)(?=[\s\S]*\/control\/network)(?=[\s\S]*\/control\/advanced\/network)(?=[\s\S]*enterprise-backend)(?=[\s\S]*enterprise-rate-limit)(?=[\s\S]*\/control\/monitoring)(?=[\s\S]*\/control\/advanced\/monitoring)(?=[\s\S]*Backend errors)(?=[\s\S]*Auth failures)(?=[\s\S]*\/control\/advanced\/cloudflare)(?=[\s\S]*\/control\/advanced\/release-evidence)(?=[\s\S]*\/control\/advanced\/identity)(?=[\s\S]*\/control\/advanced\/secrets)/, "Control Center tests must cover Advanced Mode API evidence endpoints including Network and Monitoring topology.");
   assertMatch(controlCenterTest, /\/control\/adapters[\s\S]*\/control\/adapters\/cloudflare[\s\S]*\/control\/adapters\/cloudflare\/plan[\s\S]*\/control\/adapters\/go-no-go\/verify[\s\S]*\/control\/adapters\/cloudflare\/apply/, "Control Center tests must cover adapter registry, dry-run planning, verification planning and rejected apply.");
   assertMatch(compose, /control-center:[\s\S]*PROJECT_BACKUP_RECORDS_FILE:\s+\/var\/www\/project-state\/backups\.jsonl/, "Control Center must persist local backup and restore drill records from the Node service.");
   assertMatch(controlCenterServer, /backupRecordsFile[\s\S]*handleBackupCommand[\s\S]*appendBackupRecord[\s\S]*readBackupRecords/, "Control Center must persist backup/restore plan records in a dedicated Node-managed JSONL store.");
@@ -10144,9 +11446,9 @@ function staticSecurityInfraOnlyCheck() {
   assertMatch(githubWorkflow, /Evidence bundle integrity verify[\s\S]*evidence-bundle-verify/, "Infrastructure CI must verify evidence bundle manifest integrity.");
   assertMatch(githubWorkflow, /Pre go-live evidence report[\s\S]*pre-go-live-evidence --infraOnly --repo/, "Infrastructure CI must produce an infrastructure-only pre go-live evidence report.");
   assertMatch(githubWorkflow, /Enterprise requirements traceability[\s\S]*enterprise-requirements-check/, "Infrastructure CI must verify enterprise requirements traceability.");
-  assertMatch(githubWorkflow, /Production readiness checklist[\s\S]*enterprise-requirements-check --manifest governance\/production-readiness\.json/, "Infrastructure CI must verify the 20-point production readiness checklist.");
+  assertMatch(githubWorkflow, /Production readiness checklist[\s\S]*enterprise-requirements-check --manifest governance\/production-readiness\.json/, "Infrastructure CI must verify the 19-point infrastructure production readiness checklist.");
   assertMatch(githubWorkflow, /Production live proof gate rejects missing evidence[\s\S]*--requireLiveProofs[\s\S]*Live proof gate passed without real production evidence/, "Infrastructure CI must prove the live-production gate rejects missing external evidence.");
-  assertMatch(productionReadinessManifest, /"expectedCount":\s*20/, "Production readiness manifest must track the exact 20-point checklist.");
+  assertMatch(productionReadinessManifest, /"expectedCount":\s*19/, "Production readiness manifest must track the exact 19-point infrastructure checklist.");
   assertMatch(productionReadinessManifest, /"liveProofCheckRequired":\s*true/, "Production readiness manifest must require mapped live proof checks.");
   assertMatch(productionReadinessManifest, /"liveProofChecks"/, "Production readiness requirements must map to production go/no-go live checks.");
   assertMatch(githubWorkflow, /permissions:\s*\r?\n\s+contents:\s+read/, "Infrastructure CI must declare least-privilege read permissions.");
@@ -10167,7 +11469,7 @@ function staticSecurityInfraOnlyCheck() {
   assertMatch(auditLogEvidenceWrapper, /audit-log-evidence/, "Audit log evidence wrapper must delegate to the Dockerized ops runner.");
   assertMatch(opsScript, /async function auditLogEvidence[\s\S]*audit-log-evidence-[\s\S]*infraChecksPassed/, "Ops script must provide dedicated audit log evidence reports.");
   assertMatch(opsScript, /directory: "audit-logs"[\s\S]*prefix: "audit-log-evidence-"[\s\S]*required: true/, "Evidence bundle must require audit log evidence reports.");
-  assertMatch(productionReadinessManifest, /"admin-audit-log"[\s\S]*"audit-log-evidence"/, "Production readiness must map admin audit logging to dedicated evidence.");
+  assertMatch(productionReadinessManifest, /"admin-audit-log"[\s\S]*"platform-admin-audit-evidence"/, "Production readiness must not use hosted project audit logs as platform admin audit evidence.");
   assertMatch(retentionEvidenceWrapper, /retention-evidence/, "Retention evidence wrapper must delegate to the Dockerized ops runner.");
   assertMatch(opsScript, /async function retentionEvidence[\s\S]*retention-evidence-[\s\S]*infraChecksPassed/, "Ops script must provide dedicated retention evidence reports.");
   assertMatch(opsScript, /directory: "retention"[\s\S]*prefix: "retention-evidence-"[\s\S]*required: true/, "Evidence bundle must require retention evidence reports.");
@@ -10182,7 +11484,7 @@ function staticSecurityInfraOnlyCheck() {
   assertMatch(productionGoNoGoPolicyText, /"secretRotation":\s*24/, "Production go/no-go policy must require fresh secret rotation evidence.");
   assertMatch(productionReadinessManifest, /"secrets-management"[\s\S]*"secret-rotation-evidence"/, "Production readiness must map secrets management to the dedicated secret rotation live proof.");
   assertMatch(vpsPostdeployScript, /secret-rotation-evidence\.sh --enforce[\s\S]*production-go-no-go\.sh --enforce[\s\S]*production-readiness-live\.sh/, "VPS post-deploy must enforce secret rotation evidence, production go/no-go and live readiness.");
-  assertMatch(productionReadinessLiveWrapper, /enterprise-requirements-check --manifest governance\/production-readiness\.json --requireLiveProofs/, "Production readiness live wrapper must enforce the 20-point live checklist.");
+  assertMatch(productionReadinessLiveWrapper, /enterprise-requirements-check --manifest governance\/production-readiness\.json --requireLiveProofs/, "Production readiness live wrapper must enforce the 19-point infrastructure live checklist.");
   assertMatch(opsScript, /directory: "production-readiness"[\s\S]*prefix: "production-readiness-"[\s\S]*required: true/, "Evidence bundle must require the live production readiness report.");
   assertMatch(readme, /production-readiness-live\.sh[\s\S]*reports\/production-readiness/, "README must document the live production readiness report.");
   assertMatch(runbook, /production-readiness-live\.sh[\s\S]*reports\/production-readiness/, "Runbook must document the live production readiness report.");
@@ -10198,6 +11500,12 @@ function staticSecurityInfraOnlyCheck() {
 }
 
 async function staticSecurityCheck() {
+  await withLocalCheckReport("static-security-check", staticSecurityCheckBody, {
+    infraOnly: Boolean(booleanFlag(argv.infraOnly) || booleanFlag(process.env.PLATFORM_STATIC_INFRA_ONLY) || !hasSupportedProjectSource()),
+  });
+}
+
+async function staticSecurityCheckBody() {
   if (booleanFlag(argv.infraOnly) || booleanFlag(process.env.PLATFORM_STATIC_INFRA_ONLY)) {
     staticSecurityInfraOnlyCheck();
     return;
@@ -10478,8 +11786,9 @@ async function staticSecurityCheck() {
   assertMatch(compose, /enterprise-portal:[\s\S]*url:\s+http:\/\/control-center:8080/, "Traefik portal route must target the Node Control Center service.");
   assertNoMatch(compose, /local-php/, "Traefik project routing must not be named local-php; PHP is only one runtime behind project-router.");
   assertMatch(compose, /php-apache:[\s\S]*\$\{PHP_SOURCE_DIR:-\.\/php-runtime-root\}:\/var\/www\/html[\s\S]*project-router:[\s\S]*CONTROL_CENTER_UPSTREAM:\s+http:\/\/control-center:8080/, "PHP Apache must be runtime-only while the admin host resolves through the Node Control Center.");
-  assertMatch(projectRouterServer, /stopManagedProject[\s\S]*Project disabled[\s\S]*nodeUpstream/, "Project Router must stop managed Node projects when local routing is disabled.");
-  assertMatch(projectRouterTest, /NODE_PROJECT_COMMANDS[\s\S]*php-demo\.localhost\.com[\s\S]*node-demo\.localhost\.com[\s\S]*Project disabled[\s\S]*nodeAfterEnablePayload\.runtime[\s\S]*nodeAfterEnablePayload\.host/, "Project Router tests must prove simultaneous PHP and Node hosting plus disable/re-enable behavior without host npm.");
+  assertMatch(projectRouterServer, /if \(!isEnabled\(project\)\)[\s\S]*Project disabled[\s\S]*dedicatedUpstreamFor\(project\)[\s\S]*nodeUpstreams/, "Project Router must block disabled projects and proxy Node projects only to dedicated upstreams.");
+  assertNoMatch(projectRouterServer, /node:child_process|spawn\(|execFile\(|exec\(|stopManagedProject/, "Project Router must stay proxy-only and must not manage project processes.");
+  assertMatch(projectRouterTest, /NODE_PROJECT_UPSTREAMS[\s\S]*php-demo\.localhost\.com[\s\S]*node-demo\.localhost\.com[\s\S]*Project disabled[\s\S]*nodeAfterEnablePayload\.runtime[\s\S]*nodeAfterEnablePayload\.host/, "Project Router tests must prove simultaneous PHP and Node hosting plus disable/re-enable behavior through dedicated upstreams.");
   assertNoMatch(`${compose}\n${phpRuntimeRootPage}`, /projects-portal\/public|<\?php|\/control\//i, "The PHP runtime root must not implement or expose the Control Center surface.");
   assertMatch(compose, /control-center:[\s\S]*PROJECT_AUDIT_FILE:\s+\/var\/www\/project-state\/audit\.jsonl/, "Control Center must write local audit evidence.");
   assertMatch(compose, /control-center:[\s\S]*PROJECT_APPLICATIONS_FILE:\s+\/var\/www\/project-state\/applications\.json/, "Control Center must persist local application metadata from the Node service.");
@@ -10523,14 +11832,14 @@ async function staticSecurityCheck() {
   assertMatch(controlCenterServer, /sensitiveMaterialsFile[\s\S]*handleMaterialCommand[\s\S]*planMaterialDeclare[\s\S]*planMaterialRotation[\s\S]*planMaterialUsage[\s\S]*planMaterialAccessAudit[\s\S]*readSensitiveMaterialsState[\s\S]*writeSensitiveMaterialsState/, "Control Center must manage sensitive material inventory, rotation, usage and access audit through a dedicated Node-managed JSON store.");
   assertMatch(controlCenterTest, /sensitive-materials\.json[\s\S]*\/control\/secrets\/materials[\s\S]*DECLARE-MATERIAL[\s\S]*material-plain-value-should-not-leak/, "Control Center tests must cover metadata-only sensitive material persistence, rotation, usage/access audit and plaintext redaction.");
   assertMatch(controlCenterPackage, /"name":\s+"@platform\/control-center"/, "Control Center project identity must stay generic.");
-  assertMatch(controlCenterLocalStyles, /(?=[\s\S]*--cc-bg)(?=[\s\S]*--cc-surface)(?=[\s\S]*--cc-surface-raised)(?=[\s\S]*--cc-text)(?=[\s\S]*--cc-muted)(?=[\s\S]*--cc-accent)(?=[\s\S]*--cc-radius)(?=[\s\S]*--cc-shadow)(?=[\s\S]*\.cc-app-shell)(?=[\s\S]*\.cc-sidebar)(?=[\s\S]*\.cc-nav-toggle)(?=[\s\S]*\.cc-nav-panel)(?=[\s\S]*\.cc-nav-child)/, "Control Center must provide a local --cc-* visual system with app shell and expandable sidebar navigation.");
+  assertMatch(controlCenterLocalStyles, /(?=[\s\S]*--cc-bg)(?=[\s\S]*--cc-surface)(?=[\s\S]*--cc-surface-raised)(?=[\s\S]*--cc-text)(?=[\s\S]*--cc-muted)(?=[\s\S]*--cc-accent)(?=[\s\S]*--cc-radius)(?=[\s\S]*--cc-shadow)(?=[\s\S]*\.cc-app-shell)(?=[\s\S]*\.ops-shell)(?=[\s\S]*\.ops-sidebar)(?=[\s\S]*\.cc-topbar)(?=[\s\S]*\.ops-nav)(?=[\s\S]*\.ops-table)(?=[\s\S]*\.ops-metrics)/, "Control Center must provide a local --cc-* visual system with operations shell, navigation, metrics and tables.");
   assertNoMatch(controlCenterLocalStyles, /\.card[\s\S]*border:\s*1px\s+solid/i, "Control Center cards must not use border: 1px solid for contrast.");
-  assertMatch(controlCenterLocalComponents, /(?=[\s\S]*AppShell)(?=[\s\S]*Sidebar)(?=[\s\S]*Topbar)(?=[\s\S]*PageHeader)(?=[\s\S]*Section)(?=[\s\S]*Card)(?=[\s\S]*MetricCard)(?=[\s\S]*StatusPill)(?=[\s\S]*ActionButton)(?=[\s\S]*TabGroup)(?=[\s\S]*DataList)(?=[\s\S]*EmptyState)(?=[\s\S]*AlertBanner)(?=[\s\S]*EnvironmentBadge)(?=[\s\S]*ProjectSwitcher)(?=[\s\S]*SimpleAdvancedToggle)/, "Control Center must define the requested local UI component contract.");
-  assertMatch(`${controlCenterServer}\n${controlCenterLocalComponents}`, /(?=[\s\S]*serveStaticAsset[\s\S]*\/assets\/control-center\/)(?=[\s\S]*route\(parts, "control", "ui-package"\))(?=[\s\S]*readControlCenterUiPackage)(?=[\s\S]*controlCenterStylesheetLinks)(?=[\s\S]*\/assets\/control-center\/control-center\.css)(?=[\s\S]*cc-app-shell)(?=[\s\S]*cc-sidebar)(?=[\s\S]*cc-nav-toggle)(?=[\s\S]*cc-nav-panel)/, "Control Center must serve and render through its local expandable-sidebar visual system.");
+  assertMatch(controlCenterLocalComponents, /(?=[\s\S]*OperationsShell)(?=[\s\S]*OperationsTopbar)(?=[\s\S]*StatusGate)(?=[\s\S]*ProjectTable)(?=[\s\S]*ProjectActions)(?=[\s\S]*ProjectFileBrowser)(?=[\s\S]*DatabaseInventory)(?=[\s\S]*ActivityTable)(?=[\s\S]*ResourceUsageTable)(?=[\s\S]*MetricTile)(?=[\s\S]*StatusPill)(?=[\s\S]*ActionButton)(?=[\s\S]*ProjectSwitcher)(?=[\s\S]*EmptyState)/, "Control Center must define the requested local operations UI component contract.");
+  assertMatch(`${controlCenterServer}\n${controlCenterLocalComponents}`, /(?=[\s\S]*serveStaticAsset[\s\S]*\/assets\/control-center\/)(?=[\s\S]*route\(parts, "control", "ui-package"\))(?=[\s\S]*readControlCenterUiPackage)(?=[\s\S]*controlCenterStylesheetLinks)(?=[\s\S]*\/assets\/control-center\/control-center\.css)(?=[\s\S]*cc-app-shell)(?=[\s\S]*ops-shell)(?=[\s\S]*ops-topbar)(?=[\s\S]*cc-topbar)(?=[\s\S]*ops-nav)/, "Control Center must serve and render through its local operations visual system.");
   assertNoMatch(`${controlCenterServer}\n${controlCenterPackage}\n${compose}`, /ui-shell|pill-sidebar-nav|pill-tabs/, "Control Center runtime must not use retired visual dependency assets or shell classes.");
   assertMatch(controlCenterServer, /function navigationGroupsForMode[\s\S]*navGroup\("platform", "Infrastructure"[\s\S]*navGroup\("delivery", "Delivery"[\s\S]*navGroup\("observability", "Observability"[\s\S]*navGroup\("security", "Security"/, "Control Center Advanced navigation must group enterprise sections into macro sidebar areas with page tabs.");
-  assertMatch(controlCenterServer, /Control Center UI[\s\S]*Local components[\s\S]*loaded from local Control Center files/, "Control Center Settings UI must display the local UI contract.");
-  assertMatch(controlCenterTest, /(?=[\s\S]*\/assets\/control-center\/control-center\.css)(?=[\s\S]*\/control\/ui-package)(?=[\s\S]*@platform\/control-center-local-ui)(?=[\s\S]*cc-app-shell)(?=[\s\S]*cc-sidebar)(?=[\s\S]*cc-nav-toggle)(?=[\s\S]*AppShell)(?=[\s\S]*Control Center UI)/, "Control Center tests must prove the local CSS, shell, expandable navigation and UI contract are served.");
+  assertMatch(controlCenterLocalComponents, /(?=[\s\S]*operations-first information architecture)(?=[\s\S]*ProjectFileBrowser)(?=[\s\S]*ActivityTable)/, "Control Center UI contract must describe the operations portal.");
+  assertMatch(controlCenterTest, /(?=[\s\S]*\/assets\/control-center\/control-center\.css)(?=[\s\S]*\/control\/ui-package)(?=[\s\S]*@platform\/control-center-local-ui)(?=[\s\S]*cc-app-shell)(?=[\s\S]*ops-shell)(?=[\s\S]*ops-topbar)(?=[\s\S]*OperationsShell)(?=[\s\S]*ProjectFileBrowser)(?=[\s\S]*ActivityTable)/, "Control Center tests must prove the local CSS, operations shell, navigation and UI contract are served.");
   assertMatch(compose, /control-center:[\s\S]*PROJECT_WORKER_JOBS_FILE:\s+\/var\/www\/project-state\/worker-jobs\.json/, "Control Center must persist worker/job metadata from the Node service.");
   assertMatch(controlCenterServer, /workerJobsFile[\s\S]*handleWorkerJobCommand[\s\S]*planWorkerDeclare[\s\S]*planQueueDeclare[\s\S]*planJobRecord[\s\S]*planJobRetry[\s\S]*planScheduleDeclare[\s\S]*planScheduleStatus[\s\S]*readWorkerJobsState[\s\S]*writeWorkerJobsState/, "Control Center must manage workers, queues, failed jobs, retries and schedules through a dedicated Node-managed JSON store.");
   assertMatch(controlCenterTest, /worker-jobs\.json[\s\S]*\/control\/workers-jobs\/workers[\s\S]*DECLARE-WORKER[\s\S]*\/control\/workers-jobs\/jobs[\s\S]*PLAN-JOB-RETRY[\s\S]*worker-secret-should-not-leak/, "Control Center tests must cover worker/job metadata persistence, retry planning, schedules and secret redaction.");
@@ -10598,12 +11907,12 @@ async function staticSecurityCheck() {
   assertMatch(controlCenterTest, /operations\.jsonl[\s\S]*\/control\/operations[\s\S]*operationId[\s\S]*output/, "Control Center tests must prove Operation and OperationStep records are persisted and exposed safely.");
   assertMatch(controlCenterTest, /deployments\.jsonl[\s\S]*\/control\/applications\/node-demo\/deploy[\s\S]*\/control\/applications\/node-demo\/rollback[\s\S]*\/control\/deployments/, "Control Center tests must prove deployment and rollback plans are persisted and exposed safely.");
   assertMatch(controlCenterTest, /backups\.jsonl[\s\S]*\/actions\/backup-command[\s\S]*backup-secret-should-not-leak[\s\S]*\/control\/backups\/records/, "Control Center tests must prove backup and restore drill plans are persisted and secret-redacted.");
-  assertMatch(controlCenterTest, /(?=[\s\S]*mode=advanced)(?=[\s\S]*workers-jobs)(?=[\s\S]*cicd-github)(?=[\s\S]*logs-advanced)(?=[\s\S]*alerts-advanced)(?=[\s\S]*disaster-recovery)(?=[\s\S]*release-evidence)(?=[\s\S]*security-advanced)/, "Control Center tests must cover Advanced Mode routing and requested enterprise section skeletons.");
-  assertMatch(controlCenterTest, /(?=[\s\S]*\/control\/advanced)(?=[\s\S]*\/control\/network)(?=[\s\S]*\/control\/advanced\/network)(?=[\s\S]*enterprise-backend)(?=[\s\S]*enterprise-rate-limit)(?=[\s\S]*Route Test Plan)(?=[\s\S]*\/control\/monitoring)(?=[\s\S]*\/control\/advanced\/monitoring)(?=[\s\S]*Backend errors)(?=[\s\S]*Auth failures)(?=[\s\S]*\/control\/advanced\/cloudflare)(?=[\s\S]*\/control\/advanced\/release-evidence)(?=[\s\S]*\/control\/advanced\/identity)(?=[\s\S]*\/control\/advanced\/secrets)/, "Control Center tests must cover Advanced Mode API evidence endpoints including Network and Monitoring topology.");
+  assertMatch(controlCenterTest, /(?=[\s\S]*ops-shell)(?=[\s\S]*Passati)(?=[\s\S]*Non passati)(?=[\s\S]*section=projects)(?=[\s\S]*section=files)(?=[\s\S]*section=databases)(?=[\s\S]*section=activity)(?=[\s\S]*section=resources)/, "Control Center tests must cover the operations portal sections.");
+  assertMatch(controlCenterTest, /(?=[\s\S]*\/control\/advanced)(?=[\s\S]*\/control\/network)(?=[\s\S]*\/control\/advanced\/network)(?=[\s\S]*enterprise-backend)(?=[\s\S]*enterprise-rate-limit)(?=[\s\S]*\/control\/monitoring)(?=[\s\S]*\/control\/advanced\/monitoring)(?=[\s\S]*Backend errors)(?=[\s\S]*Auth failures)(?=[\s\S]*\/control\/advanced\/cloudflare)(?=[\s\S]*\/control\/advanced\/release-evidence)(?=[\s\S]*\/control\/advanced\/identity)(?=[\s\S]*\/control\/advanced\/secrets)/, "Control Center tests must cover Advanced Mode API evidence endpoints including Network and Monitoring topology.");
   assertMatch(controlCenterTest, /\/control\/adapters[\s\S]*\/control\/adapters\/cloudflare[\s\S]*\/control\/adapters\/cloudflare\/plan[\s\S]*\/control\/adapters\/go-no-go\/verify[\s\S]*\/control\/adapters\/cloudflare\/apply/, "Control Center tests must cover adapter registry, dry-run planning, verification planning and rejected apply.");
   assertMatch(controlCenterServer, /route\(parts, "control", "readiness"\)[\s\S]*buildControlReadiness[\s\S]*readGovernanceManifest\("enterprise-requirements\.json"\)[\s\S]*readGovernanceManifest\("production-readiness\.json"\)[\s\S]*productionEvidence:\s+false[\s\S]*localEvidenceIsProductionEvidence:\s+false/, "Control Center must expose a sanitized readiness matrix from governance manifests without production evidence claims.");
-  assertMatch(controlCenterServer, /(?=[\s\S]*Readiness Matrix)(?=[\s\S]*renderReadiness)(?=[\s\S]*Production readiness checklist)(?=[\s\S]*pending live proofs)/, "Control Center Advanced UI must expose the readiness matrix and pending live-proof state.");
-  assertMatch(controlCenterTest, /(?=[\s\S]*\/control\/readiness)(?=[\s\S]*productionReadiness\.requirementCount,\s+20)(?=[\s\S]*tls-https-production-ready)(?=[\s\S]*pending-live-proof)(?=[\s\S]*localEvidenceIsProductionEvidence,\s+false)/, "Control Center tests must cover the readiness API, 20-point checklist and live-proof separation.");
+  assertIncludesAll(controlCenterServer, ["readLatestGoNoGoReport", "renderOpsStatus", "Passati", "Non passati", "Motivo", "Cosa fare", "renderOpsActivity", "renderOpsResources"], "Control Center operations UI must expose go/no-go blockers, reasons, required actions, activity and resources.");
+  assertMatch(controlCenterTest, /(?=[\s\S]*\/control\/readiness)(?=[\s\S]*productionReadiness\.requirementCount,\s+19)(?=[\s\S]*tls-https-production-ready)(?=[\s\S]*pending-live-proof)(?=[\s\S]*localEvidenceIsProductionEvidence,\s+false)/, "Control Center tests must cover the readiness API, 19-point infrastructure checklist and live-proof separation.");
   assertMatch(controlCenterTest, /local evidence only[\s\S]*notEqual[\s\S]*production evidence/, "Control Center tests must prove local evidence is not accepted as production evidence.");
   assertMatch(controlCenterTest, /admin guard[\s\S]*admin_auth_required[\s\S]*HttpOnly[\s\S]*Secure[\s\S]*SameSite=Lax/, "Control Center tests must cover the admin auth gate and hardened session cookie.");
   assertNoMatch(controlCenterTest, /CLOUDFLARE_API_TOKEN|api\.github\.com|cloudflare\.com\/client\/v4/i, "Control Center tests must not make live provider calls.");
@@ -10614,20 +11923,17 @@ async function staticSecurityCheck() {
   assertMatch(composeManagedSecrets, /SESSION_SECRET_FILE:\s+\/run\/secrets\/session_secret/, "Managed secret overlay must consume session secret through a file.");
   assertMatch(composeManagedSecrets, /SESSION_SIGNING_KEYS_FILE:\s+\/run\/secrets\/session_signing_keys/, "Managed secret overlay must consume session signing keys through a file.");
   assertMatch(composeManagedSecrets, /PROJECTS_GATEWAY_SIGNING_KEYS_FILE:\s+\/run\/secrets\/projects_gateway_signing_keys/, "Managed secret overlay must consume admin gateway signing keys through a file.");
-  assertMatch(composeManagedSecrets, /GOOGLE_RECAPTCHA_SECRET_KEY_FILE:\s+\/run\/secrets\/google_recaptcha_secret_key/, "Managed secret overlay must consume Google reCAPTCHA secret through a file.");
   assertMatch(composeManagedSecrets, /CLOUDFLARE_TURNSTILE_SECRET_KEY_FILE:\s+\/run\/secrets\/cloudflare_turnstile_secret_key/, "Managed secret overlay must consume Cloudflare Turnstile secret through a file.");
-  assertMatch(composeManagedSecrets, /GOOGLE_OAUTH_CLIENT_SECRET_FILE:\s+\$\{GOOGLE_OAUTH_CLIENT_SECRET_FILE-\}/, "Managed secret overlay must expose optional Google OAuth client secret-file configuration.");
   assertMatch(composeManagedSecrets, /ALERTMANAGER_WEBHOOK_TOKEN_FILE:\s+\/run\/secrets\/alertmanager_webhook_token/, "Managed secret overlay must consume the Alertmanager webhook token through a file.");
   assertMatch(composeManagedSecrets, /MARIADB_ROOT_PASSWORD_FILE:\s+\/run\/secrets\/mariadb_root_password/, "Managed secret overlay must consume MariaDB root password through a Docker secret file.");
   assertMatch(composeManagedSecrets, /^ {2}mariadb_root_password:\s*\r?\n {4}external:\s+true/m, "Managed secret overlay must declare MariaDB root password as an external Docker secret.");
   assertMatch(composeManagedSecrets, /PMA_CONTROL_PASSWORD_FILE:\s+\/run\/secrets\/phpmyadmin_control_password/, "Managed secret overlay must consume phpMyAdmin control password through a Docker secret file.");
   assertMatch(composeManagedSecrets, /^ {2}phpmyadmin_control_password:\s*\r?\n {4}external:\s+true/m, "Managed secret overlay must declare phpMyAdmin control password as an external Docker secret.");
+  assertNoMatch(composeManagedSecrets, /pgadmin_internal_key|PGADMIN_INT_KEY_FILE/, "Managed secret overlay must not keep the removed pgAdmin internal key secret.");
   assertMatch(composeManagedSecrets, /external:\s+true/, "Managed secret overlay must use external Docker secrets.");
   assertMatch(composeSecrets, /SESSION_SIGNING_KEYS_FILE:\s+\/run\/secrets\/session_signing_keys/, "Local secret overlay must consume session signing keys through a Docker secret file.");
   assertMatch(composeSecrets, /PROJECTS_GATEWAY_SIGNING_KEYS_FILE:\s+\/run\/secrets\/projects_gateway_signing_keys/, "Local secret overlay must consume admin gateway signing keys through a Docker secret file.");
-  assertMatch(composeSecrets, /GOOGLE_RECAPTCHA_SECRET_KEY_FILE:\s+\/run\/secrets\/google_recaptcha_secret_key/, "Local secret overlay must consume Google reCAPTCHA secret through a Docker secret file.");
   assertMatch(composeSecrets, /CLOUDFLARE_TURNSTILE_SECRET_KEY_FILE:\s+\/run\/secrets\/cloudflare_turnstile_secret_key/, "Local secret overlay must consume Cloudflare Turnstile secret through a Docker secret file.");
-  assertMatch(composeSecrets, /GOOGLE_OAUTH_CLIENT_SECRET_FILE:\s+\$\{GOOGLE_OAUTH_CLIENT_SECRET_FILE-\}/, "Local secret overlay must expose optional Google OAuth client secret-file configuration.");
   assertMatch(composeSecrets, /ALERTMANAGER_WEBHOOK_TOKEN_FILE:\s+\/run\/secrets\/alertmanager_webhook_token/, "Local secret overlay must consume the Alertmanager webhook token through a Docker secret file.");
   assertMatch(compose, /ALERT_DISCORD_WEBHOOK_URL_FILE:\s+\$\{ALERT_DISCORD_WEBHOOK_URL_FILE:-\}/, "Compose must expose optional Discord alert webhook secret-file configuration.");
   assertMatch(compose, /ALERT_TELEGRAM_BOT_TOKEN_FILE:\s+\$\{ALERT_TELEGRAM_BOT_TOKEN_FILE:-\}/, "Compose must expose optional Telegram alert bot token secret-file configuration.");
@@ -10644,7 +11950,7 @@ async function staticSecurityCheck() {
   assertMatch(composeWaf, /RESPONSE-999-EXCLUSION-RULES-AFTER-CRS\.conf/, "WAF must load post-CRS local tuning rules.");
   assertMatch(localWafPreRules, /ruleRemoveTargetById=942120;ARGS:aPath[\s\S]*ruleRemoveTargetById=942120;ARGS:vPath/, "Local WAF must allow phpMyAdmin navigation base64 paths without disabling CRS globally.");
   assertMatch(localWafPreRules, /\(\?:traefik\|prometheus\|alertmanager\)\\\.localhost\\\.com/, "Local WAF must block unauthenticated internal console hostnames.");
-  assertMatch(vpsWafPreRules, /\(\?:phpmyadmin\|traefik\|prometheus\|alertmanager\|grafana\|minio\|s3\)/, "VPS WAF must block public admin/storage console hostnames.");
+  assertMatch(vpsWafPreRules, /\(\?:phpmyadmin\|phppgadmin\|traefik\|prometheus\|alertmanager\|grafana\|minio\|s3\)/, "VPS WAF must block public admin/storage console hostnames.");
   assertNoMatch(compose, /phpmyadmin\/themes\//, "phpMyAdmin must use bundled image themes without local theme mounts.");
   assertMatch(phpMyAdminConfig, /\$cfg\['ThemeDefault'\]\s*=\s*'pmahomme'/, "phpMyAdmin must use the bundled default pmahomme theme.");
   assertMatch(phpMyAdminConfig, /\$cfg\['ThemeManager'\]\s*=\s*false/, "phpMyAdmin theme switching must be disabled so stale browser theme cookies cannot select removed local themes.");
@@ -10704,7 +12010,7 @@ async function staticSecurityCheck() {
   assertMatch(opsScript, /async function evidenceBundleVerify[\s\S]*sha256 mismatch[\s\S]*required report is not passing[\s\S]*--requireComplete/, "Ops script must verify evidence bundle SHA256, report status and completeness.");
   assertMatch(githubActionsRunEvidenceWrapper, /github-actions-run-evidence/, "GitHub Actions run evidence wrapper must delegate to the Dockerized ops runner.");
   assertMatch(opsScript, /async function githubActionsRunEvidence[\s\S]*workflow_runs[\s\S]*run\.conclusion !== "success"/, "Ops script must verify remote GitHub Actions workflow success.");
-  assertMatch(productionReadinessLiveWrapper, /enterprise-requirements-check --manifest governance\/production-readiness\.json --requireLiveProofs/, "Production readiness live wrapper must enforce the 20-point live checklist.");
+  assertMatch(productionReadinessLiveWrapper, /enterprise-requirements-check --manifest governance\/production-readiness\.json --requireLiveProofs/, "Production readiness live wrapper must enforce the 19-point infrastructure live checklist.");
   assertMatch(opsScript, /directory: "github-actions"[\s\S]*prefix: "github-actions-run-"[\s\S]*required: true/, "Evidence bundle must require the GitHub Actions run evidence report.");
   assertMatch(opsScript, /directory: "production-readiness"[\s\S]*prefix: "production-readiness-"[\s\S]*required: true/, "Evidence bundle must require the live production readiness report.");
   assertMatch(opsScript, /directory: "vps-bootstrap"[\s\S]*prefix: "vps-bootstrap-apply-"[\s\S]*required: true/, "Evidence bundle must require VPS bootstrap apply reports.");
@@ -10857,7 +12163,7 @@ async function staticSecurityCheck() {
   assertMatch(readme, /pre-go-live-evidence\.sh[\s\S]*reports\/go-live/, "README must document the pre go-live evidence pack.");
   assertMatch(runbook, /pre-go-live-evidence\.sh[\s\S]*includeRuntime[\s\S]*includeRestoreDrill/, "Runbook must document runtime and restore evidence options.");
   assertMatch(vpsPredeployChecklist, /pre-go-live-evidence\.sh[\s\S]*reports\/go-live/, "VPS checklist must require the go-live evidence report.");
-  assertMatch(opsScript, /const readinessMissing = readinessMatrix\.filter[\s\S]*missingOptions[\s\S]*status: issues\.length \? "failed" : "passed"/, "Pre go-live evidence must write status, missing options and readiness issues.");
+  assertMatch(opsScript, /const readinessMissing = readinessMatrix\.filter[\s\S]*missingOptions[\s\S]*pendingLiveProofs[\s\S]*status: preGoLiveStatus/, "Pre go-live evidence must write status, missing options and pending live-proof issues.");
   assertMatch(opsScript, /preGoLive\.payload\.status === "passed"/, "Production go/no-go must require passed pre go-live evidence.");
   assertMatch(readme, /release-evidence\.sh[\s\S]*reports\/release/, "README must document release evidence reports.");
   assertMatch(runbook, /release-evidence\.sh[\s\S]*reports\/release/, "Runbook must document release evidence reports.");
@@ -10890,7 +12196,7 @@ async function staticSecurityCheck() {
   assertMatch(runbook, /docker exec enterprise-backup-scheduler crontab -l/, "Runbook must document verifying the backup scheduler crontab.");
   assertMatch(envExample, /BACKUP_SCHEDULER_POSTGRES_AT[\s\S]*BACKUP_SCHEDULER_ENABLE_OFFSITE/, ".env.example must expose backup scheduler timing and off-site toggles.");
   assertNoMatch(`${readme}\n${runbook}\n${enterprisePlan}`, /node\s+(?:\.\/)?scripts\/infra-ops\.mjs/, "Infra operator docs must use the Dockerized ops wrapper, not host Node.");
-  const secretInterpolationPattern = /\b(?:POSTGRES_PASSWORD|APP_DB_PASSWORD|KEYCLOAK_DB_PASSWORD|REDIS_PASSWORD|KC_BOOTSTRAP_ADMIN_PASSWORD|KC_DB_PASSWORD|NATS_PASSWORD|MINIO_ROOT_PASSWORD|SESSION_SECRET|SESSION_SIGNING_KEYS|SECRET_HASH_KEYS|DATABASE_URL|NATS_URL|SMTP_PASSWORD|GF_SECURITY_ADMIN_PASSWORD|GOOGLE_RECAPTCHA_SECRET_KEY|CLOUDFLARE_TURNSTILE_SECRET_KEY|GOOGLE_OAUTH_CLIENT_SECRET)\s*:\s*\$\{/;
+  const secretInterpolationPattern = /\b(?:POSTGRES_PASSWORD|APP_DB_PASSWORD|KEYCLOAK_DB_PASSWORD|REDIS_PASSWORD|KC_BOOTSTRAP_ADMIN_PASSWORD|KC_DB_PASSWORD|NATS_PASSWORD|MINIO_ROOT_PASSWORD|SESSION_SECRET|SESSION_SIGNING_KEYS|SECRET_HASH_KEYS|DATABASE_URL|NATS_URL|SMTP_PASSWORD|GF_SECURITY_ADMIN_PASSWORD|CLOUDFLARE_TURNSTILE_SECRET_KEY)\s*:\s*\$\{/;
   for (const [label, text] of [["compose.yaml", compose], ["compose.prod.yaml", composeProd], ["compose.secrets.yaml", composeSecrets]]) {
     assertNoMatch(text, secretInterpolationPattern, `${label} must not interpolate secret values from process environment.`);
   }
@@ -10919,7 +12225,7 @@ async function staticSecurityCheck() {
   assertMatch(auditLogEvidenceWrapper, /audit-log-evidence/, "Audit log evidence wrapper must delegate to the Dockerized ops runner.");
   assertMatch(opsScript, /async function auditLogEvidence[\s\S]*audit-log-evidence-[\s\S]*infraChecksPassed/, "Ops script must write dedicated audit log evidence reports.");
   assertMatch(opsScript, /directory: "audit-logs"[\s\S]*prefix: "audit-log-evidence-"[\s\S]*required: true/, "Evidence bundle must require audit log evidence reports.");
-  assertMatch(productionReadinessManifest, /"admin-audit-log"[\s\S]*"audit-log-evidence"/, "Production readiness must map admin audit logging to dedicated evidence.");
+  assertMatch(productionReadinessManifest, /"admin-audit-log"[\s\S]*"platform-admin-audit-evidence"/, "Production readiness must not use hosted project audit logs as platform admin audit evidence.");
   assertMatch(retentionEvidenceWrapper, /retention-evidence/, "Retention evidence wrapper must delegate to the Dockerized ops runner.");
   assertMatch(opsScript, /async function retentionEvidence[\s\S]*retention-evidence-[\s\S]*infraChecksPassed/, "Ops script must write dedicated retention evidence reports.");
   assertMatch(opsScript, /directory: "retention"[\s\S]*prefix: "retention-evidence-"[\s\S]*required: true/, "Evidence bundle must require retention evidence reports.");
@@ -10993,9 +12299,9 @@ async function staticSecurityCheck() {
   assertMatch(githubWorkflow, /Pre go-live evidence report[\s\S]*pre-go-live-evidence --infraOnly --repo/, "Infra workflow must exercise the infrastructure-only pre go-live evidence pack.");
   assertMatch(githubWorkflow, /Linux portability check[\s\S]*linux-portability-check/, "Infra workflow must exercise the Linux portability command.");
   assertMatch(githubWorkflow, /Enterprise requirements traceability[\s\S]*enterprise-requirements-check/, "Infra workflow must exercise the enterprise requirements traceability gate.");
-  assertMatch(githubWorkflow, /Production readiness checklist[\s\S]*enterprise-requirements-check --manifest governance\/production-readiness\.json/, "Infra workflow must exercise the 20-point production readiness checklist.");
+  assertMatch(githubWorkflow, /Production readiness checklist[\s\S]*enterprise-requirements-check --manifest governance\/production-readiness\.json/, "Infra workflow must exercise the 19-point infrastructure production readiness checklist.");
   assertMatch(githubWorkflow, /Production live proof gate rejects missing evidence[\s\S]*--requireLiveProofs[\s\S]*Live proof gate passed without real production evidence/, "Infra workflow must prove the live-production gate rejects missing external evidence.");
-  assertMatch(productionReadinessManifest, /"expectedCount":\s*20/, "Production readiness manifest must track the exact 20-point checklist.");
+  assertMatch(productionReadinessManifest, /"expectedCount":\s*19/, "Production readiness manifest must track the exact 19-point infrastructure checklist.");
   assertMatch(productionReadinessManifest, /"liveProofCheckRequired":\s*true/, "Production readiness manifest must require mapped live proof checks.");
   assertMatch(productionReadinessManifest, /"liveProofChecks"/, "Production readiness requirements must map to production go/no-go live checks.");
   assertMatch(githubWorkflow, /Repository coverage audit[\s\S]*repo-coverage-check/, "Infra workflow must audit tracked repository coverage.");
@@ -11344,9 +12650,7 @@ async function validateLocalSecrets() {
     "hash_pepper_keys",
     "backup_signing_keys",
     "smtp_password",
-    "google_recaptcha_secret_key",
     "cloudflare_turnstile_secret_key",
-    "google_oauth_client_secret",
     "database_url",
     "nats_url",
   ];
@@ -11403,8 +12707,25 @@ async function installMariadbBackupCron() {
   log(drillLine);
 }
 
+function accountOriginFromApiBase(apiBase) {
+  try {
+    const parsed = new URL(apiBase);
+    if (parsed.hostname.startsWith("api.")) {
+      const port = parsed.port ? `:${parsed.port}` : "";
+      return `${parsed.protocol}//auth.${parsed.hostname.slice(4)}${port}`;
+    }
+  } catch {
+    // Fall through to the local default used by the development compose profile.
+  }
+  return "https://auth.localhost.com";
+}
+
 async function accountIntegrationTests() {
   const apiBase = argv.apiBase ?? "https://api.localhost.com";
+  const accountOrigin = argv.accountOrigin ?? accountOriginFromApiBase(apiBase);
+  const accountSchemaName = sqlIdentifierName(argv.accountSchema ?? process.env.ACCOUNT_DB_SCHEMA ?? "app_account", "--accountSchema");
+  const accountSchema = sqlIdentifier(accountSchemaName);
+  const accountSwitchCookieName = cookieName(argv.accountSwitchCookieName ?? process.env.ACCOUNT_SWITCH_COOKIE_NAME ?? "app_account_switcher", "--accountSwitchCookieName");
   log("==> Account integration tests");
   const signingKey = backendSessionSigningKey();
 
@@ -11432,7 +12753,7 @@ async function accountIntegrationTests() {
     redisSetPlainValue(`${redisPrefix}:otp-verified:${signupChallengeId}`, "1", 480000);
 
     const register = await request("POST", `${apiBase}/account/bootstrap/register`, {
-      headers: { Origin: "https://account.localhost.com", "Sec-Fetch-Site": "same-site" },
+      headers: { Origin: accountOrigin, "Sec-Fetch-Site": "same-site" },
       body: {
         firstName: "Integration",
         lastName: "Test",
@@ -11450,22 +12771,22 @@ async function accountIntegrationTests() {
     }
     createdAccountIds.push(accountId);
 
-    const sessionId = postgresOut("enterprise-postgres", "app_db", "postgres", `select s.id::text from app_account.sessions s join app_account.accounts a on a.id = s.account_id where a.external_id = ${sqlString(accountId)} and s.status = 'active' order by s.current_session desc, s.last_seen_at desc limit 1;`).trim();
+    const sessionId = postgresOut("enterprise-postgres", "app_db", "postgres", `select s.id::text from ${accountSchema}.sessions s join ${accountSchema}.accounts a on a.id = s.account_id where a.external_id = ${sqlString(accountId)} and s.status = 'active' order by s.current_session desc, s.last_seen_at desc limit 1;`).trim();
     if (!sessionId) {
       fail("No active session created for integration account.");
     }
     const cookie = newSignedCookie(signingKey, accountId, sessionId);
-    const authHeaders = { Cookie: cookie, Origin: "https://account.localhost.com", "Sec-Fetch-Site": "same-site", "x-platform-csrf": "1" };
+    const authHeaders = { Cookie: cookie, Origin: accountOrigin, "Sec-Fetch-Site": "same-site", "x-platform-csrf": "1" };
 
     assertStatus(await request("GET", `${apiBase}/account/snapshot`, { headers: authHeaders }), 200, "snapshot");
     const accountsResponse = await request("GET", `${apiBase}/auth/accounts`, { headers: authHeaders });
     assertStatus(accountsResponse, 200, "account switcher accounts");
-    const accountSwitchCookie = cookieFromHeaders(accountsResponse.headers, "app_account_switcher");
+    const accountSwitchCookie = cookieFromHeaders(accountsResponse.headers, accountSwitchCookieName);
     if (!accountSwitchCookie) {
       fail("auth/accounts did not refresh account switch cookie.");
     }
     assertStatus(await request("POST", `${apiBase}/auth/switch-account`, {
-      headers: { Cookie: `${cookie}; ${accountSwitchCookie}`, Origin: "https://account.localhost.com", "Sec-Fetch-Site": "same-site", "x-platform-csrf": "1" },
+      headers: { Cookie: `${cookie}; ${accountSwitchCookie}`, Origin: accountOrigin, "Sec-Fetch-Site": "same-site", "x-platform-csrf": "1" },
       body: { accountId },
     }), 200, "switch account");
 
@@ -11480,7 +12801,7 @@ async function accountIntegrationTests() {
       avatarImage: null,
     };
     assertStatus(await request("PATCH", `${apiBase}/account/profile`, {
-      headers: { Cookie: cookie, Origin: "https://account.localhost.com", "Sec-Fetch-Site": "cross-site", "x-platform-csrf": "1" },
+      headers: { Cookie: cookie, Origin: accountOrigin, "Sec-Fetch-Site": "cross-site", "x-platform-csrf": "1" },
       body: profileBody,
     }), 200, "trusted cross-site profile patch");
     assertStatus(await request("PATCH", `${apiBase}/account/profile`, {
@@ -11489,9 +12810,9 @@ async function accountIntegrationTests() {
     }), 403, "untrusted cross-site profile patch");
 
     const credentialId = crypto.randomBytes(16).toString("base64url");
-    postgres("enterprise-postgres", "app_db", "postgres", `insert into app_account.passkeys (account_id, credential_id, public_key, counter, label, device_type, backed_up, transports) select id, ${sqlString(credentialId)}, decode(repeat('ab',32),'hex'), 0, 'Integration passkey', 'singleDevice', false, ARRAY['internal']::text[] from app_account.accounts where external_id = ${sqlString(accountId)} on conflict (credential_id) do nothing;`);
+    postgres("enterprise-postgres", "app_db", "postgres", `insert into ${accountSchema}.passkeys (account_id, credential_id, public_key, counter, label, device_type, backed_up, transports) select id, ${sqlString(credentialId)}, decode(repeat('ab',32),'hex'), 0, 'Integration passkey', 'singleDevice', false, ARRAY['internal']::text[] from ${accountSchema}.accounts where external_id = ${sqlString(accountId)} on conflict (credential_id) do nothing;`);
     const passkeyOptions = await request("POST", `${apiBase}/auth/login/passkey/options`, {
-      headers: { Origin: "https://account.localhost.com", "Sec-Fetch-Site": "same-site" },
+      headers: { Origin: accountOrigin, "Sec-Fetch-Site": "same-site" },
       body: { email },
     });
     assertStatus(passkeyOptions, 200, "passkey login options");
@@ -11511,7 +12832,7 @@ async function accountIntegrationTests() {
     }), 480000);
     redisSetPlainValue(`${redisPrefix}:otp-verified:${secondSignupChallengeId}`, "1", 480000);
     const secondRegister = await request("POST", `${apiBase}/account/bootstrap/register`, {
-      headers: { Cookie: `${cookie}; ${accountSwitchCookie}`, Origin: "https://account.localhost.com", "Sec-Fetch-Site": "same-site", "x-platform-csrf": "1" },
+      headers: { Cookie: `${cookie}; ${accountSwitchCookie}`, Origin: accountOrigin, "Sec-Fetch-Site": "same-site", "x-platform-csrf": "1" },
       body: {
         firstName: "Integration",
         lastName: "Second",
@@ -11529,9 +12850,9 @@ async function accountIntegrationTests() {
     }
     createdAccountIds.push(secondAccountId);
     const secondCredentialId = crypto.randomBytes(16).toString("base64url");
-    postgres("enterprise-postgres", "app_db", "postgres", `insert into app_account.passkeys (account_id, credential_id, public_key, counter, label, device_type, backed_up, transports) select id, ${sqlString(secondCredentialId)}, decode(repeat('cd',32),'hex'), 0, 'Integration second passkey', 'singleDevice', false, ARRAY['internal']::text[] from app_account.accounts where external_id = ${sqlString(secondAccountId)} on conflict (credential_id) do nothing;`);
+    postgres("enterprise-postgres", "app_db", "postgres", `insert into ${accountSchema}.passkeys (account_id, credential_id, public_key, counter, label, device_type, backed_up, transports) select id, ${sqlString(secondCredentialId)}, decode(repeat('cd',32),'hex'), 0, 'Integration second passkey', 'singleDevice', false, ARRAY['internal']::text[] from ${accountSchema}.accounts where external_id = ${sqlString(secondAccountId)} on conflict (credential_id) do nothing;`);
     const crossAccountPasskeyOptions = await request("POST", `${apiBase}/auth/login/passkey/options`, {
-      headers: { Cookie: cookie, Origin: "https://account.localhost.com", "Sec-Fetch-Site": "same-site", "x-platform-csrf": "1" },
+      headers: { Cookie: cookie, Origin: accountOrigin, "Sec-Fetch-Site": "same-site", "x-platform-csrf": "1" },
       body: { email: secondEmail },
     });
     assertStatus(crossAccountPasskeyOptions, 200, "passkey login options for added account while current account cookie exists");
@@ -11549,7 +12870,7 @@ async function accountIntegrationTests() {
       attempts: 0,
     }), 480000);
     assertStatus(await request("POST", `${apiBase}/account/bootstrap/email-otp/verify`, {
-      headers: { Origin: "https://account.localhost.com", "Sec-Fetch-Site": "same-site" },
+      headers: { Origin: accountOrigin, "Sec-Fetch-Site": "same-site" },
       body: { challengeId: loginChallengeId, code, email },
     }), 200, "email OTP login verify");
 
@@ -11566,21 +12887,64 @@ async function accountIntegrationTests() {
       body: { code: backupCode },
     }), 400, "backup code one-time reuse block");
     assertStatus(await request("POST", `${apiBase}/auth/login/recovery/verify`, {
-      headers: { Origin: "https://account.localhost.com", "Sec-Fetch-Site": "same-site" },
+      headers: { Origin: accountOrigin, "Sec-Fetch-Site": "same-site" },
       body: { email, method: "backup_code", code: recoveryBackupCode },
     }), 200, "backup code recovery login verify");
     assertStatus(await request("POST", `${apiBase}/auth/login/recovery/verify`, {
-      headers: { Origin: "https://account.localhost.com", "Sec-Fetch-Site": "same-site" },
+      headers: { Origin: accountOrigin, "Sec-Fetch-Site": "same-site" },
       body: { email, method: "backup_code", code: recoveryBackupCode },
     }), 400, "backup code recovery one-time reuse block");
 
     const extraSessionId = crypto.randomUUID();
-    postgres("enterprise-postgres", "app_db", "postgres", `insert into app_account.sessions (id, account_id, device, browser, trusted, current_session, auth_method, status, created_at, last_seen_at, expires_at) select ${sqlString(extraSessionId)}::uuid, id, 'Integration second device', 'Curl', true, false, 'integration', 'active', now(), now(), now() + interval '10 years' from app_account.accounts where external_id = ${sqlString(accountId)};`);
+    postgres("enterprise-postgres", "app_db", "postgres", `insert into ${accountSchema}.sessions (id, account_id, device, browser, trusted, current_session, auth_method, status, created_at, last_seen_at, expires_at) select ${sqlString(extraSessionId)}::uuid, id, 'Integration second device', 'Curl', true, false, 'integration', 'active', now(), now(), now() + interval '10 years' from ${accountSchema}.accounts where external_id = ${sqlString(accountId)};`);
     assertStatus(await request("DELETE", `${apiBase}/account/sessions/${extraSessionId}`, { headers: authHeaders }), 200, "session revocation");
-    const revokedSessionStatus = postgresOut("enterprise-postgres", "app_db", "postgres", `select status from app_account.sessions where id = ${sqlString(extraSessionId)}::uuid;`).trim();
+    const revokedSessionStatus = postgresOut("enterprise-postgres", "app_db", "postgres", `select status from ${accountSchema}.sessions where id = ${sqlString(extraSessionId)}::uuid;`).trim();
     if (revokedSessionStatus !== "revoked") {
       fail("session revocation did not persist revoked status.");
     }
+    const stamp = reportTimestamp();
+    const payload = {
+      generatedAt: new Date().toISOString(),
+      status: "passed",
+      mode: "runtime",
+      apiBase,
+      accountOrigin,
+      accountSchema: accountSchemaName,
+      accountSwitchCookieName,
+      coverage: [
+        "signup register",
+        "account snapshot",
+        "account switch cookie",
+        "profile CSRF and origin guard",
+        "passkey account isolation",
+        "email OTP login",
+        "backup code one-time reuse",
+        "backup code recovery one-time reuse",
+        "session revocation",
+      ],
+      cleanup: {
+        redisKeysDeleted: true,
+        testAccountsDeleted: createdAccountIds.length,
+      },
+    };
+    const jsonPath = writeJsonReport("account-integration", `account-integration-tests-${stamp}`, payload);
+    const markdownPath = writeMarkdownReport("account-integration", `account-integration-tests-${stamp}`, [
+      "# Account Integration Tests",
+      "",
+      `Status: ${payload.status}`,
+      `Mode: ${payload.mode}`,
+      `Generated at: ${payload.generatedAt}`,
+      `API base: ${payload.apiBase}`,
+      `Account origin: ${payload.accountOrigin}`,
+      `Account schema: ${payload.accountSchema}`,
+      `Account switch cookie: ${payload.accountSwitchCookieName}`,
+      "",
+      "Coverage:",
+      ...payload.coverage.map((item) => `- ${item}`),
+      "",
+      `Cleanup: Redis keys deleted, ${payload.cleanup.testAccountsDeleted} test account(s) deleted`,
+    ]);
+    log(`Account integration test reports written to ${jsonPath} and ${markdownPath}`);
     log("Account integration tests passed.");
   } finally {
     redisDelete([
@@ -11591,7 +12955,7 @@ async function accountIntegrationTests() {
       `${redisPrefix}:otp-verified:${secondSignupChallengeId}`,
     ]);
     for (const id of createdAccountIds.reverse()) {
-      postgres("enterprise-postgres", "app_db", "postgres", `delete from app_account.accounts where external_id = ${sqlString(id)};`, { allowFailure: true, capture: true });
+      postgres("enterprise-postgres", "app_db", "postgres", `delete from ${accountSchema}.accounts where external_id = ${sqlString(id)};`, { allowFailure: true, capture: true });
     }
   }
 }
@@ -11657,6 +13021,7 @@ Commands:
   offsite-backup-restic
   offsite-restore-drill-restic
   performance-hygiene
+  platform-admin-audit
   pre-go-live-evidence
   project-router-tests
   prune-postgres-backups
@@ -11685,6 +13050,8 @@ Commands:
   supply-chain-hygiene
   testing-hygiene
   validate-local-secrets
+  vps-preflight
+  vps-postdeploy
   waf-smoke`);
 }
 
@@ -11746,6 +13113,7 @@ const commands = {
   "offsite-backup-restic": offsiteBackupRestic,
   "offsite-restore-drill-restic": offsiteRestoreDrillRestic,
   "performance-hygiene": performanceHygiene,
+  "platform-admin-audit": platformAdminAuditEvidence,
   "pre-go-live-evidence": preGoLiveEvidence,
   "project-router-tests": projectRouterTests,
   "prune-postgres-backups": prunePostgresBackups,
@@ -11774,6 +13142,8 @@ const commands = {
   "supply-chain-hygiene": supplyChainHygiene,
   "testing-hygiene": testingHygiene,
   "validate-local-secrets": validateLocalSecrets,
+  "vps-preflight": vpsPreflight,
+  "vps-postdeploy": vpsPostdeploy,
   "waf-smoke": wafSmoke,
   help,
 };

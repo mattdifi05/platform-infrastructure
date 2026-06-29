@@ -2,10 +2,9 @@
 
 ## Assets
 
-- Account profile and recovery data.
-- Passkey public credentials and counters.
-- PostgreSQL application data.
-- SMTP credentials and OTP delivery.
+- Control Center admin metadata, provider metadata and operation audit records.
+- PostgreSQL/MariaDB service data and explicitly attached workload data.
+- SMTP/provider credentials for infrastructure alerts.
 - MinIO objects.
 - Observability logs and metrics.
 
@@ -13,14 +12,14 @@
 
 - Browser to Traefik over HTTPS.
 - Traefik to internal services on `enterprise_net`.
-- Backend to PostgreSQL/Redis/NATS/MinIO.
+- Platform runtime templates and hosted workloads to PostgreSQL/Redis/NATS/MinIO.
 - SMTP provider outside the infrastructure boundary.
 
 ## Primary threats
 
-- Session theft: mitigated by `HttpOnly`, `Secure`, signed cookies and server-side session state.
-- CSRF on mutating endpoints: mitigated by Origin checks and JSON APIs.
-- Account enumeration: UI should keep generic error copy; backend should continue avoiding detailed public errors.
+- Admin session theft: mitigated by `HttpOnly`, `Secure`, signed cookies and server-side session state.
+- CSRF on Control Center mutating endpoints: mitigated by Origin checks and JSON APIs.
+- Hosted workload enumeration: app-specific public auth flows are outside the infra gate and must be tested by the hosted app.
 - Secret leakage: `.env` ignored; production should move to secret manager.
 - Backup compromise: backups must be encrypted before offsite storage.
 - Supply-chain drift: CI must run lockfile install, typecheck, build, audit and image scanning.
@@ -29,7 +28,7 @@
 
 - Local direct ports are bound to `127.0.0.1` for development convenience.
 - `.env` exists locally and must not be copied to shared systems.
-- The custom account layer is active while Keycloak remains prepared for OIDC hardening.
+- Hosted workload compatibility paths may exist locally but are not platform go-live gates.
 
 ## Production non-negotiables
 

@@ -269,8 +269,14 @@ services:
       CONTROL_CENTER_PORT: 8080
       CONTROL_CENTER_ENV: ${CONTROL_CENTER_ENV:-local}
       CONTROL_CENTER_AUTH_REQUIRED: ${CONTROL_CENTER_AUTH_REQUIRED:-false}
+      CONTROL_CENTER_DISCOVER_HOSTED_PROJECTS: ${CONTROL_CENTER_DISCOVER_HOSTED_PROJECTS:-false}
       CONTROL_CENTER_ADMIN_PASSWORD_SHA256: ${CONTROL_CENTER_ADMIN_PASSWORD_SHA256:-}
       CONTROL_CENTER_SESSION_KEYS_FILE: /run/secrets/projects_gateway_signing_keys
+      CONTROL_CENTER_PHPPGADMIN_INTERNAL_URL: ${CONTROL_CENTER_PHPPGADMIN_INTERNAL_URL:-http://phppgadmin:80}
+      CONTROL_CENTER_POSTGRES_HOST: ${CONTROL_CENTER_POSTGRES_HOST:-postgres}
+      CONTROL_CENTER_POSTGRES_PORT: ${CONTROL_CENTER_POSTGRES_PORT:-5432}
+      CONTROL_CENTER_POSTGRES_APP_USER: ${APP_DB_USER:-app_user}
+      CONTROL_CENTER_POSTGRES_APP_PASSWORD_FILE: /run/secrets/app_db_password
       CONTROL_CENTER_DOCS_ROOT: /var/www/infra-docs
       PROJECTS_ROOT: /var/www/projects
       PROJECT_STATE_FILE: /var/www/project-state/projects.json
@@ -312,6 +318,7 @@ services:
       - ./projects-portal/state:/var/www/project-state
     secrets:
       - projects_gateway_signing_keys
+      - app_db_password
     networks:
       - enterprise_net
     healthcheck:
@@ -343,20 +350,18 @@ services:
       ADMIN_HOST: ${ADMIN_HOST:-portal.${DOMAIN:-localhost.com}}
       PROJECTS_HOST: ${PROJECTS_HOST:-}
       PROJECT_HOST_SUFFIX: ${PROJECT_HOST_SUFFIX:-.localhost.com}
-      PHP_UPSTREAM: http://php-apache:80
       CONTROL_CENTER_UPSTREAM: http://control-center:8080
       NODE_PROJECT_HOSTS: ${NODE_PROJECT_HOSTS:-}
+      PROJECT_UPSTREAMS: ${PROJECT_UPSTREAMS:-}
+      PHP_PROJECT_UPSTREAMS: ${PHP_PROJECT_UPSTREAMS:-}
       NODE_PROJECT_UPSTREAMS: ${NODE_PROJECT_UPSTREAMS:-}
-      NODE_PROJECT_COMMANDS: ${NODE_PROJECT_COMMANDS:-}
-      NODE_PROJECT_ENV: ${NODE_PROJECT_ENV:-development}
+      STATIC_PROJECT_UPSTREAMS: ${STATIC_PROJECT_UPSTREAMS:-}
     volumes:
       - ./project-router:/app:ro
       - ${PHP_PROJECTS_DIR:-../src}:/var/www/projects
       - ${PROJECTS_SYMLINK_TARGET_ROOT:-..}:/mnt/host/d/docker
       - ./projects-portal/state:/var/www/project-state
     depends_on:
-      php-apache:
-        condition: service_healthy
       control-center:
         condition: service_healthy
     networks:
@@ -384,7 +389,9 @@ services:
       - ./mariadb/conf.d:/etc/mysql/conf.d:ro
       - ./traefik/certs:/etc/mysql/ssl:ro
     networks:
-      - enterprise_net
+      enterprise_net:
+        aliases:
+          - platform.local
     healthcheck:
       test: ["CMD-SHELL", "mariadb -uroot -p\"$${MARIADB_ROOT_PASSWORD}\" -N -e 'select 1' >/dev/null"]
       interval: 5s
@@ -403,12 +410,13 @@ services:
       - no-new-privileges:true
     restart: unless-stopped
     environment:
-      PMA_HOST: mariadb
+      PMA_HOST: platform.local
       PMA_PORT: 3306
       PMA_SSL_CA: /etc/phpmyadmin/certs/ca.pem
       PMA_SSL_VERIFIES: "1"
       UPLOAD_LIMIT: 256M
     volumes:
+      - ./phpmyadmin/apache-forwarded-proto.conf:/etc/apache2/conf-enabled/forwarded-proto.conf:ro
       - ./phpmyadmin/config.user.inc.php:/etc/phpmyadmin/config.user.inc.php:ro
       - ./traefik/certs:/etc/phpmyadmin/certs:ro
     depends_on:
@@ -416,6 +424,48 @@ services:
         condition: service_healthy
     expose:
       - "80"
+    networks:
+      - enterprise_net
+
+  phppgadmin:
+    image: ${PHPPGADMIN_IMAGE:-tozd/phppgadmin:latest}
+    container_name: phppgadmin
+    profiles:
+      - admin
+    init: true
+    pids_limit: 512
+    logging: *default_logging
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    environment:
+      PHPPGADMIN_HOST: ${CONTROL_CENTER_POSTGRES_HOST:-postgres}
+      PHPPGADMIN_PORT: ${CONTROL_CENTER_POSTGRES_PORT:-5432}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    expose:
+      - "80"
+    networks:
+      - enterprise_net
+
+  local-dns:
+    image: ${COREDNS_IMAGE:-coredns/coredns:1.13.1}
+    container_name: enterprise-local-dns
+    profiles:
+      - dns
+    init: true
+    pids_limit: 128
+    logging: *default_logging
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    command: ["-conf", "/etc/coredns/Corefile"]
+    volumes:
+      - ./dns:/etc/coredns:ro
+    expose:
+      - "53/tcp"
+      - "53/udp"
     networks:
       - enterprise_net
 
@@ -457,21 +507,15 @@ services:
       MINIO_ROOT_PASSWORD_FILE: /run/secrets/minio_root_password
       MINIO_DEFAULT_BUCKET: ${MINIO_DEFAULT_BUCKET:-local-bucket}
       API_PUBLIC_URL: ${API_PUBLIC_URL:-http://backend:3000}
-      ACCOUNT_PUBLIC_URL: ${ACCOUNT_PUBLIC_URL:-https://portal.localhost.com}
-      UI_PUBLIC_URL: ${UI_PUBLIC_URL:-https://portal.localhost.com}
-      WEBAUTHN_RP_ID: ${WEBAUTHN_RP_ID:-portal.localhost.com}
-      WEBAUTHN_ORIGINS: ${WEBAUTHN_ORIGINS:-https://portal.localhost.com}
-      CORS_ORIGINS: ${CORS_ORIGINS:-https://portal.localhost.com}
+      ACCOUNT_PUBLIC_URL: ${ACCOUNT_PUBLIC_URL:-${AUTH_PUBLIC_URL:-https://auth.localhost.com}}
+      UI_PUBLIC_URL: ${UI_PUBLIC_URL:-${APP_PUBLIC_URL:-https://app.localhost.com}}
+      WEBAUTHN_RP_ID: ${WEBAUTHN_RP_ID:-auth.localhost.com}
+      WEBAUTHN_ORIGINS: ${WEBAUTHN_ORIGINS:-https://auth.localhost.com}
+      CORS_ORIGINS: ${CORS_ORIGINS:-https://auth.localhost.com,https://app.localhost.com,https://portal.localhost.com}
       BOT_PROTECTION_PROVIDER: ${BOT_PROTECTION_PROVIDER:-disabled}
       BOT_PROTECTION_REQUIRED: ${BOT_PROTECTION_REQUIRED:-}
-      BOT_PROTECTION_MIN_SCORE: ${BOT_PROTECTION_MIN_SCORE:-0.5}
-      BOT_PROTECTION_EXPECTED_HOSTNAMES: ${BOT_PROTECTION_EXPECTED_HOSTNAMES:-portal.localhost.com}
-      GOOGLE_RECAPTCHA_SECRET_KEY_FILE: /run/secrets/google_recaptcha_secret_key
+      BOT_PROTECTION_EXPECTED_HOSTNAMES: ${BOT_PROTECTION_EXPECTED_HOSTNAMES:-auth.localhost.com,app.localhost.com,portal.localhost.com}
       CLOUDFLARE_TURNSTILE_SECRET_KEY_FILE: /run/secrets/cloudflare_turnstile_secret_key
-      GOOGLE_OAUTH_CLIENT_ID: ${GOOGLE_OAUTH_CLIENT_ID:-}
-      GOOGLE_OAUTH_CLIENT_SECRET_FILE: ${GOOGLE_OAUTH_CLIENT_SECRET_FILE-}
-      GOOGLE_OAUTH_REDIRECT_URI: ${GOOGLE_OAUTH_REDIRECT_URI:-http://backend:3000/auth/google/callback}
-      GOOGLE_OAUTH_SCOPES: ${GOOGLE_OAUTH_SCOPES:-openid email profile https://www.googleapis.com/auth/user.birthday.read}
       RATE_LIMIT_TTL_SECONDS: ${RATE_LIMIT_TTL_SECONDS:-60}
       RATE_LIMIT_MAX_REQUESTS: ${RATE_LIMIT_MAX_REQUESTS:-120}
       RATE_LIMIT_FALLBACK_MAX_REQUESTS: ${RATE_LIMIT_FALLBACK_MAX_REQUESTS:-80}
@@ -532,15 +576,14 @@ services:
       NEXT_TELEMETRY_DISABLED: "1"
       PORT: 3000
       NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://backend:3000}
-      NEXT_PUBLIC_UI_URL: ${NEXT_PUBLIC_UI_URL:-https://portal.localhost.com}
-      NEXT_PUBLIC_ACCOUNT_URL: ${NEXT_PUBLIC_ACCOUNT_URL:-https://portal.localhost.com}
+      NEXT_PUBLIC_UI_URL: ${NEXT_PUBLIC_UI_URL:-${APP_PUBLIC_URL:-https://app.localhost.com}}
+      NEXT_PUBLIC_ACCOUNT_URL: ${NEXT_PUBLIC_ACCOUNT_URL:-${AUTH_PUBLIC_URL:-https://auth.localhost.com}}
       NEXT_PUBLIC_BOT_PROTECTION_PROVIDER: ${NEXT_PUBLIC_BOT_PROTECTION_PROVIDER:-disabled}
-      NEXT_PUBLIC_GOOGLE_RECAPTCHA_SITE_KEY: ${NEXT_PUBLIC_GOOGLE_RECAPTCHA_SITE_KEY:-}
       NEXT_PUBLIC_CLOUDFLARE_TURNSTILE_SITE_KEY: ${NEXT_PUBLIC_CLOUDFLARE_TURNSTILE_SITE_KEY:-}
       INTERNAL_API_URL: http://backend:3000
-      ACCOUNT_HOST: ${ACCOUNT_HOST:-account.local}
-      ACCOUNT_PUBLIC_URL: ${ACCOUNT_PUBLIC_URL:-https://portal.localhost.com}
-      NEXTAUTH_URL: ${NEXTAUTH_URL:-https://portal.localhost.com}
+      ACCOUNT_HOST: ${ACCOUNT_HOST:-${AUTH_HOST:-auth.local}}
+      ACCOUNT_PUBLIC_URL: ${ACCOUNT_PUBLIC_URL:-${AUTH_PUBLIC_URL:-https://auth.localhost.com}}
+      NEXTAUTH_URL: ${NEXTAUTH_URL:-${AUTH_PUBLIC_URL:-https://auth.localhost.com}}
       KEYCLOAK_ISSUER: ${KEYCLOAK_ISSUER:-http://keycloak:8080/realms/platform}
     depends_on:
       backend:
@@ -968,3 +1011,5 @@ secrets:
     file: ${PROJECTS_GATEWAY_SIGNING_KEYS_SECRET_FILE:-./secrets/projects_gateway_signing_keys.txt}
   smtp_password:
     file: ${SMTP_PASSWORD_SECRET_FILE:-./secrets/smtp_password.txt}
+  app_db_password:
+    file: ${APP_DB_PASSWORD_SECRET_FILE:-./secrets/app_db_password.txt}

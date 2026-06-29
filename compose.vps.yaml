@@ -68,6 +68,12 @@ services:
     restart: "no"
     labels: !reset []
 
+  phppgadmin:
+    profiles:
+      - admin
+    restart: "no"
+    labels: !reset []
+
   backend:
     restart: always
     ports: !reset []
@@ -77,12 +83,11 @@ services:
       SESSION_COOKIE_SECURE: "true"
       API_DOCS_ENABLED: "false"
       API_PUBLIC_URL: ${API_PUBLIC_URL:-http://backend:3000}
-      ACCOUNT_PUBLIC_URL: ${ACCOUNT_PUBLIC_URL:-${CONTROL_CENTER_PUBLIC_URL:-http://control-center:8080}}
-      UI_PUBLIC_URL: ${UI_PUBLIC_URL:-${CONTROL_CENTER_PUBLIC_URL:-http://control-center:8080}}
+      ACCOUNT_PUBLIC_URL: ${ACCOUNT_PUBLIC_URL:-${AUTH_PUBLIC_URL:-${CONTROL_CENTER_PUBLIC_URL:-http://control-center:8080}}}
+      UI_PUBLIC_URL: ${UI_PUBLIC_URL:-${APP_PUBLIC_URL:-${CONTROL_CENTER_PUBLIC_URL:-http://control-center:8080}}}
       WEBAUTHN_RP_ID: ${WEBAUTHN_RP_ID:-${CONTROL_CENTER_HOST:-portal.${DOMAIN:?Set DOMAIN}}}
       WEBAUTHN_ORIGINS: ${WEBAUTHN_ORIGINS:-${CONTROL_CENTER_PUBLIC_URL:-http://control-center:8080}}
       CORS_ORIGINS: ${CORS_ORIGINS:-${CONTROL_CENTER_PUBLIC_URL:-http://control-center:8080}}
-      GOOGLE_OAUTH_REDIRECT_URI: ${GOOGLE_OAUTH_REDIRECT_URI:-http://backend:3000/auth/google/callback}
       MAILER_FROM: ${MAILER_FROM:?Set MAILER_FROM}
       MAILER_REPLY_TO: ${MAILER_REPLY_TO:?Set MAILER_REPLY_TO}
       SMTP_HOST: ${SMTP_HOST:?Set SMTP_HOST}
@@ -95,12 +100,12 @@ services:
     environment:
       NODE_ENV: production
       NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://backend:3000}
-      NEXT_PUBLIC_UI_URL: ${NEXT_PUBLIC_UI_URL:-${CONTROL_CENTER_PUBLIC_URL:-http://control-center:8080}}
-      NEXT_PUBLIC_ACCOUNT_URL: ${NEXT_PUBLIC_ACCOUNT_URL:-${CONTROL_CENTER_PUBLIC_URL:-http://control-center:8080}}
-      ACCOUNT_HOST: ${ACCOUNT_HOST:-account.local}
-      ACCOUNT_PUBLIC_URL: ${ACCOUNT_PUBLIC_URL:-${CONTROL_CENTER_PUBLIC_URL:-http://control-center:8080}}
-      NEXTAUTH_URL: ${NEXTAUTH_URL:-${CONTROL_CENTER_PUBLIC_URL:-http://control-center:8080}}
-      KEYCLOAK_ISSUER: ${KEYCLOAK_ISSUER:-http://keycloak:8080/realms/stexor}
+      NEXT_PUBLIC_UI_URL: ${NEXT_PUBLIC_UI_URL:-${APP_PUBLIC_URL:-${CONTROL_CENTER_PUBLIC_URL:-http://control-center:8080}}}
+      NEXT_PUBLIC_ACCOUNT_URL: ${NEXT_PUBLIC_ACCOUNT_URL:-${AUTH_PUBLIC_URL:-${CONTROL_CENTER_PUBLIC_URL:-http://control-center:8080}}}
+      ACCOUNT_HOST: ${ACCOUNT_HOST:-${AUTH_HOST:-auth.local}}
+      ACCOUNT_PUBLIC_URL: ${ACCOUNT_PUBLIC_URL:-${AUTH_PUBLIC_URL:-${CONTROL_CENTER_PUBLIC_URL:-http://control-center:8080}}}
+      NEXTAUTH_URL: ${NEXTAUTH_URL:-${AUTH_PUBLIC_URL:-${CONTROL_CENTER_PUBLIC_URL:-http://control-center:8080}}}
+      KEYCLOAK_ISSUER: ${KEYCLOAK_ISSUER:-http://keycloak:8080/realms/platform}
 
   worker-notifications:
     restart: always

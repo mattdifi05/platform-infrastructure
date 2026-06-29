@@ -8,6 +8,8 @@
   var activeRequest = null;
   var initialized = false;
   var bootId = "cc-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2);
+  var resourceLiveTimer = null;
+  var resourceLiveInFlight = false;
 
   function sameOriginUrl(value) {
     try {
@@ -159,8 +161,143 @@
 
     setBusy(false);
     restoreSidebarState();
+    startResourceLiveUpdates();
+    startStatusTabs();
     scrollAfterRender(target);
     document.dispatchEvent(new CustomEvent("cc:navigation-complete", { detail: { url: target.href } }));
+  }
+
+  function setText(node, value) {
+    if (!node) return;
+    var next = value == null ? "" : String(value);
+    if (node.textContent !== next) node.textContent = next;
+  }
+
+  function applyMetricTone(node, tone) {
+    if (!node) return;
+    ["good", "info", "warn", "bad", "error", "pending"].forEach(function (name) {
+      node.classList.remove(name);
+    });
+    node.classList.add(tone || "info");
+  }
+
+  function updateResourceCards(cards) {
+    if (!cards || typeof cards !== "object") return;
+    Object.keys(cards).forEach(function (key) {
+      var card = document.querySelector('[data-resource-card="' + key + '"]');
+      var item = cards[key] || {};
+      if (!card) return;
+      setText(card.querySelector("strong"), item.status);
+      setText(card.querySelector("small"), item.summary);
+      applyMetricTone(card, item.tone);
+    });
+  }
+
+  function updateResourceSummaries(summaries) {
+    if (!summaries || typeof summaries !== "object") return;
+    Object.keys(summaries).forEach(function (key) {
+      var box = document.querySelector('[data-resource-summary="' + key + '"]');
+      var item = summaries[key] || {};
+      if (!box) return;
+      setText(box.querySelector("strong"), item.status);
+      setText(box.querySelector("em"), item.detail);
+    });
+  }
+
+  function findResourceRow(applicationId) {
+    var id = String(applicationId || "");
+    return Array.from(document.querySelectorAll("[data-resource-row]")).find(function (row) {
+      return row.getAttribute("data-resource-row") === id;
+    });
+  }
+
+  function updateResourceRows(rows) {
+    if (!Array.isArray(rows)) return;
+    rows.forEach(function (item) {
+      var row = findResourceRow(item.applicationId);
+      if (!row) return;
+      var status = row.querySelector('[data-resource-cell="status"] .ops-state');
+      setText(status, item.status);
+      ["cpu", "memory", "disk", "containers", "measuredFrom", "limits"].forEach(function (key) {
+        setText(row.querySelector('[data-resource-cell="' + key + '"]'), item[key]);
+      });
+    });
+  }
+
+  function applyResourcePayload(payload) {
+    if (!payload || typeof payload !== "object") return;
+    updateResourceCards(payload.cards);
+    updateResourceSummaries(payload.summaries);
+    updateResourceRows(payload.rows);
+    setText(document.querySelector("[data-resource-captured-at]"), payload.capturedAt);
+  }
+
+  function stopResourceLiveUpdates() {
+    if (resourceLiveTimer) {
+      window.clearInterval(resourceLiveTimer);
+      resourceLiveTimer = null;
+    }
+    resourceLiveInFlight = false;
+  }
+
+  function startResourceLiveUpdates() {
+    stopResourceLiveUpdates();
+    var root = document.querySelector("[data-resource-live]");
+    if (!root) return;
+    var url = sameOriginUrl(root.getAttribute("data-resource-live-url") || "/control/resources/summary");
+    if (!url) return;
+    var refreshMs = Number(root.getAttribute("data-resource-refresh-ms") || 1000);
+    var intervalMs = Number.isFinite(refreshMs) ? Math.max(1000, refreshMs) : 1000;
+    var poll = async function () {
+      if (resourceLiveInFlight || !document.querySelector("[data-resource-live]")) return;
+      resourceLiveInFlight = true;
+      try {
+        var response = await fetch(url.href, {
+          cache: "no-store",
+          credentials: "same-origin",
+          headers: { Accept: "application/json" },
+        });
+        if (response.ok) applyResourcePayload(await response.json());
+      } catch {
+        // Resource polling is best-effort; the static page remains usable.
+      } finally {
+        resourceLiveInFlight = false;
+      }
+    };
+    poll();
+    resourceLiveTimer = window.setInterval(poll, intervalMs);
+  }
+
+  function activateStatusTab(tabId, updateHash) {
+    var root = document.querySelector("[data-status-tabs]");
+    if (!root) return;
+    var requested = String(tabId || "all").replace(/[^a-z0-9-]/gi, "");
+    var targetPanel = root.querySelector('[data-status-panel="' + requested + '"]');
+    if (!targetPanel) {
+      requested = "all";
+      targetPanel = root.querySelector('[data-status-panel="all"]');
+    }
+    root.querySelectorAll("[data-status-tab]").forEach(function (tab) {
+      var selected = tab.getAttribute("data-status-tab") === requested;
+      tab.classList.toggle("active", selected);
+      tab.setAttribute("aria-selected", selected ? "true" : "false");
+    });
+    root.querySelectorAll("[data-status-panel]").forEach(function (panel) {
+      var selected = panel.getAttribute("data-status-panel") === requested;
+      panel.classList.toggle("active", selected);
+      panel.hidden = !selected;
+    });
+    if (updateHash) {
+      var nextUrl = new URL(window.location.href);
+      nextUrl.hash = "status-tab-" + requested;
+      window.history.replaceState({ ccDynamic: true }, "", nextUrl.pathname + nextUrl.search + nextUrl.hash);
+    }
+  }
+
+  function startStatusTabs() {
+    if (!document.querySelector("[data-status-tabs]")) return;
+    var hash = String(window.location.hash || "").replace(/^#status-tab-/, "");
+    activateStatusTab(hash || "all", false);
   }
 
   function scrollAfterRender(url) {
@@ -220,6 +357,23 @@
     state[key] = collapsed;
     writeSidebarState(state);
     setSidebarGroupCollapsed(group, collapsed);
+  }
+
+  async function copyCommand(button) {
+    var value = button.getAttribute("data-copy-command") || "";
+    if (!value) return;
+    try {
+      await navigator.clipboard.writeText(value);
+      var previous = button.textContent;
+      button.dataset.copied = "true";
+      button.textContent = "Copied";
+      window.setTimeout(function () {
+        button.dataset.copied = "false";
+        button.textContent = previous;
+      }, 1600);
+    } catch {
+      showError("Copy failed.");
+    }
   }
 
   async function navigate(url, options) {
@@ -289,8 +443,22 @@
     document.body.dataset.ccBootId = bootId;
     window.history.replaceState({ ccDynamic: true }, "", window.location.pathname + window.location.search + window.location.hash);
     restoreSidebarState();
+    startResourceLiveUpdates();
+    startStatusTabs();
 
     document.addEventListener("click", function (event) {
+      var statusTab = event.target.closest ? event.target.closest("[data-status-tab]") : null;
+      if (statusTab) {
+        event.preventDefault();
+        activateStatusTab(statusTab.getAttribute("data-status-tab"), true);
+        return;
+      }
+      var copyButton = event.target.closest ? event.target.closest("[data-copy-command]") : null;
+      if (copyButton) {
+        event.preventDefault();
+        copyCommand(copyButton);
+        return;
+      }
       var toggle = event.target.closest ? event.target.closest("[data-cc-sidebar-toggle]") : null;
       if (toggle) {
         event.preventDefault();
@@ -307,6 +475,7 @@
     document.addEventListener("submit", function (event) {
       var form = event.target;
       if (!(form instanceof HTMLFormElement)) return;
+      if (form.hasAttribute("data-cc-native-submit") || form.target) return;
       var action = sameOriginUrl(form.getAttribute("action") || window.location.href);
       if (!action) return;
       event.preventDefault();

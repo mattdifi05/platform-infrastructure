@@ -5,6 +5,7 @@ import {
   mkdirSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { createServer } from "node:net";
@@ -36,6 +37,8 @@ const notificationChannelsFile = path.join(stateDir, "notification-channels.json
 const providerConnectionsFile = path.join(stateDir, "provider-connections.json");
 const settingsFile = path.join(stateDir, "settings.json");
 const webspacesFile = path.join(stateDir, "webspaces.json");
+const dockerStatsFile = path.join(stateDir, "docker-stats.json");
+const statusRunsFile = path.join(stateDir, "status-runs.jsonl");
 
 test("Admin Control Center local foundation", async (t) => {
   prepareFixture();
@@ -46,6 +49,7 @@ test("Admin Control Center local foundation", async (t) => {
       ...process.env,
       CONTROL_CENTER_PORT: String(port),
       CONTROL_CENTER_ENV: "local",
+      CONTROL_CENTER_DISCOVER_HOSTED_PROJECTS: "true",
       CONTROL_CENTER_DOCS_ROOT: infraRoot,
       PROJECTS_ROOT: projectsRoot,
       PROJECT_STATE_FILE: stateFile,
@@ -67,6 +71,8 @@ test("Admin Control Center local foundation", async (t) => {
       PROJECT_PROVIDER_CONNECTIONS_FILE: providerConnectionsFile,
       PROJECT_SETTINGS_FILE: settingsFile,
       PROJECT_WEBSPACES_FILE: webspacesFile,
+      PROJECT_DOCKER_STATS_FILE: dockerStatsFile,
+      PROJECT_STATUS_RUNS_FILE: statusRunsFile,
       CONTROL_CENTER_HOST: "portal.localhost.com",
       DOCS_HOST: "docs.localhost.com",
       PROJECT_HOST_SUFFIX: ".localhost.com",
@@ -91,43 +97,67 @@ test("Admin Control Center local foundation", async (t) => {
 
   const html = await getText(`${baseUrl}/`);
   assert.match(html, /Admin Control Center/);
-  assert.match(html, /Simple/);
-  assert.match(html, /Advanced/);
-  assert.match(html, /Php Demo/);
-  assert.match(html, /Node Demo/);
+  assert.match(html, /ops-shell/);
+  assert.match(html, /Stato/);
+  assert.match(html, /Applicazioni/);
+  assert.match(html, /Attività/);
+  assert.match(html, /Risorse/);
+  assert.doesNotMatch(html, /href="\/\?section=files"/);
+  assert.doesNotMatch(html, /href="\/\?section=databases"/);
+  assert.match(html, /NO GO LIVE/);
+  assert.match(html, /Controlli go live/);
+  assert.match(html, /data-status-tabs/);
+  assert.match(html, /data-status-tab="all"/);
+  assert.match(html, /data-status-tab="ok"/);
+  assert.match(html, /data-status-tab="fix"/);
+  assert.match(html, /data-status-tab="missing"/);
+  assert.match(html, /Avvia test reali/);
+  assert.match(html, /action="\/actions\/status-check"/);
+  assert.match(html, /vps-host-readiness/);
+  assert.match(html, /cloudflare-access-admin/);
+  assert.match(html, /github-actions-run-evidence/);
+  assert.match(html, /full-restore-drill/);
+  assert.match(html, /production-readiness-live/);
+  assert.match(html, /production-readiness-restore-tested/);
+  assert.doesNotMatch(html, /Non pronto per andare online|Pronto per andare online/);
+  assert.doesNotMatch(html, /Riepilogo go live/);
+  assert.doesNotMatch(html, /Verdetto/);
+  assert.doesNotMatch(html, /Controlli OK/);
+  assert.doesNotMatch(html, /Aggiorna/);
+  assert.doesNotMatch(html, /Dati tecnici/);
+  assert.doesNotMatch(html, /Dati stato/);
+  assert.doesNotMatch(html, /Copia controllo/);
+  assert.doesNotMatch(html, /data-copy-command="sh \.\/scripts\/production-go-no-go\.sh"/);
+  assert.doesNotMatch(html, /Control Center avviato/);
+  assert.doesNotMatch(html, /Asset Portal serviti/);
+  assert.doesNotMatch(html, /Control Center local UI contract/);
+  assert.doesNotMatch(html, /Simple Mode operational MVP/);
+  assert.doesNotMatch(html, /Advanced Mode enterprise sections/);
+  assert.match(html, /Passati/);
+  assert.match(html, /Non passati/);
   assert.match(html, /\/assets\/control-center\/control-center\.css/);
   assert.match(html, /\/assets\/control-center\/control-center\.js/);
   assert.match(html, /cc-app-shell/);
-  assert.match(html, /cc-stage/);
-  assert.match(html, /cc-sidebar/);
-  assert.match(html, /data-cc-sidebar-toggle="gestione"/);
-  assert.match(html, /data-cc-sidebar-toggle="sicurezza"/);
-  assert.match(html, /data-cc-sidebar-toggle="avanzato"/);
-  assert.match(html, /aria-expanded="true"/);
+  assert.match(html, /ops-topbar/);
+  assert.match(html, /ops-sidebar/);
+  assert.match(html, /ops-nav/);
   assert.doesNotMatch(html, /class="cc-tabs"/);
   assert.doesNotMatch(html, /Open navigation/);
   assert.doesNotMatch(html, /Search Control Center/);
   assert.doesNotMatch(html, /aria-label="Help"/);
   assert.doesNotMatch(html, /aria-label="Settings"/);
+  assert.doesNotMatch(html, /Platform Documentation/);
+  assert.doesNotMatch(html, /Runbook, security, readiness and service documentation/);
+  assert.doesNotMatch(html, /href="\/\?mode=simple/);
+  assert.doesNotMatch(html, /href="\/\?mode=advanced/);
   assert.match(html, /data-cc-theme="light"/);
   assert.doesNotMatch(html, /data-cc-theme="dark"/);
   assert.doesNotMatch(html, /onchange=/);
   assert.equal(html.includes(["/assets", "node-demo", "ui"].join("/") + "/"), false);
   assert.doesNotMatch(html, new RegExp(`${["ui", "shell"].join("-")}|${["pill", "sidebar", "nav"].join("-")}|${["pill", "tabs"].join("-")}`));
-  assert.match(html, /platform-wordmark/);
-  assert.match(html, /hosting-dashboard/);
-  assert.match(html, /Pannello infrastruttura/);
-  assert.match(html, /Gestisci la tua piattaforma da un solo posto/);
-  assert.match(html, /Siti e applicazioni/);
-  assert.match(html, /Superfici pubbliche/);
-  assert.match(html, /Operazioni rapide/);
-  assert.match(html, /runtime-badge php/);
-  assert.match(html, /runtime-badge node/);
+  assert.match(html, /ops-brand/);
   assert.doesNotMatch(html, /phpmyadmin\.localhost\.com/);
   assert.doesNotMatch(html, /grafana\.localhost\.com/);
-  assert.match(html, /Gestione/);
-  assert.match(html, /Sicurezza/);
-  assert.match(html, /Avanzato/);
 
   const docsHtml = await getTextWithHost(`${baseUrl}/`, "docs.localhost.com");
   assert.match(docsHtml, /Platform Documentation/);
@@ -144,16 +174,14 @@ test("Admin Control Center local foundation", async (t) => {
   assert.match(localStyles, /--cc-surface-raised/);
   assert.match(localStyles, /--cc-line/);
   assert.match(localStyles, /\.cc-app-shell/);
-  assert.match(localStyles, /\.cc-sidebar/);
-  assert.match(localStyles, /\.cc-nav-toggle/);
-  assert.match(localStyles, /\.cc-nav-child/);
-  assert.match(localStyles, /\.cc-nav-branch/);
-  assert.match(localStyles, /\.hosting-dashboard/);
-  assert.match(localStyles, /\.hosting-summary-grid/);
-  assert.match(localStyles, /\.hosting-table/);
-  assert.match(localStyles, /\.hosting-service-row/);
-  assert.match(localStyles, /max-height var\(--cc-enter\)/);
-  assert.match(localStyles, /\.cc-sidebar,\s*\.cc-sidebar \*/);
+  assert.match(localStyles, /\.ops-shell/);
+  assert.match(localStyles, /\.ops-sidebar/);
+  assert.match(localStyles, /\.ops-nav/);
+  assert.match(localStyles, /\.ops-table/);
+  assert.match(localStyles, /\.ops-metrics/);
+  assert.match(localStyles, /\.ops-project-board/);
+  assert.match(localStyles, /\.ops-resource-summary/);
+  assert.match(localStyles, /\.ops-icon-button/);
   assert.match(localStyles, /box-shadow:\s*var\(--cc-focus\)/);
   assert.match(localStyles, /color-scheme:\s*light/);
   assert.doesNotMatch(localStyles, /color-scheme:\s*dark/);
@@ -167,8 +195,8 @@ test("Admin Control Center local foundation", async (t) => {
   assert.match(localClient, /addEventListener\("popstate"/);
   assert.match(localClient, /htmlCache/);
   assert.match(localClient, /ccBootId/);
-  assert.match(localClient, /platform-control-center-sidebar/);
-  assert.match(localClient, /toggleSidebarGroup/);
+  assert.match(localClient, /data-copy-command/);
+  assert.match(localClient, /navigator\.clipboard\.writeText/);
   assert.doesNotMatch(localClient, /window\.location\.reload/);
   const localUiPackage = await getJson(`${baseUrl}/control/ui-package`);
   assert.equal(localUiPackage.name, "@platform/control-center-local-ui");
@@ -183,32 +211,33 @@ test("Admin Control Center local foundation", async (t) => {
   assert.equal(localUiPackage.entrypoints.includes("/assets/control-center/control-center.js"), true);
   assert.equal(localUiPackage.servedAssets.includes("/assets/control-center/control-center.css"), true);
   assert.equal(localUiPackage.servedAssets.includes("/assets/control-center/control-center.js"), true);
-  assert.equal(localUiPackage.coreExports.includes("AppShell"), true);
-  assert.equal(localUiPackage.coreExports.includes("Sidebar"), true);
-  assert.equal(localUiPackage.coreExports.includes("TabGroup"), true);
+  assert.equal(localUiPackage.coreExports.includes("OperationsShell"), true);
+  assert.equal(localUiPackage.coreExports.includes("ProjectFileBrowser"), true);
+  assert.equal(localUiPackage.coreExports.includes("ActivityTable"), true);
   assert.equal(localUiPackage.cssVariablePrefix, "--cc-");
   assert.deepEqual(localUiPackage.missingRequiredExports, []);
 
-  const advancedHtml = await getText(`${baseUrl}/?mode=advanced&section=infrastructure`);
-  assert.match(advancedHtml, /Infrastructure/);
-  assert.match(advancedHtml, /Traefik/);
-  assert.match(advancedHtml, /cAdvisor/);
-  assert.match(advancedHtml, /cc-sidebar/);
-  assert.doesNotMatch(advancedHtml, /class="cc-tabs"/);
-  assert.doesNotMatch(advancedHtml, /role="tablist"/);
-  assert.match(advancedHtml, /cc-nav-child/);
-  assert.match(advancedHtml, /data-cc-sidebar-toggle="platform"/);
-  assert.match(advancedHtml, /data-cc-sidebar-toggle="delivery"/);
-  assert.match(advancedHtml, /data-cc-sidebar-toggle="observability"/);
-  assert.match(advancedHtml, /Avanzato/);
-  assert.match(advancedHtml, /Deployments/);
-  assert.match(advancedHtml, /CI\/CD &amp; GitHub Governance/);
-  assert.match(advancedHtml, /Cloudflare/);
-  assert.match(advancedHtml, /Workers &amp; Jobs/);
-  assert.match(advancedHtml, /Network/);
-  assert.match(advancedHtml, /Databases/);
-  assert.match(advancedHtml, /Logs Advanced/);
-  assert.match(advancedHtml, /Billing \/ Plans/);
+  const projectsOpsHtml = await getText(`${baseUrl}/?section=projects`);
+  assert.match(projectsOpsHtml, /Aggiungi applicazione/);
+  assert.match(projectsOpsHtml, /PHP Apache/);
+  assert.match(projectsOpsHtml, /Node\/Next/);
+  assert.match(projectsOpsHtml, /Static/);
+  assert.match(projectsOpsHtml, /Descrizione breve/);
+  assert.match(projectsOpsHtml, /Con database/);
+  assert.match(projectsOpsHtml, /Runtime dedicati/);
+  assert.match(projectsOpsHtml, /ops-project-board/);
+  assert.match(projectsOpsHtml, /Archivia applicazione/);
+  assert.match(projectsOpsHtml, /Php Demo/);
+  assert.match(projectsOpsHtml, /Node Demo/);
+  assert.match(projectsOpsHtml, /ARCHIVE-PROJECT/);
+  assert.match(projectsOpsHtml, /node_demo_external/);
+  assert.match(projectsOpsHtml, /node-demo/);
+  assert.match(projectsOpsHtml, /href="\/\?section=files&project=node-demo"/);
+  assert.match(projectsOpsHtml, /href="\/\?section=databases#app-node-demo"/);
+  assert.match(projectsOpsHtml, /Stress max/);
+  assert.match(projectsOpsHtml, /RUN-STRESS:node-demo/);
+  assert.doesNotMatch(projectsOpsHtml, /db-password-should-not-leak/);
+  assert.doesNotMatch(projectsOpsHtml, /Platform Documentation/);
 
   const networkApi = await getJson(`${baseUrl}/control/network`);
   assert.equal(networkApi.guardrails.readOnly, true);
@@ -232,13 +261,10 @@ test("Admin Control Center local foundation", async (t) => {
   assert.equal(advancedNetworkApi.data.routeTests.some((testPlan) => testPlan.productionEvidence === false), true);
   assert.equal(advancedNetworkApi.data.originLockStatus, "not-required-local-loopback");
 
-  const advancedNetworkHtml = await getText(`${baseUrl}/?mode=advanced&section=network`);
-  assert.match(advancedNetworkHtml, /Traefik Network/);
-  assert.match(advancedNetworkHtml, /Router Topology/);
-  assert.match(advancedNetworkHtml, /Middleware Chain/);
-  assert.match(advancedNetworkHtml, /Loopback host ports/);
-  assert.match(advancedNetworkHtml, /Route Test Plan/);
-  assert.match(advancedNetworkHtml, /enterprise-portal/);
+  const filesOpsHtml = await getText(`${baseUrl}/?section=files&project=node-demo`);
+  assert.match(filesOpsHtml, /File applicazione/);
+  assert.match(filesOpsHtml, /Elenco in sola lettura/);
+  assert.match(filesOpsHtml, /package\.json|server\.mjs|index/);
 
   const monitoringApi = await getJson(`${baseUrl}/control/monitoring`);
   assert.equal(monitoringApi.guardrails.readOnly, true);
@@ -266,73 +292,35 @@ test("Admin Control Center local foundation", async (t) => {
   assert.equal(advancedMonitoringApi.data.prometheus.liveQueryExecuted, false);
   assert.equal(advancedMonitoringApi.productionEvidence, false);
 
-  const advancedMonitoringHtml = await getText(`${baseUrl}/?mode=advanced&section=monitoring`);
-  assert.match(advancedMonitoringHtml, /Monitoring/);
-  assert.match(advancedMonitoringHtml, /Logs Advanced/);
-  assert.match(advancedMonitoringHtml, /Alerts Advanced/);
-  assert.match(advancedMonitoringHtml, /Prometheus Targets/);
-  assert.match(advancedMonitoringHtml, /Grafana Panels/);
-  assert.match(advancedMonitoringHtml, /Alert Rules/);
-  assert.match(advancedMonitoringHtml, /Backend errors/);
-  assert.match(advancedMonitoringHtml, /WAF events/);
-  assert.match(advancedMonitoringHtml, /Auth failures/);
+  const databasesOpsHtml = await getText(`${baseUrl}/?section=databases&project=node-demo`);
+  assert.match(databasesOpsHtml, /Database per applicazione/);
+  assert.match(databasesOpsHtml, /Aggiungi metadata database/);
+  assert.match(databasesOpsHtml, /Credenziali/);
+  assert.match(databasesOpsHtml, /Node Demo/);
+  assert.match(databasesOpsHtml, /node_demo_external/);
+  assert.match(databasesOpsHtml, /phpmyadmin-login/);
+  assert.match(databasesOpsHtml, /OPEN-PHPMYADMIN%3Alegacy-mariadb-node-demo-external/);
+  assert.doesNotMatch(databasesOpsHtml, /Php Demo/);
+  assert.doesNotMatch(databasesOpsHtml, /Nessun database collegato/);
+  assert.doesNotMatch(databasesOpsHtml, /name="project"/);
+  const activityOpsHtml = await getText(`${baseUrl}/?section=activity`);
+  assert.match(activityOpsHtml, /Errori, avvisi e problemi/);
+  assert.match(activityOpsHtml, /go-no-go/);
+  const resourcesOpsHtml = await getText(`${baseUrl}/?section=resources`);
+  assert.match(resourcesOpsHtml, /Uso risorse/);
+  assert.match(resourcesOpsHtml, /Imposta limiti applicazione/);
+  assert.match(resourcesOpsHtml, /CPU totale/);
+  assert.match(resourcesOpsHtml, /RAM totale/);
+  assert.match(resourcesOpsHtml, /Disco app/);
+  assert.match(resourcesOpsHtml, /data-resource-live/);
+  assert.match(resourcesOpsHtml, /0\.100%/);
+  assert.match(resourcesOpsHtml, /3\.500%/);
+  assert.doesNotMatch(resourcesOpsHtml, /0 core/);
 
-  const advancedWorkersHtml = await getText(`${baseUrl}/?mode=advanced&section=workers-jobs`);
-  assert.match(advancedWorkersHtml, /Workers &amp; Jobs/);
-  assert.match(advancedWorkersHtml, /failed jobs/);
-  assert.match(advancedWorkersHtml, /retry controls/);
-  assert.match(advancedWorkersHtml, /Containerized Scheduler/);
-  assert.match(advancedWorkersHtml, /Declare worker/);
-
-  const advancedGithubHtml = await getText(`${baseUrl}/?mode=advanced&section=cicd-github`);
-  assert.match(advancedGithubHtml, /CI\/CD &amp; GitHub Governance/);
-  assert.match(advancedGithubHtml, /Deployments/);
-  assert.match(advancedGithubHtml, /Cloudflare/);
-  assert.match(advancedGithubHtml, /Release Evidence/);
-  assert.match(advancedGithubHtml, /Production Go\/No-Go/);
-  assert.match(advancedGithubHtml, /Readiness Matrix/);
-  assert.match(advancedGithubHtml, /branch protection/);
-  assert.match(advancedGithubHtml, /workflow status/);
-  assert.match(advancedGithubHtml, /deploy approvals/);
-
-  const advancedLogsHtml = await getText(`${baseUrl}/?mode=advanced&section=logs-advanced`);
-  assert.match(advancedLogsHtml, /Logs Advanced/);
-  assert.match(advancedLogsHtml, /query Loki/);
-  assert.match(advancedLogsHtml, /request id/);
-  assert.match(advancedLogsHtml, /non-sensitive export/);
-
-  const advancedAlertsHtml = await getText(`${baseUrl}/?mode=advanced&section=alerts-advanced`);
-  assert.match(advancedAlertsHtml, /Alerts Advanced/);
-  assert.match(advancedAlertsHtml, /delivery evidence/);
-  assert.match(advancedAlertsHtml, /failure evidence/);
-  assert.match(advancedAlertsHtml, /escalation/);
-
-  const advancedDrHtml = await getText(`${baseUrl}/?mode=advanced&section=disaster-recovery`);
-  assert.match(advancedDrHtml, /Disaster Recovery/);
-  assert.match(advancedDrHtml, /RTO\/RPO/);
-  assert.match(advancedDrHtml, /WAL archive/);
-  assert.match(advancedDrHtml, /off-site restore evidence/);
-
-  const advancedReleaseHtml = await getText(`${baseUrl}/?mode=advanced&section=release-evidence`);
-  assert.match(advancedReleaseHtml, /Release Evidence/);
-  assert.match(advancedReleaseHtml, /SBOM/);
-  assert.match(advancedReleaseHtml, /provenance/);
-  assert.match(advancedReleaseHtml, /rollback validation/);
-
-  const advancedSecurityHtml = await getText(`${baseUrl}/?mode=advanced&section=security-advanced`);
-  assert.match(advancedSecurityHtml, /Security Advanced/);
-  assert.match(advancedSecurityHtml, /Identity &amp; Access/);
-  assert.match(advancedSecurityHtml, /Secrets/);
-  assert.match(advancedSecurityHtml, /Audit Log/);
-  assert.match(advancedSecurityHtml, /secret scan/);
-  assert.match(advancedSecurityHtml, /vulnerability scan/);
-  assert.match(advancedSecurityHtml, /Cloudflare Access/);
-
-  const applicationsHtml = await getText(`${baseUrl}/?section=applications`);
-  assert.match(applicationsHtml, /Applications/);
-  assert.match(applicationsHtml, /Create app/);
-  assert.match(applicationsHtml, /Deploy/);
-  assert.match(applicationsHtml, /Rollback/);
+  const resourcesOpsApi = await getJson(`${baseUrl}/control/resources/summary`);
+  assert.equal(resourcesOpsApi.cards.applications.status, 2);
+  assert.equal(resourcesOpsApi.rows.some((row) => row.applicationId === "php-demo" && row.cpu.includes("0.100%")), true);
+  assert.equal(resourcesOpsApi.rows.some((row) => row.applicationId === "node-demo" && row.cpu.includes("3.500%")), true);
 
   const overview = await getJson(`${baseUrl}/control/overview`);
   assert.equal(overview.title, "Admin Control Center");
@@ -387,7 +375,7 @@ test("Admin Control Center local foundation", async (t) => {
   assert.equal(readiness.controlCenter.checks.some((check) => check.id === "control-center-local-ui" && check.status === "passed"), true);
   assert.equal(readiness.controlCenter.checks.some((check) => check.id === "safe-adapter-boundary" && check.status === "plan-only"), true);
   assert.equal(readiness.manifests.productionReadiness.loaded, true);
-  assert.equal(readiness.manifests.productionReadiness.requirementCount, 20);
+  assert.equal(readiness.manifests.productionReadiness.requirementCount, 19);
   assert.equal(readiness.manifests.productionReadiness.requirements.some((item) => item.id === "tls-https-production-ready" && item.status === "pending-live-proof"), true);
   assert.equal(readiness.manifests.enterprise.loaded, true);
   assert.equal(readiness.summary.needsWork, 0);
@@ -397,11 +385,43 @@ test("Admin Control Center local foundation", async (t) => {
   assert.equal(readiness.productionBlockers.some((item) => item.id === "production-live-proof"), true);
   assert.doesNotMatch(JSON.stringify(readiness), /CLOUDFLARE_API_TOKEN|super-secret-token-should-not-leak/);
 
+  const statusApi = await getJson(`${baseUrl}/control/status`);
+  assert.equal(statusApi.statusRun, null);
+  assert.match(statusApi.goNoGo.status, /^(unknown|go|no-go)$/);
+  const statusRunResponse = await fetch(`${baseUrl}/actions/status-check`, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: "",
+  });
+  assert.equal(statusRunResponse.ok, true);
+  const statusAfterRun = await getJson(`${baseUrl}/control/status`);
+  assert.equal(statusAfterRun.statusRun.scope, "platform-infrastructure");
+  assert.equal(statusAfterRun.statusRun.destructive, false);
+  assert.equal(statusAfterRun.statusRun.providerTouched, false);
+  assert.equal(statusAfterRun.statusRun.dockerTouched, false);
+  assert.equal(statusAfterRun.statusRun.checks.some((check) => check.id === "control-center-health"), false);
+  assert.equal(statusAfterRun.statusRun.checks.some((check) => check.id === "control-center-assets"), false);
+  assert.equal(statusAfterRun.statusRun.checks.some((check) => check.id === "portal-through-waf"), true);
+  assert.doesNotMatch(JSON.stringify(statusAfterRun), /CLOUDFLARE_API_TOKEN|super-secret-token-should-not-leak/);
+  const statusHtmlAfterRun = await getText(`${baseUrl}/?section=status`);
+  assert.match(statusHtmlAfterRun, /Ultimo test reale/);
+  assert.match(statusHtmlAfterRun, /<th>Controllo<\/th><th>Stato<\/th><th>Motivo<\/th><th>Cosa fare<\/th><th>Fonte<\/th>/);
+  assert.match(statusHtmlAfterRun, /Portal attraverso WAF|WAF blocca file sensibili|Manca prova live/);
+  assert.match(statusHtmlAfterRun, /vps-host-readiness/);
+  assert.match(statusHtmlAfterRun, /cloudflare-access-admin/);
+  assert.match(statusHtmlAfterRun, /github-actions-run-evidence/);
+  assert.match(statusHtmlAfterRun, /full-restore-drill/);
+  assert.match(statusHtmlAfterRun, /production-readiness-live/);
+  assert.doesNotMatch(statusHtmlAfterRun, /Control Center avviato/);
+  assert.doesNotMatch(statusHtmlAfterRun, /Asset Portal serviti/);
+  assert.doesNotMatch(statusHtmlAfterRun, /Control Center local UI contract/);
+  assert.doesNotMatch(statusHtmlAfterRun, /Simple Mode operational MVP/);
+  assert.doesNotMatch(statusHtmlAfterRun, /Advanced Mode enterprise sections/);
+
   const readinessHtml = await getText(`${baseUrl}/?mode=advanced&section=readiness`);
-  assert.match(readinessHtml, /Readiness Matrix/);
-  assert.match(readinessHtml, /Control Center coverage/);
-  assert.match(readinessHtml, /Production readiness checklist/);
-  assert.match(readinessHtml, /pending-live-proof/);
+  assert.match(readinessHtml, /ops-shell/);
+  assert.match(readinessHtml, /Controlli go live/);
+  assert.doesNotMatch(readinessHtml, /Readiness Matrix/);
 
   const advancedIdentityApi = await getJson(`${baseUrl}/control/advanced/identity`);
   assert.equal(advancedIdentityApi.data.sessionPolicy, "HttpOnly; Secure; SameSite=Lax");
@@ -456,8 +476,8 @@ test("Admin Control Center local foundation", async (t) => {
 
   const projects = await getJson(`${baseUrl}/control/projects`);
   assert.deepEqual(projects.projects.map((project) => [project.slug, project.type]), [
-    ["php-demo", "PHP"],
-    ["node-demo", "Node"],
+    ["php-demo", "PHP Apache"],
+    ["node-demo", "Node/Next"],
   ]);
 
   const duplicateProject = await postJson(`${baseUrl}/control/projects`, {
@@ -467,10 +487,9 @@ test("Admin Control Center local foundation", async (t) => {
   assert.match(duplicateProject.body.message, /already exists/);
 
   const projectPlan = await postJson(`${baseUrl}/control/projects`, {
-    slug: "client-portal",
     displayName: "Client Portal",
-    runtime: "node",
-    host: "client-portal.localhost.com",
+    description: "Area clienti",
+    runtime: "static",
     secret: "project-secret-should-not-leak",
   });
   assert.equal(projectPlan.status, 202);
@@ -482,19 +501,24 @@ test("Admin Control Center local foundation", async (t) => {
   assert.equal(projectPlan.body.details.databaseTouched, false);
   assert.equal(projectPlan.body.details.providerTouched, false);
   assert.equal(projectPlan.body.details.productionEvidence, false);
+  assert.equal(projectPlan.body.details.projectId, "client-portal");
+  assert.equal(projectPlan.body.details.host, "client-portal.localhost.com");
+  assert.equal(projectPlan.body.details.type, "Static");
+  assert.equal(projectPlan.body.details.description, "Area clienti");
   assert.doesNotMatch(JSON.stringify(projectPlan.body), /project-secret-should-not-leak/);
 
   const projectApply = await postJson(`${baseUrl}/control/projects`, {
-    slug: "client-portal",
     displayName: "Client Portal",
-    runtime: "node",
-    host: "client-portal.localhost.com",
+    description: "Area clienti",
+    runtime: "static",
     confirm: "CREATE-PROJECT",
     secret: "project-secret-should-not-leak",
   });
   assert.equal(projectApply.status, 202);
   assert.equal(projectApply.body.type, "project.create.local");
   assert.equal(projectApply.body.project.slug, "client-portal");
+  assert.equal(projectApply.body.project.type, "Static");
+  assert.equal(projectApply.body.project.description, "Area clienti");
   assert.equal(projectApply.body.project.status, "declared");
   assert.equal(projectApply.body.project.enabled, false);
   assert.equal(projectApply.body.project.filesystemExists, false);
@@ -522,9 +546,10 @@ test("Admin Control Center local foundation", async (t) => {
   assert.equal(JSON.parse(projectStateText).projects["client-portal"].declaredProject, true);
 
   const projectsHtmlAfterCreate = await getText(`${baseUrl}/?section=projects`);
-  assert.match(projectsHtmlAfterCreate, /Create project/);
+  assert.match(projectsHtmlAfterCreate, /Aggiungi applicazione/);
   assert.match(projectsHtmlAfterCreate, /Client Portal/);
-  assert.match(projectsHtmlAfterCreate, /Routing waits for mounted source files/);
+  assert.match(projectsHtmlAfterCreate, /File mancanti/);
+  assert.match(projectsHtmlAfterCreate, /Non avviabile/);
 
   const applicationPlan = await postJson(`${baseUrl}/control/applications`, {
     projectId: "node-demo",
@@ -628,12 +653,11 @@ test("Admin Control Center local foundation", async (t) => {
   assert.equal(JSON.parse(readFileSync(applicationsFile, "utf8"))["node-demo-events-worker"].lastLifecycleAction, "restart");
   assert.doesNotMatch(readFileSync(applicationsFile, "utf8"), /lifecycle-secret-should-not-leak/);
 
-  const applicationsHtmlAfterCreate = await getText(`${baseUrl}/?section=applications`);
-  assert.match(applicationsHtmlAfterCreate, /Events Worker/);
-  assert.match(applicationsHtmlAfterCreate, /control-center-state/);
-  assert.match(applicationsHtmlAfterCreate, /Healthcheck:/);
-  assert.match(applicationsHtmlAfterCreate, /Lifecycle:/);
-  assert.match(applicationsHtmlAfterCreate, /Healthcheck<\/button>/);
+  const applicationsHtmlAfterCreate = await getText(`${baseUrl}/?section=resources`);
+  assert.match(applicationsHtmlAfterCreate, /Uso risorse/);
+  assert.match(applicationsHtmlAfterCreate, /node-demo-events-worker/);
+  assert.match(applicationsHtmlAfterCreate, /online/);
+  assert.doesNotMatch(applicationsHtmlAfterCreate, /application-secret-should-not-leak/);
 
   const workerInventoryInitial = await getJson(`${baseUrl}/control/workers-jobs`);
   assert.equal(workerInventoryInitial.workers.some((worker) => worker.id === "enterprise-worker-jobs"), true);
@@ -777,15 +801,13 @@ test("Admin Control Center local foundation", async (t) => {
   assert.equal(advancedWorkersAfterApply.data.scheduler.some((schedule) => schedule.id === "node-demo-nightly-events-sync"), true);
   assert.equal(advancedWorkersAfterApply.productionEvidence, false);
 
-  const workersHtmlAfterApply = await getText(`${baseUrl}/?mode=advanced&section=workers-jobs`);
-  assert.match(workersHtmlAfterApply, /Worker Runtime/);
-  assert.match(workersHtmlAfterApply, /events-processor/);
-  assert.match(workersHtmlAfterApply, /Plan retry/);
-  assert.match(workersHtmlAfterApply, /nightly-events-sync/);
+  const workersHtmlAfterApply = await getText(`${baseUrl}/?section=activity`);
+  assert.match(workersHtmlAfterApply, /Errori, avvisi e problemi/);
+  assert.doesNotMatch(workersHtmlAfterApply, /worker-secret-should-not-leak/);
 
   const projectsHtml = await getText(`${baseUrl}/?section=projects`);
   assert.match(projectsHtml, /ARCHIVE-PROJECT/);
-  assert.match(projectsHtml, /DELETE-PROJECT:php-demo/);
+  assert.doesNotMatch(projectsHtml, /DELETE-PROJECT:php-demo/);
 
   const updatePlan = await postJson(`${baseUrl}/control/projects/node-demo/update`, {
     displayName: "Node Demo Local",
@@ -875,10 +897,9 @@ test("Admin Control Center local foundation", async (t) => {
   assert.match(prodApplyDisabled.body.message, /disabled/);
 
   const domainsHtml = await getText(`${baseUrl}/?section=domains`);
-  assert.match(domainsHtml, /Add domain/);
-  assert.match(domainsHtml, /Provider connection/);
-  assert.match(domainsHtml, /Add local/);
-  assert.match(domainsHtml, /Discovered route/);
+  assert.match(domainsHtml, /ops-shell/);
+  assert.doesNotMatch(domainsHtml, /Add domain/);
+  assert.doesNotMatch(domainsHtml, /Provider connection/);
 
   const prodLocalhostDomain = await postJson(`${baseUrl}/control/domains`, {
     environment: "production",
@@ -971,9 +992,9 @@ test("Admin Control Center local foundation", async (t) => {
   assert.equal(invalidWebspace.status, 422);
   assert.match(invalidWebspace.body.message, /Invalid webspace path/);
 
-  const webspacesHtml = await getText(`${baseUrl}/?section=webspaces`);
-  assert.match(webspacesHtml, /Create space/);
-  assert.match(webspacesHtml, /public, private, uploads, backups, config/);
+  const webspacesHtml = await getText(`${baseUrl}/?section=resources`);
+  assert.match(webspacesHtml, /Uso risorse/);
+  assert.match(webspacesHtml, /Imposta limiti applicazione/);
 
   const webspacePlan = await postJson(`${baseUrl}/control/webspaces`, {
     projectId: "node-demo",
@@ -1026,9 +1047,21 @@ test("Admin Control Center local foundation", async (t) => {
   assert.doesNotMatch(webspaceStateText, /webspace-secret-should-not-leak/);
   assert.equal(JSON.parse(webspaceStateText)["node-demo-media"].quotaBytes, 8192);
 
-  const databasesHtml = await getText(`${baseUrl}/?mode=advanced&section=databases`);
-  assert.match(databasesHtml, /Databases/);
-  assert.match(databasesHtml, /Declare database/);
+  const databasesHtml = await getText(`${baseUrl}/?section=databases&project=node-demo`);
+  assert.match(databasesHtml, /Database per applicazione/);
+  assert.match(databasesHtml, /Aggiungi metadata database/);
+  assert.match(databasesHtml, /node_demo_external/);
+  assert.match(databasesHtml, /phpmyadmin-login/);
+  assert.match(databasesHtml, /OPEN-PHPMYADMIN%3Alegacy-mariadb-node-demo-external/);
+  assert.match(databasesHtml, /\/actions\/phppgadmin-login/);
+  assert.match(databasesHtml, /OPEN-PHPPGADMIN%3Alegacy-postgres-node-demo-external/);
+  assert.doesNotMatch(databasesHtml, /\/actions\/adminer-login/);
+  assert.doesNotMatch(databasesHtml, /\/actions\/pgadmin-login/);
+  assert.match(databasesHtml, /Storage/);
+  assert.match(databasesHtml, /Node Demo Local/);
+  assert.doesNotMatch(databasesHtml, /Client Portal/);
+  assert.doesNotMatch(databasesHtml, /Nessun database collegato/);
+  assert.doesNotMatch(databasesHtml, /db-password-should-not-leak/);
 
   const invalidDatabase = await postJson(`${baseUrl}/control/databases`, {
     projectId: "node-demo",
@@ -1076,9 +1109,10 @@ test("Admin Control Center local foundation", async (t) => {
   assert.doesNotMatch(databaseStateText, /database-secret-should-not-leak/);
   assert.equal(JSON.parse(databaseStateText)["node-demo-mariadb-node-demo-app"].credentialsExposed, false);
 
-  const databasesHtmlAfterApply = await getText(`${baseUrl}/?mode=advanced&section=databases`);
+  const databasesHtmlAfterApply = await getText(`${baseUrl}/?section=databases&project=node-demo`);
+  assert.match(databasesHtmlAfterApply, /node_demo_app/);
   assert.match(databasesHtmlAfterApply, /Plan backup/);
-  assert.match(databasesHtmlAfterApply, /Plan restore/);
+  assert.match(databasesHtmlAfterApply, /Plan restore drill/);
 
   const databaseBackup = await postJson(`${baseUrl}/control/databases/node-demo-mariadb-node-demo-app/backup`, {
     secret: "database-secret-should-not-leak",
@@ -1099,9 +1133,8 @@ test("Admin Control Center local foundation", async (t) => {
   assert.equal(databaseRestore.body.details.databaseTouched, false);
 
   const storageHtml = await getText(`${baseUrl}/?mode=advanced&section=storage`);
-  assert.match(storageHtml, /Storage/);
-  assert.match(storageHtml, /Declare bucket/);
-  assert.match(storageHtml, /Access keys/);
+  assert.match(storageHtml, /ops-shell/);
+  assert.doesNotMatch(storageHtml, /Declare bucket/);
 
   const invalidBucket = await postJson(`${baseUrl}/control/storage/buckets`, {
     projectId: "node-demo",
@@ -1150,11 +1183,9 @@ test("Admin Control Center local foundation", async (t) => {
   assert.equal(JSON.parse(storageStateText)["node-demo-node-demo-assets"].credentialsExposed, false);
 
   const storageHtmlAfterApply = await getText(`${baseUrl}/?mode=advanced&section=storage`);
-  assert.match(storageHtmlAfterApply, /Update policy/);
-  assert.match(storageHtmlAfterApply, /Update lifecycle/);
-  assert.match(storageHtmlAfterApply, /Update access key/);
-  assert.match(storageHtmlAfterApply, /Plan backup/);
-  assert.match(storageHtmlAfterApply, /Plan restore/);
+  assert.match(storageHtmlAfterApply, /ops-shell/);
+  assert.doesNotMatch(storageHtmlAfterApply, /Update access key/);
+  assert.doesNotMatch(storageHtmlAfterApply, /storage-secret-should-not-leak/);
 
   const bucketPolicy = await postJson(`${baseUrl}/control/storage/buckets/node-demo-node-demo-assets/policy`, {
     accessPolicy: "project-private",
@@ -1207,10 +1238,9 @@ test("Admin Control Center local foundation", async (t) => {
   assert.equal(bucketRestore.body.details.minioTouched, false);
 
   const secretsHtml = await getText(`${baseUrl}/?mode=advanced&section=secrets`);
-  assert.match(secretsHtml, /Secrets/);
-  assert.match(secretsHtml, /Declare material/);
-  assert.match(secretsHtml, /Material Inventory/);
-  assert.match(secretsHtml, /Docker secrets/);
+  assert.match(secretsHtml, /ops-shell/);
+  assert.doesNotMatch(secretsHtml, /Declare material/);
+  assert.doesNotMatch(secretsHtml, /Docker secrets/);
 
   const invalidMaterial = await postJson(`${baseUrl}/control/secrets/materials`, {
     projectId: "node-demo",
@@ -1265,9 +1295,8 @@ test("Admin Control Center local foundation", async (t) => {
   assert.equal(JSON.parse(materialStateText)["node-demo-staging-app-config"].valueExposed, false);
 
   const secretsHtmlAfterApply = await getText(`${baseUrl}/?mode=advanced&section=secrets`);
-  assert.match(secretsHtmlAfterApply, /Update rotation/);
-  assert.match(secretsHtmlAfterApply, /Update usage/);
-  assert.match(secretsHtmlAfterApply, /Record access/);
+  assert.match(secretsHtmlAfterApply, /ops-shell/);
+  assert.doesNotMatch(secretsHtmlAfterApply, /material-plain-value-should-not-leak/);
 
   const materialRotation = await postJson(`${baseUrl}/control/secrets/materials/node-demo-staging-app-config/rotation`, {
     rotationDays: 30,
@@ -1300,9 +1329,14 @@ test("Admin Control Center local foundation", async (t) => {
   assert.doesNotMatch(JSON.stringify(materialAccess.body), /material-plain-value-should-not-leak/);
 
   const resourcesHtml = await getText(`${baseUrl}/?section=resources`);
-  assert.match(resourcesHtml, /Resources/);
-  assert.match(resourcesHtml, /Quota per project/);
-  assert.match(resourcesHtml, /Set limits/);
+  assert.match(resourcesHtml, /Risorse/);
+  assert.match(resourcesHtml, /Uso risorse/);
+  assert.match(resourcesHtml, /Imposta limiti applicazione/);
+  assert.match(resourcesHtml, /Fonte metriche/);
+  assert.match(resourcesHtml, /<th>Container<\/th>/);
+  assert.match(resourcesHtml, /3\.500%/);
+  assert.doesNotMatch(resourcesHtml, /7\.000%/);
+  assert.doesNotMatch(resourcesHtml, /0 core/);
 
   const invalidResourceLimit = await postJson(`${baseUrl}/control/resources/limits`, {
     projectId: "node-demo",
@@ -1324,6 +1358,20 @@ test("Admin Control Center local foundation", async (t) => {
   assert.equal(resourceLimitPlan.body.details.confirmationRequired, "UPDATE-RESOURCE-LIMITS");
   assert.equal(resourceLimitPlan.body.details.dockerTouched, false);
   assert.doesNotMatch(JSON.stringify(resourceLimitPlan.body), /resource-limit-secret-should-not-leak/);
+
+  const stressPlan = await postJson(`${baseUrl}/actions/resource-command`, {
+    action: "stress-test",
+    projectId: "node-demo",
+    confirm: "RUN-STRESS:node-demo",
+    secret: "stress-secret-should-not-leak",
+  });
+  assert.equal(stressPlan.status, 202);
+  assert.equal(stressPlan.body.type, "resources.stress.command");
+  assert.equal(stressPlan.body.dryRun, true);
+  assert.equal(stressPlan.body.details.projectId, "node-demo");
+  assert.match(stressPlan.body.details.command, /scripts\/app-stress-test\.sh/);
+  assert.match(stressPlan.body.details.command, /--confirm-max-load/);
+  assert.doesNotMatch(JSON.stringify(stressPlan.body), /stress-secret-should-not-leak/);
 
   const resourceLimitApply = await postJson(`${baseUrl}/actions/resource-command`, {
     action: "limits",
@@ -1355,13 +1403,9 @@ test("Admin Control Center local foundation", async (t) => {
   assert.equal(JSON.parse(resourceLimitText)["node-demo"].diskMb, 2048);
 
   const securityHtml = await getText(`${baseUrl}/?section=security`);
-  assert.match(securityHtml, /Security/);
-  assert.match(securityHtml, /WAF/);
-  assert.match(securityHtml, /Rate limit/);
-  assert.match(securityHtml, /Cloudflare Access/);
-  assert.match(securityHtml, /Admin Protection/);
-  assert.match(securityHtml, /Security Headers/);
-  assert.match(securityHtml, /Update policy/);
+  assert.match(securityHtml, /ops-shell/);
+  assert.doesNotMatch(securityHtml, /Update policy/);
+  assert.doesNotMatch(securityHtml, /security-secret-should-not-leak/);
 
   const invalidSecurityPolicy = await postJson(`${baseUrl}/control/security/policy`, {
     scope: "global",
@@ -1533,21 +1577,13 @@ test("Admin Control Center local foundation", async (t) => {
   assert.equal(JSON.parse(identityAccessText).users["ops-admin"].email, "ops-admin@example.com");
 
   const identityHtml = await getText(`${baseUrl}/?mode=advanced&section=identity`);
-  assert.match(identityHtml, /Identity &amp; Access/);
-  assert.match(identityHtml, /Declare admin user/);
-  assert.match(identityHtml, /Roles &amp; Teams/);
-  assert.match(identityHtml, /Sessions &amp; Reviews/);
-  assert.match(identityHtml, /Ops Admin/);
+  assert.match(identityHtml, /ops-shell/);
+  assert.doesNotMatch(identityHtml, /Declare admin user/);
+  assert.doesNotMatch(identityHtml, /identity-secret-should-not-leak/);
 
-  const logsHtml = await getText(`${baseUrl}/?section=logs`);
-  assert.match(logsHtml, /Logs \/ Alerts/);
-  assert.match(logsHtml, /Open alerts/);
-  assert.match(logsHtml, /Recent errors/);
-  assert.match(logsHtml, /Notification Channels/);
-  assert.match(logsHtml, /Email/);
-  assert.match(logsHtml, /Discord/);
-  assert.match(logsHtml, /Telegram/);
-  assert.match(logsHtml, /Record alert/);
+  const logsHtml = await getText(`${baseUrl}/?section=activity`);
+  assert.match(logsHtml, /Errori, avvisi e problemi/);
+  assert.match(logsHtml, /Alert aperti/);
 
   const invalidAlert = await postJson(`${baseUrl}/control/alerts/record`, {
     service: "waf",
@@ -1628,21 +1664,11 @@ test("Admin Control Center local foundation", async (t) => {
   assert.equal(JSON.parse(notificationChannelsText).email.status, "configured");
 
   const settingsHtml = await getText(`${baseUrl}/?section=settings`);
-  assert.match(settingsHtml, /Settings/);
-  assert.match(settingsHtml, /Default mode/);
-  assert.match(settingsHtml, /Base domain/);
-  assert.match(settingsHtml, /Cloudflare connection/);
-  assert.match(settingsHtml, /GitHub connection/);
-  assert.match(settingsHtml, /SMTP\/alert status/);
-  assert.match(settingsHtml, /Control Center UI/);
-  assert.match(settingsHtml, /@platform\/control-center-local-ui/);
-  assert.match(settingsHtml, /@platform\/control-center/);
-  assert.match(settingsHtml, /\/assets\/control-center\/control-center\.css/);
-  assert.match(settingsHtml, /AppShell/);
+  assert.match(settingsHtml, /ops-shell/);
+  assert.doesNotMatch(settingsHtml, /Settings/);
+  assert.doesNotMatch(settingsHtml, /Provider Connections/);
+  assert.doesNotMatch(settingsHtml, /AppShell/);
   assert.equal(settingsHtml.includes(["file", "vendor"].join(":")), false);
-  assert.match(settingsHtml, /Provider Connections/);
-  assert.match(settingsHtml, /Cloudflare/);
-  assert.match(settingsHtml, /Update settings/);
 
   const providerConnections = await getJson(`${baseUrl}/control/provider-connections`);
   assert.equal(providerConnections.providerConnections.some((connection) => connection.id === "cloudflare"), true);
@@ -1775,13 +1801,12 @@ test("Admin Control Center local foundation", async (t) => {
   assert.equal(deploymentText.trim().split(/\r?\n/).length >= 2, true);
 
   const deploymentHtml = await getText(`${baseUrl}/?mode=advanced&section=deployments`);
-  assert.match(deploymentHtml, /Deployments/);
-  assert.match(deploymentHtml, /local-plan-only|planned/);
+  assert.match(deploymentHtml, /ops-shell/);
+  assert.doesNotMatch(deploymentHtml, /Deployment History/);
 
   const backupsHtml = await getText(`${baseUrl}/?section=backups`);
-  assert.match(backupsHtml, /Manual backup/);
-  assert.match(backupsHtml, /Restore drill/);
-  assert.match(backupsHtml, /Plan manual backup/);
+  assert.match(backupsHtml, /ops-shell/);
+  assert.doesNotMatch(backupsHtml, /Plan manual backup/);
 
   const backupPlan = await postJson(`${baseUrl}/actions/backup-command`, {
     action: "backup",
@@ -1815,7 +1840,7 @@ test("Admin Control Center local foundation", async (t) => {
   const backupRecordsText = readFileSync(backupRecordsFile, "utf8");
   assert.equal(backupRecordsText.trim().split(/\r?\n/).length >= 2, true);
   assert.doesNotMatch(backupRecordsText, /backup-secret-should-not-leak/);
-  assert.match(await getText(`${baseUrl}/?mode=advanced&section=backup-restore`), /Backup History/);
+  assert.doesNotMatch(await getText(`${baseUrl}/?mode=advanced&section=backup-restore`), /Backup History/);
 
   const localApply = await postJson(`${baseUrl}/control/subdomains/apply`, {
     environment: "local",
@@ -1896,6 +1921,163 @@ test("Admin Control Center local foundation", async (t) => {
   assert.equal(stderr, "");
 });
 
+test("Admin Control Center defaults to platform-only without hosted project discovery", async (t) => {
+  const isolatedRoot = path.join(infraRoot, ".tmp", "control-center-tests", `platform-only-${randomUUID()}`);
+  const isolatedProjectsRoot = path.join(isolatedRoot, "projects");
+  const isolatedStateDir = path.join(isolatedRoot, "state");
+  const isolatedProjectStateFile = path.join(isolatedStateDir, "projects.json");
+  const isolatedAuditFile = path.join(isolatedStateDir, "audit.jsonl");
+  const isolatedOperationsFile = path.join(isolatedStateDir, "operations.jsonl");
+  const isolatedApplicationsFile = path.join(isolatedStateDir, "applications.json");
+  const isolatedDomainsFile = path.join(isolatedStateDir, "domains.json");
+  const isolatedDatabasesFile = path.join(isolatedStateDir, "databases.json");
+  const isolatedStorageBucketsFile = path.join(isolatedStateDir, "storage-buckets.json");
+  const isolatedSensitiveMaterialsFile = path.join(isolatedStateDir, "sensitive-materials.json");
+  const isolatedWorkerJobsFile = path.join(isolatedStateDir, "worker-jobs.json");
+  const isolatedIdentityAccessFile = path.join(isolatedStateDir, "identity-access.json");
+  const isolatedDeploymentsFile = path.join(isolatedStateDir, "deployments.jsonl");
+  const isolatedBackupRecordsFile = path.join(isolatedStateDir, "backups.jsonl");
+  const isolatedResourceLimitsFile = path.join(isolatedStateDir, "resource-limits.json");
+  const isolatedSecurityPoliciesFile = path.join(isolatedStateDir, "security-policies.json");
+  const isolatedAlertsFile = path.join(isolatedStateDir, "alerts.json");
+  const isolatedNotificationChannelsFile = path.join(isolatedStateDir, "notification-channels.json");
+  const isolatedProviderConnectionsFile = path.join(isolatedStateDir, "provider-connections.json");
+  const isolatedSettingsFile = path.join(isolatedStateDir, "settings.json");
+  const isolatedWebspacesFile = path.join(isolatedStateDir, "webspaces.json");
+
+  rmSync(isolatedRoot, { recursive: true, force: true });
+  mkdirSync(path.join(isolatedProjectsRoot, "shadow-project"), { recursive: true });
+  mkdirSync(isolatedStateDir, { recursive: true });
+  writeFileSync(path.join(isolatedProjectsRoot, "shadow-project", "package.json"), `${JSON.stringify({ scripts: { start: "node server.js" } }, null, 2)}\n`);
+
+  const port = await freePort();
+  const child = spawn(process.execPath, [path.join(infraRoot, "control-center", "server.mjs")], {
+    cwd: infraRoot,
+    env: {
+      ...process.env,
+      CONTROL_CENTER_PORT: String(port),
+      CONTROL_CENTER_ENV: "local",
+      CONTROL_CENTER_DOCS_ROOT: infraRoot,
+      PROJECTS_ROOT: isolatedProjectsRoot,
+      PROJECT_STATE_FILE: isolatedProjectStateFile,
+      PROJECT_AUDIT_FILE: isolatedAuditFile,
+      PROJECT_OPERATIONS_FILE: isolatedOperationsFile,
+      PROJECT_APPLICATIONS_FILE: isolatedApplicationsFile,
+      PROJECT_DOMAINS_FILE: isolatedDomainsFile,
+      PROJECT_DATABASES_FILE: isolatedDatabasesFile,
+      PROJECT_STORAGE_BUCKETS_FILE: isolatedStorageBucketsFile,
+      PROJECT_SENSITIVE_MATERIALS_FILE: isolatedSensitiveMaterialsFile,
+      PROJECT_WORKER_JOBS_FILE: isolatedWorkerJobsFile,
+      PROJECT_IDENTITY_ACCESS_FILE: isolatedIdentityAccessFile,
+      PROJECT_DEPLOYMENTS_FILE: isolatedDeploymentsFile,
+      PROJECT_BACKUP_RECORDS_FILE: isolatedBackupRecordsFile,
+      PROJECT_RESOURCE_LIMITS_FILE: isolatedResourceLimitsFile,
+      PROJECT_SECURITY_POLICIES_FILE: isolatedSecurityPoliciesFile,
+      PROJECT_ALERTS_FILE: isolatedAlertsFile,
+      PROJECT_NOTIFICATION_CHANNELS_FILE: isolatedNotificationChannelsFile,
+      PROJECT_PROVIDER_CONNECTIONS_FILE: isolatedProviderConnectionsFile,
+      PROJECT_SETTINGS_FILE: isolatedSettingsFile,
+      PROJECT_WEBSPACES_FILE: isolatedWebspacesFile,
+      PROJECT_DOCKER_STATS_FILE: path.join(isolatedStateDir, "docker-stats.json"),
+      CONTROL_CENTER_HOST: "portal.localhost.com",
+      DOCS_HOST: "docs.localhost.com",
+      PROJECT_HOST_SUFFIX: ".localhost.com",
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let stderr = "";
+  child.stderr.on("data", (chunk) => {
+    stderr += chunk.toString("utf8");
+  });
+  t.after(async () => {
+    await stopChild(child);
+    rmSync(isolatedRoot, { recursive: true, force: true });
+  });
+
+  const baseUrl = `http://127.0.0.1:${port}`;
+  await waitForHealth(`${baseUrl}/__health`, child);
+
+  const overview = await getJson(`${baseUrl}/control/overview`);
+  assert.equal(overview.projects.total, 0);
+  assert.equal(overview.applications.total, 0);
+  assert.equal(overview.subdomains.total, 0);
+
+  const applications = await getJson(`${baseUrl}/control/applications`);
+  assert.deepEqual(applications.applications, []);
+
+  const applicationsHtml = await getText(`${baseUrl}/?section=applications`);
+  assert.match(applicationsHtml, /ops-shell/);
+  assert.doesNotMatch(applicationsHtml, /Shadow Project/);
+
+  assert.equal(stderr, "");
+});
+
+test("Admin Control Center browses project root symlinks inside projects root", async (t) => {
+  const isolatedRoot = path.join(infraRoot, ".tmp", "control-center-tests", `root-symlink-${randomUUID()}`);
+  const isolatedProjectsRoot = path.join(isolatedRoot, "projects");
+  const isolatedStateDir = path.join(isolatedRoot, "state");
+  const realProjectRoot = path.join(isolatedProjectsRoot, "fiplatform");
+  const aliasProjectRoot = path.join(isolatedProjectsRoot, "fireport");
+  const outsideRoot = path.join(isolatedRoot, "outside");
+
+  rmSync(isolatedRoot, { recursive: true, force: true });
+  mkdirSync(path.join(realProjectRoot, ".platform"), { recursive: true });
+  mkdirSync(outsideRoot, { recursive: true });
+  mkdirSync(isolatedStateDir, { recursive: true });
+  writeFileSync(path.join(realProjectRoot, "package.json"), `${JSON.stringify({ scripts: { start: "node server.js" } }, null, 2)}\n`);
+  writeFileSync(path.join(realProjectRoot, "server.mjs"), "console.log('ok');\n");
+  writeFileSync(path.join(realProjectRoot, ".platform", "project.json"), `${JSON.stringify({ projects: [{ slug: "fiplatform", name: "fiplatform", type: "node", aliases: ["fireport"], summary: "fiplatform app with a fireport alias." }], type: "node" }, null, 2)}\n`);
+  symlinkSync("fiplatform", aliasProjectRoot, "dir");
+  symlinkSync(outsideRoot, path.join(realProjectRoot, "outside-link"), "dir");
+
+  const port = await freePort();
+  const child = spawn(process.execPath, [path.join(infraRoot, "control-center", "server.mjs")], {
+    cwd: infraRoot,
+    env: {
+      ...process.env,
+      CONTROL_CENTER_PORT: String(port),
+      CONTROL_CENTER_ENV: "local",
+      CONTROL_CENTER_DISCOVER_HOSTED_PROJECTS: "true",
+      CONTROL_CENTER_DOCS_ROOT: infraRoot,
+      PROJECTS_ROOT: isolatedProjectsRoot,
+      ...isolatedStateEnv(isolatedStateDir),
+      PROJECT_DOCKER_STATS_FILE: path.join(isolatedStateDir, "docker-stats.json"),
+      CONTROL_CENTER_HOST: "portal.localhost.com",
+      DOCS_HOST: "docs.localhost.com",
+      PROJECT_HOST_SUFFIX: ".localhost.com",
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let stderr = "";
+  child.stderr.on("data", (chunk) => {
+    stderr += chunk.toString("utf8");
+  });
+  t.after(async () => {
+    await stopChild(child);
+    rmSync(isolatedRoot, { recursive: true, force: true });
+  });
+
+  const baseUrl = `http://127.0.0.1:${port}`;
+  await waitForHealth(`${baseUrl}/__health`, child);
+
+  const projects = await getJson(`${baseUrl}/control/projects`);
+  const aliasProject = projects.projects.find((project) => project.slug === "fiplatform");
+  assert.equal(projects.projects.some((project) => project.slug === "fireport"), false);
+  assert.deepEqual(aliasProject?.aliases, ["fireport"]);
+  assert.equal(aliasProject?.filesAvailable, true);
+  assert.equal(aliasProject?.filesystemExists, true);
+
+  const files = await getJson(`${baseUrl}/control/projects/fiplatform/files`);
+  assert.equal(files.available, true);
+  assert.equal(files.entries.some((entry) => entry.name === "package.json"), true);
+  assert.equal(files.entries.some((entry) => entry.name === "outside-link" && entry.type === "symlink" && entry.browsable === false), true);
+
+  const blocked = await fetch(`${baseUrl}/control/projects/fiplatform/files?path=outside-link`, { headers: { accept: "application/json" } });
+  assert.equal(blocked.status, 422);
+
+  assert.equal(stderr, "");
+});
+
 test("Admin Control Center admin guard", async (t) => {
   prepareFixture();
   const port = await freePort();
@@ -1910,6 +2092,7 @@ test("Admin Control Center admin guard", async (t) => {
       CONTROL_CENTER_PORT: String(port),
       CONTROL_CENTER_ENV: "local",
       CONTROL_CENTER_AUTH_REQUIRED: "true",
+      CONTROL_CENTER_DISCOVER_HOSTED_PROJECTS: "true",
       CONTROL_CENTER_ADMIN_PASSWORD_SHA256: createHash("sha256").update(adminInput).digest("hex"),
       CONTROL_CENTER_SESSION_KEYS_FILE: sessionKeysFile,
       CONTROL_CENTER_DOCS_ROOT: infraRoot,
@@ -1929,6 +2112,7 @@ test("Admin Control Center admin guard", async (t) => {
       PROJECT_PROVIDER_CONNECTIONS_FILE: providerConnectionsFile,
       PROJECT_SETTINGS_FILE: settingsFile,
       PROJECT_WEBSPACES_FILE: webspacesFile,
+      PROJECT_DOCKER_STATS_FILE: dockerStatsFile,
       CONTROL_CENTER_HOST: "portal.localhost.com",
       DOCS_HOST: "docs.localhost.com",
       PROJECT_HOST_SUFFIX: ".localhost.com",
@@ -2008,6 +2192,58 @@ function prepareFixture() {
   mkdirSync(stateDir, { recursive: true });
   writeFileSync(path.join(projectsRoot, "php-demo", "public", "index.php"), "<?php echo 'php-demo';\n");
   writeFileSync(path.join(projectsRoot, "node-demo", "package.json"), `${JSON.stringify({ scripts: { start: "node server.js" } }, null, 2)}\n`);
+  writeFileSync(path.join(projectsRoot, "node-demo", ".env"), "DB_NAME=\"node_demo_external\"\nDB_PASSWORD=\"db-password-should-not-leak\"\n");
+  writeFileSync(dockerStatsFile, `${JSON.stringify({
+    capturedAt: "2026-06-28T00:00:00.000Z",
+    containers: [
+      { name: "php-php-demo", cpuPercent: "0.10%", memoryUsage: "24MiB / 512MiB" },
+      { name: "node-demo", cpuPercent: "3.50%", memoryUsage: "96MiB / 512MiB" },
+    ],
+  }, null, 2)}\n`);
+  writeFileSync(databasesFile, `${JSON.stringify({
+    "legacy-mariadb-node-demo-external": {
+      id: "legacy-mariadb-node-demo-external",
+      projectId: "legacy-owner",
+      engine: "mariadb",
+      name: "node_demo_external",
+      ownerRole: "node_demo_user",
+      status: "declared",
+      linkedApps: ["node-demo"],
+    },
+    "legacy-postgres-node-demo-external": {
+      id: "legacy-postgres-node-demo-external",
+      projectId: "legacy-owner",
+      engine: "postgres",
+      name: "node_demo_pg",
+      ownerRole: "node_demo_pg_user",
+      status: "declared",
+      linkedApps: ["node-demo"],
+    },
+  }, null, 2)}\n`);
+}
+
+function isolatedStateEnv(stateRoot) {
+  return {
+    PROJECT_STATE_FILE: path.join(stateRoot, "projects.json"),
+    PROJECT_AUDIT_FILE: path.join(stateRoot, "audit.jsonl"),
+    PROJECT_OPERATIONS_FILE: path.join(stateRoot, "operations.jsonl"),
+    PROJECT_APPLICATIONS_FILE: path.join(stateRoot, "applications.json"),
+    PROJECT_DOMAINS_FILE: path.join(stateRoot, "domains.json"),
+    PROJECT_DATABASES_FILE: path.join(stateRoot, "databases.json"),
+    PROJECT_STORAGE_BUCKETS_FILE: path.join(stateRoot, "storage-buckets.json"),
+    PROJECT_SENSITIVE_MATERIALS_FILE: path.join(stateRoot, "sensitive-materials.json"),
+    PROJECT_WORKER_JOBS_FILE: path.join(stateRoot, "worker-jobs.json"),
+    PROJECT_IDENTITY_ACCESS_FILE: path.join(stateRoot, "identity-access.json"),
+    PROJECT_DEPLOYMENTS_FILE: path.join(stateRoot, "deployments.jsonl"),
+    PROJECT_BACKUP_RECORDS_FILE: path.join(stateRoot, "backups.jsonl"),
+    PROJECT_RESOURCE_LIMITS_FILE: path.join(stateRoot, "resource-limits.json"),
+    PROJECT_SECURITY_POLICIES_FILE: path.join(stateRoot, "security-policies.json"),
+    PROJECT_ALERTS_FILE: path.join(stateRoot, "alerts.json"),
+    PROJECT_NOTIFICATION_CHANNELS_FILE: path.join(stateRoot, "notification-channels.json"),
+    PROJECT_PROVIDER_CONNECTIONS_FILE: path.join(stateRoot, "provider-connections.json"),
+    PROJECT_SETTINGS_FILE: path.join(stateRoot, "settings.json"),
+    PROJECT_WEBSPACES_FILE: path.join(stateRoot, "webspaces.json"),
+  };
 }
 
 function freePort() {

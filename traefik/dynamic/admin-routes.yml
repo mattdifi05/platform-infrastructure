@@ -1,0 +1,66 @@
+http:
+  routers:
+    enterprise-phpmyadmin:
+      rule: Host(`phpmyadmin.platform-infrastructure.com`)
+      entryPoints:
+        - web
+      priority: 250
+      middlewares:
+        - enterprise-edge-forwarded-https@file
+        - enterprise-security-headers@file
+        - enterprise-rate-limit@file
+        - enterprise-compress@file
+      service: enterprise-phpmyadmin
+
+    enterprise-phpmyadmin-portal-path:
+      rule: Host(`portal.platform-infrastructure.com`) && PathPrefix(`/phpmyadmin`)
+      entryPoints:
+        - web
+      priority: 300
+      middlewares:
+        - enterprise-edge-forwarded-https@file
+        - enterprise-phpmyadmin-prefix
+        - enterprise-security-headers@file
+        - enterprise-rate-limit@file
+        - enterprise-compress@file
+      service: enterprise-phpmyadmin
+
+    enterprise-phppgadmin:
+      rule: Host(`phppgadmin.platform-infrastructure.com`) && PathPrefix(`/phppgadmin`)
+      entryPoints:
+        - web
+      priority: 250
+      middlewares:
+        - enterprise-edge-forwarded-https@file
+        - enterprise-db-admin-frame-headers@file
+        - enterprise-rate-limit@file
+        - enterprise-compress@file
+      service: enterprise-phppgadmin
+
+    enterprise-phppgadmin-portal-path:
+      rule: Host(`portal.platform-infrastructure.com`) && PathPrefix(`/phppgadmin`)
+      entryPoints:
+        - web
+      priority: 300
+      middlewares:
+        - enterprise-edge-forwarded-https@file
+        - enterprise-db-admin-frame-headers@file
+        - enterprise-rate-limit@file
+        - enterprise-compress@file
+      service: enterprise-phppgadmin
+
+  middlewares:
+    enterprise-phpmyadmin-prefix:
+      stripPrefix:
+        prefixes:
+          - /phpmyadmin
+
+  services:
+    enterprise-phpmyadmin:
+      loadBalancer:
+        servers:
+          - url: http://phpmyadmin:80
+    enterprise-phppgadmin:
+      loadBalancer:
+        servers:
+          - url: http://phppgadmin:80

@@ -5,6 +5,7 @@
     ":semanticCommits"
   ],
   "dependencyDashboard": true,
+  "dependencyDashboardApproval": true,
   "enabledManagers": [
     "docker-compose",
     "dockerfile",

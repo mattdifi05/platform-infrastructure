@@ -20,6 +20,72 @@
 
 The shell wrappers are container-first. On Linux they run the ops container with host networking so `*.localhost.com` resolves to the local edge. On Docker Desktop they map those hostnames to `host-gateway`; override `PLATFORM_LOCAL_HOST_TARGET` only if your Docker runtime exposes the host through a different address.
 
+Terminology: **Infrastructure Portal** is the operator product surface,
+**Control Center** is the Node service that serves it, and `portal.<domain>` is
+the host. Historical service ids `backend`, `web` and `worker-*` are generic
+platform runtime/template containers, not hosted applications. Account,
+passkey, backup-code or `app_account` checks are workload compatibility checks
+and are not infrastructure go-live gates.
+
+## Documentation map
+
+Use `DOCUMENTATION-INDEX.md` as the entry point for repository documentation and
+`INFRASTRUCTURE-DEEP-DIVE.md` for the complete infrastructure map. This runbook
+is the operational procedure layer: when a command here conflicts with current
+Compose/script state, verify the technical source and update the docs before
+using the procedure for production evidence.
+
+## Current reference server quick checks
+
+For the current prod-like Ubuntu reference server, start with read-only checks:
+
+```sh
+ssh platform-infrastructure
+cd /home/platform_infrastructure/platform-infrastructure
+
+docker compose -p platform_infra_vps \
+  -f compose.yaml \
+  -f compose.build.yaml \
+  -f compose.secrets.yaml \
+  -f compose.vps.yaml \
+  -f compose.waf.yaml \
+  -f compose.vps-waf.yaml \
+  -f .tmp/vps-runtime-override.yaml \
+  ps
+
+curl -skS --resolve portal.platform-infrastructure.com:443:127.0.0.1 \
+  https://portal.platform-infrastructure.com/control/status
+
+for path in /srv/platform-nvme /home/platform_infrastructure /var/lib/docker; do
+  findmnt -no SOURCE,TARGET,FSTYPE,OPTIONS "$path"
+done
+df -h / /srv/platform-nvme /home/platform_infrastructure /var/lib/docker
+```
+
+Expected storage model: `/` remains on the OS disk, while
+`/home/platform_infrastructure`, external application sources and
+`/var/lib/docker` are backed by `/srv/platform-nvme`. Do not delete rollback
+copies, Docker volumes or backup artifacts while investigating an incident.
+
+For a Control Center-only rollout, back up the touched files, copy only those
+files, test them in the repo path, then recreate only `control-center`:
+
+```sh
+docker compose -p platform_infra_vps \
+  -f compose.yaml \
+  -f compose.build.yaml \
+  -f compose.secrets.yaml \
+  -f compose.vps.yaml \
+  -f compose.waf.yaml \
+  -f compose.vps-waf.yaml \
+  -f .tmp/vps-runtime-override.yaml \
+  up -d --force-recreate control-center
+```
+
+Never use `docker compose down -v` as a troubleshooting shortcut. Volume
+deletion is a separate destructive procedure and requires explicit approval,
+verified backups and a rollback plan.
+
 2. Check edge and API:
 
    ```sh
@@ -203,9 +269,9 @@ Acceptance criteria:
 
 The load profile uses a bounded synthetic `X-Forwarded-For` client pool by default so the performance probe does not collide with the security rate-limit budget consumed by smoke and E2E checks. Use `--preserveClientIp` when deliberately testing one-client throttling behavior.
 
-If `AuditOutboxDeadLetters` fires, pause risky account operations, inspect `{job="docker",service="enterprise-worker-jobs"} |= "audit_outbox"`, fix the downstream sink, then replay only events whose `external_event_id` has not already been accepted by the sink.
+If `AuditOutboxDeadLetters` fires, pause risky admin or workload operations, inspect `{job="docker",service="enterprise-worker-jobs"} |= "audit_outbox"`, fix the downstream sink, then replay only events whose `external_event_id` has not already been accepted by the sink.
 
-If `BackendRedisUnavailable` fires, keep login, passkey, OTP and backup-code traffic under the degraded memory budget until Redis is healthy. Do not raise rate-limit ceilings during the incident.
+If `BackendRedisUnavailable` fires, keep platform and hosted-workload traffic under the degraded memory/rate-limit budget until Redis is healthy. Do not raise rate-limit ceilings during the incident.
 
 ## Centralized logs and audit
 
@@ -219,7 +285,15 @@ Primary operator queries:
 {job="docker",service="enterprise-worker-jobs"} |= "audit_outbox"
 ```
 
-Use Loki for operational logs and PostgreSQL `app_account.audit_events` plus `app_account.audit_outbox` for durable security/compliance events. Audit tables are append-only and RLS protected.
+Use Loki for operational logs and `platform-admin-audit` evidence for
+infrastructure admin activity. Hosted application audit schemas such as
+`app_account.audit_events` are workload-owned and must not be used as platform
+go-live evidence. Audit tables for hosted apps may still be append-only and RLS
+protected, but they are outside the hosting-infra gate.
+The infrastructure evidence gate still verifies that audit tables using
+`audit_events` and `audit_outbox` remain append-only, durable and observable,
+so centralized audit behavior can be proven without coupling go-live to a
+hosted application.
 Run `sh ./scripts/audit-log-evidence.sh` before go-live and after audit/outbox changes; archive `reports/audit-logs/audit-log-evidence-*.json` with the release evidence.
 Run `sh ./scripts/retention-evidence.sh` after log/metric retention changes and before go-live; archive `reports/retention/retention-evidence-*.json` with the release evidence.
 
@@ -268,17 +342,19 @@ This keeps scheduling inside Docker. The host only needs Docker, Compose and Git
 ## Home VPS LAN evidence
 
 Use explicit runtime overrides when the home VPS is reachable only over LAN
-HTTP while production TLS is still provided by the future edge provider. This
-keeps production HTTPS checks intact and only changes the local evidence
-target:
+HTTP while production TLS is still provided by the future edge provider. Keep
+the canonical platform hostnames in local DNS or `/etc/hosts`; do not introduce
+temporary wildcard/IP hostnames into platform evidence. This keeps production
+HTTPS checks intact and only changes the local evidence target:
 
 ```sh
-DEPLOY_API_BASE=http://api.192.168.1.164.sslip.io \
-DEPLOY_UI_BASE=http://app.192.168.1.164.sslip.io \
-DEPLOY_ACCOUNT_BASE=http://account.192.168.1.164.sslip.io \
-DEPLOY_ACCOUNT_ORIGIN=https://account.192.168.1.164.sslip.io \
-DEPLOY_ADMIN_BASE=http://admin.192.168.1.164.sslip.io \
-DEPLOY_GRAFANA_BASE=http://grafana.192.168.1.164.sslip.io/login \
+DEPLOY_PORTAL_BASE=http://portal.platform-infrastructure.com \
+DEPLOY_DOCS_BASE=http://docs.platform-infrastructure.com \
+DEPLOY_APP_BASE=http://app.platform-infrastructure.com \
+DEPLOY_API_BASE=http://api.platform-infrastructure.com \
+DEPLOY_AUTH_BASE=http://auth.platform-infrastructure.com \
+DEPLOY_AUTH_ORIGIN=https://auth.platform-infrastructure.com \
+DEPLOY_GRAFANA_BASE=http://grafana.platform-infrastructure.com/login \
 DEPLOY_GRAFANA_BLOCKED=1 \
 DEPLOY_ADMIN_SCHEME=http \
 DEPLOY_ALLOW_HTTP_NO_HSTS=1 \
@@ -313,11 +389,11 @@ sh ./scripts/secret-rotation-evidence.sh --enforce
 
 `secret-rotation-evidence.sh --enforce` validates the encrypted store, materialized Docker secret files, audit log, Platform Local KMS age and every secret `rotationDays` window without printing secret values. Archive `reports/secret-rotation/secret-rotation-evidence-*.json` outside Git before production go/no-go.
 
-`portal.localhost.com` is the Node-based Admin Control Center served by the `control-center` container. It stays separate from PHP Apache, is declared as the local Node project `@platform/control-center`, and uses a local Control Center visual system: components are declared in `control-center/components/ui/controlCenterUi.mjs`, `--cc-*` tokens live in `control-center/styles/control-center.css`, the stylesheet is served from `/assets/control-center/control-center.css`, and `/control/ui-package` exposes that local contract. Control Center reads project inventory from `PHP_PROJECTS_DIR`, exposes read-only Advanced Network topology from `/control/network`, exposes read-only Advanced Monitoring topology from `/control/monitoring`, and stores local metadata/audit state in `projects-portal/state/`. `docs.localhost.com` is served by the same Node process but only renders whitelisted Markdown documentation from the repository. `PHP_SOURCE_DIR` points at `php-runtime-root`, a neutral static Apache root; PHP Apache is only the runtime for PHP projects and does not own the Control Center UI or API. Production/provider operations are plan-only from this foundation unless an explicit adapter and confirmation gate are added. For staging/VPS set `CONTROL_CENTER_AUTH_REQUIRED=true` and set `CONTROL_CENTER_ADMIN_PASSWORD_SHA256` to the SHA-256 hash of the admin password; the session cookie is signed with the existing `projects_gateway_signing_keys` Docker secret and login success/failure is audited without storing passwords.
-`project-router` remains the shared internal project entrypoint for PHP and Node project hosts, but Traefik no longer publishes wildcard project routes by default. `CONTROL_CENTER_HOST` forwards to the Node Control Center, `DOCS_HOST` forwards to the docs surface, and `PROJECTS_HOST` stays deprecated and empty. Node/PHP routing behavior remains covered by `project-router-tests` as an internal capability.
+`portal.localhost.com` is the Node-based Infrastructure Portal served by the `control-center` container. It stays separate from PHP Apache, is declared as the local Node project `@platform/control-center`, and uses a local Control Center visual system: components are declared in `control-center/components/ui/controlCenterUi.mjs`, `--cc-*` tokens live in `control-center/styles/control-center.css`, the stylesheet is served from `/assets/control-center/control-center.css`, and `/control/ui-package` exposes that local contract. Control Center is platform-first: Applications are metadata only, may be zero, and render `No applications attached.` when no external application is attached. Automatic hosted-project discovery is disabled by default with `CONTROL_CENTER_DISCOVER_HOSTED_PROJECTS=false`; enable it only for explicit external manifests or mounted source inventories. Control Center exposes read-only Advanced Network topology from `/control/network`, read-only Advanced Monitoring topology from `/control/monitoring`, and stores local metadata/audit state in `projects-portal/state/`. `docs.localhost.com` is served by the same Node process but only renders whitelisted Markdown documentation from the repository. `PHP_SOURCE_DIR` points at `php-runtime-root`, a neutral static Apache root; PHP Apache is only a generic runtime and does not own the Control Center UI or API. Production/provider operations are plan-only from this foundation unless an explicit adapter and confirmation gate are added. For staging/VPS set `CONTROL_CENTER_AUTH_REQUIRED=true` and set `CONTROL_CENTER_ADMIN_PASSWORD_SHA256` to the SHA-256 hash of the admin password; the session cookie is signed with the existing `projects_gateway_signing_keys` Docker secret and login success/failure is audited without storing passwords.
+`project-router` remains the shared internal entrypoint for optional PHP and Node application hosts, but Traefik no longer publishes wildcard project routes by default. `CONTROL_CENTER_HOST` forwards to the Node Control Center, `DOCS_HOST` forwards to the docs surface, and `PROJECTS_HOST` stays deprecated and empty. Node/PHP routing behavior remains covered by `project-router-tests` as an internal capability, not as production evidence for hosted applications.
 Advanced Mode exposes the requested enterprise skeleton areas, including Workers & Jobs, CI/CD & GitHub Governance, Logs/Alerts Advanced, Disaster Recovery, Release Evidence, Security Advanced and Billing / Plans. These surfaces remain plan/evidence-only until an explicit adapter performs apply plus verifyRemote.
 The read-only Advanced API is available at `/control/advanced` and `/control/advanced/:section`; it exposes capabilities, guardrails and evidence metadata without live provider calls, Docker mutations or production evidence claims. `/control/readiness` reads the read-only governance manifests, exposes a sanitized repository/live-proof readiness matrix and keeps production evidence false until real VPS/provider proof is verified.
-The backend adapter registry is available at `/control/adapters` and `/control/adapters/:id`; it covers Cloudflare, Traefik, Docker, GitHub, Prometheus, Loki, Alertmanager, Backup, Restore, MinIO, Database, Security and Go/No-Go. `/control/adapters/:id/plan` and `/verify` create audited plans, while `/apply` is rejected until an explicit live backend implementation, strong confirmation and verifyRemote are added.
+The server-side adapter registry is available at `/control/adapters` and `/control/adapters/:id`; it covers Cloudflare, Traefik, Docker, GitHub, Prometheus, Loki, Alertmanager, Backup, Restore, MinIO, Database, Security and Go/No-Go. `/control/adapters/:id/plan` and `/verify` create audited plans, while `/apply` is rejected until an explicit live adapter implementation, strong confirmation and verifyRemote are added.
 
 ## Restore test
 
@@ -451,7 +527,7 @@ review item until the VPS origin certificate is valid for every proxied
 hostname.
 
 Cloudflare Access admin protection is versioned in `cloudflare/access-admin.example.json`.
-Before live apply, replace placeholder domains, account id, identity provider ids and
+Before live apply, replace placeholder domains, Cloudflare account id, identity provider ids and
 admin emails. MFA is enforced by the configured Cloudflare Access identity provider;
 the Platform manifest refuses live operations unless that intent is explicit.
 
@@ -520,7 +596,7 @@ This must pass before public traffic is exposed.
 Run monthly:
 
 ```sh
-sh ./scripts/access-review.sh
+sh ./scripts/platform-admin-audit.sh
 ```
 
 ## Production deploy
@@ -645,12 +721,42 @@ hardening apply reports, VPS host readiness, Cloudflare Access admin
 rotation evidence, DR/off-site restore, real alert delivery, external uptime,
 public 50/100/500 load, release evidence with rollback/provenance and complete
 pre-go-live evidence. Treat
-`no-go` as a hard stop before public traffic changes. A `no-go` report carries a JSON
-`remediation` array and a Markdown remediation checklist with the exact
-follow-up commands and evidence expected for each failed gate.
-`production-readiness-live.sh` then maps the 20-point production readiness
+`no-go` as a hard stop before public traffic changes. A `no-go` report carries
+JSON `summary`, `blockingRequired`, `pendingRequired` and `remediation`
+sections plus a Markdown remediation checklist. Local repository or runtime
+problems remain `failed`; public DNS/HTTPS, Cloudflare, external uptime,
+public load, off-site restore and live GitHub provenance remain
+`pending-live-proof` or `pending-provider` until real provider evidence exists.
+`pre-go-live-evidence` uses the same separation: local blockers go to `issues`,
+while DNS/provider/GitHub requirements are listed in `pendingLiveProofs`.
+`production-readiness-live.sh` then maps the 19-point infrastructure production readiness
 checklist to the latest `production-go-no-go` report and writes
 `reports/production-readiness/production-readiness-*.json` plus `.md`.
+
+Control Center `Stato` is the operator view of this gate. Its `Avvia test
+reali` action is read-only and intentionally limited to platform checks that
+can be run safely from the Control Center container: Portal through WAF,
+sensitive-file block, go/no-go report readability, production decision and
+readiness manifest readability. It does not list Control Center-only UI tests
+or hosted-application checks as production blockers.
+
+If `Stato` shows only pending live/provider proof, do not try to force those
+items green on a LAN-only Ubuntu server. The following blockers require real
+external evidence:
+
+| Blocker | Required external proof |
+| --- | --- |
+| `pre-go-live-evidence-complete` | final pre-go-live evidence with production preflight, GitHub remote verification and required restore/off-site options |
+| `github-actions-run-success` | successful remote `enterprise-infra` GitHub Actions run on the release commit |
+| `disaster-recovery-rpo-rto-offsite` | remote off-site repository plus full-family restore drill evidence |
+| `external-uptime-provider` | third-party/provider uptime checks against public hosts from outside the VPS/LAN |
+| `public-load-benchmark` | benchmark against final public hosts through the public edge/CDN path |
+| `release-evidence-and-rollback` | fresh release evidence, rollback and complete GitHub/Sigstore provenance |
+| `cloudflare-access-admin-verified` | Cloudflare Access admin protection applied and verified remotely on the real zone |
+
+A private Ubuntu server can be healthy and ready for parallel migration while
+production remains `NO-GO`. That is correct until DNS, Cloudflare, GitHub,
+public monitoring, public load and off-site restore evidence are real.
 
 After the final reports are generated, create a non-secret evidence archive:
 
@@ -674,10 +780,15 @@ checks every entry's size and SHA256, confirms the anti-secret policy and, with
    ```
 
 2. Push images to the registry configured in `.env`.
-3. Run migrations on the target before exposing traffic:
+3. Run hosted-application migrations only if an external app runbook requires
+   them. They are workload steps, not platform hosting go-live gates. For the
+   infrastructure itself, validate managed database backup/restore evidence
+   instead:
 
    ```sh
-   sh ./scripts/apply-postgres-migrations.sh
+   sh ./scripts/backup-postgres.sh
+   sh ./scripts/backup-mariadb.sh
+   sh ./scripts/full-restore-drill.sh
    ```
 
 4. Start production:
@@ -826,8 +937,8 @@ Use this path when TLS and public certificates are terminated by VPS, Cloudflare
 
    ```json
    {
-     "APP_IMAGE": "registry.example.com/client-portal/app@sha256:...",
-     "WORKER_IMAGE": "registry.example.com/client-portal/worker@sha256:..."
+     "APP_IMAGE": "registry.example.com/example-app/app@sha256:...",
+     "WORKER_IMAGE": "registry.example.com/example-app/worker@sha256:..."
    }
    ```
 

@@ -68,14 +68,41 @@ SOURCE_MOUNT_ARGS=""
 if [ -d "$SOURCE_ROOT" ]; then
   SOURCE_MOUNT_ARGS="-v $SOURCE_VOLUME_SOURCE:$SOURCE_CONTAINER_ROOT:ro"
 fi
+
+env_file_value() {
+  key="$1"
+  file="$INFRA_ROOT/.env"
+  [ -f "$file" ] || return 0
+  value=$(grep -E "^${key}=" "$file" 2>/dev/null | tail -n 1 | sed "s/^[^=]*=//; s/^['\\\"]//; s/['\\\"]$//" || true)
+  printf '%s' "$value"
+}
+
+configured_domain="${DOMAIN:-$(env_file_value DOMAIN)}"
+configured_admin_host="${ADMIN_HOST:-$(env_file_value ADMIN_HOST)}"
+configured_control_host="${CONTROL_CENTER_HOST:-$(env_file_value CONTROL_CENTER_HOST)}"
+configured_docs_host="${DOCS_HOST:-$(env_file_value DOCS_HOST)}"
+if [ -n "$configured_domain" ]; then
+  configured_admin_host="${configured_admin_host:-portal.$configured_domain}"
+  configured_control_host="${configured_control_host:-$configured_admin_host}"
+  configured_docs_host="${configured_docs_host:-docs.$configured_domain}"
+fi
+
 LOCAL_HOST_ARGS=""
-for host in \
-  localhost.com \
-  portal.localhost.com \
-  docs.localhost.com
-do
+LOCAL_HOSTS="localhost.com portal.localhost.com docs.localhost.com"
+if [ -n "$configured_domain" ]; then
+  LOCAL_HOSTS="$LOCAL_HOSTS $configured_domain $configured_admin_host $configured_control_host $configured_docs_host portal.$configured_domain docs.$configured_domain app.$configured_domain api.$configured_domain auth.$configured_domain storage.$configured_domain grafana.$configured_domain"
+fi
+for host in $LOCAL_HOSTS; do
+  [ -n "$host" ] || continue
   LOCAL_HOST_ARGS="$LOCAL_HOST_ARGS --add-host $host:$LOCAL_HOST_TARGET"
 done
+
+NODE_CA_ARGS=""
+if [ -n "${NODE_EXTRA_CA_CERTS:-}" ]; then
+  NODE_CA_ARGS="-e NODE_EXTRA_CA_CERTS"
+elif [ -f "$INFRA_ROOT/traefik/certs/ca.pem" ]; then
+  NODE_CA_ARGS="-e NODE_EXTRA_CA_CERTS=$INFRA_CONTAINER_ROOT/traefik/certs/ca.pem"
+fi
 
 ENV_FORWARD_ARGS=""
 for name in \
@@ -93,6 +120,7 @@ for name in \
   GITHUB_REPOSITORY \
   GITHUB_SHA \
   GITHUB_TOKEN \
+  NODE_EXTRA_CA_CERTS \
   RESTIC_PASSWORD_FILE \
   RESTIC_REPOSITORY \
   PLATFORM_GITHUB_REPOSITORY \
@@ -109,6 +137,7 @@ exec docker run --rm \
   $NETWORK_ARGS \
   $LOCAL_HOST_ARGS \
   $ENV_FORWARD_ARGS \
+  $NODE_CA_ARGS \
   -e "DOCKER_HOST=${DOCKER_HOST:-}" \
   -e "NODE_IMAGE=$NODE_IMAGE" \
   -e "PLAYWRIGHT_IMAGE=${PLAYWRIGHT_IMAGE:-}" \

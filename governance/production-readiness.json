@@ -2,7 +2,7 @@
   "version": 1,
   "scope": "platform-infrastructure",
   "title": "Production Readiness Checklist",
-  "expectedCount": 20,
+  "expectedCount": 19,
   "reportDirectory": "production-readiness",
   "reportPrefix": "production-readiness",
   "liveProofCheckRequired": true,
@@ -84,7 +84,7 @@
         { "type": "workflow", "pattern": "Managed secrets preflight[\\s\\S]*managed-secrets-preflight" }
       ],
       "liveProof": "Materialize production Docker secrets, rotate them through the managed store and archive a passing secret-rotation-evidence report.",
-      "liveProofChecks": ["secret-rotation-evidence", "pre-go-live-evidence-complete"]
+      "liveProofChecks": ["secret-rotation-evidence"]
     },
     {
       "id": "tls-https-production-ready",
@@ -133,7 +133,7 @@
         { "type": "pattern", "path": "scripts/infra-ops.mjs", "pattern": "async function infraHealth" }
       ],
       "liveProof": "Pass compose-healthcheck-coverage and run infra-health after deploy against the real VPS stack.",
-      "liveProofChecks": ["pre-go-live-evidence-complete"]
+      "liveProofChecks": ["healthcheck-coverage", "infra-health-runtime"]
     },
     {
       "id": "operations-runbook",
@@ -175,17 +175,15 @@
     },
     {
       "id": "admin-audit-log",
-      "title": "Audit log admin",
-      "state": "repo-ready",
+      "title": "Audit trail admin infrastruttura",
+      "state": "gate-ready",
       "evidence": [
-        { "type": "file", "path": "postgres/migrations/007_durable_audit_outbox.sql" },
-        { "type": "command", "name": "audit-log-evidence" },
-        { "type": "command", "name": "access-review" },
-        { "type": "pattern", "path": "RUNBOOK.md", "pattern": "audit_outbox|AuditOutbox" },
-        { "type": "workflow", "pattern": "Audit log evidence[\\s\\S]*audit-log-evidence" }
+        { "type": "file", "path": "control-center/server.mjs" },
+        { "type": "file", "path": "scripts/infra-secret-manager.mjs" },
+        { "type": "pattern", "path": "RUNBOOK.md", "pattern": "deploy audit trail|Control Center[\\s\\S]*audited plans|secret manager[\\s\\S]*audit log" }
       ],
-      "liveProof": "Pass audit-log-evidence and review access-review output after every admin permission change.",
-      "liveProofChecks": ["pre-go-live-evidence-complete"]
+      "liveProof": "Archive platform-admin-audit evidence for Control Center/provider/deploy/secret-manager admin actions without using hosted project audit logs.",
+      "liveProofChecks": ["platform-admin-audit-evidence"]
     },
     {
       "id": "docker-linux-hardening",
@@ -214,7 +212,7 @@
         { "type": "workflow", "pattern": "Retention evidence[\\s\\S]*retention-evidence" }
       ],
       "liveProof": "Pass retention-evidence and tune log/metric retention according to the final VPS disk size.",
-      "liveProofChecks": ["pre-go-live-evidence-complete"]
+      "liveProofChecks": ["retention-evidence"]
     },
     {
       "id": "real-telegram-email-alerts",
@@ -241,18 +239,6 @@
       ],
       "liveProof": "Apply and verify Cloudflare Access or VPN protection with IdP MFA for every admin surface.",
       "liveProofChecks": ["cloudflare-access-admin-verified"]
-    },
-    {
-      "id": "controlled-db-migrations",
-      "title": "Migrazioni database controllate",
-      "state": "repo-ready",
-      "evidence": [
-        { "type": "file", "path": "scripts/apply-postgres-migrations.sh" },
-        { "type": "command", "name": "apply-postgres-migrations" },
-        { "type": "pattern", "path": "postgres/migrations/001_session_security_hardening.sql", "pattern": "schema_migrations" }
-      ],
-      "liveProof": "Run migrations only through the deploy flow and archive schema_migrations output.",
-      "liveProofChecks": ["pre-go-live-evidence-complete"]
     },
     {
       "id": "deploy-rollback-tests",

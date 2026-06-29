@@ -42,6 +42,11 @@ services:
     profiles:
       - admin
 
+  phppgadmin:
+    container_name: !reset null
+    profiles:
+      - admin
+
   backend:
     container_name: !reset null
 
