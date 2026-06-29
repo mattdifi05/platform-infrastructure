@@ -33,6 +33,7 @@ and are not platform go-live gates.
 - `.env` is local-only and ignored by Git.
 - Local development and single-node Docker production can use the proprietary `infra-secret-manager`.
 - The manager keeps the canonical store encrypted under `secrets/infra-secret-manager-store.json`, wraps records with the proprietary `local-bucket-kms` envelope layer, writes an audit log and materializes Docker secret files under `secrets/*.txt`.
+- The manager is also the local secret vault for arbitrary operational secrets such as provider tokens. Vault secret names are constrained to lowercase letters, numbers and underscores; commands print metadata and fingerprints only, never values.
 - Local secret files and manager runtime files are ignored by Git and mounted as `/run/secrets/*`.
 - Runtime code must consume secret material only through `*_FILE` values or approved managed secret references.
 - `SESSION_SECRET` must be random, long and rotated per environment.

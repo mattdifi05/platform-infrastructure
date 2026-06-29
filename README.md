@@ -109,6 +109,15 @@ docker compose -f compose.yaml -f compose.build.yaml -f compose.secrets.yaml --e
 
 `infra-secret-manager` mantiene uno store proprietario cifrato in `secrets/infra-secret-manager-store.json`, audit JSONL in `secrets/infra-secret-manager-audit.log` e materializza i file Docker secrets usati da `compose.secrets.yaml`. Lo store usa envelope KMS locale `local-bucket-kms` con KEK ruotabile. I runtime platform/generici leggono i secret da `/run/secrets/*`, inclusi `DATABASE_URL_FILE`, `SESSION_SECRET_FILE`, `SESSION_SIGNING_KEYS_FILE`, `PROJECTS_GATEWAY_SIGNING_KEYS_FILE`, `REDIS_PASSWORD_FILE`, `NATS_URL_FILE` e `SMTP_PASSWORD_FILE`.
 
+Lo stesso manager funziona anche come secret vault locale per valori arbitrari non presenti nella whitelist platform. I nomi devono usare solo lettere minuscole, numeri e underscore. Esempio:
+
+```sh
+printf '%s\n' "$TOKEN" | sh ./scripts/infra-secret-manager.sh set --name github_token --stdin --owner github --minLength 40
+sh ./scripts/infra-secret-manager.sh verify
+```
+
+I valori non vengono stampati: `status` mostra solo metadati, owner, scope e fingerprint. Le operazioni GitHub caricano automaticamente `secrets/github_token.txt` come `GITHUB_TOKEN` dentro il container ops quando il vault contiene `github_token` e la variabile non e' gia' impostata.
+
 Il dev Docker e' volutamente production-like: usa `NODE_ENV=production`, immagini buildate, nessun hot reload, nessun bind mount implicito del sorgente esterno e nessuna porta host diretta per database/cache/app. Il traffico platform passa da Traefik solo su `portal` e `docs` nel profilo default.
 
 `phpmyadmin` non parte nello stack default. Per manutenzione locale temporanea avvialo esplicitamente con il profilo `admin` e spegnilo a fine intervento:
@@ -394,7 +403,7 @@ sh ./scripts/dast-zap-baseline.sh https://api-staging.example.com
 
 `alert-evidence.sh` verifica configurazione Alertmanager, bearer secret, metriche worker e alert di failure delivery. In staging/VPS usa `alert-evidence.sh --sendTest`; con canali reali configurati puoi aggiungere `--requireEmailDelivery`, `--requireDiscordDelivery` o `--requireTelegramDelivery` per rendere la consegna un gate.
 
-`secret-rotation-evidence.sh` scrive un report non-secret in `reports/secret-rotation/` con stato dello store Infra Secret Manager, audit log, KMS attivo, eta' dei secret rispetto a `rotationDays`, file materializzati e risultato di `infra-secret-manager verify`. In produzione usa `--enforce`: il go/no-go accetta solo `mode=evidence`, `status=passed`, zero secret scaduti e zero file mancanti.
+`secret-rotation-evidence.sh` scrive un report non-secret in `reports/secret-rotation/` con stato dello store Infra Secret Manager, audit log, KMS attivo, eta' dei secret rispetto a `rotationDays`, file materializzati, secret vault e risultato di `infra-secret-manager verify`. In produzione usa `--enforce`: il go/no-go accetta solo `mode=evidence`, `status=passed`, zero secret scaduti e zero file mancanti.
 
 `compose-healthcheck-coverage` renderizza gli stack local WAF, VPS WAF e backup scheduler, poi scrive `reports/healthchecks/healthcheck-coverage-*.json`/`.md`. Fallisce se un servizio operativo del render Compose non ha una healthcheck.
 

@@ -6031,6 +6031,8 @@ async function secretRotationEvidence(options = {}) {
       }
       secretReports.push({
         name: expected.name,
+        scope: record.scope ?? "platform",
+        owner: record.owner ?? "platform",
         kind: record.kind ?? expected.kind,
         status,
         updatedAt: record.updatedAt ?? null,
@@ -6047,9 +6049,52 @@ async function secretRotationEvidence(options = {}) {
     }
 
     const expectedNames = new Set(managedSecretRotationExpectations.map((secret) => secret.name));
-    const unmanagedNames = Object.keys(storeSecrets).filter((name) => !expectedNames.has(name)).sort();
-    if (unmanagedNames.length) {
-      issues.push(`unexpected managed secret records: ${unmanagedNames.join(", ")}`);
+    const unexpectedNames = [];
+    for (const name of Object.keys(storeSecrets).filter((secretName) => !expectedNames.has(secretName)).sort()) {
+      const record = storeSecrets[name];
+      const isVaultRecord = record?.scope === "vault" || (record?.owner && record.owner !== "platform");
+      if (!isVaultRecord) {
+        unexpectedNames.push(name);
+        continue;
+      }
+      const materializedPath = path.join(secretsDir, `${name}.txt`);
+      const materializedPresent = fs.existsSync(materializedPath) && fs.statSync(materializedPath).isFile() && fs.statSync(materializedPath).size > 0;
+      const rotationDays = Number(record.rotationDays ?? 90);
+      const ageDays = ageDaysFromIso(record.updatedAt);
+      const allowedAgeDays = Math.max(0, rotationDays + rotationGraceDays);
+      const expired = !Number.isFinite(ageDays) || ageDays > allowedAgeDays;
+      const status = expired || !materializedPresent || record.kind !== "opaque" ? "failed" : "passed";
+      if (record.kind !== "opaque") {
+        issues.push(`${name} vault kind=${record.kind ?? "missing"} expected=opaque`);
+      }
+      if (!materializedPresent) {
+        issues.push(`missing materialized vault secret file for ${name}`);
+      }
+      if (!Number.isFinite(ageDays)) {
+        issues.push(`${name} has an invalid updatedAt timestamp`);
+      } else if (expired) {
+        issues.push(`${name} is ${ageDays.toFixed(1)}d old; max ${allowedAgeDays}d`);
+      }
+      secretReports.push({
+        name,
+        scope: "vault",
+        owner: record.owner ?? "vault",
+        kind: record.kind ?? "opaque",
+        status,
+        updatedAt: record.updatedAt ?? null,
+        ageDays: Number.isFinite(ageDays) ? Number(ageDays.toFixed(3)) : null,
+        rotationDays,
+        rotationGraceDays,
+        expired,
+        manualRotation: false,
+        materializedPresent,
+        fingerprintPresent: Boolean(record.fingerprint),
+        kmsKeyId: record.encryption?.keyId ?? null,
+        keyIds: Array.isArray(record.keyIds) ? record.keyIds : [],
+      });
+    }
+    if (unexpectedNames.length) {
+      issues.push(`unexpected non-vault secret records: ${unexpectedNames.join(", ")}`);
     }
 
     const verifyResult = runSecretManager([
@@ -6129,6 +6174,7 @@ async function secretRotationEvidence(options = {}) {
       expectedSecrets: managedSecretRotationExpectations.length,
       reportedSecrets: secretReports.length,
       failedSecrets: failedSecrets.length,
+      vaultSecrets: secretReports.filter((secret) => secret.scope === "vault").length,
       expiredSecrets: expiredSecrets.length,
       missingMaterializedFiles: secretReports.filter((secret) => !secret.materializedPresent).length,
       manualRotationSecrets: secretReports.filter((secret) => secret.manualRotation).length,
@@ -6159,11 +6205,11 @@ async function secretRotationEvidence(options = {}) {
     `Failed secrets: ${payload.summary.failedSecrets}`,
     `Missing materialized files: ${payload.summary.missingMaterializedFiles}`,
     "",
-    "| Secret | Status | Kind | Age days | Rotation days | Materialized |",
-    "| --- | --- | --- | ---: | ---: | --- |",
+    "| Secret | Scope | Status | Kind | Age days | Rotation days | Materialized |",
+    "| --- | --- | --- | --- | ---: | ---: | --- |",
     ...(secretReports.length
-      ? secretReports.map((secret) => `| ${secret.name} | ${secret.status} | ${secret.kind} | ${secret.ageDays ?? "n/a"} | ${secret.rotationDays ?? "n/a"} | ${secret.materializedPresent ? "yes" : "no"} |`)
-      : ["| n/a | plan | n/a | n/a | n/a | no |"]),
+      ? secretReports.map((secret) => `| ${secret.name} | ${secret.scope ?? "platform"} | ${secret.status} | ${secret.kind} | ${secret.ageDays ?? "n/a"} | ${secret.rotationDays ?? "n/a"} | ${secret.materializedPresent ? "yes" : "no"} |`)
+      : ["| n/a | n/a | plan | n/a | n/a | n/a | no |"]),
     "",
     "## Audit",
     "",
@@ -6186,10 +6232,14 @@ async function secretRotationEvidence(options = {}) {
 }
 
 async function releaseArtifactGate(options = {}) {
-  await withLocalCheckReport("release-artifact-gate", () => releaseArtifactGateBody(options), {
+  let result = null;
+  await withLocalCheckReport("release-artifact-gate", async () => {
+    result = await releaseArtifactGateBody(options);
+  }, {
     requireProvenance: Boolean(options.requireProvenance ?? booleanFlag(argv.requireProvenance)),
     verifyCosign: Boolean(options.verifyCosign ?? booleanFlag(argv.verifyCosign)),
   });
+  return result;
 }
 
 async function releaseArtifactGateBody(options = {}) {
@@ -6888,7 +6938,22 @@ function requiredGithubRepo() {
   return repo;
 }
 
+function loadGithubTokenFromFile() {
+  if (process.env.GITHUB_TOKEN || process.env.GH_TOKEN) return;
+  const tokenFile = process.env.GITHUB_TOKEN_FILE
+    || process.env.GH_TOKEN_FILE
+    || path.join(infraRoot, "secrets", "github_token.txt");
+  try {
+    if (!fs.existsSync(tokenFile)) return;
+    const token = fs.readFileSync(tokenFile, "utf8").trim();
+    if (token) process.env.GITHUB_TOKEN = token;
+  } catch {
+    // Token files are optional; commands that require auth will fail explicitly.
+  }
+}
+
 async function githubApi(method, apiPath, body = undefined) {
+  loadGithubTokenFromFile();
   const token = process.env.GITHUB_TOKEN ?? process.env.GH_TOKEN;
   if (!token && method !== "GET") {
     fail("Set GITHUB_TOKEN or GH_TOKEN before applying or verifying live GitHub governance.");

@@ -34,6 +34,9 @@ const requiredSecrets = [
 ];
 
 const requiredByName = new Map(requiredSecrets.map((secret) => [secret.name, secret]));
+const requiredSecretOrder = new Map(requiredSecrets.map((secret, index) => [secret.name, index]));
+const secretNamePattern = /^[a-z][a-z0-9_]{1,80}$/;
+const ownerPattern = /^[A-Za-z0-9_.:@/-]{1,80}$/;
 
 function parseArgs(args) {
   const out = { _: [] };
@@ -94,6 +97,66 @@ function auditLogPath() {
 
 function secretFilePath(name) {
   return path.join(secretsDir(), `${name}.txt`);
+}
+
+function validateSecretName(name) {
+  const normalized = String(name ?? "");
+  if (!secretNamePattern.test(normalized)) {
+    fail("Secret name must start with a lowercase letter and contain only lowercase letters, numbers and underscores.");
+  }
+  return normalized;
+}
+
+function positiveInteger(value, fallback, label) {
+  if (value === undefined || value === null || value === "") return fallback;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed <= 0) fail(`${label} must be a positive integer.`);
+  return parsed;
+}
+
+function secretOwner(value, fallback = "vault") {
+  const owner = String(value ?? fallback).trim() || fallback;
+  if (!ownerPattern.test(owner)) {
+    fail("Secret owner may contain only letters, numbers, dot, underscore, dash, colon, slash and at sign.");
+  }
+  return owner;
+}
+
+function vaultSpec(name, previousRecord = {}, overrides = {}) {
+  const normalized = validateSecretName(name);
+  return {
+    name: normalized,
+    kind: "opaque",
+    bytes: positiveInteger(overrides.bytes ?? previousRecord.bytes, 48, "bytes"),
+    minLength: positiveInteger(overrides.minLength ?? overrides["min-length"] ?? previousRecord.minLength, 1, "minLength"),
+    owner: secretOwner(overrides.owner ?? previousRecord.owner, "vault"),
+    rotationDays: positiveInteger(overrides.rotationDays ?? overrides["rotation-days"] ?? previousRecord.rotationDays, 90, "rotationDays"),
+    materializeTo: `secrets/${normalized}.txt`,
+    vault: true,
+  };
+}
+
+function secretSpec(name, previousRecords = {}, overrides = {}) {
+  const normalized = validateSecretName(name);
+  return requiredByName.get(normalized) ?? vaultSpec(normalized, previousRecords[normalized], overrides);
+}
+
+function orderedSecretNames(values = {}, previousRecords = {}) {
+  const names = new Set([...Object.keys(previousRecords), ...Object.keys(values)]);
+  for (const spec of requiredSecrets) names.add(spec.name);
+  return [...names]
+    .filter((name) => {
+      validateSecretName(name);
+      return values[name] !== undefined && values[name] !== null && String(values[name]).length > 0;
+    })
+    .sort((a, b) => {
+      const aRequired = requiredSecretOrder.has(a);
+      const bRequired = requiredSecretOrder.has(b);
+      if (aRequired && bRequired) return requiredSecretOrder.get(a) - requiredSecretOrder.get(b);
+      if (aRequired) return -1;
+      if (bRequired) return 1;
+      return a.localeCompare(b);
+    });
 }
 
 function randomSecret(bytes = 36) {
@@ -261,30 +324,34 @@ function decryptStoreValues(store = readStore()) {
   const key = masterKey();
   const values = {};
   for (const [name, record] of Object.entries(store.secrets)) {
+    validateSecretName(name);
     values[name] = decryptSecret(key, name, record.encryption);
   }
   return values;
 }
 
-function writeStore(values, previousStore = readStore(), kmsOverride = null) {
+function writeStore(values, previousStore = readStore(), kmsOverride = null, specOverrides = {}) {
   const key = masterKey();
   const now = new Date().toISOString();
   const kms = kmsOverride ?? normalizeKmsMetadata(previousStore);
   const previousRecords = previousStore?.secrets ?? {};
   const records = {};
-  for (const spec of requiredSecrets) {
-    const value = values[spec.name];
+  for (const name of orderedSecretNames(values, previousRecords)) {
+    const spec = secretSpec(name, previousRecords, specOverrides[name]);
+    const value = values[name];
     if (!value) continue;
+    const previousRecord = previousRecords[name] ?? {};
     const keyIds = spec.kind === "keyring" ? parseVersionedSecretKeys(value).map((entry) => entry.id) : undefined;
-    records[spec.name] = {
+    records[name] = {
       kind: spec.kind,
-      owner: "platform",
+      owner: spec.owner ?? "platform",
       rotationDays: spec.rotationDays,
-      materializeTo: `secrets/${spec.name}.txt`,
-      updatedAt: previousRecords[spec.name]?.fingerprint === fingerprint(value) ? previousRecords[spec.name].updatedAt : now,
+      materializeTo: spec.materializeTo ?? `secrets/${name}.txt`,
+      updatedAt: previousRecord.fingerprint === fingerprint(value) ? previousRecord.updatedAt : now,
       fingerprint: fingerprint(value),
       keyIds,
-      encryption: encryptSecret(key, spec.name, value, kms.activeKeyId),
+      ...(spec.vault ? { minLength: spec.minLength, scope: "vault" } : { scope: "platform" }),
+      encryption: encryptSecret(key, name, value, kms.activeKeyId),
     };
   }
   const store = {
@@ -338,7 +405,7 @@ function materializedOrGenerated(spec) {
 
 function buildValues(existingValues = {}) {
   const env = parseEnv(envFile());
-  const values = {};
+  const values = { ...existingValues };
   for (const spec of requiredSecrets) {
     if (existingValues[spec.name]) {
       values[spec.name] = existingValues[spec.name];
@@ -354,7 +421,7 @@ function buildValues(existingValues = {}) {
   return values;
 }
 
-function validateValues(values) {
+function validateValues(values, store = null) {
   for (const spec of requiredSecrets) {
     const value = values[spec.name];
     if (!isUsableSecret(value)) {
@@ -369,15 +436,29 @@ function validateValues(values) {
       fail(`Secret ${spec.name} is too short.`);
     }
   }
+  const previousRecords = store?.secrets ?? {};
+  for (const [name, value] of Object.entries(values)) {
+    if (requiredByName.has(name)) continue;
+    const spec = secretSpec(name, previousRecords);
+    if (typeof value !== "string" || value.length < spec.minLength) {
+      fail(`Vault secret ${name} is missing or shorter than ${spec.minLength} byte(s).`);
+    }
+  }
 }
 
-function materialize(values = decryptStoreValues()) {
-  validateValues(values);
-  for (const spec of requiredSecrets) {
-    writePrivateFile(secretFilePath(spec.name), `${values[spec.name]}\n`, spec.fileMode || 0o600);
+function materialize(values = null, store = null) {
+  const sourceStore = store ?? readStore();
+  const sourceValues = values ?? decryptStoreValues(sourceStore);
+  validateValues(sourceValues, sourceStore);
+  const names = [];
+  const previousRecords = sourceStore?.secrets ?? {};
+  for (const name of orderedSecretNames(sourceValues, previousRecords)) {
+    const spec = secretSpec(name, previousRecords);
+    writePrivateFile(secretFilePath(name), `${sourceValues[name]}\n`, spec.fileMode || 0o600);
+    names.push(name);
   }
-  audit("materialize", { names: requiredSecrets.map((secret) => secret.name) });
-  log(`Materialized ${requiredSecrets.length} Docker secret files in ${secretsDir()}`);
+  audit("materialize", { names });
+  log(`Materialized ${names.length} Docker secret files in ${secretsDir()}`);
 }
 
 async function init() {
@@ -385,9 +466,9 @@ async function init() {
   const previousStore = force ? null : readStore();
   const previousValues = previousStore ? decryptStoreValues(previousStore) : {};
   const values = buildValues(previousValues);
-  validateValues(values);
+  validateValues(values, previousStore);
   const store = writeStore(values, previousStore);
-  materialize(values);
+  materialize(values, store);
   audit("init", {
     store: storePath(),
     names: Object.keys(store.secrets),
@@ -399,15 +480,16 @@ async function verify() {
   const store = readStore();
   if (!store) fail(`Missing Infra Secret Manager store: ${storePath()}`);
   const values = decryptStoreValues(store);
-  validateValues(values);
-  for (const spec of requiredSecrets) {
-    const materialized = readFileIfExists(secretFilePath(spec.name));
-    if (!materialized) fail(`Missing materialized Docker secret: ${secretFilePath(spec.name)}`);
-    if (!timingSafeEqual(Buffer.from(materialized), Buffer.from(values[spec.name]))) {
-      fail(`Materialized secret does not match manager store: ${spec.name}`);
+  validateValues(values, store);
+  const names = orderedSecretNames(values, store.secrets);
+  for (const name of names) {
+    const materialized = readFileIfExists(secretFilePath(name));
+    if (!materialized) fail(`Missing materialized Docker secret: ${secretFilePath(name)}`);
+    if (!timingSafeEqual(Buffer.from(materialized), Buffer.from(values[name]))) {
+      fail(`Materialized secret does not match manager store: ${name}`);
     }
   }
-  audit("verify", { names: requiredSecrets.map((secret) => secret.name) });
+  audit("verify", { names });
   log("Infra Secret Manager verification passed.");
 }
 
@@ -421,14 +503,18 @@ async function status() {
   if (!store) fail(`Missing Infra Secret Manager store: ${storePath()}`);
   log(`Store: ${storePath()}`);
   log(`Updated: ${store.updatedAt}`);
-  for (const spec of requiredSecrets) {
-    const record = store.secrets?.[spec.name];
+  const values = decryptStoreValues(store);
+  const names = orderedSecretNames(values, store.secrets);
+  for (const name of names) {
+    const record = store.secrets?.[name];
     if (!record) {
-      log(`${spec.name}: missing`);
+      log(`${name}: missing`);
       continue;
     }
     const keyIds = record.keyIds?.length ? ` keyIds=${record.keyIds.join(",")}` : "";
-    log(`${spec.name}: kind=${record.kind} updatedAt=${record.updatedAt} fingerprint=${record.fingerprint}${keyIds}`);
+    const scope = record.scope ?? (requiredByName.has(name) ? "platform" : "vault");
+    const owner = record.owner ? ` owner=${record.owner}` : "";
+    log(`${name}: scope=${scope}${owner} kind=${record.kind} updatedAt=${record.updatedAt} fingerprint=${record.fingerprint}${keyIds}`);
   }
 }
 
@@ -513,9 +599,9 @@ async function rotate() {
     const natsUser = env.NATS_USER || "platform";
     values.nats_url = `nats://${encodeURIComponent(natsUser)}:${encodeURIComponent(values.nats_password)}@nats:4222`;
   }
-  validateValues(values);
-  writeStore(values, store);
-  materialize(values);
+  validateValues(values, store);
+  const nextStore = writeStore(values, store);
+  materialize(values, nextStore);
   audit("rotate", { name, keep });
   log(`Rotated ${name}. Recreate dependent containers after reviewing the rollout window.`);
 }
@@ -538,31 +624,41 @@ function readSecretInput(spec) {
 async function setSecret() {
   const name = argv.name ?? argv._[0];
   if (!name) fail("Use set --name <secret_name>.");
-  const spec = requiredByName.get(name);
-  if (!spec) fail(`Unknown secret: ${name}`);
+  const normalized = validateSecretName(name);
+  const store = readStore();
+  const spec = secretSpec(normalized, store?.secrets ?? {}, {
+    owner: argv.owner,
+    rotationDays: argv.rotationDays ?? argv["rotation-days"],
+    minLength: argv.minLength ?? argv["min-length"],
+  });
   if (spec.kind === "derived" && !booleanFlag(argv.allowDerived ?? argv["allow-derived"])) {
-    fail(`${name} is derived and cannot be set directly. Re-run with --allowDerived only to adopt an already-verified materialized value.`);
+    fail(`${normalized} is derived and cannot be set directly. Re-run with --allowDerived only to adopt an already-verified materialized value.`);
   }
 
-  const store = readStore();
   const values = buildValues(store ? decryptStoreValues(store) : {});
-  values[name] = readSecretInput(spec);
-  if (name === "app_db_password") {
+  values[normalized] = readSecretInput(spec);
+  if (spec.vault && values[normalized].length < spec.minLength) {
+    fail(`Vault secret ${normalized} is shorter than ${spec.minLength} byte(s).`);
+  }
+  if (normalized === "app_db_password") {
     const env = parseEnv(envFile());
     const appDbUser = env.APP_DB_USER || "app_user";
     const appDbName = env.APP_DB_NAME || "app_db";
     values.database_url = `postgresql://${encodeURIComponent(appDbUser)}:${encodeURIComponent(values.app_db_password)}@postgres:5432/${encodeURIComponent(appDbName)}`;
   }
-  if (name === "nats_password") {
+  if (normalized === "nats_password") {
     const env = parseEnv(envFile());
     const natsUser = env.NATS_USER || "platform";
     values.nats_url = `nats://${encodeURIComponent(natsUser)}:${encodeURIComponent(values.nats_password)}@nats:4222`;
   }
-  validateValues(values);
-  writeStore(values, store);
-  materialize(values);
-  audit("set", { name, derived: spec.kind === "derived" });
-  log(`Updated ${name} in Infra Secret Manager and materialized Docker secret files.`);
+  validateValues(values, store);
+  const specOverrides = spec.vault
+    ? { [normalized]: { owner: spec.owner, rotationDays: spec.rotationDays, minLength: spec.minLength } }
+    : {};
+  const nextStore = writeStore(values, store, null, specOverrides);
+  materialize(values, nextStore);
+  audit("set", { name: normalized, scope: spec.vault ? "vault" : "platform", owner: spec.owner ?? "platform", derived: spec.kind === "derived" });
+  log(`Updated ${normalized} in Infra Secret Manager and materialized Docker secret files.`);
 }
 
 function help() {
@@ -574,7 +670,9 @@ Commands:
   kms-status           Print proprietary KMS key metadata without secret values.
   kms-rotate           Rotate the active KMS KEK and rewrap all stored secrets.
   rotate --name <name> Rotate a keyring or opaque secret, then materialize.
-  set --name <name>    Import or replace a secret from --value-file or --stdin. Derived secrets require --allowDerived.
+  set --name <name>    Import or replace a platform or vault secret from --value-file or --stdin.
+                       Unknown safe names become vault secrets. Use --owner, --rotationDays and --minLength for metadata.
+                       Derived platform secrets require --allowDerived.
   status               Print metadata and fingerprints without secret values.
   verify               Validate encrypted store and materialized Docker secret files.
 `);
