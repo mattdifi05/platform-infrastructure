@@ -1,0 +1,11 @@
+platform-infrastructure.com:53 {
+    errors
+    log
+    file /etc/coredns/db.platform-infrastructure.com platform-infrastructure.com
+}
+
+.:53 {
+    errors
+    forward . 192.168.1.1
+    cache 30
+}

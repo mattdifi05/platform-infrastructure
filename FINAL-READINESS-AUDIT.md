@@ -1,8 +1,27 @@
 # Platform Final Readiness Audit
 
-Scope: repository and local Docker Desktop evidence before VPS Ubuntu LTS VPS deployment.
+Scope: repository evidence plus current prod-like Ubuntu runtime evidence before
+public production cutover.
 
-Status: repo/local readiness is strong, but production readiness is not fully proven until the real VPS, Cloudflare zone, remote backup store, external monitoring and alert recipients are exercised.
+Status: repo/runtime readiness is strong on the reference Ubuntu server, but
+production readiness is not fully proven until the real public domain,
+Cloudflare zone, remote backup store, external monitoring, public benchmark,
+release provenance and alert recipients are exercised.
+
+Current reference note, verified 2026-06-29: the active reference stack runs as
+Compose project `platform_infra_vps` from
+`/home/platform_infrastructure/platform-infrastructure`; active Docker data and
+external application sources are backed by `/srv/platform-nvme`, while the OS
+root remains on the HDD/root filesystem. The latest production go/no-go report
+is `no-go` with no failed required checks, but seven required external/provider
+proofs remain pending: pre-go-live evidence, remote GitHub Actions run success,
+off-site DR, external uptime provider, public load benchmark, release/rollback
+provenance and Cloudflare Access admin verification.
+
+Terminology note: historical references to `backend`, `web` and `worker-*`
+describe generic runtime/template containers. Account, passkey, backup-code,
+`apps/backend` and `app_account` checks are workload compatibility evidence and
+must not be used as platform hosting go-live proof.
 
 ## Modified Files
 
@@ -33,10 +52,8 @@ grafana/dashboards/enterprise-overview.json
 keycloak/templates/platform-realm.example.json
 prometheus/prometheus.yml
 prometheus/rules/enterprise-alerts.yml
-scripts/access-review.sh
-scripts/account-integration-tests.sh
+scripts/platform-admin-audit.sh
 scripts/alert-evidence.sh
-scripts/apply-postgres-migrations.sh
 scripts/backup-postgres.sh
 scripts/backup-restore-drill.sh
 scripts/backup-scheduler.sh
@@ -133,39 +150,11 @@ waf/*
 FINAL-READINESS-AUDIT.md
 ```
 
-Application worktree:
-
-```text
-.gitattributes
-.github/workflows/enterprise-ci.yml
-README.md
-apps/backend/package.json
-apps/worker-notifications/package.json
-apps/worker-notifications/src/server.test.ts
-apps/worker-notifications/src/server.ts
-docs/README.md
-docs/account-center.md
-docs/architecture.md
-docs/configuration-reference.md
-docs/local-docker.md
-docs/maintainer-playbook.md
-docs/operations-runbook.md
-docs/production-cloudflare-vps.md
-docs/runtime-flows.md
-docs/security.md
-docs/testing-quality-gates.md
-package.json
-packages/ui/docs/release-governance.md
-pnpm-lock.yaml
-renovate.json
-scripts/dependency-hygiene.mjs
-scripts/maintainability-hygiene.mjs
-scripts/performance-hygiene.mjs
-scripts/run-infra-ops.mjs
-scripts/supply-chain-gate.mjs
-scripts/testing-hygiene.mjs
-scripts/ui-publish-dry-run.mjs
-```
+Historical application-worktree evidence is intentionally excluded from the
+platform readiness scope. Hosted application CI, package manifests, account
+flows and business tests can be used by each application, but they must not
+promote or block `platform-infrastructure` GO/NO-GO unless the check validates a
+generic hosting capability.
 
 ## New Components
 
@@ -198,8 +187,7 @@ scripts/ui-publish-dry-run.mjs
 - VPS host readiness script with JSON/Markdown evidence under `reports/vps-host/`.
 - Linux portability check with BOM/CRLF, Windows path, PowerShell dependency and Alpine shell syntax evidence under `reports/linux-portability/`.
 - VPS hardening and Cloudflare origin-lock scripts.
-- Renovate configs for infra and app.
-- Application-side Dockerized infra launcher: `scripts/run-infra-ops.mjs`.
+- Renovate configs for infrastructure dependencies.
 - Optional native Discord and Telegram alert forwarding in notification worker.
 - Provider-neutral external uptime manifest and `external-uptime-check` command.
 - External uptime dry-run reports with `mode=dry-run` and `providerEvidence.verified=false`, so manifest evidence can be archived without satisfying live provider gates.
@@ -238,25 +226,15 @@ node scripts/infra-ops.mjs dr-evidence
 node scripts/infra-ops.mjs alert-evidence
 node scripts/infra-ops.mjs release-evidence --planOnly
 node scripts/infra-ops.mjs governance-check
-node scripts/infra-ops.mjs github-actions-config --repo mattdifi05/project-repository
-node scripts/infra-ops.mjs pre-go-live-evidence --repo mattdifi05/project-repository
 node scripts/infra-ops.mjs production-go-no-go
 node scripts/infra-ops.mjs external-uptime-check --dryRun
 node scripts/infra-ops.mjs evidence-bundle
-node scripts/infra-ops.mjs github-environments --repo mattdifi05/project-repository --dryRun
-node scripts/infra-ops.mjs github-environments --repo mattdifi05/project-repository --apply (expected fail-fast without GITHUB_PRODUCTION_REVIEWERS)
-docker run --rm -v D:/docker/platform-infrastructure:/infra:ro -w /infra platform/ops:local github-environments --repo mattdifi05/project-repository --dryRun
-docker run --rm -e PROJECT_SOURCE_ROOT=/project -v D:/docker/platform-infrastructure:/infra:ro -v D:/docker/project:/project:ro -w /infra platform/ops:local static-security-check
 node scripts/infra-ops.mjs backup-secret-manager-metadata --outputDir backups/secret-manager/report-test --skipEvidence
-scripts/run-infra-ops.mjs static-security-check
-scripts/run-infra-ops.mjs infra-health
-scripts/run-infra-ops.mjs enterprise-10-check
 scripts/infra-ops.sh static-security-check through docker:29-cli
 scripts/infra-ops.sh infra-health through docker:29-cli
 scripts/infra-ops.sh enterprise-10-check through docker:29-cli
 docker run --rm -v D:/docker/platform-infrastructure:/work:ro alpine:3.22 sh -ec 'sh -n /work/scripts/deploy-vps.sh && sh -n /work/scripts/vps-postdeploy.sh && sh -n /work/scripts/evidence-bundle.sh'
 docker run --rm -v D:/docker/platform-infrastructure:/infra -w /infra alpine:3.22 sh ./scripts/vps-go-live.sh --planOnly --repo OWNER/REPO
-node --import ./scripts/register-ts-extension-loader.mjs --test apps/worker-notifications/src/server.test.ts
 full-restore-drill.sh
 failure-tests.sh --confirmServiceStop --targets redis
 load-benchmark.sh --quick --profiles 50,100,500 --requests 20 --maxConcurrency 8 --maxP95Ms 2000
@@ -277,7 +255,8 @@ All commands listed above passed in the local evidence gathered during this hard
 - Managed-secret overlay missed MariaDB/phpMyAdmin secrets; they are now external Docker secrets.
 - Secret rotation/freshness proof was only implicit through Secret Manager verify; `secret-rotation-evidence.sh --enforce` now writes a required go/no-go report under `reports/secret-rotation/`.
 - WAF lacked a container-level healthcheck and the readiness checklist only proved generic healthcheck presence; WAF now has a healthcheck and `compose-healthcheck-coverage.sh` verifies every rendered service.
-- Application CI and docs still referenced PowerShell or direct host-Node infra gates; they now use bash/containerized gates or `scripts/run-infra-ops.mjs`.
+- Older application docs referenced PowerShell or direct host-Node infra gates;
+  those notes are legacy and outside the platform readiness scope.
 - Production go/no-go now requires a remote successful `enterprise-infra` workflow report for the release commit.
 - Alerting had email/generic webhook only; optional native Discord and Telegram delivery with metrics was added.
 - Uptime dry-run previously did not leave report evidence; it now writes diagnostic reports while keeping `providerEvidence.verified=false` so production go/no-go still requires a live provider.

@@ -1,22 +1,21 @@
 import { createServer, request as httpRequest } from "node:http";
-import { spawn } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { connect } from "node:net";
 import path from "node:path";
 
 const port = Number(process.env.PROJECT_ROUTER_PORT || 8080);
 const projectsRoot = process.env.PROJECTS_ROOT || "/var/www/projects";
 const stateFile = process.env.PROJECT_STATE_FILE || "/var/www/project-state/projects.json";
-const phpUpstream = new URL(process.env.PHP_UPSTREAM || "http://php-apache:80");
 const controlCenterUpstream = new URL(process.env.CONTROL_CENTER_UPSTREAM || "http://control-center:8080");
 const domain = normalizeHost(process.env.DOMAIN || process.env.LOCAL_DOMAIN || "localhost.com");
 const adminHost = normalizeHost(process.env.ADMIN_HOST || `portal.${domain}`);
 const controlCenterHost = normalizeHost(process.env.CONTROL_CENTER_HOST || process.env.PROJECTS_HOST || adminHost);
 const hostSuffix = process.env.PROJECT_HOST_SUFFIX || ".localhost.com";
 const nodeHosts = parsePairs(process.env.NODE_PROJECT_HOSTS || "");
+const projectUpstreams = parsePairs(process.env.PROJECT_UPSTREAMS || "");
+const phpProjectUpstreams = parsePairs(process.env.PHP_PROJECT_UPSTREAMS || "");
 const nodeUpstreams = parsePairs(process.env.NODE_PROJECT_UPSTREAMS || "");
-const nodeCommands = parsePairs(process.env.NODE_PROJECT_COMMANDS || "");
-const managed = new Map();
+const staticUpstreams = parsePairs(process.env.STATIC_PROJECT_UPSTREAMS || "");
+const projectConfigNames = [".platform/project.json", "platform.project.json"];
 
 const server = createServer(async (req, res) => {
   try {
@@ -32,28 +31,22 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    const slug = slugFromHost(host);
     const projects = discoverProjects();
-    const project = projects.find((item) => item.slug === slug);
+    const slug = slugFromHost(host);
+    const project = projects.find((item) => item.slug === slug || item.aliases?.includes(slug) || normalizeHost(item.host) === host);
     if (!project) {
       disabled(res, "Project not found", host);
       return;
     }
 
-    if (!isEnabled(slug)) {
-      stopManagedProject(slug);
+    if (!isEnabled(project)) {
       disabled(res, "Project disabled", host);
       return;
     }
 
-    if (project.type === "php") {
-      proxy(req, res, phpUpstream);
-      return;
-    }
-
-    const upstream = await nodeUpstream(project);
+    const upstream = dedicatedUpstreamFor(project);
     if (!upstream) {
-      disabled(res, "Node project has no runnable command", host, 503);
+      disabled(res, `${runtimeLabel(project.type)} project has no dedicated upstream`, host, 503);
       return;
     }
     proxy(req, res, upstream);
@@ -67,9 +60,8 @@ server.listen(port, "0.0.0.0", () => {
   console.log(`project-router listening on ${port}`);
 });
 
-setInterval(stopDisabledProcesses, 10000).unref();
-process.once("SIGTERM", shutdown);
-process.once("SIGINT", shutdown);
+process.once("SIGTERM", () => server.close(() => process.exit(0)));
+process.once("SIGINT", () => server.close(() => process.exit(0)));
 
 function proxy(clientReq, clientRes, upstream) {
   const headers = { ...clientReq.headers };
@@ -98,62 +90,30 @@ function proxy(clientReq, clientRes, upstream) {
   clientReq.pipe(proxyReq);
 }
 
-async function nodeUpstream(project) {
-  const mapped = nodeUpstreams.get(project.slug);
-  if (mapped) return new URL(mapped);
+function dedicatedUpstreamFor(project) {
+  const mapped = project.upstream || mappedProjectValue(projectUpstreams, project) || mappedProjectValue(upstreamMapForType(project.type), project);
+  return mapped ? new URL(expandProjectValue(mapped, project)) : null;
+}
 
-  const existing = managed.get(project.slug);
-  if (existing?.process && !existing.process.killed) {
-    return new URL(`http://127.0.0.1:${existing.port}`);
+function upstreamMapForType(type) {
+  if (type === "php") return phpProjectUpstreams;
+  if (type === "node") return nodeUpstreams;
+  if (type === "static") return staticUpstreams;
+  return new Map();
+}
+
+function runtimeLabel(type) {
+  if (type === "php") return "PHP";
+  if (type === "static") return "Static";
+  return "Node";
+}
+
+function mappedProjectValue(map, project) {
+  for (const slug of projectSlugs(project)) {
+    const mapped = map.get(slug);
+    if (mapped) return mapped;
   }
-
-  const command = nodeCommands.get(project.slug) || defaultNodeCommand(project.path);
-  if (!command) return null;
-
-  const processPort = availableProjectPort(project.slug);
-  const child = spawn(command, {
-    cwd: project.path,
-    shell: true,
-    env: {
-      ...process.env,
-      PORT: String(processPort),
-      HOST: "0.0.0.0",
-      HOSTNAME: "0.0.0.0",
-      NODE_ENV: process.env.NODE_PROJECT_ENV || "development",
-    },
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-
-  child.stdout.on("data", (chunk) => process.stdout.write(`[${project.slug}] ${chunk}`));
-  child.stderr.on("data", (chunk) => process.stderr.write(`[${project.slug}] ${chunk}`));
-  child.on("exit", (code, signal) => {
-    console.log(`[${project.slug}] exited code=${code ?? ""} signal=${signal ?? ""}`);
-    managed.delete(project.slug);
-  });
-
-  managed.set(project.slug, { process: child, port: processPort });
-  await waitForTcp("127.0.0.1", processPort, 20000);
-  return new URL(`http://127.0.0.1:${processPort}`);
-}
-
-function defaultNodeCommand(projectPath) {
-  const packagePath = path.join(projectPath, "package.json");
-  if (!existsSync(packagePath)) return "";
-  const pkg = JSON.parse(readFileSync(packagePath, "utf8"));
-  const scripts = pkg.scripts || {};
-  const scriptName = scripts.start ? "start" : scripts.dev ? "dev" : scripts.preview ? "preview" : "";
-  if (!scriptName) return "";
-  const runner = packageRunner(projectPath, pkg);
-  if (runner === "pnpm" || runner === "yarn") return `corepack enable && ${runner} run ${scriptName}`;
-  return `npm run ${scriptName}`;
-}
-
-function packageRunner(projectPath, pkg) {
-  const declared = typeof pkg.packageManager === "string" ? pkg.packageManager.split("@")[0] : "";
-  if (declared === "pnpm" || declared === "yarn") return declared;
-  if (existsSync(path.join(projectPath, "pnpm-lock.yaml"))) return "pnpm";
-  if (existsSync(path.join(projectPath, "yarn.lock"))) return "yarn";
-  return "npm";
+  return "";
 }
 
 function discoverProjects() {
@@ -168,18 +128,128 @@ function discoverProjects() {
     if (!safeIsDirectory(projectPath)) continue;
     const isPhp = isPhpProject(projectPath);
     const isNode = existsSync(path.join(projectPath, "package.json"));
-    if (!isPhp && !isNode) continue;
-    const type = isPhp ? "php" : "node";
+    const isStatic = isStaticProject(projectPath);
+    const config = readProjectConfig(projectPath);
+    const configuredType = normalizeProjectType(config.type);
+    const configuredUpstream = stringValue(config.upstream);
+    const configuredProjects = configuredProjectEntries(config);
+    if (configuredProjects.length > 0) {
+      const baseAlias = configuredProjects.length === 1 ? slug : "";
+      for (const item of configuredProjects) {
+        const project = configuredProjectFromEntry({
+          item,
+          baseConfig: config,
+          basePath: projectPath,
+          baseSlug: slug,
+          baseAlias,
+          fallbackType: configuredType || inferredProjectType({ isPhp, isNode, isStatic }),
+          fallbackUpstream: configuredUpstream,
+        });
+        if (!project || seen.has(project.slug)) continue;
+        projects.push(project);
+        seen.add(project.slug);
+      }
+      continue;
+    }
+    if (!isPhp && !isNode && !isStatic) continue;
+    const type = configuredType || inferredProjectType({ isPhp, isNode, isStatic });
     projects.push({
       name: entry.name,
       slug,
       type,
-      host: nodeHosts.get(slug) || `${slug}${hostSuffix}`,
+      host: stringValue(config.host) || nodeHosts.get(slug) || `${slug}${hostSuffix}`,
       path: projectPath,
+      aliases: [],
+      upstream: configuredUpstream,
     });
     seen.add(slug);
   }
   return projects;
+}
+
+function configuredProjectEntries(config) {
+  if (Array.isArray(config.projects)) return config.projects;
+  if (Array.isArray(config.surfaces)) return config.surfaces;
+  return [];
+}
+
+function configuredProjectFromEntry({ item, baseConfig, basePath, baseSlug, baseAlias, fallbackType, fallbackUpstream }) {
+  if (!item || typeof item !== "object" || Array.isArray(item)) return null;
+  const slug = slugify(item.slug || item.id || item.name);
+  if (!slug || ["public", "node-modules", "vendor"].includes(slug)) return null;
+  const projectPath = resolveProjectPath(basePath, item.path);
+  if (!safeIsDirectory(projectPath)) return null;
+  const type = normalizeProjectType(item.type) || fallbackType || "node";
+  const upstream = stringValue(item.upstream) || fallbackUpstream;
+  return {
+    name: stringValue(item.name) || slug,
+    slug,
+    type,
+    host: stringValue(item.host) || nodeHosts.get(slug) || `${slug}${hostSuffix}`,
+    path: projectPath,
+    aliases: projectAliases({ item, baseConfig, baseAlias, slug }),
+    upstream,
+    parentSlug: baseSlug,
+  };
+}
+
+function projectAliases({ item, baseConfig, baseAlias, slug }) {
+  return Array.from(new Set([
+    baseAlias,
+    ...arrayOfStrings(baseConfig.aliases),
+    ...arrayOfStrings(item.aliases),
+  ]
+    .map(slugify)
+    .filter((alias) => alias && alias !== slug)));
+}
+
+function resolveProjectPath(basePath, value) {
+  const requested = stringValue(value);
+  if (!requested) return basePath;
+  const resolved = path.resolve(basePath, requested);
+  return resolved === basePath || resolved.startsWith(`${basePath}${path.sep}`) ? resolved : basePath;
+}
+
+function readProjectConfig(projectPath) {
+  for (const name of projectConfigNames) {
+    const configPath = path.join(projectPath, name);
+    if (!existsSync(configPath)) continue;
+    try {
+      return JSON.parse(readFileSync(configPath, "utf8"));
+    } catch (error) {
+      console.error(`invalid project config ${configPath}: ${error instanceof Error ? error.message : String(error)}`);
+      return {};
+    }
+  }
+  return {};
+}
+
+function stringValue(value) {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function normalizeProjectType(value) {
+  const normalized = stringValue(value).toLowerCase();
+  return normalized === "php" || normalized === "node" || normalized === "static" ? normalized : "";
+}
+
+function inferredProjectType({ isPhp, isNode, isStatic }) {
+  if (isPhp) return "php";
+  if (isNode) return "node";
+  if (isStatic) return "static";
+  return "";
+}
+
+function arrayOfStrings(value) {
+  return Array.isArray(value) ? value.filter((item) => typeof item === "string") : [];
+}
+
+function expandProjectValue(value, project) {
+  return String(value)
+    .replaceAll("${PROJECT_SLUG}", project.slug)
+    .replaceAll("${PROJECT_HOST}", project.host)
+    .replaceAll("${PROJECT_HOST_SUFFIX}", hostSuffix)
+    .replaceAll("${DOMAIN}", domain);
 }
 
 function isPhpProject(projectPath) {
@@ -193,9 +263,20 @@ function isPhpProject(projectPath) {
   }
 }
 
-function isEnabled(slug) {
+function isStaticProject(projectPath) {
+  if (existsSync(path.join(projectPath, "public", "index.html"))) return true;
+  if (existsSync(path.join(projectPath, "index.html"))) return true;
+  return false;
+}
+
+function isEnabled(projectOrSlug) {
   const state = readState();
-  return state.projects?.[slug]?.enabled !== false;
+  return !projectSlugs(projectOrSlug).some((slug) => state.projects?.[slug]?.enabled === false);
+}
+
+function projectSlugs(projectOrSlug) {
+  if (typeof projectOrSlug === "string") return [projectOrSlug];
+  return [projectOrSlug.slug, ...(projectOrSlug.aliases || [])].filter(Boolean);
 }
 
 function readState() {
@@ -204,27 +285,6 @@ function readState() {
   } catch {
     return { projects: {} };
   }
-}
-
-function stopDisabledProcesses() {
-  for (const [slug, item] of managed) {
-    if (!isEnabled(slug)) {
-      stopManagedProject(slug);
-    }
-  }
-}
-
-function stopManagedProject(slug) {
-  const item = managed.get(slug);
-  if (!item) return;
-  item.process.kill("SIGTERM");
-  managed.delete(slug);
-}
-
-function shutdown() {
-  for (const slug of managed.keys()) stopManagedProject(slug);
-  server.close(() => process.exit(0));
-  setTimeout(() => process.exit(0), 3000).unref();
 }
 
 function disabled(res, title, host, status = 404) {
@@ -264,19 +324,6 @@ function slugify(value) {
   return String(value).trim().toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "");
 }
 
-function stableIndex(value) {
-  let hash = 0;
-  for (const char of value) hash = (hash * 31 + char.charCodeAt(0)) % 500;
-  return hash;
-}
-
-function availableProjectPort(slug) {
-  const usedPorts = new Set([...managed.values()].map((item) => item.port));
-  let candidate = 4300 + stableIndex(slug);
-  while (usedPorts.has(candidate)) candidate += 1;
-  return candidate;
-}
-
 function safeIsDirectory(value) {
   try {
     return statSync(value).isDirectory();
@@ -293,26 +340,4 @@ function escapeHtml(value) {
     "\"": "&quot;",
     "'": "&#039;",
   }[char]));
-}
-
-function waitForTcp(host, targetPort, timeoutMs) {
-  const started = Date.now();
-  return new Promise((resolve, reject) => {
-    const probe = () => {
-      const socket = connect({ host, port: targetPort });
-      socket.once("connect", () => {
-        socket.destroy();
-        resolve();
-      });
-      socket.once("error", () => {
-        socket.destroy();
-        if (Date.now() - started >= timeoutMs) {
-          reject(new Error(`Timed out waiting for Node project on ${host}:${targetPort}`));
-          return;
-        }
-        setTimeout(probe, 500);
-      });
-    };
-    probe();
-  });
 }

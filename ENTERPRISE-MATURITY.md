@@ -2,6 +2,14 @@
 
 Questo documento traduce i 30 punti enterprise in controlli concreti. Le voci `repo-ready` sono implementate o automatizzate nel repository; le voci `environment-ready` richiedono VPS, DNS, provider o policy operative reali.
 
+Lettura sintetica dello stato:
+
+```text
+Platform readiness: GO per repository e runtime Ubuntu prod-like.
+Enterprise requirements: GO per copertura repo/tooling, salvo prove live esplicitamente marcate.
+Production go-live: NO-GO finche' mancano dominio/provider/evidence esterne.
+```
+
 ## Stato sintetico
 
 | # | Area | Stato | Controllo |
@@ -17,11 +25,11 @@ Questo documento traduce i 30 punti enterprise in controlli concreti. Le voci `r
 | 9 | Alerting reale | Gate-ready | Prometheus, Alertmanager, worker notifiche, Loki/Grafana e runbook provider |
 | 10 | Log centralizzati/redaction/audit | Gate-ready | Loki/Promtail con label strutturate, redaction condivisa, audit DB append-only |
 | 11 | WAF/rate limit/bot protection | Repo-ready | Traefik rate limit + Fastify Redis-backed rate limit |
-| 12 | RBAC completa | Repo-ready | `account_roles`, role gate applicativi |
-| 13 | Account recovery and passkey replacement | Repo-ready | Passkey, OTP email, backup code |
+| 12 | RBAC admin plane | Repo-ready | Control Center identity metadata, Cloudflare Access policy, platform-admin-audit |
+| 13 | Hosted workload isolation | Repo-ready | project-router, wildcard boundary, audit separazione platform/app |
 | 14 | Email production SPF/DKIM/DMARC | Gate-ready | SMTP configurabile; checklist record dominio |
-| 15 | Migrazioni DB rollback-safe | Repo-ready | Cartella migrations e runner Linux/Docker |
-| 16 | GDPR/privacy data lifecycle | Repo-ready | Export account, soft-delete, audit/retention policy |
+| 15 | Application onboarding governance | Repo-ready | Control Center add/archive/stop metadata e audit amministrativo |
+| 16 | Database service governance | Repo-ready | Backup/restore PostgreSQL/MariaDB come servizio gestito, senza migration app |
 | 17 | SAST/DAST/dependency/container scan | Gate-ready | Audit, secret scan, SBOM, Renovate; DAST esterno da collegare |
 | 18 | Pen-test applicativo | Gate-ready | Threat model + checklist; richiede test professionale/manuale |
 | 19 | Load/performance test | Repo-ready | `load-smoke.sh`, `load-profile`, `load-benchmark.sh` 50/100/500 con report CPU/RAM e `infra-health` |
@@ -35,16 +43,11 @@ Questo documento traduce i 30 punti enterprise in controlli concreti. Le voci `r
 | 27 | Supply-chain SBOM/firma/provenance | Gate-ready | SBOM, audit, image signing, BuildKit provenance |
 | 28 | Compliance GDPR/SOC2-like | Repo-ready | Security/threat model/runbook; audit formale esterno |
 | 29 | Data classification | Repo-ready | Threat model e security doc |
-| 30 | Periodic access review | Repo-ready | RBAC in DB, `access-review.sh`, runbook mensile |
+| 30 | Periodic admin access review | Repo-ready | `platform-admin-audit`, Cloudflare Access, GitHub/VPS admin review |
 
 ## Gate locale
 
-```sh
-cd /opt/platform/src
-pnpm enterprise:check
-```
-
-Oppure direttamente:
+Il gate canonico della repository infrastrutturale e':
 
 ```sh
 cd /opt/platform/platform-infrastructure
@@ -54,11 +57,19 @@ sh ./scripts/infra-ops.sh enterprise-requirements-check --manifest governance/pr
 sh ./scripts/infra-ops.sh enterprise-requirements-check --manifest governance/production-readiness.json --requireLiveProofs
 ```
 
+Eventuali riferimenti a account, passkey, backup code, `app_account` o migration
+applicative sono controlli di workload ospitato e non partecipano al GO/NO-GO
+dell'infrastruttura hosting.
+
+Eventuali riferimenti a `/opt/platform/src` o `pnpm enterprise:check` sono
+compatibilita' per vecchi workspace/monorepo applicativi. Non sono richiesti per
+validare questa repository `platform-infrastructure`.
+
 La matrice machine-readable vive in `governance/enterprise-requirements.json`.
 Il comando `enterprise-requirements-check` verifica i 30 requisiti contro file,
 pattern, comandi ops e gate GitHub Actions, poi scrive evidenza non sensibile in
 `reports/enterprise-requirements/`.
-La checklist production-ready da 20 punti vive in
+La checklist production-ready da 19 punti vive in
 `governance/production-readiness.json` e produce report in
 `reports/production-readiness/`.
 Senza `--requireLiveProofs` il gate verifica la copertura repo/infra e segnala le
@@ -68,9 +79,13 @@ per VPS, Cloudflare, monitor esterni, alert, restore e rollback.
 
 ## Redis enterprise runtime
 
-Redis viene usato per rate limit distribuito, OTP, challenge WebAuthn/passkey, heartbeat worker e metriche Prometheus.
+Redis viene usato dall'infrastruttura per rate limit distribuito, heartbeat
+worker e metriche Prometheus. Workload ospitati possono usarlo anche per OTP o
+challenge applicative, ma quei flussi non sono gate dell'infrastruttura.
 
-PostgreSQL rimane source of truth per account, sessioni, passkey, audit, ruoli e backup code.
+PostgreSQL e MariaDB sono servizi dati gestiti dalla piattaforma hosting. Schemi
+applicativi come `app_account` sono compatibilita' workload e non source of truth
+del GO/NO-GO infrastrutturale.
 
 ## Secret manager locale
 

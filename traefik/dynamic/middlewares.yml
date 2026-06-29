@@ -6,6 +6,7 @@ http:
         contentTypeNosniff: true
         frameDeny: true
         referrerPolicy: no-referrer
+        forceSTSHeader: true
         stsSeconds: 31536000
         stsIncludeSubdomains: true
         stsPreload: true
@@ -19,6 +20,22 @@ http:
         browserXssFilter: true
         contentTypeNosniff: true
         referrerPolicy: no-referrer
+        forceSTSHeader: true
+        stsSeconds: 31536000
+        stsIncludeSubdomains: true
+        stsPreload: true
+        customResponseHeaders:
+          X-Permitted-Cross-Domain-Policies: none
+          X-Content-Type-Options: nosniff
+          Permissions-Policy: "camera=(), microphone=(), geolocation=()"
+
+    enterprise-db-admin-frame-headers:
+      headers:
+        browserXssFilter: true
+        contentTypeNosniff: true
+        customFrameOptionsValue: SAMEORIGIN
+        referrerPolicy: no-referrer
+        forceSTSHeader: true
         stsSeconds: 31536000
         stsIncludeSubdomains: true
         stsPreload: true

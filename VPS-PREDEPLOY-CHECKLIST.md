@@ -19,7 +19,12 @@ Use this checklist on the VPS Ubuntu LTS VPS before exposing public traffic.
 
 ## Repository And Environment
 
-- [ ] App repository and `platform-infrastructure` cloned under `/opt/platform`.
+- [ ] App repository and `platform-infrastructure` cloned under the reviewed
+      server path. Recommended generic path is `/opt/platform`; the current
+      reference server uses `/home/platform_infrastructure/platform-infrastructure`
+      for the infra repo and `/home/platform_infrastructure/src` for external
+      application sources. The external `src` path is not part of this
+      repository.
 - [ ] `.env` created from `.env.example` and `.env.vps.example`.
 - [ ] No `localhost`, `example.com`, `change_me` or placeholder production values remain.
 - [ ] `sh ./scripts/infra-secret-manager.sh init` executed.
@@ -37,7 +42,8 @@ Use this checklist on the VPS Ubuntu LTS VPS before exposing public traffic.
 - [ ] DNS records are proxied through Cloudflare.
 - [ ] Origin IP is not exposed in public DNS records.
 - [ ] Cloudflare WAF rules reviewed.
-- [ ] Cloudflare cache rules reviewed for API/account paths.
+- [ ] Cloudflare cache rules reviewed for platform admin/docs paths and any
+      explicitly attached application/API/auth paths.
 - [ ] `sh ./scripts/cloudflare-access-admin.sh --manifest cloudflare/access-admin.production.json` reviewed.
 - [ ] `CLOUDFLARE_API_TOKEN=... CLOUDFLARE_ACCOUNT_ID=... sh ./scripts/cloudflare-access-admin.sh --manifest cloudflare/access-admin.production.json --apply` completed for admin hosts, or equivalent Cloudflare Access config is proven.
 - [ ] `CLOUDFLARE_API_TOKEN=... CLOUDFLARE_ACCOUNT_ID=... sh ./scripts/cloudflare-access-admin.sh --manifest cloudflare/access-admin.production.json --verifyRemote` passed.
@@ -112,3 +118,8 @@ Use this checklist on the VPS Ubuntu LTS VPS before exposing public traffic.
 - [ ] `sh ./scripts/access-review.sh` output reviewed after the deploy/admin changes.
 - [ ] Rollback dry-run plan generated with `sh ./scripts/rollback-release.sh --rollbackFile ./release/previous-images.json`.
 - [ ] Production go/no-go status is `go`.
+
+Local/LAN-only Ubuntu evidence is not enough for a final `go`. Domain DNS,
+Cloudflare Access/WAF, external uptime provider, public load benchmark,
+off-site restore and GitHub/release provenance must be proven against the real
+external providers before closing the production gate.

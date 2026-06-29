@@ -1,6 +1,69 @@
 # Platform Readiness Report
 
-Current scope: repository and local Docker evidence before VPS deployment.
+Current scope: repository evidence, prod-like Ubuntu runtime evidence and the
+remaining external provider evidence required before public production go-live.
+
+## Current Live Snapshot
+
+Verified on 2026-06-29 against the reference Ubuntu server.
+
+Runtime:
+
+- Compose project: `platform_infra_vps`.
+- Repo path: `/home/platform_infrastructure/platform-infrastructure`.
+- External application source path: `/home/platform_infrastructure/src`
+  outside this repository.
+- Docker data root: `/var/lib/docker`, backed by `/srv/platform-nvme`.
+- OS root `/` remains on the HDD/root filesystem; active infra data and Docker
+  state are on NVMe.
+
+Core platform service set:
+
+```text
+alertmanager, backend, cadvisor, control-center, grafana, keycloak, local-dns,
+loki, mariadb, minio, nats, node-exporter, phpmyadmin, phppgadmin, postgres,
+project-router, prometheus, promtail, redis, traefik, waf, web, worker-jobs,
+worker-notifications
+```
+
+The live host may also run attached workload containers such as `php-*` or
+`node-*`. Those names are intentionally excluded from this public readiness
+report because hosted applications are outside the platform repository.
+
+Control Center `Stato` latest read-only run:
+
+```text
+status=passed
+checks=portal-through-waf, waf-sensitive-file-block, go-no-go-report-readable,
+go-no-go-verdict, readiness-matrix-readable
+summary=4 passed, 0 failed, 0 pending, 1 no-go verdict
+visible-status-page=164 checks, 100 OK, 0 to fix, 62 missing proofs
+```
+
+Production go/no-go latest report:
+
+```text
+platform-readiness=go for repository and current Ubuntu runtime evidence
+enterprise-requirements=go for repository/tooling coverage
+production-go-live=no-go pending external live proofs
+status=no-go
+generatedAt=2026-06-29T01:44:09Z
+summary=0 failed required checks, 7 required external/provider proofs pending
+```
+
+The current `NO-GO` is not caused by local server failures. It is caused by
+required external/live evidence that cannot be honestly produced by a private
+LAN-only Ubuntu server.
+
+| Pending gate | Status | Required evidence |
+| --- | --- | --- |
+| `pre-go-live-evidence-complete` | `pending-provider` | final pre-go-live evidence with production preflight, GitHub remote verification and required restore/off-site options |
+| `github-actions-run-success` | `pending-provider` | successful remote `enterprise-infra` GitHub Actions run on the release commit |
+| `disaster-recovery-rpo-rto-offsite` | `pending-provider` | remote off-site backup repository and full-family restore evidence |
+| `external-uptime-provider` | `pending-provider` | external uptime provider checking public hosts from outside the VPS/LAN |
+| `public-load-benchmark` | `pending-provider` | benchmark against final public hosts through the public edge/CDN path |
+| `release-evidence-and-rollback` | `pending-provider` | fresh release, rollback and complete GitHub/Sigstore provenance evidence |
+| `cloudflare-access-admin-verified` | `pending-provider` | Cloudflare Access applied and verified remotely on the real zone |
 
 ## Readiness Scores
 
@@ -9,7 +72,7 @@ Current scope: repository and local Docker evidence before VPS deployment.
 | Development | 9/10 | Local stack, admin gateway, secret manager, WAF and health gates are operational. |
 | Staging | 8/10 | Staging overlays and gates exist; a real staging host/domain still has to be exercised. |
 | Production | 7.5/10 | Production/VPS overlays, preflight, rollback and release evidence tooling exist; real VPS deploy remains required. |
-| Security | 8.5/10 | Secrets, WAF, rate limits, CSP, audit, passkeys, smoke tests and hardening scripts are in place. |
+| Security | 8.5/10 | Secrets, WAF, rate limits, CSP, platform admin audit, smoke tests and hardening scripts are in place. |
 | Observability | 8.5/10 | Prometheus, Alertmanager, Loki, Promtail, Grafana dashboards, email alerts and alert evidence tooling are wired. |
 | Disaster Recovery | 8.5/10 | Full local restore drills, off-site Restic restore automation with full-family coverage checks and rollback evidence tooling exist; live remote restore must be proven. |
 | Linux Portability | 9.5/10 | Shell scripts, LF normalization, Dockerized ops runner and Linux syntax checks are present. |
@@ -38,10 +101,10 @@ Current scope: repository and local Docker evidence before VPS deployment.
 - Containerized ops runner, so the VPS host does not need Node, pnpm or a JS toolchain.
 - `linux-portability-check.sh` scans BOM/CRLF, Windows paths and PowerShell/cmd dependencies, validates shell wrappers with Alpine and writes reports under `reports/linux-portability/`.
 - Local `enterprise-10-check` passes through the Dockerized ops runner.
-- Infrastructure and application CI now use bash/containerized infra gates instead of PowerShell or direct host-Node infra policy commands.
+- Infrastructure CI now uses bash/containerized infra gates instead of PowerShell or direct host-Node infra policy commands; attached application checks remain external unless explicitly mounted.
 - Alert delivery supports email plus optional native Discord and Telegram channels, each with delivery/failure metrics.
 - `alert-evidence.sh` validates Alertmanager routing and can send a synthetic alert to prove webhook/email/Discord/Telegram delivery counters.
-- The application repo exposes a cross-platform Dockerized infra-ops launcher, so `pnpm infra:health` and enterprise gates work from Docker Desktop without a local Unix shell.
+- Legacy application workspaces can expose a cross-platform Dockerized infra-ops launcher, but this repository's canonical gate is `scripts/infra-ops.sh`.
 - Provider-neutral external uptime manifest and `external-uptime-check` dry-run are wired into the infra gate; real provider monitors still need live DNS/CDN.
 - `external-uptime-check --dryRun` now writes diagnostic JSON/Markdown under `reports/uptime/` with `providerEvidence.verified=false`, so manifest evidence can be archived without satisfying the production provider gate.
 - GitHub branch protection policy has a containerized dry-run/apply/verify command; live enforcement still needs an admin token and repository access.
@@ -53,7 +116,7 @@ Current scope: repository and local Docker evidence before VPS deployment.
 - Off-site restore drill and release evidence plan are included in the pre go-live evidence flow.
 - `production-go-no-go.sh` aggregates live evidence reports and writes ignored JSON/Markdown reports under `reports/go-no-go/`; `--enforce` blocks production if any required proof is missing.
 - `production-go-no-go` reports include a remediation checklist for every failed required gate.
-- `production-readiness-live.sh` maps the 20-point production-ready checklist to the latest live `production-go-no-go` evidence and writes `reports/production-readiness/`.
+- `production-readiness-live.sh` maps the 19-point infrastructure production-ready checklist to the latest live `production-go-no-go` evidence and writes `reports/production-readiness/`.
 - `github-actions-run-evidence.sh --verifyRemote` proves the remote `enterprise-infra` workflow completed successfully on the release commit and writes `reports/github-actions/`.
 - `vps-preflight.sh` validates the full VPS+WAF Compose render used by deploy, then `vps-postdeploy.sh` runs WAF smoke and `infra-health` after the VPS compose start, with opt-in pre go-live evidence, final `production-go-no-go` and live readiness flags.
 - `evidence-bundle-verify.sh` rereads the final evidence bundle manifest, validates entry SHA256/size and can require every live evidence family before handoff.
