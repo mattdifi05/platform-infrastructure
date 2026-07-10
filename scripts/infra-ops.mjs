@@ -19,6 +19,7 @@ import {
   parseBackupManifestDocument,
 } from "../control-center/backup/contracts.mjs";
 import { evaluateNetworkSegmentation } from "./network-segmentation-policy.mjs";
+import { evaluateSupplyChain } from "./supply-chain-policy.mjs";
 
 process.umask(0o077);
 
@@ -29,7 +30,7 @@ const argv = parseArgs(process.argv.slice(3));
 const configuredSourceRoot = process.env.PROJECT_SOURCE_ROOT ?? process.env.PROJECT_SOURCE_DIR ?? argv.sourceRoot;
 const sourceRoot = configuredSourceRoot ? path.resolve(infraRoot, configuredSourceRoot) : path.resolve(infraRoot, "..", "src");
 const defaultNodeImage = "node:26.3.1-alpine@sha256:a2dc166a387cc6ca1e62d0c8e265e49ca985d6e60abc9fe6e6c3d6ce8e63f606";
-const defaultPlaywrightImage = "mcr.microsoft.com/playwright:v1.60.0-noble";
+const defaultPlaywrightImage = "mcr.microsoft.com/playwright:v1.60.0-noble@sha256:9bd26ad900bb5e0f4dee75839e957a89ae89c2b7ab1e76050e559790e946b948";
 
 function parseArgs(args) {
   const out = { _: [] };
@@ -2905,7 +2906,6 @@ async function browserE2eTests() {
       const sourceMount = hostPathForContainerMount(sourceRoot);
       const bootstrap = [
         "set -eu",
-        "if ! command -v docker >/dev/null; then apt-get update >/dev/null && apt-get install -y docker.io >/dev/null; fi",
         sourceWorkspaceBootstrap([
           "pnpm install --frozen-lockfile",
           "pnpm typecheck:e2e",
@@ -2927,8 +2927,6 @@ async function browserE2eTests() {
         "PLAYWRIGHT_HTML_OPEN=never",
         "-e",
         "PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1",
-        "-v",
-        "/var/run/docker.sock:/var/run/docker.sock",
         "-v",
         `${sourceMount}:/source:ro`,
         configuredPlaywrightImage(),
@@ -3245,6 +3243,8 @@ function collectInfraContainerImageRefs() {
     "docker/worker.Dockerfile",
     "docker/php-apache.Dockerfile",
     "docker/ops.Dockerfile",
+    "docker/control-center.Dockerfile",
+    "docker/restic-rclone.Dockerfile",
   ];
   for (const file of dockerfiles) {
     const target = path.join(infraRoot, file);
@@ -3353,6 +3353,8 @@ function infraDependencyHygiene() {
     "docker/worker.Dockerfile",
     "docker/php-apache.Dockerfile",
     "docker/ops.Dockerfile",
+    "docker/control-center.Dockerfile",
+    "docker/restic-rclone.Dockerfile",
   ];
   for (const file of dockerfiles) {
     const text = readText(path.join(infraRoot, file));
@@ -3388,11 +3390,22 @@ function infraDependencyHygiene() {
     const text = readText(path.join(infraRoot, file));
     assertNoMatch(text, /^\s*image:\s+[^$\n#]*:latest(?:\s|$)/m, `${file} must not pin services to :latest.`);
   }
+  const supplyChain = evaluateSupplyChain(infraRoot);
+  if (supplyChain.status !== "passed") {
+    fail(`Supply-chain lock failed: ${supplyChain.failures.join("; ")}`);
+  }
   const renovate = readJsonFile(path.join(infraRoot, "renovate.json"), "renovate.json");
   if (renovate.dependencyDashboardApproval !== true) {
     fail("renovate.json must keep dependencyDashboardApproval=true for controlled updates.");
   }
-  run("docker", ["compose", "--env-file", ".env", "-p", "platform_infra_dependency_hygiene", "config", "--quiet"]);
+  run("docker", [
+    "compose",
+    "--env-file", ".env.example",
+    "-p", "platform_infra_dependency_hygiene",
+    "-f", "compose.yaml",
+    "-f", "compose.secrets.yaml",
+    "config", "--quiet",
+  ]);
   log("Infrastructure dependency hygiene checks passed.");
 }
 
@@ -3422,6 +3435,33 @@ async function supplyChainHygiene() {
   }, { includeProject, supportedProjectSource: hasSupportedProjectSource(), mode: includeProject && hasSupportedProjectSource() ? "project" : "platform-infrastructure" });
 }
 
+async function supplyChainLockCheck() {
+  await withLocalCheckReport("supply-chain-lock", async () => {
+    const report = evaluateSupplyChain(infraRoot);
+    const stamp = reportTimestamp();
+    const jsonPath = writeJsonReport("supply-chain", `supply-chain-lock-${stamp}`, report);
+    const markdownPath = writeMarkdownReport("supply-chain", `supply-chain-lock-${stamp}`, [
+      "# Supply-chain Lock Evidence",
+      "",
+      `Generated at: ${report.generatedAt}`,
+      `Status: ${report.status}`,
+      `Checks: ${report.summary.checks}`,
+      `Failed: ${report.summary.failed}`,
+      `Workflow files: ${report.summary.workflows}`,
+      `Actions: ${report.summary.actions}`,
+      `Images: ${report.summary.images}`,
+      `Dockerfiles: ${report.summary.dockerfiles}`,
+      "",
+      "| Check | Status | Detail |",
+      "| --- | --- | --- |",
+      ...report.checks.map((item) => `| ${item.id} | ${item.status} | ${item.detail} |`),
+    ]);
+    log(`Supply-chain reports written to ${jsonPath} and ${markdownPath}`);
+    if (report.status !== "passed") fail(`Supply-chain lock failed: ${report.failures.join("; ")}`);
+    log("Supply-chain lock check passed.");
+  }, { scope: "platform-infrastructure", liveRuntimeTouched: false });
+}
+
 async function testingHygiene() {
   const includeProject = booleanFlag(argv.includeProject);
   await withLocalCheckReport("testing-hygiene", async () => {
@@ -3447,6 +3487,8 @@ function infraTestingHygiene() {
     "control-center/vault/keyring.mjs",
     "project-router/server.mjs",
     "scripts/network-segmentation-policy.mjs",
+    "scripts/supply-chain-policy.mjs",
+    "scripts/supply-chain-policy.test.mjs",
     "scripts/infra-secret-manager.mjs",
   ];
   for (const file of checkFiles) {
@@ -4905,7 +4947,7 @@ const resticPassthroughEnvKeys = [
   "OS_PROJECT_DOMAIN_NAME",
 ];
 
-const defaultResticImage = "restic/restic:0.18.0";
+const defaultResticImage = "restic/restic:0.18.0@sha256:4cf4a61ef9786f4de53e9de8c8f5c040f33830eb0a10bf3d614410ee2fcb6120";
 const defaultResticRcloneImage = "platform/restic-rclone:local";
 const defaultResticMaxRepositoryBytes = 2_500_000_000_000;
 
@@ -10388,7 +10430,7 @@ async function repoCoverageCheck() {
     ["production-live-proof-rejection", /Production live proof gate rejects missing evidence[\s\S]*enterprise-requirements-check --manifest governance\/production-readiness\.json --requireLiveProofs/],
     ["static-security-infra-only", /static-security-check --infraOnly/],
     ["repository-coverage", /repo-coverage-check/],
-    ["ci-evidence-artifact", /Upload CI evidence reports[\s\S]*actions\/upload-artifact@v7[\s\S]*reports\/[\s\S]*\.tmp\/evidence-bundles\/[\s\S]*retention-days:\s+30/],
+    ["ci-evidence-artifact", /Upload CI evidence reports[\s\S]*actions\/upload-artifact@[a-f0-9]{40}[\s\S]*reports\/[\s\S]*\.tmp\/evidence-bundles\/[\s\S]*retention-days:\s+30/],
     ["least-privilege-permissions", /permissions:\s*\r?\n\s+contents:\s+read(?![\s\S]*security-events:\s+write)/],
     ["compose-job-timeout", /compose-and-policy:[\s\S]*timeout-minutes:\s+45/],
     ["shell-job-timeout", /shell-syntax:[\s\S]*timeout-minutes:\s+10/],
@@ -12498,6 +12540,8 @@ async function signImages() {
 
 function staticSecurityInfraOnlyCheck() {
   log("==> Static security checks (infra-only)");
+  const supplyChain = evaluateSupplyChain(infraRoot);
+  if (supplyChain.status !== "passed") fail(`Supply-chain policy failed: ${supplyChain.failures.join("; ")}`);
   const compose = readText(path.join(infraRoot, "compose.yaml"));
   const composeBuild = readText(path.join(infraRoot, "compose.build.yaml"));
   const composeRuntime = readText(path.join(infraRoot, "compose.runtime.yaml"));
@@ -12759,8 +12803,8 @@ function staticSecurityInfraOnlyCheck() {
   assertMatch(githubRunEvidenceWorkflow, /permissions:[\s\S]*contents:\s+read[\s\S]*actions:\s+read/, "GitHub Actions run evidence workflow must use least-privilege read permissions.");
   assertMatch(releaseAttestationWorkflow, /name:\s+release-attestation[\s\S]*workflow_dispatch:[\s\S]*push:[\s\S]*tags:/, "Release attestation workflow must run manually and for release tags.");
   assertMatch(releaseAttestationWorkflow, /permissions:[\s\S]*contents:\s+read[\s\S]*id-token:\s+write[\s\S]*attestations:\s+write[\s\S]*packages:\s+write/, "Release attestation workflow must grant GitHub Artifact Attestations and GHCR push permissions.");
-  assertMatch(releaseAttestationWorkflow, /PHP_APACHE_IMAGE=ghcr\.io[\s\S]*docker\/build-push-action@v7[\s\S]*push:\s+true/, "Release attestation workflow must push digest-addressable images to GHCR.");
-  assertMatch(releaseAttestationWorkflow, /actions\/attest-build-provenance@v4[\s\S]*push-to-registry:\s+true/, "Release attestation workflow must create GitHub/Sigstore provenance for GHCR images.");
+  assertMatch(releaseAttestationWorkflow, /PHP_APACHE_IMAGE=ghcr\.io[\s\S]*docker\/build-push-action@[a-f0-9]{40}[\s\S]*push:\s+true/, "Release attestation workflow must push digest-addressable images to GHCR.");
+  assertMatch(releaseAttestationWorkflow, /actions\/attest-build-provenance@[a-f0-9]{40}[\s\S]*push-to-registry:\s+true/, "Release attestation workflow must create GitHub/Sigstore provenance for GHCR images.");
   assertMatch(releaseAttestationWorkflow, /gh attestation verify[\s\S]*--format json[\s\S]*github-attestation-evidence/, "Release attestation workflow must verify attestations and write non-sensitive evidence reports.");
   assertMatch(githubLiveEvidenceWorkflow, /name:\s+enterprise-live-evidence[\s\S]*workflow_dispatch:/, "Infrastructure must provide a manual production live evidence workflow.");
   assertMatch(githubLiveEvidenceWorkflow, /environment:[\s\S]*name:\s+production/, "Live evidence workflow must run in the production environment.");
@@ -12791,7 +12835,7 @@ function staticSecurityInfraOnlyCheck() {
   assertMatch(githubWorkflow, /DEPLOY_SSH_PORT:\s+\$\{\{ vars\.DEPLOY_SSH_PORT \}\}/, "Production deploy workflow must pass the configured SSH port.");
   assertMatch(githubWorkflow, /DEPLOY_RUN_PRODUCTION_PREFLIGHT:\s+"1"[\s\S]*DEPLOY_RUN_PRE_GO_LIVE:\s+"1"[\s\S]*DEPLOY_RUN_GO_NO_GO:\s+"1"/, "Production deploy workflow must enforce preflight, pre-go-live evidence and go/no-go.");
   assertMatch(githubWorkflow, /DEPLOY_PRE_GO_LIVE_RESTORE_DRILL:\s+"1"[\s\S]*DEPLOY_PRE_GO_LIVE_OFFSITE_RESTORE_DRY_RUN:\s+"1"/, "Production deploy workflow must require restore and off-site restore evidence.");
-  assertMatch(githubWorkflow, /Upload CI evidence reports[\s\S]*actions\/upload-artifact@v7[\s\S]*reports\/[\s\S]*\.tmp\/evidence-bundles\/[\s\S]*retention-days:\s+30/, "Infrastructure CI must upload non-secret evidence reports.");
+  assertMatch(githubWorkflow, /Upload CI evidence reports[\s\S]*actions\/upload-artifact@[a-f0-9]{40}[\s\S]*reports\/[\s\S]*\.tmp\/evidence-bundles\/[\s\S]*retention-days:\s+30/, "Infrastructure CI must upload non-secret evidence reports.");
   assertMatch(githubWorkflow, /Evidence bundle integrity verify[\s\S]*evidence-bundle-verify/, "Infrastructure CI must verify evidence bundle manifest integrity.");
   assertMatch(githubWorkflow, /Pre go-live evidence report[\s\S]*pre-go-live-evidence --infraOnly --repo/, "Infrastructure CI must produce an infrastructure-only pre go-live evidence report.");
   assertMatch(githubWorkflow, /Enterprise requirements traceability[\s\S]*enterprise-requirements-check/, "Infrastructure CI must verify enterprise requirements traceability.");
@@ -12868,6 +12912,8 @@ async function staticSecurityCheckBody() {
     return;
   }
   log("==> Static security checks");
+  const supplyChain = evaluateSupplyChain(infraRoot);
+  if (supplyChain.status !== "passed") fail(`Supply-chain policy failed: ${supplyChain.failures.join("; ")}`);
   const compose = readText(path.join(infraRoot, "compose.yaml"));
   const composeBuild = readText(path.join(infraRoot, "compose.build.yaml"));
   const composeRuntime = readText(path.join(infraRoot, "compose.runtime.yaml"));
@@ -13094,7 +13140,7 @@ async function staticSecurityCheckBody() {
   assertMatch(githubRunEvidenceWorkflow, /Upload GitHub Actions run evidence[\s\S]*reports\/github-actions\/[\s\S]*retention-days:\s+30/, "GitHub Actions run evidence workflow must upload its non-secret report artifact.");
   assertMatch(releaseAttestationWorkflow, /name:\s+release-attestation[\s\S]*workflow_dispatch:[\s\S]*push:[\s\S]*tags:/, "GitHub Actions must define a manual/tag release attestation workflow.");
   assertMatch(releaseAttestationWorkflow, /permissions:[\s\S]*contents:\s+read[\s\S]*id-token:\s+write[\s\S]*attestations:\s+write[\s\S]*packages:\s+write/, "Release attestation workflow must use GitHub Artifact Attestations and GHCR permissions.");
-  assertMatch(releaseAttestationWorkflow, /actions\/attest-build-provenance@v4[\s\S]*gh attestation verify[\s\S]*github-attestation-evidence/, "Release attestation workflow must attest, verify and write release evidence.");
+  assertMatch(releaseAttestationWorkflow, /actions\/attest-build-provenance@[a-f0-9]{40}[\s\S]*gh attestation verify[\s\S]*github-attestation-evidence/, "Release attestation workflow must attest, verify and write release evidence.");
   assertMatch(githubWorkflow, /GitHub Actions workflow lint[\s\S]*rhysd\/actionlint:1\.7\.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667[\s\S]*-color/, "Infra workflow must lint GitHub Actions workflows with a digest-pinned actionlint image.");
   assertMatch(githubLiveEvidenceWorkflow, /name:\s+enterprise-live-evidence[\s\S]*workflow_dispatch:/, "GitHub Actions must define a manual production live evidence workflow.");
   assertMatch(githubLiveEvidenceWorkflow, /environment:[\s\S]*name:\s+production/, "Live evidence workflow must use the production environment protection.");
@@ -13780,7 +13826,7 @@ async function staticSecurityCheckBody() {
   assertMatch(githubWorkflow, /DR readiness check[\s\S]*dr-readiness-check/, "Infra workflow must exercise the DR readiness gate.");
   assertMatch(githubWorkflow, /DEPLOY_RUN_PRODUCTION_PREFLIGHT:\s+"1"[\s\S]*DEPLOY_RUN_PRE_GO_LIVE:\s+"1"[\s\S]*DEPLOY_RUN_GO_NO_GO:\s+"1"/, "Production deploy workflow must enforce preflight, pre-go-live evidence and go/no-go.");
   assertMatch(githubWorkflow, /DEPLOY_PRE_GO_LIVE_RESTORE_DRILL:\s+"1"[\s\S]*DEPLOY_PRE_GO_LIVE_OFFSITE_RESTORE_DRY_RUN:\s+"1"/, "Production deploy workflow must require restore and off-site restore evidence.");
-  assertMatch(githubWorkflow, /Upload CI evidence reports[\s\S]*actions\/upload-artifact@v7[\s\S]*reports\/[\s\S]*\.tmp\/evidence-bundles\/[\s\S]*retention-days:\s+30/, "Infra workflow must upload non-secret CI evidence reports.");
+  assertMatch(githubWorkflow, /Upload CI evidence reports[\s\S]*actions\/upload-artifact@[a-f0-9]{40}[\s\S]*reports\/[\s\S]*\.tmp\/evidence-bundles\/[\s\S]*retention-days:\s+30/, "Infra workflow must upload non-secret CI evidence reports.");
   assertMatch(githubWorkflow, /permissions:\s*\r?\n\s+contents:\s+read/, "Infra workflow must declare least-privilege read permissions.");
   assertNoMatch(githubWorkflow, /security-events:\s+write|contents:\s+write/, "Infra workflow must not request unused write permissions.");
   assertMatch(githubWorkflow, /compose-and-policy:[\s\S]*timeout-minutes:\s+45[\s\S]*shell-syntax:[\s\S]*timeout-minutes:\s+10[\s\S]*dast-zap:[\s\S]*timeout-minutes:\s+45[\s\S]*deploy-vps:[\s\S]*timeout-minutes:\s+90/, "Infra workflow jobs must set explicit timeouts.");
@@ -15385,6 +15431,7 @@ Commands:
   sign-existing-postgres-backups
   sign-images
   static-security-check
+  supply-chain-lock-check
   supply-chain-hygiene
   testing-hygiene
   validate-local-secrets
@@ -15491,6 +15538,7 @@ const commands = {
   "sign-existing-postgres-backups": signExistingPostgresBackups,
   "sign-images": signImages,
   "static-security-check": staticSecurityCheck,
+  "supply-chain-lock-check": supplyChainLockCheck,
   "supply-chain-hygiene": supplyChainHygiene,
   "testing-hygiene": testingHygiene,
   "validate-local-secrets": validateLocalSecrets,

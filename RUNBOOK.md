@@ -614,6 +614,25 @@ change.
 
 ## DAST
 
+Prima di eseguire DAST o costruire un'immagine candidata, verifica il lock
+supply-chain e le fixture negative:
+
+```sh
+sh ./scripts/supply-chain-lock-check.sh
+docker run --rm -v "$PWD:/work" -w /work node:26.3.1-alpine@sha256:a2dc166a387cc6ca1e62d0c8e265e49ca985d6e60abc9fe6e6c3d6ce8e63f606 \
+  node --test scripts/supply-chain-policy.test.mjs
+sh ./scripts/build-context-sandbox-test.sh
+sh ./scripts/build-daemon-isolation-sandbox-test.sh
+sh ./scripts/core-image-supply-chain-test.sh
+sh ./scripts/helper-image-supply-chain-test.sh
+sh ./scripts/verify-locked-images.sh
+```
+
+I digest e i commit ammessi sono in `governance/supply-chain-lock.json`.
+L'aggiornamento di un tag non modifica automaticamente il lock: risolvi il
+nuovo digest/SHA, verifica la sorgente, aggiorna insieme lock e consumer e
+conserva l'evidence del run. Non ripristinare riferimenti tag-only.
+
 Run OWASP ZAP only against staging or a local disposable stack:
 
 ```sh
