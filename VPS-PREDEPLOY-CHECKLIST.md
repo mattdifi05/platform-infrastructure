@@ -33,7 +33,10 @@ Use this checklist on the VPS Ubuntu LTS VPS before exposing public traffic.
 - [ ] `sh ./scripts/infra-secret-manager.sh init` executed.
 - [ ] `sh ./scripts/infra-secret-manager.sh verify` passed.
 - [ ] `sh ./scripts/secret-rotation-evidence.sh --enforce` passed and the JSON/Markdown reports under `reports/secret-rotation/` were archived outside Git.
-- [ ] `sh ./scripts/vps-preflight.sh .env` passed and rendered the full VPS+WAF Compose stack, including `compose.waf.yaml` and `compose.vps-waf.yaml`.
+- [ ] `sh ./scripts/vps-preflight.sh .env` passed and rendered the canonical VPS+WAF stack, including `compose.runtime.yaml` and `compose.networks.yaml` loaded last.
+- [ ] `sh ./scripts/network-segmentation-check.sh --envFile .env` passed and its non-secret report under `reports/network-segmentation/` was archived outside Git.
+- [ ] `sh ./scripts/network-segmentation-sandbox-test.sh` passed, proving allowed ingress/data paths and denied router-to-DB, app-to-observability and cross-app paths.
+- [ ] `sudo sh ./scripts/workload-egress-firewall.sh --plan --network-prefix "$PLATFORM_NETWORK_PREFIX"` was reviewed after candidate networks were created; apply/verify used the strong confirmation in an approved maintenance window before hosted workloads started.
 - [ ] `sh ./scripts/linux-portability-check.sh` passed and the JSON/Markdown report under `reports/linux-portability/` was archived outside Git.
 - [ ] No mutable `:latest` image exists in the rendered VPS+WAF stack.
 - [ ] `sh ./scripts/vps-go-live.sh --planOnly --repo OWNER/REPO --bootstrap --apply-hardening --reload-sshd` generated a reviewed JSON/Markdown plan under `reports/vps-go-live/`; if an existing Docker daemon config must be replaced, the reviewed plan includes `--replace-docker-daemon-config`.

@@ -73,6 +73,8 @@ jobs:
             -f compose.vps.yaml \
             -f compose.waf.yaml \
             -f compose.vps-waf.yaml \
+            -f compose.runtime.yaml \
+            -f compose.networks.yaml \
             config --quiet
 
       - name: Render staging and backup compose
@@ -197,6 +199,8 @@ jobs:
             -f compose.vps.yaml \
             -f compose.waf.yaml \
             -f compose.vps-waf.yaml \
+            -f compose.runtime.yaml \
+            -f compose.networks.yaml \
             config --quiet
 
       - name: Render staging and backup compose
@@ -213,6 +217,9 @@ jobs:
             -f compose.secrets.yaml \
             -f compose.backup-scheduler.yaml \
             config --quiet
+
+      - name: Network segmentation policy
+        run: sh ./scripts/infra-ops.sh network-segmentation-check --envFile .env.vps.example
 
       - name: Backup scheduler dry run
         run: |

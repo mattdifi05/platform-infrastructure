@@ -18,6 +18,7 @@ import {
   parseBackupJobDocument,
   parseBackupManifestDocument,
 } from "../control-center/backup/contracts.mjs";
+import { evaluateNetworkSegmentation } from "./network-segmentation-policy.mjs";
 
 process.umask(0o077);
 
@@ -3221,6 +3222,7 @@ function collectInfraContainerImageRefs() {
     "compose.build.yaml",
     "compose.backup-scheduler.yaml",
     "compose.runtime.yaml",
+    "compose.networks.yaml",
     "compose.prod.yaml",
     "compose.secrets.yaml",
     "compose.staging.yaml",
@@ -3374,6 +3376,7 @@ function infraDependencyHygiene() {
     "compose.build.yaml",
     "compose.backup-scheduler.yaml",
     "compose.runtime.yaml",
+    "compose.networks.yaml",
     "compose.prod.yaml",
     "compose.secrets.yaml",
     "compose.vps.yaml",
@@ -3443,6 +3446,7 @@ function infraTestingHygiene() {
     "control-center/database/ownership.mjs",
     "control-center/vault/keyring.mjs",
     "project-router/server.mjs",
+    "scripts/network-segmentation-policy.mjs",
     "scripts/infra-secret-manager.mjs",
   ];
   for (const file of checkFiles) {
@@ -3478,6 +3482,58 @@ async function projectRouterTests() {
     run(process.execPath, ["--test", "project-router/tests/project-router.test.mjs"], { cwd: infraRoot });
     log("Project Router tests passed.");
   });
+}
+
+async function networkSegmentationCheck() {
+  await withLocalCheckReport("network-segmentation", async () => {
+    const envFile = path.resolve(infraRoot, argv.envFile || ".env");
+    if (!fs.existsSync(envFile)) fail(`Compose env file not found: ${envFile}`);
+    const composeFiles = [
+      "compose.yaml",
+      "compose.secrets.yaml",
+      "compose.waf.yaml",
+      "compose.vps.yaml",
+      "compose.vps-waf.yaml",
+      "compose.backup-scheduler.yaml",
+      "compose.build.yaml",
+      "compose.runtime.yaml",
+      "compose.networks.yaml",
+    ];
+    const configText = output("docker", [
+      "compose",
+      "--env-file", envFile,
+      "-p", "platform_t12_policy_check",
+      ...composeFiles.flatMap((file) => ["-f", path.join(infraRoot, file)]),
+      "--profile", "backup",
+      "config", "--format", "json",
+    ], { maxBuffer: 128 * 1024 * 1024 });
+    let config;
+    try {
+      config = JSON.parse(configText);
+    } catch {
+      fail("Canonical Compose network render was not valid JSON.");
+    }
+    const report = evaluateNetworkSegmentation(config);
+    const stamp = reportTimestamp();
+    const jsonPath = writeJsonReport("network-segmentation", `network-segmentation-${stamp}`, report);
+    const markdownPath = writeMarkdownReport("network-segmentation", `network-segmentation-${stamp}`, [
+      "# Network Segmentation Evidence",
+      "",
+      `Generated at: ${report.generatedAt}`,
+      `Status: ${report.status}`,
+      `Checks: ${report.summary.checks}`,
+      `Failed: ${report.summary.failed}`,
+      `Services: ${report.summary.services}`,
+      `Networks: ${report.summary.networks}`,
+      "",
+      "| Check | Status | Detail |",
+      "| --- | --- | --- |",
+      ...report.checks.map((item) => `| ${item.id} | ${item.status} | ${item.detail} |`),
+    ]);
+    log(`Network segmentation reports written to ${jsonPath} and ${markdownPath}`);
+    if (report.status !== "passed") fail(`Network segmentation failed: ${report.failures.join("; ")}`);
+    log("Network segmentation check passed.");
+  }, { scope: "platform-infrastructure", liveNetworksTouched: false });
 }
 
 async function faultInjectionTests() {
@@ -3664,6 +3720,8 @@ function infraMaintainabilityHygiene() {
     "backup-scheduler.sh",
     "cloudflare-origin-lock-ufw.sh",
     "container-metrics-sandbox-test.sh",
+    "network-segmentation-sandbox-test.sh",
+    "workload-egress-firewall.sh",
     "dast-zap-baseline.sh",
     "deploy-vps.sh",
     "infra-ops.sh",
@@ -5816,7 +5874,7 @@ async function composeHealthcheckCoverage() {
       name: "vps-waf",
       envFile: ".env.vps.example",
       projectName: "platform_ops_health_vps",
-      files: ["compose.yaml", "compose.secrets.yaml", "compose.waf.yaml", "compose.vps.yaml", "compose.vps-waf.yaml", "compose.backup-scheduler.yaml", "compose.build.yaml", "compose.runtime.yaml"],
+      files: ["compose.yaml", "compose.secrets.yaml", "compose.waf.yaml", "compose.vps.yaml", "compose.vps-waf.yaml", "compose.backup-scheduler.yaml", "compose.build.yaml", "compose.runtime.yaml", "compose.networks.yaml"],
       profiles: ["backup"],
     },
     {
@@ -12443,6 +12501,7 @@ function staticSecurityInfraOnlyCheck() {
   const compose = readText(path.join(infraRoot, "compose.yaml"));
   const composeBuild = readText(path.join(infraRoot, "compose.build.yaml"));
   const composeRuntime = readText(path.join(infraRoot, "compose.runtime.yaml"));
+  const composeNetworks = readText(path.join(infraRoot, "compose.networks.yaml"));
   const composeSecrets = readText(path.join(infraRoot, "compose.secrets.yaml"));
   const composeWaf = readText(path.join(infraRoot, "compose.waf.yaml"));
   const composeVPSWaf = readText(path.join(infraRoot, "compose.vps-waf.yaml"));
@@ -12492,11 +12551,15 @@ function staticSecurityInfraOnlyCheck() {
   const controlCenterLocalComponents = readText(path.join(infraRoot, "control-center", "components", "ui", "controlCenterUi.mjs"));
   const projectRouterServer = readText(path.join(infraRoot, "project-router", "server.mjs"));
   const projectRouterTest = readText(path.join(infraRoot, "project-router", "tests", "project-router.test.mjs"));
+  const networkSegmentationPolicy = readText(path.join(infraRoot, "scripts", "network-segmentation-policy.mjs"));
+  const networkSegmentationSandbox = readText(path.join(infraRoot, "scripts", "network-segmentation-sandbox-test.sh"));
+  const workloadEgressFirewall = readText(path.join(infraRoot, "scripts", "workload-egress-firewall.sh"));
 
   const infrastructureText = [
     compose,
     composeBuild,
     composeRuntime,
+    composeNetworks,
     composeSecrets,
     composeWaf,
     composeVPSWaf,
@@ -12531,7 +12594,7 @@ function staticSecurityInfraOnlyCheck() {
   assertMatch(compose, /^name:\s+\$\{COMPOSE_PROJECT_NAME:-platform_infra\}/m, "Compose must use an explicit environment-selectable project name.");
   assertMatch(composeRuntime, /local-registry:[\s\S]*registry:3@sha256:[a-f0-9]{64}[\s\S]*enterprise_local_registry_data:[\s\S]*external:\s+true/, "Tracked runtime must manage the pinned local registry and its external stable volume.");
   assertMatch(composeRuntime, /worker-jobs:[\s\S]*read_only:\s+false[\s\S]*worker-notifications:[\s\S]*read_only:\s+false/, "Tracked runtime must replace the former worker hotfix.");
-  assertMatch(composeVPSScript, /compose\.backup-scheduler\.yaml[\s\S]*compose\.build\.yaml[\s\S]*compose\.runtime\.yaml[\s\S]*--profile backup/, "The VPS wrapper must define the canonical tracked runtime file order.");
+  assertMatch(composeVPSScript, /compose\.backup-scheduler\.yaml[\s\S]*compose\.build\.yaml[\s\S]*compose\.runtime\.yaml[\s\S]*compose\.networks\.yaml[\s\S]*--profile backup/, "The VPS wrapper must load the tracked network policy last in the canonical runtime order.");
   assertNoMatch([readme, runbook, deployVPSScript, vpsGoLiveScript, composeVPSScript].join("\n"), /\.tmp\/(?:vps-runtime-override|compose\.worker-runtime-hotfix)\.yaml/, "Production commands must not depend on ignored runtime overlays.");
   assertMatch(compose, /dockerfile:\s+docker\/php-apache\.Dockerfile/, "Compose must build PHP hosting from the unified infra Dockerfile.");
   assertMatch(compose, /\$\{PHP_SOURCE_DIR:-\.\/php-runtime-root\}:\/var\/www\/html/, "Compose must default the PHP root to a neutral runtime-only document root.");
@@ -12563,14 +12626,29 @@ function staticSecurityInfraOnlyCheck() {
   assertMatch(localWafPreRules, /\(\?:traefik\|prometheus\|alertmanager\)\\\.localhost\\\.com/, "Local WAF must block unauthenticated internal console hostnames.");
   assertMatch(vpsWafPreRules, /\(\?:phpmyadmin\|phppgadmin\|traefik\|prometheus\|alertmanager\|grafana\|minio\|s3\)/, "VPS WAF must block public admin/storage console hostnames.");
   assertNoMatch(compose, /phpmyadmin\/themes\/|blueberry/i, "phpMyAdmin must not mount removed local themes.");
+  assertMatch(compose, /phppgadmin:[\s\S]*tozd\/phppgadmin@sha256:[a-f0-9]{64}/, "phpPgAdmin must use an immutable image digest.");
   assertMatch(phpMyAdminConfig, /\$cfg\['ThemeDefault'\]\s*=\s*'pmahomme'/, "phpMyAdmin must use the bundled default pmahomme theme.");
   assertMatch(phpMyAdminConfig, /\$cfg\['ThemeManager'\]\s*=\s*false/, "phpMyAdmin theme switching must be disabled.");
   assertMatch(phpApacheDockerfile, /php:8\.5-apache@sha256:[a-f0-9]{64}/, "PHP Apache image must be pinned to a digest.");
   assertMatch(phpApacheDockerfile, /a2enmod(?=[^\n]*rewrite)(?=[^\n]*headers)(?=[^\n]*ssl)(?=[^\n]*proxy)(?=[^\n]*proxy_http)(?=[^\n]*vhost_alias)/, "PHP Apache image must enable the required hosting modules.");
   assertMatch(`${phpApacheHttpVhost}\n${phpApacheHttpsVhost}`, /VirtualDocumentRoot\s+\/var\/www\/projects\/%1\/public/, "PHP Apache must route project subdomains to /var/www/projects/<name>/public dynamically.");
   assertMatch(projectRouterServer, /if \(!isEnabled\(project\)\)[\s\S]*Project disabled[\s\S]*dedicatedUpstreamFor\(project\)[\s\S]*nodeUpstreams/, "Project Router must block disabled projects and proxy Node projects only to dedicated upstreams.");
+  assertMatch(projectRouterServer, /PROJECT_ROUTER_ALLOWED_UPSTREAMS/, "Project Router must receive an explicit service allowlist.");
+  assertMatch(projectRouterServer, /function parseAllowedUpstreams[\s\S]*function validateUpstream/, "Project Router must parse and validate exact service-id upstreams.");
+  assertMatch(projectRouterServer, /import \{ isIP \} from "node:net"/, "Project Router must reject IP-literal upstream hosts.");
+  assertMatch(projectRouterServer, /function safeProxyPath[\s\S]*requestTarget\.startsWith\("\/\/"\)/, "Project Router must reject scheme-relative and absolute-form request targets.");
+  assertMatch(projectRouterServer, /NODE_ENV === "test"[\s\S]*PROJECT_ROUTER_TEST_ALLOW_LOOPBACK === "true"/, "Project Router loopback exceptions must be test-only and explicit.");
   assertNoMatch(projectRouterServer, /node:child_process|spawn\(|execFile\(|exec\(|stopManagedProject/, "Project Router must stay proxy-only and must not manage project processes.");
   assertMatch(projectRouterTest, /NODE_PROJECT_UPSTREAMS[\s\S]*php-demo\.localhost\.com[\s\S]*node-demo\.localhost\.com[\s\S]*Project disabled[\s\S]*nodeAfterEnablePayload\.runtime[\s\S]*nodeAfterEnablePayload\.host/, "Project Router tests must prove simultaneous PHP and Node hosting plus disable/re-enable behavior through dedicated upstreams.");
+  assertMatch(projectRouterTest, /169\.254\.169\.254[\s\S]*absoluteTarget[\s\S]*invalid request target[\s\S]*service allowlist policy violation/, "Project Router tests must reject metadata IP and absolute-form SSRF while not following redirects.");
+  assertMatch(composeNetworks, /platform_observability:[\s\S]*internal:\s+true[\s\S]*app_node_account_ingress:[\s\S]*internal:\s+true[\s\S]*app_node_account_egress:/, "Network overlay must define internal observability and per-application ingress/data with isolated egress.");
+  assertNoMatch(composeNetworks, /- enterprise_net/, "Segmented services must not rejoin the legacy flat network.");
+  assertMatch(networkSegmentationPolicy, /deny-cross-app[\s\S]*deny-router-[\s\S]*phppgadmin-image-pinned[\s\S]*router-service-allowlist/, "Network policy must enforce cross-app, router/data, admin image and service allowlist boundaries.");
+  assertMatch(networkSegmentationSandbox, /docker network create --internal[\s\S]*deny "\$ROUTER" "\$DATABASE"[\s\S]*deny "\$APP_ONE" "\$METRICS"[\s\S]*deny "\$APP_ONE" "\$APP_TWO"/, "Network sandbox must prove intended paths and negative cross-zone connectivity.");
+  assertMatch(workloadEgressFirewall, /MODE=plan[\s\S]*DOCKER-USER/, "Workload egress firewall must default to plan and attach only through DOCKER-USER.");
+  assertMatch(workloadEgressFirewall, /10\.0\.0\.0\/8[\s\S]*169\.254\.0\.0\/16[\s\S]*192\.168\.0\.0\/16/, "Workload egress firewall must block private and metadata destinations.");
+  assertMatch(workloadEgressFirewall, /APPLY-WORKLOAD-EGRESS-FIREWALL/, "Workload egress firewall apply must require an explicit confirmation token.");
+  assertMatch(workloadEgressFirewall, /ROLLBACK-WORKLOAD-EGRESS-FIREWALL/, "Workload egress firewall rollback must require a distinct confirmation token.");
   assertNoMatch(infrastructureText, /PHP_(?!(?:PROJECTS|SOURCE)_)[A-Z0-9]+_SOURCE_DIR/, "Infrastructure must not hardcode individual PHP project source mounts.");
   assertMatch(envExample, /PHP_PROJECTS_DIR=\.\.\/src/, "Environment example must point PHP projects at the generic src directory.");
   assertMatch(envExample, /ALERTMANAGER_SECRET_GID=1000/, "Environment example must declare the Alertmanager shared runtime group.");
@@ -12792,6 +12870,8 @@ async function staticSecurityCheckBody() {
   log("==> Static security checks");
   const compose = readText(path.join(infraRoot, "compose.yaml"));
   const composeBuild = readText(path.join(infraRoot, "compose.build.yaml"));
+  const composeRuntime = readText(path.join(infraRoot, "compose.runtime.yaml"));
+  const composeNetworks = readText(path.join(infraRoot, "compose.networks.yaml"));
   const composeProd = readText(path.join(infraRoot, "compose.prod.yaml"));
   const composeSecrets = readText(path.join(infraRoot, "compose.secrets.yaml"));
   const composeWaf = readText(path.join(infraRoot, "compose.waf.yaml"));
@@ -12818,6 +12898,9 @@ async function staticSecurityCheckBody() {
   const projectRouterServer = fs.existsSync(projectRouterServerPath) ? readText(projectRouterServerPath) : "";
   const projectRouterTestPath = path.resolve(infraRoot, "project-router", "tests", "project-router.test.mjs");
   const projectRouterTest = fs.existsSync(projectRouterTestPath) ? readText(projectRouterTestPath) : "";
+  const networkSegmentationPolicy = readText(path.join(infraRoot, "scripts", "network-segmentation-policy.mjs"));
+  const networkSegmentationSandbox = readText(path.join(infraRoot, "scripts", "network-segmentation-sandbox-test.sh"));
+  const workloadEgressFirewall = readText(path.join(infraRoot, "scripts", "workload-egress-firewall.sh"));
   const prometheusConfig = readText(path.join(infraRoot, "prometheus", "prometheus.yml"));
   const localWafPreRules = readText(path.join(infraRoot, "waf", "REQUEST-900-EXCLUSION-RULES-BEFORE-CRS.conf"));
   const vpsWafPreRules = readText(path.join(infraRoot, "waf", "REQUEST-900-VPS-RULES-BEFORE-CRS.conf"));
@@ -13086,13 +13169,29 @@ async function staticSecurityCheckBody() {
   assertMatch(compose, /control-center:[\s\S]*image:\s+\$\{NODE_IMAGE:-node:26\.3\.1-alpine@sha256:[a-f0-9]{64}\}/, "Control Center must run as a digest-pinned Node service.");
   assertMatch(controlCenterServer, /x-platform-control-center-runtime[^\n]*node/, "Control Center responses must expose Node runtime evidence headers.");
   assertMatch(compose, /project-router:[\s\S]*CONTROL_CENTER_UPSTREAM:\s+http:\/\/control-center:8080/, "Project router must send the admin host to the Node Control Center.");
+  assertMatch(compose, /project-router:[\s\S]*PROJECT_ROUTER_ALLOWED_UPSTREAMS:/, "Project router must receive an explicit service allowlist.");
   assertNoMatch(compose, /local-projects:[\s\S]*url:\s+http:\/\/project-router:8080/, "Traefik must not publish project-router wildcard routes by default.");
   assertMatch(compose, /enterprise-portal:[\s\S]*url:\s+http:\/\/control-center:8080/, "Traefik portal route must target the Node Control Center service.");
   assertNoMatch(compose, /local-php/, "Traefik project routing must not be named local-php; PHP is only one runtime behind project-router.");
   assertMatch(compose, /php-apache:[\s\S]*\$\{PHP_SOURCE_DIR:-\.\/php-runtime-root\}:\/var\/www\/html[\s\S]*project-router:[\s\S]*CONTROL_CENTER_UPSTREAM:\s+http:\/\/control-center:8080/, "PHP Apache must be runtime-only while the admin host resolves through the Node Control Center.");
   assertMatch(projectRouterServer, /if \(!isEnabled\(project\)\)[\s\S]*Project disabled[\s\S]*dedicatedUpstreamFor\(project\)[\s\S]*nodeUpstreams/, "Project Router must block disabled projects and proxy Node projects only to dedicated upstreams.");
+  assertMatch(projectRouterServer, /PROJECT_ROUTER_ALLOWED_UPSTREAMS/, "Project Router must receive an explicit service allowlist.");
+  assertMatch(projectRouterServer, /function parseAllowedUpstreams[\s\S]*function validateUpstream/, "Project Router must parse and validate exact service-id upstreams.");
+  assertMatch(projectRouterServer, /import \{ isIP \} from "node:net"/, "Project Router must reject IP-literal upstream hosts.");
+  assertMatch(projectRouterServer, /function safeProxyPath[\s\S]*requestTarget\.startsWith\("\/\/"\)/, "Project Router must reject scheme-relative and absolute-form request targets.");
   assertNoMatch(projectRouterServer, /node:child_process|spawn\(|execFile\(|exec\(|stopManagedProject/, "Project Router must stay proxy-only and must not manage project processes.");
   assertMatch(projectRouterTest, /NODE_PROJECT_UPSTREAMS[\s\S]*php-demo\.localhost\.com[\s\S]*node-demo\.localhost\.com[\s\S]*Project disabled[\s\S]*nodeAfterEnablePayload\.runtime[\s\S]*nodeAfterEnablePayload\.host/, "Project Router tests must prove simultaneous PHP and Node hosting plus disable/re-enable behavior through dedicated upstreams.");
+  assertMatch(projectRouterTest, /169\.254\.169\.254[\s\S]*absoluteTarget[\s\S]*invalid request target[\s\S]*service allowlist policy violation/, "Project Router tests must reject metadata IP and absolute-form SSRF while not following redirects.");
+  assertMatch(compose, /phppgadmin:[\s\S]*tozd\/phppgadmin@sha256:[a-f0-9]{64}/, "phpPgAdmin must use an immutable image digest.");
+  assertMatch(composeRuntime, /PROJECT_ROUTER_ALLOWED_UPSTREAMS:[\s\S]*php-anniversary:80[\s\S]*node-ui:3000/, "Tracked runtime must enumerate only exact hosted service IDs for router egress.");
+  assertMatch(composeNetworks, /platform_observability:[\s\S]*internal:\s+true[\s\S]*app_node_account_ingress:[\s\S]*internal:\s+true[\s\S]*app_node_account_egress:/, "Network overlay must define internal observability and per-application ingress/data with isolated egress.");
+  assertNoMatch(composeNetworks, /- enterprise_net/, "Segmented services must not rejoin the legacy flat network.");
+  assertMatch(networkSegmentationPolicy, /deny-cross-app[\s\S]*deny-router-[\s\S]*phppgadmin-image-pinned[\s\S]*router-service-allowlist/, "Network policy must enforce cross-app, router/data, admin image and service allowlist boundaries.");
+  assertMatch(networkSegmentationSandbox, /docker network create --internal[\s\S]*deny "\$ROUTER" "\$DATABASE"[\s\S]*deny "\$APP_ONE" "\$METRICS"[\s\S]*deny "\$APP_ONE" "\$APP_TWO"/, "Network sandbox must prove intended paths and negative cross-zone connectivity.");
+  assertMatch(workloadEgressFirewall, /MODE=plan[\s\S]*DOCKER-USER/, "Workload egress firewall must default to plan and attach only through DOCKER-USER.");
+  assertMatch(workloadEgressFirewall, /10\.0\.0\.0\/8[\s\S]*169\.254\.0\.0\/16[\s\S]*192\.168\.0\.0\/16/, "Workload egress firewall must block private and metadata destinations.");
+  assertMatch(workloadEgressFirewall, /APPLY-WORKLOAD-EGRESS-FIREWALL/, "Workload egress firewall apply must require an explicit confirmation token.");
+  assertMatch(workloadEgressFirewall, /ROLLBACK-WORKLOAD-EGRESS-FIREWALL/, "Workload egress firewall rollback must require a distinct confirmation token.");
   assertNoMatch(`${compose}\n${phpRuntimeRootPage}`, /projects-portal\/public|<\?php|\/control\//i, "The PHP runtime root must not implement or expose the Control Center surface.");
   assertMatch(compose, /control-center:[\s\S]*PROJECT_AUDIT_FILE:\s+\/var\/www\/project-state\/audit\.jsonl/, "Control Center must write local audit evidence.");
   assertMatch(compose, /control-center:[\s\S]*PROJECT_APPLICATIONS_FILE:\s+\/var\/www\/project-state\/applications\.json/, "Control Center must persist local application metadata from the Node service.");
@@ -15254,6 +15353,7 @@ Commands:
   linux-portability-check
   maintainability-hygiene
   managed-secrets-preflight
+  network-segmentation-check
   offsite-backup-restic
   offsite-restore-drill-restic
   performance-hygiene
@@ -15359,6 +15459,7 @@ const commands = {
   "linux-portability-check": linuxPortabilityCheck,
   "maintainability-hygiene": maintainabilityHygiene,
   "managed-secrets-preflight": managedSecretsPreflight,
+  "network-segmentation-check": networkSegmentationCheck,
   "offsite-backup-restic": offsiteBackupRestic,
   "offsite-restore-drill-restic": offsiteRestoreDrillRestic,
   "performance-hygiene": performanceHygiene,

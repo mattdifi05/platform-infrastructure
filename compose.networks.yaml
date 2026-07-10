@@ -1,0 +1,291 @@
+# T12 trust-zone overlay. Load this file last so every service receives only
+# the networks required by the communication matrix in NETWORK-SEGMENTATION.md.
+services:
+  traefik:
+    networks: !override
+      - platform_edge
+      - platform_routing
+      - platform_observability
+      - platform_egress
+
+  waf:
+    networks: !override
+      - platform_edge
+
+  postgres:
+    networks: !override
+      - platform_db_admin
+      - platform_postgres
+      - app_node_account_data
+
+  redis:
+    networks: !override
+      - platform_cache
+
+  keycloak:
+    networks: !override
+      - platform_routing
+      - platform_postgres
+      - platform_observability
+      - platform_egress
+
+  nats:
+    networks: !override
+      - platform_bus
+
+  minio:
+    networks: !override
+      - platform_storage
+
+  php-apache:
+    networks: !override
+      - platform_routing
+      - platform_db_admin
+      - platform_egress
+
+  control-center:
+    networks: !override
+      - platform_routing
+      - platform_db_admin
+      - platform_observability
+      - platform_egress
+
+  project-router:
+    networks: !override
+      - platform_routing
+      - app_php_anniversary_ingress
+      - app_php_fiplatform_ingress
+      - app_php_matthewdifilippo_ingress
+      - app_php_stream_ingress
+      - app_php_workcalendar_ingress
+      - app_node_account_ingress
+      - app_node_ui_ingress
+
+  mariadb:
+    networks: !override
+      - platform_db_admin
+      - app_php_anniversary_data
+      - app_php_fiplatform_data
+      - app_php_matthewdifilippo_data
+      - app_php_stream_data
+      - app_php_workcalendar_data
+
+  phpmyadmin:
+    networks: !override
+      - platform_routing
+      - platform_db_admin
+
+  phppgadmin:
+    networks: !override
+      - platform_routing
+      - platform_db_admin
+
+  local-dns:
+    networks: !override
+      - platform_egress
+
+  backend:
+    networks: !override
+      - platform_routing
+      - platform_postgres
+      - platform_cache
+      - platform_bus
+      - platform_storage
+      - platform_observability
+      - platform_egress
+
+  web:
+    networks: !override
+      - platform_routing
+      - platform_observability
+      - platform_egress
+
+  worker-notifications:
+    networks: !override
+      - platform_postgres
+      - platform_cache
+      - platform_bus
+      - platform_observability
+      - platform_egress
+
+  worker-jobs:
+    networks: !override
+      - platform_postgres
+      - platform_cache
+      - platform_bus
+      - platform_storage
+      - platform_observability
+
+  prometheus:
+    networks: !override
+      - platform_observability
+
+  node-exporter:
+    networks: !override
+      - platform_observability
+
+  cadvisor:
+    networks: !override
+      - platform_observability
+
+  alertmanager:
+    networks: !override
+      - platform_observability
+
+  grafana:
+    networks: !override
+      - platform_observability
+
+  loki:
+    networks: !override
+      - platform_observability
+
+  promtail:
+    networks: !override
+      - platform_observability
+
+  backup-scheduler:
+    networks: !override
+      - platform_db_admin
+      - platform_storage
+      - platform_egress
+
+  node-account:
+    networks: !override
+      - app_node_account_ingress
+      - app_node_account_data
+      - app_node_account_egress
+
+  node-ui:
+    networks: !override
+      - app_node_ui_ingress
+      - app_node_ui_egress
+
+  php-anniversary:
+    networks: !override
+      - app_php_anniversary_ingress
+      - app_php_anniversary_data
+      - app_php_anniversary_egress
+
+  php-fiplatform:
+    networks: !override
+      - app_php_fiplatform_ingress
+      - app_php_fiplatform_data
+      - app_php_fiplatform_egress
+
+  php-matthewdifilippo:
+    networks: !override
+      - app_php_matthewdifilippo_ingress
+      - app_php_matthewdifilippo_data
+      - app_php_matthewdifilippo_egress
+
+  php-stream:
+    networks: !override
+      - app_php_stream_ingress
+      - app_php_stream_data
+      - app_php_stream_egress
+
+  php-workcalendar:
+    networks: !override
+      - app_php_workcalendar_ingress
+      - app_php_workcalendar_data
+      - app_php_workcalendar_egress
+
+networks:
+  platform_edge:
+    name: ${PLATFORM_NETWORK_PREFIX:-platform_infra_vps}_edge
+    internal: true
+    labels: { com.platform.trust-zone: edge }
+  platform_routing:
+    name: ${PLATFORM_NETWORK_PREFIX:-platform_infra_vps}_routing
+    internal: true
+    labels: { com.platform.trust-zone: routing }
+  platform_db_admin:
+    name: ${PLATFORM_NETWORK_PREFIX:-platform_infra_vps}_db_admin
+    internal: true
+    labels: { com.platform.trust-zone: db-admin }
+  platform_postgres:
+    name: ${PLATFORM_NETWORK_PREFIX:-platform_infra_vps}_postgres
+    internal: true
+    labels: { com.platform.trust-zone: postgres }
+  platform_cache:
+    name: ${PLATFORM_NETWORK_PREFIX:-platform_infra_vps}_cache
+    internal: true
+    labels: { com.platform.trust-zone: cache }
+  platform_bus:
+    name: ${PLATFORM_NETWORK_PREFIX:-platform_infra_vps}_bus
+    internal: true
+    labels: { com.platform.trust-zone: bus }
+  platform_storage:
+    name: ${PLATFORM_NETWORK_PREFIX:-platform_infra_vps}_storage
+    internal: true
+    labels: { com.platform.trust-zone: storage }
+  platform_observability:
+    name: ${PLATFORM_NETWORK_PREFIX:-platform_infra_vps}_observability
+    internal: true
+    labels: { com.platform.trust-zone: observability }
+  platform_egress:
+    name: ${PLATFORM_NETWORK_PREFIX:-platform_infra_vps}_egress
+    enable_ipv6: false
+    labels: { com.platform.trust-zone: trusted-platform-egress }
+
+  app_php_anniversary_ingress:
+    name: ${PLATFORM_NETWORK_PREFIX:-platform_infra_vps}_app_php_anniversary_ingress
+    internal: true
+  app_php_anniversary_data:
+    name: ${PLATFORM_NETWORK_PREFIX:-platform_infra_vps}_app_php_anniversary_data
+    internal: true
+  app_php_anniversary_egress:
+    name: ${PLATFORM_NETWORK_PREFIX:-platform_infra_vps}_app_php_anniversary_egress
+    enable_ipv6: false
+  app_php_fiplatform_ingress:
+    name: ${PLATFORM_NETWORK_PREFIX:-platform_infra_vps}_app_php_fiplatform_ingress
+    internal: true
+  app_php_fiplatform_data:
+    name: ${PLATFORM_NETWORK_PREFIX:-platform_infra_vps}_app_php_fiplatform_data
+    internal: true
+  app_php_fiplatform_egress:
+    name: ${PLATFORM_NETWORK_PREFIX:-platform_infra_vps}_app_php_fiplatform_egress
+    enable_ipv6: false
+  app_php_matthewdifilippo_ingress:
+    name: ${PLATFORM_NETWORK_PREFIX:-platform_infra_vps}_app_php_matthewdifilippo_ingress
+    internal: true
+  app_php_matthewdifilippo_data:
+    name: ${PLATFORM_NETWORK_PREFIX:-platform_infra_vps}_app_php_matthewdifilippo_data
+    internal: true
+  app_php_matthewdifilippo_egress:
+    name: ${PLATFORM_NETWORK_PREFIX:-platform_infra_vps}_app_php_matthewdifilippo_egress
+    enable_ipv6: false
+  app_php_stream_ingress:
+    name: ${PLATFORM_NETWORK_PREFIX:-platform_infra_vps}_app_php_stream_ingress
+    internal: true
+  app_php_stream_data:
+    name: ${PLATFORM_NETWORK_PREFIX:-platform_infra_vps}_app_php_stream_data
+    internal: true
+  app_php_stream_egress:
+    name: ${PLATFORM_NETWORK_PREFIX:-platform_infra_vps}_app_php_stream_egress
+    enable_ipv6: false
+  app_php_workcalendar_ingress:
+    name: ${PLATFORM_NETWORK_PREFIX:-platform_infra_vps}_app_php_workcalendar_ingress
+    internal: true
+  app_php_workcalendar_data:
+    name: ${PLATFORM_NETWORK_PREFIX:-platform_infra_vps}_app_php_workcalendar_data
+    internal: true
+  app_php_workcalendar_egress:
+    name: ${PLATFORM_NETWORK_PREFIX:-platform_infra_vps}_app_php_workcalendar_egress
+    enable_ipv6: false
+  app_node_account_ingress:
+    name: ${PLATFORM_NETWORK_PREFIX:-platform_infra_vps}_app_node_account_ingress
+    internal: true
+  app_node_account_data:
+    name: ${PLATFORM_NETWORK_PREFIX:-platform_infra_vps}_app_node_account_data
+    internal: true
+  app_node_account_egress:
+    name: ${PLATFORM_NETWORK_PREFIX:-platform_infra_vps}_app_node_account_egress
+    enable_ipv6: false
+  app_node_ui_ingress:
+    name: ${PLATFORM_NETWORK_PREFIX:-platform_infra_vps}_app_node_ui_ingress
+    internal: true
+  app_node_ui_egress:
+    name: ${PLATFORM_NETWORK_PREFIX:-platform_infra_vps}_app_node_ui_egress
+    enable_ipv6: false

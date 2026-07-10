@@ -410,6 +410,7 @@ services:
       PHP_PROJECT_UPSTREAMS: ${PHP_PROJECT_UPSTREAMS:-}
       NODE_PROJECT_UPSTREAMS: ${NODE_PROJECT_UPSTREAMS:-}
       STATIC_PROJECT_UPSTREAMS: ${STATIC_PROJECT_UPSTREAMS:-}
+      PROJECT_ROUTER_ALLOWED_UPSTREAMS: ${PROJECT_ROUTER_ALLOWED_UPSTREAMS:-control-center:8080}
     volumes:
       - ./project-router:/app:ro
       - ${PHP_PROJECTS_DIR:-../src}:/var/www/projects
@@ -482,7 +483,7 @@ services:
       - enterprise_net
 
   phppgadmin:
-    image: ${PHPPGADMIN_IMAGE:-tozd/phppgadmin:latest}
+    image: ${PHPPGADMIN_IMAGE:-tozd/phppgadmin@sha256:2c146e25719c3712dd3190c2b59689f20448c2fa7b595f89be06214ddc89f1fd}
     container_name: phppgadmin
     profiles:
       - admin

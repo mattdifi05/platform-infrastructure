@@ -141,6 +141,15 @@ services:
         account=http://node-account:3000,
         ui=http://node-ui:3000
       STATIC_PROJECT_UPSTREAMS: ${STATIC_PROJECT_UPSTREAMS:-}
+      PROJECT_ROUTER_ALLOWED_UPSTREAMS: >-
+        control-center:8080,
+        php-anniversary:80,
+        php-fiplatform:80,
+        php-matthewdifilippo:80,
+        php-stream:80,
+        php-workcalendar:80,
+        node-account:3000,
+        node-ui:3000
     depends_on: !override
       php-anniversary:
         condition: service_healthy

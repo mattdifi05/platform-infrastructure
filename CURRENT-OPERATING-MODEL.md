@@ -1,6 +1,6 @@
 # Current Operating Model
 
-Last docs alignment: 2026-06-29.
+Last docs alignment: 2026-07-10.
 
 This file records the current non-secret operating model for the prod-like
 Ubuntu server. It is intentionally practical: use it to orient deploy,
@@ -71,13 +71,15 @@ docker compose -p platform_infra_vps \
   -f compose.vps.yaml \
   -f compose.waf.yaml \
   -f compose.vps-waf.yaml \
-  -f .tmp/vps-runtime-override.yaml \
+  -f compose.runtime.yaml \
+  -f compose.networks.yaml \
   ps
 ```
 
-`.tmp/vps-runtime-override.yaml` is a local runtime override, not a portable
-tracked baseline. New servers should recreate the same intent through reviewed
-environment/override files rather than copying stale absolute paths blindly.
+`compose.runtime.yaml` is the tracked hosted-runtime overlay and
+`compose.networks.yaml` is the T12 trust-zone policy loaded last. The network
+candidate is not live until an approved maintenance rollout recreates network
+attachments and passes `network-segmentation-check` plus post-deploy probes.
 
 Core platform services currently expected in the reference stack:
 
@@ -195,7 +197,8 @@ docker compose -p platform_infra_vps \
   -f compose.vps.yaml \
   -f compose.waf.yaml \
   -f compose.vps-waf.yaml \
-  -f .tmp/vps-runtime-override.yaml \
+  -f compose.runtime.yaml \
+  -f compose.networks.yaml \
   up -d --build
 ```
 
@@ -211,7 +214,8 @@ docker compose -p platform_infra_vps \
   -f compose.vps.yaml \
   -f compose.waf.yaml \
   -f compose.vps-waf.yaml \
-  -f .tmp/vps-runtime-override.yaml \
+  -f compose.runtime.yaml \
+  -f compose.networks.yaml \
   up -d --force-recreate control-center
 ```
 
@@ -225,7 +229,8 @@ docker compose -p platform_infra_vps \
   -f compose.vps.yaml \
   -f compose.waf.yaml \
   -f compose.vps-waf.yaml \
-  -f .tmp/vps-runtime-override.yaml \
+  -f compose.runtime.yaml \
+  -f compose.networks.yaml \
   ps control-center traefik waf
 
 curl -skS --resolve portal.platform-infrastructure.com:443:127.0.0.1 \
@@ -236,14 +241,14 @@ curl -skS --resolve portal.platform-infrastructure.com:443:127.0.0.1 \
 
 1. Install Ubuntu LTS on the new host.
 2. Verify SSH key access before changing SSH hardening.
-3. Run `vps-bootstrap-ubuntu.sh --apply` to install Docker/Git/Compose.
+3. Run `vps-bootstrap-ubuntu.sh --apply` to install Docker/Git/Compose and `jq`.
 4. Run host readiness in report mode, then enforce only after remediations.
 5. Create the NVMe mount plan before copying data.
 6. Prepare rollback backups of repo, external application sources and Docker
    volumes before first cutover attempt.
 7. Clone/copy `platform-infrastructure` to the final server path.
-8. Recreate `.env`, secret files and local runtime override from reviewed
-   templates; do not copy stale secret values into Git.
+8. Recreate `.env` and secret files from reviewed templates; render the tracked
+   runtime and network overlays without copying stale secret values into Git.
 9. Copy application sources into the external application root, outside this
    repo.
 10. Start the stack with the same overlay intent and verify `ps`, WAF, Portal,
@@ -264,7 +269,8 @@ docker compose -p platform_infra_vps \
   -f compose.vps.yaml \
   -f compose.waf.yaml \
   -f compose.vps-waf.yaml \
-  -f .tmp/vps-runtime-override.yaml \
+  -f compose.runtime.yaml \
+  -f compose.networks.yaml \
   config --services
 
 docker compose -p platform_infra_vps \
@@ -274,7 +280,8 @@ docker compose -p platform_infra_vps \
   -f compose.vps.yaml \
   -f compose.waf.yaml \
   -f compose.vps-waf.yaml \
-  -f .tmp/vps-runtime-override.yaml \
+  -f compose.runtime.yaml \
+  -f compose.networks.yaml \
   config --volumes
 
 docker compose -p platform_infra_vps \
@@ -284,7 +291,8 @@ docker compose -p platform_infra_vps \
   -f compose.vps.yaml \
   -f compose.waf.yaml \
   -f compose.vps-waf.yaml \
-  -f .tmp/vps-runtime-override.yaml \
+  -f compose.runtime.yaml \
+  -f compose.networks.yaml \
   ps
 
 curl -skS --resolve portal.platform-infrastructure.com:443:127.0.0.1 \

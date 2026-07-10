@@ -28,5 +28,6 @@ exec docker compose \
   -f compose.backup-scheduler.yaml \
   -f compose.build.yaml \
   -f compose.runtime.yaml \
+  -f compose.networks.yaml \
   --profile backup \
   "$@"

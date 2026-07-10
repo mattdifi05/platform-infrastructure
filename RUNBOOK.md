@@ -51,6 +51,7 @@ docker compose -p platform_infra_vps \
   -f compose.waf.yaml \
   -f compose.vps-waf.yaml \
   -f compose.runtime.yaml \
+  -f compose.networks.yaml \
   ps
 
 curl -skS --resolve portal.platform-infrastructure.com:443:127.0.0.1 \
@@ -79,6 +80,7 @@ docker compose -p platform_infra_vps \
   -f compose.waf.yaml \
   -f compose.vps-waf.yaml \
   -f compose.runtime.yaml \
+  -f compose.networks.yaml \
   up -d --force-recreate control-center
 ```
 

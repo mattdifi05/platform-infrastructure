@@ -645,9 +645,9 @@ sh ./scripts/vps-postdeploy.sh .env
 
 Sul reference server corrente il path operativo e'
 `/home/platform_infrastructure/platform-infrastructure` e il runtime usa anche
-il tracked overlay `compose.runtime.yaml` per collegare sorgenti e
-runtime dedicati. Quell'override e' stato-specifico: per nuovi server ricrea lo
-stesso intento in modo revisionato invece di copiarlo alla cieca.
+gli overlay tracked `compose.runtime.yaml` e `compose.networks.yaml` per
+collegare runtime dedicati e trust zone. Per nuovi server ricrea lo stesso
+intento in modo revisionato invece di copiare stato live alla cieca.
 
 ```sh
 cd /home/platform_infrastructure/platform-infrastructure
@@ -659,6 +659,7 @@ docker compose -p platform_infra_vps \
   -f compose.waf.yaml \
   -f compose.vps-waf.yaml \
   -f compose.runtime.yaml \
+  -f compose.networks.yaml \
   ps
 ```
 
@@ -785,6 +786,7 @@ fuori dal GO/NO-GO infra.
 - `compose.prod.yaml`: overlay produzione.
 - `compose.vps.yaml`: overlay VPS prod-like dietro TLS esterno.
 - `compose.runtime.yaml`: runtime hosted-app, registry e override host versionati.
+- `compose.networks.yaml`: trust zone core e reti ingress/data/egress per workload; va caricato per ultimo.
 - `compose.waf.yaml`: overlay OWASP CRS/ModSecurity davanti a Traefik.
 - `compose.vps-waf.yaml`: adattamento WAF per VPS con TLS/CDN esterno.
 - `compose.backup-scheduler.yaml`: scheduler backup/restore drill container-first.
@@ -796,6 +798,7 @@ fuori dal GO/NO-GO infra.
 - `docker/ops.Dockerfile`: immagine operativa con Node, Docker CLI e Compose plugin.
 - `BACKUP-RECOVERY-COVERAGE.md`: catalogo dati, retention e recovery della piattaforma.
 - `DATABASE-DELETION-SAFETY.md`: gate, state machine e recovery per le cancellazioni DB.
+- `NETWORK-SEGMENTATION.md`: matrice di comunicazione, SSRF boundary e rollout reti T12.
 - `postgres/init/` e `postgres/migrations/`: bootstrap DB e compatibilita'
   workload legacy; non sono gate GO/NO-GO infra.
 - `RUNBOOK.md`, `SECURITY.md`, `THREAT-MODEL.md`, `ENTERPRISE-MATURITY.md`: governance operativa.

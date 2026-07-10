@@ -1,11 +1,14 @@
 import { createServer, request as httpRequest } from "node:http";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { isIP } from "node:net";
 import path from "node:path";
 
 const port = Number(process.env.PROJECT_ROUTER_PORT || 8080);
 const projectsRoot = process.env.PROJECTS_ROOT || "/var/www/projects";
 const stateFile = process.env.PROJECT_STATE_FILE || "/var/www/project-state/projects.json";
-const controlCenterUpstream = new URL(process.env.CONTROL_CENTER_UPSTREAM || "http://control-center:8080");
+const testLoopbackAllowed = process.env.NODE_ENV === "test" && process.env.PROJECT_ROUTER_TEST_ALLOW_LOOPBACK === "true";
+const allowedUpstreams = parseAllowedUpstreams(process.env.PROJECT_ROUTER_ALLOWED_UPSTREAMS || "control-center:8080");
+const controlCenterUpstream = validateUpstream(process.env.CONTROL_CENTER_UPSTREAM || "http://control-center:8080", "control-center");
 const domain = normalizeHost(process.env.DOMAIN || process.env.LOCAL_DOMAIN || "localhost.com");
 const adminHost = normalizeHost(process.env.ADMIN_HOST || `portal.${domain}`);
 const controlCenterHost = normalizeHost(process.env.CONTROL_CENTER_HOST || process.env.PROJECTS_HOST || adminHost);
@@ -50,9 +53,10 @@ const server = createServer(async (req, res) => {
       return;
     }
     proxy(req, res, upstream);
-  } catch (error) {
+  } catch {
+    console.error("project-router request failed");
     res.writeHead(500, { "content-type": "text/plain; charset=utf-8" });
-    res.end(`project-router error: ${error instanceof Error ? error.message : String(error)}\n`);
+    res.end("internal proxy error\n");
   }
 });
 
@@ -64,18 +68,23 @@ process.once("SIGTERM", () => server.close(() => process.exit(0)));
 process.once("SIGINT", () => server.close(() => process.exit(0)));
 
 function proxy(clientReq, clientRes, upstream) {
+  const requestPath = safeProxyPath(clientReq.url || "/");
+  if (!requestPath) {
+    clientRes.writeHead(400, { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" });
+    clientRes.end("invalid request target\n");
+    return;
+  }
   const headers = { ...clientReq.headers };
   headers.host = clientReq.headers.host || upstream.host;
   headers["x-forwarded-host"] = clientReq.headers.host || "";
   headers["x-forwarded-proto"] = clientReq.headers["x-forwarded-proto"] || "https";
 
-  const target = new URL(clientReq.url || "/", upstream);
   const proxyReq = httpRequest({
     protocol: upstream.protocol,
     hostname: upstream.hostname,
     port: upstream.port || 80,
     method: clientReq.method,
-    path: `${target.pathname}${target.search}`,
+    path: requestPath,
     headers,
   }, (proxyRes) => {
     clientRes.writeHead(proxyRes.statusCode || 502, proxyRes.headers);
@@ -83,16 +92,81 @@ function proxy(clientReq, clientRes, upstream) {
   });
 
   proxyReq.on("error", (error) => {
+    console.error(`project upstream request failed for ${upstream.hostname}:${upstream.port || 80}: ${error.code || "request-error"}`);
     clientRes.writeHead(502, { "content-type": "text/plain; charset=utf-8" });
-    clientRes.end(`upstream unavailable: ${error.message}\n`);
+    clientRes.end("upstream unavailable\n");
   });
+  proxyReq.setTimeout(30000, () => proxyReq.destroy(new Error("upstream timeout")));
 
   clientReq.pipe(proxyReq);
 }
 
 function dedicatedUpstreamFor(project) {
   const mapped = project.upstream || mappedProjectValue(projectUpstreams, project) || mappedProjectValue(upstreamMapForType(project.type), project);
-  return mapped ? new URL(expandProjectValue(mapped, project)) : null;
+  if (!mapped) return null;
+  try {
+    return validateUpstream(expandProjectValue(mapped, project), project.slug);
+  } catch {
+    console.error(`rejected project upstream for ${project.slug}: service allowlist policy violation`);
+    return null;
+  }
+}
+
+function safeProxyPath(value) {
+  const requestTarget = String(value || "");
+  if (!requestTarget.startsWith("/") || requestTarget.startsWith("//") || requestTarget.includes("\\")) return "";
+  if (/^[a-z][a-z0-9+.-]*:/i.test(requestTarget.slice(1))) return "";
+  try {
+    const parsed = new URL(requestTarget, "http://router.invalid");
+    if (parsed.origin !== "http://router.invalid") return "";
+    return `${parsed.pathname}${parsed.search}`;
+  } catch {
+    return "";
+  }
+}
+
+function parseAllowedUpstreams(value) {
+  const allowed = new Set();
+  for (const item of String(value || "").split(",")) {
+    const token = item.trim().toLowerCase();
+    if (!token) continue;
+    if (token.includes("://") || token.includes("/") || token.includes("@")) throw new Error("Upstream allowlist entries must be service-id:port.");
+    const separator = token.lastIndexOf(":");
+    const hostname = separator > 0 ? token.slice(0, separator) : token;
+    const portValue = separator > 0 ? token.slice(separator + 1) : "80";
+    if (!validUpstreamHost(hostname) || !validPort(portValue)) throw new Error("Invalid upstream allowlist entry.");
+    allowed.add(`${hostname}:${Number(portValue)}`);
+  }
+  if (!allowed.size) throw new Error("Project router upstream allowlist is empty.");
+  return allowed;
+}
+
+function validateUpstream(value, label) {
+  let upstream;
+  try {
+    upstream = new URL(String(value || ""));
+  } catch {
+    throw new Error(`Invalid upstream URL for ${label}.`);
+  }
+  const hostname = upstream.hostname.toLowerCase();
+  const port = Number(upstream.port || 80);
+  if (upstream.protocol !== "http:") throw new Error(`Only internal HTTP upstreams are allowed for ${label}.`);
+  if (upstream.username || upstream.password || upstream.search || upstream.hash) throw new Error(`Upstream credentials, query and fragment are forbidden for ${label}.`);
+  if (upstream.pathname !== "/") throw new Error(`Upstream base paths are forbidden for ${label}.`);
+  if (!validUpstreamHost(hostname) || !validPort(port)) throw new Error(`Invalid upstream service for ${label}.`);
+  if (!allowedUpstreams.has(`${hostname}:${port}`)) throw new Error(`Upstream service is not allowlisted for ${label}.`);
+  return new URL(`http://${hostname}:${port}/`);
+}
+
+function validUpstreamHost(hostname) {
+  if (testLoopbackAllowed && (hostname === "127.0.0.1" || hostname === "localhost")) return true;
+  if (isIP(hostname) !== 0 || hostname === "localhost" || hostname === "host.docker.internal") return false;
+  return /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(hostname);
+}
+
+function validPort(value) {
+  const portNumber = Number(value);
+  return Number.isInteger(portNumber) && portNumber >= 1 && portNumber <= 65535;
 }
 
 function upstreamMapForType(type) {
