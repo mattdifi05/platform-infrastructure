@@ -37,6 +37,24 @@ groups:
           summary: "No passkeys registered"
           description: "Passwordless flows require at least one passkey."
 
+      - alert: KeycloakPlatformLoginFailures
+        expr: sum(increase(keycloak_user_events_total{realm="platform",event="login",error!=""}[5m])) >= 5
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Repeated platform identity login failures"
+          description: "Keycloak recorded at least five failed platform-realm logins in five minutes."
+
+      - alert: KeycloakPlatformAdminLocked
+        expr: sum(increase(keycloak_user_events_total{realm="platform",event=~"user_disabled_by_temporary_lockout|user_disabled_by_permanent_lockout"}[5m])) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Platform administrator locked by Keycloak"
+          description: "Review the identity audit and use the separate passkey-only break-glass path if required."
+
       - alert: BackendRedisUnavailable
         expr: redis_connection_up{service="enterprise-backend"} == 0
         for: 1m

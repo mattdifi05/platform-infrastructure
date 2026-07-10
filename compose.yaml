@@ -117,6 +117,9 @@ services:
       KC_DB_PASSWORD_FILE: /run/secrets/keycloak_db_password
       KC_HEALTH_ENABLED: "true"
       KC_METRICS_ENABLED: "true"
+      KC_EVENT_METRICS_USER_ENABLED: "true"
+      KC_EVENT_METRICS_USER_EVENTS: login,logout,user_disabled_by_temporary_lockout,user_disabled_by_permanent_lockout,update_credential,remove_credential
+      KC_EVENT_METRICS_USER_TAGS: realm,clientId
       KC_HTTP_ENABLED: "true"
       KC_PROXY_HEADERS: xforwarded
       KC_HOSTNAME: ${KEYCLOAK_HOSTNAME:-keycloak.local}
@@ -282,6 +285,7 @@ services:
       CONTROL_CENTER_OIDC_TOKEN_ENDPOINT: ${CONTROL_CENTER_OIDC_TOKEN_ENDPOINT:-http://keycloak:8080/realms/platform/protocol/openid-connect/token}
       CONTROL_CENTER_OIDC_JWKS_URI: ${CONTROL_CENTER_OIDC_JWKS_URI:-http://keycloak:8080/realms/platform/protocol/openid-connect/certs}
       CONTROL_CENTER_OIDC_REDIRECT_URI: ${CONTROL_CENTER_OIDC_REDIRECT_URI:-https://${CONTROL_CENTER_HOST:-${ADMIN_HOST:-portal.${DOMAIN:-localhost.com}}}/auth/callback}
+      CONTROL_CENTER_PUBLIC_ORIGIN: ${CONTROL_CENTER_PUBLIC_ORIGIN:-https://${CONTROL_CENTER_HOST:-${ADMIN_HOST:-portal.${DOMAIN:-localhost.com}}}}
       CONTROL_CENTER_OIDC_CLIENT_ID: ${CONTROL_CENTER_OIDC_CLIENT_ID:-platform-control-center}
       CONTROL_CENTER_OIDC_REQUIRED_ACR: ${CONTROL_CENTER_OIDC_REQUIRED_ACR:-urn:platform:loa:passkey}
       CONTROL_CENTER_OIDC_REQUIRED_AMR: ${CONTROL_CENTER_OIDC_REQUIRED_AMR:-webauthn}
@@ -290,6 +294,11 @@ services:
       CONTROL_CENTER_OIDC_VIEWER_ROLE: ${CONTROL_CENTER_OIDC_VIEWER_ROLE:-viewer}
       CONTROL_CENTER_SESSION_MAX_AGE_SECONDS: ${CONTROL_CENTER_SESSION_MAX_AGE_SECONDS:-28800}
       CONTROL_CENTER_SESSION_IDLE_SECONDS: ${CONTROL_CENTER_SESSION_IDLE_SECONDS:-1800}
+      CONTROL_CENTER_SESSION_POLICY_VERSION: ${CONTROL_CENTER_SESSION_POLICY_VERSION:-1}
+      CONTROL_CENTER_FRESH_AUTH_SECONDS: ${CONTROL_CENTER_FRESH_AUTH_SECONDS:-300}
+      CONTROL_CENTER_LOGIN_MAX_ATTEMPTS: ${CONTROL_CENTER_LOGIN_MAX_ATTEMPTS:-20}
+      CONTROL_CENTER_LOGIN_WINDOW_SECONDS: ${CONTROL_CENTER_LOGIN_WINDOW_SECONDS:-60}
+      CONTROL_CENTER_LOGIN_LOCK_SECONDS: ${CONTROL_CENTER_LOGIN_LOCK_SECONDS:-60}
       CONTROL_CENTER_DISCOVER_HOSTED_PROJECTS: ${CONTROL_CENTER_DISCOVER_HOSTED_PROJECTS:-false}
       CONTROL_CENTER_SESSION_KEYS_FILE: /run/secrets/projects_gateway_signing_keys
       CONTROL_CENTER_PHPPGADMIN_INTERNAL_URL: ${CONTROL_CENTER_PHPPGADMIN_INTERNAL_URL:-http://phppgadmin:80}
@@ -1035,6 +1044,27 @@ configs:
               - enterprise-compress@file
             service: enterprise-portal
 
+          enterprise-identity-http:
+            rule: Host(`${AUTH_HOST:-auth.${DOMAIN:-localhost.com}}`)
+            entryPoints:
+              - web
+            middlewares:
+              - enterprise-redirect-https@file
+            priority: 200
+            service: enterprise-identity
+
+          enterprise-identity:
+            rule: Host(`${AUTH_HOST:-auth.${DOMAIN:-localhost.com}}`)
+            entryPoints:
+              - websecure
+            priority: 200
+            tls: {}
+            middlewares:
+              - keycloak-security-headers@file
+              - enterprise-rate-limit@file
+              - enterprise-compress@file
+            service: enterprise-identity
+
         services:
           enterprise-docs:
             loadBalancer:
@@ -1044,6 +1074,10 @@ configs:
             loadBalancer:
               servers:
                 - url: http://control-center:8080
+          enterprise-identity:
+            loadBalancer:
+              servers:
+                - url: http://keycloak:8080
 
 secrets:
   control_center_database_url:

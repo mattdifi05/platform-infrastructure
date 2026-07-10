@@ -308,7 +308,7 @@
       },
       "targets": [
         {
-          "expr": "{job=\"docker\",service=\"enterprise-backend\"} |= \"auth\" |= \"failed\"",
+          "expr": "{job=\"docker\"} |= \"org.keycloak.events\" |~ \"LOGIN_ERROR|USER_DISABLED\"",
           "refId": "A"
         }
       ],

@@ -3,21 +3,50 @@
   "enabled": true,
   "displayName": "Platform",
   "registrationAllowed": false,
-  "resetPasswordAllowed": true,
-  "rememberMe": true,
+  "resetPasswordAllowed": false,
+  "rememberMe": false,
   "verifyEmail": true,
   "loginWithEmailAllowed": true,
   "duplicateEmailsAllowed": false,
+  "bruteForceProtected": true,
+  "permanentLockout": false,
+  "maxFailureWaitSeconds": 900,
+  "minimumQuickLoginWaitSeconds": 60,
+  "waitIncrementSeconds": 60,
+  "quickLoginCheckMilliSeconds": 1000,
+  "maxDeltaTimeSeconds": 43200,
+  "failureFactor": 5,
+  "eventsEnabled": true,
+  "eventsExpiration": 604800,
+  "eventsListeners": ["jboss-logging"],
   "webAuthnPolicyRpEntityName": "Platform",
-  "webAuthnPolicyUserVerificationRequirement": "preferred",
+  "webAuthnPolicyUserVerificationRequirement": "required",
   "webAuthnPolicyRequireResidentKey": "not specified",
   "webAuthnPolicyAuthenticatorAttachment": "not specified",
   "webAuthnPolicyAvoidSameAuthenticatorRegister": true,
   "webAuthnPolicyPasswordlessRpEntityName": "Platform",
   "webAuthnPolicyPasswordlessUserVerificationRequirement": "required",
-  "webAuthnPolicyPasswordlessRequireResidentKey": "not specified",
+  "webAuthnPolicyPasswordlessRequireResidentKey": "Yes",
   "webAuthnPolicyPasswordlessAuthenticatorAttachment": "not specified",
   "webAuthnPolicyPasswordlessAvoidSameAuthenticatorRegister": true,
+  "browserFlow": "platform-passkey-browser",
+  "authenticationFlows": [
+    {
+      "alias": "platform-passkey-browser",
+      "description": "Platform administrator passkey-only browser flow.",
+      "providerId": "basic-flow",
+      "topLevel": true,
+      "builtIn": false,
+      "authenticationExecutions": [
+        {
+          "authenticator": "webauthn-authenticator-passwordless",
+          "requirement": "REQUIRED",
+          "priority": 10,
+          "userSetupAllowed": false
+        }
+      ]
+    }
+  ],
   "clients": [
     {
       "clientId": "platform-web",
@@ -34,6 +63,38 @@
       "webOrigins": [
         "https://auth.localhost.com",
         "https://portal.localhost.com"
+      ]
+    },
+    {
+      "clientId": "platform-control-center",
+      "name": "Platform Control Center",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "implicitFlowEnabled": false,
+      "serviceAccountsEnabled": false,
+      "redirectUris": [
+        "https://portal.localhost.com/auth/callback"
+      ],
+      "webOrigins": [
+        "https://portal.localhost.com"
+      ],
+      "attributes": {
+        "pkce.code.challenge.method": "S256"
+      },
+      "protocolMappers": [
+        {
+          "name": "amr",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-amr-mapper",
+          "consentRequired": false,
+          "config": {
+            "id.token.claim": "true",
+            "access.token.claim": "true"
+          }
+        }
       ]
     }
   ],

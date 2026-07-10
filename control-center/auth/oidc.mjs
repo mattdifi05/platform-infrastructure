@@ -5,6 +5,7 @@ import pg from "pg";
 
 const { Pool } = pg;
 const SESSION_COOKIE = "__Host-platform_cc_session";
+const CSRF_COOKIE = "__Host-platform_cc_csrf";
 const DEFAULT_SESSION_MAX_AGE_SECONDS = 8 * 60 * 60;
 const DEFAULT_SESSION_IDLE_SECONDS = 30 * 60;
 const DEFAULT_TRANSACTION_TTL_SECONDS = 5 * 60;
@@ -82,6 +83,12 @@ export function readAuthConfig(env = process.env) {
     sessionMaxAgeSeconds: boundedInteger(env.CONTROL_CENTER_SESSION_MAX_AGE_SECONDS, DEFAULT_SESSION_MAX_AGE_SECONDS, 300, 86400),
     sessionIdleSeconds: boundedInteger(env.CONTROL_CENTER_SESSION_IDLE_SECONDS, DEFAULT_SESSION_IDLE_SECONDS, 60, 43200),
     transactionTtlSeconds: boundedInteger(env.CONTROL_CENTER_OIDC_TRANSACTION_TTL_SECONDS, DEFAULT_TRANSACTION_TTL_SECONDS, 60, 900),
+    freshAuthSeconds: boundedInteger(env.CONTROL_CENTER_FRESH_AUTH_SECONDS, 300, 60, 900),
+    loginMaxAttempts: boundedInteger(env.CONTROL_CENTER_LOGIN_MAX_ATTEMPTS, 20, 2, 100),
+    loginWindowSeconds: boundedInteger(env.CONTROL_CENTER_LOGIN_WINDOW_SECONDS, 60, 10, 600),
+    loginLockSeconds: boundedInteger(env.CONTROL_CENTER_LOGIN_LOCK_SECONDS, 60, 10, 3600),
+    sessionPolicyVersion: requiredText(env.CONTROL_CENTER_SESSION_POLICY_VERSION || "1", "CONTROL_CENTER_SESSION_POLICY_VERSION"),
+    publicOrigin: originOf(requiredHttpsUrl(env.CONTROL_CENTER_PUBLIC_ORIGIN || redirectUri, "CONTROL_CENTER_PUBLIC_ORIGIN")),
     store,
     databaseUrl,
   };
@@ -100,7 +107,17 @@ class OidcPasskeyAuth {
     });
   }
 
-  async beginLogin() {
+  async beginLogin(req) {
+    const throttleKeyHash = sha256(immediatePeer(req));
+    const permit = await this.store.registerLoginAttempt(
+      throttleKeyHash,
+      this.config.loginMaxAttempts,
+      this.config.loginWindowSeconds,
+      this.config.loginLockSeconds,
+    );
+    if (!permit.allowed) {
+      throw new AuthRequestError("Too many authentication attempts. Retry later.", 429);
+    }
     const state = opaqueToken();
     const nonce = opaqueToken();
     const codeVerifier = opaqueToken(64);
@@ -109,6 +126,7 @@ class OidcPasskeyAuth {
       stateHash: sha256(state),
       nonceHash: sha256(nonce),
       codeVerifier,
+      throttleKeyHash,
       expiresAt: new Date(Date.now() + this.config.transactionTtlSeconds * 1000),
     });
 
@@ -189,8 +207,11 @@ class OidcPasskeyAuth {
     const tokenExpiryMs = Number(payload.exp) * 1000;
     const expiresAt = new Date(Math.min(now + this.config.sessionMaxAgeSeconds * 1000, tokenExpiryMs));
     const rawSessionToken = opaqueToken(64);
+    const rawCsrfToken = opaqueToken(32);
     await this.store.createSession({
       tokenHash: sha256(rawSessionToken),
+      csrfHash: sha256(rawCsrfToken),
+      policyVersion: this.config.sessionPolicyVersion,
       subject: requiredClaim(payload.sub, "sub"),
       email: String(payload.email || ""),
       displayName: String(payload.name || payload.preferred_username || payload.email || payload.sub),
@@ -204,15 +225,31 @@ class OidcPasskeyAuth {
       keyId: String(protectedHeader.kid || ""),
       expiresAt,
     });
-    return { cookie: sessionCookie(rawSessionToken, expiresAt), role, subject: String(payload.sub) };
+    if (transaction.throttleKeyHash) await this.store.clearLoginThrottle(transaction.throttleKeyHash);
+    return {
+      cookies: [sessionCookie(rawSessionToken, expiresAt), csrfCookie(rawCsrfToken, expiresAt)],
+      role,
+      subject: String(payload.sub),
+    };
   }
 
   async authenticate(req) {
-    const token = parseCookie(req.headers.cookie || "")[SESSION_COOKIE] || "";
+    const cookies = parseCookie(req.headers.cookie || "");
+    const token = cookies[SESSION_COOKIE] || "";
     if (!token) return denied(401, "Admin authentication required.");
     const session = await this.store.getSession(sha256(token), this.config.sessionIdleSeconds);
-    if (!session) return denied(401, "Admin authentication required.");
-    return { ok: true, status: 200, message: "", role: session.role, identity: session };
+    if (!session || session.policyVersion !== this.config.sessionPolicyVersion) {
+      return denied(401, "Admin authentication required.");
+    }
+    const csrfToken = cookies[CSRF_COOKIE] || "";
+    const csrfCookieValid = csrfToken && safeEqualText(csrfToken, session.csrfHash, true);
+    return {
+      ok: true,
+      status: 200,
+      message: "",
+      role: session.role,
+      identity: { ...session, csrfToken: csrfCookieValid ? csrfToken : "" },
+    };
   }
 
   authorize(req, url, session) {
@@ -221,14 +258,35 @@ class OidcPasskeyAuth {
     const mutating = !["GET", "HEAD", "OPTIONS"].includes(method);
     const sensitive = isSensitivePath(url.pathname);
     if (sensitive && session.role !== "owner") return denied(403, "Platform owner authorization required.");
+    if (sensitive && Date.now() - new Date(session.identity.authTime).getTime() > this.config.freshAuthSeconds * 1000) {
+      return denied(428, "A recent passkey authentication is required.", { error: "admin_reauthentication_required", reauthUrl: "/auth/login" });
+    }
     if (mutating && !["owner", "admin"].includes(session.role)) return denied(403, "Administrative authorization required.");
+    return session;
+  }
+
+  async validateMutation(req, url, session) {
+    const method = String(req.method || "GET").toUpperCase();
+    if (["GET", "HEAD", "OPTIONS"].includes(method)) return session;
+    if (String(req.headers.origin || "") !== this.config.publicOrigin) {
+      return denied(403, "Exact request origin is required.", { error: "csrf_origin_rejected" });
+    }
+    if (String(req.headers["sec-fetch-site"] || "").toLowerCase() !== "same-origin") {
+      return denied(403, "Same-origin Fetch Metadata is required.", { error: "csrf_fetch_site_rejected" });
+    }
+    const payload = await readRequestPayload(req);
+    const provided = String(req.headers["x-csrf-token"] || payload._csrf || "");
+    const expected = String(session.identity?.csrfToken || "");
+    if (!provided || !expected || !safeEqualText(provided, expected)) {
+      return denied(403, "CSRF validation failed.", { error: "csrf_token_rejected" });
+    }
     return session;
   }
 
   async logout(req) {
     const token = parseCookie(req.headers.cookie || "")[SESSION_COOKIE] || "";
     if (token) await this.store.revokeSession(sha256(token));
-    return clearSessionCookie();
+    return clearSessionCookies();
   }
 
   async close() {
@@ -246,6 +304,7 @@ class TestDisabledAuth {
     return { ok: true, status: 200, message: "", role: "owner", identity: { subject: "test-owner", role: "owner" } };
   }
   authorize(_req, _url, session) { return session; }
+  async validateMutation(_req, _url, session) { return session; }
   async close() {}
 }
 
@@ -254,32 +313,37 @@ export class PostgresAuthStore {
     this.pool = new Pool({ connectionString, max: 5, idleTimeoutMillis: 30_000, connectionTimeoutMillis: 5_000 });
   }
   async ready() {
-    const result = await this.pool.query("select to_regclass('control_auth.oidc_transactions') as transactions, to_regclass('control_auth.sessions') as sessions");
-    if (!result.rows[0]?.transactions || !result.rows[0]?.sessions) {
+    const result = await this.pool.query(
+      `select to_regclass('control_auth.oidc_transactions') as transactions,
+              to_regclass('control_auth.sessions') as sessions,
+              to_regclass('control_auth.login_throttle') as throttle,
+              exists(select 1 from information_schema.columns where table_schema='control_auth' and table_name='sessions' and column_name='csrf_hash') as csrf_ready`,
+    );
+    if (!result.rows[0]?.transactions || !result.rows[0]?.sessions || !result.rows[0]?.throttle || !result.rows[0]?.csrf_ready) {
       throw new AuthConfigurationError("Control Center auth migrations are not applied.");
     }
   }
   async createTransaction(item) {
     await this.pool.query("delete from control_auth.oidc_transactions where expires_at <= now()");
     await this.pool.query(
-      "insert into control_auth.oidc_transactions (state_hash, nonce_hash, code_verifier, expires_at) values ($1,$2,$3,$4)",
-      [item.stateHash, item.nonceHash, item.codeVerifier, item.expiresAt],
+      "insert into control_auth.oidc_transactions (state_hash, nonce_hash, code_verifier, throttle_key_hash, expires_at) values ($1,$2,$3,$4,$5)",
+      [item.stateHash, item.nonceHash, item.codeVerifier, item.throttleKeyHash || null, item.expiresAt],
     );
   }
   async consumeTransaction(stateHash) {
     const result = await this.pool.query(
-      "delete from control_auth.oidc_transactions where state_hash=$1 returning nonce_hash, code_verifier, expires_at",
+      "delete from control_auth.oidc_transactions where state_hash=$1 returning nonce_hash, code_verifier, throttle_key_hash, expires_at",
       [stateHash],
     );
     const row = result.rows[0];
-    return row ? { nonceHash: row.nonce_hash, codeVerifier: row.code_verifier, expiresAt: row.expires_at } : null;
+    return row ? { nonceHash: row.nonce_hash, codeVerifier: row.code_verifier, throttleKeyHash: row.throttle_key_hash, expiresAt: row.expires_at } : null;
   }
   async createSession(item) {
     await this.pool.query(
       `insert into control_auth.sessions
-       (token_hash, subject, email, display_name, role, roles, acr, amr, auth_time, issuer, oidc_session_id, signing_key_id, expires_at)
-       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
-      [item.tokenHash, item.subject, item.email, item.displayName, item.role, item.roles, item.acr, item.amr, item.authTime, item.issuer, item.sessionId, item.keyId, item.expiresAt],
+       (token_hash, csrf_hash, policy_version, subject, email, display_name, role, roles, acr, amr, auth_time, issuer, oidc_session_id, signing_key_id, expires_at)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
+      [item.tokenHash, item.csrfHash, item.policyVersion, item.subject, item.email, item.displayName, item.role, item.roles, item.acr, item.amr, item.authTime, item.issuer, item.sessionId, item.keyId, item.expiresAt],
     );
   }
   async getSession(tokenHash, idleSeconds) {
@@ -288,13 +352,46 @@ export class PostgresAuthStore {
        set last_seen_at=now()
        where token_hash=$1 and revoked_at is null and expires_at > now()
          and last_seen_at > now() - ($2::text || ' seconds')::interval
-       returning subject,email,display_name,role,roles,acr,amr,auth_time,issuer,oidc_session_id,created_at,last_seen_at,expires_at`,
+       returning subject,email,display_name,role,roles,acr,amr,auth_time,issuer,oidc_session_id,csrf_hash,policy_version,created_at,last_seen_at,expires_at`,
       [tokenHash, idleSeconds],
     );
     return normalizeSessionRow(result.rows[0]);
   }
   async revokeSession(tokenHash) {
     await this.pool.query("update control_auth.sessions set revoked_at=now() where token_hash=$1 and revoked_at is null", [tokenHash]);
+  }
+  async registerLoginAttempt(keyHash, maxAttempts, windowSeconds, lockSeconds) {
+    const client = await this.pool.connect();
+    try {
+      await client.query("begin");
+      const current = (await client.query("select * from control_auth.login_throttle where key_hash=$1 for update", [keyHash])).rows[0];
+      const now = Date.now();
+      const lockedUntil = current?.locked_until ? new Date(current.locked_until).getTime() : 0;
+      if (lockedUntil > now) {
+        await client.query("commit");
+        return { allowed: false, retryAfterSeconds: Math.ceil((lockedUntil - now) / 1000) };
+      }
+      const windowStarted = current?.window_started_at ? new Date(current.window_started_at).getTime() : 0;
+      const reset = !windowStarted || windowStarted <= now - windowSeconds * 1000;
+      const attempts = reset ? 1 : Number(current.attempts || 0) + 1;
+      const nextLockedUntil = attempts > maxAttempts ? new Date(now + lockSeconds * 1000) : null;
+      await client.query(
+        `insert into control_auth.login_throttle (key_hash,window_started_at,attempts,locked_until,updated_at)
+         values ($1,$2,$3,$4,now())
+         on conflict (key_hash) do update set window_started_at=excluded.window_started_at,attempts=excluded.attempts,locked_until=excluded.locked_until,updated_at=now()`,
+        [keyHash, new Date(reset ? now : windowStarted), attempts, nextLockedUntil],
+      );
+      await client.query("commit");
+      return { allowed: attempts <= maxAttempts, retryAfterSeconds: nextLockedUntil ? lockSeconds : 0 };
+    } catch (error) {
+      await client.query("rollback");
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+  async clearLoginThrottle(keyHash) {
+    await this.pool.query("delete from control_auth.login_throttle where key_hash=$1", [keyHash]);
   }
   async close() { await this.pool.end(); }
 }
@@ -303,6 +400,7 @@ export class MemoryAuthStore {
   constructor() {
     this.transactions = new Map();
     this.sessions = new Map();
+    this.loginThrottle = new Map();
   }
   async ready() {}
   async createTransaction(item) {
@@ -327,6 +425,19 @@ export class MemoryAuthStore {
     const item = this.sessions.get(tokenHash);
     if (item) item.revokedAt = new Date();
   }
+  async registerLoginAttempt(keyHash, maxAttempts, windowSeconds, lockSeconds) {
+    const now = Date.now();
+    const current = this.loginThrottle.get(keyHash);
+    if (current?.lockedUntil > now) {
+      return { allowed: false, retryAfterSeconds: Math.ceil((current.lockedUntil - now) / 1000) };
+    }
+    const reset = !current || current.windowStarted <= now - windowSeconds * 1000;
+    const attempts = reset ? 1 : current.attempts + 1;
+    const lockedUntil = attempts > maxAttempts ? now + lockSeconds * 1000 : 0;
+    this.loginThrottle.set(keyHash, { windowStarted: reset ? now : current.windowStarted, attempts, lockedUntil });
+    return { allowed: attempts <= maxAttempts, retryAfterSeconds: lockedUntil ? lockSeconds : 0 };
+  }
+  async clearLoginThrottle(keyHash) { this.loginThrottle.delete(keyHash); }
   async close() {}
 }
 
@@ -386,6 +497,8 @@ function normalizeSessionRow(row) {
     authTime: row.auth_time,
     issuer: row.issuer,
     sessionId: row.oidc_session_id,
+    csrfHash: row.csrf_hash,
+    policyVersion: row.policy_version,
     createdAt: row.created_at,
     lastSeenAt: row.last_seen_at,
     expiresAt: row.expires_at,
@@ -397,8 +510,16 @@ function sessionCookie(token, expiresAt) {
   return `${SESSION_COOKIE}=${token}; Path=/; Max-Age=${maxAge}; HttpOnly; Secure; SameSite=Lax`;
 }
 
-function clearSessionCookie() {
-  return `${SESSION_COOKIE}=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax`;
+function csrfCookie(token, expiresAt) {
+  const maxAge = Math.max(0, Math.floor((expiresAt.getTime() - Date.now()) / 1000));
+  return `${CSRF_COOKIE}=${token}; Path=/; Max-Age=${maxAge}; Secure; SameSite=Strict`;
+}
+
+function clearSessionCookies() {
+  return [
+    `${SESSION_COOKIE}=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax`,
+    `${CSRF_COOKIE}=; Path=/; Max-Age=0; Secure; SameSite=Strict`,
+  ];
 }
 
 function parseCookie(header) {
@@ -418,8 +539,37 @@ function sha256(value) { return createHash("sha256").update(String(value)).diges
 function base64urlSha256(value) { return createHash("sha256").update(String(value)).digest("base64url"); }
 function csv(value) { return String(value || "").split(",").map((item) => item.trim()).filter(Boolean); }
 function trimTrailingSlash(value) { return String(value).replace(/\/+$/, ""); }
-function denied(status, message) { return { ok: false, status, message, role: "", identity: null }; }
+function denied(status, message, extra = {}) { return { ok: false, status, message, role: "", identity: null, ...extra }; }
 function isLoopback(host) { return ["127.0.0.1", "::1", "localhost"].includes(String(host).toLowerCase()); }
+function originOf(value) { return new URL(value).origin; }
+
+function immediatePeer(req) {
+  return String(req?.socket?.remoteAddress || "unknown-peer").trim().toLowerCase();
+}
+
+async function readRequestPayload(req) {
+  if (req.controlCenterPayload && typeof req.controlCenterPayload === "object") return req.controlCenterPayload;
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of req) {
+    size += chunk.length;
+    if (size > 64 * 1024) throw new AuthRequestError("Request body is too large.", 413);
+    chunks.push(chunk);
+  }
+  const raw = Buffer.concat(chunks).toString("utf8");
+  const type = String(req.headers["content-type"] || "").toLowerCase();
+  if (type.includes("application/json")) {
+    try {
+      const parsed = JSON.parse(raw || "{}");
+      req.controlCenterPayload = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+    } catch {
+      throw new AuthRequestError("Invalid JSON payload.", 400);
+    }
+  } else {
+    req.controlCenterPayload = Object.fromEntries(new URLSearchParams(raw));
+  }
+  return req.controlCenterPayload;
+}
 
 function requiredText(value, name) {
   const text = String(value || "").trim();

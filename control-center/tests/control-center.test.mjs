@@ -2993,11 +2993,12 @@ test("Admin Control Center OIDC passkey guard", async (t) => {
       assert.match(form.get("code_verifier") || "", /^[A-Za-z0-9_-]{43,128}$/);
       const role = code === "viewer" ? "viewer" : "owner";
       const acr = code === "password-auth" ? "urn:platform:loa:password" : requiredAcr;
+      const authTime = Math.floor(Date.now() / 1000) - (code === "stale-owner" ? 360 : 0);
       const idToken = await new SignJWT({
         nonce: expectedNonce,
         acr,
         amr: acr === requiredAcr ? ["webauthn"] : ["pwd"],
-        auth_time: Math.floor(Date.now() / 1000),
+        auth_time: authTime,
         email: `${role}@example.test`,
         name: `Test ${role}`,
         realm_access: { roles: [role] },
@@ -3036,6 +3037,7 @@ test("Admin Control Center OIDC passkey guard", async (t) => {
       CONTROL_CENTER_OIDC_CLIENT_ID: clientId,
       CONTROL_CENTER_OIDC_REQUIRED_ACR: requiredAcr,
       CONTROL_CENTER_OIDC_REQUIRED_AMR: "webauthn",
+      CONTROL_CENTER_LOGIN_MAX_ATTEMPTS: "2",
       CONTROL_CENTER_DATABASE_LIVE_APPLY: "false",
       CONTROL_CENTER_DISCOVER_HOSTED_PROJECTS: "true",
       CONTROL_CENTER_DOCS_ROOT: infraRoot,
@@ -3104,7 +3106,7 @@ test("Admin Control Center OIDC passkey guard", async (t) => {
   const viewerState = await beginLogin();
   const viewerLogin = await fetch(`${baseUrl}/auth/callback?code=viewer&state=${encodeURIComponent(viewerState)}`, { redirect: "manual" });
   assert.equal(viewerLogin.status, 303);
-  const viewerCookie = (viewerLogin.headers.get("set-cookie") || "").split(";")[0];
+  const viewerCookie = cookieHeader(responseSetCookies(viewerLogin));
   const viewerMutation = await fetch(`${baseUrl}/actions/toggle-project`, {
     method: "POST",
     headers: { cookie: viewerCookie, "content-type": "application/x-www-form-urlencoded", accept: "application/json" },
@@ -3115,12 +3117,15 @@ test("Admin Control Center OIDC passkey guard", async (t) => {
   const ownerState = await beginLogin();
   const ownerLogin = await fetch(`${baseUrl}/auth/callback?code=owner&state=${encodeURIComponent(ownerState)}`, { redirect: "manual" });
   assert.equal(ownerLogin.status, 303);
-  const ownerSetCookie = ownerLogin.headers.get("set-cookie") || "";
-  assert.match(ownerSetCookie, /__Host-platform_cc_session=/);
-  assert.match(ownerSetCookie, /HttpOnly/);
-  assert.match(ownerSetCookie, /Secure/);
-  assert.match(ownerSetCookie, /SameSite=Lax/);
-  const ownerCookie = ownerSetCookie.split(";")[0];
+  const ownerSetCookies = responseSetCookies(ownerLogin);
+  const ownerSetCookieText = ownerSetCookies.join("\n");
+  assert.match(ownerSetCookieText, /__Host-platform_cc_session=/);
+  assert.match(ownerSetCookieText, /__Host-platform_cc_csrf=/);
+  assert.match(ownerSetCookieText, /HttpOnly/);
+  assert.match(ownerSetCookieText, /Secure/);
+  assert.match(ownerSetCookieText, /SameSite=Lax/);
+  const ownerCookie = cookieHeader(ownerSetCookies);
+  const ownerCsrf = cookieValue(ownerSetCookies, "__Host-platform_cc_csrf");
 
   const replayCallback = await fetch(`${baseUrl}/auth/callback?code=owner&state=${encodeURIComponent(ownerState)}`, { redirect: "manual" });
   assert.equal(replayCallback.status, 401);
@@ -3129,13 +3134,70 @@ test("Admin Control Center OIDC passkey guard", async (t) => {
   const authedOverview = await fetch(`${baseUrl}/control/overview`, { headers: { cookie: ownerCookie, accept: "application/json" } });
   assert.equal(authedOverview.status, 200);
   assert.equal((await authedOverview.json()).title, "Admin Control Center");
+
+  const missingOrigin = await fetch(`${baseUrl}/actions/toggle-project`, {
+    method: "POST",
+    headers: { cookie: ownerCookie, "content-type": "application/x-www-form-urlencoded", "x-csrf-token": ownerCsrf, accept: "application/json" },
+    body: new URLSearchParams({ slug: "node-demo", enabled: "0", _csrf: ownerCsrf }),
+  });
+  assert.equal(missingOrigin.status, 403);
+  assert.equal((await missingOrigin.json()).error, "csrf_origin_rejected");
+
+  const siblingOrigin = await fetch(`${baseUrl}/actions/toggle-project`, {
+    method: "POST",
+    headers: { cookie: ownerCookie, origin: "https://sibling.example.test", "sec-fetch-site": "same-site", "content-type": "application/x-www-form-urlencoded", "x-csrf-token": ownerCsrf, accept: "application/json" },
+    body: new URLSearchParams({ slug: "node-demo", enabled: "0", _csrf: ownerCsrf }),
+  });
+  assert.equal(siblingOrigin.status, 403);
+  assert.equal((await siblingOrigin.json()).error, "csrf_origin_rejected");
+
+  const validMutation = await fetch(`${baseUrl}/actions/toggle-project`, {
+    method: "POST",
+    headers: { cookie: ownerCookie, origin: "https://portal.example.test", "sec-fetch-site": "same-origin", "content-type": "application/x-www-form-urlencoded", "x-csrf-token": ownerCsrf },
+    body: new URLSearchParams({ slug: "node-demo", enabled: "0", _csrf: ownerCsrf }),
+    redirect: "manual",
+  });
+  assert.equal(validMutation.status, 303);
+
+  const oversized = await fetch(`${baseUrl}/actions/toggle-project`, {
+    method: "POST",
+    headers: { cookie: ownerCookie, origin: "https://portal.example.test", "sec-fetch-site": "same-origin", "content-type": "application/x-www-form-urlencoded", "x-csrf-token": ownerCsrf, accept: "application/json" },
+    body: `slug=node-demo&_csrf=${encodeURIComponent(ownerCsrf)}&padding=${"x".repeat(70 * 1024)}`,
+  });
+  assert.equal(oversized.status, 413);
+  assert.equal((await oversized.json()).error, "payload_too_large");
+
+  const staleState = await beginLogin();
+  const staleLogin = await fetch(`${baseUrl}/auth/callback?code=stale-owner&state=${encodeURIComponent(staleState)}`, { redirect: "manual" });
+  assert.equal(staleLogin.status, 303);
+  const staleCookies = responseSetCookies(staleLogin);
+  const staleCookie = cookieHeader(staleCookies);
+  const staleCsrf = cookieValue(staleCookies, "__Host-platform_cc_csrf");
+  const staleSensitive = await fetch(`${baseUrl}/actions/vault-command`, {
+    method: "POST",
+    headers: { cookie: staleCookie, origin: "https://portal.example.test", "sec-fetch-site": "same-origin", "content-type": "application/x-www-form-urlencoded", "x-csrf-token": staleCsrf, accept: "application/json" },
+    body: new URLSearchParams({ action: "reveal", _csrf: staleCsrf }),
+  });
+  assert.equal(staleSensitive.status, 428);
+  assert.equal((await staleSensitive.json()).error, "admin_reauthentication_required");
+
   const ownerAudit = await getJson(`${baseUrl}/control/audit`, { headers: { cookie: ownerCookie } });
   const loginAudit = ownerAudit.audit.find((event) => event.action === "admin.oidc.login.success" && event.target === "test-owner");
   assert.equal(loginAudit.actor, "test-owner");
 
-  const logout = await fetch(`${baseUrl}/logout`, { method: "POST", headers: { cookie: ownerCookie }, redirect: "manual" });
+  await beginLogin();
+  await beginLogin();
+  const throttled = await fetch(`${baseUrl}/auth/login`, { redirect: "manual" });
+  assert.equal(throttled.status, 429);
+
+  const logout = await fetch(`${baseUrl}/logout`, {
+    method: "POST",
+    headers: { cookie: ownerCookie, origin: "https://portal.example.test", "sec-fetch-site": "same-origin", "content-type": "application/x-www-form-urlencoded", "x-csrf-token": ownerCsrf },
+    body: new URLSearchParams({ _csrf: ownerCsrf }),
+    redirect: "manual",
+  });
   assert.equal(logout.status, 303);
-  assert.match(logout.headers.get("set-cookie") || "", /Max-Age=0/);
+  assert.equal(responseSetCookies(logout).filter((cookie) => /Max-Age=0/.test(cookie)).length, 2);
   const revokedReplay = await fetch(`${baseUrl}/control/overview`, { headers: { cookie: ownerCookie, accept: "application/json" } });
   assert.equal(revokedReplay.status, 401);
 
@@ -3285,6 +3347,22 @@ async function stopChild(child) {
       new Promise((resolve) => setTimeout(resolve, 1000)),
     ]);
   }
+}
+
+function responseSetCookies(response) {
+  if (typeof response.headers.getSetCookie === "function") return response.headers.getSetCookie();
+  const combined = response.headers.get("set-cookie") || "";
+  return combined ? combined.split(/,\s*(?=__Host-)/) : [];
+}
+
+function cookieHeader(setCookies) {
+  return setCookies.map((cookie) => cookie.split(";", 1)[0]).join("; ");
+}
+
+function cookieValue(setCookies, name) {
+  const prefix = `${name}=`;
+  const match = setCookies.map((cookie) => cookie.split(";", 1)[0]).find((cookie) => cookie.startsWith(prefix));
+  return match ? match.slice(prefix.length) : "";
 }
 
 async function getJson(url, init = {}) {

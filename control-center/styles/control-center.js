@@ -77,7 +77,25 @@
     if (submitter && submitter.name && !data.has(submitter.name)) {
       data.append(submitter.name, submitter.value || "");
     }
+    var csrf = csrfToken();
+    if (csrf) data.set("_csrf", csrf);
     return new URLSearchParams(data);
+  }
+
+  function csrfToken() {
+    var prefix = "__Host-platform_cc_csrf=";
+    var parts = String(document.cookie || "").split(";");
+    for (var index = 0; index < parts.length; index += 1) {
+      var part = parts[index].trim();
+      if (part.indexOf(prefix) === 0) return decodeURIComponent(part.slice(prefix.length));
+    }
+    return "";
+  }
+
+  function addMutationHeaders(headers, method) {
+    if (String(method || "GET").toUpperCase() === "GET") return;
+    var csrf = csrfToken();
+    if (csrf) headers.set("X-CSRF-Token", csrf);
   }
 
   async function requestHtml(url, options) {
@@ -94,6 +112,7 @@
     var headers = new Headers(options && options.headers ? options.headers : {});
     headers.set("Accept", "text/html,*/*;q=0.8");
     headers.set("X-Requested-With", "platform-control-center");
+    addMutationHeaders(headers, method);
 
     var response = await fetch(url.href, {
       body: options ? options.body : undefined,
@@ -513,6 +532,7 @@
       var headers = new Headers();
       headers.set("Accept", "application/json");
       headers.set("X-Requested-With", "platform-control-center");
+      addMutationHeaders(headers, "POST");
       var fetchRun = fetch(action.href, {
         body: payloadFromForm(form, submitter),
         credentials: "same-origin",
@@ -952,6 +972,7 @@
       headers.set("Accept", "application/json");
       headers.set("Content-Type", "application/x-www-form-urlencoded");
       headers.set("X-Requested-With", "platform-control-center");
+      addMutationHeaders(headers, "POST");
       var response = await fetch("/control/vault/secrets/" + encodeURIComponent(id) + "/reveal", {
         body: new URLSearchParams({ confirm: confirm }),
         credentials: "same-origin",

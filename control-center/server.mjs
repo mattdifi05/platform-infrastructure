@@ -141,7 +141,7 @@ const server = createServer(async (req, res) => {
     }
 
     if (url.pathname === "/auth/login" && req.method === "GET") {
-      const location = await controlAuth.beginLogin();
+      const location = await controlAuth.beginLogin(req);
       redirect(res, location);
       return;
     }
@@ -159,7 +159,7 @@ const server = createServer(async (req, res) => {
           dryRun: false,
           summary: `Passkey-backed OIDC session created with ${login.role} authorization.`,
         });
-        res.setHeader("set-cookie", login.cookie);
+        res.setHeader("set-cookie", login.cookies);
         redirect(res, "/");
       } catch (error) {
         appendAudit({
@@ -181,6 +181,11 @@ const server = createServer(async (req, res) => {
       const session = await controlAuth.authenticate(req);
       if (!session.ok) {
         json(res, { error: "admin_auth_required", message: session.message }, session.status);
+        return;
+      }
+      const csrf = await controlAuth.validateMutation(req, url, session);
+      if (!csrf.ok) {
+        json(res, { error: csrf.error || "csrf_rejected", message: csrf.message }, csrf.status);
         return;
       }
       appendAudit({
@@ -210,7 +215,13 @@ const server = createServer(async (req, res) => {
 
     const authorization = controlAuth.authorize(req, url, session);
     if (!authorization.ok) {
-      json(res, { error: "admin_authorization_required", message: authorization.message }, authorization.status);
+      json(res, { error: authorization.error || "admin_authorization_required", message: authorization.message, ...(authorization.reauthUrl ? { reauthUrl: authorization.reauthUrl } : {}) }, authorization.status);
+      return;
+    }
+
+    const csrf = await controlAuth.validateMutation(req, url, authorization);
+    if (!csrf.ok) {
+      json(res, { error: csrf.error || "csrf_rejected", message: csrf.message }, csrf.status);
       return;
     }
 
@@ -332,7 +343,8 @@ const server = createServer(async (req, res) => {
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    json(res, { error: "control_center_error", message: sanitizeMessage(message) }, 500);
+    const status = error instanceof AuthRequestError ? error.status : 500;
+    json(res, { error: status === 413 ? "payload_too_large" : "control_center_error", message: sanitizeMessage(message) }, status);
   }
 });
 
@@ -11419,20 +11431,28 @@ function readBackupRecords() {
 }
 
 async function readPayload(req) {
+  if (req.controlCenterPayload && typeof req.controlCenterPayload === "object") return req.controlCenterPayload;
   const chunks = [];
-  for await (const chunk of req) chunks.push(chunk);
+  let size = 0;
+  for await (const chunk of req) {
+    size += chunk.length;
+    if (size > 64 * 1024) throw new AuthRequestError("Request body is too large.", 413);
+    chunks.push(chunk);
+  }
   const raw = Buffer.concat(chunks).toString("utf8");
   const type = String(req.headers["content-type"] || "").toLowerCase();
   if (type.includes("application/json")) {
     try {
       const parsed = JSON.parse(raw || "{}");
-      return parsed && typeof parsed === "object" ? parsed : {};
+      req.controlCenterPayload = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+      return req.controlCenterPayload;
     } catch {
       throw new ValidationError("Invalid JSON payload.");
     }
   }
   const params = new URLSearchParams(raw);
-  return Object.fromEntries(params.entries());
+  req.controlCenterPayload = Object.fromEntries(params.entries());
+  return req.controlCenterPayload;
 }
 
 function sessionKeys() {

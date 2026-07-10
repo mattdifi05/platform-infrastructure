@@ -11,6 +11,7 @@ try {
     stateHash: "a".repeat(64),
     nonceHash: "b".repeat(64),
     codeVerifier: "c".repeat(64),
+    throttleKeyHash: "e".repeat(64),
     expiresAt: new Date(Date.now() + 60_000),
   };
   await store.createTransaction(transaction);
@@ -19,6 +20,8 @@ try {
 
   const session = {
     tokenHash: "d".repeat(64),
+    csrfHash: "f".repeat(64),
+    policyVersion: "test-policy-v1",
     subject: "test-owner",
     email: "owner@example.test",
     displayName: "Test Owner",
@@ -36,6 +39,11 @@ try {
   assert.equal((await store.getSession(session.tokenHash, 60)).role, "owner");
   await store.revokeSession(session.tokenHash);
   assert.equal(await store.getSession(session.tokenHash, 60), null);
+  assert.equal((await store.registerLoginAttempt("1".repeat(64), 2, 60, 60)).allowed, true);
+  assert.equal((await store.registerLoginAttempt("1".repeat(64), 2, 60, 60)).allowed, true);
+  assert.equal((await store.registerLoginAttempt("1".repeat(64), 2, 60, 60)).allowed, false);
+  await store.clearLoginThrottle("1".repeat(64));
+  assert.equal((await store.registerLoginAttempt("1".repeat(64), 2, 60, 60)).allowed, true);
   process.stdout.write("POSTGRES_AUTH_STORE_OK\n");
 } finally {
   await store.close();

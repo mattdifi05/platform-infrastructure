@@ -12103,6 +12103,8 @@ async function staticSecurityCheckBody() {
   const controlCenterTest = fs.existsSync(controlCenterTestPath) ? readText(controlCenterTestPath) : "";
   const controlCenterAuthTestPath = path.resolve(infraRoot, "control-center", "tests", "auth-config.test.mjs");
   const controlCenterAuthTest = fs.existsSync(controlCenterAuthTestPath) ? readText(controlCenterAuthTestPath) : "";
+  const controlCenterClient = readText(path.join(infraRoot, "control-center", "styles", "control-center.js"));
+  const controlCenterSessionSecurityMigration = readText(path.join(infraRoot, "control-center", "migrations", "002_session_security.sql"));
   const projectRouterServerPath = path.resolve(infraRoot, "project-router", "server.mjs");
   const projectRouterServer = fs.existsSync(projectRouterServerPath) ? readText(projectRouterServerPath) : "";
   const projectRouterTestPath = path.resolve(infraRoot, "project-router", "tests", "project-router.test.mjs");
@@ -12117,6 +12119,8 @@ async function staticSecurityCheckBody() {
   const lokiWafAlerts = readText(path.join(infraRoot, "loki", "rules", "platform", "waf-alerts.yml"));
   const promtailConfig = readText(path.join(infraRoot, "promtail", "config.yml"));
   const grafanaOverviewDashboard = readText(path.join(infraRoot, "grafana", "dashboards", "enterprise-overview.json"));
+  const keycloakPlatformRealm = readText(path.join(infraRoot, "keycloak", "import", "platform-realm.json"));
+  const keycloakPasskeyReadiness = readText(path.join(infraRoot, "scripts", "keycloak-passkey-readiness.sh"));
   const backendDockerfile = readText(path.join(infraRoot, "docker", "backend.Dockerfile"));
   const webDockerfile = readText(path.join(infraRoot, "docker", "web.Dockerfile"));
   const workerDockerfile = readText(path.join(infraRoot, "docker", "worker.Dockerfile"));
@@ -12448,6 +12452,15 @@ async function staticSecurityCheckBody() {
   assertMatch(controlCenterServer, /await controlAuth\.authenticate\(req\)[\s\S]*admin_auth_required[\s\S]*controlAuth\.authorize/, "Control Center must authenticate and authorize requests before control-plane dispatch.");
   assertMatch(controlCenterAuth, /code_challenge_method[\s\S]*S256[\s\S]*jwtVerify[\s\S]*requiredAcr[\s\S]*requiredAmr/, "Control Center OIDC must enforce PKCE, signed tokens, passkey ACR and AMR.");
   assertMatch(controlCenterAuth, /PostgresAuthStore[\s\S]*consumeTransaction[\s\S]*revokeSession[\s\S]*__Host-platform_cc_session/, "Control Center sessions must be opaque, PostgreSQL-backed, one-time and revocable.");
+  assertMatch(controlCenterAuth, /validateMutation[\s\S]*headers\.origin[\s\S]*sec-fetch-site[\s\S]*x-csrf-token[\s\S]*csrf_token_rejected/, "Control Center mutations must require exact Origin, same-origin Fetch Metadata and a session-bound CSRF token.");
+  assertMatch(controlCenterAuth, /freshAuthSeconds[\s\S]*admin_reauthentication_required[\s\S]*registerLoginAttempt[\s\S]*loginLockSeconds/, "Control Center must require recent passkey auth for sensitive actions and use a shared login throttle.");
+  assertMatch(controlCenterServer, /size > 64 \* 1024[\s\S]*Request body is too large/, "Control Center must bound request bodies without relying on the WAF.");
+  assertMatch(controlCenterClient, /__Host-platform_cc_csrf[\s\S]*X-CSRF-Token/, "Control Center browser mutations must return the host-bound CSRF token in a request header.");
+  assertMatch(controlCenterSessionSecurityMigration, /csrf_hash[\s\S]*policy_version[\s\S]*login_throttle/, "Control Center session security schema must persist CSRF binding, policy version and shared throttle state.");
+  assertMatch(keycloakPlatformRealm, /"bruteForceProtected": true[\s\S]*"resetPasswordAllowed": false[\s\S]*"browserFlow": "platform-passkey-browser"[\s\S]*webauthn-authenticator-passwordless[\s\S]*oidc-amr-mapper/, "Keycloak realm contract must be brute-force protected and passkey-only with AMR evidence.");
+  assertMatch(keycloakPasskeyReadiness, /CONTROL_CENTER_MIN_PASSKEYS:-2[\s\S]*webauthn-passwordless[\s\S]*passkey_count[\s\S]*owner\|admin\|viewer/, "Keycloak readiness must require two passwordless credentials and an authorized role per administrator.");
+  assertMatch(compose, /KC_EVENT_METRICS_USER_ENABLED:\s+"true"[\s\S]*KC_EVENT_METRICS_USER_EVENTS:\s+login,logout/, "Keycloak user event metrics must be enabled for login and lockout alerting.");
+  assertMatch(prometheusAlerts, /KeycloakPlatformLoginFailures[\s\S]*keycloak_user_events_total[\s\S]*KeycloakPlatformAdminLocked/, "Prometheus must alert on repeated Keycloak login failures and administrator lockout.");
   assertMatch(controlCenterServer, /AsyncLocalStorage[\s\S]*requestIdentity\.run[\s\S]*requestedBy:\s+identity\?\.subject[\s\S]*actor:\s+identity\?\.subject/, "Control Center operations and audit records must use the authenticated OIDC subject rather than a shared local actor.");
   assertNoMatch(controlCenterServer, /CONTROL_CENTER_ADMIN_PASSWORD|type=["']password["']|current-password|verifyAdminPassword|handleLogin/, "Control Center must not retain a local password login path.");
   assertMatch(controlCenterAuthTest, /test-disabled auth is restricted[\s\S]*rejects all local password verifier settings[\s\S]*consumes transactions once and revokes sessions/, "Control Center auth tests must prove test-only bypass restrictions, no password fallback and replay prevention.");
