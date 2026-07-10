@@ -47,12 +47,12 @@
       },
       "targets": [
         {
-          "expr": "sum by (job) (rate(http_requests_total[5m]))",
+          "expr": "sum by (job) (rate(prometheus_http_requests_total[5m]))",
           "legendFormat": "{{job}}",
           "refId": "A"
         }
       ],
-      "title": "HTTP request rate",
+      "title": "Platform HTTP request rate",
       "type": "timeseries"
     },
     {
@@ -85,43 +85,6 @@
       ],
       "title": "Platform container logs",
       "type": "logs"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "Prometheus"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 8
-      },
-      "id": 3,
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom"
-        },
-        "tooltip": {
-          "mode": "multi"
-        }
-      },
-      "targets": [
-        {
-          "expr": "audit_outbox_rows{service=\"enterprise-worker-jobs\",status=~\"queued|failed|dead\"}",
-          "legendFormat": "{{status}}",
-          "refId": "A"
-        }
-      ],
-      "title": "Audit outbox lifecycle",
-      "type": "timeseries"
     },
     {
       "datasource": {
@@ -184,73 +147,11 @@
       },
       "targets": [
         {
-          "expr": "{job=\"docker\",service=~\"enterprise-.+\",level=~\"warn|error\"}",
+          "expr": "{job=\"docker\",level=~\"warn|error|fatal\"}",
           "refId": "A"
         }
       ],
-      "title": "Application warning and error logs",
-      "type": "logs"
-    },
-    {
-      "datasource": {
-        "type": "loki",
-        "uid": "Loki"
-      },
-      "gridPos": {
-        "h": 7,
-        "w": 12,
-        "x": 0,
-        "y": 24
-      },
-      "id": 6,
-      "options": {
-        "dedupStrategy": "none",
-        "enableLogDetails": true,
-        "prettifyLogMessage": true,
-        "showCommonLabels": true,
-        "showLabels": true,
-        "showTime": true,
-        "sortOrder": "Descending",
-        "wrapLogMessage": true
-      },
-      "targets": [
-        {
-          "expr": "{job=\"docker\",service=\"enterprise-backend\",level=~\"error|fatal\"}",
-          "refId": "A"
-        }
-      ],
-      "title": "Backend errors",
-      "type": "logs"
-    },
-    {
-      "datasource": {
-        "type": "loki",
-        "uid": "Loki"
-      },
-      "gridPos": {
-        "h": 7,
-        "w": 12,
-        "x": 12,
-        "y": 24
-      },
-      "id": 7,
-      "options": {
-        "dedupStrategy": "none",
-        "enableLogDetails": true,
-        "prettifyLogMessage": true,
-        "showCommonLabels": true,
-        "showLabels": true,
-        "showTime": true,
-        "sortOrder": "Descending",
-        "wrapLogMessage": true
-      },
-      "targets": [
-        {
-          "expr": "{job=\"docker\",service=~\"enterprise-worker-.+\",level=~\"error|fatal\"}",
-          "refId": "A"
-        }
-      ],
-      "title": "Worker errors",
+      "title": "Platform and workload warnings",
       "type": "logs"
     },
     {
@@ -413,6 +314,52 @@
       ],
       "title": "Effective workload limit coverage",
       "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "showPoints": "never"
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 24
+      },
+      "id": 13,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum by (channel, result) (platform_alert_delivery_total)",
+          "legendFormat": "{{channel}} / {{result}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Alert delivery outcomes",
+      "type": "timeseries"
     }
   ],
   "refresh": "5s",

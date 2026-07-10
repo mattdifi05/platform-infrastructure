@@ -45,114 +45,6 @@ services:
     labels:
       traefik.enable: "false"
 
-  backend:
-    image: ${BACKEND_IMAGE:?Set BACKEND_IMAGE for production}
-    restart: always
-    command: null
-    read_only: true
-    tmpfs: !override
-      - /tmp
-    security_opt: !override
-      - no-new-privileges:true
-    cap_drop: !override
-      - ALL
-    ports: !reset []
-    volumes: !reset []
-    environment:
-      NODE_ENV: production
-      SESSION_SECRET_FILE: /run/secrets/session_secret
-      SESSION_SIGNING_KEYS_FILE: /run/secrets/session_signing_keys
-      SECRET_HASH_KEYS_FILE: /run/secrets/hash_pepper_keys
-      SESSION_COOKIE_NAME: ${SESSION_COOKIE_NAME:-app_session}
-      SESSION_COOKIE_MAX_AGE_SECONDS: ${SESSION_COOKIE_MAX_AGE_SECONDS:-315360000}
-      SESSION_COOKIE_SECURE: "true"
-      SESSION_COOKIE_SAMESITE: Lax
-      API_DOCS_ENABLED: ${API_DOCS_ENABLED:-false}
-      API_PUBLIC_URL: ${API_PUBLIC_URL:-http://backend:3000}
-      ACCOUNT_PUBLIC_URL: ${ACCOUNT_PUBLIC_URL:-${AUTH_PUBLIC_URL:-${CONTROL_CENTER_PUBLIC_URL:-http://control-center:8080}}}
-      UI_PUBLIC_URL: ${UI_PUBLIC_URL:-${APP_PUBLIC_URL:-${CONTROL_CENTER_PUBLIC_URL:-http://control-center:8080}}}
-      WEBAUTHN_RP_ID: ${WEBAUTHN_RP_ID:-${CONTROL_CENTER_HOST:-portal.${DOMAIN:?Set DOMAIN}}}
-      WEBAUTHN_ORIGINS: ${WEBAUTHN_ORIGINS:-${CONTROL_CENTER_PUBLIC_URL:-http://control-center:8080}}
-      CORS_ORIGINS: ${CORS_ORIGINS:-${CONTROL_CENTER_PUBLIC_URL:-http://control-center:8080}}
-      BOT_PROTECTION_PROVIDER: ${BOT_PROTECTION_PROVIDER:-disabled}
-      BOT_PROTECTION_REQUIRED: ${BOT_PROTECTION_REQUIRED:-}
-      BOT_PROTECTION_EXPECTED_HOSTNAMES: ${BOT_PROTECTION_EXPECTED_HOSTNAMES:-}
-      RATE_LIMIT_TTL_SECONDS: ${RATE_LIMIT_TTL_SECONDS:-60}
-      RATE_LIMIT_MAX_REQUESTS: ${RATE_LIMIT_MAX_REQUESTS:-120}
-      RATE_LIMIT_FALLBACK_MAX_REQUESTS: ${RATE_LIMIT_FALLBACK_MAX_REQUESTS:-80}
-      SENSITIVE_ACTION_RATE_LIMIT_MAX: ${SENSITIVE_ACTION_RATE_LIMIT_MAX:-40}
-      SENSITIVE_ACTION_FALLBACK_RATE_LIMIT_MAX: ${SENSITIVE_ACTION_FALLBACK_RATE_LIMIT_MAX:-10}
-      SESSION_TOUCH_THROTTLE_SECONDS: ${SESSION_TOUCH_THROTTLE_SECONDS:-60}
-      MAILER_PROVIDER: ${MAILER_PROVIDER:-smtp}
-      MAILER_FROM: ${MAILER_FROM:?Set MAILER_FROM}
-      MAILER_REPLY_TO: ${MAILER_REPLY_TO:?Set MAILER_REPLY_TO}
-      SMTP_HOST: ${SMTP_HOST:?Set SMTP_HOST}
-      SMTP_PORT: ${SMTP_PORT:-465}
-      SMTP_SECURE: ${SMTP_SECURE:-true}
-      SMTP_USER: ${SMTP_USER:?Set SMTP_USER}
-      SMTP_PASSWORD_FILE: /run/secrets/smtp_password
-      MAILER_CREDENTIALS_MANAGED_EXTERNALLY: ${MAILER_CREDENTIALS_MANAGED_EXTERNALLY:-true}
-    labels:
-      traefik.enable: "false"
-
-  web:
-    image: ${WEB_IMAGE:?Set WEB_IMAGE for production}
-    restart: always
-    command: null
-    read_only: true
-    tmpfs: !override
-      - /tmp
-    security_opt: !override
-      - no-new-privileges:true
-    cap_drop: !override
-      - ALL
-    ports: !reset []
-    volumes: !reset []
-    environment:
-      NODE_ENV: production
-      NEXT_TELEMETRY_DISABLED: "1"
-      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://backend:3000}
-      NEXT_PUBLIC_UI_URL: ${NEXT_PUBLIC_UI_URL:-${APP_PUBLIC_URL:-${CONTROL_CENTER_PUBLIC_URL:-http://control-center:8080}}}
-      NEXT_PUBLIC_ACCOUNT_URL: ${NEXT_PUBLIC_ACCOUNT_URL:-${AUTH_PUBLIC_URL:-${CONTROL_CENTER_PUBLIC_URL:-http://control-center:8080}}}
-      NEXT_PUBLIC_BOT_PROTECTION_PROVIDER: ${NEXT_PUBLIC_BOT_PROTECTION_PROVIDER:-disabled}
-      NEXT_PUBLIC_CLOUDFLARE_TURNSTILE_SITE_KEY: ${NEXT_PUBLIC_CLOUDFLARE_TURNSTILE_SITE_KEY:-}
-      ACCOUNT_HOST: ${ACCOUNT_HOST:-${AUTH_HOST:-auth.local}}
-      ACCOUNT_PUBLIC_URL: ${ACCOUNT_PUBLIC_URL:-${AUTH_PUBLIC_URL:-${CONTROL_CENTER_PUBLIC_URL:-http://control-center:8080}}}
-      NEXTAUTH_URL: ${NEXTAUTH_URL:-${AUTH_PUBLIC_URL:-${CONTROL_CENTER_PUBLIC_URL:-http://control-center:8080}}}
-      KEYCLOAK_ISSUER: ${KEYCLOAK_ISSUER:-http://keycloak:8080/realms/platform}
-    labels:
-      traefik.enable: "false"
-
-  worker-notifications:
-    image: ${WORKER_NOTIFICATIONS_IMAGE:?Set WORKER_NOTIFICATIONS_IMAGE for production}
-    restart: always
-    command: null
-    read_only: true
-    tmpfs: !override
-      - /tmp
-    security_opt: !override
-      - no-new-privileges:true
-    cap_drop: !override
-      - ALL
-    volumes: !reset []
-    environment:
-      NODE_ENV: production
-
-  worker-jobs:
-    image: ${WORKER_JOBS_IMAGE:?Set WORKER_JOBS_IMAGE for production}
-    restart: always
-    command: null
-    read_only: true
-    tmpfs: !override
-      - /tmp
-    security_opt: !override
-      - no-new-privileges:true
-    cap_drop: !override
-      - ALL
-    volumes: !reset []
-    environment:
-      NODE_ENV: production
-
   prometheus:
     restart: always
     command:
@@ -164,6 +56,9 @@ services:
   alertmanager:
     restart: always
     ports: !reset []
+
+  platform-alert-dispatcher:
+    restart: always
 
   grafana:
     restart: always

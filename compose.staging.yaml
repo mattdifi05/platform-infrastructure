@@ -47,22 +47,13 @@ services:
     profiles:
       - admin
 
-  backend:
-    container_name: !reset null
-
-  web:
-    container_name: !reset null
-
-  worker-notifications:
-    container_name: !reset null
-
-  worker-jobs:
-    container_name: !reset null
-
   prometheus:
     container_name: !reset null
 
   alertmanager:
+    container_name: !reset null
+
+  platform-alert-dispatcher:
     container_name: !reset null
 
   grafana:

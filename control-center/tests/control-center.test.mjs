@@ -183,7 +183,7 @@ test("Admin Control Center local foundation", async (t) => {
   const githubStatusHtml = await getText(`${baseUrl}/?section=status&statusCategory=github-release`);
   assert.match(githubStatusHtml, /data-status-section-detail="github-release"/);
   assert.match(githubStatusHtml, /github-actions-run-evidence|GitHub Actions runtime/);
-  assert.match(backupStatusHtml, /production-readiness-restore-tested/);
+  assert.match(backupStatusHtml, /offsite-backup-restore-rpo-rto/);
   assert.doesNotMatch(html, /Non pronto per andare online|Pronto per andare online/);
   assert.doesNotMatch(html, /Riepilogo go live/);
   assert.doesNotMatch(html, /Verdetto/);
@@ -756,17 +756,16 @@ test("Admin Control Center local foundation", async (t) => {
   assert.equal(monitoringApi.guardrails.noLokiQueryFromPanel, true);
   assert.equal(monitoringApi.liveQueryExecuted, false);
   assert.equal(monitoringApi.productionEvidence, false);
-  assert.equal(monitoringApi.scrapeJobs.some((job) => job.jobName === "backend" && job.targets.includes("backend:3000")), true);
-  assert.equal(monitoringApi.scrapeJobs.some((job) => job.jobName === "workers" && job.targets.includes("worker-jobs:3000")), true);
+  assert.equal(monitoringApi.scrapeJobs.some((job) => job.jobName === "platform-alert-dispatcher" && job.targets.includes("platform-alert-dispatcher:3000")), true);
   assert.equal(monitoringApi.scrapeJobs.some((job) => job.jobName === "node-exporter" && job.category === "host"), true);
   assert.equal(monitoringApi.scrapeJobs.some((job) => job.jobName === "cadvisor" && job.category === "container"), true);
   assert.equal(monitoringApi.datasources.some((datasource) => datasource.name === "Prometheus" && datasource.url === "http://prometheus:9090"), true);
   assert.equal(monitoringApi.datasources.some((datasource) => datasource.name === "Loki" && datasource.url === "http://loki:3100"), true);
-  assert.equal(monitoringApi.dashboardPanels.some((panel) => panel.title === "Backend errors" && panel.signal === "backend-errors"), true);
-  assert.equal(monitoringApi.dashboardPanels.some((panel) => panel.title === "Worker errors" && panel.signal === "worker-errors"), true);
+  assert.equal(monitoringApi.dashboardPanels.some((panel) => panel.title === "Platform container logs" && panel.signal === "platform-errors"), true);
+  assert.equal(monitoringApi.dashboardPanels.some((panel) => panel.title === "Alert delivery outcomes" && panel.signal === "alert-delivery"), true);
   assert.equal(monitoringApi.dashboardPanels.some((panel) => panel.title === "WAF events" && panel.signal === "waf-events"), true);
   assert.equal(monitoringApi.dashboardPanels.some((panel) => panel.title === "Auth failures" && panel.signal === "auth-failures"), true);
-  assert.equal(monitoringApi.signals.every((signal) => signal.coverage === "configured" && signal.liveQueryExecuted === false), true);
+  assert.deepEqual(monitoringApi.signals.filter((signal) => signal.coverage !== "configured" || signal.liveQueryExecuted !== false), []);
   assert.equal(monitoringApi.alertmanager.credentialFileConfigured, true);
   assert.equal(monitoringApi.alertmanager.secretValueExposed, false);
   assert.equal(monitoringApi.loki.retentionPeriod, "168h");
@@ -1191,9 +1190,9 @@ test("Admin Control Center local foundation", async (t) => {
   assert.doesNotMatch(JSON.stringify(applicationsAfterCreate), /application-secret-should-not-leak/);
 
   const workerInventoryInitial = await getJson(`${baseUrl}/control/workers-jobs`);
-  assert.equal(workerInventoryInitial.workers.some((worker) => worker.id === "enterprise-worker-jobs"), true);
+  assert.equal(workerInventoryInitial.workers.some((worker) => worker.id === "enterprise-backup-scheduler"), true);
   assert.equal(workerInventoryInitial.workers.some((worker) => worker.id === "node-demo-events-worker"), true);
-  assert.equal(workerInventoryInitial.queues.some((queue) => queue.id === "audit-outbox"), true);
+  assert.equal(workerInventoryInitial.queues.some((queue) => queue.id === "maintenance"), true);
   assert.equal(workerInventoryInitial.schedules.some((schedule) => schedule.id === "backup-scheduler" && schedule.containerizedCron === true), true);
 
   const workerInvalid = await postJson(`${baseUrl}/control/workers-jobs/queues`, {
@@ -2215,12 +2214,12 @@ test("Admin Control Center local foundation", async (t) => {
   assert.doesNotMatch(JSON.stringify(materialRotation.body), /material-plain-value-should-not-leak/);
 
   const materialUsage = await postJson(`${baseUrl}/control/secrets/materials/node-demo-staging-app-config/usage`, {
-    usageTarget: "worker-jobs",
+    usageTarget: "backup-scheduler",
     confirm: "UPDATE-MATERIAL-USAGE",
   });
   assert.equal(materialUsage.status, 202);
   assert.equal(materialUsage.body.type, "material.usage.local");
-  assert.deepEqual(materialUsage.body.material.usageTargets, ["worker-jobs"]);
+  assert.deepEqual(materialUsage.body.material.usageTargets, ["backup-scheduler"]);
 
   const materialAccess = await postJson(`${baseUrl}/control/secrets/materials/node-demo-staging-app-config/access`, {
     purpose: "incident-review",

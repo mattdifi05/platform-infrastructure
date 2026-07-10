@@ -27,8 +27,10 @@ RUN curl --fail --location --silent --show-error \
     && rm -rf /tmp/gh.tar.gz "/tmp/gh_${GH_VERSION}_linux_amd64" \
     && gh --version
 
-COPY control-center/package.json control-center/package-lock.json /infra/control-center/
-RUN npm ci --prefix /infra/control-center --omit=dev --ignore-scripts --no-audit --no-fund
+COPY control-center/package.json control-center/package-lock.json /tmp/control-center-dependencies/
+RUN npm ci --prefix /tmp/control-center-dependencies --omit=dev --ignore-scripts --no-audit --no-fund \
+    && mv /tmp/control-center-dependencies/node_modules /node_modules \
+    && rm -rf /tmp/control-center-dependencies
 
 WORKDIR /infra
 

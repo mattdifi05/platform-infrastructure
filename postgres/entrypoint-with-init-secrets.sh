@@ -50,20 +50,12 @@ copy_secret() {
   chmod 400 "$target"
   case "$name" in
     POSTGRES_PASSWORD) export POSTGRES_PASSWORD_FILE=$target ;;
-    APP_DB_PASSWORD) export APP_DB_PASSWORD_FILE=$target ;;
     KEYCLOAK_DB_PASSWORD) export KEYCLOAK_DB_PASSWORD_FILE=$target ;;
-    BACKEND_DB_PASSWORD) export BACKEND_DB_PASSWORD_FILE=$target ;;
-    WORKER_JOBS_DB_PASSWORD) export WORKER_JOBS_DB_PASSWORD_FILE=$target ;;
-    WORKER_NOTIFICATIONS_DB_PASSWORD) export WORKER_NOTIFICATIONS_DB_PASSWORD_FILE=$target ;;
     *) printf 'Unsupported PostgreSQL secret: %s\n' "$name" >&2; exit 1 ;;
   esac
 }
 
 copy_secret POSTGRES_PASSWORD "${POSTGRES_PASSWORD_FILE:-}"
-copy_secret APP_DB_PASSWORD "${APP_DB_PASSWORD_FILE:-}"
 copy_secret KEYCLOAK_DB_PASSWORD "${KEYCLOAK_DB_PASSWORD_FILE:-}"
-copy_secret BACKEND_DB_PASSWORD "${BACKEND_DB_PASSWORD_FILE:-}"
-copy_secret WORKER_JOBS_DB_PASSWORD "${WORKER_JOBS_DB_PASSWORD_FILE:-}"
-copy_secret WORKER_NOTIFICATIONS_DB_PASSWORD "${WORKER_NOTIFICATIONS_DB_PASSWORD_FILE:-}"
 
 exec docker-entrypoint.sh "$@"

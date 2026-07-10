@@ -52,9 +52,6 @@ services:
       POSTGRES_DB: postgres
       POSTGRES_USER: ${POSTGRES_SUPERUSER:-postgres}
       POSTGRES_PASSWORD_FILE: /run/secrets/postgres_superuser_password
-      APP_DB_NAME: ${APP_DB_NAME:-app_db}
-      APP_DB_USER: ${APP_DB_USER:-app_user}
-      APP_DB_PASSWORD_FILE: /run/secrets/app_db_password
       KEYCLOAK_DB_NAME: ${KEYCLOAK_DB_NAME:-keycloak}
       KEYCLOAK_DB_USER: ${KEYCLOAK_DB_USER:-keycloak}
       KEYCLOAK_DB_PASSWORD_FILE: /run/secrets/keycloak_db_password
@@ -313,8 +310,6 @@ services:
       CONTROL_CENTER_POSTGRES_PORT: ${CONTROL_CENTER_POSTGRES_PORT:-5432}
       CONTROL_CENTER_POSTGRES_SUPERUSER: ${POSTGRES_SUPERUSER:-postgres}
       CONTROL_CENTER_POSTGRES_SUPERUSER_PASSWORD_FILE: /run/secrets/postgres_superuser_password
-      CONTROL_CENTER_POSTGRES_APP_USER: ${APP_DB_USER:-app_user}
-      CONTROL_CENTER_POSTGRES_APP_PASSWORD_FILE: /run/secrets/app_db_password
       CONTROL_CENTER_DOCS_ROOT: /var/www/infra-docs
       PROJECTS_ROOT: /var/www/projects
       PROJECT_STATE_FILE: /var/www/project-state/projects.json
@@ -368,7 +363,6 @@ services:
       - projects_gateway_signing_keys
       - control_center_vault_keys
       - control_center_database_url
-      - app_db_password
       - mariadb_root_password
       - postgres_superuser_password
     depends_on:
@@ -403,6 +397,7 @@ services:
       PROJECT_ROUTER_PORT: 8080
       PROJECTS_ROOT: /var/www/projects
       PROJECT_STATE_FILE: /var/www/project-state/projects.json
+      PROJECT_ROUTER_WORKLOAD_LOCK_FILE: /var/www/project-state/hosted-workloads.lock.json
       CONTROL_CENTER_HOST: ${CONTROL_CENTER_HOST:-${ADMIN_HOST:-portal.${DOMAIN:-localhost.com}}}
       ADMIN_HOST: ${ADMIN_HOST:-portal.${DOMAIN:-localhost.com}}
       PROJECTS_HOST: ${PROJECTS_HOST:-}
@@ -529,249 +524,6 @@ services:
     networks:
       - enterprise_net
 
-  backend:
-    image: ${BACKEND_BUILD_IMAGE:-platform/backend:local}
-    container_name: enterprise-backend
-    init: true
-    pids_limit: 512
-    logging: *default_logging
-    restart: unless-stopped
-    environment:
-      NODE_ENV: production
-      NEXT_TELEMETRY_DISABLED: "1"
-      PORT: 3000
-      SERVICE_NAME: enterprise-backend
-      SESSION_SECRET_FILE: /run/secrets/session_secret
-      SESSION_SIGNING_KEYS_FILE: /run/secrets/session_signing_keys
-      SECRET_HASH_KEYS_FILE: /run/secrets/hash_pepper_keys
-      SESSION_COOKIE_NAME: ${SESSION_COOKIE_NAME:-app_session}
-      SESSION_COOKIE_MAX_AGE_SECONDS: ${SESSION_COOKIE_MAX_AGE_SECONDS:-315360000}
-      SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-true}
-      SESSION_COOKIE_SAMESITE: ${SESSION_COOKIE_SAMESITE:-Lax}
-      API_DOCS_ENABLED: ${API_DOCS_ENABLED:-false}
-      APP_DB_NAME: ${APP_DB_NAME:-app_db}
-      APP_DB_USER: ${BACKEND_DB_USER:-app_backend_runtime}
-      DATABASE_URL_FILE: /run/secrets/backend_database_url
-      REDIS_HOST: redis
-      REDIS_PORT: 6379
-      REDIS_PASSWORD_FILE: /run/secrets/redis_password
-      REDIS_DB: ${REDIS_DB:-0}
-      REDIS_KEY_PREFIX: ${REDIS_KEY_PREFIX:-platform}
-      KEYCLOAK_URL: http://keycloak:8080
-      KEYCLOAK_REALM: ${KEYCLOAK_REALM:-enterprise}
-      NATS_URL_FILE: /run/secrets/nats_url
-      API_PUBLIC_URL: ${API_PUBLIC_URL:-http://backend:3000}
-      ACCOUNT_PUBLIC_URL: ${ACCOUNT_PUBLIC_URL:-${AUTH_PUBLIC_URL:-https://auth.localhost.com}}
-      UI_PUBLIC_URL: ${UI_PUBLIC_URL:-${APP_PUBLIC_URL:-https://app.localhost.com}}
-      WEBAUTHN_RP_ID: ${WEBAUTHN_RP_ID:-auth.localhost.com}
-      WEBAUTHN_ORIGINS: ${WEBAUTHN_ORIGINS:-https://auth.localhost.com}
-      CORS_ORIGINS: ${CORS_ORIGINS:-https://auth.localhost.com,https://app.localhost.com,https://portal.localhost.com}
-      BOT_PROTECTION_PROVIDER: ${BOT_PROTECTION_PROVIDER:-disabled}
-      BOT_PROTECTION_REQUIRED: ${BOT_PROTECTION_REQUIRED:-}
-      BOT_PROTECTION_EXPECTED_HOSTNAMES: ${BOT_PROTECTION_EXPECTED_HOSTNAMES:-auth.localhost.com,app.localhost.com,portal.localhost.com}
-      CLOUDFLARE_TURNSTILE_SECRET_KEY_FILE: /run/secrets/cloudflare_turnstile_secret_key
-      RATE_LIMIT_TTL_SECONDS: ${RATE_LIMIT_TTL_SECONDS:-60}
-      RATE_LIMIT_MAX_REQUESTS: ${RATE_LIMIT_MAX_REQUESTS:-120}
-      RATE_LIMIT_FALLBACK_MAX_REQUESTS: ${RATE_LIMIT_FALLBACK_MAX_REQUESTS:-80}
-      SENSITIVE_ACTION_RATE_LIMIT_MAX: ${SENSITIVE_ACTION_RATE_LIMIT_MAX:-40}
-      SENSITIVE_ACTION_FALLBACK_RATE_LIMIT_MAX: ${SENSITIVE_ACTION_FALLBACK_RATE_LIMIT_MAX:-10}
-      SESSION_TOUCH_THROTTLE_SECONDS: ${SESSION_TOUCH_THROTTLE_SECONDS:-60}
-      PASSKEY_CHALLENGE_TTL_SECONDS: ${PASSKEY_CHALLENGE_TTL_SECONDS:-300}
-      OTP_SEND_COOLDOWN_SECONDS: ${OTP_SEND_COOLDOWN_SECONDS:-60}
-      AUDIT_LOG_ENABLED: ${AUDIT_LOG_ENABLED:-true}
-      STRUCTURED_LOGGING: ${STRUCTURED_LOGGING:-true}
-      MAILER_PROVIDER: ${MAILER_PROVIDER:-smtp}
-      MAILER_FROM: ${MAILER_FROM:?Set MAILER_FROM}
-      MAILER_REPLY_TO: ${MAILER_REPLY_TO:?Set MAILER_REPLY_TO}
-      SMTP_HOST: ${SMTP_HOST:?Set SMTP_HOST}
-      SMTP_PORT: ${SMTP_PORT:-465}
-      SMTP_SECURE: ${SMTP_SECURE:-true}
-      SMTP_USER: ${SMTP_USER:?Set SMTP_USER}
-      SMTP_PASSWORD_FILE: /run/secrets/smtp_password
-      MAILER_CREDENTIALS_MANAGED_EXTERNALLY: ${MAILER_CREDENTIALS_MANAGED_EXTERNALLY:-true}
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      keycloak:
-        condition: service_healthy
-      nats:
-        condition: service_healthy
-    read_only: true
-    tmpfs:
-      - /tmp
-    security_opt:
-      - no-new-privileges:true
-    cap_drop:
-      - ALL
-    networks:
-      - enterprise_net
-    labels:
-      traefik.enable: "false"
-    healthcheck:
-      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:3000/health"]
-      interval: 15s
-      timeout: 5s
-      retries: 10
-      start_period: 20s
-
-  web:
-    image: ${WEB_BUILD_IMAGE:-platform/web:local}
-    container_name: enterprise-web
-    init: true
-    pids_limit: 512
-    logging: *default_logging
-    restart: unless-stopped
-    environment:
-      NODE_ENV: production
-      NEXT_TELEMETRY_DISABLED: "1"
-      PORT: 3000
-      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://backend:3000}
-      NEXT_PUBLIC_UI_URL: ${NEXT_PUBLIC_UI_URL:-${APP_PUBLIC_URL:-https://app.localhost.com}}
-      NEXT_PUBLIC_ACCOUNT_URL: ${NEXT_PUBLIC_ACCOUNT_URL:-${AUTH_PUBLIC_URL:-https://auth.localhost.com}}
-      NEXT_PUBLIC_BOT_PROTECTION_PROVIDER: ${NEXT_PUBLIC_BOT_PROTECTION_PROVIDER:-disabled}
-      NEXT_PUBLIC_CLOUDFLARE_TURNSTILE_SITE_KEY: ${NEXT_PUBLIC_CLOUDFLARE_TURNSTILE_SITE_KEY:-}
-      INTERNAL_API_URL: http://backend:3000
-      ACCOUNT_HOST: ${ACCOUNT_HOST:-${AUTH_HOST:-auth.local}}
-      ACCOUNT_PUBLIC_URL: ${ACCOUNT_PUBLIC_URL:-${AUTH_PUBLIC_URL:-https://auth.localhost.com}}
-      NEXTAUTH_URL: ${NEXTAUTH_URL:-${AUTH_PUBLIC_URL:-https://auth.localhost.com}}
-      KEYCLOAK_ISSUER: ${KEYCLOAK_ISSUER:-http://keycloak:8080/realms/platform}
-    depends_on:
-      backend:
-        condition: service_healthy
-    read_only: true
-    tmpfs:
-      - /tmp
-    security_opt:
-      - no-new-privileges:true
-    cap_drop:
-      - ALL
-    networks:
-      - enterprise_net
-    labels:
-      traefik.enable: "false"
-    healthcheck:
-      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:3000/health"]
-      interval: 15s
-      timeout: 5s
-      retries: 10
-      start_period: 20s
-
-  worker-notifications:
-    image: ${WORKER_NOTIFICATIONS_BUILD_IMAGE:-platform/worker-notifications:local}
-    container_name: enterprise-worker-notifications
-    init: true
-    pids_limit: 512
-    logging: *default_logging
-    restart: unless-stopped
-    environment:
-      NODE_ENV: production
-      PORT: 3000
-      WORKER_NAME: enterprise-worker-notifications
-      ALERTMANAGER_WEBHOOK_TOKEN_FILE: /run/secrets/alertmanager_webhook_token
-      DATABASE_URL_FILE: /run/secrets/worker_notifications_database_url
-      REDIS_HOST: redis
-      REDIS_PORT: 6379
-      REDIS_PASSWORD_FILE: /run/secrets/redis_password
-      REDIS_DB: ${REDIS_DB:-0}
-      REDIS_KEY_PREFIX: ${REDIS_KEY_PREFIX:-platform}
-      NATS_URL_FILE: /run/secrets/nats_url
-      ALERT_FORWARD_WEBHOOK_URL: ${ALERT_FORWARD_WEBHOOK_URL:-}
-      ALERT_DISCORD_WEBHOOK_URL_FILE: ${ALERT_DISCORD_WEBHOOK_URL_FILE:-}
-      ALERT_TELEGRAM_BOT_TOKEN_FILE: ${ALERT_TELEGRAM_BOT_TOKEN_FILE:-}
-      ALERT_TELEGRAM_CHAT_ID: ${ALERT_TELEGRAM_CHAT_ID:-}
-      ALERT_TELEGRAM_API_BASE_URL: ${ALERT_TELEGRAM_API_BASE_URL:-}
-      ALERT_EMAIL_TO: ${ALERT_EMAIL_TO:-admin@example.com}
-      MAILER_FROM: ${MAILER_FROM:?Set MAILER_FROM}
-      MAILER_REPLY_TO: ${MAILER_REPLY_TO:?Set MAILER_REPLY_TO}
-      SMTP_HOST: ${SMTP_HOST:?Set SMTP_HOST}
-      SMTP_PORT: ${SMTP_PORT:-465}
-      SMTP_SECURE: ${SMTP_SECURE:-true}
-      SMTP_USER: ${SMTP_USER:?Set SMTP_USER}
-      SMTP_PASSWORD_FILE: /run/secrets/smtp_password
-      STRUCTURED_LOGGING: ${STRUCTURED_LOGGING:-true}
-      AUDIT_LOG_ENABLED: ${AUDIT_LOG_ENABLED:-true}
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      nats:
-        condition: service_healthy
-    read_only: true
-    tmpfs:
-      - /tmp
-    security_opt:
-      - no-new-privileges:true
-    cap_drop:
-      - ALL
-    networks:
-      - enterprise_net
-    healthcheck:
-      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:3000/health"]
-      interval: 20s
-      timeout: 5s
-      retries: 10
-      start_period: 20s
-
-  worker-jobs:
-    image: ${WORKER_JOBS_BUILD_IMAGE:-platform/worker-jobs:local}
-    container_name: enterprise-worker-jobs
-    init: true
-    pids_limit: 512
-    logging: *default_logging
-    restart: unless-stopped
-    environment:
-      NODE_ENV: production
-      PORT: 3000
-      WORKER_NAME: enterprise-worker-jobs
-      DATABASE_URL_FILE: /run/secrets/worker_jobs_database_url
-      REDIS_HOST: redis
-      REDIS_PORT: 6379
-      REDIS_PASSWORD_FILE: /run/secrets/redis_password
-      REDIS_DB: ${REDIS_DB:-0}
-      REDIS_KEY_PREFIX: ${REDIS_KEY_PREFIX:-platform}
-      NATS_URL_FILE: /run/secrets/nats_url
-      MINIO_ENDPOINT: minio
-      MINIO_PORT: 9000
-      MINIO_USE_SSL: "false"
-      STRUCTURED_LOGGING: ${STRUCTURED_LOGGING:-true}
-      AUDIT_LOG_ENABLED: ${AUDIT_LOG_ENABLED:-true}
-      AUDIT_OUTBOX_ENABLED: ${AUDIT_OUTBOX_ENABLED:-true}
-      AUDIT_OUTBOX_BATCH_SIZE: ${AUDIT_OUTBOX_BATCH_SIZE:-25}
-      AUDIT_OUTBOX_INTERVAL_MS: ${AUDIT_OUTBOX_INTERVAL_MS:-5000}
-      AUDIT_OUTBOX_MAX_ATTEMPTS: ${AUDIT_OUTBOX_MAX_ATTEMPTS:-8}
-      AUDIT_OUTBOX_LEASE_MS: ${AUDIT_OUTBOX_LEASE_MS:-60000}
-      AUDIT_OUTBOX_INITIAL_BACKOFF_MS: ${AUDIT_OUTBOX_INITIAL_BACKOFF_MS:-5000}
-      AUDIT_OUTBOX_BACKOFF_MULTIPLIER: ${AUDIT_OUTBOX_BACKOFF_MULTIPLIER:-2}
-      AUDIT_OUTBOX_MAX_BACKOFF_MS: ${AUDIT_OUTBOX_MAX_BACKOFF_MS:-300000}
-      AUDIT_OUTBOX_NATS_SUBJECT_PREFIX: ${AUDIT_OUTBOX_NATS_SUBJECT_PREFIX:-audit.events}
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      nats:
-        condition: service_healthy
-      minio:
-        condition: service_healthy
-    read_only: true
-    tmpfs:
-      - /tmp
-    security_opt:
-      - no-new-privileges:true
-    cap_drop:
-      - ALL
-    networks:
-      - enterprise_net
-    healthcheck:
-      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:3000/health"]
-      interval: 20s
-      timeout: 5s
-      retries: 10
-      start_period: 20s
-
   prometheus:
     image: ${PROMETHEUS_IMAGE:-prom/prometheus:v3.12.0@sha256:69f5241418838263316593f7274a304b095c40bcf22e57272865da91bd60a8ac}
     container_name: enterprise-prometheus
@@ -788,10 +540,6 @@ services:
       - --web.enable-lifecycle
     depends_on:
       alertmanager:
-        condition: service_healthy
-      backend:
-        condition: service_healthy
-      web:
         condition: service_healthy
       node-exporter:
         condition: service_healthy
@@ -861,6 +609,49 @@ services:
       timeout: 5s
       retries: 10
 
+  platform-alert-dispatcher:
+    image: ${PLATFORM_ALERT_DISPATCHER_IMAGE:-platform/alert-dispatcher:local}
+    build:
+      context: .
+      dockerfile: docker/alert-dispatcher.Dockerfile
+      args:
+        NODE_IMAGE: ${NODE_IMAGE:-node:26.3.1-alpine@sha256:a2dc166a387cc6ca1e62d0c8e265e49ca985d6e60abc9fe6e6c3d6ce8e63f606}
+    container_name: enterprise-platform-alert-dispatcher
+    init: true
+    user: "1000:1000"
+    read_only: true
+    pids_limit: 128
+    logging: *default_logging
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    restart: unless-stopped
+    environment:
+      PORT: "3000"
+      ALERTMANAGER_WEBHOOK_TOKEN_FILE: /run/secrets/alertmanager_webhook_token
+      ALERT_EMAIL_TO: ${ALERT_EMAIL_TO:?Set ALERT_EMAIL_TO}
+      ALERT_FORWARD_WEBHOOK_URL_FILE: ${ALERT_FORWARD_WEBHOOK_URL_FILE:-}
+      MAILER_FROM: ${MAILER_FROM:?Set MAILER_FROM}
+      MAILER_REPLY_TO: ${MAILER_REPLY_TO:?Set MAILER_REPLY_TO}
+      SMTP_HOST: ${SMTP_HOST:?Set SMTP_HOST}
+      SMTP_PORT: ${SMTP_PORT:-465}
+      SMTP_SECURE: ${SMTP_SECURE:-true}
+      SMTP_USER: ${SMTP_USER:?Set SMTP_USER}
+      SMTP_PASSWORD_FILE: /run/secrets/smtp_password
+    expose:
+      - "3000"
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m
+    networks:
+      - enterprise_net
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      interval: 20s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+
   alertmanager:
     image: ${ALERTMANAGER_IMAGE:-prom/alertmanager:v0.32.2@sha256:b85533a2eb45865835315810315f6951331b2dbc8c93a6cf9a51e156a006a706}
     container_name: enterprise-alertmanager
@@ -876,7 +667,7 @@ services:
       - --config.file=/etc/alertmanager/alertmanager.yml
       - --storage.path=/alertmanager
     depends_on:
-      worker-notifications:
+      platform-alert-dispatcher:
         condition: service_healthy
     volumes:
       - enterprise_alertmanager_data:/alertmanager
@@ -1096,5 +887,3 @@ secrets:
     file: ${PROJECTS_GATEWAY_SIGNING_KEYS_SECRET_FILE:-./secrets/projects_gateway_signing_keys.txt}
   smtp_password:
     file: ${SMTP_PASSWORD_SECRET_FILE:-./secrets/smtp_password.txt}
-  app_db_password:
-    file: ${APP_DB_PASSWORD_SECRET_FILE:-./secrets/app_db_password.txt}

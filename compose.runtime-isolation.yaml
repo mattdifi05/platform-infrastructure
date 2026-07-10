@@ -202,36 +202,6 @@ services:
     mem_reservation: 16m
     pids_limit: 64
 
-  backend:
-    <<: *runtime_core
-    cpus: 1.00
-    mem_limit: 512m
-    mem_reservation: 128m
-    pids_limit: 384
-
-  web:
-    <<: *runtime_app
-    cpus: 0.75
-    mem_limit: 384m
-    mem_reservation: 96m
-    pids_limit: 320
-
-  worker-jobs:
-    <<: *runtime_core
-    read_only: true
-    cpus: 0.75
-    mem_limit: 384m
-    mem_reservation: 96m
-    pids_limit: 320
-
-  worker-notifications:
-    <<: *runtime_core
-    read_only: true
-    cpus: 0.75
-    mem_limit: 384m
-    mem_reservation: 96m
-    pids_limit: 320
-
   prometheus:
     <<: *runtime_observability
     cpus: 0.50
@@ -256,6 +226,13 @@ services:
   alertmanager:
     <<: *runtime_observability
     cpus: 0.25
+    mem_limit: 128m
+    mem_reservation: 32m
+    pids_limit: 128
+
+  platform-alert-dispatcher:
+    <<: *runtime_observability
+    cpus: 0.20
     mem_limit: 128m
     mem_reservation: 32m
     pids_limit: 128
@@ -316,167 +293,6 @@ services:
       - platform_storage
       - platform_egress
       - platform_docker_control
-
-  node-account:
-    <<: *runtime_app
-    read_only: true
-    cpus: 0.75
-    mem_limit: 384m
-    mem_reservation: 96m
-    pids_limit: 320
-    environment:
-      NODE_PROJECT_INSTALL_COMMAND: ""
-      NODE_PROJECT_BUILD_COMMAND: ""
-    tmpfs:
-      - /tmp:rw,noexec,nosuid,nodev,size=64m
-      - /workspace/apps/web/.next/cache:rw,nosuid,nodev,size=128m
-    volumes: !override
-      - ${PHP_PROJECTS_DIR:-../src}/stexor:/workspace:ro
-      - ./scripts/node-project-runtime.sh:/usr/local/bin/node-project-runtime:ro
-
-  node-ui:
-    <<: *runtime_app
-    read_only: true
-    cpus: 0.75
-    mem_limit: 384m
-    mem_reservation: 96m
-    pids_limit: 320
-    environment:
-      NODE_PROJECT_INSTALL_COMMAND: ""
-      NODE_PROJECT_BUILD_COMMAND: ""
-    tmpfs:
-      - /tmp:rw,noexec,nosuid,nodev,size=64m
-      - /workspace/apps/web/.next/cache:rw,nosuid,nodev,size=128m
-    volumes: !override
-      - ${PHP_PROJECTS_DIR:-../src}/stexor:/workspace:ro
-      - ./scripts/node-project-runtime.sh:/usr/local/bin/node-project-runtime:ro
-
-  php-anniversary:
-    <<: *runtime_app
-    read_only: true
-    cpus: 0.50
-    mem_limit: 256m
-    mem_reservation: 64m
-    pids_limit: 256
-    entrypoint: ["sh", "/usr/local/bin/php-project-runtime"]
-    command: ["apache2-foreground"]
-    environment: !override
-      PHP_PROJECT_RUNTIME_SLUG: anniversary
-    secrets: !reset []
-    tmpfs:
-      - /tmp:rw,noexec,nosuid,nodev,size=64m
-      - /run:rw,noexec,nosuid,nodev,size=16m
-      - /var/lock/apache2:rw,noexec,nosuid,nodev,size=8m
-      - /var/lib/php/sessions:rw,noexec,nosuid,nodev,size=32m
-      - /var/www/projects:rw,nosuid,nodev,size=128m
-    volumes: !override
-      - ${PHP_PROJECTS_DIR:-../src}/anniversary:/opt/platform-source/anniversary:ro
-      - ./scripts/php-project-runtime.sh:/usr/local/bin/php-project-runtime:ro
-      - ./php-apache/php/custom.ini:/usr/local/etc/php/conf.d/zz-custom.ini:ro
-      - ./php-apache/apache:/etc/apache2/sites-available:ro
-      - ${PLATFORM_CERTS_DIR:-./traefik/certs}:/etc/apache2/certs:ro
-
-  php-fiplatform:
-    <<: *runtime_app
-    read_only: true
-    cpus: 0.50
-    mem_limit: 256m
-    mem_reservation: 64m
-    pids_limit: 256
-    entrypoint: ["sh", "/usr/local/bin/php-project-runtime"]
-    command: ["apache2-foreground"]
-    environment: !override
-      APP_CACHE_DIR: /tmp/app-cache
-      PHP_PROJECT_RUNTIME_ALIASES: fireport
-      PHP_PROJECT_RUNTIME_SLUG: fiplatform
-    secrets: !reset []
-    tmpfs:
-      - /tmp:rw,noexec,nosuid,nodev,size=128m
-      - /run:rw,noexec,nosuid,nodev,size=16m
-      - /var/lock/apache2:rw,noexec,nosuid,nodev,size=8m
-      - /var/lib/php/sessions:rw,noexec,nosuid,nodev,size=32m
-      - /var/www/projects:rw,nosuid,nodev,size=128m
-    volumes: !override
-      - ${PHP_PROJECTS_DIR:-../src}/fiplatform:/opt/platform-source/fiplatform:ro
-      - ./scripts/php-project-runtime.sh:/usr/local/bin/php-project-runtime:ro
-      - ./php-apache/php/custom.ini:/usr/local/etc/php/conf.d/zz-custom.ini:ro
-      - ./php-apache/apache:/etc/apache2/sites-available:ro
-      - ${PLATFORM_CERTS_DIR:-./traefik/certs}:/etc/apache2/certs:ro
-
-  php-matthewdifilippo:
-    <<: *runtime_app
-    read_only: true
-    cpus: 0.50
-    mem_limit: 256m
-    mem_reservation: 64m
-    pids_limit: 256
-    entrypoint: ["sh", "/usr/local/bin/php-project-runtime"]
-    command: ["apache2-foreground"]
-    environment: !override
-      PHP_PROJECT_RUNTIME_SLUG: matthewdifilippo
-    secrets: !reset []
-    tmpfs:
-      - /tmp:rw,noexec,nosuid,nodev,size=64m
-      - /run:rw,noexec,nosuid,nodev,size=16m
-      - /var/lock/apache2:rw,noexec,nosuid,nodev,size=8m
-      - /var/lib/php/sessions:rw,noexec,nosuid,nodev,size=32m
-      - /var/www/projects:rw,nosuid,nodev,size=128m
-    volumes: !override
-      - ${PHP_PROJECTS_DIR:-../src}/matthewdifilippo:/opt/platform-source/matthewdifilippo:ro
-      - ./scripts/php-project-runtime.sh:/usr/local/bin/php-project-runtime:ro
-      - ./php-apache/php/custom.ini:/usr/local/etc/php/conf.d/zz-custom.ini:ro
-      - ./php-apache/apache:/etc/apache2/sites-available:ro
-      - ${PLATFORM_CERTS_DIR:-./traefik/certs}:/etc/apache2/certs:ro
-
-  php-stream:
-    <<: *runtime_app
-    read_only: true
-    cpus: 0.50
-    mem_limit: 256m
-    mem_reservation: 64m
-    pids_limit: 256
-    entrypoint: ["sh", "/usr/local/bin/php-project-runtime"]
-    command: ["apache2-foreground"]
-    environment: !override
-      PHP_PROJECT_RUNTIME_SLUG: stream
-    secrets: !reset []
-    tmpfs:
-      - /tmp:rw,noexec,nosuid,nodev,size=128m
-      - /run:rw,noexec,nosuid,nodev,size=16m
-      - /var/lock/apache2:rw,noexec,nosuid,nodev,size=8m
-      - /var/lib/php/sessions:rw,noexec,nosuid,nodev,size=32m
-      - /var/www/projects:rw,nosuid,nodev,size=128m
-    volumes: !override
-      - ${PHP_PROJECTS_DIR:-../src}/stream:/opt/platform-source/stream:ro
-      - ./scripts/php-project-runtime.sh:/usr/local/bin/php-project-runtime:ro
-      - ./php-apache/php/custom.ini:/usr/local/etc/php/conf.d/zz-custom.ini:ro
-      - ./php-apache/apache:/etc/apache2/sites-available:ro
-      - ${PLATFORM_CERTS_DIR:-./traefik/certs}:/etc/apache2/certs:ro
-
-  php-workcalendar:
-    <<: *runtime_app
-    read_only: true
-    cpus: 0.50
-    mem_limit: 256m
-    mem_reservation: 64m
-    pids_limit: 256
-    entrypoint: ["sh", "/usr/local/bin/php-project-runtime"]
-    command: ["apache2-foreground"]
-    environment: !override
-      PHP_PROJECT_RUNTIME_SLUG: workcalendar
-    secrets: !reset []
-    tmpfs:
-      - /tmp:rw,noexec,nosuid,nodev,size=64m
-      - /run:rw,noexec,nosuid,nodev,size=16m
-      - /var/lock/apache2:rw,noexec,nosuid,nodev,size=8m
-      - /var/lib/php/sessions:rw,noexec,nosuid,nodev,size=32m
-      - /var/www/projects:rw,nosuid,nodev,size=128m
-    volumes: !override
-      - ${PHP_PROJECTS_DIR:-../src}/workcalendar:/opt/platform-source/workcalendar:ro
-      - ./scripts/php-project-runtime.sh:/usr/local/bin/php-project-runtime:ro
-      - ./php-apache/php/custom.ini:/usr/local/etc/php/conf.d/zz-custom.ini:ro
-      - ./php-apache/apache:/etc/apache2/sites-available:ro
-      - ${PLATFORM_CERTS_DIR:-./traefik/certs}:/etc/apache2/certs:ro
 
 networks:
   platform_docker_control:

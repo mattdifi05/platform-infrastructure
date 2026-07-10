@@ -3,101 +3,34 @@
 # Use with:
 #   docker compose -f compose.yaml -f compose.prod.yaml -f compose.ha.yaml config --quiet
 #
-# This overlay removes fixed container names from replicated stateless services
-# and adds rolling update / rollback policy. Stateful HA still requires managed
-# or clustered PostgreSQL, Redis, NATS and object storage; see ENTERPRISE-10-PLAN.md.
+# This overlay applies placement constraints to platform-owned stateful services.
+# Hosted workloads own their replica and rollout policy in their external overlay.
+# Stateful HA still requires managed or clustered PostgreSQL, Redis, NATS and
+# object storage; see ENTERPRISE-10-PLAN.md.
+x-platform-ha-rollout: &platform-ha-rollout
+  update_config:
+    parallelism: 1
+    order: start-first
+    failure_action: rollback
+    monitor: 30s
+  rollback_config:
+    parallelism: 1
+    order: stop-first
+    failure_action: pause
+    monitor: 30s
+
 services:
-  backend:
-    container_name: !reset null
+  control-center:
     deploy:
-      replicas: ${BACKEND_REPLICAS:-3}
-      update_config:
-        parallelism: 1
-        delay: 10s
-        order: start-first
-        failure_action: rollback
-        monitor: 60s
-      rollback_config:
-        parallelism: 1
-        delay: 5s
-        order: stop-first
-        failure_action: pause
-        monitor: 60s
-      restart_policy:
-        condition: any
-        delay: 5s
-        max_attempts: 3
-        window: 120s
-      placement:
-        max_replicas_per_node: 1
+      <<: *platform-ha-rollout
 
-  web:
-    container_name: !reset null
+  project-router:
     deploy:
-      replicas: ${WEB_REPLICAS:-3}
-      update_config:
-        parallelism: 1
-        delay: 10s
-        order: start-first
-        failure_action: rollback
-        monitor: 60s
-      rollback_config:
-        parallelism: 1
-        delay: 5s
-        order: stop-first
-        failure_action: pause
-        monitor: 60s
-      restart_policy:
-        condition: any
-        delay: 5s
-        max_attempts: 3
-        window: 120s
-      placement:
-        max_replicas_per_node: 1
+      <<: *platform-ha-rollout
 
-  worker-notifications:
-    container_name: !reset null
+  platform-alert-dispatcher:
     deploy:
-      replicas: ${WORKER_NOTIFICATIONS_REPLICAS:-2}
-      update_config:
-        parallelism: 1
-        delay: 10s
-        order: start-first
-        failure_action: rollback
-        monitor: 60s
-      rollback_config:
-        parallelism: 1
-        delay: 5s
-        order: stop-first
-        failure_action: pause
-        monitor: 60s
-      restart_policy:
-        condition: any
-        delay: 5s
-        max_attempts: 3
-        window: 120s
-
-  worker-jobs:
-    container_name: !reset null
-    deploy:
-      replicas: ${WORKER_JOBS_REPLICAS:-2}
-      update_config:
-        parallelism: 1
-        delay: 10s
-        order: start-first
-        failure_action: rollback
-        monitor: 60s
-      rollback_config:
-        parallelism: 1
-        delay: 5s
-        order: stop-first
-        failure_action: pause
-        monitor: 60s
-      restart_policy:
-        condition: any
-        delay: 5s
-        max_attempts: 3
-        window: 120s
+      <<: *platform-ha-rollout
 
   postgres:
     deploy:

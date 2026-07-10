@@ -187,7 +187,7 @@ fi
 LOCAL_HOST_ARGS=""
 LOCAL_HOSTS="localhost.com portal.localhost.com docs.localhost.com"
 if [ -n "$configured_domain" ]; then
-  LOCAL_HOSTS="$LOCAL_HOSTS $configured_domain $configured_admin_host $configured_control_host $configured_docs_host portal.$configured_domain docs.$configured_domain app.$configured_domain api.$configured_domain auth.$configured_domain storage.$configured_domain grafana.$configured_domain"
+  LOCAL_HOSTS="$LOCAL_HOSTS $configured_domain $configured_admin_host $configured_control_host $configured_docs_host portal.$configured_domain docs.$configured_domain auth.$configured_domain storage.$configured_domain grafana.$configured_domain"
 fi
 for host in $LOCAL_HOSTS; do
   [ -n "$host" ] || continue
@@ -211,10 +211,10 @@ fi
 
 ENV_FORWARD_ARGS=""
 for name in \
-  BACKEND_IMAGE \
-  WEB_IMAGE \
-  WORKER_NOTIFICATIONS_IMAGE \
-  WORKER_JOBS_IMAGE \
+  PLATFORM_ALERT_DISPATCHER_IMAGE \
+  CONTROL_CENTER_IMAGE \
+  PHP_APACHE_IMAGE \
+  PLATFORM_OPS_IMAGE \
   BACKUP_SIGNING_KEYS_FILE \
   BACKUP_LOCAL_KEEP_LAST \
   CLOUDFLARE_ACCOUNT_ID \
@@ -238,10 +238,9 @@ for name in \
   RESTIC_PASSWORD_FILE \
   RESTIC_REPOSITORY \
   RESTIC_REQUIRE_IMMUTABLE_IMAGE \
-  APP_DB_NAME \
+  POSTGRES_BACKUP_DATABASE \
   KEYCLOAK_DB_NAME \
   PLATFORM_GITHUB_REPOSITORY \
-  PROJECT_REQUIRE_SOURCE_ROOT \
   PLATFORM_STATIC_INFRA_ONLY
 do
   ENV_FORWARD_ARGS="$ENV_FORWARD_ARGS -e $name"

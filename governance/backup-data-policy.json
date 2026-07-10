@@ -22,7 +22,6 @@
     "applicationSources": "all non-hidden top-level directories under PROJECT_SOURCE_ROOT, excluding declared tooling and build directories",
     "applicationDatabases": "all active exact engine/name bindings from PROJECT_DATABASES_FILE",
     "platformDatabases": [
-      "postgres:APP_DB_NAME",
       "postgres:KEYCLOAK_DB_NAME"
     ]
   },

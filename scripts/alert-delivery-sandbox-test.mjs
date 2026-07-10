@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { randomBytes, randomUUID } from "node:crypto";
-import { chmodSync, chownSync, cpSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { chmodSync, chownSync, cpSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 
@@ -73,14 +73,13 @@ createServer((request, response) => {
   if (request.url === "/metrics") {
     response.writeHead(200, { "content-type": "text/plain" });
     response.end([
-      '# TYPE notification_alert_webhook_requests_total counter',
-      'notification_alert_webhook_requests_total{service="enterprise-worker-notifications"} ' + requests,
-      '# TYPE notification_alert_webhook_alerts_total counter',
-      'notification_alert_webhook_alerts_total{service="enterprise-worker-notifications",status="firing"} ' + firing,
-      'notification_alert_webhook_alerts_total{service="enterprise-worker-notifications",status="resolved"} ' + resolved,
-      'notification_alert_email_deliveries_total{service="enterprise-worker-notifications"} 0',
-      'notification_alert_discord_deliveries_total{service="enterprise-worker-notifications"} 0',
-      'notification_alert_telegram_deliveries_total{service="enterprise-worker-notifications"} 0',
+      '# TYPE platform_alert_webhook_requests_total counter',
+      'platform_alert_webhook_requests_total ' + requests,
+      '# TYPE platform_alert_webhook_alerts_total counter',
+      'platform_alert_webhook_alerts_total{status="firing"} ' + firing,
+      'platform_alert_webhook_alerts_total{status="resolved"} ' + resolved,
+      'platform_alert_delivery_total{channel="email",result="success"} 0',
+      'platform_alert_delivery_total{channel="forward",result="success"} 0',
       '',
     ].join('\\n'));
     return;
@@ -140,7 +139,7 @@ receivers:
 
 const liveIdsBefore = {
   alertmanager: docker(["inspect", "--format", "{{.Id}}", "enterprise-alertmanager"], { allowFailure: true }).stdout.trim(),
-  receiver: docker(["inspect", "--format", "{{.Id}}", "enterprise-worker-notifications"], { allowFailure: true }).stdout.trim(),
+  receiver: docker(["inspect", "--format", "{{.Id}}", "enterprise-platform-alert-dispatcher"], { allowFailure: true }).stdout.trim(),
 };
 
 try {
@@ -154,6 +153,7 @@ try {
     path.join(replicaRoot, "scripts"),
     path.join(replicaRoot, "alertmanager"),
     path.join(replicaRoot, "prometheus", "rules"),
+    path.join(replicaRoot, "platform-alert-dispatcher"),
     path.join(replicaRoot, "control-center", "backup"),
   ]) mkdirSync(directory, { recursive: true, mode: 0o700 });
   for (const relative of [
@@ -162,8 +162,14 @@ try {
     "scripts/infra-ops.mjs",
     "scripts/infra-secret-manager.mjs",
     "scripts/alertmanager-secret-permissions.sh",
+    "scripts/network-segmentation-policy.mjs",
+    "scripts/runtime-isolation-policy.mjs",
+    "scripts/supply-chain-policy.mjs",
+    "scripts/github-governance-policy.mjs",
+    "scripts/release-trust.mjs",
     "alertmanager/alertmanager.yml",
     "prometheus/rules/enterprise-alerts.yml",
+    "platform-alert-dispatcher/server.mjs",
     "control-center/backup/contracts.mjs",
   ]) cpSync(path.join(repositoryRoot, relative), path.join(replicaRoot, relative));
 
@@ -199,18 +205,18 @@ try {
     "--enforce",
     "--timeoutMs",
     "20000",
+    "--dispatcherContainer",
+    receiverContainer,
   ], {
     env: {
-      ALERT_EVIDENCE_WORKER_CONTAINER: receiverContainer,
       ALERT_EVIDENCE_ALERTMANAGER_HOST: "alertmanager",
-      PROJECT_SOURCE_ROOT: path.join(sandboxRoot, "no-project-source"),
     },
   });
   if (!operationalEvidence.stdout.includes("Alert evidence written")) throw new Error("Operational alert evidence command did not complete.");
   const alertReportDirectory = path.join(replicaRoot, "reports", "alerts");
   const alertReportName = readdirSync(alertReportDirectory).filter((name) => name.endsWith(".json")).sort().at(-1);
   const alertReport = JSON.parse(readFileSync(path.join(alertReportDirectory, alertReportName), "utf8"));
-  if (alertReport.status !== "passed" || alertReport.runtime?.exactReceiverReceipt !== true || alertReport.runtime?.workerContainer !== receiverContainer) {
+  if (alertReport.status !== "passed" || alertReport.runtime?.exactReceiverReceipt !== true) {
     throw new Error("Operational alert evidence did not prove the exact Alertmanager delivery path.");
   }
   command(process.execPath, [
@@ -221,10 +227,10 @@ try {
     "1000",
     "--alertmanagerHost",
     "missing-alertmanager",
+    "--dispatcherContainer",
+    receiverContainer,
   ], {
     env: {
-      ALERT_EVIDENCE_WORKER_CONTAINER: receiverContainer,
-      PROJECT_SOURCE_ROOT: path.join(sandboxRoot, "no-project-source"),
     },
   });
   const negativeReportName = readdirSync(alertReportDirectory).filter((name) => name.endsWith(".json")).sort().at(-1);
@@ -240,7 +246,7 @@ try {
 
   const liveIdsAfter = {
     alertmanager: docker(["inspect", "--format", "{{.Id}}", "enterprise-alertmanager"], { allowFailure: true }).stdout.trim(),
-    receiver: docker(["inspect", "--format", "{{.Id}}", "enterprise-worker-notifications"], { allowFailure: true }).stdout.trim(),
+    receiver: docker(["inspect", "--format", "{{.Id}}", "enterprise-platform-alert-dispatcher"], { allowFailure: true }).stdout.trim(),
   };
   if (JSON.stringify(liveIdsBefore) !== JSON.stringify(liveIdsAfter)) throw new Error("Live alert runtime changed during sandbox testing.");
 
@@ -259,5 +265,6 @@ try {
 } finally {
   docker(["rm", "-f", alertmanagerContainer, receiverContainer, deniedContainer], { allowFailure: true });
   docker(["network", "rm", network], { allowFailure: true });
+  for (const entry of readdirSync(sandboxRoot)) rmSync(path.join(sandboxRoot, entry), { recursive: true, force: true });
   chmodSync(sandboxRoot, 0o700);
 }

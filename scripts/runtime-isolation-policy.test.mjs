@@ -3,41 +3,42 @@ import test from "node:test";
 
 import { evaluateRuntimeIsolation } from "./runtime-isolation-policy.mjs";
 
-test("accepts the bounded mount and socket model", () => {
+test("accepts bounded platform and external workload services", () => {
   const report = evaluateRuntimeIsolation(fixture());
   assert.equal(report.status, "passed", report.failures.join("\n"));
   assert.equal(report.summary.rawSocketOwners.join(","), "docker-socket-proxy");
+  assert.equal(report.summary.hostedWorkloads, 1);
 });
 
-test("rejects a hosted raw socket and broad host mount", () => {
+test("rejects a workload raw socket, bind and broad host mount", () => {
   const config = fixture();
-  config.services["php-anniversary"].volumes.push(
-    { source: "/var/run/docker.sock", target: "/var/run/docker.sock" },
-    { source: "/srv/platform", target: "/mnt/host/d/docker" },
+  config.services["example-app-web"].volumes.push(
+    { type: "bind", source: "/var/run/docker.sock", target: "/var/run/docker.sock" },
+    { type: "bind", source: "/srv/platform", target: "/mnt/host/platform" },
   );
   const report = evaluateRuntimeIsolation(config);
   assert.equal(report.status, "failed");
-  assert.match(report.failures.join("\n"), /app-no-docker-socket-php-anniversary/);
-  assert.match(report.failures.join("\n"), /app-deny-mount-mnt-host-php-anniversary/);
+  assert.match(report.failures.join("\n"), /workload-no-bind-mounts-example-app-web/);
+  assert.match(report.failures.join("\n"), /workload-deny-mount-mnt-host-example-app-web/);
 });
 
-test("rejects shared PHP admin secrets", () => {
+test("rejects root workload identity and added capabilities", () => {
   const config = fixture();
-  config.services["php-stream"].secrets = [{ source: "smtp_password" }];
-  config.services["php-stream"].environment.SMTP_PASSWORD_FILE = "/run/secrets/smtp_password";
+  config.services["example-app-web"].user = "0:0";
+  config.services["example-app-web"].cap_add = ["NET_ADMIN"];
   const report = evaluateRuntimeIsolation(config);
   assert.equal(report.status, "failed");
-  assert.match(report.failures.join("\n"), /php-no-admin-secrets-php-stream/);
-  assert.match(report.failures.join("\n"), /php-no-shared-mail-or-gateway-php-stream/);
+  assert.match(report.failures.join("\n"), /workload-non-root-example-app-web/);
+  assert.match(report.failures.join("\n"), /workload-drop-all-capabilities-example-app-web/);
 });
 
 test("rejects missing memory limits and budget overcommit", () => {
   const config = fixture();
-  config.services["node-ui"].mem_limit = 0;
+  config.services["example-app-web"].mem_limit = 0;
   config.services.postgres.mem_limit = 99 * 1024 * 1024 * 1024;
   const report = evaluateRuntimeIsolation(config);
   assert.equal(report.status, "failed");
-  assert.match(report.failures.join("\n"), /resource-memory-node-ui/);
+  assert.match(report.failures.join("\n"), /resource-memory-example-app-web/);
   assert.match(report.failures.join("\n"), /resource-memory-admission/);
 });
 
@@ -45,7 +46,7 @@ test("rejects mutable proxy images and extra socket-network members", () => {
   const config = fixture();
   config.services["docker-socket-proxy"].image = "ghcr.io/tecnativa/docker-socket-proxy:latest";
   config.services["docker-socket-proxy"].ports[0].host_ip = "0.0.0.0";
-  config.services["node-ui"].networks.platform_docker_control = null;
+  config.services["example-app-web"].networks.platform_docker_control = null;
   const report = evaluateRuntimeIsolation(config);
   assert.equal(report.status, "failed");
   assert.match(report.failures.join("\n"), /socket-proxy-image-pinned/);
@@ -55,36 +56,24 @@ test("rejects mutable proxy images and extra socket-network members", () => {
 
 function fixture() {
   const services = {};
-  const appTargets = {
-    "php-anniversary": "/opt/platform-source/anniversary",
-    "php-fiplatform": "/opt/platform-source/fiplatform",
-    "php-matthewdifilippo": "/opt/platform-source/matthewdifilippo",
-    "php-stream": "/opt/platform-source/stream",
-    "php-workcalendar": "/opt/platform-source/workcalendar",
-    "node-account": "/workspace",
-    "node-ui": "/workspace",
-  };
-  for (const [name, target] of Object.entries(appTargets)) {
-    services[name] = bounded({
-      read_only: true,
-      environment: name.startsWith("node-") ? { NODE_PROJECT_INSTALL_COMMAND: "", NODE_PROJECT_BUILD_COMMAND: "" } : {},
-      tmpfs: name.startsWith("php-") ? ["/var/www/projects:rw,size=128m"] : [],
-      volumes: [{ source: `/srv/apps/${name}`, target, read_only: true }],
-      networks: { app_ingress: null },
-    });
-  }
-  for (const name of ["backend", "web", "worker-jobs", "worker-notifications"]) {
-    services[name] = bounded({ read_only: true, volumes: [], networks: {} });
-  }
+  services["example-app-web"] = bounded({
+    read_only: true,
+    user: "1000:1000",
+    security_opt: ["no-new-privileges:true"],
+    cap_drop: ["ALL"],
+    labels: { "com.platform.workload-id": "example-app", "com.platform.workload-role": "web" },
+    networks: { example_app_ingress: null },
+  });
   services["control-center"] = bounded({ read_only: true, cpu_shares: 1024, volumes: [], networks: {} });
   services["project-router"] = bounded({
     read_only: true,
     volumes: [
-      { source: "/srv/apps", target: "/var/www/projects", read_only: true },
-      { source: "/srv/state", target: "/var/www/project-state", read_only: true },
+      { type: "bind", source: "/srv/apps", target: "/var/www/projects", read_only: true },
+      { type: "bind", source: "/srv/state", target: "/var/www/project-state", read_only: true },
     ],
     networks: {},
   });
+  services["platform-alert-dispatcher"] = bounded({ read_only: true, networks: {} });
   services["backup-scheduler"] = bounded({
     read_only: true,
     cpu_shares: 1024,
@@ -98,10 +87,10 @@ function fixture() {
     image: `ghcr.io/tecnativa/docker-socket-proxy:v0.4.2@sha256:${"a".repeat(64)}`,
     environment: Object.fromEntries(["AUTH", "BUILD", "COMMIT", "CONFIGS", "SECRETS", "SERVICES", "SESSION", "SWARM", "SYSTEM", "TASKS"].map((key) => [key, "0"])),
     ports: [{ host_ip: "127.0.0.1", published: "2376", target: 2375, protocol: "tcp" }],
-    volumes: [{ source: "/var/run/docker.sock", target: "/var/run/docker.sock", read_only: true }],
+    volumes: [{ type: "bind", source: "/var/run/docker.sock", target: "/var/run/docker.sock", read_only: true }],
     networks: { platform_docker_control: null },
   });
-  services.postgres = bounded({ volumes: [], networks: {} });
+  services.postgres = bounded({ networks: {} });
   return { services, networks: { platform_docker_control: { internal: true } } };
 }
 

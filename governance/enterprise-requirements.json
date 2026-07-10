@@ -70,7 +70,8 @@
       "title": "Private registry and immutable production images",
       "state": "repo-ready",
       "evidence": [
-        { "type": "file", "path": "compose.build.yaml" },
+        { "type": "file", "path": "docker/control-center.Dockerfile" },
+        { "type": "file", "path": "docker/ops.Dockerfile" },
         { "type": "command", "name": "release-artifact-gate" },
         { "type": "workflow", "pattern": "Release artifact gate dry run[\\s\\S]*release-artifact-gate" }
       ],

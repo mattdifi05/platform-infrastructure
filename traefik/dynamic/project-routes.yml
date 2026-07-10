@@ -1,17 +1,5 @@
 http:
   routers:
-    enterprise-api:
-      rule: Host(`api.platform-infrastructure.com`)
-      entryPoints:
-        - web
-      priority: 300
-      middlewares:
-        - enterprise-edge-forwarded-https@file
-        - enterprise-security-headers@file
-        - enterprise-rate-limit@file
-        - enterprise-compress@file
-      service: enterprise-backend
-
     enterprise-projects:
       rule: HostRegexp(`^[a-z0-9-]+\.platform-infrastructure\.com$`)
       entryPoints:
@@ -25,10 +13,6 @@ http:
       service: enterprise-project-router
 
   services:
-    enterprise-backend:
-      loadBalancer:
-        servers:
-          - url: http://backend:3000
     enterprise-project-router:
       loadBalancer:
         servers:

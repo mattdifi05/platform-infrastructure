@@ -42,8 +42,8 @@ do
 done
 
 for secret in \
-  postgres_superuser_password app_db_password keycloak_db_password redis_password keycloak_admin_password nats_password \
-  minio_root_password grafana_admin_password session_secret session_signing_keys hash_pepper_keys database_url nats_url smtp_password \
+  postgres_superuser_password keycloak_db_password redis_password keycloak_admin_password nats_password \
+  minio_root_password grafana_admin_password smtp_password \
   mariadb_root_password \
   alertmanager_webhook_token
 do
@@ -62,10 +62,10 @@ ALERTMANAGER_SECRET_GID="$ALERTMANAGER_SECRET_GID" \
     --gid "$ALERTMANAGER_SECRET_GID"
 
 COMPOSE_ENV_FILE="$ENV_FILE" COMPOSE_PROJECT_NAME="$PROJECT_NAME" \
-  sh ./scripts/compose-vps.sh config --quiet
+  bash ./scripts/compose-vps.sh config --quiet
 
 if COMPOSE_ENV_FILE="$ENV_FILE" COMPOSE_PROJECT_NAME="$PROJECT_NAME" \
-  sh ./scripts/compose-vps.sh config | grep -E 'image: .+:latest(@|$)' >/dev/null; then
+  bash ./scripts/compose-vps.sh config | grep -E 'image: .+:latest(@|$)' >/dev/null; then
   echo "Mutable :latest image found in rendered VPS config." >&2
   exit 1
 fi

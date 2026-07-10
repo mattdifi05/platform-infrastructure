@@ -47,10 +47,10 @@
       "controls": [
         {
           "id": "compose-overlay-integrity",
-          "title": "Compose overlay integrity for local, VPS, WAF, secrets and build",
+          "title": "Compose overlay integrity for core, VPS, WAF, secrets and external workloads",
           "mode": "automated-local",
           "requiredBeforeGoLive": true,
-          "evidenceRefs": ["command:static-security-check", "file:compose.yaml", "file:compose.vps.yaml", "file:compose.waf.yaml", "file:compose.secrets.yaml", "file:compose.build.yaml"]
+          "evidenceRefs": ["command:static-security-check", "command:network-segmentation-check", "command:runtime-isolation-check", "file:compose.yaml", "file:compose.vps.yaml", "file:compose.waf.yaml", "file:compose.secrets.yaml", "file:config/hosted-workloads.example.json"]
         },
         {
           "id": "service-healthchecks",

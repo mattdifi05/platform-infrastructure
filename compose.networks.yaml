@@ -1,5 +1,6 @@
-# T12 trust-zone overlay. Load this file last so every service receives only
-# the networks required by the communication matrix in NETWORK-SEGMENTATION.md.
+# Platform trust zones only. Each external workload owns its dedicated internal
+# networks and may extend project-router networking only through the validated
+# hosted workload contract.
 services:
   traefik:
     networks: !override
@@ -16,7 +17,6 @@ services:
     networks: !override
       - platform_db_admin
       - platform_postgres
-      - app_node_account_data
 
   redis:
     networks: !override
@@ -53,22 +53,10 @@ services:
   project-router:
     networks: !override
       - platform_routing
-      - app_php_anniversary_ingress
-      - app_php_fiplatform_ingress
-      - app_php_matthewdifilippo_ingress
-      - app_php_stream_ingress
-      - app_php_workcalendar_ingress
-      - app_node_account_ingress
-      - app_node_ui_ingress
 
   mariadb:
     networks: !override
       - platform_db_admin
-      - app_php_anniversary_data
-      - app_php_fiplatform_data
-      - app_php_matthewdifilippo_data
-      - app_php_stream_data
-      - app_php_workcalendar_data
 
   phpmyadmin:
     networks: !override
@@ -83,38 +71,6 @@ services:
   local-dns:
     networks: !override
       - platform_egress
-
-  backend:
-    networks: !override
-      - platform_routing
-      - platform_postgres
-      - platform_cache
-      - platform_bus
-      - platform_storage
-      - platform_observability
-      - platform_egress
-
-  web:
-    networks: !override
-      - platform_routing
-      - platform_observability
-      - platform_egress
-
-  worker-notifications:
-    networks: !override
-      - platform_postgres
-      - platform_cache
-      - platform_bus
-      - platform_observability
-      - platform_egress
-
-  worker-jobs:
-    networks: !override
-      - platform_postgres
-      - platform_cache
-      - platform_bus
-      - platform_storage
-      - platform_observability
 
   prometheus:
     networks: !override
@@ -131,6 +87,11 @@ services:
   alertmanager:
     networks: !override
       - platform_observability
+
+  platform-alert-dispatcher:
+    networks: !override
+      - platform_observability
+      - platform_egress
 
   grafana:
     networks: !override
@@ -149,47 +110,6 @@ services:
       - platform_db_admin
       - platform_storage
       - platform_egress
-
-  node-account:
-    networks: !override
-      - app_node_account_ingress
-      - app_node_account_data
-      - app_node_account_egress
-
-  node-ui:
-    networks: !override
-      - app_node_ui_ingress
-      - app_node_ui_egress
-
-  php-anniversary:
-    networks: !override
-      - app_php_anniversary_ingress
-      - app_php_anniversary_data
-      - app_php_anniversary_egress
-
-  php-fiplatform:
-    networks: !override
-      - app_php_fiplatform_ingress
-      - app_php_fiplatform_data
-      - app_php_fiplatform_egress
-
-  php-matthewdifilippo:
-    networks: !override
-      - app_php_matthewdifilippo_ingress
-      - app_php_matthewdifilippo_data
-      - app_php_matthewdifilippo_egress
-
-  php-stream:
-    networks: !override
-      - app_php_stream_ingress
-      - app_php_stream_data
-      - app_php_stream_egress
-
-  php-workcalendar:
-    networks: !override
-      - app_php_workcalendar_ingress
-      - app_php_workcalendar_data
-      - app_php_workcalendar_egress
 
 networks:
   platform_edge:
@@ -228,64 +148,3 @@ networks:
     name: ${PLATFORM_NETWORK_PREFIX:-platform_infra_vps}_egress
     enable_ipv6: false
     labels: { com.platform.trust-zone: trusted-platform-egress }
-
-  app_php_anniversary_ingress:
-    name: ${PLATFORM_NETWORK_PREFIX:-platform_infra_vps}_app_php_anniversary_ingress
-    internal: true
-  app_php_anniversary_data:
-    name: ${PLATFORM_NETWORK_PREFIX:-platform_infra_vps}_app_php_anniversary_data
-    internal: true
-  app_php_anniversary_egress:
-    name: ${PLATFORM_NETWORK_PREFIX:-platform_infra_vps}_app_php_anniversary_egress
-    enable_ipv6: false
-  app_php_fiplatform_ingress:
-    name: ${PLATFORM_NETWORK_PREFIX:-platform_infra_vps}_app_php_fiplatform_ingress
-    internal: true
-  app_php_fiplatform_data:
-    name: ${PLATFORM_NETWORK_PREFIX:-platform_infra_vps}_app_php_fiplatform_data
-    internal: true
-  app_php_fiplatform_egress:
-    name: ${PLATFORM_NETWORK_PREFIX:-platform_infra_vps}_app_php_fiplatform_egress
-    enable_ipv6: false
-  app_php_matthewdifilippo_ingress:
-    name: ${PLATFORM_NETWORK_PREFIX:-platform_infra_vps}_app_php_matthewdifilippo_ingress
-    internal: true
-  app_php_matthewdifilippo_data:
-    name: ${PLATFORM_NETWORK_PREFIX:-platform_infra_vps}_app_php_matthewdifilippo_data
-    internal: true
-  app_php_matthewdifilippo_egress:
-    name: ${PLATFORM_NETWORK_PREFIX:-platform_infra_vps}_app_php_matthewdifilippo_egress
-    enable_ipv6: false
-  app_php_stream_ingress:
-    name: ${PLATFORM_NETWORK_PREFIX:-platform_infra_vps}_app_php_stream_ingress
-    internal: true
-  app_php_stream_data:
-    name: ${PLATFORM_NETWORK_PREFIX:-platform_infra_vps}_app_php_stream_data
-    internal: true
-  app_php_stream_egress:
-    name: ${PLATFORM_NETWORK_PREFIX:-platform_infra_vps}_app_php_stream_egress
-    enable_ipv6: false
-  app_php_workcalendar_ingress:
-    name: ${PLATFORM_NETWORK_PREFIX:-platform_infra_vps}_app_php_workcalendar_ingress
-    internal: true
-  app_php_workcalendar_data:
-    name: ${PLATFORM_NETWORK_PREFIX:-platform_infra_vps}_app_php_workcalendar_data
-    internal: true
-  app_php_workcalendar_egress:
-    name: ${PLATFORM_NETWORK_PREFIX:-platform_infra_vps}_app_php_workcalendar_egress
-    enable_ipv6: false
-  app_node_account_ingress:
-    name: ${PLATFORM_NETWORK_PREFIX:-platform_infra_vps}_app_node_account_ingress
-    internal: true
-  app_node_account_data:
-    name: ${PLATFORM_NETWORK_PREFIX:-platform_infra_vps}_app_node_account_data
-    internal: true
-  app_node_account_egress:
-    name: ${PLATFORM_NETWORK_PREFIX:-platform_infra_vps}_app_node_account_egress
-    enable_ipv6: false
-  app_node_ui_ingress:
-    name: ${PLATFORM_NETWORK_PREFIX:-platform_infra_vps}_app_node_ui_ingress
-    internal: true
-  app_node_ui_egress:
-    name: ${PLATFORM_NETWORK_PREFIX:-platform_infra_vps}_app_node_ui_egress
-    enable_ipv6: false

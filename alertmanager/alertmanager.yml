@@ -2,7 +2,7 @@ global:
   resolve_timeout: 5m
 
 route:
-  receiver: platform-notification-worker
+  receiver: platform-alert-dispatcher
   group_by:
     - alertname
     - service
@@ -11,21 +11,21 @@ route:
   group_interval: 5m
   repeat_interval: 4h
   routes:
-    - receiver: platform-notification-worker
+    - receiver: platform-alert-dispatcher
       matchers:
         - platform_probe="alert-delivery"
       group_wait: 0s
       group_interval: 1m
       repeat_interval: 1h
-    - receiver: platform-notification-worker
+    - receiver: platform-alert-dispatcher
       matchers:
         - severity="critical"
       repeat_interval: 1h
 
 receivers:
-  - name: platform-notification-worker
+  - name: platform-alert-dispatcher
     webhook_configs:
-      - url: http://worker-notifications:3000/alerts/prometheus
+      - url: http://platform-alert-dispatcher:3000/alerts/prometheus
         send_resolved: true
         max_alerts: 20
         http_config:

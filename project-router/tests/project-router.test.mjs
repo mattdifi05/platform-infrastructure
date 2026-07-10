@@ -12,6 +12,7 @@ const testRoot = path.join(infraRoot, ".tmp", "project-router-tests", randomUUID
 const projectsRoot = path.join(testRoot, "projects");
 const stateDir = path.join(testRoot, "state");
 const stateFile = path.join(stateDir, "projects.json");
+const workloadLockFile = path.join(stateDir, "hosted-workloads.lock.json");
 
 test("project-router proxies PHP, Node and Static projects only to dedicated upstreams", async (t) => {
   prepareFixture();
@@ -56,6 +57,7 @@ test("project-router proxies PHP, Node and Static projects only to dedicated ups
       PROJECT_ROUTER_PORT: String(routerPort),
       PROJECTS_ROOT: projectsRoot,
       PROJECT_STATE_FILE: stateFile,
+      PROJECT_ROUTER_WORKLOAD_LOCK_FILE: workloadLockFile,
       CONTROL_CENTER_HOST: "portal.localhost.com",
       PROJECT_HOST_SUFFIX: ".localhost.com",
       PHP_PROJECT_UPSTREAMS: `php-demo=http://127.0.0.1:${serverPort(phpServer)},fiplatform=http://127.0.0.1:${serverPort(phpServer)}`,
@@ -154,6 +156,19 @@ test("project-router proxies PHP, Node and Static projects only to dedicated ups
   assert.equal(missing.statusCode, 404);
   assert.match(missing.body, /Project not found/);
 
+  const lockedRoute = await httpGet(routerPort, "locked-demo.localhost.com", "/");
+  assert.equal(lockedRoute.statusCode, 502);
+  assert.match(lockedRoute.body, /upstream unavailable/);
+
+  writeFileSync(workloadLockFile, `${JSON.stringify({
+    version: 1,
+    state: "verified",
+    routes: [{ workloadId: "fixture-app", slug: "locked-demo", service: "postgres", port: 5432, upstream: "http://postgres:5432" }],
+  }, null, 2)}\n`);
+  const forgedLockedRoute = await httpGet(routerPort, "locked-demo.localhost.com", "/");
+  assert.equal(forgedLockedRoute.statusCode, 500);
+  assert.match(forgedLockedRoute.body, /internal proxy error/);
+
   assert.equal(existsSync(path.join(projectsRoot, "php-demo", "public", "index.php")), true);
   assert.equal(stderr.includes("project-router error"), false);
   assert.equal(stderr.includes("169.254.169.254"), false);
@@ -189,6 +204,7 @@ function prepareFixture() {
   mkdirSync(path.join(projectsRoot, "node-demo"), { recursive: true });
   mkdirSync(path.join(projectsRoot, "static-demo", "public"), { recursive: true });
   mkdirSync(path.join(projectsRoot, "metadata-demo", ".platform"), { recursive: true });
+  mkdirSync(path.join(projectsRoot, "locked-demo"), { recursive: true });
   mkdirSync(stateDir, { recursive: true });
   writeFileSync(path.join(projectsRoot, "php-demo", "public", "index.php"), "<?php echo 'php-demo';\n");
   writeFileSync(path.join(projectsRoot, "legacy-php", "public", "index.php"), "<?php echo 'legacy-php';\n");
@@ -211,7 +227,13 @@ function prepareFixture() {
     type: "node",
     upstream: "http://169.254.169.254:80",
   }, null, 2)}\n`);
+  writeFileSync(path.join(projectsRoot, "locked-demo", "package.json"), `${JSON.stringify({ scripts: { start: "node server.mjs" } }, null, 2)}\n`);
   writeFileSync(stateFile, `${JSON.stringify({ projects: {} }, null, 2)}\n`);
+  writeFileSync(workloadLockFile, `${JSON.stringify({
+    version: 1,
+    state: "verified",
+    routes: [{ workloadId: "fixture-app", slug: "locked-demo", service: "fixture-app-web", port: 3000, upstream: "http://fixture-app-web:3000" }],
+  }, null, 2)}\n`);
 }
 
 function freePort() {

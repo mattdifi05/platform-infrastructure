@@ -36,7 +36,6 @@ function runOps(args, expectSuccess = true, envOverrides = {}) {
       PROJECT_DATABASES_FILE: path.join(stateRoot, "databases.json"),
       BACKUP_SCHEDULER_JOBS_DIR: jobsRoot,
       BACKUP_SIGNING_KEYS_FILE: keyFile,
-      APP_DB_NAME: "app_db",
       KEYCLOAK_DB_NAME: "keycloak",
       ...envOverrides,
     },
@@ -87,6 +86,13 @@ try {
   mkdirSync(path.join(replicaRoot, "control-center", "backup"), { recursive: true });
   mkdirSync(path.join(replicaRoot, "governance"), { recursive: true });
   cpSync(path.join(repositoryRoot, "scripts", "infra-ops.mjs"), path.join(replicaRoot, "scripts", "infra-ops.mjs"));
+  for (const moduleName of [
+    "network-segmentation-policy.mjs",
+    "runtime-isolation-policy.mjs",
+    "supply-chain-policy.mjs",
+    "github-governance-policy.mjs",
+    "release-trust.mjs",
+  ]) cpSync(path.join(repositoryRoot, "scripts", moduleName), path.join(replicaRoot, "scripts", moduleName));
   cpSync(path.join(repositoryRoot, "control-center", "backup", "contracts.mjs"), path.join(replicaRoot, "control-center", "backup", "contracts.mjs"));
   cpSync(path.join(repositoryRoot, "governance", "backup-data-policy.json"), path.join(replicaRoot, "governance", "backup-data-policy.json"));
 
@@ -116,7 +122,6 @@ try {
     "source:beta",
     "database:alpha-mariadb-alpha",
     "database:beta-postgres-beta",
-    "database:platform-postgres-app-db",
     "database:platform-postgres-keycloak",
     "platform-state:minio-data",
     "platform-state:keycloak-config",

@@ -6,6 +6,7 @@ import path from "node:path";
 const port = Number(process.env.PROJECT_ROUTER_PORT || 8080);
 const projectsRoot = process.env.PROJECTS_ROOT || "/var/www/projects";
 const stateFile = process.env.PROJECT_STATE_FILE || "/var/www/project-state/projects.json";
+const workloadLockFile = process.env.PROJECT_ROUTER_WORKLOAD_LOCK_FILE || "/var/www/project-state/hosted-workloads.lock.json";
 const testLoopbackAllowed = process.env.NODE_ENV === "test" && process.env.PROJECT_ROUTER_TEST_ALLOW_LOOPBACK === "true";
 const allowedUpstreams = parseAllowedUpstreams(process.env.PROJECT_ROUTER_ALLOWED_UPSTREAMS || "control-center:8080");
 const controlCenterUpstream = validateUpstream(process.env.CONTROL_CENTER_UPSTREAM || "http://control-center:8080", "control-center");
@@ -19,6 +20,7 @@ const phpProjectUpstreams = parsePairs(process.env.PHP_PROJECT_UPSTREAMS || "");
 const nodeUpstreams = parsePairs(process.env.NODE_PROJECT_UPSTREAMS || "");
 const staticUpstreams = parsePairs(process.env.STATIC_PROJECT_UPSTREAMS || "");
 const projectConfigNames = [".platform/project.json", "platform.project.json"];
+let workloadRouteCache = { key: "", routes: new Map(), allowed: new Set() };
 
 const server = createServer(async (req, res) => {
   try {
@@ -47,7 +49,7 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    const upstream = dedicatedUpstreamFor(project);
+    const upstream = dedicatedUpstreamFor(project, workloadRoutesFromLock());
     if (!upstream) {
       disabled(res, `${runtimeLabel(project.type)} project has no dedicated upstream`, host, 503);
       return;
@@ -101,11 +103,14 @@ function proxy(clientReq, clientRes, upstream) {
   clientReq.pipe(proxyReq);
 }
 
-function dedicatedUpstreamFor(project) {
-  const mapped = project.upstream || mappedProjectValue(projectUpstreams, project) || mappedProjectValue(upstreamMapForType(project.type), project);
+function dedicatedUpstreamFor(project, workloadRoutes) {
+  const mapped = mappedProjectValue(workloadRoutes.routes, project)
+    || project.upstream
+    || mappedProjectValue(projectUpstreams, project)
+    || mappedProjectValue(upstreamMapForType(project.type), project);
   if (!mapped) return null;
   try {
-    return validateUpstream(expandProjectValue(mapped, project), project.slug);
+    return validateUpstream(expandProjectValue(mapped, project), project.slug, workloadRoutes.allowed);
   } catch {
     console.error(`rejected project upstream for ${project.slug}: service allowlist policy violation`);
     return null;
@@ -141,7 +146,7 @@ function parseAllowedUpstreams(value) {
   return allowed;
 }
 
-function validateUpstream(value, label) {
+function validateUpstream(value, label, additionalAllowed = new Set()) {
   let upstream;
   try {
     upstream = new URL(String(value || ""));
@@ -154,8 +159,39 @@ function validateUpstream(value, label) {
   if (upstream.username || upstream.password || upstream.search || upstream.hash) throw new Error(`Upstream credentials, query and fragment are forbidden for ${label}.`);
   if (upstream.pathname !== "/") throw new Error(`Upstream base paths are forbidden for ${label}.`);
   if (!validUpstreamHost(hostname) || !validPort(port)) throw new Error(`Invalid upstream service for ${label}.`);
-  if (!allowedUpstreams.has(`${hostname}:${port}`)) throw new Error(`Upstream service is not allowlisted for ${label}.`);
+  if (!allowedUpstreams.has(`${hostname}:${port}`) && !additionalAllowed.has(`${hostname}:${port}`)) throw new Error(`Upstream service is not allowlisted for ${label}.`);
   return new URL(`http://${hostname}:${port}/`);
+}
+
+function workloadRoutesFromLock() {
+  if (!existsSync(workloadLockFile)) return { routes: new Map(), allowed: new Set() };
+  const stat = statSync(workloadLockFile);
+  if (!stat.isFile() || stat.size < 2 || stat.size > 1024 * 1024) throw new Error("Invalid hosted workload lock file.");
+  const key = `${stat.mtimeMs}:${stat.size}`;
+  if (workloadRouteCache.key === key) return workloadRouteCache;
+  const lock = JSON.parse(readFileSync(workloadLockFile, "utf8"));
+  if (lock?.version !== 1 || lock?.state !== "verified" || !Array.isArray(lock.routes)) throw new Error("Hosted workload lock is not verified.");
+  const routes = new Map();
+  const allowed = new Set();
+  for (const route of lock.routes) {
+    const workloadId = String(route?.workloadId ?? "").toLowerCase();
+    const slug = String(route?.slug ?? "").toLowerCase();
+    const service = String(route?.service ?? "").toLowerCase();
+    const port = Number(route?.port);
+    if (!/^[a-z][a-z0-9-]{1,62}$/.test(workloadId)
+      || !/^[a-z][a-z0-9-]{1,62}$/.test(slug)
+      || !/^[a-z][a-z0-9-]{1,62}$/.test(service)
+      || !service.startsWith(`${workloadId}-`)
+      || !validPort(port)
+      || route.upstream !== `http://${service}:${port}`
+      || routes.has(slug)) {
+      throw new Error("Hosted workload route violates the verified lock contract.");
+    }
+    routes.set(slug, route.upstream);
+    allowed.add(`${service}:${port}`);
+  }
+  workloadRouteCache = { key, routes, allowed };
+  return workloadRouteCache;
 }
 
 function validUpstreamHost(hostname) {

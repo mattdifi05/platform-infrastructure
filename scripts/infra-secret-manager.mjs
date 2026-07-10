@@ -12,10 +12,6 @@ const argv = parseArgs(process.argv.slice(3));
 
 const requiredSecrets = [
   { name: "postgres_superuser_password", kind: "opaque", bytes: 36, rotationDays: 90, manualRotation: true },
-  { name: "app_db_password", kind: "opaque", bytes: 36, rotationDays: 90, manualRotation: true, fileMode: 0o640 },
-  { name: "backend_db_password", kind: "opaque", bytes: 36, rotationDays: 90, manualRotation: true },
-  { name: "worker_jobs_db_password", kind: "opaque", bytes: 36, rotationDays: 90, manualRotation: true },
-  { name: "worker_notifications_db_password", kind: "opaque", bytes: 36, rotationDays: 90, manualRotation: true },
   { name: "keycloak_db_password", kind: "opaque", bytes: 36, rotationDays: 90, manualRotation: true },
   { name: "redis_password", kind: "opaque", bytes: 36, rotationDays: 90 },
   { name: "keycloak_admin_password", kind: "opaque", bytes: 36, rotationDays: 90 },
@@ -24,20 +20,11 @@ const requiredSecrets = [
   { name: "mariadb_root_password", kind: "opaque", bytes: 36, rotationDays: 90, manualRotation: true },
   { name: "phpmyadmin_control_password", kind: "opaque", bytes: 36, rotationDays: 90 },
   { name: "grafana_admin_password", kind: "opaque", bytes: 36, rotationDays: 90 },
-  { name: "session_secret", kind: "opaque", bytes: 48, rotationDays: 90 },
-  { name: "session_signing_keys", kind: "keyring", bytes: 48, keyPrefix: "s", rotationDays: 60 },
   { name: "projects_gateway_signing_keys", kind: "keyring", bytes: 48, keyPrefix: "p", rotationDays: 90 },
   { name: "control_center_vault_keys", kind: "keyring", bytes: 48, keyPrefix: "v", rotationDays: 90, manualRotation: true },
-  { name: "hash_pepper_keys", kind: "keyring", bytes: 48, keyPrefix: "h", rotationDays: 90 },
   { name: "backup_signing_keys", kind: "keyring", bytes: 48, keyPrefix: "b", rotationDays: 90 },
   { name: "alertmanager_webhook_token", kind: "opaque", bytes: 48, rotationDays: 90, fileMode: 0o640 },
   { name: "smtp_password", kind: "opaque", bytes: 36, minLength: 8, rotationDays: 90 },
-  { name: "cloudflare_turnstile_secret_key", kind: "opaque", bytes: 36, minLength: 8, rotationDays: 90, manualRotation: true },
-  { name: "database_url", kind: "derived", rotationDays: 90 },
-  { name: "backend_database_url", kind: "derived", rotationDays: 90 },
-  { name: "worker_jobs_database_url", kind: "derived", rotationDays: 90 },
-  { name: "worker_notifications_database_url", kind: "derived", rotationDays: 90 },
-  { name: "nats_url", kind: "derived", rotationDays: 90 },
 ];
 
 const requiredByName = new Map(requiredSecrets.map((secret) => [secret.name, secret]));
@@ -411,7 +398,6 @@ function materializedOrGenerated(spec) {
 }
 
 function buildValues(existingValues = {}) {
-  const env = parseEnv(envFile());
   const values = { ...existingValues };
   for (const spec of requiredSecrets) {
     if (existingValues[spec.name]) {
@@ -420,17 +406,6 @@ function buildValues(existingValues = {}) {
     }
     values[spec.name] = materializedOrGenerated(spec);
   }
-  const appDbUser = env.APP_DB_USER || "app_user";
-  const appDbName = env.APP_DB_NAME || "app_db";
-  const backendDbUser = env.BACKEND_DB_USER || "app_backend_runtime";
-  const workerJobsDbUser = env.WORKER_JOBS_DB_USER || "app_worker_jobs_runtime";
-  const workerNotificationsDbUser = env.WORKER_NOTIFICATIONS_DB_USER || "app_worker_notifications_runtime";
-  const natsUser = env.NATS_USER || "platform";
-  values.database_url ||= `postgresql://${encodeURIComponent(appDbUser)}:${encodeURIComponent(values.app_db_password)}@postgres:5432/${encodeURIComponent(appDbName)}`;
-  values.backend_database_url ||= `postgresql://${encodeURIComponent(backendDbUser)}:${encodeURIComponent(values.backend_db_password)}@postgres:5432/${encodeURIComponent(appDbName)}`;
-  values.worker_jobs_database_url ||= `postgresql://${encodeURIComponent(workerJobsDbUser)}:${encodeURIComponent(values.worker_jobs_db_password)}@postgres:5432/${encodeURIComponent(appDbName)}`;
-  values.worker_notifications_database_url ||= `postgresql://${encodeURIComponent(workerNotificationsDbUser)}:${encodeURIComponent(values.worker_notifications_db_password)}@postgres:5432/${encodeURIComponent(appDbName)}`;
-  values.nats_url ||= `nats://${encodeURIComponent(natsUser)}:${encodeURIComponent(values.nats_password)}@nats:4222`;
   return values;
 }
 
@@ -472,28 +447,6 @@ function materialize(values = null, store = null) {
   }
   audit("materialize", { names });
   log(`Materialized ${names.length} Docker secret files in ${secretsDir()}`);
-}
-
-function refreshScopedDatabaseUrl(values, passwordName) {
-  const env = parseEnv(envFile());
-  const appDbName = env.APP_DB_NAME || "app_db";
-  const identities = {
-    backend_db_password: {
-      user: env.BACKEND_DB_USER || "app_backend_runtime",
-      urlName: "backend_database_url",
-    },
-    worker_jobs_db_password: {
-      user: env.WORKER_JOBS_DB_USER || "app_worker_jobs_runtime",
-      urlName: "worker_jobs_database_url",
-    },
-    worker_notifications_db_password: {
-      user: env.WORKER_NOTIFICATIONS_DB_USER || "app_worker_notifications_runtime",
-      urlName: "worker_notifications_database_url",
-    },
-  };
-  const identity = identities[passwordName];
-  if (!identity) fail(`Unsupported scoped database password: ${passwordName}`);
-  values[identity.urlName] = `postgresql://${encodeURIComponent(identity.user)}:${encodeURIComponent(values[passwordName])}@postgres:5432/${encodeURIComponent(appDbName)}`;
 }
 
 async function init() {
@@ -629,20 +582,6 @@ async function rotate() {
   } else {
     fail(`${name} is derived and cannot be rotated directly.`);
   }
-  if (name === "app_db_password") {
-    const env = parseEnv(envFile());
-    const appDbUser = env.APP_DB_USER || "app_user";
-    const appDbName = env.APP_DB_NAME || "app_db";
-    values.database_url = `postgresql://${encodeURIComponent(appDbUser)}:${encodeURIComponent(values.app_db_password)}@postgres:5432/${encodeURIComponent(appDbName)}`;
-  }
-  if (["backend_db_password", "worker_jobs_db_password", "worker_notifications_db_password"].includes(name)) {
-    refreshScopedDatabaseUrl(values, name);
-  }
-  if (name === "nats_password") {
-    const env = parseEnv(envFile());
-    const natsUser = env.NATS_USER || "platform";
-    values.nats_url = `nats://${encodeURIComponent(natsUser)}:${encodeURIComponent(values.nats_password)}@nats:4222`;
-  }
   validateValues(values, store);
   const nextStore = writeStore(values, store);
   materialize(values, nextStore);
@@ -683,20 +622,6 @@ async function setSecret() {
   values[normalized] = readSecretInput(spec);
   if (spec.vault && values[normalized].length < spec.minLength) {
     fail(`Vault secret ${normalized} is shorter than ${spec.minLength} byte(s).`);
-  }
-  if (normalized === "app_db_password") {
-    const env = parseEnv(envFile());
-    const appDbUser = env.APP_DB_USER || "app_user";
-    const appDbName = env.APP_DB_NAME || "app_db";
-    values.database_url = `postgresql://${encodeURIComponent(appDbUser)}:${encodeURIComponent(values.app_db_password)}@postgres:5432/${encodeURIComponent(appDbName)}`;
-  }
-  if (["backend_db_password", "worker_jobs_db_password", "worker_notifications_db_password"].includes(normalized)) {
-    refreshScopedDatabaseUrl(values, normalized);
-  }
-  if (normalized === "nats_password") {
-    const env = parseEnv(envFile());
-    const natsUser = env.NATS_USER || "platform";
-    values.nats_url = `nats://${encodeURIComponent(natsUser)}:${encodeURIComponent(values.nats_password)}@nats:4222`;
   }
   validateValues(values, store);
   const specOverrides = spec.vault

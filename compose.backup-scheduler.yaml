@@ -47,10 +47,7 @@ services:
       RESTIC_REQUIRE_IMMUTABLE_IMAGE: ${RESTIC_REQUIRE_IMMUTABLE_IMAGE:-true}
       RESTIC_MAX_REPOSITORY_BYTES: ${RESTIC_MAX_REPOSITORY_BYTES:-2500000000000}
       RCLONE_CONFIG: ${RCLONE_CONFIG:-/infra/secrets/rclone/rclone.conf}
-      POSTGRES_BACKUP_DATABASE: ${POSTGRES_BACKUP_DATABASE:-app_db}
-      APP_DB_NAME: ${APP_DB_NAME:-app_db}
       KEYCLOAK_DB_NAME: ${KEYCLOAK_DB_NAME:-keycloak}
-      POSTGRES_OPS_SCHEMA: ${POSTGRES_OPS_SCHEMA:-}
       BACKUP_LOCAL_KEEP_LAST: ${BACKUP_LOCAL_KEEP_LAST:-42}
       BACKUP_SCHEDULER_JOBS_DIR: /var/www/project-state/backup-jobs
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
@@ -69,12 +66,6 @@ services:
       minio:
         condition: service_healthy
       keycloak:
-        condition: service_healthy
-      backend:
-        condition: service_healthy
-      worker-jobs:
-        condition: service_healthy
-      worker-notifications:
         condition: service_healthy
     networks:
       - enterprise_net

@@ -86,7 +86,6 @@ const dockerStatsFile = process.env.PROJECT_DOCKER_STATS_FILE || "/var/www/proje
 const statusRunsFile = process.env.PROJECT_STATUS_RUNS_FILE || "/var/www/project-state/status-runs.jsonl";
 const reportsRoot = process.env.CONTROL_CENTER_REPORTS_ROOT || path.join(platformInfraRoot, "reports");
 const databaseDeleteEvidenceMaxAgeMs = clampNumber(Number(process.env.CONTROL_CENTER_DATABASE_DELETE_EVIDENCE_MAX_AGE_SECONDS || 86400), 3600, 604800) * 1000;
-const postgresAppPasswordFile = process.env.CONTROL_CENTER_POSTGRES_APP_PASSWORD_FILE || "";
 const environment = normalizeEnvironment(process.env.CONTROL_CENTER_ENV || "local");
 const platformName = String(process.env.PLATFORM_NAME || "Platform Infrastructure").trim() || "Platform Infrastructure";
 const domain = normalizeHost(process.env.DOMAIN || process.env.LOCAL_DOMAIN || "localhost.com");
@@ -116,7 +115,6 @@ const postgresHost = normalizeHost(process.env.CONTROL_CENTER_POSTGRES_HOST || "
 const postgresPort = clampNumber(Number(process.env.CONTROL_CENTER_POSTGRES_PORT || 5432), 1, 65535);
 const postgresSuperuser = sanitizeDatabasePrincipal(process.env.CONTROL_CENTER_POSTGRES_SUPERUSER || "postgres") || "postgres";
 const postgresSuperuserPasswordFile = process.env.CONTROL_CENTER_POSTGRES_SUPERUSER_PASSWORD_FILE || "";
-const postgresAppUser = sanitizeDatabasePrincipal(process.env.CONTROL_CENTER_POSTGRES_APP_USER || process.env.APP_DB_USER || "app_user") || "app_user";
 const statusWafUrl = String(process.env.CONTROL_CENTER_STATUS_WAF_URL || "https://waf:8443").replace(/\/$/, "");
 const statusProbeTimeoutMs = clampNumber(Number(process.env.CONTROL_CENTER_STATUS_PROBE_TIMEOUT_MS || 4000), 500, 15000);
 const statusProbeTlsVerify = parseBoolean(process.env.CONTROL_CENTER_STATUS_TLS_VERIFY || "");
@@ -881,7 +879,7 @@ async function handlePhpPgAdminLogin(req, res, url, context) {
     const credential = resolvePostgresCredential(database, project);
     if (!credential) {
       appendAudit({ action: "database.phppgadmin.login", target: database.id, environment: context.environment, risk: "medium", result: "rejected", dryRun: true, summary: "phpPgAdmin app-scoped login rejected because no PostgreSQL credential was found." });
-      renderTransientMessage(res, 409, "Accesso phpPgAdmin non configurato", `Non ho trovato credenziali PostgreSQL limitate per ${databaseDisplayName(database)}. Configura adminPasswordFile oppure CONTROL_CENTER_POSTGRES_APP_PASSWORD_FILE.`);
+      renderTransientMessage(res, 409, "Accesso phpPgAdmin non configurato", `Non ho trovato credenziali PostgreSQL limitate per ${databaseDisplayName(database)}. Configura il principal dedicato e il relativo credentialFile.`);
       return;
     }
     const login = await phpPgAdminLogin(database, credential);
@@ -1272,21 +1270,21 @@ async function buildContext({ projects, state }) {
   const workerJobsState = readWorkerJobsState();
   const defaultWorkerRuntimes = [
     workerRuntimeRecord({
-      id: "enterprise-worker-notifications",
+      id: "enterprise-platform-alert-dispatcher",
       projectId: "platform",
-      name: "Notification worker",
-      service: "worker-notifications",
+      name: "Alert dispatcher",
+      service: "platform-alert-dispatcher",
       status: "configured",
       queueName: "alerts",
       source: "compose-service",
     }),
     workerRuntimeRecord({
-      id: "enterprise-worker-jobs",
+      id: "enterprise-backup-scheduler",
       projectId: "platform",
-      name: "Jobs worker",
-      service: "worker-jobs",
+      name: "Backup scheduler",
+      service: "backup-scheduler",
       status: "configured",
-      queueName: "jobs",
+      queueName: "maintenance",
       source: "compose-service",
     }),
     ...applications
@@ -1310,8 +1308,6 @@ async function buildContext({ projects, state }) {
   ].sort((a, b) => `${a.projectId}:${a.name}`.localeCompare(`${b.projectId}:${b.name}`));
   const defaultJobQueues = [
     jobQueueRecord({ id: "alerts", projectId: "platform", name: "alerts", backend: "alertmanager-webhook", status: "configured", retryPolicy: "bounded-worker-retry", source: "compose-service" }),
-    jobQueueRecord({ id: "jobs", projectId: "platform", name: "jobs", backend: "nats", status: "configured", retryPolicy: "bounded-worker-retry", source: "compose-service" }),
-    jobQueueRecord({ id: "audit-outbox", projectId: "platform", name: "audit-outbox", backend: "postgres-outbox", status: "configured", retryPolicy: "max-8-attempts", source: "compose-service" }),
     jobQueueRecord({ id: "maintenance", projectId: "platform", name: "maintenance", backend: "container-cron", status: "configured", retryPolicy: "ops-runner-evidence", source: "backup-scheduler" }),
   ];
   const defaultQueueIds = new Set(defaultJobQueues.map((queue) => queue.id));
@@ -1326,8 +1322,7 @@ async function buildContext({ projects, state }) {
     .map((job) => jobRecord(job))
     .sort((a, b) => String(b.updatedAt || b.createdAt).localeCompare(String(a.updatedAt || a.createdAt)));
   const defaultJobSchedules = [
-    jobScheduleRecord({ id: "backup-scheduler", projectId: "platform", name: "Backup scheduler", workerId: "enterprise-worker-jobs", queueId: "maintenance", cronExpression: "15 3 * * *", status: "configured", source: "compose-backup-scheduler", containerizedCron: true }),
-    jobScheduleRecord({ id: "audit-outbox-dispatcher", projectId: "platform", name: "Audit outbox dispatcher", workerId: "enterprise-worker-jobs", queueId: "audit-outbox", cronExpression: "*/1 * * * *", status: "configured", source: "worker-jobs", containerizedCron: true }),
+    jobScheduleRecord({ id: "backup-scheduler", projectId: "platform", name: "Backup scheduler", workerId: "enterprise-backup-scheduler", queueId: "maintenance", cronExpression: "0 */8 * * *", status: "configured", source: "compose-backup-scheduler", containerizedCron: true }),
   ];
   const defaultScheduleIds = new Set(defaultJobSchedules.map((schedule) => schedule.id));
   const jobSchedules = [
@@ -1418,7 +1413,7 @@ async function buildContext({ projects, state }) {
     recentErrors: recentErrorRecords(audit, operations),
     notificationChannels,
     detailedLogs: "Use authenticated Grafana/Loki dashboards or Docker logs from the operator shell.",
-    alertRouting: "Prometheus routes to internal Alertmanager, then to worker-notifications with secret-backed delivery.",
+    alertRouting: "Prometheus routes to internal Alertmanager, then to the platform alert dispatcher with secret-backed delivery.",
     rawConsoles: "Prometheus, Alertmanager and Traefik raw consoles are intentionally not linked from Projects.",
   };
   const monitoring = buildMonitoringTopology({ resources, logsAlerts, alertRecords });
@@ -5688,20 +5683,7 @@ function resolvePostgresCredential(database, project) {
   const metadataUser = sanitizeDatabasePrincipal(database.adminUser || database.ownerRole || "");
   const metadataPassword = readCredentialPasswordFile(database.credentialFile || database.adminPasswordFile || database.passwordFile || "", project);
   if (metadataUser && metadataPassword) return { user: metadataUser, password: metadataPassword, source: "database-metadata" };
-  const appPassword = readPostgresAppPassword();
-  if (appPassword && (!metadataUser || metadataUser === postgresAppUser)) {
-    return { user: metadataUser || postgresAppUser, password: appPassword, source: "postgres-app-secret" };
-  }
   return null;
-}
-
-function readPostgresAppPassword() {
-  if (!postgresAppPasswordFile || !existsSync(postgresAppPasswordFile)) return "";
-  try {
-    return readFileSync(postgresAppPasswordFile, "utf8").trim();
-  } catch {
-    return "";
-  }
 }
 
 function databaseAllowsGenericProjectCredential(database, project) {
@@ -8430,7 +8412,7 @@ function renderMonitoringAdvanced(monitoring) {
     <div class="panel"><div class="panel-head"><span>MET</span><div><h2>Prometheus Targets</h2><p>Scrape configuration parsed from the infrastructure Prometheus config.</p></div></div>
       <div class="cards">${scrapeJobs.map(renderMonitoringScrapeCard).join("") || empty("No scrape jobs", "No Prometheus scrape jobs were parsed.")}</div>
     </div>
-    <div class="panel"><div class="panel-head"><span>LOG</span><div><h2>Grafana Panels</h2><p>Metric and Loki panel inventory, including backend errors, worker errors, WAF events and auth failures.</p></div></div>
+    <div class="panel"><div class="panel-head"><span>LOG</span><div><h2>Grafana Panels</h2><p>Metric and Loki panel inventory for platform services, hosted workloads, WAF and authentication.</p></div></div>
       <div class="cards">${dashboards.map(renderMonitoringPanelCard).join("") || empty("No dashboard panels", "No Grafana dashboard panels were parsed.")}</div>
     </div>
     <div class="panel"><div class="panel-head"><span>ALT</span><div><h2>Alert Rules</h2><p>Prometheus alert rules and severity labels used by Alertmanager routing.</p></div></div>
@@ -9048,7 +9030,7 @@ function renderWorkersJobs(workers, queues, jobs, schedules, projects) {
         <input type="hidden" name="action" value="declare-worker">
         <select name="projectId" aria-label="Worker project">${projectOptions}</select>
         <input name="name" value="jobs-worker" aria-label="Worker name">
-        <input name="service" value="worker-jobs" aria-label="Worker service">
+        <input name="service" value="backup-scheduler" aria-label="Worker service">
         <select name="status" aria-label="Worker status"><option value="declared">declared</option><option value="configured">configured</option><option value="running">running</option><option value="stopped">stopped</option><option value="degraded">degraded</option></select>
         <input name="queueName" value="jobs" aria-label="Worker queue name">
         <input name="concurrency" value="1" inputmode="numeric" aria-label="Worker concurrency">
@@ -9078,7 +9060,7 @@ function renderWorkersJobs(workers, queues, jobs, schedules, projects) {
         <input type="hidden" name="action" value="record-job">
         <select name="projectId" aria-label="Job project">${projectOptions}</select>
         <select name="queueId" aria-label="Job queue">${queueOptions || '<option value="jobs">jobs</option>'}</select>
-        <select name="workerId" aria-label="Job worker">${workerOptions || '<option value="enterprise-worker-jobs">enterprise-worker-jobs</option>'}</select>
+        <select name="workerId" aria-label="Job worker">${workerOptions || '<option value="enterprise-backup-scheduler">enterprise-backup-scheduler</option>'}</select>
         <input name="jobName" value="sync-task" aria-label="Job name">
         <select name="status" aria-label="Job status"><option value="failed">failed</option><option value="queued">queued</option><option value="running">running</option><option value="succeeded">succeeded</option><option value="dead">dead</option></select>
         <input name="attempts" value="1" inputmode="numeric" aria-label="Attempts">
@@ -9093,7 +9075,7 @@ function renderWorkersJobs(workers, queues, jobs, schedules, projects) {
       <form method="post" action="/actions/worker-job-command" class="inline-confirm schedule-form">
         <input type="hidden" name="action" value="declare-schedule">
         <select name="projectId" aria-label="Schedule project">${projectOptions}</select>
-        <select name="workerId" aria-label="Schedule worker">${workerOptions || '<option value="enterprise-worker-jobs">enterprise-worker-jobs</option>'}</select>
+        <select name="workerId" aria-label="Schedule worker">${workerOptions || '<option value="enterprise-backup-scheduler">enterprise-backup-scheduler</option>'}</select>
         <select name="queueId" aria-label="Schedule queue">${queueOptions || '<option value="maintenance">maintenance</option>'}</select>
         <input name="name" value="nightly-maintenance" aria-label="Schedule name">
         <input name="cronExpression" value="15 3 * * *" aria-label="Cron expression">
@@ -10900,7 +10882,7 @@ function planQueueDeclare(payload, context) {
 function planJobRecord(payload, context) {
   const projectId = validateProjectOrPlatform(payload.projectId || "platform", context);
   const queueId = sanitizeIdentifier(payload.queueId || "jobs");
-  const workerId = sanitizeIdentifier(payload.workerId || "enterprise-worker-jobs");
+  const workerId = sanitizeIdentifier(payload.workerId || "enterprise-backup-scheduler");
   findById(context.jobQueues, queueId, "Queue");
   findById(context.workerRuntimes, workerId, "Worker");
   const jobName = validateQueueName(payload.jobName || payload.name || "job");
@@ -10961,7 +10943,7 @@ function planJobRetry(id, payload, context) {
 
 function planScheduleDeclare(payload, context) {
   const projectId = validateProjectOrPlatform(payload.projectId || "platform", context);
-  const workerId = sanitizeIdentifier(payload.workerId || "enterprise-worker-jobs");
+  const workerId = sanitizeIdentifier(payload.workerId || "enterprise-backup-scheduler");
   const queueId = sanitizeIdentifier(payload.queueId || "maintenance");
   findById(context.workerRuntimes, workerId, "Worker");
   findById(context.jobQueues, queueId, "Queue");
@@ -12653,7 +12635,7 @@ function jobRecord({
   id = "",
   projectId = "platform",
   queueId = "jobs",
-  workerId = "enterprise-worker-jobs",
+  workerId = "enterprise-backup-scheduler",
   jobName = "job",
   status = "failed",
   attempts = 0,
@@ -12668,7 +12650,7 @@ function jobRecord({
 } = {}) {
   const cleanProjectId = sanitizeIdentifier(projectId || "platform") || "platform";
   const cleanQueueId = sanitizeIdentifier(queueId || "jobs") || "jobs";
-  const cleanWorkerId = sanitizeIdentifier(workerId || "enterprise-worker-jobs") || "enterprise-worker-jobs";
+  const cleanWorkerId = sanitizeIdentifier(workerId || "enterprise-backup-scheduler") || "enterprise-backup-scheduler";
   const cleanJobName = validateQueueName(jobName || "job");
   return sanitizeEvent({
     id: sanitizeIdentifier(id || `${cleanProjectId}-${cleanQueueId}-${cleanJobName}`) || rid(),
@@ -12699,7 +12681,7 @@ function jobScheduleRecord({
   id = "",
   projectId = "platform",
   name = "Schedule",
-  workerId = "enterprise-worker-jobs",
+  workerId = "enterprise-backup-scheduler",
   queueId = "maintenance",
   cronExpression = "15 3 * * *",
   status = "metadata-only",
@@ -12716,7 +12698,7 @@ function jobScheduleRecord({
     id: sanitizeIdentifier(id || `${cleanProjectId}-${slugify(cleanName)}`) || rid(),
     projectId: cleanProjectId,
     name: cleanName,
-    workerId: sanitizeIdentifier(workerId || "enterprise-worker-jobs") || "enterprise-worker-jobs",
+    workerId: sanitizeIdentifier(workerId || "enterprise-backup-scheduler") || "enterprise-backup-scheduler",
     queueId: sanitizeIdentifier(queueId || "maintenance") || "maintenance",
     environment: "local",
     cronExpression: validateCronExpression(cronExpression || "15 3 * * *"),
@@ -12999,12 +12981,12 @@ function monitoringSignals({ scrapeJobs, dashboardPanels, alertRules }) {
     monitoringSignalRecord("prometheus-metrics", "Prometheus metrics", "prometheus", hasJob("prometheus") && hasPanel(/HTTP request rate|http_requests_total/i)),
     monitoringSignalRecord("workload-container-metrics", "Docker workload metrics", "node-exporter-textfile", hasJob("node-exporter") && hasPanel(/Workload CPU|Workload memory|effective limit/i) && hasAlert(/ContainerCpuUsageHigh|ContainerMemoryUsageHigh|ContainerDisappeared/i)),
     monitoringSignalRecord("node-exporter-host-metrics", "node-exporter host metrics", "node-exporter", hasJob("node-exporter") && hasAlert(/HostDiskUsageHigh|HostMemoryUsageHigh|HostCpuUsageHigh/i)),
-    monitoringSignalRecord("backend-errors", "Backend errors", "loki", hasPanel(/Backend errors|enterprise-backend/i)),
-    monitoringSignalRecord("worker-errors", "Worker errors", "loki", hasPanel(/Worker errors|enterprise-worker/i)),
+    monitoringSignalRecord("platform-errors", "Platform errors", "loki", hasPanel(/Platform container logs|Platform errors|level=~\\"warn\|error\\"/i)),
+    monitoringSignalRecord("alert-delivery", "Alert delivery", "prometheus", hasPanel(/Alert delivery|platform_alert_delivery_total/i) && hasAlert(/AlertDeliveryFailed/i)),
     monitoringSignalRecord("waf-events", "WAF events", "loki", hasPanel(/WAF events|ModSecurity/i)),
     monitoringSignalRecord("auth-failures", "Auth failures", "loki", hasPanel(/Auth failures|auth.*failed/i)),
     monitoringSignalRecord("latency", "Latency", "external-uptime", true),
-    monitoringSignalRecord("error-rate", "Error rate", "prometheus-loki", hasPanel(/error logs|level=~\\"warn\|error\\"|HTTP request rate/i) || hasAlert(/BackendErrorBudgetBurn/i)),
+    monitoringSignalRecord("error-rate", "Error rate", "prometheus-loki", hasPanel(/error logs|level=~\\"warn\|error\\"|HTTP request rate/i) || hasAlert(/PlatformTargetDown|ContainerDisappeared/i)),
   ];
 }
 
@@ -13023,15 +13005,15 @@ function monitoringSignalRecord(id, name, source, covered) {
 function monitoringJobCategory(jobName) {
   if (jobName === "node-exporter") return "host";
   if (jobName === "cadvisor") return "container";
-  if (["backend", "web", "workers"].includes(jobName)) return "application";
-  if (["prometheus", "alertmanager", "traefik", "keycloak"].includes(jobName)) return "platform";
+  if (["prometheus", "alertmanager", "platform-alert-dispatcher", "traefik", "keycloak", "control-center", "project-router"].includes(jobName)) return "platform";
+  if (/^workload-/.test(jobName)) return "hosted-workload";
   return "custom";
 }
 
 function monitoringPanelSignal(title, query) {
   const text = `${title}\n${query}`;
-  if (/Backend errors/i.test(text)) return "backend-errors";
-  if (/Worker errors/i.test(text)) return "worker-errors";
+  if (/Platform container logs/i.test(text)) return "platform-errors";
+  if (/Alert delivery outcomes|platform_alert_delivery_total/i.test(text)) return "alert-delivery";
   if (/WAF events|ModSecurity/i.test(text)) return "waf-events";
   if (/Auth failures/i.test(text)) return "auth-failures";
   if (/http_requests_total|request rate/i.test(text)) return "request-rate";
@@ -13043,8 +13025,8 @@ function monitoringAlertCategory(name, block) {
   const text = `${name}\n${block}`;
   if (/Host(Disk|Memory|Cpu)/i.test(text)) return "host";
   if (/Container/i.test(text)) return "container";
-  if (/Worker|AuditOutbox/i.test(text)) return "worker";
-  if (/Backend|Redis|Passkeys|Sessions/i.test(text)) return "backend";
+  if (/Workload|Container/i.test(text)) return "hosted-workload";
+  if (/Platform|Redis|Keycloak|Traefik|Alertmanager/i.test(text)) return "platform";
   if (/Backup|Restore/i.test(text)) return "backup";
   if (/Alertmanager|notification/i.test(text)) return "alerting";
   return "platform";

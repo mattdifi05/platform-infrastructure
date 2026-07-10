@@ -156,7 +156,7 @@ export function evaluateSupplyChain(rootDirectory) {
   const browserRunner = section(opsScript, "async function browserE2eTests", "async function platformBrowserE2e");
   record("browser-runner-no-socket", !/docker\.sock/.test(browserRunner), "browser runner must not mount the Docker socket");
   record("browser-runner-no-docker-install", !/install -y docker|docker\.io/.test(browserRunner), "browser runner must not install a Docker client");
-  record("browser-runner-source-readonly", /\$\{sourceMount\}:\/source:ro/.test(browserRunner), "hosted source must be mounted read-only into browser tests");
+  record("browser-runner-platform-only", /platformBrowserE2e\(\)/.test(browserRunner), "browser runner must execute only the platform-owned browser suite");
 
   return {
     schemaVersion: 1,

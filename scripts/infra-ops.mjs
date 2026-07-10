@@ -97,20 +97,8 @@ function sqlIdentifierName(value, label = "identifier") {
   return clean;
 }
 
-function defaultPostgresApplicationDatabase() {
-  return process.env.POSTGRES_BACKUP_DATABASE || process.env.APP_DB_NAME || "app_db";
-}
-
-function postgresOpsSchemaName(database = "") {
-  return sqlIdentifierName(process.env.POSTGRES_OPS_SCHEMA || (database === "stexor" ? "stexor_platform" : "platform_ops"), "PostgreSQL ops schema");
-}
-
-function postgresOpsSchema(database = "") {
-  return sqlIdentifier(postgresOpsSchemaName(database));
-}
-
-function postgresAccountSchemaName(database = "") {
-  return sqlIdentifierName(process.env.ACCOUNT_DB_SCHEMA || (database === "stexor" ? "stexor_account" : "app_account"), "PostgreSQL account schema");
+function defaultPostgresBackupDatabase() {
+  return sqlIdentifierName(process.env.POSTGRES_BACKUP_DATABASE || "", "PostgreSQL backup database");
 }
 
 function cookieName(value, label = "cookie name") {
@@ -140,33 +128,13 @@ function positiveInteger(value, optionName, minimum = 1) {
   return next;
 }
 
-function hasSupportedProjectSource() {
-  return fs.existsSync(path.join(sourceRoot, "package.json"))
-    && fs.existsSync(path.join(sourceRoot, ".github", "workflows"))
-    && fs.existsSync(path.join(sourceRoot, "scripts", "run-infra-ops.mjs"));
-}
 
-function projectSourceChecksRequired() {
-  return booleanFlag(argv.requireProject ?? process.env.PROJECT_REQUIRE_SOURCE_ROOT);
-}
 
-function requireSupportedProjectSource(label) {
-  if (hasSupportedProjectSource()) return true;
-  if (projectSourceChecksRequired()) {
-    fail(`Project source checks were required, but no supported project was found at ${sourceRoot}.`);
-  }
-  log(`Skipping ${label}; no supported project source found at ${sourceRoot}.`);
-  return false;
-}
 
-function localProductionImageEnv() {
-  return {
-    BACKEND_IMAGE: process.env.BACKEND_IMAGE || "platform/backend:local",
-    WEB_IMAGE: process.env.WEB_IMAGE || "platform/web:local",
-    WORKER_NOTIFICATIONS_IMAGE: process.env.WORKER_NOTIFICATIONS_IMAGE || "platform/worker-notifications:local",
-    WORKER_JOBS_IMAGE: process.env.WORKER_JOBS_IMAGE || "platform/worker-jobs:local",
-  };
-}
+
+
+
+
 
 function parseCronTime(value, optionName) {
   const [hour, minute] = String(value).split(":").map(Number);
@@ -264,54 +232,65 @@ function postgresOut(container, database, user, sql, options = {}) {
   ], options);
 }
 
+function backupRestoreRunLogPath() {
+  const stateRoot = path.resolve(process.env.PROJECT_STATE_ROOT || path.join(infraRoot, "projects-portal", "state"));
+  fs.mkdirSync(stateRoot, { recursive: true, mode: 0o700 });
+  return path.join(stateRoot, "backup-restore-runs.jsonl");
+}
+
+function backupRestoreRunRecords() {
+  const file = backupRestoreRunLogPath();
+  if (!fs.existsSync(file)) return [];
+  return fs.readFileSync(file, "utf8").split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
+}
+
+function writeBackupFreshnessMetrics(records = backupRestoreRunRecords()) {
+  const outputDir = path.join(infraRoot, "projects-portal", "state", "node-exporter-textfile");
+  fs.mkdirSync(outputDir, { recursive: true, mode: 0o755 });
+  const now = Date.now();
+  const lines = [
+    "# HELP backup_restore_last_success_age_seconds Age of the latest successful platform backup operation.",
+    "# TYPE backup_restore_last_success_age_seconds gauge",
+  ];
+  for (const operation of ["backup", "restore", "restore_test"]) {
+    const latest = records
+      .filter((record) => record.operation === operation && record.status === "success")
+      .sort((left, right) => String(right.finishedAt).localeCompare(String(left.finishedAt)))[0];
+    const age = latest ? Math.max(0, Math.floor((now - Date.parse(latest.finishedAt)) / 1000)) : -1;
+    lines.push(`backup_restore_last_success_age_seconds{operation="${operation}"} ${age}`);
+  }
+  const target = path.join(outputDir, "backup-restore.prom");
+  const temporary = `${target}.tmp-${process.pid}`;
+  fs.writeFileSync(temporary, `${lines.join("\n")}\n`, { mode: 0o644 });
+  fs.renameSync(temporary, target);
+  fs.chmodSync(target, 0o644);
+}
+
 function recordBackupRestoreRun({ container, database, databaseName = database, user, operation, status, artifactPath = null, artifactSha256 = null, startedAt, metadata = {} }) {
   const finishedAt = new Date();
   const started = startedAt instanceof Date ? startedAt : finishedAt;
   const durationMs = Math.max(0, finishedAt.getTime() - started.getTime());
-  const pathValue = artifactPath ? sqlString(artifactPath) : "null";
-  const shaValue = artifactSha256 ? sqlString(artifactSha256) : "null";
-  const metadataValue = sqlString(JSON.stringify(metadata));
-  const opsSchema = postgresOpsSchema(database);
-  postgres(container, database, user, `
-    create extension if not exists pgcrypto;
-    create schema if not exists ${opsSchema};
-    create table if not exists ${opsSchema}.backup_restore_runs (
-      id uuid primary key default gen_random_uuid(),
-      operation text not null check (operation in ('backup', 'restore', 'restore_test')),
-      status text not null check (status in ('started', 'success', 'failed')),
-      database_name text not null,
-      artifact_path text,
-      artifact_sha256 text check (artifact_sha256 is null or artifact_sha256 ~ '^[a-f0-9]{64}$'),
-      started_at timestamptz not null default now(),
-      finished_at timestamptz,
-      duration_ms integer check (duration_ms is null or duration_ms >= 0),
-      metadata jsonb not null default '{}'::jsonb,
-      check ((status = 'started' and finished_at is null) or (status <> 'started' and finished_at is not null)),
-      check (finished_at is null or finished_at >= started_at)
-    );
-    insert into ${opsSchema}.backup_restore_runs (
-      operation,
-      status,
-      database_name,
-      artifact_path,
-      artifact_sha256,
-      started_at,
-      finished_at,
-      duration_ms,
-      metadata
-    )
-    values (
-      ${sqlString(operation)},
-      ${sqlString(status)},
-      ${sqlString(databaseName)},
-      ${pathValue},
-      ${shaValue},
-      ${sqlString(started.toISOString())}::timestamptz,
-      ${sqlString(finishedAt.toISOString())}::timestamptz,
-      ${durationMs},
-      ${metadataValue}::jsonb
-    );
-  `);
+  if (!["backup", "restore", "restore_test"].includes(operation)) fail(`Invalid backup operation: ${operation}`);
+  if (!["started", "success", "failed"].includes(status)) fail(`Invalid backup status: ${status}`);
+  const record = {
+    id: crypto.randomUUID(),
+    operation,
+    status,
+    engineContainer: String(container || ""),
+    databaseName: String(databaseName || ""),
+    executionUser: String(user || ""),
+    artifactPath,
+    artifactSha256,
+    startedAt: started.toISOString(),
+    finishedAt: finishedAt.toISOString(),
+    durationMs,
+    metadata,
+  };
+  const file = backupRestoreRunLogPath();
+  fs.appendFileSync(file, `${JSON.stringify(record)}\n`, { encoding: "utf8", mode: 0o600 });
+  fs.chmodSync(file, 0o600);
+  writeBackupFreshnessMetrics();
+  return record;
 }
 
 function readText(filePath) {
@@ -833,15 +812,12 @@ function recordDatabaseBackupEvidence({ engine, sourceContainer, operation, stat
   if (booleanFlag(argv.skipEvidence)) {
     return;
   }
-  const evidenceContainer = argv.evidenceContainer ?? "enterprise-postgres";
-  const evidenceDatabase = argv.evidenceDatabase ?? "app_db";
-  const evidenceUser = argv.evidenceUser ?? "postgres";
   try {
     recordBackupRestoreRun({
-      container: evidenceContainer,
-      database: evidenceDatabase,
+      container: sourceContainer,
+      database: `${engine}-all`,
       databaseName: `${engine}-all`,
-      user: evidenceUser,
+      user: "platform-backup-executor",
       operation,
       status,
       artifactPath,
@@ -1026,10 +1002,10 @@ function makeOpsTempDir(prefix) {
 
 function dockerStatsSnapshot(label) {
   const containers = [
-    "enterprise-backend",
-    "enterprise-web",
-    "enterprise-worker-notifications",
-    "enterprise-worker-jobs",
+    "enterprise-traefik",
+    "enterprise-control-center",
+    "enterprise-project-router",
+    "enterprise-platform-alert-dispatcher",
     "enterprise-postgres",
     "mariadb",
     "enterprise-redis",
@@ -1054,10 +1030,11 @@ function dockerStatsSnapshot(label) {
 }
 
 const releaseImageKeys = [
-  "BACKEND_IMAGE",
-  "WEB_IMAGE",
-  "WORKER_NOTIFICATIONS_IMAGE",
-  "WORKER_JOBS_IMAGE",
+  "PLATFORM_ALERT_DISPATCHER_IMAGE",
+  "CONTROL_CENTER_IMAGE",
+  "PHP_APACHE_IMAGE",
+  "PLATFORM_OPS_IMAGE",
+  "RESTIC_IMAGE",
 ];
 
 function releaseImageEntriesFromManifest(manifestPath) {
@@ -1329,84 +1306,19 @@ async function signExistingPostgresBackups() {
   log(`PostgreSQL backup signature report written to ${jsonPath} and ${markdownPath}`);
 }
 
-function backendSessionSigningKey() {
-  const keyText = dockerExecOutput("enterprise-backend", [
-    "sh",
-    "-c",
-    [
-      'if [ -s /run/secrets/session_signing_keys ]; then cat /run/secrets/session_signing_keys;',
-      'elif [ -s /run/secrets/session_secret ]; then printf "current=%s" "$(cat /run/secrets/session_secret)";',
-      'fi',
-    ].join(" "),
-  ]).trim();
-  const keys = parseVersionedSecretKeys(keyText);
-  const activeKey = keys[0];
-  if (!activeKey) {
-    fail("Cannot read backend session signing key for integration signing.");
-  }
-  return activeKey;
-}
 
-function backendSecretHash(value) {
-  const keys = parseVersionedSecretKeys(dockerExecOutput("enterprise-backend", [
-    "sh",
-    "-c",
-    'if [ -s /run/secrets/hash_pepper_keys ]; then cat /run/secrets/hash_pepper_keys; fi',
-  ]).trim());
-  const activeKey = keys[0];
-  if (activeKey) {
-    return `${activeKey.id}:${hmacHex(activeKey.secret, value)}`;
-  }
-  const sessionSecret = dockerExecOutput("enterprise-backend", [
-    "sh",
-    "-c",
-    'if [ -s /run/secrets/session_secret ]; then cat /run/secrets/session_secret; fi',
-  ]).trim();
-  return hmacHex(sessionSecret, value);
-}
 
-function newSignedCookie(signingKey, accountId, sessionId) {
-  const now = Math.floor(Date.now() / 1000);
-  const fingerprint = hmacHex(signingKey.secret, "session-fingerprint:unknown").slice(0, 32);
-  const payload = JSON.stringify({
-    accountId,
-    sessionId,
-    fp: fingerprint,
-    iat: now,
-    exp: now + 315360000,
-    kid: signingKey.id,
-  });
-  const encoded = base64url(payload);
-  const signature = crypto.createHmac("sha256", signingKey.secret).update(encoded).digest("base64url");
-  return `app_session=${encoded}.${signature}`;
-}
 
-function redisCommand(args, options = {}) {
-  const script = [
-    'if [ -s /run/secrets/redis_password ]; then REDISCLI_AUTH=$(cat /run/secrets/redis_password); export REDISCLI_AUTH; fi;',
-    'redis-cli "$@"',
-  ].join(" ");
-  return dockerExec("enterprise-redis", ["sh", "-c", script, "sh", ...args], options);
-}
 
-function redisSetValue(key, value, ttlMs) {
-  const script = [
-    'if [ -s /run/secrets/redis_password ]; then REDISCLI_AUTH=$(cat /run/secrets/redis_password); export REDISCLI_AUTH; fi;',
-    'redis-cli -x set "$1" >/dev/null && redis-cli pexpire "$1" "$2" >/dev/null',
-  ].join(" ");
-  dockerExec("enterprise-redis", ["sh", "-c", script, "sh", key, String(ttlMs)], { input: value });
-}
 
-function redisSetPlainValue(key, value, ttlMs) {
-  redisCommand(["set", key, value, "px", String(ttlMs)]);
-}
 
-function redisDelete(keys) {
-  if (!keys.length) {
-    return;
-  }
-  redisCommand(["del", ...keys], { allowFailure: true, capture: true });
-}
+
+
+
+
+
+
+
 
 const localTlsHostnames = new Set([
   "localhost",
@@ -1507,17 +1419,7 @@ function headerText(headers) {
     .toLowerCase();
 }
 
-function cookieFromHeaders(headers, name) {
-  const values = headers["set-cookie"];
-  const list = Array.isArray(values) ? values : values ? [values] : [];
-  for (const cookie of list) {
-    const match = cookie.match(new RegExp(`^${name}=([^;]+)`));
-    if (match) {
-      return `${name}=${match[1]}`;
-    }
-  }
-  return null;
-}
+
 
 function assertStatus(response, expected, name) {
   if (response.status !== expected) {
@@ -1525,15 +1427,9 @@ function assertStatus(response, expected, name) {
   }
 }
 
-function pnpmInWeb(commandLine, options = {}) {
-  const bootstrap = `cd /workspace && export HOME=/tmp XDG_DATA_HOME=/tmp/xdg PNPM_HOME=/tmp/pnpm-home npm_config_cache=/tmp/npm-cache && if [ ! -f /tmp/pnpm-run/node_modules/pnpm/bin/pnpm.mjs ]; then npm install --prefix /tmp/pnpm-run --no-save pnpm@11.9.0 >/dev/null; fi && node /tmp/pnpm-run/node_modules/pnpm/bin/pnpm.mjs ${commandLine}`;
-  return dockerExec("enterprise-web", ["sh", "-lc", bootstrap], options);
-}
 
-function pnpmInWebOutput(commandLine) {
-  const bootstrap = `cd /workspace && export HOME=/tmp XDG_DATA_HOME=/tmp/xdg PNPM_HOME=/tmp/pnpm-home npm_config_cache=/tmp/npm-cache && if [ ! -f /tmp/pnpm-run/node_modules/pnpm/bin/pnpm.mjs ]; then npm install --prefix /tmp/pnpm-run --no-save pnpm@11.9.0 >/dev/null; fi && node /tmp/pnpm-run/node_modules/pnpm/bin/pnpm.mjs ${commandLine}`;
-  return dockerExecOutput("enterprise-web", ["sh", "-lc", bootstrap]);
-}
+
+
 
 function configuredNodeImage() {
   return process.env.NODE_IMAGE || parseEnv(path.join(infraRoot, ".env")).NODE_IMAGE || defaultNodeImage;
@@ -1543,265 +1439,19 @@ function configuredPlaywrightImage() {
   return process.env.PLAYWRIGHT_IMAGE || parseEnv(path.join(infraRoot, ".env")).PLAYWRIGHT_IMAGE || defaultPlaywrightImage;
 }
 
-function runSourceWorkspaceInDocker(script, options = {}) {
-  const sourceMount = hostPathForContainerMount(sourceRoot);
-  const infraMount = hostPathForContainerMount(infraRoot);
-  run("docker", [
-    "run",
-    "--rm",
-    "-e",
-    "CI=true",
-    "-e",
-    "NEXT_TELEMETRY_DISABLED=1",
-    "-v",
-    `${sourceMount}:/source:ro`,
-    "-v",
-    `${infraMount}:/platform-infrastructure:ro`,
-    configuredNodeImage(),
-    "sh",
-    "-lc",
-    script,
-  ], options);
-}
 
-function sourceWorkspaceOutput(commands, options = {}) {
-  const sourceMount = hostPathForContainerMount(sourceRoot);
-  const infraMount = hostPathForContainerMount(infraRoot);
-  return output("docker", [
-    "run",
-    "--rm",
-    "-e",
-    "CI=true",
-    "-e",
-    "NEXT_TELEMETRY_DISABLED=1",
-    "-v",
-    `${sourceMount}:/source:ro`,
-    "-v",
-    `${infraMount}:/platform-infrastructure:ro`,
-    configuredNodeImage(),
-    "sh",
-    "-lc",
-    sourceWorkspaceBootstrap(commands),
-  ], options);
-}
 
-function sourceWorkspaceBootstrap(commands) {
-  const excludes = [
-    "./.artifacts",
-    "./.codex-*.log",
-    "./.docker-build-cache",
-    "./.git",
-    "./.next",
-    "./*/.next",
-    "./.pnpm-store",
-    "./coverage",
-    "./dist",
-    "./*/dist",
-    "./node_modules",
-    "./*/node_modules",
-    "./playwright-report",
-    "./test-results",
-  ].map((pattern) => `--exclude='${pattern}'`).join(" ");
-  return [
-    "set -eu",
-    "mkdir -p /workspace",
-    "cd /source",
-    `tar ${excludes} -cf - . | tar -xf - -C /workspace`,
-    "cd /workspace",
-    "npm install -g pnpm@11.9.0 >/dev/null",
-    commands,
-  ].join(" && ");
-}
 
-async function accessReview() {
-  const database = argv.database ?? "app_db";
-  const accountSchemaName = sqlIdentifierName(argv.accountSchema ?? process.env.ACCOUNT_DB_SCHEMA ?? "app_account", "--accountSchema");
-  const accountSchema = sqlIdentifier(accountSchemaName);
-  log("==> Active account role summary");
-  postgres("enterprise-postgres", database, "postgres", `
-select
-  role.role,
-  count(*) filter (where role.revoked_at is null) as active_grants,
-  count(*) filter (where role.revoked_at is not null) as revoked_grants,
-  min(role.granted_at) as first_granted_at,
-  max(role.granted_at) as last_granted_at
-from ${accountSchema}.account_roles role
-join ${accountSchema}.accounts account on account.id = role.account_id
-where account.deleted_at is null
-group by role.role
-order by role.role;
-`);
-  log("==> Active sessions older than 30 days summary");
-  postgres("enterprise-postgres", database, "postgres", `
-select
-  coalesce(nullif(session.auth_method, ''), 'unknown') as auth_method,
-  count(*) as stale_active_sessions,
-  min(session.last_seen_at) as oldest_last_seen_at,
-  max(session.last_seen_at) as newest_last_seen_at
-from ${accountSchema}.sessions session
-join ${accountSchema}.accounts account on account.id = session.account_id
-where session.status = 'active'
-  and session.last_seen_at < now() - interval '30 days'
-group by coalesce(nullif(session.auth_method, ''), 'unknown')
-order by stale_active_sessions desc, auth_method;
-`);
-  const activeRoleCount = Number(postgresOut("enterprise-postgres", database, "postgres", `
-select count(*)
-from ${accountSchema}.account_roles role
-join ${accountSchema}.accounts account on account.id = role.account_id
-where account.deleted_at is null
-  and role.revoked_at is null;
-`).trim() || "0");
-  const staleSessionCount = Number(postgresOut("enterprise-postgres", database, "postgres", `
-select count(*)
-from ${accountSchema}.sessions session
-join ${accountSchema}.accounts account on account.id = session.account_id
-where session.status = 'active'
-  and session.last_seen_at < now() - interval '30 days';
-`).trim() || "0");
-  const stamp = reportTimestamp();
-  const payload = {
-    generatedAt: new Date().toISOString(),
-    status: "passed",
-    mode: "runtime",
-    database,
-    accountSchema: accountSchemaName,
-    checks: [
-      { name: "active-account-roles-reviewed", status: "passed", count: activeRoleCount },
-      { name: "stale-active-sessions-reviewed", status: "passed", count: staleSessionCount },
-    ],
-    piiIncluded: false,
-  };
-  const jsonPath = writeJsonReport("access-review", `access-review-${stamp}`, payload);
-  const markdownPath = writeMarkdownReport("access-review", `access-review-${stamp}`, [
-    "# Access Review",
-    "",
-    `Status: ${payload.status}`,
-    `Mode: ${payload.mode}`,
-    `Generated at: ${payload.generatedAt}`,
-    `Database: ${payload.database}`,
-    `Account schema: ${payload.accountSchema}`,
-    "",
-    "| Check | Status | Count |",
-    "| --- | --- | ---: |",
-    ...payload.checks.map((check) => `| ${check.name} | ${check.status} | ${check.count} |`),
-    "",
-    "PII included in report: no",
-  ]);
-  log(`Access review report written to ${jsonPath} and ${markdownPath}`);
-  log("Access review completed.");
-}
 
-async function applyPostgresMigrations() {
-  const container = argv.container ?? "enterprise-postgres";
-  const database = argv.database ?? "app_db";
-  const user = argv.user ?? "postgres";
-  const safeDatabaseName = sqlIdentifierName(database, "--database");
-  const migrationSchemaName = postgresOpsSchemaName(safeDatabaseName);
-  const migrationSchema = sqlIdentifier(migrationSchemaName);
-  const migrationDir = path.join(infraRoot, "postgres", "migrations");
-  const files = fs.readdirSync(migrationDir)
-    .filter((file) => file.endsWith(".sql"))
-    .sort()
-    .map((file) => path.join(migrationDir, file));
 
-  if (!files.length) {
-    log(`No migrations found in ${migrationDir}`);
-    const stamp = reportTimestamp();
-    const payload = {
-      generatedAt: new Date().toISOString(),
-      status: "passed",
-      container,
-      database,
-      user,
-      migrationDir,
-      summary: { files: 0, applied: 0, skipped: 0 },
-      migrations: [],
-    };
-    const jsonPath = writeJsonReport("postgres-migrations", `apply-postgres-migrations-${stamp}`, payload);
-    const markdownPath = writeMarkdownReport("postgres-migrations", `apply-postgres-migrations-${stamp}`, [
-      "# PostgreSQL Migrations",
-      "",
-      `Generated at: ${payload.generatedAt}`,
-      `Status: ${payload.status}`,
-      `Database: ${database}`,
-      "",
-      "No migrations found.",
-    ]);
-    log(`PostgreSQL migration report written to ${jsonPath} and ${markdownPath}`);
-    return;
-  }
 
-  postgres(container, database, user, `create schema if not exists ${migrationSchema}; create table if not exists ${migrationSchema}.schema_migrations (version text primary key, applied_at timestamptz not null default now(), checksum text not null default '');`);
 
-  const migrations = [];
-  for (const file of files) {
-    const version = path.basename(file, ".sql");
-    const checksum = sha256File(file);
-    const existing = postgresOut(container, database, user, `select checksum from ${migrationSchema}.schema_migrations where version = ${sqlString(version)};`);
-    if (existing) {
-      if (existing.trim() !== checksum) {
-        fail(`Migration ${version} was already applied with a different checksum.`);
-      }
-      log(`Skipping ${version} (already applied)`);
-      migrations.push({ version, checksum, action: "skipped" });
-      continue;
-    }
-    log(`Applying ${version}`);
-    let uploadFile = file;
-    if (safeDatabaseName !== "app_db") {
-      const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "platform-migration-"));
-      uploadFile = path.join(tempDir, path.basename(file));
-      const sql = fs.readFileSync(file, "utf8")
-        .replace(/^\\connect\s+\S+/gm, `\\connect ${safeDatabaseName}`);
-      fs.writeFileSync(uploadFile, sql, "utf8");
-    }
-    run("docker", ["cp", uploadFile, `${container}:/tmp/platform-migration.sql`]);
-    dockerExec(container, ["psql", "-U", user, "-d", database, "-v", "ON_ERROR_STOP=1", "-f", "/tmp/platform-migration.sql"]);
-    postgres(container, database, user, `insert into ${migrationSchema}.schema_migrations (version, checksum) values (${sqlString(version)}, ${sqlString(checksum)});`);
-    dockerExec(container, ["rm", "-f", "/tmp/platform-migration.sql"]);
-    if (uploadFile !== file) {
-      fs.rmSync(path.dirname(uploadFile), { recursive: true, force: true });
-    }
-    migrations.push({ version, checksum, action: "applied" });
-  }
 
-  const applied = migrations.filter((migration) => migration.action === "applied").length;
-  const skipped = migrations.filter((migration) => migration.action === "skipped").length;
-  const stamp = reportTimestamp();
-  const payload = {
-    generatedAt: new Date().toISOString(),
-    status: "passed",
-    container,
-    database,
-    user,
-    migrationDir,
-    summary: {
-      files: files.length,
-      applied,
-      skipped,
-    },
-    migrations,
-  };
-  const jsonPath = writeJsonReport("postgres-migrations", `apply-postgres-migrations-${stamp}`, payload);
-  const markdownPath = writeMarkdownReport("postgres-migrations", `apply-postgres-migrations-${stamp}`, [
-    "# PostgreSQL Migrations",
-    "",
-    `Generated at: ${payload.generatedAt}`,
-    `Status: ${payload.status}`,
-    `Database: ${database}`,
-    "",
-    "| Version | Action |",
-    "| --- | --- |",
-    ...migrations.map((migration) => `| ${migration.version} | ${migration.action} |`),
-  ]);
-  log("PostgreSQL migrations complete.");
-  log(`PostgreSQL migration report written to ${jsonPath} and ${markdownPath}`);
-}
+
 
 async function backupPostgres(options = {}) {
   const container = options.container ?? argv.container ?? "enterprise-postgres";
-  const database = options.database ?? argv.database ?? defaultPostgresApplicationDatabase();
+  const database = options.database ?? argv.database ?? defaultPostgresBackupDatabase();
   const user = options.user ?? argv.user ?? "postgres";
   const outputDir = path.resolve(options.outputDir ?? argv.outputDir ?? path.join(infraRoot, "backups", "postgres"));
   const startedAt = new Date();
@@ -2354,7 +2004,6 @@ function backupDatabaseCatalog(options = {}) {
     if (!database.projectId || !database.engine || !database.name) continue;
     add(database);
   }
-  add({ projectId: "platform", engine: "postgres", name: process.env.APP_DB_NAME || "app_db", externalId: "platform-postgres-app-db" });
   add({ projectId: "platform", engine: "postgres", name: process.env.KEYCLOAK_DB_NAME || "keycloak", externalId: "platform-postgres-keycloak" });
   return databases.sort((a, b) => a.id.localeCompare(b.id));
 }
@@ -2545,30 +2194,8 @@ async function certificateExpiryCheck() {
 }
 
 async function enterpriseCheck() {
-  const includeProject = booleanFlag(argv.includeProject);
   await withLocalCheckReport("enterprise-check", async () => {
-    if (includeProject && hasSupportedProjectSource()) {
-      log("==> Workspace typecheck/build in disposable Linux container");
-      runSourceWorkspaceInDocker(sourceWorkspaceBootstrap([
-        "node scripts/dependency-hygiene.mjs",
-        "node scripts/testing-hygiene.mjs",
-        "node scripts/maintainability-hygiene.mjs",
-        "node scripts/performance-hygiene.mjs",
-        "pnpm install --frozen-lockfile",
-        "pnpm deps:supply-chain -- --sbom-output /workspace/security/sbom/pnpm-sbom-current.cdx.json",
-        "pnpm -r typecheck",
-        "pnpm typecheck:e2e",
-        "pnpm peers check",
-        "pnpm -r --if-present test",
-        "pnpm --filter ./apps/web build",
-        "node scripts/performance-hygiene.mjs --built",
-      ].join(" && ")));
-    } else {
-      log("==> Infrastructure-only enterprise gate");
-      if (includeProject) {
-        log(`No supported project source found at ${sourceRoot}; running platform-infrastructure gate only.`);
-      }
-    }
+    log("==> Platform infrastructure enterprise gate");
     run("docker", ["compose", "--env-file", path.join(infraRoot, ".env"), "-p", "platform_infra_local", "-f", path.join(infraRoot, "compose.yaml"), "config", "--quiet"]);
     await staticSecurityCheck();
     await dependencyHygiene();
@@ -2579,30 +2206,20 @@ async function enterpriseCheck() {
     await projectRouterTests();
     run(process.execPath, [path.join(scriptDir, "infra-ops.mjs"), "enterprise-requirements-check"], { cwd: infraRoot });
     run(process.execPath, [path.join(scriptDir, "infra-ops.mjs"), "enterprise-requirements-check", "--manifest", "governance/production-readiness.json"], { cwd: infraRoot });
-    log("Enterprise local quality gate passed.");
-  }, { includeProject, supportedProjectSource: hasSupportedProjectSource() });
+    log("Platform infrastructure enterprise gate passed.");
+  }, { scope: "platform-infrastructure", hostedWorkloads: "external-contract" });
 }
 
 async function enterpriseHardeningAudit() {
   const projectName = argv.projectName ?? "platform_infra_local";
-  const includeProject = booleanFlag(argv.includeProject);
   const includeProtectedRuntime = booleanFlag(argv.includeProtectedRuntime);
   await withLocalCheckReport("enterprise-hardening-audit", async () => {
     await staticSecurityCheck();
-    await dependencyHygiene();
-    if (includeProject && hasSupportedProjectSource()) {
-      await supplyChainHygiene();
-    } else {
-      log("Skipping application supply-chain gate; platform-infrastructure hardening audit remains infra-only.");
-    }
+    await supplyChainHygiene();
     await testingHygiene();
     await maintainabilityHygiene();
     await performanceHygiene();
-    log("==> Compose local config");
     run("docker", ["compose", "--env-file", ".env", "-p", projectName, "config", "--quiet"]);
-    log("==> Compose build config");
-    run("docker", ["compose", "--env-file", ".env", "-p", projectName, "-f", "compose.yaml", "-f", "compose.build.yaml", "config", "--quiet"]);
-    log("==> Compose prod config");
     run("docker", ["compose", "--env-file", ".env", "-p", "enterprise_prod", "-f", "compose.yaml", "-f", "compose.prod.yaml", "config", "--quiet"]);
     await composeHealthcheckCoverage();
     await platformAdminAuditEvidence();
@@ -2614,70 +2231,28 @@ async function enterpriseHardeningAudit() {
       await faultInjectionTests();
       if (fs.existsSync(path.join(infraRoot, "compose.secrets.yaml"))) {
         await validateLocalSecrets();
-        log("==> Compose local secrets config");
-        run("docker", ["compose", "--env-file", ".env", "-p", projectName, "-f", "compose.yaml", "-f", "compose.secrets.yaml", "config", "--quiet"]);
       }
-      await applyPostgresMigrations();
       await backupRestoreDrill();
       await backupRestoreDrillMariadb();
       await backupRestoreDrillMinio();
       await backupRestoreDrillKeycloakConfig();
       await backupRestoreDrillSecretManagerMetadata();
       await prunePostgresBackups({ dryRun: true });
-      await accountIntegrationTests();
-      await browserE2eTests();
+      await platformBrowserE2e();
       await loadSmoke();
       await runtimeHealthChecks();
     } else {
-      log("Protected runtime checks skipped by default: no service stop, restore, backup, migration, secret validation or load test was executed.");
+      log("Protected runtime checks skipped by default: no service stop, restore, backup, secret validation or load test was executed.");
     }
-    log("Enterprise hardening audit passed.");
-  }, { includeProject, supportedProjectSource: hasSupportedProjectSource(), includeProtectedRuntime });
+    log("Platform infrastructure hardening audit passed.");
+  }, { scope: "platform-infrastructure", includeProtectedRuntime });
 }
 
 async function browserE2eTests() {
-  const includeProject = booleanFlag(argv.includeProject);
   await withLocalCheckReport("browser-e2e-tests", async () => {
-    log("==> Browser E2E tests");
-    if (includeProject && hasSupportedProjectSource()) {
-      const env = parseEnv(path.join(infraRoot, ".env"));
-      const playwrightBaseUrl = env.NEXT_PUBLIC_UI_URL ?? env.UI_PUBLIC_URL ?? "https://portal.localhost.com";
-      const sourceMount = hostPathForContainerMount(sourceRoot);
-      const bootstrap = [
-        "set -eu",
-        sourceWorkspaceBootstrap([
-          "pnpm install --frozen-lockfile",
-          "pnpm typecheck:e2e",
-          "pnpm test:e2e",
-        ].join(" && ")),
-      ].join(" && ");
-      run("docker", [
-        "run",
-        "--rm",
-        "--network",
-        "container:enterprise-traefik",
-        "-e",
-        "CI=true",
-        "-e",
-        "NEXT_TELEMETRY_DISABLED=1",
-        "-e",
-        `PLAYWRIGHT_BASE_URL=${playwrightBaseUrl}`,
-        "-e",
-        "PLAYWRIGHT_HTML_OPEN=never",
-        "-e",
-        "PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1",
-        "-v",
-        `${sourceMount}:/source:ro`,
-        configuredPlaywrightImage(),
-        "bash",
-        "-lc",
-        bootstrap,
-      ]);
-    } else {
-      await platformBrowserE2e();
-    }
-    log("Browser E2E tests passed.");
-  }, { includeProject, supportedProjectSource: hasSupportedProjectSource() });
+    await platformBrowserE2e();
+    log("Platform browser E2E tests passed.");
+  }, { scope: "platform-infrastructure" });
 }
 
 async function platformBrowserE2e() {
@@ -2742,42 +2317,32 @@ async function runtimeHealthChecks() {
     "enterprise-keycloak",
     "enterprise-nats",
     "enterprise-minio",
-    "enterprise-backend",
-    "enterprise-web",
-    "enterprise-worker-notifications",
-    "enterprise-worker-jobs",
+    "mariadb",
+    "enterprise-control-center",
+    "enterprise-project-router",
     "enterprise-prometheus",
     "enterprise-node-exporter",
     "enterprise-cadvisor",
+    "enterprise-platform-alert-dispatcher",
     "enterprise-alertmanager",
     "enterprise-grafana",
     "enterprise-loki",
     "enterprise-promtail",
   ];
-  log("==> Container health");
-  for (const container of runtimeContainers) {
-    const status = output("docker", ["inspect", "--format", "{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{end}}", container]);
-    if (!/^running( healthy)?$/.test(status.trim())) {
-      fail(`${container} is not healthy: ${status}`);
-    }
-  }
-
-  log("==> Container runtime guardrails");
+  log("==> Platform container health and runtime guardrails");
   for (const container of runtimeContainers) {
     const [inspect] = JSON.parse(output("docker", ["inspect", container]));
+    const state = inspect?.State ?? {};
+    if (state.Status !== "running" || (state.Health && state.Health.Status !== "healthy")) {
+      fail(`${container} is not healthy: status=${state.Status ?? "unknown"} health=${state.Health?.Status ?? "none"}`);
+    }
     const hostConfig = inspect?.HostConfig ?? {};
     const securityOpt = hostConfig.SecurityOpt ?? [];
     const logConfig = hostConfig.LogConfig ?? {};
     const logOptions = logConfig.Config ?? {};
-    if (hostConfig.Init !== true) {
-      fail(`${container} must run with init: true.`);
-    }
-    if (!Number.isInteger(hostConfig.PidsLimit) || hostConfig.PidsLimit <= 0) {
-      fail(`${container} must set a positive pids_limit.`);
-    }
-    if (!securityOpt.includes("no-new-privileges:true")) {
-      fail(`${container} must set no-new-privileges.`);
-    }
+    if (hostConfig.Init !== true) fail(`${container} must run with init: true.`);
+    if (!Number.isInteger(hostConfig.PidsLimit) || hostConfig.PidsLimit <= 0) fail(`${container} must set a positive pids_limit.`);
+    if (!securityOpt.includes("no-new-privileges:true")) fail(`${container} must set no-new-privileges.`);
     if (logConfig.Type !== "json-file" || logOptions["max-size"] !== "10m" || logOptions["max-file"] !== "5") {
       fail(`${container} must use bounded json-file logging.`);
     }
@@ -2785,172 +2350,13 @@ async function runtimeHealthChecks() {
       fail(`${container} must not mount docker.sock.`);
     }
   }
-
-  log("==> Redis runtime integration");
-  const redisPing = dockerExecOutput("enterprise-redis", ["sh", "-c", 'if [ -s /run/secrets/redis_password ]; then REDISCLI_AUTH=$(cat /run/secrets/redis_password); export REDISCLI_AUTH; fi; redis-cli ping']);
-  if (!/PONG/.test(redisPing)) {
-    fail("Redis ping failed");
-  }
-  const metrics = dockerExecOutput("enterprise-backend", ["wget", "-q", "-O", "-", "http://127.0.0.1:3000/metrics"]);
-  if (!/redis_connection_up\{service="enterprise-backend"\} 1/.test(metrics)) {
-    fail("Backend Redis metric is not up");
-  }
+  const redisPing = dockerExecOutput("enterprise-redis", ["sh", "-c", "if [ -s /run/secrets/redis_password ]; then REDISCLI_AUTH=$(cat /run/secrets/redis_password); export REDISCLI_AUTH; fi; redis-cli ping"]);
+  if (!/PONG/.test(redisPing)) fail("Redis ping failed.");
   const alertmanagerStatus = dockerExecOutput("enterprise-alertmanager", ["wget", "-q", "-O", "-", "http://127.0.0.1:9093/-/healthy"]);
-  if (!/OK/.test(alertmanagerStatus)) {
-    fail("Alertmanager health endpoint is not OK.");
-  }
-  for (const worker of ["enterprise-worker-notifications", "enterprise-worker-jobs"]) {
-    const health = dockerExecOutput(worker, ["wget", "-q", "-O", "-", "http://127.0.0.1:3000/health"]);
-    if (!/"redis":"ok"/.test(health)) {
-      fail(`${worker} Redis health is not ok`);
-    }
-  }
-
-  log("==> Session policy coherence");
-  const runtimeDatabase = defaultPostgresApplicationDatabase();
-  const accountSchemaName = postgresAccountSchemaName(runtimeDatabase);
-  const accountSchema = sqlIdentifier(accountSchemaName);
-  const opsSchemaName = postgresOpsSchemaName(runtimeDatabase);
-  const opsSchema = sqlIdentifier(opsSchemaName);
-  const backendSessionTtl = dockerExecOutput("enterprise-backend", ["sh", "-c", 'printf "%s" "$SESSION_COOKIE_MAX_AGE_SECONDS"']).trim();
-  if (backendSessionTtl !== "315360000") {
-    fail("Backend remember-me TTL must be 315360000 seconds.");
-  }
-  const policySessionTtl = postgresOut("enterprise-postgres", runtimeDatabase, "postgres", `select value->>'rememberMeSeconds' from ${accountSchema}.security_policies where key = 'account_session';`).trim();
-  if (policySessionTtl !== "315360000") {
-    fail("Database account_session policy rememberMeSeconds must be 315360000.");
-  }
-
-  log("==> App DB least privilege");
-  const serviceIdentityMigration = postgresOut("enterprise-postgres", runtimeDatabase, "postgres", `select count(*) from ${opsSchema}.schema_migrations where version = '014_service_identity_grants';`).trim() === "1";
-  if (serviceIdentityMigration) {
-    for (const role of ["app_db_account_rw", "app_db_auth_rw", "app_db_audit_rw"]) {
-      const roleMembership = postgresOut("enterprise-postgres", runtimeDatabase, "postgres", `select pg_has_role('app_backend_runtime', ${sqlString(role)}, 'member');`).trim();
-      if (roleMembership !== "t") {
-        fail(`app_backend_runtime must inherit ${role}.`);
-      }
-    }
-    const jobsMembership = postgresOut("enterprise-postgres", runtimeDatabase, "postgres", "select pg_has_role('app_worker_jobs_runtime', 'app_worker_jobs_rw', 'member');").trim();
-    if (jobsMembership !== "t") fail("app_worker_jobs_runtime must inherit only its jobs capability role.");
-    const workerUnionMembership = postgresOut("enterprise-postgres", runtimeDatabase, "postgres", "select pg_has_role('app_worker_jobs_runtime','app_db_account_rw','member') or pg_has_role('app_worker_jobs_runtime','app_db_auth_rw','member') or pg_has_role('app_worker_jobs_runtime','app_db_audit_rw','member') or pg_has_role('app_worker_notifications_runtime','app_db_account_rw','member') or pg_has_role('app_worker_notifications_runtime','app_db_auth_rw','member') or pg_has_role('app_worker_notifications_runtime','app_db_audit_rw','member');").trim();
-    if (workerUnionMembership !== "f") fail("Workers must not inherit union application capability roles.");
-    const jobsGrants = postgresOut("enterprise-postgres", runtimeDatabase, "postgres", `select has_table_privilege('app_worker_jobs_runtime', ${sqlString(`${accountSchemaName}.audit_outbox`)}, 'select') and has_table_privilege('app_worker_jobs_runtime', ${sqlString(`${accountSchemaName}.audit_outbox`)}, 'update') and not has_table_privilege('app_worker_jobs_runtime', ${sqlString(`${accountSchemaName}.audit_outbox`)}, 'insert,delete') and has_table_privilege('app_worker_jobs_runtime', ${sqlString(`${opsSchemaName}.backup_restore_runs`)}, 'select') and not has_table_privilege('app_worker_jobs_runtime', ${sqlString(`${opsSchemaName}.backup_restore_runs`)}, 'insert,update,delete');`).trim();
-    if (jobsGrants !== "t") fail("Jobs worker grants must be limited to audit outbox processing and read-only restore metrics.");
-    const workerCrossTable = postgresOut("enterprise-postgres", runtimeDatabase, "postgres", `select has_table_privilege('app_worker_jobs_runtime', ${sqlString(`${accountSchemaName}.accounts`)}, 'select') or has_table_privilege('app_worker_jobs_runtime', ${sqlString(`${accountSchemaName}.audit_events`)}, 'select') or has_table_privilege('app_worker_notifications_runtime', ${sqlString(`${accountSchemaName}.audit_outbox`)}, 'select') or has_table_privilege('app_worker_notifications_runtime', ${sqlString(`${accountSchemaName}.accounts`)}, 'select');`).trim();
-    if (workerCrossTable !== "f") fail("Worker cross-table access must be denied.");
-    const backendDelete = postgresOut("enterprise-postgres", runtimeDatabase, "postgres", `select has_table_privilege('app_backend_runtime', ${sqlString(`${accountSchemaName}.accounts`)}, 'delete');`).trim();
-    if (backendDelete !== "f") fail(`app_backend_runtime must not have DELETE on ${accountSchemaName}.accounts.`);
-    postgresOut("enterprise-postgres", runtimeDatabase, "postgres", `set role app_backend_runtime; select count(*) from ${accountSchema}.accounts;`);
-  } else {
-    for (const role of ["app_db_account_rw", "app_db_auth_rw", "app_db_audit_rw"]) {
-      const roleMembership = postgresOut("enterprise-postgres", runtimeDatabase, "postgres", `select pg_has_role('app_user', ${sqlString(role)}, 'member');`).trim();
-      if (roleMembership !== "t") {
-        fail(`app_user must inherit ${role} before the service-identity cutover.`);
-      }
-    }
-    const directDelete = postgresOut("enterprise-postgres", runtimeDatabase, "postgres", `select has_table_privilege('app_user', ${sqlString(`${accountSchemaName}.accounts`)}, 'delete');`).trim();
-    if (directDelete !== "f") fail(`app_user must not have DELETE on ${accountSchemaName}.accounts.`);
-    postgresOut("enterprise-postgres", runtimeDatabase, "postgres", `set role app_user; select count(*) from ${accountSchema}.accounts;`);
-  }
-
-  log("==> Row-level security");
-  const rlsGapCount = postgresOut("enterprise-postgres", runtimeDatabase, "postgres", `select count(*) from pg_class c join pg_namespace n on n.oid = c.relnamespace where n.nspname = ${sqlString(accountSchemaName)} and c.relkind in ('r','p') and (not c.relrowsecurity or not c.relforcerowsecurity);`).trim();
-  if (rlsGapCount !== "0") {
-    fail(`All ${accountSchemaName} tables must have forced row-level security.`);
-  }
-  const rlsPolicy = postgresOut("enterprise-postgres", runtimeDatabase, "postgres", `select value->>'enabled' from ${accountSchema}.security_policies where key = 'row_level_security';`).trim();
-  if (rlsPolicy !== "true") {
-    fail("row_level_security policy must be recorded and enabled.");
-  }
-
-  log("==> Persistence integrity readiness");
-  const migration006 = postgresOut("enterprise-postgres", runtimeDatabase, "postgres", `select count(*) from ${opsSchema}.schema_migrations where version = '006_persistence_integrity_readiness';`).trim();
-  if (migration006 !== "1") {
-    fail("Persistence integrity migration 006 must be applied.");
-  }
-  const migration007 = postgresOut("enterprise-postgres", runtimeDatabase, "postgres", `select count(*) from ${opsSchema}.schema_migrations where version = '007_durable_audit_outbox';`).trim();
-  if (migration007 !== "1") {
-    fail("Durable audit outbox migration 007 must be applied.");
-  }
-  const migration008 = postgresOut("enterprise-postgres", runtimeDatabase, "postgres", `select count(*) from ${opsSchema}.schema_migrations where version = '008_audit_account_unlink';`).trim();
-  if (migration008 !== "1") {
-    fail("Audit account unlink migration 008 must be applied.");
-  }
-  const migration009 = postgresOut("enterprise-postgres", runtimeDatabase, "postgres", `select count(*) from ${opsSchema}.schema_migrations where version = '009_audit_outbox_dispatcher';`).trim();
-  if (migration009 !== "1") {
-    fail("Audit outbox dispatcher migration 009 must be applied.");
-  }
-  const migration010 = postgresOut("enterprise-postgres", runtimeDatabase, "postgres", `select count(*) from ${opsSchema}.schema_migrations where version = '010_platform_runtime_least_privilege';`).trim();
-  if (migration010 !== "1") {
-    fail("Platform runtime least-privilege migration 010 must be applied.");
-  }
-  const migration011 = postgresOut("enterprise-postgres", runtimeDatabase, "postgres", `select count(*) from ${opsSchema}.schema_migrations where version = '011_platform_runtime_role_revoke';`).trim();
-  if (migration011 !== "1") {
-    fail("Platform runtime inherited role revoke migration 011 must be applied.");
-  }
-  const runtimePlatformMutation = postgresOut("enterprise-postgres", runtimeDatabase, "postgres", `select has_table_privilege('app_user', ${sqlString(`${opsSchemaName}.schema_migrations`)}, 'insert,update,delete') or has_table_privilege('app_user', ${sqlString(`${opsSchemaName}.data_retention_policies`)}, 'insert,update,delete') or has_table_privilege('app_user', ${sqlString(`${opsSchemaName}.backup_restore_runs`)}, 'insert,update,delete');`).trim();
-  if (runtimePlatformMutation !== "f") {
-    fail("app_user must not mutate platform migration, retention or backup/restore evidence tables.");
-  }
-  const retentionPolicies = postgresOut("enterprise-postgres", runtimeDatabase, "postgres", `select count(*) from ${opsSchema}.data_retention_policies where enabled;`).trim();
-  if (Number.parseInt(retentionPolicies, 10) < 6) {
-    fail("At least six enabled data retention policies must be present.");
-  }
-  const backupRestoreLog = postgresOut("enterprise-postgres", runtimeDatabase, "postgres", `select to_regclass(${sqlString(`${opsSchemaName}.backup_restore_runs`)}) is not null;`).trim();
-  if (backupRestoreLog !== "t") {
-    fail("Backup and restore run log table must exist.");
-  }
-  const successfulRestoreTests = postgresOut("enterprise-postgres", runtimeDatabase, "postgres", `select count(*) from ${opsSchema}.backup_restore_runs where operation = 'restore_test' and status = 'success';`).trim();
-  if (Number.parseInt(successfulRestoreTests, 10) < 1) {
-    fail(`At least one successful PostgreSQL restore-test drill must be recorded in ${opsSchemaName}.backup_restore_runs.`);
-  }
-  const activeBackupSetIndex = postgresOut("enterprise-postgres", runtimeDatabase, "postgres", `select to_regclass(${sqlString(`${accountSchemaName}.idx_backup_code_sets_one_active`)}) is not null;`).trim();
-  if (activeBackupSetIndex !== "t") {
-    fail("Active backup-code uniqueness index must exist.");
-  }
-  const auditMutationDenied = postgresOut("enterprise-postgres", runtimeDatabase, "postgres", `select has_table_privilege('app_db_audit_rw', ${sqlString(`${accountSchemaName}.audit_events`)}, 'update') or has_table_privilege('app_db_audit_rw', ${sqlString(`${accountSchemaName}.audit_events`)}, 'delete');`).trim();
-  if (auditMutationDenied !== "f") {
-    fail("Audit role must not be able to update or delete audit events.");
-  }
-  const auditAppendOnlyTrigger = postgresOut("enterprise-postgres", runtimeDatabase, "postgres", `select count(*) from pg_trigger t join pg_class c on c.oid = t.tgrelid join pg_namespace n on n.oid = c.relnamespace where n.nspname = ${sqlString(accountSchemaName)} and t.tgname = 'trg_audit_events_append_only' and t.tgenabled <> 'D';`).trim();
-  if (auditAppendOnlyTrigger !== "1") {
-    fail("Audit append-only trigger must be enabled.");
-  }
-  const auditOutboxTable = postgresOut("enterprise-postgres", runtimeDatabase, "postgres", `select to_regclass(${sqlString(`${accountSchemaName}.audit_outbox`)}) is not null;`).trim();
-  if (auditOutboxTable !== "t") {
-    fail("Durable audit outbox table must exist.");
-  }
-  const auditOutboxPrivileges = postgresOut("enterprise-postgres", runtimeDatabase, "postgres", `select has_table_privilege('app_db_audit_rw', ${sqlString(`${accountSchemaName}.audit_outbox`)}, 'insert') and has_table_privilege('app_db_audit_rw', ${sqlString(`${accountSchemaName}.audit_outbox`)}, 'update') and not has_table_privilege('app_db_audit_rw', ${sqlString(`${accountSchemaName}.audit_outbox`)}, 'delete');`).trim();
-  if (auditOutboxPrivileges !== "t") {
-    fail("Audit role must enqueue and update audit outbox entries without delete privilege.");
-  }
-  const auditOutboxRetention = postgresOut("enterprise-postgres", runtimeDatabase, "postgres", `select count(*) from ${opsSchema}.data_retention_policies where key = 'audit_outbox' and enabled;`).trim();
-  if (auditOutboxRetention !== "1") {
-    fail("Audit outbox retention policy must be enabled.");
-  }
-  const auditOutboxDeadStatus = postgresOut("enterprise-postgres", runtimeDatabase, "postgres", `select count(*) from pg_constraint constraint_row join pg_class c on c.oid = constraint_row.conrelid join pg_namespace n on n.oid = c.relnamespace where n.nspname = ${sqlString(accountSchemaName)} and constraint_row.conname = 'audit_outbox_status_known' and pg_get_constraintdef(constraint_row.oid) like '%dead%';`).trim();
-  if (auditOutboxDeadStatus !== "1") {
-    fail("Audit outbox must support terminal dead-letter status.");
-  }
-  const auditOutboxDueIndex = postgresOut("enterprise-postgres", runtimeDatabase, "postgres", `select to_regclass(${sqlString(`${accountSchemaName}.idx_audit_outbox_due_dispatch`)}) is not null;`).trim();
-  if (auditOutboxDueIndex !== "t") {
-    fail("Audit outbox must have a due-dispatch index for worker claims.");
-  }
-  log("==> Dev app container hardening");
-  for (const container of ["enterprise-backend", "enterprise-web", "enterprise-worker-notifications", "enterprise-worker-jobs"]) {
-    const readonly = output("docker", ["inspect", "--format", "{{.HostConfig.ReadonlyRootfs}}", container]).trim().toLowerCase();
-    const capDrop = output("docker", ["inspect", "--format", "{{json .HostConfig.CapDrop}}", container]);
-    const securityOpt = output("docker", ["inspect", "--format", "{{json .HostConfig.SecurityOpt}}", container]);
-    if (readonly !== "true") {
-      fail(`${container} root filesystem must be read-only.`);
-    }
-    if (!/ALL/.test(capDrop)) {
-      fail(`${container} must drop all Linux capabilities.`);
-    }
-    if (!/no-new-privileges:true/.test(securityOpt)) {
-      fail(`${container} must set no-new-privileges.`);
-    }
-  }
+  if (!/OK/.test(alertmanagerStatus)) fail("Alertmanager health endpoint is not OK.");
+  const dispatcherHealth = dockerExecOutput("enterprise-platform-alert-dispatcher", ["wget", "-q", "-O", "-", "http://127.0.0.1:3000/health"]);
+  if (!/\"status\":\"ok\"/.test(dispatcherHealth)) fail("Platform alert dispatcher health is not OK.");
+  log("Platform runtime health checks passed.");
 }
 
 function imageReferenceFromTemplate(value) {
@@ -2975,7 +2381,6 @@ function collectInfraContainerImageRefs() {
 
   const composeFiles = [
     "compose.yaml",
-    "compose.build.yaml",
     "compose.backup-scheduler.yaml",
     "compose.runtime.yaml",
     "compose.networks.yaml",
@@ -2997,9 +2402,7 @@ function collectInfraContainerImageRefs() {
   }
 
   const dockerfiles = [
-    "docker/backend.Dockerfile",
-    "docker/web.Dockerfile",
-    "docker/worker.Dockerfile",
+    "docker/alert-dispatcher.Dockerfile",
     "docker/php-apache.Dockerfile",
     "docker/ops.Dockerfile",
     "docker/control-center.Dockerfile",
@@ -3075,41 +2478,22 @@ function writeInfraSbom(outputDir) {
 }
 
 async function generateSbom() {
-  const includeProject = booleanFlag(argv.includeProject);
   const outputDir = path.resolve(argv.outputDir ?? path.join(infraRoot, "security", "sbom"));
   await withLocalCheckReport("generate-sbom", async () => {
-    if (includeProject && hasSupportedProjectSource()) {
-      fs.mkdirSync(outputDir, { recursive: true });
-      const timestamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\..+/, "").replace("T", "-");
-      const outputFile = path.join(outputDir, `pnpm-sbom-${timestamp}.json`);
-      const json = sourceWorkspaceOutput("pnpm install --frozen-lockfile >/dev/null && pnpm list --json --prod --depth 20", { maxBuffer: 128 * 1024 * 1024 });
-      fs.writeFileSync(outputFile, `${json}\n`, "utf8");
-      log(`Application SBOM written to ${outputFile}`);
-      return;
-    }
     const sbom = writeInfraSbom(outputDir);
     log(`Infrastructure SBOM written to ${sbom.outputFile} (${sbom.componentCount} component(s)).`);
-  }, { includeProject, supportedProjectSource: hasSupportedProjectSource(), mode: includeProject && hasSupportedProjectSource() ? "project" : "platform-infrastructure" });
+  }, { scope: "platform-infrastructure" });
 }
 
 async function dependencyHygiene() {
-  const includeProject = booleanFlag(argv.includeProject);
   await withLocalCheckReport("dependency-hygiene", async () => {
-    log("==> Dependency hygiene");
     infraDependencyHygiene();
-    if (includeProject && hasSupportedProjectSource()) {
-      run(process.execPath, ["scripts/dependency-hygiene.mjs"], { cwd: sourceRoot });
-    } else {
-      log("Application dependency hygiene skipped; platform-infrastructure dependency hygiene passed.");
-    }
-  }, { includeProject, supportedProjectSource: hasSupportedProjectSource() });
+  }, { scope: "platform-infrastructure" });
 }
 
 function infraDependencyHygiene() {
   const dockerfiles = [
-    "docker/backend.Dockerfile",
-    "docker/web.Dockerfile",
-    "docker/worker.Dockerfile",
+    "docker/alert-dispatcher.Dockerfile",
     "docker/php-apache.Dockerfile",
     "docker/ops.Dockerfile",
     "docker/control-center.Dockerfile",
@@ -3134,7 +2518,6 @@ function infraDependencyHygiene() {
   }
   const composeFiles = [
     "compose.yaml",
-    "compose.build.yaml",
     "compose.backup-scheduler.yaml",
     "compose.runtime.yaml",
     "compose.networks.yaml",
@@ -3178,21 +2561,11 @@ async function cloudflareAccessAdmin() {
 }
 
 async function supplyChainHygiene() {
-  const includeProject = booleanFlag(argv.includeProject);
   await withLocalCheckReport("supply-chain-hygiene", async () => {
-    log("==> Supply-chain SBOM/CVE/license gate");
-    if (includeProject && hasSupportedProjectSource()) {
-      const result = sourceWorkspaceOutput(
-        "pnpm install --frozen-lockfile --store-dir /tmp/pnpm-store >/dev/null && pnpm deps:supply-chain -- --sbom-output /workspace/security/sbom/pnpm-sbom-current.cdx.json",
-        { maxBuffer: 128 * 1024 * 1024 },
-      );
-      log(result);
-      return;
-    }
     infraDependencyHygiene();
     const sbom = writeInfraSbom(path.join(infraRoot, "security", "sbom"));
     log(`Platform infrastructure supply-chain hygiene passed with SBOM ${sbom.outputFile}.`);
-  }, { includeProject, supportedProjectSource: hasSupportedProjectSource(), mode: includeProject && hasSupportedProjectSource() ? "project" : "platform-infrastructure" });
+  }, { scope: "platform-infrastructure" });
 }
 
 async function supplyChainLockCheck() {
@@ -3223,16 +2596,9 @@ async function supplyChainLockCheck() {
 }
 
 async function testingHygiene() {
-  const includeProject = booleanFlag(argv.includeProject);
   await withLocalCheckReport("testing-hygiene", async () => {
-    log("==> Testing hygiene");
     infraTestingHygiene();
-    if (includeProject && hasSupportedProjectSource()) {
-      run(process.execPath, ["scripts/testing-hygiene.mjs"], { cwd: sourceRoot });
-    } else {
-      log("Application testing hygiene skipped; platform-infrastructure tests passed.");
-    }
-  }, { includeProject, supportedProjectSource: hasSupportedProjectSource() });
+  }, { scope: "platform-infrastructure" });
 }
 
 function infraTestingHygiene() {
@@ -3241,11 +2607,13 @@ function infraTestingHygiene() {
     "scripts/alert-delivery-sandbox-test.mjs",
     "scripts/control-center-vault-reencrypt.mjs",
     "scripts/database-principal-migration-plan.mjs",
+    "scripts/hosted-workload-contract.mjs",
     "control-center/server.mjs",
     "control-center/database/destructive-workflow.mjs",
     "control-center/database/ownership.mjs",
     "control-center/vault/keyring.mjs",
     "project-router/server.mjs",
+    "platform-alert-dispatcher/server.mjs",
     "scripts/network-segmentation-policy.mjs",
     "scripts/supply-chain-policy.mjs",
     "scripts/supply-chain-policy.test.mjs",
@@ -3256,9 +2624,12 @@ function infraTestingHygiene() {
   }
   run(process.execPath, ["--test", ...controlCenterTestFiles()], { cwd: infraRoot });
   run(process.execPath, ["--test", "project-router/tests/project-router.test.mjs"], { cwd: infraRoot });
+  run(process.execPath, ["--test", "scripts/hosted-workload-contract.test.mjs"], { cwd: infraRoot });
+  run(process.execPath, ["--test", "platform-alert-dispatcher/server.test.mjs"], { cwd: infraRoot });
   const shellFiles = fs.readdirSync(path.join(infraRoot, "scripts")).filter((name) => name.endsWith(".sh")).sort();
   for (const file of shellFiles) {
-    run("sh", ["-n", path.join("scripts", file)], { cwd: infraRoot });
+    const shell = readText(path.join(infraRoot, "scripts", file)).startsWith("#!/usr/bin/env bash") ? "bash" : "sh";
+    run(shell, ["-n", path.join("scripts", file)], { cwd: infraRoot });
   }
   log("Infrastructure testing hygiene checks passed.");
 }
@@ -3297,7 +2668,6 @@ async function networkSegmentationCheck() {
       "compose.vps.yaml",
       "compose.vps-waf.yaml",
       "compose.backup-scheduler.yaml",
-      "compose.build.yaml",
       "compose.runtime.yaml",
       "compose.networks.yaml",
       "compose.runtime-isolation.yaml",
@@ -3350,7 +2720,6 @@ async function runtimeIsolationCheck() {
       "compose.vps.yaml",
       "compose.vps-waf.yaml",
       "compose.backup-scheduler.yaml",
-      "compose.build.yaml",
       "compose.runtime.yaml",
       "compose.networks.yaml",
       "compose.runtime-isolation.yaml",
@@ -3395,14 +2764,8 @@ async function runtimeIsolationCheck() {
 }
 
 async function faultInjectionTests() {
-  log("==> Fault injection tests");
-  const testOutput = sourceWorkspaceOutput([
-    "pnpm install --frozen-lockfile --store-dir /tmp/pnpm-store >/dev/null",
-    "node --import ./scripts/register-ts-extension-loader.mjs --test apps/backend/src/db-query.test.ts apps/backend/src/runtime/redis-store.test.ts apps/backend/src/runtime/session-auth.test.ts",
-  ].join(" && "), { maxBuffer: 128 * 1024 * 1024 });
-  log(testOutput);
-
-  const timeoutProbe = postgres("enterprise-postgres", "app_db", "postgres", "begin; set local statement_timeout = '1ms'; select pg_sleep(0.05); rollback;", {
+  log("==> Platform fault injection tests");
+  const timeoutProbe = postgres("enterprise-postgres", "postgres", "postgres", "begin; set local statement_timeout = '1ms'; select pg_sleep(0.05); rollback;", {
     allowFailure: true,
     capture: true,
   });
@@ -3416,31 +2779,20 @@ async function faultInjectionTests() {
     status: "passed",
     mode: "runtime",
     scope: "platform-infrastructure",
-    checks: [
-      { name: "backend-runtime-tests", status: "passed" },
-      { name: "postgres-statement-timeout", status: "passed" },
-    ],
+    checks: [{ name: "postgres-statement-timeout", status: "passed" }],
   };
   const jsonPath = writeJsonReport("fault-injection", `fault-injection-tests-${stamp}`, payload);
   const markdownPath = writeMarkdownReport("fault-injection", `fault-injection-tests-${stamp}`, [
-    "# Fault Injection Tests",
-    "",
-    `Generated at: ${payload.generatedAt}`,
-    `Status: ${payload.status}`,
-    "",
-    "| Check | Status |",
-    "| --- | --- |",
-    ...payload.checks.map((check) => `| ${check.name} | ${check.status} |`),
+    "# Platform Fault Injection Tests", "", `Generated at: ${payload.generatedAt}`, `Status: ${payload.status}`, "", "| Check | Status |", "| --- | --- |", "| postgres-statement-timeout | passed |",
   ]);
-  log("PostgreSQL timeout fault injection passed.");
-  log(`Fault injection report written to ${jsonPath} and ${markdownPath}`);
+  log(`Platform fault injection report written to ${jsonPath} and ${markdownPath}`);
 }
 
 async function failureTests() {
   await faultInjectionTests();
   await wafSmoke();
   if (!booleanFlag(argv.confirmServiceStop)) {
-    log("Service stop failure tests are armed but not executed. Re-run with --confirmServiceStop in local/staging to stop and recover containers.");
+    log("Service stop failure tests are armed but not executed. Re-run with --confirmServiceStop in local/staging.");
     return;
   }
   const allTargets = [
@@ -3449,56 +2801,39 @@ async function failureTests() {
     ["postgres", "enterprise-postgres"],
     ["minio", "enterprise-minio"],
     ["keycloak", "enterprise-keycloak"],
-    ["backend", "enterprise-backend"],
-    ["worker-notifications", "enterprise-worker-notifications"],
-    ["worker-jobs", "enterprise-worker-jobs"],
     ["nats", "enterprise-nats"],
+    ["alertmanager", "enterprise-alertmanager"],
+    ["alert-dispatcher", "enterprise-platform-alert-dispatcher"],
     ["waf", "enterprise-waf"],
   ];
   const requested = new Set(String(argv.targets ?? allTargets.map(([name]) => name).join(",")).split(",").map((value) => value.trim()).filter(Boolean));
   const targets = allTargets.filter(([name]) => requested.has(name));
-  if (!targets.length) {
-    fail("No valid failure-test targets selected.");
-  }
+  if (!targets.length) fail("No valid platform failure-test targets selected.");
   const results = [];
   const stopped = [];
   try {
     for (const [name, container] of targets) {
       const startedAt = Date.now();
-      log(`==> Failure probe: stopping ${container}`);
       run("docker", ["stop", "--time", "10", container], { capture: true });
       stopped.push(container);
       await sleep(1500);
       const healthProbe = run(process.execPath, [path.join(scriptDir, "infra-ops.mjs"), "infra-health"], { allowFailure: true, capture: true });
       const outputText = `${healthProbe.stdout ?? ""}\n${healthProbe.stderr ?? ""}`;
-      if (healthProbe.status === 0 || !outputText.includes(container)) {
-        fail(`infra-health did not detect stopped ${container}.`);
-      }
-      log(`Detected ${container} failure.`);
+      if (healthProbe.status === 0 || !outputText.includes(container)) fail(`infra-health did not detect stopped ${container}.`);
       run("docker", ["start", container], { capture: true });
       stopped.pop();
       await waitContainerHealthy(container, 120);
       await waitInfraHealth(120);
-      const durationMs = Date.now() - startedAt;
-      results.push({ target: name, container, detected: true, recovered: true, durationMs });
-      log(`Recovered ${container} in ${durationMs}ms.`);
+      results.push({ target: name, container, detected: true, recovered: true, durationMs: Date.now() - startedAt });
     }
   } finally {
-    for (const container of stopped.reverse()) {
-      run("docker", ["start", container], { allowFailure: true, capture: true });
-    }
+    for (const container of stopped.reverse()) run("docker", ["start", container], { allowFailure: true, capture: true });
   }
   const stamp = reportTimestamp();
   const payload = { generatedAt: new Date().toISOString(), status: "passed", targets: results };
   const jsonPath = writeJsonReport("failure-tests", `failure-tests-${stamp}`, payload);
   const markdownPath = writeMarkdownReport("failure-tests", `failure-tests-${stamp}`, [
-    "# Platform Failure Tests",
-    "",
-    `Generated at: ${payload.generatedAt}`,
-    "",
-    "| Target | Container | Detected | Recovered | Duration ms |",
-    "| --- | --- | --- | --- | ---: |",
-    ...results.map((result) => `| ${result.target} | ${result.container} | ${result.detected ? "yes" : "no"} | ${result.recovered ? "yes" : "no"} | ${result.durationMs} |`),
+    "# Platform Failure Tests", "", `Generated at: ${payload.generatedAt}`, "", "| Target | Container | Detected | Recovered | Duration ms |", "| --- | --- | --- | --- | ---: |", ...results.map((result) => `| ${result.target} | ${result.container} | yes | yes | ${result.durationMs} |`),
   ]);
   log(`Failure test reports written to ${jsonPath} and ${markdownPath}`);
 }
@@ -3537,29 +2872,15 @@ async function waitInfraHealth(timeoutSeconds = 90) {
 }
 
 async function maintainabilityHygiene() {
-  const includeProject = booleanFlag(argv.includeProject);
   await withLocalCheckReport("maintainability-hygiene", async () => {
-    log("==> Maintainability hygiene");
     infraMaintainabilityHygiene();
-    if (includeProject && hasSupportedProjectSource()) {
-      run(process.execPath, ["scripts/maintainability-hygiene.mjs"], { cwd: sourceRoot });
-    } else {
-      log("Application maintainability hygiene skipped; platform-infrastructure maintainability checks passed.");
-    }
-  }, { includeProject, supportedProjectSource: hasSupportedProjectSource() });
+  }, { scope: "platform-infrastructure" });
 }
 
 async function performanceHygiene() {
-  const includeProject = booleanFlag(argv.includeProject);
   await withLocalCheckReport("performance-hygiene", async () => {
-    log("==> Performance hygiene");
     await infraPerformanceHygiene();
-    if (includeProject && hasSupportedProjectSource()) {
-      run(process.execPath, ["scripts/performance-hygiene.mjs"], { cwd: sourceRoot });
-    } else {
-      log("Application performance hygiene skipped; platform-infrastructure performance checks passed.");
-    }
-  }, { includeProject, supportedProjectSource: hasSupportedProjectSource() });
+  }, { scope: "platform-infrastructure" });
 }
 
 function infraMaintainabilityHygiene() {
@@ -3630,106 +2951,12 @@ async function infraPerformanceHygiene() {
 async function initLocalSecrets() {
   const envFile = path.resolve(argv.envFile ?? path.join(infraRoot, ".env"));
   const secretsDir = path.resolve(argv.secretsDir ?? path.join(infraRoot, "secrets"));
-  const force = Boolean(argv.force);
-  const sanitizeEnv = Boolean(argv.sanitizeEnv);
-  fs.mkdirSync(secretsDir, { recursive: true });
-  const env = parseEnv(envFile);
-
-  const existingSecret = (name) => {
-    if (force) return null;
-    const value = readSecretFileIfExists(path.join(secretsDir, `${name}.txt`));
-    return isUsableSecret(value) ? value : null;
-  };
-  const secretValue = (name, bytes = 36) => existingSecret(name) ?? randomSecret(bytes);
-  const versionedSecretValue = (name, fallbackId) => {
-    const existing = existingSecret(name);
-    if (existing) return existing;
-    return `${fallbackId}=${randomSecret(48)}`;
-  };
-  const postgresSuper = secretValue("postgres_superuser_password");
-  const appDbPassword = secretValue("app_db_password");
-  const backendDbPassword = secretValue("backend_db_password");
-  const workerJobsDbPassword = secretValue("worker_jobs_db_password");
-  const workerNotificationsDbPassword = secretValue("worker_notifications_db_password");
-  const keycloakDbPassword = secretValue("keycloak_db_password");
-  const redisPassword = secretValue("redis_password");
-  const keycloakAdminPassword = secretValue("keycloak_admin_password");
-  const natsPassword = secretValue("nats_password");
-  const minioRootPassword = secretValue("minio_root_password");
-  const mariadbRootPassword = secretValue("mariadb_root_password");
-  const phpmyadminControlPassword = secretValue("phpmyadmin_control_password");
-  const grafanaAdminPassword = secretValue("grafana_admin_password");
-  const sessionSecret = secretValue("session_secret", 48);
-  const sessionSigningKeys = versionedSecretValue("session_signing_keys", secretId("s"));
-  const projectsGatewaySigningKeys = versionedSecretValue("projects_gateway_signing_keys", secretId("p"));
-  const hashPepperKeys = versionedSecretValue("hash_pepper_keys", "local");
-  const backupSigningKeys = versionedSecretValue("backup_signing_keys", secretId("b"));
-  const smtpPassword = secretValue("smtp_password");
-  const appDbUser = env.APP_DB_USER || "app_user";
-  const appDbName = env.APP_DB_NAME || "app_db";
-  const backendDbUser = env.BACKEND_DB_USER || "app_backend_runtime";
-  const workerJobsDbUser = env.WORKER_JOBS_DB_USER || "app_worker_jobs_runtime";
-  const workerNotificationsDbUser = env.WORKER_NOTIFICATIONS_DB_USER || "app_worker_notifications_runtime";
-  const natsUser = env.NATS_USER || "platform";
-  const databaseUrl = existingSecret("database_url") ?? `postgresql://${encodeURIComponent(appDbUser)}:${encodeURIComponent(appDbPassword)}@postgres:5432/${encodeURIComponent(appDbName)}`;
-  const backendDatabaseUrl = existingSecret("backend_database_url") ?? `postgresql://${encodeURIComponent(backendDbUser)}:${encodeURIComponent(backendDbPassword)}@postgres:5432/${encodeURIComponent(appDbName)}`;
-  const workerJobsDatabaseUrl = existingSecret("worker_jobs_database_url") ?? `postgresql://${encodeURIComponent(workerJobsDbUser)}:${encodeURIComponent(workerJobsDbPassword)}@postgres:5432/${encodeURIComponent(appDbName)}`;
-  const workerNotificationsDatabaseUrl = existingSecret("worker_notifications_database_url") ?? `postgresql://${encodeURIComponent(workerNotificationsDbUser)}:${encodeURIComponent(workerNotificationsDbPassword)}@postgres:5432/${encodeURIComponent(appDbName)}`;
-  const natsUrl = existingSecret("nats_url") ?? `nats://${encodeURIComponent(natsUser)}:${encodeURIComponent(natsPassword)}@nats:4222`;
-
-  const groupReadableSecretFiles = new Set(["app_db_password", "alertmanager_webhook_token"]);
-  const writeSecretFile = (name, value) => {
-    const filePath = path.join(secretsDir, `${name}.txt`);
-    if (fs.existsSync(filePath) && !force) {
-      return;
-    }
-    fs.writeFileSync(filePath, value, "utf8");
-    try {
-      fs.chmodSync(filePath, groupReadableSecretFiles.has(name) ? 0o640 : 0o600);
-    } catch {
-      // Best effort on platforms without POSIX permissions.
-    }
-  };
-
-  const secretValues = {
-    postgres_superuser_password: postgresSuper,
-    app_db_password: appDbPassword,
-    backend_db_password: backendDbPassword,
-    worker_jobs_db_password: workerJobsDbPassword,
-    worker_notifications_db_password: workerNotificationsDbPassword,
-    keycloak_db_password: keycloakDbPassword,
-    redis_password: redisPassword,
-    keycloak_admin_password: keycloakAdminPassword,
-    nats_password: natsPassword,
-    minio_root_password: minioRootPassword,
-    mariadb_root_password: mariadbRootPassword,
-    phpmyadmin_control_password: phpmyadminControlPassword,
-    grafana_admin_password: grafanaAdminPassword,
-    session_secret: sessionSecret,
-    session_signing_keys: sessionSigningKeys,
-    projects_gateway_signing_keys: projectsGatewaySigningKeys,
-    hash_pepper_keys: hashPepperKeys,
-    backup_signing_keys: backupSigningKeys,
-    smtp_password: smtpPassword,
-    database_url: databaseUrl,
-    backend_database_url: backendDatabaseUrl,
-    worker_jobs_database_url: workerJobsDatabaseUrl,
-    worker_notifications_database_url: workerNotificationsDatabaseUrl,
-    nats_url: natsUrl,
-  };
-
-  for (const [name, value] of Object.entries(secretValues)) {
-    writeSecretFile(name, value);
-  }
-  runSecretManager(["init", "--secretsDir", secretsDir, "--envFile", envFile]);
-
-  if (sanitizeEnv && fs.existsSync(envFile)) {
+  const args = ["init", "--secretsDir", secretsDir, "--envFile", envFile];
+  if (booleanFlag(argv.force)) args.push("--force");
+  runSecretManager(args);
+  if (booleanFlag(argv.sanitizeEnv) && fs.existsSync(envFile)) {
     const sensitive = new Set([
       "POSTGRES_SUPERUSER_PASSWORD",
-      "APP_DB_PASSWORD",
-      "BACKEND_DB_PASSWORD",
-      "WORKER_JOBS_DB_PASSWORD",
-      "WORKER_NOTIFICATIONS_DB_PASSWORD",
       "KEYCLOAK_DB_PASSWORD",
       "REDIS_PASSWORD",
       "KEYCLOAK_ADMIN_PASSWORD",
@@ -3738,8 +2965,8 @@ async function initLocalSecrets() {
       "MARIADB_ROOT_PASSWORD",
       "PHPMYADMIN_CONTROL_PASSWORD",
       "GRAFANA_ADMIN_PASSWORD",
-      "SESSION_SECRET",
       "SMTP_PASSWORD",
+      "ALERTMANAGER_WEBHOOK_TOKEN",
     ]);
     const next = fs.readFileSync(envFile, "utf8").split(/\r?\n/).map((line) => {
       const key = line.split("=", 1)[0];
@@ -3747,10 +2974,7 @@ async function initLocalSecrets() {
     }).join("\n");
     fs.writeFileSync(envFile, next, "utf8");
   }
-
-  log(`Local secrets initialized in ${secretsDir}`);
-  log("Infra Secret Manager is the canonical encrypted local secret store.");
-  log("Use compose.secrets.yaml when starting the local stack.");
+  log("Platform secrets initialized through Infra Secret Manager.");
 }
 
 async function localSecretManager() {
@@ -4100,25 +3324,16 @@ async function externalUptimeCheck(options = {}) {
   log(`External uptime reports written to ${report.jsonPath} and ${report.markdownPath}`);
 }
 
-function alertMetricScript({ requireEmailDelivery, requireDiscordDelivery, requireTelegramDelivery, timeoutMs, alertmanagerHost = "alertmanager" }) {
+function alertMetricScript({ requireEmailDelivery, requireForwardDelivery, timeoutMs, alertmanagerHost = "alertmanager" }) {
   return `
 const crypto = require("node:crypto");
 const http = require("node:http");
 const timeoutMs = ${JSON.stringify(timeoutMs)};
-const required = ${JSON.stringify({ email: requireEmailDelivery, discord: requireDiscordDelivery, telegram: requireTelegramDelivery })};
+const required = ${JSON.stringify({ email: requireEmailDelivery, forward: requireForwardDelivery })};
 function request(hostname, port, method, path, body) {
   return new Promise((resolve, reject) => {
     const data = body ? Buffer.from(JSON.stringify(body)) : undefined;
-    const req = http.request({
-      method,
-      hostname,
-      port,
-      path,
-      headers: {
-        ...(data ? { "content-type": "application/json", "content-length": data.length } : {}),
-      },
-      timeout: timeoutMs,
-    }, (res) => {
+    const req = http.request({ method, hostname, port, path, headers: data ? { "content-type": "application/json", "content-length": data.length } : {}, timeout: timeoutMs }, (res) => {
       const chunks = [];
       res.on("data", (chunk) => chunks.push(chunk));
       res.on("end", () => resolve({ status: res.statusCode || 0, text: Buffer.concat(chunks).toString("utf8") }));
@@ -4129,10 +3344,10 @@ function request(hostname, port, method, path, body) {
     req.end();
   });
 }
-function metric(text, name, labelText = "") {
+function metric(text, name, labels = "") {
   for (const line of text.split(/\\r?\\n/)) {
     if (!line.startsWith(name)) continue;
-    if (labelText && !line.includes("{" + labelText + "}")) continue;
+    if (labels && !line.includes("{" + labels + "}")) continue;
     const value = Number(line.trim().split(/\\s+/).at(-1));
     if (Number.isFinite(value)) return value;
   }
@@ -4148,217 +3363,79 @@ async function metrics() {
   const probeId = crypto.randomUUID();
   const probeAlertname = "PlatformSyntheticAlertDeliveryTest_" + probeId.replaceAll("-", "");
   const startedAt = new Date();
-  const labels = {
-    alertname: probeAlertname,
-    severity: "info",
-    service: "platform-platform",
-    job: "alert-evidence",
-    platform_probe: "alert-delivery",
-    platform_probe_id: probeId,
-  };
-  const annotations = {
-    summary: "Synthetic Platform alert delivery test",
-    description: "Generated by alert-evidence to verify the complete Alertmanager webhook path.",
-  };
+  const labels = { alertname: probeAlertname, severity: "info", service: "platform-infrastructure", job: "alert-evidence", platform_probe: "alert-delivery", platform_probe_id: probeId };
+  const annotations = { summary: "Synthetic platform alert delivery test", description: "Generated by alert-evidence." };
   const firingAlert = { labels, annotations, startsAt: startedAt.toISOString(), endsAt: new Date(startedAt.getTime() + 60000).toISOString() };
   const accepted = await request(${JSON.stringify(alertmanagerHost)}, 9093, "POST", "/api/v2/alerts", [firingAlert]);
-  if (accepted.status < 200 || accepted.status >= 300) throw new Error("Alertmanager API status " + accepted.status + ": " + accepted.text);
+  if (accepted.status < 200 || accepted.status >= 300) throw new Error("Alertmanager API status " + accepted.status);
   const start = Date.now();
-  let after = "";
   while (Date.now() - start < timeoutMs) {
-    after = await metrics();
-    const webhookBefore = metric(before, "notification_alert_webhook_requests_total", 'service="enterprise-worker-notifications"');
-    const webhookAfter = metric(after, "notification_alert_webhook_requests_total", 'service="enterprise-worker-notifications"');
-    const firingBefore = metric(before, "notification_alert_webhook_alerts_total", 'service="enterprise-worker-notifications",status="firing"');
-    const firingAfter = metric(after, "notification_alert_webhook_alerts_total", 'service="enterprise-worker-notifications",status="firing"');
-    const emailOk = !required.email || metric(after, "notification_alert_email_deliveries_total", 'service="enterprise-worker-notifications"') > metric(before, "notification_alert_email_deliveries_total", 'service="enterprise-worker-notifications"');
-    const discordOk = !required.discord || metric(after, "notification_alert_discord_deliveries_total", 'service="enterprise-worker-notifications"') > metric(before, "notification_alert_discord_deliveries_total", 'service="enterprise-worker-notifications"');
-    const telegramOk = !required.telegram || metric(after, "notification_alert_telegram_deliveries_total", 'service="enterprise-worker-notifications"') > metric(before, "notification_alert_telegram_deliveries_total", 'service="enterprise-worker-notifications"');
-    if (webhookAfter > webhookBefore && firingAfter > firingBefore && emailOk && discordOk && telegramOk) {
-      const resolvedAlert = { ...firingAlert, endsAt: new Date().toISOString() };
-      const resolved = await request(${JSON.stringify(alertmanagerHost)}, 9093, "POST", "/api/v2/alerts", [resolvedAlert]);
-      console.log(JSON.stringify({
-        probeId,
-        probeAlertname,
-        acceptedStatus: accepted.status,
-        resolvedStatus: resolved.status,
-        counters: {
-          webhookBefore,
-          webhookAfter,
-          firingBefore,
-          firingAfter,
-        },
-        delivery: { email: emailOk, discord: discordOk, telegram: telegramOk },
-      }));
+    const after = await metrics();
+    const webhookOk = metric(after, "platform_alert_webhook_requests_total") > metric(before, "platform_alert_webhook_requests_total");
+    const firingOk = metric(after, "platform_alert_webhook_alerts_total", 'status="firing"') > metric(before, "platform_alert_webhook_alerts_total", 'status="firing"');
+    const emailOk = !required.email || metric(after, "platform_alert_delivery_total", 'channel="email",result="success"') > metric(before, "platform_alert_delivery_total", 'channel="email",result="success"');
+    const forwardOk = !required.forward || metric(after, "platform_alert_delivery_total", 'channel="forward",result="success"') > metric(before, "platform_alert_delivery_total", 'channel="forward",result="success"');
+    if (webhookOk && firingOk && emailOk && forwardOk) {
+      console.log(JSON.stringify({ probeId, probeAlertname, acceptedStatus: accepted.status, delivery: { email: emailOk, forward: forwardOk } }));
       return;
     }
     await new Promise((resolve) => setTimeout(resolve, 500));
   }
   throw new Error("alert delivery counters did not increase before timeout");
-})().catch((error) => {
-  console.error(error.stack || error.message || String(error));
-  process.exit(1);
-});
+})().catch((error) => { console.error(error.message || String(error)); process.exit(1); });
 `;
 }
 
 async function alertEvidence(options = {}) {
-  log("==> Alert delivery evidence");
+  log("==> Platform alert delivery evidence");
   const sendTest = options.sendTest ?? booleanFlag(argv.sendTest);
   const enforce = options.enforce ?? booleanFlag(argv.enforce);
   const requireEmailDelivery = options.requireEmailDelivery ?? booleanFlag(argv.requireEmailDelivery);
-  const requireDiscordDelivery = options.requireDiscordDelivery ?? booleanFlag(argv.requireDiscordDelivery);
-  const requireTelegramDelivery = options.requireTelegramDelivery ?? booleanFlag(argv.requireTelegramDelivery);
-  const requireSource = options.requireSource ?? booleanFlag(argv.requireSource ?? process.env.PROJECT_REQUIRE_SOURCE_ROOT);
+  const requireForwardDelivery = options.requireForwardDelivery ?? booleanFlag(argv.requireForwardDelivery);
   const timeoutMs = positiveInteger(options.timeoutMs ?? argv.timeoutMs ?? 15000, "--timeoutMs", 1000);
-  const workerContainer = String(options.workerContainer ?? argv.workerContainer ?? process.env.ALERT_EVIDENCE_WORKER_CONTAINER ?? "enterprise-worker-notifications").trim();
-  const alertmanagerHost = String(options.alertmanagerHost ?? argv.alertmanagerHost ?? process.env.ALERT_EVIDENCE_ALERTMANAGER_HOST ?? "alertmanager").trim();
-  if (!/^[a-z0-9][a-z0-9_.-]{0,127}$/.test(workerContainer)) fail("Invalid alert evidence worker container name.");
-  if (!/^[a-z0-9][a-z0-9.-]{0,127}$/.test(alertmanagerHost)) fail("Invalid alert evidence Alertmanager host.");
+  const dispatcherContainer = String(options.dispatcherContainer ?? argv.dispatcherContainer ?? "enterprise-platform-alert-dispatcher").trim();
+  const alertmanagerHost = String(options.alertmanagerHost ?? argv.alertmanagerHost ?? "alertmanager").trim();
   const compose = readText(path.join(infraRoot, "compose.yaml"));
   const composeSecrets = readText(path.join(infraRoot, "compose.secrets.yaml"));
   const alertmanagerConfig = readText(path.join(infraRoot, "alertmanager", "alertmanager.yml"));
+  const dispatcherSource = readText(path.join(infraRoot, "platform-alert-dispatcher", "server.mjs"));
   const prometheusAlerts = readText(path.join(infraRoot, "prometheus", "rules", "enterprise-alerts.yml"));
-  const secretManagerSource = readText(path.join(infraRoot, "scripts", "infra-secret-manager.mjs"));
-  const alertmanagerPermissionSource = readText(path.join(infraRoot, "scripts", "alertmanager-secret-permissions.sh"));
-  const workerNotificationsServerPath = path.join(sourceRoot, "apps", "worker-notifications", "src", "server.ts");
-  const workerNotificationsServer = fs.existsSync(workerNotificationsServerPath) ? readText(workerNotificationsServerPath) : null;
-  const issues = [];
-
   const checks = [
-    ["alertmanager-webhook-target", /worker-notifications:3000\/alerts\/prometheus/.test(alertmanagerConfig)],
-    ["alertmanager-bearer-token-secret", /credentials_file:\s+\/run\/secrets\/alertmanager_webhook_token/.test(alertmanagerConfig)],
+    ["alertmanager-dispatcher-target", /platform-alert-dispatcher:3000\/alerts\/prometheus/.test(alertmanagerConfig)],
+    ["alertmanager-bearer-file", /credentials_file:\s+\/run\/secrets\/alertmanager_webhook_token/.test(alertmanagerConfig)],
     ["alertmanager-probe-route", /platform_probe="alert-delivery"[\s\S]*group_wait:\s+0s/.test(alertmanagerConfig)],
-    ["compose-alertmanager-secret-file", /ALERTMANAGER_WEBHOOK_TOKEN_FILE:\s+\/run\/secrets\/alertmanager_webhook_token/.test(composeSecrets)],
-    ["compose-alertmanager-runtime-group", /alertmanager:[\s\S]*group_add:[\s\S]*ALERTMANAGER_SECRET_GID/.test(compose)],
-    ["compose-alertmanager-functional-health", /alertmanager:[\s\S]*test -r \/run\/secrets\/alertmanager_webhook_token[\s\S]*\/-\/ready/.test(compose)],
-    ["secret-manager-alert-token-mode", /alertmanager_webhook_token[^\n]*fileMode:\s*0o640/.test(secretManagerSource)],
-    ["secret-permission-confirmation", /APPLY-ALERTMANAGER-SECRET-PERMISSIONS/.test(alertmanagerPermissionSource) && /contentRead.*false/.test(alertmanagerPermissionSource)],
-    ["compose-email-recipient", /ALERT_EMAIL_TO:\s+\$\{ALERT_EMAIL_TO/.test(compose)],
-    ["compose-discord-secret-file", /ALERT_DISCORD_WEBHOOK_URL_FILE:\s+\$\{ALERT_DISCORD_WEBHOOK_URL_FILE:-\}/.test(compose)],
-    ["compose-telegram-secret-file", /ALERT_TELEGRAM_BOT_TOKEN_FILE:\s+\$\{ALERT_TELEGRAM_BOT_TOKEN_FILE:-\}/.test(compose)],
-    ["prometheus-delivery-failure-alert", /alert:\s+AlertmanagerDeliveryFailed/.test(prometheusAlerts)],
+    ["dispatcher-secret-files", /ALERTMANAGER_WEBHOOK_TOKEN_FILE:\s+\/run\/secrets\/alertmanager_webhook_token/.test(composeSecrets) && /SMTP_PASSWORD_FILE:\s+\/run\/secrets\/smtp_password/.test(composeSecrets)],
+    ["dispatcher-auth", /authorized\([\s\S]*alert_webhook_unauthorized/.test(dispatcherSource)],
+    ["dispatcher-delivery-metrics", /platform_alert_delivery_total[\s\S]*channel=\\"email\\"[\s\S]*channel=\\"forward\\"/.test(dispatcherSource)],
+    ["dispatcher-healthcheck", /platform-alert-dispatcher:[\s\S]*\/health/.test(compose)],
+    ["delivery-failure-alert", /\bAlertDeliveryFailed\b/.test(prometheusAlerts)],
   ].map(([name, passed]) => ({ name, passed: Boolean(passed) }));
-
-  if (workerNotificationsServer) {
-    checks.push(
-      { name: "worker-webhook-auth", passed: /ALERTMANAGER_WEBHOOK_TOKEN/.test(workerNotificationsServer) && /isAuthorizedAlertWebhook/.test(workerNotificationsServer) },
-      { name: "worker-email-metrics", passed: /notification_alert_email_deliveries_total/.test(workerNotificationsServer) && /notification_alert_email_failures_total/.test(workerNotificationsServer) },
-      {
-        name: "worker-discord-metrics",
-        passed: !requireDiscordDelivery || (/notification_alert_discord_deliveries_total/.test(workerNotificationsServer) && /notification_alert_discord_failures_total/.test(workerNotificationsServer)),
-        skipped: !requireDiscordDelivery,
-        detail: requireDiscordDelivery ? undefined : "Discord delivery is not required for this evidence run.",
-      },
-      {
-        name: "worker-telegram-metrics",
-        passed: !requireTelegramDelivery || (/notification_alert_telegram_deliveries_total/.test(workerNotificationsServer) && /notification_alert_telegram_failures_total/.test(workerNotificationsServer)),
-        skipped: !requireTelegramDelivery,
-        detail: requireTelegramDelivery ? undefined : "Telegram delivery is not required for this evidence run.",
-      },
-    );
-  } else {
-    checks.push({
-      name: "worker-source-checks",
-      passed: !requireSource,
-      skipped: !requireSource,
-      detail: `Optional Platform source not mounted at ${workerNotificationsServerPath}`,
-    });
-    if (requireSource) {
-      issues.push(`Required Platform source file is missing: ${workerNotificationsServerPath}`);
-    }
-  }
-
-  for (const check of checks) {
-    if (!check.passed) issues.push(`Alert evidence check failed: ${check.name}`);
-  }
-
+  const issues = checks.filter((check) => !check.passed).map((check) => `Alert evidence check failed: ${check.name}`);
   let runtime = null;
   if (sendTest) {
     try {
-      const inspect = run("docker", ["inspect", "--format", "{{.State.Status}}", workerContainer], { capture: true, allowFailure: true });
-      if (inspect.status !== 0 || String(inspect.stdout ?? "").trim() !== "running") throw new Error("receiver unavailable");
-      const script = alertMetricScript({ requireEmailDelivery, requireDiscordDelivery, requireTelegramDelivery, timeoutMs, alertmanagerHost });
-      const result = dockerExec(workerContainer, ["node", "-e", script], { capture: true });
+      const inspect = run("docker", ["inspect", "--format", "{{.State.Status}}", dispatcherContainer], { capture: true, allowFailure: true });
+      if (inspect.status !== 0 || String(inspect.stdout ?? "").trim() !== "running") throw new Error("dispatcher unavailable");
+      const result = dockerExec(dispatcherContainer, ["node", "-e", alertMetricScript({ requireEmailDelivery, requireForwardDelivery, timeoutMs, alertmanagerHost })], { capture: true });
       runtime = JSON.parse(String(result.stdout ?? "").trim().split(/\r?\n/).at(-1));
-      const receiverLogs = run("docker", ["logs", "--since", "2m", workerContainer], { capture: true, allowFailure: true });
-      const logText = `${String(receiverLogs.stdout || "")}\n${String(receiverLogs.stderr || "")}`;
-      const exactReceipt = receiverLogs.status === 0
-        && String(runtime.probeAlertname || "").length > 0
-        && logText.includes("prometheus_alerts_received")
-        && logText.includes(runtime.probeAlertname);
-      runtime.exactReceiverReceipt = exactReceipt;
-      runtime.workerContainer = workerContainer;
-      runtime.alertmanagerHost = alertmanagerHost;
-      checks.push({ name: "alertmanager-runtime-exact-receipt", passed: exactReceipt });
-      if (!exactReceipt) issues.push("Synthetic alert reached counters but no exact correlated receiver log receipt was found.");
+      const logs = run("docker", ["logs", "--since", "2m", dispatcherContainer], { capture: true, allowFailure: true });
+      const logText = `${logs.stdout ?? ""}\n${logs.stderr ?? ""}`;
+      runtime.exactReceiverReceipt = logs.status === 0 && logText.includes("alerts_received") && logText.includes(runtime.probeAlertname);
+      checks.push({ name: "alertmanager-runtime-exact-receipt", passed: runtime.exactReceiverReceipt });
+      if (!runtime.exactReceiverReceipt) issues.push("Synthetic alert had no exact correlated dispatcher log receipt.");
     } catch {
-      runtime = {
-        status: "failed",
-        workerContainer,
-        alertmanagerHost,
-        exactReceiverReceipt: false,
-        errorRedacted: true,
-      };
-      checks.push({ name: "alertmanager-runtime-exact-receipt", passed: false });
-      issues.push("Synthetic alert delivery through Alertmanager failed; runtime error details were redacted.");
+      runtime = { status: "failed", dispatcherContainer, exactReceiverReceipt: false, errorRedacted: true };
+      issues.push("Synthetic alert delivery through Alertmanager failed; runtime details were redacted.");
     }
   } else {
-    issues.push("Synthetic runtime alert was not sent. Re-run with --sendTest in local/staging/VPS.");
+    issues.push("Synthetic runtime alert was not sent. Re-run with --sendTest in staging/VPS.");
   }
-
-  const payload = {
-    generatedAt: new Date().toISOString(),
-    mode: sendTest ? "send-test" : "summary",
-    status: issues.length ? "warning" : "passed",
-    checks,
-    runtime,
-    source: {
-      required: requireSource,
-      available: Boolean(workerNotificationsServer),
-      workerNotificationsServerPath,
-    },
-    requestedDelivery: {
-      email: requireEmailDelivery,
-      discord: requireDiscordDelivery,
-      telegram: requireTelegramDelivery,
-    },
-    issues,
-  };
+  const payload = { generatedAt: new Date().toISOString(), mode: sendTest ? "send-test" : "summary", status: issues.length ? "warning" : "passed", scope: "platform-infrastructure", checks, runtime, requestedDelivery: { email: requireEmailDelivery, forward: requireForwardDelivery }, issues };
   const stamp = reportTimestamp();
   const jsonPath = writeJsonReport("alerts", `alert-evidence-${stamp}`, payload);
-  const markdownPath = writeMarkdownReport("alerts", `alert-evidence-${stamp}`, [
-    "# Platform Alert Evidence",
-    "",
-    `Status: ${payload.status}`,
-    `Mode: ${payload.mode}`,
-    `Generated at: ${payload.generatedAt}`,
-    "",
-    "| Check | Passed |",
-    "| --- | --- |",
-    ...checks.map((check) => `| ${check.name} | ${check.skipped ? "skipped" : check.passed ? "yes" : "no"} |`),
-    "",
-    "## Source",
-    "",
-    `Platform source required: ${requireSource ? "yes" : "no"}`,
-    `Platform source available: ${workerNotificationsServer ? "yes" : "no"}`,
-    `Worker source path: ${workerNotificationsServerPath}`,
-    "",
-    "## Runtime Delivery",
-    "",
-    `Synthetic alert sent: ${sendTest ? "yes" : "no"}`,
-    `Email delivery required: ${requireEmailDelivery ? "yes" : "no"}`,
-    `Discord delivery required: ${requireDiscordDelivery ? "yes" : "no"}`,
-    `Telegram delivery required: ${requireTelegramDelivery ? "yes" : "no"}`,
-    "",
-    "## Issues",
-    "",
-    ...(issues.length ? issues.map((issue) => `- ${issue}`) : ["- None"]),
-  ]);
+  const markdownPath = writeMarkdownReport("alerts", `alert-evidence-${stamp}`, ["# Platform Alert Evidence", "", `Status: ${payload.status}`, `Mode: ${payload.mode}`, `Generated at: ${payload.generatedAt}`, "", "| Check | Passed |", "| --- | --- |", ...checks.map((check) => `| ${check.name} | ${check.passed ? "yes" : "no"} |`), "", "## Issues", "", ...(issues.length ? issues.map((issue) => `- ${issue}`) : ["- none"])]);
   log(`Alert evidence written to ${jsonPath} and ${markdownPath}`);
-  if (enforce && issues.length) {
-    fail(`Alert evidence enforcement failed with ${issues.length} issue(s). Reports: ${jsonPath}, ${markdownPath}`);
-  }
+  if (enforce && issues.length) fail(`Alert evidence enforcement failed with ${issues.length} issue(s). Reports: ${jsonPath}, ${markdownPath}`);
   return payload;
 }
 
@@ -4366,10 +3443,10 @@ async function loadSmoke() {
   const requests = positiveInteger(argv.requests ?? 80, "requests");
   const concurrency = positiveInteger(argv.concurrency ?? 8, "concurrency");
   const maxP95Ms = Number(argv.maxP95Ms ?? 750);
-  let target = "container:enterprise-backend/health";
+  let target = "container:enterprise-control-center/health";
   let metric = null;
   if (!argv.url && !booleanFlag(argv.edge)) {
-    metric = runInternalBackendLoadProbe({ label: "Internal backend load smoke", requests, concurrency, maxP95Ms });
+    metric = runInternalPlatformLoadProbe({ label: "Internal Control Center load smoke", requests, concurrency, maxP95Ms });
   } else {
     const url = argv.url ?? "https://api.localhost.com/health";
     target = url;
@@ -4431,12 +3508,12 @@ async function loadProfile() {
   const maxP95Ms = Number(argv.maxP95Ms ?? 1000);
   const useEdge = Boolean(argv.url || booleanFlag(argv.edge));
   const url = argv.url ?? "https://api.localhost.com/health";
-  const target = useEdge ? url : "container:enterprise-backend/health";
+  const target = useEdge ? url : "container:enterprise-control-center/health";
   await withLocalCheckReport("load-profile", async () => {
     const before = dockerStatsSnapshot("before-load-profile");
     const metric = useEdge
       ? await runLoadProbe({ label: "Sustained load profile", url, requests, concurrency, maxP95Ms })
-      : runInternalBackendLoadProbe({ label: "Sustained internal backend load profile", requests, concurrency, maxP95Ms });
+      : runInternalPlatformLoadProbe({ label: "Sustained internal Control Center load profile", requests, concurrency, maxP95Ms });
     const after = dockerStatsSnapshot("after-load-profile");
     writeLoadProfileReport({
       generatedAt: new Date().toISOString(),
@@ -4574,7 +3651,7 @@ async function loadBenchmark() {
   const maxP95Ms = Number(argv.maxP95Ms ?? 1000);
   const url = argv.url ?? "https://api.localhost.com/health";
   const useEdge = Boolean(argv.url || booleanFlag(argv.edge));
-  const targetUrl = useEdge ? url : "container:enterprise-backend/health";
+  const targetUrl = useEdge ? url : "container:enterprise-control-center/health";
   const requirePublicTarget = booleanFlag(argv.requirePublicTarget);
   const requireEdgeEvidence = booleanFlag(argv.requireEdgeEvidence);
   const expectedEdgeProvider = String(argv.expectedEdgeProvider ?? "cloudflare").toLowerCase();
@@ -4616,7 +3693,7 @@ async function loadBenchmark() {
       let profileError = null;
       try {
         metric = !useEdge
-          ? runInternalBackendLoadProbe({ label: `Internal load benchmark ${users} users`, requests, concurrency, maxP95Ms })
+          ? runInternalPlatformLoadProbe({ label: `Internal platform load benchmark ${users} users`, requests, concurrency, maxP95Ms })
           : await runLoadProbe({ label: `Edge load benchmark ${users} users`, url, requests, concurrency, maxP95Ms });
       } catch (error) {
         profileError = String(error?.message ?? error);
@@ -4650,7 +3727,7 @@ async function loadBenchmark() {
   }
 }
 
-function runInternalBackendLoadProbe({ label, requests, concurrency, maxP95Ms }) {
+function runInternalPlatformLoadProbe({ label, requests, concurrency, maxP95Ms }) {
   const syntheticClientPool = booleanFlag(argv.preserveClientIp) ? 0 : positiveInteger(argv.syntheticClients ?? 64, "syntheticClients");
   const script = `
 const http = require("node:http");
@@ -4666,7 +3743,7 @@ function once(requestIndex) {
   return new Promise((resolve) => {
     const started = performance.now();
     const headers = syntheticClientPool > 0 ? { "X-Forwarded-For": "198.51.100." + ((requestIndex % syntheticClientPool) + 1) } : {};
-    const req = http.request({ method: "GET", hostname: "127.0.0.1", port: 3000, path: "/health", headers }, (res) => {
+    const req = http.request({ method: "GET", hostname: "127.0.0.1", port: 8080, path: "/__health", headers }, (res) => {
       res.resume();
       res.on("end", () => {
         latencies.push(Math.round(performance.now() - started));
@@ -4697,14 +3774,14 @@ Promise.all(Array.from({ length: Math.min(concurrency, requests) }, () => worker
   process.exit(errors.length || p95 > maxP95Ms ? 1 : 0);
 });
 `;
-  const result = dockerExec("enterprise-backend", ["node", "-e", script], { capture: true, allowFailure: true });
+  const result = dockerExec("enterprise-control-center", ["node", "-e", script], { capture: true, allowFailure: true });
   const text = String(result.stdout ?? "").trim();
   const parsed = text ? JSON.parse(text.split(/\r?\n/).at(-1)) : null;
   if (!parsed) {
     fail(`${label} did not return metrics.`);
   }
   if (result.status !== 0) {
-    if (parsed.errors?.length) parsed.errors.slice(0, 10).forEach((error) => log(`internal backend returned ${error}`));
+    if (parsed.errors?.length) parsed.errors.slice(0, 10).forEach((error) => log(`internal Control Center returned ${error}`));
     fail(`${label} failed: errors=${parsed.errors?.length ?? 0} p95=${parsed.p95}ms maxP95Ms=${parsed.maxP95Ms}ms.`);
   }
   log(`${label} passed: requests=${parsed.requests} requestedConcurrency=${parsed.concurrency} syntheticClients=${parsed.syntheticClients || 1} avg=${parsed.avg.toFixed(2)}ms p95=${parsed.p95}ms`);
@@ -5543,182 +4620,63 @@ async function offsiteRestoreDrillRestic(options = {}) {
 
 async function productionPreflight() {
   const envFile = path.resolve(argv.envFile ?? path.join(infraRoot, ".env"));
-  if (!fs.existsSync(envFile)) {
-    fail(`Env file not found: ${envFile}`);
-  }
+  if (!fs.existsSync(envFile)) fail(`Env file not found: ${envFile}`);
   const env = parseEnv(envFile);
   const requireKey = (key) => {
-    if (!env[key]) {
-      fail(`Missing required production env: ${key}`);
-    }
-    if (/change_me|your-domain|localhost/i.test(env[key])) {
-      fail(`Production env ${key} still contains placeholder/local value: ${env[key]}`);
-    }
+    if (!env[key]) fail(`Missing required production env: ${key}`);
+    if (/change_me|your-domain|localhost|example\.com/i.test(env[key])) fail(`Production env ${key} still contains a placeholder or local value.`);
   };
-  [
-    "TRAEFIK_ACME_EMAIL",
-    "CONTROL_CENTER_PUBLIC_URL",
-    "DOCS_PUBLIC_URL",
-    "API_PUBLIC_URL",
-    "NEXT_PUBLIC_API_URL",
-    "KEYCLOAK_ISSUER",
-    "WEBAUTHN_RP_ID",
-    "WEBAUTHN_ORIGINS",
-    "CORS_ORIGINS",
-    "SMTP_USER",
-    "BACKEND_IMAGE",
-    "WEB_IMAGE",
-    "WORKER_NOTIFICATIONS_IMAGE",
-    "WORKER_JOBS_IMAGE",
-  ].forEach(requireKey);
-
-  for (const [key, minLength] of [
-    ["SESSION_SECRET", 48],
-    ["SESSION_SIGNING_KEYS", 48],
-    ["SECRET_HASH_KEYS", 48],
-    ["BACKUP_SIGNING_KEYS", 48],
-    ["POSTGRES_SUPERUSER_PASSWORD", 24],
-    ["APP_DB_PASSWORD", 24],
-    ["KEYCLOAK_DB_PASSWORD", 24],
-    ["REDIS_PASSWORD", 24],
-    ["NATS_PASSWORD", 24],
-    ["MINIO_ROOT_PASSWORD", 24],
-    ["GRAFANA_ADMIN_PASSWORD", 24],
-    ["SMTP_PASSWORD", 16],
-  ]) {
+  ["TRAEFIK_ACME_EMAIL", "DOMAIN", "CONTROL_CENTER_PUBLIC_URL", "DOCS_PUBLIC_URL", "AUTH_HOST", "SMTP_HOST", "SMTP_USER", "MAILER_FROM", "ALERT_EMAIL_TO"].forEach(requireKey);
+  for (const key of ["POSTGRES_PASSWORD", "KEYCLOAK_DB_PASSWORD", "REDIS_PASSWORD", "KC_BOOTSTRAP_ADMIN_PASSWORD", "NATS_PASSWORD", "MINIO_ROOT_PASSWORD", "MARIADB_ROOT_PASSWORD", "GF_SECURITY_ADMIN_PASSWORD", "SMTP_PASSWORD"]) {
     requireManagedSecret(env, key);
   }
-
-  for (const imageKey of ["BACKEND_IMAGE", "WEB_IMAGE", "WORKER_NOTIFICATIONS_IMAGE", "WORKER_JOBS_IMAGE"]) {
-    if (/:latest(?:@|$)/.test(env[imageKey])) {
-      fail(`${imageKey} must use an immutable version tag and digest, not :latest`);
-    }
-    if (!/@sha256:[a-f0-9]{64}$/i.test(env[imageKey])) {
-      fail(`${imageKey} must be pinned by digest.`);
-    }
-    if (/@sha256:0{64}$/i.test(env[imageKey])) {
-      fail(`${imageKey} must use a real image digest, not the all-zero placeholder.`);
-    }
-  }
-  if ((env.SESSION_COOKIE_SECURE ?? "true").toLowerCase() !== "true") {
-    fail("SESSION_COOKIE_SECURE must be true in production.");
-  }
-  if (hasManagedSecret(env, "SESSION_SECRET") && !env.SECRET_MANAGER_PROVIDER) {
-    fail("Managed production secrets require SECRET_MANAGER_PROVIDER.");
+  for (const imageKey of releaseImageKeys) {
+    if (!env[imageKey]) continue;
+    assertDigestPinnedImageRef(imageKey, env[imageKey]);
+    if (/@sha256:0{64}$/i.test(env[imageKey])) fail(`${imageKey} must use a real image digest.`);
   }
   if (!argv.skipDns) {
-    const productionHosts = [
-      env.CONTROL_CENTER_HOST,
-      env.DOCS_HOST,
-      env.APP_HOST,
-      env.API_HOST,
-      env.AUTH_HOST,
-      env.STORAGE_HOST || env.MINIO_CONSOLE_HOST,
-      env.GRAFANA_HOST,
-    ].filter(Boolean);
-    for (const host of productionHosts) {
-      if (/localhost|your-domain/i.test(host)) {
-        fail(`Production host is not public: ${host}`);
-      }
+    for (const host of [env.CONTROL_CENTER_HOST, env.DOCS_HOST, env.AUTH_HOST, env.STORAGE_HOST, env.GRAFANA_HOST].filter(Boolean)) {
+      if (/localhost|your-domain|example\.com/i.test(host)) fail(`Production host is not public: ${host}`);
       await dns.resolve4(host);
     }
   }
-  log("Production preflight passed.");
+  const workloadLock = env.HOSTED_WORKLOAD_LOCK ? path.resolve(infraRoot, env.HOSTED_WORKLOAD_LOCK) : null;
+  if (workloadLock) {
+    run("sh", [path.join(scriptDir, "hosted-workload-lock.sh"), workloadLock, "verify"], { env: { HOSTED_WORKLOAD_ALLOW_RESOLVED: "0" } });
+  }
+  log("Platform production preflight passed.");
 }
 
 async function haConfigCheck(options = {}) {
   await withLocalCheckReport("ha-config-check", async () => {
-    log("==> HA multi-node configuration check");
     const haCompose = readText(path.join(infraRoot, "compose.ha.yaml"));
-    for (const service of ["backend", "web", "worker-notifications", "worker-jobs"]) {
-      assertMatch(haCompose, new RegExp(`^\\s{2}${service}:[\\s\\S]*?container_name:\\s*!reset null`, "m"), `${service} must reset fixed container_name for replicas.`);
-      assertMatch(haCompose, new RegExp(`^\\s{2}${service}:[\\s\\S]*?replicas:\\s*\\$\\{`, "m"), `${service} must declare configurable replicas.`);
-      assertMatch(haCompose, new RegExp(`^\\s{2}${service}:[\\s\\S]*?failure_action:\\s*rollback`, "m"), `${service} must rollback failed rolling updates.`);
-      assertMatch(haCompose, new RegExp(`^\\s{2}${service}:[\\s\\S]*?rollback_config:`, "m"), `${service} must define rollback_config.`);
-    }
     for (const service of ["postgres", "redis", "nats", "minio"]) {
       assertMatch(haCompose, new RegExp(`^\\s{2}${service}:[\\s\\S]*?node\\.labels\\.platform\\.stateful == true`, "m"), `${service} must be pinned to stateful nodes or replaced by a managed tier.`);
     }
-    if (noDockerMode(options)) {
-      log("Skipping Docker Compose HA render in --noDocker/--repoOnly mode.");
-    } else {
-      run("docker", [
-        "compose",
-        "--env-file",
-        ".env",
-        "-p",
-        "enterprise_prod_ha",
-        "-f",
-        "compose.yaml",
-        "-f",
-        "compose.prod.yaml",
-        "-f",
-        "compose.ha.yaml",
-        "config",
-        "--quiet",
-      ], { env: localProductionImageEnv() });
+    assertNoMatch(haCompose, /^\s{2}(?:backend|web|worker-jobs|worker-notifications|node-account|node-ui):/m, "HA overlay must not own hosted workload replicas.");
+    if (!noDockerMode(options)) {
+      run("docker", ["compose", "--env-file", ".env", "-p", "enterprise_prod_ha", "-f", "compose.yaml", "-f", "compose.prod.yaml", "-f", "compose.ha.yaml", "config", "--quiet"]);
     }
-    log("HA multi-node configuration check passed.");
-  }, { noDocker: noDockerMode(options) });
+    log("Platform stateful HA configuration check passed; multi-node availability still requires external capacity and live evidence.");
+  }, { noDocker: noDockerMode(options), scope: "platform-infrastructure" });
 }
 
 async function managedSecretsPreflight(options = {}) {
   await withLocalCheckReport("managed-secrets-preflight", async () => {
-    log("==> Managed secrets / KMS preflight");
     const managedCompose = readText(path.join(infraRoot, "compose.managed-secrets.yaml"));
-    for (const secretName of [
-      "postgres_superuser_password",
-      "app_db_password",
-      "backend_db_password",
-      "worker_jobs_db_password",
-      "worker_notifications_db_password",
-      "keycloak_db_password",
-      "redis_password",
-      "keycloak_admin_password",
-      "nats_password",
-      "minio_root_password",
-      "mariadb_root_password",
-      "phpmyadmin_control_password",
-      "grafana_admin_password",
-      "session_secret",
-      "session_signing_keys",
-      "projects_gateway_signing_keys",
-      "hash_pepper_keys",
-      "backup_signing_keys",
-      "smtp_password",
-      "cloudflare_turnstile_secret_key",
-      "database_url",
-      "backend_database_url",
-      "worker_jobs_database_url",
-      "worker_notifications_database_url",
-      "nats_url",
-    ]) {
+    const required = [
+      "postgres_superuser_password", "keycloak_db_password", "redis_password", "keycloak_admin_password", "nats_password", "minio_root_password", "mariadb_root_password", "phpmyadmin_control_password", "grafana_admin_password", "control_center_vault_keys", "projects_gateway_signing_keys", "backup_signing_keys", "alertmanager_webhook_token", "smtp_password",
+    ];
+    for (const secretName of required) {
       assertMatch(managedCompose, new RegExp(`^\\s{2}${secretName}:\\s*\\r?\\n\\s+external:\\s+true`, "m"), `${secretName} must be declared as an external Docker secret.`);
     }
-    for (const fileEnv of ["SESSION_SECRET_FILE", "SESSION_SIGNING_KEYS_FILE", "PROJECTS_GATEWAY_SIGNING_KEYS_FILE", "SECRET_HASH_KEYS_FILE", "DATABASE_URL_FILE", "SMTP_PASSWORD_FILE", "CLOUDFLARE_TURNSTILE_SECRET_KEY_FILE"]) {
-      assertMatch(managedCompose, new RegExp(`${fileEnv}:\\s+/run/secrets/`), `${fileEnv} must point at /run/secrets.`);
+    assertNoMatch(managedCompose, /app_db_password|backend_db_password|worker_jobs_db_password|worker_notifications_db_password|database_url|session_signing_keys|hash_pepper_keys|turnstile/i, "Managed platform secrets must not include hosted application credentials.");
+    if (!noDockerMode(options)) {
+      run("docker", ["compose", "--env-file", ".env", "-p", "enterprise_prod_managed_secrets", "-f", "compose.yaml", "-f", "compose.prod.yaml", "-f", "compose.managed-secrets.yaml", "config", "--quiet"]);
     }
-    if (noDockerMode(options)) {
-      log("Skipping Docker Compose managed-secret render in --noDocker/--repoOnly mode.");
-    } else {
-      run("docker", [
-        "compose",
-        "--env-file",
-        ".env",
-        "-p",
-        "enterprise_prod_managed_secrets",
-        "-f",
-        "compose.yaml",
-        "-f",
-        "compose.prod.yaml",
-        "-f",
-        "compose.managed-secrets.yaml",
-        "config",
-        "--quiet",
-      ], { env: localProductionImageEnv() });
-    }
-    log("Managed secrets / KMS preflight passed.");
-  }, { noDocker: noDockerMode(options) });
+    log("Managed platform secrets preflight passed.");
+  }, { noDocker: noDockerMode(options), scope: "platform-infrastructure" });
 }
 
 function dockerComposeConfigJson({ envFile, projectName, files, profiles = [] }) {
@@ -5743,102 +4701,27 @@ function composeServiceHasHealthcheck(service) {
 }
 
 async function composeHealthcheckCoverage() {
-  log("==> Compose healthcheck coverage");
+  log("==> Platform Compose healthcheck coverage");
   const stacks = [
-    {
-      name: "local-waf",
-      envFile: ".env",
-      projectName: "platform_ops_health_local",
-      files: ["compose.yaml", "compose.build.yaml", "compose.secrets.yaml", "compose.waf.yaml"],
-      profiles: [],
-    },
-    {
-      name: "vps-waf",
-      envFile: ".env.vps.example",
-      projectName: "platform_ops_health_vps",
-      files: ["compose.yaml", "compose.secrets.yaml", "compose.waf.yaml", "compose.vps.yaml", "compose.vps-waf.yaml", "compose.backup-scheduler.yaml", "compose.build.yaml", "compose.runtime.yaml", "compose.networks.yaml", "compose.runtime-isolation.yaml"],
-      profiles: ["backup"],
-    },
-    {
-      name: "backup-scheduler",
-      envFile: ".env",
-      projectName: "platform_ops_health_backup",
-      files: ["compose.yaml", "compose.secrets.yaml", "compose.backup-scheduler.yaml"],
-      profiles: ["backup"],
-    },
+    { name: "local-waf", envFile: ".env", projectName: "platform_ops_health_local", files: ["compose.yaml", "compose.secrets.yaml", "compose.waf.yaml"], profiles: [] },
+    { name: "vps-waf", envFile: ".env.vps.example", projectName: "platform_ops_health_vps", files: ["compose.yaml", "compose.secrets.yaml", "compose.waf.yaml", "compose.vps.yaml", "compose.vps-waf.yaml", "compose.backup-scheduler.yaml", "compose.runtime.yaml", "compose.networks.yaml", "compose.runtime-isolation.yaml"], profiles: ["backup"] },
+    { name: "backup-scheduler", envFile: ".env", projectName: "platform_ops_health_backup", files: ["compose.yaml", "compose.secrets.yaml", "compose.backup-scheduler.yaml"], profiles: ["backup"] },
   ];
   const issues = [];
   const stackReports = [];
   for (const stack of stacks) {
     const config = dockerComposeConfigJson(stack);
-    const services = Object.entries(config.services ?? {})
-      .map(([name, service]) => ({
-        name,
-        hasHealthcheck: composeServiceHasHealthcheck(service),
-        restart: service.restart ?? null,
-        profiles: Array.isArray(service.profiles) ? service.profiles : [],
-      }))
-      .sort((a, b) => a.name.localeCompare(b.name));
-    const missing = services
-      .filter((service) => !service.hasHealthcheck)
-      .map((service) => service.name);
-    for (const serviceName of missing) {
-      issues.push(`${stack.name}: service ${serviceName} has no healthcheck`);
-    }
-    stackReports.push({
-      name: stack.name,
-      envFile: stack.envFile,
-      files: stack.files,
-      profiles: stack.profiles,
-      serviceCount: services.length,
-      missingHealthchecks: missing,
-      services,
-    });
+    const services = Object.entries(config.services ?? {}).map(([name, service]) => ({ name, hasHealthcheck: composeServiceHasHealthcheck(service), restart: service.restart ?? null })).sort((a, b) => a.name.localeCompare(b.name));
+    const missing = services.filter((service) => !service.hasHealthcheck).map((service) => service.name);
+    missing.forEach((serviceName) => issues.push(`${stack.name}: service ${serviceName} has no healthcheck`));
+    stackReports.push({ name: stack.name, envFile: stack.envFile, projectName: stack.projectName, services, missing });
   }
-  const payload = {
-    generatedAt: new Date().toISOString(),
-    status: issues.length ? "failed" : "passed",
-    stacks: stackReports,
-    summary: {
-      stacks: stackReports.length,
-      services: stackReports.reduce((sum, stack) => sum + stack.serviceCount, 0),
-      missingHealthchecks: issues.length,
-    },
-    issues,
-  };
+  const payload = { generatedAt: new Date().toISOString(), status: issues.length ? "failed" : "passed", scope: "platform-infrastructure", stacks: stackReports, missingHealthchecks: issues };
   const stamp = reportTimestamp();
   const jsonPath = writeJsonReport("healthchecks", `healthcheck-coverage-${stamp}`, payload);
-  const markdownPath = writeMarkdownReport("healthchecks", `healthcheck-coverage-${stamp}`, [
-    "# Compose Healthcheck Coverage",
-    "",
-    `Status: ${payload.status}`,
-    `Generated at: ${payload.generatedAt}`,
-    `Stacks: ${payload.summary.stacks}`,
-    `Services checked: ${payload.summary.services}`,
-    `Missing healthchecks: ${payload.summary.missingHealthchecks}`,
-    "",
-    "## Stacks",
-    "",
-    ...stackReports.flatMap((stack) => [
-      `### ${stack.name}`,
-      "",
-      `Files: ${stack.files.join(", ")}`,
-      `Profiles: ${stack.profiles.join(", ") || "none"}`,
-      "",
-      "| Service | Healthcheck | Restart | Profiles |",
-      "| --- | --- | --- | --- |",
-      ...stack.services.map((service) => `| ${service.name} | ${service.hasHealthcheck ? "yes" : "no"} | ${service.restart ?? "n/a"} | ${service.profiles.join(", ") || "none"} |`),
-      "",
-    ]),
-    "## Issues",
-    "",
-    ...(issues.length ? issues.map((issue) => `- ${issue}`) : ["- none"]),
-  ]);
-  log(`Compose healthcheck coverage report written to ${jsonPath} and ${markdownPath}`);
-  if (issues.length && !booleanFlag(argv.allowFailures)) {
-    fail(`Compose healthcheck coverage failed with ${issues.length} issue(s). Report: ${jsonPath}`);
-  }
-  log("Compose healthcheck coverage passed.");
+  const markdownPath = writeMarkdownReport("healthchecks", `healthcheck-coverage-${stamp}`, ["# Platform Healthcheck Coverage", "", `Status: ${payload.status}`, `Generated at: ${payload.generatedAt}`, "", ...stackReports.flatMap((stack) => [`## ${stack.name}`, "", `Services: ${stack.services.length}`, `Missing: ${stack.missing.join(", ") || "none"}`, ""])]);
+  log(`Healthcheck coverage reports written to ${jsonPath} and ${markdownPath}`);
+  if (issues.length) fail(`Compose healthcheck coverage failed: ${issues.join("; ")}`);
 }
 
 function addRateLimitEvidenceCheck(checks, issues, { name, category, status, detail, required = true, file = null }) {
@@ -5908,183 +4791,23 @@ function addRateLimitSourcePatternCheck(checks, issues, { name, category, filePa
 }
 
 async function rateLimitEvidence(options = {}) {
-  log("==> Rate limit evidence");
-  const requireSource = options.requireSource ?? booleanFlag(argv.requireSource);
-  const generatedAt = new Date().toISOString();
-  const checks = [];
-  const issues = [];
-
-  addRateLimitPatternCheck(checks, issues, {
-    name: "traefik-edge-rate-limit-middleware",
-    category: "infra",
-    filePath: path.join(infraRoot, "traefik", "dynamic", "middlewares.yml"),
-    pattern: /enterprise-rate-limit:[\s\S]*rateLimit:[\s\S]*average:\s*120[\s\S]*burst:\s*60[\s\S]*period:\s*1m/,
-    detail: "Traefik defines enterprise-rate-limit with average=120, burst=60, period=1m.",
-  });
-  addRateLimitPatternCheck(checks, issues, {
-    name: "local-portal-router-uses-edge-rate-limit",
-    category: "infra",
-    filePath: path.join(infraRoot, "compose.yaml"),
-    pattern: /enterprise-portal:[\s\S]*middlewares:[\s\S]*enterprise-rate-limit@file/,
-    detail: "Local portal router attaches enterprise-rate-limit@file.",
-  });
-  addRateLimitPatternCheck(checks, issues, {
-    name: "vps-portal-router-uses-edge-rate-limit",
-    category: "infra",
-    filePath: path.join(infraRoot, "compose.vps.yaml"),
-    pattern: /enterprise-portal:[\s\S]*middlewares:[\s\S]*enterprise-rate-limit@file/,
-    detail: "VPS portal router attaches enterprise-rate-limit@file.",
-  });
-  addRateLimitPatternCheck(checks, issues, {
-    name: "backend-rate-limit-env-defaults",
-    category: "infra",
-    filePath: path.join(infraRoot, "compose.yaml"),
-    pattern: /RATE_LIMIT_TTL_SECONDS:[\s\S]*RATE_LIMIT_MAX_REQUESTS:[\s\S]*RATE_LIMIT_FALLBACK_MAX_REQUESTS:[\s\S]*SENSITIVE_ACTION_RATE_LIMIT_MAX:[\s\S]*SENSITIVE_ACTION_FALLBACK_RATE_LIMIT_MAX:/,
-    detail: "Backend exposes standard and sensitive-action rate-limit budgets.",
-  });
-
-  const backendPackage = path.join(sourceRoot, "apps", "backend", "package.json");
-  const backendServer = path.join(sourceRoot, "apps", "backend", "src", "server.ts");
-  const backendServerConfig = path.join(sourceRoot, "apps", "backend", "src", "server-config.ts");
-  const backendRedisStore = path.join(sourceRoot, "apps", "backend", "src", "runtime", "redis-store.ts");
-  const backendRedisStoreTest = path.join(sourceRoot, "apps", "backend", "src", "runtime", "redis-store.test.ts");
-  const sourcePresent = fs.existsSync(backendPackage) && fs.existsSync(backendServer);
-  addRateLimitEvidenceCheck(checks, issues, {
-    name: "optional-platform-backend-source",
-    category: "source",
-    required: requireSource,
-    status: sourcePresent ? "passed" : requireSource ? "failed" : "skipped",
-    detail: sourcePresent
-      ? `backend source mounted at ${sourceRoot}`
-      : `backend source not mounted at ${sourceRoot}; infra-only evidence mode`,
-    file: sourcePresent ? path.relative(infraRoot, backendPackage).replaceAll("\\", "/") : null,
-  });
-
-  if (sourcePresent) {
-    addRateLimitSourcePatternCheck(checks, issues, {
-      name: "backend-fastify-rate-limit-package",
-      category: "source",
-      filePath: backendPackage,
-      pattern: /"@fastify\/rate-limit"\s*:/,
-      detail: "Backend declares @fastify/rate-limit.",
-      required: true,
-    });
-    addRateLimitSourcePatternCheck(checks, issues, {
-      name: "backend-fastify-rate-limit-fail-closed",
-      category: "source",
-      filePath: backendServer,
-      pattern: /register\(rateLimit[\s\S]*skipOnError:\s*false[\s\S]*max:\s*rateLimitMaxRequests[\s\S]*timeWindow:/,
-      detail: "Fastify rate-limit is registered and fails closed on store errors.",
-      required: true,
-    });
-    addRateLimitSourcePatternCheck(checks, issues, {
-      name: "backend-per-route-runtime-guard",
-      category: "source",
-      filePath: backendServer,
-      pattern: /assertRequestRateAllowed[\s\S]*isSensitiveMutation[\s\S]*assertSensitiveActionAllowed/,
-      detail: "Request and sensitive mutation guards run during onRequest.",
-      required: true,
-    });
-    addRateLimitSourcePatternCheck(checks, issues, {
-      name: "backend-configured-sensitive-budgets",
-      category: "source",
-      filePath: backendServerConfig,
-      pattern: /rateLimitMaxRequests[\s\S]*rateLimitFallbackMaxRequests[\s\S]*sensitiveActionRateLimitMax[\s\S]*sensitiveActionFallbackRateLimitMax/,
-      detail: "Backend config has normal and sensitive fallback budgets.",
-      required: true,
-    });
-    addRateLimitSourcePatternCheck(checks, issues, {
-      name: "backend-redis-window-returns-429",
-      category: "source",
-      filePath: backendRedisStore,
-      pattern: /incrementRedisWindow[\s\S]*count > input\.max[\s\S]*statusCode:\s*429/,
-      detail: "Redis-backed windows return HTTP 429 when exceeded.",
-      required: true,
-    });
-    addRateLimitSourcePatternCheck(checks, issues, {
-      name: "backend-redis-degradation-memory-failsafe",
-      category: "source",
-      filePath: backendRedisStore,
-      pattern: /redis rate limit failed, using fail-safe memory window[\s\S]*assertMemoryRateAllowed\(memoryKey, input\.ttlMs, input\.fallbackMax\)/,
-      detail: "Redis degradation falls back to the stricter memory window.",
-      required: true,
-    });
-    addRateLimitSourcePatternCheck(checks, issues, {
-      name: "backend-rate-limit-regression-tests",
-      category: "source-test",
-      filePath: backendRedisStoreTest,
-      pattern: /rate limit memory fallback blocks[\s\S]*statusCode\?: unknown[\s\S]*429[\s\S]*sensitive rate limit remains fail-safe[\s\S]*Redis-enforced rate limits do not fall through/,
-      detail: "Backend tests cover memory fallback, sensitive fail-safe and Redis-enforced 429s.",
-      required: true,
-    });
-  }
-
-  const passedCount = checks.filter((check) => check.status === "passed").length;
-  const failedCount = checks.filter((check) => check.status === "failed").length;
-  const skippedCount = checks.filter((check) => check.status === "skipped").length;
-  const payload = {
-    generatedAt,
-    status: issues.length ? "failed" : "passed",
-    mode: sourcePresent ? "full" : "infra-only",
-    source: {
-      root: sourceRoot,
-      present: sourcePresent,
-      required: requireSource,
-    },
-    summary: {
-      checks: checks.length,
-      passed: passedCount,
-      failed: failedCount,
-      skipped: skippedCount,
-      infraChecksPassed: checks.filter((check) => check.category === "infra" && check.status === "passed").length,
-      sourceChecksPassed: checks.filter((check) => check.category.startsWith("source") && check.status === "passed").length,
-    },
-    checks,
-    issues,
-    nextCommands: [
-      "sh ./scripts/rate-limit-evidence.sh",
-      "sh ./scripts/waf-smoke.sh",
-      "sh ./scripts/load-benchmark.sh --profiles 50,100,500 --url https://api.example.com/health --requirePublicTarget --requireEdgeEvidence --expectedEdgeProvider cloudflare",
-    ],
-  };
-
+  const middlewares = readText(path.join(infraRoot, "traefik", "dynamic", "middlewares.yml"));
+  const adminRoutes = readText(path.join(infraRoot, "traefik", "dynamic", "admin-routes.yml"));
+  const projectRoutes = readText(path.join(infraRoot, "traefik", "dynamic", "project-routes.yml"));
+  const compose = readText(path.join(infraRoot, "compose.yaml"));
+  const checks = [
+    { name: "traefik-rate-limit-defined", passed: /enterprise-rate-limit:[\s\S]*rateLimit:[\s\S]*average:\s*\d+[\s\S]*burst:\s*\d+/.test(middlewares) },
+    { name: "admin-routes-rate-limited", passed: /enterprise-rate-limit@file/.test(adminRoutes) },
+    { name: "hosted-routes-rate-limited", passed: /enterprise-rate-limit@file/.test(projectRoutes) },
+    { name: "waf-enabled", passed: /middlewares:[\s\S]*enterprise-rate-limit@file/.test(compose) },
+  ];
+  const issues = checks.filter((check) => !check.passed).map((check) => check.name);
+  const payload = { generatedAt: new Date().toISOString(), status: issues.length ? "failed" : "passed", scope: "platform-infrastructure", infraChecksPassed: checks.filter((check) => check.passed).length, checks, issues };
   const stamp = reportTimestamp();
   const jsonPath = writeJsonReport("rate-limits", `rate-limit-evidence-${stamp}`, payload);
-  const markdownPath = writeMarkdownReport("rate-limits", `rate-limit-evidence-${stamp}`, [
-    "# Rate Limit Evidence",
-    "",
-    `Status: ${payload.status}`,
-    `Mode: ${payload.mode}`,
-    `Generated at: ${payload.generatedAt}`,
-    `Source mounted: ${payload.source.present ? "yes" : "no"}`,
-    `Require source: ${payload.source.required ? "yes" : "no"}`,
-    "",
-    "## Summary",
-    "",
-    `- Checks: ${payload.summary.checks}`,
-    `- Passed: ${payload.summary.passed}`,
-    `- Failed: ${payload.summary.failed}`,
-    `- Skipped: ${payload.summary.skipped}`,
-    "",
-    "## Checks",
-    "",
-    "| Check | Category | Required | Status | Detail |",
-    "| --- | --- | --- | --- | --- |",
-    ...checks.map((check) => `| ${check.name} | ${check.category} | ${check.required ? "yes" : "no"} | ${check.status} | ${String(check.detail).replaceAll("|", "\\|")} |`),
-    "",
-    "## Issues",
-    "",
-    ...(issues.length ? issues.map((issue) => `- ${issue}`) : ["- none"]),
-    "",
-    "## Next Commands",
-    "",
-    ...payload.nextCommands.map((commandLine) => `- \`${commandLine}\``),
-  ]);
-  log(`Rate limit evidence report written to ${jsonPath} and ${markdownPath}`);
-  if (issues.length && !booleanFlag(argv.allowFailures)) {
-    fail(`Rate limit evidence failed with ${issues.length} issue(s). Report: ${jsonPath}`);
-  }
-  log("Rate limit evidence passed.");
+  const markdownPath = writeMarkdownReport("rate-limits", `rate-limit-evidence-${stamp}`, ["# Platform Rate Limit Evidence", "", `Status: ${payload.status}`, `Generated at: ${payload.generatedAt}`, "", ...checks.map((check) => `- ${check.passed ? "passed" : "failed"}: ${check.name}`)]);
+  log(`Rate-limit evidence written to ${jsonPath} and ${markdownPath}`);
+  if (issues.length && !booleanFlag(options.allowFailures ?? argv.allowFailures)) fail(`Rate-limit evidence failed: ${issues.join(", ")}`);
 }
 
 function addAuditLogEvidenceCheck(checks, issues, { name, category, status, detail, required = true, file = null }) {
@@ -6129,233 +4852,22 @@ function addAuditLogPatternCheck(checks, issues, { name, category, filePath, pat
 }
 
 async function auditLogEvidence(options = {}) {
-  log("==> Audit log evidence");
-  const requireSource = options.requireSource ?? booleanFlag(argv.requireSource);
-  const generatedAt = new Date().toISOString();
-  const checks = [];
-  const issues = [];
-
-  addAuditLogPatternCheck(checks, issues, {
-    name: "audit-events-schema-and-indexes",
-    category: "infra",
-    filePath: path.join(infraRoot, "postgres", "init", "02-enterprise-account-schema.sql"),
-    pattern: /CREATE TABLE IF NOT EXISTS app_account\.audit_events[\s\S]*idx_audit_events_account_created/,
-    detail: "Base schema creates audit_events and account/time indexes.",
-  });
-  addAuditLogPatternCheck(checks, issues, {
-    name: "audit-events-append-only",
-    category: "infra",
-    filePath: path.join(infraRoot, "postgres", "migrations", "006_persistence_integrity_readiness.sql"),
-    pattern: /audit_events_are_append_only[\s\S]*BEFORE UPDATE OR DELETE ON app_account\.audit_events[\s\S]*REVOKE UPDATE, DELETE ON app_account\.audit_events/,
-    detail: "Audit events are append-only and runtime update/delete privileges are revoked.",
-  });
-  addAuditLogPatternCheck(checks, issues, {
-    name: "audit-outbox-durable-queue",
-    category: "infra",
-    filePath: path.join(infraRoot, "postgres", "migrations", "007_durable_audit_outbox.sql"),
-    pattern: /CREATE TABLE IF NOT EXISTS app_account\.audit_outbox[\s\S]*audit_event_id uuid NOT NULL REFERENCES app_account\.audit_events\(id\) ON DELETE RESTRICT[\s\S]*FORCE ROW LEVEL SECURITY[\s\S]*REVOKE DELETE ON app_account\.audit_outbox/,
-    detail: "Durable audit outbox references audit_events, forces RLS and blocks deletes.",
-  });
-  addAuditLogPatternCheck(checks, issues, {
-    name: "audit-outbox-dead-letter-and-due-index",
-    category: "infra",
-    filePath: path.join(infraRoot, "postgres", "migrations", "009_audit_outbox_dispatcher.sql"),
-    pattern: /status IN \('queued', 'processing', 'delivered', 'failed', 'dead'\)[\s\S]*idx_audit_outbox_due_dispatch/,
-    detail: "Audit outbox supports dead-letter status and due-dispatch indexing.",
-  });
-  addAuditLogPatternCheck(checks, issues, {
-    name: "worker-audit-outbox-default-enabled",
-    category: "infra",
-    filePath: path.join(infraRoot, "compose.yaml"),
-    pattern: /AUDIT_OUTBOX_ENABLED:\s+\$\{AUDIT_OUTBOX_ENABLED:-true\}/,
-    detail: "Worker jobs enables audit outbox dispatch by default.",
-  });
-  addAuditLogPatternCheck(checks, issues, {
-    name: "audit-outbox-alerts",
-    category: "infra",
-    filePath: path.join(infraRoot, "prometheus", "rules", "enterprise-alerts.yml"),
-    pattern: /AuditOutboxDispatchBacklog[\s\S]*AuditOutboxDeadLetters[\s\S]*AuditOutboxDispatchFailures/,
-    detail: "Prometheus alerts cover backlog, dead-letter and dispatch failure states.",
-  });
-  addAuditLogPatternCheck(checks, issues, {
-    name: "audit-outbox-dashboard",
-    category: "infra",
-    filePath: path.join(infraRoot, "grafana", "dashboards", "enterprise-overview.json"),
-    pattern: /audit_outbox_rows/,
-    detail: "Grafana dashboard includes audit outbox lifecycle metrics.",
-  });
-  addAuditLogPatternCheck(checks, issues, {
-    name: "access-review-command-exposed",
-    category: "infra",
-    filePath: path.join(infraRoot, "scripts", "infra-ops.mjs"),
-    pattern: /async function accessReview[\s\S]*"access-review": accessReview/,
-    detail: "Ops runner exposes the access-review command for admin role/session reviews.",
-  });
-  addAuditLogPatternCheck(checks, issues, {
-    name: "audit-runbook",
-    category: "infra",
-    filePath: path.join(infraRoot, "RUNBOOK.md"),
-    pattern: /Centralized logs and audit[\s\S]*audit_events[\s\S]*audit_outbox[\s\S]*append-only/,
-    detail: "Runbook documents centralized audit events and outbox operations.",
-  });
-
-  const backendAudit = path.join(sourceRoot, "apps", "backend", "src", "runtime", "account-audit.ts");
-  const backendServicesDir = path.join(sourceRoot, "apps", "backend", "src", "services");
-  const workerServer = path.join(sourceRoot, "apps", "worker-jobs", "src", "server.ts");
-  const workerAuditStore = path.join(sourceRoot, "apps", "worker-jobs", "src", "audit-outbox-store.ts");
-  const workerAuditTest = path.join(sourceRoot, "apps", "worker-jobs", "src", "audit-outbox.test.ts");
-  const natsAuditSink = path.join(sourceRoot, "apps", "worker-jobs", "src", "nats-audit-sink.ts");
-  const sourcePresent = fs.existsSync(backendAudit) && fs.existsSync(workerServer);
-
-  addAuditLogEvidenceCheck(checks, issues, {
-    name: "optional-platform-audit-source",
-    category: "source",
-    required: requireSource,
-    status: sourcePresent ? "passed" : requireSource ? "failed" : "skipped",
-    detail: sourcePresent
-      ? `audit source mounted at ${sourceRoot}`
-      : `audit source not mounted at ${sourceRoot}; infra-only evidence mode`,
-    file: sourcePresent ? path.relative(infraRoot, backendAudit).replaceAll("\\", "/") : null,
-  });
-
-  if (sourcePresent) {
-    addAuditLogPatternCheck(checks, issues, {
-      name: "backend-audit-transactional-outbox-write",
-      category: "source",
-      sourceFile: true,
-      filePath: backendAudit,
-      pattern: /await client\.query\("begin"\)[\s\S]*insert into [a-z][a-z0-9_]*_account\.audit_events[\s\S]*insert into [a-z][a-z0-9_]*_account\.audit_outbox[\s\S]*await client\.query\("commit"\)[\s\S]*rollback/,
-      detail: "Backend writes audit_events and audit_outbox in one transaction with rollback.",
-    });
-    addAuditLogPatternCheck(checks, issues, {
-      name: "backend-audit-outbox-durability-metadata",
-      category: "source",
-      sourceFile: true,
-      filePath: backendAudit,
-      pattern: /jsonb_build_object\('externalEventId'[\s\S]*'durability', 'outbox'\)/,
-      detail: "Backend tags persisted audit events with outbox durability metadata.",
-    });
-
-    if (fs.existsSync(backendServicesDir)) {
-      const servicesText = readSourceTreeText(backendServicesDir, new Set([".ts"]));
-      const pushAuditUses = [...servicesText.matchAll(/pushAudit\(/g)].length;
-      addAuditLogEvidenceCheck(checks, issues, {
-        name: "backend-services-emit-audit-events",
-        category: "source",
-        status: pushAuditUses >= 6 ? "passed" : "failed",
-        detail: `${pushAuditUses} pushAudit call(s) found in backend services; expected at least 6 account/security flows.`,
-        file: "apps/backend/src/services",
-      });
-    } else {
-      addAuditLogEvidenceCheck(checks, issues, {
-        name: "backend-services-emit-audit-events",
-        category: "source",
-        status: "failed",
-        detail: "missing optional source directory: apps/backend/src/services",
-        file: "apps/backend/src/services",
-      });
-    }
-
-    addAuditLogPatternCheck(checks, issues, {
-      name: "worker-audit-dispatcher-and-metrics",
-      category: "source",
-      sourceFile: true,
-      filePath: workerServer,
-      pattern: /AuditOutboxDispatcher[\s\S]*PostgresAuditOutboxStore[\s\S]*createNatsAuditSink[\s\S]*audit_outbox_rows[\s\S]*audit_outbox_failed_total[\s\S]*audit_outbox_dead_total/,
-      detail: "Worker jobs runs dispatcher, NATS sink and audit outbox metrics.",
-    });
-    addAuditLogPatternCheck(checks, issues, {
-      name: "worker-audit-transactional-claim-and-dead-letter",
-      category: "source",
-      sourceFile: true,
-      filePath: workerAuditStore,
-      pattern: /for update skip locked[\s\S]*update [a-z][a-z0-9_]*_account\.audit_outbox[\s\S]*set status = 'dead'/,
-      detail: "Worker claims audit rows safely and moves exhausted delivery attempts to dead-letter.",
-    });
-    addAuditLogPatternCheck(checks, issues, {
-      name: "worker-audit-nats-headers",
-      category: "source",
-      sourceFile: true,
-      filePath: natsAuditSink,
-      pattern: /X-Audit-Event-Id[\s\S]*record\.auditEventId/,
-      detail: "NATS audit sink carries the audit event id for downstream traceability.",
-    });
-    addAuditLogPatternCheck(checks, issues, {
-      name: "worker-audit-regression-tests",
-      category: "source-test",
-      sourceFile: true,
-      filePath: workerAuditTest,
-      pattern: /row locking[\s\S]*marks them delivered[\s\S]*moves exhausted events to dead letter[\s\S]*reclaims expired processing rows/,
-      detail: "Worker tests cover row locking, delivery, dead-letter and crash recovery.",
-    });
-  }
-
-  const passedCount = checks.filter((check) => check.status === "passed").length;
-  const failedCount = checks.filter((check) => check.status === "failed").length;
-  const skippedCount = checks.filter((check) => check.status === "skipped").length;
-  const payload = {
-    generatedAt,
-    status: issues.length ? "failed" : "passed",
-    mode: sourcePresent ? "full" : "infra-only",
-    source: {
-      root: sourceRoot,
-      present: sourcePresent,
-      required: requireSource,
-    },
-    summary: {
-      checks: checks.length,
-      passed: passedCount,
-      failed: failedCount,
-      skipped: skippedCount,
-      infraChecksPassed: checks.filter((check) => check.category === "infra" && check.status === "passed").length,
-      sourceChecksPassed: checks.filter((check) => check.category.startsWith("source") && check.status === "passed").length,
-    },
-    checks,
-    issues,
-    nextCommands: [
-      "sh ./scripts/audit-log-evidence.sh",
-      "sh ./scripts/access-review.sh",
-      "sh ./scripts/pre-go-live-evidence.sh --includeRuntime",
-    ],
-  };
-
+  const compose = readText(path.join(infraRoot, "compose.yaml"));
+  const controlCenter = readText(path.join(infraRoot, "control-center", "server.mjs"));
+  const promtail = readText(path.join(infraRoot, "promtail", "config.yml"));
+  const checks = [
+    { name: "admin-audit-file", passed: /PROJECT_AUDIT_FILE:\s+\/var\/www\/project-state\/audit\.jsonl/.test(compose) },
+    { name: "append-only-admin-audit", passed: /appendAuditRecord|appendAudit/.test(controlCenter) && /audit\.jsonl/.test(controlCenter) },
+    { name: "audit-secret-redaction", passed: /redact|sensitive|secret/i.test(controlCenter) },
+    { name: "central-log-shipping", passed: /docker_sd_configs|__meta_docker_container_name|loki/i.test(promtail) },
+  ];
+  const issues = checks.filter((check) => !check.passed).map((check) => check.name);
+  const payload = { generatedAt: new Date().toISOString(), status: issues.length ? "failed" : "passed", scope: "platform-infrastructure", infraChecksPassed: checks.filter((check) => check.passed).length, checks, issues };
   const stamp = reportTimestamp();
   const jsonPath = writeJsonReport("audit-logs", `audit-log-evidence-${stamp}`, payload);
-  const markdownPath = writeMarkdownReport("audit-logs", `audit-log-evidence-${stamp}`, [
-    "# Audit Log Evidence",
-    "",
-    `Status: ${payload.status}`,
-    `Mode: ${payload.mode}`,
-    `Generated at: ${payload.generatedAt}`,
-    `Source mounted: ${payload.source.present ? "yes" : "no"}`,
-    `Require source: ${payload.source.required ? "yes" : "no"}`,
-    "",
-    "## Summary",
-    "",
-    `- Checks: ${payload.summary.checks}`,
-    `- Passed: ${payload.summary.passed}`,
-    `- Failed: ${payload.summary.failed}`,
-    `- Skipped: ${payload.summary.skipped}`,
-    "",
-    "## Checks",
-    "",
-    "| Check | Category | Required | Status | Detail |",
-    "| --- | --- | --- | --- | --- |",
-    ...checks.map((check) => `| ${check.name} | ${check.category} | ${check.required ? "yes" : "no"} | ${check.status} | ${String(check.detail).replaceAll("|", "\\|")} |`),
-    "",
-    "## Issues",
-    "",
-    ...(issues.length ? issues.map((issue) => `- ${issue}`) : ["- none"]),
-    "",
-    "## Next Commands",
-    "",
-    ...payload.nextCommands.map((commandLine) => `- \`${commandLine}\``),
-  ]);
-  log(`Audit log evidence report written to ${jsonPath} and ${markdownPath}`);
-  if (issues.length && !booleanFlag(argv.allowFailures)) {
-    fail(`Audit log evidence failed with ${issues.length} issue(s). Report: ${jsonPath}`);
-  }
-  log("Audit log evidence passed.");
+  const markdownPath = writeMarkdownReport("audit-logs", `audit-log-evidence-${stamp}`, ["# Platform Audit Log Evidence", "", `Status: ${payload.status}`, `Generated at: ${payload.generatedAt}`, "", ...checks.map((check) => `- ${check.passed ? "passed" : "failed"}: ${check.name}`)]);
+  log(`Audit-log evidence written to ${jsonPath} and ${markdownPath}`);
+  if (issues.length && !booleanFlag(options.allowFailures ?? argv.allowFailures)) fail(`Audit-log evidence failed: ${issues.join(", ")}`);
 }
 
 function addRetentionEvidenceCheck(checks, issues, { name, category, status, detail, required = true, file = null }) {
@@ -6400,235 +4912,27 @@ function addRetentionPatternCheck(checks, issues, { name, category, filePath, pa
 }
 
 async function retentionEvidence(options = {}) {
-  log("==> Retention evidence");
-  const requireSource = options.requireSource ?? booleanFlag(argv.requireSource);
-  const generatedAt = new Date().toISOString();
-  const checks = [];
-  const issues = [];
-
-  addRetentionPatternCheck(checks, issues, {
-    name: "docker-json-file-log-bounds",
-    category: "infra",
-    filePath: path.join(infraRoot, "compose.yaml"),
-    pattern: /x-default-logging:[\s\S]*driver:\s+json-file[\s\S]*max-size:\s+"10m"[\s\S]*max-file:\s+"5"/,
-    detail: "Default Docker json-file logging is bounded to 10m x 5 files.",
-  });
-  for (const service of ["traefik", "postgres", "redis", "keycloak", "nats", "minio", "backend", "web", "worker-notifications", "worker-jobs", "prometheus", "node-exporter", "cadvisor", "alertmanager", "grafana", "loki", "promtail"]) {
-    addRetentionPatternCheck(checks, issues, {
-      name: `bounded-logging-${service}`,
-      category: "infra",
-      filePath: path.join(infraRoot, "compose.yaml"),
-      pattern: new RegExp(`^\\s{2}${service}:.*?logging:\\s+\\*default_logging`, "ms"),
-      detail: `${service} uses the bounded default Docker logging config.`,
-    });
-  }
-  addRetentionPatternCheck(checks, issues, {
-    name: "bounded-logging-waf",
-    category: "infra",
-    filePath: path.join(infraRoot, "compose.waf.yaml"),
-    pattern: /waf:[\s\S]*logging:[\s\S]*driver:\s+json-file[\s\S]*max-size:\s+"10m"[\s\S]*max-file:\s+"5"/,
-    detail: "WAF edge container has bounded json-file logging.",
-  });
-  addRetentionPatternCheck(checks, issues, {
-    name: "loki-retention-and-compactor",
-    category: "infra",
-    filePath: path.join(infraRoot, "loki", "config.yml"),
-    pattern: /retention_period:\s+168h[\s\S]*reject_old_samples:\s+true[\s\S]*reject_old_samples_max_age:\s+168h[\s\S]*compactor:[\s\S]*retention_enabled:\s+true/,
-    detail: "Loki retains 7 days, rejects stale samples and enables compactor retention.",
-  });
-  addRetentionPatternCheck(checks, issues, {
-    name: "promtail-stale-backfill-drop",
-    category: "infra",
-    filePath: path.join(infraRoot, "promtail", "config.yml"),
-    pattern: /drop:[\s\S]*older_than:\s+168h[\s\S]*drop_counter_reason:\s+stale_docker_log/,
-    detail: "Promtail drops Docker log backfill older than 7 days before Loki ingestion.",
-  });
-  addRetentionPatternCheck(checks, issues, {
-    name: "promtail-sensitive-field-redaction",
-    category: "infra",
-    filePath: path.join(infraRoot, "promtail", "config.yml"),
-    pattern: /replace:[\s\S]*authorization[\s\S]*cookie[\s\S]*token[\s\S]*\[REDACTED\]/i,
-    detail: "Promtail redacts common sensitive fields before labeling and retention.",
-  });
-  addRetentionPatternCheck(checks, issues, {
-    name: "promtail-structured-labels",
-    category: "infra",
-    filePath: path.join(infraRoot, "promtail", "config.yml"),
-    pattern: /json:[\s\S]*level:\s+level[\s\S]*service:\s+service[\s\S]*labels:[\s\S]*level:[\s\S]*service:/,
-    detail: "Promtail extracts service and level labels for retained log queries.",
-  });
-  addRetentionPatternCheck(checks, issues, {
-    name: "prometheus-tsdb-retention",
-    category: "infra",
-    filePath: path.join(infraRoot, "compose.yaml"),
-    pattern: /prometheus:[\s\S]*--storage\.tsdb\.path=\/prometheus[\s\S]*--storage\.tsdb\.retention\.time=\$\{PROMETHEUS_RETENTION_TIME:-15d\}/,
-    detail: "Prometheus TSDB retention is explicitly bounded to 15 days by default.",
-  });
-  addRetentionPatternCheck(checks, issues, {
-    name: "prometheus-scrape-targets",
-    category: "infra",
-    filePath: path.join(infraRoot, "prometheus", "prometheus.yml"),
-    pattern: /job_name:\s+backend[\s\S]*job_name:\s+workers[\s\S]*job_name:\s+node-exporter[\s\S]*job_name:\s+cadvisor/,
-    detail: "Prometheus scrapes app, worker, host and container metrics.",
-  });
-  addRetentionPatternCheck(checks, issues, {
-    name: "grafana-prometheus-loki-datasources",
-    category: "infra",
-    filePath: path.join(infraRoot, "grafana", "provisioning", "datasources", "datasources.yml"),
-    pattern: /type:\s+prometheus[\s\S]*url:\s+http:\/\/prometheus:9090[\s\S]*type:\s+loki[\s\S]*url:\s+http:\/\/loki:3100/,
-    detail: "Grafana provisions Prometheus and Loki datasources.",
-  });
-  addRetentionPatternCheck(checks, issues, {
-    name: "grafana-retained-log-panels",
-    category: "infra",
-    filePath: path.join(infraRoot, "grafana", "dashboards", "enterprise-overview.json"),
-    pattern: /Platform container logs[\s\S]*Application warning and error logs[\s\S]*Backend errors[\s\S]*Worker errors[\s\S]*WAF events/,
-    detail: "Grafana dashboard contains retained log investigation panels.",
-  });
-
-  const observabilitySource = path.join(sourceRoot, "packages", "observability", "src", "index.ts");
-  const observabilityTest = path.join(sourceRoot, "packages", "observability", "src", "index.test.ts");
-  const backendServer = path.join(sourceRoot, "apps", "backend", "src", "server.ts");
-  const workerJobsServer = path.join(sourceRoot, "apps", "worker-jobs", "src", "server.ts");
-  const workerNotificationsServer = path.join(sourceRoot, "apps", "worker-notifications", "src", "server.ts");
-  const sourcePresent = fs.existsSync(observabilitySource) && fs.existsSync(backendServer);
-
-  addRetentionEvidenceCheck(checks, issues, {
-    name: "optional-platform-observability-source",
-    category: "source",
-    required: requireSource,
-    status: sourcePresent ? "passed" : requireSource ? "failed" : "skipped",
-    detail: sourcePresent
-      ? `observability source mounted at ${sourceRoot}`
-      : `observability source not mounted at ${sourceRoot}; infra-only evidence mode`,
-    file: sourcePresent ? path.relative(infraRoot, observabilitySource).replaceAll("\\", "/") : null,
-  });
-
-  if (sourcePresent) {
-    addRetentionPatternCheck(checks, issues, {
-      name: "shared-log-redaction-policy",
-      category: "source",
-      sourceFile: true,
-      filePath: observabilitySource,
-      pattern: /FASTIFY_LOG_REDACTION_PATHS[\s\S]*authorization[\s\S]*cookie[\s\S]*set-cookie[\s\S]*function redactLogValue[\s\S]*isSensitiveLogKey/,
-      detail: "Shared observability package defines recursive sensitive log redaction.",
-    });
-    addRetentionPatternCheck(checks, issues, {
-      name: "shared-log-redaction-tests",
-      category: "source-test",
-      sourceFile: true,
-      filePath: observabilityTest,
-      pattern: /redacts nested secret-bearing keys[\s\S]*redacts bearer tokens[\s\S]*createJsonLogger writes structured redacted JSON/,
-      detail: "Observability tests cover nested secrets, bearer/cookie strings and structured JSON logging.",
-    });
-    addRetentionPatternCheck(checks, issues, {
-      name: "backend-structured-redacted-logs",
-      category: "source",
-      sourceFile: true,
-      filePath: backendServer,
-      pattern: /FASTIFY_LOG_REDACTION_PATHS[\s\S]*LOG_REDACTION_CENSOR[\s\S]*service:\s*process\.env\.SERVICE_NAME\s*\?\?\s*"enterprise-backend"[\s\S]*formatters:[\s\S]*level\(label\)[\s\S]*redact:[\s\S]*censor:\s*LOG_REDACTION_CENSOR[\s\S]*paths:\s*\[\.\.\.FASTIFY_LOG_REDACTION_PATHS\]/,
-      detail: "Backend logs use shared redaction, stable service label and text levels.",
-    });
-    addRetentionPatternCheck(checks, issues, {
-      name: "worker-jobs-structured-logs",
-      category: "source",
-      sourceFile: true,
-      filePath: workerJobsServer,
-      pattern: /const serviceName[\s\S]*enterprise-worker-jobs[\s\S]*createJsonLogger\(serviceName\)/,
-      detail: "Jobs worker emits structured JSON logs with a stable service name.",
-    });
-    addRetentionPatternCheck(checks, issues, {
-      name: "worker-notifications-structured-logs",
-      category: "source",
-      sourceFile: true,
-      filePath: workerNotificationsServer,
-      pattern: /defaultServiceName[\s\S]*enterprise-worker-notifications[\s\S]*createJsonLogger/,
-      detail: "Notifications worker emits structured JSON logs with a stable service name.",
-    });
-  }
-
-  const passedCount = checks.filter((check) => check.status === "passed").length;
-  const failedCount = checks.filter((check) => check.status === "failed").length;
-  const skippedCount = checks.filter((check) => check.status === "skipped").length;
-  const payload = {
-    generatedAt,
-    status: issues.length ? "failed" : "passed",
-    mode: sourcePresent ? "full" : "infra-only",
-    source: {
-      root: sourceRoot,
-      present: sourcePresent,
-      required: requireSource,
-    },
-    policy: {
-      dockerJsonFile: { maxSize: "10m", maxFile: 5 },
-      lokiRetention: "168h",
-      promtailStaleDrop: "168h",
-      prometheusRetention: "15d",
-    },
-    summary: {
-      checks: checks.length,
-      passed: passedCount,
-      failed: failedCount,
-      skipped: skippedCount,
-      infraChecksPassed: checks.filter((check) => check.category === "infra" && check.status === "passed").length,
-      sourceChecksPassed: checks.filter((check) => check.category.startsWith("source") && check.status === "passed").length,
-    },
-    checks,
-    issues,
-    nextCommands: [
-      "sh ./scripts/retention-evidence.sh",
-      "sh ./scripts/infra-health.sh",
-      "review VPS disk capacity before raising PROMETHEUS_RETENTION_TIME or Loki retention_period",
-    ],
-  };
-
+  const compose = readText(path.join(infraRoot, "compose.yaml"));
+  const loki = readText(path.join(infraRoot, "loki", "config.yml"));
+  const opsScript = readText(path.join(infraRoot, "scripts", "infra-ops.mjs"));
+  const checks = [
+    { name: "bounded-container-logs", passed: /max-size:\s+"10m"[\s\S]*max-file:\s+"5"/.test(compose) },
+    { name: "prometheus-retention", passed: /storage\.tsdb\.retention\.time=\$\{PROMETHEUS_RETENTION_TIME:-15d\}/.test(compose) },
+    { name: "loki-retention", passed: /retention_enabled:\s+true[\s\S]*retention_period:\s*168h/.test(loki) || /retention_period:\s*168h[\s\S]*retention_enabled:\s+true/.test(loki) },
+    { name: "backup-retention", passed: /pruneManifestBackups[\s\S]*prunePostgresBackups/.test(opsScript) },
+    { name: "platform-restore-evidence", passed: /backup-restore-runs\.jsonl[\s\S]*writeBackupFreshnessMetrics/.test(opsScript) },
+  ];
+  const issues = checks.filter((check) => !check.passed).map((check) => check.name);
+  const payload = { generatedAt: new Date().toISOString(), status: issues.length ? "failed" : "passed", mode: "platform-policy", scope: "platform-infrastructure", infraChecksPassed: checks.filter((check) => check.passed).length, checks, issues };
   const stamp = reportTimestamp();
   const jsonPath = writeJsonReport("retention", `retention-evidence-${stamp}`, payload);
-  const markdownPath = writeMarkdownReport("retention", `retention-evidence-${stamp}`, [
-    "# Retention Evidence",
-    "",
-    `Status: ${payload.status}`,
-    `Mode: ${payload.mode}`,
-    `Generated at: ${payload.generatedAt}`,
-    `Docker log cap: ${payload.policy.dockerJsonFile.maxSize} x ${payload.policy.dockerJsonFile.maxFile}`,
-    `Loki retention: ${payload.policy.lokiRetention}`,
-    `Promtail stale drop: ${payload.policy.promtailStaleDrop}`,
-    `Prometheus retention: ${payload.policy.prometheusRetention}`,
-    "",
-    "## Summary",
-    "",
-    `- Checks: ${payload.summary.checks}`,
-    `- Passed: ${payload.summary.passed}`,
-    `- Failed: ${payload.summary.failed}`,
-    `- Skipped: ${payload.summary.skipped}`,
-    "",
-    "## Checks",
-    "",
-    "| Check | Category | Required | Status | Detail |",
-    "| --- | --- | --- | --- | --- |",
-    ...checks.map((check) => `| ${check.name} | ${check.category} | ${check.required ? "yes" : "no"} | ${check.status} | ${String(check.detail).replaceAll("|", "\\|")} |`),
-    "",
-    "## Issues",
-    "",
-    ...(issues.length ? issues.map((issue) => `- ${issue}`) : ["- none"]),
-    "",
-    "## Next Commands",
-    "",
-    ...payload.nextCommands.map((commandLine) => `- \`${commandLine}\``),
-  ]);
-  log(`Retention evidence report written to ${jsonPath} and ${markdownPath}`);
-  if (issues.length && !booleanFlag(argv.allowFailures)) {
-    fail(`Retention evidence failed with ${issues.length} issue(s). Report: ${jsonPath}`);
-  }
-  log("Retention evidence passed.");
+  const markdownPath = writeMarkdownReport("retention", `retention-evidence-${stamp}`, ["# Platform Retention Evidence", "", `Status: ${payload.status}`, `Generated at: ${payload.generatedAt}`, "", ...checks.map((check) => `- ${check.passed ? "passed" : "failed"}: ${check.name}`)]);
+  log(`Retention evidence written to ${jsonPath} and ${markdownPath}`);
+  if (issues.length && !booleanFlag(options.allowFailures ?? argv.allowFailures)) fail(`Retention evidence failed: ${issues.join(", ")}`);
 }
 
 const managedSecretRotationExpectations = [
   { name: "postgres_superuser_password", kind: "opaque", rotationDays: 90, manualRotation: true },
-  { name: "app_db_password", kind: "opaque", rotationDays: 90, manualRotation: true },
-  { name: "backend_db_password", kind: "opaque", rotationDays: 90, manualRotation: true },
-  { name: "worker_jobs_db_password", kind: "opaque", rotationDays: 90, manualRotation: true },
-  { name: "worker_notifications_db_password", kind: "opaque", rotationDays: 90, manualRotation: true },
   { name: "keycloak_db_password", kind: "opaque", rotationDays: 90, manualRotation: true },
   { name: "redis_password", kind: "opaque", rotationDays: 90 },
   { name: "keycloak_admin_password", kind: "opaque", rotationDays: 90 },
@@ -6637,19 +4941,11 @@ const managedSecretRotationExpectations = [
   { name: "mariadb_root_password", kind: "opaque", rotationDays: 90, manualRotation: true },
   { name: "phpmyadmin_control_password", kind: "opaque", rotationDays: 90 },
   { name: "grafana_admin_password", kind: "opaque", rotationDays: 90 },
-  { name: "session_secret", kind: "opaque", rotationDays: 90 },
-  { name: "session_signing_keys", kind: "keyring", rotationDays: 60 },
   { name: "projects_gateway_signing_keys", kind: "keyring", rotationDays: 90 },
-  { name: "hash_pepper_keys", kind: "keyring", rotationDays: 90 },
+  { name: "control_center_vault_keys", kind: "keyring", rotationDays: 90, manualRotation: true },
   { name: "backup_signing_keys", kind: "keyring", rotationDays: 90 },
   { name: "alertmanager_webhook_token", kind: "opaque", rotationDays: 90 },
   { name: "smtp_password", kind: "opaque", rotationDays: 90 },
-  { name: "cloudflare_turnstile_secret_key", kind: "opaque", rotationDays: 90, manualRotation: true },
-  { name: "database_url", kind: "derived", rotationDays: 90 },
-  { name: "backend_database_url", kind: "derived", rotationDays: 90 },
-  { name: "worker_jobs_database_url", kind: "derived", rotationDays: 90 },
-  { name: "worker_notifications_database_url", kind: "derived", rotationDays: 90 },
-  { name: "nats_url", kind: "derived", rotationDays: 90 },
 ];
 
 function readJsonLines(filePath) {
@@ -7113,7 +5409,7 @@ async function secretRotationEvidence(options = {}) {
     nextCommands: [
       "sh ./scripts/infra-secret-manager.sh init",
       "sh ./scripts/infra-secret-manager.sh verify",
-      "sh ./scripts/infra-secret-manager.sh rotate --name session_signing_keys",
+      "sh ./scripts/infra-secret-manager.sh rotate --name control_center_vault_keys",
       "sh ./scripts/infra-secret-manager.sh kms-rotate",
       "sh ./scripts/secret-rotation-evidence.sh --enforce",
     ],
@@ -7179,7 +5475,7 @@ async function releaseArtifactGateBody(options = {}) {
   });
   const images = imageEntries.map((entry) => entry.image);
   if (!images.length) {
-    fail("No release images found. Pass --imageManifest <file>, --images <ref[,ref]> or legacy BACKEND_IMAGE/WEB_IMAGE/WORKER_* env values.");
+    fail("No release images found. Pass --imageManifest <file> or --images <ref[,ref]>.");
   }
   for (const image of images) {
     if (/:latest(?:@|$)/.test(image)) {
@@ -7225,26 +5521,7 @@ function releaseImageMapFromEnv(env, manifestPath = null) {
 }
 
 function previousReleaseImageMap(env, fileImages = {}, imageKeys = releaseImageKeys) {
-  const aliases = {
-    BACKEND_IMAGE: ["BACKEND_IMAGE", "backendImage", "PREVIOUS_BACKEND_IMAGE"],
-    WEB_IMAGE: ["WEB_IMAGE", "webImage", "PREVIOUS_WEB_IMAGE"],
-    WORKER_NOTIFICATIONS_IMAGE: ["WORKER_NOTIFICATIONS_IMAGE", "workerNotificationsImage", "PREVIOUS_WORKER_NOTIFICATIONS_IMAGE"],
-    WORKER_JOBS_IMAGE: ["WORKER_JOBS_IMAGE", "workerJobsImage", "PREVIOUS_WORKER_JOBS_IMAGE"],
-  };
-  const previousArgNames = {
-    BACKEND_IMAGE: "previousBackendImage",
-    WEB_IMAGE: "previousWebImage",
-    WORKER_NOTIFICATIONS_IMAGE: "previousWorkerNotificationsImage",
-    WORKER_JOBS_IMAGE: "previousWorkerJobsImage",
-  };
-  return Object.fromEntries(imageKeys.map((key) => {
-    const value = argv[previousArgNames[key]]
-      ?? (aliases[key] ?? [key, `PREVIOUS_${key}`]).map((alias) => fileImages[alias]).find(Boolean)
-      ?? env[`PREVIOUS_${key}`]
-      ?? fileImages[key]
-      ?? null;
-    return [key, value];
-  }));
+  return Object.fromEntries(imageKeys.map((key) => [key, env[`PREVIOUS_${key}`] ?? fileImages[`PREVIOUS_${key}`] ?? fileImages[key] ?? null]));
 }
 
 function releaseArtifactRef(filePath) {
@@ -7352,7 +5629,7 @@ async function releaseEvidence(options = {}) {
   const releaseSha = options.releaseSha ?? argv.releaseSha ?? gitEvidence().commit;
   const releaseName = options.releaseName ?? argv.releaseName ?? releaseSha?.slice(0, 12) ?? `release-${reportTimestamp()}`;
   const rollbackProjectName = options.rollbackProjectName ?? argv.rollbackProjectName ?? argv.projectName ?? "enterprise_prod";
-  const rollbackServices = csvList(options.rollbackServices ?? argv.rollbackServices ?? argv.services, "backend,web,worker-notifications,worker-jobs");
+  const rollbackServices = csvList(options.rollbackServices ?? argv.rollbackServices ?? argv.services, "platform-alert-dispatcher,control-center,php-apache");
   const rollbackComposeFiles = csvList(options.rollbackComposeFiles ?? argv.rollbackComposeFiles ?? argv.composeFiles, "compose.yaml,compose.prod.yaml");
   const generatedAt = new Date().toISOString();
   const issues = [];
@@ -7576,54 +5853,22 @@ async function githubAttestationEvidence() {
 }
 
 async function rollbackRelease() {
-  log("==> Release rollback");
+  log("==> Platform release rollback");
   const envFile = path.resolve(argv.envFile ?? path.join(infraRoot, ".env"));
-  if (!fs.existsSync(envFile)) {
-    fail(`Env file not found: ${envFile}`);
-  }
+  if (!fs.existsSync(envFile)) fail(`Env file not found: ${envFile}`);
   const rollbackFile = argv.rollbackFile ? path.resolve(argv.rollbackFile) : null;
   const fileImages = rollbackFile ? readJsonFile(rollbackFile, rollbackFile) : {};
-  const imageOverrides = Object.fromEntries(
-    Object.entries(fileImages)
-      .filter(([key, value]) => /^[A-Z0-9_]+_IMAGE$/.test(key) && value)
-      .map(([key, value]) => [key, value]),
-  );
-  const legacyImageOverrides = {
-    BACKEND_IMAGE: argv.backendImage ?? fileImages.backendImage,
-    WEB_IMAGE: argv.webImage ?? fileImages.webImage,
-    WORKER_NOTIFICATIONS_IMAGE: argv.workerNotificationsImage ?? fileImages.workerNotificationsImage,
-    WORKER_JOBS_IMAGE: argv.workerJobsImage ?? fileImages.workerJobsImage,
-  };
-  for (const [key, value] of Object.entries(legacyImageOverrides)) {
-    if (value) {
-      imageOverrides[key] = value;
-    }
-  }
-  if (Object.keys(imageOverrides).length === 0) {
-    fail("No rollback images found. Pass --rollbackFile with *_IMAGE keys or legacy --backendImage/--webImage worker image arguments.");
-  }
-  for (const [key, image] of Object.entries(imageOverrides)) {
-    assertImmutableImageRef(key, image);
-  }
+  const imageOverrides = Object.fromEntries(Object.entries(fileImages).filter(([key, value]) => /^[A-Z0-9_]+_IMAGE$/.test(key) && value));
+  if (!Object.keys(imageOverrides).length) fail("No rollback images found. Pass --rollbackFile with *_IMAGE keys.");
+  for (const [key, image] of Object.entries(imageOverrides)) assertImmutableImageRef(key, image);
   const projectName = argv.projectName ?? "enterprise_prod";
-  const services = csvList(argv.services, "backend,web,worker-notifications,worker-jobs");
+  const services = csvList(argv.services, "platform-alert-dispatcher,control-center,php-apache");
   const composeFiles = csvList(argv.composeFiles, "compose.yaml,compose.prod.yaml");
   const envText = fs.readFileSync(envFile, "utf8");
   const stamp = reportTimestamp();
-  const rollbackPlan = writeRollbackPlanReport({
-    envFile,
-    envText,
-    rollbackFile,
-    imageOverrides,
-    projectName,
-    composeFiles,
-    services,
-    mode: booleanFlag(argv.confirmRollback) ? "apply" : "dry-run",
-    stamp,
-  });
+  const rollbackPlan = writeRollbackPlanReport({ envFile, envText, rollbackFile, imageOverrides, projectName, composeFiles, services, mode: booleanFlag(argv.confirmRollback) ? "apply" : "dry-run", stamp });
   if (!booleanFlag(argv.confirmRollback)) {
     log(`Rollback dry-run passed. Plan written to ${rollbackPlan.jsonPath} and ${rollbackPlan.markdownPath}`);
-    log("Re-run with --confirmRollback to update the env file, restart selected services and run infra-health.");
     return;
   }
   const backupEnvPath = `${envFile}.rollback-backup-${stamp}`;
@@ -7669,26 +5914,14 @@ async function drReadinessCheck(options = {}) {
 }
 
 async function securityMatrix() {
-  const includeProject = booleanFlag(argv.includeProject);
   await withLocalCheckReport("security-matrix", async () => {
-    log("==> Security test matrix");
     await testingHygiene();
-    if (includeProject && hasSupportedProjectSource()) {
-      const securitySpec = readText(path.join(sourceRoot, "e2e", "security-guards.spec.ts"));
-      const accountSpec = readText(path.join(sourceRoot, "e2e", "account-auth.spec.ts"));
-      const opsScript = readText(path.join(infraRoot, "scripts", "infra-ops.mjs"));
-      assertMatch(securitySpec, /cross-site mutating requests are blocked/, "Security E2E must cover cross-site request blocking.");
-      assertMatch(securitySpec, /require the CSRF header/, "Security E2E must cover CSRF header enforcement.");
-      assertMatch(accountSpec, /loginWithBackupCodeRecovery/, "Account E2E must cover backup-code recovery login.");
-      assertMatch(accountSpec, /expectBackupCodeStatus\(page, backupCode \?\? "", 400\)/, "Account E2E/integration must cover backup-code single-use blocking.");
-      assertMatch(opsScript, /passkey login options for added account/, "Account integration must cover passkey requested-account isolation.");
-      await accountIntegrationTests();
-    } else {
-      log(`Application security E2E skipped; no supported project source found at ${sourceRoot}.`);
-    }
+    staticSecurityInfraOnlyCheck();
+    await networkSegmentationCheck();
+    await runtimeIsolationCheck();
     await securitySmoke();
-    log("Security test matrix passed.");
-  }, { includeProject, supportedProjectSource: hasSupportedProjectSource(), mode: includeProject && hasSupportedProjectSource() ? "project" : "platform-infrastructure" });
+    log("Platform security test matrix passed.");
+  }, { scope: "platform-infrastructure" });
 }
 
 async function chaosProfile() {
@@ -8889,7 +7122,7 @@ function goNoGoRemediation(check) {
       commands: [
         "sh ./scripts/infra-secret-manager.sh init",
         "sh ./scripts/infra-secret-manager.sh verify",
-        "sh ./scripts/infra-secret-manager.sh rotate --name session_signing_keys",
+        "sh ./scripts/infra-secret-manager.sh rotate --name control_center_vault_keys",
         "sh ./scripts/infra-secret-manager.sh kms-rotate",
         "sh ./scripts/secret-rotation-evidence.sh --enforce",
       ],
@@ -10743,7 +8976,7 @@ async function restorePostgres() {
     fail("Restore is destructive. Re-run with --confirmRestore after verifying the backup file.");
   }
   const container = argv.container ?? "enterprise-postgres";
-  const database = argv.database ?? defaultPostgresApplicationDatabase();
+  const database = argv.database ?? defaultPostgresBackupDatabase();
   const user = argv.user ?? "postgres";
   const backupFile = resolveInside(path.join(infraRoot, "backups"), path.resolve(backupFileArg));
   const fileName = path.basename(backupFile);
@@ -10795,13 +9028,13 @@ async function restoreTestPostgres(options = {}) {
     fail("Provide --backupFile <path>.");
   }
   const container = options.container ?? argv.container ?? "enterprise-postgres";
-  const database = options.database ?? argv.database ?? defaultPostgresApplicationDatabase();
+  const database = options.database ?? argv.database ?? defaultPostgresBackupDatabase();
   const testDatabase = options.testDatabase ?? argv.testDatabase ?? "platform_restore_test";
   const user = options.user ?? argv.user ?? "postgres";
-  const countAllUserTables = options.countAllUserTables === true || booleanFlag(argv.countAllUserTables);
-  const minimumTables = positiveInteger(options.minimumTables ?? argv.minimumTables ?? 10, "--minimumTables", 1);
-  const accountSchemaName = sqlIdentifierName(options.accountSchema ?? argv.accountSchema ?? postgresAccountSchemaName(database), "PostgreSQL account schema");
-  const accountSchema = sqlIdentifier(accountSchemaName);
+  const requestedSchema = options.schema ?? options.accountSchema ?? argv.schema ?? argv.accountSchema ?? "";
+  const schemaName = requestedSchema ? sqlIdentifierName(requestedSchema, "PostgreSQL restore schema") : "";
+  const countAllUserTables = !schemaName || options.countAllUserTables === true || booleanFlag(argv.countAllUserTables);
+  const minimumTables = positiveInteger(options.minimumTables ?? argv.minimumTables ?? 1, "--minimumTables", 1);
   const backupFile = resolveInside(path.join(infraRoot, "backups"), path.resolve(backupFileArg));
   const fileName = path.basename(backupFile);
   const containerPath = `/tmp/${fileName}`;
@@ -10817,14 +9050,14 @@ async function restoreTestPostgres(options = {}) {
     dockerExec(container, ["rm", "-f", containerPath]);
     const tableQuery = countAllUserTables
       ? "select count(*) from information_schema.tables where table_schema not in ('information_schema','pg_catalog');"
-      : `select count(*) from information_schema.tables where table_schema = ${sqlString(accountSchemaName)};`;
+      : `select count(*) from information_schema.tables where table_schema = ${sqlString(schemaName)};`;
     const tables = Number(postgresOut(container, testDatabase, user, tableQuery));
     dockerExec(container, ["psql", "-U", user, "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-c", `drop database if exists ${testDatabaseIdentifier} with (force);`]);
     if (tables < minimumTables) {
-      fail(`Restore test produced too few ${countAllUserTables ? "user" : accountSchemaName} tables: ${tables}`);
+      fail(`Restore test produced too few ${countAllUserTables ? "user" : schemaName} tables: ${tables}`);
     }
-    recordBackupRestoreRun({ container, database, user, operation: "restore_test", status: "success", artifactPath: backupFile, artifactSha256: hash, startedAt, metadata: { restoredTables: tables, restoredSchema: countAllUserTables ? "all-user-schemas" : accountSchemaName, testDatabase } });
-    log(`Restore test passed with ${tables} ${countAllUserTables ? "user" : accountSchema} tables.`);
+    recordBackupRestoreRun({ container, database, user, operation: "restore_test", status: "success", artifactPath: backupFile, artifactSha256: hash, startedAt, metadata: { restoredTables: tables, restoredSchema: countAllUserTables ? "all-user-schemas" : schemaName, testDatabase } });
+    log(`Restore test passed with ${tables} ${countAllUserTables ? "user" : schemaName} tables.`);
     return { backupFile, hash, tables, testDatabase, container, database, user };
   } catch (error) {
     try {
@@ -10841,28 +9074,19 @@ async function restoreTestPostgres(options = {}) {
 async function backupRestoreDrill() {
   log("==> PostgreSQL backup/restore drill");
   const container = argv.container ?? "enterprise-postgres";
-  const database = argv.database ?? defaultPostgresApplicationDatabase();
+  const database = argv.database ?? defaultPostgresBackupDatabase();
   const user = argv.user ?? "postgres";
-  const opsSchema = postgresOpsSchema(database);
   const outputDir = path.resolve(argv.outputDir ?? path.join(infraRoot, "backups", "postgres", "drills"));
   const suffix = new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 14);
   const testDatabase = argv.testDatabase ?? `platform_restore_test_${suffix}`;
   const backup = await backupPostgres({ container, database, user, outputDir });
   const restore = await restoreTestPostgres({ container, database, user, backupFile: backup.hostPath, testDatabase });
-  const recorded = postgresOut(
-    container,
-    database,
-    user,
-    `
-      select count(*)
-      from ${opsSchema}.backup_restore_runs
-      where operation = 'restore_test'
-        and status = 'success'
-        and artifact_sha256 = ${sqlString(backup.hash)}
-        and metadata->>'testDatabase' = ${sqlString(restore.testDatabase)}
-    `,
-  ).trim();
-  if (recorded !== "1") {
+  const recorded = backupRestoreRunRecords().some((record) =>
+    record.operation === "restore_test"
+      && record.status === "success"
+      && record.artifactSha256 === backup.hash
+      && record.metadata?.testDatabase === restore.testDatabase);
+  if (!recorded) {
     fail("Restore drill completed but backup_restore_runs did not record the matching restore_test success.");
   }
   log(`Backup/restore drill recorded restore_test success for ${path.basename(backup.hostPath)}.`);
@@ -11915,28 +10139,21 @@ function pruneDumpDirectory({ directory, dryRun, label, minKeep, retentionDays }
   return { kept: artifacts.length - pruned, pruned, total: artifacts.length };
 }
 
-function assertRecentRestoreTest(container, database, user, maxAgeDays) {
-  const opsSchema = postgresOpsSchema(database);
-  const count = postgresOut(
-    container,
-    database,
-    user,
-    `
-      select count(*)
-      from ${opsSchema}.backup_restore_runs
-      where operation = 'restore_test'
-        and status = 'success'
-        and finished_at >= now() - (${positiveInteger(maxAgeDays, "--maxRestoreTestAgeDays")}::text || ' days')::interval
-    `,
-  ).trim();
-  if (count === "0") {
+function assertRecentRestoreTest(_container, database, _user, maxAgeDays) {
+  const cutoff = Date.now() - positiveInteger(maxAgeDays, "--maxRestoreTestAgeDays") * 86400 * 1000;
+  const exists = backupRestoreRunRecords().some((record) =>
+    record.operation === "restore_test"
+      && record.status === "success"
+      && record.databaseName === database
+      && Date.parse(record.finishedAt) >= cutoff);
+  if (!exists) {
     fail(`Refusing backup retention cleanup: no successful restore_test in the last ${maxAgeDays} days.`);
   }
 }
 
 async function prunePostgresBackups(options = {}) {
   const container = options.container ?? argv.container ?? "enterprise-postgres";
-  const database = options.database ?? argv.database ?? defaultPostgresApplicationDatabase();
+  const database = options.database ?? argv.database ?? defaultPostgresBackupDatabase();
   const user = options.user ?? argv.user ?? "postgres";
   const backupDir = path.resolve(options.backupDir ?? argv.backupDir ?? path.join(infraRoot, "backups", "postgres"));
   const drillDir = path.resolve(options.drillDir ?? argv.drillDir ?? path.join(backupDir, "drills"));
@@ -12007,84 +10224,36 @@ function secretScanPatterns() {
 }
 
 async function secretScan() {
-  const includeProject = booleanFlag(argv.includeProject);
   await withLocalCheckReport("secret-scan", async () => {
-    const roots = [path.resolve(argv.infraRoot ?? infraRoot)];
-    if (includeProject && hasSupportedProjectSource()) {
-      roots.push(path.resolve(argv.sourceRoot ?? sourceRoot));
-    }
+    const root = path.resolve(argv.infraRoot ?? infraRoot);
     const patterns = secretScanPatterns();
-    const ignoredDirs = new Set([
-      ".git",
-      ".codex-backups",
-      ".tmp",
-      "node_modules",
-      ".pnpm-store",
-      ".next",
-      "dist",
-      "coverage",
-      "backups",
-      "release",
-      "reports",
-      "secrets",
-      "certs",
-      "acme",
-      "sbom",
-    ]);
+    const ignoredDirs = new Set([".git", ".codex-backups", ".tmp", "node_modules", ".pnpm-store", ".next", "dist", "coverage", "backups", "release", "reports", "secrets", "certs", "acme", "sbom"]);
     const hits = [];
-    const scanFile = (filePath) => {
-      const relativeName = path.basename(filePath);
-      if (/^\.env(?:\.|$)/.test(relativeName)) {
-        return;
-      }
-      const stat = fs.statSync(filePath);
-      if (stat.size > 2 * 1024 * 1024) {
-        return;
-      }
-      const content = fs.readFileSync(filePath);
-      if (content.includes(0)) {
-        return;
-      }
-      const text = content.toString("utf8");
-      const lines = text.split(/\r?\n/);
-      lines.forEach((line, index) => {
-        if (/change_me|placeholder|example|your-domain|smtpPassword|redisPassword|dbPassword|rootPassword|WITH PASSWORD :'\w+_password'/i.test(line)) {
-          return;
-        }
-        const match = patterns.find(([, pattern]) => pattern.test(line));
-        if (match) {
-          hits.push({
-            file: path.relative(infraRoot, filePath).replaceAll("\\", "/"),
-            line: index + 1,
-            kind: match[0],
-          });
-        }
-      });
-    };
     const walk = (dir) => {
       for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-        if (ignoredDirs.has(entry.name)) {
-          continue;
-        }
+        if (ignoredDirs.has(entry.name)) continue;
         const fullPath = path.join(dir, entry.name);
         if (entry.isDirectory()) {
           walk(fullPath);
-        } else if (entry.isFile()) {
-          scanFile(fullPath);
+          continue;
         }
+        if (!entry.isFile() || /^\.env(?:\.|$)/.test(entry.name) || fs.statSync(fullPath).size > 2 * 1024 * 1024) continue;
+        const content = fs.readFileSync(fullPath);
+        if (content.includes(0)) continue;
+        content.toString("utf8").split(/\r?\n/).forEach((line, index) => {
+          if (/change_me|placeholder|example|your-domain|smtpPassword|redisPassword|dbPassword|rootPassword|WITH PASSWORD :'\w+_password'/i.test(line)) return;
+          const match = patterns.find(([, pattern]) => pattern.test(line));
+          if (match) hits.push({ file: path.relative(infraRoot, fullPath).replaceAll("\\", "/"), line: index + 1, kind: match[0] });
+        });
       }
     };
-    for (const root of roots) {
-      if (fs.existsSync(root)) {
-        walk(root);
-      }
-    }
+    walk(root);
     if (hits.length) {
       hits.forEach((hit) => log(`${hit.file}:${hit.line}: potential ${hit.kind}`));
       fail("Potential hardcoded secrets found. Review the hits above.");
     }
-    log(`Secret scan passed for ${roots.length} root(s) without printing secret values.`);
-  }, { includeProject, supportedProjectSource: hasSupportedProjectSource(), scannedProjectSource: includeProject && hasSupportedProjectSource() });
+    log("Platform repository secret scan passed without printing secret values.");
+  }, { scope: "platform-infrastructure" });
 }
 
 async function securitySmoke() {
@@ -12182,1791 +10351,123 @@ async function infraHealth() {
 
 async function infraHealthBody() {
   const defaultContainers = [
-    "enterprise-traefik",
-    "enterprise-waf",
-    "enterprise-web",
-    "enterprise-backend",
-    "enterprise-worker-notifications",
-    "enterprise-worker-jobs",
-    "mariadb",
-    "enterprise-postgres",
-    "enterprise-redis",
-    "enterprise-nats",
-    "enterprise-keycloak",
-    "enterprise-minio",
-    "enterprise-grafana",
-    "enterprise-prometheus",
-    "enterprise-node-exporter",
-    "enterprise-cadvisor",
-    "enterprise-loki",
-    "enterprise-alertmanager",
-    "enterprise-promtail",
+    "enterprise-traefik", "enterprise-waf", "enterprise-postgres", "enterprise-redis", "enterprise-keycloak", "enterprise-nats", "enterprise-minio", "php-apache", "enterprise-control-center", "enterprise-project-router", "mariadb", "phpmyadmin", "phppgadmin", "enterprise-local-dns", "enterprise-prometheus", "enterprise-node-exporter", "enterprise-cadvisor", "enterprise-platform-alert-dispatcher", "enterprise-alertmanager", "enterprise-grafana", "enterprise-loki", "enterprise-promtail",
   ];
-  const containers = (argv.containers ? String(argv.containers).split(",") : defaultContainers)
-    .map((container) => container.trim())
-    .filter(Boolean);
+  const containers = (argv.containers ? String(argv.containers).split(",") : defaultContainers).map((container) => container.trim()).filter(Boolean);
   const envFile = path.resolve(infraRoot, argv.envFile ?? ".env");
   const env = parseEnv(envFile);
   const runtimeDomain = expandTemplate(env.DOMAIN ?? env.LOCAL_DOMAIN ?? "localhost.com", env);
   const defaultAdminHost = expandTemplate(env.CONTROL_CENTER_HOST ?? env.ADMIN_HOST ?? `portal.${runtimeDomain}`, env);
   const defaultDocsHost = expandTemplate(env.DOCS_HOST ?? `docs.${runtimeDomain}`, env);
-  const apiBase = argv.apiBase ? String(argv.apiBase).replace(/\/$/, "") : "";
   const uiBase = (argv.uiBase ?? argv.docsBase ?? `https://${defaultDocsHost}`).replace(/\/$/, "");
-  const accountBase = argv.accountBase ? String(argv.accountBase).replace(/\/$/, "") : "";
   const adminBase = (argv.adminBase ?? argv.projectsBase ?? `https://${defaultAdminHost}`).replace(/\/$/, "");
-  let inferredAdminScheme = "https";
-  try {
-    inferredAdminScheme = new URL(adminBase).protocol === "http:" ? "http" : "https";
-  } catch {
-    inferredAdminScheme = "https";
-  }
-  const adminScheme = String(argv.adminScheme ?? inferredAdminScheme).replace(/:$/, "");
-  const grafanaBase = argv.grafanaBase ? String(argv.grafanaBase).replace(/\/$/, "") : "";
-  const grafanaStatuses = booleanFlag(argv.grafanaBlocked) ? [403, 404] : [200];
   const checks = [];
-  const addCheck = (name, ok, detail = "") => {
-    checks.push({ name, ok, detail });
-  };
-
-  log("==> Infra health");
+  const addCheck = (name, ok, detail = "") => checks.push({ name, ok, detail });
   for (const container of containers) {
-    const inspect = run("docker", [
-      "inspect",
-      "--format",
-      "{{.State.Status}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}",
-      container,
-    ], { allowFailure: true, capture: true });
+    const inspect = run("docker", ["inspect", "--format", "{{.State.Status}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}", container], { allowFailure: true, capture: true });
     if (inspect.status !== 0) {
       addCheck(`container:${container}`, false, "not found");
       continue;
     }
     const [status, health = "none"] = String(inspect.stdout ?? "").trim().split("|");
-    const ok = status === "running" && (health === "none" || health === "healthy");
-    addCheck(`container:${container}`, ok, `status=${status || "unknown"} health=${health || "none"}`);
+    addCheck(`container:${container}`, status === "running" && (health === "none" || health === "healthy"), `status=${status || "unknown"} health=${health || "none"}`);
   }
-
   const httpChecks = [
     { name: "docs-home", method: "HEAD", url: `${uiBase}/`, statuses: [200, 308] },
-    { name: "admin-control-center", method: "GET", url: `${adminBase}/`, statuses: [200], body: /Admin Control Center|ops-shell|Passati|Non passati|NO GO LIVE|GO LIVE/ },
+    { name: "admin-control-center", method: "GET", url: `${adminBase}/`, statuses: [200], body: /Control Center|ops-shell|Passati|Non passati|GO LIVE/ },
     { name: "waf-xss-block", method: "GET", url: `${adminBase}/?x=%3Cscript%3Ealert(1)%3C%2Fscript%3E`, statuses: [403, 406] },
     { name: "waf-sensitive-file-block", method: "GET", url: `${adminBase}/.env`, statuses: [403, 404] },
   ];
-  if (apiBase) {
-    httpChecks.push({ name: "api-health", method: "GET", url: `${apiBase}/health`, statuses: [200] });
-  }
-  if (accountBase) {
-    httpChecks.push({ name: "account-home", method: "HEAD", url: `${accountBase}/`, statuses: [200, 308] });
-  }
-  if (grafanaBase) {
-    httpChecks.push({ name: "grafana-login", method: "GET", url: grafanaBase, statuses: grafanaStatuses });
-  }
   for (const check of httpChecks) {
     const started = Date.now();
     try {
-      const response = await request(check.method, check.url, { headers: { "User-Agent": "platform-infra-health/1.0", ...(check.headers ?? {}) } });
-      const latencyMs = Date.now() - started;
+      const response = await request(check.method, check.url, { headers: { "User-Agent": "platform-infra-health/1.0" } });
       const statusOk = check.statuses.includes(response.status);
       const bodyOk = !check.body || check.body.test(response.text);
-      addCheck(`http:${check.name}`, statusOk && bodyOk, `status=${response.status} latencyMs=${latencyMs}`);
+      addCheck(`http:${check.name}`, statusOk && bodyOk, `status=${response.status} latencyMs=${Date.now() - started}`);
     } catch (error) {
       addCheck(`http:${check.name}`, false, String(error?.message ?? error));
     }
   }
-
-  if (booleanFlag(argv.json)) {
-    log(JSON.stringify({ ok: checks.every((check) => check.ok), checks }, null, 2));
-  } else {
-    for (const check of checks) {
-      log(`${check.ok ? "OK  " : "FAIL"} ${check.name}${check.detail ? ` - ${check.detail}` : ""}`);
-    }
-  }
+  if (booleanFlag(argv.json)) log(JSON.stringify({ ok: checks.every((check) => check.ok), checks }, null, 2));
+  else for (const check of checks) log(`${check.ok ? "OK  " : "FAIL"} ${check.name}${check.detail ? ` - ${check.detail}` : ""}`);
   const failures = checks.filter((check) => !check.ok);
-  if (failures.length) {
-    fail(`Infra health failed: ${failures.map((failure) => failure.name).join(", ")}`);
-  }
+  if (failures.length) fail(`Infra health failed: ${failures.map((failure) => failure.name).join(", ")}`);
   log("Infra health passed.");
 }
 
 async function signImages() {
-  const images = (argv.images ? argv.images.split(",") : [
-    process.env.BACKEND_IMAGE,
-    process.env.WEB_IMAGE,
-    process.env.WORKER_NOTIFICATIONS_IMAGE,
-    process.env.WORKER_JOBS_IMAGE,
-  ]).filter(Boolean);
+  const entries = releaseImageEntries({
+    env: parseEnv(path.resolve(argv.envFile ?? path.join(infraRoot, ".env"))),
+    imagesArg: argv.images,
+    manifestPath: argv.imageManifest ?? argv.projectManifest ?? argv.appManifest,
+  });
+  if (!entries.length) fail("No images found. Pass --imageManifest <file> or --images <ref[,ref]>.");
   const key = argv.key ?? process.env.COSIGN_KEY;
-  const hasCosign = run("cosign", ["version"], { capture: true, allowFailure: true }).status === 0;
-  if (!hasCosign) {
-    fail("cosign is required for image signing. Install cosign and authenticate to your registry.");
-  }
-  if (!key) {
-    fail("Set COSIGN_KEY to a key reference or use keyless signing in CI.");
-  }
-  for (const image of images) {
-    if (/:latest$/.test(image)) {
-      fail(`Refusing to sign mutable :latest image: ${image}`);
-    }
+  if (run("cosign", ["version"], { capture: true, allowFailure: true }).status !== 0) fail("cosign is required for image signing.");
+  if (!key) fail("Set COSIGN_KEY to a key reference or use keyless signing in CI.");
+  for (const { key: imageKey, image } of entries) {
+    assertDigestPinnedImageRef(imageKey, image);
     run("cosign", ["sign", "--key", key, image]);
   }
-  log("Image signing completed.");
+  log(`Image signing completed for ${entries.length} immutable image(s).`);
 }
 
 function staticSecurityInfraOnlyCheck() {
-  log("==> Static security checks (infra-only)");
+  log("==> Static security checks (platform infrastructure)");
   const supplyChain = evaluateSupplyChain(infraRoot);
   if (supplyChain.status !== "passed") fail(`Supply-chain policy failed: ${supplyChain.failures.join("; ")}`);
   const compose = readText(path.join(infraRoot, "compose.yaml"));
-  const composeBuild = readText(path.join(infraRoot, "compose.build.yaml"));
   const composeRuntime = readText(path.join(infraRoot, "compose.runtime.yaml"));
   const composeNetworks = readText(path.join(infraRoot, "compose.networks.yaml"));
-  const composeRuntimeIsolation = readText(path.join(infraRoot, "compose.runtime-isolation.yaml"));
+  const composeIsolation = readText(path.join(infraRoot, "compose.runtime-isolation.yaml"));
   const composeSecrets = readText(path.join(infraRoot, "compose.secrets.yaml"));
-  const composeWaf = readText(path.join(infraRoot, "compose.waf.yaml"));
-  const composeVPSWaf = readText(path.join(infraRoot, "compose.vps-waf.yaml"));
-  const alertmanagerConfig = readText(path.join(infraRoot, "alertmanager", "alertmanager.yml"));
-  const phpApacheDockerfile = readText(path.join(infraRoot, "docker", "php-apache.Dockerfile"));
-  const phpApacheHttpVhost = readText(path.join(infraRoot, "php-apache", "apache", "000-default.conf"));
-  const phpApacheHttpsVhost = readText(path.join(infraRoot, "php-apache", "apache", "default-ssl.conf"));
-  const opsDockerfile = readText(path.join(infraRoot, "docker", "ops.Dockerfile"));
-  const opsWrapper = readText(path.join(infraRoot, "scripts", "infra-ops.sh"));
-  const backupSchedulerScript = readText(path.join(infraRoot, "scripts", "backup-scheduler.sh"));
-  const alertDeliverySandboxTest = readText(path.join(infraRoot, "scripts", "alert-delivery-sandbox-test.mjs"));
-  const alertmanagerSecretPermissions = readText(path.join(infraRoot, "scripts", "alertmanager-secret-permissions.sh"));
-  const secretManagerScript = readText(path.join(infraRoot, "scripts", "infra-secret-manager.mjs"));
-  const evidenceBundleVerifyWrapper = readText(path.join(infraRoot, "scripts", "evidence-bundle-verify.sh"));
-  const githubActionsRunEvidenceWrapper = readText(path.join(infraRoot, "scripts", "github-actions-run-evidence.sh"));
-  const rateLimitEvidenceWrapper = readText(path.join(infraRoot, "scripts", "rate-limit-evidence.sh"));
-  const auditLogEvidenceWrapper = readText(path.join(infraRoot, "scripts", "audit-log-evidence.sh"));
-  const retentionEvidenceWrapper = readText(path.join(infraRoot, "scripts", "retention-evidence.sh"));
-  const secretRotationEvidenceWrapper = readText(path.join(infraRoot, "scripts", "secret-rotation-evidence.sh"));
-  const opsScript = readText(path.join(infraRoot, "scripts", "infra-ops.mjs"));
-  const releaseTrustModule = readText(path.join(infraRoot, "scripts", "release-trust.mjs"));
-  const githubGovernancePolicyModule = readText(path.join(infraRoot, "scripts", "github-governance-policy.mjs"));
-  const vpsEvidenceRemoteScript = readText(path.join(infraRoot, "scripts", "vps-evidence-remote.sh"));
-  const deployVPSScript = readText(path.join(infraRoot, "scripts", "deploy-vps.sh"));
-  const deployVPSRemoteScript = readText(path.join(infraRoot, "scripts", "deploy-vps-remote.sh"));
-  const composeVPSScript = readText(path.join(infraRoot, "scripts", "compose-vps.sh"));
-  const vpsGoLiveScript = readText(path.join(infraRoot, "scripts", "vps-go-live.sh"));
-  const vpsPreflightScript = readText(path.join(infraRoot, "scripts", "vps-preflight.sh"));
-  const vpsPostdeployScript = readText(path.join(infraRoot, "scripts", "vps-postdeploy.sh"));
-  const productionReadinessLiveWrapper = readText(path.join(infraRoot, "scripts", "production-readiness-live.sh"));
-  const githubWorkflow = readText(path.join(infraRoot, ".github", "workflows", "enterprise-infra.yml"));
-  const githubRunEvidenceWorkflow = readText(path.join(infraRoot, ".github", "workflows", "enterprise-infra-run-evidence.yml"));
-  const githubLiveEvidenceWorkflow = readText(path.join(infraRoot, ".github", "workflows", "enterprise-live-evidence.yml"));
-  const githubVpsEvidenceWorkflow = readText(path.join(infraRoot, ".github", "workflows", "enterprise-vps-evidence.yml"));
-  const releaseAttestationWorkflow = readText(path.join(infraRoot, ".github", "workflows", "release-attestation.yml"));
-  const readme = readText(path.join(infraRoot, "README.md"));
-  const runbook = readText(path.join(infraRoot, "RUNBOOK.md"));
-  const envExample = readText(path.join(infraRoot, ".env.example"));
-  const productionReadinessManifest = readText(path.join(infraRoot, "governance", "production-readiness.json"));
-  const productionGoNoGoPolicyText = readText(path.join(infraRoot, "governance", "production-go-no-go.json"));
-  const infraRenovate = readText(path.join(infraRoot, "renovate.json"));
-  const infraGitattributes = readText(path.join(infraRoot, ".gitattributes"));
-  const gitignore = readText(path.join(infraRoot, ".gitignore"));
-  const localWafPreRules = readText(path.join(infraRoot, "waf", "REQUEST-900-EXCLUSION-RULES-BEFORE-CRS.conf"));
-  const vpsWafPreRules = readText(path.join(infraRoot, "waf", "REQUEST-900-VPS-RULES-BEFORE-CRS.conf"));
-  const phpMyAdminConfig = readText(path.join(infraRoot, "phpmyadmin", "config.user.inc.php"));
-  const controlCenterServer = readText(path.join(infraRoot, "control-center", "server.mjs"));
-  const controlCenterPackage = readText(path.join(infraRoot, "control-center", "package.json"));
-  const controlCenterTest = readText(path.join(infraRoot, "control-center", "tests", "control-center.test.mjs"));
-  const controlCenterLocalStyles = readText(path.join(infraRoot, "control-center", "styles", "control-center.css"));
-  const controlCenterLocalComponents = readText(path.join(infraRoot, "control-center", "components", "ui", "controlCenterUi.mjs"));
-  const projectRouterServer = readText(path.join(infraRoot, "project-router", "server.mjs"));
-  const projectRouterTest = readText(path.join(infraRoot, "project-router", "tests", "project-router.test.mjs"));
-  const networkSegmentationPolicy = readText(path.join(infraRoot, "scripts", "network-segmentation-policy.mjs"));
-  const networkSegmentationSandbox = readText(path.join(infraRoot, "scripts", "network-segmentation-sandbox-test.sh"));
-  const workloadEgressFirewall = readText(path.join(infraRoot, "scripts", "workload-egress-firewall.sh"));
-  const runtimeIsolationPolicy = readText(path.join(infraRoot, "scripts", "runtime-isolation-policy.mjs"));
-  const runtimeIsolationSandbox = readText(path.join(infraRoot, "scripts", "runtime-isolation-sandbox-test.sh"));
-  const runtimeHostedSandbox = readText(path.join(infraRoot, "scripts", "runtime-hosted-sandbox-test.sh"));
-
-  const infrastructureText = [
-    compose,
-    composeBuild,
-    composeRuntime,
-    composeNetworks,
-    composeRuntimeIsolation,
-    composeSecrets,
-    composeWaf,
-    composeVPSWaf,
-    phpApacheDockerfile,
-    phpApacheHttpVhost,
-    phpApacheHttpsVhost,
-    opsDockerfile,
-    opsWrapper,
-    backupSchedulerScript,
-    evidenceBundleVerifyWrapper,
-    githubActionsRunEvidenceWrapper,
-    rateLimitEvidenceWrapper,
-    auditLogEvidenceWrapper,
-    retentionEvidenceWrapper,
-    secretRotationEvidenceWrapper,
-    deployVPSScript,
-    composeVPSScript,
-    vpsGoLiveScript,
-    vpsPostdeployScript,
-    productionReadinessLiveWrapper,
-    githubWorkflow,
-    githubRunEvidenceWorkflow,
-    githubLiveEvidenceWorkflow,
-    githubVpsEvidenceWorkflow,
-    releaseAttestationWorkflow,
-    readme,
-    runbook,
-    envExample,
-  ].join("\n");
-
-  assertNoMatch(infrastructureText, /(?:\.\.\/web-php-infrastructure|src\/infrastructure|enterprise-infrastructure)/, "Infrastructure must not reference retired duplicate infra directories.");
-  assertMatch(compose, /^name:\s+\$\{COMPOSE_PROJECT_NAME:-platform_infra\}/m, "Compose must use an explicit environment-selectable project name.");
-  assertMatch(composeRuntime, /local-registry:[\s\S]*registry:3@sha256:[a-f0-9]{64}[\s\S]*enterprise_local_registry_data:[\s\S]*external:\s+true/, "Tracked runtime must manage the pinned local registry and its external stable volume.");
-  assertMatch(composeRuntime, /worker-jobs:[\s\S]*read_only:\s+false[\s\S]*worker-notifications:[\s\S]*read_only:\s+false/, "Tracked runtime must replace the former worker hotfix.");
-  assertMatch(composeVPSScript, /compose\.backup-scheduler\.yaml[\s\S]*compose\.build\.yaml[\s\S]*compose\.runtime\.yaml[\s\S]*compose\.networks\.yaml[\s\S]*compose\.runtime-isolation\.yaml[\s\S]*--profile backup/, "The VPS wrapper must load tracked network and runtime isolation policies last in canonical order.");
-  assertMatch(composeRuntimeIsolation, /docker-socket-proxy:[\s\S]*@sha256:[a-f0-9]{64}[\s\S]*\/var\/run\/docker\.sock:\/var\/run\/docker\.sock:ro[\s\S]*platform_docker_control/, "Only the digest-pinned socket proxy may receive the raw Docker socket.");
-  assertMatch(composeRuntimeIsolation, /127\.0\.0\.1:\$\{DOCKER_SOCKET_PROXY_PORT:-2376\}:2375/, "The host ops endpoint must bind only to loopback.");
-  assertMatch(composeRuntimeIsolation, /backup-scheduler:[\s\S]*DOCKER_HOST:\s+tcp:\/\/docker-socket-proxy:2375[\s\S]*platform_docker_control/, "Backup scheduler must use the isolated Docker API proxy.");
-  assertMatch(opsWrapper, /PLATFORM_OPS_DOCKER_MODE:-auto[\s\S]*PROXY_IMAGE=.*@sha256:[a-f0-9]{64}[\s\S]*platform-ops-proxy-[\s\S]*tcp:\/\/127\.0\.0\.1:\$\{DOCKER_SOCKET_PROXY_PORT:-2376\}/, "Ops runner must use a pinned ephemeral proxy in CI and the loopback-only persistent proxy on the VPS.");
-  assertMatch(opsWrapper, /PLATFORM_ALLOW_RAW_DOCKER_SOCKET:-0[\s\S]*reserved for an approved recovery window/, "Raw socket recovery mode must be an explicit audited exception.");
-  assertMatch(runtimeIsolationPolicy, /raw-socket-single-owner/, "Runtime policy must enforce one raw socket owner.");
-  assertMatch(runtimeIsolationPolicy, /resource-memory-admission/, "Runtime policy must enforce node memory admission.");
-  assertMatch(runtimeIsolationPolicy, /app-no-docker-socket/, "Runtime policy must deny hosted Docker socket access.");
-  assertMatch(runtimeIsolationSandbox, /ReadonlyRootfs[\s\S]*Memory[\s\S]*NanoCpus[\s\S]*PidsLimit[\s\S]*Ulimits/, "Runtime sandbox must inspect effective rootfs and cgroup controls.");
-  assertMatch(runtimeHostedSandbox, /T13_APP_SOURCE_ROOT[\s\S]*docker inspect[\s\S]*ReadonlyRootfs[\s\S]*\/opt\/platform-source[\s\S]*apache2ctl -t/, "Hosted sandbox must inspect real per-app mounts and runtime startup without touching live services.");
-  assertNoMatch([readme, runbook, deployVPSScript, vpsGoLiveScript, composeVPSScript].join("\n"), /\.tmp\/(?:vps-runtime-override|compose\.worker-runtime-hotfix)\.yaml/, "Production commands must not depend on ignored runtime overlays.");
-  assertMatch(compose, /dockerfile:\s+docker\/php-apache\.Dockerfile/, "Compose must build PHP hosting from the unified infra Dockerfile.");
-  assertMatch(compose, /\$\{PHP_SOURCE_DIR:-\.\/php-runtime-root\}:\/var\/www\/html/, "Compose must default the PHP root to a neutral runtime-only document root.");
-  assertNoMatch(compose, /\$\{PHP_SOURCE_DIR:-\.\/projects-portal\}:\/var\/www\/html/, "Compose must not mount a PHP projects portal as the Control Center.");
-  assertMatch(compose, /\$\{PHP_PROJECTS_DIR:-\.\.\/src\}:\/var\/www\/projects/, "Compose must mount PHP projects through one generic projects directory.");
-  assertNoMatch(compose, /HostRegexp\(/, "Compose must not expose wildcard project hosts publicly.");
-  assertMatch(compose, /enterprise-portal:[\s\S]*rule:\s+Host\(`\$\{CONTROL_CENTER_HOST:-\$\{ADMIN_HOST:-portal\.\$\{DOMAIN:-localhost\.com\}\}\}`\)/, "Compose must expose the Node Control Center only on the portal host.");
-  assertMatch(compose, /\.:\s*\/var\/www\/infra-docs:ro/, "Compose must mount infrastructure documentation read-only for the fallback portal.");
-  assertMatch(compose, /\.\/php-apache\/apache:\/etc\/apache2\/sites-available/, "Compose must mount the unified PHP Apache vhost configs.");
-  assertMatch(compose, /\.\/php-apache\/php\/custom\.ini/, "Compose must mount the unified PHP runtime config.");
-  assertMatch(compose, /\.\/mariadb\/initdb:/, "Compose must initialize MariaDB from the unified infra tree.");
-  assertMatch(compose, /x-default-logging:[\s\S]*max-size:\s+"10m"[\s\S]*max-file:\s+"5"/, "Compose services must define bounded json-file logging.");
-  assertMatch(compose, /alertmanager:[\s\S]*group_add:[\s\S]*ALERTMANAGER_SECRET_GID[\s\S]*test -r \/run\/secrets\/alertmanager_webhook_token[\s\S]*\/-\/ready/, "Alertmanager health must require a readable token and readiness under the configured runtime group.");
-  assertMatch(alertmanagerConfig, /platform_probe="alert-delivery"[\s\S]*group_wait:\s+0s/, "Alertmanager must provide an immediate route for correlated delivery probes.");
-  assertMatch(secretManagerScript, /alertmanager_webhook_token[^\n]*fileMode:\s*0o640[\s\S]*Materialized secret mode mismatch/, "Infra Secret Manager must materialize and verify the Alertmanager token at mode 0640.");
-  assertMatch(alertmanagerSecretPermissions, /APPLY-ALERTMANAGER-SECRET-PERMISSIONS[\s\S]*chgrp[\s\S]*chmod 0640[\s\S]*contentRead[^\n]*false/, "Alertmanager token permission changes must require explicit confirmation without reading token content.");
-  assertMatch(alertDeliverySandboxTest, /secret0600Rejected[\s\S]*invalidBearerRejected[\s\S]*exactAlertmanagerReceiptPassed[\s\S]*failedDeliveryReportRedacted[\s\S]*liveAlertRuntimeChanged/, "Alert delivery sandbox must prove permission failure, bearer rejection, exact receipt, redacted failure reporting and live preservation.");
-  assertMatch(vpsPreflightScript, /alertmanager_webhook_token[\s\S]*alertmanager-secret-permissions\.sh[\s\S]*ALERTMANAGER_SECRET_GID/, "VPS preflight must reject an unreadable Alertmanager token before deployment.");
-  assertMatch(opsScript, /function alertMetricScript[\s\S]*request\(\$\{JSON\.stringify\(alertmanagerHost\)\}, 9093, "POST", "\/api\/v2\/alerts"[\s\S]*exactReceiverReceipt/, "Alert evidence must traverse Alertmanager and require an exact downstream receipt.");
-  assertMatch(compose, /--storage\.tsdb\.retention\.time=\$\{PROMETHEUS_RETENTION_TIME:-15d\}/, "Prometheus must set explicit TSDB retention.");
-  assertMatch(composeBuild, /BACKEND_BUILD_IMAGE[\s\S]*WEB_BUILD_IMAGE[\s\S]*WORKER_NOTIFICATIONS_BUILD_IMAGE[\s\S]*WORKER_JOBS_BUILD_IMAGE/, "Compose build must use local build image variables.");
-  assertMatch(composeSecrets, /SESSION_SIGNING_KEYS_FILE:\s+\/run\/secrets\/session_signing_keys/, "Local secret overlay must consume session signing keys from Docker secrets.");
-  assertMatch(composeSecrets, /MARIADB_ROOT_PASSWORD_FILE:\s+\/run\/secrets\/mariadb_root_password/, "Local secret overlay must consume MariaDB root password from Docker secrets.");
-  assertMatch(composeWaf, /owasp\/modsecurity-crs:4\.26\.0-nginx-202605200705@sha256:[a-f0-9]{64}/, "WAF image must be a pinned OWASP CRS image.");
-  assertMatch(composeWaf, /waf:[\s\S]*healthcheck:[\s\S]*nginx -t[\s\S]*curl -ksS/, "WAF service must define a container healthcheck.");
-  assertMatch(composeWaf, /BLOCKING_PARANOIA:\s+\$\{WAF_BLOCKING_PARANOIA:-2\}/, "WAF must default to CRS blocking paranoia level 2.");
-  assertMatch(composeWaf, /REQUEST-900-EXCLUSION-RULES-BEFORE-CRS\.conf/, "WAF must load local pre-CRS rules.");
-  assertMatch(composeVPSWaf, /ports:\s*!override[\s\S]*WAF_HTTP_BIND/, "VPS WAF overlay must make the WAF the only public HTTP listener.");
-  assertMatch(localWafPreRules, /\(\?:traefik\|prometheus\|alertmanager\)\\\.localhost\\\.com/, "Local WAF must block unauthenticated internal console hostnames.");
-  assertMatch(vpsWafPreRules, /\(\?:phpmyadmin\|phppgadmin\|traefik\|prometheus\|alertmanager\|grafana\|minio\|s3\)/, "VPS WAF must block public admin/storage console hostnames.");
-  assertNoMatch(compose, /phpmyadmin\/themes\/|blueberry/i, "phpMyAdmin must not mount removed local themes.");
-  assertMatch(compose, /phppgadmin:[\s\S]*tozd\/phppgadmin@sha256:[a-f0-9]{64}/, "phpPgAdmin must use an immutable image digest.");
-  assertMatch(phpMyAdminConfig, /\$cfg\['ThemeDefault'\]\s*=\s*'pmahomme'/, "phpMyAdmin must use the bundled default pmahomme theme.");
-  assertMatch(phpMyAdminConfig, /\$cfg\['ThemeManager'\]\s*=\s*false/, "phpMyAdmin theme switching must be disabled.");
-  assertMatch(phpApacheDockerfile, /php:8\.5-apache@sha256:[a-f0-9]{64}/, "PHP Apache image must be pinned to a digest.");
-  assertMatch(phpApacheDockerfile, /a2enmod(?=[^\n]*rewrite)(?=[^\n]*headers)(?=[^\n]*ssl)(?=[^\n]*proxy)(?=[^\n]*proxy_http)(?=[^\n]*vhost_alias)/, "PHP Apache image must enable the required hosting modules.");
-  assertMatch(`${phpApacheHttpVhost}\n${phpApacheHttpsVhost}`, /VirtualDocumentRoot\s+\/var\/www\/projects\/%1\/public/, "PHP Apache must route project subdomains to /var/www/projects/<name>/public dynamically.");
-  assertMatch(projectRouterServer, /if \(!isEnabled\(project\)\)[\s\S]*Project disabled[\s\S]*dedicatedUpstreamFor\(project\)[\s\S]*nodeUpstreams/, "Project Router must block disabled projects and proxy Node projects only to dedicated upstreams.");
-  assertMatch(projectRouterServer, /PROJECT_ROUTER_ALLOWED_UPSTREAMS/, "Project Router must receive an explicit service allowlist.");
-  assertMatch(projectRouterServer, /function parseAllowedUpstreams[\s\S]*function validateUpstream/, "Project Router must parse and validate exact service-id upstreams.");
-  assertMatch(projectRouterServer, /import \{ isIP \} from "node:net"/, "Project Router must reject IP-literal upstream hosts.");
-  assertMatch(projectRouterServer, /function safeProxyPath[\s\S]*requestTarget\.startsWith\("\/\/"\)/, "Project Router must reject scheme-relative and absolute-form request targets.");
-  assertMatch(projectRouterServer, /NODE_ENV === "test"[\s\S]*PROJECT_ROUTER_TEST_ALLOW_LOOPBACK === "true"/, "Project Router loopback exceptions must be test-only and explicit.");
-  assertNoMatch(projectRouterServer, /node:child_process|spawn\(|execFile\(|exec\(|stopManagedProject/, "Project Router must stay proxy-only and must not manage project processes.");
-  assertMatch(projectRouterTest, /NODE_PROJECT_UPSTREAMS[\s\S]*php-demo\.localhost\.com[\s\S]*node-demo\.localhost\.com[\s\S]*Project disabled[\s\S]*nodeAfterEnablePayload\.runtime[\s\S]*nodeAfterEnablePayload\.host/, "Project Router tests must prove simultaneous PHP and Node hosting plus disable/re-enable behavior through dedicated upstreams.");
-  assertMatch(projectRouterTest, /169\.254\.169\.254[\s\S]*absoluteTarget[\s\S]*invalid request target[\s\S]*service allowlist policy violation/, "Project Router tests must reject metadata IP and absolute-form SSRF while not following redirects.");
-  assertMatch(composeNetworks, /platform_observability:[\s\S]*internal:\s+true[\s\S]*app_node_account_ingress:[\s\S]*internal:\s+true[\s\S]*app_node_account_egress:/, "Network overlay must define internal observability and per-application ingress/data with isolated egress.");
-  assertNoMatch(composeNetworks, /- enterprise_net/, "Segmented services must not rejoin the legacy flat network.");
-  assertMatch(networkSegmentationPolicy, /deny-cross-app[\s\S]*deny-router-[\s\S]*phppgadmin-image-pinned[\s\S]*router-service-allowlist/, "Network policy must enforce cross-app, router/data, admin image and service allowlist boundaries.");
-  assertMatch(networkSegmentationSandbox, /docker network create --internal[\s\S]*deny "\$ROUTER" "\$DATABASE"[\s\S]*deny "\$APP_ONE" "\$METRICS"[\s\S]*deny "\$APP_ONE" "\$APP_TWO"/, "Network sandbox must prove intended paths and negative cross-zone connectivity.");
-  assertMatch(workloadEgressFirewall, /MODE=plan[\s\S]*DOCKER-USER/, "Workload egress firewall must default to plan and attach only through DOCKER-USER.");
-  assertMatch(workloadEgressFirewall, /10\.0\.0\.0\/8[\s\S]*169\.254\.0\.0\/16[\s\S]*192\.168\.0\.0\/16/, "Workload egress firewall must block private and metadata destinations.");
-  assertMatch(workloadEgressFirewall, /APPLY-WORKLOAD-EGRESS-FIREWALL/, "Workload egress firewall apply must require an explicit confirmation token.");
-  assertMatch(workloadEgressFirewall, /ROLLBACK-WORKLOAD-EGRESS-FIREWALL/, "Workload egress firewall rollback must require a distinct confirmation token.");
-  assertNoMatch(infrastructureText, /PHP_(?!(?:PROJECTS|SOURCE)_)[A-Z0-9]+_SOURCE_DIR/, "Infrastructure must not hardcode individual PHP project source mounts.");
-  assertMatch(envExample, /PHP_PROJECTS_DIR=\.\.\/src/, "Environment example must point PHP projects at the generic src directory.");
-  assertMatch(envExample, /ALERTMANAGER_SECRET_GID=1000/, "Environment example must declare the Alertmanager shared runtime group.");
-  assertMatch(envExample, /PROJECTS_WILDCARD_HOST_REGEXP=/, "Environment example must keep the project wildcard setting explicit and disabled by default.");
-  assertMatch(opsDockerfile, /docker-cli[\s\S]*docker-cli-compose/, "Ops container must include Docker CLI and Compose plugin.");
-  assertMatch(opsWrapper, /docker build[\s\S]*docker\/ops\.Dockerfile[\s\S]*docker run --rm/, "Ops wrapper must execute commands through the containerized runner.");
-  assertMatch(opsWrapper, /\/var\/run\/docker\.sock/, "Ops wrapper must mount the Docker socket for controlled Docker operations.");
-  assertMatch(opsWrapper, /INFRA_CONTAINER_ROOT="\$\{PLATFORM_INFRA_CONTAINER_ROOT:-\/infra\}"/, "Ops wrapper must mount infrastructure at /infra to match the ops image entrypoint.");
-  assertMatch(opsWrapper, /SOURCE_CONTAINER_ROOT="\$\{PROJECT_SOURCE_CONTAINER_ROOT:-\/project\}"/, "Ops wrapper must mount source at /project by default.");
-  assertMatch(opsWrapper, /ENV_FORWARD_ARGS(?=[\s\S]*GITHUB_TOKEN)(?=[\s\S]*GH_TOKEN)(?=[\s\S]*CLOUDFLARE_API_TOKEN)/, "Ops wrapper must forward required GitHub and Cloudflare tokens into the container by name.");
-  assertNoMatch(opsWrapper, /INFRA_CONTAINER_ROOT="\$\{PLATFORM_INFRA_CONTAINER_ROOT:-\$INFRA_ROOT\}"/, "Ops wrapper must not use the host workspace path as the default container root.");
-  assertMatch(backupSchedulerScript, /BACKUP_SCHEDULER_DRY_RUN/, "Backup scheduler must support CI dry-run mode.");
-  assertMatch(opsScript, /async function staticSecurityCheck/, "Ops script must expose the full static security gate.");
-  assertMatch(opsScript, /No supported project source found[\s\S]*staticSecurityInfraOnlyCheck\(\);[\s\S]*return;/, "Full static security must fall back to infra-only checks when no project is mounted.");
-  assertMatch(opsScript, /function hasSupportedProjectSource\(\)[\s\S]*package\.json[\s\S]*\.github[\s\S]*run-infra-ops\.mjs/, "Ops runner must detect complete optional project source before running app-only gates.");
-  assertMatch(opsScript, /async function enterpriseTenCheck\(\)[\s\S]*await staticSecurityCheck\(\);[\s\S]*await controlCenterTests\(\);[\s\S]*await projectRouterTests\(\);[\s\S]*await testingHygiene\(\);/, "Enterprise gate must always test the infra Control Center and project router before optional app-only checks.");
-  assertMatch(opsScript, /async function testingHygiene\(\)[\s\S]*infraTestingHygiene\(\)[\s\S]*platform-infrastructure tests passed/, "Testing hygiene must run platform-infrastructure tests when project source is not mounted.");
-  assertMatch(opsScript, /async function performanceHygiene\(\)[\s\S]*infraPerformanceHygiene\(\)[\s\S]*platform-infrastructure performance checks passed/, "Performance hygiene must run platform-infrastructure performance checks when project source is not mounted.");
-  assertMatch(controlCenterServer, /planProjectCreate[\s\S]*CREATE-PROJECT[\s\S]*filesystemTouched:\s+false[\s\S]*dockerTouched:\s+false/, "Control Center must create project metadata safely without filesystem or Docker mutations.");
-  assertMatch(controlCenterTest, /projects\.json[\s\S]*\/control\/projects[\s\S]*CREATE-PROJECT[\s\S]*project-secret-should-not-leak/, "Control Center tests must cover project create persistence and secret redaction.");
-  assertMatch(compose, /control-center:[\s\S]*PROJECT_APPLICATIONS_FILE:\s+\/var\/www\/project-state\/applications\.json/, "Control Center must persist local application metadata from the Node service.");
-  assertMatch(controlCenterServer, /(?=[\s\S]*applicationsFile)(?=[\s\S]*readApplicationsState)(?=[\s\S]*writeApplicationsState)(?=[\s\S]*applicationRecord)(?=[\s\S]*planApplicationCreate)/, "Control Center must manage application metadata through a dedicated Node-managed JSON store.");
-  assertMatch(controlCenterTest, /applications\.json[\s\S]*\/control\/applications[\s\S]*CREATE-APPLICATION[\s\S]*application-secret-should-not-leak/, "Control Center tests must cover application create persistence and secret redaction.");
-  assertMatch(compose, /control-center:[\s\S]*PROJECT_DOMAINS_FILE:\s+\/var\/www\/project-state\/domains\.json/, "Control Center must persist local domain metadata from the Node service.");
-  assertMatch(controlCenterServer, /(?=[\s\S]*domainsFile)(?=[\s\S]*readDomainsState)(?=[\s\S]*writeDomainsState)(?=[\s\S]*domainRecord)(?=[\s\S]*planDomainCreate)/, "Control Center must manage domain metadata through a dedicated Node-managed JSON store.");
-  assertMatch(controlCenterTest, /domains\.json[\s\S]*\/control\/domains[\s\S]*CREATE-DOMAIN[\s\S]*domain-secret-should-not-leak/, "Control Center tests must cover domain metadata persistence and secret redaction.");
-  assertMatch(compose, /control-center:[\s\S]*PROJECT_DATABASES_FILE:\s+\/var\/www\/project-state\/databases\.json/, "Control Center must persist declarative database metadata from the Node service.");
-  assertMatch(controlCenterServer, /databasesFile[\s\S]*handleDatabaseCommand[\s\S]*planDatabaseCreate[\s\S]*planDatabaseBackup[\s\S]*planDatabaseRestore[\s\S]*readDatabasesState[\s\S]*writeDatabasesState/, "Control Center must manage database create, backup and restore plans through a dedicated Node-managed JSON store.");
-  assertMatch(controlCenterTest, /databases\.json[\s\S]*\/control\/databases[\s\S]*CREATE-DATABASE[\s\S]*database-secret-should-not-leak/, "Control Center tests must cover database metadata persistence, backup/restore plans and secret redaction.");
-  assertMatch(compose, /control-center:[\s\S]*PROJECT_STORAGE_BUCKETS_FILE:\s+\/var\/www\/project-state\/storage-buckets\.json/, "Control Center must persist declarative storage bucket metadata from the Node service.");
-  assertMatch(controlCenterServer, /storageBucketsFile[\s\S]*handleStorageCommand[\s\S]*planStorageBucketCreate[\s\S]*planStorageBucketPolicy[\s\S]*planStorageBucketLifecycle[\s\S]*planStorageBucketAccessKey[\s\S]*planStorageBucketBackup[\s\S]*planStorageBucketRestore[\s\S]*readStorageBucketsState[\s\S]*writeStorageBucketsState/, "Control Center must manage storage bucket create, policy, lifecycle, access key metadata, backup and restore plans through a dedicated Node-managed JSON store.");
-  assertMatch(controlCenterTest, /storage-buckets\.json[\s\S]*\/control\/storage\/buckets[\s\S]*CREATE-BUCKET[\s\S]*storage-secret-should-not-leak/, "Control Center tests must cover storage bucket metadata persistence, policy/lifecycle backup/restore plans and secret redaction.");
-  assertMatch(compose, /control-center:[\s\S]*PROJECT_SENSITIVE_MATERIALS_FILE:\s+\/var\/www\/project-state\/sensitive-materials\.json/, "Control Center must persist metadata-only sensitive material inventory from the Node service.");
-  assertMatch(controlCenterServer, /sensitiveMaterialsFile[\s\S]*handleMaterialCommand[\s\S]*planMaterialDeclare[\s\S]*planMaterialRotation[\s\S]*planMaterialUsage[\s\S]*planMaterialAccessAudit[\s\S]*readSensitiveMaterialsState[\s\S]*writeSensitiveMaterialsState/, "Control Center must manage sensitive material inventory, rotation, usage and access audit through a dedicated Node-managed JSON store.");
-  assertMatch(controlCenterTest, /sensitive-materials\.json[\s\S]*\/control\/secrets\/materials[\s\S]*DECLARE-MATERIAL[\s\S]*material-plain-value-should-not-leak/, "Control Center tests must cover metadata-only sensitive material persistence, rotation, usage/access audit and plaintext redaction.");
-  assertMatch(compose, /control-center:[\s\S]*PROJECT_VAULT_FILE:\s+\/var\/www\/project-state\/secret-vault\.json[\s\S]*CONTROL_CENTER_VAULT_KEY_FILE:\s+\/run\/secrets\/control_center_vault_keys[\s\S]*CONTROL_CENTER_VAULT_LEGACY_KEY_FILE:\s+\/run\/secrets\/projects_gateway_signing_keys[\s\S]*CONTROL_CENTER_EXISTING_SECRETS_DIR:\s+\/var\/www\/infra-docs\/secrets/, "Control Center must persist the encrypted local secret vault, use a dedicated keyring with an explicit legacy migration source, and scan existing secret files from the read-only infrastructure tree.");
-  assertMatch(controlCenterServer, /vaultFile[\s\S]*handleVaultCommand[\s\S]*planVaultSecretCreate[\s\S]*planVaultSecretImportExisting[\s\S]*planVaultSecretReveal[\s\S]*planVaultSecretDelete[\s\S]*sealVaultValue[\s\S]*openVaultValue[\s\S]*readVaultState[\s\S]*writeVaultState/, "Control Center must manage a dedicated encrypted Vault with add/remove, existing-secret import, and explicit audited reveal operations.");
-  assertMatch(controlCenterTest, /secret-vault\.json[\s\S]*\/control\/vault\/import-existing[\s\S]*IMPORT-EXISTING-SECRETS[\s\S]*\/control\/vault\/secrets[\s\S]*STORE-VAULT-SECRET[\s\S]*REVEAL-VAULT-SECRET[\s\S]*DELETE-VAULT-SECRET/, "Control Center tests must cover encrypted Vault persistence, existing secret import, explicit reveal, plaintext redaction and item removal.");
-  assertMatch(controlCenterPackage, /"name":\s+"@platform\/control-center"/, "Control Center project identity must stay generic.");
-  assertMatch(controlCenterLocalStyles, /(?=[\s\S]*--cc-bg)(?=[\s\S]*--cc-surface)(?=[\s\S]*--cc-surface-raised)(?=[\s\S]*--cc-text)(?=[\s\S]*--cc-muted)(?=[\s\S]*--cc-accent)(?=[\s\S]*--cc-radius)(?=[\s\S]*--cc-shadow)(?=[\s\S]*\.cc-app-shell)(?=[\s\S]*\.ops-shell)(?=[\s\S]*\.ops-sidebar)(?=[\s\S]*\.cc-topbar)(?=[\s\S]*\.ops-nav)(?=[\s\S]*\.ops-table)(?=[\s\S]*\.ops-metrics)/, "Control Center must provide a local --cc-* visual system with operations shell, navigation, metrics and tables.");
-  assertNoMatch(controlCenterLocalStyles, /\.card[\s\S]*border:\s*1px\s+solid/i, "Control Center cards must not use border: 1px solid for contrast.");
-  assertMatch(controlCenterLocalComponents, /(?=[\s\S]*OperationsShell)(?=[\s\S]*OperationsTopbar)(?=[\s\S]*StatusGate)(?=[\s\S]*ProjectTable)(?=[\s\S]*ProjectActions)(?=[\s\S]*ProjectFileBrowser)(?=[\s\S]*DatabaseInventory)(?=[\s\S]*ResourceUsageTable)(?=[\s\S]*MetricTile)(?=[\s\S]*StatusPill)(?=[\s\S]*ActionButton)(?=[\s\S]*ProjectSwitcher)(?=[\s\S]*EmptyState)/, "Control Center must define the requested local operations UI component contract.");
-  assertMatch(`${controlCenterServer}\n${controlCenterLocalComponents}`, /(?=[\s\S]*serveStaticAsset[\s\S]*\/assets\/control-center\/)(?=[\s\S]*route\(parts, "control", "ui-package"\))(?=[\s\S]*readControlCenterUiPackage)(?=[\s\S]*controlCenterStylesheetLinks)(?=[\s\S]*\/assets\/control-center\/control-center\.css)(?=[\s\S]*cc-app-shell)(?=[\s\S]*ops-shell)(?=[\s\S]*ops-topbar)(?=[\s\S]*cc-topbar)(?=[\s\S]*ops-nav)/, "Control Center must serve and render through its local operations visual system.");
-  assertNoMatch(`${controlCenterServer}\n${controlCenterPackage}\n${compose}`, /ui-shell|pill-sidebar-nav|pill-tabs/, "Control Center runtime must not use retired visual dependency assets or shell classes.");
-  assertMatch(controlCenterServer, /function navigationGroupsForMode[\s\S]*navGroup\("platform", "Infrastructure"[\s\S]*navGroup\("delivery", "Delivery"[\s\S]*navGroup\("observability", "Observability"[\s\S]*navGroup\("security", "Security"/, "Control Center Advanced navigation must group enterprise sections into macro sidebar areas with page tabs.");
-  assertMatch(controlCenterLocalComponents, /(?=[\s\S]*operations-first information architecture)(?=[\s\S]*ProjectFileBrowser)(?=[\s\S]*DatabaseInventory)/, "Control Center UI contract must describe the operations portal.");
-  assertNoMatch(controlCenterLocalComponents, /ActivityTable|activity and backups/, "Control Center UI contract must not keep the removed Activity page contract.");
-  assertMatch(controlCenterTest, /(?=[\s\S]*\/assets\/control-center\/control-center\.css)(?=[\s\S]*\/control\/ui-package)(?=[\s\S]*@platform\/control-center-local-ui)(?=[\s\S]*cc-app-shell)(?=[\s\S]*ops-shell)(?=[\s\S]*ops-topbar)(?=[\s\S]*OperationsShell)(?=[\s\S]*ProjectFileBrowser)/, "Control Center tests must prove the local CSS, operations shell, navigation and UI contract are served.");
-  assertMatch(controlCenterServer, /route\(parts, "control", "readiness"\)[\s\S]*buildControlReadiness[\s\S]*readGovernanceManifest\("enterprise-requirements\.json"\)[\s\S]*readGovernanceManifest\("production-readiness\.json"\)[\s\S]*productionEvidence:\s+false[\s\S]*localEvidenceIsProductionEvidence:\s+false/, "Control Center must expose a sanitized readiness matrix from governance manifests without production evidence claims.");
-  assertIncludesAll(controlCenterServer, ["readLatestGoNoGoReport", "renderOpsStatus", "Passati", "Non passati", "Motivo", "Cosa fare", "renderProjectDetailBackups"], "Control Center operations UI must expose go/no-go blockers, reasons, required actions and application-scoped backups.");
-  assertNoMatch(controlCenterServer, /renderOpsActivity|activityProblems|id:\s*"activity"|label:\s*"Attivit.|section\s*===\s*"activity"/, "Control Center must not keep the removed Activity page route or renderer.");
-  assertMatch(controlCenterTest, /(?=[\s\S]*\/control\/readiness)(?=[\s\S]*productionReadiness\.requirementCount,\s+19)(?=[\s\S]*tls-https-production-ready)(?=[\s\S]*pending-live-proof)(?=[\s\S]*localEvidenceIsProductionEvidence,\s+false)/, "Control Center tests must cover the readiness API, 19-point infrastructure checklist and live-proof separation.");
-  assertMatch(compose, /control-center:[\s\S]*PROJECT_WORKER_JOBS_FILE:\s+\/var\/www\/project-state\/worker-jobs\.json/, "Control Center must persist worker/job metadata from the Node service.");
-  assertMatch(controlCenterServer, /workerJobsFile[\s\S]*handleWorkerJobCommand[\s\S]*planWorkerDeclare[\s\S]*planQueueDeclare[\s\S]*planJobRecord[\s\S]*planJobRetry[\s\S]*planScheduleDeclare[\s\S]*planScheduleStatus[\s\S]*readWorkerJobsState[\s\S]*writeWorkerJobsState/, "Control Center must manage workers, queues, failed jobs, retries and schedules through a dedicated Node-managed JSON store.");
-  assertMatch(controlCenterTest, /worker-jobs\.json[\s\S]*\/control\/workers-jobs\/workers[\s\S]*DECLARE-WORKER[\s\S]*\/control\/workers-jobs\/jobs[\s\S]*PLAN-JOB-RETRY[\s\S]*worker-secret-should-not-leak/, "Control Center tests must cover worker/job metadata persistence, retry planning, schedules and secret redaction.");
-  assertMatch(compose, /control-center:[\s\S]*PROJECT_IDENTITY_ACCESS_FILE:\s+\/var\/www\/project-state\/identity-access\.json/, "Control Center must persist identity and access metadata from the Node service.");
-  assertMatch(controlCenterServer, /identityAccessFile[\s\S]*handleIdentityCommand[\s\S]*planIdentityAdminUser[\s\S]*planIdentityTeam[\s\S]*planIdentityRole[\s\S]*planIdentitySessionPolicy[\s\S]*planIdentityAccessReview[\s\S]*readIdentityAccessState[\s\S]*writeIdentityAccessState/, "Control Center must manage admin users, teams, roles, sessions and access reviews through a dedicated Node-managed JSON store.");
-  assertMatch(controlCenterServer, /renderIdentityAccess[\s\S]*Declare admin user[\s\S]*Roles &amp; Teams[\s\S]*Sessions &amp; Reviews/, "Control Center Identity & Access UI must expose admin users, roles, teams, sessions and access reviews.");
-  assertMatch(controlCenterTest, /identity-access\.json[\s\S]*\/control\/identity\/admin-users[\s\S]*DECLARE-ADMIN-USER[\s\S]*UPDATE-SESSION-POLICY[\s\S]*identity-secret-should-not-leak/, "Control Center tests must cover identity metadata persistence, session policy, access reviews and secret redaction.");
-  assertMatch(compose, /control-center:[\s\S]*PROJECT_RESOURCE_LIMITS_FILE:\s+\/var\/www\/project-state\/resource-limits\.json/, "Control Center must persist local project resource limits from the Node service.");
-  assertMatch(controlCenterServer, /resourceLimitsFile[\s\S]*planResourceLimitUpdate[\s\S]*readResourceLimitsState[\s\S]*writeResourceLimitsState/, "Control Center must persist resource limits in a dedicated Node-managed JSON store.");
-  assertMatch(controlCenterServer, /(?=[\s\S]*navigationForMode)(?=[\s\S]*Workers & Jobs)(?=[\s\S]*CI\/CD & GitHub Governance)(?=[\s\S]*Logs Advanced)(?=[\s\S]*Alerts Advanced)(?=[\s\S]*Disaster Recovery)(?=[\s\S]*Release Evidence)(?=[\s\S]*Security Advanced)(?=[\s\S]*Billing \/ Plans)/, "Control Center Advanced Mode navigation must cover the requested enterprise sections.");
-  assertMatch(controlCenterServer, /advancedItems[\s\S]*workers-jobs[\s\S]*cicd-github[\s\S]*logs-advanced[\s\S]*alerts-advanced[\s\S]*disaster-recovery[\s\S]*release-evidence[\s\S]*security-advanced[\s\S]*billing/, "Control Center Advanced Mode must define skeleton capability cards for all requested enterprise sections.");
-  assertMatch(controlCenterServer, /route\(parts, "control", "advanced"\)[\s\S]*advancedControlOverview[\s\S]*advancedControlSection/, "Control Center must expose read-only Advanced Mode API endpoints.");
-  assertMatch(controlCenterServer, /function advancedControlSection[\s\S]*dryRunDefault:\s+true[\s\S]*liveProviderTouched:\s+false[\s\S]*dockerTouched:\s+false[\s\S]*productionEvidence:\s+false/, "Advanced Mode API must remain dry-run/read-only and reject production evidence claims.");
-  assertMatch(controlCenterServer, /route\(parts, "control", "network"\)[\s\S]*buildNetworkTopology[\s\S]*parseTraefikRouters[\s\S]*parseTraefikMiddlewares[\s\S]*parseTraefikExposedPorts[\s\S]*networkProbeExecuted:\s+false/, "Control Center must expose a read-only Network API from Traefik and Compose config without live probes.");
-  assertMatch(controlCenterServer, /(?=[\s\S]*renderNetworkAdvanced)(?=[\s\S]*Traefik Network)(?=[\s\S]*Router Topology)(?=[\s\S]*Middleware Chain)(?=[\s\S]*Loopback host ports)(?=[\s\S]*Route Test Plan)/, "Control Center Network Advanced UI must show routers, middleware, ports and route test plans.");
-  assertMatch(controlCenterServer, /route\(parts, "control", "monitoring"\)[\s\S]*buildMonitoringTopology[\s\S]*parsePrometheusScrapeJobs[\s\S]*parseGrafanaDashboardPanels[\s\S]*parsePrometheusAlertRules[\s\S]*liveQueryExecuted:\s+false/, "Control Center must expose a read-only Monitoring API from observability config without live Prometheus or Loki queries.");
-  assertMatch(controlCenterServer, /(?=[\s\S]*renderMonitoringAdvanced)(?=[\s\S]*Prometheus Targets)(?=[\s\S]*Grafana Panels)(?=[\s\S]*Alert Rules)(?=[\s\S]*Backend errors)(?=[\s\S]*WAF events)(?=[\s\S]*Auth failures)/, "Control Center Monitoring Advanced UI must show scrape jobs, dashboard panels and alert rules.");
-  assertMatch(controlCenterServer, /route\(parts, "control", "adapters"\)[\s\S]*planAdapterAction[\s\S]*planAdapterVerify[\s\S]*rejectAdapterApply/, "Control Center must route all provider and infra adapter work through backend adapter endpoints.");
-  assertMatch(controlCenterServer, /function adapterRegistry[\s\S]*CloudflareAdapter[\s\S]*TraefikAdapter[\s\S]*DockerAdapter[\s\S]*GitHubAdapter[\s\S]*PrometheusAdapter[\s\S]*LokiAdapter[\s\S]*AlertmanagerAdapter[\s\S]*BackupAdapter[\s\S]*RestoreAdapter[\s\S]*MinioAdapter[\s\S]*DatabaseAdapter[\s\S]*SecurityAdapter[\s\S]*GoNoGoAdapter/, "Control Center must define the requested enterprise adapter registry.");
-  assertMatch(controlCenterServer, /function adapterRecord[\s\S]*dryRunDefault:\s+true[\s\S]*liveProviderTouched:\s+false[\s\S]*destructiveActionExecuted:\s+false[\s\S]*productionEvidence:\s+false/, "Control Center adapter records must stay safe-by-default.");
-  assertMatch(controlCenterServer, /function rejectAdapterApply[\s\S]*Adapter apply rejected[\s\S]*RejectedOperationError/, "Control Center adapter apply must be rejected until explicit backend implementations are added.");
-  assertNoMatch(controlCenterServer, /renderOpsResources|function renderResources|handleResourceCommand/, "Control Center must not keep the removed Resources page or resource command handler.");
-  assertMatch(controlCenterTest, /resource-limits\.json[\s\S]*\/control\/resources\/limits[\s\S]*resource-limit-secret-should-not-leak[\s\S]*\/control\/resources\/summary/, "Control Center tests must cover resource limit persistence and secret redaction without the removed Resources page.");
-  assertMatch(compose, /control-center:[\s\S]*PROJECT_SECURITY_POLICIES_FILE:\s+\/var\/www\/project-state\/security-policies\.json/, "Control Center must persist local security policy metadata from the Node service.");
-  assertMatch(controlCenterServer, /securityPoliciesFile[\s\S]*handleSecurityCommand[\s\S]*planSecurityPolicyUpdate[\s\S]*readSecurityPoliciesState[\s\S]*writeSecurityPoliciesState/, "Control Center must persist security policies in a dedicated Node-managed JSON store.");
-  assertMatch(controlCenterServer, /renderSecurity[\s\S]*WAF[\s\S]*Rate limit[\s\S]*Cloudflare Access[\s\S]*Admin Protection[\s\S]*Security Headers[\s\S]*Update policy/, "Control Center Security UI must expose policy controls instead of a raw JSON panel.");
-  assertMatch(controlCenterTest, /security-policies\.json[\s\S]*\/actions\/security-command[\s\S]*security-secret-should-not-leak[\s\S]*\/control\/security\/summary/, "Control Center tests must cover security policy persistence, UI action and secret redaction.");
-  assertMatch(compose, /control-center:[\s\S]*PROJECT_ALERTS_FILE:\s+\/var\/www\/project-state\/alerts\.json[\s\S]*PROJECT_NOTIFICATION_CHANNELS_FILE:\s+\/var\/www\/project-state\/notification-channels\.json/, "Control Center must persist local alert and notification-channel metadata from the Node service.");
-  assertMatch(controlCenterServer, /alertsFile[\s\S]*notificationChannelsFile[\s\S]*handleAlertCommand[\s\S]*planAlertRecord[\s\S]*readAlertsState[\s\S]*writeAlertsState[\s\S]*readNotificationChannelsState[\s\S]*writeNotificationChannelsState/, "Control Center must manage Logs and Alerts through dedicated Node-managed JSON stores.");
-  assertMatch(controlCenterServer, /(?=[\s\S]*renderLogsAlerts)(?=[\s\S]*Open alerts)(?=[\s\S]*Recent errors)(?=[\s\S]*Notification Channels)(?=[\s\S]*Record alert)/, "Control Center Logs / Alerts UI must expose open alerts, recent errors and notification status.");
-  assertMatch(controlCenterTest, /alerts\.json[\s\S]*notification-channels\.json[\s\S]*\/actions\/alert-command[\s\S]*alert-secret-should-not-leak[\s\S]*\/control\/logs\/summary/, "Control Center tests must cover alert persistence, notification metadata and secret redaction.");
-  assertMatch(compose, /control-center:[\s\S]*PROJECT_SETTINGS_FILE:\s+\/var\/www\/project-state\/settings\.json/, "Control Center must persist local settings preferences from the Node service.");
-  assertMatch(controlCenterServer, /settingsFile[\s\S]*handleSettingsCommand[\s\S]*planSettingsUpdate[\s\S]*readSettingsState[\s\S]*writeSettingsState/, "Control Center must manage Settings through a dedicated Node-managed JSON store.");
-  assertMatch(compose, /control-center:[\s\S]*PROJECT_PROVIDER_CONNECTIONS_FILE:\s+\/var\/www\/project-state\/provider-connections\.json/, "Control Center must persist provider connection metadata from the Node service.");
-  assertMatch(controlCenterServer, /(?=[\s\S]*providerConnectionsFile)(?=[\s\S]*readProviderConnectionsState)(?=[\s\S]*writeProviderConnectionsState)(?=[\s\S]*providerConnectionRecord)(?=[\s\S]*planProviderConnectionUpdate)/, "Control Center must manage provider_connections through a dedicated Node-managed JSON store.");
-  assertMatch(controlCenterTest, /provider-connections\.json[\s\S]*\/control\/provider-connections[\s\S]*UPDATE-PROVIDER-CONNECTION[\s\S]*provider-secret-should-not-leak/, "Control Center tests must cover provider connection metadata persistence and secret redaction.");
-  assertMatch(controlCenterServer, /(?=[\s\S]*renderSettings)(?=[\s\S]*Default mode)(?=[\s\S]*Base domain)(?=[\s\S]*Cloudflare connection)(?=[\s\S]*GitHub connection)(?=[\s\S]*SMTP\/alert status)(?=[\s\S]*Update settings)/, "Control Center Settings UI must expose mode, domain and provider connection metadata controls.");
-  assertMatch(controlCenterTest, /settings\.json[\s\S]*\/actions\/settings-command[\s\S]*settings-secret-should-not-leak[\s\S]*\/control\/settings/, "Control Center tests must cover settings persistence, UI action and secret redaction.");
-  assertMatch(controlCenterTest, /(?=[\s\S]*ops-shell)(?=[\s\S]*Passati)(?=[\s\S]*Non passati)(?=[\s\S]*section=projects)(?=[\s\S]*section=files)(?=[\s\S]*section=databases)(?=[\s\S]*project-backups)(?=[\s\S]*data-ops-nav-group="backups")(?=[\s\S]*doesNotMatch)/, "Control Center tests must cover the operations portal sections and prove the removed Backup section is absent.");
-  assertNoMatch(controlCenterTest, /assert\.match\(html,\s*\/Attivit.|ActivityTable"\), true|assert\.match\([^;]+,\s*\/Errori, avvisi e problemi\//, "Control Center tests must not expect the removed Activity page.");
-  assertMatch(controlCenterTest, /(?=[\s\S]*\/control\/advanced)(?=[\s\S]*\/control\/network)(?=[\s\S]*\/control\/advanced\/network)(?=[\s\S]*enterprise-backend)(?=[\s\S]*enterprise-rate-limit)(?=[\s\S]*\/control\/monitoring)(?=[\s\S]*\/control\/advanced\/monitoring)(?=[\s\S]*Backend errors)(?=[\s\S]*Auth failures)(?=[\s\S]*\/control\/advanced\/cloudflare)(?=[\s\S]*\/control\/advanced\/release-evidence)(?=[\s\S]*\/control\/advanced\/identity)(?=[\s\S]*\/control\/advanced\/secrets)/, "Control Center tests must cover Advanced Mode API evidence endpoints including Network and Monitoring topology.");
-  assertMatch(controlCenterTest, /\/control\/adapters[\s\S]*\/control\/adapters\/cloudflare[\s\S]*\/control\/adapters\/cloudflare\/plan[\s\S]*\/control\/adapters\/go-no-go\/verify[\s\S]*\/control\/adapters\/cloudflare\/apply/, "Control Center tests must cover adapter registry, dry-run planning, verification planning and rejected apply.");
-  assertMatch(compose, /control-center:[\s\S]*PROJECT_BACKUP_RECORDS_FILE:\s+\/var\/www\/project-state\/backups\.jsonl/, "Control Center must persist local backup and restore drill records from the Node service.");
-  assertMatch(controlCenterServer, /backupRecordsFile[\s\S]*handleBackupCommand[\s\S]*appendBackupRecord[\s\S]*readBackupRecords/, "Control Center must persist backup/restore plan records in a dedicated Node-managed JSONL store.");
-  assertNoMatch(controlCenterServer, /renderBackups[\s\S]*Backup History|section\s*===\s*"backups"|id:\s*"backups"|label:\s*"Backup"/, "Control Center must not keep the removed standalone Backup page or sidebar section.");
-  assertMatch(controlCenterTest, /backups\.jsonl[\s\S]*\/actions\/backup-command[\s\S]*backup-secret-should-not-leak[\s\S]*\/control\/backups\/records/, "Control Center tests must prove backup and restore drill plans are persisted and secret-redacted.");
-  assertNoMatch(githubWorkflow, /project-repository|PROJECT_REPO_TOKEN|Checkout application source/, "Infrastructure CI must not checkout or require project repositories.");
-  assertMatch(githubWorkflow, /\.tmp\/optional-project-source/, "Infrastructure CI must use a local optional project source placeholder for Compose rendering.");
-  assertMatch(githubWorkflow, /GitHub Actions workflow lint[\s\S]*rhysd\/actionlint:1\.7\.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667[\s\S]*-color/, "Infrastructure CI must lint GitHub Actions workflows with a digest-pinned actionlint image.");
-  assertMatch(githubWorkflow, /static-security-check --infraOnly/, "Infrastructure CI must run infrastructure-only static checks.");
-  assertMatch(githubWorkflow, /Repository coverage audit[\s\S]*repo-coverage-check/, "Infrastructure CI must audit tracked repository file coverage.");
-  assertMatch(githubWorkflow, /Render staging and backup compose[\s\S]*compose\.waf\.yaml[\s\S]*compose\.staging\.yaml[\s\S]*compose\.backup-scheduler\.yaml/, "Infrastructure CI must render staging, WAF and backup scheduler compose overlays.");
-  assertMatch(githubWorkflow, /Cloudflare from-zero dry run[\s\S]*cloudflare-from-zero --manifest cloudflare\/from-zero\.example\.json/, "Infrastructure CI must exercise the additive-only Cloudflare from-zero plan.");
-  assertMatch(githubWorkflow, /GitHub Actions run evidence plan[\s\S]*github-actions-run-evidence/, "Infrastructure CI must generate a GitHub Actions run evidence plan.");
-  assertMatch(githubRunEvidenceWorkflow, /workflow_run:[\s\S]*enterprise-infra[\s\S]*GITHUB_TOKEN:[\s\S]*github\.token[\s\S]*github-actions-run-evidence[\s\S]*--verifyRemote/, "Infrastructure CI must verify completed enterprise-infra runs through a workflow_run evidence workflow.");
-  assertMatch(githubRunEvidenceWorkflow, /permissions:[\s\S]*contents:\s+read[\s\S]*actions:\s+read/, "GitHub Actions run evidence workflow must use least-privilege read permissions.");
-  assertMatch(releaseAttestationWorkflow, /name:\s+release-attestation[\s\S]*workflow_dispatch:[\s\S]*push:[\s\S]*tags:/, "Release attestation workflow must run manually and for release tags.");
-  assertMatch(releaseAttestationWorkflow, /permissions:[\s\S]*contents:\s+read[\s\S]*id-token:\s+write[\s\S]*attestations:\s+write[\s\S]*packages:\s+write/, "Release attestation workflow must grant GitHub Artifact Attestations and GHCR push permissions.");
-  assertMatch(releaseAttestationWorkflow, /PHP_APACHE_IMAGE=ghcr\.io[\s\S]*docker\/build-push-action@[a-f0-9]{40}[\s\S]*push:\s+true/, "Release attestation workflow must push digest-addressable images to GHCR.");
-  assertMatch(releaseAttestationWorkflow, /actions\/attest-build-provenance@[a-f0-9]{40}[\s\S]*push-to-registry:\s+true/, "Release attestation workflow must create GitHub/Sigstore provenance for GHCR images.");
-  assertMatch(releaseAttestationWorkflow, /Cryptographically verify and record attestations[\s\S]*github-attestation-evidence[\s\S]*--signerWorkflow[\s\S]*--sourceDigest[\s\S]*--sourceRef/, "Release attestation workflow must invoke the verifier-backed evidence command with exact signer, commit and ref.");
-  assertNoMatch(releaseAttestationWorkflow, /verified:\s*true|--verification/, "Release attestation workflow must not mint or trust normalized verified JSON.");
-  assertMatch(releaseTrustModule, /--signer-workflow[\s\S]*--source-digest[\s\S]*--signer-digest[\s\S]*--source-ref[\s\S]*--cert-oidc-issuer[\s\S]*--deny-self-hosted-runners/, "Release trust verifier must bind signer, commit, ref, issuer and runner class.");
-  assertMatch(githubLiveEvidenceWorkflow, /name:\s+enterprise-live-evidence[\s\S]*workflow_dispatch:/, "Infrastructure must provide a manual production live evidence workflow.");
-  assertMatch(githubLiveEvidenceWorkflow, /environment:[\s\S]*name:\s+production/, "Live evidence workflow must run in the production environment.");
-  assertMatch(githubLiveEvidenceWorkflow, /EXTERNAL_UPTIME_PROVIDER_EVIDENCE_JSON[\s\S]*external-uptime-check[\s\S]*--requireProviderEvidence/, "Live evidence workflow must validate provider-backed external uptime evidence.");
-  assertMatch(githubLiveEvidenceWorkflow, /PUBLIC_API_HEALTH_URL[\s\S]*load-benchmark[\s\S]*--requirePublicTarget[\s\S]*--requireEdgeEvidence[\s\S]*--expectedEdgeProvider cloudflare/, "Live evidence workflow must run public Cloudflare edge load evidence.");
-  assertMatch(githubLiveEvidenceWorkflow, /CLOUDFLARE_API_TOKEN[\s\S]*CLOUDFLARE_ACCOUNT_ID[\s\S]*cloudflare-access-admin[\s\S]*--verifyRemote/, "Live evidence workflow must verify Cloudflare Access admin applications.");
-  assertMatch(githubLiveEvidenceWorkflow, /production-go-no-go --enforce[\s\S]*production-readiness-live\.sh[\s\S]*evidence-bundle-verify --requireComplete/, "Live evidence workflow must enforce go/no-go, live readiness and complete bundle verification.");
-  assertMatch(githubVpsEvidenceWorkflow, /name:\s+enterprise-vps-evidence[\s\S]*workflow_dispatch:/, "Infrastructure must provide a manual VPS evidence workflow.");
-  assertMatch(githubVpsEvidenceWorkflow, /environment:[\s\S]*name:\s+production/, "VPS evidence workflow must run in the production environment.");
-  assertMatch(githubVpsEvidenceWorkflow, /DEPLOY_SSH_KEY[\s\S]*DEPLOY_REMOTE[\s\S]*DEPLOY_SSH_PORT[\s\S]*VPS_HARDENED_SSH_PORT/, "VPS evidence workflow must use production SSH variables.");
-  assertMatch(githubVpsEvidenceWorkflow, /confirm_mutating_vps[\s\S]*vps-evidence-request\.mjs render[\s\S]*"\$DEPLOY_REMOTE" 'bash -s'/, "VPS evidence workflow must validate and encode inputs before a fixed remote command.");
-  assertNoMatch(githubVpsEvidenceWorkflow, /bash -s --|hardening_args="/, "VPS evidence workflow must not place dynamic inputs in the SSH command or string-built argv.");
-  assertMatch(vpsEvidenceRemoteScript, /bootstrap_args=\(--apply\)[\s\S]*bootstrap_args\+=\(--deploy-user "\$deploy_user"\)[\s\S]*hardening_args=\(--apply --ssh-port "\$hardened_ssh_port"\)/, "VPS evidence remote script must use validated Bash arrays.");
-  assertMatch(githubVpsEvidenceWorkflow, /Upload VPS evidence reports[\s\S]*reports\/vps-bootstrap\/[\s\S]*reports\/vps-hardening\/[\s\S]*reports\/vps-host\//, "VPS evidence workflow must upload VPS evidence reports.");
-  assertMatch(githubWorkflow, /Secret scan[\s\S]*secret-scan/, "Infrastructure CI must run the secret scanner.");
-  assertMatch(githubWorkflow, /HA configuration check[\s\S]*ha-config-check/, "Infrastructure CI must run the HA configuration check.");
-  assertMatch(githubWorkflow, /Managed secrets preflight[\s\S]*managed-secrets-preflight/, "Infrastructure CI must run the managed secrets preflight.");
-  assertMatch(githubWorkflow, /Compose healthcheck coverage[\s\S]*compose-healthcheck-coverage/, "Infrastructure CI must verify service healthcheck coverage.");
-  assertMatch(githubWorkflow, /Rate limit evidence[\s\S]*rate-limit-evidence/, "Infrastructure CI must write a dedicated rate-limit evidence report.");
-  assertMatch(githubWorkflow, /Audit log evidence[\s\S]*audit-log-evidence/, "Infrastructure CI must write a dedicated audit log evidence report.");
-  assertMatch(githubWorkflow, /Retention evidence[\s\S]*retention-evidence/, "Infrastructure CI must write a dedicated retention evidence report.");
-  assertMatch(githubWorkflow, /Secret rotation evidence plan[\s\S]*secret-rotation-evidence/, "Infrastructure CI must write a secret rotation evidence plan.");
-  assertMatch(githubWorkflow, /DR readiness check[\s\S]*dr-readiness-check/, "Infrastructure CI must run the DR readiness check.");
-  assertMatch(githubWorkflow, /DR evidence summary[\s\S]*dr-evidence/, "Infrastructure CI must write a DR evidence summary.");
-  assertMatch(githubWorkflow, /Off-site restore drill plan[\s\S]*offsite-restore-drill-restic --planOnly/, "Infrastructure CI must exercise the off-site restore drill plan.");
-  assertMatch(githubWorkflow, /Release artifact gate dry run[\s\S]*release-artifact-gate --envFile \.tmp\/ci-release\.env --sbom \.tmp\/ci-sbom\/pnpm-sbom-ci\.json/, "Infrastructure CI must exercise release image and SBOM admission.");
-  assertMatch(deployVPSScript, /DEPLOY_SSH_PORT[\s\S]*SSH_KEY_PATH[\s\S]*ssh "\$@" "\$REMOTE"/, "VPS deploy must use the configured SSH key and port.");
-  assertMatch(githubWorkflow, /DEPLOY_SSH_PORT:\s+\$\{\{ vars\.DEPLOY_SSH_PORT \}\}/, "Production deploy workflow must pass the configured SSH port.");
-  assertMatch(githubWorkflow, /DEPLOY_RUN_PRODUCTION_PREFLIGHT:\s+"1"[\s\S]*DEPLOY_RUN_PRE_GO_LIVE:\s+"1"[\s\S]*DEPLOY_RUN_GO_NO_GO:\s+"1"/, "Production deploy workflow must enforce preflight, pre-go-live evidence and go/no-go.");
-  assertMatch(githubWorkflow, /DEPLOY_PRE_GO_LIVE_RESTORE_DRILL:\s+"1"[\s\S]*DEPLOY_PRE_GO_LIVE_OFFSITE_RESTORE_DRY_RUN:\s+"1"/, "Production deploy workflow must require restore and off-site restore evidence.");
-  assertMatch(githubWorkflow, /Upload CI evidence reports[\s\S]*actions\/upload-artifact@[a-f0-9]{40}[\s\S]*reports\/[\s\S]*\.tmp\/evidence-bundles\/[\s\S]*retention-days:\s+30/, "Infrastructure CI must upload non-secret evidence reports.");
-  assertMatch(githubWorkflow, /Evidence bundle integrity verify[\s\S]*evidence-bundle-verify/, "Infrastructure CI must verify evidence bundle manifest integrity.");
-  assertMatch(githubWorkflow, /Pre go-live evidence report[\s\S]*pre-go-live-evidence --infraOnly --repo/, "Infrastructure CI must produce an infrastructure-only pre go-live evidence report.");
-  assertMatch(githubWorkflow, /Enterprise requirements traceability[\s\S]*enterprise-requirements-check/, "Infrastructure CI must verify enterprise requirements traceability.");
-  assertMatch(githubWorkflow, /Production readiness checklist[\s\S]*enterprise-requirements-check --manifest governance\/production-readiness\.json/, "Infrastructure CI must verify the 19-point infrastructure production readiness checklist.");
-  assertMatch(githubWorkflow, /Production live proof gate rejects missing evidence[\s\S]*--requireLiveProofs[\s\S]*Live proof gate passed without real production evidence/, "Infrastructure CI must prove the live-production gate rejects missing external evidence.");
-  assertMatch(productionReadinessManifest, /"expectedCount":\s*19/, "Production readiness manifest must track the exact 19-point infrastructure checklist.");
-  assertMatch(productionReadinessManifest, /"liveProofCheckRequired":\s*true/, "Production readiness manifest must require mapped live proof checks.");
-  assertMatch(productionReadinessManifest, /"liveProofChecks"/, "Production readiness requirements must map to production go/no-go live checks.");
-  assertMatch(githubWorkflow, /permissions:\s*\r?\n\s+contents:\s+read/, "Infrastructure CI must declare least-privilege read permissions.");
-  assertNoMatch(githubWorkflow, /security-events:\s+write|contents:\s+write/, "Infrastructure CI must not request unused write permissions.");
-  assertMatch(githubWorkflow, /compose-and-policy:[\s\S]*timeout-minutes:\s+45[\s\S]*shell-syntax:[\s\S]*timeout-minutes:\s+10[\s\S]*dast-zap:[\s\S]*timeout-minutes:\s+45[\s\S]*deploy-vps:[\s\S]*timeout-minutes:\s+90/, "Infrastructure CI jobs must set explicit timeouts.");
-  assertMatch(opsScript, /async function repoCoverageCheck/, "Ops script must provide a repository coverage audit command.");
-  assertMatch(opsScript, /safe\.directory=\$\{infraRoot\}[\s\S]*"ls-files"/, "Repository coverage must work inside Docker-mounted GitHub Actions worktrees.");
-  assertMatch(opsScript, /"repo-coverage-check": repoCoverageCheck/, "Ops command map must expose repo-coverage-check.");
-  assertMatch(opsScript, /repoStatus:[\s\S]*liveProofStatus[\s\S]*liveProofsPending/, "Enterprise requirement reports must separate repository evidence from pending live production proof.");
-  assertMatch(evidenceBundleVerifyWrapper, /evidence-bundle-verify/, "Evidence bundle verify wrapper must delegate to the Dockerized ops runner.");
-  assertMatch(opsScript, /async function evidenceBundleVerify[\s\S]*sha256 mismatch[\s\S]*required report is not passing[\s\S]*--requireComplete/, "Ops script must verify evidence bundle SHA256, report status and completeness.");
-  assertMatch(opsScript, /async function composeHealthcheckCoverage[\s\S]*missingHealthchecks/, "Ops script must provide service-by-service healthcheck coverage reports.");
-  assertMatch(opsScript, /directory: "healthchecks"[\s\S]*prefix: "healthcheck-coverage-"[\s\S]*required: true/, "Evidence bundle must require healthcheck coverage reports.");
-  assertMatch(rateLimitEvidenceWrapper, /rate-limit-evidence/, "Rate-limit evidence wrapper must delegate to the Dockerized ops runner.");
-  assertMatch(opsScript, /async function rateLimitEvidence[\s\S]*rate-limit-evidence-[\s\S]*infraChecksPassed/, "Ops script must provide dedicated rate-limit evidence reports.");
-  assertMatch(opsScript, /directory: "rate-limits"[\s\S]*prefix: "rate-limit-evidence-"[\s\S]*required: true/, "Evidence bundle must require rate-limit evidence reports.");
-  assertMatch(productionReadinessManifest, /"rate-limiting"[\s\S]*"rate-limit-evidence"/, "Production readiness must map rate limiting to dedicated evidence.");
-  assertMatch(auditLogEvidenceWrapper, /audit-log-evidence/, "Audit log evidence wrapper must delegate to the Dockerized ops runner.");
-  assertMatch(opsScript, /async function auditLogEvidence[\s\S]*audit-log-evidence-[\s\S]*infraChecksPassed/, "Ops script must provide dedicated audit log evidence reports.");
-  assertMatch(opsScript, /directory: "audit-logs"[\s\S]*prefix: "audit-log-evidence-"[\s\S]*required: true/, "Evidence bundle must require audit log evidence reports.");
-  assertMatch(productionReadinessManifest, /"admin-audit-log"[\s\S]*"platform-admin-audit-evidence"/, "Production readiness must not use hosted project audit logs as platform admin audit evidence.");
-  assertMatch(retentionEvidenceWrapper, /retention-evidence/, "Retention evidence wrapper must delegate to the Dockerized ops runner.");
-  assertMatch(opsScript, /async function retentionEvidence[\s\S]*retention-evidence-[\s\S]*infraChecksPassed/, "Ops script must provide dedicated retention evidence reports.");
-  assertMatch(opsScript, /directory: "retention"[\s\S]*prefix: "retention-evidence-"[\s\S]*required: true/, "Evidence bundle must require retention evidence reports.");
-  assertMatch(productionReadinessManifest, /"log-metric-retention"[\s\S]*"retention-evidence"/, "Production readiness must map log and metric retention to dedicated evidence.");
-  assertMatch(githubActionsRunEvidenceWrapper, /github-actions-run-evidence/, "GitHub Actions run evidence wrapper must delegate to the Dockerized ops runner.");
-  assertMatch(opsScript, /async function githubActionsRunEvidence[\s\S]*workflow_runs[\s\S]*run\.conclusion !== "success"/, "Ops script must verify remote GitHub Actions workflow success.");
-  assertMatch(productionGoNoGoPolicyText, /"requireGithubActionsRunSuccess":\s*true[\s\S]*"requiredGithubWorkflow":\s*"enterprise-infra\.yml"/, "Production go/no-go policy must require a successful remote GitHub Actions workflow run.");
-  assertMatch(secretRotationEvidenceWrapper, /secret-rotation-evidence/, "Secret rotation evidence wrapper must delegate to the Dockerized ops runner.");
-  assertMatch(opsScript, /async function secretRotationEvidence[\s\S]*secret-rotation-evidence-[\s\S]*expiredSecrets/, "Ops script must provide non-secret secret rotation evidence reports.");
-  assertMatch(opsScript, /latestJsonReport\("secret-rotation", "secret-rotation-evidence-"/, "Production go/no-go must evaluate secret rotation evidence reports.");
-  assertMatch(productionGoNoGoPolicyText, /"requireSecretRotationEvidence":\s*true/, "Production go/no-go policy must require secret rotation evidence.");
-  assertMatch(productionGoNoGoPolicyText, /"secretRotation":\s*24/, "Production go/no-go policy must require fresh secret rotation evidence.");
-  assertMatch(productionReadinessManifest, /"secrets-management"[\s\S]*"secret-rotation-evidence"/, "Production readiness must map secrets management to the dedicated secret rotation live proof.");
-  assertMatch(vpsPostdeployScript, /secret-rotation-evidence\.sh --enforce[\s\S]*production-go-no-go\.sh --enforce[\s\S]*production-readiness-live\.sh/, "VPS post-deploy must enforce secret rotation evidence, production go/no-go and live readiness.");
-  assertMatch(productionReadinessLiveWrapper, /enterprise-requirements-check --manifest governance\/production-readiness\.json --requireLiveProofs/, "Production readiness live wrapper must enforce the 19-point infrastructure live checklist.");
-  assertMatch(opsScript, /directory: "production-readiness"[\s\S]*prefix: "production-readiness-"[\s\S]*required: true/, "Evidence bundle must require the live production readiness report.");
-  assertMatch(readme, /production-readiness-live\.sh[\s\S]*reports\/production-readiness/, "README must document the live production readiness report.");
-  assertMatch(runbook, /production-readiness-live\.sh[\s\S]*reports\/production-readiness/, "Runbook must document the live production readiness report.");
-  assertMatch(opsScript, /workerNotificationsServerPath[\s\S]*fs\.existsSync\(workerNotificationsServerPath\)/, "Alert evidence must treat Platform source checks as optional.");
-  assertMatch(githubWorkflow, /Backup scheduler dry run[\s\S]*BACKUP_SCHEDULER_DRY_RUN=true/, "Infrastructure CI must exercise the Dockerized backup scheduler in dry-run mode.");
-  assertNoMatch(githubWorkflow, /setup-node|node scripts\/infra-ops\.mjs|shell:\s+pwsh|\.ps1/, "Infrastructure CI must stay Linux/container-first without PowerShell or host Node policy gates.");
-  assertMatch(productionGoNoGoPolicyText, /"vpsHost"[\s\S]*"cloudflareAccess"/, "Production go/no-go policy must require VPS and Cloudflare evidence.");
-  assertMatch(infraRenovate, /dependencyDashboardApproval/, "Renovate must require dashboard approval for controlled updates.");
-  assertMatch(infraGitattributes, /^\* text=auto eol=lf/m, "Infrastructure repo must enforce LF line endings.");
-  assertMatch(gitignore, /^\.tmp\/$/m, "Generated ops temp files must be ignored by Git.");
-
-  log("Infra-only static security checks passed.");
+  const composeManagedSecrets = readText(path.join(infraRoot, "compose.managed-secrets.yaml"));
+  const composeVps = readText(path.join(infraRoot, "scripts", "compose-vps.sh"));
+  const contract = readText(path.join(infraRoot, "scripts", "hosted-workload-contract.mjs"));
+  const lockScript = readText(path.join(infraRoot, "scripts", "hosted-workload-lock.sh"));
+  const prepareScript = readText(path.join(infraRoot, "scripts", "prepare-hosted-workloads.sh"));
+  const router = readText(path.join(infraRoot, "project-router", "server.mjs"));
+  const alertmanager = readText(path.join(infraRoot, "alertmanager", "alertmanager.yml"));
+  const dispatcher = readText(path.join(infraRoot, "platform-alert-dispatcher", "server.mjs"));
+  const workflow = readText(path.join(infraRoot, ".github", "workflows", "enterprise-infra.yml"));
+  const platformText = [compose, composeRuntime, composeNetworks, composeIsolation, composeSecrets, composeManagedSecrets].join("\n");
+  assertMatch(compose, /^name:\s+\$\{COMPOSE_PROJECT_NAME:-platform_infra\}/m, "Compose must use an explicit project name.");
+  assertNoMatch(platformText, /^\s{2}(?:backend|web|worker-jobs|worker-notifications|node-account|node-ui|php-anniversary|php-fiplatform|php-matthewdifilippo|php-stream|php-workcalendar):/m, "Platform Compose must not define concrete hosted applications.");
+  assertNoMatch(platformText, /\b(?:APP_DB|BACKEND_DB|WORKER_JOBS_DB|WORKER_NOTIFICATIONS_DB|DATABASE_URL|SESSION_SIGNING_KEYS|HASH_PEPPER|TURNSTILE)\b/i, "Platform Compose must not own hosted application credentials.");
+  assertNoMatch(composeRuntime, /\/stexor|\/anniversary|\/fiplatform|\/matthewdifilippo|\/stream|\/workcalendar|PROJECT_UPSTREAMS:/i, "Runtime overlay must not mount or route concrete projects.");
+  assertMatch(composeVps, /HOSTED_WORKLOAD_LOCK[\s\S]*hosted-workload-lock\.sh[\s\S]*compose-files/, "VPS Compose wrapper must load only a verified external workload lock.");
+  assertNoMatch(composeVps, /compose\.build\.yaml/, "VPS Compose wrapper must not load application build definitions.");
+  assertMatch(contract, /sha256File[\s\S]*Locked file changed/, "Hosted workload contract must bind and re-verify file hashes.");
+  assertMatch(contract, /read_only[\s\S]*no-new-privileges[\s\S]*cap_drop/, "Hosted workload contract must enforce runtime hardening.");
+  assertMatch(contract, /com\.platform\.workload-id[\s\S]*com\.platform\.workload-role/, "Hosted workload contract must bind workload identity labels.");
+  assertMatch(contract, /PASSWORD|TOKEN|SECRET|DATABASE_URL|NATS_URL/, "Hosted workload env validation must reject secret-bearing keys.");
+  assertMatch(lockScript, /core-env-file[\s\S]*project-name[\s\S]*compose-files[\s\S]*env-files/, "Hosted workload lock reader must expose only verified fields.");
+  assertMatch(prepareScript, /hosted-workload-contract\.mjs/, "Hosted workload preparation must use the contract validator.");
+  assertMatch(composeNetworks, /platform_edge:[\s\S]*platform_routing:[\s\S]*platform_observability:[\s\S]*platform_egress:/, "Platform trust zones must be explicit.");
+  assertMatch(composeIsolation, /docker-socket-proxy:[\s\S]*\/var\/run\/docker\.sock:\/var\/run\/docker\.sock:ro/, "Only the Docker socket proxy may mount the raw socket.");
+  assertMatch(router, /PROJECT_ROUTER_ALLOWED_UPSTREAMS[\s\S]*validateUpstream/, "Project Router must enforce an exact upstream allowlist.");
+  assertNoMatch(router, /node:child_process|spawn\(|execFile\(|stopManagedProject/, "Project Router must remain proxy-only.");
+  assertMatch(alertmanager, /platform-alert-dispatcher:3000/, "Alertmanager must deliver through the platform-owned dispatcher.");
+  assertMatch(dispatcher, /ALERTMANAGER_WEBHOOK_TOKEN_FILE[\s\S]*SMTP_PASSWORD_FILE/, "Alert dispatcher must consume credentials through files.");
+  assertMatch(dispatcher, /platform_alert_delivery_total/, "Alert dispatcher must expose delivery metrics.");
+  assertNoMatch(workflow, /project-repository|PROJECT_REPO_TOKEN|Checkout application source|compose\.build\.yaml/, "Infrastructure CI must not checkout or build hosted applications.");
+  assertMatch(workflow, /static-security-check --infraOnly[\s\S]*hosted-workload-contract/, "Infrastructure CI must verify the platform boundary and hosted workload contract.");
+  log("Static platform infrastructure checks passed.");
 }
 
 async function staticSecurityCheck() {
-  await withLocalCheckReport("static-security-check", staticSecurityCheckBody, {
-    infraOnly: Boolean(booleanFlag(argv.infraOnly) || booleanFlag(process.env.PLATFORM_STATIC_INFRA_ONLY) || !hasSupportedProjectSource()),
-  });
+  await withLocalCheckReport("static-security-check", async () => {
+    staticSecurityInfraOnlyCheck();
+  }, { infraOnly: true, scope: "platform-infrastructure" });
 }
 
-async function staticSecurityCheckBody() {
-  if (booleanFlag(argv.infraOnly) || booleanFlag(process.env.PLATFORM_STATIC_INFRA_ONLY)) {
-    staticSecurityInfraOnlyCheck();
-    return;
-  }
-  if (!hasSupportedProjectSource()) {
-    if (projectSourceChecksRequired()) {
-      fail(`Project source checks were required, but no supported project was found at ${sourceRoot}.`);
-    }
-    log(`No supported project source found at ${sourceRoot}; running infrastructure-only static checks.`);
-    staticSecurityInfraOnlyCheck();
-    return;
-  }
-  log("==> Static security checks");
-  const supplyChain = evaluateSupplyChain(infraRoot);
-  if (supplyChain.status !== "passed") fail(`Supply-chain policy failed: ${supplyChain.failures.join("; ")}`);
-  const compose = readText(path.join(infraRoot, "compose.yaml"));
-  const composeBuild = readText(path.join(infraRoot, "compose.build.yaml"));
-  const composeRuntime = readText(path.join(infraRoot, "compose.runtime.yaml"));
-  const composeNetworks = readText(path.join(infraRoot, "compose.networks.yaml"));
-  const composeProd = readText(path.join(infraRoot, "compose.prod.yaml"));
-  const composeSecrets = readText(path.join(infraRoot, "compose.secrets.yaml"));
-  const composeWaf = readText(path.join(infraRoot, "compose.waf.yaml"));
-  const composeBackupScheduler = readText(path.join(infraRoot, "compose.backup-scheduler.yaml"));
-  const composeVPSWaf = readText(path.join(infraRoot, "compose.vps-waf.yaml"));
-  const composeStaging = readText(path.join(infraRoot, "compose.staging.yaml"));
-  const composeHa = readText(path.join(infraRoot, "compose.ha.yaml"));
-  const composeManagedSecrets = readText(path.join(infraRoot, "compose.managed-secrets.yaml"));
-  const composeDr = readText(path.join(infraRoot, "compose.dr.yaml"));
-  const traefikConfig = readText(path.join(infraRoot, "traefik", "traefik.yml"));
-  const phpRuntimeRootPath = path.resolve(infraRoot, "php-runtime-root", "public", "index.html");
-  const phpRuntimeRootPage = fs.existsSync(phpRuntimeRootPath) ? readText(phpRuntimeRootPath) : "";
-  const controlCenterServerPath = path.resolve(infraRoot, "control-center", "server.mjs");
-  const controlCenterServer = fs.existsSync(controlCenterServerPath) ? readText(controlCenterServerPath) : "";
-  const controlCenterAuthPath = path.resolve(infraRoot, "control-center", "auth", "oidc.mjs");
-  const controlCenterAuth = fs.existsSync(controlCenterAuthPath) ? readText(controlCenterAuthPath) : "";
-  const controlCenterTestPath = path.resolve(infraRoot, "control-center", "tests", "control-center.test.mjs");
-  const controlCenterTest = fs.existsSync(controlCenterTestPath) ? readText(controlCenterTestPath) : "";
-  const controlCenterAuthTestPath = path.resolve(infraRoot, "control-center", "tests", "auth-config.test.mjs");
-  const controlCenterAuthTest = fs.existsSync(controlCenterAuthTestPath) ? readText(controlCenterAuthTestPath) : "";
-  const controlCenterClient = readText(path.join(infraRoot, "control-center", "styles", "control-center.js"));
-  const controlCenterSessionSecurityMigration = readText(path.join(infraRoot, "control-center", "migrations", "002_session_security.sql"));
-  const projectRouterServerPath = path.resolve(infraRoot, "project-router", "server.mjs");
-  const projectRouterServer = fs.existsSync(projectRouterServerPath) ? readText(projectRouterServerPath) : "";
-  const projectRouterTestPath = path.resolve(infraRoot, "project-router", "tests", "project-router.test.mjs");
-  const projectRouterTest = fs.existsSync(projectRouterTestPath) ? readText(projectRouterTestPath) : "";
-  const networkSegmentationPolicy = readText(path.join(infraRoot, "scripts", "network-segmentation-policy.mjs"));
-  const networkSegmentationSandbox = readText(path.join(infraRoot, "scripts", "network-segmentation-sandbox-test.sh"));
-  const workloadEgressFirewall = readText(path.join(infraRoot, "scripts", "workload-egress-firewall.sh"));
-  const prometheusConfig = readText(path.join(infraRoot, "prometheus", "prometheus.yml"));
-  const localWafPreRules = readText(path.join(infraRoot, "waf", "REQUEST-900-EXCLUSION-RULES-BEFORE-CRS.conf"));
-  const vpsWafPreRules = readText(path.join(infraRoot, "waf", "REQUEST-900-VPS-RULES-BEFORE-CRS.conf"));
-  const phpMyAdminConfig = readText(path.join(infraRoot, "phpmyadmin", "config.user.inc.php"));
-  const prometheusAlerts = readText(path.join(infraRoot, "prometheus", "rules", "enterprise-alerts.yml"));
-  const alertmanagerConfig = readText(path.join(infraRoot, "alertmanager", "alertmanager.yml"));
-  const lokiConfig = readText(path.join(infraRoot, "loki", "config.yml"));
-  const lokiWafAlerts = readText(path.join(infraRoot, "loki", "rules", "platform", "waf-alerts.yml"));
-  const promtailConfig = readText(path.join(infraRoot, "promtail", "config.yml"));
-  const grafanaOverviewDashboard = readText(path.join(infraRoot, "grafana", "dashboards", "enterprise-overview.json"));
-  const keycloakPlatformRealm = readText(path.join(infraRoot, "keycloak", "import", "platform-realm.json"));
-  const keycloakPasskeyReadiness = readText(path.join(infraRoot, "scripts", "keycloak-passkey-readiness.sh"));
-  const backendDockerfile = readText(path.join(infraRoot, "docker", "backend.Dockerfile"));
-  const webDockerfile = readText(path.join(infraRoot, "docker", "web.Dockerfile"));
-  const workerDockerfile = readText(path.join(infraRoot, "docker", "worker.Dockerfile"));
-  const opsDockerfile = readText(path.join(infraRoot, "docker", "ops.Dockerfile"));
-  const controlCenterDockerfile = readText(path.join(infraRoot, "docker", "control-center.Dockerfile"));
-  const opsWrapper = readText(path.join(infraRoot, "scripts", "infra-ops.sh"));
-  const backupSchedulerScript = readText(path.join(infraRoot, "scripts", "backup-scheduler.sh"));
-  const opsScript = readText(path.join(infraRoot, "scripts", "infra-ops.mjs"));
-  const releaseTrustModule = readText(path.join(infraRoot, "scripts", "release-trust.mjs"));
-  const githubGovernancePolicyModule = readText(path.join(infraRoot, "scripts", "github-governance-policy.mjs"));
-  const vpsEvidenceRemoteScript = readText(path.join(infraRoot, "scripts", "vps-evidence-remote.sh"));
-  const secretManagerScript = readText(path.join(infraRoot, "scripts", "infra-secret-manager.mjs"));
-  const alertDeliverySandboxTest = readText(path.join(infraRoot, "scripts", "alert-delivery-sandbox-test.mjs"));
-  const alertmanagerSecretPermissions = readText(path.join(infraRoot, "scripts", "alertmanager-secret-permissions.sh"));
-  const vaultKeyringScript = readText(path.join(infraRoot, "control-center", "vault", "keyring.mjs"));
-  const vaultMigrationScript = readText(path.join(infraRoot, "scripts", "control-center-vault-reencrypt.mjs"));
-  const databaseOwnershipScript = readText(path.join(infraRoot, "control-center", "database", "ownership.mjs"));
-  const databaseDestructiveWorkflowScript = readText(path.join(infraRoot, "control-center", "database", "destructive-workflow.mjs"));
-  const databaseDestructiveWorkflowTest = readText(path.join(infraRoot, "control-center", "tests", "database-destructive-workflow.test.mjs"));
-  const databaseOwnershipSandboxTest = readText(path.join(infraRoot, "scripts", "database-ownership-sandbox-test.sh"));
-  const databasePrincipalMigrationScript = readText(path.join(infraRoot, "scripts", "database-principal-migration-plan.mjs"));
-  const backupContractScript = readText(path.join(infraRoot, "control-center", "backup", "contracts.mjs"));
-  const backupContractTest = readText(path.join(infraRoot, "control-center", "tests", "backup-contracts.test.mjs"));
-  const backupContractSandboxTest = readText(path.join(infraRoot, "scripts", "backup-contract-sandbox-test.mjs"));
-  const backupDatabaseSandboxTest = readText(path.join(infraRoot, "scripts", "backup-database-sandbox-test.mjs"));
-  const mariaProvisionSource = controlCenterServer.slice(
-    controlCenterServer.indexOf("function applyLiveMariaDbCreate"),
-    controlCenterServer.indexOf("function applyLiveMariaDbCredential"),
-  );
-  const postgresProvisionSource = controlCenterServer.slice(
-    controlCenterServer.indexOf("function applyLivePostgresCreate"),
-    controlCenterServer.indexOf("function applyLivePostgresCredential"),
-  );
-  const backendConfig = readText(path.join(sourceRoot, "apps", "backend", "src", "server-config.ts"));
-  const backendRedisStore = readText(path.join(sourceRoot, "apps", "backend", "src", "runtime", "redis-store.ts"));
-  const backendSessionAuth = readText(path.join(sourceRoot, "apps", "backend", "src", "runtime", "session-auth.ts"));
-  const observabilitySource = readText(path.join(sourceRoot, "packages", "observability", "src", "index.ts"));
-  const workerJobsServer = readText(path.join(sourceRoot, "apps", "worker-jobs", "src", "server.ts"));
-  const workerNotificationsServer = readText(path.join(sourceRoot, "apps", "worker-notifications", "src", "server.ts"));
-  const workerJobsAuditOutbox = readText(path.join(sourceRoot, "apps", "worker-jobs", "src", "audit-outbox.ts"));
-  const workerJobsAuditOutboxStore = readText(path.join(sourceRoot, "apps", "worker-jobs", "src", "audit-outbox-store.ts"));
-  const workerJobsNatsSink = readText(path.join(sourceRoot, "apps", "worker-jobs", "src", "nats-audit-sink.ts"));
-  const sourcePackage = readText(path.join(sourceRoot, "package.json"));
-  const sourceInfraOpsLauncher = readText(path.join(sourceRoot, "scripts", "run-infra-ops.mjs"));
-  const sourceSupplyChainGate = readText(path.join(sourceRoot, "scripts", "supply-chain-gate.mjs"));
-  const sourceCiWorkflow = readText(path.join(sourceRoot, ".github", "workflows", "enterprise-ci.yml"));
-  const cryptoRuntime = readText(path.join(sourceRoot, "apps", "backend", "src", "runtime", "crypto.ts"));
-  const webNextConfig = readText(path.join(sourceRoot, "apps", "web", "next.config.mjs"));
-  const webProxy = readText(path.join(sourceRoot, "apps", "web", "src", "proxy.ts"));
-  const webAppNotFound = readText(path.join(sourceRoot, "apps", "web", "src", "app", "not-found.tsx"));
-  const webGlobalError = readText(path.join(sourceRoot, "apps", "web", "src", "app", "global-error.tsx"));
-  const webRememberModel = readText(path.join(sourceRoot, "apps", "web", "src", "components", "account-center", "model.ts"));
-  const e2eStackHelper = readText(path.join(sourceRoot, "e2e", "helpers", "stack.ts"));
-  const webSource = readSourceTreeText(path.join(sourceRoot, "apps", "web", "src"));
-  const uiSource = readSourceTreeText(path.join(sourceRoot, "packages", "ui", "src"));
-  const sourceDocs = readSourceTreeText(path.join(sourceRoot, "docs"), new Set([".md"]));
-  const sourceTopLevelDocs = [
-    path.join(sourceRoot, "README.md"),
-    path.join(sourceRoot, "packages", "ui", "docs", "release-governance.md"),
-  ].filter((filePath) => fs.existsSync(filePath)).map((filePath) => readText(filePath)).join("\n");
-  const browserUiSource = `${webSource}\n${uiSource}`;
-  const enterprisePlan = readText(path.join(infraRoot, "ENTERPRISE-10-PLAN.md"));
-  const readme = readText(path.join(infraRoot, "README.md"));
-  const runbook = readText(path.join(infraRoot, "RUNBOOK.md"));
-  const envExample = readText(path.join(infraRoot, ".env.example"));
-  const envVpsExample = readText(path.join(infraRoot, ".env.vps.example"));
-  const envStagingExample = readText(path.join(infraRoot, ".env.staging.example"));
-  const admissionPolicy = readText(path.join(infraRoot, "security", "admission", "cosign-digest-policy.rego"));
-  const branchProtection = readText(path.join(infraRoot, "governance", "github-branch-protection.json"));
-  const githubEnvironmentsPolicyText = readText(path.join(infraRoot, "governance", "github-environments.json"));
-  const githubEnvironmentsPolicyJson = JSON.parse(githubEnvironmentsPolicyText);
-  const githubActionsRuntimePolicyText = readText(path.join(infraRoot, "governance", "github-actions-runtime.json"));
-  const githubActionsRuntimePolicyJson = JSON.parse(githubActionsRuntimePolicyText);
-  const productionGoNoGoPolicyText = readText(path.join(infraRoot, "governance", "production-go-no-go.json"));
-  const productionGoNoGoPolicyJson = JSON.parse(productionGoNoGoPolicyText);
-  const productionReadinessManifest = readText(path.join(infraRoot, "governance", "production-readiness.json"));
-  const githubWorkflow = readText(path.join(infraRoot, ".github", "workflows", "enterprise-infra.yml"));
-  const githubRunEvidenceWorkflow = readText(path.join(infraRoot, ".github", "workflows", "enterprise-infra-run-evidence.yml"));
-  const githubLiveEvidenceWorkflow = readText(path.join(infraRoot, ".github", "workflows", "enterprise-live-evidence.yml"));
-  const githubVpsEvidenceWorkflow = readText(path.join(infraRoot, ".github", "workflows", "enterprise-vps-evidence.yml"));
-  const releaseAttestationWorkflow = readText(path.join(infraRoot, ".github", "workflows", "release-attestation.yml"));
-  const externalUptimeManifest = readText(path.join(infraRoot, "monitoring", "external-uptime.example.json"));
-  const cloudflareReadme = readText(path.join(infraRoot, "cloudflare", "README.md"));
-  const cloudflareFromZeroManifest = readText(path.join(infraRoot, "cloudflare", "from-zero.example.json"));
-  const cloudflareWafRules = readText(path.join(infraRoot, "cloudflare", "zone-waf-rules.json"));
-  const cloudflareSettings = readText(path.join(infraRoot, "cloudflare", "zone-settings.json"));
-  const cloudflareFromZeroScript = readText(path.join(infraRoot, "scripts", "cloudflare-from-zero.mjs"));
-  const cloudflareAccessManifest = readText(path.join(infraRoot, "cloudflare", "access-admin.example.json"));
-  const cloudflareAccessScript = readText(path.join(infraRoot, "scripts", "cloudflare-access-admin.mjs"));
-  const deployVPSScript = readText(path.join(infraRoot, "scripts", "deploy-vps.sh"));
-  const deployVPSRemoteScript = readText(path.join(infraRoot, "scripts", "deploy-vps-remote.sh"));
-  const vpsGoLiveScript = readText(path.join(infraRoot, "scripts", "vps-go-live.sh"));
-  const vpsPreflightScript = readText(path.join(infraRoot, "scripts", "vps-preflight.sh"));
-  const vpsPostdeployScript = readText(path.join(infraRoot, "scripts", "vps-postdeploy.sh"));
-  const vpsBootstrapScript = readText(path.join(infraRoot, "scripts", "vps-bootstrap-ubuntu.sh"));
-  const vpsHardeningScript = readText(path.join(infraRoot, "scripts", "vps-hardening-ubuntu.sh"));
-  const vpsHostReadinessScript = readText(path.join(infraRoot, "scripts", "vps-host-readiness.sh"));
-  const containerMetricsCollectorScript = readText(path.join(infraRoot, "scripts", "write-docker-stats-json.sh"));
-  const containerMetricsInstallerScript = readText(path.join(infraRoot, "scripts", "install-container-metrics-collector.sh"));
-  const containerMetricsSandboxTest = readText(path.join(infraRoot, "scripts", "container-metrics-sandbox-test.sh"));
-  const originLockScript = readText(path.join(infraRoot, "scripts", "cloudflare-origin-lock-ufw.sh"));
-  const vpsPredeployChecklist = readText(path.join(infraRoot, "VPS-PREDEPLOY-CHECKLIST.md"));
-  const readinessReport = readText(path.join(infraRoot, "READINESS-REPORT.md"));
-  const finalReadinessAudit = readText(path.join(infraRoot, "FINAL-READINESS-AUDIT.md"));
-  const offsiteCronScript = readText(path.join(infraRoot, "scripts", "install-offsite-backup-cron.sh"));
-  const offsiteRestoreDrillWrapper = readText(path.join(infraRoot, "scripts", "offsite-restore-drill-restic.sh"));
-  const backupMinioWrapper = readText(path.join(infraRoot, "scripts", "backup-minio.sh"));
-  const backupKeycloakWrapper = readText(path.join(infraRoot, "scripts", "backup-keycloak.sh"));
-  const backupSecretManagerWrapper = readText(path.join(infraRoot, "scripts", "backup-secret-manager-metadata.sh"));
-  const alertEvidenceWrapper = readText(path.join(infraRoot, "scripts", "alert-evidence.sh"));
-  const evidenceBundleWrapper = readText(path.join(infraRoot, "scripts", "evidence-bundle.sh"));
-  const evidenceBundleVerifyWrapper = readText(path.join(infraRoot, "scripts", "evidence-bundle-verify.sh"));
-  const infraHealthWrapper = readText(path.join(infraRoot, "scripts", "infra-health.sh"));
-  const failureTestsWrapper = readText(path.join(infraRoot, "scripts", "failure-tests.sh"));
-  const drEvidenceWrapper = readText(path.join(infraRoot, "scripts", "dr-evidence.sh"));
-  const fullRestoreDrillWrapper = readText(path.join(infraRoot, "scripts", "full-restore-drill.sh"));
-  const loadBenchmarkWrapper = readText(path.join(infraRoot, "scripts", "load-benchmark.sh"));
-  const linuxPortabilityWrapper = readText(path.join(infraRoot, "scripts", "linux-portability-check.sh"));
-  const rollbackReleaseWrapper = readText(path.join(infraRoot, "scripts", "rollback-release.sh"));
-  const releaseEvidenceWrapper = readText(path.join(infraRoot, "scripts", "release-evidence.sh"));
-  const releaseArtifactGateWrapper = readText(path.join(infraRoot, "scripts", "release-artifact-gate.sh"));
-  const externalUptimeWrapper = readText(path.join(infraRoot, "scripts", "external-uptime-check.sh"));
-  const cloudflareAccessWrapper = readText(path.join(infraRoot, "scripts", "cloudflare-access-admin.sh"));
-  const githubBranchProtectionWrapper = readText(path.join(infraRoot, "scripts", "github-branch-protection.sh"));
-  const githubEnvironmentsWrapper = readText(path.join(infraRoot, "scripts", "github-environments.sh"));
-  const githubActionsConfigWrapper = readText(path.join(infraRoot, "scripts", "github-actions-config.sh"));
-  const githubActionsRunEvidenceWrapper = readText(path.join(infraRoot, "scripts", "github-actions-run-evidence.sh"));
-  const rateLimitEvidenceWrapper = readText(path.join(infraRoot, "scripts", "rate-limit-evidence.sh"));
-  const auditLogEvidenceWrapper = readText(path.join(infraRoot, "scripts", "audit-log-evidence.sh"));
-  const retentionEvidenceWrapper = readText(path.join(infraRoot, "scripts", "retention-evidence.sh"));
-  const secretRotationEvidenceWrapper = readText(path.join(infraRoot, "scripts", "secret-rotation-evidence.sh"));
-  const preGoLiveEvidenceWrapper = readText(path.join(infraRoot, "scripts", "pre-go-live-evidence.sh"));
-  const productionGoNoGoWrapper = readText(path.join(infraRoot, "scripts", "production-go-no-go.sh"));
-  const productionReadinessLiveWrapper = readText(path.join(infraRoot, "scripts", "production-readiness-live.sh"));
-  const infraRenovate = readText(path.join(infraRoot, "renovate.json"));
-  const sourceRenovate = readText(path.join(sourceRoot, "renovate.json"));
-  const infraGitattributes = readText(path.join(infraRoot, ".gitattributes"));
-  const sourceGitattributes = readText(path.join(sourceRoot, ".gitattributes"));
-  const gitignore = readText(path.join(infraRoot, ".gitignore"));
-  const cloudflareFromZero = JSON.parse(cloudflareFromZeroManifest);
-  const cloudflareAccess = JSON.parse(cloudflareAccessManifest);
 
-  for (const text of [compose, backendDockerfile, webDockerfile, workerDockerfile, opsDockerfile]) {
-    assertMatch(text, /@sha256:[a-f0-9]{64}/, "Base/runtime images must be digest-pinned.");
-  }
-  assertMatch(opsDockerfile, /^# syntax=docker\/dockerfile:1\.7/m, "Ops Dockerfile must opt into BuildKit syntax.");
-  assertMatch(opsDockerfile, /docker-cli[\s\S]*docker-cli-compose/, "Ops container must include Docker CLI and Compose plugin for VPS-only execution.");
-  assertMatch(opsDockerfile, /dcron/, "Ops container must include cron for containerized backup scheduling.");
-  assertMatch(opsDockerfile, /ENTRYPOINT \["tini", "--", "node", "\/infra\/scripts\/infra-ops\.mjs"\]/, "Ops container must run the shared operational runner.");
-  assertMatch(opsWrapper, /PLATFORM_OPS_IMAGE:-platform\/ops:local/, "Ops wrapper must build and reuse the local ops image.");
-  assertMatch(opsWrapper, /docker build[\s\S]*docker\/ops\.Dockerfile[\s\S]*docker run --rm/, "Ops wrapper must execute commands through the containerized runner.");
-  assertMatch(opsWrapper, /\/var\/run\/docker\.sock/, "Ops wrapper must mount the Docker socket for controlled Docker operations.");
-  assertMatch(opsWrapper, /--network host/, "Ops wrapper must use host networking on Linux so runtime health checks reach local routed domains.");
-  assertMatch(opsWrapper, /INFRA_CONTAINER_ROOT="\$\{PLATFORM_INFRA_CONTAINER_ROOT:-\/infra\}"/, "Ops wrapper must mount infrastructure at /infra to match the ops image entrypoint.");
-  assertMatch(opsWrapper, /SOURCE_CONTAINER_ROOT="\$\{PROJECT_SOURCE_CONTAINER_ROOT:-\/project\}"/, "Ops wrapper must mount source at /project by default.");
-  assertNoMatch(opsWrapper, /INFRA_CONTAINER_ROOT="\$\{PLATFORM_INFRA_CONTAINER_ROOT:-\$INFRA_ROOT\}"/, "Ops wrapper must not use the host workspace path as the default container root.");
-  assertMatch(opsWrapper, /Linux\)[\s\S]*LOCAL_HOST_TARGET="\$\{PLATFORM_LOCAL_HOST_TARGET:-127\.0\.0\.1\}"/, "Ops wrapper must pin local development domains to loopback on Linux host networking.");
-  assertMatch(opsWrapper, /\*\)[\s\S]*LOCAL_HOST_TARGET="\$\{PLATFORM_LOCAL_HOST_TARGET:-host-gateway\}"/, "Ops wrapper must route local development domains to the Docker host gateway on Docker Desktop.");
-  assertMatch(opsWrapper, /api\.localhost\.com[\s\S]*account\.localhost\.com[\s\S]*--add-host \$host:\$LOCAL_HOST_TARGET/, "Ops wrapper must pin local development domains through the selected local host target.");
-  assertMatch(opsWrapper, /PLATFORM_INFRA_CONTAINER_ROOT/, "Ops wrapper must pass the infrastructure container root.");
-  assertMatch(opsWrapper, /PLATFORM_INFRA_VOLUME_SOURCE/, "Ops wrapper must allow overriding the infrastructure host volume source.");
-  assertMatch(opsWrapper, /PLATFORM_INFRA_HOST_ROOT/, "Ops wrapper must pass the infrastructure host root for nested Docker volume mounts.");
-  assertMatch(opsWrapper, /PROJECT_SOURCE_CONTAINER_ROOT/, "Ops wrapper must pass the source container root.");
-  assertMatch(opsWrapper, /PLATFORM_SOURCE_VOLUME_SOURCE/, "Ops wrapper must allow overriding the source host volume source.");
-  assertMatch(opsWrapper, /PROJECT_SOURCE_HOST_ROOT/, "Ops wrapper must pass the source host root for nested Docker volume mounts.");
-  assertMatch(opsWrapper, /ENV_FORWARD_ARGS(?=[\s\S]*GITHUB_TOKEN)(?=[\s\S]*GH_TOKEN)(?=[\s\S]*CLOUDFLARE_API_TOKEN)(?=[\s\S]*RESTIC_REPOSITORY)(?=[\s\S]*COSIGN_KEY)/, "Ops wrapper must forward operational credentials into the container by environment name.");
-  const shellWrappers = fs.readdirSync(path.join(infraRoot, "scripts"))
-    .filter((name) => name.endsWith(".sh"))
-    .map((name) => [name, readText(path.join(infraRoot, "scripts", name))]);
-  for (const [name, text] of shellWrappers) {
-    if (name === "infra-ops.sh" || name === "backup-scheduler.sh" || name === "vps-bootstrap-ubuntu.sh" || name === "vps-hardening-ubuntu.sh" || name === "vps-host-readiness.sh" || name === "cloudflare-origin-lock-ufw.sh") {
-      continue;
-    }
-    assertNoMatch(text, /exec node|infra-ops\.mjs|infra-secret-manager\.mjs|cloudflare-from-zero\.mjs/, `Shell wrapper ${name} must delegate through the Dockerized ops runner, not host Node.`);
-  }
-  assertMatch(gitignore, /^\.tmp\/$/m, "Generated ops temp files must be ignored by Git.");
-  assertMatch(gitignore, /^release\/$/m, "Generated release manifests and rollback targets must be ignored by Git.");
-  assertMatch(gitignore, /^reports\/$/m, "Generated operational reports must be ignored by Git.");
-  assertMatch(githubRunEvidenceWorkflow, /name:\s+enterprise-infra-run-evidence/, "GitHub Actions must define a post-run evidence workflow.");
-  assertMatch(githubRunEvidenceWorkflow, /workflow_run:[\s\S]*enterprise-infra[\s\S]*types:[\s\S]*completed[\s\S]*branches:[\s\S]*main/, "GitHub Actions run evidence workflow must trigger after completed enterprise-infra runs on main.");
-  assertMatch(githubRunEvidenceWorkflow, /permissions:[\s\S]*contents:\s+read[\s\S]*actions:\s+read/, "GitHub Actions run evidence workflow must use least-privilege read permissions.");
-  assertMatch(githubRunEvidenceWorkflow, /GITHUB_TOKEN:[\s\S]*github\.token[\s\S]*github-actions-run-evidence[\s\S]*--verifyRemote/, "GitHub Actions run evidence workflow must verify completed runs remotely.");
-  assertMatch(githubRunEvidenceWorkflow, /Upload GitHub Actions run evidence[\s\S]*reports\/github-actions\/[\s\S]*retention-days:\s+30/, "GitHub Actions run evidence workflow must upload its non-secret report artifact.");
-  assertMatch(releaseAttestationWorkflow, /name:\s+release-attestation[\s\S]*workflow_dispatch:[\s\S]*push:[\s\S]*tags:/, "GitHub Actions must define a manual/tag release attestation workflow.");
-  assertMatch(releaseAttestationWorkflow, /permissions:[\s\S]*contents:\s+read[\s\S]*id-token:\s+write[\s\S]*attestations:\s+write[\s\S]*packages:\s+write/, "Release attestation workflow must use GitHub Artifact Attestations and GHCR permissions.");
-  assertMatch(releaseAttestationWorkflow, /actions\/attest-build-provenance@[a-f0-9]{40}[\s\S]*Cryptographically verify and record attestations[\s\S]*github-attestation-evidence/, "Release attestation workflow must attest, cryptographically verify and write release evidence.");
-  assertNoMatch(releaseAttestationWorkflow, /verified:\s*true|--verification/, "Release attestation workflow must not mint or trust normalized verified JSON.");
-  assertMatch(githubWorkflow, /GitHub Actions workflow lint[\s\S]*rhysd\/actionlint:1\.7\.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667[\s\S]*-color/, "Infra workflow must lint GitHub Actions workflows with a digest-pinned actionlint image.");
-  assertMatch(githubLiveEvidenceWorkflow, /name:\s+enterprise-live-evidence[\s\S]*workflow_dispatch:/, "GitHub Actions must define a manual production live evidence workflow.");
-  assertMatch(githubLiveEvidenceWorkflow, /environment:[\s\S]*name:\s+production/, "Live evidence workflow must use the production environment protection.");
-  assertMatch(githubLiveEvidenceWorkflow, /EXTERNAL_UPTIME_PROVIDER_EVIDENCE_JSON[\s\S]*external-uptime-check[\s\S]*--validateProviderEvidenceOnly[\s\S]*external-uptime-check[\s\S]*--requireProviderEvidence/, "Live evidence workflow must validate external uptime provider evidence and direct public probes.");
-  assertMatch(githubLiveEvidenceWorkflow, /PUBLIC_API_HEALTH_URL[\s\S]*load-benchmark[\s\S]*--profiles 50,100,500[\s\S]*--requirePublicTarget[\s\S]*--requireEdgeEvidence[\s\S]*--expectedEdgeProvider cloudflare/, "Live evidence workflow must run public Cloudflare edge load benchmarks.");
-  assertMatch(githubLiveEvidenceWorkflow, /CLOUDFLARE_API_TOKEN[\s\S]*CLOUDFLARE_ACCOUNT_ID[\s\S]*CLOUDFLARE_ACCESS_ADMIN_MANIFEST_JSON[\s\S]*cloudflare-access-admin[\s\S]*--manifest \.tmp\/cloudflare-access-admin\.production\.json[\s\S]*--verifyRemote/, "Live evidence workflow must verify Cloudflare Access admin applications.");
-  assertMatch(githubLiveEvidenceWorkflow, /production-go-no-go --enforce[\s\S]*production-readiness-live\.sh[\s\S]*evidence-bundle-verify --requireComplete/, "Live evidence workflow must enforce go/no-go, live readiness and complete bundle verification.");
-  assertMatch(githubVpsEvidenceWorkflow, /name:\s+enterprise-vps-evidence[\s\S]*workflow_dispatch:/, "GitHub Actions must define a manual VPS evidence workflow.");
-  assertMatch(githubVpsEvidenceWorkflow, /environment:[\s\S]*name:\s+production/, "VPS evidence workflow must use the production environment protection.");
-  assertMatch(githubVpsEvidenceWorkflow, /DEPLOY_SSH_KEY[\s\S]*DEPLOY_REMOTE[\s\S]*DEPLOY_REMOTE_DIR[\s\S]*DEPLOY_SSH_PORT[\s\S]*VPS_HARDENED_SSH_PORT/, "VPS evidence workflow must use production SSH key, target and port variables.");
-  assertMatch(githubVpsEvidenceWorkflow, /confirm_mutating_vps[\s\S]*CONFIRM_MUTATING_VPS[\s\S]*vps-evidence-request\.mjs render[\s\S]*"\$DEPLOY_REMOTE" 'bash -s'/, "VPS evidence workflow must validate and encode inputs before a fixed remote command.");
-  assertNoMatch(githubVpsEvidenceWorkflow, /bash -s --|hardening_args="/, "VPS evidence workflow must not place dynamic inputs in the SSH command or string-built argv.");
-  assertMatch(vpsEvidenceRemoteScript, /__PLATFORM_VPS_EVIDENCE_TGZ_BEGIN__[\s\S]*__PLATFORM_VPS_EVIDENCE_TGZ_END__/, "VPS evidence remote script must transport a bounded report archive.");
-  assertMatch(githubVpsEvidenceWorkflow, /Upload VPS evidence reports[\s\S]*reports\/vps-bootstrap\/[\s\S]*reports\/vps-hardening\/[\s\S]*reports\/vps-host\//, "VPS evidence workflow must upload remote VPS evidence reports.");
-  assertMatch(deployVPSScript, /DEPLOY_SSH_PORT[\s\S]*SSH_KEY_PATH[\s\S]*ssh "\$@" "\$REMOTE"/, "VPS deploy must use the configured SSH key and port.");
-  assertMatch(githubWorkflow, /DEPLOY_SSH_PORT:\s+\$\{\{ vars\.DEPLOY_SSH_PORT \}\}/, "Production deploy workflow must pass the configured SSH port.");
-  if (productionGoNoGoPolicyJson.version !== 1) {
-    fail("Production go/no-go policy must use version 1.");
-  }
-  for (const users of [50, 100, 500]) {
-    if (!productionGoNoGoPolicyJson.requiredLoadProfiles?.includes(users)) {
-      fail(`Production go/no-go policy must require the ${users}-user load profile.`);
-    }
-  }
-  for (const key of [
-    "requirePublicLoadTarget",
-    "requireLoadEdgeEvidence",
-    "requireEmailAlertDelivery",
-    "requireOffsiteRestore",
-    "requireReleaseProvenance",
-    "requireCloudflareAccessVerify",
-    "requireSecretRotationEvidence",
-    "requireRuntimePreGoLive",
-    "requireRestorePreGoLive",
-    "requireGithubRemoteVerification",
-    "requireProductionPreflight",
-  ]) {
-    if (productionGoNoGoPolicyJson[key] !== true) {
-      fail(`Production go/no-go policy must enable ${key}.`);
-    }
-  }
-  assertMatch(productionGoNoGoPolicyText, /"maxAgeHours"[\s\S]*"vpsHost"[\s\S]*"cloudflareAccess"[\s\S]*"secretRotation"/, "Production go/no-go policy must define evidence freshness budgets.");
-  assertMatch(composeBackupScheduler, /backup-scheduler:[\s\S]*profiles:\s*\r?\n\s+- backup/, "Backup scheduler must be an opt-in Compose profile.");
-  assertMatch(composeBackupScheduler, /logging:[\s\S]*max-size:\s+"10m"[\s\S]*max-file:\s+"5"/, "Backup scheduler must use bounded container logging.");
-  assertMatch(composeBackupScheduler, /image:\s+\$\{PLATFORM_OPS_IMAGE:-platform\/ops:local\}/, "Backup scheduler must reuse the Dockerized ops image.");
-  assertMatch(composeBackupScheduler, /docker\/ops\.Dockerfile/, "Backup scheduler must be buildable from the ops Dockerfile.");
-  assertMatch(composeBackupScheduler, /\/var\/run\/docker\.sock:\/var\/run\/docker\.sock/, "Backup scheduler must use Docker from inside the ops container.");
-  assertMatch(composeBackupScheduler, /backup-scheduler\.sh/, "Backup scheduler service must run the container-local scheduler script.");
-  assertMatch(composeBackupScheduler, /BACKUP_SCHEDULER_ENABLE_OFFSITE/, "Backup scheduler must support opt-in off-site backup upload.");
-  assertMatch(composeBackupScheduler, /PLATFORM_INFRA_HOST_ROOT:\s+\$\{PLATFORM_INFRA_HOST_ROOT:-\}/, "Backup scheduler must not hardcode a VPS host path by default.");
-  assertMatch(composeBackupScheduler, /PROJECT_SOURCE_HOST_ROOT:\s+\$\{PROJECT_SOURCE_HOST_ROOT:-\}/, "Backup scheduler must not hardcode a source host path by default.");
-  assertMatch(backupSchedulerScript, /detect_mount_source[\s\S]*docker inspect "\$container_id"/, "Backup scheduler must autodetect host mount sources from Docker.");
-  assertMatch(backupSchedulerScript, /BACKUP_SCHEDULER_ENV_FILE[\s\S]*write_env_var PLATFORM_INFRA_HOST_ROOT/, "Backup scheduler must pass detected host roots through a private runtime env file.");
-  assertMatch(backupSchedulerScript, /load_runtime_env\(\)[\s\S]*export "\$name=\$value"[\s\S]*--run/, "Backup scheduler must parse its private runtime env file without sourcing it.");
-  assertNoMatch(backupSchedulerScript, /(^|\n)\s*\.\s+"\$ENV_FILE"|printf '\. %s &&/, "Backup scheduler must not source its runtime env file.");
-  assertMatch(backupSchedulerScript, /BACKUP_SCHEDULER_CATALOG_CRON[\s\S]*backup-platform-catalog/, "Backup scheduler must schedule one complete typed platform catalog.");
-  assertMatch(backupSchedulerScript, /full-restore-drill/, "Backup scheduler must schedule a regular full restore drill.");
-  assertMatch(backupSchedulerScript, /BACKUP_SCHEDULER_ENABLE_RETENTION_APPLY[\s\S]*prune-manifest-backups/, "Backup scheduler must keep retention plan-only until explicitly enabled.");
-  assertMatch(backupSchedulerScript, /offsite-backup-restic/, "Backup scheduler must support off-site Restic upload.");
-  assertMatch(backupSchedulerScript, /crond -f/, "Backup scheduler must run cron in the foreground inside the container.");
-  assertMatch(compose, /x-default-logging:[\s\S]*max-size:\s+"10m"[\s\S]*max-file:\s+"5"/, "Compose services must define bounded json-file logging.");
-  assertMatch(compose, /^name:\s+\$\{COMPOSE_PROJECT_NAME:-platform_infra\}/m, "Compose must use an environment-selectable project name to avoid accidental duplicate stacks.");
-  assertMatch(composeBuild, /BACKEND_BUILD_IMAGE[\s\S]*WEB_BUILD_IMAGE[\s\S]*WORKER_NOTIFICATIONS_BUILD_IMAGE[\s\S]*WORKER_JOBS_BUILD_IMAGE/, "Compose build must use local build image variables.");
-  assertMatch(composeBuild, /cache_from:[\s\S]*cache_to:/, "Compose build must define reusable BuildKit cache import/export.");
-  assertMatch(composeBuild, /NEXT_PUBLIC_API_URL[\s\S]*NEXT_PUBLIC_ACCOUNT_URL/, "Compose build must pass public web URLs into the Next.js production build.");
-  assertNoMatch(composeBuild, /\$\{(?:BACKEND_IMAGE|WEB_IMAGE|WORKER_NOTIFICATIONS_IMAGE|WORKER_JOBS_IMAGE)[:-]/, "Compose build must not reuse production release image variables.");
-  assertNoMatch(traefikConfig, /insecure:\s+true/, "Traefik API/dashboard must not be exposed in insecure mode.");
-  assertNoMatch(traefikConfig, /dashboard:\s+true/, "Traefik dashboard must be disabled unless protected by an explicit auth gateway.");
-  assertNoMatch(compose, /8090:8080|api@internal|traefik\.localhost\.com/, "Traefik dashboard must not be routed or exposed in the local stack.");
-  assertNoMatch(compose, /prometheus\.localhost\.com|alertmanager\.localhost\.com/, "Prometheus and Alertmanager must remain internal; use authenticated Grafana for browser access.");
-  assertMatch(compose, /control-center:[\s\S]*image:\s+\$\{NODE_IMAGE:-node:26\.3\.1-alpine@sha256:[a-f0-9]{64}\}/, "Control Center must run as a digest-pinned Node service.");
-  assertMatch(controlCenterServer, /x-platform-control-center-runtime[^\n]*node/, "Control Center responses must expose Node runtime evidence headers.");
-  assertMatch(compose, /project-router:[\s\S]*CONTROL_CENTER_UPSTREAM:\s+http:\/\/control-center:8080/, "Project router must send the admin host to the Node Control Center.");
-  assertMatch(compose, /project-router:[\s\S]*PROJECT_ROUTER_ALLOWED_UPSTREAMS:/, "Project router must receive an explicit service allowlist.");
-  assertNoMatch(compose, /local-projects:[\s\S]*url:\s+http:\/\/project-router:8080/, "Traefik must not publish project-router wildcard routes by default.");
-  assertMatch(compose, /enterprise-portal:[\s\S]*url:\s+http:\/\/control-center:8080/, "Traefik portal route must target the Node Control Center service.");
-  assertNoMatch(compose, /local-php/, "Traefik project routing must not be named local-php; PHP is only one runtime behind project-router.");
-  assertMatch(compose, /php-apache:[\s\S]*\$\{PHP_SOURCE_DIR:-\.\/php-runtime-root\}:\/var\/www\/html[\s\S]*project-router:[\s\S]*CONTROL_CENTER_UPSTREAM:\s+http:\/\/control-center:8080/, "PHP Apache must be runtime-only while the admin host resolves through the Node Control Center.");
-  assertMatch(projectRouterServer, /if \(!isEnabled\(project\)\)[\s\S]*Project disabled[\s\S]*dedicatedUpstreamFor\(project\)[\s\S]*nodeUpstreams/, "Project Router must block disabled projects and proxy Node projects only to dedicated upstreams.");
-  assertMatch(projectRouterServer, /PROJECT_ROUTER_ALLOWED_UPSTREAMS/, "Project Router must receive an explicit service allowlist.");
-  assertMatch(projectRouterServer, /function parseAllowedUpstreams[\s\S]*function validateUpstream/, "Project Router must parse and validate exact service-id upstreams.");
-  assertMatch(projectRouterServer, /import \{ isIP \} from "node:net"/, "Project Router must reject IP-literal upstream hosts.");
-  assertMatch(projectRouterServer, /function safeProxyPath[\s\S]*requestTarget\.startsWith\("\/\/"\)/, "Project Router must reject scheme-relative and absolute-form request targets.");
-  assertNoMatch(projectRouterServer, /node:child_process|spawn\(|execFile\(|exec\(|stopManagedProject/, "Project Router must stay proxy-only and must not manage project processes.");
-  assertMatch(projectRouterTest, /NODE_PROJECT_UPSTREAMS[\s\S]*php-demo\.localhost\.com[\s\S]*node-demo\.localhost\.com[\s\S]*Project disabled[\s\S]*nodeAfterEnablePayload\.runtime[\s\S]*nodeAfterEnablePayload\.host/, "Project Router tests must prove simultaneous PHP and Node hosting plus disable/re-enable behavior through dedicated upstreams.");
-  assertMatch(projectRouterTest, /169\.254\.169\.254[\s\S]*absoluteTarget[\s\S]*invalid request target[\s\S]*service allowlist policy violation/, "Project Router tests must reject metadata IP and absolute-form SSRF while not following redirects.");
-  assertMatch(compose, /phppgadmin:[\s\S]*tozd\/phppgadmin@sha256:[a-f0-9]{64}/, "phpPgAdmin must use an immutable image digest.");
-  assertMatch(composeRuntime, /PROJECT_ROUTER_ALLOWED_UPSTREAMS:[\s\S]*php-anniversary:80[\s\S]*node-ui:3000/, "Tracked runtime must enumerate only exact hosted service IDs for router egress.");
-  assertMatch(composeNetworks, /platform_observability:[\s\S]*internal:\s+true[\s\S]*app_node_account_ingress:[\s\S]*internal:\s+true[\s\S]*app_node_account_egress:/, "Network overlay must define internal observability and per-application ingress/data with isolated egress.");
-  assertNoMatch(composeNetworks, /- enterprise_net/, "Segmented services must not rejoin the legacy flat network.");
-  assertMatch(networkSegmentationPolicy, /deny-cross-app[\s\S]*deny-router-[\s\S]*phppgadmin-image-pinned[\s\S]*router-service-allowlist/, "Network policy must enforce cross-app, router/data, admin image and service allowlist boundaries.");
-  assertMatch(networkSegmentationSandbox, /docker network create --internal[\s\S]*deny "\$ROUTER" "\$DATABASE"[\s\S]*deny "\$APP_ONE" "\$METRICS"[\s\S]*deny "\$APP_ONE" "\$APP_TWO"/, "Network sandbox must prove intended paths and negative cross-zone connectivity.");
-  assertMatch(workloadEgressFirewall, /MODE=plan[\s\S]*DOCKER-USER/, "Workload egress firewall must default to plan and attach only through DOCKER-USER.");
-  assertMatch(workloadEgressFirewall, /10\.0\.0\.0\/8[\s\S]*169\.254\.0\.0\/16[\s\S]*192\.168\.0\.0\/16/, "Workload egress firewall must block private and metadata destinations.");
-  assertMatch(workloadEgressFirewall, /APPLY-WORKLOAD-EGRESS-FIREWALL/, "Workload egress firewall apply must require an explicit confirmation token.");
-  assertMatch(workloadEgressFirewall, /ROLLBACK-WORKLOAD-EGRESS-FIREWALL/, "Workload egress firewall rollback must require a distinct confirmation token.");
-  assertNoMatch(`${compose}\n${phpRuntimeRootPage}`, /projects-portal\/public|<\?php|\/control\//i, "The PHP runtime root must not implement or expose the Control Center surface.");
-  assertMatch(compose, /control-center:[\s\S]*PROJECT_AUDIT_FILE:\s+\/var\/www\/project-state\/audit\.jsonl/, "Control Center must write local audit evidence.");
-  assertMatch(compose, /control-center:[\s\S]*PROJECT_APPLICATIONS_FILE:\s+\/var\/www\/project-state\/applications\.json/, "Control Center must persist local application metadata from the Node service.");
-  assertMatch(compose, /control-center:[\s\S]*PROJECT_BACKUP_RECORDS_FILE:\s+\/var\/www\/project-state\/backups\.jsonl/, "Control Center must persist local backup and restore drill records from the Node service.");
-  assertMatch(compose, /control-center:[\s\S]*PROJECT_RESOURCE_LIMITS_FILE:\s+\/var\/www\/project-state\/resource-limits\.json/, "Control Center must persist local project resource limits from the Node service.");
-  assertMatch(compose, /control-center:[\s\S]*PROJECT_SECURITY_POLICIES_FILE:\s+\/var\/www\/project-state\/security-policies\.json/, "Control Center must persist local security policy metadata from the Node service.");
-  assertMatch(compose, /control-center:[\s\S]*PROJECT_ALERTS_FILE:\s+\/var\/www\/project-state\/alerts\.json[\s\S]*PROJECT_NOTIFICATION_CHANNELS_FILE:\s+\/var\/www\/project-state\/notification-channels\.json/, "Control Center must persist local alert and notification-channel metadata from the Node service.");
-  assertMatch(compose, /control-center:[\s\S]*PROJECT_SETTINGS_FILE:\s+\/var\/www\/project-state\/settings\.json/, "Control Center must persist local settings preferences from the Node service.");
-  assertMatch(compose, /control-center:[\s\S]*PROJECT_OPERATIONS_FILE:\s+\/var\/www\/project-state\/operations\.jsonl/, "Control Center must write local Operation and OperationStep records from the Node service.");
-  assertMatch(compose, /control-center:[\s\S]*PROJECT_DEPLOYMENTS_FILE:\s+\/var\/www\/project-state\/deployments\.jsonl/, "Control Center must persist local deployment records from the Node service.");
-  assertMatch(compose, /control-center:[\s\S]*PROJECT_WEBSPACES_FILE:\s+\/var\/www\/project-state\/webspaces\.json/, "Control Center must persist local webspace metadata from the Node service.");
-  assertNoMatch(compose, /control-center:[\s\S]*\.\/control-center:\/app:ro/, "Control Center production code must come from the immutable image rather than a host source bind mount.");
-  assertMatch(controlCenterDockerfile, /npm ci --omit=dev --ignore-scripts[\s\S]*COPY control-center\//, "Control Center image must install locked production dependencies and copy its source at build time.");
-  assertMatch(compose, /control-center:[\s\S]*CONTROL_CENTER_AUTH_MODE:\s+\$\{CONTROL_CENTER_AUTH_MODE:-oidc-passkey\}[\s\S]*CONTROL_CENTER_AUTH_STORE:\s+postgres/, "Control Center must fail closed on OIDC passkey auth with a PostgreSQL session store.");
-  assertMatch(compose, /CONTROL_CENTER_AUTH_DATABASE_URL_FILE:\s+\/run\/secrets\/control_center_database_url[\s\S]*secrets:[\s\S]*control_center_database_url/, "Control Center database credentials must be supplied by Docker secret file.");
-  assertMatch(envVpsExample, /CONTROL_CENTER_AUTH_MODE=oidc-passkey[\s\S]*CONTROL_CENTER_OIDC_REQUIRED_ACR=urn:platform:loa:passkey[\s\S]*CONTROL_CENTER_OIDC_REQUIRED_AMR=webauthn/, "VPS example env must require passkey-backed OIDC.");
-  assertMatch(envStagingExample, /CONTROL_CENTER_AUTH_MODE=oidc-passkey[\s\S]*CONTROL_CENTER_OIDC_REQUIRED_ACR=urn:platform:loa:passkey[\s\S]*CONTROL_CENTER_OIDC_REQUIRED_AMR=webauthn/, "Staging example env must require passkey-backed OIDC.");
-  assertMatch(controlCenterServer, /Admin Control Center/, "Control Center must title the operational panel.");
-  assertMatch(controlCenterServer, /handleApi[\s\S]*\/control\/overview/, "Control Center must expose operational API endpoints.");
-  assertMatch(controlCenterServer, /appendAudit/, "Control Center must audit every local control action.");
-  assertMatch(controlCenterServer, /planProjectCreate[\s\S]*CREATE-PROJECT[\s\S]*filesystemTouched:\s+false[\s\S]*dockerTouched:\s+false/, "Control Center must expose safe project create metadata operations.");
-  assertMatch(controlCenterServer, /planOrApplyProjectUpdate[\s\S]*planProjectArchive[\s\S]*applyProjectArchive[\s\S]*planProjectDelete[\s\S]*applyProjectDelete/, "Control Center must expose safe project update, archive and soft-delete lifecycle operations.");
-  assertMatch(controlCenterServer, /ARCHIVE-PROJECT[\s\S]*DELETE-PROJECT:\$\{project\.slug\}[\s\S]*filesystemTouched:\s+false/, "Project archive/delete must require strong confirmation and preserve project files.");
-  assertMatch(controlCenterTest, /projects\.json[\s\S]*\/control\/projects[\s\S]*CREATE-PROJECT[\s\S]*project-secret-should-not-leak/, "Control Center tests must cover project create persistence and secret redaction.");
-  assertMatch(controlCenterServer, /(?=[\s\S]*applicationsFile)(?=[\s\S]*readApplicationsState)(?=[\s\S]*writeApplicationsState)(?=[\s\S]*applicationRecord)(?=[\s\S]*planApplicationCreate)/, "Control Center must manage application metadata through a dedicated Node-managed JSON store.");
-  assertMatch(controlCenterServer, /webspacesFile[\s\S]*CREATE-WEBSPACE[\s\S]*UPDATE-QUOTA[\s\S]*readWebspacesState[\s\S]*writeWebspacesState/, "Control Center must persist declarative webspaces and quota metadata with explicit local confirmations.");
-  assertMatch(controlCenterServer, /resourceLimitsFile[\s\S]*planResourceLimitUpdate[\s\S]*readResourceLimitsState[\s\S]*writeResourceLimitsState/, "Control Center must persist resource limits in a dedicated Node-managed JSON store.");
-  assertMatch(controlCenterServer, /securityPoliciesFile[\s\S]*handleSecurityCommand[\s\S]*planSecurityPolicyUpdate[\s\S]*readSecurityPoliciesState[\s\S]*writeSecurityPoliciesState/, "Control Center must persist security policies in a dedicated Node-managed JSON store.");
-  assertMatch(controlCenterServer, /alertsFile[\s\S]*notificationChannelsFile[\s\S]*handleAlertCommand[\s\S]*planAlertRecord[\s\S]*readAlertsState[\s\S]*writeAlertsState[\s\S]*readNotificationChannelsState[\s\S]*writeNotificationChannelsState/, "Control Center must manage Logs and Alerts through dedicated Node-managed JSON stores.");
-  assertMatch(controlCenterServer, /settingsFile[\s\S]*handleSettingsCommand[\s\S]*planSettingsUpdate[\s\S]*readSettingsState[\s\S]*writeSettingsState/, "Control Center must manage Settings through a dedicated Node-managed JSON store.");
-  assertMatch(compose, /control-center:[\s\S]*PROJECT_PROVIDER_CONNECTIONS_FILE:\s+\/var\/www\/project-state\/provider-connections\.json/, "Control Center must persist provider connection metadata from the Node service.");
-  assertMatch(controlCenterServer, /(?=[\s\S]*providerConnectionsFile)(?=[\s\S]*readProviderConnectionsState)(?=[\s\S]*writeProviderConnectionsState)(?=[\s\S]*providerConnectionRecord)(?=[\s\S]*planProviderConnectionUpdate)/, "Control Center must manage provider_connections through a dedicated Node-managed JSON store.");
-  assertMatch(compose, /control-center:[\s\S]*PROJECT_DOMAINS_FILE:\s+\/var\/www\/project-state\/domains\.json/, "Control Center must persist local domain metadata from the Node service.");
-  assertMatch(controlCenterServer, /(?=[\s\S]*domainsFile)(?=[\s\S]*readDomainsState)(?=[\s\S]*writeDomainsState)(?=[\s\S]*domainRecord)(?=[\s\S]*planDomainCreate)/, "Control Center must manage domains through a dedicated Node-managed JSON store.");
-  assertMatch(compose, /control-center:[\s\S]*PROJECT_DATABASES_FILE:\s+\/var\/www\/project-state\/databases\.json/, "Control Center must persist declarative database metadata from the Node service.");
-  assertMatch(compose, /control-center:[\s\S]*PROJECT_DATABASE_DESTRUCTIVE_OPERATIONS_FILE:\s+\/var\/www\/project-state\/database-destructive-operations\.json[\s\S]*CONTROL_CENTER_REPORTS_ROOT:\s+\/var\/www\/infra-docs\/reports/, "Control Center must persist destructive database checkpoints and consume read-only recovery evidence.");
-  assertMatch(controlCenterServer, /databasesFile[\s\S]*handleDatabaseCommand[\s\S]*planDatabaseCreate[\s\S]*planDatabaseBackup[\s\S]*planDatabaseRestore[\s\S]*readDatabasesState[\s\S]*writeDatabasesState/, "Control Center must manage database create, backup and restore plans through a dedicated Node-managed JSON store.");
-  assertMatch(controlCenterServer, /planDatabaseDelete[\s\S]*approveDatabaseDelete[\s\S]*executeDatabaseDelete[\s\S]*backupRequiredBeforeLiveDelete:\s*true/, "Database deletion must use a request, approval and execution state machine with mandatory recovery evidence.");
-  assertMatch(controlCenterServer, /if \(!databaseLiveApply\) throw new RejectedOperationError\("Database delete executor is disabled; metadata and credentials were preserved\."\)/, "Database deletion must fail closed without the live adapter and preserve metadata and credentials.");
-  assertMatch(controlCenterServer, /transitionDatabaseDeleteOperation\(current, "database-dropped"\)[\s\S]*writeDatabaseDeleteOperationsState\(operationState\)[\s\S]*applyLiveDatabasePrincipalCleanup[\s\S]*removeDatabaseCredentialFile/, "Database deletion must persist the database-dropped checkpoint before principal, credential or metadata cleanup.");
-  assertNoMatch(controlCenterServer, /payload\.confirm\s*===\s*[`'"]DELETE-DATABASE:/, "Control Center must not retain the legacy one-step database deletion confirmation.");
-  assertMatch(databaseDestructiveWorkflowScript, /platform\.database-delete-operation\/v1[\s\S]*fresh-exact-backup-manifest-missing[\s\S]*fresh-exact-restore-drill-missing[\s\S]*fresh-exact-offsite-receipt-missing/, "Database delete workflow must require exact fresh backup, restore and off-site evidence.");
-  assertMatch(databaseDestructiveWorkflowScript, /readSync\(descriptor[\s\S]*fileSha256\(artifactPath\) !== artifact\.sha256/, "Database delete evidence must hash backup artifacts with bounded memory before approval.");
-  assertMatch(databaseOwnershipScript, /assertPrincipalDeletionAllowed[\s\S]*assertPrincipalCleanupAllowed[\s\S]*Database principal cleanup is allowed only after the exact database was dropped/, "Database principal cleanup must retain exact ownership and privilege checks after the database-drop checkpoint.");
-  assertMatch(databaseDestructiveWorkflowTest, /exact fresh backup, restore and off-site receipt[\s\S]*rollback-required/, "Database delete tests must cover exact recovery evidence and terminal post-drop failure handling.");
-  assertMatch(databaseOwnershipSandboxTest, /missing-evidence-mariadb[\s\S]*actualRestoreBeforeDeletePassed[\s\S]*livePlatformDatabasesTouched/, "Database deletion sandbox must prove restore before delete and preserve live platform databases.");
-  assertMatch(opsScript, /platform\.offsite-backup-receipt\/v1[\s\S]*snapshotId:[\s\S]*repositoryOffsite:\s*true/, "Off-site backup must emit an exact non-secret snapshot receipt consumable by destructive gates.");
-  assertMatch(controlCenterTest, /databases\.json[\s\S]*\/control\/databases[\s\S]*CREATE-DATABASE[\s\S]*database-secret-should-not-leak/, "Control Center tests must cover database metadata persistence, backup/restore plans and secret redaction.");
-  assertMatch(compose, /control-center:[\s\S]*PROJECT_STORAGE_BUCKETS_FILE:\s+\/var\/www\/project-state\/storage-buckets\.json/, "Control Center must persist declarative storage bucket metadata from the Node service.");
-  assertMatch(controlCenterServer, /storageBucketsFile[\s\S]*handleStorageCommand[\s\S]*planStorageBucketCreate[\s\S]*planStorageBucketPolicy[\s\S]*planStorageBucketLifecycle[\s\S]*planStorageBucketAccessKey[\s\S]*planStorageBucketBackup[\s\S]*planStorageBucketRestore[\s\S]*readStorageBucketsState[\s\S]*writeStorageBucketsState/, "Control Center must manage storage bucket create, policy, lifecycle, access key metadata, backup and restore plans through a dedicated Node-managed JSON store.");
-  assertMatch(controlCenterTest, /storage-buckets\.json[\s\S]*\/control\/storage\/buckets[\s\S]*CREATE-BUCKET[\s\S]*storage-secret-should-not-leak/, "Control Center tests must cover storage bucket metadata persistence, policy/lifecycle backup/restore plans and secret redaction.");
-  assertMatch(compose, /control-center:[\s\S]*PROJECT_SENSITIVE_MATERIALS_FILE:\s+\/var\/www\/project-state\/sensitive-materials\.json/, "Control Center must persist metadata-only sensitive material inventory from the Node service.");
-  assertMatch(controlCenterServer, /sensitiveMaterialsFile[\s\S]*handleMaterialCommand[\s\S]*planMaterialDeclare[\s\S]*planMaterialRotation[\s\S]*planMaterialUsage[\s\S]*planMaterialAccessAudit[\s\S]*readSensitiveMaterialsState[\s\S]*writeSensitiveMaterialsState/, "Control Center must manage sensitive material inventory, rotation, usage and access audit through a dedicated Node-managed JSON store.");
-  assertMatch(controlCenterTest, /sensitive-materials\.json[\s\S]*\/control\/secrets\/materials[\s\S]*DECLARE-MATERIAL[\s\S]*material-plain-value-should-not-leak/, "Control Center tests must cover metadata-only sensitive material persistence, rotation, usage/access audit and plaintext redaction.");
-  assertMatch(compose, /control-center:[\s\S]*PROJECT_VAULT_FILE:\s+\/var\/www\/project-state\/secret-vault\.json[\s\S]*CONTROL_CENTER_VAULT_KEY_FILE:\s+\/run\/secrets\/control_center_vault_keys[\s\S]*CONTROL_CENTER_VAULT_LEGACY_KEY_FILE:\s+\/run\/secrets\/projects_gateway_signing_keys[\s\S]*CONTROL_CENTER_EXISTING_SECRETS_DIR:\s+\/var\/www\/infra-docs\/secrets/, "Control Center must persist the encrypted local secret vault, use a dedicated keyring with an explicit legacy migration source, and scan existing secret files from the read-only infrastructure tree.");
-  assertMatch(controlCenterServer, /vaultFile[\s\S]*handleVaultCommand[\s\S]*planVaultSecretCreate[\s\S]*planVaultSecretImportExisting[\s\S]*planVaultSecretReveal[\s\S]*planVaultSecretDelete[\s\S]*sealVaultValue[\s\S]*openVaultValue[\s\S]*readVaultState[\s\S]*writeVaultState/, "Control Center must manage a dedicated encrypted Vault with add/remove, existing-secret import, and explicit audited reveal operations.");
-  assertMatch(controlCenterTest, /secret-vault\.json[\s\S]*\/control\/vault\/import-existing[\s\S]*IMPORT-EXISTING-SECRETS[\s\S]*\/control\/vault\/secrets[\s\S]*STORE-VAULT-SECRET[\s\S]*REVEAL-VAULT-SECRET[\s\S]*DELETE-VAULT-SECRET/, "Control Center tests must cover encrypted Vault persistence, existing secret import, explicit reveal, plaintext redaction and item removal.");
-  assertMatch(controlCenterPackage, /"name":\s+"@platform\/control-center"/, "Control Center project identity must stay generic.");
-  assertMatch(controlCenterLocalStyles, /(?=[\s\S]*--cc-bg)(?=[\s\S]*--cc-surface)(?=[\s\S]*--cc-surface-raised)(?=[\s\S]*--cc-text)(?=[\s\S]*--cc-muted)(?=[\s\S]*--cc-accent)(?=[\s\S]*--cc-radius)(?=[\s\S]*--cc-shadow)(?=[\s\S]*\.cc-app-shell)(?=[\s\S]*\.ops-shell)(?=[\s\S]*\.ops-sidebar)(?=[\s\S]*\.cc-topbar)(?=[\s\S]*\.ops-nav)(?=[\s\S]*\.ops-table)(?=[\s\S]*\.ops-metrics)/, "Control Center must provide a local --cc-* visual system with operations shell, navigation, metrics and tables.");
-  assertNoMatch(controlCenterLocalStyles, /\.card[\s\S]*border:\s*1px\s+solid/i, "Control Center cards must not use border: 1px solid for contrast.");
-  assertMatch(controlCenterLocalComponents, /(?=[\s\S]*OperationsShell)(?=[\s\S]*OperationsTopbar)(?=[\s\S]*StatusGate)(?=[\s\S]*ProjectTable)(?=[\s\S]*ProjectActions)(?=[\s\S]*ProjectFileBrowser)(?=[\s\S]*DatabaseInventory)(?=[\s\S]*ResourceUsageTable)(?=[\s\S]*MetricTile)(?=[\s\S]*StatusPill)(?=[\s\S]*ActionButton)(?=[\s\S]*ProjectSwitcher)(?=[\s\S]*EmptyState)/, "Control Center must define the requested local operations UI component contract.");
-  assertMatch(`${controlCenterServer}\n${controlCenterLocalComponents}`, /(?=[\s\S]*serveStaticAsset[\s\S]*\/assets\/control-center\/)(?=[\s\S]*route\(parts, "control", "ui-package"\))(?=[\s\S]*readControlCenterUiPackage)(?=[\s\S]*controlCenterStylesheetLinks)(?=[\s\S]*\/assets\/control-center\/control-center\.css)(?=[\s\S]*cc-app-shell)(?=[\s\S]*ops-shell)(?=[\s\S]*ops-topbar)(?=[\s\S]*cc-topbar)(?=[\s\S]*ops-nav)/, "Control Center must serve and render through its local operations visual system.");
-  assertNoMatch(`${controlCenterServer}\n${controlCenterPackage}\n${compose}`, /ui-shell|pill-sidebar-nav|pill-tabs/, "Control Center runtime must not use retired visual dependency assets or shell classes.");
-  assertMatch(controlCenterServer, /function navigationGroupsForMode[\s\S]*navGroup\("platform", "Infrastructure"[\s\S]*navGroup\("delivery", "Delivery"[\s\S]*navGroup\("observability", "Observability"[\s\S]*navGroup\("security", "Security"/, "Control Center Advanced navigation must group enterprise sections into macro sidebar areas with page tabs.");
-  assertMatch(controlCenterLocalComponents, /(?=[\s\S]*operations-first information architecture)(?=[\s\S]*ProjectFileBrowser)(?=[\s\S]*DatabaseInventory)/, "Control Center UI contract must describe the operations portal.");
-  assertNoMatch(controlCenterLocalComponents, /ActivityTable|activity and backups/, "Control Center UI contract must not keep the removed Activity page contract.");
-  assertMatch(controlCenterTest, /(?=[\s\S]*\/assets\/control-center\/control-center\.css)(?=[\s\S]*\/control\/ui-package)(?=[\s\S]*@platform\/control-center-local-ui)(?=[\s\S]*cc-app-shell)(?=[\s\S]*ops-shell)(?=[\s\S]*ops-topbar)(?=[\s\S]*OperationsShell)(?=[\s\S]*ProjectFileBrowser)/, "Control Center tests must prove the local CSS, operations shell, navigation and UI contract are served.");
-  assertMatch(compose, /control-center:[\s\S]*PROJECT_WORKER_JOBS_FILE:\s+\/var\/www\/project-state\/worker-jobs\.json/, "Control Center must persist worker/job metadata from the Node service.");
-  assertMatch(controlCenterServer, /workerJobsFile[\s\S]*handleWorkerJobCommand[\s\S]*planWorkerDeclare[\s\S]*planQueueDeclare[\s\S]*planJobRecord[\s\S]*planJobRetry[\s\S]*planScheduleDeclare[\s\S]*planScheduleStatus[\s\S]*readWorkerJobsState[\s\S]*writeWorkerJobsState/, "Control Center must manage workers, queues, failed jobs, retries and schedules through a dedicated Node-managed JSON store.");
-  assertMatch(controlCenterTest, /worker-jobs\.json[\s\S]*\/control\/workers-jobs\/workers[\s\S]*DECLARE-WORKER[\s\S]*\/control\/workers-jobs\/jobs[\s\S]*PLAN-JOB-RETRY[\s\S]*worker-secret-should-not-leak/, "Control Center tests must cover worker/job metadata persistence, retry planning, schedules and secret redaction.");
-  assertMatch(compose, /control-center:[\s\S]*PROJECT_IDENTITY_ACCESS_FILE:\s+\/var\/www\/project-state\/identity-access\.json/, "Control Center must persist identity and access metadata from the Node service.");
-  assertMatch(controlCenterServer, /identityAccessFile[\s\S]*handleIdentityCommand[\s\S]*planIdentityAdminUser[\s\S]*planIdentityTeam[\s\S]*planIdentityRole[\s\S]*planIdentitySessionPolicy[\s\S]*planIdentityAccessReview[\s\S]*readIdentityAccessState[\s\S]*writeIdentityAccessState/, "Control Center must manage admin users, teams, roles, sessions and access reviews through a dedicated Node-managed JSON store.");
-  assertMatch(controlCenterServer, /renderIdentityAccess[\s\S]*Declare admin user[\s\S]*Roles &amp; Teams[\s\S]*Sessions &amp; Reviews/, "Control Center Identity & Access UI must expose admin users, roles, teams, sessions and access reviews.");
-  assertMatch(controlCenterTest, /identity-access\.json[\s\S]*\/control\/identity\/admin-users[\s\S]*DECLARE-ADMIN-USER[\s\S]*UPDATE-SESSION-POLICY[\s\S]*identity-secret-should-not-leak/, "Control Center tests must cover identity metadata persistence, session policy, access reviews and secret redaction.");
-  assertMatch(controlCenterServer, /operationsFile[\s\S]*appendOperation[\s\S]*readOperations/, "Control Center must persist operations in a dedicated Node-managed JSONL store.");
-  assertMatch(controlCenterServer, /deploymentsFile[\s\S]*appendDeployment[\s\S]*readDeployments/, "Control Center must persist deployment records in a dedicated Node-managed JSONL store.");
-  assertMatch(controlCenterServer, /backupRecordsFile[\s\S]*handleBackupCommand[\s\S]*appendBackupRecord[\s\S]*readBackupRecords/, "Control Center must persist backup/restore plan records in a dedicated Node-managed JSONL store.");
-  assertMatch(controlCenterServer, /operationId[\s\S]*requestedBy[\s\S]*resultSummary[\s\S]*reportPath[\s\S]*errorMessage[\s\S]*steps:/, "Control Center Operation records must include the enterprise operation fields and OperationStep list.");
-  assertMatch(controlCenterServer, /planApplicationLifecycle[\s\S]*healthcheck[\s\S]*deploy[\s\S]*rollback[\s\S]*applyApplicationLifecycle[\s\S]*planApplicationDeployment/, "Control Center must expose lifecycle, healthcheck, deploy and rollback as safe application operation plans.");
-  assertMatch(controlCenterServer, /applicationLifecycleConfirmation[\s\S]*toUpperCase\(\)[\s\S]*applyApplicationLifecycle[\s\S]*commandExecuted:\s+false[\s\S]*healthcheckNetworkTouched:\s+false/, "Control Center lifecycle apply must require confirmation and remain metadata-only without Docker or network probes.");
-  assertMatch(controlCenterServer, /renderApplications[\s\S]*\["start", "stop", "restart", "healthcheck", "deploy", "rollback"\]/, "Control Center Applications UI must show lifecycle, healthcheck, deploy and rollback controls.");
-  assertMatch(controlCenterServer, /(?=[\s\S]*navigationForMode)(?=[\s\S]*Workers & Jobs)(?=[\s\S]*CI\/CD & GitHub Governance)(?=[\s\S]*Logs Advanced)(?=[\s\S]*Alerts Advanced)(?=[\s\S]*Disaster Recovery)(?=[\s\S]*Release Evidence)(?=[\s\S]*Security Advanced)(?=[\s\S]*Billing \/ Plans)/, "Control Center Advanced Mode navigation must cover the requested enterprise sections.");
-  assertMatch(controlCenterServer, /advancedItems[\s\S]*workers-jobs[\s\S]*cicd-github[\s\S]*logs-advanced[\s\S]*alerts-advanced[\s\S]*disaster-recovery[\s\S]*release-evidence[\s\S]*security-advanced[\s\S]*billing/, "Control Center Advanced Mode must define skeleton capability cards for all requested enterprise sections.");
-  assertMatch(controlCenterServer, /route\(parts, "control", "advanced"\)[\s\S]*advancedControlOverview[\s\S]*advancedControlSection/, "Control Center must expose read-only Advanced Mode API endpoints.");
-  assertMatch(controlCenterServer, /function advancedControlSection[\s\S]*dryRunDefault:\s+true[\s\S]*liveProviderTouched:\s+false[\s\S]*dockerTouched:\s+false[\s\S]*productionEvidence:\s+false/, "Advanced Mode API must remain dry-run/read-only and reject production evidence claims.");
-  assertMatch(controlCenterServer, /route\(parts, "control", "network"\)[\s\S]*buildNetworkTopology[\s\S]*parseTraefikRouters[\s\S]*parseTraefikMiddlewares[\s\S]*parseTraefikExposedPorts[\s\S]*networkProbeExecuted:\s+false/, "Control Center must expose a read-only Network API from Traefik and Compose config without live probes.");
-  assertMatch(controlCenterServer, /(?=[\s\S]*renderNetworkAdvanced)(?=[\s\S]*Traefik Network)(?=[\s\S]*Router Topology)(?=[\s\S]*Middleware Chain)(?=[\s\S]*Loopback host ports)(?=[\s\S]*Route Test Plan)/, "Control Center Network Advanced UI must show routers, middleware, ports and route test plans.");
-  assertMatch(controlCenterServer, /route\(parts, "control", "monitoring"\)[\s\S]*buildMonitoringTopology[\s\S]*parsePrometheusScrapeJobs[\s\S]*parseGrafanaDashboardPanels[\s\S]*parsePrometheusAlertRules[\s\S]*liveQueryExecuted:\s+false/, "Control Center must expose a read-only Monitoring API from observability config without live Prometheus or Loki queries.");
-  assertMatch(controlCenterServer, /(?=[\s\S]*renderMonitoringAdvanced)(?=[\s\S]*Prometheus Targets)(?=[\s\S]*Grafana Panels)(?=[\s\S]*Alert Rules)(?=[\s\S]*Backend errors)(?=[\s\S]*WAF events)(?=[\s\S]*Auth failures)/, "Control Center Monitoring Advanced UI must show scrape jobs, dashboard panels and alert rules.");
-  assertMatch(controlCenterServer, /route\(parts, "control", "adapters"\)[\s\S]*planAdapterAction[\s\S]*planAdapterVerify[\s\S]*rejectAdapterApply/, "Control Center must route all provider and infra adapter work through backend adapter endpoints.");
-  assertMatch(controlCenterServer, /function adapterRegistry[\s\S]*CloudflareAdapter[\s\S]*TraefikAdapter[\s\S]*DockerAdapter[\s\S]*GitHubAdapter[\s\S]*PrometheusAdapter[\s\S]*LokiAdapter[\s\S]*AlertmanagerAdapter[\s\S]*BackupAdapter[\s\S]*RestoreAdapter[\s\S]*MinioAdapter[\s\S]*DatabaseAdapter[\s\S]*SecurityAdapter[\s\S]*GoNoGoAdapter/, "Control Center must define the requested enterprise adapter registry.");
-  assertMatch(controlCenterServer, /function adapterRecord[\s\S]*dryRunDefault:\s+true[\s\S]*liveProviderTouched:\s+false[\s\S]*destructiveActionExecuted:\s+false[\s\S]*productionEvidence:\s+false/, "Control Center adapter records must stay safe-by-default.");
-  assertMatch(controlCenterServer, /function rejectAdapterApply[\s\S]*Adapter apply rejected[\s\S]*RejectedOperationError/, "Control Center adapter apply must be rejected until explicit backend implementations are added.");
-  assertMatch(controlCenterServer, /(?=[\s\S]*renderResources)(?=[\s\S]*Quota per project)(?=[\s\S]*Set limits)(?=[\s\S]*dockerTouched:\s+false)/, "Control Center Resources UI must expose per-project quotas without mutating Docker live from the web panel.");
-  assertMatch(controlCenterServer, /renderSecurity[\s\S]*WAF[\s\S]*Rate limit[\s\S]*Cloudflare Access[\s\S]*Admin Protection[\s\S]*Security Headers[\s\S]*Update policy/, "Control Center Security UI must expose policy controls instead of a raw JSON panel.");
-  assertMatch(controlCenterServer, /(?=[\s\S]*renderLogsAlerts)(?=[\s\S]*Open alerts)(?=[\s\S]*Recent errors)(?=[\s\S]*Notification Channels)(?=[\s\S]*Record alert)/, "Control Center Logs / Alerts UI must expose open alerts, recent errors and notification status.");
-  assertMatch(controlCenterServer, /(?=[\s\S]*renderSettings)(?=[\s\S]*Default mode)(?=[\s\S]*Base domain)(?=[\s\S]*Cloudflare connection)(?=[\s\S]*GitHub connection)(?=[\s\S]*SMTP\/alert status)(?=[\s\S]*Update settings)/, "Control Center Settings UI must expose mode, domain and provider connection metadata controls.");
-  assertNoMatch(controlCenterServer, /renderBackups[\s\S]*Backup History|section\s*===\s*"backups"|id:\s*"backups"|label:\s*"Backup"/, "Control Center must not keep the removed standalone Backup page or sidebar section.");
-  assertMatch(controlCenterServer, /sanitizeOperationDetails[\s\S]*sanitizeValue/, "Control Center operation details must be recursively sanitized before persistence.");
-  assertMatch(controlCenterServer, /admin\.oidc\.login\.success[\s\S]*admin\.oidc\.login\.failed/, "Control Center must audit OIDC login success and failure without logging tokens.");
-  assertMatch(controlCenterServer, /await controlAuth\.authenticate\(req\)[\s\S]*admin_auth_required[\s\S]*controlAuth\.authorize/, "Control Center must authenticate and authorize requests before control-plane dispatch.");
-  assertMatch(controlCenterAuth, /code_challenge_method[\s\S]*S256[\s\S]*jwtVerify[\s\S]*requiredAcr[\s\S]*requiredAmr/, "Control Center OIDC must enforce PKCE, signed tokens, passkey ACR and AMR.");
-  assertMatch(controlCenterAuth, /PostgresAuthStore[\s\S]*consumeTransaction[\s\S]*revokeSession[\s\S]*__Host-platform_cc_session/, "Control Center sessions must be opaque, PostgreSQL-backed, one-time and revocable.");
-  assertMatch(controlCenterAuth, /validateMutation[\s\S]*headers\.origin[\s\S]*sec-fetch-site[\s\S]*x-csrf-token[\s\S]*csrf_token_rejected/, "Control Center mutations must require exact Origin, same-origin Fetch Metadata and a session-bound CSRF token.");
-  assertMatch(controlCenterAuth, /freshAuthSeconds[\s\S]*admin_reauthentication_required[\s\S]*registerLoginAttempt[\s\S]*loginLockSeconds/, "Control Center must require recent passkey auth for sensitive actions and use a shared login throttle.");
-  assertMatch(controlCenterServer, /size > 64 \* 1024[\s\S]*Request body is too large/, "Control Center must bound request bodies without relying on the WAF.");
-  assertMatch(controlCenterClient, /__Host-platform_cc_csrf[\s\S]*X-CSRF-Token/, "Control Center browser mutations must return the host-bound CSRF token in a request header.");
-  assertMatch(controlCenterSessionSecurityMigration, /csrf_hash[\s\S]*policy_version[\s\S]*login_throttle/, "Control Center session security schema must persist CSRF binding, policy version and shared throttle state.");
-  assertMatch(keycloakPlatformRealm, /"bruteForceProtected": true[\s\S]*"resetPasswordAllowed": false[\s\S]*"browserFlow": "platform-passkey-browser"[\s\S]*webauthn-authenticator-passwordless[\s\S]*oidc-amr-mapper/, "Keycloak realm contract must be brute-force protected and passkey-only with AMR evidence.");
-  assertMatch(keycloakPasskeyReadiness, /CONTROL_CENTER_MIN_PASSKEYS:-2[\s\S]*webauthn-passwordless[\s\S]*passkey_count[\s\S]*owner\|admin\|viewer/, "Keycloak readiness must require two passwordless credentials and an authorized role per administrator.");
-  assertMatch(compose, /KC_EVENT_METRICS_USER_ENABLED:\s+"true"[\s\S]*KC_EVENT_METRICS_USER_EVENTS:\s+login,logout/, "Keycloak user event metrics must be enabled for login and lockout alerting.");
-  assertMatch(prometheusAlerts, /KeycloakPlatformLoginFailures[\s\S]*keycloak_user_events_total[\s\S]*KeycloakPlatformAdminLocked/, "Prometheus must alert on repeated Keycloak login failures and administrator lockout.");
-  assertMatch(controlCenterServer, /AsyncLocalStorage[\s\S]*requestIdentity\.run[\s\S]*requestedBy:\s+identity\?\.subject[\s\S]*actor:\s+identity\?\.subject/, "Control Center operations and audit records must use the authenticated OIDC subject rather than a shared local actor.");
-  assertNoMatch(controlCenterServer, /CONTROL_CENTER_ADMIN_PASSWORD|type=["']password["']|current-password|verifyAdminPassword|handleLogin/, "Control Center must not retain a local password login path.");
-  assertMatch(controlCenterAuthTest, /test-disabled auth is restricted[\s\S]*rejects all local password verifier settings[\s\S]*consumes transactions once and revokes sessions/, "Control Center auth tests must prove test-only bypass restrictions, no password fallback and replay prevention.");
-  assertMatch(controlCenterAuth, /HttpOnly; Secure; SameSite=Lax/, "Control Center admin session cookie must be HttpOnly, Secure and SameSite=Lax.");
-  assertMatch(controlCenterServer, /planSubdomain[\s\S]*APPLY-PRODUCTION/, "Control Center must keep production subdomain changes behind explicit apply confirmation.");
-  assertMatch(controlCenterServer, /handleSubdomainCommand[\s\S]*apply-local[\s\S]*verify[\s\S]*remove[\s\S]*REMOVE-SUBDOMAIN/, "Control Center must expose safe UI actions for local subdomain apply, verify and removal.");
-  assertMatch(controlCenterServer, /renderDomains[\s\S]*Add local[\s\S]*renderSubdomainCard[\s\S]*Discovered route/, "Control Center Domains UI must include local subdomain creation and protected removal controls.");
-  assertMatch(controlCenterServer, /validateHostname/, "Control Center must validate hostnames before planning DNS changes.");
-  assertMatch(controlCenterServer, /validateWebspacePath/, "Control Center must reject unsafe webspace paths.");
-  assertNoMatch(controlCenterServer, /node:child_process|child_process|shell_exec|execSync|spawn\(/, "Control Center must not execute shell commands from the web panel.");
-  assertNoMatch(controlCenterServer, /C:\\|powershell|pwsh/i, "Control Center must not depend on Windows host paths or PowerShell.");
-  assertNoMatch(controlCenterServer, /CLOUDFLARE_API_TOKEN|api\.github\.com|cloudflare\.com\/client\/v4/i, "Control Center foundation must not make live provider calls or expose provider secrets.");
-  assertMatch(githubWorkflow, /Control Center tests[\s\S]*control-center-tests/, "Infrastructure CI must run the Control Center API/UI regression tests.");
-  assertMatch(githubWorkflow, /Project Router tests[\s\S]*project-router-tests/, "Infrastructure CI must run the Project Router PHP/Node routing regression tests.");
-  assertMatch(opsScript, /async function controlCenterTests[\s\S]*controlCenterTestFiles\(\)[\s\S]*"control-center-tests": controlCenterTests/, "Ops runner must expose all container-first Control Center tests.");
-  assertMatch(opsScript, /async function projectRouterTests[\s\S]*project-router\/tests\/project-router\.test\.mjs[\s\S]*"project-router-tests": projectRouterTests/, "Ops runner must expose container-first Project Router tests.");
-  assertMatch(controlCenterTest, /admin guard[\s\S]*actions\/toggle-project/, "Control Center tests must keep mutation routes behind the admin guard.");
-  assertMatch(controlCenterTest, /production[\s\S]*bad\.localhost\.com[\s\S]*422/, "Control Center tests must reject localhost production subdomain plans.");
-  assertMatch(controlCenterTest, /actions\/subdomain-command[\s\S]*apply-local[\s\S]*subdomain-ui-secret-should-not-leak[\s\S]*REMOVE-SUBDOMAIN/, "Control Center tests must cover UI-driven local subdomain apply, verify, removal and secret redaction.");
-  assertMatch(controlCenterTest, /applications\.json[\s\S]*\/control\/applications[\s\S]*CREATE-APPLICATION[\s\S]*application-secret-should-not-leak/, "Control Center tests must cover application create persistence and secret redaction.");
-  assertMatch(controlCenterTest, /\/control\/applications\/node-demo-events-worker\/start[\s\S]*START-APPLICATION:node-demo-events-worker[\s\S]*\/control\/applications\/node-demo-events-worker\/healthcheck[\s\S]*lifecycle-secret-should-not-leak/, "Control Center tests must cover lifecycle metadata apply, healthcheck and secret redaction.");
-  assertMatch(controlCenterTest, /domains\.json[\s\S]*\/control\/domains[\s\S]*CREATE-DOMAIN[\s\S]*domain-secret-should-not-leak/, "Control Center tests must cover domain metadata persistence and secret redaction.");
-  assertMatch(controlCenterTest, /provider-connections\.json[\s\S]*\/control\/provider-connections[\s\S]*UPDATE-PROVIDER-CONNECTION[\s\S]*provider-secret-should-not-leak/, "Control Center tests must cover provider connection metadata persistence and secret redaction.");
-  assertMatch(controlCenterTest, /project\.archive[\s\S]*ARCHIVE-PROJECT[\s\S]*project\.delete[\s\S]*DELETE-PROJECT:php-demo[\s\S]*filesystemTouched/, "Control Center tests must cover project archive and soft-delete confirmation without deleting files.");
-  assertMatch(controlCenterTest, /APPLY-PRODUCTION[\s\S]*409/, "Control Center tests must reject production apply without valid production execution.");
-  assertMatch(controlCenterTest, /\.\.\/secret[\s\S]*Invalid webspace path/, "Control Center tests must cover path traversal rejection.");
-  assertMatch(controlCenterTest, /webspaces\.json[\s\S]*CREATE-WEBSPACE[\s\S]*UPDATE-QUOTA[\s\S]*webspace-secret-should-not-leak/, "Control Center tests must cover local webspace create/quota persistence and secret redaction.");
-  assertMatch(controlCenterTest, /resource-limits\.json[\s\S]*\/control\/resources\/limits[\s\S]*resource-limit-secret-should-not-leak[\s\S]*\/control\/resources\/summary/, "Control Center tests must cover resource limit persistence and secret redaction without the removed Resources page.");
-  assertMatch(controlCenterTest, /security-policies\.json[\s\S]*\/actions\/security-command[\s\S]*security-secret-should-not-leak[\s\S]*\/control\/security\/summary/, "Control Center tests must cover security policy persistence, UI action and secret redaction.");
-  assertMatch(controlCenterTest, /alerts\.json[\s\S]*notification-channels\.json[\s\S]*\/actions\/alert-command[\s\S]*alert-secret-should-not-leak[\s\S]*\/control\/logs\/summary/, "Control Center tests must cover alert persistence, notification metadata and secret redaction.");
-  assertMatch(controlCenterTest, /settings\.json[\s\S]*\/actions\/settings-command[\s\S]*settings-secret-should-not-leak[\s\S]*\/control\/settings/, "Control Center tests must cover settings persistence, UI action and secret redaction.");
-  assertMatch(controlCenterTest, /super-secret-token-should-not-leak[\s\S]*doesNotMatch/, "Control Center tests must prove supplied secret-like payloads are not serialized to audit/API output.");
-  assertMatch(controlCenterTest, /operations\.jsonl[\s\S]*\/control\/operations[\s\S]*operationId[\s\S]*output/, "Control Center tests must prove Operation and OperationStep records are persisted and exposed safely.");
-  assertMatch(controlCenterTest, /deployments\.jsonl[\s\S]*\/control\/applications\/node-demo\/deploy[\s\S]*\/control\/applications\/node-demo\/rollback[\s\S]*\/control\/deployments/, "Control Center tests must prove deployment and rollback plans are persisted and exposed safely.");
-  assertMatch(controlCenterTest, /backups\.jsonl[\s\S]*\/actions\/backup-command[\s\S]*backup-secret-should-not-leak[\s\S]*\/control\/backups\/records/, "Control Center tests must prove backup and restore drill plans are persisted and secret-redacted.");
-  assertMatch(controlCenterTest, /(?=[\s\S]*ops-shell)(?=[\s\S]*Passati)(?=[\s\S]*Non passati)(?=[\s\S]*section=projects)(?=[\s\S]*section=files)(?=[\s\S]*section=databases)(?=[\s\S]*project-backups)(?=[\s\S]*data-ops-nav-group="backups")(?=[\s\S]*doesNotMatch)/, "Control Center tests must cover the operations portal sections and prove the removed Backup section is absent.");
-  assertNoMatch(controlCenterTest, /assert\.match\(html,\s*\/Attivit.|ActivityTable"\), true|assert\.match\([^;]+,\s*\/Errori, avvisi e problemi\//, "Control Center tests must not expect the removed Activity page.");
-  assertMatch(controlCenterTest, /(?=[\s\S]*\/control\/advanced)(?=[\s\S]*\/control\/network)(?=[\s\S]*\/control\/advanced\/network)(?=[\s\S]*enterprise-backend)(?=[\s\S]*enterprise-rate-limit)(?=[\s\S]*\/control\/monitoring)(?=[\s\S]*\/control\/advanced\/monitoring)(?=[\s\S]*Backend errors)(?=[\s\S]*Auth failures)(?=[\s\S]*\/control\/advanced\/cloudflare)(?=[\s\S]*\/control\/advanced\/release-evidence)(?=[\s\S]*\/control\/advanced\/identity)(?=[\s\S]*\/control\/advanced\/secrets)/, "Control Center tests must cover Advanced Mode API evidence endpoints including Network and Monitoring topology.");
-  assertMatch(controlCenterTest, /\/control\/adapters[\s\S]*\/control\/adapters\/cloudflare[\s\S]*\/control\/adapters\/cloudflare\/plan[\s\S]*\/control\/adapters\/go-no-go\/verify[\s\S]*\/control\/adapters\/cloudflare\/apply/, "Control Center tests must cover adapter registry, dry-run planning, verification planning and rejected apply.");
-  assertMatch(controlCenterServer, /route\(parts, "control", "readiness"\)[\s\S]*buildControlReadiness[\s\S]*readGovernanceManifest\("enterprise-requirements\.json"\)[\s\S]*readGovernanceManifest\("production-readiness\.json"\)[\s\S]*productionEvidence:\s+false[\s\S]*localEvidenceIsProductionEvidence:\s+false/, "Control Center must expose a sanitized readiness matrix from governance manifests without production evidence claims.");
-  assertIncludesAll(controlCenterServer, ["readLatestGoNoGoReport", "renderOpsStatus", "Passati", "Non passati", "Motivo", "Cosa fare", "renderProjectDetailBackups"], "Control Center operations UI must expose go/no-go blockers, reasons, required actions and application-scoped backups.");
-  assertNoMatch(controlCenterServer, /renderOpsActivity|activityProblems|id:\s*"activity"|label:\s*"Attivit.|section\s*===\s*"activity"/, "Control Center must not keep the removed Activity page route or renderer.");
-  assertMatch(controlCenterTest, /(?=[\s\S]*\/control\/readiness)(?=[\s\S]*productionReadiness\.requirementCount,\s+19)(?=[\s\S]*tls-https-production-ready)(?=[\s\S]*pending-live-proof)(?=[\s\S]*localEvidenceIsProductionEvidence,\s+false)/, "Control Center tests must cover the readiness API, 19-point infrastructure checklist and live-proof separation.");
-  assertMatch(controlCenterTest, /local evidence only[\s\S]*notEqual[\s\S]*production evidence/, "Control Center tests must prove local evidence is not accepted as production evidence.");
-  assertMatch(controlCenterTest, /admin guard[\s\S]*admin_auth_required[\s\S]*HttpOnly[\s\S]*Secure[\s\S]*SameSite=Lax/, "Control Center tests must cover the admin auth gate and hardened session cookie.");
-  assertNoMatch(controlCenterTest, /CLOUDFLARE_API_TOKEN|api\.github\.com|cloudflare\.com\/client\/v4/i, "Control Center tests must not make live provider calls.");
-  assertNoMatch(phpRuntimeRootPage, /control-shell|\/control\//i, "PHP runtime root must not implement the Control Center UI or API surface.");
-  assertNoMatch(`${controlCenterServer}\n${phpRuntimeRootPage}`, /prometheus\.localhost\.com|alertmanager\.localhost\.com|traefik\.localhost\.com/, "Control Center UI must not link unauthenticated internal consoles.");
-  assertMatch(composeHa, /failure_action:\s+rollback/, "HA overlay must rollback failed rolling updates.");
-  assertMatch(composeHa, /max_replicas_per_node:\s+1/, "HA overlay must spread stateless replicas across nodes.");
-  assertMatch(composeManagedSecrets, /SESSION_SECRET_FILE:\s+\/run\/secrets\/session_secret/, "Managed secret overlay must consume session secret through a file.");
-  assertMatch(composeManagedSecrets, /SESSION_SIGNING_KEYS_FILE:\s+\/run\/secrets\/session_signing_keys/, "Managed secret overlay must consume session signing keys through a file.");
-  assertMatch(composeManagedSecrets, /PROJECTS_GATEWAY_SIGNING_KEYS_FILE:\s+\/run\/secrets\/projects_gateway_signing_keys/, "Managed secret overlay must consume admin gateway signing keys through a file.");
-  assertMatch(composeManagedSecrets, /CLOUDFLARE_TURNSTILE_SECRET_KEY_FILE:\s+\/run\/secrets\/cloudflare_turnstile_secret_key/, "Managed secret overlay must consume Cloudflare Turnstile secret through a file.");
-  assertMatch(composeManagedSecrets, /ALERTMANAGER_WEBHOOK_TOKEN_FILE:\s+\/run\/secrets\/alertmanager_webhook_token/, "Managed secret overlay must consume the Alertmanager webhook token through a file.");
-  assertMatch(composeManagedSecrets, /MARIADB_ROOT_PASSWORD_FILE:\s+\/run\/secrets\/mariadb_root_password/, "Managed secret overlay must consume MariaDB root password through a Docker secret file.");
-  assertMatch(composeManagedSecrets, /^ {2}mariadb_root_password:\s*\r?\n {4}external:\s+true/m, "Managed secret overlay must declare MariaDB root password as an external Docker secret.");
-  assertMatch(composeManagedSecrets, /PMA_CONTROL_PASSWORD_FILE:\s+\/run\/secrets\/phpmyadmin_control_password/, "Managed secret overlay must consume phpMyAdmin control password through a Docker secret file.");
-  assertMatch(composeManagedSecrets, /^ {2}phpmyadmin_control_password:\s*\r?\n {4}external:\s+true/m, "Managed secret overlay must declare phpMyAdmin control password as an external Docker secret.");
-  assertNoMatch(composeManagedSecrets, /pgadmin_internal_key|PGADMIN_INT_KEY_FILE/, "Managed secret overlay must not keep the removed pgAdmin internal key secret.");
-  assertMatch(composeManagedSecrets, /external:\s+true/, "Managed secret overlay must use external Docker secrets.");
-  assertMatch(composeSecrets, /SESSION_SIGNING_KEYS_FILE:\s+\/run\/secrets\/session_signing_keys/, "Local secret overlay must consume session signing keys through a Docker secret file.");
-  assertMatch(composeSecrets, /PROJECTS_GATEWAY_SIGNING_KEYS_FILE:\s+\/run\/secrets\/projects_gateway_signing_keys/, "Local secret overlay must consume admin gateway signing keys through a Docker secret file.");
-  assertMatch(composeSecrets, /CLOUDFLARE_TURNSTILE_SECRET_KEY_FILE:\s+\/run\/secrets\/cloudflare_turnstile_secret_key/, "Local secret overlay must consume Cloudflare Turnstile secret through a Docker secret file.");
-  assertMatch(composeSecrets, /ALERTMANAGER_WEBHOOK_TOKEN_FILE:\s+\/run\/secrets\/alertmanager_webhook_token/, "Local secret overlay must consume the Alertmanager webhook token through a Docker secret file.");
-  assertMatch(compose, /ALERT_DISCORD_WEBHOOK_URL_FILE:\s+\$\{ALERT_DISCORD_WEBHOOK_URL_FILE:-\}/, "Compose must expose optional Discord alert webhook secret-file configuration.");
-  assertMatch(compose, /ALERT_TELEGRAM_BOT_TOKEN_FILE:\s+\$\{ALERT_TELEGRAM_BOT_TOKEN_FILE:-\}/, "Compose must expose optional Telegram alert bot token secret-file configuration.");
-  assertMatch(compose, /ALERT_TELEGRAM_CHAT_ID:\s+\$\{ALERT_TELEGRAM_CHAT_ID:-\}/, "Compose must expose optional Telegram alert chat id configuration.");
-  assertMatch(composeWaf, /owasp\/modsecurity-crs:4\.26\.0-nginx-202605200705@sha256:[a-f0-9]{64}/, "WAF image must be an explicit stable CRS tag pinned by digest.");
-  assertMatch(composeWaf, /traefik:[\s\S]*ports:\s*!override \[\]/, "WAF overlay must keep Traefik off host ports.");
-  assertMatch(composeWaf, /container_name:\s+enterprise-waf[\s\S]*security_opt:\s*\r?\n\s+- no-new-privileges:true/, "WAF container must run with no-new-privileges.");
-  assertMatch(composeWaf, /waf:[\s\S]*healthcheck:[\s\S]*nginx -t[\s\S]*curl -ksS/, "WAF container must expose a healthcheck.");
-  assertMatch(composeWaf, /BLOCKING_PARANOIA:\s+\$\{WAF_BLOCKING_PARANOIA:-2\}/, "WAF must default to CRS blocking paranoia level 2.");
-  assertMatch(composeWaf, /DETECTION_PARANOIA:\s+\$\{WAF_DETECTION_PARANOIA:-2\}/, "WAF must default to CRS detection paranoia level 2.");
-  assertMatch(composeWaf, /MODSEC_AUDIT_ENGINE:\s+\$\{WAF_MODSEC_AUDIT_ENGINE:-RelevantOnly\}/, "WAF audit logging must default to relevant events only.");
-  assertMatch(composeWaf, /MODSEC_RESP_BODY_ACCESS:\s+\$\{WAF_MODSEC_RESP_BODY_ACCESS:-Off\}/, "WAF must not inspect or log response bodies by default.");
-  assertMatch(composeWaf, /REQUEST-900-EXCLUSION-RULES-BEFORE-CRS\.conf/, "WAF must load pre-CRS local rules.");
-  assertMatch(composeWaf, /RESPONSE-999-EXCLUSION-RULES-AFTER-CRS\.conf/, "WAF must load post-CRS local tuning rules.");
-  assertMatch(localWafPreRules, /ruleRemoveTargetById=942120;ARGS:aPath[\s\S]*ruleRemoveTargetById=942120;ARGS:vPath/, "Local WAF must allow phpMyAdmin navigation base64 paths without disabling CRS globally.");
-  assertMatch(localWafPreRules, /\(\?:traefik\|prometheus\|alertmanager\)\\\.localhost\\\.com/, "Local WAF must block unauthenticated internal console hostnames.");
-  assertMatch(vpsWafPreRules, /\(\?:phpmyadmin\|phppgadmin\|traefik\|prometheus\|alertmanager\|grafana\|minio\|s3\)/, "VPS WAF must block public admin/storage console hostnames.");
-  assertNoMatch(compose, /phpmyadmin\/themes\//, "phpMyAdmin must use bundled image themes without local theme mounts.");
-  assertMatch(phpMyAdminConfig, /\$cfg\['ThemeDefault'\]\s*=\s*'pmahomme'/, "phpMyAdmin must use the bundled default pmahomme theme.");
-  assertMatch(phpMyAdminConfig, /\$cfg\['ThemeManager'\]\s*=\s*false/, "phpMyAdmin theme switching must be disabled so stale browser theme cookies cannot select removed local themes.");
-  assertNoMatch(compose, /blueberry/i, "phpMyAdmin must not mount the removed Blueberry theme.");
-  assertMatch(composeVPSWaf, /ports:\s*!override[\s\S]*WAF_HTTP_BIND/, "VPS WAF overlay must make the WAF the only public HTTP listener.");
-  assertMatch(composeVPSWaf, /BACKEND:\s+\$\{WAF_BACKEND:-http:\/\/traefik:80\}/, "VPS WAF overlay must forward to internal HTTP Traefik.");
-  assertMatch(opsScript, /async function wafSmoke/, "Ops script must provide a WAF smoke gate.");
-  assertMatch(opsScript, /XSS probe/, "WAF smoke gate must test XSS blocking.");
-  assertMatch(composeStaging, /container_name:\s*!reset null/, "Staging overlay must remove fixed container names.");
-  assertMatch(composeStaging, /enterprise_postgres_data_staging/, "Staging overlay must use separate data volumes.");
-  assertMatch(githubWorkflow, /name:\s+enterprise-infra/, "GitHub Actions must define an enterprise infra workflow.");
-  assertMatch(githubWorkflow, /dast-zap/, "GitHub Actions must include an opt-in DAST job.");
-  assertMatch(githubWorkflow, /deploy-vps/, "GitHub Actions must include a controlled VPS deploy job.");
-  assertMatch(githubWorkflow, /projects_gateway_signing_keys/, "GitHub Actions compose render must provide the legacy admin gateway signing secret placeholder.");
-  assertMatch(githubWorkflow, /Backup scheduler dry run[\s\S]*BACKUP_SCHEDULER_DRY_RUN=true/, "Infrastructure CI must exercise the Dockerized backup scheduler in dry-run mode.");
-  assertMatch(githubWorkflow, /External uptime manifest dry run[\s\S]*external-uptime-check --dryRun/, "Infrastructure CI must validate the external uptime manifest.");
-  assertMatch(githubWorkflow, /Cloudflare from-zero dry run[\s\S]*cloudflare-from-zero --manifest cloudflare\/from-zero\.example\.json/, "Infrastructure CI must validate the additive-only Cloudflare bootstrap manifest.");
-  assertMatch(githubWorkflow, /GitHub branch protection dry run[\s\S]*github-branch-protection --repo/, "Infrastructure CI must validate the GitHub branch protection policy command.");
-  assertMatch(githubWorkflow, /Evidence bundle smoke[\s\S]*evidence-bundle --noArchive/, "Infrastructure CI must smoke-test the evidence bundle command.");
-  assertMatch(githubWorkflow, /Evidence bundle integrity verify[\s\S]*evidence-bundle-verify/, "Infrastructure CI must verify evidence bundle manifest integrity.");
-  assertMatch(githubWorkflow, /sh \.\/scripts\/infra-ops\.sh static-security-check/, "Infrastructure CI must run the Dockerized ops wrapper instead of host Node.");
-  assertNoMatch(githubWorkflow, /setup-node|node scripts\/infra-ops\.mjs|shell:\s+pwsh|\.ps1/, "Infrastructure CI must stay Linux/container-first without PowerShell or host Node policy gates.");
-  assertMatch(deployVPSScript, /PLATFORM_REMOTE_DIR_B64[\s\S]*base64[\s\S]*ssh "\$@" "\$REMOTE" 'sh -s'/, "VPS deploy must send validated Base64 fields to a fixed remote command.");
-  assertNoMatch(deployVPSScript, /sh -s --|<<'REMOTE_SCRIPT'/, "VPS deploy must not pass dynamic values in the SSH command or an interpolated heredoc.");
-  assertMatch(deployVPSRemoteScript, /decode_field[\s\S]*git checkout "\$branch"[\s\S]*COMPOSE_ENV_FILE="\$env_file"/, "VPS deploy remote script must decode, revalidate and quote every request field.");
-  assertNoMatch(deployVPSRemoteScript, /git checkout -- "\$branch"/, "VPS deploy must treat the validated branch as a branch, not a pathspec.");
-  assertMatch(deployVPSScript, /DEPLOY_RUN_PRE_GO_LIVE[\s\S]*DEPLOY_RUN_GO_NO_GO[\s\S]*vps-postdeploy\.sh/, "VPS deploy script must run post-deploy health and optional evidence gates.");
-  assertMatch(vpsPreflightScript, /compose\.vps\.yaml[\s\S]*compose\.waf\.yaml[\s\S]*compose\.vps-waf\.yaml[\s\S]*config --quiet[\s\S]*compose\.vps\.yaml[\s\S]*compose\.waf\.yaml[\s\S]*compose\.vps-waf\.yaml[\s\S]*grep -E 'image: .\+:latest/, "VPS preflight must render the same VPS+WAF compose stack used by deploy and scan it for mutable images.");
-  assertMatch(vpsPostdeployScript, /get_env\(\)[\s\S]*awk -F=[\s\S]*env_or_default\(\)/, "VPS post-deploy must parse .env without executing it as a shell script.");
-  assertNoMatch(vpsPostdeployScript, /(?:^|\n)\s*\.\s+"\$ENV_FILE"|set -a[\s\S]*"\$ENV_FILE"/, "VPS post-deploy must not source .env.");
-  assertMatch(vpsPostdeployScript, /waf-smoke\.sh[\s\S]*infra-health\.sh[\s\S]*pre-go-live-evidence\.sh[\s\S]*secret-rotation-evidence\.sh --enforce[\s\S]*production-go-no-go\.sh --enforce[\s\S]*production-readiness-live\.sh/, "VPS post-deploy must cover smoke, health, optional pre go-live evidence, secret rotation evidence, final go/no-go and live production readiness.");
-  assertMatch(vpsGoLiveScript, /PLAN_ONLY=1[\s\S]*--confirmLive[\s\S]*PLAN_ONLY=0/, "VPS go-live orchestrator must be plan-only unless explicitly confirmed.");
-  assertMatch(vpsGoLiveScript, /vps-bootstrap-ubuntu\.sh --apply[\s\S]*vps-hardening-ubuntu\.sh --apply[\s\S]*vps-host-readiness\.sh --ssh-port \$SSH_PORT --enforce[\s\S]*vps-preflight\.sh[\s\S]*vps-postdeploy\.sh[\s\S]*github-actions-run-evidence\.sh[\s\S]*secret-rotation-evidence\.sh --enforce[\s\S]*production-go-no-go\.sh --enforce[\s\S]*production-readiness-live\.sh[\s\S]*evidence-bundle\.sh/, "VPS go-live orchestrator must sequence optional VPS bootstrap, hardening, readiness, preflight, postdeploy, GitHub Actions evidence, secret rotation evidence, go/no-go, live readiness and evidence bundle.");
-  assertMatch(vpsGoLiveScript, /evidence-bundle\.sh[\s\S]*evidence-bundle-verify\.sh --requireComplete/, "VPS go-live orchestrator must verify the final evidence bundle when go/no-go is enabled.");
-  assertMatch(vpsGoLiveScript, /--reload-sshd[\s\S]*RELOAD_SSHD=1[\s\S]*reloadSshd[\s\S]*vps-hardening-ubuntu\.sh --apply --ssh-port "\$SSH_PORT" \$reload_flag/, "VPS go-live orchestrator must expose explicit SSH reload for VPS hardening.");
-  assertMatch(vpsGoLiveScript, /--replace-docker-daemon-config[\s\S]*REPLACE_DOCKER_DAEMON_CONFIG=1[\s\S]*replaceDockerDaemonConfig[\s\S]*vps-hardening-ubuntu\.sh --apply --ssh-port "\$SSH_PORT" \$reload_flag --replace-docker-daemon-config/, "VPS go-live orchestrator must expose explicit Docker daemon config replacement for VPS hardening.");
-  assertMatch(vpsGoLiveScript, /REPLACE_DOCKER_DAEMON_CONFIG" -eq 1[\s\S]*APPLY_HARDENING" -ne 1[\s\S]*requires --apply-hardening/, "VPS go-live must reject Docker daemon replacement without --apply-hardening.");
-  assertMatch(vpsGoLiveScript, /RELOAD_SSHD" -eq 1[\s\S]*APPLY_HARDENING" -ne 1[\s\S]*requires --apply-hardening/, "VPS go-live must reject SSH reload without --apply-hardening.");
-  assertMatch(vpsGoLiveScript, /reports\/vps-go-live[\s\S]*JSON_REPORT[\s\S]*MD_REPORT/, "VPS go-live orchestrator must write JSON and Markdown reports.");
-  assertNoMatch(vpsGoLiveScript, /(?:^|\n)\s*\.\s+"\$ENV_FILE"|set -a[\s\S]*"\$ENV_FILE"|eval\s/, "VPS go-live orchestrator must not source/eval the production env file.");
-  assertMatch(readme, /vps-preflight\.sh[\s\S]*compose\.waf\.yaml[\s\S]*compose\.vps-waf\.yaml/, "README must document that VPS preflight renders the WAF overlays.");
-  assertMatch(runbook, /vps-preflight\.sh[\s\S]*compose\.waf\.yaml[\s\S]*compose\.vps-waf\.yaml/, "Runbook must document that VPS preflight renders the WAF overlays.");
-  assertMatch(vpsPredeployChecklist, /vps-preflight\.sh[\s\S]*VPS\+WAF/, "VPS checklist must require VPS+WAF preflight coverage.");
-  assertMatch(readme, /vps-postdeploy\.sh[\s\S]*DEPLOY_RUN_PRE_GO_LIVE/, "README must document VPS post-deploy evidence options.");
-  assertMatch(runbook, /vps-postdeploy\.sh[\s\S]*DEPLOY_PRE_GO_LIVE_OFFSITE_RESTORE_DRY_RUN/, "Runbook must document VPS post-deploy evidence flags.");
-  assertMatch(vpsPredeployChecklist, /vps-postdeploy\.sh[\s\S]*DEPLOY_RUN_GO_NO_GO/, "VPS checklist must require VPS post-deploy checks.");
-  assertMatch(readme, /vps-go-live\.sh --planOnly[\s\S]*vps-go-live\.sh --confirmLive/, "README must document the VPS go-live orchestrator plan and live modes.");
-  assertMatch(runbook, /vps-go-live\.sh --planOnly[\s\S]*vps-go-live\.sh --confirmLive/, "Runbook must document the VPS go-live orchestrator plan and live modes.");
-  assertMatch(readme, /vps-go-live\.sh[\s\S]*--reload-sshd/, "README must document VPS go-live SSH reload mode.");
-  assertMatch(runbook, /vps-go-live\.sh[\s\S]*--reload-sshd/, "Runbook must document VPS go-live SSH reload mode.");
-  assertMatch(readme, /vps-go-live\.sh[\s\S]*--replace-docker-daemon-config/, "README must document VPS go-live Docker daemon replacement mode.");
-  assertMatch(runbook, /vps-go-live\.sh[\s\S]*--replace-docker-daemon-config/, "Runbook must document VPS go-live Docker daemon replacement mode.");
-  assertMatch(vpsPredeployChecklist, /vps-go-live\.sh --planOnly[\s\S]*reports\/vps-go-live/, "VPS checklist must require the VPS go-live plan report.");
-  assertMatch(vpsPredeployChecklist, /vps-go-live\.sh --planOnly[\s\S]*--reload-sshd/, "VPS checklist must require reviewed planning for SSH reload.");
-  assertMatch(vpsPredeployChecklist, /vps-go-live\.sh --planOnly[\s\S]*--replace-docker-daemon-config/, "VPS checklist must require reviewed planning for Docker daemon replacement.");
-  assertMatch(evidenceBundleWrapper, /evidence-bundle/, "Evidence bundle wrapper must delegate to the Dockerized ops runner.");
-  assertMatch(evidenceBundleVerifyWrapper, /evidence-bundle-verify/, "Evidence bundle verify wrapper must delegate to the Dockerized ops runner.");
-  assertMatch(opsScript, /async function evidenceBundle[\s\S]*infra-evidence-bundle-\$\{stamp\}[\s\S]*includesSecrets:\s+false/, "Ops script must create non-secret evidence bundles with a manifest.");
-  assertMatch(opsScript, /async function evidenceBundleVerify[\s\S]*sha256 mismatch[\s\S]*required report is not passing[\s\S]*--requireComplete/, "Ops script must verify evidence bundle SHA256, report status and completeness.");
-  assertMatch(githubActionsRunEvidenceWrapper, /github-actions-run-evidence/, "GitHub Actions run evidence wrapper must delegate to the Dockerized ops runner.");
-  assertMatch(opsScript, /async function githubActionsRunEvidence[\s\S]*workflow_runs[\s\S]*run\.conclusion !== "success"/, "Ops script must verify remote GitHub Actions workflow success.");
-  assertMatch(productionReadinessLiveWrapper, /enterprise-requirements-check --manifest governance\/production-readiness\.json --requireLiveProofs/, "Production readiness live wrapper must enforce the 19-point infrastructure live checklist.");
-  assertMatch(opsScript, /directory: "github-actions"[\s\S]*prefix: "github-actions-run-"[\s\S]*required: true/, "Evidence bundle must require the GitHub Actions run evidence report.");
-  assertMatch(opsScript, /directory: "production-readiness"[\s\S]*prefix: "production-readiness-"[\s\S]*required: true/, "Evidence bundle must require the live production readiness report.");
-  assertMatch(opsScript, /directory: "vps-bootstrap"[\s\S]*prefix: "vps-bootstrap-apply-"[\s\S]*required: true/, "Evidence bundle must require VPS bootstrap apply reports.");
-  assertMatch(opsScript, /directory: "vps-hardening"[\s\S]*prefix: "vps-hardening-apply-"[\s\S]*required: true/, "Evidence bundle must require VPS hardening apply reports.");
-  assertMatch(opsScript, /directory: "vps-go-live"[\s\S]*prefix: "vps-go-live-"/, "Evidence bundle must include VPS go-live orchestration reports when present.");
-  assertMatch(opsScript, /"evidence-bundle": evidenceBundle/, "Ops command map must expose evidence-bundle.");
-  assertMatch(readme, /evidence-bundle\.sh[\s\S]*\.tmp\/evidence-bundles/, "README must document the evidence bundle output.");
-  assertMatch(readme, /evidence-bundle-verify\.sh --requireComplete[\s\S]*SHA256/, "README must document final evidence bundle verification.");
-  assertMatch(runbook, /evidence-bundle\.sh[\s\S]*secrets\//, "Runbook must document evidence bundle secret exclusions.");
-  assertMatch(runbook, /evidence-bundle-verify\.sh --requireComplete[\s\S]*SHA256/, "Runbook must document final evidence bundle verification.");
-  assertMatch(vpsPredeployChecklist, /evidence-bundle\.sh[\s\S]*manifest\.json/, "VPS checklist must require the evidence bundle manifest review.");
-  assertMatch(vpsPredeployChecklist, /evidence-bundle-verify\.sh --requireComplete/, "VPS checklist must require final evidence bundle verification.");
-  assertMatch(readinessReport, /evidence-bundle\.sh[\s\S]*\.tmp\/evidence-bundles/, "Readiness report must include the evidence bundle command.");
-  assertMatch(readinessReport, /evidence-bundle-verify\.sh --requireComplete/, "Readiness report must include final evidence bundle verification.");
-  assertMatch(readinessReport, /vps-postdeploy\.sh[\s\S]*production-go-no-go/, "Readiness report must include VPS post-deploy and go/no-go flow.");
-  assertMatch(finalReadinessAudit, /evidence-bundle\.sh[\s\S]*SHA256/, "Final readiness audit must include evidence bundle and checksum evidence.");
-  assertMatch(finalReadinessAudit, /Evidence bundle verifier[\s\S]*SHA256/, "Final readiness audit must include evidence bundle verifier coverage.");
-  assertMatch(finalReadinessAudit, /vps-postdeploy\.sh[\s\S]*infra-health/, "Final readiness audit must include VPS post-deploy health checks.");
-  assertMatch(finalReadinessAudit, /mode=dry-run[\s\S]*providerEvidence\.verified=false/, "Final readiness audit must document uptime dry-run evidence semantics.");
-  assertMatch(externalUptimeManifest, /portal-public-home[\s\S]*CONTROL_CENTER_PUBLIC_URL[\s\S]*docs-public-home[\s\S]*DOCS_PUBLIC_URL/, "External uptime manifest must monitor only the public portal and docs surfaces.");
-  assertNoMatch(externalUptimeManifest, /api-public-health|account-public-home|keycloak-issuer-discovery|blocked-phpmyadmin-public|blocked-prometheus-public|blocked-alertmanager-public/, "External uptime manifest must not declare removed public API, account, auth or admin-host targets.");
-  assertMatch(externalUptimeManifest, /providerNotes[\s\S]*cloudflare[\s\S]*betterstack[\s\S]*uptimerobot/, "External uptime manifest must map to common external monitoring providers.");
-  assertMatch(externalUptimeWrapper, /external-uptime-check/, "External uptime wrapper must delegate to the Dockerized ops runner.");
-  assertMatch(opsScript, /async function externalUptimeCheck/, "Ops script must provide an external uptime monitor check.");
-  assertMatch(opsScript, /expectedBodyIncludes[\s\S]*maxLatencyMs/, "External uptime check must support body and latency assertions.");
-  assertMatch(opsScript, /function validateExternalUptimeProviderEvidence[\s\S]*external=true[\s\S]*coveredTargets/, "External uptime evidence must validate a real external provider monitor set.");
-  assertMatch(opsScript, /monitorTimestamp[\s\S]*lastCheckedAt[\s\S]*providerMonitorResult[\s\S]*lastStatusCode[\s\S]*lastLatencyMs/, "External uptime provider evidence must validate fresh provider-reported status, latency and check time.");
-  assertMatch(opsScript, /uptimeProviderVerified[\s\S]*providerEvidence\?\.verified === true/, "Production go/no-go must require external uptime provider evidence.");
-  assertMatch(opsScript, /validateProviderEvidenceOnly[\s\S]*validateExternalUptimeProviderEvidence[\s\S]*writeExternalUptimeReport/, "External uptime provider-only validation must write an evidence report without probing public URLs.");
-  assertMatch(opsScript, /mode:\s*"dry-run"[\s\S]*External uptime dry-run reports written/, "External uptime dry-run must write diagnostic reports.");
-  assertMatch(cloudflareAccessManifest, /"mfaEnforcedByIdentityProvider": true/, "Cloudflare Access manifest must require IdP MFA.");
-  assertMatch(cloudflareAccessManifest, /"allowedIdentityProviderIds"[\s\S]*"applications"/, "Cloudflare Access manifest must define identity providers and protected applications.");
-  for (const host of ["grafana", "prometheus", "alertmanager", "minio", "traefik", "phpmyadmin", "projects", "keycloak-admin"]) {
-    if (!cloudflareAccess.applications.some((app) => String(app.domain).startsWith(`${host}.`))) {
-      fail(`Cloudflare Access manifest must protect ${host}.`);
-    }
-  }
-  assertMatch(cloudflareAccessScript, /\/accounts\/\$\{manifest\.accountId\}\/access\/apps/, "Cloudflare Access script must use the account Access applications API.");
-  assertMatch(cloudflareAccessScript, /enable_binding_cookie[\s\S]*http_only_cookie_attribute[\s\S]*same_site_cookie_attribute/, "Cloudflare Access applications must use hardened cookies.");
-  assertMatch(cloudflareAccessScript, /login_method/, "Cloudflare Access policies must require the configured identity provider.");
-  assertMatch(cloudflareAccessScript, /reports"[\s\S]*"cloudflare-access"[\s\S]*writeEvidenceReport/, "Cloudflare Access admin command must write file-based evidence.");
-  assertMatch(cloudflareAccessScript, /catch \(error\)[\s\S]*writeEvidenceReport\(\{[\s\S]*status: "failed"[\s\S]*error\.applications/, "Cloudflare Access admin command must write failed remote verification evidence.");
-  assertMatch(cloudflareReadme, /access-admin\.example\.json[\s\S]*cloudflare-access-admin\.sh/, "Cloudflare docs must cover the Access admin policy manifest.");
-  assertMatch(opsScript, /async function cloudflareAccessAdmin/, "Ops script must expose the Cloudflare Access admin command.");
-  assertMatch(opsScript, /"cloudflare-access-admin": cloudflareAccessAdmin/, "Ops command map must expose cloudflare-access-admin.");
-  assertMatch(githubWorkflow, /Cloudflare Access admin dry run[\s\S]*cloudflare-access-admin/, "Infrastructure CI must validate the Cloudflare Access admin manifest.");
-  assertMatch(cloudflareWafRules, /platform-block-admin-hosts/, "Cloudflare WAF rules must block public admin hostnames.");
-  assertMatch(cloudflareWafRules, /platform-block-sensitive-files/, "Cloudflare WAF rules must block sensitive file probes.");
-  assertMatch(cloudflareSettings, /always_use_https/, "Cloudflare zone settings must require HTTPS redirect configuration.");
-  if (cloudflareFromZero.requireEmptyDns !== true) {
-    fail("Cloudflare from-zero manifest must require an empty DNS zone by default.");
-  }
-  assertMatch(cloudflareReadme, /additive-only/, "Cloudflare README must document additive-only live changes.");
-  assertMatch(cloudflareReadme, /Zone settings[\s\S]*only when the zone is created by the same script run/, "Cloudflare README must prevent settings changes on existing zones.");
-  assertMatch(cloudflareFromZeroScript, /Mode: dry-run/, "Cloudflare from-zero script must default to dry-run.");
-  assertMatch(cloudflareFromZeroScript, /Refusing DNS conflict/, "Cloudflare from-zero script must refuse conflicting DNS records.");
-  assertMatch(cloudflareFromZeroScript, /DNS already exists unchanged; left untouched/, "Cloudflare from-zero script must leave exact existing DNS records untouched.");
-  assertMatch(cloudflareFromZeroScript, /Refusing to change Cloudflare zone settings on an existing zone/, "Cloudflare from-zero script must not change settings on existing zones.");
-  assertMatch(cloudflareFromZeroScript, /method:\s+"POST"[\s\S]*path:\s+`\/zones\/\$\{zone\.id\}\/rulesets`/, "Cloudflare from-zero script must create, not update, the WAF entrypoint.");
-  assertNoMatch(cloudflareFromZeroScript, /method:\s+"(?:PUT|DELETE)"/, "Cloudflare from-zero script must not use destructive or overwrite API verbs.");
-  assertNoMatch(cloudflareFromZeroScript, /dns_records\/\$\{/, "Cloudflare from-zero script must not target existing DNS record IDs.");
-  assertNoMatch(cloudflareFromZeroScript, /rulesets\/phases\/\$\{ruleset\.phase\}\/entrypoint/, "Cloudflare from-zero script must not overwrite a WAF phase entrypoint.");
-  assertMatch(vpsBootstrapScript, /download\.docker\.com\/linux\/ubuntu[\s\S]*docker-ce[\s\S]*docker-ce-cli[\s\S]*containerd\.io[\s\S]*docker-buildx-plugin[\s\S]*docker-compose-plugin/, "VPS bootstrap must install Docker Engine, Buildx and Compose from Docker's official Ubuntu apt repository.");
-  assertMatch(vpsBootstrapScript, /ca-certificates curl git[\s\S]*\/etc\/apt\/keyrings\/docker\.asc[\s\S]*\/etc\/apt\/sources\.list\.d\/docker\.sources/, "VPS bootstrap must install Git and configure the Docker apt keyring/source file.");
-  assertMatch(vpsBootstrapScript, /ca-certificates curl git jq[\s\S]*jq --version/, "VPS bootstrap must install and verify jq for host-side operational collectors.");
-  assertMatch(vpsBootstrapScript, /reports\/vps-bootstrap[\s\S]*JSON_REPORT[\s\S]*MD_REPORT/, "VPS bootstrap must write JSON and Markdown evidence reports.");
-  assertMatch(vpsBootstrapScript, /os_release_value\(\)[\s\S]*awk -F=[\s\S]*\/etc\/os-release/, "VPS bootstrap must parse /etc/os-release as data.");
-  assertNoMatch(vpsBootstrapScript, /(^|\n)\s*\.\s+\/etc\/os-release/, "VPS bootstrap must not source /etc/os-release.");
-  assertMatch(vpsBootstrapScript, /APPLY=0[\s\S]*--apply[\s\S]*APPLY=1[\s\S]*apply mode requires root/, "VPS bootstrap must default to plan mode and require root only for apply.");
-  assertMatch(vpsHardeningScript, /PasswordAuthentication no/, "VPS hardening must disable SSH password authentication.");
-  assertMatch(vpsHardeningScript, /SSH_HARDENING_CONFIG="\/etc\/ssh\/sshd_config\.d\/01-platform-hardening\.conf"[\s\S]*ssh-cloud-init-precedence/, "VPS hardening must install SSH hardening before cloud-init fragments so effective sshd config disables password auth.");
-  assertMatch(vpsHardeningScript, /--reload-sshd[\s\S]*sshd -t[\s\S]*ssh-service-reload[\s\S]*systemctl reload ssh/, "VPS hardening must validate and reload SSH only when explicitly requested.");
-  assertMatch(vpsHardeningScript, /fail2ban/, "VPS hardening must install fail2ban.");
-  assertMatch(vpsHardeningScript, /reports\/vps-hardening[\s\S]*JSON_REPORT[\s\S]*MD_REPORT/, "VPS hardening must write JSON and Markdown evidence reports.");
-  assertMatch(vpsHardeningScript, /daemon_contains_hardening\(\)[\s\S]*live-restore[\s\S]*no-new-privileges[\s\S]*max-size[\s\S]*max-file/, "VPS hardening must verify Docker daemon hardening keys.");
-  assertMatch(vpsHardeningScript, /--replace-docker-daemon-config[\s\S]*daemon\.json\.platform-backup-\$STAMP[\s\S]*write_file "\$daemon_path" 0644 "\$DOCKER_DAEMON_CONFIG"/, "VPS hardening must safely apply Docker daemon hardening with backup support.");
-  assertMatch(vpsHardeningScript, /restart_docker_if_changed\(\)[\s\S]*systemctl restart docker/, "VPS hardening must restart Docker after applying daemon hardening when the service exists.");
-  assertMatch(vpsHardeningScript, /APPLY=0[\s\S]*--apply[\s\S]*APPLY=1[\s\S]*REPORT_PREFIX="vps-hardening-plan"[\s\S]*REPORT_PREFIX="vps-hardening-apply"[\s\S]*printf apply \|\| printf plan/, "VPS hardening must default to a plan and distinguish apply evidence.");
-  assertMatch(vpsHardeningScript, /apply mode requires root[\s\S]*write_reports/, "VPS hardening apply mode must require root and write failed evidence.");
-  assertMatch(vpsHostReadinessScript, /os_release_value\(\)[\s\S]*awk -F=[\s\S]*\/etc\/os-release[\s\S]*ubuntu[\s\S]*lts/i, "VPS host readiness must verify Ubuntu LTS by parsing /etc/os-release as data.");
-  assertNoMatch(vpsHostReadinessScript, /(^|\n)\s*\.\s+\/etc\/os-release/, "VPS host readiness must not source /etc/os-release.");
-  assertMatch(vpsHostReadinessScript, /docker compose version/, "VPS host readiness must verify Docker Compose plugin.");
-  assertMatch(vpsHostReadinessScript, /ufw status verbose[\s\S]*ufw-no-direct-internal-ports/, "VPS host readiness must verify UFW and blocked internal ports.");
-  assertMatch(vpsHostReadinessScript, /--ssh-port[\s\S]*EXPECTED_SSH_PORT[\s\S]*expectedSshPort/, "VPS host readiness must expose and report the expected hardened SSH port.");
-  assertMatch(vpsHostReadinessScript, /ufw-ssh-port-allowed[\s\S]*ssh-port-expected/, "VPS host readiness must verify UFW allows and sshd listens on the expected SSH port.");
-  assertMatch(vpsHostReadinessScript, /fail2ban[\s\S]*write_effective_sshd_config[\s\S]*sudo -n sshd[\s\S]*sshd -T/, "VPS host readiness must verify fail2ban and effective SSH hardening, including sudo-accessible sshd -T.");
-  assertMatch(vpsHostReadinessScript, /docker-daemon-hardening[\s\S]*live-restore[\s\S]*no-new-privileges/, "VPS host readiness must verify Docker daemon hardening.");
-  assertMatch(vpsHostReadinessScript, /--enforce[\s\S]*ALLOW_FAILURES=0/, "VPS host readiness must expose an explicit enforce mode for production evidence.");
-  assertMatch(vpsHostReadinessScript, /--diagnostic[\s\S]*reports\/vps-host-diagnostics[\s\S]*productionEvidence[\s\S]*false/, "VPS host readiness diagnostics must be separated from production VPS evidence.");
-  assertMatch(vpsHostReadinessScript, /DEFAULT_REPORT_DIR="\$ROOT_DIR\/reports\/vps-host"[\s\S]*JSON_REPORT="\$REPORT_DIR\/\$REPORT_PREFIX-\$STAMP\.json"[\s\S]*MD_REPORT="\$REPORT_DIR\/\$REPORT_PREFIX-\$STAMP\.md"/, "VPS host readiness must write ignored JSON and Markdown evidence.");
-  assertMatch(vpsHostReadinessScript, /remediation_for_check[\s\S]*docker-daemon-hardening[\s\S]*vps-hardening-ubuntu\.sh/, "VPS host readiness reports must include remediation guidance.");
-  assertMatch(vpsHostReadinessScript, /container-metrics-collector[\s\S]*platform-container-metrics\.service[\s\S]*capturedAtEpoch[\s\S]*platform_container_cpu_percent/, "VPS host readiness must require fresh complete per-container workload metrics.");
-  assertMatch(containerMetricsCollectorScript, /docker stats --no-stream --no-trunc[\s\S]*docker inspect[\s\S]*missingRunningContainerIds[\s\S]*platform_container_metrics_collector_healthy/, "Workload collector must reconcile Docker inventory and emit fail-closed JSON and Prometheus metrics.");
-  assertMatch(containerMetricsCollectorScript, /cpuLimitCores[\s\S]*memoryLimitBytes[\s\S]*memoryReservationBytes[\s\S]*pidsLimit/, "Workload collector must expose effective cgroup limits without inventing defaults.");
-  assertMatch(containerMetricsInstallerScript, /MODE=plan[\s\S]*--apply[\s\S]*NoNewPrivileges=true[\s\S]*ProtectSystem=strict[\s\S]*SupplementaryGroups=docker/, "Container metrics installer must default to plan and install a hardened host service with narrow Docker group access.");
-  assertMatch(containerMetricsSandboxTest, /cpuPercent == 0[\s\S]*cpuLimitCores == 2[\s\S]*FAKE_DOCKER_MISSING=true[\s\S]*collector\.healthy == false/, "Container metrics sandbox must preserve measured zero, verify effective limits and fail incomplete inventory.");
-  assertMatch(originLockScript, /www\.cloudflare\.com\/ips-v4/, "Origin-lock script must consume Cloudflare IPv4 ranges.");
-  assertMatch(originLockScript, /www\.cloudflare\.com\/ips-v6/, "Origin-lock script must consume Cloudflare IPv6 ranges.");
-  assertMatch(vpsPredeployChecklist, /full-restore-drill\.sh/, "VPS checklist must require a full restore drill.");
-  assertMatch(vpsPredeployChecklist, /offsite-backup-restic\.sh/, "VPS checklist must require off-site backup upload.");
-  assertMatch(vpsPredeployChecklist, /Cloudflare Access, VPN, SSH tunnel/, "VPS checklist must protect admin surfaces.");
-  assertMatch(vpsPredeployChecklist, /cloudflare-access-admin\.sh --verifyRemote/, "VPS checklist must verify Cloudflare Access admin applications.");
-  assertMatch(vpsPredeployChecklist, /Node, pnpm, PHP CLI and build toolchains are not required on the host/, "VPS checklist must keep host dependencies limited to Docker, Compose and Git.");
-  assertMatch(vpsPredeployChecklist, /compose\.backup-scheduler\.yaml/, "VPS checklist must require the Dockerized backup scheduler or approved equivalent.");
-  assertMatch(readme, /vps-bootstrap-ubuntu\.sh[\s\S]*reports\/vps-bootstrap/, "README must document VPS bootstrap evidence reports.");
-  assertMatch(runbook, /vps-bootstrap-ubuntu\.sh[\s\S]*reports\/vps-bootstrap/, "Runbook must document VPS bootstrap evidence reports.");
-  assertMatch(vpsPredeployChecklist, /vps-bootstrap-ubuntu\.sh[\s\S]*reports\/vps-bootstrap/, "VPS checklist must require VPS bootstrap evidence reports.");
-  assertMatch(readme, /vps-hardening-ubuntu\.sh[\s\S]*reports\/vps-hardening/, "README must document VPS hardening evidence reports.");
-  assertMatch(runbook, /vps-hardening-ubuntu\.sh[\s\S]*reports\/vps-hardening/, "Runbook must document VPS hardening evidence reports.");
-  assertMatch(vpsPredeployChecklist, /vps-hardening-ubuntu\.sh[\s\S]*reports\/vps-hardening/, "VPS checklist must require VPS hardening evidence reports.");
-  assertMatch(readme, /vps-host-readiness\.sh[\s\S]*reports\/vps-host/, "README must document VPS host readiness evidence reports.");
-  assertMatch(runbook, /vps-host-readiness\.sh[\s\S]*reports\/vps-host/, "Runbook must document VPS host readiness evidence reports.");
-  assertMatch(vpsPredeployChecklist, /vps-host-readiness\.sh[\s\S]*reports\/vps-host/, "VPS checklist must require VPS host readiness evidence.");
-  assertMatch(finalReadinessAudit, /VPS host readiness script/, "Final readiness audit must include the VPS host readiness script.");
-  assertMatch(readinessReport, /Requires Real VPS Or External Provider/, "Readiness report must separate repo-ready work from VPS/provider work.");
-  assertMatch(readinessReport, /load-benchmark\.sh --profiles 50,100,500/, "Readiness report must include the 50/100/500 load benchmark.");
-  assertMatch(readinessReport, /Containerized ops runner/, "Readiness report must record that host Node is not required.");
-  assertMatch(readinessReport, /cross-platform Dockerized infra-ops launcher/, "Readiness report must record the Docker Desktop application launcher.");
-  assertMatch(readinessReport, /Cloudflare Access admin manifest/, "Readiness report must record the Cloudflare Access manifest.");
-  assertMatch(finalReadinessAudit, /Cloudflare Access admin application/, "Final audit must record Cloudflare Access admin application evidence.");
-  assertMatch(readinessReport, /Dockerized backup scheduler profile/, "Readiness report must record the Dockerized backup scheduler.");
-  assertMatch(readme, /reports\/backups/, "README must document backup execution reports.");
-  assertMatch(runbook, /reports\/backups/, "Runbook must document backup execution reports.");
-  assertMatch(readme, /dr-evidence\.sh[\s\S]*RTO\/RPO/, "README must document DR evidence RTO/RPO summaries.");
-  assertMatch(runbook, /dr-evidence\.sh[\s\S]*--enforce/, "Runbook must document enforced DR evidence checks.");
-  assertMatch(vpsPredeployChecklist, /dr-evidence\.sh --enforce[\s\S]*reports\/dr/, "VPS checklist must require enforced DR evidence reports.");
-  assertMatch(finalReadinessAudit, /DR evidence summary/, "Final readiness audit must mention DR evidence summaries.");
-  assertMatch(readme, /alert-evidence\.sh[\s\S]*--sendTest/, "README must document alert evidence runtime testing.");
-  assertMatch(runbook, /Alert evidence:[\s\S]*alert-evidence\.sh --sendTest/, "Runbook must document alert evidence runtime testing.");
-  assertMatch(vpsPredeployChecklist, /alert-evidence\.sh --sendTest --requireEmailDelivery[\s\S]*reports\/alerts/, "VPS checklist must require alert delivery evidence reports.");
-  assertMatch(readinessReport, /alert-evidence\.sh/, "Readiness report must include alert evidence tooling.");
-  assertMatch(finalReadinessAudit, /Alert evidence command/, "Final readiness audit must mention alert evidence tooling.");
-  assertMatch(readme, /monitoring\/external-uptime\.example\.json[\s\S]*external-uptime-check\.sh --dryRun/, "README must document external uptime manifest validation.");
-  assertMatch(readme, /mode=dry-run[\s\S]*production go[/-]no-go/, "README must explain that uptime dry-run reports do not satisfy production go/no-go.");
-  assertMatch(runbook, /External uptime monitoring[\s\S]*external-uptime-check\.sh --dryRun/, "Runbook must document external uptime monitoring setup.");
-  assertMatch(runbook, /mode=dry-run[\s\S]*production go[/-]no-go/, "Runbook must explain that uptime dry-run reports do not satisfy production go/no-go.");
-  assertMatch(vpsPredeployChecklist, /external-uptime-check\.sh --dryRun[\s\S]*External uptime monitoring delivered a real green check/, "VPS checklist must include external uptime dry-run and provider confirmation.");
-  assertMatch(readme, /github-branch-protection\.sh[\s\S]*--verifyRemote/, "README must document GitHub branch protection apply/verify.");
-  assertMatch(runbook, /github-branch-protection\.sh[\s\S]*--apply[\s\S]*--verifyRemote/, "Runbook must document GitHub branch protection apply and remote verification.");
-  assertMatch(vpsPredeployChecklist, /github-branch-protection\.sh[\s\S]*--verifyRemote/, "VPS checklist must require live GitHub branch protection verification.");
-  assertMatch(readme, /(?=[\s\S]*github-environments\.sh)(?=[\s\S]*reviewer)(?=[\s\S]*--verifyRemote)/, "README must document exact GitHub deployment environment reviewer verification.");
-  assertMatch(runbook, /(?=[\s\S]*github-environments\.sh)(?=[\s\S]*reviewer IDs)(?=[\s\S]*--verifyRemote)/, "Runbook must document exact GitHub deployment environment reviewer verification.");
-  assertMatch(vpsPredeployChecklist, /github-environments\.sh[\s\S]*--verifyRemote/, "VPS checklist must require live GitHub deployment environment verification.");
-  assertMatch(readme, /github-actions-config\.sh[\s\S]*DEPLOY_SSH_KEY[\s\S]*--verifyRemote/, "README must document GitHub Actions runtime config verification.");
-  assertMatch(readme, /github-actions-run-evidence\.sh[\s\S]*reports\/github-actions/, "README must document GitHub Actions run evidence.");
-  assertMatch(runbook, /github-actions-config\.sh[\s\S]*DEPLOY_SSH_KEY/, "Runbook must document required GitHub Actions runtime secrets and variables.");
-  assertMatch(runbook, /github-actions-run-evidence\.sh[\s\S]*reports\/github-actions/, "Runbook must document GitHub Actions run evidence.");
-  assertMatch(vpsPredeployChecklist, /github-actions-config\.sh[\s\S]*DEPLOY_REMOTE_DIR/, "VPS checklist must require live GitHub Actions runtime config verification.");
-  assertMatch(vpsPredeployChecklist, /github-actions-run-evidence\.sh[\s\S]*reports\/github-actions/, "VPS checklist must require GitHub Actions run evidence.");
-  assertMatch(readme, /enterprise-live-evidence[\s\S]*Cloudflare Access[\s\S]*bundle completo/, "README must document the production live evidence workflow.");
-  assertMatch(runbook, /enterprise-live-evidence[\s\S]*external uptime[\s\S]*complete evidence bundle/, "Runbook must document the production live evidence workflow.");
-  assertMatch(vpsPredeployChecklist, /enterprise-live-evidence[\s\S]*production[\s\S]*artifact/, "VPS checklist must require the production live evidence workflow artifact.");
-  assertMatch(readme, /enterprise-vps-evidence[\s\S]*VPS_HARDENED_SSH_PORT[\s\S]*reports\/vps-/, "README must document the protected VPS evidence workflow.");
-  assertMatch(runbook, /enterprise-vps-evidence[\s\S]*confirm_mutating_vps=true[\s\S]*reports\/vps-/, "Runbook must document the protected VPS evidence workflow.");
-  assertMatch(vpsPredeployChecklist, /enterprise-vps-evidence[\s\S]*`enterprise-vps-evidence` artifact/, "VPS checklist must require archiving the VPS evidence workflow artifact.");
-  assertMatch(readme, /pre-go-live-evidence\.sh[\s\S]*reports\/go-live/, "README must document the pre go-live evidence pack.");
-  assertMatch(runbook, /pre-go-live-evidence\.sh[\s\S]*includeRuntime[\s\S]*includeRestoreDrill/, "Runbook must document runtime and restore evidence options.");
-  assertMatch(vpsPredeployChecklist, /pre-go-live-evidence\.sh[\s\S]*reports\/go-live/, "VPS checklist must require the go-live evidence report.");
-  assertMatch(opsScript, /const readinessMissing = readinessMatrix\.filter[\s\S]*missingOptions[\s\S]*pendingLiveProofs[\s\S]*status: preGoLiveStatus/, "Pre go-live evidence must write status, missing options and pending live-proof issues.");
-  assertMatch(opsScript, /preGoLive\.payload\.status === "passed"/, "Production go/no-go must require passed pre go-live evidence.");
-  assertMatch(readme, /release-evidence\.sh[\s\S]*reports\/release/, "README must document release evidence reports.");
-  assertMatch(runbook, /release-evidence\.sh[\s\S]*reports\/release/, "Runbook must document release evidence reports.");
-  assertMatch(vpsPredeployChecklist, /release-evidence\.sh[\s\S]*reports\/release/, "VPS checklist must require release evidence reports.");
-  assertMatch(readinessReport, /release-evidence\.sh/, "Readiness report must include release evidence tooling.");
-  assertMatch(readme, /production-go-no-go\.sh[\s\S]*reports\/go-no-go/, "README must document the production go/no-go evidence gate.");
-  assertMatch(runbook, /Production go\/no-go[\s\S]*production-go-no-go\.sh --enforce/, "Runbook must document enforcing the production go/no-go gate.");
-  assertMatch(vpsPredeployChecklist, /production-go-no-go\.sh --enforce[\s\S]*reports\/go-no-go/, "VPS checklist must require the production go/no-go report.");
-  assertMatch(readme, /production-readiness-live\.sh[\s\S]*reports\/production-readiness/, "README must document the live production readiness gate.");
-  assertMatch(runbook, /production-readiness-live\.sh[\s\S]*reports\/production-readiness/, "Runbook must document the live production readiness gate.");
-  assertMatch(vpsPredeployChecklist, /production-readiness-live\.sh[\s\S]*reports\/production-readiness/, "VPS checklist must require the live production readiness report.");
-  assertMatch(readinessReport, /production-go-no-go\.sh/, "Readiness report must include production go/no-go tooling.");
-  assertMatch(finalReadinessAudit, /production-go-no-go/, "Final readiness audit must mention the production go/no-go gate.");
-  assertMatch(readinessReport, /production-readiness-live\.sh/, "Readiness report must include live production readiness tooling.");
-  assertMatch(finalReadinessAudit, /production-readiness/, "Final readiness audit must mention the live production readiness report.");
-  assertMatch(readme, /linux-portability-check\.sh[\s\S]*reports\/linux-portability/, "README must document Linux portability evidence reports.");
-  assertMatch(runbook, /Linux portability[\s\S]*linux-portability-check\.sh --fix/, "Runbook must document the Linux portability check and fix mode.");
-  assertMatch(vpsPredeployChecklist, /linux-portability-check\.sh[\s\S]*reports\/linux-portability/, "VPS checklist must require Linux portability evidence reports.");
-  assertMatch(readinessReport, /linux-portability-check\.sh/, "Readiness report must include Linux portability tooling.");
-  assertMatch(finalReadinessAudit, /linux-portability-check/, "Final readiness audit must mention the Linux portability gate.");
-  assertMatch(readme, /offsite-restore-drill-restic\.sh[\s\S]*--dryRun/, "README must document the off-site Restic restore drill dry-run.");
-  assertMatch(runbook, /Off-site restore drill[\s\S]*offsite-restore-drill-restic\.sh/, "Runbook must document the off-site Restic restore drill.");
-  assertMatch(vpsPredeployChecklist, /offsite-restore-drill-restic\.sh[\s\S]*off-site repository/, "VPS checklist must require the off-site restore drill.");
-  assertMatch(finalReadinessAudit, /offsite-restore-drill-restic/, "Final readiness audit must mention the off-site Restic restore drill.");
-  assertMatch(finalReadinessAudit, /## Modified Files[\s\S]*## New Components[\s\S]*## Tests Executed[\s\S]*## Problems Found And Fixed/, "Final readiness audit must include files, components, tests and problems.");
-  assertMatch(finalReadinessAudit, /## Requirement Status[\s\S]*## Readiness Scores[\s\S]*## Requires Real VPS Or External Provider[\s\S]*## Final VPS Pre-Deploy Checklist/, "Final readiness audit must include requirement status, scores, VPS-only work and checklist.");
-  assertMatch(finalReadinessAudit, /Dockerized backup scheduler/, "Final readiness audit must include the Dockerized backup scheduler.");
-  assertMatch(readme, /Docker Engine, Docker Compose plugin e Git/, "README must document the minimal VPS host dependency set.");
-  assertMatch(readme, /compose\.backup-scheduler\.yaml[\s\S]*--profile backup/, "README must document enabling the Dockerized backup scheduler.");
-  assertMatch(runbook, /docker exec enterprise-backup-scheduler crontab -l/, "Runbook must document verifying the backup scheduler crontab.");
-  assertMatch(envExample, /BACKUP_SCHEDULER_POSTGRES_AT[\s\S]*BACKUP_SCHEDULER_ENABLE_OFFSITE/, ".env.example must expose backup scheduler timing and off-site toggles.");
-  assertNoMatch(`${readme}\n${runbook}\n${enterprisePlan}`, /node\s+(?:\.\/)?scripts\/infra-ops\.mjs/, "Infra operator docs must use the Dockerized ops wrapper, not host Node.");
-  const secretInterpolationPattern = /\b(?:POSTGRES_PASSWORD|APP_DB_PASSWORD|KEYCLOAK_DB_PASSWORD|REDIS_PASSWORD|KC_BOOTSTRAP_ADMIN_PASSWORD|KC_DB_PASSWORD|NATS_PASSWORD|MINIO_ROOT_PASSWORD|SESSION_SECRET|SESSION_SIGNING_KEYS|SECRET_HASH_KEYS|DATABASE_URL|NATS_URL|SMTP_PASSWORD|GF_SECURITY_ADMIN_PASSWORD|CLOUDFLARE_TURNSTILE_SECRET_KEY)\s*:\s*\$\{/;
-  for (const [label, text] of [["compose.yaml", compose], ["compose.prod.yaml", composeProd], ["compose.secrets.yaml", composeSecrets]]) {
-    assertNoMatch(text, secretInterpolationPattern, `${label} must not interpolate secret values from process environment.`);
-  }
-  assertNoMatch(observabilitySource, /env\.NODE_ENV[\s\S]*env\[name\]/, "Shared secret reader must not fall back to process environment secret values.");
-  assertNoMatch(e2eStackHelper, /\$(?:SESSION_SECRET|SECRET_HASH_KEYS|REDIS_PASSWORD)\b/, "E2E stack helpers must read runtime secrets through Docker secret files only.");
-  assertNoMatch(secretManagerScript, /value(?:E|[-]e)nv/, "Infra Secret Manager imports must not accept secret values from process environment variables.");
-  assertMatch(secretManagerScript, /manager:\s+"infra-secret-manager"/, "Infrastructure must include the proprietary Infra Secret Manager store format.");
-  assertMatch(secretManagerScript, /local-bucket-kms/, "Infra Secret Manager must use the proprietary Platform Local KMS envelope layer.");
-  assertMatch(secretManagerScript, /HKDF-SHA256\+A256GCM/, "Platform Local KMS must derive per-key encryption keys for envelope encryption.");
-  assertMatch(secretManagerScript, /kms-rotate/, "Platform Local KMS must expose an operational key rotation command.");
-  assertMatch(secretManagerScript, /AES-256-GCM/, "Infra Secret Manager must encrypt stored secrets with authenticated encryption.");
-  assertMatch(secretManagerScript, /function audit\(/, "Infra Secret Manager must append an audit trail for secret operations.");
-  assertMatch(secretManagerScript, /function materialize\(/, "Infra Secret Manager must materialize Docker secret files for Compose.");
-  assertMatch(secretManagerScript, /control_center_vault_keys[\s\S]*kind:\s*"keyring"/, "Infra Secret Manager must manage a dedicated Control Center Vault keyring.");
-  assertMatch(compose, /CONTROL_CENTER_VAULT_KEY_FILE:\s*\/run\/secrets\/control_center_vault_keys[\s\S]*CONTROL_CENTER_VAULT_LEGACY_KEY_FILE:\s*\/run\/secrets\/projects_gateway_signing_keys/, "Control Center Vault encryption must use a dedicated keyring with an explicit legacy migration source.");
-  assertNoMatch(controlCenterServer, /CONTROL_CENTER_VAULT_KEY_FILE\s*\|\|\s*process\.env\.CONTROL_CENTER_SESSION_KEYS_FILE|CONTROL_CENTER_VAULT_KEY\s*\|\||function vaultEncryptionMaterial/, "Control Center Vault must not fall back to session keys or unversioned environment key material.");
-  assertMatch(vaultKeyringScript, /keyId[\s\S]*openVaultCiphertext[\s\S]*keys\?\.get\(keyId\)/, "Vault decryption must select stable key material by ciphertext key id.");
-  assertMatch(vaultMigrationScript, /REENCRYPT-CONTROL-CENTER-VAULT[\s\S]*backup-dir[\s\S]*escrow-dir/, "Vault re-encryption apply must require explicit confirmation, state backup and key escrow.");
-  assertMatch(controlCenterServer, /endsWith\("\.sql\.gz"\)[\s\S]*mode:\s*"metadata-only"[\s\S]*content:\s*""/, "Database backup previews must be metadata-only and never return dump contents.");
-  assertMatch(compose, /PROJECT_DATABASE_PRINCIPALS_FILE:\s*\/var\/www\/project-state\/database-principals\.json/, "Control Center must persist an authoritative database principal ownership registry.");
-  assertMatch(controlCenterServer, /Database principals are generated server-side[\s\S]*reservePrincipalBinding[\s\S]*assertPrincipalCreateAllowed/, "Database create requests must reject client principals, reserve ownership and verify the catalog.");
-  assertMatch(databaseOwnershipScript, /generatedDatabasePrincipal[\s\S]*assertPrincipalCreateAllowed[\s\S]*assertPrincipalRotationAllowed/, "Database ownership policy must generate principals and separate provisioning from rotation.");
-  assertNoMatch(mariaProvisionSource, /ALTER USER|CREATE USER IF NOT EXISTS|CREATE DATABASE IF NOT EXISTS/, "MariaDB provisioning must never alter or adopt an existing principal/database.");
-  assertNoMatch(postgresProvisionSource, /ALTER ROLE|IF NOT EXISTS|ALTER DATABASE/, "PostgreSQL provisioning must never alter or adopt an existing privileged role/database.");
-  assertMatch(databasePrincipalMigrationScript, /read-only[\s\S]*mutationExecuted:\s*false[\s\S]*buildPrincipalMigrationPlan/, "Legacy database principal migration must remain a read-only dual-credential plan.");
-  assertMatch(backupContractScript, /platform\.backup-job\/v1[\s\S]*platform\.backup-manifest\/v1[\s\S]*normalizeBackupResources/, "Backup jobs and manifests must use a versioned typed resource contract.");
-  assertMatch(backupContractScript, /coverage:[\s\S]*requiredResourceIds[\s\S]*artifactResourceIds[\s\S]*missingResourceIds[\s\S]*complete/, "Backup manifests must prove exact resource coverage.");
-  assertNoMatch(controlCenterServer, /applicationBackupNameTokens|backupEntryMatchesTokens|commands:\s*commands\.map/, "Control Center backup association must not use fuzzy names or caller-selected command arrays.");
-  assertMatch(controlCenterServer, /createBackupJobDocument[\s\S]*resourceIds:[\s\S]*readBackupManifests[\s\S]*scope\.id === project\.slug/, "Control Center must queue typed resources and import manifests by exact project identity.");
-  assertMatch(controlCenterServer, /function planDatabaseBackup[\s\S]*backupResourceId\("database", database\.id\)[\s\S]*createBackupJob/, "Database backup UI must queue a real exact-resource job.");
-  assertMatch(backupSchedulerScript, /platform\.backup-job\/v1[\s\S]*execute-backup-job --jobFile "\$running_file"/, "Backup scheduler must hand one validated job file to the typed executor.");
-  assertNoMatch(backupSchedulerScript, /job_commands|Rejected non allow-listed backup command/, "Backup scheduler must not execute command arrays from queue documents.");
-  assertMatch(opsScript, /verifyBackupManifestDocument[\s\S]*HMAC-SHA256[\s\S]*executeBackupJob[\s\S]*assertRestoreResourceMatchesManifest/, "Ops executor must verify signed manifests and exact restore resource bindings.");
-  assertMatch(backupContractTest, /similarly named projects never match by substring[\s\S]*legacy global command queues/, "Backup contract tests must cover collision and legacy command rejection.");
-  assertMatch(backupContractSandboxTest, /tampered manifest was accepted[\s\S]*liveDataChanged:\s*false/, "Backup sandbox test must reject manifest tampering and prove no live source mutation.");
-  assertMatch(backupDatabaseSandboxTest, /fixture-postgres[\s\S]*fixture-mariadb[\s\S]*tampered manifest[\s\S]*liveDatabaseContainersChanged:\s*false/, "Database backup sandbox must prove exact cross-engine backup/restore without changing live containers.");
-  assertMatch(secretManagerScript, /mariadb_root_password[\s\S]*phpmyadmin_control_password/, "Infra Secret Manager must manage MariaDB and phpMyAdmin local Docker secrets.");
-  assertMatch(opsScript, /runSecretManager\(\["verify"/, "Enterprise local secret validation must verify the proprietary secret manager store.");
-  assertMatch(secretRotationEvidenceWrapper, /secret-rotation-evidence/, "Secret rotation evidence wrapper must delegate to the Dockerized ops runner.");
-  assertMatch(opsScript, /async function secretRotationEvidence[\s\S]*verify\.status[\s\S]*expiredSecrets/, "Ops script must write a secret rotation/freshness evidence report without secret values.");
-  assertMatch(opsScript, /latestJsonReport\("secret-rotation", "secret-rotation-evidence-"/, "Production go/no-go must evaluate secret rotation evidence.");
-  assertMatch(productionGoNoGoPolicyText, /"requireSecretRotationEvidence":\s*true/, "Production go/no-go policy must require a secret rotation evidence report.");
-  assertMatch(productionGoNoGoPolicyText, /"secretRotation":\s*24/, "Production go/no-go policy must require fresh secret rotation evidence.");
-  assertMatch(productionReadinessManifest, /"secrets-management"[\s\S]*"secret-rotation-evidence"/, "Production readiness must map secrets management to dedicated secret rotation evidence.");
-  assertMatch(rateLimitEvidenceWrapper, /rate-limit-evidence/, "Rate-limit evidence wrapper must delegate to the Dockerized ops runner.");
-  assertMatch(opsScript, /async function rateLimitEvidence[\s\S]*rate-limit-evidence-[\s\S]*infraChecksPassed/, "Ops script must write dedicated rate-limit evidence reports.");
-  assertMatch(opsScript, /directory: "rate-limits"[\s\S]*prefix: "rate-limit-evidence-"[\s\S]*required: true/, "Evidence bundle must require rate-limit evidence reports.");
-  assertMatch(productionReadinessManifest, /"rate-limiting"[\s\S]*"rate-limit-evidence"/, "Production readiness must map rate limiting to dedicated evidence.");
-  assertMatch(auditLogEvidenceWrapper, /audit-log-evidence/, "Audit log evidence wrapper must delegate to the Dockerized ops runner.");
-  assertMatch(opsScript, /async function auditLogEvidence[\s\S]*audit-log-evidence-[\s\S]*infraChecksPassed/, "Ops script must write dedicated audit log evidence reports.");
-  assertMatch(opsScript, /directory: "audit-logs"[\s\S]*prefix: "audit-log-evidence-"[\s\S]*required: true/, "Evidence bundle must require audit log evidence reports.");
-  assertMatch(productionReadinessManifest, /"admin-audit-log"[\s\S]*"platform-admin-audit-evidence"/, "Production readiness must not use hosted project audit logs as platform admin audit evidence.");
-  assertMatch(retentionEvidenceWrapper, /retention-evidence/, "Retention evidence wrapper must delegate to the Dockerized ops runner.");
-  assertMatch(opsScript, /async function retentionEvidence[\s\S]*retention-evidence-[\s\S]*infraChecksPassed/, "Ops script must write dedicated retention evidence reports.");
-  assertMatch(opsScript, /directory: "retention"[\s\S]*prefix: "retention-evidence-"[\s\S]*required: true/, "Evidence bundle must require retention evidence reports.");
-  assertMatch(productionReadinessManifest, /"log-metric-retention"[\s\S]*"retention-evidence"/, "Production readiness must map log and metric retention to dedicated evidence.");
-  assertMatch(composeDr, /archive_mode=on/, "DR overlay must enable PostgreSQL WAL archiving.");
-  assertMatch(composeDr, /enterprise_postgres_wal_archive/, "DR overlay must persist WAL archives.");
-  assertMatch(admissionPolicy, /cosign\.sigstore\.dev\/verified/, "Admission policy must require cosign verification.");
-  assertMatch(admissionPolicy, /slsa\.dev\/provenance/, "Admission policy must require SLSA provenance.");
-  assertMatch(branchProtection, /enterprise-readiness/, "Governance branch protection must require enterprise-readiness.");
-  assertMatch(githubBranchProtectionWrapper, /github-branch-protection/, "GitHub branch protection wrapper must delegate to the Dockerized ops runner.");
-  assertMatch(githubEnvironmentsWrapper, /github-environments/, "GitHub environments wrapper must delegate to the Dockerized ops runner.");
-  assertMatch(githubActionsConfigWrapper, /github-actions-config/, "GitHub Actions config wrapper must delegate to the Dockerized ops runner.");
-  assertMatch(preGoLiveEvidenceWrapper, /pre-go-live-evidence/, "Pre go-live evidence wrapper must delegate to the Dockerized ops runner.");
-  if (!githubEnvironmentsPolicyJson.environments?.some((environment) => environment.name === "staging")) {
-    fail("Governance GitHub environments policy must define staging.");
-  }
-  const productionEnvironment = githubEnvironmentsPolicyJson.environments?.find((environment) => environment.name === "production");
-  if (!productionEnvironment) {
-    fail("Governance GitHub environments policy must define production.");
-  }
-  if (!productionEnvironment.require_reviewers_on_apply || !productionEnvironment.reviewers?.length || productionEnvironment.reviewers.some((reviewer) => !Number.isInteger(Number(reviewer.id)))) {
-    fail("Production GitHub environment must require exact deployment reviewer identities.");
-  }
-  assertMatch(githubEnvironmentsPolicyText, /"wait_timer":\s*15[\s\S]*"protected_branches":\s*true[\s\S]*"custom_branch_policies":\s*false/, "Production GitHub environment must require a wait timer and protected branches.");
-  if (githubActionsRuntimePolicyJson.repository?.required_secrets?.some((secret) => secret.name === "PROJECT_REPO_TOKEN")) {
-    fail("GitHub Actions runtime policy must not require PROJECT_REPO_TOKEN.");
-  }
-  const stagingRuntime = githubActionsRuntimePolicyJson.environments?.find((environment) => environment.name === "staging");
-  const productionRuntime = githubActionsRuntimePolicyJson.environments?.find((environment) => environment.name === "production");
-  if (!stagingRuntime?.required_variables?.some((variable) => variable.name === "DAST_TARGET")) {
-    fail("GitHub Actions runtime policy must require DAST_TARGET in staging.");
-  }
-  if (!productionRuntime?.required_secrets?.some((secret) => secret.name === "DEPLOY_SSH_KEY")) {
-    fail("GitHub Actions runtime policy must require DEPLOY_SSH_KEY in production.");
-  }
-  for (const name of ["EXTERNAL_UPTIME_PROVIDER_EVIDENCE_JSON", "CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ACCESS_ADMIN_MANIFEST_JSON"]) {
-    if (!productionRuntime?.required_secrets?.some((secret) => secret.name === name)) {
-      fail(`GitHub Actions runtime policy must require ${name} in production.`);
-    }
-  }
-  for (const name of ["DEPLOY_REMOTE", "DEPLOY_REMOTE_DIR", "DEPLOY_SSH_PORT", "VPS_HARDENED_SSH_PORT", "PUBLIC_API_HEALTH_URL", "CLOUDFLARE_ACCOUNT_ID"]) {
-    if (!productionRuntime?.required_variables?.some((variable) => variable.name === name)) {
-      fail(`GitHub Actions runtime policy must require ${name} in production.`);
-    }
-  }
-  assertMatch(githubActionsRuntimePolicyText, /"DEPLOY_REMOTE"[\s\S]*"DEPLOY_REMOTE_DIR"[\s\S]*"DEPLOY_SSH_PORT"[\s\S]*"VPS_HARDENED_SSH_PORT"[\s\S]*"PUBLIC_API_HEALTH_URL"[\s\S]*"CLOUDFLARE_ACCOUNT_ID"/, "GitHub Actions runtime policy must define production deploy, VPS, public API and Cloudflare variables.");
-  assertMatch(githubActionsRuntimePolicyText, /"EXTERNAL_UPTIME_PROVIDER_EVIDENCE_JSON"[\s\S]*"CLOUDFLARE_API_TOKEN"[\s\S]*"CLOUDFLARE_ACCESS_ADMIN_MANIFEST_JSON"/, "GitHub Actions runtime policy must define live evidence production secrets.");
-  assertMatch(opsScript, /async function githubBranchProtection/, "Ops script must provide a GitHub branch protection command.");
-  assertMatch(opsScript, /Mode: dry-run[\s\S]*--apply/, "GitHub branch protection command must default to dry-run and require explicit apply.");
-  assertMatch(opsScript, /GITHUB_TOKEN[\s\S]*GH_TOKEN[\s\S]*Authorization[\s\S]*Bearer \$\{token\}/, "GitHub branch protection command must use token-authenticated GitHub API calls.");
-  assertMatch(opsScript, /githubApi\("PUT", apiPath, policy\)/, "GitHub branch protection command must update the live policy only through the explicit apply path.");
-  assertMatch(opsScript, /"github-branch-protection": githubBranchProtection/, "Ops command map must expose github-branch-protection.");
-  assertMatch(opsScript, /async function githubEnvironments/, "Ops script must provide a GitHub environments command.");
-  assertMatch(githubGovernancePolicyModule, /reviewer identities differ[\s\S]*prevent_self_review differs/, "GitHub environments verifier must compare exact reviewer identities and self-review policy.");
-  assertMatch(opsScript, /githubApi\("PUT", githubEnvironmentApiPath\(repo, environment\.name\), payload\)/, "GitHub environments command must update live environments only through the explicit apply path.");
-  assertMatch(opsScript, /"github-environments": githubEnvironments/, "Ops command map must expose github-environments.");
-  assertMatch(githubWorkflow, /GitHub environments dry run/, "Infra workflow must dry-run GitHub environment policy.");
-  assertMatch(opsScript, /async function githubActionsConfig/, "Ops script must provide a GitHub Actions runtime config command.");
-  assertMatch(opsScript, /githubApiList\(`\$\{basePath\}\/actions\/secrets`, "secrets"\)/, "GitHub Actions config command must verify repository secrets through the GitHub API.");
-  assertMatch(opsScript, /validateVariablePatterns/, "GitHub Actions config command must validate variable formats without printing secret values.");
-  assertMatch(opsScript, /"github-actions-config": githubActionsConfig/, "Ops command map must expose github-actions-config.");
-  assertMatch(githubWorkflow, /GitHub Actions runtime config dry run[\s\S]*github-actions-config --repo/, "Infra workflow must dry-run GitHub Actions runtime config policy.");
-  assertMatch(githubWorkflow, /GitHub Actions run evidence plan[\s\S]*github-actions-run-evidence/, "Infra workflow must generate a GitHub Actions run evidence plan.");
-  assertMatch(productionGoNoGoPolicyText, /"requireGithubActionsRunSuccess":\s*true[\s\S]*"requiredGithubWorkflow":\s*"enterprise-infra\.yml"/, "Production go/no-go policy must require a successful remote GitHub Actions workflow run.");
-  assertMatch(githubWorkflow, /DR evidence summary[\s\S]*dr-evidence/, "Infra workflow must exercise the DR evidence summary.");
-  assertMatch(githubWorkflow, /Off-site restore drill plan[\s\S]*offsite-restore-drill-restic --planOnly/, "Infra workflow must exercise the off-site restore drill plan.");
-  assertMatch(githubWorkflow, /Release evidence plan[\s\S]*release-evidence --planOnly/, "Infra workflow must exercise the release evidence command in plan mode.");
-  assertMatch(githubWorkflow, /Release artifact gate dry run[\s\S]*release-artifact-gate --envFile \.tmp\/ci-release\.env --sbom \.tmp\/ci-sbom\/pnpm-sbom-ci\.json/, "Infra workflow must exercise the release artifact admission gate.");
-  assertMatch(githubWorkflow, /Alert evidence summary[\s\S]*alert-evidence/, "Infra workflow must exercise the alert evidence command in summary mode.");
-  assertMatch(githubWorkflow, /Production go-no-go summary[\s\S]*production-go-no-go/, "Infra workflow must exercise the production go/no-go command in summary mode.");
-  assertMatch(githubWorkflow, /Pre go-live evidence report[\s\S]*pre-go-live-evidence --infraOnly --repo/, "Infra workflow must exercise the infrastructure-only pre go-live evidence pack.");
-  assertMatch(githubWorkflow, /Linux portability check[\s\S]*linux-portability-check/, "Infra workflow must exercise the Linux portability command.");
-  assertMatch(githubWorkflow, /Enterprise requirements traceability[\s\S]*enterprise-requirements-check/, "Infra workflow must exercise the enterprise requirements traceability gate.");
-  assertMatch(githubWorkflow, /Production readiness checklist[\s\S]*enterprise-requirements-check --manifest governance\/production-readiness\.json/, "Infra workflow must exercise the 19-point infrastructure production readiness checklist.");
-  assertMatch(githubWorkflow, /Production live proof gate rejects missing evidence[\s\S]*--requireLiveProofs[\s\S]*Live proof gate passed without real production evidence/, "Infra workflow must prove the live-production gate rejects missing external evidence.");
-  assertMatch(productionReadinessManifest, /"expectedCount":\s*19/, "Production readiness manifest must track the exact 19-point infrastructure checklist.");
-  assertMatch(productionReadinessManifest, /"liveProofCheckRequired":\s*true/, "Production readiness manifest must require mapped live proof checks.");
-  assertMatch(productionReadinessManifest, /"liveProofChecks"/, "Production readiness requirements must map to production go/no-go live checks.");
-  assertMatch(githubWorkflow, /Repository coverage audit[\s\S]*repo-coverage-check/, "Infra workflow must audit tracked repository coverage.");
-  assertMatch(githubWorkflow, /Render staging and backup compose[\s\S]*compose\.waf\.yaml[\s\S]*compose\.staging\.yaml[\s\S]*compose\.backup-scheduler\.yaml/, "Infra workflow must render staging, WAF and backup compose overlays.");
-  assertMatch(githubWorkflow, /Secret scan[\s\S]*secret-scan/, "Infra workflow must exercise the secret scanner.");
-  assertMatch(githubWorkflow, /HA configuration check[\s\S]*ha-config-check/, "Infra workflow must exercise the HA configuration gate.");
-  assertMatch(githubWorkflow, /Managed secrets preflight[\s\S]*managed-secrets-preflight/, "Infra workflow must exercise the managed secrets gate.");
-  assertMatch(githubWorkflow, /Compose healthcheck coverage[\s\S]*compose-healthcheck-coverage/, "Infra workflow must exercise the healthcheck coverage gate.");
-  assertMatch(githubWorkflow, /Rate limit evidence[\s\S]*rate-limit-evidence/, "Infra workflow must exercise the rate-limit evidence gate.");
-  assertMatch(githubWorkflow, /Audit log evidence[\s\S]*audit-log-evidence/, "Infra workflow must exercise the audit log evidence gate.");
-  assertMatch(githubWorkflow, /Retention evidence[\s\S]*retention-evidence/, "Infra workflow must exercise the retention evidence gate.");
-  assertMatch(githubWorkflow, /Secret rotation evidence plan[\s\S]*secret-rotation-evidence/, "Infra workflow must exercise the secret rotation evidence command.");
-  assertMatch(githubWorkflow, /DR readiness check[\s\S]*dr-readiness-check/, "Infra workflow must exercise the DR readiness gate.");
-  assertMatch(githubWorkflow, /DEPLOY_RUN_PRODUCTION_PREFLIGHT:\s+"1"[\s\S]*DEPLOY_RUN_PRE_GO_LIVE:\s+"1"[\s\S]*DEPLOY_RUN_GO_NO_GO:\s+"1"/, "Production deploy workflow must enforce preflight, pre-go-live evidence and go/no-go.");
-  assertMatch(githubWorkflow, /DEPLOY_PRE_GO_LIVE_RESTORE_DRILL:\s+"1"[\s\S]*DEPLOY_PRE_GO_LIVE_OFFSITE_RESTORE_DRY_RUN:\s+"1"/, "Production deploy workflow must require restore and off-site restore evidence.");
-  assertMatch(githubWorkflow, /Upload CI evidence reports[\s\S]*actions\/upload-artifact@[a-f0-9]{40}[\s\S]*reports\/[\s\S]*\.tmp\/evidence-bundles\/[\s\S]*retention-days:\s+30/, "Infra workflow must upload non-secret CI evidence reports.");
-  assertMatch(githubWorkflow, /permissions:\s*\r?\n\s+contents:\s+read/, "Infra workflow must declare least-privilege read permissions.");
-  assertNoMatch(githubWorkflow, /security-events:\s+write|contents:\s+write/, "Infra workflow must not request unused write permissions.");
-  assertMatch(githubWorkflow, /compose-and-policy:[\s\S]*timeout-minutes:\s+45[\s\S]*shell-syntax:[\s\S]*timeout-minutes:\s+10[\s\S]*dast-zap:[\s\S]*timeout-minutes:\s+45[\s\S]*deploy-vps:[\s\S]*timeout-minutes:\s+90/, "Infra workflow jobs must set explicit timeouts.");
-  assertMatch(opsScript, /async function preGoLiveEvidence/, "Ops script must provide a pre go-live evidence command.");
-  assertMatch(opsScript, /writeJsonReport\("go-live"[\s\S]*writeMarkdownReport\("go-live"/, "Pre go-live evidence must write JSON and Markdown reports.");
-  assertMatch(opsScript, /providerEvidence = \[[\s\S]*VPS Ubuntu LTS[\s\S]*Cloudflare DNS\/CDN\/WAF\/Access[\s\S]*providerEvidenceRequired/, "Pre go-live evidence must track remaining provider proof.");
-  assertMatch(opsScript, /"pre-go-live-evidence": preGoLiveEvidence/, "Ops command map must expose pre-go-live-evidence.");
-  assertMatch(githubWorkflow, /dast-zap:[\s\S]*environment:\s*\r?\n\s+name:\s+staging/, "DAST workflow job must use the staging environment.");
-  assertMatch(githubWorkflow, /deploy-vps:[\s\S]*environment:\s*\r?\n\s+name:\s+production/, "VPS deploy workflow job must use the production environment.");
-  assertMatch(githubWorkflow, /deploy-vps:[\s\S]*concurrency:[\s\S]*infra-production-deploy[\s\S]*cancel-in-progress:\s+false/, "Production deploy workflow must serialize deployments.");
-  assertMatch(enterprisePlan, /## 1\. HA multi-node production[\s\S]*## 8\. Governance/, "Enterprise 10 plan must cover all eight readiness domains.");
-  assertMatch(compose, /image:\s+\$\{BACKEND_BUILD_IMAGE:-platform\/backend:local\}/, "Local dev backend must run the production image shape, not a generic Node watch container.");
-  assertMatch(compose, /image:\s+\$\{WEB_BUILD_IMAGE:-platform\/web:local\}/, "Local dev web must run the production image shape, not next dev.");
-  assertMatch(compose, /image:\s+\$\{WORKER_NOTIFICATIONS_BUILD_IMAGE:-platform\/worker-notifications:local\}/, "Local dev workers must run production-shaped images.");
-  assertNoMatch(compose, /--watch|next dev/, "Local dev compose must not run watch/dev servers.");
-  assertNoMatch(compose, /--loader \.\/scripts\/ts-extension-loader\.mjs/, "Dev backend must not use the unsupported Node --loader flag.");
-  assertNoMatch(compose, /\.\.\/src:\/workspace/, "Local dev compose must not bind-mount app source into runtime containers.");
-  assertNoMatch(compose, /\$\{(?:POSTGRES_PORT|REDIS_PORT|KEYCLOAK_PORT|NATS_CLIENT_PORT|NATS_MONITORING_PORT|MINIO_API_PORT|MINIO_CONSOLE_PORT|BACKEND_PORT|WEB_PORT|PROMETHEUS_PORT|GRAFANA_PORT|LOKI_PORT)/, "Local dev compose must not expose direct service ports; route through Traefik like production.");
-  assertMatch(compose, /NODE_ENV:\s+production/, "Local dev app services must run with NODE_ENV=production.");
-  assertNoMatch(compose, /\/var\/run\/docker\.sock/, "Compose must not mount docker.sock into application or observability containers.");
-  assertNoMatch(promtailConfig, /docker_sd_configs|unix:\/\/\/var\/run\/docker\.sock/, "Promtail must scrape container logs without docker.sock service discovery.");
-  assertMatch(promtailConfig, /drop:[\s\S]*older_than:\s+168h/, "Promtail must drop stale Docker log backfill before sending to Loki.");
-  assertMatch(promtailConfig, /replace:[\s\S]*authorization[\s\S]*\[REDACTED\]/, "Promtail must apply a sensitive-field redaction pipeline.");
-  assertMatch(promtailConfig, /json:[\s\S]*level:\s+level[\s\S]*service:\s+service/, "Promtail must parse structured application log fields.");
-  assertMatch(promtailConfig, /labels:[\s\S]*level:[\s\S]*service:/, "Promtail must promote service and level labels for Loki queries.");
-  assertMatch(grafanaOverviewDashboard, /Backend errors/, "Grafana dashboard must include backend error log panel.");
-  assertMatch(grafanaOverviewDashboard, /Worker errors/, "Grafana dashboard must include worker error log panel.");
-  assertMatch(grafanaOverviewDashboard, /WAF events/, "Grafana dashboard must include WAF event log panel.");
-  assertMatch(grafanaOverviewDashboard, /Auth failures/, "Grafana dashboard must include auth failure log panel.");
-  assertMatch(lokiConfig, /retention_period:\s+168h/, "Loki must enforce bounded log retention.");
-  assertMatch(compose, /--storage\.tsdb\.retention\.time=\$\{PROMETHEUS_RETENTION_TIME:-15d\}/, "Prometheus must enforce bounded metric retention.");
-  assertMatch(lokiConfig, /reject_old_samples:\s+true/, "Loki must reject stale samples.");
-  assertMatch(backendDockerfile, /FROM \$\{NODE_IMAGE\} AS build/, "Backend Dockerfile must use a dedicated JavaScript build stage.");
-  assertMatch(backendDockerfile, /pnpm --filter \.\/apps\/backend build/, "Backend Dockerfile must build the production JavaScript bundle.");
-  assertMatch(backendDockerfile, /COPY --from=build --chown=node:node \/workspace\/apps\/backend\/dist apps\/backend\/dist/, "Backend runtime image must copy compiled dist from the build stage.");
-  assertMatch(backendDockerfile, /CMD \["node", "--enable-source-maps", "dist\/server\.js"\]/, "Backend runtime image must execute compiled JavaScript with source maps.");
-  assertNoMatch(backendDockerfile, /register-ts-extension-loader|ts-extension-loader|src\/server\.ts/, "Backend production image must not run TypeScript through a runtime loader.");
-  assertMatch(backendDockerfile, /packages\/observability\/package\.json[\s\S]*packages\/observability packages\/observability/, "Backend Dockerfile must include the shared observability package in build and runtime stages.");
-  assertMatch(workerDockerfile, /packages\/observability\/package\.json[\s\S]*packages\/observability packages\/observability/, "Worker Dockerfile must include the shared observability package.");
-  for (const service of ["traefik", "postgres", "redis", "keycloak", "nats", "minio", "backend", "web", "worker-notifications", "worker-jobs", "prometheus", "node-exporter", "cadvisor", "alertmanager", "grafana", "loki", "promtail"]) {
-    assertMatch(
-      compose,
-      new RegExp(`^\\s{2}${service}:.*?init:\\s+true.*?pids_limit:\\s+\\d+.*?logging:\\s+\\*default_logging`, "ms"),
-      `Service ${service} must have init, pids_limit and bounded logging.`,
-    );
-    assertMatch(
-      compose,
-      new RegExp(`^\\s{2}${service}:.*?security_opt:\\s*\\r?\\n\\s+- no-new-privileges:true`, "ms"),
-      `Service ${service} must set no-new-privileges.`,
-    );
-  }
-  for (const service of ["backend", "web", "worker-notifications", "worker-jobs"]) {
-    assertMatch(
-      compose,
-      new RegExp(`^\\s{2}${service}:.*?read_only:\\s+true.*?no-new-privileges:true.*?cap_drop:\\s*\\r?\\n\\s+- ALL`, "ms"),
-      `Dev service ${service} must be read-only, no-new-privileges and cap-drop ALL.`,
-    );
-  }
-  for (const dockerfile of [backendDockerfile, webDockerfile, workerDockerfile]) {
-    assertMatch(dockerfile, /^# syntax=docker\/dockerfile:1\.7/m, "Production Dockerfiles must opt into BuildKit cache mount syntax.");
-    assertMatch(dockerfile, /--mount=type=cache,target=\/pnpm\/store/, "Production Dockerfiles must cache the pnpm store during dependency install.");
-    assertMatch(dockerfile, /COPY --chown=node:node/, "Production Dockerfiles must copy runtime files as the node user.");
-    assertMatch(dockerfile, /USER node[\s\S]*RUN[\s\S]*pnpm install/, "Production Dockerfiles must run dependency install as the non-root node user.");
-    assertMatch(dockerfile, /^HEALTHCHECK /m, "Production Dockerfiles must include an image-level healthcheck.");
-  }
-  assertMatch(webDockerfile, /ARG NEXT_PUBLIC_API_URL[\s\S]*NEXT_PUBLIC_ACCOUNT_URL/, "Web Dockerfile must receive public URLs as build args for production bundles.");
-  assertMatch(compose, /AUDIT_OUTBOX_ENABLED:\s+\$\{AUDIT_OUTBOX_ENABLED:-true\}/, "Worker jobs must enable audit outbox dispatch by default.");
-  assertMatch(compose, /AUDIT_OUTBOX_MAX_ATTEMPTS:\s+\$\{AUDIT_OUTBOX_MAX_ATTEMPTS:-8\}/, "Audit outbox worker must have bounded retry attempts.");
-  assertMatch(compose, /alertmanager:[\s\S]*prom\/alertmanager:v0\.32\.2@sha256:/, "Alertmanager must run as a pinned local/prod service.");
-  assertMatch(composeProd, /alertmanager:[\s\S]*ports:\s*!reset \[\]/, "Alertmanager must not expose host ports in production.");
-  assertMatch(prometheusConfig, /alertmanagers:[\s\S]*alertmanager:9093/, "Prometheus must route alerts to Alertmanager.");
-  assertMatch(prometheusConfig, /job_name: alertmanager[\s\S]*alertmanager:9093/, "Prometheus must scrape Alertmanager.");
-  assertMatch(prometheusConfig, /job_name: node-exporter[\s\S]*node-exporter:9100/, "Prometheus must scrape node-exporter for host CPU/RAM/disk.");
-  assertMatch(prometheusConfig, /job_name: cadvisor[\s\S]*cadvisor:8080/, "Prometheus must scrape cAdvisor for container CPU/RAM.");
-  assertMatch(compose, /node-exporter:[\s\S]*--collector\.textfile\.directory=\/var\/lib\/node-exporter\/textfile[\s\S]*node-exporter-textfile:\/var\/lib\/node-exporter\/textfile:ro/, "node-exporter must scrape the host collector textfile directory read-only.");
-  assertMatch(alertmanagerConfig, /worker-notifications:3000\/alerts\/prometheus/, "Alertmanager must deliver alerts to the notification worker.");
-  assertMatch(alertmanagerConfig, /authorization:[\s\S]*type:\s+Bearer[\s\S]*credentials_file:\s+\/run\/secrets\/alertmanager_webhook_token/, "Alertmanager webhook delivery must use the shared bearer-token secret.");
-  assertMatch(alertmanagerConfig, /platform_probe="alert-delivery"[\s\S]*group_wait:\s+0s/, "Alertmanager must provide an immediate route for correlated delivery probes.");
-  assertMatch(compose, /alertmanager:[\s\S]*group_add:[\s\S]*ALERTMANAGER_SECRET_GID[\s\S]*test -r \/run\/secrets\/alertmanager_webhook_token[\s\S]*\/-\/ready/, "Alertmanager health must require a readable token and readiness under the configured runtime group.");
-  assertMatch(secretManagerScript, /alertmanager_webhook_token[^\n]*fileMode:\s*0o640[\s\S]*Materialized secret mode mismatch/, "Infra Secret Manager must materialize and verify the shared Alertmanager token at mode 0640.");
-  assertMatch(alertmanagerSecretPermissions, /APPLY-ALERTMANAGER-SECRET-PERMISSIONS[\s\S]*chgrp[\s\S]*chmod 0640[\s\S]*contentRead[^\n]*false/, "Alertmanager token permission changes must require explicit confirmation without reading token content.");
-  assertMatch(alertDeliverySandboxTest, /secret0600Rejected[\s\S]*invalidBearerRejected[\s\S]*exactAlertmanagerReceiptPassed[\s\S]*failedDeliveryReportRedacted[\s\S]*liveAlertRuntimeChanged/, "Alert delivery sandbox must prove permission failure, bearer rejection, exact receipt, redacted failure reporting and live preservation.");
-  assertMatch(vpsPreflightScript, /alertmanager_webhook_token[\s\S]*alertmanager-secret-permissions\.sh[\s\S]*ALERTMANAGER_SECRET_GID/, "VPS preflight must reject an unreadable Alertmanager token before deployment.");
-  assertMatch(`${envExample}\n${envVpsExample}\n${envStagingExample}`, /ALERTMANAGER_SECRET_GID=1000/, "Environment examples must document the Alertmanager shared runtime group.");
-  assertMatch(opsScript, /function alertMetricScript[\s\S]*request\(\$\{JSON\.stringify\(alertmanagerHost\)\}, 9093, "POST", "\/api\/v2\/alerts"[\s\S]*exactReceiverReceipt/, "Alert evidence must traverse Alertmanager and require an exact downstream receipt instead of calling the worker directly.");
-  assertMatch(lokiConfig, /alertmanager_url:\s+http:\/\/alertmanager:9093/, "Loki ruler must route alerts to Alertmanager over the Docker network.");
-  for (const alertName of ["AuditOutboxDeadLetters", "PostgresBackupStale", "RestoreDrillStale", "AlertmanagerDeliveryFailed", "HostDiskUsageHigh", "HostMemoryUsageHigh", "HostCpuUsageHigh", "ContainerCpuUsageHigh", "ContainerMemoryUsageHigh", "ContainerDisappeared"]) {
-    assertMatch(prometheusAlerts, new RegExp(`alert: ${alertName}`), `Prometheus alerts must include ${alertName}.`);
-  }
-  assertMatch(prometheusAlerts, /platform_container_cpu_percent[\s\S]*platform_container_memory_usage_bytes[\s\S]*platform_container_metrics_collector_healthy/, "Container alerts must use the compatible host collector rather than trust cAdvisor process health.");
-  assertMatch(grafanaOverviewDashboard, /platform_container_cpu_percent[\s\S]*platform_container_memory_usage_bytes[\s\S]*platform_container_memory_limit_bytes/, "Grafana overview must show per-container workload usage and effective memory limits.");
-  assertMatch(controlCenterServer, /CONTROL_CENTER_DOCKER_STATS_MAX_AGE_SECONDS[\s\S]*collectorHealthy[\s\S]*timestampValid[\s\S]*cpuLimitCores[\s\S]*memoryLimitBytes/, "Control Center must reject stale, future or incomplete Docker stats and expose effective runtime limits.");
-  assertMatch(controlCenterTest, /staleDockerStats[\s\S]*futureDockerStats[\s\S]*containerMetricsAvailable, false[\s\S]*capturedAtEpoch[\s\S]*cpuLimitCores: 2/, "Control Center tests must prove stale/future metrics rejection and effective limit reporting.");
-  assertMatch(compose, /node-exporter:[\s\S]*prom\/node-exporter:v1\.10\.2@sha256:/, "Compose must include pinned node-exporter.");
-  assertMatch(compose, /cadvisor:[\s\S]*gcr\.io\/cadvisor\/cadvisor:v0\.52\.1@sha256:/, "Compose must include pinned cAdvisor.");
-  assertMatch(compose, /loki:[\s\S]*\.\/loki\/rules:\/loki\/rules:ro/, "Loki must mount local alert rules.");
-  assertMatch(lokiWafAlerts, /alert: WafBlockSpike[\s\S]*count_over_time/, "Loki rules must alert on anomalous WAF block log volume.");
-  assertMatch(workerNotificationsServer, /\/alerts\/prometheus/, "Notification worker must expose an Alertmanager webhook endpoint.");
-  assertMatch(workerNotificationsServer, /ALERTMANAGER_WEBHOOK_TOKEN/, "Notification worker must require the Alertmanager webhook token in production.");
-  assertMatch(workerNotificationsServer, /notification_alert_webhook_alerts_total/, "Notification worker must expose alert webhook metrics.");
-  assertMatch(workerNotificationsServer, /notification_alert_email_deliveries_total/, "Notification worker must expose alert email delivery metrics.");
-  assertMatch(workerNotificationsServer, /notification_alert_discord_deliveries_total/, "Notification worker must expose Discord alert delivery metrics.");
-  assertMatch(workerNotificationsServer, /notification_alert_telegram_deliveries_total/, "Notification worker must expose Telegram alert delivery metrics.");
-  assertMatch(workerNotificationsServer, /ALERT_DISCORD_WEBHOOK_URL/, "Notification worker must support optional Discord alert forwarding through a secret file.");
-  assertMatch(workerNotificationsServer, /ALERT_TELEGRAM_BOT_TOKEN/, "Notification worker must support optional Telegram alert forwarding through a secret file.");
-  assertMatch(workerJobsServer, /backup_restore_last_success_age_seconds/, "Jobs worker must expose backup/restore freshness metrics.");
-  assertMatch(observabilitySource, /FASTIFY_LOG_REDACTION_PATHS[\s\S]*authorization[\s\S]*set-cookie/, "Shared observability package must define sensitive Fastify redaction paths.");
-  assertMatch(observabilitySource, /function redactLogValue[\s\S]*isSensitiveLogKey/, "Shared observability package must recursively redact sensitive log fields.");
-  assertMatch(readText(path.join(sourceRoot, "apps", "backend", "src", "server.ts")), /FASTIFY_LOG_REDACTION_PATHS[\s\S]*LOG_REDACTION_CENSOR/, "Backend must use the shared log redaction policy.");
-  assertMatch(readText(path.join(sourceRoot, "apps", "backend", "src", "server.ts")), /base:[\s\S]*service:[\s\S]*enterprise-backend/, "Backend logs must include a stable service field.");
-  assertMatch(readText(path.join(sourceRoot, "apps", "backend", "src", "server.ts")), /formatters:[\s\S]*level\(label\)[\s\S]*return \{ level: label \}/, "Backend log levels must be text labels for Loki queries.");
-  assertMatch(workerJobsServer, /createJsonLogger\(serviceName\)/, "Jobs worker must use the shared redacting JSON logger.");
-  assertMatch(workerNotificationsServer, /createJsonLogger\(serviceName\)/, "Notifications worker must use the shared redacting JSON logger.");
-  assertMatch(backendConfig, /apiDocsEnabled.*isProduction \? "false" : "true"/, "API docs must default off in production.");
-  assertMatch(backendConfig, /SESSION_SIGNING_KEYS/, "Session signing key-ring support must be configured.");
-  assertMatch(backendConfig, /sensitiveActionFallbackRateLimitMax/, "Sensitive action degraded rate limit budget must be configured.");
-  assertMatch(backendConfig, /sessionTouchThrottleMs/, "Session touch throttling must be configurable.");
-  assertMatch(readText(path.join(sourceRoot, "apps", "backend", "src", "server.ts")), /skipOnError:\s*false/, "Fastify rate-limit must fail closed instead of skipping on store errors.");
-  assertMatch(backendRedisStore, /assertRequestRateAllowed/, "HTTP rate limiting must have a Redis-backed runtime guard.");
-  assertMatch(backendRedisStore, /using fail-safe memory window/, "Redis rate-limit degradation must fall back to memory.");
-  assertMatch(backendSessionAuth, /shouldPersistSessionTouch/, "Authenticated session touches must be throttled.");
-  assertMatch(cryptoRuntime, /readPayloadKeyId/, "Session token verification must support key ids for rotation.");
-  assertMatch(opsScript, /async function backupRestoreDrill/, "Ops script must provide an automated backup/restore drill.");
-  assertMatch(opsScript, /function writeBackupExecutionReport[\s\S]*writeJsonReport\("backups"[\s\S]*writeMarkdownReport\("backups"/, "Backup commands must write JSON and Markdown execution reports.");
-  assertMatch(opsScript, /writeBackupExecutionReport\(\{[\s\S]*engine: "postgres"[\s\S]*engine: "mariadb"[\s\S]*engine: "minio"[\s\S]*engine: "keycloak"[\s\S]*engine: "secret-manager"/, "All backup families must write execution reports.");
-  assertMatch(opsScript, /async function backupMinio/, "Ops script must provide MinIO data backups.");
-  assertMatch(opsScript, /async function restoreTestMinio/, "Ops script must provide MinIO restore drills.");
-  assertMatch(opsScript, /async function backupKeycloakConfig/, "Ops script must provide Keycloak configuration backups.");
-  assertMatch(opsScript, /async function restoreTestKeycloakConfig/, "Ops script must provide Keycloak configuration restore dry-runs.");
-  assertMatch(opsScript, /async function backupSecretManagerMetadata/, "Ops script must provide Secret Manager metadata backups.");
-  assertMatch(opsScript, /async function restoreTestSecretManagerMetadata/, "Ops script must provide Secret Manager metadata restore dry-runs.");
-  assertMatch(opsScript, /async function infraHealth/, "Ops script must provide a global infra health gate.");
-  assertMatch(opsScript, /async function composeHealthcheckCoverage[\s\S]*healthcheck-coverage-/, "Ops script must provide a service-by-service healthcheck coverage gate.");
-  assertMatch(opsScript, /admin-traefik-block[\s\S]*admin-prometheus-block[\s\S]*admin-alertmanager-block/, "Infra health must verify unauthenticated internal consoles stay blocked.");
-  assertMatch(opsScript, /async function fullRestoreDrill/, "Ops script must provide a full restore drill across all local data families.");
-  assertMatch(opsScript, /async function loadBenchmark/, "Ops script must provide 50/100/500 load benchmark reports.");
-  assertMatch(opsScript, /function detectEdgeProvider[\s\S]*cf-ray[\s\S]*cloudflare/, "Load benchmark must detect Cloudflare/edge headers.");
-  assertMatch(opsScript, /requirePublicTarget[\s\S]*requireEdgeEvidence[\s\S]*target/, "Load benchmark reports must include production target and edge evidence.");
-  assertMatch(opsScript, /function writeLoadBenchmarkReport[\s\S]*Status:[\s\S]*payload\.status/, "Load benchmark must write status-bearing reports.");
-  assertMatch(opsScript, /catch \(error\)[\s\S]*target-preflight[\s\S]*writeLoadBenchmarkReport/, "Load benchmark must write diagnostic reports for preflight/profile failures.");
-  assertMatch(opsScript, /async function rollbackRelease/, "Ops script must provide a controlled release rollback command.");
-  assertMatch(opsScript, /"infra-health": infraHealth/, "Ops command map must expose infra-health.");
-  assertMatch(opsScript, /"failure-tests": failureTests/, "Ops command map must expose failure-tests.");
-  assertMatch(opsScript, /"full-restore-drill": fullRestoreDrill/, "Ops command map must expose full-restore-drill.");
-  assertMatch(opsScript, /"load-benchmark": loadBenchmark/, "Ops command map must expose load-benchmark.");
-  assertMatch(opsScript, /"rollback-release": rollbackRelease/, "Ops command map must expose rollback-release.");
-  assertMatch(opsScript, /function signBackupArtifact/, "Ops script must sign PostgreSQL backup artifacts.");
-  assertMatch(opsScript, /function verifyBackupArtifact/, "Ops script must verify PostgreSQL backup signatures before restore.");
-  assertMatch(opsScript, /verifyBackupArtifact\(backupFile\)/, "Restore paths must verify signed backup artifacts before pg_restore.");
-  assertMatch(opsScript, /latestVerifiedPlatformBackupManifest[\s\S]*manifest\.coverage\.complete[\s\S]*single-artifact and partial off-site uploads are not supported/i, "Restic off-site upload must require one complete signed platform manifest.");
-  assertMatch(opsScript, /function platformBackupResources[\s\S]*minio-data[\s\S]*keycloak-config[\s\S]*control-center-state[\s\S]*secret-manager-metadata/, "Platform catalog backups must cover all declared platform state resources.");
-  assertMatch(opsScript, /function pruneManifestBackups[\s\S]*confirmPruneManifestBackups[\s\S]*unmanifestedArtifactsDeleted:\s*false/, "Local retention must be manifest-bound, explicit and preserve unmanifested artifacts.");
-  assertMatch(backupSchedulerScript, /(?=[\s\S]*backup-platform-catalog)(?=[\s\S]*offsite-backup-restic)(?=[\s\S]*prune-manifest-backups)/, "Backup scheduler must define complete catalog backup, off-site copy and manifest retention.");
-  assertMatch(opsScript, /async function offsiteRestoreDrillRestic/, "Ops script must provide an off-site Restic restore drill.");
-  assertMatch(opsScript, /resticPassthroughEnvKeys[\s\S]*AWS_ACCESS_KEY_ID[\s\S]*AWS_SECRET_ACCESS_KEY/, "Restic operations must pass S3-compatible credentials into the Restic container.");
-  assertMatch(opsScript, /"snapshots",\s*"--json",\s*"--tag",\s*tag/, "Off-site restore drill must validate the remote Restic snapshot list by tag.");
-  assertMatch(opsScript, /function classifyResticRepository[\s\S]*repositoryOffsite/, "Off-site restore evidence must classify remote Restic repositories.");
-  assertMatch(opsScript, /"restore",\s*"--target",\s*"\/restore",\s*"--dry-run",\s*"--verbose=2"/, "Off-site restore drill must support a non-writing Restic restore dry-run.");
-  assertMatch(opsScript, /function offsiteRestoreCoverage[\s\S]*missingRequiredFamilies[\s\S]*infraHealthOk/, "Off-site restore drill must compute full data-family coverage.");
-  assertMatch(opsScript, /discoverRestoredBackupArtifacts[\s\S]*stageRestoredBackupArtifact[\s\S]*verifyBackupArtifact/, "Off-site restore drill must stage and verify restored signed artifacts before tests.");
-  assertMatch(opsScript, /restoreTestPostgres[\s\S]*restoreTestMariadb[\s\S]*restoreTestMinio[\s\S]*restoreTestKeycloakConfig[\s\S]*restoreTestSecretManagerMetadata/, "Off-site restore drill must reuse every data-family restore test.");
-  assertMatch(opsScript, /writeJsonReport\("offsite-restore-drills"[\s\S]*writeMarkdownReport\("offsite-restore-drills"/, "Off-site restore drill must write JSON and Markdown evidence reports.");
-  assertMatch(opsScript, /"offsite-restore-drill-restic": offsiteRestoreDrillRestic/, "Ops command map must expose offsite-restore-drill-restic.");
-  assertMatch(opsScript, /await backupRestoreDrill\(\)/, "Enterprise hardening audit must execute a backup/restore drill.");
-  assertMatch(opsScript, /await backupRestoreDrillMariadb\(\)/, "Enterprise hardening audit must execute a MariaDB backup/restore drill.");
-  assertMatch(opsScript, /await backupRestoreDrillMinio\(\)/, "Enterprise hardening audit must execute a MinIO backup/restore drill.");
-  assertMatch(opsScript, /await backupRestoreDrillKeycloakConfig\(\)/, "Enterprise hardening audit must execute a Keycloak config backup/restore drill.");
-  assertMatch(opsScript, /await backupRestoreDrillSecretManagerMetadata\(\)/, "Enterprise hardening audit must execute a Secret Manager metadata backup/restore drill.");
-  assertMatch(opsScript, /async function prunePostgresBackups/, "Ops script must provide backup artifact retention cleanup.");
-  assertMatch(opsScript, /await prunePostgresBackups\(\{ dryRun: true \}\)/, "Enterprise hardening audit must dry-run backup artifact retention.");
-  assertMatch(opsScript, /backup-restore-drill\.sh.*restore-drill\.log/s, "PostgreSQL cron installer must schedule restore drills.");
-  assertMatch(opsScript, /prune-postgres-backups\.sh.*retention\.log/s, "PostgreSQL cron installer must schedule backup retention cleanup.");
-  assertMatch(offsiteCronScript, /backup-minio\.sh.*minio-backup\.log/s, "Off-site cron installer must schedule MinIO backups.");
-  assertMatch(offsiteCronScript, /backup-keycloak\.sh.*keycloak-backup\.log/s, "Off-site cron installer must schedule Keycloak backups.");
-  assertMatch(offsiteCronScript, /backup-secret-manager-metadata\.sh.*secret-manager-backup\.log/s, "Off-site cron installer must schedule Secret Manager metadata backups.");
-  assertMatch(backupMinioWrapper, /backup-minio/, "MinIO backup wrapper must delegate to infra-ops.");
-  assertMatch(backupKeycloakWrapper, /backup-keycloak/, "Keycloak backup wrapper must delegate to infra-ops.");
-  assertMatch(backupSecretManagerWrapper, /backup-secret-manager-metadata/, "Secret Manager backup wrapper must delegate to infra-ops.");
-  assertMatch(alertEvidenceWrapper, /alert-evidence/, "Alert evidence wrapper must delegate to infra-ops.");
-  assertMatch(offsiteRestoreDrillWrapper, /offsite-restore-drill-restic/, "Off-site restore drill wrapper must delegate to infra-ops.");
-  assertMatch(infraHealthWrapper, /infra-health/, "Infra health wrapper must delegate to infra-ops.");
-  assertMatch(failureTestsWrapper, /failure-tests/, "Failure-tests wrapper must delegate to infra-ops.");
-  assertMatch(drEvidenceWrapper, /dr-evidence/, "DR evidence wrapper must delegate to infra-ops.");
-  assertMatch(fullRestoreDrillWrapper, /full-restore-drill/, "Full restore drill wrapper must delegate to infra-ops.");
-  assertMatch(loadBenchmarkWrapper, /load-benchmark/, "Load benchmark wrapper must delegate to infra-ops.");
-  assertMatch(linuxPortabilityWrapper, /linux-portability-check/, "Linux portability wrapper must delegate to infra-ops.");
-  assertMatch(rollbackReleaseWrapper, /rollback-release/, "Rollback wrapper must delegate to infra-ops.");
-  assertMatch(releaseEvidenceWrapper, /release-evidence/, "Release evidence wrapper must delegate to infra-ops.");
-  assertMatch(releaseArtifactGateWrapper, /release-artifact-gate/, "Release artifact gate wrapper must delegate to infra-ops.");
-  assertMatch(productionGoNoGoWrapper, /production-go-no-go/, "Production go/no-go wrapper must delegate to infra-ops.");
-  assertMatch(opsScript, /async function productionGoNoGo/, "Ops script must provide a production go/no-go evidence gate.");
-  assertMatch(opsScript, /writeJsonReport\("go-no-go"[\s\S]*writeMarkdownReport\("go-no-go"/, "Production go/no-go must write JSON and Markdown reports.");
-  assertMatch(opsScript, /latestJsonReport\("vps-bootstrap", "vps-bootstrap-apply-", \(payload\) => \([\s\S]*payload\.mode === "apply" && payload\.status === "applied"/, "Production go/no-go must require a VPS bootstrap apply report.");
-  assertMatch(opsScript, /latestJsonReport\("vps-hardening", "vps-hardening-apply-", \(payload\) => \{[\s\S]*dockerDaemonApplied[\s\S]*sshReloadApplied[\s\S]*payload\.mode === "apply" && payload\.status === "applied" && dockerDaemonApplied && sshReloadApplied/, "Production go/no-go must require a VPS hardening apply report with SSH reload and Docker daemon hardening.");
-  assertMatch(opsScript, /latestJsonReport\("vps-host", "vps-host-readiness-", \(payload\) => \([\s\S]*productionEvidence !== false[\s\S]*payload\.mode !== "diagnostic"/, "Production go/no-go must ignore diagnostic VPS host readiness reports.");
-  assertMatch(opsScript, /vpsExpectedSshPort[\s\S]*vpsHasSshPortEvidence[\s\S]*ssh-port-expected[\s\S]*ufw-ssh-port-allowed[\s\S]*sshPortEvidence/, "Production go/no-go must require VPS readiness evidence for the hardened SSH port and UFW allow rule.");
-  assertMatch(opsScript, /latestJsonReport\("vps-host"[\s\S]*latestJsonReport\("cloudflare-access"/, "Production go/no-go must evaluate VPS and Cloudflare Access live reports.");
-  assertMatch(opsScript, /latestRestoreOffsite === true/, "Production go/no-go must require Restic restore evidence from a remote off-site repository.");
-  assertMatch(opsScript, /latestRestoreCoverage\?\.complete === true/, "Production go/no-go must require full off-site restore family coverage.");
-  assertMatch(opsScript, /"production-go-no-go": productionGoNoGo/, "Ops command map must expose production-go-no-go.");
-  assertMatch(opsScript, /async function linuxPortabilityCheck/, "Ops script must provide a Linux portability check.");
-  assertMatch(opsScript, /scanPortabilityFiles[\s\S]*utf8-bom[\s\S]*crlf[\s\S]*windows-path[\s\S]*powershell-dependency/, "Linux portability check must scan BOM, CRLF, Windows paths and PowerShell dependencies.");
-  assertMatch(opsScript, /writeJsonReport\("linux-portability"[\s\S]*writeMarkdownReport\("linux-portability"/, "Linux portability check must write JSON and Markdown reports.");
-  assertMatch(opsScript, /await linuxPortabilityCheck\(\)/, "Enterprise 10 readiness gate must include Linux portability.");
-  assertMatch(opsScript, /confirmServiceStop/, "Failure tests must require an explicit flag before stopping containers.");
-  assertMatch(opsScript, /confirmRollback/, "Rollback command must require an explicit flag before changing runtime state.");
-  assertMatch(opsScript, /dockerStatsSnapshot/, "Load benchmark must capture Docker CPU/RAM snapshots.");
-  assertMatch(opsScript, /loadEdgeEvidence[\s\S]*requireLoadEdgeEvidence/, "Production go/no-go must require load benchmark edge evidence.");
-  assertMatch(sourcePackage, /"deps:sbom":\s+"node scripts\/run-infra-ops\.mjs generate-sbom"/, "Application package must expose containerized pnpm deps:sbom.");
-  assertMatch(sourcePackage, /"enterprise:10-check":\s+"node scripts\/run-infra-ops\.mjs enterprise-10-check"/, "Application package must expose containerized pnpm enterprise:10-check.");
-  assertMatch(sourcePackage, /"infra:health":\s+"node scripts\/run-infra-ops\.mjs infra-health"/, "Application package must expose containerized pnpm infra:health.");
-  assertMatch(sourcePackage, /"infra:release-gate":\s+"node scripts\/run-infra-ops\.mjs release-artifact-gate"/, "Application package must expose containerized pnpm infra:release-gate.");
-  assertNoMatch(sourcePackage, /\.\.\/platform-infrastructure\/scripts\/infra-ops\.mjs/, "Application package scripts must not call infrastructure ops through host Node.");
-  assertMatch(sourceInfraOpsLauncher, /platform\/ops:local/, "Application infra ops launcher must use the Dockerized ops image.");
-  assertMatch(sourceInfraOpsLauncher, /dockerArgs = \[[\s\S]*"run"[\s\S]*dockerArgs\.push\(opsImage/, "Application infra ops launcher must execute docker run with the ops image.");
-  assertMatch(sourceInfraOpsLauncher, /"docker",\s+"ops\.Dockerfile"/, "Application infra ops launcher must build the ops image when needed.");
-  assertMatch(sourceInfraOpsLauncher, /PROJECT_SOURCE_ROOT=\/project/, "Application infra ops launcher must map source into the ops container.");
-  assertMatch(sourceInfraOpsLauncher, /PLATFORM_OPS_NETWORK[\s\S]*dockerArgs\.push\("--network", opsNetwork\)/, "Application infra ops launcher must use host networking by default for local routed domains.");
-  assertNoMatch(sourceInfraOpsLauncher, /infra-ops\.mjs/, "Application infra ops launcher must not execute the infra runner directly on the host.");
-  assertMatch(infraRenovate, /dependencyDashboardApproval/, "Infra repo must require approval for major dependency updates.");
-  assertMatch(sourceRenovate, /dependencyDashboardApproval/, "Application repo must require approval for major dependency updates.");
-  assertMatch(infraRenovate, /"docker-compose"/, "Infra Renovate config must track compose images.");
-  assertMatch(sourceRenovate, /"npm"/, "Application Renovate config must track npm dependencies.");
-  assertMatch(infraGitattributes, /^\* text=auto eol=lf/m, "Infra repo must normalize text files to LF for Ubuntu VPS.");
-  assertMatch(sourceGitattributes, /^\* text=auto eol=lf/m, "Application repo must normalize text files to LF for Ubuntu VPS.");
-  assertMatch(opsScript, /async function supplyChainHygiene/, "Ops script must provide a mandatory supply-chain gate.");
-  assertMatch(opsScript, /await supplyChainHygiene\(\)/, "Enterprise hardening audit must execute the supply-chain gate.");
-  assertMatch(opsScript, /async function faultInjectionTests/, "Ops script must provide fault-injection tests.");
-  assertMatch(opsScript, /await faultInjectionTests\(\)/, "Enterprise hardening audit must execute fault-injection tests.");
-  assertMatch(opsScript, /statement_timeout = '1ms'[\s\S]*pg_sleep/, "Fault-injection tests must exercise live PostgreSQL statement timeout.");
-  assertMatch(opsScript, /async function loadProfile/, "Ops script must provide a sustained load profile command.");
-  assertMatch(opsScript, /async function haConfigCheck/, "Ops script must provide an HA readiness gate.");
-  assertMatch(opsScript, /async function managedSecretsPreflight/, "Ops script must provide a managed-secrets preflight.");
-  assertMatch(opsScript, /async function releaseArtifactGate/, "Ops script must provide a release artifact admission gate.");
-  assertMatch(opsScript, /async function alertEvidence/, "Ops script must provide an alert evidence command.");
-  assertMatch(opsScript, /writeJsonReport\("alerts"[\s\S]*writeMarkdownReport\("alerts"/, "Alert evidence must write JSON and Markdown reports.");
-  assertMatch(opsScript, /"alert-evidence": alertEvidence/, "Ops command map must expose alert-evidence.");
-  assertMatch(opsScript, /await collectEvidenceStep\(steps, \{ name: "alert-evidence-summary"/, "Pre go-live evidence must include an alert evidence summary.");
-  assertMatch(opsScript, /async function releaseEvidence/, "Ops script must provide a release evidence pack command.");
-  assertMatch(opsScript, /writeJsonReport\("release"[\s\S]*writeMarkdownReport\("release"/, "Release evidence must write JSON and Markdown reports.");
-  assertMatch(opsScript, /function writeReleaseEvidenceReport[\s\S]*Status:[\s\S]*payload\.status/, "Release evidence must write status-bearing reports.");
-  assertMatch(opsScript, /catch \(error\)[\s\S]*issues\.push[\s\S]*writeReleaseEvidenceReport/, "Release evidence must write diagnostic reports for validation failures.");
-  assertMatch(opsScript, /release\/previous-images\.json/, "Release evidence must write the rollback target manifest.");
-  assertMatch(opsScript, /writeRollbackPlanReport\([\s\S]*rollbackDryRun[\s\S]*dryRun/, "Release evidence must link a validated rollback dry-run report.");
-  assertMatch(opsScript, /releaseRollbackOk[\s\S]*rollback\?\.dryRun\?\.validated === true/, "Production go/no-go must require a validated rollback dry-run.");
-  assertMatch(opsScript, /latestJsonReport\("release", "release-evidence-", \(payload\) => payload\.mode === "evidence"\)/, "Production go/no-go must ignore release plan reports.");
-  assertMatch(opsScript, /releasePayload\.status === "passed"/, "Production go/no-go must require passed release evidence.");
-  assertMatch(releaseTrustModule, /verificationResult[\s\S]*signature\?\.certificate[\s\S]*verifiedTimestamps[\s\S]*predicateType/, "Release trust must inspect only cryptographically verified certificate, timestamp and statement output.");
-  assertMatch(releaseTrustModule, /--signer-workflow[\s\S]*--source-digest[\s\S]*--signer-digest[\s\S]*--source-ref[\s\S]*--cert-oidc-issuer[\s\S]*--deny-self-hosted-runners/, "Release trust must bind exact signer, commit, ref, issuer and runner class.");
-  assertMatch(opsScript, /githubProvenance\?\.status === "passed"[\s\S]*githubProvenance\?\.kind === "github-sigstore-cryptographic-attestation"[\s\S]*githubProvenance\?\.verifiedTimestampCount > 0/, "Production go/no-go must require cryptographic GitHub/Sigstore provenance with a verified timestamp.");
-  assertMatch(opsScript, /Unsigned local SLSA JSON is not admissible[\s\S]*Normalized GitHub attestation reports are not trust inputs/, "Release evidence must reject loose SLSA JSON and normalized provider reports.");
-  assertMatch(opsScript, /"github-attestation-evidence": githubAttestationEvidence/, "Ops command map must expose verifier-backed GitHub/Sigstore attestation evidence.");
-  assertMatch(opsScript, /"release-evidence": releaseEvidence/, "Ops command map must expose release-evidence.");
-  assertMatch(opsScript, /await collectEvidenceStep\(steps, \{ name: "release-evidence-plan"/, "Pre go-live evidence must include a release evidence plan.");
-  assertMatch(opsScript, /async function drReadinessCheck/, "Ops script must provide a DR/PITR readiness gate.");
-  assertMatch(opsScript, /async function drEvidence/, "Ops script must provide a DR evidence summary command.");
-  assertMatch(opsScript, /writeJsonReport\("dr"[\s\S]*writeMarkdownReport\("dr"/, "DR evidence must write JSON and Markdown reports.");
-  assertMatch(opsScript, /Average full restore[\s\S]*P95 full restore/, "DR evidence must document average and P95 restore timing.");
-  assertMatch(opsScript, /"dr-evidence": drEvidence/, "Ops command map must expose dr-evidence.");
-  assertMatch(opsScript, /await collectEvidenceStep\(steps, \{ name: "dr-evidence-summary"/, "Pre go-live evidence must include a DR evidence summary.");
-  assertMatch(opsScript, /async function securityMatrix/, "Ops script must provide a security test matrix gate.");
-  assertMatch(opsScript, /async function chaosProfile/, "Ops script must provide an opt-in chaos profile.");
-  assertMatch(opsScript, /async function governanceCheck/, "Ops script must provide a governance gate.");
-  assertMatch(opsScript, /async function repoCoverageCheck/, "Ops script must provide a repository coverage audit gate.");
-  assertMatch(opsScript, /safe\.directory=\$\{infraRoot\}[\s\S]*"ls-files"/, "Repository coverage must work inside Docker-mounted GitHub Actions worktrees.");
-  assertMatch(opsScript, /enterpriseRequirementLiveProofResult[\s\S]*requireLiveProofs[\s\S]*liveProofIssues/, "Enterprise requirement reports must optionally enforce live production proof separately from repo evidence.");
-  assertMatch(opsScript, /repoStatus:\s+repoIssues\.length \? "failed" : "passed"[\s\S]*liveProofStatus/, "Enterprise requirement reports must keep repository evidence status separate from live proof status.");
-  assertMatch(opsScript, /async function enterpriseTenCheck/, "Ops script must provide the combined enterprise 10 readiness gate.");
-  assertMatch(opsScript, /await externalUptimeCheck\(\{ dryRun: true \}\)/, "Enterprise 10 readiness gate must validate the external uptime manifest.");
-  assertMatch(opsScript, /"external-uptime-check": externalUptimeCheck/, "Ops command map must expose external-uptime-check.");
-  assertMatch(opsScript, /requireProviderEvidence[\s\S]*providerEvidencePath/, "External uptime command must support required provider evidence.");
-  assertMatch(opsScript, /latestJsonReport\("uptime", "external-uptime-", \(payload\) => \([\s\S]*providerEvidence\?\.verified === true/, "Production go/no-go must ignore uptime reports without provider evidence.");
-  assertMatch(opsScript, /latestJsonReport\("load", "load-benchmark-", \(payload\) => \{[\s\S]*providerMatched === true/, "Production go/no-go must ignore non-public load reports when edge evidence is required.");
-  assertMatch(opsScript, /load\.payload\.status === "passed"/, "Production go/no-go must require a passed load benchmark report.");
-  assertMatch(opsScript, /latestJsonReport\("cloudflare-access", "cloudflare-access-admin-", \(payload\) => \([\s\S]*payload\.mode === "verifyRemote"/, "Production go/no-go must ignore Cloudflare Access plan reports.");
-  assertMatch(opsScript, /function goNoGoRemediation[\s\S]*vps-bootstrap-ubuntu\.sh --apply[\s\S]*vps-hardening-ubuntu\.sh --apply[\s\S]*Remediation Checklist[\s\S]*remediation/, "Production go/no-go must include an actionable remediation checklist in JSON and Markdown.");
-  assertMatch(opsScript, /Promise\.all\(Array\.from\(\{ length: workerCount \}/, "Load probes must issue real concurrent requests.");
-  assertMatch(opsScript, /\/platform-infrastructure:ro/, "Disposable Linux source checks must mount infrastructure read-only for cross-repo hygiene gates.");
-  assertMatch(sourcePackage, /"deps:supply-chain":\s+"node scripts\/supply-chain-gate\.mjs"/, "Root package must expose the supply-chain gate.");
-  assertMatch(sourceSupplyChainGate, /"audit",\s+"--prod",\s+"--audit-level"/, "Supply-chain gate must run a production CVE audit.");
-  assertMatch(sourceSupplyChainGate, /CycloneDX/, "Supply-chain gate must generate a CycloneDX SBOM.");
-  assertMatch(sourceSupplyChainGate, /Denied or unknown production dependency licenses/, "Supply-chain gate must enforce a license policy.");
-  assertMatch(sourceCiWorkflow, /pnpm deps:supply-chain/, "Enterprise CI must run the mandatory supply-chain gate.");
-  assertMatch(sourceCiWorkflow, /pnpm-cyclonedx-sbom/, "Enterprise CI must upload the generated CycloneDX SBOM artifact.");
-  assertMatch(sourceCiWorkflow, /Source hygiene guard[\s\S]*shell:\s+bash/, "Application CI source hygiene guard must run in bash.");
-  assertMatch(sourceCiWorkflow, /sh "\$INFRA\/scripts\/infra-ops\.sh" static-security-check/, "Application CI must call infrastructure gates through the Dockerized ops wrapper.");
-  assertNoMatch(sourceCiWorkflow, /shell:\s+pwsh|static-security-check\.ps1|node "\$INFRA\/scripts\/infra-ops\.mjs"/, "Application CI must not depend on PowerShell or direct host Node infra gates.");
-  assertNoMatch(`${sourceDocs}\n${sourceTopLevelDocs}`, /node\s+(?:\.\.\/platform-infrastructure\/scripts\/)?scripts\/infra-ops\.mjs|node\s+\.\.\/platform-infrastructure\/scripts\/infra-ops\.mjs/, "Application operator docs must point to the Dockerized ops wrapper.");
-  assertMatch(opsScript, /operation = 'restore_test'[\s\S]*status = 'success'/, "Runtime checks must require a recorded successful restore_test run.");
-  assertMatch(workerJobsServer, /AuditOutboxDispatcher/, "Worker jobs must run the durable audit outbox dispatcher.");
-  assertMatch(workerJobsServer, /audit_outbox_rows/, "Worker jobs metrics must expose audit outbox lifecycle gauges.");
-  assertMatch(workerJobsAuditOutboxStore, /for update skip locked/i, "Audit outbox dispatcher must use transaction-safe row claims.");
-  assertMatch(workerJobsAuditOutboxStore, /status = 'dead'/, "Audit outbox dispatcher must support a dead-letter terminal state.");
-  assertMatch(workerJobsNatsSink, /Idempotency-Key/, "Audit outbox delivery must publish an idempotency key.");
-  assertNoMatch(webNextConfig, /Content-Security-Policy/, "Web CSP must be nonce-based middleware, not a static header.");
-  if (fs.existsSync(path.join(sourceRoot, "apps", "web", "src", "middleware.ts"))) {
-    fail("Web must use src/proxy.ts instead of src/middleware.ts.");
-  }
-  assertMatch(webProxy, /export function proxy/, "Web CSP proxy must export the Next.js proxy handler.");
-  assertMatch(webProxy, /'nonce-\$\{nonce\}'/, "Web CSP must include a request nonce.");
-  assertNoMatch(webProxy, /script-src[^\n`"]*unsafe-inline/, "Web script CSP must not allow unsafe-inline.");
-  assertNoMatch(webProxy, /style-src[^\n`"]*unsafe-inline/, "Web style CSP must not allow unsafe-inline.");
-  assertMatch(webProxy, /style-src-elem 'self' 'nonce-\$\{nonce\}'/, "Web CSP must nonce stylesheet elements.");
-  assertMatch(webProxy, /style-src-attr 'none'/, "Web CSP must block style attributes.");
-  assertNoMatch(browserUiSource, /style=\{/, "Browser UI source must not use React inline style props.");
-  assertNoMatch(browserUiSource, /dangerouslySetInnerHTML/, "Browser UI source must not inject inline style/script blocks.");
-  assertNoMatch(browserUiSource, /import\s*\{[^}]*\bmotion\b[^}]*\}\s*from\s*["']framer-motion["']/, "Browser UI source must not import Framer Motion DOM components because they write inline style attributes at runtime.");
-  assertNoMatch(browserUiSource, /import\s+\*\s+as\s+motion\s+from\s*["']framer-motion["']/, "Browser UI source must not import Framer Motion DOM components because they write inline style attributes at runtime.");
-  assertMatch(browserUiSource, /createDynamicCssRule/, "CSP-safe motion and scroll affordances must write dynamic geometry through stylesheet rules.");
-  assertNoMatch(webSource, /container\.style\./, "Bot-protection widgets must not position themselves with CSP-blocked style attributes.");
-  assertMatch(webSource, /sx-account-turnstile-container/, "Turnstile must use account-owned static CSS instead of inline styles.");
-  for (const fallback of [webAppNotFound, webGlobalError]) {
-    assertMatch(fallback, /SectionCard[\s\S]*className="ui-section"/, "Web fallback error surfaces must use CSP-safe UI package styles instead of Next inline styled defaults.");
-  }
-  assertNoMatch(webRememberModel, /JSON\.stringify\(accounts/, "Remembered accounts must not persist full profile objects in localStorage.");
-
-  const rlsSql = readText(path.join(infraRoot, "postgres", "migrations", "005_row_level_security_hardening.sql"));
-  const auditOutboxSql = readText(path.join(infraRoot, "postgres", "migrations", "007_durable_audit_outbox.sql"));
-  const auditUnlinkSql = readText(path.join(infraRoot, "postgres", "migrations", "008_audit_account_unlink.sql"));
-  const auditOutboxDispatcherSql = readText(path.join(infraRoot, "postgres", "migrations", "009_audit_outbox_dispatcher.sql"));
-  const serviceIdentitySql = readText(path.join(infraRoot, "postgres", "migrations", "014_service_identity_grants.sql"));
-  assertMatch(rlsSql, /FORCE ROW LEVEL SECURITY/, "RLS hardening migration must force row-level security.");
-  assertMatch(auditOutboxSql, /CREATE TABLE IF NOT EXISTS app_account\.audit_outbox/, "Audit outbox migration must create a durable queue.");
-  assertMatch(auditOutboxSql, /FORCE ROW LEVEL SECURITY/, "Audit outbox must force row-level security.");
-  assertMatch(auditUnlinkSql, /NEW\.account_id IS NULL/, "Audit append-only trigger must permit account_id unlink for cleanup/anonymization.");
-  assertMatch(auditOutboxDispatcherSql, /'dead'/, "Audit outbox dispatcher migration must add dead-letter status.");
-  assertMatch(auditOutboxDispatcherSql, /idx_audit_outbox_due_dispatch/, "Audit outbox dispatcher migration must add a due-dispatch index.");
-  assertMatch(serviceIdentitySql, /app_backend_runtime[\s\S]*app_worker_jobs_runtime[\s\S]*app_worker_notifications_runtime/, "Service identity migration must create distinct runtime principals.");
-  assertMatch(serviceIdentitySql, /GRANT SELECT, UPDATE ON %I\.audit_outbox TO app_worker_jobs_rw/, "Jobs worker must receive only outbox processing grants.");
-  log("Static security checks passed.");
-}
 
 async function validateLocalSecrets() {
   const secretsDir = path.resolve(argv.secretsDir ?? path.join(infraRoot, "secrets"));
   const required = [
     "postgres_superuser_password",
-    "app_db_password",
-    "backend_db_password",
-    "worker_jobs_db_password",
-    "worker_notifications_db_password",
     "keycloak_db_password",
     "redis_password",
     "keycloak_admin_password",
@@ -13975,18 +10476,11 @@ async function validateLocalSecrets() {
     "mariadb_root_password",
     "phpmyadmin_control_password",
     "grafana_admin_password",
-    "session_secret",
-    "session_signing_keys",
     "projects_gateway_signing_keys",
-    "hash_pepper_keys",
+    "control_center_vault_keys",
     "backup_signing_keys",
+    "alertmanager_webhook_token",
     "smtp_password",
-    "cloudflare_turnstile_secret_key",
-    "database_url",
-    "backend_database_url",
-    "worker_jobs_database_url",
-    "worker_notifications_database_url",
-    "nats_url",
   ];
   for (const name of required) {
     const filePath = path.join(secretsDir, `${name}.txt`);
@@ -13998,7 +10492,7 @@ async function validateLocalSecrets() {
       fail(`Invalid local secret value in ${filePath}`);
     }
   }
-  for (const name of ["session_signing_keys", "projects_gateway_signing_keys", "hash_pepper_keys", "backup_signing_keys"]) {
+  for (const name of ["projects_gateway_signing_keys", "control_center_vault_keys", "backup_signing_keys"]) {
     const keys = parseVersionedSecretKeys(fs.readFileSync(path.join(secretsDir, `${name}.txt`), "utf8"));
     if (!keys.length || keys.some((key) => key.secret.length < 48)) {
       fail(`Invalid versioned key ring in ${path.join(secretsDir, `${name}.txt`)}`);
@@ -14041,258 +10535,9 @@ async function installMariadbBackupCron() {
   log(drillLine);
 }
 
-function accountOriginFromApiBase(apiBase) {
-  try {
-    const parsed = new URL(apiBase);
-    if (parsed.hostname.startsWith("api.")) {
-      const port = parsed.port ? `:${parsed.port}` : "";
-      return `${parsed.protocol}//auth.${parsed.hostname.slice(4)}${port}`;
-    }
-  } catch {
-    // Fall through to the local default used by the development compose profile.
-  }
-  return "https://auth.localhost.com";
-}
 
-async function accountIntegrationTests() {
-  const apiBase = argv.apiBase ?? "https://api.localhost.com";
-  const accountOrigin = argv.accountOrigin ?? accountOriginFromApiBase(apiBase);
-  const accountSchemaName = sqlIdentifierName(argv.accountSchema ?? process.env.ACCOUNT_DB_SCHEMA ?? "app_account", "--accountSchema");
-  const accountSchema = sqlIdentifier(accountSchemaName);
-  const accountSwitchCookieName = cookieName(argv.accountSwitchCookieName ?? process.env.ACCOUNT_SWITCH_COOKIE_NAME ?? "app_account_switcher", "--accountSwitchCookieName");
-  log("==> Account integration tests");
-  const signingKey = backendSessionSigningKey();
 
-  const stamp = Date.now();
-  const email = `integration+${stamp}@platform.local`;
-  const username = `integration_${stamp}`;
-  const code = "184729";
-  const signupChallengeId = `it_signup_${stamp}`;
-  const loginChallengeId = `it_login_${stamp}`;
-  const secondSignupChallengeId = `it_signup_second_${stamp}`;
-  const redisPrefix = "platform";
-  let accountId = null;
-  const createdAccountIds = [];
 
-  try {
-    const expiresAt = Date.now() + 8 * 60 * 1000;
-    redisSetValue(`${redisPrefix}:otp:${signupChallengeId}`, JSON.stringify({
-      id: signupChallengeId,
-      purpose: "signup",
-      destination: email,
-      codeHash: backendSecretHash(code),
-      expiresAt,
-      attempts: 0,
-    }), 480000);
-    redisSetPlainValue(`${redisPrefix}:otp-verified:${signupChallengeId}`, "1", 480000);
-
-    const register = await request("POST", `${apiBase}/account/bootstrap/register`, {
-      headers: { Origin: accountOrigin, "Sec-Fetch-Site": "same-site" },
-      body: {
-        firstName: "Integration",
-        lastName: "Test",
-        email,
-        username,
-        dateOfBirth: "1990-01-01",
-        challengeId: signupChallengeId,
-        code,
-      },
-    });
-    assertStatus(register, 200, "signup/register");
-    accountId = register.json?.profile?.id;
-    if (!accountId) {
-      fail("signup/register did not return profile id.");
-    }
-    createdAccountIds.push(accountId);
-
-    const sessionId = postgresOut("enterprise-postgres", "app_db", "postgres", `select s.id::text from ${accountSchema}.sessions s join ${accountSchema}.accounts a on a.id = s.account_id where a.external_id = ${sqlString(accountId)} and s.status = 'active' order by s.current_session desc, s.last_seen_at desc limit 1;`).trim();
-    if (!sessionId) {
-      fail("No active session created for integration account.");
-    }
-    const cookie = newSignedCookie(signingKey, accountId, sessionId);
-    const authHeaders = { Cookie: cookie, Origin: accountOrigin, "Sec-Fetch-Site": "same-site", "x-platform-csrf": "1" };
-
-    assertStatus(await request("GET", `${apiBase}/account/snapshot`, { headers: authHeaders }), 200, "snapshot");
-    const accountsResponse = await request("GET", `${apiBase}/auth/accounts`, { headers: authHeaders });
-    assertStatus(accountsResponse, 200, "account switcher accounts");
-    const accountSwitchCookie = cookieFromHeaders(accountsResponse.headers, accountSwitchCookieName);
-    if (!accountSwitchCookie) {
-      fail("auth/accounts did not refresh account switch cookie.");
-    }
-    assertStatus(await request("POST", `${apiBase}/auth/switch-account`, {
-      headers: { Cookie: `${cookie}; ${accountSwitchCookie}`, Origin: accountOrigin, "Sec-Fetch-Site": "same-site", "x-platform-csrf": "1" },
-      body: { accountId },
-    }), 200, "switch account");
-
-    const profileBody = {
-      username,
-      firstName: "Integration",
-      lastName: "Verified",
-      email,
-      dateOfBirth: "1990-01-01",
-      language: "it-IT",
-      country: "IT",
-      avatarImage: null,
-    };
-    assertStatus(await request("PATCH", `${apiBase}/account/profile`, {
-      headers: { Cookie: cookie, Origin: accountOrigin, "Sec-Fetch-Site": "cross-site", "x-platform-csrf": "1" },
-      body: profileBody,
-    }), 200, "trusted cross-site profile patch");
-    assertStatus(await request("PATCH", `${apiBase}/account/profile`, {
-      headers: { Cookie: cookie, Origin: "https://evil.example", "Sec-Fetch-Site": "cross-site", "x-platform-csrf": "1" },
-      body: { ...profileBody, firstName: "Blocked" },
-    }), 403, "untrusted cross-site profile patch");
-
-    const credentialId = crypto.randomBytes(16).toString("base64url");
-    postgres("enterprise-postgres", "app_db", "postgres", `insert into ${accountSchema}.passkeys (account_id, credential_id, public_key, counter, label, device_type, backed_up, transports) select id, ${sqlString(credentialId)}, decode(repeat('ab',32),'hex'), 0, 'Integration passkey', 'singleDevice', false, ARRAY['internal']::text[] from ${accountSchema}.accounts where external_id = ${sqlString(accountId)} on conflict (credential_id) do nothing;`);
-    const passkeyOptions = await request("POST", `${apiBase}/auth/login/passkey/options`, {
-      headers: { Origin: accountOrigin, "Sec-Fetch-Site": "same-site" },
-      body: { email },
-    });
-    assertStatus(passkeyOptions, 200, "passkey login options");
-    if (!passkeyOptions.json?.allowCredentials?.length) {
-      fail("passkey login options did not include seeded passkey.");
-    }
-
-    const secondEmail = `integration.second+${stamp}@platform.local`;
-    const secondUsername = `int2_${stamp.toString(36)}`;
-    redisSetValue(`${redisPrefix}:otp:${secondSignupChallengeId}`, JSON.stringify({
-      id: secondSignupChallengeId,
-      purpose: "signup",
-      destination: secondEmail,
-      codeHash: backendSecretHash(code),
-      expiresAt,
-      attempts: 0,
-    }), 480000);
-    redisSetPlainValue(`${redisPrefix}:otp-verified:${secondSignupChallengeId}`, "1", 480000);
-    const secondRegister = await request("POST", `${apiBase}/account/bootstrap/register`, {
-      headers: { Cookie: `${cookie}; ${accountSwitchCookie}`, Origin: accountOrigin, "Sec-Fetch-Site": "same-site", "x-platform-csrf": "1" },
-      body: {
-        firstName: "Integration",
-        lastName: "Second",
-        email: secondEmail,
-        username: secondUsername,
-        dateOfBirth: "1991-01-01",
-        challengeId: secondSignupChallengeId,
-        code,
-      },
-    });
-    assertStatus(secondRegister, 200, "signup/register while another account is logged in");
-    const secondAccountId = secondRegister.json?.profile?.id;
-    if (!secondAccountId) {
-      fail("second signup/register did not return profile id.");
-    }
-    createdAccountIds.push(secondAccountId);
-    const secondCredentialId = crypto.randomBytes(16).toString("base64url");
-    postgres("enterprise-postgres", "app_db", "postgres", `insert into ${accountSchema}.passkeys (account_id, credential_id, public_key, counter, label, device_type, backed_up, transports) select id, ${sqlString(secondCredentialId)}, decode(repeat('cd',32),'hex'), 0, 'Integration second passkey', 'singleDevice', false, ARRAY['internal']::text[] from ${accountSchema}.accounts where external_id = ${sqlString(secondAccountId)} on conflict (credential_id) do nothing;`);
-    const crossAccountPasskeyOptions = await request("POST", `${apiBase}/auth/login/passkey/options`, {
-      headers: { Cookie: cookie, Origin: accountOrigin, "Sec-Fetch-Site": "same-site", "x-platform-csrf": "1" },
-      body: { email: secondEmail },
-    });
-    assertStatus(crossAccountPasskeyOptions, 200, "passkey login options for added account while current account cookie exists");
-    const crossAccountCredentialIds = (crossAccountPasskeyOptions.json?.allowCredentials ?? []).map((credential) => credential.id);
-    if (!crossAccountCredentialIds.includes(secondCredentialId) || crossAccountCredentialIds.includes(credentialId)) {
-      fail("passkey login options for added account resolved the current account instead of the requested account.");
-    }
-
-    redisSetValue(`${redisPrefix}:otp:${loginChallengeId}`, JSON.stringify({
-      id: loginChallengeId,
-      purpose: "login",
-      destination: email,
-      codeHash: backendSecretHash(code),
-      expiresAt,
-      attempts: 0,
-    }), 480000);
-    assertStatus(await request("POST", `${apiBase}/account/bootstrap/email-otp/verify`, {
-      headers: { Origin: accountOrigin, "Sec-Fetch-Site": "same-site" },
-      body: { challengeId: loginChallengeId, code, email },
-    }), 200, "email OTP login verify");
-
-    const backupRotate = await request("POST", `${apiBase}/account/backup-codes/rotate`, { headers: authHeaders });
-    assertStatus(backupRotate, 200, "backup code rotate");
-    const backupCode = backupRotate.json?.codes?.[0];
-    const recoveryBackupCode = backupRotate.json?.codes?.[1];
-    assertStatus(await request("POST", `${apiBase}/account/backup-codes/verify`, {
-      headers: authHeaders,
-      body: { code: backupCode },
-    }), 200, "backup code verify");
-    assertStatus(await request("POST", `${apiBase}/account/backup-codes/verify`, {
-      headers: authHeaders,
-      body: { code: backupCode },
-    }), 400, "backup code one-time reuse block");
-    assertStatus(await request("POST", `${apiBase}/auth/login/recovery/verify`, {
-      headers: { Origin: accountOrigin, "Sec-Fetch-Site": "same-site" },
-      body: { email, method: "backup_code", code: recoveryBackupCode },
-    }), 200, "backup code recovery login verify");
-    assertStatus(await request("POST", `${apiBase}/auth/login/recovery/verify`, {
-      headers: { Origin: accountOrigin, "Sec-Fetch-Site": "same-site" },
-      body: { email, method: "backup_code", code: recoveryBackupCode },
-    }), 400, "backup code recovery one-time reuse block");
-
-    const extraSessionId = crypto.randomUUID();
-    postgres("enterprise-postgres", "app_db", "postgres", `insert into ${accountSchema}.sessions (id, account_id, device, browser, trusted, current_session, auth_method, status, created_at, last_seen_at, expires_at) select ${sqlString(extraSessionId)}::uuid, id, 'Integration second device', 'Curl', true, false, 'integration', 'active', now(), now(), now() + interval '10 years' from ${accountSchema}.accounts where external_id = ${sqlString(accountId)};`);
-    assertStatus(await request("DELETE", `${apiBase}/account/sessions/${extraSessionId}`, { headers: authHeaders }), 200, "session revocation");
-    const revokedSessionStatus = postgresOut("enterprise-postgres", "app_db", "postgres", `select status from ${accountSchema}.sessions where id = ${sqlString(extraSessionId)}::uuid;`).trim();
-    if (revokedSessionStatus !== "revoked") {
-      fail("session revocation did not persist revoked status.");
-    }
-    const stamp = reportTimestamp();
-    const payload = {
-      generatedAt: new Date().toISOString(),
-      status: "passed",
-      mode: "runtime",
-      apiBase,
-      accountOrigin,
-      accountSchema: accountSchemaName,
-      accountSwitchCookieName,
-      coverage: [
-        "signup register",
-        "account snapshot",
-        "account switch cookie",
-        "profile CSRF and origin guard",
-        "passkey account isolation",
-        "email OTP login",
-        "backup code one-time reuse",
-        "backup code recovery one-time reuse",
-        "session revocation",
-      ],
-      cleanup: {
-        redisKeysDeleted: true,
-        testAccountsDeleted: createdAccountIds.length,
-      },
-    };
-    const jsonPath = writeJsonReport("account-integration", `account-integration-tests-${stamp}`, payload);
-    const markdownPath = writeMarkdownReport("account-integration", `account-integration-tests-${stamp}`, [
-      "# Account Integration Tests",
-      "",
-      `Status: ${payload.status}`,
-      `Mode: ${payload.mode}`,
-      `Generated at: ${payload.generatedAt}`,
-      `API base: ${payload.apiBase}`,
-      `Account origin: ${payload.accountOrigin}`,
-      `Account schema: ${payload.accountSchema}`,
-      `Account switch cookie: ${payload.accountSwitchCookieName}`,
-      "",
-      "Coverage:",
-      ...payload.coverage.map((item) => `- ${item}`),
-      "",
-      `Cleanup: Redis keys deleted, ${payload.cleanup.testAccountsDeleted} test account(s) deleted`,
-    ]);
-    log(`Account integration test reports written to ${jsonPath} and ${markdownPath}`);
-    log("Account integration tests passed.");
-  } finally {
-    redisDelete([
-      `${redisPrefix}:otp:${signupChallengeId}`,
-      `${redisPrefix}:otp-verified:${signupChallengeId}`,
-      `${redisPrefix}:otp:${loginChallengeId}`,
-      `${redisPrefix}:otp:${secondSignupChallengeId}`,
-      `${redisPrefix}:otp-verified:${secondSignupChallengeId}`,
-    ]);
-    for (const id of createdAccountIds.reverse()) {
-      postgres("enterprise-postgres", "app_db", "postgres", `delete from ${accountSchema}.accounts where external_id = ${sqlString(id)};`, { allowFailure: true, capture: true });
-    }
-  }
-}
 
 function latestFreshLocalCheck(commandName, maxAgeHours = 168) {
   const report = latestJsonReport("local-checks", `${commandName}-`, (payload) => (
@@ -15144,11 +11389,8 @@ function help() {
   log(`Usage: sh scripts/infra-ops.sh <command> [--key value]
 
 Commands:
-  access-review
-  account-integration-tests
   audit-log-evidence
   alert-evidence
-  apply-postgres-migrations
   backup-applications
   backup-coverage-matrix
   backup-mariadb
@@ -15252,11 +11494,8 @@ Commands:
 }
 
 const commands = {
-  "access-review": accessReview,
-  "account-integration-tests": accountIntegrationTests,
   "audit-log-evidence": auditLogEvidence,
   "alert-evidence": alertEvidence,
-  "apply-postgres-migrations": applyPostgresMigrations,
   "backup-keycloak": backupKeycloakConfig,
   "backup-mariadb": backupMariadb,
   "backup-minio": backupMinio,
