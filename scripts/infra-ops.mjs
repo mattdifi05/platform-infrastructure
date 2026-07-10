@@ -1961,6 +1961,8 @@ async function applyPostgresMigrations() {
   const database = argv.database ?? "app_db";
   const user = argv.user ?? "postgres";
   const safeDatabaseName = sqlIdentifierName(database, "--database");
+  const migrationSchemaName = postgresOpsSchemaName(safeDatabaseName);
+  const migrationSchema = sqlIdentifier(migrationSchemaName);
   const migrationDir = path.join(infraRoot, "postgres", "migrations");
   const files = fs.readdirSync(migrationDir)
     .filter((file) => file.endsWith(".sql"))
@@ -1994,13 +1996,13 @@ async function applyPostgresMigrations() {
     return;
   }
 
-  postgres(container, database, user, "create schema if not exists platform_ops; create table if not exists platform_ops.schema_migrations (version text primary key, applied_at timestamptz not null default now(), checksum text not null default '');");
+  postgres(container, database, user, `create schema if not exists ${migrationSchema}; create table if not exists ${migrationSchema}.schema_migrations (version text primary key, applied_at timestamptz not null default now(), checksum text not null default '');`);
 
   const migrations = [];
   for (const file of files) {
     const version = path.basename(file, ".sql");
     const checksum = sha256File(file);
-    const existing = postgresOut(container, database, user, `select checksum from platform_ops.schema_migrations where version = ${sqlString(version)};`);
+    const existing = postgresOut(container, database, user, `select checksum from ${migrationSchema}.schema_migrations where version = ${sqlString(version)};`);
     if (existing) {
       if (existing.trim() !== checksum) {
         fail(`Migration ${version} was already applied with a different checksum.`);
@@ -2020,7 +2022,7 @@ async function applyPostgresMigrations() {
     }
     run("docker", ["cp", uploadFile, `${container}:/tmp/platform-migration.sql`]);
     dockerExec(container, ["psql", "-U", user, "-d", database, "-v", "ON_ERROR_STOP=1", "-f", "/tmp/platform-migration.sql"]);
-    postgres(container, database, user, `insert into platform_ops.schema_migrations (version, checksum) values (${sqlString(version)}, ${sqlString(checksum)});`);
+    postgres(container, database, user, `insert into ${migrationSchema}.schema_migrations (version, checksum) values (${sqlString(version)}, ${sqlString(checksum)});`);
     dockerExec(container, ["rm", "-f", "/tmp/platform-migration.sql"]);
     if (uploadFile !== file) {
       fs.rmSync(path.dirname(uploadFile), { recursive: true, force: true });
@@ -3084,17 +3086,36 @@ async function runtimeHealthChecks() {
   }
 
   log("==> App DB least privilege");
-  for (const role of ["app_db_account_rw", "app_db_auth_rw", "app_db_audit_rw"]) {
-    const roleMembership = postgresOut("enterprise-postgres", runtimeDatabase, "postgres", `select pg_has_role('app_user', ${sqlString(role)}, 'member');`).trim();
-    if (roleMembership !== "t") {
-      fail(`app_user must inherit ${role}.`);
+  const serviceIdentityMigration = postgresOut("enterprise-postgres", runtimeDatabase, "postgres", `select count(*) from ${opsSchema}.schema_migrations where version = '014_service_identity_grants';`).trim() === "1";
+  if (serviceIdentityMigration) {
+    for (const role of ["app_db_account_rw", "app_db_auth_rw", "app_db_audit_rw"]) {
+      const roleMembership = postgresOut("enterprise-postgres", runtimeDatabase, "postgres", `select pg_has_role('app_backend_runtime', ${sqlString(role)}, 'member');`).trim();
+      if (roleMembership !== "t") {
+        fail(`app_backend_runtime must inherit ${role}.`);
+      }
     }
+    const jobsMembership = postgresOut("enterprise-postgres", runtimeDatabase, "postgres", "select pg_has_role('app_worker_jobs_runtime', 'app_worker_jobs_rw', 'member');").trim();
+    if (jobsMembership !== "t") fail("app_worker_jobs_runtime must inherit only its jobs capability role.");
+    const workerUnionMembership = postgresOut("enterprise-postgres", runtimeDatabase, "postgres", "select pg_has_role('app_worker_jobs_runtime','app_db_account_rw','member') or pg_has_role('app_worker_jobs_runtime','app_db_auth_rw','member') or pg_has_role('app_worker_jobs_runtime','app_db_audit_rw','member') or pg_has_role('app_worker_notifications_runtime','app_db_account_rw','member') or pg_has_role('app_worker_notifications_runtime','app_db_auth_rw','member') or pg_has_role('app_worker_notifications_runtime','app_db_audit_rw','member');").trim();
+    if (workerUnionMembership !== "f") fail("Workers must not inherit union application capability roles.");
+    const jobsGrants = postgresOut("enterprise-postgres", runtimeDatabase, "postgres", `select has_table_privilege('app_worker_jobs_runtime', ${sqlString(`${accountSchemaName}.audit_outbox`)}, 'select') and has_table_privilege('app_worker_jobs_runtime', ${sqlString(`${accountSchemaName}.audit_outbox`)}, 'update') and not has_table_privilege('app_worker_jobs_runtime', ${sqlString(`${accountSchemaName}.audit_outbox`)}, 'insert,delete') and has_table_privilege('app_worker_jobs_runtime', ${sqlString(`${opsSchemaName}.backup_restore_runs`)}, 'select') and not has_table_privilege('app_worker_jobs_runtime', ${sqlString(`${opsSchemaName}.backup_restore_runs`)}, 'insert,update,delete');`).trim();
+    if (jobsGrants !== "t") fail("Jobs worker grants must be limited to audit outbox processing and read-only restore metrics.");
+    const workerCrossTable = postgresOut("enterprise-postgres", runtimeDatabase, "postgres", `select has_table_privilege('app_worker_jobs_runtime', ${sqlString(`${accountSchemaName}.accounts`)}, 'select') or has_table_privilege('app_worker_jobs_runtime', ${sqlString(`${accountSchemaName}.audit_events`)}, 'select') or has_table_privilege('app_worker_notifications_runtime', ${sqlString(`${accountSchemaName}.audit_outbox`)}, 'select') or has_table_privilege('app_worker_notifications_runtime', ${sqlString(`${accountSchemaName}.accounts`)}, 'select');`).trim();
+    if (workerCrossTable !== "f") fail("Worker cross-table access must be denied.");
+    const backendDelete = postgresOut("enterprise-postgres", runtimeDatabase, "postgres", `select has_table_privilege('app_backend_runtime', ${sqlString(`${accountSchemaName}.accounts`)}, 'delete');`).trim();
+    if (backendDelete !== "f") fail(`app_backend_runtime must not have DELETE on ${accountSchemaName}.accounts.`);
+    postgresOut("enterprise-postgres", runtimeDatabase, "postgres", `set role app_backend_runtime; select count(*) from ${accountSchema}.accounts;`);
+  } else {
+    for (const role of ["app_db_account_rw", "app_db_auth_rw", "app_db_audit_rw"]) {
+      const roleMembership = postgresOut("enterprise-postgres", runtimeDatabase, "postgres", `select pg_has_role('app_user', ${sqlString(role)}, 'member');`).trim();
+      if (roleMembership !== "t") {
+        fail(`app_user must inherit ${role} before the service-identity cutover.`);
+      }
+    }
+    const directDelete = postgresOut("enterprise-postgres", runtimeDatabase, "postgres", `select has_table_privilege('app_user', ${sqlString(`${accountSchemaName}.accounts`)}, 'delete');`).trim();
+    if (directDelete !== "f") fail(`app_user must not have DELETE on ${accountSchemaName}.accounts.`);
+    postgresOut("enterprise-postgres", runtimeDatabase, "postgres", `set role app_user; select count(*) from ${accountSchema}.accounts;`);
   }
-  const directDelete = postgresOut("enterprise-postgres", runtimeDatabase, "postgres", `select has_table_privilege('app_user', ${sqlString(`${accountSchemaName}.accounts`)}, 'delete');`).trim();
-  if (directDelete !== "f") {
-    fail(`app_user must not have DELETE on ${accountSchemaName}.accounts.`);
-  }
-  postgresOut("enterprise-postgres", runtimeDatabase, "postgres", `set role app_user; select count(*) from ${accountSchema}.accounts;`);
 
   log("==> Row-level security");
   const rlsGapCount = postgresOut("enterprise-postgres", runtimeDatabase, "postgres", `select count(*) from pg_class c join pg_namespace n on n.oid = c.relnamespace where n.nspname = ${sqlString(accountSchemaName)} and c.relkind in ('r','p') and (not c.relrowsecurity or not c.relforcerowsecurity);`).trim();
@@ -3891,6 +3912,9 @@ async function initLocalSecrets() {
   };
   const postgresSuper = secretValue("postgres_superuser_password");
   const appDbPassword = secretValue("app_db_password");
+  const backendDbPassword = secretValue("backend_db_password");
+  const workerJobsDbPassword = secretValue("worker_jobs_db_password");
+  const workerNotificationsDbPassword = secretValue("worker_notifications_db_password");
   const keycloakDbPassword = secretValue("keycloak_db_password");
   const redisPassword = secretValue("redis_password");
   const keycloakAdminPassword = secretValue("keycloak_admin_password");
@@ -3907,8 +3931,14 @@ async function initLocalSecrets() {
   const smtpPassword = secretValue("smtp_password");
   const appDbUser = env.APP_DB_USER || "app_user";
   const appDbName = env.APP_DB_NAME || "app_db";
+  const backendDbUser = env.BACKEND_DB_USER || "app_backend_runtime";
+  const workerJobsDbUser = env.WORKER_JOBS_DB_USER || "app_worker_jobs_runtime";
+  const workerNotificationsDbUser = env.WORKER_NOTIFICATIONS_DB_USER || "app_worker_notifications_runtime";
   const natsUser = env.NATS_USER || "platform";
   const databaseUrl = existingSecret("database_url") ?? `postgresql://${encodeURIComponent(appDbUser)}:${encodeURIComponent(appDbPassword)}@postgres:5432/${encodeURIComponent(appDbName)}`;
+  const backendDatabaseUrl = existingSecret("backend_database_url") ?? `postgresql://${encodeURIComponent(backendDbUser)}:${encodeURIComponent(backendDbPassword)}@postgres:5432/${encodeURIComponent(appDbName)}`;
+  const workerJobsDatabaseUrl = existingSecret("worker_jobs_database_url") ?? `postgresql://${encodeURIComponent(workerJobsDbUser)}:${encodeURIComponent(workerJobsDbPassword)}@postgres:5432/${encodeURIComponent(appDbName)}`;
+  const workerNotificationsDatabaseUrl = existingSecret("worker_notifications_database_url") ?? `postgresql://${encodeURIComponent(workerNotificationsDbUser)}:${encodeURIComponent(workerNotificationsDbPassword)}@postgres:5432/${encodeURIComponent(appDbName)}`;
   const natsUrl = existingSecret("nats_url") ?? `nats://${encodeURIComponent(natsUser)}:${encodeURIComponent(natsPassword)}@nats:4222`;
 
   const groupReadableSecretFiles = new Set(["app_db_password", "alertmanager_webhook_token"]);
@@ -3928,6 +3958,9 @@ async function initLocalSecrets() {
   const secretValues = {
     postgres_superuser_password: postgresSuper,
     app_db_password: appDbPassword,
+    backend_db_password: backendDbPassword,
+    worker_jobs_db_password: workerJobsDbPassword,
+    worker_notifications_db_password: workerNotificationsDbPassword,
     keycloak_db_password: keycloakDbPassword,
     redis_password: redisPassword,
     keycloak_admin_password: keycloakAdminPassword,
@@ -3943,6 +3976,9 @@ async function initLocalSecrets() {
     backup_signing_keys: backupSigningKeys,
     smtp_password: smtpPassword,
     database_url: databaseUrl,
+    backend_database_url: backendDatabaseUrl,
+    worker_jobs_database_url: workerJobsDatabaseUrl,
+    worker_notifications_database_url: workerNotificationsDatabaseUrl,
     nats_url: natsUrl,
   };
 
@@ -3955,6 +3991,9 @@ async function initLocalSecrets() {
     const sensitive = new Set([
       "POSTGRES_SUPERUSER_PASSWORD",
       "APP_DB_PASSWORD",
+      "BACKEND_DB_PASSWORD",
+      "WORKER_JOBS_DB_PASSWORD",
+      "WORKER_NOTIFICATIONS_DB_PASSWORD",
       "KEYCLOAK_DB_PASSWORD",
       "REDIS_PASSWORD",
       "KEYCLOAK_ADMIN_PASSWORD",
@@ -5894,6 +5933,9 @@ async function managedSecretsPreflight(options = {}) {
     for (const secretName of [
       "postgres_superuser_password",
       "app_db_password",
+      "backend_db_password",
+      "worker_jobs_db_password",
+      "worker_notifications_db_password",
       "keycloak_db_password",
       "redis_password",
       "keycloak_admin_password",
@@ -5910,6 +5952,9 @@ async function managedSecretsPreflight(options = {}) {
       "smtp_password",
       "cloudflare_turnstile_secret_key",
       "database_url",
+      "backend_database_url",
+      "worker_jobs_database_url",
+      "worker_notifications_database_url",
       "nats_url",
     ]) {
       assertMatch(managedCompose, new RegExp(`^\\s{2}${secretName}:\\s*\\r?\\n\\s+external:\\s+true`, "m"), `${secretName} must be declared as an external Docker secret.`);
@@ -6845,6 +6890,9 @@ async function retentionEvidence(options = {}) {
 const managedSecretRotationExpectations = [
   { name: "postgres_superuser_password", kind: "opaque", rotationDays: 90, manualRotation: true },
   { name: "app_db_password", kind: "opaque", rotationDays: 90, manualRotation: true },
+  { name: "backend_db_password", kind: "opaque", rotationDays: 90, manualRotation: true },
+  { name: "worker_jobs_db_password", kind: "opaque", rotationDays: 90, manualRotation: true },
+  { name: "worker_notifications_db_password", kind: "opaque", rotationDays: 90, manualRotation: true },
   { name: "keycloak_db_password", kind: "opaque", rotationDays: 90, manualRotation: true },
   { name: "redis_password", kind: "opaque", rotationDays: 90 },
   { name: "keycloak_admin_password", kind: "opaque", rotationDays: 90 },
@@ -6862,6 +6910,9 @@ const managedSecretRotationExpectations = [
   { name: "smtp_password", kind: "opaque", rotationDays: 90 },
   { name: "cloudflare_turnstile_secret_key", kind: "opaque", rotationDays: 90, manualRotation: true },
   { name: "database_url", kind: "derived", rotationDays: 90 },
+  { name: "backend_database_url", kind: "derived", rotationDays: 90 },
+  { name: "worker_jobs_database_url", kind: "derived", rotationDays: 90 },
+  { name: "worker_notifications_database_url", kind: "derived", rotationDays: 90 },
   { name: "nats_url", kind: "derived", rotationDays: 90 },
 ];
 
@@ -14221,12 +14272,15 @@ async function staticSecurityCheckBody() {
   const auditOutboxSql = readText(path.join(infraRoot, "postgres", "migrations", "007_durable_audit_outbox.sql"));
   const auditUnlinkSql = readText(path.join(infraRoot, "postgres", "migrations", "008_audit_account_unlink.sql"));
   const auditOutboxDispatcherSql = readText(path.join(infraRoot, "postgres", "migrations", "009_audit_outbox_dispatcher.sql"));
+  const serviceIdentitySql = readText(path.join(infraRoot, "postgres", "migrations", "014_service_identity_grants.sql"));
   assertMatch(rlsSql, /FORCE ROW LEVEL SECURITY/, "RLS hardening migration must force row-level security.");
   assertMatch(auditOutboxSql, /CREATE TABLE IF NOT EXISTS app_account\.audit_outbox/, "Audit outbox migration must create a durable queue.");
   assertMatch(auditOutboxSql, /FORCE ROW LEVEL SECURITY/, "Audit outbox must force row-level security.");
   assertMatch(auditUnlinkSql, /NEW\.account_id IS NULL/, "Audit append-only trigger must permit account_id unlink for cleanup/anonymization.");
   assertMatch(auditOutboxDispatcherSql, /'dead'/, "Audit outbox dispatcher migration must add dead-letter status.");
   assertMatch(auditOutboxDispatcherSql, /idx_audit_outbox_due_dispatch/, "Audit outbox dispatcher migration must add a due-dispatch index.");
+  assertMatch(serviceIdentitySql, /app_backend_runtime[\s\S]*app_worker_jobs_runtime[\s\S]*app_worker_notifications_runtime/, "Service identity migration must create distinct runtime principals.");
+  assertMatch(serviceIdentitySql, /GRANT SELECT, UPDATE ON %I\.audit_outbox TO app_worker_jobs_rw/, "Jobs worker must receive only outbox processing grants.");
   log("Static security checks passed.");
 }
 
@@ -14235,6 +14289,9 @@ async function validateLocalSecrets() {
   const required = [
     "postgres_superuser_password",
     "app_db_password",
+    "backend_db_password",
+    "worker_jobs_db_password",
+    "worker_notifications_db_password",
     "keycloak_db_password",
     "redis_password",
     "keycloak_admin_password",
@@ -14251,6 +14308,9 @@ async function validateLocalSecrets() {
     "smtp_password",
     "cloudflare_turnstile_secret_key",
     "database_url",
+    "backend_database_url",
+    "worker_jobs_database_url",
+    "worker_notifications_database_url",
     "nats_url",
   ];
   for (const name of required) {

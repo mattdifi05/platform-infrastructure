@@ -39,6 +39,8 @@ services:
 
   postgres:
     image: ${POSTGRES_IMAGE:-postgres:18-alpine@sha256:1b1689b20d16a014a3d195653381cf2caa75a41a92d93b255a9d6ea29fd353aa}
+    entrypoint:
+      - /usr/local/bin/platform-postgres-entrypoint
     container_name: enterprise-postgres
     init: true
     pids_limit: 1024
@@ -58,7 +60,8 @@ services:
       KEYCLOAK_DB_PASSWORD_FILE: /run/secrets/keycloak_db_password
     volumes:
       - enterprise_postgres_data:/var/lib/postgresql
-      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+      - ./postgres/init:/platform-postgres-init:ro
+      - ./postgres/entrypoint-with-init-secrets.sh:/usr/local/bin/platform-postgres-entrypoint:ro
     networks:
       - enterprise_net
     healthcheck:
@@ -547,8 +550,8 @@ services:
       SESSION_COOKIE_SAMESITE: ${SESSION_COOKIE_SAMESITE:-Lax}
       API_DOCS_ENABLED: ${API_DOCS_ENABLED:-false}
       APP_DB_NAME: ${APP_DB_NAME:-app_db}
-      APP_DB_USER: ${APP_DB_USER:-app_user}
-      DATABASE_URL_FILE: /run/secrets/database_url
+      APP_DB_USER: ${BACKEND_DB_USER:-app_backend_runtime}
+      DATABASE_URL_FILE: /run/secrets/backend_database_url
       REDIS_HOST: redis
       REDIS_PORT: 6379
       REDIS_PASSWORD_FILE: /run/secrets/redis_password
@@ -557,12 +560,6 @@ services:
       KEYCLOAK_URL: http://keycloak:8080
       KEYCLOAK_REALM: ${KEYCLOAK_REALM:-enterprise}
       NATS_URL_FILE: /run/secrets/nats_url
-      MINIO_ENDPOINT: minio
-      MINIO_PORT: 9000
-      MINIO_USE_SSL: "false"
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minio_admin}
-      MINIO_ROOT_PASSWORD_FILE: /run/secrets/minio_root_password
-      MINIO_DEFAULT_BUCKET: ${MINIO_DEFAULT_BUCKET:-local-bucket}
       API_PUBLIC_URL: ${API_PUBLIC_URL:-http://backend:3000}
       ACCOUNT_PUBLIC_URL: ${ACCOUNT_PUBLIC_URL:-${AUTH_PUBLIC_URL:-https://auth.localhost.com}}
       UI_PUBLIC_URL: ${UI_PUBLIC_URL:-${APP_PUBLIC_URL:-https://app.localhost.com}}
@@ -600,8 +597,6 @@ services:
       keycloak:
         condition: service_healthy
       nats:
-        condition: service_healthy
-      minio:
         condition: service_healthy
     read_only: true
     tmpfs:
@@ -675,7 +670,7 @@ services:
       PORT: 3000
       WORKER_NAME: enterprise-worker-notifications
       ALERTMANAGER_WEBHOOK_TOKEN_FILE: /run/secrets/alertmanager_webhook_token
-      DATABASE_URL_FILE: /run/secrets/database_url
+      DATABASE_URL_FILE: /run/secrets/worker_notifications_database_url
       REDIS_HOST: redis
       REDIS_PORT: 6379
       REDIS_PASSWORD_FILE: /run/secrets/redis_password
@@ -731,7 +726,7 @@ services:
       NODE_ENV: production
       PORT: 3000
       WORKER_NAME: enterprise-worker-jobs
-      DATABASE_URL_FILE: /run/secrets/database_url
+      DATABASE_URL_FILE: /run/secrets/worker_jobs_database_url
       REDIS_HOST: redis
       REDIS_PORT: 6379
       REDIS_PASSWORD_FILE: /run/secrets/redis_password

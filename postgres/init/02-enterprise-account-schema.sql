@@ -391,14 +391,12 @@ GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA app_account TO app_db_account_rw,
 
 GRANT SELECT, INSERT, UPDATE ON
   app_account.accounts,
-  app_account.account_roles,
   app_account.account_security_settings,
   app_account.subscriptions
 TO app_db_account_rw;
 
 GRANT SELECT ON
-  app_account.service_catalog,
-  app_account.security_policies
+  app_account.service_catalog
 TO app_db_account_rw;
 
 GRANT SELECT, INSERT, UPDATE ON
@@ -419,9 +417,6 @@ GRANT SELECT ON
   app_account.email_templates,
   app_account.email_delivery_settings
 TO app_db_audit_rw;
-
-ALTER DEFAULT PRIVILEGES IN SCHEMA app_account GRANT SELECT, INSERT, UPDATE ON TABLES TO app_db_account_rw;
-ALTER DEFAULT PRIVILEGES IN SCHEMA app_account GRANT USAGE, SELECT ON SEQUENCES TO app_db_account_rw;
 
 GRANT app_db_account_rw TO app_user;
 GRANT app_db_auth_rw TO app_user;

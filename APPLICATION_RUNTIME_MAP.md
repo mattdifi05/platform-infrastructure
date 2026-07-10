@@ -28,10 +28,10 @@ The services `enterprise-backend`, `enterprise-web`, `enterprise-worker-jobs` an
 
 | Component | Runtime image ID | Current ownership | Data dependencies |
 | --- | --- | --- | --- |
-| `enterprise-backend` | `sha256:ac1f6769fcb1...` | External Stexor source, currently named as platform service | PostgreSQL `stexor` as `app_user`, Redis, NATS, MinIO, SMTP and Turnstile |
+| `enterprise-backend` | `sha256:ac1f6769fcb1...` | External Stexor source, currently named as platform service | Live: PostgreSQL `stexor` as `app_user`, Redis, NATS, MinIO root, SMTP and Turnstile. T14 candidate: `app_backend_runtime`, no MinIO credential. |
 | `enterprise-web` | `sha256:e1214bb57666...` | External Stexor source; appears redundant with the dedicated account/UI runtimes and requires T18 verification | Stexor API and identity |
-| `enterprise-worker-jobs` | `sha256:e1685e2c4047...` | External Stexor source | PostgreSQL `stexor`, Redis, NATS |
-| `enterprise-worker-notifications` | `sha256:960788c6ebf1...` | External Stexor source | PostgreSQL `stexor`, Redis, NATS, SMTP, Alertmanager webhook |
+| `enterprise-worker-jobs` | `sha256:e1685e2c4047...` | External Stexor source | Live union DB credential; T14 candidate limits `app_worker_jobs_runtime` to audit outbox update and backup/restore metrics read, plus Redis and NATS. |
+| `enterprise-worker-notifications` | `sha256:960788c6ebf1...` | External Stexor source | Live union DB credential; T14 candidate uses a connect-only DB identity with no table privileges, plus Redis, NATS compatibility, SMTP and Alertmanager webhook. |
 
 ## Database inventory
 
@@ -49,7 +49,10 @@ These remain the live state. The T12/T13 candidate removes broad hosted mounts,
 shared PHP gateway/SMTP secrets and raw scheduler socket; adds per-app networks,
 read-only source/runtime boundaries and cgroup ceilings; and passed disposable
 startup/connectivity tests. It is not live until an approved progressive
-rollout. T14 still owns DB/MinIO least privilege.
+rollout. The T14 candidate adds per-service PostgreSQL credentials, an explicit
+dual-credential revoke/rollback sequence, removes MinIO root from the backend
+and provides a prefix-scoped service-account bootstrap. Sandbox positive and
+negative tests are required before any live credential cutover.
 
 T11 live adoption on 2026-07-10 moved project-router and the local registry under the single `platform_infra_vps` Compose project. The registry retained the exact `enterprise_local_registry_data` volume and catalog. Other services were not recreated; their historical Compose labels still mention the old ignored overlays, but all future deploy commands use `compose.runtime.yaml` and the canonical wrapper.
 
