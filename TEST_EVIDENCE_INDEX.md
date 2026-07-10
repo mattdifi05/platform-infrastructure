@@ -19,6 +19,13 @@
 | EV-T02-004 | T02 | Runtime readiness negative | `scripts/keycloak-passkey-readiness.sh` against live realm | EXPECTED FAIL: brute-force protection is disabled; live cutover correctly blocked | 2026-07-10 |
 | EV-T02-005 | T02 | Alert rules | pinned Prometheus `promtool check rules` | PASS: 21 rules including Keycloak login-failure and admin-lockout alerts | 2026-07-10 |
 | EV-T02-006 | T02 | Effective VPS config | canonical Compose JSON invariant extraction | PASS: exact portal origin, 300-second fresh auth, shared throttle, Keycloak event metrics and identity upstream | 2026-07-10 |
+| EV-T03-001 | T03 | Versioned Vault keyring | official Control Center runner and `control-center/tests/vault-keyring.test.mjs` | PASS 12/12 overall: stable key ID, reorder, rotation, missing key, tamper and legacy migration | 2026-07-10 |
+| EV-T03-002 | T03 | Backup preview confidentiality | API fixture with PostgreSQL COPY row in `.sql.gz` | PASS: `.sql`, `.sql.gz` and `.dump` are metadata-only with empty content | 2026-07-10 |
+| EV-T03-003 | T03 | Migration safety | `scripts/control-center-vault-reencrypt.mjs` against synthetic legacy state | PASS: dry-run no write; unconfirmed apply denied; confirmed fixture apply backed up state, escrowed both key files at mode 0600 and preserved decrypt round-trip | 2026-07-10 |
+| EV-T03-004 | T03 | State integrity | corrupt JSON and normal Vault mutation fixtures | PASS: corrupt bytes preserved with HTTP 500; normal writes atomic with no temporary artifact left | 2026-07-10 |
+| EV-T03-005 | T03 | Secret/Compose contract | isolated Infra Secret Manager init/verify plus canonical VPS render | PASS: dedicated keyring generated mode 0600; no session-key fallback; explicit legacy source only | 2026-07-10 |
+| EV-T03-006 | T03 | Private evidence integrity | `/home/platform_infrastructure/remediation-work/20260710T060352Z-t03-vault/manifest-sha256.txt` | PASS: all evidence hashes verified; no real key or Vault state read | 2026-07-10 |
+| EV-T03-007 | T03 | Global static gate | `static-security-check --infraOnly` | BLOCKED only after T03 assertions by pre-existing T20 CSS border assertion | 2026-07-10 |
 | EV-MAP-DB-001 | T00/T04 | DB catalog | PostgreSQL and MariaDB read-only catalog queries | PASS inventory; drift recorded | 2026-07-10 |
 | EV-MAP-BKP-001 | T00/T07 | Backup catalog | filesystem and Control Center backup summary | PARTIAL: fresh local artifacts, full portability unproven | 2026-07-10 |
 | EV-T11-001 | T11 | Compose render | old active runtime versus tracked runtime, normalized for worktree paths | PASS: all 32 shared services identical; registry is the only added service | 2026-07-10 |
