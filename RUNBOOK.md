@@ -731,25 +731,22 @@ must verify the release SHA, immutable image digests, SBOM artifact, provenance
 attestation, rollback target and the output of:
 
 ```sh
-sh ./scripts/infra-ops.sh release-artifact-gate --requireProvenance
+GITHUB_REF=refs/heads/main sh ./scripts/infra-ops.sh release-artifact-gate --requireProvenance --repo OWNER/REPO --sourceRef refs/heads/main
 gh workflow run release-attestation.yml --repo OWNER/REPO --ref main
-sh ./scripts/release-evidence.sh --requireProvenance --imageManifest .tmp/release-attestation/release-subjects.json --sbom reports/release/github-release-sbom-<run-id>.cdx.json --githubAttestation reports/release/github-sigstore-attestation-<stamp>.json --previousImagesFile ./release/previous-images.json
+GITHUB_REF=refs/heads/main sh ./scripts/release-evidence.sh --requireProvenance --repo OWNER/REPO --sourceRef refs/heads/main --imageManifest .tmp/release-attestation/release-subjects.json --sbom reports/release/github-release-sbom-<run-id>.cdx.json --previousImagesFile ./release/previous-images.json
 sh ./scripts/infra-ops.sh governance-check
 sh ./scripts/infra-ops.sh enterprise-10-check
 ```
 
-The local provenance artifact may be an in-toto statement, DSSE envelope or
-bundle using SLSA v1 `predicateType`, but it is classified as partial evidence.
-Complete release provenance requires GitHub Artifact Attestations/Sigstore
-verification reports generated from successful `gh attestation verify` runs.
-Those reports must include `verified=true`, repository, workflow run id, release
-commit SHA, subject name and subject digest, and the union of subjects must bind
-every release image digest. `release-attestation.yml` publishes a digest-pinned
-GHCR infra image, enables Docker BuildKit SBOM attestation, signs the release
-subject manifest and uploads the non-sensitive `reports/release/` evidence
-artifact. Use `release_images_json` only for images that are already immutable
-`@sha256` refs. Use `--skipProvenanceCommitCheck` only for a documented
-provider-format exception reviewed before approval.
+Loose local SLSA statements, unsigned DSSE-looking envelopes and normalized
+verification JSON are not admission evidence. The gate invokes GitHub CLI
+directly and requires exact repository, signer workflow, source/signer commit,
+source ref, GitHub Actions issuer, SLSA v1 predicate, GitHub-hosted runner,
+verified timestamp and subject digest. Offline use requires both
+`--attestationBundle` and `--trustedRoot`. There is no commit-check bypass.
+`release-attestation.yml` publishes a digest-pinned GHCR infra image, enables
+BuildKit SBOM attestation and uploads non-sensitive audit receipts. See
+`RELEASE-TRUST-AND-WORKFLOW-SECURITY.md`.
 
 Before the first production deploy, apply the branch protection policy from
 `governance/github-branch-protection.json` to the live GitHub repository. The
@@ -760,7 +757,7 @@ sh ./scripts/github-branch-protection.sh --repo OWNER/REPO --branch main --dryRu
 GITHUB_TOKEN=... sh ./scripts/github-branch-protection.sh --repo OWNER/REPO --branch main --apply
 GITHUB_TOKEN=... sh ./scripts/github-branch-protection.sh --repo OWNER/REPO --branch main --verifyRemote
 sh ./scripts/github-environments.sh --repo OWNER/REPO --dryRun
-GITHUB_PRODUCTION_REVIEWERS=user:OWNER GITHUB_TOKEN=... sh ./scripts/github-environments.sh --repo OWNER/REPO --apply
+GITHUB_TOKEN=... sh ./scripts/github-environments.sh --repo OWNER/REPO --apply
 GITHUB_TOKEN=... sh ./scripts/github-environments.sh --repo OWNER/REPO --verifyRemote
 sh ./scripts/github-actions-config.sh --repo OWNER/REPO
 GITHUB_TOKEN=... sh ./scripts/github-actions-config.sh --repo OWNER/REPO --verifyRemote
@@ -768,9 +765,9 @@ GITHUB_TOKEN=... sh ./scripts/github-actions-run-evidence.sh --repo OWNER/REPO -
 ```
 
 The token must have repository administration permission. Do not keep the token
-in `.env` or GitHub workflow logs. Required deployment reviewers and wait
-timers depend on the repository visibility and GitHub plan; verify them in the
-repository Environments UI after `--verifyRemote`.
+in `.env` or GitHub workflow logs. Exact deployment reviewer IDs are versioned
+in `governance/github-environments.json`; `--verifyRemote` rejects wrong,
+missing or additional reviewers as well as weaker self-review/wait/branch rules.
 The GitHub Actions runtime check only verifies secret presence and variable
 formats: it expects staging variable `DAST_TARGET`, production secret
 `DEPLOY_SSH_KEY`, production secret `EXTERNAL_UPTIME_PROVIDER_EVIDENCE_JSON`,
@@ -945,7 +942,8 @@ checks every entry's size and SHA256, confirms the anti-secret policy and, with
    gh run download --repo mattdifi05/platform-infrastructure --name github-sigstore-release-evidence --dir .tmp/github-sigstore-release-evidence
    sh ./scripts/release-evidence.sh \
      --requireProvenance \
-     --githubAttestation reports/release/github-sigstore-attestation-<stamp>.json \
+     --repo mattdifi05/platform-infrastructure \
+     --sourceRef refs/heads/main \
      --previousImagesFile ./release/previous-images.json
    ```
 
@@ -956,7 +954,7 @@ checks every entry's size and SHA256, confirms the anti-secret policy and, with
      generated `reports/rollback/rollback-plan-*.json` in the release evidence.
      Failed validation still writes a diagnostic release report with `status=failed`
      and `issues`, but production go/no-go accepts only `status=passed` with a
-     complete `github-signed-attestation`.
+     fresh cryptographic GitHub/Sigstore verification bound to the release.
      For an initial deployment with no previous images, pass `--firstDeploy` and
      record that exception in the approval.
 

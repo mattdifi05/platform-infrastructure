@@ -429,9 +429,11 @@ La policy GitHub live e' versionata in `governance/github-branch-protection.json
 Usa `scripts/github-branch-protection.sh` in dry-run, poi `--apply` e
 `--verifyRemote` con un token GitHub admin prima del primo deploy pubblico.
 Gli environment di deploy sono versionati in `governance/github-environments.json`.
-Configura `GITHUB_PRODUCTION_REVIEWERS=user:login` o `team:slug`, poi usa
+Le identita' reviewer sono versionate con tipo e ID GitHub immutabile; usa
 `scripts/github-environments.sh --dryRun`, `--apply` e `--verifyRemote` per
-abilitare approvazione, wait timer e branch policy su staging/production.
+applicare e confrontare esattamente reviewer, self-review, wait timer e branch
+policy su staging/production. Reviewer mancanti o aggiuntivi fanno fallire la
+verifica.
 La runtime config GitHub Actions e' versionata in
 `governance/github-actions-runtime.json`: `DAST_TARGET`, `DEPLOY_SSH_KEY`,
 `DEPLOY_REMOTE`, `DEPLOY_REMOTE_DIR`, `DEPLOY_SSH_PORT`,
@@ -462,8 +464,9 @@ Per una release applicativa completa, dichiara le immagini in un manifest come
 release. Ogni immagine deve essere digest-pinned e avere un report verificato da
 `gh attestation verify` che copre il relativo digest. I vecchi env
 `BACKEND_IMAGE`, `WEB_IMAGE` e `WORKER_*_IMAGE` restano fallback compatibile. La
-provenance locale SLSA resta accettata come evidenza parziale; il go/no-go
-richiede `github-signed-attestation` completa.
+provenance locale non firmata e i report JSON normalizzati non sono trust input.
+Il go/no-go richiede che il gate invochi direttamente il verifier GitHub/Sigstore
+con signer workflow, commit, ref, issuer, timestamp e subject digest esatti.
 La workflow manuale `enterprise-live-evidence` gira nell'environment GitHub
 `production` e raccoglie prove live non mutanti: uptime provider, load benchmark
 pubblico via Cloudflare, Cloudflare Access `--verifyRemote`, go/no-go live e
@@ -530,10 +533,19 @@ Per ogni release candidata genera anche il manifest operativo:
 ```sh
 sh ./scripts/release-evidence.sh --planOnly
 gh workflow run release-attestation.yml --repo OWNER/REPO --ref main
-sh ./scripts/release-evidence.sh --requireProvenance --imageManifest .tmp/release-attestation/release-subjects.json --sbom reports/release/github-release-sbom-<run-id>.cdx.json --githubAttestation reports/release/github-sigstore-attestation-<stamp>.json --previousImagesFile ./release/previous-images.json
+GITHUB_REF=refs/heads/main sh ./scripts/release-evidence.sh --requireProvenance --repo OWNER/REPO --sourceRef refs/heads/main --imageManifest .tmp/release-attestation/release-subjects.json --sbom reports/release/github-release-sbom-<run-id>.cdx.json --previousImagesFile ./release/previous-images.json
 ```
 
-  Il workflow `release-attestation.yml` usa GitHub Artifact Attestations/Sigstore, builda l'immagine infra PHP Apache su GHCR, abilita SBOM BuildKit, firma anche `release-subjects.json` e carica artifact non sensibili. Per release multi-immagine passa `release_images_json` con riferimenti gia' digest-pinned: il manifest firmato viene usato dal gate per coprire tutti i subject dichiarati. Il comando valida immagini digest-pinned, SBOM, provenance opzionale, firma opzionale con `--verifyCosign`, scrive report in `reports/release/` con `status`/`issues` e, quando riceve i digest precedenti, produce `release/previous-images.json`. `--provenance` accetta una statement/bundle DSSE in-toto SLSA v1 come evidenza locale parziale; `--githubAttestation` accetta uno o piu' report GitHub/Sigstore normalizzati e verificati. Per essere completa, la GitHub attestation deve risultare `verified=true`, indicare repository, workflow run id, commit SHA, subject name e subject digest, e coprire ogni digest immagine della release. In evidence mode esegue anche la dry-run di rollback non distruttiva, valida `docker compose config` con i digest precedenti e collega il report `reports/rollback/rollback-plan-*.json` dentro l'evidence pack della release. I fallimenti scrivono comunque report diagnostici, ma il go/no-go accetta solo `status=passed` con `github-signed-attestation` completa.
+Il workflow `release-attestation.yml` usa GitHub Artifact Attestations/Sigstore,
+builda l'immagine infra PHP Apache su GHCR, abilita SBOM BuildKit, attesta anche
+`release-subjects.json` e carica receipt non sensibili. Il gate non rilegge tali
+receipt come prova: invoca direttamente il GitHub CLI checksum-pinned e vincola
+repository, signer workflow, source/signer digest, ref, issuer, SLSA v1, runner
+GitHub-hosted, timestamp verificato e subject digest. Per verifica offline sono
+obbligatori insieme `--attestationBundle` e `--trustedRoot`; `--provenance`,
+`--githubAttestation` e `--skipProvenanceCommitCheck` sono respinti. In evidence
+mode esegue anche la dry-run di rollback, valida `docker compose config` con i
+digest precedenti e collega `reports/rollback/rollback-plan-*.json`.
 
 ## Produzione
 
@@ -805,6 +817,7 @@ fuori dal GO/NO-GO infra.
 - `DATABASE-DELETION-SAFETY.md`: gate, state machine e recovery per le cancellazioni DB.
 - `NETWORK-SEGMENTATION.md`: matrice di comunicazione, SSRF boundary e rollout reti T12.
 - `SUPPLY-CHAIN.md`: lock di action/immagini/download, sandbox build e procedura di aggiornamento T15.
+- `RELEASE-TRUST-AND-WORKFLOW-SECURITY.md`: verifier crittografico, governance GitHub esatta e input SSH sicuri T16.
 - `RUNTIME-ISOLATION.md`: contratto T13, test, rollout progressivo e rollback per-app.
 - `SERVICE-IDENTITY-AND-TENANCY.md`: identita DB T14, policy MinIO per prefisso, contratto tenancy e rollout dual-credential.
 - `postgres/init/` e `postgres/migrations/`: bootstrap DB e compatibilita'

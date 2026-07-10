@@ -4,7 +4,7 @@
       "name": "staging",
       "wait_timer": 0,
       "prevent_self_review": true,
-      "required_reviewers_env": "GITHUB_STAGING_REVIEWERS",
+      "reviewers": [],
       "require_reviewers_on_apply": false,
       "deployment_branch_policy": {
         "protected_branches": false,
@@ -15,7 +15,13 @@
       "name": "production",
       "wait_timer": 15,
       "prevent_self_review": true,
-      "required_reviewers_env": "GITHUB_PRODUCTION_REVIEWERS",
+      "reviewers": [
+        {
+          "type": "User",
+          "id": 95946096,
+          "login": "mattdifi05"
+        }
+      ],
       "require_reviewers_on_apply": true,
       "deployment_branch_policy": {
         "protected_branches": true,

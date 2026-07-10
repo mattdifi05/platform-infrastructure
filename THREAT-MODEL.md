@@ -35,6 +35,11 @@
   CPU shares contain workload stress.
 - Credential pivot: distinct DB logins, worker-specific grants and MinIO inline
   policies deny cross-table, cross-prefix, cross-bucket and admin operations.
+- Forged release evidence: cryptographic GitHub/Sigstore verification binds the
+  signer workflow, commit, ref, issuer, hosted runner, timestamp and exact
+  subject digest; self-authored reports cannot satisfy admission.
+- Workflow command injection: remote commands are fixed and configurable fields
+  are validated, encoded, decoded and validated again before quoted use.
 
 ## Accepted local-development risks
 

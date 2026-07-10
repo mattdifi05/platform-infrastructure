@@ -4,6 +4,9 @@ FROM ${NODE_IMAGE}
 
 USER root
 
+ARG GH_VERSION=2.93.0
+ARG GH_SHA256=02d1290eba130e0b896f3709ffff22e1c75a51475ddb70476a85abc6b5807af0
+
 RUN apk add --no-cache \
     bash \
     ca-certificates \
@@ -15,9 +18,22 @@ RUN apk add --no-cache \
     openssh-client \
     tini
 
+RUN curl --fail --location --silent --show-error \
+      "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_amd64.tar.gz" \
+      --output /tmp/gh.tar.gz \
+    && printf '%s  %s\n' "$GH_SHA256" /tmp/gh.tar.gz | sha256sum -c - \
+    && tar -xzf /tmp/gh.tar.gz -C /tmp \
+    && install -m 0755 "/tmp/gh_${GH_VERSION}_linux_amd64/bin/gh" /usr/local/bin/gh \
+    && rm -rf /tmp/gh.tar.gz "/tmp/gh_${GH_VERSION}_linux_amd64" \
+    && gh --version
+
 COPY control-center/package.json control-center/package-lock.json /infra/control-center/
 RUN npm ci --prefix /infra/control-center --omit=dev --ignore-scripts --no-audit --no-fund
 
 WORKDIR /infra
+
+ENV GH_CONFIG_DIR=/tmp/gh \
+    GH_NO_UPDATE_NOTIFIER=1 \
+    GH_PROMPT_DISABLED=1
 
 ENTRYPOINT ["tini", "--", "node", "/infra/scripts/infra-ops.mjs"]

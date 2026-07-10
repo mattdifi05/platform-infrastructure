@@ -16,11 +16,7 @@ on:
       - "v*"
       - "release-*"
 
-permissions:
-  contents: read
-  id-token: write
-  attestations: write
-  packages: write
+permissions: {}
 
 concurrency:
   group: release-attestation-${{ github.ref }}
@@ -30,6 +26,11 @@ jobs:
   github-sigstore-release-evidence:
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      packages: write
     env:
       RELEASE_NAME: ${{ github.event.inputs.release_name || github.ref_name || github.sha }}
       RELEASE_IMAGES_JSON: ${{ github.event.inputs.release_images_json || '{}' }}
@@ -183,105 +184,25 @@ jobs:
         with:
           subject-path: .tmp/release-attestation/release-subjects.json
 
-      - name: Verify GHCR image attestation
+      - name: Cryptographically verify and record attestations
         env:
           GH_TOKEN: ${{ github.token }}
-          PHP_APACHE_DIGEST: ${{ steps.php-apache.outputs.digest }}
-        run: |
-          gh attestation verify "oci://${PHP_APACHE_IMAGE}@${PHP_APACHE_DIGEST}" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --format json > .tmp/release-attestation/php-apache-gh-verify.raw.json
-
-      - name: Verify release manifest attestation
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh attestation verify .tmp/release-attestation/release-subjects.json \
-            --repo "${GITHUB_REPOSITORY}" \
-            --format json > .tmp/release-attestation/release-manifest-gh-verify.raw.json
-
-      - name: Normalize verified attestation evidence
-        env:
-          PHP_APACHE_DIGEST: ${{ steps.php-apache.outputs.digest }}
-        run: |
-          node <<'NODE'
-          const fs = require("node:fs");
-
-          function countResults(file) {
-            const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
-            return Array.isArray(parsed) ? parsed.length : 1;
-          }
-
-          const releaseManifest = JSON.parse(fs.readFileSync(".tmp/release-attestation/release-subjects.json", "utf8"));
-          const releaseManifestSubjects = Array.isArray(releaseManifest.subjects)
-            ? releaseManifest.subjects.map((subject) => ({
-              name: subject.name,
-              digest: subject.digest,
-              key: subject.key || subject.name,
-              source: "signed-release-subject-manifest",
-            }))
-            : [];
-          const runUrl = `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`;
-          const common = {
-            version: 1,
-            provider: "github-artifact-attestations",
-            verified: true,
-            repository: process.env.GITHUB_REPOSITORY,
-            commitSha: process.env.GITHUB_SHA,
-            workflowRunId: process.env.GITHUB_RUN_ID,
-            workflowRunUrl: runUrl,
-            verifiedAt: new Date().toISOString(),
-          };
-          const imageReport = {
-            ...common,
-            subjectName: process.env.PHP_APACHE_IMAGE,
-            subjectDigest: process.env.PHP_APACHE_DIGEST,
-            subjects: [{ name: process.env.PHP_APACHE_IMAGE, digest: process.env.PHP_APACHE_DIGEST }],
-            verification: {
-              command: "gh attestation verify oci://<image>@<digest> --repo <repo> --format json",
-              rawPath: "php-apache-gh-verify.raw.json",
-              resultCount: countResults(".tmp/release-attestation/php-apache-gh-verify.raw.json"),
-            },
-          };
-          const manifestReport = {
-            ...common,
-            subjectName: "release-subjects.json",
-            subjectDigest: `sha256:${process.env.RELEASE_SUBJECTS_SHA256}`,
-            subjects: [
-              { name: "release-subjects.json", digest: `sha256:${process.env.RELEASE_SUBJECTS_SHA256}` },
-              ...releaseManifestSubjects,
-            ],
-            signedManifest: {
-              path: "release-subjects.json",
-              sha256: process.env.RELEASE_SUBJECTS_SHA256,
-              subjectCount: releaseManifestSubjects.length,
-            },
-            verification: {
-              command: "gh attestation verify release-subjects.json --repo <repo> --format json",
-              rawPath: "release-manifest-gh-verify.raw.json",
-              resultCount: countResults(".tmp/release-attestation/release-manifest-gh-verify.raw.json"),
-            },
-          };
-          fs.writeFileSync(".tmp/release-attestation/php-apache-gh-verify.json", `${JSON.stringify(imageReport, null, 2)}\n`, "utf8");
-          fs.writeFileSync(".tmp/release-attestation/release-manifest-gh-verify.json", `${JSON.stringify(manifestReport, null, 2)}\n`, "utf8");
-          NODE
-
-      - name: Write non-sensitive attestation evidence reports
-        env:
           PHP_APACHE_DIGEST: ${{ steps.php-apache.outputs.digest }}
         run: |
           sh ./scripts/github-attestation-evidence.sh \
-            --verification .tmp/release-attestation/php-apache-gh-verify.json \
-            --expectedSubjectName "${PHP_APACHE_IMAGE}" \
+            --subject "oci://${PHP_APACHE_IMAGE}@${PHP_APACHE_DIGEST}" \
             --expectedSubjectDigest "${PHP_APACHE_DIGEST}" \
-            --repository "${GITHUB_REPOSITORY}" \
-            --releaseSha "${GITHUB_SHA}"
+            --repo "${GITHUB_REPOSITORY}" \
+            --signerWorkflow "${GITHUB_REPOSITORY}/.github/workflows/release-attestation.yml" \
+            --sourceDigest "${GITHUB_SHA}" \
+            --sourceRef "${GITHUB_REF}"
           sh ./scripts/github-attestation-evidence.sh \
-            --verification .tmp/release-attestation/release-manifest-gh-verify.json \
-            --expectedSubjectName release-subjects.json \
+            --subject .tmp/release-attestation/release-subjects.json \
             --expectedSubjectDigest "sha256:${RELEASE_SUBJECTS_SHA256}" \
-            --repository "${GITHUB_REPOSITORY}" \
-            --releaseSha "${GITHUB_SHA}"
+            --repo "${GITHUB_REPOSITORY}" \
+            --signerWorkflow "${GITHUB_REPOSITORY}/.github/workflows/release-attestation.yml" \
+            --sourceDigest "${GITHUB_SHA}" \
+            --sourceRef "${GITHUB_REF}"
 
       - name: Upload GitHub Sigstore release evidence
         if: always()
@@ -294,5 +215,4 @@ jobs:
             reports/release/github-release-sbom-*.cdx.json
             .tmp/release-attestation/release-subjects.json
             .tmp/release-attestation/release-subjects.sha256
-            .tmp/release-attestation/*-gh-verify.json
           retention-days: 30

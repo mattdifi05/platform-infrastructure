@@ -1,5 +1,10 @@
 # Supply-chain Lock and Build Isolation
 
+Cryptographic release admission, GitHub signer identity and workflow input
+handling are defined in `RELEASE-TRUST-AND-WORKFLOW-SECURITY.md`. T15 pins the
+bytes and build inputs; T16 proves who produced each release subject and rejects
+unsigned or self-asserted evidence.
+
 ## Contract
 
 `governance/supply-chain-lock.json` is the reviewed source of truth for

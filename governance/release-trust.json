@@ -1,0 +1,12 @@
+{
+  "provider": "github-artifact-attestations",
+  "predicate_type": "https://slsa.dev/provenance/v1",
+  "cert_oidc_issuer": "https://token.actions.githubusercontent.com",
+  "signer_workflow_path": ".github/workflows/release-attestation.yml",
+  "deny_self_hosted_runners": true,
+  "require_source_digest": true,
+  "require_source_ref": true,
+  "require_verified_timestamp": true,
+  "accept_unsigned_local_provenance": false,
+  "accept_normalized_verification_reports": false
+}

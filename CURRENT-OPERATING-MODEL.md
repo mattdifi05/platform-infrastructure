@@ -94,6 +94,13 @@ and DB/MinIO negative tests. It is not live: the reference containers still use
 the shared `app_user`, and any cutover requires recovery evidence plus a
 service-by-service maintenance approval.
 
+The T15/T16 release candidate pins third-party bytes and admits release
+subjects only after direct GitHub/Sigstore verification of signer workflow,
+commit, ref, issuer, timestamp and digest. GitHub governance comparison is
+exact, and VPS workflow/deploy inputs no longer enter the SSH remote command.
+This is repository-side and sandbox/provider-read-only evidence: no release
+image was published or deployed and no GitHub protection rule was changed.
+
 Core platform services currently expected in the reference stack:
 
 ```text

@@ -21,6 +21,17 @@ import {
 import { evaluateNetworkSegmentation } from "./network-segmentation-policy.mjs";
 import { evaluateRuntimeIsolation } from "./runtime-isolation-policy.mjs";
 import { evaluateSupplyChain } from "./supply-chain-policy.mjs";
+import {
+  assertExactBranchProtection,
+  assertExactGithubEnvironment,
+} from "./github-governance-policy.mjs";
+import {
+  GITHUB_ACTIONS_OIDC_ISSUER,
+  SLSA_PROVENANCE_V1,
+  normalizeRepository,
+  verifyGithubAttestation,
+  verifyGithubReleaseImages,
+} from "./release-trust.mjs";
 
 process.umask(0o077);
 
@@ -1128,324 +1139,49 @@ function digestFromImageRef(image) {
   return match ? match[1].toLowerCase() : null;
 }
 
-function normalizeDigestValue(value) {
-  const text = String(value ?? "").trim().toLowerCase();
-  const match = text.match(/^(?:sha256:)?([a-f0-9]{64})$/);
-  return match ? match[1] : null;
+function releaseTrustPolicy() {
+  const policy = readJsonFile(path.join(infraRoot, "governance", "release-trust.json"), "release trust policy");
+  if (policy.provider !== "github-artifact-attestations") {
+    fail("Release trust policy must use GitHub Artifact Attestations.");
+  }
+  if (policy.predicate_type !== SLSA_PROVENANCE_V1 || policy.cert_oidc_issuer !== GITHUB_ACTIONS_OIDC_ISSUER) {
+    fail("Release trust policy must bind SLSA v1 to the GitHub Actions OIDC issuer.");
+  }
+  if (policy.deny_self_hosted_runners !== true || policy.require_verified_timestamp !== true) {
+    fail("Release trust policy must deny self-hosted signers and require a verified timestamp.");
+  }
+  if (policy.accept_unsigned_local_provenance !== false || policy.accept_normalized_verification_reports !== false) {
+    fail("Release trust policy must reject unsigned provenance and normalized verification reports.");
+  }
+  return policy;
 }
 
-function decodeBase64Json(value, label) {
-  try {
-    return JSON.parse(Buffer.from(String(value), "base64").toString("utf8"));
-  } catch (error) {
-    fail(`Invalid ${label}: ${String(error?.message ?? error)}`);
-  }
-}
-
-function inTotoStatementsFromDocument(document) {
-  if (Array.isArray(document)) {
-    return document.flatMap((entry) => inTotoStatementsFromDocument(entry));
-  }
-  if (!document || typeof document !== "object") {
-    fail("SLSA provenance must be a JSON object, DSSE envelope, bundle or array.");
-  }
-  if (document.payload && typeof document.payload === "string") {
-    return inTotoStatementsFromDocument(decodeBase64Json(document.payload, "DSSE provenance payload"));
-  }
-  if (Array.isArray(document.attestations)) {
-    return document.attestations.flatMap((entry) => inTotoStatementsFromDocument(entry));
-  }
-  if (Array.isArray(document.statements)) {
-    return document.statements.flatMap((entry) => inTotoStatementsFromDocument(entry));
-  }
-  if (document.statement && typeof document.statement === "object") {
-    return inTotoStatementsFromDocument(document.statement);
-  }
-  return [document];
-}
-
-function collectSubjectDigests(statement) {
-  return (Array.isArray(statement.subject) ? statement.subject : [])
-    .map((subject) => {
-      const digests = subject?.digest && typeof subject.digest === "object" ? Object.entries(subject.digest) : [];
-      const sha256 = digests
-        .filter(([algorithm]) => algorithm.toLowerCase() === "sha256")
-        .map(([, value]) => normalizeDigestValue(value))
-        .find(Boolean);
-      return sha256 ? { name: subject.name ?? null, sha256 } : null;
-    })
-    .filter(Boolean);
-}
-
-function valueContainsText(value, needle) {
-  if (!needle) {
-    return true;
-  }
-  if (typeof value === "string") {
-    return value.includes(needle);
-  }
-  if (Array.isArray(value)) {
-    return value.some((entry) => valueContainsText(entry, needle));
-  }
-  if (value && typeof value === "object") {
-    return Object.values(value).some((entry) => valueContainsText(entry, needle));
-  }
-  return false;
-}
-
-function validateSlsaProvenance({ provenancePath, images, releaseSha, requireReleaseSha = true }) {
-  const resolved = path.resolve(provenancePath);
-  const document = readJsonFile(resolved, resolved);
-  const statements = inTotoStatementsFromDocument(document);
-  if (!statements.length) {
-    fail("SLSA provenance does not contain an in-toto statement.");
-  }
-
-  const imageDigests = images
-    .map((image) => ({ image, sha256: digestFromImageRef(image) }))
-    .filter((entry) => entry.image);
-  const missingImageDigest = imageDigests.find((entry) => !entry.sha256);
-  if (missingImageDigest) {
-    fail(`Cannot validate provenance for unpinned image: ${missingImageDigest.image}`);
-  }
-
-  const slsaStatements = statements.filter((statement) => statement?.predicateType === "https://slsa.dev/provenance/v1");
-  if (!slsaStatements.length) {
-    fail("SLSA provenance must use predicateType https://slsa.dev/provenance/v1.");
-  }
-  for (const statement of slsaStatements) {
-    if (!Array.isArray(statement.subject) || !statement.subject.length) {
-      fail("SLSA provenance statements must include at least one subject.");
-    }
-    if (!statement.predicate?.buildDefinition?.buildType) {
-      fail("SLSA provenance v1 must include predicate.buildDefinition.buildType.");
-    }
-  }
-
-  const subjectDigests = slsaStatements.flatMap(collectSubjectDigests);
-  const subjectDigestSet = new Set(subjectDigests.map((subject) => subject.sha256));
-  const missingSubjects = imageDigests.filter((entry) => !subjectDigestSet.has(entry.sha256));
-  if (missingSubjects.length) {
-    fail(`SLSA provenance subjects do not cover release images: ${missingSubjects.map((entry) => entry.image).join(", ")}`);
-  }
-
-  const releaseShaMatched = !releaseSha || slsaStatements.some((statement) => valueContainsText(statement.predicate?.buildDefinition, releaseSha)
-    || valueContainsText(statement.predicate?.runDetails, releaseSha)
-    || valueContainsText(statement.subject, releaseSha));
-  if (requireReleaseSha && releaseSha && !releaseShaMatched) {
-    fail(`SLSA provenance does not reference release commit ${releaseSha}. Use --skipProvenanceCommitCheck only for a reviewed provider exception.`);
-  }
-
+function releaseTrustVerificationOptions(options, releaseSha) {
+  const policy = releaseTrustPolicy();
+  const repository = options.repository ?? options.repo ?? argv.repository ?? argv.repo ?? process.env.GITHUB_REPOSITORY;
+  const sourceRef = options.sourceRef ?? argv.sourceRef ?? process.env.GITHUB_REF;
   return {
-    status: "passed",
-    predicateType: "https://slsa.dev/provenance/v1",
-    statementCount: slsaStatements.length,
-    subjectCount: subjectDigests.length,
-    releaseImageDigests: imageDigests.map((entry) => entry.sha256),
-    matchedSubjects: imageDigests.map((entry) => ({
-      image: entry.image,
-      sha256: entry.sha256,
-      subjects: subjectDigests.filter((subject) => subject.sha256 === entry.sha256).map((subject) => subject.name),
-    })),
-    releaseSha,
-    releaseShaMatched,
-    requireReleaseSha,
-  };
-}
-
-function uniqueBy(items, keyFn) {
-  const seen = new Set();
-  return items.filter((item) => {
-    const key = keyFn(item);
-    if (!key || seen.has(key)) {
-      return false;
-    }
-    seen.add(key);
-    return true;
-  });
-}
-
-function collectGithubAttestationSubjects(document) {
-  const explicitSubjects = [];
-  const addSubject = (entry) => {
-    if (!entry || typeof entry !== "object") {
-      return;
-    }
-    const digest = normalizeDigestValue(entry.digest ?? entry.subjectDigest ?? entry.sha256 ?? entry?.digest?.sha256);
-    const name = entry.name ?? entry.subjectName ?? entry.image ?? null;
-    if (digest) {
-      explicitSubjects.push({ name, sha256: digest });
-    }
-  };
-
-  addSubject(document);
-  if (Array.isArray(document.subjects)) {
-    document.subjects.forEach(addSubject);
-  }
-  if (Array.isArray(document.attestation?.subjects)) {
-    document.attestation.subjects.forEach(addSubject);
-  }
-  if (Array.isArray(document.images)) {
-    document.images.forEach(addSubject);
-  }
-
-  let statementSubjects = [];
-  try {
-    statementSubjects = inTotoStatementsFromDocument(document).flatMap(collectSubjectDigests);
-  } catch {
-    statementSubjects = [];
-  }
-
-  return uniqueBy([...explicitSubjects, ...statementSubjects], (subject) => `${subject.name ?? ""}@${subject.sha256}`);
-}
-
-function validateGithubSigstoreAttestation({
-  attestationPath,
-  images,
-  releaseSha,
-  requireReleaseSha = true,
-  repository = null,
-  expectedSubjectName = null,
-  expectedSubjectDigest = null,
-  requireSubjectCoverage = true,
-}) {
-  const resolved = path.resolve(attestationPath);
-  const document = readJsonFile(resolved, resolved);
-  const verified = document.verified === true
-    || document.status === "verified"
-    || document.status === "passed"
-    || document.verification?.verified === true
-    || document.attestation?.verified === true
-    || document.attestation?.status === "passed";
-  if (!verified) {
-    fail("GitHub/Sigstore attestation report is not marked verified. Generate it from a successful gh attestation verify run.");
-  }
-
-  const subjects = collectGithubAttestationSubjects(document);
-  const expectedDigest = normalizeDigestValue(expectedSubjectDigest);
-  if (expectedSubjectName && !subjects.some((subject) => subject.name === expectedSubjectName)) {
-    fail(`GitHub/Sigstore attestation subject name mismatch: expected ${expectedSubjectName}.`);
-  }
-  if (expectedDigest && !subjects.some((subject) => subject.sha256 === expectedDigest)) {
-    fail(`GitHub/Sigstore attestation subject digest mismatch: expected sha256:${expectedDigest}.`);
-  }
-
-  const expectedRepository = repository ?? argv.repository ?? argv.repo ?? process.env.GITHUB_REPOSITORY ?? null;
-  const reportRepository = document.repository ?? document.github?.repository ?? document.sourceRepository ?? document.attestation?.repository ?? null;
-  if (expectedRepository && !reportRepository) {
-    fail(`GitHub/Sigstore attestation repository is missing; expected ${expectedRepository}.`);
-  }
-  if (expectedRepository && reportRepository && String(reportRepository).toLowerCase() !== String(expectedRepository).toLowerCase()) {
-    fail(`GitHub/Sigstore attestation repository mismatch: expected ${expectedRepository}, got ${reportRepository}.`);
-  }
-  const workflowRunId = document.workflowRunId ?? document.github?.runId ?? document.runId ?? document.attestation?.workflowRunId ?? null;
-  if (!workflowRunId) {
-    fail("GitHub/Sigstore attestation workflow run id is missing.");
-  }
-
-  const imageDigests = images
-    .map((image) => ({ image, sha256: digestFromImageRef(image) }))
-    .filter((entry) => entry.image);
-  const missingImageDigest = imageDigests.find((entry) => !entry.sha256);
-  if (missingImageDigest) {
-    fail(`Cannot validate GitHub/Sigstore attestation for unpinned image: ${missingImageDigest.image}`);
-  }
-
-  const subjectDigestSet = new Set(subjects.map((subject) => subject.sha256));
-  const missingSubjects = imageDigests.filter((entry) => !subjectDigestSet.has(entry.sha256));
-  const releaseShaMatched = !releaseSha
-    || String(document.commitSha ?? document.commit ?? document.github?.sha ?? "").toLowerCase() === String(releaseSha).toLowerCase()
-    || String(document.attestation?.commitSha ?? "").toLowerCase() === String(releaseSha).toLowerCase()
-    || valueContainsText(document, releaseSha);
-  if (requireReleaseSha && releaseSha && !releaseShaMatched) {
-    fail(`GitHub/Sigstore attestation does not reference release commit ${releaseSha}.`);
-  }
-  if (requireSubjectCoverage && missingSubjects.length) {
-    fail(`GitHub/Sigstore attestation subjects do not cover release images: ${missingSubjects.map((entry) => entry.image).join(", ")}`);
-  }
-
-  return {
-    status: "passed",
-    kind: "github-signed-attestation",
-    provider: document.provider ?? "github-artifact-attestations",
-    verified: true,
-    completeness: "complete",
-    repository: reportRepository ?? expectedRepository,
-    workflowRunId,
-    workflowRunUrl: document.workflowRunUrl ?? document.github?.runUrl ?? document.attestation?.workflowRunUrl ?? null,
-    commitSha: document.commitSha ?? document.commit ?? document.github?.sha ?? document.attestation?.commitSha ?? releaseSha ?? null,
-    commitShaMatched: releaseShaMatched,
-    subjectCount: subjects.length,
-    subjects,
-    releaseImageDigests: imageDigests.map((entry) => entry.sha256),
-    matchedSubjects: imageDigests.map((entry) => ({
-      image: entry.image,
-      sha256: entry.sha256,
-      subjects: subjects.filter((subject) => subject.sha256 === entry.sha256).map((subject) => subject.name),
-    })),
-    missingSubjects: missingSubjects.map((entry) => entry.image),
-  };
-}
-
-function githubAttestationPathList(value) {
-  return csvList(value, "").map((entry) => path.resolve(entry));
-}
-
-function validateGithubSigstoreAttestations({
-  attestationPaths,
-  images,
-  releaseSha,
-  requireReleaseSha = true,
-  repository = null,
-}) {
-  const paths = attestationPaths.filter(Boolean);
-  if (!paths.length) {
-    return null;
-  }
-  const validations = paths.map((attestationPath) => validateGithubSigstoreAttestation({
-    attestationPath,
-    images,
-    releaseSha,
-    requireReleaseSha,
     repository,
-    requireSubjectCoverage: false,
-  }));
-  const subjects = uniqueBy(validations.flatMap((validation) => validation.subjects), (subject) => `${subject.name ?? ""}@${subject.sha256}`);
-  const subjectDigestSet = new Set(subjects.map((subject) => subject.sha256));
-  const imageDigests = images
-    .map((image) => ({ image, sha256: digestFromImageRef(image) }))
-    .filter((entry) => entry.image);
-  const missingSubjects = imageDigests.filter((entry) => !subjectDigestSet.has(entry.sha256));
-  if (missingSubjects.length) {
-    fail(`GitHub/Sigstore attestations do not cover release images: ${missingSubjects.map((entry) => entry.image).join(", ")}`);
-  }
-
-  return {
-    status: "passed",
-    kind: "github-signed-attestation",
-    provider: "github-artifact-attestations",
-    verified: true,
-    completeness: "complete",
-    repository: validations.find((validation) => validation.repository)?.repository ?? repository,
-    workflowRunIds: uniqueBy(validations.map((validation) => validation.workflowRunId).filter(Boolean), (id) => String(id)),
-    commitSha: validations.find((validation) => validation.commitSha)?.commitSha ?? releaseSha ?? null,
-    commitShaMatched: validations.every((validation) => validation.commitShaMatched !== false),
-    attestationCount: validations.length,
-    attestations: validations.map((validation, index) => ({
-      path: paths[index],
-      workflowRunId: validation.workflowRunId,
-      subjectCount: validation.subjectCount,
-      subjects: validation.subjects,
-    })),
-    subjectCount: subjects.length,
-    subjects,
-    releaseImageDigests: imageDigests.map((entry) => entry.sha256),
-    matchedSubjects: imageDigests.map((entry) => ({
-      image: entry.image,
-      sha256: entry.sha256,
-      subjects: subjects.filter((subject) => subject.sha256 === entry.sha256).map((subject) => subject.name),
-    })),
+    signerWorkflow: options.signerWorkflow ?? argv.signerWorkflow ?? `${repository}/${policy.signer_workflow_path}`,
+    sourceDigest: releaseSha,
+    sourceRef,
+    bundle: options.attestationBundle ?? argv.attestationBundle ?? null,
+    trustedRoot: options.trustedRoot ?? argv.trustedRoot ?? null,
+    predicateType: policy.predicate_type,
+    certOidcIssuer: policy.cert_oidc_issuer,
   };
+}
+
+function rejectLegacyProvenanceInputs(options = {}) {
+  if (options.provenance ?? argv.provenance) {
+    fail("Unsigned local SLSA JSON is not admissible. Use a signed --attestationBundle with --trustedRoot or online GitHub verification.");
+  }
+  if (options.githubAttestation ?? options.githubAttestations ?? argv.githubAttestation ?? argv.githubAttestations) {
+    fail("Normalized GitHub attestation reports are not trust inputs. The gate must invoke the cryptographic verifier directly.");
+  }
+  if (options.skipProvenanceCommitCheck ?? booleanFlag(argv.skipProvenanceCommitCheck)) {
+    fail("Provenance commit verification cannot be skipped.");
+  }
 }
 
 function envTextWithOverrides(text, overrides) {
@@ -7464,41 +7200,24 @@ async function releaseArtifactGateBody(options = {}) {
   assertMatch(policy, /cosign\.sigstore\.dev\/verified/, "Admission policy must require cosign verification annotation.");
   assertMatch(policy, /slsa\.dev\/provenance/, "Admission policy must require SLSA provenance annotation.");
 
-  const githubAttestationPaths = githubAttestationPathList(options.githubAttestation ?? options.githubAttestations ?? argv.githubAttestation ?? argv.githubAttestations);
-  if (options.requireProvenance ?? booleanFlag(argv.requireProvenance)) {
-    const provenance = options.provenance ?? argv.provenance;
-    const hasLocalProvenance = provenance && fs.existsSync(path.resolve(provenance));
-    const hasGithubAttestation = githubAttestationPaths.length > 0 && githubAttestationPaths.every((file) => fs.existsSync(file));
-    if (!hasLocalProvenance && !hasGithubAttestation) {
-      fail("Release provenance is required. Pass --provenance <file> for local SLSA provenance or --githubAttestation <file[,file]> for GitHub/Sigstore verification reports.");
-    }
+  rejectLegacyProvenanceInputs(options);
+  const requireProvenance = options.requireProvenance ?? booleanFlag(argv.requireProvenance);
+  const releaseSha = options.releaseSha ?? argv.releaseSha ?? gitEvidence().commit;
+  let githubAttestationValidation = null;
+  if (requireProvenance) {
+    loadGithubTokenFromFile();
+    githubAttestationValidation = verifyGithubReleaseImages({
+      images,
+      ...releaseTrustVerificationOptions(options, releaseSha),
+    });
   }
-  const provenance = options.provenance ?? argv.provenance;
-  const provenancePath = provenance ? path.resolve(provenance) : null;
-  const provenanceValidation = provenancePath
-    ? validateSlsaProvenance({
-      provenancePath,
-      images,
-      releaseSha: options.releaseSha ?? argv.releaseSha ?? gitEvidence().commit,
-      requireReleaseSha: !(options.skipProvenanceCommitCheck ?? booleanFlag(argv.skipProvenanceCommitCheck)),
-    })
-    : null;
-  const githubAttestationValidation = githubAttestationPaths.length
-    ? validateGithubSigstoreAttestations({
-      attestationPaths: githubAttestationPaths,
-      images,
-      releaseSha: options.releaseSha ?? argv.releaseSha ?? gitEvidence().commit,
-      requireReleaseSha: !(options.skipProvenanceCommitCheck ?? booleanFlag(argv.skipProvenanceCommitCheck)),
-      repository: options.repository ?? options.repo ?? argv.repository ?? argv.repo ?? process.env.GITHUB_REPOSITORY ?? null,
-    })
-    : null;
   if (booleanFlag(argv.verifyCosign)) {
     for (const image of images) {
       run("cosign", ["verify", image]);
     }
   }
   log(`Release artifact admission gate passed with SBOM ${sbomFile}.`);
-  return { sbomFile, provenanceValidation, githubAttestationValidation };
+  return { sbomFile, provenanceValidation: null, githubAttestationValidation };
 }
 
 function releaseImageMapFromEnv(env, manifestPath = null) {
@@ -7557,10 +7276,6 @@ function safeReleaseArtifactRef(filePath, issues, label) {
   return releaseArtifactRef(resolved);
 }
 
-function safeReleaseArtifactRefs(filePaths, issues, label) {
-  return filePaths.map((filePath, index) => safeReleaseArtifactRef(filePath, issues, `${label} #${index + 1}`)).filter(Boolean);
-}
-
 function writeReleaseEvidenceReport(payload) {
   const stamp = reportTimestamp();
   const currentImages = payload.currentImages ?? {};
@@ -7589,9 +7304,8 @@ function writeReleaseEvidenceReport(payload) {
     "| --- | --- | --- |",
     `| SBOM | ${payload.artifacts?.sbom?.path ?? "n/a"} | ${payload.artifacts?.sbom?.sha256 ?? "n/a"} |`,
     `| Provenance | ${payload.artifacts?.provenance?.path ?? "n/a"} | ${payload.artifacts?.provenance?.sha256 ?? "n/a"} |`,
-    ...(payload.artifacts?.githubAttestations?.length
-      ? payload.artifacts.githubAttestations.map((artifact, index) => `| GitHub/Sigstore attestation ${index + 1} | ${artifact.path} | ${artifact.sha256} |`)
-      : ["| GitHub/Sigstore attestation | n/a | n/a |"]),
+    `| Signed attestation bundle | ${payload.artifacts?.attestationBundle?.path ?? "online verification"} | ${payload.artifacts?.attestationBundle?.sha256 ?? "n/a"} |`,
+    `| Trusted root | ${payload.artifacts?.trustedRoot?.path ?? "provider trust root"} | ${payload.artifacts?.trustedRoot?.sha256 ?? "n/a"} |`,
     `| Signature bundle | ${payload.artifacts?.signatureBundle?.path ?? "n/a"} | ${payload.artifacts?.signatureBundle?.sha256 ?? "n/a"} |`,
     "",
     `Rollback file: ${rollbackFilePath ?? (firstDeploy ? "first deploy" : "n/a")}`,
@@ -7628,10 +7342,13 @@ async function releaseEvidence(options = {}) {
   const previousImages = previousReleaseImageMap(env, previousFileImages, Object.keys(currentImages));
   const sbomPath = options.sbom ?? argv.sbom ?? latestFileByMtime(path.join(infraRoot, "security", "sbom"), (file) => /sbom.*\.(json|cdx\.json)$/i.test(path.basename(file)));
   const provenanceArg = options.provenance ?? argv.provenance;
-  const provenancePath = provenanceArg ? path.resolve(provenanceArg) : null;
+  const legacyGithubAttestationArg = options.githubAttestation ?? options.githubAttestations ?? argv.githubAttestation ?? argv.githubAttestations;
+  const attestationBundleArg = options.attestationBundle ?? argv.attestationBundle;
+  const attestationBundlePath = attestationBundleArg ? path.resolve(attestationBundleArg) : null;
+  const trustedRootArg = options.trustedRoot ?? argv.trustedRoot;
+  const trustedRootPath = trustedRootArg ? path.resolve(trustedRootArg) : null;
   const signatureBundleArg = options.signatureBundle ?? argv.signatureBundle;
   const signatureBundlePath = signatureBundleArg ? path.resolve(signatureBundleArg) : null;
-  const githubAttestationPaths = githubAttestationPathList(options.githubAttestation ?? options.githubAttestations ?? argv.githubAttestation ?? argv.githubAttestations);
   const releaseSha = options.releaseSha ?? argv.releaseSha ?? gitEvidence().commit;
   const releaseName = options.releaseName ?? argv.releaseName ?? releaseSha?.slice(0, 12) ?? `release-${reportTimestamp()}`;
   const rollbackProjectName = options.rollbackProjectName ?? argv.rollbackProjectName ?? argv.projectName ?? "enterprise_prod";
@@ -7639,7 +7356,6 @@ async function releaseEvidence(options = {}) {
   const rollbackComposeFiles = csvList(options.rollbackComposeFiles ?? argv.rollbackComposeFiles ?? argv.composeFiles, "compose.yaml,compose.prod.yaml");
   const generatedAt = new Date().toISOString();
   const issues = [];
-  let provenanceValidation = null;
   let githubAttestationValidation = null;
 
   if (!planOnly) {
@@ -7663,16 +7379,20 @@ async function releaseEvidence(options = {}) {
       }
       readJsonFile(path.resolve(sbomPath), sbomPath);
       const requireProvenance = options.requireProvenance ?? booleanFlag(argv.requireProvenance);
-      if (requireProvenance && !provenancePath && !githubAttestationPaths.length) {
-        fail("Release provenance is required. Pass --provenance <file> or --githubAttestation <file[,file]>.");
+      if (provenanceArg) {
+        fail("Unsigned local SLSA JSON is not admissible release evidence.");
       }
-      if (provenancePath && !fs.existsSync(provenancePath)) {
-        fail(`SLSA provenance artifact not found: ${provenancePath}`);
+      if (legacyGithubAttestationArg) {
+        fail("Normalized GitHub attestation reports are not admissible release evidence.");
       }
-      for (const githubAttestationPath of githubAttestationPaths) {
-        if (!fs.existsSync(githubAttestationPath)) {
-          fail(`GitHub/Sigstore attestation report not found: ${githubAttestationPath}`);
-        }
+      if ((attestationBundlePath && !trustedRootPath) || (!attestationBundlePath && trustedRootPath)) {
+        fail("Offline provenance verification requires both --attestationBundle and --trustedRoot.");
+      }
+      if (attestationBundlePath && !fs.existsSync(attestationBundlePath)) {
+        fail(`Signed attestation bundle not found: ${attestationBundlePath}`);
+      }
+      if (trustedRootPath && !fs.existsSync(trustedRootPath)) {
+        fail(`Trusted root not found: ${trustedRootPath}`);
       }
       if (signatureBundlePath && !fs.existsSync(signatureBundlePath)) {
         fail(`Signature bundle artifact not found: ${signatureBundlePath}`);
@@ -7682,14 +7402,14 @@ async function releaseEvidence(options = {}) {
         images: options.images ?? argv.images,
         imageManifest,
         sbom: sbomPath,
-        provenance: provenancePath,
-        githubAttestation: githubAttestationPaths,
+        attestationBundle: attestationBundlePath,
+        trustedRoot: trustedRootPath,
         requireProvenance,
         releaseSha,
-        skipProvenanceCommitCheck: options.skipProvenanceCommitCheck ?? booleanFlag(argv.skipProvenanceCommitCheck),
         repository: options.repository ?? options.repo ?? argv.repository ?? argv.repo ?? process.env.GITHUB_REPOSITORY ?? null,
+        sourceRef: options.sourceRef ?? argv.sourceRef ?? process.env.GITHUB_REF ?? null,
+        signerWorkflow: options.signerWorkflow ?? argv.signerWorkflow ?? null,
       });
-      provenanceValidation = artifactGate.provenanceValidation;
       githubAttestationValidation = artifactGate.githubAttestationValidation;
     } catch (error) {
       issues.push(String(error?.message ?? error));
@@ -7697,8 +7417,8 @@ async function releaseEvidence(options = {}) {
   }
 
   const sbom = planOnly && !sbomPath ? null : safeReleaseArtifactRef(sbomPath, issues, "SBOM");
-  const provenance = safeReleaseArtifactRef(provenancePath, issues, "SLSA provenance");
-  const githubAttestations = safeReleaseArtifactRefs(githubAttestationPaths, issues, "GitHub/Sigstore attestation");
+  const attestationBundle = safeReleaseArtifactRef(attestationBundlePath, issues, "signed attestation bundle");
+  const trustedRoot = safeReleaseArtifactRef(trustedRootPath, issues, "trusted root");
   const signatureBundle = safeReleaseArtifactRef(signatureBundlePath, issues, "Signature bundle");
   const rollbackComplete = Object.keys(currentImages).length > 0 && Object.keys(currentImages).every((key) => Boolean(previousImages[key]));
   const releaseRoot = path.join(infraRoot, "release");
@@ -7754,20 +7474,22 @@ async function releaseEvidence(options = {}) {
     },
     artifacts: {
       sbom,
-      provenance,
-      githubAttestations,
+      provenance: null,
+      githubAttestations: [],
+      attestationBundle,
+      trustedRoot,
       signatureBundle,
     },
     attestations: {
       provenanceRequired: options.requireProvenance ?? booleanFlag(argv.requireProvenance),
-      localProvenance: provenanceValidation ? { ...provenanceValidation, kind: "local-provenance", completeness: "partial" } : null,
-      slsaProvenance: provenanceValidation ? { ...provenanceValidation, kind: "local-provenance", completeness: "partial" } : null,
+      localProvenance: null,
+      slsaProvenance: githubAttestationValidation,
       githubSigstore: githubAttestationValidation,
       cosignVerified: (options.verifyCosign ?? booleanFlag(argv.verifyCosign)) && !planOnly,
     },
     issues,
     nextCommands: [
-      "sh ./scripts/release-artifact-gate.sh --requireProvenance",
+      "sh ./scripts/release-artifact-gate.sh --requireProvenance --repo owner/repo --sourceRef refs/heads/main",
       "sh ./scripts/infra-health.sh",
       "sh ./scripts/security-smoke.sh",
       "sh ./scripts/waf-smoke.sh",
@@ -7791,37 +7513,45 @@ async function releaseEvidence(options = {}) {
 
 async function githubAttestationEvidence() {
   log("==> GitHub/Sigstore attestation evidence");
-  const verificationArg = argv.verification ?? argv.githubAttestation ?? argv.githubAttestationReport;
-  if (!verificationArg) {
-    fail("Pass --verification <file> with a GitHub/Sigstore attestation verification report.");
+  if (argv.verification ?? argv.githubAttestation ?? argv.githubAttestationReport) {
+    fail("Pre-generated verification JSON is not accepted. Pass the artifact --subject and let this command invoke GitHub's cryptographic verifier.");
   }
-  const verificationPath = path.resolve(verificationArg);
-  if (!fs.existsSync(verificationPath)) {
-    fail(`GitHub/Sigstore attestation verification report not found: ${verificationPath}`);
+  const subject = argv.subject;
+  if (!subject) {
+    fail("Pass --subject <file|oci://image@sha256:digest> for cryptographic verification.");
   }
-  const images = (argv.images ? argv.images.split(",") : []).map((image) => image.trim()).filter(Boolean);
-  const releaseSha = argv.releaseSha ?? argv.sha ?? gitEvidence().commit;
-  const validation = validateGithubSigstoreAttestation({
-    attestationPath: verificationPath,
-    images,
-    releaseSha,
-    requireReleaseSha: !booleanFlag(argv.skipProvenanceCommitCheck),
-    repository: argv.repository ?? argv.repo ?? process.env.GITHUB_REPOSITORY ?? null,
-    expectedSubjectName: argv.expectedSubjectName ?? argv.subjectName ?? null,
-    expectedSubjectDigest: argv.expectedSubjectDigest ?? argv.subjectDigest ?? null,
-    requireSubjectCoverage: images.length > 0,
-  });
+  const releaseSha = argv.releaseSha ?? argv.sourceDigest ?? argv.sha ?? gitEvidence().commit;
+  const policy = releaseTrustPolicy();
+  const repository = argv.repository ?? argv.repo ?? process.env.GITHUB_REPOSITORY;
+  const validation = (() => {
+    loadGithubTokenFromFile();
+    return verifyGithubAttestation({
+      subject,
+      expectedSubjectDigest: argv.expectedSubjectDigest ?? argv.subjectDigest ?? (String(subject).startsWith("oci://") ? digestFromImageRef(subject) : null),
+      repository,
+      signerWorkflow: argv.signerWorkflow ?? `${repository}/${policy.signer_workflow_path}`,
+      sourceDigest: releaseSha,
+      sourceRef: argv.sourceRef ?? process.env.GITHUB_REF,
+      bundle: argv.attestationBundle ?? null,
+      trustedRoot: argv.trustedRoot ?? null,
+      predicateType: policy.predicate_type,
+      certOidcIssuer: policy.cert_oidc_issuer,
+    });
+  })();
   const stamp = reportTimestamp();
+  const source = String(subject).startsWith("oci://")
+    ? { kind: "oci", value: subject, sha256: digestFromImageRef(subject) }
+    : releaseArtifactRef(path.resolve(subject));
   const payload = {
     generatedAt: new Date().toISOString(),
     status: "passed",
-    mode: "verify",
+    mode: "cryptographic-verify",
     releaseSha,
     git: gitEvidence(),
-    source: releaseArtifactRef(verificationPath),
+    source,
     attestation: validation,
     nextCommands: [
-      "sh ./scripts/release-evidence.sh --requireProvenance --githubAttestation reports/release/github-sigstore-attestation-<stamp>.json --previousImagesFile release/previous-images.json",
+      "sh ./scripts/release-evidence.sh --requireProvenance --repo owner/repo --sourceRef refs/heads/main --previousImagesFile release/previous-images.json",
     ],
   };
   const jsonPath = writeJsonReport("release", `github-sigstore-attestation-${stamp}`, payload);
@@ -7833,8 +7563,10 @@ async function githubAttestationEvidence() {
     `Generated at: ${payload.generatedAt}`,
     `Repository: ${validation.repository ?? "n/a"}`,
     `Commit: ${validation.commitSha ?? "n/a"}`,
-    `Workflow run id: ${validation.workflowRunId ?? "n/a"}`,
-    `Subject count: ${validation.subjectCount}`,
+    `Signer workflow: ${validation.signerWorkflow}`,
+    `Source ref: ${validation.sourceRef}`,
+    `Verified timestamps: ${validation.verifiedTimestampCount}`,
+    `Subject count: ${validation.subjects.length}`,
     "",
     "| Subject | SHA256 |",
     "| --- | --- |",
@@ -8089,6 +7821,18 @@ function githubEnvironmentsPolicy() {
         fail(`GitHub environment ${environment.name} must choose either protected_branches or custom_branch_policies.`);
       }
     }
+    if (environment.required_reviewers_env) {
+      fail(`GitHub environment ${environment.name} must define exact reviewer identities in policy, not an environment-variable placeholder.`);
+    }
+    const reviewers = Array.isArray(environment.reviewers) ? environment.reviewers : [];
+    if (environment.require_reviewers_on_apply && reviewers.length === 0) {
+      fail(`GitHub environment ${environment.name} requires exact reviewer identities.`);
+    }
+    for (const reviewer of reviewers) {
+      if (!["User", "Team"].includes(reviewer?.type) || !Number.isInteger(Number(reviewer?.id)) || Number(reviewer.id) <= 0) {
+        fail(`GitHub environment ${environment.name} has an invalid exact reviewer identity.`);
+      }
+    }
   }
   return policy;
 }
@@ -8123,10 +7867,7 @@ function githubActionsRuntimePolicy() {
 
 function requiredGithubRepo() {
   const repo = argv.repo ?? process.env.PLATFORM_GITHUB_REPOSITORY ?? process.env.GITHUB_REPOSITORY;
-  if (!repo || !/^[^/\s]+\/[^/\s]+$/.test(repo)) {
-    fail("Provide --repo owner/name or set PLATFORM_GITHUB_REPOSITORY/GITHUB_REPOSITORY.");
-  }
-  return repo;
+  return normalizeRepository(repo);
 }
 
 function loadGithubTokenFromFile() {
@@ -8169,36 +7910,7 @@ async function githubApi(method, apiPath, body = undefined) {
 }
 
 function assertRemoteBranchProtectionMatches(policy, remote) {
-  const remoteContexts = remote?.required_status_checks?.contexts ?? remote?.required_status_checks?.checks?.map((check) => check.context) ?? [];
-  const missingContexts = policy.required_status_checks.contexts.filter((context) => !remoteContexts.includes(context));
-  if (missingContexts.length) {
-    fail(`Remote GitHub branch protection is missing required status checks: ${missingContexts.join(", ")}`);
-  }
-  const review = remote?.required_pull_request_reviews ?? {};
-  if (Number(review.required_approving_review_count ?? 0) < policy.required_pull_request_reviews.required_approving_review_count) {
-    fail("Remote GitHub branch protection requires too few approving reviews.");
-  }
-  if (Boolean(review.dismiss_stale_reviews) !== Boolean(policy.required_pull_request_reviews.dismiss_stale_reviews)) {
-    fail("Remote GitHub branch protection dismiss_stale_reviews does not match policy.");
-  }
-  if (Boolean(review.require_code_owner_reviews) !== Boolean(policy.required_pull_request_reviews.require_code_owner_reviews)) {
-    fail("Remote GitHub branch protection require_code_owner_reviews does not match policy.");
-  }
-  const requiredBooleans = [
-    ["required_linear_history", policy.required_linear_history],
-    ["allow_force_pushes", policy.allow_force_pushes],
-    ["allow_deletions", policy.allow_deletions],
-    ["required_conversation_resolution", policy.required_conversation_resolution],
-  ];
-  for (const [key, expected] of requiredBooleans) {
-    if (expected === undefined) continue;
-    const actual = typeof remote?.[key] === "object" && remote[key] !== null && "enabled" in remote[key]
-      ? remote[key].enabled
-      : remote?.[key];
-    if (Boolean(actual) !== Boolean(expected)) {
-      fail(`Remote GitHub branch protection ${key}=${actual} does not match expected ${expected}.`);
-    }
-  }
+  assertExactBranchProtection(policy, remote);
 }
 
 async function githubBranchProtection() {
@@ -8206,7 +7918,7 @@ async function githubBranchProtection() {
   const repo = requiredGithubRepo();
   const branch = String(argv.branch ?? "main");
   const policy = githubBranchProtectionPolicy();
-  const apiPath = `/repos/${repo}/branches/${encodeURIComponent(branch)}/protection`;
+  const apiPath = `${githubRepoApiPath(repo)}/branches/${encodeURIComponent(branch)}/protection`;
 
   if (booleanFlag(argv.verifyRemote)) {
     const remote = await githubApi("GET", apiPath);
@@ -8245,25 +7957,7 @@ function githubEnvironmentApiPath(repo, environmentName) {
 }
 
 function reviewerRefsForEnvironment(environment) {
-  const refs = Array.isArray(environment.reviewers) ? [...environment.reviewers] : [];
-  if (!environment.required_reviewers_env) {
-    return refs;
-  }
-  const raw = process.env[environment.required_reviewers_env];
-  if (!raw || !raw.trim()) {
-    return refs;
-  }
-  const trimmed = raw.trim();
-  if (trimmed.startsWith("[")) {
-    const parsed = JSON.parse(trimmed);
-    if (!Array.isArray(parsed)) {
-      fail(`${environment.required_reviewers_env} must be a JSON array or a comma-separated reviewer list.`);
-    }
-    refs.push(...parsed);
-    return refs;
-  }
-  refs.push(...trimmed.split(",").map((item) => item.trim()).filter(Boolean));
-  return refs;
+  return Array.isArray(environment.reviewers) ? [...environment.reviewers] : [];
 }
 
 async function resolveGithubReviewer(repo, reviewerRef) {
@@ -8318,7 +8012,7 @@ async function githubEnvironmentPayload(repo, environment) {
 function assertGithubEnvironmentApplyPreflight(policy) {
   for (const environment of policy.environments) {
     if (environment.require_reviewers_on_apply && reviewerRefsForEnvironment(environment).length === 0) {
-      fail(`Set ${environment.required_reviewers_env} before applying the ${environment.name} GitHub environment.`);
+      fail(`Define exact reviewer identities before applying the ${environment.name} GitHub environment.`);
     }
   }
 }
@@ -8327,43 +8021,14 @@ function dryRunGithubEnvironmentPayload(environment) {
   return {
     wait_timer: Number(environment.wait_timer ?? 0),
     prevent_self_review: Boolean(environment.prevent_self_review),
-    reviewers: environment.required_reviewers_env ? `$${environment.required_reviewers_env}` : null,
+    reviewers: environment.reviewers?.length ? environment.reviewers : null,
     require_reviewers_on_apply: Boolean(environment.require_reviewers_on_apply),
     deployment_branch_policy: environment.deployment_branch_policy ?? null,
   };
 }
 
 function assertRemoteGithubEnvironmentMatches(expected, remote) {
-  const rules = Array.isArray(remote?.protection_rules) ? remote.protection_rules : [];
-  const expectedWait = Number(expected.wait_timer ?? 0);
-  const waitRule = rules.find((rule) => rule.type === "wait_timer");
-  const actualWait = Number(waitRule?.wait_timer ?? 0);
-  if (actualWait !== expectedWait) {
-    fail(`Remote GitHub environment ${expected.name} wait_timer=${actualWait} does not match expected ${expectedWait}.`);
-  }
-
-  const reviewerRule = rules.find((rule) => rule.type === "required_reviewers");
-  if (expected.require_reviewers_on_apply) {
-    const reviewerCount = Array.isArray(reviewerRule?.reviewers) ? reviewerRule.reviewers.length : 0;
-    if (reviewerCount <= 0) {
-      fail(`Remote GitHub environment ${expected.name} does not require deployment reviewers.`);
-    }
-  }
-  if (reviewerRule && Boolean(reviewerRule.prevent_self_review) !== Boolean(expected.prevent_self_review)) {
-    fail(`Remote GitHub environment ${expected.name} prevent_self_review does not match policy.`);
-  }
-
-  const expectedBranchPolicy = expected.deployment_branch_policy;
-  const remoteBranchPolicy = remote?.deployment_branch_policy;
-  if (expectedBranchPolicy) {
-    for (const key of ["protected_branches", "custom_branch_policies"]) {
-      if (Boolean(remoteBranchPolicy?.[key]) !== Boolean(expectedBranchPolicy[key])) {
-        fail(`Remote GitHub environment ${expected.name} deployment_branch_policy.${key} does not match policy.`);
-      }
-    }
-  } else if (remoteBranchPolicy !== null && remoteBranchPolicy !== undefined) {
-    fail(`Remote GitHub environment ${expected.name} should not have a deployment branch policy.`);
-  }
+  assertExactGithubEnvironment(expected, remote);
 }
 
 async function githubEnvironments() {
@@ -8383,7 +8048,7 @@ async function githubEnvironments() {
       log(`Environment: ${environment.name}`);
       log(JSON.stringify(dryRunGithubEnvironmentPayload(environment), null, 2));
     }
-    log("Set reviewer env vars such as GITHUB_PRODUCTION_REVIEWERS=user:login,team:platform-admins.");
+    log("Exact reviewer IDs are loaded from governance/github-environments.json.");
     log("Re-run with --apply and GITHUB_TOKEN/GH_TOKEN to update live GitHub deployment environments.");
     return;
   }
@@ -9279,9 +8944,9 @@ function goNoGoRemediation(check) {
         "Keep the rollback dry-run report linked from the release evidence pack.",
       ],
       commands: [
-        "sh ./scripts/release-evidence.sh --envFile .env --sbom security/sbom/<sbom>.json --provenance release/<provenance>.json --previousImagesFile release/previous-images.json --requireProvenance",
+        "sh ./scripts/release-evidence.sh --envFile .env --sbom security/sbom/<sbom>.json --repo owner/repo --sourceRef refs/heads/main --previousImagesFile release/previous-images.json --requireProvenance",
       ],
-      evidence: "reports/release/release-evidence-*.json with mode=evidence, status=passed, SLSA provenance passed and rollback validated",
+      evidence: "reports/release/release-evidence-*.json with mode=evidence, status=passed, GitHub/Sigstore cryptographic provenance passed and rollback validated",
     },
     "cloudflare-access-admin-verified": {
       actions: [
@@ -10216,19 +9881,17 @@ async function productionGoNoGo() {
   const releaseFresh = reportFreshDetail(release, maxAge.release);
   const latestReleaseFresh = reportFreshDetail(latestReleaseReport, maxAge.release);
   const releasePayload = release?.payload ?? {};
+  const githubProvenance = releasePayload.attestations?.githubSigstore;
   const releaseGithubProvenanceOk = Boolean(
-    releasePayload.artifacts?.githubAttestations?.length
-      && releasePayload.attestations?.provenanceRequired
-      && releasePayload.attestations?.githubSigstore?.status === "passed"
-      && releasePayload.attestations?.githubSigstore?.verified === true
-      && releasePayload.attestations?.githubSigstore?.completeness === "complete"
-      && releasePayload.attestations?.githubSigstore?.commitShaMatched !== false,
-  );
-  const releaseLocalProvenancePartial = Boolean(
-    releasePayload.artifacts?.provenance
-      && releasePayload.attestations?.provenanceRequired
-      && releasePayload.attestations?.slsaProvenance?.status === "passed"
-      && releasePayload.attestations?.slsaProvenance?.releaseShaMatched !== false,
+    releasePayload.attestations?.provenanceRequired
+      && githubProvenance?.status === "passed"
+      && githubProvenance?.kind === "github-sigstore-cryptographic-attestation"
+      && githubProvenance?.verified === true
+      && githubProvenance?.completeness === "complete"
+      && githubProvenance?.commitShaMatched === true
+      && githubProvenance?.commitSha === releasePayload.releaseSha
+      && githubProvenance?.verifiedTimestampCount > 0
+      && githubProvenance?.attestationCount > 0,
   );
   const releaseProvenanceOk = !policy.requireReleaseProvenance || releaseGithubProvenanceOk;
   const releaseGitOk = !policy.requireCleanReleaseGit || releasePayload.git?.dirty === false;
@@ -10244,7 +9907,7 @@ async function productionGoNoGo() {
     name: "release-evidence-and-rollback",
     passed: Boolean(release && releaseFresh.fresh && releasePayload.mode === "evidence" && releasePayload.status === "passed" && releaseRollbackOk && releasePayload.artifacts?.sbom && releaseProvenanceOk && releaseGitOk),
     detail: release
-      ? `${releaseFresh.detail}; mode=${releasePayload.mode}; status=${releasePayload.status ?? "unknown"}; rollback=${releaseRollbackOk ? "validated" : "missing"}; provenance=${releaseGithubProvenanceOk ? "github-signed-attestation" : releaseLocalProvenancePartial ? "local-provenance-partial" : "missing"}; cleanGit=${releaseGitOk ? "yes" : "no"}`
+      ? `${releaseFresh.detail}; mode=${releasePayload.mode}; status=${releasePayload.status ?? "unknown"}; rollback=${releaseRollbackOk ? "validated" : "missing"}; provenance=${releaseGithubProvenanceOk ? "github-sigstore-cryptographic" : "missing"}; cleanGit=${releaseGitOk ? "yes" : "no"}`
       : latestReleaseReport
         ? `missing evidence report; latestReleaseMode=${latestReleaseReport.payload.mode ?? "unknown"}; latestStatus=${latestReleaseReport.payload.status ?? "unknown"}; ${latestReleaseFresh.detail}`
        : releaseFresh.detail,
@@ -12677,7 +12340,11 @@ function staticSecurityInfraOnlyCheck() {
   const retentionEvidenceWrapper = readText(path.join(infraRoot, "scripts", "retention-evidence.sh"));
   const secretRotationEvidenceWrapper = readText(path.join(infraRoot, "scripts", "secret-rotation-evidence.sh"));
   const opsScript = readText(path.join(infraRoot, "scripts", "infra-ops.mjs"));
+  const releaseTrustModule = readText(path.join(infraRoot, "scripts", "release-trust.mjs"));
+  const githubGovernancePolicyModule = readText(path.join(infraRoot, "scripts", "github-governance-policy.mjs"));
+  const vpsEvidenceRemoteScript = readText(path.join(infraRoot, "scripts", "vps-evidence-remote.sh"));
   const deployVPSScript = readText(path.join(infraRoot, "scripts", "deploy-vps.sh"));
+  const deployVPSRemoteScript = readText(path.join(infraRoot, "scripts", "deploy-vps-remote.sh"));
   const composeVPSScript = readText(path.join(infraRoot, "scripts", "compose-vps.sh"));
   const vpsGoLiveScript = readText(path.join(infraRoot, "scripts", "vps-go-live.sh"));
   const vpsPreflightScript = readText(path.join(infraRoot, "scripts", "vps-preflight.sh"));
@@ -12930,7 +12597,9 @@ function staticSecurityInfraOnlyCheck() {
   assertMatch(releaseAttestationWorkflow, /permissions:[\s\S]*contents:\s+read[\s\S]*id-token:\s+write[\s\S]*attestations:\s+write[\s\S]*packages:\s+write/, "Release attestation workflow must grant GitHub Artifact Attestations and GHCR push permissions.");
   assertMatch(releaseAttestationWorkflow, /PHP_APACHE_IMAGE=ghcr\.io[\s\S]*docker\/build-push-action@[a-f0-9]{40}[\s\S]*push:\s+true/, "Release attestation workflow must push digest-addressable images to GHCR.");
   assertMatch(releaseAttestationWorkflow, /actions\/attest-build-provenance@[a-f0-9]{40}[\s\S]*push-to-registry:\s+true/, "Release attestation workflow must create GitHub/Sigstore provenance for GHCR images.");
-  assertMatch(releaseAttestationWorkflow, /gh attestation verify[\s\S]*--format json[\s\S]*github-attestation-evidence/, "Release attestation workflow must verify attestations and write non-sensitive evidence reports.");
+  assertMatch(releaseAttestationWorkflow, /Cryptographically verify and record attestations[\s\S]*github-attestation-evidence[\s\S]*--signerWorkflow[\s\S]*--sourceDigest[\s\S]*--sourceRef/, "Release attestation workflow must invoke the verifier-backed evidence command with exact signer, commit and ref.");
+  assertNoMatch(releaseAttestationWorkflow, /verified:\s*true|--verification/, "Release attestation workflow must not mint or trust normalized verified JSON.");
+  assertMatch(releaseTrustModule, /--signer-workflow[\s\S]*--source-digest[\s\S]*--signer-digest[\s\S]*--source-ref[\s\S]*--cert-oidc-issuer[\s\S]*--deny-self-hosted-runners/, "Release trust verifier must bind signer, commit, ref, issuer and runner class.");
   assertMatch(githubLiveEvidenceWorkflow, /name:\s+enterprise-live-evidence[\s\S]*workflow_dispatch:/, "Infrastructure must provide a manual production live evidence workflow.");
   assertMatch(githubLiveEvidenceWorkflow, /environment:[\s\S]*name:\s+production/, "Live evidence workflow must run in the production environment.");
   assertMatch(githubLiveEvidenceWorkflow, /EXTERNAL_UPTIME_PROVIDER_EVIDENCE_JSON[\s\S]*external-uptime-check[\s\S]*--requireProviderEvidence/, "Live evidence workflow must validate provider-backed external uptime evidence.");
@@ -12940,9 +12609,9 @@ function staticSecurityInfraOnlyCheck() {
   assertMatch(githubVpsEvidenceWorkflow, /name:\s+enterprise-vps-evidence[\s\S]*workflow_dispatch:/, "Infrastructure must provide a manual VPS evidence workflow.");
   assertMatch(githubVpsEvidenceWorkflow, /environment:[\s\S]*name:\s+production/, "VPS evidence workflow must run in the production environment.");
   assertMatch(githubVpsEvidenceWorkflow, /DEPLOY_SSH_KEY[\s\S]*DEPLOY_REMOTE[\s\S]*DEPLOY_SSH_PORT[\s\S]*VPS_HARDENED_SSH_PORT/, "VPS evidence workflow must use production SSH variables.");
-  assertMatch(githubVpsEvidenceWorkflow, /confirm_mutating_vps[\s\S]*vps-bootstrap-ubuntu\.sh --apply[\s\S]*vps-hardening-ubuntu\.sh[\s\S]*vps-host-readiness\.sh/, "VPS evidence workflow must gate mutating bootstrap/hardening and always run readiness.");
-  assertMatch(githubVpsEvidenceWorkflow, /\n {10}REMOTE_SCRIPT\r?\n {10}sed -n/, "VPS evidence workflow heredoc terminator must remain inside the YAML run block.");
-  assertNoMatch(githubVpsEvidenceWorkflow, /\nREMOTE_SCRIPT\r?\n/, "VPS evidence workflow heredoc terminator must not become a top-level YAML key.");
+  assertMatch(githubVpsEvidenceWorkflow, /confirm_mutating_vps[\s\S]*vps-evidence-request\.mjs render[\s\S]*"\$DEPLOY_REMOTE" 'bash -s'/, "VPS evidence workflow must validate and encode inputs before a fixed remote command.");
+  assertNoMatch(githubVpsEvidenceWorkflow, /bash -s --|hardening_args="/, "VPS evidence workflow must not place dynamic inputs in the SSH command or string-built argv.");
+  assertMatch(vpsEvidenceRemoteScript, /bootstrap_args=\(--apply\)[\s\S]*bootstrap_args\+=\(--deploy-user "\$deploy_user"\)[\s\S]*hardening_args=\(--apply --ssh-port "\$hardened_ssh_port"\)/, "VPS evidence remote script must use validated Bash arrays.");
   assertMatch(githubVpsEvidenceWorkflow, /Upload VPS evidence reports[\s\S]*reports\/vps-bootstrap\/[\s\S]*reports\/vps-hardening\/[\s\S]*reports\/vps-host\//, "VPS evidence workflow must upload VPS evidence reports.");
   assertMatch(githubWorkflow, /Secret scan[\s\S]*secret-scan/, "Infrastructure CI must run the secret scanner.");
   assertMatch(githubWorkflow, /HA configuration check[\s\S]*ha-config-check/, "Infrastructure CI must run the HA configuration check.");
@@ -13092,6 +12761,9 @@ async function staticSecurityCheckBody() {
   const opsWrapper = readText(path.join(infraRoot, "scripts", "infra-ops.sh"));
   const backupSchedulerScript = readText(path.join(infraRoot, "scripts", "backup-scheduler.sh"));
   const opsScript = readText(path.join(infraRoot, "scripts", "infra-ops.mjs"));
+  const releaseTrustModule = readText(path.join(infraRoot, "scripts", "release-trust.mjs"));
+  const githubGovernancePolicyModule = readText(path.join(infraRoot, "scripts", "github-governance-policy.mjs"));
+  const vpsEvidenceRemoteScript = readText(path.join(infraRoot, "scripts", "vps-evidence-remote.sh"));
   const secretManagerScript = readText(path.join(infraRoot, "scripts", "infra-secret-manager.mjs"));
   const alertDeliverySandboxTest = readText(path.join(infraRoot, "scripts", "alert-delivery-sandbox-test.mjs"));
   const alertmanagerSecretPermissions = readText(path.join(infraRoot, "scripts", "alertmanager-secret-permissions.sh"));
@@ -13171,6 +12843,7 @@ async function staticSecurityCheckBody() {
   const cloudflareAccessManifest = readText(path.join(infraRoot, "cloudflare", "access-admin.example.json"));
   const cloudflareAccessScript = readText(path.join(infraRoot, "scripts", "cloudflare-access-admin.mjs"));
   const deployVPSScript = readText(path.join(infraRoot, "scripts", "deploy-vps.sh"));
+  const deployVPSRemoteScript = readText(path.join(infraRoot, "scripts", "deploy-vps-remote.sh"));
   const vpsGoLiveScript = readText(path.join(infraRoot, "scripts", "vps-go-live.sh"));
   const vpsPreflightScript = readText(path.join(infraRoot, "scripts", "vps-preflight.sh"));
   const vpsPostdeployScript = readText(path.join(infraRoot, "scripts", "vps-postdeploy.sh"));
@@ -13265,7 +12938,8 @@ async function staticSecurityCheckBody() {
   assertMatch(githubRunEvidenceWorkflow, /Upload GitHub Actions run evidence[\s\S]*reports\/github-actions\/[\s\S]*retention-days:\s+30/, "GitHub Actions run evidence workflow must upload its non-secret report artifact.");
   assertMatch(releaseAttestationWorkflow, /name:\s+release-attestation[\s\S]*workflow_dispatch:[\s\S]*push:[\s\S]*tags:/, "GitHub Actions must define a manual/tag release attestation workflow.");
   assertMatch(releaseAttestationWorkflow, /permissions:[\s\S]*contents:\s+read[\s\S]*id-token:\s+write[\s\S]*attestations:\s+write[\s\S]*packages:\s+write/, "Release attestation workflow must use GitHub Artifact Attestations and GHCR permissions.");
-  assertMatch(releaseAttestationWorkflow, /actions\/attest-build-provenance@[a-f0-9]{40}[\s\S]*gh attestation verify[\s\S]*github-attestation-evidence/, "Release attestation workflow must attest, verify and write release evidence.");
+  assertMatch(releaseAttestationWorkflow, /actions\/attest-build-provenance@[a-f0-9]{40}[\s\S]*Cryptographically verify and record attestations[\s\S]*github-attestation-evidence/, "Release attestation workflow must attest, cryptographically verify and write release evidence.");
+  assertNoMatch(releaseAttestationWorkflow, /verified:\s*true|--verification/, "Release attestation workflow must not mint or trust normalized verified JSON.");
   assertMatch(githubWorkflow, /GitHub Actions workflow lint[\s\S]*rhysd\/actionlint:1\.7\.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667[\s\S]*-color/, "Infra workflow must lint GitHub Actions workflows with a digest-pinned actionlint image.");
   assertMatch(githubLiveEvidenceWorkflow, /name:\s+enterprise-live-evidence[\s\S]*workflow_dispatch:/, "GitHub Actions must define a manual production live evidence workflow.");
   assertMatch(githubLiveEvidenceWorkflow, /environment:[\s\S]*name:\s+production/, "Live evidence workflow must use the production environment protection.");
@@ -13276,10 +12950,9 @@ async function staticSecurityCheckBody() {
   assertMatch(githubVpsEvidenceWorkflow, /name:\s+enterprise-vps-evidence[\s\S]*workflow_dispatch:/, "GitHub Actions must define a manual VPS evidence workflow.");
   assertMatch(githubVpsEvidenceWorkflow, /environment:[\s\S]*name:\s+production/, "VPS evidence workflow must use the production environment protection.");
   assertMatch(githubVpsEvidenceWorkflow, /DEPLOY_SSH_KEY[\s\S]*DEPLOY_REMOTE[\s\S]*DEPLOY_REMOTE_DIR[\s\S]*DEPLOY_SSH_PORT[\s\S]*VPS_HARDENED_SSH_PORT/, "VPS evidence workflow must use production SSH key, target and port variables.");
-  assertMatch(githubVpsEvidenceWorkflow, /confirm_mutating_vps[\s\S]*CONFIRM_MUTATING_VPS[\s\S]*vps-bootstrap-ubuntu\.sh --apply[\s\S]*hardening_args="--apply --ssh-port \$hardened_ssh_port"[\s\S]*vps-host-readiness\.sh --ssh-port "\$hardened_ssh_port" --enforce/, "VPS evidence workflow must gate mutating bootstrap/hardening and always enforce host readiness.");
-  assertMatch(githubVpsEvidenceWorkflow, /__PLATFORM_VPS_EVIDENCE_TGZ_BEGIN__[\s\S]*__PLATFORM_VPS_EVIDENCE_TGZ_END__/, "VPS evidence workflow must transport remote VPS evidence as a bounded archive.");
-  assertMatch(githubVpsEvidenceWorkflow, /\n {10}REMOTE_SCRIPT\r?\n {10}sed -n/, "VPS evidence workflow heredoc terminator must remain inside the YAML run block.");
-  assertNoMatch(githubVpsEvidenceWorkflow, /\nREMOTE_SCRIPT\r?\n/, "VPS evidence workflow heredoc terminator must not become a top-level YAML key.");
+  assertMatch(githubVpsEvidenceWorkflow, /confirm_mutating_vps[\s\S]*CONFIRM_MUTATING_VPS[\s\S]*vps-evidence-request\.mjs render[\s\S]*"\$DEPLOY_REMOTE" 'bash -s'/, "VPS evidence workflow must validate and encode inputs before a fixed remote command.");
+  assertNoMatch(githubVpsEvidenceWorkflow, /bash -s --|hardening_args="/, "VPS evidence workflow must not place dynamic inputs in the SSH command or string-built argv.");
+  assertMatch(vpsEvidenceRemoteScript, /__PLATFORM_VPS_EVIDENCE_TGZ_BEGIN__[\s\S]*__PLATFORM_VPS_EVIDENCE_TGZ_END__/, "VPS evidence remote script must transport a bounded report archive.");
   assertMatch(githubVpsEvidenceWorkflow, /Upload VPS evidence reports[\s\S]*reports\/vps-bootstrap\/[\s\S]*reports\/vps-hardening\/[\s\S]*reports\/vps-host\//, "VPS evidence workflow must upload remote VPS evidence reports.");
   assertMatch(deployVPSScript, /DEPLOY_SSH_PORT[\s\S]*SSH_KEY_PATH[\s\S]*ssh "\$@" "\$REMOTE"/, "VPS deploy must use the configured SSH key and port.");
   assertMatch(githubWorkflow, /DEPLOY_SSH_PORT:\s+\$\{\{ vars\.DEPLOY_SSH_PORT \}\}/, "Production deploy workflow must pass the configured SSH port.");
@@ -13578,8 +13251,10 @@ async function staticSecurityCheckBody() {
   assertMatch(githubWorkflow, /Evidence bundle integrity verify[\s\S]*evidence-bundle-verify/, "Infrastructure CI must verify evidence bundle manifest integrity.");
   assertMatch(githubWorkflow, /sh \.\/scripts\/infra-ops\.sh static-security-check/, "Infrastructure CI must run the Dockerized ops wrapper instead of host Node.");
   assertNoMatch(githubWorkflow, /setup-node|node scripts\/infra-ops\.mjs|shell:\s+pwsh|\.ps1/, "Infrastructure CI must stay Linux/container-first without PowerShell or host Node policy gates.");
-  assertMatch(deployVPSScript, /ssh "\$@" "\$REMOTE" sh -s --[\s\S]*<<'REMOTE_SCRIPT'[\s\S]*remote_dir="\$1"[\s\S]*cd "\$remote_dir"/, "VPS deploy must pass remote values through SSH positional arguments instead of interpolating a remote shell string.");
-  assertNoMatch(deployVPSScript, /ssh "\$REMOTE" "set -eu/, "VPS deploy must not interpolate the remote deployment script into one shell string.");
+  assertMatch(deployVPSScript, /PLATFORM_REMOTE_DIR_B64[\s\S]*base64[\s\S]*ssh "\$@" "\$REMOTE" 'sh -s'/, "VPS deploy must send validated Base64 fields to a fixed remote command.");
+  assertNoMatch(deployVPSScript, /sh -s --|<<'REMOTE_SCRIPT'/, "VPS deploy must not pass dynamic values in the SSH command or an interpolated heredoc.");
+  assertMatch(deployVPSRemoteScript, /decode_field[\s\S]*git checkout "\$branch"[\s\S]*COMPOSE_ENV_FILE="\$env_file"/, "VPS deploy remote script must decode, revalidate and quote every request field.");
+  assertNoMatch(deployVPSRemoteScript, /git checkout -- "\$branch"/, "VPS deploy must treat the validated branch as a branch, not a pathspec.");
   assertMatch(deployVPSScript, /DEPLOY_RUN_PRE_GO_LIVE[\s\S]*DEPLOY_RUN_GO_NO_GO[\s\S]*vps-postdeploy\.sh/, "VPS deploy script must run post-deploy health and optional evidence gates.");
   assertMatch(vpsPreflightScript, /compose\.vps\.yaml[\s\S]*compose\.waf\.yaml[\s\S]*compose\.vps-waf\.yaml[\s\S]*config --quiet[\s\S]*compose\.vps\.yaml[\s\S]*compose\.waf\.yaml[\s\S]*compose\.vps-waf\.yaml[\s\S]*grep -E 'image: .\+:latest/, "VPS preflight must render the same VPS+WAF compose stack used by deploy and scan it for mutable images.");
   assertMatch(vpsPostdeployScript, /get_env\(\)[\s\S]*awk -F=[\s\S]*env_or_default\(\)/, "VPS post-deploy must parse .env without executing it as a shell script.");
@@ -13756,8 +13431,8 @@ async function staticSecurityCheckBody() {
   assertMatch(readme, /github-branch-protection\.sh[\s\S]*--verifyRemote/, "README must document GitHub branch protection apply/verify.");
   assertMatch(runbook, /github-branch-protection\.sh[\s\S]*--apply[\s\S]*--verifyRemote/, "Runbook must document GitHub branch protection apply and remote verification.");
   assertMatch(vpsPredeployChecklist, /github-branch-protection\.sh[\s\S]*--verifyRemote/, "VPS checklist must require live GitHub branch protection verification.");
-  assertMatch(readme, /github-environments\.sh[\s\S]*GITHUB_PRODUCTION_REVIEWERS[\s\S]*--verifyRemote/, "README must document GitHub deployment environments apply/verify.");
-  assertMatch(runbook, /github-environments\.sh[\s\S]*GITHUB_PRODUCTION_REVIEWERS[\s\S]*--verifyRemote/, "Runbook must document GitHub deployment environments apply and remote verification.");
+  assertMatch(readme, /(?=[\s\S]*github-environments\.sh)(?=[\s\S]*reviewer)(?=[\s\S]*--verifyRemote)/, "README must document exact GitHub deployment environment reviewer verification.");
+  assertMatch(runbook, /(?=[\s\S]*github-environments\.sh)(?=[\s\S]*reviewer IDs)(?=[\s\S]*--verifyRemote)/, "Runbook must document exact GitHub deployment environment reviewer verification.");
   assertMatch(vpsPredeployChecklist, /github-environments\.sh[\s\S]*--verifyRemote/, "VPS checklist must require live GitHub deployment environment verification.");
   assertMatch(readme, /github-actions-config\.sh[\s\S]*DEPLOY_SSH_KEY[\s\S]*--verifyRemote/, "README must document GitHub Actions runtime config verification.");
   assertMatch(readme, /github-actions-run-evidence\.sh[\s\S]*reports\/github-actions/, "README must document GitHub Actions run evidence.");
@@ -13880,8 +13555,8 @@ async function staticSecurityCheckBody() {
   if (!productionEnvironment) {
     fail("Governance GitHub environments policy must define production.");
   }
-  if (productionEnvironment.required_reviewers_env !== "GITHUB_PRODUCTION_REVIEWERS" || !productionEnvironment.require_reviewers_on_apply) {
-    fail("Production GitHub environment must require deployment reviewers through GITHUB_PRODUCTION_REVIEWERS.");
+  if (!productionEnvironment.require_reviewers_on_apply || !productionEnvironment.reviewers?.length || productionEnvironment.reviewers.some((reviewer) => !Number.isInteger(Number(reviewer.id)))) {
+    fail("Production GitHub environment must require exact deployment reviewer identities.");
   }
   assertMatch(githubEnvironmentsPolicyText, /"wait_timer":\s*15[\s\S]*"protected_branches":\s*true[\s\S]*"custom_branch_policies":\s*false/, "Production GitHub environment must require a wait timer and protected branches.");
   if (githubActionsRuntimePolicyJson.repository?.required_secrets?.some((secret) => secret.name === "PROJECT_REPO_TOKEN")) {
@@ -13913,7 +13588,7 @@ async function staticSecurityCheckBody() {
   assertMatch(opsScript, /githubApi\("PUT", apiPath, policy\)/, "GitHub branch protection command must update the live policy only through the explicit apply path.");
   assertMatch(opsScript, /"github-branch-protection": githubBranchProtection/, "Ops command map must expose github-branch-protection.");
   assertMatch(opsScript, /async function githubEnvironments/, "Ops script must provide a GitHub environments command.");
-  assertMatch(opsScript, /required_reviewers_env[\s\S]*require_reviewers_on_apply/, "GitHub environments command must support reviewer env vars and apply-time enforcement.");
+  assertMatch(githubGovernancePolicyModule, /reviewer identities differ[\s\S]*prevent_self_review differs/, "GitHub environments verifier must compare exact reviewer identities and self-review policy.");
   assertMatch(opsScript, /githubApi\("PUT", githubEnvironmentApiPath\(repo, environment\.name\), payload\)/, "GitHub environments command must update live environments only through the explicit apply path.");
   assertMatch(opsScript, /"github-environments": githubEnvironments/, "Ops command map must expose github-environments.");
   assertMatch(githubWorkflow, /GitHub environments dry run/, "Infra workflow must dry-run GitHub environment policy.");
@@ -14199,11 +13874,11 @@ async function staticSecurityCheckBody() {
   assertMatch(opsScript, /releaseRollbackOk[\s\S]*rollback\?\.dryRun\?\.validated === true/, "Production go/no-go must require a validated rollback dry-run.");
   assertMatch(opsScript, /latestJsonReport\("release", "release-evidence-", \(payload\) => payload\.mode === "evidence"\)/, "Production go/no-go must ignore release plan reports.");
   assertMatch(opsScript, /releasePayload\.status === "passed"/, "Production go/no-go must require passed release evidence.");
-  assertMatch(opsScript, /function validateSlsaProvenance[\s\S]*https:\/\/slsa\.dev\/provenance\/v1[\s\S]*predicate\.buildDefinition\.buildType/, "Release evidence must validate SLSA v1 provenance structure.");
-  assertMatch(opsScript, /validateGithubSigstoreAttestations[\s\S]*github-signed-attestation[\s\S]*completeness:\s+"complete"/, "Release evidence must validate complete GitHub/Sigstore attestations.");
-  assertMatch(opsScript, /githubSigstore\?\.status === "passed"[\s\S]*githubSigstore\?\.verified === true[\s\S]*githubSigstore\?\.completeness === "complete"/, "Production go/no-go must require complete verified GitHub/Sigstore provenance.");
-  assertMatch(opsScript, /kind:\s+"local-provenance"[\s\S]*completeness:\s+"partial"/, "Release evidence must classify local provenance as partial.");
-  assertMatch(opsScript, /"github-attestation-evidence": githubAttestationEvidence/, "Ops command map must expose GitHub/Sigstore attestation evidence normalization.");
+  assertMatch(releaseTrustModule, /verificationResult[\s\S]*signature\?\.certificate[\s\S]*verifiedTimestamps[\s\S]*predicateType/, "Release trust must inspect only cryptographically verified certificate, timestamp and statement output.");
+  assertMatch(releaseTrustModule, /--signer-workflow[\s\S]*--source-digest[\s\S]*--signer-digest[\s\S]*--source-ref[\s\S]*--cert-oidc-issuer[\s\S]*--deny-self-hosted-runners/, "Release trust must bind exact signer, commit, ref, issuer and runner class.");
+  assertMatch(opsScript, /githubProvenance\?\.status === "passed"[\s\S]*githubProvenance\?\.kind === "github-sigstore-cryptographic-attestation"[\s\S]*githubProvenance\?\.verifiedTimestampCount > 0/, "Production go/no-go must require cryptographic GitHub/Sigstore provenance with a verified timestamp.");
+  assertMatch(opsScript, /Unsigned local SLSA JSON is not admissible[\s\S]*Normalized GitHub attestation reports are not trust inputs/, "Release evidence must reject loose SLSA JSON and normalized provider reports.");
+  assertMatch(opsScript, /"github-attestation-evidence": githubAttestationEvidence/, "Ops command map must expose verifier-backed GitHub/Sigstore attestation evidence.");
   assertMatch(opsScript, /"release-evidence": releaseEvidence/, "Ops command map must expose release-evidence.");
   assertMatch(opsScript, /await collectEvidenceStep\(steps, \{ name: "release-evidence-plan"/, "Pre go-live evidence must include a release evidence plan.");
   assertMatch(opsScript, /async function drReadinessCheck/, "Ops script must provide a DR/PITR readiness gate.");

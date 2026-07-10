@@ -24,6 +24,7 @@ operation explicitly requires it and has approval.
 | `RUNTIME-ISOLATION.md` | T13 mount allowlists, Docker proxy, cgroup budget, verification and rollback. |
 | `SERVICE-IDENTITY-AND-TENANCY.md` | T14 per-service PostgreSQL identities, MinIO prefix policy, tenancy decision and dual-credential rollout. |
 | `SUPPLY-CHAIN.md` | T15 immutable image/action/download lock and build sandbox. |
+| `RELEASE-TRUST-AND-WORKFLOW-SECURITY.md` | T16 cryptographic provenance, exact GitHub governance and safe remote-input contract. |
 | `ENTERPRISE-MATURITY.md` | Enterprise maturity matrix and 30-point readiness model. |
 | `ENTERPRISE-10-PLAN.md` | Enterprise roadmap and acceptance criteria. |
 
