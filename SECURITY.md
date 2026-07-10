@@ -77,6 +77,12 @@ and are not platform go-live gates.
 - PostgreSQL is not public in production.
 - Query execution is statement-time-limited and row-limited.
 - Operational logs are centralized in Loki/Promtail with shared redaction in `@platform/observability`; durable platform security events are stored in append-only audit tables and dispatched through the audit outbox.
+- Every backend/worker uses a distinct PostgreSQL login and secret. Worker roles
+  must prove cross-table denial; the legacy union login is disabled only after
+  recovery and cutover evidence.
+- Per-account RLS is defense in depth, not a supported tenant boundary.
+- Hosted workloads never receive MinIO root material. Use one service account
+  per bucket/prefix and prove cross-prefix, cross-bucket and admin denial.
 
 ## Runtime isolation
 

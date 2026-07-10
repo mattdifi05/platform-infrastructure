@@ -273,6 +273,35 @@ The stress sandbox is capped at 0.25 CPU and 96 MiB. The hosted sandbox uses
 unique networks, does not start live databases and preserves application
 sources read-only. Follow `RUNTIME-ISOLATION.md` for rollout and rollback.
 
+## Service identities and storage policy
+
+The T14 candidate replaces the shared PostgreSQL URL with three distinct
+runtime identities. Backend inherits the account/auth/audit capabilities it
+actually uses; jobs can only process `audit_outbox` and read restore metrics;
+notifications has no table grant. The backend receives no MinIO credential.
+Future object-storage users get one service account limited to one
+bucket/prefix. See `SERVICE-IDENTITY-AND-TENANCY.md`.
+
+Safe verification does not touch live data:
+
+```sh
+docker run --rm -v "$PWD:/workspace:ro" -w /workspace \
+  node:26.3.1-alpine@sha256:a2dc166a387cc6ca1e62d0c8e265e49ca985d6e60abc9fe6e6c3d6ce8e63f606 \
+  node scripts/service-identity-policy.mjs
+sh scripts/service-identity-sandbox-test.sh
+sh scripts/service-identity-rollout.sh --mode plan
+MODE=plan MINIO_BUCKET=example-app MINIO_PREFIX=runtime/ \
+  sh scripts/minio-service-identity.sh
+```
+
+Never run prepare/revoke during an ordinary deploy. The approved sequence is:
+fresh exact PostgreSQL backup plus restore-test, migration `014`, scoped secret
+materialization, prepare, recreate only backend/workers, functional smoke,
+non-secret cutover evidence, then explicit legacy revoke. The revoke command
+requires both recovery and cutover evidence and a confirmation token. Rollback
+restores bounded capability memberships only; it never restores broad grants
+or MinIO root material.
+
 ## External uptime monitoring
 
 The provider-neutral manifest is `monitoring/external-uptime.example.json`. It covers the public web edge, API health, OIDC discovery and negative checks for admin hostnames that must stay blocked.

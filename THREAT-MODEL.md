@@ -13,6 +13,10 @@
 - Browser to Traefik over HTTPS.
 - Traefik to platform routing and per-app ingress trust zones.
 - Hosted workloads to only their dedicated ingress/data/egress networks.
+- Hosted service to PostgreSQL through one service-specific login with exact
+  table operations; RLS does not create a supported tenant boundary.
+- Hosted object-storage client to one MinIO bucket/prefix service account;
+  MinIO root remains a one-shot bootstrap identity.
 - Backup scheduler to the Docker API proxy on an internal control network.
 - Host ops runner to the same proxy through a loopback-only endpoint.
 - SMTP provider outside the infrastructure boundary.
@@ -29,6 +33,8 @@
   per-app networks and no raw Docker socket constrain host and cross-app access.
 - Node exhaustion: cgroup memory/CPU/PID/FD/I/O controls and higher control-plane
   CPU shares contain workload stress.
+- Credential pivot: distinct DB logins, worker-specific grants and MinIO inline
+  policies deny cross-table, cross-prefix, cross-bucket and admin operations.
 
 ## Accepted local-development risks
 
@@ -45,3 +51,6 @@
 - Backup restore test before go-live.
 - Runtime-isolation policy, hosted startup sandbox and bounded cgroup stress
   must pass before recreating any hosted workload.
+- Service-identity policy, clean PostgreSQL migration sandbox and MinIO negative
+  matrix must pass before credential cutover; legacy revoke requires recovery
+  and cutover evidence.

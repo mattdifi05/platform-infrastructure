@@ -86,6 +86,14 @@ last. It contains the T13 mount/socket/cgroup contract. It is verified in
 sandboxes but is not applied to the reference containers; the live stack still
 shows the old mounts, flat network attachments and absent CPU/RAM ceilings.
 
+The desired render also contains the T14 service-identity contract: dedicated
+database URL secrets for backend, jobs and notifications; no MinIO root secret
+on the backend; and a PostgreSQL 18 clean-init wrapper that stages private host
+files before dropping privileges. The candidate passed empty-volume migrations
+and DB/MinIO negative tests. It is not live: the reference containers still use
+the shared `app_user`, and any cutover requires recovery evidence plus a
+service-by-service maintenance approval.
+
 Core platform services currently expected in the reference stack:
 
 ```text

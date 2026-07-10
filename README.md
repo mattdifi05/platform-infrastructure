@@ -806,6 +806,7 @@ fuori dal GO/NO-GO infra.
 - `NETWORK-SEGMENTATION.md`: matrice di comunicazione, SSRF boundary e rollout reti T12.
 - `SUPPLY-CHAIN.md`: lock di action/immagini/download, sandbox build e procedura di aggiornamento T15.
 - `RUNTIME-ISOLATION.md`: contratto T13, test, rollout progressivo e rollback per-app.
+- `SERVICE-IDENTITY-AND-TENANCY.md`: identita DB T14, policy MinIO per prefisso, contratto tenancy e rollout dual-credential.
 - `postgres/init/` e `postgres/migrations/`: bootstrap DB e compatibilita'
   workload legacy; non sono gate GO/NO-GO infra.
 - `RUNBOOK.md`, `SECURITY.md`, `THREAT-MODEL.md`, `ENTERPRISE-MATURITY.md`: governance operativa.

@@ -91,4 +91,14 @@
 | EV-T13-008 | T13 | Private evidence integrity | `/home/platform_infrastructure/remediation-work/20260710T172606Z-t13-runtime-isolation/CHECKSUMS.sha256` | PASS: private directory 0700, files 0600 | 2026-07-10 |
 | EV-T13-009 | T13 | Global static gate | `static-security-check --infraOnly` | BLOCKED only by pre-existing T20 CSS border assertion after T13 assertions passed | 2026-07-10 |
 
+| EV-T14-001 | T14 | Rendered identity policy | `service-identity-policy.mjs` plus canonical VPS Compose extraction | PASS 52/52: three distinct DB URL mounts, backend without MinIO root, PostgreSQL init staging and explicit grant/revoke/rollback contracts | 2026-07-10 |
+| EV-T14-002 | T14 | Clean PostgreSQL lifecycle | `service-identity-sandbox-test.sh` on PostgreSQL 18 tmpfs | PASS: root-only host secrets/init assets staged across privilege drop; empty init and migrations 001-014 completed | 2026-07-10 |
+| EV-T14-003 | T14 | PostgreSQL positive/negative matrix | disposable login tests and explicit legacy revoke | PASS: backend minimum operations, jobs outbox/restore metrics, notifications connect-only; account/audit/platform cross-access denied; `app_user` login disabled without affecting scoped identities | 2026-07-10 |
+| EV-T14-004 | T14 | MinIO service account | disposable MinIO and digest-pinned `mc` | PASS: scoped object round-trip; cross-prefix, cross-bucket and admin APIs denied; service account revoked and authentication rejected | 2026-07-10 |
+| EV-T14-005 | T14 | Secret Manager | isolated init, verify and three forced rotations | PASS: six scoped files materialized, three distinct principals/passwords, each derived URL updated with its matching rotation; no value printed | 2026-07-10 |
+| EV-T14-006 | T14 | Cross-task regressions | runtime isolation, network segmentation and supply-chain policy/tests | PASS: runtime 5/5, supply-chain 7/7 and all policy runners completed | 2026-07-10 |
+| EV-T14-007 | T14 | Live preservation | read-only role/grant/mount/container inventory plus sandbox residue scan | PASS: live containers remained healthy and unchanged; no T14 container/network residue; no live role, password, policy, secret or volume mutation | 2026-07-10 |
+| EV-T14-008 | T14 | Private evidence integrity | `/home/platform_infrastructure/remediation-work/20260710T184238Z-t14-service-identity/CHECKSUMS.sha256` | PASS: private directory 0700, files 0600 and hashes verified | 2026-07-10 |
+| EV-T14-009 | T14/T20/T22 | Global gates | static security and repo secret scan | KNOWN BLOCKERS: pre-existing Control Center CSS border assertion and four explicit `should-not-leak`/rejected-password test sentinels; no T14 secret or identity finding | 2026-07-10 |
+
 Every later entry must record positive, negative, regression and behavior-preservation evidence. Secret values must never be embedded.
