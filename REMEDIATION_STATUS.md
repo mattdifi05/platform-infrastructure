@@ -8,7 +8,7 @@ Live checkout remains unchanged and dirty by design.
 | Task | State | Dependencies | Branch/commit | Evidence | Rollout | Rollback | Residual risk | HA impact |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | T00 | CLOSED-VERIFIED | none | `remediation/t00-baseline`, `885196e` | private baseline directory, verified manifest, verified dirty archive, verified overlay archive, runtime/application map | no live mutation | restore archived files/patch; live checkout untouched | map has unresolved public and legacy DB resources | establishes portable identity inventory |
-| T01 | OPEN | T00,T11 design | pending | unauthenticated `/control/applications` returned HTTP 200 | pending | pending | fail-open admin surface | auth state must become shared/revocable |
+| T01 | IMPLEMENTED-VERIFIED-SANDBOX | T00,T11 design | `remediation/t01-auth`, `30fd2f9`, `86f99e7` | 9/9 Node tests; cryptographic mock IdP; PostgreSQL 18 tmpfs integration; immutable image smoke; secure VPS render | live cutover gated on Keycloak client/flow, dedicated DB secret and two enrolled passkeys | keep portal route offline or LAN-only; restore prior image only behind that restriction | live portal remains fail-open until controlled cutover; current realm has zero users/passkeys | OIDC transactions and opaque revocable sessions use a shared PostgreSQL contract |
 | T02 | OPEN | T01,T09 | pending | pending | pending | pending | CSRF/session/Keycloak gaps | shared session contract required |
 | T03 | OPEN | T01,T08 design | pending | pending | pending | pending | Vault recoverability | key-provider interface required |
 | T04 | OPEN | T01 | pending | DB catalog and principal drift recorded | pending | pending | cross-app principal risk | managed endpoint compatible principals |

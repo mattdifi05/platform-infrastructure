@@ -4,7 +4,8 @@ Status values: ACCEPTED, OPEN, BLOCKED-STAGING, BLOCKED-EXTERNAL.
 
 | ID | Decision | Status | Consequence |
 | --- | --- | --- | --- |
-| ADR-001 | Keycloak/OIDC is the central identity provider. Platform administrators use passkey/WebAuthn only, with no password fallback. | ACCEPTED | T01-T02 must fail closed and require recent WebAuthn for sensitive actions. |
+| ADR-001 | Keycloak/OIDC is the central identity provider. Platform administrators use passkey/WebAuthn only, with no password fallback. | ACCEPTED | T01 implements PKCE, signed-token/nonce/ACR/AMR validation, RBAC and PostgreSQL-backed revocable sessions; T02 owns realm flow, lockout, CSRF and fresh re-auth. |
+| ADR-015 | The OIDC client is public and uses PKCE S256; no Control Center client secret exists. Browser tokens are never persisted and session cookies are opaque hashes in PostgreSQL. | ACCEPTED | Future Control Center replicas can share session/revocation state without sharing process memory or local signing keys. |
 | ADR-002 | PostgreSQL dedicated to the control plane is the final primary state store. JSON files are migration input, not final authority. | ACCEPTED | T19 owns versioned schema, transactional migration and rollback. |
 | ADR-003 | Release classification is enterprise single-node candidate, HA-prepared but not HA. | ACCEPTED | No same-host replica may be described as HA. |
 | ADR-004 | Stexor business backend, web and workers belong to the hosted Stexor project, not platform core. | ACCEPTED | T18 must replace platform-specific naming and external build coupling with generic workload contracts. |

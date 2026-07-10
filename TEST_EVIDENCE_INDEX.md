@@ -8,6 +8,11 @@
 | EV-T00-004 | T00 | Runtime overlays | extract `runtime-overlays.tar`, verify per-file SHA-256 | PASS | 2026-07-10 |
 | EV-T00-005 | T00 | Functional edge | local-CA HTTPS probes for registered application hosts | PASS for seven registered apps; public FAIL 404 | 2026-07-10 |
 | EV-T01-NEG-001 | T01 | Admin authorization | anonymous GET `/control/applications` | FAIL expected security invariant: HTTP 200 proves fail-open | 2026-07-10 |
+| EV-T01-001 | T01 | Auth behavior | `npm test` in pinned Node container | PASS 9/9: anonymous denial, no password path, PKCE/nonce, passkey ACR/AMR, RBAC, one-time state and logout revocation | 2026-07-10 |
+| EV-T01-002 | T01 | PostgreSQL session store | PostgreSQL 18 tmpfs sandbox plus `001_auth_sessions.sql` and `postgres-auth-store.integration.mjs` | PASS: migration, atomic transaction consumption, session lookup and post-revocation replay denial | 2026-07-10 |
+| EV-T01-003 | T01 | Immutable image | build `docker/control-center.Dockerfile`, run with network disabled and loopback health probe | PASS; test image removed after smoke | 2026-07-10 |
+| EV-T01-004 | T01 | Production render | canonical VPS Compose JSON invariant extraction | PASS: `oidc-passkey`, PostgreSQL store, database secret present, password verifier absent, source bind absent | 2026-07-10 |
+| EV-T01-005 | T01 | Global static gate | `static-security-check --infra-only` | BLOCKED by pre-existing T20 CSS border assertion; no T01 auth assertion failure observed before stop | 2026-07-10 |
 | EV-MAP-DB-001 | T00/T04 | DB catalog | PostgreSQL and MariaDB read-only catalog queries | PASS inventory; drift recorded | 2026-07-10 |
 | EV-MAP-BKP-001 | T00/T07 | Backup catalog | filesystem and Control Center backup summary | PARTIAL: fresh local artifacts, full portability unproven | 2026-07-10 |
 | EV-T11-001 | T11 | Compose render | old active runtime versus tracked runtime, normalized for worktree paths | PASS: all 32 shared services identical; registry is the only added service | 2026-07-10 |

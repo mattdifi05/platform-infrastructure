@@ -28,3 +28,13 @@ Before every live restart, recreate, migration, credential change, network chang
 ## Live rollout strategy
 
 Prefer per-service or per-application sequential recreate, immutable image digests and immediate functional smoke. Never use `docker compose down -v`. Never prune volumes. Database migrations use dual credentials and keep the previous credential valid until post-change verification.
+
+## T01 authentication cutover gate
+
+Do not recreate the live Control Center until the Keycloak realm has the exact
+`platform-control-center` public client, AMR mapper and passkey-only flow, the
+dedicated control-plane database is migrated, and every administrator has two
+verified passkeys. Keep a second authenticated session available during smoke.
+Anonymous GET/POST must be 401, viewer mutation 403, owner access successful and
+the pre-logout cookie rejected after logout. The current zero-user realm does
+not satisfy this gate.

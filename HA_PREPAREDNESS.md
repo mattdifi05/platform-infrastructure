@@ -9,7 +9,7 @@ The platform is single-node and is not highly available. A host, power, storage 
 | Component | Current state location | Singleton reason | Future direction |
 | --- | --- | --- | --- |
 | Traefik/WAF | host Compose and local configuration | one ingress node | external load balancer and replicated stateless edge |
-| Control Center | process plus JSON files under project-state | current file-authoritative design | PostgreSQL state, revocable shared sessions, multiple stateless instances |
+| Control Center | application metadata remains in JSON; T01 auth transactions and revocable sessions target PostgreSQL | application state migration is still pending T19 | migrate all authority to PostgreSQL, then run multiple stateless instances |
 | project-router | one process and local source discovery | host-mounted registry/source | service registry with immutable workload IDs and replicated routers |
 | PostgreSQL | one local Docker volume | single-node release | managed or replicated PostgreSQL endpoint |
 | MariaDB | one local Docker volume | single-node release | managed or replicated MariaDB endpoint |
@@ -24,7 +24,7 @@ The platform is single-node and is not highly available. A host, power, storage 
 - effective runtime depends on ignored `.tmp` overlays;
 - application and control services depend on fixed host paths;
 - project-router and PHP services receive host-parent mounts;
-- Control Center state is JSON/file based;
+- Control Center application state is JSON/file based; auth session state has a PostgreSQL contract but is not live yet;
 - local images are not yet tied to immutable release provenance;
 - all services share one Docker network;
 - local Docker socket is an execution boundary;
