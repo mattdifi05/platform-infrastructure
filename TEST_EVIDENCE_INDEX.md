@@ -26,6 +26,13 @@
 | EV-T03-005 | T03 | Secret/Compose contract | isolated Infra Secret Manager init/verify plus canonical VPS render | PASS: dedicated keyring generated mode 0600; no session-key fallback; explicit legacy source only | 2026-07-10 |
 | EV-T03-006 | T03 | Private evidence integrity | `/home/platform_infrastructure/remediation-work/20260710T060352Z-t03-vault/manifest-sha256.txt` | PASS: all evidence hashes verified; no real key or Vault state read | 2026-07-10 |
 | EV-T03-007 | T03 | Global static gate | `static-security-check --infraOnly` | BLOCKED only after T03 assertions by pre-existing T20 CSS border assertion | 2026-07-10 |
+| EV-T04-001 | T04 | Ownership policy/API | official Control Center runner | PASS 16/16: generated principal, protected DB, foreign binding, immutable owner, atomic/fail-closed state | 2026-07-10 |
+| EV-T04-002 | T04 | MariaDB sandbox | `scripts/database-ownership-sandbox-test.sh` with pinned disposable MariaDB | PASS: existing foreign principal unchanged, no collision database created, managed create/rotate works, tampered binding rejected | 2026-07-10 |
+| EV-T04-003 | T04 | PostgreSQL sandbox | same disposable test with pinned PostgreSQL 18 | PASS: privileged foreign role unchanged, no collision database created, managed create/rotate works | 2026-07-10 |
+| EV-T04-004 | T04 | Legacy rollout plan | `scripts/database-principal-migration-plan.mjs` against current metadata read-only | PASS: 5 total, 5 migration-required, 0 mutations; apply mode denied | 2026-07-10 |
+| EV-T04-005 | T04 | Candidate/live configuration | canonical VPS render plus redacted live runtime flag | PARTIAL: candidate can render live apply false and registry path; current old live Control Center still reports live apply true | 2026-07-10 |
+| EV-T04-006 | T04 | Private evidence integrity | `/home/platform_infrastructure/remediation-work/20260710T110657Z-t04-db-ownership/manifest-sha256.txt` | PASS: all evidence hashes verified; disposable resources cleaned | 2026-07-10 |
+| EV-T04-007 | T04 | Global static gate | `static-security-check --infraOnly` | BLOCKED only after T04 assertions by pre-existing T20 CSS border assertion | 2026-07-10 |
 | EV-MAP-DB-001 | T00/T04 | DB catalog | PostgreSQL and MariaDB read-only catalog queries | PASS inventory; drift recorded | 2026-07-10 |
 | EV-MAP-BKP-001 | T00/T07 | Backup catalog | filesystem and Control Center backup summary | PARTIAL: fresh local artifacts, full portability unproven | 2026-07-10 |
 | EV-T11-001 | T11 | Compose render | old active runtime versus tracked runtime, normalized for worktree paths | PASS: all 32 shared services identical; registry is the only added service | 2026-07-10 |
