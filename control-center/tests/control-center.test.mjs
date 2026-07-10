@@ -9,10 +9,11 @@ import {
   writeFileSync,
 } from "node:fs";
 import { createServer } from "node:net";
-import { request as httpRequest } from "node:http";
+import { createServer as createHttpServer, request as httpRequest } from "node:http";
 import path from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
+import { exportJWK, generateKeyPair, SignJWT } from "jose";
 
 const infraRoot = path.resolve(import.meta.dirname, "..", "..");
 const testRoot = path.join(infraRoot, ".tmp", "control-center-tests", randomUUID());
@@ -53,8 +54,11 @@ test("Admin Control Center local foundation", async (t) => {
     cwd: infraRoot,
     env: {
       ...process.env,
+      NODE_ENV: "test",
       CONTROL_CENTER_PORT: String(port),
+      CONTROL_CENTER_BIND_HOST: "127.0.0.1",
       CONTROL_CENTER_ENV: "local",
+      CONTROL_CENTER_AUTH_MODE: "test-disabled",
       CONTROL_CENTER_DATABASE_LIVE_APPLY: "false",
       CONTROL_CENTER_DISCOVER_HOSTED_PROJECTS: "true",
       CONTROL_CENTER_DOCS_ROOT: infraRoot,
@@ -908,7 +912,7 @@ test("Admin Control Center local foundation", async (t) => {
   assert.doesNotMatch(readinessHtml, /Readiness Matrix/);
 
   const advancedIdentityApi = await getJson(`${baseUrl}/control/advanced/identity`);
-  assert.equal(advancedIdentityApi.data.sessionPolicy, "HttpOnly; Secure; SameSite=Lax");
+  assert.equal(advancedIdentityApi.data.sessionPolicy, "PostgreSQL-backed; revocable; HttpOnly; Secure; SameSite=Lax");
   assert.equal(advancedIdentityApi.data.adminVerifierConfigured, false);
   assert.equal(advancedIdentityApi.data.adminUsers.some((user) => user.id === "local-admin" && user.credentialsExposed === false), true);
   assert.equal(advancedIdentityApi.data.roles.some((role) => role.id === "platform-owner" && role.permissions.includes("control:*")), true);
@@ -2739,7 +2743,8 @@ test("Admin Control Center local foundation", async (t) => {
   const applyOperation = operations.operations.find((operation) => operation.id === localApply.body.id);
   assert.ok(applyOperation);
   assert.equal(applyOperation.type, "subdomain.apply.local");
-  assert.equal(applyOperation.requestedBy, "local-admin");
+  assert.equal(applyOperation.requestedBy, "test-owner");
+  assert.equal(applyOperation.requestedByRole, "owner");
   assert.equal(applyOperation.reportPath, null);
   assert.equal(applyOperation.errorCode, null);
   assert.equal(applyOperation.errorMessage, null);
@@ -2827,8 +2832,11 @@ test("Admin Control Center defaults to platform-only without hosted project disc
     cwd: infraRoot,
     env: {
       ...process.env,
+      NODE_ENV: "test",
       CONTROL_CENTER_PORT: String(port),
+      CONTROL_CENTER_BIND_HOST: "127.0.0.1",
       CONTROL_CENTER_ENV: "local",
+      CONTROL_CENTER_AUTH_MODE: "test-disabled",
       CONTROL_CENTER_DATABASE_LIVE_APPLY: "false",
       CONTROL_CENTER_DISCOVER_HOSTED_PROJECTS: "false",
       CONTROL_CENTER_DOCS_ROOT: infraRoot,
@@ -2910,8 +2918,11 @@ test("Admin Control Center browses project root symlinks inside projects root", 
     cwd: infraRoot,
     env: {
       ...process.env,
+      NODE_ENV: "test",
       CONTROL_CENTER_PORT: String(port),
+      CONTROL_CENTER_BIND_HOST: "127.0.0.1",
       CONTROL_CENTER_ENV: "local",
+      CONTROL_CENTER_AUTH_MODE: "test-disabled",
       CONTROL_CENTER_DATABASE_LIVE_APPLY: "false",
       CONTROL_CENTER_DISCOVER_HOSTED_PROJECTS: "true",
       CONTROL_CENTER_DOCS_ROOT: infraRoot,
@@ -2954,55 +2965,95 @@ test("Admin Control Center browses project root symlinks inside projects root", 
   assert.equal(stderr, "");
 });
 
-test("Admin Control Center admin guard", async (t) => {
+test("Admin Control Center OIDC passkey guard", async (t) => {
   prepareFixture();
+  const issuer = "https://identity.example.test/realms/platform";
+  const requiredAcr = "urn:platform:loa:passkey";
+  const clientId = "platform-control-center";
+  const { publicKey, privateKey } = await generateKeyPair("RS256", { extractable: true });
+  const publicJwk = { ...(await exportJWK(publicKey)), alg: "RS256", use: "sig", kid: "test-key" };
+  let expectedNonce = "";
+  let tokenRequests = 0;
+
+  const idpPort = await freePort();
+  const idp = createHttpServer(async (req, res) => {
+    if (req.url === "/jwks") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ keys: [publicJwk] }));
+      return;
+    }
+    if (req.url === "/token" && req.method === "POST") {
+      tokenRequests += 1;
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      const form = new URLSearchParams(Buffer.concat(chunks).toString("utf8"));
+      const code = form.get("code") || "";
+      assert.equal(form.get("grant_type"), "authorization_code");
+      assert.equal(form.get("client_id"), clientId);
+      assert.match(form.get("code_verifier") || "", /^[A-Za-z0-9_-]{43,128}$/);
+      const role = code === "viewer" ? "viewer" : "owner";
+      const acr = code === "password-auth" ? "urn:platform:loa:password" : requiredAcr;
+      const idToken = await new SignJWT({
+        nonce: expectedNonce,
+        acr,
+        amr: acr === requiredAcr ? ["webauthn"] : ["pwd"],
+        auth_time: Math.floor(Date.now() / 1000),
+        email: `${role}@example.test`,
+        name: `Test ${role}`,
+        realm_access: { roles: [role] },
+      })
+        .setProtectedHeader({ alg: "RS256", kid: "test-key" })
+        .setIssuer(issuer)
+        .setAudience(clientId)
+        .setSubject(`test-${role}`)
+        .setIssuedAt()
+        .setExpirationTime("5m")
+        .sign(privateKey);
+      res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+      res.end(JSON.stringify({ id_token: idToken, token_type: "Bearer", expires_in: 300 }));
+      return;
+    }
+    res.writeHead(404).end();
+  });
+  await new Promise((resolve) => idp.listen(idpPort, "127.0.0.1", resolve));
+
   const port = await freePort();
-  const adminInput = "example-control-center-admin-login";
-  const loginField = ["pass", "word"].join("");
-  const sessionKeysFile = path.join(stateDir, "session.keys");
-  writeFileSync(sessionKeysFile, "test-session-key\n");
   const child = spawn(process.execPath, [path.join(infraRoot, "control-center", "server.mjs")], {
     cwd: infraRoot,
     env: {
       ...process.env,
+      NODE_ENV: "test",
       CONTROL_CENTER_PORT: String(port),
-      CONTROL_CENTER_ENV: "local",
+      CONTROL_CENTER_BIND_HOST: "127.0.0.1",
+      CONTROL_CENTER_ENV: "production",
+      CONTROL_CENTER_AUTH_MODE: "oidc-passkey",
+      CONTROL_CENTER_AUTH_STORE: "memory",
+      CONTROL_CENTER_OIDC_ISSUER: issuer,
+      CONTROL_CENTER_OIDC_AUTHORIZATION_ENDPOINT: `${issuer}/protocol/openid-connect/auth`,
+      CONTROL_CENTER_OIDC_TOKEN_ENDPOINT: `http://127.0.0.1:${idpPort}/token`,
+      CONTROL_CENTER_OIDC_JWKS_URI: `http://127.0.0.1:${idpPort}/jwks`,
+      CONTROL_CENTER_OIDC_REDIRECT_URI: "https://portal.example.test/auth/callback",
+      CONTROL_CENTER_OIDC_CLIENT_ID: clientId,
+      CONTROL_CENTER_OIDC_REQUIRED_ACR: requiredAcr,
+      CONTROL_CENTER_OIDC_REQUIRED_AMR: "webauthn",
       CONTROL_CENTER_DATABASE_LIVE_APPLY: "false",
-      CONTROL_CENTER_AUTH_REQUIRED: "true",
       CONTROL_CENTER_DISCOVER_HOSTED_PROJECTS: "true",
-      CONTROL_CENTER_ADMIN_PASSWORD_SHA256: createHash("sha256").update(adminInput).digest("hex"),
-      CONTROL_CENTER_SESSION_KEYS_FILE: sessionKeysFile,
       CONTROL_CENTER_DOCS_ROOT: infraRoot,
       PROJECTS_ROOT: projectsRoot,
-      PROJECT_STATE_FILE: stateFile,
-      PROJECT_AUDIT_FILE: auditFile,
-      PROJECT_OPERATIONS_FILE: operationsFile,
-      PROJECT_APPLICATIONS_FILE: applicationsFile,
-      PROJECT_DOMAINS_FILE: domainsFile,
-      PROJECT_IDENTITY_ACCESS_FILE: identityAccessFile,
-      PROJECT_DEPLOYMENTS_FILE: deploymentsFile,
-      PROJECT_BACKUP_RECORDS_FILE: backupRecordsFile,
-      PROJECT_RESOURCE_LIMITS_FILE: resourceLimitsFile,
-      PROJECT_SECURITY_POLICIES_FILE: securityPoliciesFile,
-      PROJECT_ALERTS_FILE: alertsFile,
-      PROJECT_NOTIFICATION_CHANNELS_FILE: notificationChannelsFile,
-      PROJECT_PROVIDER_CONNECTIONS_FILE: providerConnectionsFile,
-      PROJECT_SETTINGS_FILE: settingsFile,
-      PROJECT_WEBSPACES_FILE: webspacesFile,
+      ...isolatedStateEnv(stateDir),
       PROJECT_DOCKER_STATS_FILE: dockerStatsFile,
-      CONTROL_CENTER_HOST: "portal.localhost.com",
-      DOCS_HOST: "docs.localhost.com",
-      PROJECT_HOST_SUFFIX: ".localhost.com",
-      NODE_PROJECT_HOSTS: "node-demo=node-demo.localhost.com",
+      CONTROL_CENTER_HOST: "portal.example.test",
+      DOCS_HOST: "docs.example.test",
+      PROJECT_HOST_SUFFIX: ".example.test",
+      NODE_PROJECT_HOSTS: "node-demo=node-demo.example.test",
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
   let stderr = "";
-  child.stderr.on("data", (chunk) => {
-    stderr += chunk.toString("utf8");
-  });
+  child.stderr.on("data", (chunk) => { stderr += chunk.toString("utf8"); });
   t.after(async () => {
     await stopChild(child);
+    await new Promise((resolve) => idp.close(resolve));
     rmSync(testRoot, { recursive: true, force: true });
   });
 
@@ -3013,38 +3064,6 @@ test("Admin Control Center admin guard", async (t) => {
   assert.equal(denied.status, 401);
   assert.equal((await denied.json()).error, "admin_auth_required");
 
-  const loginPage = await fetch(`${baseUrl}/`);
-  assert.equal(loginPage.status, 401);
-  assert.match(await loginPage.text(), /Admin Sign In/);
-
-  const badLogin = await fetch(`${baseUrl}/login`, {
-    method: "POST",
-    headers: { "content-type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({ [loginField]: "example-wrong-admin-login" }),
-    redirect: "manual",
-  });
-  assert.equal(badLogin.status, 401);
-
-  const goodLogin = await fetch(`${baseUrl}/login`, {
-    method: "POST",
-    headers: { "content-type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({ [loginField]: adminInput }),
-    redirect: "manual",
-  });
-  assert.equal(goodLogin.status, 303);
-  const cookie = goodLogin.headers.get("set-cookie") || "";
-  assert.match(cookie, /sxcc_session=/);
-  assert.match(cookie, /HttpOnly/);
-  assert.match(cookie, /Secure/);
-  assert.match(cookie, /SameSite=Lax/);
-  const sessionCookie = cookie.split(";")[0];
-
-  const authedOverview = await fetch(`${baseUrl}/control/overview`, {
-    headers: { cookie: sessionCookie, accept: "application/json" },
-  });
-  assert.equal(authedOverview.status, 200);
-  assert.equal((await authedOverview.json()).title, "Admin Control Center");
-
   const deniedMutation = await fetch(`${baseUrl}/actions/toggle-project`, {
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded", accept: "application/json" },
@@ -3052,14 +3071,96 @@ test("Admin Control Center admin guard", async (t) => {
   });
   assert.equal(deniedMutation.status, 401);
 
-  const audit = await getJson(`${baseUrl}/control/audit`, { headers: { cookie: sessionCookie } });
-  const auditText = JSON.stringify(audit);
-  assert.match(auditText, /admin\.login\.failed/);
-  assert.match(auditText, /admin\.login\.success/);
-  assert.doesNotMatch(auditText, /example-control-center-admin-login/);
-  assert.doesNotMatch(auditText, /example-wrong-admin-login/);
+  const loginPage = await fetch(`${baseUrl}/`);
+  assert.equal(loginPage.status, 401);
+  const loginHtml = await loginPage.text();
+  assert.match(loginHtml, /Accesso amministrativo/);
+  assert.match(loginHtml, /Accedi con passkey/);
+  assert.doesNotMatch(loginHtml, /type="password"|current-password/);
+
+  const legacyPasswordLogin = await fetch(`${baseUrl}/login`, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded", accept: "application/json" },
+    body: new URLSearchParams({ password: "must-never-be-accepted" }),
+  });
+  assert.equal(legacyPasswordLogin.status, 401);
+  assert.equal(tokenRequests, 0);
+
+  async function beginLogin() {
+    const response = await fetch(`${baseUrl}/auth/login`, { redirect: "manual" });
+    assert.equal(response.status, 303);
+    const location = new URL(response.headers.get("location"));
+    assert.equal(location.searchParams.get("code_challenge_method"), "S256");
+    assert.equal(location.searchParams.get("acr_values"), requiredAcr);
+    expectedNonce = location.searchParams.get("nonce") || "";
+    return location.searchParams.get("state") || "";
+  }
+
+  const rejectedState = await beginLogin();
+  const rejected = await fetch(`${baseUrl}/auth/callback?code=password-auth&state=${encodeURIComponent(rejectedState)}`, { redirect: "manual" });
+  assert.equal(rejected.status, 403);
+  assert.equal(rejected.headers.get("set-cookie"), null);
+
+  const viewerState = await beginLogin();
+  const viewerLogin = await fetch(`${baseUrl}/auth/callback?code=viewer&state=${encodeURIComponent(viewerState)}`, { redirect: "manual" });
+  assert.equal(viewerLogin.status, 303);
+  const viewerCookie = (viewerLogin.headers.get("set-cookie") || "").split(";")[0];
+  const viewerMutation = await fetch(`${baseUrl}/actions/toggle-project`, {
+    method: "POST",
+    headers: { cookie: viewerCookie, "content-type": "application/x-www-form-urlencoded", accept: "application/json" },
+    body: new URLSearchParams({ slug: "node-demo", enabled: "0" }),
+  });
+  assert.equal(viewerMutation.status, 403);
+
+  const ownerState = await beginLogin();
+  const ownerLogin = await fetch(`${baseUrl}/auth/callback?code=owner&state=${encodeURIComponent(ownerState)}`, { redirect: "manual" });
+  assert.equal(ownerLogin.status, 303);
+  const ownerSetCookie = ownerLogin.headers.get("set-cookie") || "";
+  assert.match(ownerSetCookie, /__Host-platform_cc_session=/);
+  assert.match(ownerSetCookie, /HttpOnly/);
+  assert.match(ownerSetCookie, /Secure/);
+  assert.match(ownerSetCookie, /SameSite=Lax/);
+  const ownerCookie = ownerSetCookie.split(";")[0];
+
+  const replayCallback = await fetch(`${baseUrl}/auth/callback?code=owner&state=${encodeURIComponent(ownerState)}`, { redirect: "manual" });
+  assert.equal(replayCallback.status, 401);
+  assert.equal(replayCallback.headers.get("set-cookie"), null);
+
+  const authedOverview = await fetch(`${baseUrl}/control/overview`, { headers: { cookie: ownerCookie, accept: "application/json" } });
+  assert.equal(authedOverview.status, 200);
+  assert.equal((await authedOverview.json()).title, "Admin Control Center");
+  const ownerAudit = await getJson(`${baseUrl}/control/audit`, { headers: { cookie: ownerCookie } });
+  const loginAudit = ownerAudit.audit.find((event) => event.action === "admin.oidc.login.success" && event.target === "test-owner");
+  assert.equal(loginAudit.actor, "test-owner");
+
+  const logout = await fetch(`${baseUrl}/logout`, { method: "POST", headers: { cookie: ownerCookie }, redirect: "manual" });
+  assert.equal(logout.status, 303);
+  assert.match(logout.headers.get("set-cookie") || "", /Max-Age=0/);
+  const revokedReplay = await fetch(`${baseUrl}/control/overview`, { headers: { cookie: ownerCookie, accept: "application/json" } });
+  assert.equal(revokedReplay.status, 401);
 
   assert.equal(stderr, "");
+});
+
+test("Control Center production startup fails closed without OIDC configuration", async () => {
+  const port = await freePort();
+  const child = spawn(process.execPath, [path.join(infraRoot, "control-center", "server.mjs")], {
+    cwd: infraRoot,
+    env: {
+      PATH: process.env.PATH,
+      HOME: process.env.HOME,
+      NODE_ENV: "production",
+      CONTROL_CENTER_PORT: String(port),
+      CONTROL_CENTER_BIND_HOST: "127.0.0.1",
+      CONTROL_CENTER_ENV: "production",
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let stderr = "";
+  child.stderr.on("data", (chunk) => { stderr += chunk.toString("utf8"); });
+  const exitCode = await new Promise((resolve) => child.once("exit", resolve));
+  assert.notEqual(exitCode, 0);
+  assert.match(stderr, /CONTROL_CENTER_AUTH_MODE must be oidc-passkey/);
 });
 
 function prepareFixture() {
@@ -3188,13 +3289,13 @@ async function stopChild(child) {
 
 async function getJson(url, init = {}) {
   const response = await fetch(url, init);
-  assert.equal(response.ok, true, `${url} returned ${response.status}`);
+  if (!response.ok) throw new Error(`${url} returned ${response.status}: ${await response.text()}`);
   return response.json();
 }
 
 async function getText(url, init = {}) {
   const response = await fetch(url, init);
-  assert.equal(response.ok, true, `${url} returned ${response.status}`);
+  if (!response.ok) throw new Error(`${url} returned ${response.status}: ${await response.text()}`);
   return response.text();
 }
 

@@ -1,14 +1,17 @@
 import { createServer, request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { spawnSync } from "node:child_process";
-import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, statfsSync, writeFileSync, appendFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { gunzipSync } from "node:zlib";
+import { AuthRequestError, createControlCenterAuth } from "./auth/oidc.mjs";
 import { controlCenterScriptTags, controlCenterStylesheetLinks, controlCenterUiContract } from "./components/ui/controlCenterUi.mjs";
 
 const port = Number(process.env.CONTROL_CENTER_PORT || 8080);
+const bindHost = String(process.env.CONTROL_CENTER_BIND_HOST || "0.0.0.0").trim();
 const appRoot = path.dirname(fileURLToPath(import.meta.url));
 const controlCenterStylesRoot = process.env.CONTROL_CENTER_STYLES_ROOT || path.join(appRoot, "styles");
 const publicRoot = process.env.CONTROL_CENTER_PUBLIC_ROOT || path.join(appRoot, "public");
@@ -46,10 +49,7 @@ const webspacesFile = process.env.PROJECT_WEBSPACES_FILE || "/var/www/project-st
 const dockerStatsFile = process.env.PROJECT_DOCKER_STATS_FILE || "/var/www/project-state/docker-stats.json";
 const statusRunsFile = process.env.PROJECT_STATUS_RUNS_FILE || "/var/www/project-state/status-runs.jsonl";
 const sessionKeysFile = process.env.CONTROL_CENTER_SESSION_KEYS_FILE || "";
-const adminPasswordFile = process.env.CONTROL_CENTER_ADMIN_PASSWORD_FILE || "";
 const postgresAppPasswordFile = process.env.CONTROL_CENTER_POSTGRES_APP_PASSWORD_FILE || "";
-const adminPasswordSha256 = String(process.env.CONTROL_CENTER_ADMIN_PASSWORD_SHA256 || "").trim().toLowerCase();
-const authRequired = parseBoolean(process.env.CONTROL_CENTER_AUTH_REQUIRED || "") || Boolean(adminPasswordSha256 || adminPasswordFile);
 const environment = normalizeEnvironment(process.env.CONTROL_CENTER_ENV || "local");
 const platformName = String(process.env.PLATFORM_NAME || "Platform Infrastructure").trim() || "Platform Infrastructure";
 const domain = normalizeHost(process.env.DOMAIN || process.env.LOCAL_DOMAIN || "localhost.com");
@@ -83,6 +83,8 @@ const statusWafUrl = String(process.env.CONTROL_CENTER_STATUS_WAF_URL || "https:
 const statusProbeTimeoutMs = clampNumber(Number(process.env.CONTROL_CENTER_STATUS_PROBE_TIMEOUT_MS || 4000), 500, 15000);
 const statusProbeTlsVerify = parseBoolean(process.env.CONTROL_CENTER_STATUS_TLS_VERIFY || "");
 const statusRunStepDelayMs = clampNumber(Number(process.env.CONTROL_CENTER_STATUS_STEP_DELAY_MS || 1500), 0, 10000);
+const controlAuth = await createControlCenterAuth();
+const requestIdentity = new AsyncLocalStorage();
 
 const docs = {
   "Overview": [
@@ -138,28 +140,66 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    if (url.pathname === "/login" && req.method === "POST") {
-      await handleLogin(req, res);
+    if (url.pathname === "/auth/login" && req.method === "GET") {
+      const location = await controlAuth.beginLogin();
+      redirect(res, location);
       return;
     }
 
-    if (url.pathname === "/logout") {
+    if (url.pathname === "/auth/callback" && req.method === "GET") {
+      try {
+        const login = await controlAuth.completeLogin(url);
+        appendAudit({
+          action: "admin.oidc.login.success",
+          actor: login.subject,
+          target: login.subject,
+          environment,
+          risk: "low",
+          result: "success",
+          dryRun: false,
+          summary: `Passkey-backed OIDC session created with ${login.role} authorization.`,
+        });
+        res.setHeader("set-cookie", login.cookie);
+        redirect(res, "/");
+      } catch (error) {
+        appendAudit({
+          action: "admin.oidc.login.failed",
+          target: "control-center",
+          environment,
+          risk: "medium",
+          result: "failed",
+          dryRun: false,
+          summary: "OIDC login rejected without creating an administrative session.",
+        });
+        const status = error instanceof AuthRequestError ? error.status : 401;
+        html(res, renderLogin("Autenticazione passkey non riuscita."), status);
+      }
+      return;
+    }
+
+    if (url.pathname === "/logout" && req.method === "POST") {
+      const session = await controlAuth.authenticate(req);
+      if (!session.ok) {
+        json(res, { error: "admin_auth_required", message: session.message }, session.status);
+        return;
+      }
       appendAudit({
         action: "admin.logout.success",
-        target: "control-center",
+        actor: session.identity.subject,
+        target: session.identity.subject,
         environment,
         risk: "low",
         result: "success",
         dryRun: false,
-        summary: "Admin session cleared.",
+        summary: "Administrative session revoked.",
       });
-      clearSession(res);
+      res.setHeader("set-cookie", await controlAuth.logout(req));
       redirect(res, "/");
       return;
     }
 
-    const session = authenticateRequest(req);
-    if (authRequired && !session.ok) {
+    const session = await controlAuth.authenticate(req);
+    if (!session.ok) {
       if (url.pathname.startsWith("/control/") || req.method !== "GET") {
         json(res, { error: "admin_auth_required", message: session.message }, session.status);
         return;
@@ -168,9 +208,20 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    const state = readState();
-    const projects = discoverProjects(state);
-    const context = await buildContext({ projects, state });
+    const authorization = controlAuth.authorize(req, url, session);
+    if (!authorization.ok) {
+      json(res, { error: "admin_authorization_required", message: authorization.message }, authorization.status);
+      return;
+    }
+
+    await requestIdentity.run({
+      subject: session.identity.subject,
+      role: session.role,
+      requestId: rid(),
+    }, async () => {
+      const state = readState();
+      const projects = discoverProjects(state);
+      const context = await buildContext({ projects, state });
 
     if (url.pathname.startsWith("/control/")) {
       await handleApi(req, res, url, context);
@@ -277,63 +328,28 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    html(res, renderControlCenter(context, url.searchParams));
+      html(res, renderControlCenter(context, url.searchParams));
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     json(res, { error: "control_center_error", message: sanitizeMessage(message) }, 500);
   }
 });
 
-server.listen(port, "0.0.0.0", () => {
-  console.log(`control-center listening on ${port}`);
+server.listen(port, bindHost, () => {
+  console.log(`control-center listening on ${bindHost}:${port} with ${controlAuth.mode} authentication`);
 });
 
-async function handleLogin(req, res) {
-  const payload = await readPayload(req);
-  const password = String(payload.password || "");
-  if (!authVerifierConfigured()) {
-    appendAudit({
-      action: "admin.login.unavailable",
-      target: "control-center",
-      environment,
-      risk: "low",
-      result: "skipped",
-      dryRun: true,
-      summary: "Admin login attempted while local password authentication is not configured.",
-    });
-    json(res, { error: "admin_auth_not_configured", message: "Admin authentication is required but no password verifier is configured." }, 503);
-    return;
-  }
-  if (!verifyAdminPassword(password)) {
-    appendAudit({
-      action: "admin.login.failed",
-      target: "control-center",
-      environment,
-      risk: "medium",
-      result: "failed",
-      dryRun: false,
-      summary: "Admin login rejected.",
-    });
-    if (wantsJson(req)) {
-      json(res, { error: "admin_auth_failed", message: "Invalid admin password." }, 401);
-      return;
-    }
-    html(res, renderLogin("Invalid admin password."), 401);
-    return;
-  }
-
-  appendAudit({
-    action: "admin.login.success",
-    target: "control-center",
-    environment,
-    risk: "low",
-    result: "success",
-    dryRun: false,
-    summary: "Admin session created.",
+async function shutdown() {
+  server.close(async () => {
+    await controlAuth.close();
+    process.exit(0);
   });
-  setSession(res);
-  redirect(res, "/");
+  setTimeout(() => process.exit(1), 10_000).unref();
 }
+
+process.once("SIGTERM", shutdown);
+process.once("SIGINT", shutdown);
 
 async function handleApi(req, res, url, context) {
   const method = (req.method || "GET").toUpperCase();
@@ -1289,7 +1305,7 @@ async function buildContext({ projects, state }) {
     scope: "global",
     wafMode: "configured",
     rateLimitTier: "configured",
-    adminProtection: authRequired ? "required" : "local-only",
+    adminProtection: controlAuth.enabled ? "oidc-passkey-required" : "test-only-disabled",
     securityHeaders: "configured",
     cloudflareAccess: environment === "production" ? "requires-verify-remote" : "plan-only-local",
     passkeyAdminAuth: "external-idp-or-passkey-app",
@@ -1903,9 +1919,9 @@ function advancedSectionData(section, context) {
       };
     case "identity":
       return {
-        adminAuthRequired: authRequired,
-        adminVerifierConfigured: authVerifierConfigured(),
-        sessionPolicy: "HttpOnly; Secure; SameSite=Lax",
+        adminAuthRequired: controlAuth.enabled,
+        adminVerifierConfigured: controlAuth.mode === "oidc-passkey",
+        sessionPolicy: "PostgreSQL-backed; revocable; HttpOnly; Secure; SameSite=Lax",
         passkeyAdminAuth: context.security.passkeyAdminAuth,
         adminUsers: context.identityAccess.adminUsers,
         teams: context.identityAccess.teams,
@@ -4640,6 +4656,7 @@ function planApplicationBackupRestore({ scope, backupRef, project, selected, mod
 
 function createBackupJob({ action, scope, backupRef = "", commands, context, metadata = {} }) {
   const now = new Date().toISOString();
+  const identity = requestIdentity.getStore();
   const job = sanitizeEvent({
     id: rid(),
     action,
@@ -4648,7 +4665,7 @@ function createBackupJob({ action, scope, backupRef = "", commands, context, met
     ...metadata,
     status: "queued",
     environment: context.environment,
-    requestedBy: "control-center",
+    requestedBy: identity?.subject || "control-center",
     commands: commands.map((item) => ({ command: item.command, label: item.label })),
     createdAt: now,
     updatedAt: now,
@@ -4724,7 +4741,7 @@ ${controlCenterScriptTags()}
     <aside class="ops-topbar ops-sidebar" aria-label="Menu principale">
       <a class="ops-brand" href="/?section=status" aria-label="Platform operations"><span class="ops-brand-mark">P</span><strong>Platform</strong></a>
       ${renderOperationsNav(sections, section, context, activeProject, params)}
-      ${authRequired ? '<a class="ops-icon-link" href="/logout" aria-label="Logout">Logout</a>' : ""}
+      ${controlAuth.enabled ? '<form action="/logout" method="post" class="ops-logout-form"><button class="ops-icon-link" type="submit" aria-label="Logout">Logout</button></form>' : ""}
     </aside>
     <section class="ops-page" ${pageLabel}>
       ${pageHead}
@@ -7727,27 +7744,23 @@ function controlUrl({ mode, section, project = "" }) {
 
 function renderLogin(message) {
   return `<!doctype html>
-<html lang="en">
+<html lang="it">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="icon" href="data:,">
-<title>Admin Control Center Sign In</title>
+<title>Accesso Control Center</title>
 ${controlCenterStylesheetLinks()}
 ${controlCenterScriptTags()}
 </head>
 <body data-cc-theme="light">
 <main class="login-shell">
   <section class="login-panel ui-panel-stack">
-    <span class="brand-mark">SX</span>
-    <p class="eyebrow">${escapeHtml(environment.toUpperCase())} MODE</p>
-    <h1>Admin Sign In</h1>
-    <p class="login-copy">${escapeHtml(message || "Admin authentication required.")}</p>
-    <form method="post" action="/login" class="login-form">
-      <label for="password">Admin password</label>
-      <input id="password" name="password" type="password" autocomplete="current-password" required autofocus>
-      <button class="button open" type="submit">Sign in</button>
-    </form>
+    <span class="brand-mark">P</span>
+    <p class="eyebrow">${escapeHtml(environment.toUpperCase())}</p>
+    <h1>Accesso amministrativo</h1>
+    <p class="login-copy">${escapeHtml(message || "Autenticazione passkey richiesta.")}</p>
+    <a class="button open" href="/auth/login">Accedi con passkey</a>
   </section>
 </main>
 </body>
@@ -10859,6 +10872,7 @@ function operationPlan(type, targetEnv, dryRun, steps, details = {}) {
   const now = new Date().toISOString();
   const operationId = rid();
   const cleanDetails = sanitizeOperationDetails(details);
+  const identity = requestIdentity.getStore();
   const operation = sanitizeEvent({
     id: operationId,
     operationId,
@@ -10866,7 +10880,8 @@ function operationPlan(type, targetEnv, dryRun, steps, details = {}) {
     status: dryRun ? "planned" : "accepted",
     projectId: cleanDetails.projectId || cleanDetails.project || cleanDetails.applicationId || cleanDetails.webspaceId || cleanDetails.subdomainId || "",
     environment: targetEnv,
-    requestedBy: "local-admin",
+    requestedBy: identity?.subject || "control-center",
+    requestedByRole: identity?.role || "system",
     dryRun,
     startedAt: now,
     finishedAt: now,
@@ -10909,11 +10924,13 @@ function writeState(state) {
 
 function appendAudit(event) {
   mkdirSync(path.dirname(auditFile), { recursive: true });
+  const identity = requestIdentity.getStore();
   const record = sanitizeEvent({
     id: rid(),
     timestamp: new Date().toISOString(),
-    actor: "local-admin",
-    requestId: rid(),
+    actor: identity?.subject || "control-center",
+    actorRole: identity?.role || "system",
+    requestId: identity?.requestId || rid(),
     ...event,
   });
   appendFileSync(auditFile, `${JSON.stringify(record)}\n`);
@@ -11418,62 +11435,6 @@ async function readPayload(req) {
   return Object.fromEntries(params.entries());
 }
 
-function authenticateRequest(req) {
-  if (!authRequired) return { ok: true, status: 200, message: "" };
-  if (!authVerifierConfigured()) {
-    return { ok: false, status: 503, message: "Admin authentication is required but no password verifier is configured." };
-  }
-  const token = parseCookie(req.headers.cookie || "").sxcc_session || "";
-  if (!verifySession(token)) {
-    return { ok: false, status: 401, message: "Admin authentication required." };
-  }
-  return { ok: true, status: 200, message: "" };
-}
-
-function authVerifierConfigured() {
-  return Boolean(adminPasswordSha256 || (adminPasswordFile && existsSync(adminPasswordFile)));
-}
-
-function verifyAdminPassword(password) {
-  if (!password) return false;
-  if (adminPasswordSha256) {
-    return safeEqualHex(sha256(password), adminPasswordSha256);
-  }
-  if (adminPasswordFile && existsSync(adminPasswordFile)) {
-    const expected = readFileSync(adminPasswordFile, "utf8").trim();
-    return safeEqualText(password, expected);
-  }
-  return false;
-}
-
-function setSession(res) {
-  const expiresAt = Date.now() + (8 * 60 * 60 * 1000);
-  const nonce = rid();
-  const body = `${expiresAt}.${nonce}`;
-  const signature = signSessionBody(body);
-  const token = `v1.${body}.${signature}`;
-  res.setHeader("set-cookie", `sxcc_session=${token}; Path=/; Max-Age=28800; HttpOnly; Secure; SameSite=Lax`);
-}
-
-function clearSession(res) {
-  res.setHeader("set-cookie", "sxcc_session=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax");
-}
-
-function verifySession(token) {
-  const parts = String(token || "").split(".");
-  if (parts.length !== 4 || parts[0] !== "v1") return false;
-  const expiresAt = Number(parts[1]);
-  if (!Number.isFinite(expiresAt) || expiresAt < Date.now()) return false;
-  const body = `${parts[1]}.${parts[2]}`;
-  return sessionKeys().some((key) => safeEqualHex(signSessionBody(body, key), parts[3]));
-}
-
-function signSessionBody(body, explicitKey = "") {
-  const key = explicitKey || sessionKeys()[0] || "";
-  if (!key) return "";
-  return createHmac("sha256", key).update(body).digest("hex");
-}
-
 function sessionKeys() {
   const raw = sessionKeysFile && existsSync(sessionKeysFile) ? readFileSync(sessionKeysFile, "utf8") : "";
   return raw.split(/\r?\n|,/).map((item) => item.trim()).filter(Boolean);
@@ -11524,34 +11485,12 @@ function vaultEncryptionMaterial() {
   throw new ValidationError("Vault encryption key is not configured.");
 }
 
-function parseCookie(header) {
-  const out = {};
-  for (const part of String(header || "").split(";")) {
-    const separator = part.indexOf("=");
-    if (separator <= 0) continue;
-    out[decodeURIComponent(part.slice(0, separator).trim())] = decodeURIComponent(part.slice(separator + 1).trim());
-  }
-  return out;
-}
-
 function wantsJson(req) {
   return String(req.headers.accept || "").includes("application/json") || String(req.headers["content-type"] || "").includes("application/json");
 }
 
 function sha256(value) {
   return createHash("sha256").update(String(value)).digest("hex");
-}
-
-function safeEqualHex(left, right) {
-  if (!/^[a-f0-9]{64}$/i.test(left) || !/^[a-f0-9]{64}$/i.test(right)) return false;
-  return timingSafeEqual(Buffer.from(left, "hex"), Buffer.from(right, "hex"));
-}
-
-function safeEqualText(left, right) {
-  const leftBuffer = Buffer.from(String(left));
-  const rightBuffer = Buffer.from(String(right));
-  if (leftBuffer.length !== rightBuffer.length) return false;
-  return timingSafeEqual(leftBuffer, rightBuffer);
 }
 
 function isPhpProject(projectPath) {
@@ -12218,10 +12157,10 @@ function buildIdentityAccess(stored, { audit, security, settings }) {
       displayName: "Local Admin",
       roleIds: ["platform-owner"],
       teamIds: ["platform-admins"],
-      mfaStatus: authRequired ? "required" : "local-dev-disabled",
+      mfaStatus: controlAuth.enabled ? "passkey-required" : "test-only-disabled",
       passkeyStatus: security.passkeyAdminAuth,
       vpnStatus: security.adminProtection === "vpn-required" ? "required" : "metadata-only",
-      status: authRequired ? "configured" : "local-dev",
+      status: controlAuth.enabled ? "configured" : "local-dev",
       source: "control-center-auth",
     }),
   ];
@@ -12236,8 +12175,8 @@ function buildIdentityAccess(stored, { audit, security, settings }) {
       name: "Control Center session",
       maxAgeMinutes: 480,
       cookieFlags: ["HttpOnly", "Secure", "SameSite=Lax"],
-      status: sessionKeysFile ? "configured" : "needs-secret-file",
-      sessionSecretConfigured: Boolean(sessionKeysFile),
+      status: "configured",
+      sessionSecretConfigured: false,
       source: "control-center-auth",
     }),
   ];
@@ -12256,7 +12195,7 @@ function buildIdentityAccess(stored, { audit, security, settings }) {
     roles,
     sessionPolicies,
     accessReviews,
-    loginAudit: audit.filter((event) => /^admin\.login\./.test(String(event.action || ""))).slice(0, 12),
+    loginAudit: audit.filter((event) => /^admin\.(?:oidc\.)?login\./.test(String(event.action || ""))).slice(0, 12),
     guardrails: {
       credentialsExposed: false,
       providerTouched: false,
@@ -13137,8 +13076,8 @@ function defaultMaterialStores(notificationChannels = []) {
   const alertDeliveryConfigured = notificationChannels.some((channel) => channel.status === "configured" || channel.status === "verified-production");
   return [
     { id: "docker-compose-files", name: "Docker secrets", status: "configured by compose files", materialConfigured: true, valueExposed: false, productionEvidence: false },
-    { id: "control-center-session", name: "Control Center session material", status: sessionKeysFile ? "configured by file" : "not configured", materialConfigured: Boolean(sessionKeysFile), valueExposed: false, productionEvidence: false },
-    { id: "admin-verifier", name: "Admin password verifier", status: authVerifierConfigured() ? "configured verifier only" : "not configured", materialConfigured: authVerifierConfigured(), valueExposed: false, productionEvidence: false },
+    { id: "control-center-session", name: "Control Center session store", status: controlAuth.enabled ? "PostgreSQL-backed" : "test-only disabled", materialConfigured: controlAuth.enabled, valueExposed: false, productionEvidence: false },
+    { id: "admin-identity", name: "Admin identity provider", status: controlAuth.mode === "oidc-passkey" ? "OIDC passkey-only" : "test-only disabled", materialConfigured: controlAuth.mode === "oidc-passkey", valueExposed: false, productionEvidence: false },
     { id: "alert-delivery", name: "Alert delivery material", status: alertDeliveryConfigured ? "partially configured" : "metadata only", materialConfigured: alertDeliveryConfigured, valueExposed: false, productionEvidence: false },
     { id: "provider-private-material", name: "Provider private material", status: "tracked by provider connections", materialConfigured: false, valueExposed: false, productionEvidence: false },
     { id: "kms-metadata", name: "Platform Local KMS metadata", status: "evidence through infra-ops", materialConfigured: false, valueExposed: false, productionEvidence: false },
