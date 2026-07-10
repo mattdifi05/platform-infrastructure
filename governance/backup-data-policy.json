@@ -1,0 +1,60 @@
+{
+  "schema": "platform.backup-data-policy/v1",
+  "scope": "platform-infrastructure",
+  "backupIntervalHours": 8,
+  "localRetention": {
+    "keepCompleteManifests": 42,
+    "maximumAgeDays": 14,
+    "deleteUnmanifestedArtifacts": false
+  },
+  "offsiteRetention": {
+    "keepSnapshotsPerTag": 42,
+    "maximumRepositoryBytes": 2500000000000,
+    "stableHostname": "platform-infrastructure"
+  },
+  "requiredPlatformStateIds": [
+    "platform-state:control-center-state",
+    "platform-state:keycloak-config",
+    "platform-state:minio-data",
+    "platform-state:secret-manager-metadata"
+  ],
+  "discovery": {
+    "applicationSources": "all non-hidden top-level directories under PROJECT_SOURCE_ROOT, excluding declared tooling and build directories",
+    "applicationDatabases": "all active exact engine/name bindings from PROJECT_DATABASES_FILE",
+    "platformDatabases": [
+      "postgres:APP_DB_NAME",
+      "postgres:KEYCLOAK_DB_NAME"
+    ]
+  },
+  "rebuildOnlyServices": [
+    {
+      "service": "redis",
+      "stateClass": "cache-and-expiring-sessions",
+      "recovery": "recreate from Compose; users may need to authenticate again"
+    },
+    {
+      "service": "nats",
+      "stateClass": "ephemeral-delivery",
+      "recovery": "recreate from Compose; durable business state must remain in a database"
+    },
+    {
+      "service": "prometheus-grafana-loki-alertmanager",
+      "stateClass": "rebuildable-observability-runtime",
+      "recovery": "recreate from Git-backed configuration; historical telemetry is not a business-data restore dependency"
+    }
+  ],
+  "externalEscrowRequired": [
+    "backup signing keyring",
+    "Restic repository password",
+    "rclone provider credentials",
+    "Control Center Vault keyring",
+    "Secret Manager master key"
+  ],
+  "safety": {
+    "artifactMode": "0600",
+    "directoryMode": "0700",
+    "manifestSignature": "HMAC-SHA256",
+    "restoreTarget": "disposable-only",
+    "retentionApplyRequiresExplicitConfirmation": true
+  }
+}

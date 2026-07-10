@@ -11,11 +11,15 @@ import tls from "node:tls";
 import { fileURLToPath } from "node:url";
 import {
   backupDocumentDigest,
+  backupResourceId,
+  createBackupJobDocument,
   createBackupManifestDocument,
   manifestArtifactForResource,
   parseBackupJobDocument,
   parseBackupManifestDocument,
 } from "../control-center/backup/contracts.mjs";
+
+process.umask(0o077);
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const infraRoot = path.resolve(scriptDir, "..");
@@ -686,7 +690,8 @@ function signBackupArtifact(filePath, hash = sha256File(filePath)) {
     signature,
     signedAt: new Date().toISOString(),
   };
-  fs.writeFileSync(backupSignatureSidecarPath(filePath), `${JSON.stringify(sidecar, null, 2)}\n`, "utf8");
+  fs.writeFileSync(backupSignatureSidecarPath(filePath), `${JSON.stringify(sidecar, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+  fs.chmodSync(backupSignatureSidecarPath(filePath), 0o600);
   return { hash, keyId: activeKey.id, signaturePath: backupSignatureSidecarPath(filePath) };
 }
 
@@ -798,13 +803,16 @@ function listDumpFilesRecursive(root) {
 
 function backupRootPath() {
   const root = path.join(infraRoot, "backups");
-  fs.mkdirSync(root, { recursive: true });
+  fs.mkdirSync(root, { recursive: true, mode: 0o700 });
+  fs.chmodSync(root, 0o700);
   return root;
 }
 
 function ensureBackupOutputDir(directory) {
-  fs.mkdirSync(directory, { recursive: true });
-  return resolveInside(backupRootPath(), directory);
+  fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+  const resolved = resolveInside(backupRootPath(), directory);
+  fs.chmodSync(resolved, 0o700);
+  return resolved;
 }
 
 function recordDatabaseBackupEvidence({ engine, sourceContainer, operation, status, artifactPath = null, artifactSha256 = null, startedAt, metadata = {} }) {
@@ -853,14 +861,16 @@ function ensureReportDir(name) {
 function writeJsonReport(directoryName, baseName, payload) {
   const directory = ensureReportDir(directoryName);
   const jsonPath = path.join(directory, `${baseName}.json`);
-  fs.writeFileSync(jsonPath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+  fs.writeFileSync(jsonPath, `${JSON.stringify(payload, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+  fs.chmodSync(jsonPath, 0o600);
   return jsonPath;
 }
 
 function writeMarkdownReport(directoryName, baseName, lines) {
   const directory = ensureReportDir(directoryName);
   const markdownPath = path.join(directory, `${baseName}.md`);
-  fs.writeFileSync(markdownPath, `${lines.join("\n")}\n`, "utf8");
+  fs.writeFileSync(markdownPath, `${lines.join("\n")}\n`, { encoding: "utf8", mode: 0o600 });
+  fs.chmodSync(markdownPath, 0o600);
   return markdownPath;
 }
 
@@ -967,7 +977,9 @@ function writeBackupExecutionReport({
 
 function writeBackupIntegritySidecars(hostPath) {
   const hash = sha256File(hostPath);
-  fs.writeFileSync(`${hostPath}.sha256`, `${hash}  ${path.basename(hostPath)}\n`, "ascii");
+  fs.chmodSync(hostPath, 0o600);
+  fs.writeFileSync(`${hostPath}.sha256`, `${hash}  ${path.basename(hostPath)}\n`, { encoding: "ascii", mode: 0o600 });
+  fs.chmodSync(`${hostPath}.sha256`, 0o600);
   const signature = signBackupArtifact(hostPath, hash);
   return { hash, signature };
 }
@@ -2065,7 +2077,9 @@ async function backupPostgres(options = {}) {
     dockerExec(container, ["rm", "-f", containerPath]);
 
     const hash = sha256File(hostPath);
-    fs.writeFileSync(`${hostPath}.sha256`, `${hash}  ${fileName}\n`, "ascii");
+    fs.chmodSync(hostPath, 0o600);
+    fs.writeFileSync(`${hostPath}.sha256`, `${hash}  ${fileName}\n`, { encoding: "ascii", mode: 0o600 });
+    fs.chmodSync(`${hostPath}.sha256`, 0o600);
     const signature = signBackupArtifact(hostPath, hash);
     recordBackupRestoreRun({ container, database, user, operation: "backup", status: "success", artifactPath: hostPath, artifactSha256: hash, startedAt });
     writeBackupExecutionReport({
@@ -2239,11 +2253,92 @@ async function backupApplications(options = {}) {
   return payload;
 }
 
-function typedBackupJobPath() {
+function controlCenterStateRoot() {
+  const candidates = [
+    process.env.PROJECT_STATE_ROOT,
+    "/var/www/project-state",
+    path.join(infraRoot, "projects-portal", "state"),
+  ].filter(Boolean).map((value) => path.resolve(value));
+  const stateRoot = candidates.find((candidate) => fs.existsSync(candidate) && fs.statSync(candidate).isDirectory());
+  if (!stateRoot) fail("Control Center state root is not available for backup.");
+  return stateRoot;
+}
+
+function validateControlCenterStateRoot(stateRoot) {
+  const required = ["projects.json", "databases.json", "secret-vault.json", "operations.jsonl", "audit.jsonl"];
+  const missing = required.filter((name) => !fs.existsSync(path.join(stateRoot, name)));
+  if (missing.length) fail(`Control Center state backup is missing required files: ${missing.join(", ")}.`);
+  return required;
+}
+
+async function backupControlCenterState(options = {}) {
+  const stateRoot = path.resolve(options.stateRoot ?? controlCenterStateRoot());
+  const required = validateControlCenterStateRoot(stateRoot);
+  const outputDir = ensureBackupOutputDir(path.resolve(options.outputDir ?? argv.outputDir ?? path.join(infraRoot, "backups", "control-center-state")));
+  const startedAt = new Date();
+  const fileName = `control-center-state-${backupTimestamp()}.tar.gz`;
+  const hostPath = path.join(outputDir, fileName);
+  run("tar", [
+    "-czf", hostPath,
+    "--exclude=backup-jobs",
+    "--exclude=*.tmp",
+    "--exclude=*.tmp-*",
+    "--exclude=*.codex-*",
+    "-C", stateRoot,
+    ".",
+  ]);
+  const { hash, signature } = writeBackupIntegritySidecars(hostPath);
+  writeBackupExecutionReport({
+    engine: "control-center-state",
+    sourceContainer: "project-state",
+    status: "success",
+    artifactPath: hostPath,
+    artifactSha256: hash,
+    signature,
+    startedAt,
+    metadata: {
+      scope: "restricted-control-state-local-artifact",
+      requiredFiles: required,
+      queueStateExcluded: true,
+      temporaryAndLegacyCopiesExcluded: true,
+      containsSensitiveEncryptedOrCredentialMaterial: true,
+      restrictedAccessRequired: true,
+      plaintextExposed: false,
+    },
+  });
+  return { hostPath, hash, signature, stateRoot };
+}
+
+function restoreTestControlCenterState(options = {}) {
+  const backupFileArg = options.backupFile ?? argv.backupFile ?? argv._[0];
+  if (!backupFileArg) fail("Provide --backupFile <path>.");
+  const backupFile = resolveInside(backupRootPath(), path.resolve(backupFileArg));
+  verifyBackupArtifact(backupFile);
+  const entries = output("tar", ["-tzf", backupFile]).split(/\r?\n/).filter(Boolean);
+  const verboseEntries = output("tar", ["-tvzf", backupFile]).split(/\r?\n/).filter(Boolean);
+  if (!entries.length || verboseEntries.some((entry) => /^[lh]/.test(entry.trim()))) fail("Control Center state archive is empty or contains links.");
+  for (const entry of entries) {
+    const normalized = entry.replace(/^\.\//, "");
+    if (normalized.startsWith("/") || normalized.split("/").includes("..")) fail("Control Center state archive contains an unsafe path.");
+  }
+  const target = makeOpsTempDir("restore-control-center-state-");
+  try {
+    run("tar", ["-xzf", backupFile, "-C", target]);
+    const required = validateControlCenterStateRoot(target);
+    const files = listFilesRecursive(target);
+    if (files.some((filePath) => fs.lstatSync(filePath).isSymbolicLink())) fail("Control Center state restore contains a symlink.");
+    return { status: "passed", requiredFiles: required, fileCount: files.length, liveStateChanged: false };
+  } finally {
+    fs.rmSync(target, { recursive: true, force: true });
+  }
+}
+
+function typedBackupJobPath(options = {}) {
   const jobsRoot = path.resolve(process.env.BACKUP_SCHEDULER_JOBS_DIR || path.join(infraRoot, "projects-portal", "state", "backup-jobs"));
   const runningRoot = path.join(jobsRoot, "running");
-  const requested = path.resolve(argv.jobFile || "");
-  if (!argv.jobFile || !requested.startsWith(`${runningRoot}${path.sep}`)) {
+  const jobFile = options.jobFile ?? argv.jobFile;
+  const requested = path.resolve(jobFile || "");
+  if (!jobFile || !requested.startsWith(`${runningRoot}${path.sep}`)) {
     fail("Typed backup jobs must be read from the scheduler running queue.");
   }
   const stat = fs.lstatSync(requested);
@@ -2318,7 +2413,19 @@ async function executeTypedBackupResource(resource) {
       database: resource.name,
     }));
   }
-  fail(`Typed backup resource is not implemented by T06: ${resource.kind}.`);
+  if (resource.kind === "platform-state" && resource.externalId === "minio-data") {
+    return typedArtifactRecord(resource, await backupMinio());
+  }
+  if (resource.kind === "platform-state" && resource.externalId === "keycloak-config") {
+    return typedArtifactRecord(resource, await backupKeycloakConfig());
+  }
+  if (resource.kind === "platform-state" && resource.externalId === "control-center-state") {
+    return typedArtifactRecord(resource, await backupControlCenterState());
+  }
+  if (resource.kind === "platform-state" && resource.externalId === "secret-manager-metadata") {
+    return typedArtifactRecord(resource, await backupSecretManagerMetadata());
+  }
+  fail(`Typed backup resource is not implemented: ${resource.id}.`);
 }
 
 function readVerifiedSourceManifest(relativePath) {
@@ -2410,11 +2517,26 @@ async function executeTypedRestoreResource(resource, artifact) {
     });
     return { resourceId: resource.id, status: "passed", restoredSchemas: result.restoredSchemas };
   }
-  fail(`Typed restore resource is not implemented by T06: ${resource.kind}.`);
+  if (resource.kind === "platform-state" && resource.externalId === "minio-data") {
+    const result = await restoreTestMinio({ backupFile });
+    return { resourceId: resource.id, status: "passed", restoredEntries: result.restoredEntries };
+  }
+  if (resource.kind === "platform-state" && resource.externalId === "keycloak-config") {
+    const result = await restoreTestKeycloakConfig({ backupFile });
+    return { resourceId: resource.id, status: "passed", realmCount: result.realmCount };
+  }
+  if (resource.kind === "platform-state" && resource.externalId === "control-center-state") {
+    return { resourceId: resource.id, ...restoreTestControlCenterState({ backupFile }) };
+  }
+  if (resource.kind === "platform-state" && resource.externalId === "secret-manager-metadata") {
+    await restoreTestSecretManagerMetadata({ backupFile });
+    return { resourceId: resource.id, status: "passed" };
+  }
+  fail(`Typed restore resource is not implemented: ${resource.id}.`);
 }
 
-async function executeBackupJob() {
-  const jobPath = typedBackupJobPath();
+async function executeBackupJob(options = {}) {
+  const jobPath = typedBackupJobPath(options);
   const job = parseBackupJobDocument(JSON.parse(fs.readFileSync(jobPath, "utf8")));
   if (job.status !== "running") fail("Typed backup executor accepts only jobs claimed by the scheduler.");
   const startedAt = new Date();
@@ -2460,6 +2582,191 @@ async function executeBackupJob() {
   });
   log(`Typed backup job report written to ${reportPath}`);
   return report;
+}
+
+function backupDatabaseCatalog(options = {}) {
+  const stateRoot = path.resolve(options.stateRoot ?? controlCenterStateRoot());
+  const databaseFile = path.resolve(options.databaseFile ?? process.env.PROJECT_DATABASES_FILE ?? path.join(stateRoot, "databases.json"));
+  const parsed = JSON.parse(fs.readFileSync(databaseFile, "utf8"));
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) fail("Control Center database catalog must be an object.");
+  const databases = [];
+  const physical = new Set();
+  const add = ({ projectId, engine, name, externalId }) => {
+    const cleanEngine = String(engine || "").trim().toLowerCase();
+    const cleanName = sqlIdentifierName(name, "backup database name");
+    if (!new Set(["postgres", "mariadb"]).has(cleanEngine)) fail(`Unsupported backup database engine: ${cleanEngine}`);
+    const physicalKey = `${cleanEngine}:${cleanName}`;
+    if (physical.has(physicalKey)) return;
+    physical.add(physicalKey);
+    const identity = externalId ?? `${safeApplicationBackupSlug(projectId)}-${cleanEngine}-${cleanName.replaceAll("_", "-")}`;
+    databases.push({
+      id: backupResourceId("database", identity),
+      externalId: identity,
+      kind: "database",
+      projectId: safeApplicationBackupSlug(projectId),
+      name: cleanName,
+      engine: cleanEngine,
+    });
+  };
+  for (const database of Object.values(parsed)) {
+    if (!database || typeof database !== "object" || database.deletedAt || database.status === "deleted") continue;
+    if (!database.projectId || !database.engine || !database.name) continue;
+    add(database);
+  }
+  add({ projectId: "platform", engine: "postgres", name: process.env.APP_DB_NAME || "app_db", externalId: "platform-postgres-app-db" });
+  add({ projectId: "platform", engine: "postgres", name: process.env.KEYCLOAK_DB_NAME || "keycloak", externalId: "platform-postgres-keycloak" });
+  return databases.sort((a, b) => a.id.localeCompare(b.id));
+}
+
+function platformBackupResources(options = {}) {
+  const sources = applicationSourceDirectories(options).map((application) => ({
+    id: backupResourceId("source", application.slug),
+    externalId: application.slug,
+    kind: "source",
+    projectId: application.slug,
+    name: application.name,
+    sourceDirectory: application.name,
+  }));
+  const platformState = [
+    "minio-data",
+    "keycloak-config",
+    "control-center-state",
+    "secret-manager-metadata",
+  ].map((externalId) => ({
+    id: backupResourceId("platform-state", externalId),
+    externalId,
+    kind: "platform-state",
+    projectId: "platform",
+    name: externalId,
+  }));
+  return [...sources, ...backupDatabaseCatalog(options), ...platformState].sort((a, b) => a.id.localeCompare(b.id));
+}
+
+function writeBackupCoverageReport(resources, options = {}) {
+  const byKind = Object.fromEntries(["source", "database", "platform-state"].map((kind) => [kind, resources.filter((resource) => resource.kind === kind).length]));
+  const policyFile = path.resolve(options.policyFile ?? path.join(infraRoot, "governance", "backup-data-policy.json"));
+  const policy = JSON.parse(fs.readFileSync(policyFile, "utf8"));
+  if (policy.schema !== "platform.backup-data-policy/v1") fail("Unsupported backup data policy schema.");
+  const resourceIds = resources.map((resource) => resource.id);
+  const missingPlatformStateIds = policy.requiredPlatformStateIds.filter((id) => !resourceIds.includes(id));
+  if (missingPlatformStateIds.length) fail(`Backup catalog is missing required platform state: ${missingPlatformStateIds.join(", ")}`);
+  if (policy.backupIntervalHours !== 8 || policy.localRetention?.keepCompleteManifests !== 42 || policy.localRetention?.maximumAgeDays !== 14) {
+    fail("Backup data policy must retain 42 complete eight-hour restore points covering 14 days.");
+  }
+  const rebuildOnly = new Set(policy.rebuildOnlyServices.map((entry) => entry.service));
+  if (!["redis", "nats", "prometheus-grafana-loki-alertmanager"].every((service) => rebuildOnly.has(service))) {
+    fail("Backup data policy must explicitly classify every rebuild-only runtime state family.");
+  }
+  const payload = {
+    generatedAt: new Date().toISOString(),
+    status: "passed",
+    scope: "platform-infrastructure",
+    resourceCount: resources.length,
+    byKind,
+    resourceIds,
+    rebuildOnlyServices: policy.rebuildOnlyServices,
+    requiredPlatformStateIds: policy.requiredPlatformStateIds,
+    exactResourceCoverage: true,
+    mutableRuntimeStatePolicyDeclared: true,
+    missingPlatformStateIds,
+  };
+  const stamp = reportTimestamp();
+  const baseName = `backup-coverage-${stamp}`;
+  const jsonPath = writeJsonReport("backup-coverage", baseName, payload);
+  const markdownPath = writeMarkdownReport("backup-coverage", baseName, [
+    "# Platform Backup Coverage",
+    "",
+    `Status: ${payload.status}`,
+    `Exact resources: ${payload.resourceCount}`,
+    `Sources: ${byKind.source}`,
+    `Databases: ${byKind.database}`,
+    `Platform state: ${byKind["platform-state"]}`,
+    `Rebuild-only services: ${policy.rebuildOnlyServices.map((entry) => entry.service).join(", ")}`,
+  ]);
+  return { payload, jsonPath, markdownPath };
+}
+
+async function backupPlatformCatalog(options = {}) {
+  const resources = platformBackupResources(options);
+  writeBackupCoverageReport(resources, options);
+  const jobsRoot = path.resolve(process.env.BACKUP_SCHEDULER_JOBS_DIR || path.join(infraRoot, "projects-portal", "state", "backup-jobs"));
+  const directories = Object.fromEntries(["running", "done", "failed"].map((name) => {
+    const directory = path.join(jobsRoot, name);
+    fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+    fs.chmodSync(directory, 0o700);
+    return [name, directory];
+  }));
+  const jobId = `scheduled-platform-${backupTimestamp().toLowerCase()}-${crypto.randomBytes(3).toString("hex")}`;
+  const job = createBackupJobDocument({
+    id: jobId,
+    operation: "backup",
+    scope: { kind: "platform", id: "platform" },
+    resources,
+    requestedBy: options.requestedBy ?? "backup-scheduler",
+    environment: process.env.PLATFORM_ENVIRONMENT || "production",
+  });
+  const runningPath = path.join(directories.running, `${jobId}.json`);
+  writePrivateJsonAtomic(runningPath, { ...job, status: "running", startedAt: new Date().toISOString() });
+  try {
+    const report = await executeBackupJob({ jobFile: runningPath });
+    const donePath = path.join(directories.done, path.basename(runningPath));
+    updateTypedBackupJob(runningPath, { status: "done", finishedAt: new Date().toISOString() });
+    fs.renameSync(runningPath, donePath);
+    log(`Complete platform backup manifest: ${report.manifestPath}`);
+    return report;
+  } catch (error) {
+    if (fs.existsSync(runningPath)) {
+      updateTypedBackupJob(runningPath, { status: "failed", finishedAt: new Date().toISOString(), resultSummary: String(error?.message ?? error).slice(0, 500) });
+      fs.renameSync(runningPath, path.join(directories.failed, path.basename(runningPath)));
+    }
+    throw error;
+  }
+}
+
+function verifiedPlatformManifests() {
+  const manifestDir = path.join(backupRootPath(), "manifests");
+  return listFilesRecursive(manifestDir, (filePath) => filePath.endsWith(".json")).map((manifestPath) => {
+    try {
+      const manifest = verifyBackupManifestDocument(JSON.parse(fs.readFileSync(manifestPath, "utf8")));
+      return manifest.scope.kind === "platform" && manifest.coverage.complete ? { manifestPath, manifest } : null;
+    } catch {
+      return null;
+    }
+  }).filter(Boolean).sort((a, b) => Date.parse(b.manifest.createdAt) - Date.parse(a.manifest.createdAt));
+}
+
+function pruneManifestBackups() {
+  const keepLast = positiveInteger(argv.keepLast ?? process.env.BACKUP_LOCAL_KEEP_LAST ?? 42, "--keepLast", 1);
+  const manifests = verifiedPlatformManifests();
+  const retained = manifests.slice(0, keepLast);
+  const expired = manifests.slice(keepLast);
+  const protectedArtifacts = new Set(retained.flatMap(({ manifest }) => manifest.artifacts.map((artifact) => artifact.path)));
+  const candidates = [];
+  for (const entry of expired) {
+    candidates.push(entry.manifestPath);
+    for (const artifact of entry.manifest.artifacts) {
+      if (protectedArtifacts.has(artifact.path)) continue;
+      const artifactPath = resolveInside(backupRootPath(), path.join(backupRootPath(), artifact.path));
+      candidates.push(artifactPath, `${artifactPath}.sha256`, `${artifactPath}.sig.json`);
+    }
+  }
+  const existingCandidates = [...new Set(candidates)].filter((filePath) => fs.existsSync(filePath));
+  const apply = booleanFlag(argv.confirmPruneManifestBackups);
+  if (apply) for (const filePath of existingCandidates) fs.rmSync(filePath);
+  const payload = {
+    generatedAt: new Date().toISOString(),
+    status: "passed",
+    mode: apply ? "apply" : "plan",
+    keepLast,
+    completeManifestCount: manifests.length,
+    retainedManifestIds: retained.map(({ manifest }) => manifest.id),
+    expiredManifestIds: expired.map(({ manifest }) => manifest.id),
+    candidateFileCount: existingCandidates.length,
+    unmanifestedArtifactsDeleted: false,
+  };
+  const reportPath = writeJsonReport("backup-retention", `manifest-retention-${reportTimestamp()}`, payload);
+  log(`Manifest retention ${payload.mode} report written to ${reportPath}`);
+  return payload;
 }
 
 async function certificateExpiryCheck() {
@@ -4502,7 +4809,9 @@ function resticConfig(options = {}) {
   const repository = options.repository ?? argv.repository ?? process.env.RESTIC_REPOSITORY;
   const passwordFile = path.resolve(options.passwordFile ?? argv.passwordFile ?? process.env.RESTIC_PASSWORD_FILE ?? path.join(infraRoot, "secrets", "restic_password.txt"));
   const tag = options.tag ?? argv.tag ?? "platform-backups";
-  return { repository, passwordFile, tag };
+  const hostname = String(options.hostname ?? argv.hostname ?? process.env.RESTIC_HOSTNAME ?? "platform-infrastructure").trim();
+  if (!/^[a-z0-9](?:[a-z0-9.-]{0,62}[a-z0-9])?$/.test(hostname)) fail("RESTIC_HOSTNAME must be a stable DNS-safe identity.");
+  return { repository, passwordFile, tag, hostname };
 }
 
 function hostnameFromEndpoint(value) {
@@ -4623,12 +4932,21 @@ function resticRetentionConfig(options = {}) {
   return { keepLast, prune };
 }
 
+function immutableResticImage(image) {
+  const clean = String(image || "").trim();
+  const digest = clean.match(/(?:@sha256:|^sha256:)([a-f0-9]{64})$/i)?.[1] || "";
+  return Boolean(digest) && !/^0{64}$/.test(digest);
+}
+
 function resticDockerContainerArgs({ repository, passwordFile, mounts = [] }) {
   const resticPasswordDir = path.dirname(passwordFile);
   const resticPasswordName = path.basename(passwordFile);
   const repositoryClass = classifyResticRepository(repository);
   const rcloneConfig = resticRcloneConfig(repository);
   const image = process.env.RESTIC_IMAGE ?? (repositoryClass.type === "rclone" ? defaultResticRcloneImage : defaultResticImage);
+  if (booleanFlag(process.env.RESTIC_REQUIRE_IMMUTABLE_IMAGE ?? true) && !immutableResticImage(image)) {
+    fail("RESTIC_IMAGE must be pinned by digest before backup or restore execution.");
+  }
   const args = [
     "run",
     "--rm",
@@ -4666,6 +4984,9 @@ function resticRepositorySizeBytes(repository) {
   const remote = String(repository || "").replace(/^rclone:/i, "");
   const rcloneConfig = resticRcloneConfig(repository);
   const image = process.env.RESTIC_IMAGE ?? defaultResticRcloneImage;
+  if (booleanFlag(process.env.RESTIC_REQUIRE_IMMUTABLE_IMAGE ?? true) && !immutableResticImage(image)) {
+    fail("RESTIC_IMAGE must be pinned by digest before reading remote repository size.");
+  }
   const result = run("docker", [
     "run",
     "--rm",
@@ -4722,7 +5043,7 @@ function resticForgetOldSnapshots({ repository, passwordFile, tag }) {
       "--tag",
       tag,
       "--group-by",
-      "host,tags",
+      "tags",
       "--keep-last",
       String(keepLast),
       ...(prune ? ["--prune"] : []),
@@ -4731,73 +5052,52 @@ function resticForgetOldSnapshots({ repository, passwordFile, tag }) {
   log(`Restic retention applied: keep-last=${keepLast}${prune ? ", prune=yes" : ", prune=no"}.`);
 }
 
+function latestVerifiedPlatformBackupManifest() {
+  const directory = path.join(backupRootPath(), "manifests");
+  const candidates = listFilesRecursive(directory, (filePath) => filePath.endsWith(".json"));
+  for (const manifestPath of candidates) {
+    try {
+      const manifest = verifyBackupManifestDocument(JSON.parse(fs.readFileSync(manifestPath, "utf8")));
+      if (manifest.scope.kind === "platform" && manifest.scope.id === "platform" && manifest.coverage.complete) {
+        return { manifestPath, manifest };
+      }
+    } catch {
+      // Continue until a valid complete platform manifest is found.
+    }
+  }
+  fail("No complete signed platform backup manifest is available for off-site upload.");
+}
+
 async function offsiteBackupRestic() {
-  const backupFile = argv.backupFile ? path.resolve(argv.backupFile) : null;
-  const { repository, passwordFile, tag } = resticConfig();
+  if (argv.backupFile || booleanFlag(argv.allowPartial)) {
+    fail("Single-artifact and partial off-site uploads are not supported by the signed platform manifest pipeline.");
+  }
+  const { repository, passwordFile, tag, hostname } = resticConfig();
   requireResticCredentials({ repository, passwordFile });
   const backupRoot = path.join(infraRoot, "backups");
-  const backupName = backupFile ? path.basename(backupFile) : null;
-  let mountSource = backupRoot;
-  let mountTarget = "/backups";
-  let resticPaths = [];
-  let artifactLabels = [];
-
-  if (backupFile) {
-    if (!fs.existsSync(backupFile)) {
-      fail(`Backup file not found: ${backupFile}`);
+  const { manifestPath, manifest } = latestVerifiedPlatformBackupManifest();
+  const pathSet = new Set([`/backups/${path.relative(backupRoot, manifestPath).replaceAll("\\", "/")}`]);
+  for (const artifact of manifest.artifacts) {
+    const artifactPath = resolveInside(backupRoot, path.join(backupRoot, artifact.path));
+    const verified = verifyBackupArtifact(artifactPath);
+    if (verified.hash !== artifact.sha256 || fs.statSync(artifactPath).size !== artifact.sizeBytes) {
+      fail(`Platform manifest artifact metadata mismatch for ${artifact.resourceId}.`);
     }
-    verifyBackupArtifact(backupFile);
-    mountSource = path.dirname(backupFile);
-    mountTarget = "/backup";
-    const sidecars = [`${backupName}.sha256`, `${backupName}.sig.json`].filter((file) => fs.existsSync(path.join(mountSource, file)));
-    resticPaths = [`/backup/${backupName}`, ...sidecars.map((file) => `/backup/${file}`)];
-    artifactLabels = [backupFile];
-  } else {
-    const specs = [
-      ["applications", path.join(backupRoot, "applications"), (file) => file.endsWith(".tar.gz")],
-      ["postgres", path.join(backupRoot, "postgres"), (file) => file.endsWith(".dump")],
-      ["mariadb", path.join(backupRoot, "mariadb"), (file) => file.endsWith(".sql.gz")],
-      ["minio", path.join(backupRoot, "minio"), (file) => file.endsWith(".tar.gz")],
-      ["keycloak", path.join(backupRoot, "keycloak"), (file) => file.endsWith(".tar.gz")],
-      ["secret-manager", path.join(backupRoot, "secret-manager"), (file) => file.endsWith(".tar.gz")],
-    ];
-    const missing = [];
-    const artifacts = [];
-    for (const [label, directory, predicate] of specs) {
-      const artifact = label === "applications" ? latestFileByMtimeRecursive(directory, predicate) : latestFileByMtime(directory, predicate);
-      if (!artifact) {
-        missing.push(label);
-        continue;
-      }
-      verifyBackupArtifact(artifact);
-      artifacts.push(artifact);
+    const sidecars = [`${artifactPath}.sha256`, `${artifactPath}.sig.json`].filter((file) => fs.existsSync(file));
+    for (const filePath of [artifactPath, ...sidecars]) {
+      const relative = path.relative(backupRoot, filePath).replaceAll("\\", "/");
+      pathSet.add(`/backups/${relative}`);
     }
-    if (missing.length && !booleanFlag(argv.allowPartial)) {
-      fail(`Missing local backup artifacts for off-site upload: ${missing.join(", ")}. Run the matching backup-* command first or pass --allowPartial.`);
-    }
-    if (!artifacts.length) {
-      fail("No local backup artifacts found. Run backup-postgres, backup-mariadb, backup-minio, backup-keycloak and backup-secret-manager-metadata first.");
-    }
-    const pathSet = new Set();
-    for (const artifact of artifacts) {
-      const sidecars = [`${artifact}.sha256`, `${artifact}.sig.json`].filter((file) => fs.existsSync(file));
-      for (const filePath of [artifact, ...sidecars]) {
-        const relative = path.relative(backupRoot, filePath).replaceAll("\\", "/");
-        pathSet.add(`/backups/${relative}`);
-      }
-    }
-    resticPaths = [...pathSet];
-    artifactLabels = artifacts;
   }
   resticDockerRun({
     repository,
     passwordFile,
-    mounts: ["-v", `${hostPathForContainerMount(mountSource)}:${mountTarget}:ro`],
-    resticArgs: ["backup", ...resticPaths, "--tag", tag],
+    mounts: ["-v", `${hostPathForContainerMount(backupRoot)}:/backups:ro`],
+    resticArgs: ["backup", ...pathSet, "--tag", tag, "--host", hostname],
   });
   resticForgetOldSnapshots({ repository, passwordFile, tag });
   verifyResticRepositorySizeLimit(repository);
-  log(`Off-site backup completed for ${artifactLabels.join(", ")}`);
+  log(`Off-site backup completed for ${manifest.resources.map((resource) => resource.id).join(", ")}`);
 }
 
 const offsiteRestoreFamilySpecs = [
@@ -10636,7 +10936,9 @@ async function backupMariadb(options = {}) {
     dockerExec(container, ["rm", "-f", containerPath]);
 
     const hash = sha256File(hostPath);
-    fs.writeFileSync(`${hostPath}.sha256`, `${hash}  ${fileName}\n`, "ascii");
+    fs.chmodSync(hostPath, 0o600);
+    fs.writeFileSync(`${hostPath}.sha256`, `${hash}  ${fileName}\n`, { encoding: "ascii", mode: 0o600 });
+    fs.chmodSync(`${hostPath}.sha256`, 0o600);
     const signature = signBackupArtifact(hostPath, hash);
     recordDatabaseBackupEvidence({
       engine: "mariadb",
@@ -10837,7 +11139,7 @@ async function backupMinio(options = {}) {
     log(`MinIO backup written to ${hostPath}`);
     log(`SHA256: ${hash}`);
     log(`Signature: ${signature.signaturePath} (${signature.keyId})`);
-    return { hostPath, hash, container };
+    return { hostPath, hash, signature, container };
   } catch (error) {
     try {
       recordDatabaseBackupEvidence({
@@ -11058,7 +11360,7 @@ env | grep '^KC_' | grep -Ev 'PASSWORD|SECRET|TOKEN|KEY' | sort > "$work/runtime
     log(`Keycloak config backup written to ${hostPath}`);
     log(`SHA256: ${hash}`);
     log(`Signature: ${signature.signaturePath} (${signature.keyId})`);
-    return { hostPath, hash, container };
+    return { hostPath, hash, signature, container };
   } catch (error) {
     try {
       dockerExec(container, ["rm", "-rf", containerWorkDir], { allowFailure: true });
@@ -11230,7 +11532,7 @@ async function backupSecretManagerMetadata(options = {}) {
     log(`Secret Manager metadata backup written to ${hostPath}`);
     log(`SHA256: ${hash}`);
     log(`Signature: ${signature.signaturePath} (${signature.keyId})`);
-    return { hostPath, hash };
+    return { hostPath, hash, signature };
   } catch (error) {
     recordDatabaseBackupEvidence({
       engine: "secret-manager",
@@ -12655,9 +12957,9 @@ async function staticSecurityCheckBody() {
   assertMatch(backupSchedulerScript, /BACKUP_SCHEDULER_ENV_FILE[\s\S]*write_env_var PLATFORM_INFRA_HOST_ROOT/, "Backup scheduler must pass detected host roots through a private runtime env file.");
   assertMatch(backupSchedulerScript, /load_runtime_env\(\)[\s\S]*export "\$name=\$value"[\s\S]*--run/, "Backup scheduler must parse its private runtime env file without sourcing it.");
   assertNoMatch(backupSchedulerScript, /(^|\n)\s*\.\s+"\$ENV_FILE"|printf '\. %s &&/, "Backup scheduler must not source its runtime env file.");
-  assertMatch(backupSchedulerScript, /backup-postgres[\s\S]*backup-mariadb[\s\S]*backup-minio[\s\S]*backup-keycloak[\s\S]*backup-secret-manager-metadata/, "Backup scheduler must schedule all local backup families.");
+  assertMatch(backupSchedulerScript, /BACKUP_SCHEDULER_CATALOG_CRON[\s\S]*backup-platform-catalog/, "Backup scheduler must schedule one complete typed platform catalog.");
   assertMatch(backupSchedulerScript, /full-restore-drill/, "Backup scheduler must schedule a regular full restore drill.");
-  assertMatch(backupSchedulerScript, /prune-postgres-backups/, "Backup scheduler must schedule retention cleanup.");
+  assertMatch(backupSchedulerScript, /BACKUP_SCHEDULER_ENABLE_RETENTION_APPLY[\s\S]*prune-manifest-backups/, "Backup scheduler must keep retention plan-only until explicitly enabled.");
   assertMatch(backupSchedulerScript, /offsite-backup-restic/, "Backup scheduler must support off-site Restic upload.");
   assertMatch(backupSchedulerScript, /crond -f/, "Backup scheduler must run cron in the foreground inside the container.");
   assertMatch(compose, /x-default-logging:[\s\S]*max-size:\s+"10m"[\s\S]*max-file:\s+"5"/, "Compose services must define bounded json-file logging.");
@@ -13388,7 +13690,10 @@ async function staticSecurityCheckBody() {
   assertMatch(opsScript, /function signBackupArtifact/, "Ops script must sign PostgreSQL backup artifacts.");
   assertMatch(opsScript, /function verifyBackupArtifact/, "Ops script must verify PostgreSQL backup signatures before restore.");
   assertMatch(opsScript, /verifyBackupArtifact\(backupFile\)/, "Restore paths must verify signed backup artifacts before pg_restore.");
-  assertMatch(opsScript, /Missing local backup artifacts for off-site upload/, "Restic off-site upload must require all backup artifact families by default.");
+  assertMatch(opsScript, /latestVerifiedPlatformBackupManifest[\s\S]*manifest\.coverage\.complete[\s\S]*single-artifact and partial off-site uploads are not supported/i, "Restic off-site upload must require one complete signed platform manifest.");
+  assertMatch(opsScript, /function platformBackupResources[\s\S]*minio-data[\s\S]*keycloak-config[\s\S]*control-center-state[\s\S]*secret-manager-metadata/, "Platform catalog backups must cover all declared platform state resources.");
+  assertMatch(opsScript, /function pruneManifestBackups[\s\S]*confirmPruneManifestBackups[\s\S]*unmanifestedArtifactsDeleted:\s*false/, "Local retention must be manifest-bound, explicit and preserve unmanifested artifacts.");
+  assertMatch(backupSchedulerScript, /(?=[\s\S]*backup-platform-catalog)(?=[\s\S]*offsite-backup-restic)(?=[\s\S]*prune-manifest-backups)/, "Backup scheduler must define complete catalog backup, off-site copy and manifest retention.");
   assertMatch(opsScript, /async function offsiteRestoreDrillRestic/, "Ops script must provide an off-site Restic restore drill.");
   assertMatch(opsScript, /resticPassthroughEnvKeys[\s\S]*AWS_ACCESS_KEY_ID[\s\S]*AWS_SECRET_ACCESS_KEY/, "Restic operations must pass S3-compatible credentials into the Restic container.");
   assertMatch(opsScript, /"snapshots",\s*"--json",\s*"--tag",\s*tag/, "Off-site restore drill must validate the remote Restic snapshot list by tag.");
@@ -14750,6 +15055,7 @@ Commands:
   alert-evidence
   apply-postgres-migrations
   backup-applications
+  backup-coverage-matrix
   backup-mariadb
   backup-keycloak
   backup-minio
@@ -14759,6 +15065,7 @@ Commands:
   backup-restore-drill-minio
   backup-restore-drill-secret-manager-metadata
   backup-postgres
+  backup-platform-catalog
   backup-scheduler
   backup-secret-manager-metadata
   browser-e2e-tests
@@ -14814,6 +15121,7 @@ Commands:
   pre-go-live-evidence
   project-router-tests
   prune-postgres-backups
+  prune-manifest-backups
   production-go-no-go
   production-preflight
   rate-limit-evidence
@@ -14860,7 +15168,9 @@ const commands = {
   "backup-restore-drill-minio": backupRestoreDrillMinio,
   "backup-restore-drill-secret-manager-metadata": backupRestoreDrillSecretManagerMetadata,
   "backup-applications": backupApplications,
+  "backup-coverage-matrix": () => writeBackupCoverageReport(platformBackupResources()),
   "backup-postgres": backupPostgres,
+  "backup-platform-catalog": backupPlatformCatalog,
   "backup-scheduler": backupSchedulerCheck,
   "backup-secret-manager-metadata": backupSecretManagerMetadata,
   "browser-e2e-tests": browserE2eTests,
@@ -14916,6 +15226,7 @@ const commands = {
   "pre-go-live-evidence": preGoLiveEvidence,
   "project-router-tests": projectRouterTests,
   "prune-postgres-backups": prunePostgresBackups,
+  "prune-manifest-backups": pruneManifestBackups,
   "production-go-no-go": productionGoNoGo,
   "production-preflight": productionPreflight,
   "rate-limit-evidence": rateLimitEvidence,

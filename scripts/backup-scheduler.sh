@@ -1,9 +1,11 @@
 #!/usr/bin/env sh
 set -eu
+umask 077
 
 INFRA_ROOT="${PLATFORM_INFRA_ROOT:-/infra}"
 INFRA_CONTAINER_ROOT="${PLATFORM_INFRA_CONTAINER_ROOT:-$INFRA_ROOT}"
 SOURCE_ROOT="${PROJECT_SOURCE_ROOT:-/project}"
+STATE_ROOT="${PROJECT_STATE_ROOT:-/var/www/project-state}"
 INFRA_HOST_ROOT="${PLATFORM_INFRA_HOST_ROOT:-}"
 SOURCE_HOST_ROOT="${PROJECT_SOURCE_HOST_ROOT:-}"
 LOG_DIR="${BACKUP_SCHEDULER_LOG_DIR:-/var/log/platform}"
@@ -13,24 +15,13 @@ JOBS_DIR="${BACKUP_SCHEDULER_JOBS_DIR:-/var/www/project-state/backup-jobs}"
 QUEUE_POLL_SECONDS="${BACKUP_SCHEDULER_QUEUE_POLL_SECONDS:-5}"
 RESTORE_DRILL_WEEKDAY="${BACKUP_SCHEDULER_RESTORE_DRILL_WEEKDAY:-0}"
 
-POSTGRES_BACKUP_AT="${BACKUP_SCHEDULER_POSTGRES_AT:-03:15}"
-APPLICATIONS_BACKUP_AT="${BACKUP_SCHEDULER_APPLICATIONS_AT:-03:05}"
-MARIADB_BACKUP_AT="${BACKUP_SCHEDULER_MARIADB_AT:-03:45}"
-MINIO_BACKUP_AT="${BACKUP_SCHEDULER_MINIO_AT:-04:00}"
-KEYCLOAK_BACKUP_AT="${BACKUP_SCHEDULER_KEYCLOAK_AT:-04:10}"
-SECRET_MANAGER_BACKUP_AT="${BACKUP_SCHEDULER_SECRET_MANAGER_AT:-04:20}"
-POSTGRES_BACKUP_CRON="${BACKUP_SCHEDULER_POSTGRES_CRON:-}"
-APPLICATIONS_BACKUP_CRON="${BACKUP_SCHEDULER_APPLICATIONS_CRON:-5 */8 * * *}"
-MARIADB_BACKUP_CRON="${BACKUP_SCHEDULER_MARIADB_CRON:-}"
-MINIO_BACKUP_CRON="${BACKUP_SCHEDULER_MINIO_CRON:-}"
-KEYCLOAK_BACKUP_CRON="${BACKUP_SCHEDULER_KEYCLOAK_CRON:-}"
-SECRET_MANAGER_BACKUP_CRON="${BACKUP_SCHEDULER_SECRET_MANAGER_CRON:-}"
+CATALOG_BACKUP_CRON="${BACKUP_SCHEDULER_CATALOG_CRON:-5 */8 * * *}"
 FULL_RESTORE_DRILL_AT="${BACKUP_SCHEDULER_FULL_RESTORE_DRILL_AT:-04:45}"
-RETENTION_AT="${BACKUP_SCHEDULER_RETENTION_AT:-05:15}"
-OFFSITE_BACKUP_AT="${BACKUP_SCHEDULER_OFFSITE_AT:-05:30}"
-OFFSITE_BACKUP_CRON="${BACKUP_SCHEDULER_OFFSITE_CRON:-}"
+RETENTION_CRON="${BACKUP_SCHEDULER_RETENTION_CRON:-50 */8 * * *}"
+OFFSITE_BACKUP_CRON="${BACKUP_SCHEDULER_OFFSITE_CRON:-35 */8 * * *}"
 
 ENABLE_OFFSITE="${BACKUP_SCHEDULER_ENABLE_OFFSITE:-false}"
+ENABLE_RETENTION_APPLY="${BACKUP_SCHEDULER_ENABLE_RETENTION_APPLY:-false}"
 RUN_ON_START="${BACKUP_SCHEDULER_RUN_ON_START:-false}"
 DRY_RUN="${BACKUP_SCHEDULER_DRY_RUN:-false}"
 
@@ -114,16 +105,23 @@ prepare_runtime_env() {
   write_env_var PLATFORM_INFRA_HOST_ROOT "$INFRA_HOST_ROOT"
   write_env_var PROJECT_SOURCE_ROOT "$SOURCE_ROOT"
   write_env_var PROJECT_SOURCE_HOST_ROOT "$SOURCE_HOST_ROOT"
+  write_env_var PROJECT_STATE_ROOT "$STATE_ROOT"
+  write_env_var PROJECT_DATABASES_FILE "${PROJECT_DATABASES_FILE:-$STATE_ROOT/databases.json}"
   write_env_var NODE_IMAGE "${NODE_IMAGE:-}"
   write_env_var BACKUP_SIGNING_KEYS_FILE "${BACKUP_SIGNING_KEYS_FILE:-}"
   write_env_var RESTIC_IMAGE "${RESTIC_IMAGE:-}"
   write_env_var RESTIC_REPOSITORY "${RESTIC_REPOSITORY:-}"
   write_env_var RESTIC_PASSWORD_FILE "${RESTIC_PASSWORD_FILE:-}"
   write_env_var RESTIC_KEEP_LAST "${RESTIC_KEEP_LAST:-}"
+  write_env_var RESTIC_HOSTNAME "${RESTIC_HOSTNAME:-platform-infrastructure}"
+  write_env_var RESTIC_REQUIRE_IMMUTABLE_IMAGE "${RESTIC_REQUIRE_IMMUTABLE_IMAGE:-true}"
   write_env_var RESTIC_MAX_REPOSITORY_BYTES "${RESTIC_MAX_REPOSITORY_BYTES:-}"
   write_env_var RCLONE_CONFIG "${RCLONE_CONFIG:-}"
   write_env_var POSTGRES_BACKUP_DATABASE "${POSTGRES_BACKUP_DATABASE:-}"
+  write_env_var APP_DB_NAME "${APP_DB_NAME:-app_db}"
+  write_env_var KEYCLOAK_DB_NAME "${KEYCLOAK_DB_NAME:-keycloak}"
   write_env_var POSTGRES_OPS_SCHEMA "${POSTGRES_OPS_SCHEMA:-}"
+  write_env_var BACKUP_LOCAL_KEEP_LAST "${BACKUP_LOCAL_KEEP_LAST:-42}"
   write_env_var BACKUP_SCHEDULER_JOBS_DIR "$JOBS_DIR"
   write_env_var AWS_ACCESS_KEY_ID "${AWS_ACCESS_KEY_ID:-}"
   write_env_var AWS_SECRET_ACCESS_KEY "${AWS_SECRET_ACCESS_KEY:-}"
@@ -142,16 +140,6 @@ cron_time() {
     exit 1
   fi
   printf '%s %s' "$minute" "$hour"
-}
-
-append_daily() {
-  time_value="$1"
-  name="$2"
-  command_value="$3"
-  schedule="$(cron_time "$time_value" "$name")"
-  log_file="$LOG_DIR/$name.log"
-  printf '%s * * * cd %s && mkdir -p %s && %s >> %s 2>&1\n' \
-    "$schedule" "$(quote_shell_value "$INFRA_ROOT")" "$(quote_shell_value "$LOG_DIR")" "$command_value" "$(quote_shell_value "$log_file")" >> "$CRON_FILE"
 }
 
 validate_cron_expression() {
@@ -183,18 +171,6 @@ append_cron_expression() {
   log_file="$LOG_DIR/$name.log"
   printf '%s cd %s && mkdir -p %s && %s >> %s 2>&1\n' \
     "$expression" "$(quote_shell_value "$INFRA_ROOT")" "$(quote_shell_value "$LOG_DIR")" "$command_value" "$(quote_shell_value "$log_file")" >> "$CRON_FILE"
-}
-
-append_scheduled() {
-  cron_value="$1"
-  time_value="$2"
-  name="$3"
-  command_value="$4"
-  if [ -n "$cron_value" ]; then
-    append_cron_expression "$cron_value" "$name" "$command_value"
-  else
-    append_daily "$time_value" "$name" "$command_value"
-  fi
 }
 
 append_weekly() {
@@ -303,24 +279,20 @@ if [ "${1:-}" = "--run" ]; then
 fi
 
 mkdir -p "$LOG_DIR" "$(dirname "$CRON_FILE")" "$JOBS_DIR/queued" "$JOBS_DIR/running" "$JOBS_DIR/done" "$JOBS_DIR/failed"
+chmod 700 "$LOG_DIR" "$JOBS_DIR" "$JOBS_DIR/queued" "$JOBS_DIR/running" "$JOBS_DIR/done" "$JOBS_DIR/failed"
 prepare_runtime_env
 : > "$CRON_FILE"
 
-append_scheduled "$APPLICATIONS_BACKUP_CRON" "$APPLICATIONS_BACKUP_AT" "applications-backup" "$(node_ops backup-applications)"
-append_scheduled "$POSTGRES_BACKUP_CRON" "$POSTGRES_BACKUP_AT" "postgres-backup" "$(node_ops backup-postgres)"
-append_scheduled "$MARIADB_BACKUP_CRON" "$MARIADB_BACKUP_AT" "mariadb-backup" "$(node_ops backup-mariadb)"
-append_scheduled "$MINIO_BACKUP_CRON" "$MINIO_BACKUP_AT" "minio-backup" "$(node_ops backup-minio)"
-append_scheduled "$KEYCLOAK_BACKUP_CRON" "$KEYCLOAK_BACKUP_AT" "keycloak-backup" "$(node_ops backup-keycloak)"
-append_scheduled "$SECRET_MANAGER_BACKUP_CRON" "$SECRET_MANAGER_BACKUP_AT" "secret-manager-backup" "$(node_ops backup-secret-manager-metadata)"
-append_daily "$RETENTION_AT" "postgres-retention" "$(node_ops prune-postgres-backups)"
+append_cron_expression "$CATALOG_BACKUP_CRON" "platform-catalog-backup" "$(node_ops backup-platform-catalog)"
+if [ "$ENABLE_RETENTION_APPLY" = "true" ] || [ "$ENABLE_RETENTION_APPLY" = "1" ]; then
+  append_cron_expression "$RETENTION_CRON" "platform-manifest-retention" "$(node_ops prune-manifest-backups) --confirmPruneManifestBackups"
+else
+  append_cron_expression "$RETENTION_CRON" "platform-manifest-retention-plan" "$(node_ops prune-manifest-backups)"
+fi
 append_weekly "$FULL_RESTORE_DRILL_AT" "full-restore-drill" "$(node_ops full-restore-drill)"
 
 if [ "$ENABLE_OFFSITE" = "true" ] || [ "$ENABLE_OFFSITE" = "1" ]; then
-  if [ -n "$OFFSITE_BACKUP_CRON" ]; then
-    append_cron_expression "$OFFSITE_BACKUP_CRON" "restic-offsite" "$(node_ops offsite-backup-restic)"
-  else
-    append_daily "$OFFSITE_BACKUP_AT" "restic-offsite" "$(node_ops offsite-backup-restic)"
-  fi
+  append_cron_expression "$OFFSITE_BACKUP_CRON" "restic-offsite" "$(node_ops offsite-backup-restic)"
 fi
 
 echo "Installed Platform backup scheduler crontab:"
@@ -333,12 +305,7 @@ fi
 if [ "$RUN_ON_START" = "true" ] || [ "$RUN_ON_START" = "1" ]; then
   cd "$INFRA_ROOT"
   load_runtime_env
-  node "$INFRA_ROOT/scripts/infra-ops.mjs" backup-applications
-  node "$INFRA_ROOT/scripts/infra-ops.mjs" backup-postgres
-  node "$INFRA_ROOT/scripts/infra-ops.mjs" backup-mariadb
-  node "$INFRA_ROOT/scripts/infra-ops.mjs" backup-minio
-  node "$INFRA_ROOT/scripts/infra-ops.mjs" backup-keycloak
-  node "$INFRA_ROOT/scripts/infra-ops.mjs" backup-secret-manager-metadata
+  node "$INFRA_ROOT/scripts/infra-ops.mjs" backup-platform-catalog
 fi
 
 process_backup_job_queue &
