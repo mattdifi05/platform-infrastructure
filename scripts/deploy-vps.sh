@@ -64,14 +64,8 @@ git fetch --all --prune
 git checkout "$branch"
 git pull --ff-only origin "$branch"
 sh ./scripts/vps-preflight.sh "$env_file"
-docker compose --env-file "$env_file" -p "$project_name" \
-    -f compose.yaml \
-    -f compose.build.yaml \
-    -f compose.secrets.yaml \
-    -f compose.vps.yaml \
-    -f compose.waf.yaml \
-    -f compose.vps-waf.yaml \
-    up -d --build --remove-orphans
+COMPOSE_ENV_FILE="$env_file" COMPOSE_PROJECT_NAME="$project_name" \
+  sh ./scripts/compose-vps.sh up -d --build --remove-orphans
 DEPLOY_RUN_WAF_SMOKE="$deploy_run_waf_smoke" \
 DEPLOY_RUN_INFRA_HEALTH="$deploy_run_infra_health" \
 DEPLOY_RUN_PRODUCTION_PREFLIGHT="$deploy_run_production_preflight" \

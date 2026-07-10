@@ -2629,6 +2629,8 @@ function collectInfraContainerImageRefs() {
   const composeFiles = [
     "compose.yaml",
     "compose.build.yaml",
+    "compose.backup-scheduler.yaml",
+    "compose.runtime.yaml",
     "compose.prod.yaml",
     "compose.secrets.yaml",
     "compose.staging.yaml",
@@ -2780,6 +2782,8 @@ function infraDependencyHygiene() {
   const composeFiles = [
     "compose.yaml",
     "compose.build.yaml",
+    "compose.backup-scheduler.yaml",
+    "compose.runtime.yaml",
     "compose.prod.yaml",
     "compose.secrets.yaml",
     "compose.vps.yaml",
@@ -5128,8 +5132,8 @@ async function composeHealthcheckCoverage() {
       name: "vps-waf",
       envFile: ".env.vps.example",
       projectName: "platform_ops_health_vps",
-      files: ["compose.yaml", "compose.build.yaml", "compose.secrets.yaml", "compose.vps.yaml", "compose.waf.yaml", "compose.vps-waf.yaml"],
-      profiles: [],
+      files: ["compose.yaml", "compose.secrets.yaml", "compose.waf.yaml", "compose.vps.yaml", "compose.vps-waf.yaml", "compose.backup-scheduler.yaml", "compose.build.yaml", "compose.runtime.yaml"],
+      profiles: ["backup"],
     },
     {
       name: "backup-scheduler",
@@ -11742,6 +11746,7 @@ function staticSecurityInfraOnlyCheck() {
   log("==> Static security checks (infra-only)");
   const compose = readText(path.join(infraRoot, "compose.yaml"));
   const composeBuild = readText(path.join(infraRoot, "compose.build.yaml"));
+  const composeRuntime = readText(path.join(infraRoot, "compose.runtime.yaml"));
   const composeSecrets = readText(path.join(infraRoot, "compose.secrets.yaml"));
   const composeWaf = readText(path.join(infraRoot, "compose.waf.yaml"));
   const composeVPSWaf = readText(path.join(infraRoot, "compose.vps-waf.yaml"));
@@ -11759,6 +11764,8 @@ function staticSecurityInfraOnlyCheck() {
   const secretRotationEvidenceWrapper = readText(path.join(infraRoot, "scripts", "secret-rotation-evidence.sh"));
   const opsScript = readText(path.join(infraRoot, "scripts", "infra-ops.mjs"));
   const deployVPSScript = readText(path.join(infraRoot, "scripts", "deploy-vps.sh"));
+  const composeVPSScript = readText(path.join(infraRoot, "scripts", "compose-vps.sh"));
+  const vpsGoLiveScript = readText(path.join(infraRoot, "scripts", "vps-go-live.sh"));
   const vpsPostdeployScript = readText(path.join(infraRoot, "scripts", "vps-postdeploy.sh"));
   const productionReadinessLiveWrapper = readText(path.join(infraRoot, "scripts", "production-readiness-live.sh"));
   const githubWorkflow = readText(path.join(infraRoot, ".github", "workflows", "enterprise-infra.yml"));
@@ -11788,6 +11795,7 @@ function staticSecurityInfraOnlyCheck() {
   const infrastructureText = [
     compose,
     composeBuild,
+    composeRuntime,
     composeSecrets,
     composeWaf,
     composeVPSWaf,
@@ -11804,6 +11812,8 @@ function staticSecurityInfraOnlyCheck() {
     retentionEvidenceWrapper,
     secretRotationEvidenceWrapper,
     deployVPSScript,
+    composeVPSScript,
+    vpsGoLiveScript,
     vpsPostdeployScript,
     productionReadinessLiveWrapper,
     githubWorkflow,
@@ -11817,7 +11827,11 @@ function staticSecurityInfraOnlyCheck() {
   ].join("\n");
 
   assertNoMatch(infrastructureText, /(?:\.\.\/web-php-infrastructure|src\/infrastructure|enterprise-infrastructure)/, "Infrastructure must not reference retired duplicate infra directories.");
-  assertMatch(compose, /^name:\s+platform_infra_local/m, "Compose must set a stable local project name.");
+  assertMatch(compose, /^name:\s+\$\{COMPOSE_PROJECT_NAME:-platform_infra\}/m, "Compose must use an explicit environment-selectable project name.");
+  assertMatch(composeRuntime, /local-registry:[\s\S]*registry:3@sha256:[a-f0-9]{64}[\s\S]*enterprise_local_registry_data/, "Tracked runtime must manage the pinned local registry and its stable volume.");
+  assertMatch(composeRuntime, /worker-jobs:[\s\S]*read_only:\s+false[\s\S]*worker-notifications:[\s\S]*read_only:\s+false/, "Tracked runtime must replace the former worker hotfix.");
+  assertMatch(composeVPSScript, /compose\.backup-scheduler\.yaml[\s\S]*compose\.build\.yaml[\s\S]*compose\.runtime\.yaml[\s\S]*--profile backup/, "The VPS wrapper must define the canonical tracked runtime file order.");
+  assertNoMatch([readme, runbook, deployVPSScript, vpsGoLiveScript, composeVPSScript].join("\n"), /\.tmp\/(?:vps-runtime-override|compose\.worker-runtime-hotfix)\.yaml/, "Production commands must not depend on ignored runtime overlays.");
   assertMatch(compose, /dockerfile:\s+docker\/php-apache\.Dockerfile/, "Compose must build PHP hosting from the unified infra Dockerfile.");
   assertMatch(compose, /\$\{PHP_SOURCE_DIR:-\.\/php-runtime-root\}:\/var\/www\/html/, "Compose must default the PHP root to a neutral runtime-only document root.");
   assertNoMatch(compose, /\$\{PHP_SOURCE_DIR:-\.\/projects-portal\}:\/var\/www\/html/, "Compose must not mount a PHP projects portal as the Control Center.");
@@ -12318,7 +12332,7 @@ async function staticSecurityCheckBody() {
   assertMatch(backupSchedulerScript, /offsite-backup-restic/, "Backup scheduler must support off-site Restic upload.");
   assertMatch(backupSchedulerScript, /crond -f/, "Backup scheduler must run cron in the foreground inside the container.");
   assertMatch(compose, /x-default-logging:[\s\S]*max-size:\s+"10m"[\s\S]*max-file:\s+"5"/, "Compose services must define bounded json-file logging.");
-  assertMatch(compose, /^name:\s+platform_infra_local/m, "Compose must set a stable local project name to avoid accidental duplicate stacks.");
+  assertMatch(compose, /^name:\s+\$\{COMPOSE_PROJECT_NAME:-platform_infra\}/m, "Compose must use an environment-selectable project name to avoid accidental duplicate stacks.");
   assertMatch(composeBuild, /BACKEND_BUILD_IMAGE[\s\S]*WEB_BUILD_IMAGE[\s\S]*WORKER_NOTIFICATIONS_BUILD_IMAGE[\s\S]*WORKER_JOBS_BUILD_IMAGE/, "Compose build must use local build image variables.");
   assertMatch(composeBuild, /cache_from:[\s\S]*cache_to:/, "Compose build must define reusable BuildKit cache import/export.");
   assertMatch(composeBuild, /NEXT_PUBLIC_API_URL[\s\S]*NEXT_PUBLIC_ACCOUNT_URL/, "Compose build must pass public web URLs into the Next.js production build.");

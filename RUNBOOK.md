@@ -50,7 +50,7 @@ docker compose -p platform_infra_vps \
   -f compose.vps.yaml \
   -f compose.waf.yaml \
   -f compose.vps-waf.yaml \
-  -f .tmp/vps-runtime-override.yaml \
+  -f compose.runtime.yaml \
   ps
 
 curl -skS --resolve portal.platform-infrastructure.com:443:127.0.0.1 \
@@ -78,7 +78,7 @@ docker compose -p platform_infra_vps \
   -f compose.vps.yaml \
   -f compose.waf.yaml \
   -f compose.vps-waf.yaml \
-  -f .tmp/vps-runtime-override.yaml \
+  -f compose.runtime.yaml \
   up -d --force-recreate control-center
 ```
 

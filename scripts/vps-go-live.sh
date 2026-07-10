@@ -307,14 +307,8 @@ step_vps_preflight() {
 }
 
 step_start_stack() {
-  docker compose --env-file "$ENV_FILE" -p "$PROJECT_NAME" \
-    -f compose.yaml \
-    -f compose.build.yaml \
-    -f compose.secrets.yaml \
-    -f compose.vps.yaml \
-    -f compose.waf.yaml \
-    -f compose.vps-waf.yaml \
-    up -d --build --remove-orphans
+  COMPOSE_ENV_FILE="$ENV_FILE" COMPOSE_PROJECT_NAME="$PROJECT_NAME" \
+    sh ./scripts/compose-vps.sh up -d --build --remove-orphans
 }
 
 step_vps_postdeploy() {
@@ -406,7 +400,7 @@ run_step "vps-host-readiness" "sudo sh ./scripts/vps-host-readiness.sh --ssh-por
 run_step "vps-preflight" "sh ./scripts/vps-preflight.sh $ENV_FILE" step_vps_preflight
 
 if [ "$START_STACK" -eq 1 ]; then
-  run_step "compose-up" "docker compose --env-file $ENV_FILE -p $PROJECT_NAME -f compose.yaml -f compose.build.yaml -f compose.secrets.yaml -f compose.vps.yaml -f compose.waf.yaml -f compose.vps-waf.yaml up -d --build --remove-orphans" step_start_stack
+  run_step "compose-up" "COMPOSE_ENV_FILE=$ENV_FILE COMPOSE_PROJECT_NAME=$PROJECT_NAME sh ./scripts/compose-vps.sh up -d --build --remove-orphans" step_start_stack
 else
   add_step "compose-up" "skipped" "docker compose --env-file $ENV_FILE -p $PROJECT_NAME ... up -d --build --remove-orphans" "enable with --start-stack"
 fi

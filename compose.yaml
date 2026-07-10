@@ -1,4 +1,4 @@
-name: platform_infra_local
+name: ${COMPOSE_PROJECT_NAME:-platform_infra}
 
 x-default-logging: &default_logging
   driver: json-file

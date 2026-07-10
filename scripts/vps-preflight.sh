@@ -53,27 +53,11 @@ do
   fi
 done
 
-docker compose \
-  --env-file "$ENV_FILE" \
-  -p "$PROJECT_NAME" \
-  -f compose.yaml \
-  -f compose.build.yaml \
-  -f compose.secrets.yaml \
-  -f compose.vps.yaml \
-  -f compose.waf.yaml \
-  -f compose.vps-waf.yaml \
-  config --quiet
+COMPOSE_ENV_FILE="$ENV_FILE" COMPOSE_PROJECT_NAME="$PROJECT_NAME" \
+  sh ./scripts/compose-vps.sh config --quiet
 
-if docker compose \
-  --env-file "$ENV_FILE" \
-  -p "$PROJECT_NAME" \
-  -f compose.yaml \
-  -f compose.build.yaml \
-  -f compose.secrets.yaml \
-  -f compose.vps.yaml \
-  -f compose.waf.yaml \
-  -f compose.vps-waf.yaml \
-  config | grep -E 'image: .+:latest(@|$)' >/dev/null; then
+if COMPOSE_ENV_FILE="$ENV_FILE" COMPOSE_PROJECT_NAME="$PROJECT_NAME" \
+  sh ./scripts/compose-vps.sh config | grep -E 'image: .+:latest(@|$)' >/dev/null; then
   echo "Mutable :latest image found in rendered VPS config." >&2
   exit 1
 fi

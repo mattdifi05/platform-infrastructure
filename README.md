@@ -645,7 +645,7 @@ sh ./scripts/vps-postdeploy.sh .env
 
 Sul reference server corrente il path operativo e'
 `/home/platform_infrastructure/platform-infrastructure` e il runtime usa anche
-un override locale `.tmp/vps-runtime-override.yaml` per collegare sorgenti e
+il tracked overlay `compose.runtime.yaml` per collegare sorgenti e
 runtime dedicati. Quell'override e' stato-specifico: per nuovi server ricrea lo
 stesso intento in modo revisionato invece di copiarlo alla cieca.
 
@@ -658,7 +658,7 @@ docker compose -p platform_infra_vps \
   -f compose.vps.yaml \
   -f compose.waf.yaml \
   -f compose.vps-waf.yaml \
-  -f .tmp/vps-runtime-override.yaml \
+  -f compose.runtime.yaml \
   ps
 ```
 
@@ -784,6 +784,7 @@ fuori dal GO/NO-GO infra.
 - `compose.secrets.yaml`: overlay Docker secrets file-based.
 - `compose.prod.yaml`: overlay produzione.
 - `compose.vps.yaml`: overlay VPS prod-like dietro TLS esterno.
+- `compose.runtime.yaml`: runtime hosted-app, registry e override host versionati.
 - `compose.waf.yaml`: overlay OWASP CRS/ModSecurity davanti a Traefik.
 - `compose.vps-waf.yaml`: adattamento WAF per VPS con TLS/CDN esterno.
 - `compose.backup-scheduler.yaml`: scheduler backup/restore drill container-first.
