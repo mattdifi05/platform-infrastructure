@@ -15,6 +15,9 @@ RUN apk add --no-cache \
     openssh-client \
     tini
 
+COPY control-center/package.json control-center/package-lock.json /infra/control-center/
+RUN npm ci --prefix /infra/control-center --omit=dev --ignore-scripts --no-audit --no-fund
+
 WORKDIR /infra
 
 ENTRYPOINT ["tini", "--", "node", "/infra/scripts/infra-ops.mjs"]

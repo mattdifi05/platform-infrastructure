@@ -24,6 +24,7 @@ const requiredSecrets = [
   { name: "session_secret", kind: "opaque", bytes: 48, rotationDays: 90 },
   { name: "session_signing_keys", kind: "keyring", bytes: 48, keyPrefix: "s", rotationDays: 60 },
   { name: "projects_gateway_signing_keys", kind: "keyring", bytes: 48, keyPrefix: "p", rotationDays: 90 },
+  { name: "control_center_vault_keys", kind: "keyring", bytes: 48, keyPrefix: "v", rotationDays: 90, manualRotation: true },
   { name: "hash_pepper_keys", kind: "keyring", bytes: 48, keyPrefix: "h", rotationDays: 90 },
   { name: "backup_signing_keys", kind: "keyring", bytes: 48, keyPrefix: "b", rotationDays: 90 },
   { name: "alertmanager_webhook_token", kind: "opaque", bytes: 48, rotationDays: 90 },
@@ -164,7 +165,7 @@ function randomSecret(bytes = 36) {
 }
 
 function secretId(prefix) {
-  return `${prefix}${new Date().toISOString().replace(/\D/g, "").slice(0, 14)}`;
+  return `${prefix}${new Date().toISOString().replace(/\D/g, "").slice(0, 14)}_${randomSecret(4)}`;
 }
 
 function isUsableSecret(value) {

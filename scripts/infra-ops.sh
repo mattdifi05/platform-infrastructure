@@ -161,5 +161,6 @@ exec docker run --rm -i \
   -e "PROJECT_SOURCE_HOST_ROOT=$SOURCE_VOLUME_SOURCE" \
   -e "PLATFORM_OPS_CONTAINER=1" \
   -v "$INFRA_VOLUME_SOURCE:$INFRA_CONTAINER_ROOT" \
+  -v "$INFRA_CONTAINER_ROOT/control-center/node_modules" \
   -w "$INFRA_CONTAINER_ROOT" \
   "$OPS_IMAGE" "$@"

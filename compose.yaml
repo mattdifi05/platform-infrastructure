@@ -300,7 +300,6 @@ services:
       CONTROL_CENTER_LOGIN_WINDOW_SECONDS: ${CONTROL_CENTER_LOGIN_WINDOW_SECONDS:-60}
       CONTROL_CENTER_LOGIN_LOCK_SECONDS: ${CONTROL_CENTER_LOGIN_LOCK_SECONDS:-60}
       CONTROL_CENTER_DISCOVER_HOSTED_PROJECTS: ${CONTROL_CENTER_DISCOVER_HOSTED_PROJECTS:-false}
-      CONTROL_CENTER_SESSION_KEYS_FILE: /run/secrets/projects_gateway_signing_keys
       CONTROL_CENTER_PHPPGADMIN_INTERNAL_URL: ${CONTROL_CENTER_PHPPGADMIN_INTERNAL_URL:-http://phppgadmin:80}
       CONTROL_CENTER_DATABASE_LIVE_APPLY: ${CONTROL_CENTER_DATABASE_LIVE_APPLY:-false}
       CONTROL_CENTER_MARIADB_HOST: ${CONTROL_CENTER_MARIADB_HOST:-mariadb}
@@ -324,7 +323,9 @@ services:
       PROJECT_STORAGE_BUCKETS_FILE: /var/www/project-state/storage-buckets.json
       PROJECT_SENSITIVE_MATERIALS_FILE: /var/www/project-state/sensitive-materials.json
       PROJECT_VAULT_FILE: /var/www/project-state/secret-vault.json
-      CONTROL_CENTER_VAULT_KEY_FILE: /run/secrets/projects_gateway_signing_keys
+      CONTROL_CENTER_VAULT_KEY_FILE: /run/secrets/control_center_vault_keys
+      CONTROL_CENTER_VAULT_ACTIVE_KEY_ID: ${CONTROL_CENTER_VAULT_ACTIVE_KEY_ID:-}
+      CONTROL_CENTER_VAULT_LEGACY_KEY_FILE: /run/secrets/projects_gateway_signing_keys
       CONTROL_CENTER_EXISTING_SECRETS_DIR: /var/www/infra-docs/secrets
       PROJECT_WORKER_JOBS_FILE: /var/www/project-state/worker-jobs.json
       PROJECT_IDENTITY_ACCESS_FILE: /var/www/project-state/identity-access.json
@@ -356,6 +357,7 @@ services:
       - ./projects-portal/state:/var/www/project-state
     secrets:
       - projects_gateway_signing_keys
+      - control_center_vault_keys
       - control_center_database_url
       - app_db_password
       - mariadb_root_password
@@ -1082,6 +1084,8 @@ configs:
 secrets:
   control_center_database_url:
     file: ${CONTROL_CENTER_DATABASE_URL_SECRET_FILE:-./secrets/control_center_database_url.txt}
+  control_center_vault_keys:
+    file: ${CONTROL_CENTER_VAULT_KEYS_SECRET_FILE:-./secrets/control_center_vault_keys.txt}
   projects_gateway_signing_keys:
     file: ${PROJECTS_GATEWAY_SIGNING_KEYS_SECRET_FILE:-./secrets/projects_gateway_signing_keys.txt}
   smtp_password:

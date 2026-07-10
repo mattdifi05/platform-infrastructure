@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import {
   existsSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   rmSync,
   symlinkSync,
@@ -2062,6 +2063,7 @@ test("Admin Control Center local foundation", async (t) => {
   assert.doesNotMatch(JSON.stringify(vaultDelete.body), /vault-plain-value-should-not-leak/);
   const vaultStateAfterDelete = JSON.parse(readFileSync(vaultFile, "utf8"));
   assert.equal(Boolean(vaultStateAfterDelete.items["node-demo-local-app-password"]), false);
+  assert.equal(readdirSync(path.dirname(vaultFile)).some((name) => name.startsWith(`${path.basename(vaultFile)}.tmp-`)), false);
 
   const materialRotation = await postJson(`${baseUrl}/control/secrets/materials/node-demo-staging-app-config/rotation`, {
     rotationDays: 30,
@@ -2576,6 +2578,14 @@ test("Admin Control Center local foundation", async (t) => {
   const dumpPreview = await getJson(`${baseUrl}/control/backups/preview?path=postgres/node-demo-20260629.dump`);
   assert.equal(dumpPreview.type, "postgres-custom-dump");
   assert.match(dumpPreview.message, /restore drill/);
+  assert.equal(dumpPreview.mode, "metadata-only");
+  assert.equal(dumpPreview.content, "");
+
+  const sqlGzipPreview = await getJson(`${baseUrl}/control/backups/preview?path=postgres/node-demo-20260629.sql.gz`);
+  assert.equal(sqlGzipPreview.type, "sql-gzip");
+  assert.equal(sqlGzipPreview.mode, "metadata-only");
+  assert.equal(sqlGzipPreview.content, "");
+  assert.doesNotMatch(JSON.stringify(sqlGzipPreview), /copy-row-secret-should-not-leak/);
 
   const blockedBackupDelete = await postJson(`${baseUrl}/actions/backup-command`, {
     action: "delete-file",
@@ -2793,6 +2803,11 @@ test("Admin Control Center local foundation", async (t) => {
     assert.ok(event.action);
     assert.ok(event.requestId);
   }
+
+  writeFileSync(vaultFile, "{not-valid-json\n", { mode: 0o600 });
+  const corruptVaultResponse = await fetch(`${baseUrl}/control/vault`, { headers: { accept: "application/json" } });
+  assert.equal(corruptVaultResponse.status, 500);
+  assert.equal(readFileSync(vaultFile, "utf8"), "{not-valid-json\n");
 
   assert.equal(stderr, "");
 });
@@ -3238,8 +3253,9 @@ function prepareFixture() {
   writeFileSync(path.join(projectsRoot, "node-demo", "package.json"), `${JSON.stringify({ scripts: { start: "node server.js" } }, null, 2)}\n`);
   writeFileSync(path.join(projectsRoot, "node-demo", "src", "index.js"), "console.log('node-demo');\n");
   writeFileSync(path.join(projectsRoot, "node-demo", ".env"), "DB_NAME=\"node_demo_external\"\nDB_PASSWORD=\"db-password-should-not-leak\"\n");
-  writeFileSync(vaultKeyFile, "test-vault-encryption-key\n", { mode: 0o600 });
+  writeFileSync(vaultKeyFile, `v20260629000000=${"a".repeat(64)}\n`, { mode: 0o600 });
   writeFileSync(path.join(backupsRoot, "postgres", "node-demo-20260629.dump"), "fixture-backup-data\n");
+  writeFileSync(path.join(backupsRoot, "postgres", "node-demo-20260629.sql.gz"), "COPY secrets FROM stdin;\ncopy-row-secret-should-not-leak\n\\.\n");
   writeFileSync(path.join(backupsRoot, "postgres", "node-demo-20260629.dump.sha256"), "fixture-sha256\n");
   writeFileSync(path.join(backupsRoot, "postgres", "preview.txt"), "token=backup-secret-should-not-leak\nhealthy=true\n");
   writeFileSync(path.join(backupsRoot, "applications", "node-demo", "node-demo-source-20260629.tar.gz"), "fixture-source-archive\n");

@@ -2845,14 +2845,16 @@ async function testingHygiene() {
 function infraTestingHygiene() {
   const checkFiles = [
     "scripts/infra-ops.mjs",
+    "scripts/control-center-vault-reencrypt.mjs",
     "control-center/server.mjs",
+    "control-center/vault/keyring.mjs",
     "project-router/server.mjs",
     "scripts/infra-secret-manager.mjs",
   ];
   for (const file of checkFiles) {
     run(process.execPath, ["--check", file], { cwd: infraRoot });
   }
-  run(process.execPath, ["--test", "control-center/tests/control-center.test.mjs"], { cwd: infraRoot });
+  run(process.execPath, ["--test", ...controlCenterTestFiles()], { cwd: infraRoot });
   run(process.execPath, ["--test", "project-router/tests/project-router.test.mjs"], { cwd: infraRoot });
   const shellFiles = fs.readdirSync(path.join(infraRoot, "scripts")).filter((name) => name.endsWith(".sh")).sort();
   for (const file of shellFiles) {
@@ -2864,9 +2866,16 @@ function infraTestingHygiene() {
 async function controlCenterTests() {
   await withLocalCheckReport("control-center-tests", async () => {
     log("==> Control Center tests");
-    run(process.execPath, ["--test", "control-center/tests/control-center.test.mjs"], { cwd: infraRoot });
+    run(process.execPath, ["--test", ...controlCenterTestFiles()], { cwd: infraRoot });
     log("Control Center tests passed.");
   });
+}
+
+function controlCenterTestFiles() {
+  return fs.readdirSync(path.join(infraRoot, "control-center", "tests"))
+    .filter((name) => name.endsWith(".test.mjs"))
+    .sort()
+    .map((name) => path.join("control-center", "tests", name));
 }
 
 async function projectRouterTests() {
@@ -11897,7 +11906,7 @@ function staticSecurityInfraOnlyCheck() {
   assertMatch(compose, /control-center:[\s\S]*PROJECT_SENSITIVE_MATERIALS_FILE:\s+\/var\/www\/project-state\/sensitive-materials\.json/, "Control Center must persist metadata-only sensitive material inventory from the Node service.");
   assertMatch(controlCenterServer, /sensitiveMaterialsFile[\s\S]*handleMaterialCommand[\s\S]*planMaterialDeclare[\s\S]*planMaterialRotation[\s\S]*planMaterialUsage[\s\S]*planMaterialAccessAudit[\s\S]*readSensitiveMaterialsState[\s\S]*writeSensitiveMaterialsState/, "Control Center must manage sensitive material inventory, rotation, usage and access audit through a dedicated Node-managed JSON store.");
   assertMatch(controlCenterTest, /sensitive-materials\.json[\s\S]*\/control\/secrets\/materials[\s\S]*DECLARE-MATERIAL[\s\S]*material-plain-value-should-not-leak/, "Control Center tests must cover metadata-only sensitive material persistence, rotation, usage/access audit and plaintext redaction.");
-  assertMatch(compose, /control-center:[\s\S]*PROJECT_VAULT_FILE:\s+\/var\/www\/project-state\/secret-vault\.json[\s\S]*CONTROL_CENTER_VAULT_KEY_FILE:\s+\/run\/secrets\/projects_gateway_signing_keys[\s\S]*CONTROL_CENTER_EXISTING_SECRETS_DIR:\s+\/var\/www\/infra-docs\/secrets/, "Control Center must persist the encrypted local secret vault, source its encryption key from a mounted Docker secret, and scan existing secret files from the read-only infrastructure tree.");
+  assertMatch(compose, /control-center:[\s\S]*PROJECT_VAULT_FILE:\s+\/var\/www\/project-state\/secret-vault\.json[\s\S]*CONTROL_CENTER_VAULT_KEY_FILE:\s+\/run\/secrets\/control_center_vault_keys[\s\S]*CONTROL_CENTER_VAULT_LEGACY_KEY_FILE:\s+\/run\/secrets\/projects_gateway_signing_keys[\s\S]*CONTROL_CENTER_EXISTING_SECRETS_DIR:\s+\/var\/www\/infra-docs\/secrets/, "Control Center must persist the encrypted local secret vault, use a dedicated keyring with an explicit legacy migration source, and scan existing secret files from the read-only infrastructure tree.");
   assertMatch(controlCenterServer, /vaultFile[\s\S]*handleVaultCommand[\s\S]*planVaultSecretCreate[\s\S]*planVaultSecretImportExisting[\s\S]*planVaultSecretReveal[\s\S]*planVaultSecretDelete[\s\S]*sealVaultValue[\s\S]*openVaultValue[\s\S]*readVaultState[\s\S]*writeVaultState/, "Control Center must manage a dedicated encrypted Vault with add/remove, existing-secret import, and explicit audited reveal operations.");
   assertMatch(controlCenterTest, /secret-vault\.json[\s\S]*\/control\/vault\/import-existing[\s\S]*IMPORT-EXISTING-SECRETS[\s\S]*\/control\/vault\/secrets[\s\S]*STORE-VAULT-SECRET[\s\S]*REVEAL-VAULT-SECRET[\s\S]*DELETE-VAULT-SECRET/, "Control Center tests must cover encrypted Vault persistence, existing secret import, explicit reveal, plaintext redaction and item removal.");
   assertMatch(controlCenterPackage, /"name":\s+"@platform\/control-center"/, "Control Center project identity must stay generic.");
@@ -12130,6 +12139,8 @@ async function staticSecurityCheckBody() {
   const backupSchedulerScript = readText(path.join(infraRoot, "scripts", "backup-scheduler.sh"));
   const opsScript = readText(path.join(infraRoot, "scripts", "infra-ops.mjs"));
   const secretManagerScript = readText(path.join(infraRoot, "scripts", "infra-secret-manager.mjs"));
+  const vaultKeyringScript = readText(path.join(infraRoot, "control-center", "vault", "keyring.mjs"));
+  const vaultMigrationScript = readText(path.join(infraRoot, "scripts", "control-center-vault-reencrypt.mjs"));
   const backendConfig = readText(path.join(sourceRoot, "apps", "backend", "src", "server-config.ts"));
   const backendRedisStore = readText(path.join(sourceRoot, "apps", "backend", "src", "runtime", "redis-store.ts"));
   const backendSessionAuth = readText(path.join(sourceRoot, "apps", "backend", "src", "runtime", "session-auth.ts"));
@@ -12403,7 +12414,7 @@ async function staticSecurityCheckBody() {
   assertMatch(compose, /control-center:[\s\S]*PROJECT_SENSITIVE_MATERIALS_FILE:\s+\/var\/www\/project-state\/sensitive-materials\.json/, "Control Center must persist metadata-only sensitive material inventory from the Node service.");
   assertMatch(controlCenterServer, /sensitiveMaterialsFile[\s\S]*handleMaterialCommand[\s\S]*planMaterialDeclare[\s\S]*planMaterialRotation[\s\S]*planMaterialUsage[\s\S]*planMaterialAccessAudit[\s\S]*readSensitiveMaterialsState[\s\S]*writeSensitiveMaterialsState/, "Control Center must manage sensitive material inventory, rotation, usage and access audit through a dedicated Node-managed JSON store.");
   assertMatch(controlCenterTest, /sensitive-materials\.json[\s\S]*\/control\/secrets\/materials[\s\S]*DECLARE-MATERIAL[\s\S]*material-plain-value-should-not-leak/, "Control Center tests must cover metadata-only sensitive material persistence, rotation, usage/access audit and plaintext redaction.");
-  assertMatch(compose, /control-center:[\s\S]*PROJECT_VAULT_FILE:\s+\/var\/www\/project-state\/secret-vault\.json[\s\S]*CONTROL_CENTER_VAULT_KEY_FILE:\s+\/run\/secrets\/projects_gateway_signing_keys[\s\S]*CONTROL_CENTER_EXISTING_SECRETS_DIR:\s+\/var\/www\/infra-docs\/secrets/, "Control Center must persist the encrypted local secret vault, source its encryption key from a mounted Docker secret, and scan existing secret files from the read-only infrastructure tree.");
+  assertMatch(compose, /control-center:[\s\S]*PROJECT_VAULT_FILE:\s+\/var\/www\/project-state\/secret-vault\.json[\s\S]*CONTROL_CENTER_VAULT_KEY_FILE:\s+\/run\/secrets\/control_center_vault_keys[\s\S]*CONTROL_CENTER_VAULT_LEGACY_KEY_FILE:\s+\/run\/secrets\/projects_gateway_signing_keys[\s\S]*CONTROL_CENTER_EXISTING_SECRETS_DIR:\s+\/var\/www\/infra-docs\/secrets/, "Control Center must persist the encrypted local secret vault, use a dedicated keyring with an explicit legacy migration source, and scan existing secret files from the read-only infrastructure tree.");
   assertMatch(controlCenterServer, /vaultFile[\s\S]*handleVaultCommand[\s\S]*planVaultSecretCreate[\s\S]*planVaultSecretImportExisting[\s\S]*planVaultSecretReveal[\s\S]*planVaultSecretDelete[\s\S]*sealVaultValue[\s\S]*openVaultValue[\s\S]*readVaultState[\s\S]*writeVaultState/, "Control Center must manage a dedicated encrypted Vault with add/remove, existing-secret import, and explicit audited reveal operations.");
   assertMatch(controlCenterTest, /secret-vault\.json[\s\S]*\/control\/vault\/import-existing[\s\S]*IMPORT-EXISTING-SECRETS[\s\S]*\/control\/vault\/secrets[\s\S]*STORE-VAULT-SECRET[\s\S]*REVEAL-VAULT-SECRET[\s\S]*DELETE-VAULT-SECRET/, "Control Center tests must cover encrypted Vault persistence, existing secret import, explicit reveal, plaintext redaction and item removal.");
   assertMatch(controlCenterPackage, /"name":\s+"@platform\/control-center"/, "Control Center project identity must stay generic.");
@@ -12475,7 +12486,7 @@ async function staticSecurityCheckBody() {
   assertNoMatch(controlCenterServer, /CLOUDFLARE_API_TOKEN|api\.github\.com|cloudflare\.com\/client\/v4/i, "Control Center foundation must not make live provider calls or expose provider secrets.");
   assertMatch(githubWorkflow, /Control Center tests[\s\S]*control-center-tests/, "Infrastructure CI must run the Control Center API/UI regression tests.");
   assertMatch(githubWorkflow, /Project Router tests[\s\S]*project-router-tests/, "Infrastructure CI must run the Project Router PHP/Node routing regression tests.");
-  assertMatch(opsScript, /async function controlCenterTests[\s\S]*control-center\/tests\/control-center\.test\.mjs[\s\S]*"control-center-tests": controlCenterTests/, "Ops runner must expose container-first Control Center tests.");
+  assertMatch(opsScript, /async function controlCenterTests[\s\S]*controlCenterTestFiles\(\)[\s\S]*"control-center-tests": controlCenterTests/, "Ops runner must expose all container-first Control Center tests.");
   assertMatch(opsScript, /async function projectRouterTests[\s\S]*project-router\/tests\/project-router\.test\.mjs[\s\S]*"project-router-tests": projectRouterTests/, "Ops runner must expose container-first Project Router tests.");
   assertMatch(controlCenterTest, /admin guard[\s\S]*actions\/toggle-project/, "Control Center tests must keep mutation routes behind the admin guard.");
   assertMatch(controlCenterTest, /production[\s\S]*bad\.localhost\.com[\s\S]*422/, "Control Center tests must reject localhost production subdomain plans.");
@@ -12801,6 +12812,12 @@ async function staticSecurityCheckBody() {
   assertMatch(secretManagerScript, /AES-256-GCM/, "Infra Secret Manager must encrypt stored secrets with authenticated encryption.");
   assertMatch(secretManagerScript, /function audit\(/, "Infra Secret Manager must append an audit trail for secret operations.");
   assertMatch(secretManagerScript, /function materialize\(/, "Infra Secret Manager must materialize Docker secret files for Compose.");
+  assertMatch(secretManagerScript, /control_center_vault_keys[\s\S]*kind:\s*"keyring"/, "Infra Secret Manager must manage a dedicated Control Center Vault keyring.");
+  assertMatch(compose, /CONTROL_CENTER_VAULT_KEY_FILE:\s*\/run\/secrets\/control_center_vault_keys[\s\S]*CONTROL_CENTER_VAULT_LEGACY_KEY_FILE:\s*\/run\/secrets\/projects_gateway_signing_keys/, "Control Center Vault encryption must use a dedicated keyring with an explicit legacy migration source.");
+  assertNoMatch(controlCenterServer, /CONTROL_CENTER_VAULT_KEY_FILE\s*\|\|\s*process\.env\.CONTROL_CENTER_SESSION_KEYS_FILE|CONTROL_CENTER_VAULT_KEY\s*\|\||function vaultEncryptionMaterial/, "Control Center Vault must not fall back to session keys or unversioned environment key material.");
+  assertMatch(vaultKeyringScript, /keyId[\s\S]*openVaultCiphertext[\s\S]*keys\?\.get\(keyId\)/, "Vault decryption must select stable key material by ciphertext key id.");
+  assertMatch(vaultMigrationScript, /REENCRYPT-CONTROL-CENTER-VAULT[\s\S]*backup-dir[\s\S]*escrow-dir/, "Vault re-encryption apply must require explicit confirmation, state backup and key escrow.");
+  assertMatch(controlCenterServer, /endsWith\("\.sql\.gz"\)[\s\S]*mode:\s*"metadata-only"[\s\S]*content:\s*""/, "Database backup previews must be metadata-only and never return dump contents.");
   assertMatch(secretManagerScript, /mariadb_root_password[\s\S]*phpmyadmin_control_password/, "Infra Secret Manager must manage MariaDB and phpMyAdmin local Docker secrets.");
   assertMatch(opsScript, /runSecretManager\(\["verify"/, "Enterprise local secret validation must verify the proprietary secret manager store.");
   assertMatch(secretRotationEvidenceWrapper, /secret-rotation-evidence/, "Secret rotation evidence wrapper must delegate to the Dockerized ops runner.");

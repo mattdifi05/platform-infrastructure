@@ -2,13 +2,19 @@ import { createServer, request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { spawnSync } from "node:child_process";
-import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, statfsSync, writeFileSync, appendFileSync } from "node:fs";
+import { createHash, randomBytes } from "node:crypto";
+import { appendFileSync, closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, statfsSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { gunzipSync } from "node:zlib";
 import { AuthRequestError, createControlCenterAuth } from "./auth/oidc.mjs";
 import { controlCenterScriptTags, controlCenterStylesheetLinks, controlCenterUiContract } from "./components/ui/controlCenterUi.mjs";
+import {
+  loadVaultKeyring,
+  openLegacyVaultCiphertext,
+  openVaultCiphertext,
+  readLegacyVaultMaterial,
+  sealVaultPlaintext,
+} from "./vault/keyring.mjs";
 
 const port = Number(process.env.CONTROL_CENTER_PORT || 8080);
 const bindHost = String(process.env.CONTROL_CENTER_BIND_HOST || "0.0.0.0").trim();
@@ -29,8 +35,9 @@ const databaseCredentialDir = process.env.PROJECT_DATABASE_CREDENTIAL_DIR || pat
 const storageBucketsFile = process.env.PROJECT_STORAGE_BUCKETS_FILE || "/var/www/project-state/storage-buckets.json";
 const sensitiveMaterialsFile = process.env.PROJECT_SENSITIVE_MATERIALS_FILE || "/var/www/project-state/sensitive-materials.json";
 const vaultFile = process.env.PROJECT_VAULT_FILE || "/var/www/project-state/secret-vault.json";
-const vaultKeyFile = process.env.CONTROL_CENTER_VAULT_KEY_FILE || process.env.CONTROL_CENTER_SESSION_KEYS_FILE || "";
-const vaultKeyMaterial = process.env.CONTROL_CENTER_VAULT_KEY || "";
+const vaultKeyFile = process.env.CONTROL_CENTER_VAULT_KEY_FILE || "";
+const vaultActiveKeyId = process.env.CONTROL_CENTER_VAULT_ACTIVE_KEY_ID || "";
+const vaultLegacyKeyFile = process.env.CONTROL_CENTER_VAULT_LEGACY_KEY_FILE || "";
 const existingSecretsDir = process.env.CONTROL_CENTER_EXISTING_SECRETS_DIR || path.join(platformInfraRoot, "secrets");
 const includeRunSecretsInVaultImport = parseBoolean(process.env.CONTROL_CENTER_IMPORT_RUN_SECRETS || "");
 const vaultRevealTtlMs = clampNumber(Number(process.env.CONTROL_CENTER_VAULT_REVEAL_TTL_MS || 120000), 10000, 600000);
@@ -48,7 +55,6 @@ const settingsFile = process.env.PROJECT_SETTINGS_FILE || "/var/www/project-stat
 const webspacesFile = process.env.PROJECT_WEBSPACES_FILE || "/var/www/project-state/webspaces.json";
 const dockerStatsFile = process.env.PROJECT_DOCKER_STATS_FILE || "/var/www/project-state/docker-stats.json";
 const statusRunsFile = process.env.PROJECT_STATUS_RUNS_FILE || "/var/www/project-state/status-runs.jsonl";
-const sessionKeysFile = process.env.CONTROL_CENTER_SESSION_KEYS_FILE || "";
 const postgresAppPasswordFile = process.env.CONTROL_CENTER_POSTGRES_APP_PASSWORD_FILE || "";
 const environment = normalizeEnvironment(process.env.CONTROL_CENTER_ENV || "local");
 const platformName = String(process.env.PLATFORM_NAME || "Platform Infrastructure").trim() || "Platform Infrastructure";
@@ -4377,7 +4383,7 @@ function backupFileDeleteAllowed(value) {
 
 function backupPreviewAllowed(value) {
   const pathValue = String(value || "");
-  return /\.(json|md|txt|sha256|sig\.json|sql\.gz|dump|tar\.gz)$/i.test(pathValue);
+  return /\.(json|md|txt|sha256|sig\.json|sql|sql\.gz|dump|tar\.gz)$/i.test(pathValue);
 }
 
 function readBackupPreview(requestedPath = "") {
@@ -4404,11 +4410,12 @@ function readBackupPreview(requestedPath = "") {
     linesRedacted: 0,
     message: "",
   };
-  if (ext.endsWith(".dump")) {
+  if (ext.endsWith(".dump") || ext.endsWith(".sql.gz") || ext.endsWith(".sql")) {
     return sanitizeEvent({
       ...result,
+      mode: "metadata-only",
       content: "",
-      message: "Dump PostgreSQL custom: non viene mostrato raw nel browser. Usa restore drill per decifrare/verificare in sandbox.",
+      message: "Dump database: il contenuto non viene letto o mostrato nel browser. Usa un restore drill isolato per verificarlo.",
     });
   }
   if (ext.endsWith(".tar.gz")) {
@@ -4420,12 +4427,7 @@ function readBackupPreview(requestedPath = "") {
   }
   let text = "";
   try {
-    if (ext.endsWith(".gz")) {
-      const compressed = readFileSync(target);
-      text = gunzipSync(compressed, { maxOutputLength: 256 * 1024 }).toString("utf8");
-    } else {
-      text = readFileSync(target, "utf8");
-    }
+    text = readFileSync(target, "utf8");
   } catch {
     return sanitizeEvent({
       ...result,
@@ -4433,7 +4435,7 @@ function readBackupPreview(requestedPath = "") {
       message: "File non leggibile come testo sicuro.",
     });
   }
-  const preview = redactBackupPreviewText(text, ext);
+  const preview = redactBackupPreviewText(text);
   return sanitizeEvent({
     ...result,
     content: preview.content,
@@ -4444,6 +4446,7 @@ function readBackupPreview(requestedPath = "") {
 
 function backupPreviewType(ext) {
   if (ext.endsWith(".sql.gz")) return "sql-gzip";
+  if (ext.endsWith(".sql")) return "sql";
   if (ext.endsWith(".sig.json")) return "signature-json";
   if (ext.endsWith(".sha256")) return "sha256";
   if (ext.endsWith(".json")) return "json";
@@ -4453,17 +4456,12 @@ function backupPreviewType(ext) {
   return "text";
 }
 
-function redactBackupPreviewText(text, ext) {
+function redactBackupPreviewText(text) {
   const maxLines = 120;
   const lines = String(text || "").split(/\r?\n/);
   const output = [];
   let linesRedacted = 0;
   for (const line of lines.slice(0, maxLines)) {
-    if (ext.endsWith(".sql.gz") && /^\s*(INSERT|COPY)\s/i.test(line)) {
-      output.push("[riga dati SQL redatta]");
-      linesRedacted += 1;
-      continue;
-    }
     const redacted = sanitizeMessage(line)
       .replace(/\b(password|passwd|pwd|secret|token|api[_-]?key|private[_-]?key|authorization|cookie)\b(\s*[:=]\s*|[`'"]?\s+)([^,\s;)}]+)/gi, "$1$2[redacted]")
       .replace(/(-----BEGIN [A-Z ]*PRIVATE KEY-----)[\s\S]*/g, "$1[redacted]");
@@ -11076,22 +11074,26 @@ function writeSensitiveMaterialsState(state) {
 }
 
 function readVaultState() {
+  if (!existsSync(vaultFile)) return { version: 2, items: {}, updatedAt: null };
   try {
     const parsed = JSON.parse(readFileSync(vaultFile, "utf8"));
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed) || !parsed.items || typeof parsed.items !== "object" || Array.isArray(parsed.items)) {
+      throw new Error("invalid Vault state shape");
+    }
     return {
-      version: 1,
-      items: parsed && typeof parsed.items === "object" && !Array.isArray(parsed.items) ? parsed.items : {},
+      version: Number(parsed?.version) === 2 ? 2 : 1,
+      items: parsed.items,
       updatedAt: parsed?.updatedAt || null,
     };
   } catch {
-    return { version: 1, items: {}, updatedAt: null };
+    throw new ValidationError("Vault state is unreadable; no write was performed.");
   }
 }
 
 function writeVaultState(state) {
   const now = new Date().toISOString();
   const normalized = {
-    version: 1,
+    version: 2,
     updatedAt: now,
     items: Object.fromEntries(
       Object.values(state.items || {})
@@ -11103,7 +11105,20 @@ function writeVaultState(state) {
     ),
   };
   mkdirSync(path.dirname(vaultFile), { recursive: true });
-  writeFileSync(vaultFile, `${JSON.stringify(normalized, null, 2)}\n`, { mode: 0o600 });
+  const temporary = `${vaultFile}.tmp-${process.pid}-${randomBytes(6).toString("hex")}`;
+  let fd = null;
+  try {
+    fd = openSync(temporary, "wx", 0o600);
+    writeFileSync(fd, `${JSON.stringify(normalized, null, 2)}\n`, "utf8");
+    fsyncSync(fd);
+    closeSync(fd);
+    fd = null;
+    renameSync(temporary, vaultFile);
+  } catch (error) {
+    if (fd !== null) closeSync(fd);
+    rmSync(temporary, { force: true });
+    throw error;
+  }
 }
 
 function readExistingSecretCandidates() {
@@ -11455,27 +11470,12 @@ async function readPayload(req) {
   return req.controlCenterPayload;
 }
 
-function sessionKeys() {
-  const raw = sessionKeysFile && existsSync(sessionKeysFile) ? readFileSync(sessionKeysFile, "utf8") : "";
-  return raw.split(/\r?\n|,/).map((item) => item.trim()).filter(Boolean);
-}
-
 function sealVaultValue(value, itemId) {
-  const material = vaultEncryptionMaterial();
-  const key = createHash("sha256").update(material).digest();
-  const iv = randomBytes(12);
-  const cipher = createCipheriv("aes-256-gcm", key, iv);
-  cipher.setAAD(Buffer.from(`control-center-vault:${itemId}`, "utf8"));
-  const encrypted = Buffer.concat([cipher.update(String(value), "utf8"), cipher.final()]);
-  const tag = cipher.getAuthTag();
-  return {
-    alg: "aes-256-gcm",
-    keyRef: createHash("sha256").update(material).digest("hex").slice(0, 16),
-    iv: iv.toString("base64url"),
-    tag: tag.toString("base64url"),
-    data: encrypted.toString("base64url"),
-    createdAt: new Date().toISOString(),
-  };
+  try {
+    return sealVaultPlaintext(value, itemId, loadVaultKeyring({ keyFile: vaultKeyFile, activeKeyId: vaultActiveKeyId }));
+  } catch {
+    throw new ValidationError("Dedicated Vault keyring is not configured or valid.");
+  }
 }
 
 function openVaultValue(sealedValue, itemId) {
@@ -11483,26 +11483,14 @@ function openVaultValue(sealedValue, itemId) {
   if (!sealed || sealed.alg !== "aes-256-gcm" || !sealed.iv || !sealed.tag || !sealed.data) {
     throw new ValidationError("Vault value is not readable.");
   }
-  const material = vaultEncryptionMaterial();
-  const key = createHash("sha256").update(material).digest();
-  const decipher = createDecipheriv("aes-256-gcm", key, Buffer.from(sealed.iv, "base64url"));
-  decipher.setAAD(Buffer.from(`control-center-vault:${itemId}`, "utf8"));
-  decipher.setAuthTag(Buffer.from(sealed.tag, "base64url"));
-  return Buffer.concat([
-    decipher.update(Buffer.from(sealed.data, "base64url")),
-    decipher.final(),
-  ]).toString("utf8");
-}
-
-function vaultEncryptionMaterial() {
-  if (vaultKeyFile && existsSync(vaultKeyFile)) {
-    const raw = readFileSync(vaultKeyFile, "utf8").trim();
-    if (raw) return raw;
+  try {
+    if (sealed.version === 2) {
+      return openVaultCiphertext(sealed, itemId, loadVaultKeyring({ keyFile: vaultKeyFile, activeKeyId: vaultActiveKeyId }));
+    }
+    return openLegacyVaultCiphertext(sealed, itemId, readLegacyVaultMaterial(vaultLegacyKeyFile));
+  } catch {
+    throw new ValidationError("Vault value cannot be authenticated with an available Vault key.");
   }
-  if (vaultKeyMaterial.trim()) return vaultKeyMaterial.trim();
-  const fallback = sessionKeys()[0] || "";
-  if (fallback) return fallback;
-  throw new ValidationError("Vault encryption key is not configured.");
 }
 
 function wantsJson(req) {
@@ -13252,7 +13240,9 @@ function sanitizeVaultFingerprint(value) {
 function normalizeSealedValue(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   return {
+    version: Number(value.version) === 2 ? 2 : 1,
     alg: sanitizeOptionalRef(value.alg || "aes-256-gcm"),
+    keyId: sanitizeOptionalRef(value.keyId || ""),
     keyRef: sanitizeOptionalRef(value.keyRef || ""),
     iv: sanitizeSealedVaultChunk(value.iv, 64),
     tag: sanitizeSealedVaultChunk(value.tag, 128),
