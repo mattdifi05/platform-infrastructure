@@ -232,7 +232,7 @@ fi
 
 echo "==> Ubuntu package baseline"
 run apt-get update
-run apt-get install -y ca-certificates curl git
+run apt-get install -y ca-certificates curl git jq
 
 echo "==> Docker official apt repository"
 run install -m 0755 -d /etc/apt/keyrings
@@ -261,6 +261,7 @@ echo "==> Verification commands"
 run docker --version
 run docker compose version
 run git --version
+run jq --version
 
 write_reports
 if [ "$APPLY" -eq 1 ]; then

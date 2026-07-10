@@ -164,28 +164,28 @@ groups:
           description: "CPU usage on {{ $labels.instance }} is above 85% for 15 minutes."
 
       - alert: ContainerCpuUsageHigh
-        expr: sum by (name) (rate(container_cpu_usage_seconds_total{job="cadvisor",name=~"enterprise-.+|mariadb|php-apache"}[5m])) * 100 > 80
+        expr: platform_container_cpu_percent > 80
         for: 10m
         labels:
           severity: warning
         annotations:
           summary: "Container CPU usage is high"
-          description: "{{ $labels.name }} is using high CPU for 10 minutes."
+          description: "{{ $labels.container }} is using more than 80% of one CPU core for 10 minutes."
 
       - alert: ContainerMemoryUsageHigh
-        expr: container_memory_working_set_bytes{job="cadvisor",name=~"enterprise-.+|mariadb|php-apache"} > 1073741824
+        expr: ((platform_container_memory_usage_bytes / on(container, compose_project, compose_service) platform_container_memory_limit_bytes) * 100 > 90) or (platform_container_memory_usage_bytes > 1073741824 unless on(container, compose_project, compose_service) platform_container_memory_limit_bytes)
         for: 10m
         labels:
           severity: warning
         annotations:
           summary: "Container memory usage is high"
-          description: "{{ $labels.name }} is using more than 1GiB working set memory."
+          description: "{{ $labels.container }} is above 90% of its effective memory limit, or above 1GiB while unlimited."
 
       - alert: ContainerDisappeared
-        expr: absent(container_last_seen{job="cadvisor",name=~"enterprise-.+|mariadb|php-apache"})
+        expr: absent(platform_container_metrics_collector_healthy) or platform_container_metrics_collector_healthy == 0 or (time() - platform_container_metrics_collector_last_attempt_timestamp_seconds > 30) or (platform_container_metrics_collector_expected_running != platform_container_metrics_collector_observed)
         for: 2m
         labels:
           severity: critical
         annotations:
-          summary: "A monitored container disappeared"
-          description: "cAdvisor no longer reports one or more Platform containers."
+          summary: "Container workload metrics are incomplete"
+          description: "The host collector is missing, stale, unhealthy, or did not sample every container Docker reports as running."

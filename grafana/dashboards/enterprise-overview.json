@@ -314,9 +314,108 @@
       ],
       "title": "Auth failures",
       "type": "logs"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 38
+      },
+      "id": 10,
+      "targets": [
+        {
+          "expr": "platform_container_cpu_percent",
+          "legendFormat": "{{container}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Workload CPU by container",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 38
+      },
+      "id": 11,
+      "targets": [
+        {
+          "expr": "platform_container_memory_usage_bytes",
+          "legendFormat": "{{container}} used",
+          "refId": "A"
+        },
+        {
+          "expr": "platform_container_memory_limit_bytes",
+          "legendFormat": "{{container}} limit",
+          "refId": "B"
+        }
+      ],
+      "title": "Workload memory and effective limits",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 24,
+        "x": 0,
+        "y": 46
+      },
+      "id": 12,
+      "targets": [
+        {
+          "expr": "sum(platform_container_cpu_limit_configured)",
+          "legendFormat": "CPU limits configured",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(platform_container_memory_limit_configured)",
+          "legendFormat": "Memory limits configured",
+          "refId": "B"
+        },
+        {
+          "expr": "platform_container_metrics_collector_observed",
+          "legendFormat": "Observed containers",
+          "refId": "C"
+        }
+      ],
+      "title": "Effective workload limit coverage",
+      "type": "stat"
     }
   ],
-  "refresh": "30s",
+  "refresh": "5s",
   "schemaVersion": 39,
   "tags": [
     "enterprise",

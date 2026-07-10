@@ -221,6 +221,34 @@ notification_alert_telegram_failures_total
 
 Keep the Discord webhook URL and Telegram bot token in the production secret manager or provider KMS. Do not put them in `.env` or Git.
 
+## Workload metrics and capacity
+
+Per-container CPU, memory and effective cgroup limits come from the hardened
+host collector documented in `WORKLOAD-METRICS.md`. cAdvisor remains a
+compatibility scrape, but its `/healthz` alone is not accepted as workload
+coverage evidence.
+
+Before an approved rollout, validate without touching the live collector:
+
+```sh
+sh ./scripts/container-metrics-sandbox-test.sh
+sudo sh ./scripts/install-container-metrics-collector.sh \
+  --plan \
+  --deploy-user platform_infrastructure \
+  --repo-root /home/platform_infrastructure/platform-infrastructure
+```
+
+During the maintenance window, run the installer with `--apply`, recreate only
+node-exporter, Prometheus and Control Center with the canonical overlays, then
+run `--verify` and `vps-host-readiness.sh --enforce`. Never use
+`docker compose down -v`.
+
+The Control Center rejects snapshots older than
+`CONTROL_CENTER_DOCKER_STATS_MAX_AGE_SECONDS` and preserves a real `0.000%` CPU
+sample as measured zero. Effective limits are reported separately from planned
+portal quota metadata; an absent limit remains explicitly unconfigured until
+T13 applies resource governance.
+
 ## External uptime monitoring
 
 The provider-neutral manifest is `monitoring/external-uptime.example.json`. It covers the public web edge, API health, OIDC discovery and negative checks for admin hostnames that must stay blocked.

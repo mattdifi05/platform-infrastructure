@@ -3663,9 +3663,11 @@ function infraMaintainabilityHygiene() {
   const directOperationalScripts = new Set([
     "backup-scheduler.sh",
     "cloudflare-origin-lock-ufw.sh",
+    "container-metrics-sandbox-test.sh",
     "dast-zap-baseline.sh",
     "deploy-vps.sh",
     "infra-ops.sh",
+    "install-container-metrics-collector.sh",
     "install-offsite-backup-cron.sh",
     "node-project-runtime.sh",
     "vps-bootstrap-ubuntu.sh",
@@ -12921,6 +12923,9 @@ async function staticSecurityCheckBody() {
   const vpsBootstrapScript = readText(path.join(infraRoot, "scripts", "vps-bootstrap-ubuntu.sh"));
   const vpsHardeningScript = readText(path.join(infraRoot, "scripts", "vps-hardening-ubuntu.sh"));
   const vpsHostReadinessScript = readText(path.join(infraRoot, "scripts", "vps-host-readiness.sh"));
+  const containerMetricsCollectorScript = readText(path.join(infraRoot, "scripts", "write-docker-stats-json.sh"));
+  const containerMetricsInstallerScript = readText(path.join(infraRoot, "scripts", "install-container-metrics-collector.sh"));
+  const containerMetricsSandboxTest = readText(path.join(infraRoot, "scripts", "container-metrics-sandbox-test.sh"));
   const originLockScript = readText(path.join(infraRoot, "scripts", "cloudflare-origin-lock-ufw.sh"));
   const vpsPredeployChecklist = readText(path.join(infraRoot, "VPS-PREDEPLOY-CHECKLIST.md"));
   const readinessReport = readText(path.join(infraRoot, "READINESS-REPORT.md"));
@@ -13405,6 +13410,7 @@ async function staticSecurityCheckBody() {
   assertNoMatch(cloudflareFromZeroScript, /rulesets\/phases\/\$\{ruleset\.phase\}\/entrypoint/, "Cloudflare from-zero script must not overwrite a WAF phase entrypoint.");
   assertMatch(vpsBootstrapScript, /download\.docker\.com\/linux\/ubuntu[\s\S]*docker-ce[\s\S]*docker-ce-cli[\s\S]*containerd\.io[\s\S]*docker-buildx-plugin[\s\S]*docker-compose-plugin/, "VPS bootstrap must install Docker Engine, Buildx and Compose from Docker's official Ubuntu apt repository.");
   assertMatch(vpsBootstrapScript, /ca-certificates curl git[\s\S]*\/etc\/apt\/keyrings\/docker\.asc[\s\S]*\/etc\/apt\/sources\.list\.d\/docker\.sources/, "VPS bootstrap must install Git and configure the Docker apt keyring/source file.");
+  assertMatch(vpsBootstrapScript, /ca-certificates curl git jq[\s\S]*jq --version/, "VPS bootstrap must install and verify jq for host-side operational collectors.");
   assertMatch(vpsBootstrapScript, /reports\/vps-bootstrap[\s\S]*JSON_REPORT[\s\S]*MD_REPORT/, "VPS bootstrap must write JSON and Markdown evidence reports.");
   assertMatch(vpsBootstrapScript, /os_release_value\(\)[\s\S]*awk -F=[\s\S]*\/etc\/os-release/, "VPS bootstrap must parse /etc/os-release as data.");
   assertNoMatch(vpsBootstrapScript, /(^|\n)\s*\.\s+\/etc\/os-release/, "VPS bootstrap must not source /etc/os-release.");
@@ -13431,6 +13437,11 @@ async function staticSecurityCheckBody() {
   assertMatch(vpsHostReadinessScript, /--diagnostic[\s\S]*reports\/vps-host-diagnostics[\s\S]*productionEvidence[\s\S]*false/, "VPS host readiness diagnostics must be separated from production VPS evidence.");
   assertMatch(vpsHostReadinessScript, /DEFAULT_REPORT_DIR="\$ROOT_DIR\/reports\/vps-host"[\s\S]*JSON_REPORT="\$REPORT_DIR\/\$REPORT_PREFIX-\$STAMP\.json"[\s\S]*MD_REPORT="\$REPORT_DIR\/\$REPORT_PREFIX-\$STAMP\.md"/, "VPS host readiness must write ignored JSON and Markdown evidence.");
   assertMatch(vpsHostReadinessScript, /remediation_for_check[\s\S]*docker-daemon-hardening[\s\S]*vps-hardening-ubuntu\.sh/, "VPS host readiness reports must include remediation guidance.");
+  assertMatch(vpsHostReadinessScript, /container-metrics-collector[\s\S]*platform-container-metrics\.service[\s\S]*capturedAtEpoch[\s\S]*platform_container_cpu_percent/, "VPS host readiness must require fresh complete per-container workload metrics.");
+  assertMatch(containerMetricsCollectorScript, /docker stats --no-stream --no-trunc[\s\S]*docker inspect[\s\S]*missingRunningContainerIds[\s\S]*platform_container_metrics_collector_healthy/, "Workload collector must reconcile Docker inventory and emit fail-closed JSON and Prometheus metrics.");
+  assertMatch(containerMetricsCollectorScript, /cpuLimitCores[\s\S]*memoryLimitBytes[\s\S]*memoryReservationBytes[\s\S]*pidsLimit/, "Workload collector must expose effective cgroup limits without inventing defaults.");
+  assertMatch(containerMetricsInstallerScript, /MODE=plan[\s\S]*--apply[\s\S]*NoNewPrivileges=true[\s\S]*ProtectSystem=strict[\s\S]*SupplementaryGroups=docker/, "Container metrics installer must default to plan and install a hardened host service with narrow Docker group access.");
+  assertMatch(containerMetricsSandboxTest, /cpuPercent == 0[\s\S]*cpuLimitCores == 2[\s\S]*FAKE_DOCKER_MISSING=true[\s\S]*collector\.healthy == false/, "Container metrics sandbox must preserve measured zero, verify effective limits and fail incomplete inventory.");
   assertMatch(originLockScript, /www\.cloudflare\.com\/ips-v4/, "Origin-lock script must consume Cloudflare IPv4 ranges.");
   assertMatch(originLockScript, /www\.cloudflare\.com\/ips-v6/, "Origin-lock script must consume Cloudflare IPv6 ranges.");
   assertMatch(vpsPredeployChecklist, /full-restore-drill\.sh/, "VPS checklist must require a full restore drill.");
@@ -13745,6 +13756,7 @@ async function staticSecurityCheckBody() {
   assertMatch(prometheusConfig, /job_name: alertmanager[\s\S]*alertmanager:9093/, "Prometheus must scrape Alertmanager.");
   assertMatch(prometheusConfig, /job_name: node-exporter[\s\S]*node-exporter:9100/, "Prometheus must scrape node-exporter for host CPU/RAM/disk.");
   assertMatch(prometheusConfig, /job_name: cadvisor[\s\S]*cadvisor:8080/, "Prometheus must scrape cAdvisor for container CPU/RAM.");
+  assertMatch(compose, /node-exporter:[\s\S]*--collector\.textfile\.directory=\/var\/lib\/node-exporter\/textfile[\s\S]*node-exporter-textfile:\/var\/lib\/node-exporter\/textfile:ro/, "node-exporter must scrape the host collector textfile directory read-only.");
   assertMatch(alertmanagerConfig, /worker-notifications:3000\/alerts\/prometheus/, "Alertmanager must deliver alerts to the notification worker.");
   assertMatch(alertmanagerConfig, /authorization:[\s\S]*type:\s+Bearer[\s\S]*credentials_file:\s+\/run\/secrets\/alertmanager_webhook_token/, "Alertmanager webhook delivery must use the shared bearer-token secret.");
   assertMatch(alertmanagerConfig, /platform_probe="alert-delivery"[\s\S]*group_wait:\s+0s/, "Alertmanager must provide an immediate route for correlated delivery probes.");
@@ -13759,6 +13771,10 @@ async function staticSecurityCheckBody() {
   for (const alertName of ["AuditOutboxDeadLetters", "PostgresBackupStale", "RestoreDrillStale", "AlertmanagerDeliveryFailed", "HostDiskUsageHigh", "HostMemoryUsageHigh", "HostCpuUsageHigh", "ContainerCpuUsageHigh", "ContainerMemoryUsageHigh", "ContainerDisappeared"]) {
     assertMatch(prometheusAlerts, new RegExp(`alert: ${alertName}`), `Prometheus alerts must include ${alertName}.`);
   }
+  assertMatch(prometheusAlerts, /platform_container_cpu_percent[\s\S]*platform_container_memory_usage_bytes[\s\S]*platform_container_metrics_collector_healthy/, "Container alerts must use the compatible host collector rather than trust cAdvisor process health.");
+  assertMatch(grafanaOverviewDashboard, /platform_container_cpu_percent[\s\S]*platform_container_memory_usage_bytes[\s\S]*platform_container_memory_limit_bytes/, "Grafana overview must show per-container workload usage and effective memory limits.");
+  assertMatch(controlCenterServer, /CONTROL_CENTER_DOCKER_STATS_MAX_AGE_SECONDS[\s\S]*collectorHealthy[\s\S]*timestampValid[\s\S]*cpuLimitCores[\s\S]*memoryLimitBytes/, "Control Center must reject stale, future or incomplete Docker stats and expose effective runtime limits.");
+  assertMatch(controlCenterTest, /staleDockerStats[\s\S]*futureDockerStats[\s\S]*containerMetricsAvailable, false[\s\S]*capturedAtEpoch[\s\S]*cpuLimitCores: 2/, "Control Center tests must prove stale/future metrics rejection and effective limit reporting.");
   assertMatch(compose, /node-exporter:[\s\S]*prom\/node-exporter:v1\.10\.2@sha256:/, "Compose must include pinned node-exporter.");
   assertMatch(compose, /cadvisor:[\s\S]*gcr\.io\/cadvisor\/cadvisor:v0\.52\.1@sha256:/, "Compose must include pinned cAdvisor.");
   assertMatch(compose, /loki:[\s\S]*\.\/loki\/rules:\/loki\/rules:ro/, "Loki must mount local alert rules.");

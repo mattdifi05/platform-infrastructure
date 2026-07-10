@@ -101,6 +101,7 @@ const prometheusUrl = String(process.env.CONTROL_CENTER_PROMETHEUS_URL || "http:
 const resourceProbeTimeoutMs = clampNumber(Number(process.env.CONTROL_CENTER_RESOURCE_PROBE_TIMEOUT_MS || 900), 250, 5000);
 const resourceMetricsTtlMs = clampNumber(Number(process.env.CONTROL_CENTER_RESOURCE_METRICS_TTL_MS || 10000), 1000, 60000);
 const resourceProbeFailureCooldownMs = clampNumber(Number(process.env.CONTROL_CENTER_RESOURCE_PROBE_FAILURE_COOLDOWN_MS || 15000), 1000, 120000);
+const dockerStatsMaxAgeMs = clampNumber(Number(process.env.CONTROL_CENTER_DOCKER_STATS_MAX_AGE_SECONDS || 15) * 1000, 5000, 120000);
 const resourceMetricsCache = { value: null, expiresAt: 0, failedUntil: 0 };
 const projectDiskUsageTtlMs = clampNumber(Number(process.env.CONTROL_CENTER_PROJECT_DISK_USAGE_TTL_MS || 30000), 1000, 300000);
 const projectDiskUsageCache = new Map();
@@ -5438,7 +5439,7 @@ function projectResourceSummary(context, project) {
     cpu: measuredContainers.length ? measuredCpuLabel(measuredContainers, hostCores) : usage.cpuMessage || "Metriche container non disponibili",
     memory: memoryBytes != null ? usageBytesLabel(memoryBytes) : usage.memoryMessage || "Metriche container non disponibili",
     disk: usage.diskAvailable ? `${usageBytesLabel(usage.diskBytes)} (${Number(usage.files || 0)} file)` : "Non disponibile",
-    containers: containers.length ? containers.map((item) => `${item.container}:${item.status}`).join(", ") : `${dedicatedRuntimeName(project)} atteso`,
+    containers: containers.length ? containers.map((item) => `${item.container}:${item.runtimeStatus || "unknown"}`).join(", ") : `${dedicatedRuntimeName(project)} atteso`,
   };
 }
 
@@ -7275,18 +7276,41 @@ function preciseCoresLabel(value) {
 }
 
 function readDockerStatsSnapshot() {
-  if (!existsSync(dockerStatsFile)) return { available: false, capturedAt: "", containers: [] };
+  if (!existsSync(dockerStatsFile)) return { available: false, capturedAt: "", stale: false, containers: [] };
   try {
     const parsed = JSON.parse(readFileSync(dockerStatsFile, "utf8"));
+    const capturedAtEpoch = Number(parsed.capturedAtEpoch || (Date.parse(parsed.capturedAt || "") / 1000));
+    const timestampDeltaMs = Number.isFinite(capturedAtEpoch) ? Date.now() - (capturedAtEpoch * 1000) : Number.POSITIVE_INFINITY;
+    const ageMs = Number.isFinite(timestampDeltaMs) ? Math.max(0, timestampDeltaMs) : Number.POSITIVE_INFINITY;
+    const timestampValid = Number.isFinite(timestampDeltaMs)
+      && timestampDeltaMs >= -5000
+      && timestampDeltaMs <= dockerStatsMaxAgeMs;
+    const collectorHealthy = parsed.schemaVersion === 2
+      && parsed.collector?.healthy === true
+      && Number(parsed.collector?.expectedRunning || 0) > 0
+      && Number(parsed.collector?.observed || 0) === Number(parsed.collector?.expectedRunning || 0);
+    if (!collectorHealthy || !timestampValid) {
+      return {
+        available: false,
+        capturedAt: sanitizeMessage(parsed.capturedAt || ""),
+        stale: timestampDeltaMs > dockerStatsMaxAgeMs,
+        futureTimestamp: timestampDeltaMs < -5000,
+        ageMs: Number.isFinite(ageMs) ? ageMs : null,
+        containers: [],
+      };
+    }
     const rawContainers = Array.isArray(parsed.containers) ? parsed.containers : [];
     const containers = rawContainers.map(dockerStatsContainerRecord).filter(Boolean);
     return {
       available: containers.length > 0,
       capturedAt: sanitizeMessage(parsed.capturedAt || ""),
+      capturedAtEpoch,
+      stale: false,
+      ageMs,
       containers,
     };
   } catch {
-    return { available: false, capturedAt: "", containers: [] };
+    return { available: false, capturedAt: "", stale: false, containers: [] };
   }
 }
 
@@ -7294,18 +7318,42 @@ function dockerStatsContainerRecord(item) {
   if (!item || typeof item !== "object") return null;
   const name = sanitizeRef(item.name || item.container || item.Name || item.Container || "");
   if (!name || name === "unknown") return null;
-  const cpuPercent = parseDockerPercent(item.cpuPercent || item.CPUPerc || item.cpu || "");
-  const memoryBytes = parseDockerMemoryUsage(item.memoryUsage || item.MemUsage || item.memory || "");
+  const cpuPercent = parseDockerPercent(item.cpuPercent ?? item.CPUPerc ?? item.cpu ?? "");
+  const explicitCpuCores = Number(item.cpuCores);
+  const explicitMemoryBytes = Number(item.memoryUsageBytes);
+  const memoryBytes = Number.isFinite(explicitMemoryBytes) && explicitMemoryBytes >= 0
+    ? explicitMemoryBytes
+    : parseDockerMemoryUsage(item.memoryUsage ?? item.MemUsage ?? item.memory ?? "");
+  const cpuLimitCores = nullableNonNegativeNumber(item.cpuLimitCores);
+  const memoryLimitBytes = nullableNonNegativeNumber(item.memoryLimitBytes);
+  const memoryReservationBytes = nullableNonNegativeNumber(item.memoryReservationBytes);
+  const pidsLimit = nullableNonNegativeNumber(item.pidsLimit);
   return {
     name,
-    cpuCores: cpuPercent != null ? cpuPercent / 100 : null,
+    service: sanitizeRef(item.service || ""),
+    status: sanitizeIdentifier(item.status || "running"),
+    source: "docker-stats",
+    cpuCores: Number.isFinite(explicitCpuCores) && explicitCpuCores >= 0 ? explicitCpuCores : cpuPercent != null ? cpuPercent / 100 : null,
     cpuPercent,
     memoryBytes,
+    cpuLimitCores,
+    memoryLimitBytes,
+    memoryReservationBytes,
+    pidsLimit,
+    cpuLimitConfigured: cpuLimitCores != null,
+    memoryLimitConfigured: memoryLimitBytes != null,
   };
 }
 
+function nullableNonNegativeNumber(value) {
+  if (value == null || value === "") return null;
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 0 ? number : null;
+}
+
 function parseDockerPercent(value) {
-  const number = Number(String(value || "").replace("%", "").trim());
+  if (value == null || value === "") return null;
+  const number = Number(String(value).replace("%", "").trim());
   return Number.isFinite(number) ? number : null;
 }
 
@@ -7346,8 +7394,9 @@ function matchDockerStatsContainers(app, project, containers) {
       .filter((value) => value && value.length >= 4)
     : [];
   return containers.filter((container) => {
-    const haystack = resourceToken(container.name);
-    return exact.some((needle) => haystack === needle) || fallback.some((needle) => haystack === needle || haystack.includes(needle));
+    const haystacks = [container.name, container.service].map((value) => resourceToken(value)).filter(Boolean);
+    return haystacks.some((haystack) => exact.some((needle) => haystack === needle)
+      || fallback.some((needle) => haystack === needle || haystack.includes(needle)));
   });
 }
 
@@ -7367,8 +7416,13 @@ async function collectLiveResourceUsage({ projects, applications, webspaces }) {
         status: app.status,
         container: container.name,
         cpuCores: container.cpuCores,
-        cpuPercent: null,
+        cpuPercent: container.cpuPercent ?? (Number.isFinite(Number(container.cpuCores)) ? Number(container.cpuCores) * 100 : null),
         memoryBytes: container.memoryBytes,
+        cpuLimitCores: container.cpuLimitCores ?? null,
+        memoryLimitBytes: container.memoryLimitBytes ?? null,
+        memoryReservationBytes: container.memoryReservationBytes ?? null,
+        pidsLimit: container.pidsLimit ?? null,
+        runtimeStatus: container.status || "running",
         attribution: "container-dedicato",
       }));
     }
@@ -7383,6 +7437,11 @@ async function collectLiveResourceUsage({ projects, applications, webspaces }) {
         cpuCores: container.cpuCores,
         cpuPercent: container.cpuPercent,
         memoryBytes: container.memoryBytes,
+        cpuLimitCores: container.cpuLimitCores,
+        memoryLimitBytes: container.memoryLimitBytes,
+        memoryReservationBytes: container.memoryReservationBytes,
+        pidsLimit: container.pidsLimit,
+        runtimeStatus: container.status || "running",
         attribution: "docker-stats",
       }));
     }
@@ -7394,6 +7453,11 @@ async function collectLiveResourceUsage({ projects, applications, webspaces }) {
       container: project ? dedicatedRuntimeName(project) : "container dedicato atteso",
       cpuCores: null,
       memoryBytes: null,
+      cpuLimitCores: null,
+      memoryLimitBytes: null,
+      memoryReservationBytes: null,
+      pidsLimit: null,
+      runtimeStatus: "missing",
       attribution: "container-dedicato-atteso",
     }];
   });
@@ -7419,18 +7483,32 @@ async function collectLiveResourceUsage({ projects, applications, webspaces }) {
       cpuCores,
       cpuPercent: sumContainerCpuPercent(exactContainers) ?? cpuPercent,
       memoryBytes,
+      runtimeLimits: exactContainers.map((item) => ({
+        container: item.name,
+        cpuLimitCores: item.cpuLimitCores ?? null,
+        memoryLimitBytes: item.memoryLimitBytes ?? null,
+        memoryReservationBytes: item.memoryReservationBytes ?? null,
+        pidsLimit: item.pidsLimit ?? null,
+      })),
       cpuMessage: exactContainers.length ? "" : "Metriche container non disponibili",
       memoryMessage: exactContainers.length ? "" : "Metriche container non disponibili",
       containersLabel: exactContainers.length ? exactContainers.map((item) => item.name).join(", ") : `${dedicatedRuntimeName(project)} atteso`,
-      measuredFrom: exactContainers.length ? `${dockerStats.containers.length ? "docker stats" : "Prometheus/cAdvisor"} + filesystem` : "filesystem + container dedicato atteso",
+      measuredFrom: exactContainers.length ? `${exactContainers.some((item) => item.source === "docker-stats") ? "docker stats" : prometheus.containerSource || "Prometheus"} + filesystem` : "filesystem + container dedicato atteso",
       applications: projectApps.map((app) => app.id),
     });
   });
   const webspaceBytes = webspaces.reduce((sum, item) => sum + Number(item.usedBytes || 0), 0);
-  const containerMetricsAvailable = prometheus.containers.length > 0 || dockerStats.containers.length > 0;
+  const measuredProjectContainers = containersByProject.filter((item) => item.attribution === "container-dedicato" || item.attribution === "docker-stats");
+  const containerMetricsAvailable = measuredProjectContainers.length > 0;
+  const projectUsesPrometheus = measuredProjectContainers.some((item) => item.attribution === "container-dedicato");
+  const projectUsesDockerStats = measuredProjectContainers.some((item) => item.attribution === "docker-stats");
   return sanitizeEvent({
-    source: dockerStats.containers.length ? `docker-stats-file (${dockerStats.capturedAt || "no timestamp"})` : prometheus.available ? (prometheus.containers.length > 0 ? "prometheus-node-exporter-cadvisor" : "prometheus-node-exporter") : "local-filesystem",
-    capturedAt: dockerStats.capturedAt || capturedAt,
+    source: projectUsesPrometheus
+      ? prometheus.containerSource || "prometheus-container-metrics"
+      : projectUsesDockerStats
+        ? `docker-stats-file (${dockerStats.capturedAt || "no timestamp"})`
+        : prometheus.available ? "prometheus-node-exporter-host-only" : "local-filesystem",
+    capturedAt: projectUsesPrometheus ? capturedAt : projectUsesDockerStats ? dockerStats.capturedAt || capturedAt : capturedAt,
     containerMetricsAvailable,
     totals: {
       cpu: prometheus.cpu,
@@ -7456,10 +7534,18 @@ async function readPrometheusResourceSnapshot() {
     memoryAvailable: "node_memory_MemAvailable_bytes",
     diskSize: 'node_filesystem_size_bytes{fstype!~"tmpfs|fuse.*|overlay|squashfs",mountpoint=~"/|/srv/platform-nvme"}',
     diskAvailable: 'node_filesystem_avail_bytes{fstype!~"tmpfs|fuse.*|overlay|squashfs",mountpoint=~"/|/srv/platform-nvme"}',
-    containerCpuByName: 'sum by (name) (rate(container_cpu_usage_seconds_total{name!="",id!="/"}[2m]))',
-    containerMemoryByName: 'max by (name) (container_memory_working_set_bytes{name!="",id!="/"})',
-    containerCpuByContainer: 'sum by (container) (rate(container_cpu_usage_seconds_total{container!="",id!="/"}[2m]))',
-    containerMemoryByContainer: 'max by (container) (container_memory_working_set_bytes{container!="",id!="/"})',
+    platformCollectorHealthy: "platform_container_metrics_collector_healthy",
+    platformCollectorLastAttempt: "platform_container_metrics_collector_last_attempt_timestamp_seconds",
+    platformContainerCpu: "platform_container_cpu_cores",
+    platformContainerMemory: "platform_container_memory_usage_bytes",
+    platformContainerCpuLimit: "platform_container_cpu_limit_cores",
+    platformContainerMemoryLimit: "platform_container_memory_limit_bytes",
+    platformContainerMemoryReservation: "platform_container_memory_reservation_bytes",
+    platformContainerPidsLimit: "platform_container_pids_limit",
+    cadvisorContainerCpuByName: 'sum by (name) (rate(container_cpu_usage_seconds_total{name!="",id!="/"}[2m]))',
+    cadvisorContainerMemoryByName: 'max by (name) (container_memory_working_set_bytes{name!="",id!="/"})',
+    cadvisorContainerCpuByContainer: 'sum by (container) (rate(container_cpu_usage_seconds_total{container!="",id!="/"}[2m]))',
+    cadvisorContainerMemoryByContainer: 'max by (container) (container_memory_working_set_bytes{container!="",id!="/"})',
   };
   const entries = await Promise.all(Object.entries(queries).map(async ([key, query]) => {
     try {
@@ -7471,6 +7557,29 @@ async function readPrometheusResourceSnapshot() {
   const results = Object.fromEntries(entries);
   const memoryTotal = firstPrometheusValue(results.memoryTotal);
   const memoryAvailable = firstPrometheusValue(results.memoryAvailable);
+  const collectorHealthy = firstPrometheusValue(results.platformCollectorHealthy) === 1;
+  const collectorLastAttempt = firstPrometheusValue(results.platformCollectorLastAttempt);
+  const collectorFresh = collectorHealthy
+    && Number.isFinite(collectorLastAttempt)
+    && ((Date.now() / 1000) - collectorLastAttempt) >= 0
+    && ((Date.now() / 1000) - collectorLastAttempt) <= (dockerStatsMaxAgeMs / 1000);
+  const platformContainers = collectorFresh
+    ? mergePrometheusContainerMetrics(
+      results.platformContainerCpu,
+      results.platformContainerMemory,
+      "prometheus-node-exporter-textfile",
+    )
+    : [];
+  attachPrometheusContainerLimit(platformContainers, results.platformContainerCpuLimit, "cpuLimitCores");
+  attachPrometheusContainerLimit(platformContainers, results.platformContainerMemoryLimit, "memoryLimitBytes");
+  attachPrometheusContainerLimit(platformContainers, results.platformContainerMemoryReservation, "memoryReservationBytes");
+  attachPrometheusContainerLimit(platformContainers, results.platformContainerPidsLimit, "pidsLimit");
+  const cadvisorContainers = mergePrometheusContainerMetrics(
+    [...results.cadvisorContainerCpuByName, ...results.cadvisorContainerCpuByContainer],
+    [...results.cadvisorContainerMemoryByName, ...results.cadvisorContainerMemoryByContainer],
+    "prometheus-cadvisor-compatibility",
+  );
+  const containers = platformContainers.length ? platformContainers : cadvisorContainers;
   const snapshot = sanitizeEvent({
     available: [results.cpuPercent, results.cpuCores, results.memoryTotal, results.memoryAvailable, results.diskSize].some((items) => items.length > 0),
     cpu: {
@@ -7488,10 +7597,8 @@ async function readPrometheusResourceSnapshot() {
       message: Number.isFinite(memoryTotal) ? "" : "Metriche RAM non disponibili da Prometheus.",
     },
     disk: buildPrometheusDiskSnapshot(results.diskSize, results.diskAvailable),
-    containers: mergePrometheusContainerMetrics(
-      [...results.containerCpuByName, ...results.containerCpuByContainer],
-      [...results.containerMemoryByName, ...results.containerMemoryByContainer],
-    ),
+    containerSource: platformContainers.length ? "prometheus-node-exporter-textfile" : cadvisorContainers.length ? "prometheus-cadvisor-compatibility" : "",
+    containers,
   });
   if (!snapshot.available) {
     resourceMetricsCache.failedUntil = now + resourceProbeFailureCooldownMs;
@@ -7518,6 +7625,7 @@ function unavailableResourceSnapshot(message) {
     cpu: { available: false, usedPercent: null, cores: null, message },
     memory: { available: false, totalBytes: 0, availableBytes: 0, usedBytes: 0, usedPercent: null, message },
     disk: readLocalFilesystemSnapshot(projectsRoot),
+    containerSource: "",
     containers: [],
   };
 }
@@ -7556,25 +7664,54 @@ function buildPrometheusDiskSnapshot(sizeRows, availableRows) {
   });
 }
 
-function mergePrometheusContainerMetrics(cpuRows, memoryRows) {
+function mergePrometheusContainerMetrics(cpuRows, memoryRows, source = "prometheus") {
   const byName = new Map();
   for (const row of cpuRows) {
     const name = prometheusContainerName(row.metric || {});
     if (!name) continue;
-    const current = byName.get(name) || { name, cpuCores: 0, memoryBytes: 0 };
+    const current = byName.get(name) || prometheusContainerRecord(name, row.metric || {}, source);
     const value = firstPrometheusValue([row]);
-    if (Number.isFinite(value)) current.cpuCores = Math.max(current.cpuCores || 0, value);
+    if (Number.isFinite(value)) {
+      current.cpuCores = current.cpuCores == null ? value : Math.max(current.cpuCores, value);
+      current.cpuPercent = current.cpuCores * 100;
+    }
     byName.set(name, current);
   }
   for (const row of memoryRows) {
     const name = prometheusContainerName(row.metric || {});
     if (!name) continue;
-    const current = byName.get(name) || { name, cpuCores: 0, memoryBytes: 0 };
+    const current = byName.get(name) || prometheusContainerRecord(name, row.metric || {}, source);
     const value = firstPrometheusValue([row]);
-    if (Number.isFinite(value)) current.memoryBytes = Math.max(current.memoryBytes || 0, value);
+    if (Number.isFinite(value)) current.memoryBytes = current.memoryBytes == null ? value : Math.max(current.memoryBytes, value);
     byName.set(name, current);
   }
-  return [...byName.values()].filter((item) => item.cpuCores || item.memoryBytes);
+  return [...byName.values()].filter((item) => item.cpuCores != null || item.memoryBytes != null);
+}
+
+function prometheusContainerRecord(name, metric, source) {
+  return {
+    name,
+    service: sanitizeRef(metric.compose_service || ""),
+    status: "running",
+    source,
+    cpuCores: null,
+    cpuPercent: null,
+    memoryBytes: null,
+    cpuLimitCores: null,
+    memoryLimitBytes: null,
+    memoryReservationBytes: null,
+    pidsLimit: null,
+  };
+}
+
+function attachPrometheusContainerLimit(containers, rows, field) {
+  const byName = new Map(containers.map((item) => [item.name, item]));
+  for (const row of rows) {
+    const name = prometheusContainerName(row.metric || {});
+    const value = firstPrometheusValue([row]);
+    if (!name || !Number.isFinite(value) || !byName.has(name)) continue;
+    byName.get(name)[field] = value;
+  }
 }
 
 function prometheusContainerName(metric) {
@@ -12860,7 +12997,7 @@ function monitoringSignals({ scrapeJobs, dashboardPanels, alertRules }) {
   const hasAlert = (pattern) => alertRules.some((rule) => pattern.test(`${rule.name}\n${rule.expression}\n${rule.summary}`));
   return [
     monitoringSignalRecord("prometheus-metrics", "Prometheus metrics", "prometheus", hasJob("prometheus") && hasPanel(/HTTP request rate|http_requests_total/i)),
-    monitoringSignalRecord("cadvisor-container-metrics", "cAdvisor container metrics", "cadvisor", hasJob("cadvisor") && hasAlert(/ContainerCpuUsageHigh|ContainerMemoryUsageHigh|ContainerDisappeared/i)),
+    monitoringSignalRecord("workload-container-metrics", "Docker workload metrics", "node-exporter-textfile", hasJob("node-exporter") && hasPanel(/Workload CPU|Workload memory|effective limit/i) && hasAlert(/ContainerCpuUsageHigh|ContainerMemoryUsageHigh|ContainerDisappeared/i)),
     monitoringSignalRecord("node-exporter-host-metrics", "node-exporter host metrics", "node-exporter", hasJob("node-exporter") && hasAlert(/HostDiskUsageHigh|HostMemoryUsageHigh|HostCpuUsageHigh/i)),
     monitoringSignalRecord("backend-errors", "Backend errors", "loki", hasPanel(/Backend errors|enterprise-backend/i)),
     monitoringSignalRecord("worker-errors", "Worker errors", "loki", hasPanel(/Worker errors|enterprise-worker/i)),

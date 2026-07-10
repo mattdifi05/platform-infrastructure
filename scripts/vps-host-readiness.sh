@@ -109,6 +109,9 @@ remediation_for_check() {
     git-cli)
       printf '%s' "Install Git: sudo apt-get update && sudo apt-get install -y git."
       ;;
+    jq-cli)
+      printf '%s' "Install jq: sudo apt-get update && sudo apt-get install -y jq."
+      ;;
     docker-cli|docker-daemon|docker-compose-plugin)
       printf '%s' "Install Docker Engine and the Docker Compose plugin from the official Docker Ubuntu repository, then ensure the deploy user can reach the Docker daemon."
       ;;
@@ -144,6 +147,9 @@ remediation_for_check() {
       ;;
     host-runtime-minimalism)
       printf '%s' "Prefer container-only runtimes; remove host Node/PHP/build tools unless explicitly needed for operations."
+      ;;
+    container-metrics-collector)
+      printf '%s' "Run sudo sh ./scripts/install-container-metrics-collector.sh --apply --deploy-user <user> --repo-root <absolute-repo-path>, then verify the service and node-exporter textfile mount."
       ;;
     *)
       printf '%s' "Review the failed check, apply the matching runbook section, then rerun scripts/vps-host-readiness.sh --ssh-port <port> --enforce on the VPS."
@@ -366,6 +372,50 @@ check_unneeded_host_runtimes() {
   fi
 }
 
+check_container_metrics_collector() {
+  snapshot="$ROOT_DIR/projects-portal/state/docker-stats.json"
+  metrics="$ROOT_DIR/projects-portal/state/node-exporter-textfile/platform-container.prom"
+  if ! command_exists jq; then
+    add_check "container-metrics-collector" "yes" "failed" "jq is required to validate the collector snapshot"
+    return
+  fi
+  if ! service_active platform-container-metrics.service; then
+    add_check "container-metrics-collector" "yes" "failed" "platform-container-metrics.service is not active"
+    return
+  fi
+  if [ ! -r "$snapshot" ] || [ ! -r "$metrics" ]; then
+    add_check "container-metrics-collector" "yes" "failed" "collector JSON or Prometheus textfile output is missing"
+    return
+  fi
+  if ! jq -e '
+    .schemaVersion == 2
+    and .collector.healthy == true
+    and .collector.expectedRunning > 0
+    and .collector.observed == .collector.expectedRunning
+    and ([.containers[] | select(.cpuPercent == null or .memoryUsageBytes == null)] | length) == 0
+  ' "$snapshot" >/dev/null 2>&1; then
+    add_check "container-metrics-collector" "yes" "failed" "collector snapshot is incomplete or lacks per-container CPU/RAM"
+    return
+  fi
+  captured_epoch=$(jq -r '.capturedAtEpoch // 0' "$snapshot")
+  current_epoch=$(date -u +%s)
+  age=$((current_epoch - captured_epoch))
+  if [ "$age" -lt 0 ] || [ "$age" -gt 15 ]; then
+    add_check "container-metrics-collector" "yes" "failed" "collector snapshot is ${age}s old; maximum is 15s"
+    return
+  fi
+  if ! grep -q '^platform_container_metrics_collector_healthy 1$' "$metrics" \
+    || ! grep -q '^platform_container_cpu_percent{' "$metrics" \
+    || ! grep -q '^platform_container_memory_usage_bytes{' "$metrics"; then
+    add_check "container-metrics-collector" "yes" "failed" "Prometheus textfile series are missing or unhealthy"
+    return
+  fi
+  observed=$(jq -r '.collector.observed' "$snapshot")
+  limited_cpu=$(jq '[.containers[] | select(.cpuLimitCores != null)] | length' "$snapshot")
+  limited_memory=$(jq '[.containers[] | select(.memoryLimitBytes != null)] | length' "$snapshot")
+  add_check "container-metrics-collector" "yes" "passed" "fresh ${age}s snapshot for ${observed} containers; effective CPU limits=${limited_cpu}, memory limits=${limited_memory}"
+}
+
 write_reports() {
   generated_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   failed_required=$(awk -F '\t' '$2 == "yes" && $3 == "failed" { count++ } END { print count + 0 }' "$ROWS_FILE")
@@ -428,6 +478,7 @@ write_reports() {
 
 check_os
 check_command "git-cli" "git" "--version"
+check_command "jq-cli" "jq" "--version"
 check_docker
 check_docker_daemon_hardening
 check_ufw
@@ -437,4 +488,5 @@ check_unattended_upgrades
 check_resources
 check_time_sync
 check_unneeded_host_runtimes
+check_container_metrics_collector
 write_reports

@@ -5,7 +5,7 @@ Use this checklist on the VPS Ubuntu LTS VPS before exposing public traffic.
 ## Host Bootstrap
 
 - [ ] Ubuntu LTS installed and updated.
-- [ ] `sudo sh ./scripts/vps-bootstrap-ubuntu.sh --apply --deploy-user <deploy-user>` executed, installing Git, Docker Engine, Buildx and Docker Compose plugin from Docker's official Ubuntu apt repository.
+- [ ] `sudo sh ./scripts/vps-bootstrap-ubuntu.sh --apply --deploy-user <deploy-user>` executed, installing Git, jq, Docker Engine, Buildx and Docker Compose plugin from Docker's official Ubuntu apt repository.
 - [ ] The JSON/Markdown report under `reports/vps-bootstrap/` was archived outside Git.
 - [ ] Node, pnpm, PHP CLI and build toolchains are not required on the host.
 - [ ] Non-root deploy user created and added to the `docker` group only if required.
@@ -16,6 +16,9 @@ Use this checklist on the VPS Ubuntu LTS VPS before exposing public traffic.
 - [ ] GitHub Actions workflow `enterprise-vps-evidence` passed in the `production` environment and its `enterprise-vps-evidence` artifact was archived outside Git.
 - [ ] `sudo ufw status verbose` reviewed.
 - [ ] fail2ban active.
+- [ ] `sh ./scripts/container-metrics-sandbox-test.sh` passed without touching the live Docker runtime.
+- [ ] `sudo sh ./scripts/install-container-metrics-collector.sh --apply --deploy-user <deploy-user> --repo-root <absolute-repo-path>` completed in an approved maintenance window.
+- [ ] `sudo sh ./scripts/install-container-metrics-collector.sh --verify --repo-root <absolute-repo-path>` passed, proving a fresh complete per-container snapshot and node-exporter textfile metrics.
 
 ## Repository And Environment
 
@@ -75,6 +78,7 @@ Use this checklist on the VPS Ubuntu LTS VPS before exposing public traffic.
 - [ ] `sh ./scripts/audit-log-evidence.sh` passed and the JSON/Markdown reports under `reports/audit-logs/` were archived outside Git.
 - [ ] `sh ./scripts/retention-evidence.sh` passed and the JSON/Markdown reports under `reports/retention/` were archived outside Git.
 - [ ] `sh ./scripts/infra-health.sh` passed.
+- [ ] Prometheus exposes fresh `platform_container_cpu_percent`, `platform_container_memory_usage_bytes` and collector-health series for every container Docker reports as running; Grafana shows workload CPU/RAM and effective limit coverage.
 - [ ] `sh ./scripts/security-smoke.sh` passed.
 - [ ] `sh ./scripts/waf-smoke.sh` passed.
 - [ ] `sh ./scripts/alert-evidence.sh --sendTest --requireEmailDelivery` passed and the JSON/Markdown reports under `reports/alerts/` were archived outside Git.

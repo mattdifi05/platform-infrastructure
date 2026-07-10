@@ -102,6 +102,7 @@ test("Admin Control Center local foundation", async (t) => {
       PROJECT_SETTINGS_FILE: settingsFile,
       PROJECT_WEBSPACES_FILE: webspacesFile,
       PROJECT_DOCKER_STATS_FILE: dockerStatsFile,
+      CONTROL_CENTER_DOCKER_STATS_MAX_AGE_SECONDS: "120",
       PROJECT_STATUS_RUNS_FILE: statusRunsFile,
       CONTROL_CENTER_HOST: "portal.localhost.com",
       DOCS_HOST: "docs.localhost.com",
@@ -794,8 +795,33 @@ test("Admin Control Center local foundation", async (t) => {
   assert.doesNotMatch(activityOpsHtml, /section=activity/);
   const resourcesOpsApi = await getJson(`${baseUrl}/control/resources/summary`);
   assert.equal(resourcesOpsApi.cards.applications.status, 2);
-  assert.equal(resourcesOpsApi.rows.some((row) => row.applicationId === "php-demo" && row.cpu.includes("0.100%")), true);
+  assert.equal(resourcesOpsApi.containerMetricsAvailable, true);
+  assert.match(resourcesOpsApi.source, /docker-stats-file/);
+  assert.equal(resourcesOpsApi.rows.some((row) => row.applicationId === "php-demo" && row.cpu.includes("0.000%")), true);
   assert.equal(resourcesOpsApi.rows.some((row) => row.applicationId === "node-demo" && row.cpu.includes("3.500%")), true);
+  const nodeRuntimeLimits = resourcesOpsApi.projectUsage.find((item) => item.projectId === "node-demo").runtimeLimits;
+  assert.deepEqual(nodeRuntimeLimits, [{
+    container: "node-demo",
+    cpuLimitCores: 2,
+    memoryLimitBytes: 536870912,
+    memoryReservationBytes: 268435456,
+    pidsLimit: 256,
+  }]);
+  const freshDockerStats = readFileSync(dockerStatsFile, "utf8");
+  const staleDockerStats = JSON.parse(freshDockerStats);
+  staleDockerStats.capturedAt = "2020-01-01T00:00:00.000Z";
+  staleDockerStats.capturedAtEpoch = 1577836800;
+  writeFileSync(dockerStatsFile, `${JSON.stringify(staleDockerStats, null, 2)}\n`);
+  const staleResourcesOpsApi = await getJson(`${baseUrl}/control/resources/summary`);
+  assert.equal(staleResourcesOpsApi.containerMetricsAvailable, false);
+  assert.equal(staleResourcesOpsApi.rows.some((row) => row.cpu.includes("3.500%")), false);
+  const futureDockerStats = JSON.parse(freshDockerStats);
+  futureDockerStats.capturedAtEpoch = Math.floor(Date.now() / 1000) + 3600;
+  futureDockerStats.capturedAt = new Date(futureDockerStats.capturedAtEpoch * 1000).toISOString();
+  writeFileSync(dockerStatsFile, `${JSON.stringify(futureDockerStats, null, 2)}\n`);
+  const futureResourcesOpsApi = await getJson(`${baseUrl}/control/resources/summary`);
+  assert.equal(futureResourcesOpsApi.containerMetricsAvailable, false);
+  writeFileSync(dockerStatsFile, freshDockerStats);
 
   const overview = await getJson(`${baseUrl}/control/overview`);
   assert.equal(overview.title, "Admin Control Center");
@@ -3403,11 +3429,21 @@ function prepareFixture() {
   writeFileSync(path.join(existingSecretsDir, "long_provider_secret.txt"), `${longExistingVaultValue}\n`, { mode: 0o600 });
   writeFileSync(path.join(existingSecretsDir, "rclone", "rclone.conf"), "[onedrive]\ntoken = existing-rclone-token-should-reveal-only\n", { mode: 0o600 });
   writeFileSync(path.join(existingSecretsDir, "README.md"), "not imported\n");
+  const dockerStatsCapturedAtEpoch = Math.floor(Date.now() / 1000);
   writeFileSync(dockerStatsFile, `${JSON.stringify({
-    capturedAt: "2026-06-28T00:00:00.000Z",
+    schemaVersion: 2,
+    capturedAt: new Date(dockerStatsCapturedAtEpoch * 1000).toISOString(),
+    capturedAtEpoch: dockerStatsCapturedAtEpoch,
+    source: "docker stats --no-stream + docker inspect",
+    collector: {
+      healthy: true,
+      expectedRunning: 2,
+      observed: 2,
+      missingRunningContainerIds: [],
+    },
     containers: [
-      { name: "php-php-demo", cpuPercent: "0.10%", memoryUsage: "24MiB / 512MiB" },
-      { name: "node-demo", cpuPercent: "3.50%", memoryUsage: "96MiB / 512MiB" },
+      { name: "php-php-demo", service: "php-demo", status: "running", cpuPercent: 0, cpuCores: 0, memoryUsageBytes: 25165824, cpuLimitCores: null, memoryLimitBytes: null, memoryReservationBytes: null, pidsLimit: 512 },
+      { name: "node-demo", service: "node-demo", status: "running", cpuPercent: 3.5, cpuCores: 0.035, memoryUsageBytes: 100663296, cpuLimitCores: 2, memoryLimitBytes: 536870912, memoryReservationBytes: 268435456, pidsLimit: 256 },
     ],
   }, null, 2)}\n`);
   writeFileSync(databasesFile, `${JSON.stringify({

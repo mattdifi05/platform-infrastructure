@@ -189,7 +189,7 @@ Enterprise requirements: GO per copertura repo/tooling.
 Production go-live: NO-GO finche' mancano prove live/provider esterne.
 ```
 
-Alertmanager resta interno alla rete Docker. Prometheus invia gli alert ad Alertmanager, che li inoltra al worker notifiche su `/alerts/prometheus` con token Bearer da Docker secret; il token e' materializzato `0640` e condiviso solo tramite `ALERTMANAGER_SECRET_GID`. L'healthcheck richiede sia `/-/ready` sia la leggibilita' del token. Il worker produce log Loki, metriche `notification_alert_*`, email reali verso `ALERT_EMAIL_TO` quando SMTP e' configurato, e canali opzionali Discord/Telegram tramite secret file. `alert-evidence --sendTest` entra dall'API Alertmanager e richiede un receipt correlato downstream: non chiama direttamente il worker. `node-exporter` e `cadvisor` forniscono metriche CPU, RAM, disco e container per alert operativi.
+Alertmanager resta interno alla rete Docker. Prometheus invia gli alert ad Alertmanager, che li inoltra al worker notifiche su `/alerts/prometheus` con token Bearer da Docker secret; il token e' materializzato `0640` e condiviso solo tramite `ALERTMANAGER_SECRET_GID`. L'healthcheck richiede sia `/-/ready` sia la leggibilita' del token. Il worker produce log Loki, metriche `notification_alert_*`, email reali verso `ALERT_EMAIL_TO` quando SMTP e' configurato, e canali opzionali Discord/Telegram tramite secret file. `alert-evidence --sendTest` entra dall'API Alertmanager e richiede un receipt correlato downstream: non chiama direttamente il worker. `node-exporter` fornisce le metriche host e legge le serie workload generate dal collector host-side `platform-container-metrics.service`. Il collector riconcilia `docker ps`, `docker stats` e i soli campi non-secret necessari di `docker inspect`, conserva gli zero reali, espone i limiti cgroup effettivi e fallisce se manca un container in esecuzione. cAdvisor resta una scrape di compatibilita', ma il suo healthcheck non e' prova di copertura workload. Vedi `WORKLOAD-METRICS.md`.
 
 I log sono centralizzati via Promtail senza montare `docker.sock`: Promtail legge i log JSON bounded dei container, applica una redaction pipeline su header, token, cookie, OTP e segreti, e promuove `service` e `level` a label Loki per query operative. `backend` e `worker-*` sono runtime/template platform che usano la policy condivisa `@platform/observability`; gli eventi critici restano anche su audit DB append-only/outbox.
 
@@ -423,7 +423,7 @@ Tutti gli entrypoint sono Linux/Docker-first; il runner comune e' `scripts/infra
 Sul VPS non servono Node, pnpm o una toolchain JS installati sull'host: i wrapper
 `scripts/*.sh` costruiscono e usano automaticamente il runner containerizzato
 `platform/ops:local` da `docker/ops.Dockerfile`. L'host deve avere solo Ubuntu LTS,
-Docker Engine, Docker Compose plugin e Git.
+Docker Engine, Docker Compose plugin, Git e `jq` per il collector operativo.
 
 La policy GitHub live e' versionata in `governance/github-branch-protection.json`.
 Usa `scripts/github-branch-protection.sh` in dry-run, poi `--apply` e
@@ -558,8 +558,8 @@ sh ./scripts/vps-host-readiness.sh --ssh-port 22 --enforce
 
 `vps-bootstrap-ubuntu.sh` e' dry-run di default e genera report JSON/Markdown in
 `reports/vps-bootstrap/`. Con `--apply` configura il repository apt ufficiale
-Docker per Ubuntu, installa Git, Docker Engine, Buildx e Docker Compose plugin,
-poi verifica `docker`, `docker compose` e `git`.
+Docker per Ubuntu, installa Git, `jq`, Docker Engine, Buildx e Docker Compose plugin,
+poi verifica `docker`, `docker compose`, `git` e `jq`.
 
 `vps-hardening-ubuntu.sh` e' dry-run di default e genera report JSON/Markdown in
 `reports/vps-hardening/`. Con `--apply` applica SSH hardening, sysctl, UFW,

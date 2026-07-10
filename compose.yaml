@@ -336,6 +336,8 @@ services:
       PROJECT_DEPLOYMENTS_FILE: /var/www/project-state/deployments.jsonl
       PROJECT_BACKUP_RECORDS_FILE: /var/www/project-state/backups.jsonl
       PROJECT_RESOURCE_LIMITS_FILE: /var/www/project-state/resource-limits.json
+      PROJECT_DOCKER_STATS_FILE: /var/www/project-state/docker-stats.json
+      CONTROL_CENTER_DOCKER_STATS_MAX_AGE_SECONDS: ${CONTROL_CENTER_DOCKER_STATS_MAX_AGE_SECONDS:-15}
       PROJECT_SECURITY_POLICIES_FILE: /var/www/project-state/security-policies.json
       PROJECT_ALERTS_FILE: /var/www/project-state/alerts.json
       PROJECT_NOTIFICATION_CHANNELS_FILE: /var/www/project-state/notification-channels.json
@@ -822,11 +824,13 @@ services:
     restart: unless-stopped
     command:
       - --path.rootfs=/host
+      - --collector.textfile.directory=/var/lib/node-exporter/textfile
       - --collector.filesystem.mount-points-exclude=^/(dev|proc|sys|var/lib/docker/.+|run/docker/netns)($|/)
       - --collector.netclass.ignored-devices=^(veth.*|br-.*|docker.*)$
     pid: host
     volumes:
       - /:/host:ro
+      - ./projects-portal/state/node-exporter-textfile:/var/lib/node-exporter/textfile:ro
     networks:
       - enterprise_net
     healthcheck:
