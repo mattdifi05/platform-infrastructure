@@ -299,6 +299,11 @@ Run `sh ./scripts/retention-evidence.sh` after log/metric retention changes and 
 
 ## Backup
 
+La coverage completa di dati e retention e' descritta in
+`BACKUP-RECOVERY-COVERAGE.md`. Ogni cancellazione database deve seguire
+`DATABASE-DELETION-SAFETY.md`; non sono ammesse cancellazioni dirette prive di
+manifest firmato, restore drill e receipt off-site freschi.
+
 Manual backup:
 
 ```sh

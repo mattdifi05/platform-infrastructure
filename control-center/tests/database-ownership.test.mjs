@@ -3,7 +3,9 @@ import assert from "node:assert/strict";
 import {
   activatePrincipalBinding,
   assertManagedDatabaseName,
+  assertPrincipalCleanupAllowed,
   assertPrincipalCreateAllowed,
+  assertPrincipalDeletionAllowed,
   assertPrincipalRotationAllowed,
   buildPrincipalMigrationPlan,
   createPrincipalBinding,
@@ -64,6 +66,12 @@ test("credential rotation requires exact active ownership and a non-privileged c
     database: { exists: true, owner: ownerRole },
   };
   assert.equal(assertPrincipalRotationAllowed({ database: managedDatabase, registry: active, catalog }).principalName, ownerRole);
+  assert.equal(assertPrincipalDeletionAllowed({ database: managedDatabase, registry: active, catalog }).principalName, ownerRole);
+  assert.equal(assertPrincipalCleanupAllowed({
+    database: managedDatabase,
+    registry: active,
+    catalog: { ...catalog, database: { exists: false, owner: "" } },
+  }).principalName, ownerRole);
   assert.throws(() => assertPrincipalRotationAllowed({
     database: managedDatabase,
     registry: active,
@@ -75,6 +83,17 @@ test("credential rotation requires exact active ownership and a non-privileged c
     catalog: { ...catalog, database: { exists: true, owner: "foreign_role" } },
   }), DatabaseOwnershipError);
   assert.throws(() => assertPrincipalRotationAllowed({ database: managedDatabase, registry: reserved, catalog }), DatabaseOwnershipError);
+  assert.throws(() => assertPrincipalDeletionAllowed({
+    database: managedDatabase,
+    registry: active,
+    catalog: { ...catalog, database: { exists: true, owner: "foreign_role" } },
+  }), DatabaseOwnershipError);
+  assert.throws(() => assertPrincipalCleanupAllowed({ database: managedDatabase, registry: active, catalog }), DatabaseOwnershipError);
+  assert.throws(() => assertPrincipalCleanupAllowed({
+    database: managedDatabase,
+    registry: active,
+    catalog: { ...catalog, principal: { ...catalog.principal, createRole: true }, database: { exists: false, owner: "" } },
+  }), DatabaseOwnershipError);
 });
 
 test("legacy databases produce a non-mutating dual-credential migration plan", () => {

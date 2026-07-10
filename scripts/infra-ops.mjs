@@ -3438,6 +3438,7 @@ function infraTestingHygiene() {
     "scripts/control-center-vault-reencrypt.mjs",
     "scripts/database-principal-migration-plan.mjs",
     "control-center/server.mjs",
+    "control-center/database/destructive-workflow.mjs",
     "control-center/database/ownership.mjs",
     "control-center/vault/keyring.mjs",
     "project-router/server.mjs",
@@ -5068,12 +5069,28 @@ function latestVerifiedPlatformBackupManifest() {
   fail("No complete signed platform backup manifest is available for off-site upload.");
 }
 
+function parseResticBackupSummary(result) {
+  const lines = `${String(result?.stdout || "")}\n${String(result?.stderr || "")}`.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  for (const line of lines.reverse()) {
+    try {
+      const payload = JSON.parse(line);
+      if (payload.message_type === "summary" && String(payload.snapshot_id || "")) return payload;
+    } catch {
+      // Restic can mix non-JSON progress output with the final JSON summary.
+    }
+  }
+  fail("Restic backup did not return a snapshot receipt.");
+}
+
 async function offsiteBackupRestic() {
   if (argv.backupFile || booleanFlag(argv.allowPartial)) {
     fail("Single-artifact and partial off-site uploads are not supported by the signed platform manifest pipeline.");
   }
   const { repository, passwordFile, tag, hostname } = resticConfig();
   requireResticCredentials({ repository, passwordFile });
+  const repositoryClass = classifyResticRepository(repository);
+  if (!repositoryClass.offsite) fail("Off-site backup requires a remote Restic repository.");
+  const startedAt = new Date();
   const backupRoot = path.join(infraRoot, "backups");
   const { manifestPath, manifest } = latestVerifiedPlatformBackupManifest();
   const pathSet = new Set([`/backups/${path.relative(backupRoot, manifestPath).replaceAll("\\", "/")}`]);
@@ -5089,15 +5106,43 @@ async function offsiteBackupRestic() {
       pathSet.add(`/backups/${relative}`);
     }
   }
-  resticDockerRun({
+  const backupResult = resticDockerRun({
     repository,
     passwordFile,
     mounts: ["-v", `${hostPathForContainerMount(backupRoot)}:/backups:ro`],
-    resticArgs: ["backup", ...pathSet, "--tag", tag, "--host", hostname],
+    resticArgs: ["backup", "--json", ...pathSet, "--tag", tag, "--host", hostname],
+    runOptions: { capture: true },
   });
+  const summary = parseResticBackupSummary(backupResult);
   resticForgetOldSnapshots({ repository, passwordFile, tag });
-  verifyResticRepositorySizeLimit(repository);
+  const sizeGuard = verifyResticRepositorySizeLimit(repository);
+  const finishedAt = new Date();
+  const receipt = {
+    schema: "platform.offsite-backup-receipt/v1",
+    generatedAt: finishedAt.toISOString(),
+    startedAt: startedAt.toISOString(),
+    finishedAt: finishedAt.toISOString(),
+    durationMs: finishedAt.getTime() - startedAt.getTime(),
+    status: "passed",
+    manifestId: manifest.id,
+    manifestPath: path.relative(backupRoot, manifestPath).replaceAll("\\", "/"),
+    manifestDigest: manifest.signature.digest,
+    resourceIds: manifest.resources.map((resource) => resource.id),
+    artifactCount: manifest.artifacts.length,
+    snapshotId: String(summary.snapshot_id),
+    hostname,
+    tag,
+    repositoryType: repositoryClass.type,
+    repositoryHost: repositoryClass.host,
+    repositoryOffsite: true,
+    repositorySizeBytes: sizeGuard?.sizeBytes ?? null,
+    repositoryMaxBytes: sizeGuard?.maxBytes ?? Number(process.env.RESTIC_MAX_REPOSITORY_BYTES ?? defaultResticMaxRepositoryBytes),
+    credentialsExposed: false,
+  };
+  const reportPath = writeJsonReport("offsite-backups", `offsite-backup-${reportTimestamp()}-${crypto.randomBytes(3).toString("hex")}`, receipt);
   log(`Off-site backup completed for ${manifest.resources.map((resource) => resource.id).join(", ")}`);
+  log(`Off-site receipt written to ${reportPath}`);
+  return receipt;
 }
 
 const offsiteRestoreFamilySpecs = [
@@ -12739,6 +12784,9 @@ async function staticSecurityCheckBody() {
   const vaultKeyringScript = readText(path.join(infraRoot, "control-center", "vault", "keyring.mjs"));
   const vaultMigrationScript = readText(path.join(infraRoot, "scripts", "control-center-vault-reencrypt.mjs"));
   const databaseOwnershipScript = readText(path.join(infraRoot, "control-center", "database", "ownership.mjs"));
+  const databaseDestructiveWorkflowScript = readText(path.join(infraRoot, "control-center", "database", "destructive-workflow.mjs"));
+  const databaseDestructiveWorkflowTest = readText(path.join(infraRoot, "control-center", "tests", "database-destructive-workflow.test.mjs"));
+  const databaseOwnershipSandboxTest = readText(path.join(infraRoot, "scripts", "database-ownership-sandbox-test.sh"));
   const databasePrincipalMigrationScript = readText(path.join(infraRoot, "scripts", "database-principal-migration-plan.mjs"));
   const backupContractScript = readText(path.join(infraRoot, "control-center", "backup", "contracts.mjs"));
   const backupContractTest = readText(path.join(infraRoot, "control-center", "tests", "backup-contracts.test.mjs"));
@@ -13017,7 +13065,18 @@ async function staticSecurityCheckBody() {
   assertMatch(compose, /control-center:[\s\S]*PROJECT_DOMAINS_FILE:\s+\/var\/www\/project-state\/domains\.json/, "Control Center must persist local domain metadata from the Node service.");
   assertMatch(controlCenterServer, /(?=[\s\S]*domainsFile)(?=[\s\S]*readDomainsState)(?=[\s\S]*writeDomainsState)(?=[\s\S]*domainRecord)(?=[\s\S]*planDomainCreate)/, "Control Center must manage domains through a dedicated Node-managed JSON store.");
   assertMatch(compose, /control-center:[\s\S]*PROJECT_DATABASES_FILE:\s+\/var\/www\/project-state\/databases\.json/, "Control Center must persist declarative database metadata from the Node service.");
+  assertMatch(compose, /control-center:[\s\S]*PROJECT_DATABASE_DESTRUCTIVE_OPERATIONS_FILE:\s+\/var\/www\/project-state\/database-destructive-operations\.json[\s\S]*CONTROL_CENTER_REPORTS_ROOT:\s+\/var\/www\/infra-docs\/reports/, "Control Center must persist destructive database checkpoints and consume read-only recovery evidence.");
   assertMatch(controlCenterServer, /databasesFile[\s\S]*handleDatabaseCommand[\s\S]*planDatabaseCreate[\s\S]*planDatabaseBackup[\s\S]*planDatabaseRestore[\s\S]*readDatabasesState[\s\S]*writeDatabasesState/, "Control Center must manage database create, backup and restore plans through a dedicated Node-managed JSON store.");
+  assertMatch(controlCenterServer, /planDatabaseDelete[\s\S]*approveDatabaseDelete[\s\S]*executeDatabaseDelete[\s\S]*backupRequiredBeforeLiveDelete:\s*true/, "Database deletion must use a request, approval and execution state machine with mandatory recovery evidence.");
+  assertMatch(controlCenterServer, /if \(!databaseLiveApply\) throw new RejectedOperationError\("Database delete executor is disabled; metadata and credentials were preserved\."\)/, "Database deletion must fail closed without the live adapter and preserve metadata and credentials.");
+  assertMatch(controlCenterServer, /transitionDatabaseDeleteOperation\(current, "database-dropped"\)[\s\S]*writeDatabaseDeleteOperationsState\(operationState\)[\s\S]*applyLiveDatabasePrincipalCleanup[\s\S]*removeDatabaseCredentialFile/, "Database deletion must persist the database-dropped checkpoint before principal, credential or metadata cleanup.");
+  assertNoMatch(controlCenterServer, /payload\.confirm\s*===\s*[`'"]DELETE-DATABASE:/, "Control Center must not retain the legacy one-step database deletion confirmation.");
+  assertMatch(databaseDestructiveWorkflowScript, /platform\.database-delete-operation\/v1[\s\S]*fresh-exact-backup-manifest-missing[\s\S]*fresh-exact-restore-drill-missing[\s\S]*fresh-exact-offsite-receipt-missing/, "Database delete workflow must require exact fresh backup, restore and off-site evidence.");
+  assertMatch(databaseDestructiveWorkflowScript, /readSync\(descriptor[\s\S]*fileSha256\(artifactPath\) !== artifact\.sha256/, "Database delete evidence must hash backup artifacts with bounded memory before approval.");
+  assertMatch(databaseOwnershipScript, /assertPrincipalDeletionAllowed[\s\S]*assertPrincipalCleanupAllowed[\s\S]*Database principal cleanup is allowed only after the exact database was dropped/, "Database principal cleanup must retain exact ownership and privilege checks after the database-drop checkpoint.");
+  assertMatch(databaseDestructiveWorkflowTest, /exact fresh backup, restore and off-site receipt[\s\S]*rollback-required/, "Database delete tests must cover exact recovery evidence and terminal post-drop failure handling.");
+  assertMatch(databaseOwnershipSandboxTest, /missing-evidence-mariadb[\s\S]*actualRestoreBeforeDeletePassed[\s\S]*livePlatformDatabasesTouched/, "Database deletion sandbox must prove restore before delete and preserve live platform databases.");
+  assertMatch(opsScript, /platform\.offsite-backup-receipt\/v1[\s\S]*snapshotId:[\s\S]*repositoryOffsite:\s*true/, "Off-site backup must emit an exact non-secret snapshot receipt consumable by destructive gates.");
   assertMatch(controlCenterTest, /databases\.json[\s\S]*\/control\/databases[\s\S]*CREATE-DATABASE[\s\S]*database-secret-should-not-leak/, "Control Center tests must cover database metadata persistence, backup/restore plans and secret redaction.");
   assertMatch(compose, /control-center:[\s\S]*PROJECT_STORAGE_BUCKETS_FILE:\s+\/var\/www\/project-state\/storage-buckets\.json/, "Control Center must persist declarative storage bucket metadata from the Node service.");
   assertMatch(controlCenterServer, /storageBucketsFile[\s\S]*handleStorageCommand[\s\S]*planStorageBucketCreate[\s\S]*planStorageBucketPolicy[\s\S]*planStorageBucketLifecycle[\s\S]*planStorageBucketAccessKey[\s\S]*planStorageBucketBackup[\s\S]*planStorageBucketRestore[\s\S]*readStorageBucketsState[\s\S]*writeStorageBucketsState/, "Control Center must manage storage bucket create, policy, lifecycle, access key metadata, backup and restore plans through a dedicated Node-managed JSON store.");

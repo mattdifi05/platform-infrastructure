@@ -11,7 +11,9 @@ import { controlCenterScriptTags, controlCenterStylesheetLinks, controlCenterUiC
 import {
   activatePrincipalBinding,
   assertManagedDatabaseName,
+  assertPrincipalCleanupAllowed,
   assertPrincipalCreateAllowed,
+  assertPrincipalDeletionAllowed,
   assertPrincipalRotationAllowed,
   createPrincipalBinding,
   DatabaseOwnershipError,
@@ -19,6 +21,13 @@ import {
   principalBindingFor,
   reservePrincipalBinding,
 } from "./database/ownership.mjs";
+import {
+  createDatabaseDeleteOperation,
+  databaseDeleteConfirmation,
+  findDatabaseDeleteRestorePoint,
+  parseDatabaseDeleteOperation,
+  transitionDatabaseDeleteOperation,
+} from "./database/destructive-workflow.mjs";
 import {
   backupDocumentDigest,
   backupResourceId,
@@ -50,6 +59,7 @@ const applicationsFile = process.env.PROJECT_APPLICATIONS_FILE || "/var/www/proj
 const domainsFile = process.env.PROJECT_DOMAINS_FILE || "/var/www/project-state/domains.json";
 const databasesFile = process.env.PROJECT_DATABASES_FILE || "/var/www/project-state/databases.json";
 const databasePrincipalsFile = process.env.PROJECT_DATABASE_PRINCIPALS_FILE || "/var/www/project-state/database-principals.json";
+const databaseDeleteOperationsFile = process.env.PROJECT_DATABASE_DESTRUCTIVE_OPERATIONS_FILE || "/var/www/project-state/database-destructive-operations.json";
 const databaseCredentialDir = process.env.PROJECT_DATABASE_CREDENTIAL_DIR || path.join(path.dirname(databasesFile), "database-credentials");
 const storageBucketsFile = process.env.PROJECT_STORAGE_BUCKETS_FILE || "/var/www/project-state/storage-buckets.json";
 const sensitiveMaterialsFile = process.env.PROJECT_SENSITIVE_MATERIALS_FILE || "/var/www/project-state/sensitive-materials.json";
@@ -74,6 +84,8 @@ const settingsFile = process.env.PROJECT_SETTINGS_FILE || "/var/www/project-stat
 const webspacesFile = process.env.PROJECT_WEBSPACES_FILE || "/var/www/project-state/webspaces.json";
 const dockerStatsFile = process.env.PROJECT_DOCKER_STATS_FILE || "/var/www/project-state/docker-stats.json";
 const statusRunsFile = process.env.PROJECT_STATUS_RUNS_FILE || "/var/www/project-state/status-runs.jsonl";
+const reportsRoot = process.env.CONTROL_CENTER_REPORTS_ROOT || path.join(platformInfraRoot, "reports");
+const databaseDeleteEvidenceMaxAgeMs = clampNumber(Number(process.env.CONTROL_CENTER_DATABASE_DELETE_EVIDENCE_MAX_AGE_SECONDS || 86400), 3600, 604800) * 1000;
 const postgresAppPasswordFile = process.env.CONTROL_CENTER_POSTGRES_APP_PASSWORD_FILE || "";
 const environment = normalizeEnvironment(process.env.CONTROL_CENTER_ENV || "local");
 const platformName = String(process.env.PLATFORM_NAME || "Platform Infrastructure").trim() || "Platform Infrastructure";
@@ -446,7 +458,7 @@ async function handleApi(req, res, url, context) {
       return json(res, planWebspaceQuota(parts[2], payload, context), 202);
     }
 
-    if (method === "GET" && route(parts, "control", "databases")) return json(res, { databases: context.databases, engines: context.databaseEngines });
+    if (method === "GET" && route(parts, "control", "databases")) return json(res, { databases: context.databases, engines: context.databaseEngines, destructiveOperations: context.databaseDeleteOperations });
     if (method === "POST" && route(parts, "control", "databases")) return json(res, planDatabaseCreate(payload, context), 202);
     if (method === "POST" && parts.length === 4 && route([parts[0], parts[1], parts[3]], "control", "databases", "backup")) {
       return json(res, planDatabaseBackup(parts[2], payload, context), 202);
@@ -772,6 +784,8 @@ async function handleDatabaseCommand(req, res, context) {
     if (action === "create") operation = planDatabaseCreate(payload, context);
     else if (action === "update") operation = planDatabaseUpdate(payload.id || payload.databaseId || "", payload, context);
     else if (action === "delete") operation = planDatabaseDelete(payload.id || payload.databaseId || "", payload, context);
+    else if (action === "delete-approve") operation = approveDatabaseDelete(payload.operationId || payload.id || "", payload, context);
+    else if (action === "delete-execute") operation = executeDatabaseDelete(payload.operationId || payload.id || "", payload, context);
     else if (action === "credential") operation = planDatabaseCredentialUpdate(payload.id || payload.databaseId || "", payload, context);
     else if (action === "backup") operation = planDatabaseBackup(payload.id || payload.databaseId || "", payload, context);
     else if (action === "restore") operation = planDatabaseRestore(payload.id || payload.databaseId || "", payload, context);
@@ -1228,6 +1242,10 @@ async function buildContext({ projects, state }) {
       });
     })
     .sort((a, b) => `${a.projectId}:${a.engine}:${a.name}`.localeCompare(`${b.projectId}:${b.engine}:${b.name}`));
+  const databaseDeleteOperations = Object.values(readDatabaseDeleteOperationsState().operations)
+    .filter((operation) => operation && operation.status !== "completed")
+    .map((operation) => parseDatabaseDeleteOperation(operation))
+    .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
   const storageProvider = {
     id: "minio",
     name: "MinIO",
@@ -1494,6 +1512,7 @@ async function buildContext({ projects, state }) {
     network,
     webspaces,
     databases,
+    databaseDeleteOperations,
     databaseEngines,
     databaseNameHints,
     storageProvider,
@@ -5110,7 +5129,8 @@ function renderProjectDetailDatabaseRow(context, project, database) {
   const adminAction = databaseAdminAction(database);
   const updateConfirm = `UPDATE-DATABASE:${database.id}`;
   const credentialConfirm = `ROTATE-DATABASE-CREDENTIAL:${database.id}`;
-  const deleteConfirm = `DELETE-DATABASE:${database.id}`;
+  const deleteConfirm = databaseDeleteConfirmation(database, "REQUEST");
+  const deleteOperation = context.databaseDeleteOperations.find((operation) => operation.database.id === database.id) || null;
   const credentialLabel = databaseCredentialDisplayLabel(database, project);
   return `<div class="ops-project-database-row" id="database-${escapeHtml(database.id)}">
     <div class="ops-project-database-main">
@@ -5141,16 +5161,46 @@ function renderProjectDetailDatabaseRow(context, project, database) {
       <button class="ops-button secondary compact" type="submit">${controlIcon("refresh")} Password</button>
     </form>
     <div class="ops-project-database-actions">
-      <form method="post" action="/actions/database-command">
+      ${deleteOperation ? renderDatabaseDeleteOperationControls(database, project, deleteOperation) : `<form method="post" action="/actions/database-command">
         <input type="hidden" name="action" value="delete">
         <input type="hidden" name="id" value="${escapeHtml(database.id)}">
         <input type="hidden" name="projectId" value="${escapeHtml(project.slug)}">
         <input type="hidden" name="returnTo" value="project-detail">
         <input type="hidden" name="confirm" value="${escapeHtml(deleteConfirm)}">
-        <button class="ops-button danger compact" type="submit">${controlIcon("trash")} Elimina</button>
-      </form>
+        <input type="hidden" name="idempotencyKey" value="${escapeHtml(rid())}">
+        <input name="typedName" value="" placeholder="Digita ${escapeHtml(database.name)}" aria-label="Nome database da eliminare" autocomplete="off" required>
+        <button class="ops-button danger compact" type="submit">${controlIcon("trash")} Richiedi eliminazione</button>
+      </form>`}
     </div>
   </div>`;
+}
+
+function renderDatabaseDeleteOperationControls(database, project, operation) {
+  const statusLabel = {
+    "evidence-verified": "Evidence verificata",
+    approved: "Approvata",
+    executing: "In esecuzione",
+    "database-dropped": "Database eliminato, cleanup in corso",
+    failed: "Fallita prima del drop",
+    "rollback-required": "Rollback richiesto",
+  }[operation.status] || operation.status;
+  if (new Set(["executing", "database-dropped", "rollback-required"]).has(operation.status)) {
+    return `<div class="ops-project-database-delete-state"><strong>${escapeHtml(statusLabel)}</strong><small>Operazione ${escapeHtml(operation.id)}. Nessun retry automatico dopo il drop.</small></div>`;
+  }
+  const approve = new Set(["evidence-verified", "failed"]).has(operation.status);
+  const action = approve ? "delete-approve" : "delete-execute";
+  const phase = approve ? "APPROVE" : "EXECUTE";
+  const label = approve ? "Approva eliminazione" : "Esegui eliminazione";
+  return `<form method="post" action="/actions/database-command">
+    <input type="hidden" name="action" value="${escapeHtml(action)}">
+    <input type="hidden" name="operationId" value="${escapeHtml(operation.id)}">
+    <input type="hidden" name="projectId" value="${escapeHtml(project.slug)}">
+    <input type="hidden" name="returnTo" value="project-detail">
+    <input type="hidden" name="confirm" value="${escapeHtml(databaseDeleteConfirmation(database, phase, operation.id))}">
+    <input name="typedName" value="" placeholder="Digita ${escapeHtml(database.name)}" aria-label="Conferma nome database" autocomplete="off" required>
+    <span class="ops-state warn">${escapeHtml(statusLabel)}</span>
+    <button class="ops-button danger compact" type="submit">${controlIcon(approve ? "shield" : "trash")} ${escapeHtml(label)}</button>
+  </form>`;
 }
 
 function renderProjectDetailDatabaseCreateForm(project) {
@@ -9664,6 +9714,14 @@ function applyLiveDatabaseDelete(database, state = {}, registry = {}) {
   return applyLiveMariaDbDelete(database, state, registry);
 }
 
+function applyLiveDatabasePrincipalCleanup(database, state = {}, registry = {}) {
+  if (!databaseLiveApply || !databaseOwnerRoleIsExclusive(database, state, registry)) {
+    return { applied: false, mode: databaseLiveApply ? "shared-principal-preserved" : "metadata-only" };
+  }
+  if (database.engine === "postgres") return applyLivePostgresPrincipalCleanup(database, registry);
+  return applyLiveMariaDbPrincipalCleanup(database, registry);
+}
+
 function applyLiveMariaDbCreate(database, password, registry) {
   const rootPassword = readRequiredSecretFile(mariadbRootPasswordFile, "MariaDB root password");
   const catalog = inspectMariaDbOwnership(database, rootPassword);
@@ -9710,11 +9768,8 @@ function applyLiveMariaDbCredential(database, password, registry) {
 
 function applyLiveMariaDbDelete(database, state = {}, registry = {}) {
   const rootPassword = readRequiredSecretFile(mariadbRootPasswordFile, "MariaDB root password");
-  const statements = [`DROP DATABASE IF EXISTS ${mysqlIdentifier(database.name)}`];
-  if (databaseOwnerRoleIsExclusive(database, state, registry)) {
-    statements.push(`DROP USER IF EXISTS ${mysqlUserHost(database.ownerRole)}`);
-  }
-  statements.push("FLUSH PRIVILEGES");
+  const catalog = inspectMariaDbOwnership(database, rootPassword);
+  ownershipPolicy(() => assertPrincipalDeletionAllowed({ database, registry, catalog }), RejectedOperationError);
   runDatabaseClient("mariadb", [
     "--protocol=TCP",
     "-h", mariadbHost,
@@ -9723,9 +9778,28 @@ function applyLiveMariaDbDelete(database, state = {}, registry = {}) {
     "--batch",
     "--skip-column-names",
   ], {
-    input: `${statements.join(";\n")};\n`,
+    input: `DROP DATABASE IF EXISTS ${mysqlIdentifier(database.name)};\n`,
     env: { MYSQL_PWD: rootPassword },
     label: "MariaDB drop database",
+  });
+  return { applied: true, mode: "mariadb-cli", principalCleanupRequired: databaseOwnerRoleIsExclusive(database, state, registry) };
+}
+
+function applyLiveMariaDbPrincipalCleanup(database, registry = {}) {
+  const rootPassword = readRequiredSecretFile(mariadbRootPasswordFile, "MariaDB root password");
+  const catalog = inspectMariaDbOwnership(database, rootPassword);
+  ownershipPolicy(() => assertPrincipalCleanupAllowed({ database, registry, catalog }), RejectedOperationError);
+  runDatabaseClient("mariadb", [
+    "--protocol=TCP",
+    "-h", mariadbHost,
+    "-P", String(mariadbPort),
+    "-u", mariadbRootUser,
+    "--batch",
+    "--skip-column-names",
+  ], {
+    input: `DROP USER IF EXISTS ${mysqlUserHost(database.ownerRole)};\nFLUSH PRIVILEGES;\n`,
+    env: { MYSQL_PWD: rootPassword },
+    label: "MariaDB drop managed database principal",
   });
   return { applied: true, mode: "mariadb-cli" };
 }
@@ -9753,14 +9827,21 @@ function applyLivePostgresCredential(database, password, registry) {
 
 function applyLivePostgresDelete(database, state = {}, registry = {}) {
   const superPassword = readRequiredSecretFile(postgresSuperuserPasswordFile, "PostgreSQL superuser password");
+  const catalog = inspectPostgresOwnership(database, superPassword);
+  ownershipPolicy(() => assertPrincipalDeletionAllowed({ database, registry, catalog }), RejectedOperationError);
   const dropSql = [
     `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = ${postgresStringLiteral(database.name)};`,
     `DROP DATABASE IF EXISTS ${postgresIdentifier(database.name)} WITH (FORCE);`,
   ];
-  if (databaseOwnerRoleIsExclusive(database, state, registry)) {
-    dropSql.push(`DROP ROLE IF EXISTS ${postgresIdentifier(database.ownerRole)};`);
-  }
   runPostgresSql(`${dropSql.join("\n")}\n`, superPassword, "PostgreSQL drop database");
+  return { applied: true, mode: "postgres-cli", principalCleanupRequired: databaseOwnerRoleIsExclusive(database, state, registry) };
+}
+
+function applyLivePostgresPrincipalCleanup(database, registry = {}) {
+  const superPassword = readRequiredSecretFile(postgresSuperuserPasswordFile, "PostgreSQL superuser password");
+  const catalog = inspectPostgresOwnership(database, superPassword);
+  ownershipPolicy(() => assertPrincipalCleanupAllowed({ database, registry, catalog }), RejectedOperationError);
+  runPostgresSql(`DROP ROLE IF EXISTS ${postgresIdentifier(database.ownerRole)};\n`, superPassword, "PostgreSQL drop managed database principal");
   return { applied: true, mode: "postgres-cli" };
 }
 
@@ -10026,26 +10107,163 @@ function planDatabaseCredentialUpdate(id, payload, context) {
 
 function planDatabaseDelete(id, payload, context) {
   const database = findById(context.databases, id, "Database");
-  const confirmation = `DELETE-DATABASE:${database.id}`;
-  if (payload.confirm === confirmation) {
-    const state = readDatabasesState();
-    const registry = readDatabasePrincipalsState();
-    const liveResult = applyLiveDatabaseDelete(database, state, registry.bindings);
+  const confirmation = databaseDeleteConfirmation(database, "REQUEST");
+  const restorePoint = findDatabaseDeleteRestorePoint({ database, backupRoot, reportsRoot, maxAgeMs: databaseDeleteEvidenceMaxAgeMs });
+  if (payload.confirm !== confirmation) {
+    appendAudit({ action: "database.delete.plan", target: database.id, environment: context.environment, risk: "high", result: "planned", dryRun: true, summary: "Database delete plan generated; exact fresh local/off-site backup and restore drill are mandatory." });
+    return operationPlan("database.delete", context.environment, true, ["type the exact database name", "verify exact signed backup manifest", "verify exact disposable restore drill", "verify fresh off-site snapshot receipt", "create idempotent delete request", "approve in a separate owner action", "execute through the checkpointed state machine"], {
+      databaseId: database.id,
+      projectId: database.projectId,
+      engine: database.engine,
+      name: database.name,
+      databaseTouched: false,
+      dataDeleted: false,
+      credentialsExposed: false,
+      backupRequiredBeforeLiveDelete: true,
+      restorePointReady: restorePoint.ready,
+      evidenceBlockers: restorePoint.blockers,
+      productionEvidence: false,
+      confirmationRequired: confirmation,
+      typedNameRequired: database.name,
+    });
+  }
+  if (String(payload.typedName || "") !== database.name) throw new RejectedOperationError(`Type the exact database name '${database.name}' to request deletion.`);
+  const idempotencyKey = String(payload.idempotencyKey || "").trim();
+  if (!idempotencyKey) throw new RejectedOperationError("Database delete request requires an idempotency key.");
+  const state = readDatabaseDeleteOperationsState();
+  const existing = Object.values(state.operations).find((operation) => operation.idempotencyKey === idempotencyKey);
+  if (existing) {
+    const parsed = parseDatabaseDeleteOperation(existing);
+    if (parsed.database.id !== database.id) throw new RejectedOperationError("Idempotency key is already bound to another database.");
+    return databaseDeleteOperationResponse("database.delete.requested", parsed, context, true);
+  }
+  if (!restorePoint.ready) throw new RejectedOperationError(`Database delete blocked: ${restorePoint.blockers.join(", ")}.`);
+  const identity = requestIdentity.getStore();
+  const operation = createDatabaseDeleteOperation({
+    id: rid(),
+    database,
+    evidence: restorePoint.evidence,
+    idempotencyKey,
+    requestedBy: identity?.subject || "unknown-admin",
+  });
+  state.operations[operation.id] = operation;
+  writeDatabaseDeleteOperationsState(state);
+  appendAudit({ action: "database.delete.request", actor: identity?.subject, target: database.id, environment: context.environment, risk: "high", result: "accepted", dryRun: false, summary: "Checkpointed database delete request created after exact backup, restore and off-site evidence verification." });
+  return databaseDeleteOperationResponse("database.delete.requested", operation, context, false);
+}
+
+function approveDatabaseDelete(operationId, payload, context) {
+  const state = readDatabaseDeleteOperationsState();
+  const operation = findDatabaseDeleteOperation(state, operationId);
+  const database = findById(context.databases, operation.database.id, "Database");
+  if (payload.confirm !== databaseDeleteConfirmation(database, "APPROVE", operation.id)) throw new RejectedOperationError("Database delete approval confirmation is invalid.");
+  if (String(payload.typedName || "") !== database.name) throw new RejectedOperationError(`Type the exact database name '${database.name}' to approve deletion.`);
+  if (operation.status === "approved") return databaseDeleteOperationResponse("database.delete.approved", operation, context, true);
+  if (!new Set(["evidence-verified", "failed"]).has(operation.status)) throw new RejectedOperationError(`Database delete cannot be approved from state ${operation.status}.`);
+  const restorePoint = findDatabaseDeleteRestorePoint({ database, backupRoot, reportsRoot, maxAgeMs: databaseDeleteEvidenceMaxAgeMs });
+  if (!restorePoint.ready || restorePoint.evidence.fingerprint !== operation.evidenceFingerprint) throw new RejectedOperationError("Database delete evidence changed, expired or is no longer complete. Create a new request.");
+  const identity = requestIdentity.getStore();
+  const approved = transitionDatabaseDeleteOperation(operation, "approved", { approvedBy: identity?.subject || "unknown-admin" });
+  state.operations[approved.id] = approved;
+  writeDatabaseDeleteOperationsState(state);
+  appendAudit({ action: "database.delete.approve", actor: identity?.subject, target: database.id, environment: context.environment, risk: "high", result: "approved", dryRun: false, summary: "Database delete approved in a separate fresh owner action; no data changed." });
+  return databaseDeleteOperationResponse("database.delete.approved", approved, context, false);
+}
+
+function executeDatabaseDelete(operationId, payload, context) {
+  const operationState = readDatabaseDeleteOperationsState();
+  const operation = findDatabaseDeleteOperation(operationState, operationId);
+  if (operation.status === "completed") return databaseDeleteOperationResponse("database.delete.completed", operation, context, true);
+  if (operation.status !== "approved") throw new RejectedOperationError(`Database delete execution requires approved state, not ${operation.status}.`);
+  if (payload.confirm !== databaseDeleteConfirmation(operation.database, "EXECUTE", operation.id)) throw new RejectedOperationError("Database delete execution confirmation is invalid.");
+  if (String(payload.typedName || "") !== operation.database.name) throw new RejectedOperationError(`Type the exact database name '${operation.database.name}' to execute deletion.`);
+  if (!databaseLiveApply) throw new RejectedOperationError("Database delete executor is disabled; metadata and credentials were preserved.");
+
+  const databases = readDatabasesState();
+  const database = databases[operation.database.id];
+  if (!database || database.engine !== operation.database.engine || database.name !== operation.database.name || database.projectId !== operation.database.projectId) {
+    throw new RejectedOperationError("Database metadata no longer matches the approved delete operation.");
+  }
+  const restorePoint = findDatabaseDeleteRestorePoint({ database, backupRoot, reportsRoot, maxAgeMs: databaseDeleteEvidenceMaxAgeMs });
+  if (!restorePoint.ready || restorePoint.evidence.fingerprint !== operation.evidenceFingerprint) throw new RejectedOperationError("Database delete evidence changed, expired or is no longer complete.");
+
+  const registry = readDatabasePrincipalsState();
+  let current = transitionDatabaseDeleteOperation(operation, "executing");
+  operationState.operations[current.id] = current;
+  writeDatabaseDeleteOperationsState(operationState);
+  let databaseDropped = false;
+  try {
+    const liveResult = applyLiveDatabaseDelete(database, databases, registry.bindings);
+    if (!liveResult.applied) throw new RejectedOperationError("Database delete executor did not apply a live database change.");
+    databaseDropped = true;
+    current = transitionDatabaseDeleteOperation(current, "database-dropped");
+    operationState.operations[current.id] = current;
+    writeDatabaseDeleteOperationsState(operationState);
+
+    const principalCleanup = applyLiveDatabasePrincipalCleanup(database, databases, registry.bindings);
     removeDatabaseCredentialFile(database);
-    delete state[database.id];
-    writeDatabasesState(state);
+    delete databases[database.id];
+    writeDatabasesState(databases);
     const binding = principalBindingFor(registry.bindings, database);
-    if (binding && (liveResult.applied || binding.status === "reserved")) {
+    if (binding) {
       const bindings = { ...registry.bindings };
       delete bindings[database.id];
       writeDatabasePrincipalsState({ ...registry, bindings });
     }
-    appendAudit({ action: "database.delete.apply", target: database.id, environment: context.environment, risk: "high", result: "success", dryRun: false, summary: liveResult.applied ? "Database, dedicated user, metadata and protected credential removed." : "Database metadata and protected credential removed; live adapter disabled." });
-    const operation = operationPlan("database.delete.local", context.environment, false, ["validate database", "require explicit confirmation", "drop database when live adapter is enabled", "drop dedicated user when safe", "remove metadata", "remove protected credential file", "write audit event"], { databaseId: database.id, projectId: database.projectId, engine: database.engine, name: database.name, databaseTouched: liveResult.applied, dataDeleted: liveResult.applied, metadataDeleted: true, credentialFileDeleted: true, credentialsExposed: false, backupRequiredBeforeLiveDelete: false, liveAdapter: liveResult.mode, productionEvidence: false });
-    return { ...operation, database: null };
+    current = transitionDatabaseDeleteOperation(current, "completed");
+    operationState.operations[current.id] = current;
+    writeDatabaseDeleteOperationsState(operationState);
+    const identity = requestIdentity.getStore();
+    appendAudit({ action: "database.delete.complete", actor: identity?.subject, target: database.id, environment: context.environment, risk: "high", result: "success", dryRun: false, summary: "Exact managed database, principal, metadata and protected credential removed through the checkpointed workflow." });
+    return databaseDeleteOperationResponse("database.delete.completed", current, context, false, { ...liveResult, principalCleanup });
+  } catch (error) {
+    try {
+      if (databaseDropped && current.status === "executing") current = transitionDatabaseDeleteOperation(current, "database-dropped");
+      current = transitionDatabaseDeleteOperation(current, databaseDropped ? "rollback-required" : "failed", { failure: sanitizeDatabaseClientError(error?.message || error) });
+      operationState.operations[current.id] = current;
+      writeDatabaseDeleteOperationsState(operationState);
+    } catch {
+      // Preserve the original failure; the last durable checkpoint remains available for reconciliation.
+    }
+    appendAudit({ action: "database.delete.failed", target: operation.database.id, environment: context.environment, risk: "high", result: databaseDropped ? "rollback-required" : "failed", dryRun: false, summary: databaseDropped ? "Database drop completed but cleanup failed; automatic retry stopped and restore/finalize approval is required." : "Database delete stopped before the database drop completed." });
+    if (error instanceof RejectedOperationError) throw error;
+    throw new RejectedOperationError(`Database delete failed in state ${databaseDropped ? "rollback-required" : "failed"}.`);
   }
-  appendAudit({ action: "database.delete.plan", target: database.id, environment: context.environment, risk: "high", result: "planned", dryRun: true, summary: "Database delete plan generated; live data requires a separate backup and explicit executor." });
-  return operationPlan("database.delete", context.environment, true, ["validate database", "require explicit confirmation", "drop live database and dedicated user when enabled", "delete metadata and protected credential", "write audit event"], { databaseId: database.id, projectId: database.projectId, engine: database.engine, name: database.name, databaseTouched: false, dataDeleted: false, credentialsExposed: false, backupRequiredBeforeLiveDelete: false, productionEvidence: false, confirmationRequired: confirmation });
+}
+
+function databaseDeleteOperationResponse(type, operation, context, idempotent = false, liveResult = null) {
+  const publicOperation = {
+    ...operation,
+    database: { ...operation.database, credentialFile: "" },
+  };
+  return {
+    ...operationPlan(type, context.environment, false, ["preserve exact evidence fingerprint", "persist every destructive checkpoint", "never auto-retry after database drop"], {
+      databaseId: operation.database.id,
+      projectId: operation.database.projectId,
+      engine: operation.database.engine,
+      name: operation.database.name,
+      operationId: operation.id,
+      operationStatus: operation.status,
+      resourceId: operation.resourceId,
+      evidenceFingerprint: operation.evidenceFingerprint,
+      backupRequiredBeforeLiveDelete: true,
+      restorePointReady: true,
+      databaseTouched: operation.status === "completed",
+      dataDeleted: operation.status === "completed",
+      credentialsExposed: false,
+      liveAdapter: liveResult?.mode || (databaseLiveApply ? "enabled" : "disabled"),
+      idempotent,
+      productionEvidence: false,
+    }),
+    deleteOperation: publicOperation,
+    database: operation.status === "completed" ? null : publicOperation.database,
+  };
+}
+
+function findDatabaseDeleteOperation(state, operationId) {
+  const cleanId = sanitizeIdentifier(operationId);
+  if (!cleanId || !state.operations[cleanId]) throw new ValidationError("Database delete operation not found.");
+  return parseDatabaseDeleteOperation(state.operations[cleanId]);
 }
 
 function planDatabaseBackup(id, payload, context) {
@@ -11219,6 +11437,23 @@ function readDatabasesState() {
 
 function writeDatabasesState(state) {
   writePrivateJsonAtomic(databasesFile, sanitizeEvent(state));
+}
+
+function readDatabaseDeleteOperationsState() {
+  if (!existsSync(databaseDeleteOperationsFile)) return { version: 1, operations: {}, updatedAt: null };
+  try {
+    const parsed = JSON.parse(readFileSync(databaseDeleteOperationsFile, "utf8"));
+    if (parsed?.version !== 1 || !parsed.operations || typeof parsed.operations !== "object" || Array.isArray(parsed.operations)) throw new Error("invalid delete operation state");
+    for (const operation of Object.values(parsed.operations)) parseDatabaseDeleteOperation(operation);
+    return parsed;
+  } catch {
+    throw new ValidationError("Database destructive operation state is unreadable; no database mutation was performed.");
+  }
+}
+
+function writeDatabaseDeleteOperationsState(state) {
+  const operations = Object.fromEntries(Object.entries(state.operations || {}).map(([id, operation]) => [sanitizeIdentifier(id), parseDatabaseDeleteOperation(operation)]));
+  writePrivateJsonAtomic(databaseDeleteOperationsFile, { version: 1, operations, updatedAt: new Date().toISOString() });
 }
 
 function readDatabasePrincipalsState() {

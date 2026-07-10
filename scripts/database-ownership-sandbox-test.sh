@@ -7,6 +7,7 @@ RUN_ID="t04-db-ownership-$$"
 NETWORK="$RUN_ID"
 POSTGRES_CONTAINER="$RUN_ID-postgres"
 MARIADB_CONTAINER="$RUN_ID-mariadb"
+MARIADB_RESTORE_CONTAINER="$RUN_ID-mariadb-restore"
 CONTROL_CONTAINER="$RUN_ID-control"
 CONTROL_IMAGE="platform/control-center:$RUN_ID"
 WORK_DIR=$(mktemp -d "/tmp/$RUN_ID.XXXXXX")
@@ -20,7 +21,7 @@ ROTATE_PASSWORD="t04-managed-rotate-fixture"
 ATTEMPT_PASSWORD="t04-foreign-attempt-fixture"
 
 cleanup() {
-  docker rm -f "$CONTROL_CONTAINER" "$POSTGRES_CONTAINER" "$MARIADB_CONTAINER" >/dev/null 2>&1 || true
+  docker rm -f "$CONTROL_CONTAINER" "$POSTGRES_CONTAINER" "$MARIADB_CONTAINER" "$MARIADB_RESTORE_CONTAINER" >/dev/null 2>&1 || true
   docker network rm "$NETWORK" >/dev/null 2>&1 || true
   docker image rm "$CONTROL_IMAGE" >/dev/null 2>&1 || true
   rm -rf "$WORK_DIR"
@@ -31,7 +32,10 @@ for command in docker jq; do
   command -v "$command" >/dev/null 2>&1 || { echo "$command is required" >&2; exit 127; }
 done
 
-mkdir -p "$WORK_DIR/projects/node-demo" "$WORK_DIR/state" "$WORK_DIR/secrets"
+LIVE_POSTGRES_ID=$(docker inspect --format '{{.Id}}' enterprise-postgres 2>/dev/null || true)
+LIVE_MARIADB_ID=$(docker inspect --format '{{.Id}}' mariadb 2>/dev/null || true)
+
+mkdir -p "$WORK_DIR/projects/node-demo" "$WORK_DIR/state" "$WORK_DIR/secrets" "$WORK_DIR/backups/mariadb" "$WORK_DIR/backups/postgres" "$WORK_DIR/reports"
 printf '%s\n' '{"name":"node-demo","private":true}' > "$WORK_DIR/projects/node-demo/package.json"
 printf '%s\n' "$POSTGRES_PASSWORD" > "$WORK_DIR/secrets/postgres_superuser_password"
 printf '%s\n' "$MARIADB_PASSWORD" > "$WORK_DIR/secrets/mariadb_root_password"
@@ -97,6 +101,9 @@ docker run -d --name "$CONTROL_CONTAINER" --network "$NETWORK" \
   -e PROJECTS_ROOT=/var/www/projects \
   -e PROJECT_DATABASES_FILE=/var/www/project-state/databases.json \
   -e PROJECT_DATABASE_PRINCIPALS_FILE=/var/www/project-state/database-principals.json \
+  -e PROJECT_DATABASE_DESTRUCTIVE_OPERATIONS_FILE=/var/www/project-state/database-destructive-operations.json \
+  -e CONTROL_CENTER_BACKUP_ROOT=/var/www/backups \
+  -e CONTROL_CENTER_REPORTS_ROOT=/var/www/evidence-reports \
   -e PROJECT_VAULT_FILE=/var/www/project-state/secret-vault.json \
   -e CONTROL_CENTER_VAULT_KEY_FILE=/run/secrets/vault.keys \
   -e CONTROL_CENTER_MARIADB_HOST="$MARIADB_CONTAINER" \
@@ -111,6 +118,8 @@ docker run -d --name "$CONTROL_CONTAINER" --network "$NETWORK" \
   -v "$ROOT:/var/www/infra-docs:ro" \
   -v "$WORK_DIR/projects:/var/www/projects:ro" \
   -v "$WORK_DIR/state:/var/www/project-state" \
+  -v "$WORK_DIR/backups:/var/www/backups:ro" \
+  -v "$WORK_DIR/reports:/var/www/evidence-reports:ro" \
   -v "$WORK_DIR/secrets/postgres_superuser_password:/run/secrets/postgres_superuser_password:ro" \
   -v "$WORK_DIR/secrets/mariadb_root_password:/run/secrets/mariadb_root_password:ro" \
   -v "$WORK_DIR/secrets/vault.keys:/run/secrets/vault.keys:ro" \
@@ -178,6 +187,28 @@ rotate_payload() {
     '{action:"credential",id:$id,projectId:"node-demo",password:$password,confirm:("ROTATE-DATABASE-CREDENTIAL:" + $id)}'
 }
 
+delete_request_payload() {
+  database_id="$1"
+  database_name="$2"
+  idempotency_key="$3"
+  jq -nc --arg id "$database_id" --arg name "$database_name" --arg key "$idempotency_key" \
+    '{action:"delete",id:$id,projectId:"node-demo",typedName:$name,idempotencyKey:$key,confirm:("REQUEST-DATABASE-DELETE:" + $id)}'
+}
+
+delete_approve_payload() {
+  operation_id="$1"
+  database_name="$2"
+  jq -nc --arg id "$operation_id" --arg name "$database_name" \
+    '{action:"delete-approve",operationId:$id,typedName:$name,confirm:("APPROVE-DATABASE-DELETE:" + $id)}'
+}
+
+delete_execute_payload() {
+  operation_id="$1"
+  database_name="$2"
+  jq -nc --arg id "$operation_id" --arg name "$database_name" \
+    '{action:"delete-execute",operationId:$id,typedName:$name,confirm:("EXECUTE-DATABASE-DELETE:" + $id)}'
+}
+
 post_json /actions/database-command "$(rotate_payload "$MARIADB_ID" "$ROTATE_PASSWORD")" 202
 post_json /actions/database-command "$(rotate_payload "$POSTGRES_ID" "$ROTATE_PASSWORD")" 202
 docker exec -e MYSQL_PWD="$ROTATE_PASSWORD" "$MARIADB_CONTAINER" mariadb -h 127.0.0.1 -u "$MARIADB_PRINCIPAL" "$MARIADB_DB" -e 'SELECT 1' >/dev/null
@@ -193,11 +224,84 @@ if docker exec -e MYSQL_PWD="$ATTEMPT_PASSWORD" "$MARIADB_CONTAINER" mariadb -h 
   exit 1
 fi
 
+cp "$WORK_DIR/state/database-principals.good.json" "$WORK_DIR/state/database-principals.json"
+
+post_json /actions/database-command "$(delete_request_payload "$MARIADB_ID" "$MARIADB_DB" missing-evidence-mariadb)" 409
+grep -q 'fresh-exact-backup-manifest-missing' "$WORK_DIR/response.json"
+
+docker exec "$MARIADB_CONTAINER" mariadb -h 127.0.0.1 -uroot "-p$MARIADB_PASSWORD" -e \
+  "CREATE TABLE $MARIADB_DB.delete_fixture(id INT PRIMARY KEY, payload VARCHAR(64) NOT NULL); INSERT INTO $MARIADB_DB.delete_fixture VALUES (1, 'mariadb-delete-fixture');"
+docker exec -e PGPASSWORD="$POSTGRES_PASSWORD" "$POSTGRES_CONTAINER" psql -U postgres -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -q -c \
+  "CREATE TABLE delete_fixture(id integer primary key, payload text not null); INSERT INTO delete_fixture VALUES (1, 'postgres-delete-fixture');"
+
+docker exec "$MARIADB_CONTAINER" sh -ec \
+  "mariadb-dump --single-transaction --routines --events --triggers --databases '$MARIADB_DB' -uroot -p'$MARIADB_PASSWORD' | gzip -9" \
+  > "$WORK_DIR/backups/mariadb/$MARIADB_ID.sql.gz"
+docker exec -e PGPASSWORD="$POSTGRES_PASSWORD" "$POSTGRES_CONTAINER" pg_dump -U postgres -d "$POSTGRES_DB" -Fc \
+  > "$WORK_DIR/backups/postgres/$POSTGRES_ID.dump"
+chmod 600 "$WORK_DIR/backups/mariadb/$MARIADB_ID.sql.gz" "$WORK_DIR/backups/postgres/$POSTGRES_ID.dump"
+
+docker run -d --rm --name "$MARIADB_RESTORE_CONTAINER" --network none \
+  -e MARIADB_ROOT_PASSWORD="$MARIADB_PASSWORD" \
+  "$MARIADB_IMAGE" >/dev/null
+wait_for_database "$MARIADB_RESTORE_CONTAINER" mariadb-admin -h 127.0.0.1 -uroot "-p$MARIADB_PASSWORD" ping --silent
+gzip -dc "$WORK_DIR/backups/mariadb/$MARIADB_ID.sql.gz" | docker exec -i "$MARIADB_RESTORE_CONTAINER" mariadb -uroot "-p$MARIADB_PASSWORD"
+docker exec "$MARIADB_RESTORE_CONTAINER" mariadb -uroot "-p$MARIADB_PASSWORD" --batch --skip-column-names -e \
+  "SELECT payload FROM $MARIADB_DB.delete_fixture WHERE id=1;" | grep -qx mariadb-delete-fixture
+docker rm -f "$MARIADB_RESTORE_CONTAINER" >/dev/null
+
+POSTGRES_RESTORE_DB="t05_restore_$$"
+docker exec -e PGPASSWORD="$POSTGRES_PASSWORD" "$POSTGRES_CONTAINER" createdb -U postgres "$POSTGRES_RESTORE_DB"
+docker exec -i -e PGPASSWORD="$POSTGRES_PASSWORD" "$POSTGRES_CONTAINER" pg_restore -U postgres -d "$POSTGRES_RESTORE_DB" < "$WORK_DIR/backups/postgres/$POSTGRES_ID.dump"
+docker exec -e PGPASSWORD="$POSTGRES_PASSWORD" "$POSTGRES_CONTAINER" psql -U postgres -d "$POSTGRES_RESTORE_DB" -Atq -c \
+  "SELECT payload FROM delete_fixture WHERE id=1;" | grep -qx postgres-delete-fixture
+docker exec -e PGPASSWORD="$POSTGRES_PASSWORD" "$POSTGRES_CONTAINER" dropdb -U postgres "$POSTGRES_RESTORE_DB"
+
+docker run --rm --network none --user "$(id -u):$(id -g)" \
+  -e FIXTURE_ROOT=/fixture \
+  -e MARIADB_ID="$MARIADB_ID" \
+  -e MARIADB_DATABASE="$MARIADB_DB" \
+  -e POSTGRES_ID="$POSTGRES_ID" \
+  -e POSTGRES_DATABASE="$POSTGRES_DB" \
+  -v "$ROOT:/repo:ro" \
+  -v "$WORK_DIR:/fixture" \
+  -w /repo \
+  "$NODE_IMAGE" node control-center/tests/database-delete-evidence-fixture.mjs >/dev/null
+
+post_json /actions/database-command "$(delete_request_payload "$MARIADB_ID" "$MARIADB_DB" delete-mariadb-1)" 202
+MARIADB_DELETE_OPERATION=$(jq -r '.deleteOperation.id' "$WORK_DIR/response.json")
+post_json /actions/database-command "$(delete_request_payload "$MARIADB_ID" "$MARIADB_DB" delete-mariadb-1)" 202
+jq -e --arg id "$MARIADB_DELETE_OPERATION" '.deleteOperation.id == $id and .details.idempotent == true' "$WORK_DIR/response.json" >/dev/null
+post_json /actions/database-command "$(delete_approve_payload "$MARIADB_DELETE_OPERATION" "$MARIADB_DB")" 202
+jq -e '.deleteOperation.status == "approved" and .details.databaseTouched == false' "$WORK_DIR/response.json" >/dev/null
+post_json /actions/database-command "$(delete_execute_payload "$MARIADB_DELETE_OPERATION" "$MARIADB_DB")" 202
+jq -e '.deleteOperation.status == "completed" and .details.databaseTouched == true and .database == null' "$WORK_DIR/response.json" >/dev/null
+
+post_json /actions/database-command "$(delete_request_payload "$POSTGRES_ID" "$POSTGRES_DB" delete-postgres-1)" 202
+POSTGRES_DELETE_OPERATION=$(jq -r '.deleteOperation.id' "$WORK_DIR/response.json")
+post_json /actions/database-command "$(delete_approve_payload "$POSTGRES_DELETE_OPERATION" "$POSTGRES_DB")" 202
+post_json /actions/database-command "$(delete_execute_payload "$POSTGRES_DELETE_OPERATION" "$POSTGRES_DB")" 202
+jq -e '.deleteOperation.status == "completed" and .details.databaseTouched == true and .database == null' "$WORK_DIR/response.json" >/dev/null
+
+test "$(docker exec "$MARIADB_CONTAINER" mariadb -h 127.0.0.1 -uroot "-p$MARIADB_PASSWORD" --batch --skip-column-names -e \
+  "SELECT COUNT(*) FROM information_schema.SCHEMATA WHERE SCHEMA_NAME='$MARIADB_DB'; SELECT COUNT(*) FROM mysql.user WHERE User='$MARIADB_PRINCIPAL';")" = "$(printf '0\n0')"
+test "$(docker exec -e PGPASSWORD="$POSTGRES_PASSWORD" "$POSTGRES_CONTAINER" psql -U postgres -Atq -c \
+  "SELECT COUNT(*) FROM pg_database WHERE datname='$POSTGRES_DB'; SELECT COUNT(*) FROM pg_roles WHERE rolname='$POSTGRES_PRINCIPAL';")" = "$(printf '0\n0')"
+jq -e --arg maria "$MARIADB_ID" --arg postgres "$POSTGRES_ID" 'has($maria) == false and has($postgres) == false' "$WORK_DIR/state/databases.json" >/dev/null
+jq -e --arg maria "$MARIADB_ID" --arg postgres "$POSTGRES_ID" '.bindings | has($maria) == false and has($postgres) == false' "$WORK_DIR/state/database-principals.json" >/dev/null
+jq -e --arg maria "$MARIADB_DELETE_OPERATION" --arg postgres "$POSTGRES_DELETE_OPERATION" '.operations[$maria].status == "completed" and .operations[$postgres].status == "completed"' "$WORK_DIR/state/database-destructive-operations.json" >/dev/null
+test ! -e "$WORK_DIR/state/database-credentials/$MARIADB_ID.txt"
+test ! -e "$WORK_DIR/state/database-credentials/$POSTGRES_ID.txt"
+
 grep -q '"action":"database.create.apply"' "$WORK_DIR/state/audit.jsonl"
 grep -q '"action":"database.credential.update.apply"' "$WORK_DIR/state/audit.jsonl"
+grep -q '"action":"database.delete.complete"' "$WORK_DIR/state/audit.jsonl"
 if grep -E -q 't04-(managed|foreign|postgres|mariadb).*-fixture' "$WORK_DIR/state/databases.json" "$WORK_DIR/state/database-principals.json" "$WORK_DIR/state/audit.jsonl"; then
   echo "database plaintext leaked into metadata or audit state" >&2
   exit 1
 fi
 
-printf '%s\n' '{"status":"passed","engines":["mariadb","postgres"],"foreignPrincipalCollisionRejected":true,"exactBindingRotationPassed":true,"foreignBindingRotationRejected":true,"livePlatformDatabasesTouched":false}'
+test "$(docker inspect --format '{{.Id}}' enterprise-postgres 2>/dev/null || true)" = "$LIVE_POSTGRES_ID"
+test "$(docker inspect --format '{{.Id}}' mariadb 2>/dev/null || true)" = "$LIVE_MARIADB_ID"
+
+printf '%s\n' '{"status":"passed","engines":["mariadb","postgres"],"foreignPrincipalCollisionRejected":true,"exactBindingRotationPassed":true,"foreignBindingRotationRejected":true,"missingDeleteEvidenceRejected":true,"actualRestoreBeforeDeletePassed":true,"checkpointedDeletePassed":true,"idempotentDeleteRequestPassed":true,"livePlatformDatabasesTouched":false}'

@@ -99,21 +99,21 @@ export function assertPrincipalCreateAllowed({ database, registry, catalog }) {
 }
 
 export function assertPrincipalRotationAllowed({ database, registry, catalog }) {
-  const expected = createPrincipalBinding(database, { status: "active" });
-  const binding = normalizedBindings(registry)[expected.id];
-  if (!binding) throw new DatabaseOwnershipError("Database principal binding is missing.");
-  assertBindingMatches(binding, expected);
-  if (binding.status !== "active") throw new DatabaseOwnershipError("Database principal binding is not active.");
-  assertPrincipalIsManaged(expected.principalName, expected.engine);
-  if (!catalog?.principal?.exists) throw new DatabaseOwnershipError("Bound database principal does not exist.");
+  const expected = assertActiveManagedPrincipal({ database, registry, catalog });
   if (!catalog?.database?.exists) throw new DatabaseOwnershipError("Bound database does not exist.");
   if (String(catalog.database.owner || "") !== expected.principalName) {
     throw new DatabaseOwnershipError("Database ownership does not match the registered principal.");
   }
-  const privilegeFlags = ["superuser", "createRole", "createDb", "replication", "bypassRls", "admin", "grantOption", "identityMismatch"];
-  if (privilegeFlags.some((flag) => Boolean(catalog.principal[flag]))) {
-    throw new DatabaseOwnershipError("Database principal has privileged capabilities and will not be altered.");
-  }
+  return expected;
+}
+
+export function assertPrincipalDeletionAllowed({ database, registry, catalog }) {
+  return assertPrincipalRotationAllowed({ database, registry, catalog });
+}
+
+export function assertPrincipalCleanupAllowed({ database, registry, catalog }) {
+  const expected = assertActiveManagedPrincipal({ database, registry, catalog });
+  if (catalog?.database?.exists) throw new DatabaseOwnershipError("Database principal cleanup is allowed only after the exact database was dropped.");
   return expected;
 }
 
@@ -207,6 +207,21 @@ function assertPrincipalIsManaged(principal, engine) {
     || value.startsWith("cloudsql")) {
     throw new DatabaseOwnershipError("Protected or unmanaged database principal is not allowed.");
   }
+}
+
+function assertActiveManagedPrincipal({ database, registry, catalog }) {
+  const expected = createPrincipalBinding(database, { status: "active" });
+  const binding = normalizedBindings(registry)[expected.id];
+  if (!binding) throw new DatabaseOwnershipError("Database principal binding is missing.");
+  assertBindingMatches(binding, expected);
+  if (binding.status !== "active") throw new DatabaseOwnershipError("Database principal binding is not active.");
+  assertPrincipalIsManaged(expected.principalName, expected.engine);
+  if (!catalog?.principal?.exists) throw new DatabaseOwnershipError("Bound database principal does not exist.");
+  const privilegeFlags = ["superuser", "createRole", "createDb", "replication", "bypassRls", "admin", "grantOption", "identityMismatch"];
+  if (privilegeFlags.some((flag) => Boolean(catalog.principal[flag]))) {
+    throw new DatabaseOwnershipError("Database principal has privileged capabilities and will not be altered.");
+  }
+  return expected;
 }
 
 function normalizedProjectId(value) {

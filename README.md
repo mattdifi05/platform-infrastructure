@@ -794,6 +794,8 @@ fuori dal GO/NO-GO infra.
 - `scripts/infra-ops.sh`: entrypoint container-first che non richiede Node sull'host.
 - `scripts/infra-ops.mjs`: runner operativo eseguito dentro il container ops.
 - `docker/ops.Dockerfile`: immagine operativa con Node, Docker CLI e Compose plugin.
+- `BACKUP-RECOVERY-COVERAGE.md`: catalogo dati, retention e recovery della piattaforma.
+- `DATABASE-DELETION-SAFETY.md`: gate, state machine e recovery per le cancellazioni DB.
 - `postgres/init/` e `postgres/migrations/`: bootstrap DB e compatibilita'
   workload legacy; non sono gate GO/NO-GO infra.
 - `RUNBOOK.md`, `SECURITY.md`, `THREAT-MODEL.md`, `ENTERPRISE-MATURITY.md`: governance operativa.

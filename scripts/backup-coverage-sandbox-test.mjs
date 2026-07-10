@@ -180,7 +180,7 @@ try {
   const resticPasswordFile = path.join(sandboxRoot, "restic-password.txt");
   writeFileSync(resticPasswordFile, `${randomBytes(32).toString("base64url")}\n`, { mode: 0o600 });
   const mutableImage = runOps(["offsite-backup-restic"], false, {
-    RESTIC_REPOSITORY: path.join(sandboxRoot, "restic-repository"),
+    RESTIC_REPOSITORY: "s3:https://backup.invalid/platform-fixture",
     RESTIC_PASSWORD_FILE: resticPasswordFile,
     RESTIC_IMAGE: `registry.invalid/restic-rclone@sha256:${"0".repeat(64)}`,
     RESTIC_REQUIRE_IMMUTABLE_IMAGE: "true",

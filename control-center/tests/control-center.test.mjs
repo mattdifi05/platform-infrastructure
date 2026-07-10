@@ -35,6 +35,7 @@ const applicationsFile = path.join(stateDir, "applications.json");
 const domainsFile = path.join(stateDir, "domains.json");
 const databasesFile = path.join(stateDir, "databases.json");
 const databasePrincipalsFile = path.join(stateDir, "database-principals.json");
+const databaseDeleteOperationsFile = path.join(stateDir, "database-destructive-operations.json");
 const storageBucketsFile = path.join(stateDir, "storage-buckets.json");
 const sensitiveMaterialsFile = path.join(stateDir, "sensitive-materials.json");
 const vaultFile = path.join(stateDir, "secret-vault.json");
@@ -54,6 +55,7 @@ const settingsFile = path.join(stateDir, "settings.json");
 const webspacesFile = path.join(stateDir, "webspaces.json");
 const dockerStatsFile = path.join(stateDir, "docker-stats.json");
 const statusRunsFile = path.join(stateDir, "status-runs.jsonl");
+const reportsRoot = path.join(testRoot, "reports");
 const longExistingVaultValue = `existing-long-provider-secret-${"x".repeat(260)}`;
 
 test("Admin Control Center local foundation", async (t) => {
@@ -80,6 +82,8 @@ test("Admin Control Center local foundation", async (t) => {
       PROJECT_DOMAINS_FILE: domainsFile,
       PROJECT_DATABASES_FILE: databasesFile,
       PROJECT_DATABASE_PRINCIPALS_FILE: databasePrincipalsFile,
+      PROJECT_DATABASE_DESTRUCTIVE_OPERATIONS_FILE: databaseDeleteOperationsFile,
+      CONTROL_CENTER_REPORTS_ROOT: reportsRoot,
       PROJECT_STORAGE_BUCKETS_FILE: storageBucketsFile,
       PROJECT_SENSITIVE_MATERIALS_FILE: sensitiveMaterialsFile,
       PROJECT_VAULT_FILE: vaultFile,
@@ -640,7 +644,7 @@ test("Admin Control Center local foundation", async (t) => {
   assert.ok(projectDetailHtml.indexOf('id="project-file-manager"') < projectDetailHtml.indexOf('id="project-backups"'));
   assert.ok(projectDetailHtml.indexOf('id="project-backups"') < projectDetailHtml.indexOf('id="project-databases"'));
   assert.match(projectDetailHtml, /ops-project-backup-list/);
-  assert.match(projectDetailHtml, /3 risorse/);
+  assert.match(projectDetailHtml, /4 risorse/);
   assert.match(projectDetailHtml, /name="backupMode" value="all"/);
   assert.doesNotMatch(projectDetailHtml, /Sorgenti \+ database/);
   assert.doesNotMatch(projectDetailHtml, /ops-project-backup-fixed-scope/);
@@ -700,7 +704,8 @@ test("Admin Control Center local foundation", async (t) => {
   assert.doesNotMatch(projectDetailHtml, /Riferimento secret password database/);
   assert.match(projectDetailHtml, /ROTATE-DATABASE-CREDENTIAL%3A|ROTATE-DATABASE-CREDENTIAL:/);
   assert.match(projectDetailHtml, /name="action" value="delete"/);
-  assert.match(projectDetailHtml, /DELETE-DATABASE:/);
+  assert.match(projectDetailHtml, /REQUEST-DATABASE-DELETE:/);
+  assert.match(projectDetailHtml, /Richiedi eliminazione/);
   assert.doesNotMatch(projectDetailHtml, /name="openAfterCreate"/);
   assert.match(projectDetailHtml, /type="password" name="password" value="" placeholder="Password"/);
   assert.match(projectDetailHtml, /name="password" value="" placeholder="Password"[^>]*required/);
@@ -1773,8 +1778,21 @@ test("Admin Control Center local foundation", async (t) => {
   assert.equal(databaseDeletePlan.status, 202);
   assert.equal(databaseDeletePlan.body.type, "database.delete");
   assert.equal(databaseDeletePlan.body.dryRun, true);
-  assert.equal(databaseDeletePlan.body.details.backupRequiredBeforeLiveDelete, false);
+  assert.equal(databaseDeletePlan.body.details.backupRequiredBeforeLiveDelete, true);
+  assert.equal(databaseDeletePlan.body.details.restorePointReady, true);
+  assert.deepEqual(databaseDeletePlan.body.details.evidenceBlockers, []);
   assert.equal(databaseDeletePlan.body.details.databaseTouched, false);
+
+  const legacyDeleteApply = await postJson(`${baseUrl}/actions/database-command`, {
+    action: "delete",
+    id: "node-demo-mariadb-node-demo-app",
+    projectId: "node-demo",
+    confirm: "DELETE-DATABASE:node-demo-mariadb-node-demo-app",
+  });
+  assert.equal(legacyDeleteApply.status, 202);
+  assert.equal(legacyDeleteApply.body.type, "database.delete");
+  assert.equal(legacyDeleteApply.body.dryRun, true);
+  assert.equal(legacyDeleteApply.body.details.databaseTouched, false);
 
   const databaseBackup = await postJson(`${baseUrl}/control/databases/node-demo-mariadb-node-demo-app/backup`, {
     secret: "database-secret-should-not-leak",
@@ -1799,21 +1817,56 @@ test("Admin Control Center local foundation", async (t) => {
   assert.equal(databaseRestore.body.details.dataChanged, false);
   assert.equal(databaseRestore.body.details.databaseTouched, false);
 
-  const databaseDeleteApply = await postJson(`${baseUrl}/actions/database-command`, {
+  const databaseDeleteRequest = await postJson(`${baseUrl}/actions/database-command`, {
     action: "delete",
     id: "node-demo-mariadb-node-demo-app",
     projectId: "node-demo",
-    confirm: "DELETE-DATABASE:node-demo-mariadb-node-demo-app",
+    typedName: "node_demo_app",
+    idempotencyKey: "delete-node-demo-mariadb-1",
+    confirm: "REQUEST-DATABASE-DELETE:node-demo-mariadb-node-demo-app",
   });
-  assert.equal(databaseDeleteApply.status, 202);
-  assert.equal(databaseDeleteApply.body.type, "database.delete.local");
-  assert.equal(databaseDeleteApply.body.database, null);
-  assert.equal(databaseDeleteApply.body.details.metadataDeleted, true);
-  assert.equal(databaseDeleteApply.body.details.credentialFileDeleted, true);
-  assert.equal(databaseDeleteApply.body.details.credentialsExposed, false);
-  assert.equal(existsSync(rotatedCredentialFile), false);
-  assert.equal(JSON.parse(readFileSync(databasesFile, "utf8"))["node-demo-mariadb-node-demo-app"], undefined);
-  assert.equal(JSON.parse(readFileSync(databasePrincipalsFile, "utf8")).bindings["node-demo-mariadb-node-demo-app"], undefined);
+  assert.equal(databaseDeleteRequest.status, 202);
+  assert.equal(databaseDeleteRequest.body.type, "database.delete.requested");
+  assert.equal(databaseDeleteRequest.body.deleteOperation.status, "evidence-verified");
+  assert.equal(databaseDeleteRequest.body.details.restorePointReady, true);
+  assert.equal(databaseDeleteRequest.body.details.databaseTouched, false);
+  assert.equal(databaseDeleteRequest.body.deleteOperation.database.credentialFile, "");
+  const deleteOperationId = databaseDeleteRequest.body.deleteOperation.id;
+
+  const duplicateDeleteRequest = await postJson(`${baseUrl}/actions/database-command`, {
+    action: "delete",
+    id: "node-demo-mariadb-node-demo-app",
+    projectId: "node-demo",
+    typedName: "node_demo_app",
+    idempotencyKey: "delete-node-demo-mariadb-1",
+    confirm: "REQUEST-DATABASE-DELETE:node-demo-mariadb-node-demo-app",
+  });
+  assert.equal(duplicateDeleteRequest.status, 202);
+  assert.equal(duplicateDeleteRequest.body.deleteOperation.id, deleteOperationId);
+  assert.equal(duplicateDeleteRequest.body.details.idempotent, true);
+
+  const databaseDeleteApprove = await postJson(`${baseUrl}/actions/database-command`, {
+    action: "delete-approve",
+    operationId: deleteOperationId,
+    typedName: "node_demo_app",
+    confirm: `APPROVE-DATABASE-DELETE:${deleteOperationId}`,
+  });
+  assert.equal(databaseDeleteApprove.status, 202);
+  assert.equal(databaseDeleteApprove.body.deleteOperation.status, "approved");
+  assert.equal(databaseDeleteApprove.body.details.databaseTouched, false);
+
+  const databaseDeleteExecute = await postJson(`${baseUrl}/actions/database-command`, {
+    action: "delete-execute",
+    operationId: deleteOperationId,
+    typedName: "node_demo_app",
+    confirm: `EXECUTE-DATABASE-DELETE:${deleteOperationId}`,
+  });
+  assert.equal(databaseDeleteExecute.status, 409);
+  assert.match(databaseDeleteExecute.body.message, /executor is disabled/);
+  assert.equal(existsSync(rotatedCredentialFile), true);
+  assert.notEqual(JSON.parse(readFileSync(databasesFile, "utf8"))["node-demo-mariadb-node-demo-app"], undefined);
+  assert.notEqual(JSON.parse(readFileSync(databasePrincipalsFile, "utf8")).bindings["node-demo-mariadb-node-demo-app"], undefined);
+  assert.equal(JSON.parse(readFileSync(databaseDeleteOperationsFile, "utf8")).operations[deleteOperationId].status, "approved");
   assert.equal(readdirSync(path.dirname(databasesFile)).some((name) => name.startsWith(`${path.basename(databasesFile)}.tmp-`)), false);
   assert.equal(readdirSync(path.dirname(databasePrincipalsFile)).some((name) => name.startsWith(`${path.basename(databasePrincipalsFile)}.tmp-`)), false);
 
@@ -2760,7 +2813,7 @@ test("Admin Control Center local foundation", async (t) => {
   assert.equal(appDatabaseRestorePlan.status, 202);
   assert.equal(appDatabaseRestorePlan.body.type, "restore.queue");
   assert.equal(appDatabaseRestorePlan.body.details.restoreMode, "database");
-  assert.equal(appDatabaseRestorePlan.body.job.resources.length, 2);
+  assert.equal(appDatabaseRestorePlan.body.job.resources.length, 3);
   assert.equal(appDatabaseRestorePlan.body.job.resources.every((item) => item.kind === "database"), true);
   assert.equal("commands" in appDatabaseRestorePlan.body.job, false);
 
@@ -3330,6 +3383,8 @@ function prepareFixture() {
   mkdirSync(path.join(backupsRoot, "mariadb"), { recursive: true });
   mkdirSync(path.join(backupsRoot, "applications", "node-demo"), { recursive: true });
   mkdirSync(path.join(backupsRoot, "manifests"), { recursive: true });
+  mkdirSync(path.join(reportsRoot, "backup-jobs"), { recursive: true });
+  mkdirSync(path.join(reportsRoot, "offsite-backups"), { recursive: true });
   mkdirSync(path.join(existingSecretsDir, "rclone"), { recursive: true });
   mkdirSync(stateDir, { recursive: true });
   writeFileSync(path.join(projectsRoot, "php-demo", "public", "index.php"), "<?php echo 'php-demo';\n");
@@ -3343,6 +3398,7 @@ function prepareFixture() {
   writeFileSync(path.join(backupsRoot, "postgres", "preview.txt"), "token=backup-secret-should-not-leak\nhealthy=true\n");
   writeFileSync(path.join(backupsRoot, "applications", "node-demo", "node-demo-source-20260629.tar.gz"), "fixture-source-archive\n");
   writeFileSync(path.join(backupsRoot, "mariadb", "node-demo-20260629.sql.gz"), "fixture-mariadb-backup\n");
+  writeFileSync(path.join(backupsRoot, "mariadb", "node-demo-app-delete.sql.gz"), "fixture-managed-mariadb-backup\n");
   writeFileSync(path.join(existingSecretsDir, "github_token.txt"), "existing-github-token-should-reveal-only\n", { mode: 0o600 });
   writeFileSync(path.join(existingSecretsDir, "long_provider_secret.txt"), `${longExistingVaultValue}\n`, { mode: 0o600 });
   writeFileSync(path.join(existingSecretsDir, "rclone", "rclone.conf"), "[onedrive]\ntoken = existing-rclone-token-should-reveal-only\n", { mode: 0o600 });
@@ -3379,6 +3435,7 @@ function prepareFixture() {
 }
 
 function writeBackupManifestFixture(id, scope) {
+  const createdAt = new Date(Date.now() - 60_000).toISOString();
   const resourceFixtures = [
     {
       resource: {
@@ -3413,6 +3470,17 @@ function writeBackupManifestFixture(id, scope) {
       },
       path: "mariadb/node-demo-20260629.sql.gz",
     },
+    {
+      resource: {
+        id: backupResourceId("database", "node-demo-mariadb-node-demo-app"),
+        externalId: "node-demo-mariadb-node-demo-app",
+        kind: "database",
+        projectId: "node-demo",
+        name: "node_demo_app",
+        engine: "mariadb",
+      },
+      path: "mariadb/node-demo-app-delete.sql.gz",
+    },
   ];
   const job = createBackupJobDocument({
     id: `job-${id}`,
@@ -3421,20 +3489,23 @@ function writeBackupManifestFixture(id, scope) {
     resources: resourceFixtures.map((item) => item.resource),
     requestedBy: "fixture",
     environment: "test",
-    createdAt: "2026-06-29T10:00:00.000Z",
+    createdAt,
   });
   const manifest = createBackupManifestDocument({
     id,
     job,
-    createdAt: "2026-06-29T10:05:00.000Z",
+    createdAt,
     artifacts: resourceFixtures.map(({ resource, path: artifactPath }, index) => {
       const absolutePath = path.join(backupsRoot, artifactPath);
       const content = readFileSync(absolutePath);
+      const hash = createHash("sha256").update(content).digest("hex");
+      writeFileSync(`${absolutePath}.sha256`, `${hash}  ${path.basename(absolutePath)}\n`, { mode: 0o600 });
+      writeFileSync(`${absolutePath}.sig.json`, `${JSON.stringify({ algorithm: "HMAC-SHA256", keyId: "fixture-key-v1", hash, signature: "fixture-signature" })}\n`, { mode: 0o600 });
       return {
         id: `artifact-${id}-${index}`,
         resourceId: resource.id,
         path: artifactPath,
-        sha256: createHash("sha256").update(content).digest("hex"),
+        sha256: hash,
         sizeBytes: content.length,
         signatureKeyId: "fixture-key-v1",
       };
@@ -3449,7 +3520,32 @@ function writeBackupManifestFixture(id, scope) {
       value: "Zml4dHVyZS1zaWduYXR1cmU",
     },
   };
-  writeFileSync(path.join(backupsRoot, "manifests", `${id}.json`), `${JSON.stringify(signed, null, 2)}\n`, { mode: 0o600 });
+  const manifestPath = `manifests/${id}.json`;
+  writeFileSync(path.join(backupsRoot, manifestPath), `${JSON.stringify(signed, null, 2)}\n`, { mode: 0o600 });
+  const resourceIds = resourceFixtures.map(({ resource }) => resource.id);
+  const restoreFinishedAt = new Date(Date.parse(createdAt) + 10_000).toISOString();
+  writeFileSync(path.join(reportsRoot, "backup-jobs", `restore-${id}.json`), `${JSON.stringify({
+    status: "passed",
+    operation: "restore-drill",
+    jobId: `restore-${id}`,
+    manifestPath,
+    resourceIds,
+    results: resourceIds.map((resourceId) => ({ resourceId, status: "passed" })),
+    liveDataChanged: false,
+    finishedAt: restoreFinishedAt,
+  }, null, 2)}\n`, { mode: 0o600 });
+  writeFileSync(path.join(reportsRoot, "offsite-backups", `offsite-${id}.json`), `${JSON.stringify({
+    schema: "platform.offsite-backup-receipt/v1",
+    status: "passed",
+    manifestId: signed.id,
+    manifestPath,
+    manifestDigest: signed.signature.digest,
+    resourceIds,
+    snapshotId: `snapshot-${id}`,
+    hostname: "platform-infrastructure",
+    repositoryOffsite: true,
+    finishedAt: new Date(Date.parse(createdAt) + 20_000).toISOString(),
+  }, null, 2)}\n`, { mode: 0o600 });
 }
 
 function isolatedStateEnv(stateRoot) {
@@ -3461,6 +3557,7 @@ function isolatedStateEnv(stateRoot) {
     PROJECT_DOMAINS_FILE: path.join(stateRoot, "domains.json"),
     PROJECT_DATABASES_FILE: path.join(stateRoot, "databases.json"),
     PROJECT_DATABASE_PRINCIPALS_FILE: path.join(stateRoot, "database-principals.json"),
+    PROJECT_DATABASE_DESTRUCTIVE_OPERATIONS_FILE: path.join(stateRoot, "database-destructive-operations.json"),
     PROJECT_STORAGE_BUCKETS_FILE: path.join(stateRoot, "storage-buckets.json"),
     PROJECT_SENSITIVE_MATERIALS_FILE: path.join(stateRoot, "sensitive-materials.json"),
     PROJECT_VAULT_FILE: path.join(stateRoot, "secret-vault.json"),
