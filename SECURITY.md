@@ -2,7 +2,28 @@
 
 ## Vulnerability disclosure
 
-Report suspected vulnerabilities privately to the project owner or the configured production security contact. Do not open public issues with exploit details, credentials, personal data or live target output. Every accepted report should receive an acknowledgement, severity triage, remediation owner and follow-up evidence once the fix is deployed.
+Report suspected vulnerabilities privately through the repository Security Policy
+or to the configured production security contact. Do not open public issues with
+exploit details, credentials, personal data or live target output.
+
+Disclosure process:
+
+- acknowledgement target: 72 hours;
+- initial severity triage target: 5 business days;
+- accepted reports get an owner, remediation plan and non-secret tracking
+  evidence;
+- reporters are updated when the fix is deployed or when a compensating control
+  is applied;
+- public disclosure happens only after remediation, validation and operator
+  approval;
+- emergency reports involving active exploitation, credential exposure or data
+  access are handled as incident-response events.
+
+Allowed report content: affected platform component, environment, impact,
+reproduction summary, timestamps, request IDs and sanitized evidence.
+
+Never include secrets, tokens, private keys, real user data, backup contents,
+database dumps or live exploitation output in public reports.
 
 ## Admin Control Plane
 

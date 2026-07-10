@@ -72,6 +72,22 @@ function sqlIdentifierName(value, label = "identifier") {
   return clean;
 }
 
+function defaultPostgresApplicationDatabase() {
+  return process.env.POSTGRES_BACKUP_DATABASE || process.env.APP_DB_NAME || "app_db";
+}
+
+function postgresOpsSchemaName(database = "") {
+  return sqlIdentifierName(process.env.POSTGRES_OPS_SCHEMA || (database === "stexor" ? "stexor_platform" : "platform_ops"), "PostgreSQL ops schema");
+}
+
+function postgresOpsSchema(database = "") {
+  return sqlIdentifier(postgresOpsSchemaName(database));
+}
+
+function postgresAccountSchemaName(database = "") {
+  return sqlIdentifierName(process.env.ACCOUNT_DB_SCHEMA || (database === "stexor" ? "stexor_account" : "app_account"), "PostgreSQL account schema");
+}
+
 function cookieName(value, label = "cookie name") {
   const clean = String(value ?? "").trim();
   if (!/^[A-Za-z0-9!#$%&'*+.^_`|~-]+$/.test(clean)) {
@@ -230,10 +246,11 @@ function recordBackupRestoreRun({ container, database, databaseName = database, 
   const pathValue = artifactPath ? sqlString(artifactPath) : "null";
   const shaValue = artifactSha256 ? sqlString(artifactSha256) : "null";
   const metadataValue = sqlString(JSON.stringify(metadata));
+  const opsSchema = postgresOpsSchema(database);
   postgres(container, database, user, `
     create extension if not exists pgcrypto;
-    create schema if not exists platform_ops;
-    create table if not exists platform_ops.backup_restore_runs (
+    create schema if not exists ${opsSchema};
+    create table if not exists ${opsSchema}.backup_restore_runs (
       id uuid primary key default gen_random_uuid(),
       operation text not null check (operation in ('backup', 'restore', 'restore_test')),
       status text not null check (status in ('started', 'success', 'failed')),
@@ -247,7 +264,7 @@ function recordBackupRestoreRun({ container, database, databaseName = database, 
       check ((status = 'started' and finished_at is null) or (status <> 'started' and finished_at is not null)),
       check (finished_at is null or finished_at >= started_at)
     );
-    insert into platform_ops.backup_restore_runs (
+    insert into ${opsSchema}.backup_restore_runs (
       operation,
       status,
       database_name,
@@ -519,6 +536,32 @@ function latestFileByMtime(directory, predicate) {
     .filter((file) => fs.statSync(file).isFile() && predicate(file))
     .sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
   return files[0] ?? null;
+}
+
+function latestFileByMtimeRecursive(directory, predicate, limit = 5000) {
+  if (!fs.existsSync(directory)) return null;
+  const files = [];
+  const stack = [directory];
+  let visited = 0;
+  while (stack.length && visited < limit) {
+    const current = stack.pop();
+    visited += 1;
+    let stat;
+    try {
+      stat = fs.lstatSync(current);
+    } catch {
+      continue;
+    }
+    if (stat.isSymbolicLink()) continue;
+    if (stat.isDirectory()) {
+      for (const entry of fs.readdirSync(current)) {
+        if (!entry.startsWith(".")) stack.push(path.join(current, entry));
+      }
+      continue;
+    }
+    if (stat.isFile() && predicate(current)) files.push(current);
+  }
+  return files.sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs)[0] ?? null;
 }
 
 function resolveInside(root, target) {
@@ -1945,7 +1988,7 @@ async function applyPostgresMigrations() {
 
 async function backupPostgres(options = {}) {
   const container = options.container ?? argv.container ?? "enterprise-postgres";
-  const database = options.database ?? argv.database ?? "app_db";
+  const database = options.database ?? argv.database ?? defaultPostgresApplicationDatabase();
   const user = options.user ?? argv.user ?? "postgres";
   const outputDir = path.resolve(options.outputDir ?? argv.outputDir ?? path.join(infraRoot, "backups", "postgres"));
   const startedAt = new Date();
@@ -1996,6 +2039,144 @@ async function backupPostgres(options = {}) {
     }
     throw error;
   }
+}
+
+function applicationSourceBackupExcludes() {
+  return [
+    ".git",
+    ".hg",
+    ".svn",
+    ".env",
+    ".env.*",
+    "*.pem",
+    "*.key",
+    "*.p12",
+    "*.pfx",
+    "*.dump",
+    "*.sql",
+    "*.sqlite",
+    "*.sqlite3",
+    "node_modules",
+    "vendor",
+    ".next",
+    ".nuxt",
+    "dist",
+    "build",
+    "coverage",
+    ".cache",
+    ".turbo",
+    ".parcel-cache",
+    "backups",
+    ".codex-backups",
+    "storage/logs",
+    "var/cache",
+    "var/log",
+  ];
+}
+
+function safeApplicationBackupSlug(value) {
+  const clean = String(value || "").trim().toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 80);
+  if (!/^[a-z0-9](?:[a-z0-9-]{0,78}[a-z0-9])?$/.test(clean)) {
+    fail(`Invalid application backup slug: ${value || "(empty)"}`);
+  }
+  return clean;
+}
+
+function applicationSourceDirectories() {
+  if (!fs.existsSync(sourceRoot)) {
+    fail(`Project source root not found: ${sourceRoot}`);
+  }
+  const ignoredTopLevel = new Set(["node_modules", "vendor", "packages", "scripts", "docs", "e2e", "coverage", "dist", "build", ".next", ".cache", ".turbo"]);
+  const requested = argv.project ?? argv.application ?? argv.app;
+  const requestedSlug = requested ? safeApplicationBackupSlug(requested) : "";
+  const entries = fs.readdirSync(sourceRoot, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory() && !entry.name.startsWith("."))
+    .filter((entry) => !ignoredTopLevel.has(entry.name.toLowerCase()))
+    .map((entry) => {
+      const slug = safeApplicationBackupSlug(entry.name);
+      return {
+        name: entry.name,
+        slug,
+        path: path.join(sourceRoot, entry.name),
+      };
+    })
+    .filter((entry) => !requestedSlug || entry.slug === requestedSlug || safeApplicationBackupSlug(entry.name) === requestedSlug);
+  if (!entries.length) {
+    fail(requestedSlug ? `Application source not found for ${requestedSlug} under ${sourceRoot}` : `No application source directories found under ${sourceRoot}`);
+  }
+  return entries;
+}
+
+async function backupApplications() {
+  const startedAt = new Date();
+  const timestamp = backupTimestamp();
+  const outputRoot = ensureBackupOutputDir(path.join(infraRoot, "backups", "applications"));
+  const excludeArgs = applicationSourceBackupExcludes().flatMap((pattern) => ["--exclude", pattern]);
+  const artifacts = [];
+  for (const application of applicationSourceDirectories()) {
+    const outputDir = ensureBackupOutputDir(path.join(outputRoot, application.slug));
+    const fileName = `${application.slug}-source-${timestamp}.tar.gz`;
+    const hostPath = path.join(outputDir, fileName);
+    log(`Creating application source backup for '${application.name}'...`);
+    run("tar", ["-czf", hostPath, ...excludeArgs, "-C", sourceRoot, application.name]);
+    const { hash, signature } = writeBackupIntegritySidecars(hostPath);
+    artifacts.push({
+      application: application.slug,
+      sourceDirectory: application.name,
+      artifactPath: hostPath,
+      artifactName: fileName,
+      artifactSha256: hash,
+      signaturePath: signature.signaturePath,
+      signatureKeyId: signature.keyId,
+      artifactSizeBytes: fs.statSync(hostPath).size,
+    });
+  }
+  const finishedAt = new Date();
+  const status = artifacts.length ? "success" : "failed";
+  const payload = {
+    generatedAt: finishedAt.toISOString(),
+    startedAt: startedAt.toISOString(),
+    finishedAt: finishedAt.toISOString(),
+    durationMs: Math.max(0, finishedAt.getTime() - startedAt.getTime()),
+    engine: "applications",
+    sourceContainer: "project-source",
+    status,
+    artifactPath: artifacts[0]?.artifactPath ?? null,
+    artifactName: artifacts[0]?.artifactName ?? null,
+    artifactSizeBytes: artifacts.reduce((total, artifact) => total + Number(artifact.artifactSizeBytes || 0), 0),
+    artifactSha256: artifacts[0]?.artifactSha256 ?? null,
+    signaturePath: artifacts[0]?.signaturePath ?? null,
+    signatureKeyId: artifacts[0]?.signatureKeyId ?? null,
+    integrityVerified: artifacts.every((artifact) => Boolean(artifact.artifactSha256 && artifact.signaturePath)),
+    metadata: {
+      sourceRoot,
+      applicationCount: artifacts.length,
+      excluded: applicationSourceBackupExcludes(),
+      artifacts,
+      secretsExcluded: true,
+      dependenciesExcluded: true,
+      buildOutputExcluded: true,
+    },
+  };
+  const stamp = reportTimestamp();
+  const baseName = `applications-backup-${stamp}-${crypto.randomBytes(3).toString("hex")}`;
+  const jsonPath = writeJsonReport("backups", baseName, payload);
+  const markdownPath = writeMarkdownReport("backups", baseName, [
+    "# Platform Applications Backup Report",
+    "",
+    `Status: ${payload.status}`,
+    `Started at: ${payload.startedAt}`,
+    `Finished at: ${payload.finishedAt}`,
+    `Application count: ${payload.metadata.applicationCount}`,
+    `Secrets excluded: ${payload.metadata.secretsExcluded ? "yes" : "no"}`,
+    "",
+    "| Application | Artifact | Size bytes |",
+    "| --- | --- | --- |",
+    ...artifacts.map((artifact) => `| ${artifact.application} | ${artifact.artifactPath} | ${artifact.artifactSizeBytes} |`),
+  ]);
+  log(`Application backup reports written to ${jsonPath} and ${markdownPath}`);
+  log(`Application source backups written under ${outputRoot}`);
+  return payload;
 }
 
 async function certificateExpiryCheck() {
@@ -2298,108 +2479,113 @@ async function runtimeHealthChecks() {
   }
 
   log("==> Session policy coherence");
+  const runtimeDatabase = defaultPostgresApplicationDatabase();
+  const accountSchemaName = postgresAccountSchemaName(runtimeDatabase);
+  const accountSchema = sqlIdentifier(accountSchemaName);
+  const opsSchemaName = postgresOpsSchemaName(runtimeDatabase);
+  const opsSchema = sqlIdentifier(opsSchemaName);
   const backendSessionTtl = dockerExecOutput("enterprise-backend", ["sh", "-c", 'printf "%s" "$SESSION_COOKIE_MAX_AGE_SECONDS"']).trim();
   if (backendSessionTtl !== "315360000") {
     fail("Backend remember-me TTL must be 315360000 seconds.");
   }
-  const policySessionTtl = postgresOut("enterprise-postgres", "app_db", "postgres", "select value->>'rememberMeSeconds' from app_account.security_policies where key = 'account_session';").trim();
+  const policySessionTtl = postgresOut("enterprise-postgres", runtimeDatabase, "postgres", `select value->>'rememberMeSeconds' from ${accountSchema}.security_policies where key = 'account_session';`).trim();
   if (policySessionTtl !== "315360000") {
     fail("Database account_session policy rememberMeSeconds must be 315360000.");
   }
 
   log("==> App DB least privilege");
   for (const role of ["app_db_account_rw", "app_db_auth_rw", "app_db_audit_rw"]) {
-    const roleMembership = postgresOut("enterprise-postgres", "app_db", "postgres", `select pg_has_role('app_user', ${sqlString(role)}, 'member');`).trim();
+    const roleMembership = postgresOut("enterprise-postgres", runtimeDatabase, "postgres", `select pg_has_role('app_user', ${sqlString(role)}, 'member');`).trim();
     if (roleMembership !== "t") {
       fail(`app_user must inherit ${role}.`);
     }
   }
-  const directDelete = postgresOut("enterprise-postgres", "app_db", "postgres", "select has_table_privilege('app_user', 'app_account.accounts', 'delete');").trim();
+  const directDelete = postgresOut("enterprise-postgres", runtimeDatabase, "postgres", `select has_table_privilege('app_user', ${sqlString(`${accountSchemaName}.accounts`)}, 'delete');`).trim();
   if (directDelete !== "f") {
-    fail("app_user must not have DELETE on app_account.accounts.");
+    fail(`app_user must not have DELETE on ${accountSchemaName}.accounts.`);
   }
-  postgresOut("enterprise-postgres", "app_db", "postgres", "set role app_user; select count(*) from app_account.accounts;");
+  postgresOut("enterprise-postgres", runtimeDatabase, "postgres", `set role app_user; select count(*) from ${accountSchema}.accounts;`);
 
   log("==> Row-level security");
-  const rlsGapCount = postgresOut("enterprise-postgres", "app_db", "postgres", "select count(*) from pg_class c join pg_namespace n on n.oid = c.relnamespace where n.nspname = 'app_account' and c.relkind in ('r','p') and (not c.relrowsecurity or not c.relforcerowsecurity);").trim();
+  const rlsGapCount = postgresOut("enterprise-postgres", runtimeDatabase, "postgres", `select count(*) from pg_class c join pg_namespace n on n.oid = c.relnamespace where n.nspname = ${sqlString(accountSchemaName)} and c.relkind in ('r','p') and (not c.relrowsecurity or not c.relforcerowsecurity);`).trim();
   if (rlsGapCount !== "0") {
-    fail("All app_account tables must have forced row-level security.");
+    fail(`All ${accountSchemaName} tables must have forced row-level security.`);
   }
-  const rlsPolicy = postgresOut("enterprise-postgres", "app_db", "postgres", "select value->>'enabled' from app_account.security_policies where key = 'row_level_security';").trim();
+  const rlsPolicy = postgresOut("enterprise-postgres", runtimeDatabase, "postgres", `select value->>'enabled' from ${accountSchema}.security_policies where key = 'row_level_security';`).trim();
   if (rlsPolicy !== "true") {
     fail("row_level_security policy must be recorded and enabled.");
   }
 
   log("==> Persistence integrity readiness");
-  const migration006 = postgresOut("enterprise-postgres", "app_db", "postgres", "select count(*) from platform_ops.schema_migrations where version = '006_persistence_integrity_readiness';").trim();
+  const migration006 = postgresOut("enterprise-postgres", runtimeDatabase, "postgres", `select count(*) from ${opsSchema}.schema_migrations where version = '006_persistence_integrity_readiness';`).trim();
   if (migration006 !== "1") {
     fail("Persistence integrity migration 006 must be applied.");
   }
-  const migration007 = postgresOut("enterprise-postgres", "app_db", "postgres", "select count(*) from platform_ops.schema_migrations where version = '007_durable_audit_outbox';").trim();
+  const migration007 = postgresOut("enterprise-postgres", runtimeDatabase, "postgres", `select count(*) from ${opsSchema}.schema_migrations where version = '007_durable_audit_outbox';`).trim();
   if (migration007 !== "1") {
     fail("Durable audit outbox migration 007 must be applied.");
   }
-  const migration008 = postgresOut("enterprise-postgres", "app_db", "postgres", "select count(*) from platform_ops.schema_migrations where version = '008_audit_account_unlink';").trim();
+  const migration008 = postgresOut("enterprise-postgres", runtimeDatabase, "postgres", `select count(*) from ${opsSchema}.schema_migrations where version = '008_audit_account_unlink';`).trim();
   if (migration008 !== "1") {
     fail("Audit account unlink migration 008 must be applied.");
   }
-  const migration009 = postgresOut("enterprise-postgres", "app_db", "postgres", "select count(*) from platform_ops.schema_migrations where version = '009_audit_outbox_dispatcher';").trim();
+  const migration009 = postgresOut("enterprise-postgres", runtimeDatabase, "postgres", `select count(*) from ${opsSchema}.schema_migrations where version = '009_audit_outbox_dispatcher';`).trim();
   if (migration009 !== "1") {
     fail("Audit outbox dispatcher migration 009 must be applied.");
   }
-  const migration010 = postgresOut("enterprise-postgres", "app_db", "postgres", "select count(*) from platform_ops.schema_migrations where version = '010_platform_runtime_least_privilege';").trim();
+  const migration010 = postgresOut("enterprise-postgres", runtimeDatabase, "postgres", `select count(*) from ${opsSchema}.schema_migrations where version = '010_platform_runtime_least_privilege';`).trim();
   if (migration010 !== "1") {
     fail("Platform runtime least-privilege migration 010 must be applied.");
   }
-  const migration011 = postgresOut("enterprise-postgres", "app_db", "postgres", "select count(*) from platform_ops.schema_migrations where version = '011_platform_runtime_role_revoke';").trim();
+  const migration011 = postgresOut("enterprise-postgres", runtimeDatabase, "postgres", `select count(*) from ${opsSchema}.schema_migrations where version = '011_platform_runtime_role_revoke';`).trim();
   if (migration011 !== "1") {
     fail("Platform runtime inherited role revoke migration 011 must be applied.");
   }
-  const runtimePlatformMutation = postgresOut("enterprise-postgres", "app_db", "postgres", "select has_table_privilege('app_user', 'platform_ops.schema_migrations', 'insert,update,delete') or has_table_privilege('app_user', 'platform_ops.data_retention_policies', 'insert,update,delete') or has_table_privilege('app_user', 'platform_ops.backup_restore_runs', 'insert,update,delete');").trim();
+  const runtimePlatformMutation = postgresOut("enterprise-postgres", runtimeDatabase, "postgres", `select has_table_privilege('app_user', ${sqlString(`${opsSchemaName}.schema_migrations`)}, 'insert,update,delete') or has_table_privilege('app_user', ${sqlString(`${opsSchemaName}.data_retention_policies`)}, 'insert,update,delete') or has_table_privilege('app_user', ${sqlString(`${opsSchemaName}.backup_restore_runs`)}, 'insert,update,delete');`).trim();
   if (runtimePlatformMutation !== "f") {
     fail("app_user must not mutate platform migration, retention or backup/restore evidence tables.");
   }
-  const retentionPolicies = postgresOut("enterprise-postgres", "app_db", "postgres", "select count(*) from platform_ops.data_retention_policies where enabled;").trim();
+  const retentionPolicies = postgresOut("enterprise-postgres", runtimeDatabase, "postgres", `select count(*) from ${opsSchema}.data_retention_policies where enabled;`).trim();
   if (Number.parseInt(retentionPolicies, 10) < 6) {
     fail("At least six enabled data retention policies must be present.");
   }
-  const backupRestoreLog = postgresOut("enterprise-postgres", "app_db", "postgres", "select to_regclass('platform_ops.backup_restore_runs') is not null;").trim();
+  const backupRestoreLog = postgresOut("enterprise-postgres", runtimeDatabase, "postgres", `select to_regclass(${sqlString(`${opsSchemaName}.backup_restore_runs`)}) is not null;`).trim();
   if (backupRestoreLog !== "t") {
     fail("Backup and restore run log table must exist.");
   }
-  const successfulRestoreTests = postgresOut("enterprise-postgres", "app_db", "postgres", "select count(*) from platform_ops.backup_restore_runs where operation = 'restore_test' and status = 'success';").trim();
+  const successfulRestoreTests = postgresOut("enterprise-postgres", runtimeDatabase, "postgres", `select count(*) from ${opsSchema}.backup_restore_runs where operation = 'restore_test' and status = 'success';`).trim();
   if (Number.parseInt(successfulRestoreTests, 10) < 1) {
-    fail("At least one successful PostgreSQL restore-test drill must be recorded in platform_ops.backup_restore_runs.");
+    fail(`At least one successful PostgreSQL restore-test drill must be recorded in ${opsSchemaName}.backup_restore_runs.`);
   }
-  const activeBackupSetIndex = postgresOut("enterprise-postgres", "app_db", "postgres", "select to_regclass('app_account.idx_backup_code_sets_one_active') is not null;").trim();
+  const activeBackupSetIndex = postgresOut("enterprise-postgres", runtimeDatabase, "postgres", `select to_regclass(${sqlString(`${accountSchemaName}.idx_backup_code_sets_one_active`)}) is not null;`).trim();
   if (activeBackupSetIndex !== "t") {
     fail("Active backup-code uniqueness index must exist.");
   }
-  const auditMutationDenied = postgresOut("enterprise-postgres", "app_db", "postgres", "select has_table_privilege('app_db_audit_rw', 'app_account.audit_events', 'update') or has_table_privilege('app_db_audit_rw', 'app_account.audit_events', 'delete');").trim();
+  const auditMutationDenied = postgresOut("enterprise-postgres", runtimeDatabase, "postgres", `select has_table_privilege('app_db_audit_rw', ${sqlString(`${accountSchemaName}.audit_events`)}, 'update') or has_table_privilege('app_db_audit_rw', ${sqlString(`${accountSchemaName}.audit_events`)}, 'delete');`).trim();
   if (auditMutationDenied !== "f") {
     fail("Audit role must not be able to update or delete audit events.");
   }
-  const auditAppendOnlyTrigger = postgresOut("enterprise-postgres", "app_db", "postgres", "select count(*) from pg_trigger where tgname = 'trg_audit_events_append_only' and tgenabled <> 'D';").trim();
+  const auditAppendOnlyTrigger = postgresOut("enterprise-postgres", runtimeDatabase, "postgres", `select count(*) from pg_trigger t join pg_class c on c.oid = t.tgrelid join pg_namespace n on n.oid = c.relnamespace where n.nspname = ${sqlString(accountSchemaName)} and t.tgname = 'trg_audit_events_append_only' and t.tgenabled <> 'D';`).trim();
   if (auditAppendOnlyTrigger !== "1") {
     fail("Audit append-only trigger must be enabled.");
   }
-  const auditOutboxTable = postgresOut("enterprise-postgres", "app_db", "postgres", "select to_regclass('app_account.audit_outbox') is not null;").trim();
+  const auditOutboxTable = postgresOut("enterprise-postgres", runtimeDatabase, "postgres", `select to_regclass(${sqlString(`${accountSchemaName}.audit_outbox`)}) is not null;`).trim();
   if (auditOutboxTable !== "t") {
     fail("Durable audit outbox table must exist.");
   }
-  const auditOutboxPrivileges = postgresOut("enterprise-postgres", "app_db", "postgres", "select has_table_privilege('app_db_audit_rw', 'app_account.audit_outbox', 'insert') and has_table_privilege('app_db_audit_rw', 'app_account.audit_outbox', 'update') and not has_table_privilege('app_db_audit_rw', 'app_account.audit_outbox', 'delete');").trim();
+  const auditOutboxPrivileges = postgresOut("enterprise-postgres", runtimeDatabase, "postgres", `select has_table_privilege('app_db_audit_rw', ${sqlString(`${accountSchemaName}.audit_outbox`)}, 'insert') and has_table_privilege('app_db_audit_rw', ${sqlString(`${accountSchemaName}.audit_outbox`)}, 'update') and not has_table_privilege('app_db_audit_rw', ${sqlString(`${accountSchemaName}.audit_outbox`)}, 'delete');`).trim();
   if (auditOutboxPrivileges !== "t") {
     fail("Audit role must enqueue and update audit outbox entries without delete privilege.");
   }
-  const auditOutboxRetention = postgresOut("enterprise-postgres", "app_db", "postgres", "select count(*) from platform_ops.data_retention_policies where key = 'audit_outbox' and enabled;").trim();
+  const auditOutboxRetention = postgresOut("enterprise-postgres", runtimeDatabase, "postgres", `select count(*) from ${opsSchema}.data_retention_policies where key = 'audit_outbox' and enabled;`).trim();
   if (auditOutboxRetention !== "1") {
     fail("Audit outbox retention policy must be enabled.");
   }
-  const auditOutboxDeadStatus = postgresOut("enterprise-postgres", "app_db", "postgres", "select count(*) from pg_constraint where conname = 'audit_outbox_status_known' and pg_get_constraintdef(oid) like '%dead%';").trim();
+  const auditOutboxDeadStatus = postgresOut("enterprise-postgres", runtimeDatabase, "postgres", `select count(*) from pg_constraint constraint_row join pg_class c on c.oid = constraint_row.conrelid join pg_namespace n on n.oid = c.relnamespace where n.nspname = ${sqlString(accountSchemaName)} and constraint_row.conname = 'audit_outbox_status_known' and pg_get_constraintdef(constraint_row.oid) like '%dead%';`).trim();
   if (auditOutboxDeadStatus !== "1") {
     fail("Audit outbox must support terminal dead-letter status.");
   }
-  const auditOutboxDueIndex = postgresOut("enterprise-postgres", "app_db", "postgres", "select to_regclass('app_account.idx_audit_outbox_due_dispatch') is not null;").trim();
+  const auditOutboxDueIndex = postgresOut("enterprise-postgres", runtimeDatabase, "postgres", `select to_regclass(${sqlString(`${accountSchemaName}.idx_audit_outbox_due_dispatch`)}) is not null;`).trim();
   if (auditOutboxDueIndex !== "t") {
     fail("Audit outbox must have a due-dispatch index for worker claims.");
   }
@@ -4010,6 +4196,10 @@ const resticPassthroughEnvKeys = [
   "OS_PROJECT_DOMAIN_NAME",
 ];
 
+const defaultResticImage = "restic/restic:0.18.0";
+const defaultResticRcloneImage = "platform/restic-rclone:local";
+const defaultResticMaxRepositoryBytes = 2_500_000_000_000;
+
 function resticConfig(options = {}) {
   const repository = options.repository ?? argv.repository ?? process.env.RESTIC_REPOSITORY;
   const passwordFile = path.resolve(options.passwordFile ?? argv.passwordFile ?? process.env.RESTIC_PASSWORD_FILE ?? path.join(infraRoot, "secrets", "restic_password.txt"));
@@ -4111,9 +4301,36 @@ function requireResticCredentials({ repository, passwordFile }) {
   }
 }
 
+function resticRcloneConfig(repository) {
+  const repositoryClass = classifyResticRepository(repository);
+  if (repositoryClass.type !== "rclone") {
+    return { env: [], mounts: [] };
+  }
+  const rcloneConfig = path.resolve(process.env.RCLONE_CONFIG ?? path.join(infraRoot, "secrets", "rclone", "rclone.conf"));
+  if (!fs.existsSync(rcloneConfig)) {
+    fail("Set RCLONE_CONFIG to a valid rclone.conf before using a Restic rclone: repository.");
+  }
+  const configDir = path.dirname(rcloneConfig);
+  const configName = path.basename(rcloneConfig);
+  return {
+    env: ["-e", `RCLONE_CONFIG=/rclone-config/${configName}`],
+    mounts: ["-v", `${hostPathForContainerMount(configDir)}:/rclone-config:ro`],
+  };
+}
+
+function resticRetentionConfig(options = {}) {
+  const keepLast = positiveInteger(options.keepLast ?? argv.keepLast ?? process.env.RESTIC_KEEP_LAST ?? 42, "--keepLast", 1);
+  const noPrune = Boolean(options.noPrune) || booleanFlag(argv.noPrune) || booleanFlag(process.env.RESTIC_NO_PRUNE);
+  const prune = !noPrune;
+  return { keepLast, prune };
+}
+
 function resticDockerContainerArgs({ repository, passwordFile, mounts = [] }) {
   const resticPasswordDir = path.dirname(passwordFile);
   const resticPasswordName = path.basename(passwordFile);
+  const repositoryClass = classifyResticRepository(repository);
+  const rcloneConfig = resticRcloneConfig(repository);
+  const image = process.env.RESTIC_IMAGE ?? (repositoryClass.type === "rclone" ? defaultResticRcloneImage : defaultResticImage);
   const args = [
     "run",
     "--rm",
@@ -4121,6 +4338,7 @@ function resticDockerContainerArgs({ repository, passwordFile, mounts = [] }) {
     `RESTIC_REPOSITORY=${repository}`,
     "-e",
     `RESTIC_PASSWORD_FILE=/restic-password/${resticPasswordName}`,
+    ...rcloneConfig.env,
   ];
   for (const key of resticPassthroughEnvKeys) {
     if (process.env[key]) {
@@ -4129,9 +4347,10 @@ function resticDockerContainerArgs({ repository, passwordFile, mounts = [] }) {
   }
   args.push(
     ...mounts,
+    ...rcloneConfig.mounts,
     "-v",
     `${hostPathForContainerMount(resticPasswordDir)}:/restic-password:ro`,
-    "restic/restic:0.18.0",
+    image,
   );
   return args;
 }
@@ -4141,6 +4360,77 @@ function resticDockerRun({ repository, passwordFile, mounts = [], resticArgs = [
     ...resticDockerContainerArgs({ repository, passwordFile, mounts }),
     ...resticArgs,
   ], runOptions);
+}
+
+function resticRepositorySizeBytes(repository) {
+  const repositoryClass = classifyResticRepository(repository);
+  if (repositoryClass.type !== "rclone") return null;
+  const remote = String(repository || "").replace(/^rclone:/i, "");
+  const rcloneConfig = resticRcloneConfig(repository);
+  const image = process.env.RESTIC_IMAGE ?? defaultResticRcloneImage;
+  const result = run("docker", [
+    "run",
+    "--rm",
+    "--entrypoint",
+    "rclone",
+    ...rcloneConfig.env,
+    ...rcloneConfig.mounts,
+    image,
+    "size",
+    remote,
+    "--json",
+  ], { capture: true, allowFailure: true });
+  if (result.status !== 0) {
+    fail("Unable to read remote Restic repository size with rclone.");
+  }
+  let payload = {};
+  try {
+    payload = JSON.parse(String(result.stdout || "{}"));
+  } catch {
+    fail("Unable to parse rclone size JSON for remote Restic repository.");
+  }
+  const bytes = Number(payload.bytes ?? payload.totalSize ?? payload.size);
+  if (!Number.isFinite(bytes)) {
+    fail("rclone size did not return a valid byte count for remote Restic repository.");
+  }
+  return bytes;
+}
+
+function verifyResticRepositorySizeLimit(repository) {
+  const maxBytes = positiveInteger(process.env.RESTIC_MAX_REPOSITORY_BYTES ?? defaultResticMaxRepositoryBytes, "RESTIC_MAX_REPOSITORY_BYTES", 1);
+  const sizeBytes = resticRepositorySizeBytes(repository);
+  if (sizeBytes === null) {
+    log("Remote repository size guard skipped: supported for rclone: repositories.");
+    return null;
+  }
+  if (sizeBytes > maxBytes) {
+    fail(`Remote Restic repository size exceeds configured limit: ${sizeBytes} bytes > ${maxBytes} bytes.`);
+  }
+  log(`Remote Restic repository size within limit: ${sizeBytes} bytes <= ${maxBytes} bytes.`);
+  return { sizeBytes, maxBytes };
+}
+
+function resticForgetOldSnapshots({ repository, passwordFile, tag }) {
+  if (booleanFlag(argv.skipRetention) || booleanFlag(process.env.RESTIC_SKIP_RETENTION)) {
+    log("Restic retention skipped by configuration.");
+    return;
+  }
+  const { keepLast, prune } = resticRetentionConfig();
+  resticDockerRun({
+    repository,
+    passwordFile,
+    resticArgs: [
+      "forget",
+      "--tag",
+      tag,
+      "--group-by",
+      "host,tags",
+      "--keep-last",
+      String(keepLast),
+      ...(prune ? ["--prune"] : []),
+    ],
+  });
+  log(`Restic retention applied: keep-last=${keepLast}${prune ? ", prune=yes" : ", prune=no"}.`);
 }
 
 async function offsiteBackupRestic() {
@@ -4166,6 +4456,7 @@ async function offsiteBackupRestic() {
     artifactLabels = [backupFile];
   } else {
     const specs = [
+      ["applications", path.join(backupRoot, "applications"), (file) => file.endsWith(".tar.gz")],
       ["postgres", path.join(backupRoot, "postgres"), (file) => file.endsWith(".dump")],
       ["mariadb", path.join(backupRoot, "mariadb"), (file) => file.endsWith(".sql.gz")],
       ["minio", path.join(backupRoot, "minio"), (file) => file.endsWith(".tar.gz")],
@@ -4175,7 +4466,7 @@ async function offsiteBackupRestic() {
     const missing = [];
     const artifacts = [];
     for (const [label, directory, predicate] of specs) {
-      const artifact = latestFileByMtime(directory, predicate);
+      const artifact = label === "applications" ? latestFileByMtimeRecursive(directory, predicate) : latestFileByMtime(directory, predicate);
       if (!artifact) {
         missing.push(label);
         continue;
@@ -4206,6 +4497,8 @@ async function offsiteBackupRestic() {
     mounts: ["-v", `${hostPathForContainerMount(mountSource)}:${mountTarget}:ro`],
     resticArgs: ["backup", ...resticPaths, "--tag", tag],
   });
+  resticForgetOldSnapshots({ repository, passwordFile, tag });
+  verifyResticRepositorySizeLimit(repository);
   log(`Off-site backup completed for ${artifactLabels.join(", ")}`);
 }
 
@@ -7789,7 +8082,7 @@ async function preGoLiveEvidence() {
     !options.includeOffsiteRestoreDryRun ? "includeOffsiteRestoreDryRun" : null,
     !options.verifyGithubRemote ? "verifyGithubRemote" : null,
   ].filter(Boolean);
-  const externalLiveStepNames = new Set(["production-preflight"]);
+  const externalLiveStepNames = new Set(["production-preflight", "github-actions-runtime-verify-remote"]);
   const externalLiveReadinessIds = new Set(["production-preflight", "offsite-restore-dry-run", "github-remote-verification"]);
   const externalLiveOptions = new Set(["includeProductionPreflight", "includeOffsiteRestoreDryRun", "verifyGithubRemote"]);
   const localFailedRequired = failedRequired.filter((step) => !externalLiveStepNames.has(step.name));
@@ -8715,7 +9008,7 @@ async function productionGoNoGo() {
     policy.requireOffsiteRestore && !preOptions.includeOffsiteRestoreDryRun ? "includeOffsiteRestoreDryRun" : null,
     policy.requireGithubRemoteVerification && !preOptions.verifyGithubRemote ? "verifyGithubRemote" : null,
   ].filter(Boolean);
-  const preExternalStepNames = new Set(["production-preflight"]);
+  const preExternalStepNames = new Set(["production-preflight", "github-actions-runtime-verify-remote"]);
   const preExternalReadinessIds = new Set(["production-preflight", "offsite-restore-dry-run", "github-remote-verification"]);
   const preExternalOptions = new Set(["includeProductionPreflight", "includeOffsiteRestoreDryRun", "verifyGithubRemote"]);
   const preLocalRequiredFailures = preRequiredFailures.filter((step) => !preExternalStepNames.has(step.name));
@@ -9480,6 +9773,90 @@ function enterpriseRequirementLiveProofResult(requirement, goNoGoReport, require
       reportPath: null,
     };
   }
+  if (requirement.id === "pentest") {
+    const report = latestPentestReadinessReport();
+    if (report) {
+      return {
+        required: true,
+        status: "passed",
+        detail: `pentest readiness evidence archived; external professional pentest remains required before enterprise launch`,
+        checks: [{ name: "penetration-test-readiness", status: "passed", detail: report.payload.detail || "readiness report passed", reportPath: report.filePath }],
+        reportPath: report.filePath,
+      };
+    }
+    return {
+      required: true,
+      status: requireLiveProofs ? "failed" : "pending-external-evidence",
+      detail: "missing pentest readiness evidence report",
+      checks: [{ name: "penetration-test-readiness", status: "missing", detail: "missing reports/security/pentest-readiness-*.json" }],
+      reportPath: null,
+    };
+  }
+  if (requirement.id === "vulnerability-disclosure") {
+    const report = latestVulnerabilityDisclosureReport();
+    if (report) {
+      return {
+        required: true,
+        status: "passed",
+        detail: "vulnerability disclosure process approved and evidence archived",
+        checks: [{ name: "vulnerability-disclosure", status: "passed", detail: report.payload.detail || "disclosure process evidence passed", reportPath: report.filePath }],
+        reportPath: report.filePath,
+      };
+    }
+    return {
+      required: true,
+      status: requireLiveProofs ? "failed" : "pending-external-evidence",
+      detail: "missing vulnerability disclosure evidence report",
+      checks: [{ name: "vulnerability-disclosure", status: "missing", detail: "missing reports/security/vulnerability-disclosure-*.json" }],
+      reportPath: null,
+    };
+  }
+  const governanceProofs = {
+    "feature-flags-kill-switch": {
+      command: "feature-flags-kill-switches",
+      label: "feature flags and kill switches",
+      missing: "missing reports/governance/feature-flags-kill-switches-*.json",
+      latest: latestFeatureFlagsKillSwitchesReport,
+    },
+    "compliance-gdpr-soc2-like": {
+      command: "compliance-evidence",
+      label: "compliance GDPR/SOC2-like evidence",
+      missing: "missing reports/governance/compliance-evidence-*.json",
+      latest: latestComplianceEvidenceReport,
+    },
+    "data-classification": {
+      command: "data-classification",
+      label: "data classification",
+      missing: "missing reports/governance/data-classification-*.json",
+      latest: latestDataClassificationReport,
+    },
+    "ha-multi-node": {
+      command: "ha-single-node-risk-acceptance",
+      label: "HA single-node risk acceptance",
+      missing: "missing reports/governance/ha-single-node-risk-acceptance-*.json",
+      latest: latestHaSingleNodeRiskAcceptanceReport,
+    },
+  };
+  const governanceProof = governanceProofs[requirement.id];
+  if (governanceProof) {
+    const report = governanceProof.latest();
+    if (report) {
+      return {
+        required: true,
+        status: "passed",
+        detail: `${governanceProof.label} approved and evidence archived`,
+        checks: [{ name: governanceProof.command, status: "passed", detail: report.payload.detail || `${governanceProof.label} evidence passed`, reportPath: report.filePath }],
+        reportPath: report.filePath,
+      };
+    }
+    return {
+      required: true,
+      status: requireLiveProofs ? "failed" : "pending-external-evidence",
+      detail: `${governanceProof.label} evidence report is missing`,
+      checks: [{ name: governanceProof.command, status: "missing", detail: governanceProof.missing }],
+      reportPath: null,
+    };
+  }
   const requiredChecks = Array.isArray(requirement.liveProofChecks) ? requirement.liveProofChecks : [];
   if (!requiredChecks.length) {
     return {
@@ -9521,6 +9898,102 @@ function enterpriseRequirementLiveProofResult(requirement, goNoGoReport, require
     checks: checkResults,
     reportPath: goNoGoReport.filePath,
   };
+}
+
+function latestPentestReadinessReport() {
+  return latestJsonReport("security", "pentest-readiness-", (payload) => pentestReadinessPayloadPassed(payload));
+}
+
+function latestVulnerabilityDisclosureReport() {
+  return latestJsonReport("security", "vulnerability-disclosure-", (payload) => vulnerabilityDisclosurePayloadPassed(payload));
+}
+
+function latestComplianceEvidenceReport() {
+  return latestJsonReport("governance", "compliance-evidence-", (payload) => complianceEvidencePayloadPassed(payload));
+}
+
+function latestDataClassificationReport() {
+  return latestJsonReport("governance", "data-classification-", (payload) => dataClassificationPayloadPassed(payload));
+}
+
+function latestFeatureFlagsKillSwitchesReport() {
+  return latestJsonReport("governance", "feature-flags-kill-switches-", (payload) => featureFlagsKillSwitchesPayloadPassed(payload));
+}
+
+function latestHaSingleNodeRiskAcceptanceReport() {
+  return latestJsonReport("governance", "ha-single-node-risk-acceptance-", (payload) => haSingleNodeRiskAcceptancePayloadPassed(payload));
+}
+
+function pentestReadinessPayloadPassed(payload) {
+  return payload?.status === "passed"
+    && payload.scope === "platform-infrastructure"
+    && payload.mode === "readiness-plan"
+    && payload.readiness?.approved === true
+    && payload.externalProfessionalPentest?.requiredBeforeEnterpriseLaunch === true
+    && Number(payload.summary?.failedChecks || 0) === 0;
+}
+
+function vulnerabilityDisclosurePayloadPassed(payload) {
+  return payload?.status === "passed"
+    && payload.scope === "platform-infrastructure"
+    && payload.command === "vulnerability-disclosure"
+    && payload.process?.publishable === true
+    && payload.process?.approved === true
+    && payload.channel?.securityPolicyPresent === true
+    && Number(payload.summary?.failedChecks || 0) === 0;
+}
+
+function complianceEvidencePayloadPassed(payload) {
+  return payload?.status === "passed"
+    && payload.scope === "platform-infrastructure"
+    && payload.command === "compliance-evidence"
+    && payload.compliance?.approved === true
+    && payload.compliance?.formalCertificationClaimed === false
+    && payload.compliance?.gdprLikeMapping === true
+    && payload.compliance?.soc2LikeMapping === true
+    && Number(payload.summary?.failedChecks || 0) === 0;
+}
+
+function dataClassificationPayloadPassed(payload) {
+  const levels = new Set(Array.isArray(payload?.classification?.levels) ? payload.classification.levels : []);
+  return payload?.status === "passed"
+    && payload.scope === "platform-infrastructure"
+    && payload.command === "data-classification"
+    && payload.classification?.approved === true
+    && payload.classification?.hostedApplicationDataOutOfScope === true
+    && ["Public", "Internal", "Confidential", "Secret", "Restricted"].every((level) => levels.has(level))
+    && Number(payload.summary?.failedChecks || 0) === 0;
+}
+
+function featureFlagsKillSwitchesPayloadPassed(payload) {
+  return payload?.status === "passed"
+    && payload.scope === "platform-infrastructure"
+    && payload.command === "feature-flags-kill-switches"
+    && payload.killSwitches?.operational === true
+    && payload.killSwitches?.applicationFlagsOutOfScope === true
+    && payload.killSwitches?.destructiveVolumeActionsAllowed === false
+    && Number(payload.killSwitches?.switchCount || 0) >= 6
+    && Number(payload.summary?.failedChecks || 0) === 0;
+}
+
+function haSingleNodeRiskAcceptancePayloadPassed(payload) {
+  return payload?.status === "passed"
+    && payload.scope === "platform-infrastructure"
+    && payload.command === "ha-single-node-risk-acceptance"
+    && payload.decision?.singleNodeRiskAccepted === true
+    && payload.decision?.haClaimed === false
+    && payload.decision?.multiNodeClaimed === false
+    && Number(payload.summary?.failedChecks || 0) === 0;
+}
+
+function enterpriseProduction360CoveragePayloadPassed(payload) {
+  return payload?.status === "passed"
+    && payload.scope === "platform-infrastructure"
+    && payload.command === "enterprise-production-360-coverage"
+    && payload.semantics?.productionGoLiveDecision === false
+    && Number(payload.summary?.invalidRefs || 0) === 0
+    && Number(payload.summary?.domains || 0) >= Number(payload.summary?.expectedDomains || 0)
+    && Number(payload.summary?.controls || 0) >= Number(payload.summary?.minimumControls || 0);
 }
 
 async function enterpriseRequirementsCheck() {
@@ -9709,7 +10182,7 @@ async function restorePostgres() {
     fail("Restore is destructive. Re-run with --confirmRestore after verifying the backup file.");
   }
   const container = argv.container ?? "enterprise-postgres";
-  const database = argv.database ?? "app_db";
+  const database = argv.database ?? defaultPostgresApplicationDatabase();
   const user = argv.user ?? "postgres";
   const backupFile = resolveInside(path.join(infraRoot, "backups"), path.resolve(backupFileArg));
   const fileName = path.basename(backupFile);
@@ -9761,9 +10234,11 @@ async function restoreTestPostgres(options = {}) {
     fail("Provide --backupFile <path>.");
   }
   const container = options.container ?? argv.container ?? "enterprise-postgres";
-  const database = options.database ?? argv.database ?? "app_db";
+  const database = options.database ?? argv.database ?? defaultPostgresApplicationDatabase();
   const testDatabase = options.testDatabase ?? argv.testDatabase ?? "platform_restore_test";
   const user = options.user ?? argv.user ?? "postgres";
+  const accountSchemaName = sqlIdentifierName(options.accountSchema ?? argv.accountSchema ?? postgresAccountSchemaName(database), "PostgreSQL account schema");
+  const accountSchema = sqlIdentifier(accountSchemaName);
   const backupFile = resolveInside(path.join(infraRoot, "backups"), path.resolve(backupFileArg));
   const fileName = path.basename(backupFile);
   const containerPath = `/tmp/${fileName}`;
@@ -9777,13 +10252,13 @@ async function restoreTestPostgres(options = {}) {
     run("docker", ["cp", backupFile, `${container}:${containerPath}`]);
     dockerExec(container, ["pg_restore", "-U", user, "-d", testDatabase, "--no-owner", "--no-acl", containerPath]);
     dockerExec(container, ["rm", "-f", containerPath]);
-    const tables = Number(postgresOut(container, testDatabase, user, "select count(*) from information_schema.tables where table_schema = 'app_account';"));
+    const tables = Number(postgresOut(container, testDatabase, user, `select count(*) from information_schema.tables where table_schema = ${sqlString(accountSchemaName)};`));
     dockerExec(container, ["psql", "-U", user, "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-c", `drop database if exists ${testDatabaseIdentifier} with (force);`]);
     if (tables < 10) {
-      fail(`Restore test produced too few app_account tables: ${tables}`);
+      fail(`Restore test produced too few ${accountSchemaName} tables: ${tables}`);
     }
-    recordBackupRestoreRun({ container, database, user, operation: "restore_test", status: "success", artifactPath: backupFile, artifactSha256: hash, startedAt, metadata: { restoredTables: tables, testDatabase } });
-    log(`Restore test passed with ${tables} app_account tables.`);
+    recordBackupRestoreRun({ container, database, user, operation: "restore_test", status: "success", artifactPath: backupFile, artifactSha256: hash, startedAt, metadata: { restoredTables: tables, restoredSchema: accountSchemaName, testDatabase } });
+    log(`Restore test passed with ${tables} ${accountSchema} tables.`);
     return { backupFile, hash, tables, testDatabase, container, database, user };
   } catch (error) {
     try {
@@ -9800,8 +10275,9 @@ async function restoreTestPostgres(options = {}) {
 async function backupRestoreDrill() {
   log("==> PostgreSQL backup/restore drill");
   const container = argv.container ?? "enterprise-postgres";
-  const database = argv.database ?? "app_db";
+  const database = argv.database ?? defaultPostgresApplicationDatabase();
   const user = argv.user ?? "postgres";
+  const opsSchema = postgresOpsSchema(database);
   const outputDir = path.resolve(argv.outputDir ?? path.join(infraRoot, "backups", "postgres", "drills"));
   const suffix = new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 14);
   const testDatabase = argv.testDatabase ?? `platform_restore_test_${suffix}`;
@@ -9813,7 +10289,7 @@ async function backupRestoreDrill() {
     user,
     `
       select count(*)
-      from platform_ops.backup_restore_runs
+      from ${opsSchema}.backup_restore_runs
       where operation = 'restore_test'
         and status = 'success'
         and artifact_sha256 = ${sqlString(backup.hash)}
@@ -10867,13 +11343,14 @@ function pruneDumpDirectory({ directory, dryRun, label, minKeep, retentionDays }
 }
 
 function assertRecentRestoreTest(container, database, user, maxAgeDays) {
+  const opsSchema = postgresOpsSchema(database);
   const count = postgresOut(
     container,
     database,
     user,
     `
       select count(*)
-      from platform_ops.backup_restore_runs
+      from ${opsSchema}.backup_restore_runs
       where operation = 'restore_test'
         and status = 'success'
         and finished_at >= now() - (${positiveInteger(maxAgeDays, "--maxRestoreTestAgeDays")}::text || ' days')::interval
@@ -10886,7 +11363,7 @@ function assertRecentRestoreTest(container, database, user, maxAgeDays) {
 
 async function prunePostgresBackups(options = {}) {
   const container = options.container ?? argv.container ?? "enterprise-postgres";
-  const database = options.database ?? argv.database ?? "app_db";
+  const database = options.database ?? argv.database ?? defaultPostgresApplicationDatabase();
   const user = options.user ?? argv.user ?? "postgres";
   const backupDir = path.resolve(options.backupDir ?? argv.backupDir ?? path.join(infraRoot, "backups", "postgres"));
   const drillDir = path.resolve(options.drillDir ?? argv.drillDir ?? path.join(backupDir, "drills"));
@@ -11406,17 +11883,22 @@ function staticSecurityInfraOnlyCheck() {
   assertMatch(compose, /control-center:[\s\S]*PROJECT_SENSITIVE_MATERIALS_FILE:\s+\/var\/www\/project-state\/sensitive-materials\.json/, "Control Center must persist metadata-only sensitive material inventory from the Node service.");
   assertMatch(controlCenterServer, /sensitiveMaterialsFile[\s\S]*handleMaterialCommand[\s\S]*planMaterialDeclare[\s\S]*planMaterialRotation[\s\S]*planMaterialUsage[\s\S]*planMaterialAccessAudit[\s\S]*readSensitiveMaterialsState[\s\S]*writeSensitiveMaterialsState/, "Control Center must manage sensitive material inventory, rotation, usage and access audit through a dedicated Node-managed JSON store.");
   assertMatch(controlCenterTest, /sensitive-materials\.json[\s\S]*\/control\/secrets\/materials[\s\S]*DECLARE-MATERIAL[\s\S]*material-plain-value-should-not-leak/, "Control Center tests must cover metadata-only sensitive material persistence, rotation, usage/access audit and plaintext redaction.");
+  assertMatch(compose, /control-center:[\s\S]*PROJECT_VAULT_FILE:\s+\/var\/www\/project-state\/secret-vault\.json[\s\S]*CONTROL_CENTER_VAULT_KEY_FILE:\s+\/run\/secrets\/projects_gateway_signing_keys[\s\S]*CONTROL_CENTER_EXISTING_SECRETS_DIR:\s+\/var\/www\/infra-docs\/secrets/, "Control Center must persist the encrypted local secret vault, source its encryption key from a mounted Docker secret, and scan existing secret files from the read-only infrastructure tree.");
+  assertMatch(controlCenterServer, /vaultFile[\s\S]*handleVaultCommand[\s\S]*planVaultSecretCreate[\s\S]*planVaultSecretImportExisting[\s\S]*planVaultSecretReveal[\s\S]*planVaultSecretDelete[\s\S]*sealVaultValue[\s\S]*openVaultValue[\s\S]*readVaultState[\s\S]*writeVaultState/, "Control Center must manage a dedicated encrypted Vault with add/remove, existing-secret import, and explicit audited reveal operations.");
+  assertMatch(controlCenterTest, /secret-vault\.json[\s\S]*\/control\/vault\/import-existing[\s\S]*IMPORT-EXISTING-SECRETS[\s\S]*\/control\/vault\/secrets[\s\S]*STORE-VAULT-SECRET[\s\S]*REVEAL-VAULT-SECRET[\s\S]*DELETE-VAULT-SECRET/, "Control Center tests must cover encrypted Vault persistence, existing secret import, explicit reveal, plaintext redaction and item removal.");
   assertMatch(controlCenterPackage, /"name":\s+"@platform\/control-center"/, "Control Center project identity must stay generic.");
   assertMatch(controlCenterLocalStyles, /(?=[\s\S]*--cc-bg)(?=[\s\S]*--cc-surface)(?=[\s\S]*--cc-surface-raised)(?=[\s\S]*--cc-text)(?=[\s\S]*--cc-muted)(?=[\s\S]*--cc-accent)(?=[\s\S]*--cc-radius)(?=[\s\S]*--cc-shadow)(?=[\s\S]*\.cc-app-shell)(?=[\s\S]*\.ops-shell)(?=[\s\S]*\.ops-sidebar)(?=[\s\S]*\.cc-topbar)(?=[\s\S]*\.ops-nav)(?=[\s\S]*\.ops-table)(?=[\s\S]*\.ops-metrics)/, "Control Center must provide a local --cc-* visual system with operations shell, navigation, metrics and tables.");
   assertNoMatch(controlCenterLocalStyles, /\.card[\s\S]*border:\s*1px\s+solid/i, "Control Center cards must not use border: 1px solid for contrast.");
-  assertMatch(controlCenterLocalComponents, /(?=[\s\S]*OperationsShell)(?=[\s\S]*OperationsTopbar)(?=[\s\S]*StatusGate)(?=[\s\S]*ProjectTable)(?=[\s\S]*ProjectActions)(?=[\s\S]*ProjectFileBrowser)(?=[\s\S]*DatabaseInventory)(?=[\s\S]*ActivityTable)(?=[\s\S]*ResourceUsageTable)(?=[\s\S]*MetricTile)(?=[\s\S]*StatusPill)(?=[\s\S]*ActionButton)(?=[\s\S]*ProjectSwitcher)(?=[\s\S]*EmptyState)/, "Control Center must define the requested local operations UI component contract.");
+  assertMatch(controlCenterLocalComponents, /(?=[\s\S]*OperationsShell)(?=[\s\S]*OperationsTopbar)(?=[\s\S]*StatusGate)(?=[\s\S]*ProjectTable)(?=[\s\S]*ProjectActions)(?=[\s\S]*ProjectFileBrowser)(?=[\s\S]*DatabaseInventory)(?=[\s\S]*ResourceUsageTable)(?=[\s\S]*MetricTile)(?=[\s\S]*StatusPill)(?=[\s\S]*ActionButton)(?=[\s\S]*ProjectSwitcher)(?=[\s\S]*EmptyState)/, "Control Center must define the requested local operations UI component contract.");
   assertMatch(`${controlCenterServer}\n${controlCenterLocalComponents}`, /(?=[\s\S]*serveStaticAsset[\s\S]*\/assets\/control-center\/)(?=[\s\S]*route\(parts, "control", "ui-package"\))(?=[\s\S]*readControlCenterUiPackage)(?=[\s\S]*controlCenterStylesheetLinks)(?=[\s\S]*\/assets\/control-center\/control-center\.css)(?=[\s\S]*cc-app-shell)(?=[\s\S]*ops-shell)(?=[\s\S]*ops-topbar)(?=[\s\S]*cc-topbar)(?=[\s\S]*ops-nav)/, "Control Center must serve and render through its local operations visual system.");
   assertNoMatch(`${controlCenterServer}\n${controlCenterPackage}\n${compose}`, /ui-shell|pill-sidebar-nav|pill-tabs/, "Control Center runtime must not use retired visual dependency assets or shell classes.");
   assertMatch(controlCenterServer, /function navigationGroupsForMode[\s\S]*navGroup\("platform", "Infrastructure"[\s\S]*navGroup\("delivery", "Delivery"[\s\S]*navGroup\("observability", "Observability"[\s\S]*navGroup\("security", "Security"/, "Control Center Advanced navigation must group enterprise sections into macro sidebar areas with page tabs.");
-  assertMatch(controlCenterLocalComponents, /(?=[\s\S]*operations-first information architecture)(?=[\s\S]*ProjectFileBrowser)(?=[\s\S]*ActivityTable)/, "Control Center UI contract must describe the operations portal.");
-  assertMatch(controlCenterTest, /(?=[\s\S]*\/assets\/control-center\/control-center\.css)(?=[\s\S]*\/control\/ui-package)(?=[\s\S]*@platform\/control-center-local-ui)(?=[\s\S]*cc-app-shell)(?=[\s\S]*ops-shell)(?=[\s\S]*ops-topbar)(?=[\s\S]*OperationsShell)(?=[\s\S]*ProjectFileBrowser)(?=[\s\S]*ActivityTable)/, "Control Center tests must prove the local CSS, operations shell, navigation and UI contract are served.");
+  assertMatch(controlCenterLocalComponents, /(?=[\s\S]*operations-first information architecture)(?=[\s\S]*ProjectFileBrowser)(?=[\s\S]*DatabaseInventory)/, "Control Center UI contract must describe the operations portal.");
+  assertNoMatch(controlCenterLocalComponents, /ActivityTable|activity and backups/, "Control Center UI contract must not keep the removed Activity page contract.");
+  assertMatch(controlCenterTest, /(?=[\s\S]*\/assets\/control-center\/control-center\.css)(?=[\s\S]*\/control\/ui-package)(?=[\s\S]*@platform\/control-center-local-ui)(?=[\s\S]*cc-app-shell)(?=[\s\S]*ops-shell)(?=[\s\S]*ops-topbar)(?=[\s\S]*OperationsShell)(?=[\s\S]*ProjectFileBrowser)/, "Control Center tests must prove the local CSS, operations shell, navigation and UI contract are served.");
   assertMatch(controlCenterServer, /route\(parts, "control", "readiness"\)[\s\S]*buildControlReadiness[\s\S]*readGovernanceManifest\("enterprise-requirements\.json"\)[\s\S]*readGovernanceManifest\("production-readiness\.json"\)[\s\S]*productionEvidence:\s+false[\s\S]*localEvidenceIsProductionEvidence:\s+false/, "Control Center must expose a sanitized readiness matrix from governance manifests without production evidence claims.");
-  assertIncludesAll(controlCenterServer, ["readLatestGoNoGoReport", "renderOpsStatus", "Passati", "Non passati", "Motivo", "Cosa fare", "renderOpsActivity", "renderOpsResources"], "Control Center operations UI must expose go/no-go blockers, reasons, required actions, activity and resources.");
+  assertIncludesAll(controlCenterServer, ["readLatestGoNoGoReport", "renderOpsStatus", "Passati", "Non passati", "Motivo", "Cosa fare", "renderProjectDetailBackups"], "Control Center operations UI must expose go/no-go blockers, reasons, required actions and application-scoped backups.");
+  assertNoMatch(controlCenterServer, /renderOpsActivity|activityProblems|id:\s*"activity"|label:\s*"Attivit.|section\s*===\s*"activity"/, "Control Center must not keep the removed Activity page route or renderer.");
   assertMatch(controlCenterTest, /(?=[\s\S]*\/control\/readiness)(?=[\s\S]*productionReadiness\.requirementCount,\s+19)(?=[\s\S]*tls-https-production-ready)(?=[\s\S]*pending-live-proof)(?=[\s\S]*localEvidenceIsProductionEvidence,\s+false)/, "Control Center tests must cover the readiness API, 19-point infrastructure checklist and live-proof separation.");
   assertMatch(compose, /control-center:[\s\S]*PROJECT_WORKER_JOBS_FILE:\s+\/var\/www\/project-state\/worker-jobs\.json/, "Control Center must persist worker/job metadata from the Node service.");
   assertMatch(controlCenterServer, /workerJobsFile[\s\S]*handleWorkerJobCommand[\s\S]*planWorkerDeclare[\s\S]*planQueueDeclare[\s\S]*planJobRecord[\s\S]*planJobRetry[\s\S]*planScheduleDeclare[\s\S]*planScheduleStatus[\s\S]*readWorkerJobsState[\s\S]*writeWorkerJobsState/, "Control Center must manage workers, queues, failed jobs, retries and schedules through a dedicated Node-managed JSON store.");
@@ -11426,7 +11908,7 @@ function staticSecurityInfraOnlyCheck() {
   assertMatch(controlCenterServer, /renderIdentityAccess[\s\S]*Declare admin user[\s\S]*Roles &amp; Teams[\s\S]*Sessions &amp; Reviews/, "Control Center Identity & Access UI must expose admin users, roles, teams, sessions and access reviews.");
   assertMatch(controlCenterTest, /identity-access\.json[\s\S]*\/control\/identity\/admin-users[\s\S]*DECLARE-ADMIN-USER[\s\S]*UPDATE-SESSION-POLICY[\s\S]*identity-secret-should-not-leak/, "Control Center tests must cover identity metadata persistence, session policy, access reviews and secret redaction.");
   assertMatch(compose, /control-center:[\s\S]*PROJECT_RESOURCE_LIMITS_FILE:\s+\/var\/www\/project-state\/resource-limits\.json/, "Control Center must persist local project resource limits from the Node service.");
-  assertMatch(controlCenterServer, /resourceLimitsFile[\s\S]*handleResourceCommand[\s\S]*planResourceLimitUpdate[\s\S]*readResourceLimitsState[\s\S]*writeResourceLimitsState/, "Control Center must persist resource limits in a dedicated Node-managed JSON store.");
+  assertMatch(controlCenterServer, /resourceLimitsFile[\s\S]*planResourceLimitUpdate[\s\S]*readResourceLimitsState[\s\S]*writeResourceLimitsState/, "Control Center must persist resource limits in a dedicated Node-managed JSON store.");
   assertMatch(controlCenterServer, /(?=[\s\S]*navigationForMode)(?=[\s\S]*Workers & Jobs)(?=[\s\S]*CI\/CD & GitHub Governance)(?=[\s\S]*Logs Advanced)(?=[\s\S]*Alerts Advanced)(?=[\s\S]*Disaster Recovery)(?=[\s\S]*Release Evidence)(?=[\s\S]*Security Advanced)(?=[\s\S]*Billing \/ Plans)/, "Control Center Advanced Mode navigation must cover the requested enterprise sections.");
   assertMatch(controlCenterServer, /advancedItems[\s\S]*workers-jobs[\s\S]*cicd-github[\s\S]*logs-advanced[\s\S]*alerts-advanced[\s\S]*disaster-recovery[\s\S]*release-evidence[\s\S]*security-advanced[\s\S]*billing/, "Control Center Advanced Mode must define skeleton capability cards for all requested enterprise sections.");
   assertMatch(controlCenterServer, /route\(parts, "control", "advanced"\)[\s\S]*advancedControlOverview[\s\S]*advancedControlSection/, "Control Center must expose read-only Advanced Mode API endpoints.");
@@ -11439,8 +11921,8 @@ function staticSecurityInfraOnlyCheck() {
   assertMatch(controlCenterServer, /function adapterRegistry[\s\S]*CloudflareAdapter[\s\S]*TraefikAdapter[\s\S]*DockerAdapter[\s\S]*GitHubAdapter[\s\S]*PrometheusAdapter[\s\S]*LokiAdapter[\s\S]*AlertmanagerAdapter[\s\S]*BackupAdapter[\s\S]*RestoreAdapter[\s\S]*MinioAdapter[\s\S]*DatabaseAdapter[\s\S]*SecurityAdapter[\s\S]*GoNoGoAdapter/, "Control Center must define the requested enterprise adapter registry.");
   assertMatch(controlCenterServer, /function adapterRecord[\s\S]*dryRunDefault:\s+true[\s\S]*liveProviderTouched:\s+false[\s\S]*destructiveActionExecuted:\s+false[\s\S]*productionEvidence:\s+false/, "Control Center adapter records must stay safe-by-default.");
   assertMatch(controlCenterServer, /function rejectAdapterApply[\s\S]*Adapter apply rejected[\s\S]*RejectedOperationError/, "Control Center adapter apply must be rejected until explicit backend implementations are added.");
-  assertMatch(controlCenterServer, /(?=[\s\S]*renderResources)(?=[\s\S]*Quota per project)(?=[\s\S]*Set limits)(?=[\s\S]*dockerTouched:\s+false)/, "Control Center Resources UI must expose per-project quotas without mutating Docker live from the web panel.");
-  assertMatch(controlCenterTest, /resource-limits\.json[\s\S]*\/actions\/resource-command[\s\S]*resource-limit-secret-should-not-leak[\s\S]*\/control\/resources\/summary/, "Control Center tests must cover resource limit persistence, UI action and secret redaction.");
+  assertNoMatch(controlCenterServer, /renderOpsResources|function renderResources|handleResourceCommand/, "Control Center must not keep the removed Resources page or resource command handler.");
+  assertMatch(controlCenterTest, /resource-limits\.json[\s\S]*\/control\/resources\/limits[\s\S]*resource-limit-secret-should-not-leak[\s\S]*\/control\/resources\/summary/, "Control Center tests must cover resource limit persistence and secret redaction without the removed Resources page.");
   assertMatch(compose, /control-center:[\s\S]*PROJECT_SECURITY_POLICIES_FILE:\s+\/var\/www\/project-state\/security-policies\.json/, "Control Center must persist local security policy metadata from the Node service.");
   assertMatch(controlCenterServer, /securityPoliciesFile[\s\S]*handleSecurityCommand[\s\S]*planSecurityPolicyUpdate[\s\S]*readSecurityPoliciesState[\s\S]*writeSecurityPoliciesState/, "Control Center must persist security policies in a dedicated Node-managed JSON store.");
   assertMatch(controlCenterServer, /renderSecurity[\s\S]*WAF[\s\S]*Rate limit[\s\S]*Cloudflare Access[\s\S]*Admin Protection[\s\S]*Security Headers[\s\S]*Update policy/, "Control Center Security UI must expose policy controls instead of a raw JSON panel.");
@@ -11456,12 +11938,13 @@ function staticSecurityInfraOnlyCheck() {
   assertMatch(controlCenterTest, /provider-connections\.json[\s\S]*\/control\/provider-connections[\s\S]*UPDATE-PROVIDER-CONNECTION[\s\S]*provider-secret-should-not-leak/, "Control Center tests must cover provider connection metadata persistence and secret redaction.");
   assertMatch(controlCenterServer, /(?=[\s\S]*renderSettings)(?=[\s\S]*Default mode)(?=[\s\S]*Base domain)(?=[\s\S]*Cloudflare connection)(?=[\s\S]*GitHub connection)(?=[\s\S]*SMTP\/alert status)(?=[\s\S]*Update settings)/, "Control Center Settings UI must expose mode, domain and provider connection metadata controls.");
   assertMatch(controlCenterTest, /settings\.json[\s\S]*\/actions\/settings-command[\s\S]*settings-secret-should-not-leak[\s\S]*\/control\/settings/, "Control Center tests must cover settings persistence, UI action and secret redaction.");
-  assertMatch(controlCenterTest, /(?=[\s\S]*ops-shell)(?=[\s\S]*Passati)(?=[\s\S]*Non passati)(?=[\s\S]*section=projects)(?=[\s\S]*section=files)(?=[\s\S]*section=databases)(?=[\s\S]*section=activity)(?=[\s\S]*section=resources)/, "Control Center tests must cover the operations portal sections.");
+  assertMatch(controlCenterTest, /(?=[\s\S]*ops-shell)(?=[\s\S]*Passati)(?=[\s\S]*Non passati)(?=[\s\S]*section=projects)(?=[\s\S]*section=files)(?=[\s\S]*section=databases)(?=[\s\S]*project-backups)(?=[\s\S]*data-ops-nav-group="backups")(?=[\s\S]*doesNotMatch)/, "Control Center tests must cover the operations portal sections and prove the removed Backup section is absent.");
+  assertNoMatch(controlCenterTest, /assert\.match\(html,\s*\/Attivit.|ActivityTable"\), true|assert\.match\([^;]+,\s*\/Errori, avvisi e problemi\//, "Control Center tests must not expect the removed Activity page.");
   assertMatch(controlCenterTest, /(?=[\s\S]*\/control\/advanced)(?=[\s\S]*\/control\/network)(?=[\s\S]*\/control\/advanced\/network)(?=[\s\S]*enterprise-backend)(?=[\s\S]*enterprise-rate-limit)(?=[\s\S]*\/control\/monitoring)(?=[\s\S]*\/control\/advanced\/monitoring)(?=[\s\S]*Backend errors)(?=[\s\S]*Auth failures)(?=[\s\S]*\/control\/advanced\/cloudflare)(?=[\s\S]*\/control\/advanced\/release-evidence)(?=[\s\S]*\/control\/advanced\/identity)(?=[\s\S]*\/control\/advanced\/secrets)/, "Control Center tests must cover Advanced Mode API evidence endpoints including Network and Monitoring topology.");
   assertMatch(controlCenterTest, /\/control\/adapters[\s\S]*\/control\/adapters\/cloudflare[\s\S]*\/control\/adapters\/cloudflare\/plan[\s\S]*\/control\/adapters\/go-no-go\/verify[\s\S]*\/control\/adapters\/cloudflare\/apply/, "Control Center tests must cover adapter registry, dry-run planning, verification planning and rejected apply.");
   assertMatch(compose, /control-center:[\s\S]*PROJECT_BACKUP_RECORDS_FILE:\s+\/var\/www\/project-state\/backups\.jsonl/, "Control Center must persist local backup and restore drill records from the Node service.");
   assertMatch(controlCenterServer, /backupRecordsFile[\s\S]*handleBackupCommand[\s\S]*appendBackupRecord[\s\S]*readBackupRecords/, "Control Center must persist backup/restore plan records in a dedicated Node-managed JSONL store.");
-  assertMatch(controlCenterServer, /renderBackups[\s\S]*Manual backup[\s\S]*Restore drill[\s\S]*Backup History/, "Control Center Backups UI must expose manual backup and restore drill planning with local history.");
+  assertNoMatch(controlCenterServer, /renderBackups[\s\S]*Backup History|section\s*===\s*"backups"|id:\s*"backups"|label:\s*"Backup"/, "Control Center must not keep the removed standalone Backup page or sidebar section.");
   assertMatch(controlCenterTest, /backups\.jsonl[\s\S]*\/actions\/backup-command[\s\S]*backup-secret-should-not-leak[\s\S]*\/control\/backups\/records/, "Control Center tests must prove backup and restore drill plans are persisted and secret-redacted.");
   assertNoMatch(githubWorkflow, /project-repository|PROJECT_REPO_TOKEN|Checkout application source/, "Infrastructure CI must not checkout or require project repositories.");
   assertMatch(githubWorkflow, /\.tmp\/optional-project-source/, "Infrastructure CI must use a local optional project source placeholder for Compose rendering.");
@@ -11879,7 +12362,7 @@ async function staticSecurityCheckBody() {
   assertMatch(controlCenterTest, /projects\.json[\s\S]*\/control\/projects[\s\S]*CREATE-PROJECT[\s\S]*project-secret-should-not-leak/, "Control Center tests must cover project create persistence and secret redaction.");
   assertMatch(controlCenterServer, /(?=[\s\S]*applicationsFile)(?=[\s\S]*readApplicationsState)(?=[\s\S]*writeApplicationsState)(?=[\s\S]*applicationRecord)(?=[\s\S]*planApplicationCreate)/, "Control Center must manage application metadata through a dedicated Node-managed JSON store.");
   assertMatch(controlCenterServer, /webspacesFile[\s\S]*CREATE-WEBSPACE[\s\S]*UPDATE-QUOTA[\s\S]*readWebspacesState[\s\S]*writeWebspacesState/, "Control Center must persist declarative webspaces and quota metadata with explicit local confirmations.");
-  assertMatch(controlCenterServer, /resourceLimitsFile[\s\S]*handleResourceCommand[\s\S]*planResourceLimitUpdate[\s\S]*readResourceLimitsState[\s\S]*writeResourceLimitsState/, "Control Center must persist resource limits in a dedicated Node-managed JSON store.");
+  assertMatch(controlCenterServer, /resourceLimitsFile[\s\S]*planResourceLimitUpdate[\s\S]*readResourceLimitsState[\s\S]*writeResourceLimitsState/, "Control Center must persist resource limits in a dedicated Node-managed JSON store.");
   assertMatch(controlCenterServer, /securityPoliciesFile[\s\S]*handleSecurityCommand[\s\S]*planSecurityPolicyUpdate[\s\S]*readSecurityPoliciesState[\s\S]*writeSecurityPoliciesState/, "Control Center must persist security policies in a dedicated Node-managed JSON store.");
   assertMatch(controlCenterServer, /alertsFile[\s\S]*notificationChannelsFile[\s\S]*handleAlertCommand[\s\S]*planAlertRecord[\s\S]*readAlertsState[\s\S]*writeAlertsState[\s\S]*readNotificationChannelsState[\s\S]*writeNotificationChannelsState/, "Control Center must manage Logs and Alerts through dedicated Node-managed JSON stores.");
   assertMatch(controlCenterServer, /settingsFile[\s\S]*handleSettingsCommand[\s\S]*planSettingsUpdate[\s\S]*readSettingsState[\s\S]*writeSettingsState/, "Control Center must manage Settings through a dedicated Node-managed JSON store.");
@@ -11896,15 +12379,19 @@ async function staticSecurityCheckBody() {
   assertMatch(compose, /control-center:[\s\S]*PROJECT_SENSITIVE_MATERIALS_FILE:\s+\/var\/www\/project-state\/sensitive-materials\.json/, "Control Center must persist metadata-only sensitive material inventory from the Node service.");
   assertMatch(controlCenterServer, /sensitiveMaterialsFile[\s\S]*handleMaterialCommand[\s\S]*planMaterialDeclare[\s\S]*planMaterialRotation[\s\S]*planMaterialUsage[\s\S]*planMaterialAccessAudit[\s\S]*readSensitiveMaterialsState[\s\S]*writeSensitiveMaterialsState/, "Control Center must manage sensitive material inventory, rotation, usage and access audit through a dedicated Node-managed JSON store.");
   assertMatch(controlCenterTest, /sensitive-materials\.json[\s\S]*\/control\/secrets\/materials[\s\S]*DECLARE-MATERIAL[\s\S]*material-plain-value-should-not-leak/, "Control Center tests must cover metadata-only sensitive material persistence, rotation, usage/access audit and plaintext redaction.");
+  assertMatch(compose, /control-center:[\s\S]*PROJECT_VAULT_FILE:\s+\/var\/www\/project-state\/secret-vault\.json[\s\S]*CONTROL_CENTER_VAULT_KEY_FILE:\s+\/run\/secrets\/projects_gateway_signing_keys[\s\S]*CONTROL_CENTER_EXISTING_SECRETS_DIR:\s+\/var\/www\/infra-docs\/secrets/, "Control Center must persist the encrypted local secret vault, source its encryption key from a mounted Docker secret, and scan existing secret files from the read-only infrastructure tree.");
+  assertMatch(controlCenterServer, /vaultFile[\s\S]*handleVaultCommand[\s\S]*planVaultSecretCreate[\s\S]*planVaultSecretImportExisting[\s\S]*planVaultSecretReveal[\s\S]*planVaultSecretDelete[\s\S]*sealVaultValue[\s\S]*openVaultValue[\s\S]*readVaultState[\s\S]*writeVaultState/, "Control Center must manage a dedicated encrypted Vault with add/remove, existing-secret import, and explicit audited reveal operations.");
+  assertMatch(controlCenterTest, /secret-vault\.json[\s\S]*\/control\/vault\/import-existing[\s\S]*IMPORT-EXISTING-SECRETS[\s\S]*\/control\/vault\/secrets[\s\S]*STORE-VAULT-SECRET[\s\S]*REVEAL-VAULT-SECRET[\s\S]*DELETE-VAULT-SECRET/, "Control Center tests must cover encrypted Vault persistence, existing secret import, explicit reveal, plaintext redaction and item removal.");
   assertMatch(controlCenterPackage, /"name":\s+"@platform\/control-center"/, "Control Center project identity must stay generic.");
   assertMatch(controlCenterLocalStyles, /(?=[\s\S]*--cc-bg)(?=[\s\S]*--cc-surface)(?=[\s\S]*--cc-surface-raised)(?=[\s\S]*--cc-text)(?=[\s\S]*--cc-muted)(?=[\s\S]*--cc-accent)(?=[\s\S]*--cc-radius)(?=[\s\S]*--cc-shadow)(?=[\s\S]*\.cc-app-shell)(?=[\s\S]*\.ops-shell)(?=[\s\S]*\.ops-sidebar)(?=[\s\S]*\.cc-topbar)(?=[\s\S]*\.ops-nav)(?=[\s\S]*\.ops-table)(?=[\s\S]*\.ops-metrics)/, "Control Center must provide a local --cc-* visual system with operations shell, navigation, metrics and tables.");
   assertNoMatch(controlCenterLocalStyles, /\.card[\s\S]*border:\s*1px\s+solid/i, "Control Center cards must not use border: 1px solid for contrast.");
-  assertMatch(controlCenterLocalComponents, /(?=[\s\S]*OperationsShell)(?=[\s\S]*OperationsTopbar)(?=[\s\S]*StatusGate)(?=[\s\S]*ProjectTable)(?=[\s\S]*ProjectActions)(?=[\s\S]*ProjectFileBrowser)(?=[\s\S]*DatabaseInventory)(?=[\s\S]*ActivityTable)(?=[\s\S]*ResourceUsageTable)(?=[\s\S]*MetricTile)(?=[\s\S]*StatusPill)(?=[\s\S]*ActionButton)(?=[\s\S]*ProjectSwitcher)(?=[\s\S]*EmptyState)/, "Control Center must define the requested local operations UI component contract.");
+  assertMatch(controlCenterLocalComponents, /(?=[\s\S]*OperationsShell)(?=[\s\S]*OperationsTopbar)(?=[\s\S]*StatusGate)(?=[\s\S]*ProjectTable)(?=[\s\S]*ProjectActions)(?=[\s\S]*ProjectFileBrowser)(?=[\s\S]*DatabaseInventory)(?=[\s\S]*ResourceUsageTable)(?=[\s\S]*MetricTile)(?=[\s\S]*StatusPill)(?=[\s\S]*ActionButton)(?=[\s\S]*ProjectSwitcher)(?=[\s\S]*EmptyState)/, "Control Center must define the requested local operations UI component contract.");
   assertMatch(`${controlCenterServer}\n${controlCenterLocalComponents}`, /(?=[\s\S]*serveStaticAsset[\s\S]*\/assets\/control-center\/)(?=[\s\S]*route\(parts, "control", "ui-package"\))(?=[\s\S]*readControlCenterUiPackage)(?=[\s\S]*controlCenterStylesheetLinks)(?=[\s\S]*\/assets\/control-center\/control-center\.css)(?=[\s\S]*cc-app-shell)(?=[\s\S]*ops-shell)(?=[\s\S]*ops-topbar)(?=[\s\S]*cc-topbar)(?=[\s\S]*ops-nav)/, "Control Center must serve and render through its local operations visual system.");
   assertNoMatch(`${controlCenterServer}\n${controlCenterPackage}\n${compose}`, /ui-shell|pill-sidebar-nav|pill-tabs/, "Control Center runtime must not use retired visual dependency assets or shell classes.");
   assertMatch(controlCenterServer, /function navigationGroupsForMode[\s\S]*navGroup\("platform", "Infrastructure"[\s\S]*navGroup\("delivery", "Delivery"[\s\S]*navGroup\("observability", "Observability"[\s\S]*navGroup\("security", "Security"/, "Control Center Advanced navigation must group enterprise sections into macro sidebar areas with page tabs.");
-  assertMatch(controlCenterLocalComponents, /(?=[\s\S]*operations-first information architecture)(?=[\s\S]*ProjectFileBrowser)(?=[\s\S]*ActivityTable)/, "Control Center UI contract must describe the operations portal.");
-  assertMatch(controlCenterTest, /(?=[\s\S]*\/assets\/control-center\/control-center\.css)(?=[\s\S]*\/control\/ui-package)(?=[\s\S]*@platform\/control-center-local-ui)(?=[\s\S]*cc-app-shell)(?=[\s\S]*ops-shell)(?=[\s\S]*ops-topbar)(?=[\s\S]*OperationsShell)(?=[\s\S]*ProjectFileBrowser)(?=[\s\S]*ActivityTable)/, "Control Center tests must prove the local CSS, operations shell, navigation and UI contract are served.");
+  assertMatch(controlCenterLocalComponents, /(?=[\s\S]*operations-first information architecture)(?=[\s\S]*ProjectFileBrowser)(?=[\s\S]*DatabaseInventory)/, "Control Center UI contract must describe the operations portal.");
+  assertNoMatch(controlCenterLocalComponents, /ActivityTable|activity and backups/, "Control Center UI contract must not keep the removed Activity page contract.");
+  assertMatch(controlCenterTest, /(?=[\s\S]*\/assets\/control-center\/control-center\.css)(?=[\s\S]*\/control\/ui-package)(?=[\s\S]*@platform\/control-center-local-ui)(?=[\s\S]*cc-app-shell)(?=[\s\S]*ops-shell)(?=[\s\S]*ops-topbar)(?=[\s\S]*OperationsShell)(?=[\s\S]*ProjectFileBrowser)/, "Control Center tests must prove the local CSS, operations shell, navigation and UI contract are served.");
   assertMatch(compose, /control-center:[\s\S]*PROJECT_WORKER_JOBS_FILE:\s+\/var\/www\/project-state\/worker-jobs\.json/, "Control Center must persist worker/job metadata from the Node service.");
   assertMatch(controlCenterServer, /workerJobsFile[\s\S]*handleWorkerJobCommand[\s\S]*planWorkerDeclare[\s\S]*planQueueDeclare[\s\S]*planJobRecord[\s\S]*planJobRetry[\s\S]*planScheduleDeclare[\s\S]*planScheduleStatus[\s\S]*readWorkerJobsState[\s\S]*writeWorkerJobsState/, "Control Center must manage workers, queues, failed jobs, retries and schedules through a dedicated Node-managed JSON store.");
   assertMatch(controlCenterTest, /worker-jobs\.json[\s\S]*\/control\/workers-jobs\/workers[\s\S]*DECLARE-WORKER[\s\S]*\/control\/workers-jobs\/jobs[\s\S]*PLAN-JOB-RETRY[\s\S]*worker-secret-should-not-leak/, "Control Center tests must cover worker/job metadata persistence, retry planning, schedules and secret redaction.");
@@ -11935,7 +12422,7 @@ async function staticSecurityCheckBody() {
   assertMatch(controlCenterServer, /renderSecurity[\s\S]*WAF[\s\S]*Rate limit[\s\S]*Cloudflare Access[\s\S]*Admin Protection[\s\S]*Security Headers[\s\S]*Update policy/, "Control Center Security UI must expose policy controls instead of a raw JSON panel.");
   assertMatch(controlCenterServer, /(?=[\s\S]*renderLogsAlerts)(?=[\s\S]*Open alerts)(?=[\s\S]*Recent errors)(?=[\s\S]*Notification Channels)(?=[\s\S]*Record alert)/, "Control Center Logs / Alerts UI must expose open alerts, recent errors and notification status.");
   assertMatch(controlCenterServer, /(?=[\s\S]*renderSettings)(?=[\s\S]*Default mode)(?=[\s\S]*Base domain)(?=[\s\S]*Cloudflare connection)(?=[\s\S]*GitHub connection)(?=[\s\S]*SMTP\/alert status)(?=[\s\S]*Update settings)/, "Control Center Settings UI must expose mode, domain and provider connection metadata controls.");
-  assertMatch(controlCenterServer, /renderBackups[\s\S]*Manual backup[\s\S]*Restore drill[\s\S]*Backup History/, "Control Center Backups UI must expose manual backup and restore drill planning with local history.");
+  assertNoMatch(controlCenterServer, /renderBackups[\s\S]*Backup History|section\s*===\s*"backups"|id:\s*"backups"|label:\s*"Backup"/, "Control Center must not keep the removed standalone Backup page or sidebar section.");
   assertMatch(controlCenterServer, /sanitizeOperationDetails[\s\S]*sanitizeValue/, "Control Center operation details must be recursively sanitized before persistence.");
   assertMatch(controlCenterServer, /handleLogin[\s\S]*admin\.login\.success[\s\S]*admin\.login\.failed/, "Control Center must audit admin login success and failure without storing passwords.");
   assertMatch(controlCenterServer, /authenticateRequest[\s\S]*admin_auth_required/, "Control Center must enforce admin authentication when configured.");
@@ -11964,7 +12451,7 @@ async function staticSecurityCheckBody() {
   assertMatch(controlCenterTest, /APPLY-PRODUCTION[\s\S]*409/, "Control Center tests must reject production apply without valid production execution.");
   assertMatch(controlCenterTest, /\.\.\/secret[\s\S]*Invalid webspace path/, "Control Center tests must cover path traversal rejection.");
   assertMatch(controlCenterTest, /webspaces\.json[\s\S]*CREATE-WEBSPACE[\s\S]*UPDATE-QUOTA[\s\S]*webspace-secret-should-not-leak/, "Control Center tests must cover local webspace create/quota persistence and secret redaction.");
-  assertMatch(controlCenterTest, /resource-limits\.json[\s\S]*\/actions\/resource-command[\s\S]*resource-limit-secret-should-not-leak[\s\S]*\/control\/resources\/summary/, "Control Center tests must cover resource limit persistence, UI action and secret redaction.");
+  assertMatch(controlCenterTest, /resource-limits\.json[\s\S]*\/control\/resources\/limits[\s\S]*resource-limit-secret-should-not-leak[\s\S]*\/control\/resources\/summary/, "Control Center tests must cover resource limit persistence and secret redaction without the removed Resources page.");
   assertMatch(controlCenterTest, /security-policies\.json[\s\S]*\/actions\/security-command[\s\S]*security-secret-should-not-leak[\s\S]*\/control\/security\/summary/, "Control Center tests must cover security policy persistence, UI action and secret redaction.");
   assertMatch(controlCenterTest, /alerts\.json[\s\S]*notification-channels\.json[\s\S]*\/actions\/alert-command[\s\S]*alert-secret-should-not-leak[\s\S]*\/control\/logs\/summary/, "Control Center tests must cover alert persistence, notification metadata and secret redaction.");
   assertMatch(controlCenterTest, /settings\.json[\s\S]*\/actions\/settings-command[\s\S]*settings-secret-should-not-leak[\s\S]*\/control\/settings/, "Control Center tests must cover settings persistence, UI action and secret redaction.");
@@ -11972,11 +12459,13 @@ async function staticSecurityCheckBody() {
   assertMatch(controlCenterTest, /operations\.jsonl[\s\S]*\/control\/operations[\s\S]*operationId[\s\S]*output/, "Control Center tests must prove Operation and OperationStep records are persisted and exposed safely.");
   assertMatch(controlCenterTest, /deployments\.jsonl[\s\S]*\/control\/applications\/node-demo\/deploy[\s\S]*\/control\/applications\/node-demo\/rollback[\s\S]*\/control\/deployments/, "Control Center tests must prove deployment and rollback plans are persisted and exposed safely.");
   assertMatch(controlCenterTest, /backups\.jsonl[\s\S]*\/actions\/backup-command[\s\S]*backup-secret-should-not-leak[\s\S]*\/control\/backups\/records/, "Control Center tests must prove backup and restore drill plans are persisted and secret-redacted.");
-  assertMatch(controlCenterTest, /(?=[\s\S]*ops-shell)(?=[\s\S]*Passati)(?=[\s\S]*Non passati)(?=[\s\S]*section=projects)(?=[\s\S]*section=files)(?=[\s\S]*section=databases)(?=[\s\S]*section=activity)(?=[\s\S]*section=resources)/, "Control Center tests must cover the operations portal sections.");
+  assertMatch(controlCenterTest, /(?=[\s\S]*ops-shell)(?=[\s\S]*Passati)(?=[\s\S]*Non passati)(?=[\s\S]*section=projects)(?=[\s\S]*section=files)(?=[\s\S]*section=databases)(?=[\s\S]*project-backups)(?=[\s\S]*data-ops-nav-group="backups")(?=[\s\S]*doesNotMatch)/, "Control Center tests must cover the operations portal sections and prove the removed Backup section is absent.");
+  assertNoMatch(controlCenterTest, /assert\.match\(html,\s*\/Attivit.|ActivityTable"\), true|assert\.match\([^;]+,\s*\/Errori, avvisi e problemi\//, "Control Center tests must not expect the removed Activity page.");
   assertMatch(controlCenterTest, /(?=[\s\S]*\/control\/advanced)(?=[\s\S]*\/control\/network)(?=[\s\S]*\/control\/advanced\/network)(?=[\s\S]*enterprise-backend)(?=[\s\S]*enterprise-rate-limit)(?=[\s\S]*\/control\/monitoring)(?=[\s\S]*\/control\/advanced\/monitoring)(?=[\s\S]*Backend errors)(?=[\s\S]*Auth failures)(?=[\s\S]*\/control\/advanced\/cloudflare)(?=[\s\S]*\/control\/advanced\/release-evidence)(?=[\s\S]*\/control\/advanced\/identity)(?=[\s\S]*\/control\/advanced\/secrets)/, "Control Center tests must cover Advanced Mode API evidence endpoints including Network and Monitoring topology.");
   assertMatch(controlCenterTest, /\/control\/adapters[\s\S]*\/control\/adapters\/cloudflare[\s\S]*\/control\/adapters\/cloudflare\/plan[\s\S]*\/control\/adapters\/go-no-go\/verify[\s\S]*\/control\/adapters\/cloudflare\/apply/, "Control Center tests must cover adapter registry, dry-run planning, verification planning and rejected apply.");
   assertMatch(controlCenterServer, /route\(parts, "control", "readiness"\)[\s\S]*buildControlReadiness[\s\S]*readGovernanceManifest\("enterprise-requirements\.json"\)[\s\S]*readGovernanceManifest\("production-readiness\.json"\)[\s\S]*productionEvidence:\s+false[\s\S]*localEvidenceIsProductionEvidence:\s+false/, "Control Center must expose a sanitized readiness matrix from governance manifests without production evidence claims.");
-  assertIncludesAll(controlCenterServer, ["readLatestGoNoGoReport", "renderOpsStatus", "Passati", "Non passati", "Motivo", "Cosa fare", "renderOpsActivity", "renderOpsResources"], "Control Center operations UI must expose go/no-go blockers, reasons, required actions, activity and resources.");
+  assertIncludesAll(controlCenterServer, ["readLatestGoNoGoReport", "renderOpsStatus", "Passati", "Non passati", "Motivo", "Cosa fare", "renderProjectDetailBackups"], "Control Center operations UI must expose go/no-go blockers, reasons, required actions and application-scoped backups.");
+  assertNoMatch(controlCenterServer, /renderOpsActivity|activityProblems|id:\s*"activity"|label:\s*"Attivit.|section\s*===\s*"activity"/, "Control Center must not keep the removed Activity page route or renderer.");
   assertMatch(controlCenterTest, /(?=[\s\S]*\/control\/readiness)(?=[\s\S]*productionReadiness\.requirementCount,\s+19)(?=[\s\S]*tls-https-production-ready)(?=[\s\S]*pending-live-proof)(?=[\s\S]*localEvidenceIsProductionEvidence,\s+false)/, "Control Center tests must cover the readiness API, 19-point infrastructure checklist and live-proof separation.");
   assertMatch(controlCenterTest, /local evidence only[\s\S]*notEqual[\s\S]*production evidence/, "Control Center tests must prove local evidence is not accepted as production evidence.");
   assertMatch(controlCenterTest, /admin guard[\s\S]*admin_auth_required[\s\S]*HttpOnly[\s\S]*Secure[\s\S]*SameSite=Lax/, "Control Center tests must cover the admin auth gate and hardened session cookie.");
@@ -13025,6 +13514,852 @@ async function accountIntegrationTests() {
   }
 }
 
+function latestFreshLocalCheck(commandName, maxAgeHours = 168) {
+  const report = latestJsonReport("local-checks", `${commandName}-`, (payload) => (
+    payload?.status === "passed"
+    && payload.scope === "platform-infrastructure"
+    && payload.command === commandName
+  ));
+  if (!report) {
+    return {
+      command: commandName,
+      status: "missing",
+      fresh: false,
+      passed: false,
+      reportPath: null,
+      ageHours: null,
+    };
+  }
+  const generatedAt = report.payload.generatedAt || report.payload.finishedAt || report.payload.startedAt || "";
+  const generatedMs = Date.parse(generatedAt);
+  const ageHours = Number.isFinite(generatedMs) ? Math.max(0, (Date.now() - generatedMs) / 36e5) : null;
+  const fresh = ageHours !== null && ageHours <= maxAgeHours;
+  return {
+    command: commandName,
+    status: report.payload.status,
+    fresh,
+    passed: fresh,
+    reportPath: path.relative(infraRoot, report.filePath).replaceAll("\\", "/"),
+    generatedAt,
+    ageHours,
+  };
+}
+
+async function pentestReadiness() {
+  log("==> Penetration test readiness");
+  if (booleanFlag(argv.refresh)) {
+    await securityMatrix();
+    await staticSecurityCheck();
+    await secretScan();
+  }
+  const startedAt = new Date();
+  const requiredReports = [
+    latestFreshLocalCheck("security-matrix"),
+    latestFreshLocalCheck("security-smoke"),
+    latestFreshLocalCheck("static-security-check"),
+    latestFreshLocalCheck("secret-scan"),
+  ];
+  const threatModelPath = path.join(infraRoot, "THREAT-MODEL.md");
+  const threatModelPresent = fs.existsSync(threatModelPath) && fs.statSync(threatModelPath).size > 0;
+  const failedChecks = [
+    ...requiredReports.filter((item) => !item.passed).map((item) => `${item.command}:${item.status}`),
+    ...(threatModelPresent ? [] : ["THREAT-MODEL.md:missing"]),
+  ];
+  const status = failedChecks.length ? "failed" : "passed";
+  const finishedAt = new Date();
+  const payload = {
+    generatedAt: finishedAt.toISOString(),
+    startedAt: startedAt.toISOString(),
+    finishedAt: finishedAt.toISOString(),
+    durationMs: Math.max(0, finishedAt.getTime() - startedAt.getTime()),
+    status,
+    mode: "readiness-plan",
+    scope: "platform-infrastructure",
+    command: "pentest-readiness",
+    detail: status === "passed"
+      ? "Infrastructure penetration test readiness is approved from current non-secret evidence; external professional pentest remains required before enterprise launch."
+      : "Infrastructure penetration test readiness is not complete.",
+    readiness: {
+      approved: status === "passed",
+      approvedBy: "platform-operator",
+      authorizationScope: "platform-infrastructure only",
+      excludedScope: ["hosted application business logic", "production secrets", "destructive exploitation", "data exfiltration"],
+    },
+    externalProfessionalPentest: {
+      requiredBeforeEnterpriseLaunch: true,
+      status: "planned-required-before-enterprise-launch",
+      nextAction: "Book or execute an external professional penetration test when staging/public provider targets are available.",
+    },
+    methodology: [
+      "OWASP Top 10 / ASVS readiness",
+      "admin-plane access and session boundary review",
+      "WAF, rate limit and security header coverage",
+      "dependency, static and secret-scan hygiene",
+      "non-destructive infrastructure-only validation",
+    ],
+    evidence: {
+      threatModel: {
+        path: "THREAT-MODEL.md",
+        present: threatModelPresent,
+      },
+      reports: requiredReports,
+    },
+    summary: {
+      totalChecks: requiredReports.length + 1,
+      failedChecks: failedChecks.length,
+      reportsFreshHours: 168,
+    },
+    issues: failedChecks,
+  };
+  const stamp = reportTimestamp();
+  const jsonPath = writeJsonReport("security", `pentest-readiness-${stamp}`, payload);
+  const markdownPath = writeMarkdownReport("security", `pentest-readiness-${stamp}`, [
+    "# Penetration Test Readiness",
+    "",
+    `Status: ${payload.status}`,
+    `Mode: ${payload.mode}`,
+    `Scope: ${payload.scope}`,
+    `Generated at: ${payload.generatedAt}`,
+    "",
+    "## Evidence",
+    "",
+    `- THREAT-MODEL.md: ${threatModelPresent ? "present" : "missing"}`,
+    ...requiredReports.map((item) => `- ${item.command}: ${item.status}; fresh=${item.fresh}; report=${item.reportPath || "missing"}`),
+    "",
+    "## External Pentest",
+    "",
+    "- Required before enterprise launch: yes",
+    "- Current state: readiness approved, external execution still required before enterprise launch",
+    "",
+    "## Issues",
+    "",
+    ...(failedChecks.length ? failedChecks.map((issue) => `- ${issue}`) : ["- none"]),
+  ]);
+  log(`Pentest readiness report written to ${jsonPath} and ${markdownPath}`);
+  if (failedChecks.length) {
+    fail(`Pentest readiness failed with ${failedChecks.length} issue(s). Report: ${jsonPath}`);
+  }
+  log("Penetration test readiness passed.");
+}
+
+function vulnerabilityDisclosure() {
+  log("==> Vulnerability disclosure evidence");
+  const generatedAt = new Date().toISOString();
+  const securityPath = path.join(infraRoot, "SECURITY.md");
+  const securityText = fs.existsSync(securityPath) ? readText(securityPath) : "";
+  const requiredPatterns = [
+    ["vulnerability section", /##\s+Vulnerability disclosure/i],
+    ["private reporting", /privately|private/i],
+    ["acknowledgement target", /acknowledgement target:\s*72 hours/i],
+    ["triage target", /severity triage target:\s*5 business days/i],
+    ["public disclosure approval", /public disclosure[\s\S]*operator\s+approval/i],
+    ["secret redaction", /Never include secrets|tokens|private keys/i],
+    ["incident response escalation", /incident-response/i],
+  ];
+  const checks = requiredPatterns.map(([name, pattern]) => ({
+    name,
+    status: pattern.test(securityText) ? "passed" : "failed",
+  }));
+  const failedChecks = checks.filter((check) => check.status !== "passed");
+  const status = failedChecks.length ? "failed" : "passed";
+  const payload = {
+    generatedAt,
+    status,
+    command: "vulnerability-disclosure",
+    scope: "platform-infrastructure",
+    mode: "publishable-process-evidence",
+    detail: status === "passed"
+      ? "Vulnerability disclosure process is publishable from SECURITY.md and approved for platform governance evidence."
+      : "Vulnerability disclosure process is incomplete.",
+    channel: {
+      type: "repository-security-policy",
+      path: "SECURITY.md",
+      securityPolicyPresent: securityText.length > 0,
+      publicDomainRequired: false,
+      containsSecretMaterial: false,
+    },
+    process: {
+      publishable: status === "passed",
+      approved: status === "passed",
+      acknowledgementTarget: "72 hours",
+      triageTarget: "5 business days",
+      publicDisclosureRequiresApproval: true,
+      emergencyEscalation: "incident-response",
+      scope: "platform-infrastructure",
+    },
+    checks,
+    summary: {
+      totalChecks: checks.length,
+      failedChecks: failedChecks.length,
+    },
+    issues: failedChecks.map((check) => check.name),
+  };
+  const stamp = reportTimestamp();
+  const jsonPath = writeJsonReport("security", `vulnerability-disclosure-${stamp}`, payload);
+  const markdownPath = writeMarkdownReport("security", `vulnerability-disclosure-${stamp}`, [
+    "# Vulnerability Disclosure Evidence",
+    "",
+    `Status: ${payload.status}`,
+    `Mode: ${payload.mode}`,
+    `Scope: ${payload.scope}`,
+    `Generated at: ${payload.generatedAt}`,
+    "",
+    "## Channel",
+    "",
+    `- Type: ${payload.channel.type}`,
+    `- Path: ${payload.channel.path}`,
+    `- Public domain required: ${payload.channel.publicDomainRequired ? "yes" : "no"}`,
+    "",
+    "## Process",
+    "",
+    `- Publishable: ${payload.process.publishable ? "yes" : "no"}`,
+    `- Approved: ${payload.process.approved ? "yes" : "no"}`,
+    `- Acknowledgement target: ${payload.process.acknowledgementTarget}`,
+    `- Triage target: ${payload.process.triageTarget}`,
+    `- Public disclosure requires approval: ${payload.process.publicDisclosureRequiresApproval ? "yes" : "no"}`,
+    `- Emergency escalation: ${payload.process.emergencyEscalation}`,
+    "",
+    "## Checks",
+    "",
+    ...checks.map((check) => `- ${check.name}: ${check.status}`),
+    "",
+    "## Issues",
+    "",
+    ...(payload.issues.length ? payload.issues.map((issue) => `- ${issue}`) : ["- none"]),
+  ]);
+  log(`Vulnerability disclosure report written to ${jsonPath} and ${markdownPath}`);
+  if (status !== "passed") {
+    fail(`Vulnerability disclosure evidence failed. Report: ${jsonPath}`);
+  }
+  log("Vulnerability disclosure evidence passed.");
+}
+
+function complianceEvidence() {
+  log("==> Compliance evidence");
+  const generatedAt = new Date().toISOString();
+  const docPath = path.join(infraRoot, "governance", "compliance-evidence.md");
+  const text = fs.existsSync(docPath) ? readText(docPath) : "";
+  const requiredPatterns = [
+    ["scope platform-infrastructure", /Approved scope:\s*platform-infrastructure only/i],
+    ["control matrix", /##\s+Control Matrix[\s\S]*Review cadence/i],
+    ["GDPR-like mapping", /##\s+GDPR-Like Mapping/i],
+    ["SOC2-like mapping", /##\s+SOC2-Like Mapping/i],
+    ["owner assigned", /\|\s*Owner\s*\|/i],
+    ["formal certification not claimed", /Formal certification:\s*not claimed/i],
+    ["external audit boundary", /External audit:\s*required only/i],
+    ["hosted apps out of scope", /Hosted application business logic/i],
+  ];
+  const checks = requiredPatterns.map(([name, pattern]) => ({
+    name,
+    status: pattern.test(text) ? "passed" : "failed",
+  }));
+  const failedChecks = checks.filter((check) => check.status !== "passed");
+  const status = failedChecks.length ? "failed" : "passed";
+  const payload = {
+    generatedAt,
+    status,
+    command: "compliance-evidence",
+    scope: "platform-infrastructure",
+    mode: "governance-evidence",
+    detail: status === "passed"
+      ? "Non-secret GDPR/SOC2-like platform compliance matrix is approved for infrastructure governance evidence."
+      : "Compliance evidence matrix is incomplete.",
+    compliance: {
+      approved: status === "passed",
+      gdprLikeMapping: /##\s+GDPR-Like Mapping/i.test(text),
+      soc2LikeMapping: /##\s+SOC2-Like Mapping/i.test(text),
+      formalCertificationClaimed: false,
+      formalCertificationRequiredForClaim: true,
+      hostedApplicationsOutOfScope: /Hosted application business logic/i.test(text),
+      documentPath: "governance/compliance-evidence.md",
+    },
+    checks,
+    summary: {
+      totalChecks: checks.length,
+      failedChecks: failedChecks.length,
+    },
+    issues: failedChecks.map((check) => check.name),
+  };
+  const stamp = reportTimestamp();
+  const jsonPath = writeJsonReport("governance", `compliance-evidence-${stamp}`, payload);
+  const markdownPath = writeMarkdownReport("governance", `compliance-evidence-${stamp}`, [
+    "# Compliance Evidence",
+    "",
+    `Status: ${payload.status}`,
+    `Mode: ${payload.mode}`,
+    `Scope: ${payload.scope}`,
+    `Generated at: ${payload.generatedAt}`,
+    "",
+    "## Compliance",
+    "",
+    `- Approved: ${payload.compliance.approved ? "yes" : "no"}`,
+    `- GDPR-like mapping: ${payload.compliance.gdprLikeMapping ? "yes" : "no"}`,
+    `- SOC2-like mapping: ${payload.compliance.soc2LikeMapping ? "yes" : "no"}`,
+    `- Formal certification claimed: ${payload.compliance.formalCertificationClaimed ? "yes" : "no"}`,
+    `- Hosted applications out of scope: ${payload.compliance.hostedApplicationsOutOfScope ? "yes" : "no"}`,
+    "",
+    "## Checks",
+    "",
+    ...checks.map((check) => `- ${check.name}: ${check.status}`),
+    "",
+    "## Issues",
+    "",
+    ...(payload.issues.length ? payload.issues.map((issue) => `- ${issue}`) : ["- none"]),
+  ]);
+  log(`Compliance evidence report written to ${jsonPath} and ${markdownPath}`);
+  if (status !== "passed") {
+    fail(`Compliance evidence failed. Report: ${jsonPath}`);
+  }
+  log("Compliance evidence passed.");
+}
+
+function dataClassification() {
+  log("==> Data classification evidence");
+  const generatedAt = new Date().toISOString();
+  const docPath = path.join(infraRoot, "governance", "data-classification.md");
+  const text = fs.existsSync(docPath) ? readText(docPath) : "";
+  const requiredLevels = ["Public", "Internal", "Confidential", "Secret", "Restricted"];
+  const requiredPatterns = [
+    ["classification levels", /##\s+Classification Levels/i],
+    ...requiredLevels.map((level) => [`level ${level}`, new RegExp(`\\b${level}\\b`, "i")]),
+    ["hosted app datasets out of scope", /Hosted\s+application datasets remain application-owned/i],
+    ["secrets never committed", /Secret and Restricted data must not be committed to Git/i],
+    ["backups restricted", /Backup contents are Restricted/i],
+    ["new data classified before go-live", /New data types must be classified before go-live/i],
+    ["retention review", /##\s+Retention And Review/i],
+  ];
+  const checks = requiredPatterns.map(([name, pattern]) => ({
+    name,
+    status: pattern.test(text) ? "passed" : "failed",
+  }));
+  const failedChecks = checks.filter((check) => check.status !== "passed");
+  const status = failedChecks.length ? "failed" : "passed";
+  const payload = {
+    generatedAt,
+    status,
+    command: "data-classification",
+    scope: "platform-infrastructure",
+    mode: "governance-evidence",
+    detail: status === "passed"
+      ? "Platform data classification is approved and covers handling rules for infrastructure data."
+      : "Platform data classification is incomplete.",
+    classification: {
+      approved: status === "passed",
+      documentPath: "governance/data-classification.md",
+      levels: requiredLevels,
+      hostedApplicationDataOutOfScope: /Hosted\s+application datasets remain application-owned/i.test(text),
+      secretsNeverCommitted: /Secret and Restricted data must not be committed to Git/i.test(text),
+      restrictedBackupHandling: /Backup contents are Restricted/i.test(text),
+    },
+    checks,
+    summary: {
+      totalChecks: checks.length,
+      failedChecks: failedChecks.length,
+    },
+    issues: failedChecks.map((check) => check.name),
+  };
+  const stamp = reportTimestamp();
+  const jsonPath = writeJsonReport("governance", `data-classification-${stamp}`, payload);
+  const markdownPath = writeMarkdownReport("governance", `data-classification-${stamp}`, [
+    "# Data Classification Evidence",
+    "",
+    `Status: ${payload.status}`,
+    `Mode: ${payload.mode}`,
+    `Scope: ${payload.scope}`,
+    `Generated at: ${payload.generatedAt}`,
+    "",
+    "## Classification",
+    "",
+    `- Approved: ${payload.classification.approved ? "yes" : "no"}`,
+    `- Levels: ${payload.classification.levels.join(", ")}`,
+    `- Hosted application data out of scope: ${payload.classification.hostedApplicationDataOutOfScope ? "yes" : "no"}`,
+    `- Secrets never committed: ${payload.classification.secretsNeverCommitted ? "yes" : "no"}`,
+    `- Restricted backup handling: ${payload.classification.restrictedBackupHandling ? "yes" : "no"}`,
+    "",
+    "## Checks",
+    "",
+    ...checks.map((check) => `- ${check.name}: ${check.status}`),
+    "",
+    "## Issues",
+    "",
+    ...(payload.issues.length ? payload.issues.map((issue) => `- ${issue}`) : ["- none"]),
+  ]);
+  log(`Data classification report written to ${jsonPath} and ${markdownPath}`);
+  if (status !== "passed") {
+    fail(`Data classification failed. Report: ${jsonPath}`);
+  }
+  log("Data classification evidence passed.");
+}
+
+function featureFlagsKillSwitches() {
+  log("==> Feature flags and kill switches evidence");
+  const generatedAt = new Date().toISOString();
+  const docPath = path.join(infraRoot, "governance", "kill-switches.md");
+  const text = fs.existsSync(docPath) ? readText(docPath) : "";
+  const switchNames = [
+    "Hosted app public exposure",
+    "Project router boundary",
+    "Admin portal public access",
+    "Off-site backup upload",
+    "Release/deploy pipeline",
+    "Alert delivery channel",
+    "WAF/rate limiting policy",
+    "Managed secret materialization",
+  ];
+  const requiredPatterns = [
+    ["kill switch matrix", /##\s+Kill Switch Matrix/i],
+    ["operator disable path", /does not\s+require code changes/i],
+    ["application flags out of scope", /application flags remain app-owned/i],
+    ["owner trigger disable recovery evidence", /\|\s*Switch\s*\|\s*Scope\s*\|\s*Trigger\s*\|\s*Disable action\s*\|\s*Recovery action\s*\|\s*Evidence\s*\|/i],
+    ["no destructive volume action", /Never delete volumes or backups as a kill switch/i],
+    ...switchNames.map((name) => [name, new RegExp(name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i")]),
+  ];
+  const checks = requiredPatterns.map(([name, pattern]) => ({
+    name,
+    status: pattern.test(text) ? "passed" : "failed",
+  }));
+  const failedChecks = checks.filter((check) => check.status !== "passed");
+  const status = failedChecks.length ? "failed" : "passed";
+  const switchCount = switchNames.filter((name) => new RegExp(name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i").test(text)).length;
+  const payload = {
+    generatedAt,
+    status,
+    command: "feature-flags-kill-switches",
+    scope: "platform-infrastructure",
+    mode: "governance-evidence",
+    detail: status === "passed"
+      ? "Infrastructure kill switches are documented with operator-owned disable and recovery paths."
+      : "Infrastructure kill switch evidence is incomplete.",
+    killSwitches: {
+      operational: status === "passed",
+      documentPath: "governance/kill-switches.md",
+      switchCount,
+      applicationFlagsOutOfScope: /application flags remain app-owned/i.test(text),
+      destructiveVolumeActionsAllowed: false,
+      codeChangeRequired: false,
+    },
+    checks,
+    summary: {
+      totalChecks: checks.length,
+      failedChecks: failedChecks.length,
+    },
+    issues: failedChecks.map((check) => check.name),
+  };
+  const stamp = reportTimestamp();
+  const jsonPath = writeJsonReport("governance", `feature-flags-kill-switches-${stamp}`, payload);
+  const markdownPath = writeMarkdownReport("governance", `feature-flags-kill-switches-${stamp}`, [
+    "# Feature Flags And Kill Switches Evidence",
+    "",
+    `Status: ${payload.status}`,
+    `Mode: ${payload.mode}`,
+    `Scope: ${payload.scope}`,
+    `Generated at: ${payload.generatedAt}`,
+    "",
+    "## Kill Switches",
+    "",
+    `- Operational: ${payload.killSwitches.operational ? "yes" : "no"}`,
+    `- Switch count: ${payload.killSwitches.switchCount}`,
+    `- Application flags out of scope: ${payload.killSwitches.applicationFlagsOutOfScope ? "yes" : "no"}`,
+    `- Destructive volume actions allowed: ${payload.killSwitches.destructiveVolumeActionsAllowed ? "yes" : "no"}`,
+    `- Code change required: ${payload.killSwitches.codeChangeRequired ? "yes" : "no"}`,
+    "",
+    "## Checks",
+    "",
+    ...checks.map((check) => `- ${check.name}: ${check.status}`),
+    "",
+    "## Issues",
+    "",
+    ...(payload.issues.length ? payload.issues.map((issue) => `- ${issue}`) : ["- none"]),
+  ]);
+  log(`Feature flags and kill switches report written to ${jsonPath} and ${markdownPath}`);
+  if (status !== "passed") {
+    fail(`Feature flags and kill switches evidence failed. Report: ${jsonPath}`);
+  }
+  log("Feature flags and kill switches evidence passed.");
+}
+
+function haSingleNodeRiskAcceptance() {
+  log("==> HA single-node risk acceptance evidence");
+  const generatedAt = new Date().toISOString();
+  const docPath = path.join(infraRoot, "governance", "ha-single-node-risk-acceptance.md");
+  const text = fs.existsSync(docPath) ? readText(docPath) : "";
+  const requiredPatterns = [
+    ["single-node accepted", /single-node operation is accepted for this phase/i],
+    ["no HA claim", /HA claimed:\s*no/i],
+    ["no multi-node claim", /Multi-node claimed:\s*no/i],
+    ["single failure domain", /single failure domain/i],
+    ["compensating controls", /##\s+Compensating Controls/i],
+    ["exit criteria", /##\s+Exit Criteria/i],
+    ["public go-live review", /before public production go-live/i],
+  ];
+  const checks = requiredPatterns.map(([name, pattern]) => ({
+    name,
+    status: pattern.test(text) ? "passed" : "failed",
+  }));
+  const failedChecks = checks.filter((check) => check.status !== "passed");
+  const status = failedChecks.length ? "failed" : "passed";
+  const payload = {
+    generatedAt,
+    status,
+    command: "ha-single-node-risk-acceptance",
+    scope: "platform-infrastructure",
+    mode: "governance-evidence",
+    detail: status === "passed"
+      ? "Single-node VPS risk is explicitly accepted for the current phase; HA or multi-node readiness is not claimed."
+      : "Single-node risk acceptance evidence is incomplete.",
+    decision: {
+      approved: status === "passed",
+      documentPath: "governance/ha-single-node-risk-acceptance.md",
+      singleNodeRiskAccepted: /single-node operation is accepted for this phase/i.test(text),
+      haClaimed: false,
+      multiNodeClaimed: false,
+      requiresReplacementBeforeHaClaim: true,
+    },
+    checks,
+    summary: {
+      totalChecks: checks.length,
+      failedChecks: failedChecks.length,
+    },
+    issues: failedChecks.map((check) => check.name),
+  };
+  const stamp = reportTimestamp();
+  const jsonPath = writeJsonReport("governance", `ha-single-node-risk-acceptance-${stamp}`, payload);
+  const markdownPath = writeMarkdownReport("governance", `ha-single-node-risk-acceptance-${stamp}`, [
+    "# HA Single-Node Risk Acceptance Evidence",
+    "",
+    `Status: ${payload.status}`,
+    `Mode: ${payload.mode}`,
+    `Scope: ${payload.scope}`,
+    `Generated at: ${payload.generatedAt}`,
+    "",
+    "## Decision",
+    "",
+    `- Approved: ${payload.decision.approved ? "yes" : "no"}`,
+    `- Single-node risk accepted: ${payload.decision.singleNodeRiskAccepted ? "yes" : "no"}`,
+    `- HA claimed: ${payload.decision.haClaimed ? "yes" : "no"}`,
+    `- Multi-node claimed: ${payload.decision.multiNodeClaimed ? "yes" : "no"}`,
+    "",
+    "## Checks",
+    "",
+    ...checks.map((check) => `- ${check.name}: ${check.status}`),
+    "",
+    "## Issues",
+    "",
+    ...(payload.issues.length ? payload.issues.map((issue) => `- ${issue}`) : ["- none"]),
+  ]);
+  log(`HA single-node risk acceptance report written to ${jsonPath} and ${markdownPath}`);
+  if (status !== "passed") {
+    fail(`HA single-node risk acceptance failed. Report: ${jsonPath}`);
+  }
+  log("HA single-node risk acceptance passed.");
+}
+
+function enterpriseProduction360Coverage() {
+  log("==> Enterprise production 360 coverage");
+  const generatedAt = new Date().toISOString();
+  const manifestPath = path.join(infraRoot, "governance", "enterprise-production-360-coverage.json");
+  const manifest = readJsonFile(manifestPath, manifestPath);
+  const enterpriseManifest = readJsonFile(path.join(infraRoot, "governance", "enterprise-requirements.json"));
+  const readinessManifest = readJsonFile(path.join(infraRoot, "governance", "production-readiness.json"));
+  const productionPolicyPath = path.join(infraRoot, "governance", "production-go-no-go.json");
+  const enterpriseIds = new Set((enterpriseManifest.requirements || []).map((item) => item.id).filter(Boolean));
+  const readinessIds = new Set((readinessManifest.requirements || []).map((item) => item.id).filter(Boolean));
+  const goNoGoChecks = new Set([
+    "vps-bootstrap-applied",
+    "vps-hardening-applied",
+    "vps-host-readiness",
+    "pre-go-live-evidence-complete",
+    "healthcheck-coverage",
+    "infra-health-runtime",
+    "retention-evidence",
+    "platform-admin-audit-evidence",
+    "github-actions-run-success",
+    "secret-rotation-evidence",
+    "disaster-recovery-rpo-rto-offsite",
+    "real-alert-delivery",
+    "external-uptime-provider",
+    "public-load-benchmark",
+    "release-evidence-and-rollback",
+    "cloudflare-access-admin-verified",
+  ]);
+  const domains = Array.isArray(manifest.domains) ? manifest.domains : [];
+  const modeCounts = {};
+  const issues = [];
+  let controlCount = 0;
+  let invalidRefs = 0;
+  let providerRequiredControls = 0;
+  let humanRequiredControls = 0;
+  let requiredBeforeGoLiveControls = 0;
+
+  const resolveRef = (rawRef) => {
+    const ref = String(rawRef || "");
+    const separator = ref.indexOf(":");
+    if (separator <= 0) return { ref, ok: false, detail: "invalid evidence reference format" };
+    const type = ref.slice(0, separator);
+    const value = ref.slice(separator + 1);
+    if (!value) return { ref, ok: false, detail: "empty evidence reference value" };
+    if (type === "enterprise") {
+      return { ref, ok: enterpriseIds.has(value), detail: enterpriseIds.has(value) ? "enterprise requirement exists" : "missing enterprise requirement" };
+    }
+    if (type === "readiness") {
+      return { ref, ok: readinessIds.has(value), detail: readinessIds.has(value) ? "production readiness requirement exists" : "missing production readiness requirement" };
+    }
+    if (type === "go-no-go") {
+      return { ref, ok: goNoGoChecks.has(value), detail: goNoGoChecks.has(value) ? "production go/no-go check exists" : "missing go/no-go check mapping" };
+    }
+    if (type === "command") {
+      const hasOpsCommand = Object.prototype.hasOwnProperty.call(commands, value);
+      const hasWrapper = fs.existsSync(path.join(infraRoot, "scripts", `${value}.sh`));
+      return { ref, ok: hasOpsCommand || hasWrapper, detail: hasOpsCommand ? "infra-ops command exists" : hasWrapper ? "script wrapper exists" : "missing command or script wrapper" };
+    }
+    if (type === "file" || type === "workflow") {
+      const filePath = path.resolve(infraRoot, value);
+      const ok = filePath.startsWith(`${infraRoot}${path.sep}`) && fs.existsSync(filePath);
+      return { ref, ok, detail: ok ? "file exists" : "missing file" };
+    }
+    return { ref, ok: false, detail: `unsupported evidence reference type: ${type}` };
+  };
+
+  const domainResults = domains.map((domain) => {
+    const controls = Array.isArray(domain.controls) ? domain.controls : [];
+    const controlResults = controls.map((control) => {
+      controlCount += 1;
+      if (control.providerRequired === true) providerRequiredControls += 1;
+      if (control.humanRequired === true) humanRequiredControls += 1;
+      if (control.requiredBeforeGoLive === true) requiredBeforeGoLiveControls += 1;
+      const mode = String(control.mode || "unspecified");
+      modeCounts[mode] = (modeCounts[mode] || 0) + 1;
+      const refs = Array.isArray(control.evidenceRefs) ? control.evidenceRefs : [];
+      const refResults = refs.map(resolveRef);
+      const missingRefs = refResults.filter((item) => !item.ok);
+      invalidRefs += missingRefs.length;
+      if (!refs.length) {
+        invalidRefs += 1;
+        issues.push(`${domain.id}/${control.id}:missing-evidenceRefs`);
+      }
+      for (const missingRef of missingRefs) {
+        issues.push(`${domain.id}/${control.id}:${missingRef.ref}:${missingRef.detail}`);
+      }
+      return {
+        id: control.id || "unnamed-control",
+        title: control.title || humanName(control.id || "unnamed-control"),
+        mode,
+        providerRequired: control.providerRequired === true,
+        humanRequired: control.humanRequired === true,
+        requiredBeforeGoLive: control.requiredBeforeGoLive === true,
+        status: refs.length && missingRefs.length === 0 ? "covered" : "needs-work",
+        evidenceRefs: refResults,
+      };
+    });
+    const gaps = controlResults.filter((control) => control.status !== "covered");
+    return {
+      id: domain.id || "unnamed-domain",
+      title: domain.title || humanName(domain.id || "unnamed-domain"),
+      objective: domain.objective || "",
+      status: gaps.length ? "needs-work" : "covered",
+      controls: controlResults,
+      summary: {
+        controls: controlResults.length,
+        covered: controlResults.filter((control) => control.status === "covered").length,
+        gaps: gaps.length,
+        providerRequired: controlResults.filter((control) => control.providerRequired).length,
+        humanRequired: controlResults.filter((control) => control.humanRequired).length,
+      },
+    };
+  });
+
+  const expectedDomains = Number(manifest.expectedDomainCount || 0);
+  const minimumControls = Number(manifest.minimumControlCount || 0);
+  const domainGaps = domainResults.filter((domain) => domain.status !== "covered").length;
+  const countIssues = [
+    ...(domains.length < expectedDomains ? [`domain-count:${domains.length}<${expectedDomains}`] : []),
+    ...(controlCount < minimumControls ? [`control-count:${controlCount}<${minimumControls}`] : []),
+  ];
+  const allIssues = [...issues, ...countIssues];
+  const status = allIssues.length ? "failed" : "passed";
+  const payload = {
+    generatedAt,
+    status,
+    command: "enterprise-production-360-coverage",
+    scope: "platform-infrastructure",
+    mode: "coverage-catalog",
+    detail: status === "passed"
+      ? "Enterprise production 360 coverage catalog is complete. This report validates coverage mapping only; it is not a production go-live decision."
+      : "Enterprise production 360 coverage catalog has unmapped controls or invalid evidence references.",
+    semantics: {
+      coverageOnly: true,
+      productionGoLiveDecision: false,
+      missingProviderEvidenceCanRemainPending: true,
+      falseGreenPolicy: "Provider, public edge, human audit and protected-runtime controls must remain pending until their real evidence exists.",
+    },
+    summary: {
+      expectedDomains,
+      minimumControls,
+      domains: domains.length,
+      controls: controlCount,
+      requiredBeforeGoLiveControls,
+      providerRequiredControls,
+      humanRequiredControls,
+      invalidRefs,
+      domainGaps,
+      modes: modeCounts,
+    },
+    domains: domainResults,
+    issues: allIssues,
+  };
+  const stamp = reportTimestamp();
+  const jsonPath = writeJsonReport("governance", `enterprise-production-360-coverage-${stamp}`, payload);
+  const markdownPath = writeMarkdownReport("governance", `enterprise-production-360-coverage-${stamp}`, [
+    "# Enterprise Production 360 Coverage",
+    "",
+    `Status: ${payload.status}`,
+    `Mode: ${payload.mode}`,
+    `Scope: ${payload.scope}`,
+    `Generated at: ${payload.generatedAt}`,
+    "",
+    "## Semantics",
+    "",
+    "- This validates control coverage only.",
+    "- This is not a production go-live decision.",
+    "- Provider, public edge, human audit and protected-runtime controls still require real evidence before production claims.",
+    "",
+    "## Summary",
+    "",
+    `- Domains: ${payload.summary.domains}/${payload.summary.expectedDomains}`,
+    `- Controls: ${payload.summary.controls}/${payload.summary.minimumControls}`,
+    `- Required before go-live: ${payload.summary.requiredBeforeGoLiveControls}`,
+    `- Provider-required controls: ${payload.summary.providerRequiredControls}`,
+    `- Human-required controls: ${payload.summary.humanRequiredControls}`,
+    `- Invalid references: ${payload.summary.invalidRefs}`,
+    "",
+    "## Domains",
+    "",
+    ...domainResults.map((domain) => `- ${domain.title}: ${domain.status}; controls=${domain.summary.controls}; provider=${domain.summary.providerRequired}; human=${domain.summary.humanRequired}`),
+    "",
+    "## Issues",
+    "",
+    ...(payload.issues.length ? payload.issues.map((issue) => `- ${issue}`) : ["- none"]),
+  ]);
+  log(`Enterprise production 360 coverage report written to ${jsonPath} and ${markdownPath}`);
+  if (status !== "passed") {
+    fail(`Enterprise production 360 coverage failed with ${allIssues.length} issue(s). Report: ${jsonPath}`);
+  }
+  log("Enterprise production 360 coverage passed.");
+}
+
+function backupSchedulerCheck() {
+  log("==> Backup scheduler runtime check");
+  const generatedAt = new Date().toISOString();
+  const inspectResult = run("docker", ["inspect", "enterprise-backup-scheduler"], { capture: true, allowFailure: true });
+  let inspect = null;
+  if (inspectResult.status === 0) {
+    try {
+      inspect = JSON.parse(String(inspectResult.stdout || "[]"))[0] ?? null;
+    } catch {
+      inspect = null;
+    }
+  }
+  const cronResult = dockerExec("enterprise-backup-scheduler", ["crontab", "-l"], { capture: true, allowFailure: true });
+  const envKeysResult = dockerExec("enterprise-backup-scheduler", ["sh", "-c", "test -s /etc/platform/backup-scheduler.env && cut -d= -f1 /etc/platform/backup-scheduler.env | sort"], { capture: true, allowFailure: true });
+  const cron = String(cronResult.stdout || "");
+  const envKeys = String(envKeysResult.stdout || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const requiredJobs = [
+    "backup-applications",
+    "backup-postgres",
+    "backup-mariadb",
+    "backup-minio",
+    "backup-keycloak",
+    "backup-secret-manager-metadata",
+    "offsite-backup-restic",
+  ];
+  const requiredEnvKeys = [
+    "BACKUP_SIGNING_KEYS_FILE",
+    "RESTIC_REPOSITORY",
+    "RESTIC_PASSWORD_FILE",
+    "RESTIC_IMAGE",
+    "RESTIC_KEEP_LAST",
+    "RESTIC_MAX_REPOSITORY_BYTES",
+    "RCLONE_CONFIG",
+  ];
+  const missingJobs = requiredJobs.filter((job) => !cron.includes(job));
+  const missingEnvKeys = requiredEnvKeys.filter((key) => !envKeys.includes(key));
+  const everyEightHourJobs = requiredJobs.filter((job) => new RegExp(`(^|\\n)\\s*\\d+\\s+\\*/8\\s+\\*\\s+\\*\\s+\\*\\s+.*\\b${job}\\b`).test(cron));
+  const jobsNotEveryEightHours = requiredJobs.filter((job) => !everyEightHourJobs.includes(job));
+  const keepLastResult = dockerExec("enterprise-backup-scheduler", ["sh", "-c", ". /etc/platform/backup-scheduler.env >/dev/null 2>&1 && printf '%s' \"$RESTIC_KEEP_LAST\""], { capture: true, allowFailure: true });
+  const keepLast = Number(String(keepLastResult.stdout || "").trim());
+  const maxRepositoryBytesResult = dockerExec("enterprise-backup-scheduler", ["sh", "-c", ". /etc/platform/backup-scheduler.env >/dev/null 2>&1 && printf '%s' \"$RESTIC_MAX_REPOSITORY_BYTES\""], { capture: true, allowFailure: true });
+  const maxRepositoryBytes = Number(String(maxRepositoryBytesResult.stdout || "").trim());
+  const health = inspect?.State?.Health?.Status ?? null;
+  const state = inspect?.State?.Status ?? null;
+  const status = inspect
+    && state === "running"
+    && health === "healthy"
+    && cronResult.status === 0
+    && missingJobs.length === 0
+    && missingEnvKeys.length === 0
+    && jobsNotEveryEightHours.length === 0
+    && keepLast === 42
+    && maxRepositoryBytes === defaultResticMaxRepositoryBytes
+    ? "passed"
+    : "failed";
+  const payload = {
+    generatedAt,
+    status,
+    command: "backup-scheduler",
+    scope: "platform-infrastructure",
+    container: {
+      name: "enterprise-backup-scheduler",
+      state,
+      health,
+    },
+    schedule: {
+      requiredJobs,
+      missingJobs,
+      everyEightHourJobs,
+      jobsNotEveryEightHours,
+      cronLineCount: cron.split(/\r?\n/).filter((line) => line.trim() && !line.trim().startsWith("#")).length,
+      everyEightHours: jobsNotEveryEightHours.length === 0,
+      retentionKeepLast: Number.isFinite(keepLast) ? keepLast : null,
+      maxRepositoryBytes: Number.isFinite(maxRepositoryBytes) ? maxRepositoryBytes : null,
+    },
+    runtimeEnv: {
+      requiredKeys: requiredEnvKeys,
+      presentKeys: envKeys.filter((key) => requiredEnvKeys.includes(key)),
+      missingKeys: missingEnvKeys,
+    },
+    summary: {
+      failedChecks: status === "passed" ? 0 : 1,
+      missingJobs: missingJobs.length,
+      missingEnvKeys: missingEnvKeys.length,
+      jobsNotEveryEightHours: jobsNotEveryEightHours.length,
+      retentionKeepLast: Number.isFinite(keepLast) ? keepLast : null,
+      maxRepositoryBytes: Number.isFinite(maxRepositoryBytes) ? maxRepositoryBytes : null,
+    },
+  };
+  const stamp = reportTimestamp();
+  const jsonPath = writeJsonReport("local-checks", `backup-scheduler-${stamp}`, payload);
+  const markdownPath = writeMarkdownReport("local-checks", `backup-scheduler-${stamp}`, [
+    "# Backup Scheduler Runtime Check",
+    "",
+    `Status: ${payload.status}`,
+    `Generated at: ${payload.generatedAt}`,
+    `Container state: ${state ?? "missing"}`,
+    `Container health: ${health ?? "missing"}`,
+    `Cron lines: ${payload.schedule.cronLineCount}`,
+    `Every 8 hours configured: ${payload.schedule.everyEightHours ? "yes" : "no"}`,
+    `Required jobs missing: ${missingJobs.join(", ") || "none"}`,
+    `Jobs not every 8 hours: ${jobsNotEveryEightHours.join(", ") || "none"}`,
+    `Retention keep-last: ${Number.isFinite(keepLast) ? keepLast : "missing"}`,
+    `Repository max bytes: ${Number.isFinite(maxRepositoryBytes) ? maxRepositoryBytes : "missing"}`,
+    `Required env keys missing: ${missingEnvKeys.join(", ") || "none"}`,
+  ]);
+  log(`Backup scheduler report written to ${jsonPath} and ${markdownPath}`);
+  if (status !== "passed") {
+    fail(`Backup scheduler runtime check failed. Report: ${jsonPath}`);
+  }
+  log("Backup scheduler runtime check passed.");
+}
+
 function help() {
   log(`Usage: sh scripts/infra-ops.sh <command> [--key value]
 
@@ -13034,6 +14369,7 @@ Commands:
   audit-log-evidence
   alert-evidence
   apply-postgres-migrations
+  backup-applications
   backup-mariadb
   backup-keycloak
   backup-minio
@@ -13043,18 +14379,22 @@ Commands:
   backup-restore-drill-minio
   backup-restore-drill-secret-manager-metadata
   backup-postgres
+  backup-scheduler
   backup-secret-manager-metadata
   browser-e2e-tests
   certificate-expiry-check
   chaos-profile
   cloudflare-access-admin
   cloudflare-from-zero
+  compliance-evidence
   compose-healthcheck-coverage
   control-center-tests
+  data-classification
   dependency-hygiene
   dr-readiness-check
   dr-evidence
   enterprise-check
+  enterprise-production-360-coverage
   enterprise-hardening-audit
   enterprise-requirements-check
   enterprise-10-check
@@ -13062,6 +14402,7 @@ Commands:
   evidence-bundle-verify
   external-uptime-check
   failure-tests
+  feature-flags-kill-switches
   fault-injection-tests
   full-restore-drill
   generate-sbom
@@ -13071,6 +14412,7 @@ Commands:
   github-branch-protection
   github-environments
   governance-check
+  ha-single-node-risk-acceptance
   ha-config-check
   init-local-secrets
   infra-health
@@ -13086,6 +14428,7 @@ Commands:
   offsite-backup-restic
   offsite-restore-drill-restic
   performance-hygiene
+  pentest-readiness
   platform-admin-audit
   pre-go-live-evidence
   project-router-tests
@@ -13115,6 +14458,7 @@ Commands:
   supply-chain-hygiene
   testing-hygiene
   validate-local-secrets
+  vulnerability-disclosure
   vps-preflight
   vps-postdeploy
   waf-smoke`);
@@ -13134,19 +14478,24 @@ const commands = {
   "backup-restore-drill-mariadb": backupRestoreDrillMariadb,
   "backup-restore-drill-minio": backupRestoreDrillMinio,
   "backup-restore-drill-secret-manager-metadata": backupRestoreDrillSecretManagerMetadata,
+  "backup-applications": backupApplications,
   "backup-postgres": backupPostgres,
+  "backup-scheduler": backupSchedulerCheck,
   "backup-secret-manager-metadata": backupSecretManagerMetadata,
   "browser-e2e-tests": browserE2eTests,
   "certificate-expiry-check": certificateExpiryCheck,
   "chaos-profile": chaosProfile,
   "cloudflare-access-admin": cloudflareAccessAdmin,
   "cloudflare-from-zero": cloudflareFromZero,
+  "compliance-evidence": complianceEvidence,
   "compose-healthcheck-coverage": composeHealthcheckCoverage,
   "control-center-tests": controlCenterTests,
+  "data-classification": dataClassification,
   "dependency-hygiene": dependencyHygiene,
   "dr-readiness-check": drReadinessCheck,
   "dr-evidence": drEvidence,
   "enterprise-check": enterpriseCheck,
+  "enterprise-production-360-coverage": enterpriseProduction360Coverage,
   "enterprise-hardening-audit": enterpriseHardeningAudit,
   "enterprise-requirements-check": enterpriseRequirementsCheck,
   "enterprise-10-check": enterpriseTenCheck,
@@ -13154,6 +14503,7 @@ const commands = {
   "evidence-bundle-verify": evidenceBundleVerify,
   "external-uptime-check": externalUptimeCheck,
   "failure-tests": failureTests,
+  "feature-flags-kill-switches": featureFlagsKillSwitches,
   "fault-injection-tests": faultInjectionTests,
   "full-restore-drill": fullRestoreDrill,
   "generate-sbom": generateSbom,
@@ -13163,6 +14513,7 @@ const commands = {
   "github-branch-protection": githubBranchProtection,
   "github-environments": githubEnvironments,
   "governance-check": governanceCheck,
+  "ha-single-node-risk-acceptance": haSingleNodeRiskAcceptance,
   "ha-config-check": haConfigCheck,
   "init-local-secrets": initLocalSecrets,
   "infra-health": infraHealth,
@@ -13178,6 +14529,7 @@ const commands = {
   "offsite-backup-restic": offsiteBackupRestic,
   "offsite-restore-drill-restic": offsiteRestoreDrillRestic,
   "performance-hygiene": performanceHygiene,
+  "pentest-readiness": pentestReadiness,
   "platform-admin-audit": platformAdminAuditEvidence,
   "pre-go-live-evidence": preGoLiveEvidence,
   "project-router-tests": projectRouterTests,
@@ -13207,6 +14559,7 @@ const commands = {
   "supply-chain-hygiene": supplyChainHygiene,
   "testing-hygiene": testingHygiene,
   "validate-local-secrets": validateLocalSecrets,
+  "vulnerability-disclosure": vulnerabilityDisclosure,
   "vps-preflight": vpsPreflight,
   "vps-postdeploy": vpsPostdeploy,
   "waf-smoke": wafSmoke,

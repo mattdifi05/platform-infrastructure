@@ -48,6 +48,10 @@ Options:
                                         replace an existing Docker daemon config
                                         that is missing Platform hardening keys.
   --start-stack                         Run docker compose up for VPS stack.
+  --skip-production-preflight           Skip production-preflight during
+                                        postdeploy. Use only for LAN/single-host
+                                        orchestration evidence without a public
+                                        domain.
   --pre-go-live                         Run pre-go-live evidence during postdeploy.
   --include-restore-drill               Include full restore drill in pre-go-live.
   --include-offsite-restore-dry-run     Include Restic dry-run in pre-go-live.
@@ -101,6 +105,9 @@ while [ "$#" -gt 0 ]; do
       ;;
     --start-stack)
       START_STACK=1
+      ;;
+    --skip-production-preflight)
+      RUN_PRODUCTION_PREFLIGHT=0
       ;;
     --pre-go-live)
       RUN_PRE_GO_LIVE=1

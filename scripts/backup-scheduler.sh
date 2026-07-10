@@ -9,16 +9,26 @@ SOURCE_HOST_ROOT="${PROJECT_SOURCE_HOST_ROOT:-}"
 LOG_DIR="${BACKUP_SCHEDULER_LOG_DIR:-/var/log/platform}"
 CRON_FILE="${BACKUP_SCHEDULER_CRON_FILE:-/etc/crontabs/root}"
 ENV_FILE="${BACKUP_SCHEDULER_ENV_FILE:-/etc/platform/backup-scheduler.env}"
+JOBS_DIR="${BACKUP_SCHEDULER_JOBS_DIR:-/var/www/project-state/backup-jobs}"
+QUEUE_POLL_SECONDS="${BACKUP_SCHEDULER_QUEUE_POLL_SECONDS:-5}"
 RESTORE_DRILL_WEEKDAY="${BACKUP_SCHEDULER_RESTORE_DRILL_WEEKDAY:-0}"
 
 POSTGRES_BACKUP_AT="${BACKUP_SCHEDULER_POSTGRES_AT:-03:15}"
+APPLICATIONS_BACKUP_AT="${BACKUP_SCHEDULER_APPLICATIONS_AT:-03:05}"
 MARIADB_BACKUP_AT="${BACKUP_SCHEDULER_MARIADB_AT:-03:45}"
 MINIO_BACKUP_AT="${BACKUP_SCHEDULER_MINIO_AT:-04:00}"
 KEYCLOAK_BACKUP_AT="${BACKUP_SCHEDULER_KEYCLOAK_AT:-04:10}"
 SECRET_MANAGER_BACKUP_AT="${BACKUP_SCHEDULER_SECRET_MANAGER_AT:-04:20}"
+POSTGRES_BACKUP_CRON="${BACKUP_SCHEDULER_POSTGRES_CRON:-}"
+APPLICATIONS_BACKUP_CRON="${BACKUP_SCHEDULER_APPLICATIONS_CRON:-5 */8 * * *}"
+MARIADB_BACKUP_CRON="${BACKUP_SCHEDULER_MARIADB_CRON:-}"
+MINIO_BACKUP_CRON="${BACKUP_SCHEDULER_MINIO_CRON:-}"
+KEYCLOAK_BACKUP_CRON="${BACKUP_SCHEDULER_KEYCLOAK_CRON:-}"
+SECRET_MANAGER_BACKUP_CRON="${BACKUP_SCHEDULER_SECRET_MANAGER_CRON:-}"
 FULL_RESTORE_DRILL_AT="${BACKUP_SCHEDULER_FULL_RESTORE_DRILL_AT:-04:45}"
 RETENTION_AT="${BACKUP_SCHEDULER_RETENTION_AT:-05:15}"
 OFFSITE_BACKUP_AT="${BACKUP_SCHEDULER_OFFSITE_AT:-05:30}"
+OFFSITE_BACKUP_CRON="${BACKUP_SCHEDULER_OFFSITE_CRON:-}"
 
 ENABLE_OFFSITE="${BACKUP_SCHEDULER_ENABLE_OFFSITE:-false}"
 RUN_ON_START="${BACKUP_SCHEDULER_RUN_ON_START:-false}"
@@ -105,8 +115,16 @@ prepare_runtime_env() {
   write_env_var PROJECT_SOURCE_ROOT "$SOURCE_ROOT"
   write_env_var PROJECT_SOURCE_HOST_ROOT "$SOURCE_HOST_ROOT"
   write_env_var NODE_IMAGE "${NODE_IMAGE:-}"
+  write_env_var BACKUP_SIGNING_KEYS_FILE "${BACKUP_SIGNING_KEYS_FILE:-}"
+  write_env_var RESTIC_IMAGE "${RESTIC_IMAGE:-}"
   write_env_var RESTIC_REPOSITORY "${RESTIC_REPOSITORY:-}"
   write_env_var RESTIC_PASSWORD_FILE "${RESTIC_PASSWORD_FILE:-}"
+  write_env_var RESTIC_KEEP_LAST "${RESTIC_KEEP_LAST:-}"
+  write_env_var RESTIC_MAX_REPOSITORY_BYTES "${RESTIC_MAX_REPOSITORY_BYTES:-}"
+  write_env_var RCLONE_CONFIG "${RCLONE_CONFIG:-}"
+  write_env_var POSTGRES_BACKUP_DATABASE "${POSTGRES_BACKUP_DATABASE:-}"
+  write_env_var POSTGRES_OPS_SCHEMA "${POSTGRES_OPS_SCHEMA:-}"
+  write_env_var BACKUP_SCHEDULER_JOBS_DIR "$JOBS_DIR"
   write_env_var AWS_ACCESS_KEY_ID "${AWS_ACCESS_KEY_ID:-}"
   write_env_var AWS_SECRET_ACCESS_KEY "${AWS_SECRET_ACCESS_KEY:-}"
 }
@@ -136,6 +154,49 @@ append_daily() {
     "$schedule" "$(quote_shell_value "$INFRA_ROOT")" "$(quote_shell_value "$LOG_DIR")" "$command_value" "$(quote_shell_value "$log_file")" >> "$CRON_FILE"
 }
 
+validate_cron_expression() {
+  value="$1"
+  name="$2"
+  case "$value" in
+    *'
+'*) echo "Invalid $name: multiline cron expressions are not allowed." >&2; exit 1 ;;
+  esac
+  set -f
+  set -- $value
+  set +f
+  if [ "$#" -ne 5 ]; then
+    echo "Invalid $name: expected 5 cron fields." >&2
+    exit 1
+  fi
+  for field in "$@"; do
+    case "$field" in
+      *[!0-9*/,:-]*) echo "Invalid $name field: $field" >&2; exit 1 ;;
+    esac
+  done
+}
+
+append_cron_expression() {
+  expression="$1"
+  name="$2"
+  command_value="$3"
+  validate_cron_expression "$expression" "$name"
+  log_file="$LOG_DIR/$name.log"
+  printf '%s cd %s && mkdir -p %s && %s >> %s 2>&1\n' \
+    "$expression" "$(quote_shell_value "$INFRA_ROOT")" "$(quote_shell_value "$LOG_DIR")" "$command_value" "$(quote_shell_value "$log_file")" >> "$CRON_FILE"
+}
+
+append_scheduled() {
+  cron_value="$1"
+  time_value="$2"
+  name="$3"
+  command_value="$4"
+  if [ -n "$cron_value" ]; then
+    append_cron_expression "$cron_value" "$name" "$command_value"
+  else
+    append_daily "$time_value" "$name" "$command_value"
+  fi
+}
+
 append_weekly() {
   time_value="$1"
   name="$2"
@@ -150,6 +211,107 @@ node_ops() {
   printf 'BACKUP_SCHEDULER_ENV_FILE=%s sh %s --run %s' "$(quote_shell_value "$ENV_FILE")" "$(quote_shell_value "$INFRA_ROOT/scripts/backup-scheduler.sh")" "$1"
 }
 
+allowed_queue_command() {
+  case "$1" in
+    backup-applications|backup-postgres|backup-mariadb|backup-minio|backup-keycloak|backup-secret-manager-metadata|offsite-backup-restic|full-restore-drill|offsite-restore-drill-restic|restore-test-postgres|restore-test-mariadb|restore-test-minio|restore-test-keycloak|restore-test-secret-manager-metadata|dr-evidence|production-go-no-go)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+job_json_value() {
+  file="$1"
+  expression="$2"
+  node -e 'const fs=require("fs"); const [file, expression]=process.argv.slice(1); const job=JSON.parse(fs.readFileSync(file, "utf8")); const value=Function("job", `return ${expression}`)(job); process.stdout.write(value == null ? "" : String(value));' "$file" "$expression"
+}
+
+job_commands() {
+  file="$1"
+  node -e 'const fs=require("fs"); const file=process.argv[1]; const job=JSON.parse(fs.readFileSync(file, "utf8")); for (const item of Array.isArray(job.commands) ? job.commands : []) { const command = typeof item === "string" ? item : item && item.command; if (command) console.log(command); }' "$file"
+}
+
+update_job_status() {
+  file="$1"
+  status="$2"
+  summary="$3"
+  exit_code="${4:-}"
+  log_path="${5:-}"
+  node -e '
+const fs = require("fs");
+const [file, status, summary, exitCode, logPath] = process.argv.slice(1);
+const now = new Date().toISOString();
+const job = JSON.parse(fs.readFileSync(file, "utf8"));
+job.status = status;
+job.updatedAt = now;
+if (status === "running" && !job.startedAt) job.startedAt = now;
+if (status === "done" || status === "failed") job.finishedAt = now;
+job.resultSummary = summary;
+if (exitCode) job.exitCode = Number(exitCode);
+if (logPath) job.logPath = logPath;
+fs.writeFileSync(file, `${JSON.stringify(job, null, 2)}\n`, { mode: 0o600 });
+' "$file" "$status" "$summary" "$exit_code" "$log_path"
+}
+
+process_backup_job() {
+  queued_file="$1"
+  name="$(basename "$queued_file")"
+  mkdir -p "$JOBS_DIR/running" "$JOBS_DIR/done" "$JOBS_DIR/failed" "$LOG_DIR"
+  running_file="$JOBS_DIR/running/$name"
+  if ! mv "$queued_file" "$running_file" 2>/dev/null; then
+    return 0
+  fi
+  job_id="$(job_json_value "$running_file" 'job.id || "unknown"')"
+  log_file="$LOG_DIR/manual-backup-$job_id.log"
+  update_job_status "$running_file" "running" "Job preso in carico dal backup scheduler." "" "$log_file"
+  exit_code=0
+  commands="$(job_commands "$running_file")"
+  if [ -z "$commands" ]; then
+    exit_code=64
+    echo "No commands in job $job_id" >> "$log_file"
+  else
+    while IFS= read -r command_name || [ -n "$command_name" ]; do
+      [ -z "$command_name" ] && continue
+      if ! allowed_queue_command "$command_name"; then
+        echo "Rejected non allow-listed backup command: $command_name" >> "$log_file"
+        exit_code=64
+        break
+      fi
+      echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] running $command_name" >> "$log_file"
+      if BACKUP_SCHEDULER_ENV_FILE="$ENV_FILE" sh "$INFRA_ROOT/scripts/backup-scheduler.sh" --run "$command_name" >> "$log_file" 2>&1; then
+        echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] completed $command_name" >> "$log_file"
+      else
+        exit_code=$?
+        echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] failed $command_name with exit $exit_code" >> "$log_file"
+        break
+      fi
+    done <<EOF
+$commands
+EOF
+  fi
+  if [ "$exit_code" -eq 0 ]; then
+    update_job_status "$running_file" "done" "Job completato dal backup scheduler." "" "$log_file"
+    mv "$running_file" "$JOBS_DIR/done/$name"
+  else
+    update_job_status "$running_file" "failed" "Job fallito nel backup scheduler." "$exit_code" "$log_file"
+    mv "$running_file" "$JOBS_DIR/failed/$name"
+  fi
+}
+
+process_backup_job_queue() {
+  mkdir -p "$JOBS_DIR/queued" "$JOBS_DIR/running" "$JOBS_DIR/done" "$JOBS_DIR/failed"
+  while true; do
+    queued_file="$(find "$JOBS_DIR/queued" -maxdepth 1 -type f -name '*.json' 2>/dev/null | sort | head -n 1 || true)"
+    if [ -n "$queued_file" ]; then
+      process_backup_job "$queued_file"
+    else
+      sleep "$QUEUE_POLL_SECONDS"
+    fi
+  done
+}
+
 if [ "${1:-}" = "--run" ]; then
   shift
   if [ "$#" -lt 1 ]; then
@@ -161,25 +323,25 @@ if [ "${1:-}" = "--run" ]; then
   exec node "$INFRA_ROOT/scripts/infra-ops.mjs" "$@"
 fi
 
-mkdir -p "$LOG_DIR" "$(dirname "$CRON_FILE")"
+mkdir -p "$LOG_DIR" "$(dirname "$CRON_FILE")" "$JOBS_DIR/queued" "$JOBS_DIR/running" "$JOBS_DIR/done" "$JOBS_DIR/failed"
 prepare_runtime_env
 : > "$CRON_FILE"
-{
-  printf 'SHELL=/bin/sh\n'
-  printf 'PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n'
-  printf '\n'
-} >> "$CRON_FILE"
 
-append_daily "$POSTGRES_BACKUP_AT" "postgres-backup" "$(node_ops backup-postgres)"
-append_daily "$MARIADB_BACKUP_AT" "mariadb-backup" "$(node_ops backup-mariadb)"
-append_daily "$MINIO_BACKUP_AT" "minio-backup" "$(node_ops backup-minio)"
-append_daily "$KEYCLOAK_BACKUP_AT" "keycloak-backup" "$(node_ops backup-keycloak)"
-append_daily "$SECRET_MANAGER_BACKUP_AT" "secret-manager-backup" "$(node_ops backup-secret-manager-metadata)"
+append_scheduled "$APPLICATIONS_BACKUP_CRON" "$APPLICATIONS_BACKUP_AT" "applications-backup" "$(node_ops backup-applications)"
+append_scheduled "$POSTGRES_BACKUP_CRON" "$POSTGRES_BACKUP_AT" "postgres-backup" "$(node_ops backup-postgres)"
+append_scheduled "$MARIADB_BACKUP_CRON" "$MARIADB_BACKUP_AT" "mariadb-backup" "$(node_ops backup-mariadb)"
+append_scheduled "$MINIO_BACKUP_CRON" "$MINIO_BACKUP_AT" "minio-backup" "$(node_ops backup-minio)"
+append_scheduled "$KEYCLOAK_BACKUP_CRON" "$KEYCLOAK_BACKUP_AT" "keycloak-backup" "$(node_ops backup-keycloak)"
+append_scheduled "$SECRET_MANAGER_BACKUP_CRON" "$SECRET_MANAGER_BACKUP_AT" "secret-manager-backup" "$(node_ops backup-secret-manager-metadata)"
 append_daily "$RETENTION_AT" "postgres-retention" "$(node_ops prune-postgres-backups)"
 append_weekly "$FULL_RESTORE_DRILL_AT" "full-restore-drill" "$(node_ops full-restore-drill)"
 
 if [ "$ENABLE_OFFSITE" = "true" ] || [ "$ENABLE_OFFSITE" = "1" ]; then
-  append_daily "$OFFSITE_BACKUP_AT" "restic-offsite" "$(node_ops offsite-backup-restic)"
+  if [ -n "$OFFSITE_BACKUP_CRON" ]; then
+    append_cron_expression "$OFFSITE_BACKUP_CRON" "restic-offsite" "$(node_ops offsite-backup-restic)"
+  else
+    append_daily "$OFFSITE_BACKUP_AT" "restic-offsite" "$(node_ops offsite-backup-restic)"
+  fi
 fi
 
 echo "Installed Platform backup scheduler crontab:"
@@ -192,11 +354,14 @@ fi
 if [ "$RUN_ON_START" = "true" ] || [ "$RUN_ON_START" = "1" ]; then
   cd "$INFRA_ROOT"
   load_runtime_env
+  node "$INFRA_ROOT/scripts/infra-ops.mjs" backup-applications
   node "$INFRA_ROOT/scripts/infra-ops.mjs" backup-postgres
   node "$INFRA_ROOT/scripts/infra-ops.mjs" backup-mariadb
   node "$INFRA_ROOT/scripts/infra-ops.mjs" backup-minio
   node "$INFRA_ROOT/scripts/infra-ops.mjs" backup-keycloak
   node "$INFRA_ROOT/scripts/infra-ops.mjs" backup-secret-manager-metadata
 fi
+
+process_backup_job_queue &
 
 exec crond -f -l 8 -L "$LOG_DIR/backup-scheduler.log"

@@ -6,7 +6,6 @@ export const controlCenterComponents = [
   "ProjectActions",
   "ProjectFileBrowser",
   "DatabaseInventory",
-  "ActivityTable",
   "ResourceUsageTable",
   "MetricTile",
   "StatusPill",
@@ -23,12 +22,18 @@ export const controlCenterScriptEntrypoints = [
   "/assets/control-center/control-center.js",
 ];
 
+const controlCenterAssetVersion = process.env.CONTROL_CENTER_ASSET_VERSION || "20260704-0025";
+
+function versionedAssetHref(href) {
+  return `${href}${href.includes("?") ? "&" : "?"}v=${encodeURIComponent(controlCenterAssetVersion)}`;
+}
+
 export function controlCenterStylesheetLinks() {
-  return controlCenterCssEntrypoints.map((href) => `<link rel="stylesheet" href="${href}">`).join("\n");
+  return controlCenterCssEntrypoints.map((href) => `<link rel="stylesheet" href="${versionedAssetHref(href)}">`).join("\n");
 }
 
 export function controlCenterScriptTags() {
-  return controlCenterScriptEntrypoints.map((src) => `<script defer src="${src}"></script>`).join("\n");
+  return controlCenterScriptEntrypoints.map((src) => `<script defer src="${versionedAssetHref(src)}"></script>`).join("\n");
 }
 
 export function controlCenterUiContract(controlCenterPackage = {}) {
@@ -61,7 +66,7 @@ export function controlCenterUiContract(controlCenterPackage = {}) {
       "solid color surfaces",
       "dynamic navigation without full page reloads",
       "operations-first information architecture",
-      "project actions, file inventory, database inventory, activity and resources",
+      "project actions, file inventory, database inventory and backups",
       "rounded-md surfaces capped at 8px for operational controls",
       "subtle borders and surface contrast instead of decorative effects",
       "accessible focus rings through box-shadow",

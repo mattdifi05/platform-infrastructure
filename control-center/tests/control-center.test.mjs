@@ -17,6 +17,7 @@ import assert from "node:assert/strict";
 const infraRoot = path.resolve(import.meta.dirname, "..", "..");
 const testRoot = path.join(infraRoot, ".tmp", "control-center-tests", randomUUID());
 const projectsRoot = path.join(testRoot, "projects");
+const backupsRoot = path.join(testRoot, "backups");
 const stateDir = path.join(testRoot, "state");
 const stateFile = path.join(stateDir, "projects.json");
 const auditFile = path.join(stateDir, "audit.jsonl");
@@ -26,10 +27,14 @@ const domainsFile = path.join(stateDir, "domains.json");
 const databasesFile = path.join(stateDir, "databases.json");
 const storageBucketsFile = path.join(stateDir, "storage-buckets.json");
 const sensitiveMaterialsFile = path.join(stateDir, "sensitive-materials.json");
+const vaultFile = path.join(stateDir, "secret-vault.json");
+const vaultKeyFile = path.join(stateDir, "vault.key");
+const existingSecretsDir = path.join(testRoot, "existing-secrets");
 const workerJobsFile = path.join(stateDir, "worker-jobs.json");
 const identityAccessFile = path.join(stateDir, "identity-access.json");
 const deploymentsFile = path.join(stateDir, "deployments.jsonl");
 const backupRecordsFile = path.join(stateDir, "backups.jsonl");
+const backupJobsDir = path.join(stateDir, "backup-jobs");
 const resourceLimitsFile = path.join(stateDir, "resource-limits.json");
 const securityPoliciesFile = path.join(stateDir, "security-policies.json");
 const alertsFile = path.join(stateDir, "alerts.json");
@@ -39,6 +44,7 @@ const settingsFile = path.join(stateDir, "settings.json");
 const webspacesFile = path.join(stateDir, "webspaces.json");
 const dockerStatsFile = path.join(stateDir, "docker-stats.json");
 const statusRunsFile = path.join(stateDir, "status-runs.jsonl");
+const longExistingVaultValue = `existing-long-provider-secret-${"x".repeat(260)}`;
 
 test("Admin Control Center local foundation", async (t) => {
   prepareFixture();
@@ -49,8 +55,10 @@ test("Admin Control Center local foundation", async (t) => {
       ...process.env,
       CONTROL_CENTER_PORT: String(port),
       CONTROL_CENTER_ENV: "local",
+      CONTROL_CENTER_DATABASE_LIVE_APPLY: "false",
       CONTROL_CENTER_DISCOVER_HOSTED_PROJECTS: "true",
       CONTROL_CENTER_DOCS_ROOT: infraRoot,
+      CONTROL_CENTER_BACKUP_ROOT: backupsRoot,
       PROJECTS_ROOT: projectsRoot,
       PROJECT_STATE_FILE: stateFile,
       PROJECT_AUDIT_FILE: auditFile,
@@ -60,10 +68,14 @@ test("Admin Control Center local foundation", async (t) => {
       PROJECT_DATABASES_FILE: databasesFile,
       PROJECT_STORAGE_BUCKETS_FILE: storageBucketsFile,
       PROJECT_SENSITIVE_MATERIALS_FILE: sensitiveMaterialsFile,
+      PROJECT_VAULT_FILE: vaultFile,
+      CONTROL_CENTER_VAULT_KEY_FILE: vaultKeyFile,
+      CONTROL_CENTER_EXISTING_SECRETS_DIR: existingSecretsDir,
       PROJECT_WORKER_JOBS_FILE: workerJobsFile,
       PROJECT_IDENTITY_ACCESS_FILE: identityAccessFile,
       PROJECT_DEPLOYMENTS_FILE: deploymentsFile,
       PROJECT_BACKUP_RECORDS_FILE: backupRecordsFile,
+      PROJECT_BACKUP_JOBS_DIR: backupJobsDir,
       PROJECT_RESOURCE_LIMITS_FILE: resourceLimitsFile,
       PROJECT_SECURITY_POLICIES_FILE: securityPoliciesFile,
       PROJECT_ALERTS_FILE: alertsFile,
@@ -97,28 +109,62 @@ test("Admin Control Center local foundation", async (t) => {
 
   const html = await getText(`${baseUrl}/`);
   assert.match(html, /Admin Control Center/);
+  assert.match(html, /<body data-cc-theme="light" data-cc-preloading="true">/);
+  assert.match(html, /class="cc-preload-screen"/);
+  assert.match(html, /Caricamento portale/);
   assert.match(html, /ops-shell/);
   assert.match(html, /Stato/);
   assert.match(html, /Applicazioni/);
-  assert.match(html, /Attività/);
-  assert.match(html, /Risorse/);
+  assert.doesNotMatch(html, /Attività/);
+  assert.doesNotMatch(html, /section=activity/);
+  assert.doesNotMatch(html, />Risorse<\/a>/);
   assert.doesNotMatch(html, /href="\/\?section=files"/);
   assert.doesNotMatch(html, /href="\/\?section=databases"/);
   assert.match(html, /NO GO LIVE/);
-  assert.match(html, /Controlli go live/);
-  assert.match(html, /data-status-tabs/);
-  assert.match(html, /data-status-tab="all"/);
-  assert.match(html, /data-status-tab="ok"/);
-  assert.match(html, /data-status-tab="fix"/);
-  assert.match(html, /data-status-tab="missing"/);
+  assert.match(html, /Esecuzione/);
+  assert.match(html, /data-status-run-form/);
+  assert.match(html, /<details class="ops-status-runner" data-status-run-console>/);
+  assert.doesNotMatch(html, /<details class="ops-status-runner"[^>]*open/);
+  assert.doesNotMatch(html, /ops-status-section-list/);
+  assert.match(html, /data-status-section-detail=/);
+  assert.doesNotMatch(html, /data-status-tabs/);
+  assert.doesNotMatch(html, /data-status-tab="all"/);
+  assert.match(html, /data-ops-nav-group="status" data-ops-nav-expanded="true" data-ops-nav-has-active-child="true" data-ops-nav-locked="true"/);
+  assert.match(html, /<span class="ops-nav-pill" aria-hidden="true"><\/span>/);
+  assert.match(html, /id="ops-nav-panel-status" aria-hidden="false"/);
+  assert.match(html, /data-ops-nav-toggle/);
+  assert.match(html, /aria-label="Sezione attuale: Stato" aria-expanded="true" aria-controls="ops-nav-panel-status" aria-disabled="true"/);
+  assert.match(html, /aria-label="Apri Applicazioni" aria-expanded="false" aria-controls="ops-nav-panel-projects"/);
+  assert.match(html, /<button class="ops-nav-main" type="button" data-ops-nav-toggle aria-label="Sezione attuale: Stato"/);
+  assert.doesNotMatch(html, /<a class="ops-nav-main/);
+  assert.match(html, /data-ops-nav-group="projects" data-ops-nav-expanded="false" data-ops-nav-has-active-child="false" data-ops-nav-locked="false"/);
+  assert.match(html, /id="ops-nav-panel-projects" aria-hidden="true"/);
+  assert.doesNotMatch(html, /data-ops-nav-group="backups"/);
+  assert.doesNotMatch(html, /ops-nav-panel-backups/);
+  assert.match(html, /href="\/\?section=status&amp;statusCategory=domain-edge#status-run"/);
+  assert.match(html, /class="ops-nav-subitem active [^"]*" aria-current="page" data-status-category-card="go-live"[^>]*href="\/\?section=status&amp;statusCategory=go-live#status-run"/);
+  assert.match(html, /data-status-category-card="go-live"/);
+  assert.match(html, /statusCategory=domain-edge/);
+  assert.match(html, /Esegui sezione/);
+  assert.match(html, /name="scope" value="category"/);
+  assert.match(html, /name="scope" value="check"/);
+  assert.match(html, /data-status-run-inline/);
   assert.match(html, /Avvia test reali/);
   assert.match(html, /action="\/actions\/status-check"/);
-  assert.match(html, /vps-host-readiness/);
-  assert.match(html, /cloudflare-access-admin/);
-  assert.match(html, /github-actions-run-evidence/);
-  assert.match(html, /full-restore-drill/);
-  assert.match(html, /production-readiness-live/);
-  assert.match(html, /production-readiness-restore-tested/);
+  assert.match(html, /data-status-section-detail="go-live"/);
+  assert.doesNotMatch(html, /full-restore-drill/);
+  const domainStatusHtml = await getText(`${baseUrl}/?section=status&statusCategory=domain-edge`);
+  assert.match(domainStatusHtml, /data-status-section-detail="domain-edge"/);
+  assert.match(domainStatusHtml, /portal-through-waf|cloudflare-access-admin/);
+  assert.doesNotMatch(domainStatusHtml, /full-restore-drill/);
+  const backupStatusHtml = await getText(`${baseUrl}/?section=status&statusCategory=backup-dr`);
+  assert.match(backupStatusHtml, /data-status-section-detail="backup-dr"/);
+  assert.match(backupStatusHtml, /full-restore-drill|Backup\/restore off-site/);
+  assert.doesNotMatch(backupStatusHtml, /cloudflare-access-admin/);
+  const githubStatusHtml = await getText(`${baseUrl}/?section=status&statusCategory=github-release`);
+  assert.match(githubStatusHtml, /data-status-section-detail="github-release"/);
+  assert.match(githubStatusHtml, /github-actions-run-evidence|GitHub Actions runtime/);
+  assert.match(backupStatusHtml, /production-readiness-restore-tested/);
   assert.doesNotMatch(html, /Non pronto per andare online|Pronto per andare online/);
   assert.doesNotMatch(html, /Riepilogo go live/);
   assert.doesNotMatch(html, /Verdetto/);
@@ -133,14 +179,26 @@ test("Admin Control Center local foundation", async (t) => {
   assert.doesNotMatch(html, /Control Center local UI contract/);
   assert.doesNotMatch(html, /Simple Mode operational MVP/);
   assert.doesNotMatch(html, /Advanced Mode enterprise sections/);
-  assert.match(html, /Passati/);
-  assert.match(html, /Non passati/);
+  assert.match(html, /Go live e decisione/);
+  assert.match(html, /<details class="ops-status-check-row/);
+  assert.match(html, /ops-status-check-details/);
+  assert.doesNotMatch(html, /ops-status-check-copy/);
   assert.match(html, /\/assets\/control-center\/control-center\.css/);
   assert.match(html, /\/assets\/control-center\/control-center\.js/);
   assert.match(html, /cc-app-shell/);
   assert.match(html, /ops-topbar/);
   assert.match(html, /ops-sidebar/);
   assert.match(html, /ops-nav/);
+  assert.match(html, /data-ops-nav-group="status"/);
+  assert.match(html, /ops-nav-panel-status/);
+  assert.match(html, /data-ops-nav-group="projects" data-ops-nav-expanded="false"/);
+  assert.match(html, /id="ops-nav-panel-projects" aria-hidden="true"/);
+  assert.match(html, /href="\/\?section=projects&amp;project=node-demo"/);
+  assert.doesNotMatch(html, /class="ops-nav-main[^"]*"[^>]*aria-current="page"/);
+  assert.match(html, /class="ops-nav-subitem active [^"]*" aria-current="page" data-status-category-card="go-live"/);
+  assert.doesNotMatch(html, /class="ops-nav-main[^"]*"[^>]*href=/);
+  assert.match(html, /data-status-section-detail="go-live"/);
+  assert.doesNotMatch(html, /ops-status-pill/);
   assert.doesNotMatch(html, /class="cc-tabs"/);
   assert.doesNotMatch(html, /Open navigation/);
   assert.doesNotMatch(html, /Search Control Center/);
@@ -174,13 +232,158 @@ test("Admin Control Center local foundation", async (t) => {
   assert.match(localStyles, /--cc-surface-raised/);
   assert.match(localStyles, /--cc-line/);
   assert.match(localStyles, /\.cc-app-shell/);
+  assert.match(localStyles, /body\[data-cc-preloading="true"\] \.cc-app-shell\s*\{[^}]*visibility:\s*hidden/s);
+  assert.match(localStyles, /\.cc-preload-screen\s*\{[^}]*position:\s*fixed/s);
+  assert.match(localStyles, /body\[data-cc-preloading="true"\] \.cc-preload-screen\s*\{[^}]*display:\s*flex/s);
+  assert.match(localStyles, /@keyframes ccPreloadSpin/);
   assert.match(localStyles, /\.ops-shell/);
   assert.match(localStyles, /\.ops-sidebar/);
+  assert.match(localStyles, /\.ops-sidebar\s*\{[^}]*overflow-anchor:\s*none/s);
   assert.match(localStyles, /\.ops-nav/);
+  assert.match(localStyles, /\.ops-nav\s*\{[^}]*overflow-anchor:\s*none/s);
+  assert.match(localStyles, /\.ops-nav-group/);
+  assert.match(localStyles, /\.ops-nav-sublist/);
+  assert.match(localStyles, /\.ops-nav-subitem/);
+  assert.match(localStyles, /\.ops-nav-subdot\.good/);
+  assert.match(localStyles, /\.ops-nav-row/);
+  assert.match(localStyles, /\.ops-nav-chevron/);
+  assert.match(localStyles, /\.ops-nav-chevron \.fa-icon\s*\{[^}]*transform:\s*rotate\(-90deg\)/s);
+  assert.match(localStyles, /\.ops-nav-chevron \.fa-icon\s*\{[^}]*transition:\s*transform 220ms var\(--cc-ease\)/s);
+  assert.match(localStyles, /\.ops-nav-group\.expanded \.ops-nav-chevron \.fa-icon\s*\{[^}]*transform:\s*rotate\(0deg\)/s);
+  assert.doesNotMatch(localStyles, /\.section-projects \.ops-nav\s*\{/);
+  assert.match(localStyles, /background:\s*#bfdbfe/);
+  assert.match(localStyles, /\.ops-nav-pill\s*\{[^}]*background:\s*#bfdbfe/s);
+  assert.match(localStyles, /\.ops-nav-pill\s*\{[^}]*border-radius:\s*999px/s);
+  assert.match(localStyles, /\.ops-nav-pill\s*\{[^}]*opacity:\s*1/s);
+  assert.match(localStyles, /\.ops-nav-pill\s*\{[^}]*transform:\s*translate3d\(0, 0, 0\)/s);
+  assert.match(localStyles, /\.ops-nav-pill\s*\{[^}]*transition:\s*transform 320ms var\(--cc-ease\), width 320ms var\(--cc-ease\), height 320ms var\(--cc-ease\)/s);
+  assert.match(localStyles, /\.ops-nav-pill\s*\{[^}]*will-change:\s*transform,\s*width,\s*height/s);
+  assert.match(localStyles, /\.ops-nav\[data-nav-pill-instant="true"\] \.ops-nav-pill\s*\{[^}]*transition:\s*none/s);
+  assert.doesNotMatch(localStyles, /\.ops-nav\[data-nav-pill-ready="true"\] \.ops-nav-pill\s*\{[^}]*opacity/s);
+  assert.doesNotMatch(localStyles, /\.ops-nav-pill\s*\{[^}]*transition:[^}]*opacity/s);
+  assert.doesNotMatch(localStyles, /\.ops-nav-pill\s*\{[^}]*will-change:[^}]*opacity/s);
+  assert.doesNotMatch(localStyles, /\.ops-nav::before\s*\{/);
+  assert.doesNotMatch(localStyles, /data-nav-indicator/);
+  assert.match(localStyles, /\.ops-nav\[data-ops-nav-restoring="true"\] \.ops-nav-sublist\s*\{[^}]*transition:\s*none/s);
+  assert.doesNotMatch(localStyles, /data-ops-nav-has-active-child="true"\]\s*>\s*\.ops-nav-row\s*>\s*\.ops-nav-main/);
+  assert.doesNotMatch(localStyles, /\.ops-nav-subitem::before/);
+  assert.doesNotMatch(localStyles, /data-nav-pill-fade/);
+  assert.doesNotMatch(localStyles, /@keyframes opsNavPillFadeIn/);
+  assert.match(localStyles, /\.ops-nav a,\s*\.ops-nav-main\s*\{[^}]*border:\s*0/s);
+  assert.match(localStyles, /\.ops-nav a,\s*\.ops-nav-main\s*\{[^}]*border-radius:\s*999px/s);
+  assert.match(localStyles, /\.ops-nav a,\s*\.ops-nav-main\s*\{[^}]*min-height:\s*48px/s);
+  assert.match(localStyles, /\.ops-nav-subitem\s*\{[^}]*min-height:\s*44px/s);
+  assert.match(localStyles, /\.ops-nav-subitem\s*\{[^}]*padding:\s*0 12px/s);
+  assert.match(localStyles, /\.ops-nav a\.active\s*\{[^}]*color:\s*#174ea6/s);
+  assert.match(localStyles, /\.ops-nav-sublist\s*\{[^}]*box-sizing:\s*border-box/s);
+  assert.match(localStyles, /\.ops-nav-sublist\s*\{[^}]*padding:\s*2px 0 4px 18px/s);
+  assert.match(localStyles, /\.ops-nav-sublist\s*\{[^}]*transition:\s*max-height 260ms var\(--cc-ease\), opacity 200ms var\(--cc-ease\)/s);
+  assert.doesNotMatch(localStyles, /\.ops-nav-sublist\s*\{[^}]*transition:[^}]*padding/s);
+  assert.match(localStyles, /\.ops-nav-group\.expanded \.ops-nav-sublist\s*\{[^}]*max-height:\s*var\(--ops-nav-panel-height\)/s);
+  assert.match(localStyles, /\.ops-nav-group\.expanded \.ops-nav-sublist\s*\{[^}]*overflow:\s*hidden/s);
+  assert.doesNotMatch(localStyles, /\.ops-nav-group\.expanded \.ops-nav-sublist\s*\{[^}]*padding/s);
+  assert.doesNotMatch(localStyles, /\.ops-nav:not\(\[data-nav-pill-ready="true"\]\) a\.active/);
+  assert.doesNotMatch(localStyles, /\.ops-nav a:hover\s*\{/);
+  assert.doesNotMatch(localStyles, /\.ops-nav a\.active:hover\s*\{/);
   assert.match(localStyles, /\.ops-table/);
   assert.match(localStyles, /\.ops-metrics/);
-  assert.match(localStyles, /\.ops-project-board/);
-  assert.match(localStyles, /\.ops-resource-summary/);
+  assert.match(localStyles, /\.ops-project-list/);
+  assert.match(localStyles, /\.ops-project-row/);
+  assert.doesNotMatch(localStyles, /\.ops-project-row:hover/);
+  assert.doesNotMatch(localStyles, /\.ops-project-row-host a:hover/);
+  assert.match(localStyles, /\.ops-project-state-dot/);
+  assert.match(localStyles, /\.ops-project-state-dot\.good/);
+  assert.match(localStyles, /\.ops-project-state-dot\.warn/);
+  assert.match(localStyles, /\.ops-project-state-dot\.bad/);
+  assert.match(localStyles, /\.ops-page\s*\{[^}]*align-content:\s*start/s);
+  assert.match(localStyles, /\.ops-section\s*\{[^}]*grid-auto-rows:\s*max-content/s);
+  assert.match(localStyles, /\.ops-project-detail-screen\s*\{[^}]*align-content:\s*start/s);
+  assert.match(localStyles, /\.ops-shell\s*\{[^}]*--ops-sidebar-width:\s*264px/s);
+  assert.match(localStyles, /\.ops-layout\s*\{[^}]*padding-left:\s*var\(--ops-sidebar-width\)/s);
+  assert.match(localStyles, /\.ops-sidebar\s*\{[^}]*background:\s*transparent/s);
+  assert.match(localStyles, /\.ops-sidebar\s*\{[^}]*position:\s*fixed/s);
+  assert.match(localStyles, /\.ops-sidebar\s*\{[^}]*width:\s*var\(--ops-sidebar-width\)/s);
+  assert.match(localStyles, /\.ops-sidebar\s*\{[^}]*overflow-y:\s*auto/s);
+  assert.match(localStyles, /\.ops-sidebar\s*\{[^}]*scrollbar-width:\s*thin/s);
+  assert.match(localStyles, /scrollbar-color:\s*rgba\(30,\s*41,\s*59,\s*\.18\)\s+transparent/);
+  assert.match(localStyles, /\.ops-sidebar::-webkit-scrollbar\s*\{[^}]*width:\s*5px/s);
+  assert.match(localStyles, /\.ops-status-workspace\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)/s);
+  assert.doesNotMatch(localStyles, /\.ops-status-section-list/);
+  assert.doesNotMatch(localStyles, /\.ops-status-section-row\.active/);
+  assert.match(localStyles, /\.ops-status-check-summary\s*\{[^}]*grid-template-columns:\s*12px\s*minmax\(0,\s*1fr\)\s*auto\s*auto/s);
+  assert.match(localStyles, /\.ops-status-check-run/);
+  assert.match(localStyles, /padding-top:\s*190px/);
+  assert.match(localStyles, /padding-top:\s*236px/);
+  assert.match(localStyles, /\.ops-project-row-host a/);
+  assert.match(localStyles, /white-space:\s*nowrap/);
+  assert.match(localStyles, /\.ops-project-detail-screen/);
+  assert.doesNotMatch(localStyles, /\.ops-project-detail-back/);
+  assert.match(localStyles, /\.ops-file-explorer/);
+  assert.match(localStyles, /\.ops-file-grid/);
+  assert.match(localStyles, /\.ops-file-workspace\s*\{[^}]*height:\s*clamp\(260px,\s*calc\(100vh - 380px\),\s*460px\)/s);
+  assert.match(localStyles, /\.ops-file-grid\s*\{[^}]*height:\s*100%/s);
+  assert.match(localStyles, /\.ops-project-detail-focus\s*\{[^}]*align-items:\s*stretch/s);
+  assert.match(localStyles, /\.ops-file-explorer\s*\{[^}]*background:\s*#ffffff/s);
+  assert.match(localStyles, /\.ops-file-search\s*\{[^}]*background:\s*#f1f5f9/s);
+  assert.match(localStyles, /\.ops-file-search\s*\{[^}]*width:\s*clamp\(150px,\s*16vw,\s*230px\)/s);
+  assert.match(localStyles, /\.ops-file-search input\s*\{[^}]*border:\s*0/s);
+  assert.match(localStyles, /\.ops-file-search input\s*\{[^}]*box-shadow:\s*none/s);
+  assert.match(localStyles, /\.ops-file-search input::-webkit-search-cancel-button/);
+  assert.match(localStyles, /\.ops-file-commandbar \[data-file-refresh-action\]\s*\{[^}]*background:\s*#f1f5f9/s);
+  assert.match(localStyles, /\.ops-file-commandbar\s*\{[^}]*min-width:\s*0/s);
+  assert.match(localStyles, /\.ops-file-workspace\s*\{[^}]*background:\s*#f1f5f9/s);
+  assert.match(localStyles, /\.ops-file-tile\[hidden\]\s*\{[^}]*display:\s*none/s);
+  assert.match(localStyles, /\.ops-project-detail-focus\s*\{[^}]*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)/s);
+  assert.match(localStyles, /#project-backups,\s*#project-databases\s*\{[^}]*align-self:\s*stretch/s);
+  assert.match(localStyles, /#project-backups,\s*#project-databases\s*\{[^}]*grid-template-rows:\s*auto minmax\(0,\s*1fr\)/s);
+  assert.match(localStyles, /#project-backups,\s*#project-databases\s*\{[^}]*height:\s*clamp\(380px,\s*44vh,\s*560px\)/s);
+  assert.match(localStyles, /\.ops-project-backup-list\s*\{[^}]*background:\s*#f1f5f9/s);
+  assert.match(localStyles, /\.ops-project-backup-list\s*\{[^}]*height:\s*100%/s);
+  assert.match(localStyles, /\.ops-project-backup-list\s*\{[^}]*max-height:\s*100%/s);
+  assert.match(localStyles, /\.ops-project-backup-row\s*\{[^}]*background:\s*#ffffff/s);
+  assert.match(localStyles, /\.ops-project-backup-row > span:last-child\s*\{[^}]*min-width:\s*0/s);
+  assert.match(localStyles, /\.ops-button,\s*\.ops-icon-button\s*\{[^}]*border-radius:\s*999px/s);
+  assert.match(localStyles, /\.ops-project-backup-head-form\s*\{[^}]*flex:\s*0 0 auto/s);
+  assert.match(localStyles, /\.ops-project-backup-head-form \.ops-button\s*\{[^}]*min-height:\s*38px/s);
+  assert.match(localStyles, /\.ops-project-backup-restore-form\s*\{[^}]*align-items:\s*center/s);
+  assert.match(localStyles, /\.ops-project-backup-restore-form\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\) minmax\(150px,\s*\.45fr\) auto/s);
+  assert.match(localStyles, /\.ops-project-select\s*\{[^}]*display:\s*block/s);
+  assert.match(localStyles, /\.ops-project-select select\s*\{[^}]*border-radius:\s*999px/s);
+  assert.match(localStyles, /\.ops-project-select select\s*\{[^}]*-webkit-appearance:\s*none/s);
+  assert.match(localStyles, /\.ops-project-select select\s*\{[^}]*appearance:\s*none/s);
+  assert.match(localStyles, /\.ops-project-select select\s*\{[^}]*padding:\s*0 38px 0 14px/s);
+  assert.match(localStyles, /\.ops-project-select-chevron\s*\{[^}]*position:\s*absolute/s);
+  assert.match(localStyles, /\.ops-project-select-chevron\s*\{[^}]*right:\s*14px/s);
+  assert.match(localStyles, /\.ops-project-select-chevron\s*\{[^}]*top:\s*50%/s);
+  assert.match(localStyles, /\.ops-project-select-chevron \.fa-icon\s*\{[^}]*height:\s*12px/s);
+  assert.match(localStyles, /\.ops-project-backup-restore-form \.ops-project-select select\s*\{[^}]*background:\s*#f1f5f9/s);
+  assert.doesNotMatch(localStyles, /ops-project-backup-fixed-scope/);
+  assert.match(localStyles, /\.ops-project-database-list\s*\{[^}]*background:\s*transparent/s);
+  assert.match(localStyles, /\.ops-project-database-list\s*\{[^}]*height:\s*100%/s);
+  assert.match(localStyles, /\.ops-project-database-list\s*\{[^}]*max-height:\s*100%/s);
+  assert.match(localStyles, /\.ops-project-database-list\s*\{[^}]*overflow:\s*auto/s);
+  assert.match(localStyles, /\.ops-project-database-list::-webkit-scrollbar[\s\S]*width:\s*3px/s);
+  assert.match(localStyles, /\.ops-project-database-list\s*\{[^}]*padding:\s*0/s);
+  assert.match(localStyles, /\.ops-project-database-row\s*\{[^}]*background:\s*#f1f5f9/s);
+  assert.match(localStyles, /\.ops-project-database-edit-form\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1\.1fr\) minmax\(0,\s*\.9fr\) auto/s);
+  assert.match(localStyles, /\.ops-project-database-edit-form \+ \.ops-project-database-edit-form\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)\s+auto/s);
+  assert.match(localStyles, /\.ops-project-database-create-form\s*\{[^}]*background:\s*#f1f5f9/s);
+  assert.match(localStyles, /\.ops-button\.compact\s*\{[^}]*border-radius:\s*999px/s);
+  assert.match(localStyles, /#project-file-manager\s*\{[^}]*grid-column:\s*1 \/ -1/s);
+  assert.match(localStyles, /#project-backups\s*\{[^}]*grid-column:\s*1/s);
+  assert.match(localStyles, /#project-databases\s*\{[^}]*grid-column:\s*2/s);
+  assert.match(localStyles, /#project-resources\s*\{[^}]*grid-column:\s*1 \/ -1/s);
+  assert.match(localStyles, /\.ops-project-detail-resource-grid\s*\{[^}]*grid-template-columns:\s*repeat\(4,\s*minmax\(0,\s*1fr\)\)/s);
+  assert.match(localStyles, /\.ops-file-tile\.selected/);
+  assert.match(localStyles, /\.ops-file-context-menu/);
+  assert.match(localStyles, /\.ops-file-tile-icon\s*\{[^}]*background:\s*#2563eb/s);
+  assert.match(localStyles, /\.ops-file-tile\.file \.ops-file-tile-icon\s*\{[^}]*background:\s*#344054/s);
+  assert.match(localStyles, /\.ops-project-detail-item-icon\s*\{[^}]*background:\s*#175cd3/s);
+  assert.doesNotMatch(localStyles, /\.ops-project-file-table/);
+  const localServer = readFileSync(path.join(infraRoot, "control-center", "server.mjs"), "utf8");
+  assert.doesNotMatch(localServer, /renderProjectSelect\("status",\s*"Stato database"/);
+  assert.match(localServer, /renderProjectSelect\("engine",\s*"Motore database"/);
+  assert.match(localServer, /renderProjectSelect\("restoreMode",\s*"Contenuto restore"/);
   assert.match(localStyles, /\.ops-icon-button/);
   assert.match(localStyles, /box-shadow:\s*var\(--cc-focus\)/);
   assert.match(localStyles, /color-scheme:\s*light/);
@@ -194,8 +397,153 @@ test("Admin Control Center local foundation", async (t) => {
   assert.match(localClient, /addEventListener\("submit"/);
   assert.match(localClient, /addEventListener\("popstate"/);
   assert.match(localClient, /htmlCache/);
+  assert.match(localClient, /var cacheLimit = 384/);
+  assert.match(localClient, /var preloadPageLimit = 64/);
+  assert.match(localClient, /var preloadWorkerCount = 8/);
+  assert.match(localClient, /var preloadFetchTimeoutMs = 2500/);
+  assert.match(localClient, /stripInitialPreloadHtml/);
+  assert.match(localClient, /htmlCache\.set\(url, stripInitialPreloadHtml\(html\)\)/);
+  assert.match(localClient, /nextBody\.removeAttribute\("data-cc-preloading"\)/);
+  assert.match(localClient, /nextBody\.querySelector\("\.cc-preload-screen"\)\?\.remove\(\)/);
   assert.match(localClient, /ccBootId/);
   assert.match(localClient, /data-copy-command/);
+  assert.match(localClient, /fitSingleLineText/);
+  assert.match(localClient, /data-project-row-link/);
+  assert.match(localClient, /data-fit-single-line/);
+  assert.match(localClient, /startFileManagers/);
+  assert.match(localClient, /data-file-refresh-action/);
+  assert.match(localClient, /data-file-search/);
+  assert.match(localClient, /applyFileSearch/);
+  assert.match(localClient, /var haystack = payload\.name\.toLowerCase\(\);/);
+  assert.doesNotMatch(localClient, /\[payload\.name,\s*payload\.path,\s*payload\.type\]/);
+  assert.match(localClient, /fileManagerRefreshInFlight/);
+  assert.match(localClient, /refreshFileManager/);
+  assert.match(localClient, /previousScrollTop/);
+  assert.match(localClient, /nextGrid\.scrollTop = previousScrollTop/);
+  assert.match(localClient, /data-file-manager-refresh-url/);
+  assert.doesNotMatch(localClient, /fileManagerLiveTimer/);
+  assert.doesNotMatch(localClient, /setInterval\(refreshFileManager/);
+  assert.match(localClient, /data-file-entry/);
+  assert.match(localClient, /data-file-menu-action/);
+  assert.match(localClient, /addEventListener\("dblclick"/);
+  assert.match(localClient, /addEventListener\("contextmenu"/);
+  assert.match(localClient, /opsNavLastPillRect/);
+  assert.match(localClient, /opsNavPillFrame/);
+  assert.match(localClient, /opsNavLayoutFrame/);
+  assert.match(localClient, /pendingSidebarScrollTop/);
+  assert.match(localClient, /pendingSidebarScrollAt/);
+  assert.doesNotMatch(localClient, /opsNavPendingTargetKey/);
+  assert.doesNotMatch(localClient, /opsNavPreMoved/);
+  assert.match(localClient, /preloadStarted/);
+  assert.match(localClient, /prefetchInFlight/);
+  assert.match(localClient, /getBoundingClientRect/);
+  assert.match(localClient, /opsNavPixel/);
+  assert.match(localClient, /usableOpsNavPillTarget/);
+  assert.doesNotMatch(localClient, /opsNavUrlKey/);
+  assert.doesNotMatch(localClient, /opsNavLinkKey/);
+  assert.match(localClient, /opsNavActiveItem/);
+  assert.match(localClient, /opsNavPillTarget/);
+  assert.match(localClient, /opsNavPillRectToTarget/);
+  assert.match(localClient, /writeOpsNavPill/);
+  assert.match(localClient, /applyOpsNavPill/);
+  assert.match(localClient, /prefetchHtml/);
+  assert.match(localClient, /controller\.abort\(\)/);
+  assert.match(localClient, /signal: controller\.signal/);
+  assert.match(localClient, /window\.clearTimeout\(timeout\)/);
+  assert.match(localClient, /return \{ html: htmlCache\.get\(url\.href\), url: url\.href, fromCache: true \}/);
+  assert.match(localClient, /return \{ html: htmlCache\.get\(finalUrl\) \|\| htmlCache\.get\(url\.href\), url: finalUrl, fromCache: false \}/);
+  assert.match(localClient, /collectPageUrlsForPreload/);
+  assert.match(localClient, /discoverPreloadUrls/);
+  assert.match(localClient, /discoverPreloadUrls\(result\.html, result\.url\)\.forEach\(enqueue\)/);
+  assert.match(localClient, /queue\.splice\(0, preloadWorkerCount\)/);
+  assert.match(localClient, /pageUrlsForPreload/);
+  assert.match(localClient, /preloadControlCenterPages/);
+  assert.match(localClient, /finishControlCenterPreload/);
+  assert.match(localClient, /startControlCenterPreload/);
+  assert.match(localClient, /scheduleControlCenterPreload/);
+  assert.match(localClient, /window\.setTimeout\(startControlCenterPreload, 300\)/);
+  assert.match(localClient, /window\.addEventListener\("load", start, \{ once: true \}\)/);
+  assert.match(localClient, /document\.body\.removeAttribute\("data-cc-preloading"\)/);
+  assert.match(localClient, /positionOpsNavPill/);
+  assert.match(localClient, /captureOpsNavPillRect/);
+  assert.match(localClient, /moveOpsNavPillTowardLink/);
+  assert.match(localClient, /trackOpsNavPillDuringLayout/);
+  assert.match(localClient, /currentSidebarScrollTop/);
+  assert.match(localClient, /restoreSidebarScrollTop/);
+  assert.match(localClient, /rememberSidebarScrollBeforePointer/);
+  assert.match(localClient, /consumePendingSidebarScrollTop/);
+  assert.match(localClient, /event\.target\.closest\("\.ops-nav-subitem\[href\]"\)/);
+  assert.match(localClient, /var previousSidebarScrollTop = options && typeof options\.sidebarScrollTop === "number" \? options\.sidebarScrollTop : currentSidebarScrollTop\(\)/);
+  assert.match(localClient, /var sidebarScrollTop = consumePendingSidebarScrollTop\(\)/);
+  assert.match(localClient, /navigate\(url, \{ history: "push", sidebarScrollTop: sidebarScrollTop \}\)/);
+  assert.match(localClient, /document\.addEventListener\("pointerdown", rememberSidebarScrollBeforePointer, \{ capture: true \}\)/);
+  assert.match(localClient, /captureOpsNavExpandedState/);
+  assert.match(localClient, /var previousOpsNavExpandedState = captureOpsNavExpandedState\(\)/);
+  assert.match(localClient, /restoreSidebarState\(\{ instantOpsNav: true, opsNavExpandedState: previousOpsNavExpandedState \}\)/);
+  assert.match(localClient, /var preserved = options && options\.expandedState && typeof options\.expandedState === "object" \? options\.expandedState : \{\}/);
+  assert.match(localClient, /var opsStateChanged = false/);
+  assert.match(localClient, /if \(hasActiveItem && key && opsState\[key\] !== true\) \{/);
+  assert.match(localClient, /opsState\[key\] = true;\s*opsStateChanged = true;/);
+  assert.match(localClient, /if \(opsStateChanged\) \{\s*state\.opsNav = opsState;\s*writeSidebarState\(state\);/);
+  assert.match(localClient, /hasActiveItem \? true : typeof preserved\[key\] === "boolean" \? preserved\[key\] : typeof opsState\[key\] === "boolean" \? opsState\[key\] : current/);
+  assert.match(localClient, /expandedState: options && options\.opsNavExpandedState/);
+  assert.match(localClient, /activeNavItemInGroup/);
+  assert.match(localClient, /groupContainsActiveNavItem/);
+  assert.doesNotMatch(localClient, /navIndicator/);
+  assert.doesNotMatch(localClient, /NavIndicator/);
+  assert.doesNotMatch(localClient, /data-nav-indicator/);
+  assert.doesNotMatch(localClient, /window\.getComputedStyle\(nav, "::before"\)/);
+  assert.doesNotMatch(localClient, /fadeOutNavIndicatorForSectionChange/);
+  assert.match(localClient, /syncOpsNavPanelHeight/);
+  assert.match(localClient, /restoreOpsNavState/);
+  assert.match(localClient, /dataset\.opsNavRestoring = "true"/);
+  assert.match(localClient, /toggleOpsNavGroup/);
+  assert.match(localClient, /group\.dataset\.opsNavLocked = locked \? "true" : "false"/);
+  assert.match(localClient, /toggle\.setAttribute\("aria-disabled", "true"\)/);
+  assert.match(localClient, /toggle\.removeAttribute\("aria-disabled"\)/);
+  assert.match(localClient, /locked \? "Sezione attuale: " \+ label/);
+  assert.doesNotMatch(localClient, /fadeNavPillOut/);
+  assert.doesNotMatch(localClient, /resetNavPillFade/);
+  assert.doesNotMatch(localClient, /data-nav-pill-fade/);
+  assert.match(localClient, /data-ops-nav-toggle/);
+  assert.match(localClient, /\.ops-nav-subitem\[aria-current='page'\], \.ops-nav-subitem\.active/);
+  assert.doesNotMatch(localClient, /group\.querySelector\("\.ops-nav-main"\)/);
+  assert.doesNotMatch(localClient, /isSubitem\s*\?\s*navRect\.width\s*:\s*activeRect\.width/);
+  assert.doesNotMatch(localClient, /await sleep\(190\)/);
+  assert.doesNotMatch(localClient, /await fadeOutNavIndicatorForSectionChange\(url\)/);
+  assert.match(localClient, /restoreSidebarState\(\{ instantOpsNav: true \}\)/);
+  assert.match(localClient, /preloadControlCenterPages\(\)\.finally\(finishControlCenterPreload\)/);
+  assert.match(localClient, /scheduleControlCenterPreload\(\)/);
+  assert.match(localClient, /prefetchHtml\(url\)/);
+  assert.doesNotMatch(localClient, /function prefetch\(url\)[\s\S]*requestHtml\(url, \{ method: "GET" \}\)/);
+  assert.doesNotMatch(localClient, /window\.history\.replaceState\(\{ ccDynamic: true \}[\s\S]*restoreSidebarState\(\);\s*positionOpsNavPill\(\{ instant: true \}\)/);
+  assert.match(localClient, /var previousPillRect = captureOpsNavPillRect\(\) \|\| opsNavLastPillRect/);
+  assert.match(localClient, /restoreSidebarScrollTop\(previousSidebarScrollTop\)/);
+  assert.doesNotMatch(localClient, /alreadyMovedToTarget/);
+  assert.match(localClient, /positionOpsNavPill\(\{ fromViewportRect: previousPillRect \}\)/);
+  assert.match(localClient, /opsNavLastPillRect = null/);
+  assert.match(localClient, /positionOpsNavPill\(\{ instant: true \}\)/);
+  assert.match(localClient, /var active = options && options\.item \? options\.item : opsNavActiveItem\(nav\)/);
+  assert.match(localClient, /captureOpsNavPillRect\(\);\s*setBusy\(true\);/);
+  assert.match(localClient, /var clickedLink = event\.target\.closest\("a\[href\]"\)/);
+  assert.match(localClient, /moveOpsNavPillTowardLink\(clickedLink\)/);
+  assert.match(localClient, /trackOpsNavPillDuringLayout\(activeItem, 320\)/);
+  assert.match(localClient, /function trackOpsNavPillDuringLayout\(activeItem, duration\)/);
+  assert.match(localClient, /var active = activeItem && activeItem\.isConnected \? activeItem : opsNavActiveItem\(nav\)/);
+  assert.match(localClient, /positionOpsNavPill\(\{ item: active \}\)/);
+  assert.doesNotMatch(localClient, /var rect = link\.getBoundingClientRect\(\);\s*if \(rect\.width && rect\.height\) \{\s*opsNavLastPillRect =/);
+  assert.match(localClient, /if \(hasActiveItem && currentExpanded\) \{/);
+  assert.match(localClient, /opsState\[key\] = true;\s*state\.opsNav = opsState;\s*writeSidebarState\(state\);\s*setOpsNavGroupExpanded\(group, true\);/);
+  assert.match(localClient, /var activeItem = opsNavActiveItem\(document\.querySelector\("\.ops-nav"\)\);\s*captureOpsNavPillRect\(\);\s*setOpsNavGroupExpanded\(group, expanded\);\s*trackOpsNavPillDuringLayout\(activeItem, 320\);/);
+  assert.doesNotMatch(localClient, /if \(expanded\) \{\s*showNavIndicatorForGroup\(group\);\s*\} else \{\s*hideNavIndicatorForGroup\(group\);/);
+  assert.doesNotMatch(localClient, /if \(!expanded && hasActiveItem\)/);
+  assert.doesNotMatch(localClient, /setOpsNavGroupExpanded\(group, expanded\);\s*updateOpsNavIndicator\(true\);/);
+  assert.match(localClient, /data-status-run-console/);
+  assert.match(localClient, /data-status-run-inline/);
+  assert.match(localClient, /statusCategory/);
+  assert.match(localClient, /selectedCheckId/);
+  assert.match(localClient, /Non eseguito in questo run/);
+  assert.match(localClient, /setAttribute\("open", ""\)/);
   assert.match(localClient, /navigator\.clipboard\.writeText/);
   assert.doesNotMatch(localClient, /window\.location\.reload/);
   const localUiPackage = await getJson(`${baseUrl}/control/ui-package`);
@@ -213,31 +561,147 @@ test("Admin Control Center local foundation", async (t) => {
   assert.equal(localUiPackage.servedAssets.includes("/assets/control-center/control-center.js"), true);
   assert.equal(localUiPackage.coreExports.includes("OperationsShell"), true);
   assert.equal(localUiPackage.coreExports.includes("ProjectFileBrowser"), true);
-  assert.equal(localUiPackage.coreExports.includes("ActivityTable"), true);
+  assert.equal(localUiPackage.coreExports.includes("ActivityTable"), false);
   assert.equal(localUiPackage.cssVariablePrefix, "--cc-");
   assert.deepEqual(localUiPackage.missingRequiredExports, []);
 
   const projectsOpsHtml = await getText(`${baseUrl}/?section=projects`);
-  assert.match(projectsOpsHtml, /Aggiungi applicazione/);
+  assert.match(projectsOpsHtml, /\/assets\/control-center\/control-center\.css\?v=/);
+  assert.match(projectsOpsHtml, /\/assets\/control-center\/control-center\.js\?v=/);
   assert.match(projectsOpsHtml, /PHP Apache/);
   assert.match(projectsOpsHtml, /Node\/Next/);
-  assert.match(projectsOpsHtml, /Static/);
-  assert.match(projectsOpsHtml, /Descrizione breve/);
-  assert.match(projectsOpsHtml, /Con database/);
-  assert.match(projectsOpsHtml, /Runtime dedicati/);
-  assert.match(projectsOpsHtml, /ops-project-board/);
-  assert.match(projectsOpsHtml, /Archivia applicazione/);
+  assert.match(projectsOpsHtml, /Runtime/);
+  assert.match(projectsOpsHtml, /ops-project-list/);
+  assert.match(projectsOpsHtml, /data-ops-nav-group="projects" data-ops-nav-expanded="true" data-ops-nav-has-active-child="true" data-ops-nav-locked="true"/);
+  assert.match(projectsOpsHtml, /id="ops-nav-panel-projects" aria-hidden="false"/);
+  assert.match(projectsOpsHtml, /aria-label="Sezione attuale: Applicazioni" aria-expanded="true" aria-controls="ops-nav-panel-projects" aria-disabled="true"/);
+  assert.match(projectsOpsHtml, /data-ops-nav-group="status" data-ops-nav-expanded="false" data-ops-nav-has-active-child="false" data-ops-nav-locked="false"/);
+  assert.match(projectsOpsHtml, /id="ops-nav-panel-status" aria-hidden="true"/);
+  assert.match(projectsOpsHtml, /class="ops-nav-subitem active" aria-current="page" href="\/\?section=projects">[\s\S]*Tutte/);
+  assert.doesNotMatch(projectsOpsHtml, /class="ops-nav-subitem active [^"]*" aria-current="page" data-status-category-card=/);
+  assert.match(projectsOpsHtml, /href="\/\?section=projects&amp;project=node-demo"/);
+  assert.match(projectsOpsHtml, /ops-nav-subdot good/);
+  assert.match(projectsOpsHtml, /ops-project-row/);
+  assert.match(projectsOpsHtml, /ops-project-state-dot good/);
   assert.match(projectsOpsHtml, /Php Demo/);
   assert.match(projectsOpsHtml, /Node Demo/);
-  assert.match(projectsOpsHtml, /ARCHIVE-PROJECT/);
-  assert.match(projectsOpsHtml, /node_demo_external/);
-  assert.match(projectsOpsHtml, /node-demo/);
-  assert.match(projectsOpsHtml, /href="\/\?section=files&project=node-demo"/);
-  assert.match(projectsOpsHtml, /href="\/\?section=databases#app-node-demo"/);
-  assert.match(projectsOpsHtml, /Stress max/);
-  assert.match(projectsOpsHtml, /RUN-STRESS:node-demo/);
+  assert.match(projectsOpsHtml, /data-project-row-link="\/\?section=projects&amp;project=node-demo"/);
+  assert.match(projectsOpsHtml, /href="https:\/\/node-demo\.localhost\.com\/"/);
+  assert.match(projectsOpsHtml, /target="_blank"/);
+  assert.match(projectsOpsHtml, /rel="noopener noreferrer"/);
+  assert.match(projectsOpsHtml, /data-fit-single-line/);
+  assert.match(projectsOpsHtml, /node-demo\.localhost\.com/);
+  assert.match(projectsOpsHtml, /PHP Apache/);
+  assert.match(projectsOpsHtml, /Node\/Next/);
+  assert.doesNotMatch(projectsOpsHtml, /ops-project-row-status/);
+  assert.doesNotMatch(projectsOpsHtml, /<em class="ops-state[^"]*">Online<\/em>/);
+  assert.doesNotMatch(projectsOpsHtml, /0\.100%|3\.500%/);
+  assert.doesNotMatch(projectsOpsHtml, /node-demo \/ 2 DB/);
+  assert.doesNotMatch(projectsOpsHtml, /Aggiungi applicazione/);
+  assert.doesNotMatch(projectsOpsHtml, /Archivia applicazione/);
+  assert.doesNotMatch(projectsOpsHtml, /ARCHIVE-PROJECT/);
+  assert.doesNotMatch(projectsOpsHtml, /Descrizione breve/);
   assert.doesNotMatch(projectsOpsHtml, /db-password-should-not-leak/);
   assert.doesNotMatch(projectsOpsHtml, /Platform Documentation/);
+
+  const projectDetailHtml = await getText(`${baseUrl}/?section=projects&project=node-demo`);
+  assert.match(projectDetailHtml, /ops-project-detail-screen/);
+  assert.match(projectDetailHtml, /<label class="ops-project-select">\s*<select name="restoreMode"[\s\S]*?<span class="ops-project-select-chevron"/);
+  assert.doesNotMatch(projectDetailHtml, /ops-project-detail-back/);
+  assert.doesNotMatch(projectDetailHtml, /Torna ad Applicazioni/);
+  assert.match(projectDetailHtml, /<section class="ops-page" aria-label="Applicazioni">/);
+  assert.doesNotMatch(projectDetailHtml, /<h1 id="control-page-title">Applicazioni<\/h1>/);
+  assert.doesNotMatch(projectDetailHtml, /Elenco applicazioni con host, runtime e dettaglio operativo/);
+  assert.match(projectDetailHtml, /data-ops-nav-group="projects" data-ops-nav-expanded="true"/);
+  assert.match(projectDetailHtml, /id="ops-nav-panel-projects" aria-hidden="false"/);
+  assert.match(projectDetailHtml, /class="ops-nav-subitem active" aria-current="page" href="\/\?section=projects&amp;project=node-demo"/);
+  assert.doesNotMatch(projectDetailHtml, /class="ops-nav-subitem active [^"]*" aria-current="page" data-status-category-card=/);
+  assert.doesNotMatch(projectDetailHtml, /class="ops-nav-main[^"]*"[^>]*aria-current="page"/);
+  assert.match(projectDetailHtml, /Node Demo/);
+  assert.match(projectDetailHtml, /node-demo\.localhost\.com/);
+  assert.match(projectDetailHtml, /Node\/Next/);
+  assert.match(projectDetailHtml, /File manager/);
+  assert.match(projectDetailHtml, /<h3>Database<\/h3>/);
+  assert.match(projectDetailHtml, /Backup/);
+  assert.ok(projectDetailHtml.indexOf('id="project-file-manager"') < projectDetailHtml.indexOf('id="project-backups"'));
+  assert.ok(projectDetailHtml.indexOf('id="project-backups"') < projectDetailHtml.indexOf('id="project-databases"'));
+  assert.match(projectDetailHtml, /ops-project-backup-list/);
+  assert.match(projectDetailHtml, /node-demo-source-20260629\.tar\.gz/);
+  assert.match(projectDetailHtml, /name="backupMode" value="all"/);
+  assert.doesNotMatch(projectDetailHtml, /Sorgenti \+ database/);
+  assert.doesNotMatch(projectDetailHtml, /ops-project-backup-fixed-scope/);
+  assert.match(projectDetailHtml, /name="backupRef"/);
+  assert.match(projectDetailHtml, /name="restoreMode"/);
+  assert.match(projectDetailHtml, /Tutto/);
+  assert.match(projectDetailHtml, /Solo database/);
+  assert.match(projectDetailHtml, /Solo sorgenti/);
+  assert.match(projectDetailHtml, /Backup da ripristinare/);
+  assert.match(projectDetailHtml, /Ripristina backup/);
+  assert.match(projectDetailHtml, /Esegui backup/);
+  assert.ok(projectDetailHtml.indexOf("Esegui backup") < projectDetailHtml.indexOf('class="ops-project-backup-list"'));
+  assert.match(projectDetailHtml, /ops-project-backup-head-form/);
+  assert.doesNotMatch(projectDetailHtml, /Backup DB/);
+  assert.match(projectDetailHtml, /name="returnTo" value="project-detail"/);
+  assert.doesNotMatch(projectDetailHtml, /Apri backup di Node Demo/);
+  assert.doesNotMatch(projectDetailHtml, /href="\/\?section=backups&amp;backupProject=node-demo"/);
+  assert.match(projectDetailHtml, /Risorse utilizzate/);
+  assert.doesNotMatch(projectDetailHtml, /Limiti<\/span>/);
+  assert.doesNotMatch(projectDetailHtml, /Misurato da<\/span>/);
+  assert.match(projectDetailHtml, /data-file-manager/);
+  assert.match(projectDetailHtml, /data-file-search/);
+  assert.match(projectDetailHtml, /placeholder="Cerca"/);
+  assert.match(projectDetailHtml, /ops-file-commandbar[\s\S]*data-file-search[\s\S]*data-file-refresh-action/);
+  assert.doesNotMatch(projectDetailHtml, /<span>Node Demo \/ \.<\/span>/);
+  assert.match(projectDetailHtml, /data-file-manager-refresh-url="\/\?section=projects&amp;project=node-demo"/);
+  assert.doesNotMatch(projectDetailHtml, /data-file-refresh-ms/);
+  assert.match(projectDetailHtml, /data-file-refresh-action/);
+  assert.match(projectDetailHtml, /ops-file-grid/);
+  assert.match(projectDetailHtml, /role="listbox"/);
+  assert.match(projectDetailHtml, /data-file-context-menu/);
+  assert.match(projectDetailHtml, /data-file-menu-action="open"/);
+  assert.match(projectDetailHtml, /data-file-menu-action="copy-path"/);
+  assert.doesNotMatch(projectDetailHtml, /data-file-menu-action="details"/);
+  assert.match(projectDetailHtml, /Aggiorna file manager/);
+  assert.doesNotMatch(projectDetailHtml, /data-file-inspector/);
+  assert.match(projectDetailHtml, /package\.json/);
+  assert.match(projectDetailHtml, /src/);
+  assert.match(projectDetailHtml, /node_demo_external/);
+  assert.match(projectDetailHtml, /\d{2}\/\d{2}\/\d{4}, \d{2}:\d{2}:\d{2} (?:CET|CEST)/);
+  assert.match(projectDetailHtml, /data-file-type="directory"/);
+  assert.match(projectDetailHtml, /data-file-open-url="\/\?section=projects&amp;project=node-demo&amp;path=src"/);
+  assert.match(projectDetailHtml, /href="\/\?section=projects&project=node-demo&path=src"/);
+  assert.doesNotMatch(projectDetailHtml, /ops-project-file-table/);
+  assert.doesNotMatch(projectDetailHtml, /href="\/\?section=files&project=node-demo"/);
+  assert.match(projectDetailHtml, /href="\/actions\/phpmyadmin-login\?databaseId=legacy-mariadb-node-demo-external&amp;confirm=OPEN-PHPMYADMIN%3Alegacy-mariadb-node-demo-external"/);
+  assert.match(projectDetailHtml, /href="\/actions\/phppgadmin-login\?databaseId=legacy-postgres-node-demo-external&amp;confirm=OPEN-PHPPGADMIN%3Alegacy-postgres-node-demo-external"/);
+  assert.match(projectDetailHtml, /ops-project-database-list/);
+  assert.match(projectDetailHtml, /Nome DB: node_demo_external \/ mariadb \/ utente:/);
+  assert.doesNotMatch(projectDetailHtml, /aria-label="Stato database"/);
+  assert.doesNotMatch(projectDetailHtml, /name="status"/);
+  assert.doesNotMatch(projectDetailHtml, />declared<\/option>/);
+  assert.match(projectDetailHtml, /Valore non mostrato/);
+  assert.match(projectDetailHtml, /name="action" value="credential"/);
+  assert.match(projectDetailHtml, /type="password" name="password" value="" placeholder="Nuova password"/);
+  assert.doesNotMatch(projectDetailHtml, /name="credentialRef"/);
+  assert.doesNotMatch(projectDetailHtml, /Riferimento secret password database/);
+  assert.match(projectDetailHtml, /ROTATE-DATABASE-CREDENTIAL%3A|ROTATE-DATABASE-CREDENTIAL:/);
+  assert.match(projectDetailHtml, /name="action" value="delete"/);
+  assert.match(projectDetailHtml, /DELETE-DATABASE:/);
+  assert.doesNotMatch(projectDetailHtml, /name="openAfterCreate"/);
+  assert.match(projectDetailHtml, /type="password" name="password" value="" placeholder="Password"/);
+  assert.match(projectDetailHtml, /name="password" value="" placeholder="Password"[^>]*required/);
+  assert.match(projectDetailHtml, /Crea DB/);
+  assert.match(projectDetailHtml, /target="_blank"/);
+  assert.match(projectDetailHtml, /rel="noopener noreferrer"/);
+  assert.doesNotMatch(projectDetailHtml, /href="\/\?section=databases#app-node-demo"/);
+  assert.doesNotMatch(projectDetailHtml, /href="\/\?section=databases#database-/);
+  assert.doesNotMatch(projectDetailHtml, /db-password-should-not-leak/);
+  assert.doesNotMatch(projectDetailHtml, /Platform Documentation/);
+  const projectDetailSubpathHtml = await getText(`${baseUrl}/?section=projects&project=node-demo&path=src`);
+  assert.match(projectDetailSubpathHtml, /File manager/);
+  assert.match(projectDetailSubpathHtml, /index\.js/);
+  assert.match(projectDetailSubpathHtml, /href="\/\?section=projects&project=node-demo"/);
+  assert.doesNotMatch(projectDetailSubpathHtml, /href="\/\?section=files&project=node-demo"/);
 
   const networkApi = await getJson(`${baseUrl}/control/network`);
   assert.equal(networkApi.guardrails.readOnly, true);
@@ -300,23 +764,15 @@ test("Admin Control Center local foundation", async (t) => {
   assert.match(databasesOpsHtml, /node_demo_external/);
   assert.match(databasesOpsHtml, /phpmyadmin-login/);
   assert.match(databasesOpsHtml, /OPEN-PHPMYADMIN%3Alegacy-mariadb-node-demo-external/);
-  assert.doesNotMatch(databasesOpsHtml, /Php Demo/);
+  assert.doesNotMatch(databasesOpsHtml, /id="app-php-demo"/);
   assert.doesNotMatch(databasesOpsHtml, /Nessun database collegato/);
   assert.doesNotMatch(databasesOpsHtml, /name="project"/);
   const activityOpsHtml = await getText(`${baseUrl}/?section=activity`);
-  assert.match(activityOpsHtml, /Errori, avvisi e problemi/);
-  assert.match(activityOpsHtml, /go-no-go/);
-  const resourcesOpsHtml = await getText(`${baseUrl}/?section=resources`);
-  assert.match(resourcesOpsHtml, /Uso risorse/);
-  assert.match(resourcesOpsHtml, /Imposta limiti applicazione/);
-  assert.match(resourcesOpsHtml, /CPU totale/);
-  assert.match(resourcesOpsHtml, /RAM totale/);
-  assert.match(resourcesOpsHtml, /Disco app/);
-  assert.match(resourcesOpsHtml, /data-resource-live/);
-  assert.match(resourcesOpsHtml, /0\.100%/);
-  assert.match(resourcesOpsHtml, /3\.500%/);
-  assert.doesNotMatch(resourcesOpsHtml, /0 core/);
-
+  assert.match(activityOpsHtml, /Stato/);
+  assert.match(activityOpsHtml, /Sezioni/);
+  assert.match(activityOpsHtml, /data-status-section-detail="go-live"/);
+  assert.doesNotMatch(activityOpsHtml, /Errori, avvisi e problemi/);
+  assert.doesNotMatch(activityOpsHtml, /section=activity/);
   const resourcesOpsApi = await getJson(`${baseUrl}/control/resources/summary`);
   assert.equal(resourcesOpsApi.cards.applications.status, 2);
   assert.equal(resourcesOpsApi.rows.some((row) => row.applicationId === "php-demo" && row.cpu.includes("0.100%")), true);
@@ -403,15 +859,43 @@ test("Admin Control Center local foundation", async (t) => {
   assert.equal(statusAfterRun.statusRun.checks.some((check) => check.id === "control-center-assets"), false);
   assert.equal(statusAfterRun.statusRun.checks.some((check) => check.id === "portal-through-waf"), true);
   assert.doesNotMatch(JSON.stringify(statusAfterRun), /CLOUDFLARE_API_TOKEN|super-secret-token-should-not-leak/);
+  const statusCategoryRunResponse = await fetch(`${baseUrl}/actions/status-check`, {
+    method: "POST",
+    headers: { accept: "application/json", "content-type": "application/x-www-form-urlencoded" },
+    body: "scope=category&category=backup-dr",
+  });
+  assert.equal(statusCategoryRunResponse.ok, true);
+  const statusCategoryRun = await statusCategoryRunResponse.json();
+  assert.equal(statusCategoryRun.requestedScope, "category");
+  assert.equal(statusCategoryRun.requestedCategory, "backup-dr");
+  assert.equal(statusCategoryRun.destructive, false);
+  assert.equal(statusCategoryRun.providerTouched, false);
+  assert.equal(statusCategoryRun.checks.length > 0, true);
+  assert.equal(statusCategoryRun.checks.every((check) => check.category === "backup-dr"), true);
+  const statusSingleRunResponse = await fetch(`${baseUrl}/actions/status-check`, {
+    method: "POST",
+    headers: { accept: "application/json", "content-type": "application/x-www-form-urlencoded" },
+    body: "scope=check&category=domain-edge&checkId=cloudflare-access-admin",
+  });
+  assert.equal(statusSingleRunResponse.ok, true);
+  const statusSingleRun = await statusSingleRunResponse.json();
+  assert.equal(statusSingleRun.requestedScope, "check");
+  assert.equal(statusSingleRun.requestedCheckId, "cloudflare-access-admin");
+  assert.equal(statusSingleRun.checks.length, 1);
+  assert.equal(statusSingleRun.checks[0].id, "cloudflare-access-admin");
   const statusHtmlAfterRun = await getText(`${baseUrl}/?section=status`);
-  assert.match(statusHtmlAfterRun, /Ultimo test reale/);
-  assert.match(statusHtmlAfterRun, /<th>Controllo<\/th><th>Stato<\/th><th>Motivo<\/th><th>Cosa fare<\/th><th>Fonte<\/th>/);
-  assert.match(statusHtmlAfterRun, /Portal attraverso WAF|WAF blocca file sensibili|Manca prova live/);
-  assert.match(statusHtmlAfterRun, /vps-host-readiness/);
-  assert.match(statusHtmlAfterRun, /cloudflare-access-admin/);
-  assert.match(statusHtmlAfterRun, /github-actions-run-evidence/);
-  assert.match(statusHtmlAfterRun, /full-restore-drill/);
-  assert.match(statusHtmlAfterRun, /production-readiness-live/);
+  assert.match(statusHtmlAfterRun, /Ultimo run/);
+  assert.match(statusHtmlAfterRun, /data-status-run-step-mark/);
+  assert.match(statusHtmlAfterRun, /Go live e decisione/);
+  assert.match(statusHtmlAfterRun, /statusCategory=github-release/);
+  assert.match(statusHtmlAfterRun, /statusCategory=backup-dr/);
+  assert.match(statusHtmlAfterRun, /<details class="ops-status-check-row/);
+  assert.match(statusHtmlAfterRun, /ops-status-check-details/);
+  assert.doesNotMatch(statusHtmlAfterRun, /<th>Controllo<\/th><th>Stato<\/th><th>Motivo<\/th><th>Cosa fare<\/th><th>Fonte<\/th>/);
+  assert.match(statusHtmlAfterRun, /data-status-section-detail="go-live"/);
+  assert.match(statusHtmlAfterRun, /name="scope" value="category"/);
+  assert.match(statusHtmlAfterRun, /name="scope" value="check"/);
+  assert.doesNotMatch(statusHtmlAfterRun, /full-restore-drill/);
   assert.doesNotMatch(statusHtmlAfterRun, /Control Center avviato/);
   assert.doesNotMatch(statusHtmlAfterRun, /Asset Portal serviti/);
   assert.doesNotMatch(statusHtmlAfterRun, /Control Center local UI contract/);
@@ -420,7 +904,7 @@ test("Admin Control Center local foundation", async (t) => {
 
   const readinessHtml = await getText(`${baseUrl}/?mode=advanced&section=readiness`);
   assert.match(readinessHtml, /ops-shell/);
-  assert.match(readinessHtml, /Controlli go live/);
+  assert.match(readinessHtml, /Esecuzione/);
   assert.doesNotMatch(readinessHtml, /Readiness Matrix/);
 
   const advancedIdentityApi = await getJson(`${baseUrl}/control/advanced/identity`);
@@ -546,11 +1030,15 @@ test("Admin Control Center local foundation", async (t) => {
   assert.equal(JSON.parse(projectStateText).projects["client-portal"].declaredProject, true);
 
   const projectsHtmlAfterCreate = await getText(`${baseUrl}/?section=projects`);
-  assert.match(projectsHtmlAfterCreate, /Aggiungi applicazione/);
   assert.match(projectsHtmlAfterCreate, /Client Portal/);
-  assert.match(projectsHtmlAfterCreate, /File mancanti/);
-  assert.match(projectsHtmlAfterCreate, /Non avviabile/);
-
+  assert.match(projectsHtmlAfterCreate, /ops-project-state-dot bad/);
+  assert.doesNotMatch(projectsHtmlAfterCreate, /File mancanti/);
+  assert.doesNotMatch(projectsHtmlAfterCreate, /Aggiungi applicazione/);
+  assert.doesNotMatch(projectsHtmlAfterCreate, /Archivia applicazione/);
+  const declaredProjectDetailHtml = await getText(`${baseUrl}/?section=projects&project=client-portal`);
+  assert.match(declaredProjectDetailHtml, /Client Portal/);
+  assert.match(declaredProjectDetailHtml, /File manager/);
+  assert.match(declaredProjectDetailHtml, /File non disponibili/);
   const applicationPlan = await postJson(`${baseUrl}/control/applications`, {
     projectId: "node-demo",
     name: "events-worker",
@@ -653,11 +1141,9 @@ test("Admin Control Center local foundation", async (t) => {
   assert.equal(JSON.parse(readFileSync(applicationsFile, "utf8"))["node-demo-events-worker"].lastLifecycleAction, "restart");
   assert.doesNotMatch(readFileSync(applicationsFile, "utf8"), /lifecycle-secret-should-not-leak/);
 
-  const applicationsHtmlAfterCreate = await getText(`${baseUrl}/?section=resources`);
-  assert.match(applicationsHtmlAfterCreate, /Uso risorse/);
-  assert.match(applicationsHtmlAfterCreate, /node-demo-events-worker/);
-  assert.match(applicationsHtmlAfterCreate, /online/);
-  assert.doesNotMatch(applicationsHtmlAfterCreate, /application-secret-should-not-leak/);
+  const applicationsAfterCreate = await getJson(`${baseUrl}/control/applications`);
+  assert.equal(applicationsAfterCreate.applications.some((app) => app.id === "node-demo-events-worker" && app.status === "online"), true);
+  assert.doesNotMatch(JSON.stringify(applicationsAfterCreate), /application-secret-should-not-leak/);
 
   const workerInventoryInitial = await getJson(`${baseUrl}/control/workers-jobs`);
   assert.equal(workerInventoryInitial.workers.some((worker) => worker.id === "enterprise-worker-jobs"), true);
@@ -801,12 +1287,13 @@ test("Admin Control Center local foundation", async (t) => {
   assert.equal(advancedWorkersAfterApply.data.scheduler.some((schedule) => schedule.id === "node-demo-nightly-events-sync"), true);
   assert.equal(advancedWorkersAfterApply.productionEvidence, false);
 
-  const workersHtmlAfterApply = await getText(`${baseUrl}/?section=activity`);
-  assert.match(workersHtmlAfterApply, /Errori, avvisi e problemi/);
-  assert.doesNotMatch(workersHtmlAfterApply, /worker-secret-should-not-leak/);
+  const workerLogsAfterApply = await getJson(`${baseUrl}/control/logs/summary`);
+  assert.doesNotMatch(JSON.stringify(workerLogsAfterApply), /worker-secret-should-not-leak/);
 
   const projectsHtml = await getText(`${baseUrl}/?section=projects`);
-  assert.match(projectsHtml, /ARCHIVE-PROJECT/);
+  assert.doesNotMatch(projectsHtml, /ARCHIVE-PROJECT/);
+  assert.doesNotMatch(projectsHtml, /Aggiungi/);
+  assert.doesNotMatch(projectsHtml, /archivia/i);
   assert.doesNotMatch(projectsHtml, /DELETE-PROJECT:php-demo/);
 
   const updatePlan = await postJson(`${baseUrl}/control/projects/node-demo/update`, {
@@ -992,9 +1479,8 @@ test("Admin Control Center local foundation", async (t) => {
   assert.equal(invalidWebspace.status, 422);
   assert.match(invalidWebspace.body.message, /Invalid webspace path/);
 
-  const webspacesHtml = await getText(`${baseUrl}/?section=resources`);
-  assert.match(webspacesHtml, /Uso risorse/);
-  assert.match(webspacesHtml, /Imposta limiti applicazione/);
+  const webspacesApi = await getJson(`${baseUrl}/control/webspaces`);
+  assert.equal(Array.isArray(webspacesApi.webspaces), true);
 
   const webspacePlan = await postJson(`${baseUrl}/control/webspaces`, {
     projectId: "node-demo",
@@ -1059,7 +1545,7 @@ test("Admin Control Center local foundation", async (t) => {
   assert.doesNotMatch(databasesHtml, /\/actions\/pgadmin-login/);
   assert.match(databasesHtml, /Storage/);
   assert.match(databasesHtml, /Node Demo Local/);
-  assert.doesNotMatch(databasesHtml, /Client Portal/);
+  assert.doesNotMatch(databasesHtml, /id="app-client-portal"/);
   assert.doesNotMatch(databasesHtml, /Nessun database collegato/);
   assert.doesNotMatch(databasesHtml, /db-password-should-not-leak/);
 
@@ -1091,6 +1577,7 @@ test("Admin Control Center local foundation", async (t) => {
     engine: "mariadb",
     name: "node_demo_app",
     ownerRole: "node_demo_user",
+    password: "created-db-password-should-not-leak",
     confirm: "CREATE-DATABASE",
     secret: "database-secret-should-not-leak",
   });
@@ -1100,6 +1587,7 @@ test("Admin Control Center local foundation", async (t) => {
   assert.equal(databaseApply.body.database.id, "node-demo-mariadb-node-demo-app");
   assert.equal(databaseApply.body.details.databaseTouched, false);
   assert.equal(databaseApply.body.details.credentialsExposed, false);
+  assert.equal(databaseApply.body.details.credentialValueStored, true);
 
   const databasesAfterApply = await getJson(`${baseUrl}/control/databases`);
   assert.equal(databasesAfterApply.engines.some((engine) => engine.id === "mariadb"), true);
@@ -1107,12 +1595,130 @@ test("Admin Control Center local foundation", async (t) => {
   assert.equal(existsSync(databasesFile), true);
   const databaseStateText = readFileSync(databasesFile, "utf8");
   assert.doesNotMatch(databaseStateText, /database-secret-should-not-leak/);
+  assert.doesNotMatch(databaseStateText, /created-db-password-should-not-leak/);
   assert.equal(JSON.parse(databaseStateText)["node-demo-mariadb-node-demo-app"].credentialsExposed, false);
+  assert.equal(JSON.parse(databaseStateText)["node-demo-mariadb-node-demo-app"].credentialRef, "secret/db/node-demo-mariadb-node-demo-app");
+  assert.equal(JSON.parse(databaseStateText)["node-demo-mariadb-node-demo-app"].credentialStatus, "secret-file-set");
+  const createdDatabaseCredentialFile = JSON.parse(databaseStateText)["node-demo-mariadb-node-demo-app"].credentialFile;
+  assert.equal(existsSync(createdDatabaseCredentialFile), true);
+  assert.equal(
+    createHash("sha256").update(readFileSync(createdDatabaseCredentialFile, "utf8").trim()).digest("hex"),
+    createHash("sha256").update("created-db-password-should-not-leak").digest("hex"),
+  );
+
+  const databaseCreateRedirect = await fetch(`${baseUrl}/actions/database-command`, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      action: "create",
+      projectId: "node-demo",
+      engine: "mariadb",
+      name: "node_demo_redirect",
+      ownerRole: "node_demo_redirect_user",
+      password: "redirect-db-password-should-not-leak",
+      returnTo: "project-detail",
+      openAfterCreate: "admin",
+      confirm: "CREATE-DATABASE",
+    }),
+    redirect: "manual",
+  });
+  assert.equal(databaseCreateRedirect.status, 303);
+  assert.equal(databaseCreateRedirect.headers.get("location"), "/?section=projects&project=node-demo#project-databases");
+  assert.doesNotMatch(databaseCreateRedirect.headers.get("location") || "", /redirect-db-password-should-not-leak/);
+  assert.doesNotMatch(readFileSync(databasesFile, "utf8"), /redirect-db-password-should-not-leak/);
+
+  const databaseCreateWithoutCredential = await fetch(`${baseUrl}/actions/database-command`, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      action: "create",
+      projectId: "node-demo",
+      engine: "mariadb",
+      name: "node_demo_without_credential",
+      ownerRole: "node_demo_without_credential_user",
+      returnTo: "project-detail",
+      openAfterCreate: "admin",
+      confirm: "CREATE-DATABASE",
+    }),
+    redirect: "manual",
+  });
+  assert.equal(databaseCreateWithoutCredential.status, 422);
+
+  const stateWithManualDatabase = JSON.parse(readFileSync(databasesFile, "utf8"));
+  stateWithManualDatabase["node-demo-mariadb-node-demo-without-credential"] = {
+    id: "node-demo-mariadb-node-demo-without-credential",
+    projectId: "node-demo",
+    engine: "mariadb",
+    name: "node_demo_without_credential",
+    ownerRole: "node_demo_without_credential_user",
+    status: "declared",
+    credentialStatus: "protected",
+  };
+  writeFileSync(databasesFile, `${JSON.stringify(stateWithManualDatabase, null, 2)}\n`);
+  const manualDatabaseAdminLocation = "/actions/phpmyadmin-login?databaseId=node-demo-mariadb-node-demo-without-credential&confirm=OPEN-PHPMYADMIN%3Anode-demo-mariadb-node-demo-without-credential";
+  const manualDatabaseAdmin = await fetch(`${baseUrl}${manualDatabaseAdminLocation}`);
+  assert.equal(manualDatabaseAdmin.status, 409);
+  assert.match(await manualDatabaseAdmin.text(), /Salva una password per questo database/);
 
   const databasesHtmlAfterApply = await getText(`${baseUrl}/?section=databases&project=node-demo`);
   assert.match(databasesHtmlAfterApply, /node_demo_app/);
   assert.match(databasesHtmlAfterApply, /Plan backup/);
   assert.match(databasesHtmlAfterApply, /Plan restore drill/);
+
+  const databaseUpdate = await postJson(`${baseUrl}/actions/database-command`, {
+    action: "update",
+    id: "node-demo-mariadb-node-demo-app",
+    projectId: "node-demo",
+    displayName: "Node Demo App DB",
+    ownerRole: "node_demo_runtime",
+    status: "active",
+    confirm: "UPDATE-DATABASE:node-demo-mariadb-node-demo-app",
+    secret: "database-secret-should-not-leak",
+  });
+  assert.equal(databaseUpdate.status, 202);
+  assert.equal(databaseUpdate.body.type, "database.update.local");
+  assert.equal(databaseUpdate.body.database.displayName, "Node Demo App DB");
+  assert.equal(databaseUpdate.body.database.ownerRole, "node_demo_runtime");
+  assert.equal(databaseUpdate.body.database.status, "active");
+  assert.equal(databaseUpdate.body.details.databaseTouched, false);
+  assert.equal(databaseUpdate.body.details.credentialsExposed, false);
+  assert.doesNotMatch(JSON.stringify(databaseUpdate.body), /database-secret-should-not-leak/);
+
+  const credentialUpdate = await postJson(`${baseUrl}/actions/database-command`, {
+    action: "credential",
+    id: "node-demo-mariadb-node-demo-app",
+    projectId: "node-demo",
+    credentialRef: "secret/db/manual-name-should-not-win",
+    confirm: "ROTATE-DATABASE-CREDENTIAL:node-demo-mariadb-node-demo-app",
+    password: "new-db-password-should-not-leak",
+  });
+  assert.equal(credentialUpdate.status, 202);
+  assert.equal(credentialUpdate.body.type, "database.credential.local");
+  assert.equal(credentialUpdate.body.database.credentialRef, "secret/db/node-demo-mariadb-node-demo-app");
+  assert.equal(credentialUpdate.body.database.credentialStatus, "secret-file-set");
+  assert.equal(credentialUpdate.body.details.credentialValueStored, true);
+  assert.equal(credentialUpdate.body.details.credentialsExposed, false);
+  assert.doesNotMatch(JSON.stringify(credentialUpdate.body), /new-db-password-should-not-leak/);
+  assert.doesNotMatch(JSON.stringify(credentialUpdate.body), /manual-name-should-not-win/);
+  const credentialStateText = readFileSync(databasesFile, "utf8");
+  assert.doesNotMatch(credentialStateText, /new-db-password-should-not-leak/);
+  const rotatedCredentialFile = JSON.parse(credentialStateText)["node-demo-mariadb-node-demo-app"].credentialFile;
+  assert.equal(existsSync(rotatedCredentialFile), true);
+  assert.equal(
+    createHash("sha256").update(readFileSync(rotatedCredentialFile, "utf8").trim()).digest("hex"),
+    createHash("sha256").update("new-db-password-should-not-leak").digest("hex"),
+  );
+
+  const databaseDeletePlan = await postJson(`${baseUrl}/actions/database-command`, {
+    action: "delete",
+    id: "node-demo-mariadb-node-demo-app",
+    projectId: "node-demo",
+  });
+  assert.equal(databaseDeletePlan.status, 202);
+  assert.equal(databaseDeletePlan.body.type, "database.delete");
+  assert.equal(databaseDeletePlan.body.dryRun, true);
+  assert.equal(databaseDeletePlan.body.details.backupRequiredBeforeLiveDelete, false);
+  assert.equal(databaseDeletePlan.body.details.databaseTouched, false);
 
   const databaseBackup = await postJson(`${baseUrl}/control/databases/node-demo-mariadb-node-demo-app/backup`, {
     secret: "database-secret-should-not-leak",
@@ -1131,6 +1737,21 @@ test("Admin Control Center local foundation", async (t) => {
   assert.equal(databaseRestore.body.type, "database.restore.plan");
   assert.equal(databaseRestore.body.details.dataChanged, false);
   assert.equal(databaseRestore.body.details.databaseTouched, false);
+
+  const databaseDeleteApply = await postJson(`${baseUrl}/actions/database-command`, {
+    action: "delete",
+    id: "node-demo-mariadb-node-demo-app",
+    projectId: "node-demo",
+    confirm: "DELETE-DATABASE:node-demo-mariadb-node-demo-app",
+  });
+  assert.equal(databaseDeleteApply.status, 202);
+  assert.equal(databaseDeleteApply.body.type, "database.delete.local");
+  assert.equal(databaseDeleteApply.body.database, null);
+  assert.equal(databaseDeleteApply.body.details.metadataDeleted, true);
+  assert.equal(databaseDeleteApply.body.details.credentialFileDeleted, true);
+  assert.equal(databaseDeleteApply.body.details.credentialsExposed, false);
+  assert.equal(existsSync(rotatedCredentialFile), false);
+  assert.equal(JSON.parse(readFileSync(databasesFile, "utf8"))["node-demo-mariadb-node-demo-app"], undefined);
 
   const storageHtml = await getText(`${baseUrl}/?mode=advanced&section=storage`);
   assert.match(storageHtml, /ops-shell/);
@@ -1298,6 +1919,146 @@ test("Admin Control Center local foundation", async (t) => {
   assert.match(secretsHtmlAfterApply, /ops-shell/);
   assert.doesNotMatch(secretsHtmlAfterApply, /material-plain-value-should-not-leak/);
 
+  const vaultHtml = await getText(`${baseUrl}/?section=vault`);
+  assert.match(vaultHtml, /Aggiungi secret/);
+  assert.match(vaultHtml, /Secret salvati/);
+  assert.doesNotMatch(vaultHtml, /vault-plain-value-should-not-leak/);
+  assert.doesNotMatch(vaultHtml, /existing-github-token-should-reveal-only/);
+
+  const vaultImportPlan = await postJson(`${baseUrl}/control/vault/import-existing`, {});
+  assert.equal(vaultImportPlan.status, 202);
+  assert.equal(vaultImportPlan.body.type, "vault.import-existing");
+  assert.equal(vaultImportPlan.body.details.importableCount >= 3, true);
+  assert.equal(vaultImportPlan.body.details.valueRead, false);
+  assert.doesNotMatch(JSON.stringify(vaultImportPlan.body), /existing-github-token-should-reveal-only/);
+
+  const vaultImportApply = await postJson(`${baseUrl}/control/vault/import-existing`, {
+    confirm: "IMPORT-EXISTING-SECRETS",
+  });
+  assert.equal(vaultImportApply.status, 202);
+  assert.equal(vaultImportApply.body.type, "vault.import-existing.local");
+  assert.equal(vaultImportApply.body.items.length >= 3, true, JSON.stringify(vaultImportApply.body.items.map((item) => item.id)));
+  assert.equal(vaultImportApply.body.items.some((item) => item.id === "platform-local-github-token"), true);
+  assert.equal(vaultImportApply.body.items.some((item) => item.id === "platform-local-long-provider-secret"), true);
+  assert.equal(vaultImportApply.body.items.some((item) => item.id === "platform-local-rclone-rclone-conf"), true);
+  assert.doesNotMatch(JSON.stringify(vaultImportApply.body), /existing-github-token-should-reveal-only/);
+  assert.doesNotMatch(JSON.stringify(vaultImportApply.body), new RegExp(longExistingVaultValue));
+  assert.doesNotMatch(JSON.stringify(vaultImportApply.body), /existing-rclone-token-should-reveal-only/);
+  assert.doesNotMatch(JSON.stringify(vaultImportApply.body), /sealedValue/);
+
+  const importedVaultInventory = await getJson(`${baseUrl}/control/vault`);
+  assert.equal(importedVaultInventory.items.some((item) => item.id === "platform-local-github-token"), true);
+  assert.doesNotMatch(JSON.stringify(importedVaultInventory), /existing-github-token-should-reveal-only/);
+  assert.doesNotMatch(JSON.stringify(importedVaultInventory), /sealedValue/);
+
+  const importedVaultHtml = await getText(`${baseUrl}/?section=vault`);
+  assert.match(importedVaultHtml, /Github Token/);
+  assert.match(importedVaultHtml, /Mostra/);
+  assert.doesNotMatch(importedVaultHtml, /existing-github-token-should-reveal-only/);
+
+  const importedReveal = await postJson(`${baseUrl}/control/vault/secrets/platform-local-github-token/reveal`, {
+    confirm: "REVEAL-VAULT-SECRET:platform-local-github-token",
+  });
+  assert.equal(importedReveal.status, 202);
+  assert.equal(importedReveal.body.type, "vault.item.reveal.local");
+  assert.equal(importedReveal.body.value, "existing-github-token-should-reveal-only");
+  assert.equal(importedReveal.body.details.valueExposed, true);
+
+  const importedLongReveal = await postJson(`${baseUrl}/control/vault/secrets/platform-local-long-provider-secret/reveal`, {
+    confirm: "REVEAL-VAULT-SECRET:platform-local-long-provider-secret",
+  });
+  assert.equal(importedLongReveal.status, 202);
+  assert.equal(importedLongReveal.body.value, longExistingVaultValue);
+
+  const invalidVault = await postJson(`${baseUrl}/control/vault/secrets`, {
+    projectId: "node-demo",
+    targetEnv: "local",
+    itemKey: "bad name!",
+    value: "vault-plain-value-should-not-leak",
+  });
+  assert.equal(invalidVault.status, 422);
+
+  const vaultPlan = await postJson(`${baseUrl}/control/vault/secrets`, {
+    projectId: "node-demo",
+    targetEnv: "local",
+    itemKey: "app_password",
+    label: "Node demo app password",
+    kind: "application",
+    username: "node-demo-user",
+    url: "node-demo.localhost.com",
+    rotationDays: 45,
+    value: "vault-plain-value-should-not-leak",
+  });
+  assert.equal(vaultPlan.status, 202);
+  assert.equal(vaultPlan.body.type, "vault.item.create");
+  assert.equal(vaultPlan.body.dryRun, true);
+  assert.equal(vaultPlan.body.details.valueStored, false);
+  assert.equal(vaultPlan.body.details.valueExposed, false);
+  assert.doesNotMatch(JSON.stringify(vaultPlan.body), /vault-plain-value-should-not-leak/);
+
+  const vaultApply = await postJson(`${baseUrl}/control/vault/secrets`, {
+    projectId: "node-demo",
+    targetEnv: "local",
+    itemKey: "app_password",
+    label: "Node demo app password",
+    kind: "application",
+    username: "node-demo-user",
+    url: "node-demo.localhost.com",
+    rotationDays: 45,
+    value: "vault-plain-value-should-not-leak",
+    confirm: "STORE-VAULT-SECRET",
+  });
+  assert.equal(vaultApply.status, 202);
+  assert.equal(vaultApply.body.type, "vault.item.create.local");
+  assert.equal(vaultApply.body.item.id, "node-demo-local-app-password");
+  assert.equal(vaultApply.body.item.valueStored, true);
+  assert.equal(vaultApply.body.item.valueExposed, false);
+  assert.doesNotMatch(JSON.stringify(vaultApply.body), /vault-plain-value-should-not-leak/);
+  assert.doesNotMatch(JSON.stringify(vaultApply.body), /sealedValue/);
+
+  const vaultRevealPlan = await postJson(`${baseUrl}/control/vault/secrets/node-demo-local-app-password/reveal`, {});
+  assert.equal(vaultRevealPlan.status, 202);
+  assert.equal(vaultRevealPlan.body.type, "vault.item.reveal");
+  assert.equal(vaultRevealPlan.body.details.valueRead, false);
+  assert.doesNotMatch(JSON.stringify(vaultRevealPlan.body), /vault-plain-value-should-not-leak/);
+
+  const vaultRevealApply = await postJson(`${baseUrl}/control/vault/secrets/node-demo-local-app-password/reveal`, {
+    confirm: "REVEAL-VAULT-SECRET:node-demo-local-app-password",
+  });
+  assert.equal(vaultRevealApply.status, 202);
+  assert.equal(vaultRevealApply.body.type, "vault.item.reveal.local");
+  assert.equal(vaultRevealApply.body.value, "vault-plain-value-should-not-leak");
+  assert.equal(vaultRevealApply.body.details.valueRead, true);
+  assert.equal(vaultRevealApply.body.details.valueExposed, true);
+
+  const vaultStateText = readFileSync(vaultFile, "utf8");
+  assert.doesNotMatch(vaultStateText, /vault-plain-value-should-not-leak/);
+  const vaultState = JSON.parse(vaultStateText);
+  assert.equal(vaultState.items["node-demo-local-app-password"].valueStored, true);
+  assert.equal(vaultState.items["node-demo-local-app-password"].sealedValue.alg, "aes-256-gcm");
+  assert.ok(vaultState.items["node-demo-local-app-password"].sealedValue.data.length > 8);
+
+  const vaultInventory = await getJson(`${baseUrl}/control/vault`);
+  assert.equal(vaultInventory.items.some((item) => item.id === "node-demo-local-app-password"), true);
+  assert.doesNotMatch(JSON.stringify(vaultInventory), /vault-plain-value-should-not-leak/);
+  assert.doesNotMatch(JSON.stringify(vaultInventory), /sealedValue/);
+
+  const vaultHtmlAfterApply = await getText(`${baseUrl}/?section=vault`);
+  assert.match(vaultHtmlAfterApply, /Node demo app password/);
+  assert.doesNotMatch(vaultHtmlAfterApply, /vault-plain-value-should-not-leak/);
+  assert.doesNotMatch(vaultHtmlAfterApply, /sealedValue/);
+
+  const vaultDelete = await postJson(`${baseUrl}/control/vault/secrets/node-demo-local-app-password/delete`, {
+    confirm: "DELETE-VAULT-SECRET:node-demo-local-app-password",
+  });
+  assert.equal(vaultDelete.status, 202);
+  assert.equal(vaultDelete.body.type, "vault.item.delete.local");
+  assert.equal(vaultDelete.body.details.valueRead, false);
+  assert.equal(vaultDelete.body.details.valueExposed, false);
+  assert.doesNotMatch(JSON.stringify(vaultDelete.body), /vault-plain-value-should-not-leak/);
+  const vaultStateAfterDelete = JSON.parse(readFileSync(vaultFile, "utf8"));
+  assert.equal(Boolean(vaultStateAfterDelete.items["node-demo-local-app-password"]), false);
+
   const materialRotation = await postJson(`${baseUrl}/control/secrets/materials/node-demo-staging-app-config/rotation`, {
     rotationDays: 30,
     confirm: "UPDATE-MATERIAL-ROTATION",
@@ -1328,15 +2089,10 @@ test("Admin Control Center local foundation", async (t) => {
   assert.equal(materialAccess.body.details.valueExposed, false);
   assert.doesNotMatch(JSON.stringify(materialAccess.body), /material-plain-value-should-not-leak/);
 
-  const resourcesHtml = await getText(`${baseUrl}/?section=resources`);
-  assert.match(resourcesHtml, /Risorse/);
-  assert.match(resourcesHtml, /Uso risorse/);
-  assert.match(resourcesHtml, /Imposta limiti applicazione/);
-  assert.match(resourcesHtml, /Fonte metriche/);
-  assert.match(resourcesHtml, /<th>Container<\/th>/);
-  assert.match(resourcesHtml, /3\.500%/);
-  assert.doesNotMatch(resourcesHtml, /7\.000%/);
-  assert.doesNotMatch(resourcesHtml, /0 core/);
+  const resourcesSummaryBeforeLimits = await getJson(`${baseUrl}/control/resources/summary`);
+  assert.equal(resourcesSummaryBeforeLimits.rows.some((row) => row.applicationId === "node-demo" && row.cpu.includes("3.500%")), true);
+  assert.equal(resourcesSummaryBeforeLimits.rows.some((row) => row.cpu.includes("7.000%")), false);
+  assert.equal(JSON.stringify(resourcesSummaryBeforeLimits).includes("0 core"), false);
 
   const invalidResourceLimit = await postJson(`${baseUrl}/control/resources/limits`, {
     projectId: "node-demo",
@@ -1359,22 +2115,7 @@ test("Admin Control Center local foundation", async (t) => {
   assert.equal(resourceLimitPlan.body.details.dockerTouched, false);
   assert.doesNotMatch(JSON.stringify(resourceLimitPlan.body), /resource-limit-secret-should-not-leak/);
 
-  const stressPlan = await postJson(`${baseUrl}/actions/resource-command`, {
-    action: "stress-test",
-    projectId: "node-demo",
-    confirm: "RUN-STRESS:node-demo",
-    secret: "stress-secret-should-not-leak",
-  });
-  assert.equal(stressPlan.status, 202);
-  assert.equal(stressPlan.body.type, "resources.stress.command");
-  assert.equal(stressPlan.body.dryRun, true);
-  assert.equal(stressPlan.body.details.projectId, "node-demo");
-  assert.match(stressPlan.body.details.command, /scripts\/app-stress-test\.sh/);
-  assert.match(stressPlan.body.details.command, /--confirm-max-load/);
-  assert.doesNotMatch(JSON.stringify(stressPlan.body), /stress-secret-should-not-leak/);
-
-  const resourceLimitApply = await postJson(`${baseUrl}/actions/resource-command`, {
-    action: "limits",
+  const resourceLimitApply = await postJson(`${baseUrl}/control/resources/limits`, {
     projectId: "node-demo",
     cpuMillicores: 750,
     memoryMb: 512,
@@ -1582,8 +2323,9 @@ test("Admin Control Center local foundation", async (t) => {
   assert.doesNotMatch(identityHtml, /identity-secret-should-not-leak/);
 
   const logsHtml = await getText(`${baseUrl}/?section=activity`);
-  assert.match(logsHtml, /Errori, avvisi e problemi/);
-  assert.match(logsHtml, /Alert aperti/);
+  assert.match(logsHtml, /Stato/);
+  assert.doesNotMatch(logsHtml, /Errori, avvisi e problemi/);
+  assert.doesNotMatch(logsHtml, /Alert aperti/);
 
   const invalidAlert = await postJson(`${baseUrl}/control/alerts/record`, {
     service: "waf",
@@ -1804,9 +2546,51 @@ test("Admin Control Center local foundation", async (t) => {
   assert.match(deploymentHtml, /ops-shell/);
   assert.doesNotMatch(deploymentHtml, /Deployment History/);
 
-  const backupsHtml = await getText(`${baseUrl}/?section=backups`);
-  assert.match(backupsHtml, /ops-shell/);
-  assert.doesNotMatch(backupsHtml, /Plan manual backup/);
+  const legacyBackupsHtml = await getText(`${baseUrl}/?section=backups`);
+  assert.match(legacyBackupsHtml, /ops-shell/);
+  assert.match(legacyBackupsHtml, /data-ops-nav-group="status" data-ops-nav-expanded="true"/);
+  assert.doesNotMatch(legacyBackupsHtml, /data-ops-nav-group="backups"|ops-nav-panel-backups|Backup applicazioni|File manager backup|backupProject=/);
+
+  const backupFiles = await getJson(`${baseUrl}/control/backups/files`);
+  assert.equal(backupFiles.available, true);
+  assert.equal(backupFiles.entries.some((entry) => entry.name === "postgres" && entry.type === "directory"), true);
+
+  const postgresBackupFiles = await getJson(`${baseUrl}/control/backups/files?path=postgres`);
+  assert.equal(postgresBackupFiles.entries.some((entry) => entry.name === "node-demo-20260629.dump" && entry.removable === true), true);
+  assert.equal(postgresBackupFiles.entries.some((entry) => entry.name === "preview.txt"), true);
+
+  const applicationBackupFiles = await getJson(`${baseUrl}/control/backups/files?path=applications/node-demo`);
+  assert.equal(applicationBackupFiles.available, true);
+  assert.equal(applicationBackupFiles.entries.some((entry) => entry.name === "node-demo-source-20260629.tar.gz"), true);
+
+  const backupPreview = await getJson(`${baseUrl}/control/backups/preview?path=postgres/preview.txt`);
+  assert.equal(backupPreview.mode, "safe-redacted-preview");
+  assert.match(backupPreview.content, /token=\[redacted\]/);
+  assert.match(backupPreview.content, /healthy=true/);
+  assert.doesNotMatch(JSON.stringify(backupPreview), /backup-secret-should-not-leak/);
+
+  const dumpPreview = await getJson(`${baseUrl}/control/backups/preview?path=postgres/node-demo-20260629.dump`);
+  assert.equal(dumpPreview.type, "postgres-custom-dump");
+  assert.match(dumpPreview.message, /restore drill/);
+
+  const blockedBackupDelete = await postJson(`${baseUrl}/actions/backup-command`, {
+    action: "delete-file",
+    path: "postgres/node-demo-20260629.dump.sha256",
+    confirm: "wrong",
+  });
+  assert.equal(blockedBackupDelete.status, 409);
+  assert.equal(existsSync(path.join(backupsRoot, "postgres", "node-demo-20260629.dump.sha256")), true);
+
+  const backupDelete = await postJson(`${baseUrl}/actions/backup-command`, {
+    action: "delete-file",
+    path: "postgres/node-demo-20260629.dump.sha256",
+    confirm: "ELIMINA-BACKUP-FILE",
+  });
+  assert.equal(backupDelete.status, 202);
+  assert.equal(backupDelete.body.type, "backup.file.delete");
+  assert.equal(backupDelete.body.dryRun, false);
+  assert.equal(backupDelete.body.details.fileDeleted, true);
+  assert.equal(existsSync(path.join(backupsRoot, "postgres", "node-demo-20260629.dump.sha256")), false);
 
   const backupPlan = await postJson(`${baseUrl}/actions/backup-command`, {
     action: "backup",
@@ -1815,11 +2599,89 @@ test("Admin Control Center local foundation", async (t) => {
   });
   assert.equal(backupPlan.status, 202);
   assert.equal(backupPlan.body.type, "backup.run");
-  assert.equal(backupPlan.body.dryRun, true);
+  assert.equal(backupPlan.body.dryRun, false);
   assert.equal(backupPlan.body.backup.action, "backup");
-  assert.equal(backupPlan.body.backup.status, "planned");
+  assert.equal(backupPlan.body.backup.status, "queued");
   assert.equal(backupPlan.body.backup.productionEvidence, false);
+  assert.equal(backupPlan.body.job.status, "queued");
+  assert.equal(existsSync(path.join(backupJobsDir, "queued", `${backupPlan.body.job.id}.json`)), true);
   assert.doesNotMatch(JSON.stringify(backupPlan.body), /backup-secret-should-not-leak/);
+
+  const appBackupPlan = await postJson(`${baseUrl}/actions/backup-command`, {
+    action: "backup",
+    scope: "application",
+    projectId: "node-demo",
+    secret: "backup-secret-should-not-leak",
+  });
+  assert.equal(appBackupPlan.status, 202);
+  assert.equal(appBackupPlan.body.type, "backup.run");
+  assert.equal(appBackupPlan.body.backup.scope, "app-node-demo");
+  assert.equal(appBackupPlan.body.job.commands.some((item) => item.command === "backup-applications"), true);
+  assert.equal(appBackupPlan.body.job.commands.some((item) => item.command === "backup-postgres"), true);
+  assert.equal(appBackupPlan.body.job.commands.some((item) => item.command === "backup-mariadb"), true);
+  assert.equal(appBackupPlan.body.details.backupMode, "all");
+  assert.equal(existsSync(path.join(backupJobsDir, "queued", `${appBackupPlan.body.job.id}.json`)), true);
+  assert.doesNotMatch(JSON.stringify(appBackupPlan.body), /backup-secret-should-not-leak/);
+
+  const appSourceOnlyBackup = await postJson(`${baseUrl}/actions/backup-command`, {
+    action: "backup",
+    scope: "application",
+    projectId: "node-demo",
+    backupMode: "source",
+  });
+  assert.equal(appSourceOnlyBackup.status, 202);
+  assert.equal(appSourceOnlyBackup.body.job.commands.some((item) => item.command === "backup-applications"), true);
+  assert.equal(appSourceOnlyBackup.body.job.commands.some((item) => item.command === "backup-postgres"), false);
+  assert.equal(appSourceOnlyBackup.body.job.commands.some((item) => item.command === "backup-mariadb"), false);
+  assert.equal(appSourceOnlyBackup.body.details.backupMode, "source");
+
+  const appDatabaseOnlyBackup = await postJson(`${baseUrl}/actions/backup-command`, {
+    action: "backup",
+    scope: "application",
+    projectId: "node-demo",
+    backupMode: "database",
+  });
+  assert.equal(appDatabaseOnlyBackup.status, 202);
+  assert.equal(appDatabaseOnlyBackup.body.job.commands.some((item) => item.command === "backup-applications"), false);
+  assert.equal(appDatabaseOnlyBackup.body.job.commands.some((item) => item.command === "backup-postgres"), true);
+  assert.equal(appDatabaseOnlyBackup.body.job.commands.some((item) => item.command === "backup-mariadb"), true);
+  assert.equal(appDatabaseOnlyBackup.body.details.backupMode, "database");
+
+  const appRestorePlan = await postJson(`${baseUrl}/actions/backup-command`, {
+    action: "restore",
+    scope: "application",
+    projectId: "node-demo",
+    backupRef: "applications/node-demo/node-demo-source-20260629.tar.gz",
+    restoreMode: "source",
+    secret: "backup-secret-should-not-leak",
+  });
+  assert.equal(appRestorePlan.status, 202);
+  assert.equal(appRestorePlan.body.type, "restore.plan");
+  assert.equal(appRestorePlan.body.dryRun, true);
+  assert.equal(appRestorePlan.body.details.scope, "app-node-demo");
+  assert.equal(appRestorePlan.body.details.projectId, "node-demo");
+  assert.equal(appRestorePlan.body.details.backupRef, "applications/node-demo/node-demo-source-20260629.tar.gz");
+  assert.equal(appRestorePlan.body.details.restoreMode, "source");
+  assert.equal(appRestorePlan.body.details.dataChanged, false);
+  assert.equal(appRestorePlan.body.backup.action, "restore-drill");
+  assert.equal(appRestorePlan.body.backup.status, "planned");
+  assert.equal(appRestorePlan.body.backup.scope, "app-node-demo");
+  assert.equal(appRestorePlan.body.backup.backupRef, "applications/node-demo/node-demo-source-20260629.tar.gz");
+  assert.doesNotMatch(JSON.stringify(appRestorePlan.body), /backup-secret-should-not-leak/);
+
+  const appDatabaseRestorePlan = await postJson(`${baseUrl}/actions/backup-command`, {
+    action: "restore",
+    scope: "application",
+    projectId: "node-demo",
+    backupRef: "applications/node-demo/node-demo-source-20260629.tar.gz",
+    restoreMode: "database",
+  });
+  assert.equal(appDatabaseRestorePlan.status, 202);
+  assert.equal(appDatabaseRestorePlan.body.type, "restore.queue");
+  assert.equal(appDatabaseRestorePlan.body.details.restoreMode, "database");
+  assert.equal(appDatabaseRestorePlan.body.job.restoreMode, "database");
+  assert.equal(appDatabaseRestorePlan.body.job.commands.some((item) => item.command === "restore-test-postgres"), true);
+  assert.equal(appDatabaseRestorePlan.body.job.commands.some((item) => item.command === "restore-test-mariadb"), true);
 
   const restorePlan = await postJson(`${baseUrl}/actions/backup-command`, {
     action: "restore",
@@ -1827,14 +2689,23 @@ test("Admin Control Center local foundation", async (t) => {
     backupRef: "latest",
   });
   assert.equal(restorePlan.status, 202);
-  assert.equal(restorePlan.body.type, "restore.plan");
-  assert.equal(restorePlan.body.dryRun, true);
+  assert.equal(restorePlan.body.type, "restore.queue");
+  assert.equal(restorePlan.body.dryRun, false);
   assert.equal(restorePlan.body.details.dataChanged, false);
   assert.equal(restorePlan.body.backup.action, "restore-drill");
+  assert.equal(restorePlan.body.backup.status, "queued");
   assert.equal(restorePlan.body.backup.backupRef, "latest");
+  assert.equal(existsSync(path.join(backupJobsDir, "queued", `${restorePlan.body.job.id}.json`)), true);
+
+  const backupJobs = await getJson(`${baseUrl}/control/backups/jobs`);
+  assert.equal(backupJobs.jobs.some((job) => job.id === backupPlan.body.job.id && job.queueStatus === "queued"), true);
+  assert.equal(backupJobs.jobs.some((job) => job.id === appBackupPlan.body.job.id && job.scope === "app-node-demo" && job.queueStatus === "queued"), true);
+  assert.equal(backupJobs.jobs.some((job) => job.id === restorePlan.body.job.id && job.queueStatus === "queued"), true);
 
   const backupRecords = await getJson(`${baseUrl}/control/backups/records`);
   assert.equal(backupRecords.records.some((record) => record.id === backupPlan.body.backup.id), true);
+  assert.equal(backupRecords.records.some((record) => record.id === appBackupPlan.body.backup.id && record.scope === "app-node-demo"), true);
+  assert.equal(backupRecords.records.some((record) => record.id === appRestorePlan.body.backup.id && record.scope === "app-node-demo"), true);
   assert.equal(backupRecords.records.some((record) => record.id === restorePlan.body.backup.id), true);
   assert.equal(existsSync(backupRecordsFile), true);
   const backupRecordsText = readFileSync(backupRecordsFile, "utf8");
@@ -1937,6 +2808,7 @@ test("Admin Control Center defaults to platform-only without hosted project disc
   const isolatedIdentityAccessFile = path.join(isolatedStateDir, "identity-access.json");
   const isolatedDeploymentsFile = path.join(isolatedStateDir, "deployments.jsonl");
   const isolatedBackupRecordsFile = path.join(isolatedStateDir, "backups.jsonl");
+  const isolatedBackupJobsDir = path.join(isolatedStateDir, "backup-jobs");
   const isolatedResourceLimitsFile = path.join(isolatedStateDir, "resource-limits.json");
   const isolatedSecurityPoliciesFile = path.join(isolatedStateDir, "security-policies.json");
   const isolatedAlertsFile = path.join(isolatedStateDir, "alerts.json");
@@ -1957,6 +2829,8 @@ test("Admin Control Center defaults to platform-only without hosted project disc
       ...process.env,
       CONTROL_CENTER_PORT: String(port),
       CONTROL_CENTER_ENV: "local",
+      CONTROL_CENTER_DATABASE_LIVE_APPLY: "false",
+      CONTROL_CENTER_DISCOVER_HOSTED_PROJECTS: "false",
       CONTROL_CENTER_DOCS_ROOT: infraRoot,
       PROJECTS_ROOT: isolatedProjectsRoot,
       PROJECT_STATE_FILE: isolatedProjectStateFile,
@@ -1971,6 +2845,7 @@ test("Admin Control Center defaults to platform-only without hosted project disc
       PROJECT_IDENTITY_ACCESS_FILE: isolatedIdentityAccessFile,
       PROJECT_DEPLOYMENTS_FILE: isolatedDeploymentsFile,
       PROJECT_BACKUP_RECORDS_FILE: isolatedBackupRecordsFile,
+      PROJECT_BACKUP_JOBS_DIR: isolatedBackupJobsDir,
       PROJECT_RESOURCE_LIMITS_FILE: isolatedResourceLimitsFile,
       PROJECT_SECURITY_POLICIES_FILE: isolatedSecurityPoliciesFile,
       PROJECT_ALERTS_FILE: isolatedAlertsFile,
@@ -2037,6 +2912,7 @@ test("Admin Control Center browses project root symlinks inside projects root", 
       ...process.env,
       CONTROL_CENTER_PORT: String(port),
       CONTROL_CENTER_ENV: "local",
+      CONTROL_CENTER_DATABASE_LIVE_APPLY: "false",
       CONTROL_CENTER_DISCOVER_HOSTED_PROJECTS: "true",
       CONTROL_CENTER_DOCS_ROOT: infraRoot,
       PROJECTS_ROOT: isolatedProjectsRoot,
@@ -2091,6 +2967,7 @@ test("Admin Control Center admin guard", async (t) => {
       ...process.env,
       CONTROL_CENTER_PORT: String(port),
       CONTROL_CENTER_ENV: "local",
+      CONTROL_CENTER_DATABASE_LIVE_APPLY: "false",
       CONTROL_CENTER_AUTH_REQUIRED: "true",
       CONTROL_CENTER_DISCOVER_HOSTED_PROJECTS: "true",
       CONTROL_CENTER_ADMIN_PASSWORD_SHA256: createHash("sha256").update(adminInput).digest("hex"),
@@ -2189,10 +3066,24 @@ function prepareFixture() {
   rmSync(testRoot, { recursive: true, force: true });
   mkdirSync(path.join(projectsRoot, "php-demo", "public"), { recursive: true });
   mkdirSync(path.join(projectsRoot, "node-demo"), { recursive: true });
+  mkdirSync(path.join(projectsRoot, "node-demo", "src"), { recursive: true });
+  mkdirSync(path.join(backupsRoot, "postgres"), { recursive: true });
+  mkdirSync(path.join(backupsRoot, "applications", "node-demo"), { recursive: true });
+  mkdirSync(path.join(existingSecretsDir, "rclone"), { recursive: true });
   mkdirSync(stateDir, { recursive: true });
   writeFileSync(path.join(projectsRoot, "php-demo", "public", "index.php"), "<?php echo 'php-demo';\n");
   writeFileSync(path.join(projectsRoot, "node-demo", "package.json"), `${JSON.stringify({ scripts: { start: "node server.js" } }, null, 2)}\n`);
+  writeFileSync(path.join(projectsRoot, "node-demo", "src", "index.js"), "console.log('node-demo');\n");
   writeFileSync(path.join(projectsRoot, "node-demo", ".env"), "DB_NAME=\"node_demo_external\"\nDB_PASSWORD=\"db-password-should-not-leak\"\n");
+  writeFileSync(vaultKeyFile, "test-vault-encryption-key\n", { mode: 0o600 });
+  writeFileSync(path.join(backupsRoot, "postgres", "node-demo-20260629.dump"), "fixture-backup-data\n");
+  writeFileSync(path.join(backupsRoot, "postgres", "node-demo-20260629.dump.sha256"), "fixture-sha256\n");
+  writeFileSync(path.join(backupsRoot, "postgres", "preview.txt"), "token=backup-secret-should-not-leak\nhealthy=true\n");
+  writeFileSync(path.join(backupsRoot, "applications", "node-demo", "node-demo-source-20260629.tar.gz"), "fixture-source-archive\n");
+  writeFileSync(path.join(existingSecretsDir, "github_token.txt"), "existing-github-token-should-reveal-only\n", { mode: 0o600 });
+  writeFileSync(path.join(existingSecretsDir, "long_provider_secret.txt"), `${longExistingVaultValue}\n`, { mode: 0o600 });
+  writeFileSync(path.join(existingSecretsDir, "rclone", "rclone.conf"), "[onedrive]\ntoken = existing-rclone-token-should-reveal-only\n", { mode: 0o600 });
+  writeFileSync(path.join(existingSecretsDir, "README.md"), "not imported\n");
   writeFileSync(dockerStatsFile, `${JSON.stringify({
     capturedAt: "2026-06-28T00:00:00.000Z",
     containers: [
@@ -2232,10 +3123,14 @@ function isolatedStateEnv(stateRoot) {
     PROJECT_DATABASES_FILE: path.join(stateRoot, "databases.json"),
     PROJECT_STORAGE_BUCKETS_FILE: path.join(stateRoot, "storage-buckets.json"),
     PROJECT_SENSITIVE_MATERIALS_FILE: path.join(stateRoot, "sensitive-materials.json"),
+    PROJECT_VAULT_FILE: path.join(stateRoot, "secret-vault.json"),
+    CONTROL_CENTER_VAULT_KEY_FILE: path.join(stateRoot, "vault.key"),
+    CONTROL_CENTER_EXISTING_SECRETS_DIR: path.join(stateRoot, "existing-secrets"),
     PROJECT_WORKER_JOBS_FILE: path.join(stateRoot, "worker-jobs.json"),
     PROJECT_IDENTITY_ACCESS_FILE: path.join(stateRoot, "identity-access.json"),
     PROJECT_DEPLOYMENTS_FILE: path.join(stateRoot, "deployments.jsonl"),
     PROJECT_BACKUP_RECORDS_FILE: path.join(stateRoot, "backups.jsonl"),
+    PROJECT_BACKUP_JOBS_DIR: path.join(stateRoot, "backup-jobs"),
     PROJECT_RESOURCE_LIMITS_FILE: path.join(stateRoot, "resource-limits.json"),
     PROJECT_SECURITY_POLICIES_FILE: path.join(stateRoot, "security-policies.json"),
     PROJECT_ALERTS_FILE: path.join(stateRoot, "alerts.json"),

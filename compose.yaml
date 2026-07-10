@@ -251,7 +251,12 @@ services:
       retries: 10
 
   control-center:
-    image: ${NODE_IMAGE:-node:26.3.1-alpine@sha256:a2dc166a387cc6ca1e62d0c8e265e49ca985d6e60abc9fe6e6c3d6ce8e63f606}
+    image: ${CONTROL_CENTER_IMAGE:-platform/control-center:local}
+    build:
+      context: .
+      dockerfile: docker/control-center.Dockerfile
+      args:
+        NODE_IMAGE: ${NODE_IMAGE:-node:26.3.1-alpine@sha256:a2dc166a387cc6ca1e62d0c8e265e49ca985d6e60abc9fe6e6c3d6ce8e63f606}
     container_name: enterprise-control-center
     init: true
     pids_limit: 512
@@ -273,8 +278,15 @@ services:
       CONTROL_CENTER_ADMIN_PASSWORD_SHA256: ${CONTROL_CENTER_ADMIN_PASSWORD_SHA256:-}
       CONTROL_CENTER_SESSION_KEYS_FILE: /run/secrets/projects_gateway_signing_keys
       CONTROL_CENTER_PHPPGADMIN_INTERNAL_URL: ${CONTROL_CENTER_PHPPGADMIN_INTERNAL_URL:-http://phppgadmin:80}
+      CONTROL_CENTER_DATABASE_LIVE_APPLY: ${CONTROL_CENTER_DATABASE_LIVE_APPLY:-false}
+      CONTROL_CENTER_MARIADB_HOST: ${CONTROL_CENTER_MARIADB_HOST:-mariadb}
+      CONTROL_CENTER_MARIADB_PORT: ${CONTROL_CENTER_MARIADB_PORT:-3306}
+      CONTROL_CENTER_MARIADB_ROOT_USER: ${CONTROL_CENTER_MARIADB_ROOT_USER:-root}
+      CONTROL_CENTER_MARIADB_ROOT_PASSWORD_FILE: /run/secrets/mariadb_root_password
       CONTROL_CENTER_POSTGRES_HOST: ${CONTROL_CENTER_POSTGRES_HOST:-postgres}
       CONTROL_CENTER_POSTGRES_PORT: ${CONTROL_CENTER_POSTGRES_PORT:-5432}
+      CONTROL_CENTER_POSTGRES_SUPERUSER: ${POSTGRES_SUPERUSER:-postgres}
+      CONTROL_CENTER_POSTGRES_SUPERUSER_PASSWORD_FILE: /run/secrets/postgres_superuser_password
       CONTROL_CENTER_POSTGRES_APP_USER: ${APP_DB_USER:-app_user}
       CONTROL_CENTER_POSTGRES_APP_PASSWORD_FILE: /run/secrets/app_db_password
       CONTROL_CENTER_DOCS_ROOT: /var/www/infra-docs
@@ -287,6 +299,9 @@ services:
       PROJECT_DATABASES_FILE: /var/www/project-state/databases.json
       PROJECT_STORAGE_BUCKETS_FILE: /var/www/project-state/storage-buckets.json
       PROJECT_SENSITIVE_MATERIALS_FILE: /var/www/project-state/sensitive-materials.json
+      PROJECT_VAULT_FILE: /var/www/project-state/secret-vault.json
+      CONTROL_CENTER_VAULT_KEY_FILE: /run/secrets/projects_gateway_signing_keys
+      CONTROL_CENTER_EXISTING_SECRETS_DIR: /var/www/infra-docs/secrets
       PROJECT_WORKER_JOBS_FILE: /var/www/project-state/worker-jobs.json
       PROJECT_IDENTITY_ACCESS_FILE: /var/www/project-state/identity-access.json
       PROJECT_DEPLOYMENTS_FILE: /var/www/project-state/deployments.jsonl
@@ -319,6 +334,8 @@ services:
     secrets:
       - projects_gateway_signing_keys
       - app_db_password
+      - mariadb_root_password
+      - postgres_superuser_password
     networks:
       - enterprise_net
     healthcheck:
@@ -441,6 +458,8 @@ services:
     environment:
       PHPPGADMIN_HOST: ${CONTROL_CENTER_POSTGRES_HOST:-postgres}
       PHPPGADMIN_PORT: ${CONTROL_CENTER_POSTGRES_PORT:-5432}
+    volumes:
+      - ./phppgadmin/config.inc.php:/etc/phppgadmin/config.inc.php:ro
     depends_on:
       postgres:
         condition: service_healthy

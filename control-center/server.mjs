@@ -1,9 +1,11 @@
 import { createServer, request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
-import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, statfsSync, writeFileSync, appendFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, statfsSync, writeFileSync, appendFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { gunzipSync } from "node:zlib";
 import { controlCenterScriptTags, controlCenterStylesheetLinks, controlCenterUiContract } from "./components/ui/controlCenterUi.mjs";
 
 const port = Number(process.env.CONTROL_CENTER_PORT || 8080);
@@ -12,18 +14,28 @@ const controlCenterStylesRoot = process.env.CONTROL_CENTER_STYLES_ROOT || path.j
 const publicRoot = process.env.CONTROL_CENTER_PUBLIC_ROOT || path.join(appRoot, "public");
 const projectsRoot = process.env.PROJECTS_ROOT || "/var/www/projects";
 const docsRoot = process.env.CONTROL_CENTER_DOCS_ROOT || "/var/www/infra-docs";
+const platformInfraRoot = process.env.CONTROL_CENTER_INFRA_ROOT || process.env.PLATFORM_INFRA_ROOT || docsRoot;
+const backupRoot = process.env.CONTROL_CENTER_BACKUP_ROOT || path.join(platformInfraRoot, "backups");
 const stateFile = process.env.PROJECT_STATE_FILE || "/var/www/project-state/projects.json";
 const auditFile = process.env.PROJECT_AUDIT_FILE || "/var/www/project-state/audit.jsonl";
 const operationsFile = process.env.PROJECT_OPERATIONS_FILE || "/var/www/project-state/operations.jsonl";
 const applicationsFile = process.env.PROJECT_APPLICATIONS_FILE || "/var/www/project-state/applications.json";
 const domainsFile = process.env.PROJECT_DOMAINS_FILE || "/var/www/project-state/domains.json";
 const databasesFile = process.env.PROJECT_DATABASES_FILE || "/var/www/project-state/databases.json";
+const databaseCredentialDir = process.env.PROJECT_DATABASE_CREDENTIAL_DIR || path.join(path.dirname(databasesFile), "database-credentials");
 const storageBucketsFile = process.env.PROJECT_STORAGE_BUCKETS_FILE || "/var/www/project-state/storage-buckets.json";
 const sensitiveMaterialsFile = process.env.PROJECT_SENSITIVE_MATERIALS_FILE || "/var/www/project-state/sensitive-materials.json";
+const vaultFile = process.env.PROJECT_VAULT_FILE || "/var/www/project-state/secret-vault.json";
+const vaultKeyFile = process.env.CONTROL_CENTER_VAULT_KEY_FILE || process.env.CONTROL_CENTER_SESSION_KEYS_FILE || "";
+const vaultKeyMaterial = process.env.CONTROL_CENTER_VAULT_KEY || "";
+const existingSecretsDir = process.env.CONTROL_CENTER_EXISTING_SECRETS_DIR || path.join(platformInfraRoot, "secrets");
+const includeRunSecretsInVaultImport = parseBoolean(process.env.CONTROL_CENTER_IMPORT_RUN_SECRETS || "");
+const vaultRevealTtlMs = clampNumber(Number(process.env.CONTROL_CENTER_VAULT_REVEAL_TTL_MS || 120000), 10000, 600000);
 const workerJobsFile = process.env.PROJECT_WORKER_JOBS_FILE || "/var/www/project-state/worker-jobs.json";
 const identityAccessFile = process.env.PROJECT_IDENTITY_ACCESS_FILE || "/var/www/project-state/identity-access.json";
 const deploymentsFile = process.env.PROJECT_DEPLOYMENTS_FILE || "/var/www/project-state/deployments.jsonl";
 const backupRecordsFile = process.env.PROJECT_BACKUP_RECORDS_FILE || "/var/www/project-state/backups.jsonl";
+const backupJobsDir = process.env.PROJECT_BACKUP_JOBS_DIR || "/var/www/project-state/backup-jobs";
 const resourceLimitsFile = process.env.PROJECT_RESOURCE_LIMITS_FILE || "/var/www/project-state/resource-limits.json";
 const securityPoliciesFile = process.env.PROJECT_SECURITY_POLICIES_FILE || "/var/www/project-state/security-policies.json";
 const alertsFile = process.env.PROJECT_ALERTS_FILE || "/var/www/project-state/alerts.json";
@@ -57,17 +69,20 @@ const projectDiskUsageTtlMs = clampNumber(Number(process.env.CONTROL_CENTER_PROJ
 const projectDiskUsageCache = new Map();
 const phpMyAdminInternalUrl = String(process.env.CONTROL_CENTER_PHPMYADMIN_INTERNAL_URL || "http://phpmyadmin:80").replace(/\/$/, "");
 const phpPgAdminInternalUrl = String(process.env.CONTROL_CENTER_PHPPGADMIN_INTERNAL_URL || "http://phppgadmin:80").replace(/\/$/, "");
+const databaseLiveApply = parseBoolean(process.env.CONTROL_CENTER_DATABASE_LIVE_APPLY || "");
+const mariadbHost = normalizeHost(process.env.CONTROL_CENTER_MARIADB_HOST || "mariadb");
+const mariadbPort = clampNumber(Number(process.env.CONTROL_CENTER_MARIADB_PORT || 3306), 1, 65535);
+const mariadbRootUser = sanitizeDatabasePrincipal(process.env.CONTROL_CENTER_MARIADB_ROOT_USER || "root") || "root";
+const mariadbRootPasswordFile = process.env.CONTROL_CENTER_MARIADB_ROOT_PASSWORD_FILE || "";
 const postgresHost = normalizeHost(process.env.CONTROL_CENTER_POSTGRES_HOST || "postgres");
 const postgresPort = clampNumber(Number(process.env.CONTROL_CENTER_POSTGRES_PORT || 5432), 1, 65535);
+const postgresSuperuser = sanitizeDatabasePrincipal(process.env.CONTROL_CENTER_POSTGRES_SUPERUSER || "postgres") || "postgres";
+const postgresSuperuserPasswordFile = process.env.CONTROL_CENTER_POSTGRES_SUPERUSER_PASSWORD_FILE || "";
 const postgresAppUser = sanitizeDatabasePrincipal(process.env.CONTROL_CENTER_POSTGRES_APP_USER || process.env.APP_DB_USER || "app_user") || "app_user";
-const appStressProfiles = String(process.env.CONTROL_CENTER_APP_STRESS_PROFILES || "100,250,500,1000").trim();
-const appStressDurationSeconds = clampNumber(Number(process.env.CONTROL_CENTER_APP_STRESS_DURATION_SECONDS || 60), 5, 3600);
-const appStressPerUserRps = Number(process.env.CONTROL_CENTER_APP_STRESS_PER_USER_RPS || 0.5);
-const appStressMaxConcurrency = clampNumber(Number(process.env.CONTROL_CENTER_APP_STRESS_MAX_CONCURRENCY || 1000), 1, 10000);
-const appStressMaxP95Ms = clampNumber(Number(process.env.CONTROL_CENTER_APP_STRESS_MAX_P95_MS || 2500), 100, 60000);
 const statusWafUrl = String(process.env.CONTROL_CENTER_STATUS_WAF_URL || "https://waf:8443").replace(/\/$/, "");
 const statusProbeTimeoutMs = clampNumber(Number(process.env.CONTROL_CENTER_STATUS_PROBE_TIMEOUT_MS || 4000), 500, 15000);
 const statusProbeTlsVerify = parseBoolean(process.env.CONTROL_CENTER_STATUS_TLS_VERIFY || "");
+const statusRunStepDelayMs = clampNumber(Number(process.env.CONTROL_CENTER_STATUS_STEP_DELAY_MS || 1500), 0, 10000);
 
 const docs = {
   "Overview": [
@@ -217,6 +232,11 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    if (req.method === "POST" && url.pathname === "/actions/vault-command") {
+      await handleVaultCommand(req, res, context);
+      return;
+    }
+
     if (req.method === "POST" && url.pathname === "/actions/worker-job-command") {
       await handleWorkerJobCommand(req, res, context);
       return;
@@ -229,11 +249,6 @@ const server = createServer(async (req, res) => {
 
     if (req.method === "POST" && url.pathname === "/actions/backup-command") {
       await handleBackupCommand(req, res, context);
-      return;
-    }
-
-    if (req.method === "POST" && url.pathname === "/actions/resource-command") {
-      await handleResourceCommand(req, res, context);
       return;
     }
 
@@ -416,6 +431,15 @@ async function handleApi(req, res, url, context) {
     if (method === "POST" && parts.length === 5 && route([parts[0], parts[1], parts[2], parts[4]], "control", "secrets", "materials", "access")) {
       return json(res, planMaterialAccessAudit(parts[3], payload, context), 202);
     }
+    if (method === "GET" && route(parts, "control", "vault")) return json(res, { items: context.vaultItems, overview: context.overview.vault });
+    if (method === "POST" && route(parts, "control", "vault", "secrets")) return json(res, planVaultSecretCreate(payload, context), 202);
+    if (method === "POST" && route(parts, "control", "vault", "import-existing")) return json(res, planVaultSecretImportExisting(payload, context), 202);
+    if (method === "POST" && parts.length === 5 && route([parts[0], parts[1], parts[2], parts[4]], "control", "vault", "secrets", "reveal")) {
+      return json(res, planVaultSecretReveal(parts[3], payload, context), 202);
+    }
+    if (method === "POST" && parts.length === 5 && route([parts[0], parts[1], parts[2], parts[4]], "control", "vault", "secrets", "delete")) {
+      return json(res, planVaultSecretDelete(parts[3], payload, context), 202);
+    }
 
     if (method === "GET" && route(parts, "control", "workers-jobs")) {
       return json(res, { workers: context.workerRuntimes, queues: context.jobQueues, jobs: context.jobRecords, schedules: context.jobSchedules });
@@ -493,7 +517,11 @@ async function handleApi(req, res, url, context) {
     if (method === "POST" && route(parts, "control", "settings", "local")) return json(res, planSettingsUpdate(payload, context), 202);
     if (method === "GET" && route(parts, "control", "backups", "summary")) return json(res, context.backups);
     if (method === "GET" && route(parts, "control", "backups", "records")) return json(res, { records: context.backupRecords });
-    if (method === "POST" && route(parts, "control", "backups", "run")) return json(res, planBackupRun(payload, context), 202);
+    if (method === "GET" && route(parts, "control", "backups", "jobs")) return json(res, { jobs: readBackupJobs() });
+    if (method === "GET" && route(parts, "control", "backups", "files")) return json(res, readBackupFiles(url.searchParams.get("path") || ""));
+    if (method === "GET" && route(parts, "control", "backups", "preview")) return json(res, readBackupPreview(url.searchParams.get("path") || ""));
+    if (method === "POST" && route(parts, "control", "backups", "run")) return json(res, queueBackupRun(payload, context), 202);
+    if (method === "POST" && route(parts, "control", "backups", "files", "delete")) return json(res, applyBackupFileDelete(payload, context), 202);
     if (method === "POST" && route(parts, "control", "restore", "plan")) return json(res, planRestore(payload, context), 202);
 
     if (method === "GET" && route(parts, "control", "deployments")) return json(res, { deployments: context.deployments });
@@ -551,11 +579,16 @@ async function handleToggleProject(req, res, projects) {
 }
 
 async function handleStatusCheck(req, res, context) {
-  const run = await runStatusVerification(context);
+  const payload = await readPayload(req);
+  const run = await runStatusVerification(context, {
+    scope: payload.scope,
+    category: payload.category,
+    checkId: payload.checkId,
+  });
   appendStatusRun(run);
   appendAudit({
     action: "status.verify.run",
-    target: "platform-infrastructure",
+    target: run.target || "platform-infrastructure",
     environment: context.environment,
     risk: "low",
     result: run.status === "passed" ? "success" : run.status === "failed" ? "failed" : "warning",
@@ -684,6 +717,9 @@ async function handleDatabaseCommand(req, res, context) {
   let operation;
   try {
     if (action === "create") operation = planDatabaseCreate(payload, context);
+    else if (action === "update") operation = planDatabaseUpdate(payload.id || payload.databaseId || "", payload, context);
+    else if (action === "delete") operation = planDatabaseDelete(payload.id || payload.databaseId || "", payload, context);
+    else if (action === "credential") operation = planDatabaseCredentialUpdate(payload.id || payload.databaseId || "", payload, context);
     else if (action === "backup") operation = planDatabaseBackup(payload.id || payload.databaseId || "", payload, context);
     else if (action === "restore") operation = planDatabaseRestore(payload.id || payload.databaseId || "", payload, context);
     else throw new ValidationError("Unsupported database action.");
@@ -702,7 +738,21 @@ async function handleDatabaseCommand(req, res, context) {
     json(res, operation, 202);
     return;
   }
-  redirect(res, `/?section=databases#database-${encodeURIComponent(operation.details?.databaseId || operation.database?.id || "")}`);
+  redirect(res, databaseCommandRedirect(payload, operation));
+}
+
+function databaseCommandRedirect(payload, operation) {
+  const returnTo = sanitizeIdentifier(payload.returnTo || "");
+  const projectId = sanitizeIdentifier(payload.projectId || operation?.details?.projectId || operation?.database?.projectId || "");
+  const databaseId = sanitizeIdentifier(operation?.details?.databaseId || operation?.database?.id || "");
+  if (returnTo === "project-detail" && projectId) {
+    return `/?section=projects&project=${encodeURIComponent(projectId)}#project-databases`;
+  }
+  if (payload.openAfterCreate === "admin" && operation?.database) {
+    const adminAction = databaseAdminAction(operation.database);
+    return adminAction.href;
+  }
+  return `/?section=databases#database-${encodeURIComponent(databaseId)}`;
 }
 
 async function handleDatabaseAdminLogin(req, res, context) {
@@ -727,7 +777,7 @@ async function openPhpMyAdminDatabase(res, context, payload) {
     const credential = resolveMariaDbCredential(database, project);
     if (!credential) {
       appendAudit({ action: "database.phpmyadmin.login", target: database.id, environment: context.environment, risk: "medium", result: "rejected", dryRun: true, summary: "phpMyAdmin app-scoped login rejected because no per-app database credential was found." });
-      renderTransientMessage(res, 409, "Accesso phpMyAdmin non configurato", `Non ho trovato credenziali MariaDB limitate per ${databaseDisplayName(database)}. Configura DB_USER/DB_PASSWORD dell'app o metadata adminUser/adminPasswordFile.`);
+      renderTransientMessage(res, 409, "Accesso phpMyAdmin non configurato", `Non ho trovato credenziali MariaDB dedicate per ${databaseDisplayName(database)}. Salva una password per questo database dalla scheda applicazione, poi riapri phpMyAdmin.`);
       return;
     }
     const login = await phpMyAdminLogin(database, credential);
@@ -844,6 +894,33 @@ async function handleMaterialCommand(req, res, context) {
   redirect(res, `/?mode=advanced&section=secrets#material-${encodeURIComponent(operation.details?.materialId || operation.material?.id || "")}`);
 }
 
+async function handleVaultCommand(req, res, context) {
+  const payload = await readPayload(req);
+  const action = String(payload.action || "");
+  let operation;
+  try {
+    if (action === "create") operation = planVaultSecretCreate(payload, context);
+    else if (action === "delete") operation = planVaultSecretDelete(payload.id || payload.itemId || "", payload, context);
+    else if (action === "import-existing") operation = planVaultSecretImportExisting(payload, context);
+    else throw new ValidationError("Unsupported vault action.");
+  } catch (error) {
+    if (error instanceof ValidationError) {
+      json(res, { error: "validation_failed", message: error.message }, 422);
+      return;
+    }
+    if (error instanceof RejectedOperationError) {
+      json(res, { error: "operation_rejected", message: error.message }, 409);
+      return;
+    }
+    throw error;
+  }
+  if (wantsJson(req)) {
+    json(res, operation, 202);
+    return;
+  }
+  redirect(res, `/?section=vault#vault-${encodeURIComponent(operation.details?.itemId || operation.item?.id || "")}`);
+}
+
 async function handleWorkerJobCommand(req, res, context) {
   const payload = await readPayload(req);
   const action = String(payload.action || "");
@@ -908,8 +985,9 @@ async function handleBackupCommand(req, res, context) {
   const action = String(payload.action || "");
   let operation;
   try {
-    if (action === "backup") operation = planBackupRun(payload, context);
-    else if (action === "restore") operation = planRestore(payload, context);
+    if (action === "backup") operation = queueBackupRun(payload, context);
+    else if (action === "restore") operation = queueRestoreDrill(payload, context);
+    else if (action === "delete-file") operation = applyBackupFileDelete(payload, context);
     else throw new ValidationError("Unsupported backup action.");
   } catch (error) {
     if (error instanceof ValidationError) {
@@ -926,33 +1004,16 @@ async function handleBackupCommand(req, res, context) {
     json(res, operation, 202);
     return;
   }
-  redirect(res, "/?section=backups");
+  redirect(res, backupCommandRedirect(payload, operation));
 }
 
-async function handleResourceCommand(req, res, context) {
-  const payload = await readPayload(req);
-  const action = String(payload.action || "");
-  let operation;
-  try {
-    if (action === "limits") operation = planResourceLimitUpdate(payload, context);
-    else if (action === "stress-test") operation = planApplicationStressTest(payload, context);
-    else throw new ValidationError("Unsupported resource action.");
-  } catch (error) {
-    if (error instanceof ValidationError) {
-      json(res, { error: "validation_failed", message: error.message }, 422);
-      return;
-    }
-    if (error instanceof RejectedOperationError) {
-      json(res, { error: "operation_rejected", message: error.message }, 409);
-      return;
-    }
-    throw error;
+function backupCommandRedirect(payload, operation) {
+  const returnTo = sanitizeIdentifier(payload.returnTo || "");
+  const projectId = sanitizeIdentifier(payload.projectId || operation?.details?.projectId || "");
+  if (returnTo === "project-detail" && projectId) {
+    return `/?section=projects&project=${encodeURIComponent(projectId)}#project-backups`;
   }
-  if (wantsJson(req)) {
-    json(res, operation, 202);
-    return;
-  }
-  redirect(res, `/?section=resources#resources-${encodeURIComponent(operation.details?.projectId || operation.resourceLimit?.projectId || "")}`);
+  return "/?section=projects";
 }
 
 async function handleSecurityCommand(req, res, context) {
@@ -1121,6 +1182,12 @@ async function buildContext({ projects, state }) {
     .filter((material) => material && !material.deletedAt)
     .map((material) => sensitiveMaterialRecord(material))
     .sort((a, b) => `${a.projectId}:${a.environment}:${a.materialName}`.localeCompare(`${b.projectId}:${b.environment}:${b.materialName}`));
+  const vaultItems = Object.values(readVaultState().items || {})
+    .filter((item) => item && !item.deletedAt)
+    .map((item) => vaultItemRecord(item))
+    .sort((a, b) => `${a.projectId}:${a.environment}:${a.itemKey}`.localeCompare(`${b.projectId}:${b.environment}:${b.itemKey}`));
+  const existingVaultCandidates = readExistingSecretCandidates();
+  const existingVaultImport = summarizeExistingSecretImport(existingVaultCandidates, vaultItems);
   const workerJobsState = readWorkerJobsState();
   const defaultWorkerRuntimes = [
     workerRuntimeRecord({
@@ -1247,14 +1314,7 @@ async function buildContext({ projects, state }) {
     policies: securityPolicies,
     recentAuditEvents: recentSecurityAudit,
   };
-  const backups = {
-    mode: environment,
-    manualBackup: "plan-only-from-control-center",
-    restoreDrill: "available-through-infra-ops",
-    offsite: process.env.BACKUP_SCHEDULER_ENABLE_OFFSITE === "true" ? "configured" : "not-configured",
-    rpoRto: "reported-by-production-go-no-go-evidence",
-    latest: backupRecords.slice(0, 5),
-  };
+  const backups = buildBackupInventory(backupRecords);
   const alertRecords = Object.values(storedAlerts)
     .filter((alert) => alert && !alert.deletedAt)
     .map((alert) => alertRecord(alert))
@@ -1339,6 +1399,7 @@ async function buildContext({ projects, state }) {
     databases: { total: databases.length, declared: databases.filter((item) => item.status === "declared").length },
     storage: { buckets: storageBuckets.length, provider: storageProvider.status },
     sensitiveMaterials: { total: sensitiveMaterials.length, rotationDue: sensitiveMaterials.filter((item) => item.rotationStatus === "due").length },
+    vault: { total: vaultItems.length, rotationDue: vaultItems.filter((item) => item.rotationStatus === "due").length, encryptedAtRest: true, importableExisting: existingVaultImport.importableCount },
     workersJobs: { workers: workerRuntimes.length, queues: jobQueues.length, failedJobs: jobRecords.filter((job) => job.status === "failed").length, schedules: jobSchedules.length },
     identityAccess: { adminUsers: identityAccess.adminUsers.length, roles: identityAccess.roles.length, sessions: identityAccess.sessionPolicies.length },
     designSystem: { package: uiPackage.name, version: uiPackage.version, source: uiPackage.source, manifestLoaded: uiPackage.apiManifestLoaded },
@@ -1377,6 +1438,9 @@ async function buildContext({ projects, state }) {
     storageBuckets,
     materialStores,
     sensitiveMaterials,
+    vaultItems,
+    existingVaultCandidates,
+    existingVaultImport,
     workerRuntimes,
     jobQueues,
     jobRecords,
@@ -1449,7 +1513,7 @@ function adapterRegistry(context) {
       category: "observability",
       status: "read-only-evidence",
       capabilities: ["metrics", "latency", "error rate", "container resources"],
-      advancedSections: ["monitoring", "resources"],
+      advancedSections: ["monitoring"],
       privateMaterialRefs: [],
     },
     {
@@ -1972,70 +2036,32 @@ function buildControlReadiness(context) {
   });
 }
 
-async function runStatusVerification(context) {
+async function runStatusVerification(context, options = {}) {
+  const request = normalizeStatusRunRequest(options);
   const startedAt = new Date().toISOString();
   const startedMs = Date.now();
   const checks = [];
   const add = (check) => checks.push(statusRunCheck(check));
+  const runners = statusRunCheckRunners(context);
+  const selected = selectStatusRunChecks(context, runners, request);
 
-  add(await statusHttpCheck({
-    id: "portal-through-waf",
-    title: "Portal attraverso WAF",
-    category: "routing",
-    source: "Test reale",
-    url: `${statusWafUrl}/`,
-    headers: statusProbeHeaders(),
-    okStatuses: [200],
-    bodyIncludes: "Admin Control Center",
-    okDetail: "La richiesta passa da WAF/Traefik e renderizza il Portal.",
-    failAction: "Verifica WAF, Traefik e host portal prima di dichiarare lo stato online.",
-  }));
+  for (const item of selected) {
+    await statusRunStepPause();
+    add(item.run ? await item.run() : statusSnapshotCheck(item.row));
+  }
 
-  add(await statusHttpCheck({
-    id: "waf-sensitive-file-block",
-    title: "WAF blocca file sensibili",
-    category: "security",
-    source: "Test reale",
-    url: `${statusWafUrl}/.env`,
-    headers: statusProbeHeaders(),
-    okStatuses: [403, 404, 406],
-    okDetail: "La route pubblica non espone file .env.",
-    failAction: "Blocca subito l'esposizione di file sensibili su WAF/Traefik.",
-  }));
-
-  const goNoGo = context.goNoGo || {};
-  add({
-    id: "go-no-go-report-readable",
-    title: "Report go/no-go leggibile",
-    category: "evidence",
-    source: "Report",
-    status: goNoGo.reportPath ? "passed" : "pending-live-proof",
-    detail: goNoGo.reportPath ? `Report caricato: ${goNoGo.reportPath}` : "Nessun report production-go-no-go trovato.",
-    nextAction: goNoGo.reportPath ? "Mantieni il report aggiornato dopo ogni cambio infrastruttura." : "Esegui il go/no-go completo dal server e conserva il report.",
-  });
-
-  add({
-    id: "go-no-go-verdict",
-    title: "Decisione produzione",
-    category: "evidence",
-    source: "Report",
-    status: goNoGo.status === "go" ? "passed" : goNoGo.reportPath ? "no-go" : "pending-live-proof",
-    detail: goNoGo.status === "go"
-      ? "Il report più recente dice GO LIVE."
-      : `Il report più recente dice ${String(goNoGo.status || "unknown").toUpperCase()} con ${Number(goNoGo.summary?.blockingRequired || goNoGo.blockers?.length || 0)} blocchi.`,
-    nextAction: goNoGo.status === "go" ? "Procedi solo con backup e rollback pronti." : "Chiudi i requisiti aperti, poi rilancia il controllo.",
-  });
-
-  const readinessTotal = Number(context.readiness?.summary?.total || 0);
-  add({
-    id: "readiness-matrix-readable",
-    title: "Matrice readiness caricata",
-    category: "evidence",
-    source: "Report",
-    status: readinessTotal > 0 ? "passed" : "needs-work",
-    detail: readinessTotal > 0 ? `${readinessTotal} controlli readiness letti dai manifest.` : "Nessun controllo readiness disponibile.",
-    nextAction: readinessTotal > 0 ? "Mantieni governance/production-readiness.json e enterprise-requirements.json coerenti." : "Ripristina i manifest governance prima del prossimo go live.",
-  });
+  if (!checks.length) {
+    add(statusRunCheck({
+      id: "status-selection-empty",
+      title: "Selezione test vuota",
+      category: request.category || "operational-evidence",
+      source: "Portal",
+      status: "plan-only",
+      detail: "Nessun controllo disponibile per la selezione richiesta.",
+      nextAction: "Scegli una sezione con controlli o rilancia tutti i test reali.",
+      required: false,
+    }));
+  }
 
   const summary = statusRunSummary(checks);
   return sanitizeEvent({
@@ -2045,12 +2071,149 @@ async function runStatusVerification(context) {
     durationMs: Date.now() - startedMs,
     status: summary.failed ? "failed" : summary.pending ? "warning" : "passed",
     scope: "platform-infrastructure",
+    target: statusRunTargetLabel(request),
+    requestedScope: request.scope,
+    requestedCategory: request.category,
+    requestedCheckId: request.checkId,
     destructive: false,
     providerTouched: false,
     dockerTouched: false,
     summary,
     checks,
   });
+}
+
+function normalizeStatusRunRequest(options = {}) {
+  const scope = sanitizeIdentifier(options.scope || "all") || "all";
+  return {
+    scope: ["all", "category", "check"].includes(scope) ? scope : "all",
+    category: sanitizeIdentifier(options.category || ""),
+    checkId: sanitizeIdentifier(options.checkId || ""),
+  };
+}
+
+function statusRunTargetLabel(request) {
+  if (request.scope === "check" && request.checkId) return `check:${request.checkId}`;
+  if (request.scope === "category" && request.category) return `category:${request.category}`;
+  return "platform-infrastructure";
+}
+
+function statusRunCheckRunners(context) {
+  const goNoGo = context.goNoGo || {};
+  const readinessTotal = Number(context.readiness?.summary?.total || 0);
+  return [
+    {
+      id: "portal-through-waf",
+      category: "domain-edge",
+      run: () => statusHttpCheck({
+        id: "portal-through-waf",
+        title: "Portal attraverso WAF",
+        category: "domain-edge",
+        source: "Test reale",
+        url: `${statusWafUrl}/`,
+        headers: statusProbeHeaders(),
+        okStatuses: [200],
+        bodyIncludes: "Admin Control Center",
+        okDetail: "La richiesta passa da WAF/Traefik e renderizza il Portal.",
+        failAction: "Verifica WAF, Traefik e host portal prima di dichiarare lo stato online.",
+      }),
+    },
+    {
+      id: "waf-sensitive-file-block",
+      category: "security",
+      run: () => statusHttpCheck({
+        id: "waf-sensitive-file-block",
+        title: "WAF blocca file sensibili",
+        category: "security",
+        source: "Test reale",
+        url: `${statusWafUrl}/.env`,
+        headers: statusProbeHeaders(),
+        okStatuses: [403, 404, 406],
+        okDetail: "La route pubblica non espone file .env.",
+        failAction: "Blocca subito l'esposizione di file sensibili su WAF/Traefik.",
+      }),
+    },
+    {
+      id: "go-no-go-report-readable",
+      category: "go-live",
+      run: () => statusRunCheck({
+        id: "go-no-go-report-readable",
+        title: "Report go/no-go leggibile",
+        category: "go-live",
+        source: "Report",
+        status: goNoGo.reportPath ? "passed" : "pending-live-proof",
+        detail: goNoGo.reportPath ? `Report caricato: ${goNoGo.reportPath}` : "Nessun report production-go-no-go trovato.",
+        nextAction: goNoGo.reportPath ? "Mantieni il report aggiornato dopo ogni cambio infrastruttura." : "Esegui il go/no-go completo dal server e conserva il report.",
+      }),
+    },
+    {
+      id: "go-no-go-verdict",
+      category: "go-live",
+      run: () => statusRunCheck({
+        id: "go-no-go-verdict",
+        title: "Decisione produzione",
+        category: "go-live",
+        source: "Report",
+        status: goNoGo.status === "go" ? "passed" : goNoGo.reportPath ? "no-go" : "pending-live-proof",
+        detail: goNoGo.status === "go"
+          ? "Il report più recente dice GO LIVE."
+          : `Il report più recente dice ${String(goNoGo.status || "unknown").toUpperCase()} con ${Number(goNoGo.summary?.blockingRequired || goNoGo.blockers?.length || 0)} blocchi.`,
+        nextAction: goNoGo.status === "go" ? "Procedi solo con backup e rollback pronti." : "Chiudi i requisiti aperti, poi rilancia il controllo.",
+      }),
+    },
+    {
+      id: "readiness-matrix-readable",
+      category: "governance",
+      run: () => statusRunCheck({
+        id: "readiness-matrix-readable",
+        title: "Matrice readiness caricata",
+        category: "governance",
+        source: "Report",
+        status: readinessTotal > 0 ? "passed" : "needs-work",
+        detail: readinessTotal > 0 ? `${readinessTotal} controlli readiness letti dai manifest.` : "Nessun controllo readiness disponibile.",
+        nextAction: readinessTotal > 0 ? "Mantieni governance/production-readiness.json e enterprise-requirements.json coerenti." : "Ripristina i manifest governance prima del prossimo go live.",
+      }),
+    },
+  ];
+}
+
+function selectStatusRunChecks(context, runners, request) {
+  const rows = opsStatusRows(context);
+  const runnerById = new Map(runners.map((runner) => [runner.id, runner]));
+  if (request.scope === "check" && request.checkId) {
+    const runner = runnerById.get(request.checkId);
+    if (runner) return [runner];
+    const row = rows.find((item) => item.technicalId === request.checkId || item.id === request.checkId);
+    return row ? [{ id: row.technicalId, category: row.category, row }] : [];
+  }
+  if (request.scope === "category" && request.category) {
+    const categoryRunners = runners.filter((runner) => runner.category === request.category);
+    const runnerIds = new Set(categoryRunners.map((runner) => runner.id));
+    const snapshots = rows
+      .filter((row) => row.category === request.category)
+      .filter((row) => !runnerIds.has(row.technicalId))
+      .map((row) => ({ id: row.technicalId, category: row.category, row }));
+    return [...categoryRunners, ...snapshots];
+  }
+  return runners;
+}
+
+function statusSnapshotCheck(row) {
+  return statusRunCheck({
+    id: row.technicalId || row.id,
+    title: row.control || row.technicalId || "Controllo",
+    category: row.category || "operational-evidence",
+    source: row.source || "Evidence corrente",
+    status: row.status,
+    detail: row.reason || "Snapshot evidence corrente.",
+    nextAction: row.status === "passed" ? "Nessuna azione immediata." : row.action,
+    required: row.required,
+  });
+}
+
+function statusRunStepPause() {
+  if (!statusRunStepDelayMs) return Promise.resolve();
+  return new Promise((resolve) => setTimeout(resolve, statusRunStepDelayMs));
 }
 
 function statusProbeHeaders(extra = {}) {
@@ -2142,7 +2305,7 @@ function statusRunCheck({ id, title, category = "general", source = "Test reale"
 
 function statusRunSummary(checks) {
   const passed = checks.filter((check) => check.status === "passed").length;
-  const failed = checks.filter((check) => ["failed", "needs-work"].includes(check.status)).length;
+  const failed = checks.filter((check) => ["failed", "needs-work", "no-go"].includes(check.status)).length;
   const pending = checks.filter((check) => ["authorization-required", "pending-live-proof", "pending-provider", "plan-only"].includes(check.status)).length;
   return {
     total: checks.length,
@@ -2180,6 +2343,7 @@ const documentedStatusTitles = {
   "enterprise-10-check": "Enterprise 10 check",
   "enterprise-check": "Enterprise check",
   "enterprise-hardening-audit": "Audit hardening enterprise",
+  "enterprise-production-360-coverage": "Copertura enterprise 360",
   "enterprise-requirements-check": "Requisiti enterprise",
   "evidence-bundle": "Bundle evidence",
   "evidence-bundle-verify": "Verifica bundle evidence",
@@ -2287,24 +2451,33 @@ const documentedStatusEvidenceSpecs = {
   "backup-restore-drill-mariadb": { directory: "restore-drills", prefix: "full-restore-drill-", maxAgeHours: 168, pass: "full-restore-step", step: "mariadb" },
   "backup-restore-drill-minio": { directory: "restore-drills", prefix: "full-restore-drill-", maxAgeHours: 168, pass: "full-restore-step", step: "minio" },
   "backup-restore-drill-secret-manager-metadata": { directory: "restore-drills", prefix: "full-restore-drill-", maxAgeHours: 168, pass: "full-restore-step", step: "secret-manager-metadata" },
+  "backup-scheduler": { directory: "local-checks", prefix: "backup-scheduler-", maxAgeHours: 72, pass: "backup-scheduler-runtime" },
   "backup-secret-manager-metadata": { directory: "backups", prefix: "secret-manager-backup-", maxAgeHours: 72, pass: "backup-success" },
   "certificate-expiry-check": { directory: "local-checks", prefix: "certificate-expiry-check-", maxAgeHours: 168, pass: "local-check-passed", command: "certificate-expiry-check" },
   "chaos-profile": { directory: "chaos", prefix: "chaos-profile-", maxAgeHours: 168, pass: "status-passed" },
+  "compliance-evidence": { directory: "governance", prefix: "compliance-evidence-", maxAgeHours: 168, pass: "compliance-evidence" },
   "compose-healthcheck-coverage": { directory: "healthchecks", prefix: "healthcheck-coverage-", maxAgeHours: 168, pass: "healthcheck-coverage" },
   "control-center-tests": { directory: "local-checks", prefix: "control-center-tests-", maxAgeHours: 168, pass: "local-check-passed", command: "control-center-tests" },
+  "data-classification": { directory: "governance", prefix: "data-classification-", maxAgeHours: 168, pass: "data-classification" },
   "dependency-hygiene": { directory: "local-checks", prefix: "dependency-hygiene-", maxAgeHours: 168, pass: "local-check-passed", command: "dependency-hygiene" },
-  "dr-readiness-check": { directory: "dr", prefix: "dr-evidence-", maxAgeHours: 168, pass: "status-passed-or-warning" },
+  "dr-evidence": { directory: "dr", prefix: "dr-evidence-", maxAgeHours: 168, pass: "dr-evidence-complete" },
+  "dr-readiness-check": { directory: "dr", prefix: "dr-evidence-", maxAgeHours: 168, pass: "dr-evidence-complete" },
   "evidence-bundle": { directory: "local-checks", prefix: "evidence-bundle-", maxAgeHours: 168, pass: "local-check-passed", command: "evidence-bundle" },
   "evidence-bundle-verify": { directory: "evidence-bundle-verify", prefix: "evidence-bundle-verify-", maxAgeHours: 168, pass: "status-passed" },
   "enterprise-check": { directory: "local-checks", prefix: "enterprise-check-", maxAgeHours: 168, pass: "local-check-passed", command: "enterprise-check" },
   "enterprise-hardening-audit": { directory: "local-checks", prefix: "enterprise-hardening-audit-", maxAgeHours: 168, pass: "local-check-passed", command: "enterprise-hardening-audit" },
+  "enterprise-production-360-coverage": { directory: "governance", prefix: "enterprise-production-360-coverage-", maxAgeHours: 168, pass: "enterprise-production-360-coverage" },
   "enterprise-requirements-check": { directory: "enterprise-requirements", prefix: "enterprise-requirements-", maxAgeHours: 168, pass: "repo-report-passed" },
   "enterprise-10-check": { directory: "enterprise-requirements", prefix: "enterprise-requirements-", maxAgeHours: 168, pass: "repo-report-passed" },
   "full-restore-drill": { directory: "restore-drills", prefix: "full-restore-drill-", maxAgeHours: 168, pass: "status-success" },
   "failure-tests": { directory: "failure-tests", prefix: "failure-tests-", maxAgeHours: 168, pass: "failure-tests" },
+  "feature-flags-kill-switches": { directory: "governance", prefix: "feature-flags-kill-switches-", maxAgeHours: 168, pass: "feature-flags-kill-switches" },
   "fault-injection-tests": { directory: "fault-injection", prefix: "fault-injection-tests-", maxAgeHours: 168, pass: "status-passed" },
   "generate-sbom": { directory: "local-checks", prefix: "generate-sbom-", maxAgeHours: 168, pass: "local-check-passed", command: "generate-sbom" },
   "governance-check": { directory: "local-checks", prefix: "governance-check-", maxAgeHours: 168, pass: "local-check-passed", command: "governance-check" },
+  "github-branch-protection": { directory: "go-live", prefix: "pre-go-live-evidence-", maxAgeHours: 168, pass: "pre-go-live-step", step: "github-branch-protection-verify-remote" },
+  "github-environments": { directory: "go-live", prefix: "pre-go-live-evidence-", maxAgeHours: 168, pass: "pre-go-live-step", step: "github-environments-verify-remote" },
+  "ha-single-node-risk-acceptance": { directory: "governance", prefix: "ha-single-node-risk-acceptance-", maxAgeHours: 168, pass: "ha-single-node-risk-acceptance" },
   "ha-config-check": { directory: "local-checks", prefix: "ha-config-check-", maxAgeHours: 168, pass: "local-check-passed", command: "ha-config-check" },
   "infra-health": { directory: "local-checks", prefix: "infra-health-", maxAgeHours: 24, pass: "local-check-passed", command: "infra-health" },
   "infra-secret-manager-init": { directory: "secret-rotation", prefix: "secret-rotation-evidence-", maxAgeHours: 168, pass: "secret-rotation" },
@@ -2317,6 +2490,7 @@ const documentedStatusEvidenceSpecs = {
   "maintainability-hygiene": { directory: "local-checks", prefix: "maintainability-hygiene-", maxAgeHours: 168, pass: "local-check-passed", command: "maintainability-hygiene" },
   "managed-secrets-preflight": { directory: "local-checks", prefix: "managed-secrets-preflight-", maxAgeHours: 168, pass: "local-check-passed", command: "managed-secrets-preflight" },
   "performance-hygiene": { directory: "local-checks", prefix: "performance-hygiene-", maxAgeHours: 168, pass: "local-check-passed", command: "performance-hygiene" },
+  "pentest-readiness": { directory: "security", prefix: "pentest-readiness-", maxAgeHours: 168, pass: "pentest-readiness" },
   "platform-admin-audit": { directory: "platform-admin-audit", prefix: "platform-admin-audit-", maxAgeHours: 168, pass: "platform-admin-audit" },
   "local-secret-manager": { directory: "secret-rotation", prefix: "secret-rotation-evidence-", maxAgeHours: 168, pass: "secret-rotation" },
   "project-router-tests": { directory: "local-checks", prefix: "project-router-tests-", maxAgeHours: 168, pass: "local-check-passed", command: "project-router-tests" },
@@ -2338,12 +2512,14 @@ const documentedStatusEvidenceSpecs = {
   "secret-scan": { directory: "local-checks", prefix: "secret-scan-", maxAgeHours: 168, pass: "local-check-passed", command: "secret-scan" },
   "security-matrix": { directory: "local-checks", prefix: "security-matrix-", maxAgeHours: 168, pass: "local-check-passed", command: "security-matrix" },
   "security-smoke": { directory: "local-checks", prefix: "security-smoke-", maxAgeHours: 168, pass: "local-check-passed", command: "security-smoke" },
+  "sign-images": { directory: "release", prefix: "github-sigstore-attestation-", maxAgeHours: 168, pass: "status-passed" },
   "static-security-check": { directory: "local-checks", prefix: "static-security-check-", maxAgeHours: 168, pass: "local-check-passed", command: "static-security-check" },
   "supply-chain-hygiene": { directory: "local-checks", prefix: "supply-chain-hygiene-", maxAgeHours: 168, pass: "local-check-passed", command: "supply-chain-hygiene" },
   "testing-hygiene": { directory: "local-checks", prefix: "testing-hygiene-", maxAgeHours: 168, pass: "local-check-passed", command: "testing-hygiene" },
   "validate-local-secrets": { directory: "secret-rotation", prefix: "secret-rotation-evidence-", maxAgeHours: 168, pass: "secret-rotation" },
+  "vulnerability-disclosure": { directory: "security", prefix: "vulnerability-disclosure-", maxAgeHours: 168, pass: "vulnerability-disclosure" },
   "sign-existing-postgres-backups": { directory: "postgres-backup-signatures", prefix: "postgres-backup-signatures-", maxAgeHours: 168, pass: "postgres-backup-signatures" },
-  "vps-go-live": { directory: "vps-go-live", prefix: "vps-go-live-", maxAgeHours: 168, pass: "vps-go-live-live" },
+  "vps-go-live": { directory: "vps-go-live", prefix: "vps-go-live-", excludePrefixes: ["vps-go-live-plan-"], maxAgeHours: 168, pass: "vps-go-live-live" },
   "vps-postdeploy": { directory: "local-checks", prefix: "vps-postdeploy-", maxAgeHours: 168, pass: "local-check-passed", command: "vps-postdeploy" },
   "vps-preflight": { directory: "local-checks", prefix: "vps-preflight-", maxAgeHours: 168, pass: "local-check-passed", command: "vps-preflight" },
   "waf-smoke": { directory: "local-checks", prefix: "waf-smoke-", maxAgeHours: 168, pass: "local-check-passed", command: "waf-smoke" },
@@ -2366,6 +2542,7 @@ const documentedStatusGroups = [
       "dr-readiness-check",
       "enterprise-check",
       "enterprise-hardening-audit",
+      "enterprise-production-360-coverage",
       "enterprise-requirements-check",
       "enterprise-10-check",
       "generate-sbom",
@@ -2420,6 +2597,7 @@ const documentedStatusGroups = [
       "backup-mariadb",
       "backup-minio",
       "backup-postgres",
+      "backup-scheduler",
       "backup-secret-manager-metadata",
       "dr-evidence",
       "evidence-bundle",
@@ -2542,6 +2720,7 @@ function resolveDocumentedStatusCheck(base, context) {
       nextAction: evidence.status === "passed"
         ? "Report reale valido: mantienilo aggiornato dopo modifiche infrastrutturali."
         : evidence.nextAction,
+      reportPath: evidence.reportPath,
       required: base.required,
     };
   }
@@ -2581,6 +2760,7 @@ function resolveDocumentedStatusCheck(base, context) {
   const readinessMatch = findReadinessRequirementForCommand(context, base.command);
   if (readinessMatch) {
     const requirementAction = documentedReadinessAction(readinessMatch.requirement);
+    const guidance = readinessRequirementGuidance(readinessMatch.requirement);
     const rawStatus = readinessMatch.requirement.status || base.status;
     const status = classifiedEvidenceStatus(rawStatus, [
       base.command,
@@ -2595,8 +2775,8 @@ function resolveDocumentedStatusCheck(base, context) {
       ...base,
       source: `${base.source} / ${readinessMatch.manifestTitle}`,
       status,
-      detail: `Checklist: ${readinessMatch.requirement.title}. Stato repo: ${readinessMatch.requirement.sourceState}; evidence: ${readinessMatch.requirement.evidenceCount}.`,
-      nextAction: requirementAction || base.nextAction,
+      detail: guidance?.reason || `Checklist: ${readinessMatch.requirement.title}. Stato repo: ${readinessMatch.requirement.sourceState}; evidence: ${readinessMatch.requirement.evidenceCount}.`,
+      nextAction: guidance?.action || requirementAction || base.nextAction,
       required: readinessMatch.requirement.liveProofRequired || base.required,
     };
   }
@@ -2615,7 +2795,7 @@ function resolveDocumentedStatusCheck(base, context) {
 function readDocumentedStatusEvidence(command) {
   const spec = documentedStatusEvidenceSpecs[command];
   if (!spec) return null;
-  const report = latestDocumentedReport(spec.directory, spec.prefix);
+  const report = latestDocumentedReport(spec.directory, spec.prefix, spec);
   if (!report) return null;
   const age = reportAgeDetail(report.payload, spec.maxAgeHours);
   const passed = age.fresh && documentedEvidencePassed(report.payload, spec);
@@ -2634,6 +2814,20 @@ function readDocumentedStatusEvidence(command) {
   };
 }
 
+function readPassedDocumentedStatusEvidence(command) {
+  const spec = documentedStatusEvidenceSpecs[command];
+  if (!spec) return null;
+  const report = latestDocumentedReport(spec.directory, spec.prefix, spec);
+  if (!report) return null;
+  const age = reportAgeDetail(report.payload, spec.maxAgeHours);
+  if (!age.fresh || !documentedEvidencePassed(report.payload, spec)) return null;
+  return {
+    payload: report.payload,
+    reportPath: report.reportPath,
+    detail: `Report reale valido: ${report.reportPath}; ${age.detail}.`,
+  };
+}
+
 function documentedEvidenceExplicitlyFailed(payload, spec) {
   const status = String(payload?.status || "").toLowerCase();
   if (["failed", "failure", "error"].includes(status)) return true;
@@ -2642,14 +2836,18 @@ function documentedEvidenceExplicitlyFailed(payload, spec) {
   return false;
 }
 
-function latestDocumentedReport(directoryName, prefix) {
+function latestDocumentedReport(directoryName, prefix, spec = {}) {
   const root = path.resolve(docsRoot);
   const directory = path.resolve(root, "reports", path.basename(directoryName));
   if (!directory.startsWith(`${root}${path.sep}`) || !existsSync(directory)) return null;
   try {
     const cleanPrefix = String(prefix || "").replace(/[^a-z0-9-]/gi, "");
+    const excludePrefixes = Array.isArray(spec.excludePrefixes)
+      ? spec.excludePrefixes.map((item) => String(item || "").replace(/[^a-z0-9-]/gi, "")).filter(Boolean)
+      : [];
     const fileName = readdirSync(directory)
       .filter((name) => name.startsWith(cleanPrefix) && name.endsWith(".json"))
+      .filter((name) => !excludePrefixes.some((excludedPrefix) => name.startsWith(excludedPrefix)))
       .sort()
       .at(-1);
     if (!fileName) return null;
@@ -2670,8 +2868,70 @@ function documentedEvidencePassed(payload, spec) {
   switch (spec.pass) {
     case "backup-success":
       return status === "success" && Boolean(payload.artifactSha256 || payload.artifactPath);
+    case "backup-scheduler-runtime":
+      return status === "passed"
+        && payload.scope === "platform-infrastructure"
+        && payload.command === "backup-scheduler"
+        && payload.container?.state === "running"
+        && payload.container?.health === "healthy"
+        && payload.schedule?.everyEightHours === true
+        && Number(payload.schedule?.retentionKeepLast || 0) === 42
+        && Number(payload.schedule?.maxRepositoryBytes || 0) === 2_500_000_000_000
+        && Number(payload.summary?.failedChecks || 0) === 0
+        && Number(payload.summary?.missingJobs || 0) === 0
+        && Number(payload.summary?.missingEnvKeys || 0) === 0
+        && Number(payload.summary?.jobsNotEveryEightHours || 0) === 0;
+    case "compliance-evidence":
+      return status === "passed"
+        && payload.scope === "platform-infrastructure"
+        && payload.command === "compliance-evidence"
+        && payload.compliance?.approved === true
+        && payload.compliance?.formalCertificationClaimed === false
+        && payload.compliance?.gdprLikeMapping === true
+        && payload.compliance?.soc2LikeMapping === true
+        && Number(payload.summary?.failedChecks || 0) === 0;
+    case "data-classification":
+      return status === "passed"
+        && payload.scope === "platform-infrastructure"
+        && payload.command === "data-classification"
+        && payload.classification?.approved === true
+        && payload.classification?.hostedApplicationDataOutOfScope === true
+        && Array.isArray(payload.classification?.levels)
+        && ["Public", "Internal", "Confidential", "Secret", "Restricted"].every((level) => payload.classification.levels.includes(level))
+        && Number(payload.summary?.failedChecks || 0) === 0;
+    case "dr-evidence-complete":
+      return status === "passed"
+        && Array.isArray(payload.issues)
+        && payload.issues.length === 0
+        && payload.offsiteEvidence?.latestRestoreOffsite === true
+        && payload.offsiteEvidence?.latestRestoreCoverage?.complete === true;
+    case "enterprise-production-360-coverage":
+      return status === "passed"
+        && payload.scope === "platform-infrastructure"
+        && payload.command === "enterprise-production-360-coverage"
+        && payload.semantics?.productionGoLiveDecision === false
+        && Number(payload.summary?.invalidRefs || 0) === 0
+        && Number(payload.summary?.domains || 0) >= Number(payload.summary?.expectedDomains || 0)
+        && Number(payload.summary?.controls || 0) >= Number(payload.summary?.minimumControls || 0);
+    case "feature-flags-kill-switches":
+      return status === "passed"
+        && payload.scope === "platform-infrastructure"
+        && payload.command === "feature-flags-kill-switches"
+        && payload.killSwitches?.operational === true
+        && payload.killSwitches?.applicationFlagsOutOfScope === true
+        && payload.killSwitches?.destructiveVolumeActionsAllowed === false
+        && Number(payload.killSwitches?.switchCount || 0) >= 6
+        && Number(payload.summary?.failedChecks || 0) === 0;
     case "healthcheck-coverage":
       return status === "passed" && Number(payload.summary?.missingHealthchecks || 0) === 0;
+    case "ha-single-node-risk-acceptance":
+      return status === "passed"
+        && payload.scope === "platform-infrastructure"
+        && payload.command === "ha-single-node-risk-acceptance"
+        && payload.decision?.singleNodeRiskAccepted === true
+        && payload.decision?.haClaimed === false
+        && payload.decision?.multiNodeClaimed === false
+        && Number(payload.summary?.failedChecks || 0) === 0;
     case "full-restore-step":
       return status === "success"
         && Array.isArray(payload.steps)
@@ -2691,6 +2951,24 @@ function documentedEvidencePassed(payload, spec) {
         && payload.scope === "platform-infrastructure"
         && Number(payload.summary?.failedChecks || 0) === 0
         && Number(payload.summary?.sensitiveKeyFindings || 0) === 0;
+    case "pentest-readiness":
+      return status === "passed"
+        && payload.scope === "platform-infrastructure"
+        && payload.mode === "readiness-plan"
+        && payload.readiness?.approved === true
+        && payload.externalProfessionalPentest?.requiredBeforeEnterpriseLaunch === true
+        && Number(payload.summary?.failedChecks || 0) === 0;
+    case "vulnerability-disclosure":
+      return status === "passed"
+        && payload.scope === "platform-infrastructure"
+        && payload.command === "vulnerability-disclosure"
+        && payload.process?.publishable === true
+        && payload.process?.approved === true
+        && payload.channel?.securityPolicyPresent === true
+        && Number(payload.summary?.failedChecks || 0) === 0;
+    case "pre-go-live-step":
+      return Array.isArray(payload.steps)
+        && payload.steps.some((step) => step?.name === spec.step && step.status === "passed");
     case "repo-report-passed":
       return status === "passed" && String(payload.repoStatus || "passed") === "passed" && Number(payload.failedCount || 0) === 0;
     case "secret-rotation":
@@ -2744,12 +3022,23 @@ function reportAgeDetail(payload, maxAgeHours) {
 function documentedManifestStatusChecks(context, prefix, manifest) {
   if (!manifest?.requirements?.length) return [];
   return manifest.requirements.map((requirement) => {
+    let localEvidence = null;
+    if (prefix === "enterprise") {
+      const requirementId = sanitizeIdentifier(requirement.id || "");
+      if (requirementId === "pentest") localEvidence = readDocumentedStatusEvidence("pentest-readiness");
+      if (requirementId === "vulnerability-disclosure") localEvidence = readDocumentedStatusEvidence("vulnerability-disclosure");
+      if (requirementId === "feature-flags-kill-switch") localEvidence = readDocumentedStatusEvidence("feature-flags-kill-switches");
+      if (requirementId === "compliance-gdpr-soc2-like") localEvidence = readDocumentedStatusEvidence("compliance-evidence");
+      if (requirementId === "data-classification") localEvidence = readDocumentedStatusEvidence("data-classification");
+      if (requirementId === "ha-multi-node") localEvidence = readDocumentedStatusEvidence("ha-single-node-risk-acceptance");
+    }
     const linkedGoNoGo = (requirement.liveProofChecks || [])
       .map((name) => (context.goNoGo?.checks || []).find((check) => check.name === name))
       .find(Boolean);
     const displayGoNoGo = linkedGoNoGo ? goNoGoDisplayCheck(linkedGoNoGo, prefix) : null;
-    const rawStatus = displayGoNoGo?.status || requirement.status;
+    const rawStatus = localEvidence?.status || displayGoNoGo?.status || requirement.status;
     const requirementAction = documentedReadinessAction(requirement);
+    const guidance = readinessRequirementGuidance(requirement, displayGoNoGo);
     const status = classifiedEvidenceStatus(rawStatus, [
       prefix,
       manifest.title || "Governance",
@@ -2767,13 +3056,17 @@ function documentedManifestStatusChecks(context, prefix, manifest) {
       id: `${prefix}-${requirement.id}`,
       title: requirement.title,
       category: prefix,
-      source: manifest.title || "Governance",
+      source: localEvidence ? `${manifest.title || "Governance"} / report` : manifest.title || "Governance",
       status,
-      detail: displayGoNoGo
-        ? (passed ? (displayGoNoGo.detail || "Requirement coperto dal report go/no-go.") : simpleBlockerReason(displayGoNoGo))
+      detail: localEvidence
+        ? localEvidence.detail
+        : displayGoNoGo
+        ? (passed ? (displayGoNoGo.detail || "Requirement coperto dal report go/no-go.") : guidance?.reason || simpleBlockerReason(displayGoNoGo))
         : `Manifest governance: ${requirement.sourceState}; evidence repo: ${requirement.evidenceCount}; live proof: ${requirement.liveProofStatus}.`,
-      nextAction: displayGoNoGo
-        ? (passed ? "Mantieni il report aggiornato dopo ogni modifica." : simpleBlockerAction(displayGoNoGo))
+      nextAction: localEvidence
+        ? (passed ? "Mantieni il report pentest readiness aggiornato e pianifica il pentest esterno prima del lancio enterprise." : localEvidence.nextAction)
+        : displayGoNoGo
+        ? (passed ? "Mantieni il report aggiornato dopo ogni modifica." : guidance?.action || simpleBlockerAction(displayGoNoGo))
         : requirementAction,
       required: requirement.liveProofRequired !== false,
     };
@@ -2785,10 +3078,83 @@ function documentedReadinessAction(requirement) {
   const checks = Array.isArray(requirement.liveProofChecks) && requirement.liveProofChecks.length
     ? ` Gate collegati: ${requirement.liveProofChecks.join(", ")}.`
     : "";
+  const guidance = readinessRequirementGuidance(requirement);
+  if (guidance?.action) return `${guidance.action}${checks}`;
   if (requirement.liveProofRequired) {
     return `Completa la prova live o provider per "${requirement.title}" e archivia il report non-secret.${checks}`;
   }
   return `Esegui la verifica documentata per "${requirement.title}" e conserva l'evidence aggiornata.${checks}`;
+}
+
+function readinessRequirementGuidance(requirement, linkedCheck = null) {
+  const id = sanitizeIdentifier(requirement?.id || linkedCheck?.name || "");
+  const title = sanitizeMessage(requirement?.title || "");
+  const linkedText = `${linkedCheck?.name || ""} ${linkedCheck?.blocker || ""} ${linkedCheck?.detail || ""}`.toLowerCase();
+  const preGoLiveEvidence = linkedText.includes("pre-go-live") || (requirement?.liveProofChecks || []).includes("pre-go-live-evidence-complete");
+  const entries = {
+    "real-dns": {
+      reason: "Manca la prova su dominio reale: DNS pubblico, dominio finale e production preflight non sono ancora verificati fuori dalla LAN.",
+      action: "Configura il dominio pubblico definitivo su Cloudflare/DNS, imposta gli host finali e rilancia production-preflight e pre-go-live evidence con il dominio reale.",
+    },
+    "public-https-acme": {
+      reason: "Manca la prova HTTPS pubblica: certificati, DNS e raggiungibilita esterna non sono ancora verificati sul dominio finale.",
+      action: "Verifica HTTPS pubblico, certificati e monitor esterno sul dominio reale; poi rilancia external-uptime-check, certificate-expiry-check e pre-go-live evidence.",
+    },
+    "remote-ci-cd": {
+      reason: "GitHub Actions ora passa, ma manca la configurazione runtime/provider per il deploy controllato e il pre-go-live completo.",
+      action: "Completa variabili/secrets GitHub Actions per staging/production, in particolare DAST_TARGET, PUBLIC_API_HEALTH_URL, Cloudflare evidence e provider uptime, poi rilancia pre-go-live con verifyRemote.",
+    },
+    "automatic-ci-cd-deploy": {
+      reason: "La workflow GitHub passa, ma il deploy automatico non e' ancora provato con tutte le variabili/secrets di produzione e i provider live.",
+      action: "Completa GitHub environment production/staging con variabili e secrets reali, conserva l'evidence del run e rilancia pre-go-live evidence.",
+    },
+    "waf-rate-limit-bot-protection": {
+      reason: "Manca la prova dal public edge: WAF, rate limit e protezione bot sono configurati localmente ma non verificati su Cloudflare/dominio reale.",
+      action: "Configura Cloudflare WAF/rate limit sul dominio pubblico, esegui WAF smoke e rate-limit evidence dal public edge, poi archivia il report.",
+    },
+    "hosted-workload-isolation": {
+      reason: "Manca la prova di routing produzione per workload ospitati: wildcard DNS, Traefik e project-router non sono ancora verificati sul dominio reale.",
+      action: "Verifica wildcard DNS e routing dei progetti sul dominio pubblico senza accoppiare codice app all'infra; conserva il report project-router/WAF.",
+    },
+    "ha-multi-node": {
+      reason: "Manca una decisione/prova HA: l'ambiente attuale e' single-node e non dimostra multi-node readiness.",
+      action: "Aggiungi un target multi-node oppure documenta e approva esplicitamente il rischio single-node per questa fase; poi archivia la decisione nel report pre-go-live.",
+    },
+    "staging-production-parity": {
+      reason: "Manca staging separato: non c'e' ancora prova di ambiente staging distinto da produzione con host, secrets, volumi e target propri.",
+      action: "Configura staging separato, imposta DAST_TARGET su GitHub Actions e verifica compose/route/secrets staging prima del go-live.",
+    },
+    "staging-separated": {
+      reason: "Manca staging separato: non c'e' ancora prova di ambiente staging distinto da produzione con host, secrets, volumi e target propri.",
+      action: "Configura staging separato, imposta DAST_TARGET su GitHub Actions e verifica compose/route/secrets staging prima del go-live.",
+    },
+    "operations-runbook": {
+      reason: "Il runbook esiste, ma manca ancora l'aggancio ai report finali reali di produzione per dominio, provider e restore off-site.",
+      action: "Dopo production preflight, Cloudflare/uptime e off-site restore, aggiorna i riferimenti ai report reali e rilancia production-readiness-live.",
+    },
+    "rate-limiting": {
+      reason: "Manca la prova pubblica del rate limiting: i controlli locali passano, ma il comportamento dal public edge non e' ancora verificato.",
+      action: "Esegui rate-limit evidence e WAF smoke contro il dominio pubblico/Cloudflare, poi conserva il report non-secret.",
+    },
+    "tls-https-production-ready": {
+      reason: "Manca la prova TLS pubblica: HTTPS e monitor esterno devono essere verificati sul dominio finale.",
+      action: "Configura dominio pubblico e certificati, verifica HTTPS da provider esterno e rilancia production-preflight.",
+    },
+    "production-email-dns": {
+      reason: "Manca prova DNS email/alert produzione: SPF/DKIM/DMARC e delivery alert non sono ancora verificati sul dominio reale.",
+      action: "Configura record email del dominio e provider SMTP/alert, esegui alert-evidence e conserva il report.",
+    },
+  };
+  if (entries[id]) return entries[id];
+  if (preGoLiveEvidence) {
+    return {
+      reason: title
+        ? `Manca il pre go-live completo per "${title}": servono production preflight reale, provider live e restore off-site dove richiesto.`
+        : "Manca il pre go-live completo: servono production preflight reale, provider live e restore off-site dove richiesto.",
+      action: "Completa dominio/provider mancanti, GitHub Actions runtime config e off-site restore; poi rilancia pre-go-live-evidence con includeProductionPreflight, includeOffsiteRestoreDryRun e verifyGithubRemote.",
+    };
+  }
+  return null;
 }
 
 function findReadinessRequirementForCommand(context, command) {
@@ -3386,6 +3752,24 @@ function hiddenProjectFile(name) {
   return [".git", "node_modules", "vendor", ".next", "dist", "build", ".turbo", ".cache", ".env", ".env.local", ".env.production"].includes(name);
 }
 
+function italianDateTimeLabel(value) {
+  try {
+    return new Intl.DateTimeFormat("it-IT", {
+      day: "2-digit",
+      hour: "2-digit",
+      hour12: false,
+      minute: "2-digit",
+      month: "2-digit",
+      second: "2-digit",
+      timeZone: "Europe/Rome",
+      timeZoneName: "short",
+      year: "numeric",
+    }).format(value instanceof Date ? value : new Date(value));
+  } catch {
+    return value instanceof Date ? value.toISOString() : String(value || "");
+  }
+}
+
 function fileEntryRecord(filePath, name, relativePath) {
   try {
     const stat = lstatSync(filePath);
@@ -3396,12 +3780,909 @@ function fileEntryRecord(filePath, name, relativePath) {
       type: isSymlink ? "symlink" : stat.isDirectory() ? "directory" : "file",
       sizeBytes: stat.isDirectory() || isSymlink ? 0 : stat.size,
       sizeLabel: stat.isDirectory() ? "" : bytesLabel(stat.size),
-      modifiedAt: stat.mtime.toISOString(),
+      modifiedAt: italianDateTimeLabel(stat.mtime),
       browsable: stat.isDirectory() && !isSymlink,
     };
   } catch {
     return null;
   }
+}
+
+function backupFamilySpecs() {
+  return [
+    { id: "applications", label: "Applicazioni", command: "backup-applications", restoreCommand: "", reportPrefix: "applications-backup-" },
+    { id: "postgres", label: "PostgreSQL", command: "backup-postgres", restoreCommand: "restore-test-postgres", reportPrefix: "postgres-backup-" },
+    { id: "mariadb", label: "MariaDB", command: "backup-mariadb", restoreCommand: "restore-test-mariadb", reportPrefix: "mariadb-backup-" },
+    { id: "minio", label: "MinIO", command: "backup-minio", restoreCommand: "restore-test-minio", reportPrefix: "minio-backup-" },
+    { id: "keycloak", label: "Keycloak", command: "backup-keycloak", restoreCommand: "restore-test-keycloak", reportPrefix: "keycloak-backup-" },
+    { id: "secret-manager", label: "Secret vault", command: "backup-secret-manager-metadata", restoreCommand: "restore-test-secret-manager-metadata", reportPrefix: "secret-manager-backup-" },
+  ];
+}
+
+function buildBackupInventory(records = []) {
+  const files = safeReadBackupFiles("");
+  const jobs = readBackupJobs();
+  const families = backupFamilySpecs().map(readBackupFamily);
+  const schedulerReport = latestDocumentedReport("local-checks", "backup-scheduler-");
+  const drReport = latestDocumentedReport("dr", "dr-evidence-");
+  const offsiteRestoreReport = latestDocumentedReport("offsite-restore-drills", "offsite-restore-drill-restore-");
+  const schedulerPayload = schedulerReport?.payload || {};
+  const drPayload = drReport?.payload || {};
+  const offsitePayload = offsiteRestoreReport?.payload || {};
+  const schedulerPassed = String(schedulerPayload.status || "").toLowerCase() === "passed";
+  const offsitePassed = String(offsitePayload.status || "").toLowerCase() === "success";
+  const localFamiliesPassed = families.length > 0 && families.every((family) => family.status === "success");
+  const rootSummary = backupRootSummary(files);
+  const scheduler = {
+    status: schedulerPassed ? "running" : schedulerReport ? "needs-work" : "missing",
+    label: schedulerPassed ? "Attivo" : schedulerReport ? "Da verificare" : "Nessuna prova",
+    reportPath: schedulerReport?.reportPath || "",
+    ageLabel: schedulerReport ? relativeTimeLabel(schedulerPayload.generatedAt) : "",
+    containerState: schedulerPayload.container?.state || "non provato",
+    containerHealth: schedulerPayload.container?.health || "non provato",
+    everyEightHours: schedulerPayload.schedule?.everyEightHours === true,
+    retentionKeepLast: Number(schedulerPayload.schedule?.retentionKeepLast || 0),
+    maxRepositoryBytes: Number(schedulerPayload.schedule?.maxRepositoryBytes || 0),
+    requiredJobs: Array.isArray(schedulerPayload.schedule?.requiredJobs) ? schedulerPayload.schedule.requiredJobs : [],
+    missingJobs: Array.isArray(schedulerPayload.schedule?.missingJobs) ? schedulerPayload.schedule.missingJobs : [],
+  };
+  const dr = {
+    status: String(drPayload.status || "").toLowerCase() === "passed" || drPayload.mode ? "available" : drReport ? "needs-work" : "missing",
+    label: drReport ? "Report presente" : "Nessun report",
+    reportPath: drReport?.reportPath || "",
+    ageLabel: drReport ? relativeTimeLabel(drPayload.generatedAt) : "",
+    rpoMinutes: Number(drPayload.targets?.rpoMinutes || 0),
+    rtoMinutes: Number(drPayload.targets?.rtoMinutes || 0),
+    familyCount: Array.isArray(drPayload.rpoEvidence?.backupFamilies) ? drPayload.rpoEvidence.backupFamilies.length : 0,
+    fullRestoreReport: drPayload.rtoEvidence?.latestFullRestoreReport || "",
+  };
+  const offsite = {
+    status: offsitePassed ? "success" : offsiteRestoreReport ? "needs-work" : "missing",
+    label: offsitePassed ? "Provato" : offsiteRestoreReport ? "Da verificare" : "Nessuna prova",
+    configured: process.env.BACKUP_SCHEDULER_ENABLE_OFFSITE === "true" || Boolean(offsitePayload.restic?.repositoryConfigured),
+    reportPath: offsiteRestoreReport?.reportPath || "",
+    ageLabel: offsiteRestoreReport ? relativeTimeLabel(offsitePayload.generatedAt || offsitePayload.finishedAt) : "",
+    repositoryType: offsitePayload.restic?.repositoryType || "non esposto",
+    repositoryOffsite: offsitePayload.restic?.repositoryOffsite === true,
+    snapshotId: offsitePayload.snapshot?.shortId || "",
+    snapshotTime: offsitePayload.snapshot?.time || "",
+    snapshotCountForTag: Number(offsitePayload.snapshotCountForTag || 0),
+  };
+  return sanitizeEvent({
+    mode: environment,
+    manualBackup: "plan-only-from-control-center",
+    restoreDrill: "available-through-infra-ops",
+    offsite: offsite.status === "success" ? "verified-off-site" : offsite.configured ? "configured" : "not-configured",
+    rpoRto: dr.reportPath ? "reported-by-dr-evidence" : "missing-dr-evidence",
+    root: rootSummary,
+    families,
+    scheduler,
+    dr,
+    offsiteRestore: offsite,
+    executor: {
+      status: existsSync(backupJobsDir) ? "available" : "ready",
+      queueDir: "project-state/backup-jobs",
+      running: jobs.filter((job) => job.queueStatus === "running").length,
+      queued: jobs.filter((job) => job.queueStatus === "queued").length,
+      failed: jobs.filter((job) => job.queueStatus === "failed").length,
+      done: jobs.filter((job) => job.queueStatus === "done").length,
+    },
+    jobs,
+    localCoverage: localFamiliesPassed ? "covered" : "incomplete",
+    latest: records.slice(0, 5),
+  });
+}
+
+function buildApplicationBackupInventories(context) {
+  return sortedOpsProjects(context.projects).map((project) => applicationBackupInventory(context, project));
+}
+
+function applicationBackupInventory(context, project) {
+  const databases = projectDatabases(context, project);
+  const storage = projectStorage(context, project);
+  const commands = applicationBackupCommands(context, project);
+  const sourcePath = applicationSourceBackupPath(project);
+  const sourceStats = readBackupDirectoryStats(sourcePath);
+  const artifacts = applicationBackupArtifacts(context, project);
+  const restoreOptions = applicationBackupRestoreOptions(artifacts);
+  const allSizeBytes = sourceStats.sizeBytes + artifacts.reduce((total, artifact) => total + Number(artifact.sizeBytes || 0), 0);
+  const latest = [...artifacts].sort((a, b) => Number(b.mtimeMs || 0) - Number(a.mtimeMs || 0))[0] || null;
+  const jobs = (context.backups?.jobs || []).filter((job) => job.scope === applicationBackupScope(project.slug)).slice(0, 5);
+  const records = (context.backupRecords || []).filter((record) => record.scope === applicationBackupScope(project.slug)).slice(0, 5);
+  const hasBackupFiles = sourceStats.fileCount > 0 || artifacts.length > 0;
+  return sanitizeEvent({
+    projectId: project.slug,
+    projectName: project.name,
+    runtime: project.runtime,
+    sourcePath,
+    sourceFileCount: sourceStats.fileCount,
+    sourceDirectoryCount: sourceStats.directoryCount,
+    artifactCount: artifacts.length,
+    fileCount: sourceStats.fileCount + artifacts.length,
+    sizeBytes: allSizeBytes,
+    sizeLabel: usageBytesLabel(allSizeBytes),
+    latestName: latest?.name || "",
+    latestPath: latest?.path || "",
+    latestModifiedAt: latest?.modifiedAt || "",
+    databaseCount: databases.length,
+    storageCount: storage.buckets.length + storage.webspaces.length,
+    commands,
+    restoreOptions,
+    jobs,
+    records,
+    status: hasBackupFiles ? "available" : commands.length ? "ready" : "missing",
+    statusLabel: hasBackupFiles ? "Disponibile" : commands.length ? "Pronto" : "Non configurato",
+  });
+}
+
+function applicationBackupScope(projectId) {
+  return `app-${sanitizeIdentifier(projectId)}`;
+}
+
+function applicationBackupMode(value) {
+  return choice(String(value || "all").toLowerCase(), ["all", "source", "database"], "application backup mode");
+}
+
+function applicationRestoreMode(value) {
+  return choice(String(value || "all").toLowerCase(), ["all", "source", "database"], "application restore mode");
+}
+
+function applicationRestoreModeLabel(value) {
+  const labels = {
+    all: "tutto",
+    source: "solo sorgenti",
+    database: "solo database",
+  };
+  return labels[applicationRestoreMode(value)] || "tutto";
+}
+
+function applicationBackupCommands(context, projectOrId, mode = "all") {
+  const project = resolveContextProject(context, projectOrId);
+  if (!project) return [];
+  const backupMode = applicationBackupMode(mode);
+  const commands = new Map();
+  if (backupMode === "all" || backupMode === "source") {
+    commands.set("backup-applications", { command: "backup-applications", label: "Backup sorgenti applicazioni" });
+  }
+  const databases = projectDatabases(context, project);
+  if ((backupMode === "all" || backupMode === "database") && databases.some((database) => database.engine === "postgres")) {
+    commands.set("backup-postgres", { command: "backup-postgres", label: "Backup PostgreSQL" });
+  }
+  if ((backupMode === "all" || backupMode === "database") && databases.some((database) => database.engine === "mariadb")) {
+    commands.set("backup-mariadb", { command: "backup-mariadb", label: "Backup MariaDB" });
+  }
+  const storage = projectStorage(context, project);
+  if (backupMode === "all" && storage.buckets.length) {
+    commands.set("backup-minio", { command: "backup-minio", label: "Backup MinIO" });
+  }
+  return [...commands.values()];
+}
+
+function applicationBackupArtifacts(context, project) {
+  const databases = projectDatabases(context, project);
+  const storage = projectStorage(context, project);
+  const tokens = new Set([...projectIdentitySet(project)].map(resourceToken).filter(Boolean));
+  for (const token of applicationBackupNameTokens(project)) {
+    tokens.add(token);
+  }
+  for (const database of databases) {
+    for (const value of [database.id, database.name, database.displayName, database.ownerRole]) {
+      const token = resourceToken(value);
+      if (token) tokens.add(token);
+    }
+  }
+  for (const item of [...storage.webspaces, ...storage.buckets]) {
+    for (const value of [item.id, item.name, item.path, item.bucketName]) {
+      const token = resourceToken(value);
+      if (token) tokens.add(token);
+    }
+  }
+  const familyDirs = new Set(databases.map((database) => database.engine === "postgres" ? "postgres" : "mariadb"));
+  if (storage.buckets.length) familyDirs.add("minio");
+  const directSourcePrefix = `${joinRelativePath("applications", project.slug)}/`;
+  const resolvedSourcePrefix = `${applicationSourceBackupPath(project)}/`;
+  const artifacts = [];
+  for (const family of familyDirs) {
+    artifacts.push(...backupArtifactEntriesRecursive(family).filter((entry) => backupEntryMatchesTokens(entry, tokens)));
+  }
+  artifacts.push(...backupArtifactEntriesRecursive("applications").filter((entry) => String(entry.path || "").startsWith(directSourcePrefix) || String(entry.path || "").startsWith(resolvedSourcePrefix)));
+  const seen = new Set();
+  return artifacts.filter((entry) => {
+    if (seen.has(entry.path)) return false;
+    seen.add(entry.path);
+    return true;
+  }).sort((a, b) => Number(b.mtimeMs || 0) - Number(a.mtimeMs || 0)).slice(0, 80);
+}
+
+function applicationBackupRestoreOptions(artifacts) {
+  return (artifacts || [])
+    .filter((entry) => backupDataArtifactName(entry.name || entry.path))
+    .map((entry) => ({
+      name: entry.name,
+      path: entry.path,
+      label: applicationBackupOptionLabel(entry),
+      modifiedAt: entry.modifiedAt || "",
+      sizeLabel: entry.sizeLabel || "",
+      kind: applicationBackupArtifactKind(entry.path || entry.name),
+    }));
+}
+
+function applicationBackupOptionLabel(entry) {
+  const kind = applicationBackupArtifactKind(entry.path || entry.name);
+  const when = entry.modifiedAt ? ` - ${entry.modifiedAt}` : "";
+  const size = entry.sizeLabel ? ` - ${entry.sizeLabel}` : "";
+  return `${kind}: ${entry.name}${when}${size}`;
+}
+
+function applicationBackupArtifactKind(value) {
+  const normalized = String(value || "").toLowerCase();
+  if (normalized.startsWith("applications/")) return "Sorgenti";
+  if (normalized.startsWith("postgres/")) return "PostgreSQL";
+  if (normalized.startsWith("mariadb/")) return "MariaDB";
+  if (normalized.startsWith("minio/")) return "Storage";
+  return "Backup";
+}
+
+function applicationSourceBackupPath(project) {
+  const candidates = [
+    project.slug,
+    project.id,
+    ...(Array.isArray(project.aliases) ? project.aliases : []),
+    ...applicationBackupNameTokens(project),
+  ].map(sanitizeIdentifier).filter(Boolean);
+  const directories = applicationSourceBackupDirectories();
+  const exact = candidates.find((candidate) => directories.has(candidate));
+  return joinRelativePath("applications", exact || sanitizeIdentifier(project.slug || project.id || project.name));
+}
+
+function applicationSourceBackupDirectories() {
+  const applicationsPath = path.resolve(backupRoot, "applications");
+  if (!existsSync(applicationsPath)) return new Set();
+  try {
+    return new Set(readdirSync(applicationsPath, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && !entry.name.startsWith("."))
+      .map((entry) => sanitizeIdentifier(entry.name))
+      .filter(Boolean));
+  } catch {
+    return new Set();
+  }
+}
+
+function applicationBackupNameTokens(project) {
+  const values = [project.name, project.displayName, ...(Array.isArray(project.aliases) ? project.aliases : [])].filter(Boolean);
+  const tokens = new Set();
+  for (const value of values) {
+    const full = resourceToken(value);
+    if (full) tokens.add(full);
+    for (const part of String(value).split(/[^a-zA-Z0-9]+/).map(resourceToken).filter((token) => token.length >= 3)) {
+      tokens.add(part);
+    }
+  }
+  return [...tokens];
+}
+
+function backupEntryMatchesTokens(entry, tokens) {
+  const haystack = resourceToken(path.basename(String(entry.path || entry.name || "")));
+  return [...tokens].some((token) => token && token.length >= 3 && (haystack === token || haystack.includes(token) || token.includes(haystack)));
+}
+
+function safeReadBackupFiles(requestedPath = "") {
+  try {
+    return readBackupFiles(requestedPath);
+  } catch (error) {
+    return sanitizeEvent({
+      available: false,
+      root: "backups/",
+      path: "",
+      parentPath: "",
+      entries: [],
+      sizeBytes: 0,
+      fileCount: 0,
+      directoryCount: 0,
+      message: error instanceof Error ? error.message : "Backup non disponibili.",
+    });
+  }
+}
+
+function readBackupFamily(spec) {
+  const report = latestDocumentedReport("backups", spec.reportPrefix);
+  const payload = report?.payload || {};
+  const directory = readBackupDirectoryStats(spec.id);
+  const artifact = latestBackupArtifact(spec.id);
+  const reportStatus = String(payload.status || "").toLowerCase();
+  const success = reportStatus === "success" && Boolean(payload.artifactSha256 || payload.artifactPath || artifact);
+  return sanitizeEvent({
+    id: spec.id,
+    label: spec.label,
+    command: spec.command,
+    restoreCommand: spec.restoreCommand,
+    status: success ? "success" : report ? "needs-work" : artifact ? "local-file" : "missing",
+    reportPath: report?.reportPath || "",
+    reportAgeLabel: report ? relativeTimeLabel(payload.generatedAt || payload.finishedAt) : "",
+    integrityVerified: payload.integrityVerified === true,
+    artifactName: payload.artifactName || artifact?.name || "",
+    artifactPath: backupArtifactDisplayPath(payload.artifactPath || artifact?.path || ""),
+    artifactSizeBytes: Number(payload.artifactSizeBytes || artifact?.sizeBytes || 0),
+    artifactSizeLabel: usageBytesLabel(Number(payload.artifactSizeBytes || artifact?.sizeBytes || 0)),
+    latestModifiedAt: artifact?.modifiedAt || payload.finishedAt || payload.generatedAt || "",
+    fileCount: directory.fileCount,
+    directoryCount: directory.directoryCount,
+    totalSizeBytes: directory.sizeBytes,
+    totalSizeLabel: usageBytesLabel(directory.sizeBytes),
+  });
+}
+
+function backupRootSummary(files) {
+  const disk = backupDiskSummary();
+  return {
+    path: "backups/",
+    available: files.available,
+    sizeBytes: files.sizeBytes || 0,
+    sizeLabel: usageBytesLabel(files.sizeBytes || 0),
+    fileCount: files.fileCount || 0,
+    directoryCount: files.directoryCount || 0,
+    diskFreeLabel: disk.available ? usageBytesLabel(disk.freeBytes) : "n.d.",
+    diskTotalLabel: disk.available ? usageBytesLabel(disk.totalBytes) : "n.d.",
+  };
+}
+
+function readBackupFiles(requestedPath = "") {
+  const root = path.resolve(backupRoot);
+  if (!existsSync(root)) {
+    return sanitizeEvent({
+      available: false,
+      root: "backups/",
+      path: "",
+      parentPath: "",
+      entries: [],
+      sizeBytes: 0,
+      fileCount: 0,
+      directoryCount: 0,
+      message: "La directory backup non e' montata nel Control Center.",
+    });
+  }
+  const realRoot = backupRealpath(root);
+  const relativePath = safeRelativeBackupPath(requestedPath || "");
+  const target = path.resolve(realRoot, relativePath);
+  if (!(target === realRoot || target.startsWith(`${realRoot}${path.sep}`))) {
+    throw new ValidationError("Percorso backup non valido.");
+  }
+  if (!existsSync(target)) throw new ValidationError("Percorso backup non trovato.");
+  assertNoBackupPathSymlink(realRoot, relativePath);
+  const stat = lstatSync(target);
+  if (stat.isSymbolicLink()) throw new ValidationError("I symlink non vengono aperti dal Control Center.");
+  const totals = directorySizeSummary(realRoot, 5000);
+  if (!stat.isDirectory()) {
+    return sanitizeEvent({
+      available: true,
+      root: "backups/",
+      path: relativePath,
+      parentPath: parentRelativeBackupPath(relativePath),
+      entries: [backupFileEntryRecord(target, path.basename(target), relativePath)].filter(Boolean),
+      sizeBytes: totals.sizeBytes,
+      fileCount: totals.fileCount,
+      directoryCount: totals.directoryCount,
+      message: "",
+    });
+  }
+  const entries = readdirSync(target, { withFileTypes: true })
+    .filter((entry) => !entry.name.startsWith("."))
+    .slice(0, 300)
+    .map((entry) => backupFileEntryRecord(path.join(target, entry.name), entry.name, joinRelativePath(relativePath, entry.name)))
+    .filter(Boolean)
+    .sort((a, b) => (a.type === b.type ? String(b.modifiedAt || "").localeCompare(String(a.modifiedAt || "")) || a.name.localeCompare(b.name) : a.type === "directory" ? -1 : 1));
+  return sanitizeEvent({
+    available: true,
+    root: "backups/",
+    path: relativePath,
+    parentPath: parentRelativeBackupPath(relativePath),
+    entries,
+    sizeBytes: totals.sizeBytes,
+    fileCount: totals.fileCount,
+    directoryCount: totals.directoryCount,
+    message: "",
+  });
+}
+
+function readBackupDirectoryStats(familyId) {
+  const root = path.resolve(backupRoot);
+  const familyPath = path.resolve(root, safeRelativeBackupPath(familyId));
+  if (!existsSync(root) || !existsSync(familyPath) || !(familyPath === root || familyPath.startsWith(`${root}${path.sep}`))) {
+    return { sizeBytes: 0, fileCount: 0, directoryCount: 0 };
+  }
+  return directorySizeSummary(familyPath, 3000);
+}
+
+function latestBackupArtifact(familyId) {
+  return backupArtifactEntriesRecursive(familyId)[0] || null;
+}
+
+function backupArtifactEntriesRecursive(relativeDir, limit = 1200) {
+  const root = path.resolve(backupRoot);
+  const familyPath = path.resolve(root, safeRelativeBackupPath(relativeDir));
+  if (!existsSync(root) || !existsSync(familyPath) || !(familyPath === root || familyPath.startsWith(`${root}${path.sep}`))) return [];
+  const entries = [];
+  const stack = [familyPath];
+  let visited = 0;
+  try {
+    while (stack.length && visited < limit) {
+      const current = stack.pop();
+      visited += 1;
+      const stat = lstatSync(current);
+      if (stat.isSymbolicLink()) continue;
+      if (stat.isDirectory()) {
+        for (const entry of readdirSync(current, { withFileTypes: true })) {
+          if (!entry.name.startsWith(".")) stack.push(path.join(current, entry.name));
+        }
+        continue;
+      }
+      if (!stat.isFile() || !backupDataArtifactName(path.basename(current))) continue;
+      const relativePath = path.relative(root, current).replaceAll("\\", "/");
+      const record = backupFileEntryRecord(current, path.basename(current), relativePath);
+      if (record) entries.push({ ...record, mtimeMs: stat.mtimeMs });
+    }
+  } catch {
+    return [];
+  }
+  return entries.sort((a, b) => Number(b.mtimeMs || 0) - Number(a.mtimeMs || 0));
+}
+
+function backupDataArtifactName(name) {
+  return /\.(dump|sql\.gz|tar\.gz)$/i.test(String(name || ""));
+}
+
+function backupFileEntryRecord(filePath, name, relativePath) {
+  try {
+    const stat = lstatSync(filePath);
+    const isSymlink = stat.isSymbolicLink();
+    const isDirectory = stat.isDirectory();
+    return {
+      name: sanitizeBackupDisplay(name),
+      path: safeRelativeBackupPath(relativePath),
+      type: isSymlink ? "symlink" : isDirectory ? "directory" : "file",
+      sizeBytes: isDirectory || isSymlink ? 0 : stat.size,
+      sizeLabel: isDirectory ? "" : usageBytesLabel(stat.size),
+      modifiedAt: italianDateTimeLabel(stat.mtime),
+      browsable: isDirectory && !isSymlink,
+      removable: !isDirectory && !isSymlink && backupFileDeleteAllowed(relativePath),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function directorySizeSummary(root, limit = 3000) {
+  const summary = { sizeBytes: 0, fileCount: 0, directoryCount: 0 };
+  const stack = [root];
+  let visited = 0;
+  while (stack.length && visited < limit) {
+    const current = stack.pop();
+    visited += 1;
+    let stat;
+    try {
+      stat = lstatSync(current);
+    } catch {
+      continue;
+    }
+    if (stat.isSymbolicLink()) continue;
+    if (stat.isDirectory()) {
+      summary.directoryCount += 1;
+      try {
+        for (const entry of readdirSync(current)) {
+          if (!entry.startsWith(".")) stack.push(path.join(current, entry));
+        }
+      } catch {
+        // Ignore directories that become unavailable while scanning.
+      }
+      continue;
+    }
+    if (stat.isFile()) {
+      summary.fileCount += 1;
+      summary.sizeBytes += stat.size;
+    }
+  }
+  return summary;
+}
+
+function backupDiskSummary() {
+  try {
+    const root = existsSync(backupRoot) ? backupRoot : path.dirname(backupRoot);
+    const stat = statfsSync(root);
+    return {
+      available: true,
+      freeBytes: Number(stat.bavail || stat.bfree || 0) * Number(stat.bsize || 0),
+      totalBytes: Number(stat.blocks || 0) * Number(stat.bsize || 0),
+    };
+  } catch {
+    return { available: false, freeBytes: 0, totalBytes: 0 };
+  }
+}
+
+function safeRelativeBackupPath(value) {
+  const normalized = String(value || "").replaceAll("\\", "/").replace(/^\/+|\/+$/g, "");
+  if (!normalized) return "";
+  if (normalized.includes("..") || /^[A-Za-z]:/.test(normalized)) throw new ValidationError("Percorso backup non valido.");
+  if (!/^[A-Za-z0-9._/@ -]+$/.test(normalized)) throw new ValidationError("Percorso backup non valido.");
+  return normalized;
+}
+
+function parentRelativeBackupPath(value) {
+  const normalized = safeRelativeBackupPath(value);
+  if (!normalized) return "";
+  const parent = path.posix.dirname(normalized.replaceAll("\\", "/"));
+  return parent === "." ? "" : parent;
+}
+
+function assertNoBackupPathSymlink(root, relativePath) {
+  const parts = safeRelativeBackupPath(relativePath).split("/").filter(Boolean);
+  let current = root;
+  for (const part of parts) {
+    current = path.join(current, part);
+    const stat = lstatSync(current);
+    if (stat.isSymbolicLink()) throw new ValidationError("I symlink non vengono aperti dal Control Center.");
+  }
+}
+
+function backupRealpath(value) {
+  try {
+    return realpathSync(value);
+  } catch {
+    throw new ValidationError("Directory backup non trovata.");
+  }
+}
+
+function backupArtifactDisplayPath(value) {
+  const raw = String(value || "");
+  if (!raw) return "";
+  const index = raw.indexOf("/backups/");
+  return index >= 0 ? raw.slice(index + 1) : safeRelativeBackupPath(raw.replace(path.resolve(backupRoot), "").replace(/^\/+/, ""));
+}
+
+function sanitizeBackupDisplay(value) {
+  return String(value || "").trim().replace(/[^a-zA-Z0-9._/@: -]+/g, "-").slice(0, 180) || "unknown";
+}
+
+function backupFileDeleteAllowed(value) {
+  const pathValue = String(value || "");
+  return /\.(dump|sql\.gz|tar\.gz|sha256|sig\.json)$/i.test(pathValue);
+}
+
+function backupPreviewAllowed(value) {
+  const pathValue = String(value || "");
+  return /\.(json|md|txt|sha256|sig\.json|sql\.gz|dump|tar\.gz)$/i.test(pathValue);
+}
+
+function readBackupPreview(requestedPath = "") {
+  const relativePath = safeRelativeBackupPath(requestedPath || "");
+  if (!relativePath) throw new ValidationError("Percorso backup richiesto.");
+  if (!backupPreviewAllowed(relativePath)) throw new ValidationError("Tipo file backup non supportato per anteprima.");
+  const root = backupRealpath(path.resolve(backupRoot));
+  const target = path.resolve(root, relativePath);
+  if (!(target === root || target.startsWith(`${root}${path.sep}`))) throw new ValidationError("Percorso backup non valido.");
+  if (!existsSync(target)) throw new ValidationError("File backup non trovato.");
+  assertNoBackupPathSymlink(root, relativePath);
+  const stat = lstatSync(target);
+  if (stat.isDirectory() || stat.isSymbolicLink()) throw new ValidationError("Anteprima disponibile solo per file reali.");
+  const ext = relativePath.toLowerCase();
+  const result = {
+    path: relativePath,
+    name: path.basename(relativePath),
+    type: backupPreviewType(ext),
+    sizeBytes: stat.size,
+    sizeLabel: usageBytesLabel(stat.size),
+    modifiedAt: italianDateTimeLabel(stat.mtime),
+    mode: "safe-redacted-preview",
+    content: "",
+    linesRedacted: 0,
+    message: "",
+  };
+  if (ext.endsWith(".dump")) {
+    return sanitizeEvent({
+      ...result,
+      content: "",
+      message: "Dump PostgreSQL custom: non viene mostrato raw nel browser. Usa restore drill per decifrare/verificare in sandbox.",
+    });
+  }
+  if (ext.endsWith(".tar.gz")) {
+    return sanitizeEvent({
+      ...result,
+      content: "",
+      message: "Archivio tar.gz: contenuto raw non mostrato nel browser. L'integrita' e il restore sono verificati dai report.",
+    });
+  }
+  let text = "";
+  try {
+    if (ext.endsWith(".gz")) {
+      const compressed = readFileSync(target);
+      text = gunzipSync(compressed, { maxOutputLength: 256 * 1024 }).toString("utf8");
+    } else {
+      text = readFileSync(target, "utf8");
+    }
+  } catch {
+    return sanitizeEvent({
+      ...result,
+      content: "",
+      message: "File non leggibile come testo sicuro.",
+    });
+  }
+  const preview = redactBackupPreviewText(text, ext);
+  return sanitizeEvent({
+    ...result,
+    content: preview.content,
+    linesRedacted: preview.linesRedacted,
+    message: preview.truncated ? "Anteprima limitata e redatta." : "Anteprima redatta.",
+  });
+}
+
+function backupPreviewType(ext) {
+  if (ext.endsWith(".sql.gz")) return "sql-gzip";
+  if (ext.endsWith(".sig.json")) return "signature-json";
+  if (ext.endsWith(".sha256")) return "sha256";
+  if (ext.endsWith(".json")) return "json";
+  if (ext.endsWith(".md")) return "markdown";
+  if (ext.endsWith(".dump")) return "postgres-custom-dump";
+  if (ext.endsWith(".tar.gz")) return "tar-gzip";
+  return "text";
+}
+
+function redactBackupPreviewText(text, ext) {
+  const maxLines = 120;
+  const lines = String(text || "").split(/\r?\n/);
+  const output = [];
+  let linesRedacted = 0;
+  for (const line of lines.slice(0, maxLines)) {
+    if (ext.endsWith(".sql.gz") && /^\s*(INSERT|COPY)\s/i.test(line)) {
+      output.push("[riga dati SQL redatta]");
+      linesRedacted += 1;
+      continue;
+    }
+    const redacted = sanitizeMessage(line)
+      .replace(/\b(password|passwd|pwd|secret|token|api[_-]?key|private[_-]?key|authorization|cookie)\b(\s*[:=]\s*|[`'"]?\s+)([^,\s;)}]+)/gi, "$1$2[redacted]")
+      .replace(/(-----BEGIN [A-Z ]*PRIVATE KEY-----)[\s\S]*/g, "$1[redacted]");
+    if (redacted !== line) linesRedacted += 1;
+    output.push(redacted);
+  }
+  return {
+    content: output.join("\n").slice(0, 12000),
+    linesRedacted,
+    truncated: lines.length > maxLines || output.join("\n").length > 12000,
+  };
+}
+
+function backupRunCommandMap() {
+  return new Map([
+    ["applications", [{ command: "backup-applications", label: "Backup applicazioni" }]],
+    ["postgres", [{ command: "backup-postgres", label: "Backup PostgreSQL" }]],
+    ["mariadb", [{ command: "backup-mariadb", label: "Backup MariaDB" }]],
+    ["minio", [{ command: "backup-minio", label: "Backup MinIO" }]],
+    ["keycloak", [{ command: "backup-keycloak", label: "Backup Keycloak" }]],
+    ["secret-manager", [{ command: "backup-secret-manager-metadata", label: "Backup Secret vault" }]],
+    ["offsite-restic", [{ command: "offsite-backup-restic", label: "Backup off-site Restic" }]],
+    ["all", [
+      { command: "backup-applications", label: "Backup applicazioni" },
+      { command: "backup-postgres", label: "Backup PostgreSQL" },
+      { command: "backup-mariadb", label: "Backup MariaDB" },
+      { command: "backup-minio", label: "Backup MinIO" },
+      { command: "backup-keycloak", label: "Backup Keycloak" },
+      { command: "backup-secret-manager-metadata", label: "Backup Secret vault" },
+      { command: "offsite-backup-restic", label: "Backup off-site Restic" },
+    ]],
+  ]);
+}
+
+function resolveBackupRunRequest(payload, context) {
+  const requestedScope = sanitizeIdentifier(payload.scope || "all") || "all";
+  if (requestedScope === "application" || requestedScope.startsWith("app-")) {
+    const projectId = requestedScope.startsWith("app-")
+      ? requestedScope.replace(/^app-/, "")
+      : sanitizeIdentifier(payload.projectId || payload.applicationId || payload.appId || "");
+    const project = resolveContextProject(context, projectId);
+    if (!project) throw new ValidationError("Applicazione backup non trovata.");
+    const mode = applicationBackupMode(payload.backupMode || payload.backupContents || "all");
+    const commands = applicationBackupCommands(context, project, mode);
+    if (!commands.length) throw new ValidationError("Questa applicazione non ha backend backup supportati.");
+    return { scope: applicationBackupScope(project.slug), commands, project, mode };
+  }
+  const commands = backupRunCommandMap().get(requestedScope);
+  if (!commands?.length) throw new ValidationError("Ambito backup non supportato.");
+  return { scope: requestedScope, commands, project: null };
+}
+
+function backupRestoreCommandMap() {
+  return new Map([
+    ["postgres", [{ command: "restore-test-postgres", label: "Restore PostgreSQL" }]],
+    ["mariadb", [{ command: "restore-test-mariadb", label: "Restore MariaDB" }]],
+    ["minio", [{ command: "restore-test-minio", label: "Restore MinIO" }]],
+    ["keycloak", [{ command: "restore-test-keycloak", label: "Restore Keycloak" }]],
+    ["secret-manager", [{ command: "restore-test-secret-manager-metadata", label: "Restore Secret vault" }]],
+    ["offsite-restic", [{ command: "offsite-restore-drill-restic", label: "Restore off-site Restic" }]],
+    ["all", [
+      { command: "full-restore-drill", label: "Restore drill completo locale" },
+      { command: "offsite-restore-drill-restic", label: "Restore off-site Restic" },
+    ]],
+  ]);
+}
+
+function resolveBackupRestoreRequest(payload, context) {
+  const requestedScope = sanitizeIdentifier(payload.scope || "all") || "all";
+  if (requestedScope === "application" || requestedScope.startsWith("app-")) {
+    const projectId = requestedScope.startsWith("app-")
+      ? requestedScope.replace(/^app-/, "")
+      : sanitizeIdentifier(payload.projectId || payload.applicationId || payload.appId || "");
+    const project = resolveContextProject(context, projectId);
+    if (!project) throw new ValidationError("Applicazione backup non trovata.");
+    const inventory = applicationBackupInventory(context, project);
+    const options = inventory.restoreOptions || [];
+    if (!options.length) throw new ValidationError("Questa applicazione non ha backup ripristinabili.");
+    const requestedRef = String(payload.backupRef || payload.backupId || "latest") === "latest"
+      ? options[0].path
+      : safeRelativeBackupPath(payload.backupRef || payload.backupId || "");
+    const selected = options.find((option) => option.path === requestedRef);
+    if (!selected) throw new ValidationError("Backup applicazione non trovato o non ripristinabile.");
+    const mode = applicationRestoreMode(payload.restoreMode || payload.restoreContents || "all");
+    const commands = applicationRestoreCommands(context, project, selected, mode);
+    return {
+      scope: applicationBackupScope(project.slug),
+      backupRef: selected.path,
+      commands,
+      project,
+      selected,
+      mode,
+      planOnly: commands.length === 0,
+    };
+  }
+  const backupRef = sanitizeRef(payload.backupRef || payload.backupId || "latest");
+  if (backupRef !== "latest") throw new ValidationError("Dal Control Center il restore drill usa solo latest; usa infra-ops per snapshot specifici.");
+  const commands = backupRestoreCommandMap().get(requestedScope);
+  if (!commands?.length) throw new ValidationError("Ambito restore non supportato.");
+  return { scope: requestedScope, backupRef, commands, project: null, selected: null, mode: "", planOnly: false };
+}
+
+function applicationRestoreCommands(context, project, selected, mode = "all") {
+  const restoreMode = applicationRestoreMode(mode);
+  const selectedPath = String(selected?.path || "").toLowerCase();
+  const commands = new Map();
+  const databases = projectDatabases(context, project);
+  if ((restoreMode === "all" || restoreMode === "database") && databases.some((database) => database.engine === "postgres")) {
+    commands.set("restore-test-postgres", { command: "restore-test-postgres", label: "Restore drill PostgreSQL" });
+  }
+  if ((restoreMode === "all" || restoreMode === "database") && databases.some((database) => database.engine === "mariadb")) {
+    commands.set("restore-test-mariadb", { command: "restore-test-mariadb", label: "Restore drill MariaDB" });
+  }
+  if (restoreMode === "all" && selectedPath.startsWith("minio/") && projectStorage(context, project).buckets.length) {
+    commands.set("restore-test-minio", { command: "restore-test-minio", label: "Restore drill storage" });
+  }
+  return [...commands.values()];
+}
+
+function queueBackupRun(payload, context) {
+  const { scope, commands, project, mode } = resolveBackupRunRequest(payload, context);
+  const job = createBackupJob({ action: "backup", scope, commands, context });
+  appendAudit({ action: "backup.run.queue", target: scope, environment: context.environment, risk: "medium", result: "accepted", dryRun: false, summary: project ? `Application backup queued for ${project.slug} (${mode || "all"}).` : "Manual backup queued for backup scheduler execution." });
+  const operation = operationPlan("backup.run", context.environment, false, ["write queue request", "backup scheduler picks job", "run allow-listed infra-ops commands", "write evidence"], {
+    scope,
+    projectId: project?.slug || "",
+    backupMode: mode || "",
+    jobId: job.id,
+    executor: "enterprise-backup-scheduler",
+    commands: commands.map((item) => item.command),
+    productionEvidence: false,
+  });
+  const backup = backupRecord({
+    operationId: operation.id,
+    jobId: job.id,
+    action: "backup",
+    scope,
+    environment: context.environment,
+    status: "queued",
+    dryRun: false,
+    resultSummary: project ? `Backup applicazione ${project.name} accodato al backup scheduler (${mode || "all"}).` : "Backup queued for backup scheduler execution.",
+  });
+  appendBackupRecord(backup);
+  return { ...operation, backup, job };
+}
+
+function queueRestoreDrill(payload, context) {
+  const { scope, backupRef, commands, project, selected, mode, planOnly } = resolveBackupRestoreRequest(payload, context);
+  if (planOnly) return planApplicationBackupRestore({ scope, backupRef, project, selected, mode, context });
+  const job = createBackupJob({ action: "restore-drill", scope, backupRef, commands, context, metadata: { restoreMode: mode || "" } });
+  appendAudit({ action: "restore.queue", target: scope, environment: context.environment, risk: "high", result: "accepted", dryRun: false, summary: project ? `Application restore drill queued for ${project.slug} (${applicationRestoreModeLabel(mode)}).` : "Restore drill queued for backup scheduler execution." });
+  const operation = operationPlan("restore.queue", context.environment, false, ["write queue request", "backup scheduler picks job", "run restore drill in sandbox", "write evidence"], {
+    scope,
+    backupRef,
+    projectId: project?.slug || "",
+    restoreMode: mode || "",
+    jobId: job.id,
+    executor: "enterprise-backup-scheduler",
+    commands: commands.map((item) => item.command),
+    dataChanged: false,
+    productionEvidence: false,
+  });
+  const backup = backupRecord({
+    operationId: operation.id,
+    jobId: job.id,
+    action: "restore-drill",
+    scope,
+    environment: context.environment,
+    status: "queued",
+    dryRun: false,
+    backupRef,
+    resultSummary: project ? `Restore drill applicazione ${project.name} accodato al backup scheduler (${applicationRestoreModeLabel(mode)}).` : "Restore drill queued for backup scheduler execution.",
+  });
+  appendBackupRecord(backup);
+  return { ...operation, backup, job };
+}
+
+function planApplicationBackupRestore({ scope, backupRef, project, selected, mode, context }) {
+  appendAudit({ action: "restore.plan", target: scope, environment: context.environment, risk: "high", result: "planned", dryRun: true, summary: `Application restore plan generated for ${project.slug} (${applicationRestoreModeLabel(mode)}); no live data changed.` });
+  const operation = operationPlan("restore.plan", context.environment, true, ["validate application backup artifact", "keep source mount read-only", "require explicit maintenance approval for destructive restore", "preserve current sources before any future apply"], {
+    scope,
+    backupRef,
+    projectId: project.slug,
+    restoreMode: mode || "",
+    selectedBackup: selected?.name || "",
+    dataChanged: false,
+    productionEvidence: false,
+  });
+  const backup = backupRecord({
+    operationId: operation.id,
+    action: "restore-drill",
+    scope,
+    environment: context.environment,
+    status: "planned",
+    dryRun: true,
+    backupRef,
+    resultSummary: `Restore ${applicationRestoreModeLabel(mode)} ${project.name} pianificato. Nessun file live e' stato modificato.`,
+  });
+  appendBackupRecord(backup);
+  return { ...operation, backup };
+}
+
+function createBackupJob({ action, scope, backupRef = "", commands, context, metadata = {} }) {
+  const now = new Date().toISOString();
+  const job = sanitizeEvent({
+    id: rid(),
+    action,
+    scope,
+    backupRef,
+    ...metadata,
+    status: "queued",
+    environment: context.environment,
+    requestedBy: "control-center",
+    commands: commands.map((item) => ({ command: item.command, label: item.label })),
+    createdAt: now,
+    updatedAt: now,
+    startedAt: null,
+    finishedAt: null,
+    resultSummary: "Queued for backup scheduler.",
+    logPath: null,
+    reportPaths: [],
+  });
+  const queuedDir = path.join(backupJobsDir, "queued");
+  mkdirSync(queuedDir, { recursive: true });
+  writeFileSync(path.join(queuedDir, `${job.id}.json`), `${JSON.stringify(job, null, 2)}\n`, { mode: 0o600 });
+  return job;
+}
+
+function readBackupJobs() {
+  const jobs = [];
+  for (const status of ["running", "queued", "failed", "done"]) {
+    const dir = path.join(backupJobsDir, status);
+    if (!existsSync(dir)) continue;
+    try {
+      for (const name of readdirSync(dir).filter((item) => item.endsWith(".json")).slice(0, 200)) {
+        const target = path.resolve(dir, name);
+        if (!target.startsWith(`${path.resolve(dir)}${path.sep}`)) continue;
+        const parsed = JSON.parse(readFileSync(target, "utf8"));
+        jobs.push(sanitizeEvent({ ...parsed, queueStatus: status }));
+      }
+    } catch {
+      // Keep the backup page available if one job file is unreadable.
+    }
+  }
+  return jobs
+    .sort((a, b) => String(b.updatedAt || b.createdAt || "").localeCompare(String(a.updatedAt || a.createdAt || "")))
+    .slice(0, 80);
 }
 
 function renderControlCenter(context, params) {
@@ -3410,8 +4691,18 @@ function renderControlCenter(context, params) {
   const section = sections.some((item) => item.id === requestedSection) ? requestedSection : "status";
   const selectedProject = context.projects.some((project) => project.slug === params.get("project")) ? params.get("project") : context.projects[0]?.slug || "";
   const currentProject = context.projects.find((project) => project.slug === selectedProject) || null;
+  const activeProject = section === "projects" && params.has("project") ? currentProject : null;
   const title = sections.find((item) => item.id === section)?.label || "Status";
   const body = renderOperationsSection(section, context, params, currentProject);
+  const hidePageHead = Boolean(activeProject);
+  const pageHint = operationPageHint(section, context);
+  const pageLabel = hidePageHead ? `aria-label="${escapeHtml(title)}"` : 'aria-labelledby="control-page-title"';
+  const pageHead = hidePageHead ? "" : `<div class="ops-page-head">
+        <div>
+          <h1 id="control-page-title">${escapeHtml(title)}</h1>
+          ${pageHint ? `<span>${escapeHtml(pageHint)}</span>` : ""}
+        </div>
+      </div>`;
 
   return `<!doctype html>
 <html lang="it">
@@ -3423,24 +4714,20 @@ function renderControlCenter(context, params) {
 ${controlCenterStylesheetLinks()}
 ${controlCenterScriptTags()}
 </head>
-<body data-cc-theme="light">
+<body data-cc-theme="light" data-cc-preloading="true">
+<div class="cc-preload-screen" role="status" aria-live="polite">
+  <span class="cc-preload-spinner" aria-hidden="true"></span>
+  <strong>Caricamento portale</strong>
+</div>
 <main aria-busy="false" class="cc-app-shell ops-shell section-${escapeHtml(section)}">
   <div class="ops-layout">
     <aside class="ops-topbar ops-sidebar" aria-label="Menu principale">
       <a class="ops-brand" href="/?section=status" aria-label="Platform operations"><span class="ops-brand-mark">P</span><strong>Platform</strong></a>
-      <span class="ops-status-pill ${context.goNoGo.status === "go" ? "go" : "no-go"}">${context.goNoGo.status === "go" ? "GO LIVE" : "NO GO LIVE"}</span>
-      <nav class="ops-nav" aria-label="Sezioni portal">
-        ${sections.filter((item) => !item.hidden).map((item) => `<a class="${item.id === section ? "active" : ""}" ${item.id === section ? 'aria-current="page"' : ""} href="/?section=${escapeHtml(item.id)}">${controlIcon(item.icon)}<span>${escapeHtml(item.label)}</span></a>`).join("")}
-      </nav>
+      ${renderOperationsNav(sections, section, context, activeProject, params)}
       ${authRequired ? '<a class="ops-icon-link" href="/logout" aria-label="Logout">Logout</a>' : ""}
     </aside>
-    <section class="ops-page" aria-labelledby="control-page-title">
-      <div class="ops-page-head">
-        <div>
-          <h1 id="control-page-title">${escapeHtml(title)}</h1>
-          <span>${escapeHtml(operationPageHint(section, context))}</span>
-        </div>
-      </div>
+    <section class="ops-page" ${pageLabel}>
+      ${pageHead}
       ${body}
     </section>
   </div>
@@ -3449,255 +4736,625 @@ ${controlCenterScriptTags()}
   </html>`;
 }
 
+function renderOperationsNav(sections, section, context, activeProject, params = new URLSearchParams()) {
+  const visibleSections = sections.filter((item) => !item.hidden);
+  return `<nav class="ops-nav" aria-label="Sezioni portal">
+    <span class="ops-nav-pill" aria-hidden="true"></span>
+    ${visibleSections.map((item) => renderOperationsNavGroup(item, section, context, activeProject, params)).join("")}
+  </nav>`;
+}
+
+function renderOperationsNavGroup(item, section, context, activeProject, params = new URLSearchParams()) {
+  const currentSection = item.id === section;
+  const children = operationsNavChildren(item.id, context, activeProject, params, currentSection);
+  const expanded = currentSection;
+  const childActive = children.some((child) => child.active);
+  const locked = expanded && childActive;
+  const panelId = `ops-nav-panel-${item.id}`;
+  const hasChildren = children.length > 0;
+  const toggleLabel = locked ? `Sezione attuale: ${item.label}` : expanded ? `Chiudi ${item.label}` : `Apri ${item.label}`;
+  return `<div class="ops-nav-group ${expanded ? "expanded" : ""}" data-ops-nav-group="${escapeHtml(item.id)}" data-ops-nav-expanded="${expanded ? "true" : "false"}" data-ops-nav-has-active-child="${childActive ? "true" : "false"}" data-ops-nav-locked="${locked ? "true" : "false"}"${hasChildren ? ' data-ops-nav-collapsible="true"' : ""}>
+    <div class="ops-nav-row">
+      <button class="ops-nav-main" type="button" data-ops-nav-toggle aria-label="${escapeHtml(toggleLabel)}" aria-expanded="${expanded ? "true" : "false"}" aria-controls="${escapeHtml(panelId)}"${locked ? ' aria-disabled="true"' : ""}>
+        ${controlIcon(item.icon)}
+        <span class="ops-nav-main-label">${escapeHtml(item.label)}</span>
+        <span class="ops-nav-chevron" aria-hidden="true">${controlIcon("chevron-down")}</span>
+      </button>
+    </div>
+    ${children.length ? `<div class="ops-nav-sublist" id="${escapeHtml(panelId)}" aria-hidden="${expanded ? "false" : "true"}">
+      ${children.map((child) => renderOperationsNavChild(child)).join("")}
+    </div>` : ""}
+  </div>`;
+}
+
+function renderOperationsNavChild(child) {
+  const tone = child.tone ? ` ${child.tone}` : "";
+  const state = child.state ? ` ${child.state}` : "";
+  const statusAttrs = child.statusCategory
+    ? ` data-status-category-card="${escapeHtml(child.statusCategory)}" data-status-category-state="${escapeHtml(child.state || "")}"`
+    : "";
+  return `<a class="ops-nav-subitem${child.active ? " active" : ""}${escapeHtml(state)}" ${child.active ? 'aria-current="page"' : ""}${statusAttrs} href="${escapeHtml(child.href)}">
+    <span class="ops-nav-subdot${escapeHtml(tone)}" aria-hidden="true"></span>
+    <span>${escapeHtml(child.label)}</span>
+  </a>`;
+}
+
+function operationsNavChildren(section, context, activeProject, params = new URLSearchParams(), currentSection = false) {
+  if (section === "status") {
+    return statusNavChildren(context, params, currentSection);
+  }
+  if (section === "projects") {
+    return [
+      {
+        active: currentSection && !activeProject,
+        href: "/?section=projects",
+        label: "Tutte",
+      },
+      ...sortedOpsProjects(context.projects).map((project) => {
+        const state = projectOpsState(project);
+        return {
+          active: activeProject?.slug === project.slug,
+          href: `/?section=projects&project=${encodeURIComponent(project.slug)}`,
+          label: project.name,
+          tone: projectStatusTone(project, state),
+        };
+      }),
+    ];
+  }
+  if (section === "vault") {
+    return [
+      {
+        active: currentSection,
+        href: "/?section=vault",
+        label: "Secret",
+        tone: context.vaultItems?.length ? "good" : "warn",
+      },
+    ];
+  }
+  return [];
+}
+
+function statusNavChildren(context, params = new URLSearchParams(), currentSection = false) {
+  const groups = groupStatusRowsByCategory(opsStatusRows(context));
+  const activeId = selectedStatusGroup(groups, params).meta.id;
+  return groups.map((group) => {
+    const counts = statusCategoryCounts(group.rows);
+    const blocked = counts.open > 0;
+    return {
+      active: currentSection && group.meta.id === activeId,
+      href: `/?section=status&statusCategory=${encodeURIComponent(group.meta.id)}#status-run`,
+      label: group.meta.label,
+      state: blocked ? "blocked" : "passed",
+      statusCategory: group.meta.id,
+      tone: blocked ? "bad" : "good",
+    };
+  });
+}
+
 function operationsPortalSections() {
   return [
     { id: "status", label: "Stato", icon: "overview" },
     { id: "projects", label: "Applicazioni", icon: "projects" },
+    { id: "vault", label: "Vault", icon: "shield" },
     { id: "files", label: "File", icon: "file", hidden: true },
     { id: "databases", label: "Database", icon: "databases", hidden: true },
-    { id: "activity", label: "Attività", icon: "logs" },
-    { id: "resources", label: "Risorse", icon: "resources" },
   ];
 }
 
 function operationPageHint(section, context) {
   const hints = {
-    status: context.goNoGo.status === "go" ? "La piattaforma ha superato i controlli obbligatori." : "Qui vedi solo cosa blocca la messa online.",
-    projects: "Aggiungi, ferma, avvia e archivia applicazioni senza cancellare file o database.",
+    status: "",
+    projects: "Elenco applicazioni con host, runtime e dettaglio operativo.",
+    vault: "Secret cifrati: puoi aggiungerli e rimuoverli senza mostrare valori in chiaro.",
     files: "Inventario file applicazione in sola lettura.",
     databases: "Database collegati alle applicazioni e azioni metadata.",
-    activity: "Errori, avvisi, problemi e operazioni recenti.",
-    resources: "Uso reale risorse, limiti e runtime applicazioni.",
   };
   return hints[section] || "";
 }
 
 function renderOperationsSection(section, context, params, currentProject) {
-  if (section === "projects") return renderOpsProjects(context);
+  if (section === "projects") return renderOpsProjects(context, params);
+  if (section === "vault") return renderOpsVault(context);
   if (section === "files") return renderOpsFiles(context, params, currentProject);
   if (section === "databases") return renderOpsDatabases(context, currentProject);
-  if (section === "activity") return renderOpsActivity(context);
-  if (section === "resources") return renderOpsResources(context);
-  return renderOpsStatus(context);
+  return renderOpsStatus(context, params);
 }
 
-function renderOpsStatus(context) {
+function renderOpsStatus(context, params = new URLSearchParams()) {
   const report = context.goNoGo;
   const isGo = report.status === "go";
   const status = isGo ? "GO LIVE" : "NO GO LIVE";
   const rows = opsStatusRows(context);
   const passedRows = rows.filter((row) => row.status === "passed");
-  const missingRows = rows.filter((row) => ["authorization-required", "pending-live-proof", "pending-provider"].includes(row.status));
-  const fixRows = rows.filter((row) => ["failed", "needs-work", "plan-only"].includes(row.status));
   const notPassedRows = rows.filter((row) => row.status !== "passed");
+  const groups = groupStatusRowsByCategory(rows);
+  const selectedGroup = selectedStatusGroup(groups, params);
+  const selectedCounts = statusCategoryCounts(selectedGroup.rows);
   const lastRun = context.statusRun;
+  const score = rows.length ? Math.round((passedRows.length / rows.length) * 100) : 0;
   const nextStep = isGo
-    ? "Mantieni il report salvato come prova di rilascio e verifica che non siano cambiate configurazioni, DNS o provider."
+    ? "Nessun blocco aperto."
     : notPassedRows.length
-      ? "Controlla le righe aperte, chiudi i requisiti e rilancia i test."
-      : "Genera un nuovo report di produzione per avere una decisione aggiornata.";
-  return `<section class="ops-section">
-    <div class="ops-command-band" id="status-run">
-      <div>
-        <strong>Verifica stato adesso</strong>
-        <span>${escapeHtml(nextStep)}</span>
+      ? `${notPassedRows.length} controlli aperti.`
+      : "Report da aggiornare.";
+  const selectedRunSteps = statusRunStepDefinitionsForRows(selectedGroup.rows, selectedGroup.meta.id);
+  return `<section class="ops-section ops-status-redesign" data-status-runner data-status-step-delay-ms="${escapeHtml(String(statusRunStepDelayMs))}">
+    <div class="ops-status-overview ${isGo ? "good" : "bad"}" id="status-run">
+      <span class="ops-status-overview-icon" aria-hidden="true">${controlIcon(isGo ? "rocket" : "shield")}</span>
+      <div class="ops-status-overview-main">
+        <h2>${escapeHtml(status)}</h2>
+        <p>${escapeHtml(nextStep)}</p>
       </div>
-      <form method="post" action="/actions/status-check">
-        <button class="ops-button primary" type="submit">${controlIcon("play")} Avvia test reali</button>
+      <div class="ops-status-overview-score" aria-label="Avanzamento controlli">
+        <strong>${escapeHtml(String(score))}%</strong>
+        <span>${escapeHtml(`${passedRows.length}/${rows.length} superati`)}</span>
+        <div class="ops-status-mini-progress" aria-hidden="true"><i style="width: ${escapeHtml(String(score))}%"></i></div>
+      </div>
+      <form method="post" action="/actions/status-check" data-status-run-form>
+        <input type="hidden" name="scope" value="all">
+        <button class="ops-button primary" type="submit" data-status-run-button>${controlIcon("play")} Avvia test reali</button>
       </form>
     </div>
-    ${renderStatusRunSummary(lastRun)}
-    <div class="ops-panel" data-status-tabs>
-      <div class="ops-panel-head ops-status-tabs-head">
-        <div>
-          <h2>Controlli go live</h2>
-          <p>Mostra solo platform-infrastructure: test reali del Portal, report go/no-go e prove produzione.</p>
+
+    <div class="ops-status-workspace">
+      <div class="ops-status-main">
+        <details class="ops-status-runner" data-status-run-console>
+          <summary class="ops-status-runner-head">
+            <div>
+              <h2>Esecuzione test</h2>
+              <p data-status-progress-label>${escapeHtml(lastRun ? `Ultimo run: ${lastRun.generatedAt || "n.d."}` : "Pronto per partire.")}</p>
+            </div>
+            <span class="ops-status-run-state" data-status-run-state>${escapeHtml(lastRun ? friendlyGoNoGoStatus(lastRun.status) : "In attesa")}</span>
+          </summary>
+          <div class="ops-status-runner-body">
+            <div class="ops-status-progress" aria-hidden="true"><span data-status-progress-bar style="width: 0%"></span></div>
+            ${renderStatusRunSteps(lastRun, selectedRunSteps)}
+          </div>
+        </details>
+
+        <div class="ops-panel ops-status-results" data-status-section-detail="${escapeHtml(selectedGroup.meta.id)}">
+          <div class="ops-status-results-head">
+            <div>
+              <h2>${escapeHtml(selectedGroup.meta.label)}</h2>
+              <p>${escapeHtml(`${selectedCounts.total} controlli: ${selectedCounts.open} aperti, ${selectedCounts.passed} superati.`)}</p>
+            </div>
+            <form method="post" action="/actions/status-check" data-status-run-form>
+              <input type="hidden" name="scope" value="category">
+              <input type="hidden" name="category" value="${escapeHtml(selectedGroup.meta.id)}">
+              <button class="ops-button secondary" type="submit" data-status-run-button>${controlIcon("play")} Esegui sezione</button>
+            </form>
+          </div>
+          ${renderStatusCategoryTable(selectedGroup.meta, selectedGroup.rows, { showDescription: true, actions: true })}
         </div>
-        <span class="ops-badge ${isGo ? "good" : "bad"}">${escapeHtml(status)}</span>
       </div>
-      <div class="ops-status-tabs" role="tablist" aria-label="Filtro controlli stato">
-        ${renderStatusTabButton("all", "Controlli", rows.length, true)}
-        ${renderStatusTabButton("ok", "OK", passedRows.length)}
-        ${renderStatusTabButton("fix", "Da sistemare", fixRows.length)}
-        ${renderStatusTabButton("missing", "Prove mancanti", missingRows.length)}
       </div>
-      <div class="ops-status-panel active" id="status-tab-all" role="tabpanel" data-status-panel="all">
-        ${renderStatusAllPanel(passedRows, notPassedRows)}
-      </div>
-      <div class="ops-status-panel" id="status-tab-ok" role="tabpanel" data-status-panel="ok" hidden>
-        ${renderStatusRowsTable(passedRows, "Tutto OK", "Nessun controllo superato ancora disponibile.")}
-      </div>
-      <div class="ops-status-panel" id="status-tab-fix" role="tabpanel" data-status-panel="fix" hidden>
-        ${renderStatusRowsTable(fixRows, "Niente da sistemare", "Non ci sono controlli falliti o solo pianificati.")}
-      </div>
-      <div class="ops-status-panel" id="status-tab-missing" role="tabpanel" data-status-panel="missing" hidden>
-        ${renderStatusRowsTable(missingRows, "Nessuna prova mancante", "Non risultano prove live o provider mancanti.")}
-      </div>
-    </div>
   </section>`;
 }
 
-function renderOpsProjects(context) {
+function selectedStatusGroup(groups, params = new URLSearchParams()) {
+  const requestedCategory = sanitizeIdentifier(params.get("statusCategory") || "");
+  return groups.find((group) => group.meta.id === requestedCategory)
+    || groups.find((group) => statusCategoryCounts(group.rows).open > 0)
+    || groups[0]
+    || { meta: statusCategoryMeta("operational-evidence"), rows: [] };
+}
+
+function renderOpsProjects(context, params = new URLSearchParams()) {
   const resourcesByProject = projectResourceRowsByProject(context);
-  const activeProjects = context.projects.filter((project) => project.enabled && !project.archivedAt).length;
-  const projectsWithDatabases = context.projects.filter((project) => projectDatabases(context, project).length > 0).length;
-  const dedicatedRuntimeCount = context.resources.containersByProject.filter((item) => item.attribution === "container-dedicato" || item.attribution === "docker-stats").length;
-  const runtimeGroups = [
-    { id: "php", label: "PHP Apache" },
-    { id: "node", label: "Node/Next" },
-    { id: "static", label: "Static" },
-  ];
-  const groupedRuntimeIds = new Set(runtimeGroups.map((group) => group.id));
-  const groupedSections = runtimeGroups
-    .map((group) => renderOpsProjectGroup({
-      ...group,
-      projects: context.projects.filter((project) => project.runtime === group.id),
-      context,
-      resourcesByProject,
-    }))
+  const selectedSlug = sanitizeIdentifier(params.get("project") || "");
+  const selectedProject = context.projects.find((project) => project.slug === selectedSlug || project.id === selectedSlug);
+  if (selectedProject) return renderOpsProjectDetailScreen(selectedProject, context, resourcesByProject.get(selectedProject.slug), params);
+
+  const rows = sortedOpsProjects(context.projects)
+    .map((project) => renderOpsProjectRow(project))
     .join("");
-  const otherProjects = context.projects.filter((project) => !groupedRuntimeIds.has(project.runtime));
-  const otherSection = otherProjects.length ? renderOpsProjectGroup({
-    id: "other",
-    label: "Altro",
-    projects: otherProjects,
-    context,
-    resourcesByProject,
-  }) : "";
-  return `<section class="ops-section">
-    <div class="ops-metrics">
-      ${renderOpsMetric("Applicazioni", context.projects.length, `${activeProjects} online`, activeProjects === context.projects.length ? "good" : "warn")}
-      ${renderOpsMetric("Con database", projectsWithDatabases, "Mostrate nella vista database", projectsWithDatabases ? "info" : "warn")}
-      ${renderOpsMetric("Runtime dedicati", `${dedicatedRuntimeCount}/${context.applications.length}`, context.resources.containerMetricsAvailable ? "Misurati da cAdvisor" : "Metriche container non disponibili", dedicatedRuntimeCount ? "good" : "warn")}
-      ${renderOpsMetric("Host", context.subdomains.length, "Routing applicazioni dichiarato", "info")}
-    </div>
-    <div class="ops-panel">
-      <div class="ops-panel-head">
-        <div>
-          <h2>Aggiungi applicazione</h2>
-          <p>Scegli tipo, nome e descrizione. Slug, host e metadata tecnici vengono generati automaticamente.</p>
-        </div>
-      </div>
-      <form class="ops-form" method="post" action="/actions/project-command">
-        <input type="hidden" name="action" value="create">
-        <select name="runtime" aria-label="Tipo applicazione"><option value="php">PHP Apache</option><option value="node">Node/Next</option><option value="static">Static</option></select>
-        <input name="displayName" placeholder="Nome applicazione" aria-label="Nome applicazione">
-        <input name="description" placeholder="Descrizione breve" aria-label="Descrizione applicazione">
-        <input type="hidden" name="confirm" value="CREATE-PROJECT">
-        <button class="ops-button primary" type="submit">${controlIcon("plus")} Aggiungi applicazione</button>
-      </form>
-    </div>
-    <div class="ops-project-board">
-      ${groupedSections}${otherSection || ""}
-      ${context.projects.length ? "" : `<div class="ops-panel">${empty("Nessuna applicazione", "Monta o dichiara una applicazione per gestirla dal portal.")}</div>`}
-    </div>
-    <div class="ops-panel">
-      <div class="ops-panel-head">
-        <div>
-          <h2>Archivia applicazione</h2>
-          <p>Archivia i metadata e disabilita il routing; non elimina file, database o volumi.</p>
-        </div>
-      </div>
-      <form class="ops-form" method="post" action="/actions/project-command">
-        <input type="hidden" name="action" value="archive">
-        <select name="slug" aria-label="Applicazione da archiviare">${context.projects.map((project) => `<option value="${escapeHtml(project.slug)}">${escapeHtml(project.name)}</option>`).join("")}</select>
-        <input name="confirm" placeholder="ARCHIVE-PROJECT" aria-label="Conferma archiviazione">
-        <button class="ops-button danger" type="submit">${controlIcon("archive")} Archivia</button>
-      </form>
+  return `<section class="ops-section ops-projects-redesign">
+    <div class="ops-project-list" aria-label="Applicazioni">
+      ${rows || empty("Nessuna applicazione", "Monta o dichiara una applicazione per gestirla dal portal.")}
     </div>
   </section>`;
 }
 
-function renderOpsProjectGroup({ id, label, projects, context, resourcesByProject }) {
-  if (!projects.length) return "";
-  const online = projects.filter((project) => project.enabled && !project.archivedAt).length;
-  return `<div class="ops-project-group ${escapeHtml(id)}">
-    <div class="ops-project-group-head">
-      <div>
-        <h2>${escapeHtml(label)}</h2>
-        <span>${escapeHtml(String(projects.length))} applicazioni, ${escapeHtml(String(online))} online</span>
+function renderOpsVault(context) {
+  const itemRows = context.vaultItems.map((item) => renderOpsVaultItem(item)).join("");
+  return `<section class="ops-section ops-projects-redesign ops-vault-section">
+    <div class="ops-vault-grid">
+      <form method="post" action="/actions/vault-command" class="ops-vault-panel ops-vault-form" autocomplete="off">
+        <input type="hidden" name="action" value="create">
+        <input type="hidden" name="confirm" value="STORE-VAULT-SECRET">
+        <div class="ops-vault-panel-head">
+          <span class="ops-project-row-icon static" aria-hidden="true">${controlIcon("shield")}</span>
+          <div>
+            <h2>Aggiungi secret</h2>
+            <p>Valore cifrato. Visibile solo quando premi mostra.</p>
+          </div>
+        </div>
+        <div class="ops-vault-fields">
+          <input name="itemKey" placeholder="nome_secret" aria-label="Nome secret" autocomplete="off" required>
+          <input name="label" placeholder="Etichetta" aria-label="Etichetta secret" autocomplete="off">
+          ${renderProjectSelect("projectId", "Applicazione", `<option value="platform">Platform</option>${sortedOpsProjects(context.projects).map((project) => `<option value="${escapeHtml(project.slug)}">${escapeHtml(project.name)}</option>`).join("")}`)}
+          ${renderProjectSelect("targetEnv", "Ambiente", '<option value="local">Local</option><option value="staging">Staging</option><option value="production">Production</option>')}
+          ${renderProjectSelect("kind", "Tipo secret", '<option value="application">Applicazione</option><option value="database">Database</option><option value="provider">Provider</option><option value="storage">Storage</option><option value="docker">Docker</option><option value="kms">KMS</option>')}
+          <input name="username" placeholder="Utente / account" aria-label="Utente o account" autocomplete="off">
+          <input name="url" placeholder="URL / host" aria-label="URL o host" autocomplete="off">
+          <input type="number" min="0" max="3650" name="rotationDays" value="90" aria-label="Giorni rotazione">
+          <input type="password" name="value" placeholder="Valore secret" aria-label="Valore secret" autocomplete="new-password" required>
+        </div>
+        <button class="ops-button primary" type="submit">${controlIcon("save")} Salva secret</button>
+      </form>
+      <div class="ops-vault-panel ops-vault-inventory">
+        <div class="ops-vault-list-head">
+          <div>
+            <h2>Secret salvati</h2>
+            <p>${escapeHtml(context.existingVaultImport?.importableCount ? `${context.existingVaultImport.importableCount} secret esistenti importabili` : "Secret esistenti gia indicizzati o non presenti.")}</p>
+          </div>
+          <form method="post" action="/actions/vault-command" class="ops-vault-import-form">
+            <input type="hidden" name="action" value="import-existing">
+            <input type="hidden" name="confirm" value="IMPORT-EXISTING-SECRETS">
+            <button class="ops-button secondary compact" type="submit">${controlIcon("refresh")} Importa esistenti</button>
+          </form>
+          <span class="ops-state ${context.vaultItems.length ? "good" : "warn"}">${escapeHtml(String(context.vaultItems.length))}</span>
+        </div>
+        <div class="ops-vault-list" aria-label="Secret salvati nel vault">
+          ${itemRows || empty("Vault vuoto", "Aggiungi il primo secret cifrato.")}
+        </div>
       </div>
-      <span class="ops-runtime ${escapeHtml(id)}">${escapeHtml(label)}</span>
     </div>
-    <div class="ops-project-grid">
-      ${projects.map((project) => renderOpsProjectCard(project, context, resourcesByProject.get(project.slug))).join("")}
+  </section>`;
+}
+
+function renderOpsVaultItem(item) {
+  const deleteConfirm = `DELETE-VAULT-SECRET:${item.id}`;
+  const revealConfirm = `REVEAL-VAULT-SECRET:${item.id}`;
+  const project = item.projectId === "platform" ? "Platform" : item.projectId;
+  const rotation = item.rotationDays ? `rotazione ${item.rotationDays} giorni` : "rotazione non impostata";
+  return `<article class="ops-vault-item" id="vault-${escapeHtml(item.id)}">
+    <span class="ops-project-row-icon static" aria-hidden="true">${controlIcon("shield")}</span>
+    <span class="ops-vault-item-main">
+      <strong>${escapeHtml(item.label || item.itemKey)}</strong>
+      <small>${escapeHtml(`${item.itemKey} / ${project} / ${item.environment} / ${item.kind}`)}</small>
+      <small>${escapeHtml(`${item.username || "utente non impostato"} / ${item.url || "host non impostato"} / ${rotation}`)}</small>
+      <small>Valore protetto. Premi mostra per leggerlo.</small>
+      <span class="ops-vault-reveal" data-vault-reveal-box>
+        <input type="password" value="" placeholder="Protetto" readonly aria-label="Valore ${escapeHtml(item.label || item.itemKey)}" data-vault-reveal-value>
+        <button class="ops-button secondary compact" type="button" data-vault-reveal-action data-vault-id="${escapeHtml(item.id)}" data-vault-confirm="${escapeHtml(revealConfirm)}">${controlIcon("eye")} Mostra</button>
+        <button class="ops-button secondary compact" type="button" data-vault-copy-action disabled>${controlIcon("copy")} Copia</button>
+      </span>
+    </span>
+    <form method="post" action="/actions/vault-command" class="ops-vault-delete-form">
+      <input type="hidden" name="action" value="delete">
+      <input type="hidden" name="id" value="${escapeHtml(item.id)}">
+      <input type="hidden" name="confirm" value="${escapeHtml(deleteConfirm)}">
+      <button class="ops-button danger compact" type="submit">${controlIcon("trash")} Elimina</button>
+    </form>
+  </article>`;
+}
+
+function sortedOpsProjects(projects) {
+  return [...(projects || [])].sort((a, b) => projectRuntimeSort(a.runtime) - projectRuntimeSort(b.runtime) || a.name.localeCompare(b.name));
+}
+
+function renderOpsProjectRow(project) {
+  const state = projectOpsState(project);
+  const detailHref = `/?section=projects&project=${encodeURIComponent(project.slug)}`;
+  return `<div class="ops-project-row" id="project-${escapeHtml(project.slug)}" role="link" tabindex="0" data-project-row-link="${escapeHtml(detailHref)}" aria-label="Apri dettagli ${escapeHtml(project.name)}">
+    <span class="ops-project-row-icon ${escapeHtml(project.runtime)}" aria-hidden="true">${controlIcon(projectRuntimeIcon(project.runtime))}</span>
+    <span class="ops-project-row-name">
+      <span class="ops-project-state-dot ${escapeHtml(projectStatusTone(project, state))}" aria-hidden="true"></span>
+      <strong>${escapeHtml(project.name)}</strong>
+    </span>
+    <span class="ops-project-row-host">
+      <small>Host</small>
+      <a class="ops-project-host-link ops-fit-link" href="${escapeHtml(project.href)}" target="_blank" rel="noopener noreferrer" data-fit-single-line aria-label="Apri ${escapeHtml(project.name)} in una nuova scheda">${escapeHtml(project.host)}</a>
+    </span>
+    <span class="ops-project-row-runtime">
+      <small>Runtime</small>
+      <strong>${escapeHtml(projectRuntimeDisplay(project.runtime))}</strong>
+    </span>
+    <span class="ops-project-row-arrow" aria-hidden="true">${controlIcon("chevron")}</span>
+  </div>`;
+}
+
+function renderOpsProjectDetailScreen(project, context, resourceSummary, params = new URLSearchParams()) {
+  const databases = projectDatabases(context, project);
+  const summary = resourceSummary || projectResourceSummary(context, project);
+  const state = projectOpsState(project);
+  const fileManager = renderProjectDetailFileManager(context, project, params);
+  const databaseList = renderProjectDetailDatabaseList(context, project, databases);
+  const resourcePanel = renderProjectDetailResources(summary, project);
+  const backupPanel = renderProjectDetailBackups(context, project);
+  return `<section class="ops-section ops-projects-redesign ops-project-detail-screen" id="project-${escapeHtml(project.slug)}">
+    <div class="ops-project-detail-hero">
+      <span class="ops-project-row-icon ${escapeHtml(project.runtime)}" aria-hidden="true">${controlIcon(projectRuntimeIcon(project.runtime))}</span>
+      <span class="ops-project-row-name">
+        <span class="ops-project-state-dot ${escapeHtml(projectStatusTone(project, state))}" aria-hidden="true"></span>
+        <strong>${escapeHtml(project.name)}</strong>
+      </span>
+      <span class="ops-project-row-host">
+        <small>Host</small>
+        <a class="ops-project-host-link ops-fit-link" href="${escapeHtml(project.href)}" target="_blank" rel="noopener noreferrer" data-fit-single-line aria-label="Apri ${escapeHtml(project.name)} in una nuova scheda">${escapeHtml(project.host)}</a>
+      </span>
+      <span class="ops-project-row-runtime">
+        <small>Runtime</small>
+        <strong>${escapeHtml(projectRuntimeDisplay(project.runtime))}</strong>
+      </span>
+    </div>
+
+    <div class="ops-project-detail-focus">
+      ${fileManager}
+      ${backupPanel}
+      ${databaseList}
+      ${resourcePanel}
+    </div>
+  </section>`;
+}
+
+function renderProjectDetailDatabaseList(context, project, databases) {
+  const databaseItems = databases.map((database) => renderProjectDetailDatabaseRow(context, project, database)).join("");
+  return `<div class="ops-project-detail-panel" id="project-databases">
+    <div class="ops-project-detail-panel-head">
+      <h3>Database</h3>
+      <span class="ops-state ${databases.length ? "good" : "warn"}">${escapeHtml(databases.length ? `${databases.length} collegati` : "Nessuno")}</span>
+    </div>
+    <div class="ops-project-database-list">${databaseItems || empty("Nessun database", "Crea metadata database per questa applicazione.")}</div>
+    ${renderProjectDetailDatabaseCreateForm(project)}
+  </div>`;
+}
+
+function renderProjectDetailDatabaseRow(context, project, database) {
+  const adminAction = databaseAdminAction(database);
+  const updateConfirm = `UPDATE-DATABASE:${database.id}`;
+  const credentialConfirm = `ROTATE-DATABASE-CREDENTIAL:${database.id}`;
+  const deleteConfirm = `DELETE-DATABASE:${database.id}`;
+  const credentialLabel = databaseCredentialDisplayLabel(database, project);
+  return `<div class="ops-project-database-row" id="database-${escapeHtml(database.id)}">
+    <div class="ops-project-database-main">
+      <span class="ops-project-detail-item-icon">${controlIcon("databases")}</span>
+      <span>
+        <strong>${escapeHtml(databaseDisplayName(database))}</strong>
+        <small>${escapeHtml(`Nome DB: ${database.name} / ${database.engine} / utente: ${database.ownerRole}`)}</small>
+        <small>${escapeHtml(credentialLabel)}. Valore non mostrato.</small>
+      </span>
+      <a class="ops-icon-button" href="${escapeHtml(adminAction.href)}" target="_blank" rel="noopener noreferrer" aria-label="${escapeHtml(adminAction.ariaLabel)}">${controlIcon("external")}</a>
+    </div>
+    <form class="ops-project-database-edit-form" method="post" action="/actions/database-command">
+      <input type="hidden" name="action" value="update">
+      <input type="hidden" name="id" value="${escapeHtml(database.id)}">
+      <input type="hidden" name="projectId" value="${escapeHtml(project.slug)}">
+      <input type="hidden" name="returnTo" value="project-detail">
+      <input type="hidden" name="confirm" value="${escapeHtml(updateConfirm)}">
+      <input name="displayName" value="${escapeHtml(databaseDisplayName(database))}" aria-label="Nome visualizzato database">
+      <input name="ownerRole" value="${escapeHtml(database.ownerRole)}" aria-label="Utente database">
+      <button class="ops-button secondary compact" type="submit">${controlIcon("save")} Salva</button>
+    </form>
+    <form class="ops-project-database-edit-form" method="post" action="/actions/database-command">
+      <input type="hidden" name="action" value="credential">
+      <input type="hidden" name="id" value="${escapeHtml(database.id)}">
+      <input type="hidden" name="projectId" value="${escapeHtml(project.slug)}">
+      <input type="hidden" name="returnTo" value="project-detail">
+      <input type="hidden" name="confirm" value="${escapeHtml(credentialConfirm)}">
+      <input type="password" name="password" value="" placeholder="Nuova password" aria-label="Nuova password database" autocomplete="new-password">
+      <button class="ops-button secondary compact" type="submit">${controlIcon("refresh")} Password</button>
+    </form>
+    <div class="ops-project-database-actions">
+      <form method="post" action="/actions/database-command">
+        <input type="hidden" name="action" value="delete">
+        <input type="hidden" name="id" value="${escapeHtml(database.id)}">
+        <input type="hidden" name="projectId" value="${escapeHtml(project.slug)}">
+        <input type="hidden" name="returnTo" value="project-detail">
+        <input type="hidden" name="confirm" value="${escapeHtml(deleteConfirm)}">
+        <button class="ops-button danger compact" type="submit">${controlIcon("trash")} Elimina</button>
+      </form>
     </div>
   </div>`;
 }
 
-function renderOpsProjectCard(project, context, resourceSummary) {
-  const databases = projectDatabases(context, project);
-  const storage = projectStorage(context, project);
-  const summary = resourceSummary || projectResourceSummary(context, project);
-  const state = projectOpsState(project);
-  const hasFiles = project.filesystemExists !== false;
-  const canRoute = hasFiles && !project.archivedAt;
-  const databaseLinks = databases.length
-    ? databases.map((database) => `<a class="ops-mini-link" href="/?section=databases#database-${escapeHtml(database.id)}">${escapeHtml(databaseDisplayName(database))}</a>`).join("")
-    : '<span class="ops-muted">Nessun database</span>';
-  const storageLinks = [
-    ...storage.webspaces.map((space) => `<span class="ops-mini-link">webspace: ${escapeHtml(space.name)}</span>`),
-    ...storage.buckets.map((bucket) => `<span class="ops-mini-link">bucket: ${escapeHtml(bucket.name)}</span>`),
-  ].join("");
-  return `<article class="ops-app-card" id="project-${escapeHtml(project.slug)}">
-    <div class="ops-app-card-head">
-      <div class="ops-app-title">
-        <h3>${escapeHtml(project.name)}</h3>
-        <span>${escapeHtml(project.slug)}${project.description ? ` / ${escapeHtml(project.description)}` : ""}</span>
-      </div>
-      <span class="ops-state ${statusClass(state.status)}">${escapeHtml(state.label)}</span>
+function renderProjectDetailDatabaseCreateForm(project) {
+  return `<form class="ops-project-database-create-form" method="post" action="/actions/database-command">
+    <input type="hidden" name="action" value="create">
+    <input type="hidden" name="projectId" value="${escapeHtml(project.slug)}">
+    <input type="hidden" name="returnTo" value="project-detail">
+    <input type="hidden" name="confirm" value="CREATE-DATABASE">
+    ${renderProjectSelect("engine", "Motore database", '<option value="mariadb">MariaDB</option><option value="postgres">PostgreSQL</option>')}
+    <input name="name" placeholder="${escapeHtml(`${project.slug.replace(/-/g, "_")}_app`)}" aria-label="Nome nuovo database">
+    <input name="ownerRole" placeholder="${escapeHtml(`${project.slug.replace(/-/g, "_")}_user`)}" aria-label="Utente nuovo database">
+    <input type="password" name="password" value="" placeholder="Password" aria-label="Password nuovo database" autocomplete="new-password" required>
+    <button class="ops-button secondary compact" type="submit">${controlIcon("plus")} Crea DB</button>
+  </form>`;
+}
+
+function renderProjectSelect(name, label, options, attributes = "") {
+  return `<label class="ops-project-select">
+    <select name="${escapeHtml(name)}" aria-label="${escapeHtml(label)}"${attributes}>
+      ${options}
+    </select>
+    <span class="ops-project-select-chevron" aria-hidden="true">${controlIcon("chevron-down")}</span>
+  </label>`;
+}
+
+function databaseCredentialStatusLabel(status) {
+  const labels = {
+    protected: "protetta",
+    "secret-ref-set": "secret collegato",
+    "secret-file-set": "modificabile, non visibile",
+    "rotation-requested": "rotazione richiesta",
+    "rotation-requested-secret-ref": "rotazione richiesta con secret",
+    missing: "mancante",
+  };
+  return labels[status] || "protetta";
+}
+
+function databaseCredentialDisplayLabel(database, project) {
+  if (database.credentialRef) return `Secret: ${database.credentialRef}`;
+  if (database.credentialFile || database.adminPasswordFile || database.passwordFile) return "Password: modificabile, non visibile";
+  if (!databaseAllowsGenericProjectCredential(database, project)) return "Password: da configurare";
+  return `Password: ${databaseCredentialStatusLabel(database.credentialStatus)}`;
+}
+
+function renderProjectDetailResources(summary) {
+  const resourceRows = [
+    ["CPU", summary.cpu],
+    ["RAM", summary.memory],
+    ["Disco", summary.disk],
+    ["Container", summary.containers],
+  ].map(([label, value]) => `<div class="ops-project-detail-fact"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`).join("");
+  return `<div class="ops-project-detail-panel" id="project-resources">
+    <div class="ops-project-detail-panel-head ops-project-resource-head">
+      <h3>Risorse utilizzate</h3>
     </div>
-    <div class="ops-app-meta">
-      <div>
-        <span>Host</span>
-        ${project.enabled ? `<a href="${escapeHtml(project.href)}">${escapeHtml(project.host)}</a>` : `<strong>${escapeHtml(project.host)}</strong>`}
-      </div>
-      <div>
-        <span>Runtime</span>
-        <strong>${escapeHtml(dedicatedRuntimeName(project))}</strong>
-      </div>
-      <div>
-        <span>Stato</span>
-        <strong>${escapeHtml(state.detail)}</strong>
-      </div>
-    </div>
-    <div class="ops-app-resource-grid" aria-label="Risorse ${escapeHtml(project.name)}">
-      <span><strong>CPU</strong><em>${escapeHtml(summary.cpu)}</em></span>
-      <span><strong>RAM</strong><em>${escapeHtml(summary.memory)}</em></span>
-      <span><strong>Disco</strong><em>${escapeHtml(summary.disk)}</em></span>
-      <span><strong>Fonte</strong><em>${escapeHtml(summary.measuredFrom)}</em></span>
-    </div>
-    <div class="ops-app-inventory">
-      <div>
-        <strong>Database</strong>
-        <div class="ops-chip-list">${databaseLinks}</div>
-      </div>
-      <div>
-        <strong>Storage</strong>
-        <div class="ops-chip-list">${storageLinks || '<span class="ops-muted">Nessuno storage</span>'}</div>
-      </div>
-      <div>
-        <strong>Limiti</strong>
-        <span>${escapeHtml(summary.limits)}</span>
-      </div>
-    </div>
-    <div class="ops-app-actions">
-      ${project.enabled ? `<a class="ops-button" href="${escapeHtml(project.href)}">${controlIcon("external")} Apri</a>` : ""}
-      ${hasFiles ? `<a class="ops-button" href="/?section=files&project=${escapeHtml(project.slug)}">${controlIcon("file")} File</a>` : `<span class="ops-button disabled">${controlIcon("file")} File</span>`}
-      ${databases.length ? `<a class="ops-button" href="/?section=databases#app-${escapeHtml(project.slug)}">${controlIcon("databases")} Database</a>` : `<span class="ops-button disabled">${controlIcon("databases")} Database</span>`}
-      <form method="post" action="/actions/resource-command">
-        <input type="hidden" name="action" value="stress-test">
+    <div class="ops-project-detail-resource-grid">${resourceRows}</div>
+  </div>`;
+}
+
+function renderProjectDetailBackups(context, project) {
+  const inventory = applicationBackupInventory(context, project);
+  const restoreOptions = inventory.restoreOptions || [];
+  const backupRows = restoreOptions.slice(0, 18).map(renderProjectDetailBackupRow).join("");
+  const optionRows = restoreOptions.map((option) => `<option value="${escapeHtml(option.path)}">${escapeHtml(option.label)}</option>`).join("");
+  const restoreDisabled = restoreOptions.length ? "" : " disabled";
+  return `<div class="ops-project-detail-panel" id="project-backups">
+    <div class="ops-project-detail-panel-head">
+      <h3>Backup</h3>
+      <form method="post" action="/actions/backup-command" class="ops-project-backup-head-form">
+        <input type="hidden" name="action" value="backup">
+        <input type="hidden" name="scope" value="application">
         <input type="hidden" name="projectId" value="${escapeHtml(project.slug)}">
-        <input type="hidden" name="confirm" value="RUN-STRESS:${escapeHtml(project.slug)}">
-        <button class="ops-button" type="submit">${controlIcon("resources")} Stress max</button>
+        <input type="hidden" name="returnTo" value="project-detail">
+        <input type="hidden" name="backupMode" value="all">
+        <button class="ops-button secondary" type="submit">${controlIcon("backups")} Esegui backup</button>
       </form>
-      ${canRoute ? `<form method="post" action="/actions/toggle-project">
-        <input type="hidden" name="slug" value="${escapeHtml(project.slug)}">
-        <input type="hidden" name="enabled" value="${project.enabled ? "0" : "1"}">
-        <button class="ops-button ${project.enabled ? "danger" : "primary"}" type="submit">${controlIcon(project.enabled ? "pause" : "play")} ${project.enabled ? "Ferma" : "Avvia"}</button>
-      </form>` : `<span class="ops-button disabled">${controlIcon("pause")} Non avviabile</span>`}
     </div>
-  </article>`;
+    <div class="ops-project-backup-list" aria-label="Backup disponibili per ${escapeHtml(project.name)}">
+      ${backupRows || empty("Nessun backup", "Esegui il primo backup dell'applicazione.")}
+    </div>
+    <div class="ops-project-backup-actions">
+      <form method="post" action="/actions/backup-command" class="ops-project-backup-restore-form">
+        <input type="hidden" name="action" value="restore">
+        <input type="hidden" name="scope" value="application">
+        <input type="hidden" name="projectId" value="${escapeHtml(project.slug)}">
+        <input type="hidden" name="returnTo" value="project-detail">
+        ${renderProjectSelect("backupRef", "Backup da ripristinare", optionRows || '<option value="">Nessun backup disponibile</option>', restoreDisabled)}
+        ${renderProjectSelect("restoreMode", "Contenuto restore", '<option value="all">Tutto</option><option value="database">Solo database</option><option value="source">Solo sorgenti</option>', restoreDisabled)}
+        <button class="ops-button danger" type="submit"${restoreDisabled}>${controlIcon("refresh")} Ripristina backup</button>
+      </form>
+    </div>
+  </div>`;
+}
+
+function renderProjectDetailBackupRow(option) {
+  return `<div class="ops-project-backup-row" data-backup-ref="${escapeHtml(option.path)}">
+    <span class="ops-project-detail-item-icon" aria-hidden="true">${controlIcon("backups")}</span>
+    <span>
+      <strong>${escapeHtml(option.name)}</strong>
+      <small>${escapeHtml(`${option.kind} / ${option.modifiedAt || "data non disponibile"} / ${option.sizeLabel || "-"}`)}</small>
+    </span>
+  </div>`;
+}
+
+function renderProjectFileBreadcrumb(snapshot, projectHref) {
+  const segments = String(snapshot.path || "").split("/").filter(Boolean);
+  const crumbs = [`<a href="${projectHref("")}">Root</a>`];
+  let current = "";
+  for (const segment of segments) {
+    current = joinRelativePath(current, segment);
+    crumbs.push(`<a href="${projectHref(current)}">${escapeHtml(segment)}</a>`);
+  }
+  return `<nav class="ops-file-breadcrumb" aria-label="Percorso file">${crumbs.join('<span aria-hidden="true">/</span>')}</nav>`;
+}
+
+function renderProjectFileExplorerEntry(entry, projectHref) {
+  const href = entry.browsable ? projectHref(entry.path) : "";
+  const type = entry.type || "file";
+  const icon = type === "directory" ? "folder" : type === "symlink" ? "external" : "file";
+  const tag = entry.browsable ? "a" : "button";
+  const tagAttributes = entry.browsable ? `href="${href}"` : 'type="button"';
+  return `<${tag} class="ops-file-tile ${escapeHtml(type)}" ${tagAttributes}
+    role="option"
+    aria-selected="false"
+    data-file-entry
+    data-file-name="${escapeHtml(entry.name)}"
+    data-file-path="${escapeHtml(entry.path || entry.name)}"
+    data-file-type="${escapeHtml(type)}"
+    data-file-size="${escapeHtml(entry.sizeLabel || "-")}"
+    data-file-modified="${escapeHtml(entry.modifiedAt || "-")}"
+    data-file-open-url="${escapeHtml(href)}">
+    <span class="ops-file-tile-icon" aria-hidden="true">${controlIcon(icon)}</span>
+    <span class="ops-file-tile-main">
+      <strong>${escapeHtml(entry.name)}</strong>
+      <small>${escapeHtml(entry.path || entry.name)}</small>
+    </span>
+    <span class="ops-file-tile-meta">
+      <small>${escapeHtml(type)}</small>
+      <small>${escapeHtml(entry.sizeLabel || "-")}</small>
+      <small>${escapeHtml(entry.modifiedAt || "-")}</small>
+    </span>
+  </${tag}>`;
+}
+
+function renderProjectDetailFileManager(context, project, params) {
+  let snapshot;
+  try {
+    snapshot = readProjectFiles(project.slug, params.get("path") || "", context);
+  } catch (error) {
+    snapshot = { available: false, path: "", parentPath: "", entries: [], message: error instanceof ValidationError ? error.message : "File applicazione non disponibili." };
+  }
+  const projectHref = (pathValue = "") => `/?section=projects&project=${escapeHtml(project.slug)}${pathValue ? `&path=${encodeURIComponent(pathValue)}` : ""}`;
+  const entries = (snapshot.entries || []).map((entry) => renderProjectFileExplorerEntry(entry, projectHref)).join("");
+  const parentHref = snapshot.parentPath || snapshot.path ? projectHref(snapshot.parentPath || "") : "";
+  const entryCount = `${(snapshot.entries || []).length} elementi`;
+  const refreshHref = projectHref(snapshot.path || "");
+  return `<div class="ops-project-detail-panel ops-file-explorer" id="project-file-manager" data-file-manager data-file-manager-refresh-url="${escapeHtml(refreshHref)}" data-file-total-count="${escapeHtml(String((snapshot.entries || []).length))}">
+    <div class="ops-file-explorer-head">
+      <div>
+        <h3>File manager</h3>
+      </div>
+      <div class="ops-file-commandbar" aria-label="Azioni file manager">
+        ${snapshot.available ? `<label class="ops-file-search">
+          ${controlIcon("search")}
+          <input type="search" data-file-search placeholder="Cerca" aria-label="Cerca nella cartella corrente">
+        </label>` : ""}
+        ${parentHref ? `<a class="ops-icon-button" href="${parentHref}" aria-label="Vai alla cartella superiore" title="Su">${controlIcon("arrow-left")}</a>` : ""}
+        <button class="ops-icon-button" type="button" data-file-refresh-action aria-label="Aggiorna file manager" title="Aggiorna">${controlIcon("refresh")}</button>
+      </div>
+    </div>
+    ${renderProjectFileBreadcrumb(snapshot, projectHref)}
+    ${snapshot.available ? `<div class="ops-file-workspace">
+      <div class="ops-file-grid" role="listbox" aria-label="File di ${escapeHtml(project.name)}">
+        ${entries || `<div class="ops-file-empty">${empty("Cartella vuota", "Nessun elemento navigabile trovato in questo path.")}</div>`}
+        <div class="ops-file-search-empty" data-file-search-empty hidden>${empty("Nessun risultato", "La ricerca vale solo per la cartella aperta.")}</div>
+      </div>
+    </div>
+    <div class="ops-file-statusbar">
+      <span data-file-count>${escapeHtml(entryCount)}</span>
+      <span>Secret, dipendenze e build output sono esclusi.</span>
+    </div>
+    <div class="ops-file-context-menu" data-file-context-menu hidden>
+      <button type="button" data-file-menu-action="open">${controlIcon("folder")} Apri</button>
+      <button type="button" data-file-menu-action="copy-path">${controlIcon("copy")} Copia percorso</button>
+      <button type="button" data-file-menu-action="copy-name">${controlIcon("copy")} Copia nome</button>
+    </div>` : empty("File non disponibili", snapshot.message || "I sorgenti applicazione non sono montati.")}
+  </div>`;
+}
+
+function projectRuntimeDisplay(runtime) {
+  if (runtime === "php") return "PHP Apache";
+  if (runtime === "node") return "Node/Next";
+  if (runtime === "static") return "Static";
+  return humanName(runtime || "runtime");
+}
+
+function projectRuntimeIcon(runtime) {
+  if (runtime === "php") return "file";
+  if (runtime === "node") return "cube";
+  if (runtime === "static") return "globe";
+  return "projects";
+}
+
+function projectRuntimeSort(runtime) {
+  if (runtime === "php") return 1;
+  if (runtime === "node") return 2;
+  if (runtime === "static") return 3;
+  return 9;
 }
 
 function projectOpsState(project) {
@@ -3705,6 +5362,12 @@ function projectOpsState(project) {
   if (project.filesystemExists === false) return { status: "offline", label: "File mancanti", detail: "Sorgenti non montati" };
   if (project.enabled) return { status: "online", label: "Online", detail: "Raggiungibile dal router" };
   return { status: "offline", label: "Fermata", detail: "Routing disabilitato" };
+}
+
+function projectStatusTone(project, state = projectOpsState(project)) {
+  if (state.status === "online") return "good";
+  if (project.filesystemExists === false) return "bad";
+  return "warn";
 }
 
 function projectResourceRowsByProject(context) {
@@ -3718,14 +5381,11 @@ function projectResourceSummary(context, project) {
   const cpuCores = measuredContainers.length ? measuredContainers.reduce((sum, item) => sum + Number(item.cpuCores || 0), 0) : null;
   const memoryBytes = measuredContainers.length ? measuredContainers.reduce((sum, item) => sum + Number(item.memoryBytes || 0), 0) : null;
   const hostCores = Number(context.resources.totals?.cpu?.cores || 0);
-  const limit = context.resources.projectLimits.find((item) => item.projectId === project.slug) || resourceLimitRecord({ projectId: project.slug });
   return {
     cpu: measuredContainers.length ? measuredCpuLabel(measuredContainers, hostCores) : usage.cpuMessage || "Metriche container non disponibili",
     memory: memoryBytes != null ? usageBytesLabel(memoryBytes) : usage.memoryMessage || "Metriche container non disponibili",
     disk: usage.diskAvailable ? `${usageBytesLabel(usage.diskBytes)} (${Number(usage.files || 0)} file)` : "Non disponibile",
     containers: containers.length ? containers.map((item) => `${item.container}:${item.status}`).join(", ") : `${dedicatedRuntimeName(project)} atteso`,
-    measuredFrom: measuredContainers.length ? (measuredContainers.some((item) => item.attribution === "docker-stats") ? "docker stats + filesystem" : "Prometheus/cAdvisor + filesystem") : "filesystem + container atteso",
-    limits: `${limit.cpuMillicores || 0}m CPU / ${limit.memoryMb || 0} MB RAM / ${limit.diskMb || 0} MB disk`,
   };
 }
 
@@ -3771,7 +5431,37 @@ function renderOpsFiles(context, params, currentProject) {
         </table>
       </div>` : empty("File non disponibili", snapshot.message || "I sorgenti applicazione non sono montati.")}
     </div>
-  </section>`;
+	  </section>`;
+}
+
+function backupStatusLabel(status) {
+  const clean = String(status || "").toLowerCase();
+  const labels = {
+    success: "OK",
+    passed: "OK",
+    running: "Attivo",
+    available: "Disponibile",
+    configured: "Configurato",
+    "local-file": "File locale",
+    queued: "In coda",
+    planned: "Pianificato",
+    deleted: "Eliminato",
+    done: "Completato",
+    failed: "Fallito",
+    missing: "Mancante",
+    "needs-work": "Da verificare",
+  };
+  return labels[clean] || clean || "n.d.";
+}
+
+function backupActionLabel(action) {
+  const clean = String(action || "").toLowerCase();
+  const labels = {
+    backup: "Backup",
+    "restore-drill": "Restore drill",
+    "delete-file": "Elimina file",
+  };
+  return labels[clean] || humanName(clean || "azione");
 }
 
 function renderOpsDatabases(context) {
@@ -3885,13 +5575,9 @@ function renderDatabaseBackupList(databases) {
 function renderDatabaseActions(databases) {
   if (!databases.length) return '<span class="ops-muted">Nessuna azione</span>';
   return `<div class="ops-db-actions">${databases.map((database) => {
-    const admin = databaseAdminTool(database);
-    const phpMyAdminConfirm = `OPEN-PHPMYADMIN:${database.id}`;
-    const phpPgAdminConfirm = `OPEN-PHPPGADMIN:${database.id}`;
-    const phpMyAdminHref = `/actions/phpmyadmin-login?databaseId=${encodeURIComponent(database.id)}&confirm=${encodeURIComponent(phpMyAdminConfirm)}`;
-    const phpPgAdminHref = `/actions/phppgadmin-login?databaseId=${encodeURIComponent(database.id)}&confirm=${encodeURIComponent(phpPgAdminConfirm)}`;
+    const adminAction = databaseAdminAction(database);
     return `<div class="ops-row-actions">
-    ${database.engine === "mariadb" ? `<a class="ops-icon-button" href="${escapeHtml(phpMyAdminHref)}" target="_blank" rel="noreferrer" aria-label="Apri ${escapeHtml(databaseDisplayName(database))} in phpMyAdmin con accesso limitato">${controlIcon("external")}</a>` : `<a class="ops-icon-button" href="${escapeHtml(phpPgAdminHref)}" target="_blank" rel="noreferrer" aria-label="Apri ${escapeHtml(databaseDisplayName(database))} in ${escapeHtml(admin.label)} con accesso limitato">${controlIcon("external")}</a>`}
+    <a class="ops-icon-button" href="${escapeHtml(adminAction.href)}" target="_blank" rel="noopener noreferrer" aria-label="${escapeHtml(adminAction.ariaLabel)}">${controlIcon("external")}</a>
     <form method="post" action="/actions/database-command">
       <input type="hidden" name="id" value="${escapeHtml(database.id)}">
       <input type="hidden" name="action" value="backup">
@@ -3907,33 +5593,47 @@ function renderDatabaseActions(databases) {
   }).join("")}</div>`;
 }
 
+function databaseAdminAction(database) {
+  const admin = databaseAdminTool(database);
+  const confirmation = `${admin.confirmPrefix}:${database.id}`;
+  const href = `${admin.loginPath}?databaseId=${encodeURIComponent(database.id)}&confirm=${encodeURIComponent(confirmation)}`;
+  return {
+    ...admin,
+    href,
+    ariaLabel: `Apri ${databaseDisplayName(database)} in ${admin.label} con accesso limitato`,
+  };
+}
+
 function databaseAdminTool(database) {
   if (database.engine === "postgres") {
     return {
       label: "phpPgAdmin",
-      href: `https://${controlCenterHost}/actions/phppgadmin-login?databaseId=${encodeURIComponent(database.id)}&confirm=${encodeURIComponent(`OPEN-PHPPGADMIN:${database.id}`)}`,
+      confirmPrefix: "OPEN-PHPPGADMIN",
+      loginPath: "/actions/phppgadmin-login",
     };
   }
   return {
     label: "phpMyAdmin",
-    href: `https://${controlCenterHost}${phpMyAdminDatabaseLocation(database.name)}`,
+    confirmPrefix: "OPEN-PHPMYADMIN",
+    loginPath: "/actions/phpmyadmin-login",
   };
 }
 
 function resolveMariaDbCredential(database, project) {
   const metadataUser = sanitizeDatabasePrincipal(database.adminUser || database.ownerRole || "");
-  const metadataPassword = readCredentialPasswordFile(database.adminPasswordFile || database.passwordFile || "", project);
+  const metadataPassword = readCredentialPasswordFile(database.credentialFile || database.adminPasswordFile || database.passwordFile || "", project);
   if (metadataUser && metadataPassword) return { user: metadataUser, password: metadataPassword, source: "database-metadata" };
-  const projectCredential = readProjectMariaDbCredential(database, project);
+  const requireDatabaseName = !databaseAllowsGenericProjectCredential(database, project);
+  const projectCredential = readProjectMariaDbCredential(database, project, { requireDatabaseName });
   if (projectCredential) return projectCredential;
-  const phpCredential = readProjectPhpMariaDbCredential(database, project);
+  const phpCredential = readProjectPhpMariaDbCredential(database, project, { requireDatabaseName });
   if (phpCredential) return phpCredential;
   return null;
 }
 
 function resolvePostgresCredential(database, project) {
   const metadataUser = sanitizeDatabasePrincipal(database.adminUser || database.ownerRole || "");
-  const metadataPassword = readCredentialPasswordFile(database.adminPasswordFile || database.passwordFile || "", project);
+  const metadataPassword = readCredentialPasswordFile(database.credentialFile || database.adminPasswordFile || database.passwordFile || "", project);
   if (metadataUser && metadataPassword) return { user: metadataUser, password: metadataPassword, source: "database-metadata" };
   const appPassword = readPostgresAppPassword();
   if (appPassword && (!metadataUser || metadataUser === postgresAppUser)) {
@@ -3951,7 +5651,22 @@ function readPostgresAppPassword() {
   }
 }
 
-function readProjectMariaDbCredential(database, project) {
+function databaseAllowsGenericProjectCredential(database, project) {
+  if (!database || !project) return false;
+  const databaseName = normalizeDatabaseCredentialName(database.name);
+  const projectTokens = [
+    project.slug,
+    project.id,
+    ...(Array.isArray(project.aliases) ? project.aliases : []),
+  ].map((value) => normalizeDatabaseCredentialName(value)).filter(Boolean);
+  return projectTokens.includes(databaseName);
+}
+
+function normalizeDatabaseCredentialName(value) {
+  return String(value || "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+}
+
+function readProjectMariaDbCredential(database, project, options = {}) {
   if (!project || !project.filesAvailable) return null;
   let root = "";
   try {
@@ -3969,6 +5684,7 @@ function readProjectMariaDbCredential(database, project) {
       continue;
     }
     const dbName = firstEnvValue(env, ["DB_DATABASE", "DB_NAME", "DATABASE_NAME", "MYSQL_DATABASE", "MARIADB_DATABASE"]);
+    if (options.requireDatabaseName && !dbName) continue;
     if (dbName && dbName !== database.name) continue;
     const user = sanitizeDatabasePrincipal(firstEnvValue(env, ["PHPMYADMIN_USER", "PMA_USER", "DB_USERNAME", "DB_USER", "DATABASE_USER", "MYSQL_USER", "MARIADB_USER"]) || database.ownerRole || "");
     const password = firstEnvValue(env, ["PHPMYADMIN_PASSWORD", "PMA_PASSWORD", "DB_PASSWORD", "DB_PASS", "DATABASE_PASSWORD", "DATABASE_PASS", "MYSQL_PASSWORD", "MYSQL_PASS", "MARIADB_PASSWORD", "MARIADB_PASS"]);
@@ -3977,7 +5693,7 @@ function readProjectMariaDbCredential(database, project) {
   return null;
 }
 
-function readProjectPhpMariaDbCredential(database, project) {
+function readProjectPhpMariaDbCredential(database, project, options = {}) {
   if (!project || !project.filesAvailable) return null;
   let root = "";
   try {
@@ -3995,6 +5711,7 @@ function readProjectPhpMariaDbCredential(database, project) {
       continue;
     }
     const dbName = firstPhpConfigValue(text, ["database", "dbname", "db_name", "DB_DATABASE", "DB_NAME", "DATABASE_NAME"]);
+    if (options.requireDatabaseName && !dbName) continue;
     if (dbName && dbName !== database.name) continue;
     const user = sanitizeDatabasePrincipal(firstPhpConfigValue(text, ["username", "user", "db_user", "DB_USERNAME", "DB_USER", "DATABASE_USER"]) || database.ownerRole || "");
     const password = firstPhpConfigValue(text, ["password", "pass", "db_pass", "db_password", "DB_PASSWORD", "DB_PASS", "DATABASE_PASSWORD", "DATABASE_PASS"]);
@@ -4453,127 +6170,65 @@ function renderStorageList(storage) {
   return links.length ? `<div class="ops-chip-list">${links.join("")}</div>` : '<span class="ops-muted">Nessuno storage</span>';
 }
 
-function renderOpsActivity(context) {
-  const problems = activityProblems(context);
-  const errors = problems.filter((item) => item.severity === "error");
-  const warnings = problems.filter((item) => item.severity === "warning");
-  const pending = problems.filter((item) => item.severity === "pending");
-  const rows = problems.map((item) => `<tr>
-    <td><span class="ops-state ${statusClass(item.severity)}">${escapeHtml(item.severity)}</span></td>
-    <td><strong>${escapeHtml(item.source)}</strong><span>${escapeHtml(item.name)}</span></td>
-    <td>${escapeHtml(item.summary)}</td>
-    <td>${escapeHtml(item.timestamp || "")}</td>
-    <td>${item.href ? `<a class="ops-button" href="${escapeHtml(item.href)}">${controlIcon("arrow-right")} Open</a>` : '<span class="ops-muted">No action</span>'}</td>
-  </tr>`).join("");
-  return `<section class="ops-section">
-    <div class="ops-metrics">
-      ${renderOpsMetric("Errori", errors.length, "Elementi falliti o critici", errors.length ? "bad" : "good")}
-      ${renderOpsMetric("Avvisi", warnings.length, "Avvisi aperti", warnings.length ? "warn" : "good")}
-      ${renderOpsMetric("In attesa", pending.length, "Prove o provider da completare", pending.length ? "warn" : "good")}
-      ${renderOpsMetric("Alert aperti", context.logsAlerts.openAlerts.length, "Record alert", context.logsAlerts.openAlerts.length ? "warn" : "good")}
-    </div>
-    <div class="ops-panel">
-      <div class="ops-panel-head">
-        <div>
-          <h2>Errori, avvisi e problemi</h2>
-          <p>I problemi operativi arrivano da go/no-go, alert, job, audit e log operazioni.</p>
-        </div>
-      </div>
-      <div class="ops-table-wrap">
-        <table class="ops-table">
-          <thead><tr><th>Gravità</th><th>Fonte</th><th>Problema</th><th>Ora</th><th>Azione</th></tr></thead>
-          <tbody>${rows || `<tr><td colspan="5">${empty("Nessun problema attivo", "Non sono stati trovati blocchi go/no-go, alert, job falliti o operazioni fallite.")}</td></tr>`}</tbody>
-        </table>
-      </div>
-    </div>
-  </section>`;
-}
-
-function renderOpsResources(context) {
-  const totals = context.resources.totals;
-  const rows = resourceUsageRows(context).map((item) => `<tr data-resource-row="${escapeHtml(item.applicationId)}">
-    <td><strong>${escapeHtml(item.applicationName)}</strong><span>${escapeHtml(item.applicationId)}</span></td>
-    <td><strong>${escapeHtml(item.projectName)}</strong><span>${escapeHtml(item.projectId)}</span></td>
-    <td>${escapeHtml(item.runtime)}</td>
-    <td data-resource-cell="status"><span class="ops-state ${statusClass(item.status)}">${escapeHtml(item.status)}</span></td>
-    <td data-resource-cell="cpu">${escapeHtml(item.cpu)}</td>
-    <td data-resource-cell="memory">${escapeHtml(item.memory)}</td>
-    <td data-resource-cell="disk">${escapeHtml(item.disk)}</td>
-    <td data-resource-cell="containers">${escapeHtml(item.containers)}</td>
-    <td data-resource-cell="measuredFrom">${escapeHtml(item.measuredFrom)}</td>
-    <td data-resource-cell="limits">${escapeHtml(item.limits)}</td>
-  </tr>`).join("");
-  return `<section class="ops-section" data-resource-live data-resource-live-url="/control/resources/summary" data-resource-refresh-ms="1000">
-    <div class="ops-metrics">
-      ${renderOpsMetric("CPU totale", context.resources.cpu.status, context.resources.cpu.summary, totals.cpu.available ? "info" : "warn", { resourceCard: "cpu" })}
-      ${renderOpsMetric("RAM totale", context.resources.memory.status, context.resources.memory.summary, totals.memory.available ? "info" : "warn", { resourceCard: "memory" })}
-      ${renderOpsMetric("Disco totale", context.resources.disk.status, totals.disk.available ? `${percentLabel(totals.disk.usedPercent)} usato` : totals.disk.message, totals.disk.available ? "info" : "warn", { resourceCard: "disk" })}
-      ${renderOpsMetric("Applicazioni", context.applications.length, context.resources.trend, context.resources.containerMetricsAvailable ? "good" : "warn", { resourceCard: "applications" })}
-    </div>
-    <div class="ops-resource-summary">
-      <div data-resource-summary="cpu">
-        <span>CPU host</span>
-        <strong>${escapeHtml(context.resources.cpu.status)}</strong>
-        <em>${escapeHtml(totals.cpu.available ? `${coresLabel(totals.cpu.cores)} disponibili` : totals.cpu.message || "non disponibile")}</em>
-      </div>
-      <div data-resource-summary="memory">
-        <span>RAM host</span>
-        <strong>${escapeHtml(context.resources.memory.status)}</strong>
-        <em>${escapeHtml(context.resources.memory.summary)}</em>
-      </div>
-      <div data-resource-summary="disk">
-        <span>Disco host</span>
-        <strong>${escapeHtml(context.resources.disk.status)}</strong>
-        <em>${escapeHtml(totals.disk.available ? `${percentLabel(totals.disk.usedPercent)} usato` : totals.disk.message || "non disponibile")}</em>
-      </div>
-      <div data-resource-summary="source">
-        <span>Fonte metriche</span>
-        <strong>${escapeHtml(context.resources.source)}</strong>
-        <em>${escapeHtml(context.resources.capturedAt)}</em>
-      </div>
-    </div>
-    <div class="ops-panel">
-      <div class="ops-panel-head">
-        <div>
-          <h2>Imposta limiti applicazione</h2>
-          <p>Aggiorna solo metadata Control Center; i limiti runtime Docker richiedono un adapter ops esplicito.</p>
-        </div>
-      </div>
-      <form method="post" action="/actions/resource-command" class="ops-form">
-        <input type="hidden" name="action" value="limits">
-        <select name="projectId" aria-label="Applicazione">${context.projects.map((project) => `<option value="${escapeHtml(project.slug)}">${escapeHtml(project.name)}</option>`).join("")}</select>
-        <input name="cpuMillicores" value="0" inputmode="numeric" aria-label="CPU millicores">
-        <input name="memoryMb" value="0" inputmode="numeric" aria-label="Memory MB">
-        <input name="diskMb" value="0" inputmode="numeric" aria-label="Disk MB">
-        <input type="hidden" name="confirm" value="UPDATE-RESOURCE-LIMITS">
-        <button class="ops-button primary" type="submit">${controlIcon("resources")} Salva limiti</button>
-      </form>
-    </div>
-    <div class="ops-panel">
-      <div class="ops-panel-head">
-        <div>
-          <h2>Uso risorse</h2>
-          <p>Totali da Prometheus/node-exporter. Per applicazione: CPU/RAM solo se attribuibili a container dedicati; disco sempre dalla cartella reale.</p>
-        </div>
-        <span class="ops-badge" data-resource-captured-at>${escapeHtml(context.resources.capturedAt)}</span>
-      </div>
-      <div class="ops-table-wrap">
-        <table class="ops-table">
-          <thead><tr><th>Applicazione</th><th>Progetto</th><th>Runtime</th><th>Stato</th><th>CPU</th><th>RAM</th><th>Disco app</th><th>Container</th><th>Fonte</th><th>Limiti</th></tr></thead>
-          <tbody>${rows || `<tr><td colspan="10">${empty("Nessuna riga risorse", "Nessun metadata applicazione disponibile.")}</td></tr>`}</tbody>
-        </table>
-      </div>
-    </div>
-  </section>`;
-}
-
-function renderOpsMetric(label, value, detail, tone = "info", options = {}) {
-  const attrs = options.resourceCard ? ` data-resource-card="${escapeHtml(options.resourceCard)}"` : "";
-  return `<div class="ops-metric ${escapeHtml(tone)}"${attrs}>
+function renderOpsMetric(label, value, detail, tone = "info") {
+  return `<div class="ops-metric ${escapeHtml(tone)}">
     <span>${escapeHtml(label)}</span>
     <strong>${escapeHtml(String(value))}</strong>
     <small>${escapeHtml(String(detail || ""))}</small>
   </div>`;
+}
+
+function statusRunStepDefinitions() {
+  return [
+    { id: "portal-through-waf", label: "Portal via WAF", category: "domain-edge" },
+    { id: "waf-sensitive-file-block", label: "File sensibili bloccati", category: "security" },
+    { id: "go-no-go-report-readable", label: "Report go/no-go", category: "go-live" },
+    { id: "go-no-go-verdict", label: "Decisione produzione", category: "go-live" },
+    { id: "readiness-matrix-readable", label: "Matrice readiness", category: "governance" },
+  ];
+}
+
+function statusRunStepDefinitionsForRows(rows, category) {
+  const cleanCategory = sanitizeIdentifier(category || "");
+  const base = statusRunStepDefinitions().filter((step) => !cleanCategory || step.category === cleanCategory);
+  const seen = new Set(base.map((step) => step.id));
+  const rowSteps = rows
+    .map((row) => ({
+      id: sanitizeIdentifier(row.technicalId || row.id || ""),
+      label: row.control || row.technicalId || "Controllo",
+      category: row.category || cleanCategory || "operational-evidence",
+    }))
+    .filter((step) => step.id && !seen.has(step.id))
+    .map((step) => {
+      seen.add(step.id);
+      return step;
+    });
+  return [...base, ...rowSteps];
+}
+
+function renderStatusRunSteps(run, steps = statusRunStepDefinitions()) {
+  const checks = Array.isArray(run?.checks) ? run.checks : [];
+  const byId = new Map(checks.map((check) => [check.id, check]));
+  return `<div class="ops-status-run-steps" data-status-run-steps>
+    ${steps.map((step, index) => {
+      const check = byId.get(step.id);
+      const state = statusRunStepState(check);
+      const detail = check?.detail || (run ? "Non presente nell'ultimo run." : "In attesa di esecuzione.");
+      return `<div class="ops-status-run-step ${escapeHtml(state.className)}" data-status-run-step="${escapeHtml(step.id)}" data-status-run-step-index="${escapeHtml(String(index))}" data-status-run-step-category="${escapeHtml(step.category)}">
+        <span class="ops-status-run-step-mark" data-status-run-step-mark>${escapeHtml(state.mark)}</span>
+        <div>
+          <strong>${escapeHtml(step.label)}</strong>
+          <span data-status-run-step-detail>${escapeHtml(detail)}</span>
+        </div>
+      </div>`;
+    }).join("")}
+  </div>`;
+}
+
+function statusRunStepState(check) {
+  if (!check) return { mark: "-", className: "idle" };
+  if (check.status === "passed" || check.status === "success") return { mark: "V", className: "passed" };
+  return { mark: "X", className: "failed" };
 }
 
 function renderStatusRunSummary(run) {
@@ -4607,11 +6262,13 @@ function opsStatusRows(context) {
       id: `run:${check.id}`,
       control: statusRunControlTitle(check),
       technicalId: check.id,
+      category: check.category,
       source: check.source || "Test reale",
       status: check.status,
       reason: check.detail || "",
       action: check.status === "passed" ? "Nessuna azione immediata." : check.nextAction,
       required: check.required,
+      reportPath: check.reportPath || "",
     }));
   }
   for (const check of context.goNoGo?.checks || []) {
@@ -4621,6 +6278,7 @@ function opsStatusRows(context) {
       id: `go-no-go:${displayCheck.name}`,
       control: friendlyCheckName(displayCheck.name),
       technicalId: displayCheck.name,
+      category: displayCheck.category,
       source: "Go live",
       status: displayCheck.status,
       reason: passed ? (displayCheck.detail || "Controllo superato nel report go/no-go.") : simpleBlockerReason(displayCheck),
@@ -4635,6 +6293,7 @@ function opsStatusRows(context) {
       id: `documented:${check.id}`,
       control: statusRunControlTitle(check),
       technicalId: check.id,
+      category: check.category,
       source: check.source || "Documentazione",
       status: check.status,
       reason: check.detail || "",
@@ -4642,7 +6301,246 @@ function opsStatusRows(context) {
       required: check.required,
     }));
   }
-  return rows;
+  return dedupeStatusRows(rows);
+}
+
+function dedupeStatusRows(rows) {
+  const groups = new Map();
+  for (const row of rows) {
+    const key = statusDedupeKey(row);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(row);
+  }
+  return [...groups.entries()].map(([key, group]) => mergeStatusRows(key, group));
+}
+
+function statusDedupeKey(row) {
+  const id = sanitizeIdentifier(row?.technicalId || row?.id || "");
+  if (["go-no-go-verdict", "production-go-no-go", "production-readiness-live"].includes(id)) return "go-live-decision";
+  if (id === "deploy-vps") return "vps-deploy-protected";
+  if (id === "vps-go-live") return "vps-go-live-orchestration";
+  if (["go-no-go-report-readable", "readiness-matrix-readable"].includes(id)) return id;
+  if (id.includes("pre-go-live")) return "pre-go-live-evidence";
+  if (id.includes("github-actions-config") || id.includes("automatic-ci-cd-deploy") || id.includes("remote-ci-cd")) return "github-actions-runtime";
+  if (id.includes("github-branch-protection") || id.includes("github-environments")) return "github-governance";
+  if (id.includes("real-dns") || id.includes("production-preflight") || id.includes("external-uptime") || id.includes("public-https") || id.includes("tls-https")) return "public-domain-dns-https-uptime";
+  if (id.includes("cloudflare-access") || id.includes("admin-access-mfa-vpn") || id.includes("cloudflare-from-zero")) return "cloudflare-access-admin";
+  if (id.includes("cloudflare-origin-lock") || id.includes("waf-rate") || id.includes("rate-limit") || id.includes("rate-limiting")) return "public-edge-waf-rate-limit";
+  if (id.includes("dast-zap")) return "staging-dast";
+  if (id.includes("hosted-workload-isolation")) return "hosted-workload-routing-boundary";
+  if (id.includes("offsite") || id.includes("disaster-recovery") || id.includes("rpo") || id.includes("rto") || id === "dr-evidence" || id.includes("database-service-governance") || id.includes("restore-tested")) return "offsite-backup-restore-rpo-rto";
+  if (id.includes("load-benchmark") || id.includes("load-performance") || id === "load-benchmark") return "public-load-benchmark";
+  if (id.includes("ha-multi-node")) return "ha-multi-node-readiness";
+  if (id.includes("staging") && !id.includes("dast-zap")) return "staging-separation";
+  if (id.includes("operations-runbook")) return "operations-runbook-final-evidence";
+  if (id.includes("sign-images") || id.includes("supply-chain-sbom-signing-provenance")) return "image-signing-provenance";
+  if (id.includes("feature-flags")) return "feature-flags-kill-switches";
+  if (id.includes("vulnerability-disclosure")) return "vulnerability-disclosure-process";
+  if (id.includes("compliance-gdpr") || id.includes("soc2")) return "compliance-evidence";
+  if (id.includes("data-classification")) return "data-classification";
+  if (id.includes("pentest")) return "penetration-test-readiness";
+  if (id.includes("install-mariadb-backup-cron") || id.includes("install-postgres-backup-cron") || id.includes("backup-scheduler")) return "backup-scheduler";
+  return id || sanitizeIdentifier(row?.id || "status-check");
+}
+
+function statusDedupeMeta(key) {
+  const titles = {
+    "go-live-decision": ["Decisione go live", "go-live-decision"],
+    "vps-deploy-protected": ["Deploy VPS protetto", "deploy-vps"],
+    "vps-go-live-orchestration": ["Orchestrazione VPS go-live", "vps-go-live"],
+    "pre-go-live-evidence": ["Pacchetto pre go-live", "pre-go-live-evidence"],
+    "github-actions-runtime": ["GitHub Actions runtime", "github-actions-runtime"],
+    "github-governance": ["GitHub governance", "github-governance"],
+    "public-domain-dns-https-uptime": ["Dominio, DNS, HTTPS e uptime pubblico", "public-domain-dns-https-uptime"],
+    "cloudflare-access-admin": ["Cloudflare Access admin", "cloudflare-access-admin"],
+    "public-edge-waf-rate-limit": ["WAF, bot protection e rate limit pubblico", "public-edge-waf-rate-limit"],
+    "staging-dast": ["DAST staging", "staging-dast"],
+    "hosted-workload-routing-boundary": ["Routing workload ospitati", "hosted-workload-routing-boundary"],
+    "offsite-backup-restore-rpo-rto": ["Backup/restore off-site e RPO/RTO", "offsite-backup-restore-rpo-rto"],
+    "public-load-benchmark": ["Benchmark pubblico", "public-load-benchmark"],
+    "ha-multi-node-readiness": ["HA e multi-node readiness", "ha-multi-node-readiness"],
+    "staging-separation": ["Staging separato da produzione", "staging-separation"],
+    "operations-runbook-final-evidence": ["Runbook operativo finale", "operations-runbook-final-evidence"],
+    "image-signing-provenance": ["Firma immagini e provenance", "image-signing-provenance"],
+    "feature-flags-kill-switches": ["Feature flag e kill switch", "feature-flags-kill-switches"],
+    "vulnerability-disclosure-process": ["Vulnerability disclosure", "vulnerability-disclosure"],
+    "compliance-evidence": ["Compliance GDPR/SOC2-like", "compliance-evidence"],
+    "data-classification": ["Data classification", "data-classification"],
+    "penetration-test-readiness": ["Penetration test readiness", "penetration-test-readiness"],
+    "backup-scheduler": ["Scheduler backup", "backup-scheduler"],
+  };
+  const [control, technicalId] = titles[key] || [null, null];
+  return { control, technicalId };
+}
+
+function mergeStatusRows(key, rows) {
+  const sorted = [...rows].sort(compareStatusRowsForMerge);
+  const primary = sorted[0];
+  const meta = statusDedupeMeta(key);
+  const mergedTechnicalId = meta.technicalId || primary.technicalId || key;
+  const covered = uniqueStrings(rows.map((row) => row.technicalId).filter((id) => id && id !== mergedTechnicalId));
+  const coveredText = covered.length
+    ? ` Copre anche ${covered.length} controlli collegati: ${covered.join(", ")}.`
+    : "";
+  const canonicalPass = canonicalPassedStatusEvidence(key);
+  if (canonicalPass) {
+    return statusTableRow({
+      id: `dedupe:${key}`,
+      control: meta.control || primary.control,
+      technicalId: mergedTechnicalId,
+      category: statusCategoryForCanonicalKey(key, primary),
+      source: compactStatusSources(rows),
+      status: "passed",
+      reason: `${canonicalPass.reason}${coveredText}`,
+      action: "Nessuna azione immediata.",
+      required: rows.some((row) => row.required !== false),
+      reportPath: canonicalPass.reportPath || primary.reportPath || rows.find((row) => row.reportPath)?.reportPath || "",
+    });
+  }
+  const mergedStatus = primary.status;
+  const mergedControl = meta.control || primary.control;
+  const mergedReason = canonicalStatusReason(key, primary, rows) || primary.reason || "n.d.";
+  const mergedAction = canonicalStatusAction(key, primary, rows) || primary.action || "Nessuna azione indicata.";
+  return statusTableRow({
+    id: `dedupe:${key}`,
+    control: mergedControl,
+    technicalId: mergedTechnicalId,
+    category: statusCategoryForCanonicalKey(key, primary),
+    source: compactStatusSources(rows),
+    status: mergedStatus,
+    reason: `${mergedReason}${coveredText}`,
+    action: mergedAction,
+    required: rows.some((row) => row.required !== false),
+    reportPath: primary.reportPath || rows.find((row) => row.reportPath)?.reportPath || "",
+  });
+}
+
+function canonicalPassedStatusEvidence(key) {
+  if (key === "offsite-backup-restore-rpo-rto") {
+    const evidence = readPassedDocumentedStatusEvidence("dr-evidence");
+    const offsite = evidence?.payload?.offsiteEvidence;
+    if (
+      evidence
+      && Array.isArray(evidence.payload?.issues)
+      && evidence.payload.issues.length === 0
+      && offsite?.latestRestoreOffsite === true
+      && offsite?.latestRestoreCoverage?.complete === true
+    ) {
+      return {
+        reportPath: evidence.reportPath,
+        reason: "Restore off-site Restic completo su repository remoto, copertura dati completa e RPO/RTO verificati da evidence DR fresca.",
+      };
+    }
+  }
+  if (key === "backup-scheduler") {
+    const evidence = readPassedDocumentedStatusEvidence("backup-scheduler");
+    if (evidence) {
+      return {
+        reportPath: evidence.reportPath,
+        reason: "Scheduler backup Docker attivo e healthy: backup locali e upload off-site sono pianificati ogni 8 ore, retention a 42 snapshot e cap remoto a 2.5 TB.",
+      };
+    }
+  }
+  return null;
+}
+
+function compareStatusRowsForMerge(a, b) {
+  const severity = statusMergeSeverity(b.status) - statusMergeSeverity(a.status);
+  if (severity) return severity;
+  const source = statusSourcePriority(a.source) - statusSourcePriority(b.source);
+  if (source) return source;
+  return String(a.technicalId || "").localeCompare(String(b.technicalId || ""));
+}
+
+function statusMergeSeverity(status) {
+  switch (String(status || "")) {
+    case "failed":
+    case "no-go":
+      return 90;
+    case "authorization-required":
+      return 80;
+    case "pending-provider":
+    case "pending-live-proof":
+    case "needs-work":
+      return 70;
+    case "warning":
+    case "plan-only":
+      return 50;
+    case "passed":
+    case "success":
+    case "go":
+      return 10;
+    default:
+      return 40;
+  }
+}
+
+function statusSourcePriority(source = "") {
+  const text = String(source).toLowerCase();
+  if (text.includes("go live")) return 1;
+  if (text.includes("test reale")) return 2;
+  if (text.includes("report")) return 3;
+  if (text.includes("production readiness")) return 4;
+  if (text.includes("enterprise")) return 5;
+  return 9;
+}
+
+function compactStatusSources(rows) {
+  const sources = uniqueStrings(rows.map((row) => row.source).filter(Boolean));
+  if (sources.length <= 2) return sources.join(" / ");
+  return `${sources.slice(0, 2).join(" / ")} + ${sources.length - 2} fonti`;
+}
+
+function canonicalStatusReason(key, primary, rows) {
+  if (primary.status === "passed" || primary.status === "success") return primary.reason;
+  if (key === "offsite-backup-restore-rpo-rto") return "Restore locale completo e backup locali risultano coperti; manca la prova off-site Restic su repository remoto con restore completo e copertura RPO/RTO.";
+  if (key === "vps-deploy-orchestration") return "Deploy/go-live VPS e' una procedura protetta: puo' modificare servizi, usare backup o validare rollback, quindi richiede finestra operativa.";
+  if (key === "github-actions-runtime") return "Branch protection, environments e workflow passano; resta incompleta la configurazione runtime GitHub Actions per staging/production.";
+  if (key === "staging-dast") return "Manca un target staging HTTPS raggiungibile da GitHub Actions per eseguire la baseline DAST.";
+  if (key === "public-domain-dns-https-uptime") return "Manca la prova su dominio pubblico reale: DNS, HTTPS e monitor esterno non sono ancora verificati fuori dalla LAN.";
+  if (key === "cloudflare-access-admin") return "Cloudflare Access/admin non e' ancora verificato come provider live per produzione.";
+  if (key === "public-edge-waf-rate-limit") return "WAF e rate limit passano localmente, ma manca la prova dal public edge Cloudflare/dominio reale.";
+  if (key === "pre-go-live-evidence") return "Il pacchetto pre go-live e' quasi completo: mancano production preflight reale, restore off-site Restic e runtime provider GitHub Actions.";
+  if (key === "public-load-benchmark") return "Manca un benchmark fresco sul dominio pubblico finale.";
+  if (key === "hosted-workload-routing-boundary") return "Manca la prova di routing produzione per wildcard DNS, Traefik e project-router sul dominio reale.";
+  if (key === "staging-separation") return "Manca una prova di staging separato da produzione con target pubblico e configurazione propria.";
+  if (key === "ha-multi-node-readiness") return "Manca una decisione/prova HA: l'ambiente attuale resta single-node.";
+  if (key === "operations-runbook-final-evidence") return "Il runbook esiste, ma deve puntare ai report finali veri di dominio, provider e restore off-site.";
+  if (key === "backup-scheduler") return "Manca una prova di scheduler backup attivo e verificato; le righe cron documentate da sole non bastano come evidence produzione.";
+  if (key === "penetration-test-readiness") return "Manca evidence di penetration test readiness per l'infrastruttura eseguita o approvata.";
+  if (key === "feature-flags-kill-switches") return "Manca evidence operativa di feature flag/kill switch per disabilitare funzionalita rischiose senza deploy.";
+  if (key === "vulnerability-disclosure-process") return "Manca evidence del processo di vulnerability disclosure pubblicabile per la piattaforma.";
+  if (key === "compliance-evidence") return "Manca evidence non-secret di compliance GDPR/SOC2-like applicabile alla piattaforma.";
+  if (key === "data-classification") return "Manca evidence di classificazione dati e trattamento dei dati gestiti dall'infrastruttura.";
+  return primary.reason;
+}
+
+function canonicalStatusAction(key, primary, rows) {
+  if (primary.status === "passed" || primary.status === "success") return primary.action;
+  if (key === "offsite-backup-restore-rpo-rto") return "Configura RESTIC_REPOSITORY remoto e RESTIC_PASSWORD_FILE, esegui offsite-backup-restic e offsite-restore-drill-restic completo, poi rilancia dr-evidence e production-go-no-go.";
+  if (key === "vps-deploy-orchestration") return "Esegui solo con backup recente, finestra di manutenzione e conferma esplicita; poi conserva il report VPS go-live live.";
+  if (key === "github-actions-runtime") return "Imposta DAST_TARGET su staging e completa le variabili/secrets production richieste; poi rilancia github-actions-config --verifyRemote e pre-go-live-evidence.";
+  if (key === "staging-dast") return "Configura DAST_TARGET con un URL HTTPS staging reale raggiungibile da GitHub Actions e rilancia il controllo.";
+  if (key === "public-domain-dns-https-uptime") return "Collega il dominio pubblico finale, verifica DNS/HTTPS da esterno e rilancia production-preflight, external-uptime-check e pre-go-live-evidence.";
+  if (key === "cloudflare-access-admin") return "Configura/verifica Cloudflare Access per il dominio reale e archivia il report non-secret.";
+  if (key === "public-edge-waf-rate-limit") return "Esegui WAF smoke e rate-limit evidence contro il dominio pubblico dietro Cloudflare.";
+  if (key === "pre-go-live-evidence") return "Rilancia pre-go-live-evidence con includeProductionPreflight, includeOffsiteRestoreDryRun e verifyGithubRemote dopo dominio, Restic remoto e GitHub runtime.";
+  if (key === "public-load-benchmark") return "Esegui load-benchmark sul dominio pubblico reale e conserva il report fresco.";
+  if (key === "hosted-workload-routing-boundary") return "Verifica wildcard DNS e routing project-router sul dominio pubblico senza accoppiare app e infrastruttura.";
+  if (key === "staging-separation") return "Configura staging separato, imposta DAST_TARGET e verifica route/secrets/volumi separati.";
+  if (key === "ha-multi-node-readiness") return "Aggiungi un target multi-node oppure approva e documenta esplicitamente il rischio single-node per questa fase.";
+  if (key === "operations-runbook-final-evidence") return "Completa i riferimenti del runbook dopo production preflight, Cloudflare/uptime e off-site restore reali.";
+  if (key === "backup-scheduler") return "Avvia/verifica il backup scheduler Docker o un crontab production equivalente, poi archivia un report non-secret.";
+  if (key === "penetration-test-readiness") return "Esegui o pianifica formalmente il pentest infrastrutturale e conserva evidence non-secret del risultato o dell'approvazione.";
+  if (key === "feature-flags-kill-switches") return "Definisci i kill switch operativi della piattaforma e conserva evidence di verifica.";
+  if (key === "vulnerability-disclosure-process") return "Pubblica o approva il processo di disclosure e conserva evidence del canale scelto.";
+  if (key === "compliance-evidence") return "Archivia la matrice compliance non-secret con scope, controlli e responsabilita.";
+  if (key === "data-classification") return "Archivia la classificazione dei dati gestiti dalla piattaforma e le regole di trattamento.";
+  return primary.action;
+}
+
+function uniqueStrings(values) {
+  return [...new Set(values.map((value) => String(value || "").trim()).filter(Boolean))];
 }
 
 function isControlCenterOnlyStatusCheck(id) {
@@ -4657,18 +6555,186 @@ function statusRunControlTitle(check) {
   return check?.title || friendlyCheckName(check?.id);
 }
 
-function statusTableRow({ id, control, technicalId, source, status, reason, action, required = true, reportPath = "" }) {
+function statusTableRow({ id, control, technicalId, category = "", source, status, reason, action, required = true, reportPath = "" }) {
+  const categoryMeta = statusCategoryMeta(statusCategoryKey({ technicalId, category, source, reason, action }));
   return sanitizeEvent({
     id,
     control,
     technicalId,
+    category: categoryMeta.id,
+    categoryLabel: categoryMeta.label,
+    categoryDescription: categoryMeta.description,
     source,
     status,
+    statusLabel: operationalStatusLabel(status, technicalId, source, reason, action),
     reason,
     action,
     required,
     reportPath,
   });
+}
+
+function operationalStatusLabel(status, technicalId, source = "", reason = "", action = "") {
+  const cleanStatus = String(status || "");
+  if (cleanStatus === "passed") return "Superato";
+  if (cleanStatus === "success") return "Riuscito";
+  if (cleanStatus === "go") return "GO LIVE";
+  if (cleanStatus === "no-go") return "NO GO LIVE";
+  const id = sanitizeIdentifier(technicalId || "");
+  const text = `${id} ${source || ""} ${reason || ""} ${action || ""}`.toLowerCase();
+  if (cleanStatus === "authorization-required") return "Serve autorizzazione";
+  if (id.includes("pre-go-live")) return "Manca pre go-live";
+  if (id.includes("staging")) return "Manca staging";
+  if (id === "github-actions-runtime") return "Manca GitHub runtime";
+  if (id === "public-domain-dns-https-uptime") return "Manca dominio";
+  if (id === "staging-dast") return "Manca DAST staging";
+  if (id === "backup-scheduler") return "Manca scheduler backup";
+  if (id === "penetration-test-readiness") return "Manca pentest";
+  if (id === "feature-flags-kill-switches") return "Manca kill switch";
+  if (id === "vulnerability-disclosure") return "Manca disclosure";
+  if (id === "compliance-evidence") return "Manca compliance";
+  if (id === "data-classification") return "Manca classificazione";
+  if (id.includes("ha-multi-node") || id.includes("multi-node")) return "Manca HA";
+  if (id.includes("offsite") || id.includes("rpo") || id.includes("rto") || id.includes("disaster-recovery") || text.includes("restic")) return "Manca backup off-site";
+  if (id.includes("hosted-workload-isolation") || text.includes("wildcard dns") || text.includes("project-router")) return "Manca routing pubblico";
+  if (/(^|-)load($|-)/.test(id) || id.includes("benchmark") || text.includes("benchmark pubblico")) return "Manca benchmark";
+  if (id.includes("cloudflare")) return "Manca Cloudflare";
+  if (id.includes("waf") || id.includes("rate-limit") || id.includes("rate-limiting") || text.includes("protezione bot")) return "Manca WAF/rate limit";
+  if (id.includes("real-dns") || id.includes("external-uptime") || id.includes("public-https") || id.includes("tls-https") || text.includes("dominio reale") || text.includes("dns pubblico")) return "Manca dominio";
+  if (id.includes("github-actions-config") || text.includes("github actions runtime")) return "Manca GitHub runtime";
+  if (id.includes("github") || text.includes("github")) return "Manca GitHub evidence";
+  if (id.includes("release") || text.includes("attestation") || text.includes("sigstore")) return "Manca release evidence";
+  if (id.includes("operations-runbook") || text.includes("runbook")) return "Manca runbook finale";
+  if (cleanStatus === "pending-live-proof") return "Manca prova live";
+  if (cleanStatus === "pending-provider") return "Manca provider";
+  return friendlyGoNoGoStatus(cleanStatus);
+}
+
+function statusCategoryForCanonicalKey(key, primary = {}) {
+  const categories = {
+    "go-live-decision": "go-live",
+    "vps-deploy-protected": "runtime-vps",
+    "vps-go-live-orchestration": "runtime-vps",
+    "pre-go-live-evidence": "go-live",
+    "github-actions-runtime": "github-release",
+    "github-governance": "github-release",
+    "public-domain-dns-https-uptime": "domain-edge",
+    "cloudflare-access-admin": "domain-edge",
+    "public-edge-waf-rate-limit": "domain-edge",
+    "staging-dast": "staging-ha",
+    "hosted-workload-routing-boundary": "domain-edge",
+    "offsite-backup-restore-rpo-rto": "backup-dr",
+    "public-load-benchmark": "performance",
+    "ha-multi-node-readiness": "staging-ha",
+    "staging-separation": "staging-ha",
+    "operations-runbook-final-evidence": "governance",
+    "image-signing-provenance": "github-release",
+    "feature-flags-kill-switches": "governance",
+    "vulnerability-disclosure-process": "governance",
+    "compliance-evidence": "governance",
+    "data-classification": "governance",
+    "penetration-test-readiness": "security",
+    "backup-scheduler": "backup-dr",
+  };
+  return categories[key] || primary.category || "";
+}
+
+function statusCategoryKey({ technicalId = "", category = "", source = "", reason = "", action = "" } = {}) {
+  const id = sanitizeIdentifier(technicalId || "");
+  const cleanCategory = sanitizeIdentifier(category || "");
+  const text = `${id} ${cleanCategory} ${source || ""} ${reason || ""} ${action || ""}`.toLowerCase();
+  if (cleanCategory === "routing" || cleanCategory === "network" || cleanCategory === "edge") return "domain-edge";
+  if (cleanCategory === "provider") {
+    if (text.includes("github") || text.includes("sigstore") || text.includes("attestation") || text.includes("release")) return "github-release";
+    if (text.includes("restic") || text.includes("backup") || text.includes("restore") || text.includes("disaster")) return "backup-dr";
+    return "domain-edge";
+  }
+  if (cleanCategory === "runtime-evidence") {
+    if (text.includes("backup") || text.includes("restore") || text.includes("dr-") || text.includes("disaster") || text.includes("restic")) return "backup-dr";
+    if (text.includes("release") || text.includes("pre-go-live") || text.includes("go-no-go")) return "go-live";
+    if (text.includes("vps")) return "runtime-vps";
+    if (text.includes("load")) return "performance";
+    if (text.includes("alert") || text.includes("retention") || text.includes("evidence-bundle")) return "observability-evidence";
+  }
+  if (cleanCategory === "protected-runtime") {
+    if (text.includes("backup") || text.includes("restore") || text.includes("prune") || text.includes("sign-existing-postgres")) return "backup-dr";
+    if (text.includes("deploy") || text.includes("vps")) return "runtime-vps";
+    return "resilience-tests";
+  }
+  if (cleanCategory === "secret-protected" || text.includes("secret-manager") || text.includes("secret rotation") || text.includes("secrets")) return "secrets";
+  if (cleanCategory === "local-policy") {
+    if (text.includes("waf") || text.includes("rate-limit") || text.includes("security") || text.includes("vulnerability") || text.includes("pentest")) return "security";
+    if (text.includes("backup") || text.includes("dr-") || text.includes("disaster")) return "backup-dr";
+    if (text.includes("ha-") || text.includes("multi-node") || text.includes("staging")) return "staging-ha";
+    if (text.includes("performance") || text.includes("load")) return "performance";
+    if (text.includes("sbom") || text.includes("supply-chain") || text.includes("github") || text.includes("release")) return "github-release";
+    if (text.includes("retention") || text.includes("alert") || text.includes("audit") || text.includes("logs")) return "observability-evidence";
+    if (text.includes("governance") || text.includes("enterprise") || text.includes("readiness") || text.includes("maintainability")) return "governance";
+    return "local-quality";
+  }
+  if (id.includes("go-no-go") || id.includes("pre-go-live") || id.includes("production-readiness-live")) return "go-live";
+  if (id.includes("github") || id.includes("release") || id.includes("artifact") || id.includes("sigstore") || id.includes("sign-images") || id.includes("supply-chain")) return "github-release";
+  if (id.includes("cloudflare") || id.includes("dns") || id.includes("domain") || id.includes("https") || id.includes("uptime") || id.includes("waf") || id.includes("route") || id.includes("router")) return "domain-edge";
+  if (id.includes("backup") || id.includes("restore") || id.includes("dr-") || id.includes("rpo") || id.includes("rto") || id.includes("restic")) return "backup-dr";
+  if (id.includes("ha-") || id.includes("multi-node") || id.includes("staging") || id.includes("dast")) return "staging-ha";
+  if (id.includes("secret")) return "secrets";
+  if (id.includes("security") || id.includes("pentest") || id.includes("vulnerability") || id.includes("rate-limit")) return "security";
+  if (id.includes("load") || id.includes("performance") || id.includes("benchmark")) return "performance";
+  if (id.includes("vps") || id.includes("deploy") || id.includes("bootstrap") || id.includes("hardening")) return "runtime-vps";
+  if (id.includes("audit") || id.includes("alert") || id.includes("retention") || id.includes("health") || id.includes("evidence-bundle")) return "observability-evidence";
+  if (id.includes("governance") || id.includes("enterprise") || id.includes("compliance") || id.includes("data-classification") || id.includes("feature-flags") || id.includes("runbook")) return "governance";
+  return "local-quality";
+}
+
+function statusCategoryMeta(key) {
+  const cleanKey = sanitizeIdentifier(key || "local-quality") || "local-quality";
+  const categories = {
+    "go-live": ["Go live e decisione", "Decisione finale, pacchetto pre go-live e report che dichiarano se si puo' andare online.", 10],
+    "domain-edge": ["Dominio, edge e routing", "DNS pubblico, HTTPS, Cloudflare, WAF, rate limit, uptime e routing project-router.", 20],
+    "github-release": ["GitHub, CI/CD e release", "Branch protection, environments, workflow, artifact, firma immagini e provenance.", 30],
+    "backup-dr": ["Backup e disaster recovery", "Backup locali/off-site, restore drill, RPO/RTO, scheduler e prove di ripristino.", 40],
+    "staging-ha": ["Staging e alta disponibilita", "Separazione staging/produzione, DAST e readiness multi-node.", 50],
+    "security": ["Sicurezza tecnica", "Security smoke, secret scan, WAF locale, rate limit locale, vulnerability e pentest.", 60],
+    "secrets": ["Secrets e vault", "Secret manager, rotazione, validazione locale e materiale sensibile protetto.", 70],
+    "governance": ["Governance e compliance", "Runbook, policy, readiness enterprise, classificazione dati e processi operativi.", 80],
+    "observability-evidence": ["Osservabilita ed evidence", "Audit log, health, alerting, retention, bundle evidence e monitoraggio.", 90],
+    "performance": ["Performance e carico", "Benchmark pubblico, smoke carico e profilo prestazioni.", 100],
+    "runtime-vps": ["Runtime Ubuntu/VPS", "Bootstrap, hardening, preflight, postdeploy e deploy protetto del server Ubuntu.", 110],
+    "resilience-tests": ["Test di resilienza", "Chaos, fault injection, failure test e rollback controllato.", 120],
+    "local-quality": ["Qualita locale repo", "Portabilita Linux, hygiene, coverage, test locali e controlli statici.", 130],
+    "operational-evidence": ["Evidence operativa", "Controlli operativi senza categoria specifica.", 900],
+  };
+  const [label, description, order] = categories[cleanKey] || categories["local-quality"];
+  return { id: cleanKey, label, description, order };
+}
+
+function groupStatusRowsByCategory(rows) {
+  const groups = new Map();
+  for (const row of rows) {
+    const meta = statusCategoryMeta(row.category || statusCategoryKey(row));
+    if (!groups.has(meta.id)) groups.set(meta.id, { meta, rows: [] });
+    groups.get(meta.id).rows.push(row);
+  }
+  return [...groups.values()]
+    .sort((a, b) => a.meta.order - b.meta.order || a.meta.label.localeCompare(b.meta.label))
+    .map((group) => ({
+      ...group,
+      rows: [...group.rows].sort(compareStatusRowsForCategory),
+    }));
+}
+
+function compareStatusRowsForCategory(a, b) {
+  const severity = statusMergeSeverity(b.status) - statusMergeSeverity(a.status);
+  if (severity) return severity;
+  return String(a.control || a.technicalId || "").localeCompare(String(b.control || b.technicalId || ""));
+}
+
+function statusCategoryCounts(rows) {
+  const total = rows.length;
+  const passed = rows.filter((row) => row.status === "passed" || row.status === "success" || row.status === "go").length;
+  const fix = rows.filter((row) => ["failed", "needs-work", "plan-only"].includes(row.status)).length;
+  const missing = rows.filter((row) => ["authorization-required", "pending-live-proof", "pending-provider", "no-go"].includes(row.status)).length;
+  return { total, passed, fix, missing, open: Math.max(0, total - passed) };
 }
 
 function renderStatusTabButton(id, label, count, selected = false) {
@@ -4679,33 +6745,72 @@ function renderStatusTabButton(id, label, count, selected = false) {
 }
 
 function renderStatusAllPanel(passedRows, notPassedRows) {
-  return `<div class="ops-status-split">
-    <div class="ops-status-column">
-      <div class="ops-status-column-head"><strong>Passati</strong><span>${escapeHtml(String(passedRows.length))}</span></div>
-      ${renderStatusRowsTable(passedRows, "Nessun controllo passato", "Avvia i test reali o genera un report go/no-go.")}
-    </div>
-    <div class="ops-status-column">
-      <div class="ops-status-column-head"><strong>Non passati</strong><span>${escapeHtml(String(notPassedRows.length))}</span></div>
-      ${renderStatusRowsTable(notPassedRows, "Nessun controllo aperto", "Non risultano blocchi nel set corrente.")}
-    </div>
-  </div>`;
+  return renderStatusRowsTable(notPassedRows, "Nessun controllo aperto", "Non risultano blocchi nel set corrente.", { grouped: true });
 }
 
-function renderStatusRowsTable(rows, emptyTitle, emptyMessage) {
+function renderStatusRowsTable(rows, emptyTitle, emptyMessage, options = {}) {
   if (!rows.length) return empty(emptyTitle, emptyMessage);
-  const body = rows.map((row) => `<tr>
-    <td><strong>${escapeHtml(row.control)}</strong><span>${escapeHtml(row.technicalId)}</span></td>
-    <td><span class="ops-state ${statusClass(row.status)}">${escapeHtml(friendlyGoNoGoStatus(row.status))}</span></td>
-    <td>${escapeHtml(row.reason || "n.d.")}</td>
-    <td>${escapeHtml(row.action || "Nessuna azione indicata.")}${row.reportPath ? `<span>${escapeHtml(row.reportPath)}</span>` : ""}</td>
-    <td>${escapeHtml(row.source)}</td>
-  </tr>`).join("");
-  return `<div class="ops-table-wrap">
-    <table class="ops-table ops-status-table">
-      <thead><tr><th>Controllo</th><th>Stato</th><th>Motivo</th><th>Cosa fare</th><th>Fonte</th></tr></thead>
-      <tbody>${body}</tbody>
-    </table>
-  </div>`;
+  const grouped = options.grouped !== false;
+  const groups = grouped ? groupStatusRowsByCategory(rows) : [{ meta: statusCategoryMeta("operational-evidence"), rows }];
+  return `<div class="ops-status-group-list">${groups.map((group) => renderStatusCategoryTable(group.meta, group.rows)).join("")}</div>`;
+}
+
+function renderStatusCategoryTable(category, rows, options = {}) {
+  if (!rows.length) return empty("Nessun controllo", "Questa sezione non contiene controlli.");
+  const counts = statusCategoryCounts(rows);
+  const body = rows.map((row) => renderStatusCheckRow(row, options)).join("");
+  return `<section class="ops-status-category" data-status-category="${escapeHtml(category.id)}">
+    <div class="ops-status-category-head">
+      <div>
+        <strong>${escapeHtml(category.label)}</strong>
+        ${options.showDescription ? `<span>${escapeHtml(category.description)}</span>` : ""}
+      </div>
+      <div class="ops-status-category-counts" aria-label="Conteggi categoria">
+        <span><strong>${escapeHtml(String(counts.total))}</strong> totali</span>
+        <span class="good"><strong>${escapeHtml(String(counts.passed))}</strong> OK</span>
+        <span class="bad"><strong>${escapeHtml(String(counts.open))}</strong> aperti</span>
+      </div>
+    </div>
+    <div class="ops-status-check-list">${body}</div>
+  </section>`;
+}
+
+function renderStatusCheckRow(row, options = {}) {
+  const tone = statusClass(row.status);
+  return `<details class="ops-status-check-row ${escapeHtml(tone)}">
+    <summary class="ops-status-check-summary">
+      <span class="ops-status-check-dot ${escapeHtml(tone)}" aria-hidden="true"></span>
+      <span class="ops-status-check-title">
+        <strong>${escapeHtml(row.control)}</strong>
+        <span>${escapeHtml(row.reason || row.technicalId || "n.d.")}</span>
+      </span>
+      <span class="ops-state ${escapeHtml(tone)}">${escapeHtml(row.statusLabel || friendlyGoNoGoStatus(row.status))}</span>
+      ${options.actions ? `<form class="ops-status-check-run" method="post" action="/actions/status-check" data-status-run-form data-status-run-inline>
+        <input type="hidden" name="scope" value="check">
+        <input type="hidden" name="category" value="${escapeHtml(row.category)}">
+        <input type="hidden" name="checkId" value="${escapeHtml(row.technicalId)}">
+        <button class="ops-icon-button" type="submit" data-status-run-button aria-label="Esegui ${escapeHtml(row.control)}">${controlIcon("play")}</button>
+      </form>` : ""}
+    </summary>
+    <div class="ops-status-check-details">
+      <div>
+        <small>ID</small>
+        <p>${escapeHtml(row.technicalId)}</p>
+      </div>
+      <div>
+        <small>Cosa fare</small>
+        <p>${escapeHtml(row.action || "Nessuna azione indicata.")}</p>
+      </div>
+      <div>
+        <small>Fonte</small>
+        <p>${escapeHtml(row.source)}</p>
+      </div>
+      ${row.reportPath ? `<div>
+        <small>Report</small>
+        <p>${escapeHtml(row.reportPath)}</p>
+      </div>` : ""}
+    </div>
+  </details>`;
 }
 
 function renderOpsBlockersTable(blockers) {
@@ -4877,11 +6982,20 @@ function simpleBlockerReason(check) {
   if (text.includes("production-go-no-go-report") || text.includes("no production go/no-go report")) {
     return "Manca il report principale: senza quello il portale non può confermare il go live.";
   }
+  if (text.includes("github-actions-config")) {
+    return "Manca la configurazione runtime di GitHub Actions: workflow e token passano, ma variabili/secrets provider per staging/production non sono completi.";
+  }
+  if (text.includes("pre-go-live")) {
+    return "Manca il pacchetto pre go-live completo: production preflight reale, verifica GitHub Actions runtime/provider e restore off-site non sono tutti chiusi.";
+  }
   if (text.includes("external-uptime") || text.includes("domain") || text.includes("dns") || text.includes("tls") || text.includes("https")) {
     return "Manca una prova esterna che dominio, DNS e HTTPS siano raggiungibili come richiesto.";
   }
   if (text.includes("cloudflare")) return "Cloudflare non è ancora provato come configurato e funzionante per la produzione.";
-  if (text.includes("github") || text.includes("pre-go-live") || text.includes("release")) {
+  if (text.includes("release")) {
+    return "Manca o non copre tutti gli artefatti richiesti l'evidence di release/rollback.";
+  }
+  if (text.includes("github")) {
     return "Manca una prova recente della pipeline o dell'evidence di rilascio richiesta.";
   }
   if (text.includes("load") || text.includes("benchmark")) {
@@ -4912,17 +7026,23 @@ function simpleBlockerAction(check) {
   if (text.includes("production-go-no-go-report") || text.includes("no production go/no-go report")) {
     return "Requisito go live: esegui il controllo completo e salva il report.";
   }
+  if (text.includes("github-actions-config")) {
+    return "Requisito GitHub Actions runtime: imposta DAST_TARGET per staging e le variabili/secrets production per deploy, Cloudflare e uptime provider; poi rilancia github-actions-config --verifyRemote.";
+  }
+  if (text.includes("pre-go-live")) {
+    return "Requisito pre go-live: completa production preflight con dominio reale, off-site restore Restic e GitHub Actions runtime config; poi rilancia pre-go-live-evidence con includeProductionPreflight, includeOffsiteRestoreDryRun e verifyGithubRemote.";
+  }
   if (text.includes("external-uptime") || text.includes("domain") || text.includes("dns") || text.includes("tls") || text.includes("https")) {
     return `Requisito dominio: verifica DNS, HTTPS e monitor esterno sul dominio pubblico.${evidence}`;
   }
   if (text.includes("cloudflare")) {
     return `Requisito Cloudflare: verifica Access, DNS/WAF o proxy Cloudflare sull'ambiente reale.${evidence}`;
   }
-  if (text.includes("github") || text.includes("pre-go-live")) {
-    return `Requisito GitHub: fai passare la workflow di verifica richiesta e conserva l'evidence del run.${evidence}`;
-  }
   if (text.includes("release")) {
     return `Requisito GitHub/release: genera evidence di release e rollback prima del go live.${evidence}`;
+  }
+  if (text.includes("github")) {
+    return `Requisito GitHub: fai passare la workflow di verifica richiesta e conserva l'evidence del run.${evidence}`;
   }
   if (text.includes("load") || text.includes("benchmark")) {
     return `Requisito performance: esegui il benchmark pubblico sul dominio reale e aggiorna il report.${evidence}`;
@@ -4992,63 +7112,6 @@ function databaseLinkedApps(database) {
 
 function databaseDisplayName(database) {
   return sanitizeOptionalDescription(database.displayName || "") || database.name;
-}
-
-function activityProblems(context) {
-  const problems = [];
-  for (const check of context.goNoGo.blockers || []) {
-    problems.push({
-      severity: check.status === "failed" || check.status === "needs-work" ? "error" : "pending",
-      source: "go-no-go",
-      name: check.name,
-      summary: check.blocker || check.detail || "Required production evidence is missing.",
-      timestamp: check.generatedAt || context.goNoGo.generatedAt || "",
-      href: "/?section=status",
-    });
-  }
-  for (const alert of context.logsAlerts.openAlerts || []) {
-    const severity = /critical|error/i.test(alert.severity) ? "error" : "warning";
-    problems.push({
-      severity,
-      source: `alert:${alert.service}`,
-      name: alert.id,
-      summary: alert.summary,
-      timestamp: alert.updatedAt || alert.createdAt || "",
-      href: "/?section=activity",
-    });
-  }
-  for (const error of context.logsAlerts.recentErrors || []) {
-    problems.push({
-      severity: "error",
-      source: error.source || "operation",
-      name: error.name || "failure",
-      summary: error.summary || "Failed operation or audit event.",
-      timestamp: error.timestamp || "",
-      href: "/?section=activity",
-    });
-  }
-  for (const job of context.jobRecords.filter((item) => item.status === "failed").slice(0, 20)) {
-    problems.push({
-      severity: "error",
-      source: `job:${job.projectId}`,
-      name: job.name || job.id,
-      summary: job.lastError || "Job failed.",
-      timestamp: job.updatedAt || job.createdAt || "",
-      href: "/?section=activity",
-    });
-  }
-  for (const item of context.readiness.productionBlockers || []) {
-    if (problems.some((problem) => problem.name === item.id)) continue;
-    problems.push({
-      severity: item.status === "needs-work" ? "error" : "pending",
-      source: "readiness",
-      name: item.id,
-      summary: item.nextAction || item.status,
-      timestamp: "",
-      href: "/?section=status",
-    });
-  }
-  return problems.slice(0, 80);
 }
 
 function resourceUsageRows(context) {
@@ -5558,8 +7621,8 @@ function resourceToken(value) {
 
 function statusClass(status) {
   const clean = String(status || "").toLowerCase();
-  if (["go", "good", "active", "online", "running", "configured", "declared", "file", "directory", "passed", "success"].includes(clean)) return "good";
-  if (["warning", "warn", "pending", "pending-live-proof", "pending-provider", "plan-only", "degraded", "local-estimate", "symlink"].includes(clean)) return "warn";
+  if (["go", "good", "active", "online", "running", "configured", "declared", "file", "directory", "passed", "success", "done", "completed"].includes(clean)) return "good";
+  if (["warning", "warn", "pending", "queued", "accepted", "pending-live-proof", "pending-provider", "plan-only", "degraded", "local-estimate", "symlink"].includes(clean)) return "warn";
   if (["error", "failed", "critical", "needs-work", "disabled", "offline", "archived", "bad", "no-go"].includes(clean)) return "bad";
   return "info";
 }
@@ -5696,7 +7759,6 @@ function renderOverview(context) {
   const activeProjects = context.projects.filter((project) => project.enabled).length;
   const phpProjects = context.projects.filter((project) => project.type === "PHP").length;
   const nodeProjects = context.projects.filter((project) => project.type === "Node").length;
-  const latestBackup = context.backupRecords?.[0];
   const alertCount = totals.alerts.open || 0;
   const healthLabel = alertCount ? `${alertCount} alert aperti` : "Operativa";
 
@@ -5724,7 +7786,6 @@ function renderOverview(context) {
       ${renderHostingTile("databases", "Database", totals.databases.total, `${context.databaseEngines.length} motori`, "/?mode=advanced&section=databases", "Gestisci")}
       ${renderHostingTile("storage", "Storage", totals.storage.buckets, `${context.storageProvider.name} ${hostingStatusLabel(context.storageProvider.status)}`, "/?mode=advanced&section=storage", "Apri")}
       ${renderHostingTile("security", "Sicurezza", alertCount ? "Check" : "OK", hostingStatusLabel(context.security.securityHeaders), "/?section=security", "Verifica")}
-      ${renderHostingTile("backups", "Backup", latestBackup ? "Attivo" : "Pronto", latestBackup ? relativeTimeLabel(latestBackup.createdAt || latestBackup.timestamp) : context.backups.offsite, "/?section=backups", "Esegui")}
       ${renderHostingTile("resources", "Monitoraggio", totals.monitoring.scrapeJobs, `${totals.monitoring.alertRules} regole alert`, "/?mode=advanced&section=monitoring", "Dettagli")}
     </section>
 
@@ -5839,7 +7900,6 @@ function renderHostingQuickActions(context) {
     ["Apri Projects", "/?section=projects", "projects"],
     ["Nuovo dominio locale", "/?section=domains", "domains"],
     ["Database", "/?mode=advanced&section=databases", "databases"],
-    ["Backup manuale", "/?section=backups", "backups"],
     ["Log e alert", "/?section=logs", "logs"],
     ["Preflight production", "/?mode=advanced&section=go-no-go", "rocket"],
   ];
@@ -5935,7 +7995,8 @@ function controlIcon(name) {
     settings: [512, 512, '<path d="M495.9 166.6c3.2 8.7.5 18.4-6.4 24.6l-43.3 39.4c1.1 8.3 1.7 16.8 1.7 25.4s-.6 17.1-1.7 25.4l43.3 39.4c6.9 6.2 9.6 15.9 6.4 24.6c-4.4 11.9-9.7 23.3-15.8 34.3l-4.7 8.1c-6.6 11-14 21.4-22.1 31.2c-5.9 7.2-15.7 9.6-24.5 6.8l-55.7-17.7c-13.4 10.3-28.2 18.9-44 25.4l-12.5 57.1c-2 9.1-9 16.3-18.2 17.8c-13.8 2.3-27.9 3.5-42.4 3.5s-28.6-1.2-42.4-3.5c-9.2-1.5-16.2-8.7-18.2-17.8l-12.5-57.1c-15.8-6.5-30.6-15.1-44-25.4L83.1 425.9c-8.8 2.8-18.6.3-24.5-6.8c-8.1-9.8-15.5-20.2-22.1-31.2l-4.7-8.1c-6.1-11-11.4-22.4-15.8-34.3c-3.2-8.7-.5-18.4 6.4-24.6l43.3-39.4C64.6 273.1 64 264.6 64 256s.6-17.1 1.7-25.4L22.4 191.2c-6.9-6.2-9.6-15.9-6.4-24.6c4.4-11.9 9.7-23.3 15.8-34.3l4.7-8.1c6.6-11 14-21.4 22.1-31.2c5.9-7.2 15.7-9.6 24.5-6.8l55.7 17.7c13.4-10.3 28.2-18.9 44-25.4l12.5-57.1c2-9.1 9-16.3 18.2-17.8C227.4 1.2 241.5 0 256 0s28.6 1.2 42.4 3.5c9.2 1.5 16.2 8.7 18.2 17.8l12.5 57.1c15.8 6.5 30.6 15.1 44 25.4l55.7-17.7c8.8-2.8 18.6-.3 24.5 6.8c8.1 9.8 15.5 20.2 22.1 31.2l4.7 8.1c6.1 11 11.4 22.4 15.8 34.3zM256 336a80 80 0 1 0 0-160 80 80 0 1 0 0 160z"/>'],
     file: [384, 512, '<path d="M64 0C28.7 0 0 28.7 0 64v384c0 35.3 28.7 64 64 64h256c35.3 0 64-28.7 64-64V160H256c-17.7 0-32-14.3-32-32V0H64zm192 0v128h128L256 0zM112 256h160c8.8 0 16 7.2 16 16s-7.2 16-16 16H112c-8.8 0-16-7.2-16-16s7.2-16 16-16zm0 64h160c8.8 0 16 7.2 16 16s-7.2 16-16 16H112c-8.8 0-16-7.2-16-16s7.2-16 16-16zm0 64h160c8.8 0 16 7.2 16 16s-7.2 16-16 16H112c-8.8 0-16-7.2-16-16s7.2-16 16-16z"/>'],
     copy: [448, 512, '<path d="M208 0H332.1c12.7 0 24.9 5.1 33.9 14.1L433.9 82c9 9 14.1 21.2 14.1 33.9V336c0 26.5-21.5 48-48 48H208c-26.5 0-48-21.5-48-48V48c0-26.5 21.5-48 48-48zM48 128h80v64H64v256h192v-32h64v48c0 26.5-21.5 48-48 48H48c-26.5 0-48-21.5-48-48V176c0-26.5 21.5-48 48-48z"/>'],
-    refresh: [512, 512, '<path d="M105.1 202.6c7.7-21.8 20.2-42.3 37.8-59.9c62.5-62.5 163.8-62.5 226.3 0L386.7 160H336c-17.7 0-32 14.3-32 32s14.3 32 32 32H464c17.7 0 32-14.3 32-32V64c0-17.7-14.3-32-32-32s-32 14.3-32 32v51.2L414.4 97.6c-87.5-87.5-229.3-87.5-316.8 0c-24.7 24.7-42.3 53.9-52.8 84.9c-5.7 16.8 3.3 34.9 20 40.6s34.9-3.3 40.3-20.5zM39 289.3c-5 1.5-9 4.4-12.1 8.4c-4.7 6.1-6.1 14.1-3.7 21.4c7.1 21.5 18.7 42.1 34.4 60.4c87.5 87.5 229.3 87.5 316.8 0c24.7-24.7 42.3-53.9 52.8-84.9c5.7-16.8-3.3-34.9-20-40.6s-34.9 3.3-40.6 20c-7.7 21.8-20.2 42.3-37.8 59.9c-62.5 62.5-163.8 62.5-226.3 0L85.3 352H136c17.7 0 32-14.3 32-32s-14.3-32-32-32H40c-.3 0-.7 0-1 .1z"/>'],
+    eye: [576, 512, '<path d="M288 32c-80.8 0-145.5 36.8-192.6 80.6C48.6 156 17.3 208 2.5 243.7c-3.3 7.9-3.3 16.7 0 24.6C17.3 304 48.6 356 95.4 399.4C142.5 443.2 207.2 480 288 480s145.5-36.8 192.6-80.6c46.8-43.5 78.1-95.4 93-131.1c3.3-7.9 3.3-16.7 0-24.6c-14.9-35.7-46.2-87.7-93-131.1C433.5 68.8 368.8 32 288 32zm0 320a96 96 0 1 1 0-192 96 96 0 1 1 0 192z"/>'],
+    refresh: [512, 512, '<path d="M463.5 224H472c13.3 0 24-10.7 24-24V72c0-9.7-5.8-18.5-14.8-22.2s-19.3-1.7-26.2 5.2l-39.4 39.4C376.2 55.2 321.7 32 264 32C146.4 32 48.5 116.7 28.8 228.8c-2.3 13.1 6.4 25.6 19.5 27.9s25.6-6.4 27.9-19.5C91.9 147.9 169.9 80 264 80c44.6 0 86.2 15.4 119.2 41.6L343 161.9c-6.9 6.9-8.9 17.2-5.2 26.2s12.5 14.8 22.2 14.8H463.5zM48 288H40c-13.3 0-24 10.7-24 24V440c0 9.7 5.8 18.5 14.8 22.2s19.3 1.7 26.2-5.2l39.4-39.4C135.8 456.8 190.3 480 248 480c117.6 0 215.5-84.7 235.2-196.8c2.3-13.1-6.4-25.6-19.5-27.9s-25.6 6.4-27.9 19.5C420.1 364.1 342.1 432 248 432c-44.6 0-86.2-15.4-119.2-41.6L169 350.1c6.9-6.9 8.9-17.2 5.2-26.2s-12.5-14.8-22.2-14.8H48z"/>'],
     play: [384, 512, '<path d="M73 39c-14.8-9.1-33.4-9.4-48.5-.9S0 62.6 0 80v352c0 17.4 9.4 33.4 24.5 41.9s33.7 8.1 48.5-.9l288-176c14.3-8.7 23-24.2 23-41s-8.7-32.2-23-41L73 39z"/>'],
     pause: [320, 512, '<path d="M48 64C21.5 64 0 85.5 0 112v288c0 26.5 21.5 48 48 48h32c26.5 0 48-21.5 48-48V112c0-26.5-21.5-48-48-48H48zm192 0c-26.5 0-48 21.5-48 48v288c0 26.5 21.5 48 48 48h32c26.5 0 48-21.5 48-48V112c0-26.5-21.5-48-48-48h-32z"/>'],
     archive: [512, 512, '<path d="M32 32C14.3 32 0 46.3 0 64v96c0 17.7 14.3 32 32 32h448c17.7 0 32-14.3 32-32V64c0-17.7-14.3-32-32-32H32zm32 192v224c0 17.7 14.3 32 32 32h320c17.7 0 32-14.3 32-32V224H64zm128 64h128c17.7 0 32 14.3 32 32s-14.3 32-32 32H192c-17.7 0-32-14.3-32-32s14.3-32 32-32z"/>'],
@@ -5954,6 +8015,8 @@ function controlIcon(name) {
     rocket: [512, 512, '<path d="M156.6 384.9L125.7 354c-8.5-8.5-11.5-20.8-7.7-32.2c17.2-51.6 45.8-98.9 84.2-137.3L320 66.7C372.7 14 443.3-7.9 511.9 2.4c10.1 68.6-11.8 139.2-64.5 191.9L329.6 312.1c-38.4 38.4-85.7 67-137.3 84.2c-11.4 3.8-23.7.8-32.2-7.7l-3.5-3.7zM384 168a40 40 0 1 0 0-80 40 40 0 1 0 0 80zM112 416c0 53-43 96-96 96c0-53 43-96 96-96z"/>'],
     user: [448, 512, '<path d="M224 256A128 128 0 1 0 224 0a128 128 0 1 0 0 256zm-45.7 48C79.8 304 0 383.8 0 482.3C0 498.7 13.3 512 29.7 512h388.6c16.4 0 29.7-13.3 29.7-29.7C448 383.8 368.2 304 269.7 304h-91.4z"/>'],
     plus: [448, 512, '<path d="M256 80c0-17.7-14.3-32-32-32s-32 14.3-32 32v144H48c-17.7 0-32 14.3-32 32s14.3 32 32 32h144v144c0 17.7 14.3 32 32 32s32-14.3 32-32V288h144c17.7 0 32-14.3 32-32s-14.3-32-32-32H256V80z"/>'],
+    save: [448, 512, '<path d="M48 0C21.5 0 0 21.5 0 48v416c0 26.5 21.5 48 48 48h352c26.5 0 48-21.5 48-48V154.5c0-12.7-5.1-24.9-14.1-33.9L327.4 14.1C318.4 5.1 306.2 0 293.5 0H48zm48 64h192v96H96V64zm0 288c0-17.7 14.3-32 32-32h192c17.7 0 32 14.3 32 32v96H96v-96z"/>'],
+    trash: [448, 512, '<path d="M135.2 17.7C140.6 6.8 151.7 0 163.8 0h120.4c12.1 0 23.2 6.8 28.6 17.7L328 48h88c17.7 0 32 14.3 32 32s-14.3 32-32 32H32C14.3 112 0 97.7 0 80s14.3-32 32-32h88l15.2-30.3zM53.2 467c1.7 25.3 22.7 45 48.1 45h245.4c25.4 0 46.4-19.7 48.1-45L416 144H32l21.2 323z"/>'],
     chevron: [320, 512, '<path d="M310.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-192 192c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L242.7 256 73.4 86.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l192 192z"/>'],
     "chevron-down": [512, 512, '<path d="M233.4 406.6c12.5 12.5 32.8 12.5 45.3 0l192-192c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0L256 338.7 86.6 169.4c-12.5-12.5-32.8-12.5-45.3 0s-12.5 32.8 0 45.3l192 192z"/>'],
     "arrow-right": [448, 512, '<path d="M438.6 278.6c12.5-12.5 12.5-32.8 0-45.3l-160-160c-12.5-12.5-32.8-12.5-45.3 0s-12.5 32.8 0 45.3L338.7 224H32c-17.7 0-32 14.3-32 32s14.3 32 32 32h306.7L233.4 393.4c-12.5 12.5-12.5 32.8 0 45.3s32.8 12.5 45.3 0l160-160z"/>'],
@@ -6249,43 +8312,6 @@ function renderWebspaceCard(space) {
       <input type="hidden" name="confirm" value="UPDATE-QUOTA">
       <button class="button" type="submit">Set quota</button>
     </form>
-  </div>`;
-}
-
-function renderResources(resources, projects) {
-  const limits = resources.projectLimits || [];
-  return `<section class="grid two">
-    <div class="panel"><div class="panel-head"><span>RES</span><div><h2>Resources</h2><p>CPU, RAM and disk quota metadata per project. Runtime enforcement stays behind Docker adapters.</p></div></div>
-      <div class="cards">
-        <div class="card compact"><strong>CPU</strong><span>${escapeHtml(resources.cpu.status)} / ${escapeHtml(resources.cpu.summary)}</span></div>
-        <div class="card compact"><strong>RAM</strong><span>${escapeHtml(resources.memory.status)} / ${escapeHtml(resources.memory.summary)}</span></div>
-        <div class="card compact"><strong>Disk</strong><span>${escapeHtml(resources.disk.status)} / web spaces ${bytesLabel(resources.disk.webspacesBytes)}</span></div>
-        <div class="card compact"><strong>Trend</strong><span>${escapeHtml(resources.trend)}</span></div>
-      </div>
-      <form method="post" action="/actions/resource-command" class="inline-confirm resource-form">
-        <input type="hidden" name="action" value="limits">
-        <select name="projectId" aria-label="Project for resource limits">${projects.map((project) => `<option value="${escapeHtml(project.slug)}">${escapeHtml(project.name)}</option>`).join("")}</select>
-        <input name="cpuMillicores" value="0" inputmode="numeric" aria-label="CPU millicores">
-        <input name="memoryMb" value="0" inputmode="numeric" aria-label="Memory MB">
-        <input name="diskMb" value="0" inputmode="numeric" aria-label="Disk MB">
-        <input type="hidden" name="confirm" value="UPDATE-RESOURCE-LIMITS">
-        <button class="button enable" type="submit">Set limits</button>
-      </form>
-    </div>
-    <div class="panel"><div class="panel-head"><span>QTA</span><div><h2>Quota per project</h2><p>Zero means unbounded metadata. No live container mutation is executed here.</p></div></div>
-      <div class="cards">${limits.map(renderResourceLimitCard).join("") || empty("No resource limits", "Mount projects to create per-project resource cards.")}</div>
-    </div>
-    <div class="panel"><div class="panel-head"><span>RUN</span><div><h2>Containers</h2><p>Discovered application runtime state per project.</p></div></div>
-      <div class="cards">${resources.containersByProject.map((item) => `<div class="card compact"><strong>${escapeHtml(item.projectId)}</strong><span>${escapeHtml(item.runtime)} / ${escapeHtml(item.status)}</span></div>`).join("") || empty("No containers", "No project applications were discovered.")}</div>
-    </div>
-  </section>`;
-}
-
-function renderResourceLimitCard(limit) {
-  return `<div id="resources-${escapeHtml(limit.projectId)}" class="card compact">
-    <div class="card-title"><strong>${escapeHtml(limit.projectId)}</strong><em>${escapeHtml(limit.status)}</em></div>
-    <span>CPU ${limit.cpuMillicores}m / RAM ${limit.memoryMb} MB / Disk ${limit.diskMb} MB</span>
-    <span>${escapeHtml(limit.updatedAt ? `updated ${limit.updatedAt}` : "no local quota metadata yet")}</span>
   </div>`;
 }
 
@@ -6944,43 +8970,6 @@ function renderJobScheduleCard(schedule) {
   </div>`;
 }
 
-function renderBackups(summary, records) {
-  const latest = records.slice(0, 24);
-  return `<section class="grid two">
-    <div class="panel"><div class="panel-head"><span>BKP</span><div><h2>Backups</h2><p>Manual backup and restore drill controls create safe local operation plans.</p></div></div>
-      <div class="cards">
-        <div class="card compact"><strong>Manual backup</strong><span>${escapeHtml(summary.manualBackup)}</span></div>
-        <div class="card compact"><strong>Restore drill</strong><span>${escapeHtml(summary.restoreDrill)}</span></div>
-        <div class="card compact"><strong>Off-site</strong><span>${escapeHtml(summary.offsite)}</span></div>
-        <div class="card compact"><strong>RPO/RTO</strong><span>${escapeHtml(summary.rpoRto)}</span></div>
-      </div>
-      <form method="post" action="/actions/backup-command" class="inline-confirm backup-form">
-        <input type="hidden" name="action" value="backup">
-        <input name="scope" value="all" aria-label="Backup scope">
-        <button class="button enable" type="submit">Plan manual backup</button>
-      </form>
-      <form method="post" action="/actions/backup-command" class="inline-confirm backup-form">
-        <input type="hidden" name="action" value="restore">
-        <input name="scope" value="all" aria-label="Restore scope">
-        <input name="backupRef" value="latest" aria-label="Backup reference">
-        <button class="button danger" type="submit">Plan restore drill</button>
-      </form>
-    </div>
-    <div class="panel"><div class="panel-head"><span>HIS</span><div><h2>Backup History</h2><p>Local records are plan evidence, not production restore proof.</p></div></div>
-      ${latest.length ? `<div class="cards">${latest.map(renderBackupRecord).join("")}</div>` : empty("No backup records", "Plan a manual backup or restore drill to create a local audit record.")}
-    </div>
-  </section>`;
-}
-
-function renderBackupRecord(record) {
-  return `<div id="backup-${escapeHtml(record.id)}" class="card compact">
-    <div class="card-title"><strong>${escapeHtml(humanName(record.action))}</strong><em>${escapeHtml(record.status)}</em></div>
-    <span>${escapeHtml(record.scope)} / ${escapeHtml(record.environment)} / ${record.dryRun ? "dry-run" : "accepted"}</span>
-    <span>${escapeHtml(record.createdAt)} / off-site ${escapeHtml(record.offsite)}</span>
-    <span>${escapeHtml(record.resultSummary)}</span>
-  </div>`;
-}
-
 function renderLogsAlerts(logsAlerts) {
   const openAlerts = logsAlerts.openAlerts || [];
   const recentErrors = logsAlerts.recentErrors || [];
@@ -7544,23 +9533,348 @@ function planDatabaseCreate(payload, context) {
   const ownerRole = validateDatabaseName(payload.ownerRole || `${projectId}_app`);
   const id = databaseId(projectId, engine, name);
   const displayName = sanitizeOptionalDescription(payload.displayName || "");
-  const details = databaseRecord({ id, projectId, engine, name, displayName, ownerRole });
+  const credential = prepareDatabaseCredentialUpdate(id, payload);
+  const details = databaseRecord({ id, projectId, engine, name, displayName, ownerRole, ...credential.metadata });
   if (payload.confirm === "CREATE-DATABASE") {
+    const password = validateDatabasePasswordInput(payload.password || "");
+    const liveResult = applyLiveDatabaseCreate(details, password);
     const state = readDatabasesState();
+    const writtenCredential = writeDatabaseCredentialIfProvided(id, payload);
     state[id] = {
       ...(state[id] || {}),
       ...details,
-      status: "declared",
+      ...writtenCredential.metadata,
+      status: liveResult.applied ? "active" : "declared",
+      connectionStatus: liveResult.applied ? "configured" : "metadata-only",
       updatedAt: new Date().toISOString(),
       createdAt: state[id]?.createdAt || new Date().toISOString(),
     };
     writeDatabasesState(state);
-    appendAudit({ action: "database.create.apply", target: `${projectId}/${name}`, environment: context.environment, risk: "medium", result: "success", dryRun: false, summary: "Database metadata declared locally; no live database mutation executed." });
-    const operation = operationPlan("database.create.local", context.environment, false, ["validate project", "validate database name", "declare engine and owner role", "leave MariaDB/PostgreSQL unchanged", "write audit event"], { ...state[id], databaseTouched: false, credentialsExposed: false, productionEvidence: false });
+    appendAudit({ action: "database.create.apply", target: `${projectId}/${name}`, environment: context.environment, risk: "medium", result: "success", dryRun: false, summary: liveResult.applied ? "Database, user, grants and protected credential created without exposing the credential value." : "Database metadata declared and credential stored in protected local file; live adapter disabled." });
+    const operation = operationPlan("database.create.local", context.environment, false, ["validate project", "validate database name", "create database when live adapter is enabled", "create or update database user", "grant database permissions", "store protected credential", "write audit event"], { ...state[id], databaseId: id, databaseTouched: liveResult.applied, dataChanged: liveResult.applied, credentialsExposed: false, credentialValueStored: writtenCredential.written, opensAdminDatabase: false, liveAdapter: liveResult.mode, productionEvidence: false });
     return { ...operation, database: state[id] };
   }
   appendAudit({ action: "database.create.plan", target: `${projectId}/${name}`, environment: context.environment, risk: "medium", result: "planned", dryRun: true, summary: "Database creation plan generated; no live database mutation executed." });
-  return operationPlan("database.create", context.environment, true, ["validate project", "validate database name", "prepare local metadata", "require apply confirmation", "write audit event"], { ...details, databaseTouched: false, credentialsExposed: false, productionEvidence: false, confirmationRequired: "CREATE-DATABASE" });
+  return operationPlan("database.create", context.environment, true, ["validate project", "validate database name", "prepare live database creation", "require apply confirmation", "write audit event"], { ...details, databaseTouched: false, credentialsExposed: false, productionEvidence: false, confirmationRequired: "CREATE-DATABASE" });
+}
+
+function prepareDatabaseCredentialUpdate(databaseId, payload = {}) {
+  const password = String(payload.password || "");
+  const credentialRef = databaseCredentialRef(databaseId);
+  const hasPassword = password.length > 0;
+  if (hasPassword) validateDatabasePasswordInput(password);
+  return {
+    hasPassword,
+    metadata: {
+      credentialRef,
+      credentialFile: hasPassword ? databaseCredentialFilePath(databaseId) : "",
+      credentialStatus: hasPassword ? "secret-file-set" : "protected",
+      credentialUpdatedAt: hasPassword ? new Date().toISOString() : null,
+    },
+  };
+}
+
+function writeDatabaseCredentialIfProvided(databaseId, payload = {}) {
+  const password = String(payload.password || "");
+  const credentialRef = databaseCredentialRef(databaseId);
+  if (!password) {
+    return {
+      written: false,
+      metadata: {
+        credentialRef,
+        credentialStatus: "protected",
+      },
+    };
+  }
+  validateDatabasePasswordInput(password);
+  const filePath = databaseCredentialFilePath(databaseId);
+  mkdirSync(path.dirname(filePath), { recursive: true, mode: 0o700 });
+  writeFileSync(filePath, `${password}\n`, { mode: 0o600 });
+  return {
+    written: true,
+    metadata: {
+      credentialRef,
+      credentialFile: filePath,
+      credentialStatus: "secret-file-set",
+      credentialUpdatedAt: new Date().toISOString(),
+    },
+  };
+}
+
+function databaseCredentialFilePath(databaseId) {
+  const cleanId = sanitizeIdentifier(databaseId);
+  if (!cleanId) throw new ValidationError("Database credential id non valido.");
+  return path.join(databaseCredentialDir, `${cleanId}.txt`);
+}
+
+function databaseCredentialRef(databaseId) {
+  const cleanId = sanitizeIdentifier(databaseId);
+  if (!cleanId) throw new ValidationError("Database credential id non valido.");
+  return `secret/db/${cleanId}`;
+}
+
+function validateDatabasePasswordInput(value) {
+  const password = String(value || "");
+  if (!password) throw new ValidationError("Password database richiesta.");
+  if (password.length > 4096 || password.includes("\0")) throw new ValidationError("Password database non valida.");
+  return password;
+}
+
+function applyLiveDatabaseCreate(database, password) {
+  if (!databaseLiveApply) return { applied: false, mode: "metadata-only" };
+  if (database.engine === "postgres") return applyLivePostgresCreate(database, password);
+  return applyLiveMariaDbCreate(database, password);
+}
+
+function applyLiveDatabaseDelete(database, state = {}) {
+  if (!databaseLiveApply) return { applied: false, mode: "metadata-only" };
+  if (database.engine === "postgres") return applyLivePostgresDelete(database, state);
+  return applyLiveMariaDbDelete(database, state);
+}
+
+function applyLiveMariaDbCreate(database, password) {
+  const rootPassword = readRequiredSecretFile(mariadbRootPasswordFile, "MariaDB root password");
+  const sql = [
+    `CREATE DATABASE IF NOT EXISTS ${mysqlIdentifier(database.name)} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`,
+    `CREATE USER IF NOT EXISTS ${mysqlUserHost(database.ownerRole)} IDENTIFIED BY ${mysqlStringLiteral(password)}`,
+    `ALTER USER ${mysqlUserHost(database.ownerRole)} IDENTIFIED BY ${mysqlStringLiteral(password)}`,
+    `GRANT ALL PRIVILEGES ON ${mysqlIdentifier(database.name)}.* TO ${mysqlUserHost(database.ownerRole)}`,
+    "FLUSH PRIVILEGES",
+  ].join(";\n") + ";\n";
+  runDatabaseClient("mariadb", [
+    "--protocol=TCP",
+    "-h", mariadbHost,
+    "-P", String(mariadbPort),
+    "-u", mariadbRootUser,
+    "--batch",
+    "--skip-column-names",
+  ], {
+    input: sql,
+    env: { MYSQL_PWD: rootPassword },
+    label: "MariaDB create database",
+  });
+  return { applied: true, mode: "mariadb-cli" };
+}
+
+function applyLiveMariaDbDelete(database, state = {}) {
+  const rootPassword = readRequiredSecretFile(mariadbRootPasswordFile, "MariaDB root password");
+  const statements = [`DROP DATABASE IF EXISTS ${mysqlIdentifier(database.name)}`];
+  if (databaseOwnerRoleIsExclusive(database, state)) {
+    statements.push(`DROP USER IF EXISTS ${mysqlUserHost(database.ownerRole)}`);
+  }
+  statements.push("FLUSH PRIVILEGES");
+  runDatabaseClient("mariadb", [
+    "--protocol=TCP",
+    "-h", mariadbHost,
+    "-P", String(mariadbPort),
+    "-u", mariadbRootUser,
+    "--batch",
+    "--skip-column-names",
+  ], {
+    input: `${statements.join(";\n")};\n`,
+    env: { MYSQL_PWD: rootPassword },
+    label: "MariaDB drop database",
+  });
+  return { applied: true, mode: "mariadb-cli" };
+}
+
+function applyLivePostgresCreate(database, password) {
+  const superPassword = readRequiredSecretFile(postgresSuperuserPasswordFile, "PostgreSQL superuser password");
+  const roleSql = `DO $do$\nBEGIN\n  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = ${postgresStringLiteral(database.ownerRole)}) THEN\n    CREATE ROLE ${postgresIdentifier(database.ownerRole)} LOGIN PASSWORD ${postgresStringLiteral(password)};\n  ELSE\n    ALTER ROLE ${postgresIdentifier(database.ownerRole)} LOGIN PASSWORD ${postgresStringLiteral(password)};\n  END IF;\nEND\n$do$;\n`;
+  runPostgresSql(roleSql, superPassword, "PostgreSQL create role");
+  const databaseSql = [
+    `SELECT format('CREATE DATABASE %I OWNER %I', ${postgresStringLiteral(database.name)}, ${postgresStringLiteral(database.ownerRole)}) WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = ${postgresStringLiteral(database.name)})`,
+    "\\gexec",
+    `ALTER DATABASE ${postgresIdentifier(database.name)} OWNER TO ${postgresIdentifier(database.ownerRole)};`,
+    `GRANT ALL PRIVILEGES ON DATABASE ${postgresIdentifier(database.name)} TO ${postgresIdentifier(database.ownerRole)};`,
+  ].join("\n") + "\n";
+  runPostgresSql(databaseSql, superPassword, "PostgreSQL create database");
+  return { applied: true, mode: "postgres-cli" };
+}
+
+function applyLivePostgresDelete(database, state = {}) {
+  const superPassword = readRequiredSecretFile(postgresSuperuserPasswordFile, "PostgreSQL superuser password");
+  const dropSql = [
+    `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = ${postgresStringLiteral(database.name)};`,
+    `DROP DATABASE IF EXISTS ${postgresIdentifier(database.name)} WITH (FORCE);`,
+  ];
+  if (databaseOwnerRoleIsExclusive(database, state)) {
+    dropSql.push(`DROP ROLE IF EXISTS ${postgresIdentifier(database.ownerRole)};`);
+  }
+  runPostgresSql(`${dropSql.join("\n")}\n`, superPassword, "PostgreSQL drop database");
+  return { applied: true, mode: "postgres-cli" };
+}
+
+function runPostgresSql(sql, password, label) {
+  runDatabaseClient("psql", [
+    "-h", postgresHost,
+    "-p", String(postgresPort),
+    "-U", postgresSuperuser,
+    "-d", "postgres",
+    "-v", "ON_ERROR_STOP=1",
+    "-q",
+  ], {
+    input: sql,
+    env: { PGPASSWORD: password },
+    label,
+  });
+}
+
+function runDatabaseClient(command, args, { input = "", env = {}, label = "database command" } = {}) {
+  const result = spawnSync(command, args, {
+    input,
+    encoding: "utf8",
+    env: { ...process.env, ...env },
+    timeout: 20000,
+    maxBuffer: 1024 * 1024,
+  });
+  if (result.error?.code === "ENOENT") throw new RejectedOperationError(`${label}: client database non disponibile nel Control Center.`);
+  if (result.error) throw new RejectedOperationError(`${label}: ${sanitizeDatabaseClientError(result.error.message)}`);
+  if (result.status !== 0) throw new RejectedOperationError(`${label}: ${sanitizeDatabaseClientError(result.stderr || result.stdout || "comando fallito")}`);
+}
+
+function readRequiredSecretFile(filePath, label) {
+  const value = String(filePath || "").trim();
+  if (!value) throw new RejectedOperationError(`${label}: secret non montato nel Control Center.`);
+  const resolved = path.resolve(value);
+  if (!resolved.startsWith("/run/secrets/")) throw new RejectedOperationError(`${label}: path secret non ammesso.`);
+  try {
+    const secret = readFileSync(resolved, "utf8").trim();
+    if (!secret) throw new Error("empty secret");
+    return secret;
+  } catch {
+    throw new RejectedOperationError(`${label}: secret non leggibile.`);
+  }
+}
+
+function databaseOwnerRoleIsExclusive(database, state = {}) {
+  const owner = sanitizeDatabasePrincipal(database.ownerRole || "");
+  if (!owner) return false;
+  return !Object.values(state || {}).some((candidate) => candidate
+    && candidate.id !== database.id
+    && !candidate.deletedAt
+    && candidate.status !== "deleted"
+    && candidate.engine === database.engine
+    && sanitizeDatabasePrincipal(candidate.ownerRole || "") === owner);
+}
+
+function removeDatabaseCredentialFile(database) {
+  const candidates = new Set();
+  if (database.credentialFile) candidates.add(database.credentialFile);
+  try {
+    candidates.add(databaseCredentialFilePath(database.id));
+  } catch {
+    // Ignore invalid legacy IDs.
+  }
+  for (const candidate of candidates) {
+    const safePath = sanitizeCredentialFilePath(candidate);
+    if (safePath && existsSync(safePath)) rmSync(safePath, { force: true });
+  }
+}
+
+function mysqlIdentifier(value) {
+  return `\`${validateDatabaseName(value).replace(/`/g, "``")}\``;
+}
+
+function mysqlStringLiteral(value) {
+  return `'${String(value || "").replace(/\\/g, "\\\\").replace(/'/g, "''")}'`;
+}
+
+function mysqlUserHost(user) {
+  return `${mysqlStringLiteral(validateDatabaseName(user))}@'%'`;
+}
+
+function postgresIdentifier(value) {
+  return `"${validateDatabaseName(value).replace(/"/g, "\"\"")}"`;
+}
+
+function postgresStringLiteral(value) {
+  return `'${String(value || "").replace(/'/g, "''")}'`;
+}
+
+function sanitizeDatabaseClientError(message) {
+  return sanitizeMessage(String(message || "").replace(/\s+/g, " ").trim()).slice(0, 240) || "comando database fallito";
+}
+
+function planDatabaseUpdate(id, payload, context) {
+  const database = findById(context.databases, id, "Database");
+  const displayName = sanitizeOptionalDescription(payload.displayName || database.displayName || "");
+  const ownerRole = validateDatabaseName(payload.ownerRole || database.ownerRole);
+  const status = choice(String(payload.status || database.status || "declared"), ["declared", "active", "maintenance", "disabled"], "database status");
+  const connectionStatus = choice(String(payload.connectionStatus || database.connectionStatus || "metadata-only"), ["metadata-only", "configured", "healthy", "needs-check", "disabled"], "database connection status");
+  const credentialRef = databaseCredentialRef(database.id);
+  const details = databaseRecord({
+    ...database,
+    displayName,
+    ownerRole,
+    status,
+    connectionStatus,
+    credentialRef,
+    credentialStatus: database.credentialStatus || (credentialRef ? "secret-ref-set" : "protected"),
+  });
+  const confirmation = `UPDATE-DATABASE:${database.id}`;
+  if (payload.confirm === confirmation) {
+    const state = readDatabasesState();
+    state[database.id] = {
+      ...(state[database.id] || database),
+      ...details,
+      updatedAt: new Date().toISOString(),
+      deletedAt: null,
+    };
+    writeDatabasesState(state);
+    appendAudit({ action: "database.update.apply", target: database.id, environment: context.environment, risk: "medium", result: "success", dryRun: false, summary: "Database metadata updated locally; live database and credentials were not mutated." });
+    const operation = operationPlan("database.update.local", context.environment, false, ["validate database", "update metadata", "preserve live database", "preserve credential value", "write audit event"], { ...state[database.id], databaseId: database.id, databaseTouched: false, credentialsExposed: false, productionEvidence: false });
+    return { ...operation, database: state[database.id] };
+  }
+  appendAudit({ action: "database.update.plan", target: database.id, environment: context.environment, risk: "medium", result: "planned", dryRun: true, summary: "Database metadata update plan generated; no live database mutation executed." });
+  return operationPlan("database.update", context.environment, true, ["validate database", "prepare metadata update", "require explicit confirmation", "preserve credential value", "write audit event"], { ...details, databaseId: database.id, databaseTouched: false, credentialsExposed: false, productionEvidence: false, confirmationRequired: confirmation });
+}
+
+function planDatabaseCredentialUpdate(id, payload, context) {
+  const database = findById(context.databases, id, "Database");
+  const credentialRef = databaseCredentialRef(database.id);
+  const credential = prepareDatabaseCredentialUpdate(database.id, payload);
+  const confirmation = `ROTATE-DATABASE-CREDENTIAL:${database.id}`;
+  if (payload.confirm === confirmation) {
+    const state = readDatabasesState();
+    const writtenCredential = writeDatabaseCredentialIfProvided(database.id, payload);
+    const liveResult = writtenCredential.written ? applyLiveDatabaseCreate(database, validateDatabasePasswordInput(payload.password || "")) : { applied: false, mode: "metadata-only" };
+    state[database.id] = {
+      ...(state[database.id] || database),
+      credentialRef,
+      ...writtenCredential.metadata,
+      credentialStatus: writtenCredential.written ? "secret-file-set" : credentialRef ? "rotation-requested-secret-ref" : "rotation-requested",
+      credentialUpdatedAt: new Date().toISOString(),
+      credentialsExposed: false,
+      databaseTouched: liveResult.applied,
+      connectionStatus: liveResult.applied ? "configured" : database.connectionStatus,
+      status: liveResult.applied ? "active" : database.status,
+      updatedAt: new Date().toISOString(),
+    };
+    writeDatabasesState(state);
+    appendAudit({ action: "database.credential.update.apply", target: database.id, environment: context.environment, risk: "high", result: "success", dryRun: false, summary: writtenCredential.written ? "Database credential and live grants updated without exposing the value." : "Database credential rotation request recorded without storing or exposing the credential value." });
+    const operation = operationPlan("database.credential.local", context.environment, false, ["validate database", "update credential only when supplied", "create database/user/grants when live adapter is enabled", "keep plaintext out of state and HTML", "do not expose value", "write audit event"], { ...state[database.id], databaseId: database.id, databaseTouched: liveResult.applied, dataChanged: liveResult.applied, credentialsExposed: false, credentialValueStored: writtenCredential.written, liveAdapter: liveResult.mode, productionEvidence: false });
+    return { ...operation, database: state[database.id] };
+  }
+  appendAudit({ action: "database.credential.update.plan", target: database.id, environment: context.environment, risk: "high", result: "planned", dryRun: true, summary: "Database credential rotation plan generated without exposing the credential value." });
+  return operationPlan("database.credential", context.environment, true, ["validate database", "prepare credential rotation request", "require explicit confirmation", "do not store plaintext", "write audit event"], { databaseId: database.id, projectId: database.projectId, engine: database.engine, credentialRef, credentialFile: credential.metadata.credentialFile || database.credentialFile || "", databaseTouched: false, credentialsExposed: false, credentialValueStored: false, productionEvidence: false, confirmationRequired: confirmation });
+}
+
+function planDatabaseDelete(id, payload, context) {
+  const database = findById(context.databases, id, "Database");
+  const confirmation = `DELETE-DATABASE:${database.id}`;
+  if (payload.confirm === confirmation) {
+    const state = readDatabasesState();
+    const liveResult = applyLiveDatabaseDelete(database, state);
+    removeDatabaseCredentialFile(database);
+    delete state[database.id];
+    writeDatabasesState(state);
+    appendAudit({ action: "database.delete.apply", target: database.id, environment: context.environment, risk: "high", result: "success", dryRun: false, summary: liveResult.applied ? "Database, dedicated user, metadata and protected credential removed." : "Database metadata and protected credential removed; live adapter disabled." });
+    const operation = operationPlan("database.delete.local", context.environment, false, ["validate database", "require explicit confirmation", "drop database when live adapter is enabled", "drop dedicated user when safe", "remove metadata", "remove protected credential file", "write audit event"], { databaseId: database.id, projectId: database.projectId, engine: database.engine, name: database.name, databaseTouched: liveResult.applied, dataDeleted: liveResult.applied, metadataDeleted: true, credentialFileDeleted: true, credentialsExposed: false, backupRequiredBeforeLiveDelete: false, liveAdapter: liveResult.mode, productionEvidence: false });
+    return { ...operation, database: null };
+  }
+  appendAudit({ action: "database.delete.plan", target: database.id, environment: context.environment, risk: "high", result: "planned", dryRun: true, summary: "Database delete plan generated; live data requires a separate backup and explicit executor." });
+  return operationPlan("database.delete", context.environment, true, ["validate database", "require explicit confirmation", "drop live database and dedicated user when enabled", "delete metadata and protected credential", "write audit event"], { databaseId: database.id, projectId: database.projectId, engine: database.engine, name: database.name, databaseTouched: false, dataDeleted: false, credentialsExposed: false, backupRequiredBeforeLiveDelete: false, productionEvidence: false, confirmationRequired: confirmation });
 }
 
 function planDatabaseBackup(id, payload, context) {
@@ -7812,6 +10126,153 @@ function planMaterialAccessAudit(id, payload, context) {
   }
   appendAudit({ action: "material.access.plan", target: material.id, environment: material.environment, risk: "high", result: "planned", dryRun: true, summary: "Sensitive material access audit plan generated; value material will not be read." });
   return operationPlan("material.access", material.environment, true, ["validate material", "prepare access audit metadata", "do not read value material", "require apply confirmation", "write audit event"], { materialId: material.id, projectId: material.projectId, purpose, valueRead: false, valueExposed: false, productionEvidence: false, confirmationRequired: "RECORD-MATERIAL-ACCESS" });
+}
+
+function planVaultSecretCreate(payload, context) {
+  const projectId = validateProjectOrPlatform(payload.projectId || "platform", context);
+  const targetEnv = normalizeEnvironment(payload.targetEnv || payload.environment || context.environment);
+  const itemKey = validateVaultItemKey(payload.itemKey || payload.name || "");
+  const kind = choice(String(payload.kind || payload.materialKind || "application"), ["application", "docker", "provider", "kms", "database", "storage"], "vault item kind");
+  const id = vaultItemId(projectId, targetEnv, itemKey);
+  const rawValue = String(payload.value || payload.plainValue || "");
+  const details = vaultItemRecord({
+    id,
+    itemKey,
+    label: payload.label || humanName(itemKey),
+    projectId,
+    environment: targetEnv,
+    kind,
+    username: payload.username || "",
+    url: payload.url || "",
+    rotationDays: payload.rotationDays || 90,
+    valueStored: false,
+    valueFingerprint: rawValue ? sha256(rawValue) : "",
+    source: "control-center-vault",
+  });
+  if (payload.confirm === "STORE-VAULT-SECRET") {
+    if (!rawValue) throw new ValidationError("Vault value is required.");
+    const state = readVaultState();
+    const previous = state.items[id] || {};
+    const now = new Date().toISOString();
+    const item = vaultItemRecord({
+      ...previous,
+      ...details,
+      sealedValue: sealVaultValue(rawValue, id),
+      valueStored: true,
+      valueFingerprint: sha256(rawValue),
+      rotationStatus: details.rotationDays > 0 ? "planned" : "not-set",
+      createdAt: previous.createdAt || now,
+      updatedAt: now,
+    }, { includeSealed: true });
+    state.items[id] = item;
+    writeVaultState(state);
+    upsertVaultMaterialMetadata(item);
+    appendAudit({ action: "vault.item.create.apply", target: `${projectId}/${targetEnv}/${itemKey}`, environment: targetEnv, risk: "high", result: "success", dryRun: false, summary: "Vault item stored encrypted; plaintext value was not logged or returned." });
+    const publicItem = vaultItemRecord(item);
+    const operation = operationPlan("vault.item.create.local", targetEnv, false, ["validate vault metadata", "encrypt value with local vault key", "write encrypted vault state", "update sensitive-material metadata", "write audit event"], { ...publicItem, valueStored: true, valueExposed: false, productionEvidence: false });
+    return { ...operation, item: publicItem };
+  }
+  appendAudit({ action: "vault.item.create.plan", target: `${projectId}/${targetEnv}/${itemKey}`, environment: targetEnv, risk: "medium", result: "planned", dryRun: true, summary: "Vault item create plan generated; plaintext value was not stored." });
+  return operationPlan("vault.item.create", targetEnv, true, ["validate vault metadata", "prepare encrypted local state", "require apply confirmation", "write audit event"], { ...details, valueProvided: Boolean(rawValue), valueStored: false, valueExposed: false, productionEvidence: false, confirmationRequired: "STORE-VAULT-SECRET" });
+}
+
+function planVaultSecretImportExisting(payload, context) {
+  const state = readVaultState();
+  const candidates = readExistingSecretCandidates();
+  const replaceExisting = parseBoolean(payload.replaceExisting || "");
+  const importable = candidates.filter((candidate) => replaceExisting || !state.items[candidate.id] || state.items[candidate.id]?.deletedAt);
+  if (payload.confirm === "IMPORT-EXISTING-SECRETS") {
+    const now = new Date().toISOString();
+    const imported = [];
+    const skipped = [];
+    for (const candidate of candidates) {
+      const previous = state.items[candidate.id] || {};
+      if (!replaceExisting && state.items[candidate.id] && !state.items[candidate.id]?.deletedAt) {
+        skipped.push(candidate.id);
+        continue;
+      }
+      let rawValue = "";
+      try {
+        rawValue = readExistingSecretValue(candidate.filePath);
+      } catch {
+        skipped.push(candidate.id);
+        continue;
+      }
+      if (!rawValue) {
+        skipped.push(candidate.id);
+        continue;
+      }
+      const item = vaultItemRecord({
+        ...previous,
+        id: candidate.id,
+        itemKey: candidate.itemKey,
+        label: candidate.label,
+        projectId: "platform",
+        environment: "local",
+        kind: candidate.kind,
+        username: "",
+        url: candidate.sourceLabel,
+        rotationDays: candidate.rotationDays,
+        rotationStatus: candidate.rotationDays > 0 ? "planned" : "not-set",
+        valueStored: true,
+        valueFingerprint: sha256(rawValue),
+        sealedValue: sealVaultValue(rawValue, candidate.id),
+        source: candidate.source,
+        createdAt: previous.createdAt || now,
+        updatedAt: now,
+      }, { includeSealed: true });
+      state.items[item.id] = item;
+      imported.push(vaultItemRecord(item));
+    }
+    writeVaultState(state);
+    for (const item of imported) upsertVaultMaterialMetadata(item);
+    appendAudit({ action: "vault.import-existing.apply", target: "platform/local", environment: "local", risk: "high", result: "success", dryRun: false, summary: `Imported ${imported.length} existing files into the encrypted Vault; values were not logged.` });
+    const operation = operationPlan("vault.import-existing.local", "local", false, ["scan approved secret directories", "read existing values locally", "encrypt each value into the Vault", "preserve original files", "write audit event"], { itemCount: candidates.length, importedCount: imported.length, skippedCount: skipped.length, importedIds: imported.map((item) => item.id), valueExposed: false, productionEvidence: false });
+    return { ...operation, items: imported };
+  }
+  appendAudit({ action: "vault.import-existing.plan", target: "platform/local", environment: "local", risk: "medium", result: "planned", dryRun: true, summary: "Existing secret import plan generated; values were not read." });
+  return operationPlan("vault.import-existing", "local", true, ["scan approved secret directories", "show importable count", "require apply confirmation", "do not read values during plan"], { itemCount: candidates.length, importableCount: importable.length, valueRead: false, valueExposed: false, productionEvidence: false, confirmationRequired: "IMPORT-EXISTING-SECRETS" });
+}
+
+function planVaultSecretReveal(id, payload, context) {
+  const itemId = sanitizeIdentifier(id || "");
+  if (!itemId) throw new ValidationError("Vault item id is required.");
+  const state = readVaultState();
+  const existing = state.items[itemId];
+  if (!existing || existing.deletedAt) throw new ValidationError("Vault item not found.");
+  const item = vaultItemRecord(existing);
+  if (!existing.sealedValue) throw new ValidationError("Vault item has no encrypted value.");
+  const confirmation = `REVEAL-VAULT-SECRET:${item.id}`;
+  if (payload.confirm !== confirmation) {
+    appendAudit({ action: "vault.item.reveal.plan", target: item.id, environment: item.environment, risk: "high", result: "planned", dryRun: true, summary: "Vault item reveal plan generated; value was not read." });
+    return operationPlan("vault.item.reveal", item.environment, true, ["validate vault item", "require reveal confirmation", "do not include value in normal inventory"], { itemId: item.id, projectId: item.projectId, valueRead: false, valueExposed: false, productionEvidence: false, confirmationRequired: confirmation });
+  }
+  const value = openVaultValue(existing.sealedValue, item.id);
+  const now = new Date();
+  const revealExpiresAt = new Date(now.getTime() + vaultRevealTtlMs).toISOString();
+  appendAudit({ action: "vault.item.reveal.apply", target: item.id, environment: item.environment, risk: "high", result: "success", dryRun: false, summary: "Vault item value revealed to the local browser after explicit confirmation; value was not logged." });
+  const operation = operationPlan("vault.item.reveal.local", item.environment, false, ["validate vault item", "decrypt in memory", "return value only for explicit browser action", "write audit event"], { itemId: item.id, projectId: item.projectId, valueRead: true, valueExposed: true, revealExpiresAt, productionEvidence: false });
+  return { ...operation, item, value, revealExpiresAt, ttlMs: vaultRevealTtlMs };
+}
+
+function planVaultSecretDelete(id, payload, context) {
+  const itemId = sanitizeIdentifier(id || "");
+  if (!itemId) throw new ValidationError("Vault item id is required.");
+  const state = readVaultState();
+  const existing = state.items[itemId];
+  if (!existing || existing.deletedAt) throw new ValidationError("Vault item not found.");
+  const item = vaultItemRecord(existing);
+  const confirmation = `DELETE-VAULT-SECRET:${item.id}`;
+  if (payload.confirm === confirmation) {
+    delete state.items[item.id];
+    writeVaultState(state);
+    removeVaultMaterialMetadata(item);
+    appendAudit({ action: "vault.item.delete.apply", target: item.id, environment: item.environment, risk: "high", result: "success", dryRun: false, summary: "Vault item removed from encrypted state; value was not read or exposed." });
+    const operation = operationPlan("vault.item.delete.local", item.environment, false, ["validate vault item", "remove encrypted vault record", "remove vault-owned material metadata", "write audit event"], { itemId: item.id, projectId: item.projectId, valueRemoved: true, valueRead: false, valueExposed: false, productionEvidence: false });
+    return { ...operation, item: { ...item, deleted: true } };
+  }
+  appendAudit({ action: "vault.item.delete.plan", target: item.id, environment: item.environment, risk: "high", result: "planned", dryRun: true, summary: "Vault item delete plan generated; encrypted value was not read." });
+  return operationPlan("vault.item.delete", item.environment, true, ["validate vault item", "require delete confirmation", "do not read value", "write audit event"], { itemId: item.id, projectId: item.projectId, valueRead: false, valueExposed: false, productionEvidence: false, confirmationRequired: confirmation });
 }
 
 function planWorkerDeclare(payload, context) {
@@ -8157,67 +10618,6 @@ function planResourceLimitUpdate(payload, context) {
   return operationPlan("resources.limits", context.environment, true, ["validate project", "validate resource limits", "prepare quota metadata update", "require apply confirmation", "write audit event"], { ...details, dockerTouched: false, confirmationRequired: "UPDATE-RESOURCE-LIMITS" });
 }
 
-function planApplicationStressTest(payload, context) {
-  const projectId = slugify(payload.projectId || payload.slug || "");
-  validateSlug(projectId);
-  const project = findById(context.projects, projectId, "Project");
-  const confirmation = `RUN-STRESS:${project.slug}`;
-  const url = project.enabled ? project.href : `https://${project.host}/`;
-  const profiles = sanitizeStressProfiles(payload.profiles || appStressProfiles);
-  const durationSeconds = parseResourceLimitNumber(payload.durationSeconds || appStressDurationSeconds, "Duration seconds", 3600);
-  const maxConcurrency = parseResourceLimitNumber(payload.maxConcurrency || appStressMaxConcurrency, "Max concurrency", 10000);
-  const maxP95Ms = parseResourceLimitNumber(payload.maxP95Ms || appStressMaxP95Ms, "Max P95 ms", 60000);
-  const perUserRps = Number(payload.perUserRps || appStressPerUserRps);
-  if (durationSeconds < 1 || maxConcurrency < 1 || maxP95Ms < 1) throw new ValidationError("Stress parameters must be positive.");
-  if (!Number.isFinite(perUserRps) || perUserRps <= 0 || perUserRps > 10) throw new ValidationError("Per-user RPS must be between 0 and 10.");
-  const command = [
-    "sh",
-    "./scripts/app-stress-test.sh",
-    "--app", shellArg(project.slug),
-    "--url", shellArg(url),
-    "--profiles", shellArg(profiles),
-    "--durationSeconds", String(durationSeconds),
-    "--perUserRps", String(perUserRps),
-    "--maxConcurrency", String(maxConcurrency),
-    "--maxP95Ms", String(maxP95Ms),
-    "--confirm-max-load",
-  ].join(" ");
-  const details = {
-    projectId: project.slug,
-    application: project.name,
-    url,
-    profiles,
-    durationSeconds,
-    perUserRps,
-    maxConcurrency,
-    maxP95Ms,
-    command,
-    impact: "high-load",
-    confirmationRequired: confirmation,
-    executedFromPortal: false,
-    reportPattern: "reports/load/load-benchmark-*.json",
-  };
-  if (payload.confirm !== confirmation) {
-    appendAudit({ action: "resources.stress.plan", target: project.slug, environment: context.environment, risk: "high", result: "planned", dryRun: true, summary: "Per-app stress test plan generated; no traffic sent." });
-    return operationPlan("resources.stress", context.environment, true, ["validate application", "build max-load command", "require exact confirmation", "send no traffic from Control Center", "write audit event"], details);
-  }
-  appendAudit({ action: "resources.stress.prepare", target: project.slug, environment: context.environment, risk: "high", result: "planned", dryRun: true, summary: "Max-load stress test command prepared; execution remains manual from server shell." });
-  return operationPlan("resources.stress.command", context.environment, true, ["validate application", "prepare max-load command", "require server shell execution", "capture reports/load evidence", "watch resources during run"], { ...details, confirmationRequired: "" });
-}
-
-function sanitizeStressProfiles(value) {
-  const profiles = String(value || "")
-    .split(",")
-    .map((item) => Number(item.trim()))
-    .filter((number) => Number.isInteger(number) && number > 0 && number <= 10000);
-  if (!profiles.length) throw new ValidationError("Stress profiles must contain at least one positive integer.");
-  return profiles.join(",");
-}
-
-function shellArg(value) {
-  return `'${String(value).replace(/'/g, "'\\''")}'`;
-}
-
 function planSecurityPolicyUpdate(payload, context) {
   const scope = sanitizeIdentifier(payload.scope || "global") || "global";
   if (scope !== "global") findById(context.projects, scope, "Project");
@@ -8412,6 +10812,49 @@ function planRestore(payload, context) {
   return { ...operation, backup };
 }
 
+function applyBackupFileDelete(payload, context) {
+  const confirm = String(payload.confirm || "").trim();
+  if (confirm !== "ELIMINA-BACKUP-FILE") {
+    throw new RejectedOperationError("Conferma richiesta: scrivi ELIMINA-BACKUP-FILE.");
+  }
+  const relativePath = safeRelativeBackupPath(payload.path || payload.filePath || "");
+  if (!relativePath) throw new ValidationError("Percorso backup richiesto.");
+  if (!backupFileDeleteAllowed(relativePath)) {
+    throw new RejectedOperationError("Questo tipo di file backup non puo' essere eliminato dal Control Center.");
+  }
+  const root = backupRealpath(path.resolve(backupRoot));
+  const target = path.resolve(root, relativePath);
+  if (!(target === root || target.startsWith(`${root}${path.sep}`))) {
+    throw new ValidationError("Percorso backup non valido.");
+  }
+  if (!existsSync(target)) throw new ValidationError("File backup non trovato.");
+  assertNoBackupPathSymlink(root, relativePath);
+  const stat = lstatSync(target);
+  if (stat.isDirectory() || stat.isSymbolicLink()) {
+    throw new RejectedOperationError("Dal Control Center si eliminano solo file backup, non directory o symlink.");
+  }
+  const deletedFile = backupFileEntryRecord(target, path.basename(target), relativePath);
+  rmSync(target, { force: false });
+  appendAudit({ action: "backup.file.delete", target: relativePath, environment: context.environment, risk: "high", result: "success", dryRun: false, summary: "Backup file removed from local backup root after explicit confirmation." });
+  const operation = operationPlan("backup.file.delete", context.environment, false, ["validate backup root", "validate file allowlist", "delete selected file", "write audit event"], {
+    backupPath: relativePath,
+    fileDeleted: true,
+    sizeBytes: deletedFile?.sizeBytes || 0,
+    productionEvidence: false,
+  });
+  const backup = backupRecord({
+    operationId: operation.id,
+    action: "delete-file",
+    scope: relativePath,
+    environment: context.environment,
+    status: "deleted",
+    dryRun: false,
+    resultSummary: "Backup file deleted after explicit confirmation.",
+  });
+  appendBackupRecord(backup);
+  return { ...operation, backup, deletedFile };
+}
+
 function operationPlan(type, targetEnv, dryRun, steps, details = {}) {
   const now = new Date().toISOString();
   const operationId = rid();
@@ -8603,6 +11046,165 @@ function writeSensitiveMaterialsState(state) {
   writeFileSync(sensitiveMaterialsFile, `${JSON.stringify(sanitizeEvent(state), null, 2)}\n`);
 }
 
+function readVaultState() {
+  try {
+    const parsed = JSON.parse(readFileSync(vaultFile, "utf8"));
+    return {
+      version: 1,
+      items: parsed && typeof parsed.items === "object" && !Array.isArray(parsed.items) ? parsed.items : {},
+      updatedAt: parsed?.updatedAt || null,
+    };
+  } catch {
+    return { version: 1, items: {}, updatedAt: null };
+  }
+}
+
+function writeVaultState(state) {
+  const now = new Date().toISOString();
+  const normalized = {
+    version: 1,
+    updatedAt: now,
+    items: Object.fromEntries(
+      Object.values(state.items || {})
+        .filter((item) => item && !item.deletedAt)
+        .map((item) => {
+          const record = vaultItemRecord(item, { includeSealed: true });
+          return [record.id, record];
+        }),
+    ),
+  };
+  mkdirSync(path.dirname(vaultFile), { recursive: true });
+  writeFileSync(vaultFile, `${JSON.stringify(normalized, null, 2)}\n`, { mode: 0o600 });
+}
+
+function readExistingSecretCandidates() {
+  const roots = [
+    { root: existingSecretsDir, origin: "repo-secrets" },
+    ...(includeRunSecretsInVaultImport ? [{ root: "/run/secrets", origin: "docker-secrets" }] : []),
+    { root: databaseCredentialDir, origin: "database-credentials" },
+  ];
+  const candidates = [];
+  const seen = new Set();
+  for (const entry of roots) {
+    for (const file of listExistingSecretFiles(entry.root, entry.origin)) {
+      const itemKey = existingSecretItemKey(file.relativePath);
+      const id = vaultItemId("platform", "local", itemKey);
+      if (seen.has(id)) continue;
+      seen.add(id);
+      candidates.push({
+        id,
+        itemKey,
+        label: humanName(itemKey),
+        kind: existingSecretKind(itemKey, file.relativePath),
+        rotationDays: existingSecretRotationDays(itemKey),
+        source: `existing-${file.origin}:${file.relativePath}`,
+        sourceLabel: `${file.origin}/${file.relativePath}`,
+        filePath: file.filePath,
+        sizeBytes: file.sizeBytes,
+      });
+    }
+  }
+  return candidates.sort((a, b) => a.itemKey.localeCompare(b.itemKey));
+}
+
+function summarizeExistingSecretImport(candidates, vaultItems) {
+  const present = new Set((vaultItems || []).map((item) => item.id));
+  const importable = (candidates || []).filter((candidate) => !present.has(candidate.id));
+  return {
+    candidateCount: candidates.length,
+    importableCount: importable.length,
+  };
+}
+
+function listExistingSecretFiles(root, origin) {
+  const files = [];
+  if (!root) return files;
+  let rootReal = "";
+  try {
+    if (!safeIsDirectory(root)) return files;
+    rootReal = realpathSync(root);
+  } catch {
+    return files;
+  }
+  const visit = (current, depth = 0) => {
+    if (depth > 3) return;
+    let entries = [];
+    try {
+      entries = readdirSync(current, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const filePath = path.join(current, entry.name);
+      if (entry.isDirectory()) {
+        if (entry.name.startsWith(".") || ["node_modules", ".git"].includes(entry.name)) continue;
+        visit(filePath, depth + 1);
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      const candidate = existingSecretFileRecord(rootReal, filePath, origin);
+      if (candidate) files.push(candidate);
+    }
+  };
+  visit(rootReal);
+  return files;
+}
+
+function existingSecretFileRecord(rootReal, filePath, origin) {
+  try {
+    const fileReal = realpathSync(filePath);
+    if (!(fileReal === rootReal || fileReal.startsWith(`${rootReal}${path.sep}`))) return null;
+    const stat = statSync(fileReal);
+    if (!stat.isFile() || stat.size <= 0 || stat.size > 1024 * 1024) return null;
+    const relativePath = path.relative(rootReal, fileReal).replaceAll(path.sep, "/");
+    if (shouldSkipExistingSecretFile(relativePath)) return null;
+    return { filePath: fileReal, relativePath, origin, sizeBytes: stat.size };
+  } catch {
+    return null;
+  }
+}
+
+function shouldSkipExistingSecretFile(relativePath) {
+  const name = path.basename(relativePath).toLowerCase();
+  if (!name || name.startsWith(".")) return true;
+  if (["readme.md", "infra-secret-manager-audit.log", "infra-secret-manager-store.json", "secret-vault.json"].includes(name)) return true;
+  if (name.endsWith(".sha256") || name.endsWith(".sig") || name.endsWith(".md") || name.endsWith(".log")) return true;
+  return false;
+}
+
+function existingSecretItemKey(relativePath) {
+  let key = String(relativePath || "")
+    .replace(/\\/g, "/")
+    .replace(/\.txt$/i, "")
+    .replace(/\.conf$/i, "_conf")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .replace(/_+/g, "_")
+    .slice(0, 120);
+  if (!/^[a-z]/.test(key)) key = `secret_${key}`;
+  return validateVaultItemKey(key || "secret_value");
+}
+
+function existingSecretKind(itemKey, relativePath) {
+  const text = `${itemKey} ${relativePath}`.toLowerCase();
+  if (/(github|cloudflare|smtp|alertmanager|webhook|turnstile)/.test(text)) return "provider";
+  if (/(rclone|restic|minio|backup)/.test(text)) return "storage";
+  if (/(database|mariadb|postgres|redis|nats|keycloak|phpmyadmin|pgadmin|db)/.test(text)) return "database";
+  if (/(key|signing|session|pepper|master|hash)/.test(text)) return "kms";
+  return "application";
+}
+
+function existingSecretRotationDays(itemKey) {
+  const text = String(itemKey || "").toLowerCase();
+  if (/(signing|session|pepper|master|key)/.test(text)) return 180;
+  return 90;
+}
+
+function readExistingSecretValue(filePath) {
+  return readFileSync(filePath, "utf8").replace(/\r?\n$/, "");
+}
+
 function readWorkerJobsState() {
   try {
     const parsed = JSON.parse(readFileSync(workerJobsFile, "utf8"));
@@ -8764,10 +11366,11 @@ function readDeployments() {
   }
 }
 
-function backupRecord({ operationId, action, scope, environment: targetEnv, status, dryRun, backupRef = "", resultSummary }) {
+function backupRecord({ operationId, jobId = "", action, scope, environment: targetEnv, status, dryRun, backupRef = "", resultSummary }) {
   return sanitizeEvent({
     id: rid(),
     operationId,
+    jobId,
     action,
     scope,
     environment: targetEnv,
@@ -8876,6 +11479,51 @@ function sessionKeys() {
   return raw.split(/\r?\n|,/).map((item) => item.trim()).filter(Boolean);
 }
 
+function sealVaultValue(value, itemId) {
+  const material = vaultEncryptionMaterial();
+  const key = createHash("sha256").update(material).digest();
+  const iv = randomBytes(12);
+  const cipher = createCipheriv("aes-256-gcm", key, iv);
+  cipher.setAAD(Buffer.from(`control-center-vault:${itemId}`, "utf8"));
+  const encrypted = Buffer.concat([cipher.update(String(value), "utf8"), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return {
+    alg: "aes-256-gcm",
+    keyRef: createHash("sha256").update(material).digest("hex").slice(0, 16),
+    iv: iv.toString("base64url"),
+    tag: tag.toString("base64url"),
+    data: encrypted.toString("base64url"),
+    createdAt: new Date().toISOString(),
+  };
+}
+
+function openVaultValue(sealedValue, itemId) {
+  const sealed = normalizeSealedValue(sealedValue);
+  if (!sealed || sealed.alg !== "aes-256-gcm" || !sealed.iv || !sealed.tag || !sealed.data) {
+    throw new ValidationError("Vault value is not readable.");
+  }
+  const material = vaultEncryptionMaterial();
+  const key = createHash("sha256").update(material).digest();
+  const decipher = createDecipheriv("aes-256-gcm", key, Buffer.from(sealed.iv, "base64url"));
+  decipher.setAAD(Buffer.from(`control-center-vault:${itemId}`, "utf8"));
+  decipher.setAuthTag(Buffer.from(sealed.tag, "base64url"));
+  return Buffer.concat([
+    decipher.update(Buffer.from(sealed.data, "base64url")),
+    decipher.final(),
+  ]).toString("utf8");
+}
+
+function vaultEncryptionMaterial() {
+  if (vaultKeyFile && existsSync(vaultKeyFile)) {
+    const raw = readFileSync(vaultKeyFile, "utf8").trim();
+    if (raw) return raw;
+  }
+  if (vaultKeyMaterial.trim()) return vaultKeyMaterial.trim();
+  const fallback = sessionKeys()[0] || "";
+  if (fallback) return fallback;
+  throw new ValidationError("Vault encryption key is not configured.");
+}
+
 function parseCookie(header) {
   const out = {};
   for (const part of String(header || "").split(";")) {
@@ -8966,6 +11614,12 @@ function validateBucketName(value) {
 function validateMaterialName(value) {
   const name = String(value || "").trim().toUpperCase();
   if (!/^[A-Z][A-Z0-9_]{1,127}$/.test(name)) throw new ValidationError("Invalid material name.");
+  return name;
+}
+
+function validateVaultItemKey(value) {
+  const name = String(value || "").trim().toLowerCase().replace(/\s+/g, "_");
+  if (!/^[a-z][a-z0-9_.-]{1,127}$/.test(name)) throw new ValidationError("Invalid vault item name.");
   return name;
 }
 
@@ -9085,6 +11739,10 @@ function materialId(projectId, targetEnv, materialName) {
   return sanitizeIdentifier(`${projectId}-${targetEnv}-${materialName.replace(/_/g, "-").toLowerCase()}`);
 }
 
+function vaultItemId(projectId, targetEnv, itemKey) {
+  return sanitizeIdentifier(`${projectId}-${targetEnv}-${itemKey.replace(/[_.]+/g, "-")}`);
+}
+
 function domainRecord({
   id = "",
   environment: targetEnv = "local",
@@ -9173,6 +11831,10 @@ function databaseRecord({
   users = [],
   permissions = [],
   linkedApps = [],
+  credentialRef = "",
+  credentialFile = "",
+  credentialStatus = "protected",
+  credentialUpdatedAt = null,
   backupPolicy = "manual-plan-only",
   restoreStatus = "restore-drill-plan-only",
   source = "control-center-state",
@@ -9200,6 +11862,10 @@ function databaseRecord({
     users: Array.isArray(users) ? users.map((user) => sanitizeOptionalRef(user)).filter(Boolean).slice(0, 20) : [],
     permissions: Array.isArray(permissions) ? permissions.map((permission) => sanitizeOptionalRef(permission)).filter(Boolean).slice(0, 20) : [],
     linkedApps: Array.isArray(linkedApps) ? [...new Set(linkedApps.map((item) => sanitizeIdentifier(item)).filter(Boolean))].slice(0, 20) : [],
+    credentialRef: sanitizeOptionalRef(credentialRef),
+    credentialFile: sanitizeCredentialFilePath(credentialFile),
+    credentialStatus: choice(String(credentialStatus || "protected"), ["protected", "secret-ref-set", "secret-file-set", "rotation-requested", "rotation-requested-secret-ref", "missing"], "database credential status"),
+    credentialUpdatedAt,
     backupPolicy,
     restoreStatus,
     source,
@@ -9314,6 +11980,54 @@ function sensitiveMaterialRecord({
     updatedAt,
     deletedAt,
   });
+}
+
+function vaultItemRecord({
+  id = "",
+  itemKey = "",
+  label = "",
+  projectId = "platform",
+  environment: targetEnv = "local",
+  kind = "application",
+  username = "",
+  url = "",
+  rotationDays = 90,
+  rotationStatus = "",
+  valueStored = false,
+  valueFingerprint = "",
+  sealedValue = null,
+  source = "control-center-vault",
+  createdAt = null,
+  updatedAt = null,
+  deletedAt = null,
+} = {}, { includeSealed = false } = {}) {
+  const cleanProjectId = sanitizeIdentifier(projectId || "platform") || "platform";
+  const cleanEnv = normalizeEnvironment(targetEnv);
+  const cleanKey = validateVaultItemKey(itemKey || "secret_value");
+  const cleanRotationDays = parseRotationDays(rotationDays || 0);
+  const cleanFingerprint = sanitizeVaultFingerprint(valueFingerprint);
+  const clean = sanitizeEvent({
+    id: sanitizeIdentifier(id || vaultItemId(cleanProjectId, cleanEnv, cleanKey)),
+    itemKey: cleanKey,
+    label: sanitizeVaultText(label || humanName(cleanKey), 96),
+    projectId: cleanProjectId,
+    environment: cleanEnv,
+    kind: choice(String(kind || "application"), ["application", "docker", "provider", "kms", "database", "storage"], "vault item kind"),
+    username: sanitizeVaultText(username, 120),
+    url: sanitizeVaultText(url, 200),
+    rotationDays: cleanRotationDays,
+    rotationStatus: rotationStatus || (cleanRotationDays > 0 ? "planned" : "not-set"),
+    valueStored: Boolean(valueStored || sealedValue),
+    fingerprintStored: Boolean(cleanFingerprint),
+    valueFingerprint: includeSealed ? cleanFingerprint : "",
+    valueExposed: false,
+    source: sanitizeOptionalRef(source || "control-center-vault"),
+    createdAt,
+    updatedAt,
+    deletedAt,
+  });
+  if (includeSealed) clean.sealedValue = normalizeSealedValue(sealedValue);
+  return clean;
 }
 
 function workerRuntimeRecord({
@@ -10567,6 +13281,81 @@ function sanitizeOptionalRef(value) {
   return raw ? sanitizeRef(raw) : "";
 }
 
+function sanitizeVaultText(value, maxLength = 120) {
+  return sanitizeMessage(String(value || "")).replace(/[\r\n\t]+/g, " ").replace(/\s+/g, " ").trim().slice(0, maxLength);
+}
+
+function sanitizeVaultFingerprint(value) {
+  const fingerprint = String(value || "").trim().toLowerCase();
+  return /^[a-f0-9]{64}$/.test(fingerprint) ? fingerprint : "";
+}
+
+function normalizeSealedValue(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  return {
+    alg: sanitizeOptionalRef(value.alg || "aes-256-gcm"),
+    keyRef: sanitizeOptionalRef(value.keyRef || ""),
+    iv: sanitizeSealedVaultChunk(value.iv, 64),
+    tag: sanitizeSealedVaultChunk(value.tag, 128),
+    data: sanitizeSealedVaultChunk(value.data, 2 * 1024 * 1024),
+    createdAt: value.createdAt || null,
+  };
+}
+
+function sanitizeSealedVaultChunk(value, maxLength) {
+  const raw = String(value || "").trim();
+  if (!raw || raw.length > maxLength || !/^[a-zA-Z0-9_-]+$/.test(raw)) return "";
+  return raw;
+}
+
+function upsertVaultMaterialMetadata(item) {
+  const materialName = vaultMaterialName(item.itemKey);
+  const id = materialId(item.projectId || "platform", item.environment, materialName);
+  const state = readSensitiveMaterialsState();
+  state[id] = {
+    ...(state[id] || {}),
+    ...sensitiveMaterialRecord({
+      id,
+      projectId: item.projectId || "platform",
+      environment: item.environment,
+      materialName,
+      materialKind: item.kind,
+      materialConfigured: true,
+      rotationDays: item.rotationDays,
+      usageTargets: [item.projectId || "platform"],
+      source: "control-center-vault",
+      createdAt: state[id]?.createdAt || item.createdAt || new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    }),
+  };
+  writeSensitiveMaterialsState(state);
+}
+
+function removeVaultMaterialMetadata(item) {
+  const materialName = vaultMaterialName(item.itemKey);
+  const id = materialId(item.projectId || "platform", item.environment, materialName);
+  const state = readSensitiveMaterialsState();
+  if (state[id]?.source === "control-center-vault") {
+    delete state[id];
+    writeSensitiveMaterialsState(state);
+  }
+}
+
+function vaultMaterialName(itemKey) {
+  let name = String(itemKey || "secret_value").toUpperCase().replace(/[^A-Z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+  if (!/^[A-Z]/.test(name)) name = `SECRET_${name}`;
+  if (name.length < 2) name = `${name}_VALUE`;
+  return validateMaterialName(name.slice(0, 128));
+}
+
+function sanitizeCredentialFilePath(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  const resolved = path.resolve(raw);
+  const allowedRoots = ["/run/secrets", "/var/www/project-state", path.resolve(path.dirname(databasesFile))];
+  return allowedRoots.some((root) => resolved === root || resolved.startsWith(`${root}${path.sep}`)) ? resolved : "";
+}
+
 function sanitizeMessage(message) {
   return String(message || "").replace(/\b(token|secret|password|authorization|cookie)=([^\s]+)/gi, "$1=[redacted]");
 }
@@ -10779,7 +13568,7 @@ function navigationGroupsForMode(mode) {
       ["domains", "Domini e sottodomini", "DNS"],
     ]),
     navGroup("operations", "Operations", "OPS", [
-      ["resources", "Risorse", "RES"], ["security", "Sicurezza", "SEC"], ["backups", "Backup", "BKP"], ["logs", "Log e alert", "LOG"],
+      ["security", "Sicurezza", "SEC"], ["backups", "Backup", "BKP"], ["logs", "Log e alert", "LOG"],
     ]),
     navGroup("settings", "Settings", "SET", [
       ["settings", "Impostazioni", "SET"],

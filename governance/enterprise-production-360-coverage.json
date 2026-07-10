@@ -1,0 +1,520 @@
+{
+  "version": 1,
+  "scope": "platform-infrastructure",
+  "title": "Enterprise Production 360 Coverage",
+  "expectedDomainCount": 16,
+  "minimumControlCount": 48,
+  "statusSemantics": {
+    "covered": "The control exists in repository governance and has a mapped evidence source.",
+    "passed": "The coverage catalog is complete. This is not a production go-live decision.",
+    "pending-live-proof": "The control is covered, but the real environment evidence still has to pass.",
+    "provider-required": "The control requires an external provider, public endpoint or third-party system.",
+    "human-required": "The control requires human approval, external audit or professional assessment."
+  },
+  "domains": [
+    {
+      "id": "host-os-runtime",
+      "title": "Host OS and runtime baseline",
+      "objective": "Ubuntu host, SSH, firewall, Docker daemon and runtime minimalism are verified before production claims.",
+      "controls": [
+        {
+          "id": "ubuntu-lts-hardening",
+          "title": "Ubuntu LTS hardening, SSH and firewall",
+          "mode": "protected-runtime",
+          "requiredBeforeGoLive": true,
+          "evidenceRefs": ["enterprise:vps-hardening-firewall-fail2ban", "readiness:firewall-fail2ban", "file:scripts/vps-hardening-ubuntu.sh", "file:scripts/vps-host-readiness.sh"]
+        },
+        {
+          "id": "docker-daemon-hardening",
+          "title": "Docker daemon hardening and host runtime minimalism",
+          "mode": "protected-runtime",
+          "requiredBeforeGoLive": true,
+          "evidenceRefs": ["readiness:docker-linux-hardening", "file:scripts/vps-host-readiness.sh", "file:compose.vps.yaml"]
+        },
+        {
+          "id": "vps-preflight-postdeploy",
+          "title": "VPS preflight and postdeploy runtime checks",
+          "mode": "protected-runtime",
+          "requiredBeforeGoLive": true,
+          "evidenceRefs": ["command:vps-preflight", "command:vps-postdeploy", "command:vps-go-live", "file:scripts/vps-go-live.sh"]
+        }
+      ]
+    },
+    {
+      "id": "container-orchestration",
+      "title": "Container orchestration and service health",
+      "objective": "Compose overlays, healthchecks, network boundaries and service liveness are validated.",
+      "controls": [
+        {
+          "id": "compose-overlay-integrity",
+          "title": "Compose overlay integrity for local, VPS, WAF, secrets and build",
+          "mode": "automated-local",
+          "requiredBeforeGoLive": true,
+          "evidenceRefs": ["command:static-security-check", "file:compose.yaml", "file:compose.vps.yaml", "file:compose.waf.yaml", "file:compose.secrets.yaml", "file:compose.build.yaml"]
+        },
+        {
+          "id": "service-healthchecks",
+          "title": "Healthchecks and runtime health for all infrastructure services",
+          "mode": "runtime-evidence",
+          "requiredBeforeGoLive": true,
+          "evidenceRefs": ["readiness:all-service-healthchecks", "command:compose-healthcheck-coverage", "command:infra-health"]
+        },
+        {
+          "id": "logging-bounds",
+          "title": "Container log size and retention bounds",
+          "mode": "automated-local",
+          "requiredBeforeGoLive": true,
+          "evidenceRefs": ["readiness:log-metric-retention", "command:retention-evidence", "file:compose.yaml"]
+        }
+      ]
+    },
+    {
+      "id": "public-edge",
+      "title": "Public edge, DNS, TLS, WAF and uptime",
+      "objective": "The public path from DNS provider to WAF/Traefik/Control Center is verified from outside the LAN.",
+      "controls": [
+        {
+          "id": "real-dns-preflight",
+          "title": "Real DNS and domain preflight",
+          "mode": "provider-live",
+          "providerRequired": true,
+          "requiredBeforeGoLive": true,
+          "evidenceRefs": ["enterprise:real-dns", "command:production-preflight", "go-no-go:pre-go-live-evidence-complete"]
+        },
+        {
+          "id": "public-https-acme",
+          "title": "Public HTTPS, ACME and certificate expiry",
+          "mode": "provider-live",
+          "providerRequired": true,
+          "requiredBeforeGoLive": true,
+          "evidenceRefs": ["enterprise:public-https-acme", "readiness:tls-https-production-ready", "command:certificate-expiry-check", "go-no-go:external-uptime-provider"]
+        },
+        {
+          "id": "cloudflare-access-admin",
+          "title": "Cloudflare Access or equivalent MFA for admin surfaces",
+          "mode": "provider-live",
+          "providerRequired": true,
+          "requiredBeforeGoLive": true,
+          "evidenceRefs": ["readiness:admin-access-mfa-vpn", "command:cloudflare-access-admin", "go-no-go:cloudflare-access-admin-verified"]
+        },
+        {
+          "id": "waf-rate-limit-public-edge",
+          "title": "Public edge WAF, bot protection and rate limit evidence",
+          "mode": "provider-live",
+          "providerRequired": true,
+          "requiredBeforeGoLive": true,
+          "evidenceRefs": ["enterprise:waf-rate-limit-bot-protection", "readiness:rate-limiting", "command:waf-smoke", "command:rate-limit-evidence"]
+        },
+        {
+          "id": "external-uptime-monitoring",
+          "title": "External uptime provider monitoring",
+          "mode": "provider-live",
+          "providerRequired": true,
+          "requiredBeforeGoLive": true,
+          "evidenceRefs": ["readiness:external-uptime-monitoring", "command:external-uptime-check", "go-no-go:external-uptime-provider"]
+        }
+      ]
+    },
+    {
+      "id": "identity-admin-access",
+      "title": "Identity, admin authorization and audit",
+      "objective": "Admin actions, RBAC, provider access and audit evidence are separated from hosted workloads.",
+      "controls": [
+        {
+          "id": "rbac-admin-authorization",
+          "title": "RBAC and admin authorization",
+          "mode": "runtime-evidence",
+          "requiredBeforeGoLive": true,
+          "evidenceRefs": ["enterprise:rbac", "command:platform-admin-audit", "file:control-center/server.mjs"]
+        },
+        {
+          "id": "admin-audit-trail",
+          "title": "Admin audit trail for infrastructure operations",
+          "mode": "runtime-evidence",
+          "requiredBeforeGoLive": true,
+          "evidenceRefs": ["readiness:admin-audit-log", "command:audit-log-evidence", "command:platform-admin-audit"]
+        },
+        {
+          "id": "periodic-access-review",
+          "title": "Periodic access review",
+          "mode": "human-governance",
+          "humanRequired": true,
+          "requiredBeforeGoLive": true,
+          "evidenceRefs": ["enterprise:periodic-access-review", "command:access-review", "command:platform-admin-audit"]
+        }
+      ]
+    },
+    {
+      "id": "secrets-vault",
+      "title": "Secrets, vault and key lifecycle",
+      "objective": "Secret material stays out of Git, rotates through controlled evidence and is mounted through secret paths.",
+      "controls": [
+        {
+          "id": "managed-secrets",
+          "title": "Integrated secret manager and mounted secrets",
+          "mode": "secret-protected",
+          "requiredBeforeGoLive": true,
+          "evidenceRefs": ["enterprise:secrets-manager", "readiness:secrets-management", "command:secret-manager", "command:managed-secrets-preflight"]
+        },
+        {
+          "id": "credential-rotation",
+          "title": "Credential rotation and verification",
+          "mode": "secret-protected",
+          "requiredBeforeGoLive": true,
+          "evidenceRefs": ["enterprise:credential-rotation", "command:secret-rotation-evidence", "command:secret-scan"]
+        },
+        {
+          "id": "secret-backup-metadata",
+          "title": "Secret manager metadata backup and restore",
+          "mode": "protected-runtime",
+          "requiredBeforeGoLive": true,
+          "evidenceRefs": ["command:backup-secret-manager-metadata", "command:restore-test-secret-manager-metadata", "command:backup-restore-drill-secret-manager-metadata"]
+        }
+      ]
+    },
+    {
+      "id": "data-database-storage",
+      "title": "Data, databases and storage governance",
+      "objective": "Managed data services, volumes, object storage and app database boundaries have backup and access controls.",
+      "controls": [
+        {
+          "id": "database-service-governance",
+          "title": "Managed database service backup and restore governance",
+          "mode": "protected-runtime",
+          "requiredBeforeGoLive": true,
+          "evidenceRefs": ["enterprise:database-service-governance", "command:backup-postgres", "command:backup-mariadb", "command:full-restore-drill"]
+        },
+        {
+          "id": "object-storage-backup",
+          "title": "MinIO object storage backup and restore",
+          "mode": "protected-runtime",
+          "requiredBeforeGoLive": true,
+          "evidenceRefs": ["command:backup-minio", "command:restore-test-minio", "command:backup-restore-drill-minio"]
+        },
+        {
+          "id": "data-classification",
+          "title": "Data classification and treatment rules",
+          "mode": "governance",
+          "requiredBeforeGoLive": true,
+          "evidenceRefs": ["enterprise:data-classification", "command:data-classification", "file:governance/data-classification.md"]
+        }
+      ]
+    },
+    {
+      "id": "backup-dr-rpo-rto",
+      "title": "Backup, disaster recovery, RPO and RTO",
+      "objective": "Local and off-site backups, restore drills, DR evidence and new-host recovery are proven with reports.",
+      "controls": [
+        {
+          "id": "offsite-backups",
+          "title": "Off-site automatic backups",
+          "mode": "protected-runtime",
+          "requiredBeforeGoLive": true,
+          "evidenceRefs": ["readiness:offsite-automatic-backups", "enterprise:offsite-backup-restore", "command:offsite-backup-restic", "command:backup-scheduler"]
+        },
+        {
+          "id": "restore-tested",
+          "title": "Restore tested locally and off-site",
+          "mode": "protected-runtime",
+          "requiredBeforeGoLive": true,
+          "evidenceRefs": ["readiness:restore-tested", "command:full-restore-drill", "command:offsite-restore-drill-restic", "go-no-go:disaster-recovery-rpo-rto-offsite"]
+        },
+        {
+          "id": "dr-rpo-rto-evidence",
+          "title": "DR evidence with measured RPO/RTO",
+          "mode": "protected-runtime",
+          "requiredBeforeGoLive": true,
+          "evidenceRefs": ["enterprise:incident-runbook-rto-rpo", "readiness:disaster-recovery-plan", "command:dr-evidence"]
+        },
+        {
+          "id": "new-host-rebuild-drill",
+          "title": "New-host rebuild and restore drill",
+          "mode": "protected-runtime",
+          "requiredBeforeGoLive": true,
+          "evidenceRefs": ["file:scripts/vps-bootstrap-ubuntu.sh", "file:scripts/vps-hardening-ubuntu.sh", "command:vps-go-live", "command:full-restore-drill"]
+        }
+      ]
+    },
+    {
+      "id": "observability-alerting",
+      "title": "Observability, logs, metrics and alerting",
+      "objective": "Infrastructure logs, metrics, dashboards, retention and real alert delivery are checked.",
+      "controls": [
+        {
+          "id": "centralized-logs",
+          "title": "Centralized logs, metrics and retention",
+          "mode": "runtime-evidence",
+          "requiredBeforeGoLive": true,
+          "evidenceRefs": ["enterprise:centralized-logs-audit", "command:retention-evidence", "file:loki/config.yml", "file:prometheus/prometheus.yml"]
+        },
+        {
+          "id": "real-alert-delivery",
+          "title": "Real email/Telegram/provider alert delivery",
+          "mode": "provider-live",
+          "providerRequired": true,
+          "requiredBeforeGoLive": true,
+          "evidenceRefs": ["enterprise:real-alerting", "readiness:real-telegram-email-alerts", "command:alert-evidence", "go-no-go:real-alert-delivery"]
+        },
+        {
+          "id": "siem-export-readiness",
+          "title": "SIEM or external monitoring export readiness",
+          "mode": "provider-live",
+          "providerRequired": true,
+          "requiredBeforeGoLive": false,
+          "evidenceRefs": ["enterprise:siem-monitoring", "file:loki/config.yml", "file:alertmanager/alertmanager.yml"]
+        }
+      ]
+    },
+    {
+      "id": "release-ci-cd",
+      "title": "Release, CI/CD, rollback and provenance",
+      "objective": "Remote CI/CD, release artifacts, deployment approvals, rollback and provenance are enforced.",
+      "controls": [
+        {
+          "id": "remote-ci-cd",
+          "title": "Remote CI/CD and controlled deployment",
+          "mode": "provider-live",
+          "providerRequired": true,
+          "requiredBeforeGoLive": true,
+          "evidenceRefs": ["enterprise:remote-ci-cd", "readiness:automatic-ci-cd-deploy", "command:github-actions-config", "go-no-go:github-actions-run-success"]
+        },
+        {
+          "id": "release-evidence-rollback",
+          "title": "Release evidence and rollback validation",
+          "mode": "provider-live",
+          "providerRequired": true,
+          "requiredBeforeGoLive": true,
+          "evidenceRefs": ["readiness:deploy-rollback-tests", "command:release-evidence", "command:rollback-release", "go-no-go:release-evidence-and-rollback"]
+        },
+        {
+          "id": "image-signing-provenance",
+          "title": "Image signing, SBOM and provenance",
+          "mode": "provider-live",
+          "providerRequired": true,
+          "requiredBeforeGoLive": true,
+          "evidenceRefs": ["enterprise:supply-chain-sbom-provenance", "command:generate-sbom", "command:sign-images", "command:github-attestation-evidence"]
+        },
+        {
+          "id": "deploy-orchestration",
+          "title": "VPS deploy and go-live orchestration",
+          "mode": "protected-runtime",
+          "requiredBeforeGoLive": true,
+          "evidenceRefs": ["command:deploy-vps", "command:vps-go-live", "file:scripts/deploy-vps.sh", "file:scripts/vps-go-live.sh"]
+        }
+      ]
+    },
+    {
+      "id": "supply-chain-security",
+      "title": "Supply chain, dependency and static security",
+      "objective": "Dependencies, containers, static checks, secret scans and admission policies are verified.",
+      "controls": [
+        {
+          "id": "dependency-container-hygiene",
+          "title": "Dependency and container hygiene",
+          "mode": "automated-local",
+          "requiredBeforeGoLive": true,
+          "evidenceRefs": ["enterprise:sast-dast-dependency-container-scan", "command:supply-chain-hygiene", "command:dependency-hygiene", "command:generate-sbom"]
+        },
+        {
+          "id": "static-security-secret-scan",
+          "title": "Static security and secret scanning",
+          "mode": "automated-local",
+          "requiredBeforeGoLive": true,
+          "evidenceRefs": ["command:static-security-check", "command:secret-scan", "command:security-smoke", "command:security-matrix"]
+        },
+        {
+          "id": "admission-policy",
+          "title": "Digest and provenance admission policy",
+          "mode": "automated-local",
+          "requiredBeforeGoLive": true,
+          "evidenceRefs": ["file:security/admission/cosign-digest-policy.rego", "command:release-artifact-gate", "command:sign-images"]
+        }
+      ]
+    },
+    {
+      "id": "staging-dast-test-environments",
+      "title": "Staging, DAST and test environments",
+      "objective": "Staging is separated from production and supports public DAST/security checks.",
+      "controls": [
+        {
+          "id": "staging-separation",
+          "title": "Staging separated from production",
+          "mode": "provider-live",
+          "providerRequired": true,
+          "requiredBeforeGoLive": true,
+          "evidenceRefs": ["enterprise:staging-production-parity", "readiness:staging-separated", "file:compose.staging.yaml", "file:.env.staging.example"]
+        },
+        {
+          "id": "dast-staging",
+          "title": "DAST baseline against public staging",
+          "mode": "provider-live",
+          "providerRequired": true,
+          "requiredBeforeGoLive": true,
+          "evidenceRefs": ["enterprise:sast-dast-dependency-container-scan", "command:dast-zap-baseline", "workflow:.github/workflows/enterprise-infra.yml"]
+        },
+        {
+          "id": "failure-chaos-profile",
+          "title": "Failure tests and controlled chaos profile",
+          "mode": "protected-runtime",
+          "requiredBeforeGoLive": false,
+          "evidenceRefs": ["command:failure-tests", "command:fault-injection-tests", "command:chaos-profile"]
+        }
+      ]
+    },
+    {
+      "id": "performance-capacity",
+      "title": "Performance, load, soak and capacity",
+      "objective": "Public edge capacity, local profile and longer-running stability are measured before production scale claims.",
+      "controls": [
+        {
+          "id": "public-load-benchmark",
+          "title": "Public 50/100/500-user benchmark",
+          "mode": "provider-live",
+          "providerRequired": true,
+          "requiredBeforeGoLive": true,
+          "evidenceRefs": ["enterprise:load-performance", "command:load-benchmark", "go-no-go:public-load-benchmark"]
+        },
+        {
+          "id": "local-load-profile",
+          "title": "Local runtime load profile",
+          "mode": "runtime-evidence",
+          "requiredBeforeGoLive": true,
+          "evidenceRefs": ["command:load-profile", "command:load-smoke"]
+        },
+        {
+          "id": "soak-capacity-plan",
+          "title": "Soak test and capacity planning",
+          "mode": "provider-live",
+          "providerRequired": true,
+          "requiredBeforeGoLive": false,
+          "evidenceRefs": ["command:load-benchmark", "file:governance/production-go-no-go.json", "file:grafana/dashboards/enterprise-overview.json"]
+        }
+      ]
+    },
+    {
+      "id": "ha-failover-resilience",
+      "title": "HA, failover and resilience posture",
+      "objective": "The platform either proves multi-node failover or documents accepted single-node risk.",
+      "controls": [
+        {
+          "id": "ha-config",
+          "title": "HA configuration overlay readiness",
+          "mode": "automated-local",
+          "requiredBeforeGoLive": true,
+          "evidenceRefs": ["enterprise:ha-multi-node", "command:ha-config-check", "file:compose.ha.yaml"]
+        },
+        {
+          "id": "single-node-risk-acceptance",
+          "title": "Single-node risk acceptance until HA exists",
+          "mode": "governance",
+          "requiredBeforeGoLive": true,
+          "evidenceRefs": ["command:ha-single-node-risk-acceptance", "file:governance/ha-single-node-risk-acceptance.md"]
+        },
+        {
+          "id": "multi-node-failover-drill",
+          "title": "Real multi-node failover drill",
+          "mode": "provider-live",
+          "providerRequired": true,
+          "requiredBeforeGoLive": false,
+          "evidenceRefs": ["enterprise:ha-multi-node", "file:compose.ha.yaml", "command:ha-config-check"]
+        }
+      ]
+    },
+    {
+      "id": "hosted-workloads",
+      "title": "Hosted workload isolation and lifecycle",
+      "objective": "Hosted projects remain external while routing, lifecycle actions and data boundaries are governed by the platform.",
+      "controls": [
+        {
+          "id": "routing-boundary",
+          "title": "Project-router and wildcard routing boundary",
+          "mode": "provider-live",
+          "providerRequired": true,
+          "requiredBeforeGoLive": true,
+          "evidenceRefs": ["enterprise:hosted-workload-isolation", "command:project-router-tests", "file:project-router/server.mjs"]
+        },
+        {
+          "id": "application-lifecycle-governance",
+          "title": "Application onboarding, archive and stop lifecycle",
+          "mode": "runtime-evidence",
+          "requiredBeforeGoLive": true,
+          "evidenceRefs": ["enterprise:application-onboarding-governance", "command:control-center-tests", "file:config/project-manifest.example.json"]
+        },
+        {
+          "id": "hosted-data-boundary",
+          "title": "Hosted app data remains outside platform go-live gates",
+          "mode": "governance",
+          "requiredBeforeGoLive": true,
+          "evidenceRefs": ["file:PLATFORM-APPLICATION-SEPARATION-AUDIT.md", "command:data-classification", "command:platform-admin-audit"]
+        }
+      ]
+    },
+    {
+      "id": "operations-runbooks",
+      "title": "Operations, runbooks and incident response",
+      "objective": "Runbooks, rollback, incident response and operational checklists point to real evidence paths.",
+      "controls": [
+        {
+          "id": "operations-runbook-final",
+          "title": "Final operations runbook linked to live evidence",
+          "mode": "provider-live",
+          "providerRequired": true,
+          "requiredBeforeGoLive": true,
+          "evidenceRefs": ["readiness:operations-runbook", "file:RUNBOOK.md", "file:VPS-PREDEPLOY-CHECKLIST.md", "go-no-go:pre-go-live-evidence-complete"]
+        },
+        {
+          "id": "incident-runbook",
+          "title": "Incident response, rollback and RTO/RPO runbook",
+          "mode": "runtime-evidence",
+          "requiredBeforeGoLive": true,
+          "evidenceRefs": ["enterprise:incident-runbook-rto-rpo", "command:dr-evidence", "command:rollback-release", "file:RUNBOOK.md"]
+        },
+        {
+          "id": "go-no-go-decision",
+          "title": "Final production go/no-go decision",
+          "mode": "provider-live",
+          "providerRequired": true,
+          "requiredBeforeGoLive": true,
+          "evidenceRefs": ["command:production-go-no-go", "command:production-readiness-live", "file:governance/production-go-no-go.json"]
+        }
+      ]
+    },
+    {
+      "id": "compliance-privacy-governance",
+      "title": "Compliance, privacy and external assurance",
+      "objective": "Internal governance evidence exists, while formal certification and professional testing are explicitly human/provider gates.",
+      "controls": [
+        {
+          "id": "compliance-gdpr-soc2-like",
+          "title": "GDPR/SOC2-like compliance evidence matrix",
+          "mode": "governance",
+          "requiredBeforeGoLive": true,
+          "evidenceRefs": ["enterprise:compliance-gdpr-soc2-like", "command:compliance-evidence", "file:governance/compliance-evidence.md"]
+        },
+        {
+          "id": "vulnerability-disclosure",
+          "title": "Vulnerability disclosure process",
+          "mode": "governance",
+          "requiredBeforeGoLive": true,
+          "evidenceRefs": ["enterprise:vulnerability-disclosure", "command:vulnerability-disclosure", "file:SECURITY.md"]
+        },
+        {
+          "id": "professional-pentest",
+          "title": "External professional penetration test",
+          "mode": "human-external",
+          "humanRequired": true,
+          "requiredBeforeGoLive": false,
+          "evidenceRefs": ["enterprise:pentest", "command:pentest-readiness", "file:THREAT-MODEL.md"]
+        },
+        {
+          "id": "formal-compliance-audit",
+          "title": "Formal external compliance audit if certification is claimed",
+          "mode": "human-external",
+          "humanRequired": true,
+          "requiredBeforeGoLive": false,
+          "evidenceRefs": ["command:compliance-evidence", "file:governance/compliance-evidence.md", "file:READINESS-REPORT.md"]
+        }
+      ]
+    }
+  ]
+}
