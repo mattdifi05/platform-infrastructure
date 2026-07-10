@@ -13,6 +13,12 @@
 | EV-T01-003 | T01 | Immutable image | build `docker/control-center.Dockerfile`, run with network disabled and loopback health probe | PASS; test image removed after smoke | 2026-07-10 |
 | EV-T01-004 | T01 | Production render | canonical VPS Compose JSON invariant extraction | PASS: `oidc-passkey`, PostgreSQL store, database secret present, password verifier absent, source bind absent | 2026-07-10 |
 | EV-T01-005 | T01 | Global static gate | `static-security-check --infra-only` | BLOCKED by pre-existing T20 CSS border assertion; no T01 auth assertion failure observed before stop | 2026-07-10 |
+| EV-T02-001 | T02 | Browser mutation boundary | cryptographic OIDC integration test | PASS: missing/sibling Origin rejected, same-origin CSRF accepted, oversized body 413, stale passkey auth 428 | 2026-07-10 |
+| EV-T02-002 | T02 | Shared session security | both auth migrations plus PostgreSQL 18 tmpfs integration | PASS: throttle lock/reset, CSRF/session columns, transaction replay and logout revocation | 2026-07-10 |
+| EV-T02-003 | T02 | Keycloak policy | pinned Keycloak 26.6.3 first-boot import in tmpfs | PASS: brute force, no password recovery, required UV, discoverable passkey, passwordless-only flow, PKCE and AMR mapper | 2026-07-10 |
+| EV-T02-004 | T02 | Runtime readiness negative | `scripts/keycloak-passkey-readiness.sh` against live realm | EXPECTED FAIL: brute-force protection is disabled; live cutover correctly blocked | 2026-07-10 |
+| EV-T02-005 | T02 | Alert rules | pinned Prometheus `promtool check rules` | PASS: 21 rules including Keycloak login-failure and admin-lockout alerts | 2026-07-10 |
+| EV-T02-006 | T02 | Effective VPS config | canonical Compose JSON invariant extraction | PASS: exact portal origin, 300-second fresh auth, shared throttle, Keycloak event metrics and identity upstream | 2026-07-10 |
 | EV-MAP-DB-001 | T00/T04 | DB catalog | PostgreSQL and MariaDB read-only catalog queries | PASS inventory; drift recorded | 2026-07-10 |
 | EV-MAP-BKP-001 | T00/T07 | Backup catalog | filesystem and Control Center backup summary | PARTIAL: fresh local artifacts, full portability unproven | 2026-07-10 |
 | EV-T11-001 | T11 | Compose render | old active runtime versus tracked runtime, normalized for worktree paths | PASS: all 32 shared services identical; registry is the only added service | 2026-07-10 |

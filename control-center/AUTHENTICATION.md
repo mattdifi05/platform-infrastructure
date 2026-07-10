@@ -25,6 +25,12 @@ The only bypass mode is `test-disabled`. Startup accepts it only when
 5. Logout revokes the server-side row before clearing the cookie. Replaying the
    previous cookie is rejected.
 
+Every state-changing request also requires the exact configured portal Origin,
+`Sec-Fetch-Site: same-origin` and a random CSRF token bound to the server-side
+session. The browser receives that token in a host-only Secure SameSite=Strict
+cookie and echoes it in `X-CSRF-Token`; it is never accepted as authentication.
+Request bodies are limited to 64 KiB at the Node boundary.
+
 No access token, ID token, passkey credential or raw browser session token is
 persisted by the Control Center.
 
@@ -37,7 +43,9 @@ persisted by the Control Center.
 | `owner` | owner | yes | yes | yes, subject to fresh re-auth in T02 |
 
 Sensitive operations include Vault access, database administration, backup or
-restore, identity administration, settings and temporary database UIs.
+restore, identity administration, settings and temporary database UIs. They
+require an OIDC `auth_time` no older than five minutes; otherwise the API
+returns 428 with a passkey re-authentication URL.
 
 ## Required configuration
 
@@ -48,10 +56,13 @@ restore, identity administration, settings and temporary database UIs.
 - public client ID `platform-control-center`; no client secret
 - required ACR `urn:platform:loa:passkey`
 - required AMR `webauthn`
+- session policy version, five-minute fresh-auth window and shared PostgreSQL
+  login-start throttle
 - database URL supplied only through
   `CONTROL_CENTER_AUTH_DATABASE_URL_FILE`
 
-Apply `migrations/001_auth_sessions.sql` to the dedicated control-plane
+Apply `migrations/001_auth_sessions.sql` and
+`migrations/002_session_security.sql` to the dedicated control-plane
 PostgreSQL database before starting the service. The runtime identity requires
 only CRUD access to `control_auth.oidc_transactions` and
 `control_auth.sessions`; schema migration and backup identities remain
@@ -77,6 +88,11 @@ Every administrator, including break-glass, must have at least two independent
 passkeys before production cutover. The current live realm has no platform
 users or passkeys, so deploying the fail-closed image before enrollment would
 cause an administrative lockout.
+
+`scripts/keycloak-passkey-readiness.sh` is the fail-closed runtime verifier. It
+checks realm lockout policy, the passwordless flow, PKCE client, AMR mapper,
+authorized role and at least two passwordless credentials for every username
+listed in `CONTROL_CENTER_ADMIN_USERS`. It never prints credential material.
 
 ## Cutover gate
 
