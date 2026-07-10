@@ -16,6 +16,12 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
 import { generatedDatabasePrincipal } from "../database/ownership.mjs";
+import {
+  backupDocumentDigest,
+  backupResourceId,
+  createBackupJobDocument,
+  createBackupManifestDocument,
+} from "../backup/contracts.mjs";
 
 const infraRoot = path.resolve(import.meta.dirname, "..", "..");
 const testRoot = path.join(infraRoot, ".tmp", "control-center-tests", randomUUID());
@@ -634,7 +640,7 @@ test("Admin Control Center local foundation", async (t) => {
   assert.ok(projectDetailHtml.indexOf('id="project-file-manager"') < projectDetailHtml.indexOf('id="project-backups"'));
   assert.ok(projectDetailHtml.indexOf('id="project-backups"') < projectDetailHtml.indexOf('id="project-databases"'));
   assert.match(projectDetailHtml, /ops-project-backup-list/);
-  assert.match(projectDetailHtml, /node-demo-source-20260629\.tar\.gz/);
+  assert.match(projectDetailHtml, /3 risorse/);
   assert.match(projectDetailHtml, /name="backupMode" value="all"/);
   assert.doesNotMatch(projectDetailHtml, /Sorgenti \+ database/);
   assert.doesNotMatch(projectDetailHtml, /ops-project-backup-fixed-scope/);
@@ -1775,7 +1781,12 @@ test("Admin Control Center local foundation", async (t) => {
   });
   assert.equal(databaseBackup.status, 202);
   assert.equal(databaseBackup.body.type, "database.backup");
-  assert.equal(databaseBackup.body.dryRun, true);
+  assert.equal(databaseBackup.body.dryRun, false);
+  assert.equal(databaseBackup.body.backup.status, "queued");
+  assert.equal(databaseBackup.body.job.schema, "platform.backup-job/v1");
+  assert.equal(databaseBackup.body.job.resources.length, 1);
+  assert.equal(databaseBackup.body.job.resources[0].id, "database:node-demo-mariadb-node-demo-app");
+  assert.equal("commands" in databaseBackup.body.job, false);
   assert.equal(databaseBackup.body.details.databaseTouched, false);
   assert.equal(databaseBackup.body.details.credentialsExposed, false);
   assert.doesNotMatch(JSON.stringify(databaseBackup.body), /database-secret-should-not-leak/);
@@ -2678,9 +2689,14 @@ test("Admin Control Center local foundation", async (t) => {
   assert.equal(appBackupPlan.status, 202);
   assert.equal(appBackupPlan.body.type, "backup.run");
   assert.equal(appBackupPlan.body.backup.scope, "app-node-demo");
-  assert.equal(appBackupPlan.body.job.commands.some((item) => item.command === "backup-applications"), true);
-  assert.equal(appBackupPlan.body.job.commands.some((item) => item.command === "backup-postgres"), true);
-  assert.equal(appBackupPlan.body.job.commands.some((item) => item.command === "backup-mariadb"), true);
+  assert.equal(appBackupPlan.body.job.schema, "platform.backup-job/v1");
+  assert.equal(appBackupPlan.body.job.scope.kind, "application");
+  assert.equal(appBackupPlan.body.job.scope.id, "node-demo");
+  assert.equal("commands" in appBackupPlan.body.job, false);
+  assert.deepEqual(new Set(appBackupPlan.body.job.resources.map((item) => item.kind)), new Set(["source", "database"]));
+  const appBackupDatabaseResources = appBackupPlan.body.job.resources.filter((item) => item.kind === "database");
+  assert.equal(appBackupDatabaseResources.length >= 2, true);
+  assert.equal(new Set(appBackupDatabaseResources.map((item) => item.id)).size, appBackupDatabaseResources.length);
   assert.equal(appBackupPlan.body.details.backupMode, "all");
   assert.equal(existsSync(path.join(backupJobsDir, "queued", `${appBackupPlan.body.job.id}.json`)), true);
   assert.doesNotMatch(JSON.stringify(appBackupPlan.body), /backup-secret-should-not-leak/);
@@ -2692,9 +2708,9 @@ test("Admin Control Center local foundation", async (t) => {
     backupMode: "source",
   });
   assert.equal(appSourceOnlyBackup.status, 202);
-  assert.equal(appSourceOnlyBackup.body.job.commands.some((item) => item.command === "backup-applications"), true);
-  assert.equal(appSourceOnlyBackup.body.job.commands.some((item) => item.command === "backup-postgres"), false);
-  assert.equal(appSourceOnlyBackup.body.job.commands.some((item) => item.command === "backup-mariadb"), false);
+  assert.equal(appSourceOnlyBackup.body.job.resources.length, 1);
+  assert.equal(appSourceOnlyBackup.body.job.resources[0].kind, "source");
+  assert.equal("commands" in appSourceOnlyBackup.body.job, false);
   assert.equal(appSourceOnlyBackup.body.details.backupMode, "source");
 
   const appDatabaseOnlyBackup = await postJson(`${baseUrl}/actions/backup-command`, {
@@ -2704,46 +2720,49 @@ test("Admin Control Center local foundation", async (t) => {
     backupMode: "database",
   });
   assert.equal(appDatabaseOnlyBackup.status, 202);
-  assert.equal(appDatabaseOnlyBackup.body.job.commands.some((item) => item.command === "backup-applications"), false);
-  assert.equal(appDatabaseOnlyBackup.body.job.commands.some((item) => item.command === "backup-postgres"), true);
-  assert.equal(appDatabaseOnlyBackup.body.job.commands.some((item) => item.command === "backup-mariadb"), true);
+  assert.equal(appDatabaseOnlyBackup.body.job.resources.length >= 2, true);
+  assert.equal(appDatabaseOnlyBackup.body.job.resources.every((item) => item.kind === "database"), true);
+  assert.deepEqual(new Set(appDatabaseOnlyBackup.body.job.resources.map((item) => item.engine)), new Set(["postgres", "mariadb"]));
   assert.equal(appDatabaseOnlyBackup.body.details.backupMode, "database");
 
   const appRestorePlan = await postJson(`${baseUrl}/actions/backup-command`, {
     action: "restore",
     scope: "application",
     projectId: "node-demo",
-    backupRef: "applications/node-demo/node-demo-source-20260629.tar.gz",
+    backupRef: "manifests/manifest-node-demo.json",
     restoreMode: "source",
     secret: "backup-secret-should-not-leak",
   });
   assert.equal(appRestorePlan.status, 202);
-  assert.equal(appRestorePlan.body.type, "restore.plan");
-  assert.equal(appRestorePlan.body.dryRun, true);
+  assert.equal(appRestorePlan.body.type, "restore.queue");
+  assert.equal(appRestorePlan.body.dryRun, false);
   assert.equal(appRestorePlan.body.details.scope, "app-node-demo");
   assert.equal(appRestorePlan.body.details.projectId, "node-demo");
-  assert.equal(appRestorePlan.body.details.backupRef, "applications/node-demo/node-demo-source-20260629.tar.gz");
+  assert.equal(appRestorePlan.body.details.backupRef, "manifests/manifest-node-demo.json");
   assert.equal(appRestorePlan.body.details.restoreMode, "source");
   assert.equal(appRestorePlan.body.details.dataChanged, false);
   assert.equal(appRestorePlan.body.backup.action, "restore-drill");
-  assert.equal(appRestorePlan.body.backup.status, "planned");
+  assert.equal(appRestorePlan.body.backup.status, "queued");
   assert.equal(appRestorePlan.body.backup.scope, "app-node-demo");
-  assert.equal(appRestorePlan.body.backup.backupRef, "applications/node-demo/node-demo-source-20260629.tar.gz");
+  assert.equal(appRestorePlan.body.backup.backupRef, "manifests/manifest-node-demo.json");
+  assert.equal(appRestorePlan.body.job.resources.length, 1);
+  assert.equal(appRestorePlan.body.job.resources[0].kind, "source");
+  assert.equal(appRestorePlan.body.job.sourceManifestPath, "manifests/manifest-node-demo.json");
   assert.doesNotMatch(JSON.stringify(appRestorePlan.body), /backup-secret-should-not-leak/);
 
   const appDatabaseRestorePlan = await postJson(`${baseUrl}/actions/backup-command`, {
     action: "restore",
     scope: "application",
     projectId: "node-demo",
-    backupRef: "applications/node-demo/node-demo-source-20260629.tar.gz",
+    backupRef: "manifests/manifest-node-demo.json",
     restoreMode: "database",
   });
   assert.equal(appDatabaseRestorePlan.status, 202);
   assert.equal(appDatabaseRestorePlan.body.type, "restore.queue");
   assert.equal(appDatabaseRestorePlan.body.details.restoreMode, "database");
-  assert.equal(appDatabaseRestorePlan.body.job.restoreMode, "database");
-  assert.equal(appDatabaseRestorePlan.body.job.commands.some((item) => item.command === "restore-test-postgres"), true);
-  assert.equal(appDatabaseRestorePlan.body.job.commands.some((item) => item.command === "restore-test-mariadb"), true);
+  assert.equal(appDatabaseRestorePlan.body.job.resources.length, 2);
+  assert.equal(appDatabaseRestorePlan.body.job.resources.every((item) => item.kind === "database"), true);
+  assert.equal("commands" in appDatabaseRestorePlan.body.job, false);
 
   const restorePlan = await postJson(`${baseUrl}/actions/backup-command`, {
     action: "restore",
@@ -2756,12 +2775,12 @@ test("Admin Control Center local foundation", async (t) => {
   assert.equal(restorePlan.body.details.dataChanged, false);
   assert.equal(restorePlan.body.backup.action, "restore-drill");
   assert.equal(restorePlan.body.backup.status, "queued");
-  assert.equal(restorePlan.body.backup.backupRef, "latest");
+  assert.equal(restorePlan.body.backup.backupRef, "manifests/manifest-platform.json");
   assert.equal(existsSync(path.join(backupJobsDir, "queued", `${restorePlan.body.job.id}.json`)), true);
 
   const backupJobs = await getJson(`${baseUrl}/control/backups/jobs`);
   assert.equal(backupJobs.jobs.some((job) => job.id === backupPlan.body.job.id && job.queueStatus === "queued"), true);
-  assert.equal(backupJobs.jobs.some((job) => job.id === appBackupPlan.body.job.id && job.scope === "app-node-demo" && job.queueStatus === "queued"), true);
+  assert.equal(backupJobs.jobs.some((job) => job.id === appBackupPlan.body.job.id && job.scope?.kind === "application" && job.scope?.id === "node-demo" && job.queueStatus === "queued"), true);
   assert.equal(backupJobs.jobs.some((job) => job.id === restorePlan.body.job.id && job.queueStatus === "queued"), true);
 
   const backupRecords = await getJson(`${baseUrl}/control/backups/records`);
@@ -3308,7 +3327,9 @@ function prepareFixture() {
   mkdirSync(path.join(projectsRoot, "node-demo"), { recursive: true });
   mkdirSync(path.join(projectsRoot, "node-demo", "src"), { recursive: true });
   mkdirSync(path.join(backupsRoot, "postgres"), { recursive: true });
+  mkdirSync(path.join(backupsRoot, "mariadb"), { recursive: true });
   mkdirSync(path.join(backupsRoot, "applications", "node-demo"), { recursive: true });
+  mkdirSync(path.join(backupsRoot, "manifests"), { recursive: true });
   mkdirSync(path.join(existingSecretsDir, "rclone"), { recursive: true });
   mkdirSync(stateDir, { recursive: true });
   writeFileSync(path.join(projectsRoot, "php-demo", "public", "index.php"), "<?php echo 'php-demo';\n");
@@ -3321,6 +3342,7 @@ function prepareFixture() {
   writeFileSync(path.join(backupsRoot, "postgres", "node-demo-20260629.dump.sha256"), "fixture-sha256\n");
   writeFileSync(path.join(backupsRoot, "postgres", "preview.txt"), "token=backup-secret-should-not-leak\nhealthy=true\n");
   writeFileSync(path.join(backupsRoot, "applications", "node-demo", "node-demo-source-20260629.tar.gz"), "fixture-source-archive\n");
+  writeFileSync(path.join(backupsRoot, "mariadb", "node-demo-20260629.sql.gz"), "fixture-mariadb-backup\n");
   writeFileSync(path.join(existingSecretsDir, "github_token.txt"), "existing-github-token-should-reveal-only\n", { mode: 0o600 });
   writeFileSync(path.join(existingSecretsDir, "long_provider_secret.txt"), `${longExistingVaultValue}\n`, { mode: 0o600 });
   writeFileSync(path.join(existingSecretsDir, "rclone", "rclone.conf"), "[onedrive]\ntoken = existing-rclone-token-should-reveal-only\n", { mode: 0o600 });
@@ -3352,6 +3374,82 @@ function prepareFixture() {
       linkedApps: ["node-demo"],
     },
   }, null, 2)}\n`);
+  writeBackupManifestFixture("manifest-node-demo", { kind: "application", id: "node-demo" });
+  writeBackupManifestFixture("manifest-platform", { kind: "platform", id: "platform" });
+}
+
+function writeBackupManifestFixture(id, scope) {
+  const resourceFixtures = [
+    {
+      resource: {
+        id: backupResourceId("source", "node-demo"),
+        externalId: "node-demo",
+        kind: "source",
+        projectId: "node-demo",
+        name: "node-demo",
+        sourceDirectory: "node-demo",
+      },
+      path: "applications/node-demo/node-demo-source-20260629.tar.gz",
+    },
+    {
+      resource: {
+        id: backupResourceId("database", "legacy-postgres-node-demo-external"),
+        externalId: "legacy-postgres-node-demo-external",
+        kind: "database",
+        projectId: "node-demo",
+        name: "node_demo_pg",
+        engine: "postgres",
+      },
+      path: "postgres/node-demo-20260629.dump",
+    },
+    {
+      resource: {
+        id: backupResourceId("database", "legacy-mariadb-node-demo-external"),
+        externalId: "legacy-mariadb-node-demo-external",
+        kind: "database",
+        projectId: "node-demo",
+        name: "node_demo_external",
+        engine: "mariadb",
+      },
+      path: "mariadb/node-demo-20260629.sql.gz",
+    },
+  ];
+  const job = createBackupJobDocument({
+    id: `job-${id}`,
+    operation: "backup",
+    scope,
+    resources: resourceFixtures.map((item) => item.resource),
+    requestedBy: "fixture",
+    environment: "test",
+    createdAt: "2026-06-29T10:00:00.000Z",
+  });
+  const manifest = createBackupManifestDocument({
+    id,
+    job,
+    createdAt: "2026-06-29T10:05:00.000Z",
+    artifacts: resourceFixtures.map(({ resource, path: artifactPath }, index) => {
+      const absolutePath = path.join(backupsRoot, artifactPath);
+      const content = readFileSync(absolutePath);
+      return {
+        id: `artifact-${id}-${index}`,
+        resourceId: resource.id,
+        path: artifactPath,
+        sha256: createHash("sha256").update(content).digest("hex"),
+        sizeBytes: content.length,
+        signatureKeyId: "fixture-key-v1",
+      };
+    }),
+  });
+  const signed = {
+    ...manifest,
+    signature: {
+      algorithm: "HMAC-SHA256",
+      keyId: "fixture-key-v1",
+      digest: backupDocumentDigest(manifest),
+      value: "Zml4dHVyZS1zaWduYXR1cmU",
+    },
+  };
+  writeFileSync(path.join(backupsRoot, "manifests", `${id}.json`), `${JSON.stringify(signed, null, 2)}\n`, { mode: 0o600 });
 }
 
 function isolatedStateEnv(stateRoot) {

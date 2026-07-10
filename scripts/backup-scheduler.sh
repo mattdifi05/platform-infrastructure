@@ -211,26 +211,10 @@ node_ops() {
   printf 'BACKUP_SCHEDULER_ENV_FILE=%s sh %s --run %s' "$(quote_shell_value "$ENV_FILE")" "$(quote_shell_value "$INFRA_ROOT/scripts/backup-scheduler.sh")" "$1"
 }
 
-allowed_queue_command() {
-  case "$1" in
-    backup-applications|backup-postgres|backup-mariadb|backup-minio|backup-keycloak|backup-secret-manager-metadata|offsite-backup-restic|full-restore-drill|offsite-restore-drill-restic|restore-test-postgres|restore-test-mariadb|restore-test-minio|restore-test-keycloak|restore-test-secret-manager-metadata|dr-evidence|production-go-no-go)
-      return 0
-      ;;
-    *)
-      return 1
-      ;;
-  esac
-}
-
 job_json_value() {
   file="$1"
   expression="$2"
   node -e 'const fs=require("fs"); const [file, expression]=process.argv.slice(1); const job=JSON.parse(fs.readFileSync(file, "utf8")); const value=Function("job", `return ${expression}`)(job); process.stdout.write(value == null ? "" : String(value));' "$file" "$expression"
-}
-
-job_commands() {
-  file="$1"
-  node -e 'const fs=require("fs"); const file=process.argv[1]; const job=JSON.parse(fs.readFileSync(file, "utf8")); for (const item of Array.isArray(job.commands) ? job.commands : []) { const command = typeof item === "string" ? item : item && item.command; if (command) console.log(command); }' "$file"
 }
 
 update_job_status() {
@@ -251,7 +235,9 @@ if (status === "done" || status === "failed") job.finishedAt = now;
 job.resultSummary = summary;
 if (exitCode) job.exitCode = Number(exitCode);
 if (logPath) job.logPath = logPath;
-fs.writeFileSync(file, `${JSON.stringify(job, null, 2)}\n`, { mode: 0o600 });
+const temporary = `${file}.tmp-${process.pid}-${Date.now()}`;
+fs.writeFileSync(temporary, `${JSON.stringify(job, null, 2)}\n`, { mode: 0o600, flag: "wx" });
+fs.renameSync(temporary, file);
 ' "$file" "$status" "$summary" "$exit_code" "$log_path"
 }
 
@@ -267,29 +253,22 @@ process_backup_job() {
   log_file="$LOG_DIR/manual-backup-$job_id.log"
   update_job_status "$running_file" "running" "Job preso in carico dal backup scheduler." "" "$log_file"
   exit_code=0
-  commands="$(job_commands "$running_file")"
-  if [ -z "$commands" ]; then
+  schema="$(job_json_value "$running_file" 'job.schema || ""')"
+  operation="$(job_json_value "$running_file" 'job.operation || ""')"
+  if [ "$schema" != "platform.backup-job/v1" ]; then
     exit_code=64
-    echo "No commands in job $job_id" >> "$log_file"
+    echo "Rejected unsupported backup job schema for $job_id" >> "$log_file"
+  elif [ "$operation" != "backup" ] && [ "$operation" != "restore-drill" ]; then
+    exit_code=64
+    echo "Rejected unsupported backup job operation for $job_id" >> "$log_file"
   else
-    while IFS= read -r command_name || [ -n "$command_name" ]; do
-      [ -z "$command_name" ] && continue
-      if ! allowed_queue_command "$command_name"; then
-        echo "Rejected non allow-listed backup command: $command_name" >> "$log_file"
-        exit_code=64
-        break
-      fi
-      echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] running $command_name" >> "$log_file"
-      if BACKUP_SCHEDULER_ENV_FILE="$ENV_FILE" sh "$INFRA_ROOT/scripts/backup-scheduler.sh" --run "$command_name" >> "$log_file" 2>&1; then
-        echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] completed $command_name" >> "$log_file"
-      else
-        exit_code=$?
-        echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] failed $command_name with exit $exit_code" >> "$log_file"
-        break
-      fi
-    done <<EOF
-$commands
-EOF
+    echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] executing typed $operation job $job_id" >> "$log_file"
+    if BACKUP_SCHEDULER_ENV_FILE="$ENV_FILE" sh "$INFRA_ROOT/scripts/backup-scheduler.sh" --run execute-backup-job --jobFile "$running_file" >> "$log_file" 2>&1; then
+      echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] completed typed job $job_id" >> "$log_file"
+    else
+      exit_code=$?
+      echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] typed job $job_id failed with exit $exit_code" >> "$log_file"
+    fi
   fi
   if [ "$exit_code" -eq 0 ]; then
     update_job_status "$running_file" "done" "Job completato dal backup scheduler." "" "$log_file"

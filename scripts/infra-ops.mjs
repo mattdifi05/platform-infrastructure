@@ -9,6 +9,13 @@ import os from "node:os";
 import path from "node:path";
 import tls from "node:tls";
 import { fileURLToPath } from "node:url";
+import {
+  backupDocumentDigest,
+  createBackupManifestDocument,
+  manifestArtifactForResource,
+  parseBackupJobDocument,
+  parseBackupManifestDocument,
+} from "../control-center/backup/contracts.mjs";
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const infraRoot = path.resolve(scriptDir, "..");
@@ -715,6 +722,59 @@ function verifyBackupArtifact(filePath) {
     fail(`Backup signature verification failed for ${filePath}.`);
   }
   return { hash, keyId: sidecar.keyId, signaturePath };
+}
+
+function backupManifestSignatureMessage(manifestId, digest) {
+  return `platform-backup-manifest-v1\n${manifestId}\n${digest}\n`;
+}
+
+function signBackupManifestDocument(manifest) {
+  const digest = backupDocumentDigest(manifest);
+  const activeKey = backupSigningKeys()[0];
+  const value = crypto.createHmac("sha256", activeKey.secret)
+    .update(backupManifestSignatureMessage(manifest.id, digest))
+    .digest("base64url");
+  return {
+    ...manifest,
+    signature: {
+      algorithm: "HMAC-SHA256",
+      keyId: activeKey.id,
+      digest,
+      value,
+    },
+  };
+}
+
+function verifyBackupManifestDocument(input) {
+  const manifest = parseBackupManifestDocument(input);
+  if (!manifest.signature || manifest.signature.digest !== backupDocumentDigest(manifest)) {
+    fail("Backup manifest digest verification failed.");
+  }
+  const keys = backupSigningKeys();
+  const orderedKeys = [
+    ...keys.filter((key) => key.id === manifest.signature.keyId),
+    ...keys.filter((key) => key.id !== manifest.signature.keyId),
+  ];
+  const valid = orderedKeys.some((key) => {
+    const expected = crypto.createHmac("sha256", key.secret)
+      .update(backupManifestSignatureMessage(manifest.id, manifest.signature.digest))
+      .digest("base64url");
+    return timingSafeEqualBuffer(Buffer.from(manifest.signature.value), Buffer.from(expected));
+  });
+  if (!valid) fail("Backup manifest signature verification failed.");
+  return manifest;
+}
+
+function writePrivateJsonAtomic(filePath, value) {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true, mode: 0o700 });
+  const temporary = `${filePath}.tmp-${process.pid}-${crypto.randomBytes(6).toString("hex")}`;
+  try {
+    fs.writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600, flag: "wx" });
+    fs.renameSync(temporary, filePath);
+  } catch (error) {
+    fs.rmSync(temporary, { force: true });
+    throw error;
+  }
 }
 
 function listDumpFilesRecursive(root) {
@@ -2021,7 +2081,7 @@ async function backupPostgres(options = {}) {
     log(`Backup written to ${hostPath}`);
     log(`SHA256: ${hash}`);
     log(`Signature: ${signature.signaturePath} (${signature.keyId})`);
-    return { hostPath, hash, container, database, user };
+    return { hostPath, hash, signature, container, database, user };
   } catch (error) {
     try {
       dockerExec(container, ["rm", "-f", containerPath], { allowFailure: true });
@@ -2082,12 +2142,12 @@ function safeApplicationBackupSlug(value) {
   return clean;
 }
 
-function applicationSourceDirectories() {
+function applicationSourceDirectories(options = {}) {
   if (!fs.existsSync(sourceRoot)) {
     fail(`Project source root not found: ${sourceRoot}`);
   }
   const ignoredTopLevel = new Set(["node_modules", "vendor", "packages", "scripts", "docs", "e2e", "coverage", "dist", "build", ".next", ".cache", ".turbo"]);
-  const requested = argv.project ?? argv.application ?? argv.app;
+  const requested = options.project ?? options.sourceDirectory ?? argv.project ?? argv.application ?? argv.app;
   const requestedSlug = requested ? safeApplicationBackupSlug(requested) : "";
   const entries = fs.readdirSync(sourceRoot, { withFileTypes: true })
     .filter((entry) => entry.isDirectory() && !entry.name.startsWith("."))
@@ -2107,13 +2167,13 @@ function applicationSourceDirectories() {
   return entries;
 }
 
-async function backupApplications() {
+async function backupApplications(options = {}) {
   const startedAt = new Date();
   const timestamp = backupTimestamp();
   const outputRoot = ensureBackupOutputDir(path.join(infraRoot, "backups", "applications"));
   const excludeArgs = applicationSourceBackupExcludes().flatMap((pattern) => ["--exclude", pattern]);
   const artifacts = [];
-  for (const application of applicationSourceDirectories()) {
+  for (const application of applicationSourceDirectories(options)) {
     const outputDir = ensureBackupOutputDir(path.join(outputRoot, application.slug));
     const fileName = `${application.slug}-source-${timestamp}.tar.gz`;
     const hostPath = path.join(outputDir, fileName);
@@ -2177,6 +2237,229 @@ async function backupApplications() {
   log(`Application backup reports written to ${jsonPath} and ${markdownPath}`);
   log(`Application source backups written under ${outputRoot}`);
   return payload;
+}
+
+function typedBackupJobPath() {
+  const jobsRoot = path.resolve(process.env.BACKUP_SCHEDULER_JOBS_DIR || path.join(infraRoot, "projects-portal", "state", "backup-jobs"));
+  const runningRoot = path.join(jobsRoot, "running");
+  const requested = path.resolve(argv.jobFile || "");
+  if (!argv.jobFile || !requested.startsWith(`${runningRoot}${path.sep}`)) {
+    fail("Typed backup jobs must be read from the scheduler running queue.");
+  }
+  const stat = fs.lstatSync(requested);
+  if (!stat.isFile() || stat.isSymbolicLink()) fail("Typed backup job must be a regular non-symlink file.");
+  return requested;
+}
+
+function relativeBackupArtifactPath(filePath) {
+  const root = path.resolve(backupRootPath());
+  const resolved = path.resolve(filePath);
+  if (!resolved.startsWith(`${root}${path.sep}`)) fail("Backup artifact escaped the backup root.");
+  return path.relative(root, resolved).replaceAll("\\", "/");
+}
+
+function typedArtifactRecord(resource, result) {
+  const hostPath = path.resolve(result.hostPath || "");
+  if (!hostPath || !fs.existsSync(hostPath)) fail(`Missing artifact for ${resource.id}.`);
+  const signature = result.signature || verifyBackupArtifact(hostPath);
+  const hash = result.hash || sha256File(hostPath);
+  if (signature.hash && signature.hash !== hash) fail(`Artifact signature hash mismatch for ${resource.id}.`);
+  return {
+    id: `artifact-${resource.externalId}-${hash.slice(0, 12)}`,
+    resourceId: resource.id,
+    path: relativeBackupArtifactPath(hostPath),
+    sha256: hash,
+    sizeBytes: fs.statSync(hostPath).size,
+    signatureKeyId: signature.keyId,
+  };
+}
+
+function writeTypedBackupManifest(job, artifacts) {
+  const manifestId = `manifest-${job.id}`;
+  const manifest = createBackupManifestDocument({ id: manifestId, job, artifacts });
+  if (!manifest.coverage.complete) fail(`Typed backup manifest is incomplete: ${manifest.coverage.missingResourceIds.join(", ")}`);
+  const signed = signBackupManifestDocument(manifest);
+  const manifestDir = ensureBackupOutputDir(path.join(backupRootPath(), "manifests"));
+  const manifestPath = path.join(manifestDir, `${manifestId}.json`);
+  writePrivateJsonAtomic(manifestPath, signed);
+  verifyBackupManifestDocument(JSON.parse(fs.readFileSync(manifestPath, "utf8")));
+  return { manifest: signed, manifestPath, relativePath: relativeBackupArtifactPath(manifestPath) };
+}
+
+function updateTypedBackupJob(jobPath, patch) {
+  const current = JSON.parse(fs.readFileSync(jobPath, "utf8"));
+  writePrivateJsonAtomic(jobPath, {
+    ...current,
+    ...patch,
+    updatedAt: new Date().toISOString(),
+  });
+}
+
+async function executeTypedBackupResource(resource) {
+  if (resource.kind === "source") {
+    const result = await backupApplications({ project: resource.sourceDirectory });
+    const artifact = result.metadata?.artifacts?.find((item) => item.application === resource.sourceDirectory || item.sourceDirectory === resource.sourceDirectory);
+    if (!artifact) fail(`Source backup did not produce the exact resource ${resource.id}.`);
+    return typedArtifactRecord(resource, {
+      hostPath: artifact.artifactPath,
+      hash: artifact.artifactSha256,
+      signature: { keyId: artifact.signatureKeyId, signaturePath: artifact.signaturePath },
+    });
+  }
+  if (resource.kind === "database" && resource.engine === "postgres") {
+    return typedArtifactRecord(resource, await backupPostgres({
+      container: process.env.BACKUP_POSTGRES_CONTAINER || "enterprise-postgres",
+      database: resource.name,
+    }));
+  }
+  if (resource.kind === "database" && resource.engine === "mariadb") {
+    return typedArtifactRecord(resource, await backupMariadb({
+      container: process.env.BACKUP_MARIADB_CONTAINER || "mariadb",
+      database: resource.name,
+    }));
+  }
+  fail(`Typed backup resource is not implemented by T06: ${resource.kind}.`);
+}
+
+function readVerifiedSourceManifest(relativePath) {
+  const root = path.resolve(backupRootPath());
+  const manifestPath = resolveInside(root, path.resolve(root, relativePath));
+  if (!manifestPath.startsWith(`${path.join(root, "manifests")}${path.sep}`)) fail("Restore manifest must be under backups/manifests.");
+  return {
+    manifestPath,
+    manifest: verifyBackupManifestDocument(JSON.parse(fs.readFileSync(manifestPath, "utf8"))),
+  };
+}
+
+function assertRestoreResourceMatchesManifest(resource, manifest) {
+  const declared = manifest.resources.find((item) => item.id === resource.id);
+  if (!declared || JSON.stringify(declared) !== JSON.stringify(resource)) {
+    fail(`Restore resource does not exactly match source manifest: ${resource.id}`);
+  }
+  const artifact = manifestArtifactForResource(manifest, resource.id);
+  if (!artifact) fail(`Source manifest has no artifact for ${resource.id}.`);
+  return artifact;
+}
+
+function restoreTestApplicationSource(resource, backupFile) {
+  const startedAt = new Date();
+  verifyBackupArtifact(backupFile);
+  const entries = output("tar", ["-tzf", backupFile]).split(/\r?\n/).filter(Boolean);
+  if (!entries.length) fail(`Source archive is empty for ${resource.id}.`);
+  const verboseEntries = output("tar", ["-tvzf", backupFile]).split(/\r?\n/).filter(Boolean);
+  if (verboseEntries.some((entry) => /^[lh]/.test(entry.trim()))) fail("Source archive contains a link entry.");
+  for (const entry of entries) {
+    const normalized = entry.replace(/^\.\//, "");
+    if (normalized.startsWith("/") || normalized.split("/").includes("..")) fail("Source archive contains an unsafe path.");
+    if (!(normalized === resource.sourceDirectory || normalized.startsWith(`${resource.sourceDirectory}/`))) {
+      fail(`Source archive contains a foreign project path: ${normalized}`);
+    }
+  }
+  const target = makeOpsTempDir(`restore-source-${resource.projectId}-`);
+  try {
+    run("tar", ["-xzf", backupFile, "-C", target]);
+    const restoredRoot = path.join(target, resource.sourceDirectory);
+    if (!fs.existsSync(restoredRoot) || !fs.statSync(restoredRoot).isDirectory()) fail("Source restore drill did not recreate the expected project root.");
+    const summary = directorySummary(restoredRoot);
+    if (summary.files < 1) fail("Source restore drill produced no files.");
+    return { resourceId: resource.id, status: "passed", durationMs: Date.now() - startedAt.getTime(), files: summary.files };
+  } finally {
+    fs.rmSync(target, { recursive: true, force: true });
+  }
+}
+
+function directorySummary(root) {
+  const summary = { files: 0, directories: 0 };
+  const stack = [root];
+  while (stack.length) {
+    const current = stack.pop();
+    const stat = fs.lstatSync(current);
+    if (stat.isSymbolicLink()) fail("Restore drill output contains a symlink.");
+    if (stat.isDirectory()) {
+      summary.directories += 1;
+      for (const name of fs.readdirSync(current)) stack.push(path.join(current, name));
+    } else if (stat.isFile()) {
+      summary.files += 1;
+    }
+  }
+  return summary;
+}
+
+async function executeTypedRestoreResource(resource, artifact) {
+  const backupFile = path.resolve(backupRootPath(), artifact.path);
+  const verified = verifyBackupArtifact(backupFile);
+  if (verified.hash !== artifact.sha256 || fs.statSync(backupFile).size !== artifact.sizeBytes) {
+    fail(`Restore artifact metadata mismatch for ${resource.id}.`);
+  }
+  if (resource.kind === "source") return restoreTestApplicationSource(resource, backupFile);
+  if (resource.kind === "database" && resource.engine === "postgres") {
+    const result = await restoreTestPostgres({
+      container: process.env.BACKUP_POSTGRES_CONTAINER || "enterprise-postgres",
+      database: resource.name,
+      backupFile,
+      countAllUserTables: true,
+      minimumTables: 1,
+    });
+    return { resourceId: resource.id, status: "passed", testDatabase: result.testDatabase };
+  }
+  if (resource.kind === "database" && resource.engine === "mariadb") {
+    const result = await restoreTestMariadb({
+      container: process.env.BACKUP_MARIADB_CONTAINER || "mariadb",
+      backupFile,
+      minSchemas: 1,
+    });
+    return { resourceId: resource.id, status: "passed", restoredSchemas: result.restoredSchemas };
+  }
+  fail(`Typed restore resource is not implemented by T06: ${resource.kind}.`);
+}
+
+async function executeBackupJob() {
+  const jobPath = typedBackupJobPath();
+  const job = parseBackupJobDocument(JSON.parse(fs.readFileSync(jobPath, "utf8")));
+  if (job.status !== "running") fail("Typed backup executor accepts only jobs claimed by the scheduler.");
+  const startedAt = new Date();
+  let manifestPath = "";
+  let results = [];
+  if (job.operation === "backup") {
+    const artifacts = [];
+    for (const resource of job.resources) artifacts.push(await executeTypedBackupResource(resource));
+    const written = writeTypedBackupManifest(job, artifacts);
+    manifestPath = written.relativePath;
+    results = written.manifest.artifacts.map((artifact) => ({ resourceId: artifact.resourceId, status: "passed", artifactPath: artifact.path }));
+  } else {
+    const source = readVerifiedSourceManifest(job.sourceManifestPath);
+    manifestPath = relativeBackupArtifactPath(source.manifestPath);
+    for (const resource of job.resources) {
+      const artifact = assertRestoreResourceMatchesManifest(resource, source.manifest);
+      results.push(await executeTypedRestoreResource(resource, artifact));
+    }
+  }
+  const finishedAt = new Date();
+  const report = {
+    generatedAt: finishedAt.toISOString(),
+    startedAt: startedAt.toISOString(),
+    finishedAt: finishedAt.toISOString(),
+    durationMs: finishedAt.getTime() - startedAt.getTime(),
+    status: "passed",
+    schema: job.schema,
+    jobId: job.id,
+    operation: job.operation,
+    scope: job.scope,
+    resourceIds: job.resources.map((resource) => resource.id),
+    manifestPath,
+    results,
+    liveDataChanged: false,
+  };
+  const reportName = `typed-${job.operation}-${job.id}`;
+  const reportPath = writeJsonReport("backup-jobs", reportName, report);
+  const relativeReportPath = path.relative(infraRoot, reportPath).replaceAll("\\", "/");
+  updateTypedBackupJob(jobPath, {
+    manifestPath,
+    reportPaths: [relativeReportPath],
+    resultSummary: `Typed ${job.operation} completed for ${job.resources.length} exact resources.`,
+  });
+  log(`Typed backup job report written to ${reportPath}`);
+  return report;
 }
 
 async function certificateExpiryCheck() {
@@ -10252,6 +10535,8 @@ async function restoreTestPostgres(options = {}) {
   const database = options.database ?? argv.database ?? defaultPostgresApplicationDatabase();
   const testDatabase = options.testDatabase ?? argv.testDatabase ?? "platform_restore_test";
   const user = options.user ?? argv.user ?? "postgres";
+  const countAllUserTables = options.countAllUserTables === true || booleanFlag(argv.countAllUserTables);
+  const minimumTables = positiveInteger(options.minimumTables ?? argv.minimumTables ?? 10, "--minimumTables", 1);
   const accountSchemaName = sqlIdentifierName(options.accountSchema ?? argv.accountSchema ?? postgresAccountSchemaName(database), "PostgreSQL account schema");
   const accountSchema = sqlIdentifier(accountSchemaName);
   const backupFile = resolveInside(path.join(infraRoot, "backups"), path.resolve(backupFileArg));
@@ -10267,13 +10552,16 @@ async function restoreTestPostgres(options = {}) {
     run("docker", ["cp", backupFile, `${container}:${containerPath}`]);
     dockerExec(container, ["pg_restore", "-U", user, "-d", testDatabase, "--no-owner", "--no-acl", containerPath]);
     dockerExec(container, ["rm", "-f", containerPath]);
-    const tables = Number(postgresOut(container, testDatabase, user, `select count(*) from information_schema.tables where table_schema = ${sqlString(accountSchemaName)};`));
+    const tableQuery = countAllUserTables
+      ? "select count(*) from information_schema.tables where table_schema not in ('information_schema','pg_catalog');"
+      : `select count(*) from information_schema.tables where table_schema = ${sqlString(accountSchemaName)};`;
+    const tables = Number(postgresOut(container, testDatabase, user, tableQuery));
     dockerExec(container, ["psql", "-U", user, "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-c", `drop database if exists ${testDatabaseIdentifier} with (force);`]);
-    if (tables < 10) {
-      fail(`Restore test produced too few ${accountSchemaName} tables: ${tables}`);
+    if (tables < minimumTables) {
+      fail(`Restore test produced too few ${countAllUserTables ? "user" : accountSchemaName} tables: ${tables}`);
     }
-    recordBackupRestoreRun({ container, database, user, operation: "restore_test", status: "success", artifactPath: backupFile, artifactSha256: hash, startedAt, metadata: { restoredTables: tables, restoredSchema: accountSchemaName, testDatabase } });
-    log(`Restore test passed with ${tables} ${accountSchema} tables.`);
+    recordBackupRestoreRun({ container, database, user, operation: "restore_test", status: "success", artifactPath: backupFile, artifactSha256: hash, startedAt, metadata: { restoredTables: tables, restoredSchema: countAllUserTables ? "all-user-schemas" : accountSchemaName, testDatabase } });
+    log(`Restore test passed with ${tables} ${countAllUserTables ? "user" : accountSchema} tables.`);
     return { backupFile, hash, tables, testDatabase, container, database, user };
   } catch (error) {
     try {
@@ -10319,22 +10607,27 @@ async function backupRestoreDrill() {
 
 async function backupMariadb(options = {}) {
   const container = options.container ?? argv.container ?? "mariadb";
+  const requestedDatabase = options.database ?? argv.database ?? "";
+  const database = requestedDatabase ? sqlIdentifierName(requestedDatabase, "MariaDB database") : "";
   const outputDir = ensureBackupOutputDir(path.resolve(options.outputDir ?? argv.outputDir ?? path.join(infraRoot, "backups", "mariadb")));
   const startedAt = new Date();
   const timestamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\..+/, "").replace("T", "-");
-  const fileName = `mariadb-all-${timestamp}.sql.gz`;
+  const fileName = `mariadb-${database || "all"}-${timestamp}.sql.gz`;
   const containerPath = `/tmp/${fileName}`;
   const hostPath = path.join(outputDir, fileName);
 
   try {
-    log("Creating MariaDB full backup for all local PHP project databases...");
+    log(database ? `Creating MariaDB backup for exact database '${database}'...` : "Creating MariaDB full backup for all local PHP project databases...");
+    const databaseSelection = database
+      ? `DATABASES=${shellQuote(database)}`
+      : 'DATABASES="$(mariadb -uroot -p"$MARIADB_ROOT_PASSWORD" -N -e "select schema_name from information_schema.schemata where schema_name not in (\'information_schema\',\'mysql\',\'performance_schema\',\'sys\') order by schema_name")"';
     dockerExec(container, [
       "sh",
       "-ec",
       [
         "test -s /run/secrets/mariadb_root_password",
         'MARIADB_ROOT_PASSWORD="$(cat /run/secrets/mariadb_root_password)"',
-        'DATABASES="$(mariadb -uroot -p"$MARIADB_ROOT_PASSWORD" -N -e "select schema_name from information_schema.schemata where schema_name not in (\'information_schema\',\'mysql\',\'performance_schema\',\'sys\') order by schema_name")"',
+        databaseSelection,
         'test -n "$DATABASES"',
         `mariadb-dump --single-transaction --routines --events --triggers --databases $DATABASES -uroot -p"$MARIADB_ROOT_PASSWORD" | gzip -9 > ${shellQuote(containerPath)}`,
       ].join(" && "),
@@ -10362,12 +10655,12 @@ async function backupMariadb(options = {}) {
       artifactSha256: hash,
       signature,
       startedAt,
-      metadata: { scope: "all-user-databases", compression: "gzip" },
+      metadata: { scope: database ? "exact-database" : "all-user-databases", database: database || null, compression: "gzip" },
     });
     log(`MariaDB backup written to ${hostPath}`);
     log(`SHA256: ${hash}`);
     log(`Signature: ${signature.signaturePath} (${signature.keyId})`);
-    return { hostPath, hash, container };
+    return { hostPath, hash, signature, container, database: database || null };
   } catch (error) {
     try {
       dockerExec(container, ["rm", "-f", containerPath], { allowFailure: true });
@@ -12145,6 +12438,10 @@ async function staticSecurityCheckBody() {
   const vaultMigrationScript = readText(path.join(infraRoot, "scripts", "control-center-vault-reencrypt.mjs"));
   const databaseOwnershipScript = readText(path.join(infraRoot, "control-center", "database", "ownership.mjs"));
   const databasePrincipalMigrationScript = readText(path.join(infraRoot, "scripts", "database-principal-migration-plan.mjs"));
+  const backupContractScript = readText(path.join(infraRoot, "control-center", "backup", "contracts.mjs"));
+  const backupContractTest = readText(path.join(infraRoot, "control-center", "tests", "backup-contracts.test.mjs"));
+  const backupContractSandboxTest = readText(path.join(infraRoot, "scripts", "backup-contract-sandbox-test.mjs"));
+  const backupDatabaseSandboxTest = readText(path.join(infraRoot, "scripts", "backup-database-sandbox-test.mjs"));
   const mariaProvisionSource = controlCenterServer.slice(
     controlCenterServer.indexOf("function applyLiveMariaDbCreate"),
     controlCenterServer.indexOf("function applyLiveMariaDbCredential"),
@@ -12836,6 +13133,17 @@ async function staticSecurityCheckBody() {
   assertNoMatch(mariaProvisionSource, /ALTER USER|CREATE USER IF NOT EXISTS|CREATE DATABASE IF NOT EXISTS/, "MariaDB provisioning must never alter or adopt an existing principal/database.");
   assertNoMatch(postgresProvisionSource, /ALTER ROLE|IF NOT EXISTS|ALTER DATABASE/, "PostgreSQL provisioning must never alter or adopt an existing privileged role/database.");
   assertMatch(databasePrincipalMigrationScript, /read-only[\s\S]*mutationExecuted:\s*false[\s\S]*buildPrincipalMigrationPlan/, "Legacy database principal migration must remain a read-only dual-credential plan.");
+  assertMatch(backupContractScript, /platform\.backup-job\/v1[\s\S]*platform\.backup-manifest\/v1[\s\S]*normalizeBackupResources/, "Backup jobs and manifests must use a versioned typed resource contract.");
+  assertMatch(backupContractScript, /coverage:[\s\S]*requiredResourceIds[\s\S]*artifactResourceIds[\s\S]*missingResourceIds[\s\S]*complete/, "Backup manifests must prove exact resource coverage.");
+  assertNoMatch(controlCenterServer, /applicationBackupNameTokens|backupEntryMatchesTokens|commands:\s*commands\.map/, "Control Center backup association must not use fuzzy names or caller-selected command arrays.");
+  assertMatch(controlCenterServer, /createBackupJobDocument[\s\S]*resourceIds:[\s\S]*readBackupManifests[\s\S]*scope\.id === project\.slug/, "Control Center must queue typed resources and import manifests by exact project identity.");
+  assertMatch(controlCenterServer, /function planDatabaseBackup[\s\S]*backupResourceId\("database", database\.id\)[\s\S]*createBackupJob/, "Database backup UI must queue a real exact-resource job.");
+  assertMatch(backupSchedulerScript, /platform\.backup-job\/v1[\s\S]*execute-backup-job --jobFile "\$running_file"/, "Backup scheduler must hand one validated job file to the typed executor.");
+  assertNoMatch(backupSchedulerScript, /job_commands|Rejected non allow-listed backup command/, "Backup scheduler must not execute command arrays from queue documents.");
+  assertMatch(opsScript, /verifyBackupManifestDocument[\s\S]*HMAC-SHA256[\s\S]*executeBackupJob[\s\S]*assertRestoreResourceMatchesManifest/, "Ops executor must verify signed manifests and exact restore resource bindings.");
+  assertMatch(backupContractTest, /similarly named projects never match by substring[\s\S]*legacy global command queues/, "Backup contract tests must cover collision and legacy command rejection.");
+  assertMatch(backupContractSandboxTest, /tampered manifest was accepted[\s\S]*liveDataChanged:\s*false/, "Backup sandbox test must reject manifest tampering and prove no live source mutation.");
+  assertMatch(backupDatabaseSandboxTest, /fixture-postgres[\s\S]*fixture-mariadb[\s\S]*tampered manifest[\s\S]*liveDatabaseContainersChanged:\s*false/, "Database backup sandbox must prove exact cross-engine backup/restore without changing live containers.");
   assertMatch(secretManagerScript, /mariadb_root_password[\s\S]*phpmyadmin_control_password/, "Infra Secret Manager must manage MariaDB and phpMyAdmin local Docker secrets.");
   assertMatch(opsScript, /runSecretManager\(\["verify"/, "Enterprise local secret validation must verify the proprietary secret manager store.");
   assertMatch(secretRotationEvidenceWrapper, /secret-rotation-evidence/, "Secret rotation evidence wrapper must delegate to the Dockerized ops runner.");
@@ -14472,6 +14780,7 @@ Commands:
   enterprise-10-check
   evidence-bundle
   evidence-bundle-verify
+  execute-backup-job
   external-uptime-check
   failure-tests
   feature-flags-kill-switches
@@ -14573,6 +14882,7 @@ const commands = {
   "enterprise-10-check": enterpriseTenCheck,
   "evidence-bundle": evidenceBundle,
   "evidence-bundle-verify": evidenceBundleVerify,
+  "execute-backup-job": executeBackupJob,
   "external-uptime-check": externalUptimeCheck,
   "failure-tests": failureTests,
   "feature-flags-kill-switches": featureFlagsKillSwitches,

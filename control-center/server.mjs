@@ -20,6 +20,13 @@ import {
   reservePrincipalBinding,
 } from "./database/ownership.mjs";
 import {
+  backupDocumentDigest,
+  backupResourceId,
+  createBackupJobDocument,
+  parseBackupJobDocument,
+  parseBackupManifestDocument,
+} from "./backup/contracts.mjs";
+import {
   loadVaultKeyring,
   openLegacyVaultCiphertext,
   openVaultCiphertext,
@@ -3933,18 +3940,19 @@ function buildApplicationBackupInventories(context) {
 }
 
 function applicationBackupInventory(context, project) {
-  const databases = projectDatabases(context, project);
+  const databases = projectBackupDatabases(context, project);
   const storage = projectStorage(context, project);
-  const commands = applicationBackupCommands(context, project);
+  const resources = applicationBackupResources(context, project);
   const sourcePath = applicationSourceBackupPath(project);
   const sourceStats = readBackupDirectoryStats(sourcePath);
-  const artifacts = applicationBackupArtifacts(context, project);
-  const restoreOptions = applicationBackupRestoreOptions(artifacts);
+  const manifests = applicationBackupManifests(project);
+  const artifacts = manifests.flatMap((manifest) => manifest.artifacts);
+  const restoreOptions = applicationBackupRestoreOptions(manifests);
   const allSizeBytes = sourceStats.sizeBytes + artifacts.reduce((total, artifact) => total + Number(artifact.sizeBytes || 0), 0);
-  const latest = [...artifacts].sort((a, b) => Number(b.mtimeMs || 0) - Number(a.mtimeMs || 0))[0] || null;
-  const jobs = (context.backups?.jobs || []).filter((job) => job.scope === applicationBackupScope(project.slug)).slice(0, 5);
+  const latest = manifests[0] || null;
+  const jobs = (context.backups?.jobs || []).filter((job) => job.scope?.kind === "application" && job.scope?.id === project.slug).slice(0, 5);
   const records = (context.backupRecords || []).filter((record) => record.scope === applicationBackupScope(project.slug)).slice(0, 5);
-  const hasBackupFiles = sourceStats.fileCount > 0 || artifacts.length > 0;
+  const hasBackupFiles = manifests.length > 0;
   return sanitizeEvent({
     projectId: project.slug,
     projectName: project.name,
@@ -3956,17 +3964,17 @@ function applicationBackupInventory(context, project) {
     fileCount: sourceStats.fileCount + artifacts.length,
     sizeBytes: allSizeBytes,
     sizeLabel: usageBytesLabel(allSizeBytes),
-    latestName: latest?.name || "",
+    latestName: latest?.id || "",
     latestPath: latest?.path || "",
-    latestModifiedAt: latest?.modifiedAt || "",
+    latestModifiedAt: latest?.createdAt ? italianDateTimeLabel(latest.createdAt) : "",
     databaseCount: databases.length,
     storageCount: storage.buckets.length + storage.webspaces.length,
-    commands,
+    resourceCount: resources.length,
     restoreOptions,
     jobs,
     records,
-    status: hasBackupFiles ? "available" : commands.length ? "ready" : "missing",
-    statusLabel: hasBackupFiles ? "Disponibile" : commands.length ? "Pronto" : "Non configurato",
+    status: hasBackupFiles ? "available" : resources.length ? "ready" : "missing",
+    statusLabel: hasBackupFiles ? "Disponibile" : resources.length ? "Pronto" : "Non configurato",
   });
 }
 
@@ -3991,82 +3999,95 @@ function applicationRestoreModeLabel(value) {
   return labels[applicationRestoreMode(value)] || "tutto";
 }
 
-function applicationBackupCommands(context, projectOrId, mode = "all") {
+function projectBackupDatabases(context, projectOrId) {
+  const project = resolveContextProject(context, projectOrId);
+  if (!project) return [];
+  const identities = projectIdentitySet(project);
+  return context.databases.filter((database) => identities.has(database.projectId)
+    || databaseLinkedApps(database).some((linkedId) => identities.has(linkedId)));
+}
+
+function applicationBackupResources(context, projectOrId, mode = "all") {
   const project = resolveContextProject(context, projectOrId);
   if (!project) return [];
   const backupMode = applicationBackupMode(mode);
-  const commands = new Map();
-  if (backupMode === "all" || backupMode === "source") {
-    commands.set("backup-applications", { command: "backup-applications", label: "Backup sorgenti applicazioni" });
+  const resources = [];
+  if ((backupMode === "all" || backupMode === "source") && project.filesystemExists !== false) {
+    resources.push({
+      id: backupResourceId("source", project.slug),
+      externalId: project.slug,
+      kind: "source",
+      projectId: project.slug,
+      name: project.slug,
+      sourceDirectory: path.basename(String(project.relativePath || project.slug)),
+    });
   }
-  const databases = projectDatabases(context, project);
-  if ((backupMode === "all" || backupMode === "database") && databases.some((database) => database.engine === "postgres")) {
-    commands.set("backup-postgres", { command: "backup-postgres", label: "Backup PostgreSQL" });
-  }
-  if ((backupMode === "all" || backupMode === "database") && databases.some((database) => database.engine === "mariadb")) {
-    commands.set("backup-mariadb", { command: "backup-mariadb", label: "Backup MariaDB" });
-  }
-  const storage = projectStorage(context, project);
-  if (backupMode === "all" && storage.buckets.length) {
-    commands.set("backup-minio", { command: "backup-minio", label: "Backup MinIO" });
-  }
-  return [...commands.values()];
-}
-
-function applicationBackupArtifacts(context, project) {
-  const databases = projectDatabases(context, project);
-  const storage = projectStorage(context, project);
-  const tokens = new Set([...projectIdentitySet(project)].map(resourceToken).filter(Boolean));
-  for (const token of applicationBackupNameTokens(project)) {
-    tokens.add(token);
-  }
-  for (const database of databases) {
-    for (const value of [database.id, database.name, database.displayName, database.ownerRole]) {
-      const token = resourceToken(value);
-      if (token) tokens.add(token);
+  if (backupMode === "all" || backupMode === "database") {
+    for (const database of projectBackupDatabases(context, project)) {
+      resources.push({
+        id: backupResourceId("database", database.id),
+        externalId: database.id,
+        kind: "database",
+        projectId: project.slug,
+        name: database.name,
+        engine: database.engine,
+      });
     }
   }
-  for (const item of [...storage.webspaces, ...storage.buckets]) {
-    for (const value of [item.id, item.name, item.path, item.bucketName]) {
-      const token = resourceToken(value);
-      if (token) tokens.add(token);
+  return resources;
+}
+
+function readBackupManifests() {
+  const root = path.resolve(backupRoot);
+  const directory = path.join(root, "manifests");
+  if (!existsSync(directory)) return [];
+  const manifests = [];
+  for (const name of readdirSync(directory).filter((item) => item.endsWith(".json")).slice(0, 500)) {
+    const target = path.resolve(directory, name);
+    if (!target.startsWith(`${directory}${path.sep}`)) continue;
+    try {
+      const parsed = parseBackupManifestDocument(JSON.parse(readFileSync(target, "utf8")));
+      if (!parsed.signature || parsed.signature.digest !== backupDocumentDigest(parsed)) continue;
+      const artifacts = parsed.artifacts.map((artifact) => {
+        const artifactPath = path.resolve(root, artifact.path);
+        if (!artifactPath.startsWith(`${root}${path.sep}`) || !existsSync(artifactPath)) return null;
+        const stat = statSync(artifactPath);
+        if (!stat.isFile() || stat.size !== artifact.sizeBytes) return null;
+        return {
+          ...artifact,
+          name: path.basename(artifact.path),
+          sizeLabel: usageBytesLabel(artifact.sizeBytes),
+          modifiedAt: italianDateTimeLabel(stat.mtime),
+          mtimeMs: stat.mtimeMs,
+        };
+      }).filter(Boolean);
+      if (artifacts.length !== parsed.artifacts.length) continue;
+      manifests.push({
+        ...parsed,
+        path: joinRelativePath("manifests", name),
+        artifacts,
+      });
+    } catch {
+      // Invalid, unsigned or incomplete manifests never enter the application inventory.
     }
   }
-  const familyDirs = new Set(databases.map((database) => database.engine === "postgres" ? "postgres" : "mariadb"));
-  if (storage.buckets.length) familyDirs.add("minio");
-  const directSourcePrefix = `${joinRelativePath("applications", project.slug)}/`;
-  const resolvedSourcePrefix = `${applicationSourceBackupPath(project)}/`;
-  const artifacts = [];
-  for (const family of familyDirs) {
-    artifacts.push(...backupArtifactEntriesRecursive(family).filter((entry) => backupEntryMatchesTokens(entry, tokens)));
-  }
-  artifacts.push(...backupArtifactEntriesRecursive("applications").filter((entry) => String(entry.path || "").startsWith(directSourcePrefix) || String(entry.path || "").startsWith(resolvedSourcePrefix)));
-  const seen = new Set();
-  return artifacts.filter((entry) => {
-    if (seen.has(entry.path)) return false;
-    seen.add(entry.path);
-    return true;
-  }).sort((a, b) => Number(b.mtimeMs || 0) - Number(a.mtimeMs || 0)).slice(0, 80);
+  return manifests.sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
 }
 
-function applicationBackupRestoreOptions(artifacts) {
-  return (artifacts || [])
-    .filter((entry) => backupDataArtifactName(entry.name || entry.path))
-    .map((entry) => ({
-      name: entry.name,
-      path: entry.path,
-      label: applicationBackupOptionLabel(entry),
-      modifiedAt: entry.modifiedAt || "",
-      sizeLabel: entry.sizeLabel || "",
-      kind: applicationBackupArtifactKind(entry.path || entry.name),
-    }));
+function applicationBackupManifests(project) {
+  return readBackupManifests().filter((manifest) => manifest.scope.kind === "application" && manifest.scope.id === project.slug);
 }
 
-function applicationBackupOptionLabel(entry) {
-  const kind = applicationBackupArtifactKind(entry.path || entry.name);
-  const when = entry.modifiedAt ? ` - ${entry.modifiedAt}` : "";
-  const size = entry.sizeLabel ? ` - ${entry.sizeLabel}` : "";
-  return `${kind}: ${entry.name}${when}${size}`;
+function applicationBackupRestoreOptions(manifests) {
+  return (manifests || []).map((manifest) => ({
+    name: manifest.id,
+    path: manifest.path,
+    label: `${italianDateTimeLabel(manifest.createdAt)} - ${manifest.artifacts.length} risorse`,
+    modifiedAt: italianDateTimeLabel(manifest.createdAt),
+    sizeLabel: usageBytesLabel(manifest.artifacts.reduce((total, artifact) => total + artifact.sizeBytes, 0)),
+    kind: "Manifest firmato",
+    manifest,
+  }));
 }
 
 function applicationBackupArtifactKind(value) {
@@ -4079,46 +4100,7 @@ function applicationBackupArtifactKind(value) {
 }
 
 function applicationSourceBackupPath(project) {
-  const candidates = [
-    project.slug,
-    project.id,
-    ...(Array.isArray(project.aliases) ? project.aliases : []),
-    ...applicationBackupNameTokens(project),
-  ].map(sanitizeIdentifier).filter(Boolean);
-  const directories = applicationSourceBackupDirectories();
-  const exact = candidates.find((candidate) => directories.has(candidate));
-  return joinRelativePath("applications", exact || sanitizeIdentifier(project.slug || project.id || project.name));
-}
-
-function applicationSourceBackupDirectories() {
-  const applicationsPath = path.resolve(backupRoot, "applications");
-  if (!existsSync(applicationsPath)) return new Set();
-  try {
-    return new Set(readdirSync(applicationsPath, { withFileTypes: true })
-      .filter((entry) => entry.isDirectory() && !entry.name.startsWith("."))
-      .map((entry) => sanitizeIdentifier(entry.name))
-      .filter(Boolean));
-  } catch {
-    return new Set();
-  }
-}
-
-function applicationBackupNameTokens(project) {
-  const values = [project.name, project.displayName, ...(Array.isArray(project.aliases) ? project.aliases : [])].filter(Boolean);
-  const tokens = new Set();
-  for (const value of values) {
-    const full = resourceToken(value);
-    if (full) tokens.add(full);
-    for (const part of String(value).split(/[^a-zA-Z0-9]+/).map(resourceToken).filter((token) => token.length >= 3)) {
-      tokens.add(part);
-    }
-  }
-  return [...tokens];
-}
-
-function backupEntryMatchesTokens(entry, tokens) {
-  const haystack = resourceToken(path.basename(String(entry.path || entry.name || "")));
-  return [...tokens].some((token) => token && token.length >= 3 && (haystack === token || haystack.includes(token) || token.includes(haystack)));
+  return joinRelativePath("applications", sanitizeIdentifier(project.slug || project.id || project.name));
 }
 
 function safeReadBackupFiles(requestedPath = "") {
@@ -4496,25 +4478,34 @@ function redactBackupPreviewText(text) {
   };
 }
 
-function backupRunCommandMap() {
-  return new Map([
-    ["applications", [{ command: "backup-applications", label: "Backup applicazioni" }]],
-    ["postgres", [{ command: "backup-postgres", label: "Backup PostgreSQL" }]],
-    ["mariadb", [{ command: "backup-mariadb", label: "Backup MariaDB" }]],
-    ["minio", [{ command: "backup-minio", label: "Backup MinIO" }]],
-    ["keycloak", [{ command: "backup-keycloak", label: "Backup Keycloak" }]],
-    ["secret-manager", [{ command: "backup-secret-manager-metadata", label: "Backup Secret vault" }]],
-    ["offsite-restic", [{ command: "offsite-backup-restic", label: "Backup off-site Restic" }]],
-    ["all", [
-      { command: "backup-applications", label: "Backup applicazioni" },
-      { command: "backup-postgres", label: "Backup PostgreSQL" },
-      { command: "backup-mariadb", label: "Backup MariaDB" },
-      { command: "backup-minio", label: "Backup MinIO" },
-      { command: "backup-keycloak", label: "Backup Keycloak" },
-      { command: "backup-secret-manager-metadata", label: "Backup Secret vault" },
-      { command: "offsite-backup-restic", label: "Backup off-site Restic" },
-    ]],
-  ]);
+function uniqueBackupResources(resources) {
+  const seen = new Set();
+  return resources.filter((resource) => {
+    if (seen.has(resource.id)) return false;
+    seen.add(resource.id);
+    return true;
+  });
+}
+
+function platformBackupResources(context, requestedScope) {
+  const resources = [];
+  if (requestedScope === "all" || requestedScope === "applications") {
+    for (const project of context.projects) resources.push(...applicationBackupResources(context, project, "source"));
+  }
+  if (requestedScope === "all" || requestedScope === "postgres" || requestedScope === "mariadb") {
+    for (const database of context.databases) {
+      if (!database.projectId || (requestedScope !== "all" && database.engine !== requestedScope)) continue;
+      resources.push({
+        id: backupResourceId("database", database.id),
+        externalId: database.id,
+        kind: "database",
+        projectId: database.projectId,
+        name: database.name,
+        engine: database.engine,
+      });
+    }
+  }
+  return uniqueBackupResources(resources);
 }
 
 function resolveBackupRunRequest(payload, context) {
@@ -4526,28 +4517,28 @@ function resolveBackupRunRequest(payload, context) {
     const project = resolveContextProject(context, projectId);
     if (!project) throw new ValidationError("Applicazione backup non trovata.");
     const mode = applicationBackupMode(payload.backupMode || payload.backupContents || "all");
-    const commands = applicationBackupCommands(context, project, mode);
-    if (!commands.length) throw new ValidationError("Questa applicazione non ha backend backup supportati.");
-    return { scope: applicationBackupScope(project.slug), commands, project, mode };
+    const resources = applicationBackupResources(context, project, mode);
+    if (!resources.length) throw new ValidationError("Questa applicazione non ha risorse backup eseguibili con identita' esatta.");
+    return {
+      scopeLabel: applicationBackupScope(project.slug),
+      scope: { kind: "application", id: project.slug },
+      resources,
+      project,
+      mode,
+    };
   }
-  const commands = backupRunCommandMap().get(requestedScope);
-  if (!commands?.length) throw new ValidationError("Ambito backup non supportato.");
-  return { scope: requestedScope, commands, project: null };
-}
-
-function backupRestoreCommandMap() {
-  return new Map([
-    ["postgres", [{ command: "restore-test-postgres", label: "Restore PostgreSQL" }]],
-    ["mariadb", [{ command: "restore-test-mariadb", label: "Restore MariaDB" }]],
-    ["minio", [{ command: "restore-test-minio", label: "Restore MinIO" }]],
-    ["keycloak", [{ command: "restore-test-keycloak", label: "Restore Keycloak" }]],
-    ["secret-manager", [{ command: "restore-test-secret-manager-metadata", label: "Restore Secret vault" }]],
-    ["offsite-restic", [{ command: "offsite-restore-drill-restic", label: "Restore off-site Restic" }]],
-    ["all", [
-      { command: "full-restore-drill", label: "Restore drill completo locale" },
-      { command: "offsite-restore-drill-restic", label: "Restore off-site Restic" },
-    ]],
-  ]);
+  if (!["all", "applications", "postgres", "mariadb"].includes(requestedScope)) {
+    throw new ValidationError("Questo ambito richiede il catalogo completo T07 e non viene accodato come job parziale.");
+  }
+  const resources = platformBackupResources(context, requestedScope);
+  if (!resources.length) throw new ValidationError("Nessuna risorsa con ownership esatta per questo ambito.");
+  return {
+    scopeLabel: requestedScope,
+    scope: { kind: "platform", id: "platform" },
+    resources,
+    project: null,
+    mode: requestedScope,
+  };
 }
 
 function resolveBackupRestoreRequest(payload, context) {
@@ -4558,8 +4549,7 @@ function resolveBackupRestoreRequest(payload, context) {
       : sanitizeIdentifier(payload.projectId || payload.applicationId || payload.appId || "");
     const project = resolveContextProject(context, projectId);
     if (!project) throw new ValidationError("Applicazione backup non trovata.");
-    const inventory = applicationBackupInventory(context, project);
-    const options = inventory.restoreOptions || [];
+    const options = applicationBackupRestoreOptions(applicationBackupManifests(project));
     if (!options.length) throw new ValidationError("Questa applicazione non ha backup ripristinabili.");
     const requestedRef = String(payload.backupRef || payload.backupId || "latest") === "latest"
       ? options[0].path
@@ -4567,59 +4557,55 @@ function resolveBackupRestoreRequest(payload, context) {
     const selected = options.find((option) => option.path === requestedRef);
     if (!selected) throw new ValidationError("Backup applicazione non trovato o non ripristinabile.");
     const mode = applicationRestoreMode(payload.restoreMode || payload.restoreContents || "all");
-    const commands = applicationRestoreCommands(context, project, selected, mode);
+    const resources = selected.manifest.resources.filter((resource) => mode === "all"
+      || (mode === "source" && resource.kind === "source")
+      || (mode === "database" && resource.kind === "database"));
+    if (!resources.length) throw new ValidationError("Il manifest selezionato non contiene risorse per la modalita' richiesta.");
     return {
-      scope: applicationBackupScope(project.slug),
+      scopeLabel: applicationBackupScope(project.slug),
+      scope: { kind: "application", id: project.slug },
       backupRef: selected.path,
-      commands,
+      resources,
       project,
       selected,
       mode,
-      planOnly: commands.length === 0,
     };
   }
-  const backupRef = sanitizeRef(payload.backupRef || payload.backupId || "latest");
-  if (backupRef !== "latest") throw new ValidationError("Dal Control Center il restore drill usa solo latest; usa infra-ops per snapshot specifici.");
-  const commands = backupRestoreCommandMap().get(requestedScope);
-  if (!commands?.length) throw new ValidationError("Ambito restore non supportato.");
-  return { scope: requestedScope, backupRef, commands, project: null, selected: null, mode: "", planOnly: false };
-}
-
-function applicationRestoreCommands(context, project, selected, mode = "all") {
-  const restoreMode = applicationRestoreMode(mode);
-  const selectedPath = String(selected?.path || "").toLowerCase();
-  const commands = new Map();
-  const databases = projectDatabases(context, project);
-  if ((restoreMode === "all" || restoreMode === "database") && databases.some((database) => database.engine === "postgres")) {
-    commands.set("restore-test-postgres", { command: "restore-test-postgres", label: "Restore drill PostgreSQL" });
-  }
-  if ((restoreMode === "all" || restoreMode === "database") && databases.some((database) => database.engine === "mariadb")) {
-    commands.set("restore-test-mariadb", { command: "restore-test-mariadb", label: "Restore drill MariaDB" });
-  }
-  if (restoreMode === "all" && selectedPath.startsWith("minio/") && projectStorage(context, project).buckets.length) {
-    commands.set("restore-test-minio", { command: "restore-test-minio", label: "Restore drill storage" });
-  }
-  return [...commands.values()];
+  const manifests = readBackupManifests().filter((manifest) => manifest.scope.kind === "platform");
+  const requestedRef = String(payload.backupRef || payload.backupId || "latest") === "latest"
+    ? manifests[0]?.path
+    : safeRelativeBackupPath(payload.backupRef || payload.backupId || "");
+  const selected = manifests.find((manifest) => manifest.path === requestedRef);
+  if (!selected) throw new ValidationError("Manifest platform firmato non trovato.");
+  return {
+    scopeLabel: requestedScope,
+    scope: { kind: "platform", id: "platform" },
+    backupRef: selected.path,
+    resources: selected.resources,
+    project: null,
+    selected: { manifest: selected, path: selected.path, name: selected.id },
+    mode: "all",
+  };
 }
 
 function queueBackupRun(payload, context) {
-  const { scope, commands, project, mode } = resolveBackupRunRequest(payload, context);
-  const job = createBackupJob({ action: "backup", scope, commands, context });
-  appendAudit({ action: "backup.run.queue", target: scope, environment: context.environment, risk: "medium", result: "accepted", dryRun: false, summary: project ? `Application backup queued for ${project.slug} (${mode || "all"}).` : "Manual backup queued for backup scheduler execution." });
-  const operation = operationPlan("backup.run", context.environment, false, ["write queue request", "backup scheduler picks job", "run allow-listed infra-ops commands", "write evidence"], {
-    scope,
+  const { scopeLabel, scope, resources, project, mode } = resolveBackupRunRequest(payload, context);
+  const job = createBackupJob({ operation: "backup", scope, resources, context });
+  appendAudit({ action: "backup.run.queue", target: scopeLabel, environment: context.environment, risk: "medium", result: "accepted", dryRun: false, summary: project ? `Typed application backup queued for ${project.slug} (${mode || "all"}).` : "Typed platform backup queued for backup scheduler execution." });
+  const operation = operationPlan("backup.run", context.environment, false, ["write versioned typed job", "backup scheduler validates schema", "execute exact resource IDs", "write signed manifest"], {
+    scope: scopeLabel,
     projectId: project?.slug || "",
     backupMode: mode || "",
     jobId: job.id,
     executor: "enterprise-backup-scheduler",
-    commands: commands.map((item) => item.command),
+    resourceIds: resources.map((resource) => resource.id),
     productionEvidence: false,
   });
   const backup = backupRecord({
     operationId: operation.id,
     jobId: job.id,
     action: "backup",
-    scope,
+    scope: scopeLabel,
     environment: context.environment,
     status: "queued",
     dryRun: false,
@@ -4630,18 +4616,17 @@ function queueBackupRun(payload, context) {
 }
 
 function queueRestoreDrill(payload, context) {
-  const { scope, backupRef, commands, project, selected, mode, planOnly } = resolveBackupRestoreRequest(payload, context);
-  if (planOnly) return planApplicationBackupRestore({ scope, backupRef, project, selected, mode, context });
-  const job = createBackupJob({ action: "restore-drill", scope, backupRef, commands, context, metadata: { restoreMode: mode || "" } });
-  appendAudit({ action: "restore.queue", target: scope, environment: context.environment, risk: "high", result: "accepted", dryRun: false, summary: project ? `Application restore drill queued for ${project.slug} (${applicationRestoreModeLabel(mode)}).` : "Restore drill queued for backup scheduler execution." });
-  const operation = operationPlan("restore.queue", context.environment, false, ["write queue request", "backup scheduler picks job", "run restore drill in sandbox", "write evidence"], {
-    scope,
+  const { scopeLabel, scope, backupRef, resources, project, selected, mode } = resolveBackupRestoreRequest(payload, context);
+  const job = createBackupJob({ operation: "restore-drill", scope, sourceManifestPath: backupRef, resources, context });
+  appendAudit({ action: "restore.queue", target: scopeLabel, environment: context.environment, risk: "high", result: "accepted", dryRun: false, summary: project ? `Exact-manifest restore drill queued for ${project.slug} (${applicationRestoreModeLabel(mode)}).` : "Exact-manifest restore drill queued for backup scheduler execution." });
+  const operation = operationPlan("restore.queue", context.environment, false, ["validate signed source manifest", "verify exact artifact signatures", "restore only into disposable targets", "write drill evidence"], {
+    scope: scopeLabel,
     backupRef,
     projectId: project?.slug || "",
     restoreMode: mode || "",
     jobId: job.id,
     executor: "enterprise-backup-scheduler",
-    commands: commands.map((item) => item.command),
+    resourceIds: resources.map((resource) => resource.id),
     dataChanged: false,
     productionEvidence: false,
   });
@@ -4649,7 +4634,7 @@ function queueRestoreDrill(payload, context) {
     operationId: operation.id,
     jobId: job.id,
     action: "restore-drill",
-    scope,
+    scope: scopeLabel,
     environment: context.environment,
     status: "queued",
     dryRun: false,
@@ -4657,58 +4642,25 @@ function queueRestoreDrill(payload, context) {
     resultSummary: project ? `Restore drill applicazione ${project.name} accodato al backup scheduler (${applicationRestoreModeLabel(mode)}).` : "Restore drill queued for backup scheduler execution.",
   });
   appendBackupRecord(backup);
-  return { ...operation, backup, job };
+  return { ...operation, backup, job, selectedManifestId: selected?.manifest?.id || selected?.name || "" };
 }
 
-function planApplicationBackupRestore({ scope, backupRef, project, selected, mode, context }) {
-  appendAudit({ action: "restore.plan", target: scope, environment: context.environment, risk: "high", result: "planned", dryRun: true, summary: `Application restore plan generated for ${project.slug} (${applicationRestoreModeLabel(mode)}); no live data changed.` });
-  const operation = operationPlan("restore.plan", context.environment, true, ["validate application backup artifact", "keep source mount read-only", "require explicit maintenance approval for destructive restore", "preserve current sources before any future apply"], {
-    scope,
-    backupRef,
-    projectId: project.slug,
-    restoreMode: mode || "",
-    selectedBackup: selected?.name || "",
-    dataChanged: false,
-    productionEvidence: false,
-  });
-  const backup = backupRecord({
-    operationId: operation.id,
-    action: "restore-drill",
-    scope,
-    environment: context.environment,
-    status: "planned",
-    dryRun: true,
-    backupRef,
-    resultSummary: `Restore ${applicationRestoreModeLabel(mode)} ${project.name} pianificato. Nessun file live e' stato modificato.`,
-  });
-  appendBackupRecord(backup);
-  return { ...operation, backup };
-}
-
-function createBackupJob({ action, scope, backupRef = "", commands, context, metadata = {} }) {
+function createBackupJob({ operation, scope, sourceManifestPath = "", resources, context }) {
   const now = new Date().toISOString();
   const identity = requestIdentity.getStore();
-  const job = sanitizeEvent({
+  const job = createBackupJobDocument({
     id: rid(),
-    action,
+    operation,
     scope,
-    backupRef,
-    ...metadata,
-    status: "queued",
-    environment: context.environment,
+    resources,
     requestedBy: identity?.subject || "control-center",
-    commands: commands.map((item) => ({ command: item.command, label: item.label })),
+    environment: context.environment,
     createdAt: now,
-    updatedAt: now,
-    startedAt: null,
-    finishedAt: null,
-    resultSummary: "Queued for backup scheduler.",
-    logPath: null,
-    reportPaths: [],
+    sourceManifestPath,
   });
   const queuedDir = path.join(backupJobsDir, "queued");
-  mkdirSync(queuedDir, { recursive: true });
-  writeFileSync(path.join(queuedDir, `${job.id}.json`), `${JSON.stringify(job, null, 2)}\n`, { mode: 0o600 });
+  mkdirSync(queuedDir, { recursive: true, mode: 0o700 });
+  writePrivateJsonAtomic(path.join(queuedDir, `${job.id}.json`), job);
   return job;
 }
 
@@ -4719,13 +4671,18 @@ function readBackupJobs() {
     if (!existsSync(dir)) continue;
     try {
       for (const name of readdirSync(dir).filter((item) => item.endsWith(".json")).slice(0, 200)) {
-        const target = path.resolve(dir, name);
-        if (!target.startsWith(`${path.resolve(dir)}${path.sep}`)) continue;
-        const parsed = JSON.parse(readFileSync(target, "utf8"));
-        jobs.push(sanitizeEvent({ ...parsed, queueStatus: status }));
+        try {
+          const target = path.resolve(dir, name);
+          if (!target.startsWith(`${path.resolve(dir)}${path.sep}`)) continue;
+          const parsed = parseBackupJobDocument(JSON.parse(readFileSync(target, "utf8")));
+          if (parsed.status !== status) continue;
+          jobs.push(sanitizeEvent({ ...parsed, queueStatus: status }));
+        } catch {
+          // Ignore only the invalid job; keep the remaining queue inventory available.
+        }
       }
     } catch {
-      // Keep the backup page available if one job file is unreadable.
+      // Keep the backup page available if the queue directory is unreadable.
     }
   }
   return jobs
@@ -10094,17 +10051,44 @@ function planDatabaseDelete(id, payload, context) {
 function planDatabaseBackup(id, payload, context) {
   const database = findById(context.databases, id, "Database");
   const scope = `database:${database.id}`;
-  appendAudit({ action: "database.backup.plan", target: database.id, environment: context.environment, risk: "medium", result: "planned", dryRun: true, summary: "Database backup plan generated; no dump command executed from the web panel." });
-  const operation = operationPlan("database.backup", context.environment, true, ["validate database record", "select database engine", "invoke DatabaseAdapter dump in ops runner", "verify backup artifact", "write evidence"], {
+  const resource = {
+    id: backupResourceId("database", database.id),
+    externalId: database.id,
+    kind: "database",
+    projectId: database.projectId || "platform",
+    name: database.name,
+    engine: database.engine,
+  };
+  const job = createBackupJob({
+    operation: "backup",
+    scope: database.projectId ? { kind: "application", id: database.projectId } : { kind: "platform", id: "platform" },
+    resources: [resource],
+    context,
+  });
+  appendAudit({ action: "database.backup.queue", target: database.id, environment: context.environment, risk: "medium", result: "accepted", dryRun: false, summary: "Exact database backup queued for the typed backup executor." });
+  const operation = operationPlan("database.backup", context.environment, false, ["validate exact database resource", "write versioned typed job", "dump only the selected database", "write signed manifest"], {
     databaseId: database.id,
     projectId: database.projectId,
     engine: database.engine,
     scope,
+    jobId: job.id,
+    resourceId: resource.id,
     databaseTouched: false,
     credentialsExposed: false,
     productionEvidence: false,
   });
-  return { ...operation, database };
+  const backup = backupRecord({
+    operationId: operation.id,
+    jobId: job.id,
+    action: "backup",
+    scope,
+    environment: context.environment,
+    status: "queued",
+    dryRun: false,
+    resultSummary: `Backup database ${database.id} accodato con identita' risorsa esatta.`,
+  });
+  appendBackupRecord(backup);
+  return { ...operation, database, backup, job };
 }
 
 function planDatabaseRestore(id, payload, context) {
