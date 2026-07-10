@@ -34,6 +34,10 @@ Use this checklist on the VPS Ubuntu LTS VPS before exposing public traffic.
 - [ ] `sh ./scripts/infra-secret-manager.sh verify` passed.
 - [ ] `sh ./scripts/secret-rotation-evidence.sh --enforce` passed and the JSON/Markdown reports under `reports/secret-rotation/` were archived outside Git.
 - [ ] `sh ./scripts/vps-preflight.sh .env` passed and rendered the canonical VPS+WAF stack, including `compose.runtime.yaml` and `compose.networks.yaml` loaded last.
+- [ ] The zero-workload core render passed independently and contains no application backend, frontend, worker, schema migration or application secret requirement.
+- [ ] Each attached application has an external catalog entry, application-owned manifest and Compose overlay, digest-pinned images, ignored non-secret runtime environment and application-owned migration/rollback procedure.
+- [ ] `sh ./scripts/prepare-hosted-workloads.sh` produced a `verified` lock with mode `0600`; core and combined render diffs contain only the declared workload services, routes, networks and secrets.
+- [ ] `sh ./scripts/hosted-workload-lock.sh <lock-file> verify` passed immediately before the approved workload activation window.
 - [ ] `sh ./scripts/network-segmentation-check.sh --envFile .env` passed and its non-secret report under `reports/network-segmentation/` was archived outside Git.
 - [ ] `sh ./scripts/network-segmentation-sandbox-test.sh` passed, proving allowed ingress/data paths and denied router-to-DB, app-to-observability and cross-app paths.
 - [ ] `sudo sh ./scripts/workload-egress-firewall.sh --plan --network-prefix "$PLATFORM_NETWORK_PREFIX"` was reviewed after candidate networks were created; apply/verify used the strong confirmation in an approved maintenance window before hosted workloads started.
@@ -119,10 +123,10 @@ Use this checklist on the VPS Ubuntu LTS VPS before exposing public traffic.
 
 - [ ] External uptime monitoring delivered a real green check from outside the VPS network and the report contains verified provider evidence.
 - [ ] Email alerts delivered to the real recipient.
-- [ ] Optional Discord/Telegram alert channels configured through secret files and delivery metrics checked, if used.
+- [ ] Optional generic forward-webhook channel configured through a secret file and its delivery metric checked, if used.
 - [ ] Disaster recovery procedure rehearsed.
 - [ ] Deploy audit entry written.
-- [ ] `sh ./scripts/access-review.sh` output reviewed after the deploy/admin changes.
+- [ ] `sh ./scripts/platform-admin-audit.sh` output reviewed after the deploy/admin changes.
 - [ ] Rollback dry-run plan generated with `sh ./scripts/rollback-release.sh --rollbackFile ./release/previous-images.json`.
 - [ ] Production go/no-go status is `go`.
 

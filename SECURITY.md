@@ -27,8 +27,11 @@ database dumps or live exploitation output in public reports.
 
 ## Admin Control Plane
 
-- Control Center sessions are signed server-side and stored in `HttpOnly`,
-  `Secure`, `SameSite=Lax` cookies by default when local auth is enabled.
+- Control Center access is fail-closed through Keycloak OIDC Authorization Code
+  with PKCE and passkey-attested `acr`/`amr` claims. There is no production
+  local-password path.
+- Browser cookies contain opaque session identifiers with `HttpOnly`, `Secure`
+  and `SameSite=Lax`; transactions and revocable sessions are server-side.
 - Mutating Control Center API calls reject untrusted `Origin` headers and hostile
   Fetch Metadata.
 - Cloudflare Access or equivalent provider MFA is required for production admin
@@ -46,8 +49,8 @@ database dumps or live exploitation output in public reports.
 
 Infrastructure admin authorization is tracked through Control Center identity
 metadata, Cloudflare Access policy evidence and platform-admin-audit reports.
-Hosted application account schemas such as `app_account` are workload concerns
-and are not platform go-live gates.
+Hosted application identities and account schemas are workload concerns and are
+not platform go-live gates.
 
 ## Secrets
 
@@ -57,14 +60,21 @@ and are not platform go-live gates.
 - The manager is also the local secret vault for arbitrary operational secrets such as provider tokens. Vault secret names are constrained to lowercase letters, numbers and underscores; commands print metadata and fingerprints only, never values.
 - Local secret files and manager runtime files are ignored by Git and mounted as `/run/secrets/*`.
 - Runtime code must consume secret material only through `*_FILE` values or approved managed secret references.
-- `SESSION_SECRET` must be random, long and rotated per environment.
-- SMTP, DB, MinIO, NATS, Redis, Grafana, admin gateway and Alertmanager webhook secrets must be managed through `infra-secret-manager` or a stronger external KMS before serious VPS usage.
+- Every platform secret must be random, scoped, rotated per environment and
+  declared in the platform Secret Manager policy.
+- SMTP, platform DB, MinIO, Redis, Grafana, admin OIDC and Alertmanager webhook
+  secrets must be managed through `infra-secret-manager` or a stronger external
+  KMS before serious VPS usage.
+- Application secrets are declared by the external workload manifest. The core
+  must not require, materialize or scan their values during a zero-workload
+  render.
 
 ## Local control access
 
 - `portal.localhost.com` is the local Infrastructure Portal host, not a public app surface. It requires the Control Center admin gate before exposing project/admin links.
-- Its persistent cookie is `HttpOnly`, `Secure`, `SameSite=Lax` and signed with `projects_gateway_signing_keys`.
-- Rotate `projects_gateway_signing_keys` to revoke every local Infrastructure Portal / Control Center session.
+- Its persistent cookie is opaque, `HttpOnly`, `Secure` and `SameSite=Lax`.
+- Revoke sessions through the Control Center session store and Keycloak policy;
+  do not add a local password or static cookie-verifier fallback.
 
 ## Alert delivery
 
@@ -76,11 +86,12 @@ and are not platform go-live gates.
 
 - PostgreSQL is not public in production.
 - Query execution is statement-time-limited and row-limited.
-- Operational logs are centralized in Loki/Promtail with shared redaction in `@platform/observability`; durable platform security events are stored in append-only audit tables and dispatched through the audit outbox.
-- Every backend/worker uses a distinct PostgreSQL login and secret. Worker roles
-  must prove cross-table denial; the legacy union login is disabled only after
-  recovery and cutover evidence.
-- Per-account RLS is defense in depth, not a supported tenant boundary.
+- Operational logs are centralized in Loki/Promtail with platform redaction;
+  Control Center administrative events use append-only JSONL evidence.
+- Each hosted workload owns its schema and migration path. Its services use
+  distinct PostgreSQL logins and must prove cross-table denial before legacy
+  credentials are revoked.
+- Application RLS is defense in depth, not a supported platform tenant boundary.
 - Hosted workloads never receive MinIO root material. Use one service account
   per bucket/prefix and prove cross-prefix, cross-bucket and admin denial.
 
@@ -90,6 +101,8 @@ and are not platform go-live gates.
 - Every service has CPU, memory, PID, file-descriptor and I/O controls.
 - Hosted source mounts are exact and read-only; hosted workloads must not see
   the infrastructure tree, backups, Control Center state or Docker socket.
+- Hosted manifests, Compose files, non-secret environments and migrations are
+  hash-locked. A changed input fails closed before Compose activation.
 - PHP runtime copies are ephemeral tmpfs and receive no shared gateway-signing
   or SMTP secret.
 - Only the digest-pinned Docker socket proxy receives the raw socket. Its host
@@ -101,7 +114,7 @@ and are not platform go-live gates.
 - Mandatory supply-chain gate: production CVE audit, CycloneDX SBOM and license policy.
 - Container image scan.
 - Backup restore tests for PostgreSQL, MariaDB, MinIO, Keycloak configuration and Secret Manager metadata.
-- Fault-injection tests for Redis degradation, PostgreSQL timeout and session races.
+- Fault-injection tests for platform dependencies and bounded failure recovery.
 - Certificate expiry check.
 - RBAC review.
 - Audit log review.
@@ -128,3 +141,5 @@ and are not platform go-live gates.
   forbidden.
 - `sh ./scripts/runtime-isolation-check.sh --env-file=.env.vps.example` after every Compose/runtime change.
 - `sh ./scripts/runtime-isolation-sandbox-test.sh` before limit changes.
+- `sh ./scripts/infra-ops.sh testing-hygiene` and
+  `sh ./scripts/prepare-hosted-workloads.sh` before accepting a workload lock.

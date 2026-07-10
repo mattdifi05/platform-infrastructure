@@ -1,6 +1,7 @@
 # Platform Infrastructure Deep Dive
 
-Last verified: 2026-06-29.
+Last verified: 2026-07-10 for the T18 candidate; the reference runtime remains
+unchanged from the earlier live snapshot.
 
 This document maps the infrastructure repository only. Hosted application code
 is intentionally out of scope. `control-center/` is in scope because it is the
@@ -43,8 +44,9 @@ Use the names consistently:
 - **Admin identity plane**: platform capability for Control Center operators,
   Cloudflare Access, GitHub/VPS admin review and platform-admin-audit evidence.
   User-facing account/passkey flows belong to hosted applications.
-- **`backend`, `web`, `worker-*`**: historical service ids for generic
-  platform runtime/template containers. They are not hosted applications.
+- **Application backend, web and business workers**: workload-owned services,
+  never platform core. Historical containers with these names may remain live
+  until the approved T18 cutover.
 - **`php-*`, `node-*`, external app names**: attached workload containers when
   present on a specific server. Treat them as migration/capacity inputs, not as
   platform core.
@@ -70,7 +72,7 @@ Browser / external checker
 Data path:
 
 ```text
-control-center / platform runtime
+control-center / platform services / attached workload
   -> PostgreSQL, MariaDB, Redis, NATS, MinIO, Keycloak
   -> Prometheus/Loki/Grafana/Alertmanager for evidence and operations
   -> reports/ and .tmp/ for ignored evidence artifacts
@@ -94,7 +96,6 @@ without a separate approved destructive procedure.
 | File | Role |
 | --- | --- |
 | `compose.yaml` | Base local prod-like stack, internal network, named volumes, healthchecks, docs/portal Traefik routes. |
-| `compose.build.yaml` | Builds historical `backend`, `web` and `worker-*` runtime/template images from local Dockerfiles when their source packages are present. |
 | `compose.secrets.yaml` | Switches services to file-based Docker secrets under `/run/secrets/*`. |
 | `compose.managed-secrets.yaml` | Same intent as secrets overlay, wired for the proprietary Infra Secret Manager materialized files. |
 | `compose.waf.yaml` | Adds local OWASP ModSecurity CRS WAF, owns local HTTP/HTTPS ports, keeps Traefik internal. |
@@ -103,6 +104,9 @@ without a separate approved destructive procedure.
 | `compose.prod.yaml` | Production image/profile overlay with digest-pinned image requirements and public TLS/ACME posture. |
 | `compose.staging.yaml` | Removes fixed container names and renames volumes for isolated staging projects. |
 | `compose.backup-scheduler.yaml` | Optional `backup` profile with the Dockerized ops runner as cron-style backup scheduler. |
+| `compose.runtime.yaml` | Optional platform runtime services; it contains no concrete application. |
+| `compose.networks.yaml` | Platform trust zones plus network attachment points for verified external workloads. |
+| `compose.runtime-isolation.yaml` | Final CPU/RAM/PID/FD/I/O, mount and Docker-socket isolation policy. |
 | `compose.dr.yaml` | DR/PITR helper overlay, including PostgreSQL WAL archive volume. |
 | `compose.ha.yaml` | HA readiness overlay for replica-capable services; requires real multi-node/provider design before use. |
 
@@ -111,7 +115,6 @@ Current reference server overlay order:
 ```sh
 docker compose -p platform_infra_vps \
   -f compose.yaml \
-  -f compose.build.yaml \
   -f compose.secrets.yaml \
   -f compose.vps.yaml \
   -f compose.waf.yaml \
@@ -122,6 +125,11 @@ docker compose -p platform_infra_vps \
 
 `.tmp/vps-runtime-override.yaml` is deployment-local evidence, not a portable
 baseline. Recreate its intent on a new host after reviewing paths and mounts.
+
+The T18 target uses `scripts/compose-vps.sh`. With no lock it renders the
+24-service core. With `HOSTED_WORKLOAD_LOCK` it verifies every locked input and
+appends only the workload Compose/environment files recorded by
+`scripts/prepare-hosted-workloads.sh`.
 
 ## Service Catalogue
 
@@ -138,13 +146,12 @@ platform's ability to host them.
 | `control-center` | control plane | Infrastructure portal, docs renderer, readiness/status, metadata actions. | `portal.<domain>` and `docs.<domain>` through Traefik. | `projects-portal/state/*` bind mount. |
 | `project-router` | hosting capability | Routes attached external PHP/Node/Static projects to dedicated upstreams. | Only via project routes when configured. | Reads project state/source metadata. |
 | `php-apache` | hosting capability | Generic PHP Apache runtime for external PHP projects. | No direct public route by default. | External project source bind mount. |
-| `backend` | generic runtime | Historical service id for a platform API/runtime template. Not a hosted app and not account proof. | Disabled Traefik labels by default. | PostgreSQL/Redis/NATS/MinIO. |
-| `web` | generic runtime | Historical service id for a generic web/Next.js runtime template. Not a hosted app. | Disabled Traefik labels by default. | No named volume. |
-| `worker-notifications` | worker | Platform notification worker for alerts and provider channels. | No. | PostgreSQL/Redis/NATS. |
-| `worker-jobs` | worker | Platform background worker and audit outbox dispatcher. | No. | PostgreSQL/Redis/NATS/MinIO. |
+| `platform-alert-dispatcher` | observability | Authenticated Alertmanager receiver with SMTP and optional generic webhook delivery. | No. | No named volume. |
+| `docker-socket-proxy` | control plane | Least-privilege Docker API boundary for approved platform operations. | Loopback/internal only. | No named volume. |
+| `local-registry` | supply chain | Optional local registry/cache for platform image workflows. | No public route. | `enterprise_local_registry_data`. |
 | `postgres` | data | PostgreSQL managed by the platform for internal metadata, Keycloak DB and explicitly attached workload databases. | No. | `enterprise_postgres_data`. |
 | `mariadb` | data | MariaDB for attached PHP workloads and phpMyAdmin. | No. | `enterprise_mariadb_data`. |
-| `redis` | data/cache | Rate limits, cache/runtime state, worker heartbeat and optional attached workload use. | No. | `enterprise_redis_data`. |
+| `redis` | data/cache | Platform cache/runtime state and optional explicitly attached workload use. | No. | `enterprise_redis_data`. |
 | `nats` | messaging | NATS JetStream event bus. | No. | `enterprise_nats_data`. |
 | `minio` | object storage | S3-compatible object storage. | No. | `enterprise_minio_data`. |
 | `keycloak` | identity | Prepared OIDC/identity provider. | No public route in platform default/VPS. | `enterprise_keycloak_data`. |
@@ -154,7 +161,7 @@ platform's ability to host them.
 | `grafana` | observability | Metrics/log dashboards. | No public route unless explicitly protected. | `enterprise_grafana_data`. |
 | `loki` | observability | Log storage and rule engine. | No. | `enterprise_loki_data`. |
 | `promtail` | observability | Docker log collector with redaction pipeline. | No. | Reads Docker logs. |
-| `alertmanager` | observability | Alert routing to notification worker. | No. | `enterprise_alertmanager_data`. |
+| `alertmanager` | observability | Alert routing to `platform-alert-dispatcher`. | No. | `enterprise_alertmanager_data`. |
 | `phpmyadmin` | admin profile | MariaDB admin UI, enabled only with `admin` profile. | No durable public surface. | No named volume. |
 | `phppgadmin` | admin profile | PostgreSQL admin UI, enabled only with `admin` profile. | No durable public surface. | No named volume. |
 | `local-dns` | dns profile | CoreDNS for local wildcard resolution. | Internal/LAN only when enabled. | No named volume. |
@@ -162,18 +169,20 @@ platform's ability to host them.
 
 ## Network, Volumes And State
 
-Network:
+The unchanged historical live stack still includes the external
+`enterprise_net`. The T18 candidate replaces flat workload attachment with
+platform trust zones:
 
 ```text
-enterprise_net
+platform_edge, platform_routing, platform_postgres, platform_cache,
+platform_bus, platform_storage, platform_observability, platform_db_admin,
+platform_docker_control, platform_egress
 ```
 
-The network is external in `compose.yaml`. Create it before rendering/running
-the base stack if Docker does not already have it:
-
-```sh
-docker network create enterprise_net
-```
+Each external workload adds only its declared ingress/data/identity/egress
+networks. The verified Stexor candidate adds `stexor_ingress`,
+`stexor_postgres`, `stexor_cache`, `stexor_bus`, `stexor_identity` and
+`stexor_egress`. Cross-workload and workload-to-observability paths are denied.
 
 Named volumes:
 
@@ -188,7 +197,8 @@ enterprise_alertmanager_data
 enterprise_grafana_data
 enterprise_prometheus_data
 enterprise_loki_data
-enterprise_postgres_wal_archive
+enterprise_local_registry_data
+backup_scheduler_logs
 ```
 
 Important bind mounts:
@@ -209,11 +219,10 @@ server.
 Secret values are out of scope for documentation. Only names and mount paths
 should be documented.
 
-Declared Docker secret names:
+Required platform Secret Manager names:
 
 ```text
 postgres_superuser_password
-app_db_password
 keycloak_db_password
 redis_password
 keycloak_admin_password
@@ -222,16 +231,12 @@ minio_root_password
 mariadb_root_password
 phpmyadmin_control_password
 grafana_admin_password
-session_secret
-session_signing_keys
 projects_gateway_signing_keys
-hash_pepper_keys
+control_center_vault_keys
+control_center_database_url
 backup_signing_keys
 alertmanager_webhook_token
 smtp_password
-cloudflare_turnstile_secret_key
-database_url
-nats_url
 ```
 
 Rules:
@@ -242,6 +247,8 @@ Rules:
 - `infra-secret-manager` may initialize, verify, rotate and materialize secret
   files, but documentation must never print secret values;
 - production go/no-go requires fresh non-secret `secret-rotation-evidence`.
+- workload secret names are declared in the external manifest and resolved only
+  when that workload lock is prepared; they are not platform-required secrets.
 
 ## Edge, WAF And DNS
 
@@ -448,7 +455,6 @@ Full current reference stack:
 ```sh
 docker compose -p platform_infra_vps \
   -f compose.yaml \
-  -f compose.build.yaml \
   -f compose.secrets.yaml \
   -f compose.vps.yaml \
   -f compose.waf.yaml \
@@ -457,12 +463,30 @@ docker compose -p platform_infra_vps \
   up -d --build
 ```
 
+This command documents the unchanged legacy runtime only. The T18 target is
+rendered through the canonical wrapper and a verified lock:
+
+```sh
+HOSTED_WORKLOAD_CATALOG=/path/hosted-workloads.json \
+HOSTED_WORKLOAD_ROOT=/path/applications \
+HOSTED_WORKLOAD_LOCK=/path/private/hosted-workloads.lock.json \
+COMPOSE_ENV_FILE=.env \
+sh ./scripts/prepare-hosted-workloads.sh
+
+COMPOSE_ENV_FILE=.env \
+COMPOSE_PROJECT_NAME=platform_infra_vps \
+HOSTED_WORKLOAD_LOCK=/path/private/hosted-workloads.lock.json \
+bash ./scripts/compose-vps.sh config --quiet
+```
+
+Starting or recreating the candidate is a separate maintenance action and is
+not implied by a successful render.
+
 Control Center-only rollout:
 
 ```sh
 docker compose -p platform_infra_vps \
   -f compose.yaml \
-  -f compose.build.yaml \
   -f compose.secrets.yaml \
   -f compose.vps.yaml \
   -f compose.waf.yaml \
@@ -476,7 +500,6 @@ Read-only status checks:
 ```sh
 docker compose -p platform_infra_vps \
   -f compose.yaml \
-  -f compose.build.yaml \
   -f compose.secrets.yaml \
   -f compose.vps.yaml \
   -f compose.waf.yaml \
@@ -500,12 +523,14 @@ Never use `docker compose down -v` as a troubleshooting shortcut.
 6. Prepare NVMe mount and Docker data-root plan.
 7. Back up repo, state, external app sources, Docker volumes and secrets.
 8. Copy/clone infrastructure repo to the final server path.
-9. Recreate `.env`, Docker secrets and local runtime overrides from reviewed
-   templates.
-10. Start the stack with the reviewed VPS/WAF overlay order.
-11. Verify WAF, Traefik, Portal, docs, Status API, observability and backups.
-12. Run restore drills before deleting rollback copies.
-13. Keep the old server as reference until the new server has current evidence
+9. Recreate `.env` and platform Docker secrets from reviewed templates.
+10. Copy application repositories outside infra, validate their manifests and
+    prepare a `0600` hosted-workload lock.
+11. Review zero-workload and combined renders, then start the stack with
+    `compose-vps.sh` and the approved lock.
+12. Verify WAF, Traefik, Portal, docs, Status API, observability and backups.
+13. Run restore drills before deleting rollback copies.
+14. Keep the old server as reference until the new server has current evidence
    and operator sign-off.
 
 ## Main Risks

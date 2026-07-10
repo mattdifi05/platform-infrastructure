@@ -9,7 +9,13 @@ This map is a migration gate. A resource must not be renamed, moved, recreated, 
 
 The repository is the hosting and control-plane layer. Hosted application source remains outside this repository under `/home/platform_infrastructure/src`.
 
-The services `enterprise-backend`, `enterprise-web`, `enterprise-worker-jobs` and `enterprise-worker-notifications` are currently built from the external Stexor source tree. They are Stexor workload components, not generic platform core. T18 must remove this ownership ambiguity without interrupting Stexor account or Stexor UI.
+The services `enterprise-backend`, `enterprise-web`, `enterprise-worker-jobs`
+and `enterprise-worker-notifications` are currently built from the external
+Stexor source tree. They are Stexor workload components, not generic platform
+core. T18 has removed this ownership ambiguity in repository candidates: the
+platform core no longer defines them, while the isolated Stexor candidate owns
+five renamed workload services, images, environment, schema and migrations.
+The live containers in this map remain unchanged until an approved cutover.
 
 ## Authoritative application map
 
@@ -52,7 +58,10 @@ startup/connectivity tests. It is not live until an approved progressive
 rollout. The T14 candidate adds per-service PostgreSQL credentials, an explicit
 dual-credential revoke/rollback sequence, removes MinIO root from the backend
 and provides a prefix-scoped service-account bootstrap. Sandbox positive and
-negative tests are required before any live credential cutover.
+negative tests are required before any live credential cutover. T18 moves the
+Stexor-specific T14 SQL and rollout commands into the Stexor repository and
+adds a verified core/combined workload lock; no app migration remains in the
+platform candidate.
 
 T11 live adoption on 2026-07-10 moved project-router and the local registry under the single `platform_infra_vps` Compose project. The registry retained the exact `enterprise_local_registry_data` volume and catalog. Other services were not recreated; their historical Compose labels still mention the old ignored overlays, but all future deploy commands use `compose.runtime.yaml` and the canonical wrapper.
 

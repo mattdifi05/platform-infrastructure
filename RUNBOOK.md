@@ -27,10 +27,9 @@ mode requires the explicit recovery flags documented in
 
 Terminology: **Infrastructure Portal** is the operator product surface,
 **Control Center** is the Node service that serves it, and `portal.<domain>` is
-the host. Historical service ids `backend`, `web` and `worker-*` are generic
-platform runtime/template containers, not hosted applications. Account,
-passkey, backup-code or `app_account` checks are workload compatibility checks
-and are not infrastructure go-live gates.
+the host. The core contains no application backend, frontend, business worker,
+account schema or application migration. Those assets belong to an external
+hosted workload and are not infrastructure go-live gates.
 
 ## Documentation map
 
@@ -50,7 +49,6 @@ cd /home/platform_infrastructure/platform-infrastructure
 
 docker compose -p platform_infra_vps \
   -f compose.yaml \
-  -f compose.build.yaml \
   -f compose.secrets.yaml \
   -f compose.vps.yaml \
   -f compose.waf.yaml \
@@ -80,7 +78,6 @@ files, test them in the repo path, then recreate only `control-center`:
 ```sh
 docker compose -p platform_infra_vps \
   -f compose.yaml \
-  -f compose.build.yaml \
   -f compose.secrets.yaml \
   -f compose.vps.yaml \
   -f compose.waf.yaml \
@@ -107,14 +104,18 @@ verified backups and a rollback plan.
 3. Read scoped logs:
 
    ```sh
-   docker compose -p platform_infra_local logs -f traefik backend web postgres
+   docker compose -p platform_infra_local logs -f traefik control-center project-router postgres platform-alert-dispatcher
    ```
 
-4. Check database migrations:
+4. Check platform database availability and backup evidence:
 
    ```sh
-   docker exec enterprise-postgres psql -U postgres -d app_db -c "select * from platform_ops.schema_migrations order by applied_at desc;"
+   sh ./scripts/infra-ops.sh backup-coverage-matrix
+   sh ./scripts/dr-evidence.sh
    ```
+
+Application migrations are checked and applied only from the owning workload
+repository, in a separately approved maintenance step.
 
 ## WAF operations
 
@@ -146,7 +147,11 @@ Treat every risky launch feature as disabled-by-default until it has an owner, r
 
 ## Alerting
 
-Prometheus sends alerts to Alertmanager, and Alertmanager posts grouped alerts to the notification worker at `worker-notifications:3000/alerts/prometheus` with the shared bearer token from `/run/secrets/alertmanager_webhook_token`. The worker logs sanitized alert summaries into Loki and exposes delivery counters on `/metrics`.
+Prometheus sends alerts to Alertmanager, and Alertmanager posts grouped platform
+alerts to `platform-alert-dispatcher:3000/alerts/prometheus` with the bearer
+token from `/run/secrets/alertmanager_webhook_token`. The dispatcher is a core
+service: it logs sanitized summaries, delivers email and an optional generic
+forward webhook, and exposes platform delivery counters on `/metrics`.
 
 Before the first deploy, set `ALERTMANAGER_SECRET_GID` to the numeric group used
 by the Ubuntu platform operator. The token must be `0640` and owned by that
@@ -173,62 +178,53 @@ sh ./scripts/alert-evidence.sh --sendTest
 sh ./scripts/alert-evidence.sh --sendTest --requireEmailDelivery
 ```
 
-The summary mode validates Alertmanager routing, bearer-token secrets, Prometheus delivery-failure alerts and notification-worker counters. `--sendTest` submits a uniquely correlated alert to the Alertmanager API, waits for downstream worker counters and requires the exact receiver log receipt, then resolves the probe. It never calls the worker webhook directly. Add `--requireEmailDelivery`, `--requireDiscordDelivery` or `--requireTelegramDelivery` only after those real provider channels are configured.
+The summary mode validates Alertmanager routing, bearer-token secrets,
+Prometheus delivery-failure alerts and dispatcher counters. `--sendTest`
+submits a uniquely correlated alert to the Alertmanager API, waits for the
+dispatcher counters and requires the exact receiver log receipt. It never
+calls the webhook directly. Add `--requireEmailDelivery` or
+`--requireForwardDelivery` only after that real channel is configured.
 
 Key alerts:
 
 ```text
-ServiceTargetDown
-BackendRedisUnavailable
-WorkerPostgresUnavailable
-AuditOutboxDeadLetters
-PostgresBackupStale
+PlatformTargetDown
+KeycloakPlatformLoginFailures
+KeycloakPlatformAdminLocked
+BackupStale
 RestoreDrillStale
-AlertmanagerDeliveryFailed
+AlertDeliveryFailed
 HostDiskUsageHigh
 HostMemoryUsageHigh
 HostCpuUsageHigh
 ContainerCpuUsageHigh
 ContainerMemoryUsageHigh
 ContainerDisappeared
-WafBlockSpike
 ```
 
 Optional external forwarding:
 
 ```sh
-ALERT_FORWARD_WEBHOOK_URL=https://hooks.example.invalid/platform-alerts
+ALERT_FORWARD_WEBHOOK_URL_FILE=/run/secrets/alert_forward_webhook_url
 ```
 
 Keep the URL in the production secret manager if it embeds credentials.
 
-Email delivery is enabled when `ALERT_EMAIL_TO`, `MAILER_FROM`, `SMTP_HOST`, `SMTP_USER` and `/run/secrets/smtp_password` are configured. Local default recipient is `admin@example.com`. Watch:
+Email delivery is enabled when `ALERT_EMAIL_TO`, `MAILER_FROM`, `SMTP_HOST`,
+`SMTP_USER` and `/run/secrets/smtp_password` are configured. Watch:
 
 ```promql
-notification_alert_email_deliveries_total
-notification_alert_email_failures_total
+platform_alert_delivery_total{channel="email",result="success"}
+platform_alert_delivery_total{channel="email",result="failed"}
+platform_alert_delivery_total{channel="forward",result="success"}
+platform_alert_delivery_total{channel="forward",result="failed"}
 ```
 
-If email failures increase, check `docker logs enterprise-worker-notifications` for `prometheus_alert_email_failed`, then verify SMTP credentials through the secret manager rather than putting the password in `.env`.
-
-Native Discord and Telegram alert channels are optional and disabled by default. Enable them only through mounted secret files:
-
-```sh
-ALERT_DISCORD_WEBHOOK_URL_FILE=/run/secrets/alert_discord_webhook_url
-ALERT_TELEGRAM_BOT_TOKEN_FILE=/run/secrets/alert_telegram_bot_token
-ALERT_TELEGRAM_CHAT_ID=123456789
-```
-
-The notification worker exposes:
-
-```promql
-notification_alert_discord_deliveries_total
-notification_alert_discord_failures_total
-notification_alert_telegram_deliveries_total
-notification_alert_telegram_failures_total
-```
-
-Keep the Discord webhook URL and Telegram bot token in the production secret manager or provider KMS. Do not put them in `.env` or Git.
+If delivery failures increase, inspect
+`docker logs enterprise-platform-alert-dispatcher` for
+`email_delivery_failed` or `forward_delivery_failed`, then verify the mounted
+secret through the secret manager. Do not put SMTP passwords or credentialed
+webhook URLs in `.env` or Git.
 
 ## Workload metrics and capacity
 
@@ -264,43 +260,43 @@ Validate the desired runtime without recreating live services:
 ```sh
 sh ./scripts/runtime-isolation-check.sh --env-file=.env.vps.example
 sh ./scripts/runtime-isolation-sandbox-test.sh
-T13_APP_SOURCE_ROOT=/home/platform_infrastructure/src \
-T13_CERTS_DIR=/home/platform_infrastructure/platform-infrastructure/traefik/certs \
-sh ./scripts/runtime-hosted-sandbox-test.sh
+sh ./scripts/infra-ops.sh testing-hygiene
+HOSTED_WORKLOAD_CATALOG=/path/hosted-workloads.json \
+HOSTED_WORKLOAD_ROOT=/path/applications \
+HOSTED_WORKLOAD_LOCK=/path/private/hosted-workloads.lock.json \
+COMPOSE_ENV_FILE=.env.vps \
+sh ./scripts/prepare-hosted-workloads.sh
 ```
 
-The stress sandbox is capped at 0.25 CPU and 96 MiB. The hosted sandbox uses
-unique networks, does not start live databases and preserves application
-sources read-only. Follow `RUNTIME-ISOLATION.md` for rollout and rollback.
+The stress sandbox is capped at 0.25 CPU and 96 MiB. The hosted workload
+preparation is non-mutating: it validates the external manifest and environment,
+compares core/combined renders and writes a hash-locked contract. Follow
+`RUNTIME-ISOLATION.md` for rollout and rollback.
 
 ## Service identities and storage policy
 
-The T14 candidate replaces the shared PostgreSQL URL with three distinct
-runtime identities. Backend inherits the account/auth/audit capabilities it
-actually uses; jobs can only process `audit_outbox` and read restore metrics;
-notifications has no table grant. The backend receives no MinIO credential.
-Future object-storage users get one service account limited to one
-bucket/prefix. See `SERVICE-IDENTITY-AND-TENANCY.md`.
+Application database identities, grants and rollout SQL are owned by the
+external workload repository. The platform contract requires distinct
+service credentials, denies MinIO root material to workloads and supports one
+object-storage service account per bucket/prefix. See
+`SERVICE-IDENTITY-AND-TENANCY.md`.
 
 Safe verification does not touch live data:
 
 ```sh
-docker run --rm -v "$PWD:/workspace:ro" -w /workspace \
-  node:26.3.1-alpine@sha256:a2dc166a387cc6ca1e62d0c8e265e49ca985d6e60abc9fe6e6c3d6ce8e63f606 \
-  node scripts/service-identity-policy.mjs
-sh scripts/service-identity-sandbox-test.sh
-sh scripts/service-identity-rollout.sh --mode plan
+sh ./scripts/infra-ops.sh testing-hygiene
+sh ./scripts/runtime-isolation-check.sh --env-file=.env.vps.example
+sh ./scripts/network-segmentation-check.sh --env-file=.env.vps.example
 MODE=plan MINIO_BUCKET=example-app MINIO_PREFIX=runtime/ \
   sh scripts/minio-service-identity.sh
 ```
 
-Never run prepare/revoke during an ordinary deploy. The approved sequence is:
-fresh exact PostgreSQL backup plus restore-test, migration `014`, scoped secret
-materialization, prepare, recreate only backend/workers, functional smoke,
-non-secret cutover evidence, then explicit legacy revoke. The revoke command
-requires both recovery and cutover evidence and a confirmation token. Rollback
-restores bounded capability memberships only; it never restores broad grants
-or MinIO root material.
+Never run application prepare/revoke during an ordinary platform deploy. The
+approved sequence lives in the app runbook: fresh exact backup plus restore
+test, app migration, scoped secret materialization, service-by-service recreate,
+functional smoke, non-secret cutover evidence and explicit legacy revoke.
+Rollback may restore only bounded capabilities, never broad grants or MinIO
+root material.
 
 ## External uptime monitoring
 
@@ -348,7 +344,7 @@ Run these before major releases and after infrastructure changes:
 
 ```sh
 sh ./scripts/fault-injection-tests.sh
-sh ./scripts/failure-tests.sh --confirmServiceStop --targets redis,postgres,minio,keycloak,backend,worker-notifications,worker-jobs,nats,waf
+sh ./scripts/failure-tests.sh --confirmServiceStop --targets redis,postgres,minio,keycloak,nats,waf,platform-alert-dispatcher,backup-scheduler
 sh ./scripts/infra-ops.sh load-profile --durationSeconds 60 --targetRps 8 --concurrency 8 --maxP95Ms 1000
 sh ./scripts/load-benchmark.sh --profiles 50,100,500 --durationSeconds 60 --perUserRps 0.2 --maxP95Ms 1000
 sh ./scripts/load-benchmark.sh --profiles 50,100,500 --url https://api.example.com/health --requirePublicTarget --requireEdgeEvidence --expectedEdgeProvider cloudflare
@@ -359,17 +355,17 @@ Acceptance criteria:
 
 - Redis degradation does not bypass sensitive endpoint rate limits.
 - PostgreSQL statement timeout cancels slow queries and rolls back cleanly.
-- Audit outbox due/dead/failed metrics stay explainable after worker interruption.
-- Backend p95 stays under the declared threshold for the selected profile.
+- Platform alert delivery and backup scheduler failures remain observable.
+- Control Center p95 stays under the declared threshold for the selected profile.
 - `failure-tests` writes a non-sensitive detection/recovery report under `reports/failure-tests/`.
 - `load-benchmark` writes JSON/Markdown reports under `reports/load/`, including Docker CPU/RAM snapshots before and after each profile.
 - The production `load-benchmark` run must target the public API URL, classify the target as public, record edge/CDN evidence and finish with `status=passed`. With Cloudflare enabled, use `--requireEdgeEvidence --expectedEdgeProvider cloudflare`; otherwise document the reviewed provider exception before go-live. Failed preflights or profiles still write diagnostic reports under `reports/load/`, but they do not satisfy production go/no-go.
 
 The load profile uses a bounded synthetic `X-Forwarded-For` client pool by default so the performance probe does not collide with the security rate-limit budget consumed by smoke and E2E checks. Use `--preserveClientIp` when deliberately testing one-client throttling behavior.
 
-If `AuditOutboxDeadLetters` fires, pause risky admin or workload operations, inspect `{job="docker",service="enterprise-worker-jobs"} |= "audit_outbox"`, fix the downstream sink, then replay only events whose `external_event_id` has not already been accepted by the sink.
-
-If `BackendRedisUnavailable` fires, keep platform and hosted-workload traffic under the degraded memory/rate-limit budget until Redis is healthy. Do not raise rate-limit ceilings during the incident.
+If `AlertDeliveryFailed` fires, inspect the platform dispatcher logs and
+mounted channel credentials, repair the channel, then rerun the exact correlated
+probe. Application outbox recovery belongs to the workload runbook.
 
 ## Centralized logs and audit
 
@@ -379,19 +375,18 @@ Primary operator queries:
 
 ```logql
 {job="docker",service=~"enterprise-.+",level=~"warn|error"}
-{job="docker",service="enterprise-backend"} |= "request failed"
-{job="docker",service="enterprise-worker-jobs"} |= "audit_outbox"
+{job="docker",service="enterprise-control-center"} |= "error"
+{job="docker",service="enterprise-platform-alert-dispatcher"} |= "delivery_failed"
 ```
 
 Use Loki for operational logs and `platform-admin-audit` evidence for
-infrastructure admin activity. Hosted application audit schemas such as
-`app_account.audit_events` are workload-owned and must not be used as platform
-go-live evidence. Audit tables for hosted apps may still be append-only and RLS
-protected, but they are outside the hosting-infra gate.
-The infrastructure evidence gate still verifies that audit tables using
-`audit_events` and `audit_outbox` remain append-only, durable and observable,
-so centralized audit behavior can be proven without coupling go-live to a
-hosted application.
+infrastructure admin activity. Hosted application audit schemas are
+workload-owned and must not be used as platform go-live evidence. Audit tables
+for hosted apps may still be append-only and RLS protected, but they are
+outside the hosting-infra gate.
+The infrastructure evidence gate verifies the Control Center append-only
+administrative audit and JSONL operational evidence. It does not inspect or
+promote application audit tables.
 Run `sh ./scripts/audit-log-evidence.sh` before go-live and after audit/outbox changes; archive `reports/audit-logs/audit-log-evidence-*.json` with the release evidence.
 Run `sh ./scripts/retention-evidence.sh` after log/metric retention changes and before go-live; archive `reports/retention/retention-evidence-*.json` with the release evidence.
 
@@ -427,7 +422,6 @@ Preferred VPS scheduler:
 ```sh
 docker compose --env-file .env -p platform_infra_vps \
   -f compose.yaml \
-  -f compose.build.yaml \
   -f compose.secrets.yaml \
   -f compose.vps.yaml \
   -f compose.waf.yaml \
@@ -898,7 +892,7 @@ checks every entry's size and SHA256, confirms the anti-secret policy and, with
 1. Build versioned images:
 
    ```sh
-   docker compose -f compose.yaml -f compose.build.yaml --env-file .env build
+   docker compose -f compose.yaml --env-file .env build
    ```
 
 2. Push images to the registry configured in `.env`.
@@ -960,6 +954,31 @@ checks every entry's size and SHA256, confirms the anti-secret policy and, with
 
 9. Record the deploy audit trail:
 
+## Hosted Workload Preparation
+
+The platform must render and pass its gates with zero hosted applications.
+Before attaching an external workload, publish its digest-pinned images and
+keep its manifest, Compose overlay, non-secret runtime environment and database
+migrations in the application repository. Then prepare and verify the lock:
+
+```sh
+HOSTED_WORKLOAD_CATALOG=/path/hosted-workloads.json \
+HOSTED_WORKLOAD_ROOT=/path/applications \
+HOSTED_WORKLOAD_LOCK=/path/private/hosted-workloads.lock.json \
+COMPOSE_ENV_FILE=.env \
+sh ./scripts/prepare-hosted-workloads.sh
+
+sh ./scripts/hosted-workload-lock.sh \
+  /path/private/hosted-workloads.lock.json verify
+```
+
+Preparation does not start services or change a database. Review the generated
+core and combined render evidence, take fresh backup/restore evidence, and apply
+application migrations only through the application runbook with its explicit
+confirmation gate. Activation or replacement of workload containers requires a
+separate approved maintenance window. A changed manifest, image environment or
+migration invalidates the lock and fails closed.
+
 ## VPS Prod-Like Deploy
 
 Use this path when TLS and public certificates are terminated by VPS, Cloudflare, or another edge in front of the VPS.
@@ -987,7 +1006,6 @@ Use this path when TLS and public certificates are terminated by VPS, Cloudflare
    ```sh
    docker compose --env-file .env -p platform_infra_vps \
      -f compose.yaml \
-     -f compose.build.yaml \
      -f compose.secrets.yaml \
      -f compose.vps.yaml \
      -f compose.waf.yaml \

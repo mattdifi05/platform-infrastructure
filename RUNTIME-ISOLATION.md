@@ -96,17 +96,20 @@ Bounded cgroup/socket stress sandbox:
 sh ./scripts/runtime-isolation-sandbox-test.sh
 ```
 
-Hosted runtime startup and mount probe on Ubuntu:
+Hosted workload contract and combined render on Ubuntu:
 
 ```sh
-T13_APP_SOURCE_ROOT=/home/platform_infrastructure/src \
-T13_CERTS_DIR=/home/platform_infrastructure/platform-infrastructure/traefik/certs \
-sh ./scripts/runtime-hosted-sandbox-test.sh
+HOSTED_WORKLOAD_CATALOG=/path/hosted-workloads.json \
+HOSTED_WORKLOAD_ROOT=/path/applications \
+HOSTED_WORKLOAD_LOCK=/path/private/hosted-workloads.lock.json \
+COMPOSE_ENV_FILE=.env.vps \
+sh ./scripts/prepare-hosted-workloads.sh
 ```
 
-The hosted sandbox uses a unique Compose project and network prefix, never
-connects to live databases and runs `down --remove-orphans` without `-v` only
-for its own disposable project.
+Preparation does not start containers or connect to a database. It validates
+the external workload inputs, renders core and combined Compose models and
+writes a permission-restricted SHA-256 lock. Runtime activation is a separate
+approved maintenance action.
 
 ## Rollout Gate
 
@@ -139,11 +142,11 @@ hosted workloads.
 
 ## Residuals
 
-- T14 must replace shared/root DB and MinIO credentials with scoped identities.
-- T18 must build immutable hosted application images and remove the external
-  prebuilt Node artifact dependency.
+- T14 scoped identity and MinIO contracts are implemented in sandbox; their
+  application-specific rollout now belongs to each workload repository.
+- T18 immutable hosted application builds and the external workload lock are
+  implemented in candidate branches; live activation remains pending approval.
 - T20 owns the existing Control Center CSS static-gate blocker.
 - T21 owns disk/UPS telemetry and host I/O/power drills.
 - T22 owns complete CI gate consolidation and dependency-runner cleanup.
 - T08 still requires a clean-host restore on a disposable Ubuntu server.
-

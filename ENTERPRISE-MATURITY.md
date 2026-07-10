@@ -19,14 +19,14 @@ Production go-live: NO-GO finche' mancano dominio/provider/evidence esterne.
 | 3 | HTTPS pubblico ACME | Repo-ready | `compose.prod.yaml` con Let's Encrypt HTTP challenge |
 | 4 | Secrets manager | Proprietary integrated | `infra-secret-manager`, encrypted store, audit log, `/run/secrets/*`, `*_FILE`, keyring rotation |
 | 5 | Rotazione credenziali | Repo-ready | Runbook e secret scan gate |
-| 6 | Registry immagini privato | Repo-ready | Dockerfile prod e `compose.build.yaml`; prod usa immagini versionate |
-| 7 | CI/CD remoto | Repo-ready | Workflow GitHub, `pnpm enterprise:check` e release/deploy gate |
+| 6 | Registry immagini privato | Repo-ready | Dockerfile platform, immagini digest-pinned e release artifact gate |
+| 7 | CI/CD remoto | Repo-ready | Workflow GitHub e release/deploy gate container-first |
 | 8 | Backup off-site e restore drill | Repo-ready + environment action | Backup e restore drill PostgreSQL, MariaDB, MinIO, Keycloak, Secret Manager metadata; Restic richiede repository off-site reale |
-| 9 | Alerting reale | Gate-ready | Prometheus, Alertmanager, worker notifiche, Loki/Grafana e runbook provider |
-| 10 | Log centralizzati/redaction/audit | Gate-ready | Loki/Promtail con label strutturate, redaction condivisa, audit DB append-only |
-| 11 | WAF/rate limit/bot protection | Repo-ready | Traefik rate limit + Fastify Redis-backed rate limit |
+| 9 | Alerting reale | Gate-ready | Prometheus, Alertmanager, `platform-alert-dispatcher`, Loki/Grafana e runbook provider |
+| 10 | Log centralizzati/redaction/audit | Gate-ready | Loki/Promtail con redaction e audit amministrativo append-only JSONL |
+| 11 | WAF/rate limit/bot protection | Repo-ready | OWASP CRS, Traefik rate limit e prove WAF platform |
 | 12 | RBAC admin plane | Repo-ready | Control Center identity metadata, Cloudflare Access policy, platform-admin-audit |
-| 13 | Hosted workload isolation | Repo-ready | project-router, wildcard boundary, audit separazione platform/app |
+| 13 | Hosted workload isolation | Repo-ready | manifest esterno, lock SHA-256, project-router, reti dedicate e diff core/combined |
 | 14 | Email production SPF/DKIM/DMARC | Gate-ready | SMTP configurabile; checklist record dominio |
 | 15 | Application onboarding governance | Repo-ready | Control Center add/archive/stop metadata e audit amministrativo |
 | 16 | Database service governance | Repo-ready | Backup/restore PostgreSQL/MariaDB come servizio gestito, senza migration app |
@@ -37,7 +37,7 @@ Production go-live: NO-GO finche' mancano dominio/provider/evidence esterne.
 | 21 | HA/multi-node | Environment-ready | Richiede infrastruttura multi-node reale |
 | 22 | Zero-downtime deploy | Gate-ready | Immagini immutabili, firma e `rollback-release.sh`; blue/green richiede target reale |
 | 23 | Staging identico alla prod | Gate-ready | Prod overlay replicabile con project/env separati |
-| 24 | Feature flags/kill switch | Repo-ready | Policy documentata; implementazione applicativa futura |
+| 24 | Feature flags/kill switch | Repo-ready | Kill switch platform e rollback release documentati; flag app fuori scope |
 | 25 | SIEM/security monitoring | Gate-ready | Log/alert esportabili; SIEM esterno da collegare |
 | 26 | Vulnerability disclosure | Repo-ready | `SECURITY.md` come base |
 | 27 | Supply-chain SBOM/firma/provenance | Gate-ready | SBOM, audit, image signing, BuildKit provenance |
@@ -57,9 +57,8 @@ sh ./scripts/infra-ops.sh enterprise-requirements-check --manifest governance/pr
 sh ./scripts/infra-ops.sh enterprise-requirements-check --manifest governance/production-readiness.json --requireLiveProofs
 ```
 
-Eventuali riferimenti a account, passkey, backup code, `app_account` o migration
-applicative sono controlli di workload ospitato e non partecipano al GO/NO-GO
-dell'infrastruttura hosting.
+Account, passkey, backup code, schema e migrazioni applicative appartengono al
+workload ospitato e non partecipano al GO/NO-GO dell'infrastruttura hosting.
 
 Eventuali riferimenti a `/opt/platform/src` o `pnpm enterprise:check` sono
 compatibilita' per vecchi workspace/monorepo applicativi. Non sono richiesti per
@@ -79,13 +78,17 @@ per VPS, Cloudflare, monitor esterni, alert, restore e rollback.
 
 ## Redis enterprise runtime
 
-Redis viene usato dall'infrastruttura per rate limit distribuito, heartbeat
-worker e metriche Prometheus. Workload ospitati possono usarlo anche per OTP o
-challenge applicative, ma quei flussi non sono gate dell'infrastruttura.
+Redis e' un servizio dati gestito disponibile ai componenti platform e ai
+workload esplicitamente collegati. OTP, challenge e cache applicative restano
+fuori dai gate dell'infrastruttura.
 
-PostgreSQL e MariaDB sono servizi dati gestiti dalla piattaforma hosting. Schemi
-applicativi come `app_account` sono compatibilita' workload e non source of truth
-del GO/NO-GO infrastrutturale.
+PostgreSQL e MariaDB sono servizi dati gestiti dalla piattaforma hosting. Tutti
+gli schemi e rollout applicativi sono posseduti dalla repository del workload e
+non sono source of truth del GO/NO-GO infrastrutturale.
+
+La separazione core/workload introdotta da T18 e' una candidata verificata, non
+ancora attivata sul server di riferimento: il runtime live resta invariato fino
+al cutover approvato con backup, lock verificato e rollback.
 
 ## Secret manager locale
 

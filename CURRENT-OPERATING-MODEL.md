@@ -66,7 +66,6 @@ Current overlay set:
 ```sh
 docker compose -p platform_infra_vps \
   -f compose.yaml \
-  -f compose.build.yaml \
   -f compose.secrets.yaml \
   -f compose.vps.yaml \
   -f compose.waf.yaml \
@@ -76,23 +75,22 @@ docker compose -p platform_infra_vps \
   ps
 ```
 
-`compose.runtime.yaml` is the tracked hosted-runtime overlay and
-`compose.networks.yaml` is the T12 trust-zone policy loaded last. The network
-candidate is not live until an approved maintenance rollout recreates network
-attachments and passes `network-segmentation-check` plus post-deploy probes.
+`compose.runtime.yaml` contains only optional platform runtime services and
+`compose.networks.yaml` defines the platform trust zones. Concrete applications
+are appended only from a verified external workload lock. The candidate is not
+live until an approved maintenance rollout recreates network attachments and
+passes `network-segmentation-check` plus post-deploy probes.
 
 The desired VPS render additionally loads `compose.runtime-isolation.yaml`
 last. It contains the T13 mount/socket/cgroup contract. It is verified in
 sandboxes but is not applied to the reference containers; the live stack still
 shows the old mounts, flat network attachments and absent CPU/RAM ceilings.
 
-The desired render also contains the T14 service-identity contract: dedicated
-database URL secrets for backend, jobs and notifications; no MinIO root secret
-on the backend; and a PostgreSQL 18 clean-init wrapper that stages private host
-files before dropping privileges. The candidate passed empty-volume migrations
-and DB/MinIO negative tests. It is not live: the reference containers still use
-the shared `app_user`, and any cutover requires recovery evidence plus a
-service-by-service maintenance approval.
+The application service-identity contract, schemas and migrations have moved to
+the owning workload repository. The platform core owns database availability,
+backup/restore and isolation, but not application grants or rollout SQL. Any
+workload credential cutover still requires recovery evidence and a separately
+approved application maintenance procedure.
 
 The T15/T16 release candidate pins third-party bytes and admits release
 subjects only after direct GitHub/Sigstore verification of signer workflow,
@@ -101,7 +99,7 @@ exact, and VPS workflow/deploy inputs no longer enter the SSH remote command.
 This is repository-side and sandbox/provider-read-only evidence: no release
 image was published or deployed and no GitHub protection rule was changed.
 
-Core platform services currently expected in the reference stack:
+Historical services currently running on the unchanged reference stack:
 
 ```text
 alertmanager, backend, cadvisor, control-center, grafana, keycloak, local-dns,
@@ -110,9 +108,19 @@ project-router, prometheus, promtail, redis, traefik, waf, web, worker-jobs,
 worker-notifications
 ```
 
-Attached workload containers can also exist on the reference server, usually as
-`php-*` or `node-*`. They are capacity/migration inputs, not platform core and
-not public documentation evidence for hosted projects.
+The T18 candidate core instead renders exactly 24 services:
+
+```text
+alertmanager, backup-scheduler, cadvisor, control-center,
+docker-socket-proxy, grafana, keycloak, local-dns, local-registry, loki,
+mariadb, minio, nats, node-exporter, phpmyadmin, phppgadmin,
+platform-alert-dispatcher, postgres, project-router, prometheus, promtail,
+redis, traefik, waf
+```
+
+Attached workloads are external. A verified Stexor candidate adds five services
+to a 29-service combined render. This separation is repository/sandbox verified
+only; all 34 live container IDs remain unchanged until cutover approval.
 
 Current named volumes:
 
@@ -210,48 +218,39 @@ Run from the server repo path:
 ```sh
 cd /home/platform_infrastructure/platform-infrastructure
 
-docker compose -p platform_infra_vps \
-  -f compose.yaml \
-  -f compose.build.yaml \
-  -f compose.secrets.yaml \
-  -f compose.vps.yaml \
-  -f compose.waf.yaml \
-  -f compose.vps-waf.yaml \
-  -f compose.runtime.yaml \
-  -f compose.networks.yaml \
-  up -d --build
+COMPOSE_ENV_FILE=.env \
+COMPOSE_PROJECT_NAME=platform_infra_vps \
+HOSTED_WORKLOAD_LOCK=/path/private/hosted-workloads.lock.json \
+bash ./scripts/compose-vps.sh config --quiet
+
+# Run only after reviewed backup, lock and maintenance approval.
+COMPOSE_ENV_FILE=.env \
+COMPOSE_PROJECT_NAME=platform_infra_vps \
+HOSTED_WORKLOAD_LOCK=/path/private/hosted-workloads.lock.json \
+bash ./scripts/compose-vps.sh up -d --build
 ```
+
+For a zero-workload platform deploy, omit `HOSTED_WORKLOAD_LOCK`. Never point it
+at an unverified or world-readable file.
 
 For a Control Center-only code/documentation rollout:
 
 ```sh
 cd /home/platform_infrastructure/platform-infrastructure
 
-docker compose -p platform_infra_vps \
-  -f compose.yaml \
-  -f compose.build.yaml \
-  -f compose.secrets.yaml \
-  -f compose.vps.yaml \
-  -f compose.waf.yaml \
-  -f compose.vps-waf.yaml \
-  -f compose.runtime.yaml \
-  -f compose.networks.yaml \
-  up -d --force-recreate control-center
+COMPOSE_ENV_FILE=.env \
+COMPOSE_PROJECT_NAME=platform_infra_vps \
+HOSTED_WORKLOAD_LOCK=/path/private/hosted-workloads.lock.json \
+bash ./scripts/compose-vps.sh up -d --no-deps --force-recreate control-center
 ```
 
 Health and status checks:
 
 ```sh
-docker compose -p platform_infra_vps \
-  -f compose.yaml \
-  -f compose.build.yaml \
-  -f compose.secrets.yaml \
-  -f compose.vps.yaml \
-  -f compose.waf.yaml \
-  -f compose.vps-waf.yaml \
-  -f compose.runtime.yaml \
-  -f compose.networks.yaml \
-  ps control-center traefik waf
+COMPOSE_ENV_FILE=.env \
+COMPOSE_PROJECT_NAME=platform_infra_vps \
+HOSTED_WORKLOAD_LOCK=/path/private/hosted-workloads.lock.json \
+bash ./scripts/compose-vps.sh ps control-center traefik waf
 
 curl -skS --resolve portal.platform-infrastructure.com:443:127.0.0.1 \
   https://portal.platform-infrastructure.com/control/status
@@ -267,14 +266,16 @@ curl -skS --resolve portal.platform-infrastructure.com:443:127.0.0.1 \
 6. Prepare rollback backups of repo, external application sources and Docker
    volumes before first cutover attempt.
 7. Clone/copy `platform-infrastructure` to the final server path.
-8. Recreate `.env` and secret files from reviewed templates; render the tracked
-   runtime and network overlays without copying stale secret values into Git.
-9. Copy application sources into the external application root, outside this
-   repo.
-10. Start the stack with the same overlay intent and verify `ps`, WAF, Portal,
-    docs and Status.
-11. Run backup and restore drills before deleting rollback copies.
-12. Keep the old server as reference until the new server has clean health,
+8. Recreate `.env` and platform secret files from reviewed templates; render the
+   zero-workload core without copying stale secret values into Git.
+9. Copy each application into the external workload root. Verify its
+   application-owned manifest, images, environment and migration procedure.
+10. Generate a `0600` hosted-workload lock and review the exact core/combined
+    render diff before any activation.
+11. Start the stack with the reviewed lock and verify `ps`, WAF, Portal, docs
+    and Status. Apply app migrations only through the separate app runbook.
+12. Run backup and restore drills before deleting rollback copies.
+13. Keep the old server as reference until the new server has clean health,
     current backups, restore evidence and operator sign-off.
 
 ## Refresh Evidence
@@ -284,7 +285,6 @@ Use these commands to refresh this document before a real migration or go-live:
 ```sh
 docker compose -p platform_infra_vps \
   -f compose.yaml \
-  -f compose.build.yaml \
   -f compose.secrets.yaml \
   -f compose.vps.yaml \
   -f compose.waf.yaml \
@@ -295,7 +295,6 @@ docker compose -p platform_infra_vps \
 
 docker compose -p platform_infra_vps \
   -f compose.yaml \
-  -f compose.build.yaml \
   -f compose.secrets.yaml \
   -f compose.vps.yaml \
   -f compose.waf.yaml \
@@ -306,7 +305,6 @@ docker compose -p platform_infra_vps \
 
 docker compose -p platform_infra_vps \
   -f compose.yaml \
-  -f compose.build.yaml \
   -f compose.secrets.yaml \
   -f compose.vps.yaml \
   -f compose.waf.yaml \

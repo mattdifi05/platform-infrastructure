@@ -17,7 +17,7 @@ Runtime:
 - OS root `/` remains on the HDD/root filesystem; active infra data and Docker
   state are on NVMe.
 
-Core platform service set:
+The 2026-06-29 live runtime still contains the historical app-coupled services:
 
 ```text
 alertmanager, backend, cadvisor, control-center, grafana, keycloak, local-dns,
@@ -26,9 +26,24 @@ project-router, prometheus, promtail, redis, traefik, waf, web, worker-jobs,
 worker-notifications
 ```
 
-The live host may also run attached workload containers such as `php-*` or
-`node-*`. Those names are intentionally excluded from this public readiness
-report because hosted applications are outside the platform repository.
+It also runs attached workload containers such as `php-*` and `node-*`. This
+is operational history, not the target ownership model.
+
+T18 candidate core, verified 2026-07-10 with no live recreate:
+
+```text
+alertmanager, backup-scheduler, cadvisor, control-center,
+docker-socket-proxy, grafana, keycloak, local-dns, local-registry, loki,
+mariadb, minio, nats, node-exporter, phppgadmin, phpmyadmin,
+platform-alert-dispatcher, postgres, project-router, prometheus, promtail,
+redis, traefik, waf
+```
+
+The candidate core renders with 24 services and zero applications. A verified
+external Stexor lock adds exactly five workload services to a 29-service
+combined render. Application images, environment, schemas and migrations are
+owned by the Stexor repository candidate. All 34 live container IDs remained
+unchanged during T18 validation.
 
 Control Center `Stato` latest read-only run:
 
@@ -102,8 +117,15 @@ LAN-only Ubuntu server.
 - `linux-portability-check.sh` scans BOM/CRLF, Windows paths and PowerShell/cmd dependencies, validates shell wrappers with Alpine and writes reports under `reports/linux-portability/`.
 - Local `enterprise-10-check` passes through the Dockerized ops runner.
 - Infrastructure CI now uses bash/containerized infra gates instead of PowerShell or direct host-Node infra policy commands; attached application checks remain external unless explicitly mounted.
-- Alert delivery supports email plus optional native Discord and Telegram channels, each with delivery/failure metrics.
-- `alert-evidence.sh` validates Alertmanager routing and can send a synthetic alert to prove webhook/email/Discord/Telegram delivery counters.
+- Alert delivery uses the platform-owned dispatcher with SMTP and an optional
+  generic forward webhook, each with delivery/failure metrics.
+- `alert-evidence.sh` validates Alertmanager routing and sends a correlated
+  synthetic alert to prove the exact dispatcher receipt and selected channel.
+- Hosted workloads are accepted through an external catalog, strict manifest,
+  digest-pinned image overlay, prefixed non-secret environment and a `0600`
+  SHA-256 lock that proves the exact core/combined render delta.
+- The platform repository contains no application backend/web/worker image,
+  application schema or application migration after T18.
 - Legacy application workspaces can expose a cross-platform Dockerized infra-ops launcher, but this repository's canonical gate is `scripts/infra-ops.sh`.
 - Provider-neutral external uptime manifest and `external-uptime-check` dry-run are wired into the infra gate; real provider monitors still need live DNS/CDN.
 - `external-uptime-check --dryRun` now writes diagnostic JSON/Markdown under `reports/uptime/` with `providerEvidence.verified=false`, so manifest evidence can be archived without satisfying the production provider gate.
@@ -160,6 +182,7 @@ sh ./scripts/alert-evidence.sh --sendTest --requireEmailDelivery
 sh ./scripts/failure-tests.sh --confirmServiceStop
 sh ./scripts/load-benchmark.sh --profiles 50,100,500 --url https://api.example.com/health --requirePublicTarget --requireEdgeEvidence --expectedEdgeProvider cloudflare
 sh ./scripts/production-preflight.sh
+HOSTED_WORKLOAD_CATALOG=/path/hosted-workloads.json HOSTED_WORKLOAD_ROOT=/path/applications HOSTED_WORKLOAD_LOCK=/path/private/hosted-workloads.lock.json COMPOSE_ENV_FILE=.env sh ./scripts/prepare-hosted-workloads.sh
 sh ./scripts/github-branch-protection.sh --repo OWNER/REPO --branch main --dryRun
 sh ./scripts/github-environments.sh --repo OWNER/REPO --dryRun
 sh ./scripts/github-actions-config.sh --repo OWNER/REPO

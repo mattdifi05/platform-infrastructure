@@ -72,11 +72,12 @@ Terminologia canonica:
 - **`docs.<domain>`**: host pubblico della documentazione.
 - **Admin identity plane**: metadata e policy per operatori del Control Center,
   Cloudflare Access, GitHub/VPS e audit amministrativo.
-- **Account/passkey workload compatibility**: eventuali flussi utente di app
-  ospitate; non sono gate GO/NO-GO dell'infrastruttura.
-- **`backend`, `web`, `worker-*`**: nomi storici dei runtime/template generici
-  della piattaforma. Non rappresentano applicazioni ospitate; quando vengono
-  usati da sorgenti esterni, la sorgente resta fuori repo.
+- **Hosted workload**: applicazione esterna con manifest, Compose overlay,
+  immagini, environment non-secret e migrazioni posseduti dalla repository
+  applicativa. Account, passkey e business worker appartengono a questo scope.
+- **Platform service**: componente necessario anche con zero workload collegati,
+  per esempio Traefik, WAF, Control Center, project-router, database condivisi,
+  backup scheduler, observability e `platform-alert-dispatcher`.
 
 ## Stack
 
@@ -86,16 +87,38 @@ Terminologia canonica:
 - Redis per rate limit, cache/runtime state, heartbeat worker e uso applicativo
   opzionale.
 - Keycloak, NATS JetStream, MinIO, Prometheus, node-exporter, cAdvisor, Grafana, Loki e Promtail.
-- Runtime Node/PHP e worker generici, usati solo quando un'application esterna viene collegata tramite sorgente o immagini release esplicite.
+- Runtime Node/PHP/Static collegati soltanto tramite un contratto workload
+  esterno verificato; nessun backend, frontend o worker applicativo e' core.
 
 I container usano prefisso `enterprise-`, network `enterprise_net` e volumi `enterprise_*`.
+
+## Contratto workload esterno
+
+Il core si renderizza e passa i gate con zero applicazioni. Per collegare un
+workload, la repository applicativa fornisce un manifest, un overlay Compose
+image-only, un environment non-secret ignorato da Git e le proprie migrazioni.
+La piattaforma registra il manifest in un catalogo esterno e prepara un lock:
+
+```sh
+HOSTED_WORKLOAD_CATALOG=/path/hosted-workloads.json \
+HOSTED_WORKLOAD_ROOT=/path/applications \
+HOSTED_WORKLOAD_LOCK=/path/private/hosted-workloads.lock.json \
+COMPOSE_ENV_FILE=.env.vps \
+sh ./scripts/prepare-hosted-workloads.sh
+```
+
+La preparazione valida digest immutabili, nomi, route, secret dichiarati,
+network e budget, confronta render core e combinato e scrive un lock `0600` con
+SHA-256 di ogni input. Non crea database, non applica migrazioni e non avvia
+container. Il deploy usa soltanto un lock `verified`; se un file cambia, il
+render fallisce chiuso finche' il lock non viene rigenerato e approvato.
 
 ## Avvio locale
 
 ```sh
 cd /opt/platform/platform-infrastructure
 cp .env.example .env
-docker compose -f compose.yaml -f compose.build.yaml --env-file .env -p platform_infra_local up -d --build
+docker compose -f compose.yaml --env-file .env -p platform_infra_local up -d --build
 ```
 
 Avvio consigliato con Infra Secret Manager e Docker secrets file-based:
@@ -104,10 +127,10 @@ Avvio consigliato con Infra Secret Manager e Docker secrets file-based:
 cd /opt/platform/platform-infrastructure
 cp .env.example .env
 sh ./scripts/infra-secret-manager.sh init
-docker compose -f compose.yaml -f compose.build.yaml -f compose.secrets.yaml --env-file .env -p platform_infra_local up -d --build
+docker compose -f compose.yaml -f compose.secrets.yaml --env-file .env -p platform_infra_local up -d --build
 ```
 
-`infra-secret-manager` mantiene uno store proprietario cifrato in `secrets/infra-secret-manager-store.json`, audit JSONL in `secrets/infra-secret-manager-audit.log` e materializza i file Docker secrets usati da `compose.secrets.yaml`. Lo store usa envelope KMS locale `local-bucket-kms` con KEK ruotabile. I runtime platform/generici leggono i secret da `/run/secrets/*`, inclusi `DATABASE_URL_FILE`, `SESSION_SECRET_FILE`, `SESSION_SIGNING_KEYS_FILE`, `PROJECTS_GATEWAY_SIGNING_KEYS_FILE`, `REDIS_PASSWORD_FILE`, `NATS_URL_FILE` e `SMTP_PASSWORD_FILE`.
+`infra-secret-manager` mantiene uno store proprietario cifrato in `secrets/infra-secret-manager-store.json`, audit JSONL in `secrets/infra-secret-manager-audit.log` e materializza i file Docker secrets usati da `compose.secrets.yaml`. Lo store usa envelope KMS locale `local-bucket-kms` con KEK ruotabile. I servizi core leggono solo i secret platform da `/run/secrets/*`. I secret applicativi non sono richiesti dal core: vengono dichiarati nel manifest del workload e devono esistere nel backend prima della preparazione del relativo lock.
 
 Lo stesso manager funziona anche come secret vault locale per valori arbitrari non presenti nella whitelist platform. I nomi devono usare solo lettere minuscole, numeri e underscore. Esempio:
 
@@ -123,7 +146,7 @@ Il dev Docker e' volutamente production-like: usa `NODE_ENV=production`, immagin
 `phpmyadmin` non parte nello stack default. Per manutenzione locale temporanea avvialo esplicitamente con il profilo `admin` e spegnilo a fine intervento:
 
 ```sh
-docker compose --env-file .env -p platform_infra_local -f compose.yaml -f compose.build.yaml -f compose.secrets.yaml -f compose.waf.yaml --profile admin up -d phpmyadmin traefik waf
+docker compose --env-file .env -p platform_infra_local -f compose.yaml -f compose.secrets.yaml -f compose.waf.yaml --profile admin up -d phpmyadmin traefik waf
 docker compose -f compose.yaml -f compose.secrets.yaml --env-file .env -p platform_infra_local stop phpmyadmin
 ```
 
@@ -189,11 +212,37 @@ Enterprise requirements: GO per copertura repo/tooling.
 Production go-live: NO-GO finche' mancano prove live/provider esterne.
 ```
 
-Alertmanager resta interno alla rete Docker. Prometheus invia gli alert ad Alertmanager, che li inoltra al worker notifiche su `/alerts/prometheus` con token Bearer da Docker secret; il token e' materializzato `0640` e condiviso solo tramite `ALERTMANAGER_SECRET_GID`. L'healthcheck richiede sia `/-/ready` sia la leggibilita' del token. Il worker produce log Loki, metriche `notification_alert_*`, email reali verso `ALERT_EMAIL_TO` quando SMTP e' configurato, e canali opzionali Discord/Telegram tramite secret file. `alert-evidence --sendTest` entra dall'API Alertmanager e richiede un receipt correlato downstream: non chiama direttamente il worker. `node-exporter` fornisce le metriche host e legge le serie workload generate dal collector host-side `platform-container-metrics.service`. Il collector riconcilia `docker ps`, `docker stats` e i soli campi non-secret necessari di `docker inspect`, conserva gli zero reali, espone i limiti cgroup effettivi e fallisce se manca un container in esecuzione. cAdvisor resta una scrape di compatibilita', ma il suo healthcheck non e' prova di copertura workload. Vedi `WORKLOAD-METRICS.md`.
+Alertmanager resta interno alla rete Docker. Prometheus invia gli alert ad
+Alertmanager, che li inoltra a `platform-alert-dispatcher` su
+`/alerts/prometheus` con token Bearer da Docker secret; il token e'
+materializzato `0640` e condiviso solo tramite `ALERTMANAGER_SECRET_GID`.
+L'healthcheck richiede sia `/-/ready` sia la leggibilita' del token. Il
+dispatcher produce log Loki, metriche `platform_alert_*`, email reali verso
+`ALERT_EMAIL_TO` e un forward webhook opzionale da secret file.
+`alert-evidence --sendTest` entra dall'API Alertmanager e richiede un receipt
+correlato downstream: non chiama direttamente il dispatcher. `node-exporter`
+fornisce le metriche host e legge le serie workload generate dal collector
+host-side `platform-container-metrics.service`. Il collector riconcilia
+`docker ps`, `docker stats` e i soli campi non-secret necessari di
+`docker inspect`, conserva gli zero reali, espone i limiti cgroup effettivi e
+fallisce se manca un container in esecuzione. cAdvisor resta una scrape di
+compatibilita', ma il suo healthcheck non e' prova di copertura workload. Vedi
+`WORKLOAD-METRICS.md`.
 
-I log sono centralizzati via Promtail senza montare `docker.sock`: Promtail legge i log JSON bounded dei container, applica una redaction pipeline su header, token, cookie, OTP e segreti, e promuove `service` e `level` a label Loki per query operative. `backend` e `worker-*` sono runtime/template platform che usano la policy condivisa `@platform/observability`; gli eventi critici restano anche su audit DB append-only/outbox.
+I log sono centralizzati via Promtail senza montare `docker.sock`: Promtail
+legge i log JSON bounded dei container, applica una redaction pipeline su
+header, token, cookie, OTP e segreti, e promuove `service` e `level` a label
+Loki per query operative. I workload esterni devono emettere log compatibili,
+ma i loro audit e outbox restano app-owned e fuori dai gate platform.
 
 Prometheus, Alertmanager e la dashboard Traefik non hanno route browser locali: restano interni alla rete Docker. Usa Grafana, protetto da login, come superficie browser per metriche, alert e log.
+
+Per email production configura SMTP nel Secret Manager, imposta
+`ALERT_EMAIL_TO`, `MAILER_FROM`, `MAILER_REPLY_TO`, `SMTP_HOST`, `SMTP_PORT` e
+`SMTP_USER`, poi pubblica e verifica SPF, DKIM e DMARC per il dominio mittente.
+Il gate si chiude solo con `alert-evidence --sendTest --requireEmailDelivery`
+contro il destinatario reale; la sola presenza delle variabili non e' prova di
+consegna.
 
 Il monitoraggio esterno e' definito in `monitoring/external-uptime.example.json`: include health pubbliche, discovery OIDC e controlli negativi sugli host admin che devono restare bloccati. Prima di configurare BetterStack, UptimeRobot o Cloudflare Health Checks, valida il manifest e le soglie con:
 
@@ -220,7 +269,7 @@ Il go/no-go accetta `reports/uptime/` solo se i target pubblici sono coperti da 
 cd /opt/platform/platform-infrastructure
 mkcert -install
 mkcert -cert-file ./traefik/certs/local-cert.pem -key-file ./traefik/certs/local-key.pem localhost 127.0.0.1 ::1 portal.localhost.com docs.localhost.com
-docker compose -f compose.yaml -f compose.build.yaml --env-file .env -p platform_infra_local up -d --build traefik
+docker compose -f compose.yaml --env-file .env -p platform_infra_local up -d --build traefik
 curl https://portal.localhost.com/__health
 ```
 
@@ -240,7 +289,6 @@ Il profilo WAF mette OWASP CRS/ModSecurity davanti a Traefik. Le porte host `80/
 cd /opt/platform/platform-infrastructure
 docker compose --env-file .env -p platform_infra_local \
   -f compose.yaml \
-  -f compose.build.yaml \
   -f compose.secrets.yaml \
   -f compose.waf.yaml \
   up -d --build
@@ -253,7 +301,7 @@ Su Windows/Docker Desktop il certificato mkcert locale e' montato in un containe
 
 ```powershell
 docker run --rm --entrypoint sh -u root -v "${PWD}\traefik\certs\local-key.pem:/tmp/server.key" owasp/modsecurity-crs:4.26.0-nginx-202605200705 -c "chmod 0644 /tmp/server.key"
-docker compose --env-file .env -p platform_infra_local -f compose.yaml -f compose.build.yaml -f compose.secrets.yaml -f compose.waf.yaml up -d waf
+docker compose --env-file .env -p platform_infra_local -f compose.yaml -f compose.secrets.yaml -f compose.waf.yaml up -d waf
 ```
 
 ## Database gestiti
@@ -263,11 +311,10 @@ infrastrutturale verifica disponibilita', backup, restore, retention,
 isolamento, admin tooling e prove DR/off-site; non verifica schema o business
 logic delle applicazioni ospitate.
 
-`postgres/init/`, `postgres/migrations/` e lo schema storico `app_account` sono
-compatibilita' legacy per workload applicativi che espongono un layer account o
-audit. Se un'app esterna li usa, la sua procedura di migrazione deve vivere nel
-runbook dell'app e deve essere eseguita come passo workload separato. Non usare
-migration applicative per promuovere la piattaforma hosting a GO-LIVE.
+Questa repository inizializza soltanto i database di piattaforma, per esempio
+Keycloak. Schema, migrazioni, rollout delle identita' database e rollback di una
+applicazione devono vivere nella repository del workload. Non usare migrazioni
+applicative per promuovere la piattaforma hosting a GO-LIVE.
 
 ## Backup e restore
 
@@ -319,7 +366,6 @@ Schedulazione consigliata, container-first:
 ```sh
 docker compose --env-file .env -p platform_infra_vps \
   -f compose.yaml \
-  -f compose.build.yaml \
   -f compose.secrets.yaml \
   -f compose.vps.yaml \
   -f compose.waf.yaml \
@@ -376,7 +422,7 @@ sh ./scripts/alert-evidence.sh
 sh ./scripts/security-smoke.sh
 sh ./scripts/waf-smoke.sh
 sh ./scripts/failure-tests.sh
-sh ./scripts/failure-tests.sh --confirmServiceStop --targets redis,postgres,minio,keycloak,backend,worker-notifications,worker-jobs,nats,waf
+sh ./scripts/failure-tests.sh --confirmServiceStop --targets redis,postgres,minio,keycloak,nats,waf,platform-alert-dispatcher,backup-scheduler
 sh ./scripts/fault-injection-tests.sh
 sh ./scripts/load-smoke.sh
 sh ./scripts/load-benchmark.sh --profiles 50,100,500
@@ -401,7 +447,11 @@ sh ./scripts/sign-images.sh
 sh ./scripts/dast-zap-baseline.sh https://api-staging.example.com
 ```
 
-`alert-evidence.sh` verifica configurazione Alertmanager, bearer secret, metriche worker e alert di failure delivery. In staging/VPS usa `alert-evidence.sh --sendTest`; con canali reali configurati puoi aggiungere `--requireEmailDelivery`, `--requireDiscordDelivery` o `--requireTelegramDelivery` per rendere la consegna un gate.
+`alert-evidence.sh` verifica configurazione Alertmanager, bearer secret, metriche
+del `platform-alert-dispatcher`, alert di failure delivery e ricevuta correlata
+del probe. In staging/VPS usa `alert-evidence.sh --sendTest`; con canali reali
+configurati puoi aggiungere `--requireEmailDelivery` o
+`--requireForwardDelivery` per rendere la consegna un gate.
 
 `secret-rotation-evidence.sh` scrive un report non-secret in `reports/secret-rotation/` con stato dello store Infra Secret Manager, audit log, KMS attivo, eta' dei secret rispetto a `rotationDays`, file materializzati, secret vault e risultato di `infra-secret-manager verify`. In produzione usa `--enforce`: il go/no-go accetta solo `mode=evidence`, `status=passed`, zero secret scaduti e zero file mancanti.
 
@@ -413,7 +463,13 @@ sh ./scripts/dast-zap-baseline.sh https://api-staging.example.com
 
 `retention-evidence.sh` scrive un report in `reports/retention/` che verifica logging Docker bounded, retention Loki/Promtail, retention TSDB Prometheus, datasource/pannelli Grafana e, quando il sorgente runtime e' montato, anche log JSON strutturati e redazione dei campi sensibili. In CI resta infra-only se il sorgente esterno non e' presente.
 
-`load-benchmark.sh` senza `--url` misura il backend dentro la rete Docker ed e' utile per regressioni locali. Per il go-live devi usare l'URL pubblico e `--requirePublicTarget`; con Cloudflare CDN attivo aggiungi `--requireEdgeEvidence --expectedEdgeProvider cloudflare`. Il report in `reports/load/` include profili 50/100/500, snapshot CPU/RAM Docker, target evidence pubblico/edge e `status`. Anche i fallimenti scrivono report diagnostici, ma il go/no-go accetta solo `status=passed`.
+`load-benchmark.sh` senza `--url` misura il Control Center dentro la rete Docker
+ed e' utile per regressioni locali della piattaforma. Per il go-live devi usare
+l'URL pubblico del Portal e `--requirePublicTarget`; con Cloudflare CDN attivo
+aggiungi `--requireEdgeEvidence --expectedEdgeProvider cloudflare`. Il report in
+`reports/load/` include profili 50/100/500, snapshot CPU/RAM Docker, target
+evidence pubblico/edge e `status`. Anche i fallimenti scrivono report
+diagnostici, ma il go/no-go accetta solo `status=passed`.
 
 Le vecchie suite account/passkey e le migration account sono compatibilita'
 workload. Non fanno parte dei gate GO/NO-GO della piattaforma hosting e non
@@ -619,7 +675,6 @@ cp .env.staging.example .env.staging
 sh ./scripts/infra-secret-manager.sh init
 docker compose --env-file .env.staging -p platform_infra_staging \
   -f compose.yaml \
-  -f compose.build.yaml \
   -f compose.secrets.yaml \
   -f compose.vps.yaml \
   -f compose.waf.yaml \
@@ -646,7 +701,6 @@ sh ./scripts/infra-secret-manager.sh init
 sh ./scripts/vps-preflight.sh .env
 docker compose --env-file .env -p platform_infra_vps \
   -f compose.yaml \
-  -f compose.build.yaml \
   -f compose.secrets.yaml \
   -f compose.vps.yaml \
   -f compose.waf.yaml \
@@ -666,7 +720,6 @@ intento in modo revisionato invece di copiare stato live alla cieca.
 cd /home/platform_infrastructure/platform-infrastructure
 docker compose -p platform_infra_vps \
   -f compose.yaml \
-  -f compose.build.yaml \
   -f compose.secrets.yaml \
   -f compose.vps.yaml \
   -f compose.waf.yaml \
@@ -773,7 +826,7 @@ In produzione:
 Build immagini runtime/template:
 
 ```sh
-docker compose -f compose.yaml -f compose.build.yaml --env-file .env build
+docker compose -f compose.yaml --env-file .env build
 ```
 
 Le variabili pubbliche dei runtime web collegati, inclusi eventuali
@@ -801,13 +854,16 @@ fuori dal GO/NO-GO infra.
 - `compose.secrets.yaml`: overlay Docker secrets file-based.
 - `compose.prod.yaml`: overlay produzione.
 - `compose.vps.yaml`: overlay VPS prod-like dietro TLS esterno.
-- `compose.runtime.yaml`: runtime hosted-app, registry e override host versionati.
+- `compose.runtime.yaml`: servizi runtime platform opzionali; non definisce app concrete.
 - `compose.networks.yaml`: trust zone core e reti ingress/data/egress per workload.
 - `compose.runtime-isolation.yaml`: overlay VPS finale con mount allowlist, proxy Docker e budget cgroup; va caricato per ultimo.
 - `compose.waf.yaml`: overlay OWASP CRS/ModSecurity davanti a Traefik.
 - `compose.vps-waf.yaml`: adattamento WAF per VPS con TLS/CDN esterno.
 - `compose.backup-scheduler.yaml`: scheduler backup/restore drill container-first.
-- `compose.build.yaml`: build immagini runtime/template.
+- `config/hosted-workloads.example.json`: catalogo di esempio per workload esterni.
+- `scripts/prepare-hosted-workloads.sh`: risolve catalogo, render core/combined e genera un lock verificato senza avviare container.
+- `scripts/hosted-workload-contract.mjs`: valida manifest, immagini immutabili, route, environment e confini core/workload.
+- `scripts/hosted-workload-lock.sh`: verifica hash, permessi e file Compose/environment bloccati dal lock.
 - `traefik/traefik.edge-http.yml`: Traefik per edge TLS esterno.
 - `scripts/*.sh`: entrypoint operativi Linux/Docker.
 - `scripts/infra-ops.sh`: entrypoint container-first che non richiede Node sull'host.
@@ -820,6 +876,6 @@ fuori dal GO/NO-GO infra.
 - `RELEASE-TRUST-AND-WORKFLOW-SECURITY.md`: verifier crittografico, governance GitHub esatta e input SSH sicuri T16.
 - `RUNTIME-ISOLATION.md`: contratto T13, test, rollout progressivo e rollback per-app.
 - `SERVICE-IDENTITY-AND-TENANCY.md`: identita DB T14, policy MinIO per prefisso, contratto tenancy e rollout dual-credential.
-- `postgres/init/` e `postgres/migrations/`: bootstrap DB e compatibilita'
-  workload legacy; non sono gate GO/NO-GO infra.
+- `postgres/init/`: solo bootstrap database platform. Migrazioni applicative e
+  relativi rollback appartengono alle repository dei workload.
 - `RUNBOOK.md`, `SECURITY.md`, `THREAT-MODEL.md`, `ENTERPRISE-MATURITY.md`: governance operativa.

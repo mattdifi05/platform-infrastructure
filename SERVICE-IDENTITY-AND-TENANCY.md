@@ -3,81 +3,84 @@
 ## Decision
 
 The supported security boundary is one credential and one least-privilege role
-per workload. PostgreSQL row-level security remains defense in depth for a
-trusted service role; it is not a supported account-to-account tenant boundary.
-Any future multi-tenant product must reopen this decision and add tenant-aware
-authorization tests before production use.
+per workload service. PostgreSQL row-level security is defense in depth for a
+trusted service role; it is not a platform-supported tenant boundary. A
+multi-tenant product must define tenant-aware authorization and negative tests
+inside its own repository before production use.
 
-The current backend and workers are Stexor compatibility workloads hosted by
-the platform. They are not platform core. T18 moves their application-specific
-schema and build ownership out of this repository without changing the access
-contract below.
+## Platform responsibility
 
-## PostgreSQL matrix
+The infrastructure repository owns:
 
-| Runtime identity | Allowed data operations | Explicit denials |
-| --- | --- | --- |
-| `app_backend_runtime` | Existing account, auth and audit capability roles; read-only `schema_migrations` preflight | no DB administration, no platform evidence mutation, no DELETE inherited from the capability roles |
-| `app_worker_jobs_runtime` | `SELECT, UPDATE` on `audit_outbox`; `SELECT` on `backup_restore_runs` | no account, passkey, session, subscription, audit-event or platform mutation access |
-| `app_worker_notifications_runtime` | database connection only for the current compatibility image | no schema/table privileges and no inherited capability role |
-| `app_user` | legacy dual-credential rollback principal until cutover evidence exists | disabled with `NOLOGIN` by the explicit revoke step |
+- PostgreSQL and MariaDB availability, isolation, health and admin boundaries;
+- platform database bootstrap, including Keycloak and Control Center state;
+- backup, restore, retention, RPO/RTO evidence and off-site transport;
+- secret storage and file-based delivery primitives;
+- network, cgroup and Docker-socket isolation;
+- MinIO root bootstrap without exposing root material to workloads.
 
-`postgres/migrations/014_service_identity_grants.sql` is the safe grant phase.
-It supports both the generic `app_account`/`platform_ops` names and the current
-Stexor `stexor_account`/`stexor_platform` names. It does not disable the old
-login. Revocation and rollback live under `postgres/rollout/` and are never
-applied by the automatic migration runner.
+The platform does not own application schemas, grants, migrations, service
+roles or legacy-principal revocation SQL.
 
-On an empty PostgreSQL 18 volume, `platform-postgres-entrypoint` stages the
-root-only host secret files and init assets into postgres-owned runtime paths
-before the official image drops privileges. The init scripts are POSIX `sh`
-compatible; the full `001` through `014` migration sequence is tested from an
-empty tmpfs volume.
+## Workload responsibility
 
-## Object storage matrix
+Each external workload repository must provide:
 
-No live MinIO bucket is currently registered for a hosted application. The
-backend therefore receives no MinIO credential at all. Future workloads use
-one MinIO service account per bucket/prefix through
-`scripts/minio-service-identity.sh`; root material is mounted only into that
-one-shot bootstrap. The generated inline policy permits list on the selected
-prefix and object read/write/delete inside that prefix. Cross-prefix,
-cross-bucket and admin APIs are denied.
+- one named database principal and secret per service that needs database access;
+- exact grants and explicit cross-table or cross-schema denials;
+- application-owned migration and rollback files;
+- a plan-by-default rollout command with separate apply and revoke confirmations;
+- fresh backup and restore evidence requirements before credential changes;
+- functional and negative probes for every affected service identity.
 
-## Mail ownership
+The workload manifest declares only secret names. Values remain in the platform
+secret backend and are never copied into the manifest, lock, Git or evidence.
 
-SMTP is limited to components that currently send mail: the Stexor backend for
-transactional account OTP and the notification worker for operations alerts.
-T13 removes SMTP from generic PHP runtimes. T18 must either retain both as
-explicit application mailers or move account email to a dedicated outbox
-consumer before removing SMTP from the backend.
+## Object storage
+
+Hosted workloads never receive MinIO root material. Use one service account per
+bucket/prefix through `scripts/minio-service-identity.sh`. The generated policy
+may list the selected prefix and read/write/delete objects only inside it.
+Cross-prefix, cross-bucket and administrative operations must be denied and
+tested before activation.
 
 ## Dual-credential rollout
 
-The live sequence requires a maintenance window and explicit approval:
+A credential cutover requires a dedicated maintenance window:
 
-1. Create a fresh PostgreSQL backup and successful restore-test evidence.
-2. Initialize or rotate the three scoped credentials in the secret manager.
-3. Apply migration `014_service_identity_grants` with the standard migration runner.
-4. Run `scripts/service-identity-rollout.sh --mode prepare` with recovery evidence.
-5. Render the candidate Compose configuration and recreate only backend and workers.
-6. Prove backend login/account flows, jobs outbox dispatch and notification delivery.
-7. Store non-secret cutover evidence, then run the explicit `revoke` mode.
-8. Re-run positive and negative queries and archive the redacted mount inventory.
+1. Produce a fresh exact database backup and successful restore-test evidence.
+2. Create or rotate scoped service credentials without removing the legacy path.
+3. Apply the application-owned grant migration with its explicit confirmation.
+4. Recreate only the affected workload services from a verified workload lock.
+5. Prove positive service behavior and negative cross-service access.
+6. Archive non-secret cutover evidence.
+7. Revoke the legacy principal with a second explicit confirmation.
 
-The emergency rollback re-enables only the bounded legacy capability roles. It
-does not restore broad direct grants or MinIO root material.
+Emergency rollback may restore only documented bounded capabilities. It must
+never restore broad direct grants or MinIO root material.
 
-## Verification
+## T18 ownership status
+
+The Stexor candidate now owns its image definitions, schema, migrations,
+service-identity grant/revoke/rollback SQL and plan-by-default commands under
+its `deploy/` directory. The infrastructure candidate contains none of those
+files. This ownership change is sandbox-verified but not activated on the live
+reference server.
+
+## Platform verification
 
 ```sh
-node scripts/service-identity-policy.mjs
-sh scripts/service-identity-sandbox-test.sh
-sh scripts/service-identity-rollout.sh --mode plan
-MODE=plan MINIO_BUCKET=example MINIO_PREFIX=runtime/ sh scripts/minio-service-identity.sh
+sh ./scripts/infra-ops.sh testing-hygiene
+sh ./scripts/runtime-isolation-check.sh --env-file=.env.vps.example
+sh ./scripts/network-segmentation-check.sh --env-file=.env.vps.example
+HOSTED_WORKLOAD_CATALOG=/path/hosted-workloads.json \
+HOSTED_WORKLOAD_ROOT=/path/applications \
+HOSTED_WORKLOAD_LOCK=/path/private/hosted-workloads.lock.json \
+COMPOSE_ENV_FILE=.env.vps \
+sh ./scripts/prepare-hosted-workloads.sh
+MODE=plan MINIO_BUCKET=example MINIO_PREFIX=runtime/ \
+  sh ./scripts/minio-service-identity.sh
 ```
 
-The sandbox uses disposable PostgreSQL and MinIO containers with tmpfs data. It
-tests actual logins, allowed queries, cross-table denials, legacy revocation,
-object round-trip, cross-prefix/cross-bucket denials and MinIO admin denial.
-It does not touch live volumes or credentials.
+These checks do not apply application migrations, rotate credentials or touch
+live data.

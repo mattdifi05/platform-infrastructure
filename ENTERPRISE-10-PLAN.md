@@ -7,8 +7,8 @@ every item must map to a file, command, policy or recurring drill.
 ## 1. HA multi-node production
 
 - Use `compose.ha.yaml` with `compose.prod.yaml` for stateless service replicas.
-- Keep `backend`, `web`, `worker-notifications` and `worker-jobs` behind
-  healthchecked load balancing and rolling updates.
+- Keep stateless platform services behind healthchecked load balancing and
+  rolling updates; hosted workload HA is declared by each external contract.
 - Stateful services must run on a managed or clustered tier before public
   high-availability claims are made.
 - Gate: `sh scripts/infra-ops.sh ha-config-check`.
@@ -20,8 +20,8 @@ every item must map to a file, command, policy or recurring drill.
   encrypted audited store.
 - Multi-node/high-compliance deployments may swap the materialization backend
   to a provider KMS while preserving the same `*_FILE` contract.
-- Raw `SESSION_SECRET`, `SECRET_HASH_KEYS` and `BACKUP_SIGNING_KEYS` values
-  must not be required in `.env` for production.
+- Raw Control Center, OIDC, provider and backup signing secrets must not be
+  required in `.env` for production.
 - Rotation uses active plus previous key rings, then removes previous keys after the
   observation window.
 - Gate: `sh scripts/infra-ops.sh managed-secrets-preflight`.
@@ -45,14 +45,15 @@ every item must map to a file, command, policy or recurring drill.
 
 Declared targets:
 
-- RPO: 15 minutes maximum data loss for account database.
-- RTO: 60 minutes to restore account database service.
+- RPO: 15 minutes maximum data loss for declared platform state.
+- RTO: 60 minutes to restore the platform data services required by the catalog.
 - Restore drill cadence: weekly minimum.
 
 ## 5. Security test matrix
 
-- Cover CSRF, CORS, CSP, recovery brute force, passkey requested-account
-  isolation, backup code single-use, session revocation and privilege blocks.
+- Cover Control Center CSRF/origin policy, OIDC/PKCE/passkey claim enforcement,
+  session revocation, WAF, secret boundaries and privilege blocks. Application
+  auth flows remain workload-owned.
 - Gate: `sh scripts/infra-ops.sh security-matrix`.
 
 ## 6. Load and chaos
@@ -65,10 +66,10 @@ Declared targets:
 
 ## 7. Cross-browser UX
 
-- Browser coverage must include Chromium, Firefox and WebKit for public and
-  security surfaces, plus mobile viewport coverage.
+- Browser coverage must include Chromium, Firefox and WebKit for Portal, docs
+  and platform security surfaces, plus mobile viewport coverage.
 - Visual snapshots stay restricted to stable Chromium projects.
-- Gate: `pnpm test:e2e`.
+- Gate: `sh scripts/infra-ops.sh browser-e2e-tests`.
 
 ## 8. Governance
 

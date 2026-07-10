@@ -18,12 +18,28 @@ proofs remain pending: pre-go-live evidence, remote GitHub Actions run success,
 off-site DR, external uptime provider, public load benchmark, release/rollback
 provenance and Cloudflare Access admin verification.
 
-Terminology note: historical references to `backend`, `web` and `worker-*`
-describe generic runtime/template containers. Account, passkey, backup-code,
-`apps/backend` and `app_account` checks are workload compatibility evidence and
-must not be used as platform hosting go-live proof.
+T18 candidate note, verified 2026-07-10: the zero-workload platform renders 24
+core services. A separately owned Stexor contract adds five workload services
+only through a verified SHA-256 lock; the combined render contains 29 services.
+The candidate has not been activated on the reference runtime, whose 34 live
+container IDs remain unchanged pending an approved cutover.
 
-## Modified Files
+Terminology note: application backend, frontend, account flows, business
+workers, schemas and migrations are hosted-workload assets. They are not core
+services and must not be used as platform hosting go-live proof.
+
+## T18 Candidate Delta
+
+- Removed application backend/web/worker definitions and application SQL from
+  the infrastructure repository.
+- Added `platform-alert-dispatcher` as the platform-owned Alertmanager receiver.
+- Added external workload catalog, manifest validation, core/combined render
+  comparison and a permission-restricted hash lock.
+- Moved Stexor images, environment contract, schema, migrations and rollout
+  scripts to the isolated Stexor repository candidate.
+- Kept the live stack, databases, volumes, backups and secrets unchanged.
+
+## Historical Modified Files Snapshot
 
 Infrastructure worktree:
 
@@ -36,15 +52,11 @@ ENTERPRISE-MATURITY.md
 README.md
 RUNBOOK.md
 SECURITY.md
-compose.build.yaml
 compose.backup-scheduler.yaml
 compose.managed-secrets.yaml
 compose.prod.yaml
 compose.secrets.yaml
 compose.yaml
-docker/backend.Dockerfile
-docker/web.Dockerfile
-docker/worker.Dockerfile
 governance/github-actions-runtime.json
 governance/github-environments.json
 governance/production-go-no-go.json
@@ -188,10 +200,10 @@ generic hosting capability.
 - Linux portability check with BOM/CRLF, Windows path, PowerShell dependency and Alpine shell syntax evidence under `reports/linux-portability/`.
 - VPS hardening and Cloudflare origin-lock scripts.
 - Renovate configs for infrastructure dependencies.
-- Optional native Discord and Telegram alert forwarding in notification worker.
+- Platform-owned alert dispatcher with SMTP and optional generic webhook forwarding.
 - Provider-neutral external uptime manifest and `external-uptime-check` command.
 - External uptime dry-run reports with `mode=dry-run` and `providerEvidence.verified=false`, so manifest evidence can be archived without satisfying live provider gates.
-- Alert evidence command with synthetic Alertmanager delivery test and optional email/Discord/Telegram delivery requirements.
+- Alert evidence command with synthetic Alertmanager delivery test, exact receiver receipt and optional email/forward delivery requirements.
 - VPS post-deploy command with WAF smoke, `infra-health`, optional pre go-live evidence and optional final go/no-go enforcement.
 - VPS go-live orchestrator with plan-only default and JSON/Markdown reports under `reports/vps-go-live/`.
 - Non-secret evidence bundle command with manifest, SHA256 checksums and `.tar.gz` output under `.tmp/evidence-bundles/`.
@@ -199,17 +211,34 @@ generic hosting capability.
 
 ## Tests Executed
 
-Latest local evidence includes:
+T18 candidate evidence includes:
+
+```text
+hosted workload contract: 15/15
+Control Center tests: 24/24
+platform alert dispatcher tests: 6/6
+network segmentation policy: 59/59 on 29-service combined render
+runtime isolation policy: 287/287 on 29-service combined render
+Prometheus config: valid, 12 rules
+Alertmanager config: valid, one platform receiver
+alert delivery sandbox: passed with exact correlated receipt and unchanged live IDs
+backup coverage sandbox: passed with 9 exact resources and isolated restore
+static-security-check: passed
+testing-hygiene: passed
+actionlint: passed
+```
+
+Earlier baseline evidence includes:
 
 ```text
 node scripts/infra-ops.mjs static-security-check
 docker run --rm -v D:/docker/platform-infrastructure:/infra:ro -w /infra alpine:3.22 sh -ec 'for file in scripts/*.sh; do sh -n "$file"; done'
 docker run --rm -v D:/docker/platform-infrastructure:/infra -w /infra alpine:3.22 sh ./scripts/vps-host-readiness.sh --diagnostic
-docker compose --env-file .env -p platform_infra_local -f compose.yaml -f compose.build.yaml -f compose.secrets.yaml -f compose.waf.yaml config --quiet
-docker compose --env-file .env -p platform_infra_local -f compose.yaml -f compose.build.yaml -f compose.secrets.yaml -f compose.waf.yaml -f compose.backup-scheduler.yaml --profile backup config --quiet
-docker compose --env-file .env.vps.example -p platform_infra_vps_ci -f compose.yaml -f compose.build.yaml -f compose.secrets.yaml -f compose.vps.yaml -f compose.waf.yaml -f compose.vps-waf.yaml config --quiet
-docker compose --env-file .env.vps.example -p platform_infra_vps_ci -f compose.yaml -f compose.build.yaml -f compose.secrets.yaml -f compose.vps.yaml -f compose.waf.yaml -f compose.vps-waf.yaml -f compose.backup-scheduler.yaml --profile backup config --quiet
-docker compose --env-file .env.staging.example -p platform_infra_staging_ci -f compose.yaml -f compose.build.yaml -f compose.secrets.yaml -f compose.vps.yaml -f compose.waf.yaml -f compose.vps-waf.yaml -f compose.staging.yaml config --quiet
+docker compose --env-file .env -p platform_infra_local -f compose.yaml -f compose.secrets.yaml -f compose.waf.yaml config --quiet
+docker compose --env-file .env -p platform_infra_local -f compose.yaml -f compose.secrets.yaml -f compose.waf.yaml -f compose.backup-scheduler.yaml --profile backup config --quiet
+docker compose --env-file .env.vps.example -p platform_infra_vps_ci -f compose.yaml -f compose.secrets.yaml -f compose.vps.yaml -f compose.waf.yaml -f compose.vps-waf.yaml config --quiet
+docker compose --env-file .env.vps.example -p platform_infra_vps_ci -f compose.yaml -f compose.secrets.yaml -f compose.vps.yaml -f compose.waf.yaml -f compose.vps-waf.yaml -f compose.backup-scheduler.yaml --profile backup config --quiet
+docker compose --env-file .env.staging.example -p platform_infra_staging_ci -f compose.yaml -f compose.secrets.yaml -f compose.vps.yaml -f compose.waf.yaml -f compose.vps-waf.yaml -f compose.staging.yaml config --quiet
 docker compose --env-file .env -p enterprise_prod_ci -f compose.yaml -f compose.prod.yaml -f compose.managed-secrets.yaml config --quiet
 docker build -f docker/ops.Dockerfile -t platform/ops:local .
 docker run --rm -e BACKUP_SCHEDULER_DRY_RUN=true -v D:/docker/platform-infrastructure:/infra:ro --entrypoint sh platform/ops:local /infra/scripts/backup-scheduler.sh
@@ -258,7 +287,7 @@ All commands listed above passed in the local evidence gathered during this hard
 - Older application docs referenced PowerShell or direct host-Node infra gates;
   those notes are legacy and outside the platform readiness scope.
 - Production go/no-go now requires a remote successful `enterprise-infra` workflow report for the release commit.
-- Alerting had email/generic webhook only; optional native Discord and Telegram delivery with metrics was added.
+- Alerting uses the platform dispatcher with SMTP and one provider-neutral forward webhook, both with delivery metrics.
 - Uptime dry-run previously did not leave report evidence; it now writes diagnostic reports while keeping `providerEvidence.verified=false` so production go/no-go still requires a live provider.
 - VPS deploy previously stopped after compose/WAF smoke; a post-deploy script now runs WAF smoke plus `infra-health` and can opt into pre go-live, go/no-go and live production readiness gates.
 - VPS live execution previously required manually sequencing many commands; `vps-go-live.sh` now creates a plan-first orchestration report and can run the ordered live sequence with `--confirmLive`.
@@ -279,19 +308,19 @@ All commands listed above passed in the local evidence gathered during this hard
 | ---: | --- | --- | --- |
 | 1 | Backup automatici | Implemented for PostgreSQL, MariaDB, MinIO, Keycloak config and Secret Manager metadata, with Dockerized scheduler profile and execution reports. | Enable scheduler and off-site repository on VPS, then archive first reports outside Git. |
 | 2 | Restore drill | Full and per-service local drills implemented and exercised; off-site Restic restore drill and DR evidence summaries now cover timing/RTO/RPO reporting. | Remote restore from the real off-site repository must be executed with live credentials and `dr-evidence --enforce` must pass. |
-| 3 | Passkey/WebAuthn | App code, tests and PostgreSQL persistence exist; OTP fallback retained. | Browser validation on real production domains still required. |
+| 3 | Admin passkey/OIDC | Fail-closed Keycloak OIDC/PKCE contract, opaque sessions and passkey claim validation are sandbox-verified. | Live cutover requires the dedicated DB secret, Keycloak client/flow and at least two enrolled passkeys per admin. |
 | 4 | Protezione console | Raw Prometheus/Alertmanager/Traefik dashboard blocked; admin surfaces kept internal or authenticated. | Cloudflare Access/VPN/SSH tunnel must be configured on real zone/host. |
 | 5 | Healthcheck completi | `infra-health` covers containers, endpoints, admin blocks and WAF blocks. | Must pass on VPS after deploy. |
-| 6 | Alert reali | Prometheus/Alertmanager/email plus optional Discord/Telegram metrics implemented; alert evidence and external uptime dry-run reports added. | Real email/Discord/Telegram delivery and external monitoring provider checks must be tested. |
+| 6 | Alert reali | Prometheus, Alertmanager and `platform-alert-dispatcher` with SMTP/generic-forward metrics and exact sandbox receipt are implemented. | Real email or approved forward-channel delivery and external monitoring provider checks must be tested. |
 | 7 | Failure tests | Controlled failure tests implemented and Redis recovery exercised. | Full target matrix should run in staging/VPS window. |
 | 8 | Rollback | Image/compose rollback dry-run, post-health command and release evidence rollback-target generation are implemented. | Real previous image set must be captured from the live registry per release. |
 | 9 | CI/CD | GitHub workflows, compose gates, DAST job, branch-protection apply command, deployment environment approvals, runtime secret/var verification, release evidence plan, VPS deploy job, post-deploy checks and evidence bundle smoke are prepared. | Secrets, branch protection and deploy approvals must be enabled in GitHub. |
-| 10 | Dependency management | Renovate configured for app/infra. | Dependency dashboard and production update cadence must be operated. |
+| 10 | Dependency management | Renovate and supply-chain gates cover platform dependencies; workload dependencies are app-owned. | Dependency dashboard and production update cadence must be operated. |
 | 11 | Log hygiene | Redaction, bounded logs, Loki retention and dashboards added. | Retention/capacity must be tuned on VPS disk size. |
 | 12 | Runbook definitivo | README, RUNBOOK, SECURITY, readiness and VPS checklist updated. | Must be followed during first real deploy. |
 | 13 | Security hardening | Secrets, rotation evidence, service healthcheck coverage, CSP, rate limits, WAF, headers, admin blocks and audit gates implemented. | Cloudflare and VPS hardening must be applied live. |
 | 14 | Load test | 50/100/500 benchmark command and local quick run completed. | Public-path VPS load benchmark still required. |
-| 15 | Production-like env | Local, staging, VPS and production overlays exist. | Real staging and production hosts must be exercised. |
+| 15 | Production-like env | Local, staging, VPS and production overlays plus an external workload lock contract exist. | Real staging and production hosts must be exercised; workload activation remains a separate approved step. |
 | 16 | Remove Windows dependency | Host-critical ops moved to Linux containers; LF normalization configured. | Docker Desktop compatibility retained; VPS requires no Windows. |
 | 17 | Container-first ops | Backup, restore, scheduler, health, load, SBOM and diagnostics run through ops containers. | Confirm on Ubuntu VPS after clone. |
 | 18 | Ubuntu LTS compatibility | Compose renders, shell syntax checks and host-readiness script exist. | Real Ubuntu LTS run still required. |
@@ -302,11 +331,11 @@ All commands listed above passed in the local evidence gathered during this hard
 
 | Area | Score | Reason |
 | --- | ---: | --- |
-| Development | 9/10 | Local Docker stack, app launcher, health, WAF, secrets and gates are operational. |
+| Development | 9/10 | Zero-workload Docker core, external workload contract, health, WAF, secrets and gates are operational. |
 | Staging | 8/10 | Staging overlay exists and renders; real staging host/domain remains untested. |
 | Production | 7.5/10 | VPS overlays and hardening exist; real VPS deploy and provider wiring remain. |
 | Security | 8.7/10 | WAF, CSP, rate limits, secrets, audit, admin blocks and smoke gates are present. |
-| Observability | 8.5/10 | Metrics, logs, dashboards, alerts, email, Discord and Telegram hooks are wired locally. |
+| Observability | 8.5/10 | Metrics, logs, dashboards, alerts, email and generic forward-hook delivery are wired locally. |
 | Disaster Recovery | 8.5/10 | Local full restore drills pass and off-site restore automation exists; live Restic repository restore must still be proven. |
 | Linux Portability | 9.5/10 | Dockerized ops runner, shell syntax checks, LF normalization and no Windows-critical ops. |
 
@@ -318,7 +347,7 @@ All commands listed above passed in the local evidence gathered during this hard
 - VPS host readiness script passed on the actual VPS host under `reports/vps-host/`.
 - Cloudflare DNS/CDN/WAF/Access setup on the real zone, including verified MFA-protected Access applications for admin hosts.
 - Cloudflare origin lock applied after proxied DNS works.
-- Real SMTP/email and optional Discord/Telegram delivery tests.
+- Real SMTP/email and optional generic forward-hook delivery tests.
 - External uptime monitoring provider enabled from `monitoring/external-uptime.example.json` and confirmed from outside the VPS network.
 - Dockerized backup scheduler enabled on VPS, plus remote Restic repository credentials and `offsite-restore-drill-restic` dry-run/full restore evidence.
 - Real staging deploy and production deploy.
@@ -341,18 +370,19 @@ Use `VPS-PREDEPLOY-CHECKLIST.md` as the canonical checklist. Minimum go/no-go:
 2. VPS host readiness report passed and archived.
 3. .env created from examples with no placeholders.
 4. Secret manager initialized, verified and `secret-rotation-evidence.sh --enforce` archived.
-5. VPS compose render passes.
-6. Cloudflare DNS proxied, Access admin applications verified, and origin lock applied.
-7. Dockerized backup scheduler enabled and backup execution reports reviewed.
-8. Full local and remote restore drills pass.
-9. Static security, infra health, security smoke and WAF smoke pass.
-10. Failure tests pass in staging.
-11. 50/100/500 load benchmark report archived.
-12. External uptime provider monitors created and first green check archived.
-13. Alert delivery reaches real recipients.
-14. GitHub branch protection, deployment environments and Actions runtime config applied or verified.
-15. Pre go-live evidence pack archived.
-16. Production go/no-go report archived with status `go`.
-17. Release evidence pack archived with rollback target and release image digests.
-18. Evidence bundle archive generated, manifest reviewed, SHA256 recorded and stored outside Git.
+5. Zero-workload VPS Compose render passes.
+6. Every attached workload has a reviewed external manifest and a verified `0600` hash lock; core/combined diff is exact.
+7. Cloudflare DNS proxied, Access admin applications verified, and origin lock applied.
+8. Dockerized backup scheduler enabled and backup execution reports reviewed.
+9. Full local and remote restore drills pass.
+10. Static security, infra health, security smoke and WAF smoke pass.
+11. Failure tests pass in staging.
+12. 50/100/500 load benchmark report archived.
+13. External uptime provider monitors created and first green check archived.
+14. Alert delivery reaches real recipients.
+15. GitHub branch protection, deployment environments and Actions runtime config applied or verified.
+16. Pre go-live evidence pack archived.
+17. Production go/no-go report archived with status `go`.
+18. Release evidence pack archived with rollback target and release image digests.
+19. Evidence bundle archive generated, manifest reviewed, SHA256 recorded and stored outside Git.
 ```

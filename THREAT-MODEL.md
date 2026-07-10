@@ -13,6 +13,8 @@
 - Browser to Traefik over HTTPS.
 - Traefik to platform routing and per-app ingress trust zones.
 - Hosted workloads to only their dedicated ingress/data/egress networks.
+- External workload repository to the platform through a reviewed manifest,
+  digest-pinned images, prefixed non-secret environment and SHA-256 lock.
 - Hosted service to PostgreSQL through one service-specific login with exact
   table operations; RLS does not create a supported tenant boundary.
 - Hosted object-storage client to one MinIO bucket/prefix service account;
@@ -26,6 +28,9 @@
 - Admin session theft: mitigated by `HttpOnly`, `Secure`, signed cookies and server-side session state.
 - CSRF on Control Center mutating endpoints: mitigated by Origin checks and JSON APIs.
 - Hosted workload enumeration: app-specific public auth flows are outside the infra gate and must be tested by the hosted app.
+- Contract substitution or TOCTOU: catalog, manifest, Compose, environment and
+  migration files are regular non-symlink inputs whose hashes are verified
+  again before every combined render.
 - Secret leakage: `.env` ignored; production should move to secret manager.
 - Backup compromise: backups must be encrypted before offsite storage.
 - Supply-chain drift: CI must run lockfile install, typecheck, build, audit and image scanning.
@@ -33,7 +38,7 @@
   per-app networks and no raw Docker socket constrain host and cross-app access.
 - Node exhaustion: cgroup memory/CPU/PID/FD/I/O controls and higher control-plane
   CPU shares contain workload stress.
-- Credential pivot: distinct DB logins, worker-specific grants and MinIO inline
+- Credential pivot: distinct DB logins, service-specific grants and MinIO inline
   policies deny cross-table, cross-prefix, cross-bucket and admin operations.
 - Forged release evidence: cryptographic GitHub/Sigstore verification binds the
   signer workflow, commit, ref, issuer, hosted runner, timestamp and exact
@@ -45,7 +50,8 @@
 
 - Local direct ports are bound to `127.0.0.1` for development convenience.
 - `.env` exists locally and must not be copied to shared systems.
-- Hosted workload compatibility paths may exist locally but are not platform go-live gates.
+- Hosted workload inputs may be attached locally only through the same verified
+  contract; they are not platform go-live gates.
 
 ## Production non-negotiables
 
@@ -54,8 +60,8 @@
 - Real DNS and Let's Encrypt certificates.
 - Firewall denies everything except required ingress.
 - Backup restore test before go-live.
-- Runtime-isolation policy, hosted startup sandbox and bounded cgroup stress
-  must pass before recreating any hosted workload.
+- Runtime-isolation policy, verified workload lock, core/combined render diff and
+  bounded cgroup stress must pass before recreating any hosted workload.
 - Service-identity policy, clean PostgreSQL migration sandbox and MinIO negative
   matrix must pass before credential cutover; legacy revoke requires recovery
   and cutover evidence.
