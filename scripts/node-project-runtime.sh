@@ -8,6 +8,11 @@ start_command="${NODE_PROJECT_START_COMMAND:?Set NODE_PROJECT_START_COMMAND}"
 lock_name="${NODE_PROJECT_LOCK_NAME:-runtime-build}"
 
 cd "$workdir"
+
+if [ -z "$install_command" ] && [ -z "$build_command" ]; then
+  exec sh -ec "$start_command"
+fi
+
 mkdir -p .platform
 lock_dir=".platform/${lock_name}.lock"
 

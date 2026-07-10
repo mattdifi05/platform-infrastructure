@@ -1,0 +1,485 @@
+# T13 single-node runtime isolation overlay. Load last so these limits and
+# mount allowlists are authoritative for the VPS profile.
+x-runtime-core: &runtime_core
+  cpu_shares: 768
+  ulimits:
+    nofile:
+      soft: 16384
+      hard: 16384
+  blkio_config:
+    weight: 600
+
+x-runtime-control: &runtime_control
+  cpu_shares: 1024
+  ulimits:
+    nofile:
+      soft: 16384
+      hard: 16384
+  blkio_config:
+    weight: 700
+
+x-runtime-app: &runtime_app
+  cpu_shares: 256
+  ulimits:
+    nofile:
+      soft: 8192
+      hard: 8192
+  blkio_config:
+    weight: 300
+
+x-runtime-observability: &runtime_observability
+  cpu_shares: 512
+  ulimits:
+    nofile:
+      soft: 8192
+      hard: 8192
+  blkio_config:
+    weight: 400
+
+services:
+  docker-socket-proxy:
+    <<: *runtime_control
+    image: ${DOCKER_SOCKET_PROXY_IMAGE:-ghcr.io/tecnativa/docker-socket-proxy:v0.4.2@sha256:1f3a6f303320723d199d2316a3e82b2e2685d86c275d5e3deeaf182573b47476}
+    container_name: enterprise-docker-socket-proxy
+    init: true
+    read_only: true
+    cpus: 0.10
+    mem_limit: 128m
+    mem_reservation: 32m
+    pids_limit: 64
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    environment:
+      ALLOW_START: "1"
+      ALLOW_STOP: "1"
+      ALLOW_RESTARTS: "1"
+      AUTH: "0"
+      BUILD: "0"
+      COMMIT: "0"
+      CONFIGS: "0"
+      CONTAINERS: "1"
+      DISTRIBUTION: "0"
+      EVENTS: "1"
+      EXEC: "1"
+      GRPC: "0"
+      IMAGES: "1"
+      INFO: "1"
+      NETWORKS: "1"
+      NODES: "0"
+      PLUGINS: "0"
+      POST: "1"
+      SECRETS: "0"
+      SERVICES: "0"
+      SESSION: "0"
+      SWARM: "0"
+      SYSTEM: "0"
+      TASKS: "0"
+      VOLUMES: "1"
+    expose:
+      - "2375"
+    ports:
+      - "127.0.0.1:${DOCKER_SOCKET_PROXY_PORT:-2376}:2375"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - platform_docker_control
+    healthcheck:
+      test: ["CMD", "haproxy", "-c", "-f", "/usr/local/etc/haproxy/haproxy.cfg"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+
+  traefik:
+    <<: *runtime_control
+    cpus: 0.50
+    mem_limit: 256m
+    mem_reservation: 64m
+    pids_limit: 192
+
+  waf:
+    <<: *runtime_control
+    cpus: 1.00
+    mem_limit: 384m
+    mem_reservation: 96m
+    pids_limit: 384
+
+  postgres:
+    <<: *runtime_core
+    cpus: 1.00
+    mem_limit: 1024m
+    mem_reservation: 256m
+    pids_limit: 768
+
+  redis:
+    <<: *runtime_core
+    cpus: 0.50
+    mem_limit: 256m
+    mem_reservation: 64m
+    pids_limit: 192
+
+  keycloak:
+    <<: *runtime_core
+    cpus: 1.50
+    mem_limit: 1280m
+    mem_reservation: 384m
+    pids_limit: 768
+
+  nats:
+    <<: *runtime_core
+    cpus: 0.25
+    mem_limit: 128m
+    mem_reservation: 32m
+    pids_limit: 192
+
+  minio:
+    <<: *runtime_core
+    cpus: 1.00
+    mem_limit: 768m
+    mem_reservation: 192m
+    pids_limit: 384
+
+  php-apache:
+    <<: *runtime_app
+    cpus: 0.50
+    mem_limit: 256m
+    mem_reservation: 64m
+    pids_limit: 256
+
+  control-center:
+    <<: *runtime_control
+    read_only: true
+    cpus: 1.00
+    mem_limit: 512m
+    mem_reservation: 128m
+    pids_limit: 384
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+    volumes: !override
+      - .:/var/www/infra-docs:ro
+      - ${PHP_PROJECTS_DIR:-../src}:/var/www/projects:ro
+      - ./projects-portal/state:/var/www/project-state
+
+  project-router:
+    <<: *runtime_control
+    read_only: true
+    cpus: 0.50
+    mem_limit: 192m
+    mem_reservation: 48m
+    pids_limit: 192
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=32m
+    volumes: !override
+      - ./project-router:/app:ro
+      - ${PHP_PROJECTS_DIR:-../src}:/var/www/projects:ro
+      - ./projects-portal/state:/var/www/project-state:ro
+
+  mariadb:
+    <<: *runtime_core
+    cpus: 1.50
+    mem_limit: 1024m
+    mem_reservation: 256m
+    pids_limit: 768
+
+  phpmyadmin:
+    <<: *runtime_app
+    cpus: 0.25
+    mem_limit: 256m
+    mem_reservation: 48m
+    pids_limit: 256
+
+  phppgadmin:
+    <<: *runtime_app
+    cpus: 0.25
+    mem_limit: 256m
+    mem_reservation: 48m
+    pids_limit: 256
+
+  local-dns:
+    <<: *runtime_core
+    cpus: 0.10
+    mem_limit: 64m
+    mem_reservation: 16m
+    pids_limit: 64
+
+  backend:
+    <<: *runtime_core
+    cpus: 1.00
+    mem_limit: 512m
+    mem_reservation: 128m
+    pids_limit: 384
+
+  web:
+    <<: *runtime_app
+    cpus: 0.75
+    mem_limit: 384m
+    mem_reservation: 96m
+    pids_limit: 320
+
+  worker-jobs:
+    <<: *runtime_core
+    read_only: true
+    cpus: 0.75
+    mem_limit: 384m
+    mem_reservation: 96m
+    pids_limit: 320
+
+  worker-notifications:
+    <<: *runtime_core
+    read_only: true
+    cpus: 0.75
+    mem_limit: 384m
+    mem_reservation: 96m
+    pids_limit: 320
+
+  prometheus:
+    <<: *runtime_observability
+    cpus: 0.50
+    mem_limit: 512m
+    mem_reservation: 128m
+    pids_limit: 320
+
+  node-exporter:
+    <<: *runtime_observability
+    cpus: 0.15
+    mem_limit: 64m
+    mem_reservation: 16m
+    pids_limit: 96
+
+  cadvisor:
+    <<: *runtime_observability
+    cpus: 0.25
+    mem_limit: 192m
+    mem_reservation: 48m
+    pids_limit: 192
+
+  alertmanager:
+    <<: *runtime_observability
+    cpus: 0.25
+    mem_limit: 128m
+    mem_reservation: 32m
+    pids_limit: 128
+
+  grafana:
+    <<: *runtime_observability
+    cpus: 0.50
+    mem_limit: 384m
+    mem_reservation: 96m
+    pids_limit: 256
+
+  loki:
+    <<: *runtime_observability
+    cpus: 0.50
+    mem_limit: 512m
+    mem_reservation: 128m
+    pids_limit: 320
+
+  promtail:
+    <<: *runtime_observability
+    cpus: 0.25
+    mem_limit: 192m
+    mem_reservation: 48m
+    pids_limit: 192
+
+  local-registry:
+    <<: *runtime_core
+    cpus: 0.25
+    mem_limit: 256m
+    mem_reservation: 64m
+    pids_limit: 192
+
+  backup-scheduler:
+    <<: *runtime_control
+    read_only: true
+    cpus: 1.00
+    mem_limit: 512m
+    mem_reservation: 128m
+    pids_limit: 256
+    environment:
+      DOCKER_API_VERSION: "1.51"
+      DOCKER_HOST: tcp://docker-socket-proxy:2375
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=256m
+      - /root:rw,nosuid,nodev,size=32m
+    volumes: !override
+      - .:/infra:ro
+      - ./backups:/infra/backups
+      - ./reports:/infra/reports
+      - ./projects-portal/state:/var/www/project-state
+      - ${PROJECT_SOURCE_DIR:-../src}:/project:ro
+      - backup_scheduler_logs:/var/log/platform
+    depends_on:
+      docker-socket-proxy:
+        condition: service_healthy
+    networks: !override
+      - platform_db_admin
+      - platform_storage
+      - platform_egress
+      - platform_docker_control
+
+  node-account:
+    <<: *runtime_app
+    read_only: true
+    cpus: 0.75
+    mem_limit: 384m
+    mem_reservation: 96m
+    pids_limit: 320
+    environment:
+      NODE_PROJECT_INSTALL_COMMAND: ""
+      NODE_PROJECT_BUILD_COMMAND: ""
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+      - /workspace/apps/web/.next/cache:rw,nosuid,nodev,size=128m
+    volumes: !override
+      - ${PHP_PROJECTS_DIR:-../src}/stexor:/workspace:ro
+      - ./scripts/node-project-runtime.sh:/usr/local/bin/node-project-runtime:ro
+
+  node-ui:
+    <<: *runtime_app
+    read_only: true
+    cpus: 0.75
+    mem_limit: 384m
+    mem_reservation: 96m
+    pids_limit: 320
+    environment:
+      NODE_PROJECT_INSTALL_COMMAND: ""
+      NODE_PROJECT_BUILD_COMMAND: ""
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+      - /workspace/apps/web/.next/cache:rw,nosuid,nodev,size=128m
+    volumes: !override
+      - ${PHP_PROJECTS_DIR:-../src}/stexor:/workspace:ro
+      - ./scripts/node-project-runtime.sh:/usr/local/bin/node-project-runtime:ro
+
+  php-anniversary:
+    <<: *runtime_app
+    read_only: true
+    cpus: 0.50
+    mem_limit: 256m
+    mem_reservation: 64m
+    pids_limit: 256
+    entrypoint: ["sh", "/usr/local/bin/php-project-runtime"]
+    command: ["apache2-foreground"]
+    environment: !override
+      PHP_PROJECT_RUNTIME_SLUG: anniversary
+    secrets: !reset []
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+      - /run:rw,noexec,nosuid,nodev,size=16m
+      - /var/lock/apache2:rw,noexec,nosuid,nodev,size=8m
+      - /var/lib/php/sessions:rw,noexec,nosuid,nodev,size=32m
+      - /var/www/projects:rw,nosuid,nodev,size=128m
+    volumes: !override
+      - ${PHP_PROJECTS_DIR:-../src}/anniversary:/opt/platform-source/anniversary:ro
+      - ./scripts/php-project-runtime.sh:/usr/local/bin/php-project-runtime:ro
+      - ./php-apache/php/custom.ini:/usr/local/etc/php/conf.d/zz-custom.ini:ro
+      - ./php-apache/apache:/etc/apache2/sites-available:ro
+      - ${PLATFORM_CERTS_DIR:-./traefik/certs}:/etc/apache2/certs:ro
+
+  php-fiplatform:
+    <<: *runtime_app
+    read_only: true
+    cpus: 0.50
+    mem_limit: 256m
+    mem_reservation: 64m
+    pids_limit: 256
+    entrypoint: ["sh", "/usr/local/bin/php-project-runtime"]
+    command: ["apache2-foreground"]
+    environment: !override
+      APP_CACHE_DIR: /tmp/app-cache
+      PHP_PROJECT_RUNTIME_ALIASES: fireport
+      PHP_PROJECT_RUNTIME_SLUG: fiplatform
+    secrets: !reset []
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=128m
+      - /run:rw,noexec,nosuid,nodev,size=16m
+      - /var/lock/apache2:rw,noexec,nosuid,nodev,size=8m
+      - /var/lib/php/sessions:rw,noexec,nosuid,nodev,size=32m
+      - /var/www/projects:rw,nosuid,nodev,size=128m
+    volumes: !override
+      - ${PHP_PROJECTS_DIR:-../src}/fiplatform:/opt/platform-source/fiplatform:ro
+      - ./scripts/php-project-runtime.sh:/usr/local/bin/php-project-runtime:ro
+      - ./php-apache/php/custom.ini:/usr/local/etc/php/conf.d/zz-custom.ini:ro
+      - ./php-apache/apache:/etc/apache2/sites-available:ro
+      - ${PLATFORM_CERTS_DIR:-./traefik/certs}:/etc/apache2/certs:ro
+
+  php-matthewdifilippo:
+    <<: *runtime_app
+    read_only: true
+    cpus: 0.50
+    mem_limit: 256m
+    mem_reservation: 64m
+    pids_limit: 256
+    entrypoint: ["sh", "/usr/local/bin/php-project-runtime"]
+    command: ["apache2-foreground"]
+    environment: !override
+      PHP_PROJECT_RUNTIME_SLUG: matthewdifilippo
+    secrets: !reset []
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+      - /run:rw,noexec,nosuid,nodev,size=16m
+      - /var/lock/apache2:rw,noexec,nosuid,nodev,size=8m
+      - /var/lib/php/sessions:rw,noexec,nosuid,nodev,size=32m
+      - /var/www/projects:rw,nosuid,nodev,size=128m
+    volumes: !override
+      - ${PHP_PROJECTS_DIR:-../src}/matthewdifilippo:/opt/platform-source/matthewdifilippo:ro
+      - ./scripts/php-project-runtime.sh:/usr/local/bin/php-project-runtime:ro
+      - ./php-apache/php/custom.ini:/usr/local/etc/php/conf.d/zz-custom.ini:ro
+      - ./php-apache/apache:/etc/apache2/sites-available:ro
+      - ${PLATFORM_CERTS_DIR:-./traefik/certs}:/etc/apache2/certs:ro
+
+  php-stream:
+    <<: *runtime_app
+    read_only: true
+    cpus: 0.50
+    mem_limit: 256m
+    mem_reservation: 64m
+    pids_limit: 256
+    entrypoint: ["sh", "/usr/local/bin/php-project-runtime"]
+    command: ["apache2-foreground"]
+    environment: !override
+      PHP_PROJECT_RUNTIME_SLUG: stream
+    secrets: !reset []
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=128m
+      - /run:rw,noexec,nosuid,nodev,size=16m
+      - /var/lock/apache2:rw,noexec,nosuid,nodev,size=8m
+      - /var/lib/php/sessions:rw,noexec,nosuid,nodev,size=32m
+      - /var/www/projects:rw,nosuid,nodev,size=128m
+    volumes: !override
+      - ${PHP_PROJECTS_DIR:-../src}/stream:/opt/platform-source/stream:ro
+      - ./scripts/php-project-runtime.sh:/usr/local/bin/php-project-runtime:ro
+      - ./php-apache/php/custom.ini:/usr/local/etc/php/conf.d/zz-custom.ini:ro
+      - ./php-apache/apache:/etc/apache2/sites-available:ro
+      - ${PLATFORM_CERTS_DIR:-./traefik/certs}:/etc/apache2/certs:ro
+
+  php-workcalendar:
+    <<: *runtime_app
+    read_only: true
+    cpus: 0.50
+    mem_limit: 256m
+    mem_reservation: 64m
+    pids_limit: 256
+    entrypoint: ["sh", "/usr/local/bin/php-project-runtime"]
+    command: ["apache2-foreground"]
+    environment: !override
+      PHP_PROJECT_RUNTIME_SLUG: workcalendar
+    secrets: !reset []
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+      - /run:rw,noexec,nosuid,nodev,size=16m
+      - /var/lock/apache2:rw,noexec,nosuid,nodev,size=8m
+      - /var/lib/php/sessions:rw,noexec,nosuid,nodev,size=32m
+      - /var/www/projects:rw,nosuid,nodev,size=128m
+    volumes: !override
+      - ${PHP_PROJECTS_DIR:-../src}/workcalendar:/opt/platform-source/workcalendar:ro
+      - ./scripts/php-project-runtime.sh:/usr/local/bin/php-project-runtime:ro
+      - ./php-apache/php/custom.ini:/usr/local/etc/php/conf.d/zz-custom.ini:ro
+      - ./php-apache/apache:/etc/apache2/sites-available:ro
+      - ${PLATFORM_CERTS_DIR:-./traefik/certs}:/etc/apache2/certs:ro
+
+networks:
+  platform_docker_control:
+    name: ${COMPOSE_PROJECT_NAME:-platform_infra}_platform_docker_control
+    internal: true
+    driver: bridge

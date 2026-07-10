@@ -29,5 +29,6 @@ exec docker compose \
   -f compose.build.yaml \
   -f compose.runtime.yaml \
   -f compose.networks.yaml \
+  -f compose.runtime-isolation.yaml \
   --profile backup \
   "$@"

@@ -19,6 +19,7 @@ import {
   parseBackupManifestDocument,
 } from "../control-center/backup/contracts.mjs";
 import { evaluateNetworkSegmentation } from "./network-segmentation-policy.mjs";
+import { evaluateRuntimeIsolation } from "./runtime-isolation-policy.mjs";
 import { evaluateSupplyChain } from "./supply-chain-policy.mjs";
 
 process.umask(0o077);
@@ -3221,6 +3222,7 @@ function collectInfraContainerImageRefs() {
     "compose.backup-scheduler.yaml",
     "compose.runtime.yaml",
     "compose.networks.yaml",
+    "compose.runtime-isolation.yaml",
     "compose.prod.yaml",
     "compose.secrets.yaml",
     "compose.staging.yaml",
@@ -3379,6 +3381,7 @@ function infraDependencyHygiene() {
     "compose.backup-scheduler.yaml",
     "compose.runtime.yaml",
     "compose.networks.yaml",
+    "compose.runtime-isolation.yaml",
     "compose.prod.yaml",
     "compose.secrets.yaml",
     "compose.vps.yaml",
@@ -3528,7 +3531,7 @@ async function projectRouterTests() {
 
 async function networkSegmentationCheck() {
   await withLocalCheckReport("network-segmentation", async () => {
-    const envFile = path.resolve(infraRoot, argv.envFile || ".env");
+    const envFile = path.resolve(infraRoot, argv.envFile || argv["env-file"] || ".env");
     if (!fs.existsSync(envFile)) fail(`Compose env file not found: ${envFile}`);
     const composeFiles = [
       "compose.yaml",
@@ -3540,6 +3543,7 @@ async function networkSegmentationCheck() {
       "compose.build.yaml",
       "compose.runtime.yaml",
       "compose.networks.yaml",
+      "compose.runtime-isolation.yaml",
     ];
     const configText = output("docker", [
       "compose",
@@ -3576,6 +3580,61 @@ async function networkSegmentationCheck() {
     if (report.status !== "passed") fail(`Network segmentation failed: ${report.failures.join("; ")}`);
     log("Network segmentation check passed.");
   }, { scope: "platform-infrastructure", liveNetworksTouched: false });
+}
+
+async function runtimeIsolationCheck() {
+  await withLocalCheckReport("runtime-isolation", async () => {
+    const envFile = path.resolve(infraRoot, argv.envFile || argv["env-file"] || ".env.vps.example");
+    if (!fs.existsSync(envFile)) fail(`Compose env file not found: ${envFile}`);
+    const composeFiles = [
+      "compose.yaml",
+      "compose.secrets.yaml",
+      "compose.waf.yaml",
+      "compose.vps.yaml",
+      "compose.vps-waf.yaml",
+      "compose.backup-scheduler.yaml",
+      "compose.build.yaml",
+      "compose.runtime.yaml",
+      "compose.networks.yaml",
+      "compose.runtime-isolation.yaml",
+    ];
+    const configText = output("docker", [
+      "compose",
+      "--env-file", envFile,
+      "-p", "platform_t13_policy_check",
+      ...composeFiles.flatMap((file) => ["-f", path.join(infraRoot, file)]),
+      "--profile", "backup",
+      "config", "--format", "json",
+    ], { maxBuffer: 128 * 1024 * 1024 });
+    let config;
+    try {
+      config = JSON.parse(configText);
+    } catch {
+      fail("Canonical Compose runtime-isolation render was not valid JSON.");
+    }
+    const report = evaluateRuntimeIsolation(config);
+    const stamp = reportTimestamp();
+    const jsonPath = writeJsonReport("runtime-isolation", `runtime-isolation-${stamp}`, report);
+    const markdownPath = writeMarkdownReport("runtime-isolation", `runtime-isolation-${stamp}`, [
+      "# Runtime Isolation Evidence",
+      "",
+      `Generated at: ${report.generatedAt}`,
+      `Status: ${report.status}`,
+      `Checks: ${report.summary.checks}`,
+      `Failed: ${report.summary.failed}`,
+      `Services: ${report.summary.services}`,
+      `Hosted applications: ${report.summary.hostedApplications}`,
+      `Total memory ceiling bytes: ${report.summary.totalMemoryLimitBytes}`,
+      `Raw socket owners: ${report.summary.rawSocketOwners.join(",") || "none"}`,
+      "",
+      "| Check | Status | Detail |",
+      "| --- | --- | --- |",
+      ...report.checks.map((item) => `| ${item.id} | ${item.status} | ${item.detail} |`),
+    ]);
+    log(`Runtime isolation reports written to ${jsonPath} and ${markdownPath}`);
+    if (report.status !== "passed") fail(`Runtime isolation failed: ${report.failures.join("; ")}`);
+    log("Runtime isolation check passed.");
+  }, { scope: "platform-infrastructure", liveRuntimeTouched: false });
 }
 
 async function faultInjectionTests() {
@@ -5916,7 +5975,7 @@ async function composeHealthcheckCoverage() {
       name: "vps-waf",
       envFile: ".env.vps.example",
       projectName: "platform_ops_health_vps",
-      files: ["compose.yaml", "compose.secrets.yaml", "compose.waf.yaml", "compose.vps.yaml", "compose.vps-waf.yaml", "compose.backup-scheduler.yaml", "compose.build.yaml", "compose.runtime.yaml", "compose.networks.yaml"],
+      files: ["compose.yaml", "compose.secrets.yaml", "compose.waf.yaml", "compose.vps.yaml", "compose.vps-waf.yaml", "compose.backup-scheduler.yaml", "compose.build.yaml", "compose.runtime.yaml", "compose.networks.yaml", "compose.runtime-isolation.yaml"],
       profiles: ["backup"],
     },
     {
@@ -12546,6 +12605,7 @@ function staticSecurityInfraOnlyCheck() {
   const composeBuild = readText(path.join(infraRoot, "compose.build.yaml"));
   const composeRuntime = readText(path.join(infraRoot, "compose.runtime.yaml"));
   const composeNetworks = readText(path.join(infraRoot, "compose.networks.yaml"));
+  const composeRuntimeIsolation = readText(path.join(infraRoot, "compose.runtime-isolation.yaml"));
   const composeSecrets = readText(path.join(infraRoot, "compose.secrets.yaml"));
   const composeWaf = readText(path.join(infraRoot, "compose.waf.yaml"));
   const composeVPSWaf = readText(path.join(infraRoot, "compose.vps-waf.yaml"));
@@ -12598,12 +12658,16 @@ function staticSecurityInfraOnlyCheck() {
   const networkSegmentationPolicy = readText(path.join(infraRoot, "scripts", "network-segmentation-policy.mjs"));
   const networkSegmentationSandbox = readText(path.join(infraRoot, "scripts", "network-segmentation-sandbox-test.sh"));
   const workloadEgressFirewall = readText(path.join(infraRoot, "scripts", "workload-egress-firewall.sh"));
+  const runtimeIsolationPolicy = readText(path.join(infraRoot, "scripts", "runtime-isolation-policy.mjs"));
+  const runtimeIsolationSandbox = readText(path.join(infraRoot, "scripts", "runtime-isolation-sandbox-test.sh"));
+  const runtimeHostedSandbox = readText(path.join(infraRoot, "scripts", "runtime-hosted-sandbox-test.sh"));
 
   const infrastructureText = [
     compose,
     composeBuild,
     composeRuntime,
     composeNetworks,
+    composeRuntimeIsolation,
     composeSecrets,
     composeWaf,
     composeVPSWaf,
@@ -12638,7 +12702,17 @@ function staticSecurityInfraOnlyCheck() {
   assertMatch(compose, /^name:\s+\$\{COMPOSE_PROJECT_NAME:-platform_infra\}/m, "Compose must use an explicit environment-selectable project name.");
   assertMatch(composeRuntime, /local-registry:[\s\S]*registry:3@sha256:[a-f0-9]{64}[\s\S]*enterprise_local_registry_data:[\s\S]*external:\s+true/, "Tracked runtime must manage the pinned local registry and its external stable volume.");
   assertMatch(composeRuntime, /worker-jobs:[\s\S]*read_only:\s+false[\s\S]*worker-notifications:[\s\S]*read_only:\s+false/, "Tracked runtime must replace the former worker hotfix.");
-  assertMatch(composeVPSScript, /compose\.backup-scheduler\.yaml[\s\S]*compose\.build\.yaml[\s\S]*compose\.runtime\.yaml[\s\S]*compose\.networks\.yaml[\s\S]*--profile backup/, "The VPS wrapper must load the tracked network policy last in the canonical runtime order.");
+  assertMatch(composeVPSScript, /compose\.backup-scheduler\.yaml[\s\S]*compose\.build\.yaml[\s\S]*compose\.runtime\.yaml[\s\S]*compose\.networks\.yaml[\s\S]*compose\.runtime-isolation\.yaml[\s\S]*--profile backup/, "The VPS wrapper must load tracked network and runtime isolation policies last in canonical order.");
+  assertMatch(composeRuntimeIsolation, /docker-socket-proxy:[\s\S]*@sha256:[a-f0-9]{64}[\s\S]*\/var\/run\/docker\.sock:\/var\/run\/docker\.sock:ro[\s\S]*platform_docker_control/, "Only the digest-pinned socket proxy may receive the raw Docker socket.");
+  assertMatch(composeRuntimeIsolation, /127\.0\.0\.1:\$\{DOCKER_SOCKET_PROXY_PORT:-2376\}:2375/, "The host ops endpoint must bind only to loopback.");
+  assertMatch(composeRuntimeIsolation, /backup-scheduler:[\s\S]*DOCKER_HOST:\s+tcp:\/\/docker-socket-proxy:2375[\s\S]*platform_docker_control/, "Backup scheduler must use the isolated Docker API proxy.");
+  assertMatch(opsWrapper, /PLATFORM_OPS_DOCKER_MODE:-auto[\s\S]*PROXY_IMAGE=.*@sha256:[a-f0-9]{64}[\s\S]*platform-ops-proxy-[\s\S]*tcp:\/\/127\.0\.0\.1:\$\{DOCKER_SOCKET_PROXY_PORT:-2376\}/, "Ops runner must use a pinned ephemeral proxy in CI and the loopback-only persistent proxy on the VPS.");
+  assertMatch(opsWrapper, /PLATFORM_ALLOW_RAW_DOCKER_SOCKET:-0[\s\S]*reserved for an approved recovery window/, "Raw socket recovery mode must be an explicit audited exception.");
+  assertMatch(runtimeIsolationPolicy, /raw-socket-single-owner/, "Runtime policy must enforce one raw socket owner.");
+  assertMatch(runtimeIsolationPolicy, /resource-memory-admission/, "Runtime policy must enforce node memory admission.");
+  assertMatch(runtimeIsolationPolicy, /app-no-docker-socket/, "Runtime policy must deny hosted Docker socket access.");
+  assertMatch(runtimeIsolationSandbox, /ReadonlyRootfs[\s\S]*Memory[\s\S]*NanoCpus[\s\S]*PidsLimit[\s\S]*Ulimits/, "Runtime sandbox must inspect effective rootfs and cgroup controls.");
+  assertMatch(runtimeHostedSandbox, /T13_APP_SOURCE_ROOT[\s\S]*docker inspect[\s\S]*ReadonlyRootfs[\s\S]*\/opt\/platform-source[\s\S]*apache2ctl -t/, "Hosted sandbox must inspect real per-app mounts and runtime startup without touching live services.");
   assertNoMatch([readme, runbook, deployVPSScript, vpsGoLiveScript, composeVPSScript].join("\n"), /\.tmp\/(?:vps-runtime-override|compose\.worker-runtime-hotfix)\.yaml/, "Production commands must not depend on ignored runtime overlays.");
   assertMatch(compose, /dockerfile:\s+docker\/php-apache\.Dockerfile/, "Compose must build PHP hosting from the unified infra Dockerfile.");
   assertMatch(compose, /\$\{PHP_SOURCE_DIR:-\.\/php-runtime-root\}:\/var\/www\/html/, "Compose must default the PHP root to a neutral runtime-only document root.");
@@ -15417,6 +15491,7 @@ Commands:
   release-evidence
   release-artifact-gate
   rollback-release
+  runtime-isolation-check
   restore-test-keycloak
   restore-test-mariadb
   restore-test-minio
@@ -15524,6 +15599,7 @@ const commands = {
   "release-evidence": releaseEvidence,
   "release-artifact-gate": releaseArtifactGate,
   "rollback-release": rollbackRelease,
+  "runtime-isolation-check": runtimeIsolationCheck,
   "restore-test-keycloak": restoreTestKeycloakConfig,
   "restore-test-mariadb": restoreTestMariadb,
   "restore-test-minio": restoreTestMinio,

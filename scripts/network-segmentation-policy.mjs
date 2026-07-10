@@ -17,6 +17,7 @@ const INTERNAL_NETWORKS = [
   "platform_bus",
   "platform_storage",
   "platform_observability",
+  "platform_docker_control",
   ...APP_NETWORKS.flatMap((item) => [item.ingress, item.data].filter(Boolean)),
 ];
 
@@ -78,6 +79,8 @@ export function evaluateNetworkSegmentation(config) {
   requireShared("observability-prometheus-loki", "prometheus", "loki", "platform_observability");
   requireShared("observability-prometheus-alertmanager", "prometheus", "alertmanager", "platform_observability");
   requireShared("observability-alertmanager-receiver", "alertmanager", "worker-notifications", "platform_observability");
+  record("members-platform-docker-control", membersEqual("platform_docker_control", ["backup-scheduler", "docker-socket-proxy"]), `platform_docker_control members=${(networkMembers.get("platform_docker_control") || []).sort().join(",")}`);
+  requireShared("docker-control-scheduler-proxy", "backup-scheduler", "docker-socket-proxy", "platform_docker_control");
 
   for (const app of APP_NETWORKS) {
     record(`members-${app.ingress}`, membersEqual(app.ingress, ["project-router", app.service]), `${app.ingress} members=${(networkMembers.get(app.ingress) || []).sort().join(",")}`);
@@ -90,6 +93,7 @@ export function evaluateNetworkSegmentation(config) {
     for (const admin of ["prometheus", "loki", "alertmanager", "control-center", "phpmyadmin", "phppgadmin"]) {
       requireDenied(`deny-${app.service}-${admin}`, app.service, admin);
     }
+    requireDenied(`deny-${app.service}-docker-socket-proxy`, app.service, "docker-socket-proxy");
   }
 
   for (let index = 0; index < APP_NETWORKS.length; index += 1) {

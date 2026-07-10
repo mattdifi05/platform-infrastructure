@@ -22,6 +22,11 @@ for service in local-registry backup-scheduler project-router control-center \
 done
 
 jq -e '.services["local-registry"].image | test("^registry:3@sha256:[a-f0-9]{64}$")' "$OUTPUT" >/dev/null
+jq -e '.services["docker-socket-proxy"].image | test("^ghcr.io/tecnativa/docker-socket-proxy:v0\\.4\\.2@sha256:[a-f0-9]{64}$")' "$OUTPUT" >/dev/null
+jq -e '[.services["docker-socket-proxy"].ports[] | select(.host_ip == "127.0.0.1" and .target == 2375)] | length == 1' "$OUTPUT" >/dev/null
+jq -e '.networks.platform_docker_control.internal == true' "$OUTPUT" >/dev/null
+jq -e '.services["backup-scheduler"].environment.DOCKER_HOST == "tcp://docker-socket-proxy:2375"' "$OUTPUT" >/dev/null
+jq -e '[.services[] | select(any(.volumes[]?; .source == "/var/run/docker.sock")) | .container_name] == ["enterprise-docker-socket-proxy"]' "$OUTPUT" >/dev/null
 jq -e '.volumes.enterprise_local_registry_data.name == "enterprise_local_registry_data"' "$OUTPUT" >/dev/null
 rg -U 'enterprise_local_registry_data:\n\s+external:\s+true' compose.runtime.yaml >/dev/null
 
