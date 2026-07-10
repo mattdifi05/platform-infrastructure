@@ -645,8 +645,9 @@ sh ./scripts/vps-postdeploy.sh .env
 
 Sul reference server corrente il path operativo e'
 `/home/platform_infrastructure/platform-infrastructure` e il runtime usa anche
-gli overlay tracked `compose.runtime.yaml` e `compose.networks.yaml` per
-collegare runtime dedicati e trust zone. Per nuovi server ricrea lo stesso
+gli overlay tracked `compose.runtime.yaml`, `compose.networks.yaml` e
+`compose.runtime-isolation.yaml` per collegare runtime dedicati, trust zone e
+limiti cgroup/mount. Per nuovi server ricrea lo stesso
 intento in modo revisionato invece di copiare stato live alla cieca.
 
 ```sh
@@ -660,6 +661,7 @@ docker compose -p platform_infra_vps \
   -f compose.vps-waf.yaml \
   -f compose.runtime.yaml \
   -f compose.networks.yaml \
+  -f compose.runtime-isolation.yaml \
   ps
 ```
 
@@ -736,6 +738,8 @@ Nel profilo VPS:
 - PostgreSQL, MariaDB, Redis, NATS, MinIO, Prometheus, Loki, Grafana, phpMyAdmin e dashboard Traefik non sono pubblici.
 - `CONTROL_CENTER_HOST` apre il portal Node e `DOCS_HOST` apre la documentazione operativa. Sono le sole route pubbliche previste.
 - I progetti PHP e Node condividono `PHP_PROJECTS_DIR` come sorgente universale. `PROJECTS_HOST` resta solo alias legacy e deve restare vuoto nelle nuove installazioni, `PROJECTS_WILDCARD_HOST_REGEXP` resta vuoto di default e Traefik non espone wildcard progetto. Il `project-router` resta disponibile come servizio interno e continua a essere coperto da `project-router-tests`.
+- L'overlay finale monta a ogni workload solo la propria sorgente read-only, applica CPU/RAM/PID/FD/I/O e rootfs read-only, e impedisce accesso a repository parent, backup, stato Control Center e Docker socket. I PHP usano una copia tmpfs per il runtime; i Node avviano soltanto artifact precompilati.
+- Solo `docker-socket-proxy` riceve il socket raw. Scheduler e ops runner usano il proxy; l'endpoint host e' vincolato a `127.0.0.1:2376`.
 - MariaDB usa `secrets/mariadb_root_password.txt` tramite Docker secret, non una password root in `.env`.
 - `phpmyadmin` resta fuori dal profilo di default; su VPS pubblica usa preferibilmente SSH e client CLI, non una UI DB esposta.
 
@@ -786,7 +790,8 @@ fuori dal GO/NO-GO infra.
 - `compose.prod.yaml`: overlay produzione.
 - `compose.vps.yaml`: overlay VPS prod-like dietro TLS esterno.
 - `compose.runtime.yaml`: runtime hosted-app, registry e override host versionati.
-- `compose.networks.yaml`: trust zone core e reti ingress/data/egress per workload; va caricato per ultimo.
+- `compose.networks.yaml`: trust zone core e reti ingress/data/egress per workload.
+- `compose.runtime-isolation.yaml`: overlay VPS finale con mount allowlist, proxy Docker e budget cgroup; va caricato per ultimo.
 - `compose.waf.yaml`: overlay OWASP CRS/ModSecurity davanti a Traefik.
 - `compose.vps-waf.yaml`: adattamento WAF per VPS con TLS/CDN esterno.
 - `compose.backup-scheduler.yaml`: scheduler backup/restore drill container-first.
@@ -800,6 +805,7 @@ fuori dal GO/NO-GO infra.
 - `DATABASE-DELETION-SAFETY.md`: gate, state machine e recovery per le cancellazioni DB.
 - `NETWORK-SEGMENTATION.md`: matrice di comunicazione, SSRF boundary e rollout reti T12.
 - `SUPPLY-CHAIN.md`: lock di action/immagini/download, sandbox build e procedura di aggiornamento T15.
+- `RUNTIME-ISOLATION.md`: contratto T13, test, rollout progressivo e rollback per-app.
 - `postgres/init/` e `postgres/migrations/`: bootstrap DB e compatibilita'
   workload legacy; non sono gate GO/NO-GO infra.
 - `RUNBOOK.md`, `SECURITY.md`, `THREAT-MODEL.md`, `ENTERPRISE-MATURITY.md`: governance operativa.

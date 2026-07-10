@@ -18,7 +18,12 @@
 `audit-log-evidence.sh` verifies append-only audit events, durable outbox dispatch, alerts, dashboards and optional Platform source wiring, then writes non-secret reports under `reports/audit-logs/`.
 `retention-evidence.sh` verifies bounded Docker logs, Loki/Promtail retention, Prometheus TSDB retention, Grafana log panels and optional Platform structured log redaction, then writes non-secret reports under `reports/retention/`.
 
-The shell wrappers are container-first. On Linux they run the ops container with host networking so `*.localhost.com` resolves to the local edge. On Docker Desktop they map those hostnames to `host-gateway`; override `PLATFORM_LOCAL_HOST_TARGET` only if your Docker runtime exposes the host through a different address.
+The shell wrappers are container-first. They never mount the raw Docker socket
+by default. On the VPS they use the persistent proxy through
+`127.0.0.1:2376`; in CI/bootstrap they create and remove a digest-pinned
+ephemeral proxy. The container runs with the SSH user's UID/GID. Raw socket
+mode requires the explicit recovery flags documented in
+`RUNTIME-ISOLATION.md`.
 
 Terminology: **Infrastructure Portal** is the operator product surface,
 **Control Center** is the Node service that serves it, and `portal.<domain>` is
@@ -52,6 +57,7 @@ docker compose -p platform_infra_vps \
   -f compose.vps-waf.yaml \
   -f compose.runtime.yaml \
   -f compose.networks.yaml \
+  -f compose.runtime-isolation.yaml \
   ps
 
 curl -skS --resolve portal.platform-infrastructure.com:443:127.0.0.1 \
@@ -81,6 +87,7 @@ docker compose -p platform_infra_vps \
   -f compose.vps-waf.yaml \
   -f compose.runtime.yaml \
   -f compose.networks.yaml \
+  -f compose.runtime-isolation.yaml \
   up -d --force-recreate control-center
 ```
 
@@ -248,8 +255,23 @@ run `--verify` and `vps-host-readiness.sh --enforce`. Never use
 The Control Center rejects snapshots older than
 `CONTROL_CENTER_DOCKER_STATS_MAX_AGE_SECONDS` and preserves a real `0.000%` CPU
 sample as measured zero. Effective limits are reported separately from planned
-portal quota metadata; an absent limit remains explicitly unconfigured until
-T13 applies resource governance.
+portal quota metadata. The T13 candidate now applies hard CPU/RAM/PID/FD/I/O
+limits through `compose.runtime-isolation.yaml`; the old live containers remain
+unlimited until an approved per-service rollout.
+
+Validate the desired runtime without recreating live services:
+
+```sh
+sh ./scripts/runtime-isolation-check.sh --env-file=.env.vps.example
+sh ./scripts/runtime-isolation-sandbox-test.sh
+T13_APP_SOURCE_ROOT=/home/platform_infrastructure/src \
+T13_CERTS_DIR=/home/platform_infrastructure/platform-infrastructure/traefik/certs \
+sh ./scripts/runtime-hosted-sandbox-test.sh
+```
+
+The stress sandbox is capped at 0.25 CPU and 96 MiB. The hosted sandbox uses
+unique networks, does not start live databases and preserves application
+sources read-only. Follow `RUNTIME-ISOLATION.md` for rollout and rollback.
 
 ## External uptime monitoring
 
@@ -389,7 +411,7 @@ docker logs enterprise-backup-scheduler
 docker exec enterprise-backup-scheduler crontab -l
 ```
 
-This keeps scheduling inside Docker. The host only needs Docker, Compose and Git. The scheduler autodetects Docker mount sources; set `PLATFORM_INFRA_HOST_ROOT` and `PROJECT_SOURCE_HOST_ROOT` only when the VPS uses nonstandard paths. Enable off-site upload with `BACKUP_SCHEDULER_ENABLE_OFFSITE=true` after `RESTIC_REPOSITORY`, `RESTIC_PASSWORD_FILE` and provider credentials are valid. Scheduled jobs call `backup-scheduler.sh --run <command>` and parse the private runtime env file as data instead of sourcing it as shell code.
+This keeps scheduling inside Docker. The host only needs Docker, Compose and Git. The scheduler uses `docker-socket-proxy` on the isolated `platform_docker_control` network and never mounts the raw socket. It autodetects Docker mount sources; set `PLATFORM_INFRA_HOST_ROOT` and `PROJECT_SOURCE_HOST_ROOT` only when the VPS uses nonstandard paths. Enable off-site upload with `BACKUP_SCHEDULER_ENABLE_OFFSITE=true` after `RESTIC_REPOSITORY`, `RESTIC_PASSWORD_FILE` and provider credentials are valid. Scheduled jobs call `backup-scheduler.sh --run <command>` and parse the private runtime env file as data instead of sourcing it as shell code.
 
 ## Home VPS LAN evidence
 

@@ -78,6 +78,18 @@ and are not platform go-live gates.
 - Query execution is statement-time-limited and row-limited.
 - Operational logs are centralized in Loki/Promtail with shared redaction in `@platform/observability`; durable platform security events are stored in append-only audit tables and dispatched through the audit outbox.
 
+## Runtime isolation
+
+- The VPS render must load `compose.runtime-isolation.yaml` last.
+- Every service has CPU, memory, PID, file-descriptor and I/O controls.
+- Hosted source mounts are exact and read-only; hosted workloads must not see
+  the infrastructure tree, backups, Control Center state or Docker socket.
+- PHP runtime copies are ephemeral tmpfs and receive no shared gateway-signing
+  or SMTP secret.
+- Only the digest-pinned Docker socket proxy receives the raw socket. Its host
+  endpoint is loopback-only; hosted workloads are outside its internal network.
+- Raw socket recovery mode requires explicit approval and both recovery flags.
+
 ## Required recurring checks
 
 - Mandatory supply-chain gate: production CVE audit, CycloneDX SBOM and license policy.
@@ -104,3 +116,5 @@ and are not platform go-live gates.
 - `sh ./scripts/offsite-backup-restic.sh` after the full local backup set in production.
 - `sh ./scripts/rollback-release.sh` as a dry-run before every approved rollback.
 - `sh ./scripts/sign-images.sh` for immutable production images.
+- `sh ./scripts/runtime-isolation-check.sh --env-file=.env.vps.example` after every Compose/runtime change.
+- `sh ./scripts/runtime-isolation-sandbox-test.sh` before limit changes.

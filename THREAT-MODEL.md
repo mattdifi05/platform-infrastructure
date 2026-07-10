@@ -11,8 +11,10 @@
 ## Trust boundaries
 
 - Browser to Traefik over HTTPS.
-- Traefik to internal services on `enterprise_net`.
-- Platform runtime templates and hosted workloads to PostgreSQL/Redis/NATS/MinIO.
+- Traefik to platform routing and per-app ingress trust zones.
+- Hosted workloads to only their dedicated ingress/data/egress networks.
+- Backup scheduler to the Docker API proxy on an internal control network.
+- Host ops runner to the same proxy through a loopback-only endpoint.
 - SMTP provider outside the infrastructure boundary.
 
 ## Primary threats
@@ -23,6 +25,10 @@
 - Secret leakage: `.env` ignored; production should move to secret manager.
 - Backup compromise: backups must be encrypted before offsite storage.
 - Supply-chain drift: CI must run lockfile install, typecheck, build, audit and image scanning.
+- Hosted workload escape: exact read-only source mounts, read-only rootfs,
+  per-app networks and no raw Docker socket constrain host and cross-app access.
+- Node exhaustion: cgroup memory/CPU/PID/FD/I/O controls and higher control-plane
+  CPU shares contain workload stress.
 
 ## Accepted local-development risks
 
@@ -37,3 +43,5 @@
 - Real DNS and Let's Encrypt certificates.
 - Firewall denies everything except required ingress.
 - Backup restore test before go-live.
+- Runtime-isolation policy, hosted startup sandbox and bounded cgroup stress
+  must pass before recreating any hosted workload.

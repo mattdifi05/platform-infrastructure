@@ -1,6 +1,6 @@
 # Documentation Index
 
-Last docs alignment: 2026-06-29.
+Last docs alignment: 2026-07-10.
 
 Use this index to choose the right document before changing or deploying the
 platform. Do not read secrets, dumps, backups or provider live state unless the
@@ -20,6 +20,9 @@ operation explicitly requires it and has approval.
 | `PLATFORM-APPLICATION-SEPARATION-AUDIT.md` | Boundary between infrastructure and hosted applications. |
 | `SECURITY.md` | Security baseline, roles, secrets policy and recurring checks. |
 | `THREAT-MODEL.md` | Assets, trust boundaries, primary threats and production non-negotiables. |
+| `NETWORK-SEGMENTATION.md` | T12 trust zones, per-app networks, router SSRF boundary and rollout. |
+| `RUNTIME-ISOLATION.md` | T13 mount allowlists, Docker proxy, cgroup budget, verification and rollback. |
+| `SUPPLY-CHAIN.md` | T15 immutable image/action/download lock and build sandbox. |
 | `ENTERPRISE-MATURITY.md` | Enterprise maturity matrix and 30-point readiness model. |
 | `ENTERPRISE-10-PLAN.md` | Enterprise roadmap and acceptance criteria. |
 

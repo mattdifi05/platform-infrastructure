@@ -81,4 +81,14 @@
 | EV-T11-005 | T11 | Data pre-change gate | fresh signed local backups plus two new OneDrive/Restic snapshots | PASS with OPEN T07 warnings: rclone config update and ephemeral Restic host grouping | 2026-07-10 |
 | EV-T11-006 | T11 | Registry rollback | private 218947584-byte volume archive plus SHA-256 and catalog snapshot | PASS | 2026-07-10 |
 
+| EV-T13-001 | T13 | Rendered isolation policy | `runtime-isolation-check --env-file=.env.vps.example` | PASS 341/341: 34 services, seven hosted apps, 13,623,099,392-byte ceiling, one raw socket owner | 2026-07-10 |
+| EV-T13-002 | T13 | Network regression | `network-segmentation-check --env-file=.env.vps.example` | PASS 155/155: 30 networks including exact scheduler/proxy control network | 2026-07-10 |
+| EV-T13-003 | T13 | Socket and cgroup stress | `runtime-isolation-sandbox-test.sh` | PASS: proxy allow/deny, no hosted mounts, effective CPU/RAM/PID/FD/I/O, 96 MiB OOM contained, control plane stayed responsive | 2026-07-10 |
+| EV-T13-004 | T13 | Hosted runtime behavior | `runtime-hosted-sandbox-test.sh` with reference source/cert paths | PASS: five PHP and two Node runtimes started; source mounts read-only; static/HTTP probes passed; no secret/socket/broad mount | 2026-07-10 |
+| EV-T13-005 | T13 | Ops runner boundary | persistent proxy loopback smoke plus default ephemeral runner | PASS: digest pinned, read-only, `127.0.0.1:2376`, UID/GID report ownership, zero residual proxy resources | 2026-07-10 |
+| EV-T13-006 | T13 | Supply chain regression | `supply-chain-lock-check` | PASS 214/214 with 30 locked images | 2026-07-10 |
+| EV-T13-007 | T13 | Live/source preservation | before/after live IDs and non-sensitive source metadata | PASS: both diffs empty; no sandbox residue; no live restart/network mutation | 2026-07-10 |
+| EV-T13-008 | T13 | Private evidence integrity | `/home/platform_infrastructure/remediation-work/20260710T172606Z-t13-runtime-isolation/CHECKSUMS.sha256` | PASS: private directory 0700, files 0600 | 2026-07-10 |
+| EV-T13-009 | T13 | Global static gate | `static-security-check --infraOnly` | BLOCKED only by pre-existing T20 CSS border assertion after T13 assertions passed | 2026-07-10 |
+
 Every later entry must record positive, negative, regression and behavior-preservation evidence. Secret values must never be embedded.

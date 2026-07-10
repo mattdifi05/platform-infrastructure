@@ -81,6 +81,11 @@ docker compose -p platform_infra_vps \
 candidate is not live until an approved maintenance rollout recreates network
 attachments and passes `network-segmentation-check` plus post-deploy probes.
 
+The desired VPS render additionally loads `compose.runtime-isolation.yaml`
+last. It contains the T13 mount/socket/cgroup contract. It is verified in
+sandboxes but is not applied to the reference containers; the live stack still
+shows the old mounts, flat network attachments and absent CPU/RAM ceilings.
+
 Core platform services currently expected in the reference stack:
 
 ```text

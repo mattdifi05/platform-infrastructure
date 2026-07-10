@@ -45,7 +45,11 @@ MariaDB drift requiring classification before any delete: `node_demo_app`, `phpm
 
 All workloads currently share `enterprise_net`. PHP runtimes still receive broad repository/control-state mounts and shared SMTP/signing material. The legacy `php-apache` shared runtime is still running despite its disabled profile. The project-router has broad source and host-parent mounts. Control Center has DB superuser material. Backup scheduler has the production Docker socket.
 
-These are OPEN inputs to T11-T14, not accepted target state.
+These remain the live state. The T12/T13 candidate removes broad hosted mounts,
+shared PHP gateway/SMTP secrets and raw scheduler socket; adds per-app networks,
+read-only source/runtime boundaries and cgroup ceilings; and passed disposable
+startup/connectivity tests. It is not live until an approved progressive
+rollout. T14 still owns DB/MinIO least privilege.
 
 T11 live adoption on 2026-07-10 moved project-router and the local registry under the single `platform_infra_vps` Compose project. The registry retained the exact `enterprise_local_registry_data` volume and catalog. Other services were not recreated; their historical Compose labels still mention the old ignored overlays, but all future deploy commands use `compose.runtime.yaml` and the canonical wrapper.
 
