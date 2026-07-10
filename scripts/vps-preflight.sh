@@ -44,7 +44,8 @@ done
 for secret in \
   postgres_superuser_password app_db_password keycloak_db_password redis_password keycloak_admin_password nats_password \
   minio_root_password grafana_admin_password session_secret session_signing_keys hash_pepper_keys database_url nats_url smtp_password \
-  mariadb_root_password
+  mariadb_root_password \
+  alertmanager_webhook_token
 do
   file="$ROOT_DIR/secrets/$secret.txt"
   if [ ! -s "$file" ]; then
@@ -52,6 +53,13 @@ do
     exit 1
   fi
 done
+
+ALERTMANAGER_SECRET_GID=$(get_env ALERTMANAGER_SECRET_GID)
+ALERTMANAGER_SECRET_GID=${ALERTMANAGER_SECRET_GID:-$(id -g)}
+ALERTMANAGER_SECRET_GID="$ALERTMANAGER_SECRET_GID" \
+  sh ./scripts/alertmanager-secret-permissions.sh \
+    --file "$ROOT_DIR/secrets/alertmanager_webhook_token.txt" \
+    --gid "$ALERTMANAGER_SECRET_GID"
 
 COMPOSE_ENV_FILE="$ENV_FILE" COMPOSE_PROJECT_NAME="$PROJECT_NAME" \
   sh ./scripts/compose-vps.sh config --quiet

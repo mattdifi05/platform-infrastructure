@@ -13,6 +13,12 @@ route:
   routes:
     - receiver: platform-notification-worker
       matchers:
+        - platform_probe="alert-delivery"
+      group_wait: 0s
+      group_interval: 1m
+      repeat_interval: 1h
+    - receiver: platform-notification-worker
+      matchers:
         - severity="critical"
       repeat_interval: 1h
 

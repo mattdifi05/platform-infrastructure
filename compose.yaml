@@ -866,6 +866,8 @@ services:
     container_name: enterprise-alertmanager
     init: true
     pids_limit: 256
+    group_add:
+      - "${ALERTMANAGER_SECRET_GID:-1000}"
     logging: *default_logging
     security_opt:
       - no-new-privileges:true
@@ -882,7 +884,7 @@ services:
     networks:
       - enterprise_net
     healthcheck:
-      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:9093/-/healthy"]
+      test: ["CMD-SHELL", "test -r /run/secrets/alertmanager_webhook_token && wget -q -O /dev/null http://127.0.0.1:9093/-/ready"]
       interval: 15s
       timeout: 5s
       retries: 10

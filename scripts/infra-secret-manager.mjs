@@ -27,7 +27,7 @@ const requiredSecrets = [
   { name: "control_center_vault_keys", kind: "keyring", bytes: 48, keyPrefix: "v", rotationDays: 90, manualRotation: true },
   { name: "hash_pepper_keys", kind: "keyring", bytes: 48, keyPrefix: "h", rotationDays: 90 },
   { name: "backup_signing_keys", kind: "keyring", bytes: 48, keyPrefix: "b", rotationDays: 90 },
-  { name: "alertmanager_webhook_token", kind: "opaque", bytes: 48, rotationDays: 90 },
+  { name: "alertmanager_webhook_token", kind: "opaque", bytes: 48, rotationDays: 90, fileMode: 0o640 },
   { name: "smtp_password", kind: "opaque", bytes: 36, minLength: 8, rotationDays: 90 },
   { name: "cloudflare_turnstile_secret_key", kind: "opaque", bytes: 36, minLength: 8, rotationDays: 90, manualRotation: true },
   { name: "database_url", kind: "derived", rotationDays: 90 },
@@ -179,8 +179,8 @@ function readFileIfExists(filePath) {
 }
 
 function writePrivateFile(filePath, value, mode = 0o600) {
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  fs.writeFileSync(filePath, value, "utf8");
+  fs.mkdirSync(path.dirname(filePath), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(filePath, value, { encoding: "utf8", mode });
   try {
     fs.chmodSync(filePath, mode);
   } catch {
@@ -484,10 +484,16 @@ async function verify() {
   validateValues(values, store);
   const names = orderedSecretNames(values, store.secrets);
   for (const name of names) {
+    const spec = secretSpec(name, store.secrets);
     const materialized = readFileIfExists(secretFilePath(name));
     if (!materialized) fail(`Missing materialized Docker secret: ${secretFilePath(name)}`);
     if (!timingSafeEqual(Buffer.from(materialized), Buffer.from(values[name]))) {
       fail(`Materialized secret does not match manager store: ${name}`);
+    }
+    const expectedMode = spec.fileMode || 0o600;
+    const actualMode = fs.statSync(secretFilePath(name)).mode & 0o777;
+    if (actualMode !== expectedMode) {
+      fail(`Materialized secret mode mismatch for ${name}: expected ${expectedMode.toString(8)}, got ${actualMode.toString(8)}.`);
     }
   }
   audit("verify", { names });

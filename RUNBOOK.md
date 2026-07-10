@@ -139,6 +139,23 @@ Treat every risky launch feature as disabled-by-default until it has an owner, r
 
 Prometheus sends alerts to Alertmanager, and Alertmanager posts grouped alerts to the notification worker at `worker-notifications:3000/alerts/prometheus` with the shared bearer token from `/run/secrets/alertmanager_webhook_token`. The worker logs sanitized alert summaries into Loki and exposes delivery counters on `/metrics`.
 
+Before the first deploy, set `ALERTMANAGER_SECRET_GID` to the numeric group used
+by the Ubuntu platform operator. The token must be `0640` and owned by that
+group. Check without mutation first; apply only in an approved maintenance
+window:
+
+```sh
+sh ./scripts/alertmanager-secret-permissions.sh --gid "$(id -g)"
+sh ./scripts/alertmanager-secret-permissions.sh \
+  --gid "$(id -g)" \
+  --apply \
+  --confirm APPLY-ALERTMANAGER-SECRET-PERMISSIONS
+```
+
+`vps-preflight.sh` repeats the read-only permission check and blocks deployment
+when mode or group do not match. Alertmanager health also fails when the token
+is unreadable, even if `/-/ready` is green.
+
 Alert evidence:
 
 ```sh
@@ -147,7 +164,7 @@ sh ./scripts/alert-evidence.sh --sendTest
 sh ./scripts/alert-evidence.sh --sendTest --requireEmailDelivery
 ```
 
-The summary mode validates Alertmanager routing, bearer-token secrets, Prometheus delivery-failure alerts and notification-worker counters. `--sendTest` posts a synthetic Alertmanager payload to the running worker and checks webhook counters. Add `--requireEmailDelivery`, `--requireDiscordDelivery` or `--requireTelegramDelivery` only after those real provider channels are configured.
+The summary mode validates Alertmanager routing, bearer-token secrets, Prometheus delivery-failure alerts and notification-worker counters. `--sendTest` submits a uniquely correlated alert to the Alertmanager API, waits for downstream worker counters and requires the exact receiver log receipt, then resolves the probe. It never calls the worker webhook directly. Add `--requireEmailDelivery`, `--requireDiscordDelivery` or `--requireTelegramDelivery` only after those real provider channels are configured.
 
 Key alerts:
 
