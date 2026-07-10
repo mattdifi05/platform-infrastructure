@@ -255,4 +255,5 @@ services:
 
 volumes:
   enterprise_local_registry_data:
+    external: true
     name: enterprise_local_registry_data

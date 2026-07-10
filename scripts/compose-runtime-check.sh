@@ -23,6 +23,7 @@ done
 
 jq -e '.services["local-registry"].image | test("^registry:3@sha256:[a-f0-9]{64}$")' "$OUTPUT" >/dev/null
 jq -e '.volumes.enterprise_local_registry_data.name == "enterprise_local_registry_data"' "$OUTPUT" >/dev/null
+rg -U 'enterprise_local_registry_data:\n\s+external:\s+true' compose.runtime.yaml >/dev/null
 
 if rg -n '\.tmp/(vps-runtime-override|compose\.worker-runtime-hotfix)\.yaml' \
   README.md RUNBOOK.md scripts/compose-vps.sh scripts/deploy-vps.sh \

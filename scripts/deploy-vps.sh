@@ -64,6 +64,7 @@ git fetch --all --prune
 git checkout "$branch"
 git pull --ff-only origin "$branch"
 sh ./scripts/vps-preflight.sh "$env_file"
+sh ./scripts/prepare-vps-runtime.sh
 COMPOSE_ENV_FILE="$env_file" COMPOSE_PROJECT_NAME="$project_name" \
   sh ./scripts/compose-vps.sh up -d --build --remove-orphans
 DEPLOY_RUN_WAF_SMOKE="$deploy_run_waf_smoke" \

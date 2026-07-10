@@ -11828,7 +11828,7 @@ function staticSecurityInfraOnlyCheck() {
 
   assertNoMatch(infrastructureText, /(?:\.\.\/web-php-infrastructure|src\/infrastructure|enterprise-infrastructure)/, "Infrastructure must not reference retired duplicate infra directories.");
   assertMatch(compose, /^name:\s+\$\{COMPOSE_PROJECT_NAME:-platform_infra\}/m, "Compose must use an explicit environment-selectable project name.");
-  assertMatch(composeRuntime, /local-registry:[\s\S]*registry:3@sha256:[a-f0-9]{64}[\s\S]*enterprise_local_registry_data/, "Tracked runtime must manage the pinned local registry and its stable volume.");
+  assertMatch(composeRuntime, /local-registry:[\s\S]*registry:3@sha256:[a-f0-9]{64}[\s\S]*enterprise_local_registry_data:[\s\S]*external:\s+true/, "Tracked runtime must manage the pinned local registry and its external stable volume.");
   assertMatch(composeRuntime, /worker-jobs:[\s\S]*read_only:\s+false[\s\S]*worker-notifications:[\s\S]*read_only:\s+false/, "Tracked runtime must replace the former worker hotfix.");
   assertMatch(composeVPSScript, /compose\.backup-scheduler\.yaml[\s\S]*compose\.build\.yaml[\s\S]*compose\.runtime\.yaml[\s\S]*--profile backup/, "The VPS wrapper must define the canonical tracked runtime file order.");
   assertNoMatch([readme, runbook, deployVPSScript, vpsGoLiveScript, composeVPSScript].join("\n"), /\.tmp\/(?:vps-runtime-override|compose\.worker-runtime-hotfix)\.yaml/, "Production commands must not depend on ignored runtime overlays.");
