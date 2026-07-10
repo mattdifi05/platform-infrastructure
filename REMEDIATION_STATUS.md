@@ -18,7 +18,7 @@ Live checkout remains unchanged and dirty by design.
 | T08 | BLOCKED-STAGING | T03,T07,T11,T18 | pending | no empty Ubuntu host | none | none | no measured full restore | required for node migration |
 | T09 | OPEN | T00,T11 | pending | pending | pending | pending | alert delivery not proven | replaceable receiver contract |
 | T10 | OPEN | T00,T11 | pending | pending | pending | pending | workload metrics not truthful | replica-aware metrics labels |
-| T11 | IN-PROGRESS | T00 | pending | two ignored runtime overlays and mixed Compose ownership recorded | pending | baseline bundle and current live config | recreate not yet deterministic | removes node-specific runtime drift |
+| T11 | DEPLOYED-LIVE | T00 | `remediation/t11-runtime`, `5bcc4ce`, `551a945` | tracked render matches all 32 prior active services; project-router and registry adopted by `platform_infra_vps`; route/catalog/DB/container-ID checks pass | two stateless containers replaced; registry volume retained | automatic rollback commands plus verified registry archive and T00 config | unchanged containers retain historical config-file labels until later per-service rollout; live checkout is still dirty | canonical tracked stack removes future `.tmp` dependency and physical-IP bind is configurable |
 | T12-T22 | OPEN | see master plan | pending | see TEST_EVIDENCE_INDEX.md | pending | pending | see master plan | must preserve future multi-node path |
 | T23 | BLOCKED-EXTERNAL | T01-T22 | pending | staging/domain/provider evidence absent | none | none | final candidate verdict unavailable | true HA explicitly out of scope |
 

@@ -47,6 +47,8 @@ All workloads currently share `enterprise_net`. PHP runtimes still receive broad
 
 These are OPEN inputs to T11-T14, not accepted target state.
 
+T11 live adoption on 2026-07-10 moved project-router and the local registry under the single `platform_infra_vps` Compose project. The registry retained the exact `enterprise_local_registry_data` volume and catalog. Other services were not recreated; their historical Compose labels still mention the old ignored overlays, but all future deploy commands use `compose.runtime.yaml` and the canonical wrapper.
+
 ## Backup and restore coverage
 
 Fresh local source archives exist for anniversary, fiplatform, matthewdifilippo, public, stexor, stream and workcalendar. Fresh MariaDB global dumps and a Stexor PostgreSQL dump exist.

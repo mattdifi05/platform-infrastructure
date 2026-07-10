@@ -9,6 +9,8 @@ This report is intentionally incomplete until T23.
 
 T00 established a recoverable live baseline and authoritative initial application/runtime map. No live container, network, volume, database or secret was changed during T00.
 
+T11 has deployed the canonical tracked VPS runtime wrapper and adopted project-router plus the local registry into `platform_infra_vps`. The registry volume/catalog, application routes, database catalog and all unrelated container IDs were preserved. T11 remains `DEPLOYED-LIVE`, not closed, until subsequent per-service rollouts remove historical `.tmp` config labels and the live checkout is promoted to a clean commit.
+
 ## Required final sections
 
 1. architecture decisions;
