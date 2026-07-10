@@ -9,3 +9,4 @@ COPY control-center/package.json control-center/package-lock.json ./
 RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
 
 COPY control-center/ ./
+RUN chmod -R a+rX /app

@@ -9,6 +9,17 @@ import { fileURLToPath } from "node:url";
 import { AuthRequestError, createControlCenterAuth } from "./auth/oidc.mjs";
 import { controlCenterScriptTags, controlCenterStylesheetLinks, controlCenterUiContract } from "./components/ui/controlCenterUi.mjs";
 import {
+  activatePrincipalBinding,
+  assertManagedDatabaseName,
+  assertPrincipalCreateAllowed,
+  assertPrincipalRotationAllowed,
+  createPrincipalBinding,
+  DatabaseOwnershipError,
+  generatedDatabasePrincipal,
+  principalBindingFor,
+  reservePrincipalBinding,
+} from "./database/ownership.mjs";
+import {
   loadVaultKeyring,
   openLegacyVaultCiphertext,
   openVaultCiphertext,
@@ -31,6 +42,7 @@ const operationsFile = process.env.PROJECT_OPERATIONS_FILE || "/var/www/project-
 const applicationsFile = process.env.PROJECT_APPLICATIONS_FILE || "/var/www/project-state/applications.json";
 const domainsFile = process.env.PROJECT_DOMAINS_FILE || "/var/www/project-state/domains.json";
 const databasesFile = process.env.PROJECT_DATABASES_FILE || "/var/www/project-state/databases.json";
+const databasePrincipalsFile = process.env.PROJECT_DATABASE_PRINCIPALS_FILE || "/var/www/project-state/database-principals.json";
 const databaseCredentialDir = process.env.PROJECT_DATABASE_CREDENTIAL_DIR || path.join(path.dirname(databasesFile), "database-credentials");
 const storageBucketsFile = process.env.PROJECT_STORAGE_BUCKETS_FILE || "/var/www/project-state/storage-buckets.json";
 const sensitiveMaterialsFile = process.env.PROJECT_SENSITIVE_MATERIALS_FILE || "/var/www/project-state/sensitive-materials.json";
@@ -1196,9 +1208,18 @@ async function buildContext({ projects, state }) {
     { id: "postgres", name: "PostgreSQL", status: "configured", service: "postgres", liveAdapter: "DatabaseAdapter", productionEvidence: false },
   ];
   const databaseNameHints = discoverProjectDatabaseHints(projects);
+  const databasePrincipalBindings = readDatabasePrincipalsState().bindings;
   const databases = Object.values(readDatabasesState())
     .filter((database) => database && !database.deletedAt)
-    .map((database) => databaseRecord(database))
+    .map((database) => {
+      const binding = principalBindingFor(databasePrincipalBindings, database);
+      return databaseRecord({
+        ...database,
+        principalBindingId: binding?.databaseId || database.principalBindingId || "",
+        principalManaged: Boolean(binding),
+        principalBindingStatus: binding?.status || database.principalBindingStatus || "legacy-unbound",
+      });
+    })
     .sort((a, b) => `${a.projectId}:${a.engine}:${a.name}`.localeCompare(`${b.projectId}:${b.engine}:${b.name}`));
   const storageProvider = {
     id: "minio",
@@ -5151,7 +5172,6 @@ function renderProjectDetailDatabaseRow(context, project, database) {
       <input type="hidden" name="returnTo" value="project-detail">
       <input type="hidden" name="confirm" value="${escapeHtml(updateConfirm)}">
       <input name="displayName" value="${escapeHtml(databaseDisplayName(database))}" aria-label="Nome visualizzato database">
-      <input name="ownerRole" value="${escapeHtml(database.ownerRole)}" aria-label="Utente database">
       <button class="ops-button secondary compact" type="submit">${controlIcon("save")} Salva</button>
     </form>
     <form class="ops-project-database-edit-form" method="post" action="/actions/database-command">
@@ -5184,7 +5204,6 @@ function renderProjectDetailDatabaseCreateForm(project) {
     <input type="hidden" name="confirm" value="CREATE-DATABASE">
     ${renderProjectSelect("engine", "Motore database", '<option value="mariadb">MariaDB</option><option value="postgres">PostgreSQL</option>')}
     <input name="name" placeholder="${escapeHtml(`${project.slug.replace(/-/g, "_")}_app`)}" aria-label="Nome nuovo database">
-    <input name="ownerRole" placeholder="${escapeHtml(`${project.slug.replace(/-/g, "_")}_user`)}" aria-label="Utente nuovo database">
     <input type="password" name="password" value="" placeholder="Password" aria-label="Password nuovo database" autocomplete="new-password" required>
     <button class="ops-button secondary compact" type="submit">${controlIcon("plus")} Crea DB</button>
   </form>`;
@@ -5534,7 +5553,6 @@ function renderOpsDatabases(context) {
         <select name="projectId" aria-label="Applicazione">${projectOptions}</select>
         <select name="engine" aria-label="Motore"><option value="mariadb">MariaDB</option><option value="postgres">PostgreSQL</option></select>
         <input name="name" placeholder="database_name" aria-label="Nome database">
-        <input name="ownerRole" placeholder="owner_role" aria-label="Owner role">
         <input type="hidden" name="confirm" value="CREATE-DATABASE">
         <button class="ops-button primary" type="submit">${controlIcon("plus")} Aggiungi database</button>
       </form>
@@ -8604,7 +8622,6 @@ function renderDatabases(databases, engines, projects) {
         <select name="projectId" aria-label="Database project">${projectOptions}</select>
         <select name="engine" aria-label="Database engine">${engineOptions}</select>
         <input name="name" value="app_db" aria-label="Database name">
-        <input name="ownerRole" value="app_user" aria-label="Owner role">
         <input type="hidden" name="confirm" value="CREATE-DATABASE">
         <button class="button enable" type="submit">Declare database</button>
       </form>
@@ -9553,32 +9570,57 @@ function planDatabaseCreate(payload, context) {
   findById(context.projects, projectId, "Project");
   const engine = choice(String(payload.engine || "mariadb").toLowerCase(), ["mariadb", "postgres"], "database engine");
   const name = validateDatabaseName(payload.name || `${projectId}_${engine}`);
-  const ownerRole = validateDatabaseName(payload.ownerRole || `${projectId}_app`);
+  ownershipPolicy(() => assertManagedDatabaseName(engine, name));
+  if (String(payload.ownerRole || "").trim()) throw new ValidationError("Database principals are generated server-side and cannot be supplied by the client.");
   const id = databaseId(projectId, engine, name);
+  if (context.databases.some((database) => database.id === id || (database.engine === engine && database.name === name))) {
+    throw new ValidationError("Database resource is already registered.");
+  }
+  const ownerRole = ownershipPolicy(() => generatedDatabasePrincipal({ projectId, engine, databaseName: name }));
   const displayName = sanitizeOptionalDescription(payload.displayName || "");
   const credential = prepareDatabaseCredentialUpdate(id, payload);
-  const details = databaseRecord({ id, projectId, engine, name, displayName, ownerRole, ...credential.metadata });
+  const details = databaseRecord({
+    id,
+    projectId,
+    engine,
+    name,
+    displayName,
+    ownerRole,
+    principalBindingId: id,
+    principalManaged: true,
+    principalBindingStatus: "reserved",
+    ...credential.metadata,
+  });
   if (payload.confirm === "CREATE-DATABASE") {
     const password = validateDatabasePasswordInput(payload.password || "");
-    const liveResult = applyLiveDatabaseCreate(details, password);
     const state = readDatabasesState();
+    if (state[id] && !state[id].deletedAt && state[id].status !== "deleted") throw new ValidationError("Database resource is already registered.");
+    const registry = readDatabasePrincipalsState();
+    const reservedBindings = ownershipPolicy(() => reservePrincipalBinding(registry.bindings, details));
+    writeDatabasePrincipalsState({ ...registry, bindings: reservedBindings });
+    const liveResult = applyLiveDatabaseCreate(details, password, reservedBindings);
     const writtenCredential = writeDatabaseCredentialIfProvided(id, payload);
+    const principalBindingStatus = liveResult.applied ? "active" : "reserved";
     state[id] = {
       ...(state[id] || {}),
       ...details,
       ...writtenCredential.metadata,
+      principalBindingStatus,
       status: liveResult.applied ? "active" : "declared",
       connectionStatus: liveResult.applied ? "configured" : "metadata-only",
       updatedAt: new Date().toISOString(),
       createdAt: state[id]?.createdAt || new Date().toISOString(),
     };
     writeDatabasesState(state);
-    appendAudit({ action: "database.create.apply", target: `${projectId}/${name}`, environment: context.environment, risk: "medium", result: "success", dryRun: false, summary: liveResult.applied ? "Database, user, grants and protected credential created without exposing the credential value." : "Database metadata declared and credential stored in protected local file; live adapter disabled." });
-    const operation = operationPlan("database.create.local", context.environment, false, ["validate project", "validate database name", "create database when live adapter is enabled", "create or update database user", "grant database permissions", "store protected credential", "write audit event"], { ...state[id], databaseId: id, databaseTouched: liveResult.applied, dataChanged: liveResult.applied, credentialsExposed: false, credentialValueStored: writtenCredential.written, opensAdminDatabase: false, liveAdapter: liveResult.mode, productionEvidence: false });
+    if (liveResult.applied) {
+      writeDatabasePrincipalsState({ ...registry, bindings: ownershipPolicy(() => activatePrincipalBinding(reservedBindings, details)) });
+    }
+    appendAudit({ action: "database.create.apply", target: `${projectId}/${name}`, environment: context.environment, risk: "medium", result: "success", dryRun: false, summary: liveResult.applied ? "Database and its server-generated principal were created under an exact ownership binding; the credential value was not exposed." : "Database metadata and a reserved server-generated principal binding were stored; live adapter disabled." });
+    const operation = operationPlan("database.create.local", context.environment, false, ["validate project and protected database denylist", "generate project-scoped principal", "reserve exact ownership binding", "verify catalog has no colliding database or principal", "create database and principal when live adapter is enabled", "grant only target database permissions", "store protected credential", "write audit event"], { ...state[id], databaseId: id, databaseTouched: liveResult.applied, dataChanged: liveResult.applied, credentialsExposed: false, credentialValueStored: writtenCredential.written, opensAdminDatabase: false, liveAdapter: liveResult.mode, productionEvidence: false });
     return { ...operation, database: state[id] };
   }
   appendAudit({ action: "database.create.plan", target: `${projectId}/${name}`, environment: context.environment, risk: "medium", result: "planned", dryRun: true, summary: "Database creation plan generated; no live database mutation executed." });
-  return operationPlan("database.create", context.environment, true, ["validate project", "validate database name", "prepare live database creation", "require apply confirmation", "write audit event"], { ...details, databaseTouched: false, credentialsExposed: false, productionEvidence: false, confirmationRequired: "CREATE-DATABASE" });
+  return operationPlan("database.create", context.environment, true, ["validate project and database name", "generate project-scoped principal", "prepare exact ownership reservation", "require apply confirmation", "write audit event"], { ...details, databaseTouched: false, credentialsExposed: false, productionEvidence: false, confirmationRequired: "CREATE-DATABASE" });
 }
 
 function prepareDatabaseCredentialUpdate(databaseId, payload = {}) {
@@ -9643,24 +9685,35 @@ function validateDatabasePasswordInput(value) {
   return password;
 }
 
-function applyLiveDatabaseCreate(database, password) {
+function applyLiveDatabaseCreate(database, password, registry) {
   if (!databaseLiveApply) return { applied: false, mode: "metadata-only" };
-  if (database.engine === "postgres") return applyLivePostgresCreate(database, password);
-  return applyLiveMariaDbCreate(database, password);
+  if (database.engine === "postgres") return applyLivePostgresCreate(database, password, registry);
+  return applyLiveMariaDbCreate(database, password, registry);
 }
 
-function applyLiveDatabaseDelete(database, state = {}) {
-  if (!databaseLiveApply) return { applied: false, mode: "metadata-only" };
-  if (database.engine === "postgres") return applyLivePostgresDelete(database, state);
-  return applyLiveMariaDbDelete(database, state);
+function applyLiveDatabaseCredential(database, password, registry) {
+  if (!databaseLiveApply) return { applied: false, mode: "metadata-only", action: "none" };
+  const binding = principalBindingFor(registry, database);
+  if (!binding) throw new RejectedOperationError("Database principal has no exact managed ownership binding.");
+  if (binding.status === "reserved") return applyLiveDatabaseCreate(database, password, registry);
+  if (binding.status !== "active") throw new RejectedOperationError("Database principal binding is not active.");
+  if (database.engine === "postgres") return applyLivePostgresCredential(database, password, registry);
+  return applyLiveMariaDbCredential(database, password, registry);
 }
 
-function applyLiveMariaDbCreate(database, password) {
+function applyLiveDatabaseDelete(database, state = {}, registry = {}) {
+  if (!databaseLiveApply) return { applied: false, mode: "metadata-only" };
+  if (database.engine === "postgres") return applyLivePostgresDelete(database, state, registry);
+  return applyLiveMariaDbDelete(database, state, registry);
+}
+
+function applyLiveMariaDbCreate(database, password, registry) {
   const rootPassword = readRequiredSecretFile(mariadbRootPasswordFile, "MariaDB root password");
+  const catalog = inspectMariaDbOwnership(database, rootPassword);
+  ownershipPolicy(() => assertPrincipalCreateAllowed({ database, registry, catalog }), RejectedOperationError);
   const sql = [
-    `CREATE DATABASE IF NOT EXISTS ${mysqlIdentifier(database.name)} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`,
-    `CREATE USER IF NOT EXISTS ${mysqlUserHost(database.ownerRole)} IDENTIFIED BY ${mysqlStringLiteral(password)}`,
-    `ALTER USER ${mysqlUserHost(database.ownerRole)} IDENTIFIED BY ${mysqlStringLiteral(password)}`,
+    `CREATE USER ${mysqlUserHost(database.ownerRole)} IDENTIFIED BY ${mysqlStringLiteral(password)}`,
+    `CREATE DATABASE ${mysqlIdentifier(database.name)} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`,
     `GRANT ALL PRIVILEGES ON ${mysqlIdentifier(database.name)}.* TO ${mysqlUserHost(database.ownerRole)}`,
     "FLUSH PRIVILEGES",
   ].join(";\n") + ";\n";
@@ -9676,13 +9729,32 @@ function applyLiveMariaDbCreate(database, password) {
     env: { MYSQL_PWD: rootPassword },
     label: "MariaDB create database",
   });
-  return { applied: true, mode: "mariadb-cli" };
+  return { applied: true, mode: "mariadb-cli", action: "provision" };
 }
 
-function applyLiveMariaDbDelete(database, state = {}) {
+function applyLiveMariaDbCredential(database, password, registry) {
+  const rootPassword = readRequiredSecretFile(mariadbRootPasswordFile, "MariaDB root password");
+  const catalog = inspectMariaDbOwnership(database, rootPassword);
+  ownershipPolicy(() => assertPrincipalRotationAllowed({ database, registry, catalog }), RejectedOperationError);
+  runDatabaseClient("mariadb", [
+    "--protocol=TCP",
+    "-h", mariadbHost,
+    "-P", String(mariadbPort),
+    "-u", mariadbRootUser,
+    "--batch",
+    "--skip-column-names",
+  ], {
+    input: `ALTER USER ${mysqlUserHost(database.ownerRole)} IDENTIFIED BY ${mysqlStringLiteral(password)};\n`,
+    env: { MYSQL_PWD: rootPassword },
+    label: "MariaDB rotate managed database credential",
+  });
+  return { applied: true, mode: "mariadb-cli", action: "rotate" };
+}
+
+function applyLiveMariaDbDelete(database, state = {}, registry = {}) {
   const rootPassword = readRequiredSecretFile(mariadbRootPasswordFile, "MariaDB root password");
   const statements = [`DROP DATABASE IF EXISTS ${mysqlIdentifier(database.name)}`];
-  if (databaseOwnerRoleIsExclusive(database, state)) {
+  if (databaseOwnerRoleIsExclusive(database, state, registry)) {
     statements.push(`DROP USER IF EXISTS ${mysqlUserHost(database.ownerRole)}`);
   }
   statements.push("FLUSH PRIVILEGES");
@@ -9701,40 +9773,122 @@ function applyLiveMariaDbDelete(database, state = {}) {
   return { applied: true, mode: "mariadb-cli" };
 }
 
-function applyLivePostgresCreate(database, password) {
+function applyLivePostgresCreate(database, password, registry) {
   const superPassword = readRequiredSecretFile(postgresSuperuserPasswordFile, "PostgreSQL superuser password");
-  const roleSql = `DO $do$\nBEGIN\n  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = ${postgresStringLiteral(database.ownerRole)}) THEN\n    CREATE ROLE ${postgresIdentifier(database.ownerRole)} LOGIN PASSWORD ${postgresStringLiteral(password)};\n  ELSE\n    ALTER ROLE ${postgresIdentifier(database.ownerRole)} LOGIN PASSWORD ${postgresStringLiteral(password)};\n  END IF;\nEND\n$do$;\n`;
-  runPostgresSql(roleSql, superPassword, "PostgreSQL create role");
+  const catalog = inspectPostgresOwnership(database, superPassword);
+  ownershipPolicy(() => assertPrincipalCreateAllowed({ database, registry, catalog }), RejectedOperationError);
   const databaseSql = [
-    `SELECT format('CREATE DATABASE %I OWNER %I', ${postgresStringLiteral(database.name)}, ${postgresStringLiteral(database.ownerRole)}) WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = ${postgresStringLiteral(database.name)})`,
-    "\\gexec",
-    `ALTER DATABASE ${postgresIdentifier(database.name)} OWNER TO ${postgresIdentifier(database.ownerRole)};`,
+    `CREATE ROLE ${postgresIdentifier(database.ownerRole)} LOGIN PASSWORD ${postgresStringLiteral(password)};`,
+    `CREATE DATABASE ${postgresIdentifier(database.name)} OWNER ${postgresIdentifier(database.ownerRole)};`,
     `GRANT ALL PRIVILEGES ON DATABASE ${postgresIdentifier(database.name)} TO ${postgresIdentifier(database.ownerRole)};`,
   ].join("\n") + "\n";
   runPostgresSql(databaseSql, superPassword, "PostgreSQL create database");
-  return { applied: true, mode: "postgres-cli" };
+  return { applied: true, mode: "postgres-cli", action: "provision" };
 }
 
-function applyLivePostgresDelete(database, state = {}) {
+function applyLivePostgresCredential(database, password, registry) {
+  const superPassword = readRequiredSecretFile(postgresSuperuserPasswordFile, "PostgreSQL superuser password");
+  const catalog = inspectPostgresOwnership(database, superPassword);
+  ownershipPolicy(() => assertPrincipalRotationAllowed({ database, registry, catalog }), RejectedOperationError);
+  runPostgresSql(`ALTER ROLE ${postgresIdentifier(database.ownerRole)} LOGIN PASSWORD ${postgresStringLiteral(password)};\n`, superPassword, "PostgreSQL rotate managed database credential");
+  return { applied: true, mode: "postgres-cli", action: "rotate" };
+}
+
+function applyLivePostgresDelete(database, state = {}, registry = {}) {
   const superPassword = readRequiredSecretFile(postgresSuperuserPasswordFile, "PostgreSQL superuser password");
   const dropSql = [
     `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = ${postgresStringLiteral(database.name)};`,
     `DROP DATABASE IF EXISTS ${postgresIdentifier(database.name)} WITH (FORCE);`,
   ];
-  if (databaseOwnerRoleIsExclusive(database, state)) {
+  if (databaseOwnerRoleIsExclusive(database, state, registry)) {
     dropSql.push(`DROP ROLE IF EXISTS ${postgresIdentifier(database.ownerRole)};`);
   }
   runPostgresSql(`${dropSql.join("\n")}\n`, superPassword, "PostgreSQL drop database");
   return { applied: true, mode: "postgres-cli" };
 }
 
+function inspectMariaDbOwnership(database, rootPassword) {
+  const args = [
+    "--protocol=TCP",
+    "-h", mariadbHost,
+    "-P", String(mariadbPort),
+    "-u", mariadbRootUser,
+    "--batch",
+    "--skip-column-names",
+  ];
+  const env = { MYSQL_PWD: rootPassword };
+  const hosts = databaseClientLines(runDatabaseClient("mariadb", args, {
+    input: `SELECT Host FROM mysql.user WHERE User = ${mysqlStringLiteral(database.ownerRole)} ORDER BY Host;\n`,
+    env,
+    label: "MariaDB inspect principal",
+  }));
+  const databaseExists = databaseClientLines(runDatabaseClient("mariadb", args, {
+    input: `SELECT COUNT(*) FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = ${mysqlStringLiteral(database.name)};\n`,
+    env,
+    label: "MariaDB inspect database",
+  }))[0] === "1";
+  const grants = hosts.includes("%") ? databaseClientLines(runDatabaseClient("mariadb", args, {
+    input: `SHOW GRANTS FOR ${mysqlUserHost(database.ownerRole)};\n`,
+    env,
+    label: "MariaDB inspect principal grants",
+  })) : [];
+  const ownsDatabase = grants.some((line) => line.replaceAll("`", "").toLowerCase().includes(`on ${database.name.toLowerCase()}.* to`));
+  const globalAdmin = grants.some((line) => /GRANT\s+(?!USAGE\b).+\s+ON\s+\*\.\*/i.test(line));
+  return {
+    principal: {
+      exists: hosts.length > 0,
+      admin: globalAdmin,
+      grantOption: grants.some((line) => /WITH GRANT OPTION/i.test(line)),
+      identityMismatch: hosts.length !== 1 || hosts[0] !== "%",
+    },
+    database: {
+      exists: databaseExists,
+      owner: databaseExists && ownsDatabase ? database.ownerRole : "",
+    },
+  };
+}
+
+function inspectPostgresOwnership(database, superPassword) {
+  const roleLine = databaseClientLines(runPostgresSql([
+    "SELECT concat_ws('|', rolname,",
+    "  CASE WHEN rolsuper THEN '1' ELSE '0' END,",
+    "  CASE WHEN rolcreaterole THEN '1' ELSE '0' END,",
+    "  CASE WHEN rolcreatedb THEN '1' ELSE '0' END,",
+    "  CASE WHEN rolreplication THEN '1' ELSE '0' END,",
+    "  CASE WHEN rolbypassrls THEN '1' ELSE '0' END)",
+    `FROM pg_roles WHERE rolname = ${postgresStringLiteral(database.ownerRole)};`,
+  ].join("\n"), superPassword, "PostgreSQL inspect principal"))[0] || "";
+  const role = roleLine ? roleLine.split("|") : [];
+  const owner = databaseClientLines(runPostgresSql(
+    `SELECT pg_get_userbyid(datdba) FROM pg_database WHERE datname = ${postgresStringLiteral(database.name)};\n`,
+    superPassword,
+    "PostgreSQL inspect database",
+  ))[0] || "";
+  return {
+    principal: {
+      exists: role.length === 6,
+      superuser: role[1] === "1",
+      createRole: role[2] === "1",
+      createDb: role[3] === "1",
+      replication: role[4] === "1",
+      bypassRls: role[5] === "1",
+    },
+    database: {
+      exists: Boolean(owner),
+      owner,
+    },
+  };
+}
+
 function runPostgresSql(sql, password, label) {
-  runDatabaseClient("psql", [
+  return runDatabaseClient("psql", [
     "-h", postgresHost,
     "-p", String(postgresPort),
     "-U", postgresSuperuser,
     "-d", "postgres",
     "-v", "ON_ERROR_STOP=1",
+    "-A",
+    "-t",
     "-q",
   ], {
     input: sql,
@@ -9754,6 +9908,11 @@ function runDatabaseClient(command, args, { input = "", env = {}, label = "datab
   if (result.error?.code === "ENOENT") throw new RejectedOperationError(`${label}: client database non disponibile nel Control Center.`);
   if (result.error) throw new RejectedOperationError(`${label}: ${sanitizeDatabaseClientError(result.error.message)}`);
   if (result.status !== 0) throw new RejectedOperationError(`${label}: ${sanitizeDatabaseClientError(result.stderr || result.stdout || "comando fallito")}`);
+  return String(result.stdout || "");
+}
+
+function databaseClientLines(value) {
+  return String(value || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
 }
 
 function readRequiredSecretFile(filePath, label) {
@@ -9770,9 +9929,11 @@ function readRequiredSecretFile(filePath, label) {
   }
 }
 
-function databaseOwnerRoleIsExclusive(database, state = {}) {
+function databaseOwnerRoleIsExclusive(database, state = {}, registry = {}) {
   const owner = sanitizeDatabasePrincipal(database.ownerRole || "");
   if (!owner) return false;
+  const binding = principalBindingFor(registry, database);
+  if (!binding || binding.status !== "active" || binding.principalName !== owner) return false;
   return !Object.values(state || {}).some((candidate) => candidate
     && candidate.id !== database.id
     && !candidate.deletedAt
@@ -9819,10 +9980,22 @@ function sanitizeDatabaseClientError(message) {
   return sanitizeMessage(String(message || "").replace(/\s+/g, " ").trim()).slice(0, 240) || "comando database fallito";
 }
 
+function ownershipPolicy(operation, ErrorType = ValidationError) {
+  try {
+    return operation();
+  } catch (error) {
+    if (error instanceof DatabaseOwnershipError) throw new ErrorType(error.message);
+    throw error;
+  }
+}
+
 function planDatabaseUpdate(id, payload, context) {
   const database = findById(context.databases, id, "Database");
   const displayName = sanitizeOptionalDescription(payload.displayName || database.displayName || "");
-  const ownerRole = validateDatabaseName(payload.ownerRole || database.ownerRole);
+  if (String(payload.ownerRole || "").trim() && validateDatabaseName(payload.ownerRole) !== database.ownerRole) {
+    throw new ValidationError("Database principal ownership is immutable; use the controlled migration workflow.");
+  }
+  const ownerRole = database.ownerRole;
   const status = choice(String(payload.status || database.status || "declared"), ["declared", "active", "maintenance", "disabled"], "database status");
   const connectionStatus = choice(String(payload.connectionStatus || database.connectionStatus || "metadata-only"), ["metadata-only", "configured", "healthy", "needs-check", "disabled"], "database connection status");
   const credentialRef = databaseCredentialRef(database.id);
@@ -9860,12 +10033,23 @@ function planDatabaseCredentialUpdate(id, payload, context) {
   const confirmation = `ROTATE-DATABASE-CREDENTIAL:${database.id}`;
   if (payload.confirm === confirmation) {
     const state = readDatabasesState();
+    const registry = readDatabasePrincipalsState();
+    const password = validateDatabasePasswordInput(payload.password || "");
+    const liveResult = applyLiveDatabaseCredential(database, password, registry.bindings);
     const writtenCredential = writeDatabaseCredentialIfProvided(database.id, payload);
-    const liveResult = writtenCredential.written ? applyLiveDatabaseCreate(database, validateDatabasePasswordInput(payload.password || "")) : { applied: false, mode: "metadata-only" };
+    let bindings = registry.bindings;
+    if (liveResult.applied && liveResult.action === "provision") {
+      bindings = ownershipPolicy(() => activatePrincipalBinding(bindings, database));
+      writeDatabasePrincipalsState({ ...registry, bindings });
+    }
+    const binding = principalBindingFor(bindings, database);
     state[database.id] = {
       ...(state[database.id] || database),
       credentialRef,
       ...writtenCredential.metadata,
+      principalManaged: Boolean(binding),
+      principalBindingId: binding?.databaseId || database.principalBindingId || "",
+      principalBindingStatus: binding?.status || database.principalBindingStatus || "legacy-unbound",
       credentialStatus: writtenCredential.written ? "secret-file-set" : credentialRef ? "rotation-requested-secret-ref" : "rotation-requested",
       credentialUpdatedAt: new Date().toISOString(),
       credentialsExposed: false,
@@ -9875,8 +10059,8 @@ function planDatabaseCredentialUpdate(id, payload, context) {
       updatedAt: new Date().toISOString(),
     };
     writeDatabasesState(state);
-    appendAudit({ action: "database.credential.update.apply", target: database.id, environment: context.environment, risk: "high", result: "success", dryRun: false, summary: writtenCredential.written ? "Database credential and live grants updated without exposing the value." : "Database credential rotation request recorded without storing or exposing the credential value." });
-    const operation = operationPlan("database.credential.local", context.environment, false, ["validate database", "update credential only when supplied", "create database/user/grants when live adapter is enabled", "keep plaintext out of state and HTML", "do not expose value", "write audit event"], { ...state[database.id], databaseId: database.id, databaseTouched: liveResult.applied, dataChanged: liveResult.applied, credentialsExposed: false, credentialValueStored: writtenCredential.written, liveAdapter: liveResult.mode, productionEvidence: false });
+    appendAudit({ action: "database.credential.update.apply", target: database.id, environment: context.environment, risk: "high", result: "success", dryRun: false, summary: writtenCredential.written ? "Credential updated only after exact principal ownership and non-privileged catalog verification; value not exposed." : "Database credential rotation request recorded without storing or exposing the credential value." });
+    const operation = operationPlan("database.credential.local", context.environment, false, ["validate exact principal ownership", "verify catalog principal is non-privileged", "rotate only the bound principal", "write protected credential after successful live mutation", "keep plaintext out of state and HTML", "write audit event"], { ...state[database.id], databaseId: database.id, databaseTouched: liveResult.applied, dataChanged: liveResult.applied, credentialsExposed: false, credentialValueStored: writtenCredential.written, liveAdapter: liveResult.mode, productionEvidence: false });
     return { ...operation, database: state[database.id] };
   }
   appendAudit({ action: "database.credential.update.plan", target: database.id, environment: context.environment, risk: "high", result: "planned", dryRun: true, summary: "Database credential rotation plan generated without exposing the credential value." });
@@ -9888,10 +10072,17 @@ function planDatabaseDelete(id, payload, context) {
   const confirmation = `DELETE-DATABASE:${database.id}`;
   if (payload.confirm === confirmation) {
     const state = readDatabasesState();
-    const liveResult = applyLiveDatabaseDelete(database, state);
+    const registry = readDatabasePrincipalsState();
+    const liveResult = applyLiveDatabaseDelete(database, state, registry.bindings);
     removeDatabaseCredentialFile(database);
     delete state[database.id];
     writeDatabasesState(state);
+    const binding = principalBindingFor(registry.bindings, database);
+    if (binding && (liveResult.applied || binding.status === "reserved")) {
+      const bindings = { ...registry.bindings };
+      delete bindings[database.id];
+      writeDatabasePrincipalsState({ ...registry, bindings });
+    }
     appendAudit({ action: "database.delete.apply", target: database.id, environment: context.environment, risk: "high", result: "success", dryRun: false, summary: liveResult.applied ? "Database, dedicated user, metadata and protected credential removed." : "Database metadata and protected credential removed; live adapter disabled." });
     const operation = operationPlan("database.delete.local", context.environment, false, ["validate database", "require explicit confirmation", "drop database when live adapter is enabled", "drop dedicated user when safe", "remove metadata", "remove protected credential file", "write audit event"], { databaseId: database.id, projectId: database.projectId, engine: database.engine, name: database.name, databaseTouched: liveResult.applied, dataDeleted: liveResult.applied, metadataDeleted: true, credentialFileDeleted: true, credentialsExposed: false, backupRequiredBeforeLiveDelete: false, liveAdapter: liveResult.mode, productionEvidence: false });
     return { ...operation, database: null };
@@ -11032,17 +11223,57 @@ function writeWebspacesState(state) {
 }
 
 function readDatabasesState() {
+  if (!existsSync(databasesFile)) return {};
   try {
     const parsed = JSON.parse(readFileSync(databasesFile, "utf8"));
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("invalid database state");
+    return parsed;
   } catch {
-    return {};
+    throw new ValidationError("Database state is unreadable; no write was performed.");
   }
 }
 
 function writeDatabasesState(state) {
-  mkdirSync(path.dirname(databasesFile), { recursive: true });
-  writeFileSync(databasesFile, `${JSON.stringify(sanitizeEvent(state), null, 2)}\n`);
+  writePrivateJsonAtomic(databasesFile, sanitizeEvent(state));
+}
+
+function readDatabasePrincipalsState() {
+  if (!existsSync(databasePrincipalsFile)) return { version: 1, bindings: {}, updatedAt: null };
+  try {
+    const parsed = JSON.parse(readFileSync(databasePrincipalsFile, "utf8"));
+    if (!parsed || parsed.version !== 1 || !parsed.bindings || typeof parsed.bindings !== "object" || Array.isArray(parsed.bindings)) {
+      throw new Error("invalid database principal registry");
+    }
+    return parsed;
+  } catch {
+    throw new ValidationError("Database principal registry is unreadable; no database mutation was performed.");
+  }
+}
+
+function writeDatabasePrincipalsState(state) {
+  writePrivateJsonAtomic(databasePrincipalsFile, {
+    version: 1,
+    updatedAt: new Date().toISOString(),
+    bindings: sanitizeEvent(state.bindings || {}),
+  });
+}
+
+function writePrivateJsonAtomic(filePath, value) {
+  mkdirSync(path.dirname(filePath), { recursive: true, mode: 0o700 });
+  const temporary = `${filePath}.tmp-${process.pid}-${randomBytes(6).toString("hex")}`;
+  let fd = null;
+  try {
+    fd = openSync(temporary, "wx", 0o600);
+    writeFileSync(fd, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+    fsyncSync(fd);
+    closeSync(fd);
+    fd = null;
+    renameSync(temporary, filePath);
+  } catch (error) {
+    if (fd !== null) closeSync(fd);
+    rmSync(temporary, { force: true });
+    throw error;
+  }
 }
 
 function readStorageBucketsState() {
@@ -11771,6 +12002,9 @@ function databaseRecord({
   name = "",
   displayName = "",
   ownerRole = "",
+  principalBindingId = "",
+  principalManaged = false,
+  principalBindingStatus = "legacy-unbound",
   status = "declared",
   connectionStatus = "metadata-only",
   sizeBytes = 0,
@@ -11801,6 +12035,9 @@ function databaseRecord({
     name: cleanName,
     displayName: sanitizeOptionalDescription(displayName || ""),
     ownerRole: cleanOwnerRole,
+    principalBindingId: sanitizeIdentifier(principalBindingId),
+    principalManaged: Boolean(principalManaged),
+    principalBindingStatus: choice(String(principalBindingStatus || "legacy-unbound"), ["legacy-unbound", "reserved", "active", "migration-required", "retired"], "database principal binding status"),
     environment: "local",
     status,
     connectionStatus,

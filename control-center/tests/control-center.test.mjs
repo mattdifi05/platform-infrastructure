@@ -15,6 +15,7 @@ import path from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
+import { generatedDatabasePrincipal } from "../database/ownership.mjs";
 
 const infraRoot = path.resolve(import.meta.dirname, "..", "..");
 const testRoot = path.join(infraRoot, ".tmp", "control-center-tests", randomUUID());
@@ -27,6 +28,7 @@ const operationsFile = path.join(stateDir, "operations.jsonl");
 const applicationsFile = path.join(stateDir, "applications.json");
 const domainsFile = path.join(stateDir, "domains.json");
 const databasesFile = path.join(stateDir, "databases.json");
+const databasePrincipalsFile = path.join(stateDir, "database-principals.json");
 const storageBucketsFile = path.join(stateDir, "storage-buckets.json");
 const sensitiveMaterialsFile = path.join(stateDir, "sensitive-materials.json");
 const vaultFile = path.join(stateDir, "secret-vault.json");
@@ -71,6 +73,7 @@ test("Admin Control Center local foundation", async (t) => {
       PROJECT_APPLICATIONS_FILE: applicationsFile,
       PROJECT_DOMAINS_FILE: domainsFile,
       PROJECT_DATABASES_FILE: databasesFile,
+      PROJECT_DATABASE_PRINCIPALS_FILE: databasePrincipalsFile,
       PROJECT_STORAGE_BUCKETS_FILE: storageBucketsFile,
       PROJECT_SENSITIVE_MATERIALS_FILE: sensitiveMaterialsFile,
       PROJECT_VAULT_FILE: vaultFile,
@@ -1553,6 +1556,7 @@ test("Admin Control Center local foundation", async (t) => {
   assert.doesNotMatch(databasesHtml, /id="app-client-portal"/);
   assert.doesNotMatch(databasesHtml, /Nessun database collegato/);
   assert.doesNotMatch(databasesHtml, /db-password-should-not-leak/);
+  assert.doesNotMatch(databasesHtml, /name="ownerRole"/);
 
   const invalidDatabase = await postJson(`${baseUrl}/control/databases`, {
     projectId: "node-demo",
@@ -1562,11 +1566,33 @@ test("Admin Control Center local foundation", async (t) => {
   assert.equal(invalidDatabase.status, 422);
   assert.match(invalidDatabase.body.message, /Invalid database identifier/);
 
-  const databasePlan = await postJson(`${baseUrl}/control/databases`, {
+  const protectedDatabase = await postJson(`${baseUrl}/control/databases`, {
+    projectId: "node-demo",
+    engine: "mariadb",
+    name: "mysql",
+  });
+  assert.equal(protectedDatabase.status, 422);
+  assert.match(protectedDatabase.body.message, /Protected system database/);
+
+  const customPrincipalDatabase = await postJson(`${baseUrl}/control/databases`, {
     projectId: "node-demo",
     engine: "mariadb",
     name: "node_demo_app",
     ownerRole: "node_demo_user",
+  });
+  assert.equal(customPrincipalDatabase.status, 422);
+  assert.match(customPrincipalDatabase.body.message, /generated server-side/);
+
+  const managedMariaPrincipal = generatedDatabasePrincipal({
+    projectId: "node-demo",
+    engine: "mariadb",
+    databaseName: "node_demo_app",
+  });
+
+  const databasePlan = await postJson(`${baseUrl}/control/databases`, {
+    projectId: "node-demo",
+    engine: "mariadb",
+    name: "node_demo_app",
     secret: "database-secret-should-not-leak",
   });
   assert.equal(databasePlan.status, 202);
@@ -1575,13 +1601,15 @@ test("Admin Control Center local foundation", async (t) => {
   assert.equal(databasePlan.body.details.confirmationRequired, "CREATE-DATABASE");
   assert.equal(databasePlan.body.details.databaseTouched, false);
   assert.equal(databasePlan.body.details.credentialsExposed, false);
+  assert.equal(databasePlan.body.details.ownerRole, managedMariaPrincipal);
+  assert.equal(databasePlan.body.details.principalManaged, true);
+  assert.equal(databasePlan.body.details.principalBindingStatus, "reserved");
   assert.doesNotMatch(JSON.stringify(databasePlan.body), /database-secret-should-not-leak/);
 
   const databaseApply = await postJson(`${baseUrl}/control/databases`, {
     projectId: "node-demo",
     engine: "mariadb",
     name: "node_demo_app",
-    ownerRole: "node_demo_user",
     password: "created-db-password-should-not-leak",
     confirm: "CREATE-DATABASE",
     secret: "database-secret-should-not-leak",
@@ -1590,6 +1618,8 @@ test("Admin Control Center local foundation", async (t) => {
   assert.equal(databaseApply.body.type, "database.create.local");
   assert.equal(databaseApply.body.dryRun, false);
   assert.equal(databaseApply.body.database.id, "node-demo-mariadb-node-demo-app");
+  assert.equal(databaseApply.body.database.ownerRole, managedMariaPrincipal);
+  assert.equal(databaseApply.body.database.principalBindingStatus, "reserved");
   assert.equal(databaseApply.body.details.databaseTouched, false);
   assert.equal(databaseApply.body.details.credentialsExposed, false);
   assert.equal(databaseApply.body.details.credentialValueStored, true);
@@ -1604,6 +1634,11 @@ test("Admin Control Center local foundation", async (t) => {
   assert.equal(JSON.parse(databaseStateText)["node-demo-mariadb-node-demo-app"].credentialsExposed, false);
   assert.equal(JSON.parse(databaseStateText)["node-demo-mariadb-node-demo-app"].credentialRef, "secret/db/node-demo-mariadb-node-demo-app");
   assert.equal(JSON.parse(databaseStateText)["node-demo-mariadb-node-demo-app"].credentialStatus, "secret-file-set");
+  assert.equal(JSON.parse(databaseStateText)["node-demo-mariadb-node-demo-app"].ownerRole, managedMariaPrincipal);
+  assert.equal(JSON.parse(databaseStateText)["node-demo-mariadb-node-demo-app"].principalManaged, true);
+  const principalRegistry = JSON.parse(readFileSync(databasePrincipalsFile, "utf8"));
+  assert.equal(principalRegistry.bindings["node-demo-mariadb-node-demo-app"].principalName, managedMariaPrincipal);
+  assert.equal(principalRegistry.bindings["node-demo-mariadb-node-demo-app"].status, "reserved");
   const createdDatabaseCredentialFile = JSON.parse(databaseStateText)["node-demo-mariadb-node-demo-app"].credentialFile;
   assert.equal(existsSync(createdDatabaseCredentialFile), true);
   assert.equal(
@@ -1619,7 +1654,6 @@ test("Admin Control Center local foundation", async (t) => {
       projectId: "node-demo",
       engine: "mariadb",
       name: "node_demo_redirect",
-      ownerRole: "node_demo_redirect_user",
       password: "redirect-db-password-should-not-leak",
       returnTo: "project-detail",
       openAfterCreate: "admin",
@@ -1640,7 +1674,6 @@ test("Admin Control Center local foundation", async (t) => {
       projectId: "node-demo",
       engine: "mariadb",
       name: "node_demo_without_credential",
-      ownerRole: "node_demo_without_credential_user",
       returnTo: "project-detail",
       openAfterCreate: "admin",
       confirm: "CREATE-DATABASE",
@@ -1670,7 +1703,7 @@ test("Admin Control Center local foundation", async (t) => {
   assert.match(databasesHtmlAfterApply, /Plan backup/);
   assert.match(databasesHtmlAfterApply, /Plan restore drill/);
 
-  const databaseUpdate = await postJson(`${baseUrl}/actions/database-command`, {
+  const databaseOwnerUpdateDenied = await postJson(`${baseUrl}/actions/database-command`, {
     action: "update",
     id: "node-demo-mariadb-node-demo-app",
     projectId: "node-demo",
@@ -1680,10 +1713,22 @@ test("Admin Control Center local foundation", async (t) => {
     confirm: "UPDATE-DATABASE:node-demo-mariadb-node-demo-app",
     secret: "database-secret-should-not-leak",
   });
+  assert.equal(databaseOwnerUpdateDenied.status, 422);
+  assert.match(databaseOwnerUpdateDenied.body.message, /ownership is immutable/);
+
+  const databaseUpdate = await postJson(`${baseUrl}/actions/database-command`, {
+    action: "update",
+    id: "node-demo-mariadb-node-demo-app",
+    projectId: "node-demo",
+    displayName: "Node Demo App DB",
+    status: "active",
+    confirm: "UPDATE-DATABASE:node-demo-mariadb-node-demo-app",
+    secret: "database-secret-should-not-leak",
+  });
   assert.equal(databaseUpdate.status, 202);
   assert.equal(databaseUpdate.body.type, "database.update.local");
   assert.equal(databaseUpdate.body.database.displayName, "Node Demo App DB");
-  assert.equal(databaseUpdate.body.database.ownerRole, "node_demo_runtime");
+  assert.equal(databaseUpdate.body.database.ownerRole, managedMariaPrincipal);
   assert.equal(databaseUpdate.body.database.status, "active");
   assert.equal(databaseUpdate.body.details.databaseTouched, false);
   assert.equal(databaseUpdate.body.details.credentialsExposed, false);
@@ -1757,6 +1802,9 @@ test("Admin Control Center local foundation", async (t) => {
   assert.equal(databaseDeleteApply.body.details.credentialsExposed, false);
   assert.equal(existsSync(rotatedCredentialFile), false);
   assert.equal(JSON.parse(readFileSync(databasesFile, "utf8"))["node-demo-mariadb-node-demo-app"], undefined);
+  assert.equal(JSON.parse(readFileSync(databasePrincipalsFile, "utf8")).bindings["node-demo-mariadb-node-demo-app"], undefined);
+  assert.equal(readdirSync(path.dirname(databasesFile)).some((name) => name.startsWith(`${path.basename(databasesFile)}.tmp-`)), false);
+  assert.equal(readdirSync(path.dirname(databasePrincipalsFile)).some((name) => name.startsWith(`${path.basename(databasePrincipalsFile)}.tmp-`)), false);
 
   const storageHtml = await getText(`${baseUrl}/?mode=advanced&section=storage`);
   assert.match(storageHtml, /ops-shell/);
@@ -2804,6 +2852,20 @@ test("Admin Control Center local foundation", async (t) => {
     assert.ok(event.requestId);
   }
 
+  const validDatabaseState = readFileSync(databasesFile, "utf8");
+  writeFileSync(databasesFile, "{not-valid-database-json\n", { mode: 0o600 });
+  const corruptDatabaseResponse = await fetch(`${baseUrl}/control/databases`, { headers: { accept: "application/json" } });
+  assert.equal(corruptDatabaseResponse.status, 500);
+  assert.equal(readFileSync(databasesFile, "utf8"), "{not-valid-database-json\n");
+  writeFileSync(databasesFile, validDatabaseState, { mode: 0o600 });
+
+  const validPrincipalRegistry = readFileSync(databasePrincipalsFile, "utf8");
+  writeFileSync(databasePrincipalsFile, "{not-valid-principal-json\n", { mode: 0o600 });
+  const corruptPrincipalResponse = await fetch(`${baseUrl}/control/databases`, { headers: { accept: "application/json" } });
+  assert.equal(corruptPrincipalResponse.status, 500);
+  assert.equal(readFileSync(databasePrincipalsFile, "utf8"), "{not-valid-principal-json\n");
+  writeFileSync(databasePrincipalsFile, validPrincipalRegistry, { mode: 0o600 });
+
   writeFileSync(vaultFile, "{not-valid-json\n", { mode: 0o600 });
   const corruptVaultResponse = await fetch(`${baseUrl}/control/vault`, { headers: { accept: "application/json" } });
   assert.equal(corruptVaultResponse.status, 500);
@@ -3300,6 +3362,7 @@ function isolatedStateEnv(stateRoot) {
     PROJECT_APPLICATIONS_FILE: path.join(stateRoot, "applications.json"),
     PROJECT_DOMAINS_FILE: path.join(stateRoot, "domains.json"),
     PROJECT_DATABASES_FILE: path.join(stateRoot, "databases.json"),
+    PROJECT_DATABASE_PRINCIPALS_FILE: path.join(stateRoot, "database-principals.json"),
     PROJECT_STORAGE_BUCKETS_FILE: path.join(stateRoot, "storage-buckets.json"),
     PROJECT_SENSITIVE_MATERIALS_FILE: path.join(stateRoot, "sensitive-materials.json"),
     PROJECT_VAULT_FILE: path.join(stateRoot, "secret-vault.json"),

@@ -2846,7 +2846,9 @@ function infraTestingHygiene() {
   const checkFiles = [
     "scripts/infra-ops.mjs",
     "scripts/control-center-vault-reencrypt.mjs",
+    "scripts/database-principal-migration-plan.mjs",
     "control-center/server.mjs",
+    "control-center/database/ownership.mjs",
     "control-center/vault/keyring.mjs",
     "project-router/server.mjs",
     "scripts/infra-secret-manager.mjs",
@@ -12141,6 +12143,16 @@ async function staticSecurityCheckBody() {
   const secretManagerScript = readText(path.join(infraRoot, "scripts", "infra-secret-manager.mjs"));
   const vaultKeyringScript = readText(path.join(infraRoot, "control-center", "vault", "keyring.mjs"));
   const vaultMigrationScript = readText(path.join(infraRoot, "scripts", "control-center-vault-reencrypt.mjs"));
+  const databaseOwnershipScript = readText(path.join(infraRoot, "control-center", "database", "ownership.mjs"));
+  const databasePrincipalMigrationScript = readText(path.join(infraRoot, "scripts", "database-principal-migration-plan.mjs"));
+  const mariaProvisionSource = controlCenterServer.slice(
+    controlCenterServer.indexOf("function applyLiveMariaDbCreate"),
+    controlCenterServer.indexOf("function applyLiveMariaDbCredential"),
+  );
+  const postgresProvisionSource = controlCenterServer.slice(
+    controlCenterServer.indexOf("function applyLivePostgresCreate"),
+    controlCenterServer.indexOf("function applyLivePostgresCredential"),
+  );
   const backendConfig = readText(path.join(sourceRoot, "apps", "backend", "src", "server-config.ts"));
   const backendRedisStore = readText(path.join(sourceRoot, "apps", "backend", "src", "runtime", "redis-store.ts"));
   const backendSessionAuth = readText(path.join(sourceRoot, "apps", "backend", "src", "runtime", "session-auth.ts"));
@@ -12818,6 +12830,12 @@ async function staticSecurityCheckBody() {
   assertMatch(vaultKeyringScript, /keyId[\s\S]*openVaultCiphertext[\s\S]*keys\?\.get\(keyId\)/, "Vault decryption must select stable key material by ciphertext key id.");
   assertMatch(vaultMigrationScript, /REENCRYPT-CONTROL-CENTER-VAULT[\s\S]*backup-dir[\s\S]*escrow-dir/, "Vault re-encryption apply must require explicit confirmation, state backup and key escrow.");
   assertMatch(controlCenterServer, /endsWith\("\.sql\.gz"\)[\s\S]*mode:\s*"metadata-only"[\s\S]*content:\s*""/, "Database backup previews must be metadata-only and never return dump contents.");
+  assertMatch(compose, /PROJECT_DATABASE_PRINCIPALS_FILE:\s*\/var\/www\/project-state\/database-principals\.json/, "Control Center must persist an authoritative database principal ownership registry.");
+  assertMatch(controlCenterServer, /Database principals are generated server-side[\s\S]*reservePrincipalBinding[\s\S]*assertPrincipalCreateAllowed/, "Database create requests must reject client principals, reserve ownership and verify the catalog.");
+  assertMatch(databaseOwnershipScript, /generatedDatabasePrincipal[\s\S]*assertPrincipalCreateAllowed[\s\S]*assertPrincipalRotationAllowed/, "Database ownership policy must generate principals and separate provisioning from rotation.");
+  assertNoMatch(mariaProvisionSource, /ALTER USER|CREATE USER IF NOT EXISTS|CREATE DATABASE IF NOT EXISTS/, "MariaDB provisioning must never alter or adopt an existing principal/database.");
+  assertNoMatch(postgresProvisionSource, /ALTER ROLE|IF NOT EXISTS|ALTER DATABASE/, "PostgreSQL provisioning must never alter or adopt an existing privileged role/database.");
+  assertMatch(databasePrincipalMigrationScript, /read-only[\s\S]*mutationExecuted:\s*false[\s\S]*buildPrincipalMigrationPlan/, "Legacy database principal migration must remain a read-only dual-credential plan.");
   assertMatch(secretManagerScript, /mariadb_root_password[\s\S]*phpmyadmin_control_password/, "Infra Secret Manager must manage MariaDB and phpMyAdmin local Docker secrets.");
   assertMatch(opsScript, /runSecretManager\(\["verify"/, "Enterprise local secret validation must verify the proprietary secret manager store.");
   assertMatch(secretRotationEvidenceWrapper, /secret-rotation-evidence/, "Secret rotation evidence wrapper must delegate to the Dockerized ops runner.");
