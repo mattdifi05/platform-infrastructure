@@ -578,7 +578,7 @@ services:
     pid: host
     volumes:
       - /:/host:ro
-      - ./projects-portal/state/node-exporter-textfile:/var/lib/node-exporter/textfile:ro
+      - ${NODE_EXPORTER_TEXTFILE_DIR:-./projects-portal/state/node-exporter-textfile}:/var/lib/node-exporter/textfile:ro
     networks:
       - enterprise_net
     healthcheck:

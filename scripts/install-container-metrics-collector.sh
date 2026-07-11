@@ -151,7 +151,7 @@ chmod 0644 "$ENV_FILE"
 cat > "$UNIT_FILE" <<EOF
 [Unit]
 Description=Platform truthful Docker workload metrics collector
-Documentation=$REPO_ROOT/RUNBOOK.md
+Documentation=file:$REPO_ROOT/RUNBOOK.md
 Requires=docker.service
 After=docker.service
 
@@ -191,7 +191,7 @@ systemctl daemon-reload
 systemctl enable --now "$UNIT_NAME"
 
 attempt=0
-while [ "$attempt" -lt 10 ]; do
+while [ "$attempt" -lt 30 ]; do
   if verify_installation >/dev/null 2>&1; then
     verify_installation
     exit 0
@@ -201,5 +201,5 @@ while [ "$attempt" -lt 10 ]; do
 done
 
 systemctl --no-pager --full status "$UNIT_NAME" >&2 || true
-echo "$UNIT_NAME did not produce fresh complete metrics within 10 seconds" >&2
+echo "$UNIT_NAME did not produce fresh complete metrics within 30 seconds" >&2
 exit 1

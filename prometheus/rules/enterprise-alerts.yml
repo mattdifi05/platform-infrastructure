@@ -64,6 +64,132 @@ groups:
           summary: "Host disk usage is high"
           description: "{{ $labels.mountpoint }} on {{ $labels.instance }} is above 85% usage."
 
+      - alert: HostDiskUsageCritical
+        expr: 100 - ((node_filesystem_avail_bytes{job="node-exporter",fstype!~"tmpfs|overlay"} * 100) / node_filesystem_size_bytes{job="node-exporter",fstype!~"tmpfs|overlay"}) > 95
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Host disk usage is critical"
+          description: "{{ $labels.mountpoint }} on {{ $labels.instance }} is above 95% usage."
+
+      - alert: HostDiskWillFillSoon
+        expr: predict_linear(node_filesystem_avail_bytes{job="node-exporter",fstype!~"tmpfs|overlay"}[6h], 24 * 3600) < 0
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Host filesystem may fill within 24 hours"
+          description: "Recent growth predicts exhaustion of {{ $labels.mountpoint }} within 24 hours."
+
+      - alert: HostReliabilityCollectorMissing
+        expr: absent(platform_host_reliability_collector_healthy) or platform_host_reliability_collector_healthy == 0 or (time() - platform_host_reliability_last_success_timestamp_seconds > 180)
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Host reliability telemetry is missing"
+          description: "The host collector is absent, stale or unhealthy."
+
+      - alert: HostNetworkNotReady
+        expr: platform_host_network_default_route == 0 or platform_host_wait_online_failed == 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Host network readiness is degraded"
+          description: "The default route is missing or wait-online remains failed."
+
+      - alert: HostUpdatesPending
+        expr: platform_host_upgradable_packages > 0
+        for: 24h
+        labels:
+          severity: warning
+        annotations:
+          summary: "Host package updates remain pending"
+          description: "{{ $value }} packages have remained upgradeable for at least 24 hours."
+
+      - alert: HostRebootRequired
+        expr: platform_host_reboot_required == 1
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "Host reboot is required"
+          description: "A controlled maintenance window is required; never reboot automatically."
+
+      - alert: HostDriveTelemetryMissing
+        expr: platform_host_drive_count > platform_host_drive_telemetry_count
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Drive telemetry coverage is incomplete"
+          description: "At least one physical drive lacks readable SMART or NVMe health data."
+
+      - alert: HostDriveUnhealthy
+        expr: platform_host_drive_telemetry_available == 1 and platform_host_drive_healthy == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Physical drive health check failed"
+          description: "Drive {{ $labels.device }} reports an unhealthy SMART/NVMe state."
+
+      - alert: HostDriveMediaErrors
+        expr: platform_host_drive_media_errors_total > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Physical drive media errors detected"
+          description: "Drive {{ $labels.device }} reports media errors."
+
+      - alert: HostIoPressureHigh
+        expr: platform_host_io_pressure_avg10{mode="full"} > 10
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Host I/O pressure is high"
+          description: "Full I/O pressure has remained above 10% for 10 minutes."
+
+      - alert: HostJournalUsageHigh
+        expr: platform_host_journal_bytes > 1073741824
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Persistent journal usage is high"
+          description: "systemd journal storage exceeds 1 GiB."
+
+      - alert: HostUpsMissing
+        expr: platform_host_ups_configured == 0
+        for: 24h
+        labels:
+          severity: warning
+        annotations:
+          summary: "UPS protection is not configured"
+          description: "No NUT UPS device is available to the host reliability collector."
+
+      - alert: HostUpsOnBattery
+        expr: platform_host_ups_on_battery == 1
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "Host is running on UPS battery"
+          description: "Utility power is unavailable; follow the controlled shutdown policy."
+
+      - alert: HostUpsChargeLow
+        expr: platform_host_ups_configured == 1 and platform_host_ups_charge_percent < 30
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "UPS battery charge is low"
+          description: "UPS charge is below 30%; prepare controlled shutdown."
+
       - alert: HostMemoryUsageHigh
         expr: 100 * (1 - (node_memory_MemAvailable_bytes{job="node-exporter"} / node_memory_MemTotal_bytes{job="node-exporter"})) > 85
         for: 10m

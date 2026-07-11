@@ -4,6 +4,9 @@ set -eu
 ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 DEFAULT_REPORT_DIR="$ROOT_DIR/reports/vps-host"
 REPORT_DIR="${REPORT_DIR:-}"
+HOST_RELIABILITY_METRICS_FILE="${HOST_RELIABILITY_METRICS_FILE:-$ROOT_DIR/projects-portal/state/node-exporter-textfile/platform-host-reliability.prom}"
+CONTAINER_METRICS_JSON_FILE="${CONTAINER_METRICS_JSON_FILE:-$ROOT_DIR/projects-portal/state/docker-stats.json}"
+CONTAINER_METRICS_PROM_FILE="${CONTAINER_METRICS_PROM_FILE:-$ROOT_DIR/projects-portal/state/node-exporter-textfile/platform-container.prom}"
 MIN_ROOT_FREE_MB="${MIN_ROOT_FREE_MB:-10240}"
 MIN_MEMORY_MB="${MIN_MEMORY_MB:-4096}"
 EXPECTED_SSH_PORT="${SSH_PORT:-65002}"
@@ -150,6 +153,15 @@ remediation_for_check() {
       ;;
     container-metrics-collector)
       printf '%s' "Run sudo sh ./scripts/install-container-metrics-collector.sh --apply --deploy-user <user> --repo-root <absolute-repo-path>, then verify the service and node-exporter textfile mount."
+      ;;
+    host-reliability-collector)
+      printf '%s' "Run sudo sh ./scripts/install-host-reliability-collector.sh --apply --repo-root <absolute-repo-path>, then verify SMART/NVMe coverage and the timer."
+      ;;
+    deterministic-network)
+      printf '%s' "Reserve the current server address in the router and validate a console-backed reboot; do not rewrite Netplan over SSH."
+      ;;
+    ups-protection)
+      printf '%s' "Connect a supported UPS, configure NUT locally and validate on-battery plus controlled-shutdown behavior without cutting application power unexpectedly."
       ;;
     *)
       printf '%s' "Review the failed check, apply the matching runbook section, then rerun scripts/vps-host-readiness.sh --ssh-port <port> --enforce on the VPS."
@@ -373,8 +385,8 @@ check_unneeded_host_runtimes() {
 }
 
 check_container_metrics_collector() {
-  snapshot="$ROOT_DIR/projects-portal/state/docker-stats.json"
-  metrics="$ROOT_DIR/projects-portal/state/node-exporter-textfile/platform-container.prom"
+  snapshot="$CONTAINER_METRICS_JSON_FILE"
+  metrics="$CONTAINER_METRICS_PROM_FILE"
   if ! command_exists jq; then
     add_check "container-metrics-collector" "yes" "failed" "jq is required to validate the collector snapshot"
     return
@@ -414,6 +426,60 @@ check_container_metrics_collector() {
   limited_cpu=$(jq '[.containers[] | select(.cpuLimitCores != null)] | length' "$snapshot")
   limited_memory=$(jq '[.containers[] | select(.memoryLimitBytes != null)] | length' "$snapshot")
   add_check "container-metrics-collector" "yes" "passed" "fresh ${age}s snapshot for ${observed} containers; effective CPU limits=${limited_cpu}, memory limits=${limited_memory}"
+}
+
+check_host_reliability_collector() {
+  metrics="$HOST_RELIABILITY_METRICS_FILE"
+  collector_result=$(systemctl show platform-host-reliability.service -p Result --value 2>/dev/null || true)
+  collector_status=$(systemctl show platform-host-reliability.service -p ExecMainStatus --value 2>/dev/null || true)
+  if ! service_active platform-host-reliability.timer || [ "$collector_result" != "success" ] || [ "$collector_status" != "0" ]; then
+    add_check "host-reliability-collector" "yes" "failed" "host reliability timer is inactive or the latest collection failed"
+    return
+  fi
+  if [ ! -r "$metrics" ]; then
+    add_check "host-reliability-collector" "yes" "failed" "host reliability Prometheus textfile is missing"
+    return
+  fi
+  current=$(date -u +%s)
+  captured=$(awk '$1 == "platform_host_reliability_last_success_timestamp_seconds" { print $2; exit }' "$metrics")
+  age=$((current - captured))
+  if [ "$age" -lt 0 ] || [ "$age" -gt 180 ]; then
+    add_check "host-reliability-collector" "yes" "failed" "host reliability metrics are ${age}s old"
+    return
+  fi
+  if ! grep -q '^platform_host_reliability_collector_healthy 1$' "$metrics" \
+    || ! grep -q '^platform_host_network_default_route 1$' "$metrics"; then
+    add_check "host-reliability-collector" "yes" "failed" "collector or default-route metric is unhealthy"
+    return
+  fi
+  drive_count=$(awk '$1 == "platform_host_drive_count" { print $2; exit }' "$metrics")
+  telemetry_count=$(awk '$1 == "platform_host_drive_telemetry_count" { print $2; exit }' "$metrics")
+  if [ "${drive_count:-0}" -lt 1 ] || [ "$telemetry_count" -ne "$drive_count" ]; then
+    add_check "host-reliability-collector" "yes" "failed" "drive telemetry coverage ${telemetry_count:-0}/${drive_count:-0}"
+    return
+  fi
+  add_check "host-reliability-collector" "yes" "passed" "fresh ${age}s metrics with drive telemetry ${telemetry_count}/${drive_count}"
+}
+
+check_deterministic_network() {
+  if command_exists ip && ip route show default 2>/dev/null | grep -q '^default '; then
+    if service_active systemd-networkd-wait-online.service; then
+      add_check "deterministic-network" "yes" "passed" "default route present and wait-online active"
+    else
+      add_check "deterministic-network" "yes" "failed" "default route present but wait-online is not active"
+    fi
+  else
+    add_check "deterministic-network" "yes" "failed" "default route is missing"
+  fi
+}
+
+check_ups_protection() {
+  metrics="$HOST_RELIABILITY_METRICS_FILE"
+  if [ -r "$metrics" ] && grep -q '^platform_host_ups_configured 1$' "$metrics"; then
+    add_check "ups-protection" "yes" "passed" "UPS is visible through host telemetry"
+  else
+    add_check "ups-protection" "yes" "failed" "no UPS is visible through NUT telemetry"
+  fi
 }
 
 write_reports() {
@@ -489,4 +555,7 @@ check_resources
 check_time_sync
 check_unneeded_host_runtimes
 check_container_metrics_collector
+check_host_reliability_collector
+check_deterministic_network
+check_ups_protection
 write_reports
