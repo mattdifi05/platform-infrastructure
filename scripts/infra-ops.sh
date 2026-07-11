@@ -19,6 +19,7 @@ else
 fi
 OPS_IMAGE="${PLATFORM_OPS_IMAGE:-platform/ops:local}"
 NODE_IMAGE="${NODE_IMAGE:-node:26.3.1-alpine@sha256:a2dc166a387cc6ca1e62d0c8e265e49ca985d6e60abc9fe6e6c3d6ce8e63f606}"
+OPS_FINGERPRINT_LABEL=io.platform-infrastructure.ops-source-sha256
 
 if [ "${PLATFORM_OPS_USE_HOST_NODE:-0}" = "1" ]; then
   exec node "$SCRIPT_DIR/infra-ops.mjs" "$@"
@@ -29,9 +30,21 @@ if ! command -v docker >/dev/null 2>&1; then
   exit 127
 fi
 
-if ! docker image inspect "$OPS_IMAGE" >/dev/null 2>&1; then
+OPS_SOURCE_FINGERPRINT=$(
+  {
+    printf '%s\n' "$NODE_IMAGE"
+    sha256sum \
+      "$INFRA_ROOT/docker/ops.Dockerfile" \
+      "$INFRA_ROOT/control-center/package.json" \
+      "$INFRA_ROOT/control-center/package-lock.json"
+  } | sha256sum | awk '{print $1}'
+)
+CURRENT_OPS_FINGERPRINT=$(docker image inspect --format "{{index .Config.Labels \"$OPS_FINGERPRINT_LABEL\"}}" "$OPS_IMAGE" 2>/dev/null || true)
+
+if [ "$CURRENT_OPS_FINGERPRINT" != "$OPS_SOURCE_FINGERPRINT" ]; then
   docker build \
     --build-arg "NODE_IMAGE=$NODE_IMAGE" \
+    --label "$OPS_FINGERPRINT_LABEL=$OPS_SOURCE_FINGERPRINT" \
     -f "$INFRA_ROOT/docker/ops.Dockerfile" \
     -t "$OPS_IMAGE" \
     "$INFRA_ROOT"
@@ -42,6 +55,14 @@ SOURCE_CONTAINER_ROOT="${PROJECT_SOURCE_CONTAINER_ROOT:-/project}"
 OPS_UID="${PLATFORM_OPS_UID:-$(id -u)}"
 OPS_GID="${PLATFORM_OPS_GID:-$(id -g)}"
 OPS_DOCKER_MODE="${PLATFORM_OPS_DOCKER_MODE:-auto}"
+OPS_GIT_COMMIT="$(git -C "$INFRA_ROOT" rev-parse HEAD 2>/dev/null || true)"
+OPS_GIT_BRANCH="$(git -C "$INFRA_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+OPS_GIT_TRACKED_FILES_B64="$(git -C "$INFRA_ROOT" ls-files -z 2>/dev/null | base64 | tr -d '\n' || true)"
+if [ -n "$(git -C "$INFRA_ROOT" status --short 2>/dev/null || true)" ]; then
+  OPS_GIT_DIRTY=1
+else
+  OPS_GIT_DIRTY=0
+fi
 SOCKET_ARGS=""
 EPHEMERAL_PROXY_CONTAINER=""
 EPHEMERAL_PROXY_NETWORK=""
@@ -97,6 +118,24 @@ start_ephemeral_proxy() {
     -e VOLUMES=1 \
     -v /var/run/docker.sock:/var/run/docker.sock:ro \
     "$PROXY_IMAGE" >/dev/null
+
+  proxy_ip="$(docker inspect --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$EPHEMERAL_PROXY_CONTAINER")"
+  proxy_ready=0
+  proxy_attempt=0
+  while [ "$proxy_attempt" -lt 50 ]; do
+    if [ "$(curl -fsS --max-time 1 "http://$proxy_ip:2375/_ping" 2>/dev/null || true)" = "OK" ]; then
+      proxy_ready=1
+      break
+    fi
+    proxy_attempt=$((proxy_attempt + 1))
+    sleep 0.1
+  done
+  if [ "$proxy_ready" -ne 1 ]; then
+    echo "Ephemeral Docker socket proxy did not become ready." >&2
+    docker logs --tail 40 "$EPHEMERAL_PROXY_CONTAINER" >&2 || true
+    return 1
+  fi
+
   PROXY_CONTAINER="$EPHEMERAL_PROXY_CONTAINER"
   PROXY_NETWORK="$EPHEMERAL_PROXY_NETWORK"
 }
@@ -265,6 +304,10 @@ docker run --rm -i \
   -e "PLATFORM_INFRA_CONTAINER_ROOT=$INFRA_CONTAINER_ROOT" \
   -e "PLATFORM_INFRA_HOST_ROOT=$INFRA_VOLUME_SOURCE" \
   -e "PROJECT_SOURCE_HOST_ROOT=$SOURCE_VOLUME_SOURCE" \
+  -e "PLATFORM_GIT_COMMIT=$OPS_GIT_COMMIT" \
+  -e "PLATFORM_GIT_BRANCH=$OPS_GIT_BRANCH" \
+  -e "PLATFORM_GIT_DIRTY=$OPS_GIT_DIRTY" \
+  -e "PLATFORM_GIT_TRACKED_FILES_B64=$OPS_GIT_TRACKED_FILES_B64" \
   -e "PLATFORM_OPS_CONTAINER=1" \
   -v "$INFRA_VOLUME_SOURCE:$INFRA_CONTAINER_ROOT" \
   -v "$INFRA_CONTAINER_ROOT/control-center/node_modules" \

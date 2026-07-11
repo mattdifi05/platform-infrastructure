@@ -21,6 +21,9 @@ import {
 import { evaluateNetworkSegmentation } from "./network-segmentation-policy.mjs";
 import { evaluateRuntimeIsolation } from "./runtime-isolation-policy.mjs";
 import { evaluateSupplyChain } from "./supply-chain-policy.mjs";
+import { evaluateFunctionalHealth, validateFunctionalHealthProbes } from "./functional-health.mjs";
+import { evaluateRuntimeFingerprint } from "./runtime-fingerprint.mjs";
+import { providerEvidenceAttestationOptions } from "./provider-evidence-auth.mjs";
 import {
   assertExactBranchProtection,
   assertExactGithubEnvironment,
@@ -2617,6 +2620,10 @@ function infraTestingHygiene() {
     "scripts/network-segmentation-policy.mjs",
     "scripts/supply-chain-policy.mjs",
     "scripts/supply-chain-policy.test.mjs",
+    "scripts/runtime-fingerprint.mjs",
+    "scripts/runtime-fingerprint.test.mjs",
+    "scripts/provider-evidence-auth.mjs",
+    "scripts/provider-evidence-auth.test.mjs",
     "scripts/infra-secret-manager.mjs",
   ];
   for (const file of checkFiles) {
@@ -2625,6 +2632,9 @@ function infraTestingHygiene() {
   run(process.execPath, ["--test", ...controlCenterTestFiles()], { cwd: infraRoot });
   run(process.execPath, ["--test", "project-router/tests/project-router.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/hosted-workload-contract.test.mjs"], { cwd: infraRoot });
+  run(process.execPath, ["--test", "scripts/functional-health.test.mjs"], { cwd: infraRoot });
+  run(process.execPath, ["--test", "scripts/runtime-fingerprint.test.mjs"], { cwd: infraRoot });
+  run(process.execPath, ["--test", "scripts/provider-evidence-auth.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "platform-alert-dispatcher/server.test.mjs"], { cwd: infraRoot });
   const shellFiles = fs.readdirSync(path.join(infraRoot, "scripts")).filter((name) => name.endsWith(".sh")).sort();
   for (const file of shellFiles) {
@@ -2897,9 +2907,33 @@ function infraMaintainabilityHygiene() {
     .sort();
   const directOperationalScripts = new Set([
     "backup-scheduler.sh",
+    "alertmanager-secret-permissions.sh",
+    "build-context-sandbox-test.sh",
+    "build-daemon-isolation-sandbox-test.sh",
     "cloudflare-origin-lock-ufw.sh",
+    "collect-host-reliability.sh",
+    "compose-runtime-check.sh",
+    "compose-vps.sh",
+    "configure-host-wait-online.sh",
     "container-metrics-sandbox-test.sh",
+    "core-image-supply-chain-test.sh",
+    "database-ownership-sandbox-test.sh",
+    "deploy-vps-input-test.sh",
+    "deploy-vps-remote.sh",
+    "helper-image-supply-chain-test.sh",
+    "host-reliability-sandbox-test.sh",
+    "hosted-workload-lock.sh",
+    "install-host-reliability-collector.sh",
+    "keycloak-passkey-readiness.sh",
+    "minio-service-identity.sh",
     "network-segmentation-sandbox-test.sh",
+    "php-project-runtime.sh",
+    "php-runtime-supply-chain-test.sh",
+    "prepare-hosted-workloads.sh",
+    "prepare-vps-runtime.sh",
+    "runtime-isolation-sandbox-test.sh",
+    "verify-locked-images.sh",
+    "vps-evidence-remote.sh",
     "workload-egress-firewall.sh",
     "dast-zap-baseline.sh",
     "deploy-vps.sh",
@@ -3136,6 +3170,32 @@ function validateExternalUptimeProviderEvidence({ evidencePath, targets, manifes
   if (ageHours > maxAgeHours) {
     fail(`External uptime provider evidence is ${ageHours.toFixed(1)}h old; max ${maxAgeHours}h.`);
   }
+  const attestationValue = argv.providerEvidenceAttestation;
+  const policy = releaseTrustPolicy();
+  const repository = argv.providerEvidenceRepository ?? evidence.attestation?.repository ?? process.env.GITHUB_REPOSITORY;
+  const signerWorkflow = argv.providerEvidenceWorkflow ?? evidence.attestation?.signerWorkflow ?? (repository ? `${repository}/${policy.signer_workflow_path}` : null);
+  const sourceDigest = argv.providerEvidenceSourceDigest ?? evidence.attestation?.sourceDigest;
+  const sourceRef = argv.providerEvidenceSourceRef ?? evidence.attestation?.sourceRef;
+  const bundle = typeof attestationValue === "string" && !booleanFlag(attestationValue) && attestationValue !== "online"
+    ? attestationValue
+    : null;
+  const attestationOptions = providerEvidenceAttestationOptions({
+    enabled: Boolean(attestationValue),
+    evidencePath: resolved,
+    evidenceDigest: sha256File(resolved),
+    repository,
+    signerWorkflow,
+    sourceDigest,
+    sourceRef,
+    bundle,
+    trustedRoot: argv.providerEvidenceTrustedRoot ?? null,
+  });
+  loadGithubTokenFromFile();
+  const authentication = verifyGithubAttestation({
+    ...attestationOptions,
+    predicateType: policy.predicate_type,
+    certOidcIssuer: policy.cert_oidc_issuer,
+  });
   const monitors = Array.isArray(evidence.monitors) ? evidence.monitors : [];
   if (!monitors.length) {
     fail("External uptime provider evidence must include monitors.");
@@ -3201,6 +3261,18 @@ function validateExternalUptimeProviderEvidence({ evidencePath, targets, manifes
     monitorCount: monitors.length,
     coveredTargets,
     results,
+    authentication: {
+      verified: authentication.verified === true,
+      kind: authentication.kind,
+      provider: authentication.provider,
+      repository: authentication.repository,
+      signerWorkflow: authentication.signerWorkflow,
+      sourceDigest: authentication.sourceDigest,
+      sourceRef: authentication.sourceRef,
+      subjectCount: authentication.subjects.length,
+      verifiedTimestampCount: authentication.verifiedTimestampCount,
+      evidenceSha256: attestationOptions.expectedSubjectDigest,
+    },
   };
 }
 
@@ -4656,7 +4728,7 @@ async function haConfigCheck(options = {}) {
     }
     assertNoMatch(haCompose, /^\s{2}(?:backend|web|worker-jobs|worker-notifications|node-account|node-ui):/m, "HA overlay must not own hosted workload replicas.");
     if (!noDockerMode(options)) {
-      run("docker", ["compose", "--env-file", ".env", "-p", "enterprise_prod_ha", "-f", "compose.yaml", "-f", "compose.prod.yaml", "-f", "compose.ha.yaml", "config", "--quiet"]);
+      run("docker", ["compose", "--env-file", ".env.example", "-p", "enterprise_prod_ha", "-f", "compose.yaml", "-f", "compose.secrets.yaml", "-f", "compose.prod.yaml", "-f", "compose.ha.yaml", "config", "--quiet"]);
     }
     log("Platform stateful HA configuration check passed; multi-node availability still requires external capacity and live evidence.");
   }, { noDocker: noDockerMode(options), scope: "platform-infrastructure" });
@@ -4664,6 +4736,7 @@ async function haConfigCheck(options = {}) {
 
 async function managedSecretsPreflight(options = {}) {
   await withLocalCheckReport("managed-secrets-preflight", async () => {
+    const envFile = path.resolve(options.envFile ?? argv.envFile ?? path.join(infraRoot, ".env"));
     const managedCompose = readText(path.join(infraRoot, "compose.managed-secrets.yaml"));
     const required = [
       "postgres_superuser_password", "keycloak_db_password", "redis_password", "keycloak_admin_password", "nats_password", "minio_root_password", "mariadb_root_password", "phpmyadmin_control_password", "grafana_admin_password", "control_center_vault_keys", "projects_gateway_signing_keys", "backup_signing_keys", "alertmanager_webhook_token", "smtp_password",
@@ -4673,10 +4746,10 @@ async function managedSecretsPreflight(options = {}) {
     }
     assertNoMatch(managedCompose, /app_db_password|backend_db_password|worker_jobs_db_password|worker_notifications_db_password|database_url|session_signing_keys|hash_pepper_keys|turnstile/i, "Managed platform secrets must not include hosted application credentials.");
     if (!noDockerMode(options)) {
-      run("docker", ["compose", "--env-file", ".env", "-p", "enterprise_prod_managed_secrets", "-f", "compose.yaml", "-f", "compose.prod.yaml", "-f", "compose.managed-secrets.yaml", "config", "--quiet"]);
+      run("docker", ["compose", "--env-file", envFile, "-p", "enterprise_prod_managed_secrets", "-f", "compose.yaml", "-f", "compose.prod.yaml", "-f", "compose.managed-secrets.yaml", "config", "--quiet"]);
     }
     log("Managed platform secrets preflight passed.");
-  }, { noDocker: noDockerMode(options), scope: "platform-infrastructure" });
+  }, { noDocker: noDockerMode(options), envFile: options.envFile ?? argv.envFile ?? null, scope: "platform-infrastructure" });
 }
 
 function dockerComposeConfigJson({ envFile, projectName, files, profiles = [] }) {
@@ -4703,9 +4776,9 @@ function composeServiceHasHealthcheck(service) {
 async function composeHealthcheckCoverage() {
   log("==> Platform Compose healthcheck coverage");
   const stacks = [
-    { name: "local-waf", envFile: ".env", projectName: "platform_ops_health_local", files: ["compose.yaml", "compose.secrets.yaml", "compose.waf.yaml"], profiles: [] },
+    { name: "local-waf", envFile: ".env.example", projectName: "platform_ops_health_local", files: ["compose.yaml", "compose.secrets.yaml", "compose.waf.yaml"], profiles: [] },
     { name: "vps-waf", envFile: ".env.vps.example", projectName: "platform_ops_health_vps", files: ["compose.yaml", "compose.secrets.yaml", "compose.waf.yaml", "compose.vps.yaml", "compose.vps-waf.yaml", "compose.backup-scheduler.yaml", "compose.runtime.yaml", "compose.networks.yaml", "compose.runtime-isolation.yaml"], profiles: ["backup"] },
-    { name: "backup-scheduler", envFile: ".env", projectName: "platform_ops_health_backup", files: ["compose.yaml", "compose.secrets.yaml", "compose.backup-scheduler.yaml"], profiles: ["backup"] },
+    { name: "backup-scheduler", envFile: ".env.example", projectName: "platform_ops_health_backup", files: ["compose.yaml", "compose.secrets.yaml", "compose.backup-scheduler.yaml"], profiles: ["backup"] },
   ];
   const issues = [];
   const stackReports = [];
@@ -4722,6 +4795,187 @@ async function composeHealthcheckCoverage() {
   const markdownPath = writeMarkdownReport("healthchecks", `healthcheck-coverage-${stamp}`, ["# Platform Healthcheck Coverage", "", `Status: ${payload.status}`, `Generated at: ${payload.generatedAt}`, "", ...stackReports.flatMap((stack) => [`## ${stack.name}`, "", `Services: ${stack.services.length}`, `Missing: ${stack.missing.join(", ") || "none"}`, ""])]);
   log(`Healthcheck coverage reports written to ${jsonPath} and ${markdownPath}`);
   if (issues.length) fail(`Compose healthcheck coverage failed: ${issues.join("; ")}`);
+}
+
+function platformFunctionalHealthProbes() {
+  return validateFunctionalHealthProbes([
+    { id: "keycloak-ready", kind: "http", container: "enterprise-keycloak", port: 9000, path: "/health/ready", expectedStatuses: [200] },
+    { id: "loki-ready", kind: "http", container: "enterprise-loki", port: 3100, path: "/ready", expectedStatuses: [200], bodyIncludes: "ready" },
+    { id: "promtail-ready", kind: "http", container: "enterprise-promtail", port: 9080, path: "/ready", expectedStatuses: [200] },
+    { id: "prometheus-ready", kind: "http", container: "enterprise-prometheus", port: 9090, path: "/-/ready", expectedStatuses: [200] },
+    { id: "alertmanager-ready", kind: "http", container: "enterprise-alertmanager", port: 9093, path: "/-/ready", expectedStatuses: [200] },
+    { id: "grafana-api", kind: "http", container: "enterprise-grafana", port: 3000, path: "/api/health", expectedStatuses: [200] },
+    { id: "control-center-api", kind: "http", container: "enterprise-control-center", port: 8080, path: "/__health", expectedStatuses: [200] },
+    { id: "project-router-api", kind: "http", container: "enterprise-project-router", port: 8080, path: "/__health", expectedStatuses: [200] },
+    { id: "nats-ready", kind: "http", container: "enterprise-nats", port: 8222, path: "/healthz", expectedStatuses: [200] },
+    { id: "minio-ready", kind: "http", container: "enterprise-minio", port: 9000, path: "/minio/health/ready", expectedStatuses: [200] },
+    { id: "platform-dns", kind: "dns", container: "enterprise-local-dns", query: "portal.platform-infrastructure.com" },
+  ]);
+}
+
+const FUNCTIONAL_HTTP_PROBE_SCRIPT = `
+const http = require("node:http");
+const [host, port, path] = process.argv.slice(1);
+const request = http.get({ host, port: Number(port), path, headers: { "User-Agent": "platform-functional-health/1.0" } }, (response) => {
+  let body = "";
+  response.setEncoding("utf8");
+  response.on("data", (chunk) => { body += chunk; });
+  response.on("end", () => process.stdout.write(JSON.stringify({ status: response.statusCode, body })));
+});
+request.setTimeout(5000, () => request.destroy(new Error("timeout")));
+request.on("error", (error) => { process.stderr.write(error.message); process.exitCode = 1; });
+`;
+
+const FUNCTIONAL_DNS_PROBE_SCRIPT = `
+const dns = require("node:dns");
+const [server, query] = process.argv.slice(1);
+dns.lookup(server, (lookupError, address) => {
+  if (lookupError) { process.stderr.write(lookupError.message); process.exitCode = 1; return; }
+  const resolver = new dns.Resolver();
+  resolver.setServers([address]);
+  resolver.resolve4(query, (resolveError, answers) => {
+    if (resolveError) { process.stderr.write(resolveError.message); process.exitCode = 1; return; }
+    process.stdout.write(JSON.stringify({ answers }));
+  });
+});
+`;
+
+function runFunctionalProbe(probe) {
+  const executor = "enterprise-control-center";
+  const args = probe.kind === "dns"
+    ? ["exec", executor, "node", "-e", FUNCTIONAL_DNS_PROBE_SCRIPT, probe.container, probe.query]
+    : ["exec", executor, "node", "-e", FUNCTIONAL_HTTP_PROBE_SCRIPT, probe.container, String(probe.port), probe.path];
+  const result = run("docker", args, { allowFailure: true, capture: true });
+  if (result.status !== 0) {
+    log(`Functional probe ${probe.id} rejected: ${String(result.stderr || result.stdout || "docker exec failed").trim()}`);
+    return { error: `${probe.kind}-probe-failed` };
+  }
+  try {
+    return JSON.parse(String(result.stdout ?? ""));
+  } catch {
+    return { error: `${probe.kind}-probe-invalid-response` };
+  }
+}
+
+async function functionalHealthCheck(options = {}) {
+  log("==> Platform functional health check");
+  const probes = platformFunctionalHealthProbes();
+  const noDocker = noDockerMode(options);
+  let observations = [];
+  let evaluation = null;
+  if (!noDocker) {
+    for (const probe of probes) {
+      const started = Date.now();
+      try {
+        const observation = runFunctionalProbe(probe);
+        observations.push({ id: probe.id, ...observation, latencyMs: Date.now() - started });
+      } catch (error) {
+        log(`Functional probe ${probe.id} failed to execute: ${String(error?.message ?? error)}`);
+        observations.push({ id: probe.id, latencyMs: Date.now() - started, error: "probe-failed" });
+      }
+    }
+    evaluation = evaluateFunctionalHealth(probes, observations);
+  }
+  const payload = {
+    generatedAt: new Date().toISOString(),
+    mode: noDocker ? "static-policy" : "runtime",
+    status: noDocker ? "passed" : evaluation.status,
+    scope: "platform-infrastructure",
+    fingerprint: evaluation?.fingerprint ?? null,
+    checks: noDocker ? probes.map((probe) => ({ id: probe.id, kind: probe.kind, container: probe.container, passed: true })) : evaluation.checks,
+  };
+  const stamp = reportTimestamp();
+  const jsonPath = writeJsonReport("healthchecks", `functional-health-${stamp}`, payload);
+  const markdownPath = writeMarkdownReport("healthchecks", `functional-health-${stamp}`, [
+    "# Platform Functional Health",
+    "",
+    `Status: ${payload.status}`,
+    `Mode: ${payload.mode}`,
+    `Generated at: ${payload.generatedAt}`,
+    "",
+    "| Probe | Kind | Container | Result | Latency ms |",
+    "| --- | --- | --- | --- | ---: |",
+    ...payload.checks.map((check) => `| ${check.id} | ${check.kind} | ${check.container} | ${check.passed ? "passed" : "failed"} | ${check.latencyMs ?? "n/a"} |`),
+  ]);
+  log(`Functional health reports written to ${jsonPath} and ${markdownPath}`);
+  if (payload.status !== "passed") fail(`Functional health failed. Report: ${jsonPath}`);
+  log("Platform functional health passed.");
+}
+
+function parseComposeServiceHashes(raw) {
+  const services = String(raw ?? "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean).map((line) => {
+    const match = line.match(/^([^\s]+)\s+([a-f0-9]{64})$/i);
+    if (!match) fail(`Invalid Docker Compose service hash line: ${line}`);
+    return { service: match[1], configHash: match[2].toLowerCase() };
+  });
+  if (!services.length) fail("Docker Compose returned no service hashes.");
+  return services;
+}
+
+function inspectComposeRuntime(project) {
+  const idsResult = run("docker", ["ps", "-aq", "--filter", `label=com.docker.compose.project=${project}`], { allowFailure: true, capture: true });
+  if (idsResult.status !== 0) fail(`Unable to enumerate runtime containers for Compose project ${project}.`);
+  const ids = String(idsResult.stdout ?? "").split(/\s+/).map((item) => item.trim()).filter(Boolean);
+  const format = '{{.Name}}|{{.Image}}|{{.Config.Image}}|{{index .Config.Labels "com.docker.compose.service"}}|{{index .Config.Labels "com.docker.compose.project"}}|{{index .Config.Labels "com.docker.compose.config-hash"}}|{{.State.Status}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}';
+  return ids.map((id) => {
+    const result = run("docker", ["inspect", "--format", format, id], { allowFailure: true, capture: true });
+    if (result.status !== 0) fail(`Unable to inspect runtime container ${id}.`);
+    const [name, imageId, imageRef, service, containerProject, configHash, state, health] = String(result.stdout ?? "").trim().split("|");
+    return { name, imageId, imageRef, service, project: containerProject, configHash, state, health };
+  });
+}
+
+async function runtimeFingerprint(options = {}) {
+  log("==> Platform runtime fingerprint");
+  const envFile = path.resolve(options.envFile ?? argv.envFile ?? path.join(infraRoot, ".env"));
+  const envValues = parseEnv(envFile);
+  const project = String(options.project ?? argv.project ?? envValues.COMPOSE_PROJECT_NAME ?? process.env.COMPOSE_PROJECT_NAME ?? "platform_infra_vps").trim();
+  const git = gitEvidence();
+  if (!git.commit) fail("Unable to resolve the candidate Git commit.");
+  const hashResult = run("bash", [path.join(scriptDir, "compose-vps.sh"), "config", "--hash", "*"], {
+    allowFailure: true,
+    capture: true,
+    env: { COMPOSE_ENV_FILE: envFile, COMPOSE_PROJECT_NAME: project },
+  });
+  if (hashResult.status !== 0) fail(`Unable to calculate Docker Compose service hashes: ${String(hashResult.stderr ?? "").trim()}`);
+  const services = parseComposeServiceHashes(hashResult.stdout);
+  const containers = noDockerMode(options) ? [] : inspectComposeRuntime(project);
+  const evaluation = noDockerMode(options)
+    ? { status: "static-policy", issues: ["runtime-not-inspected"], expectedServiceCount: services.length, actualContainerCount: 0, fingerprint: null, expected: { commit: git.commit, project, services }, actual: { commit: git.commit, clean: git.dirty === false, project, containers: [] } }
+    : evaluateRuntimeFingerprint(
+      { commit: options.expectedCommit ?? argv.expectedCommit ?? git.commit, project, services },
+      { commit: git.commit, clean: git.dirty === false, project, containers },
+    );
+  const payload = {
+    generatedAt: new Date().toISOString(),
+    mode: noDockerMode(options) ? "static-policy" : "runtime-exact",
+    status: evaluation.status,
+    scope: "platform-infrastructure",
+    git: { commit: git.commit, branch: git.branch, clean: git.dirty === false },
+    envFile: path.relative(infraRoot, envFile).replaceAll("\\", "/"),
+    ...evaluation,
+  };
+  const stamp = reportTimestamp();
+  const jsonPath = writeJsonReport("runtime-fingerprint", `runtime-fingerprint-${stamp}`, payload);
+  const markdownPath = writeMarkdownReport("runtime-fingerprint", `runtime-fingerprint-${stamp}`, [
+    "# Platform Runtime Fingerprint",
+    "",
+    `Status: ${payload.status}`,
+    `Mode: ${payload.mode}`,
+    `Commit: ${payload.git.commit}`,
+    `Worktree clean: ${payload.git.clean}`,
+    `Compose project: ${project}`,
+    `Expected services: ${payload.expectedServiceCount}`,
+    `Runtime containers: ${payload.actualContainerCount}`,
+    `Fingerprint: ${payload.fingerprint ?? "not-generated"}`,
+    "",
+    "## Issues",
+    "",
+    ...(payload.issues.length ? payload.issues.map((issue) => `- ${issue}`) : ["- none"]),
+  ]);
+  log(`Runtime fingerprint reports written to ${jsonPath} and ${markdownPath}`);
+  if (!noDockerMode(options) && payload.status !== "passed") fail(`Runtime fingerprint mismatch. Report: ${jsonPath}`);
+  if (!noDockerMode(options)) log("Platform runtime fingerprint passed.");
 }
 
 function addRateLimitEvidenceCheck(checks, issues, { name, category, status, detail, required = true, file = null }) {
@@ -6022,6 +6276,10 @@ async function governanceCheckBody() {
   assertMatch(infraWorkflow, /dast-zap:[\s\S]*environment:\s*\r?\n\s+name:\s+staging/, "DAST job must target the staging GitHub environment.");
   assertMatch(infraWorkflow, /deploy-vps:[\s\S]*environment:\s*\r?\n\s+name:\s+production/, "VPS deploy job must target the production GitHub environment.");
   assertMatch(infraWorkflow, /deploy-vps:[\s\S]*concurrency:[\s\S]*infra-production-deploy[\s\S]*cancel-in-progress:\s+false/, "Production deploys must be serialized.");
+  assertNoMatch(infraWorkflow, /^\s{2}(?:compose-and-policy|shell-syntax):/m, "Infrastructure CI must use the four canonical required gates without duplicate legacy jobs.");
+  assertMatch(infraWorkflow, /enterprise-readiness:[\s\S]*needs:\s*\r?\n\s+- quality\s*\r?\n\s+- compose\s*\r?\n\s+- supply-chain/, "Enterprise readiness must depend on all three behavior gates.");
+  assertMatch(infraWorkflow, /dast-zap:[\s\S]*needs:\s*enterprise-readiness/, "DAST must run only after enterprise readiness.");
+  assertMatch(infraWorkflow, /deploy-vps:[\s\S]*needs:\s*enterprise-readiness/, "Production deploy must run only after enterprise readiness.");
   assertMatch(runbook, /Production deploy/, "Runbook must document production deploy.");
   assertMatch(runbook, /Rollback/, "Runbook must document rollback.");
   assertMatch(runbook, /release approval/i, "Runbook must document release approval.");
@@ -6512,6 +6770,13 @@ async function githubActionsRunEvidence() {
 }
 
 function gitEvidence() {
+  if (/^[a-f0-9]{40}$/i.test(String(process.env.PLATFORM_GIT_COMMIT ?? ""))) {
+    return {
+      commit: String(process.env.PLATFORM_GIT_COMMIT).toLowerCase(),
+      branch: String(process.env.PLATFORM_GIT_BRANCH ?? "").trim() || null,
+      dirty: booleanFlag(process.env.PLATFORM_GIT_DIRTY),
+    };
+  }
   const gitArgs = (...args) => ["-c", "safe.directory=*", ...args];
   const rev = run("git", gitArgs("rev-parse", "HEAD"), { capture: true, allowFailure: true });
   const branch = run("git", gitArgs("rev-parse", "--abbrev-ref", "HEAD"), { capture: true, allowFailure: true });
@@ -7232,6 +7497,8 @@ const evidenceBundleReportSpecs = [
   { directory: "production-readiness", prefix: "production-readiness-", label: "production-readiness-live", required: true },
   { directory: "github-actions", prefix: "github-actions-run-", label: "github-actions-run", required: true },
   { directory: "healthchecks", prefix: "healthcheck-coverage-", label: "healthcheck-coverage", required: true },
+  { directory: "healthchecks", prefix: "functional-health-", label: "functional-health", required: true },
+  { directory: "runtime-fingerprint", prefix: "runtime-fingerprint-", label: "runtime-fingerprint", required: true },
   { directory: "rate-limits", prefix: "rate-limit-evidence-", label: "rate-limit-evidence", required: true },
   { directory: "audit-logs", prefix: "audit-log-evidence-", label: "audit-log-evidence", required: true },
   { directory: "retention", prefix: "retention-evidence-", label: "retention-evidence", required: true },
@@ -7399,7 +7666,17 @@ function evidenceBundleReportPasses(spec, payload) {
     return { passed: payload.mode === "verifyRemote" && payload.status === "passed" && payload.run?.conclusion === "success", detail: `mode=${payload.mode ?? "missing"} status=${payload.status ?? "missing"} conclusion=${payload.run?.conclusion ?? "missing"}` };
   }
   if (spec.label === "healthcheck-coverage") {
-    return { passed: payload.status === "passed" && Number(payload.summary?.missingHealthchecks ?? 1) === 0, detail: `status=${payload.status ?? "missing"} missing=${payload.summary?.missingHealthchecks ?? "missing"}` };
+    const missing = Array.isArray(payload.missingHealthchecks)
+      ? payload.missingHealthchecks.length
+      : Number(payload.summary?.missingHealthchecks ?? 1);
+    return { passed: payload.status === "passed" && missing === 0, detail: `status=${payload.status ?? "missing"} missing=${missing}` };
+  }
+  if (spec.label === "functional-health") {
+    const checks = Array.isArray(payload.checks) ? payload.checks : [];
+    return { passed: payload.mode === "runtime" && payload.status === "passed" && checks.length > 0 && checks.every((check) => check.passed === true), detail: `mode=${payload.mode ?? "missing"} status=${payload.status ?? "missing"} checks=${checks.length}` };
+  }
+  if (spec.label === "runtime-fingerprint") {
+    return { passed: payload.mode === "runtime-exact" && payload.status === "passed" && payload.git?.clean === true && /^[a-f0-9]{64}$/.test(String(payload.fingerprint ?? "")), detail: `mode=${payload.mode ?? "missing"} status=${payload.status ?? "missing"} clean=${payload.git?.clean ?? "missing"}` };
   }
   if (spec.label === "rate-limit-evidence") {
     return {
@@ -7729,6 +8006,7 @@ async function productionGoNoGo() {
     cloudflareAccess: 24,
     secretRotation: 24,
     healthchecks: 24,
+    runtimeFingerprint: 24,
     retention: 24,
     auditLogs: 24,
     accessReview: 24,
@@ -7843,6 +8121,26 @@ async function productionGoNoGo() {
     detail: healthcheckCoverage ? `${healthcheckFresh.detail}; ${healthcheckResult.detail}` : healthcheckFresh.detail,
     report: healthcheckCoverage,
     required: false,
+  });
+
+  const functionalHealth = latestJsonReport("healthchecks", "functional-health-");
+  const functionalHealthFresh = reportFreshDetail(functionalHealth, maxAge.healthchecks);
+  const functionalHealthResult = evidenceBundleReportPasses({ label: "functional-health" }, functionalHealth?.payload);
+  addGoNoGoCheck(checks, {
+    name: "functional-health-runtime",
+    passed: Boolean(functionalHealth && functionalHealthFresh.fresh && functionalHealthResult.passed),
+    detail: functionalHealth ? `${functionalHealthFresh.detail}; ${functionalHealthResult.detail}` : functionalHealthFresh.detail,
+    report: functionalHealth,
+  });
+
+  const runtimeFingerprintReport = latestJsonReport("runtime-fingerprint", "runtime-fingerprint-");
+  const runtimeFingerprintFresh = reportFreshDetail(runtimeFingerprintReport, maxAge.runtimeFingerprint);
+  const runtimeFingerprintResult = evidenceBundleReportPasses({ label: "runtime-fingerprint" }, runtimeFingerprintReport?.payload);
+  addGoNoGoCheck(checks, {
+    name: "runtime-fingerprint-exact",
+    passed: Boolean(runtimeFingerprintReport && runtimeFingerprintFresh.fresh && runtimeFingerprintResult.passed),
+    detail: runtimeFingerprintReport ? `${runtimeFingerprintFresh.detail}; ${runtimeFingerprintResult.detail}` : runtimeFingerprintFresh.detail,
+    report: runtimeFingerprintReport,
   });
 
   const infraHealthReport = latestJsonReport("local-checks", "infra-health-", (payload) => (
@@ -8024,6 +8322,8 @@ async function productionGoNoGo() {
   const latestUptimeReport = latestJsonReport("uptime", "external-uptime-");
   const uptime = latestJsonReport("uptime", "external-uptime-", (payload) => (
     payload.providerEvidence?.verified === true
+    && payload.providerEvidence?.authentication?.verified === true
+    && payload.providerEvidence?.authentication?.kind === "github-sigstore-cryptographic-attestation"
     && (payload.results ?? []).every((result) => publicEvidenceUrl(result.url))
   ));
   const uptimeFresh = reportFreshDetail(uptime, maxAge.uptime);
@@ -8031,10 +8331,12 @@ async function productionGoNoGo() {
   const uptimeResults = uptime?.payload?.results ?? [];
   const uptimeFailed = uptimeResults.filter((result) => !result.ok);
   const uptimePublic = uptimeResults.every((result) => publicEvidenceUrl(result.url));
-  const uptimeProviderVerified = uptime?.payload?.providerEvidence?.verified === true;
+  const uptimeProviderVerified = uptime?.payload?.providerEvidence?.verified === true
+    && uptime?.payload?.providerEvidence?.authentication?.verified === true;
   const latestUptimeResults = latestUptimeReport?.payload?.results ?? [];
   const latestUptimePublic = latestUptimeResults.length > 0 && latestUptimeResults.every((result) => publicEvidenceUrl(result.url));
-  const latestUptimeProviderVerified = latestUptimeReport?.payload?.providerEvidence?.verified === true;
+  const latestUptimeProviderVerified = latestUptimeReport?.payload?.providerEvidence?.verified === true
+    && latestUptimeReport?.payload?.providerEvidence?.authentication?.verified === true;
   const uptimePendingProvider = Boolean(
     !uptime
     && (!latestUptimeProviderVerified || !latestUptimePublic)
@@ -8252,7 +8554,7 @@ async function linuxPortabilityCheck(options = {}) {
   let shellSyntax = null;
 
   if (!skipShellSyntax) {
-    const shellScript = 'for file in scripts/*.sh; do sh -n "$file"; done';
+    const shellScript = 'for file in scripts/*.sh; do if head -n 1 "$file" | grep -q "bash"; then bash -n "$file"; else sh -n "$file"; fi; done';
     const canUseContainerShell = process.env.PLATFORM_OPS_CONTAINER === "1" || fs.existsSync("/.dockerenv");
     const shellResult = canUseContainerShell
       ? run("sh", ["-ec", shellScript], { capture: true, allowFailure: true })
@@ -8318,19 +8620,19 @@ function repoCoverageCategory(filePath) {
   const normalized = filePath.replaceAll("\\", "/");
   const rules = [
     ["workflow", /^\.github\/workflows\/[^/]+\.ya?ml$/],
-    ["root-policy", /^(?:\.env(?:\..*)?|\.gitattributes|\.gitignore|renovate\.json|SECURITY\.md|THREAT-MODEL\.md)$/],
+    ["root-policy", /^(?:\.dockerignore|\.env(?:\..*)?|\.gitattributes|\.gitignore|renovate\.json|SECURITY\.md|THREAT-MODEL\.md)$/],
     ["platform-config", /^config\/.+\.json$/],
     ["object-storage", /^minio\//],
-    ["documentation", /^(?:README|RUNBOOK|CURRENT-OPERATING-MODEL|DOCUMENTATION-INDEX|ENTERPRISE-10-PLAN|ENTERPRISE-MATURITY|FINAL-READINESS-AUDIT|INFRASTRUCTURE-DEEP-DIVE|PLATFORM-APPLICATION-SEPARATION-AUDIT|READINESS-REPORT|VPS-PREDEPLOY-CHECKLIST)\.md$|^(?:cloudflare|keycloak|minio|secrets)\/README\.md$/],
+    ["documentation", /^[A-Z][A-Z0-9_-]*\.md$|^(?:cloudflare|keycloak|minio|secrets)\/README\.md$/],
     ["compose", /^compose(?:\.[^.]+)?\.ya?ml$/],
     ["dns", /^dns\//],
     ["docker-build", /^docker\/[^/]+\.Dockerfile$/],
     ["operations-script", /^scripts\/.+\.(?:sh|mjs)$/],
-    ["governance-policy", /^governance\/.+\.json$/],
+    ["governance-policy", /^governance\/.+\.(?:json|md)$/],
     ["cloudflare-policy", /^cloudflare\/.+\.(?:json|md)$/],
-    ["observability", /^(?:alertmanager|grafana|loki|monitoring|prometheus|promtail)\//],
+    ["observability", /^(?:alertmanager|grafana|loki|monitoring|platform-alert-dispatcher|prometheus|promtail)\//],
     ["identity", /^keycloak\//],
-    ["database", /^(?:postgres|mariadb)\//],
+    ["database", /^(?:postgres|mariadb|phppgadmin)\//],
     ["messaging", /^nats\//],
     ["control-plane", /^control-center\//],
     ["php-runtime", /^(?:php-apache|phpmyadmin|php-runtime-root|projects-portal)\//],
@@ -8356,8 +8658,11 @@ function readGithubWorkflowText() {
 
 async function repoCoverageCheck() {
   log("==> Repository coverage check");
-  const trackedFiles = output("git", ["-c", `safe.directory=${infraRoot}`, "ls-files"], { cwd: infraRoot })
-    .split(/\r?\n/)
+  const trackedManifest = process.env.PLATFORM_GIT_TRACKED_FILES_B64
+    ? Buffer.from(process.env.PLATFORM_GIT_TRACKED_FILES_B64, "base64").toString("utf8")
+    : output("git", ["-c", `safe.directory=${infraRoot}`, "ls-files", "-z"], { cwd: infraRoot });
+  const trackedFiles = trackedManifest
+    .split("\0")
     .map((file) => file.trim())
     .filter(Boolean)
     .sort();
@@ -8396,7 +8701,7 @@ async function repoCoverageCheck() {
   const missingCategories = requiredCategories.filter((category) => !categories.has(category));
   const workflow = readGithubWorkflowText();
   const requiredWorkflowGates = [
-    ["local-compose-render", /Render local WAF compose[\s\S]*compose\.yaml[\s\S]*compose\.build\.yaml[\s\S]*compose\.secrets\.yaml[\s\S]*compose\.waf\.yaml/],
+    ["local-compose-render", /Render local WAF compose[\s\S]*compose\.yaml[\s\S]*compose\.secrets\.yaml[\s\S]*compose\.waf\.yaml/],
     ["vps-compose-render", /Render VPS WAF compose[\s\S]*compose\.vps\.yaml[\s\S]*compose\.vps-waf\.yaml/],
     ["staging-compose-render", /Render staging and backup compose[\s\S]*compose\.waf\.yaml[\s\S]*compose\.staging\.yaml/],
     ["backup-compose-render", /Render staging and backup compose[\s\S]*compose\.backup-scheduler\.yaml/],
@@ -8410,8 +8715,8 @@ async function repoCoverageCheck() {
     ["github-actions-workflow-lint", /GitHub Actions workflow lint[\s\S]*rhysd\/actionlint:1\.7\.12@sha256:[a-f0-9]{64}/],
     ["github-actions-run-evidence-plan", /GitHub Actions run evidence plan[\s\S]*github-actions-run-evidence/],
     ["github-actions-run-evidence-verify-remote", /workflow_run:[\s\S]*enterprise-infra[\s\S]*Verify completed enterprise infra run[\s\S]*github-actions-run-evidence[\s\S]*--verifyRemote/],
-    ["production-live-evidence-workflow", /workflow_dispatch:[\s\S]*External uptime provider evidence[\s\S]*external-uptime-check[\s\S]*--requireProviderEvidence[\s\S]*Production Cloudflare edge load benchmark[\s\S]*load-benchmark[\s\S]*--expectedEdgeProvider cloudflare[\s\S]*Cloudflare Access admin verify[\s\S]*cloudflare-access-admin[\s\S]*--verifyRemote[\s\S]*evidence-bundle-verify --requireComplete/],
-    ["vps-evidence-workflow", /workflow_dispatch:[\s\S]*Run VPS evidence on VPS[\s\S]*vps-bootstrap-ubuntu\.sh[\s\S]*vps-hardening-ubuntu\.sh[\s\S]*vps-host-readiness\.sh[\s\S]*Upload VPS evidence reports/],
+    ["production-live-evidence-workflow", /workflow_dispatch:[\s\S]*External uptime provider evidence[\s\S]*--providerEvidenceAttestation online[\s\S]*--providerEvidenceSourceDigest[\s\S]*--requireProviderEvidence[\s\S]*Production Cloudflare edge load benchmark[\s\S]*load-benchmark[\s\S]*--expectedEdgeProvider cloudflare[\s\S]*Cloudflare Access admin verify[\s\S]*cloudflare-access-admin[\s\S]*--verifyRemote[\s\S]*evidence-bundle-verify --requireComplete/],
+    ["vps-evidence-workflow", /workflow_dispatch:[\s\S]*Run VPS evidence on VPS[\s\S]*vps-evidence-request\.mjs render[\s\S]*Upload VPS evidence reports/],
     ["secret-scan", /Secret scan[\s\S]*secret-scan/],
     ["ha-config-check", /HA configuration check[\s\S]*ha-config-check/],
     ["managed-secrets-preflight", /Managed secrets preflight[\s\S]*managed-secrets-preflight/],
@@ -8424,7 +8729,7 @@ async function repoCoverageCheck() {
     ["dr-evidence-summary", /DR evidence summary[\s\S]*dr-evidence/],
     ["offsite-restore-plan", /Off-site restore drill plan[\s\S]*offsite-restore-drill-restic --planOnly/],
     ["release-evidence-plan", /release-evidence --planOnly/],
-    ["release-artifact-gate-dry-run", /Release artifact gate dry run[\s\S]*release-artifact-gate --envFile \.tmp\/ci-release\.env --sbom \.tmp\/ci-sbom\/pnpm-sbom-ci\.json/],
+    ["release-artifact-gate-dry-run", /Release artifact gate dry run[\s\S]*release-artifact-gate --envFile \.tmp\/ci-release\.env[\s\S]*--sbom \.tmp\/ci-sbom\/pnpm-sbom-ci\.json/],
     ["alert-evidence-summary", /alert-evidence/],
     ["production-go-no-go-summary", /production-go-no-go/],
     ["pre-go-live-evidence-report", /Pre go-live evidence report[\s\S]*pre-go-live-evidence --infraOnly --repo/],
@@ -8438,8 +8743,10 @@ async function repoCoverageCheck() {
     ["repository-coverage", /repo-coverage-check/],
     ["ci-evidence-artifact", /Upload CI evidence reports[\s\S]*actions\/upload-artifact@[a-f0-9]{40}[\s\S]*reports\/[\s\S]*\.tmp\/evidence-bundles\/[\s\S]*retention-days:\s+30/],
     ["least-privilege-permissions", /permissions:\s*\r?\n\s+contents:\s+read(?![\s\S]*security-events:\s+write)/],
-    ["compose-job-timeout", /compose-and-policy:[\s\S]*timeout-minutes:\s+45/],
-    ["shell-job-timeout", /shell-syntax:[\s\S]*timeout-minutes:\s+10/],
+    ["quality-job-timeout", /^\s{2}quality:[\s\S]*?timeout-minutes:\s+30/m],
+    ["compose-job-timeout", /^\s{2}compose:[\s\S]*?timeout-minutes:\s+45/m],
+    ["canonical-ci-dag", /enterprise-readiness:[\s\S]*needs:\s*\r?\n\s+- quality\s*\r?\n\s+- compose\s*\r?\n\s+- supply-chain/],
+    ["deploy-after-readiness", /deploy-vps:[\s\S]*needs:\s*enterprise-readiness/],
     ["dast-job-timeout", /dast-zap:[\s\S]*timeout-minutes:\s+45/],
     ["deploy-job-timeout", /deploy-vps:[\s\S]*timeout-minutes:\s+90/],
     ["shell-syntax", /for file in scripts\/\*\.sh/],
@@ -11412,6 +11719,7 @@ Commands:
   cloudflare-from-zero
   compliance-evidence
   compose-healthcheck-coverage
+  functional-health-check
   control-center-tests
   data-classification
   dependency-hygiene
@@ -11468,6 +11776,7 @@ Commands:
   release-evidence
   release-artifact-gate
   rollback-release
+  runtime-fingerprint
   runtime-isolation-check
   restore-test-keycloak
   restore-test-mariadb
@@ -11517,6 +11826,7 @@ const commands = {
   "cloudflare-from-zero": cloudflareFromZero,
   "compliance-evidence": complianceEvidence,
   "compose-healthcheck-coverage": composeHealthcheckCoverage,
+  "functional-health-check": functionalHealthCheck,
   "control-center-tests": controlCenterTests,
   "data-classification": dataClassification,
   "dependency-hygiene": dependencyHygiene,
@@ -11573,6 +11883,7 @@ const commands = {
   "release-evidence": releaseEvidence,
   "release-artifact-gate": releaseArtifactGate,
   "rollback-release": rollbackRelease,
+  "runtime-fingerprint": runtimeFingerprint,
   "runtime-isolation-check": runtimeIsolationCheck,
   "restore-test-keycloak": restoreTestKeycloakConfig,
   "restore-test-mariadb": restoreTestMariadb,

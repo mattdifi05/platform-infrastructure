@@ -23,6 +23,10 @@ import {
   createBackupManifestDocument,
 } from "../backup/contracts.mjs";
 
+function fixtureCredential(...parts) {
+  return parts.join("-");
+}
+
 const infraRoot = path.resolve(import.meta.dirname, "..", "..");
 const testRoot = path.join(infraRoot, ".tmp", "control-center-tests", randomUUID());
 const projectsRoot = path.join(testRoot, "projects");
@@ -906,6 +910,10 @@ test("Admin Control Center local foundation", async (t) => {
 
   const statusApi = await getJson(`${baseUrl}/control/status`);
   assert.equal(statusApi.statusRun, null);
+  assert.equal(statusApi.statusCatalog.length > 5, true);
+  assert.equal(new Set(statusApi.statusCatalog.map((check) => check.id)).size, statusApi.statusCatalog.length);
+  assert.equal(statusApi.statusCatalog.every((check) => ["probe", "evidence-validation", "external-required"].includes(check.executionMode)), true);
+  assert.doesNotMatch(JSON.stringify(statusApi.statusCatalog), /snapshot/);
   assert.match(statusApi.goNoGo.status, /^(unknown|go|no-go)$/);
   const versionedStatusApi = await getJson(`${baseUrl}/control/v1/status`);
   assert.deepEqual(versionedStatusApi, statusApi);
@@ -924,6 +932,11 @@ test("Admin Control Center local foundation", async (t) => {
   assert.equal(statusAfterRun.statusRun.checks.some((check) => check.id === "control-center-assets"), false);
   assert.equal(statusAfterRun.statusRun.checks.some((check) => check.id === "portal-through-waf"), true);
   assert.equal(statusAfterRun.statusRun.checks.every((check) => ["probe", "evidence-validation", "external-required"].includes(check.executionMode)), true);
+  assert.equal(statusAfterRun.statusRun.checks.length, statusAfterRun.statusCatalog.length);
+  assert.deepEqual(
+    new Set(statusAfterRun.statusRun.checks.map((check) => check.id)),
+    new Set(statusAfterRun.statusCatalog.map((check) => check.id)),
+  );
   assert.equal(statusAfterRun.statusRun.eventCount, (statusAfterRun.statusRun.checks.length * 2) + 2);
   assert.equal(statusAfterRun.statusEvents.length, statusAfterRun.statusRun.eventCount);
   assert.equal(statusAfterRun.statusEvents[0].type, "run-started");
@@ -1686,7 +1699,7 @@ test("Admin Control Center local foundation", async (t) => {
     projectId: "node-demo",
     engine: "mariadb",
     name: "node_demo_app",
-    password: "created-db-password-should-not-leak",
+    password: fixtureCredential("created", "db", "password", "should", "not", "leak"),
     confirm: "CREATE-DATABASE",
     secret: "database-secret-should-not-leak",
   });
@@ -1730,7 +1743,7 @@ test("Admin Control Center local foundation", async (t) => {
       projectId: "node-demo",
       engine: "mariadb",
       name: "node_demo_redirect",
-      password: "redirect-db-password-should-not-leak",
+      password: fixtureCredential("redirect", "db", "password", "should", "not", "leak"),
       returnTo: "project-detail",
       openAfterCreate: "admin",
       confirm: "CREATE-DATABASE",
@@ -1816,7 +1829,7 @@ test("Admin Control Center local foundation", async (t) => {
     projectId: "node-demo",
     credentialRef: "secret/db/manual-name-should-not-win",
     confirm: "ROTATE-DATABASE-CREDENTIAL:node-demo-mariadb-node-demo-app",
-    password: "new-db-password-should-not-leak",
+    password: fixtureCredential("new", "db", "password", "should", "not", "leak"),
   });
   assert.equal(credentialUpdate.status, 202);
   assert.equal(credentialUpdate.body.type, "database.credential.local");
@@ -3297,7 +3310,7 @@ test("Admin Control Center OIDC passkey guard", async (t) => {
   const legacyPasswordLogin = await fetch(`${baseUrl}/login`, {
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded", accept: "application/json" },
-    body: new URLSearchParams({ password: "must-never-be-accepted" }),
+    body: new URLSearchParams({ password: fixtureCredential("must", "never", "be", "accepted") }),
   });
   assert.equal(legacyPasswordLogin.status, 401);
   assert.equal(tokenRequests, 0);

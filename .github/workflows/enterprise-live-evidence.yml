@@ -54,15 +54,29 @@ jobs:
         if: inputs.run_external_uptime == 'true'
         env:
           EXTERNAL_UPTIME_PROVIDER_EVIDENCE_JSON: ${{ secrets.EXTERNAL_UPTIME_PROVIDER_EVIDENCE_JSON }}
+          EXTERNAL_UPTIME_EVIDENCE_SIGNER_WORKFLOW: ${{ vars.EXTERNAL_UPTIME_EVIDENCE_SIGNER_WORKFLOW }}
+          EXTERNAL_UPTIME_EVIDENCE_SOURCE_SHA: ${{ vars.EXTERNAL_UPTIME_EVIDENCE_SOURCE_SHA }}
+          EXTERNAL_UPTIME_EVIDENCE_SOURCE_REF: ${{ vars.EXTERNAL_UPTIME_EVIDENCE_SOURCE_REF }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           test -n "$EXTERNAL_UPTIME_PROVIDER_EVIDENCE_JSON"
           mkdir -p .tmp
           printf '%s\n' "$EXTERNAL_UPTIME_PROVIDER_EVIDENCE_JSON" > .tmp/external-uptime-provider.production.json
           sh ./scripts/infra-ops.sh external-uptime-check \
             --providerEvidence .tmp/external-uptime-provider.production.json \
+            --providerEvidenceAttestation online \
+            --providerEvidenceRepository "${{ github.repository }}" \
+            --providerEvidenceWorkflow "$EXTERNAL_UPTIME_EVIDENCE_SIGNER_WORKFLOW" \
+            --providerEvidenceSourceDigest "$EXTERNAL_UPTIME_EVIDENCE_SOURCE_SHA" \
+            --providerEvidenceSourceRef "$EXTERNAL_UPTIME_EVIDENCE_SOURCE_REF" \
             --validateProviderEvidenceOnly
           sh ./scripts/infra-ops.sh external-uptime-check \
             --providerEvidence .tmp/external-uptime-provider.production.json \
+            --providerEvidenceAttestation online \
+            --providerEvidenceRepository "${{ github.repository }}" \
+            --providerEvidenceWorkflow "$EXTERNAL_UPTIME_EVIDENCE_SIGNER_WORKFLOW" \
+            --providerEvidenceSourceDigest "$EXTERNAL_UPTIME_EVIDENCE_SOURCE_SHA" \
+            --providerEvidenceSourceRef "$EXTERNAL_UPTIME_EVIDENCE_SOURCE_REF" \
             --requireProviderEvidence
 
       - name: Production Cloudflare edge load benchmark

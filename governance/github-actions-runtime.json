@@ -65,6 +65,21 @@
           "name": "CLOUDFLARE_ACCOUNT_ID",
           "purpose": "Cloudflare account id used by the Access verification workflow.",
           "pattern": "^[A-Za-z0-9_-]+$"
+        },
+        {
+          "name": "EXTERNAL_UPTIME_EVIDENCE_SIGNER_WORKFLOW",
+          "purpose": "Exact GitHub workflow identity that attested the provider evidence artifact.",
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/\\.github/workflows/[A-Za-z0-9_.-]+\\.ya?ml$"
+        },
+        {
+          "name": "EXTERNAL_UPTIME_EVIDENCE_SOURCE_SHA",
+          "purpose": "Full source commit bound into the provider evidence attestation.",
+          "pattern": "^[a-f0-9]{40}$"
+        },
+        {
+          "name": "EXTERNAL_UPTIME_EVIDENCE_SOURCE_REF",
+          "purpose": "Full Git ref bound into the provider evidence attestation.",
+          "pattern": "^refs/(heads|tags)/[A-Za-z0-9._/-]+$"
         }
       ]
     }

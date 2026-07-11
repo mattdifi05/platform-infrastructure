@@ -13,6 +13,11 @@ services:
       - "127.0.0.1:5000:5000"
     volumes:
       - enterprise_local_registry_data:/var/lib/registry
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:5000/v2/"]
+      interval: 20s
+      timeout: 5s
+      retries: 10
 
   traefik:
     volumes:

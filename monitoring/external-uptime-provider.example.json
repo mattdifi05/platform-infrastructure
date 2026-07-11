@@ -5,6 +5,12 @@
   "source": "provider-api",
   "verifiedAt": "replace-with-current-utc-timestamp",
   "maxAgeHours": 24,
+  "attestation": {
+    "repository": "owner/platform-infrastructure",
+    "signerWorkflow": "owner/platform-infrastructure/.github/workflows/provider-evidence.yml",
+    "sourceDigest": "replace-with-full-40-character-git-sha",
+    "sourceRef": "refs/heads/main"
+  },
   "monitors": [
     {
       "targetName": "portal-public-home",

@@ -30,6 +30,6 @@
     "cloudflare": "Create Health Checks or Synthetic Tests from these targets after DNS is live.",
     "betterstack": "Create HTTPS keyword/status monitors with the same status and latency thresholds.",
     "uptimerobot": "Create HTTPS monitors for public targets and keyword checks where expectedBodyIncludes is set.",
-    "evidenceTemplate": "Copy monitoring/external-uptime-provider.example.json, fill provider monitor ids, regions, verifiedAt, lastStatusCode, lastLatencyMs and lastCheckedAt after a live provider API/dashboard verification, then pass it with --providerEvidence."
+    "evidenceTemplate": "Copy monitoring/external-uptime-provider.example.json, fill provider monitor ids, regions and fresh provider results, attest the exact file with GitHub Artifact Attestations, then pass it with --providerEvidence and --providerEvidenceAttestation."
   }
 }

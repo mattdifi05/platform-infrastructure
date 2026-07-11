@@ -9,6 +9,7 @@ ARG GH_SHA256=02d1290eba130e0b896f3709ffff22e1c75a51475ddb70476a85abc6b5807af0
 
 RUN apk add --no-cache \
     bash \
+    bind-tools \
     ca-certificates \
     curl \
     dcron \

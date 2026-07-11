@@ -409,6 +409,7 @@ async function handleApi(req, res, url, context) {
       return json(res, {
         goNoGo: context.goNoGo,
         readiness: context.readiness,
+        statusCatalog: statusExecutorCatalog(context),
         statusRun: context.statusRun,
         statusEvents: readStatusRunEvents(
           clampNumber(Number(context.statusRun?.eventCount || 100), 1, 2000),
@@ -2376,6 +2377,16 @@ function statusEvidenceValidationCheck(row) {
     nextAction: row.status === "passed" ? "Nessuna azione immediata." : row.action,
     required: row.required,
   });
+}
+
+function statusExecutorCatalog(context) {
+  const checks = selectStatusRunChecks(context, statusRunCheckRunners(context), { scope: "all", category: "", checkId: "" });
+  return checks.map((check) => ({
+    id: check.id,
+    category: check.category,
+    executionMode: check.executionMode,
+    required: check.required !== false,
+  }));
 }
 
 function statusProbeHeaders(extra = {}) {
