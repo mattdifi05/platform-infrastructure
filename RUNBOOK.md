@@ -969,6 +969,25 @@ A private Ubuntu server can be healthy and ready for parallel migration while
 production remains `NO-GO`. That is correct until DNS, Cloudflare, GitHub,
 public monitoring, public load and off-site restore evidence are real.
 
+### T23 production candidate verdict
+
+The candidate verified on 2026-07-11 remains `NO-GO`. The authoritative local
+receipt is
+`/home/platform_infrastructure/remediation-work/20260711T044751Z-t23-production-candidate`.
+The clean candidate commit is `4c04042a6fabc42317e18896b949f16b35102c7a`.
+Functional health passed 11/11, but the exact runtime fingerprint correctly
+failed because the 24-service candidate core is not deployed over the 34-service
+historical runtime. Do not copy a passing flag into the report. Deploy in an
+approved maintenance window, then rerun the fingerprint from the deployed clean
+checkout with the production `.env`.
+
+The same verdict retains stale bootstrap/hardening evidence, UPS, complete
+pre-go-live, rotation, off-site DR and real alert delivery as local/maintenance
+blockers. GitHub run, authenticated external uptime, public load, signed
+release/rollback and Cloudflare Access remain provider blockers. Run
+`evidence-bundle-verify --requireComplete` only after every one of those proofs
+is real.
+
 After the final reports are generated, create a non-secret evidence archive:
 
 ```sh

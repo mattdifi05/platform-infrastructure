@@ -156,4 +156,15 @@
 | EV-T22-009 | T22 | Live preservation | before/after container identity, health and systemd inventory | PASS: 34 running, zero unhealthy, zero failed systemd units; application/database containers and volumes unchanged; no residual probe resources | 2026-07-11 |
 | EV-T22-010 | T22 | Private evidence integrity | `/home/platform_infrastructure/remediation-work/20260711T034525Z-t22-ci-readiness-evidence/CHECKSUMS.sha256` | PASS: 40 private files, directory 0700, evidence files 0600 and hashes verified | 2026-07-11 |
 
+| EV-T23-001 | T23 | Clean candidate identity | `runtime-fingerprint --envFile .env.example --project platform_infra_vps` at `4c04042` | EXPECTED NO-GO: clean candidate commit recorded; 24 expected core services do not match the 34 historical live containers and 36 exact mismatch issues are preserved | 2026-07-11 |
+| EV-T23-002 | T23 | Runtime functional health | final `functional-health-check` | PASS 11/11 with deterministic SHA256; no service recreate or configuration write | 2026-07-11 |
+| EV-T23-003 | T23 | Final behavior regression | testing hygiene with real report inventory present | PASS: 24 Control Center, 2 router, 15 workload contract, 4 functional, 5 fingerprint, 3 provider-auth and 6 alert tests; latent report age-label path fixed | 2026-07-11 |
+| EV-T23-004 | T23 | Admin audit runtime evidence | read-only Control Center audit JSONL via Docker exec plus file-store source policy | PASS: append-only writer, monotonic/unique events, no sensitive key finding and all required admin categories covered | 2026-07-11 |
+| EV-T23-005 | T23 | Enterprise 360 map | `enterprise-production-360-coverage` | PASS after removing the obsolete nonexistent access-review command reference; human periodic review and platform audit remain required | 2026-07-11 |
+| EV-T23-006 | T23 | Host readiness | fresh read-only `vps-host-readiness --ssh-port 22 --allow-failures` | NO-GO: one failed required check, `ups-protection`; no network, SSH, package, Docker or power mutation executed | 2026-07-11 |
+| EV-T23-007 | T23 | Final production decision | `production-go-no-go` | NO-GO: 18 total, 14 required, 13 blocking; 8 local/maintenance failures and 5 pending-provider checks | 2026-07-11 |
+| EV-T23-008 | T23 | Evidence bundle | `evidence-bundle --noArchive` plus `evidence-bundle-verify` | PASS integrity without `--requireComplete`; complete verification intentionally remains blocked by missing live/provider evidence | 2026-07-11 |
+| EV-T23-009 | T23 | Live preservation | final container, systemd, route and SSH session checks | PASS: 34 running, zero unhealthy, zero failed systemd units and fresh Mac-to-server SSH; applications, databases, volumes and backups unchanged | 2026-07-11 |
+| EV-T23-010 | T23 | Honest residual gates | final report and private evidence manifest | BLOCKED: no public staging/domain/Cloudflare proof, no signed release run, no candidate deploy, no clean-host restore, stale bootstrap/hardening apply evidence, no UPS and no approved maintenance window | 2026-07-11 |
+
 Every later entry must record positive, negative, regression and behavior-preservation evidence. Secret values must never be embedded.
