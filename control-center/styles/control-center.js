@@ -2,18 +2,18 @@
   "use strict";
 
   var appSelector = ".cc-app-shell, .login-shell";
-  var cacheLimit = 384;
-  var preloadPageLimit = 64;
-  var preloadWorkerCount = 8;
-  var preloadFetchTimeoutMs = 2500;
+  var cacheLimit = 32;
+  var cacheTtlMs = 15000;
+  var prefetchTimeoutMs = 1200;
   var sidebarStateKey = "platform-control-center-sidebar";
   var htmlCache = new Map();
   var activeRequest = null;
   var initialized = false;
   var bootId = "cc-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2);
   var fileManagerRefreshInFlight = false;
-  var preloadStarted = false;
   var prefetchInFlight = new Set();
+  var formSubmissions = new WeakSet();
+  var navigationSequence = 0;
   var opsNavLastPillRect = null;
   var opsNavPillFrame = 0;
   var opsNavLayoutFrame = 0;
@@ -57,8 +57,9 @@
     }, 5200);
   }
 
-  function storeCache(url, html) {
-    htmlCache.set(url, stripInitialPreloadHtml(html));
+  function storeCache(url, html, etag) {
+    htmlCache.delete(url);
+    htmlCache.set(url, { etag: etag || "", html: String(html || ""), storedAt: Date.now() });
     while (htmlCache.size > cacheLimit) {
       htmlCache.delete(htmlCache.keys().next().value);
     }
@@ -68,8 +69,13 @@
     htmlCache.clear();
   }
 
-  function stripInitialPreloadHtml(html) {
-    return String(html || "").replace(/<body([^>]*)\sdata-cc-preloading="true"([^>]*)>/i, "<body$1$2>");
+  function cachedPage(url, allowStale) {
+    var entry = htmlCache.get(url);
+    if (!entry) return null;
+    if (!allowStale && Date.now() - entry.storedAt > cacheTtlMs) return null;
+    htmlCache.delete(url);
+    htmlCache.set(url, entry);
+    return entry;
   }
 
   function payloadFromForm(form, submitter) {
@@ -102,63 +108,78 @@
     var method = (options && options.method ? options.method : "GET").toUpperCase();
     var useCache = method === "GET";
     var cacheKey = url.href;
-    if (useCache && htmlCache.has(cacheKey)) {
-      return { html: htmlCache.get(cacheKey), url: cacheKey, fromCache: true };
+    var freshCache = useCache ? cachedPage(cacheKey, false) : null;
+    var staleCache = useCache ? cachedPage(cacheKey, true) : null;
+    if (freshCache) {
+      return { html: freshCache.html, url: cacheKey, fromCache: true };
     }
 
     if (activeRequest) activeRequest.abort();
-    activeRequest = new AbortController();
+    var controller = new AbortController();
+    activeRequest = controller;
 
     var headers = new Headers(options && options.headers ? options.headers : {});
     headers.set("Accept", "text/html,*/*;q=0.8");
     headers.set("X-Requested-With", "platform-control-center");
+    if (staleCache && staleCache.etag) headers.set("If-None-Match", staleCache.etag);
     addMutationHeaders(headers, method);
 
-    var response = await fetch(url.href, {
-      body: options ? options.body : undefined,
-      credentials: "same-origin",
-      headers: headers,
-      method: method,
-      redirect: "follow",
-      signal: activeRequest.signal,
-    });
+    try {
+      var response = await fetch(url.href, {
+        body: options ? options.body : undefined,
+        credentials: "same-origin",
+        headers: headers,
+        method: method,
+        redirect: "follow",
+        signal: controller.signal,
+      });
 
-    var contentType = response.headers.get("content-type") || "";
-    if (contentType.indexOf("application/json") !== -1) {
-      var payload = await response.json();
-      if (!response.ok) throw new Error(payload.message || payload.error || "Request failed.");
-      throw new Error(payload.message || "The server returned JSON instead of a page update.");
-    }
+      if (response.status === 304 && staleCache) {
+        staleCache.storedAt = Date.now();
+        return { html: staleCache.html, url: cacheKey, fromCache: true, revalidated: true };
+      }
 
-    var html = await response.text();
-    if (!response.ok) {
-      throw new Error(extractError(html) || "Request failed.");
-    }
+      var contentType = response.headers.get("content-type") || "";
+      if (contentType.indexOf("application/json") !== -1) {
+        var payload = await response.json();
+        if (!response.ok) throw new Error(payload.message || payload.error || "Request failed.");
+        throw new Error(payload.message || "The server returned JSON instead of a page update.");
+      }
 
-    var finalUrl = response.url || url.href;
-    if (useCache) {
-      storeCache(cacheKey, html);
-      storeCache(finalUrl, html);
+      var html = await response.text();
+      if (!response.ok) {
+        throw new Error(extractError(html) || "Request failed.");
+      }
+
+      var finalUrl = response.url || url.href;
+      if (useCache) {
+        var etag = response.headers.get("etag") || "";
+        storeCache(cacheKey, html, etag);
+        storeCache(finalUrl, html, etag);
+      }
+      return { html: html, url: finalUrl, fromCache: false };
+    } finally {
+      if (activeRequest === controller) activeRequest = null;
     }
-    return { html: html, url: finalUrl, fromCache: false };
   }
 
   async function prefetchHtml(url) {
     if (!url || !canRenderPath(url) || prefetchInFlight.has(url.href)) return null;
-    if (htmlCache.has(url.href)) return { html: htmlCache.get(url.href), url: url.href, fromCache: true };
+    var cached = cachedPage(url.href, false);
+    if (cached) return { html: cached.html, url: url.href, fromCache: true };
     prefetchInFlight.add(url.href);
     try {
       var controller = new AbortController();
       var timeout = window.setTimeout(function () {
         controller.abort();
-      }, preloadFetchTimeoutMs);
+      }, prefetchTimeoutMs);
       var headers = new Headers();
       headers.set("Accept", "text/html,*/*;q=0.8");
       headers.set("X-Requested-With", "platform-control-center-prefetch");
       var response;
       try {
         response = await fetch(url.href, {
-          cache: "force-cache",
+          cache: "no-cache",
           credentials: "same-origin",
           headers: headers,
           method: "GET",
@@ -173,9 +194,10 @@
       if (contentType.indexOf("application/json") !== -1) return null;
       var html = await response.text();
       var finalUrl = response.url || url.href;
-      storeCache(url.href, html);
-      storeCache(finalUrl, html);
-      return { html: htmlCache.get(finalUrl) || htmlCache.get(url.href), url: finalUrl, fromCache: false };
+      var etag = response.headers.get("etag") || "";
+      storeCache(url.href, html, etag);
+      storeCache(finalUrl, html, etag);
+      return { html: html, url: finalUrl, fromCache: false };
     } catch {
       // Preload is opportunistic; normal navigation still fetches on demand.
       return null;
@@ -184,85 +206,6 @@
     }
   }
 
-  function collectPageUrlsForPreload(root, baseHref) {
-    var urls = new Map();
-    var add = function (value) {
-      var url;
-      try {
-        url = new URL(value, baseHref || window.location.href);
-      } catch {
-        return;
-      }
-      if (url.origin !== window.location.origin) return;
-      if (!url || !canRenderPath(url)) return;
-      urls.set(url.href, url);
-    };
-    root.querySelectorAll(".ops-brand[href], .ops-nav-subitem[href], [data-project-row-link]").forEach(function (node) {
-      add(node.getAttribute("href") || node.getAttribute("data-project-row-link") || "");
-    });
-    return Array.from(urls.values());
-  }
-
-  function pageUrlsForPreload() {
-    return collectPageUrlsForPreload(document, window.location.href);
-  }
-
-  function discoverPreloadUrls(html, baseHref) {
-    try {
-      var parsed = new DOMParser().parseFromString(html, "text/html");
-      return collectPageUrlsForPreload(parsed, baseHref);
-    } catch {
-      return [];
-    }
-  }
-
-  function preloadControlCenterPages() {
-    if (preloadStarted) return Promise.resolve();
-    preloadStarted = true;
-    var seen = new Set();
-    var queued = new Set();
-    var queue = [];
-    var enqueue = function (url) {
-      if (!url || seen.has(url.href) || queued.has(url.href) || seen.size + queue.length >= preloadPageLimit) return;
-      queued.add(url.href);
-      queue.push(url);
-    };
-    pageUrlsForPreload().forEach(enqueue);
-    var runBatch = async function () {
-      while (queue.length) {
-        var batch = queue.splice(0, preloadWorkerCount);
-        batch.forEach(function (url) {
-          queued.delete(url.href);
-          seen.add(url.href);
-        });
-        var results = await Promise.all(batch.map(prefetchHtml));
-        results.forEach(function (result) {
-          if (!result || !result.html) return;
-          discoverPreloadUrls(result.html, result.url).forEach(enqueue);
-        });
-      }
-    };
-    return runBatch();
-  }
-
-  function finishControlCenterPreload() {
-    document.body.removeAttribute("data-cc-preloading");
-  }
-
-  function startControlCenterPreload() {
-    preloadControlCenterPages().finally(finishControlCenterPreload);
-  }
-
-  function scheduleControlCenterPreload() {
-    var start = function () {
-      window.setTimeout(startControlCenterPreload, 300);
-    };
-    if (document.readyState === "complete") {
-      start();
-      return;
-    }
-    window.addEventListener("load", start, { once: true });
-  }
 
   function extractError(html) {
     try {
@@ -288,27 +231,61 @@
     document.body.dataset.ccBootId = bootId;
   }
 
+  function syncElementAttributes(current, next) {
+    Array.from(current.attributes).forEach(function (attribute) {
+      current.removeAttribute(attribute.name);
+    });
+    Array.from(next.attributes).forEach(function (attribute) {
+      current.setAttribute(attribute.name, attribute.value);
+    });
+  }
+
+  function updateStableElement(current, next, options) {
+    var imported = document.importNode(next, true);
+    if (options && options.preserveNavPill) {
+      var currentPill = current.querySelector(".ops-nav-pill");
+      var nextPill = imported.querySelector(".ops-nav-pill");
+      if (currentPill && nextPill) nextPill.replaceWith(currentPill);
+    }
+    syncElementAttributes(current, imported);
+    current.replaceChildren.apply(current, Array.from(imported.childNodes));
+  }
+
   function applyHtml(html, finalUrl, mode, options) {
     var previousSidebarScrollTop = options && typeof options.sidebarScrollTop === "number" ? options.sidebarScrollTop : currentSidebarScrollTop();
     var previousOpsNavExpandedState = captureOpsNavExpandedState();
     var previousPillRect = captureOpsNavPillRect() || opsNavLastPillRect;
     var parsed = new DOMParser().parseFromString(html, "text/html");
     var nextBody = parsed.body;
+    var currentShell = document.querySelector(".cc-app-shell");
+    var nextShell = parsed.querySelector(".cc-app-shell");
     if (!nextBody || !parsed.querySelector(appSelector)) {
       window.location.assign(finalUrl);
       return;
     }
-    nextBody.removeAttribute("data-cc-preloading");
-    nextBody.querySelector(".cc-preload-screen")?.remove();
 
     document.title = parsed.title || document.title;
     syncBodyAttributes(nextBody);
-    document.body.replaceChildren.apply(
-      document.body,
-      Array.from(nextBody.childNodes).map(function (node) {
-        return document.importNode(node, true);
-      })
-    );
+    if (currentShell && nextShell) {
+      var currentSidebar = currentShell.querySelector(".ops-sidebar");
+      var currentPage = currentShell.querySelector(".ops-page");
+      var nextSidebar = nextShell.querySelector(".ops-sidebar");
+      var nextPage = nextShell.querySelector(".ops-page");
+      if (!currentSidebar || !currentPage || !nextSidebar || !nextPage) {
+        window.location.assign(finalUrl);
+        return;
+      }
+      updateStableElement(currentSidebar, nextSidebar, { preserveNavPill: true });
+      updateStableElement(currentPage, nextPage);
+      currentShell.className = nextShell.className;
+    } else {
+      document.body.replaceChildren.apply(
+        document.body,
+        Array.from(nextBody.childNodes).map(function (node) {
+          return document.importNode(node, true);
+        })
+      );
+    }
 
     var target = new URL(finalUrl, window.location.href);
     var historyUrl = target.pathname + target.search + target.hash;
@@ -327,8 +304,15 @@
     scrollAfterRender(target);
     restoreSidebarScrollTop(previousSidebarScrollTop);
     positionOpsNavPill({ fromViewportRect: previousPillRect });
+    restoreNavigationFocus();
     opsNavLastPillRect = null;
     document.dispatchEvent(new CustomEvent("cc:navigation-complete", { detail: { url: target.href } }));
+  }
+
+  function restoreNavigationFocus() {
+    var active = document.querySelector(".ops-nav-subitem[aria-current='page']");
+    if (!active || typeof active.focus !== "function") return;
+    active.focus({ preventScroll: true });
   }
 
   function setText(node, value) {
@@ -389,20 +373,8 @@
     });
   }
 
-  function sleep(ms) {
-    return new Promise(function (resolve) {
-      window.setTimeout(resolve, ms);
-    });
-  }
-
   function statusRunnerRoot() {
     return document.querySelector("[data-status-runner]");
-  }
-
-  function statusStepDelay() {
-    var root = statusRunnerRoot();
-    var value = root ? Number(root.getAttribute("data-status-step-delay-ms") || 1500) : 1500;
-    return Number.isFinite(value) ? Math.max(0, value) : 1500;
   }
 
   function setStatusProgress(percent, label) {
@@ -451,30 +423,94 @@
     return document.querySelector('[data-status-category-card="' + String(id).replace(/"/g, "") + '"]');
   }
 
-  async function animateStatusRun(checkId) {
-    var steps = Array.from(document.querySelectorAll("[data-status-run-step]"));
-    if (checkId) {
-      steps = steps.filter(function (step) {
-        return step.getAttribute("data-status-run-step") === checkId;
+  function statusRunId() {
+    return "status-ui-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 10);
+  }
+
+  function statusStepById(checkId) {
+    return Array.from(document.querySelectorAll("[data-status-run-step]")).find(function (step) {
+      return step.getAttribute("data-status-run-step") === checkId;
+    }) || null;
+  }
+
+  function applyStatusEvent(event, state) {
+    if (!event || !state) return;
+    if (event.type === "run-started") {
+      state.total = Math.max(1, Number(event.total || 0));
+      setStatusRunState("In corso");
+      setStatusProgress(0, "Avvio controlli...");
+      document.querySelectorAll("[data-status-run-step]").forEach(function (step) {
+        setStatusStep(step, "idle", "In coda.");
       });
+      return;
     }
-    if (!steps.length) return;
-    var delay = statusStepDelay();
-    setStatusRunState("In corso");
-    setStatusProgress(0, "Avvio test reali...");
-    steps.forEach(function (step) {
-      setStatusStep(step, "idle", "In coda.");
+    var step = statusStepById(event.checkId || "");
+    if (event.type === "check-started") {
+      if (step) setStatusStep(step, "loading", "Esecuzione in corso...");
+      setStatusSection(sectionCardById(event.category), "loading", 50, "Controllo in corso...");
+      var label = step?.querySelector("strong")?.textContent?.trim() || event.checkId || "Controllo";
+      setStatusProgress(Math.round((state.completed / state.total) * 100), "Eseguo: " + label);
+      return;
+    }
+    if (event.type === "check-completed") {
+      state.completed += 1;
+      var passed = event.status === "passed" || event.status === "success";
+      if (step) setStatusStep(step, passed ? "passed" : "failed", friendlyStatusLabel(event.status));
+      setStatusSection(sectionCardById(event.category), passed ? "passed" : "blocked", passed ? 100 : 0, passed ? "Controllo superato." : "Controllo aperto.");
+      setStatusProgress(Math.round((state.completed / state.total) * 100), state.completed + " di " + state.total + " completati");
+      return;
+    }
+    if (event.type === "run-completed") {
+      setStatusProgress(100, "Controlli completati.");
+    }
+  }
+
+  function watchStatusRun(runId) {
+    var source = new EventSource("/control/v1/status/events/stream?runId=" + encodeURIComponent(runId), { withCredentials: true });
+    var settled = false;
+    var state = { completed: 0, total: 1 };
+    var resolvePromise;
+    var rejectPromise;
+    var completed = new Promise(function (resolve, reject) {
+      resolvePromise = resolve;
+      rejectPromise = reject;
     });
-    for (var index = 0; index < steps.length; index += 1) {
-      var step = steps[index];
-      var label = step.querySelector("strong")?.textContent?.trim() || "Test";
-      var category = step.getAttribute("data-status-run-step-category") || "";
-      setStatusStep(step, "loading", "Esecuzione in corso...");
-      setStatusSection(sectionCardById(category), "loading", 50, "Test in corso...");
-      setStatusProgress(Math.round((index / steps.length) * 100), "Eseguo: " + label);
-      await sleep(delay);
-    }
-    setStatusProgress(92, "Attendo esito finale...");
+    var timeout = window.setTimeout(function () {
+      if (settled) return;
+      settled = true;
+      source.close();
+      rejectPromise(new Error("Timeout stream Stato."));
+    }, 6 * 60 * 1000);
+    source.addEventListener("status", function (message) {
+      var event;
+      try {
+        event = JSON.parse(message.data);
+      } catch {
+        return;
+      }
+      applyStatusEvent(event, state);
+      if (event.type === "run-completed" && !settled) {
+        settled = true;
+        window.clearTimeout(timeout);
+        source.close();
+        resolvePromise(event);
+      }
+    });
+    source.onerror = function () {
+      if (settled || source.readyState !== EventSource.CLOSED) return;
+      settled = true;
+      window.clearTimeout(timeout);
+      rejectPromise(new Error("Stream Stato interrotto."));
+    };
+    return {
+      completed: completed,
+      close: function () {
+        if (settled) return;
+        settled = true;
+        window.clearTimeout(timeout);
+        source.close();
+      },
+    };
   }
 
   function applyStatusRunResult(payload) {
@@ -515,10 +551,10 @@
   async function submitStatusRun(form, submitter, action) {
     var button = submitter || form.querySelector("[data-status-run-button]");
     var consolePanel = document.querySelector("[data-status-run-console]");
-    var selectedCheck = form.querySelector('[name="checkId"]');
     var selectedCategory = form.querySelector('[name="category"]');
-    var selectedCheckId = selectedCheck ? selectedCheck.value || "" : "";
     var selectedCategoryId = selectedCategory ? selectedCategory.value || "" : "";
+    var runId = statusRunId();
+    var stream = null;
     clearCache();
     setBusy(true);
     if (consolePanel && consolePanel.tagName === "DETAILS") {
@@ -533,8 +569,11 @@
       headers.set("Accept", "application/json");
       headers.set("X-Requested-With", "platform-control-center");
       addMutationHeaders(headers, "POST");
+      var body = payloadFromForm(form, submitter);
+      body.set("runId", runId);
+      stream = watchStatusRun(runId);
       var fetchRun = fetch(action.href, {
-        body: payloadFromForm(form, submitter),
+        body: body,
         credentials: "same-origin",
         headers: headers,
         method: "POST",
@@ -544,9 +583,9 @@
         if (!response.ok) throw new Error(payload.message || payload.error || "Status run failed.");
         return payload;
       });
-      var result = await Promise.all([fetchRun, animateStatusRun(selectedCheckId)]);
-      applyStatusRunResult(result[0]);
-      await sleep(900);
+      var result = await fetchRun;
+      await stream.completed;
+      applyStatusRunResult(result);
       var page = sameOriginUrl(window.location.href);
       page.searchParams.set("section", "status");
       if (selectedCategoryId) page.searchParams.set("statusCategory", selectedCategoryId);
@@ -555,6 +594,7 @@
       applyHtml(html.html, html.url || page.href, "replace");
       return true;
     } catch (error) {
+      if (stream) stream.close();
       setBusy(false);
       setStatusRunState("Errore");
       setStatusProgress(100, "Run non completato.");
@@ -563,7 +603,7 @@
     } finally {
       if (button) {
         button.disabled = false;
-        button.setAttribute("aria-busy", "false");
+        button.removeAttribute("aria-busy");
       }
     }
   }
@@ -835,6 +875,7 @@
   function restoreOpsNavState(options) {
     var nav = document.querySelector(".ops-nav");
     var instant = Boolean(options && options.instant);
+    var compactNavigation = Boolean(window.matchMedia && window.matchMedia("(max-width: 860px)").matches);
     var preserved = options && options.expandedState && typeof options.expandedState === "object" ? options.expandedState : {};
     var state = readSidebarState();
     var opsState = state.opsNav && typeof state.opsNav === "object" ? state.opsNav : {};
@@ -848,7 +889,7 @@
         opsState[key] = true;
         opsStateChanged = true;
       }
-      var expanded = hasActiveItem ? true : typeof preserved[key] === "boolean" ? preserved[key] : typeof opsState[key] === "boolean" ? opsState[key] : current;
+      var expanded = hasActiveItem ? true : compactNavigation ? false : typeof preserved[key] === "boolean" ? preserved[key] : typeof opsState[key] === "boolean" ? opsState[key] : current;
       setOpsNavGroupExpanded(group, expanded);
     });
     if (opsStateChanged) {
@@ -1015,12 +1056,14 @@
 
   async function navigate(url, options) {
     if (!url || !canRenderPath(url)) return false;
+    var sequence = ++navigationSequence;
     var historyMode = options && options.history ? options.history : "push";
     var sidebarScrollTop = options && typeof options.sidebarScrollTop === "number" ? options.sidebarScrollTop : null;
     captureOpsNavPillRect();
     setBusy(true);
     try {
       var result = await requestHtml(url, { method: "GET" });
+      if (sequence !== navigationSequence) return true;
       applyHtml(result.html, result.url || url.href, historyMode, { sidebarScrollTop: sidebarScrollTop });
       return true;
     } catch (error) {
@@ -1037,6 +1080,12 @@
     if (!action || !canRenderPath(action) && action.pathname.indexOf("/actions/") !== 0) return false;
     if (method === "POST" && action.pathname === "/actions/status-check") {
       return submitStatusRun(form, submitter, action);
+    }
+    if (formSubmissions.has(form)) return true;
+    formSubmissions.add(form);
+    if (submitter) {
+      submitter.disabled = true;
+      submitter.setAttribute("aria-busy", "true");
     }
 
     setBusy(true);
@@ -1060,11 +1109,17 @@
       if (error && error.name === "AbortError") return true;
       showError(error && error.message ? error.message : "Action failed.");
       return false;
+    } finally {
+      formSubmissions.delete(form);
+      if (submitter && submitter.isConnected) {
+        submitter.disabled = false;
+        submitter.removeAttribute("aria-busy");
+      }
     }
   }
 
   function prefetch(url) {
-    if (!url || !canRenderPath(url) || htmlCache.has(url.href)) return;
+    if (!url || !canRenderPath(url) || cachedPage(url.href, false)) return;
     prefetchHtml(url);
   }
 
@@ -1298,6 +1353,7 @@
     startStatusTabs();
     startFileManagers();
     fitSingleLineText();
+    storeCache(window.location.href, document.documentElement.outerHTML, "");
 
     document.addEventListener("click", function (event) {
       var inlineStatusRun = event.target.closest ? event.target.closest("[data-status-run-inline]") : null;
@@ -1492,7 +1548,6 @@
       if (url) navigate(url, { history: "replace" });
     });
 
-    scheduleControlCenterPreload();
   }
 
   if (document.readyState === "loading") {

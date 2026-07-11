@@ -122,42 +122,9 @@ svg.fa-icon {
   position: relative;
 }
 
-body[data-cc-preloading="true"] .cc-app-shell {
-  opacity: 0;
-  pointer-events: none;
-  visibility: hidden;
-}
-
-.cc-preload-screen {
-  align-items: center;
-  background: #f5f7fb;
-  color: #0f172a;
-  display: none;
-  gap: 12px;
-  inset: 0;
-  justify-content: center;
-  min-height: 100vh;
-  position: fixed;
-  z-index: 1000;
-}
-
-body[data-cc-preloading="true"] .cc-preload-screen {
-  display: flex;
-}
-
-.cc-preload-spinner {
-  animation: ccPreloadSpin 900ms linear infinite;
-  border: 3px solid rgba(47, 125, 246, .18);
-  border-radius: 999px;
-  border-top-color: #2f7df6;
-  height: 22px;
-  width: 22px;
-}
-
-@keyframes ccPreloadSpin {
-  to {
-    transform: rotate(360deg);
-  }
+.cc-app-shell[aria-busy="true"] .ops-page {
+  opacity: .72;
+  transition: opacity 120ms ease;
 }
 
 .cc-shell-bg {
@@ -5139,7 +5106,7 @@ pre {
   .ops-layout {
     display: block;
     padding-left: 0;
-    padding-top: 190px;
+    padding-top: 0;
   }
 
   .ops-sidebar {
@@ -5147,25 +5114,25 @@ pre {
     border-bottom: 0;
     border-right: 0;
     bottom: auto;
-    grid-template-columns: auto minmax(0, 1fr);
+    grid-template-columns: 1fr;
     height: auto;
     left: 0;
-    max-height: none;
-    overflow: visible;
+    max-height: min(46dvh, 420px);
+    overflow-x: hidden;
+    overflow-y: auto;
     padding: 14px;
-    right: 0;
+    position: sticky;
+    right: auto;
     width: auto;
   }
 
   .ops-sidebar .ops-icon-link {
-    justify-self: end;
+    justify-self: start;
   }
 
   .ops-nav {
-    grid-column: 1 / -1;
-    grid-template-columns: repeat(4, minmax(156px, 1fr));
-    overflow-x: auto;
-    scrollbar-width: thin;
+    grid-template-columns: 1fr;
+    overflow: visible;
   }
 
   .ops-vault-item {
@@ -5179,7 +5146,7 @@ pre {
 
 @media (max-width: 680px) {
   .ops-layout {
-    padding-top: 236px;
+    padding-top: 0;
   }
 
   .ops-page {
@@ -5195,7 +5162,7 @@ pre {
   }
 
   .ops-nav {
-    grid-template-columns: repeat(4, minmax(150px, 1fr));
+    grid-template-columns: 1fr;
   }
 
   .ops-vault-list-head,

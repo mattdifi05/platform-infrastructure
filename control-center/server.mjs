@@ -88,6 +88,8 @@ const dockerStatsMaxAgeMs = clampNumber(Number(process.env.CONTROL_CENTER_DOCKER
 const resourceMetricsCache = { value: null, expiresAt: 0, failedUntil: 0 };
 const projectDiskUsageTtlMs = clampNumber(Number(process.env.CONTROL_CENTER_PROJECT_DISK_USAGE_TTL_MS || 30000), 1000, 300000);
 const projectDiskUsageCache = new Map();
+const controlContextCacheTtlMs = clampNumber(Number(process.env.CONTROL_CENTER_CONTEXT_CACHE_TTL_MS || 2000), 250, 5000);
+const controlContextCache = { key: "", value: null, expiresAt: 0, pending: null };
 const phpMyAdminInternalUrl = String(process.env.CONTROL_CENTER_PHPMYADMIN_INTERNAL_URL || "http://phpmyadmin:80").replace(/\/$/, "");
 const phpPgAdminInternalUrl = String(process.env.CONTROL_CENTER_PHPPGADMIN_INTERNAL_URL || "http://phppgadmin:80").replace(/\/$/, "");
 const databaseLiveApply = parseBoolean(process.env.CONTROL_CENTER_DATABASE_LIVE_APPLY || "");
@@ -254,7 +256,10 @@ const server = createServer(async (req, res) => {
     }, async () => {
       const state = readState();
       const projects = discoverProjects(state);
-      const context = await buildContext({ projects, state });
+      if (req.method !== "GET") invalidateControlContextCache();
+      const context = req.method === "GET" && !url.pathname.startsWith("/control/")
+        ? await buildCachedContext({ projects, state })
+        : await buildContext({ projects, state });
 
     if (url.pathname.startsWith("/control/")) {
       await handleApi(req, res, url, context);
@@ -361,7 +366,7 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-      html(res, renderControlCenter(context, url.searchParams));
+      htmlPage(req, res, renderControlCenter(context, url.searchParams));
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -392,6 +397,9 @@ async function handleApi(req, res, url, context) {
 
   try {
     if (method === "GET" && route(parts, "control", "overview")) return json(res, context.overview);
+    if (method === "GET" && route(parts, "control", "status", "events", "stream")) {
+      return streamStatusRunEvents(req, res, url.searchParams.get("runId") || "");
+    }
     if (method === "GET" && route(parts, "control", "status", "events")) {
       const runId = sanitizeIdentifier(url.searchParams.get("runId") || "");
       const limit = clampNumber(Number(url.searchParams.get("limit") || (runId ? 2000 : 200)), 1, 2000);
@@ -649,6 +657,7 @@ async function handleStatusCheck(req, res, context) {
     scope: payload.scope,
     category: payload.category,
     checkId: payload.checkId,
+    runId: payload.runId,
   });
   appendStatusRun(run);
   appendAudit({
@@ -1500,7 +1509,7 @@ async function buildContext({ projects, state }) {
     deployments: { latest: deployments.slice(0, 5) },
     backups,
   };
-  return {
+  const context = {
     overview,
     projects,
     applications,
@@ -1545,6 +1554,51 @@ async function buildContext({ projects, state }) {
     environment,
     advancedServices: advancedServices(),
   };
+  context.statusRows = opsStatusRows(context);
+  return context;
+}
+
+function controlContextKey({ projects, state }) {
+  return sha256(JSON.stringify({
+    projects: projects.map((project) => ({
+      enabled: project.enabled,
+      host: project.host,
+      runtime: project.runtime,
+      slug: project.slug,
+      status: project.status,
+    })),
+    state,
+  }));
+}
+
+function invalidateControlContextCache() {
+  controlContextCache.key = "";
+  controlContextCache.value = null;
+  controlContextCache.expiresAt = 0;
+  controlContextCache.pending = null;
+}
+
+async function buildCachedContext(input) {
+  const key = controlContextKey(input);
+  const now = Date.now();
+  if (controlContextCache.value && controlContextCache.key === key && controlContextCache.expiresAt > now) {
+    return controlContextCache.value;
+  }
+  if (controlContextCache.pending && controlContextCache.key === key) return controlContextCache.pending;
+  controlContextCache.key = key;
+  const pending = buildContext(input).then((context) => {
+    if (controlContextCache.pending === pending && controlContextCache.key === key) {
+      controlContextCache.value = context;
+      controlContextCache.expiresAt = Date.now() + controlContextCacheTtlMs;
+      controlContextCache.pending = null;
+    }
+    return context;
+  }, (error) => {
+    if (controlContextCache.pending === pending) invalidateControlContextCache();
+    throw error;
+  });
+  controlContextCache.pending = pending;
+  return pending;
 }
 
 function adapterRegistry(context) {
@@ -2118,7 +2172,8 @@ async function runStatusVerification(context, options = {}) {
   const request = normalizeStatusRunRequest(options);
   const startedAt = new Date().toISOString();
   const startedMs = Date.now();
-  const runId = `status-${startedMs.toString(36)}`;
+  const runId = normalizeStatusRunId(options.runId, startedMs);
+  if (readStatusRunEvents(1, runId).length) throw new ValidationError("Status run ID already exists.");
   const runners = statusRunCheckRunners(context);
   const selected = selectStatusRunChecks(context, runners, request);
   const catalog = selected.length ? selected : [{
@@ -2174,6 +2229,13 @@ function normalizeStatusRunRequest(options = {}) {
     category: sanitizeIdentifier(options.category || ""),
     checkId: sanitizeIdentifier(options.checkId || ""),
   };
+}
+
+function normalizeStatusRunId(value, startedMs = Date.now()) {
+  const candidate = String(value || "").trim();
+  if (!candidate) return `status-${startedMs.toString(36)}`;
+  if (!/^status-[a-z0-9][a-z0-9-]{7,79}$/.test(candidate)) throw new ValidationError("Invalid status run ID.");
+  return candidate;
 }
 
 function statusRunTargetLabel(request) {
@@ -2267,7 +2329,7 @@ function statusRunCheckRunners(context) {
 }
 
 function selectStatusRunChecks(context, runners, request) {
-  const rows = opsStatusRows(context);
+  const rows = statusRowsForContext(context);
   const runnerById = new Map(runners.map((runner) => [runner.id, runner]));
   if (request.scope === "check" && request.checkId) {
     const runner = runnerById.get(request.checkId);
@@ -4744,11 +4806,7 @@ function renderControlCenter(context, params) {
 ${controlCenterStylesheetLinks()}
 ${controlCenterScriptTags()}
 </head>
-<body data-cc-theme="light" data-cc-preloading="true">
-<div class="cc-preload-screen" role="status" aria-live="polite">
-  <span class="cc-preload-spinner" aria-hidden="true"></span>
-  <strong>Caricamento portale</strong>
-</div>
+<body data-cc-theme="light">
 <main aria-busy="false" class="cc-app-shell ops-shell section-${escapeHtml(section)}">
   <div class="ops-layout">
     <aside class="ops-topbar ops-sidebar" aria-label="Menu principale">
@@ -4845,7 +4903,7 @@ function operationsNavChildren(section, context, activeProject, params = new URL
 }
 
 function statusNavChildren(context, params = new URLSearchParams(), currentSection = false) {
-  const groups = groupStatusRowsByCategory(opsStatusRows(context));
+  const groups = groupStatusRowsByCategory(statusRowsForContext(context));
   const activeId = selectedStatusGroup(groups, params).meta.id;
   return groups.map((group) => {
     const counts = statusCategoryCounts(group.rows);
@@ -4894,7 +4952,7 @@ function renderOpsStatus(context, params = new URLSearchParams()) {
   const report = context.goNoGo;
   const isGo = report.status === "go";
   const status = isGo ? "GO LIVE" : "NO GO LIVE";
-  const rows = opsStatusRows(context);
+  const rows = statusRowsForContext(context);
   const passedRows = rows.filter((row) => row.status === "passed");
   const notPassedRows = rows.filter((row) => row.status !== "passed");
   const groups = groupStatusRowsByCategory(rows);
@@ -5280,11 +5338,11 @@ function renderProjectDetailBackups(context, project) {
         <input type="hidden" name="projectId" value="${escapeHtml(project.slug)}">
         <input type="hidden" name="returnTo" value="project-detail">
         <input type="hidden" name="backupMode" value="all">
-        <button class="ops-button secondary" type="submit">${controlIcon("backups")} Esegui backup</button>
+        <button class="ops-button secondary" type="submit">${controlIcon("backups")} Avvia backup</button>
       </form>
     </div>
     <div class="ops-project-backup-list" aria-label="Backup disponibili per ${escapeHtml(project.name)}">
-      ${backupRows || empty("Nessun backup", "Esegui il primo backup dell'applicazione.")}
+      ${backupRows || empty("Nessun backup", "Avvia il primo backup dell'applicazione.")}
     </div>
     <div class="ops-project-backup-actions">
       <form method="post" action="/actions/backup-command" class="ops-project-backup-restore-form">
@@ -5294,7 +5352,7 @@ function renderProjectDetailBackups(context, project) {
         <input type="hidden" name="returnTo" value="project-detail">
         ${renderProjectSelect("backupRef", "Backup da ripristinare", optionRows || '<option value="">Nessun backup disponibile</option>', restoreDisabled)}
         ${renderProjectSelect("restoreMode", "Contenuto restore", '<option value="all">Tutto</option><option value="database">Solo database</option><option value="source">Solo sorgenti</option>', restoreDisabled)}
-        <button class="ops-button danger" type="submit"${restoreDisabled}>${controlIcon("refresh")} Ripristina backup</button>
+        <button class="ops-button danger" type="submit"${restoreDisabled}>${controlIcon("refresh")} Avvia restore drill</button>
       </form>
     </div>
   </div>`;
@@ -6301,6 +6359,10 @@ function opsStatusRows(context) {
     }));
   }
   return dedupeStatusRows(rows);
+}
+
+function statusRowsForContext(context) {
+  return Array.isArray(context.statusRows) ? context.statusRows : opsStatusRows(context);
 }
 
 function dedupeStatusRows(rows) {
@@ -10067,6 +10129,41 @@ function readStatusRunEvents(limit = 200, runId = "") {
   return filtered.slice(0, limit).reverse();
 }
 
+async function streamStatusRunEvents(req, res, requestedRunId) {
+  if (!String(requestedRunId || "").trim()) throw new ValidationError("Status run ID is required.");
+  const runId = normalizeStatusRunId(requestedRunId, 0);
+  res.writeHead(200, {
+    "content-type": "text/event-stream; charset=utf-8",
+    "cache-control": "no-store",
+    connection: "keep-alive",
+    "x-accel-buffering": "no",
+    "x-platform-control-center-runtime": "node",
+  });
+  res.flushHeaders?.();
+  let closed = false;
+  let lastSequence = 0;
+  let keepaliveAt = Date.now();
+  const deadline = Date.now() + 6 * 60 * 1000;
+  req.once("close", () => { closed = true; });
+  while (!closed && Date.now() < deadline) {
+    const events = readStatusRunEvents(2000, runId).filter((event) => Number(event.sequence || 0) > lastSequence);
+    for (const event of events) {
+      lastSequence = Math.max(lastSequence, Number(event.sequence || 0));
+      res.write(`id: ${lastSequence}\nevent: status\ndata: ${JSON.stringify(event)}\n\n`);
+      if (event.type === "run-completed") {
+        res.end();
+        return;
+      }
+    }
+    if (Date.now() - keepaliveAt >= 15_000) {
+      res.write(": keepalive\n\n");
+      keepaliveAt = Date.now();
+    }
+    await new Promise((resolve) => setTimeout(resolve, 150));
+  }
+  if (!closed) res.end();
+}
+
 function objectState(name) {
   const parsed = controlState.read(name, { strict: true }).value;
   validateStateRecord(parsed);
@@ -12633,6 +12730,23 @@ function html(res, content, status = 200) {
   res.end(content);
 }
 
+function htmlPage(req, res, content, status = 200) {
+  const etag = `"${createHash("sha256").update(content).digest("base64url")}"`;
+  const headers = {
+    "content-type": "text/html; charset=utf-8",
+    "cache-control": "private, max-age=0, must-revalidate",
+    etag,
+    "x-platform-control-center-runtime": "node",
+  };
+  if (status === 200 && String(req.headers["if-none-match"] || "") === etag) {
+    res.writeHead(304, headers);
+    res.end();
+    return;
+  }
+  res.writeHead(status, headers);
+  res.end(content);
+}
+
 function renderTransientMessage(res, status, title, message) {
   html(res, `<!doctype html>
 <html lang="it">
@@ -12696,12 +12810,21 @@ function serveStaticAsset(req, res, url, rootDir, prefix) {
     ".woff2": "font/woff2",
     ".svg": "image/svg+xml; charset=utf-8",
   };
-  res.writeHead(200, {
+  const content = readFileSync(target);
+  const etag = `"${createHash("sha256").update(content).digest("base64url")}"`;
+  const headers = {
     "content-type": contentTypes[extension] || "application/octet-stream",
-    "cache-control": "no-store",
+    "cache-control": "public, max-age=3600, must-revalidate",
+    etag,
     "x-platform-control-center-runtime": "node",
-  });
-  res.end(readFileSync(target));
+  };
+  if (String(req.headers["if-none-match"] || "") === etag) {
+    res.writeHead(304, headers);
+    res.end();
+    return;
+  }
+  res.writeHead(200, headers);
+  res.end(content);
 }
 
 function escapeHtml(value) {

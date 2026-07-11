@@ -132,9 +132,8 @@ test("Admin Control Center local foundation", async (t) => {
 
   const html = await getText(`${baseUrl}/`);
   assert.match(html, /Admin Control Center/);
-  assert.match(html, /<body data-cc-theme="light" data-cc-preloading="true">/);
-  assert.match(html, /class="cc-preload-screen"/);
-  assert.match(html, /Caricamento portale/);
+  assert.match(html, /<body data-cc-theme="light">/);
+  assert.doesNotMatch(html, /data-cc-preloading|cc-preload-screen|Caricamento portale/);
   assert.match(html, /ops-shell/);
   assert.match(html, /Stato/);
   assert.match(html, /Applicazioni/);
@@ -239,6 +238,12 @@ test("Admin Control Center local foundation", async (t) => {
   assert.match(html, /ops-brand/);
   assert.doesNotMatch(html, /phpmyadmin\.localhost\.com/);
   assert.doesNotMatch(html, /grafana\.localhost\.com/);
+  const pageResponse = await fetch(`${baseUrl}/`);
+  const pageEtag = pageResponse.headers.get("etag");
+  assert.match(pageEtag || "", /^"[A-Za-z0-9_-]+"$/);
+  assert.match(pageResponse.headers.get("cache-control") || "", /private, max-age=0, must-revalidate/);
+  const pageRevalidated = await fetch(`${baseUrl}/`, { headers: { "if-none-match": pageEtag } });
+  assert.equal(pageRevalidated.status, 304);
 
   const docsHtml = await getTextWithHost(`${baseUrl}/`, "docs.localhost.com");
   assert.match(docsHtml, /Platform Documentation/);
@@ -251,14 +256,19 @@ test("Admin Control Center local foundation", async (t) => {
   assert.match(readmeHtml, /Platform Infrastructure|URL locali/);
 
   const localStyles = await getText(`${baseUrl}/assets/control-center/control-center.css`);
+  const serverSource = readFileSync(path.join(infraRoot, "control-center", "server.mjs"), "utf8");
+  const styleResponse = await fetch(`${baseUrl}/assets/control-center/control-center.css`);
+  const styleEtag = styleResponse.headers.get("etag");
+  assert.match(styleEtag || "", /^"[A-Za-z0-9_-]+"$/);
+  assert.match(styleResponse.headers.get("cache-control") || "", /public, max-age=3600, must-revalidate/);
+  const styleRevalidated = await fetch(`${baseUrl}/assets/control-center/control-center.css`, { headers: { "if-none-match": styleEtag } });
+  assert.equal(styleRevalidated.status, 304);
   assert.match(localStyles, /--cc-bg/);
   assert.match(localStyles, /--cc-surface-raised/);
   assert.match(localStyles, /--cc-line/);
   assert.match(localStyles, /\.cc-app-shell/);
-  assert.match(localStyles, /body\[data-cc-preloading="true"\] \.cc-app-shell\s*\{[^}]*visibility:\s*hidden/s);
-  assert.match(localStyles, /\.cc-preload-screen\s*\{[^}]*position:\s*fixed/s);
-  assert.match(localStyles, /body\[data-cc-preloading="true"\] \.cc-preload-screen\s*\{[^}]*display:\s*flex/s);
-  assert.match(localStyles, /@keyframes ccPreloadSpin/);
+  assert.doesNotMatch(localStyles, /data-cc-preloading|cc-preload-screen|ccPreloadSpin/);
+  assert.match(localStyles, /\.cc-app-shell\[aria-busy="true"\] \.ops-page\s*\{[^}]*opacity:\s*\.72/s);
   assert.match(localStyles, /\.ops-shell/);
   assert.match(localStyles, /\.ops-sidebar/);
   assert.match(localStyles, /\.ops-sidebar\s*\{[^}]*overflow-anchor:\s*none/s);
@@ -335,8 +345,8 @@ test("Admin Control Center local foundation", async (t) => {
   assert.doesNotMatch(localStyles, /\.ops-status-section-row\.active/);
   assert.match(localStyles, /\.ops-status-check-summary\s*\{[^}]*grid-template-columns:\s*12px\s*minmax\(0,\s*1fr\)\s*auto\s*auto/s);
   assert.match(localStyles, /\.ops-status-check-run/);
-  assert.match(localStyles, /padding-top:\s*190px/);
-  assert.match(localStyles, /padding-top:\s*236px/);
+  assert.doesNotMatch(localStyles, /padding-top:\s*190px/);
+  assert.doesNotMatch(localStyles, /padding-top:\s*236px/);
   assert.match(localStyles, /\.ops-project-row-host a/);
   assert.match(localStyles, /white-space:\s*nowrap/);
   assert.match(localStyles, /\.ops-project-detail-screen/);
@@ -420,14 +430,29 @@ test("Admin Control Center local foundation", async (t) => {
   assert.match(localClient, /addEventListener\("submit"/);
   assert.match(localClient, /addEventListener\("popstate"/);
   assert.match(localClient, /htmlCache/);
-  assert.match(localClient, /var cacheLimit = 384/);
-  assert.match(localClient, /var preloadPageLimit = 64/);
-  assert.match(localClient, /var preloadWorkerCount = 8/);
-  assert.match(localClient, /var preloadFetchTimeoutMs = 2500/);
-  assert.match(localClient, /stripInitialPreloadHtml/);
-  assert.match(localClient, /htmlCache\.set\(url, stripInitialPreloadHtml\(html\)\)/);
-  assert.match(localClient, /nextBody\.removeAttribute\("data-cc-preloading"\)/);
-  assert.match(localClient, /nextBody\.querySelector\("\.cc-preload-screen"\)\?\.remove\(\)/);
+  assert.match(localClient, /var cacheLimit = 32/);
+  assert.match(localClient, /var cacheTtlMs = 15000/);
+  assert.match(localClient, /var prefetchTimeoutMs = 1200/);
+  assert.match(localClient, /var formSubmissions = new WeakSet\(\)/);
+  assert.match(localClient, /var navigationSequence = 0/);
+  assert.match(localClient, /If-None-Match/);
+  assert.match(localClient, /response\.status === 304/);
+  assert.doesNotMatch(localClient, /preloadPageLimit|preloadWorkerCount|stripInitialPreloadHtml|data-cc-preloading|cc-preload-screen/);
+  assert.match(localClient, /updateStableElement\(currentSidebar, nextSidebar, \{ preserveNavPill: true \}\)/);
+  assert.match(localClient, /updateStableElement\(currentPage, nextPage\)/);
+  assert.match(localClient, /nextPill\.replaceWith\(currentPill\)/);
+  assert.doesNotMatch(localClient, /currentSidebar\.replaceWith/);
+  assert.doesNotMatch(localClient, /currentPage\.replaceWith/);
+  assert.match(localClient, /matchMedia\("\(max-width: 860px\)"\)/);
+  assert.match(localStyles, /@media \(max-width: 860px\)[\s\S]*?\.ops-sidebar\s*\{[^}]*max-height:\s*min\(46dvh, 420px\)[^}]*position:\s*sticky/s);
+  assert.match(localStyles, /@media \(max-width: 860px\)[\s\S]*?\.ops-nav\s*\{[^}]*grid-template-columns:\s*1fr/s);
+  assert.match(serverSource, /CONTROL_CENTER_CONTEXT_CACHE_TTL_MS/);
+  assert.match(serverSource, /req\.method !== "GET"\) invalidateControlContextCache\(\)/);
+  assert.match(serverSource, /req\.method === "GET" && !url\.pathname\.startsWith\("\/control\/"\)\s*\? await buildCachedContext/);
+  assert.match(serverSource, /controlContextCache\.pending && controlContextCache\.key === key/);
+  assert.match(serverSource, /context\.statusRows = opsStatusRows\(context\)/);
+  assert.match(serverSource, /function statusRowsForContext\(context\)/);
+  assert.match(localClient, /if \(sequence !== navigationSequence\) return true/);
   assert.match(localClient, /ccBootId/);
   assert.match(localClient, /data-copy-command/);
   assert.match(localClient, /fitSingleLineText/);
@@ -457,7 +482,7 @@ test("Admin Control Center local foundation", async (t) => {
   assert.match(localClient, /pendingSidebarScrollAt/);
   assert.doesNotMatch(localClient, /opsNavPendingTargetKey/);
   assert.doesNotMatch(localClient, /opsNavPreMoved/);
-  assert.match(localClient, /preloadStarted/);
+  assert.doesNotMatch(localClient, /preloadStarted/);
   assert.match(localClient, /prefetchInFlight/);
   assert.match(localClient, /getBoundingClientRect/);
   assert.match(localClient, /opsNavPixel/);
@@ -473,20 +498,8 @@ test("Admin Control Center local foundation", async (t) => {
   assert.match(localClient, /controller\.abort\(\)/);
   assert.match(localClient, /signal: controller\.signal/);
   assert.match(localClient, /window\.clearTimeout\(timeout\)/);
-  assert.match(localClient, /return \{ html: htmlCache\.get\(url\.href\), url: url\.href, fromCache: true \}/);
-  assert.match(localClient, /return \{ html: htmlCache\.get\(finalUrl\) \|\| htmlCache\.get\(url\.href\), url: finalUrl, fromCache: false \}/);
-  assert.match(localClient, /collectPageUrlsForPreload/);
-  assert.match(localClient, /discoverPreloadUrls/);
-  assert.match(localClient, /discoverPreloadUrls\(result\.html, result\.url\)\.forEach\(enqueue\)/);
-  assert.match(localClient, /queue\.splice\(0, preloadWorkerCount\)/);
-  assert.match(localClient, /pageUrlsForPreload/);
-  assert.match(localClient, /preloadControlCenterPages/);
-  assert.match(localClient, /finishControlCenterPreload/);
-  assert.match(localClient, /startControlCenterPreload/);
-  assert.match(localClient, /scheduleControlCenterPreload/);
-  assert.match(localClient, /window\.setTimeout\(startControlCenterPreload, 300\)/);
-  assert.match(localClient, /window\.addEventListener\("load", start, \{ once: true \}\)/);
-  assert.match(localClient, /document\.body\.removeAttribute\("data-cc-preloading"\)/);
+  assert.match(localClient, /cachedPage/);
+  assert.doesNotMatch(localClient, /collectPageUrlsForPreload|discoverPreloadUrls|pageUrlsForPreload|preloadControlCenterPages|finishControlCenterPreload|startControlCenterPreload|scheduleControlCenterPreload/);
   assert.match(localClient, /positionOpsNavPill/);
   assert.match(localClient, /captureOpsNavPillRect/);
   assert.match(localClient, /moveOpsNavPillTowardLink/);
@@ -508,7 +521,7 @@ test("Admin Control Center local foundation", async (t) => {
   assert.match(localClient, /if \(hasActiveItem && key && opsState\[key\] !== true\) \{/);
   assert.match(localClient, /opsState\[key\] = true;\s*opsStateChanged = true;/);
   assert.match(localClient, /if \(opsStateChanged\) \{\s*state\.opsNav = opsState;\s*writeSidebarState\(state\);/);
-  assert.match(localClient, /hasActiveItem \? true : typeof preserved\[key\] === "boolean" \? preserved\[key\] : typeof opsState\[key\] === "boolean" \? opsState\[key\] : current/);
+  assert.match(localClient, /hasActiveItem \? true : compactNavigation \? false : typeof preserved\[key\] === "boolean" \? preserved\[key\] : typeof opsState\[key\] === "boolean" \? opsState\[key\] : current/);
   assert.match(localClient, /expandedState: options && options\.opsNavExpandedState/);
   assert.match(localClient, /activeNavItemInGroup/);
   assert.match(localClient, /groupContainsActiveNavItem/);
@@ -535,8 +548,9 @@ test("Admin Control Center local foundation", async (t) => {
   assert.doesNotMatch(localClient, /await sleep\(190\)/);
   assert.doesNotMatch(localClient, /await fadeOutNavIndicatorForSectionChange\(url\)/);
   assert.match(localClient, /restoreSidebarState\(\{ instantOpsNav: true \}\)/);
-  assert.match(localClient, /preloadControlCenterPages\(\)\.finally\(finishControlCenterPreload\)/);
-  assert.match(localClient, /scheduleControlCenterPreload\(\)/);
+  assert.match(localClient, /new EventSource\("\/control\/v1\/status\/events\/stream\?runId="/);
+  assert.match(localClient, /event\.type === "check-completed"/);
+  assert.doesNotMatch(localClient, /animateStatusRun|statusStepDelay|await sleep\(delay\)/);
   assert.match(localClient, /prefetchHtml\(url\)/);
   assert.doesNotMatch(localClient, /function prefetch\(url\)[\s\S]*requestHtml\(url, \{ method: "GET" \}\)/);
   assert.doesNotMatch(localClient, /window\.history\.replaceState\(\{ ccDynamic: true \}[\s\S]*restoreSidebarState\(\);\s*positionOpsNavPill\(\{ instant: true \}\)/);
@@ -564,7 +578,7 @@ test("Admin Control Center local foundation", async (t) => {
   assert.match(localClient, /data-status-run-console/);
   assert.match(localClient, /data-status-run-inline/);
   assert.match(localClient, /statusCategory/);
-  assert.match(localClient, /selectedCheckId/);
+  assert.match(localClient, /body\.set\("runId", runId\)/);
   assert.match(localClient, /Non eseguito in questo run/);
   assert.match(localClient, /setAttribute\("open", ""\)/);
   assert.match(localClient, /navigator\.clipboard\.writeText/);
@@ -659,9 +673,10 @@ test("Admin Control Center local foundation", async (t) => {
   assert.match(projectDetailHtml, /Solo database/);
   assert.match(projectDetailHtml, /Solo sorgenti/);
   assert.match(projectDetailHtml, /Backup da ripristinare/);
-  assert.match(projectDetailHtml, /Ripristina backup/);
-  assert.match(projectDetailHtml, /Esegui backup/);
-  assert.ok(projectDetailHtml.indexOf("Esegui backup") < projectDetailHtml.indexOf('class="ops-project-backup-list"'));
+  assert.match(projectDetailHtml, /Avvia restore drill/);
+  assert.doesNotMatch(projectDetailHtml, />Ripristina backup</);
+  assert.match(projectDetailHtml, /Avvia backup/);
+  assert.ok(projectDetailHtml.indexOf("Avvia backup") < projectDetailHtml.indexOf('class="ops-project-backup-list"'));
   assert.match(projectDetailHtml, /ops-project-backup-head-form/);
   assert.doesNotMatch(projectDetailHtml, /Backup DB/);
   assert.match(projectDetailHtml, /name="returnTo" value="project-detail"/);
@@ -930,10 +945,14 @@ test("Admin Control Center local foundation", async (t) => {
   assert.equal(statusCategoryRun.providerTouched, false);
   assert.equal(statusCategoryRun.checks.length > 0, true);
   assert.equal(statusCategoryRun.checks.every((check) => check.category === "backup-dr"), true);
+  const streamedRunId = `status-ui-${Date.now().toString(36)}-fixture`;
+  const statusEventStream = await fetch(`${baseUrl}/control/v1/status/events/stream?runId=${streamedRunId}`);
+  assert.equal(statusEventStream.status, 200);
+  assert.match(statusEventStream.headers.get("content-type") || "", /text\/event-stream/);
   const statusSingleRunResponse = await fetch(`${baseUrl}/actions/status-check`, {
     method: "POST",
     headers: { accept: "application/json", "content-type": "application/x-www-form-urlencoded" },
-    body: "scope=check&category=domain-edge&checkId=cloudflare-access-admin",
+    body: `scope=check&category=domain-edge&checkId=cloudflare-access-admin&runId=${streamedRunId}`,
   });
   assert.equal(statusSingleRunResponse.ok, true);
   const statusSingleRun = await statusSingleRunResponse.json();
@@ -942,6 +961,12 @@ test("Admin Control Center local foundation", async (t) => {
   assert.equal(statusSingleRun.checks.length, 1);
   assert.equal(statusSingleRun.checks[0].id, "cloudflare-access-admin");
   assert.equal(statusSingleRun.checks[0].executionMode, "external-required");
+  const statusEventText = await statusEventStream.text();
+  assert.match(statusEventText, /event: status/);
+  assert.match(statusEventText, /"type":"run-started"/);
+  assert.match(statusEventText, /"type":"check-started"/);
+  assert.match(statusEventText, /"type":"check-completed"/);
+  assert.match(statusEventText, /"type":"run-completed"/);
   const statusHtmlAfterRun = await getText(`${baseUrl}/?section=status`);
   assert.match(statusHtmlAfterRun, /Ultimo run/);
   assert.match(statusHtmlAfterRun, /data-status-run-step-mark/);

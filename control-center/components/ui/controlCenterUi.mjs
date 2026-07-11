@@ -22,7 +22,7 @@ export const controlCenterScriptEntrypoints = [
   "/assets/control-center/control-center.js",
 ];
 
-const controlCenterAssetVersion = process.env.CONTROL_CENTER_ASSET_VERSION || "20260704-0025";
+const controlCenterAssetVersion = process.env.CONTROL_CENTER_ASSET_VERSION || "20260711-0110";
 
 function versionedAssetHref(href) {
   return `${href}${href.includes("?") ? "&" : "?"}v=${encodeURIComponent(controlCenterAssetVersion)}`;
