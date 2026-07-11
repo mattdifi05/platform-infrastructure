@@ -19,6 +19,13 @@ Use this checklist on the VPS Ubuntu LTS VPS before exposing public traffic.
 - [ ] `sh ./scripts/container-metrics-sandbox-test.sh` passed without touching the live Docker runtime.
 - [ ] `sudo sh ./scripts/install-container-metrics-collector.sh --apply --deploy-user <deploy-user> --repo-root <absolute-repo-path>` completed in an approved maintenance window.
 - [ ] `sudo sh ./scripts/install-container-metrics-collector.sh --verify --repo-root <absolute-repo-path>` passed, proving a fresh complete per-container snapshot and node-exporter textfile metrics.
+- [ ] `sh ./scripts/host-reliability-sandbox-test.sh` passed.
+- [ ] `sudo sh ./scripts/install-host-reliability-collector.sh --apply --repo-root <absolute-repo-path>` completed, followed by `--verify` with full SMART/NVMe coverage.
+- [ ] Node-exporter uses the same `NODE_EXPORTER_TEXTFILE_DIR` as the host collectors; Prometheus reports the host and container collector series as fresh.
+- [ ] `systemd-networkd-wait-online.service` passes for the production interface. Any drop-in was applied with `configure-host-wait-online.sh`, without `netplan apply` over SSH.
+- [ ] Production addressing is deterministic through Ethernet/static configuration or a router DHCP reservation, and a console-backed reboot preserved SSH, route and Docker access.
+- [ ] Pending package and reboot state recorded; controlled patch/reboot evidence proves SSH, NVMe mounts, Docker and all required containers healthy afterward.
+- [ ] Supported UPS hardware is visible through NUT and a controlled on-battery/shutdown drill passed. Configuration without hardware is not evidence.
 
 ## Repository And Environment
 

@@ -195,6 +195,20 @@ BackupStale
 RestoreDrillStale
 AlertDeliveryFailed
 HostDiskUsageHigh
+HostDiskUsageCritical
+HostDiskWillFillSoon
+HostReliabilityCollectorMissing
+HostNetworkNotReady
+HostUpdatesPending
+HostRebootRequired
+HostDriveTelemetryMissing
+HostDriveUnhealthy
+HostDriveMediaErrors
+HostIoPressureHigh
+HostJournalUsageHigh
+HostUpsMissing
+HostUpsOnBattery
+HostUpsChargeLow
 HostMemoryUsageHigh
 HostCpuUsageHigh
 ContainerCpuUsageHigh
@@ -557,6 +571,61 @@ For Cloudflare R2, use the S3-compatible Restic repository endpoint and keep
 `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` in the VPS secret environment or
 root-only systemd/cron environment, not in Git.
 
+## Host reliability, storage and power
+
+The host reliability collector exports default-route and wait-online state,
+pending package count, reboot requirement, journal size, Linux I/O pressure,
+SMART/NVMe health, temperature, wear and media errors, plus NUT UPS state. It
+writes an atomic, non-secret node-exporter textfile every minute.
+
+Validate before host mutation:
+
+```sh
+sh ./scripts/host-reliability-sandbox-test.sh
+sudo sh ./scripts/install-host-reliability-collector.sh \
+  --plan \
+  --repo-root /home/platform_infrastructure/platform-infrastructure
+sudo sh ./scripts/configure-host-wait-online.sh --plan --interface wlp3s0
+```
+
+Install and verify on the current reference server without changing Netplan,
+DHCP, routes or SSH:
+
+```sh
+sudo sh ./scripts/install-host-reliability-collector.sh \
+  --apply \
+  --repo-root /home/platform_infrastructure/platform-infrastructure
+sudo sh ./scripts/install-host-reliability-collector.sh \
+  --verify \
+  --repo-root /home/platform_infrastructure/platform-infrastructure
+sudo sh ./scripts/configure-host-wait-online.sh --apply --interface wlp3s0
+sudo sh ./scripts/configure-host-wait-online.sh --verify --interface wlp3s0
+```
+
+`configure-host-wait-online.sh` changes only the wait-online command and never
+runs `netplan apply` or restarts `systemd-networkd`. Use `--remove` to delete
+its drop-in. A deterministic production network still requires Ethernet or a
+router DHCP reservation plus a console-backed reboot test; successful
+wait-online on the current Wi-Fi lease does not close that requirement.
+
+Node-exporter must mount the same textfile directory used by both host
+collectors. Set `NODE_EXPORTER_TEXTFILE_DIR` only when the collector repository
+path differs from the Compose project directory. Confirm the real scrape with:
+
+```promql
+platform_host_reliability_collector_healthy
+platform_host_drive_telemetry_count
+platform_container_metrics_collector_healthy
+```
+
+Do not run a broad `apt upgrade` or reboot during an unplanned SSH session.
+Record pending packages, create a maintenance window, verify console or
+out-of-band access, apply updates, reboot only when required, then repeat SSH,
+route, mount, Docker, container health and Prometheus checks. Automatic reboot
+remains disabled. UPS readiness requires supported physical hardware, NUT
+visibility and a controlled on-battery/shutdown drill; never mark it passed
+from configuration alone.
+
 ## VPS hardening and Cloudflare
 
 Run on a new VPS Ubuntu LTS VPS before public traffic:
@@ -605,7 +674,8 @@ because the effective `sshd -T` output, not only the file contents, must show
 and `.md`. It should pass after Docker Engine, the Compose plugin, Git, UFW,
 fail2ban, SSH hardening, unattended upgrades, auditd, AppArmor and Docker daemon
 hardening are installed, and it also verifies the expected SSH port and matching
-UFW allow rule. Every check includes remediation text in JSON and Markdown so a
+UFW allow rule, both host collectors, deterministic network readiness and UPS
+telemetry. Every check includes remediation text in JSON and Markdown so a
 failed report can be used as the host fix checklist. If Docker daemon hardening
 fails, merge the reviewed
 `/etc/docker/daemon.json.platform-template` into `/etc/docker/daemon.json`,

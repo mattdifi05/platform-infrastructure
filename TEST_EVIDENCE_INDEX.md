@@ -134,4 +134,15 @@
 | EV-T20-009 | T20/T22 | Residual global harness gates | `maintainability-hygiene` and `testing-hygiene` | KNOWN BLOCKERS outside T20: alert permission wrapper delegation and ops mount hiding `jose`/`pg`; dedicated candidate suite is green | 2026-07-11 |
 | EV-T20-010 | T20 | Safety and private evidence | candidate isolation, cleanup, before/after live inventory and checksums | PASS: read-only candidate with synthetic tmpfs data only; candidate/tunnel/images removed; no live service or data mutation | 2026-07-11 |
 
+| EV-T21-001 | T21 | Read-only host baseline | OS, route, failed units, mounts, Docker inventory, packages, storage, logs and power inventory | PASS: Ubuntu 26.04, NVMe-backed home/Docker paths, 34 running containers; identified wait-online failure, missing drive tools, 32 pending updates and no UPS | 2026-07-11 |
+| EV-T21-002 | T21 | Collector behavior | shell syntax plus `host-reliability-sandbox-test.sh` positive and negative fixtures | PASS: route, patch, drive, I/O and UPS states are truthful; missing route fails closed and absent telemetry remains zero | 2026-07-11 |
+| EV-T21-003 | T21 | Drive telemetry | live systemd collector, SMART/NVMe tools and node-exporter textfile | PASS: 2/2 physical drives covered, both healthy, zero media errors, atomic fresh metrics | 2026-07-11 |
+| EV-T21-004 | T21 | Network readiness | direct interface probe plus `configure-host-wait-online.sh --apply/--verify` | PASS: wait-online active on `wlp3s0`, default route unchanged and fresh SSH session passed; no Netplan/network service restart | 2026-07-11 |
+| EV-T21-005 | T10/T21 | Container metrics activation | hardened host service plus fresh JSON and Prometheus textfile | PASS: 34/34 running containers observed, no null CPU/RAM samples and collector healthy | 2026-07-11 |
+| EV-T21-006 | T21 | End-to-end observability | Prometheus target API and instant queries | PASS: node-exporter target up, drive telemetry count 2 and container collector health 1 | 2026-07-11 |
+| EV-T21-007 | T21 | Alerts and repository gates | promtool, static security, governance and canonical VPS Compose render | PASS: 26 rules, security/governance green and live-env render valid | 2026-07-11 |
+| EV-T21-008 | T21 | Live blast radius | before/after full container IDs excluding selected node-exporter recreate | PASS: all other 33 IDs unchanged; 34 running, zero unhealthy, zero failed systemd units | 2026-07-11 |
+| EV-T21-009 | T21 | Access and storage preservation | new SSH session, route, NVMe mounts, Docker daemon and container health after every live step | PASS: server remained accessible; application/database containers and volumes were not modified | 2026-07-11 |
+| EV-T21-010 | T21 | Honest residual gates | final VPS host readiness and package/hardware inventory | PARTIAL: collectors and network check pass; UPS fails truthfully; Wi-Fi DHCP reboot proof and controlled 32-package patch/reboot remain open | 2026-07-11 |
+
 Every later entry must record positive, negative, regression and behavior-preservation evidence. Secret values must never be embedded.
