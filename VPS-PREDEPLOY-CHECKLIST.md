@@ -97,8 +97,10 @@ Use this checklist on the VPS Ubuntu LTS VPS before exposing public traffic.
 - [ ] `sh ./scripts/waf-smoke.sh` passed.
 - [ ] `sh ./scripts/alert-evidence.sh --sendTest --requireEmailDelivery` passed and the JSON/Markdown reports under `reports/alerts/` were archived outside Git.
 - [ ] `sh ./scripts/external-uptime-check.sh --dryRun` passed and provider monitors were created from `monitoring/external-uptime.example.json`.
-- [ ] `sh ./scripts/external-uptime-check.sh --providerEvidence ./monitoring/external-uptime-provider.production.json --validateProviderEvidenceOnly` passed and wrote `reports/uptime/` with real provider monitor ids, public URLs, regions, `lastStatusCode`, `lastLatencyMs`, `lastCheckedAt` and a fresh `verifiedAt`.
-- [ ] `sh ./scripts/external-uptime-check.sh --envFile .env --providerEvidence ./monitoring/external-uptime-provider.production.json --requireProviderEvidence` passed with the same provider evidence plus a direct public probe.
+- [ ] Provider uptime evidence was produced by a dedicated GitHub workflow and its exact SHA256 is covered by a GitHub/Sigstore attestation bound to the expected repository, workflow, commit and ref.
+- [ ] `external-uptime-check --providerEvidence ... --providerEvidenceAttestation online --providerEvidenceRepository OWNER/REPO --providerEvidenceWorkflow OWNER/REPO/.github/workflows/provider-evidence.yml --providerEvidenceSourceDigest FULL_GIT_SHA --providerEvidenceSourceRef refs/heads/main --validateProviderEvidenceOnly` passed and wrote `reports/uptime/` with authenticated provider results.
+- [ ] The same authenticated evidence arguments passed with `external-uptime-check --envFile .env ... --requireProviderEvidence` plus a direct public probe.
+- [ ] `sh ./scripts/functional-health-check.sh` passed and the runtime fingerprint matched a clean deployed commit and every Compose service config hash.
 - [ ] `sh ./scripts/failure-tests.sh --confirmServiceStop` passed in staging.
 - [ ] `sh ./scripts/load-benchmark.sh --profiles 50,100,500 --url https://api.example.com/health --requirePublicTarget --requireEdgeEvidence --expectedEdgeProvider cloudflare` completed with `status=passed`, classified the target as public, recorded edge evidence, and archived `reports/load/`.
 - [ ] `sh ./scripts/production-preflight.sh` passed.

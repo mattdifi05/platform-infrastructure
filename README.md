@@ -257,14 +257,15 @@ Il dry-run scrive un report diagnostico in `reports/uptime/` con
 `mode=dry-run` e `providerEvidence.verified=false`; serve per archiviare la
 validazione del manifest, ma non soddisfa il production go/no-go.
 
-Quando DNS, CDN e TLS sono attivi, crea i monitor nel provider esterno, copia `monitoring/external-uptime-provider.example.json`, compila `monitorId`, `verifiedAt`, regioni reali, ultimo status code, latenza e `lastCheckedAt` letti dal provider, poi esegui:
+Quando DNS, CDN e TLS sono attivi, crea i monitor nel provider esterno, copia `monitoring/external-uptime-provider.example.json`, compila `monitorId`, `verifiedAt`, regioni reali, ultimo status code, latenza e `lastCheckedAt` letti dal provider. Il file deve essere prodotto da un workflow GitHub dedicato e attestato con GitHub Artifact Attestations: un campo locale `verified: true` non e' evidence. Poi esegui:
 
 ```sh
-sh ./scripts/external-uptime-check.sh --providerEvidence ./monitoring/external-uptime-provider.production.json --validateProviderEvidenceOnly
-sh ./scripts/external-uptime-check.sh --envFile .env --providerEvidence ./monitoring/external-uptime-provider.production.json --requireProviderEvidence
+PROVIDER_EVIDENCE_ARGS="--providerEvidenceAttestation online --providerEvidenceRepository OWNER/REPO --providerEvidenceWorkflow OWNER/REPO/.github/workflows/provider-evidence.yml --providerEvidenceSourceDigest FULL_GIT_SHA --providerEvidenceSourceRef refs/heads/main"
+sh ./scripts/external-uptime-check.sh --providerEvidence ./monitoring/external-uptime-provider.production.json $PROVIDER_EVIDENCE_ARGS --validateProviderEvidenceOnly
+sh ./scripts/external-uptime-check.sh --envFile .env --providerEvidence ./monitoring/external-uptime-provider.production.json $PROVIDER_EVIDENCE_ARGS --requireProviderEvidence
 ```
 
-Il go/no-go accetta `reports/uptime/` solo se i target pubblici sono coperti da provider evidence esterna verificata e con ultimi risultati provider freschi; il secondo comando aggiunge anche una sonda HTTP diretta dal punto in cui lo esegui.
+Il go/no-go accetta `reports/uptime/` solo se il digest esatto del file e' verificato crittograficamente, i target pubblici sono coperti da provider evidence esterna fresca e i risultati passano; il secondo comando aggiunge anche una sonda HTTP diretta dal punto in cui lo esegui.
 
 ## HTTPS locale
 

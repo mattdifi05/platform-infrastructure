@@ -333,24 +333,41 @@ checks and latency budgets. Copy
 `monitoring/external-uptime-provider.example.json` to a production-only evidence
 file, fill the provider monitor ids, regions and a fresh `verifiedAt` timestamp,
 plus provider-reported `lastStatusCode`, `lastLatencyMs` and `lastCheckedAt`
-for every monitor. Validate the evidence file, then run the real probe from
-outside the local network or from the VPS:
+for every monitor. Produce and attest that exact file in a dedicated GitHub
+workflow. A self-authored `verified: true` field is rejected. Validate the
+GitHub/Sigstore attestation, then run the real probe from outside the local
+network or from the VPS:
 
 ```sh
+PROVIDER_EVIDENCE_ARGS="--providerEvidenceAttestation online --providerEvidenceRepository OWNER/REPO --providerEvidenceWorkflow OWNER/REPO/.github/workflows/provider-evidence.yml --providerEvidenceSourceDigest FULL_GIT_SHA --providerEvidenceSourceRef refs/heads/main"
+
 sh ./scripts/external-uptime-check.sh \
   --providerEvidence ./monitoring/external-uptime-provider.production.json \
+  $PROVIDER_EVIDENCE_ARGS \
   --validateProviderEvidenceOnly
 
 sh ./scripts/external-uptime-check.sh \
   --envFile .env \
   --providerEvidence ./monitoring/external-uptime-provider.production.json \
+  $PROVIDER_EVIDENCE_ARGS \
   --requireProviderEvidence
 ```
 
 Archive the JSON/Markdown report from `reports/uptime/`. The production
 go/no-go gate rejects reports that only prove local HTTP reachability and do not
-include verified external provider evidence with fresh provider-reported
-results.
+include cryptographically authenticated external provider evidence with fresh
+provider-reported results.
+
+Runtime candidate identity is a separate fail-closed gate:
+
+```sh
+sh ./scripts/functional-health-check.sh
+sh ./scripts/infra-ops.sh runtime-fingerprint --envFile .env --project platform_infra_vps
+```
+
+The runtime fingerprint passes only when the worktree is clean and every
+Compose service config hash matches exactly one running container. It reads no
+container environment values.
 
 ## Resilience drills
 
