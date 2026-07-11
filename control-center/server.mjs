@@ -3,7 +3,7 @@ import { request as httpsRequest } from "node:https";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { spawnSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { appendFileSync, closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, statfsSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, statfsSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { AuthRequestError, createControlCenterAuth } from "./auth/oidc.mjs";
@@ -42,6 +42,9 @@ import {
   readLegacyVaultMaterial,
   sealVaultPlaintext,
 } from "./vault/keyring.mjs";
+import { controlIcon } from "./components/ui/controlIcons.mjs";
+import { createControlStateStore, validateStateRecord } from "./state/catalog.mjs";
+import { executeStatusChecks } from "./status/executor.mjs";
 
 const port = Number(process.env.CONTROL_CENTER_PORT || 8080);
 const bindHost = String(process.env.CONTROL_CENTER_BIND_HOST || "0.0.0.0").trim();
@@ -52,17 +55,10 @@ const projectsRoot = process.env.PROJECTS_ROOT || "/var/www/projects";
 const docsRoot = process.env.CONTROL_CENTER_DOCS_ROOT || "/var/www/infra-docs";
 const platformInfraRoot = process.env.CONTROL_CENTER_INFRA_ROOT || process.env.PLATFORM_INFRA_ROOT || docsRoot;
 const backupRoot = process.env.CONTROL_CENTER_BACKUP_ROOT || path.join(platformInfraRoot, "backups");
-const stateFile = process.env.PROJECT_STATE_FILE || "/var/www/project-state/projects.json";
-const auditFile = process.env.PROJECT_AUDIT_FILE || "/var/www/project-state/audit.jsonl";
-const operationsFile = process.env.PROJECT_OPERATIONS_FILE || "/var/www/project-state/operations.jsonl";
-const applicationsFile = process.env.PROJECT_APPLICATIONS_FILE || "/var/www/project-state/applications.json";
-const domainsFile = process.env.PROJECT_DOMAINS_FILE || "/var/www/project-state/domains.json";
 const databasesFile = process.env.PROJECT_DATABASES_FILE || "/var/www/project-state/databases.json";
 const databasePrincipalsFile = process.env.PROJECT_DATABASE_PRINCIPALS_FILE || "/var/www/project-state/database-principals.json";
 const databaseDeleteOperationsFile = process.env.PROJECT_DATABASE_DESTRUCTIVE_OPERATIONS_FILE || "/var/www/project-state/database-destructive-operations.json";
 const databaseCredentialDir = process.env.PROJECT_DATABASE_CREDENTIAL_DIR || path.join(path.dirname(databasesFile), "database-credentials");
-const storageBucketsFile = process.env.PROJECT_STORAGE_BUCKETS_FILE || "/var/www/project-state/storage-buckets.json";
-const sensitiveMaterialsFile = process.env.PROJECT_SENSITIVE_MATERIALS_FILE || "/var/www/project-state/sensitive-materials.json";
 const vaultFile = process.env.PROJECT_VAULT_FILE || "/var/www/project-state/secret-vault.json";
 const vaultKeyFile = process.env.CONTROL_CENTER_VAULT_KEY_FILE || "";
 const vaultActiveKeyId = process.env.CONTROL_CENTER_VAULT_ACTIVE_KEY_ID || "";
@@ -70,20 +66,8 @@ const vaultLegacyKeyFile = process.env.CONTROL_CENTER_VAULT_LEGACY_KEY_FILE || "
 const existingSecretsDir = process.env.CONTROL_CENTER_EXISTING_SECRETS_DIR || path.join(platformInfraRoot, "secrets");
 const includeRunSecretsInVaultImport = parseBoolean(process.env.CONTROL_CENTER_IMPORT_RUN_SECRETS || "");
 const vaultRevealTtlMs = clampNumber(Number(process.env.CONTROL_CENTER_VAULT_REVEAL_TTL_MS || 120000), 10000, 600000);
-const workerJobsFile = process.env.PROJECT_WORKER_JOBS_FILE || "/var/www/project-state/worker-jobs.json";
-const identityAccessFile = process.env.PROJECT_IDENTITY_ACCESS_FILE || "/var/www/project-state/identity-access.json";
-const deploymentsFile = process.env.PROJECT_DEPLOYMENTS_FILE || "/var/www/project-state/deployments.jsonl";
-const backupRecordsFile = process.env.PROJECT_BACKUP_RECORDS_FILE || "/var/www/project-state/backups.jsonl";
 const backupJobsDir = process.env.PROJECT_BACKUP_JOBS_DIR || "/var/www/project-state/backup-jobs";
-const resourceLimitsFile = process.env.PROJECT_RESOURCE_LIMITS_FILE || "/var/www/project-state/resource-limits.json";
-const securityPoliciesFile = process.env.PROJECT_SECURITY_POLICIES_FILE || "/var/www/project-state/security-policies.json";
-const alertsFile = process.env.PROJECT_ALERTS_FILE || "/var/www/project-state/alerts.json";
-const notificationChannelsFile = process.env.PROJECT_NOTIFICATION_CHANNELS_FILE || "/var/www/project-state/notification-channels.json";
-const providerConnectionsFile = process.env.PROJECT_PROVIDER_CONNECTIONS_FILE || "/var/www/project-state/provider-connections.json";
-const settingsFile = process.env.PROJECT_SETTINGS_FILE || "/var/www/project-state/settings.json";
-const webspacesFile = process.env.PROJECT_WEBSPACES_FILE || "/var/www/project-state/webspaces.json";
 const dockerStatsFile = process.env.PROJECT_DOCKER_STATS_FILE || "/var/www/project-state/docker-stats.json";
-const statusRunsFile = process.env.PROJECT_STATUS_RUNS_FILE || "/var/www/project-state/status-runs.jsonl";
 const reportsRoot = process.env.CONTROL_CENTER_REPORTS_ROOT || path.join(platformInfraRoot, "reports");
 const databaseDeleteEvidenceMaxAgeMs = clampNumber(Number(process.env.CONTROL_CENTER_DATABASE_DELETE_EVIDENCE_MAX_AGE_SECONDS || 86400), 3600, 604800) * 1000;
 const environment = normalizeEnvironment(process.env.CONTROL_CENTER_ENV || "local");
@@ -119,6 +103,8 @@ const statusWafUrl = String(process.env.CONTROL_CENTER_STATUS_WAF_URL || "https:
 const statusProbeTimeoutMs = clampNumber(Number(process.env.CONTROL_CENTER_STATUS_PROBE_TIMEOUT_MS || 4000), 500, 15000);
 const statusProbeTlsVerify = parseBoolean(process.env.CONTROL_CENTER_STATUS_TLS_VERIFY || "");
 const statusRunStepDelayMs = clampNumber(Number(process.env.CONTROL_CENTER_STATUS_STEP_DELAY_MS || 1500), 0, 10000);
+const statusRunCheckTimeoutMs = clampNumber(Number(process.env.CONTROL_CENTER_STATUS_CHECK_TIMEOUT_MS || 30000), 1000, 300000);
+const controlState = createControlStateStore(process.env);
 const controlAuth = await createControlCenterAuth();
 const requestIdentity = new AsyncLocalStorage();
 
@@ -401,12 +387,27 @@ process.once("SIGINT", shutdown);
 
 async function handleApi(req, res, url, context) {
   const method = (req.method || "GET").toUpperCase();
-  const parts = url.pathname.split("/").filter(Boolean);
+  const parts = normalizeControlApiParts(url.pathname.split("/").filter(Boolean));
   const payload = await readPayload(req);
 
   try {
     if (method === "GET" && route(parts, "control", "overview")) return json(res, context.overview);
-    if (method === "GET" && route(parts, "control", "status")) return json(res, { goNoGo: context.goNoGo, readiness: context.readiness, statusRun: context.statusRun });
+    if (method === "GET" && route(parts, "control", "status", "events")) {
+      const runId = sanitizeIdentifier(url.searchParams.get("runId") || "");
+      const limit = clampNumber(Number(url.searchParams.get("limit") || (runId ? 2000 : 200)), 1, 2000);
+      return json(res, { events: readStatusRunEvents(limit, runId) });
+    }
+    if (method === "GET" && route(parts, "control", "status")) {
+      return json(res, {
+        goNoGo: context.goNoGo,
+        readiness: context.readiness,
+        statusRun: context.statusRun,
+        statusEvents: readStatusRunEvents(
+          clampNumber(Number(context.statusRun?.eventCount || 100), 1, 2000),
+          context.statusRun?.id || "",
+        ),
+      });
+    }
     if (method === "GET" && route(parts, "control", "go-no-go")) return json(res, context.goNoGo);
     if (method === "GET" && route(parts, "control", "projects")) return json(res, { projects: context.projects });
     if (method === "POST" && route(parts, "control", "projects")) return json(res, planProjectCreate(payload, context), 202);
@@ -2117,18 +2118,15 @@ async function runStatusVerification(context, options = {}) {
   const request = normalizeStatusRunRequest(options);
   const startedAt = new Date().toISOString();
   const startedMs = Date.now();
-  const checks = [];
-  const add = (check) => checks.push(statusRunCheck(check));
+  const runId = `status-${startedMs.toString(36)}`;
   const runners = statusRunCheckRunners(context);
   const selected = selectStatusRunChecks(context, runners, request);
-
-  for (const item of selected) {
-    await statusRunStepPause();
-    add(item.run ? await item.run() : statusSnapshotCheck(item.row));
-  }
-
-  if (!checks.length) {
-    add(statusRunCheck({
+  const catalog = selected.length ? selected : [{
+    id: "status-selection-empty",
+    category: request.category || "operational-evidence",
+    executionMode: "evidence-validation",
+    required: false,
+    run: () => statusRunCheck({
       id: "status-selection-empty",
       title: "Selezione test vuota",
       category: request.category || "operational-evidence",
@@ -2137,12 +2135,20 @@ async function runStatusVerification(context, options = {}) {
       detail: "Nessun controllo disponibile per la selezione richiesta.",
       nextAction: "Scegli una sezione con controlli o rilancia tutti i test reali.",
       required: false,
-    }));
-  }
+    }),
+  }];
+  const execution = await executeStatusChecks({
+    runId,
+    checks: catalog,
+    delayMs: statusRunStepDelayMs,
+    timeoutMs: statusRunCheckTimeoutMs,
+    onEvent: appendStatusRunEvent,
+  });
+  const checks = execution.checks;
 
   const summary = statusRunSummary(checks);
   return sanitizeEvent({
-    id: `status-${startedMs.toString(36)}`,
+    id: runId,
     generatedAt: startedAt,
     finishedAt: new Date().toISOString(),
     durationMs: Date.now() - startedMs,
@@ -2157,6 +2163,7 @@ async function runStatusVerification(context, options = {}) {
     dockerTouched: false,
     summary,
     checks,
+    eventCount: execution.events.length,
   });
 }
 
@@ -2182,6 +2189,7 @@ function statusRunCheckRunners(context) {
     {
       id: "portal-through-waf",
       category: "domain-edge",
+      executionMode: "probe",
       run: () => statusHttpCheck({
         id: "portal-through-waf",
         title: "Portal attraverso WAF",
@@ -2198,6 +2206,7 @@ function statusRunCheckRunners(context) {
     {
       id: "waf-sensitive-file-block",
       category: "security",
+      executionMode: "probe",
       run: () => statusHttpCheck({
         id: "waf-sensitive-file-block",
         title: "WAF blocca file sensibili",
@@ -2213,6 +2222,7 @@ function statusRunCheckRunners(context) {
     {
       id: "go-no-go-report-readable",
       category: "go-live",
+      executionMode: "evidence-validation",
       run: () => statusRunCheck({
         id: "go-no-go-report-readable",
         title: "Report go/no-go leggibile",
@@ -2226,6 +2236,7 @@ function statusRunCheckRunners(context) {
     {
       id: "go-no-go-verdict",
       category: "go-live",
+      executionMode: "evidence-validation",
       run: () => statusRunCheck({
         id: "go-no-go-verdict",
         title: "Decisione produzione",
@@ -2241,6 +2252,7 @@ function statusRunCheckRunners(context) {
     {
       id: "readiness-matrix-readable",
       category: "governance",
+      executionMode: "evidence-validation",
       run: () => statusRunCheck({
         id: "readiness-matrix-readable",
         title: "Matrice readiness caricata",
@@ -2261,36 +2273,47 @@ function selectStatusRunChecks(context, runners, request) {
     const runner = runnerById.get(request.checkId);
     if (runner) return [runner];
     const row = rows.find((item) => item.technicalId === request.checkId || item.id === request.checkId);
-    return row ? [{ id: row.technicalId, category: row.category, row }] : [];
+    return row ? [statusEvidenceRunner(row)] : [];
   }
   if (request.scope === "category" && request.category) {
     const categoryRunners = runners.filter((runner) => runner.category === request.category);
     const runnerIds = new Set(categoryRunners.map((runner) => runner.id));
-    const snapshots = rows
+    const evidenceChecks = rows
       .filter((row) => row.category === request.category)
       .filter((row) => !runnerIds.has(row.technicalId))
-      .map((row) => ({ id: row.technicalId, category: row.category, row }));
-    return [...categoryRunners, ...snapshots];
+      .map(statusEvidenceRunner);
+    return [...categoryRunners, ...evidenceChecks];
   }
-  return runners;
+  const runnerIds = new Set(runners.map((runner) => runner.id));
+  return [
+    ...runners,
+    ...rows.filter((row) => !runnerIds.has(row.technicalId)).map(statusEvidenceRunner),
+  ];
 }
 
-function statusSnapshotCheck(row) {
+function statusEvidenceRunner(row) {
+  const externalRequired = ["authorization-required", "pending-live-proof", "pending-provider"].includes(row.status);
+  return {
+    id: row.technicalId || row.id,
+    title: row.control || row.technicalId || "Controllo",
+    category: row.category || "operational-evidence",
+    required: row.required,
+    executionMode: externalRequired ? "external-required" : "evidence-validation",
+    run: () => statusEvidenceValidationCheck(row),
+  };
+}
+
+function statusEvidenceValidationCheck(row) {
   return statusRunCheck({
     id: row.technicalId || row.id,
     title: row.control || row.technicalId || "Controllo",
     category: row.category || "operational-evidence",
-    source: row.source || "Evidence corrente",
+    source: row.source || "Validazione evidence",
     status: row.status,
-    detail: row.reason || "Snapshot evidence corrente.",
+    detail: row.reason || "Evidence ricontrollata dal catalogo Stato.",
     nextAction: row.status === "passed" ? "Nessuna azione immediata." : row.action,
     required: row.required,
   });
-}
-
-function statusRunStepPause() {
-  if (!statusRunStepDelayMs) return Promise.resolve();
-  return new Promise((resolve) => setTimeout(resolve, statusRunStepDelayMs));
 }
 
 function statusProbeHeaders(extra = {}) {
@@ -3950,10 +3973,6 @@ function buildBackupInventory(records = []) {
   });
 }
 
-function buildApplicationBackupInventories(context) {
-  return sortedOpsProjects(context.projects).map((project) => applicationBackupInventory(context, project));
-}
-
 function applicationBackupInventory(context, project) {
   const databases = projectBackupDatabases(context, project);
   const storage = projectStorage(context, project);
@@ -4103,15 +4122,6 @@ function applicationBackupRestoreOptions(manifests) {
     kind: "Manifest firmato",
     manifest,
   }));
-}
-
-function applicationBackupArtifactKind(value) {
-  const normalized = String(value || "").toLowerCase();
-  if (normalized.startsWith("applications/")) return "Sorgenti";
-  if (normalized.startsWith("postgres/")) return "PostgreSQL";
-  if (normalized.startsWith("mariadb/")) return "MariaDB";
-  if (normalized.startsWith("minio/")) return "Storage";
-  return "Backup";
 }
 
 function applicationSourceBackupPath(project) {
@@ -5483,36 +5493,6 @@ function renderOpsFiles(context, params, currentProject) {
 	  </section>`;
 }
 
-function backupStatusLabel(status) {
-  const clean = String(status || "").toLowerCase();
-  const labels = {
-    success: "OK",
-    passed: "OK",
-    running: "Attivo",
-    available: "Disponibile",
-    configured: "Configurato",
-    "local-file": "File locale",
-    queued: "In coda",
-    planned: "Pianificato",
-    deleted: "Eliminato",
-    done: "Completato",
-    failed: "Fallito",
-    missing: "Mancante",
-    "needs-work": "Da verificare",
-  };
-  return labels[clean] || clean || "n.d.";
-}
-
-function backupActionLabel(action) {
-  const clean = String(action || "").toLowerCase();
-  const labels = {
-    backup: "Backup",
-    "restore-drill": "Restore drill",
-    "delete-file": "Elimina file",
-  };
-  return labels[clean] || humanName(clean || "azione");
-}
-
 function renderOpsDatabases(context) {
   const projectInventories = context.projects.map((project) => ({
     project,
@@ -6266,22 +6246,6 @@ function statusRunStepState(check) {
   return { mark: "X", className: "failed" };
 }
 
-function renderStatusRunSummary(run) {
-  if (!run) {
-    return `<div class="ops-status-run empty-run">
-      <strong>Nessun test reale eseguito dal Portal</strong>
-      <span>Premi “Avvia test reali” per verificare WAF, report e prove attuali.</span>
-    </div>`;
-  }
-  return `<div class="ops-status-run ${statusClass(run.status)}">
-    <div>
-      <strong>Ultimo test reale</strong>
-      <span>${escapeHtml(`${run.generatedAt || "n.d."} / durata ${Number(run.durationMs || 0)} ms`)}</span>
-    </div>
-    <span class="ops-status-run-state">${escapeHtml(friendlyGoNoGoStatus(run.status))}</span>
-  </div>`;
-}
-
 function opsStatusRows(context) {
   const rows = [];
   const seen = new Set();
@@ -6772,24 +6736,6 @@ function statusCategoryCounts(rows) {
   return { total, passed, fix, missing, open: Math.max(0, total - passed) };
 }
 
-function renderStatusTabButton(id, label, count, selected = false) {
-  return `<button class="ops-status-tab ${selected ? "active" : ""}" type="button" role="tab" data-status-tab="${escapeHtml(id)}" aria-controls="status-tab-${escapeHtml(id)}" aria-selected="${selected ? "true" : "false"}">
-    <span>${escapeHtml(label)}</span>
-    <strong>${escapeHtml(String(count))}</strong>
-  </button>`;
-}
-
-function renderStatusAllPanel(passedRows, notPassedRows) {
-  return renderStatusRowsTable(notPassedRows, "Nessun controllo aperto", "Non risultano blocchi nel set corrente.", { grouped: true });
-}
-
-function renderStatusRowsTable(rows, emptyTitle, emptyMessage, options = {}) {
-  if (!rows.length) return empty(emptyTitle, emptyMessage);
-  const grouped = options.grouped !== false;
-  const groups = grouped ? groupStatusRowsByCategory(rows) : [{ meta: statusCategoryMeta("operational-evidence"), rows }];
-  return `<div class="ops-status-group-list">${groups.map((group) => renderStatusCategoryTable(group.meta, group.rows)).join("")}</div>`;
-}
-
 function renderStatusCategoryTable(category, rows, options = {}) {
   if (!rows.length) return empty("Nessun controllo", "Questa sezione non contiene controlli.");
   const counts = statusCategoryCounts(rows);
@@ -6846,24 +6792,6 @@ function renderStatusCheckRow(row, options = {}) {
       </div>` : ""}
     </div>
   </details>`;
-}
-
-function renderOpsBlockersTable(blockers) {
-  const rows = blockers.map((check) => {
-    const displayCheck = goNoGoDisplayCheck(check);
-    return `<tr>
-    <td><strong>${escapeHtml(friendlyCheckName(displayCheck.name))}</strong><span>${escapeHtml(displayCheck.name)}</span></td>
-    <td><span class="ops-state ${statusClass(displayCheck.status)}">${escapeHtml(friendlyGoNoGoStatus(displayCheck.status))}</span></td>
-    <td>${escapeHtml(simpleBlockerReason(displayCheck))}</td>
-    <td>${escapeHtml(simpleBlockerAction(displayCheck))}</td>
-  </tr>`;
-  }).join("");
-  return `<div class="ops-table-wrap">
-    <table class="ops-table">
-      <thead><tr><th>Controllo</th><th>Stato</th><th>Motivo</th><th>Cosa fare</th></tr></thead>
-      <tbody>${rows}</tbody>
-    </table>
-  </div>`;
 }
 
 function friendlyCheckName(name) {
@@ -7798,104 +7726,6 @@ function statusClass(status) {
   return "info";
 }
 
-function renderControlSidebar(groups, activeGroupId, activeSection, mode, selectedProject) {
-  const activeIndex = Math.max(0, groups.findIndex((group) => group.id === activeGroupId));
-  const buckets = [
-    ["", []],
-    ["Gestione", []],
-    ["Sicurezza", []],
-    ["Avanzato", []],
-  ];
-  const bucketByName = new Map(buckets);
-  for (const group of groups) {
-    const heading = sidebarCategoryForGroup(group);
-    bucketByName.get(heading)?.push(group);
-  }
-  const navGroups = buckets.map(([heading, navItems]) => {
-    if (!navItems.length) return "";
-    const bucketId = heading ? heading.toLowerCase() : "overview";
-    const links = navItems.map((group) => renderSidebarGroupEntry(group, activeGroupId, activeSection, mode, selectedProject)).join("");
-    if (!heading) {
-      return `<div class="cc-nav-group cc-nav-group-static" data-cc-nav-group="${escapeHtml(bucketId)}"><div class="cc-nav-panel">${links}</div></div>`;
-    }
-    return `<div class="cc-nav-group" data-cc-collapsible="" data-cc-nav-group="${escapeHtml(bucketId)}" data-cc-collapsed="false">
-      <button aria-controls="cc-nav-panel-${escapeHtml(bucketId)}" aria-expanded="true" class="cc-nav-toggle" data-cc-sidebar-toggle="${escapeHtml(bucketId)}" type="button">
-        <span>${escapeHtml(heading)}</span>
-        <span class="cc-nav-toggle-icon" aria-hidden="true">${controlIcon("chevron-down")}</span>
-      </button>
-      <div class="cc-nav-panel" id="cc-nav-panel-${escapeHtml(bucketId)}">${links}</div>
-    </div>`;
-  }).join("");
-  return `<aside aria-label="Control Center navigation" class="cc-sidebar" data-cc-sidebar-active-index="${activeIndex}" data-cc-sidebar-id="control-sidebar">
-    <a class="brand platform-wordmark" href="/?mode=simple&section=overview" aria-label="Admin Control Center"><span class="brand-mark">P</span><div><strong>Control Center</strong><small>${escapeHtml(platformName)}</small></div></a>
-    <div class="cc-nav-groups">${navGroups}</div>
-    <div class="mode-card">
-      <small>Simple Mode</small>
-      <div class="segmented">
-        <a class="${mode === "simple" ? "selected" : ""}" href="${escapeHtml(controlUrl({ mode: "simple", section: "overview", project: selectedProject }))}">Simple</a>
-        <a class="${mode === "advanced" ? "selected" : ""}" href="${escapeHtml(controlUrl({ mode: "advanced", section: "infrastructure", project: selectedProject }))}">Advanced</a>
-      </div>
-    </div>
-    <div class="cc-admin-card">
-      <span class="cc-admin-avatar" aria-hidden="true">A</span>
-      <span><strong>admin@${escapeHtml(domain)}</strong><small>Administrator</small></span>
-      <span class="cc-admin-arrow" aria-hidden="true">${controlIcon("chevron")}</span>
-    </div>
-  </aside>`;
-}
-
-function renderSidebarGroupEntry(group, activeGroupId, activeSection, mode, selectedProject) {
-  const activeGroup = group.id === activeGroupId || group.tabs.some((item) => item.id === activeSection);
-  if (group.tabs.length === 1) {
-    return renderSidebarLink(group.tabs[0], group, activeSection, mode, selectedProject);
-  }
-  const branchId = `cc-nav-branch-${group.id}`;
-  const children = group.tabs.map((item) => renderSidebarLink(item, group, activeSection, mode, selectedProject, true)).join("");
-  return `<div class="cc-nav-branch" data-cc-collapsible="" data-cc-nav-group="${escapeHtml(group.id)}" data-cc-active-path="${activeGroup ? "true" : "false"}" data-cc-collapsed="${activeGroup ? "false" : "true"}">
-    <button aria-controls="${escapeHtml(branchId)}" aria-expanded="${activeGroup ? "true" : "false"}" class="cc-nav-item cc-nav-branch-toggle ${activeGroup ? "active" : ""}" data-cc-sidebar-toggle="${escapeHtml(group.id)}" type="button">
-      <span class="cc-nav-icon" aria-hidden="true">${controlIcon(sidebarGroupIcon(group))}</span>
-      <span>${escapeHtml(sidebarGroupLabel(group))}</span>
-      <span class="cc-nav-arrow" aria-hidden="true">${controlIcon("chevron-down")}</span>
-    </button>
-    <div class="cc-nav-panel cc-nav-children" id="${escapeHtml(branchId)}">${children}</div>
-  </div>`;
-}
-
-function renderSidebarLink(item, group, activeSection, mode, selectedProject, child = false) {
-  const active = item.id === activeSection;
-  const href = controlUrl({ mode, section: item.id, project: selectedProject });
-  return `<a class="${child ? "cc-nav-child" : "cc-nav-item"} ${active ? "active" : ""}" ${active ? 'aria-current="page"' : ""} href="${escapeHtml(href)}" title="${escapeHtml(item.label)}">
-    ${child ? "" : `<span class="cc-nav-icon" aria-hidden="true">${controlIcon(item.id)}</span>`}
-    <span>${escapeHtml(sidebarItemLabel(item.label))}</span>
-    ${child ? "" : `<span class="cc-nav-arrow" aria-hidden="true">${item.id === "overview" ? "" : controlIcon("chevron")}</span>`}
-  </a>`;
-}
-
-function renderControlTopbar(context, mode) {
-  const envLabel = context.environment === "production" ? "Production" : humanName(context.environment || "local");
-  const envClass = context.environment === "production" ? "production" : "local";
-  return `<header class="cc-topbar">
-    <a class="cc-platform-switch" href="/?mode=${escapeHtml(mode)}&section=overview">
-      <span aria-hidden="true">${controlIcon("cube")}</span>
-      <strong>${escapeHtml(platformName)}</strong>
-      <span aria-hidden="true">${controlIcon("chevron-down")}</span>
-    </a>
-    <span class="cc-env-pill ${escapeHtml(envClass)}">${escapeHtml(envLabel)}</span>
-    <span class="cc-topbar-fill" aria-hidden="true"></span>
-    <nav class="cc-top-actions" aria-label="Quick tools">
-      <a class="cc-icon-button" href="/?section=logs" aria-label="Logs and alerts">${controlIcon("bell")}<span class="cc-notification-badge">${escapeHtml(context.overview.alerts.open || 0)}</span></a>
-    </nav>
-  </header>`;
-}
-
-function controlUrl({ mode, section, project = "" }) {
-  const params = new URLSearchParams();
-  params.set("mode", mode);
-  params.set("section", section);
-  if (project) params.set("project", project);
-  return `/?${params.toString()}`;
-}
-
 function renderLogin(message) {
   return `<!doctype html>
 <html lang="it">
@@ -7919,690 +7749,6 @@ ${controlCenterScriptTags()}
 </main>
 </body>
 </html>`;
-}
-
-function renderOverview(context) {
-  const totals = context.overview;
-  const activeProjects = context.projects.filter((project) => project.enabled).length;
-  const phpProjects = context.projects.filter((project) => project.type === "PHP").length;
-  const nodeProjects = context.projects.filter((project) => project.type === "Node").length;
-  const alertCount = totals.alerts.open || 0;
-  const healthLabel = alertCount ? `${alertCount} alert aperti` : "Operativa";
-
-  return `<section class="hosting-dashboard" aria-label="Infrastructure hosting panel">
-    <section class="hosting-hero">
-      <div class="hosting-hero-copy">
-        <p class="hosting-kicker">Pannello infrastruttura</p>
-        <h1>Gestisci la tua piattaforma da un solo posto</h1>
-        <p>Progetti PHP e Node, domini locali, database, container, backup e sicurezza sono separati in aree operative chiare.</p>
-      </div>
-      <div class="hosting-hero-status">
-        <span class="hosting-status ${alertCount ? "warning" : "good"}"><i aria-hidden="true"></i>${escapeHtml(healthLabel)}</span>
-        <span>${escapeHtml(dashboardDateLabel())}</span>
-        <div class="hosting-hero-actions">
-          <a class="primary-button" href="/?section=projects">${controlIcon("projects")} Gestisci progetti</a>
-          <a class="button" href="/?mode=advanced&section=infrastructure">${controlIcon("server")} Servizi infra</a>
-        </div>
-      </div>
-    </section>
-
-    <section class="hosting-summary-grid" aria-label="Hosting summary">
-      ${renderHostingTile("projects", "Siti e progetti", `${activeProjects}/${totals.projects.total}`, `${phpProjects} PHP / ${nodeProjects} Node`, "/?section=projects", "Gestisci")}
-      ${renderHostingTile("applications", "Applicazioni", totals.applications.total, `${totals.applications.online} online`, "/?section=applications", "Apri")}
-      ${renderHostingTile("domains", "Domini e routing", totals.subdomains.total, `${totals.subdomains.active} attivi`, "/?section=domains", "Configura")}
-      ${renderHostingTile("databases", "Database", totals.databases.total, `${context.databaseEngines.length} motori`, "/?mode=advanced&section=databases", "Gestisci")}
-      ${renderHostingTile("storage", "Storage", totals.storage.buckets, `${context.storageProvider.name} ${hostingStatusLabel(context.storageProvider.status)}`, "/?mode=advanced&section=storage", "Apri")}
-      ${renderHostingTile("security", "Sicurezza", alertCount ? "Check" : "OK", hostingStatusLabel(context.security.securityHeaders), "/?section=security", "Verifica")}
-      ${renderHostingTile("resources", "Monitoraggio", totals.monitoring.scrapeJobs, `${totals.monitoring.alertRules} regole alert`, "/?mode=advanced&section=monitoring", "Dettagli")}
-    </section>
-
-    <section class="hosting-main-grid">
-      ${renderHostingProjects(context.projects)}
-      ${renderHostingServiceHealth(context)}
-    </section>
-
-    ${renderHostingQuickActions(context)}
-  </section>`;
-}
-
-function renderHostingTile(icon, title, value, meta, href, action) {
-  return `<a class="hosting-tile" href="${escapeHtml(href)}">
-    <span class="hosting-tile-icon" aria-hidden="true">${controlIcon(icon)}</span>
-    <span class="hosting-tile-body">
-      <strong>${escapeHtml(title)}</strong>
-      <small>${escapeHtml(meta)}</small>
-    </span>
-    <span class="hosting-tile-value">${escapeHtml(value)}</span>
-    <em>${escapeHtml(action)} ${controlIcon("chevron")}</em>
-  </a>`;
-}
-
-function renderHostingProjects(projects) {
-  const rows = projects.slice(0, 8).map((project) => {
-    const canOpen = project.enabled && project.filesystemExists !== false;
-    return `<tr>
-      <td>
-        <div class="hosting-project-cell">
-          <strong>${escapeHtml(project.name)}</strong>
-          <span>${escapeHtml(project.summary)}</span>
-        </div>
-      </td>
-      <td><span class="runtime-badge ${project.type === "PHP" ? "php" : "node"}">${escapeHtml(project.type)}</span></td>
-      <td><a class="hosting-host" href="${escapeHtml(project.href)}">${escapeHtml(project.host)}</a></td>
-      <td><span class="state ${project.enabled ? "on" : "off"}">${project.enabled ? "Attivo" : "Disattivo"}</span></td>
-      <td>
-        <div class="hosting-row-actions">
-          ${canOpen ? `<a class="button open" href="${escapeHtml(project.href)}">Apri</a>` : `<span class="button muted">Apri</span>`}
-          ${project.filesystemExists !== false ? `<form method="post" action="/actions/toggle-project">
-            <input type="hidden" name="slug" value="${escapeHtml(project.slug)}">
-            <input type="hidden" name="enabled" value="${project.enabled ? "0" : "1"}">
-            <button class="button ${project.enabled ? "danger" : "enable"}" type="submit">${project.enabled ? "Disattiva" : "Attiva"}</button>
-          </form>` : `<span class="button muted">Attiva</span>`}
-        </div>
-      </td>
-    </tr>`;
-  }).join("");
-
-  return `<section class="hosting-panel hosting-projects-panel">
-    <div class="hosting-panel-head">
-      <div>
-        <h2>Siti e applicazioni</h2>
-        <p>PHP e Node restano separati per runtime, ma sono ospitati contemporaneamente dalla stessa infrastruttura.</p>
-      </div>
-      <a class="button" href="/?section=projects">Tutti i progetti</a>
-    </div>
-    <div class="hosting-table-wrap">
-      <table class="hosting-table">
-        <thead><tr><th>Progetto</th><th>Runtime</th><th>Dominio</th><th>Stato</th><th>Azioni</th></tr></thead>
-        <tbody>${rows || `<tr><td colspan="5">${empty("Nessun progetto", "Monta un progetto in src per vederlo qui.")}</td></tr>`}</tbody>
-      </table>
-    </div>
-  </section>`;
-}
-
-function renderHostingServiceHealth(context) {
-  const serviceRows = hostingServiceRows(context);
-  return `<section class="hosting-panel hosting-health-panel">
-    <div class="hosting-panel-head">
-      <div>
-        <h2>Superfici pubbliche</h2>
-        <p>Solo portal e docs sono pubblicati; i servizi operativi restano interni.</p>
-      </div>
-      <a class="button" href="/?mode=advanced&section=infrastructure">Inventario</a>
-    </div>
-    <div class="hosting-service-list">
-      ${serviceRows.map((item) => `<a class="hosting-service-row" href="${escapeHtml(item.href)}">
-        <span class="hosting-service-icon" aria-hidden="true">${controlIcon(item.icon)}</span>
-        <span><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(item.role)}</small></span>
-        <em class="${escapeHtml(item.tone)}"><i aria-hidden="true"></i>${escapeHtml(item.status)}</em>
-      </a>`).join("")}
-    </div>
-  </section>`;
-}
-
-function hostingServiceRows(context) {
-  return [
-    { name: "Portal", role: "Control Center Node", status: context.network.routers.some((router) => router.id === "enterprise-portal") ? "pubblico" : "da verificare", icon: "domains", href: `https://${controlCenterHost}`, tone: "good" },
-    { name: "Docs", role: "Documentazione operativa", status: context.network.routers.some((router) => router.id === "enterprise-docs") ? "pubblico" : "da verificare", icon: "logs", href: `https://${docsHost}`, tone: "good" },
-  ];
-}
-
-function hostingStatusLabel(value) {
-  const normalized = String(value || "").toLowerCase().trim();
-  const labels = {
-    configured: "configurato",
-    strict: "header attivi",
-    active: "attivo",
-    disabled: "disattivo",
-    online: "online",
-    offline: "offline",
-    "not-configured": "non configurato",
-    "requires-secret-file": "richiede segreto",
-  };
-  return labels[normalized] || value || "sconosciuto";
-}
-
-function renderHostingQuickActions(context) {
-  const actions = [
-    ["Apri Projects", "/?section=projects", "projects"],
-    ["Nuovo dominio locale", "/?section=domains", "domains"],
-    ["Database", "/?mode=advanced&section=databases", "databases"],
-    ["Log e alert", "/?section=logs", "logs"],
-    ["Preflight production", "/?mode=advanced&section=go-no-go", "rocket"],
-  ];
-  return `<section class="hosting-panel hosting-actions-panel">
-    <div class="hosting-panel-head">
-      <div>
-        <h2>Operazioni rapide</h2>
-        <p>Azioni frequenti da pannello hosting. Le operazioni sensibili restano pianificate e auditate.</p>
-      </div>
-      <span class="hosting-status ${context.environment === "production" ? "warning" : "info"}"><i aria-hidden="true"></i>${escapeHtml(context.overview.modeEvidence)}</span>
-    </div>
-    <div class="hosting-action-grid">
-      ${actions.map(([label, href, icon]) => `<a class="hosting-action" href="${escapeHtml(href)}">${controlIcon(icon)}<span>${escapeHtml(label)}</span>${controlIcon("chevron")}</a>`).join("")}
-    </div>
-  </section>`;
-}
-
-function dashboardDateLabel() {
-  try {
-    return new Intl.DateTimeFormat("it-IT", { day: "2-digit", month: "long", year: "numeric", hour: "2-digit", minute: "2-digit" }).format(new Date());
-  } catch {
-    return new Date().toISOString();
-  }
-}
-
-function relativeTimeLabel(value) {
-  const timestamp = Date.parse(value || "");
-  if (!Number.isFinite(timestamp)) return "locale";
-  const minutes = Math.max(1, Math.round((Date.now() - timestamp) / 60000));
-  if (minutes < 60) return `${minutes} min fa`;
-  const hours = Math.round(minutes / 60);
-  if (hours < 24) return `${hours} ore fa`;
-  return `${Math.round(hours / 24)} giorni fa`;
-}
-
-function sidebarCategoryForGroup(group) {
-  if (group.id === "home") return "";
-  if (["workloads", "routing", "platform"].includes(group.id)) return "Gestione";
-  if (["operations", "security", "resilience", "observability"].includes(group.id)) return "Sicurezza";
-  return "Avanzato";
-}
-
-function sidebarGroupIcon(group) {
-  const map = {
-    workloads: "projects",
-    routing: "domains",
-    operations: "resources",
-    platform: "server",
-    delivery: "rocket",
-    observability: "resources",
-    resilience: "backups",
-    security: "security",
-    plans: "server",
-    settings: "settings",
-  };
-  return map[group.id] || group.tabs[0]?.id || "settings";
-}
-
-function sidebarGroupLabel(group) {
-  const map = {
-    workloads: "Progetti",
-    routing: "Domini",
-    operations: "Operazioni",
-    platform: "Piattaforma",
-    delivery: "Delivery",
-    observability: "Osservabilita",
-    resilience: "Resilienza",
-    security: "Sicurezza",
-    plans: "Piani",
-    settings: "Impostazioni",
-  };
-  return map[group.id] || group.label;
-}
-
-function sidebarItemLabel(label) {
-  return label === "Logs / Alerts" ? "Logs & Alert" : label;
-}
-
-function controlIcon(name) {
-  // Font Awesome Free solid icon paths, embedded inline to keep the portal self-hosted.
-  const icons = {
-    overview: [576, 512, '<path d="M575.8 255.5c0 18-15 32.1-32 32.1h-32l.7 160.2c.2 35.5-28.5 64.3-64 64.3H128.1c-35.3 0-64-28.7-64-64V287.6H32c-18 0-32-14-32-32.1c0-9 3.8-17.3 10.4-23.4L266.4 8c14.4-12.7 36-12.7 50.5 0l248.5 224.1c6.6 6.1 10.4 14.4 10.4 23.4z"/>'],
-    projects: [512, 512, '<path d="M64 480h384c35.3 0 64-28.7 64-64V160c0-35.3-28.7-64-64-64H288.8c-10.1 0-19.6-4.7-25.6-12.8L243.2 56C232.1 41.2 214.7 32 196.2 32H64C28.7 32 0 60.7 0 96v320c0 35.3 28.7 64 64 64z"/>'],
-    applications: [512, 512, '<path d="M234.5 5.7c13.9-7.6 30.9-7.6 44.8 0l192 104.7c15.4 8.4 24.7 24.5 24.7 41.9v207.4c0 17.4-9.3 33.5-24.7 41.9l-192 104.7c-13.9 7.6-30.9 7.6-44.8 0l-192-104.7C27.1 393.2 17.8 377.1 17.8 359.7V152.3c0-17.4 9.3-33.5 24.7-41.9l192-104.7zM256 53.3L72.5 153.4 256 253.5l183.5-100.1L256 53.3zM464 194.9 280 295.3v157l184-100.3V194.9zM232 452.3v-157L48 194.9V352l184 100.3z"/>'],
-    domains: [512, 512, '<path d="M352 256c0 22.2-1.2 43.6-3.3 64H163.3c-2.2-20.4-3.3-41.8-3.3-64s1.2-43.6 3.3-64h185.4c2.1 20.4 3.3 41.8 3.3 64zm28.8-64h123.1c5.3 20.5 8.1 41.9 8.1 64s-2.8 43.5-8.1 64H380.8c2.1-20.6 3.2-42 3.2-64s-1.1-43.4-3.2-64zm112.6-32H376.7c-10-63.9-29.8-117.4-55.3-151.6c78.3 20.7 142 77.5 172 151.6zm-149.1 0H167.7c6.1-36.4 15.5-68.6 27-94.7c10.5-23.6 22.2-40.7 33.5-51.5C239.4 3.2 248.7 0 256 0s16.6 3.2 27.8 13.8c11.3 10.8 23 27.9 33.5 51.5c11.5 26.1 20.9 58.3 27 94.7zm-209 0H18.6c30-74.1 93.7-130.9 172-151.6c-25.5 34.2-45.3 87.7-55.3 151.6zM8.1 192h123.1c-2.1 20.6-3.2 42-3.2 64s1.1 43.4 3.2 64H8.1C2.8 299.5 0 278.1 0 256s2.8-43.5 8.1-64zm159.6 160h176.6c-6.1 36.4-15.5 68.6-27 94.7c-10.5 23.6-22.2 40.7-33.5 51.5C272.6 508.8 263.3 512 256 512s-16.6-3.2-27.8-13.8c-11.3-10.8-23-27.9-33.5-51.5c-11.5-26.1-20.9-58.3-27-94.7zm-32.4 0c10 63.9 29.8 117.4 55.3 151.6c-78.3-20.7-142-77.5-172-151.6h116.7zm358.1 0c-30 74.1-93.7 130.9-172 151.6c25.5-34.2 45.3-87.7 55.3-151.6h116.7z"/>'],
-    databases: [448, 512, '<path d="M448 80v48c0 44.2-100.3 80-224 80S0 172.2 0 128V80C0 35.8 100.3 0 224 0s224 35.8 224 80zM393.2 214.7c20.8-7.4 39.9-16.9 54.8-28.6V288c0 44.2-100.3 80-224 80S0 332.2 0 288V186.1c14.9 11.8 34 21.2 54.8 28.6C99.7 230.7 159.5 240 224 240s124.3-9.3 169.2-25.3zM0 346.1c14.9 11.8 34 21.2 54.8 28.6C99.7 390.7 159.5 400 224 400s124.3-9.3 169.2-25.3c20.8-7.4 39.9-16.9 54.8-28.6V432c0 44.2-100.3 80-224 80S0 476.2 0 432v-85.9z"/>'],
-    storage: [512, 512, '<path d="M32 32C14.3 32 0 46.3 0 64v368c0 26.5 21.5 48 48 48h416c26.5 0 48-21.5 48-48V64c0-17.7-14.3-32-32-32H32zm64 352a32 32 0 1 1 0 64 32 32 0 1 1 0-64zm96 32a32 32 0 1 1-64 0 32 32 0 1 1 64 0zm-64-224h256c17.7 0 32 14.3 32 32s-14.3 32-32 32H128c-17.7 0-32-14.3-32-32s14.3-32 32-32z"/>'],
-    webspaces: [512, 512, '<path d="M64 64C28.7 64 0 92.7 0 128v256c0 35.3 28.7 64 64 64h384c35.3 0 64-28.7 64-64V128c0-35.3-28.7-64-64-64H64zm0 64h384v64H64v-64zm0 128h112v128H64V256zm176 0h208v128H240V256z"/>'],
-    resources: [512, 512, '<path d="M64 64c0-17.7-14.3-32-32-32S0 46.3 0 64v336c0 44.2 35.8 80 80 80h400c17.7 0 32-14.3 32-32s-14.3-32-32-32H80c-8.8 0-16-7.2-16-16V64zm406.6 86.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0L320 210.7l-57.4-57.4c-12.5-12.5-32.8-12.5-45.3 0l-112 112c-12.5 12.5-12.5 32.8 0 45.3s32.8 12.5 45.3 0l89.4-89.3 57.4 57.4c12.5 12.5 32.8 12.5 45.3 0l128-128z"/>'],
-    security: [512, 512, '<path d="M256 0c4.6 0 9.2 1 13.4 2.9l188.3 79.9c22 9.3 38.4 31 38.3 57.2c-.5 99.2-41.3 280.7-213.6 363.2c-16.7 8-36.1 8-52.8 0C57.3 420.7 16.5 239.2 16 140c-.1-26.2 16.3-47.9 38.3-57.2L242.6 2.9C246.8 1 251.4 0 256 0zm0 66.8v378c138-66.8 175.1-214.7 176-303.4L256 66.8z"/>'],
-    backups: [640, 512, '<path d="M144 480C64.5 480 0 415.5 0 336c0-62.8 40.2-116.2 96.2-135.9C97.4 125.6 158.2 64 232 64c54.8 0 102.6 30.1 128 74.6C373.6 132 388.9 128 405.3 128C464.8 128 512 177.1 512 236.6c0 4.1-.2 8.2-.7 12.2C584.9 260.3 640 323.9 640 400c0 44.2-35.8 80-80 80H144zm209-207c-9.4-9.4-24.6-9.4-33.9 0l-55 55V184c0-13.3-10.7-24-24-24s-24 10.7-24 24v144l-55-55c-9.4-9.4-24.6-9.4-33.9 0s-9.4 24.6 0 33.9l96 96c9.4 9.4 24.6 9.4 33.9 0l96-96c9.3-9.3 9.3-24.5-.1-33.9z"/>'],
-    logs: [448, 512, '<path d="M224 0c-17.7 0-32 14.3-32 32v17.9C119.5 61.4 64 124.2 64 200v33.4c0 45.4-15.5 89.5-43.8 124.9L5.3 377c-5.8 7.2-6.9 17.1-2.9 25.4S14.8 416 24 416h400c9.2 0 17.6-5.3 21.6-13.6s2.9-18.2-2.9-25.4l-14.9-18.6C399.5 322.9 384 278.8 384 233.4V200c0-75.8-55.5-138.6-128-150.1V32c0-17.7-14.3-32-32-32zm0 512c35.3 0 64-28.7 64-64H160c0 35.3 28.7 64 64 64z"/>'],
-    settings: [512, 512, '<path d="M495.9 166.6c3.2 8.7.5 18.4-6.4 24.6l-43.3 39.4c1.1 8.3 1.7 16.8 1.7 25.4s-.6 17.1-1.7 25.4l43.3 39.4c6.9 6.2 9.6 15.9 6.4 24.6c-4.4 11.9-9.7 23.3-15.8 34.3l-4.7 8.1c-6.6 11-14 21.4-22.1 31.2c-5.9 7.2-15.7 9.6-24.5 6.8l-55.7-17.7c-13.4 10.3-28.2 18.9-44 25.4l-12.5 57.1c-2 9.1-9 16.3-18.2 17.8c-13.8 2.3-27.9 3.5-42.4 3.5s-28.6-1.2-42.4-3.5c-9.2-1.5-16.2-8.7-18.2-17.8l-12.5-57.1c-15.8-6.5-30.6-15.1-44-25.4L83.1 425.9c-8.8 2.8-18.6.3-24.5-6.8c-8.1-9.8-15.5-20.2-22.1-31.2l-4.7-8.1c-6.1-11-11.4-22.4-15.8-34.3c-3.2-8.7-.5-18.4 6.4-24.6l43.3-39.4C64.6 273.1 64 264.6 64 256s.6-17.1 1.7-25.4L22.4 191.2c-6.9-6.2-9.6-15.9-6.4-24.6c4.4-11.9 9.7-23.3 15.8-34.3l4.7-8.1c6.6-11 14-21.4 22.1-31.2c5.9-7.2 15.7-9.6 24.5-6.8l55.7 17.7c13.4-10.3 28.2-18.9 44-25.4l12.5-57.1c2-9.1 9-16.3 18.2-17.8C227.4 1.2 241.5 0 256 0s28.6 1.2 42.4 3.5c9.2 1.5 16.2 8.7 18.2 17.8l12.5 57.1c15.8 6.5 30.6 15.1 44 25.4l55.7-17.7c8.8-2.8 18.6-.3 24.5 6.8c8.1 9.8 15.5 20.2 22.1 31.2l4.7 8.1c6.1 11 11.4 22.4 15.8 34.3zM256 336a80 80 0 1 0 0-160 80 80 0 1 0 0 160z"/>'],
-    file: [384, 512, '<path d="M64 0C28.7 0 0 28.7 0 64v384c0 35.3 28.7 64 64 64h256c35.3 0 64-28.7 64-64V160H256c-17.7 0-32-14.3-32-32V0H64zm192 0v128h128L256 0zM112 256h160c8.8 0 16 7.2 16 16s-7.2 16-16 16H112c-8.8 0-16-7.2-16-16s7.2-16 16-16zm0 64h160c8.8 0 16 7.2 16 16s-7.2 16-16 16H112c-8.8 0-16-7.2-16-16s7.2-16 16-16zm0 64h160c8.8 0 16 7.2 16 16s-7.2 16-16 16H112c-8.8 0-16-7.2-16-16s7.2-16 16-16z"/>'],
-    copy: [448, 512, '<path d="M208 0H332.1c12.7 0 24.9 5.1 33.9 14.1L433.9 82c9 9 14.1 21.2 14.1 33.9V336c0 26.5-21.5 48-48 48H208c-26.5 0-48-21.5-48-48V48c0-26.5 21.5-48 48-48zM48 128h80v64H64v256h192v-32h64v48c0 26.5-21.5 48-48 48H48c-26.5 0-48-21.5-48-48V176c0-26.5 21.5-48 48-48z"/>'],
-    eye: [576, 512, '<path d="M288 32c-80.8 0-145.5 36.8-192.6 80.6C48.6 156 17.3 208 2.5 243.7c-3.3 7.9-3.3 16.7 0 24.6C17.3 304 48.6 356 95.4 399.4C142.5 443.2 207.2 480 288 480s145.5-36.8 192.6-80.6c46.8-43.5 78.1-95.4 93-131.1c3.3-7.9 3.3-16.7 0-24.6c-14.9-35.7-46.2-87.7-93-131.1C433.5 68.8 368.8 32 288 32zm0 320a96 96 0 1 1 0-192 96 96 0 1 1 0 192z"/>'],
-    refresh: [512, 512, '<path d="M463.5 224H472c13.3 0 24-10.7 24-24V72c0-9.7-5.8-18.5-14.8-22.2s-19.3-1.7-26.2 5.2l-39.4 39.4C376.2 55.2 321.7 32 264 32C146.4 32 48.5 116.7 28.8 228.8c-2.3 13.1 6.4 25.6 19.5 27.9s25.6-6.4 27.9-19.5C91.9 147.9 169.9 80 264 80c44.6 0 86.2 15.4 119.2 41.6L343 161.9c-6.9 6.9-8.9 17.2-5.2 26.2s12.5 14.8 22.2 14.8H463.5zM48 288H40c-13.3 0-24 10.7-24 24V440c0 9.7 5.8 18.5 14.8 22.2s19.3 1.7 26.2-5.2l39.4-39.4C135.8 456.8 190.3 480 248 480c117.6 0 215.5-84.7 235.2-196.8c2.3-13.1-6.4-25.6-19.5-27.9s-25.6 6.4-27.9 19.5C420.1 364.1 342.1 432 248 432c-44.6 0-86.2-15.4-119.2-41.6L169 350.1c6.9-6.9 8.9-17.2 5.2-26.2s-12.5-14.8-22.2-14.8H48z"/>'],
-    play: [384, 512, '<path d="M73 39c-14.8-9.1-33.4-9.4-48.5-.9S0 62.6 0 80v352c0 17.4 9.4 33.4 24.5 41.9s33.7 8.1 48.5-.9l288-176c14.3-8.7 23-24.2 23-41s-8.7-32.2-23-41L73 39z"/>'],
-    pause: [320, 512, '<path d="M48 64C21.5 64 0 85.5 0 112v288c0 26.5 21.5 48 48 48h32c26.5 0 48-21.5 48-48V112c0-26.5-21.5-48-48-48H48zm192 0c-26.5 0-48 21.5-48 48v288c0 26.5 21.5 48 48 48h32c26.5 0 48-21.5 48-48V112c0-26.5-21.5-48-48-48h-32z"/>'],
-    archive: [512, 512, '<path d="M32 32C14.3 32 0 46.3 0 64v96c0 17.7 14.3 32 32 32h448c17.7 0 32-14.3 32-32V64c0-17.7-14.3-32-32-32H32zm32 192v224c0 17.7 14.3 32 32 32h320c17.7 0 32-14.3 32-32V224H64zm128 64h128c17.7 0 32 14.3 32 32s-14.3 32-32 32H192c-17.7 0-32-14.3-32-32s14.3-32 32-32z"/>'],
-    external: [512, 512, '<path d="M320 0c-17.7 0-32 14.3-32 32s14.3 32 32 32h82.7L201.4 265.4c-12.5 12.5-12.5 32.8 0 45.3s32.8 12.5 45.3 0L448 109.3V192c0 17.7 14.3 32 32 32s32-14.3 32-32V32c0-17.7-14.3-32-32-32H320zM80 32C35.8 32 0 67.8 0 112v320c0 44.2 35.8 80 80 80h320c44.2 0 80-35.8 80-80V320c0-17.7-14.3-32-32-32s-32 14.3-32 32v112c0 8.8-7.2 16-16 16H80c-8.8 0-16-7.2-16-16V112c0-8.8 7.2-16 16-16h112c17.7 0 32-14.3 32-32s-14.3-32-32-32H80z"/>'],
-    "arrow-left": [448, 512, '<path d="M9.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 288H416c17.7 0 32-14.3 32-32s-14.3-32-32-32H109.3L214.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/>'],
-    menu: [448, 512, '<path d="M0 96C0 78.3 14.3 64 32 64h384c17.7 0 32 14.3 32 32s-14.3 32-32 32H32C14.3 128 0 113.7 0 96zm0 160c0-17.7 14.3-32 32-32h384c17.7 0 32 14.3 32 32s-14.3 32-32 32H32c-17.7 0-32-14.3-32-32zm448 160c0 17.7-14.3 32-32 32H32c-17.7 0-32-14.3-32-32s14.3-32 32-32h384c17.7 0 32 14.3 32 32z"/>'],
-    search: [512, 512, '<path d="M416 208c0 45.9-14.9 88.3-40 122.7l126.6 126.7c12.5 12.5 12.5 32.8 0 45.3s-32.8 12.5-45.3 0L330.7 376C296.3 401.1 253.9 416 208 416C93.1 416 0 322.9 0 208S93.1 0 208 0s208 93.1 208 208zM208 352a144 144 0 1 0 0-288 144 144 0 1 0 0 288z"/>'],
-    bell: [448, 512, '<path d="M224 0c-17.7 0-32 14.3-32 32v17.9C119.5 61.4 64 124.2 64 200v33.4c0 45.4-15.5 89.5-43.8 124.9L5.3 377c-5.8 7.2-6.9 17.1-2.9 25.4S14.8 416 24 416h400c9.2 0 17.6-5.3 21.6-13.6s2.9-18.2-2.9-25.4l-14.9-18.6C399.5 322.9 384 278.8 384 233.4V200c0-75.8-55.5-138.6-128-150.1V32c0-17.7-14.3-32-32-32zm0 512c35.3 0 64-28.7 64-64H160c0 35.3 28.7 64 64 64z"/>'],
-    help: [512, 512, '<path d="M256 512A256 256 0 1 0 256 0a256 256 0 1 0 0 512zm0-384c-26.5 0-48 21.5-48 48c0 17.7-14.3 32-32 32s-32-14.3-32-32c0-61.9 50.1-112 112-112s112 50.1 112 112c0 39.8-20.8 74.8-52.1 94.6c-17.9 11.3-27.9 25.6-27.9 45.4v4c0 17.7-14.3 32-32 32s-32-14.3-32-32v-4c0-42.4 23.8-78.7 57.6-100.1c13.9-8.8 22.4-23.8 22.4-40.9c0-26.5-21.5-48-48-48zm0 320a40 40 0 1 1 0-80 40 40 0 1 1 0 80z"/>'],
-    sun: [512, 512, '<path d="M361.5 1.2c5 2.1 8.6 6.6 9.6 11.9L391 121l107.9 19.8c5.3 1 9.8 4.6 11.9 9.6s1.5 10.7-1.6 15.2L446.9 256l62.3 90.3c3.1 4.5 3.7 10.2 1.6 15.2s-6.6 8.6-11.9 9.6L391 391 371.1 498.9c-1 5.3-4.6 9.8-9.6 11.9s-10.7 1.5-15.2-1.6L256 446.9l-90.3 62.3c-4.5 3.1-10.2 3.7-15.2 1.6s-8.6-6.6-9.6-11.9L121 391 13.1 371.1c-5.3-1-9.8-4.6-11.9-9.6s-1.5-10.7 1.6-15.2L65.1 256 2.8 165.7c-3.1-4.5-3.7-10.2-1.6-15.2s6.6-8.6 11.9-9.6L121 121 140.9 13.1c1-5.3 4.6-9.8 9.6-11.9s10.7-1.5 15.2 1.6L256 65.1 346.3 2.8c4.5-3.1 10.2-3.7 15.2-1.6zM256 352a96 96 0 1 0 0-192 96 96 0 1 0 0 192z"/>'],
-    folder: [512, 512, '<path d="M64 480h384c35.3 0 64-28.7 64-64V160c0-35.3-28.7-64-64-64H288.8c-10.1 0-19.6-4.7-25.6-12.8L243.2 56C232.1 41.2 214.7 32 196.2 32H64C28.7 32 0 60.7 0 96v320c0 35.3 28.7 64 64 64z"/>'],
-    cube: [512, 512, '<path d="M234.5 5.7c13.9-7.6 30.9-7.6 44.8 0l192 104.7c15.4 8.4 24.7 24.5 24.7 41.9v207.4c0 17.4-9.3 33.5-24.7 41.9l-192 104.7c-13.9 7.6-30.9 7.6-44.8 0l-192-104.7C27.1 393.2 17.8 377.1 17.8 359.7V152.3c0-17.4 9.3-33.5 24.7-41.9l192-104.7z"/>'],
-    globe: [512, 512, '<path d="M352 256c0 22.2-1.2 43.6-3.3 64H163.3c-2.2-20.4-3.3-41.8-3.3-64s1.2-43.6 3.3-64h185.4c2.1 20.4 3.3 41.8 3.3 64zm151.9-64c5.3 20.5 8.1 41.9 8.1 64s-2.8 43.5-8.1 64H380.8c2.1-20.6 3.2-42 3.2-64s-1.1-43.4-3.2-64h123.1zM493.4 160H376.7c-10-63.9-29.8-117.4-55.3-151.6c78.3 20.7 142 77.5 172 151.6zM344.3 160H167.7c6.1-36.4 15.5-68.6 27-94.7C216 17.4 239.5 0 256 0s40 17.4 61.3 65.3c11.5 26.1 20.9 58.3 27 94.7zM135.3 160H18.6c30-74.1 93.7-130.9 172-151.6c-25.5 34.2-45.3 87.7-55.3 151.6zM8.1 192h123.1c-2.1 20.6-3.2 42-3.2 64s1.1 43.4 3.2 64H8.1C2.8 299.5 0 278.1 0 256s2.8-43.5 8.1-64zm159.6 160h176.6c-6.1 36.4-15.5 68.6-27 94.7C296 494.6 272.5 512 256 512s-40-17.4-61.3-65.3c-11.5-26.1-20.9-58.3-27-94.7zm-32.4 0c10 63.9 29.8 117.4 55.3 151.6c-78.3-20.7-142-77.5-172-151.6h116.7zm358.1 0c-30 74.1-93.7 130.9-172 151.6c25.5-34.2 45.3-87.7 55.3-151.6h116.7z"/>'],
-    server: [512, 512, '<path d="M64 32C28.7 32 0 60.7 0 96v64c0 35.3 28.7 64 64 64h384c35.3 0 64-28.7 64-64V96c0-35.3-28.7-64-64-64H64zm280 72a24 24 0 1 1 0 48 24 24 0 1 1 0-48zm64 0a24 24 0 1 1 0 48 24 24 0 1 1 0-48zM64 288c-35.3 0-64 28.7-64 64v64c0 35.3 28.7 64 64 64h384c35.3 0 64-28.7 64-64v-64c0-35.3-28.7-64-64-64H64zm280 72a24 24 0 1 1 0 48 24 24 0 1 1 0-48zm64 0a24 24 0 1 1 0 48 24 24 0 1 1 0-48z"/>'],
-    shield: [512, 512, '<path d="M256 0c4.6 0 9.2 1 13.4 2.9l188.3 79.9c22 9.3 38.4 31 38.3 57.2c-.5 99.2-41.3 280.7-213.6 363.2c-16.7 8-36.1 8-52.8 0C57.3 420.7 16.5 239.2 16 140c-.1-26.2 16.3-47.9 38.3-57.2L242.6 2.9C246.8 1 251.4 0 256 0z"/>'],
-    rocket: [512, 512, '<path d="M156.6 384.9L125.7 354c-8.5-8.5-11.5-20.8-7.7-32.2c17.2-51.6 45.8-98.9 84.2-137.3L320 66.7C372.7 14 443.3-7.9 511.9 2.4c10.1 68.6-11.8 139.2-64.5 191.9L329.6 312.1c-38.4 38.4-85.7 67-137.3 84.2c-11.4 3.8-23.7.8-32.2-7.7l-3.5-3.7zM384 168a40 40 0 1 0 0-80 40 40 0 1 0 0 80zM112 416c0 53-43 96-96 96c0-53 43-96 96-96z"/>'],
-    user: [448, 512, '<path d="M224 256A128 128 0 1 0 224 0a128 128 0 1 0 0 256zm-45.7 48C79.8 304 0 383.8 0 482.3C0 498.7 13.3 512 29.7 512h388.6c16.4 0 29.7-13.3 29.7-29.7C448 383.8 368.2 304 269.7 304h-91.4z"/>'],
-    plus: [448, 512, '<path d="M256 80c0-17.7-14.3-32-32-32s-32 14.3-32 32v144H48c-17.7 0-32 14.3-32 32s14.3 32 32 32h144v144c0 17.7 14.3 32 32 32s32-14.3 32-32V288h144c17.7 0 32-14.3 32-32s-14.3-32-32-32H256V80z"/>'],
-    save: [448, 512, '<path d="M48 0C21.5 0 0 21.5 0 48v416c0 26.5 21.5 48 48 48h352c26.5 0 48-21.5 48-48V154.5c0-12.7-5.1-24.9-14.1-33.9L327.4 14.1C318.4 5.1 306.2 0 293.5 0H48zm48 64h192v96H96V64zm0 288c0-17.7 14.3-32 32-32h192c17.7 0 32 14.3 32 32v96H96v-96z"/>'],
-    trash: [448, 512, '<path d="M135.2 17.7C140.6 6.8 151.7 0 163.8 0h120.4c12.1 0 23.2 6.8 28.6 17.7L328 48h88c17.7 0 32 14.3 32 32s-14.3 32-32 32H32C14.3 112 0 97.7 0 80s14.3-32 32-32h88l15.2-30.3zM53.2 467c1.7 25.3 22.7 45 48.1 45h245.4c25.4 0 46.4-19.7 48.1-45L416 144H32l21.2 323z"/>'],
-    chevron: [320, 512, '<path d="M310.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-192 192c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L242.7 256 73.4 86.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l192 192z"/>'],
-    "chevron-down": [512, 512, '<path d="M233.4 406.6c12.5 12.5 32.8 12.5 45.3 0l192-192c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0L256 338.7 86.6 169.4c-12.5-12.5-32.8-12.5-45.3 0s-12.5 32.8 0 45.3l192 192z"/>'],
-    "arrow-right": [448, 512, '<path d="M438.6 278.6c12.5-12.5 12.5-32.8 0-45.3l-160-160c-12.5-12.5-32.8-12.5-45.3 0s-12.5 32.8 0 45.3L338.7 224H32c-17.7 0-32 14.3-32 32s14.3 32 32 32h306.7L233.4 393.4c-12.5 12.5-12.5 32.8 0 45.3s32.8 12.5 45.3 0l160-160z"/>'],
-  };
-  const [width, height, body] = icons[name] || icons.settings;
-  return `<svg class="fa-icon" viewBox="0 0 ${width} ${height}" focusable="false" aria-hidden="true">${body}</svg>`;
-}
-
-function renderProjects(projects) {
-  return `<section class="panel"><div class="panel-head"><span>PRJ</span><div><h2>Projects</h2><p>Routing toggle is local and audited. Create/archive/delete are API planned.</p></div></div>
-  <form class="inline-confirm project-create-form" method="post" action="/actions/project-command">
-    <input type="hidden" name="action" value="create">
-    <input name="slug" placeholder="project-slug" aria-label="Project slug">
-    <input name="displayName" placeholder="Display name" aria-label="Project display name">
-    <select name="runtime" aria-label="Default project runtime"><option value="php">PHP Apache</option><option value="node">Node/Next</option><option value="static">Static</option></select>
-    <input name="host" placeholder="project.localhost.com" aria-label="Project host">
-    <input type="hidden" name="confirm" value="CREATE-PROJECT">
-    <button class="button enable" type="submit">Create project</button>
-  </form>
-  <div class="cards project-cards">${projects.map(renderProjectCard).join("") || empty("No projects", "No mounted projects found.")}</div></section>`;
-}
-
-function renderProjectCard(project) {
-  const canRoute = project.filesystemExists !== false;
-  return `<div id="project-${escapeHtml(project.slug)}" class="card project-card ${project.enabled ? "" : "is-off"}">
-    <div class="card-title"><strong>${escapeHtml(project.name)}</strong><em>${escapeHtml(project.type)}</em></div>
-    <span class="host">${escapeHtml(project.host)}</span>
-    <span>${escapeHtml(project.summary)}</span>
-    ${project.archivedAt ? `<span>Archived at ${escapeHtml(project.archivedAt)}</span>` : ""}
-    ${canRoute ? "" : "<span>Routing waits for mounted source files.</span>"}
-    <div class="project-actions">
-      <span class="state ${project.enabled ? "on" : "off"}">${escapeHtml(humanName(project.status))}</span>
-      ${project.enabled && canRoute ? `<a class="button open" href="${escapeHtml(project.href)}">Open</a>` : `<span class="button muted">Open</span>`}
-      ${canRoute ? `<form method="post" action="/actions/toggle-project">
-        <input type="hidden" name="slug" value="${escapeHtml(project.slug)}">
-        <input type="hidden" name="enabled" value="${project.enabled ? "0" : "1"}">
-        <button class="button ${project.enabled ? "danger" : "enable"}" type="submit">${project.enabled ? "Disable" : "Enable"}</button>
-      </form>` : '<span class="button muted">Enable</span>'}
-      <form class="inline-confirm" method="post" action="/actions/project-command">
-        <input type="hidden" name="slug" value="${escapeHtml(project.slug)}">
-        <input type="hidden" name="action" value="archive">
-        <input name="confirm" value="" placeholder="ARCHIVE-PROJECT" aria-label="Archive confirmation for ${escapeHtml(project.slug)}">
-        <button class="button danger" type="submit">Archive</button>
-      </form>
-      <form class="inline-confirm" method="post" action="/actions/project-command">
-        <input type="hidden" name="slug" value="${escapeHtml(project.slug)}">
-        <input type="hidden" name="action" value="delete">
-        <input name="confirm" value="" placeholder="DELETE-PROJECT:${escapeHtml(project.slug)}" aria-label="Delete confirmation for ${escapeHtml(project.slug)}">
-        <button class="button danger" type="submit">Soft delete</button>
-      </form>
-    </div>
-  </div>`;
-}
-
-function renderApplications(applications, projects, webspaces) {
-  return `<section class="panel"><div class="panel-head"><span>APP</span><div><h2>Applications</h2><p>Create app records and lifecycle plans without touching Docker or project files from the browser.</p></div></div>
-  <form method="post" action="/actions/application-command" class="inline-confirm app-create-form">
-    <select name="projectId" aria-label="Project for application">${projects.map((project) => `<option value="${escapeHtml(project.slug)}">${escapeHtml(project.name)}</option>`).join("")}</select>
-    <input name="name" placeholder="app name" aria-label="Application name">
-    <select name="runtime" aria-label="Runtime"><option value="php">PHP Apache</option><option value="node">Node/Next</option><option value="static">Static</option></select>
-    <select name="webspaceId" aria-label="Linked web space"><option value="">no web space</option>${webspaces.map((space) => `<option value="${escapeHtml(space.id)}">${escapeHtml(space.projectId)}/${escapeHtml(space.name)}</option>`).join("")}</select>
-    <input name="repositoryUrl" placeholder="git repo or folder ref" aria-label="Repository or folder reference">
-    <input type="hidden" name="action" value="create">
-    <input type="hidden" name="confirm" value="CREATE-APPLICATION">
-    <button class="button enable" type="submit">Create app</button>
-  </form>
-  <div class="cards app-cards">${applications.map(renderApplicationCard).join("") || empty("No applications attached.", "Attach applications later through external manifests or local metadata.")}</div></section>`;
-}
-
-function renderApplicationCard(app) {
-  const actions = ["start", "stop", "restart", "healthcheck", "deploy", "rollback"];
-  const actionForms = actions.map((action) => {
-    const confirmValue = applicationLifecycleConfirmation(action, app.id);
-    return `<form method="post" action="/actions/application-command">
-        <input type="hidden" name="id" value="${escapeHtml(app.id)}">
-        <input type="hidden" name="action" value="${escapeHtml(action)}">
-        ${confirmValue ? `<input type="hidden" name="confirm" value="${escapeHtml(confirmValue)}">` : ""}
-        <button class="button ${action === "stop" || action === "rollback" ? "danger" : action === "deploy" || action === "start" ? "enable" : ""}" type="submit">${escapeHtml(humanName(action))}</button>
-      </form>`;
-  }).join("");
-  return `<div id="app-${escapeHtml(app.id)}" class="card app-card">
-    <div class="card-title"><strong>${escapeHtml(app.name)}</strong><em>${escapeHtml(app.runtime)}</em></div>
-    <span class="host">${escapeHtml(app.host)}</span>
-    <span>Healthcheck: ${escapeHtml(app.healthcheck)} / ${escapeHtml(app.healthStatus || "not-checked")}</span>
-    <span>${escapeHtml(app.source || "control-center-state")} / webspace ${escapeHtml(app.webspaceId || "not-linked")}</span>
-    <span>Lifecycle: ${escapeHtml(app.lastLifecycleAction || "none")} / ${escapeHtml(app.lifecycleMode || "metadata-only")}</span>
-    <div class="project-actions app-actions">
-      <span class="state ${app.status === "online" ? "on" : "off"}">${escapeHtml(app.status)}</span>
-      ${actionForms}
-    </div>
-  </div>`;
-}
-
-function renderDomains(domains, subdomains, projects) {
-  return `<section class="grid two"><div class="panel"><div class="panel-head"><span>DNS</span><div><h2>Domains</h2><p>Local DNS is simulated; production domains remain metadata-only until Cloudflare verifyRemote passes.</p></div></div>
-    <form method="post" action="/actions/subdomain-command" class="inline-confirm">
-      <input type="hidden" name="action" value="create-domain">
-      <input name="baseDomain" placeholder="example.com" aria-label="Base domain">
-      <select name="environment" aria-label="Domain environment"><option value="local">local</option><option value="staging">staging</option><option value="production">production</option></select>
-      <select name="visibility" aria-label="Domain visibility"><option value="public">public</option><option value="admin">admin</option><option value="private">private</option></select>
-      <input name="providerConnectionId" placeholder="cloudflare" aria-label="Provider connection id">
-      <input type="hidden" name="confirm" value="CREATE-DOMAIN">
-      <button class="button enable" type="submit">Add domain</button>
-    </form>
-    <div class="cards">${domains.map(renderDomainCard).join("")}</div></div>
-  <div class="panel"><div class="panel-head"><span>SUB</span><div><h2>Subdomains</h2><p>Local apply writes routing state only; production remains dry-run until explicit provider adapters verify remote evidence.</p></div></div>
-    <form method="post" action="/actions/subdomain-command" class="inline-confirm">
-      <select name="projectId" aria-label="Project for subdomain">${projects.map((project) => `<option value="${escapeHtml(project.slug)}">${escapeHtml(project.name)}</option>`).join("")}</select>
-      <input name="hostname" placeholder="preview.localhost.com" aria-label="Local hostname">
-      <select name="visibility" aria-label="Visibility"><option value="public">public</option><option value="admin">admin</option><option value="private">private</option></select>
-      <select name="protection" aria-label="Protection"><option value="none">none</option><option value="passkey">passkey</option><option value="cloudflare-access">cloudflare-access</option></select>
-      <input type="hidden" name="action" value="apply-local">
-      <button class="button enable" type="submit">Add local</button>
-    </form>
-    <div class="cards">${subdomains.map(renderSubdomainCard).join("") || empty("No subdomains", "Create a local subdomain to test routing without Cloudflare.")}</div></div></section>`;
-}
-
-function renderDomainCard(domain) {
-  return `<div id="domain-${escapeHtml(domain.id)}" class="card compact">
-    <div class="card-title"><strong>${escapeHtml(domain.baseDomain)}</strong><em>${escapeHtml(domain.environment)}</em></div>
-    <span>DNS ${escapeHtml(domain.dnsStatus)} / TLS ${escapeHtml(domain.tlsStatus)}</span>
-    <span>Cloudflare ${escapeHtml(domain.cloudflareStatus)} / provider ${escapeHtml(domain.providerConnectionId || "none")}</span>
-    <span>${escapeHtml(domain.source || "control-center-state")} / production evidence ${domain.productionEvidence ? "yes" : "no"}</span>
-  </div>`;
-}
-
-function renderSubdomainCard(item) {
-  const removable = item.createdBy !== "control-center-discovery";
-  return `<div id="subdomain-${escapeHtml(item.id)}" class="card compact">
-    <div class="card-title"><strong>${escapeHtml(item.hostname)}</strong><em>${escapeHtml(item.visibility || "public")}</em></div>
-    <span>${escapeHtml(item.type)} / ${escapeHtml(item.protection)} / ${escapeHtml(item.healthStatus)}</span>
-    <span>DNS ${escapeHtml(item.dnsStatus || "unknown")} / TLS ${escapeHtml(item.tlsStatus || "unknown")}</span>
-    <div class="project-actions">
-      <form method="post" action="/actions/subdomain-command">
-        <input type="hidden" name="id" value="${escapeHtml(item.id)}">
-        <input type="hidden" name="action" value="verify">
-        <button class="button" type="submit">Verify</button>
-      </form>
-      ${removable ? `<form method="post" action="/actions/subdomain-command" class="inline-confirm">
-        <input type="hidden" name="id" value="${escapeHtml(item.id)}">
-        <input type="hidden" name="action" value="remove">
-        <input name="confirm" placeholder="REMOVE-SUBDOMAIN" aria-label="Remove confirmation for ${escapeHtml(item.hostname)}">
-        <button class="button danger" type="submit">Remove</button>
-      </form>` : `<span class="button muted">Discovered route</span>`}
-    </div>
-  </div>`;
-}
-
-function renderNetworkAdvanced(network) {
-  const routers = network.routers || [];
-  const middlewares = network.middlewares || [];
-  const exposedPorts = network.exposedPorts || [];
-  const routeTests = network.routeTests || [];
-  return `<section class="grid two">
-    <div class="panel"><div class="panel-head"><span>NET</span><div><h2>Traefik Network</h2><p>Read-only topology from Compose and Traefik dynamic config. No live route probe or provider mutation is executed here.</p></div></div>
-      <div class="cards">
-        <div class="card compact"><strong>Router topology</strong><span>${routers.length} routers / ${network.services?.length || 0} services / ${network.source}</span></div>
-        <div class="card compact"><strong>Middleware chain</strong><span>${middlewares.length} middlewares / redirect ${network.redirectStatus}</span></div>
-        <div class="card compact"><strong>Loopback host ports</strong><span>${exposedPorts.map((port) => `${port.hostPort}->${port.containerPort}`).join(", ") || "none"}</span></div>
-        <div class="card compact"><strong>Origin lock</strong><span>${escapeHtml(network.originLockStatus)} / Cloudflare ${escapeHtml(network.cloudflareProxyStatus)}</span></div>
-      </div>
-    </div>
-    <div class="panel"><div class="panel-head"><span>TLS</span><div><h2>TLS & Redirect</h2><p>Local TLS uses the mounted Traefik certificate bundle; production proof still requires external HTTPS verification.</p></div></div>
-      <div class="cards">
-        <div class="card compact"><strong>TLS store</strong><span>${escapeHtml(network.tls.defaultStore)} / certificates ${network.tls.certificateCount}</span></div>
-        <div class="card compact"><strong>HTTPS routers</strong><span>${network.tlsRouters} TLS routers configured</span></div>
-        <div class="card compact"><strong>HTTP redirects</strong><span>${network.redirectRouters} redirect routers configured</span></div>
-        <div class="card compact"><strong>Production evidence</strong><span>${network.productionEvidence ? "yes" : "no"} / verifyRemote required</span></div>
-      </div>
-    </div>
-    <div class="panel"><div class="panel-head"><span>RTR</span><div><h2>Router Topology</h2><p>Traefik routers and target services declared by the infrastructure config.</p></div></div>
-      <div class="cards">${routers.map(renderNetworkRouterCard).join("") || empty("No routers", "No Traefik routers were parsed from the local config.")}</div>
-    </div>
-    <div class="panel"><div class="panel-head"><span>MID</span><div><h2>Middleware Chain</h2><p>Security headers, compression, rate limiting and HTTPS redirect middlewares.</p></div></div>
-      <div class="cards">${middlewares.map(renderNetworkMiddlewareCard).join("") || empty("No middlewares", "No Traefik middlewares were parsed from the local config.")}</div>
-    </div>
-    <div class="panel"><div class="panel-head"><span>CHK</span><div><h2>Route Test Plan</h2><p>Dry-run route checks generated for operators and CI evidence. The web panel does not probe the network.</p></div></div>
-      <div class="cards">${routeTests.slice(0, 24).map(renderNetworkRouteTestCard).join("") || empty("No route tests", "Route test plans appear when routers are parsed.")}</div>
-    </div>
-  </section>`;
-}
-
-function renderNetworkRouterCard(router) {
-  return `<div id="network-router-${escapeHtml(router.id)}" class="card compact">
-    <div class="card-title"><strong>${escapeHtml(router.id)}</strong><em>${escapeHtml(router.entryPoints.join(", ") || "none")}</em></div>
-    <span>${escapeHtml(router.rule)}</span>
-    <span>service ${escapeHtml(router.service)} / host ${escapeHtml(router.sampleHost)}</span>
-    <span>TLS ${router.tls ? "enabled" : "disabled"} / redirect ${router.redirect ? "yes" : "no"} / probe ${router.networkProbeExecuted ? "executed" : "not executed"}</span>
-  </div>`;
-}
-
-function renderNetworkMiddlewareCard(middleware) {
-  return `<div id="network-middleware-${escapeHtml(middleware.id)}" class="card compact">
-    <div class="card-title"><strong>${escapeHtml(middleware.id)}</strong><em>${escapeHtml(middleware.type)}</em></div>
-    <span>${escapeHtml(middleware.summary)}</span>
-    <span>provider touched ${middleware.providerTouched ? "yes" : "no"} / production evidence ${middleware.productionEvidence ? "yes" : "no"}</span>
-  </div>`;
-}
-
-function renderNetworkRouteTestCard(testPlan) {
-  return `<div id="network-route-test-${escapeHtml(testPlan.routerId)}" class="card compact">
-    <div class="card-title"><strong>${escapeHtml(testPlan.routerId)}</strong><em>${escapeHtml(testPlan.method)}</em></div>
-    <span>${escapeHtml(testPlan.url)}</span>
-    <span>expected ${escapeHtml(testPlan.expectedStatus)} / network probe ${testPlan.networkProbeExecuted ? "executed" : "not executed"}</span>
-    <span>local evidence ${testPlan.localEvidence ? "yes" : "no"} / production evidence ${testPlan.productionEvidence ? "yes" : "no"}</span>
-  </div>`;
-}
-
-function renderMonitoringAdvanced(monitoring) {
-  const scrapeJobs = monitoring.scrapeJobs || [];
-  const dashboards = monitoring.dashboardPanels || [];
-  const alerts = monitoring.alertRules || [];
-  const datasources = monitoring.datasources || [];
-  return `<section class="grid two">
-    <div class="panel"><div class="panel-head"><span>MON</span><div><h2>Monitoring</h2><p>Read-only observability map from Prometheus, Loki, Grafana and Alertmanager configuration. No Prometheus or Loki query is executed by this panel.</p></div></div>
-      <div class="cards">
-        <div class="card compact"><strong>Prometheus scrape jobs</strong><span>${scrapeJobs.length} jobs / interval ${escapeHtml(monitoring.prometheus.scrapeInterval)}</span></div>
-        <div class="card compact"><strong>Grafana datasources</strong><span>${datasources.map((item) => item.name).join(", ") || "none"}</span></div>
-        <div class="card compact"><strong>Loki retention</strong><span>${escapeHtml(monitoring.loki.retentionPeriod)} / stale samples ${escapeHtml(monitoring.loki.rejectOldSamples)}</span></div>
-        <div class="card compact"><strong>Alert routing</strong><span>${escapeHtml(monitoring.alertmanager.receiver)} / secret value exposed ${monitoring.alertmanager.secretValueExposed ? "yes" : "no"}</span></div>
-      </div>
-    </div>
-    <div class="panel"><div class="panel-head"><span>SLO</span><div><h2>Signals</h2><p>Coverage for the requested host, container, app, worker, WAF, auth, latency and error-rate signals.</p></div></div>
-      <div class="cards">${(monitoring.signals || []).map(renderMonitoringSignalCard).join("")}</div>
-    </div>
-    <div class="panel"><div class="panel-head"><span>MET</span><div><h2>Prometheus Targets</h2><p>Scrape configuration parsed from the infrastructure Prometheus config.</p></div></div>
-      <div class="cards">${scrapeJobs.map(renderMonitoringScrapeCard).join("") || empty("No scrape jobs", "No Prometheus scrape jobs were parsed.")}</div>
-    </div>
-    <div class="panel"><div class="panel-head"><span>LOG</span><div><h2>Grafana Panels</h2><p>Metric and Loki panel inventory for platform services, hosted workloads, WAF and authentication.</p></div></div>
-      <div class="cards">${dashboards.map(renderMonitoringPanelCard).join("") || empty("No dashboard panels", "No Grafana dashboard panels were parsed.")}</div>
-    </div>
-    <div class="panel"><div class="panel-head"><span>ALT</span><div><h2>Alert Rules</h2><p>Prometheus alert rules and severity labels used by Alertmanager routing.</p></div></div>
-      <div class="cards">${alerts.slice(0, 24).map(renderMonitoringAlertRuleCard).join("") || empty("No alert rules", "No Prometheus alert rules were parsed.")}</div>
-    </div>
-  </section>`;
-}
-
-function renderMonitoringSignalCard(signal) {
-  return `<div id="monitoring-signal-${escapeHtml(signal.id)}" class="card compact">
-    <div class="card-title"><strong>${escapeHtml(signal.name)}</strong><em>${escapeHtml(signal.source)}</em></div>
-    <span>${escapeHtml(signal.coverage)}</span>
-    <span>live query ${signal.liveQueryExecuted ? "executed" : "not executed"} / production evidence ${signal.productionEvidence ? "yes" : "no"}</span>
-  </div>`;
-}
-
-function renderMonitoringScrapeCard(job) {
-  return `<div id="monitoring-job-${escapeHtml(job.jobName)}" class="card compact">
-    <div class="card-title"><strong>${escapeHtml(job.jobName)}</strong><em>${escapeHtml(job.metricsPath)}</em></div>
-    <span>${escapeHtml(job.targets.join(", "))}</span>
-    <span>category ${escapeHtml(job.category)} / live query ${job.liveQueryExecuted ? "executed" : "not executed"}</span>
-  </div>`;
-}
-
-function renderMonitoringPanelCard(panel) {
-  return `<div id="monitoring-panel-${escapeHtml(panel.id)}" class="card compact">
-    <div class="card-title"><strong>${escapeHtml(panel.title)}</strong><em>${escapeHtml(panel.type)}</em></div>
-    <span>${escapeHtml(panel.datasource)} / ${escapeHtml(panel.signal)}</span>
-    <span>${escapeHtml(panel.query)}</span>
-  </div>`;
-}
-
-function renderMonitoringAlertRuleCard(rule) {
-  return `<div id="monitoring-alert-${escapeHtml(rule.name)}" class="card compact">
-    <div class="card-title"><strong>${escapeHtml(rule.name)}</strong><em>${escapeHtml(rule.severity)}</em></div>
-    <span>${escapeHtml(rule.summary)}</span>
-    <span>${escapeHtml(rule.expression)}</span>
-  </div>`;
-}
-
-function renderWebspaces(webspaces, projects) {
-  return `<section class="panel"><div class="panel-head"><span>WEB</span><div><h2>Web Spaces</h2><p>Declarative folders only; secrets are excluded by policy.</p></div></div>
-  <form method="post" action="/actions/webspace-command" class="inline-confirm">
-    <select name="projectId" aria-label="Project for web space">${projects.map((project) => `<option value="${escapeHtml(project.slug)}">${escapeHtml(project.name)}</option>`).join("")}</select>
-    <input name="name" placeholder="space name" aria-label="Web space name">
-    <input name="quotaBytes" placeholder="quota bytes" inputmode="numeric" aria-label="Quota bytes">
-    <input type="hidden" name="action" value="create">
-    <input type="hidden" name="confirm" value="CREATE-WEBSPACE">
-    <button class="button enable" type="submit">Create space</button>
-  </form>
-  <div class="cards">${webspaces.map(renderWebspaceCard).join("") || empty("No web spaces", "Create a project web space to declare public/private/uploads/backups/config folders.")}</div></section>`;
-}
-
-function renderWebspaceCard(space) {
-  return `<div id="webspace-${escapeHtml(space.id)}" class="card">
-    <div class="card-title"><strong>${escapeHtml(space.name)}</strong><em>${escapeHtml(space.status)}</em></div>
-    <span>${escapeHtml(space.basePath)}</span>
-    <span>${bytesLabel(space.usedBytes)} used / quota ${bytesLabel(space.quotaBytes)}</span>
-    <span>Folders: ${escapeHtml((space.mounts || []).join(", "))}</span>
-    <form method="post" action="/actions/webspace-command" class="inline-confirm">
-      <input type="hidden" name="id" value="${escapeHtml(space.id)}">
-      <input type="hidden" name="action" value="quota">
-      <input name="quotaBytes" value="${space.quotaBytes || 0}" inputmode="numeric" aria-label="Quota bytes for ${escapeHtml(space.id)}">
-      <input type="hidden" name="confirm" value="UPDATE-QUOTA">
-      <button class="button" type="submit">Set quota</button>
-    </form>
-  </div>`;
-}
-
-function renderSecurity(security) {
-  const policies = security.policies || [];
-  const globalPolicy = policies.find((policy) => policy.scope === "global") || securityPolicyRecord({ scope: "global" });
-  const selectOptions = (name, selected, values, label) => `<select name="${escapeHtml(name)}" aria-label="${escapeHtml(label)}">${values.map((value) => `<option value="${escapeHtml(value)}" ${selected === value ? "selected" : ""}>${escapeHtml(value)}</option>`).join("")}</select>`;
-  return `<section class="grid two">
-    <div class="panel"><div class="panel-head"><span>SEC</span><div><h2>Security</h2><p>Security posture is managed as local policy metadata unless a verified production adapter applies it.</p></div></div>
-      <div class="cards">
-        <div class="card compact"><strong>WAF</strong><span>${escapeHtml(security.waf)}</span></div>
-        <div class="card compact"><strong>Rate limit</strong><span>${escapeHtml(security.rateLimit)}</span></div>
-        <div class="card compact"><strong>Cloudflare Access</strong><span>${escapeHtml(security.cloudflareAccess)}</span></div>
-        <div class="card compact"><strong>Admin Protection</strong><span>${escapeHtml(security.adminProtection)}</span></div>
-        <div class="card compact"><strong>Security Headers</strong><span>${escapeHtml(security.securityHeaders)}</span></div>
-        <div class="card compact"><strong>Passkey/Admin Auth</strong><span>${escapeHtml(security.passkeyAdminAuth)}</span></div>
-      </div>
-      <form method="post" action="/actions/security-command" class="inline-confirm security-form">
-        <input type="hidden" name="action" value="policy">
-        <input name="scope" value="${escapeHtml(globalPolicy.scope)}" aria-label="Security policy scope">
-        ${selectOptions("wafMode", globalPolicy.wafMode, ["configured", "monitor", "blocking", "disabled"], "WAF mode")}
-        ${selectOptions("rateLimitTier", globalPolicy.rateLimitTier, ["configured", "standard", "strict", "disabled"], "Rate limit tier")}
-        ${selectOptions("adminProtection", globalPolicy.adminProtection, ["local-only", "required", "cloudflare-access", "vpn-required"], "Admin protection")}
-        ${selectOptions("securityHeaders", globalPolicy.securityHeaders, ["configured", "strict", "report-only", "disabled"], "Security headers")}
-        ${selectOptions("cloudflareAccess", globalPolicy.cloudflareAccess, ["plan-only-local", "requires-verify-remote", "configured"], "Cloudflare Access status")}
-        ${selectOptions("passkeyAdminAuth", globalPolicy.passkeyAdminAuth, ["external-idp-or-passkey-app", "required", "not-configured"], "Passkey admin auth")}
-        <input type="hidden" name="confirm" value="UPDATE-SECURITY-POLICY">
-        <button class="button enable" type="submit">Update policy</button>
-      </form>
-    </div>
-    <div class="panel"><div class="panel-head"><span>POL</span><div><h2>Policy Records</h2><p>Provider changes stay plan-only until explicit production adapters verify remote evidence.</p></div></div>
-      <div class="cards">${policies.map(renderSecurityPolicyCard).join("") || empty("No security policies", "Update the global policy to create local metadata.")}</div>
-    </div>
-    <div class="panel"><div class="panel-head"><span>AUD</span><div><h2>Recent Security Audit</h2><p>Filtered Control Center security, auth and admin events.</p></div></div>
-      ${security.recentAuditEvents?.length ? `<div class="cards">${security.recentAuditEvents.map((event) => `<div class="card compact"><strong>${escapeHtml(event.action || "event")}</strong><span>${escapeHtml(`${event.timestamp || ""} / ${event.result || "unknown"}`)}</span></div>`).join("")}</div>` : empty("No security events", "Security policy and admin auth events will appear here after activity.")}
-    </div>
-  </section>`;
-}
-
-function renderSecurityPolicyCard(policy) {
-  return `<div id="security-${escapeHtml(policy.scope)}" class="card compact">
-    <div class="card-title"><strong>${escapeHtml(policy.scope)}</strong><em>${escapeHtml(policy.status)}</em></div>
-    <span>WAF ${escapeHtml(policy.wafMode)} / Rate ${escapeHtml(policy.rateLimitTier)} / Admin ${escapeHtml(policy.adminProtection)}</span>
-    <span>Headers ${escapeHtml(policy.securityHeaders)} / Access ${escapeHtml(policy.cloudflareAccess)} / Auth ${escapeHtml(policy.passkeyAdminAuth)}</span>
-    <span>${escapeHtml(policy.updatedAt ? `updated ${policy.updatedAt}` : policy.source || "control-center-default")}</span>
-  </div>`;
-}
-
-function renderSettings(context) {
-  const settings = context.settings || settingsRecord();
-  const uiPackage = context.uiPackage || readControlCenterUiPackage();
-  const uiComponents = (uiPackage.requiredComponents || []).join(", ");
-  const uiAssets = (uiPackage.servedAssets || []).join(", ");
-  const optionList = (name, selected, values, label) => `<select name="${escapeHtml(name)}" aria-label="${escapeHtml(label)}">${values.map((value) => `<option value="${escapeHtml(value)}" ${selected === value ? "selected" : ""}>${escapeHtml(value)}</option>`).join("")}</select>`;
-  return `<section class="grid two">
-    <div class="panel"><div class="panel-head"><span>SET</span><div><h2>Settings</h2><p>Local preferences and connection statuses. Tokens stay in Docker secrets and provider changes stay behind explicit adapters.</p></div></div>
-      <ul class="status-list">
-        <li><strong>Environment</strong><span>${escapeHtml(settings.environmentMode)}</span></li>
-        <li><strong>Base domain</strong><span>${escapeHtml(settings.baseDomain)}</span></li>
-        <li><strong>Cloudflare connection</strong><span>${escapeHtml(settings.cloudflareConnectionStatus)}</span></li>
-        <li><strong>GitHub connection</strong><span>${escapeHtml(settings.githubConnectionStatus)}</span></li>
-        <li><strong>SMTP/alert status</strong><span>${escapeHtml(settings.smtpAlertStatus)}</span></li>
-        <li><strong>Default mode</strong><span>${escapeHtml(settings.preferredMode)}</span></li>
-      </ul>
-      <form id="settings-local" method="post" action="/actions/settings-command" class="inline-confirm settings-form">
-        <input type="hidden" name="action" value="update">
-        ${optionList("preferredMode", settings.preferredMode, ["simple", "advanced"], "Default mode preference")}
-        ${optionList("environmentMode", settings.environmentMode, ["local", "staging", "production"], "Environment mode")}
-        <input name="baseDomain" value="${escapeHtml(settings.baseDomain)}" aria-label="Base domain">
-        ${optionList("cloudflareConnectionStatus", settings.cloudflareConnectionStatus, ["not-configured", "plan-only-local", "requires-verify-remote", "configured"], "Cloudflare connection status")}
-        ${optionList("githubConnectionStatus", settings.githubConnectionStatus, ["not-configured", "dry-run", "requires-verify", "configured"], "GitHub connection status")}
-        ${optionList("smtpAlertStatus", settings.smtpAlertStatus, ["not-configured", "requires-secret-file", "configured", "disabled", "verified-production"], "SMTP alert status")}
-        <input type="hidden" name="confirm" value="UPDATE-SETTINGS">
-        <button class="button enable" type="submit">Update settings</button>
-      </form>
-    </div>
-    <div class="panel"><div class="panel-head"><span>SAFE</span><div><h2>Production Guard</h2><p>Changing this metadata does not mutate Compose, DNS, Cloudflare, GitHub or SMTP.</p></div></div>
-      <div class="cards">
-        <div class="card compact"><strong>Runtime env</strong><span>${escapeHtml(environment)}</span></div>
-        <div class="card compact"><strong>Preference source</strong><span>${escapeHtml(settings.source)}</span></div>
-        <div class="card compact"><strong>Production guard</strong><span>${escapeHtml(settings.productionGuard)}</span></div>
-        <div class="card compact"><strong>Provider touched</strong><span>${settings.providerTouched ? "yes" : "no"}</span></div>
-      </div>
-    </div>
-    <div class="panel"><div class="panel-head"><span>UI</span><div><h2>Control Center UI</h2><p>The Control Center uses a local visual system scoped to this Node dashboard.</p></div></div>
-      <div class="cards">
-        <div class="card compact"><strong>${escapeHtml(uiPackage.name)}</strong><span>version ${escapeHtml(uiPackage.version)} / ${escapeHtml(uiPackage.source)}</span></div>
-        <div class="card compact"><strong>${escapeHtml(uiPackage.controlCenterProject || "@platform/control-center")}</strong><span>${escapeHtml(uiPackage.declaredDependency || "none")} / local scope ${uiPackage.packageMountedInControlCenterProject ? "yes" : "no"}</span></div>
-        <div class="card compact"><strong>Local entrypoints</strong><span>${escapeHtml(uiAssets)}</span></div>
-        <div class="card compact"><strong>Local components</strong><span>${escapeHtml(uiComponents)}</span></div>
-        <div class="card compact"><strong>Visual contract</strong><span>${uiPackage.apiManifestLoaded && uiPackage.missingRequiredExports?.length === 0 ? "loaded from local Control Center files" : "needs package review"}</span></div>
-      </div>
-    </div>
-    <div class="panel"><div class="panel-head"><span>CON</span><div><h2>Provider Connections</h2><p>Connection metadata only. Tokens and provider credentials stay in Docker secrets or private ops material.</p></div></div>
-      <div class="cards">${(context.providerConnections || []).map(renderProviderConnectionCard).join("")}</div>
-      <form method="post" action="/actions/settings-command" class="inline-confirm settings-form">
-        <input type="hidden" name="action" value="provider-connection">
-        <select name="id" aria-label="Provider connection">${(context.providerConnections || []).map((connection) => `<option value="${escapeHtml(connection.id)}">${escapeHtml(connection.name)}</option>`).join("")}</select>
-        ${optionList("status", "metadata-only", ["not-configured", "metadata-only", "requires-secret-file", "requires-verify-remote", "configured", "verified-production"], "Provider connection status")}
-        <input name="accountLabel" placeholder="account or zone label" aria-label="Account or zone label">
-        <input name="scope" placeholder="scope" aria-label="Provider scope">
-        <input type="hidden" name="confirm" value="UPDATE-PROVIDER-CONNECTION">
-        <button class="button enable" type="submit">Update connection</button>
-      </form>
-    </div>
-    <div class="panel"><div class="panel-head"><span>DOC</span><div><h2>Documentation</h2><p>${context.docsAvailable} local docs</p></div></div>${renderDocs()}</div>
-  </section>`;
-}
-
-function renderProviderConnectionCard(connection) {
-  return `<div id="provider-${escapeHtml(connection.id)}" class="card compact">
-    <div class="card-title"><strong>${escapeHtml(connection.name)}</strong><em>${escapeHtml(connection.status)}</em></div>
-    <span>${escapeHtml(connection.provider)} / ${escapeHtml(connection.environment)} / ${escapeHtml(connection.scope || "global")}</span>
-    <span>${escapeHtml(connection.accountLabel || "no account label")} / material ${escapeHtml(connection.privateMaterialConfigured ? "configured" : "not configured")}</span>
-    <span>verified ${escapeHtml(connection.lastVerifiedAt || "never")} / production evidence ${connection.productionEvidence ? "yes" : "no"}</span>
-  </div>`;
-}
-
-function renderDocs() {
-  return Object.entries(docs).map(([group, items]) => `<h3>${escapeHtml(group)}</h3><div class="cards">${items.map(([docPath, description]) => {
-    const exists = existsSync(safeDocPath(docPath));
-    const href = exists ? `https://${docsHost}/docs/${encodeURIComponent(docPath)}` : "#";
-    return `<a class="card compact ${exists ? "" : "disabled"}" href="${escapeHtml(href)}"><strong>${escapeHtml(path.basename(docPath))}</strong><span>${escapeHtml(description)}</span></a>`;
-  }).join("")}</div>`).join("");
 }
 
 function renderDocsPortal(selectedDocPath = "") {
@@ -8725,554 +7871,6 @@ function renderMarkdown(content) {
   flushList();
   if (inCode) flushCode();
   return htmlParts.join("\n");
-}
-
-function renderInfrastructure(services) {
-  return `<section class="panel"><div class="panel-head"><span>INF</span><div><h2>Infrastructure</h2><p>Enterprise service map. Mutations stay behind backend adapters and confirmation.</p></div></div><div class="cards">${services.map((service) => `<div class="card compact"><strong>${escapeHtml(service.name)}</strong><span>${escapeHtml(service.role)} / ${escapeHtml(service.status)}</span></div>`).join("")}</div></section>`;
-}
-
-function renderDeployments(deployments) {
-  return `<section class="panel"><div class="panel-head"><span>DEP</span><div><h2>Deployments</h2><p>Local deployment records are plan evidence only until production verifyRemote passes.</p></div></div>${deployments.length ? `<div class="cards">${deployments.slice(0, 24).map((deployment) => `<div class="card compact"><strong>${escapeHtml(`${deployment.action} / ${deployment.applicationId}`)}</strong><span>${escapeHtml(`${deployment.createdAt} / ${deployment.status} / ${deployment.environment}`)}</span><span>${escapeHtml(`branch ${deployment.branch} / commit ${deployment.commit}`)}</span></div>`).join("")}</div>` : empty("No deployments", "Deploy and rollback plans will appear here after you run them from Applications.")}</section>`;
-}
-
-function renderDatabases(databases, engines, projects) {
-  const projectOptions = projects.map((project) => `<option value="${escapeHtml(project.slug)}">${escapeHtml(project.name)}</option>`).join("");
-  const engineOptions = engines.map((engine) => `<option value="${escapeHtml(engine.id)}">${escapeHtml(engine.name)}</option>`).join("");
-  return `<section class="grid two">
-    <div class="panel"><div class="panel-head"><span>DB</span><div><h2>Databases</h2><p>Database inventory and plans are metadata-only until a live DatabaseAdapter is explicitly enabled.</p></div></div>
-      <div class="cards">
-        ${engines.map((engine) => `<div class="card compact"><strong>${escapeHtml(engine.name)}</strong><span>${escapeHtml(engine.service)} / ${escapeHtml(engine.status)} / production evidence ${engine.productionEvidence ? "yes" : "no"}</span></div>`).join("")}
-      </div>
-      <form method="post" action="/actions/database-command" class="inline-confirm database-form">
-        <input type="hidden" name="action" value="create">
-        <select name="projectId" aria-label="Database project">${projectOptions}</select>
-        <select name="engine" aria-label="Database engine">${engineOptions}</select>
-        <input name="name" value="app_db" aria-label="Database name">
-        <input type="hidden" name="confirm" value="CREATE-DATABASE">
-        <button class="button enable" type="submit">Declare database</button>
-      </form>
-    </div>
-    <div class="panel"><div class="panel-head"><span>INV</span><div><h2>Database Inventory</h2><p>Create/backup/restore controls write audited plans and never expose credentials.</p></div></div>
-      ${databases.length ? `<div class="cards">${databases.map(renderDatabaseCard).join("")}</div>` : empty("No databases declared", "Declare a project database to track backup and restore plans from the Control Center.")}
-    </div>
-  </section>`;
-}
-
-function renderDatabaseCard(database) {
-  return `<div id="database-${escapeHtml(database.id)}" class="card compact">
-    <div class="card-title"><strong>${escapeHtml(database.name)}</strong><em>${escapeHtml(database.engine)}</em></div>
-    <span>${escapeHtml(database.projectId)} / ${escapeHtml(database.status)} / ${escapeHtml(database.connectionStatus)}</span>
-    <span>size ${escapeHtml(String(database.sizeBytes))} bytes / slow queries ${escapeHtml(database.slowQueries)}</span>
-    <form method="post" action="/actions/database-command" class="inline-confirm">
-      <input type="hidden" name="action" value="backup">
-      <input type="hidden" name="id" value="${escapeHtml(database.id)}">
-      <button class="button enable" type="submit">Plan backup</button>
-    </form>
-    <form method="post" action="/actions/database-command" class="inline-confirm">
-      <input type="hidden" name="action" value="restore">
-      <input type="hidden" name="id" value="${escapeHtml(database.id)}">
-      <input name="backupRef" value="latest" aria-label="Backup reference">
-      <button class="button danger" type="submit">Plan restore</button>
-    </form>
-  </div>`;
-}
-
-function renderStorage(buckets, provider, projects) {
-  const projectOptions = projects.map((project) => `<option value="${escapeHtml(project.slug)}">${escapeHtml(project.name)}</option>`).join("");
-  return `<section class="grid two">
-    <div class="panel"><div class="panel-head"><span>S3</span><div><h2>Storage</h2><p>MinIO bucket inventory and controls are metadata-only until a live MinioAdapter is explicitly enabled.</p></div></div>
-      <div class="cards">
-        <div class="card compact"><strong>${escapeHtml(provider.name)}</strong><span>${escapeHtml(provider.service)} / ${escapeHtml(provider.status)} / production evidence ${provider.productionEvidence ? "yes" : "no"}</span></div>
-        <div class="card compact"><strong>Access keys</strong><span>tracked as configured/not-configured metadata; values are never exposed.</span></div>
-        <div class="card compact"><strong>Lifecycle</strong><span>retention and transition metadata only until adapter apply.</span></div>
-      </div>
-      <form method="post" action="/actions/storage-command" class="inline-confirm storage-form">
-        <input type="hidden" name="action" value="create">
-        <select name="projectId" aria-label="Bucket project">${projectOptions}</select>
-        <input name="name" value="project-assets" aria-label="Bucket name">
-        <input name="quotaBytes" value="0" aria-label="Bucket quota bytes">
-        <select name="accessPolicy" aria-label="Access policy"><option value="private">private</option><option value="project-private">project-private</option><option value="public-read">public-read</option><option value="admin-only">admin-only</option></select>
-        <select name="accessKeyStatus" aria-label="Access key status"><option value="not-configured">not-configured</option><option value="requires-secret-file">requires-secret-file</option><option value="configured">configured</option><option value="rotating">rotating</option></select>
-        <input type="hidden" name="confirm" value="CREATE-BUCKET">
-        <button class="button enable" type="submit">Declare bucket</button>
-      </form>
-    </div>
-    <div class="panel"><div class="panel-head"><span>INV</span><div><h2>Bucket Inventory</h2><p>Policy, lifecycle, backup and restore plans are audited and do not call MinIO live.</p></div></div>
-      ${buckets.length ? `<div class="cards">${buckets.map(renderStorageBucketCard).join("")}</div>` : empty("No buckets declared", "Declare a project bucket to track storage policy, lifecycle and backup plans from the Control Center.")}
-    </div>
-  </section>`;
-}
-
-function renderStorageBucketCard(bucket) {
-  return `<div id="bucket-${escapeHtml(bucket.id)}" class="card compact">
-    <div class="card-title"><strong>${escapeHtml(bucket.name)}</strong><em>${escapeHtml(bucket.accessPolicy)}</em></div>
-    <span>${escapeHtml(bucket.projectId)} / ${escapeHtml(bucket.status)} / quota ${escapeHtml(String(bucket.quotaBytes))} bytes</span>
-    <span>lifecycle ${escapeHtml(bucket.lifecycleStatus)} / retention ${escapeHtml(String(bucket.retentionDays))} days / access key ${escapeHtml(bucket.accessKeyStatus)}</span>
-    <form method="post" action="/actions/storage-command" class="inline-confirm">
-      <input type="hidden" name="action" value="policy">
-      <input type="hidden" name="id" value="${escapeHtml(bucket.id)}">
-      <select name="accessPolicy" aria-label="Access policy"><option value="private">private</option><option value="project-private">project-private</option><option value="public-read">public-read</option><option value="admin-only">admin-only</option></select>
-      <input type="hidden" name="confirm" value="UPDATE-BUCKET-POLICY">
-      <button class="button" type="submit">Update policy</button>
-    </form>
-    <form method="post" action="/actions/storage-command" class="inline-confirm">
-      <input type="hidden" name="action" value="lifecycle">
-      <input type="hidden" name="id" value="${escapeHtml(bucket.id)}">
-      <input name="retentionDays" value="${escapeHtml(String(bucket.retentionDays || 30))}" aria-label="Retention days">
-      <input type="hidden" name="confirm" value="UPDATE-BUCKET-LIFECYCLE">
-      <button class="button" type="submit">Update lifecycle</button>
-    </form>
-    <form method="post" action="/actions/storage-command" class="inline-confirm">
-      <input type="hidden" name="action" value="access-key">
-      <input type="hidden" name="id" value="${escapeHtml(bucket.id)}">
-      <select name="accessKeyStatus" aria-label="Access key status"><option value="not-configured">not-configured</option><option value="requires-secret-file">requires-secret-file</option><option value="configured">configured</option><option value="rotating">rotating</option></select>
-      <input type="hidden" name="confirm" value="UPDATE-BUCKET-ACCESS-KEY">
-      <button class="button" type="submit">Update access key</button>
-    </form>
-    <form method="post" action="/actions/storage-command" class="inline-confirm">
-      <input type="hidden" name="action" value="backup">
-      <input type="hidden" name="id" value="${escapeHtml(bucket.id)}">
-      <button class="button enable" type="submit">Plan backup</button>
-    </form>
-    <form method="post" action="/actions/storage-command" class="inline-confirm">
-      <input type="hidden" name="action" value="restore">
-      <input type="hidden" name="id" value="${escapeHtml(bucket.id)}">
-      <input name="backupRef" value="latest" aria-label="Backup reference">
-      <button class="button danger" type="submit">Plan restore</button>
-    </form>
-  </div>`;
-}
-
-function renderSecrets(materials, stores, projects) {
-  const projectOptions = projects.map((project) => `<option value="${escapeHtml(project.slug)}">${escapeHtml(project.name)}</option>`).join("");
-  return `<section class="grid two">
-    <div class="panel"><div class="panel-head"><span>KEY</span><div><h2>Secrets</h2><p>Inventory tracks sensitive material metadata only. Plaintext values never enter the Control Center.</p></div></div>
-      <div class="cards">
-        ${stores.map((store) => `<div class="card compact"><strong>${escapeHtml(store.name)}</strong><span>${escapeHtml(store.status)} / value exposed ${store.valueExposed ? "yes" : "no"}</span></div>`).join("")}
-      </div>
-      <form method="post" action="/actions/material-command" class="inline-confirm material-form">
-        <input type="hidden" name="action" value="declare">
-        <select name="projectId" aria-label="Material project">${projectOptions}</select>
-        <select name="targetEnv" aria-label="Material environment"><option value="local">local</option><option value="staging">staging</option><option value="production">production</option></select>
-        <input name="materialName" value="APP_CONFIG" aria-label="Material name">
-        <select name="materialKind" aria-label="Material kind"><option value="application">application</option><option value="docker">docker</option><option value="provider">provider</option><option value="kms">kms</option><option value="database">database</option><option value="storage">storage</option></select>
-        <select name="materialConfigured" aria-label="Material configured"><option value="false">not configured</option><option value="true">configured</option></select>
-        <input name="rotationDays" value="90" aria-label="Rotation days">
-        <input name="usageTarget" value="app" aria-label="Usage target">
-        <input type="hidden" name="confirm" value="DECLARE-MATERIAL">
-        <button class="button enable" type="submit">Declare material</button>
-      </form>
-    </div>
-    <div class="panel"><div class="panel-head"><span>INV</span><div><h2>Material Inventory</h2><p>Rotation, usage and access audit are local metadata records, not value reads.</p></div></div>
-      ${materials.length ? `<div class="cards">${materials.map(renderMaterialCard).join("")}</div>` : empty("No materials declared", "Declare sensitive material metadata to track usage, rotation and access audits without exposing values.")}
-    </div>
-  </section>`;
-}
-
-function renderMaterialCard(material) {
-  return `<div id="material-${escapeHtml(material.id)}" class="card compact">
-    <div class="card-title"><strong>${escapeHtml(material.materialName)}</strong><em>${escapeHtml(material.materialKind)}</em></div>
-    <span>${escapeHtml(material.projectId)} / ${escapeHtml(material.environment)} / configured ${material.materialConfigured ? "yes" : "no"}</span>
-    <span>rotation ${escapeHtml(material.rotationStatus)} every ${escapeHtml(String(material.rotationDays))} days / value exposed ${material.valueExposed ? "yes" : "no"}</span>
-    <span>usage ${escapeHtml(material.usageTargets.join(", ") || "not mapped")}</span>
-    <form method="post" action="/actions/material-command" class="inline-confirm">
-      <input type="hidden" name="action" value="rotation">
-      <input type="hidden" name="id" value="${escapeHtml(material.id)}">
-      <input name="rotationDays" value="${escapeHtml(String(material.rotationDays || 90))}" aria-label="Rotation days">
-      <input type="hidden" name="confirm" value="UPDATE-MATERIAL-ROTATION">
-      <button class="button" type="submit">Update rotation</button>
-    </form>
-    <form method="post" action="/actions/material-command" class="inline-confirm">
-      <input type="hidden" name="action" value="usage">
-      <input type="hidden" name="id" value="${escapeHtml(material.id)}">
-      <input name="usageTarget" value="${escapeHtml(material.usageTargets[0] || "app")}" aria-label="Usage target">
-      <input type="hidden" name="confirm" value="UPDATE-MATERIAL-USAGE">
-      <button class="button" type="submit">Update usage</button>
-    </form>
-    <form method="post" action="/actions/material-command" class="inline-confirm">
-      <input type="hidden" name="action" value="access">
-      <input type="hidden" name="id" value="${escapeHtml(material.id)}">
-      <input name="purpose" value="admin-review" aria-label="Access purpose">
-      <input type="hidden" name="confirm" value="RECORD-MATERIAL-ACCESS">
-      <button class="button danger" type="submit">Record access</button>
-    </form>
-  </div>`;
-}
-
-function renderIdentityAccess(identity) {
-  return `<section class="grid two">
-    <div class="panel"><div class="panel-head"><span>IAM</span><div><h2>Identity &amp; Access</h2><p>Admin users, roles, teams, sessions and access reviews are metadata-only until Keycloak or Cloudflare Access adapters verify remote state.</p></div></div>
-      <div class="cards">
-        <div class="card compact"><strong>Admin users</strong><span>${identity.adminUsers.length} records / credentials exposed no</span></div>
-        <div class="card compact"><strong>Roles</strong><span>${identity.roles.length} roles / permissions metadata</span></div>
-        <div class="card compact"><strong>Sessions</strong><span>${identity.sessionPolicies.length} policies / ${escapeHtml(identity.sessionPolicies[0]?.cookieFlags?.join(", ") || "HttpOnly, Secure")}</span></div>
-        <div class="card compact"><strong>Login audit</strong><span>${identity.loginAudit.length} recent admin login events</span></div>
-      </div>
-      <form method="post" action="/actions/identity-command" class="inline-confirm identity-form">
-        <input type="hidden" name="action" value="admin-user">
-        <input name="email" value="admin@localhost.com" aria-label="Admin email">
-        <input name="displayName" value="Platform Admin" aria-label="Admin display name">
-        <input name="roleIds" value="platform-owner" aria-label="Role ids">
-        <input name="teamIds" value="platform-admins" aria-label="Team ids">
-        <select name="mfaRequired" aria-label="MFA required"><option value="true">MFA required</option><option value="false">MFA metadata only</option></select>
-        <select name="passkeyRequired" aria-label="Passkey required"><option value="true">passkey required</option><option value="false">passkey optional</option></select>
-        <input type="hidden" name="confirm" value="DECLARE-ADMIN-USER">
-        <button class="button enable" type="submit">Declare admin user</button>
-      </form>
-      <form method="post" action="/actions/identity-command" class="inline-confirm identity-form">
-        <input type="hidden" name="action" value="role">
-        <input name="id" value="platform-operator" aria-label="Role id">
-        <input name="name" value="Platform Operator" aria-label="Role name">
-        <input name="permissions" value="control:read,projects:write,audit:read" aria-label="Permissions">
-        <input type="hidden" name="confirm" value="DECLARE-IDENTITY-ROLE">
-        <button class="button enable" type="submit">Declare role</button>
-      </form>
-      <form method="post" action="/actions/identity-command" class="inline-confirm identity-form">
-        <input type="hidden" name="action" value="team">
-        <input name="id" value="platform-ops" aria-label="Team id">
-        <input name="name" value="Platform Ops" aria-label="Team name">
-        <input name="roleIds" value="platform-operator" aria-label="Team role ids">
-        <input name="members" value="local-admin" aria-label="Team members">
-        <input type="hidden" name="confirm" value="DECLARE-IDENTITY-TEAM">
-        <button class="button enable" type="submit">Declare team</button>
-      </form>
-    </div>
-    <div class="panel"><div class="panel-head"><span>USR</span><div><h2>Admin Users</h2><p>No passwords, passkey credentials or OAuth tokens are stored in this inventory.</p></div></div>
-      ${identity.adminUsers.length ? `<div class="cards">${identity.adminUsers.map(renderIdentityUserCard).join("")}</div>` : empty("No admin users", "Declare admin users to track ownership and access reviews.")}
-    </div>
-    <div class="panel"><div class="panel-head"><span>ROL</span><div><h2>Roles &amp; Teams</h2><p>Permissions are reviewed locally; live IdP changes require an explicit adapter.</p></div></div>
-      <div class="cards">${[...identity.roles.map(renderIdentityRoleCard), ...identity.teams.map(renderIdentityTeamCard)].join("")}</div>
-    </div>
-    <div class="panel"><div class="panel-head"><span>SES</span><div><h2>Sessions &amp; Reviews</h2><p>Session policy and access review evidence stay local until production verifyRemote passes.</p></div></div>
-      <form method="post" action="/actions/identity-command" class="inline-confirm identity-form">
-        <input type="hidden" name="action" value="session-policy">
-        <input name="id" value="control-center-session" aria-label="Session policy id">
-        <input name="maxAgeMinutes" value="480" inputmode="numeric" aria-label="Session max age minutes">
-        <input name="cookieFlags" value="HttpOnly,Secure,SameSite=Lax" aria-label="Cookie flags">
-        <input type="hidden" name="confirm" value="UPDATE-SESSION-POLICY">
-        <button class="button" type="submit">Update session policy</button>
-      </form>
-      <form method="post" action="/actions/identity-command" class="inline-confirm identity-form">
-        <input type="hidden" name="action" value="access-review">
-        <input name="scope" value="admin-users" aria-label="Access review scope">
-        <input name="reviewer" value="local-admin" aria-label="Reviewer">
-        <select name="status" aria-label="Review status"><option value="planned">planned</option><option value="passed">passed</option><option value="needs-action">needs-action</option></select>
-        <input type="hidden" name="confirm" value="RECORD-ACCESS-REVIEW">
-        <button class="button" type="submit">Record access review</button>
-      </form>
-      <div class="cards">${[...identity.sessionPolicies.map(renderIdentitySessionPolicyCard), ...identity.accessReviews.map(renderIdentityAccessReviewCard), ...identity.loginAudit.map(renderIdentityLoginAuditCard)].join("") || empty("No session evidence", "Session policy and access review records appear here.")}</div>
-    </div>
-  </section>`;
-}
-
-function renderIdentityUserCard(user) {
-  return `<div id="identity-${escapeHtml(user.id)}" class="card compact">
-    <div class="card-title"><strong>${escapeHtml(user.displayName)}</strong><em>${escapeHtml(user.status)}</em></div>
-    <span>${escapeHtml(user.email)} / roles ${escapeHtml(user.roleIds.join(", ") || "none")}</span>
-    <span>MFA ${escapeHtml(user.mfaStatus)} / passkey ${escapeHtml(user.passkeyStatus)} / VPN ${escapeHtml(user.vpnStatus)}</span>
-    <span>credentials exposed ${user.credentialsExposed ? "yes" : "no"} / provider touched ${user.providerTouched ? "yes" : "no"}</span>
-  </div>`;
-}
-
-function renderIdentityRoleCard(role) {
-  return `<div id="identity-${escapeHtml(role.id)}" class="card compact">
-    <div class="card-title"><strong>${escapeHtml(role.name)}</strong><em>role</em></div>
-    <span>${escapeHtml(role.permissions.join(", ") || "no permissions")}</span>
-    <span>${escapeHtml(role.source)} / IdP touched ${role.providerTouched ? "yes" : "no"}</span>
-  </div>`;
-}
-
-function renderIdentityTeamCard(team) {
-  return `<div id="identity-${escapeHtml(team.id)}" class="card compact">
-    <div class="card-title"><strong>${escapeHtml(team.name)}</strong><em>team</em></div>
-    <span>roles ${escapeHtml(team.roleIds.join(", ") || "none")} / members ${escapeHtml(team.members.join(", ") || "none")}</span>
-    <span>${escapeHtml(team.source)} / production evidence ${team.productionEvidence ? "yes" : "no"}</span>
-  </div>`;
-}
-
-function renderIdentitySessionPolicyCard(policy) {
-  return `<div id="identity-${escapeHtml(policy.id)}" class="card compact">
-    <div class="card-title"><strong>${escapeHtml(policy.name)}</strong><em>${escapeHtml(policy.status)}</em></div>
-    <span>max age ${escapeHtml(String(policy.maxAgeMinutes))}m / flags ${escapeHtml(policy.cookieFlags.join(", "))}</span>
-    <span>secret file ${policy.sessionSecretConfigured ? "configured" : "not configured"} / value exposed ${policy.valueExposed ? "yes" : "no"}</span>
-  </div>`;
-}
-
-function renderIdentityAccessReviewCard(review) {
-  return `<div id="identity-${escapeHtml(review.id)}" class="card compact">
-    <div class="card-title"><strong>${escapeHtml(review.scope)}</strong><em>${escapeHtml(review.status)}</em></div>
-    <span>reviewer ${escapeHtml(review.reviewer)} / ${escapeHtml(review.reviewedAt || "not-reviewed")}</span>
-    <span>provider touched ${review.providerTouched ? "yes" : "no"} / production evidence ${review.productionEvidence ? "yes" : "no"}</span>
-  </div>`;
-}
-
-function renderIdentityLoginAuditCard(event) {
-  return `<div class="card compact">
-    <div class="card-title"><strong>${escapeHtml(event.action || "admin.login")}</strong><em>${escapeHtml(event.result || "unknown")}</em></div>
-    <span>${escapeHtml(event.timestamp || "")} / ${escapeHtml(event.risk || "low")} / ${escapeHtml(event.requestId || "")}</span>
-  </div>`;
-}
-
-function renderWorkersJobs(workers, queues, jobs, schedules, projects) {
-  const projectOptions = projects.map((project) => `<option value="${escapeHtml(project.slug)}">${escapeHtml(project.name)}</option>`).join("");
-  const queueOptions = queues.map((queue) => `<option value="${escapeHtml(queue.id)}">${escapeHtml(`${queue.projectId}/${queue.name}`)}</option>`).join("");
-  const workerOptions = workers.map((worker) => `<option value="${escapeHtml(worker.id)}">${escapeHtml(`${worker.projectId}/${worker.name}`)}</option>`).join("");
-  const failedJobs = jobs.filter((job) => job.status === "failed");
-  return `<section class="grid two">
-    <div class="panel"><div class="panel-head"><span>JOB</span><div><h2>Workers &amp; Jobs</h2><p>Worker, queue, failed job, retry and scheduler metadata. No job execution or Docker command runs from this panel.</p></div></div>
-      <div class="cards">
-        <div class="card compact"><strong>Worker status</strong><span>${workers.length} runtime records / Docker touched no</span></div>
-        <div class="card compact"><strong>Queues</strong><span>${queues.length} queue records / providers touched no</span></div>
-        <div class="card compact"><strong>Failed jobs</strong><span>${failedJobs.length} local records / retry controls metadata-only</span></div>
-        <div class="card compact"><strong>Containerized scheduler</strong><span>${schedules.filter((schedule) => schedule.containerizedCron).length} cron records</span></div>
-      </div>
-      <form method="post" action="/actions/worker-job-command" class="inline-confirm worker-form">
-        <input type="hidden" name="action" value="declare-worker">
-        <select name="projectId" aria-label="Worker project">${projectOptions}</select>
-        <input name="name" value="jobs-worker" aria-label="Worker name">
-        <input name="service" value="backup-scheduler" aria-label="Worker service">
-        <select name="status" aria-label="Worker status"><option value="declared">declared</option><option value="configured">configured</option><option value="running">running</option><option value="stopped">stopped</option><option value="degraded">degraded</option></select>
-        <input name="queueName" value="jobs" aria-label="Worker queue name">
-        <input name="concurrency" value="1" inputmode="numeric" aria-label="Worker concurrency">
-        <input name="maxAttempts" value="3" inputmode="numeric" aria-label="Max retry attempts">
-        <input type="hidden" name="confirm" value="DECLARE-WORKER">
-        <button class="button enable" type="submit">Declare worker</button>
-      </form>
-      <form method="post" action="/actions/worker-job-command" class="inline-confirm worker-form">
-        <input type="hidden" name="action" value="declare-queue">
-        <select name="projectId" aria-label="Queue project">${projectOptions}</select>
-        <input name="name" value="jobs" aria-label="Queue name">
-        <select name="backend" aria-label="Queue backend"><option value="nats">nats</option><option value="postgres-outbox">postgres-outbox</option><option value="container-cron">container-cron</option><option value="http-webhook">http-webhook</option><option value="alertmanager-webhook">alertmanager-webhook</option></select>
-        <select name="status" aria-label="Queue status"><option value="declared">declared</option><option value="configured">configured</option><option value="draining">draining</option><option value="paused">paused</option></select>
-        <input name="retryPolicy" value="bounded-worker-retry" aria-label="Retry policy">
-        <input type="hidden" name="confirm" value="DECLARE-QUEUE">
-        <button class="button enable" type="submit">Declare queue</button>
-      </form>
-    </div>
-    <div class="panel"><div class="panel-head"><span>WRK</span><div><h2>Worker Runtime</h2><p>Status is local metadata plus discovered Compose services; health proof comes from ops evidence.</p></div></div>
-      ${workers.length ? `<div class="cards">${workers.map(renderWorkerRuntimeCard).join("")}</div>` : empty("No worker records", "Declare a worker or create an application with runtime worker.")}
-    </div>
-    <div class="panel"><div class="panel-head"><span>QUE</span><div><h2>Queues</h2><p>Queue depth and dead-letter metadata are safe local records until adapters read metrics.</p></div></div>
-      ${queues.length ? `<div class="cards">${queues.map(renderJobQueueCard).join("")}</div>` : empty("No queues", "Declare a queue to map worker routing and retry policy.")}
-    </div>
-    <div class="panel"><div class="panel-head"><span>FAIL</span><div><h2>Jobs</h2><p>Record failed jobs and retry plans without running handlers from the web panel.</p></div></div>
-      <form method="post" action="/actions/worker-job-command" class="inline-confirm job-form">
-        <input type="hidden" name="action" value="record-job">
-        <select name="projectId" aria-label="Job project">${projectOptions}</select>
-        <select name="queueId" aria-label="Job queue">${queueOptions || '<option value="jobs">jobs</option>'}</select>
-        <select name="workerId" aria-label="Job worker">${workerOptions || '<option value="enterprise-backup-scheduler">enterprise-backup-scheduler</option>'}</select>
-        <input name="jobName" value="sync-task" aria-label="Job name">
-        <select name="status" aria-label="Job status"><option value="failed">failed</option><option value="queued">queued</option><option value="running">running</option><option value="succeeded">succeeded</option><option value="dead">dead</option></select>
-        <input name="attempts" value="1" inputmode="numeric" aria-label="Attempts">
-        <input name="maxAttempts" value="3" inputmode="numeric" aria-label="Max attempts">
-        <input name="lastError" value="sanitized failure note" aria-label="Last error summary">
-        <input type="hidden" name="confirm" value="RECORD-JOB">
-        <button class="button enable" type="submit">Record job</button>
-      </form>
-      ${jobs.length ? `<div class="cards">${jobs.map(renderJobRecordCard).join("")}</div>` : empty("No job records", "Failed job and retry metadata will appear here.")}
-    </div>
-    <div class="panel"><div class="panel-head"><span>CRON</span><div><h2>Containerized Scheduler</h2><p>Cron expressions are metadata only; production proof comes from the Dockerized scheduler evidence.</p></div></div>
-      <form method="post" action="/actions/worker-job-command" class="inline-confirm schedule-form">
-        <input type="hidden" name="action" value="declare-schedule">
-        <select name="projectId" aria-label="Schedule project">${projectOptions}</select>
-        <select name="workerId" aria-label="Schedule worker">${workerOptions || '<option value="enterprise-backup-scheduler">enterprise-backup-scheduler</option>'}</select>
-        <select name="queueId" aria-label="Schedule queue">${queueOptions || '<option value="maintenance">maintenance</option>'}</select>
-        <input name="name" value="nightly-maintenance" aria-label="Schedule name">
-        <input name="cronExpression" value="15 3 * * *" aria-label="Cron expression">
-        <select name="status" aria-label="Schedule status"><option value="enabled">enabled</option><option value="paused">paused</option><option value="metadata-only">metadata-only</option></select>
-        <input type="hidden" name="confirm" value="DECLARE-SCHEDULE">
-        <button class="button enable" type="submit">Declare schedule</button>
-      </form>
-      ${schedules.length ? `<div class="cards">${schedules.map(renderJobScheduleCard).join("")}</div>` : empty("No schedules", "Declare containerized cron metadata to track scheduler intent.")}
-    </div>
-  </section>`;
-}
-
-function renderWorkerRuntimeCard(worker) {
-  return `<div id="worker-job-${escapeHtml(worker.id)}" class="card compact">
-    <div class="card-title"><strong>${escapeHtml(worker.name)}</strong><em>${escapeHtml(worker.status)}</em></div>
-    <span>${escapeHtml(worker.projectId)} / service ${escapeHtml(worker.service)} / queue ${escapeHtml(worker.queueName)}</span>
-    <span>concurrency ${escapeHtml(String(worker.concurrency))} / max attempts ${escapeHtml(String(worker.maxAttempts))} / health ${escapeHtml(worker.healthStatus)}</span>
-    <span>${escapeHtml(worker.source)} / command executed ${worker.commandExecuted ? "yes" : "no"}</span>
-  </div>`;
-}
-
-function renderJobQueueCard(queue) {
-  return `<div id="worker-job-${escapeHtml(queue.id)}" class="card compact">
-    <div class="card-title"><strong>${escapeHtml(queue.name)}</strong><em>${escapeHtml(queue.status)}</em></div>
-    <span>${escapeHtml(queue.projectId)} / ${escapeHtml(queue.backend)} / depth ${escapeHtml(String(queue.depth))}</span>
-    <span>failed ${escapeHtml(String(queue.failedCount))} / retry ${escapeHtml(queue.retryPolicy)} / dead letter ${escapeHtml(queue.deadLetterQueue || "not-set")}</span>
-  </div>`;
-}
-
-function renderJobRecordCard(job) {
-  return `<div id="worker-job-${escapeHtml(job.id)}" class="card compact">
-    <div class="card-title"><strong>${escapeHtml(job.jobName)}</strong><em>${escapeHtml(job.status)}</em></div>
-    <span>${escapeHtml(job.projectId)} / queue ${escapeHtml(job.queueId)} / worker ${escapeHtml(job.workerId)}</span>
-    <span>attempts ${escapeHtml(String(job.attempts))}/${escapeHtml(String(job.maxAttempts))} / retry after ${escapeHtml(String(job.retryAfterSeconds))}s</span>
-    <span>${escapeHtml(job.lastError || "no error summary")}</span>
-    ${["failed", "dead", "retry-planned"].includes(job.status) ? `<form method="post" action="/actions/worker-job-command" class="inline-confirm">
-      <input type="hidden" name="action" value="retry-job">
-      <input type="hidden" name="id" value="${escapeHtml(job.id)}">
-      <input name="retryAfterSeconds" value="${escapeHtml(String(job.retryAfterSeconds || 60))}" inputmode="numeric" aria-label="Retry delay seconds">
-      <input type="hidden" name="confirm" value="PLAN-JOB-RETRY">
-      <button class="button danger" type="submit">Plan retry</button>
-    </form>` : ""}
-  </div>`;
-}
-
-function renderJobScheduleCard(schedule) {
-  return `<div id="worker-job-${escapeHtml(schedule.id)}" class="card compact">
-    <div class="card-title"><strong>${escapeHtml(schedule.name)}</strong><em>${escapeHtml(schedule.status)}</em></div>
-    <span>${escapeHtml(schedule.projectId)} / worker ${escapeHtml(schedule.workerId)} / queue ${escapeHtml(schedule.queueId)}</span>
-    <span>cron ${escapeHtml(schedule.cronExpression)} / containerized ${schedule.containerizedCron ? "yes" : "no"} / last ${escapeHtml(schedule.lastRunStatus)}</span>
-    <form method="post" action="/actions/worker-job-command" class="inline-confirm">
-      <input type="hidden" name="action" value="schedule-status">
-      <input type="hidden" name="id" value="${escapeHtml(schedule.id)}">
-      <select name="status" aria-label="Schedule status for ${escapeHtml(schedule.id)}"><option value="enabled">enabled</option><option value="paused">paused</option><option value="metadata-only">metadata-only</option></select>
-      <input type="hidden" name="confirm" value="UPDATE-SCHEDULE">
-      <button class="button" type="submit">Update schedule</button>
-    </form>
-  </div>`;
-}
-
-function renderLogsAlerts(logsAlerts) {
-  const openAlerts = logsAlerts.openAlerts || [];
-  const recentErrors = logsAlerts.recentErrors || [];
-  const channels = logsAlerts.notificationChannels || [];
-  return `<section class="grid two">
-    <div class="panel"><div class="panel-head"><span>LOG</span><div><h2>Logs / Alerts</h2><p>Minimal operational view. Raw internal consoles stay off the public Projects surface.</p></div></div>
-      <div class="cards">
-        <div class="card compact"><strong>Open alerts</strong><span>${openAlerts.length} active local records</span></div>
-        <div class="card compact"><strong>Recent errors</strong><span>${recentErrors.length} failed operations or audit events</span></div>
-        <div class="card compact"><strong>Detailed logs</strong><span>${escapeHtml(logsAlerts.detailedLogs)}</span></div>
-        <div class="card compact"><strong>Alert routing</strong><span>${escapeHtml(logsAlerts.alertRouting)}</span></div>
-      </div>
-      <form method="post" action="/actions/alert-command" class="inline-confirm alert-form">
-        <input type="hidden" name="action" value="record">
-        <input name="service" value="platform" aria-label="Alert service">
-        <select name="severity" aria-label="Alert severity"><option value="info">info</option><option value="warning" selected>warning</option><option value="critical">critical</option></select>
-        <input name="summary" value="note" aria-label="Alert summary">
-        <input type="hidden" name="confirm" value="RECORD-ALERT">
-        <button class="button enable" type="submit">Record alert</button>
-      </form>
-      <form method="post" action="/actions/alert-command" class="inline-confirm alert-form">
-        <input type="hidden" name="action" value="channel">
-        <select name="channel" aria-label="Notification channel"><option value="email">email</option><option value="discord">discord</option><option value="telegram">telegram</option></select>
-        <select name="status" aria-label="Notification status"><option value="not-configured">not-configured</option><option value="requires-secret-file">requires-secret-file</option><option value="configured">configured</option><option value="disabled">disabled</option><option value="verified-production">verified-production</option></select>
-        <select name="deliveryMode" aria-label="Delivery mode"><option value="local-metadata">local-metadata</option><option value="secret-file">secret-file</option><option value="provider-verified">provider-verified</option></select>
-        <input type="hidden" name="confirm" value="UPDATE-NOTIFICATION-CHANNEL">
-        <button class="button" type="submit">Update channel</button>
-      </form>
-    </div>
-    <div class="panel"><div class="panel-head"><span>ALT</span><div><h2>Open Alerts</h2><p>${escapeHtml(logsAlerts.rawConsoles)}</p></div></div>
-      ${openAlerts.length ? `<div class="cards">${openAlerts.map(renderAlertCard).join("")}</div>` : empty("No open alerts", "Record a local alert or run alert evidence tooling to create operational context.")}
-    </div>
-    <div class="panel"><div class="panel-head"><span>MET</span><div><h2>Notification Channels</h2><p>Email, Discord and Telegram status without exposing webhook or token values.</p></div></div>
-      <div class="cards">${channels.map(renderNotificationChannelCard).join("")}</div>
-    </div>
-    <div class="panel"><div class="panel-head"><span>ERR</span><div><h2>Recent Errors</h2><p>Sanitized failed operations and audit failures.</p></div></div>
-      ${recentErrors.length ? `<div class="cards">${recentErrors.map((item) => `<div class="card compact"><strong>${escapeHtml(item.source)}</strong><span>${escapeHtml(`${item.timestamp} / ${item.name}`)}</span><span>${escapeHtml(item.summary)}</span></div>`).join("")}</div>` : empty("No recent errors", "No failed Control Center operations or audited failures were found.")}
-    </div>
-  </section>`;
-}
-
-function renderAlertCard(alert) {
-  return `<div id="alert-${escapeHtml(alert.id)}" class="card compact">
-    <div class="card-title"><strong>${escapeHtml(alert.service)}</strong><em>${escapeHtml(alert.severity)}</em></div>
-    <span>${escapeHtml(alert.summary)}</span>
-    <span>${escapeHtml(alert.status)} / ${escapeHtml(alert.createdAt || "local metadata")}</span>
-    <form method="post" action="/actions/alert-command" class="inline-confirm">
-      <input type="hidden" name="action" value="resolve">
-      <input type="hidden" name="id" value="${escapeHtml(alert.id)}">
-      <input type="hidden" name="confirm" value="RESOLVE-ALERT">
-      <button class="button" type="submit">Resolve</button>
-    </form>
-  </div>`;
-}
-
-function renderNotificationChannelCard(channel) {
-  return `<div id="channel-${escapeHtml(channel.channel)}" class="card compact">
-    <div class="card-title"><strong>${escapeHtml(humanName(channel.channel))}</strong><em>${escapeHtml(channel.status)}</em></div>
-    <span>${escapeHtml(channel.deliveryMode)} / ${escapeHtml(channel.source)}</span>
-    <span>${escapeHtml(channel.updatedAt ? `updated ${channel.updatedAt}` : "no local override")}</span>
-  </div>`;
-}
-
-function renderReadiness(readiness) {
-  const summary = readiness.summary || {};
-  const controlChecks = readiness.controlCenter?.checks || [];
-  const productionRequirements = readiness.manifests?.productionReadiness?.requirements || [];
-  const enterpriseRequirements = readiness.manifests?.enterprise?.requirements || [];
-  return `<section class="metric-grid">
-    <div class="metric"><span>${summary.passed || 0}</span><small>passed checks</small></div>
-    <div class="metric"><span>${summary.pendingLiveProof || 0}</span><small>pending live proofs</small></div>
-    <div class="metric"><span>${summary.planOnly || 0}</span><small>plan-only controls</small></div>
-    <div class="metric"><span>${summary.needsWork || 0}</span><small>repo gaps</small></div>
-  </section>
-  <section class="grid two">
-    <div class="panel"><div class="panel-head"><span>RDY</span><div><h2>Control Center coverage</h2><p>Local control-plane capabilities are separated from production live evidence.</p></div></div>
-      <div class="cards">${controlChecks.map(renderReadinessCard).join("")}</div>
-    </div>
-    <div class="panel"><div class="panel-head"><span>LIVE</span><div><h2>Production blockers</h2><p>These items need real VPS/provider proof before production evidence can be accepted.</p></div></div>
-      <div class="cards">${readiness.productionBlockers.slice(0, 8).map((item) => `<div class="card compact"><strong>${escapeHtml(item.id)}</strong><span>${escapeHtml(item.status)} / ${escapeHtml(item.nextAction)}</span></div>`).join("") || empty("No blockers", "No pending live-proof blockers were found.")}</div>
-    </div>
-  </section>
-  <section class="grid two">
-    <div class="panel"><div class="panel-head"><span>20</span><div><h2>Production readiness checklist</h2><p>${escapeHtml(readiness.manifests?.productionReadiness?.requirementCount || 0)} tracked requirements from governance/production-readiness.json.</p></div></div>
-      <div class="cards">${productionRequirements.slice(0, 20).map(renderReadinessCard).join("")}</div>
-    </div>
-    <div class="panel"><div class="panel-head"><span>ENT</span><div><h2>Enterprise requirements</h2><p>${escapeHtml(readiness.manifests?.enterprise?.requirementCount || 0)} tracked requirements from governance/enterprise-requirements.json.</p></div></div>
-      <div class="cards">${enterpriseRequirements.slice(0, 12).map(renderReadinessCard).join("")}</div>
-    </div>
-  </section>`;
-}
-
-function renderReadinessCard(item) {
-  const statusClass = item.status === "needs-work" ? "danger" : item.status === "pending-live-proof" || item.status === "plan-only" ? "off" : "on";
-  return `<div id="readiness-${escapeHtml(item.id)}" class="card compact">
-    <div class="card-title"><strong>${escapeHtml(item.title || item.id)}</strong><em class="state ${statusClass}">${escapeHtml(item.status)}</em></div>
-    <span>${escapeHtml(item.repoEvidenceStatus || "tracked")} / live proof ${item.liveProofRequired ? "required" : "not required"}</span>
-    <span>${escapeHtml(item.nextAction || "Keep evidence current.")}</span>
-  </div>`;
-}
-
-function renderAdvancedPanel(title, section, context, note = "Advanced control is dry-run/plan by default in this foundation.") {
-  const items = advancedItems(section);
-  const statusCards = [
-    ["Environment", context.environment],
-    ["Evidence mode", context.overview.modeEvidence],
-    ["Provider apply", "requires explicit adapter and confirmation"],
-    ["Production proof", "requires verifyRemote before evidence is accepted"],
-  ];
-  return `<section class="grid two">
-    <div class="panel"><div class="panel-head"><span>ADV</span><div><h2>${escapeHtml(title)}</h2><p>${escapeHtml(note)}</p></div></div>
-      <div class="cards">${items.map((item) => `<div class="card compact"><strong>${escapeHtml(item)}</strong><span>planned adapter surface</span></div>`).join("")}</div>
-    </div>
-    <div class="panel"><div class="panel-head"><span>GATE</span><div><h2>Execution Guardrails</h2><p>No live provider, Docker or destructive operation is executed from this skeleton.</p></div></div>
-      <div class="cards">${statusCards.map(([name, value]) => `<div class="card compact"><strong>${escapeHtml(name)}</strong><span>${escapeHtml(value)}</span></div>`).join("")}</div>
-    </div>
-    <div class="panel"><div class="panel-head"><span>EVD</span><div><h2>Evidence Path</h2><p>Use containerized infra-ops commands for live proof, then surface sanitized summaries here.</p></div></div>
-      <div class="cards">
-        <div class="card compact"><strong>Audit</strong><span>${context.audit.length} recent Control Center events available.</span></div>
-        <div class="card compact"><strong>Operations</strong><span>${context.operations.length} local operation records available.</span></div>
-        <div class="card compact"><strong>Deployments</strong><span>${context.deployments.length} deployment records available.</span></div>
-        <div class="card compact"><strong>Alerts</strong><span>${context.logsAlerts.openAlerts.length} open local alert records.</span></div>
-      </div>
-    </div>
-  </section>`;
-}
-
-function renderPlanOnlyPanel(title, items) {
-  return `<section class="panel"><div class="panel-head"><span>ADV</span><div><h2>${escapeHtml(title)}</h2><p>Advanced control is dry-run/plan by default in this foundation.</p></div></div><div class="cards">${items.map((item) => `<div class="card compact"><strong>${escapeHtml(item)}</strong><span>planned adapter surface</span></div>`).join("")}</div></section>`;
-}
-
-function renderJsonPanel(title, data) {
-  return `<section class="panel"><div class="panel-head"><span>SUM</span><div><h2>${escapeHtml(title)}</h2><p>Sanitized local summary.</p></div></div><pre class="json-block">${escapeHtml(JSON.stringify(data, null, 2))}</pre></section>`;
-}
-
-function renderAudit(audit, title) {
-  return `<section class="panel"><div class="panel-head"><span>AUD</span><div><h2>${escapeHtml(title)}</h2><p>Control Center events are append-only JSON lines in local state.</p></div></div>${audit.length ? `<div class="cards">${audit.slice(0, 12).map((event) => `<div class="card compact"><strong>${escapeHtml(event.action || "event")}</strong><span>${escapeHtml(`${event.timestamp || ""} / ${event.result || "unknown"}`)}</span></div>`).join("")}</div>` : empty("No events", "No Control Center action has been audited yet.")}</section>`;
 }
 
 function planProjectCreate(payload, context) {
@@ -11311,23 +9909,6 @@ function planProviderConnectionUpdate(id, payload, context) {
   return operationPlan("provider.connection", context.environment, true, ["validate provider", "sanitize metadata", "prepare local connection metadata", "require apply confirmation", "write audit event"], { ...details, providerTouched: false, liveProviderTouched: false, productionEvidence: false, confirmationRequired: "UPDATE-PROVIDER-CONNECTION" });
 }
 
-function planBackupRun(payload, context) {
-  const scope = sanitizeIdentifier(payload.scope || "all") || "all";
-  appendAudit({ action: "backup.run.plan", target: scope, environment: context.environment, risk: "medium", result: "planned", dryRun: true, summary: "Manual backup plan generated." });
-  const operation = operationPlan("backup.run", context.environment, true, ["select scope", "invoke backup adapter", "verify artifact", "write evidence"], { scope, productionEvidence: false });
-  const backup = backupRecord({
-    operationId: operation.id,
-    action: "backup",
-    scope,
-    environment: context.environment,
-    status: "planned",
-    dryRun: true,
-    resultSummary: "Manual backup plan generated. No backup command executed from the web panel.",
-  });
-  appendBackupRecord(backup);
-  return { ...operation, backup };
-}
-
 function planRestore(payload, context) {
   const scope = sanitizeIdentifier(payload.scope || "all") || "all";
   const backupRef = sanitizeRef(payload.backupRef || payload.backupId || "latest");
@@ -11427,25 +10008,19 @@ function operationPlan(type, targetEnv, dryRun, steps, details = {}) {
 }
 
 function readState() {
-  try {
-    const parsed = JSON.parse(readFileSync(stateFile, "utf8"));
-    return {
-      ...parsed,
-      projects: typeof parsed.projects === "object" && parsed.projects ? parsed.projects : {},
-      subdomains: typeof parsed.subdomains === "object" && parsed.subdomains ? parsed.subdomains : {},
-    };
-  } catch {
-    return { projects: {}, subdomains: {} };
-  }
+  const parsed = controlState.read("projects", { strict: true }).value;
+  return {
+    ...parsed,
+    projects: typeof parsed.projects === "object" && parsed.projects ? parsed.projects : {},
+    subdomains: typeof parsed.subdomains === "object" && parsed.subdomains ? parsed.subdomains : {},
+  };
 }
 
 function writeState(state) {
-  mkdirSync(path.dirname(stateFile), { recursive: true });
-  writeFileSync(stateFile, `${JSON.stringify(state, null, 2)}\n`);
+  controlState.write("projects", state);
 }
 
 function appendAudit(event) {
-  mkdirSync(path.dirname(auditFile), { recursive: true });
   const identity = requestIdentity.getStore();
   const record = sanitizeEvent({
     id: rid(),
@@ -11455,92 +10030,76 @@ function appendAudit(event) {
     requestId: identity?.requestId || rid(),
     ...event,
   });
-  appendFileSync(auditFile, `${JSON.stringify(record)}\n`);
+  controlState.append("audit", record);
 }
 
 function readAudit() {
-  try {
-    return readFileSync(auditFile, "utf8").split(/\r?\n/).filter(Boolean).reverse().slice(0, 100).map((line) => JSON.parse(line));
-  } catch {
-    return [];
-  }
+  return recentStateEvents("audit", 100);
 }
 
 function appendOperation(operation) {
-  mkdirSync(path.dirname(operationsFile), { recursive: true });
-  appendFileSync(operationsFile, `${JSON.stringify(sanitizeEvent(operation))}\n`);
+  controlState.append("operations", sanitizeEvent(operation));
 }
 
 function readOperations() {
-  try {
-    return readFileSync(operationsFile, "utf8").split(/\r?\n/).filter(Boolean).reverse().slice(0, 100).map((line) => JSON.parse(line));
-  } catch {
-    return [];
-  }
+  return recentStateEvents("operations", 100);
 }
 
 function appendStatusRun(run) {
-  mkdirSync(path.dirname(statusRunsFile), { recursive: true });
-  appendFileSync(statusRunsFile, `${JSON.stringify(sanitizeEvent(run))}\n`);
+  controlState.append("statusRuns", sanitizeEvent(run));
 }
 
 function readStatusRuns(limit = 20) {
-  try {
-    return readFileSync(statusRunsFile, "utf8")
-      .split(/\r?\n/)
-      .filter(Boolean)
-      .reverse()
-      .slice(0, limit)
-      .map((line) => JSON.parse(line));
-  } catch {
-    return [];
-  }
+  return recentStateEvents("statusRuns", limit);
 }
 
 function readLatestStatusRun() {
   return readStatusRuns(1)[0] || null;
 }
 
+function appendStatusRunEvent(event) {
+  controlState.append("statusRunEvents", sanitizeEvent(event));
+}
+
+function readStatusRunEvents(limit = 200, runId = "") {
+  const events = recentStateEvents("statusRunEvents", Math.max(limit, 2000));
+  const filtered = runId ? events.filter((event) => event.runId === runId) : events;
+  return filtered.slice(0, limit).reverse();
+}
+
+function objectState(name) {
+  const parsed = controlState.read(name, { strict: true }).value;
+  validateStateRecord(parsed);
+  return parsed;
+}
+
+function recentStateEvents(name, limit = 100) {
+  const records = controlState.read(name, { strict: true }).value;
+  return records.slice(-Math.max(0, limit)).reverse();
+}
+
 function readApplicationsState() {
-  try {
-    const parsed = JSON.parse(readFileSync(applicationsFile, "utf8"));
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
-  } catch {
-    return {};
-  }
+  return objectState("applications");
 }
 
 function writeApplicationsState(state) {
-  mkdirSync(path.dirname(applicationsFile), { recursive: true });
-  writeFileSync(applicationsFile, `${JSON.stringify(sanitizeEvent(state), null, 2)}\n`);
+  controlState.write("applications", sanitizeEvent(state));
 }
 
 function readDomainsState() {
-  try {
-    const parsed = JSON.parse(readFileSync(domainsFile, "utf8"));
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
-  } catch {
-    return {};
-  }
+  return objectState("domains");
 }
 
 function writeDomainsState(state) {
-  mkdirSync(path.dirname(domainsFile), { recursive: true });
-  writeFileSync(domainsFile, `${JSON.stringify(sanitizeEvent(state), null, 2)}\n`);
+  controlState.write("domains", sanitizeEvent(state));
 }
 
 function readWebspacesState() {
-  try {
-    const parsed = JSON.parse(readFileSync(webspacesFile, "utf8"));
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
-  } catch {
-    return {};
-  }
+  return objectState("webspaces");
 }
 
 function writeWebspacesState(state) {
-  mkdirSync(path.dirname(webspacesFile), { recursive: true });
-  writeFileSync(webspacesFile, `${JSON.stringify(sanitizeEvent(state), null, 2)}\n`);
+  controlState.write("webspaces", sanitizeEvent(state));
 }
 
 function readDatabasesState() {
@@ -11615,31 +10174,19 @@ function writePrivateJsonAtomic(filePath, value) {
 }
 
 function readStorageBucketsState() {
-  try {
-    const parsed = JSON.parse(readFileSync(storageBucketsFile, "utf8"));
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
-  } catch {
-    return {};
-  }
+  return objectState("storageBuckets");
 }
 
 function writeStorageBucketsState(state) {
-  mkdirSync(path.dirname(storageBucketsFile), { recursive: true });
-  writeFileSync(storageBucketsFile, `${JSON.stringify(sanitizeEvent(state), null, 2)}\n`);
+  controlState.write("storageBuckets", sanitizeEvent(state));
 }
 
 function readSensitiveMaterialsState() {
-  try {
-    const parsed = JSON.parse(readFileSync(sensitiveMaterialsFile, "utf8"));
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
-  } catch {
-    return {};
-  }
+  return objectState("sensitiveMaterials");
 }
 
 function writeSensitiveMaterialsState(state) {
-  mkdirSync(path.dirname(sensitiveMaterialsFile), { recursive: true });
-  writeFileSync(sensitiveMaterialsFile, `${JSON.stringify(sanitizeEvent(state), null, 2)}\n`);
+  controlState.write("sensitiveMaterials", sanitizeEvent(state));
 }
 
 function readVaultState() {
@@ -11819,137 +10366,91 @@ function readExistingSecretValue(filePath) {
 }
 
 function readWorkerJobsState() {
-  try {
-    const parsed = JSON.parse(readFileSync(workerJobsFile, "utf8"));
-    return {
-      workers: parsed && typeof parsed.workers === "object" && !Array.isArray(parsed.workers) ? parsed.workers : {},
-      queues: parsed && typeof parsed.queues === "object" && !Array.isArray(parsed.queues) ? parsed.queues : {},
-      jobs: parsed && typeof parsed.jobs === "object" && !Array.isArray(parsed.jobs) ? parsed.jobs : {},
-      schedules: parsed && typeof parsed.schedules === "object" && !Array.isArray(parsed.schedules) ? parsed.schedules : {},
-    };
-  } catch {
-    return { workers: {}, queues: {}, jobs: {}, schedules: {} };
-  }
+  const parsed = objectState("workerJobs");
+  return {
+    workers: parsed && typeof parsed.workers === "object" && !Array.isArray(parsed.workers) ? parsed.workers : {},
+    queues: parsed && typeof parsed.queues === "object" && !Array.isArray(parsed.queues) ? parsed.queues : {},
+    jobs: parsed && typeof parsed.jobs === "object" && !Array.isArray(parsed.jobs) ? parsed.jobs : {},
+    schedules: parsed && typeof parsed.schedules === "object" && !Array.isArray(parsed.schedules) ? parsed.schedules : {},
+  };
 }
 
 function writeWorkerJobsState(state) {
-  mkdirSync(path.dirname(workerJobsFile), { recursive: true });
-  writeFileSync(workerJobsFile, `${JSON.stringify(sanitizeEvent({
+  controlState.write("workerJobs", sanitizeEvent({
     workers: state.workers || {},
     queues: state.queues || {},
     jobs: state.jobs || {},
     schedules: state.schedules || {},
-  }), null, 2)}\n`);
+  }));
 }
 
 function readIdentityAccessState() {
-  try {
-    const parsed = JSON.parse(readFileSync(identityAccessFile, "utf8"));
-    return {
-      users: parsed && typeof parsed.users === "object" && !Array.isArray(parsed.users) ? parsed.users : {},
-      teams: parsed && typeof parsed.teams === "object" && !Array.isArray(parsed.teams) ? parsed.teams : {},
-      roles: parsed && typeof parsed.roles === "object" && !Array.isArray(parsed.roles) ? parsed.roles : {},
-      sessions: parsed && typeof parsed.sessions === "object" && !Array.isArray(parsed.sessions) ? parsed.sessions : {},
-      accessReviews: parsed && typeof parsed.accessReviews === "object" && !Array.isArray(parsed.accessReviews) ? parsed.accessReviews : {},
-    };
-  } catch {
-    return { users: {}, teams: {}, roles: {}, sessions: {}, accessReviews: {} };
-  }
+  const parsed = objectState("identityAccess");
+  return {
+    users: parsed && typeof parsed.users === "object" && !Array.isArray(parsed.users) ? parsed.users : {},
+    teams: parsed && typeof parsed.teams === "object" && !Array.isArray(parsed.teams) ? parsed.teams : {},
+    roles: parsed && typeof parsed.roles === "object" && !Array.isArray(parsed.roles) ? parsed.roles : {},
+    sessions: parsed && typeof parsed.sessions === "object" && !Array.isArray(parsed.sessions) ? parsed.sessions : {},
+    accessReviews: parsed && typeof parsed.accessReviews === "object" && !Array.isArray(parsed.accessReviews) ? parsed.accessReviews : {},
+  };
 }
 
 function writeIdentityAccessState(state) {
-  mkdirSync(path.dirname(identityAccessFile), { recursive: true });
-  writeFileSync(identityAccessFile, `${JSON.stringify(sanitizeEvent({
+  controlState.write("identityAccess", sanitizeEvent({
     users: state.users || {},
     teams: state.teams || {},
     roles: state.roles || {},
     sessions: state.sessions || {},
     accessReviews: state.accessReviews || {},
-  }), null, 2)}\n`);
+  }));
 }
 
 function readResourceLimitsState() {
-  try {
-    const parsed = JSON.parse(readFileSync(resourceLimitsFile, "utf8"));
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
-  } catch {
-    return {};
-  }
+  return objectState("resourceLimits");
 }
 
 function writeResourceLimitsState(state) {
-  mkdirSync(path.dirname(resourceLimitsFile), { recursive: true });
-  writeFileSync(resourceLimitsFile, `${JSON.stringify(sanitizeEvent(state), null, 2)}\n`);
+  controlState.write("resourceLimits", sanitizeEvent(state));
 }
 
 function readSecurityPoliciesState() {
-  try {
-    const parsed = JSON.parse(readFileSync(securityPoliciesFile, "utf8"));
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
-  } catch {
-    return {};
-  }
+  return objectState("securityPolicies");
 }
 
 function writeSecurityPoliciesState(state) {
-  mkdirSync(path.dirname(securityPoliciesFile), { recursive: true });
-  writeFileSync(securityPoliciesFile, `${JSON.stringify(sanitizeEvent(state), null, 2)}\n`);
+  controlState.write("securityPolicies", sanitizeEvent(state));
 }
 
 function readAlertsState() {
-  try {
-    const parsed = JSON.parse(readFileSync(alertsFile, "utf8"));
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
-  } catch {
-    return {};
-  }
+  return objectState("alerts");
 }
 
 function writeAlertsState(state) {
-  mkdirSync(path.dirname(alertsFile), { recursive: true });
-  writeFileSync(alertsFile, `${JSON.stringify(sanitizeEvent(state), null, 2)}\n`);
+  controlState.write("alerts", sanitizeEvent(state));
 }
 
 function readNotificationChannelsState() {
-  try {
-    const parsed = JSON.parse(readFileSync(notificationChannelsFile, "utf8"));
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
-  } catch {
-    return {};
-  }
+  return objectState("notificationChannels");
 }
 
 function writeNotificationChannelsState(state) {
-  mkdirSync(path.dirname(notificationChannelsFile), { recursive: true });
-  writeFileSync(notificationChannelsFile, `${JSON.stringify(sanitizeEvent(state), null, 2)}\n`);
+  controlState.write("notificationChannels", sanitizeEvent(state));
 }
 
 function readProviderConnectionsState() {
-  try {
-    const parsed = JSON.parse(readFileSync(providerConnectionsFile, "utf8"));
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
-  } catch {
-    return {};
-  }
+  return objectState("providerConnections");
 }
 
 function writeProviderConnectionsState(state) {
-  mkdirSync(path.dirname(providerConnectionsFile), { recursive: true });
-  writeFileSync(providerConnectionsFile, `${JSON.stringify(sanitizeEvent(state), null, 2)}\n`);
+  controlState.write("providerConnections", sanitizeEvent(state));
 }
 
 function readSettingsState() {
-  try {
-    const parsed = JSON.parse(readFileSync(settingsFile, "utf8"));
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
-  } catch {
-    return {};
-  }
+  return objectState("settings");
 }
 
 function writeSettingsState(state) {
-  mkdirSync(path.dirname(settingsFile), { recursive: true });
-  writeFileSync(settingsFile, `${JSON.stringify(sanitizeEvent(state), null, 2)}\n`);
+  controlState.write("settings", sanitizeEvent(state));
 }
 
 function readControlCenterUiPackage() {
@@ -11967,16 +10468,11 @@ function readControlCenterPackageJson() {
 }
 
 function appendDeployment(deployment) {
-  mkdirSync(path.dirname(deploymentsFile), { recursive: true });
-  appendFileSync(deploymentsFile, `${JSON.stringify(sanitizeEvent(deployment))}\n`);
+  controlState.append("deployments", sanitizeEvent(deployment));
 }
 
 function readDeployments() {
-  try {
-    return readFileSync(deploymentsFile, "utf8").split(/\r?\n/).filter(Boolean).reverse().slice(0, 100).map((line) => JSON.parse(line));
-  } catch {
-    return [];
-  }
+  return recentStateEvents("deployments", 100);
 }
 
 function backupRecord({ operationId, jobId = "", action, scope, environment: targetEnv, status, dryRun, backupRef = "", resultSummary }) {
@@ -12002,16 +10498,11 @@ function backupRecord({ operationId, jobId = "", action, scope, environment: tar
 }
 
 function appendBackupRecord(record) {
-  mkdirSync(path.dirname(backupRecordsFile), { recursive: true });
-  appendFileSync(backupRecordsFile, `${JSON.stringify(sanitizeEvent(record))}\n`);
+  controlState.append("backupRecords", sanitizeEvent(record));
 }
 
 function readBackupRecords() {
-  try {
-    return readFileSync(backupRecordsFile, "utf8").split(/\r?\n/).filter(Boolean).reverse().slice(0, 100).map((line) => JSON.parse(line));
-  } catch {
-    return [];
-  }
+  return recentStateEvents("backupRecords", 100);
 }
 
 async function readPayload(req) {
@@ -13733,6 +12224,11 @@ function findById(items, id, label) {
 
 function route(parts, ...expected) {
   return parts.length === expected.length && expected.every((part, index) => parts[index] === part);
+}
+
+function normalizeControlApiParts(parts) {
+  if (parts[0] === "control" && parts[1] === "v1") return ["control", ...parts.slice(2)];
+  return parts;
 }
 
 function choice(value, allowed, label) {

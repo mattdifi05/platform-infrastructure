@@ -336,6 +336,10 @@ services:
       PROJECT_RESOURCE_LIMITS_FILE: /var/www/project-state/resource-limits.json
       PROJECT_DOCKER_STATS_FILE: /var/www/project-state/docker-stats.json
       CONTROL_CENTER_DOCKER_STATS_MAX_AGE_SECONDS: ${CONTROL_CENTER_DOCKER_STATS_MAX_AGE_SECONDS:-15}
+      PROJECT_STATUS_RUNS_FILE: /var/www/project-state/status-runs.jsonl
+      PROJECT_STATUS_RUN_EVENTS_FILE: /var/www/project-state/status-run-events.jsonl
+      CONTROL_CENTER_STATUS_STEP_DELAY_MS: ${CONTROL_CENTER_STATUS_STEP_DELAY_MS:-1500}
+      CONTROL_CENTER_STATUS_CHECK_TIMEOUT_MS: ${CONTROL_CENTER_STATUS_CHECK_TIMEOUT_MS:-30000}
       PROJECT_SECURITY_POLICIES_FILE: /var/www/project-state/security-policies.json
       PROJECT_ALERTS_FILE: /var/www/project-state/alerts.json
       PROJECT_NOTIFICATION_CHANNELS_FILE: /var/www/project-state/notification-channels.json

@@ -1,0 +1,260 @@
+import { createHash, randomBytes } from "node:crypto";
+import {
+  chmodSync,
+  closeSync,
+  existsSync,
+  fsyncSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
+import path from "node:path";
+
+export class StateStoreError extends Error {}
+export class StateConflictError extends StateStoreError {}
+export class StateValidationError extends StateStoreError {}
+
+export function createFileStateStore(options) {
+  return new FileStateStore(options);
+}
+
+export class FileStateStore {
+  constructor({ datasets, lockTimeoutMs = 2000, staleLockMs = 30_000, now = () => Date.now() }) {
+    this.datasets = new Map(Object.entries(datasets || {}).map(([name, definition]) => [name, normalizeDefinition(name, definition)]));
+    this.lockTimeoutMs = lockTimeoutMs;
+    this.staleLockMs = staleLockMs;
+    this.now = now;
+  }
+
+  read(name, { strict = false } = {}) {
+    const definition = this.definition(name);
+    const raw = readRaw(definition.path);
+    const hash = digest(raw);
+    const metadata = readMetadata(definition.path);
+    const revision = Number.isInteger(metadata?.revision) && metadata.revision >= 0 ? metadata.revision : 0;
+    const externalDrift = Boolean(metadata && metadata.contentSha256 !== hash);
+    try {
+      const value = definition.kind === "jsonl"
+        ? parseJsonLines(raw, strict)
+        : raw ? JSON.parse(raw) : clone(definition.defaultValue);
+      if (definition.kind === "jsonl") {
+        for (const record of value) definition.validate?.(record);
+      } else {
+        definition.validate?.(value);
+      }
+      return { name, kind: definition.kind, value, revision, token: `${revision}:${hash}`, contentSha256: hash, exists: raw !== "", externalDrift };
+    } catch (error) {
+      if (strict) throw new StateValidationError(`${name} state is unreadable: ${error.message}`);
+      return { name, kind: definition.kind, value: clone(definition.defaultValue), revision, token: `${revision}:${hash}`, contentSha256: hash, exists: raw !== "", externalDrift, invalid: true };
+    }
+  }
+
+  write(name, value, { expectedToken } = {}) {
+    const definition = this.definition(name);
+    if (definition.kind !== "json") throw new StateValidationError(`${name} is append-only JSONL state.`);
+    return this.withLock(definition.path, () => this.writeLocked(name, value, expectedToken));
+  }
+
+  update(name, mutate, { expectedToken } = {}) {
+    const definition = this.definition(name);
+    if (definition.kind !== "json") throw new StateValidationError(`${name} is append-only JSONL state.`);
+    return this.withLock(definition.path, () => {
+      const current = this.read(name, { strict: true });
+      if (expectedToken && expectedToken !== current.token) throw new StateConflictError(`${name} changed after it was read.`);
+      const next = mutate(clone(current.value), current);
+      return this.writeLocked(name, next, current.token);
+    });
+  }
+
+  append(name, value, { expectedToken } = {}) {
+    const definition = this.definition(name);
+    if (definition.kind !== "jsonl") throw new StateValidationError(`${name} is not JSONL state.`);
+    return this.withLock(definition.path, () => {
+      const current = this.read(name, { strict: true });
+      if (expectedToken && expectedToken !== current.token) throw new StateConflictError(`${name} changed after it was read.`);
+      definition.validate?.(value);
+      mkdirSync(path.dirname(definition.path), { recursive: true, mode: 0o700 });
+      const fd = openSync(definition.path, "a", 0o600);
+      try {
+        writeFileSync(fd, `${JSON.stringify(value)}\n`, "utf8");
+        fsyncSync(fd);
+      } finally {
+        closeSync(fd);
+      }
+      chmodSync(definition.path, 0o600);
+      return this.writeMetadata(name, current.revision + 1);
+    });
+  }
+
+  exportSnapshot(names = [...this.datasets.keys()]) {
+    const datasets = {};
+    for (const name of names) {
+      const record = this.read(name, { strict: true });
+      datasets[name] = {
+        kind: record.kind,
+        value: record.value,
+        valueSha256: valueDigest(record.value),
+        sourceToken: record.token,
+      };
+    }
+    return { schemaVersion: 1, generatedAt: new Date(this.now()).toISOString(), datasets };
+  }
+
+  planImport(snapshot) {
+    if (snapshot?.schemaVersion !== 1 || !snapshot.datasets || typeof snapshot.datasets !== "object") {
+      throw new StateValidationError("State snapshot schema is invalid.");
+    }
+    const changes = [];
+    for (const [name, entry] of Object.entries(snapshot.datasets)) {
+      const definition = this.definition(name);
+      if (entry?.kind !== definition.kind || entry.valueSha256 !== valueDigest(entry.value)) {
+        throw new StateValidationError(`State snapshot dataset is invalid: ${name}.`);
+      }
+      if (definition.kind === "jsonl") {
+        if (!Array.isArray(entry.value)) throw new StateValidationError(`State snapshot JSONL dataset is invalid: ${name}.`);
+        for (const record of entry.value) definition.validate?.(record);
+      } else {
+        definition.validate?.(entry.value);
+      }
+      const current = this.read(name, { strict: true });
+      changes.push({ name, kind: definition.kind, fromToken: current.token, changed: valueDigest(current.value) !== entry.valueSha256 });
+    }
+    return { status: "planned", apply: false, datasetCount: changes.length, changedCount: changes.filter((item) => item.changed).length, changes };
+  }
+
+  importSnapshot(snapshot, { apply = false, confirm = "" } = {}) {
+    const plan = this.planImport(snapshot);
+    if (!apply) return plan;
+    if (confirm !== "IMPORT-CONTROL-CENTER-STATE") throw new StateValidationError("State import requires explicit confirmation.");
+    const rollback = this.exportSnapshot(Object.keys(snapshot.datasets));
+    try {
+      for (const [name, entry] of Object.entries(snapshot.datasets)) {
+        if (entry.kind === "json") this.write(name, entry.value);
+        else this.replaceJsonLines(name, entry.value);
+      }
+    } catch (error) {
+      for (const [name, entry] of Object.entries(rollback.datasets)) {
+        if (entry.kind === "json") this.write(name, entry.value);
+        else this.replaceJsonLines(name, entry.value);
+      }
+      throw error;
+    }
+    return { ...plan, status: "applied", apply: true, rollback };
+  }
+
+  replaceJsonLines(name, records) {
+    const definition = this.definition(name);
+    if (definition.kind !== "jsonl" || !Array.isArray(records)) throw new StateValidationError(`${name} JSONL replacement is invalid.`);
+    return this.withLock(definition.path, () => {
+      for (const record of records) definition.validate?.(record);
+      const current = this.read(name, { strict: true });
+      atomicWrite(definition.path, records.map((record) => JSON.stringify(record)).join("\n") + (records.length ? "\n" : ""));
+      return this.writeMetadata(name, current.revision + 1);
+    });
+  }
+
+  writeLocked(name, value, expectedToken) {
+    const definition = this.definition(name);
+    const current = this.read(name, { strict: true });
+    if (expectedToken && expectedToken !== current.token) throw new StateConflictError(`${name} changed after it was read.`);
+    definition.validate?.(value);
+    atomicWrite(definition.path, `${JSON.stringify(value, null, 2)}\n`);
+    return this.writeMetadata(name, current.revision + 1);
+  }
+
+  writeMetadata(name, revision) {
+    const definition = this.definition(name);
+    const raw = readRaw(definition.path);
+    const metadata = { schemaVersion: 1, revision, contentSha256: digest(raw), updatedAt: new Date(this.now()).toISOString() };
+    atomicWrite(metadataPath(definition.path), `${JSON.stringify(metadata, null, 2)}\n`);
+    return this.read(name, { strict: true });
+  }
+
+  withLock(filePath, callback) {
+    const lockPath = `${filePath}.lock`;
+    mkdirSync(path.dirname(filePath), { recursive: true, mode: 0o700 });
+    const started = this.now();
+    let fd;
+    while (fd === undefined) {
+      try {
+        fd = openSync(lockPath, "wx", 0o600);
+        writeFileSync(fd, `${JSON.stringify({ pid: process.pid, createdAt: new Date(this.now()).toISOString() })}\n`);
+        fsyncSync(fd);
+      } catch (error) {
+        if (error.code !== "EEXIST") throw error;
+        if (lockIsStale(lockPath, this.now(), this.staleLockMs)) {
+          rmSync(lockPath, { force: true });
+          continue;
+        }
+        if (this.now() - started >= this.lockTimeoutMs) throw new StateConflictError(`State lock timed out: ${path.basename(filePath)}.`);
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+      }
+    }
+    try {
+      return callback();
+    } finally {
+      closeSync(fd);
+      rmSync(lockPath, { force: true });
+    }
+  }
+
+  definition(name) {
+    const definition = this.datasets.get(name);
+    if (!definition) throw new StateValidationError(`Unknown state dataset: ${name}.`);
+    return definition;
+  }
+}
+
+function normalizeDefinition(name, definition = {}) {
+  const kind = definition.kind || "json";
+  if (!["json", "jsonl"].includes(kind) || !definition.path) throw new StateValidationError(`Invalid state dataset definition: ${name}.`);
+  return { ...definition, kind, defaultValue: definition.defaultValue ?? (kind === "jsonl" ? [] : {}) };
+}
+
+function atomicWrite(filePath, content) {
+  mkdirSync(path.dirname(filePath), { recursive: true, mode: 0o700 });
+  const temporary = `${filePath}.tmp-${process.pid}-${randomBytes(6).toString("hex")}`;
+  let fd;
+  try {
+    fd = openSync(temporary, "wx", 0o600);
+    writeFileSync(fd, content, "utf8");
+    fsyncSync(fd);
+    closeSync(fd);
+    fd = undefined;
+    renameSync(temporary, filePath);
+    chmodSync(filePath, 0o600);
+  } catch (error) {
+    if (fd !== undefined) closeSync(fd);
+    rmSync(temporary, { force: true });
+    throw error;
+  }
+}
+
+function readRaw(filePath) {
+  try { return readFileSync(filePath, "utf8"); } catch (error) { if (error.code === "ENOENT") return ""; throw error; }
+}
+
+function readMetadata(filePath) {
+  try { return JSON.parse(readFileSync(metadataPath(filePath), "utf8")); } catch { return null; }
+}
+
+function metadataPath(filePath) { return `${filePath}.state-meta.json`; }
+function digest(value) { return createHash("sha256").update(value).digest("hex"); }
+function valueDigest(value) { return digest(JSON.stringify(value)); }
+function clone(value) { return structuredClone(value); }
+
+function parseJsonLines(raw, strict) {
+  const records = [];
+  for (const line of raw.split(/\r?\n/).filter(Boolean)) {
+    try { records.push(JSON.parse(line)); } catch (error) { if (strict) throw error; }
+  }
+  return records;
+}
+
+function lockIsStale(lockPath, now, staleLockMs) {
+  try { return now - statSync(lockPath).mtimeMs > staleLockMs; } catch { return false; }
+}

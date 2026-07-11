@@ -55,6 +55,7 @@ const settingsFile = path.join(stateDir, "settings.json");
 const webspacesFile = path.join(stateDir, "webspaces.json");
 const dockerStatsFile = path.join(stateDir, "docker-stats.json");
 const statusRunsFile = path.join(stateDir, "status-runs.jsonl");
+const statusRunEventsFile = path.join(stateDir, "status-run-events.jsonl");
 const reportsRoot = path.join(testRoot, "reports");
 const longExistingVaultValue = `existing-long-provider-secret-${"x".repeat(260)}`;
 
@@ -104,6 +105,9 @@ test("Admin Control Center local foundation", async (t) => {
       PROJECT_DOCKER_STATS_FILE: dockerStatsFile,
       CONTROL_CENTER_DOCKER_STATS_MAX_AGE_SECONDS: "120",
       PROJECT_STATUS_RUNS_FILE: statusRunsFile,
+      PROJECT_STATUS_RUN_EVENTS_FILE: statusRunEventsFile,
+      CONTROL_CENTER_STATUS_STEP_DELAY_MS: "0",
+      CONTROL_CENTER_STATUS_PROBE_TIMEOUT_MS: "500",
       CONTROL_CENTER_HOST: "portal.localhost.com",
       DOCS_HOST: "docs.localhost.com",
       PROJECT_HOST_SUFFIX: ".localhost.com",
@@ -888,6 +892,8 @@ test("Admin Control Center local foundation", async (t) => {
   const statusApi = await getJson(`${baseUrl}/control/status`);
   assert.equal(statusApi.statusRun, null);
   assert.match(statusApi.goNoGo.status, /^(unknown|go|no-go)$/);
+  const versionedStatusApi = await getJson(`${baseUrl}/control/v1/status`);
+  assert.deepEqual(versionedStatusApi, statusApi);
   const statusRunResponse = await fetch(`${baseUrl}/actions/status-check`, {
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded" },
@@ -902,6 +908,14 @@ test("Admin Control Center local foundation", async (t) => {
   assert.equal(statusAfterRun.statusRun.checks.some((check) => check.id === "control-center-health"), false);
   assert.equal(statusAfterRun.statusRun.checks.some((check) => check.id === "control-center-assets"), false);
   assert.equal(statusAfterRun.statusRun.checks.some((check) => check.id === "portal-through-waf"), true);
+  assert.equal(statusAfterRun.statusRun.checks.every((check) => ["probe", "evidence-validation", "external-required"].includes(check.executionMode)), true);
+  assert.equal(statusAfterRun.statusRun.eventCount, (statusAfterRun.statusRun.checks.length * 2) + 2);
+  assert.equal(statusAfterRun.statusEvents.length, statusAfterRun.statusRun.eventCount);
+  assert.equal(statusAfterRun.statusEvents[0].type, "run-started");
+  assert.equal(statusAfterRun.statusEvents.at(-1).type, "run-completed");
+  assert.deepEqual(statusAfterRun.statusEvents.map((event) => event.sequence), statusAfterRun.statusEvents.map((_, index) => index + 1));
+  const statusEventsApi = await getJson(`${baseUrl}/control/status/events?runId=${statusAfterRun.statusRun.id}`);
+  assert.deepEqual(statusEventsApi.events, statusAfterRun.statusEvents);
   assert.doesNotMatch(JSON.stringify(statusAfterRun), /CLOUDFLARE_API_TOKEN|super-secret-token-should-not-leak/);
   const statusCategoryRunResponse = await fetch(`${baseUrl}/actions/status-check`, {
     method: "POST",
@@ -927,6 +941,7 @@ test("Admin Control Center local foundation", async (t) => {
   assert.equal(statusSingleRun.requestedCheckId, "cloudflare-access-admin");
   assert.equal(statusSingleRun.checks.length, 1);
   assert.equal(statusSingleRun.checks[0].id, "cloudflare-access-admin");
+  assert.equal(statusSingleRun.checks[0].executionMode, "external-required");
   const statusHtmlAfterRun = await getText(`${baseUrl}/?section=status`);
   assert.match(statusHtmlAfterRun, /Ultimo run/);
   assert.match(statusHtmlAfterRun, /data-status-run-step-mark/);
@@ -3610,6 +3625,9 @@ function isolatedStateEnv(stateRoot) {
     PROJECT_PROVIDER_CONNECTIONS_FILE: path.join(stateRoot, "provider-connections.json"),
     PROJECT_SETTINGS_FILE: path.join(stateRoot, "settings.json"),
     PROJECT_WEBSPACES_FILE: path.join(stateRoot, "webspaces.json"),
+    PROJECT_STATUS_RUNS_FILE: path.join(stateRoot, "status-runs.jsonl"),
+    PROJECT_STATUS_RUN_EVENTS_FILE: path.join(stateRoot, "status-run-events.jsonl"),
+    CONTROL_CENTER_STATUS_STEP_DELAY_MS: "0",
   };
 }
 

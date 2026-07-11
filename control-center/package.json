@@ -11,6 +11,7 @@
   },
   "scripts": {
     "start": "node server.mjs",
-    "test": "node --test tests/*.test.mjs"
+    "state:migrate": "node state/migration.mjs",
+    "test": "node --test tests/*.test.mjs state/*.test.mjs status/*.test.mjs"
   }
 }
