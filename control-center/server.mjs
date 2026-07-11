@@ -3943,6 +3943,19 @@ function italianDateTimeLabel(value) {
   }
 }
 
+function relativeTimeLabel(value, now = Date.now()) {
+  const timestamp = Date.parse(value instanceof Date ? value.toISOString() : String(value || ""));
+  if (!Number.isFinite(timestamp)) return "data non valida";
+  const elapsedSeconds = Math.max(0, Math.floor((now - timestamp) / 1000));
+  if (elapsedSeconds < 60) return "ora";
+  const minutes = Math.floor(elapsedSeconds / 60);
+  if (minutes < 60) return `${minutes} min fa`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} h fa`;
+  const days = Math.floor(hours / 24);
+  return `${days} g fa`;
+}
+
 function fileEntryRecord(filePath, name, relativePath) {
   try {
     const stat = lstatSync(filePath);

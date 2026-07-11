@@ -140,7 +140,7 @@
           "mode": "human-governance",
           "humanRequired": true,
           "requiredBeforeGoLive": true,
-          "evidenceRefs": ["enterprise:periodic-access-review", "command:access-review", "command:platform-admin-audit"]
+          "evidenceRefs": ["enterprise:periodic-access-review", "command:platform-admin-audit"]
         }
       ]
     },

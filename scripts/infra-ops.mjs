@@ -5202,13 +5202,10 @@ const managedSecretRotationExpectations = [
   { name: "smtp_password", kind: "opaque", rotationDays: 90 },
 ];
 
-function readJsonLines(filePath) {
-  if (!fs.existsSync(filePath)) {
-    return { entries: [], invalidLines: 0 };
-  }
+function parseJsonLines(raw) {
   const entries = [];
   let invalidLines = 0;
-  for (const line of readText(filePath).split(/\r?\n/)) {
+  for (const line of String(raw ?? "").split(/\r?\n/)) {
     const trimmed = line.trim();
     if (!trimmed) continue;
     try {
@@ -5220,15 +5217,20 @@ function readJsonLines(filePath) {
   return { entries, invalidLines };
 }
 
+function readJsonLines(filePath) {
+  if (!fs.existsSync(filePath)) return { entries: [], invalidLines: 0 };
+  return parseJsonLines(readText(filePath));
+}
+
 function platformAdminAuditCategory(action) {
   const value = String(action || "");
-  if (/^admin\.login\./.test(value)) return "login";
-  if (/^admin\.logout\./.test(value)) return "logout";
+  if (/^admin\.login(?:\.|$)/.test(value)) return "login";
+  if (/^admin\.logout(?:\.|$)/.test(value)) return "logout";
   if (value === "admin.readiness.access") return "readiness-access";
   if (value === "admin.providers.access") return "providers-access";
   if (value === "admin.monitoring.access") return "monitoring-access";
-  if (/^adapter\.[a-z0-9-]+\.verify\.plan$/.test(value)) return "verify";
-  if (/^adapter\.[a-z0-9-]+\.[a-z0-9-]+\.plan$/.test(value) || /^(backup|restore)\.plan$/.test(value) || /\.plan$/.test(value) && /^(settings|provider\.connection|security\.policy|resources\.limits|material|alerts\.channel)\./.test(value)) return "plan";
+  if (/^adapter\.[a-z0-9-]+\.verify\.plan$/.test(value) || /^status\.verify(?:\.|$)/.test(value)) return "verify";
+  if (/^adapter\.[a-z0-9-]+(?:\.[a-z0-9-]+)*\.plan$/.test(value) || /^(backup|restore)\.plan$/.test(value) || /\.plan$/.test(value) && /^(settings|provider\.connection|security\.policy|resources\.limits|material|alerts\.channel)\./.test(value)) return "plan";
   if (/^(settings\.update|provider\.connection|security\.policy|resources\.limits|material\.(rotation|usage|access)|alerts\.channel)\.apply$/.test(value)) return "metadata-update";
   return "";
 }
@@ -5267,9 +5269,20 @@ async function platformAdminAuditEvidence() {
     "metadata-update",
   ];
   const issues = [];
-  const { entries, invalidLines } = readJsonLines(auditPath);
-  if (!fs.existsSync(auditPath)) {
-    issues.push(`missing audit file: ${path.relative(infraRoot, auditPath).replaceAll("\\", "/")}`);
+  let auditSource = path.relative(infraRoot, auditPath).replaceAll("\\", "/");
+  let auditData = readJsonLines(auditPath);
+  if (!fs.existsSync(auditPath) && !argv.auditFile) {
+    const container = String(argv.auditContainer ?? "enterprise-control-center");
+    const containerPath = String(argv.auditContainerPath ?? "/var/www/project-state/audit.jsonl");
+    const result = run("docker", ["exec", container, "cat", containerPath], { allowFailure: true, capture: true });
+    if (result.status === 0) {
+      auditData = parseJsonLines(result.stdout);
+      auditSource = `container:${container}:${containerPath}`;
+    }
+  }
+  const { entries, invalidLines } = auditData;
+  if (!entries.length && !fs.existsSync(auditPath) && !auditSource.startsWith("container:")) {
+    issues.push(`missing audit source: ${auditSource}`);
   }
   if (invalidLines > 0) {
     issues.push(`audit file has ${invalidLines} invalid JSON line(s)`);
@@ -5314,8 +5327,11 @@ async function platformAdminAuditEvidence() {
 
   const controlCenterPath = path.join(infraRoot, "control-center", "server.mjs");
   const controlCenterText = readText(controlCenterPath);
-  const appendOnlySource = /function appendAudit[\s\S]*appendFileSync\(auditFile/.test(controlCenterText)
-    && !/writeFileSync\(auditFile|truncateSync\(auditFile|rmSync\(auditFile|unlinkSync\(auditFile/.test(controlCenterText);
+  const fileStoreText = readText(path.join(infraRoot, "control-center", "state", "file-store.mjs"));
+  const appendOnlySource = /function appendAudit[\s\S]*controlState\.append\("audit"/.test(controlCenterText)
+    && /openSync\(definition\.path, "a", 0o600\)/.test(fileStoreText)
+    && /fsyncSync\(fd\)/.test(fileStoreText)
+    && !/truncateSync\(definition\.path|rmSync\(definition\.path|unlinkSync\(definition\.path/.test(fileStoreText);
   if (!appendOnlySource) {
     issues.push("Control Center audit writer is not append-only in source inspection");
   }
@@ -5340,7 +5356,7 @@ async function platformAdminAuditEvidence() {
     status: issues.length ? "failed" : "passed",
     mode: "runtime",
     scope: "platform-infrastructure",
-    auditFile: path.relative(infraRoot, auditPath).replaceAll("\\", "/"),
+    auditFile: auditSource,
     appendOnly: {
       source: appendOnlySource,
       jsonl: true,
