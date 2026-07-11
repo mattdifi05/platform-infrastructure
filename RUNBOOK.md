@@ -849,12 +849,20 @@ while DNS/provider/GitHub requirements are listed in `pendingLiveProofs`.
 checklist to the latest `production-go-no-go` report and writes
 `reports/production-readiness/production-readiness-*.json` plus `.md`.
 
-Control Center `Stato` is the operator view of this gate. Its `Avvia test
-reali` action is read-only and intentionally limited to platform checks that
-can be run safely from the Control Center container: Portal through WAF,
-sensitive-file block, go/no-go report readability, production decision and
-readiness manifest readability. It does not list Control Center-only UI tests
-or hosted-application checks as production blockers.
+Control Center `Stato` is the operator view of this gate. A run executes every
+selected catalog item through the typed executor. Each item is labelled as a
+real `probe`, `evidence-validation` or `external-required`; evidence snapshots
+are never presented as network probes. Ordered progress is persisted in
+`status-run-events.jsonl` and exposed through
+`/control/v1/status/events?runId=<id>`. Runs remain read-only and do not include
+Control Center-only UI tests or hosted-application checks as production
+blockers.
+
+Control metadata uses the single-writer file store documented in
+`control-center/CONTROL-CENTER-CORE.md`. Before any approved state conversion,
+follow `control-center/STATE-STORE-MIGRATION.md`: export, plan, write a private
+rollback snapshot, require the exact apply confirmation and verify the
+versioned API. T19 did not run this migration or recreate the live service.
 
 If `Stato` shows only pending live/provider proof, do not try to force those
 items green on a LAN-only Ubuntu server. The following blockers require real

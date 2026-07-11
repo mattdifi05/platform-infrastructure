@@ -25,6 +25,8 @@ operation explicitly requires it and has approval.
 | `SERVICE-IDENTITY-AND-TENANCY.md` | T14 per-service PostgreSQL identities, MinIO prefix policy, tenancy decision and dual-credential rollout. |
 | `SUPPLY-CHAIN.md` | T15 immutable image/action/download lock and build sandbox. |
 | `RELEASE-TRUST-AND-WORKFLOW-SECURITY.md` | T16 cryptographic provenance, exact GitHub governance and safe remote-input contract. |
+| `control-center/CONTROL-CENTER-CORE.md` | T19 backend modules, versioned API, state and Status executor boundaries. |
+| `control-center/STATE-STORE-MIGRATION.md` | Plan-only state export/import/rollback procedure and activation gates. |
 | `ENTERPRISE-MATURITY.md` | Enterprise maturity matrix and 30-point readiness model. |
 | `ENTERPRISE-10-PLAN.md` | Enterprise roadmap and acceptance criteria. |
 
@@ -58,7 +60,8 @@ technical source.
 | Work on the current reference server | `CURRENT-OPERATING-MODEL.md`, then `RUNBOOK.md`. |
 | Prepare a new Ubuntu server | `VPS-PREDEPLOY-CHECKLIST.md`, then `RUNBOOK.md`. |
 | Decide GO/NO-GO | `READINESS-REPORT.md`, `RUNBOOK.md`, `governance/production-go-no-go.json`. |
-| Change Control Center | `INFRASTRUCTURE-DEEP-DIVE.md`, `control-center/tests/control-center.test.mjs`, `RUNBOOK.md`. |
+| Change Control Center | `control-center/CONTROL-CENTER-CORE.md`, `control-center/tests/control-center.test.mjs`, `RUNBOOK.md`. |
+| Migrate Control Center state | `control-center/STATE-STORE-MIGRATION.md`, then `RUNBOOK.md`. |
 | Change WAF/Traefik/DNS | `INFRASTRUCTURE-DEEP-DIVE.md`, `cloudflare/README.md`, `RUNBOOK.md`. |
 | Change secrets | `secrets/README.md`, `SECURITY.md`, `RUNBOOK.md`. |
 | Change backup/restore | `RUNBOOK.md`, `READINESS-REPORT.md`, `VPS-PREDEPLOY-CHECKLIST.md`. |
