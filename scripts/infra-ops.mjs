@@ -1871,14 +1871,20 @@ function restoreTestControlCenterState(options = {}) {
 
 function typedBackupJobPath(options = {}) {
   const jobsRoot = path.resolve(process.env.BACKUP_SCHEDULER_JOBS_DIR || path.join(infraRoot, "projects-portal", "state", "backup-jobs"));
-  const runningRoot = path.join(jobsRoot, "running");
+  const gatewaySnapshotRoot = process.env.PLATFORM_DOCKER_GATEWAY_CHILD === "1"
+    ? String(process.env.DOCKER_GATEWAY_JOB_SNAPSHOT_ROOT || "")
+    : "";
+  const allowedRoot = path.resolve(gatewaySnapshotRoot || path.join(jobsRoot, "running"));
   const jobFile = options.jobFile ?? argv.jobFile;
   const requested = path.resolve(jobFile || "");
-  if (!jobFile || !requested.startsWith(`${runningRoot}${path.sep}`)) {
-    fail("Typed backup jobs must be read from the scheduler running queue.");
+  if (!jobFile || !requested.startsWith(`${allowedRoot}${path.sep}`)) {
+    fail("Typed backup jobs must be read from the scheduler queue or gateway snapshot.");
   }
   const stat = fs.lstatSync(requested);
-  if (!stat.isFile() || stat.isSymbolicLink()) fail("Typed backup job must be a regular non-symlink file.");
+  const parent = fs.realpathSync.native(path.dirname(requested));
+  if (!stat.isFile() || stat.isSymbolicLink() || parent !== fs.realpathSync.native(allowedRoot)) {
+    fail("Typed backup job must be a contained regular non-symlink file.");
+  }
   return requested;
 }
 
@@ -4971,7 +4977,7 @@ async function managedSecretsPreflight(options = {}) {
     const envFile = path.resolve(options.envFile ?? argv.envFile ?? path.join(infraRoot, ".env"));
     const managedCompose = readText(path.join(infraRoot, "compose.managed-secrets.yaml"));
     const required = [
-      "postgres_superuser_password", "keycloak_db_password", "redis_password", "keycloak_admin_password", "nats_password", "minio_root_password", "mariadb_root_password", "phpmyadmin_control_password", "grafana_admin_password", "control_center_vault_keys", "projects_gateway_signing_keys", "backup_signing_keys", "alertmanager_webhook_token", "smtp_password",
+      "backup_scheduler_docker_gateway_token", "postgres_superuser_password", "keycloak_db_password", "redis_password", "keycloak_admin_password", "nats_password", "minio_root_password", "mariadb_root_password", "phpmyadmin_control_password", "grafana_admin_password", "control_center_vault_keys", "projects_gateway_signing_keys", "backup_signing_keys", "alertmanager_webhook_token", "smtp_password",
     ];
     for (const secretName of required) {
       assertMatch(managedCompose, new RegExp(`^\\s{2}${secretName}:\\s*\\r?\\n\\s+external:\\s+true`, "m"), `${secretName} must be declared as an external Docker secret.`);
@@ -5460,6 +5466,7 @@ async function retentionEvidence(options = {}) {
 }
 
 const managedSecretRotationExpectations = [
+  { name: "backup_scheduler_docker_gateway_token", kind: "opaque", rotationDays: 90 },
   { name: "postgres_superuser_password", kind: "opaque", rotationDays: 90, manualRotation: true },
   { name: "keycloak_db_password", kind: "opaque", rotationDays: 90, manualRotation: true },
   { name: "redis_password", kind: "opaque", rotationDays: 90 },
@@ -11615,6 +11622,7 @@ async function staticSecurityCheck() {
 async function validateLocalSecrets() {
   const secretsDir = path.resolve(argv.secretsDir ?? path.join(infraRoot, "secrets"));
   const required = [
+    "backup_scheduler_docker_gateway_token",
     "postgres_superuser_password",
     "keycloak_db_password",
     "redis_password",

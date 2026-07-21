@@ -853,7 +853,7 @@ Nel profilo VPS:
 - `CONTROL_CENTER_HOST` apre il portal Node e `DOCS_HOST` apre la documentazione operativa. Sono le sole route pubbliche previste.
 - I progetti PHP e Node condividono `PHP_PROJECTS_DIR` come sorgente universale. `PROJECTS_HOST` resta solo alias legacy e deve restare vuoto nelle nuove installazioni, `PROJECTS_WILDCARD_HOST_REGEXP` resta vuoto di default e Traefik non espone wildcard progetto. Il `project-router` resta disponibile come servizio interno e continua a essere coperto da `project-router-tests`.
 - L'overlay finale monta a ogni workload solo la propria sorgente read-only, applica CPU/RAM/PID/FD/I/O e rootfs read-only, e impedisce accesso a repository parent, backup, stato Control Center e Docker socket. I PHP usano una copia tmpfs per il runtime; i Node avviano soltanto artifact precompilati.
-- Solo `docker-operation-gateway` riceve il socket raw. Non pubblica porte host e accetta esclusivamente job di backup/restore enumerati, autenticati con Docker secret; scheduler e workload non ricevono mai `DOCKER_HOST`.
+- Solo `docker-operation-gateway` riceve il socket raw. Non pubblica porte host e accetta esclusivamente job di backup/restore enumerati, autenticati con la credenziale Docker secret dedicata al principal `backup-scheduler` e montata solo nei due servizi; scheduler e workload non ricevono mai `DOCKER_HOST`.
 - MariaDB usa `secrets/mariadb_root_password.txt` tramite Docker secret, non una password root in `.env`.
 - `phpmyadmin` resta fuori dal profilo di default; su VPS pubblica usa preferibilmente SSH e client CLI, non una UI DB esposta.
 

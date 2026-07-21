@@ -246,7 +246,7 @@ services:
     pids_limit: 256
     environment:
       PLATFORM_DOCKER_GATEWAY_URL: http://docker-operation-gateway:8787
-      DOCKER_GATEWAY_TOKEN_FILE: /run/secrets/docker_gateway_token
+      BACKUP_SCHEDULER_DOCKER_GATEWAY_TOKEN_FILE: /run/secrets/backup_scheduler_docker_gateway_token
     tmpfs:
       - /tmp:rw,nosuid,nodev,size=256m
       - /root:rw,nosuid,nodev,size=32m

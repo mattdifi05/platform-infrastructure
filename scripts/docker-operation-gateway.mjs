@@ -3,23 +3,27 @@ import { spawn, spawnSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
-const DEFAULT_TOKEN_FILE = "/run/secrets/docker_gateway_token";
+const SCHEDULER_PRINCIPAL = "backup-scheduler";
+const DEFAULT_SCHEDULER_TOKEN_FILE = "/run/secrets/backup_scheduler_docker_gateway_token";
 const DEFAULT_JOBS_DIR = "/var/www/project-state/backup-jobs";
 const MAX_BODY_BYTES = 16 * 1024;
+const MAX_JOB_BYTES = 1024 * 1024;
 const MAX_CLOCK_SKEW_MS = 60_000;
 const REPLAY_TTL_MS = 5 * 60_000;
+const DEFAULT_OPERATION_TIMEOUT_MS = 4 * 60 * 60_000;
 
 const OPERATIONS = new Map([
-  ["backup-platform-catalog", { args: ["backup-platform-catalog"] }],
-  ["prune-manifest-backups-plan", { args: ["prune-manifest-backups"] }],
-  ["prune-manifest-backups-apply", { args: ["prune-manifest-backups", "--confirmPruneManifestBackups"] }],
-  ["full-restore-drill", { args: ["full-restore-drill"] }],
-  ["offsite-backup-restic", { args: ["offsite-backup-restic"] }],
-  ["execute-backup-job", { jobFile: true, args: ["execute-backup-job"] }],
+  ["backup-platform-catalog", { principals: [SCHEDULER_PRINCIPAL], args: ["backup-platform-catalog"] }],
+  ["prune-manifest-backups-plan", { principals: [SCHEDULER_PRINCIPAL], args: ["prune-manifest-backups"] }],
+  ["prune-manifest-backups-apply", { principals: [SCHEDULER_PRINCIPAL], args: ["prune-manifest-backups", "--confirmPruneManifestBackups"] }],
+  ["full-restore-drill", { principals: [SCHEDULER_PRINCIPAL], args: ["full-restore-drill"] }],
+  ["offsite-backup-restic", { principals: [SCHEDULER_PRINCIPAL], args: ["offsite-backup-restic"] }],
+  ["execute-backup-job", { principals: [SCHEDULER_PRINCIPAL], jobFile: true, args: ["execute-backup-job"] }],
 ]);
 
 export function operationNames() {
@@ -28,7 +32,7 @@ export function operationNames() {
 
 export function normalizeOperationRequest(value, { now = Date.now(), jobsDir = DEFAULT_JOBS_DIR } = {}) {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw requestError(400, "request must be an object");
-  assertExactKeys(value, ["issuedAt", "operation", "parameters", "requestId", "version"], "request");
+  assertExactKeys(value, ["issuedAt", "operation", "parameters", "principal", "requestId", "version"], "request");
   if (value.version !== 1) throw requestError(400, "unsupported request version");
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(value.requestId ?? ""))) {
     throw requestError(400, "requestId must be a UUID v4");
@@ -40,6 +44,8 @@ export function normalizeOperationRequest(value, { now = Date.now(), jobsDir = D
   const operation = String(value.operation ?? "");
   const contract = OPERATIONS.get(operation);
   if (!contract) throw requestError(403, "operation is not authorized");
+  const principal = String(value.principal ?? "");
+  if (!contract.principals.includes(principal)) throw requestError(403, "principal is not authorized for operation");
   const parameters = value.parameters;
   if (!parameters || typeof parameters !== "object" || Array.isArray(parameters)) throw requestError(400, "parameters must be an object");
   if (contract.jobFile) {
@@ -50,19 +56,24 @@ export function normalizeOperationRequest(value, { now = Date.now(), jobsDir = D
     }
     return {
       requestId: value.requestId,
+      principal,
       operation,
       args: [...contract.args, "--jobFile", path.join(path.resolve(jobsDir), "running", jobFileName)],
     };
   }
   assertExactKeys(parameters, [], "parameters");
-  return { requestId: value.requestId, operation, args: [...contract.args] };
+  return { requestId: value.requestId, principal, operation, args: [...contract.args] };
 }
 
-export function authorizeBearer(header, expectedToken) {
+export function authenticatePrincipal(header, principalTokens) {
   const match = /^Bearer ([^\s]+)$/.exec(String(header ?? ""));
   const actual = Buffer.from(match?.[1] ?? "");
-  const expected = Buffer.from(String(expectedToken ?? ""));
-  return expected.length >= 32 && actual.length === expected.length && crypto.timingSafeEqual(actual, expected);
+  let authenticated = "";
+  for (const [principal, token] of Object.entries(principalTokens ?? {})) {
+    const expected = Buffer.from(String(token ?? ""));
+    if (expected.length >= 32 && actual.length === expected.length && crypto.timingSafeEqual(actual, expected)) authenticated = principal;
+  }
+  return authenticated;
 }
 
 export function validateJobFilePath(filePath, jobsDir = DEFAULT_JOBS_DIR) {
@@ -76,36 +87,101 @@ export function validateJobFilePath(filePath, jobsDir = DEFAULT_JOBS_DIR) {
   return filePath;
 }
 
+export function snapshotJobFile(filePath, jobsDir = DEFAULT_JOBS_DIR, snapshotParent = os.tmpdir()) {
+  validateJobFilePath(filePath, jobsDir);
+  let descriptor;
+  let snapshotRoot = "";
+  try {
+    descriptor = fs.openSync(filePath, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
+    const before = fs.fstatSync(descriptor);
+    if (!before.isFile() || before.size < 2 || before.size > MAX_JOB_BYTES) throw requestError(400, "job file size is invalid");
+    const bytes = readDescriptorExactly(descriptor, before.size);
+    const confirmation = readDescriptorExactly(descriptor, before.size);
+    const after = fs.fstatSync(descriptor);
+    if (before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size || before.mtimeMs !== after.mtimeMs) {
+      throw requestError(409, "job file changed while being snapshotted");
+    }
+    if (bytes.length !== confirmation.length || !crypto.timingSafeEqual(bytes, confirmation)) {
+      throw requestError(409, "job file content was not stable while being snapshotted");
+    }
+    snapshotRoot = fs.mkdtempSync(path.join(path.resolve(snapshotParent), "docker-gateway-job-"));
+    fs.chmodSync(snapshotRoot, 0o700);
+    const snapshotPath = path.join(snapshotRoot, "job.json");
+    fs.writeFileSync(snapshotPath, bytes, { mode: 0o600, flag: "wx" });
+    return {
+      path: snapshotPath,
+      root: snapshotRoot,
+      cleanup: () => fs.rmSync(snapshotRoot, { recursive: true, force: true }),
+    };
+  } catch (error) {
+    if (snapshotRoot) fs.rmSync(snapshotRoot, { recursive: true, force: true });
+    throw error;
+  } finally {
+    if (descriptor !== undefined) fs.closeSync(descriptor);
+  }
+}
+
+function readDescriptorExactly(descriptor, size) {
+  const bytes = Buffer.alloc(size);
+  let offset = 0;
+  while (offset < size) {
+    const count = fs.readSync(descriptor, bytes, offset, size - offset, offset);
+    if (count === 0) break;
+    offset += count;
+  }
+  if (offset !== size) throw requestError(409, "job file changed while being snapshotted");
+  return bytes;
+}
+
 export function createDockerOperationGateway({
-  token,
+  principalTokens,
   jobsDir = DEFAULT_JOBS_DIR,
   now = () => Date.now(),
   runOperation = defaultRunOperation,
+  operationTimeoutMs = DEFAULT_OPERATION_TIMEOUT_MS,
 } = {}) {
-  if (String(token ?? "").length < 32) throw new Error("Docker operation gateway token must contain at least 32 characters.");
+  const credentials = normalizePrincipalTokens(principalTokens);
+  if (!Number.isInteger(operationTimeoutMs) || operationTimeoutMs < 1 || operationTimeoutMs > 24 * 60 * 60_000) {
+    throw new Error("Docker operation gateway timeout is invalid.");
+  }
   const replay = new Map();
   let busy = false;
   return http.createServer(async (req, res) => {
     if (req.method === "GET" && req.url === "/healthz") return json(res, 200, { status: "ok" });
     if (req.method !== "POST" || req.url !== "/v1/operations") return json(res, 404, { error: "not found" });
-    if (!authorizeBearer(req.headers.authorization, token)) return json(res, 401, { error: "unauthorized" });
+    const principal = authenticatePrincipal(req.headers.authorization, credentials);
+    if (!principal) return json(res, 401, { error: "unauthorized" });
     if (String(req.headers["content-type"] ?? "").split(";", 1)[0].trim().toLowerCase() !== "application/json") {
       return json(res, 415, { error: "application/json required" });
     }
     try {
       const body = await readJsonBody(req);
       const operation = normalizeOperationRequest(body, { now: now(), jobsDir });
+      if (operation.principal !== principal) throw requestError(403, "credential principal does not match request principal");
       purgeReplay(replay, now());
       if (replay.has(operation.requestId)) throw requestError(409, "request replay rejected");
       replay.set(operation.requestId, now());
       if (busy) throw requestError(409, "another platform operation is running");
       busy = true;
+      const controller = new AbortController();
+      const operationPromise = Promise.resolve()
+        .then(() => runOperation(operation, { signal: controller.signal }))
+        .finally(() => { busy = false; });
+      let timeout;
       try {
-        const result = await runOperation(operation);
+        const result = await Promise.race([
+          operationPromise,
+          new Promise((_, reject) => {
+            timeout = setTimeout(() => {
+              controller.abort();
+              reject(requestError(504, "platform operation timed out"));
+            }, operationTimeoutMs);
+          }),
+        ]);
         if (result?.status !== 0) return json(res, 500, { status: "failed", operation: operation.operation });
         return json(res, 200, { status: "completed", operation: operation.operation });
       } finally {
-        busy = false;
+        clearTimeout(timeout);
       }
     } catch (error) {
       return json(res, Number(error?.statusCode) || 400, { error: String(error?.message ?? "invalid request") });
@@ -113,21 +189,60 @@ export function createDockerOperationGateway({
   });
 }
 
-function defaultRunOperation(operation) {
+function defaultRunOperation(operation, { signal } = {}) {
   const infraRoot = path.resolve(process.env.PLATFORM_INFRA_ROOT || path.join(scriptDir, ".."));
   const env = gatewayChildEnvironment();
+  const args = [...operation.args];
+  let snapshot;
   if (operation.operation === "execute-backup-job") {
-    validateJobFilePath(operation.args.at(-1), process.env.BACKUP_SCHEDULER_JOBS_DIR || DEFAULT_JOBS_DIR);
+    snapshot = snapshotJobFile(
+      operation.args.at(-1),
+      process.env.BACKUP_SCHEDULER_JOBS_DIR || DEFAULT_JOBS_DIR,
+      process.env.DOCKER_GATEWAY_JOB_SNAPSHOT_PARENT || os.tmpdir(),
+    );
+    args[args.length - 1] = snapshot.path;
+    env.DOCKER_GATEWAY_JOB_SNAPSHOT_ROOT = snapshot.root;
   }
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [path.join(infraRoot, "scripts", "infra-ops.mjs"), ...operation.args], {
+    const child = spawn(process.execPath, [path.join(infraRoot, "scripts", "infra-ops.mjs"), ...args], {
       cwd: infraRoot,
       env,
       stdio: ["ignore", "inherit", "inherit"],
+      detached: process.platform !== "win32",
     });
-    child.once("error", reject);
-    child.once("exit", (status, signal) => resolve({ status: Number.isInteger(status) ? status : 1, signal }));
+    let killTimer;
+    const cleanup = () => {
+      clearTimeout(killTimer);
+      snapshot?.cleanup();
+    };
+    const abort = () => {
+      terminateChild(child, "SIGTERM");
+      killTimer = setTimeout(() => terminateChild(child, "SIGKILL"), 5000);
+      killTimer.unref?.();
+    };
+    signal?.addEventListener("abort", abort, { once: true });
+    child.once("error", (error) => {
+      signal?.removeEventListener("abort", abort);
+      cleanup();
+      reject(error);
+    });
+    child.once("exit", (status, childSignal) => {
+      signal?.removeEventListener("abort", abort);
+      cleanup();
+      resolve({ status: Number.isInteger(status) ? status : 1, signal: childSignal });
+    });
+    if (signal?.aborted) abort();
   });
+}
+
+function terminateChild(child, signal) {
+  if (!child.pid || child.exitCode !== null || child.signalCode) return;
+  try {
+    if (process.platform === "win32") child.kill(signal);
+    else process.kill(-child.pid, signal);
+  } catch {
+    // The process may have exited between the state check and signal delivery.
+  }
 }
 
 function gatewayChildEnvironment() {
@@ -156,6 +271,14 @@ function assertExactKeys(value, expected, label) {
   const actual = Object.keys(value).sort();
   const wanted = [...expected].sort();
   if (JSON.stringify(actual) !== JSON.stringify(wanted)) throw requestError(400, `${label} contains unsupported fields`);
+}
+
+function normalizePrincipalTokens(value) {
+  const entries = Object.entries(value ?? {});
+  if (entries.length !== 1 || entries[0][0] !== SCHEDULER_PRINCIPAL || String(entries[0][1] ?? "").length < 32) {
+    throw new Error("Docker operation gateway requires one scheduler-specific credential.");
+  }
+  return Object.fromEntries(entries.map(([principal, token]) => [principal, String(token)]));
 }
 
 function requestError(statusCode, message) {
@@ -197,8 +320,11 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   const host = process.env.DOCKER_GATEWAY_HOST || "0.0.0.0";
   const port = Number(process.env.DOCKER_GATEWAY_PORT || 8787);
   const server = createDockerOperationGateway({
-    token: readToken(process.env.DOCKER_GATEWAY_TOKEN_FILE || DEFAULT_TOKEN_FILE),
+    principalTokens: {
+      [SCHEDULER_PRINCIPAL]: readToken(process.env.BACKUP_SCHEDULER_DOCKER_GATEWAY_TOKEN_FILE || DEFAULT_SCHEDULER_TOKEN_FILE),
+    },
     jobsDir: process.env.BACKUP_SCHEDULER_JOBS_DIR || DEFAULT_JOBS_DIR,
+    operationTimeoutMs: Number(process.env.DOCKER_GATEWAY_OPERATION_TIMEOUT_MS || DEFAULT_OPERATION_TIMEOUT_MS),
   });
   server.listen(port, host, () => process.stdout.write(`typed Docker operation gateway listening on ${host}:${port}\n`));
 }

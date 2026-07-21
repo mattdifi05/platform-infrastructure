@@ -85,7 +85,7 @@
 | EV-T13-002 | T13 | Network regression | `network-segmentation-check --env-file=.env.vps.example` | HISTORICAL: superseded by typed scheduler/gateway control-network verification | 2026-07-10 |
 | EV-T13-003 | T13 | Socket and cgroup stress | `runtime-isolation-sandbox-test.sh` | RUNTIME-PENDING after typed gateway replacement; prior proxy result is not reusable | 2026-07-10 |
 | EV-T13-004 | T13 | Hosted runtime behavior | historical pre-T18 `runtime-hosted-sandbox-test.sh` with reference source/cert paths | PASS: five PHP and two Node runtimes started; source mounts read-only; static/HTTP probes passed; no secret/socket/broad mount; script superseded by the T18 external contract | 2026-07-10 |
-| EV-T13-005 | T13 | Ops runner boundary | typed gateway unit/static tests | OFFLINE PASS; Docker sandbox and live scheduler execution remain runtime-pending | 2026-07-21 |
+| EV-T13-005 | T13 | Ops runner boundary | typed gateway and runtime-isolation unit/static tests | OFFLINE PASS 14/14: per-principal credential exclusivity, no raw Docker vocabulary, stable job snapshot, replay, timeout and busy fail-closed; Docker sandbox and live scheduler execution remain runtime-pending | 2026-07-21 |
 | EV-T13-006 | T13 | Supply chain regression | `supply-chain-lock-check` | PASS 214/214 with 30 locked images | 2026-07-10 |
 | EV-T13-007 | T13 | Live/source preservation | before/after live IDs and non-sensitive source metadata | PASS: both diffs empty; no sandbox residue; no live restart/network mutation | 2026-07-10 |
 | EV-T13-008 | T13 | Private evidence integrity | `/home/platform_infrastructure/remediation-work/20260710T172606Z-t13-runtime-isolation/CHECKSUMS.sha256` | PASS: private directory 0700, files 0600 | 2026-07-10 |

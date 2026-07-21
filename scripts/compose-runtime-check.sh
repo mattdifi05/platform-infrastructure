@@ -36,7 +36,11 @@ jq -e '.networks.platform_docker_control.internal == true' "$OUTPUT" >/dev/null
 jq -e '.services["docker-operation-gateway"].ports == null and .services["docker-operation-gateway"].entrypoint == ["node", "/infra/scripts/docker-operation-gateway.mjs"]' "$OUTPUT" >/dev/null
 jq -e '.services["backup-scheduler"].environment.PLATFORM_DOCKER_GATEWAY_URL == "http://docker-operation-gateway:8787" and (.services["backup-scheduler"].environment.DOCKER_HOST == null)' "$OUTPUT" >/dev/null
 jq -e '[.services[] | select(any(.volumes[]?; .source == "/var/run/docker.sock")) | .container_name] == ["enterprise-docker-operation-gateway"]' "$OUTPUT" >/dev/null
-jq -e '[.services["docker-operation-gateway"].secrets[].source] == ["docker_gateway_token"] and [.services["backup-scheduler"].secrets[].source] == ["docker_gateway_token"]' "$OUTPUT" >/dev/null
+jq -e '
+  [.services["docker-operation-gateway"].secrets[].source] == ["backup_scheduler_docker_gateway_token"] and
+  [.services["backup-scheduler"].secrets[].source] == ["backup_scheduler_docker_gateway_token"] and
+  ([.services | to_entries[] | select(any(.value.secrets[]?; .source == "backup_scheduler_docker_gateway_token")) | .key] | sort) == ["backup-scheduler", "docker-operation-gateway"]
+' "$OUTPUT" >/dev/null
 jq -e '.volumes.enterprise_local_registry_data.name == "enterprise_local_registry_data"' "$OUTPUT" >/dev/null
 jq -e '.volumes.enterprise_local_registry_data.external == true' "$OUTPUT" >/dev/null
 

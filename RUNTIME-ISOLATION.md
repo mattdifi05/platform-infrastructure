@@ -17,7 +17,7 @@ contract; it does not provide high availability.
 - no infrastructure repository, backup path, Control Center state or Docker
   socket inside hosted workloads;
 - no shared gateway signing key or SMTP secret in PHP workloads;
-- one digest-pinned Docker socket proxy on a dedicated internal network;
+- one typed Docker operation gateway on a dedicated internal network;
 - a loopback-only host endpoint for the trusted ops runner.
 
 The overlay is loaded after `compose.networks.yaml`. Earlier overlays remain
@@ -60,9 +60,14 @@ service receives the repository-parent mount.
 Only `docker-operation-gateway` receives `/var/run/docker.sock`. It exposes no
 host port and does not implement any Docker API route. Its sole mutation
 endpoint accepts a closed, versioned set of platform backup/restore jobs with
-exact JSON fields, a Docker-secret bearer token, a short timestamp window and
-request replay rejection. Docker command arrays, image references, bind paths,
-network names and volume names are never caller-controlled.
+exact JSON fields, the `backup-scheduler` principal's dedicated Docker-secret
+credential, a short timestamp window, bounded execution time and request replay
+rejection. That credential is mounted only into the scheduler and gateway.
+Docker command arrays, image references, bind paths, network names, volume
+names, capabilities, devices and host namespaces are never caller-controlled.
+Queued job input is copied through a no-follow stable read into a private
+gateway tmpfs snapshot before privileged execution, closing the scheduler-file
+replacement window.
 
 The backup scheduler reaches the gateway through the internal
 `platform_docker_control` network. Hosted workloads are not members of this
@@ -141,7 +146,7 @@ before rollback. Do not remove volumes or application sources.
 
 For a per-app failure, restore the previous Compose revision and run the old
 canonical wrapper with `up -d --no-deps --force-recreate <service>`. If the
-socket proxy fails, stop new scheduler jobs, preserve queued job state, restore
+typed gateway fails, stop new scheduler jobs, preserve queued job state, restore
 the previous scheduler revision and leave the Docker socket unavailable to
 hosted workloads.
 

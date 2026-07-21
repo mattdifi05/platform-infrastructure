@@ -47,11 +47,11 @@ docker run -d \
   --ulimit nofile=16384:16384 \
   --blkio-weight 700 \
   --security-opt no-new-privileges:true \
-  -e DOCKER_GATEWAY_TOKEN_FILE=/run/secrets/docker_gateway_token \
+  -e BACKUP_SCHEDULER_DOCKER_GATEWAY_TOKEN_FILE=/run/secrets/backup_scheduler_docker_gateway_token \
   -e PLATFORM_INFRA_ROOT=/infra \
   -v /var/run/docker.sock:/var/run/docker.sock:ro \
   -v "$ROOT_DIR:/infra:ro" \
-  -v "$TOKEN_FILE:/run/secrets/docker_gateway_token:ro" \
+  -v "$TOKEN_FILE:/run/secrets/backup_scheduler_docker_gateway_token:ro" \
   "$NODE_IMAGE" node /infra/scripts/docker-operation-gateway.mjs >/dev/null
 
 docker run -d \
@@ -88,7 +88,7 @@ for (const [path, expected] of endpoints) {
 const response = await fetch("http://docker-operation-gateway:8787/v1/operations", {
   method: "POST",
   headers: { Authorization: `Bearer ${process.env.GATEWAY_TOKEN}`, "Content-Type": "application/json" },
-  body: JSON.stringify({ version: 1, requestId: "123e4567-e89b-42d3-a456-426614174000", issuedAt: new Date().toISOString(), operation: "container-create", parameters: {} }),
+  body: JSON.stringify({ version: 1, principal: "backup-scheduler", requestId: "123e4567-e89b-42d3-a456-426614174000", issuedAt: new Date().toISOString(), operation: "container-create", parameters: {} }),
 });
 if (response.status !== 403) throw new Error(`forbidden operation expected 403, received ${response.status}`);
 const control = await fetch("http://control-plane:8080/");

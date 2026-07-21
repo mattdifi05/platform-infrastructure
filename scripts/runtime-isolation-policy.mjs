@@ -86,16 +86,22 @@ export function evaluateRuntimeIsolation(config, options = {}) {
   const gateway = services["docker-operation-gateway"] || {};
   const gatewayEnvironment = object(gateway.environment);
   const gatewayEntrypoint = Array.isArray(gateway.entrypoint) ? gateway.entrypoint.map(String) : [String(gateway.entrypoint || "")];
+  const gatewayCredential = "backup_scheduler_docker_gateway_token";
+  const gatewayCredentialOwners = Object.entries(services)
+    .filter(([, service]) => secretNames(service).includes(gatewayCredential))
+    .map(([name]) => name)
+    .sort();
   record("docker-gateway-typed-entrypoint", gatewayEntrypoint.includes("/infra/scripts/docker-operation-gateway.mjs"), `entrypoint=${gatewayEntrypoint.join(" ")}`);
   record("docker-gateway-no-host-ports", !Array.isArray(gateway.ports) || gateway.ports.length === 0, `ports=${JSON.stringify(gateway.ports || [])}`);
-  record("docker-gateway-secret-auth", secretNames(gateway).includes("docker_gateway_token") && gatewayEnvironment.DOCKER_GATEWAY_TOKEN_FILE === "/run/secrets/docker_gateway_token", `secrets=${secretNames(gateway).join(",") || "none"}`);
+  record("docker-gateway-principal-auth", secretNames(gateway).includes(gatewayCredential) && gatewayEnvironment.BACKUP_SCHEDULER_DOCKER_GATEWAY_TOKEN_FILE === `/run/secrets/${gatewayCredential}`, `secrets=${secretNames(gateway).join(",") || "none"}`);
+  record("docker-gateway-principal-secret-exclusive", same(gatewayCredentialOwners, ["backup-scheduler", "docker-operation-gateway"]), `owners=${gatewayCredentialOwners.join(",") || "none"}`);
   record("docker-gateway-no-remote-docker-host", !gatewayEnvironment.DOCKER_HOST, `DOCKER_HOST=${gatewayEnvironment.DOCKER_HOST || "unset"}`);
 
   const scheduler = services["backup-scheduler"] || {};
   const schedulerEnvironment = object(scheduler.environment);
   record("scheduler-uses-typed-gateway", schedulerEnvironment.PLATFORM_DOCKER_GATEWAY_URL === "http://docker-operation-gateway:8787", `gateway=${schedulerEnvironment.PLATFORM_DOCKER_GATEWAY_URL || "unset"}`);
   record("scheduler-has-no-docker-api", !schedulerEnvironment.DOCKER_HOST && !schedulerEnvironment.DOCKER_API_VERSION, `DOCKER_HOST=${schedulerEnvironment.DOCKER_HOST || "unset"}`);
-  record("scheduler-gateway-secret", secretNames(scheduler).includes("docker_gateway_token") && schedulerEnvironment.DOCKER_GATEWAY_TOKEN_FILE === "/run/secrets/docker_gateway_token", `secrets=${secretNames(scheduler).join(",") || "none"}`);
+  record("scheduler-principal-secret", secretNames(scheduler).includes(gatewayCredential) && schedulerEnvironment.BACKUP_SCHEDULER_DOCKER_GATEWAY_TOKEN_FILE === `/run/secrets/${gatewayCredential}`, `secrets=${secretNames(scheduler).join(",") || "none"}`);
 
   record("socket-network-internal", networks.platform_docker_control?.internal === true, `internal=${networks.platform_docker_control?.internal === true}`);
   const socketMembers = Object.entries(services)

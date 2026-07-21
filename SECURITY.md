@@ -105,8 +105,9 @@ not platform go-live gates.
   hash-locked. A changed input fails closed before Compose activation.
 - PHP runtime copies are ephemeral tmpfs and receive no shared gateway-signing
   or SMTP secret.
-- Only the digest-pinned Docker socket proxy receives the raw socket. Its host
-  endpoint is loopback-only; hosted workloads are outside its internal network.
+- Only the typed Docker operation gateway receives the raw socket. It has no
+  host endpoint; its scheduler-specific credential is mounted only by the
+  gateway and backup scheduler on their two-member internal control network.
 - Raw socket recovery mode requires explicit approval and both recovery flags.
 
 ## Required recurring checks
