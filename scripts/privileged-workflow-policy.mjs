@@ -52,7 +52,9 @@ export function deploymentPrerequisiteMismatches(workflowText) {
   if (!/^    needs: enterprise-readiness\s*$/m.test(dast) || !/environment:\s*\n\s+name:\s+staging/.test(dast) || !/dast-zap-baseline\.sh/.test(dast)) {
     issues.push("dast-zap must consume readiness and execute the staging DAST gate");
   }
-  if (!/^    needs: enterprise-readiness\s*$/m.test(admission) || !admission.includes(TRUSTED_REF_GUARD) || !/release-artifact-gate\.sh/.test(admission)) {
+  if (!/^    needs: enterprise-readiness\s*$/m.test(admission)
+    || !admission.includes(TRUSTED_REF_GUARD)
+    || !/(?:release-artifact-gate\.sh|node \.\/scripts\/infra-ops\.mjs release-artifact-gate)/.test(admission)) {
     issues.push("release-admission must consume readiness and enforce protected-main artifact admission");
   }
   if (/continue-on-error:\s*true/.test(`${dast}\n${admission}`)) {

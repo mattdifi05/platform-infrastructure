@@ -6386,6 +6386,10 @@ async function releaseArtifactGateBody(options = {}) {
       manifestVerification,
     });
     const receiptPath = writeJsonReport("release", `release-artifact-admission-${reportTimestamp()}`, receipt);
+    if (booleanFlag(options.artifactVerificationOnly ?? argv.artifactVerificationOnly)) {
+      log(`Artifact-only release verification passed; trusted deployment admission remains EXTERNAL-PENDING. Receipt: ${receiptPath}`);
+      return { sbomFile, receiptPath, provenanceValidation: null, githubAttestationValidation };
+    }
     const deploymentAdmission = readJsonFile(path.join(infraRoot, "governance", "deployment-admission.json"), "deployment admission policy");
     assertDeploymentAdmissionConfigured(deploymentAdmission);
     log(`Release artifact admission gate passed with SBOM ${sbomFile} and receipt ${receiptPath}.`);

@@ -172,6 +172,13 @@ process.stdout.write(JSON.stringify([{ verificationResult: {
   assert.match(positive.stderr, /EXTERNAL-PENDING/);
   assert.doesNotMatch(positive.stderr, /Exact per-subject registry resolution is required/);
 
+  const artifactOnly = spawnSync(process.execPath, [...commonArgs, "--artifactVerificationOnly"], {
+    cwd: root, env: environment, encoding: "utf8",
+  });
+  assert.equal(artifactOnly.status, 0, artifactOnly.stderr);
+  assert.match(artifactOnly.stdout, /Artifact-only release verification passed/);
+  assert.match(artifactOnly.stdout, /EXTERNAL-PENDING/);
+
   const tampered = structuredClone(registryResolution);
   tampered.platforms[0].size += 1;
   const tamperedArtifact = writeJson("registry-resolution-tampered.json", tampered);
@@ -182,7 +189,7 @@ process.stdout.write(JSON.stringify([{ verificationResult: {
   assert.match(negative.stderr, /differs from exact descriptor resolution/);
   assert.doesNotMatch(negative.stderr, /EXTERNAL-PENDING/);
 
-  process.stdout.write("release artifact gate consumer tests passed 2/2; trusted channel remains EXTERNAL-PENDING\n");
+  process.stdout.write("release artifact gate consumer tests passed 3/3; trusted channel remains EXTERNAL-PENDING\n");
 } finally {
   fs.rmSync(temporary, { recursive: true, force: true });
 }

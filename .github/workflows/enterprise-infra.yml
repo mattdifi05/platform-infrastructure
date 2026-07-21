@@ -19,6 +19,18 @@ on:
         description: Owner-reviewed SHA256 of the attested release subject manifest
         required: true
         type: string
+      trusted_admission_run_id:
+        description: Trusted-provider run containing the exact deployment admission receipt
+        required: true
+        type: string
+      artifact_receipt_sha256:
+        description: Owner-reviewed SHA256 of the artifact-only verification receipt
+        required: true
+        type: string
+      deployment_receipt_sha256:
+        description: Owner-reviewed SHA256 of the trusted-provider deployment receipt
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -170,6 +182,7 @@ jobs:
           node scripts/release-go-no-go-policy.test.mjs
           node scripts/deployment-admission-policy.test.mjs
           node scripts/deployment-receipt-policy.test.mjs
+          node scripts/trusted-receipt-workflow.test.mjs
           node scripts/privileged-workflow-policy.test.mjs
           node scripts/ssh-host-key-policy.test.mjs
           sh scripts/ops-image-trust-test.sh
@@ -310,6 +323,8 @@ jobs:
     outputs:
       release_sha: ${{ steps.bind.outputs.release_sha }}
       release_tree: ${{ steps.bind.outputs.release_tree }}
+      artifact_receipt_sha256: ${{ steps.artifacts.outputs.artifact_receipt_sha256 }}
+      deployment_receipt_sha256: ${{ steps.artifacts.outputs.deployment_receipt_sha256 }}
     steps:
       - name: Checkout exact protected-main candidate
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
@@ -336,26 +351,46 @@ jobs:
           path: ${{ runner.temp }}/release-candidate
           run-id: ${{ inputs.release_attestation_run_id }}
           github-token: ${{ github.token }}
-      - name: Select one manifest, SBOM and registry evidence set
+      - name: Download trusted-provider admission receipt
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: platform-trusted-deployment-admission
+          path: ${{ runner.temp }}/trusted-admission
+          run-id: ${{ inputs.trusted_admission_run_id }}
+          github-token: ${{ github.token }}
+      - name: Select one manifest, SBOM, registry and receipt evidence set
         id: artifacts
         env:
           CANDIDATE_DIR: ${{ runner.temp }}/release-candidate
+          TRUSTED_ADMISSION_DIR: ${{ runner.temp }}/trusted-admission
           EXPECTED_MANIFEST_SHA256: ${{ inputs.release_manifest_sha256 }}
+          EXPECTED_ARTIFACT_RECEIPT_SHA256: ${{ inputs.artifact_receipt_sha256 }}
+          EXPECTED_DEPLOYMENT_RECEIPT_SHA256: ${{ inputs.deployment_receipt_sha256 }}
           APPROVED_SHA: ${{ inputs.approved_sha }}
         run: |
           case "$EXPECTED_MANIFEST_SHA256" in *[!a-f0-9]*|'') exit 1 ;; esac
+          case "$EXPECTED_ARTIFACT_RECEIPT_SHA256" in *[!a-f0-9]*|'') exit 1 ;; esac
+          case "$EXPECTED_DEPLOYMENT_RECEIPT_SHA256" in *[!a-f0-9]*|'') exit 1 ;; esac
           test "${#EXPECTED_MANIFEST_SHA256}" -eq 64
+          test "${#EXPECTED_ARTIFACT_RECEIPT_SHA256}" -eq 64
+          test "${#EXPECTED_DEPLOYMENT_RECEIPT_SHA256}" -eq 64
           mapfile -t manifests < <(find "$CANDIDATE_DIR" -type f -name 'release-subjects-*.json' -print)
           mapfile -t sboms < <(find "$CANDIDATE_DIR" -type f -name 'github-release-sbom-*.cdx.json' -print)
           mapfile -t buildkit_sboms < <(find "$CANDIDATE_DIR" -type f -name 'buildkit-sbom-*.spdx.json' -print)
           mapfile -t registry_descriptors < <(find "$CANDIDATE_DIR" -type f -name 'registry-descriptor-*.json' -print)
           mapfile -t registry_resolutions < <(find "$CANDIDATE_DIR" -type f -name 'registry-resolution-*.json' -print)
+          mapfile -t artifact_receipts < <(find "$CANDIDATE_DIR" -type f -name 'release-artifact-admission-*.json' -print)
+          mapfile -t deployment_receipts < <(find "$TRUSTED_ADMISSION_DIR" -type f -name 'trusted-deployment-admission-*.json' -print)
           test "${#manifests[@]}" -eq 1
           test "${#sboms[@]}" -eq 1
           test "${#buildkit_sboms[@]}" -eq 1
           test "${#registry_descriptors[@]}" -eq 1
           test "${#registry_resolutions[@]}" -eq 1
+          test "${#artifact_receipts[@]}" -eq 1
+          test "${#deployment_receipts[@]}" -eq 1
           test "$(sha256sum "${manifests[0]}" | awk '{print $1}')" = "$EXPECTED_MANIFEST_SHA256"
+          test "$(sha256sum "${artifact_receipts[0]}" | awk '{print $1}')" = "$EXPECTED_ARTIFACT_RECEIPT_SHA256"
+          test "$(sha256sum "${deployment_receipts[0]}" | awk '{print $1}')" = "$EXPECTED_DEPLOYMENT_RECEIPT_SHA256"
           test "$(jq -r '.repository' "${manifests[0]}")" = "$GITHUB_REPOSITORY"
           test "$(jq -r '.commitSha' "${manifests[0]}")" = "$APPROVED_SHA"
           printf 'manifest=%s\n' "${manifests[0]}" >> "$GITHUB_OUTPUT"
@@ -363,7 +398,11 @@ jobs:
           printf 'buildkit_sbom=%s\n' "${buildkit_sboms[0]}" >> "$GITHUB_OUTPUT"
           printf 'registry_descriptor=%s\n' "${registry_descriptors[0]}" >> "$GITHUB_OUTPUT"
           printf 'registry_resolution=%s\n' "${registry_resolutions[0]}" >> "$GITHUB_OUTPUT"
-      - name: Verify release subjects and require trusted deployment admission
+          printf 'artifact_receipt=%s\n' "${artifact_receipts[0]}" >> "$GITHUB_OUTPUT"
+          printf 'deployment_receipt=%s\n' "${deployment_receipts[0]}" >> "$GITHUB_OUTPUT"
+          printf 'artifact_receipt_sha256=%s\n' "$EXPECTED_ARTIFACT_RECEIPT_SHA256" >> "$GITHUB_OUTPUT"
+          printf 'deployment_receipt_sha256=%s\n' "$EXPECTED_DEPLOYMENT_RECEIPT_SHA256" >> "$GITHUB_OUTPUT"
+      - name: Verify release subjects and trusted-provider deployment admission
         env:
           GH_TOKEN: ${{ github.token }}
           APPROVED_SHA: ${{ inputs.approved_sha }}
@@ -372,8 +411,13 @@ jobs:
           BUILDKIT_SBOM: ${{ steps.artifacts.outputs.buildkit_sbom }}
           REGISTRY_DESCRIPTOR: ${{ steps.artifacts.outputs.registry_descriptor }}
           REGISTRY_RESOLUTION: ${{ steps.artifacts.outputs.registry_resolution }}
+          ARTIFACT_RECEIPT: ${{ steps.artifacts.outputs.artifact_receipt }}
+          DEPLOYMENT_RECEIPT: ${{ steps.artifacts.outputs.deployment_receipt }}
+          ARTIFACT_RECEIPT_SHA256: ${{ steps.artifacts.outputs.artifact_receipt_sha256 }}
+          DEPLOYMENT_RECEIPT_SHA256: ${{ steps.artifacts.outputs.deployment_receipt_sha256 }}
+          RELEASE_TREE: ${{ steps.bind.outputs.release_tree }}
         run: |
-          sh ./scripts/release-artifact-gate.sh \
+          node ./scripts/infra-ops.mjs release-artifact-gate \
             --imageManifest "$RELEASE_MANIFEST" \
             --sbom "$RELEASE_SBOM" \
             --buildkitSbom "$BUILDKIT_SBOM" \
@@ -382,9 +426,27 @@ jobs:
             --releaseSha "$APPROVED_SHA" \
             --repo "$GITHUB_REPOSITORY" \
             --sourceRef refs/heads/main \
-            --signerWorkflow "$GITHUB_REPOSITORY/.github/workflows/release-attestation.yml"
-          echo "EXTERNAL-PENDING: no authenticated trusted deployment-receipt producer is configured." >&2
-          exit 1
+            --signerWorkflow "$GITHUB_REPOSITORY/.github/workflows/release-attestation.yml" \
+            --artifactVerificationOnly
+          node ./scripts/deployment-receipt-policy.mjs \
+            --policy governance/deployment-admission.json \
+            --artifactReceipt "$ARTIFACT_RECEIPT" \
+            --artifactReceiptSha256 "$ARTIFACT_RECEIPT_SHA256" \
+            --deploymentReceipt "$DEPLOYMENT_RECEIPT" \
+            --deploymentReceiptSha256 "$DEPLOYMENT_RECEIPT_SHA256" \
+            --repo "$GITHUB_REPOSITORY" \
+            --commit "$APPROVED_SHA" \
+            --tree "$RELEASE_TREE"
+          install -d -m 700 "${RUNNER_TEMP}/admitted-deployment-receipts"
+          install -m 600 "$ARTIFACT_RECEIPT" "${RUNNER_TEMP}/admitted-deployment-receipts/artifact-verification.json"
+          install -m 600 "$DEPLOYMENT_RECEIPT" "${RUNNER_TEMP}/admitted-deployment-receipts/trusted-deployment-admission.json"
+      - name: Upload exact admitted deployment receipts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: admitted-deployment-receipts-${{ github.run_id }}
+          path: ${{ runner.temp }}/admitted-deployment-receipts/
+          if-no-files-found: error
+          retention-days: 1
       - name: Upload artifact-verification evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -412,6 +474,29 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+      - name: Download exact admitted deployment receipts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: admitted-deployment-receipts-${{ github.run_id }}
+          path: ${{ runner.temp }}/admitted-deployment-receipts
+      - name: Revalidate deployment receipt handoff
+        env:
+          ARTIFACT_RECEIPT: ${{ runner.temp }}/admitted-deployment-receipts/artifact-verification.json
+          DEPLOYMENT_RECEIPT: ${{ runner.temp }}/admitted-deployment-receipts/trusted-deployment-admission.json
+          ARTIFACT_RECEIPT_SHA256: ${{ needs.release-admission.outputs.artifact_receipt_sha256 }}
+          DEPLOYMENT_RECEIPT_SHA256: ${{ needs.release-admission.outputs.deployment_receipt_sha256 }}
+          RELEASE_SHA: ${{ needs.release-admission.outputs.release_sha }}
+          RELEASE_TREE: ${{ needs.release-admission.outputs.release_tree }}
+        run: |
+          node ./scripts/deployment-receipt-policy.mjs \
+            --policy governance/deployment-admission.json \
+            --artifactReceipt "$ARTIFACT_RECEIPT" \
+            --artifactReceiptSha256 "$ARTIFACT_RECEIPT_SHA256" \
+            --deploymentReceipt "$DEPLOYMENT_RECEIPT" \
+            --deploymentReceiptSha256 "$DEPLOYMENT_RECEIPT_SHA256" \
+            --repo "$GITHUB_REPOSITORY" \
+            --commit "$RELEASE_SHA" \
+            --tree "$RELEASE_TREE"
       - name: Install SSH key
         env:
           DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
@@ -444,6 +529,10 @@ jobs:
           DEPLOY_REPO: ${{ github.repository }}
           DEPLOY_RELEASE_SHA: ${{ needs.release-admission.outputs.release_sha }}
           DEPLOY_RELEASE_TREE: ${{ needs.release-admission.outputs.release_tree }}
+          DEPLOY_ARTIFACT_RECEIPT_PATH: ${{ runner.temp }}/admitted-deployment-receipts/artifact-verification.json
+          DEPLOY_ARTIFACT_RECEIPT_SHA256: ${{ needs.release-admission.outputs.artifact_receipt_sha256 }}
+          DEPLOY_ADMISSION_RECEIPT_PATH: ${{ runner.temp }}/admitted-deployment-receipts/trusted-deployment-admission.json
+          DEPLOY_ADMISSION_RECEIPT_SHA256: ${{ needs.release-admission.outputs.deployment_receipt_sha256 }}
           DEPLOY_RUN_WAF_SMOKE: "1"
           DEPLOY_RUN_INFRA_HEALTH: "1"
           DEPLOY_RUN_PRODUCTION_PREFLIGHT: "1"
