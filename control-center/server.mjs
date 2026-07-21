@@ -7,6 +7,10 @@ import { closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readd
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { AuthRequestError, createControlCenterAuth } from "./auth/oidc.mjs";
+import {
+  isControlApiPath,
+  resolveAuthorizationCapability,
+} from "./auth/route-capabilities.mjs";
 import { controlCenterScriptTags, controlCenterStylesheetLinks, controlCenterUiContract } from "./components/ui/controlCenterUi.mjs";
 import {
   activatePrincipalBinding,
@@ -227,6 +231,11 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    const controlOperation = isControlApiPath(url.pathname)
+      ? resolveAuthorizationCapability(req.method, url.pathname)
+      : null;
+    if (controlOperation) req.controlCenterOperation = controlOperation;
+
     const session = await controlAuth.authenticate(req);
     if (!session.ok) {
       if (url.pathname.startsWith("/control/") || req.method !== "GET") {
@@ -261,8 +270,8 @@ const server = createServer(async (req, res) => {
         ? await buildCachedContext({ projects, state })
         : await buildContext({ projects, state });
 
-    if (url.pathname.startsWith("/control/")) {
-      await handleApi(req, res, url, context);
+    if (controlOperation) {
+      await handleApi(req, res, url, context, controlOperation);
       return;
     }
 
@@ -390,12 +399,39 @@ async function shutdown() {
 process.once("SIGTERM", shutdown);
 process.once("SIGINT", shutdown);
 
-async function handleApi(req, res, url, context) {
-  const method = (req.method || "GET").toUpperCase();
-  const parts = normalizeControlApiParts(url.pathname.split("/").filter(Boolean));
-  const payload = await readPayload(req);
+async function handleApi(req, res, url, context, operation) {
+  if (!operation?.classified || operation.control !== true) {
+    notFound(res);
+    return;
+  }
+  const method = operation.method;
+  const parts = operation.canonicalPath.split("/").filter(Boolean);
+  const payload = method === "POST" ? await readPayload(req) : {};
 
   try {
+    // Security-sensitive operations dispatch directly from the same catalog
+    // identity used by authorization. The legacy comparisons below consume
+    // only the already-resolved canonical method/path for ordinary routes.
+    switch (operation.operationId) {
+      case "overview.read": return json(res, context.overview);
+      case "advanced.section.read": return json(res, advancedControlSection(operation.parameters.sectionId, context));
+      case "vault.inventory.read": return json(res, { items: context.vaultItems, overview: context.overview.vault });
+      case "vault.secret.store": return json(res, planVaultSecretCreate(payload, context), 202);
+      case "vault.import-existing": return json(res, planVaultSecretImportExisting(payload, context), 202);
+      case "vault.secret.reveal": return json(res, planVaultSecretReveal(operation.parameters.vaultItemId, payload, context), 202);
+      case "vault.secret.delete": return json(res, planVaultSecretDelete(operation.parameters.vaultItemId, payload, context), 202);
+      case "database.create": return json(res, planDatabaseCreate(payload, context), 202);
+      case "database.backup": return json(res, planDatabaseBackup(operation.parameters.databaseId, payload, context), 202);
+      case "backup.summary.read": return json(res, context.backups);
+      case "backup.records.read": return json(res, { records: context.backupRecords });
+      case "backup.jobs.read": return json(res, { jobs: readBackupJobs() });
+      case "backup.files.list": return json(res, readBackupFiles(url.searchParams.get("path") || ""));
+      case "backup.file.preview": return json(res, readBackupPreview(url.searchParams.get("path") || ""));
+      case "backup.run": return json(res, queueBackupRun(payload, context), 202);
+      case "backup.file.delete": return json(res, applyBackupFileDelete(payload, context), 202);
+      default: break;
+    }
+
     if (method === "GET" && route(parts, "control", "overview")) return json(res, context.overview);
     if (method === "GET" && route(parts, "control", "status", "events", "stream")) {
       return streamStatusRunEvents(req, res, url.searchParams.get("runId") || "");
@@ -12345,11 +12381,6 @@ function findById(items, id, label) {
 
 function route(parts, ...expected) {
   return parts.length === expected.length && expected.every((part, index) => parts[index] === part);
-}
-
-function normalizeControlApiParts(parts) {
-  if (parts[0] === "control" && parts[1] === "v1") return ["control", ...parts.slice(2)];
-  return parts;
 }
 
 function choice(value, allowed, label) {

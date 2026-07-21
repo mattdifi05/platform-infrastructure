@@ -2,6 +2,7 @@ import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { createRemoteJWKSet, jwtVerify } from "jose";
 import pg from "pg";
+import { resolveAuthorizationCapability } from "./route-capabilities.mjs";
 
 const { Pool } = pg;
 const SESSION_COOKIE = "__Host-platform_cc_session";
@@ -272,13 +273,24 @@ class OidcPasskeyAuth {
   authorize(req, url, session) {
     if (!session?.ok) return session;
     const method = String(req.method || "GET").toUpperCase();
-    const mutating = !["GET", "HEAD", "OPTIONS"].includes(method);
-    const sensitive = isSensitivePath(url.pathname);
-    if (sensitive && session.role !== "owner") return denied(403, "Platform owner authorization required.");
-    if (sensitive && Date.now() - new Date(session.identity.authTime).getTime() > this.config.freshAuthSeconds * 1000) {
-      return denied(428, "A recent passkey authentication is required.", { error: "admin_reauthentication_required", reauthUrl: "/auth/login" });
+    const operation = req.controlCenterOperation || resolveAuthorizationCapability(method, url.pathname);
+    if (operation.capability === "deny") {
+      return denied(403, "Endpoint capability is not declared.", { error: "endpoint_capability_denied" });
     }
-    if (mutating && !["owner", "admin"].includes(session.role)) return denied(403, "Administrative authorization required.");
+    if (operation.capability === "owner:fresh") {
+      if (session.role !== "owner") return denied(403, "Platform owner authorization required.");
+      const now = Date.now();
+      const authTime = new Date(session.identity?.authTime).getTime();
+      if (!Number.isFinite(authTime) || authTime > now || now - authTime > this.config.freshAuthSeconds * 1000) {
+        return denied(428, "A recent passkey authentication is required.", { error: "admin_reauthentication_required", reauthUrl: "/auth/login" });
+      }
+    }
+    if (operation.capability === "admin" && !["owner", "admin"].includes(session.role)) {
+      return denied(403, "Administrative authorization required.");
+    }
+    if (operation.capability === "viewer" && !["owner", "admin", "viewer"].includes(session.role)) {
+      return denied(403, "Control Center authorization required.");
+    }
     return session;
   }
 
@@ -486,19 +498,6 @@ function highestRole(roles, config) {
   if (roles.has(config.adminRole)) return "admin";
   if (roles.has(config.viewerRole)) return "viewer";
   return "";
-}
-
-function isSensitivePath(pathname) {
-  return [
-    "/actions/vault-command",
-    "/actions/database-command",
-    "/actions/database-admin-login",
-    "/actions/phpmyadmin-login",
-    "/actions/phppgadmin-login",
-    "/actions/backup-command",
-    "/actions/identity-command",
-    "/actions/settings-command",
-  ].includes(pathname);
 }
 
 function normalizeSessionRow(row) {

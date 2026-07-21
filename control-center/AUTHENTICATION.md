@@ -49,6 +49,24 @@ restore, identity administration, settings and temporary database UIs. They
 require an OIDC `auth_time` no older than five minutes; otherwise the API
 returns 428 with a passkey re-authentication URL.
 
+Authorization resolves an exact HTTP method and route identity after applying
+the same `/control/v1/*` normalization as the API dispatcher. The complete
+catalog classifies every implemented Control read and mutation. Its fresh-owner
+entries cover Vault inventory/store/import/reveal/delete, database creation and
+per-database backup, and backup file enumeration/preview/run/delete under both
+`/control/*` and `/control/v1/*`. Overview and parameterized Advanced detail
+reads use the same boundary because they project backup records or inventory.
+Dynamic identifiers occupy one exact route segment; longer, shorter, or
+similarly named paths do not match.
+Legacy Vault, database, backup, identity, settings, and temporary database UI
+actions retain the same fresh-owner boundary. The HTML shell at `/` and
+`/index.html` is also fresh-owner-only because it constructs a single context
+containing Vault and backup metadata; every non-GET method on those two paths is
+denied. Every unclassified Control method or route fails closed with
+`endpoint_capability_denied` before CSRF/body parsing, context construction, or
+handler execution. Adding any Control endpoint therefore requires an explicit
+catalog entry and role-matrix test.
+
 ## Required configuration
 
 - `CONTROL_CENTER_AUTH_MODE=oidc-passkey`
