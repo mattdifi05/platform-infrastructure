@@ -851,7 +851,11 @@ class Fixture:
     @staticmethod
     def _write_manifest(root: Path) -> None:
         rows = []
-        for path in sorted(item for item in root.rglob("*") if item.is_file() and item.name != "MANIFEST.sha256"):
+        for path in sorted(
+            item
+            for item in root.rglob("*")
+            if item.is_file() and item.relative_to(root).as_posix() != "MANIFEST.sha256"
+        ):
             rows.append(f"{sha256(path)}  {path.relative_to(root).as_posix()}\n")
         (root / "MANIFEST.sha256").write_text("".join(rows), encoding="utf-8")
 

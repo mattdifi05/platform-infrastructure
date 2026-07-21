@@ -58,6 +58,33 @@ HANDOFF_FILE_KEYS = (
     "provider_live_residuals",
 )
 
+HANDOFF_ARCHIVE_PATHS = {
+    "postfix_classification_ledger": "receipts/input/handoff/postfix_classification_ledger.jsonl",
+    "fix_group_ledger": "receipts/input/handoff/fix_group_ledger.jsonl",
+    "test_receipt_registry": "receipts/input/handoff/test_receipt_registry.jsonl",
+    "pre_fix_negative_receipt": "receipts/input/handoff/pre_fix_negative_receipt.json",
+    "local_condition_closure": "receipts/input/handoff/local_condition_closure.jsonl",
+    "documentation_alignment_receipt": "receipts/input/handoff/documentation_alignment_receipt.json",
+    "semantic_completion_receipt": "receipts/input/handoff/semantic_completion_receipt.json",
+    "required_matrices": "receipts/input/handoff/required_matrices.md",
+    "four_verdicts": "receipts/input/handoff/four_verdicts.json",
+    "provider_live_residuals": "receipts/input/handoff/provider_live_residuals.jsonl",
+}
+
+BASELINE_MANIFEST_ARCHIVE_PATH = "receipts/input/baseline/MANIFEST.sha256"
+GROUP_MAP_ARCHIVE_PATH = "receipts/input/security_fix_groups_v1.jsonl"
+HANDOFF_MANIFEST_ARCHIVE_PATH = "receipts/input/handoff/handoff-v1.json"
+
+TOOL_SOURCE_NAMES = (
+    "build_postfix_package.py",
+    "common.py",
+    "validate_postfix_package.py",
+    "handoff-v1.schema.json",
+)
+TOOL_SOURCE_PACKAGE_PATHS = {
+    name: f"validators/{name}" for name in TOOL_SOURCE_NAMES
+}
+
 REQUIRED_LOCAL_CLOSURES = frozenset(
     {
         "DOC-EVD-004",
@@ -234,7 +261,7 @@ SECRET_COMMAND_RE = re.compile(
     r"(?i)(?:password|passwd|api[_-]?key|access[_-]?token|private[_-]?key)\s*=\s*.+"
 )
 
-PACKAGE_REQUIRED_FILES = frozenset(
+PACKAGE_STATIC_FILES = frozenset(
     {
         "README.md",
         "MANIFEST.sha256",
@@ -257,6 +284,11 @@ PACKAGE_REQUIRED_FILES = frozenset(
         "receipts/candidate_identity.json",
         "receipts/replay_receipt.json",
         "receipts/build_receipt.json",
+        BASELINE_MANIFEST_ARCHIVE_PATH,
+        GROUP_MAP_ARCHIVE_PATH,
+        HANDOFF_MANIFEST_ARCHIVE_PATH,
+        *HANDOFF_ARCHIVE_PATHS.values(),
+        *TOOL_SOURCE_PACKAGE_PATHS.values(),
     }
 )
 
@@ -274,6 +306,7 @@ class Baseline:
     matrix_schema: dict[str, Any]
     inventory_count: int
     inventory_ids: frozenset[str]
+    manifest_bytes: bytes
     manifest_sha256: str
     classification_sha256: str
     registry_sha256: str
@@ -287,6 +320,7 @@ class ValidatedInputs:
     group_map_path: Path
     group_map_rows: list[dict[str, Any]]
     group_map_sha256: str
+    group_map_bytes: bytes
     handoff_path: Path
     handoff_sha256: str
     handoff_bytes: bytes
@@ -311,6 +345,28 @@ class ValidatedInputs:
     test_log_bytes: dict[str, bytes]
     pre_fix_log_bytes: dict[str, bytes]
     counts: dict[str, int]
+
+
+def expected_package_payload_paths(
+    test_receipt_rows: list[dict[str, Any]],
+    pre_fix_receipt: dict[str, Any],
+) -> frozenset[str]:
+    paths = set(PACKAGE_STATIC_FILES)
+    paths.discard("MANIFEST.sha256")
+    for index, row in enumerate(test_receipt_rows, start=1):
+        receipt_id = row.get("receipt_id") if isinstance(row, dict) else None
+        if not isinstance(receipt_id, str) or SAFE_RECEIPT_ID_RE.fullmatch(receipt_id) is None:
+            raise ContractError(f"package allowlist: unsafe test receipt identity at row {index}")
+        paths.add(f"evidence/test/logs/{receipt_id}.log")
+    executions = pre_fix_receipt.get("executions") if isinstance(pre_fix_receipt, dict) else None
+    if not isinstance(executions, list):
+        raise ContractError("package allowlist: pre-fix executions are missing")
+    for index, row in enumerate(executions, start=1):
+        group_id = row.get("group_id") if isinstance(row, dict) else None
+        if not isinstance(group_id, str) or re.fullmatch(r"FG-[0-9]{3}", group_id) is None:
+            raise ContractError(f"package allowlist: unsafe pre-fix group identity at row {index}")
+        paths.add(f"evidence/test/pre-fix/{group_id}.log")
+    return frozenset(paths)
 
 
 def _unique_rows(rows: list[dict[str, Any]], key: str, *, label: str) -> dict[str, dict[str, Any]]:
@@ -412,6 +468,7 @@ def _validate_baseline(root: Path) -> Baseline:
         matrix_schema=matrix_schema,
         inventory_count=len(inventory),
         inventory_ids=frozenset(inventory_ids),
+        manifest_bytes=snapshot.manifest_bytes,
         manifest_sha256=sha256_bytes(snapshot.manifest_bytes),
         classification_sha256=sha256_bytes(classification_bytes),
         registry_sha256=sha256_bytes(registry_bytes),
@@ -473,7 +530,10 @@ def _validate_matrix_schema(value: Any) -> None:
         raise ContractError("matrix schema: matrix IDs are not ordered M01 through M15")
 
 
-def _validate_group_map(path: Path, reportable_ids: frozenset[str]) -> tuple[list[dict[str, Any]], str]:
+def _validate_group_map(
+    path: Path,
+    reportable_ids: frozenset[str],
+) -> tuple[list[dict[str, Any]], str, bytes]:
     payload = read_regular_bytes(path, label="fix-group map")
     rows = load_jsonl_bytes(payload, label="fix-group map")
     by_id = _unique_rows(rows, "group_id", label="fix-group map")
@@ -489,7 +549,7 @@ def _validate_group_map(path: Path, reportable_ids: frozenset[str]) -> tuple[lis
             nonempty_string(row.get(key), label=f"fix-group map {group_id} {key}")
     if len(projection) != 135 or len(set(projection)) != 135 or set(projection) != set(reportable_ids):
         raise ContractError("fix-group map: reportable projection is not an exact one-to-one 135-CAN cover")
-    return [by_id[group_id] for group_id in sorted(by_id)], sha256_bytes(payload)
+    return [by_id[group_id] for group_id in sorted(by_id)], sha256_bytes(payload), payload
 
 
 def _validate_candidate(repo: Path, baseline: Baseline, final_commit_value: Any) -> tuple[str, str]:
@@ -1605,7 +1665,7 @@ def validate_source_inputs(
     semantic_receipt_sha256: str,
 ) -> ValidatedInputs:
     baseline_data = _validate_baseline(baseline)
-    group_rows, group_hash = _validate_group_map(group_map, baseline_data.reportable_ids)
+    group_rows, group_hash, group_bytes = _validate_group_map(group_map, baseline_data.reportable_ids)
     handoff_value, files, hashes, snapshots, handoff_bytes = _validate_handoff_manifest(handoff)
     final_commit, final_tree = _validate_candidate(candidate_repo, baseline_data, handoff_value["candidate_final_commit"])
     classification_rows = load_jsonl_bytes(
@@ -1648,6 +1708,7 @@ def validate_source_inputs(
         group_map_path=group_map,
         group_map_rows=group_rows,
         group_map_sha256=group_hash,
+        group_map_bytes=group_bytes,
         handoff_path=handoff,
         handoff_sha256=sha256_bytes(handoff_bytes),
         handoff_bytes=handoff_bytes,
@@ -1700,6 +1761,164 @@ def expected_baseline_binding(data: Baseline, group_map_sha256: str) -> dict[str
     }
 
 
+def _validate_packaged_trust_roots(
+    *,
+    package_files: dict[str, bytes],
+    baseline: Baseline,
+    group_map_rows: list[dict[str, Any]],
+    group_map_sha256: str,
+    final_commit: str,
+    evidence_cutoff: str,
+    classification_rows: list[dict[str, Any]],
+    fix_rows: list[dict[str, Any]],
+    test_rows: list[dict[str, Any]],
+    pre_fix: dict[str, Any],
+    closure_rows: list[dict[str, Any]],
+    documentation: dict[str, Any],
+    semantic_bytes: bytes,
+    matrices_bytes: bytes,
+    verdicts: dict[str, Any],
+    residuals: list[dict[str, Any]],
+) -> tuple[dict[str, str], dict[str, str]]:
+    def archived(relative: str, *, label: str) -> bytes:
+        try:
+            return package_files[relative]
+        except KeyError as error:
+            raise ContractError(f"package trust root: missing {label}") from error
+
+    baseline_manifest = archived(
+        BASELINE_MANIFEST_ARCHIVE_PATH,
+        label="baseline manifest snapshot",
+    )
+    if baseline_manifest != baseline.manifest_bytes:
+        raise ContractError("package trust root: baseline manifest snapshot is not authoritative")
+
+    group_map_bytes = archived(GROUP_MAP_ARCHIVE_PATH, label="fix-group map snapshot")
+    if sha256_bytes(group_map_bytes) != group_map_sha256:
+        raise ContractError("package trust root: fix-group map snapshot hash changed")
+    archived_group_rows = load_jsonl_bytes(group_map_bytes, label="archived fix-group map")
+    if archived_group_rows != group_map_rows:
+        raise ContractError("package trust root: fix-group map snapshot content changed")
+
+    handoff_bytes = archived(HANDOFF_MANIFEST_ARCHIVE_PATH, label="handoff manifest snapshot")
+    handoff = load_json_bytes(handoff_bytes, label="archived handoff manifest")
+    exact_keys(
+        handoff,
+        {"schema_version", "evidence_cutoff_at", "candidate_final_commit", "files"},
+        label="archived handoff manifest",
+    )
+    if (
+        handoff["schema_version"] != 1
+        or handoff["candidate_final_commit"] != final_commit
+        or handoff["evidence_cutoff_at"] != evidence_cutoff
+    ):
+        raise ContractError("package trust root: archived handoff identity/cutoff changed")
+    handoff_entries = exact_keys(handoff["files"], HANDOFF_FILE_KEYS, label="archived handoff files")
+    handoff_payloads: dict[str, bytes] = {}
+    handoff_hashes: dict[str, str] = {}
+    for key in HANDOFF_FILE_KEYS:
+        entry = exact_keys(
+            handoff_entries[key],
+            {"path", "sha256"},
+            label=f"archived handoff file {key}",
+        )
+        safe_relative(entry["path"], label=f"archived handoff file {key} path")
+        if not isinstance(entry["sha256"], str) or SHA256_RE.fullmatch(entry["sha256"]) is None:
+            raise ContractError(f"package trust root: invalid archived SHA-256 for {key}")
+        payload = archived(HANDOFF_ARCHIVE_PATHS[key], label=f"handoff file {key}")
+        digest = sha256_bytes(payload)
+        if digest != entry["sha256"]:
+            raise ContractError(f"package trust root: archived handoff file hash changed for {key}")
+        handoff_payloads[key] = payload
+        handoff_hashes[key] = digest
+
+    source_classification = load_jsonl_bytes(
+        handoff_payloads["postfix_classification_ledger"],
+        label="archived classification",
+    )
+    if sorted(source_classification, key=lambda row: row["id"]) != classification_rows:
+        raise ContractError("package trust root: classification is not projected from archived input")
+    source_fix = load_jsonl_bytes(handoff_payloads["fix_group_ledger"], label="archived fix groups")
+    if sorted(source_fix, key=lambda row: row["group_id"]) != fix_rows:
+        raise ContractError("package trust root: fix groups are not projected from archived input")
+
+    source_tests = load_jsonl_bytes(
+        handoff_payloads["test_receipt_registry"],
+        label="archived test receipts",
+    )
+    source_test_by_id = _unique_rows(source_tests, "receipt_id", label="archived test receipts")
+    packaged_test_by_id = _unique_rows(test_rows, "receipt_id", label="packaged test receipts")
+    if set(source_test_by_id) != set(packaged_test_by_id):
+        raise ContractError("package trust root: test receipt identity projection changed")
+    normalized_tests: list[dict[str, Any]] = []
+    for receipt_id in sorted(source_test_by_id):
+        row = copy.deepcopy(source_test_by_id[receipt_id])
+        row["log"]["path"] = f"evidence/test/logs/{receipt_id}.log"
+        normalized_tests.append(row)
+    if normalized_tests != test_rows:
+        raise ContractError("package trust root: test receipts are not projected from archived input")
+
+    source_pre_fix = load_json_bytes(
+        handoff_payloads["pre_fix_negative_receipt"],
+        label="archived pre-fix receipt",
+    )
+    source_pre_fix = copy.deepcopy(source_pre_fix)
+    source_pre_fix["executions"] = sorted(
+        source_pre_fix["executions"], key=lambda row: row["group_id"]
+    )
+    for row in source_pre_fix["executions"]:
+        row["log"]["path"] = f"evidence/test/pre-fix/{row['group_id']}.log"
+    if source_pre_fix != pre_fix:
+        raise ContractError("package trust root: pre-fix receipt is not projected from archived input")
+
+    source_closures = load_jsonl_bytes(
+        handoff_payloads["local_condition_closure"],
+        label="archived local closures",
+    )
+    if sorted(source_closures, key=lambda row: row["id"]) != closure_rows:
+        raise ContractError("package trust root: local closures are not projected from archived input")
+    source_documentation = load_json_bytes(
+        handoff_payloads["documentation_alignment_receipt"],
+        label="archived documentation receipt",
+    )
+    if source_documentation != documentation:
+        raise ContractError("package trust root: documentation receipt projection changed")
+    if handoff_payloads["semantic_completion_receipt"] != semantic_bytes:
+        raise ContractError("package trust root: semantic receipt bytes changed")
+    if handoff_payloads["required_matrices"] != matrices_bytes:
+        raise ContractError("package trust root: required matrix bytes changed")
+    source_verdicts = load_json_bytes(handoff_payloads["four_verdicts"], label="archived verdicts")
+    if source_verdicts != verdicts:
+        raise ContractError("package trust root: verdict projection changed")
+    source_residuals = load_jsonl_bytes(
+        handoff_payloads["provider_live_residuals"],
+        label="archived provider/live residuals",
+    )
+    if sorted(source_residuals, key=lambda row: row["id"]) != residuals:
+        raise ContractError("package trust root: provider/live residual projection changed")
+
+    expected_inputs = {
+        "baseline_manifest": baseline.manifest_sha256,
+        "security_fix_group_map": group_map_sha256,
+        "handoff_manifest": sha256_bytes(handoff_bytes),
+        **{f"handoff:{key}": digest for key, digest in sorted(handoff_hashes.items())},
+    }
+
+    tool_root = Path(__file__).parent
+    expected_tools: dict[str, str] = {}
+    for name in TOOL_SOURCE_NAMES:
+        current = read_regular_bytes(tool_root / name, label=f"current tool source {name}")
+        packaged = archived(TOOL_SOURCE_PACKAGE_PATHS[name], label=f"tool source {name}")
+        if packaged != current:
+            raise ContractError(f"package trust root: packaged tool source differs for {name}")
+        expected_tools[name] = sha256_bytes(packaged)
+    if package_files["schemas/handoff-v1.schema.json"] != package_files[
+        TOOL_SOURCE_PACKAGE_PATHS["handoff-v1.schema.json"]
+    ]:
+        raise ContractError("package trust root: handoff schema copies differ")
+    return expected_inputs, expected_tools
+
+
 def validate_package(
     *,
     package: Path,
@@ -1726,7 +1945,7 @@ def validate_package(
     package_snapshot = validate_manifest_snapshot(
         package,
         exact=True,
-        required=PACKAGE_REQUIRED_FILES - {"MANIFEST.sha256"},
+        required=PACKAGE_STATIC_FILES - {"MANIFEST.sha256"},
     )
     manifest = package_snapshot.rows
     package_files = package_snapshot.files
@@ -1748,7 +1967,7 @@ def validate_package(
         return load_jsonl_bytes(payload, label=label)
 
     baseline_data = _validate_baseline(baseline)
-    group_rows, group_hash = _validate_group_map(group_map, baseline_data.reportable_ids)
+    group_rows, group_hash, _ = _validate_group_map(group_map, baseline_data.reportable_ids)
     candidate_identity = json_at("receipts/candidate_identity.json", label="candidate identity")
     final_commit, final_tree = _validate_candidate(
         candidate_repo,
@@ -1780,6 +1999,13 @@ def validate_package(
     fix_rows = jsonl_at("evidence/remediation/fix_group_ledger_v1.jsonl", label="packaged fix groups")
     test_rows = jsonl_at("evidence/test/test_receipt_registry_v1.jsonl", label="packaged test receipts")
     pre_fix = json_at("evidence/test/pre_fix_negative_receipt.json", label="packaged pre-fix receipt")
+    expected_paths = set(expected_package_payload_paths(test_rows, pre_fix))
+    if set(manifest) != expected_paths:
+        missing = sorted(expected_paths - set(manifest))
+        extra = sorted(set(manifest) - expected_paths)
+        raise ContractError(
+            f"package allowlist: missing or extra files (missing={missing}, extra={extra})"
+        )
     closure_rows = jsonl_at(
         "evidence/remediation/local_condition_closure.jsonl",
         label="packaged local closures",
@@ -1799,6 +2025,24 @@ def validate_package(
     evidence_cutoff = verdicts.get("evidence_cutoff_at")
     if not isinstance(evidence_cutoff, str):
         raise ContractError("package: verdict cutoff is missing")
+    expected_input_hashes, expected_tool_hashes = _validate_packaged_trust_roots(
+        package_files=package_files,
+        baseline=baseline_data,
+        group_map_rows=group_rows,
+        group_map_sha256=group_hash,
+        final_commit=final_commit,
+        evidence_cutoff=evidence_cutoff,
+        classification_rows=classification_rows,
+        fix_rows=fix_rows,
+        test_rows=test_rows,
+        pre_fix=pre_fix,
+        closure_rows=closure_rows,
+        documentation=documentation,
+        semantic_bytes=semantic_bytes,
+        matrices_bytes=matrices_bytes,
+        verdicts=verdicts,
+        residuals=residuals,
+    )
     equivalence, _, _, counts = _validate_dataset(
         baseline=baseline_data,
         group_map_rows=group_rows,
@@ -1862,8 +2106,22 @@ def validate_package(
     }:
         raise ContractError("package: replay receipt is inconsistent")
     build = json_at("receipts/build_receipt.json", label="build receipt")
-    if not isinstance(build, dict):
-        raise ContractError("package: build receipt is malformed")
+    exact_keys(
+        build,
+        {
+            "schema_version",
+            "tool",
+            "candidate_final_commit",
+            "candidate_final_tree",
+            "evidence_cutoff_at",
+            "semantic_receipt_sha256",
+            "core_index_sha256",
+            "counts",
+            "input_sha256",
+            "tool_source_sha256",
+        },
+        label="build receipt",
+    )
     if (
         build.get("schema_version") != 1
         or build.get("tool") != "ultra-postfix-evidence-builder"
@@ -1873,8 +2131,10 @@ def validate_package(
         or build.get("semantic_receipt_sha256") != semantic_receipt_sha256
         or build.get("core_index_sha256") != core_hash
         or build.get("counts") != counts
+        or build.get("input_sha256") != expected_input_hashes
+        or build.get("tool_source_sha256") != expected_tool_hashes
     ):
-        raise ContractError("package: build receipt is inconsistent")
+        raise ContractError("package: build receipt trust root/input SHA/tool source is inconsistent")
     return {
         "ok": True,
         "package_manifest_sha256": sha256_bytes(package_snapshot.manifest_bytes),

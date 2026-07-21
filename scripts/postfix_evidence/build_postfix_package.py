@@ -19,7 +19,6 @@ from scripts.postfix_evidence.common import (
     read_regular_bytes,
     scan_secret_bytes,
     sha256_bytes,
-    sha256_file,
     tree_index,
     write_bytes,
     write_json,
@@ -27,8 +26,15 @@ from scripts.postfix_evidence.common import (
     write_manifest,
 )
 from scripts.postfix_evidence.validate_postfix_package import (
+    BASELINE_MANIFEST_ARCHIVE_PATH,
+    GROUP_MAP_ARCHIVE_PATH,
+    HANDOFF_ARCHIVE_PATHS,
+    HANDOFF_MANIFEST_ARCHIVE_PATH,
+    TOOL_SOURCE_NAMES,
+    TOOL_SOURCE_PACKAGE_PATHS,
     ValidatedInputs,
     _derive_finding_map,
+    expected_package_payload_paths,
     expected_baseline_binding,
     validate_package,
     validate_source_inputs,
@@ -93,7 +99,11 @@ def _render_readme(data: ValidatedInputs) -> bytes:
     return "\n".join(lines).encode("utf-8")
 
 
-def _render_core(destination: Path, data: ValidatedInputs) -> None:
+def _render_core(
+    destination: Path,
+    data: ValidatedInputs,
+    tool_sources: dict[str, bytes],
+) -> None:
     write_bytes(destination / "README.md", _render_readme(data))
     write_json(
         destination / "baseline/baseline_binding.json",
@@ -105,11 +115,17 @@ def _render_core(destination: Path, data: ValidatedInputs) -> None:
         data.baseline.registry,
     )
     write_json(destination / "schemas/matrix-schema-v1.json", data.baseline.matrix_schema)
-    schema_path = Path(__file__).with_name("handoff-v1.schema.json")
     write_bytes(
         destination / "schemas/handoff-v1.schema.json",
-        read_regular_bytes(schema_path, label="handoff schema"),
+        tool_sources["handoff-v1.schema.json"],
     )
+    write_bytes(destination / BASELINE_MANIFEST_ARCHIVE_PATH, data.baseline.manifest_bytes)
+    write_bytes(destination / GROUP_MAP_ARCHIVE_PATH, data.group_map_bytes)
+    write_bytes(destination / HANDOFF_MANIFEST_ARCHIVE_PATH, data.handoff_bytes)
+    for key, relative in HANDOFF_ARCHIVE_PATHS.items():
+        write_bytes(destination / relative, data.handoff_file_bytes[key])
+    for name, relative in TOOL_SOURCE_PACKAGE_PATHS.items():
+        write_bytes(destination / relative, tool_sources[name])
 
     write_jsonl(
         destination / "evidence/remediation/finding_classification_ledger.jsonl",
@@ -162,18 +178,20 @@ def _render_core(destination: Path, data: ValidatedInputs) -> None:
     )
 
 
-def _tool_source_hashes() -> dict[str, str]:
-    names = (
-        "build_postfix_package.py",
-        "common.py",
-        "validate_postfix_package.py",
-        "handoff-v1.schema.json",
-    )
+def _tool_source_snapshots() -> dict[str, bytes]:
     root = Path(__file__).parent
-    return {name: sha256_file(root / name, label=f"tool source {name}") for name in names}
+    return {
+        name: read_regular_bytes(root / name, label=f"tool source {name}")
+        for name in TOOL_SOURCE_NAMES
+    }
 
 
-def _build_receipt(data: ValidatedInputs, core_hash: str, semantic_sha256: str) -> dict[str, Any]:
+def _build_receipt(
+    data: ValidatedInputs,
+    core_hash: str,
+    semantic_sha256: str,
+    tool_sources: dict[str, bytes],
+) -> dict[str, Any]:
     return {
         "schema_version": 1,
         "tool": "ultra-postfix-evidence-builder",
@@ -189,7 +207,9 @@ def _build_receipt(data: ValidatedInputs, core_hash: str, semantic_sha256: str) 
             "handoff_manifest": data.handoff_sha256,
             **{f"handoff:{key}": value for key, value in sorted(data.handoff_file_sha256.items())},
         },
-        "tool_source_sha256": _tool_source_hashes(),
+        "tool_source_sha256": {
+            name: sha256_bytes(payload) for name, payload in sorted(tool_sources.items())
+        },
     }
 
 
@@ -236,12 +256,15 @@ def build_package(
         scan_secret_bytes(payload, label=f"test log {receipt_id}")
     for group_id, payload in sorted(data.pre_fix_log_bytes.items()):
         scan_secret_bytes(payload, label=f"pre-fix log {group_id}")
+    tool_sources = _tool_source_snapshots()
+    for name, payload in sorted(tool_sources.items()):
+        scan_secret_bytes(payload, label=f"tool source {name}")
     replay_a = Path(tempfile.mkdtemp(prefix=".postfix-replay-a-", dir=output.parent))
     replay_b = Path(tempfile.mkdtemp(prefix=".postfix-replay-b-", dir=output.parent))
     published = False
     try:
-        _render_core(replay_a, data)
-        _render_core(replay_b, data)
+        _render_core(replay_a, data, tool_sources)
+        _render_core(replay_b, data, tool_sources)
         index_a = tree_index(replay_a)
         index_b = tree_index(replay_b)
         if index_a != index_b:
@@ -253,10 +276,21 @@ def build_package(
             "byte_identical": True,
             "core_index_sha256": core_hash,
         }
-        build_receipt = _build_receipt(data, core_hash, semantic_receipt_sha256)
+        build_receipt = _build_receipt(
+            data,
+            core_hash,
+            semantic_receipt_sha256,
+            tool_sources,
+        )
         for replay in (replay_a, replay_b):
             write_json(replay / "receipts/replay_receipt.json", replay_receipt)
             write_json(replay / "receipts/build_receipt.json", build_receipt)
+            actual_paths = set(tree_index(replay))
+            expected_paths = set(
+                expected_package_payload_paths(data.test_receipt_rows, data.pre_fix_receipt)
+            )
+            if actual_paths != expected_paths:
+                raise ContractError("package allowlist: builder produced missing or extra files")
             write_manifest(replay)
         if tree_index(replay_a) != tree_index(replay_b):
             raise ContractError("replay: complete package builds are not byte-identical")
