@@ -110,8 +110,7 @@ export function evaluateRuntimeIsolation(config, options = {}) {
         const definition = object(config?.secrets?.[source]);
         return !source.startsWith(`${workloadId}-`)
           || definition.external !== true
-          || typeof definition.name !== "string"
-          || !definition.name.endsWith(`_${source}`);
+          || definition.name !== `${projectName}_${source}`;
       });
     record(`workload-owned-secrets-${name}`, foreignSecrets.length === 0, `${name} foreignSecrets=${foreignSecrets.join(",") || "none"}`);
     const mounts = volumes(service);

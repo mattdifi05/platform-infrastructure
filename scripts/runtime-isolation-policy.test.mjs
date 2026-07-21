@@ -174,6 +174,7 @@ test("rejects foreign external secret aliases at runtime", () => {
   for (const definition of [
     { external: true },
     { external: true, name: "foreign_api_key" },
+    { external: true, name: "attacker_example-app-api-key" },
   ]) {
     const config = fixture();
     config.secrets = { "example-app-api-key": definition };
