@@ -133,6 +133,10 @@ docker run --rm --network none --user "$(id -u):$(id -g)" --entrypoint ruby \
   -w "$INFRA_ROOT" \
   "$OPS_IMAGE" scripts/hosted-workload-source-policy.rb --lock "$resolved"
 
+[[ ! -L "$OUTPUT" && ( ! -e "$OUTPUT" || -f "$OUTPUT" ) ]] || {
+  printf '%s\n' "Hosted workload activation output must be absent or a regular non-symlink file: $OUTPUT" >&2
+  exit 1
+}
 install -m 0600 "$resolved" "$OUTPUT"
 
 COMPOSE_ENV_FILE="$ENV_FILE" COMPOSE_PROJECT_NAME="$PROJECT_NAME" HOSTED_WORKLOAD_LOCK= \
