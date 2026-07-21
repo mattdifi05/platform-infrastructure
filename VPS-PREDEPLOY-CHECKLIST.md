@@ -102,7 +102,7 @@ Use this checklist on the VPS Ubuntu LTS VPS before exposing public traffic.
 - [ ] The same authenticated evidence arguments passed with `external-uptime-check --envFile .env ... --requireProviderEvidence` plus a direct public probe.
 - [ ] `sh ./scripts/functional-health-check.sh` passed and the runtime fingerprint matched a clean deployed commit and every Compose service config hash.
 - [ ] `sh ./scripts/failure-tests.sh --confirmServiceStop` passed in staging.
-- [ ] `sh ./scripts/load-benchmark.sh --profiles 50,100,500 --url https://api.example.com/health --requirePublicTarget --requireEdgeEvidence --expectedEdgeProvider cloudflare` completed with `status=passed`, classified the target as public, recorded edge evidence, and archived `reports/load/`.
+- [ ] The 50/100/500 public load benchmark completed with `status=passed` and authenticated provider evidence bound to its exact URL/request/status/current candidate; origin-controlled response headers were retained only as diagnostics, and `reports/load/` was archived.
 - [ ] `sh ./scripts/production-preflight.sh` passed.
 - [ ] `sh ./scripts/github-branch-protection.sh --repo OWNER/REPO --branch main --dryRun` reviewed.
 - [ ] `GITHUB_TOKEN=... sh ./scripts/github-branch-protection.sh --repo OWNER/REPO --branch main --apply` and `--verifyRemote` completed, or equivalent branch protection is proven in GitHub.

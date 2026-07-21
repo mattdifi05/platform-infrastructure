@@ -382,7 +382,7 @@ sh ./scripts/fault-injection-tests.sh
 sh ./scripts/failure-tests.sh --confirmServiceStop --targets redis,postgres,minio,keycloak,nats,waf,platform-alert-dispatcher,backup-scheduler
 sh ./scripts/infra-ops.sh load-profile --durationSeconds 60 --targetRps 8 --concurrency 8 --maxP95Ms 1000
 sh ./scripts/load-benchmark.sh --profiles 50,100,500 --durationSeconds 60 --perUserRps 0.2 --maxP95Ms 1000
-sh ./scripts/load-benchmark.sh --profiles 50,100,500 --url https://api.example.com/health --requirePublicTarget --requireEdgeEvidence --expectedEdgeProvider cloudflare
+sh ./scripts/load-benchmark.sh --profiles 50,100,500 --url 'https://api.example.com/health?proof=unique-release-nonce' --requirePublicTarget --requireEdgeEvidence --expectedEdgeProvider cloudflare --edgeProviderEvidence ./monitoring/edge-traversal-provider.production.json --edgeProviderEvidenceAttestation online --edgeProviderEvidenceRepository OWNER/REPO --edgeProviderEvidenceWorkflow OWNER/REPO/.github/workflows/provider-evidence.yml --edgeProviderEvidenceSourceDigest FULL_GIT_SHA --edgeProviderEvidenceSourceRef refs/heads/main
 sh ./scripts/infra-ops.sh chaos-profile --confirmChaos
 ```
 
@@ -394,7 +394,7 @@ Acceptance criteria:
 - Control Center p95 stays under the declared threshold for the selected profile.
 - `failure-tests` writes a non-sensitive detection/recovery report under `reports/failure-tests/`.
 - `load-benchmark` writes JSON/Markdown reports under `reports/load/`, including Docker CPU/RAM snapshots before and after each profile.
-- The production `load-benchmark` run must target the public API URL, classify the target as public, record edge/CDN evidence and finish with `status=passed`. With Cloudflare enabled, use `--requireEdgeEvidence --expectedEdgeProvider cloudflare`; otherwise document the reviewed provider exception before go-live. Failed preflights or profiles still write diagnostic reports under `reports/load/`, but they do not satisfy production go/no-go.
+- The production `load-benchmark` run must target the public API URL, classify the target as public, verify fresh authenticated provider evidence bound to the exact URL/request/status/current candidate, and finish with `status=passed`. Cloudflare response headers are diagnostic only and never prove traversal. Without the attested provider artifact the check remains `EXTERNAL-PENDING`. Failed preflights or profiles still write diagnostic reports under `reports/load/`, but they do not satisfy production go/no-go.
 
 The load profile uses a bounded synthetic `X-Forwarded-For` client pool by default so the performance probe does not collide with the security rate-limit budget consumed by smoke and E2E checks. Use `--preserveClientIp` when deliberately testing one-client throttling behavior.
 
@@ -860,7 +860,7 @@ in `governance/github-environments.json`; `--verifyRemote` rejects wrong,
 missing or additional reviewers as well as weaker self-review/wait/branch rules.
 The GitHub Actions runtime check only verifies secret presence and variable
 formats: it expects staging variable `DAST_TARGET`, production secret
-`DEPLOY_SSH_KEY`, production secret `EXTERNAL_UPTIME_PROVIDER_EVIDENCE_JSON`,
+`DEPLOY_SSH_KEY`, production secrets `EXTERNAL_UPTIME_PROVIDER_EVIDENCE_JSON` and `EDGE_PROVIDER_EVIDENCE_JSON`,
 production secret `CLOUDFLARE_API_TOKEN`, and production variables
 `DEPLOY_REMOTE`, `DEPLOY_REMOTE_DIR`, `DEPLOY_SSH_PORT`,
 `VPS_HARDENED_SSH_PORT`, `PUBLIC_API_HEALTH_URL` plus `CLOUDFLARE_ACCOUNT_ID`.

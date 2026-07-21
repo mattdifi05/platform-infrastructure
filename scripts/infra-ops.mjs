@@ -35,6 +35,7 @@ import { canonicalVpsTopologyPlan, parseCanonicalVpsTopology } from "./canonical
 import { candidateIdentityMatches, createCandidateIdentity, evaluateCandidateReportBinding, normalizeRepositoryIdentity } from "./candidate-identity.mjs";
 import { verifyTrustedEvidenceReports } from "./evidence-trust-envelope.mjs";
 import { verifyOwnerPinnedBundleManifest } from "./evidence-bundle-anchor.mjs";
+import { validateEdgeProviderEvidence } from "./edge-provider-evidence.mjs";
 import {
   assertExactBranchProtection,
   assertExactGithubEnvironment,
@@ -2711,6 +2712,8 @@ function infraTestingHygiene() {
     "scripts/evidence-bundle-anchor.test.mjs",
     "scripts/vps-evidence-request.mjs",
     "scripts/vps-evidence-request.test.mjs",
+    "scripts/edge-provider-evidence.mjs",
+    "scripts/edge-provider-evidence.test.mjs",
   ];
   for (const file of checkFiles) {
     run(process.execPath, ["--check", file], { cwd: infraRoot });
@@ -2733,6 +2736,7 @@ function infraTestingHygiene() {
   run(process.execPath, ["--test", "scripts/evidence-trust-envelope.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/evidence-bundle-anchor.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["scripts/vps-evidence-request.test.mjs"], { cwd: infraRoot });
+  run(process.execPath, ["--test", "scripts/edge-provider-evidence.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "platform-alert-dispatcher/server.test.mjs"], { cwd: infraRoot });
   const shellFiles = fs.readdirSync(path.join(infraRoot, "scripts")).filter((name) => name.endsWith(".sh")).sort();
   for (const file of shellFiles) {
@@ -3730,8 +3734,82 @@ function detectEdgeProvider(headers = {}) {
   return null;
 }
 
-async function loadTargetEvidence({ url, mode, requirePublicTarget, requireEdgeEvidence, expectedEdgeProvider, timeoutMs }) {
+function authenticatedEdgeProviderEvidence({ evidencePath, expectedUrl, expectedProvider, currentCandidateId, observedStatus }) {
+  const resolvedEvidencePath = path.resolve(String(evidencePath));
+  const noFollow = fs.constants.O_NOFOLLOW ?? 0;
+  let descriptor = null;
+  let evidenceBytes = null;
+  try {
+    descriptor = fs.openSync(resolvedEvidencePath, fs.constants.O_RDONLY | noFollow);
+    const before = fs.fstatSync(descriptor);
+    if (!before.isFile() || before.size <= 0 || before.size > 1024 * 1024) {
+      fail("Edge provider evidence must be a regular JSON file no larger than 1 MiB.");
+    }
+    evidenceBytes = Buffer.allocUnsafe(before.size);
+    let offset = 0;
+    while (offset < evidenceBytes.length) {
+      const read = fs.readSync(descriptor, evidenceBytes, offset, evidenceBytes.length - offset, offset);
+      if (read <= 0) fail("Edge provider evidence was truncated while reading.");
+      offset += read;
+    }
+    const after = fs.fstatSync(descriptor);
+    if (before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size || before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs) {
+      fail("Edge provider evidence changed while reading.");
+    }
+  } finally {
+    if (descriptor !== null) fs.closeSync(descriptor);
+  }
+  let evidence = null;
+  try {
+    evidence = JSON.parse(evidenceBytes.toString("utf8"));
+  } catch (error) {
+    fail(`Invalid edge provider evidence JSON: ${String(error?.message ?? error)}`);
+  }
+  const attestationMode = String(argv.edgeProviderEvidenceAttestation ?? "");
+  if (!new Set(["online", "offline"]).has(attestationMode)) {
+    fail("Edge provider evidence requires --edgeProviderEvidenceAttestation online or offline.");
+  }
+  const bundle = argv.edgeProviderEvidenceBundle ?? null;
+  const trustedRoot = argv.edgeProviderEvidenceTrustedRoot ?? null;
+  if (attestationMode === "online" && (bundle || trustedRoot)) {
+    fail("Online edge provider evidence verification must not accept local bundle or trust-root overrides.");
+  }
+  if (attestationMode === "offline" && (!bundle || !trustedRoot)) {
+    fail("Offline edge provider evidence verification requires both attestation bundle and trusted root.");
+  }
+  const attestationOptions = providerEvidenceAttestationOptions({
+    enabled: true,
+    evidencePath: resolvedEvidencePath,
+    evidenceDigest: crypto.createHash("sha256").update(evidenceBytes).digest("hex"),
+    repository: argv.edgeProviderEvidenceRepository ?? process.env.GITHUB_REPOSITORY,
+    signerWorkflow: argv.edgeProviderEvidenceWorkflow,
+    sourceDigest: argv.edgeProviderEvidenceSourceDigest,
+    sourceRef: argv.edgeProviderEvidenceSourceRef,
+    bundle,
+    trustedRoot,
+  });
+  const authentication = verifyGithubAttestation({
+    ...attestationOptions,
+    predicateType: SLSA_PROVENANCE_V1,
+    certOidcIssuer: GITHUB_ACTIONS_OIDC_ISSUER,
+  });
+  const validated = validateEdgeProviderEvidence({
+    evidence,
+    authentication,
+    expectedUrl,
+    expectedProvider,
+    currentCandidateId,
+    observedStatus,
+    maxAgeMinutes: Number(argv.maxEdgeProviderEvidenceAgeMinutes ?? 60),
+  });
+  return { ...validated, evidenceSha256: attestationOptions.expectedSubjectDigest };
+}
+
+async function loadTargetEvidence({ url, mode, requirePublicTarget, requireEdgeEvidence, expectedEdgeProvider, timeoutMs, edgeProviderEvidencePath, currentCandidateId }) {
   if (mode === "internal") {
+    if (requireEdgeEvidence || edgeProviderEvidencePath) {
+      fail("Authenticated edge traversal evidence cannot be satisfied by an internal load target.");
+    }
     return {
       mode,
       url,
@@ -3755,15 +3833,24 @@ async function loadTargetEvidence({ url, mode, requirePublicTarget, requireEdgeE
   const started = performance.now();
   const response = await request("GET", url, { timeoutMs });
   const latencyMs = Math.round(performance.now() - started);
-  const edgeProvider = detectEdgeProvider(response.headers);
-  const providerMatched = expectedEdgeProvider === "any"
-    ? Boolean(edgeProvider)
-    : expectedEdgeProvider === "none"
-      ? true
-      : edgeProvider === expectedEdgeProvider;
-  if (requireEdgeEvidence && !providerMatched) {
-    fail(`Load benchmark edge evidence missing or mismatched: expected=${expectedEdgeProvider}, observed=${edgeProvider ?? "none"}.`);
+  const headerDiagnostics = {
+    detectedProvider: detectEdgeProvider(response.headers),
+    headers: selectedEdgeHeaders(response.headers),
+  };
+  let providerEvidence = null;
+  let externalPending = null;
+  if (edgeProviderEvidencePath) {
+    providerEvidence = authenticatedEdgeProviderEvidence({
+      evidencePath: edgeProviderEvidencePath,
+      expectedUrl: url,
+      expectedProvider: expectedEdgeProvider,
+      currentCandidateId,
+      observedStatus: response.status,
+    });
+  } else if (requireEdgeEvidence) {
+    externalPending = "EXTERNAL-PENDING: authenticated edge provider traversal evidence was not supplied.";
   }
+  const providerMatched = providerEvidence?.verified === true;
 
   return {
     mode,
@@ -3773,13 +3860,17 @@ async function loadTargetEvidence({ url, mode, requirePublicTarget, requireEdgeE
     public: publicTarget,
     publicRequired: requirePublicTarget,
     edgeRequired: requireEdgeEvidence,
+    error: externalPending,
     edge: {
       status: response.status,
       latencyMs,
-      provider: edgeProvider,
+      provider: providerEvidence?.provider ?? null,
       expectedProvider: expectedEdgeProvider,
       providerMatched,
-      headers: selectedEdgeHeaders(response.headers),
+      authenticated: providerMatched,
+      providerEvidence,
+      headerDiagnostics,
+      externalPending,
     },
   };
 }
@@ -3794,7 +3885,8 @@ function writeLoadBenchmarkReport(payload) {
     `Status: ${payload.status}`,
     `Target: ${payload.url}`,
     `Target public: ${payload.target?.public ? "yes" : "no"}`,
-    `Edge provider: ${payload.target?.edge?.provider ?? "n/a"}`,
+    `Authenticated edge provider: ${payload.target?.edge?.authenticated ? payload.target.edge.provider : "EXTERNAL-PENDING"}`,
+    `Header diagnostic only: ${payload.target?.edge?.headerDiagnostics?.detectedProvider ?? "none"}`,
     "",
     "| Users | Requests | Concurrency | Avg ms | P95 ms | Errors |",
     "| ---: | ---: | ---: | ---: | ---: | ---: |",
@@ -3824,9 +3916,17 @@ async function loadBenchmark() {
   const requirePublicTarget = booleanFlag(argv.requirePublicTarget);
   const requireEdgeEvidence = booleanFlag(argv.requireEdgeEvidence);
   const expectedEdgeProvider = String(argv.expectedEdgeProvider ?? "cloudflare").toLowerCase();
+  const edgeProviderEvidencePath = argv.edgeProviderEvidence ? path.resolve(String(argv.edgeProviderEvidence)) : null;
   const preflightTimeoutMs = positiveInteger(argv.preflightTimeoutMs ?? 10000, "preflightTimeoutMs", 1000);
   const issues = [];
   let target = null;
+  const candidateStartEvidence = requireEdgeEvidence || edgeProviderEvidencePath
+    ? currentCandidateIdentityEvidence({
+      envFile: argv.envFile ?? path.join(infraRoot, ".env.vps.example"),
+      projectName: argv.project ?? argv.projectName,
+      repository: argv.repository ?? argv.repo,
+    })
+    : { candidate: null, error: null };
   log("==> Load benchmark");
   try {
     target = await loadTargetEvidence({
@@ -3836,7 +3936,10 @@ async function loadBenchmark() {
       requireEdgeEvidence,
       expectedEdgeProvider,
       timeoutMs: preflightTimeoutMs,
+      edgeProviderEvidencePath,
+      currentCandidateId: candidateStartEvidence.candidate?.id,
     });
+    if (target.error) issues.push(`target-preflight: ${target.error}`);
   } catch (error) {
     const message = String(error?.message ?? error);
     issues.push(`target-preflight: ${message}`);
@@ -3874,11 +3977,31 @@ async function loadBenchmark() {
     }
   }
 
+  const candidateEndEvidence = requireEdgeEvidence || edgeProviderEvidencePath
+    ? currentCandidateIdentityEvidence({
+      envFile: argv.envFile ?? path.join(infraRoot, ".env.vps.example"),
+      projectName: argv.project ?? argv.projectName,
+      repository: argv.repository ?? argv.repo,
+    })
+    : { candidate: null, error: null };
+  const candidateStable = !(requireEdgeEvidence || edgeProviderEvidencePath) || Boolean(
+    candidateStartEvidence.candidate?.trusted
+    && candidateEndEvidence.candidate?.trusted
+    && candidateIdentityMatches(candidateStartEvidence.candidate, candidateEndEvidence.candidate),
+  );
+  if (!candidateStable) {
+    issues.push(`candidate-binding: load benchmark candidate changed or was unavailable: ${candidateStartEvidence.error ?? candidateEndEvidence.error ?? "identity-mismatch"}`);
+  }
+
   const payload = {
     generatedAt: new Date().toISOString(),
     status: issues.length ? "failed" : "passed",
     url: targetUrl,
     target,
+    candidate: candidateStartEvidence.candidate,
+    candidateEnd: candidateEndEvidence.candidate,
+    candidateStable,
+    candidateError: candidateStartEvidence.error ?? candidateEndEvidence.error,
     benchmark: {
       durationSeconds,
       perUserRps,
@@ -7660,12 +7783,13 @@ function goNoGoRemediation(check) {
     "public-load-benchmark": {
       actions: [
         "Run the 50/100/500 benchmark against the public HTTPS API through the CDN/edge path.",
-        "With Cloudflare enabled, require Cloudflare edge evidence in the target preflight.",
+        "Obtain fresh provider-observed traversal evidence for a unique request URL and attest the exact JSON artifact with the approved GitHub workflow.",
+        "Treat response headers as diagnostics only; they cannot satisfy the edge gate.",
       ],
       commands: [
-        "sh ./scripts/load-benchmark.sh --url https://api.<domain>/health --profiles 50,100,500 --requirePublicTarget --requireEdgeEvidence --expectedEdgeProvider cloudflare",
+        "sh ./scripts/load-benchmark.sh --url 'https://api.<domain>/health?proof=<unique-release-nonce>' --profiles 50,100,500 --requirePublicTarget --requireEdgeEvidence --expectedEdgeProvider cloudflare --edgeProviderEvidence /secure/edge-provider-evidence.json --edgeProviderEvidenceAttestation online --edgeProviderEvidenceRepository OWNER/REPO --edgeProviderEvidenceWorkflow OWNER/REPO/.github/workflows/provider-evidence.yml --edgeProviderEvidenceSourceDigest <full-sha> --edgeProviderEvidenceSourceRef refs/heads/main",
       ],
-      evidence: "reports/load/load-benchmark-*.json with status=passed, public target evidence and required profiles",
+      evidence: "reports/load/load-benchmark-*.json with status=passed, current-candidate binding, authenticated provider evidence and required profiles",
     },
     "release-evidence-and-rollback": {
       actions: [
@@ -7768,6 +7892,7 @@ const evidenceBundleDocPaths = [
   "governance/github-environments.json",
   "monitoring/external-uptime.example.json",
   "monitoring/external-uptime-provider.example.json",
+  "monitoring/edge-traversal-provider.example.json",
   "cloudflare/README.md",
   "cloudflare/access-admin.example.json",
   "cloudflare/from-zero.example.json",
@@ -8684,9 +8809,14 @@ async function productionGoNoGo() {
     const edgeEvidence = !policy.requireLoadEdgeEvidence || (
       target.edgeRequired === true
       && target.edge?.providerMatched === true
+      && target.edge?.authenticated === true
       && Boolean(target.edge?.provider)
+      && target.edge?.providerEvidence?.verified === true
+      && target.edge?.providerEvidence?.candidateId === payload.candidate?.id
+      && target.edge?.providerEvidence?.authentication?.verified === true
+      && target.edge?.providerEvidence?.authentication?.kind === "github-sigstore-cryptographic-attestation"
     );
-    return publicTarget && edgeEvidence;
+    return publicTarget && edgeEvidence && candidateReportBinding(payload, "runtime-health", maxAge.load);
   });
   const loadFresh = reportFreshDetail(load, maxAge.load);
   const latestLoadFresh = reportFreshDetail(latestLoadReport, maxAge.load);
@@ -8699,7 +8829,12 @@ async function productionGoNoGo() {
   const loadEdgeEvidence = !policy.requireLoadEdgeEvidence || (
     loadTarget.edgeRequired === true
     && loadTarget.edge?.providerMatched === true
+    && loadTarget.edge?.authenticated === true
     && Boolean(loadTarget.edge?.provider)
+    && loadTarget.edge?.providerEvidence?.verified === true
+    && loadTarget.edge?.providerEvidence?.candidateId === load?.payload?.candidate?.id
+    && loadTarget.edge?.providerEvidence?.authentication?.verified === true
+    && loadTarget.edge?.providerEvidence?.authentication?.kind === "github-sigstore-cryptographic-attestation"
   );
   const latestLegacyLoadHost = legacyPlatformEvidenceHost(latestLoadReport?.payload?.url);
   const latestLoadTarget = latestLoadReport?.payload?.target ?? {};
@@ -8707,17 +8842,25 @@ async function productionGoNoGo() {
     latestLoadReport
     && (!policy.requirePublicLoadTarget || (latestLoadTarget.public === true && publicEvidenceUrl(latestLoadReport.payload.url) && !latestLegacyLoadHost))
   );
-  const latestLoadEdgeEvidence = Boolean(
+  const latestLoadCandidateBound = Boolean(
+    latestLoadReport && candidateReportBinding(latestLoadReport.payload, "runtime-health", maxAge.load)
+  );
+  const latestLoadAuthenticatedEdge = Boolean(
     latestLoadReport
     && (!policy.requireLoadEdgeEvidence || (
       latestLoadTarget.edgeRequired === true
       && latestLoadTarget.edge?.providerMatched === true
+      && latestLoadTarget.edge?.authenticated === true
       && Boolean(latestLoadTarget.edge?.provider)
+      && latestLoadTarget.edge?.providerEvidence?.verified === true
+      && latestLoadTarget.edge?.providerEvidence?.candidateId === latestLoadReport.payload.candidate?.id
+      && latestLoadTarget.edge?.providerEvidence?.authentication?.verified === true
+      && latestLoadTarget.edge?.providerEvidence?.authentication?.kind === "github-sigstore-cryptographic-attestation"
     ))
   );
   const loadPendingProvider = Boolean(
     !load
-    && (!latestLoadReport || latestLegacyLoadHost || !latestPublicLoadTarget || !latestLoadEdgeEvidence)
+    && (!latestLoadReport || (latestPublicLoadTarget && latestLoadCandidateBound && !latestLoadAuthenticatedEdge))
   );
   addGoNoGoCheck(checks, {
     name: "public-load-benchmark",
@@ -8788,6 +8931,7 @@ async function productionGoNoGo() {
     ["runtime-fingerprint", runtimeFingerprintReport?.payload, "runtime-fingerprint", maxAge.runtimeFingerprint],
     ["github-actions", githubActionsRun?.payload, "github-actions", maxAge.githubActionsRun],
     ["release", release?.payload, "release", maxAge.release],
+    ...(load?.payload ? [["public-load", load.payload, "runtime-health", maxAge.load]] : []),
   ].map(([name, reportPayload, kind, reportMaxAge]) => ({
     name,
     ...evaluateCandidateReportBinding(reportPayload, currentCandidate, { kind, maxAgeHours: reportMaxAge }),

@@ -179,6 +179,7 @@ try {
     "scripts/candidate-identity.mjs",
     "scripts/evidence-trust-envelope.mjs",
     "scripts/evidence-bundle-anchor.mjs",
+    "scripts/edge-provider-evidence.mjs",
     "alertmanager/alertmanager.yml",
     "prometheus/rules/enterprise-alerts.yml",
     "platform-alert-dispatcher/server.mjs",

@@ -1,0 +1,14 @@
+{
+  "schema": "platform.edge-traversal-evidence/v1",
+  "external": true,
+  "provider": "cloudflare",
+  "candidateId": "0000000000000000000000000000000000000000000000000000000000000000",
+  "verifiedAt": "2026-01-01T00:00:30.000Z",
+  "request": {
+    "id": "provider-request-id-replace-me",
+    "method": "GET",
+    "url": "https://api.example.com/health?proof=unique-release-nonce",
+    "status": 200,
+    "observedAt": "2026-01-01T00:00:00.000Z"
+  }
+}

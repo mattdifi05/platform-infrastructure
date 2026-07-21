@@ -27,6 +27,10 @@
           "purpose": "Provider-exported external uptime evidence JSON used by the live evidence workflow."
         },
         {
+          "name": "EDGE_PROVIDER_EVIDENCE_JSON",
+          "purpose": "Authenticated provider-observed edge traversal evidence bound to the public load request and release candidate."
+        },
+        {
           "name": "CLOUDFLARE_API_TOKEN",
           "purpose": "Cloudflare API token with read access for Access application verification."
         },
@@ -79,6 +83,21 @@
         {
           "name": "EXTERNAL_UPTIME_EVIDENCE_SOURCE_REF",
           "purpose": "Full Git ref bound into the provider evidence attestation.",
+          "pattern": "^refs/(heads|tags)/[A-Za-z0-9._/-]+$"
+        },
+        {
+          "name": "EDGE_PROVIDER_EVIDENCE_SIGNER_WORKFLOW",
+          "purpose": "Exact GitHub workflow identity that attested edge traversal provider evidence.",
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/\\.github/workflows/[A-Za-z0-9_.-]+\\.ya?ml$"
+        },
+        {
+          "name": "EDGE_PROVIDER_EVIDENCE_SOURCE_SHA",
+          "purpose": "Full source commit bound into edge traversal provider evidence attestation.",
+          "pattern": "^[a-f0-9]{40}$"
+        },
+        {
+          "name": "EDGE_PROVIDER_EVIDENCE_SOURCE_REF",
+          "purpose": "Full Git ref bound into edge traversal provider evidence attestation.",
           "pattern": "^refs/(heads|tags)/[A-Za-z0-9._/-]+$"
         }
       ]

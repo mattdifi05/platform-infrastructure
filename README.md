@@ -434,7 +434,7 @@ sh ./scripts/failure-tests.sh --confirmServiceStop --targets redis,postgres,mini
 sh ./scripts/fault-injection-tests.sh
 sh ./scripts/load-smoke.sh
 sh ./scripts/load-benchmark.sh --profiles 50,100,500
-sh ./scripts/load-benchmark.sh --profiles 50,100,500 --url https://api.example.com/health --requirePublicTarget --requireEdgeEvidence --expectedEdgeProvider cloudflare
+sh ./scripts/load-benchmark.sh --profiles 50,100,500 --url 'https://api.example.com/health?proof=unique-release-nonce' --requirePublicTarget --requireEdgeEvidence --expectedEdgeProvider cloudflare --edgeProviderEvidence ./monitoring/edge-traversal-provider.production.json --edgeProviderEvidenceAttestation online --edgeProviderEvidenceRepository OWNER/REPO --edgeProviderEvidenceWorkflow OWNER/REPO/.github/workflows/provider-evidence.yml --edgeProviderEvidenceSourceDigest FULL_GIT_SHA --edgeProviderEvidenceSourceRef refs/heads/main
 sh ./scripts/linux-portability-check.sh
 sh ./scripts/secret-scan.sh
 sh ./scripts/secret-rotation-evidence.sh
@@ -474,7 +474,12 @@ configurati puoi aggiungere `--requireEmailDelivery` o
 `load-benchmark.sh` senza `--url` misura il Control Center dentro la rete Docker
 ed e' utile per regressioni locali della piattaforma. Per il go-live devi usare
 l'URL pubblico del Portal e `--requirePublicTarget`; con Cloudflare CDN attivo
-aggiungi `--requireEdgeEvidence --expectedEdgeProvider cloudflare`. Il report in
+aggiungi `--requireEdgeEvidence --expectedEdgeProvider cloudflare` e passa un
+`platform.edge-traversal-evidence/v1` fresco, legato a URL/request ID/status e
+candidate ID, con attestazione GitHub/Sigstore verificata. Gli header HTTP
+(`CF-Ray`, `Server`, cache header) restano diagnostica non autenticata e non
+possono soddisfare il gate; senza prova provider il risultato resta
+`EXTERNAL-PENDING`. Il report in
 `reports/load/` include profili 50/100/500, snapshot CPU/RAM Docker, target
 evidence pubblico/edge e `status`. Anche i fallimenti scrivono report
 diagnostici, ma il go/no-go accetta solo `status=passed`.
@@ -502,7 +507,7 @@ La runtime config GitHub Actions e' versionata in
 `governance/github-actions-runtime.json`: `DAST_TARGET`, `DEPLOY_SSH_KEY`,
 `DEPLOY_REMOTE`, `DEPLOY_REMOTE_DIR`, `DEPLOY_SSH_PORT`,
 `VPS_HARDENED_SSH_PORT`, `PUBLIC_API_HEALTH_URL`, `CLOUDFLARE_ACCOUNT_ID`,
-`EXTERNAL_UPTIME_PROVIDER_EVIDENCE_JSON` e
+`EXTERNAL_UPTIME_PROVIDER_EVIDENCE_JSON`, `EDGE_PROVIDER_EVIDENCE_JSON` e
 `CLOUDFLARE_API_TOKEN` piu' `CLOUDFLARE_ACCESS_ADMIN_MANIFEST_JSON` vengono verificati da
 `scripts/github-actions-config.sh --verifyRemote` senza stampare valori
 segreti. Per il go-live finale registra anche la run CI remota del commit di

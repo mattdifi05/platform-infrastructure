@@ -83,14 +83,28 @@ jobs:
         if: inputs.run_public_load == 'true'
         env:
           PUBLIC_API_HEALTH_URL: ${{ vars.PUBLIC_API_HEALTH_URL }}
+          EDGE_PROVIDER_EVIDENCE_JSON: ${{ secrets.EDGE_PROVIDER_EVIDENCE_JSON }}
+          EDGE_PROVIDER_EVIDENCE_SIGNER_WORKFLOW: ${{ vars.EDGE_PROVIDER_EVIDENCE_SIGNER_WORKFLOW }}
+          EDGE_PROVIDER_EVIDENCE_SOURCE_SHA: ${{ vars.EDGE_PROVIDER_EVIDENCE_SOURCE_SHA }}
+          EDGE_PROVIDER_EVIDENCE_SOURCE_REF: ${{ vars.EDGE_PROVIDER_EVIDENCE_SOURCE_REF }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           test -n "$PUBLIC_API_HEALTH_URL"
+          test -n "$EDGE_PROVIDER_EVIDENCE_JSON"
+          mkdir -p .tmp
+          printf '%s\n' "$EDGE_PROVIDER_EVIDENCE_JSON" > .tmp/edge-provider-evidence.production.json
           sh ./scripts/infra-ops.sh load-benchmark \
             --profiles 50,100,500 \
             --url "$PUBLIC_API_HEALTH_URL" \
             --requirePublicTarget \
             --requireEdgeEvidence \
-            --expectedEdgeProvider cloudflare
+            --expectedEdgeProvider cloudflare \
+            --edgeProviderEvidence .tmp/edge-provider-evidence.production.json \
+            --edgeProviderEvidenceAttestation online \
+            --edgeProviderEvidenceRepository "${{ github.repository }}" \
+            --edgeProviderEvidenceWorkflow "$EDGE_PROVIDER_EVIDENCE_SIGNER_WORKFLOW" \
+            --edgeProviderEvidenceSourceDigest "$EDGE_PROVIDER_EVIDENCE_SOURCE_SHA" \
+            --edgeProviderEvidenceSourceRef "$EDGE_PROVIDER_EVIDENCE_SOURCE_REF"
 
       - name: Cloudflare Access admin verify
         if: inputs.run_cloudflare_access == 'true'

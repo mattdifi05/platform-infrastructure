@@ -142,6 +142,7 @@ try {
     "candidate-identity.mjs",
     "evidence-trust-envelope.mjs",
     "evidence-bundle-anchor.mjs",
+    "edge-provider-evidence.mjs",
   ]) cpSync(path.join(repositoryRoot, "scripts", moduleName), path.join(replicaRoot, "scripts", moduleName));
   cpSync(path.join(repositoryRoot, "control-center", "backup", "contracts.mjs"), path.join(replicaRoot, "control-center", "backup", "contracts.mjs"));
   writeFileSync(keyFile, `sandbox-v1=${randomBytes(48).toString("base64url")}\n`, { mode: 0o600 });
