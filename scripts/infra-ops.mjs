@@ -46,8 +46,11 @@ import {
 } from "./evidence-bundle-phase.mjs";
 import { validateEdgeProviderEvidence } from "./edge-provider-evidence.mjs";
 import {
+  applyAndVerifyBranchProtection,
+  applyAndVerifyGithubEnvironment,
   assertExactBranchProtection,
   assertExactGithubEnvironment,
+  assertValidGithubEnvironmentCollection,
 } from "./github-governance-policy.mjs";
 import {
   GITHUB_ACTIONS_OIDC_ISSUER,
@@ -6912,7 +6915,7 @@ async function governanceCheckBody() {
       assertMatch(workflow, new RegExp(`^\\s{2}${job}:`, "m"), `Enterprise CI must define ${job} job.`);
     }
     const matchingChecks = producerBoundChecks.filter((check) => check?.context === job);
-    if (matchingChecks.length !== 1 || !Number.isInteger(Number(matchingChecks[0]?.app_id)) || Number(matchingChecks[0].app_id) <= 0) {
+    if (matchingChecks.length !== 1 || !Number.isInteger(matchingChecks[0]?.app_id) || matchingChecks[0].app_id <= 0) {
       fail(`Branch protection must require ${job} from one exact positive app_id producer.`);
     }
   }
@@ -6947,41 +6950,17 @@ async function governanceCheckBody() {
 }
 
 function githubBranchProtectionPolicy() {
-  return JSON.parse(readText(path.join(infraRoot, "governance", "github-branch-protection.json")));
+  const policy = JSON.parse(readText(path.join(infraRoot, "governance", "github-branch-protection.json")));
+  assertExactBranchProtection(policy, policy);
+  return policy;
 }
 
 function githubEnvironmentsPolicy() {
   const policy = JSON.parse(readText(path.join(infraRoot, "governance", "github-environments.json")));
-  if (!Array.isArray(policy.environments) || policy.environments.length === 0) {
-    fail("governance/github-environments.json must define at least one environment.");
-  }
+  assertValidGithubEnvironmentCollection(policy);
   for (const environment of policy.environments) {
-    if (!environment.name || !/^[A-Za-z0-9_.-]+$/.test(environment.name)) {
-      fail("Each GitHub environment must have a simple name.");
-    }
-    const waitTimer = Number(environment.wait_timer ?? 0);
-    if (!Number.isInteger(waitTimer) || waitTimer < 0 || waitTimer > 43200) {
-      fail(`GitHub environment ${environment.name} has an invalid wait_timer.`);
-    }
-    const branchPolicy = environment.deployment_branch_policy;
-    if (branchPolicy) {
-      const protectedBranches = Boolean(branchPolicy.protected_branches);
-      const customBranchPolicies = Boolean(branchPolicy.custom_branch_policies);
-      if (protectedBranches === customBranchPolicies) {
-        fail(`GitHub environment ${environment.name} must choose either protected_branches or custom_branch_policies.`);
-      }
-    }
     if (environment.required_reviewers_env) {
       fail(`GitHub environment ${environment.name} must define exact reviewer identities in policy, not an environment-variable placeholder.`);
-    }
-    const reviewers = Array.isArray(environment.reviewers) ? environment.reviewers : [];
-    if (environment.require_reviewers_on_apply && reviewers.length === 0) {
-      fail(`GitHub environment ${environment.name} requires exact reviewer identities.`);
-    }
-    for (const reviewer of reviewers) {
-      if (!["User", "Team"].includes(reviewer?.type) || !Number.isInteger(Number(reviewer?.id)) || Number(reviewer.id) <= 0) {
-        fail(`GitHub environment ${environment.name} has an invalid exact reviewer identity.`);
-      }
     }
   }
   return policy;
@@ -7086,8 +7065,12 @@ async function githubBranchProtection() {
     return;
   }
 
-  await githubApi("PUT", apiPath, policy);
-  log(`Applied GitHub branch protection policy to ${repo}:${branch}.`);
+  await applyAndVerifyBranchProtection({
+    expected: policy,
+    apply: (payload) => githubApi("PUT", apiPath, payload),
+    read: () => githubApi("GET", apiPath),
+  });
+  log(`Applied and freshly verified GitHub branch protection policy for ${repo}:${branch}.`);
 }
 
 async function verifyGithubBranchProtectionRemote(repo, branch = "main") {
@@ -7113,7 +7096,7 @@ function reviewerRefsForEnvironment(environment) {
 async function resolveGithubReviewer(repo, reviewerRef) {
   if (typeof reviewerRef === "object" && reviewerRef !== null) {
     const type = reviewerRef.type;
-    const id = Number(reviewerRef.id);
+    const id = reviewerRef.id;
     if (!["User", "Team"].includes(type) || !Number.isInteger(id) || id <= 0) {
       fail("Reviewer objects must use {\"type\":\"User|Team\",\"id\":123}.");
     }
@@ -7132,17 +7115,17 @@ async function resolveGithubReviewer(repo, reviewerRef) {
   }
   if (type === "User") {
     const user = await githubApi("GET", `/users/${encodeURIComponent(value)}`);
-    if (!Number.isInteger(Number(user?.id))) {
+    if (!Number.isInteger(user?.id) || user.id <= 0) {
       fail(`Could not resolve GitHub user reviewer '${value}'.`);
     }
-    return { type: "User", id: Number(user.id) };
+    return { type: "User", id: user.id };
   }
   const [owner] = repo.split("/");
   const team = await githubApi("GET", `/orgs/${encodeURIComponent(owner)}/teams/${encodeURIComponent(value)}`);
-  if (!Number.isInteger(Number(team?.id))) {
+  if (!Number.isInteger(team?.id) || team.id <= 0) {
     fail(`Could not resolve GitHub team reviewer '${value}'.`);
   }
-  return { type: "Team", id: Number(team.id) };
+  return { type: "Team", id: team.id };
 }
 
 async function githubEnvironmentPayload(repo, environment) {
@@ -7152,8 +7135,8 @@ async function githubEnvironmentPayload(repo, environment) {
     reviewers.push(await resolveGithubReviewer(repo, reviewerRef));
   }
   return {
-    wait_timer: Number(environment.wait_timer ?? 0),
-    prevent_self_review: Boolean(environment.prevent_self_review),
+    wait_timer: environment.wait_timer,
+    prevent_self_review: environment.prevent_self_review,
     reviewers: reviewers.length > 0 ? reviewers : null,
     deployment_branch_policy: environment.deployment_branch_policy ?? null,
   };
@@ -7169,10 +7152,10 @@ function assertGithubEnvironmentApplyPreflight(policy) {
 
 function dryRunGithubEnvironmentPayload(environment) {
   return {
-    wait_timer: Number(environment.wait_timer ?? 0),
-    prevent_self_review: Boolean(environment.prevent_self_review),
+    wait_timer: environment.wait_timer,
+    prevent_self_review: environment.prevent_self_review,
     reviewers: environment.reviewers?.length ? environment.reviewers : null,
-    require_reviewers_on_apply: Boolean(environment.require_reviewers_on_apply),
+    require_reviewers_on_apply: environment.require_reviewers_on_apply,
     deployment_branch_policy: environment.deployment_branch_policy ?? null,
   };
 }
@@ -7206,8 +7189,13 @@ async function githubEnvironments() {
   assertGithubEnvironmentApplyPreflight(policy);
   for (const environment of policy.environments) {
     const payload = await githubEnvironmentPayload(repo, environment);
-    await githubApi("PUT", githubEnvironmentApiPath(repo, environment.name), payload);
-    log(`Applied GitHub environment policy to ${repo}:${environment.name}.`);
+    const apiPath = githubEnvironmentApiPath(repo, environment.name);
+    await applyAndVerifyGithubEnvironment({
+      expected: environment,
+      apply: () => githubApi("PUT", apiPath, payload),
+      read: () => githubApi("GET", apiPath),
+    });
+    log(`Applied and freshly verified GitHub environment policy for ${repo}:${environment.name}.`);
   }
 }
 

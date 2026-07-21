@@ -1,6 +1,9 @@
 #!/usr/bin/env node
 import assert from "node:assert/strict";
 import {
+  applyAndVerifyBranchProtection,
+  applyAndVerifyGithubEnvironment,
+  assertValidGithubEnvironmentCollection,
   branchProtectionMismatches,
   githubEnvironmentMismatches,
   requiredStatusCheckMismatches,
@@ -9,6 +12,7 @@ import {
 const branchPolicy = {
   required_status_checks: {
     strict: true,
+    contexts: [],
     checks: [
       { context: "quality", app_id: 15368 },
       { context: "compose", app_id: 15368 },
@@ -35,6 +39,7 @@ const branchPolicy = {
 const remoteBranch = {
   required_status_checks: {
     strict: true,
+    contexts: [],
     checks: [
       { context: "compose", app_id: 15368 },
       { context: "quality", app_id: 15368 },
@@ -73,11 +78,9 @@ const remoteEnvironment = {
   deployment_branch_policy: { protected_branches: true, custom_branch_policies: false },
 };
 
-let passed = 0;
+const tests = [];
 function test(name, fn) {
-  fn();
-  passed += 1;
-  process.stdout.write(`ok ${passed} - ${name}\n`);
+  tests.push([name, fn]);
 }
 
 test("exact branch protection passes", () => {
@@ -165,4 +168,115 @@ test("deployment branch widening fails", () => {
   assert.match(githubEnvironmentMismatches(environmentPolicy, remote).join(" "), /deployment_branch_policy/);
 });
 
+test("whitespace status context alias fails", () => {
+  const remote = structuredClone(remoteBranch);
+  remote.required_status_checks.checks[0].context = " compose ";
+  assert.match(requiredStatusCheckMismatches(branchPolicy.required_status_checks, remote.required_status_checks).join(" "), /non-exact context/);
+});
+test("missing empty contexts array fails", () => {
+  const remote = structuredClone(remoteBranch);
+  delete remote.required_status_checks.contexts;
+  assert.match(requiredStatusCheckMismatches(branchPolicy.required_status_checks, remote.required_status_checks).join(" "), /empty contexts/);
+});
+test("string strict flag fails", () => {
+  const remote = structuredClone(remoteBranch);
+  remote.required_status_checks.strict = "true";
+  assert.match(branchProtectionMismatches(branchPolicy, remote).join(" "), /strict/);
+});
+test("string review count fails", () => {
+  const remote = structuredClone(remoteBranch);
+  remote.required_pull_request_reviews.required_approving_review_count = "2";
+  assert.match(branchProtectionMismatches(branchPolicy, remote).join(" "), /invalid type/);
+});
+test("string reviewer id fails", () => {
+  const remote = structuredClone(remoteEnvironment);
+  remote.protection_rules[1].reviewers[0].reviewer.id = "95946096";
+  assert.match(githubEnvironmentMismatches(environmentPolicy, remote).join(" "), /non-integer identity/);
+});
+test("duplicate reviewer identity fails", () => {
+  const remote = structuredClone(remoteEnvironment);
+  remote.protection_rules[1].reviewers.push(structuredClone(remote.protection_rules[1].reviewers[0]));
+  assert.match(githubEnvironmentMismatches(environmentPolicy, remote).join(" "), /duplicate identities/);
+});
+test("duplicate reviewer protection rule fails", () => {
+  const remote = structuredClone(remoteEnvironment);
+  remote.protection_rules.push(structuredClone(remote.protection_rules[1]));
+  assert.match(githubEnvironmentMismatches(environmentPolicy, remote).join(" "), /cardinality/);
+});
+test("duplicate wait timer protection rule fails", () => {
+  const remote = structuredClone(remoteEnvironment);
+  remote.protection_rules.push(structuredClone(remote.protection_rules[0]));
+  assert.match(githubEnvironmentMismatches(environmentPolicy, remote).join(" "), /at most once/);
+});
+test("string wait timer fails", () => {
+  const remote = structuredClone(remoteEnvironment);
+  remote.protection_rules[0].wait_timer = "15";
+  assert.match(githubEnvironmentMismatches(environmentPolicy, remote).join(" "), /invalid type/);
+});
+test("string self-review flag fails", () => {
+  const remote = structuredClone(remoteEnvironment);
+  remote.protection_rules[1].prevent_self_review = "true";
+  assert.match(githubEnvironmentMismatches(environmentPolicy, remote).join(" "), /invalid type/);
+});
+test("unexpected protection rule fails", () => {
+  const remote = structuredClone(remoteEnvironment);
+  remote.protection_rules.push({ type: "unreviewed-provider-rule" });
+  assert.match(githubEnvironmentMismatches(environmentPolicy, remote).join(" "), /unexpected/);
+});
+test("invalid tracked branch policy is rejected before PUT", async () => {
+  const expected = structuredClone(branchPolicy);
+  expected.required_status_checks.checks[0].app_id = "15368";
+  const calls = [];
+  await assert.rejects(() => applyAndVerifyBranchProtection({
+    expected,
+    apply: async () => calls.push("PUT"),
+    read: async () => remoteBranch,
+  }), /invalid app_id/);
+  assert.deepEqual(calls, []);
+});
+test("branch apply requires fresh exact GET before success", async () => {
+  const drifted = structuredClone(remoteBranch);
+  drifted.required_status_checks.checks[0].app_id = 999;
+  const calls = [];
+  await assert.rejects(() => applyAndVerifyBranchProtection({
+    expected: branchPolicy,
+    apply: async () => { calls.push("PUT"); return remoteBranch; },
+    read: async () => { calls.push("GET"); return drifted; },
+  }), /producer bindings differ/);
+  assert.deepEqual(calls, ["PUT", "GET"]);
+});
+test("environment apply requires fresh exact GET before success", async () => {
+  const drifted = structuredClone(remoteEnvironment);
+  drifted.protection_rules[1].prevent_self_review = false;
+  const calls = [];
+  await assert.rejects(() => applyAndVerifyGithubEnvironment({
+    expected: environmentPolicy,
+    apply: async () => { calls.push("PUT"); return remoteEnvironment; },
+    read: async () => { calls.push("GET"); return drifted; },
+  }), /prevent_self_review/);
+  assert.deepEqual(calls, ["PUT", "GET"]);
+});
+test("duplicate expected reviewers are rejected before PUT", async () => {
+  const expected = structuredClone(environmentPolicy);
+  expected.reviewers.push(structuredClone(expected.reviewers[0]));
+  const calls = [];
+  await assert.rejects(() => applyAndVerifyGithubEnvironment({
+    expected,
+    apply: async () => calls.push("PUT"),
+    read: async () => remoteEnvironment,
+  }), /duplicate identities/);
+  assert.deepEqual(calls, []);
+});
+test("duplicate environment names fail collection preflight", () => {
+  assert.throws(() => assertValidGithubEnvironmentCollection({
+    environments: [environmentPolicy, structuredClone(environmentPolicy)],
+  }), /unique/);
+});
+
+let passed = 0;
+for (const [name, fn] of tests) {
+  await fn();
+  passed += 1;
+  process.stdout.write(`ok ${passed} - ${name}\n`);
+}
 process.stdout.write(`github governance tests passed ${passed}/${passed}\n`);

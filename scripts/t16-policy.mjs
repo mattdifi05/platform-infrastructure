@@ -104,7 +104,13 @@ record("branch-strict", branchPolicy.required_status_checks?.strict === true, "s
 record("branch-admins", branchPolicy.enforce_admins === true, "admins cannot bypass protection");
 record("branch-last-push", branchPolicy.required_pull_request_reviews?.require_last_push_approval === true, "last pusher cannot satisfy approval alone");
 record("branch-no-bypass", ["users", "teams", "apps"].every((key) => branchPolicy.required_pull_request_reviews?.bypass_pull_request_allowances?.[key]?.length === 0), "review bypass allowlists are empty");
-record("branch-exact-verifier", includes(governanceModule, "required status check producer bindings differ") && includes(governanceModule, "enforce_admins differs"), "branch verifier compares exact producer-bound state");
+record(
+  "branch-exact-verifier",
+  includes(governanceModule, "required status check producer bindings differ")
+    && includes(governanceModule, "exact empty contexts array")
+    && includes(governanceModule, "applyAndVerifyBranchProtection"),
+  "branch verifier compares exact producer-bound state and requires fresh post-apply readback",
+);
 record("github-repository-normalized", includes(ops, "return normalizeRepository(repo)") && includes(ops, "githubRepoApiPath(repo)"), "GitHub API repository path uses strict owner/name normalization");
 
 const production = environments.environments?.find((environment) => environment.name === "production");
