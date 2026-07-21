@@ -83,8 +83,17 @@ case "$1" in
     case "$*" in
       *rollback-compose.json*) printf 'rollback-origin-verify\n' >> "$ORDER_LOG" ;;
       *)
-        printf 'origin-verify\n' >> "$ORDER_LOG"
-        [ "${FAIL_ORIGIN_VERIFY:-0}" != 1 ]
+        count=0
+        [ ! -f "$VERIFY_COUNT_FILE" ] || count=$(cat "$VERIFY_COUNT_FILE")
+        count=$((count + 1))
+        printf '%s\n' "$count" > "$VERIFY_COUNT_FILE"
+        if [ "$count" -eq 1 ]; then
+          printf 'origin-verify-pre\n' >> "$ORDER_LOG"
+          [ "${FAIL_ORIGIN_VERIFY:-0}" != 1 ]
+        else
+          printf 'origin-verify-final\n' >> "$ORDER_LOG"
+          [ "${FAIL_FINAL_ORIGIN_VERIFY:-0}" != 1 ]
+        fi
         ;;
     esac
     ;;
@@ -185,9 +194,9 @@ SH
 chmod 700 "$TMP/bin/git" "$TMP/bin/sudo" "$TMP/bin/sh" "$TMP/bin/bash" "$TMP/bin/docker" "$TMP/bin/timeout"
 
 run_remote() {
-  rm -f "$TMP/config-count" "$TMP/volume-count" "$TMP/compose-up-args" "$TMP/git-state"
+  rm -f "$TMP/config-count" "$TMP/volume-count" "$TMP/verify-count" "$TMP/compose-up-args" "$TMP/git-state"
   env \
-    PATH="$TMP/bin:$PATH" ORDER_LOG="$LOG" COMPOSE_UP_ARGS="$TMP/compose-up-args" CONFIG_COUNT_FILE="$TMP/config-count" VOLUME_COUNT_FILE="$TMP/volume-count" GIT_STATE_FILE="$TMP/git-state" \
+    PATH="$TMP/bin:$PATH" ORDER_LOG="$LOG" COMPOSE_UP_ARGS="$TMP/compose-up-args" CONFIG_COUNT_FILE="$TMP/config-count" VOLUME_COUNT_FILE="$TMP/volume-count" VERIFY_COUNT_FILE="$TMP/verify-count" GIT_STATE_FILE="$TMP/git-state" \
     FAKE_RELEASE_SHA="$RELEASE_SHA" FAKE_RELEASE_TREE="$RELEASE_TREE" FAKE_CANONICAL_ORIGIN='https://github.com/owner/repo.git' \
     FAKE_APPROVED_IMAGE="$APPROVED_IMAGE" FAKE_APPROVED_IMAGE_ID="$APPROVED_IMAGE_ID" FAKE_RUNTIME_CONTAINER_ID="$RUNTIME_CONTAINER_ID" \
     FAKE_PREVIOUS_IMAGE="$PREVIOUS_IMAGE" FAKE_PREVIOUS_IMAGE_ID="$PREVIOUS_IMAGE_ID" FAKE_PREVIOUS_CONTAINER_ID="$PREVIOUS_CONTAINER_ID" \
@@ -260,6 +269,13 @@ assert_not_activated
 printf 'PASS\torigin-verification-failure-blocks-activation\n'
 
 : > "$LOG"
+if run_remote env FAIL_FINAL_ORIGIN_VERIFY=1 >/dev/null 2>&1; then echo "FAIL: post-prepare origin drift was accepted" >&2; exit 1; fi
+grep -Fx 'prepare' "$LOG" >/dev/null
+grep -Fx 'origin-verify-final' "$LOG" >/dev/null
+if grep -Fx 'compose-up' "$LOG" >/dev/null; then echo "FAIL: post-prepare origin drift reached runtime activation" >&2; exit 1; fi
+printf 'PASS\tpost-prepare-origin-drift-blocks-compose\n'
+
+: > "$LOG"
 if run_remote env FAKE_RUNTIME_IMAGE_ID="$PREVIOUS_IMAGE_ID" >"$TMP/runtime-mismatch.out" 2>"$TMP/runtime-mismatch.err"; then echo "FAIL: runtime image ID mismatch was accepted" >&2; exit 1; fi
 if ! grep -Fx 'rollback-up' "$LOG" >/dev/null; then
   echo "FAIL: runtime image mismatch did not reach rollback" >&2
@@ -310,8 +326,9 @@ compose-config
 subject-bind
 image-pull
 origin-apply
-origin-verify
+origin-verify-pre
 prepare
+origin-verify-final
 compose-up
 runtime-verify
 postactivation
@@ -337,4 +354,4 @@ if grep -Eq 'docker (compose .*down|volume (rm|prune)|system prune)' "$SCRIPT_DI
 fi
 printf 'PASS\trollback-never-deletes-project-or-volumes\n'
 
-printf 'deploy VPS order tests passed 13/13\n'
+printf 'deploy VPS order tests passed 14/14\n'
