@@ -445,14 +445,19 @@ class Fixture:
         local = set(BASELINE_LOCAL_BLOCKERS)
         for row in post_rows:
             item_id = str(row["id"])
+            pending_external = item_id in validator_module.EXTERNAL_PENDING_LOCAL_SUPPORT
             if item_id in reportable or item_id in local:
                 row["candidate_affected"] = False
-                row["affected_scope"] = []
+                row["affected_scope"] = ["evidence", "external-governance"] if pending_external else []
                 row["blocks_merge"] = False
-                row["blocks_deploy"] = False
-                row["blocks_go_to_deploy"] = False
+                row["blocks_deploy"] = pending_external
+                row["blocks_go_to_deploy"] = pending_external
                 row["fix_evidence"] = [f"final candidate {self.final_commit}", "test registry"]
-                row["final_state"] = "FIXED-IN-FINAL-CANDIDATE"
+                row["final_state"] = (
+                    "LOCAL-SUPPORT-READY-EXTERNAL-PENDING"
+                    if pending_external
+                    else "FIXED-IN-FINAL-CANDIDATE"
+                )
             if item_id in REQUIRED_LIVE_RESIDUALS:
                 row["candidate_affected"] = False
                 row["live_affected"] = True
@@ -690,17 +695,29 @@ class Fixture:
 
         closures = []
         for item_id in BASELINE_LOCAL_BLOCKERS:
-            closures.append(
-                {
-                    "schema_version": 1,
-                    "id": item_id,
-                    "status": "CLOSED-LOCAL",
-                    "candidate_final_commit": self.final_commit,
-                    "final_commit": self.final_commit,
-                    "test_receipt_ids": ["TEST-FULL-SUITE", "TEST-DOCUMENTATION-VALIDATION"],
-                    "evidence": ["docs.md"],
-                }
-            )
+            special = validator_module.EXTERNAL_PENDING_LOCAL_SUPPORT.get(item_id)
+            row = {
+                "schema_version": 1,
+                "id": item_id,
+                "status": (
+                    "LOCAL-SUPPORT-READY-EXTERNAL-PENDING"
+                    if special is not None
+                    else "CLOSED-LOCAL"
+                ),
+                "candidate_final_commit": self.final_commit,
+                "final_commit": self.final_commit,
+                "test_receipt_ids": ["TEST-FULL-SUITE", "TEST-DOCUMENTATION-VALIDATION"],
+                "evidence": ["docs.md"],
+            }
+            if special is not None:
+                row.update(
+                    {
+                        "local_support_kind": special["local_support_kind"],
+                        "external_residual_id": special["external_residual_id"],
+                        "condition_ids": [f"COND-{item_id}"],
+                    }
+                )
+            closures.append(row)
         self._write_jsonl(self.inputs / "local-closures.jsonl", closures)
 
         documentation = {
@@ -725,7 +742,12 @@ class Fixture:
 
         self._write_matrices(self.inputs / "required-matrices.md")
 
-        all_external_blockers = [*REQUIRED_LIVE_RESIDUALS, *REQUIRED_PROVIDER_RESIDUALS]
+        governance_blockers = sorted(validator_module.EXTERNAL_PENDING_LOCAL_SUPPORT)
+        all_external_blockers = [
+            *REQUIRED_LIVE_RESIDUALS,
+            *REQUIRED_PROVIDER_RESIDUALS,
+            *governance_blockers,
+        ]
         verdicts = {
             "schema_version": 1,
             "candidate_final_commit": self.final_commit,
@@ -749,6 +771,7 @@ class Fixture:
                     "verification_status": "NOT-VERIFIED",
                     "candidate_final_commit": self.final_commit,
                     "classification_ids": [item_id],
+                    "condition_ids": [f"COND-{item_id}"],
                     "blocks": (
                         ["merge", "go_to_deploy", "full_production_go"]
                         if is_provider
@@ -756,6 +779,21 @@ class Fixture:
                     ),
                     "required_evidence": ["direct live execution receipt"],
                     "owner": "platform operations",
+                }
+            )
+        for item_id, special in validator_module.EXTERNAL_PENDING_LOCAL_SUPPORT.items():
+            residuals.append(
+                {
+                    "schema_version": 1,
+                    "id": special["external_residual_id"],
+                    "locus": "GOVERNANCE-EXTERNAL",
+                    "verification_status": "EXTERNAL-VALIDATION-REQUIRED",
+                    "candidate_final_commit": self.final_commit,
+                    "classification_ids": [item_id],
+                    "condition_ids": [f"COND-{item_id}"],
+                    "blocks": ["go_to_deploy", "full_production_go"],
+                    "required_evidence": [special["required_evidence"]],
+                    "owner": "external governance owner",
                 }
             )
         self._write_jsonl(self.inputs / "provider-live-residuals.jsonl", residuals)
@@ -957,6 +995,24 @@ class PostfixEvidenceTests(unittest.TestCase):
         self.fixture.write_jsonl("inputs/local-closures.jsonl", rows)
         self.fixture.refresh_handoff_hash("local_condition_closure")
         with self.assertRaisesRegex(ContractError, "required proof rows missing"):
+            self.build()
+
+    def test_external_owner_and_drill_conditions_cannot_be_claimed_closed_local(self) -> None:
+        rows = self.fixture.load_jsonl("inputs/local-closures.jsonl")
+        target = next(row for row in rows if row["id"] == "DOC-EVD-001")
+        target["status"] = "CLOSED-LOCAL"
+        self.fixture.write_jsonl("inputs/local-closures.jsonl", rows)
+        self.fixture.refresh_handoff_hash("local_condition_closure")
+        with self.assertRaisesRegex(ContractError, "invalid identity or status|falsely closed"):
+            self.build()
+
+    def test_local_support_requires_exact_go_blocking_external_residual(self) -> None:
+        rows = self.fixture.load_jsonl("inputs/provider-live-residuals.jsonl")
+        target = next(row for row in rows if row["id"] == "GOV-DOC-EVD-002")
+        target["required_evidence"] = ["self-authored local assertion"]
+        self.fixture.write_jsonl("inputs/provider-live-residuals.jsonl", rows)
+        self.fixture.refresh_handoff_hash("provider_live_residuals")
+        with self.assertRaisesRegex(ContractError, "exact GO-blocking external condition mapping"):
             self.build()
 
     def test_cohort_only_final_commit_mapping_is_rejected(self) -> None:

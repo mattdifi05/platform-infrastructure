@@ -103,6 +103,19 @@ REQUIRED_LIVE_RESIDUALS = frozenset(
 
 REQUIRED_PROVIDER_RESIDUALS = frozenset({"PROVIDER-003"})
 
+EXTERNAL_PENDING_LOCAL_SUPPORT = {
+    "DOC-EVD-001": {
+        "local_support_kind": "inventory-ownership-matrix",
+        "external_residual_id": "GOV-DOC-EVD-001",
+        "required_evidence": "named owner and substitute acknowledgement",
+    },
+    "DOC-EVD-002": {
+        "local_support_kind": "versioned-runbook-catalog",
+        "external_residual_id": "GOV-DOC-EVD-002",
+        "required_evidence": "independent operator drill receipts bound to exact approved artifacts",
+    },
+}
+
 EXTERNAL_CATEGORIES = frozenset(
     {
         "PROVIDER-EXTERNAL",
@@ -1208,7 +1221,7 @@ def _validate_local_closures(
     final_commit: str,
     repo: Path,
     receipts: dict[str, dict[str, Any]],
-) -> None:
+) -> dict[str, dict[str, Any]]:
     by_id = _unique_rows(rows, "id", label="local condition closure")
     baseline_local_blockers = {
         item_id
@@ -1224,13 +1237,36 @@ def _validate_local_closures(
     available_required = (REQUIRED_LOCAL_CLOSURES & set(baseline.by_id)) | baseline_local_blockers
     if not available_required.issubset(by_id):
         raise ContractError(f"local condition closure: required proof rows missing: {sorted(available_required - set(by_id))}")
+    pending_external: dict[str, dict[str, Any]] = {}
+    base_keys = {
+        "schema_version",
+        "id",
+        "status",
+        "candidate_final_commit",
+        "final_commit",
+        "test_receipt_ids",
+        "evidence",
+    }
     for item_id, row in by_id.items():
+        special = EXTERNAL_PENDING_LOCAL_SUPPORT.get(item_id)
         exact_keys(
             row,
-            {"schema_version", "id", "status", "candidate_final_commit", "final_commit", "test_receipt_ids", "evidence"},
+            base_keys
+            | (
+                {"local_support_kind", "external_residual_id", "condition_ids"}
+                if special is not None
+                else set()
+            ),
             label=f"local condition closure {item_id}",
         )
-        if item_id not in baseline.by_id or row["schema_version"] != 1 or row["status"] != "CLOSED-LOCAL":
+        expected_status = (
+            "LOCAL-SUPPORT-READY-EXTERNAL-PENDING" if special is not None else "CLOSED-LOCAL"
+        )
+        if (
+            item_id not in baseline.by_id
+            or row["schema_version"] != 1
+            or row["status"] != expected_status
+        ):
             raise ContractError(f"local condition closure {item_id}: invalid identity or status")
         if row["candidate_final_commit"] != final_commit:
             raise ContractError(f"local condition closure {item_id}: not bound to final HEAD")
@@ -1239,11 +1275,75 @@ def _validate_local_closures(
         test_ids = string_list(row["test_receipt_ids"], label=f"local condition closure {item_id} tests")
         if any(test_id not in receipts for test_id in test_ids):
             raise ContractError(f"local condition closure {item_id}: unknown test receipt")
-        for evidence in string_list(row["evidence"], label=f"local condition closure {item_id} evidence"):
+        evidence_rows = string_list(row["evidence"], label=f"local condition closure {item_id} evidence")
+        for evidence in evidence_rows:
             ensure_path_at_commit(repo, final_commit, evidence)
         post = classification[item_id]
-        if post.get("candidate_affected") is not False or post.get("blocks_merge") is not False:
-            raise ContractError(f"local condition closure {item_id}: post-fix classification is not closed")
+        if special is None:
+            if post.get("candidate_affected") is not False or any(
+                post.get(field) is not False
+                for field in (
+                    "blocks_merge",
+                    "blocks_deploy",
+                    "blocks_go_to_deploy",
+                    "blocks_only_production_go",
+                )
+            ):
+                raise ContractError(f"local condition closure {item_id}: post-fix classification is not closed")
+            continue
+
+        baseline_conditions = string_list(
+            baseline.by_id[item_id].get("condition_ids"),
+            label=f"local condition closure {item_id} baseline conditions",
+        )
+        conditions = string_list(
+            row["condition_ids"],
+            label=f"local condition closure {item_id} conditions",
+        )
+        if (
+            row["local_support_kind"] != special["local_support_kind"]
+            or row["external_residual_id"] != special["external_residual_id"]
+            or conditions != baseline_conditions
+            or post.get("condition_ids") != baseline_conditions
+        ):
+            raise ContractError(
+                f"local condition closure {item_id}: local support/residual/condition mapping is not exact"
+            )
+        if (
+            post.get("candidate_affected") is not False
+            or post.get("blocks_merge") is not False
+            or post.get("blocks_deploy") is not True
+            or post.get("blocks_go_to_deploy") is not True
+            or post.get("blocks_only_production_go") is not False
+            or not set(post.get("affected_scope", []))
+            or not any(token in str(post.get("final_state", "")).upper() for token in ("PENDING", "EXTERNAL"))
+        ):
+            raise ContractError(
+                f"local condition closure {item_id}: external acknowledgement/drill was falsely closed"
+            )
+        documentation_receipts = [
+            receipts[test_id]
+            for test_id in test_ids
+            if receipts[test_id].get("phase") == "documentation-validation"
+        ]
+        anchored_documents = {
+            anchor["path"]
+            for receipt in documentation_receipts
+            for anchor in receipt["artifact_anchors"]
+            if anchor["kind"] == "documentation"
+        }
+        if not documentation_receipts or not {
+            evidence_repo_path(evidence) for evidence in evidence_rows
+        }.issubset(anchored_documents):
+            raise ContractError(
+                f"local condition closure {item_id}: local support is not anchored by documentation validation"
+            )
+        pending_external[item_id] = {
+            "external_residual_id": row["external_residual_id"],
+            "condition_ids": conditions,
+            "required_evidence": special["required_evidence"],
+        }
+    return pending_external
 
 
 def _validate_documentation(
@@ -1420,6 +1520,7 @@ def _validate_residuals(
     classification: dict[str, dict[str, Any]],
     external_or_live: set[str],
     final_commit: str,
+    pending_local_support: dict[str, dict[str, Any]],
 ) -> tuple[dict[str, dict[str, Any]], dict[str, set[str]]]:
     by_id = _unique_rows(rows, "id", label="provider/live residuals")
     covered: set[str] = set()
@@ -1434,6 +1535,7 @@ def _validate_residuals(
                 "verification_status",
                 "candidate_final_commit",
                 "classification_ids",
+                "condition_ids",
                 "blocks",
                 "required_evidence",
                 "owner",
@@ -1442,13 +1544,39 @@ def _validate_residuals(
         )
         if row["schema_version"] != 1 or row["candidate_final_commit"] != final_commit:
             raise ContractError(f"provider/live residual {residual_id}: identity mismatch")
-        if row["locus"] not in {"PROVIDER-EXTERNAL", "LIVE-RUNTIME", "POST-DEPLOY", "HARDWARE-MAINTENANCE"}:
+        if row["locus"] not in {
+            "PROVIDER-EXTERNAL",
+            "LIVE-RUNTIME",
+            "POST-DEPLOY",
+            "HARDWARE-MAINTENANCE",
+            "GOVERNANCE-EXTERNAL",
+        }:
             raise ContractError(f"provider/live residual {residual_id}: invalid locus")
         if row["verification_status"] not in {"NOT-VERIFIED", "EXTERNAL-VALIDATION-REQUIRED", "POST-DEPLOY-REQUIRED"}:
             raise ContractError(f"provider/live residual {residual_id}: invalid or falsely positive status")
         ids = string_list(row["classification_ids"], label=f"provider/live residual {residual_id} classification IDs")
         if any(item not in classification for item in ids):
             raise ContractError(f"provider/live residual {residual_id}: unknown classification ID")
+        conditions = string_list(
+            row["condition_ids"],
+            label=f"provider/live residual {residual_id} condition IDs",
+            allow_empty=True,
+        )
+        expected_conditions = sorted(
+            {
+                condition
+                for item_id in ids
+                for condition in string_list(
+                    classification[item_id].get("condition_ids"),
+                    label=f"provider/live residual {residual_id} classification conditions",
+                    allow_empty=True,
+                )
+            }
+        )
+        if conditions != expected_conditions:
+            raise ContractError(
+                f"provider/live residual {residual_id}: classification condition mapping is not exact"
+            )
         overlap = covered & set(ids)
         if overlap:
             raise ContractError(
@@ -1485,6 +1613,20 @@ def _validate_residuals(
     required_external = (REQUIRED_LIVE_RESIDUALS | REQUIRED_PROVIDER_RESIDUALS) & set(classification)
     if not required_external.issubset(covered):
         raise ContractError("provider/live residuals: required High/provider blocking rows were hidden")
+    for item_id, mapping in pending_local_support.items():
+        residual = by_id.get(mapping["external_residual_id"])
+        if (
+            residual is None
+            or residual["locus"] != "GOVERNANCE-EXTERNAL"
+            or residual["verification_status"] != "EXTERNAL-VALIDATION-REQUIRED"
+            or residual["classification_ids"] != [item_id]
+            or residual["condition_ids"] != mapping["condition_ids"]
+            or residual["blocks"] != ["go_to_deploy", "full_production_go"]
+            or residual["required_evidence"] != [mapping["required_evidence"]]
+        ):
+            raise ContractError(
+                f"provider/live residuals: {item_id} lacks its exact GO-blocking external condition mapping"
+            )
     return by_id, blockers
 
 
@@ -1631,11 +1773,24 @@ def _validate_dataset(
         candidate_repo,
         artifact_snapshots,
     )
-    _validate_local_closures(local_closure_rows, baseline, classification, final_commit, candidate_repo, receipts)
+    pending_local_support = _validate_local_closures(
+        local_closure_rows,
+        baseline,
+        classification,
+        final_commit,
+        candidate_repo,
+        receipts,
+    )
     _validate_documentation(documentation_receipt, final_commit, candidate_repo, receipts)
     _validate_semantic(semantic_receipt, final_commit, semantic_bytes, semantic_receipt_sha256)
     _validate_matrices(matrices_bytes, baseline)
-    _, blockers = _validate_residuals(residual_rows, classification, external_or_live, final_commit)
+    _, blockers = _validate_residuals(
+        residual_rows,
+        classification,
+        external_or_live,
+        final_commit,
+        pending_local_support,
+    )
     residual_classification_ids = set().union(*blockers.values()) if blockers else set()
     derived_verdicts = _derive_verdicts(
         classification,
