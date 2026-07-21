@@ -785,6 +785,25 @@ class PostfixEvidenceTests(unittest.TestCase):
         with self.assertRaisesRegex(ContractError, "go_to_deploy"):
             self.build()
 
+    def test_residual_block_axes_are_derived_from_the_full_classification_ledger(self) -> None:
+        residuals = self.fixture.load_jsonl("inputs/provider-live-residuals.jsonl")
+        for residual in residuals:
+            residual["blocks"] = []
+        self.fixture.write_jsonl("inputs/provider-live-residuals.jsonl", residuals)
+        self.fixture.refresh_handoff_hash("provider_live_residuals")
+        verdicts = self.fixture.load_json("inputs/four-verdicts.json")
+        verdicts["go_to_deploy"] = {"value": "GO", "reason_ids": []}
+        verdicts["ready_for_commit_push_deploy_authorization"] = "YES"
+        self.fixture.write_json("inputs/four-verdicts.json", verdicts)
+        self.fixture.refresh_handoff_hash("four_verdicts")
+        with self.assertRaisesRegex(ContractError, "derived|exact residual"):
+            self.build()
+
+    def test_pass_log_cannot_substitute_for_a_script_present_at_final_commit(self) -> None:
+        self.assertFalse((self.fixture.repo / "offline-fixture.py").exists())
+        with self.assertRaisesRegex(ContractError, "script-at-commit|script at final commit"):
+            self.build()
+
     def test_manifest_tamper_is_detected_after_build(self) -> None:
         self.build()
         target = self.fixture.output / "four_verdicts_v1.json"
