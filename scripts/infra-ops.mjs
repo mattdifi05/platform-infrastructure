@@ -34,7 +34,7 @@ import { evaluateOffsiteRestoreCoverage, locateSnapshotManifest, offsiteManifest
 import { canonicalVpsTopologyPlan, parseCanonicalVpsTopology } from "./canonical-compose-topology.mjs";
 import { candidateIdentityMatches, createCandidateIdentity, evaluateCandidateReportBinding, normalizeRepositoryIdentity } from "./candidate-identity.mjs";
 import { verifyTrustedEvidenceReports } from "./evidence-trust-envelope.mjs";
-import { verifyOwnerPinnedBundleManifest } from "./evidence-bundle-anchor.mjs";
+import { verifyClosedWorldBundleFiles, verifyOwnerPinnedBundleManifest } from "./evidence-bundle-anchor.mjs";
 import {
   createEvidenceReportContext,
   evaluateEvidenceBundlePhase,
@@ -8459,6 +8459,12 @@ async function evidenceBundleVerify() {
     }
     paths.add(normalizedPath);
   }
+  let closedWorld = null;
+  try {
+    closedWorld = verifyClosedWorldBundleFiles({ bundleDir, manifestEntryPaths: [...paths] });
+  } catch (error) {
+    issues.push(String(error?.message ?? error));
+  }
   for (const docPath of evidenceBundleDocPaths) {
     if (!paths.has(docPath)) {
       issues.push(`missing required document entry: ${docPath}`);
@@ -8517,6 +8523,7 @@ async function evidenceBundleVerify() {
     phase,
     requireComplete,
     phaseEvaluation,
+    closedWorld,
     manifestTrust,
     entryCount: paths.size,
     missingRequiredEvidence,
