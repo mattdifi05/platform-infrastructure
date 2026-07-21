@@ -358,13 +358,23 @@ test("synthetic acknowledgement and drill receipts are structurally testable but
       acknowledgements: ownership.assets.flatMap((asset) => [asset.roles.primary, asset.roles.substitute].map((roleRef) => ({
         assetId: asset.id,
         roleRef,
-        authenticatedSubjectRef: `test-subject-sha256:${"1".repeat(64)}`,
+        authenticatedSubjectRef: `test-subject-sha256:${sha256(`${asset.id}:${roleRef}`)}`,
+        authentication: {
+          method: "synthetic",
+          issuerRef: "test-fixture",
+          evidenceSha256: sha256(`auth:${asset.id}:${roleRef}`),
+        },
         responsibilities: ["closure", "rollback", "preservation", "review"],
         acknowledgedAt: "2026-07-22T00:00:00Z",
       }))),
       approval: {
         roleRef: "role:change-approval-authority",
         authenticatedSubjectRef: `test-subject-sha256:${"2".repeat(64)}`,
+        authentication: {
+          method: "synthetic",
+          issuerRef: "test-fixture",
+          evidenceSha256: "5".repeat(64),
+        },
         approvedAt: "2026-07-22T00:00:00Z",
       },
     };
@@ -385,6 +395,11 @@ test("synthetic acknowledgement and drill receipts are structurally testable but
       performedAt: "2026-07-22T00:00:00Z",
       independentOperator: {
         authenticatedSubjectRef: `test-subject-sha256:${"3".repeat(64)}`,
+        authentication: {
+          method: "synthetic",
+          issuerRef: "test-fixture",
+          evidenceSha256: "6".repeat(64),
+        },
         independentFromPrimary: true,
       },
       result: "PASS",
@@ -418,4 +433,3 @@ test("synthetic acknowledgement and drill receipts are structurally testable but
     assert.equal(parsedGate.status, "GOVERNANCE-EXTERNAL-BLOCKING");
   });
 });
-
