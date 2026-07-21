@@ -4,6 +4,21 @@ set -euo pipefail
 ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 ENV_FILE=${COMPOSE_ENV_FILE:-$ROOT_DIR/.env}
 PROJECT_NAME=${COMPOSE_PROJECT_NAME:-platform_infra_vps}
+PREPARE_RESOLVED=${HOSTED_WORKLOAD_PREPARE_RESOLVED:-0}
+
+case "$PREPARE_RESOLVED" in
+  0) ;;
+  1)
+    if (( $# != 3 )) || [[ "$1" != config || "$2" != --format || "$3" != json ]]; then
+      printf '%s\n' "Resolved hosted workload locks are limited to the exact prepare-time config render." >&2
+      exit 2
+    fi
+    ;;
+  *)
+    printf '%s\n' "HOSTED_WORKLOAD_PREPARE_RESOLVED must be 0 or 1." >&2
+    exit 2
+    ;;
+esac
 
 for argument in "$@"; do
   case "$argument" in
@@ -207,7 +222,7 @@ if [[ -n "$workload_lock" ]]; then
   }
   export HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE=$runtime_lock_source
   activation_bundle=$(
-    HOSTED_WORKLOAD_ALLOW_RESOLVED=${HOSTED_WORKLOAD_ALLOW_RESOLVED:-0} \
+    HOSTED_WORKLOAD_ALLOW_RESOLVED=$PREPARE_RESOLVED \
       sh "$ROOT_DIR/scripts/hosted-workload-lock.sh" "$workload_lock" activation-bundle
   )
   printf '%s' "$activation_bundle" | jq -e '
@@ -277,7 +292,7 @@ if [[ -n "$workload_lock" ]]; then
   done <<< "$workload_env_records"
 else
   runtime_lock_source=$(canonical_existing_file "${HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE:-$ROOT_DIR/config/no-hosted-workloads.lock.json}")
-  if [[ "${HOSTED_WORKLOAD_PREPARE_RESOLVED:-0}" = 1 ]]; then
+  if [[ "$PREPARE_RESOLVED" = 1 ]]; then
     HOSTED_WORKLOAD_ALLOW_RESOLVED=1 sh "$ROOT_DIR/scripts/hosted-workload-lock.sh" "$runtime_lock_source" verify
   else
     no_workload_lock=$(canonical_existing_file "$ROOT_DIR/config/no-hosted-workloads.lock.json")

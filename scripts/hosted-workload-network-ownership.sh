@@ -38,7 +38,10 @@ done
   exit 1
 }
 
-activation_bundle=$(sh "$SCRIPT_DIR/hosted-workload-lock.sh" "$LOCK" activation-bundle)
+activation_bundle=$(
+  HOSTED_WORKLOAD_ALLOW_RESOLVED=0 \
+    sh "$SCRIPT_DIR/hosted-workload-lock.sh" "$LOCK" activation-bundle
+)
 printf '%s' "$activation_bundle" | jq -e --arg projectName "$PROJECT_NAME" '
   def network_record:
     type == "object"
