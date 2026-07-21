@@ -124,6 +124,14 @@ listener. Do not add environment overrides for `NGINX_ALWAYS_TLS_REDIRECT` or
 `NGINX_X_FORWARDED_PROTO`: plaintext requests must never reach Traefik labeled
 as HTTPS. `platform_edge` must contain exactly `waf` and `traefik`.
 
+Traefik trusts forwarded identity only from the WAF's fixed
+`172.30.250.2/32` peer. Its rate-limit key scans `X-Forwarded-For` from the
+right and excludes only the CIDRs pinned in
+`cloudflare/trusted-proxy-cidrs.json`; do not configure `depth` or a broader
+trusted peer. Before changing UFW, `cloudflare-origin-lock-ufw.sh` compares the
+live provider lists with that snapshot and aborts on any added or removed
+range. Review and update the firewall and rate-limit controls together.
+
 Useful checks:
 
 ```sh
@@ -739,6 +747,11 @@ Use `--ports "80 443"` only if Cloudflare connects to the origin over both
 HTTP and HTTPS. After Cloudflare DNS is proxied and working, remove generic
 public UFW web rules so the origin accepts web traffic only from Cloudflare IP
 ranges.
+
+Provider-range freshness and distinct rate buckets for two real clients remain
+deployment evidence: run the origin-lock check on the VPS, then probe through
+Cloudflare with two client identities plus a spoofed leftmost forwarded entry.
+Do not treat the static snapshot or offline contract test as provider evidence.
 
 Cloudflare zone code lives in `cloudflare/`. Keep `ssl=full_strict` as a manual
 review item until the VPS origin certificate is valid for every proxied

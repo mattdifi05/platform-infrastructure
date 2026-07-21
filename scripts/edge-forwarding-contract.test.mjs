@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
@@ -10,6 +12,8 @@ const vpsEnv = read(".env.vps.example");
 const edgeTraefik = read("traefik/traefik.edge-http.yml");
 const networks = read("compose.networks.yaml");
 const networkPolicy = read("scripts/network-segmentation-policy.mjs");
+const middlewares = read("traefik/dynamic/middlewares.yml");
+const trustedProxySnapshot = JSON.parse(read("cloudflare/trusted-proxy-cidrs.json"));
 
 test("FG-053 plaintext edge traffic redirects and cannot spoof forwarded HTTPS", () => {
   const waf = serviceBlock(vpsWaf, "waf");
@@ -25,9 +29,57 @@ test("FG-053 plaintext edge traffic redirects and cannot spoof forwarded HTTPS",
 });
 
 test("FG-053 only WAF and Traefik can inhabit the TLS-termination edge zone", () => {
-  assert.match(serviceBlock(networks, "waf"), /networks: !override\n\s+- platform_edge/);
-  assert.match(serviceBlock(networks, "traefik"), /\n\s+- platform_edge/);
+  assert.match(serviceBlock(networks, "waf"), /networks: !override\n\s+platform_edge:/);
+  assert.match(serviceBlock(networks, "traefik"), /\n\s+platform_edge:/);
   assert.match(networkPolicy, /members-platform-edge[\s\S]*\["traefik", "waf"\]/);
+});
+
+test("FG-060 Traefik trusts forwarded identity only from the fixed WAF peer", () => {
+  assert.match(edgeTraefik, /forwardedHeaders:\n\s+trustedIPs:\n\s+- "172\.30\.250\.2\/32"/);
+  assert.doesNotMatch(edgeTraefik, /forwardedHeaders:\s*[\s\S]*insecure:\s*true/);
+  assert.match(serviceBlock(networks, "waf"), /platform_edge:\n\s+ipv4_address: 172\.30\.250\.2/);
+  assert.match(serviceBlock(networks, "traefik"), /platform_edge:\n\s+ipv4_address: 172\.30\.250\.3/);
+  assert.match(networks, /platform_edge:[\s\S]*subnet: 172\.30\.250\.0\/29/);
+});
+
+test("FG-060 rate key skips only the pinned provider hops and ignores spoofed left entries", () => {
+  const block = middlewareBlock(middlewares, "enterprise-rate-limit");
+  assert.match(block, /sourceCriterion:\n\s+ipStrategy:\n\s+excludedIPs:/);
+  assert.doesNotMatch(block, /\n\s+depth:/);
+  const configured = [...block.matchAll(/^\s+- "?([^"\s]+\/\d+)"?$/gm)].map((match) => match[1]).sort();
+  const expected = [...trustedProxySnapshot.ipv4, ...trustedProxySnapshot.ipv6].sort();
+  assert.deepEqual(configured, expected);
+
+  const direct = selectClientIp(["198.51.100.99", "203.0.113.7"], trustedProxySnapshot.ipv4);
+  const throughCloudflareA = selectClientIp(["203.0.113.10", "198.41.128.42"], trustedProxySnapshot.ipv4);
+  const throughCloudflareB = selectClientIp(["203.0.113.11", "198.41.128.43"], trustedProxySnapshot.ipv4);
+  assert.equal(direct, "203.0.113.7");
+  assert.equal(throughCloudflareA, "203.0.113.10");
+  assert.equal(throughCloudflareB, "203.0.113.11");
+  assert.notEqual(throughCloudflareA, throughCloudflareB);
+});
+
+test("FG-060 origin firewall refuses provider drift before applying trusted ranges", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "trusted-proxy-check-"));
+  const ipv4Path = path.join(temp, "ips-v4");
+  const ipv6Path = path.join(temp, "ips-v6");
+  try {
+    fs.writeFileSync(ipv4Path, `${trustedProxySnapshot.ipv4.join("\n")}\n`);
+    fs.writeFileSync(ipv6Path, `${trustedProxySnapshot.ipv6.join("\n")}\n`);
+    assert.equal(runTrustedProxyCheck(ipv4Path, ipv6Path).status, 0);
+
+    fs.appendFileSync(ipv4Path, "203.0.113.0/24\n");
+    const extraRange = runTrustedProxyCheck(ipv4Path, ipv6Path);
+    assert.notEqual(extraRange.status, 0);
+    assert.match(extraRange.stderr, /ipv4 ranges differ/);
+
+    fs.writeFileSync(ipv4Path, `${trustedProxySnapshot.ipv4.slice(1).join("\n")}\n`);
+    const missingRange = runTrustedProxyCheck(ipv4Path, ipv6Path);
+    assert.notEqual(missingRange.status, 0);
+    assert.match(missingRange.stderr, /ipv4 ranges differ/);
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
 });
 
 function read(name) {
@@ -41,4 +93,37 @@ function serviceBlock(source, name) {
   const rest = source.slice(start + marker.length);
   const end = rest.search(/\n  [a-zA-Z0-9][a-zA-Z0-9_-]*:\n/);
   return end === -1 ? rest : rest.slice(0, end);
+}
+
+function middlewareBlock(source, name) {
+  const marker = `\n    ${name}:\n`;
+  const start = source.indexOf(marker);
+  assert.notEqual(start, -1, `missing middleware ${name}`);
+  const rest = source.slice(start + marker.length);
+  const end = rest.search(/\n    [a-zA-Z0-9][a-zA-Z0-9_-]*:\n/);
+  return end === -1 ? rest : rest.slice(0, end);
+}
+
+function selectClientIp(chain, trustedCidrs) {
+  for (let index = chain.length - 1; index >= 0; index -= 1) {
+    if (!trustedCidrs.some((cidr) => ipv4InCidr(chain[index], cidr))) return chain[index];
+  }
+  return "";
+}
+
+function ipv4InCidr(address, cidr) {
+  if (address.includes(":") || cidr.includes(":")) return false;
+  const [network, prefixText] = cidr.split("/");
+  const prefix = Number(prefixText);
+  const toInt = (value) => value.split(".").reduce((out, octet) => (out * 256 + Number(octet)) >>> 0, 0) >>> 0;
+  const mask = prefix === 0 ? 0 : (0xffffffff << (32 - prefix)) >>> 0;
+  return (toInt(address) & mask) === (toInt(network) & mask);
+}
+
+function runTrustedProxyCheck(ipv4Path, ipv6Path) {
+  return spawnSync(
+    path.join(root, "scripts/cloudflare-trusted-proxy-check.sh"),
+    [path.join(root, "cloudflare/trusted-proxy-cidrs.json"), ipv4Path, ipv6Path],
+    { encoding: "utf8" },
+  );
 }

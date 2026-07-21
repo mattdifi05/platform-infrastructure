@@ -3,6 +3,9 @@ set -eu
 
 APPLY=0
 PORTS="${ORIGIN_LOCK_PORTS:-80 443}"
+ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+TRUSTED_PROXY_SNAPSHOT="$ROOT_DIR/cloudflare/trusted-proxy-cidrs.json"
+TRUSTED_PROXY_CHECK="$ROOT_DIR/scripts/cloudflare-trusted-proxy-check.sh"
 
 usage() {
   cat <<'EOF'
@@ -58,6 +61,8 @@ trap 'rm -rf "$tmpdir"' EXIT
 
 curl -fsSL https://www.cloudflare.com/ips-v4 -o "$tmpdir/ips-v4"
 curl -fsSL https://www.cloudflare.com/ips-v6 -o "$tmpdir/ips-v6"
+
+"$TRUSTED_PROXY_CHECK" "$TRUSTED_PROXY_SNAPSHOT" "$tmpdir/ips-v4" "$tmpdir/ips-v6"
 
 echo "==> Allowing Cloudflare IP ranges to origin ports: $PORTS"
 for port in $PORTS; do

@@ -352,6 +352,15 @@ sono sovrascrivibili dall'env o dagli header del client. La zona interna
 `platform_edge` ammette esattamente WAF e Traefik, quindi il middleware che
 propaga lo schema HTTPS opera soltanto dietro il terminatore dichiarato.
 
+La chiave del rate limit usa l'identita' client validata: Traefik accetta gli
+header forwarded soltanto dal peer WAF fisso `172.30.250.2`, quindi scorre
+`X-Forwarded-For` da destra e salta esclusivamente i CIDR Cloudflare fissati in
+`cloudflare/trusted-proxy-cidrs.json`. Non usare `depth`, wildcard o proxy
+aggiuntivi impliciti. `cloudflare-origin-lock-ufw.sh` confronta i range ottenuti
+dal provider con lo snapshot prima di proporre o applicare qualunque regola;
+una differenza interrompe l'operazione e richiede una revisione congiunta di
+firewall e middleware.
+
 Su Windows/Docker Desktop il certificato mkcert locale e' montato in un container non privilegiato. Se il WAF non riesce a leggere `local-key.pem`, rendi la copia locale leggibile dal runtime Docker e riavvia:
 
 ```powershell
@@ -741,6 +750,12 @@ effettivo di `sshd -T`: deve mostrare `passwordauthentication no`, non basta che
 un file contenga `PasswordAuthentication no`.
 
 Se Cloudflare parla con l'origin anche su 443, usa `--ports "80 443"`. Dopo aver verificato DNS proxied e traffico Cloudflare, rimuovi eventuali vecchie regole UFW generiche `allow 80/tcp` e `allow 443/tcp`: l'origin non deve accettare bypass diretti.
+Prima di ogni applicazione lo script scarica entrambi gli elenchi IP Cloudflare
+e pretende uguaglianza esatta con `cloudflare/trusted-proxy-cidrs.json`; se il
+provider ha aggiunto o rimosso un CIDR, aggiorna e revisiona lo snapshot e il
+middleware di rate limit nello stesso cambiamento. La freschezza dei range e le
+bucket separate per client devono comunque essere provate sul provider/VPS
+reale prima del deploy.
 `vps-host-readiness.sh --ssh-port 65002 --enforce` genera report JSON/Markdown in `reports/vps-host/` e
 verifica Ubuntu LTS, Docker Engine, Compose plugin, Git, UFW, fail2ban, SSH
 hardening, porta SSH attesa, regola UFW per quella porta, Docker daemon

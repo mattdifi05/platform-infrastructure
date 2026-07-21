@@ -4,14 +4,16 @@
 services:
   traefik:
     networks: !override
-      - platform_edge
-      - platform_routing
-      - platform_observability
-      - platform_egress
+      platform_edge:
+        ipv4_address: 172.30.250.3
+      platform_routing: {}
+      platform_observability: {}
+      platform_egress: {}
 
   waf:
     networks: !override
-      - platform_edge
+      platform_edge:
+        ipv4_address: 172.30.250.2
 
   postgres:
     networks: !override
@@ -116,6 +118,9 @@ networks:
     name: ${PLATFORM_NETWORK_PREFIX:-platform_infra_vps}_edge
     internal: true
     labels: { com.platform.trust-zone: edge }
+    ipam:
+      config:
+        - subnet: 172.30.250.0/29
   platform_routing:
     name: ${PLATFORM_NETWORK_PREFIX:-platform_infra_vps}_routing
     internal: true

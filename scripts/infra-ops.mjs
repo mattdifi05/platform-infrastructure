@@ -5329,8 +5329,13 @@ async function rateLimitEvidence(options = {}) {
   const adminRoutes = readText(path.join(infraRoot, "traefik", "dynamic", "admin-routes.yml"));
   const projectRoutes = readText(path.join(infraRoot, "traefik", "dynamic", "project-routes.yml"));
   const compose = readText(path.join(infraRoot, "compose.yaml"));
+  const edgeTraefik = readText(path.join(infraRoot, "traefik", "traefik.edge-http.yml"));
+  const networkOverlay = readText(path.join(infraRoot, "compose.networks.yaml"));
   const checks = [
     { name: "traefik-rate-limit-defined", passed: /enterprise-rate-limit:[\s\S]*rateLimit:[\s\S]*average:\s*\d+[\s\S]*burst:\s*\d+/.test(middlewares) },
+    { name: "rate-limit-trusted-client-key", passed: /sourceCriterion:[\s\S]*ipStrategy:[\s\S]*excludedIPs:/.test(middlewares) && !/ipStrategy:[\s\S]*depth:/.test(middlewares) },
+    { name: "forwarded-identity-fixed-waf-peer", passed: /forwardedHeaders:[\s\S]*trustedIPs:[\s\S]*172\.30\.250\.2\/32/.test(edgeTraefik) && !/insecure:\s*true/.test(edgeTraefik) },
+    { name: "waf-peer-address-bound", passed: /waf:[\s\S]*platform_edge:[\s\S]*ipv4_address:\s*172\.30\.250\.2/.test(networkOverlay) && /subnet:\s*172\.30\.250\.0\/29/.test(networkOverlay) },
     { name: "admin-routes-rate-limited", passed: /enterprise-rate-limit@file/.test(adminRoutes) },
     { name: "hosted-routes-rate-limited", passed: /enterprise-rate-limit@file/.test(projectRoutes) },
     { name: "waf-enabled", passed: /middlewares:[\s\S]*enterprise-rate-limit@file/.test(compose) },
