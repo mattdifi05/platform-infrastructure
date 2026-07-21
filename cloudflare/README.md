@@ -27,8 +27,11 @@ been reviewed and approved.
   authenticated provider receipt is integrated, MFA ownership stays
   `EXTERNAL`, evidence stays `pending-provider`, and production remains no-go.
 - `zone-settings.json` lists safe zone settings plus manual-review items.
-- `scripts/cloudflare-origin-lock-ufw.sh` must run on the VPS so direct-origin
-  bypass is blocked at the host firewall.
+- `scripts/cloudflare-origin-lock-ufw.sh` must run on the VPS with the rendered
+  Compose JSON and exact SSH recovery port so direct-origin bypass is blocked
+  at the host firewall. It requires both SSH address families, validates the
+  Cloudflare CIDRs semantically, enforces inbound default-deny and persists a
+  fresh source/hash/ruleset receipt for later verification.
 
 Recommended live sequence:
 
@@ -44,9 +47,12 @@ Recommended live sequence:
    on the live account use `--apply` only after replacing placeholders, then
    run `--verifyRemote`.
 5. Confirm public hostnames work through Cloudflare.
-6. Run `sudo sh ./scripts/cloudflare-origin-lock-ufw.sh --apply` on the VPS.
-7. Remove old generic UFW `allow 80/tcp` and `allow 443/tcp` rules only after
-   Cloudflare traffic is confirmed.
+6. Render Compose JSON, then run
+   `sudo sh ./scripts/cloudflare-origin-lock-ufw.sh --apply --compose-json <file> --ssh-port <port>`
+   on the VPS. Explicit CIDR and receipt paths are test-only.
+7. Confirm Cloudflare traffic and rerun the script with `--verify`, the same
+   Compose JSON and SSH port; the generic public web allows have already been
+   removed transactionally by apply.
 8. Keep phpMyAdmin, Grafana, Prometheus, Alertmanager, MinIO console and Traefik
    dashboard off public DNS.
 

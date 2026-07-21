@@ -745,7 +745,7 @@ Prima del deploy pubblico su VPS/Ubuntu LTS:
 sudo sh ./scripts/vps-bootstrap-ubuntu.sh --apply --deploy-user deploy
 sudo sh ./scripts/vps-hardening-ubuntu.sh --apply --ssh-port 65002 --reload-sshd
 COMPOSE_ENV_FILE=.env COMPOSE_PROJECT_NAME=platform_infra_vps bash ./scripts/compose-vps.sh config --format json > /tmp/platform-compose.json
-sudo sh ./scripts/cloudflare-origin-lock-ufw.sh --apply --compose-json /tmp/platform-compose.json
+sudo sh ./scripts/cloudflare-origin-lock-ufw.sh --apply --compose-json /tmp/platform-compose.json --ssh-port 65002
 sudo sh ./scripts/vps-host-readiness.sh --ssh-port 65002 --enforce
 ```
 
@@ -755,14 +755,20 @@ procedura con `--ssh-port 22` dopo aver confermato l'accesso con chiave.
 ```sh
 sudo sh ./scripts/vps-hardening-ubuntu.sh --apply --ssh-port 22 --reload-sshd
 COMPOSE_ENV_FILE=.env COMPOSE_PROJECT_NAME=platform_infra_vps bash ./scripts/compose-vps.sh config --format json > /tmp/platform-compose.json
-sudo sh ./scripts/cloudflare-origin-lock-ufw.sh --apply --compose-json /tmp/platform-compose.json
+sudo sh ./scripts/cloudflare-origin-lock-ufw.sh --apply --compose-json /tmp/platform-compose.json --ssh-port 22
 sh ./scripts/vps-host-readiness.sh --ssh-port 22 --enforce
 ```
 
+L'origin-lock richiede esattamente una regola recovery SSH IPv4 e una IPv6 gia'
+presenti, scarica i due elenchi CIDR dagli URL HTTPS Cloudflare senza redirect,
+valida semanticamente famiglie, prefissi e overlap, imposta il default inbound
+`deny` e salva un receipt con hash e digest del ruleset. La verifica successiva
+consuma solo quello stato salvato; file CIDR/receipt espliciti sono test-only.
+
 `vps-bootstrap-ubuntu.sh` e' dry-run di default e genera report JSON/Markdown in
 `reports/vps-bootstrap/`. Con `--apply` configura il repository apt ufficiale
-Docker per Ubuntu, installa Git, `jq`, Docker Engine, Buildx e Docker Compose plugin,
-poi verifica `docker`, `docker compose`, `git` e `jq`.
+Docker per Ubuntu, installa Git, `jq`, Python 3, Docker Engine, Buildx e Docker
+Compose plugin, poi verifica `docker`, `docker compose`, `git` e `jq`.
 
 `vps-hardening-ubuntu.sh` e' dry-run di default e genera report JSON/Markdown in
 `reports/vps-hardening/`. Con `--apply` applica SSH hardening, sysctl, UFW,

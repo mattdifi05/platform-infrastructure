@@ -717,7 +717,7 @@ Run on a new VPS Ubuntu LTS VPS before public traffic:
 sudo sh ./scripts/vps-bootstrap-ubuntu.sh --apply --deploy-user deploy
 sudo sh ./scripts/vps-hardening-ubuntu.sh --apply --ssh-port 65002 --reload-sshd
 COMPOSE_ENV_FILE=.env COMPOSE_PROJECT_NAME=platform_infra_vps bash ./scripts/compose-vps.sh config --format json > /tmp/platform-compose.json
-sudo sh ./scripts/cloudflare-origin-lock-ufw.sh --apply --compose-json /tmp/platform-compose.json
+sudo sh ./scripts/cloudflare-origin-lock-ufw.sh --apply --compose-json /tmp/platform-compose.json --ssh-port 65002
 sudo sh ./scripts/vps-host-readiness.sh --ssh-port 65002 --enforce
 ```
 
@@ -728,13 +728,20 @@ session works:
 ```sh
 sudo sh ./scripts/vps-hardening-ubuntu.sh --apply --ssh-port 22 --reload-sshd
 COMPOSE_ENV_FILE=.env COMPOSE_PROJECT_NAME=platform_infra_vps bash ./scripts/compose-vps.sh config --format json > /tmp/platform-compose.json
-sudo sh ./scripts/cloudflare-origin-lock-ufw.sh --apply --compose-json /tmp/platform-compose.json
+sudo sh ./scripts/cloudflare-origin-lock-ufw.sh --apply --compose-json /tmp/platform-compose.json --ssh-port 22
 sh ./scripts/vps-host-readiness.sh --ssh-port 22 --enforce
 ```
 
+Origin-lock refuses mutation unless exactly one IPv4 and one IPv6 recovery rule
+already protect the selected SSH port. Apply fetches the exact Cloudflare HTTPS
+CIDR endpoints without redirects, rejects malformed, wrong-family, duplicate or
+overlapping networks, sets inbound default deny and persists a fresh
+hash/ruleset receipt. Verify consumes only that saved state. Explicit CIDR and
+receipt paths are isolated to the test harness.
+
 `vps-bootstrap-ubuntu.sh` is dry-run by default and writes JSON/Markdown reports
 under `reports/vps-bootstrap/`. In `--apply` mode it requires root, configures
-Docker's official Ubuntu apt repository, installs Git, Docker Engine, Buildx and
+Docker's official Ubuntu apt repository, installs Git, Python 3, Docker Engine, Buildx and
 the Docker Compose plugin, enables Docker and verifies `docker`, `docker compose`
 and `git`. Use `--deploy-user <user>` only after reviewing Docker group access.
 

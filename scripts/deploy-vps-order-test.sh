@@ -199,6 +199,7 @@ run_remote() {
     PLATFORM_RELEASE_TREE_B64="$(encode "$RELEASE_TREE")" \
     PLATFORM_DEPLOY_REPO_B64="$(encode 'owner/repo')" \
     PLATFORM_CANONICAL_ORIGIN_B64="$(encode 'https://github.com/owner/repo.git')" \
+    PLATFORM_SSH_PORT_B64="$(encode 65002)" \
     PLATFORM_ARTIFACT_RECEIPT_SHA256_B64="$(encode "$ARTIFACT_SHA")" \
     PLATFORM_ADMISSION_RECEIPT_SHA256_B64="$(encode "$ADMISSION_SHA")" \
     PLATFORM_ARTIFACT_RECEIPT_B64="$(encode_file "$TMP/artifact.json")" \
@@ -323,8 +324,8 @@ grep -F -- '--pull never' "$TMP/compose-up-args" >/dev/null
 if grep -Eq '(^| )--build( |$)' "$TMP/compose-up-args"; then echo "FAIL: remote deploy still permits build-on-host" >&2; exit 1; fi
 printf 'PASS\texact-gates-before-prepare-and-compose-up\n'
 
-grep -F 'timeout 120 sudo -n sh ./scripts/cloudflare-origin-lock-ufw.sh --apply' "$SCRIPT_DIR/deploy-vps-remote.sh" >/dev/null
-grep -F 'timeout 120 sh ./scripts/cloudflare-origin-lock-ufw.sh --verify' "$SCRIPT_DIR/deploy-vps-remote.sh" >/dev/null
+grep -F 'timeout 120 sudo -n sh ./scripts/cloudflare-origin-lock-ufw.sh --apply' "$SCRIPT_DIR/deploy-vps-remote.sh" | grep -F -- '--ssh-port "$ssh_port"' >/dev/null
+grep -F 'timeout 120 sh ./scripts/cloudflare-origin-lock-ufw.sh --verify' "$SCRIPT_DIR/deploy-vps-remote.sh" | grep -F -- '--ssh-port "$ssh_port"' >/dev/null
 grep -F 'timeout 300 sh ./scripts/prepare-vps-runtime.sh' "$SCRIPT_DIR/deploy-vps-remote.sh" >/dev/null
 grep -F 'timeout "$activation_timeout_seconds" docker compose' "$SCRIPT_DIR/deploy-vps-remote.sh" >/dev/null
 grep -F 'timeout "$postactivation_timeout_seconds" sh ./scripts/vps-postdeploy.sh' "$SCRIPT_DIR/deploy-vps-remote.sh" >/dev/null

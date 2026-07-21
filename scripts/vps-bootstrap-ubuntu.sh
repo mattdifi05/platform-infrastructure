@@ -232,7 +232,7 @@ fi
 
 echo "==> Ubuntu package baseline"
 run apt-get update
-run apt-get install -y ca-certificates curl git jq
+run apt-get install -y ca-certificates curl git jq python3
 
 echo "==> Docker official apt repository"
 run install -m 0755 -d /etc/apt/keyrings
