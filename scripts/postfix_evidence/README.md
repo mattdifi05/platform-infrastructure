@@ -96,3 +96,31 @@ Run the tests with:
 ```sh
 python3 -m unittest discover -s scripts/postfix_evidence/tests -v
 ```
+
+Build only after every handoff hash and the current semantic trust root are
+known:
+
+```sh
+python3 -m scripts.postfix_evidence.build_postfix_package \
+  --baseline /absolute/path/to/outputs \
+  --group-map /absolute/path/to/security_fix_groups_v1.jsonl \
+  --handoff /absolute/path/to/handoff.json \
+  --candidate-repo /absolute/path/to/final-candidate \
+  --output /absolute/path/to/postfix-package \
+  --semantic-receipt-sha256 CURRENT_64_HEX_SHA256
+```
+
+Revalidate the published sibling package independently with:
+
+```sh
+python3 -m scripts.postfix_evidence.validate_postfix_package \
+  --package /absolute/path/to/postfix-package \
+  --baseline /absolute/path/to/outputs \
+  --group-map /absolute/path/to/security_fix_groups_v1.jsonl \
+  --candidate-repo /absolute/path/to/final-candidate \
+  --semantic-receipt-sha256 CURRENT_64_HEX_SHA256
+```
+
+Both commands return structured JSON and a nonzero exit status on failure.  The
+output directory must not already exist and must be external to both candidate
+and baseline.

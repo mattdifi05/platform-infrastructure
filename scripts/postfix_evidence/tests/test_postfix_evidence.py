@@ -28,6 +28,22 @@ REQUIRED_LOCAL_CLOSURES = (
     "ULTRA-GAP-042",
 )
 
+BASELINE_LOCAL_BLOCKERS = tuple(
+    dict.fromkeys(
+        (
+            "DOC-EVD-001",
+            "DOC-EVD-002",
+            "DOC-EVD-006",
+            "DOC-EVD-007",
+            "ULTRA-GAP-023",
+            "ULTRA-GAP-024",
+            "ULTRA-GAP-025",
+            "ULTRA-GAP-026",
+            *REQUIRED_LOCAL_CLOSURES,
+        )
+    )
+)
+
 REQUIRED_LIVE_RESIDUALS = (
     "LIVE-BKP-006",
     "LIVE-OPS-001",
@@ -125,6 +141,8 @@ class Fixture:
         self.cohort_commit = self._git_commit("cohort implementation")
 
         run_git(self.repo, "switch", "-q", "-c", "final", self.baseline_commit)
+        (self.repo / "integration-note.txt").write_text("unrelated integration\n", encoding="utf-8")
+        self.unrelated_commit = self._git_commit("unrelated integration")
         (self.repo / "tracked.txt").write_text("baseline\nstructural fix\n", encoding="utf-8")
         self.final_commit = self._git_commit("integrated implementation")
         self.final_tree = run_git(self.repo, "rev-parse", "HEAD^{tree}")
@@ -193,7 +211,7 @@ class Fixture:
     def _make_baseline(self) -> None:
         reportable_ids = [f"CAN-{number:03d}" for number in range(1, 136)]
         suppressed_ids = [f"CAN-{number:03d}" for number in range(136, 241)]
-        auxiliary_ids = [*REQUIRED_LOCAL_CLOSURES, *REQUIRED_LIVE_RESIDUALS]
+        auxiliary_ids = [*BASELINE_LOCAL_BLOCKERS, *REQUIRED_LIVE_RESIDUALS]
         auxiliary_ids.extend(f"AUX-{number:03d}" for number in range(1, 102 - len(auxiliary_ids)))
         if len(auxiliary_ids) != 101:
             raise AssertionError("fixture auxiliary cardinality")
@@ -228,7 +246,7 @@ class Fixture:
                 )
             )
         for item_id in auxiliary_ids:
-            is_local = item_id in REQUIRED_LOCAL_CLOSURES
+            is_local = item_id in BASELINE_LOCAL_BLOCKERS
             is_live = item_id in REQUIRED_LIVE_RESIDUALS
             rows.append(
                 self._classification_row(
@@ -324,7 +342,7 @@ class Fixture:
     def _make_handoff_inputs(self) -> None:
         post_rows = copy.deepcopy(self.baseline_rows)
         reportable = set(self.reportable_ids)
-        local = set(REQUIRED_LOCAL_CLOSURES)
+        local = set(BASELINE_LOCAL_BLOCKERS)
         for row in post_rows:
             item_id = str(row["id"])
             if item_id in reportable or item_id in local:
@@ -443,7 +461,7 @@ class Fixture:
         self._write_json(self.inputs / "pre-fix-negative.json", pre_fix)
 
         closures = []
-        for item_id in REQUIRED_LOCAL_CLOSURES:
+        for item_id in BASELINE_LOCAL_BLOCKERS:
             closures.append(
                 {
                     "schema_version": 1,
@@ -517,6 +535,8 @@ class Fixture:
             lines.append("| " + " | ".join("---" for _ in columns) + " |")
             exact = matrix["exact_count"]
             count = exact if exact is not None else max(matrix["minimum_count"], 1)
+            if matrix["id"].startswith("M01-"):
+                count = 134
             if matrix["id"].startswith("M15-"):
                 count = len(self.reportable_ids)
             for index in range(count):
@@ -678,6 +698,14 @@ class PostfixEvidenceTests(unittest.TestCase):
         with self.assertRaisesRegex(ContractError, "baseline"):
             self.build()
 
+    def test_every_baseline_local_blocker_requires_an_explicit_closure_row(self) -> None:
+        rows = self.fixture.load_jsonl("inputs/local-closures.jsonl")
+        rows = [row for row in rows if row["id"] != "DOC-EVD-001"]
+        self.fixture.write_jsonl("inputs/local-closures.jsonl", rows)
+        self.fixture.refresh_handoff_hash("local_condition_closure")
+        with self.assertRaisesRegex(ContractError, "required proof rows missing"):
+            self.build()
+
     def test_cohort_only_final_commit_mapping_is_rejected(self) -> None:
         rows = self.fixture.load_jsonl("inputs/fix-groups.jsonl")
         for row in rows:
@@ -687,10 +715,23 @@ class PostfixEvidenceTests(unittest.TestCase):
         with self.assertRaisesRegex(ContractError, "cohort-only"):
             self.build()
 
+    def test_reachable_but_non_equivalent_final_mapping_is_rejected(self) -> None:
+        rows = self.fixture.load_jsonl("inputs/fix-groups.jsonl")
+        for row in rows:
+            row["final_commit"] = self.fixture.unrelated_commit
+        self.fixture.write_jsonl("inputs/fix-groups.jsonl", rows)
+        self.fixture.refresh_handoff_hash("fix_group_ledger")
+        with self.assertRaisesRegex(ContractError, "patch-equivalent"):
+            self.build()
+
     def test_dirty_final_candidate_is_rejected(self) -> None:
         (self.fixture.repo / "untracked.txt").write_text("dirty\n", encoding="utf-8")
         with self.assertRaisesRegex(ContractError, "clean"):
             self.build()
+
+    def test_output_package_must_remain_external_to_candidate(self) -> None:
+        with self.assertRaisesRegex(ContractError, "external"):
+            self.build(output=self.fixture.repo / "evidence-package")
 
     def test_suppressed_row_mutation_is_rejected(self) -> None:
         rows = self.fixture.load_jsonl("inputs/classification.jsonl")
@@ -742,4 +783,3 @@ class PostfixEvidenceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
