@@ -817,6 +817,14 @@ export function verifyLockFiles(lock) {
   return true;
 }
 
+function verifyRawPolicyReceipt(lock) {
+  if (lock?.rawPolicyVersion !== "hosted-raw-v1"
+      || lock?.rawPolicyWorkloadContentSha256 !== lock?.workloadContentSha256
+      || !SHA256.test(String(lock?.rawPolicySha256 ?? ""))) {
+    invalid("Hosted workload lock has no valid raw source policy receipt.");
+  }
+}
+
 function parseArgs(values) {
   const out = { _: [] };
   for (let index = 0; index < values.length; index += 1) {
@@ -851,6 +859,7 @@ function main() {
     const lockPath = path.resolve(requiredText(args.lock, "--lock"));
     const lock = readJson(lockPath, "workload lock");
     verifyLockFiles(lock);
+    verifyRawPolicyReceipt(lock);
     const corePath = path.resolve(requiredText(args.coreRender, "--coreRender"));
     const combinedPath = path.resolve(requiredText(args.combinedRender, "--combinedRender"));
     const validation = validateRenderedWorkloads({ core: readJson(corePath), combined: readJson(combinedPath), lock });
@@ -868,12 +877,14 @@ function main() {
     const lock = readJson(path.resolve(requiredText(args.lock, "--lock")), "workload lock");
     if (lock.state !== "verified") invalid("Workload lock is not verified.");
     verifyLockFiles(lock);
+    verifyRawPolicyReceipt(lock);
     return;
   }
   if (command === "compose-files") {
     const lock = readJson(path.resolve(requiredText(args.lock, "--lock")), "workload lock");
     if (lock.state !== "verified" && args.allowResolved !== "true") invalid("Workload lock is not verified.");
     verifyLockFiles(lock);
+    verifyRawPolicyReceipt(lock);
     process.stdout.write(`${lock.workloads.map((workload) => workload.composePath).join("\n")}\n`);
     return;
   }
@@ -881,6 +892,7 @@ function main() {
     const lock = readJson(path.resolve(requiredText(args.lock, "--lock")), "workload lock");
     if (lock.state !== "verified" && args.allowResolved !== "true") invalid("Workload lock is not verified.");
     verifyLockFiles(lock);
+    verifyRawPolicyReceipt(lock);
     process.stdout.write(`${lock.workloads.map((workload) => workload.environmentPath).join("\n")}\n`);
     return;
   }

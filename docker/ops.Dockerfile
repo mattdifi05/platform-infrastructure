@@ -17,6 +17,7 @@ RUN apk add --no-cache \
     docker-cli-compose \
     git \
     openssh-client \
+    ruby \
     tini
 
 RUN curl --fail --location --silent --show-error \

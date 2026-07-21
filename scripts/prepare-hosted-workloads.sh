@@ -80,6 +80,13 @@ docker run --rm --network none --user "$(id -u):$(id -g)" --entrypoint node \
     --snapshotRoot "$snapshot_root" \
     --output "$resolved"
 
+docker run --rm --network none --user "$(id -u):$(id -g)" --entrypoint ruby \
+  -v "$INFRA_ROOT:$INFRA_ROOT:ro" \
+  -v "$(dirname "$OUTPUT"):$(dirname "$OUTPUT"):ro" \
+  -v "$TMP:$TMP" \
+  -w "$INFRA_ROOT" \
+  "$OPS_IMAGE" scripts/hosted-workload-source-policy.rb --lock "$resolved"
+
 COMPOSE_ENV_FILE="$ENV_FILE" COMPOSE_PROJECT_NAME="$PROJECT_NAME" HOSTED_WORKLOAD_LOCK= \
   bash "$SCRIPT_DIR/compose-vps.sh" config --format json > "$core_render"
 
