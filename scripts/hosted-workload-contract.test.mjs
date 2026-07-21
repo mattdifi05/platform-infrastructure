@@ -358,7 +358,7 @@ test("raw policy receipt requires the exact current control set", () => {
     rawPolicyVersion: "hosted-raw-v1",
     rawPolicyWorkloadContentSha256: "a".repeat(64),
     rawPolicySha256: "b".repeat(64),
-    rawPolicyControls: ["deny-extends", "deny-include"],
+    rawPolicyControls: ["deny-env-file", "deny-extends", "deny-include"],
   };
   assert.doesNotThrow(() => verifyRawPolicyReceipt(receipt));
   receipt.rawPolicyControls = ["deny-include"];

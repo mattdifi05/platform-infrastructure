@@ -38,4 +38,19 @@ class HostedWorkloadSourcePolicyTest < Minitest::Test
     extends_model = parse("services:\n  app:\n    extends:\n      file: base.yaml\n      service: base\n")
     assert_raises(ArgumentError) { HostedWorkloadSourcePolicy.validate_source_model(extends_model, "fixture") }
   end
+
+  def test_rejects_every_env_file_form_before_compose_can_read_it
+    [
+      "../../host.env",
+      "/etc/credential-bearing.env",
+      ["linked.env", "mutable.env"],
+      [{ "path" => "workload.env", "required" => false }]
+    ].each do |env_file|
+      model = { "services" => { "app" => { "env_file" => env_file } } }
+      error = assert_raises(ArgumentError) do
+        HostedWorkloadSourcePolicy.validate_source_model(model, "fixture")
+      end
+      assert_match(/cannot use env_file/, error.message)
+    end
+  end
 end
