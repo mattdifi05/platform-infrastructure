@@ -5,6 +5,7 @@
   "trustedProducer": {
     "repository": null,
     "workflowPath": null,
+    "workflowSha": null,
     "sourceRef": null,
     "event": null
   },

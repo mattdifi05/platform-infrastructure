@@ -18,6 +18,7 @@ const policy = {
   trustedProducer: {
     repository: "owner/trusted-admission",
     workflowPath: ".github/workflows/produce-admission.yml",
+    workflowSha: "4".repeat(40),
     sourceRef: "refs/heads/main",
     event: "workflow_dispatch",
   },
@@ -64,7 +65,6 @@ const deploymentReceipt = {
     ...policy.trustedProducer,
     runId: "123456",
     runAttempt: 2,
-    workflowSha: "4".repeat(40),
   },
 };
 const options = {

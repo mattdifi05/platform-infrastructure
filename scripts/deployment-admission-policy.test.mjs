@@ -7,7 +7,7 @@ const policy = JSON.parse(fs.readFileSync("governance/deployment-admission.json"
 const rego = fs.readFileSync("security/admission/cosign-digest-policy.rego", "utf8");
 assert.equal(policy.status, "EXTERNAL-PENDING");
 assert.equal(policy.trustedVerifierChannel, null);
-assert.deepEqual(policy.trustedProducer, { repository: null, workflowPath: null, sourceRef: null, event: null });
+assert.deepEqual(policy.trustedProducer, { repository: null, workflowPath: null, workflowSha: null, sourceRef: null, event: null });
 assert.equal(policy.selfAssertedAnnotationsAccepted, false);
 assert.match(rego, /EXTERNAL-PENDING/);
 assert.doesNotMatch(rego, /metadata\.annotations/);
@@ -19,7 +19,7 @@ assert.throws(
 assert.throws(
   () => assertDeploymentAdmissionConfigured({
     status: "READY", trustedVerifierChannel: "external/prod", selfAssertedAnnotationsAccepted: false,
-    trustedProducer: { repository: null, workflowPath: null, sourceRef: null, event: null },
+    trustedProducer: { repository: null, workflowPath: null, workflowSha: null, sourceRef: null, event: null },
   }),
   /EXTERNAL-PENDING/,
 );

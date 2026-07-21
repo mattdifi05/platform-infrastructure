@@ -95,6 +95,7 @@ export function validateTrustedDeploymentReceipt(receipt, {
   if (
     producer?.repository !== configuredProducer.repository
     || producer?.workflowPath !== configuredProducer.workflowPath
+    || producer?.workflowSha !== configuredProducer.workflowSha
     || producer?.sourceRef !== configuredProducer.sourceRef
     || producer?.event !== configuredProducer.event
     || !/^[1-9][0-9]*$/.test(String(producer?.runId ?? ""))

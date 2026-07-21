@@ -57,6 +57,7 @@ export function trustedProducerConfiguration(policy) {
     return {
       repository: exactRepository(producer?.repository),
       workflowPath: exactWorkflowPath(producer?.workflowPath),
+      workflowSha: exactGitSha(producer?.workflowSha),
       sourceRef: exactSourceRef(producer?.sourceRef),
       event: String(producer?.event ?? "") === "workflow_dispatch" ? "workflow_dispatch" : invalid("trusted producer event must be workflow_dispatch."),
     };
@@ -77,6 +78,7 @@ export function validateTrustedProviderRun(run, { policy, runId, runAttempt, dep
     || run?.repository?.full_name !== configured.repository
     || run?.head_repository?.full_name !== configured.repository
     || run?.path !== configured.workflowPath
+    || workflowSha !== configured.workflowSha
     || actualRef !== configured.sourceRef
     || run?.event !== configured.event
     || run?.status !== "completed"
@@ -91,10 +93,18 @@ export function validateTrustedProviderRun(run, { policy, runId, runAttempt, dep
     event: configured.event,
     runId: expectedRunId,
     runAttempt: expectedRunAttempt,
-    workflowSha,
+    workflowSha: configured.workflowSha,
   };
-  if (deploymentReceipt !== null && JSON.stringify(deploymentReceipt?.producer) !== JSON.stringify(producer)) {
-    invalid("Trusted deployment receipt does not bind the authenticated provider run identity.");
+  if (deploymentReceipt !== null) {
+    const candidate = deploymentReceipt?.producer;
+    const exactKeys = ["event", "repository", "runAttempt", "runId", "sourceRef", "workflowPath", "workflowSha"];
+    if (
+      !candidate
+      || JSON.stringify(Object.keys(candidate).sort()) !== JSON.stringify(exactKeys)
+      || exactKeys.some((key) => candidate[key] !== producer[key])
+    ) {
+      invalid("Trusted deployment receipt does not bind the authenticated provider run identity.");
+    }
   }
   return producer;
 }

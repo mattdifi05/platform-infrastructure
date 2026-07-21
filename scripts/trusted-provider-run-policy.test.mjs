@@ -9,6 +9,7 @@ const policy = {
   trustedProducer: {
     repository: "owner/trusted-admission",
     workflowPath: ".github/workflows/produce-admission.yml",
+    workflowSha: "a".repeat(40),
     sourceRef: "refs/heads/main",
     event: "workflow_dispatch",
   },
@@ -29,7 +30,6 @@ const producer = {
   ...policy.trustedProducer,
   runId: "123456",
   runAttempt: 2,
-  workflowSha: "a".repeat(40),
 };
 
 assert.deepEqual(trustedProducerConfiguration(policy), policy.trustedProducer);
@@ -43,6 +43,9 @@ assert.throws(() => validateTrustedProviderRun({ ...run, path: ".github/workflow
 assert.throws(() => validateTrustedProviderRun({ ...run, conclusion: "failure" }, {
   policy, runId: "123456", runAttempt: "2",
 }), /does not match/);
+assert.throws(() => validateTrustedProviderRun({ ...run, head_sha: "b".repeat(40) }, {
+  policy, runId: "123456", runAttempt: "2",
+}), /does not match/);
 assert.throws(() => validateTrustedProviderRun(run, {
   policy, runId: "123456", runAttempt: "1",
 }), /does not match/);
@@ -53,4 +56,4 @@ assert.throws(() => trustedProducerConfiguration({
   status: "EXTERNAL-PENDING", trustedVerifierChannel: null, selfAssertedAnnotationsAccepted: false,
 }), /EXTERNAL-PENDING/);
 
-process.stdout.write("trusted provider run policy tests passed 8/8\n");
+process.stdout.write("trusted provider run policy tests passed 9/9\n");
