@@ -1,5 +1,6 @@
 #!/usr/bin/env sh
 set -eu
+umask 077
 
 IMAGE=${1:-}
 RECEIPT=${2:-}
@@ -16,11 +17,17 @@ case "$EXPECTED_RECEIPT_SHA256" in
 esac
 [ "${#EXPECTED_RECEIPT_SHA256}" -eq 64 ] || { echo "PLATFORM_OPS_IMAGE_ADMISSION_RECEIPT_SHA256 must be complete." >&2; exit 1; }
 [ -f "$RECEIPT" ] && [ -r "$RECEIPT" ] || { echo "Ops image admission receipt is missing or unreadable." >&2; exit 1; }
+[ ! -L "$RECEIPT" ] || { echo "Ops image admission receipt must not be a symbolic link." >&2; exit 1; }
+
+stable_receipt=$(mktemp "${TMPDIR:-/tmp}/ops-image-admission-receipt.XXXXXX")
+trap 'rm -f "$stable_receipt"' EXIT HUP INT TERM
+cp "$RECEIPT" "$stable_receipt"
+chmod 600 "$stable_receipt"
 
 if command -v sha256sum >/dev/null 2>&1; then
-  actual_receipt_sha256=$(sha256sum "$RECEIPT" | awk '{print $1}')
+  actual_receipt_sha256=$(sha256sum "$stable_receipt" | awk '{print $1}')
 else
-  actual_receipt_sha256=$(shasum -a 256 "$RECEIPT" | awk '{print $1}')
+  actual_receipt_sha256=$(shasum -a 256 "$stable_receipt" | awk '{print $1}')
 fi
 [ "$actual_receipt_sha256" = "$EXPECTED_RECEIPT_SHA256" ] || { echo "Ops image admission receipt SHA256 mismatch." >&2; exit 1; }
 
@@ -32,7 +39,7 @@ jq -e --arg image "$IMAGE" '
   (.commitSha | type == "string" and test("^[a-f0-9]{40}$")) and
   (.provenance.verificationFingerprint | type == "string" and test("^[a-f0-9]{64}$")) and
   ([.subjects[]? | select(.key == "PLATFORM_OPS_IMAGE" and .image == $image)] | length == 1)
-' "$RECEIPT" >/dev/null || { echo "Ops image admission receipt does not bind the exact PLATFORM_OPS_IMAGE." >&2; exit 1; }
+' "$stable_receipt" >/dev/null || { echo "Ops image admission receipt does not bind the exact PLATFORM_OPS_IMAGE." >&2; exit 1; }
 
 inspect_json=$(docker image inspect "$IMAGE")
 image_id=$(printf '%s' "$inspect_json" | jq -er --arg image "$IMAGE" '
