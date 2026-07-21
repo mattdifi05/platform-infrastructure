@@ -375,4 +375,3 @@ def ensure_path_at_commit(repo: Path, commit: str, evidence: str) -> None:
         raise ContractError("candidate evidence: unable to inspect Git object") from error
     if completed.returncode != 0:
         raise ContractError(f"candidate evidence: path is absent at final commit: {relative}")
-

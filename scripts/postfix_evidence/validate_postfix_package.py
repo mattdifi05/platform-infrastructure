@@ -134,6 +134,11 @@ GLOBAL_TEST_PHASES = frozenset(
     {"full-suite", "differential-scan", "adversarial-qa", "documentation-validation"}
 )
 
+SAFE_RECEIPT_ID_RE = re.compile(r"^[A-Z0-9][A-Z0-9._-]{0,127}$")
+SECRET_COMMAND_RE = re.compile(
+    r"(?i)(?:password|passwd|api[_-]?key|access[_-]?token|private[_-]?key)\s*=\s*.+"
+)
+
 PACKAGE_REQUIRED_FILES = frozenset(
     {
         "README.md",
@@ -223,6 +228,8 @@ def _unique_rows(rows: list[dict[str, Any]], key: str, *, label: str) -> dict[st
 
 
 def _validate_baseline(root: Path) -> Baseline:
+    if root.is_symlink() or not root.is_dir():
+        raise ContractError("baseline: trust root must be a real directory")
     required = {
         "finding_classification_ledger.jsonl",
         "inventory_ledger.jsonl",
@@ -408,6 +415,28 @@ def _validate_classification(
     by_id = _unique_rows(rows, "id", label="post-fix classification")
     if len(rows) != 341 or set(by_id) != set(baseline.by_id):
         raise ContractError("post-fix classification: exact 341-row baseline universe was not preserved")
+    boolean_fields = (
+        "candidate_affected",
+        "live_affected",
+        "corrected_in_t1_t23",
+        "is_new",
+        "blocks_merge",
+        "blocks_deploy",
+        "blocks_go_to_deploy",
+        "blocks_only_production_go",
+    )
+    for item_id, row in by_id.items():
+        prior = baseline.by_id[item_id]
+        if set(row) != set(prior):
+            raise ContractError(f"post-fix classification: schema surface changed for {item_id}")
+        if row.get("schema_version") != 2:
+            raise ContractError(f"post-fix classification: unsupported schema version for {item_id}")
+        if any(type(row.get(field)) is not bool for field in boolean_fields):
+            raise ContractError(f"post-fix classification: invalid boolean field for {item_id}")
+        if not isinstance(row.get("affected_scope"), list) or any(
+            not isinstance(scope, str) for scope in row["affected_scope"]
+        ):
+            raise ContractError(f"post-fix classification: invalid affected scope for {item_id}")
     for item_id in baseline.suppressed_ids:
         if by_id[item_id] != baseline.by_id[item_id]:
             raise ContractError(f"post-fix classification: suppressed row changed: {item_id}")
@@ -460,6 +489,8 @@ def _validate_test_receipts(
     seen_global: set[str] = set()
     allowed_phases = set(GROUP_RECEIPT_FIELDS.values()) | set(GLOBAL_TEST_PHASES)
     for receipt_id, row in by_id.items():
+        if SAFE_RECEIPT_ID_RE.fullmatch(receipt_id) is None:
+            raise ContractError(f"test receipt {receipt_id}: unsafe receipt ID")
         exact_keys(
             row,
             {
@@ -486,6 +517,8 @@ def _validate_test_receipts(
         command = string_list(row["command"], label=f"test receipt {receipt_id} command")
         if any("\n" in item or "\x00" in item for item in command):
             raise ContractError(f"test receipt {receipt_id}: unsafe command encoding")
+        if any(SECRET_COMMAND_RE.search(item) for item in command):
+            raise ContractError(f"test receipt {receipt_id}: credential-like command argument")
         groups = string_list(row["group_ids"], label=f"test receipt {receipt_id} groups", allow_empty=True)
         if not set(groups).issubset(valid_groups):
             raise ContractError(f"test receipt {receipt_id}: unknown fix group")
@@ -523,6 +556,7 @@ def _validate_fix_groups(
                 "group_id",
                 "canonical_ids",
                 "cohort",
+                "integration_mode",
                 "cohort_commit",
                 "final_commit",
                 "source",
@@ -540,6 +574,9 @@ def _validate_fix_groups(
         if row["canonical_ids"] != source_by_id[group_id]["canonical_ids"]:
             raise ContractError(f"fix-group ledger {group_id}: canonical ID projection changed")
         nonempty_string(row["cohort"], label=f"fix-group ledger {group_id} cohort")
+        integration_mode = row["integration_mode"]
+        if integration_mode not in {"cherry-pick", "direct-final"}:
+            raise ContractError(f"fix-group ledger {group_id}: invalid integration mode")
         for field in ("source", "control", "sink"):
             string_list(row[field], label=f"fix-group ledger {group_id} {field}")
         nonempty_string(row["remediation_boundary"], label=f"fix-group ledger {group_id} remediation boundary")
@@ -548,15 +585,32 @@ def _validate_fix_groups(
             ensure_path_at_commit(repo, final_head, evidence)
         cohort = resolve_commit(repo, row["cohort_commit"], label=f"fix-group ledger {group_id} cohort commit")
         final = resolve_commit(repo, row["final_commit"], label=f"fix-group ledger {group_id} final commit")
-        if cohort == final:
+        if integration_mode == "direct-final" and cohort != final:
+            raise ContractError(
+                f"fix-group ledger {group_id}: direct-final mode requires identical commit fields"
+            )
+        if integration_mode == "cherry-pick" and cohort == final:
             raise ContractError(
                 f"fix-group ledger {group_id}: cohort-only SHA is not a final integration mapping"
             )
         ensure_ancestor(repo, final, final_head, label=f"fix-group ledger {group_id} final mapping")
-        pair = (cohort, final)
-        if pair not in cache:
-            cache[pair] = commit_equivalence(repo, cohort, final)
-        equivalence_by_group.append({"group_id": group_id, **cache[pair]})
+        if integration_mode == "direct-final":
+            equivalence_by_group.append(
+                {
+                    "group_id": group_id,
+                    "integration_mode": integration_mode,
+                    "cohort_commit": cohort,
+                    "final_commit": final,
+                    "accepted_by": "direct-final-identity",
+                }
+            )
+        else:
+            pair = (cohort, final)
+            if pair not in cache:
+                cache[pair] = commit_equivalence(repo, cohort, final)
+            equivalence_by_group.append(
+                {"group_id": group_id, "integration_mode": integration_mode, **cache[pair]}
+            )
         for field, phase in GROUP_RECEIPT_FIELDS.items():
             receipt_ids = string_list(row[field], label=f"fix-group ledger {group_id} {field}")
             for receipt_id in receipt_ids:
@@ -610,6 +664,8 @@ def _validate_pre_fix_receipt(
             raise ContractError(f"pre-fix negative receipt: invalid runner kind for {group_id}")
         counts[runner_kind] += 1
         command = string_list(row["command"], label=f"pre-fix execution {group_id} command")
+        if any(SECRET_COMMAND_RE.search(item) for item in command):
+            raise ContractError(f"pre-fix negative receipt: credential-like command argument for {group_id}")
         executable = Path(command[0]).name
         if runner_kind == "make-wrapper" and executable not in {"make", "gmake"}:
             raise ContractError(f"pre-fix negative receipt: {group_id} is not a Make wrapper")
@@ -937,6 +993,7 @@ def _derive_finding_map(
                     "schema_version": 1,
                     "canonical_id": canonical_id,
                     "group_id": group["group_id"],
+                    "integration_mode": group["integration_mode"],
                     "cohort_commit": group["cohort_commit"],
                     "final_commit": group["final_commit"],
                     "test_receipt_ids": receipt_ids,
@@ -1094,6 +1151,21 @@ def validate_package(
     candidate_repo: Path,
     semantic_receipt_sha256: str,
 ) -> dict[str, Any]:
+    if package.is_symlink() or not package.is_dir():
+        raise ContractError("package: trust root must be a real directory")
+    package_root = package.resolve(strict=True)
+    candidate_root = candidate_repo.resolve(strict=True)
+    baseline_root = baseline.resolve(strict=True)
+    for forbidden_root, label in (
+        (candidate_root, "candidate repository"),
+        (baseline_root, "authoritative baseline"),
+    ):
+        try:
+            package_root.relative_to(forbidden_root)
+        except ValueError:
+            pass
+        else:
+            raise ContractError(f"package: package must be external to the {label}")
     manifest = validate_manifest(package, exact=True, required=PACKAGE_REQUIRED_FILES - {"MANIFEST.sha256"})
     baseline_data = _validate_baseline(baseline)
     group_rows, group_hash = _validate_group_map(group_map, baseline_data.reportable_ids)

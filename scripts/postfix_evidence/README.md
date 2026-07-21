@@ -18,11 +18,13 @@ semantic-completion receipt with `--semantic-receipt-sha256`.  There is no
 count-dependent or historical snapshot hash in the code.
 
 The candidate worktree must be clean.  Its exact `HEAD` and tree must match the
-handoff.  Every fix-group row has distinct `cohort_commit` and `final_commit`
-fields.  The final commit must resolve, be reachable from final `HEAD`, and be
-patch-equivalent to the cohort commit (stable patch-id or exact Git tree delta).
-A cohort-only SHA, an unreachable integration SHA, or a stale mapping is a hard
-failure.
+handoff.  Every fix-group row declares `integration_mode`.  For `cherry-pick`,
+`cohort_commit` and `final_commit` must be distinct; the final commit must
+resolve, be reachable from final `HEAD`, and be patch-equivalent to the cohort
+commit (stable patch-id or exact Git tree delta).  For `direct-final`, the two
+fields must be the same reachable commit because the fix was authored directly
+on the final candidate branch.  A cohort-only SHA mislabeled as `cherry-pick`,
+an unreachable integration SHA, or a stale mapping is a hard failure.
 
 ## Handoff manifest
 
@@ -59,7 +61,8 @@ FG-001 through FG-077 exactly once: exactly 72 `make-wrapper` executions and 5
 access were all disabled.  Every execution binds a regular log by SHA-256.
 
 Each fix-group ledger row preserves the canonical IDs from the group map and
-records source, control, sink, remediation boundary, cohort/final commits,
+records source, control, sink, remediation boundary, integration mode,
+cohort/final commits,
 consumer evidence, and receipt IDs for negative, positive, regression, hostile,
 and independent-QA tests.  Test receipts bind final `HEAD` and hash-bound logs.
 The registry also needs candidate-wide receipts for the full suite,

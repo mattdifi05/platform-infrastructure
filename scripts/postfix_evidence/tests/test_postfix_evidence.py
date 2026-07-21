@@ -379,6 +379,7 @@ class Fixture:
                     "group_id": group["group_id"],
                     "canonical_ids": group["canonical_ids"],
                     "cohort": "fixture",
+                    "integration_mode": "cherry-pick",
                     "cohort_commit": self.cohort_commit,
                     "final_commit": self.final_commit,
                     "source": ["untrusted fixture input"],
@@ -724,6 +725,15 @@ class PostfixEvidenceTests(unittest.TestCase):
         with self.assertRaisesRegex(ContractError, "patch-equivalent"):
             self.build()
 
+    def test_explicit_direct_final_identity_is_accepted(self) -> None:
+        rows = self.fixture.load_jsonl("inputs/fix-groups.jsonl")
+        rows[0]["integration_mode"] = "direct-final"
+        rows[0]["cohort_commit"] = self.fixture.final_commit
+        rows[0]["final_commit"] = self.fixture.final_commit
+        self.fixture.write_jsonl("inputs/fix-groups.jsonl", rows)
+        self.fixture.refresh_handoff_hash("fix_group_ledger")
+        self.assertTrue(self.build()["ok"])
+
     def test_dirty_final_candidate_is_rejected(self) -> None:
         (self.fixture.repo / "untracked.txt").write_text("dirty\n", encoding="utf-8")
         with self.assertRaisesRegex(ContractError, "clean"):
@@ -747,6 +757,14 @@ class PostfixEvidenceTests(unittest.TestCase):
         del manifest["files"]["required_matrices"]
         self.fixture._write_json(self.fixture.handoff, manifest)
         with self.assertRaisesRegex(ContractError, "handoff"):
+            self.build()
+
+    def test_unsafe_test_receipt_identity_cannot_escape_package(self) -> None:
+        rows = self.fixture.load_jsonl("inputs/test-receipts.jsonl")
+        rows[0]["receipt_id"] = "../ESCAPE"
+        self.fixture.write_jsonl("inputs/test-receipts.jsonl", rows)
+        self.fixture.refresh_handoff_hash("test_receipt_registry")
+        with self.assertRaisesRegex(ContractError, "unsafe receipt ID"):
             self.build()
 
     def test_matrix_set_requires_m01_through_m15_and_exact_m15_projection(self) -> None:
