@@ -111,6 +111,7 @@ test("Admin Control Center local foundation", async (t) => {
       PROJECT_STATUS_RUNS_FILE: statusRunsFile,
       PROJECT_STATUS_RUN_EVENTS_FILE: statusRunEventsFile,
       CONTROL_CENTER_STATUS_STEP_DELAY_MS: "0",
+      CONTROL_CENTER_STATUS_STREAM_MAX_PER_PRINCIPAL: "1",
       CONTROL_CENTER_STATUS_PROBE_TIMEOUT_MS: "500",
       CONTROL_CENTER_HOST: "portal.localhost.com",
       DOCS_HOST: "docs.localhost.com",
@@ -990,6 +991,32 @@ test("Admin Control Center local foundation", async (t) => {
   assert.match(statusEventText, /"type":"check-started"/);
   assert.match(statusEventText, /"type":"check-completed"/);
   assert.match(statusEventText, /"type":"run-completed"/);
+  const resumedStatusEventStream = await fetch(`${baseUrl}/control/v1/status/events/stream?runId=${streamedRunId}`, {
+    headers: { "last-event-id": "2" },
+  });
+  assert.equal(resumedStatusEventStream.status, 200);
+  const resumedStatusEventText = await resumedStatusEventStream.text();
+  assert.doesNotMatch(resumedStatusEventText, /^id: [12]$/m);
+  assert.match(resumedStatusEventText, /^id: 3$/m);
+  assert.match(resumedStatusEventText, /^id: 4$/m);
+
+  const heldStreamController = new AbortController();
+  const heldStream = await fetch(`${baseUrl}/control/v1/status/events/stream?runId=status-quota-held`, {
+    signal: heldStreamController.signal,
+  });
+  assert.equal(heldStream.status, 200);
+  const rejectedStream = await fetch(`${baseUrl}/control/v1/status/events/stream?runId=status-quota-rejected`);
+  assert.equal(rejectedStream.status, 429);
+  assert.doesNotMatch(rejectedStream.headers.get("content-type") || "", /text\/event-stream/);
+  assert.equal((await rejectedStream.json()).error, "status_stream_principal_quota");
+  heldStreamController.abort();
+  await heldStream.body?.cancel().catch(() => {});
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  const streamAfterDisconnect = await fetch(`${baseUrl}/control/v1/status/events/stream?runId=${streamedRunId}`, {
+    headers: { "last-event-id": "3" },
+  });
+  assert.equal(streamAfterDisconnect.status, 200);
+  assert.match(await streamAfterDisconnect.text(), /^id: 4$/m);
   const statusHtmlAfterRun = await getText(`${baseUrl}/?section=status`);
   assert.match(statusHtmlAfterRun, /Ultimo run/);
   assert.match(statusHtmlAfterRun, /data-status-run-step-mark/);
@@ -4204,6 +4231,7 @@ function isolatedStateEnv(stateRoot) {
     PROJECT_STATUS_RUNS_FILE: path.join(stateRoot, "status-runs.jsonl"),
     PROJECT_STATUS_RUN_EVENTS_FILE: path.join(stateRoot, "status-run-events.jsonl"),
     CONTROL_CENTER_STATUS_STEP_DELAY_MS: "0",
+    CONTROL_CENTER_STATUS_STREAM_MAX_PER_PRINCIPAL: "1",
   };
 }
 

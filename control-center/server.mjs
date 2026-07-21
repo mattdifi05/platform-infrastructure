@@ -47,6 +47,11 @@ import {
 import { controlIcon } from "./components/ui/controlIcons.mjs";
 import { createControlStateStore, validateStateRecord } from "./state/catalog.mjs";
 import { executeStatusChecks } from "./status/executor.mjs";
+import {
+  createStatusEventBroker,
+  pumpStatusEventStream,
+  StatusEventStreamError,
+} from "./status/event-stream.mjs";
 import { createProjectDiskUsageReader, unavailableUsage as unavailableProjectDiskUsage } from "./resources/project-disk-usage.mjs";
 
 const port = Number(process.env.CONTROL_CENTER_PORT || 8080);
@@ -126,6 +131,31 @@ const statusEventMaxRecordBytes = Math.min(
   statusEventTailMaxBytes,
   clampNumber(Number(process.env.CONTROL_CENTER_STATUS_EVENT_MAX_RECORD_BYTES || 256 * 1024), 1024, 4 * 1024 * 1024),
 );
+const statusEventRetentionMaxRecords = clampNumber(Number(process.env.CONTROL_CENTER_STATUS_EVENT_RETENTION_MAX_RECORDS || 5000), 100, 100000);
+const statusEventRetentionMaxBytes = clampNumber(Number(process.env.CONTROL_CENTER_STATUS_EVENT_RETENTION_MAX_BYTES || 8 * 1024 * 1024), 64 * 1024, 64 * 1024 * 1024);
+const statusEventRetentionMaxRecordBytes = Math.min(
+  statusEventRetentionMaxBytes,
+  clampNumber(Number(process.env.CONTROL_CENTER_STATUS_EVENT_RETENTION_MAX_RECORD_BYTES || 256 * 1024), 1024, 4 * 1024 * 1024),
+);
+const statusStreamMaxSubscribers = clampNumber(Number(process.env.CONTROL_CENTER_STATUS_STREAM_MAX_SUBSCRIBERS || 64), 1, 4096);
+const statusStreamMaxSubscribersPerPrincipal = Math.min(
+  statusStreamMaxSubscribers,
+  clampNumber(Number(process.env.CONTROL_CENTER_STATUS_STREAM_MAX_PER_PRINCIPAL || 4), 1, 256),
+);
+const statusStreamMaxSubscribersPerRun = Math.min(
+  statusStreamMaxSubscribers,
+  clampNumber(Number(process.env.CONTROL_CENTER_STATUS_STREAM_MAX_PER_RUN || 16), 1, 1024),
+);
+const statusStreamHeartbeatMs = clampNumber(Number(process.env.CONTROL_CENTER_STATUS_STREAM_HEARTBEAT_MS || 15000), 100, 300000);
+const statusStreamMaxDurationMs = clampNumber(Number(process.env.CONTROL_CENTER_STATUS_STREAM_MAX_DURATION_MS || 6 * 60 * 1000), 1000, 24 * 60 * 60 * 1000);
+const statusStreamBackpressureTimeoutMs = clampNumber(Number(process.env.CONTROL_CENTER_STATUS_STREAM_BACKPRESSURE_TIMEOUT_MS || 5000), 100, 60000);
+const statusEventBroker = createStatusEventBroker({
+  maxSubscribers: statusStreamMaxSubscribers,
+  maxSubscribersPerPrincipal: statusStreamMaxSubscribersPerPrincipal,
+  maxSubscribersPerRun: statusStreamMaxSubscribersPerRun,
+  maxQueueEvents: clampNumber(Number(process.env.CONTROL_CENTER_STATUS_STREAM_QUEUE_EVENTS || 128), 1, 10000),
+  maxQueueBytes: clampNumber(Number(process.env.CONTROL_CENTER_STATUS_STREAM_QUEUE_BYTES || 1024 * 1024), 1024, 64 * 1024 * 1024),
+});
 const controlState = createControlStateStore(process.env);
 const controlAuth = await createControlCenterAuth();
 const requestIdentity = new AsyncLocalStorage();
@@ -519,6 +549,7 @@ function rawRequestPathname(requestTarget) {
 }
 
 async function shutdown() {
+  statusEventBroker.close();
   server.close(async () => {
     await controlAuth.close();
     process.exit(0);
@@ -564,7 +595,7 @@ async function handleApi(req, res, url, context, operation) {
 
     if (method === "GET" && route(parts, "control", "overview")) return json(res, context.overview);
     if (method === "GET" && route(parts, "control", "status", "events", "stream")) {
-      return streamStatusRunEvents(req, res, url.searchParams.get("runId") || "");
+      return await streamStatusRunEvents(req, res, url.searchParams.get("runId") || "");
     }
     if (method === "GET" && route(parts, "control", "status", "events")) {
       const runId = sanitizeIdentifier(url.searchParams.get("runId") || "");
@@ -786,6 +817,9 @@ async function handleApi(req, res, url, context, operation) {
   } catch (error) {
     if (error instanceof ValidationError) return json(res, { error: "validation_failed", message: error.message }, 422);
     if (error instanceof RejectedOperationError) return json(res, { error: "operation_rejected", message: error.message }, 409);
+    if (error instanceof StatusEventStreamError && !res.headersSent) {
+      return json(res, { error: error.code.toLowerCase(), message: error.message }, error.status);
+    }
     throw error;
   }
 
@@ -10258,7 +10292,13 @@ function readLatestStatusRun() {
 }
 
 function appendStatusRunEvent(event) {
-  controlState.append("statusRunEvents", sanitizeEvent(event));
+  const record = sanitizeEvent(event);
+  controlState.appendRetained("statusRunEvents", record, {
+    maxRecords: statusEventRetentionMaxRecords,
+    maxBytes: statusEventRetentionMaxBytes,
+    maxRecordBytes: statusEventRetentionMaxRecordBytes,
+  });
+  statusEventBroker.publish(record);
 }
 
 function readStatusRunEvents(limit = 200, runId = "") {
@@ -10291,36 +10331,84 @@ function readStatusRunEventPage(limit = 200, runId = "") {
 async function streamStatusRunEvents(req, res, requestedRunId) {
   if (!String(requestedRunId || "").trim()) throw new ValidationError("Status run ID is required.");
   const runId = normalizeStatusRunId(requestedRunId, 0);
-  res.writeHead(200, {
-    "content-type": "text/event-stream; charset=utf-8",
-    "cache-control": "no-store",
-    connection: "keep-alive",
-    "x-accel-buffering": "no",
-    "x-platform-control-center-runtime": "node",
-  });
-  res.flushHeaders?.();
-  let closed = false;
-  let lastSequence = 0;
-  let keepaliveAt = Date.now();
-  const deadline = Date.now() + 6 * 60 * 1000;
-  req.once("close", () => { closed = true; });
-  while (!closed && Date.now() < deadline) {
-    const events = readStatusRunEvents(2000, runId).filter((event) => Number(event.sequence || 0) > lastSequence);
-    for (const event of events) {
-      lastSequence = Math.max(lastSequence, Number(event.sequence || 0));
-      res.write(`id: ${lastSequence}\nevent: status\ndata: ${JSON.stringify(event)}\n\n`);
-      if (event.type === "run-completed") {
-        res.end();
-        return;
-      }
+  const afterSequence = statusStreamLastEventId(req);
+  const principal = requestIdentity.getStore()?.subject || "";
+  const subscription = statusEventBroker.subscribe({ principal, runId, afterSequence });
+  const controller = new AbortController();
+  const disconnect = () => {
+    controller.abort();
+    subscription.close("client-disconnect");
+  };
+  req.once("aborted", disconnect);
+  res.once("close", disconnect);
+  res.once("error", disconnect);
+  try {
+    const replay = readStatusRunEventPage(2000, runId);
+    const replayEvents = replay.events.filter((event) => Number(event.sequence || 0) > afterSequence);
+    if (subscription.closed) throw subscription.closeError || new StatusEventStreamError("Status stream closed before start.");
+    const replayState = validateStatusEventReplay(replay.events, replayEvents, afterSequence);
+    res.writeHead(200, {
+      "content-type": "text/event-stream; charset=utf-8",
+      "cache-control": "no-store",
+      connection: "keep-alive",
+      "x-accel-buffering": "no",
+      "x-platform-control-center-runtime": "node",
+    });
+    res.flushHeaders?.();
+    if (replayState.completedAtCursor) {
+      res.end();
+      return;
     }
-    if (Date.now() - keepaliveAt >= 15_000) {
-      res.write(": keepalive\n\n");
-      keepaliveAt = Date.now();
-    }
-    await new Promise((resolve) => setTimeout(resolve, 150));
+    await pumpStatusEventStream({
+      response: res,
+      subscription,
+      replayEvents,
+      afterSequence,
+      heartbeatMs: statusStreamHeartbeatMs,
+      maxDurationMs: statusStreamMaxDurationMs,
+      backpressureTimeoutMs: statusStreamBackpressureTimeoutMs,
+      signal: controller.signal,
+    });
+    if (!res.writableEnded && !res.destroyed) res.end();
+  } catch (error) {
+    if (!res.headersSent) throw error;
+    if (!res.destroyed) res.destroy();
+  } finally {
+    req.removeListener("aborted", disconnect);
+    res.removeListener("close", disconnect);
+    res.removeListener("error", disconnect);
+    controller.abort();
+    subscription.close("stream-finished");
   }
-  if (!closed) res.end();
+}
+
+function validateStatusEventReplay(retainedEvents, replayEvents, afterSequence) {
+  if (afterSequence > 0 && !retainedEvents.some((event) => Number(event.sequence || 0) === afterSequence)) {
+    throw new StatusEventStreamError("Status stream replay cursor is no longer retained.", "STATUS_STREAM_REPLAY_GAP", 409);
+  }
+  let cursor = afterSequence;
+  for (const event of replayEvents) {
+    const sequence = Number(event.sequence || 0);
+    if (!Number.isSafeInteger(sequence) || sequence !== cursor + 1) {
+      throw new StatusEventStreamError("Status stream replay contains a sequence gap.", "STATUS_STREAM_REPLAY_GAP", 409);
+    }
+    cursor = sequence;
+  }
+  return {
+    completedAtCursor: retainedEvents.some((event) => event.type === "run-completed" && Number(event.sequence || 0) <= afterSequence),
+  };
+}
+
+function statusStreamLastEventId(req) {
+  const header = Array.isArray(req.headers["last-event-id"])
+    ? req.headers["last-event-id"][0]
+    : req.headers["last-event-id"];
+  const value = String(header || "").trim();
+  if (!value) return 0;
+  if (!/^\d{1,16}$/.test(value) || !Number.isSafeInteger(Number(value))) {
+    throw new ValidationError("Last-Event-ID must be a non-negative safe integer.");
+  }
+  return Number(value);
 }
 
 function objectState(name) {

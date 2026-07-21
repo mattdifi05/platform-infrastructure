@@ -111,6 +111,39 @@ test("JSONL tail rejects an oversized or malformed selected record before valida
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+test("retained JSONL append bounds stored records and bytes while preserving the newest events", () => {
+  const { root, store } = fixture();
+  try {
+    for (let index = 0; index < 20; index += 1) {
+      store.appendRetained("audit", { id: `event-${index}`, payload: "x".repeat(180) }, {
+        maxRecords: 5,
+        maxBytes: 1024,
+        maxRecordBytes: 256,
+      });
+    }
+    const records = store.read("audit", { strict: true }).value;
+    assert.equal(records.length <= 5, true);
+    assert.equal(records.at(-1).id, "event-19");
+    assert.equal(statSync(path.join(root, "audit.jsonl")).size <= 1024, true);
+    const metadata = JSON.parse(readFileSync(path.join(root, "audit.jsonl.state-meta.json"), "utf8"));
+    assert.equal(metadata.recordCount, records.length);
+    assert.deepEqual(metadata.retention, { maxRecords: 5, maxBytes: 1024, maxRecordBytes: 256 });
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("retained JSONL append rejects same-size drift before extending a trusted generation", () => {
+  const { root, store } = fixture();
+  try {
+    const options = { maxRecords: 5, maxBytes: 1024, maxRecordBytes: 256 };
+    store.appendRetained("audit", { id: "trusted" }, options);
+    const filePath = path.join(root, "audit.jsonl");
+    const raw = readFileSync(filePath, "utf8");
+    writeFileSync(filePath, raw.replace("trusted", "altered"));
+    assert.equal(Buffer.byteLength(readFileSync(filePath)), Buffer.byteLength(raw));
+    assert.throws(() => store.appendRetained("audit", { id: "next" }, options), /changed outside the state store/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test("snapshot import is plan-only by default and returns rollback evidence", () => {
   const { root, store } = fixture();
   try {

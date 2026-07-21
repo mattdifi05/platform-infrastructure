@@ -6,6 +6,7 @@ import {
   existsSync,
   fstatSync,
   fsyncSync,
+  lstatSync,
   mkdirSync,
   openSync,
   readSync,
@@ -60,13 +61,13 @@ export class FileStateStore {
     strict = false,
     maxRecords = 100,
     maxBytes = 4 * 1024 * 1024,
-    maxRecordBytes = 256 * 1024,
+    maxRecordBytes,
   } = {}) {
     const definition = this.definition(name);
     if (definition.kind !== "jsonl") throw new StateValidationError(`${name} is not JSONL state.`);
     const recordLimit = boundedReadLimit(maxRecords, 1, 100_000, "tail record");
     const byteLimit = boundedReadLimit(maxBytes, 1, 64 * 1024 * 1024, "tail byte");
-    const recordByteLimit = boundedReadLimit(maxRecordBytes, 1, byteLimit, "tail record byte");
+    const recordByteLimit = boundedReadLimit(maxRecordBytes ?? Math.min(256 * 1024, byteLimit), 1, byteLimit, "tail record byte");
     const raw = readRawTail(definition.path, byteLimit);
     const metadata = readMetadata(definition.path);
     const revision = Number.isInteger(metadata?.revision) && metadata.revision >= 0 ? metadata.revision : 0;
@@ -137,6 +138,74 @@ export class FileStateStore {
       }
       chmodSync(definition.path, 0o600);
       return this.writeMetadata(name, current.revision + 1);
+    });
+  }
+
+  appendRetained(name, value, {
+    maxRecords = 5000,
+    maxBytes = 8 * 1024 * 1024,
+    maxRecordBytes,
+  } = {}) {
+    const definition = this.definition(name);
+    if (definition.kind !== "jsonl") throw new StateValidationError(`${name} is not JSONL state.`);
+    const recordLimit = boundedReadLimit(maxRecords, 1, 100_000, "retention record");
+    const byteLimit = boundedReadLimit(maxBytes, 1024, 64 * 1024 * 1024, "retention byte");
+    const recordByteLimit = boundedReadLimit(maxRecordBytes ?? Math.min(256 * 1024, byteLimit), 1, byteLimit, "retention record byte");
+    definition.validate?.(value);
+    const encoded = JSON.stringify(value);
+    const encodedBytes = Buffer.byteLength(encoded);
+    if (encodedBytes > recordByteLimit || encodedBytes + 1 > byteLimit) {
+      throw new StateValidationError(`${name} record exceeds its retained JSONL budget.`);
+    }
+
+    return this.withLock(definition.path, () => {
+      const metadata = readMetadata(definition.path);
+      const revision = Number.isInteger(metadata?.revision) && metadata.revision >= 0 ? metadata.revision : 0;
+      const stat = lstatRegularFile(definition.path);
+      const retentionMatches = metadata?.retention?.maxRecords === recordLimit
+        && metadata?.retention?.maxBytes === byteLimit
+        && metadata?.retention?.maxRecordBytes === recordByteLimit;
+      const trackedCount = Number(metadata?.recordCount);
+      const canAppend = stat
+        && retentionMatches
+        && Number.isSafeInteger(trackedCount)
+        && trackedCount >= 0
+        && trackedCount < recordLimit
+        && metadata.contentBytes === stat.size
+        && stat.size + encodedBytes + 1 <= byteLimit;
+      let recordCount;
+
+      if (canAppend) {
+        const currentRaw = readRaw(definition.path);
+        if (Buffer.byteLength(currentRaw) !== stat.size || digest(currentRaw) !== metadata.contentSha256) {
+          throw new StateValidationError(`${name} retained state changed outside the state store.`);
+        }
+        appendPrivateJsonLine(definition.path, encoded, stat);
+        recordCount = trackedCount + 1;
+      } else {
+        const retained = recordLimit === 1
+          ? []
+          : this.readTail(name, {
+              strict: true,
+              maxRecords: recordLimit - 1,
+              maxBytes: byteLimit,
+              maxRecordBytes: recordByteLimit,
+            }).value;
+        const lines = [...retained, value].map((record) => JSON.stringify(record));
+        let totalBytes = lines.reduce((sum, line) => sum + Buffer.byteLength(line) + 1, 0);
+        while (lines.length > 1 && totalBytes > byteLimit) {
+          totalBytes -= Buffer.byteLength(lines.shift()) + 1;
+        }
+        atomicWrite(definition.path, `${lines.join("\n")}\n`);
+        recordCount = lines.length;
+      }
+
+      return this.writeMetadata(name, revision + 1, {
+        readBack: false,
+        recordCount,
+        contentBytes: lstatSync(definition.path).size,
+        retention: { maxRecords: recordLimit, maxBytes: byteLimit, maxRecordBytes: recordByteLimit },
+      });
     });
   }
 
@@ -216,12 +285,21 @@ export class FileStateStore {
     return this.writeMetadata(name, current.revision + 1);
   }
 
-  writeMetadata(name, revision) {
+  writeMetadata(name, revision, { readBack = true, ...details } = {}) {
     const definition = this.definition(name);
     const raw = readRaw(definition.path);
-    const metadata = { schemaVersion: 1, revision, contentSha256: digest(raw), updatedAt: new Date(this.now()).toISOString() };
+    const metadata = { schemaVersion: 1, ...details, revision, contentSha256: digest(raw), updatedAt: new Date(this.now()).toISOString() };
     atomicWrite(metadataPath(definition.path), `${JSON.stringify(metadata, null, 2)}\n`);
-    return this.read(name, { strict: true });
+    if (readBack) return this.read(name, { strict: true });
+    return {
+      name,
+      kind: definition.kind,
+      revision,
+      token: `${revision}:${metadata.contentSha256}`,
+      contentSha256: metadata.contentSha256,
+      exists: raw !== "",
+      ...details,
+    };
   }
 
   withLock(filePath, callback) {
@@ -280,6 +358,35 @@ function atomicWrite(filePath, content) {
   } catch (error) {
     if (fd !== undefined) closeSync(fd);
     rmSync(temporary, { force: true });
+    throw error;
+  }
+}
+
+function appendPrivateJsonLine(filePath, encoded, expectedStat) {
+  const flags = constants.O_WRONLY | constants.O_APPEND | constants.O_NOFOLLOW;
+  const fd = openSync(filePath, flags);
+  try {
+    const opened = fstatSync(fd);
+    if (!opened.isFile() || opened.dev !== expectedStat.dev || opened.ino !== expectedStat.ino || opened.size !== expectedStat.size) {
+      throw new StateValidationError(`Retained state changed before append: ${path.basename(filePath)}.`);
+    }
+    writeFileSync(fd, `${encoded}\n`, "utf8");
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  chmodSync(filePath, 0o600);
+}
+
+function lstatRegularFile(filePath) {
+  try {
+    const stat = lstatSync(filePath);
+    if (!stat.isFile() || stat.isSymbolicLink() || !Number.isSafeInteger(stat.size) || stat.size < 0) {
+      throw new StateValidationError(`Retained state source is not a regular file: ${path.basename(filePath)}.`);
+    }
+    return stat;
+  } catch (error) {
+    if (error.code === "ENOENT") return null;
     throw error;
   }
 }
