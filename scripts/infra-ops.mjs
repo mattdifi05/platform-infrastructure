@@ -28,7 +28,7 @@ import { runCommandSync } from "./command-safety.mjs";
 import { resticSecretTransport } from "./restic-secret-transport.mjs";
 import { safeTarCreateArgs, validateTarEntryName } from "./safe-tar-path.mjs";
 import { assertNoPlaintextFingerprints, legacyPlaintextFingerprintNames } from "./secret-store-metadata.mjs";
-import { validateBackupImportProvenance } from "./backup-import-policy.mjs";
+import { readBackupImportProvenance, validateBackupImportProvenance } from "./backup-import-policy.mjs";
 import { defaultPostgresRestoreImage, postgresRestoreSandboxPlan } from "./postgres-restore-sandbox.mjs";
 import { evaluateOffsiteRestoreCoverage, locateSnapshotManifest, offsiteManifestTags, validateOffsiteRestoreSet } from "./offsite-restore-contract.mjs";
 import { canonicalVpsTopologyPlan, parseCanonicalVpsTopology } from "./canonical-compose-topology.mjs";
@@ -1346,11 +1346,15 @@ async function importPostgresBackup() {
   if (fs.existsSync(backupSignatureSidecarPath(backupFile))) fail("Backup already has signature metadata; verify it instead of importing it again.");
   if (!argv.provenanceFile) fail("Import requires --provenanceFile and an owner-pinned --provenanceSha256.");
   const provenanceFile = path.resolve(argv.provenanceFile);
-  if (!fs.existsSync(provenanceFile) || !fs.statSync(provenanceFile).isFile()) fail("Import provenance file is missing or not a regular file.");
   const artifactHash = sha256File(backupFile);
   const artifactSizeBytes = fs.statSync(backupFile).size;
-  const provenance = readJsonFile(provenanceFile, provenanceFile);
-  const provenanceSha256 = sha256File(provenanceFile);
+  let capturedProvenance;
+  try {
+    capturedProvenance = readBackupImportProvenance({ filePath: provenanceFile });
+  } catch {
+    fail("Import provenance file could not be captured as one bounded immutable JSON document.");
+  }
+  const { provenance, provenanceSha256 } = capturedProvenance;
   const provenanceResult = validateBackupImportProvenance({
     artifactName: path.basename(backupFile),
     artifactSha256: artifactHash,

@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { backupImportConfirmation, validateBackupImportProvenance } from "./backup-import-policy.mjs";
+import { backupImportConfirmation, readBackupImportProvenance, validateBackupImportProvenance } from "./backup-import-policy.mjs";
 
 const sha256 = "a".repeat(64);
 const provenanceSha256 = "b".repeat(64);
@@ -55,3 +57,35 @@ test("local secret manager no longer mints backup trust", () => {
   assert.match(source, /validateBackupImportProvenance\(\{/);
 });
 
+test("provenance path swap cannot split parsed bytes from the owner-pinned digest", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "backup-import-provenance-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const provenancePath = path.join(root, "provenance.json");
+  const replacementPath = path.join(root, "replacement.json");
+  const bytesA = Buffer.from(`${JSON.stringify(provenance)}\n`);
+  const provenanceB = { ...provenance, source: { ...provenance.source, resourceId: "database:attacker" } };
+  fs.writeFileSync(provenancePath, bytesA);
+  fs.writeFileSync(replacementPath, `${JSON.stringify(provenanceB)}\n`);
+  const captured = readBackupImportProvenance({
+    filePath: provenancePath,
+    onBytesCaptured: () => fs.renameSync(replacementPath, provenancePath),
+  });
+  assert.deepEqual(captured.provenance, provenance);
+  assert.equal(captured.provenanceSha256, crypto.createHash("sha256").update(bytesA).digest("hex"));
+  assert.deepEqual(JSON.parse(fs.readFileSync(provenancePath, "utf8")), provenanceB);
+  assert.deepEqual(validateBackupImportProvenance({
+    ...valid,
+    provenance: captured.provenance,
+    provenanceSha256: captured.provenanceSha256,
+    pinnedProvenanceSha256: captured.provenanceSha256,
+  }).sourceId, sourceId);
+});
+
+test("import consumer uses one captured provenance object and digest", () => {
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const source = fs.readFileSync(path.join(here, "infra-ops.mjs"), "utf8");
+  const body = source.slice(source.indexOf("async function importPostgresBackup"), source.indexOf("const localTlsHostnames"));
+  assert.match(body, /readBackupImportProvenance\(\{/);
+  assert.doesNotMatch(body, /readJsonFile\(provenanceFile/);
+  assert.doesNotMatch(body, /sha256File\(provenanceFile/);
+});
