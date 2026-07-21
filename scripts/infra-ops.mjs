@@ -24,6 +24,7 @@ import { evaluateSupplyChain } from "./supply-chain-policy.mjs";
 import { evaluateFunctionalHealth, validateFunctionalHealthProbes } from "./functional-health.mjs";
 import { evaluateRuntimeFingerprint } from "./runtime-fingerprint.mjs";
 import { providerEvidenceAttestationOptions } from "./provider-evidence-auth.mjs";
+import { sha256FileBounded } from "./bounded-file-hash.mjs";
 import {
   assertExactBranchProtection,
   assertExactGithubEnvironment,
@@ -601,9 +602,7 @@ function removeTreeInside(root, target) {
 }
 
 function sha256File(filePath) {
-  const hash = crypto.createHash("sha256");
-  hash.update(fs.readFileSync(filePath));
-  return hash.digest("hex");
+  return sha256FileBounded(filePath).sha256;
 }
 
 function secretId(prefix) {
@@ -2624,6 +2623,8 @@ function infraTestingHygiene() {
     "scripts/runtime-fingerprint.test.mjs",
     "scripts/provider-evidence-auth.mjs",
     "scripts/provider-evidence-auth.test.mjs",
+    "scripts/bounded-file-hash.mjs",
+    "scripts/bounded-file-hash.test.mjs",
     "scripts/infra-secret-manager.mjs",
   ];
   for (const file of checkFiles) {
@@ -2635,6 +2636,7 @@ function infraTestingHygiene() {
   run(process.execPath, ["--test", "scripts/functional-health.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/runtime-fingerprint.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/provider-evidence-auth.test.mjs"], { cwd: infraRoot });
+  run(process.execPath, ["--test", "scripts/bounded-file-hash.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "platform-alert-dispatcher/server.test.mjs"], { cwd: infraRoot });
   const shellFiles = fs.readdirSync(path.join(infraRoot, "scripts")).filter((name) => name.endsWith(".sh")).sort();
   for (const file of shellFiles) {
