@@ -30,6 +30,7 @@ import { safeTarCreateArgs, validateTarEntryName } from "./safe-tar-path.mjs";
 import { assertNoPlaintextFingerprints, legacyPlaintextFingerprintNames } from "./secret-store-metadata.mjs";
 import { validateBackupImportProvenance } from "./backup-import-policy.mjs";
 import { defaultPostgresRestoreImage, postgresRestoreSandboxPlan } from "./postgres-restore-sandbox.mjs";
+import { evaluateOffsiteRestoreCoverage, locateSnapshotManifest, offsiteManifestTags, validateOffsiteRestoreSet } from "./offsite-restore-contract.mjs";
 import {
   assertExactBranchProtection,
   assertExactGithubEnvironment,
@@ -1937,8 +1938,9 @@ function directorySummary(root) {
   return summary;
 }
 
-async function executeTypedRestoreResource(resource, artifact) {
-  const backupFile = path.resolve(backupRootPath(), artifact.path);
+async function executeTypedRestoreResource(resource, artifact, options = {}) {
+  const restoreArtifactRoot = path.resolve(options.backupRoot ?? backupRootPath());
+  const backupFile = assertPathInside(restoreArtifactRoot, path.resolve(restoreArtifactRoot, artifact.path));
   const verified = verifyBackupArtifact(backupFile);
   if (verified.hash !== artifact.sha256 || fs.statSync(backupFile).size !== artifact.sizeBytes) {
     fail(`Restore artifact metadata mismatch for ${resource.id}.`);
@@ -2689,6 +2691,8 @@ function infraTestingHygiene() {
     "scripts/backup-import-policy.test.mjs",
     "scripts/postgres-restore-sandbox.mjs",
     "scripts/postgres-restore-sandbox.test.mjs",
+    "scripts/offsite-restore-contract.mjs",
+    "scripts/offsite-restore-contract.test.mjs",
   ];
   for (const file of checkFiles) {
     run(process.execPath, ["--check", file], { cwd: infraRoot });
@@ -2705,6 +2709,7 @@ function infraTestingHygiene() {
   run(process.execPath, ["--test", "scripts/infra-secret-manager.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/backup-import-policy.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/postgres-restore-sandbox.test.mjs"], { cwd: infraRoot });
+  run(process.execPath, ["--test", "scripts/offsite-restore-contract.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "platform-alert-dispatcher/server.test.mjs"], { cwd: infraRoot });
   const shellFiles = fs.readdirSync(path.join(infraRoot, "scripts")).filter((name) => name.endsWith(".sh")).sort();
   for (const file of shellFiles) {
@@ -4311,7 +4316,7 @@ async function offsiteBackupRestic() {
     repository,
     passwordFile,
     mounts: ["-v", `${hostPathForContainerMount(backupRoot)}:/backups:ro`],
-    resticArgs: ["backup", "--json", ...pathSet, "--tag", tag, "--host", hostname],
+    resticArgs: ["backup", "--json", ...pathSet, "--tag", tag, ...offsiteManifestTags(manifest).flatMap((manifestTag) => ["--tag", manifestTag]), "--host", hostname],
     runOptions: { capture: true },
   });
   const summary = parseResticBackupSummary(backupResult);
@@ -4344,71 +4349,6 @@ async function offsiteBackupRestic() {
   log(`Off-site backup completed for ${manifest.resources.map((resource) => resource.id).join(", ")}`);
   log(`Off-site receipt written to ${reportPath}`);
   return receipt;
-}
-
-const offsiteRestoreFamilySpecs = [
-  {
-    key: "postgres",
-    label: "PostgreSQL",
-    backupDirectory: "postgres",
-    predicate: (filePath) => filePath.endsWith(".dump"),
-    restore: (options) => restoreTestPostgres(options),
-  },
-  {
-    key: "mariadb",
-    label: "MariaDB",
-    backupDirectory: "mariadb",
-    predicate: (filePath) => filePath.endsWith(".sql.gz"),
-    restore: (options) => restoreTestMariadb(options),
-  },
-  {
-    key: "minio",
-    label: "MinIO",
-    backupDirectory: "minio",
-    predicate: (filePath) => /minio-data-.+\.tar\.gz$/.test(path.basename(filePath)),
-    restore: (options) => restoreTestMinio(options),
-  },
-  {
-    key: "keycloak",
-    label: "Keycloak",
-    backupDirectory: "keycloak",
-    predicate: (filePath) => /keycloak-config-.+\.tar\.gz$/.test(path.basename(filePath)),
-    restore: (options) => restoreTestKeycloakConfig(options),
-  },
-  {
-    key: "secret-manager-metadata",
-    label: "Secret Manager metadata",
-    backupDirectory: "secret-manager",
-    predicate: (filePath) => /secret-manager-metadata-.+\.tar\.gz$/.test(path.basename(filePath)),
-    restore: (options) => restoreTestSecretManagerMetadata(options),
-  },
-];
-
-function offsiteRestoreFamilies(value) {
-  const aliases = new Map();
-  for (const spec of offsiteRestoreFamilySpecs) {
-    aliases.set(spec.key, spec);
-  }
-  aliases.set("secret-manager", offsiteRestoreFamilySpecs.find((spec) => spec.key === "secret-manager-metadata"));
-  const rawFamilies = value
-    ? (Array.isArray(value) ? value : String(value).split(","))
-    : offsiteRestoreFamilySpecs.map((spec) => spec.key);
-  const selected = [];
-  const seen = new Set();
-  for (const raw of rawFamilies.map((item) => String(item).trim()).filter(Boolean)) {
-    const spec = aliases.get(raw);
-    if (!spec) {
-      fail(`Unknown off-site restore family '${raw}'. Use one of: ${offsiteRestoreFamilySpecs.map((item) => item.key).join(", ")}.`);
-    }
-    if (!seen.has(spec.key)) {
-      selected.push(spec);
-      seen.add(spec.key);
-    }
-  }
-  if (!selected.length) {
-    fail("At least one off-site restore family is required.");
-  }
-  return selected;
 }
 
 function listFilesRecursive(root, predicate = () => true) {
@@ -4464,58 +4404,41 @@ function resticSnapshotSummary(snapshot) {
   };
 }
 
-function discoverRestoredBackupArtifacts(restoreRoot, families) {
-  const restoredFiles = listFilesRecursive(restoreRoot);
-  const discovered = {};
-  for (const family of families) {
-    discovered[family.key] = restoredFiles.find((filePath) => family.predicate(filePath)) ?? null;
-  }
-  return discovered;
+function restoredBackupFilePaths(restoreRoot) {
+  const files = [];
+  const walk = (directory) => {
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      const fullPath = path.join(directory, entry.name);
+      const stat = fs.lstatSync(fullPath);
+      if (stat.isSymbolicLink()) fail(`Restic restore produced a symbolic link: ${fullPath}`);
+      if (stat.isDirectory()) walk(fullPath);
+      else if (stat.isFile()) files.push(`/${path.relative(restoreRoot, fullPath).replaceAll("\\", "/")}`);
+      else fail(`Restic restore produced a non-regular file: ${fullPath}`);
+    }
+  };
+  walk(restoreRoot);
+  return files.sort();
 }
 
-function stageRestoredBackupArtifact({ sourceFile, family, stagingRoot }) {
-  const targetDir = path.join(stagingRoot, family.backupDirectory);
-  fs.mkdirSync(targetDir, { recursive: true });
-  const stagedArtifact = assertPathInside(targetDir, path.join(targetDir, path.basename(sourceFile)));
-  fs.copyFileSync(sourceFile, stagedArtifact);
-  const copiedSidecars = [];
-  for (const sidecar of [`${sourceFile}.sha256`, `${sourceFile}.sig.json`]) {
-    if (!fs.existsSync(sidecar)) {
-      continue;
-    }
-    const stagedSidecar = assertPathInside(targetDir, path.join(targetDir, path.basename(sidecar)));
-    fs.copyFileSync(sidecar, stagedSidecar);
-    copiedSidecars.push(stagedSidecar);
+function restoredPathForSnapshotPath(restoreRoot, snapshotPath) {
+  const relative = String(snapshotPath).replaceAll("\\", "/").replace(/^\/+/, "");
+  return assertPathInside(restoreRoot, path.join(restoreRoot, relative));
+}
+
+function stageExactRestoredSet({ restoreRoot, stagingRoot, expectedPaths }) {
+  for (const snapshotPath of expectedPaths) {
+    const source = restoredPathForSnapshotPath(restoreRoot, snapshotPath);
+    if (!fs.existsSync(source) || !fs.statSync(source).isFile()) fail(`Missing restored file: ${snapshotPath}`);
+    const backupRelative = snapshotPath.replace(/^\/backups\//, "");
+    const target = assertPathInside(stagingRoot, path.join(stagingRoot, backupRelative));
+    fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
+    fs.copyFileSync(source, target);
+    fs.chmodSync(target, 0o600);
   }
-  const { hash, keyId, signaturePath } = verifyBackupArtifact(stagedArtifact);
-  return { stagedArtifact, copiedSidecars, hash, keyId, signaturePath };
 }
 
 function offsiteRestoreCoverage(payload = {}) {
-  const requiredFamilies = offsiteRestoreFamilySpecs.map((family) => family.key);
-  const requestedFamilies = Array.isArray(payload.families) ? payload.families : [];
-  const successfulFamilies = [...new Set((payload.steps ?? [])
-    .filter((step) => step.family && step.status === "success")
-    .map((step) => step.family))];
-  const missingRequiredFamilies = requiredFamilies.filter((family) => !successfulFamilies.includes(family));
-  const unrequestedRequiredFamilies = requiredFamilies.filter((family) => !requestedFamilies.includes(family));
-  const infraHealthOk = (payload.steps ?? []).some((step) => step.name === "infra-health" && step.status === "success");
-  const complete = payload.mode === "restore"
-    && payload.status === "success"
-    && payload.allowPartial !== true
-    && missingRequiredFamilies.length === 0
-    && unrequestedRequiredFamilies.length === 0
-    && infraHealthOk;
-  return {
-    requiredFamilies,
-    requestedFamilies,
-    successfulFamilies,
-    missingRequiredFamilies,
-    unrequestedRequiredFamilies,
-    allowPartial: payload.allowPartial === true,
-    infraHealthOk,
-    complete,
-  };
+  return evaluateOffsiteRestoreCoverage(payload);
 }
 
 function writeOffsiteRestoreDrillReport(payload) {
@@ -4526,7 +4449,7 @@ function writeOffsiteRestoreDrillReport(payload) {
     coverage: payload.coverage ?? offsiteRestoreCoverage(payload),
   };
   const jsonPath = writeJsonReport("offsite-restore-drills", baseName, reportPayload);
-  const rows = (reportPayload.steps ?? []).map((step) => `| ${step.family ?? step.name} | ${step.status} | ${step.durationMs ?? "n/a"} | ${step.artifactName ?? "n/a"} |`);
+  const rows = (reportPayload.steps ?? []).map((step) => `| ${step.resourceId ?? step.family ?? step.name} | ${step.status} | ${step.durationMs ?? "n/a"} | ${step.artifactName ?? "n/a"} |`);
   const markdownPath = writeMarkdownReport("offsite-restore-drills", baseName, [
     "# Platform Off-site Restore Drill",
     "",
@@ -4543,8 +4466,10 @@ function writeOffsiteRestoreDrillReport(payload) {
     `Restic tag: ${reportPayload.restic.tag}`,
     `Snapshot: ${reportPayload.snapshot?.shortId ?? reportPayload.snapshot?.id ?? reportPayload.requestedSnapshot ?? "n/a"}`,
     `Coverage complete: ${reportPayload.coverage.complete ? "yes" : "no"}`,
-    `Successful families: ${reportPayload.coverage.successfulFamilies.join(", ") || "none"}`,
-    `Missing required families: ${reportPayload.coverage.missingRequiredFamilies.join(", ") || "none"}`,
+    `Manifest signature verified: ${reportPayload.coverage.manifestSignatureVerified ? "yes" : "no"}`,
+    `Exact restored set verified: ${reportPayload.coverage.exactSetVerified ? "yes" : "no"}`,
+    `Successful resources: ${reportPayload.coverage.successfulResourceIds.join(", ") || "none"}`,
+    `Missing required resources: ${reportPayload.coverage.missingRequiredResourceIds.join(", ") || "none"}`,
     `Infra health after restore: ${reportPayload.coverage.infraHealthOk ? "yes" : "no"}`,
     "",
     "| Step | Status | Duration ms | Artifact |",
@@ -4565,7 +4490,9 @@ async function offsiteRestoreDrillRestic(options = {}) {
   const keepRestoredArtifacts = options.keepRestoredArtifacts ?? booleanFlag(argv.keepRestoredArtifacts);
   const skipInfraHealth = options.skipInfraHealth ?? booleanFlag(argv.skipInfraHealth);
   const requestedSnapshot = String(options.snapshot ?? argv.snapshot ?? argv._[0] ?? "latest");
-  const families = offsiteRestoreFamilies(options.families ?? argv.families);
+  const requestedFamilies = options.families ?? argv.families;
+  if (requestedFamilies) fail("Selective family restore is disabled; off-site restore must verify and test every resource in the signed manifest.");
+  if (allowPartial) fail("Partial off-site restore cannot produce trustworthy coverage and is disabled.");
   const { repository, passwordFile, tag } = resticConfig(options);
   const repositoryClass = classifyResticRepository(repository);
   const mode = planOnly ? "plan" : dryRun ? "dry-run" : "restore";
@@ -4577,7 +4504,7 @@ async function offsiteRestoreDrillRestic(options = {}) {
     status: "running",
     mode,
     requestedSnapshot,
-    families: families.map((family) => family.key),
+    families: [],
     allowPartial,
     keepRestoredArtifacts,
     skipInfraHealth,
@@ -4591,6 +4518,8 @@ async function offsiteRestoreDrillRestic(options = {}) {
     },
     snapshot: null,
     snapshotCountForTag: null,
+    manifest: null,
+    exactSetVerified: false,
     steps: [],
   };
 
@@ -4601,22 +4530,23 @@ async function offsiteRestoreDrillRestic(options = {}) {
       status: "success",
       finishedAt: finishedAt.toISOString(),
       durationMs: finishedAt.getTime() - startedAt.getTime(),
-      steps: families.map((family) => ({
-        family: family.key,
+      steps: [{
+        name: "signed-exact-manifest",
         status: "planned",
-        artifactName: `${family.backupDirectory}/latest signed artifact`,
-      })),
+        artifactName: "one signed complete platform manifest and its exact artifact set",
+      }],
       notes: [
         "Use --dryRun to validate the remote Restic repository and selected snapshot without restoring files.",
         "Run without --dryRun to restore into disposable local paths and execute restore-test commands.",
       ],
     };
     writeOffsiteRestoreDrillReport(payload);
-    log(`Off-site restore drill plan generated for families: ${payload.families.join(", ")}`);
+    log("Off-site restore drill plan generated for the complete signed manifest resource set.");
     return payload;
   }
 
   requireResticCredentials({ repository, passwordFile });
+  if (!repositoryClass.offsite) fail("Off-site restore requires a remote Restic repository.");
 
   let restoreRoot = null;
   let stagingRoot = null;
@@ -4637,10 +4567,18 @@ async function offsiteRestoreDrillRestic(options = {}) {
     }
     const snapshot = selectResticSnapshot(snapshots, requestedSnapshot);
     const snapshotId = snapshot.id ?? snapshot.short_id ?? requestedSnapshot;
+    const locatedManifest = locateSnapshotManifest({ snapshotPaths: snapshot.paths, snapshotTags: snapshot.tags });
     payload = {
       ...payload,
       snapshot: resticSnapshotSummary(snapshot),
       snapshotCountForTag: snapshots.length,
+      manifest: {
+        id: locatedManifest.manifestId,
+        digest: locatedManifest.manifestDigest,
+        path: locatedManifest.manifestPath,
+        signatureVerified: false,
+        resourceIds: [],
+      },
     };
 
     restoreRoot = makeOpsTempDir(dryRun ? "restic-restore-dry-run-" : "restic-restore-");
@@ -4657,7 +4595,7 @@ async function offsiteRestoreDrillRestic(options = {}) {
       const finishedAt = new Date();
       payload = {
         ...payload,
-        status: "success",
+        status: "external-pending",
         finishedAt: finishedAt.toISOString(),
         durationMs: finishedAt.getTime() - startedAt.getTime(),
         steps: [{
@@ -4667,9 +4605,10 @@ async function offsiteRestoreDrillRestic(options = {}) {
           artifactName: "remote snapshot",
         }],
         resticOutputPreview: String(dryRunResult.stdout ?? dryRunResult.stderr ?? "").slice(0, 12000),
+        externalPending: ["The remote snapshot is reachable, but its signed manifest and exact restored file set were not materialized or verified."],
       };
       writeOffsiteRestoreDrillReport(payload);
-      log(`Off-site Restic dry-run passed for snapshot ${snapshot.short_id ?? snapshot.id ?? snapshotId}.`);
+      log(`Off-site Restic dry-run reached snapshot ${snapshot.short_id ?? snapshot.id ?? snapshotId}; exact manifest verification remains EXTERNAL-PENDING.`);
       return payload;
     }
 
@@ -4683,39 +4622,51 @@ async function offsiteRestoreDrillRestic(options = {}) {
     fs.mkdirSync(stagingParent, { recursive: true });
     stagingRoot = assertPathInside(stagingParent, path.join(stagingParent, `${reportTimestamp()}-${crypto.randomBytes(3).toString("hex")}`));
     fs.mkdirSync(stagingRoot, { recursive: true });
-
-    const discovered = discoverRestoredBackupArtifacts(restoreRoot, families);
-    const missing = families.filter((family) => !discovered[family.key]).map((family) => family.key);
-    if (missing.length && !allowPartial) {
-      fail(`Remote Restic restore did not contain required backup artifacts: ${missing.join(", ")}. Pass --allowPartial only for bootstrap validation.`);
+    const restoredPaths = restoredBackupFilePaths(restoreRoot);
+    const manifestSourcePath = restoredPathForSnapshotPath(restoreRoot, locatedManifest.manifestPath);
+    if (!fs.existsSync(manifestSourcePath) || !fs.statSync(manifestSourcePath).isFile()) fail("Restic restore did not materialize the tagged manifest file.");
+    const signedManifest = verifyBackupManifestDocument(readJsonFile(manifestSourcePath, manifestSourcePath));
+    const exactSet = validateOffsiteRestoreSet({
+      manifest: signedManifest,
+      snapshotPaths: snapshot.paths,
+      restoredPaths,
+      snapshotTags: snapshot.tags,
+    });
+    stageExactRestoredSet({ restoreRoot, stagingRoot, expectedPaths: exactSet.expectedPaths });
+    const stagedManifestPath = assertPathInside(stagingRoot, path.join(stagingRoot, exactSet.manifestPath.replace(/^\/backups\//, "")));
+    const stagedManifest = verifyBackupManifestDocument(readJsonFile(stagedManifestPath, stagedManifestPath));
+    if (stagedManifest.id !== signedManifest.id || stagedManifest.signature.digest !== signedManifest.signature.digest) {
+      fail("Staged off-site manifest identity changed after exact-set verification.");
     }
+    payload = {
+      ...payload,
+      exactSetVerified: true,
+      manifest: {
+        id: stagedManifest.id,
+        digest: stagedManifest.signature.digest,
+        path: exactSet.manifestPath,
+        signatureVerified: true,
+        resourceIds: exactSet.resourceIds,
+      },
+    };
 
-    for (const family of families) {
-      const sourceFile = discovered[family.key];
-      if (!sourceFile) {
-        payload.steps.push({ family: family.key, status: "missing", artifactName: "n/a" });
-        continue;
-      }
-      const staged = stageRestoredBackupArtifact({ sourceFile, family, stagingRoot });
+    for (const resource of stagedManifest.resources) {
+      const artifact = manifestArtifactForResource(stagedManifest, resource.id);
+      if (!artifact) fail(`Signed off-site manifest has no artifact for ${resource.id}.`);
       const stepStarted = Date.now();
-      const result = await family.restore({ backupFile: staged.stagedArtifact });
+      const result = await executeTypedRestoreResource(resource, artifact, { backupRoot: stagingRoot });
       payload.steps.push({
-        family: family.key,
-        label: family.label,
+        resourceId: resource.id,
+        resourceKind: resource.kind,
         status: "success",
         durationMs: Date.now() - stepStarted,
-        artifactName: path.basename(staged.stagedArtifact),
-        stagedArtifact: staged.stagedArtifact,
-        sha256: staged.hash,
-        signatureKeyId: staged.keyId,
-        signaturePath: staged.signaturePath,
+        artifactName: path.basename(artifact.path),
+        sha256: artifact.sha256,
         result,
       });
     }
 
-    if (!payload.steps.some((step) => step.status === "success")) {
-      fail("No restored off-site artifacts were tested.");
-    }
+    if (!payload.steps.some((step) => step.resourceId && step.status === "success")) fail("No signed-manifest resources were restore-tested.");
 
     if (!skipInfraHealth) {
       const healthStarted = Date.now();
@@ -4738,7 +4689,7 @@ async function offsiteRestoreDrillRestic(options = {}) {
       stagingRoot,
     };
     writeOffsiteRestoreDrillReport(payload);
-    log(`Off-site restore drill completed for families: ${families.map((family) => family.key).join(", ")}`);
+    log(`Off-site restore drill completed for ${payload.manifest.resourceIds.length} exact signed-manifest resources.`);
     return payload;
   } catch (error) {
     const finishedAt = new Date();
@@ -10430,7 +10381,7 @@ async function drEvidence(options = {}) {
     issues.push(`Latest full restore duration exceeds RTO ${rtoMinutes} minutes.`);
   }
 
-  const latestOffsiteDryRun = latestReport(offsiteRestoreReports, (report) => report.status === "success" && report.mode === "dry-run");
+  const latestOffsiteDryRun = latestReport(offsiteRestoreReports, (report) => ["success", "external-pending"].includes(report.status) && report.mode === "dry-run");
   const latestOffsiteRestore = latestReport(offsiteRestoreReports, (report) => report.status === "success" && report.mode === "restore");
   const latestOffsiteRestoreAgeMinutes = latestOffsiteRestore ? reportAgeMinutes(latestOffsiteRestore.payload, nowMs) : null;
   const latestOffsiteDryRunOffsite = latestOffsiteDryRun ? Boolean(latestOffsiteDryRun.payload.restic?.repositoryOffsite) : null;
@@ -10443,7 +10394,7 @@ async function drEvidence(options = {}) {
   } else if (!latestOffsiteRestoreOffsite) {
     issues.push("Latest Restic restore drill did not use a remote off-site repository.");
   } else if (!latestOffsiteRestoreCoverage?.complete) {
-    issues.push(`Latest off-site restore drill does not prove full data-family coverage. Missing: ${latestOffsiteRestoreCoverage?.missingRequiredFamilies?.join(", ") || "unknown"}.`);
+    issues.push(`Latest off-site restore drill does not prove the exact signed resource set. Missing: ${latestOffsiteRestoreCoverage?.missingRequiredResourceIds?.join(", ") || "unknown"}.`);
   }
 
   const drCompose = readText(path.join(infraRoot, "compose.dr.yaml"));
@@ -10513,7 +10464,7 @@ async function drEvidence(options = {}) {
     `Latest dry-run report: ${payload.offsiteEvidence.latestDryRunReport ?? "n/a"}`,
     `Latest full restore report: ${payload.offsiteEvidence.latestRestoreReport ?? "n/a"}`,
     `Latest full restore coverage complete: ${payload.offsiteEvidence.latestRestoreCoverage?.complete ? "yes" : "no"}`,
-    `Latest full restore missing families: ${payload.offsiteEvidence.latestRestoreCoverage?.missingRequiredFamilies?.join(", ") || "none"}`,
+    `Latest full restore missing resources: ${payload.offsiteEvidence.latestRestoreCoverage?.missingRequiredResourceIds?.join(", ") || "none"}`,
     "",
     "## Issues",
     "",

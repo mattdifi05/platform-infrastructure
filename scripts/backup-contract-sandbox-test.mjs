@@ -74,6 +74,14 @@ try {
     "provider-evidence-auth.mjs",
     "github-governance-policy.mjs",
     "release-trust.mjs",
+    "bounded-file-hash.mjs",
+    "command-safety.mjs",
+    "restic-secret-transport.mjs",
+    "safe-tar-path.mjs",
+    "secret-store-metadata.mjs",
+    "backup-import-policy.mjs",
+    "postgres-restore-sandbox.mjs",
+    "offsite-restore-contract.mjs",
   ]) cpSync(path.join(repositoryRoot, "scripts", moduleName), path.join(replicaRoot, "scripts", moduleName));
   cpSync(path.join(repositoryRoot, "control-center", "backup", "contracts.mjs"), path.join(replicaRoot, "control-center", "backup", "contracts.mjs"));
   mkdirSync(path.join(sourceRoot, "fixture-app", "src"), { recursive: true });

@@ -581,13 +581,13 @@ sh ./scripts/offsite-restore-drill-restic.sh --passwordFile ./secrets/restic_pas
 sh ./scripts/install-offsite-backup-cron.sh --cron-root /opt/platform/platform-infrastructure
 ```
 
-Without `--backupFile`, the Restic command uploads the latest signed PostgreSQL, MariaDB, MinIO, Keycloak and Secret Manager metadata artifact. Missing artifact families fail the run so cron/alerts catch incomplete protection.
+The Restic command uploads one complete signed platform manifest, every artifact declared by it, and every checksum/signature sidecar. Snapshot tags bind the manifest ID and digest.
 
 Off-site restore drill:
 
-`offsite-restore-drill-restic.sh --planOnly` writes the expected execution plan without requiring remote credentials. `--dryRun` validates the remote Restic repository and selected snapshot without restoring files. The full command restores into `.tmp/ops`, stages only signed backup artifacts under `backups/offsite-restore-drills/`, runs the disposable restore-test commands for every data family, runs `infra-health`, and writes evidence under `reports/offsite-restore-drills/`. Use `--snapshot <id>` for a specific snapshot, `--families postgres,mariadb` for a scoped drill, `--allowPartial` only during bootstrap, and `--keepRestoredArtifacts` only when you need manual inspection.
+`offsite-restore-drill-restic.sh --planOnly` writes the expected execution plan without remote credentials. `--dryRun` proves reachability only and is recorded as `EXTERNAL-PENDING`. The full command restores into `.tmp/ops`, verifies the embedded signed manifest against its snapshot tags, rejects any missing/extra/duplicate/substituted path, stages the exact set under `backups/offsite-restore-drills/`, executes every typed resource restore, then runs `infra-health`. Use `--snapshot <id>` for a specific snapshot. Selective `--families` and `--allowPartial` are fail-closed and cannot be used for evidence.
 
-Production go/no-go requires restore evidence from a remote Restic repository such as `s3:`, `b2:`, `azure:`, `gs:`, `sftp:`, `rest:` or `rclone:`. The endpoint must not resolve to localhost, the Docker network or private IP space. The accepted report must show `coverage.complete=true`: PostgreSQL, MariaDB, MinIO, Keycloak and Secret Manager metadata were restored and tested, `--allowPartial` was not used, and `infra-health` passed after the restore. A local filesystem repository or scoped family drill is useful for bootstrap rehearsal only.
+Production go/no-go requires a real remote Restic restore. The accepted report must show `coverage.complete=true`, cryptographic manifest verification, exact-set verification, every manifest resource restored and tested, and `infra-health` passed. Repository-only tests never satisfy this external gate.
 
 For Cloudflare R2, use the S3-compatible Restic repository endpoint and keep
 `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` in the VPS secret environment or

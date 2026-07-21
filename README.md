@@ -365,9 +365,9 @@ sh ./scripts/offsite-restore-drill-restic.sh --dryRun --passwordFile ./secrets/r
 sh ./scripts/offsite-restore-drill-restic.sh --passwordFile ./secrets/restic_password.txt
 ```
 
-Senza `--backupFile`, Restic carica l'ultimo artifact firmato di PostgreSQL, MariaDB, MinIO, Keycloak e Secret Manager metadata. Se manca una famiglia dati, il comando fallisce; usa `--allowPartial` solo durante bootstrap o manutenzione controllata.
-`offsite-restore-drill-restic.sh --dryRun` valida repository e snapshot senza scrivere file. Senza `--dryRun`, il comando ripristina gli artifact in percorsi disposable, verifica checksum/firma, lancia i restore-test PostgreSQL, MariaDB, MinIO, Keycloak e Secret Manager metadata, poi scrive evidenza JSON/Markdown in `reports/offsite-restore-drills/`.
-Per il go-live il repository Restic deve essere remoto (`s3:`, `b2:`, `azure:`, `gs:`, `sftp:`, `rest:` o `rclone:`) e non deve puntare a localhost, rete Docker o IP privati. Il report production valido deve avere `coverage.complete=true`: tutte le famiglie dati restaurate, nessun `--allowPartial`, e `infra-health` riuscito dopo il restore. Un repository locale o un restore parziale va bene solo per bootstrap o prove meccaniche e non soddisfa il gate production.
+Restic carica esclusivamente l'ultimo manifest platform completo e firmato, tutti gli artifact dichiarati e i sidecar obbligatori; lo snapshot viene taggato con identità e digest del manifest.
+`offsite-restore-drill-restic.sh --dryRun` verifica soltanto raggiungibilità e metadata dello snapshot e resta `EXTERNAL-PENDING`. Senza `--dryRun`, il comando verifica firma e tag del manifest, confronta esattamente path snapshot/restaurati/attesi, rifiuta file mancanti, extra, duplicati o sostituiti ed esegue il restore-test tipizzato per ogni risorsa dichiarata.
+Per il go-live il repository Restic deve essere remoto (`s3:`, `b2:`, `azure:`, `gs:`, `sftp:`, `rest:` o `rclone:`). Il report è completo soltanto con firma manifest verificata, set esatto, ogni resource ID riuscito e `infra-health` positivo. Restore per famiglie e `--allowPartial` sono rifiutati e non possono produrre evidenza completa.
 
 Schedulazione consigliata, container-first:
 
