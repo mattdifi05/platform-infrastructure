@@ -4,6 +4,7 @@ import {
   validateRenderedWorkloads,
   validateWorkloadEnvironmentText,
   validateWorkloadManifest,
+  verifyLockFiles,
 } from "./hosted-workload-contract.mjs";
 
 const digest = "a".repeat(64);
@@ -148,6 +149,13 @@ test("duplicate route is rejected at manifest boundary", () => {
       { name: "duplicate-app-two", role: "web", routes: [{ slug: "same", port: 3000 }] },
     ],
   }), /Duplicate route/);
+});
+
+test("legacy hosted workload locks fail closed", () => {
+  assert.throws(
+    () => verifyLockFiles({ version: 1, state: "verified", files: [] }),
+    /schema 2 and validator hosted-contract-v2/,
+  );
 });
 
 test("workload environment accepts only non-secret prefixed variables", () => {

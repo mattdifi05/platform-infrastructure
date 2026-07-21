@@ -8,9 +8,9 @@ COMMAND=${2:-verify}
 mode=$(stat -c '%a' "$LOCK")
 case "$mode" in 600|400) ;; *) printf '%s\n' "Hosted workload lock must use mode 0600 or 0400." >&2; exit 1 ;; esac
 if [ "${HOSTED_WORKLOAD_ALLOW_RESOLVED:-0}" = 1 ]; then
-  jq -e '.version == 1 and (.state == "resolved" or .state == "verified") and (.files | type == "array" and length > 0) and (.workloads | type == "array")' "$LOCK" >/dev/null
+  jq -e '.version == 2 and .validatorVersion == "hosted-contract-v2" and (.state == "resolved" or .state == "verified") and (.files | type == "array" and length > 0) and (.workloads | type == "array")' "$LOCK" >/dev/null
 else
-  jq -e '.version == 1 and .state == "verified" and (.files | type == "array" and length > 0) and (.workloads | type == "array")' "$LOCK" >/dev/null
+  jq -e '.version == 2 and .validatorVersion == "hosted-contract-v2" and .state == "verified" and (.files | type == "array" and length > 0) and (.workloads | type == "array")' "$LOCK" >/dev/null
 fi
 
 count=$(jq '.files | length' "$LOCK")

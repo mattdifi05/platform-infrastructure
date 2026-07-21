@@ -8,6 +8,8 @@ const SERVICE = /^[a-z][a-z0-9-]{1,62}$/;
 const SHA256 = /^[a-f0-9]{64}$/;
 const IMAGE = /^[a-z0-9][a-z0-9._/-]*(?::[A-Za-z0-9._-]+)?@sha256:[a-f0-9]{64}$/;
 const SAFE_PATH = /^[A-Za-z0-9_./-]+$/;
+export const HOSTED_WORKLOAD_LOCK_VERSION = 2;
+export const HOSTED_WORKLOAD_VALIDATOR_VERSION = "hosted-contract-v2";
 const PLATFORM_DEPENDENCIES = new Set([
   "postgres",
   "redis",
@@ -177,7 +179,8 @@ export function validateWorkloadManifest(document, manifestPath = "manifest") {
     if (!SERVICE.test(secret) || !secret.startsWith(`${id}-`)) invalid(`Secret ${secret} must be workload-prefixed.`);
   }
   return {
-    version: 1,
+    version: HOSTED_WORKLOAD_LOCK_VERSION,
+    validatorVersion: HOSTED_WORKLOAD_VALIDATOR_VERSION,
     id,
     composeFile,
     services,
@@ -399,6 +402,9 @@ export function validateRenderedWorkloads({ core, combined, lock }) {
 }
 
 export function verifyLockFiles(lock) {
+  if (lock?.version !== HOSTED_WORKLOAD_LOCK_VERSION || lock?.validatorVersion !== HOSTED_WORKLOAD_VALIDATOR_VERSION) {
+    invalid(`Hosted workload lock must use schema ${HOSTED_WORKLOAD_LOCK_VERSION} and validator ${HOSTED_WORKLOAD_VALIDATOR_VERSION}.`);
+  }
   if (!Array.isArray(lock?.files) || lock.files.length === 0) invalid("Workload lock has no file records.");
   for (const record of lock.files) {
     if (!SHA256.test(String(record.sha256 ?? ""))) invalid(`Invalid lock digest for ${record.path}.`);
