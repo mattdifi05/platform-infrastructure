@@ -100,6 +100,9 @@ const projectDiskUsageReader = createProjectDiskUsageReader({
   partialTtlMs: clampNumber(Number(process.env.CONTROL_CENTER_PROJECT_DISK_USAGE_PARTIAL_TTL_MS || 5000), 1000, 30000),
   staleTtlMs: clampNumber(Number(process.env.CONTROL_CENTER_PROJECT_DISK_USAGE_STALE_TTL_MS || 300000), 30000, 3600000),
   maxConcurrency: clampNumber(Number(process.env.CONTROL_CENTER_PROJECT_DISK_USAGE_CONCURRENCY || 2), 1, 8),
+  maxQueue: clampNumber(Number(process.env.CONTROL_CENTER_PROJECT_DISK_USAGE_MAX_QUEUE || 32), 0, 512),
+  maxInflight: clampNumber(Number(process.env.CONTROL_CENTER_PROJECT_DISK_USAGE_MAX_INFLIGHT || 64), 1, 1024),
+  hardDeadlineMs: clampNumber(Number(process.env.CONTROL_CENTER_PROJECT_DISK_USAGE_HARD_DEADLINE_MS || 2000), 50, 12000),
   scanOptions: {
     maxDepth: clampNumber(Number(process.env.CONTROL_CENTER_PROJECT_DISK_USAGE_MAX_DEPTH || 32), 1, 128),
     maxNodes: clampNumber(Number(process.env.CONTROL_CENTER_PROJECT_DISK_USAGE_MAX_NODES || 50000), 100, 1000000),
@@ -7936,9 +7939,10 @@ function readLocalFilesystemSnapshot(targetPath) {
 async function readProjectDiskUsage(project) {
   if (!project.filesAvailable || !project.relativePath) return unavailableProjectDiskUsage("source-unavailable");
   try {
+    const anchorRoot = safeRealpath(path.resolve(projectsRoot));
     const root = resolveProjectRoot(project);
     const key = `${project.slug}:${root}`;
-    return await projectDiskUsageReader.read(key, root);
+    return await projectDiskUsageReader.read(key, root, { anchorRoot });
   } catch {
     return unavailableProjectDiskUsage("source-unavailable");
   }

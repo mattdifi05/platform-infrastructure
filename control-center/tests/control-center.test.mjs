@@ -841,11 +841,16 @@ test("Admin Control Center local foundation", async (t) => {
   assert.equal(resourcesOpsApi.rows.some((row) => row.applicationId === "php-demo" && row.cpu.includes("0.000%")), true);
   assert.equal(resourcesOpsApi.rows.some((row) => row.applicationId === "node-demo" && row.cpu.includes("3.500%")), true);
   const nodeResourceUsage = resourcesOpsApi.projectUsage.find((item) => item.projectId === "node-demo");
-  assert.equal(nodeResourceUsage.diskComplete, true);
+  assert.equal(nodeResourceUsage.diskComplete, process.platform === "linux");
   assert.equal(nodeResourceUsage.diskTruncated, false);
   assert.equal(nodeResourceUsage.diskStale, false);
-  assert.equal(nodeResourceUsage.diskLimitReason, "");
-  assert.match(nodeResourceUsage.diskMeasuredAt, /^\d{4}-\d{2}-\d{2}T/);
+  if (process.platform === "linux") {
+    assert.equal(nodeResourceUsage.diskLimitReason, "");
+    assert.match(nodeResourceUsage.diskMeasuredAt, /^\d{4}-\d{2}-\d{2}T/);
+  } else {
+    assert.equal(nodeResourceUsage.diskLimitReason, "descriptor-unavailable");
+    assert.equal(nodeResourceUsage.diskMeasuredAt, null);
+  }
   const nodeRuntimeLimits = nodeResourceUsage.runtimeLimits;
   assert.deepEqual(nodeRuntimeLimits, [{
     container: "node-demo",
