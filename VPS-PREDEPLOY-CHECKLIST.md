@@ -64,7 +64,8 @@ Use this checklist on the VPS Ubuntu LTS VPS before exposing public traffic.
 - [ ] `sh ./scripts/cloudflare-access-admin.sh --manifest cloudflare/access-admin.production.json` reviewed.
 - [ ] `CLOUDFLARE_API_TOKEN=... CLOUDFLARE_ACCOUNT_ID=... sh ./scripts/cloudflare-access-admin.sh --manifest cloudflare/access-admin.production.json --apply` completed for admin hosts, or equivalent Cloudflare Access config is proven.
 - [ ] `CLOUDFLARE_API_TOKEN=... CLOUDFLARE_ACCOUNT_ID=... sh ./scripts/cloudflare-access-admin.sh --manifest cloudflare/access-admin.production.json --verifyRemote` passed.
-- [ ] Origin lock applied after proxying works: `sudo sh ./scripts/cloudflare-origin-lock-ufw.sh --apply --ports "80"`.
+- [ ] Rendered candidate saved with `COMPOSE_ENV_FILE=.env COMPOSE_PROJECT_NAME=platform_infra_vps bash ./scripts/compose-vps.sh config --format json > /tmp/platform-compose.json`; origin lock then applied with `sudo sh ./scripts/cloudflare-origin-lock-ufw.sh --apply --compose-json /tmp/platform-compose.json --ssh-port <current-ssh-port>` and verified from its saved CIDR/receipt state.
+- [ ] Production activation is routed only through the trusted `deploy-vps.sh` workflow; `vps-go-live.sh --start-stack` and direct VPS `compose up` are disabled as admission bypasses.
 - [ ] TLS mode and origin certificate strategy confirmed.
 
 ## Data Protection

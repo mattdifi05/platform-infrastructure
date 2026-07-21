@@ -21,7 +21,6 @@ INCLUDE_OFFSITE_RESTORE_DRY_RUN=0
 VERIFY_GITHUB_REMOTE=0
 REPLACE_DOCKER_DAEMON_CONFIG=0
 RELOAD_SSHD=0
-ACTIVATION_REQUEST=
 
 usage() {
   cat <<'EOF'
@@ -48,10 +47,8 @@ Options:
   --replace-docker-daemon-config        When applying hardening, back up and
                                         replace an existing Docker daemon config
                                         that is missing Platform hardening keys.
-  --start-stack                         Submit one authenticated activation request
-                                        to the fixed provider-installed broker.
-  --activation-request PATH             Bounded activation request JSON generated
-                                        by the trusted release workflow.
+  --start-stack                         Disabled: production activation must use
+                                        the trusted deploy-vps workflow.
   --skip-production-preflight           Skip production-preflight during
                                         postdeploy. Use only for LAN/single-host
                                         orchestration evidence without a public
@@ -109,10 +106,6 @@ while [ "$#" -gt 0 ]; do
       ;;
     --start-stack)
       START_STACK=1
-      ;;
-    --activation-request)
-      ACTIVATION_REQUEST="$2"
-      shift
       ;;
     --skip-production-preflight)
       RUN_PRODUCTION_PREFLIGHT=0
@@ -319,18 +312,6 @@ step_vps_preflight() {
   sh ./scripts/vps-preflight.sh "$ENV_FILE"
 }
 
-step_start_stack() {
-  case "$ACTIVATION_REQUEST" in
-    /*) ;;
-    *) echo "--start-stack requires an absolute --activation-request path." >&2; return 64 ;;
-  esac
-  [ -f "$ACTIVATION_REQUEST" ] && [ ! -L "$ACTIVATION_REQUEST" ] || {
-    echo "Activation request must be a regular non-symlink file." >&2
-    return 64
-  }
-  sudo -n /usr/local/libexec/platform-activation-broker activate < "$ACTIVATION_REQUEST"
-}
-
 step_vps_postdeploy() {
   DEPLOY_RUN_WAF_SMOKE=1 \
   DEPLOY_RUN_INFRA_HEALTH=1 \
@@ -388,6 +369,11 @@ if [ "$RELOAD_SSHD" -eq 1 ] && [ "$APPLY_HARDENING" -ne 1 ]; then
   exit 1
 fi
 
+if [ "$START_STACK" -eq 1 ]; then
+  echo "--start-stack is disabled: production activation must use deploy-vps.sh through the trusted release/admission workflow." >&2
+  exit 64
+fi
+
 if [ "$PLAN_ONLY" -eq 0 ] && [ ! -f "$ENV_FILE" ]; then
   echo "Env file not found: $ENV_FILE" >&2
   exit 1
@@ -419,12 +405,9 @@ fi
 run_step "vps-host-readiness" "sudo sh ./scripts/vps-host-readiness.sh --ssh-port $SSH_PORT --enforce" step_vps_readiness
 run_step "vps-preflight" "sh ./scripts/vps-preflight.sh $ENV_FILE" step_vps_preflight
 
-if [ "$START_STACK" -eq 1 ]; then
-  run_step "platform-activation-transaction" "sudo -n /usr/local/libexec/platform-activation-broker activate < AUTHENTICATED_REQUEST" step_start_stack
-else
-  add_step "platform-activation-transaction" "skipped" "sudo -n /usr/local/libexec/platform-activation-broker activate < AUTHENTICATED_REQUEST" "enable with --start-stack --activation-request ABSOLUTE_PATH"
-  run_step "vps-postdeploy" "sh ./scripts/vps-postdeploy.sh $ENV_FILE" step_vps_postdeploy
-fi
+add_step "production-activation" "skipped" "sh ./scripts/deploy-vps.sh" "activation is outside this host orchestrator and remains gated by trusted release admission"
+
+run_step "vps-postdeploy" "sh ./scripts/vps-postdeploy.sh $ENV_FILE" step_vps_postdeploy
 
 if [ "$RUN_GO_NO_GO" -eq 1 ]; then
   run_step "github-actions-run-evidence" "sh ./scripts/github-actions-run-evidence.sh --repo $DEPLOY_REPO_VALUE --workflow enterprise-infra.yml --branch main --verifyRemote" step_github_actions_run_evidence

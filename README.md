@@ -847,15 +847,15 @@ cp .env.example .env
 # copia i valori di .env.vps.example dentro .env e sostituisci tutti i domini example.com
 sh ./scripts/infra-secret-manager.sh init
 sh ./scripts/vps-preflight.sh .env
-docker compose --env-file .env -p platform_infra_vps \
-  -f compose.yaml \
-  -f compose.secrets.yaml \
-  -f compose.vps.yaml \
-  -f compose.waf.yaml \
-  -f compose.vps-waf.yaml \
-  up -d --build
-sh ./scripts/vps-postdeploy.sh .env
+COMPOSE_ENV_FILE=.env COMPOSE_PROJECT_NAME=platform_infra_vps \
+  bash ./scripts/compose-vps.sh config --format json > /tmp/platform-compose.json
 ```
+
+Questo prepara e rende ispezionabile il modello, ma non lo attiva. La produzione
+puo' essere avviata solo dalla workflow trusted che invoca `deploy-vps.sh`, lega
+commit/tree, artifact, admission receipt, image digest e UFW, quindi usa
+`--no-build --pull never`. Al momento il trusted bootstrap esterno e'
+`EXTERNAL-PENDING`, quindi il percorso corretto e' intenzionalmente deny-all.
 
 Sul reference server corrente il path operativo e'
 `/home/platform_infrastructure/platform-infrastructure` e il runtime usa anche
@@ -935,17 +935,17 @@ Per ridurre errori manuali sulla VPS, usa l'orchestratore safe-by-default:
 
 ```sh
 sh ./scripts/vps-go-live.sh --planOnly --repo OWNER/REPO
-sh ./scripts/vps-go-live.sh --confirmLive --repo OWNER/REPO --start-stack
-sh ./scripts/vps-go-live.sh --confirmLive --repo OWNER/REPO --bootstrap --apply-hardening --reload-sshd --full-evidence --start-stack
-sh ./scripts/vps-go-live.sh --confirmLive --repo OWNER/REPO --apply-hardening --reload-sshd --replace-docker-daemon-config --full-evidence --start-stack
+sh ./scripts/vps-go-live.sh --confirmLive --repo OWNER/REPO --bootstrap --apply-hardening --reload-sshd --full-evidence
+sh ./scripts/vps-go-live.sh --confirmLive --repo OWNER/REPO --apply-hardening --reload-sshd --replace-docker-daemon-config --full-evidence
 ```
 
 Senza `--confirmLive` scrive solo il piano in `reports/vps-go-live/`.
 Con `--confirmLive` puo' eseguire bootstrap host, hardening, `vps-host-readiness
---enforce`, `vps-preflight`, opzionalmente `docker compose up`,
-post-deploy, go/no-go, checklist live production-ready, `evidence-bundle` e
+--enforce`, `vps-preflight`, controlli post-deploy su un runtime gia' ammesso,
+go/no-go, checklist live production-ready, `evidence-bundle` e
 verifica integrita' bundle, fermandosi al primo errore e
 lasciando un report JSON/Markdown non sensibile. Usa
+`--start-stack` e' rifiutato: non puo' aggirare `deploy-vps.sh`.
 `--reload-sshd` solo dopo aver verificato che la chiave SSH e la porta target
 funzionano; senza questa prova il go/no-go non accetta l'hardening host come
 production evidence. Usa

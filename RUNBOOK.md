@@ -1249,18 +1249,16 @@ Use this path when TLS and public certificates are terminated by VPS, Cloudflare
    same VPS Compose file set used by deploy, including `compose.waf.yaml`
    and `compose.vps-waf.yaml`.
 
-5. Start the single-node VPS stack:
+5. Render and inspect the single-node VPS candidate without activating it:
 
    ```sh
-   docker compose --env-file .env -p platform_infra_vps \
-     -f compose.yaml \
-     -f compose.secrets.yaml \
-     -f compose.vps.yaml \
-     -f compose.waf.yaml \
-     -f compose.vps-waf.yaml \
-     up -d --build
-   sh ./scripts/vps-postdeploy.sh .env
+   COMPOSE_ENV_FILE=.env COMPOSE_PROJECT_NAME=platform_infra_vps \
+     bash ./scripts/compose-vps.sh config --format json > /tmp/platform-compose.json
    ```
+
+   Do not run direct `compose up` on a VPS. Production activation is exclusively
+   the trusted workflow sink in step 6; the current external admission bootstrap
+   is `EXTERNAL-PENDING`, so production activation is intentionally deny-all.
 
 6. Remote deploys are exact-subject only. `scripts/deploy-vps.sh` requires the
    approved commit/tree, canonical repository, artifact-verification receipt,
@@ -1323,13 +1321,12 @@ Use this path when TLS and public certificates are terminated by VPS, Cloudflare
 
    ```sh
    sh ./scripts/vps-go-live.sh --planOnly --repo OWNER/REPO
-   sh ./scripts/vps-go-live.sh --confirmLive --repo OWNER/REPO --start-stack
-   sh ./scripts/vps-go-live.sh --confirmLive --repo OWNER/REPO --bootstrap --apply-hardening --reload-sshd --full-evidence --start-stack
-   sh ./scripts/vps-go-live.sh --confirmLive --repo OWNER/REPO --apply-hardening --reload-sshd --replace-docker-daemon-config --full-evidence --start-stack
+   sh ./scripts/vps-go-live.sh --confirmLive --repo OWNER/REPO --bootstrap --apply-hardening --reload-sshd --full-evidence
+   sh ./scripts/vps-go-live.sh --confirmLive --repo OWNER/REPO --apply-hardening --reload-sshd --replace-docker-daemon-config --full-evidence
    ```
 
    The orchestrator is plan-only by default. Live mode runs VPS readiness,
-   VPS preflight, optional compose start, post-deploy smoke/health, final
+   VPS preflight, post-deploy smoke/health against an already admitted runtime, final
    go/no-go and evidence bundle in order. On a fresh VPS add `--bootstrap` to
    install Git/Docker/Compose and `--apply-hardening` after SSH key access is
    verified. Use `--reload-sshd` after the target SSH port is reachable so the
@@ -1337,7 +1334,8 @@ Use this path when TLS and public certificates are terminated by VPS, Cloudflare
    generated Docker daemon template on a host that already has
    `/etc/docker/daemon.json`. The flow writes JSON/Markdown reports under
    `reports/vps-go-live/`. It does not source `.env`; the file is passed
-   to the dedicated preflight/postdeploy commands.
+   to the dedicated preflight/postdeploy commands. `--start-stack` is rejected;
+   only `deploy-vps.sh` may cross the production activation boundary.
 
 7. Keep database/admin surfaces private. Do not publish phpMyAdmin, Grafana, Prometheus, Alertmanager, MinIO console or Traefik dashboard to public DNS.
 
