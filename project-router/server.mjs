@@ -1,8 +1,20 @@
 import { createServer, request as httpRequest } from "node:http";
 import { createHash } from "node:crypto";
-import { closeSync, constants, existsSync, fstatSync, openSync, readdirSync, readFileSync, statSync } from "node:fs";
+import {
+  closeSync,
+  constants,
+  existsSync,
+  fstatSync,
+  lstatSync,
+  openSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  statSync,
+} from "node:fs";
 import { isIP } from "node:net";
 import path from "node:path";
+import { createProjectMetadataReader, ProjectMetadataError } from "./project-metadata.mjs";
 
 const port = Number(process.env.PROJECT_ROUTER_PORT || 8080);
 const projectsRoot = process.env.PROJECTS_ROOT || "/var/www/projects";
@@ -22,7 +34,23 @@ const phpProjectUpstreams = parsePairs(testLegacyDiscoveryAllowed ? process.env.
 const nodeUpstreams = parsePairs(testLegacyDiscoveryAllowed ? process.env.NODE_PROJECT_UPSTREAMS || "" : "");
 const staticUpstreams = parsePairs(testLegacyDiscoveryAllowed ? process.env.STATIC_PROJECT_UPSTREAMS || "" : "");
 const projectConfigNames = [".platform/project.json", "platform.project.json"];
-let workloadRouteCache = { key: "", byHost: new Map(), allowed: new Set() };
+const projectMetadataReader = createProjectMetadataReader({
+  maxBytes: boundedEnvironmentInteger("PROJECT_METADATA_MAX_BYTES", 256 * 1024, 2, 1024 * 1024),
+  maxDepth: boundedEnvironmentInteger("PROJECT_METADATA_MAX_DEPTH", 24, 1, 64),
+  maxKeys: boundedEnvironmentInteger("PROJECT_METADATA_MAX_KEYS", 4096, 1, 100_000),
+  maxNodes: boundedEnvironmentInteger("PROJECT_METADATA_MAX_NODES", 8192, 1, 200_000),
+  maxAliases: boundedEnvironmentInteger("PROJECT_METADATA_MAX_ALIASES", 256, 0, 10_000),
+  maxArrayItems: boundedEnvironmentInteger("PROJECT_METADATA_MAX_ARRAY_ITEMS", 2048, 1, 100_000),
+  parseTimeoutMs: boundedEnvironmentInteger("PROJECT_METADATA_PARSE_TIMEOUT_MS", 500, 1, 5000),
+  maxCacheEntries: boundedEnvironmentInteger("PROJECT_METADATA_CACHE_ENTRIES", 256, 1, 4096),
+});
+let workloadRouteCache = {
+  key: "",
+  byHost: new Map(),
+  allowed: new Set(),
+  trustedEpoch: "",
+  projectMetadata: new Map(),
+};
 
 const server = createServer(async (req, res) => {
   try {
@@ -54,7 +82,7 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    const projects = discoverProjects();
+    const projects = await discoverProjects(workloadRoutes);
     const slug = slugFromHost(host);
     const project = projects.find((item) => item.slug === slug || item.aliases?.includes(slug) || normalizeHost(item.host) === host);
     if (!project) {
@@ -181,13 +209,21 @@ function validateUpstream(value, label, additionalAllowed = new Set()) {
 }
 
 function workloadRoutesFromLock() {
-  if (!existsSync(workloadLockFile)) return { key: "missing", byHost: new Map(), allowed: new Set() };
+  if (!existsSync(workloadLockFile)) return emptyWorkloadRoutes();
   const bytes = readStableLockFile(workloadLockFile);
   const key = createHash("sha256").update(bytes).digest("hex");
   if (workloadRouteCache.key === key) return workloadRouteCache;
   const lock = JSON.parse(bytes.toString("utf8"));
   if (lock?.version !== 2 || lock?.validatorVersion !== "hosted-contract-v2" || lock?.state !== "verified" || !Array.isArray(lock.routes)) {
     throw new Error("Hosted workload lock is not verified under the supported contract.");
+  }
+  const trustedEpoch = String(lock?.workloadContentSha256 || "");
+  const signedMetadata = /^[a-f0-9]{64}$/.test(trustedEpoch);
+  const metadataDeclared = lock?.files !== undefined
+    || lock?.workloads !== undefined
+    || lock?.snapshotGeneration !== undefined;
+  if (metadataDeclared && !signedMetadata) {
+    throw new Error("Hosted workload project metadata is not bound to a verified content digest.");
   }
   const byHost = new Map();
   const names = new Map();
@@ -223,8 +259,63 @@ function workloadRoutesFromLock() {
     claimRouteValue(upstreams, `${service}:${port}`, identity);
     allowed.add(`${service}:${port}`);
   }
-  workloadRouteCache = { key, byHost, allowed };
+  const projectMetadata = signedMetadata ? signedProjectMetadata(lock) : new Map();
+  workloadRouteCache = {
+    key,
+    byHost,
+    allowed,
+    trustedEpoch: signedMetadata ? trustedEpoch : "",
+    projectMetadata,
+  };
   return workloadRouteCache;
+}
+
+function emptyWorkloadRoutes() {
+  return {
+    key: "missing",
+    byHost: new Map(),
+    allowed: new Set(),
+    trustedEpoch: "",
+    projectMetadata: new Map(),
+  };
+}
+
+function signedProjectMetadata(lock) {
+  if (!Array.isArray(lock.files)) throw new Error("Verified hosted workload lock has no file inventory.");
+  const metadata = new Map();
+  const byWorkload = new Map();
+  const snapshotGenerationValue = String(lock.snapshotGeneration || "");
+  if (!path.isAbsolute(snapshotGenerationValue)) throw new Error("Verified hosted workload snapshot generation is invalid.");
+  const snapshotGeneration = path.resolve(snapshotGenerationValue);
+  for (const record of lock.files.filter((item) => item?.kind === "project-metadata")) {
+    const sourcePath = String(record.sourcePath || "");
+    const snapshotPath = String(record.path || "");
+    const sha256 = String(record.sha256 || "");
+    const sizeBytes = Number(record.sizeBytes);
+    if (!path.isAbsolute(sourcePath) || !path.isAbsolute(snapshotPath)
+      || record.snapshot !== true || !/^[a-f0-9]{64}$/.test(sha256)
+      || !Number.isSafeInteger(sizeBytes) || sizeBytes < 2 || sizeBytes > 1024 * 1024
+      || !path.resolve(snapshotPath).startsWith(`${snapshotGeneration}${path.sep}`)
+      || metadata.has(path.resolve(sourcePath)) || byWorkload.has(String(record.workloadId || ""))) {
+      throw new Error("Verified hosted workload project metadata inventory is invalid.");
+    }
+    const normalized = {
+      path: snapshotPath,
+      sha256,
+      sizeBytes,
+      workloadId: String(record.workloadId || ""),
+    };
+    metadata.set(path.resolve(sourcePath), normalized);
+    byWorkload.set(normalized.workloadId, normalized);
+  }
+  for (const workload of Array.isArray(lock.workloads) ? lock.workloads : []) {
+    if (!workload?.projectMetadataSourcePath && !workload?.projectMetadataPath) continue;
+    const record = metadata.get(path.resolve(String(workload.projectMetadataSourcePath || "")));
+    if (!record || record.path !== workload.projectMetadataPath || record.workloadId !== workload.id) {
+      throw new Error("Verified hosted workload project metadata binding is invalid.");
+    }
+  }
+  return metadata;
 }
 
 function readStableLockFile(filePath) {
@@ -317,7 +408,7 @@ function mappedProjectValue(map, project) {
   return "";
 }
 
-function discoverProjects() {
+async function discoverProjects(workloadRoutes = emptyWorkloadRoutes()) {
   if (!existsSync(projectsRoot)) return [];
   const projects = [];
   const seen = new Set();
@@ -330,7 +421,14 @@ function discoverProjects() {
     const isPhp = isPhpProject(projectPath);
     const isNode = existsSync(path.join(projectPath, "package.json"));
     const isStatic = isStaticProject(projectPath);
-    const config = readProjectConfig(projectPath);
+    let config;
+    try {
+      config = await readProjectConfig(projectPath, workloadRoutes);
+    } catch (error) {
+      const code = error instanceof ProjectMetadataError ? error.code : "PROJECT_METADATA_REJECTED";
+      console.error(`rejected project metadata for ${slug}: ${code}`);
+      continue;
+    }
     const configuredType = normalizeProjectType(config.type);
     const configuredUpstream = stringValue(config.upstream);
     const configuredProjects = configuredProjectEntries(config);
@@ -411,18 +509,40 @@ function resolveProjectPath(basePath, value) {
   return resolved === basePath || resolved.startsWith(`${basePath}${path.sep}`) ? resolved : basePath;
 }
 
-function readProjectConfig(projectPath) {
+async function readProjectConfig(projectPath, workloadRoutes) {
   for (const name of projectConfigNames) {
     const configPath = path.join(projectPath, name);
     if (!existsSync(configPath)) continue;
-    try {
-      return JSON.parse(readFileSync(configPath, "utf8"));
-    } catch (error) {
-      console.error(`invalid project config ${configPath}: ${error instanceof Error ? error.message : String(error)}`);
-      return {};
+    const signed = workloadRoutes.projectMetadata.get(metadataSourceIdentity(configPath));
+    if (signed) {
+      return projectMetadataReader.read(signed.path, {
+        expectedSha256: signed.sha256,
+        expectedSizeBytes: signed.sizeBytes,
+        trustedEpoch: workloadRoutes.trustedEpoch,
+      });
     }
+    if (process.env.NODE_ENV === "production" && workloadRoutes.trustedEpoch) {
+      throw new ProjectMetadataError("Project metadata is absent from the verified workload lock.", "PROJECT_METADATA_UNSIGNED");
+    }
+    return projectMetadataReader.read(configPath);
   }
   return {};
+}
+
+function metadataSourceIdentity(configPath) {
+  const stat = lstatSync(configPath);
+  if (!stat.isFile() || stat.isSymbolicLink()) {
+    throw new ProjectMetadataError("Project metadata must be a regular non-symlink file.", "PROJECT_METADATA_FILE_TYPE");
+  }
+  return path.join(realpathSync.native(path.dirname(configPath)), path.basename(configPath));
+}
+
+function boundedEnvironmentInteger(name, fallback, minimum, maximum) {
+  const value = process.env[name] == null || process.env[name] === "" ? fallback : Number(process.env[name]);
+  if (!Number.isInteger(value) || value < minimum || value > maximum) {
+    throw new Error(`${name} must be an integer between ${minimum} and ${maximum}.`);
+  }
+  return value;
 }
 
 function stringValue(value) {

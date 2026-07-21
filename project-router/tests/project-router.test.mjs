@@ -1,11 +1,13 @@
 import { spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { createServer, request as httpRequest } from "node:http";
 import { createServer as createTcpServer } from "node:net";
+import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
+import { createProjectMetadataReader } from "../project-metadata.mjs";
 
 const infraRoot = path.resolve(import.meta.dirname, "..", "..");
 const testRoot = path.join(infraRoot, ".tmp", "project-router-tests", randomUUID());
@@ -66,6 +68,7 @@ test("project-router proxies PHP, Node and Static projects only to dedicated ups
       CONTROL_CENTER_UPSTREAM: `http://127.0.0.1:${serverPort(controlServer)}`,
       PROJECT_ROUTER_TEST_ALLOW_LOOPBACK: "true",
       PROJECT_ROUTER_TEST_ALLOW_LEGACY_DISCOVERY: "true",
+      PROJECT_METADATA_MAX_BYTES: "4096",
       PROJECT_ROUTER_ALLOWED_UPSTREAMS: [
         `127.0.0.1:${serverPort(phpServer)}`,
         `127.0.0.1:${serverPort(nodeServer)}`,
@@ -111,6 +114,15 @@ test("project-router proxies PHP, Node and Static projects only to dedicated ups
   assert.equal(fireportAlias.statusCode, 200);
   assert.equal(fireportAlias.body, "php-dedicated:fireport.localhost.com:/");
 
+  writeFileSync(path.join(projectsRoot, "fiplatform", ".platform", "project.json"), `${JSON.stringify({
+    projects: [{ slug: "fiplatform", name: "fiplatform", type: "php", aliases: ["attacker-alias"] }],
+    type: "php",
+  })}\n`);
+  const signedAliasStillAvailable = await httpGet(routerPort, "fireport.localhost.com", "/signed-snapshot");
+  assert.equal(signedAliasStillAvailable.statusCode, 200);
+  const unsignedReplacement = await httpGet(routerPort, "attacker-alias.localhost.com", "/");
+  assert.equal(unsignedReplacement.statusCode, 404);
+
   const nodeFirst = await httpGet(routerPort, "node-demo.localhost.com", "/api/ping");
   assert.equal(nodeFirst.statusCode, 200);
   const nodeFirstPayload = JSON.parse(nodeFirst.body);
@@ -139,6 +151,10 @@ test("project-router proxies PHP, Node and Static projects only to dedicated ups
   const metadataProject = await httpGet(routerPort, "metadata-demo.localhost.com", "/latest/meta-data/");
   assert.equal(metadataProject.statusCode, 503);
   assert.match(metadataProject.body, /no dedicated upstream/);
+
+  const oversizedMetadata = await httpGet(routerPort, "oversized-demo.localhost.com", "/");
+  assert.equal(oversizedMetadata.statusCode, 404);
+  assert.match(oversizedMetadata.body, /Project not found/);
 
   writeFileSync(stateFile, `${JSON.stringify({ projects: { "node-demo": { enabled: false } } }, null, 2)}\n`);
   const disabledNode = await httpGet(routerPort, "node-demo.localhost.com", "/api/ping");
@@ -190,6 +206,7 @@ test("project-router proxies PHP, Node and Static projects only to dedicated ups
   assert.equal(stderr.includes("project-router error"), false);
   assert.equal(stderr.includes("169.254.169.254"), false);
   assert.match(stderr, /service allowlist policy violation/);
+  assert.match(stderr, /rejected project metadata for oversized-demo: PROJECT_METADATA_SIZE/);
 });
 
 test("project-router rejects IP and external-host upstream policy at production startup", async () => {
@@ -298,6 +315,90 @@ test("FG-042 production consumer rejects route-owner, sibling-upstream and wildc
   }
 });
 
+test("project metadata budgets reject unsafe files before they can influence routing", async (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "project-metadata-budgets-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const file = path.join(root, "project.json");
+  const reader = createProjectMetadataReader({
+    maxBytes: 256,
+    maxDepth: 4,
+    maxKeys: 8,
+    maxNodes: 32,
+    maxAliases: 2,
+    maxArrayItems: 8,
+    parseTimeoutMs: 1000,
+  });
+
+  writeFileSync(file, `${JSON.stringify({ type: "node", aliases: ["one", "two"] })}\n`);
+  assert.deepEqual(await reader.read(file), { type: "node", aliases: ["one", "two"] });
+
+  writeFileSync(file, JSON.stringify({ padding: "x".repeat(300) }));
+  await assert.rejects(reader.read(file), (error) => error.code === "PROJECT_METADATA_SIZE");
+
+  writeFileSync(file, JSON.stringify({ a: { b: { c: { d: { e: true } } } } }));
+  await assert.rejects(reader.read(file), (error) => error.code === "PROJECT_METADATA_COMPLEXITY");
+
+  writeFileSync(file, JSON.stringify(Object.fromEntries(Array.from({ length: 9 }, (_, index) => [`key${index}`, index]))));
+  await assert.rejects(reader.read(file), (error) => error.code === "PROJECT_METADATA_COMPLEXITY");
+
+  writeFileSync(file, JSON.stringify({ aliases: ["one", "two", "three"] }));
+  await assert.rejects(reader.read(file), (error) => error.code === "PROJECT_METADATA_COMPLEXITY");
+
+  const symlink = path.join(root, "linked.json");
+  symlinkSync(file, symlink);
+  await assert.rejects(reader.read(symlink), (error) => error.code === "PROJECT_METADATA_FILE_TYPE");
+});
+
+test("project metadata cache is content-addressed and bound to the verified lock digest", async (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "project-metadata-cache-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const file = path.join(root, "project.json");
+  let parses = 0;
+  const reader = createProjectMetadataReader({
+    parser: async (text) => {
+      parses += 1;
+      return JSON.parse(text);
+    },
+  });
+  const first = `${JSON.stringify({ type: "node", aliases: ["one"] })}\n`;
+  writeFileSync(file, first);
+  const contentDigest = createHash("sha256").update(first).digest("hex");
+  const firstEpoch = "a".repeat(64);
+  await reader.read(file, { expectedSha256: contentDigest, expectedSizeBytes: Buffer.byteLength(first), trustedEpoch: firstEpoch });
+  await reader.read(file, { expectedSha256: contentDigest, expectedSizeBytes: Buffer.byteLength(first), trustedEpoch: firstEpoch });
+  assert.equal(parses, 1);
+  await reader.read(file, { expectedSha256: contentDigest, expectedSizeBytes: Buffer.byteLength(first), trustedEpoch: "b".repeat(64) });
+  assert.equal(parses, 2, "a new verified workload digest must invalidate metadata cache reuse");
+
+  const originalTimes = statSync(file);
+  const changed = first.replace("one", "two");
+  writeFileSync(file, changed);
+  utimesSync(file, originalTimes.atime, originalTimes.mtime);
+  assert.equal(Buffer.byteLength(changed), Buffer.byteLength(first));
+  await assert.rejects(
+    reader.read(file, { expectedSha256: contentDigest, expectedSizeBytes: Buffer.byteLength(first), trustedEpoch: firstEpoch }),
+    (error) => error.code === "PROJECT_METADATA_TRUST",
+  );
+  assert.equal(parses, 2, "digest mismatch must fail before parsing");
+
+  await reader.read(file);
+  assert.equal(parses, 3, "same-size and same-mtime replacement must not reuse the old local cache entry");
+});
+
+test("project metadata parse-time budget interrupts an unresponsive parser", async (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "project-metadata-timeout-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const file = path.join(root, "project.json");
+  writeFileSync(file, '{"type":"node"}\n');
+  const reader = createProjectMetadataReader({
+    parseTimeoutMs: 25,
+    parser: () => new Promise(() => {}),
+  });
+  const started = Date.now();
+  await assert.rejects(reader.read(file), (error) => error.code === "PROJECT_METADATA_TIMEOUT");
+  assert.equal(Date.now() - started < 500, true);
+});
+
 function prepareFixture() {
   rmSync(testRoot, { recursive: true, force: true });
   mkdirSync(path.join(projectsRoot, "php-demo", "public"), { recursive: true });
@@ -307,11 +408,13 @@ function prepareFixture() {
   mkdirSync(path.join(projectsRoot, "node-demo"), { recursive: true });
   mkdirSync(path.join(projectsRoot, "static-demo", "public"), { recursive: true });
   mkdirSync(path.join(projectsRoot, "metadata-demo", ".platform"), { recursive: true });
+  mkdirSync(path.join(projectsRoot, "oversized-demo", ".platform"), { recursive: true });
   mkdirSync(path.join(projectsRoot, "locked-demo"), { recursive: true });
+  mkdirSync(path.join(stateDir, "verified-snapshot"), { recursive: true });
   mkdirSync(stateDir, { recursive: true });
   writeFileSync(path.join(projectsRoot, "php-demo", "public", "index.php"), "<?php echo 'php-demo';\n");
   writeFileSync(path.join(projectsRoot, "legacy-php", "public", "index.php"), "<?php echo 'legacy-php';\n");
-  writeFileSync(path.join(projectsRoot, "fiplatform", ".platform", "project.json"), `${JSON.stringify({
+  const fiplatformMetadata = `${JSON.stringify({
     projects: [
       {
         slug: "fiplatform",
@@ -321,7 +424,12 @@ function prepareFixture() {
       },
     ],
     type: "php",
-  }, null, 2)}\n`);
+  }, null, 2)}\n`;
+  const fiplatformMetadataSource = path.join(projectsRoot, "fiplatform", ".platform", "project.json");
+  const fiplatformMetadataSnapshot = path.join(stateDir, "verified-snapshot", "project-metadata.json");
+  writeFileSync(fiplatformMetadataSource, fiplatformMetadata);
+  writeFileSync(fiplatformMetadataSnapshot, fiplatformMetadata);
+  chmodSync(fiplatformMetadataSnapshot, 0o400);
   writeFileSync(path.join(projectsRoot, "fiplatform", "public", "index.php"), "<?php echo 'fiplatform';\n");
   writeFileSync(path.join(projectsRoot, "node-demo", "package.json"), `${JSON.stringify({ scripts: { start: "node server.mjs" } }, null, 2)}\n`);
   writeFileSync(path.join(projectsRoot, "static-demo", "public", "index.html"), "<!doctype html><title>static</title>\n");
@@ -330,10 +438,31 @@ function prepareFixture() {
     type: "node",
     upstream: "http://169.254.169.254:80",
   }, null, 2)}\n`);
+  writeFileSync(path.join(projectsRoot, "oversized-demo", "package.json"), `${JSON.stringify({ scripts: { start: "node server.mjs" } }, null, 2)}\n`);
+  writeFileSync(path.join(projectsRoot, "oversized-demo", ".platform", "project.json"), `${JSON.stringify({
+    type: "node",
+    padding: "x".repeat(8192),
+  })}\n`);
   writeFileSync(path.join(projectsRoot, "locked-demo", "package.json"), `${JSON.stringify({ scripts: { start: "node server.mjs" } }, null, 2)}\n`);
   writeFileSync(stateFile, `${JSON.stringify({ projects: {} }, null, 2)}\n`);
   writeFileSync(workloadLockFile, `${JSON.stringify({
     ...verifiedRouteLock(),
+    workloadContentSha256: "c".repeat(64),
+    snapshotGeneration: path.join(stateDir, "verified-snapshot"),
+    workloads: [{
+      id: "fixture-app",
+      projectMetadataSourcePath: fiplatformMetadataSource,
+      projectMetadataPath: fiplatformMetadataSnapshot,
+    }],
+    files: [{
+      kind: "project-metadata",
+      workloadId: "fixture-app",
+      sourcePath: fiplatformMetadataSource,
+      path: fiplatformMetadataSnapshot,
+      sha256: createHash("sha256").update(fiplatformMetadata).digest("hex"),
+      sizeBytes: Buffer.byteLength(fiplatformMetadata),
+      snapshot: true,
+    }],
   }, null, 2)}\n`);
 }
 
