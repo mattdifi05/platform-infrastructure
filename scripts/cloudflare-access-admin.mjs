@@ -2,9 +2,17 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  assertExactAdminApplications,
+  buildAdminAccessEvidence,
+  loadAdminAccessInventory,
+  reconcileAdminRouteInventory,
+} from "./admin-access-inventory.mjs";
 
 const API_BASE = "https://api.cloudflare.com/client/v4";
 const DEFAULT_MANIFEST = "cloudflare/access-admin.example.json";
+const DEFAULT_INVENTORY = "governance/admin-access-surfaces.json";
+const ADMIN_ROUTES = "traefik/dynamic/admin-routes.yml";
 
 function parseArgs(args) {
   const out = { manifest: DEFAULT_MANIFEST, apply: false, verifyRemote: false };
@@ -51,6 +59,8 @@ function manifestSummary(manifest) {
     accountId: manifest.accountId,
     teamName: manifest.teamName,
     adminSessionDuration: manifest.adminSessionDuration,
+    domainSuffix: manifest.domainSuffix,
+    adminSurfaceInventory: manifest.inventoryContract.inventory,
     mfaEnforcedByIdentityProvider: true,
     allowedIdentityProviderCount: manifest.allowedIdentityProviderIds.length,
     allowedEmailCount: manifest.allowedEmails.length,
@@ -64,14 +74,21 @@ function manifestSummary(manifest) {
   };
 }
 
-function writeEvidenceReport({ mode, status, manifest, applications, issues = [] }) {
+function writeEvidenceReport({ mode, status, manifest, applications, routeReconciliation, issues = [] }) {
   const generatedAt = new Date().toISOString();
+  const adminSurfaceCoverage = buildAdminAccessEvidence({
+    inventoryContract: manifest.inventoryContract,
+    routeReconciliation,
+    applications,
+    mode,
+  });
   const payload = {
     generatedAt,
     mode,
     status,
     manifest: manifestSummary(manifest),
     applications,
+    adminSurfaceCoverage,
     issues,
   };
   const directory = ensureReportDir();
@@ -86,6 +103,8 @@ function writeEvidenceReport({ mode, status, manifest, applications, issues = []
     `Mode: ${mode}`,
     `Generated at: ${generatedAt}`,
     `Team: ${manifest.teamName}`,
+    `Admin inventory: ${adminSurfaceCoverage.inventory.id}@${adminSurfaceCoverage.inventory.version} (${adminSurfaceCoverage.inventory.sha256})`,
+    `Complete inventory coverage: ${adminSurfaceCoverage.complete ? "yes" : "no"}`,
     "",
     "| Application | Domain | Result |",
     "| --- | --- | --- |",
@@ -124,7 +143,7 @@ function requireUnique(values, label) {
   }
 }
 
-export function normalizeManifest(raw, argv) {
+export function normalizeManifest(raw, argv, inventoryRecord) {
   const accountId = argv.accountId || process.env.CLOUDFLARE_ACCOUNT_ID || raw.accountId;
   const allowedIdentityProviderIds = uniqueValues(cleanArray(raw.allowedIdentityProviderIds), "identity provider", false);
   const allowedEmails = uniqueValues(cleanArray(raw.allowedEmails), "allowed email", true);
@@ -143,6 +162,11 @@ export function normalizeManifest(raw, argv) {
     throw new Error("Cloudflare Access manifest must allow at least one admin email or email domain.");
   }
   if (applications.length === 0) throw new Error("Cloudflare Access manifest must define at least one admin application.");
+
+  const inventoryContract = assertExactAdminApplications(applications, inventoryRecord, {
+    domainSuffix: raw.domainSuffix,
+    binding: raw.adminSurfaceInventory,
+  });
 
   const normalizedApps = applications.map((app) => {
     if (!app.name || !app.domain) throw new Error(`Every Access application needs name and domain: ${JSON.stringify(app)}`);
@@ -169,6 +193,8 @@ export function normalizeManifest(raw, argv) {
     accountId,
     teamName: String(raw.teamName),
     adminSessionDuration: String(raw.adminSessionDuration),
+    domainSuffix: String(raw.domainSuffix).toLowerCase(),
+    inventoryContract,
     allowedIdentityProviderIds,
     allowedEmails,
     allowedEmailDomains,
@@ -498,8 +524,14 @@ async function main() {
   let mode = argv.verifyRemote ? "verifyRemote" : argv.apply ? "apply" : "plan";
   let applications = [];
   let manifest = null;
+  let routeReconciliation = null;
   try {
-    manifest = normalizeManifest(readJson(argv.manifest), argv);
+    const inventoryRecord = loadAdminAccessInventory(path.join(process.cwd(), DEFAULT_INVENTORY));
+    routeReconciliation = reconcileAdminRouteInventory(
+      inventoryRecord,
+      fs.readFileSync(path.join(process.cwd(), ADMIN_ROUTES), "utf8"),
+    );
+    manifest = normalizeManifest(readJson(argv.manifest), argv, inventoryRecord);
     if (argv.apply && argv.verifyRemote) throw new Error("Use either --apply or --verifyRemote, not both.");
     let status = "warning";
     if (argv.apply) {
@@ -511,7 +543,7 @@ async function main() {
     } else {
       applications = dryRun(manifest);
     }
-    writeEvidenceReport({ mode, status, manifest, applications });
+    writeEvidenceReport({ mode, status, manifest, applications, routeReconciliation });
   } catch (error) {
     if (manifest) {
       writeEvidenceReport({
@@ -519,6 +551,7 @@ async function main() {
         status: "failed",
         manifest,
         applications: error.applications ?? applications,
+        routeReconciliation,
         issues: error.issues ?? [String(error?.message ?? error)],
       });
     }

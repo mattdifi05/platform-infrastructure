@@ -2,6 +2,12 @@
   "accountId": "00000000000000000000000000000000",
   "teamName": "platform",
   "adminSessionDuration": "8h",
+  "domainSuffix": "example.com",
+  "adminSurfaceInventory": {
+    "id": "platform-admin-access-surfaces",
+    "version": "2026-07-21.1",
+    "sha256": "fd6451e078eb9c5456c725f483b1dacce7e832794965987cb5eb2aee85d12ac4"
+  },
   "mfaEnforcedByIdentityProvider": true,
   "allowedIdentityProviderIds": [
     "00000000-0000-0000-0000-000000000000"
@@ -17,6 +23,7 @@
     { "name": "Platform MinIO Console", "domain": "minio.example.com" },
     { "name": "Platform Traefik Dashboard", "domain": "traefik.example.com" },
     { "name": "Platform phpMyAdmin", "domain": "phpmyadmin.example.com" },
+    { "name": "Platform phpPgAdmin", "domain": "phppgadmin.example.com" },
     { "name": "Platform Portal Control Center", "domain": "portal.example.com" },
     { "name": "Platform Keycloak Admin", "domain": "keycloak-admin.example.com" }
   ]

@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "inventoryId": "platform-admin-access-surfaces",
+  "version": "2026-07-21.1",
+  "routeDomainSuffix": "platform-infrastructure.com",
+  "applications": [
+    { "id": "grafana", "name": "Platform Grafana", "subdomain": "grafana" },
+    { "id": "prometheus", "name": "Platform Prometheus", "subdomain": "prometheus" },
+    { "id": "alertmanager", "name": "Platform Alertmanager", "subdomain": "alertmanager" },
+    { "id": "minio-console", "name": "Platform MinIO Console", "subdomain": "minio" },
+    { "id": "traefik-dashboard", "name": "Platform Traefik Dashboard", "subdomain": "traefik" },
+    { "id": "phpmyadmin", "name": "Platform phpMyAdmin", "subdomain": "phpmyadmin" },
+    { "id": "phppgadmin", "name": "Platform phpPgAdmin", "subdomain": "phppgadmin" },
+    { "id": "portal-control-center", "name": "Platform Portal Control Center", "subdomain": "portal" },
+    { "id": "keycloak-admin", "name": "Platform Keycloak Admin", "subdomain": "keycloak-admin" }
+  ],
+  "routes": [
+    {
+      "id": "database-phpmyadmin-portal-path",
+      "sourceFile": "traefik/dynamic/admin-routes.yml",
+      "router": "enterprise-phpmyadmin-portal-path",
+      "host": "portal.platform-infrastructure.com",
+      "pathPrefix": "/phpmyadmin",
+      "service": "enterprise-phpmyadmin",
+      "accessApplicationId": "portal-control-center"
+    },
+    {
+      "id": "database-phppgadmin-portal-path",
+      "sourceFile": "traefik/dynamic/admin-routes.yml",
+      "router": "enterprise-phppgadmin-portal-path",
+      "host": "portal.platform-infrastructure.com",
+      "pathPrefix": "/phppgadmin",
+      "service": "enterprise-phppgadmin",
+      "accessApplicationId": "portal-control-center"
+    }
+  ]
+}

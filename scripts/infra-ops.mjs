@@ -56,6 +56,10 @@ import {
   verifyGithubAttestation,
   verifyGithubReleaseImages,
 } from "./release-trust.mjs";
+import {
+  evaluateAdminAccessEvidence,
+  loadAdminAccessInventory,
+} from "./admin-access-inventory.mjs";
 
 process.umask(0o077);
 
@@ -8766,6 +8770,7 @@ async function vpsPostdeploy() {
 async function productionGoNoGo() {
   log("==> Production go/no-go evidence gate");
   const { policyPath, policy } = productionGoNoGoPolicy();
+  const adminAccessInventory = loadAdminAccessInventory(path.join(infraRoot, "governance", "admin-access-surfaces.json"));
   const enforce = booleanFlag(argv.enforce);
   const checks = [];
   const candidateEvidence = currentCandidateIdentityEvidence({
@@ -9314,11 +9319,12 @@ async function productionGoNoGo() {
   ));
   const cloudflareAccessFresh = reportFreshDetail(cloudflareAccess, maxAge.cloudflareAccess);
   const latestCloudflareAccessFresh = reportFreshDetail(latestCloudflareAccessReport, maxAge.cloudflareAccess);
-  const cloudflareApps = cloudflareAccess?.payload?.applications ?? [];
+  const cloudflareAccessEvaluation = cloudflareAccess
+    ? evaluateAdminAccessEvidence(cloudflareAccess.payload, adminAccessInventory)
+    : { ok: false, reason: "missing verifyRemote report" };
   const cloudflareVerified = !policy.requireCloudflareAccessVerify || (
     cloudflareAccess?.payload?.mode === "verifyRemote"
-    && cloudflareApps.length > 0
-    && cloudflareApps.every((app) => app.result === "verified")
+    && cloudflareAccessEvaluation.ok
   );
   const cloudflarePendingProvider = Boolean(
     !cloudflareVerified
@@ -9328,7 +9334,7 @@ async function productionGoNoGo() {
     name: "cloudflare-access-admin-verified",
     passed: Boolean(cloudflareAccess && cloudflareAccessFresh.fresh && cloudflareAccess.payload.status === "passed" && cloudflareVerified),
     detail: cloudflareAccess
-      ? `${cloudflareAccessFresh.detail}; mode=${cloudflareAccess.payload.mode}; verified=${cloudflareVerified ? "yes" : "no"}`
+      ? `${cloudflareAccessFresh.detail}; mode=${cloudflareAccess.payload.mode}; exactInventoryCoverage=${cloudflareVerified ? "yes" : "no"}; evaluation=${cloudflareAccessEvaluation.reason}`
       : latestCloudflareAccessReport
         ? `missing verifyRemote report; latestMode=${latestCloudflareAccessReport.payload.mode ?? "unknown"}; latestStatus=${latestCloudflareAccessReport.payload.status ?? "unknown"}; ${latestCloudflareAccessFresh.detail}`
         : cloudflareAccessFresh.detail,
