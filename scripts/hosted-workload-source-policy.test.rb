@@ -32,6 +32,15 @@ class HostedWorkloadSourcePolicyTest < Minitest::Test
     assert_raises(ArgumentError) { parse("services: {}\n#" + ("x" * HostedWorkloadSourcePolicy::MAX_COMPOSE_BYTES)) }
   end
 
+  def test_rejects_all_compose_interpolation_and_dollar_escapes
+    ["$IMAGE", "${IMAGE}", "${IMAGE:-fallback}", "$$IMAGE"].each do |value|
+      error = assert_raises(ArgumentError) do
+        parse("services:\n  app:\n    image: '#{value}'\n")
+      end
+      assert_match(/cannot use Compose interpolation or dollar escapes/, error.message)
+    end
+  end
+
   def test_rejects_include_and_extends_before_render
     include_model = parse("include:\n  - other.yaml\nservices:\n  app: {}\n")
     assert_raises(ArgumentError) { HostedWorkloadSourcePolicy.validate_source_model(include_model, "fixture") }

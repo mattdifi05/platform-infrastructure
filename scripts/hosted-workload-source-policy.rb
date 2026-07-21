@@ -8,7 +8,7 @@ require "psych"
 
 module HostedWorkloadSourcePolicy
   VERSION = "hosted-raw-v1"
-  CONTROLS = %w[bind-owned-secret-aliases bind-owned-volumes deny-api-socket deny-device-access deny-env-file deny-extends deny-file-configs deny-gpu-access deny-include deny-lifecycle-hooks deny-local-volume-options deny-providers deny-runtime-overrides deny-scaling deny-stop-grace-overrides deny-supplemental-groups deny-volumes-from].freeze
+  CONTROLS = %w[bind-owned-secret-aliases bind-owned-volumes deny-api-socket deny-compose-interpolation deny-device-access deny-env-file deny-extends deny-file-configs deny-gpu-access deny-include deny-lifecycle-hooks deny-local-volume-options deny-providers deny-runtime-overrides deny-scaling deny-stop-grace-overrides deny-supplemental-groups deny-volumes-from].freeze
   MAX_COMPOSE_BYTES = 1_048_576
   STANDARD_TAG_PREFIX = "tag:yaml.org,2002:"
 
@@ -64,6 +64,7 @@ module HostedWorkloadSourcePolicy
 
   def parse_compose(bytes, label)
     fail!("#{label} exceeds #{MAX_COMPOSE_BYTES} bytes.") if bytes.bytesize > MAX_COMPOSE_BYTES
+    fail!("#{label} cannot use Compose interpolation or dollar escapes.") if bytes.include?("$")
     stream = Psych.parse_stream(bytes, filename: label)
     fail!("#{label} must contain exactly one YAML document.") unless stream.children.length == 1
     document = stream.children.first
