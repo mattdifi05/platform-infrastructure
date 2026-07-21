@@ -15,6 +15,7 @@ import {
 import { isIP } from "node:net";
 import path from "node:path";
 import { createProjectMetadataReader, ProjectMetadataError } from "./project-metadata.mjs";
+import { validateVerifiedWorkloadLock } from "./verified-workload-lock.mjs";
 
 const port = Number(process.env.PROJECT_ROUTER_PORT || 8080);
 const projectsRoot = process.env.PROJECTS_ROOT || "/var/www/projects";
@@ -214,17 +215,7 @@ function workloadRoutesFromLock() {
   const key = createHash("sha256").update(bytes).digest("hex");
   if (workloadRouteCache.key === key) return workloadRouteCache;
   const lock = JSON.parse(bytes.toString("utf8"));
-  if (lock?.version !== 2 || lock?.validatorVersion !== "hosted-contract-v2" || lock?.state !== "verified" || !Array.isArray(lock.routes)) {
-    throw new Error("Hosted workload lock is not verified under the supported contract.");
-  }
-  const trustedEpoch = String(lock?.workloadContentSha256 || "");
-  const signedMetadata = /^[a-f0-9]{64}$/.test(trustedEpoch);
-  const metadataDeclared = lock?.files !== undefined
-    || lock?.workloads !== undefined
-    || lock?.snapshotGeneration !== undefined;
-  if (metadataDeclared && !signedMetadata) {
-    throw new Error("Hosted workload project metadata is not bound to a verified content digest.");
-  }
+  const verified = validateVerifiedWorkloadLock(lock);
   const byHost = new Map();
   const names = new Map();
   const upstreams = new Map();
@@ -259,13 +250,12 @@ function workloadRoutesFromLock() {
     claimRouteValue(upstreams, `${service}:${port}`, identity);
     allowed.add(`${service}:${port}`);
   }
-  const projectMetadata = signedMetadata ? signedProjectMetadata(lock) : new Map();
   workloadRouteCache = {
     key,
     byHost,
     allowed,
-    trustedEpoch: signedMetadata ? trustedEpoch : "",
-    projectMetadata,
+    trustedEpoch: verified.trustedEpoch,
+    projectMetadata: verified.projectMetadata,
   };
   return workloadRouteCache;
 }
@@ -280,50 +270,13 @@ function emptyWorkloadRoutes() {
   };
 }
 
-function signedProjectMetadata(lock) {
-  if (!Array.isArray(lock.files)) throw new Error("Verified hosted workload lock has no file inventory.");
-  const metadata = new Map();
-  const byWorkload = new Map();
-  const snapshotGenerationValue = String(lock.snapshotGeneration || "");
-  if (!path.isAbsolute(snapshotGenerationValue)) throw new Error("Verified hosted workload snapshot generation is invalid.");
-  const snapshotGeneration = path.resolve(snapshotGenerationValue);
-  for (const record of lock.files.filter((item) => item?.kind === "project-metadata")) {
-    const sourcePath = String(record.sourcePath || "");
-    const snapshotPath = String(record.path || "");
-    const sha256 = String(record.sha256 || "");
-    const sizeBytes = Number(record.sizeBytes);
-    if (!path.isAbsolute(sourcePath) || !path.isAbsolute(snapshotPath)
-      || record.snapshot !== true || !/^[a-f0-9]{64}$/.test(sha256)
-      || !Number.isSafeInteger(sizeBytes) || sizeBytes < 2 || sizeBytes > 1024 * 1024
-      || !path.resolve(snapshotPath).startsWith(`${snapshotGeneration}${path.sep}`)
-      || metadata.has(path.resolve(sourcePath)) || byWorkload.has(String(record.workloadId || ""))) {
-      throw new Error("Verified hosted workload project metadata inventory is invalid.");
-    }
-    const normalized = {
-      path: snapshotPath,
-      sha256,
-      sizeBytes,
-      workloadId: String(record.workloadId || ""),
-    };
-    metadata.set(path.resolve(sourcePath), normalized);
-    byWorkload.set(normalized.workloadId, normalized);
-  }
-  for (const workload of Array.isArray(lock.workloads) ? lock.workloads : []) {
-    if (!workload?.projectMetadataSourcePath && !workload?.projectMetadataPath) continue;
-    const record = metadata.get(path.resolve(String(workload.projectMetadataSourcePath || "")));
-    if (!record || record.path !== workload.projectMetadataPath || record.workloadId !== workload.id) {
-      throw new Error("Verified hosted workload project metadata binding is invalid.");
-    }
-  }
-  return metadata;
-}
-
 function readStableLockFile(filePath) {
   let descriptor;
   try {
     descriptor = openSync(filePath, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
     const before = fstatSync(descriptor);
-    if (!before.isFile() || before.size < 2 || before.size > 1024 * 1024) throw new Error("Invalid hosted workload lock file.");
+    if (!before.isFile() || ![0o400, 0o600].includes(before.mode & 0o777)
+      || before.size < 2 || before.size > 1024 * 1024) throw new Error("Invalid hosted workload lock file.");
     const bytes = readFileSync(descriptor);
     const after = fstatSync(descriptor);
     if (before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size || before.mtimeMs !== after.mtimeMs) {

@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { createServer, request as httpRequest } from "node:http";
 import { createServer as createTcpServer } from "node:net";
 import os from "node:os";
@@ -8,6 +8,7 @@ import path from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createProjectMetadataReader } from "../project-metadata.mjs";
+import { validateVerifiedWorkloadLock, workloadContentDigest } from "../verified-workload-lock.mjs";
 
 const infraRoot = path.resolve(import.meta.dirname, "..", "..");
 const testRoot = path.join(infraRoot, ".tmp", "project-router-tests", randomUUID());
@@ -17,7 +18,7 @@ const stateFile = path.join(stateDir, "projects.json");
 const workloadLockFile = path.join(stateDir, "hosted-workloads.lock.json");
 
 test("project-router proxies PHP, Node and Static projects only to dedicated upstreams", async (t) => {
-  prepareFixture();
+  const verifiedLock = prepareFixture();
   let phpRequestCount = 0;
   const phpServer = createServer((req, res) => {
     phpRequestCount += 1;
@@ -85,6 +86,7 @@ test("project-router proxies PHP, Node and Static projects only to dedicated ups
   });
   t.after(async () => {
     await stopChild(child);
+    chmodWritableSnapshot(path.join(stateDir, "verified-snapshots", "content-fixture"));
     await closeServer(phpServer);
     await closeServer(nodeServer);
     await closeServer(staticServer);
@@ -197,7 +199,7 @@ test("project-router proxies PHP, Node and Static projects only to dedicated ups
   assert.equal(wildcardLockedRoute.statusCode, 500);
   assert.match(wildcardLockedRoute.body, /internal proxy error/);
 
-  writeFileSync(workloadLockFile, `${JSON.stringify(verifiedRouteLock(), null, 2)}\n`);
+  writeFileSync(workloadLockFile, `${JSON.stringify(verifiedLock, null, 2)}\n`);
   const wildcardRequest = await httpGet(routerPort, "anything.example.invalid", "/");
   assert.equal(wildcardRequest.statusCode, 404);
   assert.match(wildcardRequest.body, /Project not found/);
@@ -277,10 +279,10 @@ test("FG-042 production consumer rejects route-owner, sibling-upstream and wildc
       const root = path.join(infraRoot, ".tmp", "project-router-tests", randomUUID());
       const lockFile = path.join(root, "hosted-workloads.lock.json");
       mkdirSync(root, { recursive: true });
-      writeFileSync(lockFile, `${JSON.stringify({
-        ...verifiedRouteLock(),
-        routes: [routeFixture(override)],
-      }, null, 2)}\n`);
+      const verifiedLock = verifiedMetadataLockFixture(root);
+      verifiedLock.routes = [routeFixture(override)];
+      writeFileSync(lockFile, `${JSON.stringify(verifiedLock, null, 2)}\n`, { mode: 0o600 });
+      chmodSync(lockFile, 0o600);
 
       const routerPort = await freePort();
       const child = spawn(process.execPath, [path.join(infraRoot, "project-router", "server.mjs")], {
@@ -302,6 +304,7 @@ test("FG-042 production consumer rejects route-owner, sibling-upstream and wildc
       });
       t.after(async () => {
         await stopChild(child);
+        chmodWritableSnapshot(verifiedLock.snapshotGeneration);
         rmSync(root, { recursive: true, force: true });
       });
 
@@ -399,6 +402,29 @@ test("project metadata parse-time budget interrupts an unresponsive parser", asy
   assert.equal(Date.now() - started < 500, true);
 });
 
+test("project metadata trust rejects legacy locks, pointer tampering, and digest tampering", (t) => {
+  const root = realpathSync.native(mkdtempSync(path.join(os.tmpdir(), "project-metadata-lock-")));
+  t.after(() => {
+    chmodWritableSnapshot(path.join(root, "snapshots", "content-fixture"));
+    rmSync(root, { recursive: true, force: true });
+  });
+  const lock = verifiedMetadataLockFixture(root);
+  assert.equal(validateVerifiedWorkloadLock(lock).projectMetadata.size, 1);
+
+  const legacy = structuredClone(lock);
+  legacy.version = 1;
+  delete legacy.validatorVersion;
+  assert.throws(() => validateVerifiedWorkloadLock(legacy), /policy\/version/);
+
+  const pointerTamper = structuredClone(lock);
+  pointerTamper.workloads[0].projectMetadataPath = path.join(lock.snapshotGeneration, "different.json");
+  assert.throws(() => validateVerifiedWorkloadLock(pointerTamper), /pointer/);
+
+  const digestTamper = structuredClone(lock);
+  digestTamper.files[0].sha256 = "d".repeat(64);
+  assert.throws(() => validateVerifiedWorkloadLock(digestTamper), /content digest/);
+});
+
 function prepareFixture() {
   rmSync(testRoot, { recursive: true, force: true });
   mkdirSync(path.join(projectsRoot, "php-demo", "public"), { recursive: true });
@@ -410,7 +436,9 @@ function prepareFixture() {
   mkdirSync(path.join(projectsRoot, "metadata-demo", ".platform"), { recursive: true });
   mkdirSync(path.join(projectsRoot, "oversized-demo", ".platform"), { recursive: true });
   mkdirSync(path.join(projectsRoot, "locked-demo"), { recursive: true });
-  mkdirSync(path.join(stateDir, "verified-snapshot"), { recursive: true });
+  const snapshotRoot = path.join(stateDir, "verified-snapshots");
+  const snapshotGeneration = path.join(snapshotRoot, "content-fixture");
+  mkdirSync(snapshotGeneration, { recursive: true });
   mkdirSync(stateDir, { recursive: true });
   writeFileSync(path.join(projectsRoot, "php-demo", "public", "index.php"), "<?php echo 'php-demo';\n");
   writeFileSync(path.join(projectsRoot, "legacy-php", "public", "index.php"), "<?php echo 'legacy-php';\n");
@@ -426,10 +454,12 @@ function prepareFixture() {
     type: "php",
   }, null, 2)}\n`;
   const fiplatformMetadataSource = path.join(projectsRoot, "fiplatform", ".platform", "project.json");
-  const fiplatformMetadataSnapshot = path.join(stateDir, "verified-snapshot", "project-metadata.json");
+  const fiplatformMetadataSnapshot = path.join(snapshotGeneration, "project-metadata.json");
   writeFileSync(fiplatformMetadataSource, fiplatformMetadata);
   writeFileSync(fiplatformMetadataSnapshot, fiplatformMetadata);
   chmodSync(fiplatformMetadataSnapshot, 0o400);
+  chmodSync(snapshotGeneration, 0o500);
+  chmodSync(snapshotRoot, 0o700);
   writeFileSync(path.join(projectsRoot, "fiplatform", "public", "index.php"), "<?php echo 'fiplatform';\n");
   writeFileSync(path.join(projectsRoot, "node-demo", "package.json"), `${JSON.stringify({ scripts: { start: "node server.mjs" } }, null, 2)}\n`);
   writeFileSync(path.join(projectsRoot, "static-demo", "public", "index.html"), "<!doctype html><title>static</title>\n");
@@ -445,25 +475,98 @@ function prepareFixture() {
   })}\n`);
   writeFileSync(path.join(projectsRoot, "locked-demo", "package.json"), `${JSON.stringify({ scripts: { start: "node server.mjs" } }, null, 2)}\n`);
   writeFileSync(stateFile, `${JSON.stringify({ projects: {} }, null, 2)}\n`);
-  writeFileSync(workloadLockFile, `${JSON.stringify({
+  const metadataStat = statSync(fiplatformMetadataSnapshot, { bigint: true });
+  const snapshotRootStat = statSync(snapshotRoot, { bigint: true });
+  const snapshotGenerationStat = statSync(snapshotGeneration, { bigint: true });
+  const metadataRecord = {
+    kind: "project-metadata",
+    workloadId: "fixture-app",
+    sourcePath: fiplatformMetadataSource,
+    path: fiplatformMetadataSnapshot,
+    sha256: createHash("sha256").update(fiplatformMetadata).digest("hex"),
+    sizeBytes: Buffer.byteLength(fiplatformMetadata),
+    snapshot: true,
+    snapshotDevice: String(metadataStat.dev),
+    snapshotInode: String(metadataStat.ino),
+    snapshotUid: String(metadataStat.uid),
+  };
+  const workloadLock = {
     ...verifiedRouteLock(),
-    workloadContentSha256: "c".repeat(64),
-    snapshotGeneration: path.join(stateDir, "verified-snapshot"),
+    snapshotRoot,
+    snapshotGeneration,
+    snapshotRootIdentity: statIdentity(snapshotRootStat),
+    snapshotGenerationIdentity: statIdentity(snapshotGenerationStat),
     workloads: [{
       id: "fixture-app",
       projectMetadataSourcePath: fiplatformMetadataSource,
       projectMetadataPath: fiplatformMetadataSnapshot,
     }],
-    files: [{
-      kind: "project-metadata",
-      workloadId: "fixture-app",
-      sourcePath: fiplatformMetadataSource,
-      path: fiplatformMetadataSnapshot,
-      sha256: createHash("sha256").update(fiplatformMetadata).digest("hex"),
-      sizeBytes: Buffer.byteLength(fiplatformMetadata),
-      snapshot: true,
-    }],
-  }, null, 2)}\n`);
+    files: [metadataRecord],
+  };
+  workloadLock.workloadContentSha256 = workloadContentDigest(workloadLock.files);
+  writeFileSync(workloadLockFile, `${JSON.stringify(workloadLock, null, 2)}\n`, { mode: 0o600 });
+  chmodSync(workloadLockFile, 0o600);
+  return workloadLock;
+}
+
+function verifiedMetadataLockFixture(root) {
+  const sourceRoot = path.join(root, "source");
+  const snapshotRoot = path.join(root, "snapshots");
+  const snapshotGeneration = path.join(snapshotRoot, "content-fixture");
+  mkdirSync(sourceRoot, { recursive: true });
+  mkdirSync(snapshotGeneration, { recursive: true });
+  const sourcePath = path.join(sourceRoot, "project.json");
+  const snapshotPath = path.join(snapshotGeneration, "project.json");
+  const content = '{"type":"node"}\n';
+  writeFileSync(sourcePath, content);
+  writeFileSync(snapshotPath, content, { mode: 0o400 });
+  chmodSync(snapshotPath, 0o400);
+  chmodSync(snapshotGeneration, 0o500);
+  chmodSync(snapshotRoot, 0o700);
+  const fileStat = statSync(snapshotPath, { bigint: true });
+  const record = {
+    kind: "project-metadata",
+    workloadId: "fixture-app",
+    sourcePath,
+    path: snapshotPath,
+    sha256: createHash("sha256").update(content).digest("hex"),
+    sizeBytes: Buffer.byteLength(content),
+    snapshot: true,
+    snapshotDevice: String(fileStat.dev),
+    snapshotInode: String(fileStat.ino),
+    snapshotUid: String(fileStat.uid),
+  };
+  const lock = {
+    version: 2,
+    validatorVersion: "hosted-contract-v2",
+    state: "verified",
+    snapshotRoot,
+    snapshotGeneration,
+    snapshotRootIdentity: statIdentity(statSync(snapshotRoot, { bigint: true })),
+    snapshotGenerationIdentity: statIdentity(statSync(snapshotGeneration, { bigint: true })),
+    workloads: [{ id: "fixture-app", projectMetadataSourcePath: sourcePath, projectMetadataPath: snapshotPath }],
+    files: [record],
+    routes: [{ workloadId: "fixture-app", slug: "fixture", service: "fixture-app-web", port: 3000, upstream: "http://fixture-app-web:3000" }],
+  };
+  lock.workloadContentSha256 = workloadContentDigest(lock.files);
+  return lock;
+}
+
+function statIdentity(stat) {
+  return {
+    device: String(stat.dev),
+    inode: String(stat.ino),
+    uid: String(stat.uid),
+    mode: Number(stat.mode & 0o777n),
+  };
+}
+
+function chmodWritableSnapshot(snapshotGeneration) {
+  try {
+    chmodSync(snapshotGeneration, 0o700);
+  } catch {
+    // The fixture may have been removed before cleanup.
+  }
 }
 
 function verifiedRouteLock() {
