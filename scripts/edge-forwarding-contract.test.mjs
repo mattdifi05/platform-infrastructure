@@ -82,6 +82,41 @@ test("FG-060 origin firewall refuses provider drift before applying trusted rang
   }
 });
 
+test("FG-060 rejects identical malformed IPv4 CIDRs in provider and snapshot", () => {
+  const fixture = trustedProxyFixture({ ipv4: ["198.41.128.0/17", "999.999.999.999/24"], ipv6: ["2606:4700::/32"] });
+  try {
+    const result = runTrustedProxyCheck(fixture.ipv4Path, fixture.ipv6Path, fixture.snapshotPath);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /invalid.*ipv4|ipv4.*invalid/i);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("FG-060 rejects identical malformed IPv6 CIDRs in provider and snapshot", () => {
+  const fixture = trustedProxyFixture({ ipv4: ["198.41.128.0/17"], ipv6: ["2606:4700::/32", "2606:4700::gg/32"] });
+  try {
+    const result = runTrustedProxyCheck(fixture.ipv4Path, fixture.ipv6Path, fixture.snapshotPath);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /invalid.*ipv6|ipv6.*invalid/i);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("FG-060 compares valid IPv6 CIDRs by canonical network semantics", () => {
+  const fixture = trustedProxyFixture({
+    ipv4: ["198.41.128.0/17"],
+    ipv6: ["2606:4700:0000:0000:0000:0000:0000:0000/32"],
+    providerIpv6: ["2606:4700::/32"],
+  });
+  try {
+    assert.equal(runTrustedProxyCheck(fixture.ipv4Path, fixture.ipv6Path, fixture.snapshotPath).status, 0);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
 function read(name) {
   return fs.readFileSync(path.join(root, name), "utf8");
 }
@@ -120,10 +155,26 @@ function ipv4InCidr(address, cidr) {
   return (toInt(address) & mask) === (toInt(network) & mask);
 }
 
-function runTrustedProxyCheck(ipv4Path, ipv6Path) {
+function runTrustedProxyCheck(ipv4Path, ipv6Path, snapshotPath = path.join(root, "cloudflare/trusted-proxy-cidrs.json")) {
   return spawnSync(
     path.join(root, "scripts/cloudflare-trusted-proxy-check.sh"),
-    [path.join(root, "cloudflare/trusted-proxy-cidrs.json"), ipv4Path, ipv6Path],
+    [snapshotPath, ipv4Path, ipv6Path],
     { encoding: "utf8" },
   );
+}
+
+function trustedProxyFixture({ ipv4, ipv6, providerIpv4 = ipv4, providerIpv6 = ipv6 }) {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "trusted-proxy-cidr-"));
+  const snapshotPath = path.join(temp, "snapshot.json");
+  const ipv4Path = path.join(temp, "ips-v4");
+  const ipv6Path = path.join(temp, "ips-v6");
+  fs.writeFileSync(snapshotPath, `${JSON.stringify({ ipv4, ipv6 }, null, 2)}\n`);
+  fs.writeFileSync(ipv4Path, `${providerIpv4.join("\n")}\n`);
+  fs.writeFileSync(ipv6Path, `${providerIpv6.join("\n")}\n`);
+  return {
+    snapshotPath,
+    ipv4Path,
+    ipv6Path,
+    cleanup: () => fs.rmSync(temp, { recursive: true, force: true }),
+  };
 }
