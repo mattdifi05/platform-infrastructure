@@ -34,6 +34,11 @@ if [ "$SSH_PORT" -lt 1 ] || [ "$SSH_PORT" -gt 65535 ]; then
   echo "DEPLOY_SSH_PORT must be between 1 and 65535." >&2
   exit 1
 fi
+case "$KNOWN_HOSTS_PATH" in /*) ;; *) echo "DEPLOY_KNOWN_HOSTS_PATH must be absolute." >&2; exit 1 ;; esac
+if [ ! -f "$KNOWN_HOSTS_PATH" ] || [ ! -r "$KNOWN_HOSTS_PATH" ] || [ ! -s "$KNOWN_HOSTS_PATH" ]; then
+  echo "DEPLOY_KNOWN_HOSTS_PATH must be a readable, non-empty owner-approved known_hosts file." >&2
+  exit 1
+fi
 case "$BRANCH" in [A-Za-z0-9]* ) ;; *) echo "DEPLOY_BRANCH is invalid." >&2; exit 1 ;; esac
 case "$BRANCH" in *[!A-Za-z0-9._/-]*|*..*|*/ ) echo "DEPLOY_BRANCH is invalid." >&2; exit 1 ;; esac
 case "$ENV_FILE" in [A-Za-z0-9._/-]* ) ;; *) echo "DEPLOY_ENV_FILE is invalid." >&2; exit 1 ;; esac

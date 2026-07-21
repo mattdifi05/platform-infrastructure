@@ -34,9 +34,11 @@ expect_reject repo-metachar env DEPLOY_REMOTE='deploy@example.internal' DEPLOY_R
 
 export FAKE_SSH_ARGS="$TMP/ssh-args.txt"
 export FAKE_SSH_STDIN="$TMP/ssh-stdin.sh"
+printf '%s\n' 'example.internal ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestOnlyPinnedHostKey' > "$TMP/known_hosts"
 PATH="$TMP:$PATH" \
 DEPLOY_REMOTE='deploy@example.internal' \
 DEPLOY_REMOTE_DIR='/opt/platform-infrastructure' \
+DEPLOY_KNOWN_HOSTS_PATH="$TMP/known_hosts" \
 DEPLOY_BRANCH='main' \
 DEPLOY_ENV_FILE='.env' \
 DEPLOY_PROJECT_NAME='platform_infra_vps' \
@@ -44,6 +46,13 @@ DEPLOY_PROJECT_NAME='platform_infra_vps' \
 
 grep -Fx 'deploy@example.internal' "$FAKE_SSH_ARGS" >/dev/null
 grep -Fx 'sh -s' "$FAKE_SSH_ARGS" >/dev/null
+grep -Fx 'StrictHostKeyChecking=yes' "$FAKE_SSH_ARGS" >/dev/null
+grep -Fx "UserKnownHostsFile=$TMP/known_hosts" "$FAKE_SSH_ARGS" >/dev/null
+grep -Fx 'GlobalKnownHostsFile=/dev/null' "$FAKE_SSH_ARGS" >/dev/null
+if grep -F 'accept-new' "$FAKE_SSH_ARGS" >/dev/null; then
+  echo "FAIL: accept-new remained enabled" >&2
+  exit 1
+fi
 if grep -F '/opt/platform-infrastructure' "$FAKE_SSH_STDIN" >/dev/null; then
   echo "FAIL: raw remote directory leaked into generated shell" >&2
   exit 1
@@ -56,4 +65,4 @@ if grep -F 'git checkout -- "$branch"' "$SCRIPT_DIR/deploy-vps-remote.sh" >/dev/
   exit 1
 fi
 printf 'PASS\tvalidated-branch-checkout\n'
-printf 'deploy VPS input tests passed 10/10\n'
+printf 'deploy VPS input tests passed 14/14\n'
