@@ -158,6 +158,16 @@ test("file-backed secret must be external", () => {
   combined.secrets["example-app-database-url"] = { file: "/tmp/secret" };
   assert.throws(() => validateRenderedWorkloads({ core, combined, lock }), /must be external/);
 });
+test("file-backed configs and workload config grants are rejected after render", () => {
+  const fileBacked = combinedFixture();
+  fileBacked.configs = { host_data: { file: "/etc/hosts" } };
+  assert.throws(() => validateRenderedWorkloads({ core, combined: fileBacked, lock }), /cannot use a host file source/);
+
+  const granted = combinedFixture();
+  granted.configs = { platform_config: { external: true } };
+  granted.services["example-app-web"].configs = [{ source: "platform_config", target: "/run/config" }];
+  assert.throws(() => validateRenderedWorkloads({ core, combined: granted, lock }), /cannot mount platform or host-backed configs/);
+});
 test("platform service mutation is rejected", () => {
   const combined = combinedFixture();
   combined.services["project-router"].privileged = true;
@@ -459,7 +469,7 @@ test("legacy hosted workload locks fail closed", () => {
 test("raw policy receipt requires the exact current control set", () => {
   const rawPolicyReceipt = {
     policyVersion: "hosted-raw-v1",
-    controls: ["deny-env-file", "deny-extends", "deny-include", "deny-lifecycle-hooks", "deny-scaling", "deny-volumes-from"],
+    controls: ["deny-env-file", "deny-extends", "deny-file-configs", "deny-include", "deny-lifecycle-hooks", "deny-scaling", "deny-volumes-from"],
     workloadContentSha256: "a".repeat(64),
     workloads: [{
       workloadId: "example-app",
@@ -481,12 +491,12 @@ test("raw policy receipt requires the exact current control set", () => {
     rawPolicyWorkloadContentSha256: "a".repeat(64),
     rawPolicyReceipt,
     rawPolicySha256: crypto.createHash("sha256").update(JSON.stringify(stable(rawPolicyReceipt))).digest("hex"),
-    rawPolicyControls: ["deny-env-file", "deny-extends", "deny-include", "deny-lifecycle-hooks", "deny-scaling", "deny-volumes-from"],
+    rawPolicyControls: ["deny-env-file", "deny-extends", "deny-file-configs", "deny-include", "deny-lifecycle-hooks", "deny-scaling", "deny-volumes-from"],
   };
   assert.doesNotThrow(() => verifyRawPolicyReceipt(receipt));
   receipt.rawPolicyControls = ["deny-include"];
   assert.throws(() => verifyRawPolicyReceipt(receipt), /raw source policy receipt/);
-  receipt.rawPolicyControls = ["deny-env-file", "deny-extends", "deny-include", "deny-lifecycle-hooks", "deny-scaling", "deny-volumes-from"];
+  receipt.rawPolicyControls = ["deny-env-file", "deny-extends", "deny-file-configs", "deny-include", "deny-lifecycle-hooks", "deny-scaling", "deny-volumes-from"];
   receipt.rawPolicySha256 = "b".repeat(64);
   assert.throws(() => verifyRawPolicyReceipt(receipt), /raw source policy receipt/);
   receipt.rawPolicyReceipt.workloads[0].composeSha256 = "d".repeat(64);

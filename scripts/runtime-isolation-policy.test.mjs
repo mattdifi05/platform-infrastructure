@@ -67,6 +67,14 @@ test("rejects both workload scaling controls independently at runtime", () => {
   }
 });
 
+test("rejects workload config grants independently at runtime", () => {
+  const config = fixture();
+  config.services["example-app-web"].configs = [{ source: "platform-config", target: "/run/config" }];
+  const report = evaluateRuntimeIsolation(config);
+  assert.equal(report.status, "failed");
+  assert.match(report.failures.join("\n"), /workload-no-configs-example-app-web/);
+});
+
 test("rejects missing memory limits and budget overcommit", () => {
   const config = fixture();
   config.services["example-app-web"].mem_limit = 0;

@@ -16,7 +16,7 @@ const IMAGE = /^[a-z0-9][a-z0-9._/-]*(?::[A-Za-z0-9._-]+)?@sha256:[a-f0-9]{64}$/
 const SAFE_PATH = /^[A-Za-z0-9_./-]+$/;
 export const HOSTED_WORKLOAD_LOCK_VERSION = 2;
 export const HOSTED_WORKLOAD_VALIDATOR_VERSION = "hosted-contract-v2";
-const RAW_POLICY_CONTROLS = Object.freeze(["deny-env-file", "deny-extends", "deny-include", "deny-lifecycle-hooks", "deny-scaling", "deny-volumes-from"]);
+const RAW_POLICY_CONTROLS = Object.freeze(["deny-env-file", "deny-extends", "deny-file-configs", "deny-include", "deny-lifecycle-hooks", "deny-scaling", "deny-volumes-from"]);
 const PLATFORM_DEPENDENCIES = new Set([
   "postgres",
   "redis",
@@ -897,6 +897,7 @@ function assertWorkloadService({ serviceDefinition, manifestService, manifest, c
     invalid(`${name} cannot define service lifecycle hooks.`);
   }
   if (serviceDefinition.scale != null || serviceDefinition.deploy?.replicas != null) invalid(`${name} cannot request service scaling.`);
+  if ((serviceDefinition.configs?.length ?? 0) > 0) invalid(`${name} cannot mount platform or host-backed configs.`);
   if (serviceDefinition.volumes_from != null) invalid(`${name} cannot inherit volumes from another service.`);
   if (serviceDefinition.container_name) invalid(`${name} cannot reserve a global container_name.`);
   if (serviceDefinition.privileged || serviceDefinition.network_mode === "host" || serviceDefinition.pid === "host" || serviceDefinition.ipc === "host") {
@@ -1012,6 +1013,11 @@ export function validateRenderedWorkloads({ core, combined, lock }) {
   assertActivationStorageIsolation(core, combined, lock);
   assertProtectedTopLevelResourcesUnchanged(core, combined);
   assertPlatformServicesUnchanged(core, combined, workloadIds);
+  for (const [name, definition] of Object.entries(combined.configs ?? {})) {
+    if (!Object.hasOwn(core.configs ?? {}, name) && definition?.file != null) {
+      invalid(`Workload config ${name} cannot use a host file source.`);
+    }
+  }
   const declared = new Map();
   for (const workload of lock.workloads) {
     for (const service of workload.services) declared.set(service.name, { workload, service });

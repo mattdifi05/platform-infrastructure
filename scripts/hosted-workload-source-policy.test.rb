@@ -83,4 +83,11 @@ class HostedWorkloadSourcePolicyTest < Minitest::Test
       assert_match(/cannot set (?:scale|deploy\.replicas)/, error.message)
     end
   end
+
+  def test_rejects_file_backed_configs_and_service_config_grants
+    file_config = parse("configs:\n  host-data:\n    file: /etc/hosts\nservices:\n  app: {}\n")
+    assert_raises(ArgumentError) { HostedWorkloadSourcePolicy.validate_source_model(file_config, "fixture") }
+    grant = parse("services:\n  app:\n    configs:\n      - platform-config\n")
+    assert_raises(ArgumentError) { HostedWorkloadSourcePolicy.validate_source_model(grant, "fixture") }
+  end
 end
