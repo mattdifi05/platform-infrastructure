@@ -11,20 +11,25 @@ const MAX_LOCK_BYTES = 8 * 1024 * 1024;
 
 export function renderRedisAcl(lock, { secretsRoot, platformPasswordFile, platformUsername = "platform" }) {
   validateLock(lock);
-  if (!/^[a-z][a-z0-9_-]{1,63}$/.test(platformUsername) || platformUsername === "default") {
-    throw new Error("Redis platform username is invalid.");
-  }
+  const credentials = loadRedisCredentials(lock, { secretsRoot, platformPasswordFile });
+  assertUniqueCredentialMaterial(credentials.entries);
+  return renderRedisAclWithCredentials(lock, { platformUsername, credentials });
+}
+
+function renderRedisAclWithCredentials(lock, { platformUsername, credentials }) {
+  assertPlatformUsername(platformUsername, "Redis", { denyDefault: true });
   const lines = [
     "user default reset off",
-    `user ${platformUsername} reset on #${passwordSha256(readSecretFile(platformPasswordFile))} ~* &* +@all`,
+    `user ${platformUsername} reset on #${credentials.platform.digest} ~* &* +@all`,
   ];
   const workloads = [...lock.workloads].sort((left, right) => left.id.localeCompare(right.id));
   for (const workload of workloads) {
     const policy = workload.brokers?.redis;
     if (!policy) continue;
-    const password = readNamedSecret(secretsRoot, policy.credentialSecret);
+    const credential = credentials.tenants.get(policy.credentialSecret);
+    if (!credential) throw new Error("Redis tenant credential was not loaded.");
     const permissions = policy.commands.map((command) => `+${command}`).join(" ");
-    lines.push(`user ${policy.username} reset on #${passwordSha256(password)} ${policy.keyPattern} ${policy.channelPattern} -@all ${permissions}`);
+    lines.push(`user ${policy.username} reset on #${credential.digest} ${policy.keyPattern} ${policy.channelPattern} -@all ${permissions}`);
   }
   const text = `${lines.join("\n")}\n`;
   return {
@@ -37,7 +42,13 @@ export function renderRedisAcl(lock, { secretsRoot, platformPasswordFile, platfo
 
 export function renderNatsConfig(lock, { secretsRoot, platformPasswordFile, platformUsername = "platform" }) {
   validateLock(lock);
-  if (!/^[a-z][a-z0-9_-]{1,63}$/.test(platformUsername)) throw new Error("NATS platform username is invalid.");
+  const credentials = loadNatsCredentials(lock, { secretsRoot, platformPasswordFile });
+  assertUniqueCredentialMaterial(credentials.entries);
+  return renderNatsConfigWithCredentials(lock, { platformUsername, credentials });
+}
+
+function renderNatsConfigWithCredentials(lock, { platformUsername, credentials }) {
+  assertPlatformUsername(platformUsername, "NATS");
   const lines = [
     `# broker-policy-sha256: ${lock.brokerPolicySha256}`,
     'server_name: "enterprise-nats"',
@@ -61,7 +72,7 @@ export function renderNatsConfig(lock, { secretsRoot, platformPasswordFile, plat
     "    users = [",
     "      {",
     `        user: ${configString(platformUsername)}`,
-    `        password: ${configString(readSecretFile(platformPasswordFile))}`,
+    `        password: ${configString(credentials.platform.value)}`,
     "        permissions: {",
     '          publish: { allow: [">"], deny: [] }',
     '          subscribe: { allow: [">"], deny: [] }',
@@ -81,7 +92,8 @@ export function renderNatsConfig(lock, { secretsRoot, platformPasswordFile, plat
     const users = [...policy.users].sort((left, right) => left.service.localeCompare(right.service));
     users.forEach((user, index) => {
       userCount += 1;
-      const password = readNamedSecret(secretsRoot, user.credentialSecret);
+      const credential = credentials.tenants.get(user.credentialSecret);
+      if (!credential) throw new Error("NATS tenant credential was not loaded.");
       const queueSubscriptions = user.subscribe
         .filter((subject) => subject !== "_INBOX.>")
         .flatMap((subject) => user.queueGroups.map((queue) => `${subject} ${queue}`));
@@ -89,7 +101,7 @@ export function renderNatsConfig(lock, { secretsRoot, platformPasswordFile, plat
       lines.push(
         "      {",
         `        user: ${configString(user.username)}`,
-        `        password: ${configString(password)}`,
+        `        password: ${configString(credential.value)}`,
         "        permissions: {",
         `          publish: { allow: ${configArray(user.publish)}, deny: ${configArray(user.denyPublish)} }`,
         `          subscribe: { allow: ${configArray([...inboxSubscriptions, ...queueSubscriptions])}, deny: ${configArray(user.denySubscribe)} }`,
@@ -108,6 +120,23 @@ export function renderNatsConfig(lock, { secretsRoot, platformPasswordFile, plat
     policySha256: lock.brokerPolicySha256,
     workloadAccounts: accountCount,
     workloadUsers: userCount,
+  };
+}
+
+export function renderBrokerConfigs(lock, {
+  secretsRoot,
+  redisPlatformPasswordFile,
+  natsPlatformPasswordFile,
+  redisPlatformUsername = "platform",
+  natsPlatformUsername = "platform",
+}) {
+  validateLock(lock);
+  const redisCredentials = loadRedisCredentials(lock, { secretsRoot, platformPasswordFile: redisPlatformPasswordFile });
+  const natsCredentials = loadNatsCredentials(lock, { secretsRoot, platformPasswordFile: natsPlatformPasswordFile });
+  assertUniqueCredentialMaterial([...redisCredentials.entries, ...natsCredentials.entries]);
+  return {
+    redis: renderRedisAclWithCredentials(lock, { platformUsername: redisPlatformUsername, credentials: redisCredentials }),
+    nats: renderNatsConfigWithCredentials(lock, { platformUsername: natsPlatformUsername, credentials: natsCredentials }),
   };
 }
 
@@ -150,6 +179,65 @@ function validateLock(lock) {
   assertBrokerPolicyDigest(lock);
 }
 
+function assertPlatformUsername(value, broker, { denyDefault = false } = {}) {
+  if (!/^[a-z][a-z0-9_-]{1,63}$/.test(String(value ?? "")) || (denyDefault && value === "default")) {
+    throw new Error(`${broker} platform username is invalid.`);
+  }
+}
+
+function loadRedisCredentials(lock, { secretsRoot, platformPasswordFile }) {
+  const platform = credentialRecord(readSecretFile(platformPasswordFile));
+  const tenants = new Map();
+  const entries = [platform];
+  for (const workload of [...lock.workloads].sort((left, right) => left.id.localeCompare(right.id))) {
+    const policy = workload.brokers?.redis;
+    if (!policy) continue;
+    const credential = credentialRecord(readNamedSecret(secretsRoot, policy.credentialSecret));
+    tenants.set(policy.credentialSecret, credential);
+    entries.push(credential);
+  }
+  return { platform, tenants, entries };
+}
+
+function loadNatsCredentials(lock, { secretsRoot, platformPasswordFile }) {
+  const platform = credentialRecord(readSecretFile(platformPasswordFile));
+  const tenants = new Map();
+  const entries = [platform];
+  for (const workload of [...lock.workloads].sort((left, right) => left.id.localeCompare(right.id))) {
+    const users = [...(workload.brokers?.nats?.users ?? [])].sort((left, right) => left.service.localeCompare(right.service));
+    for (const user of users) {
+      const credential = credentialRecord(readNamedSecret(secretsRoot, user.credentialSecret));
+      tenants.set(user.credentialSecret, credential);
+      entries.push(credential);
+    }
+  }
+  return { platform, tenants, entries };
+}
+
+function credentialRecord(value) {
+  assertCredentialStrength(value);
+  return { value, digest: crypto.createHash("sha256").update(value).digest("hex") };
+}
+
+function assertCredentialStrength(value) {
+  const characters = [...value];
+  const byteLength = Buffer.byteLength(value, "utf8");
+  const periodic = Array.from({ length: Math.min(16, Math.floor(characters.length / 2)) }, (_, index) => index + 1)
+    .some((period) => characters.length % period === 0
+      && characters.every((character, index) => character === characters[index % period]));
+  if (byteLength < 32 || new Set(characters).size < 10 || periodic) {
+    throw new Error("Broker credential does not meet the required strength policy.");
+  }
+}
+
+function assertUniqueCredentialMaterial(credentials) {
+  const seen = new Set();
+  for (const credential of credentials) {
+    if (seen.has(credential.digest)) throw new Error("Broker credential material is reused across principals.");
+    seen.add(credential.digest);
+  }
+}
+
 function readNamedSecret(root, name) {
   if (!SECRET_NAME.test(String(name ?? ""))) throw new Error("Broker credential secret name is invalid.");
   const canonicalRoot = fs.realpathSync.native(path.resolve(root));
@@ -189,10 +277,6 @@ function readDescriptor(descriptor, size) {
   }
   if (offset !== size) throw new Error("Broker credential changed while being read.");
   return bytes;
-}
-
-function passwordSha256(value) {
-  return crypto.createHash("sha256").update(value).digest("hex");
 }
 
 function configString(value) {
@@ -258,15 +342,10 @@ function main() {
     return;
   }
   if (command === "all") {
-    const redis = renderRedisAcl(lock, {
+    const { redis, nats } = renderBrokerConfigs(lock, {
       secretsRoot: args.secretsRoot,
-      platformPasswordFile: args.redisPlatformPasswordFile,
-      platformUsername: "platform",
-    });
-    const nats = renderNatsConfig(lock, {
-      secretsRoot: args.secretsRoot,
-      platformPasswordFile: args.natsPlatformPasswordFile,
-      platformUsername: "platform",
+      redisPlatformPasswordFile: args.redisPlatformPasswordFile,
+      natsPlatformPasswordFile: args.natsPlatformPasswordFile,
     });
     writeProtectedConfig(args.redisOutput, redis);
     writeProtectedConfig(args.natsOutput, nats, ownerOptions(args, "nats"));

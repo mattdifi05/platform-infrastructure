@@ -26,6 +26,18 @@ function natsWorkload(id, roles = ["worker"]) {
   };
 }
 
+function combinedWorkload(id, roles = ["worker"]) {
+  const services = roles.map((role) => ({ name: `${id}-${role}`, role }));
+  const secrets = [`${id}-redis-password`, ...services.map((service) => `${service.name}-nats-password`)];
+  return {
+    id,
+    brokers: normalizeWorkloadBrokers({
+      redis: expectedRedisPolicy(id),
+      nats: expectedNatsPolicy(id, services),
+    }, { id, services, secrets }),
+  };
+}
+
 function verifiedLock(workloads) {
   return {
     version: 2,
@@ -40,8 +52,8 @@ test("renders deterministic Redis ACL hashes with default user off and an explic
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "redis-acl-render-"));
   try {
     writeSecret(root, "redis_password", "platform-secret-value-1234567890");
-    writeSecret(root, "alpha-app-redis-password", "alpha-secret-value-123456789012");
-    writeSecret(root, "beta-app-redis-password", "beta-secret-value-1234567890123");
+    writeSecret(root, "alpha-app-redis-password", "alpha-secret-value-123456789012!A");
+    writeSecret(root, "beta-app-redis-password", "beta-secret-value-1234567890123!B");
     const lock = verifiedLock([redisWorkload("beta-app"), redisWorkload("alpha-app")]);
     const rendered = renderRedisAcl(lock, { secretsRoot: root, platformPasswordFile: path.join(root, "redis_password") });
     const repeated = renderRedisAcl(lock, { secretsRoot: root, platformPasswordFile: path.join(root, "redis_password") });
@@ -63,11 +75,11 @@ test("independent Redis credential rotation changes only that tenant ACL line", 
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "redis-acl-rotation-"));
   try {
     writeSecret(root, "redis_password", "platform-secret-value-1234567890");
-    writeSecret(root, "alpha-app-redis-password", "alpha-secret-value-123456789012");
-    writeSecret(root, "beta-app-redis-password", "beta-secret-value-1234567890123");
+    writeSecret(root, "alpha-app-redis-password", "alpha-secret-value-123456789012!A");
+    writeSecret(root, "beta-app-redis-password", "beta-secret-value-1234567890123!B");
     const lock = verifiedLock([redisWorkload("alpha-app"), redisWorkload("beta-app")]);
     const before = renderRedisAcl(lock, { secretsRoot: root, platformPasswordFile: path.join(root, "redis_password") });
-    writeSecret(root, "alpha-app-redis-password", "alpha-rotated-value-12345678901");
+    writeSecret(root, "alpha-app-redis-password", "alpha-rotated-value-12345678901!C");
     const after = renderRedisAcl(lock, { secretsRoot: root, platformPasswordFile: path.join(root, "redis_password") });
     const line = (text, username) => text.split("\n").find((item) => item.startsWith(`user ${username} `));
     assert.notEqual(line(before.text, "wl_alpha_app"), line(after.text, "wl_alpha_app"));
@@ -86,7 +98,7 @@ test("writes Redis ACL and digest with owner-only modes and rejects symlink cred
     fs.mkdirSync(secrets, { mode: 0o700 });
     fs.mkdirSync(output, { mode: 0o700 });
     writeSecret(secrets, "redis_password", "platform-secret-value-1234567890");
-    writeSecret(secrets, "alpha-app-redis-password", "alpha-secret-value-123456789012");
+    writeSecret(secrets, "alpha-app-redis-password", "alpha-secret-value-123456789012!A");
     const lock = verifiedLock([redisWorkload("alpha-app")]);
     const rendered = renderRedisAcl(lock, { secretsRoot: secrets, platformPasswordFile: path.join(secrets, "redis_password") });
     const written = writeProtectedConfig(path.join(output, "users.acl"), rendered);
@@ -196,7 +208,116 @@ test("all-mode writes owner-only broker files and reports only digests", () => {
   }
 });
 
+test("FG-054 rejects Redis credential reuse between platform and tenant principals", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "redis-credential-reuse-"));
+  const reused = "Redis-Reused-Secret-Value-1234567890!ABCD";
+  try {
+    writeSecret(root, "redis_password", reused);
+    writeSecret(root, "alpha-app-redis-password", reused);
+    assert.throws(
+      () => renderRedisAcl(verifiedLock([redisWorkload("alpha-app")]), {
+        secretsRoot: root,
+        platformPasswordFile: path.join(root, "redis_password"),
+      }),
+      /credential.*reused|reused.*credential/i,
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("FG-055 rejects NATS credential reuse across users with different secret filenames", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "nats-credential-reuse-"));
+  const reused = "Nats-Reused-Secret-Value-1234567890!ABCDE";
+  try {
+    writeSecret(root, "nats_password", "Nats-Platform-Unique-Value-1234567890!ABCDE");
+    writeSecret(root, "alpha-app-web-nats-password", reused);
+    writeSecret(root, "alpha-app-worker-nats-password", reused);
+    assert.throws(
+      () => renderNatsConfig(verifiedLock([natsWorkload("alpha-app", ["web", "worker"])]), {
+        secretsRoot: root,
+        platformPasswordFile: path.join(root, "nats_password"),
+      }),
+      /credential.*reused|reused.*credential/i,
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("FG-054 and FG-055 all-mode reject cross-broker platform-to-tenant credential reuse without disclosure", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "broker-cross-reuse-"));
+  const secrets = path.join(root, "secrets");
+  const redisOutput = path.join(root, "redis");
+  const natsOutput = path.join(root, "nats");
+  const reused = "Cross-Broker-Reused-Value-1234567890!ABCDE";
+  try {
+    fs.mkdirSync(redisOutput, { mode: 0o700 });
+    fs.mkdirSync(natsOutput, { mode: 0o700 });
+    writeSecret(secrets, "redis_password", reused);
+    writeSecret(secrets, "nats_password", "Nats-Platform-Unique-Value-1234567890!ABCDE");
+    writeSecret(secrets, "alpha-app-redis-password", "Redis-Tenant-Unique-Value-1234567890!ABCDE");
+    writeSecret(secrets, "alpha-app-worker-nats-password", reused);
+    const lockPath = path.join(root, "hosted.lock.json");
+    fs.writeFileSync(lockPath, JSON.stringify(verifiedLock([combinedWorkload("alpha-app")])), { mode: 0o600 });
+    const result = runAllMode({ root, secrets, redisOutput, natsOutput, lockPath });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /credential.*reused|reused.*credential/i);
+    assert.doesNotMatch(`${result.stdout}\n${result.stderr}`, new RegExp(reused));
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("FG-054 rejects a weak 16-character Redis tenant credential", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "redis-weak-credential-"));
+  try {
+    writeSecret(root, "redis_password", "Redis-Platform-Unique-Value-1234567890!ABCDE");
+    writeSecret(root, "alpha-app-redis-password", "a".repeat(16));
+    assert.throws(
+      () => renderRedisAcl(verifiedLock([redisWorkload("alpha-app")]), {
+        secretsRoot: root,
+        platformPasswordFile: path.join(root, "redis_password"),
+      }),
+      /credential.*weak|strength/i,
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("FG-055 rejects a weak 16-character NATS tenant credential", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "nats-weak-credential-"));
+  try {
+    writeSecret(root, "nats_password", "Nats-Platform-Unique-Value-1234567890!ABCDE");
+    writeSecret(root, "alpha-app-worker-nats-password", "a".repeat(16));
+    assert.throws(
+      () => renderNatsConfig(verifiedLock([natsWorkload("alpha-app")]), {
+        secretsRoot: root,
+        platformPasswordFile: path.join(root, "nats_password"),
+      }),
+      /credential.*weak|strength/i,
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 function writeSecret(root, name, value) {
   fs.mkdirSync(root, { recursive: true, mode: 0o700 });
   fs.writeFileSync(path.join(root, name), `${value}\n`, { mode: 0o600 });
+}
+
+function runAllMode({ root, secrets, redisOutput, natsOutput, lockPath }) {
+  const uid = typeof process.getuid === "function" ? process.getuid() : 0;
+  const gid = typeof process.getgid === "function" ? process.getgid() : 0;
+  return spawnSync(process.execPath, [
+    path.join(path.dirname(new URL(import.meta.url).pathname), "render-workload-broker-config.mjs"),
+    "all", "--lock", lockPath, "--secretsRoot", secrets,
+    "--redisPlatformPasswordFile", path.join(secrets, "redis_password"),
+    "--redisOutput", path.join(redisOutput, "redis-users.acl"),
+    "--natsPlatformPasswordFile", path.join(secrets, "nats_password"),
+    "--natsOutput", path.join(natsOutput, "nats-server.conf"),
+    "--natsUid", String(uid), "--natsGid", String(gid),
+  ], { cwd: root, encoding: "utf8" });
 }
