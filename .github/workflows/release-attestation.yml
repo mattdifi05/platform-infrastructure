@@ -7,10 +7,6 @@ on:
         description: Release name shown in the signed release manifest
         required: false
         type: string
-      release_images_json:
-        description: Optional JSON map/list of already digest-pinned release image refs to include in the manifest
-        required: false
-        type: string
 
 permissions: {}
 
@@ -32,7 +28,6 @@ jobs:
       packages: write
     env:
       RELEASE_NAME: ${{ github.event.inputs.release_name || github.ref_name || github.sha }}
-      RELEASE_IMAGES_JSON: ${{ github.event.inputs.release_images_json || '{}' }}
     steps:
       - name: Checkout infrastructure
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
@@ -81,104 +76,25 @@ jobs:
           subject-digest: ${{ steps.php-apache.outputs.digest }}
           push-to-registry: true
 
-      - name: Generate release subject manifest
+      - name: Verify image provenance and generate bound release artifacts
         env:
+          GH_TOKEN: ${{ github.token }}
           PHP_APACHE_DIGEST: ${{ steps.php-apache.outputs.digest }}
-          PHP_APACHE_ATTESTATION_URL: ${{ steps.attest-php-apache.outputs.attestation-url }}
         run: |
           mkdir -p .tmp/release-attestation reports/release
-          node <<'NODE'
-          const fs = require("node:fs");
-          const crypto = require("node:crypto");
-
-          function digestFromImageRef(value) {
-            const match = String(value || "").match(/@sha256:([a-f0-9]{64})$/i);
-            return match ? `sha256:${match[1].toLowerCase()}` : null;
-          }
-
-          const raw = process.env.RELEASE_IMAGES_JSON || "{}";
-          let configuredImages = {};
-          try {
-            configuredImages = raw.trim() ? JSON.parse(raw) : {};
-          } catch (error) {
-            console.error(`release_images_json is not valid JSON: ${error.message}`);
-            process.exit(1);
-          }
-
-          const configuredSubjects = [];
-          if (Array.isArray(configuredImages)) {
-            for (const entry of configuredImages) {
-              const image = typeof entry === "string" ? entry : entry.image;
-              const digest = digestFromImageRef(image) || entry.digest || entry.subjectDigest;
-              if (image && digest) {
-                configuredSubjects.push({ name: image.replace(/@sha256:[a-f0-9]{64}$/i, ""), digest });
-              }
-            }
-          } else {
-            for (const [key, image] of Object.entries(configuredImages)) {
-              const digest = digestFromImageRef(image);
-              if (digest) {
-                configuredSubjects.push({ key, image, name: image.replace(/@sha256:[a-f0-9]{64}$/i, ""), digest });
-              }
-            }
-          }
-
-          const phpApacheSubject = {
-            key: "PHP_APACHE_IMAGE",
-            name: process.env.PHP_APACHE_IMAGE,
-            digest: process.env.PHP_APACHE_DIGEST,
-            attestationUrl: process.env.PHP_APACHE_ATTESTATION_URL || null,
-          };
-          const subjects = [phpApacheSubject, ...configuredSubjects];
-          const manifest = {
-            version: 1,
-            generatedAt: new Date().toISOString(),
-            releaseName: process.env.RELEASE_NAME || process.env.GITHUB_REF_NAME || process.env.GITHUB_SHA,
-            repository: process.env.GITHUB_REPOSITORY,
-            commitSha: process.env.GITHUB_SHA,
-            workflowRunId: process.env.GITHUB_RUN_ID,
-            workflowRunUrl: `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`,
-            subjects,
-          };
-          const manifestPath = ".tmp/release-attestation/release-subjects.json";
-          fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
-          const sha256 = crypto.createHash("sha256").update(fs.readFileSync(manifestPath)).digest("hex");
-          fs.writeFileSync(".tmp/release-attestation/release-subjects.sha256", `${sha256}  release-subjects.json\n`, "utf8");
-          const sbom = {
-            bomFormat: "CycloneDX",
-            specVersion: "1.5",
-            serialNumber: `urn:uuid:${crypto.randomUUID()}`,
-            version: 1,
-            metadata: {
-              timestamp: manifest.generatedAt,
-              component: {
-                type: "application",
-                name: manifest.releaseName,
-                version: process.env.GITHUB_SHA,
-                purl: `pkg:github/${process.env.GITHUB_REPOSITORY}@${process.env.GITHUB_SHA}`,
-              },
-              properties: [
-                { name: "repository", value: process.env.GITHUB_REPOSITORY },
-                { name: "commitSha", value: process.env.GITHUB_SHA },
-                { name: "workflowRunId", value: process.env.GITHUB_RUN_ID },
-                { name: "sbom.source", value: "docker-buildx-sbom-attestation-and-release-subject-index" },
-              ],
-            },
-            components: subjects.map((subject) => ({
-              type: "container",
-              name: subject.name,
-              version: subject.digest,
-              hashes: [{ alg: "SHA-256", content: String(subject.digest).replace(/^sha256:/, "") }],
-              purl: `pkg:oci/${subject.name}@${subject.digest}`,
-              properties: [
-                { name: "releaseSubjectKey", value: subject.key || subject.name },
-                { name: "attestationUrl", value: subject.attestationUrl || "" },
-              ],
-            })),
-          };
-          fs.writeFileSync(`reports/release/github-release-sbom-${process.env.GITHUB_RUN_ID}.cdx.json`, `${JSON.stringify(sbom, null, 2)}\n`, "utf8");
-          fs.appendFileSync(process.env.GITHUB_ENV, `RELEASE_SUBJECTS_SHA256=${sha256}\n`);
-          NODE
+          RELEASE_SUBJECTS_SHA256="$(node ./scripts/release-subject-manifest.mjs \
+            --image "PHP_APACHE_IMAGE=${PHP_APACHE_IMAGE}@${PHP_APACHE_DIGEST}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --sha "${GITHUB_SHA}" \
+            --ref "${GITHUB_REF}" \
+            --signerWorkflow "${GITHUB_REPOSITORY}/.github/workflows/release-attestation.yml" \
+            --releaseName "${RELEASE_NAME}" \
+            --workflowRunId "${GITHUB_RUN_ID}" \
+            --workflowRunUrl "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            --manifest .tmp/release-attestation/release-subjects.json \
+            --sbom "reports/release/github-release-sbom-${GITHUB_RUN_ID}.cdx.json" \
+            --receipt "reports/release/release-artifact-admission-${GITHUB_RUN_ID}.json")"
+          printf 'RELEASE_SUBJECTS_SHA256=%s\n' "$RELEASE_SUBJECTS_SHA256" >> "$GITHUB_ENV"
 
       - name: Attest release subject manifest provenance
         id: attest-release-manifest
@@ -191,13 +107,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           PHP_APACHE_DIGEST: ${{ steps.php-apache.outputs.digest }}
         run: |
-          sh ./scripts/github-attestation-evidence.sh \
-            --subject "oci://${PHP_APACHE_IMAGE}@${PHP_APACHE_DIGEST}" \
-            --expectedSubjectDigest "${PHP_APACHE_DIGEST}" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --signerWorkflow "${GITHUB_REPOSITORY}/.github/workflows/release-attestation.yml" \
-            --sourceDigest "${GITHUB_SHA}" \
-            --sourceRef "${GITHUB_REF}"
           sh ./scripts/github-attestation-evidence.sh \
             --subject .tmp/release-attestation/release-subjects.json \
             --expectedSubjectDigest "sha256:${RELEASE_SUBJECTS_SHA256}" \
@@ -215,6 +124,7 @@ jobs:
             reports/release/github-sigstore-attestation-*.json
             reports/release/github-sigstore-attestation-*.md
             reports/release/github-release-sbom-*.cdx.json
+            reports/release/release-artifact-admission-*.json
             .tmp/release-attestation/release-subjects.json
             .tmp/release-attestation/release-subjects.sha256
           retention-days: 30

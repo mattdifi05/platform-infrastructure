@@ -61,6 +61,13 @@ import {
   loadAdminAccessInventory,
 } from "./admin-access-inventory.mjs";
 import { evaluateProviderMfaAssurance } from "./provider-mfa-assurance.mjs";
+import { assertDeploymentAdmissionConfigured } from "./deployment-admission-policy.mjs";
+import {
+  buildReleaseAdmissionReceipt,
+  canonicalReleaseSubjects,
+  validateCryptographicReleaseVerification,
+  validateCycloneDxReleaseSbom,
+} from "./release-artifact-policy.mjs";
 
 process.umask(0o077);
 
@@ -6245,7 +6252,7 @@ async function releaseArtifactGate(options = {}) {
   await withLocalCheckReport("release-artifact-gate", async () => {
     result = await releaseArtifactGateBody(options);
   }, {
-    requireProvenance: Boolean(options.requireProvenance ?? booleanFlag(argv.requireProvenance)),
+    requireProvenance: true,
     verifyCosign: Boolean(options.verifyCosign ?? booleanFlag(argv.verifyCosign)),
   });
   return result;
@@ -6271,35 +6278,50 @@ async function releaseArtifactGateBody(options = {}) {
       fail(`Release image must be digest-pinned: ${image}`);
     }
   }
+  const subjects = canonicalReleaseSubjects(imageEntries);
 
   const sbomFile = options.sbom ?? argv.sbom ?? latestFileByMtime(path.join(infraRoot, "security", "sbom"), (file) => /sbom.*\.(json|cdx\.json)$/i.test(path.basename(file)));
   if (!sbomFile || !fs.existsSync(sbomFile)) {
     fail("A release SBOM artifact is required. Run generate-sbom or pass --sbom <file>.");
   }
-  readJsonFile(sbomFile, sbomFile);
+  const sbom = readJsonFile(sbomFile, sbomFile);
 
-  const policy = readText(path.join(infraRoot, "security", "admission", "cosign-digest-policy.rego"));
-  assertMatch(policy, /cosign\.sigstore\.dev\/verified/, "Admission policy must require cosign verification annotation.");
-  assertMatch(policy, /slsa\.dev\/provenance/, "Admission policy must require SLSA provenance annotation.");
+  const admissionPolicy = readText(path.join(infraRoot, "security", "admission", "cosign-digest-policy.rego"));
+  assertMatch(admissionPolicy, /EXTERNAL-PENDING/, "Repository admission policy must remain fail-closed until a trusted verifier channel is configured.");
+  assertNoMatch(admissionPolicy, /metadata\.annotations/, "Repository admission policy must not trust workload-controlled annotations.");
 
   rejectLegacyProvenanceInputs(options);
-  const requireProvenance = options.requireProvenance ?? booleanFlag(argv.requireProvenance);
   const releaseSha = options.releaseSha ?? argv.releaseSha ?? gitEvidence().commit;
-  let githubAttestationValidation = null;
-  if (requireProvenance) {
-    loadGithubTokenFromFile();
-    githubAttestationValidation = verifyGithubReleaseImages({
-      images,
-      ...releaseTrustVerificationOptions(options, releaseSha),
-    });
-  }
+  const verificationOptions = releaseTrustVerificationOptions(options, releaseSha);
+  validateCycloneDxReleaseSbom(sbom, {
+    subjects,
+    repository: verificationOptions.repository,
+    commitSha: releaseSha,
+  });
+  loadGithubTokenFromFile();
+  const githubAttestationValidation = verifyGithubReleaseImages({ images, ...verificationOptions });
+  validateCryptographicReleaseVerification(githubAttestationValidation, {
+    subjects,
+    repository: verificationOptions.repository,
+    commitSha: releaseSha,
+  });
   if (booleanFlag(argv.verifyCosign)) {
     for (const image of images) {
       run("cosign", ["verify", image]);
     }
   }
-  log(`Release artifact admission gate passed with SBOM ${sbomFile}.`);
-  return { sbomFile, provenanceValidation: null, githubAttestationValidation };
+  const receipt = buildReleaseAdmissionReceipt({
+    subjects,
+    repository: verificationOptions.repository,
+    commitSha: releaseSha,
+    sbomSha256: sha256File(sbomFile),
+    verification: githubAttestationValidation,
+  });
+  const receiptPath = writeJsonReport("release", `release-artifact-admission-${reportTimestamp()}`, receipt);
+  const deploymentAdmission = readJsonFile(path.join(infraRoot, "governance", "deployment-admission.json"), "deployment admission policy");
+  assertDeploymentAdmissionConfigured(deploymentAdmission);
+  log(`Release artifact admission gate passed with SBOM ${sbomFile} and receipt ${receiptPath}.`);
+  return { sbomFile, receiptPath, provenanceValidation: null, githubAttestationValidation };
 }
 
 function releaseImageMapFromEnv(env, manifestPath = null) {
@@ -6450,7 +6472,6 @@ async function releaseEvidence(options = {}) {
         fail("A release SBOM artifact is required. Run generate-sbom or pass --sbom <file>.");
       }
       readJsonFile(path.resolve(sbomPath), sbomPath);
-      const requireProvenance = options.requireProvenance ?? booleanFlag(argv.requireProvenance);
       if (provenanceArg) {
         fail("Unsigned local SLSA JSON is not admissible release evidence.");
       }
@@ -6476,7 +6497,7 @@ async function releaseEvidence(options = {}) {
         sbom: sbomPath,
         attestationBundle: attestationBundlePath,
         trustedRoot: trustedRootPath,
-        requireProvenance,
+        requireProvenance: true,
         releaseSha,
         repository: options.repository ?? options.repo ?? argv.repository ?? argv.repo ?? process.env.GITHUB_REPOSITORY ?? null,
         sourceRef: options.sourceRef ?? argv.sourceRef ?? process.env.GITHUB_REF ?? null,
@@ -6568,7 +6589,7 @@ async function releaseEvidence(options = {}) {
       signatureBundle,
     },
     attestations: {
-      provenanceRequired: options.requireProvenance ?? booleanFlag(argv.requireProvenance),
+      provenanceRequired: true,
       localProvenance: null,
       slsaProvenance: githubAttestationValidation,
       githubSigstore: githubAttestationValidation,

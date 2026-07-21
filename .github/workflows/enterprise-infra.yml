@@ -138,7 +138,7 @@ jobs:
         run: sh ./scripts/infra-ops.sh static-security-check --infraOnly
       - name: Hosted workload contract tests
         run: node --test scripts/hosted-workload-contract.test.mjs
-      - name: Release artifact gate dry run
+      - name: Release artifact and admission policy tests
         run: |
           mkdir -p .tmp/ci-sbom
           cp .env.example .tmp/ci-release.env
@@ -147,6 +147,8 @@ jobs:
           sh ./scripts/infra-ops.sh release-artifact-gate --envFile .tmp/ci-release.env --imageManifest .tmp/ci-release-images.json --sbom .tmp/ci-sbom/pnpm-sbom-ci.json
           sh scripts/cloudflare-origin-lock-ufw-test.sh
           sh scripts/cloudflare-origin-lock-ufw-transaction-test.sh
+          node scripts/release-trust.test.mjs
+          node scripts/release-artifact-policy.test.mjs
       - name: Upload supply-chain evidence reports
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
