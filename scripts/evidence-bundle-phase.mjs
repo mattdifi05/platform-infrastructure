@@ -74,6 +74,69 @@ export function createEvidenceReportContext({ git, phase, command, env = {} }) {
   };
 }
 
+function exactNonEmptyStringSet(leftInput, rightInput) {
+  if (!Array.isArray(leftInput) || !Array.isArray(rightInput) || leftInput.length === 0 || rightInput.length === 0) return false;
+  const clean = (values) => values.map((value) => cleanString(value)).filter(Boolean);
+  const left = clean(leftInput);
+  const right = clean(rightInput);
+  if (left.length !== leftInput.length || right.length !== rightInput.length) return false;
+  if (new Set(left).size !== left.length || new Set(right).size !== right.length) return false;
+  return left.length === right.length && left.every((value) => right.includes(value));
+}
+
+export function evaluateOperationalEvidenceReport(label, payload) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return ["offsite-restore-drill", "external-uptime"].includes(label)
+      ? { passed: false, detail: "report payload is missing" }
+      : null;
+  }
+  if (label === "offsite-restore-drill") {
+    const requiredResourceIds = Array.isArray(payload.manifest?.resourceIds) ? payload.manifest.resourceIds : [];
+    const successfulResourceIds = Array.isArray(payload.steps)
+      ? payload.steps.filter((step) => step?.resourceId && step.status === "success").map((step) => step.resourceId)
+      : [];
+    const infraHealthOk = Array.isArray(payload.steps)
+      && payload.steps.some((step) => step?.name === "infra-health" && step.status === "success");
+    const exactResources = exactNonEmptyStringSet(requiredResourceIds, successfulResourceIds);
+    const passed = payload.mode === "restore"
+      && payload.status === "success"
+      && payload.allowPartial !== true
+      && payload.manifest?.signatureVerified === true
+      && payload.exactSetVerified === true
+      && payload.coverage?.complete === true
+      && infraHealthOk
+      && exactResources;
+    return {
+      passed,
+      detail: `mode=${payload.mode ?? "missing"} status=${payload.status ?? "missing"} signature=${payload.manifest?.signatureVerified ?? "missing"} exactSet=${payload.exactSetVerified ?? "missing"} coverage=${payload.coverage?.complete ?? "missing"} resources=${requiredResourceIds.length}`,
+    };
+  }
+  if (label === "external-uptime") {
+    const providerResults = Array.isArray(payload.providerEvidence?.results) ? payload.providerEvidence.results : [];
+    const probeResults = Array.isArray(payload.results) ? payload.results : [];
+    const providerNames = providerResults.filter((result) => result?.ok === true).map((result) => result.name);
+    const probeNames = probeResults.filter((result) => result?.ok === true).map((result) => result.name);
+    const coveredTargets = Array.isArray(payload.providerEvidence?.coveredTargets) ? payload.providerEvidence.coveredTargets : [];
+    const exactProviderCoverage = exactNonEmptyStringSet(coveredTargets, providerNames)
+      && exactNonEmptyStringSet(coveredTargets, probeNames)
+      && Number(payload.providerEvidence?.monitorCount) === coveredTargets.length;
+    const statusCompatible = payload.status === undefined || payload.status === "passed";
+    const passed = payload.mode === "probe"
+      && statusCompatible
+      && payload.providerEvidence?.verified === true
+      && payload.providerEvidence?.external === true
+      && payload.providerEvidence?.authentication?.verified === true
+      && providerResults.every((result) => result?.ok === true)
+      && probeResults.every((result) => result?.ok === true)
+      && exactProviderCoverage;
+    return {
+      passed,
+      detail: `mode=${payload.mode ?? "missing"} status=${payload.status ?? "producer-derived"} provider=${payload.providerEvidence?.verified ?? "missing"} external=${payload.providerEvidence?.external ?? "missing"} authenticated=${payload.providerEvidence?.authentication?.verified ?? "missing"} probes=${probeResults.length}`,
+    };
+  }
+  return null;
+}
+
 function parseTime(value, label, issues) {
   const parsed = Date.parse(String(value ?? ""));
   if (!Number.isFinite(parsed)) {

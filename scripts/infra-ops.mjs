@@ -39,6 +39,7 @@ import { verifyClosedWorldBundleFiles, verifyOwnerPinnedBundleManifest } from ".
 import {
   createEvidenceReportContext,
   evaluateEvidenceBundlePhase,
+  evaluateOperationalEvidenceReport,
   evidenceBundleManifestVersion,
   evidenceBundlePhasePolicy,
   normalizeEvidenceBundlePhase,
@@ -8151,6 +8152,8 @@ function evidenceBundleReportPasses(spec, payload) {
   if (!payload || typeof payload !== "object") {
     return { passed: false, detail: "report payload is missing" };
   }
+  const operationalResult = evaluateOperationalEvidenceReport(spec.label, payload);
+  if (operationalResult) return operationalResult;
   if (spec.label === "production-go-no-go") {
     return { passed: payload.status === "go", detail: `status=${payload.status ?? "missing"}` };
   }

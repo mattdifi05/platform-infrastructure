@@ -6,6 +6,7 @@ import test from "node:test";
 import { createCandidateIdentity } from "./candidate-identity.mjs";
 import {
   createEvidenceReportContext,
+  evaluateOperationalEvidenceReport,
   evaluateEvidenceBundlePhase,
   evidenceBundleManifestVersion,
 } from "./evidence-bundle-phase.mjs";
@@ -194,6 +195,87 @@ test("candidate-ci manifests cannot be replayed as production-live authority", (
     reportPasses: alwaysPasses,
   });
   assert.match(result.issues.join("\n"), /bundle phase mismatch/);
+});
+
+test("actual off-site restore and external uptime producer contracts have explicit fail-closed semantics", () => {
+  const offsite = {
+    mode: "restore",
+    status: "success",
+    allowPartial: false,
+    exactSetVerified: true,
+    manifest: { signatureVerified: true, resourceIds: ["database:alpha", "source:alpha"] },
+    steps: [
+      { resourceId: "database:alpha", status: "success" },
+      { resourceId: "source:alpha", status: "success" },
+      { name: "infra-health", status: "success" },
+    ],
+    coverage: { complete: true },
+  };
+  assert.equal(evaluateOperationalEvidenceReport("offsite-restore-drill", offsite)?.passed, true);
+  for (const mutation of [
+    { mode: "plan" },
+    { status: "external-pending" },
+    { exactSetVerified: false },
+    { manifest: { ...offsite.manifest, signatureVerified: false } },
+    { steps: offsite.steps.filter((step) => step.resourceId !== "source:alpha") },
+    { coverage: { complete: false } },
+  ]) assert.equal(evaluateOperationalEvidenceReport("offsite-restore-drill", { ...offsite, ...mutation })?.passed, false);
+
+  const uptime = {
+    mode: "probe",
+    providerEvidence: {
+      verified: true,
+      external: true,
+      monitorCount: 2,
+      coveredTargets: ["api", "control-center"],
+      authentication: { verified: true },
+      results: [{ name: "api", ok: true }, { name: "control-center", ok: true }],
+    },
+    results: [{ name: "api", ok: true }, { name: "control-center", ok: true }],
+  };
+  assert.equal(evaluateOperationalEvidenceReport("external-uptime", uptime)?.passed, true);
+  for (const mutation of [
+    { mode: "provider-evidence-only" },
+    { status: "failed" },
+    { providerEvidence: { ...uptime.providerEvidence, verified: false } },
+    { providerEvidence: { ...uptime.providerEvidence, authentication: { verified: false } } },
+    { results: [{ name: "api", ok: false }] },
+  ]) assert.equal(evaluateOperationalEvidenceReport("external-uptime", { ...uptime, ...mutation })?.passed, false);
+  assert.equal(evaluateOperationalEvidenceReport("healthcheck-coverage", { status: "passed" }), null);
+
+  const labels = ["offsite-restore-drill", "external-uptime"];
+  const reports = [offsite, uptime].map((payload, index) => report(labels[index], {
+    phase: "production-live",
+    payload: { ...payload, candidate, candidateEnd: candidate, candidateStable: true },
+  }));
+  const accepted = evaluateEvidenceBundlePhase({
+    phase: "production-live",
+    sourceGit: git,
+    currentGit: git,
+    candidate,
+    reports,
+    productionRequiredLabels: labels,
+    requireComplete: true,
+    notBefore: "2026-07-21T19:00:00.000Z",
+    nowMs,
+    reportPasses: evaluateOperationalEvidenceReport,
+  });
+  assert.equal(accepted.passed, true);
+
+  const unbound = evaluateEvidenceBundlePhase({
+    phase: "production-live",
+    sourceGit: git,
+    currentGit: git,
+    candidate,
+    reports: [report(labels[0], { phase: "production-live", payload: offsite }), reports[1]],
+    productionRequiredLabels: labels,
+    requireComplete: true,
+    notBefore: "2026-07-21T19:00:00.000Z",
+    nowMs,
+    reportPasses: evaluateOperationalEvidenceReport,
+  });
+  assert.equal(unbound.passed, false);
+  assert.match(unbound.issues.join("\n"), /candidate is missing.*ending candidate is missing.*stability proof/s);
 });
 
 test("report writer and ephemeral workflows enforce explicit phase contexts", () => {
