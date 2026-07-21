@@ -52,11 +52,15 @@ jobs:
   production-live-evidence:
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    if: github.ref == 'refs/heads/main' && github.ref_protected == true
     environment:
       name: production
     steps:
       - name: Checkout infrastructure
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
 
       - name: External uptime provider evidence
         if: inputs.run_external_uptime == 'true'

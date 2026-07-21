@@ -11,10 +11,6 @@ on:
         description: Optional JSON map/list of already digest-pinned release image refs to include in the manifest
         required: false
         type: string
-  push:
-    tags:
-      - "v*"
-      - "release-*"
 
 permissions: {}
 
@@ -26,6 +22,9 @@ jobs:
   github-sigstore-release-evidence:
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    if: github.ref == 'refs/heads/main' && github.ref_protected == true
+    environment:
+      name: production
     permissions:
       contents: read
       id-token: write
@@ -37,6 +36,9 @@ jobs:
     steps:
       - name: Checkout infrastructure
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
 
       - name: Prepare GHCR image names
         run: |
