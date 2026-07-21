@@ -51,6 +51,19 @@ class HostedWorkloadSourcePolicyTest < Minitest::Test
     assert HostedWorkloadSourcePolicy.validate_source_model({ "services" => { "app" => { "user" => "1000:1000" } } }, "fixture")
   end
 
+  def test_rejects_unbounded_or_non_local_logging
+    [
+      { "driver" => "json-file" },
+      { "driver" => "local", "options" => { "max-size" => "1g", "max-file" => "99" } },
+      { "driver" => "local" }
+    ].each do |logging|
+      error = assert_raises(ArgumentError) do
+        HostedWorkloadSourcePolicy.validate_source_model({ "services" => { "app" => { "logging" => logging } } }, "fixture")
+      end
+      assert_match(/must use bounded local logging/, error.message)
+    end
+  end
+
   def test_rejects_include_and_extends_before_render
     include_model = parse("include:\n  - other.yaml\nservices:\n  app: {}\n")
     assert_raises(ArgumentError) { HostedWorkloadSourcePolicy.validate_source_model(include_model, "fixture") }

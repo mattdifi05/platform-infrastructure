@@ -38,6 +38,20 @@ test("rejects PID sharing, non-numeric workload identity and added capabilities"
   assert.match(report.failures.join("\n"), /workload-drop-all-capabilities-example-app-web/);
 });
 
+test("rejects unbounded or non-local workload logging at runtime", () => {
+  for (const logging of [
+    undefined,
+    { driver: "json-file" },
+    { driver: "local", options: { "max-size": "1g", "max-file": "99" } },
+  ]) {
+    const config = fixture();
+    config.services["example-app-web"].logging = logging;
+    const report = evaluateRuntimeIsolation(config);
+    assert.equal(report.status, "failed");
+    assert.match(report.failures.join("\n"), /workload-bounded-local-logging-example-app-web/);
+  }
+});
+
 test("rejects workload service volume inheritance independently at runtime", () => {
   const config = fixture();
   config.services["example-app-web"].volumes_from = ["postgres:rw"];
@@ -250,6 +264,7 @@ function fixture() {
   services["example-app-web"] = bounded({
     read_only: true,
     user: "1000:1000",
+    logging: { driver: "local", options: { "max-size": "10m", "max-file": "3" } },
     security_opt: ["no-new-privileges:true"],
     cap_drop: ["ALL"],
     labels: { "com.platform.workload-id": "example-app", "com.platform.workload-role": "web" },

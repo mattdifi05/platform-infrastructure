@@ -59,6 +59,11 @@ export function evaluateRuntimeIsolation(config, options = {}) {
     record(`workload-role-${name}`, ["api", "web", "worker", "scheduled-worker"].includes(role), `${name} role=${role}`);
     record(`workload-numeric-user-${name}`, /^[1-9][0-9]{0,9}:[1-9][0-9]{0,9}$/.test(String(service.user || "")), `${name} user=${service.user || "unset"}`);
     record(`workload-private-pid-${name}`, !Object.hasOwn(service, "pid"), `${name} pid=${service.pid ?? "private"}`);
+    record(
+      `workload-bounded-local-logging-${name}`,
+      JSON.stringify(service.logging) === JSON.stringify({ driver: "local", options: { "max-size": "10m", "max-file": "3" } }),
+      `${name} logging=${JSON.stringify(service.logging ?? null)}`,
+    );
     record(`workload-no-new-privileges-${name}`, service.security_opt?.includes("no-new-privileges:true"), `${name} securityOpt=${service.security_opt || "unset"}`);
     record(`workload-drop-all-capabilities-${name}`, service.cap_drop?.includes("ALL") && !(service.cap_add?.length > 0), `${name} capDrop=${service.cap_drop || "unset"}`);
     record(`workload-no-volumes-from-${name}`, !Object.hasOwn(service, "volumes_from"), `${name} volumesFrom=${service.volumes_from || "none"}`);

@@ -17,7 +17,7 @@ const IMAGE = /^[a-z0-9][a-z0-9._/-]*(?::[A-Za-z0-9._-]+)?@sha256:[a-f0-9]{64}$/
 const SAFE_PATH = /^[A-Za-z0-9_./-]+$/;
 export const HOSTED_WORKLOAD_LOCK_VERSION = 2;
 export const HOSTED_WORKLOAD_VALIDATOR_VERSION = "hosted-contract-v2";
-const RAW_POLICY_CONTROLS = Object.freeze(["bind-owned-secret-aliases", "bind-owned-volumes", "bind-private-pid-numeric-user", "deny-api-socket", "deny-compose-interpolation", "deny-device-access", "deny-env-file", "deny-extends", "deny-file-configs", "deny-gpu-access", "deny-include", "deny-lifecycle-hooks", "deny-local-volume-options", "deny-providers", "deny-runtime-overrides", "deny-scaling", "deny-stop-grace-overrides", "deny-supplemental-groups", "deny-volumes-from"]);
+const RAW_POLICY_CONTROLS = Object.freeze(["bind-bounded-local-logging", "bind-owned-secret-aliases", "bind-owned-volumes", "bind-private-pid-numeric-user", "deny-api-socket", "deny-compose-interpolation", "deny-device-access", "deny-env-file", "deny-extends", "deny-file-configs", "deny-gpu-access", "deny-include", "deny-lifecycle-hooks", "deny-local-volume-options", "deny-providers", "deny-runtime-overrides", "deny-scaling", "deny-stop-grace-overrides", "deny-supplemental-groups", "deny-volumes-from"]);
 const PLATFORM_DEPENDENCIES = new Set([
   "postgres",
   "redis",
@@ -963,6 +963,9 @@ function assertWorkloadService({ serviceDefinition, manifestService, manifest, c
   if (!serviceDefinition.cap_drop?.includes("ALL") || (serviceDefinition.cap_add?.length ?? 0) > 0) invalid(`${name} must drop all capabilities.`);
   if (!/^[1-9][0-9]{0,9}:[1-9][0-9]{0,9}$/.test(String(serviceDefinition.user ?? ""))) {
     invalid(`${name} must declare a canonical numeric non-root uid:gid.`);
+  }
+  if (!same(serviceDefinition.logging, { driver: "local", options: { "max-size": "10m", "max-file": "3" } })) {
+    invalid(`${name} must use local logging with max-size=10m and max-file=3.`);
   }
   if (!Array.isArray(serviceDefinition.healthcheck?.test) || serviceDefinition.healthcheck.test.length < 2 || serviceDefinition.healthcheck.disable === true) {
     invalid(`${name} requires a functional healthcheck.`);

@@ -8,7 +8,7 @@ require "psych"
 
 module HostedWorkloadSourcePolicy
   VERSION = "hosted-raw-v1"
-  CONTROLS = %w[bind-owned-secret-aliases bind-owned-volumes bind-private-pid-numeric-user deny-api-socket deny-compose-interpolation deny-device-access deny-env-file deny-extends deny-file-configs deny-gpu-access deny-include deny-lifecycle-hooks deny-local-volume-options deny-providers deny-runtime-overrides deny-scaling deny-stop-grace-overrides deny-supplemental-groups deny-volumes-from].freeze
+  CONTROLS = %w[bind-bounded-local-logging bind-owned-secret-aliases bind-owned-volumes bind-private-pid-numeric-user deny-api-socket deny-compose-interpolation deny-device-access deny-env-file deny-extends deny-file-configs deny-gpu-access deny-include deny-lifecycle-hooks deny-local-volume-options deny-providers deny-runtime-overrides deny-scaling deny-stop-grace-overrides deny-supplemental-groups deny-volumes-from].freeze
   MAX_COMPOSE_BYTES = 1_048_576
   STANDARD_TAG_PREFIX = "tag:yaml.org,2002:"
 
@@ -113,6 +113,9 @@ module HostedWorkloadSourcePolicy
       fail!("#{label} service #{name} cannot share another PID namespace.") if service.key?("pid")
       if service.key?("user") && !service["user"].to_s.match?(/\A[1-9][0-9]{0,9}:[1-9][0-9]{0,9}\z/)
         fail!("#{label} service #{name} must use a canonical numeric uid:gid.")
+      end
+      if service.key?("logging") && service["logging"] != { "driver" => "local", "options" => { "max-size" => "10m", "max-file" => "3" } }
+        fail!("#{label} service #{name} must use bounded local logging.")
       end
       fail!("#{label} service #{name} cannot use env_file.") if service.key?("env_file")
       fail!("#{label} service #{name} cannot use extends.") if service.key?("extends")
