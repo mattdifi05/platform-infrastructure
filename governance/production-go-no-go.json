@@ -23,6 +23,7 @@
   "requireReleaseProvenance": true,
   "requireCleanReleaseGit": true,
   "requireCloudflareAccessVerify": true,
+  "requireProviderMfaAssurance": true,
   "requireGithubActionsRunSuccess": true,
   "requireSecretRotationEvidence": true,
   "requiredGithubWorkflow": "enterprise-infra.yml",

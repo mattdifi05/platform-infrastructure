@@ -60,6 +60,7 @@ import {
   evaluateAdminAccessEvidence,
   loadAdminAccessInventory,
 } from "./admin-access-inventory.mjs";
+import { evaluateProviderMfaAssurance } from "./provider-mfa-assurance.mjs";
 
 process.umask(0o077);
 
@@ -7749,6 +7750,9 @@ function productionGoNoGoPolicy() {
   if (policy.version !== 1) {
     fail(`Unsupported production go/no-go policy version in ${policyPath}.`);
   }
+  if (policy.requireProviderMfaAssurance !== true) {
+    fail(`Production go/no-go policy must require provider-backed MFA assurance: ${policyPath}`);
+  }
   return { policyPath, policy };
 }
 
@@ -8010,13 +8014,23 @@ function goNoGoRemediation(check) {
     },
     "cloudflare-access-admin-verified": {
       actions: [
-        "Apply or verify the additive Cloudflare Access manifest for admin applications after the Cloudflare zone and identity provider are configured.",
-        "Do not overwrite unrelated Cloudflare rules; use the dedicated Access admin manifest.",
+        "Verify the exact additive Cloudflare Access application and policy inventory after the Cloudflare zone is configured.",
+        "Obtain fresh authenticated provider MFA evidence through a supported provider mechanism; local intent and Access login-method IDs are not MFA assurance.",
       ],
       commands: [
         "CLOUDFLARE_API_TOKEN=<token> CLOUDFLARE_ACCOUNT_ID=<account-id> sh ./scripts/cloudflare-access-admin.sh --manifest cloudflare/access-admin.production.json --verifyRemote",
       ],
-      evidence: "reports/cloudflare-access/cloudflare-access-admin-*.json with mode=verifyRemote and every application result=verified",
+      evidence: "reports/cloudflare-access/cloudflare-access-admin-*.json with exact Access shape coverage plus separately authenticated provider MFA assurance",
+    },
+    "cloudflare-access-shape-verified": {
+      actions: ["Run exact remote Cloudflare Access application and policy verification for the authoritative admin inventory."],
+      commands: ["CLOUDFLARE_API_TOKEN=<token> CLOUDFLARE_ACCOUNT_ID=<account-id> sh ./scripts/cloudflare-access-admin.sh --manifest cloudflare/access-admin.production.json --verifyRemote"],
+      evidence: "fresh verifyRemote report with accessShape.status=passed and exact inventory coverage",
+    },
+    "identity-provider-mfa-assurance": {
+      actions: ["Integrate an authenticated provider-supported MFA policy or session receipt bound to issuer, tenant, client, login method, Access application IDs, policy revision, context, methods, and freshness."],
+      commands: ["No local closure command exists; complete an authorized provider-backed live verification integration."],
+      evidence: "fresh cryptographically authenticated or direct-provider MFA receipt; until implemented this check remains pending-provider",
     },
   };
 
@@ -9322,25 +9336,61 @@ async function productionGoNoGo() {
   const cloudflareAccessEvaluation = cloudflareAccess
     ? evaluateAdminAccessEvidence(cloudflareAccess.payload, adminAccessInventory)
     : { ok: false, reason: "missing verifyRemote report" };
-  const cloudflareVerified = !policy.requireCloudflareAccessVerify || (
+  const cloudflareAccessShapeEvidenceVerified = Boolean(
     cloudflareAccess?.payload?.mode === "verifyRemote"
     && cloudflareAccessEvaluation.ok
+    && cloudflareAccess.payload.accessShape?.status === "passed"
   );
-  const cloudflarePendingProvider = Boolean(
-    !cloudflareVerified
-    && policy.requireCloudflareAccessVerify
-  );
+  const cloudflareAccessShapePassed = !policy.requireCloudflareAccessVerify
+    || (cloudflareAccessShapeEvidenceVerified && Boolean(cloudflareAccess && cloudflareAccessFresh.fresh));
+  const cloudflareAccessShapeStatus = cloudflareAccessShapePassed
+    ? "passed"
+    : cloudflareAccess
+      ? "failed"
+      : "pending-provider";
+  const providerMfaEvaluation = cloudflareAccess
+    ? evaluateProviderMfaAssurance(cloudflareAccess.payload)
+    : { status: "pending-provider", passed: false, reason: "missing provider-backed MFA evidence" };
+  const providerMfaPassed = !policy.requireProviderMfaAssurance
+    || (providerMfaEvaluation.passed === true && Boolean(cloudflareAccess && cloudflareAccessFresh.fresh));
+  const providerMfaStatus = providerMfaPassed ? "passed" : providerMfaEvaluation.status;
   addGoNoGoCheck(checks, {
-    name: "cloudflare-access-admin-verified",
-    passed: Boolean(cloudflareAccess && cloudflareAccessFresh.fresh && cloudflareAccess.payload.status === "passed" && cloudflareVerified),
+    name: "cloudflare-access-shape-verified",
+    passed: cloudflareAccessShapePassed,
     detail: cloudflareAccess
-      ? `${cloudflareAccessFresh.detail}; mode=${cloudflareAccess.payload.mode}; exactInventoryCoverage=${cloudflareVerified ? "yes" : "no"}; evaluation=${cloudflareAccessEvaluation.reason}`
+      ? `${cloudflareAccessFresh.detail}; mode=${cloudflareAccess.payload.mode}; exactInventoryCoverage=${cloudflareAccessShapeEvidenceVerified ? "yes" : "no"}; evaluation=${cloudflareAccessEvaluation.reason}`
       : latestCloudflareAccessReport
         ? `missing verifyRemote report; latestMode=${latestCloudflareAccessReport.payload.mode ?? "unknown"}; latestStatus=${latestCloudflareAccessReport.payload.status ?? "unknown"}; ${latestCloudflareAccessFresh.detail}`
         : cloudflareAccessFresh.detail,
     report: cloudflareAccess ?? latestCloudflareAccessReport,
-    status: cloudflarePendingProvider ? "pending-provider" : null,
-    blocker: cloudflarePendingProvider ? "cloudflare-access-provider" : null,
+    status: cloudflareAccessShapeStatus,
+    blocker: cloudflareAccessShapeStatus === "pending-provider" ? "cloudflare-access-provider" : "local",
+  });
+  addGoNoGoCheck(checks, {
+    name: "identity-provider-mfa-assurance",
+    passed: providerMfaPassed,
+    detail: `${cloudflareAccessFresh.detail}; ownership=EXTERNAL; evaluation=${providerMfaEvaluation.reason}`,
+    report: cloudflareAccess ?? latestCloudflareAccessReport,
+    status: providerMfaStatus,
+    blocker: providerMfaStatus === "pending-provider" ? "identity-provider-mfa-assurance" : "local",
+  });
+  const cloudflareCombinedPassed = cloudflareAccessShapePassed && providerMfaPassed;
+  const cloudflareCombinedStatus = cloudflareCombinedPassed
+    ? "passed"
+    : cloudflareAccessShapeStatus === "failed" || providerMfaStatus === "failed"
+      ? "failed"
+      : "pending-provider";
+  addGoNoGoCheck(checks, {
+    name: "cloudflare-access-admin-verified",
+    passed: cloudflareCombinedPassed,
+    detail: cloudflareAccess
+      ? `${cloudflareAccessFresh.detail}; accessShape=${cloudflareAccessShapeStatus}; providerMfa=${providerMfaStatus}; ownership=EXTERNAL`
+      : latestCloudflareAccessReport
+        ? `missing verifyRemote report; latestMode=${latestCloudflareAccessReport.payload.mode ?? "unknown"}; latestStatus=${latestCloudflareAccessReport.payload.status ?? "unknown"}; ${latestCloudflareAccessFresh.detail}`
+        : cloudflareAccessFresh.detail,
+    report: cloudflareAccess ?? latestCloudflareAccessReport,
+    status: cloudflareCombinedStatus,
+    blocker: cloudflareCombinedStatus === "pending-provider" ? "identity-provider-mfa-assurance" : "local",
   });
 
   const evidenceTrustEnvelopePathValue = argv.evidenceTrustEnvelope ?? process.env.EVIDENCE_TRUST_ENVELOPE;
@@ -12401,6 +12451,8 @@ function enterpriseProduction360Coverage() {
     "public-load-benchmark",
     "release-evidence-and-rollback",
     "cloudflare-access-admin-verified",
+    "cloudflare-access-shape-verified",
+    "identity-provider-mfa-assurance",
   ]);
   const domains = Array.isArray(manifest.domains) ? manifest.domains : [];
   const modeCounts = {};

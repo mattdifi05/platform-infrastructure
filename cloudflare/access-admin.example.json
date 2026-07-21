@@ -8,7 +8,24 @@
     "version": "2026-07-21.1",
     "sha256": "fd6451e078eb9c5456c725f483b1dacce7e832794965987cb5eb2aee85d12ac4"
   },
-  "mfaEnforcedByIdentityProvider": true,
+  "mfaAssurancePolicy": {
+    "schemaVersion": 1,
+    "assuranceBoundary": "external-provider",
+    "provider": "replace-with-identity-provider",
+    "expectedIssuer": "https://idp.example.com/",
+    "expectedTenantId": "replace-with-provider-tenant",
+    "expectedClientId": "replace-with-provider-client",
+    "expectedLoginMethodId": "00000000-0000-0000-0000-000000000000",
+    "acceptedAuthenticationContexts": [
+      "replace-with-provider-mfa-context"
+    ],
+    "acceptedMethods": [
+      "replace-with-provider-mfa-method"
+    ],
+    "expectedPolicyRevision": "replace-with-provider-policy-revision",
+    "trustedVerifierId": "replace-with-authenticated-provider-verifier",
+    "maxEvidenceAgeSeconds": 300
+  },
   "allowedIdentityProviderIds": [
     "00000000-0000-0000-0000-000000000000"
   ],

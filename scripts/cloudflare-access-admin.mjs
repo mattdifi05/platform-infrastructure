@@ -8,6 +8,11 @@ import {
   loadAdminAccessInventory,
   reconcileAdminRouteInventory,
 } from "./admin-access-inventory.mjs";
+import {
+  assertProviderMfaPolicyReadyForLive,
+  normalizeProviderMfaPolicy,
+  pendingProviderMfaAssurance,
+} from "./provider-mfa-assurance.mjs";
 
 const API_BASE = "https://api.cloudflare.com/client/v4";
 const DEFAULT_MANIFEST = "cloudflare/access-admin.example.json";
@@ -61,7 +66,7 @@ function manifestSummary(manifest) {
     adminSessionDuration: manifest.adminSessionDuration,
     domainSuffix: manifest.domainSuffix,
     adminSurfaceInventory: manifest.inventoryContract.inventory,
-    mfaEnforcedByIdentityProvider: true,
+    mfaAssurancePolicy: manifest.mfaAssurancePolicy,
     allowedIdentityProviderCount: manifest.allowedIdentityProviderIds.length,
     allowedEmailCount: manifest.allowedEmails.length,
     allowedEmailDomainCount: manifest.allowedEmailDomains.length,
@@ -82,6 +87,17 @@ function writeEvidenceReport({ mode, status, manifest, applications, routeReconc
     applications,
     mode,
   });
+  const accessShape = {
+    status: mode === "verifyRemote" && adminSurfaceCoverage.complete ? "passed" : mode === "verifyRemote" ? "failed" : "not-verified",
+    inventoryComplete: adminSurfaceCoverage.complete,
+    scope: "cloudflare-access-application-and-policy-shape",
+  };
+  const providerMfaAssurance = pendingProviderMfaAssurance({
+    policy: manifest.mfaAssurancePolicy,
+    applications,
+    accountId: manifest.accountId,
+    teamName: manifest.teamName,
+  });
   const payload = {
     generatedAt,
     mode,
@@ -89,6 +105,8 @@ function writeEvidenceReport({ mode, status, manifest, applications, routeReconc
     manifest: manifestSummary(manifest),
     applications,
     adminSurfaceCoverage,
+    accessShape,
+    providerMfaAssurance,
     issues,
   };
   const directory = ensureReportDir();
@@ -105,6 +123,8 @@ function writeEvidenceReport({ mode, status, manifest, applications, routeReconc
     `Team: ${manifest.teamName}`,
     `Admin inventory: ${adminSurfaceCoverage.inventory.id}@${adminSurfaceCoverage.inventory.version} (${adminSurfaceCoverage.inventory.sha256})`,
     `Complete inventory coverage: ${adminSurfaceCoverage.complete ? "yes" : "no"}`,
+    `Access shape: ${accessShape.status}`,
+    `Provider MFA assurance: ${providerMfaAssurance.status} (${providerMfaAssurance.ownership})`,
     "",
     "| Application | Domain | Result |",
     "| --- | --- | --- |",
@@ -152,9 +172,6 @@ export function normalizeManifest(raw, argv, inventoryRecord) {
 
   if (!raw.teamName) throw new Error("Cloudflare Access manifest must define teamName.");
   if (!raw.adminSessionDuration) throw new Error("Cloudflare Access manifest must define adminSessionDuration.");
-  if (raw.mfaEnforcedByIdentityProvider !== true) {
-    throw new Error("Cloudflare Access manifest must set mfaEnforcedByIdentityProvider: true.");
-  }
   if (allowedIdentityProviderIds.length !== 1) {
     throw new Error("Cloudflare Access admin manifest must define exactly one allowedIdentityProviderId so the allow policy can require that MFA-capable login method unambiguously.");
   }
@@ -162,6 +179,11 @@ export function normalizeManifest(raw, argv, inventoryRecord) {
     throw new Error("Cloudflare Access manifest must allow at least one admin email or email domain.");
   }
   if (applications.length === 0) throw new Error("Cloudflare Access manifest must define at least one admin application.");
+
+  const mfaAssurancePolicy = normalizeProviderMfaPolicy(raw.mfaAssurancePolicy, {
+    allowedIdentityProviderIds,
+    legacySelfAttestation: raw.mfaEnforcedByIdentityProvider,
+  });
 
   const inventoryContract = assertExactAdminApplications(applications, inventoryRecord, {
     domainSuffix: raw.domainSuffix,
@@ -182,6 +204,7 @@ export function normalizeManifest(raw, argv, inventoryRecord) {
   requireUnique(normalizedApps.map((app) => app.policyName), "Access policy name");
 
   if (argv.apply || argv.verifyRemote) {
+    assertProviderMfaPolicyReadyForLive(mfaAssurancePolicy);
     if (isPlaceholder(accountId)) throw new Error("Set a real Cloudflare account id with --account-id or CLOUDFLARE_ACCOUNT_ID before live operations.");
     if (allowedIdentityProviderIds.some(isPlaceholder)) throw new Error("Replace the placeholder Cloudflare Access identity provider id before live operations.");
     if (allowedEmails.some(isPlaceholder) && allowedEmailDomains.length === 0) throw new Error("Replace placeholder admin emails before live operations.");
@@ -195,6 +218,7 @@ export function normalizeManifest(raw, argv, inventoryRecord) {
     adminSessionDuration: String(raw.adminSessionDuration),
     domainSuffix: String(raw.domainSuffix).toLowerCase(),
     inventoryContract,
+    mfaAssurancePolicy,
     allowedIdentityProviderIds,
     allowedEmails,
     allowedEmailDomains,
@@ -402,7 +426,7 @@ function dryRun(manifest) {
   process.stdout.write(`==> Cloudflare Access admin plan for account ${manifest.accountId || "<set during apply>"}\n`);
   process.stdout.write(`Team: ${manifest.teamName}\n`);
   process.stdout.write(`Admin session duration: ${manifest.adminSessionDuration}\n`);
-  process.stdout.write("MFA source: required identity provider configuration\n");
+  process.stdout.write("MFA assurance: external provider evidence required; local plan remains pending-provider\n");
   process.stdout.write(`Allowed identity provider: ${manifest.allowedIdentityProviderIds[0]}\n`);
   process.stdout.write(`Allowed admin emails: ${manifest.allowedEmails.length}\n`);
   process.stdout.write(`Allowed admin email domains: ${manifest.allowedEmailDomains.length}\n`);
@@ -487,12 +511,13 @@ async function verifyRemote(manifest) {
       const policies = await listPolicies(manifest.accountId, remote.id, token);
       const expectedPolicy = policyPayload(app, manifest);
       const policy = assertExactPolicyCollection(policies, expectedPolicy);
+      if (!remote.id || !policy.id) throw new Error(`${app.name} verification lacks provider application or policy identifiers.`);
       results.push({
         name: app.name,
         domain: app.domain,
-        result: "verified",
-        applicationId: remote.id ?? null,
-        policyId: policy.id ?? null,
+        result: "access-shape-verified",
+        applicationId: remote.id,
+        policyId: policy.id,
       });
     } catch (error) {
       const issue = String(error?.message ?? error);
@@ -536,10 +561,10 @@ async function main() {
     let status = "warning";
     if (argv.apply) {
       applications = await apply(manifest);
-      status = "passed";
+      status = "pending-provider";
     } else if (argv.verifyRemote) {
       applications = await verifyRemote(manifest);
-      status = "passed";
+      status = "pending-provider";
     } else {
       applications = dryRun(manifest);
     }

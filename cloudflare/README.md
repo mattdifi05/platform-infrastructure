@@ -16,12 +16,16 @@ been reviewed and approved.
   validates the manifest by default, creates only missing Access applications
   and policies with `--apply`, and verifies the live account with
   `--verifyRemote`. Both successful and failed live verifications write
-  `reports/cloudflare-access/` evidence for audit and troubleshooting. MFA is
-  enforced through the configured identity provider IDs. Reconciliation reads
+  `reports/cloudflare-access/` evidence for audit and troubleshooting.
+  Reconciliation reads
   every API page and requires exact application settings plus exact, unique
   include/require/exclude selectors. Unknown or duplicate selectors and any
   sibling allow/bypass policy fail closed; the tool never treats an expected
-  selector as sufficient when the effective policy is broader.
+  selector as sufficient when the effective policy is broader. The
+  Access application/policy shape and upstream MFA assurance are separate
+  controls: a login-method ID does not prove MFA. Until a supported
+  authenticated provider receipt is integrated, MFA ownership stays
+  `EXTERNAL`, evidence stays `pending-provider`, and production remains no-go.
 - `zone-settings.json` lists safe zone settings plus manual-review items.
 - `scripts/cloudflare-origin-lock-ufw.sh` must run on the VPS so direct-origin
   bypass is blocked at the host firewall.

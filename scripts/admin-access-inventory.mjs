@@ -247,7 +247,7 @@ export function reconcileAdminRouteInventory(inventoryRecord, adminRoutesSource)
 export function buildAdminAccessEvidence({ inventoryContract, routeReconciliation, applications, mode }) {
   const applicationResults = Array.isArray(applications) ? applications : [];
   const verifiedDomainsRaw = applicationResults
-    .filter((entry) => entry?.result === "verified")
+    .filter((entry) => entry?.result === "access-shape-verified")
     .map((entry) => String(entry.domain ?? "").trim().toLowerCase())
     .filter(Boolean);
   const verifiedDomains = sortedUniqueStrings(verifiedDomainsRaw);
@@ -296,7 +296,7 @@ export function evaluateAdminAccessEvidence(payload, inventoryRecord) {
     const expectedDomains = expected.map((entry) => entry.domain).sort();
     const reportApps = Array.isArray(payload?.applications) ? payload.applications : [];
     const appDomains = reportApps.map((entry) => String(entry?.domain ?? "").trim().toLowerCase()).filter(Boolean);
-    const verifiedDomains = reportApps.filter((entry) => entry?.result === "verified").map((entry) => String(entry.domain ?? "").trim().toLowerCase()).filter(Boolean).sort();
+    const verifiedDomains = reportApps.filter((entry) => entry?.result === "access-shape-verified").map((entry) => String(entry.domain ?? "").trim().toLowerCase()).filter(Boolean).sort();
     const duplicateReportDomains = duplicates(appDomains);
     const expectedPairs = expected.map((entry) => `${entry.name}\u0000${entry.domain}`).sort();
     const reportPairs = reportApps.map((entry) => `${String(entry?.name ?? "").trim()}\u0000${String(entry?.domain ?? "").trim().toLowerCase()}`).sort();

@@ -43,7 +43,7 @@ function exactPayload() {
   const routeReconciliation = reconcileAdminRouteInventory(inventoryRecord, adminRoutes);
   const applications = manifest.applications.map((app, index) => ({
     ...app,
-    result: "verified",
+    result: "access-shape-verified",
     applicationId: `app-${index}`,
     policyId: `policy-${index}`,
   }));
@@ -131,6 +131,7 @@ test("real verifyRemote entrypoint rejects an incomplete manifest before credent
     const incomplete = clone(manifest);
     incomplete.accountId = "a".repeat(32);
     incomplete.allowedIdentityProviderIds = ["provider-id"];
+    incomplete.mfaAssurancePolicy.expectedLoginMethodId = "provider-id";
     incomplete.allowedEmails = ["admin@real.invalid"];
     incomplete.applications = incomplete.applications.filter((app) => app.name !== "Platform phpPgAdmin");
     const manifestPath = path.join(directory, "incomplete.json");
@@ -208,7 +209,7 @@ test("exact and reordered evidence passes the production inventory evaluator", (
 test("missing, extra, duplicate, failed, or digest-mismatched evidence fails closed", () => {
   const mutations = [
     (payload) => payload.applications.pop(),
-    (payload) => payload.applications.push({ name: "Unknown", domain: "unknown.example.com", result: "verified" }),
+    (payload) => payload.applications.push({ name: "Unknown", domain: "unknown.example.com", result: "access-shape-verified" }),
     (payload) => payload.applications.push(clone(payload.applications[0])),
     (payload) => { payload.applications[0].result = "failed"; },
     (payload) => { payload.adminSurfaceCoverage.inventory.sha256 = "0".repeat(64); },
