@@ -1261,8 +1261,15 @@ Use this path when TLS and public certificates are terminated by VPS, Cloudflare
    verifies the release artifact before it exposes the production environment
    or installs the SSH key. Remotely, all evidence/go-no-go gates run first;
    UFW is then reconciled and verified against the rendered candidate Compose
-   ports, followed by runtime preparation and `compose up` without `--build`.
+   ports, followed by runtime preparation and `compose up --no-build --pull never`.
    Post-activation runs only WAF smoke and `infra-health`.
+
+   Il deploy cattura prima del checkout il modello Compose precedente e il suo
+   image ID runtime, e rifiuta cambi di mount persistenti o reti nella stessa
+   transazione. Da UFW in avanti ogni fase ha un timeout. Qualunque errore
+   ripristina con timeout il modello precedente senza `down`, `-v`, build o
+   pull, poi confronta image ID e identita' dei volumi pre/post. Un rollback
+   incompleto termina con stato hard-failure e richiede recovery operatore.
 
    `governance/deployment-admission.json` is intentionally
    `EXTERNAL-PENDING`: no authenticated external trusted-receipt producer is

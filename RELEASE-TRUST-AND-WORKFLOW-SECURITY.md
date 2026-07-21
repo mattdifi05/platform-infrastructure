@@ -86,6 +86,14 @@ artifact attestations, but it has no authenticated external producer for
 consumer and is not, by itself, producer authentication or a reason to mark the
 gate READY.
 
+The remote activation transaction also binds the authenticated release subject
+to the exact rendered Compose service and running Docker image ID. It snapshots
+the previous normalized Compose model before checkout, rejects persistent mount
+or network drift, and uses bounded automatic rollback after the mutation
+boundary. Rollback restores the previous UFW/runtime model with no build, pull,
+volume deletion or project teardown and verifies the prior image and volume
+identities; rollback failure remains a hard deployment failure.
+
 ## Tool integrity
 
 The ops image installs GitHub CLI 2.93.0 from an immutable release asset after

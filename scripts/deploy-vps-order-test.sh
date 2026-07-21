@@ -15,6 +15,9 @@ APPROVED_IMAGE="ghcr.io/owner/platform-infrastructure-php-apache@sha256:$(printf
 OTHER_IMAGE="ghcr.io/owner/platform-infrastructure-php-apache@sha256:$(printf '9%.0s' $(seq 1 64))"
 APPROVED_IMAGE_ID="sha256:$(printf 'f%.0s' $(seq 1 64))"
 RUNTIME_CONTAINER_ID=$(printf '1%.0s' $(seq 1 64))
+PREVIOUS_IMAGE="ghcr.io/owner/platform-infrastructure-php-apache@sha256:$(printf '0%.0s' $(seq 1 64))"
+PREVIOUS_IMAGE_ID="sha256:$(printf '2%.0s' $(seq 1 64))"
+PREVIOUS_CONTAINER_ID=$(printf '3%.0s' $(seq 1 64))
 
 hash_file() {
   if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'; else shasum -a 256 "$1" | awk '{print $1}'; fi
@@ -49,8 +52,16 @@ SH
 cat > "$TMP/bin/sudo" <<'SH'
 #!/bin/sh
 set -eu
-printf 'origin-apply\n' >> "$ORDER_LOG"
-[ "${FAIL_ORIGIN_APPLY:-0}" != 1 ]
+case "$*" in
+  *rollback-compose.json*)
+    printf 'rollback-origin-apply\n' >> "$ORDER_LOG"
+    [ "${FAIL_ROLLBACK_ORIGIN:-0}" != 1 ]
+    ;;
+  *)
+    printf 'origin-apply\n' >> "$ORDER_LOG"
+    [ "${FAIL_ORIGIN_APPLY:-0}" != 1 ]
+    ;;
+esac
 SH
 cat > "$TMP/bin/sh" <<'SH'
 #!/bin/sh
@@ -63,14 +74,20 @@ case "$1" in
     printf 'subject-bind\n' >> "$ORDER_LOG"
     ;;
   ./scripts/cloudflare-origin-lock-ufw.sh)
-    printf 'origin-verify\n' >> "$ORDER_LOG"
-    [ "${FAIL_ORIGIN_VERIFY:-0}" != 1 ]
+    case "$*" in
+      *rollback-compose.json*) printf 'rollback-origin-verify\n' >> "$ORDER_LOG" ;;
+      *)
+        printf 'origin-verify\n' >> "$ORDER_LOG"
+        [ "${FAIL_ORIGIN_VERIFY:-0}" != 1 ]
+        ;;
+    esac
     ;;
   ./scripts/vps-postdeploy.sh)
     if [ "${DEPLOY_RUN_RATE_LIMIT_EVIDENCE:-0}" = 1 ]; then
       printf 'preactivation\n' >> "$ORDER_LOG"
     else
       printf 'postactivation\n' >> "$ORDER_LOG"
+      [ "${FAIL_POSTACTIVATION:-0}" != 1 ]
     fi
     ;;
   ./scripts/prepare-vps-runtime.sh) printf 'prepare\n' >> "$ORDER_LOG" ;;
@@ -82,8 +99,18 @@ cat > "$TMP/bin/bash" <<'SH'
 set -eu
 case "$*" in
   *"compose-vps.sh config --format json")
-    printf 'compose-config\n' >> "$ORDER_LOG"
-    printf '{"services":{"edge":{"ports":[{"published":443,"target":8443,"protocol":"tcp","host_ip":"0.0.0.0"}]},"php-apache":{"image":"%s"}},"volumes":{}}\n' "${FAKE_COMPOSE_IMAGE:-$FAKE_APPROVED_IMAGE}"
+    count=0
+    [ ! -f "$CONFIG_COUNT_FILE" ] || count=$(cat "$CONFIG_COUNT_FILE")
+    count=$((count + 1))
+    printf '%s\n' "$count" > "$CONFIG_COUNT_FILE"
+    if [ "$count" -eq 1 ]; then
+      printf 'rollback-config\n' >> "$ORDER_LOG"
+      image=$FAKE_PREVIOUS_IMAGE
+    else
+      printf 'compose-config\n' >> "$ORDER_LOG"
+      image=${FAKE_COMPOSE_IMAGE:-$FAKE_APPROVED_IMAGE}
+    fi
+    printf '{"services":{"edge":{"ports":[{"published":443,"target":8443,"protocol":"tcp","host_ip":"0.0.0.0"}]} ,"php-apache":{"image":"%s","volumes":[{"type":"volume","source":"database","target":"/var/lib/php-data"}]}},"volumes":{"database":{"name":"platform_database","driver":"local"}}}\n' "$image"
     ;;
   *) echo "unexpected bash call: $*" >&2; exit 1 ;;
 esac
@@ -92,27 +119,72 @@ cat > "$TMP/bin/docker" <<'SH'
 #!/bin/sh
 set -eu
 case "$*" in
-  "pull $FAKE_APPROVED_IMAGE") printf 'image-pull\n' >> "$ORDER_LOG" ;;
-  "image inspect --format {{.Id}} $FAKE_APPROVED_IMAGE") printf '%s\n' "$FAKE_APPROVED_IMAGE_ID" ;;
-  "compose "*" up -d --remove-orphans --no-build --pull never")
-    printf '%s\n' "$*" > "$COMPOSE_UP_ARGS"
-    printf 'compose-up\n' >> "$ORDER_LOG"
+  "volume inspect platform_database")
+    count=0
+    [ ! -f "$VOLUME_COUNT_FILE" ] || count=$(cat "$VOLUME_COUNT_FILE")
+    count=$((count + 1))
+    printf '%s\n' "$count" > "$VOLUME_COUNT_FILE"
+    if [ "$count" -eq 1 ]; then printf 'volume-before\n' >> "$ORDER_LOG"; else printf 'volume-after\n' >> "$ORDER_LOG"; fi
+    mountpoint=/var/lib/docker/volumes/platform_database/_data
+    if [ "${VOLUME_DRIFT:-0}" = 1 ] && [ "$count" -gt 1 ]; then mountpoint=/var/lib/docker/volumes/replaced/_data; fi
+    printf '[{"Name":"platform_database","Driver":"local","Mountpoint":"%s","Scope":"local","Options":null,"Labels":null}]\n' "$mountpoint"
     ;;
-  "compose "*" ps --no-trunc -q php-apache") printf '%s\n' "$FAKE_RUNTIME_CONTAINER_ID" ;;
+  "pull $FAKE_APPROVED_IMAGE")
+    printf 'image-pull\n' >> "$ORDER_LOG"
+    [ "${FAIL_PULL:-0}" != 1 ]
+    ;;
+  "image inspect --format {{.Id}} $FAKE_APPROVED_IMAGE")
+    [ "${FAIL_IMAGE_INSPECT:-0}" != 1 ]
+    printf '%s\n' "$FAKE_APPROVED_IMAGE_ID"
+    ;;
+  "image inspect --format {{.Id}} $FAKE_PREVIOUS_IMAGE")
+    printf 'rollback-image-bind\n' >> "$ORDER_LOG"
+    printf '%s\n' "$FAKE_PREVIOUS_IMAGE_ID"
+    ;;
+  "compose "*" up -d --remove-orphans --no-build --pull never")
+    case "$*" in
+      *rollback-compose.json*)
+        printf 'rollback-up\n' >> "$ORDER_LOG"
+        [ "${FAIL_ROLLBACK:-0}" != 1 ]
+        ;;
+      *)
+        printf '%s\n' "$*" > "$COMPOSE_UP_ARGS"
+        printf 'compose-up\n' >> "$ORDER_LOG"
+        ;;
+    esac
+    ;;
+  "compose "*" ps --no-trunc -q php-apache")
+    case "$*" in
+      *rollback-compose.json*) printf '%s\n' "$FAKE_PREVIOUS_CONTAINER_ID" ;;
+      *) printf '%s\n' "$FAKE_RUNTIME_CONTAINER_ID" ;;
+    esac
+    ;;
   "inspect --format {{.Image}} $FAKE_RUNTIME_CONTAINER_ID")
     printf 'runtime-verify\n' >> "$ORDER_LOG"
-    printf '%s\n' "$FAKE_APPROVED_IMAGE_ID"
+    printf '%s\n' "${FAKE_RUNTIME_IMAGE_ID:-$FAKE_APPROVED_IMAGE_ID}"
+    ;;
+  "inspect --format {{.Image}} $FAKE_PREVIOUS_CONTAINER_ID")
+    printf 'previous-runtime-verify\n' >> "$ORDER_LOG"
+    printf '%s\n' "$FAKE_PREVIOUS_IMAGE_ID"
     ;;
   *) echo "unexpected docker call: $*" >&2; exit 1 ;;
 esac
 SH
-chmod 700 "$TMP/bin/git" "$TMP/bin/sudo" "$TMP/bin/sh" "$TMP/bin/bash" "$TMP/bin/docker"
+cat > "$TMP/bin/timeout" <<'SH'
+#!/bin/sh
+set -eu
+shift
+exec "$@"
+SH
+chmod 700 "$TMP/bin/git" "$TMP/bin/sudo" "$TMP/bin/sh" "$TMP/bin/bash" "$TMP/bin/docker" "$TMP/bin/timeout"
 
 run_remote() {
+  rm -f "$TMP/config-count" "$TMP/volume-count" "$TMP/compose-up-args"
   env \
-    PATH="$TMP/bin:$PATH" ORDER_LOG="$LOG" COMPOSE_UP_ARGS="$TMP/compose-up-args" \
+    PATH="$TMP/bin:$PATH" ORDER_LOG="$LOG" COMPOSE_UP_ARGS="$TMP/compose-up-args" CONFIG_COUNT_FILE="$TMP/config-count" VOLUME_COUNT_FILE="$TMP/volume-count" \
     FAKE_RELEASE_SHA="$RELEASE_SHA" FAKE_RELEASE_TREE="$RELEASE_TREE" FAKE_CANONICAL_ORIGIN='https://github.com/owner/repo.git' \
     FAKE_APPROVED_IMAGE="$APPROVED_IMAGE" FAKE_APPROVED_IMAGE_ID="$APPROVED_IMAGE_ID" FAKE_RUNTIME_CONTAINER_ID="$RUNTIME_CONTAINER_ID" \
+    FAKE_PREVIOUS_IMAGE="$PREVIOUS_IMAGE" FAKE_PREVIOUS_IMAGE_ID="$PREVIOUS_IMAGE_ID" FAKE_PREVIOUS_CONTAINER_ID="$PREVIOUS_CONTAINER_ID" \
     PLATFORM_REMOTE_DIR_B64="$(encode "$REMOTE_DIR")" \
     PLATFORM_ENV_FILE_B64="$(encode '.env')" \
     PLATFORM_PROJECT_NAME_B64="$(encode 'platform_infra_vps')" \
@@ -149,6 +221,16 @@ if grep -Eq '^(origin-apply|prepare|compose-up)$' "$LOG"; then echo "FAIL: relea
 printf 'PASS\tsubject-compose-mismatch-blocks-mutation\n'
 
 : > "$LOG"
+if run_remote env FAIL_PULL=1 >/dev/null 2>&1; then echo "FAIL: failed exact image pull was accepted" >&2; exit 1; fi
+if grep -Eq '^(origin-apply|prepare|compose-up|rollback-up)$' "$LOG"; then echo "FAIL: failed pull reached mutation or rollback" >&2; exit 1; fi
+printf 'PASS\tpull-failure-blocks-mutation\n'
+
+: > "$LOG"
+if run_remote env FAIL_IMAGE_INSPECT=1 >/dev/null 2>&1; then echo "FAIL: failed exact image inspect was accepted" >&2; exit 1; fi
+if grep -Eq '^(origin-apply|prepare|compose-up|rollback-up)$' "$LOG"; then echo "FAIL: failed image inspect reached mutation or rollback" >&2; exit 1; fi
+printf 'PASS\timage-inspect-failure-blocks-mutation\n'
+
+: > "$LOG"
 if run_remote env FAIL_ORIGIN_APPLY=1 >/dev/null 2>&1; then echo "FAIL: failed origin reconcile was accepted" >&2; exit 1; fi
 assert_not_activated
 printf 'PASS\torigin-reconcile-failure-blocks-activation\n'
@@ -159,8 +241,47 @@ assert_not_activated
 printf 'PASS\torigin-verification-failure-blocks-activation\n'
 
 : > "$LOG"
+if run_remote env FAKE_RUNTIME_IMAGE_ID="$PREVIOUS_IMAGE_ID" >"$TMP/runtime-mismatch.out" 2>"$TMP/runtime-mismatch.err"; then echo "FAIL: runtime image ID mismatch was accepted" >&2; exit 1; fi
+if ! grep -Fx 'rollback-up' "$LOG" >/dev/null; then
+  echo "FAIL: runtime image mismatch did not reach rollback" >&2
+  cat "$TMP/runtime-mismatch.err" >&2
+  cat "$LOG" >&2
+  exit 1
+fi
+grep -Fx 'volume-after' "$LOG" >/dev/null
+if grep -Fx 'postactivation' "$LOG" >/dev/null; then echo "FAIL: runtime mismatch reached postactivation" >&2; exit 1; fi
+printf 'PASS\truntime-image-mismatch-rolls-back\n'
+
+: > "$LOG"
+if run_remote env FAIL_POSTACTIVATION=1 >/dev/null 2>&1; then echo "FAIL: synthetic postactivation failure was accepted" >&2; exit 1; fi
+grep -Fx 'rollback-up' "$LOG" >/dev/null
+grep -Fx 'previous-runtime-verify' "$LOG" >/dev/null
+grep -Fx 'volume-after' "$LOG" >/dev/null
+printf 'PASS\tsynthetic-failure-restores-runtime-and-volume-identity\n'
+
+: > "$LOG"
+set +e
+run_remote env FAIL_POSTACTIVATION=1 FAIL_ROLLBACK=1 >/dev/null 2>&1
+rollback_status=$?
+set -e
+[ "$rollback_status" -eq 72 ] || { echo "FAIL: rollback failure did not return hard status 72 (got $rollback_status)" >&2; exit 1; }
+printf 'PASS\trollback-failure-is-hard-failure\n'
+
+: > "$LOG"
+set +e
+run_remote env FAIL_POSTACTIVATION=1 VOLUME_DRIFT=1 >/dev/null 2>&1
+volume_drift_status=$?
+set -e
+[ "$volume_drift_status" -eq 72 ] || { echo "FAIL: rollback volume drift did not return hard status 72 (got $volume_drift_status)" >&2; exit 1; }
+printf 'PASS\trollback-volume-identity-drift-is-hard-failure\n'
+
+: > "$LOG"
 run_remote env >/dev/null
 cat > "$TMP/expected-order" <<'EOF'
+rollback-config
+volume-before
+previous-runtime-verify
+rollback-image-bind
 git-fetch
 git-checkout
 preactivation
@@ -182,4 +303,18 @@ grep -F -- '--no-build' "$TMP/compose-up-args" >/dev/null
 grep -F -- '--pull never' "$TMP/compose-up-args" >/dev/null
 if grep -Eq '(^| )--build( |$)' "$TMP/compose-up-args"; then echo "FAIL: remote deploy still permits build-on-host" >&2; exit 1; fi
 printf 'PASS\texact-gates-before-prepare-and-compose-up\n'
-printf 'deploy VPS order tests passed 4/4\n'
+
+grep -F 'timeout 120 sudo -n sh ./scripts/cloudflare-origin-lock-ufw.sh --apply' "$SCRIPT_DIR/deploy-vps-remote.sh" >/dev/null
+grep -F 'timeout 120 sh ./scripts/cloudflare-origin-lock-ufw.sh --verify' "$SCRIPT_DIR/deploy-vps-remote.sh" >/dev/null
+grep -F 'timeout 300 sh ./scripts/prepare-vps-runtime.sh' "$SCRIPT_DIR/deploy-vps-remote.sh" >/dev/null
+grep -F 'timeout "$activation_timeout_seconds" docker compose' "$SCRIPT_DIR/deploy-vps-remote.sh" >/dev/null
+grep -F 'timeout "$postactivation_timeout_seconds" sh ./scripts/vps-postdeploy.sh' "$SCRIPT_DIR/deploy-vps-remote.sh" >/dev/null
+printf 'PASS\tpost-boundary-commands-are-bounded\n'
+
+if grep -Eq 'docker (compose .*down|volume (rm|prune)|system prune)' "$SCRIPT_DIR/deploy-vps-remote.sh"; then
+  echo "FAIL: rollback contains a destructive volume/project teardown operation" >&2
+  exit 1
+fi
+printf 'PASS\trollback-never-deletes-project-or-volumes\n'
+
+printf 'deploy VPS order tests passed 12/12\n'

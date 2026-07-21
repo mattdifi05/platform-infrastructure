@@ -880,8 +880,12 @@ set Compose usato dal deploy VPS, inclusi `compose.waf.yaml` e
 esatti, receipt artifact-verification e trusted-deployment con checksum attesi,
 origin GitHub canonica e checkout puliti. Il remoto esegue i gate evidence
 prima di mutare UFW, poi riconcilia e verifica l'origin-lock dal Compose
-renderizzato; solo dopo puo' preparare il runtime e fare `compose up` senza
-build on-host. `vps-postdeploy.sh` dopo l'attivazione resta limitato a WAF smoke
+renderizzato; solo dopo puo' preparare il runtime e fare `compose up` con
+`--no-build --pull never`. Prima del checkout salva il modello Compose precedente, richiede
+storage/reti invariati e lega quel modello all'image ID gia' in esecuzione. Un
+errore dopo il confine di mutazione attiva un rollback bounded di UFW e runtime;
+il rollback verifica image ID e identita' dei volumi e fallisce hard se non puo'
+ripristinarli. `vps-postdeploy.sh` dopo l'attivazione resta limitato a WAF smoke
 e `infra-health`.
 
 Il repository non dispone ancora di un produttore esterno autenticato di

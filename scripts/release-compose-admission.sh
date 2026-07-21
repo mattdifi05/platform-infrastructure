@@ -41,30 +41,28 @@ if [ -n "$previous_compose" ]; then
         .services | to_entries[] as $service |
         ($service.value.volumes // [])[] |
         select(type == "object" and (.type == "volume" or .type == "bind")) |
-        {
-          service: $service.key,
-          type: .type,
-          source: .source,
-          target: .target,
-          read_only: (.read_only // false)
-        }
-      ] | sort_by(.service, .type, .source, .target);
+        {service: $service.key, mount: .}
+      ] | sort_by(.service, .mount.type, .mount.source, .mount.target);
     def volume_definitions:
       [
         (.volumes // {}) | to_entries[] |
-        {
-          key: .key,
-          name: (.value.name // .key),
-          external: (.value.external // false),
-          driver: (.value.driver // "local"),
-          driver_opts: (.value.driver_opts // {})
-        }
+        {key: .key, definition: .value}
       ] | sort_by(.key);
+    def network_attachments:
+      [
+        .services | to_entries[] as $service |
+        ($service.value.networks // {}) | to_entries[] |
+        {service: $service.key, network: .key, attachment: .value}
+      ] | sort_by(.service, .network);
+    def network_definitions:
+      [(.networks // {}) | to_entries[] | {key: .key, definition: .value}] | sort_by(.key);
     .[0] as $previous | .[1] as $candidate |
     ($previous | storage_mounts) == ($candidate | storage_mounts) and
-    ($previous | volume_definitions) == ($candidate | volume_definitions)
+    ($previous | volume_definitions) == ($candidate | volume_definitions) and
+    ($previous | network_attachments) == ($candidate | network_attachments) and
+    ($previous | network_definitions) == ($candidate | network_definitions)
   ' "$previous_compose" "$candidate_compose" >/dev/null || {
-    echo "Candidate Compose changes persistent storage identity; deploy requires a separately approved migration." >&2
+    echo "Candidate Compose changes persistent storage or network identity; deploy requires a separately approved migration." >&2
     exit 1
   }
 fi

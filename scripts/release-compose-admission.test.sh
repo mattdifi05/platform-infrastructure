@@ -54,4 +54,31 @@ write_receipt "[{\"key\":\"PHP_APACHE_IMAGE\",\"image\":\"$TAGGED_IMAGE\"}]"
 write_compose "$TAGGED_IMAGE"
 expect_reject tag-plus-digest-alias
 
-printf 'release Compose admission tests passed 7/7\n'
+write_receipt "[{\"key\":\"PHP_APACHE_IMAGE\",\"image\":\"$IMAGE\"}]"
+write_compose "$IMAGE"
+cp "$TMP/compose.json" "$TMP/previous.json"
+sh "$SCRIPT_DIR/release-compose-admission.sh" "$TMP/receipt.json" "$TMP/compose.json" "$TMP/previous.json"
+printf 'PASS\texact-persistent-storage-identity\n'
+
+sed 's/"source":"database"/"source":"replacement_database"/' "$TMP/compose.json" > "$TMP/changed-storage.json"
+if sh "$SCRIPT_DIR/release-compose-admission.sh" "$TMP/receipt.json" "$TMP/changed-storage.json" "$TMP/previous.json" >/dev/null 2>&1; then
+  echo "FAIL: changed persistent storage identity was accepted" >&2
+  exit 1
+fi
+printf 'PASS\tchanged-persistent-storage-rejected\n'
+
+jq '.services["php-apache"].volumes[0].volume = {"subpath":"other"}' "$TMP/compose.json" > "$TMP/changed-subpath.json"
+if sh "$SCRIPT_DIR/release-compose-admission.sh" "$TMP/receipt.json" "$TMP/changed-subpath.json" "$TMP/previous.json" >/dev/null 2>&1; then
+  echo "FAIL: changed volume subpath semantics were accepted" >&2
+  exit 1
+fi
+printf 'PASS\tchanged-volume-subpath-rejected\n'
+
+jq '.services["php-apache"].networks = {"candidate_only":null} | .networks = {"candidate_only":{"name":"candidate_only"}}' "$TMP/compose.json" > "$TMP/changed-network.json"
+if sh "$SCRIPT_DIR/release-compose-admission.sh" "$TMP/receipt.json" "$TMP/changed-network.json" "$TMP/previous.json" >/dev/null 2>&1; then
+  echo "FAIL: changed network identity was accepted" >&2
+  exit 1
+fi
+printf 'PASS\tchanged-network-identity-rejected\n'
+
+printf 'release Compose admission tests passed 11/11\n'
