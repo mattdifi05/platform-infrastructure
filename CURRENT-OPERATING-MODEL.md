@@ -236,8 +236,10 @@ with mode `0700`, outside `projects-portal/state` or every other service-writabl
 tree; workload snapshots are kept beside it and are never mounted writable.
 Snapshot mutations are descriptor-relative and the Compose wrapper materializes
 verified bytes into persistent, unlinked file descriptors before the final
-consumer exec. The deployment Unix identity is an administrative trust boundary
-and must not be shared with hosted services.
+consumer exec. The lock itself is copied to one unlinked inode, validated from
+immutable in-memory bytes, and projected as one digest-bound activation bundle;
+separate helper calls cannot mix generations. The deployment Unix identity is an
+administrative trust boundary and must not be shared with hosted services.
 
 For a Control Center-only code/documentation rollout:
 

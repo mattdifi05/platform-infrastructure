@@ -1015,7 +1015,15 @@ test("compose-files CLI never emits a path not exactly bound to a compose snapsh
     fs.writeFileSync(path.join(minimalBin, "jq"), `#!/bin/sh
 if [ -n "\${HOSTED_TEST_SWAP_MODE:-}" ]; then
   case "$*" in
-    *'workload-compose'*'@tsv'*)
+    *'workload-compose'*'@tsv'*|*'.composeRecords'*'@tsv'*)
+      for argument in "$@"; do
+        case "$argument" in
+          */hosted-workload-lock.*/lock.json)
+            /bin/cp "$HOSTED_TEST_REPLACEMENT" "$argument"
+            : > "$HOSTED_TEST_PRIVATE_LOCK_MARKER"
+            ;;
+        esac
+      done
       case "$HOSTED_TEST_SWAP_MODE" in
         transient)
           /bin/cp "$HOSTED_TEST_REPLACEMENT" "$HOSTED_TEST_LOCK"
@@ -1042,6 +1050,7 @@ exec "$HOSTED_TEST_REAL_JQ" "$@"
         HOSTED_TEST_ORIGINAL: raceOriginalPath,
         HOSTED_TEST_LOCK: lockPath,
         HOSTED_TEST_REAL_JQ: realJq,
+        HOSTED_TEST_PRIVATE_LOCK_MARKER: path.join(root, "private-lock-path-reopened"),
       },
     });
     assert.doesNotMatch(transient.stdout, /hostile\.yaml/);
@@ -1061,11 +1070,16 @@ exec "$HOSTED_TEST_REAL_JQ" "$@"
         HOSTED_TEST_REPLACEMENT: raceReplacementPath,
         HOSTED_TEST_LOCK: lockPath,
         HOSTED_TEST_REAL_JQ: realJq,
+        HOSTED_TEST_PRIVATE_LOCK_MARKER: path.join(root, "private-lock-path-reopened"),
       },
     });
-    assert.notEqual(raced.status, 0);
     assert.doesNotMatch(raced.stdout, /hostile\.yaml/);
-    assert.match(raced.stderr, /lock changed while being verified/i);
+    if (raced.status === 0) {
+      assert.equal(raced.stdout.trim().split("\t")[0], lock.workloads[0].composePath);
+    } else {
+      assert.match(raced.stderr, /lock changed while being (verified|snapshotted)/i);
+    }
+    assert.equal(fs.existsSync(path.join(root, "private-lock-path-reopened")), false);
     fs.writeFileSync(lockPath, verifiedLockText, { mode: 0o600 });
 
     const tampered = JSON.parse(fs.readFileSync(lockPath, "utf8"));
@@ -1086,7 +1100,7 @@ exec "$HOSTED_TEST_REAL_JQ" "$@"
   }
 });
 
-test("compose wrapper hands verified workload bytes to the consumer through persistent descriptors", () => {
+test("compose wrapper uses one activation bundle and hands verified bytes through persistent descriptors", () => {
   const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "hosted-fd-handoff-")));
   try {
     const workloadRoot = path.join(root, "workloads");
@@ -1108,7 +1122,10 @@ test("compose wrapper hands verified workload bytes to the consumer through pers
     const originalGeneration = `${lock.snapshotGeneration}.original`;
     const composeBasename = path.basename(lock.workloads[0].composePath);
     const realJq = executablePath("jq");
+    const shaCommand = executablePath("sha256sum") ? "sha256sum" : "shasum";
+    const realSha = executablePath(shaCommand);
     assert.ok(realJq, "jq is required by the descriptor handoff race test");
+    assert.ok(realSha, "a SHA-256 utility is required by the descriptor handoff race test");
     fs.mkdirSync(fakeBin);
     fs.writeFileSync(path.join(fakeBin, "docker"), `#!/bin/bash
 set -euo pipefail
@@ -1127,10 +1144,19 @@ for argument in "$@"; do
   esac
 done
 `, { mode: 0o755 });
+    fs.writeFileSync(path.join(fakeBin, "sh"), `#!/bin/sh
+count=0
+if [ -f "$HOSTED_TEST_LOCK_READER_COUNT" ]; then
+  IFS= read -r count < "$HOSTED_TEST_LOCK_READER_COUNT"
+fi
+count=$((count + 1))
+printf '%s\n' "$count" > "$HOSTED_TEST_LOCK_READER_COUNT"
+exec /bin/sh "$@"
+`, { mode: 0o755 });
     fs.writeFileSync(path.join(fakeBin, "jq"), `#!/bin/sh
 if [ "\${HOSTED_TEST_QUERY_SWAP:-0}" = 1 ]; then
   case "$*" in
-    *'workload-compose'*'@tsv'*)
+    *'workload-compose'*'@tsv'*|*'.composeRecords'*'@tsv'*)
       /bin/mv "$HOSTED_TEST_GENERATION" "$HOSTED_TEST_ORIGINAL_GENERATION"
       /bin/mkdir -m 700 "$HOSTED_TEST_GENERATION"
       printf 'services:\n  hostile:\n    privileged: true\n' > "$HOSTED_TEST_GENERATION/$HOSTED_TEST_COMPOSE_BASENAME"
@@ -1153,17 +1179,48 @@ exec "$HOSTED_TEST_REAL_JQ" "$@"
       HOSTED_TEST_COMPOSE_BASENAME: composeBasename,
       HOSTED_TEST_CAPTURE: capture,
       HOSTED_TEST_REAL_JQ: realJq,
+      HOSTED_TEST_REAL_SHA: realSha,
+      HOSTED_TEST_TMPDIR: root,
+      HOSTED_TEST_HASH_RACE_MARKER: path.join(root, "hash-race-fired"),
+      HOSTED_TEST_LOCK_READER_COUNT: path.join(root, "lock-reader-count"),
+      TMPDIR: root,
     };
     const queryRace = spawnSync("/bin/bash", [path.join(import.meta.dirname, "compose-vps.sh"), "config", "--format", "json"], {
       encoding: "utf8",
       env: { ...sharedEnvironment, HOSTED_TEST_QUERY_SWAP: "1" },
     });
     assert.notEqual(queryRace.status, 0);
-    assert.match(queryRace.stderr, /handoff object identity changed/i);
+    assert.match(queryRace.stderr, /handoff object (identity changed|could not be opened)/i);
     assert.equal(fs.existsSync(capture), false);
+    assert.equal(fs.readFileSync(sharedEnvironment.HOSTED_TEST_LOCK_READER_COUNT, "utf8").trim(), "1");
     removeFixtureTree(lock.snapshotGeneration);
     fs.renameSync(originalGeneration, lock.snapshotGeneration);
     fs.unlinkSync(path.join(fakeBin, "jq"));
+    fs.writeFileSync(sharedEnvironment.HOSTED_TEST_LOCK_READER_COUNT, "0\n");
+    fs.writeFileSync(path.join(fakeBin, shaCommand), `#!/bin/sh
+output=$("$HOSTED_TEST_REAL_SHA" "$@")
+status=$?
+target=
+for argument in "$@"; do
+  case "$argument" in
+    "$HOSTED_TEST_TMPDIR"/hosted-compose-handoff.*/object-*) target=$argument ;;
+  esac
+done
+if [ -z "$target" ]; then
+  for candidate in "$HOSTED_TEST_TMPDIR"/hosted-compose-handoff.*/object-*; do
+    [ -e "$candidate" ] || continue
+    target=$candidate
+    break
+  done
+fi
+if [ -n "$target" ] && [ -e "$target" ]; then
+  printf 'services:\n  hostile:\n    privileged: true\n' > "$target.replacement"
+  /bin/mv "$target.replacement" "$target"
+  : > "$HOSTED_TEST_HASH_RACE_MARKER"
+fi
+printf '%s\n' "$output"
+exit "$status"
+`, { mode: 0o755 });
 
     const consumer = spawnSync("/bin/bash", [path.join(import.meta.dirname, "compose-vps.sh"), "config", "--format", "json"], {
       encoding: "utf8",
@@ -1174,6 +1231,8 @@ exec "$HOSTED_TEST_REAL_JQ" "$@"
     assert.match(consumed, /example-app-web/);
     assert.match(consumed, /EXAMPLE_APP_THEME=dark/);
     assert.doesNotMatch(consumed, /privileged: true/);
+    assert.equal(fs.existsSync(sharedEnvironment.HOSTED_TEST_HASH_RACE_MARKER), false);
+    assert.equal(fs.readFileSync(sharedEnvironment.HOSTED_TEST_LOCK_READER_COUNT, "utf8").trim(), "1");
     assert.notEqual(fs.statSync(lock.snapshotGeneration).ino, Number(lock.snapshotGenerationIdentity.inode));
   } finally {
     removeFixtureTree(root);

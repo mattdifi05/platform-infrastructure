@@ -34,12 +34,11 @@ env_path_value() {
   printf '%s' "$value"
 }
 
-sha256_file() {
-  local target=$1
+sha256_stream() {
   if command -v sha256sum >/dev/null 2>&1; then
-    sha256sum "$target" | awk '{ print $1 }'
+    sha256sum | awk '{ print $1 }'
   else
-    shasum -a 256 "$target" | awk '{ print $1 }'
+    shasum -a 256 | awk '{ print $1 }'
   fi
 }
 
@@ -53,6 +52,13 @@ fd_identity() {
   IFS='|' read -r device inode uid mode <<< "$raw"
   [[ "$OSTYPE" != darwin* ]] || device='*'
   printf '%s|%s|%s|%s\n' "$device" "$inode" "$uid" "$((8#$mode))"
+}
+
+fd_object_identity() {
+  local identity device inode uid mode
+  identity=$(fd_identity "$1")
+  IFS='|' read -r device inode uid mode <<< "$identity"
+  printf '%s|%s\n' "$inode" "$uid"
 }
 
 next_handoff_fd=50
@@ -70,14 +76,19 @@ cleanup_handoff() {
 
 open_locked_handoff() {
   local source=$1 expected_sha=$2 expected_device=$3 expected_inode=$4 expected_uid=$5 expected_mode=$6
-  local source_fd source_reference before after actual_device actual_inode actual_uid actual_mode handoff_file actual_sha handoff_fd
+  local source_fd source_reference before after actual_device actual_inode actual_uid actual_mode handoff_file
+  local writer_fd hash_fd handoff_fd path_identity path_device path_inode path_uid path_mode
+  local writer_identity hash_identity handoff_identity actual_sha
   [[ "$source" = /* && "$source" != *[!A-Za-z0-9_./-]* && "$source" != *//* && "$source" != */../* && "$source" != */.. ]] || {
     printf 'Invalid locked handoff path: %s\n' "$source" >&2
     return 1
   }
   source_fd=$next_handoff_fd
   next_handoff_fd=$((next_handoff_fd + 1))
-  eval "exec ${source_fd}<\"\$source\""
+  if ! eval "exec ${source_fd}<\"\$source\""; then
+    printf 'Locked handoff object could not be opened: %s\n' "$source" >&2
+    return 1
+  fi
   source_reference=/dev/fd/$source_fd
   before=$(fd_identity "$source_reference")
   IFS='|' read -r actual_device actual_inode actual_uid actual_mode <<< "$before"
@@ -88,23 +99,46 @@ open_locked_handoff() {
   }
   handoff_file=$handoff_directory/object-$next_handoff_fd
   handoff_files+=("$handoff_file")
-  /bin/cat <&$source_fd > "$handoff_file"
+  writer_fd=$next_handoff_fd
+  next_handoff_fd=$((next_handoff_fd + 1))
+  set -C
+  if ! eval "exec ${writer_fd}>\"\$handoff_file\""; then
+    set +C
+    printf 'Could not exclusively create locked handoff object: %s\n' "$source" >&2
+    return 1
+  fi
+  set +C
+  hash_fd=$next_handoff_fd
+  next_handoff_fd=$((next_handoff_fd + 1))
+  eval "exec ${hash_fd}<\"\$handoff_file\""
+  handoff_fd=$next_handoff_fd
+  next_handoff_fd=$((next_handoff_fd + 1))
+  eval "exec ${handoff_fd}<\"\$handoff_file\""
+  path_identity=$(fd_identity "$handoff_file")
+  IFS='|' read -r path_device path_inode path_uid path_mode <<< "$path_identity"
+  writer_identity=$(fd_object_identity "/dev/fd/$writer_fd")
+  hash_identity=$(fd_object_identity "/dev/fd/$hash_fd")
+  handoff_identity=$(fd_object_identity "/dev/fd/$handoff_fd")
+  [[ "$path_mode" = 384 && "$writer_identity" = "$path_inode|$path_uid"
+      && "$writer_identity" = "$hash_identity" && "$writer_identity" = "$handoff_identity" ]] || {
+    printf 'Locked handoff descriptors do not reference one object: %s\n' "$source" >&2
+    return 1
+  }
+  /bin/rm -- "$handoff_file"
+  /bin/cat <&$source_fd >&$writer_fd
   after=$(fd_identity "$source_reference")
   [[ "$before" = "$after" ]] || {
     printf 'Locked handoff object changed while being copied: %s\n' "$source" >&2
     return 1
   }
   eval "exec ${source_fd}<&-"
-  chmod 400 "$handoff_file"
-  actual_sha=$(sha256_file "$handoff_file")
+  eval "exec ${writer_fd}>&-"
+  actual_sha=$(sha256_stream <&$hash_fd)
+  eval "exec ${hash_fd}<&-"
   [[ "$actual_sha" = "$expected_sha" ]] || {
     printf 'Locked handoff digest changed: %s\n' "$source" >&2
     return 1
   }
-  handoff_fd=$next_handoff_fd
-  next_handoff_fd=$((next_handoff_fd + 1))
-  eval "exec ${handoff_fd}<\"\$handoff_file\""
-  /bin/rm -- "$handoff_file"
   HANDOFF_REFERENCE=/dev/fd/$handoff_fd
 }
 
@@ -120,10 +154,39 @@ if [[ -n "$workload_lock" ]]; then
   [[ "$workload_lock" = /* ]] || workload_lock="$ROOT_DIR/$workload_lock"
   handoff_directory=$(mktemp -d "${TMPDIR:-/tmp}/hosted-compose-handoff.XXXXXX")
   chmod 700 "$handoff_directory"
+  umask 077
   trap cleanup_handoff EXIT
   export HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE=${HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE:-$workload_lock}
-  locked_core_env=$(HOSTED_WORKLOAD_ALLOW_RESOLVED=${HOSTED_WORKLOAD_ALLOW_RESOLVED:-0} sh "$ROOT_DIR/scripts/hosted-workload-lock.sh" "$workload_lock" core-env-file)
-  locked_project_name=$(HOSTED_WORKLOAD_ALLOW_RESOLVED=${HOSTED_WORKLOAD_ALLOW_RESOLVED:-0} sh "$ROOT_DIR/scripts/hosted-workload-lock.sh" "$workload_lock" project-name)
+  activation_bundle=$(
+    HOSTED_WORKLOAD_ALLOW_RESOLVED=${HOSTED_WORKLOAD_ALLOW_RESOLVED:-0} \
+      sh "$ROOT_DIR/scripts/hosted-workload-lock.sh" "$workload_lock" activation-bundle
+  )
+  printf '%s' "$activation_bundle" | jq -e '
+    def record:
+      type == "object"
+      and ((keys | sort) == ["device", "inode", "mode", "path", "sha256", "uid"])
+      and (.path | type == "string" and length > 0)
+      and (.sha256 | type == "string" and test("^[a-f0-9]{64}$"))
+      and (.device | type == "string" and test("^[0-9]+$"))
+      and (.inode | type == "string" and test("^[0-9]+$"))
+      and (.uid | type == "string" and test("^[0-9]+$"))
+      and .mode == 256;
+    type == "object"
+    and ((keys | sort) == ["composeRecords", "coreEnvFile", "environmentRecords", "lockSha256", "projectName", "version"])
+    and .version == 1
+    and (.lockSha256 | type == "string" and test("^[a-f0-9]{64}$"))
+    and (.coreEnvFile | type == "string" and length > 0)
+    and (.projectName | type == "string" and test("^[a-z0-9][a-z0-9_-]*$"))
+    and (.environmentRecords | type == "array" and all(.[]; record))
+    and (.composeRecords | type == "array" and all(.[]; record))
+  ' >/dev/null || {
+    echo "Hosted workload activation bundle is invalid." >&2
+    exit 1
+  }
+  locked_core_env=$(printf '%s' "$activation_bundle" | jq -r '.coreEnvFile')
+  locked_project_name=$(printf '%s' "$activation_bundle" | jq -r '.projectName')
+  workload_env_records=$(printf '%s' "$activation_bundle" | jq -r '.environmentRecords[] | [.path, .sha256, .device, .inode, .uid, (.mode | tostring)] | @tsv')
+  workload_compose_records=$(printf '%s' "$activation_bundle" | jq -r '.composeRecords[] | [.path, .sha256, .device, .inode, .uid, (.mode | tostring)] | @tsv')
   [[ "$locked_core_env" = "$ENV_FILE" ]] || {
     echo "Hosted workload lock was prepared for a different core env file." >&2
     exit 1
@@ -132,10 +195,6 @@ if [[ -n "$workload_lock" ]]; then
     echo "Hosted workload lock was prepared for a different Compose project name." >&2
     exit 1
   }
-  workload_env_records=$(
-    HOSTED_WORKLOAD_ALLOW_RESOLVED=${HOSTED_WORKLOAD_ALLOW_RESOLVED:-0} \
-      sh "$ROOT_DIR/scripts/hosted-workload-lock.sh" "$workload_lock" env-records
-  )
   while IFS=$'\t' read -r source expected_sha expected_device expected_inode expected_uid expected_mode; do
     [[ -n "$source" ]] || continue
     open_locked_handoff "$source" "$expected_sha" "$expected_device" "$expected_inode" "$expected_uid" "$expected_mode"
@@ -159,10 +218,6 @@ compose+=(
 )
 
 if [[ -n "$workload_lock" ]]; then
-  workload_compose_records=$(
-    HOSTED_WORKLOAD_ALLOW_RESOLVED=${HOSTED_WORKLOAD_ALLOW_RESOLVED:-0} \
-      sh "$ROOT_DIR/scripts/hosted-workload-lock.sh" "$workload_lock" compose-records
-  )
   while IFS=$'\t' read -r source expected_sha expected_device expected_inode expected_uid expected_mode; do
     [[ -n "$source" ]] || continue
     open_locked_handoff "$source" "$expected_sha" "$expected_device" "$expected_inode" "$expected_uid" "$expected_mode"

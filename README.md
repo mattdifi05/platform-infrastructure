@@ -112,7 +112,9 @@ network e budget, confronta render core e combinato e scrive un lock `0600` con
 SHA-256 di ogni input. Lock e snapshot content-addressed devono stare nello
 stesso parent deployment-owned `0700`, fuori da `projects-portal/state`; il
 resolver crea e finalizza gli snapshot con operazioni descriptor-relative
-`openat`/`O_NOFOLLOW`. Il deploy legge il lock una sola volta e consegna copie
+`openat`/`O_NOFOLLOW`. Il deploy copia il lock su un inode privato subito
+unlinkato, valida quei byte in memoria e ricava core, progetto, Compose ed
+environment da un unico bundle digest-bound. Consegna poi copie
 digest-verificate di Compose/environment tramite file descriptor persistenti,
 senza riaprire i pathname workload dopo la verifica; il router riceve soltanto
 il lock in read-only. L'identita' Unix che prepara ed esegue il deploy resta una
