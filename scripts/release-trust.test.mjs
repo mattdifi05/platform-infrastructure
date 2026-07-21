@@ -30,7 +30,7 @@ const verifiedFixture = [{
     statement: {
       _type: "https://in-toto.io/Statement/v1",
       predicateType: "https://slsa.dev/provenance/v1",
-      subject: [{ name: "example/image", digest: { sha256: digest } }],
+      subject: [{ name: "ghcr.io/example/image", digest: { sha256: digest } }],
       predicate: {},
     },
   },
@@ -60,6 +60,7 @@ function test(name, fn) {
 const baseOptions = {
   subject: `oci://ghcr.io/example/image@sha256:${digest}`,
   expectedSubjectDigest: digest,
+  expectedSubjectName: "ghcr.io/example/image",
   repository,
   signerWorkflow,
   sourceDigest,
@@ -133,6 +134,13 @@ try {
     assert.throws(() => parseCryptographicallyVerifiedGithubOutput(JSON.stringify(verifiedFixture), {
       expectedSubjectDigest: "c".repeat(64),
     }), /does not cover/);
+  });
+
+  test("rejects the right digest under a different subject name", () => {
+    assert.throws(() => parseCryptographicallyVerifiedGithubOutput(JSON.stringify(verifiedFixture), {
+      expectedSubjectDigest: digest,
+      expectedSubjectName: "ghcr.io/attacker/image",
+    }), /exact subject/);
   });
 
   test("rejects verifier command failure", () => {

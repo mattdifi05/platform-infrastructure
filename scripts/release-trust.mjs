@@ -73,6 +73,18 @@ function normalizeSubject(value) {
   return path.resolve(text);
 }
 
+export function normalizeOciSubject(value) {
+  const normalized = normalizeSubject(value);
+  if (!normalized.startsWith("oci://")) {
+    invalid("Expected an OCI attestation subject.");
+  }
+  const match = normalized.match(/^oci:\/\/(.+)@sha256:([a-f0-9]{64})$/i);
+  if (!match || !match[1] || match[1].includes("@")) {
+    invalid("OCI attestation subject must contain one exact image name and SHA256 digest.");
+  }
+  return { subject: normalized, name: match[1], sha256: match[2].toLowerCase() };
+}
+
 function existingFile(value, label) {
   const resolved = path.resolve(requiredText(value, label));
   if (!fs.statSync(resolved, { throwIfNoEntry: false })?.isFile()) {
@@ -151,6 +163,7 @@ function canonicalFingerprint(value) {
 
 export function parseCryptographicallyVerifiedGithubOutput(rawOutput, {
   expectedSubjectDigest,
+  expectedSubjectName,
   predicateType = SLSA_PROVENANCE_V1,
 } = {}) {
   let document;
@@ -164,6 +177,7 @@ export function parseCryptographicallyVerifiedGithubOutput(rawOutput, {
   }
 
   const expectedDigest = expectedSubjectDigest ? normalizeSha256(expectedSubjectDigest, "expected subject digest") : null;
+  const expectedName = expectedSubjectName ? requiredText(expectedSubjectName, "expected subject name") : null;
   const results = document.map((entry, index) => {
     const verification = entry?.verificationResult;
     if (!verification || typeof verification !== "object") {
@@ -202,7 +216,10 @@ export function parseCryptographicallyVerifiedGithubOutput(rawOutput, {
       }
     }
   }
-  if (expectedDigest && !subjects.some((subject) => subject.sha256 === expectedDigest)) {
+  if (expectedDigest && expectedName && !subjects.some((subject) => subject.sha256 === expectedDigest && subject.name === expectedName)) {
+    invalid(`Verified attestation does not cover exact subject ${expectedName}@sha256:${expectedDigest}.`);
+  }
+  if (expectedDigest && !expectedName && !subjects.some((subject) => subject.sha256 === expectedDigest)) {
     invalid(`Verified attestation does not cover expected subject sha256:${expectedDigest}.`);
   }
   return {
@@ -243,6 +260,7 @@ export function verifyGithubAttestation(options) {
   }
   const parsed = parseCryptographicallyVerifiedGithubOutput(result.stdout, {
     expectedSubjectDigest: options.expectedSubjectDigest,
+    expectedSubjectName: options.expectedSubjectName,
     predicateType: options.predicateType,
   });
   return {
@@ -270,14 +288,12 @@ export function verifyGithubReleaseImages({ images, ...options }) {
     invalid("At least one release image is required for attestation verification.");
   }
   const attestations = images.map((image) => {
-    const digestMatch = String(image).match(/@sha256:([a-f0-9]{64})$/i);
-    if (!digestMatch) {
-      invalid(`Release image must be digest-pinned before verification: ${image}`);
-    }
+    const normalized = normalizeOciSubject(String(image).startsWith("oci://") ? image : `oci://${image}`);
     return verifyGithubAttestation({
       ...options,
-      subject: String(image).startsWith("oci://") ? image : `oci://${image}`,
-      expectedSubjectDigest: digestMatch[1],
+      subject: normalized.subject,
+      expectedSubjectDigest: normalized.sha256,
+      expectedSubjectName: normalized.name,
     });
   });
   const subjects = [];
@@ -309,6 +325,7 @@ export function verifyGithubReleaseImages({ images, ...options }) {
     subjectCount: subjects.length,
     certificateFingerprints: [...new Set(attestations.flatMap((attestation) => attestation.certificateFingerprints))],
     verifiedTimestampCount: attestations.reduce((sum, attestation) => sum + attestation.verifiedTimestampCount, 0),
+    releaseImages: images.map((image) => normalizeOciSubject(String(image).startsWith("oci://") ? image : `oci://${image}`)).map((subject) => `${subject.name}@sha256:${subject.sha256}`),
     releaseImageDigests: images.map((image) => normalizeSha256(String(image).split("@sha256:").at(-1))),
   };
 }
