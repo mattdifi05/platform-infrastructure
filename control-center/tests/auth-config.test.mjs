@@ -43,7 +43,51 @@ test("OIDC authorization endpoint must stay under the exact issuer", () => {
   assert.throws(() => readAuthConfig({
     ...completeOidcEnv(),
     CONTROL_CENTER_OIDC_AUTHORIZATION_ENDPOINT: "https://attacker.example.test/authorize",
-  }), /must belong to the configured issuer/);
+  }), /exact configured OIDC issuer/);
+});
+
+test("production OIDC token and JWKS endpoints require issuer-bound HTTPS", () => {
+  const issuer = "https://identity.example.test/realms/platform";
+  const production = {
+    ...completeOidcEnv(),
+    CONTROL_CENTER_ENV: "production",
+    CONTROL_CENTER_OIDC_TOKEN_ENDPOINT: `${issuer}/protocol/openid-connect/token`,
+    CONTROL_CENTER_OIDC_JWKS_URI: `${issuer}/protocol/openid-connect/certs`,
+  };
+  const accepted = readAuthConfig(production);
+  assert.equal(accepted.tokenEndpoint, `${issuer}/protocol/openid-connect/token`);
+  assert.equal(accepted.jwksUri, `${issuer}/protocol/openid-connect/certs`);
+  assert.throws(() => readAuthConfig({
+    ...production,
+    NODE_TLS_REJECT_UNAUTHORIZED: "0",
+  }), /OIDC TLS certificate verification must remain enabled/);
+  assert.throws(() => readAuthConfig({
+    ...production,
+    CONTROL_CENTER_OIDC_TOKEN_ENDPOINT: "http://keycloak:8080/realms/platform/protocol/openid-connect/token",
+  }), /CONTROL_CENTER_OIDC_TOKEN_ENDPOINT must use HTTPS under the exact configured OIDC issuer/);
+  assert.throws(() => readAuthConfig({
+    ...production,
+    CONTROL_CENTER_OIDC_JWKS_URI: "http://keycloak:8080/realms/platform/protocol/openid-connect/certs",
+  }), /CONTROL_CENTER_OIDC_JWKS_URI must use HTTPS under the exact configured OIDC issuer/);
+  assert.throws(() => readAuthConfig({
+    ...production,
+    CONTROL_CENTER_OIDC_JWKS_URI: "https://attacker.example.test/realms/platform/protocol/openid-connect/certs",
+  }), /CONTROL_CENTER_OIDC_JWKS_URI must use HTTPS under the exact configured OIDC issuer/);
+  assert.throws(() => readAuthConfig({
+    ...production,
+    CONTROL_CENTER_OIDC_TOKEN_ENDPOINT: "https://identity.example.test/realms/platform-lookalike/token",
+  }), /CONTROL_CENTER_OIDC_TOKEN_ENDPOINT must use HTTPS under the exact configured OIDC issuer/);
+  for (const tokenEndpoint of [
+    "//identity.example.test/realms/platform/protocol/openid-connect/token",
+    "https://identity.example.test@attacker.example.test/realms/platform/protocol/openid-connect/token",
+    "https://identity.example.test:444/realms/platform/protocol/openid-connect/token",
+    "https://identity.example.test/realms/other/protocol/openid-connect/token",
+  ]) {
+    assert.throws(() => readAuthConfig({
+      ...production,
+      CONTROL_CENTER_OIDC_TOKEN_ENDPOINT: tokenEndpoint,
+    }), /CONTROL_CENTER_OIDC_TOKEN_ENDPOINT/);
+  }
 });
 
 test("memory auth store consumes transactions once and revokes sessions", async () => {
@@ -76,7 +120,7 @@ test("memory auth store consumes transactions once and revokes sessions", async 
 function completeOidcEnv() {
   return {
     NODE_ENV: "test",
-    CONTROL_CENTER_ENV: "production",
+    CONTROL_CENTER_ENV: "test",
     CONTROL_CENTER_BIND_HOST: "127.0.0.1",
     CONTROL_CENTER_AUTH_MODE: "oidc-passkey",
     CONTROL_CENTER_AUTH_STORE: "memory",

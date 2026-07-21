@@ -282,8 +282,8 @@ services:
       CONTROL_CENTER_AUTH_DATABASE_URL_FILE: /run/secrets/control_center_database_url
       CONTROL_CENTER_OIDC_ISSUER: ${CONTROL_CENTER_OIDC_ISSUER:-https://${AUTH_HOST:-auth.${DOMAIN:-localhost.com}}/realms/platform}
       CONTROL_CENTER_OIDC_AUTHORIZATION_ENDPOINT: ${CONTROL_CENTER_OIDC_AUTHORIZATION_ENDPOINT:-https://${AUTH_HOST:-auth.${DOMAIN:-localhost.com}}/realms/platform/protocol/openid-connect/auth}
-      CONTROL_CENTER_OIDC_TOKEN_ENDPOINT: ${CONTROL_CENTER_OIDC_TOKEN_ENDPOINT:-http://keycloak:8080/realms/platform/protocol/openid-connect/token}
-      CONTROL_CENTER_OIDC_JWKS_URI: ${CONTROL_CENTER_OIDC_JWKS_URI:-http://keycloak:8080/realms/platform/protocol/openid-connect/certs}
+      CONTROL_CENTER_OIDC_TOKEN_ENDPOINT: ${CONTROL_CENTER_OIDC_TOKEN_ENDPOINT:-https://${AUTH_HOST:-auth.${DOMAIN:-localhost.com}}/realms/platform/protocol/openid-connect/token}
+      CONTROL_CENTER_OIDC_JWKS_URI: ${CONTROL_CENTER_OIDC_JWKS_URI:-https://${AUTH_HOST:-auth.${DOMAIN:-localhost.com}}/realms/platform/protocol/openid-connect/certs}
       CONTROL_CENTER_OIDC_REDIRECT_URI: ${CONTROL_CENTER_OIDC_REDIRECT_URI:-https://${CONTROL_CENTER_HOST:-${ADMIN_HOST:-portal.${DOMAIN:-localhost.com}}}/auth/callback}
       CONTROL_CENTER_PUBLIC_ORIGIN: ${CONTROL_CENTER_PUBLIC_ORIGIN:-https://${CONTROL_CENTER_HOST:-${ADMIN_HOST:-portal.${DOMAIN:-localhost.com}}}}
       CONTROL_CENTER_OIDC_CLIENT_ID: ${CONTROL_CENTER_OIDC_CLIENT_ID:-platform-control-center}

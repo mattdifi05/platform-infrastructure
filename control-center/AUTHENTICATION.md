@@ -18,8 +18,10 @@ The only bypass mode is `test-disabled`. Startup accepts it only when
 2. The browser is redirected to the exact configured Keycloak issuer with
    `code_challenge_method=S256`, the required passkey ACR and `prompt=login`.
 3. `GET /auth/callback` atomically consumes state, exchanges the code through
-   the internal Keycloak endpoint and validates signature, issuer, audience,
+   the exact issuer-scoped HTTPS Keycloak endpoint and validates signature, issuer, audience,
    nonce, expiry, authentication time, ACR, AMR and Control Center role.
+   Token exchange rejects HTTP redirects instead of forwarding the
+   authorization code to a redirect target.
 4. The browser receives an opaque `__Host-platform_cc_session` cookie. Only its
    SHA-256 hash is stored in PostgreSQL.
 5. Logout revokes the server-side row before clearing the cookie. Replaying the

@@ -3201,12 +3201,18 @@ test("Admin Control Center OIDC passkey guard", async (t) => {
   const publicJwk = { ...(await exportJWK(publicKey)), alg: "RS256", use: "sig", kid: "test-key" };
   let expectedNonce = "";
   let tokenRequests = 0;
+  let redirectedTokenRequests = 0;
 
   const idpPort = await freePort();
   const idp = createHttpServer(async (req, res) => {
     if (req.url === "/jwks") {
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({ keys: [publicJwk] }));
+      return;
+    }
+    if (req.url === "/token-redirect-target") {
+      redirectedTokenRequests += 1;
+      res.writeHead(500).end();
       return;
     }
     if (req.url === "/token" && req.method === "POST") {
@@ -3218,6 +3224,10 @@ test("Admin Control Center OIDC passkey guard", async (t) => {
       assert.equal(form.get("grant_type"), "authorization_code");
       assert.equal(form.get("client_id"), clientId);
       assert.match(form.get("code_verifier") || "", /^[A-Za-z0-9_-]{43,128}$/);
+      if (code === "redirect-token") {
+        res.writeHead(307, { location: `http://127.0.0.1:${idpPort}/token-redirect-target` }).end();
+        return;
+      }
       const role = code === "viewer" ? "viewer" : "owner";
       const acr = code === "password-auth" ? "urn:platform:loa:password" : requiredAcr;
       const authTime = Math.floor(Date.now() / 1000) - (code === "stale-owner" ? 360 : 0);
@@ -3253,7 +3263,7 @@ test("Admin Control Center OIDC passkey guard", async (t) => {
       NODE_ENV: "test",
       CONTROL_CENTER_PORT: String(port),
       CONTROL_CENTER_BIND_HOST: "127.0.0.1",
-      CONTROL_CENTER_ENV: "production",
+      CONTROL_CENTER_ENV: "test",
       CONTROL_CENTER_AUTH_MODE: "oidc-passkey",
       CONTROL_CENTER_AUTH_STORE: "memory",
       CONTROL_CENTER_OIDC_ISSUER: issuer,
@@ -3340,6 +3350,11 @@ test("Admin Control Center OIDC passkey guard", async (t) => {
     body: new URLSearchParams({ slug: "node-demo", enabled: "0" }),
   });
   assert.equal(viewerMutation.status, 403);
+
+  const redirectState = await beginLogin();
+  const redirectAttempt = await fetch(`${baseUrl}/auth/callback?code=redirect-token&state=${encodeURIComponent(redirectState)}`, { redirect: "manual" });
+  assert.equal(redirectAttempt.status, 401);
+  assert.equal(redirectedTokenRequests, 0);
 
   const ownerState = await beginLogin();
   const ownerLogin = await fetch(`${baseUrl}/auth/callback?code=owner&state=${encodeURIComponent(ownerState)}`, { redirect: "manual" });

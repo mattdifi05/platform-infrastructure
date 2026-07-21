@@ -45,16 +45,32 @@ export function readAuthConfig(env = process.env) {
     throw new AuthConfigurationError("The Control Center OIDC client must use public-client PKCE without a client secret.");
   }
 
-  const issuer = requiredHttpsUrl(env.CONTROL_CENTER_OIDC_ISSUER, "CONTROL_CENTER_OIDC_ISSUER");
-  const authorizationEndpoint = requiredHttpsUrl(env.CONTROL_CENTER_OIDC_AUTHORIZATION_ENDPOINT, "CONTROL_CENTER_OIDC_AUTHORIZATION_ENDPOINT");
-  const tokenEndpoint = requiredUrl(env.CONTROL_CENTER_OIDC_TOKEN_ENDPOINT, "CONTROL_CENTER_OIDC_TOKEN_ENDPOINT");
-  const jwksUri = requiredUrl(env.CONTROL_CENTER_OIDC_JWKS_URI, "CONTROL_CENTER_OIDC_JWKS_URI");
+  if (String(env.NODE_TLS_REJECT_UNAUTHORIZED || "").trim() === "0") {
+    throw new AuthConfigurationError("OIDC TLS certificate verification must remain enabled.");
+  }
+
+  const issuer = requiredIssuerUrl(env.CONTROL_CENTER_OIDC_ISSUER, "CONTROL_CENTER_OIDC_ISSUER");
+  const authorizationEndpoint = requiredIssuerEndpoint(
+    env.CONTROL_CENTER_OIDC_AUTHORIZATION_ENDPOINT,
+    "CONTROL_CENTER_OIDC_AUTHORIZATION_ENDPOINT",
+    issuer,
+  );
+  const allowInsecureTestEndpoint = nodeEnvironment === "test" && environment === "test" && isLoopback(bindHost);
+  const tokenEndpoint = requiredIssuerEndpoint(
+    env.CONTROL_CENTER_OIDC_TOKEN_ENDPOINT,
+    "CONTROL_CENTER_OIDC_TOKEN_ENDPOINT",
+    issuer,
+    { allowInsecureTestEndpoint },
+  );
+  const jwksUri = requiredIssuerEndpoint(
+    env.CONTROL_CENTER_OIDC_JWKS_URI,
+    "CONTROL_CENTER_OIDC_JWKS_URI",
+    issuer,
+    { allowInsecureTestEndpoint },
+  );
   const redirectUri = requiredHttpsUrl(env.CONTROL_CENTER_OIDC_REDIRECT_URI, "CONTROL_CENTER_OIDC_REDIRECT_URI");
   const clientId = requiredText(env.CONTROL_CENTER_OIDC_CLIENT_ID, "CONTROL_CENTER_OIDC_CLIENT_ID");
   const requiredAcr = requiredText(env.CONTROL_CENTER_OIDC_REQUIRED_ACR, "CONTROL_CENTER_OIDC_REQUIRED_ACR");
-  if (!authorizationEndpoint.startsWith(`${trimTrailingSlash(issuer)}/`)) {
-    throw new AuthConfigurationError("The OIDC authorization endpoint must belong to the configured issuer.");
-  }
   const requiredAmr = csv(env.CONTROL_CENTER_OIDC_REQUIRED_AMR || "");
   const store = String(env.CONTROL_CENTER_AUTH_STORE || "postgres").trim().toLowerCase();
   if (!['postgres', 'memory'].includes(store)) {
@@ -159,6 +175,7 @@ class OidcPasskeyAuth {
 
     const response = await fetch(this.config.tokenEndpoint, {
       method: "POST",
+      redirect: "error",
       headers: { "content-type": "application/x-www-form-urlencoded", accept: "application/json" },
       body: new URLSearchParams({
         grant_type: "authorization_code",
@@ -589,6 +606,32 @@ function requiredHttpsUrl(value, name) {
   const text = requiredUrl(value, name);
   if (new URL(text).protocol !== "https:") throw new AuthConfigurationError(`${name} must use HTTPS.`);
   return text;
+}
+
+function requiredIssuerUrl(value, name) {
+  const text = requiredHttpsUrl(value, name);
+  const url = new URL(text);
+  if (url.username || url.password || url.search || url.hash) {
+    throw new AuthConfigurationError(`${name} must not contain userinfo, query parameters, or a fragment.`);
+  }
+  return trimTrailingSlash(url.toString());
+}
+
+function requiredIssuerEndpoint(value, name, issuer, { allowInsecureTestEndpoint = false } = {}) {
+  const text = requiredUrl(value, name);
+  const endpoint = new URL(text);
+  const issuerUrl = new URL(issuer);
+  if (endpoint.username || endpoint.password || endpoint.hash) {
+    throw new AuthConfigurationError(`${name} must not contain userinfo or a fragment.`);
+  }
+  if (allowInsecureTestEndpoint && endpoint.protocol === "http:" && isLoopback(endpoint.hostname)) {
+    return endpoint.toString();
+  }
+  const issuerPath = `${trimTrailingSlash(issuerUrl.pathname)}/`;
+  if (endpoint.protocol !== "https:" || endpoint.origin !== issuerUrl.origin || !endpoint.pathname.startsWith(issuerPath)) {
+    throw new AuthConfigurationError(`${name} must use HTTPS under the exact configured OIDC issuer.`);
+  }
+  return endpoint.toString();
 }
 
 function requiredClaim(value, name) {
