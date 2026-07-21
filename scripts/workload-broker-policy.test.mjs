@@ -99,6 +99,8 @@ test("NATS policy model allows exact own subjects and queue but denies cross, wi
   const user = normalized().nats.users.find((item) => item.service === "alpha-app-worker");
   assert.equal(natsPolicyAllows(user, { operation: "publish", subject: "workload.alpha-app.alpha-app-worker.event" }), true);
   assert.equal(natsPolicyAllows(user, { operation: "subscribe", subject: "workload.alpha-app.alpha-app-worker.event", queue: "workload.alpha-app.alpha-app-worker" }), true);
+  assert.equal(natsPolicyAllows(user, { operation: "subscribe", subject: "workload.alpha-app.alpha-app-worker.event" }), false);
+  assert.equal(natsPolicyAllows(user, { operation: "subscribe", subject: "_INBOX.reply" }), true);
   assert.equal(natsPolicyAllows(user, { operation: "publish", subject: "workload.alpha-app.alpha-app-web.event" }), false);
   assert.equal(natsPolicyAllows(user, { operation: "publish", subject: "workload.beta-app.beta-app-worker.event" }), false);
   assert.equal(natsPolicyAllows(user, { operation: "subscribe", subject: "workload.alpha-app.alpha-app-worker.*" }), false);

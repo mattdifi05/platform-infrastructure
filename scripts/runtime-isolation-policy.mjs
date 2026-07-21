@@ -88,7 +88,24 @@ export function evaluateRuntimeIsolation(config, options = {}) {
   const brokerBootstrapMounts = volumes(brokerBootstrap);
   record("broker-bootstrap-no-network", brokerBootstrap.network_mode === "none" && networkNames(brokerBootstrap).length === 0, `networkMode=${brokerBootstrap.network_mode || "unset"}`);
   record("broker-bootstrap-lock-read-only", brokerBootstrapMounts.some((mount) => mount.target === "/run/platform/hosted-workloads.lock.json" && mount.readOnly), "broker bootstrap consumes the deployment lock read-only");
-  record("broker-bootstrap-config-volume", brokerBootstrapMounts.some((mount) => mount.target === "/out" && mount.type === "volume"), "broker bootstrap writes only the broker auth volume");
+  const brokerOutputs = brokerBootstrapMounts
+    .filter((mount) => mount.target.startsWith("/out/"))
+    .map((mount) => `${mount.type}:${mount.target}:${mount.readOnly ? "ro" : "rw"}`)
+    .sort();
+  record("broker-bootstrap-config-volumes", same(brokerOutputs, ["volume:/out/nats:rw", "volume:/out/redis:rw"]), `outputs=${brokerOutputs.join(",") || "none"}`);
+  record("broker-bootstrap-minimum-capability", brokerBootstrap.cap_drop?.includes("ALL") && same([...(brokerBootstrap.cap_add ?? [])].sort(), ["CHOWN"]), `capAdd=${brokerBootstrap.cap_add || "none"}`);
+  const redisMounts = volumes(services.redis);
+  record("redis-generated-acl-read-only", redisMounts.some((mount) => mount.target === "/run/platform-broker" && mount.readOnly), "Redis consumes only its generated ACL volume");
+  const nats = services.nats || {};
+  const natsMounts = volumes(nats);
+  const natsCommand = [...(Array.isArray(nats.entrypoint) ? nats.entrypoint : []), ...(Array.isArray(nats.command) ? nats.command : [])].map(String);
+  const natsCommandLine = natsCommand.join(" ");
+  const natsEnvironment = object(nats.environment);
+  record("nats-generated-config-read-only", natsMounts.some((mount) => mount.target === "/run/platform-broker" && mount.readOnly), "NATS consumes only its generated account config volume");
+  record("nats-no-global-credential-flags", !/(?:^|\s)--(?:user|pass)(?:=|\s|$)/.test(natsCommandLine)
+    && !natsEnvironment.NATS_PASSWORD && !natsEnvironment.NATS_PASSWORD_FILE && !natsEnvironment.NATS_USER,
+  `command=${natsCommandLine}`);
+  record("nats-non-root-identity", Boolean(nats.user) && !/^(?:0|root)(?::|$)/.test(String(nats.user)), `user=${nats.user || "unset"}`);
 
   const gateway = services["docker-operation-gateway"] || {};
   const gatewayEnvironment = object(gateway.environment);

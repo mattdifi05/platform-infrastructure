@@ -82,25 +82,36 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
+    cap_add:
+      - CHOWN
     restart: "no"
     entrypoint:
       - node
       - /broker/render-workload-broker-config.mjs
     command:
-      - redis
+      - all
       - --lock
       - /run/platform/hosted-workloads.lock.json
       - --secretsRoot
       - /run/secrets
-      - --platformPasswordFile
+      - --redisPlatformPasswordFile
       - /run/secrets/redis_password
-      - --output
-      - /out/redis-users.acl
+      - --redisOutput
+      - /out/redis/redis-users.acl
+      - --natsPlatformPasswordFile
+      - /run/secrets/nats_password
+      - --natsOutput
+      - /out/nats/nats-server.conf
+      - --natsUid
+      - "1000"
+      - --natsGid
+      - "1000"
     volumes:
       - ./scripts/render-workload-broker-config.mjs:/broker/render-workload-broker-config.mjs:ro
       - ./scripts/workload-broker-policy.mjs:/broker/workload-broker-policy.mjs:ro
       - ${HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE:-./config/no-hosted-workloads.lock.json}:/run/platform/hosted-workloads.lock.json:ro
-      - broker_auth_config:/out
+      - redis_auth_config:/out/redis
+      - nats_auth_config:/out/nats
     network_mode: none
 
   redis:
@@ -118,13 +129,13 @@ services:
     command:
       - sh
       - -ec
-      - exec redis-server --appendonly yes --aclfile /run/platform-broker/redis-users.acl
+      - cd /run/platform-broker && sha256sum -c redis-users.acl.sha256 >/dev/null && exec redis-server --appendonly yes --aclfile /run/platform-broker/redis-users.acl
     depends_on:
       broker-auth-bootstrap:
         condition: service_completed_successfully
     volumes:
       - enterprise_redis_data:/data
-      - broker_auth_config:/run/platform-broker:ro
+      - redis_auth_config:/run/platform-broker:ro
     networks:
       - enterprise_net
     healthcheck:
@@ -189,16 +200,18 @@ services:
     security_opt:
       - no-new-privileges:true
     restart: unless-stopped
+    user: "1000:1000"
     entrypoint:
       - /bin/sh
       - -ec
-      - NATS_PASSWORD="$$(cat "$$NATS_PASSWORD_FILE")"; exec nats-server -c /etc/nats/nats-server.conf --user "$$NATS_USER" --pass "$$NATS_PASSWORD"
-    environment:
-      NATS_USER: ${NATS_USER:-enterprise}
-      NATS_PASSWORD_FILE: /run/secrets/nats_password
+    command:
+      - cd /run/platform-broker && sha256sum -c nats-server.conf.sha256 >/dev/null && exec /nats-server --config /run/platform-broker/nats-server.conf
+    depends_on:
+      broker-auth-bootstrap:
+        condition: service_completed_successfully
     volumes:
       - enterprise_nats_data:/data
-      - ./nats/nats-server.conf:/etc/nats/nats-server.conf:ro
+      - nats_auth_config:/run/platform-broker:ro
     networks:
       - enterprise_net
     healthcheck:
@@ -827,8 +840,10 @@ networks:
     name: enterprise_net
 
 volumes:
-  broker_auth_config:
-    name: enterprise_broker_auth_config
+  redis_auth_config:
+    name: enterprise_redis_auth_config
+  nats_auth_config:
+    name: enterprise_nats_auth_config
   enterprise_mariadb_data:
     name: ${MARIADB_DATA_VOLUME:-enterprise_mariadb_data}
     external: true

@@ -244,7 +244,9 @@ export function natsPolicyAllows(user, { operation, subject, queue = "" }) {
   const allowed = operation === "publish" ? user.publish : user.subscribe;
   if (!new Set(["publish", "subscribe"]).has(operation) || denied.some((pattern) => subjectMatches(pattern, subject))) return false;
   if (!allowed.some((pattern) => subjectMatches(pattern, subject))) return false;
-  return !queue || user.queueGroups.includes(queue);
+  if (operation === "publish") return !queue;
+  if (String(subject).startsWith("_INBOX.")) return !queue;
+  return Boolean(queue) && user.queueGroups.includes(queue);
 }
 
 function subjectMatches(pattern, subject) {

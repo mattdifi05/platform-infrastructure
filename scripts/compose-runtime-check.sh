@@ -35,7 +35,18 @@ jq -e '.services["local-registry"].image | test("^registry:3@sha256:[a-f0-9]{64}
 jq -e '.networks.platform_docker_control.internal == true' "$OUTPUT" >/dev/null
 jq -e '.services["docker-operation-gateway"].ports == null and .services["docker-operation-gateway"].entrypoint == ["node", "/infra/scripts/docker-operation-gateway.mjs"]' "$OUTPUT" >/dev/null
 jq -e '.services["backup-scheduler"].environment.PLATFORM_DOCKER_GATEWAY_URL == "http://docker-operation-gateway:8787" and (.services["backup-scheduler"].environment.DOCKER_HOST == null)' "$OUTPUT" >/dev/null
-jq -e '.services["broker-auth-bootstrap"].network_mode == "none" and .services["broker-auth-bootstrap"].read_only == true and .services.redis.command == ["sh", "-ec", "exec redis-server --appendonly yes --aclfile /run/platform-broker/redis-users.acl"]' "$OUTPUT" >/dev/null
+jq -e '
+  .services["broker-auth-bootstrap"].network_mode == "none" and
+  .services["broker-auth-bootstrap"].read_only == true and
+  .services["broker-auth-bootstrap"].cap_drop == ["ALL"] and
+  .services["broker-auth-bootstrap"].cap_add == ["CHOWN"] and
+  .services.redis.command == ["sh", "-ec", "cd /run/platform-broker && sha256sum -c redis-users.acl.sha256 >/dev/null && exec redis-server --appendonly yes --aclfile /run/platform-broker/redis-users.acl"] and
+  .services.nats.user == "1000:1000" and
+  .services.nats.entrypoint == ["/bin/sh", "-ec"] and
+  .services.nats.command == ["cd /run/platform-broker && sha256sum -c nats-server.conf.sha256 >/dev/null && exec /nats-server --config /run/platform-broker/nats-server.conf"] and
+  (.services.nats.environment.NATS_PASSWORD == null) and
+  ((.services.nats.command + .services.nats.entrypoint) | index("--user") == null and index("--pass") == null)
+' "$OUTPUT" >/dev/null
 jq -e '[.services[] | select(any(.volumes[]?; .source == "/var/run/docker.sock")) | .container_name] == ["enterprise-docker-operation-gateway"]' "$OUTPUT" >/dev/null
 jq -e '
   [.services["docker-operation-gateway"].secrets[].source] == ["backup_scheduler_docker_gateway_token"] and

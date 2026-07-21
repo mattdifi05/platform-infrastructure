@@ -8,6 +8,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const compose = fs.readFileSync(path.join(root, "compose.yaml"), "utf8");
 const fileSecrets = fs.readFileSync(path.join(root, "compose.secrets.yaml"), "utf8");
 const managedSecrets = fs.readFileSync(path.join(root, "compose.managed-secrets.yaml"), "utf8");
+const composeVps = fs.readFileSync(path.join(root, "scripts", "compose-vps.sh"), "utf8");
 
 test("FG-054 Compose starts Redis only from generated per-workload ACLs", () => {
   const bootstrap = serviceBlock(compose, "broker-auth-bootstrap");
@@ -25,6 +26,29 @@ test("FG-054 Compose starts Redis only from generated per-workload ACLs", () => 
     assert.match(serviceBlock(overlay, "redis"), /REDIS_USERNAME: platform/);
     assert.doesNotMatch(serviceBlock(overlay, "redis"), /--requirepass/);
   }
+});
+
+test("FG-055 Compose starts NATS from generated accounts without global credential flags", () => {
+  const bootstrap = serviceBlock(compose, "broker-auth-bootstrap");
+  const nats = serviceBlock(compose, "nats");
+  assert.match(bootstrap, /- all/);
+  assert.match(bootstrap, /- CHOWN/);
+  assert.match(bootstrap, /nats_password/);
+  assert.match(bootstrap, /nats-server\.conf/);
+  assert.match(bootstrap, /nats_auth_config:\/out\/nats/);
+  assert.match(nats, /user: "1000:1000"/);
+  assert.match(nats, /nats_auth_config:\/run\/platform-broker:ro/);
+  assert.match(nats, /--config/);
+  assert.match(nats, /nats-server\.conf/);
+  assert.doesNotMatch(nats, /--user|--pass|NATS_PASSWORD|nats_password/);
+  assert.doesNotMatch(nats, /\.\/nats\/nats-server\.conf/);
+  for (const overlay of [fileSecrets, managedSecrets]) {
+    assert.match(serviceBlock(overlay, "broker-auth-bootstrap"), /- nats_password/);
+    assert.doesNotMatch(overlay, /^  nats:\n/m);
+  }
+  const bootstrapRun = composeVps.indexOf('run --rm --no-deps broker-auth-bootstrap');
+  const finalExec = composeVps.indexOf('exec "${compose[@]}" --profile backup "$@"');
+  assert.ok(bootstrapRun >= 0 && finalExec > bootstrapRun, "VPS up must regenerate broker auth before the final Compose command");
 });
 
 function serviceBlock(source, name) {

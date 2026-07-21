@@ -138,6 +138,16 @@ dopo il completamento riuscito del bootstrap. Le prove di comportamento sul
 broker reale (cross-tenant, rotazione, persistenza e restart) restano un gate
 runtime obbligatorio prima del deploy.
 
+Lo stesso bootstrap genera un `nats-server.conf` `0600`, con un account distinto
+per workload e un utente distinto per ogni ruolo di servizio. Publish, subscribe,
+queue group, reply limit e deny `$SYS.>`/`$JS.>` derivano soltanto dalla policy
+firmata; non esiste piu' un `--user`/`--pass` globale e gli export/import restano
+chiusi finche' non esiste un'approvazione direzionale esatta. Redis e NATS
+verificano il digest del proprio file prima di avviarsi, e ogni
+`compose-vps.sh up` riesegue il bootstrap per rendere effettive le rotazioni.
+La matrice reale di pub/sub/queue, persistenza, restart e rotazione resta un gate
+runtime obbligatorio.
+
 ## Avvio locale
 
 ```sh

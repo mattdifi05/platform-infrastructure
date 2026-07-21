@@ -78,10 +78,12 @@ test("rejects a networked broker bootstrap or writable workload lock", () => {
   const config = fixture();
   config.services["broker-auth-bootstrap"].network_mode = "bridge";
   config.services["broker-auth-bootstrap"].volumes[0].read_only = false;
+  config.services.nats.command.push("--user", "global", "--pass", "shared");
   const report = evaluateRuntimeIsolation(config);
   assert.equal(report.status, "failed");
   assert.match(report.failures.join("\n"), /broker-bootstrap-no-network/);
   assert.match(report.failures.join("\n"), /broker-bootstrap-lock-read-only/);
+  assert.match(report.failures.join("\n"), /nats-no-global-credential-flags/);
 });
 
 function fixture() {
@@ -107,10 +109,24 @@ function fixture() {
   services["broker-auth-bootstrap"] = bounded({
     read_only: true,
     network_mode: "none",
+    cap_drop: ["ALL"],
+    cap_add: ["CHOWN"],
     volumes: [
       { type: "bind", source: "/private/hosted.lock.json", target: "/run/platform/hosted-workloads.lock.json", read_only: true },
-      { type: "volume", source: "broker_auth_config", target: "/out", read_only: false },
+      { type: "volume", source: "redis_auth_config", target: "/out/redis", read_only: false },
+      { type: "volume", source: "nats_auth_config", target: "/out/nats", read_only: false },
     ],
+    networks: {},
+  });
+  services.redis = bounded({
+    volumes: [{ type: "volume", source: "redis_auth_config", target: "/run/platform-broker", read_only: true }],
+    networks: {},
+  });
+  services.nats = bounded({
+    user: "1000:1000",
+    entrypoint: ["/bin/sh", "-ec"],
+    command: ["cd /run/platform-broker && sha256sum -c nats-server.conf.sha256 >/dev/null && exec /nats-server --config /run/platform-broker/nats-server.conf"],
+    volumes: [{ type: "volume", source: "nats_auth_config", target: "/run/platform-broker", read_only: true }],
     networks: {},
   });
   services["backup-scheduler"] = bounded({

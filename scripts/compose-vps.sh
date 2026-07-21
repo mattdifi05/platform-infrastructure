@@ -79,4 +79,8 @@ if [[ -n "$workload_lock" ]]; then
   done
 fi
 
+if [[ "${1:-}" == "up" ]]; then
+  "${compose[@]}" --profile backup run --rm --no-deps broker-auth-bootstrap
+fi
+
 exec "${compose[@]}" --profile backup "$@"
