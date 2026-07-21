@@ -166,9 +166,15 @@ export function listControlRouteDefinitions() {
   }));
 }
 
-export function resolveAuthorizationCapability(method, pathname) {
+export function resolveAuthorizationCapability(method, pathname, { rawPathname = pathname } = {}) {
   const verb = String(method || "GET").toUpperCase();
   const pathValue = String(pathname || "");
+  const rawPathValue = String(rawPathname || "");
+  const rawControlPath = controlPathDisposition(rawPathValue);
+  if (rawControlPath === "confusable" ||
+      (rawPathValue !== pathValue && (rawControlPath === "canonical" || isControlApiPath(pathValue)))) {
+    return deniedOperation(verb, rawPathValue || pathValue, true);
+  }
   const controlPath = isControlApiPath(pathValue);
   const parsed = parsePath(pathValue);
 
@@ -199,6 +205,40 @@ export function resolveAuthorizationCapability(method, pathname) {
   return parts[0] === "control" || isProtectedUiPath(parts)
     ? deniedOperation(verb, canonicalPath(parts), parts[0] === "control")
     : defaultOperation(verb, canonicalPath(parts));
+}
+
+function controlPathDisposition(pathname) {
+  const value = String(pathname || "");
+  if (isControlApiPath(value)) {
+    return isUnambiguousControlPath(value) ? "canonical" : "confusable";
+  }
+
+  let projection = value;
+  for (let decodingPass = 0; decodingPass <= 2; decodingPass += 1) {
+    if (looksLikeControlPath(projection)) return "confusable";
+    if (!projection.includes("%")) break;
+    try {
+      const decoded = decodeURIComponent(projection);
+      if (decoded === projection) break;
+      projection = decoded;
+    } catch {
+      break;
+    }
+  }
+  return "other";
+}
+
+function isUnambiguousControlPath(pathname) {
+  if (/[\\%?#\u0000-\u001f\u007f]/.test(pathname)) return false;
+  return !pathname.split("/").some((part) => part === "." || part === "..");
+}
+
+function looksLikeControlPath(pathname) {
+  const projection = String(pathname || "")
+    .replaceAll("\\", "/")
+    .replace(/\/+/g, "/")
+    .toLowerCase();
+  return /^\/control(?:$|[\/%?#\u0000-\u0020\u007f])/.test(projection);
 }
 
 function parsePath(pathname) {

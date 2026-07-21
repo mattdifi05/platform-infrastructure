@@ -7,10 +7,7 @@ import { closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readd
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { AuthRequestError, createControlCenterAuth } from "./auth/oidc.mjs";
-import {
-  isControlApiPath,
-  resolveAuthorizationCapability,
-} from "./auth/route-capabilities.mjs";
+import { resolveAuthorizationCapability } from "./auth/route-capabilities.mjs";
 import { controlCenterScriptTags, controlCenterStylesheetLinks, controlCenterUiContract } from "./components/ui/controlCenterUi.mjs";
 import {
   activatePrincipalBinding,
@@ -338,9 +335,10 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    const controlOperation = isControlApiPath(url.pathname)
-      ? resolveAuthorizationCapability(req.method, url.pathname)
-      : null;
+    const resolvedOperation = resolveAuthorizationCapability(req.method, url.pathname, {
+      rawPathname: rawRequestPathname(req.url),
+    });
+    const controlOperation = resolvedOperation.control === true ? resolvedOperation : null;
     if (controlOperation) req.controlCenterOperation = controlOperation;
 
     const session = await controlAuth.authenticate(req);
@@ -494,6 +492,12 @@ const server = createServer(async (req, res) => {
 server.listen(port, bindHost, () => {
   console.log(`control-center listening on ${bindHost}:${port} with ${controlAuth.mode} authentication`);
 });
+
+function rawRequestPathname(requestTarget) {
+  const value = String(requestTarget || "/");
+  const queryIndex = value.indexOf("?");
+  return queryIndex < 0 ? value : value.slice(0, queryIndex);
+}
 
 async function shutdown() {
   server.close(async () => {

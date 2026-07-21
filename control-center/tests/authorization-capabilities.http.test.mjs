@@ -170,6 +170,26 @@ test("real HTTP authorization denies before payload/context/sinks and preserves 
       assert.equal((await stale.json()).error, "admin_reauthentication_required");
     }
   }
+  for (const pathname of [
+    "/CONTROL/vault",
+    "/Control/vault",
+    "/c%6fntrol/vault",
+    "/c%256fntrol/vault",
+    "/control%2Fvault",
+    "/control%252Fvault",
+    "/control%5Cvault",
+    "/control%255Cvault",
+    "/CONTROL/backups/files",
+    "/c%6fntrol/backups/preview",
+    "/control%2Fbackups/summary",
+    "/control%252Fbackups/records",
+  ]) {
+    for (const identity of [identities.viewer, identities.owner]) {
+      const response = await request(baseUrl, "GET", pathname, identity);
+      assert.equal(response.status, 403, `control-like path must deny before context: ${pathname}`);
+      assert.equal((await response.json()).error, "endpoint_capability_denied", pathname);
+    }
+  }
   for (const pathname of ["/", "/?section=vault", "/?section=projects&project=example", "/index.html?section=vault"]) {
     assert.equal((await request(baseUrl, "GET", pathname)).status, 401, `anonymous UI ${pathname}`);
     assert.equal((await request(baseUrl, "GET", pathname, identities.viewer)).status, 403, `viewer UI ${pathname}`);

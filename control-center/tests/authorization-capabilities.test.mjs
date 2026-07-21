@@ -43,7 +43,7 @@ const LEGACY_SENSITIVE_ROUTES = Object.freeze([
   ["POST", "/actions/settings-command"],
 ]);
 
-test("the explicit Control catalog is unique and resolves every canonical and v1 template", () => {
+test("the explicit Control catalog resolves canonical aliases and rejects every confusable projection", () => {
   const definitions = listControlRouteDefinitions();
   assert.ok(definitions.length > 80, "the complete dispatcher surface must remain cataloged");
   assert.equal(new Set(definitions.map(({ method, template }) => `${method} ${template}`)).size, definitions.length);
@@ -59,6 +59,33 @@ test("the explicit Control catalog is unique and resolves every canonical and v1
       assert.equal(resolved.capability, definition.capability, `${definition.method} ${alias}`);
       assert.equal(resolved.control, true, `${definition.method} ${alias}`);
     }
+  }
+
+  for (const definition of definitions) {
+    const canonical = definition.template.replaceAll(/:[A-Za-z][A-Za-z0-9]*/g, "fixture-id");
+    for (const catalogPath of [canonical, versioned(canonical)]) {
+      for (const pathname of controlPathConfusables(catalogPath)) {
+        const resolved = resolveAuthorizationCapability(definition.method, pathname);
+        assert.equal(resolved.classified, false, `${definition.method} ${pathname}`);
+        assert.equal(resolved.operationId, "control.denied", `${definition.method} ${pathname}`);
+        assert.equal(resolved.capability, "deny", `${definition.method} ${pathname}`);
+        assert.equal(resolved.control, true, `${definition.method} ${pathname}`);
+        assert.notEqual(resolved.canonicalPath, canonical, `${pathname} must not normalize to ${canonical}`);
+      }
+    }
+  }
+
+  for (const [rawPathname, parsedPathname] of [
+    ["/control\\vault", "/control/vault"],
+    ["/control/../vault", "/vault"],
+    ["/control/%2e%2e/vault", "/vault"],
+    ["//control/vault", "/vault"],
+  ]) {
+    const resolved = resolveAuthorizationCapability("GET", parsedPathname, { rawPathname });
+    assert.equal(resolved.classified, false, rawPathname);
+    assert.equal(resolved.operationId, "control.denied", rawPathname);
+    assert.equal(resolved.capability, "deny", rawPathname);
+    assert.equal(resolved.control, true, rawPathname);
   }
 });
 
@@ -235,6 +262,38 @@ function session(role, ageSeconds = 0, now = new Date()) {
 
 function versioned(pathname) {
   return pathname.replace(/^\/control(?=\/|$)/, "/control/v1");
+}
+
+function controlPathConfusables(pathname) {
+  const suffix = pathname.slice("/control".length);
+  const withoutLeadingSlash = suffix.replace(/^\//, "");
+  const segmentCharacterIndex = pathname.slice("/control/".length).search(/[A-Za-z0-9]/);
+  const absoluteCharacterIndex = segmentCharacterIndex < 0
+    ? -1
+    : "/control/".length + segmentCharacterIndex;
+  const encodedSegment = absoluteCharacterIndex < 0
+    ? `${pathname}%41`
+    : `${pathname.slice(0, absoluteCharacterIndex)}%${pathname.charCodeAt(absoluteCharacterIndex).toString(16).padStart(2, "0")}${pathname.slice(absoluteCharacterIndex + 1)}`;
+  const doubleEncodedSegment = encodedSegment.replace("%", "%25");
+  const encodedParameter = pathname.includes("fixture-id")
+    ? pathname.replace("fixture-id", "fixture%2did")
+    : encodedSegment;
+  return new Set([
+    `/CONTROL${suffix}`,
+    `/Control${suffix}`,
+    `/c%6fntrol${suffix}`,
+    `/c%256fntrol${suffix}`,
+    `/control%2F${withoutLeadingSlash}`,
+    `/control%252F${withoutLeadingSlash}`,
+    `/control%5C${withoutLeadingSlash}`,
+    `/control%255C${withoutLeadingSlash}`,
+    `/control\\${withoutLeadingSlash}`,
+    `/%2Fcontrol${suffix}`,
+    `/%252Fcontrol${suffix}`,
+    encodedSegment,
+    doubleEncodedSegment,
+    encodedParameter,
+  ]);
 }
 
 function url(pathname) {
