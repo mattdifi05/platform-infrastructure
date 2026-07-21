@@ -199,6 +199,22 @@ test("unauthorized platform network extension is rejected", () => {
   combined.networks.evil = { internal: true };
   assert.throws(() => validateRenderedWorkloads({ core, combined, lock }), /non-workload network/);
 });
+test("workload network cannot alias the Docker-control physical network", () => {
+  for (const definition of [
+    { external: true, name: "platform_infra_platform_docker_control" },
+    { internal: true, name: "platform_infra_platform_docker_control" },
+  ]) {
+    const combined = combinedFixture();
+    combined.networks.example_app_ingress = definition;
+    assert.throws(
+      () => validateRenderedWorkloads({ core, combined, lock: { projectName: "fixture", workloads: [manifest] } }),
+      /cannot alias foreign physical network/,
+    );
+  }
+  const combined = combinedFixture();
+  combined.networks.example_app_ingress.name = "fixture_example_app_ingress";
+  assert.doesNotThrow(() => validateRenderedWorkloads({ core, combined, lock: { projectName: "fixture", workloads: [manifest] } }));
+});
 test("platform service can join only its assigned workload zone", () => {
   const combined = combinedFixture();
   combined.services["project-router"].networks.example_app_cache = null;

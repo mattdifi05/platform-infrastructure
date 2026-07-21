@@ -1059,6 +1059,10 @@ export function validateRenderedWorkloads({ core, combined, lock }) {
     if (!owner) invalid(`Undeclared workload network ${name}.`);
     const zone = workloadNetworkZone(name, owner.id);
     if (!WORKLOAD_NETWORK_ZONES.has(zone)) invalid(`Workload network ${name} has unsupported zone ${zone}.`);
+    const expectedPhysicalName = `${lock.projectName}_${name}`;
+    if (network?.external === true || (network?.name != null && network.name !== expectedPhysicalName)) {
+      invalid(`Workload network ${name} cannot alias foreign physical network ${network?.name ?? name}.`);
+    }
     if (zone === "egress") {
       if (network?.internal === true || network?.enable_ipv6 === true) invalid(`Workload egress network ${name} must allow IPv4 egress with IPv6 disabled.`);
     } else if (network?.internal !== true) {
