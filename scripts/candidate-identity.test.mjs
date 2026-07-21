@@ -42,6 +42,19 @@ test("prior commit, wrong tree, repository, workload lock, and render are reject
   ]) assert.equal(candidateIdentityMatches(candidate, createCandidateIdentity({ ...base, ...mutation })), false);
 });
 
+test("production candidate identity requires a non-null exact workload lock and render", () => {
+  for (const workloadLockSha256 of [null, undefined, ""]) {
+    assert.throws(
+      () => createCandidateIdentity({ ...base, workloadLockSha256 }),
+      /workload lock SHA256/,
+    );
+  }
+  const source = readFileSync(path.join(repositoryRoot, "scripts", "infra-ops.mjs"), "utf8");
+  const identity = source.slice(source.indexOf("function currentCandidateIdentity"), source.indexOf("function currentCandidateIdentityEvidence"));
+  assert.match(identity, /workloadLockSha256: topology\.workloadLock\.sha256/);
+  assert.doesNotMatch(identity, /workloadLock\?\.|\?\? null/);
+});
+
 test("mixed, stale, future, dirty, and digest-tampered reports fail closed", () => {
   const prior = createCandidateIdentity({ ...base, commit: "a".repeat(40) });
   const mixed = evaluateCandidateReportBinding({ generatedAt: new Date(nowMs - 60_000).toISOString(), candidate: prior, candidateEnd: prior, candidateStable: true, releaseSha: prior.commit }, candidate, { kind: "release", maxAgeHours: 24, nowMs });

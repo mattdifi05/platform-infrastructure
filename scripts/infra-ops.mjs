@@ -2828,7 +2828,7 @@ function currentCandidateIdentity({ envFile, projectName, workloadLock, reposito
     tree: git.tree,
     clean: git.dirty === false,
     projectName: topology.projectName,
-    workloadLockSha256: topology.workloadLock?.sha256 ?? null,
+    workloadLockSha256: topology.workloadLock.sha256,
     renderSha256: topology.renderSha256,
   });
 }

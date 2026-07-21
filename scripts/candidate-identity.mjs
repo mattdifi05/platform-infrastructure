@@ -38,9 +38,7 @@ export function normalizeRepositoryIdentity(value) {
 }
 
 function canonicalCandidate(input) {
-  const workloadLockSha256 = input.workloadLockSha256 === null || input.workloadLockSha256 === undefined || input.workloadLockSha256 === ""
-    ? null
-    : requiredHash(input.workloadLockSha256, "candidate workload lock SHA256");
+  const workloadLockSha256 = requiredHash(input.workloadLockSha256, "candidate workload lock SHA256");
   if (typeof input.clean !== "boolean") throw new Error("Candidate clean state must be explicit.");
   return {
     schema: candidateIdentitySchema,
