@@ -74,6 +74,16 @@ test("rejects mounting the scheduler principal credential into any third service
   assert.match(report.failures.join("\n"), /docker-gateway-principal-secret-exclusive/);
 });
 
+test("rejects a networked broker bootstrap or writable workload lock", () => {
+  const config = fixture();
+  config.services["broker-auth-bootstrap"].network_mode = "bridge";
+  config.services["broker-auth-bootstrap"].volumes[0].read_only = false;
+  const report = evaluateRuntimeIsolation(config);
+  assert.equal(report.status, "failed");
+  assert.match(report.failures.join("\n"), /broker-bootstrap-no-network/);
+  assert.match(report.failures.join("\n"), /broker-bootstrap-lock-read-only/);
+});
+
 function fixture() {
   const services = {};
   services["example-app-web"] = bounded({
@@ -94,6 +104,15 @@ function fixture() {
     networks: {},
   });
   services["platform-alert-dispatcher"] = bounded({ read_only: true, networks: {} });
+  services["broker-auth-bootstrap"] = bounded({
+    read_only: true,
+    network_mode: "none",
+    volumes: [
+      { type: "bind", source: "/private/hosted.lock.json", target: "/run/platform/hosted-workloads.lock.json", read_only: true },
+      { type: "volume", source: "broker_auth_config", target: "/out", read_only: false },
+    ],
+    networks: {},
+  });
   services["backup-scheduler"] = bounded({
     read_only: true,
     cpu_shares: 1024,

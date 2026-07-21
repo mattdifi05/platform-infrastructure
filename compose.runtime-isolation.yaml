@@ -83,6 +83,14 @@ services:
     mem_reservation: 256m
     pids_limit: 768
 
+  broker-auth-bootstrap:
+    <<: *runtime_core
+    read_only: true
+    cpus: 0.25
+    mem_limit: 128m
+    mem_reservation: 32m
+    pids_limit: 64
+
   redis:
     <<: *runtime_core
     cpus: 0.50

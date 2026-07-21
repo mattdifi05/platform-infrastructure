@@ -177,3 +177,6 @@
 | EV-ULTRA-FG067 | FG-067 | PostgreSQL restore isolation | `node --test scripts/postgres-restore-sandbox.test.mjs`; Docker hostile integration intentionally not run in this tranche | PASS local plan/negative fixtures: digest-pinned PostgreSQL 18, network none, read-only/capability/resource bounds and non-superuser restore are mandatory; no live cluster, database or container touched | 2026-07-21 |
 
 Every later entry must record positive, negative, regression and behavior-preservation evidence. Secret values must never be embedded.
+
+| EV-FG054-001 | FG-054 | Redis tenant policy, renderer and Compose guard | `node --test scripts/workload-broker-policy.test.mjs scripts/render-workload-broker-config.test.mjs scripts/broker-compose-contract.test.mjs` | PASS 10/10: immutable policy/digest, duplicate and overlap denial, default user off, per-tenant hashed credentials, command/prefix/channel bounds, independent synthetic rotation, symlink rejection, `0600` output and generated-ACL startup | 2026-07-21 |
+| EV-FG054-002 | FG-054 | Redis runtime behavior | real Redis ACL matrix, persistence/restart and independent credential rotation | NOT RUN/EXTERNAL: Docker/runtime access was outside this remediation boundary; deploy remains gated on fresh broker evidence | 2026-07-21 |

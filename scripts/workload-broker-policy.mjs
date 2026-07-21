@@ -194,6 +194,7 @@ export function validateGlobalBrokerOwnership(workloads) {
   for (const workload of [...workloads].sort((left, right) => left.id.localeCompare(right.id))) {
     const redis = workload.brokers?.redis;
     if (redis) {
+      assertPolicyDigest(redis, `${workload.id} Redis`);
       claim(redisUsers, redis.username, workload.id, "Redis username");
       claim(secrets, redis.credentialSecret, `${workload.id}/redis`, "broker credential secret");
       for (const previous of redisPrefixes) {
@@ -205,6 +206,7 @@ export function validateGlobalBrokerOwnership(workloads) {
     }
     const nats = workload.brokers?.nats;
     if (nats) {
+      assertPolicyDigest(nats, `${workload.id} NATS`);
       claim(natsAccounts, nats.account, workload.id, "NATS account");
       for (const user of nats.users) {
         claim(natsUsers, user.username, `${workload.id}/${user.service}`, "NATS username");
@@ -269,6 +271,12 @@ function workloadNatsAccount(id) {
 
 function withPolicyDigest(value) {
   return { ...value, policySha256: crypto.createHash("sha256").update(JSON.stringify(stable(value))).digest("hex") };
+}
+
+function assertPolicyDigest(policy, label) {
+  const { policySha256, ...fields } = policy;
+  const expected = crypto.createHash("sha256").update(JSON.stringify(stable(fields))).digest("hex");
+  if (policySha256 !== expected) invalid(`${label} policy digest does not match its immutable authorization fields.`);
 }
 
 function claim(registry, value, owner, label) {

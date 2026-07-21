@@ -521,7 +521,7 @@ export function resolveCatalog({ catalogPath, workloadRoot, coreEnvFile, coreFil
 function objectWithoutNetworks(service, name) {
   const copy = structuredClone(service);
   delete copy.networks;
-  if (name === "redis" || name === "nats") delete copy.secrets;
+  if (name === "broker-auth-bootstrap") delete copy.secrets;
   return copy;
 }
 
@@ -690,12 +690,14 @@ function assertBrokerEnvironment(name, service, manifest, manifestService) {
 
 function validateBrokerCoreSecretExtensions({ core, combined, workloads }) {
   const expectedByService = new Map([
-    ["redis", workloads.flatMap((workload) => workload.brokers?.redis ? [workload.brokers.redis.credentialSecret] : [])],
-    ["nats", workloads.flatMap((workload) => workload.brokers?.nats?.users.map((user) => user.credentialSecret) ?? [])],
+    ["broker-auth-bootstrap", workloads.flatMap((workload) => [
+      ...(workload.brokers?.redis ? [workload.brokers.redis.credentialSecret] : []),
+      ...(workload.brokers?.nats?.users.map((user) => user.credentialSecret) ?? []),
+    ])],
   ]);
   for (const [serviceName, tenantSecrets] of expectedByService) {
     if (!core.services?.[serviceName]) {
-      if (tenantSecrets.length) invalid(`Core broker ${serviceName} is missing for declared workload identities.`);
+      if (tenantSecrets.length) invalid(`Core broker authorization bootstrap is missing for declared workload identities.`);
       continue;
     }
     const baseline = secretEntries(core.services[serviceName]);

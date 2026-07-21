@@ -15,7 +15,7 @@ cd "$ROOT_DIR"
 COMPOSE_ENV_FILE="$ENV_FILE" COMPOSE_PROJECT_NAME="$PROJECT_NAME" \
   bash ./scripts/compose-vps.sh config --format json > "$OUTPUT"
 
-for service in local-registry backup-scheduler docker-operation-gateway project-router control-center \
+for service in local-registry backup-scheduler docker-operation-gateway broker-auth-bootstrap project-router control-center \
   platform-alert-dispatcher postgres redis keycloak nats minio mariadb \
   traefik waf prometheus alertmanager grafana loki promtail node-exporter cadvisor; do
   jq -e --arg service "$service" '.services[$service] != null' "$OUTPUT" >/dev/null
@@ -35,6 +35,7 @@ jq -e '.services["local-registry"].image | test("^registry:3@sha256:[a-f0-9]{64}
 jq -e '.networks.platform_docker_control.internal == true' "$OUTPUT" >/dev/null
 jq -e '.services["docker-operation-gateway"].ports == null and .services["docker-operation-gateway"].entrypoint == ["node", "/infra/scripts/docker-operation-gateway.mjs"]' "$OUTPUT" >/dev/null
 jq -e '.services["backup-scheduler"].environment.PLATFORM_DOCKER_GATEWAY_URL == "http://docker-operation-gateway:8787" and (.services["backup-scheduler"].environment.DOCKER_HOST == null)' "$OUTPUT" >/dev/null
+jq -e '.services["broker-auth-bootstrap"].network_mode == "none" and .services["broker-auth-bootstrap"].read_only == true and .services.redis.command == ["sh", "-ec", "exec redis-server --appendonly yes --aclfile /run/platform-broker/redis-users.acl"]' "$OUTPUT" >/dev/null
 jq -e '[.services[] | select(any(.volumes[]?; .source == "/var/run/docker.sock")) | .container_name] == ["enterprise-docker-operation-gateway"]' "$OUTPUT" >/dev/null
 jq -e '
   [.services["docker-operation-gateway"].secrets[].source] == ["backup_scheduler_docker_gateway_token"] and

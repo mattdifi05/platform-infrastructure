@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import test from "node:test";
 
 import {
@@ -38,6 +39,10 @@ test("normalizes immutable Redis and NATS identity policy and binds its digest",
   const lock = { workloads, brokerPolicySha256: brokerPolicySha256(workloads) };
   assert.equal(assertBrokerPolicyDigest(lock), true);
   assert.throws(() => assertBrokerPolicyDigest({ ...lock, brokerPolicySha256: "0".repeat(64) }), /digest/);
+  const tampered = structuredClone(lock);
+  tampered.workloads[0].brokers.redis.commands.push("flushall");
+  tampered.brokerPolicySha256 = brokerPolicySha256(tampered.workloads);
+  assert.throws(() => assertBrokerPolicyDigest(tampered), /Redis policy digest/);
   assert.equal(brokerPolicySha256([]), "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945");
 });
 
@@ -110,11 +115,25 @@ test("global ownership rejects reused Redis/NATS identities, secrets and overlap
   assert.equal(validateGlobalBrokerOwnership([beta, alpha]), true);
   const duplicateUser = structuredClone(beta);
   duplicateUser.brokers.redis.username = alpha.brokers.redis.username;
+  rebindPolicyDigest(duplicateUser.brokers.redis);
   assert.throws(() => validateGlobalBrokerOwnership([duplicateUser, alpha]), /Redis username/);
   const duplicateSecret = structuredClone(beta);
   duplicateSecret.brokers.nats.users[0].credentialSecret = alpha.brokers.redis.credentialSecret;
+  rebindPolicyDigest(duplicateSecret.brokers.nats);
   assert.throws(() => validateGlobalBrokerOwnership([duplicateSecret, alpha]), /credential secret/);
   const overlap = structuredClone(beta);
   overlap.brokers.redis.keyPrefix = alpha.brokers.redis.keyPrefix;
+  rebindPolicyDigest(overlap.brokers.redis);
   assert.throws(() => validateGlobalBrokerOwnership([overlap, alpha]), /prefixes overlap/);
 });
+
+function rebindPolicyDigest(policy) {
+  const { policySha256: _previous, ...fields } = policy;
+  policy.policySha256 = crypto.createHash("sha256").update(JSON.stringify(stable(fields))).digest("hex");
+}
+
+function stable(value) {
+  if (Array.isArray(value)) return value.map(stable);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(Object.keys(value).sort().map((key) => [key, stable(value[key])]));
+}

@@ -4,6 +4,7 @@ const REQUIRED_READ_ONLY = new Set([
   "platform-alert-dispatcher",
   "backup-scheduler",
   "docker-operation-gateway",
+  "broker-auth-bootstrap",
 ]);
 
 const FORBIDDEN_WORKLOAD_TARGETS = [
@@ -82,6 +83,12 @@ export function evaluateRuntimeIsolation(config, options = {}) {
     .map(([name]) => name)
     .sort();
   record("raw-socket-single-owner", rawSocketOwners.length === 1 && rawSocketOwners[0] === "docker-operation-gateway", `owners=${rawSocketOwners.join(",") || "none"}`);
+
+  const brokerBootstrap = services["broker-auth-bootstrap"] || {};
+  const brokerBootstrapMounts = volumes(brokerBootstrap);
+  record("broker-bootstrap-no-network", brokerBootstrap.network_mode === "none" && networkNames(brokerBootstrap).length === 0, `networkMode=${brokerBootstrap.network_mode || "unset"}`);
+  record("broker-bootstrap-lock-read-only", brokerBootstrapMounts.some((mount) => mount.target === "/run/platform/hosted-workloads.lock.json" && mount.readOnly), "broker bootstrap consumes the deployment lock read-only");
+  record("broker-bootstrap-config-volume", brokerBootstrapMounts.some((mount) => mount.target === "/out" && mount.type === "volume"), "broker bootstrap writes only the broker auth volume");
 
   const gateway = services["docker-operation-gateway"] || {};
   const gatewayEnvironment = object(gateway.environment);

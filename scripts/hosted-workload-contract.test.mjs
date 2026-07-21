@@ -182,6 +182,7 @@ function brokerRenderFixture() {
     services: {
       redis: { image: "redis@sha256:fixed", command: ["fixed-redis-entrypoint"], secrets: ["redis_password"], networks: { platform_cache: null } },
       nats: { image: "nats@sha256:fixed", command: ["fixed-nats-entrypoint"], secrets: ["nats_password"], networks: { platform_bus: null } },
+      "broker-auth-bootstrap": { image: "ops@sha256:fixed", command: ["fixed-broker-bootstrap"], secrets: ["redis_password", "nats_password"], network_mode: "none" },
     },
     networks: { platform_cache: { internal: true }, platform_bus: { internal: true } },
   };
@@ -219,13 +220,15 @@ function brokerRenderFixture() {
     services: {
       redis: {
         ...structuredClone(brokerCore.services.redis),
-        secrets: ["redis_password", "tenant-app-redis-password"],
         networks: { platform_cache: null, tenant_app_cache: null },
       },
       nats: {
         ...structuredClone(brokerCore.services.nats),
-        secrets: ["nats_password", "tenant-app-bus-nats-password"],
         networks: { platform_bus: null, tenant_app_bus: null },
+      },
+      "broker-auth-bootstrap": {
+        ...structuredClone(brokerCore.services["broker-auth-bootstrap"]),
+        secrets: ["redis_password", "nats_password", "tenant-app-redis-password", "tenant-app-bus-nats-password"],
       },
       "tenant-app-cache": cacheService,
       "tenant-app-bus": busService,
@@ -261,7 +264,7 @@ test("rendered broker contract rejects missing identity fields, core secrets and
   assert.throws(() => validateRenderedWorkloads(missingIdentity), /NATS connection fields/);
 
   const missingCoreSecret = brokerRenderFixture();
-  missingCoreSecret.combined.services.redis.secrets = ["redis_password"];
+  missingCoreSecret.combined.services["broker-auth-bootstrap"].secrets = ["redis_password", "nats_password", "tenant-app-bus-nats-password"];
   assert.throws(() => validateRenderedWorkloads(missingCoreSecret), /mount exactly/);
 
   const mutatedBroker = brokerRenderFixture();

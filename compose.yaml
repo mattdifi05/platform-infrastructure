@@ -67,6 +67,42 @@ services:
       timeout: 5s
       retries: 10
 
+  broker-auth-bootstrap:
+    image: ${PLATFORM_OPS_IMAGE:-platform/ops:local}
+    build:
+      context: .
+      dockerfile: docker/ops.Dockerfile
+      args:
+        NODE_IMAGE: ${NODE_IMAGE:-node:26.3.1-alpine@sha256:a2dc166a387cc6ca1e62d0c8e265e49ca985d6e60abc9fe6e6c3d6ce8e63f606}
+    container_name: enterprise-broker-auth-bootstrap
+    init: true
+    read_only: true
+    pids_limit: 64
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    restart: "no"
+    entrypoint:
+      - node
+      - /broker/render-workload-broker-config.mjs
+    command:
+      - redis
+      - --lock
+      - /run/platform/hosted-workloads.lock.json
+      - --secretsRoot
+      - /run/secrets
+      - --platformPasswordFile
+      - /run/secrets/redis_password
+      - --output
+      - /out/redis-users.acl
+    volumes:
+      - ./scripts/render-workload-broker-config.mjs:/broker/render-workload-broker-config.mjs:ro
+      - ./scripts/workload-broker-policy.mjs:/broker/workload-broker-policy.mjs:ro
+      - ${HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE:-./config/no-hosted-workloads.lock.json}:/run/platform/hosted-workloads.lock.json:ro
+      - broker_auth_config:/out
+    network_mode: none
+
   redis:
     image: ${REDIS_IMAGE:-redis:8.6-alpine@sha256:2cc044fc5a07c9b701f8f1255a309ae9ad7856e694ac03513bf3648c01e40763}
     container_name: enterprise-redis
@@ -77,19 +113,22 @@ services:
       - no-new-privileges:true
     restart: unless-stopped
     environment:
+      REDIS_USERNAME: platform
       REDIS_PASSWORD_FILE: /run/secrets/redis_password
     command:
       - sh
       - -ec
-      - |
-        REDIS_PASSWORD="$$(cat "$${REDIS_PASSWORD_FILE}")"
-        exec redis-server --appendonly yes --requirepass "$${REDIS_PASSWORD}"
+      - exec redis-server --appendonly yes --aclfile /run/platform-broker/redis-users.acl
+    depends_on:
+      broker-auth-bootstrap:
+        condition: service_completed_successfully
     volumes:
       - enterprise_redis_data:/data
+      - broker_auth_config:/run/platform-broker:ro
     networks:
       - enterprise_net
     healthcheck:
-      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$$(cat \"$${REDIS_PASSWORD_FILE}\")\" redis-cli ping | grep PONG"]
+      test: ["CMD-SHELL", "redis-cli --user \"$${REDIS_USERNAME}\" --pass \"$$(cat \"$${REDIS_PASSWORD_FILE}\")\" --no-auth-warning ping | grep PONG"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -788,6 +827,8 @@ networks:
     name: enterprise_net
 
 volumes:
+  broker_auth_config:
+    name: enterprise_broker_auth_config
   enterprise_mariadb_data:
     name: ${MARIADB_DATA_VOLUME:-enterprise_mariadb_data}
     external: true

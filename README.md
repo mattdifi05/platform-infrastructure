@@ -129,6 +129,15 @@ manifest o nel lock. Collisioni, prefissi Redis sovrapposti, comandi ampliati,
 subject globali, credenziali condivise ed export/import NATS non approvati fanno
 fallire il render prima dell'attivazione.
 
+Prima dell'avvio, il servizio isolato `broker-auth-bootstrap` legge il lock
+verificato e i soli secret esterni dichiarati, quindi genera fuori dal repository
+un file ACL Redis `0600`: l'utente `default` e' disabilitato, ogni workload ha
+un utente e una password indipendenti, e puo' usare soltanto i propri prefissi
+di chiavi/canali con l'allowlist di comandi firmata nel lock. Redis parte solo
+dopo il completamento riuscito del bootstrap. Le prove di comportamento sul
+broker reale (cross-tenant, rotazione, persistenza e restart) restano un gate
+runtime obbligatorio prima del deploy.
+
 ## Avvio locale
 
 ```sh

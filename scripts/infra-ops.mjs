@@ -2502,7 +2502,7 @@ async function runtimeHealthChecks() {
       fail(`${container} must not mount docker.sock.`);
     }
   }
-  const redisPing = dockerExecOutput("enterprise-redis", ["sh", "-c", "if [ -s /run/secrets/redis_password ]; then REDISCLI_AUTH=$(cat /run/secrets/redis_password); export REDISCLI_AUTH; fi; redis-cli ping"]);
+  const redisPing = dockerExecOutput("enterprise-redis", ["sh", "-c", "redis-cli --user platform --pass \"$(cat /run/secrets/redis_password)\" --no-auth-warning ping"]);
   if (!/PONG/.test(redisPing)) fail("Redis ping failed.");
   const alertmanagerStatus = dockerExecOutput("enterprise-alertmanager", ["wget", "-q", "-O", "-", "http://127.0.0.1:9093/-/healthy"]);
   if (!/OK/.test(alertmanagerStatus)) fail("Alertmanager health endpoint is not OK.");
