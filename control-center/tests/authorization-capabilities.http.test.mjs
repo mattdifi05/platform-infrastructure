@@ -183,6 +183,10 @@ test("real HTTP authorization denies before payload/context/sinks and preserves 
     "/c%6fntrol/backups/preview",
     "/control%2Fbackups/summary",
     "/control%252Fbackups/records",
+    ...["/vault", "/backups/files"].flatMap((suffix) =>
+      [3, 4, 32].map((layers) => nestedEncodedControlPath(suffix, layers))),
+    nestedEncodedControlPath("/%FF/vault", 3),
+    nestedEncodedControlPath("/%ZZ/backups/files", 4),
   ]) {
     for (const identity of [identities.viewer, identities.owner]) {
       const response = await request(baseUrl, "GET", pathname, identity);
@@ -377,6 +381,10 @@ function cookieValue(cookies, name) {
 
 function versioned(pathname) {
   return pathname.replace(/^\/control(?=\/|$)/, "/control/v1");
+}
+
+function nestedEncodedControlPath(suffix, layers) {
+  return `/c%${"25".repeat(layers - 1)}6fntrol${suffix}`;
 }
 
 function freePort() {

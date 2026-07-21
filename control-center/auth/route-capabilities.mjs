@@ -214,18 +214,22 @@ function controlPathDisposition(pathname) {
   }
 
   let projection = value;
-  for (let decodingPass = 0; decodingPass <= 2; decodingPass += 1) {
+  while (true) {
     if (looksLikeControlPath(projection)) return "confusable";
-    if (!projection.includes("%")) break;
-    try {
-      const decoded = decodeURIComponent(projection);
-      if (decoded === projection) break;
-      projection = decoded;
-    } catch {
-      break;
-    }
+    if (!projection.includes("%")) return "other";
+    const decoded = decodePercentOctetsOnce(projection);
+    if (decoded === projection) return "other";
+    // Every decoding pass strictly shortens the projection. This decreasing
+    // measure reaches a fixed point without an arbitrary layer cap. Detection
+    // never reuses the decoded projection for routing or dispatch.
+    if (decoded.length >= projection.length) return "confusable";
+    projection = decoded;
   }
-  return "other";
+}
+
+function decodePercentOctetsOnce(pathname) {
+  return pathname.replace(/%([0-9a-f]{2})/gi, (_, octet) =>
+    String.fromCharCode(Number.parseInt(octet, 16)));
 }
 
 function isUnambiguousControlPath(pathname) {
