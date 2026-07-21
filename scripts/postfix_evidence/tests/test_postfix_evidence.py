@@ -157,12 +157,16 @@ class Fixture:
         self.cohort_commit = self._git_commit("cohort implementation")
         (self.repo / "semantic.yml").write_text("value: a b\n", encoding="utf-8")
         self.cohort_semantic_commit = self._git_commit("cohort semantic whitespace")
+        (self.repo / "support.txt").write_text("shared support fix\n", encoding="utf-8")
+        self.cohort_support_commit = self._git_commit("cohort support implementation")
 
         run_git(self.repo, "switch", "-q", "-c", "final", self.baseline_commit)
         (self.repo / "integration-note.txt").write_text("unrelated integration\n", encoding="utf-8")
         self.unrelated_commit = self._git_commit("unrelated integration")
         (self.repo / "semantic.yml").write_text("value: ab\n", encoding="utf-8")
         self.final_semantic_commit = self._git_commit("integrated semantic whitespace")
+        (self.repo / "support.txt").write_text("shared support fix\n", encoding="utf-8")
+        self.final_support_commit = self._git_commit("integrated support implementation")
         (self.repo / "tracked.txt").write_text("baseline\nstructural fix\n", encoding="utf-8")
         self.final_commit = self._git_commit("integrated implementation")
         self.final_tree = run_git(self.repo, "rev-parse", "HEAD^{tree}")
@@ -491,7 +495,22 @@ class Fixture:
                     "control": ["structural admission control"],
                     "sink": ["protected fixture sink"],
                     "remediation_boundary": "candidate only; no live mutation",
-                    "boundary_paths": ["tracked.txt"],
+                    "boundary_paths": ["tracked.txt", "support.txt"],
+                    "support_commits": [self.cohort_commit, self.cohort_support_commit],
+                    "support_commit_mappings": [
+                        {
+                            "cohort_commit": self.cohort_commit,
+                            "final_commit": self.final_commit,
+                            "integration_mode": "cherry-pick",
+                            "boundary_paths": ["tracked.txt"],
+                        },
+                        {
+                            "cohort_commit": self.cohort_support_commit,
+                            "final_commit": self.final_support_commit,
+                            "integration_mode": "cherry-pick",
+                            "boundary_paths": ["support.txt"],
+                        },
+                    ],
                     "status": "PASS",
                     "consumer_evidence": ["tracked.txt:2"],
                     "negative_test_receipt_ids": [phase_ids["negative"]],
@@ -1019,6 +1038,7 @@ class PostfixEvidenceTests(unittest.TestCase):
         rows = self.fixture.load_jsonl("inputs/fix-groups.jsonl")
         for row in rows:
             row["final_commit"] = row["cohort_commit"]
+            row["support_commit_mappings"][0]["final_commit"] = row["cohort_commit"]
         self.fixture.write_jsonl("inputs/fix-groups.jsonl", rows)
         self.fixture.refresh_handoff_hash("fix_group_ledger")
         with self.assertRaisesRegex(ContractError, "cohort-only"):
@@ -1028,8 +1048,10 @@ class PostfixEvidenceTests(unittest.TestCase):
         rows = self.fixture.load_jsonl("inputs/fix-groups.jsonl")
         for row in rows:
             row["final_commit"] = self.fixture.unrelated_commit
-            row["boundary_paths"] = ["integration-note.txt"]
+            row["boundary_paths"] = ["integration-note.txt", "support.txt"]
             row["consumer_evidence"] = ["integration-note.txt:1"]
+            row["support_commit_mappings"][0]["final_commit"] = self.fixture.unrelated_commit
+            row["support_commit_mappings"][0]["boundary_paths"] = ["integration-note.txt"]
         self.fixture.write_jsonl("inputs/fix-groups.jsonl", rows)
         self.fixture.refresh_handoff_hash("fix_group_ledger")
         with self.assertRaisesRegex(ContractError, "exact tree delta|path/mode/content"):
@@ -1069,8 +1091,15 @@ class PostfixEvidenceTests(unittest.TestCase):
         rows = self.fixture.load_jsonl("inputs/fix-groups.jsonl")
         rows[0]["cohort_commit"] = self.fixture.cohort_semantic_commit
         rows[0]["final_commit"] = self.fixture.final_semantic_commit
-        rows[0]["boundary_paths"] = ["semantic.yml"]
+        rows[0]["boundary_paths"] = ["semantic.yml", "support.txt"]
         rows[0]["consumer_evidence"] = ["semantic.yml:1"]
+        rows[0]["support_commits"][0] = self.fixture.cohort_semantic_commit
+        rows[0]["support_commit_mappings"][0] = {
+            "cohort_commit": self.fixture.cohort_semantic_commit,
+            "final_commit": self.fixture.final_semantic_commit,
+            "integration_mode": "cherry-pick",
+            "boundary_paths": ["semantic.yml"],
+        }
         self.fixture.write_jsonl("inputs/fix-groups.jsonl", rows)
         self.fixture.refresh_handoff_hash("fix_group_ledger")
         with self.assertRaisesRegex(ContractError, "exact tree delta|path/mode/content"):
@@ -1081,9 +1110,34 @@ class PostfixEvidenceTests(unittest.TestCase):
         rows[0]["integration_mode"] = "direct-final"
         rows[0]["cohort_commit"] = self.fixture.final_commit
         rows[0]["final_commit"] = self.fixture.final_commit
+        rows[0]["support_commits"][0] = self.fixture.final_commit
+        rows[0]["support_commit_mappings"][0] = {
+            "cohort_commit": self.fixture.final_commit,
+            "final_commit": self.fixture.final_commit,
+            "integration_mode": "direct-final",
+            "boundary_paths": ["tracked.txt"],
+        }
         self.fixture.write_jsonl("inputs/fix-groups.jsonl", rows)
         self.fixture.refresh_handoff_hash("fix_group_ledger")
         self.assertTrue(self.build()["ok"])
+
+    def test_declared_support_commit_cannot_be_omitted_from_mappings(self) -> None:
+        rows = self.fixture.load_jsonl("inputs/fix-groups.jsonl")
+        rows[0]["support_commit_mappings"].pop()
+        self.fixture.write_jsonl("inputs/fix-groups.jsonl", rows)
+        self.fixture.refresh_handoff_hash("fix_group_ledger")
+        with self.assertRaisesRegex(ContractError, "support commit references are not exactly mapped"):
+            self.build()
+
+    def test_stale_support_commit_mapping_is_rejected(self) -> None:
+        rows = self.fixture.load_jsonl("inputs/fix-groups.jsonl")
+        rows[0]["boundary_paths"] = ["tracked.txt", "integration-note.txt"]
+        rows[0]["support_commit_mappings"][1]["final_commit"] = self.fixture.unrelated_commit
+        rows[0]["support_commit_mappings"][1]["boundary_paths"] = ["integration-note.txt"]
+        self.fixture.write_jsonl("inputs/fix-groups.jsonl", rows)
+        self.fixture.refresh_handoff_hash("fix_group_ledger")
+        with self.assertRaisesRegex(ContractError, "exact tree delta|path/mode/content"):
+            self.build()
 
     def test_dirty_final_candidate_is_rejected(self) -> None:
         (self.fixture.repo / "untracked.txt").write_text("dirty\n", encoding="utf-8")

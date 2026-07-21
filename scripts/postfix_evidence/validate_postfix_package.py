@@ -981,6 +981,8 @@ def _validate_fix_groups(
                 "sink",
                 "remediation_boundary",
                 "boundary_paths",
+                "support_commits",
+                "support_commit_mappings",
                 "status",
                 "consumer_evidence",
                 *GROUP_RECEIPT_FIELDS,
@@ -1041,23 +1043,153 @@ def _validate_fix_groups(
             raise ContractError(
                 f"fix-group ledger {group_id}: final commit has no nonempty diff on boundary paths"
             )
-        if integration_mode == "direct-final":
-            equivalence_by_group.append(
-                {
-                    "group_id": group_id,
-                    "integration_mode": integration_mode,
-                    "cohort_commit": cohort,
-                    "final_commit": final,
+        declared_supports = string_list(
+            row["support_commits"],
+            label=f"fix-group ledger {group_id} support commits",
+        )
+        resolved_supports = {
+            resolve_commit(
+                repo,
+                value,
+                label=f"fix-group ledger {group_id} support commit",
+            )
+            for value in declared_supports
+        }
+        mapping_rows = row["support_commit_mappings"]
+        if not isinstance(mapping_rows, list) or not mapping_rows:
+            raise ContractError(f"fix-group ledger {group_id}: support commit mappings are missing")
+        support_records: list[dict[str, Any]] = []
+        mapped_cohorts: set[str] = set()
+        mapped_boundaries: set[str] = set()
+        primary_record: dict[str, Any] | None = None
+        for mapping_index, mapping in enumerate(mapping_rows, start=1):
+            exact_keys(
+                mapping,
+                {"cohort_commit", "final_commit", "integration_mode", "boundary_paths"},
+                label=f"fix-group ledger {group_id} support mapping {mapping_index}",
+            )
+            mapping_mode = mapping["integration_mode"]
+            if mapping_mode not in {"cherry-pick", "direct-final"}:
+                raise ContractError(
+                    f"fix-group ledger {group_id}: invalid support integration mode"
+                )
+            mapping_cohort = resolve_commit(
+                repo,
+                mapping["cohort_commit"],
+                label=f"fix-group ledger {group_id} mapped cohort commit",
+            )
+            mapping_final = resolve_commit(
+                repo,
+                mapping["final_commit"],
+                label=f"fix-group ledger {group_id} mapped final commit",
+            )
+            if mapping_cohort in mapped_cohorts:
+                raise ContractError(
+                    f"fix-group ledger {group_id}: duplicate support commit mapping"
+                )
+            mapped_cohorts.add(mapping_cohort)
+            ensure_ancestor(
+                repo,
+                baseline_commit,
+                mapping_cohort,
+                label=f"fix-group ledger {group_id} support post-baseline cohort",
+            )
+            ensure_ancestor(
+                repo,
+                baseline_commit,
+                mapping_final,
+                label=f"fix-group ledger {group_id} support post-baseline final",
+            )
+            ensure_ancestor(
+                repo,
+                mapping_final,
+                final_head,
+                label=f"fix-group ledger {group_id} support final reachability",
+            )
+            if mapping_cohort == baseline_commit or mapping_final == baseline_commit:
+                raise ContractError(
+                    f"fix-group ledger {group_id}: support mapping points at the baseline"
+                )
+            mapping_boundary_list = string_list(
+                mapping["boundary_paths"],
+                label=f"fix-group ledger {group_id} support mapping boundary",
+            )
+            mapping_boundary = {
+                safe_relative(
+                    value,
+                    label=f"fix-group ledger {group_id} support mapping boundary path",
+                ).as_posix()
+                for value in mapping_boundary_list
+            }
+            if not mapping_boundary.issubset(boundary_set):
+                raise ContractError(
+                    f"fix-group ledger {group_id}: support mapping escapes remediation boundary"
+                )
+            mapping_delta = commit_delta_records(repo, mapping_final)
+            mapping_changed = {item["path"] for item in mapping_delta}
+            if mapping_changed != mapping_boundary:
+                raise ContractError(
+                    f"fix-group ledger {group_id}: support mapping boundary is not the exact nonempty final delta"
+                )
+            mapped_boundaries.update(mapping_boundary)
+            if mapping_mode == "direct-final":
+                if mapping_cohort != mapping_final:
+                    raise ContractError(
+                        f"fix-group ledger {group_id}: direct support mapping is not identical"
+                    )
+                mapping_record = {
+                    "cohort_commit": mapping_cohort,
+                    "final_commit": mapping_final,
+                    "integration_mode": mapping_mode,
+                    "boundary_paths": sorted(mapping_boundary),
+                    "tree_delta_sha256": sha256_bytes(canonical_json_bytes(mapping_delta)),
                     "accepted_by": "direct-final-identity",
                 }
+            else:
+                if mapping_cohort == mapping_final:
+                    raise ContractError(
+                        f"fix-group ledger {group_id}: cohort-only support SHA lacks final mapping"
+                    )
+                pair = (mapping_cohort, mapping_final)
+                if pair not in cache:
+                    cache[pair] = commit_equivalence(repo, mapping_cohort, mapping_final)
+                mapping_record = {
+                    "integration_mode": mapping_mode,
+                    "boundary_paths": sorted(mapping_boundary),
+                    **cache[pair],
+                }
+            support_records.append(mapping_record)
+            if (
+                mapping_cohort == cohort
+                and mapping_final == final
+                and mapping_mode == integration_mode
+            ):
+                primary_record = mapping_record
+        if mapped_cohorts != resolved_supports:
+            raise ContractError(
+                f"fix-group ledger {group_id}: support commit references are not exactly mapped"
             )
-        else:
-            pair = (cohort, final)
-            if pair not in cache:
-                cache[pair] = commit_equivalence(repo, cohort, final)
-            equivalence_by_group.append(
-                {"group_id": group_id, "integration_mode": integration_mode, **cache[pair]}
+        if mapped_boundaries != boundary_set:
+            raise ContractError(
+                f"fix-group ledger {group_id}: support mappings do not exactly cover remediation boundary paths"
             )
+        if primary_record is None:
+            raise ContractError(
+                f"fix-group ledger {group_id}: primary cohort/final mapping is absent from support mappings"
+            )
+        equivalence_by_group.append(
+            {
+                "group_id": group_id,
+                "integration_mode": integration_mode,
+                "cohort_commit": cohort,
+                "final_commit": final,
+                "accepted_by": primary_record["accepted_by"],
+                "support_commit_mappings": sorted(
+                    support_records,
+                    key=lambda item: (item["cohort_commit"], item["final_commit"]),
+                ),
+            }
+        )
         for field, phase in GROUP_RECEIPT_FIELDS.items():
             receipt_ids = string_list(row[field], label=f"fix-group ledger {group_id} {field}")
             for receipt_id in receipt_ids:
@@ -1717,6 +1849,7 @@ def _derive_finding_map(
                     "integration_mode": group["integration_mode"],
                     "cohort_commit": group["cohort_commit"],
                     "final_commit": group["final_commit"],
+                    "support_commit_mappings": group["support_commit_mappings"],
                     "test_receipt_ids": receipt_ids,
                 }
             )
