@@ -18,9 +18,10 @@ const artifact = createVerifiedReleaseArtifacts({
 });
 assert.equal(artifact.manifest.source, "cryptographically-verified-subjects");
 assert.deepEqual(artifact.manifest.subjects.map((subject) => subject.image), [image]);
+assert.match(artifact.manifest.sbom.sha256, /^[a-f0-9]{64}$/);
 assert.equal(artifact.sbom.components[0].name, "ghcr.io/owner/app");
 
 const wrong = structuredClone(verification);
 wrong.releaseImages = [`ghcr.io/attacker/app@sha256:${"a".repeat(64)}`];
 assert.throws(() => createVerifiedReleaseArtifacts({ entries, repository, commitSha, verification: wrong }), /subject set/);
-process.stdout.write("release subject manifest tests passed 4/4\n");
+process.stdout.write("release subject manifest tests passed 5/5\n");

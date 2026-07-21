@@ -73,7 +73,7 @@
         { "type": "file", "path": "docker/control-center.Dockerfile" },
         { "type": "file", "path": "docker/ops.Dockerfile" },
         { "type": "command", "name": "release-artifact-gate" },
-        { "type": "workflow", "pattern": "Release artifact gate dry run[\\s\\S]*release-artifact-gate" }
+        { "type": "workflow", "pattern": "Release artifact and admission policy tests[\\s\\S]*release-artifact-policy\\.test\\.mjs" }
       ],
       "liveProof": "Publish signed digest-pinned release images to the production registry.",
       "liveProofChecks": ["release-evidence-and-rollback"]
@@ -330,7 +330,7 @@
         { "type": "command", "name": "release-artifact-gate" },
         { "type": "command", "name": "github-attestation-evidence" },
         { "type": "workflow", "pattern": "release-attestation[\\s\\S]*actions/attest-build-provenance@[a-f0-9]{40}[\\s\\S]*Cryptographically verify and record attestations[\\s\\S]*github-attestation-evidence" },
-        { "type": "pattern", "path": "security/admission/cosign-digest-policy.rego", "pattern": "slsa\\.dev/provenance" }
+        { "type": "pattern", "path": "security/admission/cosign-digest-policy.rego", "pattern": "EXTERNAL-PENDING" }
       ],
       "liveProof": "Verify signed production images, SBOM and GitHub/Sigstore provenance in every release evidence pack.",
       "liveProofChecks": ["release-evidence-and-rollback"]

@@ -108,11 +108,27 @@ export function validateCryptographicReleaseVerification(verification, { subject
   return { repository: expectedRepository, commitSha: expectedCommit, subjects };
 }
 
+export function validateAttestedReleaseManifest(manifest, { subjects: rawSubjects, repository, commitSha, sbomSha256 }) {
+  const subjects = canonicalReleaseSubjects(rawSubjects);
+  const expectedRepository = exactRepository(repository);
+  const expectedCommit = exactGitSha(commitSha);
+  if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)) invalid("Release subject manifest must be a JSON object.");
+  if (manifest.version !== 2 || manifest.source !== "cryptographically-verified-subjects") invalid("Release subject manifest must use verified schema version 2.");
+  if (manifest.repository !== expectedRepository || manifest.commitSha !== expectedCommit) invalid("Release subject manifest repository/commit binding is mismatched.");
+  if (!/^[a-f0-9]{64}$/.test(String(sbomSha256 ?? "")) || manifest.sbom?.sha256 !== sbomSha256) invalid("Attested release manifest does not authenticate the exact SBOM SHA256.");
+  if (manifest.sbom?.schema !== "http://cyclonedx.org/schema/bom-1.5.schema.json") invalid("Attested release manifest does not bind CycloneDX 1.5.");
+  const manifestSubjects = canonicalReleaseSubjects(manifest.subjects ?? []);
+  const expected = subjects.map((subject) => `${subject.key}\u0000${subject.image}`).sort();
+  const actual = manifestSubjects.map((subject) => `${subject.key}\u0000${subject.image}`).sort();
+  if (JSON.stringify(expected) !== JSON.stringify(actual)) invalid("Attested release manifest subject set is mismatched.");
+  return { repository: expectedRepository, commitSha: expectedCommit, subjects };
+}
+
 export function sha256Json(value) {
   return crypto.createHash("sha256").update(JSON.stringify(value)).digest("hex");
 }
 
-export function buildReleaseAdmissionReceipt({ subjects, repository, commitSha, sbomSha256, verification }) {
+export function buildReleaseAdmissionReceipt({ subjects, repository, commitSha, sbomSha256, manifestSha256, verification, manifestVerification = null }) {
   const binding = validateCryptographicReleaseVerification(verification, { subjects, repository, commitSha });
   if (!/^[a-f0-9]{64}$/.test(String(sbomSha256 ?? ""))) invalid("SBOM artifact SHA256 is required for the admission receipt.");
   return {
@@ -125,12 +141,14 @@ export function buildReleaseAdmissionReceipt({ subjects, repository, commitSha, 
     commitSha: binding.commitSha,
     subjects: binding.subjects.map(({ key, image, name, digest }) => ({ key, image, name, digest })),
     sbomSha256,
+    manifestSha256: /^[a-f0-9]{64}$/.test(String(manifestSha256 ?? "")) ? manifestSha256 : null,
     provenance: {
       provider: verification.provider,
       signerWorkflow: verification.signerWorkflow,
       sourceRef: verification.sourceRef,
       verifiedTimestampCount: verification.verifiedTimestampCount,
       verificationFingerprint: sha256Json(verification),
+      manifestVerificationFingerprint: manifestVerification ? sha256Json(manifestVerification) : null,
     },
     deploymentAdmission: "EXTERNAL-PENDING",
     usageScope: "artifact-verification-only",

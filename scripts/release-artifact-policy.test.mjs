@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 import assert from "node:assert/strict";
+import { validatePinnedCycloneDxReleaseSchema, validatePlatformReleaseProfileOnly } from "./cyclonedx-schema-policy.mjs";
 import {
   buildReleaseAdmissionReceipt,
   canonicalReleaseSubjects,
+  validateAttestedReleaseManifest,
   validateCryptographicReleaseVerification,
   validateCycloneDxReleaseSbom,
 } from "./release-artifact-policy.mjs";
@@ -92,14 +94,36 @@ test("builds a receipt bound to SBOM and verifier output", () => {
   assert.equal(receipt.artifactVerification, "passed");
   assert.equal(receipt.deploymentAdmission, "EXTERNAL-PENDING");
 });
+test("attested manifest consumer rejects a different SBOM digest", () => {
+  const manifest = {
+    version: 2,
+    source: "cryptographically-verified-subjects",
+    repository,
+    commitSha,
+    sbom: { schema: "http://cyclonedx.org/schema/bom-1.5.schema.json", sha256: "e".repeat(64) },
+    subjects,
+  };
+  assert.throws(() => validateAttestedReleaseManifest(manifest, {
+    subjects,
+    repository,
+    commitSha,
+    sbomSha256: "f".repeat(64),
+  }), /authenticate the exact SBOM/);
+});
 test("rejects an SBOM field outside the pinned strict schema", () => {
   const changed = structuredClone(sbom);
   changed.unreviewedExtension = true;
-  assert.throws(() => validateCycloneDxReleaseSbom(changed, { subjects, repository, commitSha }), /unsupported property/);
+  assert.throws(() => validateCycloneDxReleaseSbom(changed, { subjects, repository, commitSha }), /additional properties|unsupported property/);
 });
 test("rejects a malformed hash through pinned schema validation", () => {
   const changed = structuredClone(sbom);
   changed.components[0].hashes[0].content = "not-a-hash";
-  assert.throws(() => validateCycloneDxReleaseSbom(changed, { subjects, repository, commitSha }), /schema pattern/);
+  assert.throws(() => validateCycloneDxReleaseSbom(changed, { subjects, repository, commitSha }), /match pattern/);
+});
+test("official schema rejects a document that the custom profile alone accepts", () => {
+  const changed = structuredClone(sbom);
+  changed.serialNumber = `urn:uuid:${"0".repeat(36)}`;
+  assert.equal(validatePlatformReleaseProfileOnly(changed), true);
+  assert.throws(() => validatePinnedCycloneDxReleaseSchema(changed), /Official CycloneDX 1\.5.*pattern/);
 });
 process.stdout.write(`release artifact policy tests passed ${passed}/${passed}\n`);

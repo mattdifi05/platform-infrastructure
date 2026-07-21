@@ -52,17 +52,6 @@ export function createVerifiedReleaseArtifacts({
     if (!verifiedImage) invalid(`Verifier output is missing ${requested.image}.`);
     return { key: requested.key, image: verifiedImage, name: requested.name, digest: requested.digest };
   });
-  const manifest = {
-    version: 2,
-    generatedAt,
-    releaseName: String(releaseName || commitSha),
-    repository,
-    commitSha,
-    workflowRunId: String(workflowRunId ?? ""),
-    workflowRunUrl: String(workflowRunUrl ?? ""),
-    source: "cryptographically-verified-subjects",
-    subjects,
-  };
   const sbom = {
     $schema: "http://cyclonedx.org/schema/bom-1.5.schema.json",
     bomFormat: "CycloneDX",
@@ -71,11 +60,11 @@ export function createVerifiedReleaseArtifacts({
     version: 1,
     metadata: {
       timestamp: generatedAt,
-      component: { type: "application", name: manifest.releaseName, version: commitSha, purl: `pkg:github/${repository}@${commitSha}` },
+      component: { type: "application", name: String(releaseName || commitSha), version: commitSha, purl: `pkg:github/${repository}@${commitSha}` },
       properties: [
         { name: "repository", value: repository },
         { name: "commitSha", value: commitSha },
-        { name: "workflowRunId", value: manifest.workflowRunId },
+        { name: "workflowRunId", value: String(workflowRunId ?? "") },
         { name: "sbom.source", value: "cryptographically-verified-release-subject-index" },
       ],
     },
@@ -89,6 +78,23 @@ export function createVerifiedReleaseArtifacts({
     })),
   };
   validateCycloneDxReleaseSbom(sbom, { subjects, repository, commitSha });
+  const sbomBytes = `${JSON.stringify(sbom, null, 2)}\n`;
+  const sbomSha256 = crypto.createHash("sha256").update(sbomBytes).digest("hex");
+  const manifest = {
+    version: 2,
+    generatedAt,
+    releaseName: String(releaseName || commitSha),
+    repository,
+    commitSha,
+    workflowRunId: String(workflowRunId ?? ""),
+    workflowRunUrl: String(workflowRunUrl ?? ""),
+    source: "cryptographically-verified-subjects",
+    sbom: {
+      schema: "http://cyclonedx.org/schema/bom-1.5.schema.json",
+      sha256: sbomSha256,
+    },
+    subjects,
+  };
   return { manifest, sbom, subjects };
 }
 
@@ -122,13 +128,15 @@ function main() {
   const manifestPath = path.resolve(options.manifest);
   const sbomPath = path.resolve(options.sbom);
   const receiptPath = path.resolve(options.receipt);
-  const manifestArtifact = writeJson(manifestPath, artifacts.manifest);
   const sbomArtifact = writeJson(sbomPath, artifacts.sbom);
+  if (artifacts.manifest.sbom.sha256 !== sbomArtifact.sha256) invalid("Generated SBOM bytes do not match the manifest binding.");
+  const manifestArtifact = writeJson(manifestPath, artifacts.manifest);
   const receipt = buildReleaseAdmissionReceipt({
     subjects: artifacts.subjects,
     repository: options.repo,
     commitSha: options.sha,
     sbomSha256: sbomArtifact.sha256,
+    manifestSha256: manifestArtifact.sha256,
     verification,
   });
   receipt.manifestSha256 = manifestArtifact.sha256;

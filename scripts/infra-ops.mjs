@@ -66,6 +66,7 @@ import { releaseEvidenceAdmissionReady } from "./release-go-no-go-policy.mjs";
 import {
   buildReleaseAdmissionReceipt,
   canonicalReleaseSubjects,
+  validateAttestedReleaseManifest,
   validateCryptographicReleaseVerification,
   validateCycloneDxReleaseSbom,
 } from "./release-artifact-policy.mjs";
@@ -6262,10 +6263,15 @@ async function releaseArtifactGate(options = {}) {
 async function releaseArtifactGateBody(options = {}) {
   log("==> Release artifact admission gate");
   const env = parseEnv(path.resolve(options.envFile ?? argv.envFile ?? path.join(infraRoot, ".env")));
+  const manifestPath = options.imageManifest ?? argv.imageManifest ?? argv.projectManifest ?? argv.appManifest;
+  if (!manifestPath) {
+    fail("A versioned, attested release subject manifest is required; env-only and --images admission are not accepted.");
+  }
+  const releaseManifest = readJsonFile(path.resolve(manifestPath), manifestPath);
   const imageEntries = releaseImageEntries({
     env,
     imagesArg: options.images ?? argv.images,
-    manifestPath: options.imageManifest ?? argv.imageManifest ?? argv.projectManifest ?? argv.appManifest,
+    manifestPath,
   });
   const images = imageEntries.map((entry) => entry.image);
   if (!images.length) {
@@ -6294,12 +6300,25 @@ async function releaseArtifactGateBody(options = {}) {
   rejectLegacyProvenanceInputs(options);
   const releaseSha = options.releaseSha ?? argv.releaseSha ?? gitEvidence().commit;
   const verificationOptions = releaseTrustVerificationOptions(options, releaseSha);
+  const sbomSha256 = sha256File(sbomFile);
+  validateAttestedReleaseManifest(releaseManifest, {
+    subjects,
+    repository: verificationOptions.repository,
+    commitSha: releaseSha,
+    sbomSha256,
+  });
   validateCycloneDxReleaseSbom(sbom, {
     subjects,
     repository: verificationOptions.repository,
     commitSha: releaseSha,
   });
   loadGithubTokenFromFile();
+  const manifestSha256 = sha256File(path.resolve(manifestPath));
+  const manifestVerification = verifyGithubAttestation({
+    subject: path.resolve(manifestPath),
+    expectedSubjectDigest: manifestSha256,
+    ...verificationOptions,
+  });
   const githubAttestationValidation = verifyGithubReleaseImages({ images, ...verificationOptions });
   validateCryptographicReleaseVerification(githubAttestationValidation, {
     subjects,
@@ -6315,8 +6334,10 @@ async function releaseArtifactGateBody(options = {}) {
     subjects,
     repository: verificationOptions.repository,
     commitSha: releaseSha,
-    sbomSha256: sha256File(sbomFile),
+    sbomSha256,
+    manifestSha256,
     verification: githubAttestationValidation,
+    manifestVerification,
   });
   const receiptPath = writeJsonReport("release", `release-artifact-admission-${reportTimestamp()}`, receipt);
   const deploymentAdmission = readJsonFile(path.join(infraRoot, "governance", "deployment-admission.json"), "deployment admission policy");
@@ -9817,7 +9838,7 @@ async function repoCoverageCheck() {
     ["dr-evidence-summary", /DR evidence summary[\s\S]*dr-evidence/],
     ["offsite-restore-plan", /Off-site restore drill plan[\s\S]*offsite-restore-drill-restic --planOnly/],
     ["release-evidence-plan", /release-evidence --planOnly/],
-    ["release-artifact-gate-dry-run", /Release artifact gate dry run[\s\S]*release-artifact-gate --envFile \.tmp\/ci-release\.env[\s\S]*--sbom \.tmp\/ci-sbom\/pnpm-sbom-ci\.json/],
+    ["release-artifact-policy-tests", /Release artifact and admission policy tests[\s\S]*release-artifact-policy\.test\.mjs/],
     ["alert-evidence-summary", /alert-evidence/],
     ["production-go-no-go-summary", /production-go-no-go/],
     ["pre-go-live-evidence-report", /Pre go-live evidence report[\s\S]*pre-go-live-evidence --infraOnly --repo/],
