@@ -407,18 +407,21 @@ Per il go-live il repository Restic deve essere remoto (`s3:`, `b2:`, `azure:`, 
 Schedulazione consigliata, container-first:
 
 ```sh
-docker compose --env-file .env -p platform_infra_vps \
-  -f compose.yaml \
-  -f compose.secrets.yaml \
-  -f compose.vps.yaml \
-  -f compose.waf.yaml \
-  -f compose.vps-waf.yaml \
-  -f compose.backup-scheduler.yaml \
-  --profile backup \
-  up -d backup-scheduler
+COMPOSE_ENV_FILE=.env COMPOSE_PROJECT_NAME=platform_infra_vps \
+  bash ./scripts/compose-vps.sh up -d backup-scheduler
 ```
 
-Il servizio `backup-scheduler` usa l'immagine ops Dockerizzata e `crond` interno, quindi non richiede cron o Node sull'host. Schedula backup giornalieri PostgreSQL, MariaDB, MinIO, Keycloak e Secret Manager metadata, retention PostgreSQL e un `full-restore-drill` settimanale. Lo scheduler rileva i mount host da Docker; su VPS puoi forzarli con `PLATFORM_INFRA_HOST_ROOT` e `PROJECT_SOURCE_HOST_ROOT` se usi percorsi custom. L'upload Restic off-site parte solo con `BACKUP_SCHEDULER_ENABLE_OFFSITE=true` e credenziali reali. Il runtime env file privato dello scheduler viene letto con parser dedicato dai job `--run` e non viene eseguito con `source`.
+Il wrapper `compose-vps.sh` e' l'unico entrypoint supportato per lo scheduler:
+carica anche gli overlay runtime, network e isolamento che non devono essere
+ricostruiti manualmente. Il servizio `backup-scheduler` usa l'immagine ops
+Dockerizzata e `crond` interno, quindi non richiede cron o Node sull'host.
+Schedula backup giornalieri PostgreSQL, MariaDB, MinIO, Keycloak e Secret
+Manager metadata, retention PostgreSQL e un `full-restore-drill` settimanale.
+Lo scheduler rileva i mount host da Docker; su VPS puoi forzarli con
+`PLATFORM_INFRA_HOST_ROOT` e `PROJECT_SOURCE_HOST_ROOT` se usi percorsi custom.
+L'upload Restic off-site parte solo con `BACKUP_SCHEDULER_ENABLE_OFFSITE=true` e
+credenziali reali. Il runtime env file privato dello scheduler viene letto con
+parser dedicato dai job `--run` e non viene eseguito con `source`.
 
 Schedulazione Linux host fallback:
 

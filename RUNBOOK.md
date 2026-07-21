@@ -457,21 +457,27 @@ PostgreSQL restore drills never target `enterprise-postgres`: they mount the sig
 Preferred VPS scheduler:
 
 ```sh
-docker compose --env-file .env -p platform_infra_vps \
-  -f compose.yaml \
-  -f compose.secrets.yaml \
-  -f compose.vps.yaml \
-  -f compose.waf.yaml \
-  -f compose.vps-waf.yaml \
-  -f compose.backup-scheduler.yaml \
-  --profile backup \
-  up -d backup-scheduler
+COMPOSE_ENV_FILE=.env COMPOSE_PROJECT_NAME=platform_infra_vps \
+  bash ./scripts/compose-vps.sh up -d backup-scheduler
 
 docker logs enterprise-backup-scheduler
 docker exec enterprise-backup-scheduler crontab -l
 ```
 
-This keeps scheduling inside Docker. The host only needs Docker, Compose and Git. The scheduler calls `docker-operation-gateway` on the isolated `platform_docker_control` network with its dedicated Docker-secret principal credential, mounted only into those two services. The gateway has no host port and maps only documented backup/restore job names to fixed `infra-ops` invocations; it never accepts Docker paths, methods, commands, images, mounts, networks, volumes, capabilities, devices or host namespaces from the caller. Manual job files are stably snapshotted into private gateway tmpfs before execution. Set `PLATFORM_INFRA_HOST_ROOT` and `PROJECT_SOURCE_HOST_ROOT` only when gateway mount discovery cannot identify nonstandard VPS paths. Enable off-site upload with `BACKUP_SCHEDULER_ENABLE_OFFSITE=true` after `RESTIC_REPOSITORY`, `RESTIC_PASSWORD_FILE` and provider credentials are valid.
+This keeps scheduling inside Docker. `compose-vps.sh` is the sole supported
+scheduler entrypoint because it loads the runtime, network and isolation
+overlays as one fixed set. The host only needs Docker, Compose and Git. The
+scheduler calls `docker-operation-gateway` on the isolated
+`platform_docker_control` network with its dedicated Docker-secret principal
+credential, mounted only into those two services. The gateway has no host port
+and maps only documented backup/restore job names to fixed `infra-ops`
+invocations; it never accepts Docker paths, methods, commands, images, mounts,
+networks, volumes, capabilities, devices or host namespaces from the caller.
+Manual job files are stably snapshotted into private gateway tmpfs before
+execution. Set `PLATFORM_INFRA_HOST_ROOT` and `PROJECT_SOURCE_HOST_ROOT` only
+when gateway mount discovery cannot identify nonstandard VPS paths. Enable
+off-site upload with `BACKUP_SCHEDULER_ENABLE_OFFSITE=true` after
+`RESTIC_REPOSITORY`, `RESTIC_PASSWORD_FILE` and provider credentials are valid.
 
 Host-side ops default to `PLATFORM_OPS_DOCKER_MODE=none`. Use `gateway` only for enumerated scheduled operations. Explicit `raw` recovery still requires `PLATFORM_ALLOW_RAW_DOCKER_SOCKET=1` and an approved maintenance window; no loopback Docker API is created.
 
