@@ -1013,7 +1013,9 @@ After the final reports are generated, create a non-secret evidence archive:
 
 ```sh
 sh ./scripts/evidence-bundle.sh
-sh ./scripts/evidence-bundle-verify.sh --requireComplete
+sh ./scripts/evidence-bundle-verify.sh \
+  --ownerPinnedManifestSha256 <independently-approved-sha256> \
+  --requireComplete
 ```
 
 The bundle is written under `.tmp/evidence-bundles/` and includes operational
@@ -1023,6 +1025,12 @@ directories; use `--allReports` only for a reviewed validation window where the
 full report history is needed. The verify command rereads `manifest.json`,
 checks every entry's size and SHA256, confirms the anti-secret policy and, with
 `--requireComplete`, fails while any required evidence family is still missing.
+Before verification, a release owner must review the exact `manifest.json` and
+pin its SHA-256 in a channel outside the bundle and mutable reports tree. Pass
+that independent value with `--ownerPinnedManifestSha256` (or
+`EVIDENCE_BUNDLE_MANIFEST_SHA256`). Missing approval is reported as
+`EXTERNAL-PENDING`; an internally recorded or freshly recomputed bundle digest
+does not authenticate the manifest.
 
 1. Build versioned images:
 

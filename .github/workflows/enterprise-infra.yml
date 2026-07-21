@@ -218,7 +218,15 @@ jobs:
       - name: Evidence bundle smoke
         run: sh ./scripts/infra-ops.sh evidence-bundle --noArchive
       - name: Evidence bundle integrity verify
-        run: sh ./scripts/infra-ops.sh evidence-bundle-verify
+        run: |
+          set +e
+          output=$(sh ./scripts/infra-ops.sh evidence-bundle-verify 2>&1)
+          status=$?
+          set -e
+          printf '%s\n' "$output"
+          test "$status" -ne 0
+          report=$(ls -t reports/evidence-bundle-verify/evidence-bundle-verify-*.json | head -n 1)
+          node -e 'const fs=require("fs"); const p=JSON.parse(fs.readFileSync(process.argv[1], "utf8")); if (p.status !== "external-pending" || p.issues.length !== 0 || p.externalPending.length === 0) process.exit(1)' "$report"
       - name: Linux portability check
         run: sh ./scripts/infra-ops.sh linux-portability-check
       - name: Upload CI evidence reports

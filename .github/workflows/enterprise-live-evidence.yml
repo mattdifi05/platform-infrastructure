@@ -28,7 +28,7 @@ on:
           - "true"
           - "false"
       run_final_gates:
-        description: Run production readiness/go-no-go and complete bundle verification
+        description: Run final gates and stage a complete bundle for independent approval
         required: true
         default: "true"
         type: choice
@@ -116,11 +116,18 @@ jobs:
         if: inputs.run_final_gates == 'true'
         run: sh ./scripts/production-readiness-live.sh
 
-      - name: Evidence bundle complete verify
+      - name: Evidence bundle stage for independent owner approval
         if: inputs.run_final_gates == 'true'
         run: |
           sh ./scripts/infra-ops.sh evidence-bundle --noArchive
-          sh ./scripts/infra-ops.sh evidence-bundle-verify --requireComplete
+          set +e
+          output=$(sh ./scripts/infra-ops.sh evidence-bundle-verify --requireComplete 2>&1)
+          status=$?
+          set -e
+          printf '%s\n' "$output"
+          test "$status" -ne 0
+          report=$(ls -t reports/evidence-bundle-verify/evidence-bundle-verify-*.json | head -n 1)
+          node -e 'const fs=require("fs"); const p=JSON.parse(fs.readFileSync(process.argv[1], "utf8")); if (p.status !== "external-pending" || p.issues.length !== 0 || p.externalPending.length === 0) process.exit(1)' "$report"
 
       - name: Upload live evidence reports
         if: always()

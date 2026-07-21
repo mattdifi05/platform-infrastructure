@@ -575,7 +575,9 @@ operative:
 
 ```sh
 sh ./scripts/evidence-bundle.sh
-sh ./scripts/evidence-bundle-verify.sh --requireComplete
+sh ./scripts/evidence-bundle-verify.sh \
+  --ownerPinnedManifestSha256 <independently-approved-sha256> \
+  --requireComplete
 ```
 
 Il bundle finisce in `.tmp/evidence-bundles/`, include gli ultimi report
@@ -584,7 +586,11 @@ esclude sempre `secrets/`, artifact di backup, `.env`, SBOM/release artifact e
 altri file sensibili. Usa `--allReports` solo se devi consegnare tutta la
 cronologia report della finestra di validazione. `evidence-bundle-verify.sh`
 rilegge `manifest.json`, ricontrolla SHA256, size, policy anti-segreti e, con
-`--requireComplete`, fallisce se manca una qualunque evidenza richiesta.
+`--requireComplete`, fallisce se manca una qualunque evidenza richiesta. Il
+digest del manifest deve essere approvato e fissato dal release owner fuori dal
+bundle; senza `--ownerPinnedManifestSha256` la verifica resta
+`EXTERNAL-PENDING`. Un digest copiato dal manifest o dal summary contenuto nello
+stesso bundle non e' un trust anchor.
 
 `scripts/linux-portability-check.sh` verifica BOM UTF-8, CRLF, path Windows e
 dipendenze PowerShell/cmd nei file operativi, poi valida gli shell script dentro

@@ -34,6 +34,7 @@ import { evaluateOffsiteRestoreCoverage, locateSnapshotManifest, offsiteManifest
 import { canonicalVpsTopologyPlan, parseCanonicalVpsTopology } from "./canonical-compose-topology.mjs";
 import { candidateIdentityMatches, createCandidateIdentity, evaluateCandidateReportBinding, normalizeRepositoryIdentity } from "./candidate-identity.mjs";
 import { verifyTrustedEvidenceReports } from "./evidence-trust-envelope.mjs";
+import { verifyOwnerPinnedBundleManifest } from "./evidence-bundle-anchor.mjs";
 import {
   assertExactBranchProtection,
   assertExactGithubEnvironment,
@@ -2706,6 +2707,8 @@ function infraTestingHygiene() {
     "scripts/candidate-identity.test.mjs",
     "scripts/evidence-trust-envelope.mjs",
     "scripts/evidence-trust-envelope.test.mjs",
+    "scripts/evidence-bundle-anchor.mjs",
+    "scripts/evidence-bundle-anchor.test.mjs",
   ];
   for (const file of checkFiles) {
     run(process.execPath, ["--check", file], { cwd: infraRoot });
@@ -2726,6 +2729,7 @@ function infraTestingHygiene() {
   run(process.execPath, ["--test", "scripts/canonical-compose-topology.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/candidate-identity.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/evidence-trust-envelope.test.mjs"], { cwd: infraRoot });
+  run(process.execPath, ["--test", "scripts/evidence-bundle-anchor.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "platform-alert-dispatcher/server.test.mjs"], { cwd: infraRoot });
   const shellFiles = fs.readdirSync(path.join(infraRoot, "scripts")).filter((name) => name.endsWith(".sh")).sort();
   for (const file of shellFiles) {
@@ -7856,21 +7860,28 @@ function validateEvidenceBundleEntry(entry, bundleDir, issues) {
   const bundleRoot = path.resolve(bundleDir);
   if (!filePath.startsWith(`${bundleRoot}${path.sep}`)) {
     issues.push(`${normalizedPath}: resolves outside bundle directory`);
-    return normalizedPath;
+    return { normalizedPath, bytes: null };
   }
-  if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
+  const stat = fs.lstatSync(filePath, { throwIfNoEntry: false });
+  if (!stat?.isFile() || stat.isSymbolicLink()) {
     issues.push(`${normalizedPath}: file missing from bundle`);
-    return normalizedPath;
+    return { normalizedPath, bytes: null };
   }
-  const stat = fs.statSync(filePath);
-  if (Number.isInteger(entry.sizeBytes) && stat.size !== entry.sizeBytes) {
-    issues.push(`${normalizedPath}: size mismatch manifest=${entry.sizeBytes} actual=${stat.size}`);
+  const resolvedFilePath = fs.realpathSync(filePath);
+  const resolvedBundleRoot = fs.realpathSync(bundleRoot);
+  if (!resolvedFilePath.startsWith(`${resolvedBundleRoot}${path.sep}`)) {
+    issues.push(`${normalizedPath}: resolves outside the real bundle directory`);
+    return { normalizedPath, bytes: null };
   }
-  const actualHash = sha256File(filePath);
+  const bytes = fs.readFileSync(filePath);
+  if (Number.isInteger(entry.sizeBytes) && bytes.length !== entry.sizeBytes) {
+    issues.push(`${normalizedPath}: size mismatch manifest=${entry.sizeBytes} actual=${bytes.length}`);
+  }
+  const actualHash = crypto.createHash("sha256").update(bytes).digest("hex");
   if (String(entry.sha256 ?? "").toLowerCase() !== actualHash) {
     issues.push(`${normalizedPath}: sha256 mismatch`);
   }
-  return normalizedPath;
+  return { normalizedPath, bytes };
 }
 
 function evidenceBundleReportPasses(spec, payload) {
@@ -8076,6 +8087,7 @@ async function evidenceBundleVerify() {
   const bundleDir = path.resolve(argv.bundleDir ?? argv._[0] ?? latestEvidenceBundleDir(outputRoot) ?? "");
   const requireComplete = booleanFlag(argv.requireComplete);
   const issues = [];
+  const externalPending = [];
   if (!bundleDir || !fs.existsSync(bundleDir) || !fs.statSync(bundleDir).isDirectory()) {
     fail(`Evidence bundle directory not found. Pass --bundleDir <path> or create one with evidence-bundle. Looked in: ${outputRoot}`);
   }
@@ -8085,7 +8097,28 @@ async function evidenceBundleVerify() {
   if (!fs.existsSync(manifestPath)) {
     fail(`Missing evidence bundle manifest: ${manifestPath}`);
   }
-  const manifest = readJsonFile(manifestPath, manifestPath);
+  const manifestStat = fs.lstatSync(manifestPath, { throwIfNoEntry: false });
+  if (!manifestStat?.isFile() || manifestStat.isSymbolicLink()) {
+    fail(`Evidence bundle manifest must be a regular non-symlink file: ${manifestPath}`);
+  }
+  const manifestBytes = fs.readFileSync(manifestPath);
+  let manifest = null;
+  try {
+    manifest = JSON.parse(manifestBytes.toString("utf8"));
+  } catch (error) {
+    fail(`Invalid evidence bundle manifest JSON: ${String(error?.message ?? error)}`);
+  }
+  const expectedManifestSha256 = argv.ownerPinnedManifestSha256 ?? process.env.EVIDENCE_BUNDLE_MANIFEST_SHA256;
+  let manifestTrust = null;
+  if (!expectedManifestSha256) {
+    externalPending.push("EXTERNAL-PENDING: an independent release owner must pin the exact evidence bundle manifest SHA-256.");
+  } else {
+    try {
+      manifestTrust = verifyOwnerPinnedBundleManifest({ manifestBytes, expectedManifestSha256 });
+    } catch (error) {
+      issues.push(String(error?.message ?? error));
+    }
+  }
   if (manifest.version !== 1) {
     issues.push(`manifest.version must be 1, found ${manifest.version ?? "missing"}`);
   }
@@ -8115,13 +8148,17 @@ async function evidenceBundleVerify() {
     issues.push("manifest.entries must be a non-empty array");
   }
   const paths = new Set();
+  const validatedEntries = new Map();
   for (const entry of Array.isArray(manifest.entries) ? manifest.entries : []) {
-    const normalizedPath = validateEvidenceBundleEntry(entry, bundleDir, issues);
-    if (!normalizedPath) {
+    const validated = validateEvidenceBundleEntry(entry, bundleDir, issues);
+    if (!validated) {
       continue;
     }
+    const { normalizedPath } = validated;
     if (paths.has(normalizedPath)) {
       issues.push(`${normalizedPath}: duplicate manifest entry`);
+    } else if (validated.bytes) {
+      validatedEntries.set(normalizedPath, validated.bytes);
     }
     paths.add(normalizedPath);
   }
@@ -8139,11 +8176,23 @@ async function evidenceBundleVerify() {
       if (!reportEntries.length) {
         issues.push(`missing required report entry: ${spec.label}`);
       } else if (requireComplete) {
-        const reportPath = path.join(bundleDir, reportEntries.at(-1));
-        const payload = readJsonFile(reportPath, reportPath);
-        const result = evidenceBundleReportPasses(spec, payload);
-        if (!result.passed) {
-          issues.push(`required report is not passing: ${spec.label}; ${result.detail}`);
+        const reportEntry = reportEntries.at(-1);
+        const reportBytes = validatedEntries.get(reportEntry);
+        if (!reportBytes) {
+          issues.push(`required report could not be validated from captured bytes: ${spec.label}`);
+        } else {
+          let reportPayload = null;
+          try {
+            reportPayload = JSON.parse(reportBytes.toString("utf8"));
+          } catch {
+            issues.push(`required report is invalid JSON: ${spec.label}`);
+          }
+          if (reportPayload) {
+            const result = evidenceBundleReportPasses(spec, reportPayload);
+            if (!result.passed) {
+              issues.push(`required report is not passing: ${spec.label}; ${result.detail}`);
+            }
+          }
         }
       }
     }
@@ -8166,12 +8215,14 @@ async function evidenceBundleVerify() {
   const stamp = reportTimestamp();
   const payload = {
     generatedAt: new Date().toISOString(),
-    status: issues.length ? "failed" : "passed",
+    status: issues.length ? "failed" : externalPending.length ? "external-pending" : "passed",
     bundleDir,
     requireComplete,
+    manifestTrust,
     entryCount: paths.size,
     missingRequiredEvidence,
     issues,
+    externalPending,
   };
   const jsonPath = writeJsonReport("evidence-bundle-verify", `evidence-bundle-verify-${stamp}`, payload);
   const markdownPath = writeMarkdownReport("evidence-bundle-verify", `evidence-bundle-verify-${stamp}`, [
@@ -8180,6 +8231,7 @@ async function evidenceBundleVerify() {
     `Status: ${payload.status}`,
     `Bundle: ${bundleDir}`,
     `Require complete: ${requireComplete}`,
+    `Manifest trust: ${manifestTrust?.trustMode ?? "EXTERNAL-PENDING"}`,
     `Entries: ${payload.entryCount}`,
     "",
     "## Missing Required Evidence",
@@ -8189,10 +8241,18 @@ async function evidenceBundleVerify() {
     "## Issues",
     "",
     ...(issues.length ? issues.map((issue) => `- ${issue}`) : ["- none"]),
+    "",
+    "## External Pending",
+    "",
+    ...(externalPending.length ? externalPending.map((issue) => `- ${issue}`) : ["- none"]),
   ]);
   log(`Evidence bundle verification report written to ${jsonPath} and ${markdownPath}`);
   if (issues.length) {
-    fail(`Evidence bundle verification failed with ${issues.length} issue(s). Report: ${jsonPath}`);
+    const pendingDetail = externalPending.length ? " EXTERNAL-PENDING: independent manifest approval is also absent." : "";
+    fail(`Evidence bundle verification failed with ${issues.length} issue(s).${pendingDetail} Report: ${jsonPath}`);
+  }
+  if (externalPending.length) {
+    fail(`EXTERNAL-PENDING: evidence bundle integrity is internally consistent but not externally authenticated. Report: ${jsonPath}`);
   }
   log("Evidence bundle verification passed.");
 }
