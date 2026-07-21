@@ -716,7 +716,8 @@ Run on a new VPS Ubuntu LTS VPS before public traffic:
 ```sh
 sudo sh ./scripts/vps-bootstrap-ubuntu.sh --apply --deploy-user deploy
 sudo sh ./scripts/vps-hardening-ubuntu.sh --apply --ssh-port 65002 --reload-sshd
-sudo sh ./scripts/cloudflare-origin-lock-ufw.sh --apply --ports "80 443"
+COMPOSE_ENV_FILE=.env COMPOSE_PROJECT_NAME=platform_infra_vps bash ./scripts/compose-vps.sh config --format json > /tmp/platform-compose.json
+sudo sh ./scripts/cloudflare-origin-lock-ufw.sh --apply --compose-json /tmp/platform-compose.json
 sudo sh ./scripts/vps-host-readiness.sh --ssh-port 65002 --enforce
 ```
 
@@ -726,7 +727,8 @@ session works:
 
 ```sh
 sudo sh ./scripts/vps-hardening-ubuntu.sh --apply --ssh-port 22 --reload-sshd
-sudo sh ./scripts/cloudflare-origin-lock-ufw.sh --apply --ports "80 443"
+COMPOSE_ENV_FILE=.env COMPOSE_PROJECT_NAME=platform_infra_vps bash ./scripts/compose-vps.sh config --format json > /tmp/platform-compose.json
+sudo sh ./scripts/cloudflare-origin-lock-ufw.sh --apply --compose-json /tmp/platform-compose.json
 sh ./scripts/vps-host-readiness.sh --ssh-port 22 --enforce
 ```
 

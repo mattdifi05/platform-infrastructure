@@ -288,7 +288,7 @@ check_ufw() {
   fi
   origin_status=$(mktemp)
   printf '%s\n' "$ufw_status" > "$origin_status"
-  if sh "$ROOT_DIR/scripts/cloudflare-origin-lock-ufw.sh" --verify --ports "${ORIGIN_LOCK_PORTS:-80 443}" --status-file "$origin_status" >/dev/null 2>&1; then
+  if sh "$ROOT_DIR/scripts/cloudflare-origin-lock-ufw.sh" --verify --status-file "$origin_status" >/dev/null 2>&1; then
     add_check "ufw-origin-lock" "yes" "passed" "public web ports are restricted to the complete saved Cloudflare IPv4/IPv6 CIDR set"
   else
     add_check "ufw-origin-lock" "yes" "failed" "origin lock is incomplete, stale, duplicated, or still has a generic public web allow"
