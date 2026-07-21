@@ -101,6 +101,11 @@ enterprise readiness, protected-main release admission and the staging DAST
 job. The repository policy rejects `always()`, continue-on-error and alternate
 deployment sinks that could bypass failed or skipped prerequisites.
 
+Both privileged SSH consumers require an owner-approved exact host:port pin and
+a readable, non-symlink dedicated private-key file. They use `BatchMode=yes`,
+`IdentitiesOnly=yes`, strict host checking, no global host database and no host
+key update, so an ambient agent or default identity cannot become a fallback.
+
 ## Tool integrity
 
 The ops image installs GitHub CLI 2.93.0 from an immutable release asset after

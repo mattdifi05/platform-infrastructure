@@ -44,6 +44,8 @@ cat > "$TMP/admission.json" <<EOF
 EOF
 ADMISSION_SHA=$(hash_file "$TMP/admission.json")
 printf '%s\n' '[example.internal]:2222 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestOnlyPinnedHostKey' > "$TMP/known_hosts"
+printf '%s\n' 'test-only-private-key' > "$TMP/deploy_key"
+chmod 600 "$TMP/deploy_key"
 
 expect_reject() {
   label=$1
@@ -64,6 +66,7 @@ base_env() {
     DEPLOY_SSH_PORT=2222 \
     DEPLOY_REMOTE_DIR='/opt/platform-infrastructure' \
     DEPLOY_KNOWN_HOSTS_PATH="$TMP/known_hosts" \
+    DEPLOY_SSH_KEY_PATH="$TMP/deploy_key" \
     DEPLOY_ENV_FILE='.env' \
     DEPLOY_PROJECT_NAME='platform_infra_vps' \
     DEPLOY_REPO='owner/repo' \
@@ -114,6 +117,9 @@ expect_base_reject missing-mandatory-production-gate env -u DEPLOY_RUN_GO_NO_GO
 [ ! -e "$FAKE_SSH_ARGS" ] && [ ! -e "$FAKE_SSH_STDIN" ] || { echo "FAIL: missing mandatory gate reached SSH" >&2; exit 1; }
 expect_base_reject disabled-mandatory-production-gate env DEPLOY_RUN_GO_NO_GO=0
 [ ! -e "$FAKE_SSH_ARGS" ] && [ ! -e "$FAKE_SSH_STDIN" ] || { echo "FAIL: disabled mandatory gate reached SSH" >&2; exit 1; }
+expect_base_reject missing-dedicated-ssh-key env DEPLOY_SSH_KEY_PATH="$TMP/missing-key"
+ln -s "$TMP/deploy_key" "$TMP/deploy-key-link"
+expect_base_reject symlink-dedicated-ssh-key env DEPLOY_SSH_KEY_PATH="$TMP/deploy-key-link"
 
 cp "$TMP/known_hosts" "$TMP/wrong-port-known-hosts"
 sed 's/:2222/:2200/' "$TMP/wrong-port-known-hosts" > "$TMP/wrong-port-known-hosts.next"
@@ -127,6 +133,9 @@ grep -Fx 'StrictHostKeyChecking=yes' "$FAKE_SSH_ARGS" >/dev/null
 grep -Fx "UserKnownHostsFile=$TMP/known_hosts" "$FAKE_SSH_ARGS" >/dev/null
 grep -Fx 'GlobalKnownHostsFile=/dev/null' "$FAKE_SSH_ARGS" >/dev/null
 grep -Fx 'UpdateHostKeys=no' "$FAKE_SSH_ARGS" >/dev/null
+grep -Fx 'BatchMode=yes' "$FAKE_SSH_ARGS" >/dev/null
+grep -Fx 'IdentitiesOnly=yes' "$FAKE_SSH_ARGS" >/dev/null
+grep -Fx "$TMP/deploy_key" "$FAKE_SSH_ARGS" >/dev/null
 if grep -F 'accept-new' "$FAKE_SSH_ARGS" >/dev/null; then echo "FAIL: accept-new remained enabled" >&2; exit 1; fi
 if grep -F '/opt/platform-infrastructure' "$FAKE_SSH_STDIN" >/dev/null; then echo "FAIL: raw remote directory leaked into generated shell" >&2; exit 1; fi
 grep -E "^PLATFORM_RELEASE_SHA_B64='[A-Za-z0-9+/=]+'$" "$FAKE_SSH_STDIN" >/dev/null
@@ -140,4 +149,4 @@ expect_reject production-policy-stays-external-pending env \
   DEPLOY_ADMISSION_RECEIPT_PATH="$TMP/admission.json" DEPLOY_ADMISSION_RECEIPT_SHA256="$ADMISSION_SHA" \
   FAKE_RELEASE_SHA="$RELEASE_SHA" FAKE_RELEASE_TREE="$RELEASE_TREE"
 
-printf 'deploy VPS input tests passed 15/15\n'
+printf 'deploy VPS input tests passed 17/17\n'

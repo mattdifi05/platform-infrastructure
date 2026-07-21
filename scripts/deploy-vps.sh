@@ -39,6 +39,10 @@ case "$REMOTE_DIR" in *[!A-Za-z0-9_./-]*|*//*|*/../*|*/..) echo "DEPLOY_REMOTE_D
 case "$SSH_PORT" in ''|*[!0-9]*) echo "DEPLOY_SSH_PORT must be numeric." >&2; exit 1 ;; esac
 [ "$SSH_PORT" -ge 1 ] && [ "$SSH_PORT" -le 65535 ] || { echo "DEPLOY_SSH_PORT must be between 1 and 65535." >&2; exit 1; }
 case "$SSH_KNOWN_HOSTS_PATH" in /*) ;; *) echo "DEPLOY_SSH_KNOWN_HOSTS_PATH must be absolute." >&2; exit 1 ;; esac
+[ -f "$SSH_KEY_PATH" ] && [ -r "$SSH_KEY_PATH" ] && [ -s "$SSH_KEY_PATH" ] && [ ! -L "$SSH_KEY_PATH" ] || {
+  echo "DEPLOY_SSH_KEY_PATH must be a readable, non-empty dedicated private-key file, not a symlink." >&2
+  exit 1
+}
 [ -f "$SSH_KNOWN_HOSTS_PATH" ] && [ -r "$SSH_KNOWN_HOSTS_PATH" ] && [ -s "$SSH_KNOWN_HOSTS_PATH" ] && [ ! -L "$SSH_KNOWN_HOSTS_PATH" ] || {
   echo "DEPLOY_SSH_KNOWN_HOSTS_PATH must be a readable, non-empty owner-approved regular file, not a symlink." >&2
   exit 1
@@ -119,14 +123,13 @@ node "$SCRIPT_DIR/pinned-ssh-host-key.mjs" verify \
     exit 1
   }
 
-set -- -F /dev/null -p "$SSH_PORT" \
+set -- -F /dev/null -i "$SSH_KEY_PATH" -p "$SSH_PORT" \
   -o BatchMode=yes \
   -o IdentitiesOnly=yes \
   -o StrictHostKeyChecking=yes \
   -o "UserKnownHostsFile=$SSH_KNOWN_HOSTS_PATH" \
   -o GlobalKnownHostsFile=/dev/null \
   -o UpdateHostKeys=no
-if [ -f "$SSH_KEY_PATH" ]; then set -- -i "$SSH_KEY_PATH" "$@"; fi
 
 request_file="$request_dir/request.sh"
 {

@@ -18,10 +18,14 @@ assert.match(combined, /StrictHostKeyChecking=yes/);
 assert.match(combined, /UserKnownHostsFile=/);
 assert.match(combined, /GlobalKnownHostsFile=\/dev\/null/);
 assert.match(combined, /UpdateHostKeys=no/);
+assert.match(combined, /BatchMode=yes/);
+assert.match(combined, /IdentitiesOnly=yes/);
 assert.match(sources["scripts/deploy-vps.sh"], /ssh-known-host-endpoint\.sh/);
 assert.match(sources[".github/workflows/enterprise-vps-evidence.yml"], /ssh-known-host-endpoint\.sh/);
 assert.match(sources["scripts/deploy-vps.sh"], /ssh-known-host-endpoint\.sh[\s\S]*ssh "\$@" "\$REMOTE"/);
 assert.match(sources[".github/workflows/enterprise-vps-evidence.yml"], /ssh-known-host-endpoint\.sh[\s\S]*ssh -i ~\/\.ssh\/deploy_key/);
+assert.match(sources["scripts/deploy-vps.sh"], /DEPLOY_SSH_KEY_PATH must be a readable, non-empty dedicated private-key file/);
+assert.doesNotMatch(sources["scripts/deploy-vps.sh"], /if \[ -f "\$SSH_KEY_PATH" \]/);
 
 const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "ssh-host-key-policy-"));
 process.on("exit", () => fs.rmSync(temporary, { recursive: true, force: true }));
@@ -44,4 +48,4 @@ assert.notEqual(verify(`${endpoint} ${key1}\n${endpoint} ${key2}\n`).status, 0, 
 assert.notEqual(verify(`[*.internal]:2222 ${key1}\n`).status, 0, "a wildcard host pattern must not satisfy an exact endpoint pin");
 assert.notEqual(verify(`${endpoint},[alias.internal]:2222 ${key1}\n`).status, 0, "a comma-separated alias must not widen the exact endpoint pin");
 
-process.stdout.write("SSH host key policy tests passed 16/16\n");
+process.stdout.write("SSH host key policy tests passed 20/20\n");
