@@ -86,9 +86,40 @@ function resolveWithin(root, value, label) {
   return resolved;
 }
 
+function physicalRoot(root, label) {
+  const lexicalRoot = path.resolve(root);
+  const rootStat = fs.lstatSync(lexicalRoot, { throwIfNoEntry: false });
+  if (!rootStat?.isDirectory() || rootStat.isSymbolicLink()) {
+    invalid(`${label} must be a real non-symlink directory.`);
+  }
+  return fs.realpathSync.native(lexicalRoot);
+}
+
+function resolvePhysicalWithin(root, value, label, expectedType) {
+  const lexicalRoot = path.resolve(root);
+  const canonicalRoot = physicalRoot(lexicalRoot, `${label} root`);
+  const lexical = resolveWithin(lexicalRoot, value, label);
+  let cursor = lexicalRoot;
+  const relative = path.relative(lexicalRoot, lexical);
+  for (const component of relative.split(path.sep).filter(Boolean)) {
+    cursor = path.join(cursor, component);
+    const entry = fs.lstatSync(cursor, { throwIfNoEntry: false });
+    if (!entry) invalid(`${label} does not exist: ${cursor}`);
+    if (entry.isSymbolicLink()) invalid(`${label} contains a symlink component: ${cursor}`);
+  }
+  const canonical = fs.realpathSync.native(lexical);
+  if (canonical !== canonicalRoot && !canonical.startsWith(`${canonicalRoot}${path.sep}`)) {
+    invalid(`${label} escapes its physical root.`);
+  }
+  const stat = fs.lstatSync(canonical, { throwIfNoEntry: false });
+  if (expectedType === "file" && !stat?.isFile()) invalid(`${label} must be a regular file.`);
+  if (expectedType === "directory" && !stat?.isDirectory()) invalid(`${label} must be a directory.`);
+  return canonical;
+}
+
 function fileRecord(filePath, kind) {
-  const stat = fs.statSync(filePath, { throwIfNoEntry: false });
-  if (!stat?.isFile()) invalid(`${kind} file does not exist: ${filePath}`);
+  const stat = fs.lstatSync(filePath, { throwIfNoEntry: false });
+  if (!stat?.isFile() || stat.isSymbolicLink()) invalid(`${kind} file does not exist or is symlinked: ${filePath}`);
   return { kind, path: filePath, sha256: sha256File(filePath), sizeBytes: stat.size };
 }
 
@@ -128,13 +159,12 @@ function workloadEnvironmentRecord(filePath, workloadId) {
 function sqlRecords(root, relativeRoots) {
   const records = [];
   for (const relativeRoot of relativeRoots ?? []) {
-    const directory = resolveWithin(root, relativeRoot, "migration root");
-    if (!fs.statSync(directory, { throwIfNoEntry: false })?.isDirectory()) {
-      invalid(`Migration root is not a directory: ${directory}`);
-    }
-    for (const name of fs.readdirSync(directory).sort()) {
-      if (!name.endsWith(".sql")) continue;
-      records.push(fileRecord(path.join(directory, name), "migration"));
+    const directory = resolvePhysicalWithin(root, relativeRoot, "migration root", "directory");
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true }).sort((left, right) => left.name.localeCompare(right.name))) {
+      if (!entry.name.endsWith(".sql")) continue;
+      if (entry.isSymbolicLink() || !entry.isFile()) invalid(`Migration must be a regular non-symlink file: ${path.join(directory, entry.name)}`);
+      const migrationPath = resolvePhysicalWithin(directory, entry.name, "migration", "file");
+      records.push(fileRecord(migrationPath, "migration"));
     }
   }
   return records;
@@ -194,7 +224,7 @@ export function resolveCatalog({ catalogPath, workloadRoot, coreEnvFile, coreFil
   if (catalog?.version !== 1 || !Array.isArray(catalog.workloads)) {
     invalid("Hosted workload catalog must use version 1 and workloads[].");
   }
-  const root = path.resolve(workloadRoot);
+  const root = physicalRoot(workloadRoot, "workload root");
   const records = [fileRecord(path.resolve(catalogPath), "catalog"), fileRecord(path.resolve(coreEnvFile), "core-environment")];
   for (const coreFile of coreFiles) records.push(fileRecord(path.resolve(coreFile), "core-compose"));
   const ids = new Set();
@@ -202,9 +232,9 @@ export function resolveCatalog({ catalogPath, workloadRoot, coreEnvFile, coreFil
   const routes = new Set();
   const workloads = catalog.workloads.map((entry) => {
     if (!entry || typeof entry !== "object" || Array.isArray(entry)) invalid("Each workload catalog entry must be an object.");
-    const manifestPath = resolveWithin(root, entry.manifest, "workload manifest");
+    const manifestPath = resolvePhysicalWithin(root, entry.manifest, "workload manifest", "file");
     const manifest = validateWorkloadManifest(readJson(manifestPath), manifestPath);
-    const environmentPath = resolveWithin(root, entry.environmentFile, `environment file for ${manifest.id}`);
+    const environmentPath = resolvePhysicalWithin(root, entry.environmentFile, `environment file for ${manifest.id}`, "file");
     if (ids.has(manifest.id)) invalid(`Duplicate workload id ${manifest.id}.`);
     ids.add(manifest.id);
     for (const service of manifest.services) {
@@ -215,7 +245,7 @@ export function resolveCatalog({ catalogPath, workloadRoot, coreEnvFile, coreFil
         routes.add(route.slug);
       }
     }
-    const composePath = resolveWithin(path.dirname(manifestPath), manifest.composeFile, "workload compose file");
+    const composePath = resolvePhysicalWithin(path.dirname(manifestPath), manifest.composeFile, "workload compose file", "file");
     const workloadRecords = [
       fileRecord(manifestPath, "workload-manifest"),
       fileRecord(composePath, "workload-compose"),

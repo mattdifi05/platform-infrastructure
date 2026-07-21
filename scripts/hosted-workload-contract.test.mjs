@@ -1,6 +1,10 @@
 #!/usr/bin/env node
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import {
+  resolveCatalog,
   validateRenderedWorkloads,
   validateWorkloadEnvironmentText,
   validateWorkloadManifest,
@@ -156,6 +160,64 @@ test("legacy hosted workload locks fail closed", () => {
     () => verifyLockFiles({ version: 1, state: "verified", files: [] }),
     /schema 2 and validator hosted-contract-v2/,
   );
+});
+
+function catalogFixture(root, appRoot = path.join(root, "workloads", "example-app")) {
+  fs.mkdirSync(appRoot, { recursive: true });
+  fs.writeFileSync(path.join(appRoot, "manifest.json"), JSON.stringify({
+    version: 1,
+    id: "example-app",
+    composeFile: "compose.yaml",
+    services: [{ name: "example-app-web", role: "web" }],
+  }));
+  fs.writeFileSync(path.join(appRoot, "compose.yaml"), "services: {}\n");
+  fs.writeFileSync(path.join(appRoot, "workload.env"), "EXAMPLE_APP_THEME=dark\n");
+  const catalogPath = path.join(root, "catalog.json");
+  fs.writeFileSync(catalogPath, JSON.stringify({
+    version: 1,
+    workloads: [{ manifest: "example-app/manifest.json", environmentFile: "example-app/workload.env" }],
+  }));
+  const coreEnvFile = path.join(root, "core.env");
+  const coreFile = path.join(root, "compose.core.yaml");
+  fs.writeFileSync(coreEnvFile, "CORE_VALUE=fixture\n");
+  fs.writeFileSync(coreFile, "services: {}\n");
+  return { catalogPath, coreEnvFile, coreFile };
+}
+
+test("workload resolver accepts an all-regular contained tree", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "hosted-contained-"));
+  try {
+    const workloadRoot = path.join(root, "workloads");
+    const fixture = catalogFixture(root);
+    const result = resolveCatalog({ ...fixture, workloadRoot, coreFiles: [fixture.coreFile], projectName: "fixture" });
+    assert.equal(result.workloads[0].manifestPath, fs.realpathSync.native(path.join(workloadRoot, "example-app", "manifest.json")));
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("workload resolver rejects intermediate and terminal symlinks", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "hosted-symlink-"));
+  try {
+    const workloadRoot = path.join(root, "workloads");
+    const outside = path.join(root, "outside-app");
+    fs.mkdirSync(workloadRoot, { recursive: true });
+    const fixture = catalogFixture(root, outside);
+    fs.symlinkSync(outside, path.join(workloadRoot, "example-app"), "dir");
+    assert.throws(
+      () => resolveCatalog({ ...fixture, workloadRoot, coreFiles: [fixture.coreFile], projectName: "fixture" }),
+      /symlink component/,
+    );
+    fs.rmSync(path.join(workloadRoot, "example-app"));
+    fs.mkdirSync(path.join(workloadRoot, "example-app"));
+    fs.symlinkSync(path.join(outside, "manifest.json"), path.join(workloadRoot, "example-app", "manifest.json"));
+    assert.throws(
+      () => resolveCatalog({ ...fixture, workloadRoot, coreFiles: [fixture.coreFile], projectName: "fixture" }),
+      /symlink component/,
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("workload environment accepts only non-secret prefixed variables", () => {
