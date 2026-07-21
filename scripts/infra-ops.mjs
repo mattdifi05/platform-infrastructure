@@ -35,6 +35,13 @@ import { canonicalVpsTopologyPlan, parseCanonicalVpsTopology } from "./canonical
 import { candidateIdentityMatches, createCandidateIdentity, evaluateCandidateReportBinding, normalizeRepositoryIdentity } from "./candidate-identity.mjs";
 import { verifyTrustedEvidenceReports } from "./evidence-trust-envelope.mjs";
 import { verifyOwnerPinnedBundleManifest } from "./evidence-bundle-anchor.mjs";
+import {
+  createEvidenceReportContext,
+  evaluateEvidenceBundlePhase,
+  evidenceBundleManifestVersion,
+  evidenceBundlePhasePolicy,
+  normalizeEvidenceBundlePhase,
+} from "./evidence-bundle-phase.mjs";
 import { validateEdgeProviderEvidence } from "./edge-provider-evidence.mjs";
 import {
   assertExactBranchProtection,
@@ -849,7 +856,18 @@ function ensureReportDir(name) {
 function writeJsonReport(directoryName, baseName, payload) {
   const directory = ensureReportDir(directoryName);
   const jsonPath = path.join(directory, `${baseName}.json`);
-  fs.writeFileSync(jsonPath, `${JSON.stringify(payload, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+  const boundPayload = payload && typeof payload === "object" && !Array.isArray(payload)
+    ? {
+        ...payload,
+        evidenceContext: createEvidenceReportContext({
+          git: gitEvidence(),
+          phase: process.env.EVIDENCE_REPORT_PHASE,
+          command,
+          env: process.env,
+        }),
+      }
+    : payload;
+  fs.writeFileSync(jsonPath, `${JSON.stringify(boundPayload, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
   fs.chmodSync(jsonPath, 0o600);
   return jsonPath;
 }
@@ -2710,6 +2728,8 @@ function infraTestingHygiene() {
     "scripts/evidence-trust-envelope.test.mjs",
     "scripts/evidence-bundle-anchor.mjs",
     "scripts/evidence-bundle-anchor.test.mjs",
+    "scripts/evidence-bundle-phase.mjs",
+    "scripts/evidence-bundle-phase.test.mjs",
     "scripts/vps-evidence-request.mjs",
     "scripts/vps-evidence-request.test.mjs",
     "scripts/edge-provider-evidence.mjs",
@@ -2735,6 +2755,7 @@ function infraTestingHygiene() {
   run(process.execPath, ["--test", "scripts/candidate-identity.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/evidence-trust-envelope.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/evidence-bundle-anchor.test.mjs"], { cwd: infraRoot });
+  run(process.execPath, ["--test", "scripts/evidence-bundle-phase.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["scripts/vps-evidence-request.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/edge-provider-evidence.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "platform-alert-dispatcher/server.test.mjs"], { cwd: infraRoot });
@@ -7847,6 +7868,13 @@ function goNoGoRemediationMarkdown(remediation) {
   ]);
 }
 
+const evidenceBundleCandidateCiLabels = new Set([
+  "healthcheck-coverage",
+  "rate-limit-evidence",
+  "audit-log-evidence",
+  "retention-evidence",
+]);
+
 const evidenceBundleReportSpecs = [
   { directory: "go-no-go", prefix: "production-go-no-go-", label: "production-go-no-go", required: true },
   { directory: "production-readiness", prefix: "production-readiness-", label: "production-readiness-live", required: true },
@@ -7875,7 +7903,12 @@ const evidenceBundleReportSpecs = [
   { directory: "backups", prefix: "", label: "backup-execution-reports", required: false },
   { directory: "restore-drills", prefix: "full-restore-drill-", label: "full-restore-drill", required: false },
   { directory: "failure-tests", prefix: "failure-tests-", label: "failure-tests", required: false },
-];
+].map((spec) => ({
+  ...spec,
+  phases: evidenceBundleCandidateCiLabels.has(spec.label)
+    ? ["candidate-ci", "production-live"]
+    : ["production-live"],
+}));
 
 const evidenceBundleDocPaths = [
   "README.md",
@@ -7917,13 +7950,23 @@ function assertEvidenceBundleRelativePath(relativePath) {
   return normalized;
 }
 
-function listEvidenceBundleReportFiles({ allReports }) {
+function evidenceBundleSpecsForPhase(phase) {
+  return evidenceBundleReportSpecs.filter((spec) => spec.phases.includes(phase));
+}
+
+function evidenceBundleProductionRequiredLabels() {
+  return evidenceBundleReportSpecs.filter((spec) => spec.required).map((spec) => spec.label);
+}
+
+function listEvidenceBundleReportFiles({ allReports, phase }) {
   const files = [];
   const missing = [];
-  for (const spec of evidenceBundleReportSpecs) {
+  const policy = evidenceBundlePhasePolicy(phase, { productionRequiredLabels: evidenceBundleProductionRequiredLabels() });
+  const requiredLabels = new Set(policy.requiredLabels);
+  for (const spec of evidenceBundleSpecsForPhase(phase)) {
     const directory = path.join(infraRoot, "reports", spec.directory);
     if (!fs.existsSync(directory)) {
-      if (spec.required) missing.push({ label: spec.label, reason: "missing report directory" });
+      if (requiredLabels.has(spec.label)) missing.push({ label: spec.label, reason: "missing report directory" });
       continue;
     }
     if (allReports) {
@@ -7932,13 +7975,13 @@ function listEvidenceBundleReportFiles({ allReports }) {
         .map((name) => path.join(directory, name))
         .filter((filePath) => fs.statSync(filePath).isFile())
         .sort();
-      if (!matches.length && spec.required) missing.push({ label: spec.label, reason: "missing reports" });
+      if (!matches.length && requiredLabels.has(spec.label)) missing.push({ label: spec.label, reason: "missing reports" });
       files.push(...matches);
       continue;
     }
     const report = latestJsonReport(spec.directory, spec.prefix);
     if (!report) {
-      if (spec.required) missing.push({ label: spec.label, reason: "missing latest JSON report" });
+      if (requiredLabels.has(spec.label)) missing.push({ label: spec.label, reason: "missing latest JSON report" });
       continue;
     }
     files.push(report.filePath);
@@ -7948,6 +7991,57 @@ function listEvidenceBundleReportFiles({ allReports }) {
     }
   }
   return { files, missing };
+}
+
+function evidenceBundleSpecForEntry(entryPath, phase) {
+  return evidenceBundleSpecsForPhase(phase).find((spec) => (
+    entryPath.startsWith(`reports/${spec.directory}/`)
+    && path.basename(entryPath).startsWith(spec.prefix)
+    && entryPath.endsWith(".json")
+  )) ?? null;
+}
+
+function evidenceBundleCapturedReports(entries, bytesByPath, phase, issues = []) {
+  const reports = [];
+  for (const entry of entries) {
+    if (entry.type !== "report" || !entry.path.endsWith(".json")) continue;
+    const spec = evidenceBundleSpecForEntry(entry.path, phase);
+    if (!spec) {
+      issues.push(`${entry.path}: report is not allowed in phase ${phase}`);
+      continue;
+    }
+    const bytes = bytesByPath.get(entry.path);
+    if (!bytes) {
+      issues.push(`${entry.path}: report bytes are unavailable`);
+      continue;
+    }
+    try {
+      reports.push({ label: spec.label, path: entry.path, payload: JSON.parse(bytes.toString("utf8")) });
+    } catch {
+      issues.push(`${entry.path}: report is invalid JSON`);
+    }
+  }
+  return reports;
+}
+
+function evaluateCapturedEvidenceBundle({ phase, sourceGit, currentGit, candidate, missingRequiredEvidence, reports, requireComplete, notBefore, maxAgeHours, expectedPhase }) {
+  return evaluateEvidenceBundlePhase({
+    phase,
+    expectedPhase,
+    sourceGit,
+    currentGit,
+    candidate,
+    missingRequiredEvidence,
+    reports,
+    productionRequiredLabels: evidenceBundleProductionRequiredLabels(),
+    requireComplete,
+    notBefore,
+    maxAgeHours,
+    reportPasses: (label, payload) => {
+      const spec = evidenceBundleReportSpecs.find((entry) => entry.label === label);
+      return spec ? evidenceBundleReportPasses(spec, payload) : { passed: false, detail: "unknown report label" };
+    },
+  });
 }
 
 function latestEvidenceBundleDir(outputRoot) {
@@ -8091,8 +8185,13 @@ async function evidenceBundle() {
 
 async function evidenceBundleBody() {
   log("==> Evidence bundle");
+  const phase = normalizeEvidenceBundlePhase(argv.phase ?? process.env.EVIDENCE_BUNDLE_PHASE);
+  const strict = booleanFlag(argv.strict);
   const allReports = booleanFlag(argv.allReports);
   const noArchive = booleanFlag(argv.noArchive);
+  if (strict && allReports) fail("Strict evidence bundles require exactly the latest JSON report per phase category; --allReports is not allowed.");
+  const maxAgeHours = Number(argv.maxAgeHours ?? process.env.EVIDENCE_BUNDLE_MAX_AGE_HOURS ?? 24);
+  const notBefore = argv.notBefore ?? process.env.EVIDENCE_BUNDLE_NOT_BEFORE ?? null;
   const stamp = reportTimestamp();
   const outputRoot = path.resolve(argv.outputDir ?? path.join(infraRoot, ".tmp", "evidence-bundles"));
   fs.mkdirSync(outputRoot, { recursive: true });
@@ -8123,7 +8222,7 @@ async function evidenceBundleBody() {
     return entry;
   };
 
-  const { files: reportFiles, missing } = listEvidenceBundleReportFiles({ allReports });
+  const { files: reportFiles, missing } = listEvidenceBundleReportFiles({ allReports, phase });
   for (const reportFile of reportFiles) {
     const relativePath = path.relative(infraRoot, reportFile).replaceAll("\\", "/");
     copyEvidenceFile(reportFile, relativePath, "report");
@@ -8132,13 +8231,48 @@ async function evidenceBundleBody() {
     copyEvidenceFile(path.join(infraRoot, docPath), docPath, "document");
   }
 
+  const entries = Array.from(copied.values()).sort((a, b) => a.path.localeCompare(b.path));
+  const copiedBytes = new Map(entries.map((entry) => [entry.path, fs.readFileSync(path.join(bundleDir, entry.path))]));
+  const captureIssues = [];
+  const reports = evidenceBundleCapturedReports(entries, copiedBytes, phase, captureIssues);
+  const sourceGit = gitEvidence();
+  const candidate = phase === "production-live"
+    ? reports.find((report) => report.label === "production-go-no-go")?.payload?.candidate ?? null
+    : null;
+  const evaluation = evaluateCapturedEvidenceBundle({
+    phase,
+    sourceGit,
+    candidate,
+    missingRequiredEvidence: missing,
+    reports,
+    requireComplete: strict,
+    notBefore,
+    maxAgeHours,
+  });
+  evaluation.issues.push(...captureIssues);
+  evaluation.issues = [...new Set(evaluation.issues)];
+  evaluation.passed = evaluation.issues.length === 0;
+  evaluation.complete = strict && evaluation.passed;
+
   const manifestPath = path.join(bundleDir, "manifest.json");
   const manifest = {
-    version: 1,
+    version: evidenceBundleManifestVersion,
     generatedAt: new Date().toISOString(),
     mode: allReports ? "all-reports" : "latest-per-category",
+    phase: {
+      name: phase,
+      authority: evaluation.policy?.authority ?? null,
+      strict,
+      complete: evaluation.complete,
+      notBefore,
+      maxAgeHours,
+      requiredLabels: evaluation.requiredLabels,
+      reportLabels: evaluation.reportLabels,
+      issues: evaluation.issues,
+    },
     source: {
-      git: gitEvidence(),
+      git: sourceGit,
+      candidate,
       command: "evidence-bundle",
     },
     policy: {
@@ -8148,7 +8282,7 @@ async function evidenceBundleBody() {
       outputDirectoryIgnoredByGit: outputRoot.includes(`${path.sep}.tmp${path.sep}`) || path.basename(path.dirname(outputRoot)) === ".tmp",
     },
     missingRequiredEvidence: missing,
-    entries: Array.from(copied.values()).sort((a, b) => a.path.localeCompare(b.path)),
+    entries,
   };
   fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
   const manifestMarkdownPath = path.join(bundleDir, "manifest.md");
@@ -8157,8 +8291,13 @@ async function evidenceBundleBody() {
     "",
     `Generated at: ${manifest.generatedAt}`,
     `Mode: ${manifest.mode}`,
+    `Phase: ${manifest.phase.name}`,
+    `Phase authority: ${manifest.phase.authority}`,
+    `Strict complete: ${manifest.phase.complete ? "yes" : "no"}`,
     `Git commit: ${manifest.source.git.commit ?? "unknown"}`,
+    `Git tree: ${manifest.source.git.tree ?? "unknown"}`,
     `Git dirty: ${manifest.source.git.dirty ? "yes" : "no"}`,
+    `Candidate: ${manifest.source.candidate?.id ?? "not-applicable"}`,
     "",
     "## Policy",
     "",
@@ -8170,6 +8309,10 @@ async function evidenceBundleBody() {
     "## Missing Required Evidence",
     "",
     ...(missing.length ? missing.map((item) => `- ${item.label}: ${item.reason}`) : ["- none"]),
+    "",
+    "## Phase Evaluation Issues",
+    "",
+    ...(evaluation.issues.length ? evaluation.issues.map((issue) => `- ${issue}`) : ["- none"]),
     "",
     "## Files",
     "",
@@ -8196,6 +8339,8 @@ async function evidenceBundleBody() {
     generatedAt: manifest.generatedAt,
     bundleDir,
     archive,
+    phase,
+    complete: manifest.phase.complete,
     files: manifest.entries.length,
     missingRequiredEvidence: missing,
   };
@@ -8207,6 +8352,9 @@ async function evidenceBundleBody() {
   if (missing.length) {
     log(`Missing required evidence: ${missing.map((item) => item.label).join(", ")}`);
   }
+  if (strict && !evaluation.passed) {
+    fail(`Strict ${phase} evidence bundle is incomplete or incompatible: ${evaluation.issues.join("; ")}`);
+  }
 }
 
 async function evidenceBundleVerify() {
@@ -8214,6 +8362,9 @@ async function evidenceBundleVerify() {
   const outputRoot = path.resolve(argv.outputDir ?? path.join(infraRoot, ".tmp", "evidence-bundles"));
   const bundleDir = path.resolve(argv.bundleDir ?? argv._[0] ?? latestEvidenceBundleDir(outputRoot) ?? "");
   const requireComplete = booleanFlag(argv.requireComplete);
+  const expectedPhaseValue = argv.phase ?? process.env.EVIDENCE_BUNDLE_PHASE;
+  const maxAgeHours = Number(argv.maxAgeHours ?? process.env.EVIDENCE_BUNDLE_MAX_AGE_HOURS ?? 24);
+  const expectedNotBefore = argv.notBefore ?? process.env.EVIDENCE_BUNDLE_NOT_BEFORE ?? null;
   const issues = [];
   const externalPending = [];
   if (!bundleDir || !fs.existsSync(bundleDir) || !fs.statSync(bundleDir).isDirectory()) {
@@ -8247,8 +8398,8 @@ async function evidenceBundleVerify() {
       issues.push(String(error?.message ?? error));
     }
   }
-  if (manifest.version !== 1) {
-    issues.push(`manifest.version must be 1, found ${manifest.version ?? "missing"}`);
+  if (manifest.version !== evidenceBundleManifestVersion) {
+    issues.push(`manifest.version must be ${evidenceBundleManifestVersion}, found ${manifest.version ?? "missing"}`);
   }
   if (manifest.source?.command !== "evidence-bundle") {
     issues.push("manifest.source.command must be evidence-bundle");
@@ -8265,12 +8416,30 @@ async function evidenceBundleVerify() {
   if (manifest.policy?.outputDirectoryIgnoredByGit !== true) {
     issues.push("manifest policy must confirm the output directory is ignored by Git");
   }
+  let phase = null;
+  try {
+    phase = normalizeEvidenceBundlePhase(manifest.phase?.name);
+  } catch (error) {
+    issues.push(String(error?.message ?? error));
+  }
+  if (requireComplete && !expectedPhaseValue) {
+    issues.push("--requireComplete requires an independently selected --phase");
+  }
+  if (manifest.phase?.maxAgeHours !== maxAgeHours) {
+    issues.push(`manifest phase maxAgeHours mismatch: expected ${maxAgeHours}, found ${manifest.phase?.maxAgeHours ?? "missing"}`);
+  }
+  if (expectedNotBefore && manifest.phase?.notBefore !== expectedNotBefore) {
+    issues.push("manifest phase notBefore does not match the independently supplied timestamp");
+  }
+  if (requireComplete && (manifest.phase?.strict !== true || manifest.phase?.complete !== true)) {
+    issues.push("complete verification requires a manifest created by the strict phase flow");
+  }
+  if (requireComplete && Array.isArray(manifest.phase?.issues) && manifest.phase.issues.length) {
+    issues.push("strict manifest records unresolved phase issues");
+  }
   const missingRequiredEvidence = Array.isArray(manifest.missingRequiredEvidence) ? manifest.missingRequiredEvidence : [];
   if (!Array.isArray(manifest.missingRequiredEvidence)) {
     issues.push("manifest.missingRequiredEvidence must be an array");
-  }
-  if (requireComplete && missingRequiredEvidence.length) {
-    issues.push(`required evidence is still missing: ${missingRequiredEvidence.map((item) => item.label ?? "unknown").join(", ")}`);
   }
   if (!Array.isArray(manifest.entries) || !manifest.entries.length) {
     issues.push("manifest.entries must be a non-empty array");
@@ -8295,34 +8464,31 @@ async function evidenceBundleVerify() {
       issues.push(`missing required document entry: ${docPath}`);
     }
   }
-  const missingLabels = new Set(missingRequiredEvidence.map((item) => item.label));
-  for (const spec of evidenceBundleReportSpecs) {
-    if (spec.required && !missingLabels.has(spec.label)) {
-      const reportEntries = [...paths]
-        .filter((entryPath) => entryPath.startsWith(`reports/${spec.directory}/`) && path.basename(entryPath).startsWith(spec.prefix) && entryPath.endsWith(".json"))
-        .sort();
-      if (!reportEntries.length) {
-        issues.push(`missing required report entry: ${spec.label}`);
-      } else if (requireComplete) {
-        const reportEntry = reportEntries.at(-1);
-        const reportBytes = validatedEntries.get(reportEntry);
-        if (!reportBytes) {
-          issues.push(`required report could not be validated from captured bytes: ${spec.label}`);
-        } else {
-          let reportPayload = null;
-          try {
-            reportPayload = JSON.parse(reportBytes.toString("utf8"));
-          } catch {
-            issues.push(`required report is invalid JSON: ${spec.label}`);
-          }
-          if (reportPayload) {
-            const result = evidenceBundleReportPasses(spec, reportPayload);
-            if (!result.passed) {
-              issues.push(`required report is not passing: ${spec.label}; ${result.detail}`);
-            }
-          }
-        }
-      }
+  let phaseEvaluation = null;
+  if (phase) {
+    const reportEntries = (Array.isArray(manifest.entries) ? manifest.entries : []).filter((entry) => entry?.type === "report");
+    const reports = evidenceBundleCapturedReports(reportEntries, validatedEntries, phase, issues);
+    phaseEvaluation = evaluateCapturedEvidenceBundle({
+      phase,
+      expectedPhase: expectedPhaseValue,
+      sourceGit: manifest.source?.git,
+      currentGit: gitEvidence(),
+      candidate: manifest.source?.candidate,
+      missingRequiredEvidence,
+      reports,
+      requireComplete,
+      notBefore: manifest.phase?.notBefore,
+      maxAgeHours,
+    });
+    issues.push(...phaseEvaluation.issues);
+    if (requireComplete && manifest.phase?.authority !== phaseEvaluation.policy?.authority) {
+      issues.push("manifest phase authority does not match verifier policy");
+    }
+    if (requireComplete && JSON.stringify(manifest.phase?.requiredLabels ?? null) !== JSON.stringify(phaseEvaluation.requiredLabels)) {
+      issues.push("manifest requiredLabels do not match verifier phase policy");
+    }
+    if (requireComplete && JSON.stringify(manifest.phase?.reportLabels ?? null) !== JSON.stringify(phaseEvaluation.reportLabels)) {
+      issues.push("manifest reportLabels do not match captured report set");
     }
   }
   if (!fs.existsSync(manifestMarkdownPath)) {
@@ -8336,6 +8502,9 @@ async function evidenceBundleVerify() {
     if (!Array.isArray(summary.missingRequiredEvidence)) {
       issues.push("summary.missingRequiredEvidence must be an array");
     }
+    if (summary.phase !== manifest.phase?.name || summary.complete !== manifest.phase?.complete) {
+      issues.push("summary phase metadata mismatch manifest");
+    }
   } else {
     issues.push("missing summary.json");
   }
@@ -8345,7 +8514,9 @@ async function evidenceBundleVerify() {
     generatedAt: new Date().toISOString(),
     status: issues.length ? "failed" : externalPending.length ? "external-pending" : "passed",
     bundleDir,
+    phase,
     requireComplete,
+    phaseEvaluation,
     manifestTrust,
     entryCount: paths.size,
     missingRequiredEvidence,
@@ -8358,6 +8529,7 @@ async function evidenceBundleVerify() {
     "",
     `Status: ${payload.status}`,
     `Bundle: ${bundleDir}`,
+    `Phase: ${phase ?? "invalid"}`,
     `Require complete: ${requireComplete}`,
     `Manifest trust: ${manifestTrust?.trustMode ?? "EXTERNAL-PENDING"}`,
     `Entries: ${payload.entryCount}`,
@@ -9261,7 +9433,7 @@ async function repoCoverageCheck() {
     ["github-actions-workflow-lint", /GitHub Actions workflow lint[\s\S]*rhysd\/actionlint:1\.7\.12@sha256:[a-f0-9]{64}/],
     ["github-actions-run-evidence-plan", /GitHub Actions run evidence plan[\s\S]*github-actions-run-evidence/],
     ["github-actions-run-evidence-verify-remote", /workflow_run:[\s\S]*enterprise-infra[\s\S]*Verify completed enterprise infra run[\s\S]*github-actions-run-evidence[\s\S]*--verifyRemote/],
-    ["production-live-evidence-workflow", /workflow_dispatch:[\s\S]*External uptime provider evidence[\s\S]*--providerEvidenceAttestation online[\s\S]*--providerEvidenceSourceDigest[\s\S]*--requireProviderEvidence[\s\S]*Production Cloudflare edge load benchmark[\s\S]*load-benchmark[\s\S]*--expectedEdgeProvider cloudflare[\s\S]*Cloudflare Access admin verify[\s\S]*cloudflare-access-admin[\s\S]*--verifyRemote[\s\S]*evidence-bundle-verify --requireComplete/],
+    ["production-live-evidence-workflow", /workflow_dispatch:[\s\S]*evidence_not_before:[\s\S]*External uptime provider evidence[\s\S]*--providerEvidenceAttestation online[\s\S]*--providerEvidenceSourceDigest[\s\S]*--requireProviderEvidence[\s\S]*Production Cloudflare edge load benchmark[\s\S]*load-benchmark[\s\S]*--expectedEdgeProvider cloudflare[\s\S]*Cloudflare Access admin verify[\s\S]*cloudflare-access-admin[\s\S]*--verifyRemote[\s\S]*evidence-bundle --phase production-live --strict[\s\S]*evidence-bundle-verify --phase production-live[\s\S]*--requireComplete/],
     ["vps-evidence-workflow", /workflow_dispatch:[\s\S]*Run VPS evidence on VPS[\s\S]*vps-evidence-request\.mjs render[\s\S]*Upload VPS evidence reports/],
     ["secret-scan", /Secret scan[\s\S]*secret-scan/],
     ["ha-config-check", /HA configuration check[\s\S]*ha-config-check/],
@@ -9279,7 +9451,7 @@ async function repoCoverageCheck() {
     ["alert-evidence-summary", /alert-evidence/],
     ["production-go-no-go-summary", /production-go-no-go/],
     ["pre-go-live-evidence-report", /Pre go-live evidence report[\s\S]*pre-go-live-evidence --infraOnly --repo/],
-    ["evidence-bundle-smoke", /evidence-bundle --noArchive/],
+    ["evidence-bundle-smoke", /evidence-bundle --phase candidate-ci --strict --noArchive/],
     ["evidence-bundle-verify", /Evidence bundle integrity verify[\s\S]*evidence-bundle-verify/],
     ["linux-portability", /linux-portability-check/],
     ["enterprise-requirements", /Enterprise requirements traceability[\s\S]*enterprise-requirements-check/],

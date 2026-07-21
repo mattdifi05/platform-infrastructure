@@ -1013,14 +1013,21 @@ The same verdict retains stale bootstrap/hardening evidence, UPS, complete
 pre-go-live, rotation, off-site DR and real alert delivery as local/maintenance
 blockers. GitHub run, authenticated external uptime, public load, signed
 release/rollback and Cloudflare Access remain provider blockers. Run
-`evidence-bundle-verify --requireComplete` only after every one of those proofs
-is real.
+`evidence-bundle-verify --phase production-live --requireComplete` only after
+every one of those proofs is real. A `candidate-ci` bundle is intentionally not
+production authority.
 
 After the final reports are generated, create a non-secret evidence archive:
 
 ```sh
-sh ./scripts/evidence-bundle.sh
+EVIDENCE_REPORT_PHASE=production-live \
+  sh ./scripts/evidence-bundle.sh \
+    --phase production-live \
+    --notBefore <latest-relevant-event-rfc3339> \
+    --strict
 sh ./scripts/evidence-bundle-verify.sh \
+  --phase production-live \
+  --notBefore <latest-relevant-event-rfc3339> \
   --ownerPinnedManifestSha256 <independently-approved-sha256> \
   --requireComplete
 ```
@@ -1038,6 +1045,16 @@ that independent value with `--ownerPinnedManifestSha256` (or
 `EVIDENCE_BUNDLE_MANIFEST_SHA256`). Missing approval is reported as
 `EXTERNAL-PENDING`; an internally recorded or freshly recomputed bundle digest
 does not authenticate the manifest.
+
+Strict bundles use manifest schema v2. Every selected JSON report must carry
+the exact phase plus a clean Git commit/tree/repository context. The verifier
+reapplies its own phase policy to the captured bytes, requires exactly one
+report per required category, rejects stale/future/pre-event and semantically
+non-passing modes, and compares the bundle source with the verifier checkout.
+For `production-live`, the manifest also binds the trusted release candidate,
+including Compose render and workload-lock digests. The owner pin authenticates
+the final one-HEAD set; it does not convert missing provider, off-site restore,
+or live execution into a pass.
 
 1. Build versioned images:
 

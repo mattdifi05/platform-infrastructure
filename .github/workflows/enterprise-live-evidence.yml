@@ -35,10 +35,18 @@ on:
         options:
           - "true"
           - "false"
+      evidence_not_before:
+        description: RFC3339 timestamp of the latest release/runtime event that every bundled report must postdate
+        required: true
+        type: string
 
 permissions:
   contents: read
   actions: read
+
+env:
+  EVIDENCE_REPORT_PHASE: production-live
+  EVIDENCE_BUNDLE_NOT_BEFORE: ${{ inputs.evidence_not_before }}
 
 jobs:
   production-live-evidence:
@@ -133,9 +141,9 @@ jobs:
       - name: Evidence bundle stage for independent owner approval
         if: inputs.run_final_gates == 'true'
         run: |
-          sh ./scripts/infra-ops.sh evidence-bundle --noArchive
+          sh ./scripts/infra-ops.sh evidence-bundle --phase production-live --strict --notBefore "$EVIDENCE_BUNDLE_NOT_BEFORE" --noArchive
           set +e
-          output=$(sh ./scripts/infra-ops.sh evidence-bundle-verify --requireComplete 2>&1)
+          output=$(sh ./scripts/infra-ops.sh evidence-bundle-verify --phase production-live --notBefore "$EVIDENCE_BUNDLE_NOT_BEFORE" --requireComplete 2>&1)
           status=$?
           set -e
           printf '%s\n' "$output"

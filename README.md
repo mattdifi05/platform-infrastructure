@@ -583,8 +583,14 @@ Quando i report sono pronti, genera un archivio non committato con le evidenze
 operative:
 
 ```sh
-sh ./scripts/evidence-bundle.sh
+EVIDENCE_REPORT_PHASE=production-live \
+  sh ./scripts/evidence-bundle.sh \
+    --phase production-live \
+    --notBefore <latest-relevant-event-rfc3339> \
+    --strict
 sh ./scripts/evidence-bundle-verify.sh \
+  --phase production-live \
+  --notBefore <latest-relevant-event-rfc3339> \
   --ownerPinnedManifestSha256 <independently-approved-sha256> \
   --requireComplete
 ```
@@ -599,7 +605,15 @@ rilegge `manifest.json`, ricontrolla SHA256, size, policy anti-segreti e, con
 digest del manifest deve essere approvato e fissato dal release owner fuori dal
 bundle; senza `--ownerPinnedManifestSha256` la verifica resta
 `EXTERNAL-PENDING`. Un digest copiato dal manifest o dal summary contenuto nello
-stesso bundle non e' un trust anchor.
+stesso bundle non e' un trust anchor. Ogni report JSON scritto dal tool include
+un contesto `platform.evidence-report-context/v1` con fase, commit, tree, stato
+clean e metadati GitHub non sensibili. La verifica strict rifiuta report
+mancanti, duplicati, stale, anteriori all'evento indicato, prodotti in un'altra
+fase o legati a commit/tree/repository/candidato differenti. `candidate-ci` e'
+una fase completa ma solo candidate-scoped: non puo' essere riusata come prova
+`production-live`. La fase live richiede inoltre il candidato completo
+(repository, commit, tree, Compose project, workload lock e render digest) e il
+set di prove production previsto dalla policy.
 
 `scripts/linux-portability-check.sh` verifica BOM UTF-8, CRLF, path Windows e
 dipendenze PowerShell/cmd nei file operativi, poi valida gli shell script dentro
