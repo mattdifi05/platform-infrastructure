@@ -2,6 +2,8 @@ export const DATABASE_ADMIN_AUTHORIZATION_PATH = "/control/internal/database-adm
 
 const ALLOWED_METHODS = new Set(["GET", "HEAD", "POST"]);
 const ALLOWED_PATH_PREFIXES = ["/phpmyadmin", "/phppgadmin"];
+const ENCODED_CONTROL_OCTET = /%(?:0[0-9a-f]|1[0-9a-f]|7f)/i;
+const ENCODED_PATH_SEPARATOR_OR_DELIMITER = /%(?:21|23|24|25|26|27|28|29|2a|2b|2c|2e|2f|3a|3b|3d|3f|40|5b|5c|5d)/i;
 
 export function authorizeDatabaseAdminForwardTarget(headers, { expectedHost }) {
   const host = normalizedSingleHeader(headers?.["x-forwarded-host"]);
@@ -19,12 +21,16 @@ export function authorizeDatabaseAdminForwardTarget(headers, { expectedHost }) {
 function databaseAdminPath(uri) {
   if (!uri || uri.length > 4096 || !uri.startsWith("/") || /[\\\u0000-\u001f\u007f#]/.test(uri)) return "";
   const rawPath = uri.split("?", 1)[0];
+  if (ENCODED_CONTROL_OCTET.test(rawPath) || ENCODED_PATH_SEPARATOR_OR_DELIMITER.test(rawPath)) return "";
   let decoded;
   try {
     decoded = decodeURIComponent(rawPath);
   } catch {
     return "";
   }
+  if (!decoded.startsWith("/") || decoded.startsWith("//")
+    || /[\\\u0000-\u001f\u007f-\u009f?#]/.test(decoded)
+    || /%[0-9a-f]{2}/i.test(decoded)) return "";
   if (decoded.split("/").some((segment) => segment === "." || segment === "..")) return "";
   if (!ALLOWED_PATH_PREFIXES.some((prefix) => decoded === prefix || decoded.startsWith(`${prefix}/`))) return "";
   return decoded;
