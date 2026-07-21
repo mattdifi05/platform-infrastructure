@@ -46,6 +46,12 @@ export function evaluateRuntimeIsolation(config, options = {}) {
     .filter(([, service]) => String(service?.labels?.["com.platform.workload-id"] || ""))
     .map(([name]) => name)
     .sort();
+  const workloadIds = new Set(workloadServices.map((name) => String(services[name]?.labels?.["com.platform.workload-id"] || "")));
+  const unsafeWorkloadConfigs = Object.entries(object(config?.configs))
+    .filter(([name]) => [...workloadIds].some((id) => name.startsWith(`${id}_`) || name.startsWith(`${id.replaceAll("-", "_")}_`)))
+    .filter(([, definition]) => Object.hasOwn(object(definition), "content") || Object.hasOwn(object(definition), "environment"))
+    .map(([name]) => name);
+  record("workload-no-inline-config-definitions", unsafeWorkloadConfigs.length === 0, `configs=${unsafeWorkloadConfigs.join(",") || "none"}`);
   const readOnlyServices = new Set([...REQUIRED_READ_ONLY, ...workloadServices]);
   for (const name of readOnlyServices) {
     record(`rootfs-read-only-${name}`, services[name]?.read_only === true, `${name} readOnly=${services[name]?.read_only === true}`);

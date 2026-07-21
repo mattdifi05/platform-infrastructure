@@ -110,6 +110,16 @@ test("rejects workload config grants independently at runtime", () => {
   assert.match(report.failures.join("\n"), /workload-no-configs-example-app-web/);
 });
 
+test("rejects workload inline and host-environment config definitions at runtime", () => {
+  for (const definition of [{ content: "hostile" }, { environment: "HOST_SECRET" }]) {
+    const config = fixture();
+    config.configs = { example_app_inline: definition };
+    const report = evaluateRuntimeIsolation(config);
+    assert.equal(report.status, "failed");
+    assert.match(report.failures.join("\n"), /workload-no-inline-config-definitions/);
+  }
+});
+
 test("rejects workload host device controls independently at runtime", () => {
   for (const mutation of [
     (service) => { service.devices = [{ source: "/dev/kvm", target: "/dev/kvm" }]; },

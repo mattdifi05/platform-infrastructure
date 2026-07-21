@@ -139,6 +139,16 @@ class HostedWorkloadSourcePolicyTest < Minitest::Test
     assert_raises(ArgumentError) { HostedWorkloadSourcePolicy.validate_source_model(grant, "fixture") }
   end
 
+  def test_rejects_inline_and_host_environment_configs
+    [{ "content" => "hostile" }, { "environment" => "HOST_SECRET" }].each do |definition|
+      model = { "configs" => { "example-app_config" => definition }, "services" => { "app" => {} } }
+      error = assert_raises(ArgumentError) do
+        HostedWorkloadSourcePolicy.validate_source_model(model, "fixture")
+      end
+      assert_match(/cannot use inline or host-environment content/, error.message)
+    end
+  end
+
   def test_rejects_host_device_controls
     [
       "services:\n  app:\n    devices:\n      - /dev/kvm:/dev/kvm\n",

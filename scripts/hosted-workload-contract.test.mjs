@@ -258,6 +258,12 @@ test("file-backed configs and workload config grants are rejected after render",
   granted.configs = { platform_config: { external: true } };
   granted.services["example-app-web"].configs = [{ source: "platform_config", target: "/run/config" }];
   assert.throws(() => validateRenderedWorkloads({ core, combined: granted, lock }), /cannot mount platform or host-backed configs/);
+
+  for (const definition of [{ content: "hostile" }, { environment: "HOST_SECRET" }]) {
+    const combined = combinedFixture();
+    combined.configs = { example_app_inline: definition };
+    assert.throws(() => validateRenderedWorkloads({ core, combined, lock }), /cannot use inline or host-environment content/);
+  }
 });
 test("host device controls are rejected after render", () => {
   for (const mutation of [
@@ -618,7 +624,7 @@ test("legacy hosted workload locks fail closed", () => {
 test("raw policy receipt requires the exact current control set", () => {
   const rawPolicyReceipt = {
     policyVersion: "hosted-raw-v1",
-    controls: ["bind-bounded-local-logging", "bind-no-swap-oom-policy", "bind-owned-secret-aliases", "bind-owned-volumes", "bind-private-pid-numeric-user", "deny-api-socket", "deny-compose-interpolation", "deny-device-access", "deny-env-file", "deny-extends", "deny-file-configs", "deny-gpu-access", "deny-include", "deny-lifecycle-hooks", "deny-local-volume-options", "deny-providers", "deny-runtime-overrides", "deny-scaling", "deny-stop-grace-overrides", "deny-supplemental-groups", "deny-volumes-from"],
+    controls: ["bind-bounded-local-logging", "bind-no-swap-oom-policy", "bind-owned-secret-aliases", "bind-owned-volumes", "bind-private-pid-numeric-user", "deny-api-socket", "deny-compose-interpolation", "deny-device-access", "deny-env-file", "deny-extends", "deny-file-configs", "deny-gpu-access", "deny-include", "deny-inline-configs", "deny-lifecycle-hooks", "deny-local-volume-options", "deny-providers", "deny-runtime-overrides", "deny-scaling", "deny-stop-grace-overrides", "deny-supplemental-groups", "deny-volumes-from"],
     workloadContentSha256: "a".repeat(64),
     workloads: [{
       workloadId: "example-app",
@@ -640,12 +646,12 @@ test("raw policy receipt requires the exact current control set", () => {
     rawPolicyWorkloadContentSha256: "a".repeat(64),
     rawPolicyReceipt,
     rawPolicySha256: crypto.createHash("sha256").update(JSON.stringify(stable(rawPolicyReceipt))).digest("hex"),
-    rawPolicyControls: ["bind-bounded-local-logging", "bind-no-swap-oom-policy", "bind-owned-secret-aliases", "bind-owned-volumes", "bind-private-pid-numeric-user", "deny-api-socket", "deny-compose-interpolation", "deny-device-access", "deny-env-file", "deny-extends", "deny-file-configs", "deny-gpu-access", "deny-include", "deny-lifecycle-hooks", "deny-local-volume-options", "deny-providers", "deny-runtime-overrides", "deny-scaling", "deny-stop-grace-overrides", "deny-supplemental-groups", "deny-volumes-from"],
+    rawPolicyControls: ["bind-bounded-local-logging", "bind-no-swap-oom-policy", "bind-owned-secret-aliases", "bind-owned-volumes", "bind-private-pid-numeric-user", "deny-api-socket", "deny-compose-interpolation", "deny-device-access", "deny-env-file", "deny-extends", "deny-file-configs", "deny-gpu-access", "deny-include", "deny-inline-configs", "deny-lifecycle-hooks", "deny-local-volume-options", "deny-providers", "deny-runtime-overrides", "deny-scaling", "deny-stop-grace-overrides", "deny-supplemental-groups", "deny-volumes-from"],
   };
   assert.doesNotThrow(() => verifyRawPolicyReceipt(receipt));
   receipt.rawPolicyControls = ["deny-include"];
   assert.throws(() => verifyRawPolicyReceipt(receipt), /raw source policy receipt/);
-  receipt.rawPolicyControls = ["bind-bounded-local-logging", "bind-no-swap-oom-policy", "bind-owned-secret-aliases", "bind-owned-volumes", "bind-private-pid-numeric-user", "deny-api-socket", "deny-compose-interpolation", "deny-device-access", "deny-env-file", "deny-extends", "deny-file-configs", "deny-gpu-access", "deny-include", "deny-lifecycle-hooks", "deny-local-volume-options", "deny-providers", "deny-runtime-overrides", "deny-scaling", "deny-stop-grace-overrides", "deny-supplemental-groups", "deny-volumes-from"];
+  receipt.rawPolicyControls = ["bind-bounded-local-logging", "bind-no-swap-oom-policy", "bind-owned-secret-aliases", "bind-owned-volumes", "bind-private-pid-numeric-user", "deny-api-socket", "deny-compose-interpolation", "deny-device-access", "deny-env-file", "deny-extends", "deny-file-configs", "deny-gpu-access", "deny-include", "deny-inline-configs", "deny-lifecycle-hooks", "deny-local-volume-options", "deny-providers", "deny-runtime-overrides", "deny-scaling", "deny-stop-grace-overrides", "deny-supplemental-groups", "deny-volumes-from"];
   receipt.rawPolicySha256 = "b".repeat(64);
   assert.throws(() => verifyRawPolicyReceipt(receipt), /raw source policy receipt/);
   receipt.rawPolicyReceipt.workloads[0].composeSha256 = "d".repeat(64);

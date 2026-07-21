@@ -8,7 +8,7 @@ require "psych"
 
 module HostedWorkloadSourcePolicy
   VERSION = "hosted-raw-v1"
-  CONTROLS = %w[bind-bounded-local-logging bind-no-swap-oom-policy bind-owned-secret-aliases bind-owned-volumes bind-private-pid-numeric-user deny-api-socket deny-compose-interpolation deny-device-access deny-env-file deny-extends deny-file-configs deny-gpu-access deny-include deny-lifecycle-hooks deny-local-volume-options deny-providers deny-runtime-overrides deny-scaling deny-stop-grace-overrides deny-supplemental-groups deny-volumes-from].freeze
+  CONTROLS = %w[bind-bounded-local-logging bind-no-swap-oom-policy bind-owned-secret-aliases bind-owned-volumes bind-private-pid-numeric-user deny-api-socket deny-compose-interpolation deny-device-access deny-env-file deny-extends deny-file-configs deny-gpu-access deny-include deny-inline-configs deny-lifecycle-hooks deny-local-volume-options deny-providers deny-runtime-overrides deny-scaling deny-stop-grace-overrides deny-supplemental-groups deny-volumes-from].freeze
   MAX_COMPOSE_BYTES = 1_048_576
   STANDARD_TAG_PREFIX = "tag:yaml.org,2002:"
 
@@ -84,6 +84,9 @@ module HostedWorkloadSourcePolicy
     fail!("#{label} configs must be a mapping.") if !configs.nil? && !configs.is_a?(Hash)
     (configs || {}).each do |name, definition|
       fail!("#{label} config #{name} cannot use a file source.") if definition.is_a?(Hash) && definition.key?("file")
+      if definition.is_a?(Hash) && (definition.key?("content") || definition.key?("environment"))
+        fail!("#{label} config #{name} cannot use inline or host-environment content.")
+      end
     end
     secrets = model["secrets"]
     fail!("#{label} secrets must be a mapping.") if !secrets.nil? && !secrets.is_a?(Hash)
