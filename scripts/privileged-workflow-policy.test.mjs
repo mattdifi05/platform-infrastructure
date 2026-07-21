@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import { privilegedWorkflowMismatches } from "./privileged-workflow-policy.mjs";
+import { deploymentPrerequisiteMismatches, privilegedWorkflowMismatches } from "./privileged-workflow-policy.mjs";
 
 const fixtures = [
   [".github/workflows/enterprise-infra.yml", "deploy-vps", false],
@@ -28,4 +28,26 @@ assert.match(
   privilegedWorkflowMismatches(`${release}\n  push:\n    tags: ['v*']\n`, { jobName: "github-sigstore-release-evidence", forbidTagTrigger: true }).join(" "),
   /tag triggers/,
 );
-process.stdout.write(`privileged workflow policy tests passed ${fixtures.length * 3 + 1}/${fixtures.length * 3 + 1}\n`);
+
+const deployment = fs.readFileSync(".github/workflows/enterprise-infra.yml", "utf8");
+assert.deepEqual(deploymentPrerequisiteMismatches(deployment), []);
+assert.match(deploymentPrerequisiteMismatches(deployment.replace("      - dast-zap\n", "")).join(" "), /exact .* prerequisite set/);
+assert.match(
+  deploymentPrerequisiteMismatches(deployment.replace("    if: github.event_name == 'workflow_dispatch'\n    environment:\n      name: staging", "    if: false\n    environment:\n      name: staging")).join(" "),
+  /unconditionally/,
+);
+assert.match(
+  deploymentPrerequisiteMismatches(deployment.replace("    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.ref_protected == true\n    environment:\n      name: production", "    if: ${{ always() }}\n    environment:\n      name: production")).join(" "),
+  /fail\/skip propagation/,
+);
+assert.match(
+  deploymentPrerequisiteMismatches(deployment.replace("      - name: Run ZAP baseline against staging", "    continue-on-error: true\n      - name: Run ZAP baseline against staging")).join(" "),
+  /continue on error/,
+);
+assert.match(
+  deploymentPrerequisiteMismatches(`${deployment}\n  alternate-deploy:\n    environment:\n      name: production\n    steps:\n      - run: sh ./scripts/deploy-vps.sh\n`).join(" "),
+  /exactly one deploy-vps\.sh sink|exactly one production environment/,
+);
+
+const total = fixtures.length * 3 + 1 + 6;
+process.stdout.write(`privileged workflow policy tests passed ${total}/${total}\n`);

@@ -381,6 +381,7 @@ jobs:
     needs:
       - enterprise-readiness
       - release-admission
+      - dast-zap
     if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.ref_protected == true
     environment:
       name: production

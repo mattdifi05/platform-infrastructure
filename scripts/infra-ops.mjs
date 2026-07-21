@@ -64,6 +64,7 @@ import { evaluateProviderMfaAssurance } from "./provider-mfa-assurance.mjs";
 import { assertDeploymentAdmissionConfigured } from "./deployment-admission-policy.mjs";
 import { validateTrustedDeploymentReceipt } from "./deployment-receipt-policy.mjs";
 import { releaseEvidenceAdmissionReady } from "./release-go-no-go-policy.mjs";
+import { deploymentPrerequisiteMismatches } from "./privileged-workflow-policy.mjs";
 import { snapshotJsonArtifact } from "./stable-json-artifact.mjs";
 import {
   buildReleaseAdmissionReceipt,
@@ -6935,7 +6936,9 @@ async function governanceCheckBody() {
   assertMatch(infraWorkflow, /enterprise-readiness:[\s\S]*needs:\s*\r?\n\s+- quality\s*\r?\n\s+- compose\s*\r?\n\s+- supply-chain/, "Enterprise readiness must depend on all three behavior gates.");
   assertMatch(infraWorkflow, /dast-zap:[\s\S]*needs:\s*enterprise-readiness/, "DAST must run only after enterprise readiness.");
   assertMatch(infraWorkflow, /release-admission:[\s\S]*needs:\s*enterprise-readiness[\s\S]*release-artifact-gate\.sh/, "Release admission must verify artifacts after enterprise readiness and before deploy.");
-  assertMatch(infraWorkflow, /deploy-vps:[\s\S]*needs:\s*\r?\n\s+- enterprise-readiness\s*\r?\n\s+- release-admission/, "Production deploy must require enterprise readiness and release admission.");
+  const deploymentDagIssues = deploymentPrerequisiteMismatches(infraWorkflow);
+  if (deploymentDagIssues.length) fail(`Production deployment DAG is unsafe: ${deploymentDagIssues.join("; ")}`);
+  assertMatch(infraWorkflow, /deploy-vps:[\s\S]*needs:\s*\r?\n\s+- enterprise-readiness\s*\r?\n\s+- release-admission\s*\r?\n\s+- dast-zap/, "Production deploy must require enterprise readiness, release admission and staging DAST.");
   assertMatch(runbook, /Production deploy/, "Runbook must document production deploy.");
   assertMatch(runbook, /Rollback/, "Runbook must document rollback.");
   assertMatch(runbook, /release approval/i, "Runbook must document release approval.");
@@ -9907,7 +9910,7 @@ async function repoCoverageCheck() {
     ["quality-job-timeout", /^\s{2}quality:[\s\S]*?timeout-minutes:\s+30/m],
     ["compose-job-timeout", /^\s{2}compose:[\s\S]*?timeout-minutes:\s+45/m],
     ["canonical-ci-dag", /enterprise-readiness:[\s\S]*needs:\s*\r?\n\s+- quality\s*\r?\n\s+- compose\s*\r?\n\s+- supply-chain/],
-    ["deploy-after-readiness", /deploy-vps:[\s\S]*needs:\s*\r?\n\s+- enterprise-readiness\s*\r?\n\s+- release-admission/],
+    ["deploy-after-readiness", /deploy-vps:[\s\S]*needs:\s*\r?\n\s+- enterprise-readiness\s*\r?\n\s+- release-admission\s*\r?\n\s+- dast-zap/],
     ["dast-job-timeout", /dast-zap:[\s\S]*timeout-minutes:\s+45/],
     ["deploy-job-timeout", /deploy-vps:[\s\S]*timeout-minutes:\s+90/],
     ["shell-syntax", /for file in scripts\/\*\.sh/],

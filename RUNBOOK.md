@@ -1301,6 +1301,11 @@ Use this path when TLS and public certificates are terminated by VPS, Cloudflare
    concorrentemente gli indici e avvia due apply simultanei; non sostituisce una
    prova firewall/rete sul target approvato.
 
+    Il job production dipende inoltre dal DAST staging dello stesso run. Failure,
+    skip, `continue-on-error` o un job alternativo non possono raggiungere
+    `deploy-vps.sh`; readiness, release admission e DAST devono tutti concludersi
+    con successo prima che GitHub esponga l'environment production.
+
    Use `DEPLOY_PRE_GO_LIVE_RESTORE_DRILL=1`,
    `DEPLOY_PRE_GO_LIVE_OFFSITE_RESTORE_DRY_RUN=1` and
    `DEPLOY_PRE_GO_LIVE_GITHUB_REMOTE=1` during the staging/VPS validation

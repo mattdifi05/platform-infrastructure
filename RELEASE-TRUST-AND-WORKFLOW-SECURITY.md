@@ -96,6 +96,10 @@ identities plus the exact previous commit/tree and full running-service image
 identity set; rollback failure remains a hard deployment failure. Production
 evidence, remote-provider, DR/off-site, go/no-go, WAF and health gates are all
 mandatory; omitted or zero-valued flags fail before SSH or remote mutation.
+The GitHub production job also has exact, non-skippable dependencies on
+enterprise readiness, protected-main release admission and the staging DAST
+job. The repository policy rejects `always()`, continue-on-error and alternate
+deployment sinks that could bypass failed or skipped prerequisites.
 
 ## Tool integrity
 
