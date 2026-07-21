@@ -26,13 +26,15 @@ test("rejects a workload raw socket, bind and broad host mount", () => {
   assert.match(report.failures.join("\n"), /workload-deny-mount-mnt-host-example-app-web/);
 });
 
-test("rejects root workload identity and added capabilities", () => {
+test("rejects PID sharing, non-numeric workload identity and added capabilities", () => {
   const config = fixture();
-  config.services["example-app-web"].user = "0:0";
+  config.services["example-app-web"].user = "app:app";
+  config.services["example-app-web"].pid = "service:postgres";
   config.services["example-app-web"].cap_add = ["NET_ADMIN"];
   const report = evaluateRuntimeIsolation(config);
   assert.equal(report.status, "failed");
-  assert.match(report.failures.join("\n"), /workload-non-root-example-app-web/);
+  assert.match(report.failures.join("\n"), /workload-numeric-user-example-app-web/);
+  assert.match(report.failures.join("\n"), /workload-private-pid-example-app-web/);
   assert.match(report.failures.join("\n"), /workload-drop-all-capabilities-example-app-web/);
 });
 

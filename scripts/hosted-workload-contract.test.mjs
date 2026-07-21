@@ -197,10 +197,17 @@ test("host port is rejected", () => {
   combined.services["example-app-web"].ports = [{ target: 3000, published: "3000" }];
   assert.throws(() => validateRenderedWorkloads({ core, combined, lock }), /host ports/);
 });
-test("root user is rejected", () => {
-  const combined = combinedFixture();
-  combined.services["example-app-web"].user = "0:0";
-  assert.throws(() => validateRenderedWorkloads({ core, combined, lock }), /non-root/);
+test("PID sharing and non-canonical workload users are rejected", () => {
+  for (const user of ["0:0", "app:app", "1000", "1000:root"]) {
+    const combined = combinedFixture();
+    combined.services["example-app-web"].user = user;
+    assert.throws(() => validateRenderedWorkloads({ core, combined, lock }), /canonical numeric non-root uid:gid/);
+  }
+  for (const pid of ["host", "service:postgres", "container:foreign"]) {
+    const combined = combinedFixture();
+    combined.services["example-app-web"].pid = pid;
+    assert.throws(() => validateRenderedWorkloads({ core, combined, lock }), /cannot share another PID namespace/);
+  }
 });
 test("literal secret environment is rejected", () => {
   const combined = combinedFixture();
@@ -587,7 +594,7 @@ test("legacy hosted workload locks fail closed", () => {
 test("raw policy receipt requires the exact current control set", () => {
   const rawPolicyReceipt = {
     policyVersion: "hosted-raw-v1",
-    controls: ["bind-owned-secret-aliases", "bind-owned-volumes", "deny-api-socket", "deny-compose-interpolation", "deny-device-access", "deny-env-file", "deny-extends", "deny-file-configs", "deny-gpu-access", "deny-include", "deny-lifecycle-hooks", "deny-local-volume-options", "deny-providers", "deny-runtime-overrides", "deny-scaling", "deny-stop-grace-overrides", "deny-supplemental-groups", "deny-volumes-from"],
+    controls: ["bind-owned-secret-aliases", "bind-owned-volumes", "bind-private-pid-numeric-user", "deny-api-socket", "deny-compose-interpolation", "deny-device-access", "deny-env-file", "deny-extends", "deny-file-configs", "deny-gpu-access", "deny-include", "deny-lifecycle-hooks", "deny-local-volume-options", "deny-providers", "deny-runtime-overrides", "deny-scaling", "deny-stop-grace-overrides", "deny-supplemental-groups", "deny-volumes-from"],
     workloadContentSha256: "a".repeat(64),
     workloads: [{
       workloadId: "example-app",
@@ -609,12 +616,12 @@ test("raw policy receipt requires the exact current control set", () => {
     rawPolicyWorkloadContentSha256: "a".repeat(64),
     rawPolicyReceipt,
     rawPolicySha256: crypto.createHash("sha256").update(JSON.stringify(stable(rawPolicyReceipt))).digest("hex"),
-    rawPolicyControls: ["bind-owned-secret-aliases", "bind-owned-volumes", "deny-api-socket", "deny-compose-interpolation", "deny-device-access", "deny-env-file", "deny-extends", "deny-file-configs", "deny-gpu-access", "deny-include", "deny-lifecycle-hooks", "deny-local-volume-options", "deny-providers", "deny-runtime-overrides", "deny-scaling", "deny-stop-grace-overrides", "deny-supplemental-groups", "deny-volumes-from"],
+    rawPolicyControls: ["bind-owned-secret-aliases", "bind-owned-volumes", "bind-private-pid-numeric-user", "deny-api-socket", "deny-compose-interpolation", "deny-device-access", "deny-env-file", "deny-extends", "deny-file-configs", "deny-gpu-access", "deny-include", "deny-lifecycle-hooks", "deny-local-volume-options", "deny-providers", "deny-runtime-overrides", "deny-scaling", "deny-stop-grace-overrides", "deny-supplemental-groups", "deny-volumes-from"],
   };
   assert.doesNotThrow(() => verifyRawPolicyReceipt(receipt));
   receipt.rawPolicyControls = ["deny-include"];
   assert.throws(() => verifyRawPolicyReceipt(receipt), /raw source policy receipt/);
-  receipt.rawPolicyControls = ["bind-owned-secret-aliases", "bind-owned-volumes", "deny-api-socket", "deny-compose-interpolation", "deny-device-access", "deny-env-file", "deny-extends", "deny-file-configs", "deny-gpu-access", "deny-include", "deny-lifecycle-hooks", "deny-local-volume-options", "deny-providers", "deny-runtime-overrides", "deny-scaling", "deny-stop-grace-overrides", "deny-supplemental-groups", "deny-volumes-from"];
+  receipt.rawPolicyControls = ["bind-owned-secret-aliases", "bind-owned-volumes", "bind-private-pid-numeric-user", "deny-api-socket", "deny-compose-interpolation", "deny-device-access", "deny-env-file", "deny-extends", "deny-file-configs", "deny-gpu-access", "deny-include", "deny-lifecycle-hooks", "deny-local-volume-options", "deny-providers", "deny-runtime-overrides", "deny-scaling", "deny-stop-grace-overrides", "deny-supplemental-groups", "deny-volumes-from"];
   receipt.rawPolicySha256 = "b".repeat(64);
   assert.throws(() => verifyRawPolicyReceipt(receipt), /raw source policy receipt/);
   receipt.rawPolicyReceipt.workloads[0].composeSha256 = "d".repeat(64);

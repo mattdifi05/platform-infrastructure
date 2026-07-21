@@ -17,7 +17,7 @@ const IMAGE = /^[a-z0-9][a-z0-9._/-]*(?::[A-Za-z0-9._-]+)?@sha256:[a-f0-9]{64}$/
 const SAFE_PATH = /^[A-Za-z0-9_./-]+$/;
 export const HOSTED_WORKLOAD_LOCK_VERSION = 2;
 export const HOSTED_WORKLOAD_VALIDATOR_VERSION = "hosted-contract-v2";
-const RAW_POLICY_CONTROLS = Object.freeze(["bind-owned-secret-aliases", "bind-owned-volumes", "deny-api-socket", "deny-compose-interpolation", "deny-device-access", "deny-env-file", "deny-extends", "deny-file-configs", "deny-gpu-access", "deny-include", "deny-lifecycle-hooks", "deny-local-volume-options", "deny-providers", "deny-runtime-overrides", "deny-scaling", "deny-stop-grace-overrides", "deny-supplemental-groups", "deny-volumes-from"]);
+const RAW_POLICY_CONTROLS = Object.freeze(["bind-owned-secret-aliases", "bind-owned-volumes", "bind-private-pid-numeric-user", "deny-api-socket", "deny-compose-interpolation", "deny-device-access", "deny-env-file", "deny-extends", "deny-file-configs", "deny-gpu-access", "deny-include", "deny-lifecycle-hooks", "deny-local-volume-options", "deny-providers", "deny-runtime-overrides", "deny-scaling", "deny-stop-grace-overrides", "deny-supplemental-groups", "deny-volumes-from"]);
 const PLATFORM_DEPENDENCIES = new Set([
   "postgres",
   "redis",
@@ -952,15 +952,18 @@ function assertWorkloadService({ serviceDefinition, manifestService, manifest, c
   if (acceleratorRequest) invalid(`${name} cannot request GPU or accelerator access.`);
   if (serviceDefinition.volumes_from != null) invalid(`${name} cannot inherit volumes from another service.`);
   if (serviceDefinition.container_name) invalid(`${name} cannot reserve a global container_name.`);
-  if (serviceDefinition.privileged || serviceDefinition.network_mode === "host" || serviceDefinition.pid === "host" || serviceDefinition.ipc === "host") {
+  if (serviceDefinition.privileged || serviceDefinition.network_mode === "host" || serviceDefinition.ipc === "host") {
     invalid(`${name} requests a host-level privilege.`);
   }
+  if (serviceDefinition.pid != null) invalid(`${name} cannot share another PID namespace.`);
   if (Array.isArray(serviceDefinition.ports) && serviceDefinition.ports.length > 0) invalid(`${name} cannot publish host ports.`);
   if (serviceDefinition.read_only !== true) invalid(`${name} must use a read-only root filesystem.`);
   if (serviceDefinition.init !== true || serviceDefinition.restart !== "unless-stopped") invalid(`${name} requires init and restart=unless-stopped.`);
   if (!serviceDefinition.security_opt?.includes("no-new-privileges:true")) invalid(`${name} must enable no-new-privileges.`);
   if (!serviceDefinition.cap_drop?.includes("ALL") || (serviceDefinition.cap_add?.length ?? 0) > 0) invalid(`${name} must drop all capabilities.`);
-  if (!serviceDefinition.user || /^(?:0|root)(?::|$)/.test(String(serviceDefinition.user))) invalid(`${name} must declare a non-root user.`);
+  if (!/^[1-9][0-9]{0,9}:[1-9][0-9]{0,9}$/.test(String(serviceDefinition.user ?? ""))) {
+    invalid(`${name} must declare a canonical numeric non-root uid:gid.`);
+  }
   if (!Array.isArray(serviceDefinition.healthcheck?.test) || serviceDefinition.healthcheck.test.length < 2 || serviceDefinition.healthcheck.disable === true) {
     invalid(`${name} requires a functional healthcheck.`);
   }

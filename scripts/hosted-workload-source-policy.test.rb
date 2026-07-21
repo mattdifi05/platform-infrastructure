@@ -41,6 +41,16 @@ class HostedWorkloadSourcePolicyTest < Minitest::Test
     end
   end
 
+  def test_rejects_pid_namespace_sharing_and_non_numeric_users
+    [{ "pid" => "service:postgres" }, { "pid" => "container:foreign" }, { "user" => "app:app" }, { "user" => "1000" }, { "user" => "0:1000" }].each do |service|
+      error = assert_raises(ArgumentError) do
+        HostedWorkloadSourcePolicy.validate_source_model({ "services" => { "app" => service } }, "fixture")
+      end
+      assert_match(/PID namespace|canonical numeric uid:gid/, error.message)
+    end
+    assert HostedWorkloadSourcePolicy.validate_source_model({ "services" => { "app" => { "user" => "1000:1000" } } }, "fixture")
+  end
+
   def test_rejects_include_and_extends_before_render
     include_model = parse("include:\n  - other.yaml\nservices:\n  app: {}\n")
     assert_raises(ArgumentError) { HostedWorkloadSourcePolicy.validate_source_model(include_model, "fixture") }
