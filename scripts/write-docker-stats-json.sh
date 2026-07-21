@@ -75,7 +75,7 @@ write_snapshot() {
         tostring
         | split("/")[0]
         | gsub("^[[:space:]]+|[[:space:]]+$"; "")
-        | capture("^(?<amount>[0-9]+(?:[.][0-9]+)?)(?<unit>[KMGTPE]?i?B)$"; "i")? as $part
+        | (capture("^(?<amount>[0-9]+(?:[.][0-9]+)?)(?<unit>[KMGTPE]?i?B)$"; "i")? // null) as $part
         | if $part == null then null else
             ($part.amount | tonumber) *
             ({B: 1, KB: 1000, MB: 1000000, GB: 1000000000, TB: 1000000000000,
