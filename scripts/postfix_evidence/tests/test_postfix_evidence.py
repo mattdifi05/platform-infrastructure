@@ -8,8 +8,11 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
+import scripts.postfix_evidence.common as common_module
+import scripts.postfix_evidence.validate_postfix_package as validator_module
 from scripts.postfix_evidence.build_postfix_package import build_package
 from scripts.postfix_evidence.common import ContractError, canonical_json_bytes, tree_index
 from scripts.postfix_evidence.validate_postfix_package import validate_package
@@ -136,6 +139,7 @@ class Fixture:
         run_git(self.repo, "init", "-q")
         (self.repo / "tracked.txt").write_text("baseline\n", encoding="utf-8")
         (self.repo / "docs.md").write_text("# Complete documentation\n", encoding="utf-8")
+        (self.repo / "semantic.yml").write_text("value: base\n", encoding="utf-8")
         (self.repo / "offline-fixture.py").write_text(
             "#!/usr/bin/env python3\nprint('offline fixture')\n",
             encoding="utf-8",
@@ -151,10 +155,14 @@ class Fixture:
         run_git(self.repo, "switch", "-q", "-c", "cohort")
         (self.repo / "tracked.txt").write_text("baseline\nstructural fix\n", encoding="utf-8")
         self.cohort_commit = self._git_commit("cohort implementation")
+        (self.repo / "semantic.yml").write_text("value: a b\n", encoding="utf-8")
+        self.cohort_semantic_commit = self._git_commit("cohort semantic whitespace")
 
         run_git(self.repo, "switch", "-q", "-c", "final", self.baseline_commit)
         (self.repo / "integration-note.txt").write_text("unrelated integration\n", encoding="utf-8")
         self.unrelated_commit = self._git_commit("unrelated integration")
+        (self.repo / "semantic.yml").write_text("value: ab\n", encoding="utf-8")
+        self.final_semantic_commit = self._git_commit("integrated semantic whitespace")
         (self.repo / "tracked.txt").write_text("baseline\nstructural fix\n", encoding="utf-8")
         self.final_commit = self._git_commit("integrated implementation")
         self.final_tree = run_git(self.repo, "rev-parse", "HEAD^{tree}")
@@ -941,6 +949,45 @@ class PostfixEvidenceTests(unittest.TestCase):
         with self.assertRaisesRegex(ContractError, "patch-equivalent"):
             self.build()
 
+    def test_direct_final_cannot_point_all_groups_at_the_authoritative_baseline(self) -> None:
+        rows = self.fixture.load_jsonl("inputs/fix-groups.jsonl")
+        for row in rows:
+            row["integration_mode"] = "direct-final"
+            row["cohort_commit"] = self.fixture.baseline_commit
+            row["final_commit"] = self.fixture.baseline_commit
+        self.fixture.write_jsonl("inputs/fix-groups.jsonl", rows)
+        self.fixture.refresh_handoff_hash("fix_group_ledger")
+        with self.assertRaisesRegex(ContractError, "post-baseline|boundary diff"):
+            self.build()
+
+    def test_patch_id_cannot_equate_semantically_different_yaml_content(self) -> None:
+        cohort_patch = run_git(
+            self.fixture.repo,
+            "show",
+            "--pretty=format:",
+            self.fixture.cohort_semantic_commit,
+        ).encode("utf-8")
+        final_patch = run_git(
+            self.fixture.repo,
+            "show",
+            "--pretty=format:",
+            self.fixture.final_semantic_commit,
+        ).encode("utf-8")
+        cohort_patch_id = subprocess.run(
+            ["git", "patch-id", "--stable"], input=cohort_patch, stdout=subprocess.PIPE, check=True
+        ).stdout.split()[0]
+        final_patch_id = subprocess.run(
+            ["git", "patch-id", "--stable"], input=final_patch, stdout=subprocess.PIPE, check=True
+        ).stdout.split()[0]
+        self.assertEqual(cohort_patch_id, final_patch_id)
+        rows = self.fixture.load_jsonl("inputs/fix-groups.jsonl")
+        rows[0]["cohort_commit"] = self.fixture.cohort_semantic_commit
+        rows[0]["final_commit"] = self.fixture.final_semantic_commit
+        self.fixture.write_jsonl("inputs/fix-groups.jsonl", rows)
+        self.fixture.refresh_handoff_hash("fix_group_ledger")
+        with self.assertRaisesRegex(ContractError, "exact tree delta|path/mode/content"):
+            self.build()
+
     def test_explicit_direct_final_identity_is_accepted(self) -> None:
         rows = self.fixture.load_jsonl("inputs/fix-groups.jsonl")
         rows[0]["integration_mode"] = "direct-final"
@@ -1070,6 +1117,141 @@ class PostfixEvidenceTests(unittest.TestCase):
         target = self.fixture.output / "four_verdicts_v1.json"
         target.write_bytes(target.read_bytes() + b"\n")
         with self.assertRaisesRegex(ContractError, "manifest"):
+            validate_package(
+                package=self.fixture.output,
+                baseline=self.fixture.baseline,
+                group_map=self.fixture.group_map,
+                candidate_repo=self.fixture.repo,
+                semantic_receipt_sha256=self.fixture.semantic_sha256(),
+            )
+
+    def test_open_fd_snapshot_defeats_lstat_read_restore_path_swap(self) -> None:
+        target = self.fixture.root / "swap-target.txt"
+        target.write_bytes(b"ORIGINAL")
+        original_reader = Path.read_bytes
+
+        def hostile_reader(path: Path) -> bytes:
+            if path != target:
+                return original_reader(path)
+            backup = target.with_suffix(".saved")
+            target.rename(backup)
+            target.write_bytes(b"HOSTILE!")
+            try:
+                return original_reader(target)
+            finally:
+                target.unlink()
+                backup.rename(target)
+
+        with mock.patch.object(Path, "read_bytes", hostile_reader):
+            payload = common_module.read_regular_bytes(target, label="swap PoC")
+        self.assertEqual(payload, b"ORIGINAL")
+
+    def test_handoff_classification_hash_parse_and_copy_use_one_snapshot(self) -> None:
+        source = (self.fixture.inputs / "classification.jsonl").resolve(strict=True)
+        original_bytes = source.read_bytes()
+        original_loader = validator_module.load_jsonl
+
+        def hostile_loader(path: Path, *, label: str) -> list[dict[str, object]]:
+            if path != source:
+                return original_loader(path, label=label)
+            rows = [json.loads(line) for line in original_bytes.splitlines()]
+            target = next(row for row in rows if row["id"].startswith("AUX-"))
+            target["title"] = "HOSTILE-SWAP-AFTER-HASH"
+            source.write_bytes(b"".join(canonical_json_bytes(row) for row in rows))
+            try:
+                return original_loader(path, label=label)
+            finally:
+                source.write_bytes(original_bytes)
+
+        with mock.patch.object(validator_module, "load_jsonl", side_effect=hostile_loader):
+            self.build()
+        packaged = [
+            json.loads(line)
+            for line in (
+                self.fixture.output / "evidence/remediation/finding_classification_ledger.jsonl"
+            ).read_text(encoding="utf-8").splitlines()
+        ]
+        self.assertFalse(any(row["title"] == "HOSTILE-SWAP-AFTER-HASH" for row in packaged))
+
+    def test_m01_rejects_134_fake_duplicate_inventory_rows(self) -> None:
+        path = self.fixture.inputs / "required-matrices.md"
+        lines = path.read_text(encoding="utf-8").splitlines()
+        start = next(index for index, line in enumerate(lines) if line.startswith("## M01-"))
+        end = next(index for index, line in enumerate(lines[start + 1 :], start + 1) if line.startswith("## M02-"))
+        header_index = next(index for index in range(start + 1, end) if lines[index].startswith("|"))
+        for index in range(header_index + 2, end):
+            if lines[index].startswith("|"):
+                cells = [cell.strip() for cell in lines[index].strip("|").split("|")]
+                cells[0] = "FAKE"
+                lines[index] = "| " + " | ".join(cells) + " |"
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        self.fixture.refresh_handoff_hash("required_matrices")
+        with self.assertRaisesRegex(ContractError, "M01|FAKE|duplicate"):
+            self.build()
+
+    def test_m02_through_m14_reject_fake_semantic_cells(self) -> None:
+        path = self.fixture.inputs / "required-matrices.md"
+        lines = path.read_text(encoding="utf-8").splitlines()
+        for number in range(2, 15):
+            start = next(index for index, line in enumerate(lines) if line.startswith(f"## M{number:02d}-"))
+            header_index = next(index for index in range(start + 1, len(lines)) if lines[index].startswith("|"))
+            row_index = next(index for index in range(header_index + 2, len(lines)) if lines[index].startswith("|"))
+            cells = [cell.strip() for cell in lines[row_index].strip("|").split("|")]
+            cells[-1] = "FAKE"
+            lines[row_index] = "| " + " | ".join(cells) + " |"
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        self.fixture.refresh_handoff_hash("required_matrices")
+        with self.assertRaisesRegex(ContractError, "FAKE|semantic"):
+            self.build()
+
+    def test_common_secret_scanner_covers_headers_tokens_and_private_keys(self) -> None:
+        scanner = getattr(common_module, "scan_secret_bytes", None)
+        self.assertIsNotNone(scanner, "common builder/validator secret scanner is missing")
+        for payload in (
+            b"Authorization: Bearer abcdefghijklmnopqrstuvwxyz\n",
+            b"Cookie: session=super-secret-cookie\n",
+            b"Set-Cookie: session=super-secret-cookie; HttpOnly\n",
+            b"-----BEGIN PGP PRIVATE KEY BLOCK-----\nprivate\n",
+        ):
+            with self.subTest(payload=payload[:20]):
+                with self.assertRaises(ContractError):
+                    scanner(payload, label="secret PoC")
+
+    def test_build_receipt_input_and_tool_hashes_are_recalculated(self) -> None:
+        self.build()
+        path = self.fixture.output / "receipts/build_receipt.json"
+        receipt = json.loads(path.read_text(encoding="utf-8"))
+        receipt["input_sha256"] = {key: "0" * 64 for key in receipt["input_sha256"]}
+        receipt["tool_source_sha256"] = {key: "0" * 64 for key in receipt["tool_source_sha256"]}
+        self.fixture._write_json(path, receipt)
+        self.fixture._write_manifest(self.fixture.output)
+        with self.assertRaisesRegex(ContractError, "trust root|tool source|input SHA"):
+            validate_package(
+                package=self.fixture.output,
+                baseline=self.fixture.baseline,
+                group_map=self.fixture.group_map,
+                candidate_repo=self.fixture.repo,
+                semantic_receipt_sha256=self.fixture.semantic_sha256(),
+            )
+
+    def test_manifest_cannot_authorize_an_extra_package_file(self) -> None:
+        self.build()
+        (self.fixture.output / "EXTRA.txt").write_text("not allowlisted\n", encoding="utf-8")
+        core_index = tree_index(
+            self.fixture.output,
+            exclude={"MANIFEST.sha256", "receipts/build_receipt.json", "receipts/replay_receipt.json"},
+        )
+        core_hash = hashlib.sha256(canonical_json_bytes(core_index)).hexdigest()
+        replay_path = self.fixture.output / "receipts/replay_receipt.json"
+        replay = json.loads(replay_path.read_text(encoding="utf-8"))
+        replay["core_index_sha256"] = core_hash
+        self.fixture._write_json(replay_path, replay)
+        build_path = self.fixture.output / "receipts/build_receipt.json"
+        build = json.loads(build_path.read_text(encoding="utf-8"))
+        build["core_index_sha256"] = core_hash
+        self.fixture._write_json(build_path, build)
+        self.fixture._write_manifest(self.fixture.output)
+        with self.assertRaisesRegex(ContractError, "allowlist|extra"):
             validate_package(
                 package=self.fixture.output,
                 baseline=self.fixture.baseline,
