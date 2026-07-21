@@ -450,6 +450,8 @@ sh ./scripts/install-offsite-backup-cron.sh --cron-root /opt/platform/platform-i
 
 The generated crontab covers PostgreSQL/MariaDB local database backups, weekly restore drills, daily PostgreSQL backup-artifact retention, MinIO/Keycloak/Secret Manager metadata backups, and encrypted Restic off-site upload.
 
+PostgreSQL restore drills never target `enterprise-postgres`: they mount the signed dump read-only into a digest-pinned, networkless disposable container and run `pg_restore` as the restricted `restore_runner` role. A Docker-enabled disposable integration test is still required after policy/code changes; repository-only checks do not claim that runtime proof.
+
 Preferred VPS scheduler:
 
 ```sh

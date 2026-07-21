@@ -29,6 +29,7 @@ import { resticSecretTransport } from "./restic-secret-transport.mjs";
 import { safeTarCreateArgs, validateTarEntryName } from "./safe-tar-path.mjs";
 import { assertNoPlaintextFingerprints, legacyPlaintextFingerprintNames } from "./secret-store-metadata.mjs";
 import { validateBackupImportProvenance } from "./backup-import-policy.mjs";
+import { defaultPostgresRestoreImage, postgresRestoreSandboxPlan } from "./postgres-restore-sandbox.mjs";
 import {
   assertExactBranchProtection,
   assertExactGithubEnvironment,
@@ -2686,6 +2687,8 @@ function infraTestingHygiene() {
     "scripts/infra-secret-manager.test.mjs",
     "scripts/backup-import-policy.mjs",
     "scripts/backup-import-policy.test.mjs",
+    "scripts/postgres-restore-sandbox.mjs",
+    "scripts/postgres-restore-sandbox.test.mjs",
   ];
   for (const file of checkFiles) {
     run(process.execPath, ["--check", file], { cwd: infraRoot });
@@ -2701,6 +2704,7 @@ function infraTestingHygiene() {
   run(process.execPath, ["--test", "scripts/safe-tar-path.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/infra-secret-manager.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/backup-import-policy.test.mjs"], { cwd: infraRoot });
+  run(process.execPath, ["--test", "scripts/postgres-restore-sandbox.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "platform-alert-dispatcher/server.test.mjs"], { cwd: infraRoot });
   const shellFiles = fs.readdirSync(path.join(infraRoot, "scripts")).filter((name) => name.endsWith(".sh")).sort();
   for (const file of shellFiles) {
@@ -9423,47 +9427,77 @@ async function restoreTestPostgres(options = {}) {
   if (!backupFileArg) {
     fail("Provide --backupFile <path>.");
   }
-  const container = options.container ?? argv.container ?? "enterprise-postgres";
-  const database = options.database ?? argv.database ?? defaultPostgresBackupDatabase();
-  const testDatabase = options.testDatabase ?? argv.testDatabase ?? "platform_restore_test";
-  const user = options.user ?? argv.user ?? "postgres";
+  const sourceContainer = options.container ?? argv.container ?? "enterprise-postgres";
+  const sourceDatabase = options.database ?? argv.database ?? defaultPostgresBackupDatabase();
+  const testDatabase = sqlIdentifierName(options.testDatabase ?? argv.testDatabase ?? "platform_restore_test", "PostgreSQL restore sandbox database");
   const requestedSchema = options.schema ?? options.accountSchema ?? argv.schema ?? argv.accountSchema ?? "";
   const schemaName = requestedSchema ? sqlIdentifierName(requestedSchema, "PostgreSQL restore schema") : "";
   const countAllUserTables = !schemaName || options.countAllUserTables === true || booleanFlag(argv.countAllUserTables);
   const minimumTables = positiveInteger(options.minimumTables ?? argv.minimumTables ?? 1, "--minimumTables", 1);
   const backupFile = resolveInside(path.join(infraRoot, "backups"), path.resolve(backupFileArg));
-  const fileName = path.basename(backupFile);
-  const containerPath = `/tmp/${fileName}`;
   const startedAt = new Date();
   const { hash } = verifyBackupArtifact(backupFile);
-  const testDatabaseIdentifier = sqlIdentifier(testDatabase);
+  const image = options.image ?? argv.image ?? process.env.POSTGRES_RESTORE_TEST_IMAGE ?? process.env.POSTGRES_IMAGE ?? defaultPostgresRestoreImage;
+  const sandboxContainer = `platform-postgres-restore-${process.pid}-${crypto.randomBytes(4).toString("hex")}`;
+  const plan = postgresRestoreSandboxPlan({
+    image,
+    containerName: sandboxContainer,
+    backupMount: `${hostPathForContainerMount(backupFile)}:/restore/input.dump:ro`,
+    databaseName: testDatabase,
+  });
+  let sandboxStarted = false;
   try {
-    log(`Creating disposable restore-test database '${testDatabase}'...`);
-    dockerExec(container, ["psql", "-U", user, "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-c", `drop database if exists ${testDatabaseIdentifier} with (force);`]);
-    dockerExec(container, ["psql", "-U", user, "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-c", `create database ${testDatabaseIdentifier};`]);
-    run("docker", ["cp", backupFile, `${container}:${containerPath}`]);
-    dockerExec(container, ["pg_restore", "-U", user, "-d", testDatabase, "--no-owner", "--no-acl", containerPath]);
-    dockerExec(container, ["rm", "-f", containerPath]);
+    log(`Starting isolated PostgreSQL restore sandbox '${sandboxContainer}'...`);
+    run("docker", plan.dockerRunArgs, { capture: true });
+    sandboxStarted = true;
+    let ready = false;
+    for (let attempt = 0; attempt < 90; attempt += 1) {
+      const probe = dockerExec(sandboxContainer, ["pg_isready", "-U", "postgres", "-d", "postgres"], { capture: true, allowFailure: true });
+      if (probe.status === 0) {
+        ready = true;
+        break;
+      }
+      await sleep(500);
+    }
+    if (!ready) fail("Isolated PostgreSQL restore sandbox did not become ready.");
+    dockerExec(sandboxContainer, ["psql", "-U", "postgres", "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-c", plan.bootstrapSql]);
+    dockerExec(sandboxContainer, plan.restoreArgs);
     const tableQuery = countAllUserTables
       ? "select count(*) from information_schema.tables where table_schema not in ('information_schema','pg_catalog');"
       : `select count(*) from information_schema.tables where table_schema = ${sqlString(schemaName)};`;
-    const tables = Number(postgresOut(container, testDatabase, user, tableQuery));
-    dockerExec(container, ["psql", "-U", user, "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-c", `drop database if exists ${testDatabaseIdentifier} with (force);`]);
+    const tables = Number(postgresOut(sandboxContainer, plan.database, plan.role, tableQuery));
     if (tables < minimumTables) {
       fail(`Restore test produced too few ${countAllUserTables ? "user" : schemaName} tables: ${tables}`);
     }
-    recordBackupRestoreRun({ container, database, user, operation: "restore_test", status: "success", artifactPath: backupFile, artifactSha256: hash, startedAt, metadata: { restoredTables: tables, restoredSchema: countAllUserTables ? "all-user-schemas" : schemaName, testDatabase } });
+    recordBackupRestoreRun({
+      container: sandboxContainer,
+      database: sourceDatabase,
+      user: plan.role,
+      operation: "restore_test",
+      status: "success",
+      artifactPath: backupFile,
+      artifactSha256: hash,
+      startedAt,
+      metadata: {
+        restoredTables: tables,
+        restoredSchema: countAllUserTables ? "all-user-schemas" : schemaName,
+        testDatabase,
+        sourceContainer,
+        isolation: "disposable-network-none",
+        liveSourceTouched: false,
+      },
+    });
     log(`Restore test passed with ${tables} ${countAllUserTables ? "user" : schemaName} tables.`);
-    return { backupFile, hash, tables, testDatabase, container, database, user };
+    return { backupFile, hash, tables, testDatabase, container: sandboxContainer, database: sourceDatabase, user: plan.role, liveSourceTouched: false };
   } catch (error) {
     try {
-      dockerExec(container, ["rm", "-f", containerPath], { allowFailure: true });
-      dockerExec(container, ["psql", "-U", user, "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-c", `drop database if exists ${testDatabaseIdentifier} with (force);`], { allowFailure: true });
-      recordBackupRestoreRun({ container, database, user, operation: "restore_test", status: "failed", artifactPath: backupFile, artifactSha256: hash, startedAt, metadata: { error: String(error?.message ?? error), testDatabase } });
+      recordBackupRestoreRun({ container: sandboxContainer, database: sourceDatabase, user: plan.role, operation: "restore_test", status: "failed", artifactPath: backupFile, artifactSha256: hash, startedAt, metadata: { error: String(error?.message ?? error), testDatabase, sourceContainer, isolation: "disposable-network-none", liveSourceTouched: false } });
     } catch {
       // Preserve the original restore-test failure.
     }
     throw error;
+  } finally {
+    if (sandboxStarted) run("docker", ["rm", "-f", sandboxContainer], { capture: true, allowFailure: true });
   }
 }
 
