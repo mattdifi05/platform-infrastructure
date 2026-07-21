@@ -21,6 +21,7 @@ from scripts.postfix_evidence.common import (
     UTC_SECOND_RE,
     canonical_json_bytes,
     commit_equivalence,
+    commit_delta_records,
     evidence_repo_path,
     ensure_ancestor,
     ensure_path_at_commit,
@@ -764,6 +765,7 @@ def _validate_fix_groups(
     receipts: dict[str, dict[str, Any]],
     repo: Path,
     final_head: str,
+    baseline_commit: str,
 ) -> list[dict[str, Any]]:
     by_id = _unique_rows(rows, "group_id", label="fix-group ledger")
     source_by_id = {row["group_id"]: row for row in group_map_rows}
@@ -787,6 +789,7 @@ def _validate_fix_groups(
                 "control",
                 "sink",
                 "remediation_boundary",
+                "boundary_paths",
                 "status",
                 "consumer_evidence",
                 *GROUP_RECEIPT_FIELDS,
@@ -804,11 +807,34 @@ def _validate_fix_groups(
         for field in ("source", "control", "sink"):
             string_list(row[field], label=f"fix-group ledger {group_id} {field}")
         nonempty_string(row["remediation_boundary"], label=f"fix-group ledger {group_id} remediation boundary")
+        boundary_paths = string_list(
+            row["boundary_paths"],
+            label=f"fix-group ledger {group_id} boundary paths",
+        )
+        boundary_set = {
+            safe_relative(path, label=f"fix-group ledger {group_id} boundary path").as_posix()
+            for path in boundary_paths
+        }
         consumer_evidence = string_list(row["consumer_evidence"], label=f"fix-group ledger {group_id} consumer evidence")
         for evidence in consumer_evidence:
             ensure_path_at_commit(repo, final_head, evidence)
+        consumer_paths = {evidence_repo_path(item) for item in consumer_evidence}
+        if not consumer_paths.issubset(boundary_set):
+            raise ContractError(
+                f"fix-group ledger {group_id}: consumer evidence is outside the declared remediation boundary"
+            )
         cohort = resolve_commit(repo, row["cohort_commit"], label=f"fix-group ledger {group_id} cohort commit")
         final = resolve_commit(repo, row["final_commit"], label=f"fix-group ledger {group_id} final commit")
+        if final == baseline_commit:
+            raise ContractError(
+                f"fix-group ledger {group_id}: final commit must be post-baseline with a nonempty boundary diff"
+            )
+        ensure_ancestor(repo, baseline_commit, final, label=f"fix-group ledger {group_id} post-baseline final")
+        if cohort == baseline_commit:
+            raise ContractError(
+                f"fix-group ledger {group_id}: cohort/direct commit must be post-baseline"
+            )
+        ensure_ancestor(repo, baseline_commit, cohort, label=f"fix-group ledger {group_id} post-baseline cohort")
         if integration_mode == "direct-final" and cohort != final:
             raise ContractError(
                 f"fix-group ledger {group_id}: direct-final mode requires identical commit fields"
@@ -818,6 +844,12 @@ def _validate_fix_groups(
                 f"fix-group ledger {group_id}: cohort-only SHA is not a final integration mapping"
             )
         ensure_ancestor(repo, final, final_head, label=f"fix-group ledger {group_id} final mapping")
+        final_delta = commit_delta_records(repo, final)
+        changed_paths = {item["path"] for item in final_delta}
+        if not (changed_paths & boundary_set):
+            raise ContractError(
+                f"fix-group ledger {group_id}: final commit has no nonempty diff on boundary paths"
+            )
         if integration_mode == "direct-final":
             equivalence_by_group.append(
                 {
@@ -1372,7 +1404,14 @@ def _validate_dataset(
         final_tree,
         group_ids,
     )
-    equivalence = _validate_fix_groups(fix_group_rows, group_map_rows, receipts, candidate_repo, final_commit)
+    equivalence = _validate_fix_groups(
+        fix_group_rows,
+        group_map_rows,
+        receipts,
+        candidate_repo,
+        final_commit,
+        baseline.candidate_commit,
+    )
     pre_fix_logs = _validate_pre_fix_receipt(
         pre_fix_receipt,
         artifact_root,

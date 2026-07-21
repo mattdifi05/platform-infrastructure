@@ -474,6 +474,7 @@ class Fixture:
                     "control": ["structural admission control"],
                     "sink": ["protected fixture sink"],
                     "remediation_boundary": "candidate only; no live mutation",
+                    "boundary_paths": ["tracked.txt"],
                     "status": "PASS",
                     "consumer_evidence": ["tracked.txt:2"],
                     "negative_test_receipt_ids": [phase_ids["negative"]],
@@ -944,9 +945,11 @@ class PostfixEvidenceTests(unittest.TestCase):
         rows = self.fixture.load_jsonl("inputs/fix-groups.jsonl")
         for row in rows:
             row["final_commit"] = self.fixture.unrelated_commit
+            row["boundary_paths"] = ["integration-note.txt"]
+            row["consumer_evidence"] = ["integration-note.txt:1"]
         self.fixture.write_jsonl("inputs/fix-groups.jsonl", rows)
         self.fixture.refresh_handoff_hash("fix_group_ledger")
-        with self.assertRaisesRegex(ContractError, "patch-equivalent"):
+        with self.assertRaisesRegex(ContractError, "exact tree delta|path/mode/content"):
             self.build()
 
     def test_direct_final_cannot_point_all_groups_at_the_authoritative_baseline(self) -> None:
@@ -983,6 +986,8 @@ class PostfixEvidenceTests(unittest.TestCase):
         rows = self.fixture.load_jsonl("inputs/fix-groups.jsonl")
         rows[0]["cohort_commit"] = self.fixture.cohort_semantic_commit
         rows[0]["final_commit"] = self.fixture.final_semantic_commit
+        rows[0]["boundary_paths"] = ["semantic.yml"]
+        rows[0]["consumer_evidence"] = ["semantic.yml:1"]
         self.fixture.write_jsonl("inputs/fix-groups.jsonl", rows)
         self.fixture.refresh_handoff_hash("fix_group_ledger")
         with self.assertRaisesRegex(ContractError, "exact tree delta|path/mode/content"):

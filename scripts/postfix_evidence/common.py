@@ -304,55 +304,81 @@ def ensure_ancestor(repo: Path, ancestor: str, descendant: str, *, label: str) -
         raise ContractError(f"{label}: commit is not reachable from final HEAD")
 
 
-def stable_patch_id(repo: Path, commit: str) -> str:
-    patch = git(repo, "show", "--pretty=format:", "--binary", "--no-ext-diff", commit)
-    if not patch.strip():
-        raise ContractError("commit equivalence: empty commits are not accepted")
-    try:
-        completed = subprocess.run(
-            ["git", "patch-id", "--stable"],
-            input=patch,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            check=False,
-        )
-    except OSError as error:
-        raise ContractError("commit equivalence: git patch-id unavailable") from error
-    if completed.returncode != 0:
-        raise ContractError("commit equivalence: patch-id failed")
-    fields = completed.stdout.decode("ascii", "strict").split()
-    if not fields or SHA1_RE.fullmatch(fields[0]) is None:
-        raise ContractError("commit equivalence: invalid patch-id")
-    return fields[0]
-
-
-def tree_delta_sha256(repo: Path, commit: str) -> str:
+def commit_delta_records(repo: Path, commit: str) -> list[dict[str, Any]]:
     parent = git_text(repo, "rev-parse", f"{commit}^")
-    delta = git(repo, "diff-tree", "--no-commit-id", "-r", "--raw", "-z", parent, commit)
-    if not delta:
+    raw = git(
+        repo,
+        "diff-tree",
+        "--no-commit-id",
+        "-r",
+        "--no-renames",
+        "--raw",
+        "-z",
+        parent,
+        commit,
+    )
+    if not raw:
         raise ContractError("commit equivalence: empty tree delta")
-    return sha256_bytes(delta)
+    fields = raw.split(b"\x00")
+    if fields and fields[-1] == b"":
+        fields.pop()
+    if len(fields) % 2 != 0:
+        raise ContractError("commit equivalence: malformed raw tree delta")
+    records: list[dict[str, Any]] = []
+    header_re = re.compile(
+        rb"^:([0-7]{6}) ([0-7]{6}) ([0-9a-f]{40}) ([0-9a-f]{40}) ([A-Z])$"
+    )
+    zero = "0" * 40
+    for index in range(0, len(fields), 2):
+        match = header_re.fullmatch(fields[index])
+        if match is None:
+            raise ContractError("commit equivalence: unsupported tree delta record")
+        try:
+            path = fields[index + 1].decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise ContractError("commit equivalence: non-UTF-8 changed path") from error
+        safe_relative(path, label="commit equivalence changed path")
+        old_mode, new_mode, old_object, new_object, status = (
+            value.decode("ascii") for value in match.groups()
+        )
+
+        def content_hash(object_id: str, mode: str) -> str | None:
+            if object_id == zero:
+                return None
+            if mode == "160000":
+                return sha256_bytes(object_id.encode("ascii"))
+            return sha256_bytes(git(repo, "cat-file", "blob", object_id))
+
+        records.append(
+            {
+                "path": path,
+                "status": status,
+                "old_mode": old_mode,
+                "new_mode": new_mode,
+                "old_object": None if old_object == zero else old_object,
+                "new_object": None if new_object == zero else new_object,
+                "old_content_sha256": content_hash(old_object, old_mode),
+                "new_content_sha256": content_hash(new_object, new_mode),
+            }
+        )
+    return sorted(records, key=lambda row: row["path"])
 
 
 def commit_equivalence(repo: Path, cohort: str, final: str) -> dict[str, Any]:
     if cohort == final:
         raise ContractError("commit equivalence: cohort-only SHA is not a final integration mapping")
-    cohort_patch = stable_patch_id(repo, cohort)
-    final_patch = stable_patch_id(repo, final)
-    cohort_delta = tree_delta_sha256(repo, cohort)
-    final_delta = tree_delta_sha256(repo, final)
-    patch_equal = cohort_patch == final_patch
-    delta_equal = cohort_delta == final_delta
-    if not patch_equal and not delta_equal:
-        raise ContractError("commit equivalence: cohort and final commits are not patch-equivalent")
+    cohort_delta = commit_delta_records(repo, cohort)
+    final_delta = commit_delta_records(repo, final)
+    if cohort_delta != final_delta:
+        raise ContractError(
+            "commit equivalence: cohort and final commits differ in exact tree delta path/mode/content"
+        )
     return {
         "cohort_commit": cohort,
         "final_commit": final,
-        "cohort_patch_id": cohort_patch,
-        "final_patch_id": final_patch,
-        "cohort_tree_delta_sha256": cohort_delta,
-        "final_tree_delta_sha256": final_delta,
-        "accepted_by": "stable-patch-id" if patch_equal else "exact-tree-delta",
+        "tree_delta_sha256": sha256_bytes(canonical_json_bytes(cohort_delta)),
+        "changed_paths": [row["path"] for row in cohort_delta],
+        "accepted_by": "exact-tree-delta-path-mode-content",
     }
 
 
