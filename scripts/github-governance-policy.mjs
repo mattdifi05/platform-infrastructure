@@ -13,6 +13,55 @@ function sameStrings(left, right) {
   return JSON.stringify(sortedStrings(left)) === JSON.stringify(sortedStrings(right));
 }
 
+function requiredCheckKey(check) {
+  const context = String(check?.context ?? "").trim();
+  const appId = Number(check?.app_id);
+  if (!context || !Number.isInteger(appId) || appId <= 0) return null;
+  return `${context}\u0000${appId}`;
+}
+
+export function requiredStatusCheckMismatches(expectedStatusChecks, remoteStatusChecks) {
+  const issues = [];
+  const expectedContexts = expectedStatusChecks?.contexts;
+  const expectedChecks = expectedStatusChecks?.checks;
+  if (Array.isArray(expectedContexts) && expectedContexts.length > 0) {
+    issues.push("policy must use checks with exact app_id values, not context-only required checks");
+  }
+  if (!Array.isArray(expectedChecks) || expectedChecks.length === 0) {
+    issues.push("policy must define at least one producer-bound required status check");
+    return issues;
+  }
+
+  const expectedKeys = expectedChecks.map(requiredCheckKey);
+  if (expectedKeys.some((key) => key === null)) {
+    issues.push("policy required checks must each define a non-empty context and positive app_id");
+  }
+  if (new Set(expectedKeys.filter(Boolean)).size !== expectedKeys.filter(Boolean).length) {
+    issues.push("policy required checks must not contain duplicate context/app_id tuples");
+  }
+
+  const remoteContexts = remoteStatusChecks?.contexts;
+  if (Array.isArray(remoteContexts) && remoteContexts.length > 0) {
+    issues.push("remote branch protection contains context-only required checks");
+  }
+  const remoteChecks = remoteStatusChecks?.checks;
+  if (!Array.isArray(remoteChecks) || remoteChecks.length === 0) {
+    issues.push("remote branch protection has no producer-bound required status checks");
+    return issues;
+  }
+  const remoteKeys = remoteChecks.map(requiredCheckKey);
+  if (remoteKeys.some((key) => key === null)) {
+    issues.push("remote required checks include a missing, null, wildcard or invalid app_id");
+  }
+  if (new Set(remoteKeys.filter(Boolean)).size !== remoteKeys.filter(Boolean).length) {
+    issues.push("remote required checks contain duplicate context/app_id tuples");
+  }
+  if (JSON.stringify([...expectedKeys].filter(Boolean).sort()) !== JSON.stringify([...remoteKeys].filter(Boolean).sort())) {
+    issues.push("required status check producer bindings differ");
+  }
+  return issues;
+}
+
 function reviewerKey(reviewer) {
   const type = String(reviewer?.type ?? "");
   const nested = reviewer?.reviewer ?? reviewer;
@@ -34,13 +83,7 @@ function allowanceNames(value, key) {
 
 export function branchProtectionMismatches(expected, remote) {
   const issues = [];
-  const expectedChecks = expected?.required_status_checks?.contexts ?? [];
-  const remoteChecks = remote?.required_status_checks?.contexts
-    ?? remote?.required_status_checks?.checks?.map((check) => check.context)
-    ?? [];
-  if (!sameStrings(expectedChecks, remoteChecks)) {
-    issues.push(`required status checks differ: expected ${sortedStrings(expectedChecks).join(",")}, got ${sortedStrings(remoteChecks).join(",")}`);
-  }
+  issues.push(...requiredStatusCheckMismatches(expected?.required_status_checks, remote?.required_status_checks));
   if (Boolean(remote?.required_status_checks?.strict) !== Boolean(expected?.required_status_checks?.strict)) {
     issues.push("required_status_checks.strict differs");
   }

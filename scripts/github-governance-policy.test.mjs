@@ -3,10 +3,17 @@ import assert from "node:assert/strict";
 import {
   branchProtectionMismatches,
   githubEnvironmentMismatches,
+  requiredStatusCheckMismatches,
 } from "./github-governance-policy.mjs";
 
 const branchPolicy = {
-  required_status_checks: { strict: true, contexts: ["quality", "compose"] },
+  required_status_checks: {
+    strict: true,
+    checks: [
+      { context: "quality", app_id: 15368 },
+      { context: "compose", app_id: 15368 },
+    ],
+  },
   enforce_admins: true,
   required_pull_request_reviews: {
     dismiss_stale_reviews: true,
@@ -26,7 +33,13 @@ const branchPolicy = {
 };
 
 const remoteBranch = {
-  required_status_checks: { strict: true, contexts: ["compose", "quality"] },
+  required_status_checks: {
+    strict: true,
+    checks: [
+      { context: "compose", app_id: 15368 },
+      { context: "quality", app_id: 15368 },
+    ],
+  },
   enforce_admins: { enabled: true },
   required_pull_request_reviews: structuredClone(branchPolicy.required_pull_request_reviews),
   restrictions: null,
@@ -72,13 +85,35 @@ test("exact branch protection passes", () => {
 });
 test("missing status check fails", () => {
   const remote = structuredClone(remoteBranch);
-  remote.required_status_checks.contexts = ["quality"];
-  assert.match(branchProtectionMismatches(branchPolicy, remote).join(" "), /status checks/);
+  remote.required_status_checks.checks = [{ context: "quality", app_id: 15368 }];
+  assert.match(branchProtectionMismatches(branchPolicy, remote).join(" "), /producer bindings/);
 });
 test("extra status check fails exact comparison", () => {
   const remote = structuredClone(remoteBranch);
-  remote.required_status_checks.contexts.push("unreviewed-check");
-  assert.match(branchProtectionMismatches(branchPolicy, remote).join(" "), /status checks/);
+  remote.required_status_checks.checks.push({ context: "unreviewed-check", app_id: 15368 });
+  assert.match(branchProtectionMismatches(branchPolicy, remote).join(" "), /producer bindings/);
+});
+test("context-only policy fails closed", () => {
+  assert.match(requiredStatusCheckMismatches({ contexts: ["quality"] }, remoteBranch.required_status_checks).join(" "), /context-only/);
+});
+test("context-only remote rule fails closed", () => {
+  const remote = { strict: true, contexts: ["quality", "compose"] };
+  assert.match(requiredStatusCheckMismatches(branchPolicy.required_status_checks, remote).join(" "), /context-only/);
+});
+test("wrong producer app id fails", () => {
+  const remote = structuredClone(remoteBranch);
+  remote.required_status_checks.checks[0].app_id = 999;
+  assert.match(requiredStatusCheckMismatches(branchPolicy.required_status_checks, remote.required_status_checks).join(" "), /producer bindings/);
+});
+test("null producer app id fails", () => {
+  const remote = structuredClone(remoteBranch);
+  remote.required_status_checks.checks[0].app_id = null;
+  assert.match(requiredStatusCheckMismatches(branchPolicy.required_status_checks, remote.required_status_checks).join(" "), /null/);
+});
+test("duplicate producer tuple fails", () => {
+  const remote = structuredClone(remoteBranch);
+  remote.required_status_checks.checks.push({ context: "quality", app_id: 15368 });
+  assert.match(requiredStatusCheckMismatches(branchPolicy.required_status_checks, remote.required_status_checks).join(" "), /duplicate/);
 });
 test("non-strict status checks fail", () => {
   const remote = structuredClone(remoteBranch);

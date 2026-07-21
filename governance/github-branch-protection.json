@@ -1,11 +1,11 @@
 {
   "required_status_checks": {
     "strict": true,
-    "contexts": [
-      "quality",
-      "compose",
-      "supply-chain",
-      "enterprise-readiness"
+    "checks": [
+      { "context": "quality", "app_id": 15368 },
+      { "context": "compose", "app_id": 15368 },
+      { "context": "supply-chain", "app_id": 15368 },
+      { "context": "enterprise-readiness", "app_id": 15368 }
     ]
   },
   "enforce_admins": true,

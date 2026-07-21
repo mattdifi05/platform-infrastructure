@@ -6808,12 +6808,14 @@ async function governanceCheckBody() {
   const actionsRuntimePolicy = JSON.parse(readText(path.join(infraRoot, "governance", "github-actions-runtime.json")));
   const infraWorkflow = readText(path.join(infraRoot, ".github", "workflows", "enterprise-infra.yml"));
   const runbook = readText(path.join(infraRoot, "RUNBOOK.md"));
+  const producerBoundChecks = branchProtection.required_status_checks?.checks ?? [];
   for (const job of ["quality", "compose", "supply-chain", "enterprise-readiness"]) {
     if (checkSourceWorkflow) {
       assertMatch(workflow, new RegExp(`^\\s{2}${job}:`, "m"), `Enterprise CI must define ${job} job.`);
     }
-    if (!branchProtection.required_status_checks.contexts.includes(job)) {
-      fail(`Branch protection must require ${job}.`);
+    const matchingChecks = producerBoundChecks.filter((check) => check?.context === job);
+    if (matchingChecks.length !== 1 || !Number.isInteger(Number(matchingChecks[0]?.app_id)) || Number(matchingChecks[0].app_id) <= 0) {
+      fail(`Branch protection must require ${job} from one exact positive app_id producer.`);
     }
   }
   if (!checkSourceWorkflow) {
