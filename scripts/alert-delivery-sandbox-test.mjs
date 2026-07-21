@@ -176,6 +176,7 @@ try {
     "scripts/postgres-restore-sandbox.mjs",
     "scripts/offsite-restore-contract.mjs",
     "scripts/canonical-compose-topology.mjs",
+    "scripts/candidate-identity.mjs",
     "alertmanager/alertmanager.yml",
     "prometheus/rules/enterprise-alerts.yml",
     "platform-alert-dispatcher/server.mjs",

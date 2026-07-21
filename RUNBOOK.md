@@ -362,12 +362,16 @@ Runtime candidate identity is a separate fail-closed gate:
 
 ```sh
 sh ./scripts/functional-health-check.sh
-sh ./scripts/infra-ops.sh runtime-fingerprint --envFile .env --project platform_infra_vps
+sh ./scripts/infra-ops.sh runtime-fingerprint --envFile .env --project platform_infra_vps --repo OWNER/REPO
 ```
 
 The runtime fingerprint passes only when the worktree is clean and every
-Compose service config hash matches exactly one running container. It reads no
-container environment values.
+Compose service config hash matches exactly one running container. Its
+candidate identity binds repository, commit, Git tree, verified hosted-workload
+lock and canonical Compose render. Release, GitHub, pre-go-live and runtime
+reports must carry that same identity; reports from an earlier or mixed
+candidate are rejected even while still fresh. It reads no container
+environment values.
 
 ## Resilience drills
 

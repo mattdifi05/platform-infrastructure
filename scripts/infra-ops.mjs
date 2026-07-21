@@ -32,6 +32,7 @@ import { validateBackupImportProvenance } from "./backup-import-policy.mjs";
 import { defaultPostgresRestoreImage, postgresRestoreSandboxPlan } from "./postgres-restore-sandbox.mjs";
 import { evaluateOffsiteRestoreCoverage, locateSnapshotManifest, offsiteManifestTags, validateOffsiteRestoreSet } from "./offsite-restore-contract.mjs";
 import { canonicalVpsTopologyPlan, parseCanonicalVpsTopology } from "./canonical-compose-topology.mjs";
+import { candidateIdentityMatches, createCandidateIdentity, evaluateCandidateReportBinding, normalizeRepositoryIdentity } from "./candidate-identity.mjs";
 import {
   assertExactBranchProtection,
   assertExactGithubEnvironment,
@@ -884,6 +885,10 @@ async function withLocalCheckReport(commandName, fn, metadata = {}) {
       command: commandName,
       scope: "platform-infrastructure",
       runner: "infra-ops",
+      candidate: metadata.candidate ?? null,
+      candidateEnd: metadata.candidateEnd ?? null,
+      candidateStable: metadata.candidateStable === true,
+      candidateError: metadata.candidateError ?? null,
       metadata,
     };
     if (errorMessage) {
@@ -2696,6 +2701,8 @@ function infraTestingHygiene() {
     "scripts/offsite-restore-contract.test.mjs",
     "scripts/canonical-compose-topology.mjs",
     "scripts/canonical-compose-topology.test.mjs",
+    "scripts/candidate-identity.mjs",
+    "scripts/candidate-identity.test.mjs",
   ];
   for (const file of checkFiles) {
     run(process.execPath, ["--check", file], { cwd: infraRoot });
@@ -2714,6 +2721,7 @@ function infraTestingHygiene() {
   run(process.execPath, ["--test", "scripts/postgres-restore-sandbox.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/offsite-restore-contract.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/canonical-compose-topology.test.mjs"], { cwd: infraRoot });
+  run(process.execPath, ["--test", "scripts/candidate-identity.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "platform-alert-dispatcher/server.test.mjs"], { cwd: infraRoot });
   const shellFiles = fs.readdirSync(path.join(infraRoot, "scripts")).filter((name) => name.endsWith(".sh")).sort();
   for (const file of shellFiles) {
@@ -2759,6 +2767,34 @@ function canonicalVpsTopologyRender({ envFile, projectName, workloadLock } = {})
   });
   const workloadLockSha256 = plan.workloadLock ? sha256File(plan.workloadLock) : null;
   return parseCanonicalVpsTopology(configText, plan, { workloadLockSha256 });
+}
+
+function currentCandidateIdentity({ envFile, projectName, workloadLock, repository } = {}) {
+  const git = gitEvidence();
+  const { evidence: topology } = canonicalVpsTopologyRender({ envFile, projectName, workloadLock });
+  const repositoryIdentity = repository
+    ?? argv.repository
+    ?? argv.repo
+    ?? process.env.PLATFORM_GITHUB_REPOSITORY
+    ?? process.env.GITHUB_REPOSITORY
+    ?? git.repository;
+  return createCandidateIdentity({
+    repository: repositoryIdentity,
+    commit: git.commit,
+    tree: git.tree,
+    clean: git.dirty === false,
+    projectName: topology.projectName,
+    workloadLockSha256: topology.workloadLock?.sha256 ?? null,
+    renderSha256: topology.renderSha256,
+  });
+}
+
+function currentCandidateIdentityEvidence(options = {}) {
+  try {
+    return { candidate: currentCandidateIdentity(options), error: null };
+  } catch (error) {
+    return { candidate: null, error: String(error?.message ?? error) };
+  }
 }
 
 async function networkSegmentationCheck() {
@@ -4860,6 +4896,10 @@ async function functionalHealthCheck(options = {}) {
   log("==> Platform functional health check");
   const probes = platformFunctionalHealthProbes();
   const noDocker = noDockerMode(options);
+  const candidateEvidence = noDocker ? { candidate: null, error: "runtime-not-inspected" } : currentCandidateIdentityEvidence({
+    envFile: options.envFile ?? argv.envFile ?? path.join(infraRoot, ".env"),
+    projectName: options.project ?? argv.project ?? argv.projectName,
+  });
   let observations = [];
   let evaluation = null;
   if (!noDocker) {
@@ -4875,11 +4915,24 @@ async function functionalHealthCheck(options = {}) {
     }
     evaluation = evaluateFunctionalHealth(probes, observations);
   }
+  const candidateEndEvidence = noDocker ? candidateEvidence : currentCandidateIdentityEvidence({
+    envFile: options.envFile ?? argv.envFile ?? path.join(infraRoot, ".env"),
+    projectName: options.project ?? argv.project ?? argv.projectName,
+  });
+  const candidateStable = Boolean(
+    candidateEvidence.candidate?.trusted
+    && candidateEndEvidence.candidate?.trusted
+    && candidateIdentityMatches(candidateEvidence.candidate, candidateEndEvidence.candidate),
+  );
   const payload = {
     generatedAt: new Date().toISOString(),
     mode: noDocker ? "static-policy" : "runtime",
     status: noDocker ? "passed" : evaluation.status,
     scope: "platform-infrastructure",
+    candidate: candidateEvidence.candidate,
+    candidateEnd: candidateEndEvidence.candidate,
+    candidateStable,
+    candidateError: candidateEvidence.error,
     fingerprint: evaluation?.fingerprint ?? null,
     checks: noDocker ? probes.map((probe) => ({ id: probe.id, kind: probe.kind, container: probe.container, passed: true })) : evaluation.checks,
   };
@@ -4891,6 +4944,7 @@ async function functionalHealthCheck(options = {}) {
     `Status: ${payload.status}`,
     `Mode: ${payload.mode}`,
     `Generated at: ${payload.generatedAt}`,
+    `Candidate: ${payload.candidate?.id ?? "not-bound"}`,
     "",
     "| Probe | Kind | Container | Result | Latency ms |",
     "| --- | --- | --- | --- | ---: |",
@@ -4931,10 +4985,15 @@ async function runtimeFingerprint(options = {}) {
   const project = String(options.project ?? argv.project ?? envValues.COMPOSE_PROJECT_NAME ?? process.env.COMPOSE_PROJECT_NAME ?? "platform_infra_vps").trim();
   const git = gitEvidence();
   if (!git.commit) fail("Unable to resolve the candidate Git commit.");
+  const candidateEvidence = currentCandidateIdentityEvidence({
+    envFile,
+    projectName: project,
+    repository: options.repository ?? options.repo ?? argv.repository ?? argv.repo,
+  });
   const hashResult = run("bash", [path.join(scriptDir, "compose-vps.sh"), "config", "--hash", "*"], {
     allowFailure: true,
     capture: true,
-    env: { COMPOSE_ENV_FILE: envFile, COMPOSE_PROJECT_NAME: project },
+    env: { COMPOSE_ENV_FILE: envFile, COMPOSE_PROJECT_NAME: project, HOSTED_WORKLOAD_ALLOW_RESOLVED: "0" },
   });
   if (hashResult.status !== 0) fail(`Unable to calculate Docker Compose service hashes: ${String(hashResult.stderr ?? "").trim()}`);
   const services = parseComposeServiceHashes(hashResult.stdout);
@@ -4945,12 +5004,30 @@ async function runtimeFingerprint(options = {}) {
       { commit: options.expectedCommit ?? argv.expectedCommit ?? git.commit, project, services },
       { commit: git.commit, clean: git.dirty === false, project, containers },
     );
+  const candidateEndEvidence = currentCandidateIdentityEvidence({
+    envFile,
+    projectName: project,
+    repository: options.repository ?? options.repo ?? argv.repository ?? argv.repo,
+  });
+  const candidateStable = Boolean(
+    candidateEvidence.candidate?.trusted
+    && candidateEndEvidence.candidate?.trusted
+    && candidateIdentityMatches(candidateEvidence.candidate, candidateEndEvidence.candidate),
+  );
+  if (!candidateStable || candidateEvidence.error || candidateEndEvidence.error) {
+    evaluation.issues.push(`candidate-identity:${candidateEvidence.error ?? candidateEndEvidence.error ?? "candidate-changed-or-worktree-not-clean"}`);
+    if (!noDockerMode(options)) evaluation.status = "failed";
+  }
   const payload = {
     generatedAt: new Date().toISOString(),
     mode: noDockerMode(options) ? "static-policy" : "runtime-exact",
     status: evaluation.status,
     scope: "platform-infrastructure",
-    git: { commit: git.commit, branch: git.branch, clean: git.dirty === false },
+    git: { commit: git.commit, tree: git.tree, repository: git.repository, branch: git.branch, clean: git.dirty === false },
+    candidate: candidateEvidence.candidate,
+    candidateEnd: candidateEndEvidence.candidate,
+    candidateStable,
+    candidateError: candidateEvidence.error,
     envFile: path.relative(infraRoot, envFile).replaceAll("\\", "/"),
     ...evaluation,
   };
@@ -4964,6 +5041,7 @@ async function runtimeFingerprint(options = {}) {
     `Commit: ${payload.git.commit}`,
     `Worktree clean: ${payload.git.clean}`,
     `Compose project: ${project}`,
+    `Candidate: ${payload.candidate?.id ?? "not-bound"}`,
     `Expected services: ${payload.expectedServiceCount}`,
     `Runtime containers: ${payload.actualContainerCount}`,
     `Fingerprint: ${payload.fingerprint ?? "not-generated"}`,
@@ -5845,6 +5923,7 @@ function writeReleaseEvidenceReport(payload) {
     `Commit: ${payload.releaseSha ?? "n/a"}`,
     `Environment: ${payload.environment}`,
     `Approved by: ${payload.approvedBy ?? "n/a"}`,
+    `Candidate: ${payload.candidate?.id ?? "not-bound"}`,
     "",
     "| Image variable | Current image | Rollback image |",
     "| --- | --- | --- |",
@@ -5902,14 +5981,22 @@ async function releaseEvidence(options = {}) {
   const releaseSha = options.releaseSha ?? argv.releaseSha ?? gitEvidence().commit;
   const releaseName = options.releaseName ?? argv.releaseName ?? releaseSha?.slice(0, 12) ?? `release-${reportTimestamp()}`;
   const rollbackProjectName = options.rollbackProjectName ?? argv.rollbackProjectName ?? argv.projectName ?? "enterprise_prod";
+  const candidateProjectName = options.candidateProjectName ?? argv.candidateProjectName ?? process.env.COMPOSE_PROJECT_NAME ?? env.COMPOSE_PROJECT_NAME ?? "platform_infra_vps";
   const rollbackServices = csvList(options.rollbackServices ?? argv.rollbackServices ?? argv.services, "platform-alert-dispatcher,control-center,php-apache");
   const rollbackComposeFiles = csvList(options.rollbackComposeFiles ?? argv.rollbackComposeFiles ?? argv.composeFiles, "compose.yaml,compose.prod.yaml");
   const generatedAt = new Date().toISOString();
   const issues = [];
   let githubAttestationValidation = null;
+  const candidateEvidence = planOnly ? { candidate: null, error: "plan-only" } : currentCandidateIdentityEvidence({
+    envFile,
+    projectName: candidateProjectName,
+    repository: options.repository ?? options.repo ?? argv.repository ?? argv.repo,
+  });
 
   if (!planOnly) {
     try {
+      if (!candidateEvidence.candidate?.trusted) fail(`Release candidate identity is not trusted: ${candidateEvidence.error ?? "worktree-not-clean"}.`);
+      if (String(releaseSha ?? "").toLowerCase() !== candidateEvidence.candidate.commit) fail("Release SHA must equal the current candidate commit.");
       if (!fs.existsSync(envFile)) {
         fail(`Env file not found: ${envFile}`);
       }
@@ -6001,6 +6088,17 @@ async function releaseEvidence(options = {}) {
       };
     }
   }
+  const candidateEndEvidence = planOnly ? candidateEvidence : currentCandidateIdentityEvidence({
+    envFile,
+    projectName: candidateProjectName,
+    repository: options.repository ?? options.repo ?? argv.repository ?? argv.repo,
+  });
+  const candidateStable = Boolean(
+    candidateEvidence.candidate?.trusted
+    && candidateEndEvidence.candidate?.trusted
+    && candidateIdentityMatches(candidateEvidence.candidate, candidateEndEvidence.candidate),
+  );
+  if (!planOnly && !candidateStable) issues.push(`Release candidate changed during evidence collection: ${candidateEndEvidence.error ?? "identity-mismatch"}.`);
 
   const payload = {
     generatedAt,
@@ -6011,6 +6109,10 @@ async function releaseEvidence(options = {}) {
     approvedBy: argv.approvedBy ?? null,
     environment: argv.environment ?? "production",
     git: gitEvidence(),
+    candidate: candidateEvidence.candidate,
+    candidateEnd: candidateEndEvidence.candidate,
+    candidateStable,
+    candidateError: candidateEvidence.error,
     envFile: fs.existsSync(envFile) ? envFile : null,
     imageManifest: imageManifest ? path.resolve(imageManifest) : null,
     currentImages,
@@ -6704,6 +6806,7 @@ function writeGithubActionsRunEvidenceReport(payload) {
     `Workflow: ${payload.workflow}`,
     `Branch: ${payload.branch}`,
     `Expected SHA: ${payload.expectedSha ?? "n/a"}`,
+    `Candidate: ${payload.candidate?.id ?? "not-bound"}`,
     `Run ID: ${payload.run?.id ?? "n/a"}`,
     `Run conclusion: ${payload.run?.conclusion ?? "n/a"}`,
     `Run status: ${payload.run?.status ?? "n/a"}`,
@@ -6724,8 +6827,24 @@ async function githubActionsRunEvidence() {
   const expectedSha = expectedGithubActionsRunSha();
   const mode = booleanFlag(argv.verifyRemote) ? "verifyRemote" : "plan";
   const issues = [];
+  const candidateEvidence = mode === "verifyRemote" ? currentCandidateIdentityEvidence({
+    envFile: argv.envFile ?? path.join(infraRoot, ".env"),
+    projectName: argv.project ?? argv.projectName,
+    repository: repo,
+  }) : { candidate: null, error: "plan-only" };
   if (!expectedSha || !/^[a-f0-9]{40}$/i.test(expectedSha)) {
     issues.push(`expected SHA is missing or invalid: ${expectedSha ?? "n/a"}`);
+  }
+  if (mode === "verifyRemote") {
+    if (!candidateEvidence.candidate?.trusted) issues.push(`candidate identity is not trusted: ${candidateEvidence.error ?? "worktree-not-clean"}`);
+    else {
+      if (String(expectedSha).toLowerCase() !== candidateEvidence.candidate.commit) issues.push("expected SHA does not equal the current candidate commit");
+      try {
+        if (normalizeRepositoryIdentity(repo) !== candidateEvidence.candidate.repository) issues.push("repository does not equal the current candidate repository");
+      } catch (error) {
+        issues.push(String(error?.message ?? error));
+      }
+    }
   }
   let runEvidence = null;
   if (mode === "verifyRemote") {
@@ -6766,6 +6885,17 @@ async function githubActionsRunEvidence() {
   } else {
     issues.push("remote workflow run not verified; rerun with --verifyRemote and GITHUB_TOKEN/GH_TOKEN");
   }
+  const candidateEndEvidence = mode === "verifyRemote" ? currentCandidateIdentityEvidence({
+    envFile: argv.envFile ?? path.join(infraRoot, ".env"),
+    projectName: argv.project ?? argv.projectName,
+    repository: repo,
+  }) : candidateEvidence;
+  const candidateStable = Boolean(
+    candidateEvidence.candidate?.trusted
+    && candidateEndEvidence.candidate?.trusted
+    && candidateIdentityMatches(candidateEvidence.candidate, candidateEndEvidence.candidate),
+  );
+  if (mode === "verifyRemote" && !candidateStable) issues.push(`candidate changed during GitHub verification: ${candidateEndEvidence.error ?? "identity-mismatch"}`);
   const payload = {
     generatedAt: new Date().toISOString(),
     status: issues.length ? "failed" : "passed",
@@ -6774,6 +6904,10 @@ async function githubActionsRunEvidence() {
     workflow,
     branch,
     expectedSha,
+    candidate: candidateEvidence.candidate,
+    candidateEnd: candidateEndEvidence.candidate,
+    candidateStable,
+    candidateError: candidateEvidence.error,
     run: runEvidence,
     issues,
   };
@@ -6788,32 +6922,37 @@ async function githubActionsRunEvidence() {
   }
 }
 
+function safeRepositoryIdentity(value) {
+  try {
+    return normalizeRepositoryIdentity(value);
+  } catch {
+    return null;
+  }
+}
+
 function gitEvidence() {
-  if (/^[a-f0-9]{40}$/i.test(String(process.env.PLATFORM_GIT_COMMIT ?? ""))) {
+  if (/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i.test(String(process.env.PLATFORM_GIT_COMMIT ?? ""))) {
     return {
       commit: String(process.env.PLATFORM_GIT_COMMIT).toLowerCase(),
+      tree: /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i.test(String(process.env.PLATFORM_GIT_TREE ?? "")) ? String(process.env.PLATFORM_GIT_TREE).toLowerCase() : null,
       branch: String(process.env.PLATFORM_GIT_BRANCH ?? "").trim() || null,
       dirty: booleanFlag(process.env.PLATFORM_GIT_DIRTY),
+      repository: safeRepositoryIdentity(process.env.PLATFORM_GIT_REPOSITORY ?? process.env.PLATFORM_GITHUB_REPOSITORY ?? process.env.GITHUB_REPOSITORY),
     };
   }
   const gitArgs = (...args) => ["-c", "safe.directory=*", ...args];
   const rev = run("git", gitArgs("rev-parse", "HEAD"), { capture: true, allowFailure: true });
+  const tree = run("git", gitArgs("rev-parse", "HEAD^{tree}"), { capture: true, allowFailure: true });
   const branch = run("git", gitArgs("rev-parse", "--abbrev-ref", "HEAD"), { capture: true, allowFailure: true });
   const status = run("git", gitArgs("status", "--short"), { capture: true, allowFailure: true });
+  const repository = run("git", gitArgs("config", "--get", "remote.origin.url"), { capture: true, allowFailure: true });
   return {
     commit: rev.status === 0 ? String(rev.stdout ?? "").trim() : null,
+    tree: tree.status === 0 ? String(tree.stdout ?? "").trim() : null,
     branch: branch.status === 0 ? String(branch.stdout ?? "").trim() : null,
     dirty: status.status === 0 ? String(status.stdout ?? "").trim().split(/\r?\n/).filter(Boolean).length > 0 : null,
+    repository: repository.status === 0 ? safeRepositoryIdentity(repository.stdout) : null,
   };
-}
-
-function releaseCommitShaCandidate() {
-  const release = latestJsonReport("release", "release-evidence-", (payload) => payload.mode === "evidence");
-  const releaseSha = release?.payload?.releaseSha ?? release?.payload?.git?.commit ?? release?.payload?.git?.sha;
-  if (releaseSha && /^[a-f0-9]{40}$/i.test(String(releaseSha))) {
-    return String(releaseSha);
-  }
-  return null;
 }
 
 async function collectEvidenceStep(steps, { name, category, required = true, fn }) {
@@ -6892,7 +7031,7 @@ function liveProofGroupStatus(steps, names, enabled = true) {
   return statuses.every((status) => status === "passed") ? "passed" : "pending-live-proof";
 }
 
-function buildPreGoLiveReadinessMatrix({ steps, options, repo }) {
+function buildPreGoLiveReadinessMatrix({ steps, options, repo, candidateStable }) {
   const localPolicySteps = [
     "static-security-check",
     "governance-check",
@@ -6923,6 +7062,13 @@ function buildPreGoLiveReadinessMatrix({ steps, options, repo }) {
   ];
 
   return [
+    {
+      id: "candidate-identity",
+      required: true,
+      status: candidateStable ? "passed" : "failed",
+      evidence: "current commit, tree, repository, clean worktree, workload lock and canonical render digest",
+      nextAction: "Regenerate all evidence from one clean current candidate and do not change the checkout during collection.",
+    },
     {
       id: "local-policy",
       required: true,
@@ -7047,6 +7193,11 @@ async function preGoLiveEvidence() {
     "Real staging deploy, DAST run and production deploy completed.",
     "Public-path load benchmark archived.",
   ];
+  const candidateAtStart = currentCandidateIdentityEvidence({
+    envFile: argv.envFile ?? path.join(infraRoot, ".env"),
+    projectName: argv.project ?? argv.projectName,
+    repository: repo,
+  });
 
   await collectEvidenceStep(steps, {
     name: "static-security-check",
@@ -7152,7 +7303,17 @@ async function preGoLiveEvidence() {
     includeOffsiteRestoreDryRun: booleanFlag(argv.includeOffsiteRestoreDryRun),
     verifyGithubRemote: booleanFlag(argv.verifyGithubRemote),
   };
-  const readinessMatrix = buildPreGoLiveReadinessMatrix({ steps, options, repo });
+  const candidateAtEnd = currentCandidateIdentityEvidence({
+    envFile: argv.envFile ?? path.join(infraRoot, ".env"),
+    projectName: argv.project ?? argv.projectName,
+    repository: repo,
+  });
+  const candidateStable = Boolean(
+    candidateAtStart.candidate?.trusted
+    && candidateAtEnd.candidate?.trusted
+    && candidateIdentityMatches(candidateAtStart.candidate, candidateAtEnd.candidate),
+  );
+  const readinessMatrix = buildPreGoLiveReadinessMatrix({ steps, options, repo, candidateStable });
   const failedRequired = steps.filter((step) => step.required && step.status === "failed");
   const readinessMissing = readinessMatrix.filter((item) => item.required && item.status !== "passed");
   const missingOptions = [
@@ -7174,6 +7335,7 @@ async function preGoLiveEvidence() {
     ...missingOptions.filter((option) => externalLiveOptions.has(option)).map((option) => `missing option: --${option}`),
   ];
   const issues = [
+    ...(!candidateStable ? [`candidate-identity: ${candidateAtStart.error ?? candidateAtEnd.error ?? "candidate changed or worktree is not clean"}`] : []),
     ...localFailedRequired.map((step) => `${step.name}: ${step.error ?? "failed"}`),
     ...localReadinessMissing.map((item) => `${item.id}: ${item.nextAction}`),
     ...localMissingOptions.map((option) => `missing option: --${option}`),
@@ -7184,6 +7346,9 @@ async function preGoLiveEvidence() {
     status: preGoLiveStatus,
     repo,
     branch,
+    candidate: candidateAtStart.candidate,
+    candidateEnd: candidateAtEnd.candidate,
+    candidateStable,
     git: gitEvidence(),
     options,
     steps,
@@ -7204,6 +7369,7 @@ async function preGoLiveEvidence() {
     `Git commit: ${payload.git.commit ?? "unknown"}`,
     `Git branch: ${payload.git.branch ?? "unknown"}`,
     `Dirty worktree: ${payload.git.dirty === null ? "unknown" : payload.git.dirty ? "yes" : "no"}`,
+    `Candidate: ${payload.candidate?.id ?? "not-bound"}`,
     "",
     "## Readiness Matrix",
     "",
@@ -7342,7 +7508,21 @@ function goNoGoStatusCounts(checks) {
 }
 
 function goNoGoRemediation(check) {
+  const candidateRemediation = {
+    actions: [
+      "Use one clean checkout and the exact production env/workload lock for every final evidence command.",
+      "Regenerate release, GitHub Actions, functional health, pre-go-live and runtime fingerprint reports after any commit, tree, repository, workload-lock or Compose-render change.",
+    ],
+    commands: [
+      "sh ./scripts/infra-ops.sh runtime-fingerprint --envFile .env --project platform_infra_vps --repo OWNER/REPO",
+      "sh ./scripts/pre-go-live-evidence.sh --envFile .env --repo OWNER/REPO --includeRuntime --includeRestoreDrill --includeOffsiteRestoreDryRun --includeProductionPreflight --verifyGithubRemote",
+      "sh ./scripts/production-go-no-go.sh --envFile .env --repo OWNER/REPO --enforce",
+    ],
+    evidence: "Every accepted report carries the same trusted platform.release-candidate/v1 identity.",
+  };
   const remediations = {
+    "release-candidate-current": candidateRemediation,
+    "candidate-report-set-consistent": candidateRemediation,
     "vps-bootstrap-applied": {
       actions: [
         "Run the VPS bootstrap on the actual VPS Ubuntu LTS host in apply mode, not from Docker Desktop or a diagnostic container.",
@@ -8012,6 +8192,24 @@ async function productionGoNoGo() {
   const { policyPath, policy } = productionGoNoGoPolicy();
   const enforce = booleanFlag(argv.enforce);
   const checks = [];
+  const candidateEvidence = currentCandidateIdentityEvidence({
+    envFile: argv.envFile ?? path.join(infraRoot, ".env"),
+    projectName: argv.project ?? argv.projectName,
+    repository: argv.repository ?? argv.repo,
+  });
+  const currentCandidate = candidateEvidence.candidate;
+  const candidateReportBinding = (payload, kind, maxAgeHours) => (
+    currentCandidate
+      ? evaluateCandidateReportBinding(payload, currentCandidate, { kind, maxAgeHours }).passed
+      : false
+  );
+  addGoNoGoCheck(checks, {
+    name: "release-candidate-current",
+    passed: Boolean(currentCandidate?.trusted),
+    detail: currentCandidate
+      ? `id=${currentCandidate.id}; commit=${currentCandidate.commit}; tree=${currentCandidate.tree}; repository=${currentCandidate.repository}; clean=${currentCandidate.clean}; workloadLock=${currentCandidate.workloadLockSha256 ?? "none"}; render=${currentCandidate.renderSha256}`
+      : `candidate identity unavailable: ${candidateEvidence.error ?? "unknown"}`,
+  });
   const maxAge = {
     vpsBootstrap: 168,
     vpsHardening: 168,
@@ -8023,6 +8221,7 @@ async function productionGoNoGo() {
     load: 72,
     release: 24,
     cloudflareAccess: 24,
+    githubActionsRun: 24,
     secretRotation: 24,
     healthchecks: 24,
     runtimeFingerprint: 24,
@@ -8088,7 +8287,8 @@ async function productionGoNoGo() {
     report: vps,
   });
 
-  const preGoLive = latestJsonReport("go-live", "pre-go-live-evidence-");
+  const latestPreGoLive = latestJsonReport("go-live", "pre-go-live-evidence-");
+  const preGoLive = latestJsonReport("go-live", "pre-go-live-evidence-", (payload) => candidateReportBinding(payload, "pre-go-live", maxAge.preGoLive));
   const preFresh = reportFreshDetail(preGoLive, maxAge.preGoLive);
   const preOptions = preGoLive?.payload?.options ?? {};
   const preReadinessMatrix = preGoLive?.payload?.readinessMatrix ?? [];
@@ -8125,8 +8325,10 @@ async function productionGoNoGo() {
     passed: Boolean(preGoLive && preFresh.fresh && preGoLive.payload.status === "passed" && preRequiredFailures.length === 0 && preMissingOptions.length === 0 && preMatrixRequiredFailures.length === 0),
     detail: preGoLive
       ? `${preFresh.detail}; status=${preGoLive.payload.status ?? "unknown"}; requiredFailures=${preRequiredFailures.length}; missingOptions=${preMissingOptions.join(",") || "none"}; readinessMissing=${preMatrixRequiredFailures.map((item) => item.id).join(",") || "none"}`
-      : preFresh.detail,
-    report: preGoLive,
+      : latestPreGoLive
+        ? `latest pre-go-live report is not bound to the current candidate; ${reportFreshDetail(latestPreGoLive, maxAge.preGoLive).detail}`
+        : preFresh.detail,
+    report: preGoLive ?? latestPreGoLive,
     status: prePendingProvider ? "pending-provider" : null,
     blocker: prePendingProvider ? "external-provider-proof" : null,
   });
@@ -8142,30 +8344,37 @@ async function productionGoNoGo() {
     required: false,
   });
 
-  const functionalHealth = latestJsonReport("healthchecks", "functional-health-");
+  const latestFunctionalHealth = latestJsonReport("healthchecks", "functional-health-");
+  const functionalHealth = latestJsonReport("healthchecks", "functional-health-", (payload) => candidateReportBinding(payload, "runtime-health", maxAge.healthchecks));
   const functionalHealthFresh = reportFreshDetail(functionalHealth, maxAge.healthchecks);
   const functionalHealthResult = evidenceBundleReportPasses({ label: "functional-health" }, functionalHealth?.payload);
   addGoNoGoCheck(checks, {
     name: "functional-health-runtime",
     passed: Boolean(functionalHealth && functionalHealthFresh.fresh && functionalHealthResult.passed),
-    detail: functionalHealth ? `${functionalHealthFresh.detail}; ${functionalHealthResult.detail}` : functionalHealthFresh.detail,
-    report: functionalHealth,
+    detail: functionalHealth
+      ? `${functionalHealthFresh.detail}; ${functionalHealthResult.detail}`
+      : latestFunctionalHealth ? `latest runtime health report is not bound to the current candidate` : functionalHealthFresh.detail,
+    report: functionalHealth ?? latestFunctionalHealth,
   });
 
-  const runtimeFingerprintReport = latestJsonReport("runtime-fingerprint", "runtime-fingerprint-");
+  const latestRuntimeFingerprintReport = latestJsonReport("runtime-fingerprint", "runtime-fingerprint-");
+  const runtimeFingerprintReport = latestJsonReport("runtime-fingerprint", "runtime-fingerprint-", (payload) => candidateReportBinding(payload, "runtime-fingerprint", maxAge.runtimeFingerprint));
   const runtimeFingerprintFresh = reportFreshDetail(runtimeFingerprintReport, maxAge.runtimeFingerprint);
   const runtimeFingerprintResult = evidenceBundleReportPasses({ label: "runtime-fingerprint" }, runtimeFingerprintReport?.payload);
   addGoNoGoCheck(checks, {
     name: "runtime-fingerprint-exact",
     passed: Boolean(runtimeFingerprintReport && runtimeFingerprintFresh.fresh && runtimeFingerprintResult.passed),
-    detail: runtimeFingerprintReport ? `${runtimeFingerprintFresh.detail}; ${runtimeFingerprintResult.detail}` : runtimeFingerprintFresh.detail,
-    report: runtimeFingerprintReport,
+    detail: runtimeFingerprintReport
+      ? `${runtimeFingerprintFresh.detail}; ${runtimeFingerprintResult.detail}`
+      : latestRuntimeFingerprintReport ? `latest runtime fingerprint is not bound to the current candidate` : runtimeFingerprintFresh.detail,
+    report: runtimeFingerprintReport ?? latestRuntimeFingerprintReport,
   });
 
   const infraHealthReport = latestJsonReport("local-checks", "infra-health-", (payload) => (
     payload.status === "passed"
     && payload.scope === "platform-infrastructure"
     && payload.command === "infra-health"
+    && candidateReportBinding(payload, "runtime-health", maxAge.healthchecks)
   ));
   const infraHealthFresh = reportFreshDetail(infraHealthReport, maxAge.healthchecks);
   const infraHealthStep = (preGoLive?.payload?.steps ?? []).find((step) => step.name === "infra-health");
@@ -8211,11 +8420,12 @@ async function productionGoNoGo() {
   });
 
   const expectedWorkflow = policy.requiredGithubWorkflow ?? "enterprise-infra.yml";
-  const releaseSha = releaseCommitShaCandidate() ?? gitEvidence().commit;
+  const releaseSha = currentCandidate?.commit ?? null;
   const githubActionsRun = latestJsonReport("github-actions", "github-actions-run-", (payload) => (
     !policy.requireGithubActionsRunSuccess
     || (
-      payload.mode === "verifyRemote"
+      candidateReportBinding(payload, "github-actions", maxAge.githubActionsRun)
+      && payload.mode === "verifyRemote"
       && payload.status === "passed"
       && payload.workflow === expectedWorkflow
       && (!releaseSha || String(payload.expectedSha ?? "").toLowerCase() === String(releaseSha).toLowerCase())
@@ -8233,6 +8443,7 @@ async function productionGoNoGo() {
     && githubActionsRun.payload.status === "passed"
     && githubActionsRun.payload.workflow === expectedWorkflow
     && githubActionsRun.payload.run?.conclusion === "success"
+    && candidateReportBinding(githubActionsRun.payload, "github-actions", maxAge.githubActionsRun)
     && (!releaseSha || String(githubActionsRun.payload.expectedSha ?? "").toLowerCase() === String(releaseSha).toLowerCase())
   );
   const githubActionsRemoteFailed = Boolean(
@@ -8240,10 +8451,15 @@ async function productionGoNoGo() {
     && latestGithubActionsRun.payload.mode === "verifyRemote"
     && latestGithubActionsRun.payload.status === "failed"
   );
+  const latestGithubActionsCandidateBound = Boolean(
+    latestGithubActionsRun
+    && candidateReportBinding(latestGithubActionsRun.payload, "github-actions", maxAge.githubActionsRun)
+  );
   const githubActionsPendingProvider = Boolean(
     !githubActionsOk
     && policy.requireGithubActionsRunSuccess
     && !githubActionsRemoteFailed
+    && (!latestGithubActionsRun || latestGithubActionsRun.payload.mode !== "verifyRemote" || latestGithubActionsCandidateBound)
   );
   addGoNoGoCheck(checks, {
     name: "github-actions-run-success",
@@ -8431,7 +8647,10 @@ async function productionGoNoGo() {
   });
 
   const latestReleaseReport = latestJsonReport("release", "release-evidence-");
-  const release = latestJsonReport("release", "release-evidence-", (payload) => payload.mode === "evidence");
+  const release = latestJsonReport("release", "release-evidence-", (payload) => (
+    payload.mode === "evidence"
+    && candidateReportBinding(payload, "release", maxAge.release)
+  ));
   const releaseFresh = reportFreshDetail(release, maxAge.release);
   const latestReleaseFresh = reportFreshDetail(latestReleaseReport, maxAge.release);
   const releasePayload = release?.payload ?? {};
@@ -8448,13 +8667,18 @@ async function productionGoNoGo() {
       && githubProvenance?.attestationCount > 0,
   );
   const releaseProvenanceOk = !policy.requireReleaseProvenance || releaseGithubProvenanceOk;
-  const releaseGitOk = !policy.requireCleanReleaseGit || releasePayload.git?.dirty === false;
+  const releaseGitOk = !policy.requireCleanReleaseGit || (
+    releasePayload.git?.dirty === false
+    && String(releasePayload.git?.commit ?? "").toLowerCase() === currentCandidate?.commit
+    && String(releasePayload.git?.tree ?? "").toLowerCase() === currentCandidate?.tree
+  );
   const releaseRollbackOk = Boolean(
     releasePayload.rollback?.complete
       && (releasePayload.rollback?.firstDeploy || releasePayload.rollback?.dryRun?.validated === true),
   );
   const releasePendingProvider = Boolean(
-    policy.requireReleaseProvenance
+    release
+    && policy.requireReleaseProvenance
     && !releaseGithubProvenanceOk
   );
   addGoNoGoCheck(checks, {
@@ -8468,6 +8692,25 @@ async function productionGoNoGo() {
     report: release ?? latestReleaseReport,
     status: releasePendingProvider ? "pending-provider" : null,
     blocker: releasePendingProvider ? "github-sigstore-release-provenance" : null,
+  });
+
+  const candidateReportBindings = [
+    ["pre-go-live", preGoLive?.payload, "pre-go-live", maxAge.preGoLive],
+    ["functional-health", functionalHealth?.payload, "runtime-health", maxAge.healthchecks],
+    ["runtime-fingerprint", runtimeFingerprintReport?.payload, "runtime-fingerprint", maxAge.runtimeFingerprint],
+    ["github-actions", githubActionsRun?.payload, "github-actions", maxAge.githubActionsRun],
+    ["release", release?.payload, "release", maxAge.release],
+  ].map(([name, reportPayload, kind, reportMaxAge]) => ({
+    name,
+    ...evaluateCandidateReportBinding(reportPayload, currentCandidate, { kind, maxAgeHours: reportMaxAge }),
+  }));
+  const candidateReportFailures = candidateReportBindings.filter((binding) => !binding.passed);
+  addGoNoGoCheck(checks, {
+    name: "candidate-report-set-consistent",
+    passed: candidateReportFailures.length === 0,
+    detail: candidateReportFailures.length
+      ? candidateReportFailures.map((binding) => `${binding.name}:${binding.issues.join(",")}`).join("; ")
+      : `all release, GitHub, runtime, and fingerprint reports bind candidate ${currentCandidate?.id}`,
   });
 
   const latestCloudflareAccessReport = latestJsonReport("cloudflare-access", "cloudflare-access-admin-");
@@ -8517,6 +8760,8 @@ async function productionGoNoGo() {
     mode: enforce ? "enforce" : "summary",
     status,
     policyPath,
+    candidate: currentCandidate,
+    candidateError: candidateEvidence.error,
     summary: {
       total: checks.length,
       required: checks.filter((check) => check.required).length,
@@ -8543,6 +8788,7 @@ async function productionGoNoGo() {
     `Mode: ${payload.mode}`,
     `Generated at: ${generatedAt}`,
     `Policy: ${policyPath}`,
+    `Candidate: ${currentCandidate?.id ?? "not-bound"}`,
     "",
     "| Check | Status | Detail | Report |",
     "| --- | --- | --- | --- |",
@@ -10706,7 +10952,31 @@ async function wafSmoke() {
 }
 
 async function infraHealth() {
-  await withLocalCheckReport("infra-health", infraHealthBody);
+  const candidateEvidence = currentCandidateIdentityEvidence({
+    envFile: argv.envFile ?? path.join(infraRoot, ".env"),
+    projectName: argv.project ?? argv.projectName,
+  });
+  const metadata = {
+    candidate: candidateEvidence.candidate,
+    candidateError: candidateEvidence.error,
+  };
+  await withLocalCheckReport("infra-health", async () => {
+    try {
+      return await infraHealthBody();
+    } finally {
+      const candidateEndEvidence = currentCandidateIdentityEvidence({
+        envFile: argv.envFile ?? path.join(infraRoot, ".env"),
+        projectName: argv.project ?? argv.projectName,
+      });
+      metadata.candidateEnd = candidateEndEvidence.candidate;
+      metadata.candidateStable = Boolean(
+        candidateEvidence.candidate?.trusted
+        && candidateEndEvidence.candidate?.trusted
+        && candidateIdentityMatches(candidateEvidence.candidate, candidateEndEvidence.candidate),
+      );
+      metadata.candidateError = candidateEvidence.error ?? candidateEndEvidence.error;
+    }
+  }, metadata);
 }
 
 async function infraHealthBody() {

@@ -83,6 +83,7 @@ try {
     "postgres-restore-sandbox.mjs",
     "offsite-restore-contract.mjs",
     "canonical-compose-topology.mjs",
+    "candidate-identity.mjs",
   ]) cpSync(path.join(repositoryRoot, "scripts", moduleName), path.join(replicaRoot, "scripts", moduleName));
   cpSync(path.join(repositoryRoot, "control-center", "backup", "contracts.mjs"), path.join(replicaRoot, "control-center", "backup", "contracts.mjs"));
   mkdirSync(path.join(sourceRoot, "fixture-app", "src"), { recursive: true });

@@ -30,6 +30,7 @@ jobs:
         run: |
           sh ./scripts/infra-ops.sh github-actions-run-evidence \
             --repo "${{ github.repository }}" \
+            --envFile .env.vps.example \
             --workflow enterprise-infra.yml \
             --branch "${{ github.event.workflow_run.head_branch }}" \
             --sha "${{ github.event.workflow_run.head_sha }}" \

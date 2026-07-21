@@ -56,7 +56,13 @@ OPS_UID="${PLATFORM_OPS_UID:-$(id -u)}"
 OPS_GID="${PLATFORM_OPS_GID:-$(id -g)}"
 OPS_DOCKER_MODE="${PLATFORM_OPS_DOCKER_MODE:-auto}"
 OPS_GIT_COMMIT="$(git -C "$INFRA_ROOT" rev-parse HEAD 2>/dev/null || true)"
+OPS_GIT_TREE="$(git -C "$INFRA_ROOT" rev-parse 'HEAD^{tree}' 2>/dev/null || true)"
 OPS_GIT_BRANCH="$(git -C "$INFRA_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+OPS_GIT_REPOSITORY="${PLATFORM_GITHUB_REPOSITORY:-${GITHUB_REPOSITORY:-}}"
+if [ -z "$OPS_GIT_REPOSITORY" ]; then
+  OPS_GIT_REPOSITORY="$(git -C "$INFRA_ROOT" config --get remote.origin.url 2>/dev/null \
+    | sed -E 's#^[A-Za-z][A-Za-z0-9+.-]*://([^/@]+@)?##; s#^[^@/]+@##; s#:#/#; s#\.git$##' || true)"
+fi
 OPS_GIT_TRACKED_FILES_B64="$(git -C "$INFRA_ROOT" ls-files -z 2>/dev/null | base64 | tr -d '\n' || true)"
 if [ -n "$(git -C "$INFRA_ROOT" status --short 2>/dev/null || true)" ]; then
   OPS_GIT_DIRTY=1
@@ -305,7 +311,9 @@ docker run --rm -i \
   -e "PLATFORM_INFRA_HOST_ROOT=$INFRA_VOLUME_SOURCE" \
   -e "PROJECT_SOURCE_HOST_ROOT=$SOURCE_VOLUME_SOURCE" \
   -e "PLATFORM_GIT_COMMIT=$OPS_GIT_COMMIT" \
+  -e "PLATFORM_GIT_TREE=$OPS_GIT_TREE" \
   -e "PLATFORM_GIT_BRANCH=$OPS_GIT_BRANCH" \
+  -e "PLATFORM_GIT_REPOSITORY=$OPS_GIT_REPOSITORY" \
   -e "PLATFORM_GIT_DIRTY=$OPS_GIT_DIRTY" \
   -e "PLATFORM_GIT_TRACKED_FILES_B64=$OPS_GIT_TRACKED_FILES_B64" \
   -e "PLATFORM_OPS_CONTAINER=1" \
