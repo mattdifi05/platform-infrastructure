@@ -34,6 +34,19 @@ env_path_value() {
   printf '%s' "$value"
 }
 
+canonical_existing_file() {
+  local candidate=$1 parent base
+  [[ "$candidate" = /* ]] || candidate="$ROOT_DIR/$candidate"
+  parent=$(dirname -- "$candidate")
+  base=$(basename -- "$candidate")
+  [[ -d "$parent" && ! -L "$candidate" && -f "$candidate" ]] || {
+    printf 'Runtime lock source must be an existing regular non-symlink file: %s\n' "$candidate" >&2
+    return 1
+  }
+  parent=$(CDPATH= cd -- "$parent" && pwd -P)
+  printf '%s/%s\n' "$parent" "$base"
+}
+
 sha256_stream() {
   if command -v sha256sum >/dev/null 2>&1; then
     sha256sum | awk '{ print $1 }'
@@ -182,11 +195,17 @@ compose=(
 workload_lock=${HOSTED_WORKLOAD_LOCK:-$(env_path_value HOSTED_WORKLOAD_LOCK)}
 if [[ -n "$workload_lock" ]]; then
   [[ "$workload_lock" = /* ]] || workload_lock="$ROOT_DIR/$workload_lock"
+  workload_lock=$(canonical_existing_file "$workload_lock")
   handoff_directory=$(mktemp -d "${TMPDIR:-/tmp}/hosted-compose-handoff.XXXXXX")
   chmod 700 "$handoff_directory"
   umask 077
   trap cleanup_handoff EXIT
-  export HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE=${HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE:-$workload_lock}
+  runtime_lock_source=$(canonical_existing_file "${HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE:-$workload_lock}")
+  [[ "$runtime_lock_source" = "$workload_lock" ]] || {
+    printf '%s\n' "Runtime lock mount source must be the exact verified activation lock." >&2
+    exit 1
+  }
+  export HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE=$runtime_lock_source
   activation_bundle=$(
     HOSTED_WORKLOAD_ALLOW_RESOLVED=${HOSTED_WORKLOAD_ALLOW_RESOLVED:-0} \
       sh "$ROOT_DIR/scripts/hosted-workload-lock.sh" "$workload_lock" activation-bundle
@@ -257,7 +276,30 @@ if [[ -n "$workload_lock" ]]; then
     compose+=(--env-file "$HANDOFF_REFERENCE")
   done <<< "$workload_env_records"
 else
-  export HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE=${HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE:-$ROOT_DIR/config/no-hosted-workloads.lock.json}
+  runtime_lock_source=$(canonical_existing_file "${HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE:-$ROOT_DIR/config/no-hosted-workloads.lock.json}")
+  if [[ "${HOSTED_WORKLOAD_PREPARE_RESOLVED:-0}" = 1 ]]; then
+    HOSTED_WORKLOAD_ALLOW_RESOLVED=1 sh "$ROOT_DIR/scripts/hosted-workload-lock.sh" "$runtime_lock_source" verify
+  else
+    no_workload_lock=$(canonical_existing_file "$ROOT_DIR/config/no-hosted-workloads.lock.json")
+    [[ "$runtime_lock_source" = "$no_workload_lock" ]] || {
+      printf '%s\n' "A non-empty HOSTED_WORKLOAD_LOCK is required for a hosted runtime lock source." >&2
+      exit 1
+    }
+    jq -e '
+      type == "object"
+      and ((keys | sort) == ["brokerPolicySha256", "routes", "state", "validatorVersion", "version", "workloads"])
+      and .version == 2
+      and .validatorVersion == "hosted-contract-v2"
+      and .state == "verified"
+      and .routes == []
+      and .workloads == []
+      and .brokerPolicySha256 == "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    ' "$runtime_lock_source" >/dev/null || {
+      printf '%s\n' "Canonical no-hosted-workloads runtime lock is invalid." >&2
+      exit 1
+    }
+  fi
+  export HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE=$runtime_lock_source
 fi
 
 compose+=(

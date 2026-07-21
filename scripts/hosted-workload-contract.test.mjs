@@ -202,6 +202,39 @@ test("Compose wrapper rejects caller-controlled scaling flags before execution",
     removeFixtureTree(root);
   }
 });
+test("Compose wrapper rejects a missing or non-canonical runtime lock source before render", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "hosted-runtime-lock-source-"));
+  try {
+    const envFile = path.join(root, "core.env");
+    fs.writeFileSync(envFile, "CORE_VALUE=fixture\n");
+    const missing = spawnSync("/bin/bash", [path.join(import.meta.dirname, "compose-vps.sh"), "config", "--quiet"], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        COMPOSE_ENV_FILE: envFile,
+        HOSTED_WORKLOAD_LOCK: "",
+        HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE: path.join(root, "missing.lock.json"),
+      },
+    });
+    assert.notEqual(missing.status, 0);
+    assert.match(missing.stderr, /existing regular non-symlink file/);
+    const foreign = path.join(root, "foreign.lock.json");
+    fs.copyFileSync(path.join(import.meta.dirname, "..", "config", "no-hosted-workloads.lock.json"), foreign);
+    const nonCanonical = spawnSync("/bin/bash", [path.join(import.meta.dirname, "compose-vps.sh"), "config", "--quiet"], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        COMPOSE_ENV_FILE: envFile,
+        HOSTED_WORKLOAD_LOCK: "",
+        HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE: foreign,
+      },
+    });
+    assert.notEqual(nonCanonical.status, 0);
+    assert.match(nonCanonical.stderr, /non-empty HOSTED_WORKLOAD_LOCK is required/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
 test("host port is rejected", () => {
   const combined = combinedFixture();
   combined.services["example-app-web"].ports = [{ target: 3000, published: "3000" }];

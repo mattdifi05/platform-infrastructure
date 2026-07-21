@@ -133,12 +133,14 @@ docker run --rm --network none --user "$(id -u):$(id -g)" --entrypoint ruby \
   -w "$INFRA_ROOT" \
   "$OPS_IMAGE" scripts/hosted-workload-source-policy.rb --lock "$resolved"
 
+install -m 0600 "$resolved" "$OUTPUT"
+
 COMPOSE_ENV_FILE="$ENV_FILE" COMPOSE_PROJECT_NAME="$PROJECT_NAME" HOSTED_WORKLOAD_LOCK= \
-HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE="$OUTPUT" \
+HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE="$OUTPUT" HOSTED_WORKLOAD_PREPARE_RESOLVED=1 \
   bash "$SCRIPT_DIR/compose-vps.sh" config --format json > "$core_render"
 
 COMPOSE_ENV_FILE="$ENV_FILE" COMPOSE_PROJECT_NAME="$PROJECT_NAME" \
-HOSTED_WORKLOAD_LOCK="$resolved" HOSTED_WORKLOAD_ALLOW_RESOLVED=1 \
+HOSTED_WORKLOAD_LOCK="$OUTPUT" HOSTED_WORKLOAD_ALLOW_RESOLVED=1 \
 HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE="$OUTPUT" \
   bash "$SCRIPT_DIR/compose-vps.sh" config --format json > "$combined_render"
 
@@ -149,7 +151,7 @@ docker run --rm --network none --user "$(id -u):$(id -g)" --entrypoint node \
   -v "$(dirname "$OUTPUT"):$(dirname "$OUTPUT")" \
   -w "$INFRA_ROOT" \
   "$OPS_IMAGE" scripts/hosted-workload-contract.mjs verify-render \
-    --lock "$resolved" \
+    --lock "$OUTPUT" \
     --coreRender "$core_render" \
     --combinedRender "$combined_render" \
     --output "$OUTPUT"
