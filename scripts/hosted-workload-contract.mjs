@@ -931,7 +931,9 @@ function assertWorkloadService({ serviceDefinition, manifestService, manifest, c
   if (["post_start", "pre_start", "pre_stop"].some((field) => serviceDefinition[field] != null)) {
     invalid(`${name} cannot define service lifecycle hooks.`);
   }
-  if (serviceDefinition.scale != null || serviceDefinition.deploy?.replicas != null) invalid(`${name} cannot request service scaling.`);
+  if (serviceDefinition.scale != null || serviceDefinition.deploy?.replicas != null || serviceDefinition.deploy?.mode != null) {
+    invalid(`${name} cannot request service scaling.`);
+  }
   if ((serviceDefinition.configs?.length ?? 0) > 0) invalid(`${name} cannot mount platform or host-backed configs.`);
   if (serviceDefinition.use_api_socket != null) invalid(`${name} cannot use the Compose API socket.`);
   if (serviceDefinition.provider != null) invalid(`${name} cannot delegate execution to a provider.`);

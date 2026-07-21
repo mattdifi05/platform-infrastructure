@@ -72,15 +72,16 @@ class HostedWorkloadSourcePolicyTest < Minitest::Test
     end
   end
 
-  def test_rejects_scale_and_deploy_replicas_before_resource_admission
+  def test_rejects_all_service_scaling_before_resource_admission
     [
       { "scale" => 2 },
-      { "deploy" => { "replicas" => 2 } }
+      { "deploy" => { "replicas" => 2 } },
+      { "deploy" => { "mode" => "global" } }
     ].each do |service|
       error = assert_raises(ArgumentError) do
         HostedWorkloadSourcePolicy.validate_source_model({ "services" => { "app" => service } }, "fixture")
       end
-      assert_match(/cannot set (?:scale|deploy\.replicas)/, error.message)
+      assert_match(/cannot set (?:scale|deploy\.(?:replicas|mode))/, error.message)
     end
   end
 

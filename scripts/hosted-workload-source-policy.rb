@@ -112,6 +112,7 @@ module HostedWorkloadSourcePolicy
       fail!("#{label} service #{name} cannot use lifecycle hooks: #{lifecycle_hooks.join(', ')}.") unless lifecycle_hooks.empty?
       fail!("#{label} service #{name} cannot set scale.") if service.key?("scale")
       fail!("#{label} service #{name} cannot set deploy.replicas.") if service["deploy"].is_a?(Hash) && service["deploy"].key?("replicas")
+      fail!("#{label} service #{name} cannot set deploy.mode.") if service["deploy"].is_a?(Hash) && service["deploy"].key?("mode")
       fail!("#{label} service #{name} cannot use volumes_from.") if service.key?("volumes_from")
     end
     true

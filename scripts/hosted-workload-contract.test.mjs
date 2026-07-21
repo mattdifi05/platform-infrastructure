@@ -136,10 +136,36 @@ test("service scaling is rejected after render", () => {
   for (const mutation of [
     (service) => { service.scale = 2; },
     (service) => { service.deploy = { replicas: 2 }; },
+    (service) => { service.deploy = { mode: "global" }; },
   ]) {
     const combined = combinedFixture();
     mutation(combined.services["example-app-web"]);
     assert.throws(() => validateRenderedWorkloads({ core, combined, lock }), /cannot request service scaling/);
+  }
+});
+test("Compose wrapper rejects caller-controlled scaling flags before execution", () => {
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "hosted-cli-scale-")));
+  try {
+    const envFile = path.join(root, "core.env");
+    const fakeBin = path.join(root, "bin");
+    const marker = path.join(root, "docker-called");
+    fs.writeFileSync(envFile, "CORE_VALUE=fixture\n");
+    fs.mkdirSync(fakeBin);
+    fs.writeFileSync(path.join(fakeBin, "docker"), `#!/bin/sh\nprintf called > "$HOSTED_TEST_DOCKER_MARKER"\n`, { mode: 0o755 });
+    const result = spawnSync("/bin/bash", [path.join(import.meta.dirname, "compose-vps.sh"), "up", "--scale", "example-app-web=100"], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        PATH: `${fakeBin}:${process.env.PATH}`,
+        COMPOSE_ENV_FILE: envFile,
+        HOSTED_TEST_DOCKER_MARKER: marker,
+      },
+    });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /caller-controlled scaling is forbidden/i);
+    assert.equal(fs.existsSync(marker), false);
+  } finally {
+    removeFixtureTree(root);
   }
 });
 test("host port is rejected", () => {

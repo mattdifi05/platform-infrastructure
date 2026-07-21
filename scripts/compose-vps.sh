@@ -5,6 +5,15 @@ ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 ENV_FILE=${COMPOSE_ENV_FILE:-$ROOT_DIR/.env}
 PROJECT_NAME=${COMPOSE_PROJECT_NAME:-platform_infra_vps}
 
+for argument in "$@"; do
+  case "$argument" in
+    --scale|--scale=*|scale)
+      printf '%s\n' "Caller-controlled scaling is forbidden; regenerate and verify the hosted workload contract." >&2
+      exit 2
+      ;;
+  esac
+done
+
 case "$ENV_FILE" in
   /*) ;;
   *) ENV_FILE="$ROOT_DIR/$ENV_FILE" ;;

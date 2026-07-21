@@ -71,8 +71,10 @@ export function evaluateRuntimeIsolation(config, options = {}) {
     );
     const lifecycleHooks = ["post_start", "pre_start", "pre_stop"].filter((field) => Object.hasOwn(service, field));
     record(`workload-no-lifecycle-hooks-${name}`, lifecycleHooks.length === 0, `${name} hooks=${lifecycleHooks.join(",") || "none"}`);
-    const hasScaling = Object.hasOwn(service, "scale") || Object.hasOwn(object(service.deploy), "replicas");
-    record(`workload-no-scaling-${name}`, !hasScaling, `${name} scale=${service.scale ?? "unset"} replicas=${service.deploy?.replicas ?? "unset"}`);
+    const hasScaling = Object.hasOwn(service, "scale")
+      || Object.hasOwn(object(service.deploy), "replicas")
+      || Object.hasOwn(object(service.deploy), "mode");
+    record(`workload-no-scaling-${name}`, !hasScaling, `${name} scale=${service.scale ?? "unset"} replicas=${service.deploy?.replicas ?? "unset"} mode=${service.deploy?.mode ?? "unset"}`);
     record(`workload-no-configs-${name}`, !Object.hasOwn(service, "configs"), `${name} configs=${service.configs || "none"}`);
     record(`workload-no-api-socket-${name}`, !Object.hasOwn(service, "use_api_socket"), `${name} useApiSocket=${service.use_api_socket ?? "unset"}`);
     record(`workload-no-provider-${name}`, !Object.hasOwn(service, "provider"), `${name} provider=${service.provider?.type ?? "none"}`);

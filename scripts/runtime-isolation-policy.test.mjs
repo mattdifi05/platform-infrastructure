@@ -66,6 +66,7 @@ test("rejects both workload scaling controls independently at runtime", () => {
   for (const mutation of [
     (service) => { service.scale = 2; },
     (service) => { service.deploy = { replicas: 2 }; },
+    (service) => { service.deploy = { mode: "global" }; },
   ]) {
     const config = fixture();
     mutation(config.services["example-app-web"]);
