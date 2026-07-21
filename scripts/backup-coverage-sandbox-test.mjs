@@ -90,6 +90,9 @@ try {
     "network-segmentation-policy.mjs",
     "runtime-isolation-policy.mjs",
     "supply-chain-policy.mjs",
+    "functional-health.mjs",
+    "runtime-fingerprint.mjs",
+    "provider-evidence-auth.mjs",
     "github-governance-policy.mjs",
     "release-trust.mjs",
   ]) cpSync(path.join(repositoryRoot, "scripts", moduleName), path.join(replicaRoot, "scripts", moduleName));

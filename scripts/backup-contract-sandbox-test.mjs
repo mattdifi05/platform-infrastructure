@@ -65,6 +65,16 @@ try {
   mkdirSync(path.join(replicaRoot, "scripts"), { recursive: true });
   mkdirSync(path.join(replicaRoot, "control-center", "backup"), { recursive: true });
   cpSync(path.join(repositoryRoot, "scripts", "infra-ops.mjs"), path.join(replicaRoot, "scripts", "infra-ops.mjs"));
+  for (const moduleName of [
+    "network-segmentation-policy.mjs",
+    "runtime-isolation-policy.mjs",
+    "supply-chain-policy.mjs",
+    "functional-health.mjs",
+    "runtime-fingerprint.mjs",
+    "provider-evidence-auth.mjs",
+    "github-governance-policy.mjs",
+    "release-trust.mjs",
+  ]) cpSync(path.join(repositoryRoot, "scripts", moduleName), path.join(replicaRoot, "scripts", moduleName));
   cpSync(path.join(repositoryRoot, "control-center", "backup", "contracts.mjs"), path.join(replicaRoot, "control-center", "backup", "contracts.mjs"));
   mkdirSync(path.join(sourceRoot, "fixture-app", "src"), { recursive: true });
   const sourceFile = path.join(sourceRoot, "fixture-app", "src", "index.js");
