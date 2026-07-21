@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { createServer, request as httpRequest } from "node:http";
 import { createServer as createTcpServer } from "node:net";
 import os from "node:os";
@@ -61,6 +61,7 @@ test("project-router proxies PHP, Node and Static projects only to dedicated ups
       PROJECTS_ROOT: projectsRoot,
       PROJECT_STATE_FILE: stateFile,
       PROJECT_ROUTER_WORKLOAD_LOCK_FILE: workloadLockFile,
+      PROJECT_ROUTER_WORKLOAD_LOCK_MODE: "required",
       CONTROL_CENTER_HOST: "portal.localhost.com",
       PROJECT_HOST_SUFFIX: ".localhost.com",
       PHP_PROJECT_UPSTREAMS: `php-demo=http://127.0.0.1:${serverPort(phpServer)},fiplatform=http://127.0.0.1:${serverPort(phpServer)}`,
@@ -151,8 +152,8 @@ test("project-router proxies PHP, Node and Static projects only to dedicated ups
   assert.match(absoluteTarget.body, /invalid request target/);
 
   const metadataProject = await httpGet(routerPort, "metadata-demo.localhost.com", "/latest/meta-data/");
-  assert.equal(metadataProject.statusCode, 503);
-  assert.match(metadataProject.body, /no dedicated upstream/);
+  assert.equal(metadataProject.statusCode, 404);
+  assert.match(metadataProject.body, /Project not found/);
 
   const oversizedMetadata = await httpGet(routerPort, "oversized-demo.localhost.com", "/");
   assert.equal(oversizedMetadata.statusCode, 404);
@@ -207,8 +208,44 @@ test("project-router proxies PHP, Node and Static projects only to dedicated ups
   assert.equal(existsSync(path.join(projectsRoot, "php-demo", "public", "index.php")), true);
   assert.equal(stderr.includes("project-router error"), false);
   assert.equal(stderr.includes("169.254.169.254"), false);
-  assert.match(stderr, /service allowlist policy violation/);
-  assert.match(stderr, /rejected project metadata for oversized-demo: PROJECT_METADATA_SIZE/);
+  assert.match(stderr, /rejected project metadata for metadata-demo: PROJECT_METADATA_UNSIGNED/);
+  assert.match(stderr, /rejected project metadata for oversized-demo: PROJECT_METADATA_UNSIGNED/);
+});
+
+test("project-router explicit lock-required mode rejects a missing lock and Compose enables it", async (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "project-router-lock-required-"));
+  const routerPort = await freePort();
+  const missingLock = path.join(root, "missing.lock.json");
+  const child = spawn(process.execPath, [path.join(infraRoot, "project-router", "server.mjs")], {
+    cwd: infraRoot,
+    env: {
+      ...process.env,
+      NODE_ENV: "test",
+      PROJECT_ROUTER_PORT: String(routerPort),
+      PROJECTS_ROOT: path.join(root, "projects"),
+      PROJECT_STATE_FILE: path.join(root, "projects.json"),
+      PROJECT_ROUTER_WORKLOAD_LOCK_FILE: missingLock,
+      PROJECT_ROUTER_WORKLOAD_LOCK_MODE: "required",
+      PROJECT_ROUTER_ALLOWED_UPSTREAMS: "control-center:8080",
+      CONTROL_CENTER_UPSTREAM: "http://control-center:8080",
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  t.after(async () => {
+    await stopChild(child);
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  await waitForHealth(routerPort);
+  const response = await httpGet(routerPort, "untrusted.localhost.com", "/");
+  assert.equal(response.statusCode, 500);
+  assert.match(response.body, /internal proxy error/);
+
+  const serverSource = readFileSync(path.join(infraRoot, "project-router", "server.mjs"), "utf8");
+  const composeSource = readFileSync(path.join(infraRoot, "compose.yaml"), "utf8");
+  assert.match(serverSource, /PROJECT_ROUTER_WORKLOAD_LOCK_MODE/);
+  assert.doesNotMatch(serverSource, /process\.env\.NODE_ENV === "production"/);
+  assert.match(composeSource, /PROJECT_ROUTER_WORKLOAD_LOCK_MODE:\s+required/);
 });
 
 test("project-router rejects IP and external-host upstream policy at production startup", async () => {
@@ -219,6 +256,7 @@ test("project-router rejects IP and external-host upstream policy at production 
       env: {
         ...process.env,
         NODE_ENV: "production",
+        PROJECT_ROUTER_WORKLOAD_LOCK_MODE: "optional",
         PROJECT_ROUTER_PORT: String(routerPort),
         PROJECT_ROUTER_ALLOWED_UPSTREAMS: target,
         CONTROL_CENTER_UPSTREAM: `http://${target}`,
@@ -249,6 +287,7 @@ test("production routing ignores legacy discovery and environment maps", async (
       PROJECTS_ROOT: projects,
       PROJECT_STATE_FILE: path.join(state, "projects.json"),
       PROJECT_ROUTER_WORKLOAD_LOCK_FILE: path.join(state, "missing.lock.json"),
+      PROJECT_ROUTER_WORKLOAD_LOCK_MODE: "optional",
       CONTROL_CENTER_HOST: "portal.localhost.com",
       CONTROL_CENTER_UPSTREAM: "http://control-center:8080",
       PROJECT_ROUTER_ALLOWED_UPSTREAMS: "control-center:8080,legacy-service:8080",
@@ -292,6 +331,7 @@ test("FG-042 production consumer rejects route-owner, sibling-upstream and wildc
           NODE_ENV: "production",
           PROJECT_ROUTER_PORT: String(routerPort),
           PROJECT_ROUTER_WORKLOAD_LOCK_FILE: lockFile,
+          PROJECT_ROUTER_WORKLOAD_LOCK_MODE: "required",
           CONTROL_CENTER_HOST: "portal.localhost.com",
           CONTROL_CENTER_UPSTREAM: "http://control-center:8080",
           PROJECT_ROUTER_ALLOWED_UPSTREAMS: "control-center:8080",

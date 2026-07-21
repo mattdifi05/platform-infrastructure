@@ -21,6 +21,7 @@ const port = Number(process.env.PROJECT_ROUTER_PORT || 8080);
 const projectsRoot = process.env.PROJECTS_ROOT || "/var/www/projects";
 const stateFile = process.env.PROJECT_STATE_FILE || "/var/www/project-state/projects.json";
 const workloadLockFile = process.env.PROJECT_ROUTER_WORKLOAD_LOCK_FILE || "/var/www/project-state/hosted-workloads.lock.json";
+const workloadLockMode = explicitWorkloadLockMode(process.env.PROJECT_ROUTER_WORKLOAD_LOCK_MODE);
 const testLoopbackAllowed = process.env.NODE_ENV === "test" && process.env.PROJECT_ROUTER_TEST_ALLOW_LOOPBACK === "true";
 const testLegacyDiscoveryAllowed = process.env.NODE_ENV === "test" && process.env.PROJECT_ROUTER_TEST_ALLOW_LEGACY_DISCOVERY === "true";
 const allowedUpstreams = parseAllowedUpstreams(process.env.PROJECT_ROUTER_ALLOWED_UPSTREAMS || "control-center:8080");
@@ -210,7 +211,10 @@ function validateUpstream(value, label, additionalAllowed = new Set()) {
 }
 
 function workloadRoutesFromLock() {
-  if (!existsSync(workloadLockFile)) return emptyWorkloadRoutes();
+  if (!existsSync(workloadLockFile)) {
+    if (workloadLockMode === "required") throw new Error("Required hosted workload lock is unavailable.");
+    return emptyWorkloadRoutes();
+  }
   const bytes = readStableLockFile(workloadLockFile);
   const key = createHash("sha256").update(bytes).digest("hex");
   if (workloadRouteCache.key === key) return workloadRouteCache;
@@ -474,7 +478,7 @@ async function readProjectConfig(projectPath, workloadRoutes) {
         trustedEpoch: workloadRoutes.trustedEpoch,
       });
     }
-    if (process.env.NODE_ENV === "production" && workloadRoutes.trustedEpoch) {
+    if (workloadLockMode === "required") {
       throw new ProjectMetadataError("Project metadata is absent from the verified workload lock.", "PROJECT_METADATA_UNSIGNED");
     }
     return projectMetadataReader.read(configPath);
@@ -496,6 +500,14 @@ function boundedEnvironmentInteger(name, fallback, minimum, maximum) {
     throw new Error(`${name} must be an integer between ${minimum} and ${maximum}.`);
   }
   return value;
+}
+
+function explicitWorkloadLockMode(value) {
+  const mode = String(value || "").trim().toLowerCase();
+  if (mode !== "required" && mode !== "optional") {
+    throw new Error("PROJECT_ROUTER_WORKLOAD_LOCK_MODE must be explicitly set to required or optional.");
+  }
+  return mode;
 }
 
 function stringValue(value) {

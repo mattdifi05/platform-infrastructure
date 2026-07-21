@@ -454,6 +454,7 @@ services:
       PROJECTS_ROOT: /var/www/projects
       PROJECT_STATE_FILE: /var/www/project-state/projects.json
       PROJECT_ROUTER_WORKLOAD_LOCK_FILE: /var/www/project-state/hosted-workloads.lock.json
+      PROJECT_ROUTER_WORKLOAD_LOCK_MODE: required
       CONTROL_CENTER_HOST: ${CONTROL_CENTER_HOST:-${ADMIN_HOST:-portal.${DOMAIN:-localhost.com}}}
       ADMIN_HOST: ${ADMIN_HOST:-portal.${DOMAIN:-localhost.com}}
       PROJECTS_HOST: ${PROJECTS_HOST:-}
