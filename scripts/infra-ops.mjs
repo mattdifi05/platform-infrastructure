@@ -26,6 +26,7 @@ import { providerEvidenceAttestationOptions } from "./provider-evidence-auth.mjs
 import { sha256FileBounded } from "./bounded-file-hash.mjs";
 import { runCommandSync } from "./command-safety.mjs";
 import { resticSecretTransport } from "./restic-secret-transport.mjs";
+import { safeTarCreateArgs, validateTarEntryName } from "./safe-tar-path.mjs";
 import {
   assertExactBranchProtection,
   assertExactGithubEnvironment,
@@ -1541,11 +1542,13 @@ function applicationSourceDirectories(options = {}) {
   }
   const ignoredTopLevel = new Set(["node_modules", "vendor", "packages", "scripts", "docs", "e2e", "coverage", "dist", "build", ".next", ".cache", ".turbo"]);
   const requested = options.project ?? options.sourceDirectory ?? argv.project ?? argv.application ?? argv.app;
+  if (requested) validateTarEntryName(requested, "requested application source name");
   const requestedSlug = requested ? safeApplicationBackupSlug(requested) : "";
   const entries = fs.readdirSync(sourceRoot, { withFileTypes: true })
     .filter((entry) => entry.isDirectory() && !entry.name.startsWith("."))
     .filter((entry) => !ignoredTopLevel.has(entry.name.toLowerCase()))
     .map((entry) => {
+      validateTarEntryName(entry.name, "application source directory name");
       const slug = safeApplicationBackupSlug(entry.name);
       return {
         name: entry.name,
@@ -1571,7 +1574,7 @@ async function backupApplications(options = {}) {
     const fileName = `${application.slug}-source-${timestamp}.tar.gz`;
     const hostPath = path.join(outputDir, fileName);
     log(`Creating application source backup for '${application.name}'...`);
-    run("tar", ["-czf", hostPath, ...excludeArgs, "-C", sourceRoot, application.name]);
+    run("tar", safeTarCreateArgs({ archivePath: hostPath, excludeArgs, sourceRoot, entryName: application.name }));
     const { hash, signature } = writeBackupIntegritySidecars(hostPath);
     artifacts.push({
       application: application.slug,
@@ -2614,6 +2617,8 @@ function infraTestingHygiene() {
     "scripts/command-safety.mjs",
     "scripts/restic-secret-transport.mjs",
     "scripts/restic-secret-transport.test.mjs",
+    "scripts/safe-tar-path.mjs",
+    "scripts/safe-tar-path.test.mjs",
     "scripts/infra-secret-manager.mjs",
   ];
   for (const file of checkFiles) {
@@ -2627,6 +2632,7 @@ function infraTestingHygiene() {
   run(process.execPath, ["--test", "scripts/provider-evidence-auth.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/bounded-file-hash.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/restic-secret-transport.test.mjs"], { cwd: infraRoot });
+  run(process.execPath, ["--test", "scripts/safe-tar-path.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "platform-alert-dispatcher/server.test.mjs"], { cwd: infraRoot });
   const shellFiles = fs.readdirSync(path.join(infraRoot, "scripts")).filter((name) => name.endsWith(".sh")).sort();
   for (const file of shellFiles) {
