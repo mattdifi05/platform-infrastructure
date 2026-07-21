@@ -61,6 +61,14 @@ export function evaluateRuntimeIsolation(config, options = {}) {
     record(`workload-no-new-privileges-${name}`, service.security_opt?.includes("no-new-privileges:true"), `${name} securityOpt=${service.security_opt || "unset"}`);
     record(`workload-drop-all-capabilities-${name}`, service.cap_drop?.includes("ALL") && !(service.cap_add?.length > 0), `${name} capDrop=${service.cap_drop || "unset"}`);
     record(`workload-no-volumes-from-${name}`, !Object.hasOwn(service, "volumes_from"), `${name} volumesFrom=${service.volumes_from || "none"}`);
+    const externalContainerInheritance = (Array.isArray(service.volumes_from) ? service.volumes_from : [])
+      .map(String)
+      .filter((entry) => entry.startsWith("container:"));
+    record(
+      `workload-no-external-container-volume-inheritance-${name}`,
+      externalContainerInheritance.length === 0,
+      `${name} externalContainers=${externalContainerInheritance.join(",") || "none"}`,
+    );
     const lifecycleHooks = ["post_start", "pre_start", "pre_stop"].filter((field) => Object.hasOwn(service, field));
     record(`workload-no-lifecycle-hooks-${name}`, lifecycleHooks.length === 0, `${name} hooks=${lifecycleHooks.join(",") || "none"}`);
     const hasScaling = Object.hasOwn(service, "scale") || Object.hasOwn(object(service.deploy), "replicas");

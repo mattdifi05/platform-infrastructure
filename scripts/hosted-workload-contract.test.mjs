@@ -120,6 +120,10 @@ test("service volume inheritance is rejected after render", () => {
   const combined = combinedFixture();
   combined.services["example-app-web"].volumes_from = ["postgres:rw"];
   assert.throws(() => validateRenderedWorkloads({ core, combined, lock }), /cannot inherit volumes/);
+
+  const externalContainer = combinedFixture();
+  externalContainer.services["example-app-web"].volumes_from = ["container:platform-postgres:rw"];
+  assert.throws(() => validateRenderedWorkloads({ core, combined: externalContainer, lock }), /cannot inherit volumes/);
 });
 test("service lifecycle hooks are rejected after render", () => {
   for (const hook of ["post_start", "pre_start", "pre_stop"]) {

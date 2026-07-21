@@ -44,6 +44,14 @@ test("rejects workload service volume inheritance independently at runtime", () 
   assert.match(report.failures.join("\n"), /workload-no-volumes-from-example-app-web/);
 });
 
+test("FG-057 countercheck rejects external-container volume inheritance", () => {
+  const config = fixture();
+  config.services["example-app-web"].volumes_from = ["container:platform-postgres:rw"];
+  const report = evaluateRuntimeIsolation(config);
+  assert.equal(report.status, "failed");
+  assert.match(report.failures.join("\n"), /workload-no-external-container-volume-inheritance-example-app-web/);
+});
+
 test("rejects workload lifecycle hooks independently at runtime", () => {
   for (const hook of ["post_start", "pre_start", "pre_stop"]) {
     const config = fixture();
