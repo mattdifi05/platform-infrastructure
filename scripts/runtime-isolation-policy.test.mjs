@@ -44,6 +44,16 @@ test("rejects workload service volume inheritance independently at runtime", () 
   assert.match(report.failures.join("\n"), /workload-no-volumes-from-example-app-web/);
 });
 
+test("rejects workload lifecycle hooks independently at runtime", () => {
+  for (const hook of ["post_start", "pre_start", "pre_stop"]) {
+    const config = fixture();
+    config.services["example-app-web"][hook] = [{ command: "id" }];
+    const report = evaluateRuntimeIsolation(config);
+    assert.equal(report.status, "failed");
+    assert.match(report.failures.join("\n"), /workload-no-lifecycle-hooks-example-app-web/);
+  }
+});
+
 test("rejects missing memory limits and budget overcommit", () => {
   const config = fixture();
   config.services["example-app-web"].mem_limit = 0;

@@ -61,4 +61,14 @@ class HostedWorkloadSourcePolicyTest < Minitest::Test
     end
     assert_match(/cannot use volumes_from/, error.message)
   end
+
+  def test_rejects_every_service_lifecycle_hook_before_render
+    %w[post_start pre_start pre_stop].each do |hook|
+      model = parse("services:\n  app:\n    #{hook}:\n      - command: id\n")
+      error = assert_raises(ArgumentError) do
+        HostedWorkloadSourcePolicy.validate_source_model(model, "fixture")
+      end
+      assert_match(/cannot use lifecycle hooks/, error.message)
+    end
+  end
 end
