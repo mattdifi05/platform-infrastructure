@@ -172,10 +172,15 @@ test("rejects provenance from a different commit", () => {
   assert.throws(() => validateCryptographicReleaseVerification(changed, { subjects, repository, commitSha }), /repository and commit/);
 });
 test("builds a receipt bound to SBOM and verifier output", () => {
-  const receipt = buildReleaseAdmissionReceipt({ subjects, repository, commitSha, sbomSha256: "d".repeat(64), verification, registryResolution });
+  const receipt = buildReleaseAdmissionReceipt({
+    subjects, repository, commitSha, sbomSha256: "d".repeat(64), verification, registryResolution,
+    manifestVerification: verification.attestations[0], generatedAt: "2026-07-21T00:00:00.000Z",
+  });
   assert.equal(receipt.status, "EXTERNAL-PENDING");
   assert.equal(receipt.artifactVerification, "passed");
   assert.equal(receipt.deploymentAdmission, "EXTERNAL-PENDING");
+  assert.match(receipt.provenance.manifestVerificationFingerprint, /^[a-f0-9]{64}$/);
+  assert.equal(receipt.generatedAt, "2026-07-21T00:00:00.000Z");
   assert.equal(receipt.subjectVerificationReceipts[0].attestationReference.subject, `oci://${image}`);
 });
 test("rejects an unapproved release subject key and repository", () => {

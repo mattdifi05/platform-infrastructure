@@ -112,8 +112,7 @@ jobs:
             --registryResolution "reports/release/registry-resolution-${GITHUB_RUN_ID}.json" \
             --platform linux/amd64 \
             --manifest "reports/release/release-subjects-${GITHUB_RUN_ID}.json" \
-            --sbom "reports/release/github-release-sbom-${GITHUB_RUN_ID}.cdx.json" \
-            --receipt "reports/release/release-artifact-admission-${GITHUB_RUN_ID}.json")"
+            --sbom "reports/release/github-release-sbom-${GITHUB_RUN_ID}.cdx.json")"
           printf 'RELEASE_SUBJECTS_SHA256=%s\n' "$RELEASE_SUBJECTS_SHA256" >> "$GITHUB_ENV"
 
       - name: Attest release subject manifest provenance
@@ -134,6 +133,18 @@ jobs:
             --signerWorkflow "${GITHUB_REPOSITORY}/.github/workflows/release-attestation.yml" \
             --sourceDigest "${GITHUB_SHA}" \
             --sourceRef "${GITHUB_REF}"
+          node ./scripts/infra-ops.mjs release-artifact-gate \
+            --imageManifest "reports/release/release-subjects-${GITHUB_RUN_ID}.json" \
+            --sbom "reports/release/github-release-sbom-${GITHUB_RUN_ID}.cdx.json" \
+            --buildkitSbom "reports/release/buildkit-sbom-${GITHUB_RUN_ID}.spdx.json" \
+            --registryDescriptor "reports/release/registry-descriptor-${GITHUB_RUN_ID}.json" \
+            --registryResolution "reports/release/registry-resolution-${GITHUB_RUN_ID}.json" \
+            --releaseSha "${GITHUB_SHA}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --sourceRef "${GITHUB_REF}" \
+            --signerWorkflow "${GITHUB_REPOSITORY}/.github/workflows/release-attestation.yml" \
+            --artifactVerificationOnly \
+            --receiptOutput "reports/release/release-artifact-admission-${GITHUB_RUN_ID}.json"
 
       - name: Upload GitHub Sigstore release evidence
         if: always()

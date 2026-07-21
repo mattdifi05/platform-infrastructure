@@ -4,7 +4,6 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  buildReleaseAdmissionReceipt,
   approvedReleaseSubjects,
   validateCryptographicReleaseVerification,
   validateCycloneDxReleaseSbom,
@@ -156,6 +155,7 @@ function writeJson(pathname, value) {
 
 function main() {
   const options = parseArgs(process.argv.slice(2));
+  if (options.receipt) invalid("Artifact admission receipts can only be finalized after the release manifest attestation is verified.");
   const entries = options.images.map(imageEntry);
   const images = approvedReleaseSubjects(entries, options.repo).map((subject) => subject.image);
   const verification = verifyGithubReleaseImages({
@@ -185,23 +185,9 @@ function main() {
   });
   const manifestPath = path.resolve(options.manifest);
   const sbomPath = path.resolve(options.sbom);
-  const receiptPath = path.resolve(options.receipt);
   const sbomArtifact = writeJson(sbomPath, artifacts.sbom);
   if (artifacts.manifest.sbom.sha256 !== sbomArtifact.sha256) invalid("Generated SBOM bytes do not match the manifest binding.");
   const manifestArtifact = writeJson(manifestPath, artifacts.manifest);
-  const receipt = buildReleaseAdmissionReceipt({
-    subjects: artifacts.subjects,
-    repository: options.repo,
-    commitSha: options.sha,
-    sbomSha256: sbomArtifact.sha256,
-    buildkitSbomSha256: artifacts.manifest.sbom.buildkitSha256,
-    registryResolutionSha256: artifacts.manifest.registryResolution.sha256,
-    registryResolution: registryReceipt.document,
-    manifestSha256: manifestArtifact.sha256,
-    verification,
-  });
-  receipt.manifestSha256 = manifestArtifact.sha256;
-  writeJson(receiptPath, receipt);
   process.stdout.write(`${manifestArtifact.sha256}\n`);
 }
 

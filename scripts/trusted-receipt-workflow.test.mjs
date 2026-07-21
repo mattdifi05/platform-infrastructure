@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const workflow = fs.readFileSync(path.join(root, ".github", "workflows", "enterprise-infra.yml"), "utf8");
+const producerWorkflow = fs.readFileSync(path.join(root, ".github", "workflows", "release-attestation.yml"), "utf8");
 
 function wiringIssues(source) {
   const issues = [];
@@ -22,6 +23,10 @@ function wiringIssues(source) {
   requireText("= \"$EXPECTED_ARTIFACT_RECEIPT_SHA256\"", "artifact receipt hash is not checked after download");
   requireText("= \"$EXPECTED_DEPLOYMENT_RECEIPT_SHA256\"", "deployment receipt hash is not checked after download");
   requireText("--artifactVerificationOnly", "artifact-only cryptographic gate is absent");
+  requireText('--receiptOutput "$REVERIFIED_ARTIFACT_RECEIPT"', "fresh cryptographic output is not captured");
+  requireText('sha256sum "$REVERIFIED_ARTIFACT_RECEIPT"', "fresh cryptographic output hash is not checked");
+  requireText('cmp -- "$REVERIFIED_ARTIFACT_RECEIPT" "$ARTIFACT_RECEIPT"', "downloaded receipt is not byte-equal to fresh verification output");
+  requireText('--artifactReceipt "$REVERIFIED_ARTIFACT_RECEIPT"', "deployment policy does not consume the fresh cryptographic output");
   const policyCalls = source.match(/node \.\/scripts\/deployment-receipt-policy\.mjs/g) ?? [];
   if (policyCalls.length !== 2) issues.push("trusted receipt policy must run before upload and again before deploy");
   requireText("name: admitted-deployment-receipts-${{ github.run_id }}", "validated receipt handoff artifact is not run-bound");
@@ -40,5 +45,16 @@ assert.notDeepEqual(wiringIssues(workflow.replace("DEPLOY_ADMISSION_RECEIPT_SHA2
 assert.notDeepEqual(wiringIssues(workflow.replace("name: platform-trusted-deployment-admission", "name: caller-selected-artifact")), []);
 assert.notDeepEqual(wiringIssues(workflow.replace("test \"${#deployment_receipts[@]}\" -eq 1", "test \"${#deployment_receipts[@]}\" -ge 1")), []);
 assert.notDeepEqual(wiringIssues(workflow.replace("--artifactVerificationOnly", "--skipDeploymentAdmission")), []);
+assert.notDeepEqual(wiringIssues(workflow.replace('cmp -- "$REVERIFIED_ARTIFACT_RECEIPT" "$ARTIFACT_RECEIPT"', "true")), []);
 
-process.stdout.write("trusted receipt workflow wiring tests passed 5/5; provider channel remains EXTERNAL-PENDING\n");
+const manifestAttestation = producerWorkflow.indexOf("- name: Attest release subject manifest provenance");
+const finalizedReceipt = producerWorkflow.indexOf('--receiptOutput "reports/release/release-artifact-admission-${GITHUB_RUN_ID}.json"');
+assert.ok(manifestAttestation >= 0 && finalizedReceipt > manifestAttestation,
+  "producer must finalize the artifact receipt only after manifest attestation");
+assert.doesNotMatch(
+  producerWorkflow.slice(0, manifestAttestation),
+  /--receipt(?:Output)?\s+"reports\/release\/release-artifact-admission-/,
+  "pre-attestation generation must not mint an artifact receipt",
+);
+
+process.stdout.write("trusted receipt workflow wiring tests passed 9/9; provider channel remains EXTERNAL-PENDING\n");

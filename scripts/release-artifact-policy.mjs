@@ -241,7 +241,7 @@ export function sha256Json(value) {
   return crypto.createHash("sha256").update(JSON.stringify(value)).digest("hex");
 }
 
-export function buildReleaseAdmissionReceipt({ subjects, repository, commitSha, sbomSha256, buildkitSbomSha256 = null, registryResolutionSha256 = null, registryResolution = null, manifestSha256, verification, manifestVerification = null }) {
+export function buildReleaseAdmissionReceipt({ subjects, repository, commitSha, sbomSha256, buildkitSbomSha256 = null, registryResolutionSha256 = null, registryResolution = null, manifestSha256, verification, manifestVerification = null, generatedAt = new Date().toISOString() }) {
   const binding = validateCryptographicReleaseVerification(verification, { subjects, repository, commitSha });
   if (!/^[a-f0-9]{64}$/.test(String(sbomSha256 ?? ""))) invalid("SBOM artifact SHA256 is required for the admission receipt.");
   if (!registryResolution || registryResolution.status !== "passed" || registryResolution.image !== binding.subjects[0]?.image
@@ -256,7 +256,7 @@ export function buildReleaseAdmissionReceipt({ subjects, repository, commitSha, 
     kind: "platform-release-artifact-verification/v1",
     status: "EXTERNAL-PENDING",
     artifactVerification: "passed",
-    generatedAt: new Date().toISOString(),
+    generatedAt,
     repository: binding.repository,
     commitSha: binding.commitSha,
     subjects: binding.subjects.map(({ key, image, name, digest }) => ({ key, image, name, digest })),

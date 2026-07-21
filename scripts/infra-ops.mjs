@@ -6264,10 +6264,13 @@ async function secretRotationEvidence(options = {}) {
 
 async function releaseArtifactGate(options = {}) {
   let result = null;
-  await withLocalCheckReport("release-artifact-gate", async () => {
+  const artifactVerificationOnly = booleanFlag(options.artifactVerificationOnly ?? argv.artifactVerificationOnly);
+  const reportCommand = artifactVerificationOnly ? "release-artifact-crypto-only" : "release-artifact-gate";
+  await withLocalCheckReport(reportCommand, async () => {
     result = await releaseArtifactGateBody(options);
   }, {
     requireProvenance: true,
+    deploymentAdmission: artifactVerificationOnly ? "EXTERNAL-PENDING" : "required",
     verifyCosign: Boolean(options.verifyCosign ?? booleanFlag(argv.verifyCosign)),
   });
   return result;
@@ -6384,8 +6387,16 @@ async function releaseArtifactGateBody(options = {}) {
       manifestSha256,
       verification: githubAttestationValidation,
       manifestVerification,
+      generatedAt: releaseManifest.generatedAt,
     });
-    const receiptPath = writeJsonReport("release", `release-artifact-admission-${reportTimestamp()}`, receipt);
+    const requestedReceiptOutput = options.receiptOutput ?? argv.receiptOutput;
+    let receiptPath;
+    if (requestedReceiptOutput) {
+      receiptPath = path.resolve(requestedReceiptOutput);
+      writePrivateJsonAtomic(receiptPath, receipt);
+    } else {
+      receiptPath = writeJsonReport("release", `release-artifact-admission-${reportTimestamp()}`, receipt);
+    }
     if (booleanFlag(options.artifactVerificationOnly ?? argv.artifactVerificationOnly)) {
       log(`Artifact-only release verification passed; trusted deployment admission remains EXTERNAL-PENDING. Receipt: ${receiptPath}`);
       return { sbomFile, receiptPath, provenanceValidation: null, githubAttestationValidation };
@@ -6977,7 +6988,7 @@ async function governanceCheckBody() {
   assertNoMatch(infraWorkflow, /^\s{2}(?:compose-and-policy|shell-syntax):/m, "Infrastructure CI must use the four canonical required gates without duplicate legacy jobs.");
   assertMatch(infraWorkflow, /enterprise-readiness:[\s\S]*needs:\s*\r?\n\s+- quality\s*\r?\n\s+- compose\s*\r?\n\s+- supply-chain/, "Enterprise readiness must depend on all three behavior gates.");
   assertMatch(infraWorkflow, /dast-zap:[\s\S]*needs:\s*enterprise-readiness/, "DAST must run only after enterprise readiness.");
-  assertMatch(infraWorkflow, /release-admission:[\s\S]*needs:\s*enterprise-readiness[\s\S]*release-artifact-gate\.sh/, "Release admission must verify artifacts after enterprise readiness and before deploy.");
+  assertMatch(infraWorkflow, /release-admission:[\s\S]*needs:\s*enterprise-readiness[\s\S]*(?:release-artifact-gate\.sh|node \.\/scripts\/infra-ops\.mjs release-artifact-gate)/, "Release admission must verify artifacts after enterprise readiness and before deploy.");
   const deploymentDagIssues = deploymentPrerequisiteMismatches(infraWorkflow);
   if (deploymentDagIssues.length) fail(`Production deployment DAG is unsafe: ${deploymentDagIssues.join("; ")}`);
   assertMatch(infraWorkflow, /deploy-vps:[\s\S]*needs:\s*\r?\n\s+- enterprise-readiness\s*\r?\n\s+- release-admission\s*\r?\n\s+- dast-zap/, "Production deploy must require enterprise readiness, release admission and staging DAST.");

@@ -19,6 +19,16 @@ function writeJson(name, value) {
   return { pathname, bytes, sha256: crypto.createHash("sha256").update(bytes).digest("hex") };
 }
 
+function fileHashes(directory, prefix) {
+  if (!fs.existsSync(directory)) return new Map();
+  return new Map(fs.readdirSync(directory)
+    .filter((name) => name.startsWith(prefix) && name.endsWith(".json"))
+    .map((name) => {
+      const bytes = fs.readFileSync(path.join(directory, name));
+      return [name, crypto.createHash("sha256").update(bytes).digest("hex")];
+    }));
+}
+
 try {
   const repository = "owner/repo";
   const commitSha = "b".repeat(40);
@@ -139,7 +149,7 @@ if (subject.startsWith("oci://")) {
   name = match[1];
   digest = match[2];
 } else {
-  name = subject;
+  name = subject.split("/").at(-1);
   digest = crypto.createHash("sha256").update(fs.readFileSync(subject)).digest("hex");
 }
 process.stdout.write(JSON.stringify([{ verificationResult: {
@@ -172,12 +182,36 @@ process.stdout.write(JSON.stringify([{ verificationResult: {
   assert.match(positive.stderr, /EXTERNAL-PENDING/);
   assert.doesNotMatch(positive.stderr, /Exact per-subject registry resolution is required/);
 
-  const artifactOnly = spawnSync(process.execPath, [...commonArgs, "--artifactVerificationOnly"], {
+  const localChecks = path.join(root, "reports", "local-checks");
+  const gateReportsBeforeArtifactOnly = fileHashes(localChecks, "release-artifact-gate-");
+  const producerReceipt = path.join(temporary, "producer-artifact-receipt.json");
+  const artifactOnly = spawnSync(process.execPath, [
+    ...commonArgs,
+    "--artifactVerificationOnly",
+    "--receiptOutput", producerReceipt,
+  ], {
     cwd: root, env: environment, encoding: "utf8",
   });
   assert.equal(artifactOnly.status, 0, artifactOnly.stderr);
   assert.match(artifactOnly.stdout, /Artifact-only release verification passed/);
   assert.match(artifactOnly.stdout, /EXTERNAL-PENDING/);
+  assert.deepEqual(fileHashes(localChecks, "release-artifact-gate-"), gateReportsBeforeArtifactOnly,
+    "artifact-only verification must not mint or overwrite a release-artifact-gate PASS report");
+  const cryptoOnlyReports = [...fileHashes(localChecks, "release-artifact-crypto-only-").keys()];
+  assert.ok(cryptoOnlyReports.length > 0, "artifact-only verification must be phase-scoped in local evidence");
+  const artifactReceipt = JSON.parse(fs.readFileSync(producerReceipt, "utf8"));
+  assert.match(artifactReceipt.provenance.manifestVerificationFingerprint, /^[a-f0-9]{64}$/);
+  assert.equal(artifactReceipt.generatedAt, artifacts.manifest.generatedAt);
+
+  const reverifiedReceipt = path.join(temporary, "consumer-artifact-receipt.json");
+  const reverify = spawnSync(process.execPath, [
+    ...commonArgs,
+    "--artifactVerificationOnly",
+    "--receiptOutput", reverifiedReceipt,
+  ], { cwd: root, env: environment, encoding: "utf8" });
+  assert.equal(reverify.status, 0, reverify.stderr);
+  assert.deepEqual(fs.readFileSync(reverifiedReceipt), fs.readFileSync(producerReceipt),
+    "the consumer must regenerate the exact provider-bound artifact receipt bytes");
 
   const tampered = structuredClone(registryResolution);
   tampered.platforms[0].size += 1;
@@ -189,7 +223,7 @@ process.stdout.write(JSON.stringify([{ verificationResult: {
   assert.match(negative.stderr, /differs from exact descriptor resolution/);
   assert.doesNotMatch(negative.stderr, /EXTERNAL-PENDING/);
 
-  process.stdout.write("release artifact gate consumer tests passed 3/3; trusted channel remains EXTERNAL-PENDING\n");
+  process.stdout.write("release artifact gate consumer tests passed 7/7; trusted channel remains EXTERNAL-PENDING\n");
 } finally {
   fs.rmSync(temporary, { recursive: true, force: true });
 }

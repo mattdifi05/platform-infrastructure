@@ -417,6 +417,7 @@ jobs:
           DEPLOYMENT_RECEIPT_SHA256: ${{ steps.artifacts.outputs.deployment_receipt_sha256 }}
           RELEASE_TREE: ${{ steps.bind.outputs.release_tree }}
         run: |
+          REVERIFIED_ARTIFACT_RECEIPT="${RUNNER_TEMP}/reverified-artifact-verification.json"
           node ./scripts/infra-ops.mjs release-artifact-gate \
             --imageManifest "$RELEASE_MANIFEST" \
             --sbom "$RELEASE_SBOM" \
@@ -427,10 +428,13 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --sourceRef refs/heads/main \
             --signerWorkflow "$GITHUB_REPOSITORY/.github/workflows/release-attestation.yml" \
-            --artifactVerificationOnly
+            --artifactVerificationOnly \
+            --receiptOutput "$REVERIFIED_ARTIFACT_RECEIPT"
+          test "$(sha256sum "$REVERIFIED_ARTIFACT_RECEIPT" | awk '{print $1}')" = "$ARTIFACT_RECEIPT_SHA256"
+          cmp -- "$REVERIFIED_ARTIFACT_RECEIPT" "$ARTIFACT_RECEIPT"
           node ./scripts/deployment-receipt-policy.mjs \
             --policy governance/deployment-admission.json \
-            --artifactReceipt "$ARTIFACT_RECEIPT" \
+            --artifactReceipt "$REVERIFIED_ARTIFACT_RECEIPT" \
             --artifactReceiptSha256 "$ARTIFACT_RECEIPT_SHA256" \
             --deploymentReceipt "$DEPLOYMENT_RECEIPT" \
             --deploymentReceiptSha256 "$DEPLOYMENT_RECEIPT_SHA256" \
@@ -438,7 +442,7 @@ jobs:
             --commit "$APPROVED_SHA" \
             --tree "$RELEASE_TREE"
           install -d -m 700 "${RUNNER_TEMP}/admitted-deployment-receipts"
-          install -m 600 "$ARTIFACT_RECEIPT" "${RUNNER_TEMP}/admitted-deployment-receipts/artifact-verification.json"
+          install -m 600 "$REVERIFIED_ARTIFACT_RECEIPT" "${RUNNER_TEMP}/admitted-deployment-receipts/artifact-verification.json"
           install -m 600 "$DEPLOYMENT_RECEIPT" "${RUNNER_TEMP}/admitted-deployment-receipts/trusted-deployment-admission.json"
       - name: Upload exact admitted deployment receipts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
