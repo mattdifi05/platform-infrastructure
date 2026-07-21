@@ -142,6 +142,36 @@ open_locked_handoff() {
   HANDOFF_REFERENCE=/dev/fd/$handoff_fd
 }
 
+open_generated_handoff() {
+  local content=$1 handoff_file writer_fd handoff_fd path_identity path_device path_inode path_uid path_mode
+  local writer_identity handoff_identity
+  handoff_file=$handoff_directory/generated-$next_handoff_fd
+  writer_fd=$next_handoff_fd
+  next_handoff_fd=$((next_handoff_fd + 1))
+  set -C
+  if ! eval "exec ${writer_fd}>\"\$handoff_file\""; then
+    set +C
+    printf '%s\n' "Could not exclusively create generated hosted workload overlay." >&2
+    return 1
+  fi
+  set +C
+  handoff_fd=$next_handoff_fd
+  next_handoff_fd=$((next_handoff_fd + 1))
+  eval "exec ${handoff_fd}<\"\$handoff_file\""
+  path_identity=$(fd_identity "$handoff_file")
+  IFS='|' read -r path_device path_inode path_uid path_mode <<< "$path_identity"
+  writer_identity=$(fd_object_identity "/dev/fd/$writer_fd")
+  handoff_identity=$(fd_object_identity "/dev/fd/$handoff_fd")
+  [[ "$path_mode" = 384 && "$writer_identity" = "$path_inode|$path_uid" && "$writer_identity" = "$handoff_identity" ]] || {
+    printf '%s\n' "Generated hosted workload overlay descriptors do not reference one private object." >&2
+    return 1
+  }
+  printf '%s\n' "$content" >&$writer_fd
+  eval "exec ${writer_fd}>&-"
+  /bin/rm -- "$handoff_file"
+  HANDOFF_REFERENCE=/dev/fd/$handoff_fd
+}
+
 cd "$ROOT_DIR"
 
 compose=(
@@ -178,9 +208,16 @@ if [[ -n "$workload_lock" ]]; then
       and (.logicalName | type == "string" and test("^[a-z0-9][a-z0-9_]*(ingress|postgres|cache|bus|identity|storage|observability|egress)$"))
       and .logicalName == ((.workloadId | gsub("-"; "_")) + "_" + (.logicalName | split("_") | last))
       and .physicalName == ($projectName + "_" + .logicalName);
+    def service_record:
+      . as $record
+      | type == "object"
+      and ((keys | sort) == ["serviceName", "workloadId"])
+      and (.workloadId | type == "string" and test("^[a-z0-9][a-z0-9-]*$"))
+      and (.serviceName | type == "string" and test("^[a-z][a-z0-9-]{1,62}$"))
+      and ($record.serviceName | startswith($record.workloadId + "-"));
     . as $bundle
     | type == "object"
-    and ((keys | sort) == ["composeRecords", "coreEnvFile", "environmentRecords", "lockSha256", "networkRecords", "projectName", "version", "workloadIds"])
+    and ((keys | sort) == ["composeRecords", "coreEnvFile", "environmentRecords", "lockSha256", "networkRecords", "projectName", "serviceRecords", "version", "workloadIds"])
     and .version == 1
     and (.lockSha256 | type == "string" and test("^[a-f0-9]{64}$"))
     and (.coreEnvFile | type == "string" and length > 0)
@@ -190,6 +227,10 @@ if [[ -n "$workload_lock" ]]; then
     and ($bundle.networkRecords == ($bundle.networkRecords | unique_by(.workloadId, .logicalName) | sort_by(.workloadId, .logicalName)))
     and all($bundle.networkRecords[]; network_record($bundle.projectName))
     and ([$bundle.networkRecords[].workloadId] | unique | sort) == $bundle.workloadIds
+    and ($bundle.serviceRecords | type == "array" and length >= ($bundle.workloadIds | length))
+    and ($bundle.serviceRecords == ($bundle.serviceRecords | unique_by(.serviceName) | sort_by(.workloadId, .serviceName)))
+    and all($bundle.serviceRecords[]; service_record)
+    and ([$bundle.serviceRecords[].workloadId] | unique | sort) == $bundle.workloadIds
     and (.environmentRecords | type == "array" and all(.[]; record))
     and (.composeRecords | type == "array" and all(.[]; record))
   ' >/dev/null || {
@@ -248,20 +289,51 @@ runtime_identity_variables=(
 )
 runtime_identity_count=0
 for runtime_identity_variable in "${runtime_identity_variables[@]}"; do
-  [[ -z "${!runtime_identity_variable:-}" ]] || ((runtime_identity_count += 1))
+  [[ -z "${!runtime_identity_variable:-}" ]] || runtime_identity_count=$((runtime_identity_count + 1))
 done
 if (( runtime_identity_count != 0 && runtime_identity_count != ${#runtime_identity_variables[@]} )); then
-  echo "Runtime identity labels require the complete approved candidate/deployment tuple." >&2
+  printf '%s\n' "Runtime identity labels require the complete approved candidate/deployment tuple." >&2
   exit 1
 fi
 if (( runtime_identity_count == ${#runtime_identity_variables[@]} )); then
-  [[ "$PLATFORM_RUNTIME_CANDIDATE_ID" =~ ^[a-f0-9]{64}$ ]] || { echo "Invalid runtime candidate ID." >&2; exit 1; }
-  [[ "$PLATFORM_RUNTIME_COMMIT" =~ ^([a-f0-9]{40}|[a-f0-9]{64})$ ]] || { echo "Invalid runtime commit." >&2; exit 1; }
-  [[ "$PLATFORM_RUNTIME_TREE" =~ ^([a-f0-9]{40}|[a-f0-9]{64})$ ]] || { echo "Invalid runtime tree." >&2; exit 1; }
-  [[ "$PLATFORM_RUNTIME_DEPLOYMENT_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$ ]] || { echo "Invalid runtime deployment ID." >&2; exit 1; }
-  [[ "$PLATFORM_RUNTIME_RENDER_SHA256" =~ ^[a-f0-9]{64}$ ]] || { echo "Invalid runtime render SHA256." >&2; exit 1; }
-  [[ "$PLATFORM_RUNTIME_WORKLOAD_LOCK_SHA256" =~ ^[a-f0-9]{64}$ ]] || { echo "Invalid runtime workload lock SHA256." >&2; exit 1; }
+  [[ "$PLATFORM_RUNTIME_CANDIDATE_ID" =~ ^[a-f0-9]{64}$ ]] || { printf '%s\n' "Invalid runtime candidate ID." >&2; exit 1; }
+  [[ "$PLATFORM_RUNTIME_COMMIT" =~ ^([a-f0-9]{40}|[a-f0-9]{64})$ ]] || { printf '%s\n' "Invalid runtime commit." >&2; exit 1; }
+  [[ "$PLATFORM_RUNTIME_TREE" =~ ^([a-f0-9]{40}|[a-f0-9]{64})$ ]] || { printf '%s\n' "Invalid runtime tree." >&2; exit 1; }
+  [[ "$PLATFORM_RUNTIME_DEPLOYMENT_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$ ]] || { printf '%s\n' "Invalid runtime deployment ID." >&2; exit 1; }
+  [[ "$PLATFORM_RUNTIME_RENDER_SHA256" =~ ^[a-f0-9]{64}$ ]] || { printf '%s\n' "Invalid runtime render SHA256." >&2; exit 1; }
+  [[ "$PLATFORM_RUNTIME_WORKLOAD_LOCK_SHA256" =~ ^[a-f0-9]{64}$ ]] || { printf '%s\n' "Invalid runtime workload lock SHA256." >&2; exit 1; }
   compose+=(-f compose.runtime-identity.yaml)
+  if [[ -n "$workload_lock" ]]; then
+    runtime_identity_override=$(printf '%s' "$activation_bundle" | jq -c \
+      --arg candidateId "$PLATFORM_RUNTIME_CANDIDATE_ID" \
+      --arg commit "$PLATFORM_RUNTIME_COMMIT" \
+      --arg tree "$PLATFORM_RUNTIME_TREE" \
+      --arg deploymentId "$PLATFORM_RUNTIME_DEPLOYMENT_ID" \
+      --arg renderSha256 "$PLATFORM_RUNTIME_RENDER_SHA256" \
+      --arg workloadLockSha256 "$PLATFORM_RUNTIME_WORKLOAD_LOCK_SHA256" '
+        {
+          services: (
+            .serviceRecords
+            | map({
+                key: .serviceName,
+                value: {
+                  labels: {
+                    "com.platform.runtime.candidate-id": $candidateId,
+                    "com.platform.runtime.commit": $commit,
+                    "com.platform.runtime.tree": $tree,
+                    "com.platform.runtime.deployment-id": $deploymentId,
+                    "com.platform.runtime.render-sha256": $renderSha256,
+                    "com.platform.runtime.workload-lock-sha256": $workloadLockSha256
+                  }
+                }
+              })
+            | from_entries
+          )
+        }
+      ')
+    open_generated_handoff "$runtime_identity_override"
+    compose+=(-f "$HANDOFF_REFERENCE")
+  fi
 fi
 
 if [[ "${1:-}" == "up" ]]; then

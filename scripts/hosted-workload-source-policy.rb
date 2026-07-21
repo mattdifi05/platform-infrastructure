@@ -8,7 +8,7 @@ require "psych"
 
 module HostedWorkloadSourcePolicy
   VERSION = "hosted-raw-v1"
-  CONTROLS = %w[bind-bounded-local-logging bind-network-identity bind-network-topology bind-no-swap-oom-policy bind-owned-secret-aliases bind-owned-volumes bind-private-pid-numeric-user deny-api-socket deny-compose-interpolation deny-device-access deny-env-file deny-extends deny-file-configs deny-gpu-access deny-include deny-inline-configs deny-lifecycle-hooks deny-local-volume-options deny-providers deny-runtime-overrides deny-scaling deny-stop-grace-overrides deny-supplemental-groups deny-volumes-from].freeze
+  CONTROLS = %w[bind-bounded-local-logging bind-network-identity bind-network-topology bind-no-swap-oom-policy bind-owned-secret-aliases bind-owned-volumes bind-private-pid-numeric-user deny-api-socket deny-compose-interpolation deny-device-access deny-env-file deny-extends deny-file-configs deny-gpu-access deny-include deny-inline-configs deny-lifecycle-hooks deny-local-volume-options deny-providers deny-runtime-identity-labels deny-runtime-overrides deny-scaling deny-stop-grace-overrides deny-supplemental-groups deny-volumes-from].freeze
   MAX_COMPOSE_BYTES = 1_048_576
   STANDARD_TAG_PREFIX = "tag:yaml.org,2002:"
   WORKLOAD_NETWORK_ZONES = %w[ingress postgres cache bus identity storage observability egress].freeze
@@ -133,6 +133,17 @@ module HostedWorkloadSourcePolicy
     end
     model.fetch("services").each do |name, service|
       fail!("#{label} service #{name} must be a mapping.") unless service.is_a?(Hash)
+      labels = service["labels"]
+      label_names = case labels
+                    when nil then []
+                    when Hash then labels.keys.map(&:to_s)
+                    when Array then labels.map { |entry| entry.to_s.split("=", 2).first }
+                    else
+                      fail!("#{label} service #{name} labels must be a mapping or sequence.")
+                    end
+      if label_names.any? { |label_name| label_name.start_with?("com.platform.runtime.") }
+        fail!("#{label} service #{name} cannot predeclare trusted runtime identity labels.")
+      end
       fail!("#{label} service #{name} cannot share another PID namespace.") if service.key?("pid")
       if service.key?("user") && !service["user"].to_s.match?(/\A[1-9][0-9]{0,9}:[1-9][0-9]{0,9}\z/)
         fail!("#{label} service #{name} must use a canonical numeric uid:gid.")

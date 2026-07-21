@@ -16,18 +16,39 @@ const FORBIDDEN_WORKLOAD_TARGETS = [
   "/var/www/project-state",
 ];
 
+const RUNTIME_IDENTITY_LABELS = [
+  "com.platform.runtime.candidate-id",
+  "com.platform.runtime.commit",
+  "com.platform.runtime.tree",
+  "com.platform.runtime.deployment-id",
+  "com.platform.runtime.render-sha256",
+  "com.platform.runtime.workload-lock-sha256",
+];
+
 export function evaluateRuntimeIsolation(config, options = {}) {
   const services = object(config?.services);
   const networks = object(config?.networks);
   const projectName = String(options.projectName ?? "");
   const maxMemoryBytes = integer(options.maxMemoryBytes ?? 13_500 * 1024 * 1024);
   const maxWorkloadMemoryBytes = integer(options.maxWorkloadMemoryBytes ?? 8_000 * 1024 * 1024);
+  const runtimeIdentityRequired = options.runtimeIdentity != null;
+  const runtimeIdentity = object(options.runtimeIdentity);
+  const runtimeIdentityValid = !runtimeIdentityRequired || (
+    JSON.stringify(Object.keys(runtimeIdentity).sort()) === JSON.stringify([...RUNTIME_IDENTITY_LABELS].sort())
+    && /^[a-f0-9]{64}$/.test(String(runtimeIdentity[RUNTIME_IDENTITY_LABELS[0]] || ""))
+    && /^([a-f0-9]{40}|[a-f0-9]{64})$/.test(String(runtimeIdentity[RUNTIME_IDENTITY_LABELS[1]] || ""))
+    && /^([a-f0-9]{40}|[a-f0-9]{64})$/.test(String(runtimeIdentity[RUNTIME_IDENTITY_LABELS[2]] || ""))
+    && /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/.test(String(runtimeIdentity[RUNTIME_IDENTITY_LABELS[3]] || ""))
+    && /^[a-f0-9]{64}$/.test(String(runtimeIdentity[RUNTIME_IDENTITY_LABELS[4]] || ""))
+    && /^[a-f0-9]{64}$/.test(String(runtimeIdentity[RUNTIME_IDENTITY_LABELS[5]] || ""))
+  );
   const checks = [];
   const failures = [];
   const record = (id, passed, detail) => {
     checks.push({ id, status: passed ? "passed" : "failed", detail });
     if (!passed) failures.push(`${id}: ${detail}`);
   };
+  record("workload-runtime-identity-input", runtimeIdentityValid, `required=${runtimeIdentityRequired} valid=${runtimeIdentityValid}`);
 
   let totalMemoryBytes = 0;
   for (const [name, service] of Object.entries(services)) {
@@ -67,6 +88,11 @@ export function evaluateRuntimeIsolation(config, options = {}) {
     const service = services[name] || {};
     const workloadId = String(service.labels?.["com.platform.workload-id"] || "");
     const role = String(service.labels?.["com.platform.workload-role"] || "");
+    const runtimeLabelKeys = Object.keys(object(service.labels)).filter((label) => label.startsWith("com.platform.runtime.")).sort();
+    const runtimeIdentityMatches = !runtimeIdentityRequired || (runtimeIdentityValid
+      && JSON.stringify(runtimeLabelKeys) === JSON.stringify([...RUNTIME_IDENTITY_LABELS].sort())
+      && RUNTIME_IDENTITY_LABELS.every((label) => service.labels?.[label] === runtimeIdentity[label]));
+    record(`workload-runtime-identity-${name}`, runtimeIdentityMatches, `${name} labels=${runtimeLabelKeys.join(",") || "none"}`);
     record(`workload-name-prefix-${name}`, name.startsWith(`${workloadId}-`), `${name} workload=${workloadId}`);
     record(`workload-role-${name}`, ["api", "web", "worker", "scheduled-worker"].includes(role), `${name} role=${role}`);
     record(`workload-numeric-user-${name}`, /^[1-9][0-9]{0,9}:[1-9][0-9]{0,9}$/.test(String(service.user || "")), `${name} user=${service.user || "unset"}`);

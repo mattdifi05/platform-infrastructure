@@ -17,7 +17,7 @@ const IMAGE = /^[a-z0-9][a-z0-9._/-]*(?::[A-Za-z0-9._-]+)?@sha256:[a-f0-9]{64}$/
 const SAFE_PATH = /^[A-Za-z0-9_./-]+$/;
 export const HOSTED_WORKLOAD_LOCK_VERSION = 2;
 export const HOSTED_WORKLOAD_VALIDATOR_VERSION = "hosted-contract-v2";
-const RAW_POLICY_CONTROLS = Object.freeze(["bind-bounded-local-logging", "bind-network-identity", "bind-network-topology", "bind-no-swap-oom-policy", "bind-owned-secret-aliases", "bind-owned-volumes", "bind-private-pid-numeric-user", "deny-api-socket", "deny-compose-interpolation", "deny-device-access", "deny-env-file", "deny-extends", "deny-file-configs", "deny-gpu-access", "deny-include", "deny-inline-configs", "deny-lifecycle-hooks", "deny-local-volume-options", "deny-providers", "deny-runtime-overrides", "deny-scaling", "deny-stop-grace-overrides", "deny-supplemental-groups", "deny-volumes-from"]);
+const RAW_POLICY_CONTROLS = Object.freeze(["bind-bounded-local-logging", "bind-network-identity", "bind-network-topology", "bind-no-swap-oom-policy", "bind-owned-secret-aliases", "bind-owned-volumes", "bind-private-pid-numeric-user", "deny-api-socket", "deny-compose-interpolation", "deny-device-access", "deny-env-file", "deny-extends", "deny-file-configs", "deny-gpu-access", "deny-include", "deny-inline-configs", "deny-lifecycle-hooks", "deny-local-volume-options", "deny-providers", "deny-runtime-identity-labels", "deny-runtime-overrides", "deny-scaling", "deny-stop-grace-overrides", "deny-supplemental-groups", "deny-volumes-from"]);
 const PLATFORM_DEPENDENCIES = new Set([
   "postgres",
   "redis",
@@ -948,6 +948,8 @@ function assertVolumes(name, service, workloadId) {
 
 function assertWorkloadService({ serviceDefinition, manifestService, manifest, combined, projectName }) {
   const name = manifestService.name;
+  const predeclaredRuntimeLabels = Object.keys(serviceDefinition.labels ?? {}).filter((label) => label.startsWith("com.platform.runtime."));
+  if (predeclaredRuntimeLabels.length > 0) invalid(`${name} cannot predeclare trusted runtime identity labels.`);
   if (!IMAGE.test(String(serviceDefinition.image ?? ""))) invalid(`${name} image must be digest-pinned.`);
   if (serviceDefinition.build) invalid(`${name} cannot build inside the platform deployment.`);
   if (["post_start", "pre_start", "pre_stop"].some((field) => serviceDefinition[field] != null)) {
@@ -1177,9 +1179,11 @@ export function validateRenderedWorkloads({ core, combined, lock }) {
       invalid(`Workload network ${name} cannot alias foreign physical network ${network?.name ?? name}.`);
     }
     const expectedInternal = zone !== "egress";
+    const expectedKeys = zone === "egress" ? ["enable_ipv6", "internal", "name"] : ["internal", "name"];
     if (!network || typeof network !== "object" || Array.isArray(network)
-        || !same(Object.keys(network).sort(), ["internal", "name"])
-        || network.internal !== expectedInternal) {
+        || !same(Object.keys(network).sort(), expectedKeys)
+        || network.internal !== expectedInternal
+        || (zone === "egress" && network.enable_ipv6 !== false)) {
       invalid(`Workload network ${name} must use the exact ${zone} topology with internal=${expectedInternal}.`);
     }
   }

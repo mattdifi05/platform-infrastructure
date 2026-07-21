@@ -314,6 +314,11 @@ test("OCI runtime overrides are rejected after render", () => {
   combined.services["example-app-web"].runtime = "kata-runtime";
   assert.throws(() => validateRenderedWorkloads({ core, combined, lock }), /cannot override the OCI runtime/);
 });
+test("workloads cannot predeclare trusted runtime identity labels", () => {
+  const combined = combinedFixture();
+  combined.services["example-app-web"].labels["com.platform.runtime.candidate-id"] = "a".repeat(64);
+  assert.throws(() => validateRenderedWorkloads({ core, combined, lock }), /cannot predeclare trusted runtime identity labels/);
+});
 test("stop grace period overrides are rejected after render", () => {
   const combined = combinedFixture();
   combined.services["example-app-web"].stop_grace_period = "24h";
@@ -421,12 +426,12 @@ test("workload networks reject every caller-controlled topology knob", () => {
   ]) {
     const combined = combinedFixture();
     mutate(combined.networks.example_app_ingress);
-    assert.throws(() => validateRenderedWorkloads({ core, combined, lock: { projectName: "fixture", workloads: [manifest] } }), /exact ingress topology/);
+    assert.throws(() => validateRenderedWorkloads({ core, combined, lock }), /exact ingress topology/);
   }
   const egress = combinedFixture();
   egress.services["example-app-worker"].networks = { example_app_egress: null };
   delete egress.networks.example_app_bus;
-  egress.networks.example_app_egress = { internal: false, name: "fixture_example_app_egress" };
+  egress.networks.example_app_egress = { internal: false, enable_ipv6: false, name: "fixture_example_app_egress" };
   assert.doesNotThrow(() => validateRenderedWorkloads({ core, combined: egress, lock }));
 });
 test("platform service can join only its assigned workload zone", () => {
@@ -684,7 +689,7 @@ test("legacy hosted workload locks fail closed", () => {
 test("raw policy receipt requires the exact current control set", () => {
   const rawPolicyReceipt = {
     policyVersion: "hosted-raw-v1",
-    controls: ["bind-bounded-local-logging", "bind-network-identity", "bind-network-topology", "bind-no-swap-oom-policy", "bind-owned-secret-aliases", "bind-owned-volumes", "bind-private-pid-numeric-user", "deny-api-socket", "deny-compose-interpolation", "deny-device-access", "deny-env-file", "deny-extends", "deny-file-configs", "deny-gpu-access", "deny-include", "deny-inline-configs", "deny-lifecycle-hooks", "deny-local-volume-options", "deny-providers", "deny-runtime-overrides", "deny-scaling", "deny-stop-grace-overrides", "deny-supplemental-groups", "deny-volumes-from"],
+    controls: ["bind-bounded-local-logging", "bind-network-identity", "bind-network-topology", "bind-no-swap-oom-policy", "bind-owned-secret-aliases", "bind-owned-volumes", "bind-private-pid-numeric-user", "deny-api-socket", "deny-compose-interpolation", "deny-device-access", "deny-env-file", "deny-extends", "deny-file-configs", "deny-gpu-access", "deny-include", "deny-inline-configs", "deny-lifecycle-hooks", "deny-local-volume-options", "deny-providers", "deny-runtime-identity-labels", "deny-runtime-overrides", "deny-scaling", "deny-stop-grace-overrides", "deny-supplemental-groups", "deny-volumes-from"],
     workloadContentSha256: "a".repeat(64),
     workloads: [{
       workloadId: "example-app",
@@ -707,12 +712,12 @@ test("raw policy receipt requires the exact current control set", () => {
     rawPolicyWorkloadContentSha256: "a".repeat(64),
     rawPolicyReceipt,
     rawPolicySha256: crypto.createHash("sha256").update(JSON.stringify(stable(rawPolicyReceipt))).digest("hex"),
-    rawPolicyControls: ["bind-bounded-local-logging", "bind-network-identity", "bind-network-topology", "bind-no-swap-oom-policy", "bind-owned-secret-aliases", "bind-owned-volumes", "bind-private-pid-numeric-user", "deny-api-socket", "deny-compose-interpolation", "deny-device-access", "deny-env-file", "deny-extends", "deny-file-configs", "deny-gpu-access", "deny-include", "deny-inline-configs", "deny-lifecycle-hooks", "deny-local-volume-options", "deny-providers", "deny-runtime-overrides", "deny-scaling", "deny-stop-grace-overrides", "deny-supplemental-groups", "deny-volumes-from"],
+    rawPolicyControls: ["bind-bounded-local-logging", "bind-network-identity", "bind-network-topology", "bind-no-swap-oom-policy", "bind-owned-secret-aliases", "bind-owned-volumes", "bind-private-pid-numeric-user", "deny-api-socket", "deny-compose-interpolation", "deny-device-access", "deny-env-file", "deny-extends", "deny-file-configs", "deny-gpu-access", "deny-include", "deny-inline-configs", "deny-lifecycle-hooks", "deny-local-volume-options", "deny-providers", "deny-runtime-identity-labels", "deny-runtime-overrides", "deny-scaling", "deny-stop-grace-overrides", "deny-supplemental-groups", "deny-volumes-from"],
   };
   assert.doesNotThrow(() => verifyRawPolicyReceipt(receipt));
   receipt.rawPolicyControls = ["deny-include"];
   assert.throws(() => verifyRawPolicyReceipt(receipt), /raw source policy receipt/);
-  receipt.rawPolicyControls = ["bind-bounded-local-logging", "bind-network-identity", "bind-network-topology", "bind-no-swap-oom-policy", "bind-owned-secret-aliases", "bind-owned-volumes", "bind-private-pid-numeric-user", "deny-api-socket", "deny-compose-interpolation", "deny-device-access", "deny-env-file", "deny-extends", "deny-file-configs", "deny-gpu-access", "deny-include", "deny-inline-configs", "deny-lifecycle-hooks", "deny-local-volume-options", "deny-providers", "deny-runtime-overrides", "deny-scaling", "deny-stop-grace-overrides", "deny-supplemental-groups", "deny-volumes-from"];
+  receipt.rawPolicyControls = ["bind-bounded-local-logging", "bind-network-identity", "bind-network-topology", "bind-no-swap-oom-policy", "bind-owned-secret-aliases", "bind-owned-volumes", "bind-private-pid-numeric-user", "deny-api-socket", "deny-compose-interpolation", "deny-device-access", "deny-env-file", "deny-extends", "deny-file-configs", "deny-gpu-access", "deny-include", "deny-inline-configs", "deny-lifecycle-hooks", "deny-local-volume-options", "deny-providers", "deny-runtime-identity-labels", "deny-runtime-overrides", "deny-scaling", "deny-stop-grace-overrides", "deny-supplemental-groups", "deny-volumes-from"];
   receipt.rawPolicySha256 = "b".repeat(64);
   assert.throws(() => verifyRawPolicyReceipt(receipt), /raw source policy receipt/);
   receipt.rawPolicyReceipt.workloads[0].composeSha256 = "d".repeat(64);
@@ -1312,6 +1317,12 @@ exec "$HOSTED_TEST_REAL_JQ" "$@"
       HOSTED_TEST_TMPDIR: root,
       HOSTED_TEST_HASH_RACE_MARKER: path.join(root, "hash-race-fired"),
       HOSTED_TEST_LOCK_READER_COUNT: path.join(root, "lock-reader-count"),
+      PLATFORM_RUNTIME_CANDIDATE_ID: "a".repeat(64),
+      PLATFORM_RUNTIME_COMMIT: "b".repeat(40),
+      PLATFORM_RUNTIME_TREE: "c".repeat(40),
+      PLATFORM_RUNTIME_DEPLOYMENT_ID: "deploy-20260721",
+      PLATFORM_RUNTIME_RENDER_SHA256: "d".repeat(64),
+      PLATFORM_RUNTIME_WORKLOAD_LOCK_SHA256: "e".repeat(64),
       TMPDIR: root,
     };
     const queryRace = spawnSync("/bin/bash", [path.join(import.meta.dirname, "compose-vps.sh"), "config", "--format", "json"], {
@@ -1359,6 +1370,13 @@ exit "$status"
     const consumed = fs.readFileSync(capture, "utf8");
     assert.match(consumed, /example-app-web/);
     assert.match(consumed, /EXAMPLE_APP_THEME=dark/);
+    assert.match(consumed, /"example-app-web"/);
+    assert.match(consumed, /"com\.platform\.runtime\.candidate-id":"a{64}"/);
+    assert.match(consumed, /"com\.platform\.runtime\.commit":"b{40}"/);
+    assert.match(consumed, /"com\.platform\.runtime\.tree":"c{40}"/);
+    assert.match(consumed, /"com\.platform\.runtime\.deployment-id":"deploy-20260721"/);
+    assert.match(consumed, /"com\.platform\.runtime\.render-sha256":"d{64}"/);
+    assert.match(consumed, /"com\.platform\.runtime\.workload-lock-sha256":"e{64}"/);
     assert.doesNotMatch(consumed, /privileged: true/);
     assert.equal(fs.existsSync(sharedEnvironment.HOSTED_TEST_HASH_RACE_MARKER), false);
     assert.equal(fs.readFileSync(sharedEnvironment.HOSTED_TEST_LOCK_READER_COUNT, "utf8").trim(), "1");

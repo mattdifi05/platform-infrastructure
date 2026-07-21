@@ -233,6 +233,25 @@ test("rejects workload network topology overrides at runtime", () => {
   assert.equal(accepted.status, "passed", accepted.failures.join("\n"));
 });
 
+test("binds all six hosted workload runtime identity labels", () => {
+  const expected = runtimeIdentityFixture();
+  const accepted = fixture();
+  Object.assign(accepted.services["example-app-web"].labels, expected);
+  assert.equal(evaluateRuntimeIsolation(accepted, { projectName: "fixture", runtimeIdentity: expected }).status, "passed");
+  for (const label of Object.keys(expected)) {
+    const config = fixture();
+    Object.assign(config.services["example-app-web"].labels, expected);
+    config.services["example-app-web"].labels[label] = `wrong-${label}`;
+    const report = evaluateRuntimeIsolation(config, { projectName: "fixture", runtimeIdentity: expected });
+    assert.equal(report.status, "failed");
+    assert.match(report.failures.join("\n"), /workload-runtime-identity-example-app-web/);
+  }
+  const missing = fixture();
+  Object.assign(missing.services["example-app-web"].labels, expected);
+  delete missing.services["example-app-web"].labels["com.platform.runtime.tree"];
+  assert.equal(evaluateRuntimeIsolation(missing, { projectName: "fixture", runtimeIdentity: expected }).status, "failed");
+});
+
 test("rejects workload Compose API socket access independently at runtime", () => {
   const config = fixture();
   config.services["example-app-web"].use_api_socket = true;
@@ -398,6 +417,17 @@ function fixture() {
       platform_docker_control: { internal: true },
       example_app_ingress: { internal: true, name: "fixture_example_app_ingress" },
     },
+  };
+}
+
+function runtimeIdentityFixture() {
+  return {
+    "com.platform.runtime.candidate-id": "a".repeat(64),
+    "com.platform.runtime.commit": "b".repeat(40),
+    "com.platform.runtime.tree": "c".repeat(40),
+    "com.platform.runtime.deployment-id": "deploy-20260721",
+    "com.platform.runtime.render-sha256": "d".repeat(64),
+    "com.platform.runtime.workload-lock-sha256": "e".repeat(64),
   };
 }
 

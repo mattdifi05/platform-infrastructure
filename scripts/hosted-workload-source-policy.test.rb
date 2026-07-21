@@ -335,6 +335,19 @@ class HostedWorkloadSourcePolicyTest < Minitest::Test
     assert_match(/cannot override the OCI runtime/, error.message)
   end
 
+  def test_rejects_predeclared_runtime_identity_labels
+    [
+      { "com.platform.runtime.candidate-id" => "a" * 64 },
+      ["com.platform.runtime.commit=#{'b' * 40}"]
+    ].each do |labels|
+      model = { "services" => { "example-app-web" => { "labels" => labels } } }
+      error = assert_raises(ArgumentError) do
+        HostedWorkloadSourcePolicy.validate_source_model(model, "fixture", workload_id: "example-app", project_name: "fixture")
+      end
+      assert_match(/cannot predeclare trusted runtime identity labels/, error.message)
+    end
+  end
+
   def test_rejects_stop_grace_period_overrides
     model = parse("services:\n  app:\n    stop_grace_period: 24h\n")
     error = assert_raises(ArgumentError) do
