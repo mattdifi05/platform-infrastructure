@@ -4,6 +4,9 @@ set -eu
 MODE=plan
 CONFIRM=""
 NETWORK_PREFIX="${PLATFORM_NETWORK_PREFIX:-platform_infra_vps}"
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+LOCK=""
+PROJECT_NAME=""
 CHAIN=PLATFORM-WORKLOAD-EGRESS
 SUBNET_FILE=$(mktemp)
 cleanup() {
@@ -13,14 +16,14 @@ trap cleanup EXIT HUP INT TERM
 
 usage() {
   cat <<'EOF'
-Usage: workload-egress-firewall.sh [--plan|--apply|--verify|--rollback] [--network-prefix PREFIX] [--subnet CIDR] [--confirm TOKEN]
+Usage: workload-egress-firewall.sh [--plan|--apply|--verify|--rollback] --lock ABSOLUTE_PATH --project-name NAME [--subnet CIDR] [--confirm TOKEN]
 
-Default mode is plan. Apply discovers the candidate application egress Docker
-networks and blocks access from their IPv4 subnets to private, loopback,
+Default mode is plan. Apply reads the exact egress-network inventory from one
+verified hosted workload lock and blocks its IPv4 subnets to private, loopback,
 link-local/metadata, CGNAT and reserved destinations through DOCKER-USER.
 
---subnet is accepted for plan-only sandbox evidence and is rejected by apply,
-verify and rollback.
+--subnet is accepted only for isolated plan evidence. Apply and verify reject
+caller-supplied networks/subnets and require the verified lock inventory.
 EOF
 }
 
@@ -30,6 +33,14 @@ while [ "$#" -gt 0 ]; do
     --apply) MODE=apply ;;
     --verify) MODE=verify ;;
     --rollback) MODE=rollback ;;
+    --lock)
+      shift
+      LOCK="${1:?Missing value for --lock}"
+      ;;
+    --project-name)
+      shift
+      PROJECT_NAME="${1:?Missing value for --project-name}"
+      ;;
     --network-prefix)
       shift
       NETWORK_PREFIX="${1:?Missing value for --network-prefix}"
@@ -83,30 +94,52 @@ require_command() {
   command -v "$1" >/dev/null 2>&1 || { echo "$1 command not found" >&2; exit 1; }
 }
 
-discover_subnets() {
+load_locked_egress_subnets() {
   require_command docker
-  docker network ls --format '{{.Name}}' | while IFS= read -r network; do
-    case "$network" in
-      "${NETWORK_PREFIX}"_app_*_egress)
-        docker network inspect "$network" --format '{{range .IPAM.Config}}{{println .Subnet}}{{end}}' \
-          | while IFS= read -r subnet; do
-              case "$subnet" in
-                *:*) ;;
-                '') ;;
-                *) printf '%s\n' "$subnet" ;;
-              esac
-            done
-        ;;
-    esac
-  done >> "$SUBNET_FILE"
+  require_command jq
+  case "$LOCK" in
+    /*) ;;
+    *) echo "--lock must be an absolute path" >&2; exit 2 ;;
+  esac
+  case "$LOCK" in *[!A-Za-z0-9_./-]*|*//*|*/../*|*/..) echo "Invalid --lock path" >&2; exit 2 ;; esac
+  [ -f "$LOCK" ] || { echo "Hosted workload lock does not exist: $LOCK" >&2; exit 1; }
+  case "$PROJECT_NAME" in ''|*[!a-z0-9_-]* ) echo "Invalid --project-name" >&2; exit 2 ;; esac
+  activation_bundle=$(sh "$SCRIPT_DIR/hosted-workload-lock.sh" "$LOCK" activation-bundle)
+  printf '%s' "$activation_bundle" | jq -e --arg projectName "$PROJECT_NAME" '
+    .projectName == $projectName
+    and (.networkRecords | type == "array")
+    and all(.networkRecords[];
+      (.workloadId | type == "string")
+      and (.logicalName | type == "string")
+      and (.physicalName == ($projectName + "_" + .logicalName))
+    )
+    and all(.networkRecords[] | select(.logicalName | endswith("_egress")); .logicalName == ((.workloadId | gsub("-"; "_")) + "_egress"))
+  ' >/dev/null || { echo "Hosted workload egress inventory is invalid" >&2; exit 1; }
+  egress_records=$(printf '%s' "$activation_bundle" | jq -r '.networkRecords[] | select(.logicalName | endswith("_egress")) | [.logicalName, .physicalName] | @tsv')
+  while IFS="$(printf '\t')" read -r logical_name physical_name; do
+    [ -n "$physical_name" ] || continue
+    inspection=$(docker network inspect "$physical_name") || {
+      echo "Locked workload egress network is missing: $physical_name" >&2
+      exit 1
+    }
+    printf '%s' "$inspection" | jq -e --arg physicalName "$physical_name" --arg projectName "$PROJECT_NAME" --arg logicalName "$logical_name" '
+      type == "array"
+      and length == 1
+      and .[0].Name == $physicalName
+      and .[0].EnableIPv6 == false
+      and .[0].Labels["com.docker.compose.project"] == $projectName
+      and .[0].Labels["com.docker.compose.network"] == $logicalName
+      and (.[0].IPAM.Config | type == "array")
+      and ([.[0].IPAM.Config[].Subnet | select(type == "string" and (contains(":") | not))] | length > 0)
+    ' >/dev/null || { echo "Locked workload egress network identity/IPAM is invalid: $physical_name" >&2; exit 1; }
+    printf '%s' "$inspection" | jq -r '.[0].IPAM.Config[].Subnet | select(type == "string" and (contains(":") | not))' >> "$SUBNET_FILE"
+  done <<EOF
+$egress_records
+EOF
 }
 
 validate_subnets() {
   sort -u "$SUBNET_FILE" -o "$SUBNET_FILE"
-  if [ ! -s "$SUBNET_FILE" ]; then
-    echo "No workload egress subnet found for prefix $NETWORK_PREFIX" >&2
-    exit 1
-  fi
   while IFS= read -r subnet; do
     case "$subnet" in
       *[!0-9./]*|''|*.*.*.*.*|*//*|/*|*/)
@@ -135,8 +168,8 @@ if [ "$MODE" = rollback ]; then
   exit 0
 fi
 
-if [ ! -s "$SUBNET_FILE" ]; then
-  discover_subnets
+if [ ! -s "$SUBNET_FILE" ] && [ "$MODE" != rollback ]; then
+  load_locked_egress_subnets
 fi
 validate_subnets
 
@@ -160,6 +193,8 @@ iptables -w -S DOCKER-USER >/dev/null 2>&1 || { echo "DOCKER-USER chain is unava
 
 verify_rules() {
   iptables -w -C DOCKER-USER -j "$CHAIN" >/dev/null
+  expected_rules=1
+  blocked_rule_count=$(printf '%s\n' "$BLOCKED_DESTINATIONS" | awk 'NF { count += 1 } END { print count + 0 }')
   while IFS= read -r subnet; do
     printf '%s\n' "$BLOCKED_DESTINATIONS" | while IFS= read -r destination; do
       [ -n "$destination" ] || continue
@@ -167,12 +202,16 @@ verify_rules() {
     done
     iptables -w -C "$CHAIN" -s "$subnet" -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN >/dev/null
     iptables -w -C "$CHAIN" -s "$subnet" -j RETURN >/dev/null
+    expected_rules=$((expected_rules + blocked_rule_count + 2))
   done < "$SUBNET_FILE"
+  iptables -w -C "$CHAIN" -j RETURN >/dev/null
+  actual_rules=$(iptables -w -S "$CHAIN" | awk '$1 == "-A" { count += 1 } END { print count + 0 }')
+  [ "$actual_rules" -eq "$expected_rules" ] || { echo "Workload egress firewall has stale or unexpected rules" >&2; exit 1; }
 }
 
 if [ "$MODE" = verify ]; then
   verify_rules
-  echo "Workload egress firewall verified for $(wc -l < "$SUBNET_FILE") subnet(s)."
+  echo "Workload egress firewall verified for $(awk 'END { print NR + 0 }' "$SUBNET_FILE") subnet(s)."
   exit 0
 fi
 
@@ -180,7 +219,10 @@ fi
 [ "$CONFIRM" = "APPLY-WORKLOAD-EGRESS-FIREWALL" ] || { echo "Apply requires --confirm APPLY-WORKLOAD-EGRESS-FIREWALL" >&2; exit 1; }
 
 iptables -w -N "$CHAIN" >/dev/null 2>&1 || true
-iptables -w -C DOCKER-USER -j "$CHAIN" >/dev/null 2>&1 || iptables -w -I DOCKER-USER 1 -j "$CHAIN"
+while iptables -w -C DOCKER-USER -j "$CHAIN" >/dev/null 2>&1; do
+  iptables -w -D DOCKER-USER -j "$CHAIN"
+done
+iptables -w -I DOCKER-USER 1 -j "$CHAIN"
 iptables -w -F "$CHAIN"
 while IFS= read -r subnet; do
   printf '%s\n' "$BLOCKED_DESTINATIONS" | while IFS= read -r destination; do
@@ -193,4 +235,4 @@ done < "$SUBNET_FILE"
 iptables -w -A "$CHAIN" -j RETURN
 
 verify_rules
-echo "Workload egress firewall applied and verified for $(wc -l < "$SUBNET_FILE") subnet(s)."
+echo "Workload egress firewall applied and verified for $(awk 'END { print NR + 0 }' "$SUBNET_FILE") subnet(s)."

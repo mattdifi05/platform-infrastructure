@@ -1493,6 +1493,73 @@ exit 2
   }
 });
 
+test("egress firewall consumes only the verified lock network inventory", () => {
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "hosted-egress-inventory-")));
+  try {
+    const fixture = catalogFixture(root);
+    fs.writeFileSync(path.join(root, "workloads", "example-app", "compose.yaml"), "services:\n  example-app-web:\n    networks:\n      example_app_egress:\nnetworks:\n  example_app_egress:\n    internal: false\n");
+    const lock = resolveCatalog({
+      ...fixture,
+      workloadRoot: path.join(root, "workloads"),
+      coreFiles: [fixture.coreFile],
+      projectName: "fixture",
+      snapshotRoot: path.join(root, "snapshots"),
+    });
+    const lockPath = path.join(root, "lock.json");
+    fs.writeFileSync(lockPath, `${JSON.stringify(lock, null, 2)}\n`, { mode: 0o600 });
+    const rawPolicy = spawnSync("ruby", [path.join(import.meta.dirname, "hosted-workload-source-policy.rb"), "--lock", lockPath], { encoding: "utf8" });
+    assert.equal(rawPolicy.status, 0, rawPolicy.stderr);
+    const fakeBin = path.join(root, "fake-bin");
+    const dockerLog = path.join(root, "docker.log");
+    fs.mkdirSync(fakeBin);
+    fs.writeFileSync(path.join(fakeBin, "docker"), `#!/bin/sh
+printf '%s\n' "$*" >> "$HOSTED_TEST_DOCKER_LOG"
+[ "\${1:-}" = network ] && [ "\${2:-}" = inspect ] || exit 2
+case "\${HOSTED_TEST_EGRESS_MODE:-correct}" in
+  missing) exit 1 ;;
+  wrong-label) project=attacker ;;
+  *) project=fixture ;;
+esac
+printf '[{"Name":"fixture_example_app_egress","EnableIPv6":false,"Labels":{"com.docker.compose.project":"%s","com.docker.compose.network":"example_app_egress"},"IPAM":{"Config":[{"Subnet":"172.30.10.0/24"}]}}]\n' "$project"
+`, { mode: 0o755 });
+    fs.writeFileSync(path.join(fakeBin, "iptables"), `#!/bin/sh
+case "$*" in
+  *'-S PLATFORM-WORKLOAD-EGRESS'*)
+    count=0
+    while [ "$count" -lt 17 ]; do printf '%s\n' '-A PLATFORM-WORKLOAD-EGRESS -j RETURN'; count=$((count + 1)); done
+    ;;
+esac
+exit 0
+`, { mode: 0o755 });
+    const environment = {
+      ...process.env,
+      PATH: `${fakeBin}:${process.env.PATH}`,
+      HOSTED_WORKLOAD_ALLOW_RESOLVED: "1",
+      HOSTED_TEST_DOCKER_LOG: dockerLog,
+    };
+    const firewall = path.join(import.meta.dirname, "workload-egress-firewall.sh");
+    const run = (mode, extraEnvironment = {}) => spawnSync("/bin/sh", [firewall, mode, "--lock", lockPath, "--project-name", "fixture"], {
+      encoding: "utf8",
+      env: { ...environment, ...extraEnvironment },
+    });
+    const plan = run("--plan");
+    assert.equal(plan.status, 0, plan.stderr);
+    assert.match(plan.stdout, /Workload source: 172\.30\.10\.0\/24/);
+    assert.equal(fs.readFileSync(dockerLog, "utf8").trim(), "network inspect fixture_example_app_egress");
+    fs.writeFileSync(dockerLog, "");
+    const verified = run("--verify");
+    assert.equal(verified.status, 0, verified.stderr);
+    assert.match(verified.stdout, /verified for 1 subnet/);
+    for (const mode of ["wrong-label", "missing"]) {
+      const rejected = run("--plan", { HOSTED_TEST_EGRESS_MODE: mode });
+      assert.notEqual(rejected.status, 0);
+      assert.match(rejected.stderr, /missing|identity\/IPAM is invalid/);
+    }
+  } finally {
+    removeFixtureTree(root);
+  }
+});
+
 test("workload environment accepts only non-secret prefixed variables", () => {
   assert.deepEqual(
     validateWorkloadEnvironmentText("EXAMPLE_APP_IMAGE=registry.example/app@sha256:abc\nEXAMPLE_APP_SMTP_HOST=smtp.example.test\n", "example-app"),
