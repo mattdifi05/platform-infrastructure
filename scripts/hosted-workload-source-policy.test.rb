@@ -53,4 +53,12 @@ class HostedWorkloadSourcePolicyTest < Minitest::Test
       assert_match(/cannot use env_file/, error.message)
     end
   end
+
+  def test_rejects_service_volume_inheritance_before_render
+    model = parse("services:\n  app:\n    volumes_from:\n      - postgres:rw\n")
+    error = assert_raises(ArgumentError) do
+      HostedWorkloadSourcePolicy.validate_source_model(model, "fixture")
+    end
+    assert_match(/cannot use volumes_from/, error.message)
+  end
 end

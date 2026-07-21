@@ -2822,6 +2822,7 @@ function infraTestingHygiene() {
   run(process.execPath, ["--test", "scripts/hosted-workload-contract.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/database-admin-profile-safety.test.mjs"], { cwd: infraRoot });
   run("ruby", ["scripts/hosted-workload-source-policy.test.rb"], { cwd: infraRoot });
+  run(process.execPath, ["--test", "scripts/runtime-isolation-policy.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/functional-health.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/runtime-fingerprint.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/provider-evidence-auth.test.mjs"], { cwd: infraRoot });

@@ -8,7 +8,7 @@ require "psych"
 
 module HostedWorkloadSourcePolicy
   VERSION = "hosted-raw-v1"
-  CONTROLS = %w[deny-env-file deny-extends deny-include].freeze
+  CONTROLS = %w[deny-env-file deny-extends deny-include deny-volumes-from].freeze
   MAX_COMPOSE_BYTES = 1_048_576
   STANDARD_TAG_PREFIX = "tag:yaml.org,2002:"
 
@@ -83,6 +83,7 @@ module HostedWorkloadSourcePolicy
       fail!("#{label} service #{name} must be a mapping.") unless service.is_a?(Hash)
       fail!("#{label} service #{name} cannot use env_file.") if service.key?("env_file")
       fail!("#{label} service #{name} cannot use extends.") if service.key?("extends")
+      fail!("#{label} service #{name} cannot use volumes_from.") if service.key?("volumes_from")
     end
     true
   end

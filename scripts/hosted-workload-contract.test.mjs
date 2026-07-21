@@ -116,6 +116,11 @@ test("bind mount is rejected", () => {
   combined.services["example-app-web"].volumes = [{ type: "bind", source: "/srv", target: "/app" }];
   assert.throws(() => validateRenderedWorkloads({ core, combined, lock }), /bind mounts are forbidden/);
 });
+test("service volume inheritance is rejected after render", () => {
+  const combined = combinedFixture();
+  combined.services["example-app-web"].volumes_from = ["postgres:rw"];
+  assert.throws(() => validateRenderedWorkloads({ core, combined, lock }), /cannot inherit volumes/);
+});
 test("host port is rejected", () => {
   const combined = combinedFixture();
   combined.services["example-app-web"].ports = [{ target: 3000, published: "3000" }];
@@ -391,7 +396,7 @@ test("legacy hosted workload locks fail closed", () => {
 test("raw policy receipt requires the exact current control set", () => {
   const rawPolicyReceipt = {
     policyVersion: "hosted-raw-v1",
-    controls: ["deny-env-file", "deny-extends", "deny-include"],
+    controls: ["deny-env-file", "deny-extends", "deny-include", "deny-volumes-from"],
     workloadContentSha256: "a".repeat(64),
     workloads: [{
       workloadId: "example-app",
@@ -413,12 +418,12 @@ test("raw policy receipt requires the exact current control set", () => {
     rawPolicyWorkloadContentSha256: "a".repeat(64),
     rawPolicyReceipt,
     rawPolicySha256: crypto.createHash("sha256").update(JSON.stringify(stable(rawPolicyReceipt))).digest("hex"),
-    rawPolicyControls: ["deny-env-file", "deny-extends", "deny-include"],
+    rawPolicyControls: ["deny-env-file", "deny-extends", "deny-include", "deny-volumes-from"],
   };
   assert.doesNotThrow(() => verifyRawPolicyReceipt(receipt));
   receipt.rawPolicyControls = ["deny-include"];
   assert.throws(() => verifyRawPolicyReceipt(receipt), /raw source policy receipt/);
-  receipt.rawPolicyControls = ["deny-env-file", "deny-extends", "deny-include"];
+  receipt.rawPolicyControls = ["deny-env-file", "deny-extends", "deny-include", "deny-volumes-from"];
   receipt.rawPolicySha256 = "b".repeat(64);
   assert.throws(() => verifyRawPolicyReceipt(receipt), /raw source policy receipt/);
   receipt.rawPolicyReceipt.workloads[0].composeSha256 = "d".repeat(64);

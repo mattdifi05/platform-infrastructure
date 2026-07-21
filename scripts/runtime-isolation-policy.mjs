@@ -60,6 +60,7 @@ export function evaluateRuntimeIsolation(config, options = {}) {
     record(`workload-non-root-${name}`, Boolean(service.user) && !/^(?:0|root)(?::|$)/.test(String(service.user)), `${name} user=${service.user || "unset"}`);
     record(`workload-no-new-privileges-${name}`, service.security_opt?.includes("no-new-privileges:true"), `${name} securityOpt=${service.security_opt || "unset"}`);
     record(`workload-drop-all-capabilities-${name}`, service.cap_drop?.includes("ALL") && !(service.cap_add?.length > 0), `${name} capDrop=${service.cap_drop || "unset"}`);
+    record(`workload-no-volumes-from-${name}`, !Object.hasOwn(service, "volumes_from"), `${name} volumesFrom=${service.volumes_from || "none"}`);
     const mounts = volumes(service);
     for (const target of FORBIDDEN_WORKLOAD_TARGETS) {
       const exposed = mounts.some((mount) => mount.target === target || mount.target.startsWith(`${target}/`));

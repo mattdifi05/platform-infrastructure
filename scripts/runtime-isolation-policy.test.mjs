@@ -36,6 +36,14 @@ test("rejects root workload identity and added capabilities", () => {
   assert.match(report.failures.join("\n"), /workload-drop-all-capabilities-example-app-web/);
 });
 
+test("rejects workload service volume inheritance independently at runtime", () => {
+  const config = fixture();
+  config.services["example-app-web"].volumes_from = ["postgres:rw"];
+  const report = evaluateRuntimeIsolation(config);
+  assert.equal(report.status, "failed");
+  assert.match(report.failures.join("\n"), /workload-no-volumes-from-example-app-web/);
+});
+
 test("rejects missing memory limits and budget overcommit", () => {
   const config = fixture();
   config.services["example-app-web"].mem_limit = 0;
