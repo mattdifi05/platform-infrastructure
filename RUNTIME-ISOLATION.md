@@ -96,6 +96,10 @@ Bounded cgroup/socket stress sandbox:
 sh ./scripts/runtime-isolation-sandbox-test.sh
 ```
 
+The isolation check consumes the canonical `scripts/compose-vps.sh` render,
+including every overlay selected by a verified `HOSTED_WORKLOAD_LOCK`. Reports
+bind the policy result to that exact render digest and workload set.
+
 Hosted workload contract and combined render on Ubuntu:
 
 ```sh

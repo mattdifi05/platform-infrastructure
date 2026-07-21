@@ -175,6 +175,7 @@ try {
     "scripts/backup-import-policy.mjs",
     "scripts/postgres-restore-sandbox.mjs",
     "scripts/offsite-restore-contract.mjs",
+    "scripts/canonical-compose-topology.mjs",
     "alertmanager/alertmanager.yml",
     "prometheus/rules/enterprise-alerts.yml",
     "platform-alert-dispatcher/server.mjs",

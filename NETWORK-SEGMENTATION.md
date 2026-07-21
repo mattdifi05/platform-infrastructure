@@ -72,6 +72,11 @@ Disposable Docker network connectivity test:
 sh ./scripts/network-segmentation-sandbox-test.sh
 ```
 
+The policy check renders through the same `scripts/compose-vps.sh` wrapper used
+for deployment. A configured, verified `HOSTED_WORKLOAD_LOCK` is therefore part
+of the checked graph; the evidence records the complete render digest and every
+hosted workload identity.
+
 The sandbox proves router-to-app and app-to-database connectivity, then proves
 router-to-database, router/app-to-observability, cross-app and unrelated
 app-to-database denial. It removes all disposable containers and networks on

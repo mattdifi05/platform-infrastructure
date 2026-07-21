@@ -31,6 +31,7 @@ import { assertNoPlaintextFingerprints, legacyPlaintextFingerprintNames } from "
 import { validateBackupImportProvenance } from "./backup-import-policy.mjs";
 import { defaultPostgresRestoreImage, postgresRestoreSandboxPlan } from "./postgres-restore-sandbox.mjs";
 import { evaluateOffsiteRestoreCoverage, locateSnapshotManifest, offsiteManifestTags, validateOffsiteRestoreSet } from "./offsite-restore-contract.mjs";
+import { canonicalVpsTopologyPlan, parseCanonicalVpsTopology } from "./canonical-compose-topology.mjs";
 import {
   assertExactBranchProtection,
   assertExactGithubEnvironment,
@@ -2693,6 +2694,8 @@ function infraTestingHygiene() {
     "scripts/postgres-restore-sandbox.test.mjs",
     "scripts/offsite-restore-contract.mjs",
     "scripts/offsite-restore-contract.test.mjs",
+    "scripts/canonical-compose-topology.mjs",
+    "scripts/canonical-compose-topology.test.mjs",
   ];
   for (const file of checkFiles) {
     run(process.execPath, ["--check", file], { cwd: infraRoot });
@@ -2710,6 +2713,7 @@ function infraTestingHygiene() {
   run(process.execPath, ["--test", "scripts/backup-import-policy.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/postgres-restore-sandbox.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/offsite-restore-contract.test.mjs"], { cwd: infraRoot });
+  run(process.execPath, ["--test", "scripts/canonical-compose-topology.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "platform-alert-dispatcher/server.test.mjs"], { cwd: infraRoot });
   const shellFiles = fs.readdirSync(path.join(infraRoot, "scripts")).filter((name) => name.endsWith(".sh")).sort();
   for (const file of shellFiles) {
@@ -2742,36 +2746,27 @@ async function projectRouterTests() {
   });
 }
 
+function canonicalVpsTopologyRender({ envFile, projectName, workloadLock } = {}) {
+  const resolvedEnvFile = path.resolve(envFile ?? argv.envFile ?? argv["env-file"] ?? path.join(infraRoot, ".env.vps.example"));
+  if (!fs.existsSync(resolvedEnvFile)) fail(`Compose env file not found: ${resolvedEnvFile}`);
+  const envValues = parseEnv(resolvedEnvFile);
+  const resolvedProjectName = String(projectName ?? argv.projectName ?? argv.project ?? process.env.COMPOSE_PROJECT_NAME ?? envValues.COMPOSE_PROJECT_NAME ?? "platform_infra_vps").trim();
+  const configuredWorkloadLock = workloadLock ?? argv.workloadLock ?? process.env.HOSTED_WORKLOAD_LOCK ?? envValues.HOSTED_WORKLOAD_LOCK ?? "";
+  const plan = canonicalVpsTopologyPlan({ infraRoot, envFile: resolvedEnvFile, projectName: resolvedProjectName, workloadLock: configuredWorkloadLock });
+  const configText = output(plan.command.bin, plan.command.args, {
+    env: plan.command.env,
+    maxBuffer: 128 * 1024 * 1024,
+  });
+  const workloadLockSha256 = plan.workloadLock ? sha256File(plan.workloadLock) : null;
+  return parseCanonicalVpsTopology(configText, plan, { workloadLockSha256 });
+}
+
 async function networkSegmentationCheck() {
   await withLocalCheckReport("network-segmentation", async () => {
     const envFile = path.resolve(infraRoot, argv.envFile || argv["env-file"] || ".env");
-    if (!fs.existsSync(envFile)) fail(`Compose env file not found: ${envFile}`);
-    const composeFiles = [
-      "compose.yaml",
-      "compose.secrets.yaml",
-      "compose.waf.yaml",
-      "compose.vps.yaml",
-      "compose.vps-waf.yaml",
-      "compose.backup-scheduler.yaml",
-      "compose.runtime.yaml",
-      "compose.networks.yaml",
-      "compose.runtime-isolation.yaml",
-    ];
-    const configText = output("docker", [
-      "compose",
-      "--env-file", envFile,
-      "-p", "platform_t12_policy_check",
-      ...composeFiles.flatMap((file) => ["-f", path.join(infraRoot, file)]),
-      "--profile", "backup",
-      "config", "--format", "json",
-    ], { maxBuffer: 128 * 1024 * 1024 });
-    let config;
-    try {
-      config = JSON.parse(configText);
-    } catch {
-      fail("Canonical Compose network render was not valid JSON.");
-    }
+    const { config, evidence: topology } = canonicalVpsTopologyRender({ envFile });
     const report = evaluateNetworkSegmentation(config);
+    report.canonicalTopology = topology;
     const stamp = reportTimestamp();
     const jsonPath = writeJsonReport("network-segmentation", `network-segmentation-${stamp}`, report);
     const markdownPath = writeMarkdownReport("network-segmentation", `network-segmentation-${stamp}`, [
@@ -2783,6 +2778,8 @@ async function networkSegmentationCheck() {
       `Failed: ${report.summary.failed}`,
       `Services: ${report.summary.services}`,
       `Networks: ${report.summary.networks}`,
+      `Canonical render: ${topology.renderSha256}`,
+      `Hosted workloads: ${topology.hostedWorkloadIds.join(", ") || "none"}`,
       "",
       "| Check | Status | Detail |",
       "| --- | --- | --- |",
@@ -2797,33 +2794,9 @@ async function networkSegmentationCheck() {
 async function runtimeIsolationCheck() {
   await withLocalCheckReport("runtime-isolation", async () => {
     const envFile = path.resolve(infraRoot, argv.envFile || argv["env-file"] || ".env.vps.example");
-    if (!fs.existsSync(envFile)) fail(`Compose env file not found: ${envFile}`);
-    const composeFiles = [
-      "compose.yaml",
-      "compose.secrets.yaml",
-      "compose.waf.yaml",
-      "compose.vps.yaml",
-      "compose.vps-waf.yaml",
-      "compose.backup-scheduler.yaml",
-      "compose.runtime.yaml",
-      "compose.networks.yaml",
-      "compose.runtime-isolation.yaml",
-    ];
-    const configText = output("docker", [
-      "compose",
-      "--env-file", envFile,
-      "-p", "platform_t13_policy_check",
-      ...composeFiles.flatMap((file) => ["-f", path.join(infraRoot, file)]),
-      "--profile", "backup",
-      "config", "--format", "json",
-    ], { maxBuffer: 128 * 1024 * 1024 });
-    let config;
-    try {
-      config = JSON.parse(configText);
-    } catch {
-      fail("Canonical Compose runtime-isolation render was not valid JSON.");
-    }
+    const { config, evidence: topology } = canonicalVpsTopologyRender({ envFile });
     const report = evaluateRuntimeIsolation(config);
+    report.canonicalTopology = topology;
     const stamp = reportTimestamp();
     const jsonPath = writeJsonReport("runtime-isolation", `runtime-isolation-${stamp}`, report);
     const markdownPath = writeMarkdownReport("runtime-isolation", `runtime-isolation-${stamp}`, [
@@ -2837,6 +2810,8 @@ async function runtimeIsolationCheck() {
       `Hosted applications: ${report.summary.hostedApplications}`,
       `Total memory ceiling bytes: ${report.summary.totalMemoryLimitBytes}`,
       `Raw socket owners: ${report.summary.rawSocketOwners.join(",") || "none"}`,
+      `Canonical render: ${topology.renderSha256}`,
+      `Hosted workloads: ${topology.hostedWorkloadIds.join(", ") || "none"}`,
       "",
       "| Check | Status | Detail |",
       "| --- | --- | --- |",
