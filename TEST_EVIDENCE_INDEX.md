@@ -167,4 +167,8 @@
 | EV-T23-009 | T23 | Live preservation | final container, systemd, route and SSH session checks | PASS: 34 running, zero unhealthy, zero failed systemd units and fresh Mac-to-server SSH; applications, databases, volumes and backups unchanged | 2026-07-11 |
 | EV-T23-010 | T23 | Honest residual gates | final report and private evidence manifest | BLOCKED: no public staging/domain/Cloudflare proof, no signed release run, no candidate deploy, no clean-host restore, stale bootstrap/hardening apply evidence, no UPS and no approved maintenance window | 2026-07-11 |
 
+## Ultra isolated remediation evidence
+
+| EV-ULTRA-FG077 | FG-077 | Bounded artifact hashing | `node --test scripts/bounded-file-hash.test.mjs` plus backup contract/coverage sandboxes | PASS local positive, growth/truncation/mutation, symlink/non-regular, timeout/abort, read/close-error and 128 MiB memory-bound fixtures; no live backup artifact read claimed | 2026-07-21 |
+
 Every later entry must record positive, negative, regression and behavior-preservation evidence. Secret values must never be embedded.
