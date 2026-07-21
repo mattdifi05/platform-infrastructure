@@ -59,6 +59,8 @@ export function evaluateNetworkSegmentation(config) {
   const flatMembers = [...serviceNetworks].filter(([, names]) => names.includes("enterprise_net")).map(([name]) => name);
   record("legacy-flat-network-unused", flatMembers.length === 0, `enterprise_net members=${flatMembers.join(",") || "none"}`);
   requireShared("edge-waf-traefik", "waf", "traefik", "platform_edge");
+  const edgeMembers = [...(networkMembers.get("platform_edge") || [])].sort();
+  record("members-platform-edge", same(edgeMembers, ["traefik", "waf"]), `members=${edgeMembers.join(",") || "none"}`);
   requireShared("routing-traefik-router", "traefik", "project-router", "platform_routing");
   requireShared("routing-traefik-control", "traefik", "control-center", "platform_routing");
   requireShared("db-admin-control-postgres", "control-center", "postgres", "platform_db_admin");

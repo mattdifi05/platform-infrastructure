@@ -345,6 +345,13 @@ evento che presenti campi body, Authorization, Cookie o Set-Cookie prima di
 Loki. PL3/PL4 vanno attivati solo dopo una finestra di tuning sui log, altrimenti
 il rischio falso positivo diventa alto per dashboard, OAuth e form PHP.
 
+Nel profilo VPS la porta pubblica 80 del WAF esegue sempre un redirect
+permanente verso HTTPS; soltanto il listener TLS 8443 puo' inoltrare
+`X-Forwarded-Proto: https`. Questi due valori sono fissi nell'overlay e non
+sono sovrascrivibili dall'env o dagli header del client. La zona interna
+`platform_edge` ammette esattamente WAF e Traefik, quindi il middleware che
+propaga lo schema HTTPS opera soltanto dietro il terminatore dichiarato.
+
 Su Windows/Docker Desktop il certificato mkcert locale e' montato in un container non privilegiato. Se il WAF non riesce a leggere `local-key.pem`, rendi la copia locale leggibile dal runtime Docker e riavvia:
 
 ```powershell

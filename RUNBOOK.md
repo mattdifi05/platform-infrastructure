@@ -119,6 +119,11 @@ repository, in a separately approved maintenance step.
 
 The WAF is the only container that should publish public HTTP/HTTPS ports when `compose.waf.yaml` is active. It terminates or receives edge traffic, runs OWASP CRS/ModSecurity, then forwards benign requests to internal Traefik.
 
+On the VPS profile, port 80 is redirect-only and port 443 maps to the WAF TLS
+listener. Do not add environment overrides for `NGINX_ALWAYS_TLS_REDIRECT` or
+`NGINX_X_FORWARDED_PROTO`: plaintext requests must never reach Traefik labeled
+as HTTPS. `platform_edge` must contain exactly `waf` and `traefik`.
+
 Useful checks:
 
 ```sh

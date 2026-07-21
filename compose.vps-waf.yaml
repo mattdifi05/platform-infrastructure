@@ -14,8 +14,10 @@ services:
       - "${WAF_HTTPS_BIND:-0.0.0.0:443}:8443"
     environment:
       BACKEND: ${WAF_BACKEND:-http://traefik:80}
-      NGINX_ALWAYS_TLS_REDIRECT: ${WAF_NGINX_ALWAYS_TLS_REDIRECT:-on}
-      NGINX_X_FORWARDED_PROTO: ${WAF_X_FORWARDED_PROTO:-https}
+      # Production has exactly two listener meanings: 8080 redirects and 8443
+      # terminates TLS. Request headers cannot override either decision.
+      NGINX_ALWAYS_TLS_REDIRECT: "on"
+      NGINX_X_FORWARDED_PROTO: "https"
       PROXY_SSL_VERIFY: "off"
     volumes: !override
       - ./waf/REQUEST-900-VPS-RULES-BEFORE-CRS.conf:/etc/modsecurity.d/owasp-crs/rules/REQUEST-900-EXCLUSION-RULES-BEFORE-CRS.conf:ro
