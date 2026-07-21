@@ -99,21 +99,85 @@ test("FG-040 paginates Cloudflare collections before reconciliation", async () =
   globalThis.fetch = async (url) => {
     calls.push(String(url));
     const page = Number(new URL(url).searchParams.get("page") || "1");
+    const result = Array.from({ length: page === 1 ? 50 : 1 }, (_, index) => ({
+      id: `app-${page}-${index}`,
+      domain: `admin-${page}-${index}.example.test`,
+    }));
     return {
       ok: true,
       status: 200,
       json: async () => ({
         success: true,
-        result: [{ id: `app-${page}`, domain: `admin-${page}.example.test` }],
-        result_info: { page, total_pages: 2, per_page: 1, count: 1 },
+        result,
+        result_info: { page, total_pages: 2, per_page: 50, count: result.length, total_count: 51 },
       }),
     };
   };
   try {
     const applications = await listApplications("account", "synthetic-token");
-    assert.deepEqual(applications.map((item) => item.id), ["app-1", "app-2"]);
+    assert.equal(applications.length, 51);
+    assert.equal(applications[0].id, "app-1-0");
+    assert.equal(applications.at(-1).id, "app-2-0");
     assert.equal(calls.length, 2);
   } finally {
     globalThis.fetch = originalFetch;
   }
 });
+
+test("FG-040 rejects a successful collection response without result_info", async () => {
+  await assert.rejects(
+    () => withCloudflareCollectionResponse({
+      success: true,
+      result: [{ id: "app-1", domain: "admin.example.test" }],
+    }),
+    /result_info|pagination/i,
+  );
+});
+
+test("FG-040 rejects incoherent pagination metadata even when the item is valid", async () => {
+  await assert.rejects(
+    () => withCloudflareCollectionResponse({
+      success: true,
+      result: [{ id: "app-1", domain: "admin.example.test" }],
+      result_info: { page: 999, total_pages: 1, per_page: 0, count: 999, total_count: 999 },
+    }),
+    /result_info|pagination/i,
+  );
+});
+
+test("FG-040 rejects a non-exact page progression", async () => {
+  const originalFetch = globalThis.fetch;
+  let call = 0;
+  globalThis.fetch = async () => {
+    call += 1;
+    const result = Array.from({ length: call === 1 ? 50 : 1 }, (_, index) => ({ id: `app-${call}-${index}` }));
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        success: true,
+        result,
+        result_info: { page: call === 1 ? 1 : 3, total_pages: 2, per_page: 50, count: result.length, total_count: 51 },
+      }),
+    };
+  };
+  try {
+    await assert.rejects(() => listApplications("account", "synthetic-token"), /page|progression|pagination/i);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+async function withCloudflareCollectionResponse(payload) {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({
+    ok: true,
+    status: 200,
+    json: async () => structuredClone(payload),
+  });
+  try {
+    return await listApplications("account", "synthetic-token");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+}

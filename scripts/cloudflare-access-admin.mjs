@@ -234,24 +234,68 @@ async function listPaginated(requestPath, token, label) {
   const items = [];
   const ids = new Set();
   const perPage = 50;
+  let collectionShape = null;
   for (let page = 1; page <= 1000; page += 1) {
     const separator = requestPath.includes("?") ? "&" : "?";
     const response = await cloudflareRequest({ method: "GET", requestPath: `${requestPath}${separator}per_page=${perPage}&page=${page}`, token });
     if (!Array.isArray(response.result)) throw new Error(`${label} response is not an array.`);
+    const pageInfo = exactPaginationInfo(response.result_info, {
+      label,
+      requestedPage: page,
+      requestedPerPage: perPage,
+      resultCount: response.result.length,
+    });
+    if (collectionShape
+        && (pageInfo.perPage !== collectionShape.perPage
+          || pageInfo.totalCount !== collectionShape.totalCount
+          || pageInfo.totalPages !== collectionShape.totalPages)) {
+      throw new Error(`${label} pagination totals changed between pages.`);
+    }
+    collectionShape ??= pageInfo;
     for (const item of response.result) {
       const id = String(item?.id ?? "");
       if (id && ids.has(id)) throw new Error(`${label} pagination returned duplicate id ${id}.`);
       if (id) ids.add(id);
       items.push(item);
     }
-    const totalPages = Number(response.result_info?.total_pages);
-    if (Number.isSafeInteger(totalPages) && totalPages >= 0) {
-      if (page >= totalPages) return items;
-      continue;
+    if (pageInfo.totalPages === 0 || page === pageInfo.totalPages) {
+      if (items.length !== pageInfo.totalCount) throw new Error(`${label} pagination did not return the declared total count.`);
+      return items;
     }
-    if (response.result.length < perPage) return items;
   }
   throw new Error(`${label} pagination exceeded the safety limit.`);
+}
+
+function exactPaginationInfo(value, { label, requestedPage, requestedPerPage, resultCount }) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`${label} pagination result_info is required.`);
+  }
+  const integer = (key) => {
+    const number = value[key];
+    if (typeof number !== "number" || !Number.isSafeInteger(number)) {
+      throw new Error(`${label} pagination result_info.${key} must be an exact integer.`);
+    }
+    return number;
+  };
+  const page = integer("page");
+  const perPage = integer("per_page");
+  const count = integer("count");
+  const totalCount = integer("total_count");
+  const totalPages = integer("total_pages");
+  if (page !== requestedPage || perPage !== requestedPerPage || count !== resultCount) {
+    throw new Error(`${label} pagination page, per_page, or count does not match the exact request and result.`);
+  }
+  if (page < 1 || perPage < 1 || count < 0 || count > perPage || totalCount < 0 || totalPages < 0) {
+    throw new Error(`${label} pagination result_info contains an invalid range.`);
+  }
+  const expectedTotalPages = totalCount === 0 ? 0 : Math.ceil(totalCount / perPage);
+  if (totalPages !== expectedTotalPages || page > Math.max(1, totalPages)) {
+    throw new Error(`${label} pagination total_pages is inconsistent with total_count and per_page.`);
+  }
+  const offset = (page - 1) * perPage;
+  const expectedCount = Math.max(0, Math.min(perPage, totalCount - offset));
+  if (count !== expectedCount) throw new Error(`${label} pagination count is inconsistent with the exact page progression.`);
+  return { page, perPage, count, totalCount, totalPages };
 }
 
 function selectorKeys(selectors, label) {
