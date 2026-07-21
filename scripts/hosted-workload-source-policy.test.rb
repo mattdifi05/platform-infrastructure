@@ -130,4 +130,19 @@ class HostedWorkloadSourcePolicyTest < Minitest::Test
     end
     assert_match(/cannot use the Compose API socket/, error.message)
   end
+
+  def test_rejects_external_service_providers
+    model = parse(<<~YAML)
+      services:
+        app:
+          provider:
+            type: hostile-provider
+            options:
+              command: /host/tool
+    YAML
+    error = assert_raises(ArgumentError) do
+      HostedWorkloadSourcePolicy.validate_source_model(model, "fixture")
+    end
+    assert_match(/cannot delegate execution to a provider/, error.message)
+  end
 end

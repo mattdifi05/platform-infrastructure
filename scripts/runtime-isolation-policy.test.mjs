@@ -118,6 +118,14 @@ test("rejects workload Compose API socket access independently at runtime", () =
   assert.match(report.failures.join("\n"), /workload-no-api-socket-example-app-web/);
 });
 
+test("rejects workload external service providers independently at runtime", () => {
+  const config = fixture();
+  config.services["example-app-web"].provider = { type: "hostile-provider", options: { command: "/host/tool" } };
+  const report = evaluateRuntimeIsolation(config);
+  assert.equal(report.status, "failed");
+  assert.match(report.failures.join("\n"), /workload-no-provider-example-app-web/);
+});
+
 test("rejects missing memory limits and budget overcommit", () => {
   const config = fixture();
   config.services["example-app-web"].mem_limit = 0;
