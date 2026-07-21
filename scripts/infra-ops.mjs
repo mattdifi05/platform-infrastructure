@@ -27,6 +27,7 @@ import { sha256FileBounded } from "./bounded-file-hash.mjs";
 import { runCommandSync } from "./command-safety.mjs";
 import { resticSecretTransport } from "./restic-secret-transport.mjs";
 import { safeTarCreateArgs, validateTarEntryName } from "./safe-tar-path.mjs";
+import { assertNoPlaintextFingerprints, legacyPlaintextFingerprintNames } from "./secret-store-metadata.mjs";
 import {
   assertExactBranchProtection,
   assertExactGithubEnvironment,
@@ -2619,7 +2620,9 @@ function infraTestingHygiene() {
     "scripts/restic-secret-transport.test.mjs",
     "scripts/safe-tar-path.mjs",
     "scripts/safe-tar-path.test.mjs",
+    "scripts/secret-store-metadata.mjs",
     "scripts/infra-secret-manager.mjs",
+    "scripts/infra-secret-manager.test.mjs",
   ];
   for (const file of checkFiles) {
     run(process.execPath, ["--check", file], { cwd: infraRoot });
@@ -2633,6 +2636,7 @@ function infraTestingHygiene() {
   run(process.execPath, ["--test", "scripts/bounded-file-hash.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/restic-secret-transport.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/safe-tar-path.test.mjs"], { cwd: infraRoot });
+  run(process.execPath, ["--test", "scripts/infra-secret-manager.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "platform-alert-dispatcher/server.test.mjs"], { cwd: infraRoot });
   const shellFiles = fs.readdirSync(path.join(infraRoot, "scripts")).filter((name) => name.endsWith(".sh")).sort();
   for (const file of shellFiles) {
@@ -5490,6 +5494,10 @@ async function secretRotationEvidence(options = {}) {
     }
 
     const storeSecrets = store.secrets ?? {};
+    const legacyFingerprintNames = legacyPlaintextFingerprintNames(store);
+    if (legacyFingerprintNames.length) {
+      issues.push(`legacy plaintext-derived secret fingerprints require migrate-metadata: ${legacyFingerprintNames.join(", ")}`);
+    }
     for (const expected of managedSecretRotationExpectations) {
       const record = storeSecrets[expected.name];
       const materializedPath = path.join(secretsDir, `${expected.name}.txt`);
@@ -5537,7 +5545,7 @@ async function secretRotationEvidence(options = {}) {
         expired,
         manualRotation: Boolean(expected.manualRotation),
         materializedPresent,
-        fingerprintPresent: Boolean(record.fingerprint),
+        legacyPlaintextFingerprintPresent: Object.prototype.hasOwnProperty.call(record, "fingerprint"),
         kmsKeyId: record.encryption?.keyId ?? null,
         keyIds: Array.isArray(record.keyIds) ? record.keyIds : [],
       });
@@ -5583,7 +5591,7 @@ async function secretRotationEvidence(options = {}) {
         expired,
         manualRotation: false,
         materializedPresent,
-        fingerprintPresent: Boolean(record.fingerprint),
+        legacyPlaintextFingerprintPresent: Object.prototype.hasOwnProperty.call(record, "fingerprint"),
         kmsKeyId: record.encryption?.keyId ?? null,
         keyIds: Array.isArray(record.keyIds) ? record.keyIds : [],
       });
@@ -9992,8 +10000,12 @@ async function backupSecretManagerMetadata(options = {}) {
   const workDir = makeOpsTempDir("infra-secret-manager-metadata-");
 
   try {
+    const secretManagerStorePath = path.join(infraRoot, "secrets", "infra-secret-manager-store.json");
+    if (fs.existsSync(secretManagerStorePath)) {
+      assertNoPlaintextFingerprints(readJsonFile(secretManagerStorePath, secretManagerStorePath), "secret manager metadata backup");
+    }
     const files = [
-      ["infra-secret-manager-store.json", path.join(infraRoot, "secrets", "infra-secret-manager-store.json")],
+      ["infra-secret-manager-store.json", secretManagerStorePath],
       ["infra-secret-manager-audit.log", path.join(infraRoot, "secrets", "infra-secret-manager-audit.log")],
     ];
     for (const [name, filePath] of files) {

@@ -132,6 +132,8 @@ docker compose -f compose.yaml -f compose.secrets.yaml --env-file .env -p platfo
 
 `infra-secret-manager` mantiene uno store proprietario cifrato in `secrets/infra-secret-manager-store.json`, audit JSONL in `secrets/infra-secret-manager-audit.log` e materializza i file Docker secrets usati da `compose.secrets.yaml`. Lo store usa envelope KMS locale `local-bucket-kms` con KEK ruotabile. I servizi core leggono solo i secret platform da `/run/secrets/*`. I secret applicativi non sono richiesti dal core: vengono dichiarati nel manifest del workload e devono esistere nel backend prima della preparazione del relativo lock.
 
+Lo store non persiste fingerprint derivati dal plaintext. Gli store legacy devono essere riscritti con `sh ./scripts/infra-secret-manager.sh migrate-metadata` prima di `verify` o del backup metadata; il comando conserva `updatedAt` confrontando i valori decifrati soltanto in memoria.
+
 Lo stesso manager funziona anche come secret vault locale per valori arbitrari non presenti nella whitelist platform. I nomi devono usare solo lettere minuscole, numeri e underscore. Esempio:
 
 ```sh

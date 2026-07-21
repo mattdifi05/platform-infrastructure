@@ -507,6 +507,7 @@ Useful operations:
 ```sh
 sh ./scripts/infra-secret-manager.sh status
 sh ./scripts/infra-secret-manager.sh kms-status
+sh ./scripts/infra-secret-manager.sh migrate-metadata
 sh ./scripts/infra-secret-manager.sh kms-rotate
 sh ./scripts/infra-secret-manager.sh rotate --name session_signing_keys
 sh ./scripts/infra-secret-manager.sh rotate --name projects_gateway_signing_keys

@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { assertNoPlaintextFingerprints } from "./secret-store-metadata.mjs";
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const infraRoot = path.resolve(scriptDir, "..");
@@ -214,10 +215,6 @@ function keyringValue(prefix, bytes = 48) {
   return `${secretId(prefix)}=${randomSecret(bytes)}`;
 }
 
-function fingerprint(value) {
-  return crypto.createHash("sha256").update(value).digest("hex").slice(0, 16);
-}
-
 function kmsKeyId() {
   return `kek_${new Date().toISOString().replace(/\D/g, "").slice(0, 14)}_${randomSecret(9)}`;
 }
@@ -329,20 +326,23 @@ function writeStore(values, previousStore = readStore(), kmsOverride = null, spe
   const now = new Date().toISOString();
   const kms = kmsOverride ?? normalizeKmsMetadata(previousStore);
   const previousRecords = previousStore?.secrets ?? {};
+  const previousValues = previousStore ? decryptStoreValues(previousStore) : {};
   const records = {};
   for (const name of orderedSecretNames(values, previousRecords)) {
     const spec = secretSpec(name, previousRecords, specOverrides[name]);
     const value = values[name];
     if (!value) continue;
     const previousRecord = previousRecords[name] ?? {};
+    const previousValue = previousValues[name];
+    const unchanged = typeof previousValue === "string"
+      && timingSafeEqual(Buffer.from(previousValue), Buffer.from(value));
     const keyIds = spec.kind === "keyring" ? parseVersionedSecretKeys(value).map((entry) => entry.id) : undefined;
     records[name] = {
       kind: spec.kind,
       owner: spec.owner ?? "platform",
       rotationDays: spec.rotationDays,
       materializeTo: spec.materializeTo ?? `secrets/${name}.txt`,
-      updatedAt: previousRecord.fingerprint === fingerprint(value) ? previousRecord.updatedAt : now,
-      fingerprint: fingerprint(value),
+      updatedAt: unchanged ? (previousRecord.updatedAt ?? now) : now,
       keyIds,
       ...(spec.vault ? { minLength: spec.minLength, scope: "vault" } : { scope: "platform" }),
       encryption: encryptSecret(key, name, value, kms.activeKeyId),
@@ -467,6 +467,7 @@ async function init() {
 async function verify() {
   const store = readStore();
   if (!store) fail(`Missing Infra Secret Manager store: ${storePath()}`);
+  assertNoPlaintextFingerprints(store);
   const values = decryptStoreValues(store);
   validateValues(values, store);
   const names = orderedSecretNames(values, store.secrets);
@@ -495,6 +496,7 @@ function timingSafeEqual(a, b) {
 async function status() {
   const store = readStore();
   if (!store) fail(`Missing Infra Secret Manager store: ${storePath()}`);
+  assertNoPlaintextFingerprints(store);
   log(`Store: ${storePath()}`);
   log(`Updated: ${store.updatedAt}`);
   const values = decryptStoreValues(store);
@@ -508,8 +510,19 @@ async function status() {
     const keyIds = record.keyIds?.length ? ` keyIds=${record.keyIds.join(",")}` : "";
     const scope = record.scope ?? (requiredByName.has(name) ? "platform" : "vault");
     const owner = record.owner ? ` owner=${record.owner}` : "";
-    log(`${name}: scope=${scope}${owner} kind=${record.kind} updatedAt=${record.updatedAt} fingerprint=${record.fingerprint}${keyIds}`);
+    log(`${name}: scope=${scope}${owner} kind=${record.kind} updatedAt=${record.updatedAt}${keyIds}`);
   }
+}
+
+async function migrateMetadata() {
+  const store = readStore();
+  if (!store) fail(`Missing Infra Secret Manager store: ${storePath()}`);
+  const values = decryptStoreValues(store);
+  validateValues(values, store);
+  const nextStore = writeStore(values, store);
+  assertNoPlaintextFingerprints(nextStore);
+  audit("migrate_metadata", { names: Object.keys(nextStore.secrets) });
+  log(`Migrated ${Object.keys(nextStore.secrets).length} secret records to opaque metadata.`);
 }
 
 async function kmsStatus() {
@@ -639,13 +652,14 @@ function help() {
 Commands:
   init                 Create/update the encrypted store and materialize Docker secret files.
   materialize          Decrypt the store into secrets/*.txt for compose.secrets.yaml.
+  migrate-metadata     Remove legacy plaintext-derived fingerprints from encrypted-store metadata.
   kms-status           Print proprietary KMS key metadata without secret values.
   kms-rotate           Rotate the active KMS KEK and rewrap all stored secrets.
   rotate --name <name> Rotate a keyring or opaque secret, then materialize.
   set --name <name>    Import or replace a platform or vault secret from --value-file or --stdin.
                        Unknown safe names become vault secrets. Use --owner, --rotationDays and --minLength for metadata.
                        Derived platform secrets require --allowDerived.
-  status               Print metadata and fingerprints without secret values.
+  status               Print non-secret metadata without plaintext-derived fingerprints.
   verify               Validate encrypted store and materialized Docker secret files.
 `);
 }
@@ -656,6 +670,7 @@ const commands = {
   "kms-rotate": kmsRotate,
   "kms-status": kmsStatus,
   materialize: async () => materialize(),
+  "migrate-metadata": migrateMetadata,
   rotate,
   set: setSecret,
   status,
