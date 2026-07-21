@@ -208,6 +208,31 @@ test("rejects foreign workload networks and attachment aliases at runtime", () =
   assert.match(spoofedProject.failures.join("\n"), /workload-project-name-bound|workload-network-identity/);
 });
 
+test("rejects workload network topology overrides at runtime", () => {
+  for (const mutate of [
+    (network) => { network.internal = false; },
+    (network) => { network.driver = "bridge"; },
+    (network) => { network.driver_opts = { "com.docker.network.bridge.name": "host0" }; },
+    (network) => { network.ipam = { config: [{ subnet: "172.30.0.0/16" }] }; },
+    (network) => { network.attachable = true; },
+    (network) => { network.labels = { owner: "attacker" }; },
+    (network) => { network.enable_ipv4 = false; },
+    (network) => { network.enable_ipv6 = true; },
+  ]) {
+    const config = fixture();
+    mutate(config.networks.example_app_ingress);
+    const report = evaluateRuntimeIsolation(config, { projectName: "fixture" });
+    assert.equal(report.status, "failed");
+    assert.match(report.failures.join("\n"), /workload-network-topology-example-app-web/);
+  }
+  const egress = fixture();
+  egress.services["example-app-web"].networks = { example_app_egress: null };
+  delete egress.networks.example_app_ingress;
+  egress.networks.example_app_egress = { internal: false, name: "fixture_example_app_egress" };
+  const accepted = evaluateRuntimeIsolation(egress, { projectName: "fixture" });
+  assert.equal(accepted.status, "passed", accepted.failures.join("\n"));
+});
+
 test("rejects workload Compose API socket access independently at runtime", () => {
   const config = fixture();
   config.services["example-app-web"].use_api_socket = true;

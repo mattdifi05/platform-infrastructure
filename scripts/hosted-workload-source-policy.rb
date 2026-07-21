@@ -8,7 +8,7 @@ require "psych"
 
 module HostedWorkloadSourcePolicy
   VERSION = "hosted-raw-v1"
-  CONTROLS = %w[bind-bounded-local-logging bind-network-identity bind-no-swap-oom-policy bind-owned-secret-aliases bind-owned-volumes bind-private-pid-numeric-user deny-api-socket deny-compose-interpolation deny-device-access deny-env-file deny-extends deny-file-configs deny-gpu-access deny-include deny-inline-configs deny-lifecycle-hooks deny-local-volume-options deny-providers deny-runtime-overrides deny-scaling deny-stop-grace-overrides deny-supplemental-groups deny-volumes-from].freeze
+  CONTROLS = %w[bind-bounded-local-logging bind-network-identity bind-network-topology bind-no-swap-oom-policy bind-owned-secret-aliases bind-owned-volumes bind-private-pid-numeric-user deny-api-socket deny-compose-interpolation deny-device-access deny-env-file deny-extends deny-file-configs deny-gpu-access deny-include deny-inline-configs deny-lifecycle-hooks deny-local-volume-options deny-providers deny-runtime-overrides deny-scaling deny-stop-grace-overrides deny-supplemental-groups deny-volumes-from].freeze
   MAX_COMPOSE_BYTES = 1_048_576
   STANDARD_TAG_PREFIX = "tag:yaml.org,2002:"
   WORKLOAD_NETWORK_ZONES = %w[ingress postgres cache bus identity storage observability egress].freeze
@@ -117,7 +117,7 @@ module HostedWorkloadSourcePolicy
     fail!("#{label} networks must be a mapping.") if !networks.nil? && !networks.is_a?(Hash)
     workload_network_prefix = "#{workload_id&.tr('-', '_')}_"
     (networks || {}).each do |name, definition|
-      fail!("#{label} network #{name} must be null or a mapping.") unless definition.nil? || definition.is_a?(Hash)
+      fail!("#{label} network #{name} must be a mapping.") unless definition.is_a?(Hash)
       next unless workload_id
       zone = name.to_s.delete_prefix(workload_network_prefix)
       unless name.is_a?(String) && name.start_with?(workload_network_prefix) && WORKLOAD_NETWORK_ZONES.include?(zone)
@@ -125,6 +125,10 @@ module HostedWorkloadSourcePolicy
       end
       if definition.is_a?(Hash) && (definition.key?("external") || definition.key?("name"))
         fail!("#{label} network #{name} cannot alias an external or foreign physical network.")
+      end
+      expected_internal = zone != "egress"
+      unless definition == { "internal" => expected_internal }
+        fail!("#{label} network #{name} must declare only internal: #{expected_internal} for its #{zone} zone.")
       end
     end
     model.fetch("services").each do |name, service|

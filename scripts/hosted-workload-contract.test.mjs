@@ -408,6 +408,27 @@ test("workload network cannot alias the Docker-control physical network", () => 
     assert.throws(() => validateRenderedWorkloads({ core, combined: aliased, lock }), /cannot set aliases or address overrides/);
   }
 });
+test("workload networks reject every caller-controlled topology knob", () => {
+  for (const mutate of [
+    (network) => { network.internal = false; },
+    (network) => { network.driver = "bridge"; },
+    (network) => { network.driver_opts = { "com.docker.network.bridge.name": "host0" }; },
+    (network) => { network.ipam = { config: [{ subnet: "172.30.0.0/16" }] }; },
+    (network) => { network.attachable = true; },
+    (network) => { network.labels = { "com.docker.compose.network": "platform_docker_control" }; },
+    (network) => { network.enable_ipv4 = false; },
+    (network) => { network.enable_ipv6 = true; },
+  ]) {
+    const combined = combinedFixture();
+    mutate(combined.networks.example_app_ingress);
+    assert.throws(() => validateRenderedWorkloads({ core, combined, lock: { projectName: "fixture", workloads: [manifest] } }), /exact ingress topology/);
+  }
+  const egress = combinedFixture();
+  egress.services["example-app-worker"].networks = { example_app_egress: null };
+  delete egress.networks.example_app_bus;
+  egress.networks.example_app_egress = { internal: false, name: "fixture_example_app_egress" };
+  assert.doesNotThrow(() => validateRenderedWorkloads({ core, combined: egress, lock }));
+});
 test("platform service can join only its assigned workload zone", () => {
   const combined = combinedFixture();
   combined.services["project-router"].networks.example_app_cache = null;
@@ -663,7 +684,7 @@ test("legacy hosted workload locks fail closed", () => {
 test("raw policy receipt requires the exact current control set", () => {
   const rawPolicyReceipt = {
     policyVersion: "hosted-raw-v1",
-    controls: ["bind-bounded-local-logging", "bind-network-identity", "bind-no-swap-oom-policy", "bind-owned-secret-aliases", "bind-owned-volumes", "bind-private-pid-numeric-user", "deny-api-socket", "deny-compose-interpolation", "deny-device-access", "deny-env-file", "deny-extends", "deny-file-configs", "deny-gpu-access", "deny-include", "deny-inline-configs", "deny-lifecycle-hooks", "deny-local-volume-options", "deny-providers", "deny-runtime-overrides", "deny-scaling", "deny-stop-grace-overrides", "deny-supplemental-groups", "deny-volumes-from"],
+    controls: ["bind-bounded-local-logging", "bind-network-identity", "bind-network-topology", "bind-no-swap-oom-policy", "bind-owned-secret-aliases", "bind-owned-volumes", "bind-private-pid-numeric-user", "deny-api-socket", "deny-compose-interpolation", "deny-device-access", "deny-env-file", "deny-extends", "deny-file-configs", "deny-gpu-access", "deny-include", "deny-inline-configs", "deny-lifecycle-hooks", "deny-local-volume-options", "deny-providers", "deny-runtime-overrides", "deny-scaling", "deny-stop-grace-overrides", "deny-supplemental-groups", "deny-volumes-from"],
     workloadContentSha256: "a".repeat(64),
     workloads: [{
       workloadId: "example-app",
@@ -686,12 +707,12 @@ test("raw policy receipt requires the exact current control set", () => {
     rawPolicyWorkloadContentSha256: "a".repeat(64),
     rawPolicyReceipt,
     rawPolicySha256: crypto.createHash("sha256").update(JSON.stringify(stable(rawPolicyReceipt))).digest("hex"),
-    rawPolicyControls: ["bind-bounded-local-logging", "bind-network-identity", "bind-no-swap-oom-policy", "bind-owned-secret-aliases", "bind-owned-volumes", "bind-private-pid-numeric-user", "deny-api-socket", "deny-compose-interpolation", "deny-device-access", "deny-env-file", "deny-extends", "deny-file-configs", "deny-gpu-access", "deny-include", "deny-inline-configs", "deny-lifecycle-hooks", "deny-local-volume-options", "deny-providers", "deny-runtime-overrides", "deny-scaling", "deny-stop-grace-overrides", "deny-supplemental-groups", "deny-volumes-from"],
+    rawPolicyControls: ["bind-bounded-local-logging", "bind-network-identity", "bind-network-topology", "bind-no-swap-oom-policy", "bind-owned-secret-aliases", "bind-owned-volumes", "bind-private-pid-numeric-user", "deny-api-socket", "deny-compose-interpolation", "deny-device-access", "deny-env-file", "deny-extends", "deny-file-configs", "deny-gpu-access", "deny-include", "deny-inline-configs", "deny-lifecycle-hooks", "deny-local-volume-options", "deny-providers", "deny-runtime-overrides", "deny-scaling", "deny-stop-grace-overrides", "deny-supplemental-groups", "deny-volumes-from"],
   };
   assert.doesNotThrow(() => verifyRawPolicyReceipt(receipt));
   receipt.rawPolicyControls = ["deny-include"];
   assert.throws(() => verifyRawPolicyReceipt(receipt), /raw source policy receipt/);
-  receipt.rawPolicyControls = ["bind-bounded-local-logging", "bind-network-identity", "bind-no-swap-oom-policy", "bind-owned-secret-aliases", "bind-owned-volumes", "bind-private-pid-numeric-user", "deny-api-socket", "deny-compose-interpolation", "deny-device-access", "deny-env-file", "deny-extends", "deny-file-configs", "deny-gpu-access", "deny-include", "deny-inline-configs", "deny-lifecycle-hooks", "deny-local-volume-options", "deny-providers", "deny-runtime-overrides", "deny-scaling", "deny-stop-grace-overrides", "deny-supplemental-groups", "deny-volumes-from"];
+  receipt.rawPolicyControls = ["bind-bounded-local-logging", "bind-network-identity", "bind-network-topology", "bind-no-swap-oom-policy", "bind-owned-secret-aliases", "bind-owned-volumes", "bind-private-pid-numeric-user", "deny-api-socket", "deny-compose-interpolation", "deny-device-access", "deny-env-file", "deny-extends", "deny-file-configs", "deny-gpu-access", "deny-include", "deny-inline-configs", "deny-lifecycle-hooks", "deny-local-volume-options", "deny-providers", "deny-runtime-overrides", "deny-scaling", "deny-stop-grace-overrides", "deny-supplemental-groups", "deny-volumes-from"];
   receipt.rawPolicySha256 = "b".repeat(64);
   assert.throws(() => verifyRawPolicyReceipt(receipt), /raw source policy receipt/);
   receipt.rawPolicyReceipt.workloads[0].composeSha256 = "d".repeat(64);

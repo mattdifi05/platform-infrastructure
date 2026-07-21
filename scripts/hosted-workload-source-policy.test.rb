@@ -161,19 +161,19 @@ class HostedWorkloadSourcePolicyTest < Minitest::Test
       assert_match(/cannot alias an external or foreign physical network/, error.message)
     end
     aliased = {
-      "networks" => { "example_app_ingress" => {} },
+      "networks" => { "example_app_ingress" => { "internal" => true } },
       "services" => { "example-app-web" => { "networks" => { "example_app_ingress" => { "aliases" => ["postgres"] } } } }
     }
     error = assert_raises(ArgumentError) do
       HostedWorkloadSourcePolicy.validate_source_model(aliased, "fixture", workload_id: "example-app", project_name: "fixture")
     end
     assert_match(/cannot set network aliases or address overrides/, error.message)
-    ["attacker_example_app_ingress", ["example_app_ingress"], true, 7].each do |definition|
+    [nil, "attacker_example_app_ingress", ["example_app_ingress"], true, 7].each do |definition|
       malformed = { "networks" => { "example_app_ingress" => definition }, "services" => { "example-app-web" => {} } }
       error = assert_raises(ArgumentError) do
         HostedWorkloadSourcePolicy.validate_source_model(malformed, "fixture", workload_id: "example-app", project_name: "fixture")
       end
-      assert_match(/must be null or a mapping/, error.message)
+      assert_match(/must be a mapping/, error.message)
     end
     collision = {
       "networks" => { "example_app_shadow_ingress" => {} },
@@ -183,6 +183,42 @@ class HostedWorkloadSourcePolicyTest < Minitest::Test
       HostedWorkloadSourcePolicy.validate_source_model(collision, "fixture", workload_id: "example-app", project_name: "fixture")
     end
     assert_match(/not an exact workload-owned network/, error.message)
+  end
+
+  def test_binds_exact_network_topology_per_zone
+    assert HostedWorkloadSourcePolicy.validate_source_model(
+      {
+        "networks" => {
+          "example_app_ingress" => { "internal" => true },
+          "example_app_egress" => { "internal" => false }
+        },
+        "services" => { "example-app-web" => { "networks" => ["example_app_ingress", "example_app_egress"] } }
+      },
+      "fixture",
+      workload_id: "example-app",
+      project_name: "fixture"
+    )
+    [
+      { "internal" => false },
+      { "internal" => true, "driver" => "bridge" },
+      { "internal" => true, "driver_opts" => { "com.docker.network.bridge.name" => "host0" } },
+      { "internal" => true, "ipam" => { "config" => [{ "subnet" => "172.30.0.0/16" }] } },
+      { "internal" => true, "attachable" => true },
+      { "internal" => true, "labels" => { "com.docker.compose.network" => "platform_docker_control" } },
+      { "internal" => true, "enable_ipv4" => false },
+      { "internal" => true, "enable_ipv6" => true }
+    ].each do |definition|
+      model = { "networks" => { "example_app_ingress" => definition }, "services" => { "example-app-web" => {} } }
+      error = assert_raises(ArgumentError) do
+        HostedWorkloadSourcePolicy.validate_source_model(model, "fixture", workload_id: "example-app", project_name: "fixture")
+      end
+      assert_match(/must declare only internal: true/, error.message)
+    end
+    model = { "networks" => { "example_app_egress" => { "internal" => true } }, "services" => { "example-app-web" => {} } }
+    error = assert_raises(ArgumentError) do
+      HostedWorkloadSourcePolicy.validate_source_model(model, "fixture", workload_id: "example-app", project_name: "fixture")
+    end
+    assert_match(/must declare only internal: false/, error.message)
   end
 
   def test_rejects_host_device_controls

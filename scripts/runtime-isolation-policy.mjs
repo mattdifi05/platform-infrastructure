@@ -85,6 +85,14 @@ export function evaluateRuntimeIsolation(config, options = {}) {
         || definition.name !== `${projectName}_${network}`;
     });
     record(`workload-network-identity-${name}`, foreignNetworkIdentities.length === 0, `${name} foreignNetworks=${foreignNetworkIdentities.join(",") || "none"}`);
+    const invalidNetworkTopologies = networkNames(service).filter((network) => {
+      const definition = networks[network];
+      const zone = workloadNetworkZone(network, workloadId);
+      return !definition || typeof definition !== "object" || Array.isArray(definition)
+        || JSON.stringify(Object.keys(definition).sort()) !== JSON.stringify(["internal", "name"])
+        || definition.internal !== (zone !== "egress");
+    });
+    record(`workload-network-topology-${name}`, invalidNetworkTopologies.length === 0, `${name} invalidTopologies=${invalidNetworkTopologies.join(",") || "none"}`);
     record(
       `workload-bounded-local-logging-${name}`,
       JSON.stringify(service.logging) === JSON.stringify({ driver: "local", options: { "max-size": "10m", "max-file": "3" } }),
@@ -302,6 +310,10 @@ function workloadNetworkOwner(network, workloadIds) {
     return network.startsWith(prefix) && WORKLOAD_NETWORK_ZONES.has(network.slice(prefix.length));
   });
   return owners.length === 1 ? owners[0] : null;
+}
+
+function workloadNetworkZone(network, workloadId) {
+  return network.slice(`${workloadId.replaceAll("-", "_")}_`.length);
 }
 
 function stableId(value) {
