@@ -119,6 +119,20 @@ test("rejects workload local volume driver options independently at runtime", ()
   assert.match(report.failures.join("\n"), /workload-no-local-volume-options-example-app-web/);
 });
 
+test("rejects external and foreign workload volume aliases at runtime", () => {
+  for (const definition of [
+    { external: true, name: "foreign_data" },
+    { name: "foreign_data" },
+  ]) {
+    const config = fixture();
+    config.volumes = { "example-app_data": definition };
+    config.services["example-app-web"].volumes.push({ type: "volume", source: "example-app_data", target: "/data" });
+    const report = evaluateRuntimeIsolation(config);
+    assert.equal(report.status, "failed");
+    assert.match(report.failures.join("\n"), /workload-owned-volumes-example-app-web/);
+  }
+});
+
 test("rejects workload Compose API socket access independently at runtime", () => {
   const config = fixture();
   config.services["example-app-web"].use_api_socket = true;

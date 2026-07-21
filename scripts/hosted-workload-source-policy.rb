@@ -8,7 +8,7 @@ require "psych"
 
 module HostedWorkloadSourcePolicy
   VERSION = "hosted-raw-v1"
-  CONTROLS = %w[deny-api-socket deny-device-access deny-env-file deny-extends deny-file-configs deny-gpu-access deny-include deny-lifecycle-hooks deny-local-volume-options deny-providers deny-runtime-overrides deny-scaling deny-stop-grace-overrides deny-supplemental-groups deny-volumes-from].freeze
+  CONTROLS = %w[bind-owned-volumes deny-api-socket deny-device-access deny-env-file deny-extends deny-file-configs deny-gpu-access deny-include deny-lifecycle-hooks deny-local-volume-options deny-providers deny-runtime-overrides deny-scaling deny-stop-grace-overrides deny-supplemental-groups deny-volumes-from].freeze
   MAX_COMPOSE_BYTES = 1_048_576
   STANDARD_TAG_PREFIX = "tag:yaml.org,2002:"
 
@@ -77,7 +77,7 @@ module HostedWorkloadSourcePolicy
     fail!("#{label} is not safe YAML: #{e.message}")
   end
 
-  def validate_source_model(model, label)
+  def validate_source_model(model, label, workload_id: nil, project_name: nil, declared_secrets: [])
     fail!("#{label} cannot use top-level include.") if model.key?("include")
     configs = model["configs"]
     fail!("#{label} configs must be a mapping.") if !configs.nil? && !configs.is_a?(Hash)
@@ -87,6 +87,12 @@ module HostedWorkloadSourcePolicy
     volumes = model["volumes"]
     fail!("#{label} volumes must be a mapping.") if !volumes.nil? && !volumes.is_a?(Hash)
     (volumes || {}).each do |name, definition|
+      if workload_id
+        fail!("#{label} volume #{name} is not workload-prefixed.") unless name.start_with?("#{workload_id}_")
+        if definition.is_a?(Hash) && (definition["external"] == true || definition.key?("name"))
+          fail!("#{label} volume #{name} cannot alias an external or foreign physical volume.")
+        end
+      end
       if definition.is_a?(Hash) && definition.key?("driver_opts")
         fail!("#{label} volume #{name} cannot use local driver options.")
       end
@@ -148,7 +154,13 @@ module HostedWorkloadSourcePolicy
       bytes = stable_read(compose_path, "#{workload_id} Compose source")
       fail!("#{workload_id} Compose digest changed.") unless Digest::SHA256.hexdigest(bytes) == record.fetch("sha256")
       model = parse_compose(bytes, "#{workload_id} Compose source")
-      validate_source_model(model, "#{workload_id} Compose source")
+      validate_source_model(
+        model,
+        "#{workload_id} Compose source",
+        workload_id: workload_id,
+        project_name: lock.fetch("projectName"),
+        declared_secrets: workload.fetch("secrets")
+      )
       {
         "workloadId" => workload_id,
         "composeSha256" => record.fetch("sha256"),

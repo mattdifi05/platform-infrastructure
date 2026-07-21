@@ -17,7 +17,7 @@ const IMAGE = /^[a-z0-9][a-z0-9._/-]*(?::[A-Za-z0-9._-]+)?@sha256:[a-f0-9]{64}$/
 const SAFE_PATH = /^[A-Za-z0-9_./-]+$/;
 export const HOSTED_WORKLOAD_LOCK_VERSION = 2;
 export const HOSTED_WORKLOAD_VALIDATOR_VERSION = "hosted-contract-v2";
-const RAW_POLICY_CONTROLS = Object.freeze(["deny-api-socket", "deny-device-access", "deny-env-file", "deny-extends", "deny-file-configs", "deny-gpu-access", "deny-include", "deny-lifecycle-hooks", "deny-local-volume-options", "deny-providers", "deny-runtime-overrides", "deny-scaling", "deny-stop-grace-overrides", "deny-supplemental-groups", "deny-volumes-from"]);
+const RAW_POLICY_CONTROLS = Object.freeze(["bind-owned-volumes", "deny-api-socket", "deny-device-access", "deny-env-file", "deny-extends", "deny-file-configs", "deny-gpu-access", "deny-include", "deny-lifecycle-hooks", "deny-local-volume-options", "deny-providers", "deny-runtime-overrides", "deny-scaling", "deny-stop-grace-overrides", "deny-supplemental-groups", "deny-volumes-from"]);
 const PLATFORM_DEPENDENCIES = new Set([
   "postgres",
   "redis",
@@ -1068,6 +1068,13 @@ export function validateRenderedWorkloads({ core, combined, lock }) {
   for (const [name, definition] of Object.entries(combined.volumes ?? {})) {
     if (!Object.hasOwn(core.volumes ?? {}, name) && Object.hasOwn(definition ?? {}, "driver_opts")) {
       invalid(`Workload volume ${name} cannot use local driver options.`);
+    }
+    if (Object.hasOwn(core.volumes ?? {}, name)) continue;
+    const owner = lock.workloads.find((workload) => name.startsWith(`${workload.id}_`));
+    if (!owner) invalid(`Undeclared workload volume ${name}.`);
+    const expectedPhysicalName = `${lock.projectName}_${name}`;
+    if (definition?.external === true || definition?.name !== expectedPhysicalName) {
+      invalid(`Workload volume ${name} must bind physical volume ${expectedPhysicalName}.`);
     }
   }
   const declared = new Map();

@@ -132,6 +132,23 @@ class HostedWorkloadSourcePolicyTest < Minitest::Test
     assert_match(/cannot use local driver options/, error.message)
   end
 
+  def test_rejects_external_and_foreign_workload_volume_aliases
+    [
+      { "external" => true },
+      { "name" => "foreign_data" }
+    ].each do |definition|
+      model = { "volumes" => { "example-app_data" => definition }, "services" => { "example-app-web" => {} } }
+      error = assert_raises(ArgumentError) do
+        HostedWorkloadSourcePolicy.validate_source_model(model, "fixture", workload_id: "example-app", project_name: "fixture")
+      end
+      assert_match(/cannot alias an external or foreign physical volume/, error.message)
+    end
+    model = { "volumes" => { "other_data" => {} }, "services" => { "example-app-web" => {} } }
+    assert_raises(ArgumentError) do
+      HostedWorkloadSourcePolicy.validate_source_model(model, "fixture", workload_id: "example-app", project_name: "fixture")
+    end
+  end
+
   def test_rejects_compose_api_socket
     model = parse("services:\n  app:\n    use_api_socket: true\n")
     error = assert_raises(ArgumentError) do

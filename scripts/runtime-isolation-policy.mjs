@@ -99,6 +99,17 @@ export function evaluateRuntimeIsolation(config, options = {}) {
       .filter((mount) => mount.type === "volume" && Object.hasOwn(object(config?.volumes?.[mount.source]), "driver_opts"))
       .map((mount) => mount.source);
     record(`workload-no-local-volume-options-${name}`, optionedVolumes.length === 0, `${name} optionedVolumes=${optionedVolumes.join(",") || "none"}`);
+    const foreignVolumes = mounts
+      .filter((mount) => mount.type === "volume")
+      .filter((mount) => {
+        const definition = object(config?.volumes?.[mount.source]);
+        return !mount.source.startsWith(`${workloadId}_`)
+          || definition.external === true
+          || typeof definition.name !== "string"
+          || !definition.name.endsWith(`_${mount.source}`);
+      })
+      .map((mount) => mount.source);
+    record(`workload-owned-volumes-${name}`, foreignVolumes.length === 0, `${name} foreignVolumes=${foreignVolumes.join(",") || "none"}`);
   }
 
   for (const name of ["control-center", "project-router"]) {
