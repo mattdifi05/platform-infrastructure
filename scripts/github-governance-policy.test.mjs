@@ -295,7 +295,10 @@ test("branch apply receipt binds policy hash API version and producer tuples", (
   assert.equal(receipt.verification, "fresh-GET-exact");
   assert.equal(receipt.policySha256, "a".repeat(64));
   assert.equal(receipt.githubApiVersion, "2026-03-10");
-  assert.deepEqual(receipt.requiredStatusChecks.checks, branchPolicy.required_status_checks.checks);
+  assert.deepEqual(receipt.requiredStatusChecks.checks, [
+    { context: "compose", app_id: 15368 },
+    { context: "quality", app_id: 15368 },
+  ]);
 });
 
 let passed = 0;

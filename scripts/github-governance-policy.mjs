@@ -347,7 +347,9 @@ export function buildBranchProtectionApplyReceipt({ repository, branch, policySh
     requiredStatusChecks: {
       strict: expected.required_status_checks.strict,
       contexts: [],
-      checks: expected.required_status_checks.checks.map(({ context, app_id }) => ({ context, app_id })),
+      checks: expected.required_status_checks.checks
+        .map(({ context, app_id }) => ({ context, app_id }))
+        .sort((left, right) => left.context.localeCompare(right.context) || left.app_id - right.app_id),
     },
   };
 }
