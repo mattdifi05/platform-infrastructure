@@ -120,6 +120,12 @@ const statusProbeTimeoutMs = clampNumber(Number(process.env.CONTROL_CENTER_STATU
 const statusProbeTlsVerify = parseBoolean(process.env.CONTROL_CENTER_STATUS_TLS_VERIFY || "");
 const statusRunStepDelayMs = clampNumber(Number(process.env.CONTROL_CENTER_STATUS_STEP_DELAY_MS || 1500), 0, 10000);
 const statusRunCheckTimeoutMs = clampNumber(Number(process.env.CONTROL_CENTER_STATUS_CHECK_TIMEOUT_MS || 30000), 1000, 300000);
+const statusEventTailMaxRecords = clampNumber(Number(process.env.CONTROL_CENTER_STATUS_EVENT_TAIL_MAX_RECORDS || 2000), 100, 10000);
+const statusEventTailMaxBytes = clampNumber(Number(process.env.CONTROL_CENTER_STATUS_EVENT_TAIL_MAX_BYTES || 16 * 1024 * 1024), 64 * 1024, 64 * 1024 * 1024);
+const statusEventMaxRecordBytes = Math.min(
+  statusEventTailMaxBytes,
+  clampNumber(Number(process.env.CONTROL_CENTER_STATUS_EVENT_MAX_RECORD_BYTES || 256 * 1024), 1024, 4 * 1024 * 1024),
+);
 const controlState = createControlStateStore(process.env);
 const controlAuth = await createControlCenterAuth();
 const requestIdentity = new AsyncLocalStorage();
@@ -563,18 +569,20 @@ async function handleApi(req, res, url, context, operation) {
     if (method === "GET" && route(parts, "control", "status", "events")) {
       const runId = sanitizeIdentifier(url.searchParams.get("runId") || "");
       const limit = clampNumber(Number(url.searchParams.get("limit") || (runId ? 2000 : 200)), 1, 2000);
-      return json(res, { events: readStatusRunEvents(limit, runId) });
+      return json(res, readStatusRunEventPage(limit, runId));
     }
     if (method === "GET" && route(parts, "control", "status")) {
+      const statusEventPage = readStatusRunEventPage(
+        clampNumber(Number(context.statusRun?.eventCount || 100), 1, 2000),
+        context.statusRun?.id || "",
+      );
       return json(res, {
         goNoGo: context.goNoGo,
         readiness: context.readiness,
         statusCatalog: statusExecutorCatalog(context),
         statusRun: context.statusRun,
-        statusEvents: readStatusRunEvents(
-          clampNumber(Number(context.statusRun?.eventCount || 100), 1, 2000),
-          context.statusRun?.id || "",
-        ),
+        statusEvents: statusEventPage.events,
+        statusEventsTruncated: statusEventPage.truncated,
       });
     }
     if (method === "GET" && route(parts, "control", "go-no-go")) return json(res, context.goNoGo);
@@ -10254,9 +10262,30 @@ function appendStatusRunEvent(event) {
 }
 
 function readStatusRunEvents(limit = 200, runId = "") {
-  const events = recentStateEvents("statusRunEvents", Math.max(limit, 2000));
-  const filtered = runId ? events.filter((event) => event.runId === runId) : events;
-  return filtered.slice(0, limit).reverse();
+  return readStatusRunEventPage(limit, runId).events;
+}
+
+function readStatusRunEventPage(limit = 200, runId = "") {
+  const requestedLimit = clampNumber(Number(limit), 1, 2000);
+  const tail = controlState.readTail("statusRunEvents", {
+    strict: true,
+    maxRecords: statusEventTailMaxRecords,
+    maxBytes: statusEventTailMaxBytes,
+    maxRecordBytes: statusEventMaxRecordBytes,
+  });
+  const filtered = runId ? tail.value.filter((event) => event.runId === runId) : tail.value;
+  const events = filtered.slice(-requestedLimit);
+  const missingRunPrefix = Boolean(runId && events.length > 0 && Number(events[0].sequence || 0) > 1);
+  const sourceTruncated = runId
+    ? missingRunPrefix || (tail.truncated && events.length === 0)
+    : tail.truncated;
+  return {
+    events,
+    truncated: sourceTruncated || filtered.length > events.length,
+    sourceTruncated: tail.truncated,
+    bytesRead: tail.bytesRead,
+    parsedRecords: tail.parsedRecords,
+  };
 }
 
 async function streamStatusRunEvents(req, res, requestedRunId) {

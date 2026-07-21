@@ -948,8 +948,12 @@ test("Admin Control Center local foundation", async (t) => {
   assert.equal(statusAfterRun.statusEvents[0].type, "run-started");
   assert.equal(statusAfterRun.statusEvents.at(-1).type, "run-completed");
   assert.deepEqual(statusAfterRun.statusEvents.map((event) => event.sequence), statusAfterRun.statusEvents.map((_, index) => index + 1));
+  assert.equal(statusAfterRun.statusEventsTruncated, false);
   const statusEventsApi = await getJson(`${baseUrl}/control/status/events?runId=${statusAfterRun.statusRun.id}`);
   assert.deepEqual(statusEventsApi.events, statusAfterRun.statusEvents);
+  assert.equal(statusEventsApi.truncated, false);
+  assert.equal(statusEventsApi.bytesRead > 0, true);
+  assert.equal(statusEventsApi.parsedRecords >= statusEventsApi.events.length, true);
   assert.doesNotMatch(JSON.stringify(statusAfterRun), /CLOUDFLARE_API_TOKEN|super-secret-token-should-not-leak/);
   const statusCategoryRunResponse = await fetch(`${baseUrl}/actions/status-check`, {
     method: "POST",

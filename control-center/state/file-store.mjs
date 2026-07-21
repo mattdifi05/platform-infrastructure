@@ -2,10 +2,13 @@ import { createHash, randomBytes } from "node:crypto";
 import {
   chmodSync,
   closeSync,
+  constants,
   existsSync,
+  fstatSync,
   fsyncSync,
   mkdirSync,
   openSync,
+  readSync,
   readFileSync,
   renameSync,
   rmSync,
@@ -51,6 +54,53 @@ export class FileStateStore {
       if (strict) throw new StateValidationError(`${name} state is unreadable: ${error.message}`);
       return { name, kind: definition.kind, value: clone(definition.defaultValue), revision, token: `${revision}:${hash}`, contentSha256: hash, exists: raw !== "", externalDrift, invalid: true };
     }
+  }
+
+  readTail(name, {
+    strict = false,
+    maxRecords = 100,
+    maxBytes = 4 * 1024 * 1024,
+    maxRecordBytes = 256 * 1024,
+  } = {}) {
+    const definition = this.definition(name);
+    if (definition.kind !== "jsonl") throw new StateValidationError(`${name} is not JSONL state.`);
+    const recordLimit = boundedReadLimit(maxRecords, 1, 100_000, "tail record");
+    const byteLimit = boundedReadLimit(maxBytes, 1, 64 * 1024 * 1024, "tail byte");
+    const recordByteLimit = boundedReadLimit(maxRecordBytes, 1, byteLimit, "tail record byte");
+    const raw = readRawTail(definition.path, byteLimit);
+    const metadata = readMetadata(definition.path);
+    const revision = Number.isInteger(metadata?.revision) && metadata.revision >= 0 ? metadata.revision : 0;
+    const lines = boundedJsonLineBuffers(raw.buffer, raw.offset > 0);
+    const selected = lines.slice(-recordLimit);
+    const value = [];
+    let parsedRecords = 0;
+    let invalidRecords = 0;
+
+    for (const line of selected) {
+      try {
+        if (line.byteLength > recordByteLimit) throw new Error(`record exceeds ${recordByteLimit} bytes`);
+        parsedRecords += 1;
+        const record = JSON.parse(line.toString("utf8"));
+        definition.validate?.(record);
+        value.push(record);
+      } catch (error) {
+        invalidRecords += 1;
+        if (strict) throw new StateValidationError(`${name} tail is unreadable: ${error.message}`);
+      }
+    }
+
+    return {
+      name,
+      kind: definition.kind,
+      value,
+      revision,
+      exists: raw.exists,
+      totalBytes: raw.totalBytes,
+      bytesRead: raw.buffer.byteLength,
+      parsedRecords,
+      invalidRecords,
+      truncated: raw.offset > 0 || lines.length > selected.length,
+    };
   }
 
   write(name, value, { expectedToken } = {}) {
@@ -238,6 +288,59 @@ function readRaw(filePath) {
   try { return readFileSync(filePath, "utf8"); } catch (error) { if (error.code === "ENOENT") return ""; throw error; }
 }
 
+function readRawTail(filePath, maxBytes) {
+  let fd;
+  try {
+    fd = openSync(filePath, constants.O_RDONLY | constants.O_NOFOLLOW);
+  } catch (error) {
+    if (error.code === "ENOENT") return { buffer: Buffer.alloc(0), exists: false, offset: 0, totalBytes: 0 };
+    throw error;
+  }
+  try {
+    const stat = fstatSync(fd);
+    if (!stat.isFile() || !Number.isSafeInteger(stat.size) || stat.size < 0) {
+      throw new StateValidationError(`State tail source is not a bounded regular file: ${path.basename(filePath)}.`);
+    }
+    const totalBytes = stat.size;
+    const length = Math.min(totalBytes, maxBytes);
+    const offset = totalBytes - length;
+    const buffer = Buffer.allocUnsafe(length);
+    let bytesRead = 0;
+    while (bytesRead < length) {
+      const count = readSync(fd, buffer, bytesRead, length - bytesRead, offset + bytesRead);
+      if (count === 0) break;
+      bytesRead += count;
+    }
+    if (bytesRead !== length) throw new StateValidationError(`State tail changed while it was being read: ${path.basename(filePath)}.`);
+    return { buffer, exists: true, offset, totalBytes };
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function boundedJsonLineBuffers(buffer, discardLeadingFragment) {
+  let start = 0;
+  if (discardLeadingFragment) {
+    const boundary = buffer.indexOf(0x0a);
+    if (boundary < 0) return [];
+    start = boundary + 1;
+  }
+  const lines = [];
+  let lineStart = start;
+  for (let index = start; index < buffer.length; index += 1) {
+    if (buffer[index] !== 0x0a) continue;
+    appendJsonLineBuffer(lines, buffer.subarray(lineStart, index));
+    lineStart = index + 1;
+  }
+  if (lineStart < buffer.length) appendJsonLineBuffer(lines, buffer.subarray(lineStart));
+  return lines;
+}
+
+function appendJsonLineBuffer(lines, line) {
+  const normalized = line.at(-1) === 0x0d ? line.subarray(0, -1) : line;
+  if (normalized.byteLength > 0) lines.push(normalized);
+}
+
 function readMetadata(filePath) {
   try { return JSON.parse(readFileSync(metadataPath(filePath), "utf8")); } catch { return null; }
 }
@@ -246,6 +349,14 @@ function metadataPath(filePath) { return `${filePath}.state-meta.json`; }
 function digest(value) { return createHash("sha256").update(value).digest("hex"); }
 function valueDigest(value) { return digest(JSON.stringify(value)); }
 function clone(value) { return structuredClone(value); }
+
+function boundedReadLimit(value, minimum, maximum, label) {
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < minimum || parsed > maximum) {
+    throw new StateValidationError(`Invalid ${label} limit.`);
+  }
+  return parsed;
+}
 
 function parseJsonLines(raw, strict) {
   const records = [];

@@ -40,6 +40,77 @@ test("JSONL append is durable and strict reads reject malformed state", () => {
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+test("JSONL tail applies byte and record ceilings before parsing", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "control-state-tail-"));
+  const auditPath = path.join(root, "audit.jsonl");
+  let validations = 0;
+  const store = createFileStateStore({ datasets: {
+    audit: {
+      path: auditPath,
+      kind: "jsonl",
+      defaultValue: [],
+      validate: (value) => {
+        validations += 1;
+        if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("audit record required");
+      },
+    },
+  } });
+  try {
+    writeFileSync(auditPath, [
+      "x".repeat(4096),
+      "{malformed-but-not-selected}",
+      JSON.stringify({ id: "one" }),
+      JSON.stringify({ id: "two" }),
+      JSON.stringify({ id: "three" }),
+      "",
+    ].join("\n"));
+    const tail = store.readTail("audit", {
+      strict: true,
+      maxRecords: 2,
+      maxBytes: 256,
+      maxRecordBytes: 128,
+    });
+    assert.deepEqual(tail.value.map((item) => item.id), ["two", "three"]);
+    assert.equal(tail.bytesRead, 256);
+    assert.equal(tail.parsedRecords, 2);
+    assert.equal(validations, 2);
+    assert.equal(tail.truncated, true);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("JSONL tail rejects an oversized or malformed selected record before validation", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "control-state-tail-invalid-"));
+  const auditPath = path.join(root, "audit.jsonl");
+  let validations = 0;
+  const store = createFileStateStore({ datasets: {
+    audit: {
+      path: auditPath,
+      kind: "jsonl",
+      defaultValue: [],
+      validate: () => { validations += 1; },
+    },
+  } });
+  try {
+    writeFileSync(auditPath, `${JSON.stringify({ id: "large", value: "x".repeat(512) })}\n`);
+    assert.throws(() => store.readTail("audit", {
+      strict: true,
+      maxRecords: 1,
+      maxBytes: 1024,
+      maxRecordBytes: 64,
+    }), /record exceeds 64 bytes/);
+    assert.equal(validations, 0);
+
+    writeFileSync(auditPath, "{malformed}\n");
+    assert.throws(() => store.readTail("audit", {
+      strict: true,
+      maxRecords: 1,
+      maxBytes: 1024,
+      maxRecordBytes: 128,
+    }), StateValidationError);
+    assert.equal(validations, 0);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test("snapshot import is plan-only by default and returns rollback evidence", () => {
   const { root, store } = fixture();
   try {
