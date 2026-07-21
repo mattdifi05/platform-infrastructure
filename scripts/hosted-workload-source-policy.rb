@@ -8,7 +8,7 @@ require "psych"
 
 module HostedWorkloadSourcePolicy
   VERSION = "hosted-raw-v1"
-  CONTROLS = %w[deny-env-file deny-extends deny-include deny-lifecycle-hooks deny-volumes-from].freeze
+  CONTROLS = %w[deny-env-file deny-extends deny-include deny-lifecycle-hooks deny-scaling deny-volumes-from].freeze
   MAX_COMPOSE_BYTES = 1_048_576
   STANDARD_TAG_PREFIX = "tag:yaml.org,2002:"
 
@@ -85,6 +85,8 @@ module HostedWorkloadSourcePolicy
       fail!("#{label} service #{name} cannot use extends.") if service.key?("extends")
       lifecycle_hooks = %w[post_start pre_start pre_stop].select { |key| service.key?(key) }
       fail!("#{label} service #{name} cannot use lifecycle hooks: #{lifecycle_hooks.join(', ')}.") unless lifecycle_hooks.empty?
+      fail!("#{label} service #{name} cannot set scale.") if service.key?("scale")
+      fail!("#{label} service #{name} cannot set deploy.replicas.") if service["deploy"].is_a?(Hash) && service["deploy"].key?("replicas")
       fail!("#{label} service #{name} cannot use volumes_from.") if service.key?("volumes_from")
     end
     true

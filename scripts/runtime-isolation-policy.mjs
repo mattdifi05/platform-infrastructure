@@ -63,6 +63,8 @@ export function evaluateRuntimeIsolation(config, options = {}) {
     record(`workload-no-volumes-from-${name}`, !Object.hasOwn(service, "volumes_from"), `${name} volumesFrom=${service.volumes_from || "none"}`);
     const lifecycleHooks = ["post_start", "pre_start", "pre_stop"].filter((field) => Object.hasOwn(service, field));
     record(`workload-no-lifecycle-hooks-${name}`, lifecycleHooks.length === 0, `${name} hooks=${lifecycleHooks.join(",") || "none"}`);
+    const hasScaling = Object.hasOwn(service, "scale") || Object.hasOwn(object(service.deploy), "replicas");
+    record(`workload-no-scaling-${name}`, !hasScaling, `${name} scale=${service.scale ?? "unset"} replicas=${service.deploy?.replicas ?? "unset"}`);
     const mounts = volumes(service);
     for (const target of FORBIDDEN_WORKLOAD_TARGETS) {
       const exposed = mounts.some((mount) => mount.target === target || mount.target.startsWith(`${target}/`));

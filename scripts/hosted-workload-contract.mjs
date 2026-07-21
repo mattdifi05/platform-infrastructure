@@ -16,7 +16,7 @@ const IMAGE = /^[a-z0-9][a-z0-9._/-]*(?::[A-Za-z0-9._-]+)?@sha256:[a-f0-9]{64}$/
 const SAFE_PATH = /^[A-Za-z0-9_./-]+$/;
 export const HOSTED_WORKLOAD_LOCK_VERSION = 2;
 export const HOSTED_WORKLOAD_VALIDATOR_VERSION = "hosted-contract-v2";
-const RAW_POLICY_CONTROLS = Object.freeze(["deny-env-file", "deny-extends", "deny-include", "deny-lifecycle-hooks", "deny-volumes-from"]);
+const RAW_POLICY_CONTROLS = Object.freeze(["deny-env-file", "deny-extends", "deny-include", "deny-lifecycle-hooks", "deny-scaling", "deny-volumes-from"]);
 const PLATFORM_DEPENDENCIES = new Set([
   "postgres",
   "redis",
@@ -883,6 +883,7 @@ function assertWorkloadService({ serviceDefinition, manifestService, manifest, c
   if (["post_start", "pre_start", "pre_stop"].some((field) => serviceDefinition[field] != null)) {
     invalid(`${name} cannot define service lifecycle hooks.`);
   }
+  if (serviceDefinition.scale != null || serviceDefinition.deploy?.replicas != null) invalid(`${name} cannot request service scaling.`);
   if (serviceDefinition.volumes_from != null) invalid(`${name} cannot inherit volumes from another service.`);
   if (serviceDefinition.container_name) invalid(`${name} cannot reserve a global container_name.`);
   if (serviceDefinition.privileged || serviceDefinition.network_mode === "host" || serviceDefinition.pid === "host" || serviceDefinition.ipc === "host") {

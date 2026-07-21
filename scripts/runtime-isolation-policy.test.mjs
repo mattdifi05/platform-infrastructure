@@ -54,6 +54,19 @@ test("rejects workload lifecycle hooks independently at runtime", () => {
   }
 });
 
+test("rejects both workload scaling controls independently at runtime", () => {
+  for (const mutation of [
+    (service) => { service.scale = 2; },
+    (service) => { service.deploy = { replicas: 2 }; },
+  ]) {
+    const config = fixture();
+    mutation(config.services["example-app-web"]);
+    const report = evaluateRuntimeIsolation(config);
+    assert.equal(report.status, "failed");
+    assert.match(report.failures.join("\n"), /workload-no-scaling-example-app-web/);
+  }
+});
+
 test("rejects missing memory limits and budget overcommit", () => {
   const config = fixture();
   config.services["example-app-web"].mem_limit = 0;

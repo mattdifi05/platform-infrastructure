@@ -71,4 +71,16 @@ class HostedWorkloadSourcePolicyTest < Minitest::Test
       assert_match(/cannot use lifecycle hooks/, error.message)
     end
   end
+
+  def test_rejects_scale_and_deploy_replicas_before_resource_admission
+    [
+      { "scale" => 2 },
+      { "deploy" => { "replicas" => 2 } }
+    ].each do |service|
+      error = assert_raises(ArgumentError) do
+        HostedWorkloadSourcePolicy.validate_source_model({ "services" => { "app" => service } }, "fixture")
+      end
+      assert_match(/cannot set (?:scale|deploy\.replicas)/, error.message)
+    end
+  end
 end
