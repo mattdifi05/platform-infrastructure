@@ -66,6 +66,8 @@ export function evaluateRuntimeIsolation(config, options = {}) {
     const hasScaling = Object.hasOwn(service, "scale") || Object.hasOwn(object(service.deploy), "replicas");
     record(`workload-no-scaling-${name}`, !hasScaling, `${name} scale=${service.scale ?? "unset"} replicas=${service.deploy?.replicas ?? "unset"}`);
     record(`workload-no-configs-${name}`, !Object.hasOwn(service, "configs"), `${name} configs=${service.configs || "none"}`);
+    const deviceControls = ["devices", "device_cgroup_rules"].filter((field) => Object.hasOwn(service, field));
+    record(`workload-no-device-access-${name}`, deviceControls.length === 0, `${name} deviceControls=${deviceControls.join(",") || "none"}`);
     const mounts = volumes(service);
     for (const target of FORBIDDEN_WORKLOAD_TARGETS) {
       const exposed = mounts.some((mount) => mount.target === target || mount.target.startsWith(`${target}/`));

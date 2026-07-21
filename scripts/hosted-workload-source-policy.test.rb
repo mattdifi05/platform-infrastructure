@@ -90,4 +90,16 @@ class HostedWorkloadSourcePolicyTest < Minitest::Test
     grant = parse("services:\n  app:\n    configs:\n      - platform-config\n")
     assert_raises(ArgumentError) { HostedWorkloadSourcePolicy.validate_source_model(grant, "fixture") }
   end
+
+  def test_rejects_host_device_controls
+    [
+      "services:\n  app:\n    devices:\n      - /dev/kvm:/dev/kvm\n",
+      "services:\n  app:\n    device_cgroup_rules:\n      - c 10:232 rwm\n"
+    ].each do |document|
+      error = assert_raises(ArgumentError) do
+        HostedWorkloadSourcePolicy.validate_source_model(parse(document), "fixture")
+      end
+      assert_match(/cannot request host device access/, error.message)
+    end
+  end
 end

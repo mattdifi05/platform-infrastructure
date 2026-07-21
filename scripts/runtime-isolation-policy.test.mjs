@@ -75,6 +75,19 @@ test("rejects workload config grants independently at runtime", () => {
   assert.match(report.failures.join("\n"), /workload-no-configs-example-app-web/);
 });
 
+test("rejects workload host device controls independently at runtime", () => {
+  for (const mutation of [
+    (service) => { service.devices = [{ source: "/dev/kvm", target: "/dev/kvm" }]; },
+    (service) => { service.device_cgroup_rules = ["c 10:232 rwm"]; },
+  ]) {
+    const config = fixture();
+    mutation(config.services["example-app-web"]);
+    const report = evaluateRuntimeIsolation(config);
+    assert.equal(report.status, "failed");
+    assert.match(report.failures.join("\n"), /workload-no-device-access-example-app-web/);
+  }
+});
+
 test("rejects missing memory limits and budget overcommit", () => {
   const config = fixture();
   config.services["example-app-web"].mem_limit = 0;

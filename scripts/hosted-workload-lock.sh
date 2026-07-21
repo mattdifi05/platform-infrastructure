@@ -3,7 +3,7 @@ set -eu
 
 LOCK=${1:?Usage: hosted-workload-lock.sh <lock-file> [verify|compose-files]}
 COMMAND=${2:-verify}
-RAW_POLICY_CONTROLS='["deny-env-file","deny-extends","deny-file-configs","deny-include","deny-lifecycle-hooks","deny-scaling","deny-volumes-from"]'
+RAW_POLICY_CONTROLS='["deny-device-access","deny-env-file","deny-extends","deny-file-configs","deny-include","deny-lifecycle-hooks","deny-scaling","deny-volumes-from"]'
 
 case "$COMMAND" in
   verify|compose-files|env-files|core-env-file|project-name) ;;
