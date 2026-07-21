@@ -10,6 +10,7 @@ import {
   validateWorkloadEnvironmentText,
   validateWorkloadManifest,
   verifyLockFiles,
+  verifyRawPolicyReceipt,
 } from "./hosted-workload-contract.mjs";
 import { brokerPolicySha256, expectedNatsPolicy, expectedRedisPolicy } from "./workload-broker-policy.mjs";
 
@@ -349,6 +350,19 @@ test("legacy hosted workload locks fail closed", () => {
     () => verifyLockFiles({ version: 1, state: "verified", files: [] }),
     /schema 2 and validator hosted-contract-v2/,
   );
+});
+
+test("raw policy receipt requires the exact current control set", () => {
+  const receipt = {
+    workloadContentSha256: "a".repeat(64),
+    rawPolicyVersion: "hosted-raw-v1",
+    rawPolicyWorkloadContentSha256: "a".repeat(64),
+    rawPolicySha256: "b".repeat(64),
+    rawPolicyControls: ["deny-extends", "deny-include"],
+  };
+  assert.doesNotThrow(() => verifyRawPolicyReceipt(receipt));
+  receipt.rawPolicyControls = ["deny-include"];
+  assert.throws(() => verifyRawPolicyReceipt(receipt), /raw source policy receipt/);
 });
 
 function catalogFixture(root, appRoot = path.join(root, "workloads", "example-app")) {

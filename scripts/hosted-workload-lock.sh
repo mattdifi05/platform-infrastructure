@@ -3,6 +3,7 @@ set -eu
 
 LOCK=${1:?Usage: hosted-workload-lock.sh <lock-file> [verify|compose-files]}
 COMMAND=${2:-verify}
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 
 [ -f "$LOCK" ] && [ ! -L "$LOCK" ] || { printf '%s\n' "Hosted workload lock must be a regular non-symlink file." >&2; exit 1; }
 mode=$(stat -c '%a' "$LOCK")
@@ -12,6 +13,10 @@ if [ "${HOSTED_WORKLOAD_ALLOW_RESOLVED:-0}" = 1 ]; then
 else
   jq -e '.version == 2 and .validatorVersion == "hosted-contract-v2" and .rawPolicyVersion == "hosted-raw-v1" and .rawPolicyWorkloadContentSha256 == .workloadContentSha256 and (.rawPolicySha256 | test("^[a-f0-9]{64}$")) and .state == "verified" and (.snapshotGeneration | type == "string" and length > 0) and (.snapshotRootIdentity.mode == 448) and (.snapshotGenerationIdentity.mode == 320) and (.workloadContentSha256 | test("^[a-f0-9]{64}$")) and (.files | type == "array" and length > 0) and (.workloads | type == "array")' "$LOCK" >/dev/null
 fi
+
+node "$SCRIPT_DIR/hosted-workload-contract.mjs" verify-lock \
+  --lock "$LOCK" \
+  --allowResolved "$([ "${HOSTED_WORKLOAD_ALLOW_RESOLVED:-0}" = 1 ] && printf true || printf false)"
 
 count=$(jq '.files | length' "$LOCK")
 index=0

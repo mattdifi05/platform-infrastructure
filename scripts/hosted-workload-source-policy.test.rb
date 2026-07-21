@@ -31,4 +31,11 @@ class HostedWorkloadSourcePolicyTest < Minitest::Test
   def test_rejects_oversized_source
     assert_raises(ArgumentError) { parse("services: {}\n#" + ("x" * HostedWorkloadSourcePolicy::MAX_COMPOSE_BYTES)) }
   end
+
+  def test_rejects_include_and_extends_before_render
+    include_model = parse("include:\n  - other.yaml\nservices:\n  app: {}\n")
+    assert_raises(ArgumentError) { HostedWorkloadSourcePolicy.validate_source_model(include_model, "fixture") }
+    extends_model = parse("services:\n  app:\n    extends:\n      file: base.yaml\n      service: base\n")
+    assert_raises(ArgumentError) { HostedWorkloadSourcePolicy.validate_source_model(extends_model, "fixture") }
+  end
 end

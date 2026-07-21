@@ -8,6 +8,7 @@ require "psych"
 
 module HostedWorkloadSourcePolicy
   VERSION = "hosted-raw-v1"
+  CONTROLS = %w[deny-extends deny-include].freeze
   MAX_COMPOSE_BYTES = 1_048_576
   STANDARD_TAG_PREFIX = "tag:yaml.org,2002:"
 
@@ -76,6 +77,15 @@ module HostedWorkloadSourcePolicy
     fail!("#{label} is not safe YAML: #{e.message}")
   end
 
+  def validate_source_model(model, label)
+    fail!("#{label} cannot use top-level include.") if model.key?("include")
+    model.fetch("services").each do |name, service|
+      fail!("#{label} service #{name} must be a mapping.") unless service.is_a?(Hash)
+      fail!("#{label} service #{name} cannot use extends.") if service.key?("extends")
+    end
+    true
+  end
+
   def stable_read(path, label)
     flags = File::RDONLY
     flags |= File::NOFOLLOW if File.const_defined?(:NOFOLLOW)
@@ -104,6 +114,7 @@ module HostedWorkloadSourcePolicy
       bytes = stable_read(compose_path, "#{workload_id} Compose source")
       fail!("#{workload_id} Compose digest changed.") unless Digest::SHA256.hexdigest(bytes) == record.fetch("sha256")
       model = parse_compose(bytes, "#{workload_id} Compose source")
+      validate_source_model(model, "#{workload_id} Compose source")
       {
         "workloadId" => workload_id,
         "composeSha256" => record.fetch("sha256"),
@@ -113,10 +124,12 @@ module HostedWorkloadSourcePolicy
     end
     receipt = {
       "policyVersion" => VERSION,
+      "controls" => CONTROLS,
       "workloadContentSha256" => lock.fetch("workloadContentSha256"),
       "workloads" => receipts.sort_by { |item| item.fetch("workloadId") }
     }
     lock["rawPolicyVersion"] = VERSION
+    lock["rawPolicyControls"] = CONTROLS
     lock["rawPolicyWorkloadContentSha256"] = lock.fetch("workloadContentSha256")
     lock["rawPolicySha256"] = Digest::SHA256.hexdigest(JSON.generate(stable(receipt)))
     lock

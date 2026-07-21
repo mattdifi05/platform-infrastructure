@@ -16,6 +16,7 @@ const IMAGE = /^[a-z0-9][a-z0-9._/-]*(?::[A-Za-z0-9._-]+)?@sha256:[a-f0-9]{64}$/
 const SAFE_PATH = /^[A-Za-z0-9_./-]+$/;
 export const HOSTED_WORKLOAD_LOCK_VERSION = 2;
 export const HOSTED_WORKLOAD_VALIDATOR_VERSION = "hosted-contract-v2";
+const RAW_POLICY_CONTROLS = Object.freeze(["deny-extends", "deny-include"]);
 const PLATFORM_DEPENDENCIES = new Set([
   "postgres",
   "redis",
@@ -817,9 +818,10 @@ export function verifyLockFiles(lock) {
   return true;
 }
 
-function verifyRawPolicyReceipt(lock) {
+export function verifyRawPolicyReceipt(lock) {
   if (lock?.rawPolicyVersion !== "hosted-raw-v1"
       || lock?.rawPolicyWorkloadContentSha256 !== lock?.workloadContentSha256
+      || !same(lock?.rawPolicyControls, RAW_POLICY_CONTROLS)
       || !SHA256.test(String(lock?.rawPolicySha256 ?? ""))) {
     invalid("Hosted workload lock has no valid raw source policy receipt.");
   }
@@ -875,7 +877,7 @@ function main() {
   }
   if (command === "verify-lock") {
     const lock = readJson(path.resolve(requiredText(args.lock, "--lock")), "workload lock");
-    if (lock.state !== "verified") invalid("Workload lock is not verified.");
+    if (lock.state !== "verified" && !(args.allowResolved === "true" && lock.state === "resolved")) invalid("Workload lock is not verified.");
     verifyLockFiles(lock);
     verifyRawPolicyReceipt(lock);
     return;
