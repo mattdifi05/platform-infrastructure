@@ -24,14 +24,6 @@ services:
       - ./traefik/dynamic/admin-routes.yml:/etc/traefik/dynamic/admin-routes.yml:ro
       - ./traefik/dynamic/project-routes.yml:/etc/traefik/dynamic/project-routes.yml:ro
 
-  phpmyadmin:
-    profiles: !reset []
-    restart: unless-stopped
-
-  phppgadmin:
-    profiles: !reset []
-    restart: unless-stopped
-
   local-dns:
     profiles: !reset []
     ports:

@@ -2767,6 +2767,7 @@ function infraTestingHygiene() {
     "project-router/server.mjs",
     "platform-alert-dispatcher/server.mjs",
     "scripts/network-segmentation-policy.mjs",
+    "scripts/database-admin-profile-safety.test.mjs",
     "scripts/supply-chain-policy.mjs",
     "scripts/supply-chain-policy.test.mjs",
     "scripts/runtime-fingerprint.mjs",
@@ -2814,6 +2815,7 @@ function infraTestingHygiene() {
   run(process.execPath, ["--test", ...controlCenterTestFiles()], { cwd: infraRoot });
   run(process.execPath, ["--test", "project-router/tests/project-router.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/hosted-workload-contract.test.mjs"], { cwd: infraRoot });
+  run(process.execPath, ["--test", "scripts/database-admin-profile-safety.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/functional-health.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/runtime-fingerprint.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/provider-evidence-auth.test.mjs"], { cwd: infraRoot });
