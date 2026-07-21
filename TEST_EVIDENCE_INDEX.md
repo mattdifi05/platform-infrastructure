@@ -170,5 +170,6 @@
 ## Ultra isolated remediation evidence
 
 | EV-ULTRA-FG077 | FG-077 | Bounded artifact hashing | `node --test scripts/bounded-file-hash.test.mjs` plus backup contract/coverage sandboxes | PASS local positive, growth/truncation/mutation, symlink/non-regular, timeout/abort, read/close-error and 128 MiB memory-bound fixtures; no live backup artifact read claimed | 2026-07-21 |
+| EV-ULTRA-FG037 | FG-037 | Restic secret transport | `node --test scripts/restic-secret-transport.test.mjs` plus synthetic command-failure redaction fixtures | PASS local: repository credentials travel only in protected environment values, Docker argv carries key names only, and raw/encoded canaries are absent from argv/stdout/stderr/report serialization; no real repository or secret used | 2026-07-21 |
 
 Every later entry must record positive, negative, regression and behavior-preservation evidence. Secret values must never be embedded.
