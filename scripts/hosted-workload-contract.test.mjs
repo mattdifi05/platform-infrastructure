@@ -78,6 +78,7 @@ function test(name, fn) {
 }
 
 test("exact hardened workload render passes", () => {
+  assert.equal(manifest.version, 1);
   const result = validateRenderedWorkloads({ core, combined: combinedFixture(), lock });
   assert.deepEqual(result.routes, [{ workloadId: "example-app", slug: "example", service: "example-app-web", port: 3000, upstream: "http://example-app-web:3000" }]);
 });

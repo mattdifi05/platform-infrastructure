@@ -209,8 +209,7 @@ export function validateWorkloadManifest(document, manifestPath = "manifest") {
     if (!SERVICE.test(secret) || !secret.startsWith(`${id}-`)) invalid(`Secret ${secret} must be workload-prefixed.`);
   }
   return {
-    version: HOSTED_WORKLOAD_LOCK_VERSION,
-    validatorVersion: HOSTED_WORKLOAD_VALIDATOR_VERSION,
+    version: 1,
     id,
     composeFile,
     services,
@@ -262,7 +261,8 @@ export function resolveCatalog({ catalogPath, workloadRoot, coreEnvFile, coreFil
     };
   });
   return {
-    version: 1,
+    version: HOSTED_WORKLOAD_LOCK_VERSION,
+    validatorVersion: HOSTED_WORKLOAD_VALIDATOR_VERSION,
     state: "resolved",
     generatedAt: new Date().toISOString(),
     workloadRoot: root,
