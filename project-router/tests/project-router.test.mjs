@@ -248,6 +248,56 @@ test("production routing ignores legacy discovery and environment maps", async (
   assert.match(response.body, /Project not found/);
 });
 
+test("FG-042 production consumer rejects route-owner, sibling-upstream and wildcard substitutions", async (t) => {
+  const substitutions = [
+    ["route owner", { owner: "sibling-app" }],
+    ["sibling upstream", { service: "sibling-app-web", upstream: "http://sibling-app-web:3000" }],
+    ["wildcard hostname", { canonicalHost: "*.example.invalid", hosts: ["*.example.invalid"] }],
+  ];
+
+  for (const [label, override] of substitutions) {
+    await t.test(label, async (t) => {
+      const root = path.join(infraRoot, ".tmp", "project-router-tests", randomUUID());
+      const lockFile = path.join(root, "hosted-workloads.lock.json");
+      mkdirSync(root, { recursive: true });
+      writeFileSync(lockFile, `${JSON.stringify({
+        ...verifiedRouteLock(),
+        routes: [routeFixture(override)],
+      }, null, 2)}\n`);
+
+      const routerPort = await freePort();
+      const child = spawn(process.execPath, [path.join(infraRoot, "project-router", "server.mjs")], {
+        cwd: infraRoot,
+        env: {
+          ...process.env,
+          NODE_ENV: "production",
+          PROJECT_ROUTER_PORT: String(routerPort),
+          PROJECT_ROUTER_WORKLOAD_LOCK_FILE: lockFile,
+          CONTROL_CENTER_HOST: "portal.localhost.com",
+          CONTROL_CENTER_UPSTREAM: "http://control-center:8080",
+          PROJECT_ROUTER_ALLOWED_UPSTREAMS: "control-center:8080",
+        },
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      let stderr = "";
+      child.stderr.on("data", (chunk) => {
+        stderr += chunk.toString("utf8");
+      });
+      t.after(async () => {
+        await stopChild(child);
+        rmSync(root, { recursive: true, force: true });
+      });
+
+      await waitForHealth(routerPort);
+      const response = await httpGet(routerPort, "locked-demo.localhost.com", "/");
+      assert.equal(response.statusCode, 500);
+      assert.match(response.body, /internal proxy error/);
+      assert.match(stderr, /project-router request failed/);
+      assert.doesNotMatch(stderr, /sibling-app|example\.invalid/);
+    });
+  }
+});
+
 function prepareFixture() {
   rmSync(testRoot, { recursive: true, force: true });
   mkdirSync(path.join(projectsRoot, "php-demo", "public"), { recursive: true });
