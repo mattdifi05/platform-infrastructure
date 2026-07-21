@@ -101,6 +101,7 @@ module HostedWorkloadSourcePolicy
     volumes = model["volumes"]
     fail!("#{label} volumes must be a mapping.") if !volumes.nil? && !volumes.is_a?(Hash)
     (volumes || {}).each do |name, definition|
+      fail!("#{label} volume #{name} must be null or a mapping.") unless definition.nil? || definition.is_a?(Hash)
       if workload_id
         fail!("#{label} volume #{name} is not workload-prefixed.") unless name.start_with?("#{workload_id}_")
         if definition.is_a?(Hash) && (definition["external"] == true || definition.key?("name"))

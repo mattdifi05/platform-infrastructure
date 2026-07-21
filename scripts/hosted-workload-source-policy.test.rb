@@ -204,6 +204,13 @@ class HostedWorkloadSourcePolicyTest < Minitest::Test
     assert_raises(ArgumentError) do
       HostedWorkloadSourcePolicy.validate_source_model(model, "fixture", workload_id: "example-app", project_name: "fixture")
     end
+    ["attacker_example-app_data", ["attacker_example-app_data"]].each do |definition|
+      model = { "volumes" => { "example-app_data" => definition }, "services" => { "example-app-web" => {} } }
+      error = assert_raises(ArgumentError) do
+        HostedWorkloadSourcePolicy.validate_source_model(model, "fixture", workload_id: "example-app", project_name: "fixture")
+      end
+      assert_match(/must be null or a mapping/, error.message)
+    end
   end
 
   def test_binds_external_secrets_to_workload_owned_physical_names
