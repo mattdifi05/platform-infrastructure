@@ -153,4 +153,12 @@ class HostedWorkloadSourcePolicyTest < Minitest::Test
     end
     assert_match(/cannot override the OCI runtime/, error.message)
   end
+
+  def test_rejects_stop_grace_period_overrides
+    model = parse("services:\n  app:\n    stop_grace_period: 24h\n")
+    error = assert_raises(ArgumentError) do
+      HostedWorkloadSourcePolicy.validate_source_model(model, "fixture")
+    end
+    assert_match(/cannot override the stop grace period/, error.message)
+  end
 end

@@ -134,6 +134,14 @@ test("rejects workload OCI runtime overrides independently at runtime", () => {
   assert.match(report.failures.join("\n"), /workload-no-runtime-override-example-app-web/);
 });
 
+test("rejects workload stop grace period overrides independently at runtime", () => {
+  const config = fixture();
+  config.services["example-app-web"].stop_grace_period = "24h";
+  const report = evaluateRuntimeIsolation(config);
+  assert.equal(report.status, "failed");
+  assert.match(report.failures.join("\n"), /workload-no-stop-grace-override-example-app-web/);
+});
+
 test("rejects missing memory limits and budget overcommit", () => {
   const config = fixture();
   config.services["example-app-web"].mem_limit = 0;

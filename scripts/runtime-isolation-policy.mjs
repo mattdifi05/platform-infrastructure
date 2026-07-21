@@ -77,6 +77,7 @@ export function evaluateRuntimeIsolation(config, options = {}) {
     record(`workload-no-api-socket-${name}`, !Object.hasOwn(service, "use_api_socket"), `${name} useApiSocket=${service.use_api_socket ?? "unset"}`);
     record(`workload-no-provider-${name}`, !Object.hasOwn(service, "provider"), `${name} provider=${service.provider?.type ?? "none"}`);
     record(`workload-no-runtime-override-${name}`, !Object.hasOwn(service, "runtime"), `${name} runtime=${service.runtime ?? "default"}`);
+    record(`workload-no-stop-grace-override-${name}`, !Object.hasOwn(service, "stop_grace_period"), `${name} stopGrace=${service.stop_grace_period ?? "default"}`);
     const deviceControls = ["devices", "device_cgroup_rules"].filter((field) => Object.hasOwn(service, field));
     record(`workload-no-device-access-${name}`, deviceControls.length === 0, `${name} deviceControls=${deviceControls.join(",") || "none"}`);
     const mounts = volumes(service);

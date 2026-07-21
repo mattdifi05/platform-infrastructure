@@ -16,7 +16,7 @@ const IMAGE = /^[a-z0-9][a-z0-9._/-]*(?::[A-Za-z0-9._-]+)?@sha256:[a-f0-9]{64}$/
 const SAFE_PATH = /^[A-Za-z0-9_./-]+$/;
 export const HOSTED_WORKLOAD_LOCK_VERSION = 2;
 export const HOSTED_WORKLOAD_VALIDATOR_VERSION = "hosted-contract-v2";
-const RAW_POLICY_CONTROLS = Object.freeze(["deny-api-socket", "deny-device-access", "deny-env-file", "deny-extends", "deny-file-configs", "deny-include", "deny-lifecycle-hooks", "deny-local-volume-options", "deny-providers", "deny-runtime-overrides", "deny-scaling", "deny-volumes-from"]);
+const RAW_POLICY_CONTROLS = Object.freeze(["deny-api-socket", "deny-device-access", "deny-env-file", "deny-extends", "deny-file-configs", "deny-include", "deny-lifecycle-hooks", "deny-local-volume-options", "deny-providers", "deny-runtime-overrides", "deny-scaling", "deny-stop-grace-overrides", "deny-volumes-from"]);
 const PLATFORM_DEPENDENCIES = new Set([
   "postgres",
   "redis",
@@ -901,6 +901,7 @@ function assertWorkloadService({ serviceDefinition, manifestService, manifest, c
   if (serviceDefinition.use_api_socket != null) invalid(`${name} cannot use the Compose API socket.`);
   if (serviceDefinition.provider != null) invalid(`${name} cannot delegate execution to a provider.`);
   if (serviceDefinition.runtime != null) invalid(`${name} cannot override the OCI runtime.`);
+  if (serviceDefinition.stop_grace_period != null) invalid(`${name} cannot override the stop grace period.`);
   if (serviceDefinition.devices != null || serviceDefinition.device_cgroup_rules != null) invalid(`${name} cannot request host device access.`);
   if (serviceDefinition.volumes_from != null) invalid(`${name} cannot inherit volumes from another service.`);
   if (serviceDefinition.container_name) invalid(`${name} cannot reserve a global container_name.`);
