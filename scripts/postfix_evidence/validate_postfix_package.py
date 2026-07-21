@@ -7,7 +7,9 @@ import argparse
 import copy
 import json
 import re
+import shutil
 import sys
+from datetime import datetime, timezone
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -19,9 +21,11 @@ from scripts.postfix_evidence.common import (
     UTC_SECOND_RE,
     canonical_json_bytes,
     commit_equivalence,
+    evidence_repo_path,
     ensure_ancestor,
     ensure_path_at_commit,
     exact_keys,
+    git,
     git_head,
     git_text,
     git_tree,
@@ -144,6 +148,28 @@ GROUP_RECEIPT_FIELDS = {
 GLOBAL_TEST_PHASES = frozenset(
     {"full-suite", "differential-scan", "adversarial-qa", "documentation-validation"}
 )
+
+PHASE_SEMANTIC_ANCHOR = {
+    "negative": "negative-boundary",
+    "positive": "positive-control",
+    "regression": "regression-suite",
+    "hostile": "hostile-variant",
+    "independent-qa": "independent-qa",
+    "full-suite": "full-suite",
+    "differential-scan": "differential-scan",
+    "adversarial-qa": "adversarial-qa",
+    "documentation-validation": "documentation-validation",
+}
+
+OFFLINE_SANDBOX = {
+    "mode": "offline-read-only",
+    "network": False,
+    "docker": False,
+    "live": False,
+    "provider": False,
+    "secrets": False,
+    "filesystem_write": False,
+}
 
 SAFE_RECEIPT_ID_RE = re.compile(r"^[A-Z0-9][A-Z0-9._-]{0,127}$")
 SECRET_COMMAND_RE = re.compile(
@@ -517,8 +543,158 @@ def _validate_log_reference(root: Path, value: Any, *, label: str) -> Path:
     return path
 
 
+def _parse_utc_second(value: Any, *, label: str) -> datetime:
+    if not isinstance(value, str) or UTC_SECOND_RE.fullmatch(value) is None:
+        raise ContractError(f"{label}: expected a UTC timestamp with second precision")
+    try:
+        parsed = datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except ValueError as error:
+        raise ContractError(f"{label}: invalid UTC timestamp") from error
+    return parsed
+
+
+def _git_object_anchor(
+    repo: Path,
+    commit: str,
+    value: Any,
+    *,
+    label: str,
+    allowed_kinds: set[str] | None = None,
+) -> tuple[str, str | None]:
+    expected_keys = {"path", "mode", "sha256"}
+    if allowed_kinds is not None:
+        expected_keys.add("kind")
+    entry = exact_keys(value, expected_keys, label=label)
+    path = safe_relative(entry["path"], label=f"{label} path").as_posix()
+    if not isinstance(entry["mode"], str) or re.fullmatch(r"[0-7]{6}", entry["mode"]) is None:
+        raise ContractError(f"{label}: invalid Git mode")
+    if not isinstance(entry["sha256"], str) or SHA256_RE.fullmatch(entry["sha256"]) is None:
+        raise ContractError(f"{label}: invalid blob SHA-256")
+    if allowed_kinds is not None and entry["kind"] not in allowed_kinds:
+        raise ContractError(f"{label}: invalid anchor kind")
+    listing = git_text(repo, "ls-tree", commit, "--", path)
+    match = re.fullmatch(r"([0-7]{6}) (?:blob|commit) [0-9a-f]+\t.+", listing)
+    if match is None or match.group(1) != entry["mode"]:
+        raise ContractError(f"{label}: path/mode is absent at commit")
+    payload = git(repo, "show", f"{commit}:{path}")
+    if sha256_bytes(payload) != entry["sha256"]:
+        raise ContractError(f"{label}: content does not match script-at-commit/blob anchor")
+    return path, entry.get("kind")
+
+
+def _validate_cwd_at_commit(repo: Path, commit: str, value: Any, *, label: str) -> str:
+    cwd = nonempty_string(value, label=label)
+    if cwd == ".":
+        return cwd
+    path = safe_relative(cwd, label=label).as_posix()
+    object_type = git_text(repo, "cat-file", "-t", f"{commit}:{path}")
+    if object_type != "tree":
+        raise ContractError(f"{label}: cwd is not a directory at commit")
+    return path
+
+
+def _validate_executable(value: Any, argv: list[str], *, label: str) -> None:
+    entry = exact_keys(value, {"argv0", "resolved_path", "sha256"}, label=label)
+    argv0 = nonempty_string(entry["argv0"], label=f"{label} argv0")
+    if argv[0] != argv0:
+        raise ContractError(f"{label}: argv[0] does not match executable identity")
+    resolved_value = nonempty_string(entry["resolved_path"], label=f"{label} resolved path")
+    if not isinstance(entry["sha256"], str) or SHA256_RE.fullmatch(entry["sha256"]) is None:
+        raise ContractError(f"{label}: invalid executable SHA-256")
+    located = shutil.which(argv0)
+    if located is None:
+        raise ContractError(f"{label}: executable is unavailable")
+    resolved = Path(located).resolve(strict=True)
+    if str(resolved) != resolved_value or sha256_file(resolved, label=label) != entry["sha256"]:
+        raise ContractError(f"{label}: executable path/hash trust root changed")
+
+
+def _validate_execution_proof(
+    row: dict[str, Any],
+    *,
+    receipt_id: str,
+    phase: str,
+    repo: Path,
+    commit: str,
+    tree: str,
+    log_path: Path,
+    label: str,
+) -> set[tuple[str, str]]:
+    if row["head_commit"] != commit or row["head_tree"] != tree:
+        raise ContractError(f"{label}: execution head/tree does not match the required commit")
+    started = _parse_utc_second(row["started_at"], label=f"{label} start")
+    ended = _parse_utc_second(row["ended_at"], label=f"{label} end")
+    if ended < started:
+        raise ContractError(f"{label}: execution ended before it started")
+    _validate_cwd_at_commit(repo, commit, row["cwd"], label=f"{label} cwd")
+    argv = string_list(row["argv"], label=f"{label} argv")
+    if any("\n" in item or "\x00" in item or SECRET_COMMAND_RE.search(item) for item in argv):
+        raise ContractError(f"{label}: unsafe or credential-like argv")
+    _validate_executable(row["executable"], argv, label=f"{label} executable")
+    script_path, _ = _git_object_anchor(
+        repo,
+        commit,
+        row["script_at_commit"],
+        label=f"{label} script-at-commit",
+    )
+    executable_name = Path(argv[0]).name
+    if executable_name in {"python", "python3", "node", "bash", "sh"}:
+        if script_path not in argv[1:]:
+            raise ContractError(f"{label}: interpreter argv does not execute script-at-commit")
+    elif executable_name in {"make", "gmake"}:
+        script_name = Path(script_path).name
+        explicit_makefile = any(
+            item == script_path or item == script_name
+            for index, item in enumerate(argv)
+            if index > 0 and argv[index - 1] in {"-f", "--file", "--makefile"}
+        )
+        if script_name != "Makefile" and not explicit_makefile:
+            raise ContractError(f"{label}: Make argv is not bound to script-at-commit")
+    else:
+        raise ContractError(f"{label}: unsupported receipt executable")
+    if row["sandbox"] != OFFLINE_SANDBOX:
+        raise ContractError(f"{label}: sandbox does not prove offline read-only execution")
+    expected_semantic = PHASE_SEMANTIC_ANCHOR.get(phase, "pre-fix-negative-reproduced")
+    semantic_anchors = string_list(row["semantic_anchors"], label=f"{label} semantic anchors")
+    if semantic_anchors != [expected_semantic]:
+        raise ContractError(f"{label}: semantic anchor is not exact for phase")
+    artifact_rows = row["artifact_anchors"]
+    if not isinstance(artifact_rows, list) or not artifact_rows:
+        raise ContractError(f"{label}: artifact anchors are missing")
+    artifacts: set[tuple[str, str]] = set()
+    for index, anchor in enumerate(artifact_rows, start=1):
+        path, kind = _git_object_anchor(
+            repo,
+            commit,
+            anchor,
+            label=f"{label} artifact anchor {index}",
+            allowed_kinds={"test-script", "consumer", "documentation"},
+        )
+        pair = (str(kind), path)
+        if pair in artifacts:
+            raise ContractError(f"{label}: duplicate artifact anchor")
+        artifacts.add(pair)
+    if ("test-script", script_path) not in artifacts:
+        raise ContractError(f"{label}: script-at-commit lacks a test-script artifact anchor")
+    try:
+        log_lines = read_regular_bytes(log_path, label=f"{label} log").decode("utf-8").splitlines()
+    except UnicodeDecodeError as error:
+        raise ContractError(f"{label}: log is not UTF-8") from error
+    identity_line = (
+        f"RECEIPT {receipt_id} HEAD {commit} TREE {tree} PHASE {phase} RESULT PASS"
+    )
+    if identity_line not in log_lines or f"ANCHOR {expected_semantic}" not in log_lines:
+        raise ContractError(f"{label}: log lacks execution identity or semantic anchor")
+    return artifacts
+
+
 def _validate_test_receipts(
-    rows: list[dict[str, Any]], artifact_root: Path, final_commit: str, valid_groups: set[str]
+    rows: list[dict[str, Any]],
+    artifact_root: Path,
+    repo: Path,
+    final_commit: str,
+    final_tree: str,
+    valid_groups: set[str],
 ) -> tuple[dict[str, dict[str, Any]], dict[str, Path]]:
     by_id = _unique_rows(rows, "receipt_id", label="test receipt registry")
     logs: dict[str, Path] = {}
@@ -535,26 +711,28 @@ def _validate_test_receipts(
                 "phase",
                 "scope",
                 "group_ids",
-                "candidate_final_commit",
-                "command",
+                "head_commit",
+                "head_tree",
+                "started_at",
+                "ended_at",
+                "cwd",
+                "argv",
+                "executable",
+                "script_at_commit",
                 "exit_code",
                 "result",
+                "sandbox",
+                "semantic_anchors",
+                "artifact_anchors",
                 "log",
             },
             label=f"test receipt {receipt_id}",
         )
         if row["schema_version"] != 1 or row["phase"] not in allowed_phases:
             raise ContractError(f"test receipt {receipt_id}: invalid schema or phase")
-        if row["candidate_final_commit"] != final_commit:
-            raise ContractError(f"test receipt {receipt_id}: not bound to final HEAD")
         if row["exit_code"] != 0 or row["result"] != "PASS":
             raise ContractError(f"test receipt {receipt_id}: result is not PASS/0")
         nonempty_string(row["scope"], label=f"test receipt {receipt_id} scope")
-        command = string_list(row["command"], label=f"test receipt {receipt_id} command")
-        if any("\n" in item or "\x00" in item for item in command):
-            raise ContractError(f"test receipt {receipt_id}: unsafe command encoding")
-        if any(SECRET_COMMAND_RE.search(item) for item in command):
-            raise ContractError(f"test receipt {receipt_id}: credential-like command argument")
         groups = string_list(row["group_ids"], label=f"test receipt {receipt_id} groups", allow_empty=True)
         if not set(groups).issubset(valid_groups):
             raise ContractError(f"test receipt {receipt_id}: unknown fix group")
@@ -565,6 +743,16 @@ def _validate_test_receipts(
         elif not groups:
             raise ContractError(f"test receipt {receipt_id}: group phase has empty group coverage")
         logs[receipt_id] = _validate_log_reference(artifact_root, row["log"], label=f"test receipt {receipt_id} log")
+        _validate_execution_proof(
+            row,
+            receipt_id=receipt_id,
+            phase=row["phase"],
+            repo=repo,
+            commit=final_commit,
+            tree=final_tree,
+            log_path=logs[receipt_id],
+            label=f"test receipt {receipt_id}",
+        )
     if seen_global != set(GLOBAL_TEST_PHASES):
         raise ContractError("test receipt registry: full-suite/differential/adversarial/documentation receipts are incomplete")
     return by_id, logs
@@ -653,11 +841,25 @@ def _validate_fix_groups(
                 receipt = receipts.get(receipt_id)
                 if receipt is None or receipt["phase"] != phase or group_id not in receipt["group_ids"]:
                     raise ContractError(f"fix-group ledger {group_id}: invalid {phase} receipt binding")
+                anchored_consumers = {
+                    anchor["path"]
+                    for anchor in receipt["artifact_anchors"]
+                    if anchor["kind"] == "consumer"
+                }
+                required_consumers = {evidence_repo_path(item) for item in consumer_evidence}
+                if not required_consumers.issubset(anchored_consumers):
+                    raise ContractError(
+                        f"fix-group ledger {group_id}: {phase} receipt lacks consumer blob anchors"
+                    )
     return equivalence_by_group
 
 
 def _validate_pre_fix_receipt(
-    receipt: dict[str, Any], artifact_root: Path, baseline: Baseline, group_ids: set[str]
+    receipt: dict[str, Any],
+    artifact_root: Path,
+    baseline: Baseline,
+    group_ids: set[str],
+    repo: Path,
 ) -> dict[str, Path]:
     exact_keys(
         receipt,
@@ -690,7 +892,28 @@ def _validate_pre_fix_receipt(
     logs: dict[str, Path] = {}
     log_paths: set[str] = set()
     for index, row in enumerate(executions, start=1):
-        exact_keys(row, {"group_id", "runner_kind", "command", "result", "exit_code", "log"}, label=f"pre-fix execution {index}")
+        exact_keys(
+            row,
+            {
+                "group_id",
+                "runner_kind",
+                "head_commit",
+                "head_tree",
+                "started_at",
+                "ended_at",
+                "cwd",
+                "argv",
+                "executable",
+                "script_at_commit",
+                "result",
+                "exit_code",
+                "sandbox",
+                "semantic_anchors",
+                "artifact_anchors",
+                "log",
+            },
+            label=f"pre-fix execution {index}",
+        )
         group_id = row["group_id"]
         if group_id not in group_ids or group_id in seen:
             raise ContractError("pre-fix negative receipt: missing or duplicate fix-group execution")
@@ -699,10 +922,8 @@ def _validate_pre_fix_receipt(
         if runner_kind not in counts:
             raise ContractError(f"pre-fix negative receipt: invalid runner kind for {group_id}")
         counts[runner_kind] += 1
-        command = string_list(row["command"], label=f"pre-fix execution {group_id} command")
-        if any(SECRET_COMMAND_RE.search(item) for item in command):
-            raise ContractError(f"pre-fix negative receipt: credential-like command argument for {group_id}")
-        executable = Path(command[0]).name
+        argv = string_list(row["argv"], label=f"pre-fix execution {group_id} argv")
+        executable = Path(argv[0]).name
         if runner_kind == "make-wrapper" and executable not in {"make", "gmake"}:
             raise ContractError(f"pre-fix negative receipt: {group_id} is not a Make wrapper")
         if runner_kind == "manual-harness" and executable not in {"python3", "node", "bash", "sh"}:
@@ -717,6 +938,35 @@ def _validate_pre_fix_receipt(
             raise ContractError("pre-fix negative receipt: execution logs are not one-to-one")
         log_paths.add(log_path_text)
         logs[group_id] = _validate_log_reference(artifact_root, log_entry, label=f"pre-fix execution {group_id} log")
+        _validate_execution_proof(
+            row,
+            receipt_id=group_id,
+            phase="pre-fix-negative",
+            repo=repo,
+            commit=baseline.candidate_commit,
+            tree=baseline.candidate_tree,
+            log_path=logs[group_id],
+            label=f"pre-fix execution {group_id}",
+        )
+        if runner_kind == "make-wrapper":
+            script_path = row["script_at_commit"]["path"]
+            script_payload = git(repo, "show", f"{baseline.candidate_commit}:{script_path}")
+            targets = [
+                item
+                for item in argv[1:]
+                if not item.startswith("-") and item not in {script_path, Path(script_path).name}
+            ]
+            if not targets:
+                raise ContractError(f"pre-fix negative receipt: {group_id} Make target is missing")
+            target = targets[-1]
+            try:
+                makefile_text = script_payload.decode("utf-8")
+            except UnicodeDecodeError as error:
+                raise ContractError(f"pre-fix negative receipt: {group_id} Makefile is not UTF-8") from error
+            if re.search(rf"(?m)^{re.escape(target)}\s*:", makefile_text) is None:
+                raise ContractError(
+                    f"pre-fix negative receipt: {group_id} Make target is absent at baseline commit"
+                )
     if seen != group_ids or counts != {"make-wrapper": 72, "manual-harness": 5}:
         raise ContractError("pre-fix negative receipt: exact 77-FG/72-Make/5-manual contract failed")
     summary = exact_keys(
@@ -797,8 +1047,28 @@ def _validate_documentation(
         for evidence in string_list(paths, label=f"documentation topic {topic}"):
             ensure_path_at_commit(repo, final_commit, evidence)
     receipt_ids = string_list(receipt["test_receipt_ids"], label="documentation alignment tests")
-    if not any(test_receipts.get(item, {}).get("phase") == "documentation-validation" for item in receipt_ids):
+    documentation_receipts = [
+        test_receipts[item]
+        for item in receipt_ids
+        if item in test_receipts and test_receipts[item].get("phase") == "documentation-validation"
+    ]
+    if not documentation_receipts:
         raise ContractError("documentation alignment receipt: documentation validation test is missing")
+    required_paths = {
+        evidence_repo_path(evidence)
+        for paths in topics.values()
+        for evidence in paths
+    }
+    anchored_paths = {
+        anchor["path"]
+        for test_receipt in documentation_receipts
+        for anchor in test_receipt["artifact_anchors"]
+        if anchor["kind"] == "documentation"
+    }
+    if anchored_paths != required_paths:
+        raise ContractError(
+            "documentation alignment receipt: documentation blobs are not exactly anchored by the runner"
+        )
 
 
 def _validate_semantic(receipt: dict[str, Any], final_commit: str, path: Path, expected_sha256: str) -> None:
@@ -1093,9 +1363,23 @@ def _validate_dataset(
 ) -> tuple[list[dict[str, Any]], dict[str, Path], dict[str, Path], dict[str, int]]:
     classification, external_or_live = _validate_classification(classification_rows, baseline, final_commit)
     group_ids = {row["group_id"] for row in group_map_rows}
-    receipts, test_logs = _validate_test_receipts(test_receipt_rows, artifact_root, final_commit, group_ids)
+    final_tree = git_tree(candidate_repo, final_commit)
+    receipts, test_logs = _validate_test_receipts(
+        test_receipt_rows,
+        artifact_root,
+        candidate_repo,
+        final_commit,
+        final_tree,
+        group_ids,
+    )
     equivalence = _validate_fix_groups(fix_group_rows, group_map_rows, receipts, candidate_repo, final_commit)
-    pre_fix_logs = _validate_pre_fix_receipt(pre_fix_receipt, artifact_root, baseline, group_ids)
+    pre_fix_logs = _validate_pre_fix_receipt(
+        pre_fix_receipt,
+        artifact_root,
+        baseline,
+        group_ids,
+        candidate_repo,
+    )
     _validate_local_closures(local_closure_rows, baseline, classification, final_commit, candidate_repo, receipts)
     _validate_documentation(documentation_receipt, final_commit, candidate_repo, receipts)
     _validate_semantic(semantic_receipt, final_commit, semantic_path, semantic_receipt_sha256)

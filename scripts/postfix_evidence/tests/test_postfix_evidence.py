@@ -4,6 +4,7 @@ import copy
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -135,6 +136,15 @@ class Fixture:
         run_git(self.repo, "init", "-q")
         (self.repo / "tracked.txt").write_text("baseline\n", encoding="utf-8")
         (self.repo / "docs.md").write_text("# Complete documentation\n", encoding="utf-8")
+        (self.repo / "offline-fixture.py").write_text(
+            "#!/usr/bin/env python3\nprint('offline fixture')\n",
+            encoding="utf-8",
+        )
+        make_targets = "\n".join(
+            f"pre-fix-fg-{number:03d}:\n\t@true"
+            for number in range(1, 73)
+        )
+        (self.repo / "Makefile").write_text(make_targets + "\n", encoding="utf-8")
         self.baseline_commit = self._git_commit("baseline")
         self.baseline_tree = run_git(self.repo, "rev-parse", "HEAD^{tree}")
 
@@ -150,6 +160,51 @@ class Fixture:
         self.final_tree = run_git(self.repo, "rev-parse", "HEAD^{tree}")
         if self.cohort_commit == self.final_commit:
             raise AssertionError("fixture commits must have distinct identities")
+
+    def _git_blob_descriptor(
+        self,
+        commit: str,
+        path: str,
+        *,
+        kind: str | None = None,
+    ) -> dict[str, str]:
+        listing = run_git(self.repo, "ls-tree", commit, "--", path)
+        mode = listing.split(" ", 1)[0]
+        payload = subprocess.run(
+            ["git", "-C", os.fspath(self.repo), "show", f"{commit}:{path}"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=True,
+        ).stdout
+        result = {"path": path, "mode": mode, "sha256": hashlib.sha256(payload).hexdigest()}
+        if kind is not None:
+            result["kind"] = kind
+        return result
+
+    @staticmethod
+    def _executable_descriptor(argv0: str) -> dict[str, str]:
+        located = shutil.which(argv0)
+        if located is None:
+            raise AssertionError(f"fixture executable unavailable: {argv0}")
+        resolved = Path(located).resolve(strict=True)
+        return {
+            "argv0": argv0,
+            "resolved_path": str(resolved),
+            "sha256": sha256(resolved),
+        }
+
+    @staticmethod
+    def _execution_log(
+        receipt_id: str,
+        head: str,
+        tree: str,
+        phase: str,
+        semantic_anchor: str,
+    ) -> str:
+        return (
+            f"RECEIPT {receipt_id} HEAD {head} TREE {tree} PHASE {phase} RESULT PASS\n"
+            f"ANCHOR {semantic_anchor}\n"
+        )
 
     @staticmethod
     def _classification_row(
@@ -422,8 +477,46 @@ class Fixture:
             )
         self._write_jsonl(self.inputs / "fix-groups.jsonl", group_ledger)
 
+        semantic_by_phase = {
+            "negative": "negative-boundary",
+            "positive": "positive-control",
+            "regression": "regression-suite",
+            "hostile": "hostile-variant",
+            "independent-qa": "independent-qa",
+            "full-suite": "full-suite",
+            "differential-scan": "differential-scan",
+            "adversarial-qa": "adversarial-qa",
+            "documentation-validation": "documentation-validation",
+        }
+        sandbox = {
+            "mode": "offline-read-only",
+            "network": False,
+            "docker": False,
+            "live": False,
+            "provider": False,
+            "secrets": False,
+            "filesystem_write": False,
+        }
+        python_executable = self._executable_descriptor("python3")
+        final_script = self._git_blob_descriptor(self.final_commit, "offline-fixture.py")
+        final_test_anchor = self._git_blob_descriptor(
+            self.final_commit,
+            "offline-fixture.py",
+            kind="test-script",
+        )
+        final_consumer_anchor = self._git_blob_descriptor(
+            self.final_commit,
+            "tracked.txt",
+            kind="consumer",
+        )
+        final_documentation_anchor = self._git_blob_descriptor(
+            self.final_commit,
+            "docs.md",
+            kind="documentation",
+        )
         receipts = []
         for phase, receipt_id in phase_ids.items():
+            semantic_anchor = semantic_by_phase[phase]
             receipts.append(
                 {
                     "schema_version": 1,
@@ -431,15 +524,34 @@ class Fixture:
                     "phase": phase,
                     "scope": "all-fix-groups",
                     "group_ids": group_ids,
-                    "candidate_final_commit": self.final_commit,
-                    "command": ["python3", "offline-fixture.py", phase],
+                    "head_commit": self.final_commit,
+                    "head_tree": self.final_tree,
+                    "started_at": "2026-07-21T19:00:00Z",
+                    "ended_at": "2026-07-21T19:00:01Z",
+                    "cwd": ".",
+                    "argv": ["python3", "offline-fixture.py", phase],
+                    "executable": python_executable,
+                    "script_at_commit": final_script,
                     "exit_code": 0,
                     "result": "PASS",
-                    "log": self._write_log(f"logs/{receipt_id}.log", f"{phase}: PASS\n"),
+                    "sandbox": sandbox,
+                    "semantic_anchors": [semantic_anchor],
+                    "artifact_anchors": [final_test_anchor, final_consumer_anchor],
+                    "log": self._write_log(
+                        f"logs/{receipt_id}.log",
+                        self._execution_log(
+                            receipt_id,
+                            self.final_commit,
+                            self.final_tree,
+                            phase,
+                            semantic_anchor,
+                        ),
+                    ),
                 }
             )
         for phase in ("full-suite", "differential-scan", "adversarial-qa", "documentation-validation"):
             receipt_id = f"TEST-{phase.upper()}"
+            semantic_anchor = semantic_by_phase[phase]
             receipts.append(
                 {
                     "schema_version": 1,
@@ -447,26 +559,95 @@ class Fixture:
                     "phase": phase,
                     "scope": "candidate",
                     "group_ids": [],
-                    "candidate_final_commit": self.final_commit,
-                    "command": ["python3", "offline-fixture.py", phase],
+                    "head_commit": self.final_commit,
+                    "head_tree": self.final_tree,
+                    "started_at": "2026-07-21T19:00:00Z",
+                    "ended_at": "2026-07-21T19:00:01Z",
+                    "cwd": ".",
+                    "argv": ["python3", "offline-fixture.py", phase],
+                    "executable": python_executable,
+                    "script_at_commit": final_script,
                     "exit_code": 0,
                     "result": "PASS",
-                    "log": self._write_log(f"logs/{receipt_id}.log", f"{phase}: PASS\n"),
+                    "sandbox": sandbox,
+                    "semantic_anchors": [semantic_anchor],
+                    "artifact_anchors": [
+                        final_test_anchor,
+                        final_documentation_anchor
+                        if phase == "documentation-validation"
+                        else final_consumer_anchor,
+                    ],
+                    "log": self._write_log(
+                        f"logs/{receipt_id}.log",
+                        self._execution_log(
+                            receipt_id,
+                            self.final_commit,
+                            self.final_tree,
+                            phase,
+                            semantic_anchor,
+                        ),
+                    ),
                 }
             )
         self._write_jsonl(self.inputs / "test-receipts.jsonl", receipts)
 
+        make_executable = self._executable_descriptor("make")
+        baseline_makefile = self._git_blob_descriptor(self.baseline_commit, "Makefile")
+        baseline_makefile_anchor = self._git_blob_descriptor(
+            self.baseline_commit,
+            "Makefile",
+            kind="test-script",
+        )
+        baseline_script = self._git_blob_descriptor(self.baseline_commit, "offline-fixture.py")
+        baseline_script_anchor = self._git_blob_descriptor(
+            self.baseline_commit,
+            "offline-fixture.py",
+            kind="test-script",
+        )
+        baseline_consumer_anchor = self._git_blob_descriptor(
+            self.baseline_commit,
+            "tracked.txt",
+            kind="consumer",
+        )
         executions = []
         for index, group_id in enumerate(group_ids, start=1):
             runner_kind = "make-wrapper" if index <= 72 else "manual-harness"
+            is_make = runner_kind == "make-wrapper"
+            argv = (
+                ["make", f"pre-fix-{group_id.lower()}"]
+                if is_make
+                else ["python3", "offline-fixture.py", group_id]
+            )
             executions.append(
                 {
                     "group_id": group_id,
                     "runner_kind": runner_kind,
-                    "command": ["make", f"pre-fix-{group_id.lower()}"] if runner_kind == "make-wrapper" else ["python3", f"manual-{group_id.lower()}.py"],
+                    "head_commit": self.baseline_commit,
+                    "head_tree": self.baseline_tree,
+                    "started_at": "2026-07-21T18:00:00Z",
+                    "ended_at": "2026-07-21T18:00:01Z",
+                    "cwd": ".",
+                    "argv": argv,
+                    "executable": make_executable if is_make else python_executable,
+                    "script_at_commit": baseline_makefile if is_make else baseline_script,
                     "result": "PRE-FIX-NEGATIVE-REPRODUCED",
                     "exit_code": 0,
-                    "log": self._write_log(f"logs/pre-fix-{group_id}.log", f"{group_id}: reproduced\n"),
+                    "sandbox": sandbox,
+                    "semantic_anchors": ["pre-fix-negative-reproduced"],
+                    "artifact_anchors": [
+                        baseline_makefile_anchor if is_make else baseline_script_anchor,
+                        baseline_consumer_anchor,
+                    ],
+                    "log": self._write_log(
+                        f"logs/pre-fix-{group_id}.log",
+                        self._execution_log(
+                            group_id,
+                            self.baseline_commit,
+                            self.baseline_tree,
+                            "pre-fix-negative",
+                            "pre-fix-negative-reproduced",
+                        ),
+                    ),
                 }
             )
         pre_fix = {
@@ -845,8 +1026,43 @@ class PostfixEvidenceTests(unittest.TestCase):
             self.build()
 
     def test_pass_log_cannot_substitute_for_a_script_present_at_final_commit(self) -> None:
-        self.assertFalse((self.fixture.repo / "offline-fixture.py").exists())
+        rows = self.fixture.load_jsonl("inputs/test-receipts.jsonl")
+        rows[0]["argv"] = ["python3", "missing-fixture.py", rows[0]["phase"]]
+        rows[0]["script_at_commit"]["path"] = "missing-fixture.py"
+        self.fixture.write_jsonl("inputs/test-receipts.jsonl", rows)
+        self.fixture.refresh_handoff_hash("test_receipt_registry")
         with self.assertRaisesRegex(ContractError, "script-at-commit|script at final commit"):
+            self.build()
+
+    def test_receipt_log_must_bind_head_tree_phase_result_and_semantic_anchor(self) -> None:
+        rows = self.fixture.load_jsonl("inputs/test-receipts.jsonl")
+        target = rows[0]
+        log_path = self.fixture.handoff_root / target["log"]["path"]
+        log_path.write_text("PASS\n", encoding="utf-8")
+        target["log"]["sha256"] = sha256(log_path)
+        self.fixture.write_jsonl("inputs/test-receipts.jsonl", rows)
+        self.fixture.refresh_handoff_hash("test_receipt_registry")
+        with self.assertRaisesRegex(ContractError, "log lacks execution identity|semantic anchor"):
+            self.build()
+
+    def test_receipt_sandbox_and_executable_are_current_trust_roots(self) -> None:
+        rows = self.fixture.load_jsonl("inputs/test-receipts.jsonl")
+        rows[0]["sandbox"]["network"] = True
+        rows[0]["executable"]["sha256"] = "0" * 64
+        self.fixture.write_jsonl("inputs/test-receipts.jsonl", rows)
+        self.fixture.refresh_handoff_hash("test_receipt_registry")
+        with self.assertRaisesRegex(ContractError, "executable|sandbox"):
+            self.build()
+
+    def test_documentation_validation_receipt_anchors_every_document_blob(self) -> None:
+        rows = self.fixture.load_jsonl("inputs/test-receipts.jsonl")
+        target = next(row for row in rows if row["phase"] == "documentation-validation")
+        target["artifact_anchors"] = [
+            anchor for anchor in target["artifact_anchors"] if anchor["kind"] != "documentation"
+        ]
+        self.fixture.write_jsonl("inputs/test-receipts.jsonl", rows)
+        self.fixture.refresh_handoff_hash("test_receipt_registry")
+        with self.assertRaisesRegex(ContractError, "documentation blobs"):
             self.build()
 
     def test_manifest_tamper_is_detected_after_build(self) -> None:
