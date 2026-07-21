@@ -9,9 +9,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 test("FG-005 documents only the isolation-aware scheduler entrypoint", () => {
   for (const name of ["README.md", "RUNBOOK.md"]) {
     const source = fs.readFileSync(path.join(root, name), "utf8");
-    const schedulerBlocks = [...source.matchAll(/```(?:sh|bash)\n([\s\S]*?)```/g)]
-      .map((match) => match[1])
-      .filter((block) => /(?:compose-vps\.sh|\bup\s+-d\s+backup-scheduler\b)/.test(block));
+    const schedulerBlocks = documentedSchedulerComposeBlocks(source);
     assert.ok(schedulerBlocks.length > 0, `${name} must document scheduler startup`);
     for (const block of schedulerBlocks) {
       if (!/(?:^|\n)\s*(?:docker logs|docker exec)\b/.test(block) || /(?:^|\n)\s*(?:docker compose|docker-compose)\b/.test(block)) {
@@ -20,6 +18,11 @@ test("FG-005 documents only the isolation-aware scheduler entrypoint", () => {
       assert.doesNotMatch(block, /(?:^|\n)\s*(?:docker compose|docker-compose)\b/);
     }
   }
+});
+
+test("FG-005 scanner includes every Compose command block that cites backup-scheduler", () => {
+  const injected = "```sh\ndocker compose up --wait backup-scheduler\n```\n";
+  assert.equal(documentedSchedulerComposeBlocks(injected).length, 1);
 });
 
 test("FG-005 wrapper and scheduler retain the complete isolation boundary", () => {
@@ -50,4 +53,11 @@ function serviceBlock(source, name) {
   const rest = source.slice(start + marker.length);
   const end = rest.search(/\n  [a-zA-Z0-9][a-zA-Z0-9_-]*:\n/);
   return end === -1 ? rest : rest.slice(0, end);
+}
+
+function documentedSchedulerComposeBlocks(source) {
+  return [...source.matchAll(/^\s{0,3}```(?:sh|bash|shell|zsh|console)\s*\r?\n([\s\S]*?)^\s{0,3}```\s*$/gim)]
+    .map((match) => match[1])
+    .filter((block) => /\bbackup-scheduler\b/.test(block)
+      && /(?:^|\n)\s*(?:\$\s*)?(?:(?:docker\s+compose|docker-compose)\b|(?:bash|sh)\s+\.\/scripts\/compose-vps\.sh\b)/m.test(block));
 }
