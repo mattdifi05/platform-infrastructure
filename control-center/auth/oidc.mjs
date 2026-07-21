@@ -342,7 +342,7 @@ class OidcPasskeyAuth {
       throw new AuthRequestError("OIDC back-channel logout requires form encoding.", 415);
     }
     const logoutToken = await readSingleFormField(req, "logout_token", 16 * 1024);
-    const claims = await this.verifySignedProviderToken(logoutToken);
+    const claims = await this.verifySignedProviderToken(logoutToken, { requiredType: "logout+jwt" });
     const events = claims.events && typeof claims.events === "object" && !Array.isArray(claims.events)
       ? claims.events
       : null;

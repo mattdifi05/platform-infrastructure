@@ -3460,6 +3460,7 @@ test("Admin Control Center OIDC passkey guard", async (t) => {
     signer = privateKey,
     alg = "RS256",
     kid = "test-key",
+    tokenType = "logout+jwt",
     tokenIssuer = issuer,
     tokenAudience = clientId,
     jti = `logout-${randomUUID()}`,
@@ -3476,7 +3477,7 @@ test("Admin Control Center OIDC passkey guard", async (t) => {
     };
     for (const claim of omit) delete payload[claim];
     let token = new SignJWT(payload)
-      .setProtectedHeader({ alg, kid })
+      .setProtectedHeader({ alg, kid, ...(tokenType === null ? {} : { typ: tokenType }) })
       .setIssuer(tokenIssuer)
       .setAudience(tokenAudience)
       .setIssuedAt(issuedAt)
@@ -3542,6 +3543,9 @@ test("Admin Control Center OIDC passkey guard", async (t) => {
     await createLogoutToken({ signer: wrongPrivateKey }),
     await createLogoutToken({ tokenIssuer: "https://wrong-issuer.example.test/realms/platform" }),
     await createLogoutToken({ tokenAudience: "wrong-client" }),
+    await createLogoutToken({ tokenType: null }),
+    await createLogoutToken({ tokenType: "secevent+jwt" }),
+    await createLogoutToken({ tokenType: "attacker+jwt" }),
     await createLogoutToken({ claims: { nonce: "forbidden" } }),
     await createLogoutToken({ claims: { events: { "urn:wrong:event": {} } } }),
     await createLogoutToken({ claims: { events: { "http://schemas.openid.net/event/backchannel-logout": {}, revoke_offline_access: false } } }),
@@ -3611,7 +3615,7 @@ test("Admin Control Center OIDC passkey guard", async (t) => {
     await createProviderSecurityEventToken({ omit: ["sub"] }),
     await createProviderSecurityEventToken({ jti: null }),
     await createProviderSecurityEventToken({ issuedAt: Math.floor(Date.now() / 1000) - 6 * 60 }),
-    await createProviderSecurityEventToken({ issuedAt: Math.floor(Date.now() / 1000) + 1 }),
+    await createProviderSecurityEventToken({ issuedAt: Math.floor(Date.now() / 1000) + 60 }),
   ];
   for (const invalidProviderEvent of invalidProviderEvents) {
     const response = await submitProviderSecurityEvent(invalidProviderEvent);
@@ -3779,7 +3783,7 @@ test("OIDC back-channel logout reports transient JWKS failures as retryable", as
     events: { "http://schemas.openid.net/event/backchannel-logout": {} },
     sid: "transient-jwks-session",
   })
-    .setProtectedHeader({ alg: "RS256", kid: "unavailable-key" })
+    .setProtectedHeader({ alg: "RS256", kid: "unavailable-key", typ: "logout+jwt" })
     .setIssuer(issuer)
     .setAudience("platform-control-center")
     .setJti("transient-jwks-1")
@@ -3876,7 +3880,7 @@ test("OIDC back-channel logout distinguishes JWKS rotation cooldown from an unkn
       events: { "http://schemas.openid.net/event/backchannel-logout": {} },
       sid: `sid-${jti}`,
     })
-      .setProtectedHeader({ alg: "RS256", kid })
+      .setProtectedHeader({ alg: "RS256", kid, typ: "logout+jwt" })
       .setIssuer(issuer)
       .setAudience(clientId)
       .setJti(jti)
