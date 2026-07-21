@@ -25,7 +25,7 @@ import { evaluateRuntimeFingerprint } from "./runtime-fingerprint.mjs";
 import { providerEvidenceAttestationOptions } from "./provider-evidence-auth.mjs";
 import { sha256FileBounded } from "./bounded-file-hash.mjs";
 import { runCommandSync } from "./command-safety.mjs";
-import { resticSecretTransport } from "./restic-secret-transport.mjs";
+import { resticPassthroughEnvironmentKeys, resticSecretTransport } from "./restic-secret-transport.mjs";
 import { safeTarCreateArgs, validateTarEntryName } from "./safe-tar-path.mjs";
 import { assertNoPlaintextFingerprints, legacyPlaintextFingerprintNames } from "./secret-store-metadata.mjs";
 import { readBackupImportProvenance, validateBackupImportProvenance } from "./backup-import-policy.mjs";
@@ -176,6 +176,7 @@ function run(bin, args = [], options = {}) {
     capture: options.capture,
     allowFailure: options.allowFailure,
     sensitiveValues: options.sensitiveValues,
+    sensitiveEnvironmentKeys: options.sensitiveEnvironmentKeys,
   });
 }
 
@@ -4144,37 +4145,6 @@ async function runLoadProbe({ label, url, requests, concurrency, maxP95Ms }) {
   return { requests, concurrency, syntheticClients: syntheticClientPool || 1, avg, p95, maxP95Ms, errors: 0 };
 }
 
-const resticPassthroughEnvKeys = [
-  "AWS_ACCESS_KEY_ID",
-  "AWS_SECRET_ACCESS_KEY",
-  "AWS_SESSION_TOKEN",
-  "AWS_DEFAULT_REGION",
-  "RESTIC_AWS_ASSUME_ROLE_ARN",
-  "RESTIC_AWS_ASSUME_ROLE_SESSION_NAME",
-  "RESTIC_AWS_ASSUME_ROLE_EXTERNAL_ID",
-  "RESTIC_AWS_ASSUME_ROLE_REGION",
-  "RESTIC_AWS_ASSUME_ROLE_STS_ENDPOINT",
-  "B2_ACCOUNT_ID",
-  "B2_ACCOUNT_KEY",
-  "AZURE_ACCOUNT_NAME",
-  "AZURE_ACCOUNT_KEY",
-  "AZURE_ACCOUNT_SAS",
-  "AZURE_ENDPOINT_SUFFIX",
-  "GOOGLE_PROJECT_ID",
-  "GOOGLE_ACCESS_TOKEN",
-  "OS_AUTH_URL",
-  "OS_REGION_NAME",
-  "OS_USERNAME",
-  "OS_USER_ID",
-  "OS_PASSWORD",
-  "OS_TENANT_ID",
-  "OS_TENANT_NAME",
-  "OS_USER_DOMAIN_NAME",
-  "OS_USER_DOMAIN_ID",
-  "OS_PROJECT_NAME",
-  "OS_PROJECT_DOMAIN_NAME",
-];
-
 const defaultResticImage = "restic/restic:0.18.0@sha256:4cf4a61ef9786f4de53e9de8c8f5c040f33830eb0a10bf3d614410ee2fcb6120";
 const defaultResticRcloneImage = "platform/restic-rclone:local";
 const defaultResticMaxRepositoryBytes = 2_500_000_000_000;
@@ -4328,7 +4298,7 @@ function resticDockerContainerArgs({ repository, passwordFile, mounts = [] }) {
     ...secretTransport.dockerArgs,
     ...rcloneConfig.env,
   ];
-  for (const key of resticPassthroughEnvKeys) {
+  for (const key of resticPassthroughEnvironmentKeys) {
     if (process.env[key]) {
       args.push("-e", key);
     }
@@ -4352,6 +4322,7 @@ function resticDockerRun({ repository, passwordFile, mounts = [], resticArgs = [
     ...runOptions,
     env: { ...runOptions.env, ...invocation.secretTransport.processEnv },
     sensitiveValues: [...(runOptions.sensitiveValues ?? []), ...invocation.secretTransport.sensitiveValues],
+    sensitiveEnvironmentKeys: invocation.secretTransport.sensitiveEnvironmentKeys,
   });
 }
 

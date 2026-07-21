@@ -25,6 +25,7 @@ test("infra Restic execution uses the key-only environment transport", () => {
   assert.match(source, /resticSecretTransport\(repository,/);
   assert.match(source, /invocation\.secretTransport\.processEnv/);
   assert.match(source, /invocation\.secretTransport\.sensitiveValues/);
+  assert.match(source, /invocation\.secretTransport\.sensitiveEnvironmentKeys/);
 });
 
 test("raw, URI, percent-encoded, and base64 repository credentials are redacted", () => {
@@ -36,16 +37,41 @@ test("raw, URI, percent-encoded, and base64 repository credentials are redacted"
 });
 
 test("synthetic command failure cannot serialize the repository credential", () => {
+  const transport = resticSecretTransport(repository, "/run/restic/password");
   const script = [
-    `process.stdout.write(${JSON.stringify(repository)});`,
+    `process.stdout.write(${JSON.stringify(`${credential}\nbackup-user`)});`,
     `process.stderr.write(${JSON.stringify(Buffer.from(repository).toString("base64"))});`,
     "process.exit(7);",
   ].join("\n");
   assert.throws(
-    () => runCommandSync(process.execPath, ["-e", script, repository], { capture: true, sensitiveValues: [repository, credential] }),
+    () => runCommandSync(process.execPath, ["-e", script, repository], {
+      capture: true,
+      sensitiveValues: transport.sensitiveValues,
+    }),
     (error) => {
       assert.equal(error.message.includes(repository), false);
       assert.equal(error.message.includes(credential), false);
+      assert.equal(error.message.includes("backup-user"), false);
+      assert.match(error.message, /\[REDACTED\]/);
+      return true;
+    },
+  );
+});
+
+test("passthrough credential environment values are discovered by key and redacted", () => {
+  const inheritedCredential = "synthetic-inherited-provider-credential";
+  const transport = resticSecretTransport(repository, "/run/restic/password");
+  const script = `process.stderr.write(process.env.AWS_SECRET_ACCESS_KEY); process.exit(9);`;
+  assert.equal(transport.sensitiveEnvironmentKeys.includes("AWS_SECRET_ACCESS_KEY"), true);
+  assert.throws(
+    () => runCommandSync(process.execPath, ["-e", script], {
+      capture: true,
+      env: { ...process.env, AWS_SECRET_ACCESS_KEY: inheritedCredential },
+      sensitiveValues: transport.sensitiveValues,
+      sensitiveEnvironmentKeys: transport.sensitiveEnvironmentKeys,
+    }),
+    (error) => {
+      assert.equal(error.message.includes(inheritedCredential), false);
       assert.match(error.message, /\[REDACTED\]/);
       return true;
     },
