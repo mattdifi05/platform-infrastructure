@@ -125,13 +125,15 @@ function validateReportBinding({ report, phase, sourceGit, candidate, notBeforeM
     if (nowMs - generatedAtMs > maxAgeHours * 3_600_000) issues.push(`${prefix}: stale artifact`);
     if (notBeforeMs !== null && generatedAtMs < notBeforeMs) issues.push(`${prefix}: predates relevant phase event`);
   }
-  if (candidate && payload.candidate && !candidateIdentityMatches(candidate, payload.candidate)) {
-    issues.push(`${prefix}: candidate mismatch`);
+  if (candidate) {
+    if (!payload.candidate) issues.push(`${prefix}: candidate is missing`);
+    else if (!candidateIdentityMatches(candidate, payload.candidate)) issues.push(`${prefix}: candidate mismatch`);
+
+    if (!payload.candidateEnd) issues.push(`${prefix}: ending candidate is missing`);
+    else if (!candidateIdentityMatches(candidate, payload.candidateEnd)) issues.push(`${prefix}: ending candidate mismatch`);
+
+    if (payload.candidateStable !== true) issues.push(`${prefix}: candidate stability proof is missing or false`);
   }
-  if (candidate && payload.candidateEnd && !candidateIdentityMatches(candidate, payload.candidateEnd)) {
-    issues.push(`${prefix}: ending candidate mismatch`);
-  }
-  if (payload.candidateStable === false) issues.push(`${prefix}: candidate changed while report was generated`);
   return issues;
 }
 

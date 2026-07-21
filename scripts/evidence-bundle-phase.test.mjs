@@ -151,6 +151,38 @@ test("production bundles require one trusted candidate, a relevant event, and ma
   }
 });
 
+test("every production report requires exact start, end, and stable candidate bindings", () => {
+  const labels = ["production-go-no-go"];
+  const basePayload = { candidate, candidateEnd: candidate, candidateStable: true };
+  const mutations = [
+    { payload: { candidateEnd: candidate, candidateStable: true }, expected: /candidate is missing/ },
+    { payload: { candidate, candidateStable: true }, expected: /ending candidate is missing/ },
+    { payload: { candidate, candidateEnd: candidate }, expected: /candidate stability proof is missing or false/ },
+    { payload: { candidate, candidateEnd: candidate, candidateStable: false }, expected: /candidate stability proof is missing or false/ },
+    {
+      payload: { ...basePayload, candidateEnd: createCandidateIdentity({ ...candidate, renderSha256: "a".repeat(64) }) },
+      expected: /ending candidate mismatch/,
+    },
+  ];
+
+  for (const mutation of mutations) {
+    const result = evaluateEvidenceBundlePhase({
+      phase: "production-live",
+      sourceGit: git,
+      currentGit: git,
+      candidate,
+      reports: [report(labels[0], { phase: "production-live", payload: mutation.payload })],
+      productionRequiredLabels: labels,
+      requireComplete: true,
+      notBefore: "2026-07-21T19:00:00.000Z",
+      nowMs,
+      reportPasses: alwaysPasses,
+    });
+    assert.equal(result.passed, false);
+    assert.match(result.issues.join("\n"), mutation.expected);
+  }
+});
+
 test("candidate-ci manifests cannot be replayed as production-live authority", () => {
   const result = evaluateEvidenceBundlePhase({
     phase: "candidate-ci",
