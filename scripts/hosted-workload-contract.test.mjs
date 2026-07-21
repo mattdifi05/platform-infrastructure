@@ -836,6 +836,13 @@ function executablePath(name) {
   return result.status === 0 ? result.stdout.trim() : null;
 }
 
+function promoteFixtureLock(lockPath) {
+  const verified = JSON.parse(fs.readFileSync(lockPath, "utf8"));
+  assert.equal(verified.activationLockPath, lockPath);
+  verified.state = "verified";
+  fs.writeFileSync(lockPath, `${JSON.stringify(verified, null, 2)}\n`, { mode: 0o600 });
+}
+
 test("workload resolver accepts an all-regular contained tree", () => {
   const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "hosted-contained-")));
   try {
@@ -1311,14 +1318,15 @@ test("compose wrapper uses one activation bundle and hands verified bytes throug
   try {
     const workloadRoot = path.join(root, "workloads");
     const fixture = catalogFixture(root);
+    const lockPath = path.join(root, "lock.json");
     const lock = resolveCatalog({
       ...fixture,
       workloadRoot,
       coreFiles: [fixture.coreFile],
       projectName: "fixture",
       snapshotRoot: path.join(root, "snapshots"),
+      activationLockPath: lockPath,
     });
-    const lockPath = path.join(root, "lock.json");
     fs.writeFileSync(lockPath, `${JSON.stringify(lock, null, 2)}\n`, { mode: 0o600 });
     const rawPolicy = spawnSync("ruby", [path.join(import.meta.dirname, "hosted-workload-source-policy.rb"), "--lock", lockPath], { encoding: "utf8" });
     assert.equal(rawPolicy.status, 0, rawPolicy.stderr);
@@ -1335,11 +1343,13 @@ test("compose wrapper uses one activation bundle and hands verified bytes throug
     fs.mkdirSync(fakeBin);
     fs.writeFileSync(path.join(fakeBin, "docker"), `#!/bin/bash
 set -euo pipefail
-/bin/mv "$HOSTED_TEST_GENERATION" "$HOSTED_TEST_ORIGINAL_GENERATION"
-/bin/mkdir -m 700 "$HOSTED_TEST_GENERATION"
-printf 'services:\n  hostile:\n    privileged: true\n' > "$HOSTED_TEST_GENERATION/$HOSTED_TEST_COMPOSE_BASENAME"
-/bin/chmod 400 "$HOSTED_TEST_GENERATION/$HOSTED_TEST_COMPOSE_BASENAME"
-/bin/chmod 500 "$HOSTED_TEST_GENERATION"
+if [[ "\${HOSTED_TEST_NO_SWAP:-0}" != 1 ]]; then
+  /bin/mv "$HOSTED_TEST_GENERATION" "$HOSTED_TEST_ORIGINAL_GENERATION"
+  /bin/mkdir -m 700 "$HOSTED_TEST_GENERATION"
+  printf 'services:\n  hostile:\n    privileged: true\n' > "$HOSTED_TEST_GENERATION/$HOSTED_TEST_COMPOSE_BASENAME"
+  /bin/chmod 400 "$HOSTED_TEST_GENERATION/$HOSTED_TEST_COMPOSE_BASENAME"
+  /bin/chmod 500 "$HOSTED_TEST_GENERATION"
+fi
 : > "$HOSTED_TEST_CAPTURE"
 for argument in "$@"; do
   case "$argument" in
@@ -1397,6 +1407,31 @@ exec "$HOSTED_TEST_REAL_JQ" "$@"
       PLATFORM_RUNTIME_WORKLOAD_LOCK_SHA256: "e".repeat(64),
       TMPDIR: root,
     };
+    const prepareConfig = spawnSync("/bin/bash", [path.join(import.meta.dirname, "compose-vps.sh"), "config", "--format", "json"], {
+      encoding: "utf8",
+      env: { ...sharedEnvironment, HOSTED_WORKLOAD_PREPARE_RESOLVED: "1", HOSTED_TEST_NO_SWAP: "1" },
+    });
+    assert.equal(prepareConfig.status, 0, prepareConfig.stderr);
+    assert.equal(fs.existsSync(capture), true);
+    fs.unlinkSync(capture);
+    fs.writeFileSync(sharedEnvironment.HOSTED_TEST_LOCK_READER_COUNT, "0\n");
+    for (const arguments_ of [["up", "-d"], ["start"]]) {
+      const prepareMutation = spawnSync("/bin/bash", [path.join(import.meta.dirname, "compose-vps.sh"), ...arguments_], {
+        encoding: "utf8",
+        env: { ...sharedEnvironment, HOSTED_WORKLOAD_PREPARE_RESOLVED: "1", HOSTED_TEST_NO_SWAP: "1" },
+      });
+      assert.notEqual(prepareMutation.status, 0);
+      assert.match(prepareMutation.stderr, /limited to the exact prepare-time config render/i);
+      assert.equal(fs.existsSync(capture), false);
+    }
+    const resolvedRejected = spawnSync("/bin/bash", [path.join(import.meta.dirname, "compose-vps.sh"), "config", "--format", "json"], {
+      encoding: "utf8",
+      env: sharedEnvironment,
+    });
+    assert.notEqual(resolvedRejected.status, 0);
+    assert.equal(fs.existsSync(capture), false);
+    promoteFixtureLock(lockPath);
+    fs.writeFileSync(sharedEnvironment.HOSTED_TEST_LOCK_READER_COUNT, "0\n");
     const queryRace = spawnSync("/bin/bash", [path.join(import.meta.dirname, "compose-vps.sh"), "config", "--format", "json"], {
       encoding: "utf8",
       env: { ...sharedEnvironment, HOSTED_TEST_QUERY_SWAP: "1" },
@@ -1462,14 +1497,15 @@ test("Engine network ownership verifier binds exact physical names and Compose l
   const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "hosted-network-owner-")));
   try {
     const fixture = catalogFixture(root);
+    const lockPath = path.join(root, "lock.json");
     const lock = resolveCatalog({
       ...fixture,
       workloadRoot: path.join(root, "workloads"),
       coreFiles: [fixture.coreFile],
       projectName: "fixture",
       snapshotRoot: path.join(root, "snapshots"),
+      activationLockPath: lockPath,
     });
-    const lockPath = path.join(root, "lock.json");
     fs.writeFileSync(lockPath, `${JSON.stringify(lock, null, 2)}\n`, { mode: 0o600 });
     const rawPolicy = spawnSync("ruby", [path.join(import.meta.dirname, "hosted-workload-source-policy.rb"), "--lock", lockPath], { encoding: "utf8" });
     assert.equal(rawPolicy.status, 0, rawPolicy.stderr);
@@ -1505,6 +1541,9 @@ exit 2
       encoding: "utf8",
       env: { ...environment, HOSTED_TEST_NETWORK_MODE: mode },
     });
+    const resolvedRejected = run("correct");
+    assert.notEqual(resolvedRejected.status, 0);
+    promoteFixtureLock(lockPath);
     assert.equal(run("correct").status, 0);
     for (const mode of ["wrong-project", "wrong-logical", "invalid-json", "duplicate", "missing"]) {
       const rejected = run(mode);
@@ -1531,14 +1570,15 @@ test("egress firewall consumes only the verified lock network inventory", () => 
   try {
     const fixture = catalogFixture(root);
     fs.writeFileSync(path.join(root, "workloads", "example-app", "compose.yaml"), "services:\n  example-app-web:\n    networks:\n      example_app_egress:\nnetworks:\n  example_app_egress:\n    internal: false\n");
+    const lockPath = path.join(root, "lock.json");
     const lock = resolveCatalog({
       ...fixture,
       workloadRoot: path.join(root, "workloads"),
       coreFiles: [fixture.coreFile],
       projectName: "fixture",
       snapshotRoot: path.join(root, "snapshots"),
+      activationLockPath: lockPath,
     });
-    const lockPath = path.join(root, "lock.json");
     fs.writeFileSync(lockPath, `${JSON.stringify(lock, null, 2)}\n`, { mode: 0o600 });
     const rawPolicy = spawnSync("ruby", [path.join(import.meta.dirname, "hosted-workload-source-policy.rb"), "--lock", lockPath], { encoding: "utf8" });
     assert.equal(rawPolicy.status, 0, rawPolicy.stderr);
@@ -1557,7 +1597,13 @@ printf '[{"Name":"fixture_example_app_egress","EnableIPv6":false,"Labels":{"com.
 `, { mode: 0o755 });
     fs.writeFileSync(path.join(fakeBin, "iptables"), `#!/bin/sh
 case "$*" in
-  *'-S DOCKER-USER'*) printf '%s\n' '-A DOCKER-USER -j PLATFORM-WORKLOAD-EGRESS' ;;
+  *'-S DOCKER-USER'*)
+    if [ "\${HOSTED_TEST_IPTABLES_MODE:-correct}" = preceding-accept ]; then
+      printf '%s\n' '-A DOCKER-USER -j ACCEPT'
+    fi
+    printf '%s\n' '-A DOCKER-USER -j PLATFORM-WORKLOAD-EGRESS'
+    ;;
+  *'-S PLATFORM-WORKLOAD-EGRESS-NEW'*) exit 1 ;;
   *'-S PLATFORM-WORKLOAD-EGRESS'*)
     count=0
     while [ "$count" -lt 17 ]; do printf '%s\n' '-A PLATFORM-WORKLOAD-EGRESS -j RETURN'; count=$((count + 1)); done
@@ -1576,14 +1622,27 @@ exit 0
       encoding: "utf8",
       env: { ...environment, ...extraEnvironment },
     });
+    const resolvedRejected = run("--plan");
+    assert.notEqual(resolvedRejected.status, 0);
+    assert.equal(fs.existsSync(dockerLog), false);
+    promoteFixtureLock(lockPath);
     const plan = run("--plan");
     assert.equal(plan.status, 0, plan.stderr);
     assert.match(plan.stdout, /Workload source: 172\.30\.10\.0\/24/);
     assert.equal(fs.readFileSync(dockerLog, "utf8").trim(), "network inspect fixture_example_app_egress");
+    const callerPrefix = spawnSync("/bin/sh", [firewall, "--apply", "--network-prefix", "fixture"], {
+      encoding: "utf8",
+      env: environment,
+    });
+    assert.notEqual(callerPrefix.status, 0);
+    assert.match(callerPrefix.stderr, /unknown option/i);
     fs.writeFileSync(dockerLog, "");
     const verified = run("--verify");
     assert.equal(verified.status, 0, verified.stderr);
     assert.match(verified.stdout, /verified for 1 subnet/);
+    const shadowed = run("--verify", { HOSTED_TEST_IPTABLES_MODE: "preceding-accept" });
+    assert.notEqual(shadowed.status, 0);
+    assert.match(shadowed.stderr, /must begin with exactly one direct workload egress jump/);
     for (const mode of ["wrong-label", "missing"]) {
       const rejected = run("--plan", { HOSTED_TEST_EGRESS_MODE: mode });
       assert.notEqual(rejected.status, 0);

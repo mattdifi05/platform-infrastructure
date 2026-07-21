@@ -3,13 +3,19 @@ set -eu
 
 MODE=plan
 CONFIRM=""
-NETWORK_PREFIX="${PLATFORM_NETWORK_PREFIX:-platform_infra_vps}"
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 LOCK=""
 PROJECT_NAME=""
 CHAIN=PLATFORM-WORKLOAD-EGRESS
+STAGING_CHAIN=${CHAIN}-NEW
+STAGING_CREATED=0
+STAGING_ACTIVE=0
 SUBNET_FILE=$(mktemp)
 cleanup() {
+  if [ "$STAGING_CREATED" = 1 ] && [ "$STAGING_ACTIVE" = 0 ] && command -v iptables >/dev/null 2>&1; then
+    iptables -w -F "$STAGING_CHAIN" >/dev/null 2>&1 || true
+    iptables -w -X "$STAGING_CHAIN" >/dev/null 2>&1 || true
+  fi
   rm -f "$SUBNET_FILE"
 }
 trap cleanup EXIT HUP INT TERM
@@ -41,10 +47,6 @@ while [ "$#" -gt 0 ]; do
       shift
       PROJECT_NAME="${1:?Missing value for --project-name}"
       ;;
-    --network-prefix)
-      shift
-      NETWORK_PREFIX="${1:?Missing value for --network-prefix}"
-      ;;
     --subnet)
       shift
       printf '%s\n' "${1:?Missing value for --subnet}" >> "$SUBNET_FILE"
@@ -65,13 +67,6 @@ while [ "$#" -gt 0 ]; do
   esac
   shift
 done
-
-case "$NETWORK_PREFIX" in
-  ''|*[!A-Za-z0-9_.-]*)
-    echo "Invalid network prefix" >&2
-    exit 2
-    ;;
-esac
 
 BLOCKED_DESTINATIONS="
 0.0.0.0/8
@@ -104,7 +99,7 @@ verified_activation_bundle() {
     runuser -u "$lock_owner" -- env HOSTED_WORKLOAD_ALLOW_RESOLVED=0 \
       sh "$SCRIPT_DIR/hosted-workload-lock.sh" "$LOCK" activation-bundle
   else
-    HOSTED_WORKLOAD_ALLOW_RESOLVED=${HOSTED_WORKLOAD_ALLOW_RESOLVED:-0} \
+    HOSTED_WORKLOAD_ALLOW_RESOLVED=0 \
       sh "$SCRIPT_DIR/hosted-workload-lock.sh" "$LOCK" activation-bundle
   fi
 }
@@ -177,8 +172,13 @@ if [ "$MODE" = rollback ]; then
   while iptables -w -C DOCKER-USER -j "$CHAIN" >/dev/null 2>&1; do
     iptables -w -D DOCKER-USER -j "$CHAIN"
   done
+  while iptables -w -C DOCKER-USER -j "$STAGING_CHAIN" >/dev/null 2>&1; do
+    iptables -w -D DOCKER-USER -j "$STAGING_CHAIN"
+  done
   iptables -w -F "$CHAIN" >/dev/null 2>&1 || true
   iptables -w -X "$CHAIN" >/dev/null 2>&1 || true
+  iptables -w -F "$STAGING_CHAIN" >/dev/null 2>&1 || true
+  iptables -w -X "$STAGING_CHAIN" >/dev/null 2>&1 || true
   echo "Workload egress firewall chain removed; verify Docker/UFW policy before restarting workloads."
   exit 0
 fi
@@ -206,24 +206,39 @@ fi
 require_command iptables
 iptables -w -S DOCKER-USER >/dev/null 2>&1 || { echo "DOCKER-USER chain is unavailable; verify Docker firewall backend before rollout" >&2; exit 1; }
 
-verify_rules() {
-  iptables -w -C DOCKER-USER -j "$CHAIN" >/dev/null
-  jump_count=$(iptables -w -S DOCKER-USER | awk -v chain="$CHAIN" '$1 == "-A" && $2 == "DOCKER-USER" && $3 == "-j" && $4 == chain && NF == 4 { count += 1 } END { print count + 0 }')
-  [ "$jump_count" -eq 1 ] || { echo "DOCKER-USER must contain exactly one direct workload egress jump" >&2; exit 1; }
+verify_chain_body() {
+  verify_chain=$1
   expected_rules=1
   blocked_rule_count=$(printf '%s\n' "$BLOCKED_DESTINATIONS" | awk 'NF { count += 1 } END { print count + 0 }')
   while IFS= read -r subnet; do
     printf '%s\n' "$BLOCKED_DESTINATIONS" | while IFS= read -r destination; do
       [ -n "$destination" ] || continue
-      iptables -w -C "$CHAIN" -s "$subnet" -d "$destination" -j REJECT --reject-with icmp-admin-prohibited >/dev/null
+      iptables -w -C "$verify_chain" -s "$subnet" -d "$destination" -j REJECT --reject-with icmp-admin-prohibited >/dev/null
     done
-    iptables -w -C "$CHAIN" -s "$subnet" -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN >/dev/null
-    iptables -w -C "$CHAIN" -s "$subnet" -j RETURN >/dev/null
+    iptables -w -C "$verify_chain" -s "$subnet" -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN >/dev/null
+    iptables -w -C "$verify_chain" -s "$subnet" -j RETURN >/dev/null
     expected_rules=$((expected_rules + blocked_rule_count + 2))
   done < "$SUBNET_FILE"
-  iptables -w -C "$CHAIN" -j RETURN >/dev/null
-  actual_rules=$(iptables -w -S "$CHAIN" | awk '$1 == "-A" { count += 1 } END { print count + 0 }')
+  iptables -w -C "$verify_chain" -j RETURN >/dev/null
+  actual_rules=$(iptables -w -S "$verify_chain" | awk '$1 == "-A" { count += 1 } END { print count + 0 }')
   [ "$actual_rules" -eq "$expected_rules" ] || { echo "Workload egress firewall has stale or unexpected rules" >&2; exit 1; }
+}
+
+verify_rules() {
+  iptables -w -C DOCKER-USER -j "$CHAIN" >/dev/null
+  docker_user_rules=$(iptables -w -S DOCKER-USER)
+  jump_count=$(printf '%s\n' "$docker_user_rules" | awk -v chain="$CHAIN" '$1 == "-A" && $2 == "DOCKER-USER" && $3 == "-j" && $4 == chain && NF == 4 { count += 1 } END { print count + 0 }')
+  staging_jump_count=$(printf '%s\n' "$docker_user_rules" | awk -v chain="$STAGING_CHAIN" '$1 == "-A" && $2 == "DOCKER-USER" && $3 == "-j" && $4 == chain && NF == 4 { count += 1 } END { print count + 0 }')
+  first_rule=$(printf '%s\n' "$docker_user_rules" | awk '$1 == "-A" && $2 == "DOCKER-USER" { print; exit }')
+  [ "$jump_count" -eq 1 ] && [ "$staging_jump_count" -eq 0 ] && [ "$first_rule" = "-A DOCKER-USER -j $CHAIN" ] || {
+    echo "DOCKER-USER must begin with exactly one direct workload egress jump" >&2
+    exit 1
+  }
+  if iptables -w -S "$STAGING_CHAIN" >/dev/null 2>&1; then
+    echo "Stale workload egress staging chain exists" >&2
+    exit 1
+  fi
+  verify_chain_body "$CHAIN"
 }
 
 if [ "$MODE" = verify ]; then
@@ -235,21 +250,34 @@ fi
 [ "$(id -u)" -eq 0 ] || { echo "--apply requires root" >&2; exit 1; }
 [ "$CONFIRM" = "APPLY-WORKLOAD-EGRESS-FIREWALL" ] || { echo "Apply requires --confirm APPLY-WORKLOAD-EGRESS-FIREWALL" >&2; exit 1; }
 
-iptables -w -N "$CHAIN" >/dev/null 2>&1 || true
-while iptables -w -C DOCKER-USER -j "$CHAIN" >/dev/null 2>&1; do
-  iptables -w -D DOCKER-USER -j "$CHAIN"
-done
-iptables -w -I DOCKER-USER 1 -j "$CHAIN"
-iptables -w -F "$CHAIN"
+if iptables -w -S "$STAGING_CHAIN" >/dev/null 2>&1; then
+  echo "Stale workload egress staging chain exists; refusing a non-atomic replacement" >&2
+  exit 1
+fi
+iptables -w -N "$STAGING_CHAIN"
+STAGING_CREATED=1
 while IFS= read -r subnet; do
   printf '%s\n' "$BLOCKED_DESTINATIONS" | while IFS= read -r destination; do
     [ -n "$destination" ] || continue
-    iptables -w -A "$CHAIN" -s "$subnet" -d "$destination" -j REJECT --reject-with icmp-admin-prohibited
+    iptables -w -A "$STAGING_CHAIN" -s "$subnet" -d "$destination" -j REJECT --reject-with icmp-admin-prohibited
   done
-  iptables -w -A "$CHAIN" -s "$subnet" -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
-  iptables -w -A "$CHAIN" -s "$subnet" -j RETURN
+  iptables -w -A "$STAGING_CHAIN" -s "$subnet" -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
+  iptables -w -A "$STAGING_CHAIN" -s "$subnet" -j RETURN
 done < "$SUBNET_FILE"
-iptables -w -A "$CHAIN" -j RETURN
+iptables -w -A "$STAGING_CHAIN" -j RETURN
+verify_chain_body "$STAGING_CHAIN"
+
+# Build the complete replacement before changing DOCKER-USER. Once inserted,
+# the new chain stays active until it is renamed to the canonical chain; the
+# previous chain is never removed before the replacement protects traffic.
+STAGING_ACTIVE=1
+iptables -w -I DOCKER-USER 1 -j "$STAGING_CHAIN"
+while iptables -w -C DOCKER-USER -j "$CHAIN" >/dev/null 2>&1; do
+  iptables -w -D DOCKER-USER -j "$CHAIN"
+done
+iptables -w -F "$CHAIN" >/dev/null 2>&1 || true
+iptables -w -X "$CHAIN" >/dev/null 2>&1 || true
+iptables -w -E "$STAGING_CHAIN" "$CHAIN"
 
 verify_rules
 echo "Workload egress firewall applied and verified for $(awk 'END { print NR + 0 }' "$SUBNET_FILE") subnet(s)."
