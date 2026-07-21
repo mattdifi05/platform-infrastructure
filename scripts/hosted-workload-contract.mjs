@@ -35,7 +35,8 @@ function invalid(message) {
 
 function readJson(filePath, label = filePath) {
   try {
-    return JSON.parse(fs.readFileSync(filePath, "utf8"));
+    const { bytes } = readStableRegularFile(filePath, label);
+    return JSON.parse(bytes.toString("utf8"));
   } catch (error) {
     invalid(`${label} is not valid JSON: ${error.message}`);
   }
@@ -92,11 +93,24 @@ function resolveWithin(root, value, label) {
 
 function physicalRoot(root, label) {
   const lexicalRoot = path.resolve(root);
+  assertNoSymlinkPathComponents(lexicalRoot, label);
   const rootStat = fs.lstatSync(lexicalRoot, { throwIfNoEntry: false });
   if (!rootStat?.isDirectory() || rootStat.isSymbolicLink()) {
     invalid(`${label} must be a real non-symlink directory.`);
   }
   return fs.realpathSync.native(lexicalRoot);
+}
+
+function assertNoSymlinkPathComponents(absolutePath, label) {
+  const resolved = path.resolve(absolutePath);
+  const parsed = path.parse(resolved);
+  let cursor = parsed.root;
+  for (const component of resolved.slice(parsed.root.length).split(path.sep).filter(Boolean)) {
+    cursor = path.join(cursor, component);
+    const stat = fs.lstatSync(cursor, { throwIfNoEntry: false });
+    if (!stat) invalid(`${label} path component does not exist: ${cursor}`);
+    if (stat.isSymbolicLink()) invalid(`${label} contains a symlink component: ${cursor}`);
+  }
 }
 
 function resolvePhysicalWithin(root, value, label, expectedType) {
@@ -149,13 +163,58 @@ function readStableRegularFile(filePath, label) {
 
 function createSnapshotGeneration(snapshotRoot) {
   fs.mkdirSync(snapshotRoot, { recursive: true, mode: 0o700 });
-  const stat = fs.lstatSync(snapshotRoot, { throwIfNoEntry: false });
+  const canonicalRoot = physicalRoot(snapshotRoot, "snapshot root");
+  const stat = fs.lstatSync(canonicalRoot, { throwIfNoEntry: false });
   if (!stat?.isDirectory() || stat.isSymbolicLink()) invalid("Snapshot root must be a real directory.");
   fs.chmodSync(snapshotRoot, 0o700);
-  const canonicalRoot = fs.realpathSync.native(snapshotRoot);
-  const generation = fs.mkdtempSync(path.join(canonicalRoot, "generation-"));
+  const generation = fs.mkdtempSync(path.join(canonicalRoot, ".staging-"));
   fs.chmodSync(generation, 0o700);
   return { root: canonicalRoot, generation: fs.realpathSync.native(generation), nextIndex: 0 };
+}
+
+function fileIdentity(filePath) {
+  const stat = fs.lstatSync(filePath, { bigint: true, throwIfNoEntry: false });
+  if (!stat) invalid(`Snapshot identity is missing: ${filePath}`);
+  return { device: String(stat.dev), inode: String(stat.ino), uid: String(stat.uid), mode: Number(stat.mode & 0o777n) };
+}
+
+function sameIdentity(actual, expected) {
+  return actual.device === String(expected?.device)
+    && actual.inode === String(expected?.inode)
+    && actual.uid === String(expected?.uid)
+    && actual.mode === Number(expected?.mode);
+}
+
+function finalizeSnapshot(snapshot, records, contentDigest) {
+  const staging = snapshot.generation;
+  const finalGeneration = path.join(snapshot.root, `content-${contentDigest}`);
+  if (fs.existsSync(finalGeneration)) {
+    const existing = fs.lstatSync(finalGeneration);
+    if (!existing.isDirectory() || existing.isSymbolicLink()) invalid("Existing content-addressed snapshot is not a real directory.");
+    for (const record of records.filter((item) => item.snapshot === true)) {
+      const existingPath = path.join(finalGeneration, path.basename(record.path));
+      const stat = fs.lstatSync(existingPath, { throwIfNoEntry: false });
+      if (!stat?.isFile() || stat.isSymbolicLink() || sha256Bytes(readStableRegularFile(existingPath, record.kind).bytes) !== record.sha256) {
+        invalid(`Existing content-addressed snapshot does not match ${record.kind}.`);
+      }
+    }
+    fs.rmSync(staging, { recursive: true, force: true });
+  } else {
+    fs.renameSync(staging, finalGeneration);
+  }
+  fs.chmodSync(finalGeneration, 0o500);
+  snapshot.generation = finalGeneration;
+  for (const record of records.filter((item) => item.snapshot === true)) {
+    record.path = path.join(finalGeneration, path.basename(record.path));
+    const identity = fileIdentity(record.path);
+    record.snapshotDevice = identity.device;
+    record.snapshotInode = identity.inode;
+    record.snapshotUid = identity.uid;
+  }
+  return {
+    rootIdentity: fileIdentity(snapshot.root),
+    generationIdentity: fileIdentity(finalGeneration),
+  };
 }
 
 function snapshotFile(sourcePath, kind, snapshot, metadata = {}) {
@@ -332,6 +391,13 @@ export function resolveCatalog({ catalogPath, workloadRoot, coreEnvFile, coreFil
       files: workloadRecords,
     };
   });
+  const contentDigest = workloadContentSha256(records);
+  const snapshotReceipt = finalizeSnapshot(snapshot, records, contentDigest);
+  for (const workload of workloads) {
+    workload.manifestPath = workload.files.find((record) => record.kind === "workload-manifest").path;
+    workload.composePath = workload.files.find((record) => record.kind === "workload-compose").path;
+    workload.environmentPath = workload.files.find((record) => record.kind === "workload-environment").path;
+  }
   return {
     version: HOSTED_WORKLOAD_LOCK_VERSION,
     validatorVersion: HOSTED_WORKLOAD_VALIDATOR_VERSION,
@@ -339,6 +405,8 @@ export function resolveCatalog({ catalogPath, workloadRoot, coreEnvFile, coreFil
     generatedAt: new Date().toISOString(),
     snapshotRoot: snapshot.root,
     snapshotGeneration: snapshot.generation,
+    snapshotRootIdentity: snapshotReceipt.rootIdentity,
+    snapshotGenerationIdentity: snapshotReceipt.generationIdentity,
     workloadRoot: root,
     catalogPath: path.resolve(catalogPath),
     coreEnvFile: path.resolve(coreEnvFile),
@@ -346,7 +414,7 @@ export function resolveCatalog({ catalogPath, workloadRoot, coreEnvFile, coreFil
     coreFiles: coreFiles.map((file) => path.resolve(file)),
     workloads,
     files: records,
-    workloadContentSha256: workloadContentSha256(records),
+    workloadContentSha256: contentDigest,
   };
 }
 
@@ -512,12 +580,31 @@ export function verifyLockFiles(lock) {
   }
   if (!Array.isArray(lock?.files) || lock.files.length === 0) invalid("Workload lock has no file records.");
   const snapshotGeneration = physicalRoot(requiredText(lock.snapshotGeneration, "snapshot generation"), "snapshot generation");
+  if (path.dirname(snapshotGeneration) !== physicalRoot(requiredText(lock.snapshotRoot, "snapshot root"), "snapshot root")) {
+    invalid("Snapshot generation is outside the locked snapshot root.");
+  }
+  if (!sameIdentity(fileIdentity(lock.snapshotRoot), lock.snapshotRootIdentity)
+      || !sameIdentity(fileIdentity(snapshotGeneration), lock.snapshotGenerationIdentity)) {
+    invalid("Snapshot root or generation identity changed after resolution.");
+  }
+  const effectiveUid = typeof process.getuid === "function" ? String(process.getuid()) : lock.snapshotRootIdentity.uid;
+  if (String(lock.snapshotRootIdentity.uid) !== effectiveUid || String(lock.snapshotGenerationIdentity.uid) !== effectiveUid) {
+    invalid("Snapshot root and generation must be owned by the deployment identity.");
+  }
+  if (lock.snapshotRootIdentity.mode !== 0o700 || lock.snapshotGenerationIdentity.mode !== 0o500) {
+    invalid("Snapshot root or generation permissions are not deployment-owned.");
+  }
   for (const record of lock.files) {
     if (!SHA256.test(String(record.sha256 ?? ""))) invalid(`Invalid lock digest for ${record.path}.`);
     if (record.snapshot === true) {
       if (path.dirname(record.path) !== snapshotGeneration) invalid(`Snapshot file is outside the locked generation: ${record.path}.`);
       const stat = fs.lstatSync(record.path, { throwIfNoEntry: false });
       if (!stat?.isFile() || stat.isSymbolicLink() || (stat.mode & 0o777) !== 0o400) invalid(`Snapshot file is not immutable: ${record.path}.`);
+      const identity = fileIdentity(record.path);
+      if (identity.device !== String(record.snapshotDevice) || identity.inode !== String(record.snapshotInode)
+          || identity.uid !== String(record.snapshotUid) || identity.uid !== String(lock.snapshotGenerationIdentity.uid)) {
+        invalid(`Snapshot file identity or owner changed: ${record.path}.`);
+      }
     }
     const { bytes } = readStableRegularFile(record.path, `locked ${record.kind}`);
     if (sha256Bytes(bytes) !== record.sha256) invalid(`Locked file changed: ${record.path}.`);

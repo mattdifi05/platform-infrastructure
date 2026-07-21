@@ -185,8 +185,20 @@ function catalogFixture(root, appRoot = path.join(root, "workloads", "example-ap
   return { catalogPath, coreEnvFile, coreFile };
 }
 
+function removeFixtureTree(root) {
+  if (!fs.existsSync(root)) return;
+  const makeDirectoriesWritable = (directory) => {
+    const stat = fs.lstatSync(directory);
+    if (!stat.isDirectory() || stat.isSymbolicLink()) return;
+    fs.chmodSync(directory, 0o700);
+    for (const entry of fs.readdirSync(directory)) makeDirectoriesWritable(path.join(directory, entry));
+  };
+  makeDirectoriesWritable(root);
+  fs.rmSync(root, { recursive: true, force: true });
+}
+
 test("workload resolver accepts an all-regular contained tree", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "hosted-contained-"));
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "hosted-contained-")));
   try {
     const workloadRoot = path.join(root, "workloads");
     const fixture = catalogFixture(root);
@@ -194,15 +206,19 @@ test("workload resolver accepts an all-regular contained tree", () => {
     const result = resolveCatalog({ ...fixture, workloadRoot, coreFiles: [fixture.coreFile], projectName: "fixture", snapshotRoot });
     assert.equal(result.workloads[0].manifestSourcePath, fs.realpathSync.native(path.join(workloadRoot, "example-app", "manifest.json")));
     assert.equal(path.dirname(result.workloads[0].manifestPath), result.snapshotGeneration);
+    assert.equal(path.basename(result.snapshotGeneration), `content-${result.workloadContentSha256}`);
+    assert.equal(result.snapshotRootIdentity.uid, String(process.getuid?.() ?? result.snapshotRootIdentity.uid));
+    assert.equal(result.snapshotRootIdentity.mode, 0o700);
+    assert.equal(result.snapshotGenerationIdentity.mode, 0o500);
     assert.match(result.workloadContentSha256, /^[a-f0-9]{64}$/);
     verifyLockFiles(result);
   } finally {
-    fs.rmSync(root, { recursive: true, force: true });
+    removeFixtureTree(root);
   }
 });
 
 test("workload resolver rejects intermediate and terminal symlinks", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "hosted-symlink-"));
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "hosted-symlink-")));
   try {
     const workloadRoot = path.join(root, "workloads");
     const outside = path.join(root, "outside-app");
@@ -222,12 +238,61 @@ test("workload resolver rejects intermediate and terminal symlinks", () => {
       /symlink component/,
     );
   } finally {
-    fs.rmSync(root, { recursive: true, force: true });
+    removeFixtureTree(root);
+  }
+});
+
+test("workload resolver rejects symlinked roots and root parents", () => {
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "hosted-root-link-")));
+  try {
+    const realParent = path.join(root, "real-parent");
+    const workloadRoot = path.join(realParent, "workloads");
+    const fixture = catalogFixture(root, path.join(workloadRoot, "example-app"));
+    const linkedParent = path.join(root, "linked-parent");
+    fs.symlinkSync(realParent, linkedParent, "dir");
+    assert.throws(
+      () => resolveCatalog({
+        ...fixture,
+        workloadRoot: path.join(linkedParent, "workloads"),
+        coreFiles: [fixture.coreFile],
+        projectName: "fixture",
+        snapshotRoot: path.join(root, "snapshots-one"),
+      }),
+      /symlink component/,
+    );
+    const realSnapshotParent = path.join(root, "real-snapshot-parent");
+    fs.mkdirSync(realSnapshotParent);
+    const linkedSnapshotParent = path.join(root, "linked-snapshot-parent");
+    fs.symlinkSync(realSnapshotParent, linkedSnapshotParent, "dir");
+    assert.throws(
+      () => resolveCatalog({
+        ...fixture,
+        workloadRoot,
+        coreFiles: [fixture.coreFile],
+        projectName: "fixture",
+        snapshotRoot: path.join(linkedSnapshotParent, "snapshots"),
+      }),
+      /symlink component/,
+    );
+    const linkedRoot = path.join(root, "linked-workloads");
+    fs.symlinkSync(workloadRoot, linkedRoot, "dir");
+    assert.throws(
+      () => resolveCatalog({
+        ...fixture,
+        workloadRoot: linkedRoot,
+        coreFiles: [fixture.coreFile],
+        projectName: "fixture",
+        snapshotRoot: path.join(root, "snapshots-two"),
+      }),
+      /symlink component/,
+    );
+  } finally {
+    removeFixtureTree(root);
   }
 });
 
 test("activation paths remain bound to immutable snapshots after source replacement", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "hosted-snapshot-"));
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "hosted-snapshot-")));
   try {
     const workloadRoot = path.join(root, "workloads");
     const fixture = catalogFixture(root);
@@ -249,7 +314,36 @@ test("activation paths remain bound to immutable snapshots after source replacem
     assert.equal(fs.readFileSync(lock.workloads[0].composePath, "utf8"), originalCompose);
     assert.equal(verifyLockFiles(lock), true);
   } finally {
-    fs.rmSync(root, { recursive: true, force: true });
+    removeFixtureTree(root);
+  }
+});
+
+test("lock verification rejects snapshot parent and generation replacement", () => {
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "hosted-snapshot-parent-")));
+  try {
+    const workloadRoot = path.join(root, "workloads");
+    const fixture = catalogFixture(root);
+    const lock = resolveCatalog({
+      ...fixture,
+      workloadRoot,
+      coreFiles: [fixture.coreFile],
+      projectName: "fixture",
+      snapshotRoot: path.join(root, "snapshots"),
+    });
+    const originalRoot = `${lock.snapshotRoot}.original`;
+    fs.renameSync(lock.snapshotRoot, originalRoot);
+    fs.symlinkSync(originalRoot, lock.snapshotRoot, "dir");
+    assert.throws(() => verifyLockFiles(lock), /symlink component/);
+    fs.unlinkSync(lock.snapshotRoot);
+    fs.renameSync(originalRoot, lock.snapshotRoot);
+
+    const originalGeneration = `${lock.snapshotGeneration}.original`;
+    fs.renameSync(lock.snapshotGeneration, originalGeneration);
+    fs.mkdirSync(lock.snapshotGeneration, { mode: 0o700 });
+    fs.chmodSync(lock.snapshotGeneration, 0o500);
+    assert.throws(() => verifyLockFiles(lock), /identity changed/);
+  } finally {
+    removeFixtureTree(root);
   }
 });
 
