@@ -145,4 +145,12 @@ class HostedWorkloadSourcePolicyTest < Minitest::Test
     end
     assert_match(/cannot delegate execution to a provider/, error.message)
   end
+
+  def test_rejects_oci_runtime_overrides
+    model = parse("services:\n  app:\n    runtime: kata-runtime\n")
+    error = assert_raises(ArgumentError) do
+      HostedWorkloadSourcePolicy.validate_source_model(model, "fixture")
+    end
+    assert_match(/cannot override the OCI runtime/, error.message)
+  end
 end

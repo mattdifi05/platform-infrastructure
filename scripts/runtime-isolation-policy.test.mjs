@@ -126,6 +126,14 @@ test("rejects workload external service providers independently at runtime", () 
   assert.match(report.failures.join("\n"), /workload-no-provider-example-app-web/);
 });
 
+test("rejects workload OCI runtime overrides independently at runtime", () => {
+  const config = fixture();
+  config.services["example-app-web"].runtime = "kata-runtime";
+  const report = evaluateRuntimeIsolation(config);
+  assert.equal(report.status, "failed");
+  assert.match(report.failures.join("\n"), /workload-no-runtime-override-example-app-web/);
+});
+
 test("rejects missing memory limits and budget overcommit", () => {
   const config = fixture();
   config.services["example-app-web"].mem_limit = 0;

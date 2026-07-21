@@ -8,7 +8,7 @@ require "psych"
 
 module HostedWorkloadSourcePolicy
   VERSION = "hosted-raw-v1"
-  CONTROLS = %w[deny-api-socket deny-device-access deny-env-file deny-extends deny-file-configs deny-include deny-lifecycle-hooks deny-local-volume-options deny-providers deny-scaling deny-volumes-from].freeze
+  CONTROLS = %w[deny-api-socket deny-device-access deny-env-file deny-extends deny-file-configs deny-include deny-lifecycle-hooks deny-local-volume-options deny-providers deny-runtime-overrides deny-scaling deny-volumes-from].freeze
   MAX_COMPOSE_BYTES = 1_048_576
   STANDARD_TAG_PREFIX = "tag:yaml.org,2002:"
 
@@ -98,6 +98,7 @@ module HostedWorkloadSourcePolicy
       fail!("#{label} service #{name} cannot mount configs.") if service.key?("configs")
       fail!("#{label} service #{name} cannot use the Compose API socket.") if service.key?("use_api_socket")
       fail!("#{label} service #{name} cannot delegate execution to a provider.") if service.key?("provider")
+      fail!("#{label} service #{name} cannot override the OCI runtime.") if service.key?("runtime")
       device_controls = %w[devices device_cgroup_rules].select { |key| service.key?(key) }
       fail!("#{label} service #{name} cannot request host device access: #{device_controls.join(', ')}.") unless device_controls.empty?
       lifecycle_hooks = %w[post_start pre_start pre_stop].select { |key| service.key?(key) }
