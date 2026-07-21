@@ -88,6 +88,20 @@ test("rejects workload host device controls independently at runtime", () => {
   }
 });
 
+test("rejects workload local volume driver options independently at runtime", () => {
+  const config = fixture();
+  config.volumes = {
+    example_app_data: {
+      driver: "local",
+      driver_opts: { type: "none", o: "bind", device: "/srv/platform" },
+    },
+  };
+  config.services["example-app-web"].volumes.push({ type: "volume", source: "example_app_data", target: "/data" });
+  const report = evaluateRuntimeIsolation(config);
+  assert.equal(report.status, "failed");
+  assert.match(report.failures.join("\n"), /workload-no-local-volume-options-example-app-web/);
+});
+
 test("rejects missing memory limits and budget overcommit", () => {
   const config = fixture();
   config.services["example-app-web"].mem_limit = 0;

@@ -8,7 +8,7 @@ require "psych"
 
 module HostedWorkloadSourcePolicy
   VERSION = "hosted-raw-v1"
-  CONTROLS = %w[deny-device-access deny-env-file deny-extends deny-file-configs deny-include deny-lifecycle-hooks deny-scaling deny-volumes-from].freeze
+  CONTROLS = %w[deny-device-access deny-env-file deny-extends deny-file-configs deny-include deny-lifecycle-hooks deny-local-volume-options deny-scaling deny-volumes-from].freeze
   MAX_COMPOSE_BYTES = 1_048_576
   STANDARD_TAG_PREFIX = "tag:yaml.org,2002:"
 
@@ -83,6 +83,13 @@ module HostedWorkloadSourcePolicy
     fail!("#{label} configs must be a mapping.") if !configs.nil? && !configs.is_a?(Hash)
     (configs || {}).each do |name, definition|
       fail!("#{label} config #{name} cannot use a file source.") if definition.is_a?(Hash) && definition.key?("file")
+    end
+    volumes = model["volumes"]
+    fail!("#{label} volumes must be a mapping.") if !volumes.nil? && !volumes.is_a?(Hash)
+    (volumes || {}).each do |name, definition|
+      if definition.is_a?(Hash) && definition.key?("driver_opts")
+        fail!("#{label} volume #{name} cannot use local driver options.")
+      end
     end
     model.fetch("services").each do |name, service|
       fail!("#{label} service #{name} must be a mapping.") unless service.is_a?(Hash)

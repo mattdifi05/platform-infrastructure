@@ -102,4 +102,24 @@ class HostedWorkloadSourcePolicyTest < Minitest::Test
       assert_match(/cannot request host device access/, error.message)
     end
   end
+
+  def test_rejects_local_volume_driver_options
+    model = parse(<<~YAML)
+      volumes:
+        host-data:
+          driver: local
+          driver_opts:
+            type: none
+            o: bind
+            device: /srv/platform
+      services:
+        app:
+          volumes:
+            - host-data:/data
+    YAML
+    error = assert_raises(ArgumentError) do
+      HostedWorkloadSourcePolicy.validate_source_model(model, "fixture")
+    end
+    assert_match(/cannot use local driver options/, error.message)
+  end
 end
