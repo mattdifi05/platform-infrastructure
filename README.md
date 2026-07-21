@@ -744,8 +744,8 @@ Prima del deploy pubblico su VPS/Ubuntu LTS:
 ```sh
 sudo sh ./scripts/vps-bootstrap-ubuntu.sh --apply --deploy-user deploy
 sudo sh ./scripts/vps-hardening-ubuntu.sh --apply --ssh-port 65002 --reload-sshd
+sudo sh ./scripts/cloudflare-origin-lock-ufw.sh --apply --ports "80 443"
 sudo sh ./scripts/vps-host-readiness.sh --ssh-port 65002 --enforce
-sudo sh ./scripts/cloudflare-origin-lock-ufw.sh --apply --ports "80"
 ```
 
 Per il server home-VPS/LAN attuale non cambiare porta SSH: usa la stessa
@@ -753,6 +753,7 @@ procedura con `--ssh-port 22` dopo aver confermato l'accesso con chiave.
 
 ```sh
 sudo sh ./scripts/vps-hardening-ubuntu.sh --apply --ssh-port 22 --reload-sshd
+sudo sh ./scripts/cloudflare-origin-lock-ufw.sh --apply --ports "80 443"
 sh ./scripts/vps-host-readiness.sh --ssh-port 22 --enforce
 ```
 
@@ -786,6 +787,7 @@ provider ha aggiunto o rimosso un CIDR, aggiorna e revisiona lo snapshot e il
 middleware di rate limit nello stesso cambiamento. La freschezza dei range e le
 bucket separate per client devono comunque essere provate sul provider/VPS
 reale prima del deploy.
+La riconciliazione termina con una verifica fail-closed dell'intero set IPv4/IPv6; il deploy usa solo `--verify` e non modifica UFW.
 `vps-host-readiness.sh --ssh-port 65002 --enforce` genera report JSON/Markdown in `reports/vps-host/` e
 verifica Ubuntu LTS, Docker Engine, Compose plugin, Git, UFW, fail2ban, SSH
 hardening, porta SSH attesa, regola UFW per quella porta, Docker daemon

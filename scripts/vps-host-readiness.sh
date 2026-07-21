@@ -121,7 +121,7 @@ remediation_for_check() {
     docker-daemon-hardening)
       printf '%s' "Run sudo sh ./scripts/vps-hardening-ubuntu.sh --apply. The reviewed contract requires live-restore=false so a daemon restart cannot bypass the firewall-gated restart=no workload policy. If replacement is needed, archive the backup and rerun with --replace-docker-daemon-config during an approved Docker restart window."
       ;;
-    ufw-active|ufw-no-direct-internal-ports)
+    ufw-active|ufw-no-direct-internal-ports|ufw-origin-lock)
       printf '%s' "Run sudo sh ./scripts/vps-hardening-ubuntu.sh --apply --ssh-port <port>, then apply Cloudflare origin lock before removing generic 80/443 exposure."
       ;;
     ufw-ssh-port-allowed)
@@ -286,6 +286,14 @@ check_ufw() {
   else
     add_check "ufw-ssh-port-allowed" "yes" "failed" "UFW does not show ${EXPECTED_SSH_PORT}/tcp"
   fi
+  origin_status=$(mktemp)
+  printf '%s\n' "$ufw_status" > "$origin_status"
+  if sh "$ROOT_DIR/scripts/cloudflare-origin-lock-ufw.sh" --verify --ports "${ORIGIN_LOCK_PORTS:-80 443}" --status-file "$origin_status" >/dev/null 2>&1; then
+    add_check "ufw-origin-lock" "yes" "passed" "public web ports are restricted to the complete saved Cloudflare IPv4/IPv6 CIDR set"
+  else
+    add_check "ufw-origin-lock" "yes" "failed" "origin lock is incomplete, stale, duplicated, or still has a generic public web allow"
+  fi
+  rm -f "$origin_status"
 }
 
 check_services() {

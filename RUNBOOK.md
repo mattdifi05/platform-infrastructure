@@ -716,8 +716,8 @@ Run on a new VPS Ubuntu LTS VPS before public traffic:
 ```sh
 sudo sh ./scripts/vps-bootstrap-ubuntu.sh --apply --deploy-user deploy
 sudo sh ./scripts/vps-hardening-ubuntu.sh --apply --ssh-port 65002 --reload-sshd
+sudo sh ./scripts/cloudflare-origin-lock-ufw.sh --apply --ports "80 443"
 sudo sh ./scripts/vps-host-readiness.sh --ssh-port 65002 --enforce
-sudo sh ./scripts/cloudflare-origin-lock-ufw.sh --apply --ports "80"
 ```
 
 For the current home-VPS/LAN validation host, do not change the SSH port. Use
@@ -726,6 +726,7 @@ session works:
 
 ```sh
 sudo sh ./scripts/vps-hardening-ubuntu.sh --apply --ssh-port 22 --reload-sshd
+sudo sh ./scripts/cloudflare-origin-lock-ufw.sh --apply --ports "80 443"
 sh ./scripts/vps-host-readiness.sh --ssh-port 22 --enforce
 ```
 
@@ -770,10 +771,11 @@ Use `--diagnostic` only from disposable Linux containers or non-VPS hosts; it
 writes to `reports/vps-host-diagnostics/` so diagnostic failures cannot satisfy
 or pollute production VPS evidence.
 
-Use `--ports "80 443"` only if Cloudflare connects to the origin over both
-HTTP and HTTPS. After Cloudflare DNS is proxied and working, remove generic
-public UFW web rules so the origin accepts web traffic only from Cloudflare IP
-ranges.
+Reconcile both public web ports. Apply mode replaces the managed IPv4/IPv6
+rules, removes generic public web allows, verifies the exact final ruleset and
+then persists the verified CIDR state. Deploy and readiness paths use only
+`--verify`, which is non-mutating and fails on missing, duplicate or stale
+managed rules.
 
 Provider-range freshness and distinct rate buckets for two real clients remain
 deployment evidence: run the origin-lock check on the VPS, then probe through
