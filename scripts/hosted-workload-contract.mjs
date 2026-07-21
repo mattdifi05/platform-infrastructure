@@ -312,6 +312,12 @@ export function validateWorkloadManifest(document, manifestPath = "manifest") {
   if (!SAFE_PATH.test(composeFile) || path.isAbsolute(composeFile) || composeFile.split("/").includes("..")) {
     invalid("composeFile must be a contained relative path.");
   }
+  const projectMetadataFile = document.projectMetadataFile == null
+    ? null
+    : requiredText(document.projectMetadataFile, "projectMetadataFile");
+  if (projectMetadataFile && (!SAFE_PATH.test(projectMetadataFile) || path.isAbsolute(projectMetadataFile) || projectMetadataFile.split("/").includes(".."))) {
+    invalid("projectMetadataFile must be a contained relative path.");
+  }
   if (!Array.isArray(document.services) || document.services.length === 0) invalid(`${id} must declare services.`);
   const serviceNames = new Set();
   const routeSlugs = new Set();
@@ -338,6 +344,7 @@ export function validateWorkloadManifest(document, manifestPath = "manifest") {
     version: 1,
     id,
     composeFile,
+    projectMetadataFile,
     services,
     secrets,
     migrationRoots: [...new Set(document.migrationRoots ?? [])],
@@ -378,6 +385,12 @@ export function resolveCatalog({ catalogPath, workloadRoot, coreEnvFile, coreFil
     const composeRecord = snapshotFile(composePath, "workload-compose", snapshot, { workloadId: manifest.id });
     const environmentRecord = workloadEnvironmentRecord(environmentPath, manifest.id, snapshot);
     const workloadRecords = [manifestRecord, composeRecord, environmentRecord];
+    let projectMetadataRecord = null;
+    if (manifest.projectMetadataFile) {
+      const projectMetadataSourcePath = resolvePhysicalWithin(path.dirname(manifestPath), manifest.projectMetadataFile, "project metadata file", "file");
+      projectMetadataRecord = snapshotFile(projectMetadataSourcePath, "project-metadata", snapshot, { workloadId: manifest.id });
+      workloadRecords.push(projectMetadataRecord);
+    }
     workloadRecords.push(...sqlRecords(path.dirname(manifestPath), manifest.migrationRoots, snapshot, manifest.id));
     records.push(...workloadRecords);
     return {
@@ -388,6 +401,8 @@ export function resolveCatalog({ catalogPath, workloadRoot, coreEnvFile, coreFil
       composeSourcePath: composePath,
       environmentPath: environmentRecord.path,
       environmentSourcePath: environmentPath,
+      projectMetadataPath: projectMetadataRecord?.path ?? null,
+      projectMetadataSourcePath: projectMetadataRecord?.sourcePath ?? null,
       files: workloadRecords,
     };
   });
@@ -397,6 +412,7 @@ export function resolveCatalog({ catalogPath, workloadRoot, coreEnvFile, coreFil
     workload.manifestPath = workload.files.find((record) => record.kind === "workload-manifest").path;
     workload.composePath = workload.files.find((record) => record.kind === "workload-compose").path;
     workload.environmentPath = workload.files.find((record) => record.kind === "workload-environment").path;
+    workload.projectMetadataPath = workload.files.find((record) => record.kind === "project-metadata")?.path ?? null;
   }
   return {
     version: HOSTED_WORKLOAD_LOCK_VERSION,

@@ -318,6 +318,37 @@ test("activation paths remain bound to immutable snapshots after source replacem
   }
 });
 
+test("optional project metadata is exported as a verified workload-owned snapshot record", () => {
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "hosted-project-metadata-")));
+  try {
+    const workloadRoot = path.join(root, "workloads");
+    const fixture = catalogFixture(root);
+    const appRoot = path.join(workloadRoot, "example-app");
+    const manifestPath = path.join(appRoot, "manifest.json");
+    const manifestDocument = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+    manifestDocument.projectMetadataFile = ".platform/project.json";
+    fs.writeFileSync(manifestPath, JSON.stringify(manifestDocument));
+    fs.mkdirSync(path.join(appRoot, ".platform"));
+    fs.writeFileSync(path.join(appRoot, ".platform", "project.json"), '{"name":"Example"}\n');
+    const lock = resolveCatalog({
+      ...fixture,
+      workloadRoot,
+      coreFiles: [fixture.coreFile],
+      projectName: "fixture",
+      snapshotRoot: path.join(root, "snapshots"),
+    });
+    const record = lock.files.find((item) => item.kind === "project-metadata");
+    assert.equal(record.workloadId, "example-app");
+    assert.equal(record.path, lock.workloads[0].projectMetadataPath);
+    assert.equal(record.sourcePath, lock.workloads[0].projectMetadataSourcePath);
+    assert.match(record.sha256, /^[a-f0-9]{64}$/);
+    fs.writeFileSync(record.sourcePath, '{"name":"Changed"}\n');
+    assert.equal(verifyLockFiles(lock), true);
+  } finally {
+    removeFixtureTree(root);
+  }
+});
+
 test("lock verification rejects snapshot parent and generation replacement", () => {
   const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "hosted-snapshot-parent-")));
   try {
