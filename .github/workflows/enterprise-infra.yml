@@ -6,6 +6,19 @@ on:
     branches:
       - main
   workflow_dispatch:
+    inputs:
+      approved_sha:
+        description: Exact protected-main commit SHA approved for release
+        required: true
+        type: string
+      release_attestation_run_id:
+        description: Release-attestation workflow run containing the bound manifest and SBOM
+        required: true
+        type: string
+      release_manifest_sha256:
+        description: Owner-reviewed SHA256 of the attested release subject manifest
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -153,10 +166,14 @@ jobs:
           node scripts/release-subject-manifest.test.mjs
           node scripts/release-go-no-go-policy.test.mjs
           node scripts/deployment-admission-policy.test.mjs
+          node scripts/deployment-receipt-policy.test.mjs
           node scripts/privileged-workflow-policy.test.mjs
           node scripts/ssh-host-key-policy.test.mjs
           sh scripts/ops-image-trust-test.sh
           sh scripts/cloudflare-origin-lock-ufw-test.sh
+          sh scripts/release-compose-admission.test.sh
+          sh scripts/deploy-vps-input-test.sh
+          sh scripts/deploy-vps-order-test.sh
       - name: Upload supply-chain evidence reports
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -277,10 +294,93 @@ jobs:
           name: zap-baseline
           path: security/dast/
 
+  release-admission:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: enterprise-readiness
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.ref_protected == true
+    permissions:
+      actions: read
+      attestations: read
+      contents: read
+    outputs:
+      release_sha: ${{ steps.bind.outputs.release_sha }}
+      release_tree: ${{ steps.bind.outputs.release_tree }}
+    steps:
+      - name: Checkout exact protected-main candidate
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Bind owner-approved commit and tree
+        id: bind
+        env:
+          APPROVED_SHA: ${{ inputs.approved_sha }}
+        run: |
+          case "$APPROVED_SHA" in *[!a-f0-9]*|'') exit 1 ;; esac
+          test "${#APPROVED_SHA}" -eq 40
+          test "$APPROVED_SHA" = "$GITHUB_SHA"
+          test "$(git rev-parse HEAD)" = "$APPROVED_SHA"
+          test -z "$(git status --porcelain --untracked-files=all)"
+          RELEASE_TREE="$(git rev-parse "${APPROVED_SHA}^{tree}")"
+          printf 'release_sha=%s\n' "$APPROVED_SHA" >> "$GITHUB_OUTPUT"
+          printf 'release_tree=%s\n' "$RELEASE_TREE" >> "$GITHUB_OUTPUT"
+      - name: Download exact release-attestation evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: github-sigstore-release-evidence
+          path: ${{ runner.temp }}/release-candidate
+          run-id: ${{ inputs.release_attestation_run_id }}
+          github-token: ${{ github.token }}
+      - name: Select one manifest and one SBOM
+        id: artifacts
+        env:
+          CANDIDATE_DIR: ${{ runner.temp }}/release-candidate
+          EXPECTED_MANIFEST_SHA256: ${{ inputs.release_manifest_sha256 }}
+          APPROVED_SHA: ${{ inputs.approved_sha }}
+        run: |
+          case "$EXPECTED_MANIFEST_SHA256" in *[!a-f0-9]*|'') exit 1 ;; esac
+          test "${#EXPECTED_MANIFEST_SHA256}" -eq 64
+          mapfile -t manifests < <(find "$CANDIDATE_DIR" -type f -name 'release-subjects-*.json' -print)
+          mapfile -t sboms < <(find "$CANDIDATE_DIR" -type f -name 'github-release-sbom-*.cdx.json' -print)
+          test "${#manifests[@]}" -eq 1
+          test "${#sboms[@]}" -eq 1
+          test "$(sha256sum "${manifests[0]}" | awk '{print $1}')" = "$EXPECTED_MANIFEST_SHA256"
+          test "$(jq -r '.repository' "${manifests[0]}")" = "$GITHUB_REPOSITORY"
+          test "$(jq -r '.commitSha' "${manifests[0]}")" = "$APPROVED_SHA"
+          printf 'manifest=%s\n' "${manifests[0]}" >> "$GITHUB_OUTPUT"
+          printf 'sbom=%s\n' "${sboms[0]}" >> "$GITHUB_OUTPUT"
+      - name: Verify release subjects and require trusted deployment admission
+        env:
+          GH_TOKEN: ${{ github.token }}
+          APPROVED_SHA: ${{ inputs.approved_sha }}
+          RELEASE_MANIFEST: ${{ steps.artifacts.outputs.manifest }}
+          RELEASE_SBOM: ${{ steps.artifacts.outputs.sbom }}
+        run: |
+          sh ./scripts/release-artifact-gate.sh \
+            --imageManifest "$RELEASE_MANIFEST" \
+            --sbom "$RELEASE_SBOM" \
+            --releaseSha "$APPROVED_SHA" \
+            --repo "$GITHUB_REPOSITORY" \
+            --sourceRef refs/heads/main \
+            --signerWorkflow "$GITHUB_REPOSITORY/.github/workflows/release-attestation.yml"
+          echo "EXTERNAL-PENDING: no authenticated trusted deployment-receipt producer is configured." >&2
+          exit 1
+      - name: Upload artifact-verification evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: release-admission-candidate-${{ github.run_id }}
+          path: reports/release/
+          if-no-files-found: ignore
+          retention-days: 30
+
   deploy-vps:
     runs-on: ubuntu-latest
     timeout-minutes: 90
-    needs: enterprise-readiness
+    needs:
+      - enterprise-readiness
+      - release-admission
     if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.ref_protected == true
     environment:
       name: production
@@ -322,6 +422,8 @@ jobs:
           DEPLOY_REMOTE_DIR: ${{ vars.DEPLOY_REMOTE_DIR }}
           DEPLOY_SSH_PORT: ${{ vars.DEPLOY_SSH_PORT }}
           DEPLOY_REPO: ${{ github.repository }}
+          DEPLOY_RELEASE_SHA: ${{ needs.release-admission.outputs.release_sha }}
+          DEPLOY_RELEASE_TREE: ${{ needs.release-admission.outputs.release_tree }}
           DEPLOY_RUN_PRODUCTION_PREFLIGHT: "1"
           DEPLOY_RUN_PRE_GO_LIVE: "1"
           DEPLOY_RUN_GO_NO_GO: "1"

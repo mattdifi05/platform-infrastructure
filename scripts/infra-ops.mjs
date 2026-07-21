@@ -62,6 +62,7 @@ import {
 } from "./admin-access-inventory.mjs";
 import { evaluateProviderMfaAssurance } from "./provider-mfa-assurance.mjs";
 import { assertDeploymentAdmissionConfigured } from "./deployment-admission-policy.mjs";
+import { validateTrustedDeploymentReceipt } from "./deployment-receipt-policy.mjs";
 import { releaseEvidenceAdmissionReady } from "./release-go-no-go-policy.mjs";
 import { snapshotJsonArtifact } from "./stable-json-artifact.mjs";
 import {
@@ -6353,6 +6354,48 @@ async function releaseArtifactGateBody(options = {}) {
   }
 }
 
+function trustedDeploymentAdmissionEvidence(options = {}) {
+  const artifactReceiptPath = options.artifactReceiptPath ?? argv.artifactReceipt ?? process.env.DEPLOY_ARTIFACT_RECEIPT_PATH;
+  const deploymentReceiptPath = options.deploymentReceiptPath ?? argv.deploymentReceipt ?? process.env.DEPLOY_ADMISSION_RECEIPT_PATH;
+  const expectedArtifactSha256 = String(options.artifactReceiptSha256 ?? argv.artifactReceiptSha256 ?? process.env.DEPLOY_ARTIFACT_RECEIPT_SHA256 ?? "");
+  const expectedDeploymentSha256 = String(options.deploymentReceiptSha256 ?? argv.deploymentReceiptSha256 ?? process.env.DEPLOY_ADMISSION_RECEIPT_SHA256 ?? "");
+  if (!artifactReceiptPath || !deploymentReceiptPath || !/^[a-f0-9]{64}$/.test(expectedArtifactSha256) || !/^[a-f0-9]{64}$/.test(expectedDeploymentSha256)) {
+    fail("EXTERNAL-PENDING: exact artifact and trusted deployment receipt paths and SHA256 values are required.");
+  }
+  const snapshots = [];
+  try {
+    const artifact = snapshotJsonArtifact(artifactReceiptPath, { label: "artifact verification receipt", maxBytes: 16 * 1024 * 1024 });
+    const deployment = snapshotJsonArtifact(deploymentReceiptPath, { label: "trusted deployment receipt", maxBytes: 16 * 1024 * 1024 });
+    snapshots.push(artifact, deployment);
+    if (artifact.sha256 !== expectedArtifactSha256 || deployment.sha256 !== expectedDeploymentSha256) {
+      fail("Deployment admission receipt checksum mismatch.");
+    }
+    const policy = readJsonFile(path.join(infraRoot, "governance", "deployment-admission.json"), "deployment admission policy");
+    const repository = options.repository ?? argv.repo ?? process.env.DEPLOY_REPO ?? process.env.GITHUB_REPOSITORY;
+    const commitSha = options.commitSha ?? process.env.DEPLOY_RELEASE_SHA ?? gitEvidence().commit;
+    const treeSha = options.treeSha ?? process.env.DEPLOY_RELEASE_TREE ?? run("git", ["rev-parse", `${commitSha}^{tree}`], { capture: true }).stdout.trim();
+    validateTrustedDeploymentReceipt(deployment.document, {
+      policy,
+      repository,
+      commitSha,
+      treeSha,
+      artifactReceiptSha256: artifact.sha256,
+      artifactReceipt: artifact.document,
+    });
+    log(`Deployment receipt contract is bound to ${repository}@${commitSha}; repository policy remains authoritative for external verifier readiness.`);
+    return {
+      status: "READY",
+      repository,
+      commitSha,
+      treeSha,
+      artifactReceiptSha256: artifact.sha256,
+      deploymentReceiptSha256: deployment.sha256,
+    };
+  } finally {
+    for (const snapshot of snapshots.reverse()) snapshot.cleanup();
+  }
+}
+
 function releaseImageMapFromEnv(env, manifestPath = null) {
   return imageMapFromEntries(releaseImageEntries({ env, manifestPath }));
 }
@@ -6891,7 +6934,8 @@ async function governanceCheckBody() {
   assertNoMatch(infraWorkflow, /^\s{2}(?:compose-and-policy|shell-syntax):/m, "Infrastructure CI must use the four canonical required gates without duplicate legacy jobs.");
   assertMatch(infraWorkflow, /enterprise-readiness:[\s\S]*needs:\s*\r?\n\s+- quality\s*\r?\n\s+- compose\s*\r?\n\s+- supply-chain/, "Enterprise readiness must depend on all three behavior gates.");
   assertMatch(infraWorkflow, /dast-zap:[\s\S]*needs:\s*enterprise-readiness/, "DAST must run only after enterprise readiness.");
-  assertMatch(infraWorkflow, /deploy-vps:[\s\S]*needs:\s*enterprise-readiness/, "Production deploy must run only after enterprise readiness.");
+  assertMatch(infraWorkflow, /release-admission:[\s\S]*needs:\s*enterprise-readiness[\s\S]*release-artifact-gate\.sh/, "Release admission must verify artifacts after enterprise readiness and before deploy.");
+  assertMatch(infraWorkflow, /deploy-vps:[\s\S]*needs:\s*\r?\n\s+- enterprise-readiness\s*\r?\n\s+- release-admission/, "Production deploy must require enterprise readiness and release admission.");
   assertMatch(runbook, /Production deploy/, "Runbook must document production deploy.");
   assertMatch(runbook, /Rollback/, "Runbook must document rollback.");
   assertMatch(runbook, /release approval/i, "Runbook must document release approval.");
@@ -7536,7 +7580,7 @@ function buildPreGoLiveReadinessMatrix({ steps, options, repo, candidateStable }
     "secret-rotation-evidence-plan",
     "dr-readiness-check",
     "dr-evidence-summary",
-    "release-evidence-plan",
+    "trusted-deployment-admission",
     "alert-evidence-summary",
     "external-uptime-manifest-dry-run",
   ];
@@ -7710,7 +7754,7 @@ async function preGoLiveEvidence() {
   });
   await collectEvidenceStep(steps, { name: "dr-readiness-check", category: "local-policy", fn: drReadinessCheck });
   await collectEvidenceStep(steps, { name: "dr-evidence-summary", category: "local-policy", fn: drEvidence });
-  await collectEvidenceStep(steps, { name: "release-evidence-plan", category: "local-policy", fn: () => releaseEvidence({ planOnly: true }) });
+  await collectEvidenceStep(steps, { name: "trusted-deployment-admission", category: "external-admission", fn: trustedDeploymentAdmissionEvidence });
   await collectEvidenceStep(steps, { name: "alert-evidence-summary", category: "local-policy", fn: alertEvidence });
   await collectEvidenceStep(steps, { name: "external-uptime-manifest-dry-run", category: "provider-dry-run", fn: () => externalUptimeCheck({ dryRun: true }) });
 
@@ -9754,6 +9798,7 @@ function repoCoverageCategory(filePath) {
     ["reverse-proxy", /^(?:traefik|project-router)\//],
     ["waf", /^waf\//],
     ["security-policy", /^security\//],
+    ["vendored-dependency", /^vendor\//],
   ];
   const match = rules.find(([, pattern]) => pattern.test(normalized));
   return match?.[0] ?? null;
@@ -9862,7 +9907,7 @@ async function repoCoverageCheck() {
     ["quality-job-timeout", /^\s{2}quality:[\s\S]*?timeout-minutes:\s+30/m],
     ["compose-job-timeout", /^\s{2}compose:[\s\S]*?timeout-minutes:\s+45/m],
     ["canonical-ci-dag", /enterprise-readiness:[\s\S]*needs:\s*\r?\n\s+- quality\s*\r?\n\s+- compose\s*\r?\n\s+- supply-chain/],
-    ["deploy-after-readiness", /deploy-vps:[\s\S]*needs:\s*enterprise-readiness/],
+    ["deploy-after-readiness", /deploy-vps:[\s\S]*needs:\s*\r?\n\s+- enterprise-readiness\s*\r?\n\s+- release-admission/],
     ["dast-job-timeout", /dast-zap:[\s\S]*timeout-minutes:\s+45/],
     ["deploy-job-timeout", /deploy-vps:[\s\S]*timeout-minutes:\s+90/],
     ["shell-syntax", /for file in scripts\/\*\.sh/],

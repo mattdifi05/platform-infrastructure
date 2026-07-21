@@ -876,17 +876,18 @@ docker compose -p platform_infra_vps \
 set Compose usato dal deploy VPS, inclusi `compose.waf.yaml` e
 `compose.vps-waf.yaml`.
 
-`vps-postdeploy.sh` carica `.env`, usa gli URL pubblici reali e lancia
-WAF smoke piu' `infra-health` per default. Con `DEPLOY_RUN_GO_NO_GO=1` esegue
-anche `production-go-no-go.sh --enforce` e `production-readiness-live.sh`. Per
-il go-live finale puoi abilitarlo anche da `deploy-vps.sh` con:
+`deploy-vps.sh` non accetta piu' branch mobili: richiede commit e tree SHA
+esatti, receipt artifact-verification e trusted-deployment con checksum attesi,
+origin GitHub canonica e checkout puliti. Il remoto esegue i gate evidence
+prima di mutare UFW, poi riconcilia e verifica l'origin-lock dal Compose
+renderizzato; solo dopo puo' preparare il runtime e fare `compose up` senza
+build on-host. `vps-postdeploy.sh` dopo l'attivazione resta limitato a WAF smoke
+e `infra-health`.
 
-```sh
-DEPLOY_RUN_PRE_GO_LIVE=1 \
-DEPLOY_RUN_GO_NO_GO=1 \
-DEPLOY_REPO=OWNER/REPO \
-sh ./scripts/deploy-vps.sh
-```
+Il repository non dispone ancora di un produttore esterno autenticato di
+trusted deployment receipt: `governance/deployment-admission.json` resta
+`EXTERNAL-PENDING` e il workflow blocca intenzionalmente prima di installare la
+chiave SSH. Non impostare localmente `READY` e non usare receipt auto-dichiarate.
 
 Per il server home-VPS/LAN senza DNS pubblico, mantieni i valori production in
 `.env` e punta i client/operatori ai nomi canonici tramite DNS locale o

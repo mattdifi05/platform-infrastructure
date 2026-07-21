@@ -79,6 +79,13 @@ SSH, Base64-encoded into a generated script prelude, decoded and validated again
 remotely, then passed through quoted arguments or Bash arrays. No workflow input
 is appended to the SSH remote command string.
 
+Production deploy admission is currently deny-all. The repository can verify
+artifact attestations, but it has no authenticated external producer for
+`platform-trusted-deployment-admission/v1`; governance therefore remains
+`EXTERNAL-PENDING`. The deployment receipt JSON validator is only a structural
+consumer and is not, by itself, producer authentication or a reason to mark the
+gate READY.
+
 ## Tool integrity
 
 The ops image installs GitHub CLI 2.93.0 from an immutable release asset after
@@ -94,6 +101,7 @@ node scripts/release-trust.test.mjs
 node scripts/github-governance-policy.test.mjs
 node scripts/vps-evidence-request.test.mjs
 sh scripts/deploy-vps-input-test.sh
+sh scripts/deploy-vps-order-test.sh
 node scripts/t16-policy.mjs
 ```
 

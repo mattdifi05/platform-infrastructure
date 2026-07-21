@@ -91,7 +91,7 @@ jobs:
             --releaseName "${RELEASE_NAME}" \
             --workflowRunId "${GITHUB_RUN_ID}" \
             --workflowRunUrl "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
-            --manifest .tmp/release-attestation/release-subjects.json \
+            --manifest "reports/release/release-subjects-${GITHUB_RUN_ID}.json" \
             --sbom "reports/release/github-release-sbom-${GITHUB_RUN_ID}.cdx.json" \
             --receipt "reports/release/release-artifact-admission-${GITHUB_RUN_ID}.json")"
           printf 'RELEASE_SUBJECTS_SHA256=%s\n' "$RELEASE_SUBJECTS_SHA256" >> "$GITHUB_ENV"
@@ -100,7 +100,7 @@ jobs:
         id: attest-release-manifest
         uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4
         with:
-          subject-path: .tmp/release-attestation/release-subjects.json
+          subject-path: reports/release/release-subjects-${{ github.run_id }}.json
 
       - name: Cryptographically verify and record attestations
         env:
@@ -108,7 +108,7 @@ jobs:
           PHP_APACHE_DIGEST: ${{ steps.php-apache.outputs.digest }}
         run: |
           sh ./scripts/github-attestation-evidence.sh \
-            --subject .tmp/release-attestation/release-subjects.json \
+            --subject "reports/release/release-subjects-${GITHUB_RUN_ID}.json" \
             --expectedSubjectDigest "sha256:${RELEASE_SUBJECTS_SHA256}" \
             --repo "${GITHUB_REPOSITORY}" \
             --signerWorkflow "${GITHUB_REPOSITORY}/.github/workflows/release-attestation.yml" \
@@ -125,6 +125,5 @@ jobs:
             reports/release/github-sigstore-attestation-*.md
             reports/release/github-release-sbom-*.cdx.json
             reports/release/release-artifact-admission-*.json
-            .tmp/release-attestation/release-subjects.json
-            .tmp/release-attestation/release-subjects.sha256
+            reports/release/release-subjects-*.json
           retention-days: 30

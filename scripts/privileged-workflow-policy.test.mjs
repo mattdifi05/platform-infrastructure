@@ -14,11 +14,11 @@ for (const [pathname, jobName, forbidTagTrigger] of fixtures) {
   const text = fs.readFileSync(pathname, "utf8");
   assert.deepEqual(privilegedWorkflowMismatches(text, { jobName, forbidTagTrigger }), []);
   assert.match(
-    privilegedWorkflowMismatches(text.replace("github.ref_protected == true", "true"), { jobName, forbidTagTrigger }).join(" "),
+    privilegedWorkflowMismatches(text.replaceAll("github.ref_protected == true", "true"), { jobName, forbidTagTrigger }).join(" "),
     /protected-main/,
   );
   assert.match(
-    privilegedWorkflowMismatches(text.replace("persist-credentials: false", "persist-credentials: true"), { jobName, forbidTagTrigger }).join(" "),
+    privilegedWorkflowMismatches(text.replaceAll("persist-credentials: false", "persist-credentials: true"), { jobName, forbidTagTrigger }).join(" "),
     /persisted credentials/,
   );
 }

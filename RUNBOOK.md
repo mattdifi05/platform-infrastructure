@@ -893,7 +893,7 @@ attestation, rollback target and the output of:
 ```sh
 GITHUB_REF=refs/heads/main sh ./scripts/infra-ops.sh release-artifact-gate --requireProvenance --repo OWNER/REPO --sourceRef refs/heads/main
 gh workflow run release-attestation.yml --repo OWNER/REPO --ref main
-GITHUB_REF=refs/heads/main sh ./scripts/release-evidence.sh --requireProvenance --repo OWNER/REPO --sourceRef refs/heads/main --imageManifest .tmp/release-attestation/release-subjects.json --sbom reports/release/github-release-sbom-<run-id>.cdx.json --previousImagesFile ./release/previous-images.json
+GITHUB_REF=refs/heads/main sh ./scripts/release-evidence.sh --requireProvenance --repo OWNER/REPO --sourceRef refs/heads/main --imageManifest reports/release/release-subjects-<run-id>.json --sbom reports/release/github-release-sbom-<run-id>.cdx.json --previousImagesFile ./release/previous-images.json
 sh ./scripts/infra-ops.sh governance-check
 sh ./scripts/infra-ops.sh enterprise-10-check
 ```
@@ -1255,20 +1255,19 @@ Use this path when TLS and public certificates are terminated by VPS, Cloudflare
    sh ./scripts/vps-postdeploy.sh .env
    ```
 
-6. For remote deploys, `scripts/deploy-vps.sh` now calls
-   `vps-postdeploy.sh` after `docker compose up`. By default the
-   post-deploy step runs WAF smoke and `infra-health` against the public URLs
-   loaded from `.env`. With `DEPLOY_RUN_GO_NO_GO=1`, it also enforces
-   `production-go-no-go.sh --enforce` and `production-readiness-live.sh`.
-   Enable the final evidence gates only when the external providers are
-   configured:
+6. Remote deploys are exact-subject only. `scripts/deploy-vps.sh` requires the
+   approved commit/tree, canonical repository, artifact-verification receipt,
+   trusted-deployment receipt and both expected receipt hashes. The workflow
+   verifies the release artifact before it exposes the production environment
+   or installs the SSH key. Remotely, all evidence/go-no-go gates run first;
+   UFW is then reconciled and verified against the rendered candidate Compose
+   ports, followed by runtime preparation and `compose up` without `--build`.
+   Post-activation runs only WAF smoke and `infra-health`.
 
-   ```sh
-   DEPLOY_RUN_PRE_GO_LIVE=1 \
-   DEPLOY_RUN_GO_NO_GO=1 \
-   DEPLOY_REPO=OWNER/REPO \
-   sh ./scripts/deploy-vps.sh
-   ```
+   `governance/deployment-admission.json` is intentionally
+   `EXTERNAL-PENDING`: no authenticated external trusted-receipt producer is
+   configured, so the production workflow is a deny-all gate today. A local
+   JSON receipt or a manual policy flip is not deployment authority.
 
    La transazione UFW acquisisce prima un lock canonico esclusivo e cattura
    l'esatto multinsieme semantico delle regole possedute

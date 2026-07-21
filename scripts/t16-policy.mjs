@@ -93,16 +93,18 @@ record("deploy-vps-no-remote-argv", !includes(deployVps, "sh -s --") && !include
 record(
   "deploy-vps-remote-revalidation",
   includes(deployVpsRemote, "decode_field")
-    && includes(deployVpsRemote, 'git checkout "$branch"')
-    && !includes(deployVpsRemote, 'git checkout -- "$branch"'),
-  "remote deploy script decodes, revalidates and checks out the validated branch",
+    && includes(deployVpsRemote, 'git checkout --detach "$release_sha"')
+    && includes(deployVpsRemote, "platform-trusted-deployment-admission/v1")
+    && includes(deployVpsRemote, 'git remote get-url --all origin')
+    && !includes(deployVpsRemote, "PLATFORM_BRANCH_B64"),
+  "remote deploy decodes receipts, verifies canonical origin and checks out the exact admitted commit detached",
 );
 
 record("branch-strict", branchPolicy.required_status_checks?.strict === true, "status checks require the latest branch state");
 record("branch-admins", branchPolicy.enforce_admins === true, "admins cannot bypass protection");
 record("branch-last-push", branchPolicy.required_pull_request_reviews?.require_last_push_approval === true, "last pusher cannot satisfy approval alone");
 record("branch-no-bypass", ["users", "teams", "apps"].every((key) => branchPolicy.required_pull_request_reviews?.bypass_pull_request_allowances?.[key]?.length === 0), "review bypass allowlists are empty");
-record("branch-exact-verifier", includes(governanceModule, "required status checks differ") && includes(governanceModule, "enforce_admins differs"), "branch verifier compares exact state");
+record("branch-exact-verifier", includes(governanceModule, "required status check producer bindings differ") && includes(governanceModule, "enforce_admins differs"), "branch verifier compares exact producer-bound state");
 record("github-repository-normalized", includes(ops, "return normalizeRepository(repo)") && includes(ops, "githubRepoApiPath(repo)"), "GitHub API repository path uses strict owner/name normalization");
 
 const production = environments.environments?.find((environment) => environment.name === "production");
