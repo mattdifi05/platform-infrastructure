@@ -208,6 +208,11 @@ test("host device controls are rejected after render", () => {
     assert.throws(() => validateRenderedWorkloads({ core, combined, lock }), /cannot request host device access/);
   }
 });
+test("supplemental device groups are rejected after render", () => {
+  const combined = combinedFixture();
+  combined.services["example-app-web"].group_add = ["video", "44"];
+  assert.throws(() => validateRenderedWorkloads({ core, combined, lock }), /cannot add supplemental groups/);
+});
 test("local volume driver options are rejected after render", () => {
   const combined = combinedFixture();
   combined.volumes = {
@@ -551,7 +556,7 @@ test("legacy hosted workload locks fail closed", () => {
 test("raw policy receipt requires the exact current control set", () => {
   const rawPolicyReceipt = {
     policyVersion: "hosted-raw-v1",
-    controls: ["deny-api-socket", "deny-device-access", "deny-env-file", "deny-extends", "deny-file-configs", "deny-gpu-access", "deny-include", "deny-lifecycle-hooks", "deny-local-volume-options", "deny-providers", "deny-runtime-overrides", "deny-scaling", "deny-stop-grace-overrides", "deny-volumes-from"],
+    controls: ["deny-api-socket", "deny-device-access", "deny-env-file", "deny-extends", "deny-file-configs", "deny-gpu-access", "deny-include", "deny-lifecycle-hooks", "deny-local-volume-options", "deny-providers", "deny-runtime-overrides", "deny-scaling", "deny-stop-grace-overrides", "deny-supplemental-groups", "deny-volumes-from"],
     workloadContentSha256: "a".repeat(64),
     workloads: [{
       workloadId: "example-app",
@@ -573,12 +578,12 @@ test("raw policy receipt requires the exact current control set", () => {
     rawPolicyWorkloadContentSha256: "a".repeat(64),
     rawPolicyReceipt,
     rawPolicySha256: crypto.createHash("sha256").update(JSON.stringify(stable(rawPolicyReceipt))).digest("hex"),
-    rawPolicyControls: ["deny-api-socket", "deny-device-access", "deny-env-file", "deny-extends", "deny-file-configs", "deny-gpu-access", "deny-include", "deny-lifecycle-hooks", "deny-local-volume-options", "deny-providers", "deny-runtime-overrides", "deny-scaling", "deny-stop-grace-overrides", "deny-volumes-from"],
+    rawPolicyControls: ["deny-api-socket", "deny-device-access", "deny-env-file", "deny-extends", "deny-file-configs", "deny-gpu-access", "deny-include", "deny-lifecycle-hooks", "deny-local-volume-options", "deny-providers", "deny-runtime-overrides", "deny-scaling", "deny-stop-grace-overrides", "deny-supplemental-groups", "deny-volumes-from"],
   };
   assert.doesNotThrow(() => verifyRawPolicyReceipt(receipt));
   receipt.rawPolicyControls = ["deny-include"];
   assert.throws(() => verifyRawPolicyReceipt(receipt), /raw source policy receipt/);
-  receipt.rawPolicyControls = ["deny-api-socket", "deny-device-access", "deny-env-file", "deny-extends", "deny-file-configs", "deny-gpu-access", "deny-include", "deny-lifecycle-hooks", "deny-local-volume-options", "deny-providers", "deny-runtime-overrides", "deny-scaling", "deny-stop-grace-overrides", "deny-volumes-from"];
+  receipt.rawPolicyControls = ["deny-api-socket", "deny-device-access", "deny-env-file", "deny-extends", "deny-file-configs", "deny-gpu-access", "deny-include", "deny-lifecycle-hooks", "deny-local-volume-options", "deny-providers", "deny-runtime-overrides", "deny-scaling", "deny-stop-grace-overrides", "deny-supplemental-groups", "deny-volumes-from"];
   receipt.rawPolicySha256 = "b".repeat(64);
   assert.throws(() => verifyRawPolicyReceipt(receipt), /raw source policy receipt/);
   receipt.rawPolicyReceipt.workloads[0].composeSha256 = "d".repeat(64);

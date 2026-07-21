@@ -8,7 +8,7 @@ require "psych"
 
 module HostedWorkloadSourcePolicy
   VERSION = "hosted-raw-v1"
-  CONTROLS = %w[deny-api-socket deny-device-access deny-env-file deny-extends deny-file-configs deny-gpu-access deny-include deny-lifecycle-hooks deny-local-volume-options deny-providers deny-runtime-overrides deny-scaling deny-stop-grace-overrides deny-volumes-from].freeze
+  CONTROLS = %w[deny-api-socket deny-device-access deny-env-file deny-extends deny-file-configs deny-gpu-access deny-include deny-lifecycle-hooks deny-local-volume-options deny-providers deny-runtime-overrides deny-scaling deny-stop-grace-overrides deny-supplemental-groups deny-volumes-from].freeze
   MAX_COMPOSE_BYTES = 1_048_576
   STANDARD_TAG_PREFIX = "tag:yaml.org,2002:"
 
@@ -102,6 +102,7 @@ module HostedWorkloadSourcePolicy
       fail!("#{label} service #{name} cannot override the stop grace period.") if service.key?("stop_grace_period")
       device_controls = %w[devices device_cgroup_rules].select { |key| service.key?(key) }
       fail!("#{label} service #{name} cannot request host device access: #{device_controls.join(', ')}.") unless device_controls.empty?
+      fail!("#{label} service #{name} cannot add supplemental groups.") if service.key?("group_add")
       accelerator_controls = %w[gpus device_requests].select { |key| service.key?(key) }
       reservations = service.dig("deploy", "resources", "reservations") if service["deploy"].is_a?(Hash)
       accelerator_controls << "deploy.resources.reservations.devices" if reservations.is_a?(Hash) && reservations.key?("devices")

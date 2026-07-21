@@ -97,6 +97,14 @@ test("rejects workload host device controls independently at runtime", () => {
   }
 });
 
+test("rejects workload supplemental device groups independently at runtime", () => {
+  const config = fixture();
+  config.services["example-app-web"].group_add = ["video", "44"];
+  const report = evaluateRuntimeIsolation(config);
+  assert.equal(report.status, "failed");
+  assert.match(report.failures.join("\n"), /workload-no-supplemental-groups-example-app-web/);
+});
+
 test("rejects workload local volume driver options independently at runtime", () => {
   const config = fixture();
   config.volumes = {

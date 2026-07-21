@@ -104,6 +104,14 @@ class HostedWorkloadSourcePolicyTest < Minitest::Test
     end
   end
 
+  def test_rejects_supplemental_device_groups
+    model = parse("services:\n  app:\n    group_add: [video, '44']\n")
+    error = assert_raises(ArgumentError) do
+      HostedWorkloadSourcePolicy.validate_source_model(model, "fixture")
+    end
+    assert_match(/cannot add supplemental groups/, error.message)
+  end
+
   def test_rejects_local_volume_driver_options
     model = parse(<<~YAML)
       volumes:

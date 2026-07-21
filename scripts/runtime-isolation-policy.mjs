@@ -82,6 +82,7 @@ export function evaluateRuntimeIsolation(config, options = {}) {
     record(`workload-no-stop-grace-override-${name}`, !Object.hasOwn(service, "stop_grace_period"), `${name} stopGrace=${service.stop_grace_period ?? "default"}`);
     const deviceControls = ["devices", "device_cgroup_rules"].filter((field) => Object.hasOwn(service, field));
     record(`workload-no-device-access-${name}`, deviceControls.length === 0, `${name} deviceControls=${deviceControls.join(",") || "none"}`);
+    record(`workload-no-supplemental-groups-${name}`, !Object.hasOwn(service, "group_add"), `${name} groupAdd=${service.group_add || "none"}`);
     const acceleratorControls = ["gpus", "device_requests"].filter((field) => Object.hasOwn(service, field));
     if (Object.hasOwn(object(service.deploy?.resources?.reservations), "devices")) {
       acceleratorControls.push("deploy.resources.reservations.devices");
