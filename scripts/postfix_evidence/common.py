@@ -216,6 +216,69 @@ def sha256_bytes(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+_SECRET_HEADER_RE = re.compile(
+    rb"(?im)^[ \t]*(?:authorization[ \t]*:[ \t]*(?:bearer|basic)|cookie[ \t]*:|set-cookie[ \t]*:)[ \t]*([^\r\n]+)"
+)
+_SECRET_ASSIGNMENT_RE = re.compile(
+    rb"(?im)(?:^|[,{;][ \t]*|export[ \t]+)[\"']?"
+    rb"(?:password|passwd|api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|private[_-]?key)"
+    rb"[\"']?[ \t]*[:=][ \t]*[\"']?([^\"'\s,;}]{4,})"
+)
+_AUTHENTICATED_URL_RE = re.compile(
+    rb"(?i)(?:postgres(?:ql)?|mysql|mariadb|redis|mongodb(?:\+srv)?|https?)://[^\s/:@]+:([^\s/@]+)@"
+)
+_KNOWN_TOKEN_RE = re.compile(
+    rb"(?<![A-Za-z0-9])(?:AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{20,}|xox[baprs]-[A-Za-z0-9-]{20,}|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,})(?![A-Za-z0-9])"
+)
+_PRIVATE_KEY_MARKERS = (
+    b"-----BEGIN " + b"PRIVATE KEY-----",
+    b"-----BEGIN RSA " + b"PRIVATE KEY-----",
+    b"-----BEGIN EC " + b"PRIVATE KEY-----",
+    b"-----BEGIN DSA " + b"PRIVATE KEY-----",
+    b"-----BEGIN OPENSSH " + b"PRIVATE KEY-----",
+    b"-----BEGIN PGP " + b"PRIVATE KEY BLOCK-----",
+)
+_SECRET_PLACEHOLDERS = {
+    b"false",
+    b"true",
+    b"none",
+    b"null",
+    b"redacted",
+    b"masked",
+    b"removed",
+    b"placeholder",
+    b"changeme",
+    b"not-set",
+    b"unset",
+}
+
+
+def _is_secret_placeholder(value: bytes) -> bool:
+    normalized = value.strip().strip(b"\"'").lower()
+    return (
+        normalized in _SECRET_PLACEHOLDERS
+        or normalized.startswith((b"<redacted", b"${", b"{{"))
+        or (normalized and set(normalized) <= {ord("*"), ord("x"), ord("-")})
+    )
+
+
+def scan_secret_bytes(payload: bytes, *, label: str) -> None:
+    """Reject credential material without echoing the matched value."""
+    for marker in _PRIVATE_KEY_MARKERS:
+        if marker in payload:
+            raise ContractError(f"{label}: private key material detected")
+    if _KNOWN_TOKEN_RE.search(payload):
+        raise ContractError(f"{label}: credential token detected")
+    for pattern, kind in (
+        (_SECRET_HEADER_RE, "sensitive HTTP authentication/cookie header"),
+        (_SECRET_ASSIGNMENT_RE, "credential assignment"),
+        (_AUTHENTICATED_URL_RE, "credential-bearing URL"),
+    ):
+        for match in pattern.finditer(payload):
+            if not _is_secret_placeholder(match.group(1)):
+                raise ContractError(f"{label}: {kind} detected")
+
+
 def sha256_file(path: Path, *, label: str | None = None) -> str:
     return sha256_bytes(read_regular_bytes(path, label=label or path.name))
 

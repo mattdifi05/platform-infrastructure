@@ -1270,6 +1270,20 @@ class PostfixEvidenceTests(unittest.TestCase):
                 with self.assertRaises(ContractError):
                     scanner(payload, label="secret PoC")
 
+    def test_builder_and_validator_reject_a_secret_in_a_receipt_log(self) -> None:
+        rows = self.fixture.load_jsonl("inputs/test-receipts.jsonl")
+        target = rows[0]
+        log_path = self.fixture.handoff_root / target["log"]["path"]
+        log_path.write_bytes(
+            log_path.read_bytes()
+            + b"Authorization: Bearer abcdefghijklmnopqrstuvwxyz\n"
+        )
+        target["log"]["sha256"] = sha256(log_path)
+        self.fixture.write_jsonl("inputs/test-receipts.jsonl", rows)
+        self.fixture.refresh_handoff_hash("test_receipt_registry")
+        with self.assertRaisesRegex(ContractError, "authentication|credential"):
+            self.build()
+
     def test_build_receipt_input_and_tool_hashes_are_recalculated(self) -> None:
         self.build()
         path = self.fixture.output / "receipts/build_receipt.json"

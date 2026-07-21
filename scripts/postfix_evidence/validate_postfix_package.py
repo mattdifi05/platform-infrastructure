@@ -35,6 +35,7 @@ from scripts.postfix_evidence.common import (
     nonempty_string,
     read_regular_bytes,
     read_regular_under,
+    scan_secret_bytes,
     resolve_commit,
     safe_relative,
     sha256_bytes,
@@ -510,6 +511,7 @@ def _validate_handoff_manifest(
     path: Path,
 ) -> tuple[dict[str, Any], dict[str, Path], dict[str, str], dict[str, bytes], bytes]:
     handoff_bytes = read_regular_bytes(path, label="handoff manifest")
+    scan_secret_bytes(handoff_bytes, label="handoff manifest")
     handoff = load_json_bytes(handoff_bytes, label="handoff manifest")
     exact_keys(
         handoff,
@@ -536,6 +538,7 @@ def _validate_handoff_manifest(
         actual = sha256_bytes(payload)
         if actual != entry["sha256"]:
             raise ContractError(f"handoff file {key}: stale SHA-256")
+        scan_secret_bytes(payload, label=f"handoff file {key}")
         resolved[key] = root / Path(*relative.parts)
         hashes[key] = actual
         snapshots[key] = payload
@@ -649,6 +652,7 @@ def _validate_log_reference(
             raise ContractError(f"{label}: log is absent from the package snapshot") from error
     if sha256_bytes(payload) != entry["sha256"]:
         raise ContractError(f"{label}: stale log SHA-256")
+    scan_secret_bytes(payload, label=label)
     return payload
 
 
@@ -1726,6 +1730,8 @@ def validate_package(
     )
     manifest = package_snapshot.rows
     package_files = package_snapshot.files
+    for relative, payload in sorted(package_files.items()):
+        scan_secret_bytes(payload, label=f"package file {relative}")
 
     def json_at(relative: str, *, label: str) -> Any:
         try:

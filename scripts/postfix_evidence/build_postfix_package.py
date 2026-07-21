@@ -7,7 +7,6 @@ import argparse
 import copy
 import json
 import os
-import re
 import shutil
 import sys
 import tempfile
@@ -18,6 +17,7 @@ from scripts.postfix_evidence.common import (
     ContractError,
     canonical_json_bytes,
     read_regular_bytes,
+    scan_secret_bytes,
     sha256_bytes,
     sha256_file,
     tree_index,
@@ -35,18 +35,12 @@ from scripts.postfix_evidence.validate_postfix_package import (
 )
 
 
-SENSITIVE_LOG_RE = re.compile(
-    rb"(?i)(?:password|passwd|api[_-]?key|access[_-]?token|private[_-]?key)\s*[:=]\s*[^\s]{4,}|-----BEGIN [A-Z ]*PRIVATE KEY-----"
-)
-
-
 def _copy_verified_log(payload: bytes, expected_sha256: str, destination: Path) -> None:
     if len(payload) > 10 * 1024 * 1024:
         raise ContractError("evidence log: file exceeds the 10 MiB package limit")
     if sha256_bytes(payload) != expected_sha256:
         raise ContractError("evidence log: source changed after validation")
-    if SENSITIVE_LOG_RE.search(payload):
-        raise ContractError("evidence log: credential-like value detected; sanitize before packaging")
+    scan_secret_bytes(payload, label="evidence log")
     write_bytes(destination, payload)
 
 
@@ -235,6 +229,13 @@ def build_package(
         candidate_repo=candidate_repo,
         semantic_receipt_sha256=semantic_receipt_sha256,
     )
+    scan_secret_bytes(data.handoff_bytes, label="handoff manifest")
+    for key, payload in sorted(data.handoff_file_bytes.items()):
+        scan_secret_bytes(payload, label=f"handoff input {key}")
+    for receipt_id, payload in sorted(data.test_log_bytes.items()):
+        scan_secret_bytes(payload, label=f"test log {receipt_id}")
+    for group_id, payload in sorted(data.pre_fix_log_bytes.items()):
+        scan_secret_bytes(payload, label=f"pre-fix log {group_id}")
     replay_a = Path(tempfile.mkdtemp(prefix=".postfix-replay-a-", dir=output.parent))
     replay_b = Path(tempfile.mkdtemp(prefix=".postfix-replay-b-", dir=output.parent))
     published = False
