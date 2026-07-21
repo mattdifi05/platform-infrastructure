@@ -2,6 +2,12 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import {
+  assertBrokerPolicyDigest,
+  brokerPolicySha256,
+  normalizeWorkloadBrokers,
+  validateGlobalBrokerOwnership,
+} from "./workload-broker-policy.mjs";
 
 const ID = /^[a-z][a-z0-9-]{1,62}$/;
 const SERVICE = /^[a-z][a-z0-9-]{1,62}$/;
@@ -418,6 +424,7 @@ export function validateWorkloadManifest(document, manifestPath = "manifest") {
   for (const secret of secrets) {
     if (!SERVICE.test(secret) || !secret.startsWith(`${id}-`)) invalid(`Secret ${secret} must be workload-prefixed.`);
   }
+  const brokers = normalizeWorkloadBrokers(document.brokers, { id, services, secrets });
   return {
     version: 1,
     id,
@@ -425,6 +432,7 @@ export function validateWorkloadManifest(document, manifestPath = "manifest") {
     projectMetadataFile,
     services,
     secrets,
+    brokers,
     migrationRoots: [...new Set(document.migrationRoots ?? [])],
   };
 }
@@ -480,6 +488,7 @@ export function resolveCatalog({ catalogPath, workloadRoot, coreEnvFile, coreFil
     };
   });
   validateGlobalRouteOwnership(workloads, { reservedHosts: reservedHostsFromEnvironment(coreEnvFile) });
+  validateGlobalBrokerOwnership(workloads);
   const contentDigest = workloadContentSha256(records);
   const snapshotReceipt = finalizeSnapshot(snapshot, records, contentDigest);
   for (const workload of workloads) {
@@ -503,14 +512,16 @@ export function resolveCatalog({ catalogPath, workloadRoot, coreEnvFile, coreFil
     projectName: requiredText(projectName, "Compose project name"),
     coreFiles: coreFiles.map((file) => path.resolve(file)),
     workloads,
+    brokerPolicySha256: brokerPolicySha256(workloads),
     files: records,
     workloadContentSha256: contentDigest,
   };
 }
 
-function objectWithoutNetworks(service) {
+function objectWithoutNetworks(service, name) {
   const copy = structuredClone(service);
   delete copy.networks;
+  if (name === "redis" || name === "nats") delete copy.secrets;
   return copy;
 }
 
@@ -522,7 +533,7 @@ function assertPlatformServicesUnchanged(core, combined, workloadIds) {
   for (const [name, coreService] of Object.entries(core.services ?? {})) {
     const combinedService = combined.services?.[name];
     if (!combinedService) invalid(`Workload overlays removed platform service ${name}.`);
-    if (!same(objectWithoutNetworks(coreService), objectWithoutNetworks(combinedService))) {
+    if (!same(objectWithoutNetworks(coreService, name), objectWithoutNetworks(combinedService, name))) {
       invalid(`Workload overlays changed protected platform service ${name}.`);
     }
     const coreNetworks = serviceNetworks(coreService);
@@ -627,8 +638,82 @@ function assertWorkloadService({ serviceDefinition, manifestService, manifest, c
   }
 }
 
+function secretEntries(service) {
+  return (service?.secrets ?? []).map((entry) => {
+    if (typeof entry === "string") return { source: entry, target: entry };
+    return { source: String(entry?.source ?? ""), target: String(entry?.target ?? entry?.source ?? "") };
+  });
+}
+
+function assertBrokerEnvironment(name, service, manifest, manifestService) {
+  const networks = serviceNetworks(service);
+  const secrets = new Set(secretEntries(service).map((entry) => entry.source));
+  const environment = service.environment ?? {};
+  const prefix = workloadNetworkPrefix(manifest.id);
+  const usesRedis = networks.has(`${prefix}cache`);
+  const usesNats = networks.has(`${prefix}bus`);
+  if (usesRedis) {
+    const policy = manifest.brokers?.redis;
+    if (!policy) invalid(`${name} joins the cache zone without a locked Redis ACL identity.`);
+    const expected = {
+      REDIS_HOST: "redis",
+      REDIS_PORT: "6379",
+      REDIS_USERNAME: policy.username,
+      REDIS_PASSWORD_FILE: `/run/secrets/${policy.credentialSecret}`,
+      REDIS_KEY_PREFIX: policy.keyPrefix,
+      REDIS_CHANNEL_PREFIX: policy.channelPrefix,
+    };
+    if (!secrets.has(policy.credentialSecret) || Object.entries(expected).some(([key, value]) => String(environment[key] ?? "") !== value)) {
+      invalid(`${name} Redis connection fields do not match its locked ACL identity.`);
+    }
+  }
+  const natsUser = manifest.brokers?.nats?.users.find((user) => user.service === manifestService.name) ?? null;
+  if (usesNats) {
+    if (!natsUser) invalid(`${name} joins the bus zone without a locked NATS service identity.`);
+    const expected = {
+      NATS_HOST: "nats",
+      NATS_PORT: "4222",
+      NATS_ACCOUNT: manifest.brokers.nats.account,
+      NATS_USERNAME: natsUser.username,
+      NATS_PASSWORD_FILE: `/run/secrets/${natsUser.credentialSecret}`,
+      NATS_SUBJECT_PREFIX: natsUser.publish[0].slice(0, -1),
+      NATS_QUEUE_GROUP: natsUser.queueGroups[0],
+    };
+    if (!secrets.has(natsUser.credentialSecret) || Object.entries(expected).some(([key, value]) => String(environment[key] ?? "") !== value)) {
+      invalid(`${name} NATS connection fields do not match its locked account identity.`);
+    }
+  } else if (natsUser) {
+    invalid(`${name} declares a NATS identity but does not join its workload bus zone.`);
+  }
+  return { usesRedis, usesNats };
+}
+
+function validateBrokerCoreSecretExtensions({ core, combined, workloads }) {
+  const expectedByService = new Map([
+    ["redis", workloads.flatMap((workload) => workload.brokers?.redis ? [workload.brokers.redis.credentialSecret] : [])],
+    ["nats", workloads.flatMap((workload) => workload.brokers?.nats?.users.map((user) => user.credentialSecret) ?? [])],
+  ]);
+  for (const [serviceName, tenantSecrets] of expectedByService) {
+    if (!core.services?.[serviceName]) {
+      if (tenantSecrets.length) invalid(`Core broker ${serviceName} is missing for declared workload identities.`);
+      continue;
+    }
+    const baseline = secretEntries(core.services[serviceName]);
+    const expected = [
+      ...baseline,
+      ...tenantSecrets.map((source) => ({ source, target: source })),
+    ].map((entry) => `${entry.source}\0${entry.target}`).sort();
+    const actual = secretEntries(combined.services?.[serviceName]).map((entry) => `${entry.source}\0${entry.target}`).sort();
+    if (!same(actual, expected)) invalid(`${serviceName} must mount exactly its core and locked workload credential secrets.`);
+    for (const secret of tenantSecrets) {
+      if (combined.secrets?.[secret]?.external !== true) invalid(`${serviceName} workload credential ${secret} must be external.`);
+    }
+  }
+}
+
 export function validateRenderedWorkloads({ core, combined, lock }) {
   validateGlobalRouteOwnership(lock.workloads);
+  assertBrokerPolicyDigest(lock);
   const workloadIds = lock.workloads.map((workload) => workload.id);
   assertPlatformServicesUnchanged(core, combined, workloadIds);
   const declared = new Map();
@@ -639,10 +724,15 @@ export function validateRenderedWorkloads({ core, combined, lock }) {
   const extras = Object.keys(combined.services ?? {}).filter((name) => !coreNames.has(name));
   if (!same(extras.sort(), [...declared.keys()].sort())) invalid("Rendered workload services do not exactly match the signed catalog.");
   const routes = [];
+  const redisUsers = new Set();
+  const natsUsers = new Set();
   for (const [name, item] of declared) {
     const rendered = combined.services?.[name];
     if (!rendered) invalid(`Rendered service ${name} is missing.`);
     assertWorkloadService({ serviceDefinition: rendered, manifestService: item.service, manifest: item.workload, combined });
+    const brokerUse = assertBrokerEnvironment(name, rendered, item.workload, item.service);
+    if (brokerUse.usesRedis) redisUsers.add(item.workload.id);
+    if (brokerUse.usesNats) natsUsers.add(`${item.workload.id}/${item.service.name}`);
     for (const route of item.service.routes) {
       const workloadNetworks = [...serviceNetworks(rendered)].filter((network) => network.startsWith(workloadNetworkPrefix(item.workload.id)));
       const routerNetworks = serviceNetworks(combined.services?.["project-router"]);
@@ -660,6 +750,13 @@ export function validateRenderedWorkloads({ core, combined, lock }) {
       });
     }
   }
+  for (const workload of lock.workloads) {
+    if (workload.brokers?.redis && !redisUsers.has(workload.id)) invalid(`${workload.id} declares Redis authorization without a cache-zone consumer.`);
+    for (const user of workload.brokers?.nats?.users ?? []) {
+      if (!natsUsers.has(`${workload.id}/${user.service}`)) invalid(`${workload.id} NATS user ${user.service} has no bus-zone consumer.`);
+    }
+  }
+  validateBrokerCoreSecretExtensions({ core, combined, workloads: lock.workloads });
   for (const [name, network] of Object.entries(combined.networks ?? {})) {
     if (core.networks?.[name]) continue;
     const owner = lock.workloads.find((workload) => name.startsWith(workloadNetworkPrefix(workload.id)));
@@ -680,6 +777,7 @@ export function verifyLockFiles(lock) {
     invalid(`Hosted workload lock must use schema ${HOSTED_WORKLOAD_LOCK_VERSION} and validator ${HOSTED_WORKLOAD_VALIDATOR_VERSION}.`);
   }
   if (!Array.isArray(lock?.files) || lock.files.length === 0) invalid("Workload lock has no file records.");
+  assertBrokerPolicyDigest(lock);
   const snapshotGeneration = physicalRoot(requiredText(lock.snapshotGeneration, "snapshot generation"), "snapshot generation");
   if (path.dirname(snapshotGeneration) !== physicalRoot(requiredText(lock.snapshotRoot, "snapshot root"), "snapshot root")) {
     invalid("Snapshot generation is outside the locked snapshot root.");

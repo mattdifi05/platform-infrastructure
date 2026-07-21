@@ -121,6 +121,14 @@ core) e scrive nel lock la tupla completa di ownership. In produzione il
 filesystem, wildcard e mappe upstream da environment sono disponibili soltanto
 nei test che abilitano esplicitamente la compatibilita' legacy.
 
+Un servizio workload che entra nella zona `cache` o `bus` deve inoltre firmare
+nel manifest la propria policy broker completa. Il lock lega digest, username,
+secret esterno, prefissi Redis, account e utenti NATS per servizio, subject,
+queue e response policy. I valori delle credenziali non entrano mai nel
+manifest o nel lock. Collisioni, prefissi Redis sovrapposti, comandi ampliati,
+subject globali, credenziali condivise ed export/import NATS non approvati fanno
+fallire il render prima dell'attivazione.
+
 ## Avvio locale
 
 ```sh

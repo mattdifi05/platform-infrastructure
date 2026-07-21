@@ -11,6 +11,7 @@ import {
   validateWorkloadManifest,
   verifyLockFiles,
 } from "./hosted-workload-contract.mjs";
+import { brokerPolicySha256, expectedNatsPolicy, expectedRedisPolicy } from "./workload-broker-policy.mjs";
 
 const digest = "a".repeat(64);
 const manifest = validateWorkloadManifest({
@@ -65,16 +66,16 @@ function combinedFixture() {
       },
       "example-app-worker": {
         ...structuredClone(baseService),
-        networks: { example_app_bus: null },
+        networks: { example_app_egress: null },
         labels: { "com.platform.workload-id": "example-app", "com.platform.workload-role": "worker" },
       },
     },
-    networks: { platform_routing: { internal: true }, example_app_ingress: { internal: true }, example_app_bus: { internal: true } },
+    networks: { platform_routing: { internal: true }, example_app_ingress: { internal: true }, example_app_egress: { internal: false, enable_ipv6: false } },
     secrets: { "example-app-database-url": { external: true } },
   };
 }
 
-const lock = { workloads: [manifest] };
+const lock = { workloads: [manifest], brokerPolicySha256: brokerPolicySha256([manifest]) };
 let passed = 0;
 function test(name, fn) {
   fn();
@@ -158,6 +159,114 @@ test("undeclared service is rejected", () => {
   const combined = combinedFixture();
   combined.services["example-app-shell"] = structuredClone(baseService);
   assert.throws(() => validateRenderedWorkloads({ core, combined, lock }), /exactly match/);
+});
+
+function brokerRenderFixture() {
+  const services = [
+    { name: "tenant-app-cache", role: "worker" },
+    { name: "tenant-app-bus", role: "scheduled-worker" },
+  ];
+  const secrets = ["tenant-app-redis-password", "tenant-app-bus-nats-password"];
+  const workload = validateWorkloadManifest({
+    version: 1,
+    id: "tenant-app",
+    composeFile: "compose.yaml",
+    services,
+    secrets,
+    brokers: {
+      redis: expectedRedisPolicy("tenant-app"),
+      nats: expectedNatsPolicy("tenant-app", [services[1]]),
+    },
+  });
+  const brokerCore = {
+    services: {
+      redis: { image: "redis@sha256:fixed", command: ["fixed-redis-entrypoint"], secrets: ["redis_password"], networks: { platform_cache: null } },
+      nats: { image: "nats@sha256:fixed", command: ["fixed-nats-entrypoint"], secrets: ["nats_password"], networks: { platform_bus: null } },
+    },
+    networks: { platform_cache: { internal: true }, platform_bus: { internal: true } },
+  };
+  const cacheService = {
+    ...structuredClone(baseService),
+    networks: { tenant_app_cache: null },
+    labels: { "com.platform.workload-id": "tenant-app", "com.platform.workload-role": "worker" },
+    secrets: [{ source: "tenant-app-redis-password", target: "tenant-app-redis-password" }],
+    environment: {
+      REDIS_HOST: "redis",
+      REDIS_PORT: "6379",
+      REDIS_USERNAME: workload.brokers.redis.username,
+      REDIS_PASSWORD_FILE: "/run/secrets/tenant-app-redis-password",
+      REDIS_KEY_PREFIX: "tenant-app:",
+      REDIS_CHANNEL_PREFIX: "tenant-app:",
+    },
+  };
+  const natsUser = workload.brokers.nats.users[0];
+  const busService = {
+    ...structuredClone(baseService),
+    networks: { tenant_app_bus: null },
+    labels: { "com.platform.workload-id": "tenant-app", "com.platform.workload-role": "scheduled-worker" },
+    secrets: [{ source: "tenant-app-bus-nats-password", target: "tenant-app-bus-nats-password" }],
+    environment: {
+      NATS_HOST: "nats",
+      NATS_PORT: "4222",
+      NATS_ACCOUNT: workload.brokers.nats.account,
+      NATS_USERNAME: natsUser.username,
+      NATS_PASSWORD_FILE: "/run/secrets/tenant-app-bus-nats-password",
+      NATS_SUBJECT_PREFIX: natsUser.publish[0].slice(0, -1),
+      NATS_QUEUE_GROUP: natsUser.queueGroups[0],
+    },
+  };
+  const combined = {
+    services: {
+      redis: {
+        ...structuredClone(brokerCore.services.redis),
+        secrets: ["redis_password", "tenant-app-redis-password"],
+        networks: { platform_cache: null, tenant_app_cache: null },
+      },
+      nats: {
+        ...structuredClone(brokerCore.services.nats),
+        secrets: ["nats_password", "tenant-app-bus-nats-password"],
+        networks: { platform_bus: null, tenant_app_bus: null },
+      },
+      "tenant-app-cache": cacheService,
+      "tenant-app-bus": busService,
+    },
+    networks: {
+      platform_cache: { internal: true },
+      platform_bus: { internal: true },
+      tenant_app_cache: { internal: true },
+      tenant_app_bus: { internal: true },
+    },
+    secrets: {
+      redis_password: { external: true },
+      nats_password: { external: true },
+      "tenant-app-redis-password": { external: true },
+      "tenant-app-bus-nats-password": { external: true },
+    },
+  };
+  return {
+    core: brokerCore,
+    combined,
+    lock: { workloads: [workload], brokerPolicySha256: brokerPolicySha256([workload]) },
+  };
+}
+
+test("rendered cache and bus consumers bind exact workload broker identities and core secret mounts", () => {
+  const fixture = brokerRenderFixture();
+  assert.deepEqual(validateRenderedWorkloads(fixture).routes, []);
+});
+
+test("rendered broker contract rejects missing identity fields, core secrets and broker command mutation", () => {
+  const missingIdentity = brokerRenderFixture();
+  delete missingIdentity.combined.services["tenant-app-bus"].environment.NATS_PASSWORD_FILE;
+  assert.throws(() => validateRenderedWorkloads(missingIdentity), /NATS connection fields/);
+
+  const missingCoreSecret = brokerRenderFixture();
+  missingCoreSecret.combined.services.redis.secrets = ["redis_password"];
+  assert.throws(() => validateRenderedWorkloads(missingCoreSecret), /mount exactly/);
+
+  const mutatedBroker = brokerRenderFixture();
+  mutatedBroker.combined.services.nats.command = ["--user", "shared", "--pass", "shared"];
+  assert.throws(() => validateRenderedWorkloads(mutatedBroker), /changed protected platform service/);
 });
 test("duplicate route is rejected at manifest boundary", () => {
   assert.throws(() => validateWorkloadManifest({
