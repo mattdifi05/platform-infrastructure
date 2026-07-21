@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "specification": "CycloneDX",
+  "specVersion": "1.5",
+  "officialSchemaId": "http://cyclonedx.org/schema/bom-1.5.schema.json",
+  "vendoredProfile": "security/schemas/cyclonedx-1.5-platform-release.schema.json",
+  "vendoredProfileSha256": "830abdb080eb333c4c392561b9c4ba2b765f0acf3261fb1227389350e5476e23",
+  "validationMode": "offline-strict-subset"
+}

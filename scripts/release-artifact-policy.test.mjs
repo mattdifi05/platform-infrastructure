@@ -12,6 +12,7 @@ const commitSha = "b".repeat(40);
 const image = `ghcr.io/owner/app@sha256:${"a".repeat(64)}`;
 const subjects = canonicalReleaseSubjects([{ key: "APP_IMAGE", image }]);
 const sbom = {
+  $schema: "http://cyclonedx.org/schema/bom-1.5.schema.json",
   bomFormat: "CycloneDX",
   specVersion: "1.5",
   serialNumber: "urn:uuid:123e4567-e89b-42d3-a456-426614174000",
@@ -19,7 +20,12 @@ const sbom = {
   metadata: {
     timestamp: "2026-07-21T00:00:00.000Z",
     component: { type: "application", name: "release", version: commitSha, purl: `pkg:github/${repository}@${commitSha}` },
-    properties: [{ name: "repository", value: repository }, { name: "commitSha", value: commitSha }],
+    properties: [
+      { name: "repository", value: repository },
+      { name: "commitSha", value: commitSha },
+      { name: "workflowRunId", value: "1" },
+      { name: "sbom.source", value: "cryptographically-verified-release-subject-index" },
+    ],
   },
   components: [{
     type: "container",
@@ -60,7 +66,7 @@ test("rejects SBOM with wrong repository binding", () => {
 test("rejects SBOM missing one release subject", () => {
   const changed = structuredClone(sbom);
   changed.components = [];
-  assert.throws(() => validateCycloneDxReleaseSbom(changed, { subjects, repository, commitSha }), /exactly match/);
+  assert.throws(() => validateCycloneDxReleaseSbom(changed, { subjects, repository, commitSha }), /fewer than|exactly match/);
 });
 test("rejects SBOM component with wrong digest", () => {
   const changed = structuredClone(sbom);
@@ -82,7 +88,18 @@ test("rejects provenance from a different commit", () => {
 });
 test("builds a receipt bound to SBOM and verifier output", () => {
   const receipt = buildReleaseAdmissionReceipt({ subjects, repository, commitSha, sbomSha256: "d".repeat(64), verification });
-  assert.equal(receipt.status, "passed");
+  assert.equal(receipt.status, "EXTERNAL-PENDING");
+  assert.equal(receipt.artifactVerification, "passed");
   assert.equal(receipt.deploymentAdmission, "EXTERNAL-PENDING");
+});
+test("rejects an SBOM field outside the pinned strict schema", () => {
+  const changed = structuredClone(sbom);
+  changed.unreviewedExtension = true;
+  assert.throws(() => validateCycloneDxReleaseSbom(changed, { subjects, repository, commitSha }), /unsupported property/);
+});
+test("rejects a malformed hash through pinned schema validation", () => {
+  const changed = structuredClone(sbom);
+  changed.components[0].hashes[0].content = "not-a-hash";
+  assert.throws(() => validateCycloneDxReleaseSbom(changed, { subjects, repository, commitSha }), /schema pattern/);
 });
 process.stdout.write(`release artifact policy tests passed ${passed}/${passed}\n`);

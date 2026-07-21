@@ -62,6 +62,7 @@ import {
 } from "./admin-access-inventory.mjs";
 import { evaluateProviderMfaAssurance } from "./provider-mfa-assurance.mjs";
 import { assertDeploymentAdmissionConfigured } from "./deployment-admission-policy.mjs";
+import { releaseEvidenceAdmissionReady } from "./release-go-no-go-policy.mjs";
 import {
   buildReleaseAdmissionReceipt,
   canonicalReleaseSubjects,
@@ -6595,6 +6596,10 @@ async function releaseEvidence(options = {}) {
       githubSigstore: githubAttestationValidation,
       cosignVerified: (options.verifyCosign ?? booleanFlag(argv.verifyCosign)) && !planOnly,
     },
+    admission: {
+      artifactVerification: githubAttestationValidation?.verified === true ? "passed" : "missing",
+      deploymentAdmission: "EXTERNAL-PENDING",
+    },
     issues,
     nextCommands: [
       "sh ./scripts/release-artifact-gate.sh --requireProvenance --repo owner/repo --sourceRef refs/heads/main",
@@ -9396,6 +9401,7 @@ async function productionGoNoGo() {
       && githubProvenance?.attestationCount > 0,
   );
   const releaseProvenanceOk = !policy.requireReleaseProvenance || releaseGithubProvenanceOk;
+  const releaseAdmissionOk = releaseEvidenceAdmissionReady(releasePayload);
   const releaseGitOk = !policy.requireCleanReleaseGit || (
     releasePayload.git?.dirty === false
     && String(releasePayload.git?.commit ?? "").toLowerCase() === currentCandidate?.commit
@@ -9412,9 +9418,9 @@ async function productionGoNoGo() {
   );
   addGoNoGoCheck(checks, {
     name: "release-evidence-and-rollback",
-    passed: Boolean(release && releaseFresh.fresh && releasePayload.mode === "evidence" && releasePayload.status === "passed" && releaseRollbackOk && releasePayload.artifacts?.sbom && releaseProvenanceOk && releaseGitOk),
+    passed: Boolean(release && releaseFresh.fresh && releasePayload.mode === "evidence" && releasePayload.status === "passed" && releaseRollbackOk && releasePayload.artifacts?.sbom && releaseProvenanceOk && releaseGitOk && releaseAdmissionOk),
     detail: release
-      ? `${releaseFresh.detail}; mode=${releasePayload.mode}; status=${releasePayload.status ?? "unknown"}; rollback=${releaseRollbackOk ? "validated" : "missing"}; provenance=${releaseGithubProvenanceOk ? "github-sigstore-cryptographic" : "missing"}; cleanGit=${releaseGitOk ? "yes" : "no"}`
+      ? `${releaseFresh.detail}; mode=${releasePayload.mode}; status=${releasePayload.status ?? "unknown"}; rollback=${releaseRollbackOk ? "validated" : "missing"}; provenance=${releaseGithubProvenanceOk ? "github-sigstore-cryptographic" : "missing"}; deploymentAdmission=${releasePayload.admission?.deploymentAdmission ?? "missing"}; cleanGit=${releaseGitOk ? "yes" : "no"}`
       : latestReleaseReport
         ? `missing evidence report; latestReleaseMode=${latestReleaseReport.payload.mode ?? "unknown"}; latestStatus=${latestReleaseReport.payload.status ?? "unknown"}; ${latestReleaseFresh.detail}`
        : releaseFresh.detail,

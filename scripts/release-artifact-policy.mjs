@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { validatePinnedCycloneDxReleaseSchema } from "./cyclonedx-schema-policy.mjs";
 
 function invalid(message) {
   throw new Error(message);
@@ -55,6 +56,7 @@ export function validateCycloneDxReleaseSbom(sbom, { subjects: rawSubjects, repo
   const expectedRepository = exactRepository(repository);
   const expectedCommit = exactGitSha(commitSha);
   if (!sbom || typeof sbom !== "object" || Array.isArray(sbom)) invalid("SBOM must be a JSON object.");
+  const schemaValidation = validatePinnedCycloneDxReleaseSchema(sbom);
   if (sbom.bomFormat !== "CycloneDX" || sbom.specVersion !== "1.5") invalid("SBOM must be CycloneDX 1.5.");
   if (!Number.isInteger(sbom.version) || sbom.version < 1) invalid("SBOM version must be a positive integer.");
   if (!/^urn:uuid:[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(sbom.serialNumber ?? ""))) {
@@ -86,7 +88,7 @@ export function validateCycloneDxReleaseSbom(sbom, { subjects: rawSubjects, repo
     const componentProperties = propertiesMap(component.properties, `SBOM component ${name}`);
     if (componentProperties.get("releaseSubjectKey") !== expected.key) invalid(`SBOM component ${name} is not bound to release key ${expected.key}.`);
   }
-  return { repository: expectedRepository, commitSha: expectedCommit, subjects };
+  return { repository: expectedRepository, commitSha: expectedCommit, subjects, schemaValidation };
 }
 
 export function validateCryptographicReleaseVerification(verification, { subjects: rawSubjects, repository, commitSha }) {
@@ -115,8 +117,9 @@ export function buildReleaseAdmissionReceipt({ subjects, repository, commitSha, 
   if (!/^[a-f0-9]{64}$/.test(String(sbomSha256 ?? ""))) invalid("SBOM artifact SHA256 is required for the admission receipt.");
   return {
     version: 1,
-    kind: "platform-release-artifact-admission/v1",
-    status: "passed",
+    kind: "platform-release-artifact-verification/v1",
+    status: "EXTERNAL-PENDING",
+    artifactVerification: "passed",
     generatedAt: new Date().toISOString(),
     repository: binding.repository,
     commitSha: binding.commitSha,
@@ -130,5 +133,6 @@ export function buildReleaseAdmissionReceipt({ subjects, repository, commitSha, 
       verificationFingerprint: sha256Json(verification),
     },
     deploymentAdmission: "EXTERNAL-PENDING",
+    usageScope: "artifact-verification-only",
   };
 }

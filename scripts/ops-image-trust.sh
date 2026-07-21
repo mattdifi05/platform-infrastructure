@@ -25,8 +25,9 @@ fi
 [ "$actual_receipt_sha256" = "$EXPECTED_RECEIPT_SHA256" ] || { echo "Ops image admission receipt SHA256 mismatch." >&2; exit 1; }
 
 jq -e --arg image "$IMAGE" '
-  .kind == "platform-release-artifact-admission/v1" and
-  .status == "passed" and
+  .kind == "platform-release-artifact-verification/v1" and
+  .artifactVerification == "passed" and
+  .usageScope == "artifact-verification-only" and
   (.repository | type == "string" and length > 0) and
   (.commitSha | type == "string" and test("^[a-f0-9]{40}$")) and
   (.provenance.verificationFingerprint | type == "string" and test("^[a-f0-9]{64}$")) and

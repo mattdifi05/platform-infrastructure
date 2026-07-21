@@ -64,6 +64,7 @@ export function createVerifiedReleaseArtifacts({
     subjects,
   };
   const sbom = {
+    $schema: "http://cyclonedx.org/schema/bom-1.5.schema.json",
     bomFormat: "CycloneDX",
     specVersion: "1.5",
     serialNumber,

@@ -18,7 +18,7 @@ chmod 700 "$TMP/docker"
 
 write_receipt() {
   cat > "$RECEIPT" <<EOF
-{"kind":"platform-release-artifact-admission/v1","status":"passed","repository":"owner/repo","commitSha":"$(printf 'c%.0s' $(seq 1 40))","subjects":[{"key":"PLATFORM_OPS_IMAGE","image":"$1"}],"provenance":{"verificationFingerprint":"$(printf 'd%.0s' $(seq 1 64))"}}
+{"kind":"platform-release-artifact-verification/v1","status":"EXTERNAL-PENDING","artifactVerification":"passed","deploymentAdmission":"EXTERNAL-PENDING","usageScope":"artifact-verification-only","repository":"owner/repo","commitSha":"$(printf 'c%.0s' $(seq 1 40))","subjects":[{"key":"PLATFORM_OPS_IMAGE","image":"$1"}],"provenance":{"verificationFingerprint":"$(printf 'd%.0s' $(seq 1 64))"}}
 EOF
 }
 receipt_sha() {
