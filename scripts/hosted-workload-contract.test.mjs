@@ -163,6 +163,36 @@ test("platform service mutation is rejected", () => {
   combined.services["project-router"].privileged = true;
   assert.throws(() => validateRenderedWorkloads({ core, combined, lock }), /changed protected platform service/);
 });
+test("protected top-level resources cannot be replaced or removed", () => {
+  const protectedCore = structuredClone(core);
+  protectedCore.configs = { traefik_dynamic: { file: "/private/traefik.yaml" } };
+  protectedCore.secrets = { postgres_password: { external: true, name: "platform-postgres-password" } };
+  protectedCore.volumes = { postgres_data: { name: "platform-postgres-data" } };
+  protectedCore.networks.platform_db = { internal: true, name: "platform-db" };
+  for (const [resourceType, resourceName, replacement] of [
+    ["configs", "traefik_dynamic", { file: "/hostile/config" }],
+    ["secrets", "postgres_password", { external: true, name: "hostile-secret" }],
+    ["volumes", "postgres_data", { name: "hostile-volume" }],
+    ["networks", "platform_db", { internal: false, name: "hostile-network" }],
+  ]) {
+    const combined = combinedFixture();
+    combined.configs = structuredClone(protectedCore.configs);
+    combined.secrets = { ...structuredClone(protectedCore.secrets), ...combined.secrets };
+    combined.volumes = structuredClone(protectedCore.volumes);
+    combined.networks = { ...structuredClone(protectedCore.networks), ...combined.networks };
+    combined[resourceType][resourceName] = replacement;
+    assert.throws(
+      () => validateRenderedWorkloads({ core: protectedCore, combined, lock }),
+      new RegExp(`changed protected ${resourceType} resource ${resourceName}`),
+    );
+    combined[resourceType][resourceName] = structuredClone(protectedCore[resourceType][resourceName]);
+    delete combined[resourceType][resourceName];
+    assert.throws(
+      () => validateRenderedWorkloads({ core: protectedCore, combined, lock }),
+      new RegExp(`removed protected ${resourceType} resource ${resourceName}`),
+    );
+  }
+});
 test("unauthorized platform network extension is rejected", () => {
   const combined = combinedFixture();
   combined.services["project-router"].networks.evil = null;

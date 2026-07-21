@@ -824,6 +824,19 @@ function assertPlatformServicesUnchanged(core, combined, workloadIds) {
   }
 }
 
+function assertProtectedTopLevelResourcesUnchanged(core, combined) {
+  for (const resourceType of ["configs", "secrets", "volumes", "networks"]) {
+    for (const [name, definition] of Object.entries(core[resourceType] ?? {})) {
+      if (!Object.hasOwn(combined[resourceType] ?? {}, name)) {
+        invalid(`Workload overlays removed protected ${resourceType} resource ${name}.`);
+      }
+      if (!same(definition, combined[resourceType][name])) {
+        invalid(`Workload overlays changed protected ${resourceType} resource ${name}.`);
+      }
+    }
+  }
+}
+
 function assertResourceLimits(name, service) {
   const cpus = Number(service.cpus);
   const memLimit = Number(service.mem_limit);
@@ -997,6 +1010,7 @@ export function validateRenderedWorkloads({ core, combined, lock }) {
   assertBrokerPolicyDigest(lock);
   const workloadIds = lock.workloads.map((workload) => workload.id);
   assertActivationStorageIsolation(core, combined, lock);
+  assertProtectedTopLevelResourcesUnchanged(core, combined);
   assertPlatformServicesUnchanged(core, combined, workloadIds);
   const declared = new Map();
   for (const workload of lock.workloads) {
