@@ -380,12 +380,17 @@ class Fixture:
 
         schemas = self.baseline / "schemas"
         schemas.mkdir()
+        first_columns = validator_module.MATRIX_FIRST_COLUMNS
         matrices = []
         for number in range(1, 16):
             matrix_id = f"M{number:02d}-FIXTURE"
             exact = {2: 23, 5: 34, 12: 6, 13: 13}.get(number)
             minimum = 20 if number == 11 else (0 if number == 15 else 1)
-            columns = ["finding_id", "title", "category", "affected_scope", "risk", "action", "evidence"] if number == 15 else ["id", "value"]
+            columns = (
+                ["finding_id", "title", "category", "affected_scope", "risk", "action", "evidence"]
+                if number == 15
+                else [first_columns[number - 1], "value"]
+            )
             matrices.append(
                 {
                     "id": matrix_id,
@@ -395,7 +400,14 @@ class Fixture:
                     "minimum_count": minimum,
                 }
             )
-        self.matrix_schema = {"matrix_schema_version": 1, "fixed_sets": {}, "matrices": matrices}
+        self.matrix_schema = {
+            "matrix_schema_version": 1,
+            "fixed_sets": {
+                "ci_check_ids": list(validator_module.CI_CHECK_IDS),
+                "t23_blocker_slugs": list(validator_module.T23_BLOCKER_SLUGS),
+            },
+            "matrices": matrices,
+        }
         self._write_json(schemas / "matrix-schema-v1.json", self.matrix_schema)
         self._write_manifest(self.baseline)
 
@@ -761,11 +773,22 @@ class Fixture:
                 count = 134
             if matrix["id"].startswith("M15-"):
                 count = len(self.reportable_ids)
+            matrix_number = int(matrix["id"][1:3])
+            primary_ids = {
+                1: [f"INV-{number:03d}" for number in range(1, 135)],
+                2: [f"T{number:02d}" for number in range(1, 24)],
+                11: list(validator_module.CI_CHECK_IDS),
+                12: [f"T{number:02d}" for number in range(18, 24)],
+                13: list(validator_module.T23_BLOCKER_SLUGS),
+                14: [REQUIRED_LIVE_RESIDUALS[0]],
+                15: self.reportable_ids,
+            }.get(matrix_number)
             for index in range(count):
                 if matrix["id"].startswith("M15-"):
                     values = [self.reportable_ids[index], f"Title {self.reportable_ids[index]}", "NEW-FINDING", "candidate", "Medium", "fixed", "test registry"]
                 else:
-                    values = [f"ROW-{index + 1:03d}", "verified"]
+                    identity = primary_ids[index] if primary_ids is not None else f"ROW-{index + 1:03d}"
+                    values = [identity, "verified"]
                 lines.append("| " + " | ".join(values) + " |")
             lines.append("")
         path.write_text("\n".join(lines), encoding="utf-8")
@@ -1207,6 +1230,31 @@ class PostfixEvidenceTests(unittest.TestCase):
         path.write_text("\n".join(lines) + "\n", encoding="utf-8")
         self.fixture.refresh_handoff_hash("required_matrices")
         with self.assertRaisesRegex(ContractError, "FAKE|semantic"):
+            self.build()
+
+    def test_matrix_fixed_sets_are_the_authoritative_ci_and_t23_sets(self) -> None:
+        schema_path = self.fixture.baseline / "schemas/matrix-schema-v1.json"
+        schema = json.loads(schema_path.read_text(encoding="utf-8"))
+        schema["fixed_sets"]["ci_check_ids"][0] = "invented-check"
+        self.fixture._write_json(schema_path, schema)
+        self.fixture._write_manifest(self.fixture.baseline)
+        with self.assertRaisesRegex(ContractError, "fixed CI/T23 sets"):
+            self.build()
+
+    def test_matrix_semantic_identity_sets_reject_duplicates(self) -> None:
+        path = self.fixture.inputs / "required-matrices.md"
+        lines = path.read_text(encoding="utf-8").splitlines()
+        start = next(index for index, line in enumerate(lines) if line.startswith("## M02-"))
+        header_index = next(index for index in range(start + 1, len(lines)) if lines[index].startswith("|"))
+        first_row = header_index + 2
+        second_row = first_row + 1
+        first_id = lines[first_row].strip("|").split("|", 1)[0].strip()
+        cells = [cell.strip() for cell in lines[second_row].strip("|").split("|")]
+        cells[0] = first_id
+        lines[second_row] = "| " + " | ".join(cells) + " |"
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        self.fixture.refresh_handoff_hash("required_matrices")
+        with self.assertRaisesRegex(ContractError, "duplicate semantic identities"):
             self.build()
 
     def test_common_secret_scanner_covers_headers_tokens_and_private_keys(self) -> None:

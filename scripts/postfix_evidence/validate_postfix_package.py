@@ -84,6 +84,63 @@ EXTERNAL_CATEGORIES = frozenset(
     }
 )
 
+CI_CHECK_IDS = (
+    "four-required-checks",
+    "actionlint",
+    "governance",
+    "supply-chain",
+    "action-lock",
+    "static-scan",
+    "secret-scan",
+    "coverage",
+    "portability",
+    "maintainability",
+    "testing",
+    "ha",
+    "readiness",
+    "functional",
+    "provider-auth",
+    "status",
+    "catalog",
+    "sse",
+    "wrapper-allowlist",
+    "hard-037-binding",
+)
+
+T23_BLOCKER_SLUGS = (
+    "vps-bootstrap-applied",
+    "vps-hardening-applied",
+    "vps-host-readiness",
+    "pre-go-live-evidence-complete",
+    "runtime-fingerprint-exact",
+    "github-actions-run-success",
+    "secret-rotation-evidence",
+    "disaster-recovery-rpo-rto-offsite",
+    "real-alert-delivery",
+    "external-uptime-provider",
+    "public-load-benchmark",
+    "release-evidence-and-rollback",
+    "cloudflare-access-admin-verified",
+)
+
+MATRIX_FIRST_COLUMNS = (
+    "inventory_id",
+    "task_id",
+    "component_id",
+    "component",
+    "container_name",
+    "store_id",
+    "record_id",
+    "identity_id",
+    "secret_id",
+    "backup_id",
+    "check_id",
+    "task_id",
+    "blocker_slug",
+    "finding_id",
+    "finding_id",
+)
+
 DOCUMENTATION_TOPICS = frozenset(
     {
         "architecture",
@@ -215,6 +272,7 @@ class Baseline:
     candidate_tree: str
     matrix_schema: dict[str, Any]
     inventory_count: int
+    inventory_ids: frozenset[str]
     manifest_sha256: str
     classification_sha256: str
     registry_sha256: str
@@ -330,6 +388,15 @@ def _validate_baseline(root: Path) -> Baseline:
     inventory = load_jsonl_bytes(inventory_bytes, label="baseline inventory")
     if len(inventory) != 134:
         raise ContractError("baseline: inventory cardinality is not 134")
+    inventory_ids: list[str] = []
+    for index, row in enumerate(inventory, start=1):
+        nested = row.get("inventory")
+        inventory_id = nested.get("id") if isinstance(nested, dict) else row.get("id")
+        if not isinstance(inventory_id, str) or not inventory_id:
+            raise ContractError(f"baseline inventory:{index}: missing inventory identity")
+        inventory_ids.append(inventory_id)
+    if len(set(inventory_ids)) != 134:
+        raise ContractError("baseline: inventory identities are not unique")
     matrix_schema = load_json_bytes(matrix_bytes, label="baseline matrix schema")
     _validate_matrix_schema(matrix_schema)
     return Baseline(
@@ -343,6 +410,7 @@ def _validate_baseline(root: Path) -> Baseline:
         candidate_tree=next(iter(trees)),
         matrix_schema=matrix_schema,
         inventory_count=len(inventory),
+        inventory_ids=frozenset(inventory_ids),
         manifest_sha256=sha256_bytes(snapshot.manifest_bytes),
         classification_sha256=sha256_bytes(classification_bytes),
         registry_sha256=sha256_bytes(registry_bytes),
@@ -352,16 +420,31 @@ def _validate_baseline(root: Path) -> Baseline:
 
 
 def _validate_matrix_schema(value: Any) -> None:
-    if not isinstance(value, dict) or value.get("matrix_schema_version") != 1:
+    exact_keys(value, {"matrix_schema_version", "fixed_sets", "matrices"}, label="matrix schema")
+    if value.get("matrix_schema_version") != 1:
         raise ContractError("matrix schema: unsupported version")
+    fixed_sets = exact_keys(
+        value["fixed_sets"],
+        {"ci_check_ids", "t23_blocker_slugs"},
+        label="matrix schema fixed sets",
+    )
+    ci_ids = string_list(fixed_sets["ci_check_ids"], label="matrix schema CI check IDs")
+    blocker_slugs = string_list(
+        fixed_sets["t23_blocker_slugs"], label="matrix schema T23 blocker slugs"
+    )
+    if ci_ids != list(CI_CHECK_IDS) or blocker_slugs != list(T23_BLOCKER_SLUGS):
+        raise ContractError("matrix schema: fixed CI/T23 sets differ from the authoritative contract")
     matrices = value.get("matrices")
     if not isinstance(matrices, list) or len(matrices) != 15:
         raise ContractError("matrix schema: expected exactly M01 through M15")
     expected_numbers = list(range(1, 16))
     actual_numbers: list[int] = []
-    for row in matrices:
-        if not isinstance(row, dict):
-            raise ContractError("matrix schema: malformed row")
+    for matrix_index, row in enumerate(matrices):
+        exact_keys(
+            row,
+            {"id", "columns", "boolean_columns", "exact_count", "minimum_count"},
+            label="matrix schema row",
+        )
         matrix_id = row.get("id")
         if not isinstance(matrix_id, str) or re.fullmatch(r"M[0-9]{2}-[A-Z0-9-]+", matrix_id) is None:
             raise ContractError("matrix schema: invalid matrix ID")
@@ -371,6 +454,8 @@ def _validate_matrix_schema(value: Any) -> None:
             raise ContractError(f"matrix schema: invalid columns for {matrix_id}")
         if len(set(columns)) != len(columns):
             raise ContractError(f"matrix schema: duplicate columns for {matrix_id}")
+        if columns[0] != MATRIX_FIRST_COLUMNS[matrix_index]:
+            raise ContractError(f"matrix schema: wrong semantic identity column for {matrix_id}")
         boolean_columns = row.get("boolean_columns")
         if not isinstance(boolean_columns, list) or not set(boolean_columns).issubset(columns):
             raise ContractError(f"matrix schema: invalid boolean columns for {matrix_id}")
@@ -378,6 +463,11 @@ def _validate_matrix_schema(value: Any) -> None:
             raise ContractError(f"matrix schema: invalid exact count for {matrix_id}")
         if type(row.get("minimum_count")) is not int or row["minimum_count"] < 0:
             raise ContractError(f"matrix schema: invalid minimum count for {matrix_id}")
+        required_exact = {2: 23, 5: 34, 12: 6, 13: 13}.get(matrix_index + 1)
+        if required_exact is not None and row["exact_count"] != required_exact:
+            raise ContractError(f"matrix schema: authoritative exact count changed for {matrix_id}")
+        if matrix_index + 1 == 11 and row["minimum_count"] < len(CI_CHECK_IDS):
+            raise ContractError("matrix schema: M11 minimum does not cover the fixed CI set")
     if actual_numbers != expected_numbers:
         raise ContractError("matrix schema: matrix IDs are not ordered M01 through M15")
 
@@ -1218,6 +1308,10 @@ def _validate_matrices(payload: bytes, baseline: Baseline) -> None:
         rows = [_split_markdown_row(line) for line in data_lines]
         if any(len(row) != len(header) for row in rows):
             raise ContractError(f"matrices: row width mismatch for {matrix_id}")
+        if any(not cell.strip() for row in rows for cell in row):
+            raise ContractError(f"matrices: empty semantic cell in {matrix_id}")
+        if any(cell.strip().upper() == "FAKE" for row in rows for cell in row):
+            raise ContractError(f"matrices: FAKE semantic cell in {matrix_id}")
         exact_count = schema["exact_count"]
         minimum_count = schema["minimum_count"]
         if exact_count is not None and len(rows) != exact_count:
@@ -1226,17 +1320,33 @@ def _validate_matrices(payload: bytes, baseline: Baseline) -> None:
             raise ContractError(f"matrices: minimum row count mismatch for {matrix_id}")
         if matrix_id.startswith("M01-") and len(rows) != baseline.inventory_count:
             raise ContractError("matrices: M01 must project all 134 inventory rows")
+        primary_ids = [row[0] for row in rows]
+        if len(primary_ids) != len(set(primary_ids)):
+            raise ContractError(f"matrices: duplicate semantic identities in {matrix_id}")
         for boolean_column in schema["boolean_columns"]:
             offset = header.index(boolean_column)
             if any(row[offset] not in {"true", "false"} for row in rows):
                 raise ContractError(f"matrices: invalid boolean value in {matrix_id}.{boolean_column}")
-        if matrix_id.startswith("M15-"):
-            if header[0] != "finding_id":
-                raise ContractError("matrices: M15 first column is not finding_id")
-            finding_ids = [row[0] for row in rows]
-            if len(finding_ids) != len(set(finding_ids)):
-                raise ContractError("matrices: M15 contains duplicate finding IDs")
-            reportable_projection = set(finding_ids)
+        matrix_number = matrix_index + 1
+        expected_primary: set[str] | None = None
+        if matrix_number == 1:
+            expected_primary = set(baseline.inventory_ids)
+        elif matrix_number == 2:
+            expected_primary = {f"T{number:02d}" for number in range(1, 24)}
+        elif matrix_number == 11:
+            expected_primary = set(CI_CHECK_IDS)
+        elif matrix_number == 12:
+            expected_primary = {f"T{number:02d}" for number in range(18, 24)}
+        elif matrix_number == 13:
+            expected_primary = set(T23_BLOCKER_SLUGS)
+        elif matrix_number == 14:
+            if not set(primary_ids).issubset(baseline.by_id):
+                raise ContractError("matrices: M14 references unknown classification IDs")
+        elif matrix_number == 15:
+            expected_primary = set(baseline.reportable_ids)
+            reportable_projection = set(primary_ids)
+        if expected_primary is not None and set(primary_ids) != expected_primary:
+            raise ContractError(f"matrices: {matrix_id} does not match its exact semantic identity set")
     if reportable_projection != set(baseline.reportable_ids):
         raise ContractError("matrices: M15 is not the exact 135-reportable-CAN projection")
 
