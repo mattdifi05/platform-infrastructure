@@ -52,6 +52,16 @@ test("rejects unbounded or non-local workload logging at runtime", () => {
   }
 });
 
+test("rejects workload swap and OOM overrides at runtime", () => {
+  const config = fixture();
+  config.services["example-app-web"].memswap_limit = 512 * 1024 * 1024;
+  config.services["example-app-web"].oom_score_adj = -1000;
+  const report = evaluateRuntimeIsolation(config);
+  assert.equal(report.status, "failed");
+  assert.match(report.failures.join("\n"), /workload-no-swap-example-app-web/);
+  assert.match(report.failures.join("\n"), /workload-no-oom-overrides-example-app-web/);
+});
+
 test("rejects workload service volume inheritance independently at runtime", () => {
   const config = fixture();
   config.services["example-app-web"].volumes_from = ["postgres:rw"];
@@ -329,6 +339,7 @@ function bounded(overrides = {}) {
     cpus: 0.5,
     cpu_shares: 256,
     mem_limit: 128 * 1024 * 1024,
+    memswap_limit: 128 * 1024 * 1024,
     mem_reservation: 32 * 1024 * 1024,
     pids_limit: 128,
     ulimits: { nofile: { soft: 8192, hard: 8192 } },

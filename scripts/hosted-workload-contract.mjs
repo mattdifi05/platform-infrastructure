@@ -17,7 +17,7 @@ const IMAGE = /^[a-z0-9][a-z0-9._/-]*(?::[A-Za-z0-9._-]+)?@sha256:[a-f0-9]{64}$/
 const SAFE_PATH = /^[A-Za-z0-9_./-]+$/;
 export const HOSTED_WORKLOAD_LOCK_VERSION = 2;
 export const HOSTED_WORKLOAD_VALIDATOR_VERSION = "hosted-contract-v2";
-const RAW_POLICY_CONTROLS = Object.freeze(["bind-bounded-local-logging", "bind-owned-secret-aliases", "bind-owned-volumes", "bind-private-pid-numeric-user", "deny-api-socket", "deny-compose-interpolation", "deny-device-access", "deny-env-file", "deny-extends", "deny-file-configs", "deny-gpu-access", "deny-include", "deny-lifecycle-hooks", "deny-local-volume-options", "deny-providers", "deny-runtime-overrides", "deny-scaling", "deny-stop-grace-overrides", "deny-supplemental-groups", "deny-volumes-from"]);
+const RAW_POLICY_CONTROLS = Object.freeze(["bind-bounded-local-logging", "bind-no-swap-oom-policy", "bind-owned-secret-aliases", "bind-owned-volumes", "bind-private-pid-numeric-user", "deny-api-socket", "deny-compose-interpolation", "deny-device-access", "deny-env-file", "deny-extends", "deny-file-configs", "deny-gpu-access", "deny-include", "deny-lifecycle-hooks", "deny-local-volume-options", "deny-providers", "deny-runtime-overrides", "deny-scaling", "deny-stop-grace-overrides", "deny-supplemental-groups", "deny-volumes-from"]);
 const PLATFORM_DEPENDENCIES = new Set([
   "postgres",
   "redis",
@@ -883,6 +883,10 @@ function assertResourceLimits(name, service) {
   if (!(cpus >= 0.1 && cpus <= 2)) invalid(`${name} requires cpus between 0.1 and 2.`);
   if (!(memLimit >= 64 * 1024 * 1024 && memLimit <= 2 * 1024 * 1024 * 1024)) invalid(`${name} requires a bounded mem_limit.`);
   if (!(memReservation >= 16 * 1024 * 1024 && memReservation <= memLimit)) invalid(`${name} requires a valid mem_reservation.`);
+  if (Number(service.memswap_limit) !== memLimit) invalid(`${name} requires memswap_limit equal to mem_limit.`);
+  if (["oom_kill_disable", "oom_score_adj", "mem_swappiness"].some((field) => Object.hasOwn(service, field))) {
+    invalid(`${name} cannot override OOM or swappiness controls.`);
+  }
   if (!(pids >= 16 && pids <= 512)) invalid(`${name} requires pids_limit between 16 and 512.`);
   if (!(cpuShares >= 2 && cpuShares <= 1024)) invalid(`${name} requires bounded cpu_shares.`);
   if (!(ioWeight >= 10 && ioWeight <= 1000)) invalid(`${name} requires bounded block I/O weight.`);

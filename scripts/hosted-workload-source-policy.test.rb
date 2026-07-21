@@ -64,6 +64,21 @@ class HostedWorkloadSourcePolicyTest < Minitest::Test
     end
   end
 
+  def test_binds_memswap_and_rejects_oom_priority_controls
+    error = assert_raises(ArgumentError) do
+      HostedWorkloadSourcePolicy.validate_source_model(
+        { "services" => { "app" => { "mem_limit" => "256m", "memswap_limit" => "512m" } } }, "fixture"
+      )
+    end
+    assert_match(/bind memswap_limit exactly to mem_limit/, error.message)
+    %w[oom_kill_disable oom_score_adj mem_swappiness].each do |field|
+      error = assert_raises(ArgumentError) do
+        HostedWorkloadSourcePolicy.validate_source_model({ "services" => { "app" => { field => 0 } } }, "fixture")
+      end
+      assert_match(/cannot override OOM or swappiness controls/, error.message)
+    end
+  end
+
   def test_rejects_include_and_extends_before_render
     include_model = parse("include:\n  - other.yaml\nservices:\n  app: {}\n")
     assert_raises(ArgumentError) { HostedWorkloadSourcePolicy.validate_source_model(include_model, "fixture") }

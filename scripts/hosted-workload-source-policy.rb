@@ -8,7 +8,7 @@ require "psych"
 
 module HostedWorkloadSourcePolicy
   VERSION = "hosted-raw-v1"
-  CONTROLS = %w[bind-bounded-local-logging bind-owned-secret-aliases bind-owned-volumes bind-private-pid-numeric-user deny-api-socket deny-compose-interpolation deny-device-access deny-env-file deny-extends deny-file-configs deny-gpu-access deny-include deny-lifecycle-hooks deny-local-volume-options deny-providers deny-runtime-overrides deny-scaling deny-stop-grace-overrides deny-supplemental-groups deny-volumes-from].freeze
+  CONTROLS = %w[bind-bounded-local-logging bind-no-swap-oom-policy bind-owned-secret-aliases bind-owned-volumes bind-private-pid-numeric-user deny-api-socket deny-compose-interpolation deny-device-access deny-env-file deny-extends deny-file-configs deny-gpu-access deny-include deny-lifecycle-hooks deny-local-volume-options deny-providers deny-runtime-overrides deny-scaling deny-stop-grace-overrides deny-supplemental-groups deny-volumes-from].freeze
   MAX_COMPOSE_BYTES = 1_048_576
   STANDARD_TAG_PREFIX = "tag:yaml.org,2002:"
 
@@ -117,6 +117,11 @@ module HostedWorkloadSourcePolicy
       if service.key?("logging") && service["logging"] != { "driver" => "local", "options" => { "max-size" => "10m", "max-file" => "3" } }
         fail!("#{label} service #{name} must use bounded local logging.")
       end
+      if service.key?("mem_limit") && service["memswap_limit"] != service["mem_limit"]
+        fail!("#{label} service #{name} must bind memswap_limit exactly to mem_limit.")
+      end
+      oom_controls = %w[oom_kill_disable oom_score_adj mem_swappiness].select { |key| service.key?(key) }
+      fail!("#{label} service #{name} cannot override OOM or swappiness controls: #{oom_controls.join(', ')}.") unless oom_controls.empty?
       fail!("#{label} service #{name} cannot use env_file.") if service.key?("env_file")
       fail!("#{label} service #{name} cannot use extends.") if service.key?("extends")
       fail!("#{label} service #{name} cannot mount configs.") if service.key?("configs")
