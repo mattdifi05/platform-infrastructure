@@ -162,6 +162,8 @@ jobs:
           sh scripts/cloudflare-origin-lock-ufw-transaction-test.sh
           node scripts/release-trust.test.mjs
           node scripts/release-artifact-policy.test.mjs
+          node scripts/buildkit-sbom-policy.test.mjs
+          node scripts/release-registry-resolution.test.mjs
           node scripts/stable-json-artifact.test.mjs
           node scripts/release-subject-manifest.test.mjs
           node scripts/release-go-no-go-policy.test.mjs
@@ -333,7 +335,7 @@ jobs:
           path: ${{ runner.temp }}/release-candidate
           run-id: ${{ inputs.release_attestation_run_id }}
           github-token: ${{ github.token }}
-      - name: Select one manifest and one SBOM
+      - name: Select one manifest, SBOM and registry evidence set
         id: artifacts
         env:
           CANDIDATE_DIR: ${{ runner.temp }}/release-candidate
@@ -344,23 +346,38 @@ jobs:
           test "${#EXPECTED_MANIFEST_SHA256}" -eq 64
           mapfile -t manifests < <(find "$CANDIDATE_DIR" -type f -name 'release-subjects-*.json' -print)
           mapfile -t sboms < <(find "$CANDIDATE_DIR" -type f -name 'github-release-sbom-*.cdx.json' -print)
+          mapfile -t buildkit_sboms < <(find "$CANDIDATE_DIR" -type f -name 'buildkit-sbom-*.spdx.json' -print)
+          mapfile -t registry_descriptors < <(find "$CANDIDATE_DIR" -type f -name 'registry-descriptor-*.json' -print)
+          mapfile -t registry_resolutions < <(find "$CANDIDATE_DIR" -type f -name 'registry-resolution-*.json' -print)
           test "${#manifests[@]}" -eq 1
           test "${#sboms[@]}" -eq 1
+          test "${#buildkit_sboms[@]}" -eq 1
+          test "${#registry_descriptors[@]}" -eq 1
+          test "${#registry_resolutions[@]}" -eq 1
           test "$(sha256sum "${manifests[0]}" | awk '{print $1}')" = "$EXPECTED_MANIFEST_SHA256"
           test "$(jq -r '.repository' "${manifests[0]}")" = "$GITHUB_REPOSITORY"
           test "$(jq -r '.commitSha' "${manifests[0]}")" = "$APPROVED_SHA"
           printf 'manifest=%s\n' "${manifests[0]}" >> "$GITHUB_OUTPUT"
           printf 'sbom=%s\n' "${sboms[0]}" >> "$GITHUB_OUTPUT"
+          printf 'buildkit_sbom=%s\n' "${buildkit_sboms[0]}" >> "$GITHUB_OUTPUT"
+          printf 'registry_descriptor=%s\n' "${registry_descriptors[0]}" >> "$GITHUB_OUTPUT"
+          printf 'registry_resolution=%s\n' "${registry_resolutions[0]}" >> "$GITHUB_OUTPUT"
       - name: Verify release subjects and require trusted deployment admission
         env:
           GH_TOKEN: ${{ github.token }}
           APPROVED_SHA: ${{ inputs.approved_sha }}
           RELEASE_MANIFEST: ${{ steps.artifacts.outputs.manifest }}
           RELEASE_SBOM: ${{ steps.artifacts.outputs.sbom }}
+          BUILDKIT_SBOM: ${{ steps.artifacts.outputs.buildkit_sbom }}
+          REGISTRY_DESCRIPTOR: ${{ steps.artifacts.outputs.registry_descriptor }}
+          REGISTRY_RESOLUTION: ${{ steps.artifacts.outputs.registry_resolution }}
         run: |
           sh ./scripts/release-artifact-gate.sh \
             --imageManifest "$RELEASE_MANIFEST" \
             --sbom "$RELEASE_SBOM" \
+            --buildkitSbom "$BUILDKIT_SBOM" \
+            --registryDescriptor "$REGISTRY_DESCRIPTOR" \
+            --registryResolution "$REGISTRY_RESOLUTION" \
             --releaseSha "$APPROVED_SHA" \
             --repo "$GITHUB_REPOSITORY" \
             --sourceRef refs/heads/main \

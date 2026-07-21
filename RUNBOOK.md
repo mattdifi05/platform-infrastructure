@@ -900,7 +900,7 @@ attestation, rollback target and the output of:
 ```sh
 GITHUB_REF=refs/heads/main sh ./scripts/infra-ops.sh release-artifact-gate --requireProvenance --repo OWNER/REPO --sourceRef refs/heads/main
 gh workflow run release-attestation.yml --repo OWNER/REPO --ref main
-GITHUB_REF=refs/heads/main sh ./scripts/release-evidence.sh --requireProvenance --repo OWNER/REPO --sourceRef refs/heads/main --imageManifest reports/release/release-subjects-<run-id>.json --sbom reports/release/github-release-sbom-<run-id>.cdx.json --previousImagesFile ./release/previous-images.json
+GITHUB_REF=refs/heads/main sh ./scripts/release-evidence.sh --requireProvenance --repo OWNER/REPO --sourceRef refs/heads/main --imageManifest reports/release/release-subjects-<run-id>.json --sbom reports/release/github-release-sbom-<run-id>.cdx.json --buildkitSbom reports/release/buildkit-sbom-<run-id>.spdx.json --registryDescriptor reports/release/registry-descriptor-<run-id>.json --registryResolution reports/release/registry-resolution-<run-id>.json --previousImagesFile ./release/previous-images.json
 sh ./scripts/infra-ops.sh governance-check
 sh ./scripts/infra-ops.sh enterprise-10-check
 ```
@@ -911,8 +911,10 @@ directly and requires exact repository, signer workflow, source/signer commit,
 source ref, GitHub Actions issuer, SLSA v1 predicate, GitHub-hosted runner,
 verified timestamp and subject digest. Offline use requires both
 `--attestationBundle` and `--trustedRoot`. There is no commit-check bypass.
-`release-attestation.yml` publishes a digest-pinned GHCR infra image, enables
-BuildKit SBOM attestation and uploads non-sensitive audit receipts. See
+`release-attestation.yml` publishes a digest-pinned GHCR infra image for exact
+`linux/amd64`, resolves the OCI index/child descriptor, consumes the attached
+BuildKit SPDX package inventory into a dependency-bearing CycloneDX document,
+and uploads the raw/derived artifacts plus non-sensitive bound receipts. See
 `RELEASE-TRUST-AND-WORKFLOW-SECURITY.md`.
 
 Before the first production deploy, apply the branch protection policy from

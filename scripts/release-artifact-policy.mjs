@@ -40,19 +40,36 @@ export function canonicalReleaseSubjects(entries) {
   return subjects;
 }
 
+export function approvedReleaseSubjects(entries, repository) {
+  const subjects = canonicalReleaseSubjects(entries);
+  const expectedRepository = exactRepository(repository);
+  const [owner] = expectedRepository.split("/");
+  const approved = new Map([
+    ["PHP_APACHE_IMAGE", `ghcr.io/${owner.toLowerCase()}/platform-infrastructure-php-apache`],
+  ]);
+  for (const subject of subjects) {
+    const expectedName = approved.get(subject.key);
+    if (!expectedName || subject.name !== expectedName) {
+      invalid(`Release subject ${subject.key} is not mapped to its approved OCI repository.`);
+    }
+  }
+  return subjects;
+}
+
 function propertiesMap(properties, label) {
   if (!Array.isArray(properties)) invalid(`${label} properties must be an array.`);
   const map = new Map();
   for (const property of properties) {
     const name = exactText(property?.name, `${label} property name`);
     if (map.has(name)) invalid(`${label} contains duplicate property ${name}.`);
-    map.set(name, String(property?.value ?? ""));
+    if (typeof property?.value !== "string") invalid(`${label} property ${name} value must be a string.`);
+    map.set(name, property.value);
   }
   return map;
 }
 
-export function validateCycloneDxReleaseSbom(sbom, { subjects: rawSubjects, repository, commitSha }) {
-  const subjects = canonicalReleaseSubjects(rawSubjects);
+export function validateCycloneDxReleaseSbom(sbom, { subjects: rawSubjects, repository, commitSha, buildkitSbomSha256 = null }) {
+  const subjects = approvedReleaseSubjects(rawSubjects, repository);
   const expectedRepository = exactRepository(repository);
   const expectedCommit = exactGitSha(commitSha);
   if (!sbom || typeof sbom !== "object" || Array.isArray(sbom)) invalid("SBOM must be a JSON object.");
@@ -70,11 +87,28 @@ export function validateCycloneDxReleaseSbom(sbom, { subjects: rawSubjects, repo
   if (metadataProperties.get("repository") !== expectedRepository || metadataProperties.get("commitSha") !== expectedCommit) {
     invalid("SBOM metadata repository/commitSha binding is missing or mismatched.");
   }
-  if (!Array.isArray(sbom.components) || sbom.components.length !== subjects.length) invalid("SBOM component set must exactly match the release subject set.");
+  if (metadataProperties.get("sbom.source") !== "buildkit-attestation-spdx") invalid("SBOM dependency inventory is not sourced from BuildKit SPDX attestation output.");
+  const rawBuildkitSha256 = metadataProperties.get("buildkitSbomSha256");
+  if (!/^[a-f0-9]{64}$/.test(String(rawBuildkitSha256 ?? ""))) invalid("SBOM metadata lacks the raw BuildKit SBOM SHA256.");
+  if (buildkitSbomSha256 !== null && rawBuildkitSha256 !== buildkitSbomSha256) invalid("SBOM raw BuildKit artifact hash binding is mismatched.");
+  const platformText = metadataProperties.get("buildkitPlatforms");
+  const platforms = typeof platformText === "string" ? platformText.split(",") : [];
+  if (platforms.length === 0 || platforms.some((platform) => !/^linux\/(amd64|arm64)$/.test(platform)) || new Set(platforms).size !== platforms.length) {
+    invalid("SBOM BuildKit platform inventory is missing, invalid or duplicated.");
+  }
+  if (metadataProperties.get("releaseSubjectCount") !== String(subjects.length)) invalid("SBOM release subject count binding is mismatched.");
+  if (!Array.isArray(sbom.components) || sbom.components.length === 0) invalid("SBOM components must be a non-empty array.");
 
   const expectedByName = new Map(subjects.map((subject) => [subject.name, subject]));
   const seen = new Set();
+  const subjectComponents = [];
+  const dependencyComponents = [];
   for (const component of sbom.components) {
+    const componentProperties = propertiesMap(component?.properties, `SBOM component ${String(component?.name ?? "unknown")}`);
+    if (componentProperties.has("releaseSubjectKey")) subjectComponents.push({ component, componentProperties });
+    else dependencyComponents.push({ component, componentProperties });
+  }
+  for (const { component, componentProperties } of subjectComponents) {
     const name = exactText(component?.name, "SBOM component name");
     const expected = expectedByName.get(name);
     if (!expected || seen.has(name)) invalid(`SBOM contains an unexpected or duplicate component ${name}.`);
@@ -85,14 +119,45 @@ export function validateCycloneDxReleaseSbom(sbom, { subjects: rawSubjects, repo
     if (!hashes.some((hash) => hash?.alg === "SHA-256" && String(hash?.content ?? "").toLowerCase() === expected.sha256)) {
       invalid(`SBOM component ${name} lacks its exact SHA-256 hash.`);
     }
-    const componentProperties = propertiesMap(component.properties, `SBOM component ${name}`);
-    if (componentProperties.get("releaseSubjectKey") !== expected.key) invalid(`SBOM component ${name} is not bound to release key ${expected.key}.`);
+    if (componentProperties.size !== 1 || componentProperties.get("releaseSubjectKey") !== expected.key) invalid(`SBOM component ${name} is not bound only to release key ${expected.key}.`);
   }
-  return { repository: expectedRepository, commitSha: expectedCommit, subjects, schemaValidation };
+  if (seen.size !== subjects.length) invalid("SBOM is missing one or more exact release subject components.");
+  if (dependencyComponents.length === 0) invalid("SBOM dependency inventory is empty.");
+  const dependencyRefs = new Set();
+  for (const { component, componentProperties } of dependencyComponents) {
+    const name = exactText(component?.name, "SBOM dependency name");
+    exactText(component?.version, `SBOM dependency ${name} version`);
+    if (component.type !== "library" || !/^urn:buildkit-spdx:[a-f0-9]{64}$/.test(String(component["bom-ref"] ?? ""))) {
+      invalid(`SBOM dependency ${name} is not an exact BuildKit package component.`);
+    }
+    if (dependencyRefs.has(component["bom-ref"])) invalid(`SBOM dependency ${name} has a duplicate bom-ref.`);
+    dependencyRefs.add(component["bom-ref"]);
+    if (component.purl !== undefined && (typeof component.purl !== "string" || !/^pkg:\S+$/.test(component.purl))) {
+      invalid(`SBOM dependency ${name} has an invalid purl.`);
+    }
+    if (componentProperties.size !== 4
+      || componentProperties.get("sbom.source") !== "buildkit-attestation-spdx"
+      || !platforms.includes(componentProperties.get("buildkit.platform"))
+      || !/^SPDXRef-[A-Za-z0-9.-]+$/.test(String(componentProperties.get("buildkit.spdxId") ?? ""))
+      || !subjects.some((subject) => subject.image === componentProperties.get("releaseSubjectImage"))) {
+      invalid(`SBOM dependency ${name} lacks exact BuildKit provenance properties.`);
+    }
+  }
+  if (metadataProperties.get("buildkitPackageCount") !== String(dependencyComponents.length)) invalid("SBOM BuildKit package count binding is mismatched.");
+  return {
+    repository: expectedRepository,
+    commitSha: expectedCommit,
+    subjects,
+    dependencyCount: dependencyComponents.length,
+    buildkitSbomSha256: rawBuildkitSha256,
+    platforms,
+    dependencyComponents: dependencyComponents.map(({ component }) => component),
+    schemaValidation,
+  };
 }
 
 export function validateCryptographicReleaseVerification(verification, { subjects: rawSubjects, repository, commitSha }) {
-  const subjects = canonicalReleaseSubjects(rawSubjects);
+  const subjects = approvedReleaseSubjects(rawSubjects, repository);
   const expectedRepository = exactRepository(repository);
   const expectedCommit = exactGitSha(commitSha);
   if (verification?.status !== "passed" || verification?.verified !== true || verification?.completeness !== "complete") {
@@ -105,22 +170,70 @@ export function validateCryptographicReleaseVerification(verification, { subject
   const verifiedImages = Array.isArray(verification.releaseImages) ? [...verification.releaseImages].sort() : [];
   if (JSON.stringify(expectedImages) !== JSON.stringify(verifiedImages)) invalid("Cryptographic provenance subject set does not exactly match release images.");
   if (!Array.isArray(verification.attestations) || verification.attestations.length !== subjects.length) invalid("Each release image must have one cryptographic provenance verification result.");
-  return { repository: expectedRepository, commitSha: expectedCommit, subjects };
+  const perSubjectVerification = subjects.map((subject) => {
+    const matches = verification.attestations.filter((attestation) => Array.isArray(attestation?.subjects)
+      && attestation.subjects.some((entry) => entry?.name === subject.name && entry?.sha256 === subject.sha256));
+    if (matches.length !== 1) invalid(`Release subject ${subject.key} must have one exact verifier result.`);
+    const attestation = matches[0];
+    if (attestation.status !== "passed" || attestation.verified !== true || attestation.completeness !== "complete"
+      || attestation.repository !== expectedRepository || attestation.sourceDigest !== expectedCommit
+      || attestation.signerWorkflow !== verification.signerWorkflow || attestation.sourceRef !== verification.sourceRef
+      || !/^https:\/\/slsa\.dev\/provenance\/v1$/.test(String(attestation.predicateType ?? ""))
+      || !/^https:\/\/token\.actions\.githubusercontent\.com$/.test(String(attestation.certOidcIssuer ?? ""))
+      || !Array.isArray(attestation.certificateFingerprints) || attestation.certificateFingerprints.length === 0
+      || attestation.certificateFingerprints.some((fingerprint) => !/^[a-f0-9]{64}$/.test(String(fingerprint)))
+      || !Number.isInteger(attestation.verifiedTimestampCount) || attestation.verifiedTimestampCount < 1) {
+      invalid(`Release subject ${subject.key} verifier receipt is incomplete or mismatched.`);
+    }
+    return { subject, attestation };
+  });
+  return { repository: expectedRepository, commitSha: expectedCommit, subjects, perSubjectVerification };
 }
 
-export function validateAttestedReleaseManifest(manifest, { subjects: rawSubjects, repository, commitSha, sbomSha256 }) {
-  const subjects = canonicalReleaseSubjects(rawSubjects);
+export function validateAttestedReleaseManifest(manifest, {
+  subjects: rawSubjects,
+  repository,
+  commitSha,
+  sbomSha256,
+  buildkitSbomSha256,
+  registryResolutionSha256,
+  registryDescriptorSha256,
+  registryRootDescriptorSha256,
+  resolvedPlatforms,
+}) {
+  const subjects = approvedReleaseSubjects(rawSubjects, repository);
   const expectedRepository = exactRepository(repository);
   const expectedCommit = exactGitSha(commitSha);
   if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)) invalid("Release subject manifest must be a JSON object.");
-  if (manifest.version !== 2 || manifest.source !== "cryptographically-verified-subjects") invalid("Release subject manifest must use verified schema version 2.");
+  if (manifest.version !== 3 || manifest.source !== "registry-resolved-cryptographically-verified-subjects") invalid("Release subject manifest must use registry-resolved verified schema version 3.");
   if (manifest.repository !== expectedRepository || manifest.commitSha !== expectedCommit) invalid("Release subject manifest repository/commit binding is mismatched.");
   if (!/^[a-f0-9]{64}$/.test(String(sbomSha256 ?? "")) || manifest.sbom?.sha256 !== sbomSha256) invalid("Attested release manifest does not authenticate the exact SBOM SHA256.");
   if (manifest.sbom?.schema !== "http://cyclonedx.org/schema/bom-1.5.schema.json") invalid("Attested release manifest does not bind CycloneDX 1.5.");
+  if (!/^[a-f0-9]{64}$/.test(String(buildkitSbomSha256 ?? "")) || manifest.sbom?.buildkitSha256 !== buildkitSbomSha256) {
+    invalid("Attested release manifest does not bind the raw BuildKit SBOM artifact.");
+  }
+  if (!/^[a-f0-9]{64}$/.test(String(registryResolutionSha256 ?? ""))
+    || manifest.registryResolution?.sha256 !== registryResolutionSha256
+    || manifest.registryResolution?.descriptorArtifactSha256 !== registryDescriptorSha256
+    || manifest.registryResolution?.descriptorSha256 !== registryRootDescriptorSha256) {
+    invalid("Attested release manifest does not bind exact registry resolution evidence.");
+  }
   const manifestSubjects = canonicalReleaseSubjects(manifest.subjects ?? []);
   const expected = subjects.map((subject) => `${subject.key}\u0000${subject.image}`).sort();
   const actual = manifestSubjects.map((subject) => `${subject.key}\u0000${subject.image}`).sort();
   if (JSON.stringify(expected) !== JSON.stringify(actual)) invalid("Attested release manifest subject set is mismatched.");
+  const expectedPlatforms = (resolvedPlatforms ?? []).map(({ platform, digest, size, mediaType }) => ({
+    platform, descriptorDigest: digest, size, mediaType,
+  })).sort((left, right) => left.platform.localeCompare(right.platform));
+  if (expectedPlatforms.length === 0) invalid("Resolved release platform descriptors are required.");
+  for (const subject of manifest.subjects) {
+    const actualPlatforms = Array.isArray(subject.platforms)
+      ? subject.platforms.map(({ platform, descriptorDigest, size, mediaType }) => ({ platform, descriptorDigest, size, mediaType })).sort((left, right) => left.platform.localeCompare(right.platform))
+      : [];
+    if (JSON.stringify(actualPlatforms) !== JSON.stringify(expectedPlatforms)) invalid(`Attested release subject ${subject.key} platform descriptors are mismatched.`);
+  }
+  const platformNames = expectedPlatforms.map((entry) => entry.platform);
+  if (JSON.stringify(manifest.registryResolution.platforms) !== JSON.stringify(platformNames)) invalid("Attested release manifest platform set is mismatched.");
   return { repository: expectedRepository, commitSha: expectedCommit, subjects };
 }
 
@@ -128,9 +241,16 @@ export function sha256Json(value) {
   return crypto.createHash("sha256").update(JSON.stringify(value)).digest("hex");
 }
 
-export function buildReleaseAdmissionReceipt({ subjects, repository, commitSha, sbomSha256, manifestSha256, verification, manifestVerification = null }) {
+export function buildReleaseAdmissionReceipt({ subjects, repository, commitSha, sbomSha256, buildkitSbomSha256 = null, registryResolutionSha256 = null, registryResolution = null, manifestSha256, verification, manifestVerification = null }) {
   const binding = validateCryptographicReleaseVerification(verification, { subjects, repository, commitSha });
   if (!/^[a-f0-9]{64}$/.test(String(sbomSha256 ?? ""))) invalid("SBOM artifact SHA256 is required for the admission receipt.");
+  if (!registryResolution || registryResolution.status !== "passed" || registryResolution.image !== binding.subjects[0]?.image
+    || registryResolution.rootDigest !== binding.subjects[0]?.digest || registryResolution.descriptorSha256 !== binding.subjects[0]?.sha256
+    || !Array.isArray(registryResolution.platforms) || registryResolution.platforms.length === 0
+    || registryResolution.platforms.some((entry) => !/^linux\/(amd64|arm64)$/.test(String(entry?.platform ?? ""))
+      || !/^sha256:[a-f0-9]{64}$/.test(String(entry?.digest ?? "")) || !Number.isInteger(entry?.size) || entry.size < 1)) {
+    invalid("Exact per-subject registry resolution is required for the admission receipt.");
+  }
   return {
     version: 1,
     kind: "platform-release-artifact-verification/v1",
@@ -140,7 +260,31 @@ export function buildReleaseAdmissionReceipt({ subjects, repository, commitSha, 
     repository: binding.repository,
     commitSha: binding.commitSha,
     subjects: binding.subjects.map(({ key, image, name, digest }) => ({ key, image, name, digest })),
+    subjectVerificationReceipts: binding.perSubjectVerification.map(({ subject, attestation }) => ({
+      key: subject.key,
+      image: subject.image,
+      registry: {
+        rootDigest: registryResolution.rootDigest,
+        descriptorSha256: registryResolution.descriptorSha256,
+        platforms: registryResolution.platforms,
+      },
+      attestationReference: {
+        provider: verification.provider,
+        repository: verification.repository,
+        subject: `oci://${subject.image}`,
+        signerWorkflow: verification.signerWorkflow,
+        sourceDigest: verification.sourceDigest,
+        sourceRef: verification.sourceRef,
+        predicateType: attestation.predicateType,
+        certOidcIssuer: attestation.certOidcIssuer,
+      },
+      certificateFingerprints: [...attestation.certificateFingerprints].sort(),
+      verifiedTimestampCount: attestation.verifiedTimestampCount,
+      verifierResultFingerprint: sha256Json(attestation),
+    })),
     sbomSha256,
+    buildkitSbomSha256: /^[a-f0-9]{64}$/.test(String(buildkitSbomSha256 ?? "")) ? buildkitSbomSha256 : null,
+    registryResolutionSha256: /^[a-f0-9]{64}$/.test(String(registryResolutionSha256 ?? "")) ? registryResolutionSha256 : null,
     manifestSha256: /^[a-f0-9]{64}$/.test(String(manifestSha256 ?? "")) ? manifestSha256 : null,
     provenance: {
       provider: verification.provider,

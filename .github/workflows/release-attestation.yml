@@ -60,6 +60,7 @@ jobs:
           file: docker/php-apache.Dockerfile
           push: true
           sbom: true
+          platforms: linux/amd64
           tags: |
             ${{ env.PHP_APACHE_IMAGE }}:${{ github.sha }}
             ${{ env.PHP_APACHE_IMAGE }}:${{ github.ref_name }}
@@ -76,6 +77,21 @@ jobs:
           subject-digest: ${{ steps.php-apache.outputs.digest }}
           push-to-registry: true
 
+      - name: Resolve immutable registry platform and extract BuildKit SBOM
+        env:
+          PHP_APACHE_DIGEST: ${{ steps.php-apache.outputs.digest }}
+        run: |
+          mkdir -p reports/release
+          SUBJECT="${PHP_APACHE_IMAGE}@${PHP_APACHE_DIGEST}"
+          docker buildx imagetools inspect "$SUBJECT" --raw > "reports/release/registry-descriptor-${GITHUB_RUN_ID}.json"
+          node ./scripts/release-registry-resolution.mjs \
+            --image "$SUBJECT" \
+            --descriptor "reports/release/registry-descriptor-${GITHUB_RUN_ID}.json" \
+            --platform linux/amd64 \
+            --receipt "reports/release/registry-resolution-${GITHUB_RUN_ID}.json"
+          docker buildx imagetools inspect "$SUBJECT" --format '{{ json .SBOM }}' > "reports/release/buildkit-sbom-${GITHUB_RUN_ID}.spdx.json"
+          test -s "reports/release/buildkit-sbom-${GITHUB_RUN_ID}.spdx.json"
+
       - name: Verify image provenance and generate bound release artifacts
         env:
           GH_TOKEN: ${{ github.token }}
@@ -91,6 +107,10 @@ jobs:
             --releaseName "${RELEASE_NAME}" \
             --workflowRunId "${GITHUB_RUN_ID}" \
             --workflowRunUrl "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            --buildkitSbom "reports/release/buildkit-sbom-${GITHUB_RUN_ID}.spdx.json" \
+            --registryDescriptor "reports/release/registry-descriptor-${GITHUB_RUN_ID}.json" \
+            --registryResolution "reports/release/registry-resolution-${GITHUB_RUN_ID}.json" \
+            --platform linux/amd64 \
             --manifest "reports/release/release-subjects-${GITHUB_RUN_ID}.json" \
             --sbom "reports/release/github-release-sbom-${GITHUB_RUN_ID}.cdx.json" \
             --receipt "reports/release/release-artifact-admission-${GITHUB_RUN_ID}.json")"
@@ -124,6 +144,9 @@ jobs:
             reports/release/github-sigstore-attestation-*.json
             reports/release/github-sigstore-attestation-*.md
             reports/release/github-release-sbom-*.cdx.json
+            reports/release/buildkit-sbom-*.spdx.json
+            reports/release/registry-descriptor-*.json
+            reports/release/registry-resolution-*.json
             reports/release/release-artifact-admission-*.json
             reports/release/release-subjects-*.json
           retention-days: 30

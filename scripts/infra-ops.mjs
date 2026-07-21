@@ -70,8 +70,11 @@ import { validateTrustedDeploymentReceipt } from "./deployment-receipt-policy.mj
 import { releaseEvidenceAdmissionReady } from "./release-go-no-go-policy.mjs";
 import { deploymentPrerequisiteMismatches } from "./privileged-workflow-policy.mjs";
 import { snapshotJsonArtifact } from "./stable-json-artifact.mjs";
+import { assertExactBuildkitComponentSet, buildkitSbomSha256, buildkitSpdxInventory } from "./buildkit-sbom-policy.mjs";
+import { validateRegistryResolutionReceipt } from "./release-registry-resolution.mjs";
 import {
   buildReleaseAdmissionReceipt,
+  approvedReleaseSubjects,
   canonicalReleaseSubjects,
   validateAttestedReleaseManifest,
   validateCryptographicReleaseVerification,
@@ -6278,6 +6281,9 @@ async function releaseArtifactGateBody(options = {}) {
   }
   const manifestArtifact = snapshotJsonArtifact(manifestPath, { label: "release subject manifest", maxBytes: 16 * 1024 * 1024 });
   let sbomArtifact = null;
+  let buildkitSbomArtifact = null;
+  let registryResolutionArtifact = null;
+  let registryDescriptorArtifact = null;
   try {
     const releaseManifest = manifestArtifact.document;
     const imageEntries = releaseImageEntriesFromManifestDocument(releaseManifest);
@@ -6293,7 +6299,26 @@ async function releaseArtifactGateBody(options = {}) {
         fail(`Release image must be digest-pinned: ${image}`);
       }
     }
-    const subjects = canonicalReleaseSubjects(imageEntries);
+    const subjects = approvedReleaseSubjects(imageEntries, releaseManifest.repository);
+    if (subjects.length !== 1) fail("One release gate invocation must bind exactly one image evidence set.");
+
+    const buildkitSbomFile = options.buildkitSbom ?? argv.buildkitSbom;
+    const registryResolutionFile = options.registryResolution ?? argv.registryResolution;
+    const registryDescriptorFile = options.registryDescriptor ?? argv.registryDescriptor;
+    if (!buildkitSbomFile || !registryResolutionFile || !registryDescriptorFile) {
+      fail("Raw BuildKit SBOM, registry resolution receipt and raw registry descriptor are mandatory release evidence.");
+    }
+    buildkitSbomArtifact = snapshotJsonArtifact(buildkitSbomFile, { label: "raw BuildKit SBOM", maxBytes: 128 * 1024 * 1024 });
+    registryResolutionArtifact = snapshotJsonArtifact(registryResolutionFile, { label: "registry resolution receipt", maxBytes: 16 * 1024 * 1024 });
+    registryDescriptorArtifact = snapshotJsonArtifact(registryDescriptorFile, { label: "raw registry descriptor", maxBytes: 16 * 1024 * 1024 });
+    const approvedPlatforms = ["linux/amd64"];
+    const registryResolution = validateRegistryResolutionReceipt(registryResolutionArtifact.document, {
+      image: subjects[0].image,
+      descriptorBytes: fs.readFileSync(registryDescriptorArtifact.snapshotPath),
+      expectedPlatforms: approvedPlatforms,
+    });
+    const rawBuildkitSha256 = buildkitSbomSha256(fs.readFileSync(buildkitSbomArtifact.snapshotPath));
+    const buildkitInventory = buildkitSpdxInventory(buildkitSbomArtifact.document, { subjects, expectedPlatforms: approvedPlatforms });
 
     const sbomFile = options.sbom ?? argv.sbom ?? latestFileByMtime(path.join(infraRoot, "security", "sbom"), (file) => /sbom.*\.(json|cdx\.json)$/i.test(path.basename(file)));
     if (!sbomFile) {
@@ -6315,12 +6340,21 @@ async function releaseArtifactGateBody(options = {}) {
       repository: verificationOptions.repository,
       commitSha: releaseSha,
       sbomSha256,
+      buildkitSbomSha256: rawBuildkitSha256,
+      registryResolutionSha256: registryResolutionArtifact.sha256,
+      registryResolution,
+      registryDescriptorSha256: registryDescriptorArtifact.sha256,
+      registryRootDescriptorSha256: registryResolution.descriptorSha256,
+      resolvedPlatforms: registryResolution.platforms,
     });
-    validateCycloneDxReleaseSbom(sbom, {
+    const sbomValidation = validateCycloneDxReleaseSbom(sbom, {
       subjects,
       repository: verificationOptions.repository,
       commitSha: releaseSha,
+      buildkitSbomSha256: rawBuildkitSha256,
     });
+    if (sbomValidation.dependencyCount !== buildkitInventory.components.length) fail("CycloneDX dependency count differs from raw BuildKit SPDX inventory.");
+    assertExactBuildkitComponentSet(buildkitInventory.components, sbomValidation.dependencyComponents);
     loadGithubTokenFromFile();
     const manifestSha256 = manifestArtifact.sha256;
     const manifestVerification = verifyGithubAttestation({
@@ -6344,6 +6378,8 @@ async function releaseArtifactGateBody(options = {}) {
       repository: verificationOptions.repository,
       commitSha: releaseSha,
       sbomSha256,
+      buildkitSbomSha256: rawBuildkitSha256,
+      registryResolutionSha256: registryResolutionArtifact.sha256,
       manifestSha256,
       verification: githubAttestationValidation,
       manifestVerification,
@@ -6354,6 +6390,9 @@ async function releaseArtifactGateBody(options = {}) {
     log(`Release artifact admission gate passed with SBOM ${sbomFile} and receipt ${receiptPath}.`);
     return { sbomFile, receiptPath, provenanceValidation: null, githubAttestationValidation };
   } finally {
+    registryDescriptorArtifact?.cleanup();
+    registryResolutionArtifact?.cleanup();
+    buildkitSbomArtifact?.cleanup();
     sbomArtifact?.cleanup();
     manifestArtifact.cleanup();
   }

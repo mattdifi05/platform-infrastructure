@@ -30,7 +30,7 @@
         },
         "properties": {
           "type": "array",
-          "minItems": 4,
+          "minItems": 7,
           "items": {
             "type": "object",
             "additionalProperties": false,
@@ -47,41 +47,83 @@
       "type": "array",
       "minItems": 1,
       "items": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["type", "name", "version", "hashes", "purl", "properties"],
-        "properties": {
-          "type": { "const": "container" },
-          "name": { "type": "string", "pattern": "^[a-z0-9.-]+(:[0-9]+)?(/[a-z0-9._-]+)+$" },
-          "version": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
-          "hashes": {
-            "type": "array",
-            "minItems": 1,
-            "items": {
-              "type": "object",
-              "additionalProperties": false,
-              "required": ["alg", "content"],
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["type", "name", "version", "hashes", "purl", "properties"],
+            "properties": {
+              "type": { "const": "container" },
+              "name": { "type": "string", "pattern": "^[a-z0-9.-]+(:[0-9]+)?(/[a-z0-9._-]+)+$" },
+              "version": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+              "hashes": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["alg", "content"],
+                  "properties": {
+                    "alg": { "const": "SHA-256" },
+                    "content": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+                  }
+                }
+              },
+              "purl": { "type": "string", "pattern": "^pkg:oci/[a-z0-9.-]+(:[0-9]+)?(/[a-z0-9._-]+)+@sha256:[a-f0-9]{64}$" },
               "properties": {
-                "alg": { "const": "SHA-256" },
-                "content": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["name", "value"],
+                  "properties": {
+                    "name": { "const": "releaseSubjectKey" },
+                    "value": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+$" }
+                  }
+                }
               }
             }
           },
-          "purl": { "type": "string", "pattern": "^pkg:oci/[a-z0-9.-]+(:[0-9]+)?(/[a-z0-9._-]+)+@sha256:[a-f0-9]{64}$" },
-          "properties": {
-            "type": "array",
-            "minItems": 1,
-            "items": {
-              "type": "object",
-              "additionalProperties": false,
-              "required": ["name", "value"],
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["type", "bom-ref", "name", "version", "properties"],
+            "properties": {
+              "type": { "const": "library" },
+              "bom-ref": { "type": "string", "pattern": "^urn:buildkit-spdx:[a-f0-9]{64}$" },
+              "name": { "type": "string", "minLength": 1 },
+              "version": { "type": "string", "minLength": 1 },
+              "purl": { "type": "string", "pattern": "^pkg:\\S+$" },
+              "hashes": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["alg", "content"],
+                  "properties": {
+                    "alg": { "const": "SHA-256" },
+                    "content": { "type": "string", "pattern": "^[a-fA-F0-9]{64}$" }
+                  }
+                }
+              },
               "properties": {
-                "name": { "const": "releaseSubjectKey" },
-                "value": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+$" }
+                "type": "array",
+                "minItems": 4,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["name", "value"],
+                  "properties": {
+                    "name": { "enum": ["sbom.source", "buildkit.platform", "buildkit.spdxId", "releaseSubjectImage"] },
+                    "value": { "type": "string", "minLength": 1 }
+                  }
+                }
               }
             }
           }
-        }
+        ]
       }
     }
   }

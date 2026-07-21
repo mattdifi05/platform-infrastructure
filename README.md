@@ -721,12 +721,15 @@ Per ogni release candidata genera anche il manifest operativo:
 ```sh
 sh ./scripts/release-evidence.sh --planOnly
 gh workflow run release-attestation.yml --repo OWNER/REPO --ref main
-GITHUB_REF=refs/heads/main sh ./scripts/release-evidence.sh --requireProvenance --repo OWNER/REPO --sourceRef refs/heads/main --imageManifest .tmp/release-attestation/release-subjects.json --sbom reports/release/github-release-sbom-<run-id>.cdx.json --previousImagesFile ./release/previous-images.json
+GITHUB_REF=refs/heads/main sh ./scripts/release-evidence.sh --requireProvenance --repo OWNER/REPO --sourceRef refs/heads/main --imageManifest reports/release/release-subjects-<run-id>.json --sbom reports/release/github-release-sbom-<run-id>.cdx.json --buildkitSbom reports/release/buildkit-sbom-<run-id>.spdx.json --registryDescriptor reports/release/registry-descriptor-<run-id>.json --registryResolution reports/release/registry-resolution-<run-id>.json --previousImagesFile ./release/previous-images.json
 ```
 
 Il workflow `release-attestation.yml` usa GitHub Artifact Attestations/Sigstore,
-builda l'immagine infra PHP Apache su GHCR, abilita SBOM BuildKit, attesta anche
-`release-subjects.json` e carica receipt non sensibili. Il gate non rilegge tali
+builda l'immagine infra PHP Apache su GHCR per la piattaforma esatta
+`linux/amd64`, estrae e consuma l'inventario SPDX dell'attestation SBOM BuildKit,
+lo proietta in un CycloneDX con dipendenze reali e componenti subject distinti,
+risolve l'indice OCI e lega root digest, child platform digest e descriptor.
+Attesta anche `release-subjects.json` e carica receipt non sensibili. Il gate non rilegge tali
 receipt come prova: invoca direttamente il GitHub CLI checksum-pinned e vincola
 repository, signer workflow, source/signer digest, ref, issuer, SLSA v1, runner
 GitHub-hosted, timestamp verificato e subject digest. Per verifica offline sono
