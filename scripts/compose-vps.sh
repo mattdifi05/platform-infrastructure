@@ -35,6 +35,7 @@ compose=(
 workload_lock=${HOSTED_WORKLOAD_LOCK:-$(env_path_value HOSTED_WORKLOAD_LOCK)}
 if [[ -n "$workload_lock" ]]; then
   [[ "$workload_lock" = /* ]] || workload_lock="$ROOT_DIR/$workload_lock"
+  export HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE=${HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE:-$workload_lock}
   locked_core_env=$(HOSTED_WORKLOAD_ALLOW_RESOLVED=${HOSTED_WORKLOAD_ALLOW_RESOLVED:-0} sh "$ROOT_DIR/scripts/hosted-workload-lock.sh" "$workload_lock" core-env-file)
   locked_project_name=$(HOSTED_WORKLOAD_ALLOW_RESOLVED=${HOSTED_WORKLOAD_ALLOW_RESOLVED:-0} sh "$ROOT_DIR/scripts/hosted-workload-lock.sh" "$workload_lock" project-name)
   [[ "$locked_core_env" = "$ENV_FILE" ]] || {
@@ -53,6 +54,8 @@ if [[ -n "$workload_lock" ]]; then
     [[ -n "$workload_env_file" ]] || continue
     compose+=(--env-file "$workload_env_file")
   done
+else
+  export HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE=${HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE:-$ROOT_DIR/config/no-hosted-workloads.lock.json}
 fi
 
 compose+=(

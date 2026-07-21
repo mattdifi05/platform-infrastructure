@@ -30,7 +30,8 @@ WORKLOAD_ROOT=${HOSTED_WORKLOAD_ROOT:-$(env_path_value HOSTED_WORKLOAD_ROOT)}
 OUTPUT=${HOSTED_WORKLOAD_LOCK:-$(env_path_value HOSTED_WORKLOAD_LOCK)}
 CATALOG=${CATALOG:-$INFRA_ROOT/config/hosted-workloads.example.json}
 WORKLOAD_ROOT=${WORKLOAD_ROOT:-$INFRA_ROOT/../src}
-OUTPUT=${OUTPUT:-$INFRA_ROOT/projects-portal/state/hosted-workloads.lock.json}
+PRIVATE_STATE_BASE=${XDG_STATE_HOME:-${HOME:?HOME is required}/.local/state}
+OUTPUT=${OUTPUT:-$PRIVATE_STATE_BASE/platform-infrastructure/hosted-workloads/hosted-workloads.lock.json}
 
 for path_var in CATALOG WORKLOAD_ROOT OUTPUT; do
   value=${!path_var}
@@ -41,6 +42,45 @@ done
 [[ -f "$CATALOG" && -d "$WORKLOAD_ROOT" ]] || {
   printf '%s\n' "Catalog, workload root and Compose env file must exist." >&2
   exit 1
+}
+
+ensure_private_directory() {
+  local directory=$1 remainder cursor component mode owner
+  [[ "$directory" = /* ]] || {
+    printf 'Deployment-private directory must be absolute: %s\n' "$directory" >&2
+    exit 1
+  }
+  remainder=${directory#/}
+  cursor=
+  while [[ -n "$remainder" ]]; do
+    if [[ "$remainder" = */* ]]; then
+      component=${remainder%%/*}
+      remainder=${remainder#*/}
+    else
+      component=$remainder
+      remainder=
+    fi
+    cursor=$cursor/$component
+    if [[ -e "$cursor" || -L "$cursor" ]]; then
+      [[ -d "$cursor" && ! -L "$cursor" ]] || {
+        printf 'Deployment-private path component is not a real directory: %s\n' "$cursor" >&2
+        exit 1
+      }
+    else
+      mkdir -m 700 -- "$cursor"
+    fi
+  done
+  if stat -c '%a' "$directory" >/dev/null 2>&1; then
+    mode=$(stat -c '%a' "$directory")
+    owner=$(stat -c '%u' "$directory")
+  else
+    mode=$(stat -f '%Lp' "$directory")
+    owner=$(stat -f '%u' "$directory")
+  fi
+  [[ "$mode" = 700 && "$owner" = "$(id -u)" ]] || {
+    printf 'Deployment-private directory must be owned by the deployment identity with mode 0700: %s\n' "$directory" >&2
+    exit 1
+  }
 }
 
 core_files=(
@@ -56,10 +96,15 @@ core_files=(
 )
 core_csv=$(IFS=,; printf '%s' "${core_files[*]}")
 
-mkdir -p "$(dirname "$OUTPUT")"
-snapshot_root="$(dirname "$OUTPUT")/hosted-workload-snapshots"
-mkdir -p "$snapshot_root"
-chmod 700 "$snapshot_root"
+output_directory=$(dirname "$OUTPUT")
+case "$output_directory/" in
+  "$INFRA_ROOT/projects-portal/state/"*)
+    printf '%s\n' "Hosted workload activation state cannot use the service-writable projects-portal/state tree." >&2
+    exit 1
+    ;;
+esac
+ensure_private_directory "$output_directory"
+snapshot_root="$output_directory/snapshots"
 resolved="$TMP/hosted-workloads.resolved.json"
 core_render="$TMP/core-render.json"
 combined_render="$TMP/combined-render.json"
@@ -78,6 +123,7 @@ docker run --rm --network none --user "$(id -u):$(id -g)" --entrypoint node \
     --projectName "$PROJECT_NAME" \
     --coreFiles "$core_csv" \
     --snapshotRoot "$snapshot_root" \
+    --activationLock "$OUTPUT" \
     --output "$resolved"
 
 docker run --rm --network none --user "$(id -u):$(id -g)" --entrypoint ruby \
@@ -88,10 +134,12 @@ docker run --rm --network none --user "$(id -u):$(id -g)" --entrypoint ruby \
   "$OPS_IMAGE" scripts/hosted-workload-source-policy.rb --lock "$resolved"
 
 COMPOSE_ENV_FILE="$ENV_FILE" COMPOSE_PROJECT_NAME="$PROJECT_NAME" HOSTED_WORKLOAD_LOCK= \
+HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE="$OUTPUT" \
   bash "$SCRIPT_DIR/compose-vps.sh" config --format json > "$core_render"
 
 COMPOSE_ENV_FILE="$ENV_FILE" COMPOSE_PROJECT_NAME="$PROJECT_NAME" \
 HOSTED_WORKLOAD_LOCK="$resolved" HOSTED_WORKLOAD_ALLOW_RESOLVED=1 \
+HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE="$OUTPUT" \
   bash "$SCRIPT_DIR/compose-vps.sh" config --format json > "$combined_render"
 
 docker run --rm --network none --user "$(id -u):$(id -g)" --entrypoint node \

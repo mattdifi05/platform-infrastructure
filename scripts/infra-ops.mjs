@@ -11782,12 +11782,18 @@ function staticSecurityInfraOnlyCheck() {
   assertNoMatch(platformText, /\b(?:APP_DB|BACKEND_DB|WORKER_JOBS_DB|WORKER_NOTIFICATIONS_DB|DATABASE_URL|SESSION_SIGNING_KEYS|HASH_PEPPER|TURNSTILE)\b/i, "Platform Compose must not own hosted application credentials.");
   assertNoMatch(composeRuntime, /\/stexor|\/anniversary|\/fiplatform|\/matthewdifilippo|\/stream|\/workcalendar|PROJECT_UPSTREAMS:/i, "Runtime overlay must not mount or route concrete projects.");
   assertMatch(composeVps, /HOSTED_WORKLOAD_LOCK[\s\S]*hosted-workload-lock\.sh[\s\S]*compose-files/, "VPS Compose wrapper must load only a verified external workload lock.");
+  assertMatch(compose, /HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE[\s\S]*\/run\/platform\/hosted-workloads\.lock\.json:ro/, "Project router must receive only a read-only deployment-private workload lock.");
+  assertMatch(composeIsolation, /HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE[\s\S]*\/run\/platform\/hosted-workloads\.lock\.json:ro/, "Runtime isolation must preserve the read-only router workload lock mount.");
+  assertNoMatch([compose, composeIsolation].join("\n"), /projects-portal\/state\/hosted-workloads\.lock|hosted-workload-snapshots/, "Service-writable state must not contain hosted workload activation locks or snapshots.");
+  assertMatch(prepareScript, /platform-infrastructure\/hosted-workloads[\s\S]*cannot use the service-writable projects-portal\/state tree/, "Hosted workload preparation must default to and enforce deployment-private activation storage.");
   assertNoMatch(composeVps, /compose\.build\.yaml/, "VPS Compose wrapper must not load application build definitions.");
   assertMatch(contract, /sha256File[\s\S]*Locked file changed/, "Hosted workload contract must bind and re-verify file hashes.");
   assertMatch(contract, /read_only[\s\S]*no-new-privileges[\s\S]*cap_drop/, "Hosted workload contract must enforce runtime hardening.");
   assertMatch(contract, /com\.platform\.workload-id[\s\S]*com\.platform\.workload-role/, "Hosted workload contract must bind workload identity labels.");
   assertMatch(contract, /PASSWORD|TOKEN|SECRET|DATABASE_URL|NATS_URL/, "Hosted workload env validation must reject secret-bearing keys.");
   assertMatch(lockScript, /core-env-file[\s\S]*project-name[\s\S]*compose-files[\s\S]*env-files/, "Hosted workload lock reader must expose only verified fields.");
+  assertNoMatch(lockScript, /\bnode\b/, "Hosted workload activation must not require Node on the minimal VPS host.");
+  assertMatch(lockScript, /snapshotParentIdentity[\s\S]*rawPolicyReceipt[\s\S]*lock changed while being verified/, "Host lock reader must enforce private snapshot identity, raw receipt binding, and stable consumer output.");
   assertMatch(prepareScript, /hosted-workload-contract\.mjs/, "Hosted workload preparation must use the contract validator.");
   assertMatch(composeNetworks, /platform_edge:[\s\S]*platform_routing:[\s\S]*platform_observability:[\s\S]*platform_egress:/, "Platform trust zones must be explicit.");
   assertMatch(composeIsolation, /docker-operation-gateway:[\s\S]*\/var\/run\/docker\.sock:\/var\/run\/docker\.sock:ro/, "Only the typed Docker operation gateway may mount the raw socket.");

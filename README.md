@@ -109,7 +109,9 @@ sh ./scripts/prepare-hosted-workloads.sh
 
 La preparazione valida digest immutabili, nomi, route, secret dichiarati,
 network e budget, confronta render core e combinato e scrive un lock `0600` con
-SHA-256 di ogni input. Non crea database, non applica migrazioni e non avvia
+SHA-256 di ogni input. Lock e snapshot content-addressed devono stare nello
+stesso parent deployment-owned `0700`, fuori da `projects-portal/state`; il
+router riceve soltanto il lock in read-only. Non crea database, non applica migrazioni e non avvia
 container. Il deploy usa soltanto un lock `verified`; se un file cambia, il
 render fallisce chiuso finche' il lock non viene rigenerato e approvato.
 

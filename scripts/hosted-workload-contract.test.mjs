@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -150,6 +152,40 @@ test("platform service can join only its assigned workload zone", () => {
   combined.services["project-router"].networks.example_app_cache = null;
   combined.networks.example_app_cache = { internal: true };
   assert.throws(() => validateRenderedWorkloads({ core, combined, lock }), /cannot join workload example-app zone cache/);
+});
+test("deployment-private activation state has no non-router writable mount", () => {
+  const privateLock = "/deployment-private/hosted-workloads.lock.json";
+  const lockWithActivation = {
+    workloads: [manifest],
+    activationLockPath: privateLock,
+    snapshotRoot: "/deployment-private/snapshots",
+  };
+  const coreWithLock = structuredClone(core);
+  coreWithLock.services["project-router"].volumes = [{
+    type: "bind",
+    source: privateLock,
+    target: "/run/platform/hosted-workloads.lock.json",
+    read_only: true,
+  }];
+  const combined = combinedFixture();
+  combined.services["project-router"].volumes = structuredClone(coreWithLock.services["project-router"].volumes);
+  assert.doesNotThrow(() => validateRenderedWorkloads({ core: coreWithLock, combined, lock: lockWithActivation }));
+  combined.services["project-router"].volumes[0].read_only = false;
+  assert.throws(
+    () => validateRenderedWorkloads({ core: coreWithLock, combined, lock: lockWithActivation }),
+    /deployment-private hosted workload activation state|read-only activation-lock mount/,
+  );
+  combined.services["project-router"].volumes = structuredClone(coreWithLock.services["project-router"].volumes);
+  combined.services["example-app-worker"].volumes = [{
+    type: "bind",
+    source: "/deployment-private",
+    target: "/mnt/private",
+    read_only: false,
+  }];
+  assert.throws(
+    () => validateRenderedWorkloads({ core: coreWithLock, combined, lock: lockWithActivation }),
+    /writable access to deployment-private/,
+  );
 });
 test("route without dedicated router network is rejected", () => {
   const combined = combinedFixture();
@@ -353,16 +389,41 @@ test("legacy hosted workload locks fail closed", () => {
 });
 
 test("raw policy receipt requires the exact current control set", () => {
+  const rawPolicyReceipt = {
+    policyVersion: "hosted-raw-v1",
+    controls: ["deny-env-file", "deny-extends", "deny-include"],
+    workloadContentSha256: "a".repeat(64),
+    workloads: [{
+      workloadId: "example-app",
+      composeSha256: "c".repeat(64),
+      topLevelKeys: ["services"],
+      serviceNames: ["example-app-web"],
+    }],
+  };
+  const stable = (value) => {
+    if (Array.isArray(value)) return value.map(stable);
+    if (!value || typeof value !== "object") return value;
+    return Object.fromEntries(Object.keys(value).sort().map((key) => [key, stable(value[key])]));
+  };
   const receipt = {
     workloadContentSha256: "a".repeat(64),
+    workloads: [{ id: "example-app", services: [{ name: "example-app-web" }] }],
+    files: [{ kind: "workload-compose", workloadId: "example-app", sha256: "c".repeat(64) }],
     rawPolicyVersion: "hosted-raw-v1",
     rawPolicyWorkloadContentSha256: "a".repeat(64),
-    rawPolicySha256: "b".repeat(64),
+    rawPolicyReceipt,
+    rawPolicySha256: crypto.createHash("sha256").update(JSON.stringify(stable(rawPolicyReceipt))).digest("hex"),
     rawPolicyControls: ["deny-env-file", "deny-extends", "deny-include"],
   };
   assert.doesNotThrow(() => verifyRawPolicyReceipt(receipt));
   receipt.rawPolicyControls = ["deny-include"];
   assert.throws(() => verifyRawPolicyReceipt(receipt), /raw source policy receipt/);
+  receipt.rawPolicyControls = ["deny-env-file", "deny-extends", "deny-include"];
+  receipt.rawPolicySha256 = "b".repeat(64);
+  assert.throws(() => verifyRawPolicyReceipt(receipt), /raw source policy receipt/);
+  receipt.rawPolicyReceipt.workloads[0].composeSha256 = "d".repeat(64);
+  receipt.rawPolicySha256 = crypto.createHash("sha256").update(JSON.stringify(stable(receipt.rawPolicyReceipt))).digest("hex");
+  assert.throws(() => verifyRawPolicyReceipt(receipt), /not bound/);
 });
 
 function catalogFixture(root, appRoot = path.join(root, "workloads", "example-app")) {
@@ -373,7 +434,7 @@ function catalogFixture(root, appRoot = path.join(root, "workloads", "example-ap
     composeFile: "compose.yaml",
     services: [{ name: "example-app-web", role: "web" }],
   }));
-  fs.writeFileSync(path.join(appRoot, "compose.yaml"), "services: {}\n");
+  fs.writeFileSync(path.join(appRoot, "compose.yaml"), "services:\n  example-app-web: {}\n");
   fs.writeFileSync(path.join(appRoot, "workload.env"), "EXAMPLE_APP_THEME=dark\n");
   const catalogPath = path.join(root, "catalog.json");
   fs.writeFileSync(catalogPath, JSON.stringify({
@@ -399,6 +460,11 @@ function removeFixtureTree(root) {
   fs.rmSync(root, { recursive: true, force: true });
 }
 
+function executablePath(name) {
+  const result = spawnSync("/bin/sh", ["-c", `command -v ${name}`], { encoding: "utf8" });
+  return result.status === 0 ? result.stdout.trim() : null;
+}
+
 test("workload resolver accepts an all-regular contained tree", () => {
   const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "hosted-contained-")));
   try {
@@ -410,10 +476,47 @@ test("workload resolver accepts an all-regular contained tree", () => {
     assert.equal(path.dirname(result.workloads[0].manifestPath), result.snapshotGeneration);
     assert.equal(path.basename(result.snapshotGeneration), `content-${result.workloadContentSha256}`);
     assert.equal(result.snapshotRootIdentity.uid, String(process.getuid?.() ?? result.snapshotRootIdentity.uid));
+    assert.equal(result.snapshotParentIdentity.mode, 0o700);
     assert.equal(result.snapshotRootIdentity.mode, 0o700);
     assert.equal(result.snapshotGenerationIdentity.mode, 0o500);
+    assert.deepEqual(result.snapshotDurability, {
+      version: 1,
+      filesFsynced: true,
+      generationDirectoryFsynced: true,
+      rootDirectoryFsynced: true,
+    });
     assert.match(result.workloadContentSha256, /^[a-f0-9]{64}$/);
     verifyLockFiles(result);
+  } finally {
+    removeFixtureTree(root);
+  }
+});
+
+test("lock verification rejects missing, duplicate, and semantically tampered workload roles", () => {
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "hosted-role-binding-")));
+  try {
+    const workloadRoot = path.join(root, "workloads");
+    const fixture = catalogFixture(root);
+    const lock = resolveCatalog({
+      ...fixture,
+      workloadRoot,
+      coreFiles: [fixture.coreFile],
+      projectName: "fixture",
+      snapshotRoot: path.join(root, "snapshots"),
+    });
+    const missing = structuredClone(lock);
+    missing.files = missing.files.filter((record) => record.kind !== "workload-compose");
+    missing.workloads[0].files = missing.workloads[0].files.filter((record) => record.kind !== "workload-compose");
+    assert.throws(() => verifyLockFiles(missing), /exactly one workload-compose/);
+
+    const duplicate = structuredClone(lock);
+    duplicate.files.push(structuredClone(duplicate.files.find((record) => record.kind === "workload-compose")));
+    duplicate.workloads[0].files.push(structuredClone(duplicate.workloads[0].files.find((record) => record.kind === "workload-compose")));
+    assert.throws(() => verifyLockFiles(duplicate), /duplicate file paths/);
+
+    const semantic = structuredClone(lock);
+    semantic.workloads[0].services[0].role = "worker";
+    assert.throws(() => verifyLockFiles(semantic), /semantic manifest fields differ/);
   } finally {
     removeFixtureTree(root);
   }
@@ -476,6 +579,7 @@ test("workload resolver rejects symlinked roots and root parents", () => {
       }),
       /symlink component/,
     );
+    assert.equal(fs.existsSync(path.join(realSnapshotParent, "snapshots")), false);
     const linkedRoot = path.join(root, "linked-workloads");
     fs.symlinkSync(workloadRoot, linkedRoot, "dir");
     assert.throws(
@@ -488,6 +592,72 @@ test("workload resolver rejects symlinked roots and root parents", () => {
       }),
       /symlink component/,
     );
+  } finally {
+    removeFixtureTree(root);
+  }
+});
+
+test("snapshot capture rejects deterministic parent swaps before every workload file open", () => {
+  for (const targetKind of ["workload-manifest", "workload-compose", "workload-environment"]) {
+    const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), `hosted-open-race-${targetKind}-`)));
+    try {
+      const workloadRoot = path.join(root, "workloads");
+      const fixture = catalogFixture(root);
+      const appRoot = path.join(workloadRoot, "example-app");
+      const outside = path.join(root, "outside-app");
+      fs.cpSync(appRoot, outside, { recursive: true });
+      let swapped = false;
+      assert.throws(() => resolveCatalog({
+        ...fixture,
+        workloadRoot,
+        coreFiles: [fixture.coreFile],
+        projectName: "fixture",
+        snapshotRoot: path.join(root, "snapshots"),
+        sourceAccessHook(_source, label) {
+          if (swapped || label !== targetKind) return;
+          swapped = true;
+          fs.renameSync(appRoot, `${appRoot}.original`);
+          fs.symlinkSync(outside, appRoot, "dir");
+        },
+      }), /symlink component|identity changed|physical root/);
+      assert.equal(swapped, true);
+    } finally {
+      removeFixtureTree(root);
+    }
+  }
+});
+
+test("migration enumeration rejects a deterministic parent-directory swap", () => {
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "hosted-migration-race-")));
+  try {
+    const workloadRoot = path.join(root, "workloads");
+    const fixture = catalogFixture(root);
+    const appRoot = path.join(workloadRoot, "example-app");
+    const manifestPath = path.join(appRoot, "manifest.json");
+    const manifestDocument = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+    manifestDocument.migrationRoots = ["postgres/migrations"];
+    fs.writeFileSync(manifestPath, JSON.stringify(manifestDocument));
+    const migrations = path.join(appRoot, "postgres", "migrations");
+    fs.mkdirSync(migrations, { recursive: true });
+    fs.writeFileSync(path.join(migrations, "001.sql"), "SELECT 1;\n");
+    const outside = path.join(root, "outside-migrations");
+    fs.mkdirSync(outside);
+    fs.writeFileSync(path.join(outside, "001.sql"), "SELECT 'hostile';\n");
+    let swapped = false;
+    assert.throws(() => resolveCatalog({
+      ...fixture,
+      workloadRoot,
+      coreFiles: [fixture.coreFile],
+      projectName: "fixture",
+      snapshotRoot: path.join(root, "snapshots"),
+      sourceAccessHook(_source, label) {
+        if (swapped || label !== "migration root") return;
+        swapped = true;
+        fs.renameSync(migrations, `${migrations}.original`);
+        fs.symlinkSync(outside, migrations, "dir");
+      },
+    }), /symlink component|identity changed|physical root/);
+    assert.equal(swapped, true);
   } finally {
     removeFixtureTree(root);
   }
@@ -575,6 +745,107 @@ test("lock verification rejects snapshot parent and generation replacement", () 
     fs.mkdirSync(lock.snapshotGeneration, { mode: 0o700 });
     fs.chmodSync(lock.snapshotGeneration, 0o500);
     assert.throws(() => verifyLockFiles(lock), /identity changed/);
+  } finally {
+    removeFixtureTree(root);
+  }
+});
+
+test("compose-files CLI never emits a path not exactly bound to a compose snapshot record", () => {
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "hosted-pointer-tamper-")));
+  try {
+    const workloadRoot = path.join(root, "workloads");
+    const fixture = catalogFixture(root);
+    const lock = resolveCatalog({
+      ...fixture,
+      workloadRoot,
+      coreFiles: [fixture.coreFile],
+      projectName: "fixture",
+      snapshotRoot: path.join(root, "snapshots"),
+    });
+    const lockPath = path.join(root, "lock.json");
+    fs.writeFileSync(lockPath, `${JSON.stringify(lock, null, 2)}\n`, { mode: 0o600 });
+    const rawPolicy = spawnSync("ruby", [path.join(import.meta.dirname, "hosted-workload-source-policy.rb"), "--lock", lockPath], { encoding: "utf8" });
+    assert.equal(rawPolicy.status, 0, rawPolicy.stderr);
+    const contractScript = path.join(import.meta.dirname, "hosted-workload-contract.mjs");
+    const valid = spawnSync(process.execPath, [contractScript, "compose-files", "--lock", lockPath, "--allowResolved", "true"], { encoding: "utf8" });
+    assert.equal(valid.status, 0, valid.stderr);
+    assert.equal(valid.stdout.trim(), lock.workloads[0].composePath);
+
+    const minimalBin = path.join(root, "minimal-bin");
+    fs.mkdirSync(minimalBin);
+    let realJq;
+    for (const command of ["jq", "stat", "awk", "dirname", "id"]) {
+      const executable = executablePath(command);
+      assert.ok(executable, `${command} is required by the host lock reader test`);
+      fs.symlinkSync(executable, path.join(minimalBin, command));
+      if (command === "jq") realJq = executable;
+    }
+    const shaCommand = executablePath("sha256sum") ? "sha256sum" : "shasum";
+    const shaExecutable = executablePath(shaCommand);
+    assert.ok(shaExecutable, "a SHA-256 utility is required by the host lock reader test");
+    fs.symlinkSync(shaExecutable, path.join(minimalBin, shaCommand));
+    assert.equal(fs.existsSync(path.join(minimalBin, "node")), false);
+    const shellReader = spawnSync("/bin/sh", [path.join(import.meta.dirname, "hosted-workload-lock.sh"), lockPath, "compose-files"], {
+      encoding: "utf8",
+      env: { PATH: minimalBin, HOSTED_WORKLOAD_ALLOW_RESOLVED: "1" },
+    });
+    assert.equal(shellReader.status, 0, shellReader.stderr);
+    assert.equal(shellReader.stdout.trim(), lock.workloads[0].composePath);
+    const verifiedActivation = JSON.parse(fs.readFileSync(lockPath, "utf8"));
+    verifiedActivation.state = "verified";
+    fs.writeFileSync(verifiedActivation.activationLockPath, `${JSON.stringify(verifiedActivation, null, 2)}\n`, { mode: 0o600 });
+    const finalShellReader = spawnSync("/bin/sh", [path.join(import.meta.dirname, "hosted-workload-lock.sh"), verifiedActivation.activationLockPath, "compose-files"], {
+      encoding: "utf8",
+      env: { PATH: minimalBin, HOSTED_WORKLOAD_ALLOW_RESOLVED: "0" },
+    });
+    assert.equal(finalShellReader.status, 0, finalShellReader.stderr);
+    assert.equal(finalShellReader.stdout.trim(), lock.workloads[0].composePath);
+
+    const hostilePath = path.join(root, "hostile.yaml");
+    fs.writeFileSync(hostilePath, "services:\n  hostile:\n    privileged: true\n");
+    const verifiedLockText = fs.readFileSync(lockPath, "utf8");
+    const raceReplacementPath = path.join(root, "race-replacement.json");
+    const raceReplacement = JSON.parse(verifiedLockText);
+    raceReplacement.workloads[0].composePath = hostilePath;
+    fs.writeFileSync(raceReplacementPath, `${JSON.stringify(raceReplacement, null, 2)}\n`, { mode: 0o600 });
+    fs.unlinkSync(path.join(minimalBin, "jq"));
+    fs.writeFileSync(path.join(minimalBin, "jq"), `#!/bin/sh
+if [ "\${HOSTED_TEST_SWAP_ON_CONSUMER:-0}" = 1 ]; then
+  case "$*" in
+    *'.workloads[].composePath'*) /bin/mv "$HOSTED_TEST_REPLACEMENT" "$HOSTED_TEST_LOCK" ;;
+  esac
+fi
+exec "$HOSTED_TEST_REAL_JQ" "$@"
+`, { mode: 0o755 });
+    const raced = spawnSync("/bin/sh", [path.join(import.meta.dirname, "hosted-workload-lock.sh"), lockPath, "compose-files"], {
+      encoding: "utf8",
+      env: {
+        PATH: minimalBin,
+        HOSTED_WORKLOAD_ALLOW_RESOLVED: "1",
+        HOSTED_TEST_SWAP_ON_CONSUMER: "1",
+        HOSTED_TEST_REPLACEMENT: raceReplacementPath,
+        HOSTED_TEST_LOCK: lockPath,
+        HOSTED_TEST_REAL_JQ: realJq,
+      },
+    });
+    assert.notEqual(raced.status, 0);
+    assert.doesNotMatch(raced.stdout, /hostile\.yaml/);
+    assert.match(raced.stderr, /lock changed while being verified/i);
+    fs.writeFileSync(lockPath, verifiedLockText, { mode: 0o600 });
+
+    const tampered = JSON.parse(fs.readFileSync(lockPath, "utf8"));
+    tampered.workloads[0].composePath = hostilePath;
+    fs.writeFileSync(lockPath, `${JSON.stringify(tampered, null, 2)}\n`, { mode: 0o600 });
+    const rejected = spawnSync(process.execPath, [contractScript, "compose-files", "--lock", lockPath, "--allowResolved", "true"], { encoding: "utf8" });
+    assert.notEqual(rejected.status, 0);
+    assert.doesNotMatch(rejected.stdout, /hostile\.yaml/);
+    assert.match(rejected.stderr, /activation pointers are not exactly bound/);
+    const shellRejected = spawnSync("/bin/sh", [path.join(import.meta.dirname, "hosted-workload-lock.sh"), lockPath, "compose-files"], {
+      encoding: "utf8",
+      env: { PATH: minimalBin, HOSTED_WORKLOAD_ALLOW_RESOLVED: "1" },
+    });
+    assert.notEqual(shellRejected.status, 0);
+    assert.doesNotMatch(shellRejected.stdout, /hostile\.yaml/);
   } finally {
     removeFixtureTree(root);
   }

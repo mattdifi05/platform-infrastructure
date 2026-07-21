@@ -453,8 +453,7 @@ services:
       PROJECT_ROUTER_PORT: 8080
       PROJECTS_ROOT: /var/www/projects
       PROJECT_STATE_FILE: /var/www/project-state/projects.json
-      PROJECT_ROUTER_WORKLOAD_LOCK_FILE: /var/www/project-state/hosted-workloads.lock.json
-      PROJECT_ROUTER_WORKLOAD_LOCK_MODE: required
+      PROJECT_ROUTER_WORKLOAD_LOCK_FILE: /run/platform/hosted-workloads.lock.json
       CONTROL_CENTER_HOST: ${CONTROL_CENTER_HOST:-${ADMIN_HOST:-portal.${DOMAIN:-localhost.com}}}
       ADMIN_HOST: ${ADMIN_HOST:-portal.${DOMAIN:-localhost.com}}
       PROJECTS_HOST: ${PROJECTS_HOST:-}
@@ -466,6 +465,7 @@ services:
       - ${PHP_PROJECTS_DIR:-../src}:/var/www/projects
       - ${PROJECTS_SYMLINK_TARGET_ROOT:-..}:/mnt/host/d/docker
       - ./projects-portal/state:/var/www/project-state
+      - ${HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE:-./config/no-hosted-workloads.lock.json}:/run/platform/hosted-workloads.lock.json:ro
     depends_on:
       control-center:
         condition: service_healthy

@@ -107,8 +107,9 @@ module HostedWorkloadSourcePolicy
     generation = File.realpath(lock.fetch("snapshotGeneration"))
     receipts = lock.fetch("workloads").map do |workload|
       workload_id = workload.fetch("id")
-      record = lock.fetch("files").find { |item| item["kind"] == "workload-compose" && item["workloadId"] == workload_id }
-      fail!("#{workload_id} has no workload-compose snapshot record.") unless record
+      records = lock.fetch("files").select { |item| item["kind"] == "workload-compose" && item["workloadId"] == workload_id }
+      fail!("#{workload_id} must have exactly one workload-compose snapshot record.") unless records.length == 1
+      record = records.fetch(0)
       compose_path = File.realpath(record.fetch("path"))
       fail!("#{workload_id} compose path is outside the snapshot generation.") unless File.dirname(compose_path) == generation
       fail!("#{workload_id} compose path differs from the lock workload entry.") unless compose_path == workload.fetch("composePath")
@@ -132,6 +133,7 @@ module HostedWorkloadSourcePolicy
     lock["rawPolicyVersion"] = VERSION
     lock["rawPolicyControls"] = CONTROLS
     lock["rawPolicyWorkloadContentSha256"] = lock.fetch("workloadContentSha256")
+    lock["rawPolicyReceipt"] = receipt
     lock["rawPolicySha256"] = Digest::SHA256.hexdigest(JSON.generate(stable(receipt)))
     lock
   end
@@ -148,6 +150,7 @@ module HostedWorkloadSourcePolicy
     end
     File.chmod(0o600, temporary)
     File.rename(temporary, lock_path)
+    File.open(File.dirname(lock_path), File::RDONLY) { |directory| directory.fsync }
   ensure
     File.delete(temporary) if defined?(temporary) && temporary && File.exist?(temporary)
   end

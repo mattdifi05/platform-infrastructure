@@ -120,7 +120,7 @@ function assertNoSymlinkPathComponents(absolutePath, label) {
   }
 }
 
-function resolvePhysicalWithin(root, value, label, expectedType) {
+function resolvePhysicalEntryWithin(root, value, label, expectedType) {
   const lexicalRoot = path.resolve(root);
   const canonicalRoot = physicalRoot(lexicalRoot, `${label} root`);
   const lexical = resolveWithin(lexicalRoot, value, label);
@@ -136,30 +136,90 @@ function resolvePhysicalWithin(root, value, label, expectedType) {
   if (canonical !== canonicalRoot && !canonical.startsWith(`${canonicalRoot}${path.sep}`)) {
     invalid(`${label} escapes its physical root.`);
   }
-  const stat = fs.lstatSync(canonical, { throwIfNoEntry: false });
+  const stat = fs.lstatSync(canonical, { bigint: true, throwIfNoEntry: false });
   if (expectedType === "file" && !stat?.isFile()) invalid(`${label} must be a regular file.`);
   if (expectedType === "directory" && !stat?.isDirectory()) invalid(`${label} must be a directory.`);
-  return canonical;
+  return {
+    path: canonical,
+    root: canonicalRoot,
+    rootIdentity: fileIdentity(canonicalRoot),
+    identity: stableEntryIdentity(stat),
+    expectedType,
+  };
+}
+
+function resolvePhysicalWithin(root, value, label, expectedType) {
+  return resolvePhysicalEntryWithin(root, value, label, expectedType).path;
 }
 
 function fileRecord(filePath, kind) {
-  const stat = fs.lstatSync(filePath, { throwIfNoEntry: false });
-  if (!stat?.isFile() || stat.isSymbolicLink()) invalid(`${kind} file does not exist or is symlinked: ${filePath}`);
-  return { kind, path: filePath, sha256: sha256File(filePath), sizeBytes: stat.size };
+  const source = captureRegularFile(filePath, kind);
+  const { bytes } = readStableRegularFile(source, kind);
+  return { kind, path: source.path, sha256: sha256Bytes(bytes), sizeBytes: bytes.length };
 }
 
-function readStableRegularFile(filePath, label) {
+function stableEntryIdentity(stat) {
+  return {
+    device: String(stat.dev),
+    inode: String(stat.ino),
+    links: String(stat.nlink),
+    uid: String(stat.uid),
+    mode: String(stat.mode),
+    size: String(stat.size),
+    mtimeNs: String(stat.mtimeNs ?? stat.mtimeMs),
+    ctimeNs: String(stat.ctimeNs ?? stat.ctimeMs),
+  };
+}
+
+function sameStableEntryIdentity(left, right) {
+  return Object.keys(left).every((key) => left[key] === right?.[key]);
+}
+
+function captureRegularFile(filePath, label) {
+  const resolved = path.resolve(filePath);
+  const stat = fs.lstatSync(resolved, { bigint: true, throwIfNoEntry: false });
+  if (!stat?.isFile() || stat.isSymbolicLink()) invalid(`${label} file does not exist or is symlinked: ${resolved}`);
+  return { path: resolved, root: null, rootIdentity: null, identity: stableEntryIdentity(stat), expectedType: "file" };
+}
+
+function revalidatePhysicalEntry(source, descriptorStat, label) {
+  if (source.root) {
+    const canonicalRoot = physicalRoot(source.root, `${label} root`);
+    if (canonicalRoot !== source.root || !sameIdentity(fileIdentity(canonicalRoot), source.rootIdentity)) {
+      invalid(`${label} physical root identity changed before snapshot capture.`);
+    }
+    assertNoSymlinkPathComponents(source.path, label);
+    const canonical = fs.realpathSync.native(source.path);
+    if (canonical !== source.path || (canonical !== canonicalRoot && !canonical.startsWith(`${canonicalRoot}${path.sep}`))) {
+      invalid(`${label} escaped its physical root before snapshot capture.`);
+    }
+  }
+  const current = fs.lstatSync(source.path, { bigint: true, throwIfNoEntry: false });
+  const correctType = source.expectedType === "directory" ? current?.isDirectory() : current?.isFile();
+  if (!correctType || current.isSymbolicLink()) invalid(`${label} changed type before snapshot capture.`);
+  const currentIdentity = stableEntryIdentity(current);
+  if (!sameStableEntryIdentity(source.identity, currentIdentity)
+      || (descriptorStat && !sameStableEntryIdentity(source.identity, stableEntryIdentity(descriptorStat)))) {
+    invalid(`${label} identity changed before snapshot capture.`);
+  }
+}
+
+function readStableRegularFile(filePathOrSource, label, beforeOpen) {
+  const source = typeof filePathOrSource === "string" ? captureRegularFile(filePathOrSource, label) : filePathOrSource;
   const noFollow = fs.constants.O_NOFOLLOW ?? 0;
   let descriptor;
   try {
-    descriptor = fs.openSync(filePath, fs.constants.O_RDONLY | noFollow);
-    const before = fs.fstatSync(descriptor);
+    beforeOpen?.(source, label);
+    descriptor = fs.openSync(source.path, fs.constants.O_RDONLY | noFollow);
+    const before = fs.fstatSync(descriptor, { bigint: true });
     if (!before.isFile()) invalid(`${label} must be a regular file.`);
+    revalidatePhysicalEntry(source, before, label);
     const bytes = fs.readFileSync(descriptor);
-    const after = fs.fstatSync(descriptor);
-    if (before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size || before.mtimeMs !== after.mtimeMs) {
+    const after = fs.fstatSync(descriptor, { bigint: true });
+    if (!sameStableEntryIdentity(stableEntryIdentity(before), stableEntryIdentity(after))) {
       invalid(`${label} changed while it was being read.`);
     }
+    revalidatePhysicalEntry(source, after, label);
     return { bytes, stat: after };
   } catch (error) {
     invalid(`${label} could not be read safely: ${error.message}`);
@@ -169,14 +229,49 @@ function readStableRegularFile(filePath, label) {
 }
 
 function createSnapshotGeneration(snapshotRoot) {
-  fs.mkdirSync(snapshotRoot, { recursive: true, mode: 0o700 });
-  const canonicalRoot = physicalRoot(snapshotRoot, "snapshot root");
+  const lexicalRoot = path.resolve(snapshotRoot);
+  const lexicalParent = path.dirname(lexicalRoot);
+  const canonicalParent = physicalRoot(lexicalParent, "snapshot root parent");
+  if (path.join(canonicalParent, path.basename(lexicalRoot)) !== lexicalRoot) invalid("Snapshot root parent is not canonical.");
+  const effectiveUid = typeof process.getuid === "function" ? String(process.getuid()) : fileIdentity(canonicalParent).uid;
+  const parentIdentity = fileIdentity(canonicalParent);
+  if (parentIdentity.uid !== effectiveUid || parentIdentity.mode !== 0o700) {
+    invalid("Snapshot root parent must be deployment-owned with mode 0700.");
+  }
+  const existing = fs.lstatSync(lexicalRoot, { throwIfNoEntry: false });
+  if (!existing) {
+    fs.mkdirSync(lexicalRoot, { mode: 0o700 });
+    fsyncDirectory(canonicalParent);
+  } else if (!existing.isDirectory() || existing.isSymbolicLink()) {
+    invalid("Snapshot root must be a real non-symlink directory.");
+  }
+  const canonicalRoot = physicalRoot(lexicalRoot, "snapshot root");
   const stat = fs.lstatSync(canonicalRoot, { throwIfNoEntry: false });
   if (!stat?.isDirectory() || stat.isSymbolicLink()) invalid("Snapshot root must be a real directory.");
-  fs.chmodSync(snapshotRoot, 0o700);
+  const rootIdentity = fileIdentity(canonicalRoot);
+  if (rootIdentity.uid !== effectiveUid || rootIdentity.mode !== 0o700) {
+    invalid("Snapshot root must be deployment-owned with mode 0700.");
+  }
   const generation = fs.mkdtempSync(path.join(canonicalRoot, ".staging-"));
   fs.chmodSync(generation, 0o700);
-  return { root: canonicalRoot, generation: fs.realpathSync.native(generation), nextIndex: 0 };
+  fsyncDirectory(canonicalRoot);
+  return {
+    parent: canonicalParent,
+    parentIdentity: fileIdentity(canonicalParent),
+    root: canonicalRoot,
+    generation: fs.realpathSync.native(generation),
+    nextIndex: 0,
+  };
+}
+
+function fsyncDirectory(directory) {
+  const directoryFlag = fs.constants.O_DIRECTORY ?? 0;
+  const descriptor = fs.openSync(directory, fs.constants.O_RDONLY | directoryFlag);
+  try {
+    fs.fsyncSync(descriptor);
+  } finally {
+    fs.closeSync(descriptor);
+  }
 }
 
 function fileIdentity(filePath) {
@@ -195,6 +290,7 @@ function sameIdentity(actual, expected) {
 function finalizeSnapshot(snapshot, records, contentDigest) {
   const staging = snapshot.generation;
   const finalGeneration = path.join(snapshot.root, `content-${contentDigest}`);
+  fsyncDirectory(staging);
   if (fs.existsSync(finalGeneration)) {
     const existing = fs.lstatSync(finalGeneration);
     if (!existing.isDirectory() || existing.isSymbolicLink()) invalid("Existing content-addressed snapshot is not a real directory.");
@@ -206,10 +302,13 @@ function finalizeSnapshot(snapshot, records, contentDigest) {
       }
     }
     fs.rmSync(staging, { recursive: true, force: true });
+    fsyncDirectory(snapshot.root);
   } else {
     fs.renameSync(staging, finalGeneration);
   }
   fs.chmodSync(finalGeneration, 0o500);
+  fsyncDirectory(finalGeneration);
+  fsyncDirectory(snapshot.root);
   snapshot.generation = finalGeneration;
   for (const record of records.filter((item) => item.snapshot === true)) {
     record.path = path.join(finalGeneration, path.basename(record.path));
@@ -219,14 +318,22 @@ function finalizeSnapshot(snapshot, records, contentDigest) {
     record.snapshotUid = identity.uid;
   }
   return {
+    parentIdentity: fileIdentity(snapshot.parent),
     rootIdentity: fileIdentity(snapshot.root),
     generationIdentity: fileIdentity(finalGeneration),
+    durability: {
+      version: 1,
+      filesFsynced: true,
+      generationDirectoryFsynced: true,
+      rootDirectoryFsynced: true,
+    },
   };
 }
 
-function snapshotFile(sourcePath, kind, snapshot, metadata = {}) {
-  const { bytes } = readStableRegularFile(sourcePath, kind);
-  const suffix = path.extname(sourcePath).replace(/[^A-Za-z0-9.]/g, "") || ".data";
+function snapshotFile(sourcePathOrEntry, kind, snapshot, metadata = {}, beforeOpen) {
+  const source = typeof sourcePathOrEntry === "string" ? captureRegularFile(sourcePathOrEntry, kind) : sourcePathOrEntry;
+  const { bytes } = readStableRegularFile(source, kind, beforeOpen);
+  const suffix = path.extname(source.path).replace(/[^A-Za-z0-9.]/g, "") || ".data";
   const name = `${String(snapshot.nextIndex++).padStart(4, "0")}-${kind.replace(/[^a-z0-9-]/gi, "-")}${suffix}`;
   const snapshotPath = path.join(snapshot.generation, name);
   const descriptor = fs.openSync(snapshotPath, fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY, 0o400);
@@ -237,9 +344,10 @@ function snapshotFile(sourcePath, kind, snapshot, metadata = {}) {
     fs.closeSync(descriptor);
   }
   fs.chmodSync(snapshotPath, 0o400);
+  fsyncDirectory(snapshot.generation);
   return {
     kind,
-    sourcePath,
+    sourcePath: source.path,
     path: snapshotPath,
     sha256: sha256Bytes(bytes),
     sizeBytes: bytes.length,
@@ -254,6 +362,115 @@ function workloadContentSha256(records) {
     .map(({ kind, sourcePath, sha256, sizeBytes, workloadId = null }) => ({ kind, sourcePath, sha256, sizeBytes, workloadId }))
     .sort((left, right) => `${left.workloadId}:${left.kind}:${left.sourcePath}`.localeCompare(`${right.workloadId}:${right.kind}:${right.sourcePath}`));
   return sha256Bytes(Buffer.from(JSON.stringify(stable(content))));
+}
+
+function recordKey(record) {
+  return `${record.workloadId ?? ""}:${record.kind ?? ""}:${record.sourcePath ?? ""}:${record.path ?? ""}`;
+}
+
+function exactRecord(records, kind, workloadId = null, required = true) {
+  const matches = records.filter((record) => record.kind === kind && (record.workloadId ?? null) === workloadId);
+  if (matches.length !== (required ? 1 : 0)) {
+    invalid(`Hosted workload lock requires ${required ? "exactly one" : "no"} ${kind} record${workloadId ? ` for ${workloadId}` : ""}.`);
+  }
+  return matches[0] ?? null;
+}
+
+function workloadManifestSemantics(workload) {
+  return {
+    version: workload.version,
+    id: workload.id,
+    composeFile: workload.composeFile,
+    projectMetadataFile: workload.projectMetadataFile ?? null,
+    services: workload.services,
+    secrets: workload.secrets,
+    migrationRoots: workload.migrationRoots,
+  };
+}
+
+function verifyWorkloadRecordBindings(lock) {
+  if (!Array.isArray(lock.workloads)) invalid("Hosted workload lock has no workloads array.");
+  const records = lock.files;
+  const recordPaths = records.map((record) => record.path);
+  if (new Set(recordPaths).size !== recordPaths.length) invalid("Hosted workload lock contains duplicate file paths.");
+
+  const catalogRecord = exactRecord(records, "catalog");
+  const coreEnvironmentRecord = exactRecord(records, "core-environment");
+  if (catalogRecord.snapshot !== true || coreEnvironmentRecord.snapshot === true || coreEnvironmentRecord.path !== lock.coreEnvFile) {
+    invalid("Hosted workload catalog or core environment role is not bound to its file record.");
+  }
+  const coreRecords = records.filter((record) => record.kind === "core-compose" && record.snapshot !== true);
+  const coreRecordPaths = coreRecords.map((record) => record.path).sort();
+  if (!Array.isArray(lock.coreFiles) || new Set(lock.coreFiles).size !== lock.coreFiles.length
+      || !same(coreRecordPaths, [...lock.coreFiles].sort())) {
+    invalid("Hosted workload core Compose paths are not exactly bound to core-compose records.");
+  }
+
+  const workloadIds = new Set();
+  const boundRecords = new Set([catalogRecord, coreEnvironmentRecord, ...coreRecords]);
+  for (const workload of lock.workloads) {
+    const workloadId = requiredText(workload?.id, "locked workload id");
+    if (workloadIds.has(workloadId)) invalid(`Duplicate locked workload ${workloadId}.`);
+    workloadIds.add(workloadId);
+    const related = records.filter((record) => record.workloadId === workloadId);
+    const manifestRecord = exactRecord(related, "workload-manifest", workloadId);
+    const composeRecord = exactRecord(related, "workload-compose", workloadId);
+    const environmentRecord = exactRecord(related, "workload-environment", workloadId);
+    const metadataRecords = related.filter((record) => record.kind === "project-metadata");
+    if (metadataRecords.length > 1) invalid(`${workloadId} has duplicate project-metadata records.`);
+    const metadataRecord = metadataRecords[0] ?? null;
+
+    if (workload.manifestPath !== manifestRecord.path || workload.manifestSourcePath !== manifestRecord.sourcePath
+        || workload.composePath !== composeRecord.path || workload.composeSourcePath !== composeRecord.sourcePath
+        || workload.environmentPath !== environmentRecord.path || workload.environmentSourcePath !== environmentRecord.sourcePath
+        || (workload.projectMetadataPath ?? null) !== (metadataRecord?.path ?? null)
+        || (workload.projectMetadataSourcePath ?? null) !== (metadataRecord?.sourcePath ?? null)) {
+      invalid(`${workloadId} activation pointers are not exactly bound to snapshot records.`);
+    }
+
+    const allowedKinds = new Set(["workload-manifest", "workload-compose", "workload-environment", "project-metadata", "migration"]);
+    if (related.some((record) => record.snapshot !== true || !allowedKinds.has(record.kind))) {
+      invalid(`${workloadId} contains an unsupported or non-snapshot workload record.`);
+    }
+    const embedded = Array.isArray(workload.files) ? [...workload.files].sort((left, right) => recordKey(left).localeCompare(recordKey(right))) : null;
+    const expected = [...related].sort((left, right) => recordKey(left).localeCompare(recordKey(right)));
+    if (!embedded || !same(embedded, expected)) invalid(`${workloadId} embedded file records differ from the global lock records.`);
+
+    const manifest = validateWorkloadManifest(readJson(manifestRecord.path, `${workloadId} locked manifest`), manifestRecord.sourcePath);
+    if (!same(workloadManifestSemantics(workload), workloadManifestSemantics(manifest))) {
+      invalid(`${workloadId} semantic manifest fields differ from the locked manifest snapshot.`);
+    }
+    const manifestDirectory = path.dirname(manifestRecord.sourcePath);
+    if (composeRecord.sourcePath !== resolveWithin(manifestDirectory, manifest.composeFile, `${workloadId} compose source`)) {
+      invalid(`${workloadId} Compose source role differs from its manifest.`);
+    }
+    if (Boolean(manifest.projectMetadataFile) !== Boolean(metadataRecord)
+        || (metadataRecord && metadataRecord.sourcePath !== resolveWithin(manifestDirectory, manifest.projectMetadataFile, `${workloadId} metadata source`))) {
+      invalid(`${workloadId} project metadata role differs from its manifest.`);
+    }
+    const migrationRoots = manifest.migrationRoots.map((relativeRoot) => resolveWithin(manifestDirectory, relativeRoot, `${workloadId} migration root`));
+    for (const record of related.filter((item) => item.kind === "migration")) {
+      if (!record.sourcePath.endsWith(".sql") || !migrationRoots.includes(path.dirname(record.sourcePath))) {
+        invalid(`${workloadId} migration record is outside its declared migration roots.`);
+      }
+    }
+    for (const record of related) boundRecords.add(record);
+  }
+  if (boundRecords.size !== records.length) invalid("Hosted workload lock contains unbound file records.");
+
+  const catalog = readJson(catalogRecord.path, "locked hosted workload catalog");
+  if (catalog?.version !== 1 || !Array.isArray(catalog.workloads) || catalog.workloads.length !== lock.workloads.length) {
+    invalid("Locked catalog does not exactly match the workload set.");
+  }
+  const catalogBindings = catalog.workloads.map((entry) => ({
+    manifestSourcePath: resolveWithin(lock.workloadRoot, entry?.manifest, "catalog manifest"),
+    environmentSourcePath: resolveWithin(lock.workloadRoot, entry?.environmentFile, "catalog environment"),
+  })).sort((left, right) => left.manifestSourcePath.localeCompare(right.manifestSourcePath));
+  const workloadBindings = lock.workloads.map((workload) => ({
+    manifestSourcePath: workload.manifestSourcePath,
+    environmentSourcePath: workload.environmentSourcePath,
+  })).sort((left, right) => left.manifestSourcePath.localeCompare(right.manifestSourcePath));
+  if (!same(catalogBindings, workloadBindings)) invalid("Locked catalog source roles differ from workload source pointers.");
 }
 
 export function validateWorkloadEnvironmentText(text, workloadId, label = "workload environment") {
@@ -283,21 +500,25 @@ export function validateWorkloadEnvironmentText(text, workloadId, label = "workl
   return [...names].sort();
 }
 
-function workloadEnvironmentRecord(filePath, workloadId, snapshot) {
-  const record = snapshotFile(filePath, "workload-environment", snapshot, { workloadId });
-  validateWorkloadEnvironmentText(fs.readFileSync(record.path, "utf8"), workloadId, filePath);
+function workloadEnvironmentRecord(fileEntry, workloadId, snapshot, sourceAccessHook) {
+  const record = snapshotFile(fileEntry, "workload-environment", snapshot, { workloadId }, sourceAccessHook);
+  validateWorkloadEnvironmentText(fs.readFileSync(record.path, "utf8"), workloadId, fileEntry.path);
   return record;
 }
 
-function sqlRecords(root, relativeRoots, snapshot, workloadId) {
+function sqlRecords(root, relativeRoots, snapshot, workloadId, sourceAccessHook) {
   const records = [];
   for (const relativeRoot of relativeRoots ?? []) {
-    const directory = resolvePhysicalWithin(root, relativeRoot, "migration root", "directory");
-    for (const entry of fs.readdirSync(directory, { withFileTypes: true }).sort((left, right) => left.name.localeCompare(right.name))) {
+    const directory = resolvePhysicalEntryWithin(root, relativeRoot, "migration root", "directory");
+    sourceAccessHook?.(directory, "migration root");
+    revalidatePhysicalEntry(directory, null, "migration root");
+    const entries = fs.readdirSync(directory.path, { withFileTypes: true }).sort((left, right) => left.name.localeCompare(right.name));
+    revalidatePhysicalEntry(directory, null, "migration root");
+    for (const entry of entries) {
       if (!entry.name.endsWith(".sql")) continue;
-      if (entry.isSymbolicLink() || !entry.isFile()) invalid(`Migration must be a regular non-symlink file: ${path.join(directory, entry.name)}`);
-      const migrationPath = resolvePhysicalWithin(directory, entry.name, "migration", "file");
-      records.push(snapshotFile(migrationPath, "migration", snapshot, { workloadId }));
+      if (entry.isSymbolicLink() || !entry.isFile()) invalid(`Migration must be a regular non-symlink file: ${path.join(directory.path, entry.name)}`);
+      const migration = resolvePhysicalEntryWithin(directory.path, entry.name, "migration", "file");
+      records.push(snapshotFile(migration, "migration", snapshot, { workloadId }, sourceAccessHook));
     }
   }
   return records;
@@ -434,13 +655,23 @@ export function validateWorkloadManifest(document, manifestPath = "manifest") {
     services,
     secrets,
     brokers,
-    migrationRoots: [...new Set(document.migrationRoots ?? [])],
+    migrationRoots: [...new Set((document.migrationRoots ?? []).map((value) => {
+      const relativeRoot = requiredText(value, "migration root");
+      if (!SAFE_PATH.test(relativeRoot) || path.isAbsolute(relativeRoot) || relativeRoot.split("/").includes("..")) {
+        invalid("migration root must be a contained relative path.");
+      }
+      return relativeRoot;
+    }))],
   };
 }
 
-export function resolveCatalog({ catalogPath, workloadRoot, coreEnvFile, coreFiles, projectName, snapshotRoot }) {
+export function resolveCatalog({ catalogPath, workloadRoot, coreEnvFile, coreFiles, projectName, snapshotRoot, activationLockPath, sourceAccessHook }) {
   const snapshot = createSnapshotGeneration(path.resolve(requiredText(snapshotRoot, "snapshot root")));
-  const catalogRecord = snapshotFile(path.resolve(catalogPath), "catalog", snapshot);
+  const activationPath = path.resolve(activationLockPath ?? path.join(path.dirname(snapshot.root), "hosted-workloads.lock.json"));
+  if (path.dirname(activationPath) !== path.dirname(snapshot.root)) {
+    invalid("Activation lock and snapshot root must share one deployment-private parent.");
+  }
+  const catalogRecord = snapshotFile(path.resolve(catalogPath), "catalog", snapshot, {}, sourceAccessHook);
   const catalog = readJson(catalogRecord.path, "hosted workload catalog");
   if (catalog?.version !== 1 || !Array.isArray(catalog.workloads)) {
     invalid("Hosted workload catalog must use version 1 and workloads[].");
@@ -452,28 +683,31 @@ export function resolveCatalog({ catalogPath, workloadRoot, coreEnvFile, coreFil
   const services = new Set();
   const workloads = catalog.workloads.map((entry) => {
     if (!entry || typeof entry !== "object" || Array.isArray(entry)) invalid("Each workload catalog entry must be an object.");
-    const manifestPath = resolvePhysicalWithin(root, entry.manifest, "workload manifest", "file");
-    const manifestRecord = snapshotFile(manifestPath, "workload-manifest", snapshot);
+    const manifestEntry = resolvePhysicalEntryWithin(root, entry.manifest, "workload manifest", "file");
+    const manifestPath = manifestEntry.path;
+    const manifestRecord = snapshotFile(manifestEntry, "workload-manifest", snapshot, {}, sourceAccessHook);
     const manifest = validateWorkloadManifest(readJson(manifestRecord.path), manifestPath);
-    const environmentPath = resolvePhysicalWithin(root, entry.environmentFile, `environment file for ${manifest.id}`, "file");
+    const environmentEntry = resolvePhysicalEntryWithin(root, entry.environmentFile, `environment file for ${manifest.id}`, "file");
+    const environmentPath = environmentEntry.path;
     if (ids.has(manifest.id)) invalid(`Duplicate workload id ${manifest.id}.`);
     ids.add(manifest.id);
     for (const service of manifest.services) {
       if (services.has(service.name)) invalid(`Duplicate workload service ${service.name}.`);
       services.add(service.name);
     }
-    const composePath = resolvePhysicalWithin(path.dirname(manifestPath), manifest.composeFile, "workload compose file", "file");
+    const composeEntry = resolvePhysicalEntryWithin(path.dirname(manifestPath), manifest.composeFile, "workload compose file", "file");
+    const composePath = composeEntry.path;
     manifestRecord.workloadId = manifest.id;
-    const composeRecord = snapshotFile(composePath, "workload-compose", snapshot, { workloadId: manifest.id });
-    const environmentRecord = workloadEnvironmentRecord(environmentPath, manifest.id, snapshot);
+    const composeRecord = snapshotFile(composeEntry, "workload-compose", snapshot, { workloadId: manifest.id }, sourceAccessHook);
+    const environmentRecord = workloadEnvironmentRecord(environmentEntry, manifest.id, snapshot, sourceAccessHook);
     const workloadRecords = [manifestRecord, composeRecord, environmentRecord];
     let projectMetadataRecord = null;
     if (manifest.projectMetadataFile) {
-      const projectMetadataSourcePath = resolvePhysicalWithin(path.dirname(manifestPath), manifest.projectMetadataFile, "project metadata file", "file");
-      projectMetadataRecord = snapshotFile(projectMetadataSourcePath, "project-metadata", snapshot, { workloadId: manifest.id });
+      const projectMetadataEntry = resolvePhysicalEntryWithin(path.dirname(manifestPath), manifest.projectMetadataFile, "project metadata file", "file");
+      projectMetadataRecord = snapshotFile(projectMetadataEntry, "project-metadata", snapshot, { workloadId: manifest.id }, sourceAccessHook);
       workloadRecords.push(projectMetadataRecord);
     }
-    workloadRecords.push(...sqlRecords(path.dirname(manifestPath), manifest.migrationRoots, snapshot, manifest.id));
+    workloadRecords.push(...sqlRecords(path.dirname(manifestPath), manifest.migrationRoots, snapshot, manifest.id, sourceAccessHook));
     records.push(...workloadRecords);
     return {
       ...manifest,
@@ -505,8 +739,11 @@ export function resolveCatalog({ catalogPath, workloadRoot, coreEnvFile, coreFil
     generatedAt: new Date().toISOString(),
     snapshotRoot: snapshot.root,
     snapshotGeneration: snapshot.generation,
+    activationLockPath: activationPath,
+    snapshotParentIdentity: snapshotReceipt.parentIdentity,
     snapshotRootIdentity: snapshotReceipt.rootIdentity,
     snapshotGenerationIdentity: snapshotReceipt.generationIdentity,
+    snapshotDurability: snapshotReceipt.durability,
     workloadRoot: root,
     catalogPath: path.resolve(catalogPath),
     coreEnvFile: path.resolve(coreEnvFile),
@@ -528,6 +765,42 @@ function objectWithoutNetworks(service, name) {
 
 function serviceNetworks(service) {
   return new Set(Object.keys(service?.networks ?? {}));
+}
+
+function pathsOverlap(left, right) {
+  const a = path.resolve(left);
+  const b = path.resolve(right);
+  return a === b || a.startsWith(`${b}${path.sep}`) || b.startsWith(`${a}${path.sep}`);
+}
+
+function assertActivationStorageIsolation(core, combined, lock) {
+  if (!lock.activationLockPath || !lock.snapshotRoot) return;
+  const activationLockPath = path.resolve(lock.activationLockPath);
+  const snapshotRoot = path.resolve(lock.snapshotRoot);
+  let routerLockMounts = 0;
+  for (const [serviceName, service] of Object.entries(combined.services ?? {})) {
+    for (const volume of service.volumes ?? []) {
+      if (volume?.type !== "bind" || !volume.source) continue;
+      const source = path.resolve(volume.source);
+      const exactRouterLockMount = serviceName === "project-router"
+        && source === activationLockPath
+        && volume.target === "/run/platform/hosted-workloads.lock.json"
+        && volume.read_only === true;
+      if (exactRouterLockMount) {
+        routerLockMounts += 1;
+        continue;
+      }
+      if ((pathsOverlap(source, activationLockPath) || pathsOverlap(source, snapshotRoot)) && volume.read_only !== true) {
+        invalid(`${serviceName} has writable access to deployment-private hosted workload activation state.`);
+      }
+    }
+  }
+  if (routerLockMounts !== 1) invalid("project-router requires exactly one read-only activation-lock mount.");
+  const coreRouterMounts = (core.services?.["project-router"]?.volumes ?? []).filter((volume) => volume?.type === "bind"
+    && path.resolve(volume.source) === activationLockPath
+    && volume.target === "/run/platform/hosted-workloads.lock.json"
+    && volume.read_only === true);
+  if (coreRouterMounts.length !== 1) invalid("Core render does not preserve the read-only router activation-lock mount.");
 }
 
 function assertPlatformServicesUnchanged(core, combined, workloadIds) {
@@ -718,6 +991,7 @@ export function validateRenderedWorkloads({ core, combined, lock }) {
   validateGlobalRouteOwnership(lock.workloads);
   assertBrokerPolicyDigest(lock);
   const workloadIds = lock.workloads.map((workload) => workload.id);
+  assertActivationStorageIsolation(core, combined, lock);
   assertPlatformServicesUnchanged(core, combined, workloadIds);
   const declared = new Map();
   for (const workload of lock.workloads) {
@@ -782,19 +1056,34 @@ export function verifyLockFiles(lock) {
   if (!Array.isArray(lock?.files) || lock.files.length === 0) invalid("Workload lock has no file records.");
   assertBrokerPolicyDigest(lock);
   const snapshotGeneration = physicalRoot(requiredText(lock.snapshotGeneration, "snapshot generation"), "snapshot generation");
-  if (path.dirname(snapshotGeneration) !== physicalRoot(requiredText(lock.snapshotRoot, "snapshot root"), "snapshot root")) {
+  const snapshotRoot = physicalRoot(requiredText(lock.snapshotRoot, "snapshot root"), "snapshot root");
+  const snapshotParent = physicalRoot(path.dirname(snapshotRoot), "snapshot root parent");
+  if (path.dirname(snapshotGeneration) !== snapshotRoot) {
     invalid("Snapshot generation is outside the locked snapshot root.");
   }
-  if (!sameIdentity(fileIdentity(lock.snapshotRoot), lock.snapshotRootIdentity)
+  if (path.dirname(path.resolve(requiredText(lock.activationLockPath, "activation lock path"))) !== snapshotParent) {
+    invalid("Activation lock is outside the deployment-private snapshot parent.");
+  }
+  if (!sameIdentity(fileIdentity(snapshotParent), lock.snapshotParentIdentity)
+      || !sameIdentity(fileIdentity(snapshotRoot), lock.snapshotRootIdentity)
       || !sameIdentity(fileIdentity(snapshotGeneration), lock.snapshotGenerationIdentity)) {
-    invalid("Snapshot root or generation identity changed after resolution.");
+    invalid("Snapshot parent, root, or generation identity changed after resolution.");
   }
   const effectiveUid = typeof process.getuid === "function" ? String(process.getuid()) : lock.snapshotRootIdentity.uid;
-  if (String(lock.snapshotRootIdentity.uid) !== effectiveUid || String(lock.snapshotGenerationIdentity.uid) !== effectiveUid) {
-    invalid("Snapshot root and generation must be owned by the deployment identity.");
+  if (String(lock.snapshotParentIdentity.uid) !== effectiveUid || String(lock.snapshotRootIdentity.uid) !== effectiveUid
+      || String(lock.snapshotGenerationIdentity.uid) !== effectiveUid) {
+    invalid("Snapshot parent, root, and generation must be owned by the deployment identity.");
   }
-  if (lock.snapshotRootIdentity.mode !== 0o700 || lock.snapshotGenerationIdentity.mode !== 0o500) {
-    invalid("Snapshot root or generation permissions are not deployment-owned.");
+  if (lock.snapshotParentIdentity.mode !== 0o700 || lock.snapshotRootIdentity.mode !== 0o700 || lock.snapshotGenerationIdentity.mode !== 0o500) {
+    invalid("Snapshot parent, root, or generation permissions are not deployment-owned.");
+  }
+  if (!same(lock.snapshotDurability, {
+    version: 1,
+    filesFsynced: true,
+    generationDirectoryFsynced: true,
+    rootDirectoryFsynced: true,
+  })) {
+    invalid("Snapshot lock has no complete crash-durability receipt.");
   }
   for (const record of lock.files) {
     if (!SHA256.test(String(record.sha256 ?? ""))) invalid(`Invalid lock digest for ${record.path}.`);
@@ -811,6 +1100,7 @@ export function verifyLockFiles(lock) {
     const { bytes } = readStableRegularFile(record.path, `locked ${record.kind}`);
     if (sha256Bytes(bytes) !== record.sha256) invalid(`Locked file changed: ${record.path}.`);
   }
+  verifyWorkloadRecordBindings(lock);
   const expectedContent = workloadContentSha256(lock.files);
   if (!SHA256.test(String(lock.workloadContentSha256 ?? "")) || lock.workloadContentSha256 !== expectedContent) {
     invalid("Hosted workload content digest does not match its verified snapshot records.");
@@ -819,11 +1109,37 @@ export function verifyLockFiles(lock) {
 }
 
 export function verifyRawPolicyReceipt(lock) {
+  const receipt = lock?.rawPolicyReceipt;
   if (lock?.rawPolicyVersion !== "hosted-raw-v1"
       || lock?.rawPolicyWorkloadContentSha256 !== lock?.workloadContentSha256
       || !same(lock?.rawPolicyControls, RAW_POLICY_CONTROLS)
-      || !SHA256.test(String(lock?.rawPolicySha256 ?? ""))) {
+      || !receipt || typeof receipt !== "object" || Array.isArray(receipt)
+      || !same(Object.keys(receipt).sort(), ["controls", "policyVersion", "workloadContentSha256", "workloads"])
+      || receipt.policyVersion !== lock.rawPolicyVersion
+      || receipt.workloadContentSha256 !== lock.workloadContentSha256
+      || !same(receipt.controls, RAW_POLICY_CONTROLS)
+      || !Array.isArray(receipt.workloads)
+      || !SHA256.test(String(lock?.rawPolicySha256 ?? ""))
+      || sha256Bytes(Buffer.from(JSON.stringify(stable(receipt)))) !== lock.rawPolicySha256) {
     invalid("Hosted workload lock has no valid raw source policy receipt.");
+  }
+  const expectedIds = lock.workloads.map((workload) => workload.id).sort();
+  const receiptIds = receipt.workloads.map((item) => item?.workloadId).sort();
+  if (!same(receiptIds, expectedIds)) invalid("Raw source policy receipt does not cover the exact workload set.");
+  for (const item of receipt.workloads) {
+    if (!same(Object.keys(item ?? {}).sort(), ["composeSha256", "serviceNames", "topLevelKeys", "workloadId"])) {
+      invalid("Raw source policy workload receipt has an unexpected shape.");
+    }
+    const workload = lock.workloads.find((candidate) => candidate.id === item.workloadId);
+    const composeRecords = lock.files.filter((record) => record.kind === "workload-compose" && record.workloadId === item.workloadId);
+    const serviceNames = Array.isArray(item.serviceNames) ? item.serviceNames : [];
+    const topLevelKeys = Array.isArray(item.topLevelKeys) ? item.topLevelKeys : [];
+    if (!workload || composeRecords.length !== 1 || item.composeSha256 !== composeRecords[0].sha256
+        || !same(serviceNames, [...new Set(serviceNames)].sort())
+        || !same(topLevelKeys, [...new Set(topLevelKeys)].sort()) || !topLevelKeys.includes("services")
+        || workload.services.some((service) => !serviceNames.includes(service.name))) {
+      invalid(`Raw source policy receipt is not bound to ${item.workloadId ?? "a workload"}.`);
+    }
   }
 }
 
@@ -838,8 +1154,30 @@ function parseArgs(values) {
 }
 
 function writeJson(filePath, value) {
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  fs.writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
+  const outputPath = path.resolve(filePath);
+  const parent = physicalRoot(path.dirname(outputPath), "lock output parent");
+  const effectiveUid = typeof process.getuid === "function" ? String(process.getuid()) : fileIdentity(parent).uid;
+  const parentIdentity = fileIdentity(parent);
+  if (parentIdentity.uid !== effectiveUid || parentIdentity.mode !== 0o700) {
+    invalid("Lock output parent must be deployment-owned with mode 0700.");
+  }
+  const existing = fs.lstatSync(outputPath, { throwIfNoEntry: false });
+  if (existing && (!existing.isFile() || existing.isSymbolicLink())) invalid("Lock output path must not be symlinked or non-regular.");
+  const temporary = path.join(parent, `.${path.basename(outputPath)}.${process.pid}.${crypto.randomBytes(8).toString("hex")}.tmp`);
+  const noFollow = fs.constants.O_NOFOLLOW ?? 0;
+  let descriptor;
+  try {
+    descriptor = fs.openSync(temporary, fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY | noFollow, 0o600);
+    fs.writeFileSync(descriptor, `${JSON.stringify(value, null, 2)}\n`);
+    fs.fsyncSync(descriptor);
+    fs.closeSync(descriptor);
+    descriptor = undefined;
+    fs.renameSync(temporary, outputPath);
+    fsyncDirectory(parent);
+  } finally {
+    if (descriptor !== undefined) fs.closeSync(descriptor);
+    if (fs.existsSync(temporary)) fs.unlinkSync(temporary);
+  }
 }
 
 function main() {
@@ -853,6 +1191,7 @@ function main() {
       coreFiles: requiredText(args.coreFiles, "--coreFiles").split(",").map((file) => path.resolve(file)),
       projectName: requiredText(args.projectName, "--projectName"),
       snapshotRoot: path.resolve(requiredText(args.snapshotRoot, "--snapshotRoot")),
+      activationLockPath: path.resolve(requiredText(args.activationLock, "--activationLock")),
     });
     writeJson(path.resolve(requiredText(args.output, "--output")), lock);
     return;
@@ -865,7 +1204,9 @@ function main() {
     const corePath = path.resolve(requiredText(args.coreRender, "--coreRender"));
     const combinedPath = path.resolve(requiredText(args.combinedRender, "--combinedRender"));
     const validation = validateRenderedWorkloads({ core: readJson(corePath), combined: readJson(combinedPath), lock });
-    writeJson(path.resolve(requiredText(args.output, "--output")), {
+    const outputPath = path.resolve(requiredText(args.output, "--output"));
+    if (outputPath !== lock.activationLockPath) invalid("Verified lock output differs from the deployment activation path.");
+    writeJson(outputPath, {
       ...lock,
       state: "verified",
       verifiedAt: new Date().toISOString(),
@@ -876,23 +1217,29 @@ function main() {
     return;
   }
   if (command === "verify-lock") {
-    const lock = readJson(path.resolve(requiredText(args.lock, "--lock")), "workload lock");
+    const lockPath = path.resolve(requiredText(args.lock, "--lock"));
+    const lock = readJson(lockPath, "workload lock");
     if (lock.state !== "verified" && !(args.allowResolved === "true" && lock.state === "resolved")) invalid("Workload lock is not verified.");
+    if (lock.state === "verified" && lockPath !== lock.activationLockPath) invalid("Verified lock is not read from its activation path.");
     verifyLockFiles(lock);
     verifyRawPolicyReceipt(lock);
     return;
   }
   if (command === "compose-files") {
-    const lock = readJson(path.resolve(requiredText(args.lock, "--lock")), "workload lock");
+    const lockPath = path.resolve(requiredText(args.lock, "--lock"));
+    const lock = readJson(lockPath, "workload lock");
     if (lock.state !== "verified" && args.allowResolved !== "true") invalid("Workload lock is not verified.");
+    if (lock.state === "verified" && lockPath !== lock.activationLockPath) invalid("Verified lock is not read from its activation path.");
     verifyLockFiles(lock);
     verifyRawPolicyReceipt(lock);
     process.stdout.write(`${lock.workloads.map((workload) => workload.composePath).join("\n")}\n`);
     return;
   }
   if (command === "env-files") {
-    const lock = readJson(path.resolve(requiredText(args.lock, "--lock")), "workload lock");
+    const lockPath = path.resolve(requiredText(args.lock, "--lock"));
+    const lock = readJson(lockPath, "workload lock");
     if (lock.state !== "verified" && args.allowResolved !== "true") invalid("Workload lock is not verified.");
+    if (lock.state === "verified" && lockPath !== lock.activationLockPath) invalid("Verified lock is not read from its activation path.");
     verifyLockFiles(lock);
     verifyRawPolicyReceipt(lock);
     process.stdout.write(`${lock.workloads.map((workload) => workload.environmentPath).join("\n")}\n`);
