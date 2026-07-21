@@ -19,7 +19,7 @@ const FORBIDDEN_WORKLOAD_TARGETS = [
 export function evaluateRuntimeIsolation(config, options = {}) {
   const services = object(config?.services);
   const networks = object(config?.networks);
-  const projectName = String(options.projectName ?? config?.name ?? "");
+  const projectName = String(options.projectName ?? "");
   const maxMemoryBytes = integer(options.maxMemoryBytes ?? 13_500 * 1024 * 1024);
   const maxWorkloadMemoryBytes = integer(options.maxWorkloadMemoryBytes ?? 8_000 * 1024 * 1024);
   const checks = [];
@@ -48,6 +48,11 @@ export function evaluateRuntimeIsolation(config, options = {}) {
     .map(([name]) => name)
     .sort();
   const workloadIds = new Set(workloadServices.map((name) => String(services[name]?.labels?.["com.platform.workload-id"] || "")));
+  record(
+    "workload-project-name-bound",
+    workloadServices.length === 0 || (/^[a-z0-9][a-z0-9_-]*$/.test(projectName) && config?.name === projectName),
+    `expected=${projectName || "unset"} rendered=${config?.name || "unset"}`,
+  );
   const unsafeWorkloadConfigs = Object.entries(object(config?.configs))
     .filter(([name]) => [...workloadIds].some((id) => name.startsWith(`${id}_`) || name.startsWith(`${id.replaceAll("-", "_")}_`)))
     .filter(([, definition]) => Object.hasOwn(object(definition), "content") || Object.hasOwn(object(definition), "environment"))
@@ -69,6 +74,17 @@ export function evaluateRuntimeIsolation(config, options = {}) {
     record(`workload-no-swap-${name}`, bytes(service.memswap_limit) === bytes(service.mem_limit), `${name} memswap=${bytes(service.memswap_limit)} memory=${bytes(service.mem_limit)}`);
     const oomControls = ["oom_kill_disable", "oom_score_adj", "mem_swappiness"].filter((field) => Object.hasOwn(service, field));
     record(`workload-no-oom-overrides-${name}`, oomControls.length === 0, `${name} oomControls=${oomControls.join(",") || "none"}`);
+    const foreignNetworkIdentities = networkNames(service).filter((network) => {
+      const attachment = Array.isArray(service.networks) ? null : service.networks?.[network];
+      const definition = object(networks[network]);
+      const attachmentIsPlain = attachment == null
+        || (typeof attachment === "object" && !Array.isArray(attachment) && Object.keys(attachment).length === 0);
+      return workloadNetworkOwner(network, workloadIds) !== workloadId
+        || !attachmentIsPlain
+        || definition.external === true
+        || definition.name !== `${projectName}_${network}`;
+    });
+    record(`workload-network-identity-${name}`, foreignNetworkIdentities.length === 0, `${name} foreignNetworks=${foreignNetworkIdentities.join(",") || "none"}`);
     record(
       `workload-bounded-local-logging-${name}`,
       JSON.stringify(service.logging) === JSON.stringify({ driver: "local", options: { "max-size": "10m", "max-file": "3" } }),
@@ -276,6 +292,16 @@ function networkNames(service) {
 
 function secretNames(service) {
   return (service?.secrets || []).map((secret) => typeof secret === "string" ? secret : String(secret?.source || ""));
+}
+
+const WORKLOAD_NETWORK_ZONES = new Set(["ingress", "postgres", "cache", "bus", "identity", "storage", "observability", "egress"]);
+
+function workloadNetworkOwner(network, workloadIds) {
+  const owners = [...workloadIds].filter((id) => {
+    const prefix = `${id.replaceAll("-", "_")}_`;
+    return network.startsWith(prefix) && WORKLOAD_NETWORK_ZONES.has(network.slice(prefix.length));
+  });
+  return owners.length === 1 ? owners[0] : null;
 }
 
 function stableId(value) {

@@ -149,6 +149,42 @@ class HostedWorkloadSourcePolicyTest < Minitest::Test
     end
   end
 
+  def test_binds_network_identity_and_rejects_attachment_aliases
+    [
+      { "external" => true },
+      { "name" => "platform_docker_control" }
+    ].each do |definition|
+      model = { "networks" => { "example_app_ingress" => definition }, "services" => { "example-app-web" => {} } }
+      error = assert_raises(ArgumentError) do
+        HostedWorkloadSourcePolicy.validate_source_model(model, "fixture", workload_id: "example-app", project_name: "fixture")
+      end
+      assert_match(/cannot alias an external or foreign physical network/, error.message)
+    end
+    aliased = {
+      "networks" => { "example_app_ingress" => {} },
+      "services" => { "example-app-web" => { "networks" => { "example_app_ingress" => { "aliases" => ["postgres"] } } } }
+    }
+    error = assert_raises(ArgumentError) do
+      HostedWorkloadSourcePolicy.validate_source_model(aliased, "fixture", workload_id: "example-app", project_name: "fixture")
+    end
+    assert_match(/cannot set network aliases or address overrides/, error.message)
+    ["attacker_example_app_ingress", ["example_app_ingress"], true, 7].each do |definition|
+      malformed = { "networks" => { "example_app_ingress" => definition }, "services" => { "example-app-web" => {} } }
+      error = assert_raises(ArgumentError) do
+        HostedWorkloadSourcePolicy.validate_source_model(malformed, "fixture", workload_id: "example-app", project_name: "fixture")
+      end
+      assert_match(/must be null or a mapping/, error.message)
+    end
+    collision = {
+      "networks" => { "example_app_shadow_ingress" => {} },
+      "services" => { "example-app-web" => { "networks" => ["example_app_shadow_ingress"] } }
+    }
+    error = assert_raises(ArgumentError) do
+      HostedWorkloadSourcePolicy.validate_source_model(collision, "fixture", workload_id: "example-app", project_name: "fixture")
+    end
+    assert_match(/not an exact workload-owned network/, error.message)
+  end
+
   def test_rejects_host_device_controls
     [
       "services:\n  app:\n    devices:\n      - /dev/kvm:/dev/kvm\n",

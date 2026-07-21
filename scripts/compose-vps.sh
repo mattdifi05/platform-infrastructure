@@ -171,12 +171,25 @@ if [[ -n "$workload_lock" ]]; then
       and (.inode | type == "string" and test("^[0-9]+$"))
       and (.uid | type == "string" and test("^[0-9]+$"))
       and .mode == 256;
-    type == "object"
-    and ((keys | sort) == ["composeRecords", "coreEnvFile", "environmentRecords", "lockSha256", "projectName", "version"])
+    def network_record($projectName):
+      type == "object"
+      and ((keys | sort) == ["logicalName", "physicalName", "workloadId"])
+      and (.workloadId | type == "string" and test("^[a-z0-9][a-z0-9-]*$"))
+      and (.logicalName | type == "string" and test("^[a-z0-9][a-z0-9_]*(ingress|postgres|cache|bus|identity|storage|observability|egress)$"))
+      and .logicalName == ((.workloadId | gsub("-"; "_")) + "_" + (.logicalName | split("_") | last))
+      and .physicalName == ($projectName + "_" + .logicalName);
+    . as $bundle
+    | type == "object"
+    and ((keys | sort) == ["composeRecords", "coreEnvFile", "environmentRecords", "lockSha256", "networkRecords", "projectName", "version", "workloadIds"])
     and .version == 1
     and (.lockSha256 | type == "string" and test("^[a-f0-9]{64}$"))
     and (.coreEnvFile | type == "string" and length > 0)
     and (.projectName | type == "string" and test("^[a-z0-9][a-z0-9_-]*$"))
+    and ($bundle.workloadIds | type == "array" and length > 0 and . == (unique | sort) and all(.[]; type == "string" and test("^[a-z0-9][a-z0-9-]*$")))
+    and ($bundle.networkRecords | type == "array" and length >= ($bundle.workloadIds | length))
+    and ($bundle.networkRecords == ($bundle.networkRecords | unique_by(.workloadId, .logicalName) | sort_by(.workloadId, .logicalName)))
+    and all($bundle.networkRecords[]; network_record($bundle.projectName))
+    and ([$bundle.networkRecords[].workloadId] | unique | sort) == $bundle.workloadIds
     and (.environmentRecords | type == "array" and all(.[]; record))
     and (.composeRecords | type == "array" and all(.[]; record))
   ' >/dev/null || {

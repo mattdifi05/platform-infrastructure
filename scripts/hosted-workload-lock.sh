@@ -3,7 +3,7 @@ set -eu
 
 LOCK=${1:?Usage: hosted-workload-lock.sh <lock-file> [verify|compose-records|activation-bundle]}
 COMMAND=${2:-verify}
-RAW_POLICY_CONTROLS='["bind-bounded-local-logging","bind-no-swap-oom-policy","bind-owned-secret-aliases","bind-owned-volumes","bind-private-pid-numeric-user","deny-api-socket","deny-compose-interpolation","deny-device-access","deny-env-file","deny-extends","deny-file-configs","deny-gpu-access","deny-include","deny-inline-configs","deny-lifecycle-hooks","deny-local-volume-options","deny-providers","deny-runtime-overrides","deny-scaling","deny-stop-grace-overrides","deny-supplemental-groups","deny-volumes-from"]'
+RAW_POLICY_CONTROLS='["bind-bounded-local-logging","bind-network-identity","bind-no-swap-oom-policy","bind-owned-secret-aliases","bind-owned-volumes","bind-private-pid-numeric-user","deny-api-socket","deny-compose-interpolation","deny-device-access","deny-env-file","deny-extends","deny-file-configs","deny-gpu-access","deny-include","deny-inline-configs","deny-lifecycle-hooks","deny-local-volume-options","deny-providers","deny-runtime-overrides","deny-scaling","deny-stop-grace-overrides","deny-supplemental-groups","deny-volumes-from"]'
 
 case "$COMMAND" in
   verify|compose-records|env-records|core-env-file|project-name|activation-bundle) ;;
@@ -243,7 +243,15 @@ jq_lock -e --arg lockPath "$LOCK" --argjson allowResolved "$allow_resolved" --ar
       . as $receipt
       | ($lock.files | map(select(.kind == "workload-compose" and .workloadId == $receipt.workloadId))) as $compose
       | ($lock.workloads | map(select(.id == $receipt.workloadId))[0]) as $workload
-      | (($receipt | keys | sort) == ["composeSha256", "serviceNames", "topLevelKeys", "workloadId"])
+      | (($receipt | keys | sort) == ["composeSha256", "networkNames", "serviceNames", "topLevelKeys", "workloadId"])
+        and ($receipt.networkNames | type == "array")
+        and ($receipt.networkNames == ($receipt.networkNames | unique | sort))
+        and all($receipt.networkNames[];
+          . as $name
+          | (($receipt.workloadId | gsub("-"; "_")) + "_") as $prefix
+          | ["ingress", "postgres", "cache", "bus", "identity", "storage", "observability", "egress"]
+          | any(.[]; $name == ($prefix + .))
+        )
         and ($receipt.serviceNames | type == "array")
         and ($receipt.topLevelKeys | type == "array")
         and ($receipt.serviceNames == ($receipt.serviceNames | unique | sort))
@@ -363,11 +371,18 @@ case "$COMMAND" in
   core-env-file) command_output=$(jq_lock -r '.coreEnvFile') ;;
   project-name) command_output=$(jq_lock -r '.projectName') ;;
   activation-bundle) command_output=$(jq_lock -c --arg lockSha256 "$lock_read_sha256" '
-    {
+    . as $lock
+    | {
       version: 1,
       lockSha256: $lockSha256,
       coreEnvFile,
       projectName,
+      workloadIds: [.workloads[].id] | sort,
+      networkRecords: [
+        .rawPolicyReceipt.workloads[] as $workload
+        | $workload.networkNames[]
+        | {workloadId: $workload.workloadId, logicalName: ., physicalName: ($lock.projectName + "_" + .)}
+      ] | sort_by(.workloadId, .logicalName),
       environmentRecords: [
         .workloads[] as $workload
         | .files[]

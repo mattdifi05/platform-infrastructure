@@ -8,9 +8,10 @@ require "psych"
 
 module HostedWorkloadSourcePolicy
   VERSION = "hosted-raw-v1"
-  CONTROLS = %w[bind-bounded-local-logging bind-no-swap-oom-policy bind-owned-secret-aliases bind-owned-volumes bind-private-pid-numeric-user deny-api-socket deny-compose-interpolation deny-device-access deny-env-file deny-extends deny-file-configs deny-gpu-access deny-include deny-inline-configs deny-lifecycle-hooks deny-local-volume-options deny-providers deny-runtime-overrides deny-scaling deny-stop-grace-overrides deny-supplemental-groups deny-volumes-from].freeze
+  CONTROLS = %w[bind-bounded-local-logging bind-network-identity bind-no-swap-oom-policy bind-owned-secret-aliases bind-owned-volumes bind-private-pid-numeric-user deny-api-socket deny-compose-interpolation deny-device-access deny-env-file deny-extends deny-file-configs deny-gpu-access deny-include deny-inline-configs deny-lifecycle-hooks deny-local-volume-options deny-providers deny-runtime-overrides deny-scaling deny-stop-grace-overrides deny-supplemental-groups deny-volumes-from].freeze
   MAX_COMPOSE_BYTES = 1_048_576
   STANDARD_TAG_PREFIX = "tag:yaml.org,2002:"
+  WORKLOAD_NETWORK_ZONES = %w[ingress postgres cache bus identity storage observability egress].freeze
 
   module_function
 
@@ -112,6 +113,20 @@ module HostedWorkloadSourcePolicy
         fail!("#{label} volume #{name} cannot use local driver options.")
       end
     end
+    networks = model["networks"]
+    fail!("#{label} networks must be a mapping.") if !networks.nil? && !networks.is_a?(Hash)
+    workload_network_prefix = "#{workload_id&.tr('-', '_')}_"
+    (networks || {}).each do |name, definition|
+      fail!("#{label} network #{name} must be null or a mapping.") unless definition.nil? || definition.is_a?(Hash)
+      next unless workload_id
+      zone = name.to_s.delete_prefix(workload_network_prefix)
+      unless name.is_a?(String) && name.start_with?(workload_network_prefix) && WORKLOAD_NETWORK_ZONES.include?(zone)
+        fail!("#{label} network #{name} is not an exact workload-owned network.")
+      end
+      if definition.is_a?(Hash) && (definition.key?("external") || definition.key?("name"))
+        fail!("#{label} network #{name} cannot alias an external or foreign physical network.")
+      end
+    end
     model.fetch("services").each do |name, service|
       fail!("#{label} service #{name} must be a mapping.") unless service.is_a?(Hash)
       fail!("#{label} service #{name} cannot share another PID namespace.") if service.key?("pid")
@@ -126,6 +141,24 @@ module HostedWorkloadSourcePolicy
       end
       oom_controls = %w[oom_kill_disable oom_score_adj mem_swappiness].select { |key| service.key?(key) }
       fail!("#{label} service #{name} cannot override OOM or swappiness controls: #{oom_controls.join(', ')}.") unless oom_controls.empty?
+      service_networks = service["networks"]
+      unless service_networks.nil?
+        entries = if service_networks.is_a?(Array)
+                    service_networks.each_with_object({}) { |network, result| result[network] = nil }
+                  else
+                    service_networks
+                  end
+        fail!("#{label} service #{name} networks must be a sequence or mapping.") unless entries.is_a?(Hash)
+        entries.each do |network, attachment|
+          zone = network.to_s.delete_prefix(workload_network_prefix)
+          if workload_id && (!network.is_a?(String) || !network.start_with?(workload_network_prefix) || !WORKLOAD_NETWORK_ZONES.include?(zone))
+            fail!("#{label} service #{name} uses foreign network #{network}.")
+          end
+          unless attachment.nil? || (attachment.is_a?(Hash) && attachment.empty?)
+            fail!("#{label} service #{name} cannot set network aliases or address overrides on #{network}.")
+          end
+        end
+      end
       fail!("#{label} service #{name} cannot use env_file.") if service.key?("env_file")
       fail!("#{label} service #{name} cannot use extends.") if service.key?("extends")
       fail!("#{label} service #{name} cannot mount configs.") if service.key?("configs")
@@ -192,7 +225,8 @@ module HostedWorkloadSourcePolicy
         "workloadId" => workload_id,
         "composeSha256" => record.fetch("sha256"),
         "topLevelKeys" => model.keys.map(&:to_s).sort,
-        "serviceNames" => model.fetch("services").keys.map(&:to_s).sort
+        "serviceNames" => model.fetch("services").keys.map(&:to_s).sort,
+        "networkNames" => (model["networks"] || {}).keys.map(&:to_s).sort
       }
     end
     receipt = {

@@ -75,7 +75,15 @@ function combinedFixture() {
         labels: { "com.platform.workload-id": "example-app", "com.platform.workload-role": "worker" },
       },
     },
-    networks: { platform_routing: { internal: true }, example_app_ingress: { internal: true }, example_app_egress: { internal: false, enable_ipv6: false } },
+    networks: {
+      platform_routing: { internal: true },
+      example_app_ingress: { internal: true, name: "fixture_example_app_ingress" },
+      example_app_egress: {
+        internal: false,
+        enable_ipv6: false,
+        name: "fixture_example_app_egress",
+      },
+    },
     secrets: { "example-app-database-url": { external: true, name: "fixture_example-app-database-url" } },
   };
 }
@@ -371,13 +379,34 @@ test("workload network cannot alias the Docker-control physical network", () => 
     const combined = combinedFixture();
     combined.networks.example_app_ingress = definition;
     assert.throws(
-      () => validateRenderedWorkloads({ core, combined, lock: { projectName: "fixture", workloads: [manifest] } }),
+      () => validateRenderedWorkloads({
+        core,
+        combined,
+        lock: {
+          projectName: "fixture",
+          workloads: [manifest],
+          brokerPolicySha256: brokerPolicySha256([manifest]),
+        },
+      }),
       /cannot alias foreign physical network/,
     );
   }
   const combined = combinedFixture();
   combined.networks.example_app_ingress.name = "fixture_example_app_ingress";
-  assert.doesNotThrow(() => validateRenderedWorkloads({ core, combined, lock: { projectName: "fixture", workloads: [manifest] } }));
+  assert.doesNotThrow(() => validateRenderedWorkloads({
+    core,
+    combined,
+    lock: {
+      projectName: "fixture",
+      workloads: [manifest],
+      brokerPolicySha256: brokerPolicySha256([manifest]),
+    },
+  }));
+  for (const attachment of [{ aliases: ["postgres"] }, { ipv4_address: "172.30.0.2" }, { gw_priority: 999 }]) {
+    const aliased = combinedFixture();
+    aliased.services["example-app-web"].networks.example_app_ingress = attachment;
+    assert.throws(() => validateRenderedWorkloads({ core, combined: aliased, lock }), /cannot set aliases or address overrides/);
+  }
 });
 test("platform service can join only its assigned workload zone", () => {
   const combined = combinedFixture();
@@ -399,6 +428,7 @@ test("deployment-private activation state has no non-router writable mount", () 
   const lockWithActivation = {
     projectName: "fixture",
     workloads: [manifest],
+    brokerPolicySha256: brokerPolicySha256([manifest]),
     activationLockPath: privateLock,
     snapshotRoot: "/deployment-private/snapshots",
   };
@@ -515,20 +545,20 @@ function brokerRenderFixture() {
     networks: {
       platform_cache: { internal: true },
       platform_bus: { internal: true },
-      tenant_app_cache: { internal: true },
-      tenant_app_bus: { internal: true },
+      tenant_app_cache: { internal: true, name: "fixture_tenant_app_cache" },
+      tenant_app_bus: { internal: true, name: "fixture_tenant_app_bus" },
     },
     secrets: {
       redis_password: { external: true },
       nats_password: { external: true },
-      "tenant-app-redis-password": { external: true },
-      "tenant-app-bus-nats-password": { external: true },
+      "tenant-app-redis-password": { external: true, name: "fixture_tenant-app-redis-password" },
+      "tenant-app-bus-nats-password": { external: true, name: "fixture_tenant-app-bus-nats-password" },
     },
   };
   return {
     core: brokerCore,
     combined,
-    lock: { workloads: [workload], brokerPolicySha256: brokerPolicySha256([workload]) },
+    lock: { projectName: "fixture", workloads: [workload], brokerPolicySha256: brokerPolicySha256([workload]) },
   };
 }
 
@@ -633,11 +663,12 @@ test("legacy hosted workload locks fail closed", () => {
 test("raw policy receipt requires the exact current control set", () => {
   const rawPolicyReceipt = {
     policyVersion: "hosted-raw-v1",
-    controls: ["bind-bounded-local-logging", "bind-no-swap-oom-policy", "bind-owned-secret-aliases", "bind-owned-volumes", "bind-private-pid-numeric-user", "deny-api-socket", "deny-compose-interpolation", "deny-device-access", "deny-env-file", "deny-extends", "deny-file-configs", "deny-gpu-access", "deny-include", "deny-inline-configs", "deny-lifecycle-hooks", "deny-local-volume-options", "deny-providers", "deny-runtime-overrides", "deny-scaling", "deny-stop-grace-overrides", "deny-supplemental-groups", "deny-volumes-from"],
+    controls: ["bind-bounded-local-logging", "bind-network-identity", "bind-no-swap-oom-policy", "bind-owned-secret-aliases", "bind-owned-volumes", "bind-private-pid-numeric-user", "deny-api-socket", "deny-compose-interpolation", "deny-device-access", "deny-env-file", "deny-extends", "deny-file-configs", "deny-gpu-access", "deny-include", "deny-inline-configs", "deny-lifecycle-hooks", "deny-local-volume-options", "deny-providers", "deny-runtime-overrides", "deny-scaling", "deny-stop-grace-overrides", "deny-supplemental-groups", "deny-volumes-from"],
     workloadContentSha256: "a".repeat(64),
     workloads: [{
       workloadId: "example-app",
       composeSha256: "c".repeat(64),
+      networkNames: [],
       topLevelKeys: ["services"],
       serviceNames: ["example-app-web"],
     }],
@@ -655,12 +686,12 @@ test("raw policy receipt requires the exact current control set", () => {
     rawPolicyWorkloadContentSha256: "a".repeat(64),
     rawPolicyReceipt,
     rawPolicySha256: crypto.createHash("sha256").update(JSON.stringify(stable(rawPolicyReceipt))).digest("hex"),
-    rawPolicyControls: ["bind-bounded-local-logging", "bind-no-swap-oom-policy", "bind-owned-secret-aliases", "bind-owned-volumes", "bind-private-pid-numeric-user", "deny-api-socket", "deny-compose-interpolation", "deny-device-access", "deny-env-file", "deny-extends", "deny-file-configs", "deny-gpu-access", "deny-include", "deny-inline-configs", "deny-lifecycle-hooks", "deny-local-volume-options", "deny-providers", "deny-runtime-overrides", "deny-scaling", "deny-stop-grace-overrides", "deny-supplemental-groups", "deny-volumes-from"],
+    rawPolicyControls: ["bind-bounded-local-logging", "bind-network-identity", "bind-no-swap-oom-policy", "bind-owned-secret-aliases", "bind-owned-volumes", "bind-private-pid-numeric-user", "deny-api-socket", "deny-compose-interpolation", "deny-device-access", "deny-env-file", "deny-extends", "deny-file-configs", "deny-gpu-access", "deny-include", "deny-inline-configs", "deny-lifecycle-hooks", "deny-local-volume-options", "deny-providers", "deny-runtime-overrides", "deny-scaling", "deny-stop-grace-overrides", "deny-supplemental-groups", "deny-volumes-from"],
   };
   assert.doesNotThrow(() => verifyRawPolicyReceipt(receipt));
   receipt.rawPolicyControls = ["deny-include"];
   assert.throws(() => verifyRawPolicyReceipt(receipt), /raw source policy receipt/);
-  receipt.rawPolicyControls = ["bind-bounded-local-logging", "bind-no-swap-oom-policy", "bind-owned-secret-aliases", "bind-owned-volumes", "bind-private-pid-numeric-user", "deny-api-socket", "deny-compose-interpolation", "deny-device-access", "deny-env-file", "deny-extends", "deny-file-configs", "deny-gpu-access", "deny-include", "deny-inline-configs", "deny-lifecycle-hooks", "deny-local-volume-options", "deny-providers", "deny-runtime-overrides", "deny-scaling", "deny-stop-grace-overrides", "deny-supplemental-groups", "deny-volumes-from"];
+  receipt.rawPolicyControls = ["bind-bounded-local-logging", "bind-network-identity", "bind-no-swap-oom-policy", "bind-owned-secret-aliases", "bind-owned-volumes", "bind-private-pid-numeric-user", "deny-api-socket", "deny-compose-interpolation", "deny-device-access", "deny-env-file", "deny-extends", "deny-file-configs", "deny-gpu-access", "deny-include", "deny-inline-configs", "deny-lifecycle-hooks", "deny-local-volume-options", "deny-providers", "deny-runtime-overrides", "deny-scaling", "deny-stop-grace-overrides", "deny-supplemental-groups", "deny-volumes-from"];
   receipt.rawPolicySha256 = "b".repeat(64);
   assert.throws(() => verifyRawPolicyReceipt(receipt), /raw source policy receipt/);
   receipt.rawPolicyReceipt.workloads[0].composeSha256 = "d".repeat(64);
@@ -676,7 +707,7 @@ function catalogFixture(root, appRoot = path.join(root, "workloads", "example-ap
     composeFile: "compose.yaml",
     services: [{ name: "example-app-web", role: "web" }],
   }));
-  fs.writeFileSync(path.join(appRoot, "compose.yaml"), "services:\n  example-app-web: {}\n");
+  fs.writeFileSync(path.join(appRoot, "compose.yaml"), "services:\n  example-app-web:\n    networks:\n      example_app_ingress:\nnetworks:\n  example_app_ingress:\n    internal: true\n");
   fs.writeFileSync(path.join(appRoot, "workload.env"), "EXAMPLE_APP_THEME=dark\n");
   const catalogPath = path.join(root, "catalog.json");
   fs.writeFileSync(catalogPath, JSON.stringify({
@@ -1311,6 +1342,74 @@ exit "$status"
     assert.equal(fs.existsSync(sharedEnvironment.HOSTED_TEST_HASH_RACE_MARKER), false);
     assert.equal(fs.readFileSync(sharedEnvironment.HOSTED_TEST_LOCK_READER_COUNT, "utf8").trim(), "1");
     assert.notEqual(fs.statSync(lock.snapshotGeneration).ino, Number(lock.snapshotGenerationIdentity.inode));
+  } finally {
+    removeFixtureTree(root);
+  }
+});
+
+test("Engine network ownership verifier binds exact physical names and Compose labels", () => {
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "hosted-network-owner-")));
+  try {
+    const fixture = catalogFixture(root);
+    const lock = resolveCatalog({
+      ...fixture,
+      workloadRoot: path.join(root, "workloads"),
+      coreFiles: [fixture.coreFile],
+      projectName: "fixture",
+      snapshotRoot: path.join(root, "snapshots"),
+    });
+    const lockPath = path.join(root, "lock.json");
+    fs.writeFileSync(lockPath, `${JSON.stringify(lock, null, 2)}\n`, { mode: 0o600 });
+    const rawPolicy = spawnSync("ruby", [path.join(import.meta.dirname, "hosted-workload-source-policy.rb"), "--lock", lockPath], { encoding: "utf8" });
+    assert.equal(rawPolicy.status, 0, rawPolicy.stderr);
+
+    const fakeBin = path.join(root, "fake-bin");
+    fs.mkdirSync(fakeBin);
+    fs.writeFileSync(path.join(fakeBin, "docker"), `#!/bin/bash
+set -euo pipefail
+if [[ "\${1:-}" == network && "\${2:-}" == inspect ]]; then
+  case "\${HOSTED_TEST_NETWORK_MODE:-correct}" in
+    correct) printf '[{"Name":"fixture_example_app_ingress","Labels":{"com.docker.compose.project":"fixture","com.docker.compose.network":"example_app_ingress"}}]\n' ;;
+    wrong-project) printf '[{"Name":"fixture_example_app_ingress","Labels":{"com.docker.compose.project":"attacker","com.docker.compose.network":"example_app_ingress"}}]\n' ;;
+    wrong-logical) printf '[{"Name":"fixture_example_app_ingress","Labels":{"com.docker.compose.project":"fixture","com.docker.compose.network":"platform_docker_control"}}]\n' ;;
+    invalid-json) printf '{not-json\n' ;;
+    duplicate) printf '[{"Name":"fixture_example_app_ingress","Labels":{"com.docker.compose.project":"fixture","com.docker.compose.network":"example_app_ingress"}},{"Name":"fixture_example_app_ingress","Labels":{"com.docker.compose.project":"fixture","com.docker.compose.network":"example_app_ingress"}}]\n' ;;
+    missing|collision) exit 1 ;;
+  esac
+  exit 0
+fi
+if [[ "\${1:-}" == network && "\${2:-}" == ls ]]; then
+  [[ "\${HOSTED_TEST_NETWORK_MODE:-}" != collision ]] || printf '%s\n' fixture_example_app_ingress
+  exit 0
+fi
+exit 2
+`, { mode: 0o755 });
+    const verifier = path.join(import.meta.dirname, "hosted-workload-network-ownership.sh");
+    const environment = {
+      ...process.env,
+      PATH: `${fakeBin}:${process.env.PATH}`,
+      HOSTED_WORKLOAD_ALLOW_RESOLVED: "1",
+    };
+    const run = (mode, extra = []) => spawnSync("/bin/bash", [verifier, "--lock", lockPath, "--project-name", "fixture", ...extra], {
+      encoding: "utf8",
+      env: { ...environment, HOSTED_TEST_NETWORK_MODE: mode },
+    });
+    assert.equal(run("correct").status, 0);
+    for (const mode of ["wrong-project", "wrong-logical", "invalid-json", "duplicate", "missing"]) {
+      const rejected = run(mode);
+      assert.notEqual(rejected.status, 0, `${mode} unexpectedly passed`);
+      assert.match(rejected.stderr, /invalid Engine ownership|missing or cannot be inspected/);
+    }
+    assert.equal(run("missing", ["--allow-absent"]).status, 0);
+    const collision = run("collision", ["--allow-absent"]);
+    assert.notEqual(collision.status, 0);
+    assert.match(collision.stderr, /exists but cannot be inspected/);
+    const wrongProject = spawnSync("/bin/bash", [verifier, "--lock", lockPath, "--project-name", "attacker"], {
+      encoding: "utf8",
+      env: { ...environment, HOSTED_TEST_NETWORK_MODE: "correct" },
+    });
+    assert.notEqual(wrongProject.status, 0);
+    assert.match(wrongProject.stderr, /ownership receipt is invalid/);
   } finally {
     removeFixtureTree(root);
   }

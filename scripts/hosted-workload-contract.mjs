@@ -17,7 +17,7 @@ const IMAGE = /^[a-z0-9][a-z0-9._/-]*(?::[A-Za-z0-9._-]+)?@sha256:[a-f0-9]{64}$/
 const SAFE_PATH = /^[A-Za-z0-9_./-]+$/;
 export const HOSTED_WORKLOAD_LOCK_VERSION = 2;
 export const HOSTED_WORKLOAD_VALIDATOR_VERSION = "hosted-contract-v2";
-const RAW_POLICY_CONTROLS = Object.freeze(["bind-bounded-local-logging", "bind-no-swap-oom-policy", "bind-owned-secret-aliases", "bind-owned-volumes", "bind-private-pid-numeric-user", "deny-api-socket", "deny-compose-interpolation", "deny-device-access", "deny-env-file", "deny-extends", "deny-file-configs", "deny-gpu-access", "deny-include", "deny-inline-configs", "deny-lifecycle-hooks", "deny-local-volume-options", "deny-providers", "deny-runtime-overrides", "deny-scaling", "deny-stop-grace-overrides", "deny-supplemental-groups", "deny-volumes-from"]);
+const RAW_POLICY_CONTROLS = Object.freeze(["bind-bounded-local-logging", "bind-network-identity", "bind-no-swap-oom-policy", "bind-owned-secret-aliases", "bind-owned-volumes", "bind-private-pid-numeric-user", "deny-api-socket", "deny-compose-interpolation", "deny-device-access", "deny-env-file", "deny-extends", "deny-file-configs", "deny-gpu-access", "deny-include", "deny-inline-configs", "deny-lifecycle-hooks", "deny-local-volume-options", "deny-providers", "deny-runtime-overrides", "deny-scaling", "deny-stop-grace-overrides", "deny-supplemental-groups", "deny-volumes-from"]);
 const PLATFORM_DEPENDENCIES = new Set([
   "postgres",
   "redis",
@@ -81,7 +81,9 @@ function workloadNetworkPrefix(id) {
 }
 
 function workloadNetworkOwner(network, workloadIds) {
-  return workloadIds.find((id) => network.startsWith(workloadNetworkPrefix(id)));
+  const owners = workloadIds.filter((id) => network.startsWith(workloadNetworkPrefix(id))
+    && WORKLOAD_NETWORK_ZONES.has(workloadNetworkZone(network, id)));
+  return owners.length === 1 ? owners[0] : null;
 }
 
 function workloadNetworkZone(network, workloadId) {
@@ -862,6 +864,10 @@ function assertPlatformServicesUnchanged(core, combined, workloadIds) {
       if (!PLATFORM_NETWORK_EXTENSION_ZONES.get(name)?.has(zone)) {
         invalid(`Platform service ${name} cannot join workload ${owner} zone ${zone}.`);
       }
+      const attachment = Array.isArray(combinedService.networks) ? null : combinedService.networks?.[network];
+      if (attachment != null && (!attachment || typeof attachment !== "object" || Array.isArray(attachment) || Object.keys(attachment).length > 0)) {
+        invalid(`Platform service ${name} cannot set aliases or address overrides on workload network ${network}.`);
+      }
     }
   }
 }
@@ -988,7 +994,11 @@ function assertWorkloadService({ serviceDefinition, manifestService, manifest, c
   const networks = serviceNetworks(serviceDefinition);
   if (networks.size === 0) invalid(`${name} must declare networks.`);
   for (const network of networks) {
-    if (!network.startsWith(workloadNetworkPrefix(manifest.id))) invalid(`${name} uses unauthorized network ${network}.`);
+    if (workloadNetworkOwner(network, combinedWorkloadIds(combined)) !== manifest.id) invalid(`${name} uses unauthorized network ${network}.`);
+    const attachment = Array.isArray(serviceDefinition.networks) ? null : serviceDefinition.networks?.[network];
+    if (attachment != null && (!attachment || typeof attachment !== "object" || Array.isArray(attachment) || Object.keys(attachment).length > 0)) {
+      invalid(`${name} cannot set aliases or address overrides on network ${network}.`);
+    }
   }
   for (const dependency of Object.keys(serviceDefinition.depends_on ?? {})) {
     if (!manifest.services.some((service) => service.name === dependency) && !PLATFORM_DEPENDENCIES.has(dependency)) {
@@ -1075,6 +1085,12 @@ function validateBrokerCoreSecretExtensions({ core, combined, workloads }) {
   }
 }
 
+function combinedWorkloadIds(combined) {
+  return [...new Set(Object.values(combined.services ?? {})
+    .map((service) => service?.labels?.["com.platform.workload-id"])
+    .filter((id) => typeof id === "string" && id.length > 0))];
+}
+
 export function validateRenderedWorkloads({ core, combined, lock }) {
   validateGlobalRouteOwnership(lock.workloads);
   assertBrokerPolicyDigest(lock);
@@ -1151,12 +1167,13 @@ export function validateRenderedWorkloads({ core, combined, lock }) {
   validateBrokerCoreSecretExtensions({ core, combined, workloads: lock.workloads });
   for (const [name, network] of Object.entries(combined.networks ?? {})) {
     if (core.networks?.[name]) continue;
-    const owner = lock.workloads.find((workload) => name.startsWith(workloadNetworkPrefix(workload.id)));
-    if (!owner) invalid(`Undeclared workload network ${name}.`);
+    const ownerId = workloadNetworkOwner(name, workloadIds);
+    const owner = lock.workloads.find((workload) => workload.id === ownerId);
+    if (!owner) invalid(`Undeclared or ambiguously owned workload network ${name}.`);
     const zone = workloadNetworkZone(name, owner.id);
     if (!WORKLOAD_NETWORK_ZONES.has(zone)) invalid(`Workload network ${name} has unsupported zone ${zone}.`);
     const expectedPhysicalName = `${lock.projectName}_${name}`;
-    if (network?.external === true || (network?.name != null && network.name !== expectedPhysicalName)) {
+    if (network?.external === true || network?.name !== expectedPhysicalName) {
       invalid(`Workload network ${name} cannot alias foreign physical network ${network?.name ?? name}.`);
     }
     if (zone === "egress") {
@@ -1246,15 +1263,18 @@ export function verifyRawPolicyReceipt(lock) {
   const receiptIds = receipt.workloads.map((item) => item?.workloadId).sort();
   if (!same(receiptIds, expectedIds)) invalid("Raw source policy receipt does not cover the exact workload set.");
   for (const item of receipt.workloads) {
-    if (!same(Object.keys(item ?? {}).sort(), ["composeSha256", "serviceNames", "topLevelKeys", "workloadId"])) {
+    if (!same(Object.keys(item ?? {}).sort(), ["composeSha256", "networkNames", "serviceNames", "topLevelKeys", "workloadId"])) {
       invalid("Raw source policy workload receipt has an unexpected shape.");
     }
     const workload = lock.workloads.find((candidate) => candidate.id === item.workloadId);
     const composeRecords = lock.files.filter((record) => record.kind === "workload-compose" && record.workloadId === item.workloadId);
     const serviceNames = Array.isArray(item.serviceNames) ? item.serviceNames : [];
+    const networkNames = Array.isArray(item.networkNames) ? item.networkNames : [];
     const topLevelKeys = Array.isArray(item.topLevelKeys) ? item.topLevelKeys : [];
     if (!workload || composeRecords.length !== 1 || item.composeSha256 !== composeRecords[0].sha256
         || !same(serviceNames, [...new Set(serviceNames)].sort())
+        || !same(networkNames, [...new Set(networkNames)].sort())
+        || networkNames.some((name) => workloadNetworkOwner(name, expectedIds) !== item.workloadId)
         || !same(topLevelKeys, [...new Set(topLevelKeys)].sort()) || !topLevelKeys.includes("services")
         || workload.services.some((service) => !serviceNames.includes(service.name))) {
       invalid(`Raw source policy receipt is not bound to ${item.workloadId ?? "a workload"}.`);
