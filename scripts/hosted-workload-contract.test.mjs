@@ -1557,6 +1557,7 @@ printf '[{"Name":"fixture_example_app_egress","EnableIPv6":false,"Labels":{"com.
 `, { mode: 0o755 });
     fs.writeFileSync(path.join(fakeBin, "iptables"), `#!/bin/sh
 case "$*" in
+  *'-S DOCKER-USER'*) printf '%s\n' '-A DOCKER-USER -j PLATFORM-WORKLOAD-EGRESS' ;;
   *'-S PLATFORM-WORKLOAD-EGRESS'*)
     count=0
     while [ "$count" -lt 17 ]; do printf '%s\n' '-A PLATFORM-WORKLOAD-EGRESS -j RETURN'; count=$((count + 1)); done

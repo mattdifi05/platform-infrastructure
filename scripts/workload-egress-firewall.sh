@@ -208,6 +208,8 @@ iptables -w -S DOCKER-USER >/dev/null 2>&1 || { echo "DOCKER-USER chain is unava
 
 verify_rules() {
   iptables -w -C DOCKER-USER -j "$CHAIN" >/dev/null
+  jump_count=$(iptables -w -S DOCKER-USER | awk -v chain="$CHAIN" '$1 == "-A" && $2 == "DOCKER-USER" && $3 == "-j" && $4 == chain && NF == 4 { count += 1 } END { print count + 0 }')
+  [ "$jump_count" -eq 1 ] || { echo "DOCKER-USER must contain exactly one direct workload egress jump" >&2; exit 1; }
   expected_rules=1
   blocked_rule_count=$(printf '%s\n' "$BLOCKED_DESTINATIONS" | awk 'NF { count += 1 } END { print count + 0 }')
   while IFS= read -r subnet; do
