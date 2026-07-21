@@ -213,6 +213,17 @@ test("stop grace period overrides are rejected after render", () => {
   combined.services["example-app-web"].stop_grace_period = "24h";
   assert.throws(() => validateRenderedWorkloads({ core, combined, lock }), /cannot override the stop grace period/);
 });
+test("GPU and accelerator requests are rejected after render", () => {
+  for (const mutation of [
+    (service) => { service.gpus = "all"; },
+    (service) => { service.device_requests = [{ capabilities: [["gpu"]] }]; },
+    (service) => { service.deploy = { resources: { reservations: { devices: [{ driver: "nvidia", capabilities: ["gpu"] }] } } }; },
+  ]) {
+    const combined = combinedFixture();
+    mutation(combined.services["example-app-web"]);
+    assert.throws(() => validateRenderedWorkloads({ core, combined, lock }), /cannot request GPU or accelerator access/);
+  }
+});
 test("platform service mutation is rejected", () => {
   const combined = combinedFixture();
   combined.services["project-router"].privileged = true;
@@ -514,7 +525,7 @@ test("legacy hosted workload locks fail closed", () => {
 test("raw policy receipt requires the exact current control set", () => {
   const rawPolicyReceipt = {
     policyVersion: "hosted-raw-v1",
-    controls: ["deny-api-socket", "deny-device-access", "deny-env-file", "deny-extends", "deny-file-configs", "deny-include", "deny-lifecycle-hooks", "deny-local-volume-options", "deny-providers", "deny-runtime-overrides", "deny-scaling", "deny-stop-grace-overrides", "deny-volumes-from"],
+    controls: ["deny-api-socket", "deny-device-access", "deny-env-file", "deny-extends", "deny-file-configs", "deny-gpu-access", "deny-include", "deny-lifecycle-hooks", "deny-local-volume-options", "deny-providers", "deny-runtime-overrides", "deny-scaling", "deny-stop-grace-overrides", "deny-volumes-from"],
     workloadContentSha256: "a".repeat(64),
     workloads: [{
       workloadId: "example-app",
@@ -536,12 +547,12 @@ test("raw policy receipt requires the exact current control set", () => {
     rawPolicyWorkloadContentSha256: "a".repeat(64),
     rawPolicyReceipt,
     rawPolicySha256: crypto.createHash("sha256").update(JSON.stringify(stable(rawPolicyReceipt))).digest("hex"),
-    rawPolicyControls: ["deny-api-socket", "deny-device-access", "deny-env-file", "deny-extends", "deny-file-configs", "deny-include", "deny-lifecycle-hooks", "deny-local-volume-options", "deny-providers", "deny-runtime-overrides", "deny-scaling", "deny-stop-grace-overrides", "deny-volumes-from"],
+    rawPolicyControls: ["deny-api-socket", "deny-device-access", "deny-env-file", "deny-extends", "deny-file-configs", "deny-gpu-access", "deny-include", "deny-lifecycle-hooks", "deny-local-volume-options", "deny-providers", "deny-runtime-overrides", "deny-scaling", "deny-stop-grace-overrides", "deny-volumes-from"],
   };
   assert.doesNotThrow(() => verifyRawPolicyReceipt(receipt));
   receipt.rawPolicyControls = ["deny-include"];
   assert.throws(() => verifyRawPolicyReceipt(receipt), /raw source policy receipt/);
-  receipt.rawPolicyControls = ["deny-api-socket", "deny-device-access", "deny-env-file", "deny-extends", "deny-file-configs", "deny-include", "deny-lifecycle-hooks", "deny-local-volume-options", "deny-providers", "deny-runtime-overrides", "deny-scaling", "deny-stop-grace-overrides", "deny-volumes-from"];
+  receipt.rawPolicyControls = ["deny-api-socket", "deny-device-access", "deny-env-file", "deny-extends", "deny-file-configs", "deny-gpu-access", "deny-include", "deny-lifecycle-hooks", "deny-local-volume-options", "deny-providers", "deny-runtime-overrides", "deny-scaling", "deny-stop-grace-overrides", "deny-volumes-from"];
   receipt.rawPolicySha256 = "b".repeat(64);
   assert.throws(() => verifyRawPolicyReceipt(receipt), /raw source policy receipt/);
   receipt.rawPolicyReceipt.workloads[0].composeSha256 = "d".repeat(64);

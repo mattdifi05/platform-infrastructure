@@ -161,4 +161,17 @@ class HostedWorkloadSourcePolicyTest < Minitest::Test
     end
     assert_match(/cannot override the stop grace period/, error.message)
   end
+
+  def test_rejects_gpu_and_accelerator_requests
+    [
+      "services:\n  app:\n    gpus: all\n",
+      "services:\n  app:\n    device_requests:\n      - capabilities: [gpu]\n",
+      "services:\n  app:\n    deploy:\n      resources:\n        reservations:\n          devices:\n            - driver: nvidia\n              capabilities: [gpu]\n"
+    ].each do |document|
+      error = assert_raises(ArgumentError) do
+        HostedWorkloadSourcePolicy.validate_source_model(parse(document), "fixture")
+      end
+      assert_match(/cannot request GPU or accelerator access/, error.message)
+    end
+  end
 end

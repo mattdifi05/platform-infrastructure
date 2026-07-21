@@ -142,6 +142,20 @@ test("rejects workload stop grace period overrides independently at runtime", ()
   assert.match(report.failures.join("\n"), /workload-no-stop-grace-override-example-app-web/);
 });
 
+test("rejects workload GPU and accelerator requests independently at runtime", () => {
+  for (const mutation of [
+    (service) => { service.gpus = "all"; },
+    (service) => { service.device_requests = [{ capabilities: [["gpu"]] }]; },
+    (service) => { service.deploy = { resources: { reservations: { devices: [{ driver: "nvidia", capabilities: ["gpu"] }] } } }; },
+  ]) {
+    const config = fixture();
+    mutation(config.services["example-app-web"]);
+    const report = evaluateRuntimeIsolation(config);
+    assert.equal(report.status, "failed");
+    assert.match(report.failures.join("\n"), /workload-no-accelerators-example-app-web/);
+  }
+});
+
 test("rejects missing memory limits and budget overcommit", () => {
   const config = fixture();
   config.services["example-app-web"].mem_limit = 0;
