@@ -2,7 +2,7 @@
   "accountId": "00000000000000000000000000000000",
   "teamName": "platform",
   "adminSessionDuration": "8h",
-  "domainSuffix": "example.com",
+  "domainSuffix": "platform-infrastructure.com",
   "adminSurfaceInventory": {
     "id": "platform-admin-access-surfaces",
     "version": "2026-07-21.1",
@@ -34,14 +34,14 @@
   ],
   "allowedEmailDomains": [],
   "applications": [
-    { "name": "Platform Grafana", "domain": "grafana.example.com" },
-    { "name": "Platform Prometheus", "domain": "prometheus.example.com" },
-    { "name": "Platform Alertmanager", "domain": "alertmanager.example.com" },
-    { "name": "Platform MinIO Console", "domain": "minio.example.com" },
-    { "name": "Platform Traefik Dashboard", "domain": "traefik.example.com" },
-    { "name": "Platform phpMyAdmin", "domain": "phpmyadmin.example.com" },
-    { "name": "Platform phpPgAdmin", "domain": "phppgadmin.example.com" },
-    { "name": "Platform Portal Control Center", "domain": "portal.example.com" },
-    { "name": "Platform Keycloak Admin", "domain": "keycloak-admin.example.com" }
+    { "name": "Platform Grafana", "domain": "grafana.platform-infrastructure.com" },
+    { "name": "Platform Prometheus", "domain": "prometheus.platform-infrastructure.com" },
+    { "name": "Platform Alertmanager", "domain": "alertmanager.platform-infrastructure.com" },
+    { "name": "Platform MinIO Console", "domain": "minio.platform-infrastructure.com" },
+    { "name": "Platform Traefik Dashboard", "domain": "traefik.platform-infrastructure.com" },
+    { "name": "Platform phpMyAdmin", "domain": "phpmyadmin.platform-infrastructure.com" },
+    { "name": "Platform phpPgAdmin", "domain": "phppgadmin.platform-infrastructure.com" },
+    { "name": "Platform Portal Control Center", "domain": "portal.platform-infrastructure.com" },
+    { "name": "Platform Keycloak Admin", "domain": "keycloak-admin.platform-infrastructure.com" }
   ]
 }

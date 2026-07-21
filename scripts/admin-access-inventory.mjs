@@ -3,7 +3,6 @@ import fs from "node:fs";
 import path from "node:path";
 
 const INVENTORY_SCHEMA_VERSION = 1;
-const ADMIN_DATABASE_SERVICES = new Set(["enterprise-phpmyadmin", "enterprise-phppgadmin"]);
 
 function cleanString(value, label) {
   const clean = String(value ?? "").trim();
@@ -127,6 +126,9 @@ export function loadAdminAccessInventory(file) {
 
 function expectedApplications(inventory, domainSuffix) {
   const suffix = validateDomainSuffix(domainSuffix, "Cloudflare Access manifest domainSuffix");
+  if (suffix !== inventory.routeDomainSuffix) {
+    throw new Error("Cloudflare Access manifest domainSuffix must match the authoritative inventory routeDomainSuffix.");
+  }
   return inventory.applications.map((entry) => ({
     id: entry.id,
     name: entry.name,
@@ -191,8 +193,10 @@ function parseDatabaseAdminRoutes(source, inventory) {
   const blocks = [];
   let current = null;
   for (const line of lines.slice(routerStart + 1, routerEnd)) {
-    const header = line.match(/^    ([a-zA-Z0-9_-]+):\s*$/);
-    if (header) {
+    if (/^    #/.test(line)) continue;
+    if (/^    \S/.test(line)) {
+      const header = line.match(/^    ([a-zA-Z0-9][a-zA-Z0-9_.-]*):\s*$/);
+      if (!header) throw new Error("Traefik admin routes file contains an unsupported router declaration.");
       if (current) blocks.push(current);
       current = { router: header[1] };
       continue;
@@ -208,7 +212,9 @@ function parseDatabaseAdminRoutes(source, inventory) {
   }
   if (current) blocks.push(current);
   const applicationById = new Map(inventory.applications.map((entry) => [entry.id, entry]));
-  return blocks.filter((entry) => ADMIN_DATABASE_SERVICES.has(entry.service)).map((entry) => {
+  // This dedicated file is a closed inventory boundary. Filtering by canonical
+  // service name would let a new router disappear behind an arbitrary alias.
+  return blocks.map((entry) => {
     if (!entry.host || !entry.pathPrefix) throw new Error(`Database admin router ${entry.router} must use an exact Host and PathPrefix rule.`);
     const application = inventory.routes.find((route) => route.host === entry.host && route.pathPrefix === entry.pathPrefix)?.accessApplicationId;
     if (!application || !applicationById.has(application)) {

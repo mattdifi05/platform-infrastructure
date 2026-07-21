@@ -75,12 +75,24 @@ test("the example manifest exactly binds all inventory applications including ph
   const contract = exactManifestContract();
   assert.equal(contract.manifestComplete, true);
   assert.equal(contract.expectedCount, rawInventory.applications.length);
-  assert.equal(contract.expectedDomains.includes("phppgadmin.example.com"), true);
+  assert.equal(contract.expectedDomains.includes("phppgadmin.platform-infrastructure.com"), true);
   assert.deepEqual(manifest.adminSurfaceInventory, {
     id: inventoryRecord.inventory.inventoryId,
     version: inventoryRecord.inventory.version,
     sha256: inventoryRecord.sha256,
   });
+});
+
+test("the manifest domain suffix must equal the authoritative route suffix", () => {
+  const mismatchedSuffix = "other.example";
+  const applications = rawInventory.applications.map((entry) => ({
+    name: entry.name,
+    domain: `${entry.subdomain}.${mismatchedSuffix}`,
+  }));
+  assert.throws(() => assertExactAdminApplications(applications, inventoryRecord, {
+    domainSuffix: mismatchedSuffix,
+    binding: manifest.adminSurfaceInventory,
+  }), /domainSuffix must match the authoritative inventory routeDomainSuffix/);
 });
 
 test("omitting first, middle, last, or phpPgAdmin application fails exact validation", () => {
@@ -102,13 +114,13 @@ test("empty, single, duplicate-name, duplicate-domain, case-variant, and unknown
 
   const duplicateDomain = clone(manifest.applications);
   duplicateDomain[1].domain = duplicateDomain[0].domain;
-  assert.throws(() => exactManifestContract(duplicateDomain), /duplicateDomains=grafana\.example\.com/);
+  assert.throws(() => exactManifestContract(duplicateDomain), /duplicateDomains=grafana\.platform-infrastructure\.com/);
 
   const caseVariant = [...clone(manifest.applications), {
     name: "Case variant duplicate",
     domain: manifest.applications[0].domain.toUpperCase(),
   }];
-  assert.throws(() => exactManifestContract(caseVariant), /duplicateDomains=grafana\.example\.com/);
+  assert.throws(() => exactManifestContract(caseVariant), /duplicateDomains=grafana\.platform-infrastructure\.com/);
 
   const unknown = clone(manifest.applications);
   unknown[0] = { name: "Unknown admin", domain: "unknown.example.com" };
@@ -184,6 +196,43 @@ test("an added route or an inventory route absent from Traefik fails reconciliat
     accessApplicationId: "portal-control-center",
   });
   assert.throws(() => reconcileAdminRouteInventory(recordFor(expanded), adminRoutes), /missing=.*phppgadmin-second/);
+});
+
+test("a router through a backend alias cannot disappear from exact surface reconciliation", () => {
+  const aliased = adminRoutes
+    .replace("\n  middlewares:\n", [
+      "",
+      "    enterprise-phpmyadmin-alias-path:",
+      "      rule: Host(`portal.platform-infrastructure.com`) && PathPrefix(`/hidden-phpmyadmin`)",
+      "      service: database-admin-backend-alias",
+      "",
+      "  middlewares:",
+      "",
+    ].join("\n"))
+    .replace("\n  services:\n", [
+      "",
+      "  services:",
+      "    database-admin-backend-alias:",
+      "      loadBalancer:",
+      "        servers:",
+      "          - url: http://phpmyadmin:80",
+      "",
+    ].join("\n"));
+  assert.throws(
+    () => reconcileAdminRouteInventory(inventoryRecord, aliased),
+    /unknown=.*enterprise-phpmyadmin-alias-path.*database-admin-backend-alias/,
+  );
+
+  const dottedAlias = adminRoutes.replace("  routers:\n", [
+    "  routers:",
+    "    enterprise.phpmyadmin.alias:",
+    "      rule: Host(`portal.platform-infrastructure.com`) && PathPrefix(`/hidden-phpmyadmin-dotted`)",
+    "      service: enterprise-phpmyadmin",
+  ].join("\n") + "\n");
+  assert.throws(
+    () => reconcileAdminRouteInventory(inventoryRecord, dottedAlias),
+    /unknown=.*enterprise\.phpmyadmin\.alias/,
+  );
 });
 
 test("phpPgAdmin absence and duplicate inventory identities fail authoritative inventory validation", () => {
