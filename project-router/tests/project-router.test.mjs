@@ -65,6 +65,7 @@ test("project-router proxies PHP, Node and Static projects only to dedicated ups
       STATIC_PROJECT_UPSTREAMS: `static-demo=http://127.0.0.1:${serverPort(staticServer)}`,
       CONTROL_CENTER_UPSTREAM: `http://127.0.0.1:${serverPort(controlServer)}`,
       PROJECT_ROUTER_TEST_ALLOW_LOOPBACK: "true",
+      PROJECT_ROUTER_TEST_ALLOW_LEGACY_DISCOVERY: "true",
       PROJECT_ROUTER_ALLOWED_UPSTREAMS: [
         `127.0.0.1:${serverPort(phpServer)}`,
         `127.0.0.1:${serverPort(nodeServer)}`,
@@ -161,13 +162,29 @@ test("project-router proxies PHP, Node and Static projects only to dedicated ups
   assert.match(lockedRoute.body, /upstream unavailable/);
 
   writeFileSync(workloadLockFile, `${JSON.stringify({
-    version: 1,
+    version: 2,
+    validatorVersion: "hosted-contract-v2",
     state: "verified",
-    routes: [{ workloadId: "fixture-app", slug: "locked-demo", service: "postgres", port: 5432, upstream: "http://postgres:5432" }],
+    routes: [routeFixture({ service: "postgres", port: 5432 })],
   }, null, 2)}\n`);
   const forgedLockedRoute = await httpGet(routerPort, "locked-demo.localhost.com", "/");
   assert.equal(forgedLockedRoute.statusCode, 500);
   assert.match(forgedLockedRoute.body, /internal proxy error/);
+
+  writeFileSync(workloadLockFile, `${JSON.stringify({
+    version: 2,
+    validatorVersion: "hosted-contract-v2",
+    state: "verified",
+    routes: [routeFixture({ canonicalHost: "*.localhost.com", hosts: ["*.localhost.com"] })],
+  }, null, 2)}\n`);
+  const wildcardLockedRoute = await httpGet(routerPort, "locked-demo.localhost.com", "/");
+  assert.equal(wildcardLockedRoute.statusCode, 500);
+  assert.match(wildcardLockedRoute.body, /internal proxy error/);
+
+  writeFileSync(workloadLockFile, `${JSON.stringify(verifiedRouteLock(), null, 2)}\n`);
+  const wildcardRequest = await httpGet(routerPort, "anything.example.invalid", "/");
+  assert.equal(wildcardRequest.statusCode, 404);
+  assert.match(wildcardRequest.body, /Project not found/);
 
   assert.equal(existsSync(path.join(projectsRoot, "php-demo", "public", "index.php")), true);
   assert.equal(stderr.includes("project-router error"), false);
@@ -193,6 +210,42 @@ test("project-router rejects IP and external-host upstream policy at production 
     assert.notEqual(stderr.code, 0);
     assert.doesNotMatch(stderr.stderr, /169\.254\.169\.254|example\.com|localhost:8080/);
   }
+});
+
+test("production routing ignores legacy discovery and environment maps", async (t) => {
+  const root = path.join(infraRoot, ".tmp", "project-router-tests", randomUUID());
+  const projects = path.join(root, "projects");
+  const state = path.join(root, "state");
+  mkdirSync(path.join(projects, "legacy-demo"), { recursive: true });
+  mkdirSync(state, { recursive: true });
+  writeFileSync(path.join(projects, "legacy-demo", "package.json"), "{}\n");
+  writeFileSync(path.join(state, "projects.json"), "{\"projects\":{}}\n");
+  const routerPort = await freePort();
+  const child = spawn(process.execPath, [path.join(infraRoot, "project-router", "server.mjs")], {
+    cwd: infraRoot,
+    env: {
+      ...process.env,
+      NODE_ENV: "production",
+      PROJECT_ROUTER_PORT: String(routerPort),
+      PROJECTS_ROOT: projects,
+      PROJECT_STATE_FILE: path.join(state, "projects.json"),
+      PROJECT_ROUTER_WORKLOAD_LOCK_FILE: path.join(state, "missing.lock.json"),
+      CONTROL_CENTER_HOST: "portal.localhost.com",
+      CONTROL_CENTER_UPSTREAM: "http://control-center:8080",
+      PROJECT_ROUTER_ALLOWED_UPSTREAMS: "control-center:8080,legacy-service:8080",
+      NODE_PROJECT_UPSTREAMS: "legacy-demo=http://legacy-service:8080",
+      PROJECT_ROUTER_TEST_ALLOW_LEGACY_DISCOVERY: "true",
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  t.after(async () => {
+    await stopChild(child);
+    rmSync(root, { recursive: true, force: true });
+  });
+  await waitForHealth(routerPort);
+  const response = await httpGet(routerPort, "legacy-demo.localhost.com", "/");
+  assert.equal(response.statusCode, 404);
+  assert.match(response.body, /Project not found/);
 });
 
 function prepareFixture() {
@@ -230,10 +283,32 @@ function prepareFixture() {
   writeFileSync(path.join(projectsRoot, "locked-demo", "package.json"), `${JSON.stringify({ scripts: { start: "node server.mjs" } }, null, 2)}\n`);
   writeFileSync(stateFile, `${JSON.stringify({ projects: {} }, null, 2)}\n`);
   writeFileSync(workloadLockFile, `${JSON.stringify({
-    version: 1,
-    state: "verified",
-    routes: [{ workloadId: "fixture-app", slug: "locked-demo", service: "fixture-app-web", port: 3000, upstream: "http://fixture-app-web:3000" }],
+    ...verifiedRouteLock(),
   }, null, 2)}\n`);
+}
+
+function verifiedRouteLock() {
+  return {
+    version: 2,
+    validatorVersion: "hosted-contract-v2",
+    state: "verified",
+    routes: [routeFixture()],
+  };
+}
+
+function routeFixture(overrides = {}) {
+  return {
+    owner: "fixture-app",
+    workloadId: "fixture-app",
+    slug: "locked-demo",
+    aliases: [],
+    canonicalHost: "locked-demo.localhost.com",
+    hosts: ["locked-demo.localhost.com"],
+    service: "fixture-app-web",
+    port: 3000,
+    upstream: "http://fixture-app-web:3000",
+    ...overrides,
+  };
 }
 
 function freePort() {

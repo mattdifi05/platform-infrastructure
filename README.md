@@ -113,6 +113,14 @@ SHA-256 di ogni input. Non crea database, non applica migrazioni e non avvia
 container. Il deploy usa soltanto un lock `verified`; se un file cambia, il
 render fallisce chiuso finche' il lock non viene rigenerato e approvato.
 
+Ogni route del manifest dichiara `slug`, host DNS canonico esatto, eventuali
+alias e porta. Il validatore assegna route e alias a un solo workload, rifiuta
+collisioni globali di slug, host e upstream (incluse le superfici riservate del
+core) e scrive nel lock la tupla completa di ownership. In produzione il
+`project-router` accetta esclusivamente queste tuple verificate: discovery dal
+filesystem, wildcard e mappe upstream da environment sono disponibili soltanto
+nei test che abilitano esplicitamente la compatibilita' legacy.
+
 ## Avvio locale
 
 ```sh

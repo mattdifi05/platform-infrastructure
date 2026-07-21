@@ -296,12 +296,90 @@ function sqlRecords(root, relativeRoots, snapshot, workloadId) {
   return records;
 }
 
-function normalizeRoute(route, serviceName) {
+function normalizeDnsHost(value, label) {
+  const host = requiredText(value, label).toLowerCase().replace(/\.$/, "");
+  if (host.length > 253 || host.includes(":") || host.includes("*") || host.split(".").some((part) => !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(part))) {
+    invalid(`${label} must be an exact normalized DNS hostname.`);
+  }
+  return host;
+}
+
+function normalizeRoute(route, serviceName, workloadId) {
   const slug = requiredText(route?.slug, `route slug for ${serviceName}`).toLowerCase();
   const port = Number(route?.port);
   if (!ID.test(slug)) invalid(`Route slug '${slug}' is invalid.`);
   if (!Number.isInteger(port) || port < 1 || port > 65535) invalid(`Route port for ${slug} is invalid.`);
-  return { slug, port };
+  const canonicalHost = normalizeDnsHost(route?.host, `route host for ${slug}`);
+  const labels = canonicalHost.split(".");
+  if (labels[0] !== slug) invalid(`Route host for ${slug} must begin with the exact route slug.`);
+  if (route?.aliases !== undefined && !Array.isArray(route.aliases)) invalid(`Route aliases for ${slug} must be an array.`);
+  const aliases = [...new Set((route?.aliases ?? []).map((value) => requiredText(value, `route alias for ${slug}`).toLowerCase()))].sort();
+  for (const alias of aliases) {
+    if (!ID.test(alias) || alias === slug) invalid(`Route alias '${alias}' for ${slug} is invalid.`);
+  }
+  const suffix = labels.slice(1).join(".");
+  const hosts = [canonicalHost, ...aliases.map((alias) => suffix ? `${alias}.${suffix}` : alias)];
+  return { owner: workloadId, slug, aliases, canonicalHost, hosts, port };
+}
+
+export function validateGlobalRouteOwnership(workloads, { reservedHosts = [] } = {}) {
+  const nameClaims = new Map();
+  const hostClaims = new Map([...reservedHosts].map((host) => [normalizeDnsHost(host, "reserved route host"), "platform"]));
+  const upstreamClaims = new Map();
+  const claims = [];
+  for (const workload of workloads) {
+    for (const service of workload.services ?? []) {
+      for (const route of service.routes ?? []) {
+        claims.push({ workloadId: workload.id, service: service.name, route, identity: `${workload.id}/${service.name}/${route.slug}` });
+      }
+    }
+  }
+  claims.sort((left, right) => left.identity.localeCompare(right.identity));
+  for (const claim of claims) {
+    const { workloadId, service, route, identity } = claim;
+    if (route.owner !== workloadId) invalid(`Route ${identity} is not bound to its workload owner.`);
+    for (const name of [route.slug, ...route.aliases]) claimUnique(nameClaims, name, identity, "slug or alias");
+    for (const host of route.hosts) claimUnique(hostClaims, host, identity, "host");
+    claimUnique(upstreamClaims, `${service}:${route.port}`, identity, "upstream");
+  }
+  return true;
+}
+
+function claimUnique(registry, value, identity, kind) {
+  const previous = registry.get(value);
+  if (previous && previous !== identity) {
+    const owners = [previous, identity].sort();
+    invalid(`Global route ${kind} '${value}' is claimed by both ${owners[0]} and ${owners[1]}.`);
+  }
+  registry.set(value, identity);
+}
+
+function reservedHostsFromEnvironment(filePath) {
+  const values = new Map();
+  for (const line of readStableRegularFile(path.resolve(filePath), "core environment").bytes.toString("utf8").split(/\r?\n/)) {
+    const separator = line.indexOf("=");
+    if (separator < 1) continue;
+    values.set(line.slice(0, separator).trim(), line.slice(separator + 1).trim().replace(/^['"]|['"]$/g, ""));
+  }
+  const domain = values.get("DOMAIN") || values.get("LOCAL_DOMAIN") || "";
+  const hosts = [
+    "ADMIN_HOST",
+    "CONTROL_CENTER_HOST",
+    "DOCS_HOST",
+    "AUTH_HOST",
+    "STORAGE_HOST",
+    "MINIO_CONSOLE_HOST",
+    "GRAFANA_HOST",
+    "PHPMYADMIN_HOST",
+    "PROMETHEUS_HOST",
+    "ALERTMANAGER_HOST",
+    "TRAEFIK_DASHBOARD_HOST",
+    "PROJECTS_HOST",
+  ]
+    .map((key) => values.get(key))
+    .filter(Boolean);
+  if (domain) hosts.push(domain, ...["portal", "docs", "app", "api", "auth", "storage", "grafana"].map((name) => `${name}.${domain}`));
+  return [...new Set(hosts)];
 }
 
 export function validateWorkloadManifest(document, manifestPath = "manifest") {
@@ -328,7 +406,7 @@ export function validateWorkloadManifest(document, manifestPath = "manifest") {
     if (!new Set(["api", "web", "worker", "scheduled-worker"]).has(role)) invalid(`Service ${name} has unsupported role ${role}.`);
     if (serviceNames.has(name)) invalid(`Duplicate service ${name}.`);
     serviceNames.add(name);
-    const routes = (service.routes ?? []).map((route) => normalizeRoute(route, name));
+    const routes = (service.routes ?? []).map((route) => normalizeRoute(route, name, id));
     if (routes.length > 0 && !new Set(["api", "web"]).has(role)) invalid(`Only api/web services may expose routes: ${name}.`);
     for (const route of routes) {
       if (routeSlugs.has(route.slug)) invalid(`Duplicate route slug ${route.slug}.`);
@@ -363,7 +441,6 @@ export function resolveCatalog({ catalogPath, workloadRoot, coreEnvFile, coreFil
   for (const coreFile of coreFiles) records.push(fileRecord(path.resolve(coreFile), "core-compose"));
   const ids = new Set();
   const services = new Set();
-  const routes = new Set();
   const workloads = catalog.workloads.map((entry) => {
     if (!entry || typeof entry !== "object" || Array.isArray(entry)) invalid("Each workload catalog entry must be an object.");
     const manifestPath = resolvePhysicalWithin(root, entry.manifest, "workload manifest", "file");
@@ -375,10 +452,6 @@ export function resolveCatalog({ catalogPath, workloadRoot, coreEnvFile, coreFil
     for (const service of manifest.services) {
       if (services.has(service.name)) invalid(`Duplicate workload service ${service.name}.`);
       services.add(service.name);
-      for (const route of service.routes) {
-        if (routes.has(route.slug)) invalid(`Duplicate global route ${route.slug}.`);
-        routes.add(route.slug);
-      }
     }
     const composePath = resolvePhysicalWithin(path.dirname(manifestPath), manifest.composeFile, "workload compose file", "file");
     manifestRecord.workloadId = manifest.id;
@@ -406,6 +479,7 @@ export function resolveCatalog({ catalogPath, workloadRoot, coreEnvFile, coreFil
       files: workloadRecords,
     };
   });
+  validateGlobalRouteOwnership(workloads, { reservedHosts: reservedHostsFromEnvironment(coreEnvFile) });
   const contentDigest = workloadContentSha256(records);
   const snapshotReceipt = finalizeSnapshot(snapshot, records, contentDigest);
   for (const workload of workloads) {
@@ -554,6 +628,7 @@ function assertWorkloadService({ serviceDefinition, manifestService, manifest, c
 }
 
 export function validateRenderedWorkloads({ core, combined, lock }) {
+  validateGlobalRouteOwnership(lock.workloads);
   const workloadIds = lock.workloads.map((workload) => workload.id);
   assertPlatformServicesUnchanged(core, combined, workloadIds);
   const declared = new Map();
@@ -572,7 +647,17 @@ export function validateRenderedWorkloads({ core, combined, lock }) {
       const workloadNetworks = [...serviceNetworks(rendered)].filter((network) => network.startsWith(workloadNetworkPrefix(item.workload.id)));
       const routerNetworks = serviceNetworks(combined.services?.["project-router"]);
       if (!workloadNetworks.some((network) => routerNetworks.has(network))) invalid(`Route ${route.slug} has no dedicated network shared with project-router.`);
-      routes.push({ workloadId: item.workload.id, slug: route.slug, service: name, port: route.port, upstream: `http://${name}:${route.port}` });
+      routes.push({
+        owner: item.workload.id,
+        workloadId: item.workload.id,
+        slug: route.slug,
+        aliases: route.aliases,
+        canonicalHost: route.canonicalHost,
+        hosts: route.hosts,
+        service: name,
+        port: route.port,
+        upstream: `http://${name}:${route.port}`,
+      });
     }
   }
   for (const [name, network] of Object.entries(combined.networks ?? {})) {
@@ -587,7 +672,7 @@ export function validateRenderedWorkloads({ core, combined, lock }) {
       invalid(`Workload network ${name} must be internal.`);
     }
   }
-  return { routes: routes.sort((a, b) => a.slug.localeCompare(b.slug)) };
+  return { routes: routes.sort((a, b) => a.canonicalHost.localeCompare(b.canonicalHost)) };
 }
 
 export function verifyLockFiles(lock) {

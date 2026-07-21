@@ -1,5 +1,6 @@
 import { createServer, request as httpRequest } from "node:http";
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { closeSync, constants, existsSync, fstatSync, openSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { isIP } from "node:net";
 import path from "node:path";
 
@@ -8,19 +9,20 @@ const projectsRoot = process.env.PROJECTS_ROOT || "/var/www/projects";
 const stateFile = process.env.PROJECT_STATE_FILE || "/var/www/project-state/projects.json";
 const workloadLockFile = process.env.PROJECT_ROUTER_WORKLOAD_LOCK_FILE || "/var/www/project-state/hosted-workloads.lock.json";
 const testLoopbackAllowed = process.env.NODE_ENV === "test" && process.env.PROJECT_ROUTER_TEST_ALLOW_LOOPBACK === "true";
+const testLegacyDiscoveryAllowed = process.env.NODE_ENV === "test" && process.env.PROJECT_ROUTER_TEST_ALLOW_LEGACY_DISCOVERY === "true";
 const allowedUpstreams = parseAllowedUpstreams(process.env.PROJECT_ROUTER_ALLOWED_UPSTREAMS || "control-center:8080");
 const controlCenterUpstream = validateUpstream(process.env.CONTROL_CENTER_UPSTREAM || "http://control-center:8080", "control-center");
 const domain = normalizeHost(process.env.DOMAIN || process.env.LOCAL_DOMAIN || "localhost.com");
 const adminHost = normalizeHost(process.env.ADMIN_HOST || `portal.${domain}`);
 const controlCenterHost = normalizeHost(process.env.CONTROL_CENTER_HOST || process.env.PROJECTS_HOST || adminHost);
 const hostSuffix = process.env.PROJECT_HOST_SUFFIX || ".localhost.com";
-const nodeHosts = parsePairs(process.env.NODE_PROJECT_HOSTS || "");
-const projectUpstreams = parsePairs(process.env.PROJECT_UPSTREAMS || "");
-const phpProjectUpstreams = parsePairs(process.env.PHP_PROJECT_UPSTREAMS || "");
-const nodeUpstreams = parsePairs(process.env.NODE_PROJECT_UPSTREAMS || "");
-const staticUpstreams = parsePairs(process.env.STATIC_PROJECT_UPSTREAMS || "");
+const nodeHosts = parsePairs(testLegacyDiscoveryAllowed ? process.env.NODE_PROJECT_HOSTS || "" : "");
+const projectUpstreams = parsePairs(testLegacyDiscoveryAllowed ? process.env.PROJECT_UPSTREAMS || "" : "");
+const phpProjectUpstreams = parsePairs(testLegacyDiscoveryAllowed ? process.env.PHP_PROJECT_UPSTREAMS || "" : "");
+const nodeUpstreams = parsePairs(testLegacyDiscoveryAllowed ? process.env.NODE_PROJECT_UPSTREAMS || "" : "");
+const staticUpstreams = parsePairs(testLegacyDiscoveryAllowed ? process.env.STATIC_PROJECT_UPSTREAMS || "" : "");
 const projectConfigNames = [".platform/project.json", "platform.project.json"];
-let workloadRouteCache = { key: "", routes: new Map(), allowed: new Set() };
+let workloadRouteCache = { key: "", byHost: new Map(), allowed: new Set() };
 
 const server = createServer(async (req, res) => {
   try {
@@ -33,6 +35,22 @@ const server = createServer(async (req, res) => {
 
     if (!host || host === controlCenterHost || (process.env.PROJECTS_HOST && host === normalizeHost(process.env.PROJECTS_HOST))) {
       proxy(req, res, controlCenterUpstream);
+      return;
+    }
+
+    const workloadRoutes = workloadRoutesFromLock();
+    const lockedRoute = workloadRoutes.byHost.get(host);
+    if (lockedRoute) {
+      if (!isEnabled(lockedRoute)) {
+        disabled(res, "Project disabled", host);
+        return;
+      }
+      proxy(req, res, validateUpstream(lockedRoute.upstream, lockedRoute.slug, workloadRoutes.allowed));
+      return;
+    }
+
+    if (!testLegacyDiscoveryAllowed) {
+      disabled(res, "Project not found", host);
       return;
     }
 
@@ -49,7 +67,7 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    const upstream = dedicatedUpstreamFor(project, workloadRoutesFromLock());
+    const upstream = dedicatedUpstreamFor(project);
     if (!upstream) {
       disabled(res, `${runtimeLabel(project.type)} project has no dedicated upstream`, host, 503);
       return;
@@ -103,14 +121,13 @@ function proxy(clientReq, clientRes, upstream) {
   clientReq.pipe(proxyReq);
 }
 
-function dedicatedUpstreamFor(project, workloadRoutes) {
-  const mapped = mappedProjectValue(workloadRoutes.routes, project)
-    || project.upstream
+function dedicatedUpstreamFor(project) {
+  const mapped = project.upstream
     || mappedProjectValue(projectUpstreams, project)
     || mappedProjectValue(upstreamMapForType(project.type), project);
   if (!mapped) return null;
   try {
-    return validateUpstream(expandProjectValue(mapped, project), project.slug, workloadRoutes.allowed);
+    return validateUpstream(expandProjectValue(mapped, project), project.slug);
   } catch {
     console.error(`rejected project upstream for ${project.slug}: service allowlist policy violation`);
     return null;
@@ -164,34 +181,108 @@ function validateUpstream(value, label, additionalAllowed = new Set()) {
 }
 
 function workloadRoutesFromLock() {
-  if (!existsSync(workloadLockFile)) return { routes: new Map(), allowed: new Set() };
-  const stat = statSync(workloadLockFile);
-  if (!stat.isFile() || stat.size < 2 || stat.size > 1024 * 1024) throw new Error("Invalid hosted workload lock file.");
-  const key = `${stat.mtimeMs}:${stat.size}`;
+  if (!existsSync(workloadLockFile)) return { key: "missing", byHost: new Map(), allowed: new Set() };
+  const bytes = readStableLockFile(workloadLockFile);
+  const key = createHash("sha256").update(bytes).digest("hex");
   if (workloadRouteCache.key === key) return workloadRouteCache;
-  const lock = JSON.parse(readFileSync(workloadLockFile, "utf8"));
-  if (lock?.version !== 1 || lock?.state !== "verified" || !Array.isArray(lock.routes)) throw new Error("Hosted workload lock is not verified.");
-  const routes = new Map();
+  const lock = JSON.parse(bytes.toString("utf8"));
+  if (lock?.version !== 2 || lock?.validatorVersion !== "hosted-contract-v2" || lock?.state !== "verified" || !Array.isArray(lock.routes)) {
+    throw new Error("Hosted workload lock is not verified under the supported contract.");
+  }
+  const byHost = new Map();
+  const names = new Map();
+  const upstreams = new Map();
   const allowed = new Set();
   for (const route of lock.routes) {
+    assertExactKeys(route, ["aliases", "canonicalHost", "hosts", "owner", "port", "service", "slug", "upstream", "workloadId"]);
+    const owner = String(route?.owner ?? "").toLowerCase();
     const workloadId = String(route?.workloadId ?? "").toLowerCase();
     const slug = String(route?.slug ?? "").toLowerCase();
     const service = String(route?.service ?? "").toLowerCase();
     const port = Number(route?.port);
-    if (!/^[a-z][a-z0-9-]{1,62}$/.test(workloadId)
-      || !/^[a-z][a-z0-9-]{1,62}$/.test(slug)
-      || !/^[a-z][a-z0-9-]{1,62}$/.test(service)
+    const canonicalHost = exactDnsHost(route?.canonicalHost);
+    const aliases = exactSlugArray(route?.aliases);
+    const suffix = canonicalHost.split(".").slice(1).join(".");
+    const expectedHosts = [canonicalHost, ...aliases.map((alias) => suffix ? `${alias}.${suffix}` : alias)];
+    const hosts = exactHostArray(route?.hosts);
+    if (!validId(owner)
+      || !validId(workloadId)
+      || owner !== workloadId
+      || !validId(slug)
+      || canonicalHost.split(".")[0] !== slug
+      || JSON.stringify(hosts) !== JSON.stringify(expectedHosts)
+      || !validId(service)
       || !service.startsWith(`${workloadId}-`)
       || !validPort(port)
-      || route.upstream !== `http://${service}:${port}`
-      || routes.has(slug)) {
+      || route.upstream !== `http://${service}:${port}`) {
       throw new Error("Hosted workload route violates the verified lock contract.");
     }
-    routes.set(slug, route.upstream);
+    const identity = `${workloadId}/${service}/${slug}`;
+    for (const name of [slug, ...aliases]) claimRouteValue(names, name, identity);
+    for (const host of hosts) claimRouteValue(byHost, host, { ...route, owner, workloadId, slug, aliases, canonicalHost, hosts, service, port });
+    claimRouteValue(upstreams, `${service}:${port}`, identity);
     allowed.add(`${service}:${port}`);
   }
-  workloadRouteCache = { key, routes, allowed };
+  workloadRouteCache = { key, byHost, allowed };
   return workloadRouteCache;
+}
+
+function readStableLockFile(filePath) {
+  let descriptor;
+  try {
+    descriptor = openSync(filePath, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+    const before = fstatSync(descriptor);
+    if (!before.isFile() || before.size < 2 || before.size > 1024 * 1024) throw new Error("Invalid hosted workload lock file.");
+    const bytes = readFileSync(descriptor);
+    const after = fstatSync(descriptor);
+    if (before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size || before.mtimeMs !== after.mtimeMs) {
+      throw new Error("Hosted workload lock changed while being read.");
+    }
+    return bytes;
+  } finally {
+    if (descriptor !== undefined) closeSync(descriptor);
+  }
+}
+
+function assertExactKeys(value, expected) {
+  if (!value || typeof value !== "object" || Array.isArray(value)
+      || JSON.stringify(Object.keys(value).sort()) !== JSON.stringify(expected)) {
+    throw new Error("Hosted workload route has unsupported fields.");
+  }
+}
+
+function exactSlugArray(value) {
+  if (!Array.isArray(value)) throw new Error("Hosted workload route aliases are invalid.");
+  const normalized = value.map((item) => String(item));
+  if (normalized.some((item) => !validId(item)) || JSON.stringify(normalized) !== JSON.stringify([...new Set(normalized)].sort())) {
+    throw new Error("Hosted workload route aliases are invalid.");
+  }
+  return normalized;
+}
+
+function exactHostArray(value) {
+  if (!Array.isArray(value) || value.length === 0) throw new Error("Hosted workload route hosts are invalid.");
+  return value.map((item) => exactDnsHost(item));
+}
+
+function exactDnsHost(value) {
+  const host = String(value ?? "");
+  if (host !== host.toLowerCase() || host.endsWith(".") || host.length > 253 || host.includes(":") || host.includes("*")) {
+    throw new Error("Hosted workload route host is invalid.");
+  }
+  if (host.split(".").some((label) => !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label))) {
+    throw new Error("Hosted workload route host is invalid.");
+  }
+  return host;
+}
+
+function claimRouteValue(registry, key, value) {
+  if (registry.has(key)) throw new Error("Hosted workload lock has duplicate global route ownership.");
+  registry.set(key, value);
+}
+
+function validId(value) {
+  return /^[a-z][a-z0-9-]{1,62}$/.test(value);
 }
 
 function validUpstreamHost(hostname) {

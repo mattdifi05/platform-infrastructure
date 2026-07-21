@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import {
   resolveCatalog,
+  validateGlobalRouteOwnership,
   validateRenderedWorkloads,
   validateWorkloadEnvironmentText,
   validateWorkloadManifest,
@@ -19,7 +20,11 @@ const manifest = validateWorkloadManifest({
   secrets: ["example-app-database-url"],
   migrationRoots: ["postgres/migrations"],
   services: [
-    { name: "example-app-web", role: "web", routes: [{ slug: "example", port: 3000 }] },
+    {
+      name: "example-app-web",
+      role: "web",
+      routes: [{ slug: "example", host: "Example.Example.com.", aliases: ["example-alt"], port: 3000 }],
+    },
     { name: "example-app-worker", role: "worker" },
   ],
 });
@@ -80,7 +85,17 @@ function test(name, fn) {
 test("exact hardened workload render passes", () => {
   assert.equal(manifest.version, 1);
   const result = validateRenderedWorkloads({ core, combined: combinedFixture(), lock });
-  assert.deepEqual(result.routes, [{ workloadId: "example-app", slug: "example", service: "example-app-web", port: 3000, upstream: "http://example-app-web:3000" }]);
+  assert.deepEqual(result.routes, [{
+    owner: "example-app",
+    workloadId: "example-app",
+    slug: "example",
+    aliases: ["example-alt"],
+    canonicalHost: "example.example.com",
+    hosts: ["example.example.com", "example-alt.example.com"],
+    service: "example-app-web",
+    port: 3000,
+    upstream: "http://example-app-web:3000",
+  }]);
 });
 test("build context is rejected", () => {
   const combined = combinedFixture();
@@ -150,10 +165,71 @@ test("duplicate route is rejected at manifest boundary", () => {
     id: "duplicate-app",
     composeFile: "compose.yaml",
     services: [
-      { name: "duplicate-app-one", role: "web", routes: [{ slug: "same", port: 3000 }] },
-      { name: "duplicate-app-two", role: "web", routes: [{ slug: "same", port: 3000 }] },
+      { name: "duplicate-app-one", role: "web", routes: [{ slug: "same", host: "same.example.com", port: 3000 }] },
+      { name: "duplicate-app-two", role: "web", routes: [{ slug: "same", host: "same.example.com", port: 3000 }] },
     ],
   }), /Duplicate route/);
+});
+
+test("global route collisions are deterministic regardless of manifest order", () => {
+  const alpha = validateWorkloadManifest({
+    version: 1,
+    id: "alpha-app",
+    composeFile: "compose.yaml",
+    services: [{
+      name: "alpha-app-web",
+      role: "web",
+      routes: [{ slug: "alpha", host: "alpha.example.com", aliases: ["shared"], port: 3000 }],
+    }],
+  });
+  const beta = validateWorkloadManifest({
+    version: 1,
+    id: "beta-app",
+    composeFile: "compose.yaml",
+    services: [{
+      name: "beta-app-web",
+      role: "web",
+      routes: [{ slug: "shared", host: "shared.example.net", port: 3001 }],
+    }],
+  });
+  const errors = [];
+  for (const workloads of [[alpha, beta], [beta, alpha]]) {
+    assert.throws(() => validateGlobalRouteOwnership(workloads), (error) => {
+      errors.push(error.message);
+      return /slug or alias 'shared'.*alpha-app.*beta-app/.test(error.message);
+    });
+  }
+  assert.equal(errors[0], errors[1]);
+});
+
+test("canonical host ownership rejects reserved and normalized duplicates", () => {
+  const alpha = validateWorkloadManifest({
+    version: 1,
+    id: "alpha-app",
+    composeFile: "compose.yaml",
+    services: [{ name: "alpha-app-web", role: "web", routes: [{ slug: "alpha", host: "ALPHA.example.com.", port: 3000 }] }],
+  });
+  assert.throws(
+    () => validateGlobalRouteOwnership([alpha], { reservedHosts: ["alpha.example.com"] }),
+    /host 'alpha\.example\.com'.*platform/,
+  );
+});
+
+test("global upstream reuse is rejected even when hosts differ", () => {
+  const workload = validateWorkloadManifest({
+    version: 1,
+    id: "example-app",
+    composeFile: "compose.yaml",
+    services: [{
+      name: "example-app-web",
+      role: "web",
+      routes: [
+        { slug: "alpha", host: "alpha.example.com", port: 3000 },
+        { slug: "beta", host: "beta.example.com", port: 3000 },
+      ],
+    }],
+  });
+  assert.throws(() => validateGlobalRouteOwnership([workload]), /upstream 'example-app-web:3000'/);
 });
 
 test("legacy hosted workload locks fail closed", () => {
