@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://platform-infrastructure.invalid/schemas/ultra-postfix-handoff-v1.json",
+  "title": "Ultra post-fix handoff manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "evidence_cutoff_at",
+    "candidate_final_commit",
+    "files"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "evidence_cutoff_at": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+    },
+    "candidate_final_commit": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "files": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "postfix_classification_ledger",
+        "fix_group_ledger",
+        "test_receipt_registry",
+        "pre_fix_negative_receipt",
+        "local_condition_closure",
+        "documentation_alignment_receipt",
+        "semantic_completion_receipt",
+        "required_matrices",
+        "four_verdicts",
+        "provider_live_residuals"
+      ],
+      "properties": {
+        "postfix_classification_ledger": {"$ref": "#/$defs/file"},
+        "fix_group_ledger": {"$ref": "#/$defs/file"},
+        "test_receipt_registry": {"$ref": "#/$defs/file"},
+        "pre_fix_negative_receipt": {"$ref": "#/$defs/file"},
+        "local_condition_closure": {"$ref": "#/$defs/file"},
+        "documentation_alignment_receipt": {"$ref": "#/$defs/file"},
+        "semantic_completion_receipt": {"$ref": "#/$defs/file"},
+        "required_matrices": {"$ref": "#/$defs/file"},
+        "four_verdicts": {"$ref": "#/$defs/file"},
+        "provider_live_residuals": {"$ref": "#/$defs/file"}
+      }
+    }
+  },
+  "$defs": {
+    "file": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256"],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$)).+$"
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    }
+  }
+}
