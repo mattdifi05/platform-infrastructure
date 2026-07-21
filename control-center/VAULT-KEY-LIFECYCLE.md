@@ -33,6 +33,13 @@ Stop the Control Center, restore the verified pre-migration Vault state and matc
 
 Database dump formats `.sql`, `.sql.gz`, and `.dump` are metadata-only in the browser. The Control Center does not read, decompress, redact, or return their contents. Verification of database contents belongs to an isolated restore drill.
 
+Unclassified `.txt`, `.md`, and generic `.json` backup files are also
+metadata-only: heuristic secret-name matching is not a confidentiality control.
+Only one bounded checksum record and a strict backup-signature sidecar schema
+can produce content. Signature bytes are omitted. Unknown fields, malformed or
+binary input, files above the small per-schema limit, symlinks, and files that
+change while read all fail closed to an empty metadata-only preview.
+
 ## Current rollout gate
 
 The implementation is sandbox-verified only. Live key initialization, Vault inventory read, migration, key rotation, Control Center restart, and deletion of any old key require a separate authorized maintenance gate and T08 restore evidence.

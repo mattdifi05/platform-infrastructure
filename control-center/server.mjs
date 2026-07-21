@@ -36,6 +36,7 @@ import {
   parseBackupJobDocument,
   parseBackupManifestDocument,
 } from "./backup/contracts.mjs";
+import { safeBackupPreview } from "./backup/preview.mjs";
 import {
   loadVaultKeyring,
   openLegacyVaultCiphertext,
@@ -4666,7 +4667,7 @@ function readBackupPreview(requestedPath = "") {
     sizeBytes: stat.size,
     sizeLabel: usageBytesLabel(stat.size),
     modifiedAt: italianDateTimeLabel(stat.mtime),
-    mode: "safe-redacted-preview",
+    mode: "metadata-only",
     content: "",
     linesRedacted: 0,
     message: "",
@@ -4686,22 +4687,13 @@ function readBackupPreview(requestedPath = "") {
       message: "Archivio tar.gz: contenuto raw non mostrato nel browser. L'integrita' e il restore sono verificati dai report.",
     });
   }
-  let text = "";
-  try {
-    text = readFileSync(target, "utf8");
-  } catch {
-    return sanitizeEvent({
-      ...result,
-      content: "",
-      message: "File non leggibile come testo sicuro.",
-    });
-  }
-  const preview = redactBackupPreviewText(text);
+  const preview = safeBackupPreview(target, relativePath);
   return sanitizeEvent({
     ...result,
+    mode: preview.mode,
     content: preview.content,
-    linesRedacted: preview.linesRedacted,
-    message: preview.truncated ? "Anteprima limitata e redatta." : "Anteprima redatta.",
+    linesRedacted: 0,
+    message: preview.message,
   });
 }
 
@@ -4715,25 +4707,6 @@ function backupPreviewType(ext) {
   if (ext.endsWith(".dump")) return "postgres-custom-dump";
   if (ext.endsWith(".tar.gz")) return "tar-gzip";
   return "text";
-}
-
-function redactBackupPreviewText(text) {
-  const maxLines = 120;
-  const lines = String(text || "").split(/\r?\n/);
-  const output = [];
-  let linesRedacted = 0;
-  for (const line of lines.slice(0, maxLines)) {
-    const redacted = sanitizeMessage(line)
-      .replace(/\b(password|passwd|pwd|secret|token|api[_-]?key|private[_-]?key|authorization|cookie)\b(\s*[:=]\s*|[`'"]?\s+)([^,\s;)}]+)/gi, "$1$2[redacted]")
-      .replace(/(-----BEGIN [A-Z ]*PRIVATE KEY-----)[\s\S]*/g, "$1[redacted]");
-    if (redacted !== line) linesRedacted += 1;
-    output.push(redacted);
-  }
-  return {
-    content: output.join("\n").slice(0, 12000),
-    linesRedacted,
-    truncated: lines.length > maxLines || output.join("\n").length > 12000,
-  };
 }
 
 function uniqueBackupResources(resources) {

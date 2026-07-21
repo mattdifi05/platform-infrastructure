@@ -2760,10 +2760,21 @@ test("Admin Control Center local foundation", async (t) => {
   assert.equal(applicationBackupFiles.entries.some((entry) => entry.name === "node-demo-source-20260629.tar.gz"), true);
 
   const backupPreview = await getJson(`${baseUrl}/control/backups/preview?path=postgres/preview.txt`);
-  assert.equal(backupPreview.mode, "safe-redacted-preview");
-  assert.match(backupPreview.content, /token=\[redacted\]/);
-  assert.match(backupPreview.content, /healthy=true/);
+  assert.equal(backupPreview.mode, "metadata-only");
+  assert.equal(backupPreview.content, "");
+  assert.match(backupPreview.message, /schema pubblico allowlist/);
   assert.doesNotMatch(JSON.stringify(backupPreview), /backup-secret-should-not-leak/);
+
+  const signaturePreview = await getJson(`${baseUrl}/control/backups/preview?path=postgres/public-preview.dump.sig.json`);
+  assert.equal(signaturePreview.mode, "allowlisted-preview");
+  assert.match(signaturePreview.content, /"signaturePresent": true/);
+  assert.doesNotMatch(JSON.stringify(signaturePreview), /backup-signature-canary-should-not-leak/);
+  for (const name of ["malformed.sig.json", "binary.sig.json", "oversize.sig.json"]) {
+    const deniedPreview = await getJson(`${baseUrl}/control/backups/preview?path=postgres/${name}`);
+    assert.equal(deniedPreview.mode, "metadata-only");
+    assert.equal(deniedPreview.content, "");
+    assert.doesNotMatch(JSON.stringify(deniedPreview), /backup-preview-canary-should-not-leak/);
+  }
 
   const dumpPreview = await getJson(`${baseUrl}/control/backups/preview?path=postgres/node-demo-20260629.dump`);
   assert.equal(dumpPreview.type, "postgres-custom-dump");
@@ -3979,6 +3990,18 @@ function prepareFixture() {
   writeFileSync(path.join(backupsRoot, "postgres", "node-demo-20260629.sql.gz"), "COPY secrets FROM stdin;\ncopy-row-secret-should-not-leak\n\\.\n");
   writeFileSync(path.join(backupsRoot, "postgres", "node-demo-20260629.dump.sha256"), "fixture-sha256\n");
   writeFileSync(path.join(backupsRoot, "postgres", "preview.txt"), "token=backup-secret-should-not-leak\nhealthy=true\n");
+  writeFileSync(path.join(backupsRoot, "postgres", "public-preview.dump.sig.json"), `${JSON.stringify({
+    version: 1,
+    algorithm: "HMAC-SHA256",
+    keyId: "fixture-key-v1",
+    artifact: "public-preview.dump",
+    sha256: "a".repeat(64),
+    signature: "backup-signature-canary-should-not-leak-0000000000000000",
+    signedAt: "2026-07-21T20:00:00.000Z",
+  })}\n`);
+  writeFileSync(path.join(backupsRoot, "postgres", "malformed.sig.json"), '{"credential_material":"backup-preview-canary-should-not-leak"');
+  writeFileSync(path.join(backupsRoot, "postgres", "binary.sig.json"), Buffer.from([0xff, 0xfe, 0x00, 0x41]));
+  writeFileSync(path.join(backupsRoot, "postgres", "oversize.sig.json"), `${"x".repeat(16385)}backup-preview-canary-should-not-leak`);
   writeFileSync(path.join(backupsRoot, "applications", "node-demo", "node-demo-source-20260629.tar.gz"), "fixture-source-archive\n");
   writeFileSync(path.join(backupsRoot, "mariadb", "node-demo-20260629.sql.gz"), "fixture-mariadb-backup\n");
   writeFileSync(path.join(backupsRoot, "mariadb", "node-demo-app-delete.sql.gz"), "fixture-managed-mariadb-backup\n");
