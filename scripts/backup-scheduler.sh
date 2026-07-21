@@ -56,6 +56,10 @@ write_env_var() {
   fi
 }
 
+queue_control() {
+  node "$INFRA_ROOT/scripts/backup-queue-control.mjs" "$@" --jobsDir "$JOBS_DIR" --logDir "$LOG_DIR"
+}
+
 load_runtime_env() {
   if [ ! -f "$ENV_FILE" ]; then
     echo "Scheduler runtime env file not found: $ENV_FILE" >&2
@@ -86,6 +90,15 @@ prepare_runtime_env() {
   write_env_var DOCKER_ACTION_RUNTIME_INTENT_ID "${DOCKER_ACTION_RUNTIME_INTENT_ID:-}"
   write_env_var DOCKER_ACTION_ACTIVE_RECEIPT_SHA256 "${DOCKER_ACTION_ACTIVE_RECEIPT_SHA256:-}"
   write_env_var DOCKER_ACTION_COMBINED_RENDER_SHA256 "${DOCKER_ACTION_COMBINED_RENDER_SHA256:-}"
+  write_env_var BACKUP_QUEUE_MAX_OUTSTANDING "${BACKUP_QUEUE_MAX_OUTSTANDING:-32}"
+  write_env_var BACKUP_QUEUE_MAX_PER_PRINCIPAL "${BACKUP_QUEUE_MAX_PER_PRINCIPAL:-4}"
+  write_env_var BACKUP_QUEUE_RATE_WINDOW_SECONDS "${BACKUP_QUEUE_RATE_WINDOW_SECONDS:-900}"
+  write_env_var BACKUP_QUEUE_MAX_CONCURRENCY "${BACKUP_QUEUE_MAX_CONCURRENCY:-1}"
+  write_env_var BACKUP_QUEUE_TERMINAL_MAX_PER_STATUS "${BACKUP_QUEUE_TERMINAL_MAX_PER_STATUS:-200}"
+  write_env_var BACKUP_QUEUE_TERMINAL_MAX_AGE_DAYS "${BACKUP_QUEUE_TERMINAL_MAX_AGE_DAYS:-30}"
+  write_env_var BACKUP_QUEUE_LEDGER_MAX_ENTRIES "${BACKUP_QUEUE_LEDGER_MAX_ENTRIES:-4096}"
+  write_env_var BACKUP_QUEUE_MAX_SCAN_ENTRIES "${BACKUP_QUEUE_MAX_SCAN_ENTRIES:-4096}"
+  write_env_var BACKUP_QUEUE_LOCK_TIMEOUT_MS "${BACKUP_QUEUE_LOCK_TIMEOUT_MS:-2000}"
 }
 
 cron_time() {
@@ -148,50 +161,11 @@ node_ops() {
   printf '%s --run %s' "$(quote_shell_value "$SCHEDULER_PATH")" "$1"
 }
 
-update_job_status() {
-  file="$1"
-  status="$2"
-  summary="$3"
-  exit_code="${4:-}"
-  node -e '
-const fs = require("fs");
-const [file, status, summary, exitCode] = process.argv.slice(1);
-const now = new Date().toISOString();
-const job = JSON.parse(fs.readFileSync(file, "utf8"));
-job.status = status;
-job.updatedAt = now;
-if (status === "running" && !job.startedAt) job.startedAt = now;
-if (status === "done" || status === "failed") job.finishedAt = now;
-job.resultSummary = summary;
-if (exitCode) job.exitCode = Number(exitCode);
-const temporary = `${file}.tmp-${process.pid}-${Date.now()}`;
-fs.writeFileSync(temporary, `${JSON.stringify(job, null, 2)}\n`, { mode: 0o600, flag: "wx" });
-fs.renameSync(temporary, file);
-' "$file" "$status" "$summary" "$exit_code"
-}
-
-valid_claimed_job_file_name() {
-  case "$1" in
-    ""|.|..|*/*|*\\*|*[!A-Za-z0-9._-]*|.*) return 1 ;;
-    *.json) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
 process_backup_job() {
-  queued_file="$1"
-  name="$(basename "$queued_file")"
-  mkdir -p "$JOBS_DIR/running" "$JOBS_DIR/done" "$JOBS_DIR/failed" "$LOG_DIR"
-  if ! valid_claimed_job_file_name "$name"; then
-    echo "Rejected unsafe backup job filename: $name" >&2
-    return 0
-  fi
-  running_file="$JOBS_DIR/running/$name"
-  if ! mv "$queued_file" "$running_file" 2>/dev/null; then
-    return 0
-  fi
-  log_file="$LOG_DIR/manual-backup-$name.log"
-  update_job_status "$running_file" "running" "Job preso in carico dal backup scheduler."
+  running_file="$1"
+  name="$(basename "$running_file")"
+  job_id="${name%.json}"
+  log_file="$LOG_DIR/manual-backup-$job_id.log"
   exit_code=0
   echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] executing claimed typed job $name" >> "$log_file"
   if node "$CLIENT_PATH" execute-backup-job --jobFileName "$name" >> "$log_file" 2>&1; then
@@ -201,23 +175,25 @@ process_backup_job() {
     echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] claimed typed job $name returned exit $exit_code" >> "$log_file"
   fi
   if [ "$exit_code" -eq 74 ]; then
-    update_job_status "$running_file" "running" "UNKNOWN_AFTER_ADMISSION: manual-reconciliation richiesta; retry automatico disabilitato." "$exit_code"
     echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] leaving $name in running for manual reconciliation" >> "$log_file"
   elif [ "$exit_code" -eq 0 ]; then
-    update_job_status "$running_file" "done" "Job completato dal backup scheduler."
-    mv "$running_file" "$JOBS_DIR/done/$name"
+    queue_control finish --jobId "$job_id" --status done --summary "Job completato dal backup scheduler."
   else
-    update_job_status "$running_file" "failed" "Job fallito nel backup scheduler." "$exit_code"
-    mv "$running_file" "$JOBS_DIR/failed/$name"
+    queue_control finish --jobId "$job_id" --status failed --summary "Job fallito nel backup scheduler." --exitCode "$exit_code"
   fi
 }
 
 process_backup_job_queue() {
   mkdir -p "$JOBS_DIR/queued" "$JOBS_DIR/running" "$JOBS_DIR/done" "$JOBS_DIR/failed"
   while true; do
-    queued_file="$(find "$JOBS_DIR/queued" -maxdepth 1 -type f -name '*.json' 2>/dev/null | sort | head -n 1 || true)"
-    if [ -n "$queued_file" ]; then
-      process_backup_job "$queued_file"
+    running_file=""
+    if ! running_file="$(queue_control claim)"; then
+      echo "Backup queue claim failed closed; retrying after $QUEUE_POLL_SECONDS seconds." >&2
+      sleep "$QUEUE_POLL_SECONDS"
+      continue
+    fi
+    if [ -n "$running_file" ]; then
+      process_backup_job "$running_file"
     else
       sleep "$QUEUE_POLL_SECONDS"
     fi

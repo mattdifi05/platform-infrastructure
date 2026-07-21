@@ -34,7 +34,33 @@ queued -> running -> done
                   -> failed
 ```
 
-Job files are private mode `0600` and written atomically. A queued file is moved to `running` before the executor sees it. The executor writes the manifest/report references; the scheduler records the terminal state.
+Job files are private mode `0600` and written atomically. Admission and scheduler transitions share the filesystem lock at `backup-jobs/.admission.lock`. A queued file is moved to `running` before the executor sees it. The executor writes the manifest/report references; the scheduler records the terminal state.
+
+### Bounded privileged queue
+
+`control-center/backup/queue-admission.mjs` is the only supported writer for a newly admitted privileged backup job. One locked transaction performs the active-work lookup, global depth check, per-principal sliding-window check, conservative admission-ledger reservation and durable job creation. Equivalent active work is keyed from the typed operation, exact scope, sorted resource IDs and restore manifest reference, without including the principal; two owners therefore cannot enqueue the same work concurrently.
+
+The scheduler uses `scripts/backup-queue-control.mjs` for claims and terminal transitions. The same lock enforces a scheduler-wide running-job limit across future replicas. Cron and run-on-start platform backup/restore work reserves the same budget with an ownership-checked lease; while such a lease exists, new Control Center admissions fail closed. `done` and `failed` job documents and their exact owned `manual-backup-<job-id>.log` files have count and age retention bounds. Active jobs are never retention candidates. Audit and backup evidence records remain governed by their separate evidence-retention policy.
+
+Default bounds are configurable with:
+
+- `BACKUP_QUEUE_MAX_OUTSTANDING=32`;
+- `BACKUP_QUEUE_MAX_PER_PRINCIPAL=4` per `BACKUP_QUEUE_RATE_WINDOW_SECONDS=900`;
+- `BACKUP_QUEUE_MAX_CONCURRENCY=1`;
+- `BACKUP_QUEUE_TERMINAL_MAX_PER_STATUS=200` and `BACKUP_QUEUE_TERMINAL_MAX_AGE_DAYS=30`;
+- `BACKUP_QUEUE_LEDGER_MAX_ENTRIES=4096`, `BACKUP_QUEUE_MAX_SCAN_ENTRIES=4096`, and `BACKUP_QUEUE_LOCK_TIMEOUT_MS=2000`.
+
+Invalid queue state, malformed ledger state, a non-regular queue file, an exhausted scan bound, or an unavailable lock all fail closed. An abandoned lock or scheduler lease is not automatically removed based only on age; an operator must first prove that no owner still holds it.
+
+### FG-004/FG-043 integration order
+
+Queue admission consumes only the immutable operation object returned by `control-center/auth/route-capabilities.mjs`. It does not accept raw URLs and contains no duplicate alias matcher. The required integration order is:
+
+1. integrate commit `0145498196b90d1df867c4b1428dcefed03d3c6d` so authorization and dispatch share the canonical operation object;
+2. pass that exact resolved object and the authenticated principal into `admitBackupJob()` at every `createBackupJob()` call site; and
+3. remove the old direct `writePrivateJsonAtomic()` queue write.
+
+Until step 2 is complete, the repository has the tested queue control and bounded scheduler lifecycle but the Control Center enqueue sink is not yet protected by FG-069 and must remain a production NO-GO. No path-based fallback is permitted.
 
 ## Manifest Import
 
