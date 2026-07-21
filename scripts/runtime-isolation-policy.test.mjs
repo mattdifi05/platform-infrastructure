@@ -159,6 +159,7 @@ test("rejects external and foreign workload volume aliases at runtime", () => {
   for (const definition of [
     { external: true, name: "foreign_data" },
     { name: "foreign_data" },
+    { name: "attacker_example-app_data" },
   ]) {
     const config = fixture();
     config.volumes = { "example-app_data": definition };
@@ -341,7 +342,7 @@ function fixture() {
     networks: { platform_docker_control: null },
   });
   services.postgres = bounded({ networks: {} });
-  return { services, networks: { platform_docker_control: { internal: true } } };
+  return { name: "fixture", services, networks: { platform_docker_control: { internal: true } } };
 }
 
 function bounded(overrides = {}) {

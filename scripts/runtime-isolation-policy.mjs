@@ -19,6 +19,7 @@ const FORBIDDEN_WORKLOAD_TARGETS = [
 export function evaluateRuntimeIsolation(config, options = {}) {
   const services = object(config?.services);
   const networks = object(config?.networks);
+  const projectName = String(options.projectName ?? config?.name ?? "");
   const maxMemoryBytes = integer(options.maxMemoryBytes ?? 13_500 * 1024 * 1024);
   const maxWorkloadMemoryBytes = integer(options.maxWorkloadMemoryBytes ?? 8_000 * 1024 * 1024);
   const checks = [];
@@ -130,8 +131,7 @@ export function evaluateRuntimeIsolation(config, options = {}) {
         const definition = object(config?.volumes?.[mount.source]);
         return !mount.source.startsWith(`${workloadId}_`)
           || definition.external === true
-          || typeof definition.name !== "string"
-          || !definition.name.endsWith(`_${mount.source}`);
+          || definition.name !== `${projectName}_${mount.source}`;
       })
       .map((mount) => mount.source);
     record(`workload-owned-volumes-${name}`, foreignVolumes.length === 0, `${name} foreignVolumes=${foreignVolumes.join(",") || "none"}`);
