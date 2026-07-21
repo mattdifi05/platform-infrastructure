@@ -47,6 +47,7 @@ import {
 import { controlIcon } from "./components/ui/controlIcons.mjs";
 import { createControlStateStore, validateStateRecord } from "./state/catalog.mjs";
 import { executeStatusChecks } from "./status/executor.mjs";
+import { createProjectDiskUsageReader, unavailableUsage as unavailableProjectDiskUsage } from "./resources/project-disk-usage.mjs";
 
 const port = Number(process.env.CONTROL_CENTER_PORT || 8080);
 const bindHost = String(process.env.CONTROL_CENTER_BIND_HOST || "0.0.0.0").trim();
@@ -88,8 +89,19 @@ const resourceMetricsTtlMs = clampNumber(Number(process.env.CONTROL_CENTER_RESOU
 const resourceProbeFailureCooldownMs = clampNumber(Number(process.env.CONTROL_CENTER_RESOURCE_PROBE_FAILURE_COOLDOWN_MS || 15000), 1000, 120000);
 const dockerStatsMaxAgeMs = clampNumber(Number(process.env.CONTROL_CENTER_DOCKER_STATS_MAX_AGE_SECONDS || 15) * 1000, 5000, 120000);
 const resourceMetricsCache = { value: null, expiresAt: 0, failedUntil: 0 };
-const projectDiskUsageTtlMs = clampNumber(Number(process.env.CONTROL_CENTER_PROJECT_DISK_USAGE_TTL_MS || 30000), 1000, 300000);
-const projectDiskUsageCache = new Map();
+const projectDiskUsageReader = createProjectDiskUsageReader({
+  ttlMs: clampNumber(Number(process.env.CONTROL_CENTER_PROJECT_DISK_USAGE_TTL_MS || 30000), 1000, 300000),
+  partialTtlMs: clampNumber(Number(process.env.CONTROL_CENTER_PROJECT_DISK_USAGE_PARTIAL_TTL_MS || 5000), 1000, 30000),
+  staleTtlMs: clampNumber(Number(process.env.CONTROL_CENTER_PROJECT_DISK_USAGE_STALE_TTL_MS || 300000), 30000, 3600000),
+  maxConcurrency: clampNumber(Number(process.env.CONTROL_CENTER_PROJECT_DISK_USAGE_CONCURRENCY || 2), 1, 8),
+  scanOptions: {
+    maxDepth: clampNumber(Number(process.env.CONTROL_CENTER_PROJECT_DISK_USAGE_MAX_DEPTH || 32), 1, 128),
+    maxNodes: clampNumber(Number(process.env.CONTROL_CENTER_PROJECT_DISK_USAGE_MAX_NODES || 50000), 100, 1000000),
+    maxBytes: clampNumber(Number(process.env.CONTROL_CENTER_PROJECT_DISK_USAGE_MAX_BYTES || 100 * 1024 * 1024 * 1024), 1024 * 1024, Number.MAX_SAFE_INTEGER),
+    timeoutMs: clampNumber(Number(process.env.CONTROL_CENTER_PROJECT_DISK_USAGE_TIMEOUT_MS || 1500), 50, 10000),
+    yieldEvery: clampNumber(Number(process.env.CONTROL_CENTER_PROJECT_DISK_USAGE_YIELD_EVERY || 64), 1, 1000),
+  },
+});
 const controlContextCacheTtlMs = clampNumber(Number(process.env.CONTROL_CENTER_CONTEXT_CACHE_TTL_MS || 2000), 250, 5000);
 const controlContextCache = { key: "", value: null, expiresAt: 0, pending: null };
 const phpMyAdminInternalUrl = String(process.env.CONTROL_CENTER_PHPMYADMIN_INTERNAL_URL || "http://phpmyadmin:80").replace(/\/$/, "");
@@ -7520,7 +7532,10 @@ async function collectLiveResourceUsage({ projects, applications, webspaces }) {
   const capturedAt = new Date().toISOString();
   const prometheus = await readPrometheusResourceSnapshot();
   const dockerStats = readDockerStatsSnapshot();
-  const projectDisks = new Map(projects.map((project) => [project.slug, readProjectDiskUsage(project)]));
+  const projectDisks = new Map(await Promise.all(projects.map(async (project) => [
+    project.slug,
+    await readProjectDiskUsage(project),
+  ])));
   const containersByProject = applications.flatMap((app) => {
     const project = projects.find((item) => item.slug === app.projectId) || projects.find((item) => item.slug === app.id);
     const exactContainers = project ? matchApplicationContainers(app, project, prometheus.containers) : [];
@@ -7596,6 +7611,12 @@ async function collectLiveResourceUsage({ projects, applications, webspaces }) {
       diskBytes: disk.bytes,
       files: disk.files,
       directories: disk.directories,
+      diskComplete: disk.complete,
+      diskTruncated: disk.truncated,
+      diskStale: disk.stale,
+      diskLimitReason: disk.reason,
+      diskMeasuredAt: disk.measuredAt,
+      symlinks: disk.symlinks,
       cpuCores,
       cpuPercent: sumContainerCpuPercent(exactContainers) ?? cpuPercent,
       memoryBytes,
@@ -7859,50 +7880,15 @@ function readLocalFilesystemSnapshot(targetPath) {
   }
 }
 
-function readProjectDiskUsage(project) {
-  if (!project.filesAvailable || !project.relativePath) return { available: false, bytes: 0, files: 0, directories: 0 };
+async function readProjectDiskUsage(project) {
+  if (!project.filesAvailable || !project.relativePath) return unavailableProjectDiskUsage("source-unavailable");
   try {
     const root = resolveProjectRoot(project);
     const key = `${project.slug}:${root}`;
-    const cached = projectDiskUsageCache.get(key);
-    const now = Date.now();
-    if (cached && cached.expiresAt > now) return cached.value;
-    const value = directoryUsage(root);
-    projectDiskUsageCache.set(key, { value, expiresAt: now + projectDiskUsageTtlMs });
-    return value;
+    return await projectDiskUsageReader.read(key, root);
   } catch {
-    return { available: false, bytes: 0, files: 0, directories: 0 };
+    return unavailableProjectDiskUsage("source-unavailable");
   }
-}
-
-function directoryUsage(root) {
-  const stack = [root];
-  let bytes = 0;
-  let files = 0;
-  let directories = 0;
-  while (stack.length) {
-    const current = stack.pop();
-    let stat;
-    try {
-      stat = lstatSync(current);
-    } catch {
-      continue;
-    }
-    bytes += Number(stat.size || 0);
-    if (stat.isDirectory() && !stat.isSymbolicLink()) {
-      directories += 1;
-      let entries = [];
-      try {
-        entries = readdirSync(current);
-      } catch {
-        entries = [];
-      }
-      for (const entry of entries) stack.push(path.join(current, entry));
-    } else {
-      files += 1;
-    }
-  }
-  return { available: true, bytes, files, directories };
 }
 
 function matchApplicationContainers(app, project, containers) {
