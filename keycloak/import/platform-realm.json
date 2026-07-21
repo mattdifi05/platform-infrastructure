@@ -82,7 +82,10 @@
         "https://portal.localhost.com"
       ],
       "attributes": {
-        "pkce.code.challenge.method": "S256"
+        "pkce.code.challenge.method": "S256",
+        "backchannel.logout.url": "https://portal.localhost.com/auth/backchannel-logout",
+        "backchannel.logout.session.required": "true",
+        "backchannel.logout.revoke.offline.tokens": "true"
       },
       "protocolMappers": [
         {

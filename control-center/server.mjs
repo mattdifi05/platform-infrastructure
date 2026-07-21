@@ -205,6 +205,113 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    if (url.pathname === "/auth/provider-security-event" && req.method === "POST") {
+      let result;
+      try {
+        result = await controlAuth.providerSecurityEvent(req);
+      } catch (error) {
+        const invalidToken = error instanceof AuthRequestError;
+        try {
+          appendAudit({
+            action: invalidToken
+              ? "admin.oidc.provider-security-event.rejected"
+              : "admin.oidc.provider-security-event.failed",
+            target: "control-center-sessions",
+            environment,
+            risk: "medium",
+            result: "failed",
+            dryRun: false,
+            summary: invalidToken
+              ? "Signed provider account or authorization event was rejected before session mutation."
+              : "Provider security event processing failed or had an indeterminate commit outcome; an idempotent retry is required.",
+          });
+        } catch {
+          // Preserve the protocol status even when the local audit sink is unavailable.
+        }
+        json(res, {
+          error: invalidToken ? "oidc_provider_security_event_rejected" : "oidc_provider_security_event_unavailable",
+          message: invalidToken
+            ? "Provider security event was rejected."
+            : "Provider security event processing is temporarily unavailable; retry safely.",
+        }, invalidToken ? error.status : 503);
+        return;
+      }
+
+      try {
+        appendAudit({
+          action: "admin.oidc.provider-security-event.accepted",
+          target: "control-center-sessions",
+          environment,
+          risk: "medium",
+          result: "success",
+          dryRun: false,
+          summary: `Validated provider security event processed; type=${result.eventType} revoked=${Number(result.revoked || 0)} replayed=${result.replayed === true}.`,
+        });
+      } catch {
+        json(res, {
+          error: "oidc_provider_security_event_audit_unavailable",
+          message: "Provider security event was processed, but completion evidence is temporarily unavailable; retry safely.",
+        }, 503);
+        return;
+      }
+      json(res, { ok: true, replayed: result.replayed === true, revoked: Number(result.revoked || 0) });
+      return;
+    }
+
+    if (url.pathname === "/auth/backchannel-logout" && req.method === "POST") {
+      let result;
+      try {
+        result = await controlAuth.backchannelLogout(req);
+      } catch (error) {
+        const invalidToken = error instanceof AuthRequestError;
+        try {
+          appendAudit({
+            action: invalidToken
+              ? "admin.oidc.backchannel-logout.rejected"
+              : "admin.oidc.backchannel-logout.failed",
+            target: "control-center-sessions",
+            environment,
+            risk: "medium",
+            result: "failed",
+            dryRun: false,
+            summary: invalidToken
+              ? "OIDC back-channel logout signal was rejected before session mutation."
+              : "OIDC back-channel logout processing failed or had an indeterminate commit outcome; an idempotent retry is required.",
+          });
+        } catch {
+          // Preserve the protocol status even when the local audit sink is unavailable.
+        }
+        const status = invalidToken ? error.status : 503;
+        json(res, {
+          error: invalidToken ? "oidc_backchannel_logout_rejected" : "oidc_backchannel_logout_unavailable",
+          message: invalidToken
+            ? "OIDC back-channel logout was rejected."
+            : "OIDC back-channel logout is temporarily unavailable; retry safely.",
+        }, status);
+        return;
+      }
+
+      try {
+        appendAudit({
+          action: "admin.oidc.backchannel-logout.accepted",
+          target: "control-center-sessions",
+          environment,
+          risk: "medium",
+          result: "success",
+          dryRun: false,
+          summary: `Validated OIDC logout signal processed; revoked=${Number(result.revoked || 0)} replayed=${result.replayed === true}.`,
+        });
+      } catch {
+        json(res, {
+          error: "oidc_backchannel_logout_audit_unavailable",
+          message: "OIDC back-channel logout was processed, but completion evidence is temporarily unavailable; retry safely.",
+        }, 503);
+        return;
+      }
+      json(res, { ok: true, replayed: result.replayed === true, revoked: Number(result.revoked || 0) });
+      return;
+    }
+
     if (url.pathname === "/logout" && req.method === "POST") {
       const session = await controlAuth.authenticate(req);
       if (!session.ok) {

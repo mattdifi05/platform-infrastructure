@@ -2924,6 +2924,7 @@ function infraMaintainabilityHygiene() {
     "host-reliability-sandbox-test.sh",
     "hosted-workload-lock.sh",
     "install-host-reliability-collector.sh",
+    "keycloak-backchannel-configure.sh",
     "keycloak-passkey-readiness.sh",
     "minio-service-identity.sh",
     "network-segmentation-sandbox-test.sh",

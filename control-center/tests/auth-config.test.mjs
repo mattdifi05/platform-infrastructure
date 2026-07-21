@@ -117,6 +117,68 @@ test("memory auth store consumes transactions once and revokes sessions", async 
   assert.equal(await store.getSession("session-hash", 60), null);
 });
 
+test("memory auth store revokes by issuer sid and subject with replay protection", async () => {
+  const store = new MemoryAuthStore();
+  const issuer = "https://identity.example.test/realms/platform";
+  const subject = "owner-subject";
+  const authTime = new Date(Date.now() - 60_000);
+  const expiresAt = new Date(Date.now() + 10 * 60_000);
+  const session = (tokenHash, sessionId) => ({
+    tokenHash,
+    csrfHash: "f".repeat(64),
+    policyVersion: "1",
+    subject,
+    role: "owner",
+    roles: ["owner"],
+    acr: "urn:platform:loa:passkey",
+    amr: ["webauthn"],
+    authTime,
+    issuer,
+    sessionId,
+    expiresAt,
+  });
+  await store.createSession(session("a".repeat(64), "sid-a"));
+  await store.createSession(session("b".repeat(64), "sid-b"));
+  const issuedAt = new Date();
+  const receiptExpiry = new Date(Date.now() + 20 * 60_000);
+  const sidResult = await store.consumeProviderRevocation({
+    issuer,
+    eventType: "http://schemas.openid.net/event/backchannel-logout",
+    jtiHash: "1".repeat(64),
+    issuedAt,
+    expiresAt: receiptExpiry,
+    sid: "sid-a",
+    subject,
+  });
+  assert.deepEqual(sidResult, { replayed: false, revoked: 1 });
+  assert.equal(await store.getSession("a".repeat(64), 60), null);
+  assert.equal((await store.getSession("b".repeat(64), 60)).sessionId, "sid-b");
+  assert.deepEqual(await store.consumeProviderRevocation({
+    issuer,
+    eventType: "http://schemas.openid.net/event/backchannel-logout",
+    jtiHash: "1".repeat(64),
+    issuedAt,
+    expiresAt: receiptExpiry,
+    sid: "sid-a",
+    subject,
+  }), { replayed: true, revoked: 0 });
+  const subjectResult = await store.consumeProviderRevocation({
+    issuer,
+    eventType: "urn:platform-infrastructure:event:account-disabled",
+    jtiHash: "2".repeat(64),
+    issuedAt,
+    expiresAt: receiptExpiry,
+    sid: "",
+    subject,
+  });
+  assert.deepEqual(subjectResult, { replayed: false, revoked: 1 });
+  assert.equal(await store.getSession("b".repeat(64), 60), null);
+  await assert.rejects(
+    store.createSession(session("c".repeat(64), "sid-c")),
+    /was revoked/,
+  );
+});
+
 function completeOidcEnv() {
   return {
     NODE_ENV: "test",

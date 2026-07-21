@@ -3198,6 +3198,8 @@ test("Admin Control Center OIDC passkey guard", async (t) => {
   const requiredAcr = "urn:platform:loa:passkey";
   const clientId = "platform-control-center";
   const { publicKey, privateKey } = await generateKeyPair("RS256", { extractable: true });
+  const { privateKey: wrongPrivateKey } = await generateKeyPair("RS256");
+  const { privateKey: disallowedAlgorithmPrivateKey } = await generateKeyPair("PS256");
   const publicJwk = { ...(await exportJWK(publicKey)), alg: "RS256", use: "sig", kid: "test-key" };
   let expectedNonce = "";
   let tokenRequests = 0;
@@ -3231,11 +3233,28 @@ test("Admin Control Center OIDC passkey guard", async (t) => {
       const role = code === "viewer" ? "viewer" : "owner";
       const acr = code === "password-auth" ? "urn:platform:loa:password" : requiredAcr;
       const authTime = Math.floor(Date.now() / 1000) - (code === "stale-owner" ? 360 : 0);
+      const subject = code === "backchannel-owner"
+        ? "test-backchannel-owner"
+        : code === "audit-failure-owner"
+          ? "test-audit-failure-owner"
+          : code === "provider-audit-failure-owner"
+            ? "test-provider-audit-failure-owner"
+          : code.startsWith("provider-event-")
+            ? "test-provider-event-owner"
+            : code === "account-disabled-owner" ? "test-account-disabled-owner" : `test-${role}`;
+      const sessionId = code === "backchannel-owner"
+        ? "sid-backchannel-owner"
+        : code === "audit-failure-owner"
+          ? "sid-audit-failure-owner"
+          : code.startsWith("provider-event-") || code === "account-disabled-owner" || code === "provider-audit-failure-owner"
+            ? `sid-${code}`
+            : `sid-test-${role}`;
       const idToken = await new SignJWT({
         nonce: expectedNonce,
         acr,
         amr: acr === requiredAcr ? ["webauthn"] : ["pwd"],
         auth_time: authTime,
+        sid: sessionId,
         email: `${role}@example.test`,
         name: `Test ${role}`,
         realm_access: { roles: [role] },
@@ -3243,7 +3262,7 @@ test("Admin Control Center OIDC passkey guard", async (t) => {
         .setProtectedHeader({ alg: "RS256", kid: "test-key" })
         .setIssuer(issuer)
         .setAudience(clientId)
-        .setSubject(`test-${role}`)
+        .setSubject(subject)
         .setIssuedAt()
         .setExpirationTime("5m")
         .sign(privateKey);
@@ -3427,6 +3446,262 @@ test("Admin Control Center OIDC passkey guard", async (t) => {
   const loginAudit = ownerAudit.audit.find((event) => event.action === "admin.oidc.login.success" && event.target === "test-owner");
   assert.equal(loginAudit.actor, "test-owner");
 
+  const backchannelState = await beginLogin();
+  const backchannelLogin = await fetch(`${baseUrl}/auth/callback?code=backchannel-owner&state=${encodeURIComponent(backchannelState)}`, { redirect: "manual" });
+  assert.equal(backchannelLogin.status, 303);
+  const backchannelCookie = cookieHeader(responseSetCookies(backchannelLogin));
+  const auditFailureState = await beginLogin();
+  const auditFailureLogin = await fetch(`${baseUrl}/auth/callback?code=audit-failure-owner&state=${encodeURIComponent(auditFailureState)}`, { redirect: "manual" });
+  assert.equal(auditFailureLogin.status, 303);
+  const auditFailureCookie = cookieHeader(responseSetCookies(auditFailureLogin));
+  async function createLogoutToken({
+    claims = {},
+    omit = [],
+    signer = privateKey,
+    alg = "RS256",
+    kid = "test-key",
+    tokenIssuer = issuer,
+    tokenAudience = clientId,
+    jti = `logout-${randomUUID()}`,
+    issuedAt = Math.floor(Date.now() / 1000),
+  } = {}) {
+    const payload = {
+      events: {
+        "http://schemas.openid.net/event/backchannel-logout": {},
+        revoke_offline_access: true,
+      },
+      sid: "sid-backchannel-owner",
+      sub: "test-backchannel-owner",
+      ...claims,
+    };
+    for (const claim of omit) delete payload[claim];
+    let token = new SignJWT(payload)
+      .setProtectedHeader({ alg, kid })
+      .setIssuer(tokenIssuer)
+      .setAudience(tokenAudience)
+      .setIssuedAt(issuedAt)
+      .setExpirationTime("5m");
+    if (jti !== null) token = token.setJti(jti);
+    return token.sign(signer);
+  }
+
+  async function submitBackchannelToken(token) {
+    return fetch(`${baseUrl}/auth/backchannel-logout`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded", accept: "application/json" },
+      body: new URLSearchParams({ logout_token: token }),
+    });
+  }
+
+  async function createProviderSecurityEventToken({
+    eventType = "urn:platform-infrastructure:event:authorization-changed",
+    eventValue = {},
+    claims = {},
+    omit = [],
+    signer = privateKey,
+    tokenIssuer = issuer,
+    tokenAudience = clientId,
+    tokenType = "secevent+jwt",
+    jti = `provider-event-${randomUUID()}`,
+    issuedAt = Math.floor(Date.now() / 1000),
+  } = {}) {
+    const payload = {
+      events: { [eventType]: eventValue },
+      sub: "test-provider-event-owner",
+      ...claims,
+    };
+    for (const claim of omit) delete payload[claim];
+    let token = new SignJWT(payload)
+      .setProtectedHeader({ alg: "RS256", kid: "test-key", typ: tokenType })
+      .setIssuer(tokenIssuer)
+      .setAudience(tokenAudience)
+      .setIssuedAt(issuedAt)
+      .setExpirationTime("5m");
+    if (jti !== null) token = token.setJti(jti);
+    return token.sign(signer);
+  }
+
+  async function submitProviderSecurityEvent(token, contentType = "application/secevent+jwt") {
+    return fetch(`${baseUrl}/auth/provider-security-event`, {
+      method: "POST",
+      headers: { "content-type": contentType, accept: "application/json" },
+      body: token,
+    });
+  }
+
+  const logoutToken = await createLogoutToken({ jti: "logout-backchannel-owner-1" });
+  const duplicateField = await fetch(`${baseUrl}/auth/backchannel-logout`, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: `logout_token=${encodeURIComponent(logoutToken)}&logout_token=${encodeURIComponent(logoutToken)}`,
+  });
+  assert.equal(duplicateField.status, 400);
+
+  const invalidLogoutTokens = [
+    "not-a-compact-jwt",
+    await createLogoutToken({ signer: wrongPrivateKey }),
+    await createLogoutToken({ tokenIssuer: "https://wrong-issuer.example.test/realms/platform" }),
+    await createLogoutToken({ tokenAudience: "wrong-client" }),
+    await createLogoutToken({ claims: { nonce: "forbidden" } }),
+    await createLogoutToken({ claims: { events: { "urn:wrong:event": {} } } }),
+    await createLogoutToken({ claims: { events: { "http://schemas.openid.net/event/backchannel-logout": {}, revoke_offline_access: false } } }),
+    await createLogoutToken({ claims: { events: { "http://schemas.openid.net/event/backchannel-logout": {}, revoke_offline_access: "true" } } }),
+    await createLogoutToken({ claims: { events: { "http://schemas.openid.net/event/backchannel-logout": {}, revoke_offline_access: true, "urn:unexpected:event": {} } } }),
+    await createLogoutToken({ omit: ["sid", "sub"] }),
+    await createLogoutToken({ jti: null }),
+    await createLogoutToken({ issuedAt: Math.floor(Date.now() / 1000) - 6 * 60 }),
+    await createLogoutToken({ signer: disallowedAlgorithmPrivateKey, alg: "PS256", kid: "ps256-key" }),
+    await createLogoutToken({ claims: { sid: { invalid: true } } }),
+  ];
+  for (const invalidLogoutToken of invalidLogoutTokens) {
+    const invalidResponse = await submitBackchannelToken(invalidLogoutToken);
+    assert.equal(invalidResponse.status, 400);
+    assert.equal((await invalidResponse.json()).error, "oidc_backchannel_logout_rejected");
+  }
+  const beforeBackchannel = await fetch(`${baseUrl}/control/overview`, { headers: { cookie: backchannelCookie, accept: "application/json" } });
+  assert.equal(beforeBackchannel.status, 200);
+  const backchannel = await fetch(`${baseUrl}/auth/backchannel-logout`, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded; charset=utf-8", accept: "application/json" },
+    body: new URLSearchParams({ logout_token: logoutToken }),
+  });
+  assert.equal(backchannel.status, 200);
+  assert.deepEqual(await backchannel.json(), { ok: true, replayed: false, revoked: 1 });
+  const revokedByProvider = await fetch(`${baseUrl}/control/overview`, { headers: { cookie: backchannelCookie, accept: "application/json" } });
+  assert.equal(revokedByProvider.status, 401);
+  const unaffectedOwner = await fetch(`${baseUrl}/control/overview`, { headers: { cookie: ownerCookie, accept: "application/json" } });
+  assert.equal(unaffectedOwner.status, 200);
+  const replayedBackchannel = await fetch(`${baseUrl}/auth/backchannel-logout`, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded", accept: "application/json" },
+    body: new URLSearchParams({ logout_token: logoutToken }),
+  });
+  assert.equal(replayedBackchannel.status, 200);
+  assert.deepEqual(await replayedBackchannel.json(), { ok: true, replayed: true, revoked: 0 });
+
+  const providerEventCookies = [];
+  for (const code of ["provider-event-a", "provider-event-b"]) {
+    const state = await beginLogin();
+    const login = await fetch(`${baseUrl}/auth/callback?code=${code}&state=${encodeURIComponent(state)}`, { redirect: "manual" });
+    assert.equal(login.status, 303);
+    providerEventCookies.push(cookieHeader(responseSetCookies(login)));
+  }
+  for (const cookie of providerEventCookies) {
+    assert.equal((await fetch(`${baseUrl}/control/overview`, { headers: { cookie, accept: "application/json" } })).status, 200);
+  }
+
+  const validAuthorizationEvent = await createProviderSecurityEventToken({ jti: "provider-authorization-change-1" });
+  const wrongContentType = await submitProviderSecurityEvent(validAuthorizationEvent, "application/x-www-form-urlencoded");
+  assert.equal(wrongContentType.status, 415);
+  const invalidProviderEvents = [
+    "not-a-compact-jwt",
+    await createProviderSecurityEventToken({ signer: wrongPrivateKey }),
+    await createProviderSecurityEventToken({ tokenIssuer: "https://wrong-issuer.example.test/realms/platform" }),
+    await createProviderSecurityEventToken({ tokenAudience: "wrong-client" }),
+    await createProviderSecurityEventToken({ tokenAudience: [clientId, "wrong-client"] }),
+    await createProviderSecurityEventToken({ tokenType: "JWT" }),
+    await createProviderSecurityEventToken({ eventType: "urn:platform-infrastructure:event:unsupported" }),
+    await createProviderSecurityEventToken({ eventValue: { reason: "unexpected" } }),
+    await createProviderSecurityEventToken({ claims: { events: {
+      "urn:platform-infrastructure:event:authorization-changed": {},
+      "urn:platform-infrastructure:event:account-disabled": {},
+    } } }),
+    await createProviderSecurityEventToken({ claims: { sid: "sid-must-not-narrow-account-events" } }),
+    await createProviderSecurityEventToken({ claims: { nonce: "forbidden" } }),
+    await createProviderSecurityEventToken({ omit: ["sub"] }),
+    await createProviderSecurityEventToken({ jti: null }),
+    await createProviderSecurityEventToken({ issuedAt: Math.floor(Date.now() / 1000) - 6 * 60 }),
+    await createProviderSecurityEventToken({ issuedAt: Math.floor(Date.now() / 1000) + 1 }),
+  ];
+  for (const invalidProviderEvent of invalidProviderEvents) {
+    const response = await submitProviderSecurityEvent(invalidProviderEvent);
+    assert.equal(response.status, 400);
+    assert.equal((await response.json()).error, "oidc_provider_security_event_rejected");
+  }
+  const authorizationEventResponse = await submitProviderSecurityEvent(validAuthorizationEvent);
+  assert.equal(authorizationEventResponse.status, 200);
+  assert.deepEqual(await authorizationEventResponse.json(), { ok: true, replayed: false, revoked: 2 });
+  for (const cookie of providerEventCookies) {
+    assert.equal((await fetch(`${baseUrl}/control/overview`, { headers: { cookie, accept: "application/json" } })).status, 401);
+  }
+  const replayedAuthorizationEvent = await submitProviderSecurityEvent(validAuthorizationEvent);
+  assert.equal(replayedAuthorizationEvent.status, 200);
+  assert.deepEqual(await replayedAuthorizationEvent.json(), { ok: true, replayed: true, revoked: 0 });
+
+  const setThenLogoutReplay = await submitBackchannelToken(await createLogoutToken({
+    claims: { sid: "sid-test-owner", sub: "test-owner" },
+    jti: "provider-authorization-change-1",
+  }));
+  assert.equal(setThenLogoutReplay.status, 200);
+  assert.deepEqual(await setThenLogoutReplay.json(), { ok: true, replayed: true, revoked: 0 });
+  assert.equal((await fetch(`${baseUrl}/control/overview`, { headers: { cookie: ownerCookie, accept: "application/json" } })).status, 200);
+
+  const accountDisabledState = await beginLogin();
+  const accountDisabledLogin = await fetch(`${baseUrl}/auth/callback?code=account-disabled-owner&state=${encodeURIComponent(accountDisabledState)}`, { redirect: "manual" });
+  assert.equal(accountDisabledLogin.status, 303);
+  const accountDisabledCookie = cookieHeader(responseSetCookies(accountDisabledLogin));
+  const crossTypeReplay = await createProviderSecurityEventToken({
+    eventType: "urn:platform-infrastructure:event:account-disabled",
+    claims: { sub: "test-account-disabled-owner" },
+    jti: "logout-backchannel-owner-1",
+  });
+  const crossTypeReplayResponse = await submitProviderSecurityEvent(crossTypeReplay);
+  assert.equal(crossTypeReplayResponse.status, 200);
+  assert.deepEqual(await crossTypeReplayResponse.json(), { ok: true, replayed: true, revoked: 0 });
+  assert.equal((await fetch(`${baseUrl}/control/overview`, { headers: { cookie: accountDisabledCookie, accept: "application/json" } })).status, 200);
+  const setThenSetReplayResponse = await submitProviderSecurityEvent(await createProviderSecurityEventToken({
+    eventType: "urn:platform-infrastructure:event:account-disabled",
+    claims: { sub: "test-account-disabled-owner" },
+    jti: "provider-authorization-change-1",
+  }));
+  assert.equal(setThenSetReplayResponse.status, 200);
+  assert.deepEqual(await setThenSetReplayResponse.json(), { ok: true, replayed: true, revoked: 0 });
+  assert.equal((await fetch(`${baseUrl}/control/overview`, { headers: { cookie: accountDisabledCookie, accept: "application/json" } })).status, 200);
+  const accountDisabledEvent = await createProviderSecurityEventToken({
+    eventType: "urn:platform-infrastructure:event:account-disabled",
+    claims: { sub: "test-account-disabled-owner" },
+    jti: "provider-account-disabled-1",
+  });
+  const accountDisabledResponse = await submitProviderSecurityEvent(accountDisabledEvent);
+  assert.equal(accountDisabledResponse.status, 200);
+  assert.deepEqual(await accountDisabledResponse.json(), { ok: true, replayed: false, revoked: 1 });
+  assert.equal((await fetch(`${baseUrl}/control/overview`, { headers: { cookie: accountDisabledCookie, accept: "application/json" } })).status, 401);
+
+  const auditFailureToken = await createLogoutToken({
+    jti: "logout-audit-failure-owner-1",
+    claims: { sid: "sid-audit-failure-owner", sub: "test-audit-failure-owner" },
+  });
+  const providerAuditFailureState = await beginLogin();
+  const providerAuditFailureLogin = await fetch(`${baseUrl}/auth/callback?code=provider-audit-failure-owner&state=${encodeURIComponent(providerAuditFailureState)}`, { redirect: "manual" });
+  assert.equal(providerAuditFailureLogin.status, 303);
+  const providerAuditFailureCookie = cookieHeader(responseSetCookies(providerAuditFailureLogin));
+  const providerAuditFailureToken = await createProviderSecurityEventToken({
+    eventType: "urn:platform-infrastructure:event:account-disabled",
+    claims: { sub: "test-provider-audit-failure-owner" },
+    jti: "provider-audit-failure-owner-1",
+  });
+  const beforeAuditFailure = await fetch(`${baseUrl}/control/overview`, { headers: { cookie: auditFailureCookie, accept: "application/json" } });
+  assert.equal(beforeAuditFailure.status, 200);
+  assert.equal((await fetch(`${baseUrl}/control/overview`, { headers: { cookie: providerAuditFailureCookie, accept: "application/json" } })).status, 200);
+  rmSync(auditFile, { force: true });
+  mkdirSync(auditFile);
+  const committedWithoutAudit = await submitBackchannelToken(auditFailureToken);
+  assert.equal(committedWithoutAudit.status, 503);
+  assert.equal((await committedWithoutAudit.json()).error, "oidc_backchannel_logout_audit_unavailable");
+  const revokedDespiteAuditFailure = await fetch(`${baseUrl}/control/overview`, { headers: { cookie: auditFailureCookie, accept: "application/json" } });
+  assert.equal(revokedDespiteAuditFailure.status, 401);
+  const providerCommittedWithoutAudit = await submitProviderSecurityEvent(providerAuditFailureToken);
+  assert.equal(providerCommittedWithoutAudit.status, 503);
+  assert.equal((await providerCommittedWithoutAudit.json()).error, "oidc_provider_security_event_audit_unavailable");
+  assert.equal((await fetch(`${baseUrl}/control/overview`, { headers: { cookie: providerAuditFailureCookie, accept: "application/json" } })).status, 401);
+  rmSync(auditFile, { recursive: true, force: true });
+  const retryAfterAuditRecovery = await submitBackchannelToken(auditFailureToken);
+  assert.equal(retryAfterAuditRecovery.status, 200);
+  assert.deepEqual(await retryAfterAuditRecovery.json(), { ok: true, replayed: true, revoked: 0 });
+  const providerRetryAfterAuditRecovery = await submitProviderSecurityEvent(providerAuditFailureToken);
+  assert.equal(providerRetryAfterAuditRecovery.status, 200);
+  assert.deepEqual(await providerRetryAfterAuditRecovery.json(), { ok: true, replayed: true, revoked: 0 });
+
   await beginLogin();
   await beginLogin();
   const throttled = await fetch(`${baseUrl}/auth/login`, { redirect: "manual" });
@@ -3443,6 +3718,217 @@ test("Admin Control Center OIDC passkey guard", async (t) => {
   const revokedReplay = await fetch(`${baseUrl}/control/overview`, { headers: { cookie: ownerCookie, accept: "application/json" } });
   assert.equal(revokedReplay.status, 401);
 
+  assert.equal(stderr, "");
+});
+
+test("OIDC back-channel logout reports transient JWKS failures as retryable", async (t) => {
+  const isolatedRoot = path.join(infraRoot, ".tmp", "control-center-tests", `backchannel-jwks-${randomUUID()}`);
+  const stateDir = path.join(isolatedRoot, "state");
+  const projectsDir = path.join(isolatedRoot, "projects");
+  mkdirSync(stateDir, { recursive: true });
+  mkdirSync(projectsDir, { recursive: true });
+
+  const idpPort = await freePort();
+  const idp = createHttpServer((req, res) => {
+    if (req.url === "/jwks") {
+      res.writeHead(503, { "content-type": "application/json" });
+      res.end('{"error":"temporarily-unavailable"}');
+      return;
+    }
+    res.writeHead(404).end();
+  });
+  await new Promise((resolve) => idp.listen(idpPort, "127.0.0.1", resolve));
+
+  const port = await freePort();
+  const issuer = "https://identity.example.test/realms/platform";
+  const child = spawn(process.execPath, [path.join(infraRoot, "control-center", "server.mjs")], {
+    cwd: infraRoot,
+    env: {
+      ...process.env,
+      NODE_ENV: "test",
+      CONTROL_CENTER_PORT: String(port),
+      CONTROL_CENTER_BIND_HOST: "127.0.0.1",
+      CONTROL_CENTER_ENV: "test",
+      CONTROL_CENTER_AUTH_MODE: "oidc-passkey",
+      CONTROL_CENTER_AUTH_STORE: "memory",
+      CONTROL_CENTER_OIDC_ISSUER: issuer,
+      CONTROL_CENTER_OIDC_AUTHORIZATION_ENDPOINT: `${issuer}/protocol/openid-connect/auth`,
+      CONTROL_CENTER_OIDC_TOKEN_ENDPOINT: `http://127.0.0.1:${idpPort}/token`,
+      CONTROL_CENTER_OIDC_JWKS_URI: `http://127.0.0.1:${idpPort}/jwks`,
+      CONTROL_CENTER_OIDC_REDIRECT_URI: "https://portal.example.test/auth/callback",
+      CONTROL_CENTER_OIDC_CLIENT_ID: "platform-control-center",
+      CONTROL_CENTER_OIDC_REQUIRED_ACR: "urn:platform:loa:passkey",
+      CONTROL_CENTER_DOCS_ROOT: infraRoot,
+      PROJECTS_ROOT: projectsDir,
+      ...isolatedStateEnv(stateDir),
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let stderr = "";
+  child.stderr.on("data", (chunk) => { stderr += chunk.toString("utf8"); });
+  t.after(async () => {
+    await stopChild(child);
+    await new Promise((resolve) => idp.close(resolve));
+    rmSync(isolatedRoot, { recursive: true, force: true });
+  });
+
+  const baseUrl = `http://127.0.0.1:${port}`;
+  await waitForHealth(`${baseUrl}/__health`, child);
+  const { privateKey } = await generateKeyPair("RS256");
+  const logoutToken = await new SignJWT({
+    events: { "http://schemas.openid.net/event/backchannel-logout": {} },
+    sid: "transient-jwks-session",
+  })
+    .setProtectedHeader({ alg: "RS256", kid: "unavailable-key" })
+    .setIssuer(issuer)
+    .setAudience("platform-control-center")
+    .setJti("transient-jwks-1")
+    .setIssuedAt()
+    .setExpirationTime("5m")
+    .sign(privateKey);
+  const response = await fetch(`${baseUrl}/auth/backchannel-logout`, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded", accept: "application/json" },
+    body: new URLSearchParams({ logout_token: logoutToken }),
+  });
+  assert.equal(response.status, 503);
+  assert.equal((await response.json()).error, "oidc_backchannel_logout_unavailable");
+  assert.equal(stderr, "");
+});
+
+test("OIDC back-channel logout distinguishes JWKS rotation cooldown from an unknown key", async (t) => {
+  const isolatedRoot = path.join(infraRoot, ".tmp", "control-center-tests", `backchannel-jwks-rotation-${randomUUID()}`);
+  const stateDir = path.join(isolatedRoot, "state");
+  const projectsDir = path.join(isolatedRoot, "projects");
+  const clockOffsetFile = path.join(isolatedRoot, "clock-offset-ms");
+  const clockModule = path.join(isolatedRoot, "clock.mjs");
+  mkdirSync(stateDir, { recursive: true });
+  mkdirSync(projectsDir, { recursive: true });
+  writeFileSync(clockOffsetFile, "0\n");
+  writeFileSync(clockModule, [
+    'import { readFileSync } from "node:fs";',
+    "const realNow = Date.now.bind(Date);",
+    "const offsetFile = process.env.CONTROL_CENTER_TEST_CLOCK_OFFSET_FILE;",
+    'Date.now = () => realNow() + Number(readFileSync(offsetFile, "utf8").trim() || "0");',
+    "",
+  ].join("\n"));
+
+  const issuer = "https://identity.example.test/realms/platform";
+  const clientId = "platform-control-center";
+  const keyA = await generateKeyPair("RS256", { extractable: true });
+  const keyB = await generateKeyPair("RS256", { extractable: true });
+  const keyC = await generateKeyPair("RS256");
+  const jwkA = { ...(await exportJWK(keyA.publicKey)), alg: "RS256", use: "sig", kid: "rotation-key-a" };
+  const jwkB = { ...(await exportJWK(keyB.publicKey)), alg: "RS256", use: "sig", kid: "rotation-key-b" };
+  let currentJwks = [jwkA];
+  let jwksRequests = 0;
+
+  const idpPort = await freePort();
+  const idp = createHttpServer((req, res) => {
+    if (req.url === "/jwks") {
+      jwksRequests += 1;
+      res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+      res.end(JSON.stringify({ keys: currentJwks }));
+      return;
+    }
+    res.writeHead(404).end();
+  });
+  await new Promise((resolve) => idp.listen(idpPort, "127.0.0.1", resolve));
+
+  const port = await freePort();
+  const child = spawn(process.execPath, ["--import", clockModule, path.join(infraRoot, "control-center", "server.mjs")], {
+    cwd: infraRoot,
+    env: {
+      ...process.env,
+      NODE_ENV: "test",
+      CONTROL_CENTER_PORT: String(port),
+      CONTROL_CENTER_BIND_HOST: "127.0.0.1",
+      CONTROL_CENTER_ENV: "test",
+      CONTROL_CENTER_AUTH_MODE: "oidc-passkey",
+      CONTROL_CENTER_AUTH_STORE: "memory",
+      CONTROL_CENTER_OIDC_ISSUER: issuer,
+      CONTROL_CENTER_OIDC_AUTHORIZATION_ENDPOINT: `${issuer}/protocol/openid-connect/auth`,
+      CONTROL_CENTER_OIDC_TOKEN_ENDPOINT: `http://127.0.0.1:${idpPort}/token`,
+      CONTROL_CENTER_OIDC_JWKS_URI: `http://127.0.0.1:${idpPort}/jwks`,
+      CONTROL_CENTER_OIDC_REDIRECT_URI: "https://portal.example.test/auth/callback",
+      CONTROL_CENTER_OIDC_CLIENT_ID: clientId,
+      CONTROL_CENTER_OIDC_REQUIRED_ACR: "urn:platform:loa:passkey",
+      CONTROL_CENTER_DOCS_ROOT: infraRoot,
+      CONTROL_CENTER_TEST_CLOCK_OFFSET_FILE: clockOffsetFile,
+      PROJECTS_ROOT: projectsDir,
+      ...isolatedStateEnv(stateDir),
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let stderr = "";
+  child.stderr.on("data", (chunk) => { stderr += chunk.toString("utf8"); });
+  t.after(async () => {
+    await stopChild(child);
+    await new Promise((resolve) => idp.close(resolve));
+    rmSync(isolatedRoot, { recursive: true, force: true });
+  });
+
+  const baseUrl = `http://127.0.0.1:${port}`;
+  await waitForHealth(`${baseUrl}/__health`, child);
+
+  async function logoutToken(privateKey, kid, jti) {
+    return new SignJWT({
+      events: { "http://schemas.openid.net/event/backchannel-logout": {} },
+      sid: `sid-${jti}`,
+    })
+      .setProtectedHeader({ alg: "RS256", kid })
+      .setIssuer(issuer)
+      .setAudience(clientId)
+      .setJti(jti)
+      .setIssuedAt()
+      .setExpirationTime("5m")
+      .sign(privateKey);
+  }
+
+  async function submit(token) {
+    const response = await fetch(`${baseUrl}/auth/backchannel-logout`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded", accept: "application/json" },
+      body: new URLSearchParams({ logout_token: token }),
+    });
+    return { status: response.status, body: await response.json() };
+  }
+
+  const tokenA = await logoutToken(keyA.privateKey, "rotation-key-a", "rotation-a");
+  assert.deepEqual(await submit(tokenA), {
+    status: 200,
+    body: { ok: true, replayed: false, revoked: 0 },
+  });
+  assert.equal(jwksRequests, 1);
+
+  currentJwks = [jwkB];
+  const tokenB = await logoutToken(keyB.privateKey, "rotation-key-b", "rotation-b");
+  assert.deepEqual(await submit(tokenB), {
+    status: 503,
+    body: {
+      error: "oidc_backchannel_logout_unavailable",
+      message: "OIDC back-channel logout is temporarily unavailable; retry safely.",
+    },
+  });
+  assert.equal(jwksRequests, 1, "the remote JWKS must not be fetched during jose's cooldown");
+
+  writeFileSync(clockOffsetFile, "31000\n");
+  assert.deepEqual(await submit(tokenB), {
+    status: 200,
+    body: { ok: true, replayed: false, revoked: 0 },
+  });
+  assert.equal(jwksRequests, 2, "the rotated key must be fetched after cooldown");
+
+  writeFileSync(clockOffsetFile, "62000\n");
+  const unknownToken = await logoutToken(keyC.privateKey, "rotation-key-c", "rotation-c");
+  assert.deepEqual(await submit(unknownToken), {
+    status: 400,
+    body: {
+      error: "oidc_backchannel_logout_rejected",
+      message: "OIDC back-channel logout was rejected.",
+    },
+  });
+  assert.equal(jwksRequests, 3, "an unknown kid is rejected only after one post-cooldown refresh");
   assert.equal(stderr, "");
 });
 

@@ -12,6 +12,7 @@
   "scripts": {
     "start": "node server.mjs",
     "state:migrate": "node state/migration.mjs",
-    "test": "node --test tests/*.test.mjs state/*.test.mjs status/*.test.mjs"
+    "test": "node --test tests/*.test.mjs state/*.test.mjs status/*.test.mjs",
+    "test:postgres-auth": "node tests/postgres-auth-store.integration.mjs"
   }
 }

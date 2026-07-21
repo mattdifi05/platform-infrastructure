@@ -7,9 +7,27 @@ import { resolveAuthorizationCapability } from "./route-capabilities.mjs";
 const { Pool } = pg;
 const SESSION_COOKIE = "__Host-platform_cc_session";
 const CSRF_COOKIE = "__Host-platform_cc_csrf";
-const DEFAULT_SESSION_MAX_AGE_SECONDS = 8 * 60 * 60;
+const DEFAULT_SESSION_MAX_AGE_SECONDS = 15 * 60;
 const DEFAULT_SESSION_IDLE_SECONDS = 30 * 60;
 const DEFAULT_TRANSACTION_TTL_SECONDS = 5 * 60;
+const BACKCHANNEL_LOGOUT_EVENT = "http://schemas.openid.net/event/backchannel-logout";
+const KEYCLOAK_REVOKE_OFFLINE_ACCESS_EVENT = "revoke_offline_access";
+const ACCOUNT_DISABLED_EVENT = "urn:platform-infrastructure:event:account-disabled";
+const AUTHORIZATION_CHANGED_EVENT = "urn:platform-infrastructure:event:authorization-changed";
+const SECURITY_EVENT_TYPES = new Set([ACCOUNT_DISABLED_EVENT, AUTHORIZATION_CHANGED_EVENT]);
+const INVALID_PROVIDER_TOKEN_ERROR_CODES = new Set([
+  "ERR_JOSE_ALG_NOT_ALLOWED",
+  "ERR_JOSE_NOT_SUPPORTED",
+  "ERR_JWE_DECRYPTION_FAILED",
+  "ERR_JWE_INVALID",
+  "ERR_JWKS_MULTIPLE_MATCHING_KEYS",
+  "ERR_JWKS_NO_MATCHING_KEY",
+  "ERR_JWS_INVALID",
+  "ERR_JWS_SIGNATURE_VERIFICATION_FAILED",
+  "ERR_JWT_CLAIM_VALIDATION_FAILED",
+  "ERR_JWT_EXPIRED",
+  "ERR_JWT_INVALID",
+]);
 
 export async function createControlCenterAuth({ env = process.env } = {}) {
   const config = readAuthConfig(env);
@@ -97,7 +115,7 @@ export function readAuthConfig(env = process.env) {
     ownerRole: String(env.CONTROL_CENTER_OIDC_OWNER_ROLE || "owner").trim(),
     adminRole: String(env.CONTROL_CENTER_OIDC_ADMIN_ROLE || "admin").trim(),
     viewerRole: String(env.CONTROL_CENTER_OIDC_VIEWER_ROLE || "viewer").trim(),
-    sessionMaxAgeSeconds: boundedInteger(env.CONTROL_CENTER_SESSION_MAX_AGE_SECONDS, DEFAULT_SESSION_MAX_AGE_SECONDS, 300, 86400),
+    sessionMaxAgeSeconds: boundedInteger(env.CONTROL_CENTER_SESSION_MAX_AGE_SECONDS, DEFAULT_SESSION_MAX_AGE_SECONDS, 300, 900),
     sessionIdleSeconds: boundedInteger(env.CONTROL_CENTER_SESSION_IDLE_SECONDS, DEFAULT_SESSION_IDLE_SECONDS, 60, 43200),
     transactionTtlSeconds: boundedInteger(env.CONTROL_CENTER_OIDC_TRANSACTION_TTL_SECONDS, DEFAULT_TRANSACTION_TTL_SECONDS, 60, 900),
     freshAuthSeconds: boundedInteger(env.CONTROL_CENTER_FRESH_AUTH_SECONDS, 300, 60, 900),
@@ -318,6 +336,129 @@ class OidcPasskeyAuth {
     return clearSessionCookies();
   }
 
+  async backchannelLogout(req) {
+    const contentType = String(req.headers["content-type"] || "").split(";", 1)[0].trim().toLowerCase();
+    if (contentType !== "application/x-www-form-urlencoded") {
+      throw new AuthRequestError("OIDC back-channel logout requires form encoding.", 415);
+    }
+    const logoutToken = await readSingleFormField(req, "logout_token", 16 * 1024);
+    const claims = await this.verifySignedProviderToken(logoutToken);
+    const events = claims.events && typeof claims.events === "object" && !Array.isArray(claims.events)
+      ? claims.events
+      : null;
+    const eventKeys = events
+      ? Object.keys(events)
+      : [];
+    const eventValue = events?.[BACKCHANNEL_LOGOUT_EVENT];
+    const allowedEventKeys = new Set([BACKCHANNEL_LOGOUT_EVENT, KEYCLOAK_REVOKE_OFFLINE_ACCESS_EVENT]);
+    const offlineRevocation = events?.[KEYCLOAK_REVOKE_OFFLINE_ACCESS_EVENT];
+    if (!eventKeys.includes(BACKCHANNEL_LOGOUT_EVENT) || eventKeys.some((key) => !allowedEventKeys.has(key)) ||
+        !eventValue || typeof eventValue !== "object" || Array.isArray(eventValue) || Object.keys(eventValue).length !== 0 ||
+        (offlineRevocation !== undefined && offlineRevocation !== true)) {
+      throw new AuthRequestError("OIDC Logout Token has an invalid events claim.", 400);
+    }
+    if (claims.nonce !== undefined) throw new AuthRequestError("OIDC Logout Token cannot contain nonce.", 400);
+    const issuedAtSeconds = claims.iat;
+    const jti = typeof claims.jti === "string" ? claims.jti.trim() : "";
+    const sid = claims.sid === undefined ? "" : (typeof claims.sid === "string" ? claims.sid.trim() : null);
+    const subject = claims.sub === undefined ? "" : (typeof claims.sub === "string" ? claims.sub.trim() : null);
+    if (!Number.isSafeInteger(issuedAtSeconds) || !jti || sid === null || subject === null ||
+        jti.length > 1024 || sid.length > 1024 || subject.length > 1024 || (!sid && !subject)) {
+      throw new AuthRequestError("OIDC Logout Token requires bounded iat, jti, and sid or sub claims.", 400);
+    }
+    const now = Date.now();
+    const issuedAt = new Date(issuedAtSeconds * 1000);
+    if (issuedAt.getTime() > now + 5_000 || issuedAt.getTime() < now - 5 * 60_000) {
+      throw new AuthRequestError("OIDC Logout Token is outside the accepted age window.", 400);
+    }
+    const expiresAt = new Date(now + this.config.sessionMaxAgeSeconds * 1000 + 60_000);
+    return this.store.consumeProviderRevocation({
+      issuer: this.config.issuer,
+      eventType: BACKCHANNEL_LOGOUT_EVENT,
+      jtiHash: sha256(`oidc-provider-jti\0${this.config.issuer}\0${jti}`),
+      issuedAt,
+      expiresAt,
+      sid,
+      subject,
+    });
+  }
+
+  async providerSecurityEvent(req) {
+    const contentType = String(req.headers["content-type"] || "").split(";", 1)[0].trim().toLowerCase();
+    if (contentType !== "application/secevent+jwt") {
+      throw new AuthRequestError("Provider security events require application/secevent+jwt.", 415);
+    }
+    const eventToken = await readCompactProviderToken(req, 16 * 1024);
+    const claims = await this.verifySignedProviderToken(eventToken, { requiredType: "secevent+jwt" });
+    const events = claims.events && typeof claims.events === "object" && !Array.isArray(claims.events)
+      ? claims.events
+      : null;
+    const eventTypes = events ? Object.keys(events) : [];
+    const eventType = eventTypes[0] || "";
+    const eventValue = events?.[eventType];
+    if (eventTypes.length !== 1 || !SECURITY_EVENT_TYPES.has(eventType) ||
+        !eventValue || typeof eventValue !== "object" || Array.isArray(eventValue) || Object.keys(eventValue).length !== 0) {
+      throw new AuthRequestError("Provider security event has an unsupported events claim.", 400);
+    }
+    if (claims.nonce !== undefined || claims.sid !== undefined) {
+      throw new AuthRequestError("Provider account and authorization events cannot contain nonce or sid.", 400);
+    }
+    const issuedAtSeconds = claims.iat;
+    const jti = typeof claims.jti === "string" ? claims.jti.trim() : "";
+    const subject = typeof claims.sub === "string" ? claims.sub.trim() : "";
+    if (!Number.isSafeInteger(issuedAtSeconds) || !jti || !subject || jti.length > 1024 || subject.length > 1024) {
+      throw new AuthRequestError("Provider security event requires bounded iat, jti, and sub claims.", 400);
+    }
+    const now = Date.now();
+    const issuedAt = new Date(issuedAtSeconds * 1000);
+    if (issuedAt.getTime() > now || issuedAt.getTime() < now - 5 * 60_000) {
+      throw new AuthRequestError("Provider security event is outside the accepted age window.", 400);
+    }
+    const expiresAt = new Date(now + this.config.sessionMaxAgeSeconds * 1000 + 60_000);
+    const result = await this.store.consumeProviderRevocation({
+      issuer: this.config.issuer,
+      eventType,
+      jtiHash: sha256(`oidc-provider-jti\0${this.config.issuer}\0${jti}`),
+      issuedAt,
+      expiresAt,
+      sid: "",
+      subject,
+    });
+    return { ...result, eventType };
+  }
+
+  async verifySignedProviderToken(token, { requiredType = "" } = {}) {
+    const jwksWasCoolingDown = this.jwks.coolingDown === true;
+    try {
+      const { payload, protectedHeader } = await jwtVerify(token, this.jwks, {
+        issuer: this.config.issuer,
+        audience: this.config.clientId,
+        algorithms: ["RS256", "ES256"],
+        maxTokenAge: "5 minutes",
+        clockTolerance: 5,
+      });
+      const audience = Array.isArray(payload.aud) ? payload.aud : [payload.aud];
+      if (audience.length !== 1 || audience[0] !== this.config.clientId) {
+        throw new AuthRequestError("Signed provider event token requires the exact Control Center audience.", 400);
+      }
+      if (requiredType && String(protectedHeader.typ || "").toLowerCase() !== requiredType) {
+        throw new AuthRequestError("Signed provider event token has an invalid type.", 400);
+      }
+      return payload;
+    } catch (error) {
+      if (String(error?.code || "") === "ERR_JWKS_NO_MATCHING_KEY" && jwksWasCoolingDown) {
+        // A just-rotated signing key cannot trigger a remote-JWKS refresh
+        // during the bounded cooldown. The provider must retry once refresh
+        // is possible instead of having the event mislabeled as invalid.
+        throw error;
+      }
+      if (INVALID_PROVIDER_TOKEN_ERROR_CODES.has(String(error?.code || ""))) {
+        throw new AuthRequestError("Signed provider event token verification failed.", 400);
+      }
+      throw error;
+    }
+  }
+
   async close() {
     await this.store.close();
   }
@@ -334,6 +475,8 @@ class TestDisabledAuth {
   }
   authorize(_req, _url, session) { return session; }
   async validateMutation(_req, _url, session) { return session; }
+  async backchannelLogout() { throw new AuthRequestError("OIDC back-channel logout is unavailable.", 404); }
+  async providerSecurityEvent() { throw new AuthRequestError("Provider security events are unavailable.", 404); }
   async close() {}
 }
 
@@ -346,9 +489,12 @@ export class PostgresAuthStore {
       `select to_regclass('control_auth.oidc_transactions') as transactions,
               to_regclass('control_auth.sessions') as sessions,
               to_regclass('control_auth.login_throttle') as throttle,
+              to_regclass('control_auth.provider_event_tokens') as provider_event_tokens,
+              to_regclass('control_auth.provider_revocations') as provider_revocations,
               exists(select 1 from information_schema.columns where table_schema='control_auth' and table_name='sessions' and column_name='csrf_hash') as csrf_ready`,
     );
-    if (!result.rows[0]?.transactions || !result.rows[0]?.sessions || !result.rows[0]?.throttle || !result.rows[0]?.csrf_ready) {
+    if (!result.rows[0]?.transactions || !result.rows[0]?.sessions || !result.rows[0]?.throttle ||
+        !result.rows[0]?.provider_event_tokens || !result.rows[0]?.provider_revocations || !result.rows[0]?.csrf_ready) {
       throw new AuthConfigurationError("Control Center auth migrations are not applied.");
     }
   }
@@ -368,12 +514,33 @@ export class PostgresAuthStore {
     return row ? { nonceHash: row.nonce_hash, codeVerifier: row.code_verifier, throttleKeyHash: row.throttle_key_hash, expiresAt: row.expires_at } : null;
   }
   async createSession(item) {
-    await this.pool.query(
-      `insert into control_auth.sessions
-       (token_hash, csrf_hash, policy_version, subject, email, display_name, role, roles, acr, amr, auth_time, issuer, oidc_session_id, signing_key_id, expires_at)
-       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
-      [item.tokenHash, item.csrfHash, item.policyVersion, item.subject, item.email, item.displayName, item.role, item.roles, item.acr, item.amr, item.authTime, item.issuer, item.sessionId, item.keyId, item.expiresAt],
-    );
+    const client = await this.pool.connect();
+    try {
+      await client.query("begin");
+      const lockKeys = [`${item.issuer}\0subject\0${item.subject}`, ...(item.sessionId ? [`${item.issuer}\0sid\0${item.sessionId}`] : [])].sort();
+      for (const key of lockKeys) await client.query("select pg_advisory_xact_lock(hashtextextended($1, 0))", [key]);
+      const revoked = await client.query(
+        `select 1 from control_auth.provider_revocations
+         where issuer=$1 and expires_at > now() and event_iat >= $4
+           and ((scope_type='subject' and scope_value=$2)
+             or (scope_type='sid' and scope_value=$3 and $3 <> ''))
+         limit 1`,
+        [item.issuer, item.subject, item.sessionId || "", item.authTime],
+      );
+      if (revoked.rowCount > 0) throw new AuthRequestError("Identity-provider session was revoked; authenticate again.", 401);
+      await client.query(
+        `insert into control_auth.sessions
+         (token_hash, csrf_hash, policy_version, subject, email, display_name, role, roles, acr, amr, auth_time, issuer, oidc_session_id, signing_key_id, expires_at)
+         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
+        [item.tokenHash, item.csrfHash, item.policyVersion, item.subject, item.email, item.displayName, item.role, item.roles, item.acr, item.amr, item.authTime, item.issuer, item.sessionId, item.keyId, item.expiresAt],
+      );
+      await client.query("commit");
+    } catch (error) {
+      await client.query("rollback");
+      throw error;
+    } finally {
+      client.release();
+    }
   }
   async getSession(tokenHash, idleSeconds) {
     const result = await this.pool.query(
@@ -388,6 +555,52 @@ export class PostgresAuthStore {
   }
   async revokeSession(tokenHash) {
     await this.pool.query("update control_auth.sessions set revoked_at=now() where token_hash=$1 and revoked_at is null", [tokenHash]);
+  }
+  async consumeProviderRevocation({ issuer, eventType, jtiHash, issuedAt, expiresAt, sid, subject }) {
+    const scopeType = sid ? "sid" : "subject";
+    const scopeValue = sid || subject;
+    const client = await this.pool.connect();
+    try {
+      await client.query("begin");
+      await client.query("select pg_advisory_xact_lock(hashtextextended($1, 0))", [`${issuer}\0${scopeType}\0${scopeValue}`]);
+      await client.query("delete from control_auth.provider_event_tokens where expires_at <= now()");
+      await client.query("delete from control_auth.provider_revocations where expires_at <= now()");
+      const receipt = await client.query(
+        `insert into control_auth.provider_event_tokens (issuer,jti_hash,event_type,issued_at,expires_at)
+         values ($1,$2,$3,$4,$5) on conflict do nothing returning jti_hash`,
+        [issuer, jtiHash, eventType, issuedAt, expiresAt],
+      );
+      if (receipt.rowCount === 0) {
+        await client.query("commit");
+        return { replayed: true, revoked: 0 };
+      }
+      await client.query(
+        `insert into control_auth.provider_revocations (issuer,scope_type,scope_value,event_iat,expires_at)
+         values ($1,$2,$3,$4,$5)
+         on conflict (issuer,scope_type,scope_value) do update
+         set event_iat=greatest(control_auth.provider_revocations.event_iat,excluded.event_iat),
+             expires_at=greatest(control_auth.provider_revocations.expires_at,excluded.expires_at),
+             updated_at=now()`,
+        [issuer, scopeType, scopeValue, issuedAt, expiresAt],
+      );
+      const revoked = sid
+        ? await client.query(
+          `update control_auth.sessions set revoked_at=now()
+           where issuer=$1 and oidc_session_id=$2 and ($3='' or subject=$3) and revoked_at is null`,
+          [issuer, sid, subject],
+        )
+        : await client.query(
+          "update control_auth.sessions set revoked_at=now() where issuer=$1 and subject=$2 and revoked_at is null",
+          [issuer, subject],
+        );
+      await client.query("commit");
+      return { replayed: false, revoked: revoked.rowCount };
+    } catch (error) {
+      await client.query("rollback");
+      throw error;
+    } finally {
+      client.release();
+    }
   }
   async registerLoginAttempt(keyHash, maxAttempts, windowSeconds, lockSeconds) {
     const client = await this.pool.connect();
@@ -430,6 +643,8 @@ export class MemoryAuthStore {
     this.transactions = new Map();
     this.sessions = new Map();
     this.loginThrottle = new Map();
+    this.providerEventTokens = new Map();
+    this.providerRevocations = new Map();
   }
   async ready() {}
   async createTransaction(item) {
@@ -441,6 +656,14 @@ export class MemoryAuthStore {
     return item;
   }
   async createSession(item) {
+    const now = Date.now();
+    const scopes = [`${item.issuer}\0subject\0${item.subject}`, ...(item.sessionId ? [`${item.issuer}\0sid\0${item.sessionId}`] : [])];
+    if (scopes.some((key) => {
+      const revocation = this.providerRevocations.get(key);
+      return revocation && revocation.expiresAt.getTime() > now && revocation.issuedAt.getTime() >= item.authTime.getTime();
+    })) {
+      throw new AuthRequestError("Identity-provider session was revoked; authenticate again.", 401);
+    }
     this.sessions.set(item.tokenHash, { ...structuredClone(item), createdAt: new Date(), lastSeenAt: new Date(), revokedAt: null });
   }
   async getSession(tokenHash, idleSeconds) {
@@ -453,6 +676,32 @@ export class MemoryAuthStore {
   async revokeSession(tokenHash) {
     const item = this.sessions.get(tokenHash);
     if (item) item.revokedAt = new Date();
+  }
+  async consumeProviderRevocation({ issuer, eventType, jtiHash, issuedAt, expiresAt, sid, subject }) {
+    const now = Date.now();
+    for (const [key, expiry] of this.providerEventTokens) if (expiry.getTime() <= now) this.providerEventTokens.delete(key);
+    for (const [key, value] of this.providerRevocations) if (value.expiresAt.getTime() <= now) this.providerRevocations.delete(key);
+    const receiptKey = `${issuer}\0${jtiHash}`;
+    if (this.providerEventTokens.has(receiptKey)) return { replayed: true, revoked: 0 };
+    this.providerEventTokens.set(receiptKey, new Date(expiresAt));
+    const scopeType = sid ? "sid" : "subject";
+    const scopeValue = sid || subject;
+    const scopeKey = `${issuer}\0${scopeType}\0${scopeValue}`;
+    const current = this.providerRevocations.get(scopeKey);
+    if (!current || current.issuedAt < issuedAt) {
+      this.providerRevocations.set(scopeKey, { issuedAt: new Date(issuedAt), expiresAt: new Date(expiresAt) });
+    }
+    let revoked = 0;
+    for (const item of this.sessions.values()) {
+      const matches = item.issuer === issuer && (sid
+        ? item.sessionId === sid && (!subject || item.subject === subject)
+        : item.subject === subject);
+      if (matches && !item.revokedAt) {
+        item.revokedAt = new Date();
+        revoked += 1;
+      }
+    }
+    return { replayed: false, revoked };
   }
   async registerLoginAttempt(keyHash, maxAttempts, windowSeconds, lockSeconds) {
     const now = Date.now();
@@ -565,14 +814,7 @@ function immediatePeer(req) {
 
 async function readRequestPayload(req) {
   if (req.controlCenterPayload && typeof req.controlCenterPayload === "object") return req.controlCenterPayload;
-  const chunks = [];
-  let size = 0;
-  for await (const chunk of req) {
-    size += chunk.length;
-    if (size > 64 * 1024) throw new AuthRequestError("Request body is too large.", 413);
-    chunks.push(chunk);
-  }
-  const raw = Buffer.concat(chunks).toString("utf8");
+  const raw = (await readBoundedRequestBody(req)).toString("utf8");
   const type = String(req.headers["content-type"] || "").toLowerCase();
   if (type.includes("application/json")) {
     try {
@@ -585,6 +827,37 @@ async function readRequestPayload(req) {
     req.controlCenterPayload = Object.fromEntries(new URLSearchParams(raw));
   }
   return req.controlCenterPayload;
+}
+
+async function readSingleFormField(req, field, maximumLength) {
+  const raw = (await readBoundedRequestBody(req)).toString("utf8");
+  const entries = [...new URLSearchParams(raw).entries()];
+  if (entries.length !== 1 || entries[0][0] !== field || !entries[0][1] || entries[0][1].length > maximumLength) {
+    throw new AuthRequestError(`OIDC back-channel logout requires exactly one bounded ${field}.`, 400);
+  }
+  return entries[0][1];
+}
+
+async function readCompactProviderToken(req, maximumLength) {
+  const raw = (await readBoundedRequestBody(req)).toString("utf8");
+  if (!raw || raw.length > maximumLength || raw !== raw.trim() || /\s/.test(raw) ||
+      !/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(raw)) {
+    throw new AuthRequestError("Provider security event requires one bounded compact JWT body.", 400);
+  }
+  return raw;
+}
+
+async function readBoundedRequestBody(req) {
+  if (Buffer.isBuffer(req.controlCenterRawBody)) return req.controlCenterRawBody;
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of req) {
+    size += chunk.length;
+    if (size > 64 * 1024) throw new AuthRequestError("Request body is too large.", 413);
+    chunks.push(chunk);
+  }
+  req.controlCenterRawBody = Buffer.concat(chunks);
+  return req.controlCenterRawBody;
 }
 
 function requiredText(value, name) {
