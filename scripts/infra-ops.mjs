@@ -24,6 +24,7 @@ import { evaluateFunctionalHealth, validateFunctionalHealthProbes } from "./func
 import { evaluateRuntimeFingerprint } from "./runtime-fingerprint.mjs";
 import { providerEvidenceAttestationOptions } from "./provider-evidence-auth.mjs";
 import { sha256FileBounded } from "./bounded-file-hash.mjs";
+import { publishBackupArtifact } from "./backup-artifact-publication.mjs";
 import { runCommandSync } from "./command-safety.mjs";
 import { resticPassthroughEnvironmentKeys, resticSecretTransport } from "./restic-secret-transport.mjs";
 import { safeTarCreateArgs, validateTarEntryName } from "./safe-tar-path.mjs";
@@ -676,22 +677,29 @@ function backupSignatureMessage(fileName, hash) {
   return `platform-postgres-backup-v1\n${fileName}\n${hash}\n`;
 }
 
-function signBackupArtifact(filePath, hash = sha256File(filePath)) {
-  const fileName = path.basename(filePath);
+function createBackupArtifactSignature({ artifactName, sha256 }) {
   const activeKey = backupSigningKeys()[0];
-  const signature = crypto.createHmac("sha256", activeKey.secret).update(backupSignatureMessage(fileName, hash)).digest("base64url");
-  const sidecar = {
-    version: 1,
-    algorithm: "HMAC-SHA256",
+  const signature = crypto.createHmac("sha256", activeKey.secret).update(backupSignatureMessage(artifactName, sha256)).digest("base64url");
+  return {
     keyId: activeKey.id,
-    artifact: fileName,
-    sha256: hash,
-    signature,
-    signedAt: new Date().toISOString(),
+    document: {
+      version: 1,
+      algorithm: "HMAC-SHA256",
+      keyId: activeKey.id,
+      artifact: artifactName,
+      sha256,
+      signature,
+      signedAt: new Date().toISOString(),
+    },
   };
+}
+
+function signBackupArtifact(filePath, hash = sha256File(filePath)) {
+  const created = createBackupArtifactSignature({ artifactName: path.basename(filePath), sha256: hash });
+  const sidecar = created.document;
   fs.writeFileSync(backupSignatureSidecarPath(filePath), `${JSON.stringify(sidecar, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
   fs.chmodSync(backupSignatureSidecarPath(filePath), 0o600);
-  return { hash, keyId: activeKey.id, signaturePath: backupSignatureSidecarPath(filePath) };
+  return { hash, keyId: created.keyId, signaturePath: backupSignatureSidecarPath(filePath) };
 }
 
 function verifyBackupArtifact(filePath) {
@@ -936,6 +944,7 @@ function writeBackupExecutionReport({
   status,
   artifactPath = null,
   artifactSha256 = null,
+  artifactSizeBytes: capturedArtifactSizeBytes = null,
   signature = null,
   startedAt,
   metadata = {},
@@ -943,7 +952,9 @@ function writeBackupExecutionReport({
   const finishedAt = new Date();
   const started = startedAt instanceof Date ? startedAt : finishedAt;
   const artifactExists = artifactPath ? fs.existsSync(artifactPath) : false;
-  const artifactSizeBytes = artifactExists ? fs.statSync(artifactPath).size : null;
+  const artifactSizeBytes = Number.isSafeInteger(capturedArtifactSizeBytes) && capturedArtifactSizeBytes >= 0
+    ? capturedArtifactSizeBytes
+    : artifactExists ? fs.statSync(artifactPath).size : null;
   const payload = {
     generatedAt: finishedAt.toISOString(),
     startedAt: started.toISOString(),
@@ -986,13 +997,39 @@ function writeBackupExecutionReport({
   return { jsonPath, markdownPath };
 }
 
-function writeBackupIntegritySidecars(hostPath) {
-  const hash = sha256File(hostPath);
-  fs.chmodSync(hostPath, 0o600);
-  fs.writeFileSync(`${hostPath}.sha256`, `${hash}  ${path.basename(hostPath)}\n`, { encoding: "ascii", mode: 0o600 });
-  fs.chmodSync(`${hostPath}.sha256`, 0o600);
-  const signature = signBackupArtifact(hostPath, hash);
-  return { hash, signature };
+function backupArtifactStagingPath(hostPath) {
+  return path.join(
+    path.dirname(hostPath),
+    `.${path.basename(hostPath)}.staging-${process.pid}-${crypto.randomBytes(12).toString("hex")}`,
+  );
+}
+
+function publishBackupArtifactWithEvidence({ stagingPath, hostPath, engine, sourceContainer, startedAt, metadata, recordSuccess }) {
+  const publication = publishBackupArtifact({
+    stagingPath,
+    publishedPath: hostPath,
+    createSignature: createBackupArtifactSignature,
+    onPublished({ hash, sizeBytes, signature }) {
+      recordSuccess?.({ hash, signature });
+      writeBackupExecutionReport({
+        engine,
+        sourceContainer,
+        status: "success",
+        artifactPath: hostPath,
+        artifactSha256: hash,
+        artifactSizeBytes: sizeBytes,
+        signature,
+        startedAt,
+        metadata,
+      });
+    },
+  });
+  try {
+    publication.assertCurrent();
+    return { hash: publication.hash, signature: publication.signature, sizeBytes: publication.sizeBytes };
+  } finally {
+    publication.close();
+  }
 }
 
 function hostPathForContainerMount(filePath) {
@@ -1545,33 +1582,43 @@ async function backupPostgres(options = {}) {
   const fileName = `${database}-${timestamp}.dump`;
   const containerPath = `/tmp/${fileName}`;
   const hostPath = path.join(outputDir, fileName);
+  const stagingPath = backupArtifactStagingPath(hostPath);
 
   try {
     log(`Creating PostgreSQL backup for database '${database}'...`);
     dockerExec(container, ["pg_dump", "-U", user, "-d", database, "--format=custom", "--no-owner", "--no-acl", `--file=${containerPath}`]);
-    run("docker", ["cp", `${container}:${containerPath}`, hostPath]);
+    run("docker", ["cp", `${container}:${containerPath}`, stagingPath]);
     dockerExec(container, ["rm", "-f", containerPath]);
 
-    const hash = sha256File(hostPath);
-    fs.chmodSync(hostPath, 0o600);
-    fs.writeFileSync(`${hostPath}.sha256`, `${hash}  ${fileName}\n`, { encoding: "ascii", mode: 0o600 });
-    fs.chmodSync(`${hostPath}.sha256`, 0o600);
-    const signature = signBackupArtifact(hostPath, hash);
-    recordBackupRestoreRun({ container, database, user, operation: "backup", status: "success", artifactPath: hostPath, artifactSha256: hash, startedAt });
-    writeBackupExecutionReport({
-      engine: "postgres",
-      sourceContainer: container,
-      status: "success",
-      artifactPath: hostPath,
-      artifactSha256: hash,
-      signature,
-      startedAt,
-      metadata: { database, format: "pg_dump-custom" },
+    const publication = publishBackupArtifact({
+      stagingPath,
+      publishedPath: hostPath,
+      createSignature: createBackupArtifactSignature,
+      onPublished({ hash, sizeBytes, signature }) {
+        recordBackupRestoreRun({ container, database, user, operation: "backup", status: "success", artifactPath: hostPath, artifactSha256: hash, startedAt });
+        writeBackupExecutionReport({
+          engine: "postgres",
+          sourceContainer: container,
+          status: "success",
+          artifactPath: hostPath,
+          artifactSha256: hash,
+          artifactSizeBytes: sizeBytes,
+          signature,
+          startedAt,
+          metadata: { database, format: "pg_dump-custom" },
+        });
+      },
     });
-    log(`Backup written to ${hostPath}`);
-    log(`SHA256: ${hash}`);
-    log(`Signature: ${signature.signaturePath} (${signature.keyId})`);
-    return { hostPath, hash, signature, container, database, user };
+    try {
+      const { hash, signature } = publication;
+      publication.assertCurrent();
+      log(`Backup written to ${hostPath}`);
+      log(`SHA256: ${hash}`);
+      log(`Signature: ${signature.signaturePath} (${signature.keyId})`);
+      return { hostPath, hash, signature, container, database, user };
+    } finally {
+      publication.close();
+    }
   } catch (error) {
     try {
       dockerExec(container, ["rm", "-f", containerPath], { allowFailure: true });
@@ -1665,70 +1712,82 @@ async function backupApplications(options = {}) {
   const outputRoot = ensureBackupOutputDir(path.join(infraRoot, "backups", "applications"));
   const excludeArgs = applicationSourceBackupExcludes().flatMap((pattern) => ["--exclude", pattern]);
   const artifacts = [];
-  for (const application of applicationSourceDirectories(options)) {
-    const outputDir = ensureBackupOutputDir(path.join(outputRoot, application.slug));
-    const fileName = `${application.slug}-source-${timestamp}.tar.gz`;
-    const hostPath = path.join(outputDir, fileName);
-    log(`Creating application source backup for '${application.name}'...`);
-    run("tar", safeTarCreateArgs({ archivePath: hostPath, excludeArgs, sourceRoot, entryName: application.name }));
-    const { hash, signature } = writeBackupIntegritySidecars(hostPath);
-    artifacts.push({
-      application: application.slug,
-      sourceDirectory: application.name,
-      artifactPath: hostPath,
-      artifactName: fileName,
-      artifactSha256: hash,
-      signaturePath: signature.signaturePath,
-      signatureKeyId: signature.keyId,
-      artifactSizeBytes: fs.statSync(hostPath).size,
-    });
+  const publications = [];
+  try {
+    for (const application of applicationSourceDirectories(options)) {
+      const outputDir = ensureBackupOutputDir(path.join(outputRoot, application.slug));
+      const fileName = `${application.slug}-source-${timestamp}.tar.gz`;
+      const hostPath = path.join(outputDir, fileName);
+      const stagingPath = backupArtifactStagingPath(hostPath);
+      log(`Creating application source backup for '${application.name}'...`);
+      run("tar", safeTarCreateArgs({ archivePath: stagingPath, excludeArgs, sourceRoot, entryName: application.name }));
+      const publication = publishBackupArtifact({
+        stagingPath,
+        publishedPath: hostPath,
+        createSignature: createBackupArtifactSignature,
+      });
+      publications.push(publication);
+      artifacts.push({
+        application: application.slug,
+        sourceDirectory: application.name,
+        artifactPath: hostPath,
+        artifactName: fileName,
+        artifactSha256: publication.hash,
+        signaturePath: publication.signature.signaturePath,
+        signatureKeyId: publication.signature.keyId,
+        artifactSizeBytes: publication.sizeBytes,
+      });
+    }
+    const finishedAt = new Date();
+    const status = artifacts.length ? "success" : "failed";
+    const payload = {
+      generatedAt: finishedAt.toISOString(),
+      startedAt: startedAt.toISOString(),
+      finishedAt: finishedAt.toISOString(),
+      durationMs: Math.max(0, finishedAt.getTime() - startedAt.getTime()),
+      engine: "applications",
+      sourceContainer: "project-source",
+      status,
+      artifactPath: artifacts[0]?.artifactPath ?? null,
+      artifactName: artifacts[0]?.artifactName ?? null,
+      artifactSizeBytes: artifacts.reduce((total, artifact) => total + Number(artifact.artifactSizeBytes || 0), 0),
+      artifactSha256: artifacts[0]?.artifactSha256 ?? null,
+      signaturePath: artifacts[0]?.signaturePath ?? null,
+      signatureKeyId: artifacts[0]?.signatureKeyId ?? null,
+      integrityVerified: artifacts.every((artifact) => Boolean(artifact.artifactSha256 && artifact.signaturePath)),
+      metadata: {
+        sourceRoot,
+        applicationCount: artifacts.length,
+        excluded: applicationSourceBackupExcludes(),
+        artifacts,
+        secretsExcluded: true,
+        dependenciesExcluded: true,
+        buildOutputExcluded: true,
+      },
+    };
+    const stamp = reportTimestamp();
+    const baseName = `applications-backup-${stamp}-${crypto.randomBytes(3).toString("hex")}`;
+    const jsonPath = writeJsonReport("backups", baseName, payload);
+    const markdownPath = writeMarkdownReport("backups", baseName, [
+      "# Platform Applications Backup Report",
+      "",
+      `Status: ${payload.status}`,
+      `Started at: ${payload.startedAt}`,
+      `Finished at: ${payload.finishedAt}`,
+      `Application count: ${payload.metadata.applicationCount}`,
+      `Secrets excluded: ${payload.metadata.secretsExcluded ? "yes" : "no"}`,
+      "",
+      "| Application | Artifact | Size bytes |",
+      "| --- | --- | --- |",
+      ...artifacts.map((artifact) => `| ${artifact.application} | ${artifact.artifactPath} | ${artifact.artifactSizeBytes} |`),
+    ]);
+    for (const publication of publications) publication.assertCurrent();
+    log(`Application backup reports written to ${jsonPath} and ${markdownPath}`);
+    log(`Application source backups written under ${outputRoot}`);
+    return payload;
+  } finally {
+    for (const publication of publications) publication.close();
   }
-  const finishedAt = new Date();
-  const status = artifacts.length ? "success" : "failed";
-  const payload = {
-    generatedAt: finishedAt.toISOString(),
-    startedAt: startedAt.toISOString(),
-    finishedAt: finishedAt.toISOString(),
-    durationMs: Math.max(0, finishedAt.getTime() - startedAt.getTime()),
-    engine: "applications",
-    sourceContainer: "project-source",
-    status,
-    artifactPath: artifacts[0]?.artifactPath ?? null,
-    artifactName: artifacts[0]?.artifactName ?? null,
-    artifactSizeBytes: artifacts.reduce((total, artifact) => total + Number(artifact.artifactSizeBytes || 0), 0),
-    artifactSha256: artifacts[0]?.artifactSha256 ?? null,
-    signaturePath: artifacts[0]?.signaturePath ?? null,
-    signatureKeyId: artifacts[0]?.signatureKeyId ?? null,
-    integrityVerified: artifacts.every((artifact) => Boolean(artifact.artifactSha256 && artifact.signaturePath)),
-    metadata: {
-      sourceRoot,
-      applicationCount: artifacts.length,
-      excluded: applicationSourceBackupExcludes(),
-      artifacts,
-      secretsExcluded: true,
-      dependenciesExcluded: true,
-      buildOutputExcluded: true,
-    },
-  };
-  const stamp = reportTimestamp();
-  const baseName = `applications-backup-${stamp}-${crypto.randomBytes(3).toString("hex")}`;
-  const jsonPath = writeJsonReport("backups", baseName, payload);
-  const markdownPath = writeMarkdownReport("backups", baseName, [
-    "# Platform Applications Backup Report",
-    "",
-    `Status: ${payload.status}`,
-    `Started at: ${payload.startedAt}`,
-    `Finished at: ${payload.finishedAt}`,
-    `Application count: ${payload.metadata.applicationCount}`,
-    `Secrets excluded: ${payload.metadata.secretsExcluded ? "yes" : "no"}`,
-    "",
-    "| Application | Artifact | Size bytes |",
-    "| --- | --- | --- |",
-    ...artifacts.map((artifact) => `| ${artifact.application} | ${artifact.artifactPath} | ${artifact.artifactSizeBytes} |`),
-  ]);
-  log(`Application backup reports written to ${jsonPath} and ${markdownPath}`);
-  log(`Application source backups written under ${outputRoot}`);
-  return payload;
 }
 
 function controlCenterStateRoot() {
@@ -1756,8 +1815,9 @@ async function backupControlCenterState(options = {}) {
   const startedAt = new Date();
   const fileName = `control-center-state-${backupTimestamp()}.tar.gz`;
   const hostPath = path.join(outputDir, fileName);
+  const stagingPath = backupArtifactStagingPath(hostPath);
   run("tar", [
-    "-czf", hostPath,
+    "-czf", stagingPath,
     "--exclude=backup-jobs",
     "--exclude=*.tmp",
     "--exclude=*.tmp-*",
@@ -1765,14 +1825,11 @@ async function backupControlCenterState(options = {}) {
     "-C", stateRoot,
     ".",
   ]);
-  const { hash, signature } = writeBackupIntegritySidecars(hostPath);
-  writeBackupExecutionReport({
+  const { hash, signature } = publishBackupArtifactWithEvidence({
+    stagingPath,
+    hostPath,
     engine: "control-center-state",
     sourceContainer: "project-state",
-    status: "success",
-    artifactPath: hostPath,
-    artifactSha256: hash,
-    signature,
     startedAt,
     metadata: {
       scope: "restricted-control-state-local-artifact",
@@ -2711,6 +2768,8 @@ function infraTestingHygiene() {
     "scripts/provider-evidence-auth.test.mjs",
     "scripts/bounded-file-hash.mjs",
     "scripts/bounded-file-hash.test.mjs",
+    "scripts/backup-artifact-publication.mjs",
+    "scripts/backup-artifact-publication.test.mjs",
     "scripts/command-safety.mjs",
     "scripts/restic-secret-transport.mjs",
     "scripts/restic-secret-transport.test.mjs",
@@ -2752,6 +2811,7 @@ function infraTestingHygiene() {
   run(process.execPath, ["--test", "scripts/runtime-fingerprint.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/provider-evidence-auth.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/bounded-file-hash.test.mjs"], { cwd: infraRoot });
+  run(process.execPath, ["--test", "scripts/backup-artifact-publication.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/restic-secret-transport.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/safe-tar-path.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/infra-secret-manager.test.mjs"], { cwd: infraRoot });
@@ -10146,6 +10206,7 @@ async function backupMariadb(options = {}) {
   const fileName = `mariadb-${database || "all"}-${timestamp}.sql.gz`;
   const containerPath = `/tmp/${fileName}`;
   const hostPath = path.join(outputDir, fileName);
+  const stagingPath = backupArtifactStagingPath(hostPath);
 
   try {
     log(database ? `Creating MariaDB backup for exact database '${database}'...` : "Creating MariaDB full backup for all local PHP project databases...");
@@ -10163,37 +10224,46 @@ async function backupMariadb(options = {}) {
         `mariadb-dump --single-transaction --routines --events --triggers --databases $DATABASES -uroot -p"$MARIADB_ROOT_PASSWORD" | gzip -9 > ${shellQuote(containerPath)}`,
       ].join(" && "),
     ]);
-    run("docker", ["cp", `${container}:${containerPath}`, hostPath]);
+    run("docker", ["cp", `${container}:${containerPath}`, stagingPath]);
     dockerExec(container, ["rm", "-f", containerPath]);
 
-    const hash = sha256File(hostPath);
-    fs.chmodSync(hostPath, 0o600);
-    fs.writeFileSync(`${hostPath}.sha256`, `${hash}  ${fileName}\n`, { encoding: "ascii", mode: 0o600 });
-    fs.chmodSync(`${hostPath}.sha256`, 0o600);
-    const signature = signBackupArtifact(hostPath, hash);
-    recordDatabaseBackupEvidence({
-      engine: "mariadb",
-      sourceContainer: container,
-      operation: "backup",
-      status: "success",
-      artifactPath: hostPath,
-      artifactSha256: hash,
-      startedAt,
+    const publication = publishBackupArtifact({
+      stagingPath,
+      publishedPath: hostPath,
+      createSignature: createBackupArtifactSignature,
+      onPublished({ hash, sizeBytes, signature }) {
+        recordDatabaseBackupEvidence({
+          engine: "mariadb",
+          sourceContainer: container,
+          operation: "backup",
+          status: "success",
+          artifactPath: hostPath,
+          artifactSha256: hash,
+          artifactSizeBytes: sizeBytes,
+          startedAt,
+        });
+        writeBackupExecutionReport({
+          engine: "mariadb",
+          sourceContainer: container,
+          status: "success",
+          artifactPath: hostPath,
+          artifactSha256: hash,
+          signature,
+          startedAt,
+          metadata: { scope: database ? "exact-database" : "all-user-databases", database: database || null, compression: "gzip" },
+        });
+      },
     });
-    writeBackupExecutionReport({
-      engine: "mariadb",
-      sourceContainer: container,
-      status: "success",
-      artifactPath: hostPath,
-      artifactSha256: hash,
-      signature,
-      startedAt,
-      metadata: { scope: database ? "exact-database" : "all-user-databases", database: database || null, compression: "gzip" },
-    });
-    log(`MariaDB backup written to ${hostPath}`);
-    log(`SHA256: ${hash}`);
-    log(`Signature: ${signature.signaturePath} (${signature.keyId})`);
-    return { hostPath, hash, signature, container, database: database || null };
+    try {
+      const { hash, signature } = publication;
+      publication.assertCurrent();
+      log(`MariaDB backup written to ${hostPath}`);
+      log(`SHA256: ${hash}`);
+      log(`Signature: ${signature.signaturePath} (${signature.keyId})`);
+      return { hostPath, hash, signature, container, database: database || null };
+    } finally {
+      publication.close();
+    }
   } catch (error) {
     try {
       dockerExec(container, ["rm", "-f", containerPath], { allowFailure: true });
@@ -10330,6 +10400,8 @@ async function backupMinio(options = {}) {
   const startedAt = new Date();
   const fileName = `minio-data-${backupTimestamp()}.tar.gz`;
   const hostPath = path.join(outputDir, fileName);
+  const stagingPath = backupArtifactStagingPath(hostPath);
+  const stagingFileName = path.basename(stagingPath);
   const hostWorkParent = makeOpsTempDir("platform-minio-data-");
   const hostWorkDir = path.join(hostWorkParent, "minio-data");
 
@@ -10344,28 +10416,27 @@ async function backupMinio(options = {}) {
       configuredNodeImage(),
       "sh",
       "-lc",
-      `tar -czf /backup/${shellQuote(fileName)} -C /work .`,
+      `tar -czf /backup/${shellQuote(stagingFileName)} -C /work .`,
     ]);
 
-    const { hash, signature } = writeBackupIntegritySidecars(hostPath);
-    recordDatabaseBackupEvidence({
+    const { hash, signature } = publishBackupArtifactWithEvidence({
+      stagingPath,
+      hostPath,
       engine: "minio",
       sourceContainer: container,
-      operation: "backup",
-      status: "success",
-      artifactPath: hostPath,
-      artifactSha256: hash,
-      startedAt,
-    });
-    writeBackupExecutionReport({
-      engine: "minio",
-      sourceContainer: container,
-      status: "success",
-      artifactPath: hostPath,
-      artifactSha256: hash,
-      signature,
       startedAt,
       metadata: { scope: "data-volume", compression: "tar.gz" },
+      recordSuccess({ hash: artifactSha256 }) {
+        recordDatabaseBackupEvidence({
+          engine: "minio",
+          sourceContainer: container,
+          operation: "backup",
+          status: "success",
+          artifactPath: hostPath,
+          artifactSha256,
+          startedAt,
+        });
+      },
     });
     log(`MinIO backup written to ${hostPath}`);
     log(`SHA256: ${hash}`);
@@ -10528,6 +10599,8 @@ async function backupKeycloakConfig(options = {}) {
   const startedAt = new Date();
   const fileName = `keycloak-config-${backupTimestamp()}.tar.gz`;
   const hostPath = path.join(outputDir, fileName);
+  const stagingPath = backupArtifactStagingPath(hostPath);
+  const stagingFileName = path.basename(stagingPath);
   const containerWorkDir = "/tmp/platform-keycloak-config-backup";
   const hostWorkParent = makeOpsTempDir("platform-keycloak-config-");
   const hostWorkDir = path.join(hostWorkParent, "keycloak-config");
@@ -10565,28 +10638,27 @@ env | grep '^KC_' | grep -Ev 'PASSWORD|SECRET|TOKEN|KEY' | sort > "$work/runtime
       configuredNodeImage(),
       "sh",
       "-lc",
-      `tar -czf /backup/${shellQuote(fileName)} -C /work .`,
+      `tar -czf /backup/${shellQuote(stagingFileName)} -C /work .`,
     ]);
 
-    const { hash, signature } = writeBackupIntegritySidecars(hostPath);
-    recordDatabaseBackupEvidence({
+    const { hash, signature } = publishBackupArtifactWithEvidence({
+      stagingPath,
+      hostPath,
       engine: "keycloak",
       sourceContainer: container,
-      operation: "backup",
-      status: "success",
-      artifactPath: hostPath,
-      artifactSha256: hash,
-      startedAt,
-    });
-    writeBackupExecutionReport({
-      engine: "keycloak",
-      sourceContainer: container,
-      status: "success",
-      artifactPath: hostPath,
-      artifactSha256: hash,
-      signature,
       startedAt,
       metadata: { scope: "configuration", compression: "tar.gz" },
+      recordSuccess({ hash: artifactSha256 }) {
+        recordDatabaseBackupEvidence({
+          engine: "keycloak",
+          sourceContainer: container,
+          operation: "backup",
+          status: "success",
+          artifactPath: hostPath,
+          artifactSha256,
+          startedAt,
+        });
+      },
     });
     log(`Keycloak config backup written to ${hostPath}`);
     log(`SHA256: ${hash}`);
@@ -10708,6 +10780,8 @@ async function backupSecretManagerMetadata(options = {}) {
   const startedAt = new Date();
   const fileName = `secret-manager-metadata-${backupTimestamp()}.tar.gz`;
   const hostPath = path.join(outputDir, fileName);
+  const stagingPath = backupArtifactStagingPath(hostPath);
+  const stagingFileName = path.basename(stagingPath);
   const workDir = makeOpsTempDir("infra-secret-manager-metadata-");
 
   try {
@@ -10742,27 +10816,26 @@ async function backupSecretManagerMetadata(options = {}) {
       configuredNodeImage(),
       "sh",
       "-lc",
-      `tar -czf /backup/${shellQuote(fileName)} -C /work .`,
+      `tar -czf /backup/${shellQuote(stagingFileName)} -C /work .`,
     ]);
-    const { hash, signature } = writeBackupIntegritySidecars(hostPath);
-    recordDatabaseBackupEvidence({
+    const { hash, signature } = publishBackupArtifactWithEvidence({
+      stagingPath,
+      hostPath,
       engine: "secret-manager",
       sourceContainer: "host-metadata",
-      operation: "backup",
-      status: "success",
-      artifactPath: hostPath,
-      artifactSha256: hash,
-      startedAt,
-    });
-    writeBackupExecutionReport({
-      engine: "secret-manager",
-      sourceContainer: "host-metadata",
-      status: "success",
-      artifactPath: hostPath,
-      artifactSha256: hash,
-      signature,
       startedAt,
       metadata: { scope: "metadata-without-master-key", compression: "tar.gz" },
+      recordSuccess({ hash: artifactSha256 }) {
+        recordDatabaseBackupEvidence({
+          engine: "secret-manager",
+          sourceContainer: "host-metadata",
+          operation: "backup",
+          status: "success",
+          artifactPath: hostPath,
+          artifactSha256,
+          startedAt,
+        });
+      },
     });
     log(`Secret Manager metadata backup written to ${hostPath}`);
     log(`SHA256: ${hash}`);

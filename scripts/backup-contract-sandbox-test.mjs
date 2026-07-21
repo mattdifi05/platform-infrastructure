@@ -75,6 +75,7 @@ try {
     "github-governance-policy.mjs",
     "release-trust.mjs",
     "bounded-file-hash.mjs",
+    "backup-artifact-publication.mjs",
     "command-safety.mjs",
     "restic-secret-transport.mjs",
     "safe-tar-path.mjs",

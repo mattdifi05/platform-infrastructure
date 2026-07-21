@@ -168,6 +168,7 @@ try {
     "scripts/github-governance-policy.mjs",
     "scripts/release-trust.mjs",
     "scripts/bounded-file-hash.mjs",
+    "scripts/backup-artifact-publication.mjs",
     "scripts/command-safety.mjs",
     "scripts/restic-secret-transport.mjs",
     "scripts/safe-tar-path.mjs",
