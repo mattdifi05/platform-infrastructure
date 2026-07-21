@@ -181,6 +181,16 @@ open_read_once_snapshot() {
   SNAPSHOT_SOURCE_IDENTITY=$path_before
 }
 
+# This wrapper is deliberately read-only. Production mutation is admitted only
+# by deploy-vps-remote.sh after the release, host, origin and network gates.
+case "${1:-}" in
+  config|events|images|logs|ls|port|ps|top|version) ;;
+  *)
+    echo "Compose mutation command '${1:-<missing>}' is disabled: production activation must use the trusted deploy-vps workflow." >&2
+    exit 64
+    ;;
+esac
+
 case "$ENV_FILE" in
   /*) ;;
   *) ENV_FILE="$ROOT_DIR/$ENV_FILE" ;;

@@ -448,16 +448,13 @@ Restic carica esclusivamente l'ultimo manifest platform completo e firmato, tutt
 `offsite-restore-drill-restic.sh --dryRun` verifica soltanto raggiungibilità e metadata dello snapshot e resta `EXTERNAL-PENDING`. Senza `--dryRun`, il comando verifica firma e tag del manifest, confronta esattamente path snapshot/restaurati/attesi, rifiuta file mancanti, extra, duplicati o sostituiti ed esegue il restore-test tipizzato per ogni risorsa dichiarata.
 Per il go-live il repository Restic deve essere remoto (`s3:`, `b2:`, `azure:`, `gs:`, `sftp:`, `rest:` o `rclone:`). Il report è completo soltanto con firma manifest verificata, set esatto, ogni resource ID riuscito e `infra-health` positivo. Restore per famiglie e `--allowPartial` sono rifiutati e non possono produrre evidenza completa.
 
-Schedulazione consigliata, container-first:
+La schedulazione container-first production e' parte della release immutabile
+ammessa: `backup-scheduler` puo' essere attivato o aggiornato soltanto dal
+workflow trusted `deploy-vps.sh`, non con un comando Compose diretto.
 
-```sh
-COMPOSE_ENV_FILE=.env COMPOSE_PROJECT_NAME=platform_infra_vps \
-  bash ./scripts/compose-vps.sh up -d backup-scheduler
-```
-
-Il wrapper `compose-vps.sh` e' l'unico entrypoint supportato per lo scheduler:
-carica anche gli overlay runtime, network e isolamento che non devono essere
-ricostruiti manualmente. Il servizio `backup-scheduler` usa l'immagine ops
+Il wrapper `compose-vps.sh` e' l'unico entrypoint supportato per rendere e
+ispezionare lo scheduler: carica anche gli overlay runtime, network e isolamento
+che non devono essere ricostruiti manualmente. Il servizio `backup-scheduler` usa l'immagine ops
 Dockerizzata e `crond` interno, quindi non richiede cron o Node sull'host.
 Schedula backup giornalieri PostgreSQL, MariaDB, MinIO, Keycloak e Secret
 Manager metadata, retention PostgreSQL e un `full-restore-drill` settimanale.
@@ -969,11 +966,11 @@ Nel profilo VPS:
 
 ### Produzione full con ACME
 
-```sh
-cd /opt/platform/platform-infrastructure
-sh ./scripts/production-preflight.sh
-docker compose -f compose.yaml -f compose.prod.yaml --env-file .env -p enterprise_prod up -d
-```
+Render e preflight locali sono sola evidenza preparatoria. L'attivazione o la
+ricreazione production deve passare esclusivamente dal workflow trusted
+`deploy-vps.sh`, dopo admission della release e approvazione dell'environment.
+Finche' le policy del provider GitHub e il bootstrap del verifier non sono
+provati esternamente, questa operazione resta `EXTERNAL-PENDING`/`NO-GO`.
 
 In produzione:
 
@@ -982,11 +979,9 @@ In produzione:
 - Le immagini runtime o dei workload collegati devono essere versionate e pin-nate con digest.
 - `.localhost.com` non e' valido per ACME pubblico: servono domini DNS reali.
 
-Build immagini runtime/template:
-
-```sh
-docker compose -f compose.yaml --env-file .env build
-```
+Le immagini runtime/template production sono costruite e attestate soltanto dal
+workflow `release-attestation.yml`; una build Compose locale non e' un artefatto
+ammissibile per il deploy.
 
 Le variabili pubbliche dei runtime web collegati, inclusi eventuali
 `NEXT_PUBLIC_*`, vengono passate come build args solo quando un workload esterno

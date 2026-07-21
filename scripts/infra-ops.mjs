@@ -6380,6 +6380,7 @@ async function releaseArtifactGateBody(options = {}) {
       sbomSha256,
       buildkitSbomSha256: rawBuildkitSha256,
       registryResolutionSha256: registryResolutionArtifact.sha256,
+      registryResolution,
       manifestSha256,
       verification: githubAttestationValidation,
       manifestVerification,
@@ -6805,6 +6806,9 @@ async function githubAttestationEvidence() {
 
 async function rollbackRelease() {
   log("==> Platform release rollback");
+  if (booleanFlag(argv.confirmRollback)) {
+    fail("--confirmRollback is disabled: an approved prior immutable release must be redeployed through the trusted release/admission deploy-vps workflow (EXTERNAL-PENDING).");
+  }
   const envFile = path.resolve(argv.envFile ?? path.join(infraRoot, ".env"));
   if (!fs.existsSync(envFile)) fail(`Env file not found: ${envFile}`);
   const rollbackFile = argv.rollbackFile ? path.resolve(argv.rollbackFile) : null;
@@ -6817,17 +6821,8 @@ async function rollbackRelease() {
   const composeFiles = csvList(argv.composeFiles, "compose.yaml,compose.prod.yaml");
   const envText = fs.readFileSync(envFile, "utf8");
   const stamp = reportTimestamp();
-  const rollbackPlan = writeRollbackPlanReport({ envFile, envText, rollbackFile, imageOverrides, projectName, composeFiles, services, mode: booleanFlag(argv.confirmRollback) ? "apply" : "dry-run", stamp });
-  if (!booleanFlag(argv.confirmRollback)) {
-    log(`Rollback dry-run passed. Plan written to ${rollbackPlan.jsonPath} and ${rollbackPlan.markdownPath}`);
-    return;
-  }
-  const backupEnvPath = `${envFile}.rollback-backup-${stamp}`;
-  fs.copyFileSync(envFile, backupEnvPath);
-  fs.writeFileSync(envFile, rollbackPlan.nextEnvText, "utf8");
-  run("docker", ["compose", "--env-file", envFile, "-p", projectName, ...composeFiles.flatMap((file) => ["-f", path.resolve(infraRoot, file)]), "up", "-d", ...services]);
-  await infraHealth();
-  log(`Rollback applied. Previous env copied to ${backupEnvPath}. Plan: ${rollbackPlan.jsonPath}`);
+  const rollbackPlan = writeRollbackPlanReport({ envFile, envText, rollbackFile, imageOverrides, projectName, composeFiles, services, mode: "dry-run", stamp });
+  log(`Rollback dry-run passed. Plan written to ${rollbackPlan.jsonPath} and ${rollbackPlan.markdownPath}`);
 }
 
 async function drReadinessCheck(options = {}) {

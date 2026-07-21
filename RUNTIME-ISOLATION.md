@@ -147,11 +147,12 @@ Rollback uses the previous verified release and recreates only the affected
 service. Preserve logs, `docker inspect`, resource events and the failed render
 before rollback. Do not remove volumes or application sources.
 
-For a per-app failure, restore the previous Compose revision and run the old
-canonical wrapper with `up -d --no-deps --force-recreate <service>`. If the
-typed gateway fails, stop new scheduler jobs, preserve queued job state, restore
-the previous scheduler revision and leave the Docker socket unavailable to
-hosted workloads.
+For a per-app failure, submit the prior immutable release and its bound evidence
+to the same trusted deployment admission workflow. If the semantic Docker
+action broker fails, stop new scheduler jobs through the approved incident
+control, preserve queued job state, restore the previous scheduler revision
+through that workflow and leave the Docker socket unavailable to hosted
+workloads.
 
 ## Residuals
 

@@ -70,21 +70,10 @@ Expected storage model: `/` remains on the OS disk, while
 `/var/lib/docker` are backed by `/srv/platform-nvme`. Do not delete rollback
 copies, Docker volumes or backup artifacts while investigating an incident.
 
-For a Control Center-only rollout, back up the touched files, copy only those
-files, test them in the repo path, then recreate only `control-center`:
-
-```sh
-docker compose -p platform_infra_vps \
-  -f compose.yaml \
-  -f compose.secrets.yaml \
-  -f compose.vps.yaml \
-  -f compose.waf.yaml \
-  -f compose.vps-waf.yaml \
-  -f compose.runtime.yaml \
-  -f compose.networks.yaml \
-  -f compose.runtime-isolation.yaml \
-  up -d --force-recreate control-center
-```
+For a Control Center-only rollout, encode the change as an immutable release
+and submit it through the same trusted release/admission `deploy-vps.sh`
+workflow. Copying files into the live checkout and direct service recreation
+are disabled production bypasses.
 
 Never use `docker compose down -v` as a troubleshooting shortcut. Volume
 deletion is a separate destructive procedure and requires explicit approval,
@@ -274,10 +263,11 @@ sudo sh ./scripts/install-container-metrics-collector.sh \
   --repo-root /home/platform_infrastructure/platform-infrastructure
 ```
 
-During the maintenance window, run the installer with `--apply`, recreate only
-node-exporter, Prometheus and Control Center with the canonical overlays, then
-run `--verify` and `vps-host-readiness.sh --enforce`. Never use
-`docker compose down -v`.
+During the maintenance window, an approved host-maintenance controller may run
+the installer with `--apply`; the resulting immutable runtime revision must then
+be submitted through the trusted deployment workflow before `--verify` and
+`vps-host-readiness.sh --enforce`. Direct service recreation is disabled. Never
+use `docker compose down -v`.
 
 The Control Center rejects snapshots older than
 `CONTROL_CENTER_DOCKER_STATS_MAX_AGE_SECONDS` and preserves a real `0.000%` CPU
@@ -505,32 +495,18 @@ The generated crontab covers PostgreSQL/MariaDB local database backups, weekly r
 
 PostgreSQL restore drills never target `enterprise-postgres`: they mount the signed dump read-only into a digest-pinned, networkless disposable container and run `pg_restore` as the restricted `restore_runner` role. A Docker-enabled disposable integration test is still required after policy/code changes; repository-only checks do not claim that runtime proof.
 
-Preferred VPS scheduler:
+Preferred VPS scheduler is part of the admitted immutable production release;
+enable or update it only through the trusted `deploy-vps.sh` workflow. After
+that workflow succeeds, `docker logs enterprise-backup-scheduler` and
+`docker exec enterprise-backup-scheduler crontab -l` are diagnostic checks,
+not activation evidence.
 
-```sh
-COMPOSE_ENV_FILE=.env COMPOSE_PROJECT_NAME=platform_infra_vps \
-  bash ./scripts/compose-vps.sh up -d backup-scheduler
-
-docker logs enterprise-backup-scheduler
-docker exec enterprise-backup-scheduler crontab -l
-```
-
-This keeps scheduling inside Docker. `compose-vps.sh` is the sole supported
-scheduler entrypoint because it loads the runtime, network and isolation
-overlays as one fixed set. The host only needs Docker, Compose and Git. The
-scheduler calls `docker-operation-gateway` on the isolated
-`platform_docker_control` network with its dedicated Docker-secret principal
-credential, mounted only into those two services. The gateway has no host port
-and maps only documented backup/restore job names to fixed `infra-ops`
-invocations; it never accepts Docker paths, methods, commands, images, mounts,
-networks, volumes, capabilities, devices or host namespaces from the caller.
-Manual job files are stably snapshotted into private gateway tmpfs before
-execution. Set `PLATFORM_INFRA_HOST_ROOT` and `PROJECT_SOURCE_HOST_ROOT` only
-when gateway mount discovery cannot identify nonstandard VPS paths. Enable
-off-site upload with `BACKUP_SCHEDULER_ENABLE_OFFSITE=true` after
-`RESTIC_REPOSITORY`, `RESTIC_PASSWORD_FILE` and provider credentials are valid.
-
-Host-side ops default to `PLATFORM_OPS_DOCKER_MODE=none`. Use `gateway` only for enumerated scheduled operations. Explicit `raw` recovery still requires `PLATFORM_ALLOW_RAW_DOCKER_SOCKET=1` and an approved maintenance window; no loopback Docker API is created.
+This keeps scheduling inside Docker while the scheduler remains socketless. It
+submits only fixed semantic backup/restore actions to the root-owned Docker
+action broker; it cannot supply Docker commands, paths, images, mounts,
+networks, volumes, capabilities, devices or host namespaces. Manual jobs are
+stably snapshotted before execution. Raw-socket recovery remains a separate,
+explicit operator maintenance path and is never exposed to hosted workloads.
 
 ## Home VPS LAN evidence
 
@@ -1139,10 +1115,10 @@ including Compose render and workload-lock digests. The owner pin authenticates
 the final one-HEAD set; it does not convert missing provider, off-site restore,
 or live execution into a pass.
 
-1. Build versioned images:
+1. Build and attest versioned images through the release workflow:
 
    ```sh
-   docker compose -f compose.yaml --env-file .env build
+   gh workflow run release-attestation.yml --repo OWNER/REPO --ref main
    ```
 
 2. Push images to the registry configured in `.env`.
@@ -1157,11 +1133,10 @@ or live execution into a pass.
    sh ./scripts/full-restore-drill.sh
    ```
 
-4. Start production:
-
-   ```sh
-   docker compose -f compose.yaml -f compose.prod.yaml --env-file .env -p enterprise_prod up -d
-   ```
+4. Submit the admitted release to the trusted `deploy-vps.sh` workflow. Direct
+   Compose activation is disabled. This remains `EXTERNAL-PENDING`/`NO-GO`
+   until the GitHub environment/revision policy and trusted verifier bootstrap
+   have current provider evidence.
 
 5. Run smoke checks against public domains.
 6. Run the mandatory supply-chain gate, then archive the dependency SBOM:
@@ -1373,12 +1348,12 @@ Use this path when TLS and public certificates are terminated by VPS, Cloudflare
    sh ./scripts/rollback-release.sh --rollbackFile ./release/previous-images.json
    ```
 
-4. Apply only after approval:
+4. Submit the approved prior immutable release SHA and its bound evidence to the
+   same trusted release/admission `deploy-vps.sh` workflow. The legacy
+   `--confirmRollback` mutation path is disabled and returns
+   `EXTERNAL-PENDING`.
 
-   ```sh
-   sh ./scripts/rollback-release.sh --rollbackFile ./release/previous-images.json --confirmRollback
-   ```
-
-5. The apply path backs up `.env`, updates only the image variables, restarts selected app services and runs `infra-health`.
+5. The trusted deploy path must preserve the current runtime snapshot, deploy
+   only the admitted prior image digests and run post-deploy health checks.
 6. Do not roll back the database unless a restore plan has been tested.
 7. Append rollback reason, operator and restored image digests to the deploy audit trail.

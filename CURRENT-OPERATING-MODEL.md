@@ -223,13 +223,6 @@ COMPOSE_PROJECT_NAME=platform_infra_vps \
 HOSTED_WORKLOAD_LOCK=/path/private/hosted-workloads.lock.json \
 bash ./scripts/compose-vps.sh config --format json > /tmp/reviewed-hosted-compose.json
 
-# Run only after reviewed backup, lock and maintenance approval.
-bash ./scripts/hosted-workload-activation-gate.sh \
-  --project-name platform_infra_vps \
-  --env-file .env \
-  --lock /path/private/hosted-workloads.lock.json \
-  --previous-lock /path/private/previous-hosted-workloads.lock.json \
-  --confirm ACTIVATE-HOSTED-WORKLOADS
 ```
 
 For a zero-workload platform deploy, omit `HOSTED_WORKLOAD_LOCK`. Never point it
@@ -243,11 +236,13 @@ immutable in-memory bytes, and projected as one digest-bound activation bundle;
 separate helper calls cannot mix generations. The deployment Unix identity is an
 administrative trust boundary and must not be shared with hosted services.
 
-Control Center-only code/documentation rollout remains owned by the verified
-release/rollback workflow. The Compose wrapper refuses runtime mutation while a
-hosted lock is selected; do not bypass the activation or release gates with
-direct `up`, `start`, `restart`, `run`, `unpause`, `watch`, late `-f`, env,
-project or profile arguments.
+The wrapper is read-only: it cannot build, pull, start or recreate services.
+Full and Control Center-only production mutations must be encoded as an
+immutable release and pass the trusted release/admission `deploy-vps.sh`
+workflow. Provider policy and verifier bootstrap proof are still
+`EXTERNAL-PENDING`, so activation remains `NO-GO` until those proofs exist.
+It also refuses late `-f`, environment, project and profile overrides; the
+hosted lock and its canonical route projection remain bound to that release.
 
 Health and status checks:
 
@@ -272,8 +267,9 @@ curl -skS --resolve portal.platform-infrastructure.com:443:127.0.0.1 \
    application-owned manifest, images, environment and migration procedure.
 10. Generate a `0600` hosted-workload lock and review the exact core/combined
     render diff before any activation.
-11. Start the stack with the reviewed lock and verify `ps`, WAF, Portal, docs
-    and Status. Apply app migrations only through the separate app runbook.
+11. Submit the admitted release and reviewed lock to the trusted deployment
+    workflow, then verify `ps`, WAF, Portal, docs and Status. Apply app
+    migrations only through the separate app runbook.
 12. Run backup and restore drills before deleting rollback copies.
 13. Keep the old server as reference until the new server has clean health,
     current backups, restore evidence and operator sign-off.

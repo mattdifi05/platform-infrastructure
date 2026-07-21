@@ -166,6 +166,7 @@ jobs:
           node scripts/release-registry-resolution.test.mjs
           node scripts/stable-json-artifact.test.mjs
           node scripts/release-subject-manifest.test.mjs
+          node scripts/release-artifact-gate-consumer.test.mjs
           node scripts/release-go-no-go-policy.test.mjs
           node scripts/deployment-admission-policy.test.mjs
           node scripts/deployment-receipt-policy.test.mjs

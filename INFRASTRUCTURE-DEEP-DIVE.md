@@ -450,21 +450,8 @@ Reference server path:
 cd /home/platform_infrastructure/platform-infrastructure
 ```
 
-Full current reference stack:
-
-```sh
-docker compose -p platform_infra_vps \
-  -f compose.yaml \
-  -f compose.secrets.yaml \
-  -f compose.vps.yaml \
-  -f compose.waf.yaml \
-  -f compose.vps-waf.yaml \
-  -f .tmp/vps-runtime-override.yaml \
-  up -d --build
-```
-
-This command documents the unchanged legacy runtime only. The T18 target is
-rendered through the canonical wrapper and a verified lock:
+The T18 target is rendered through the canonical read-only wrapper and a
+verified lock:
 
 ```sh
 HOSTED_WORKLOAD_CATALOG=/path/hosted-workloads.json \
@@ -479,33 +466,19 @@ HOSTED_WORKLOAD_LOCK=/path/private/hosted-workloads.lock.json \
 bash ./scripts/compose-vps.sh config --format json > /tmp/reviewed-hosted-compose.json
 ```
 
-Starting or recreating the candidate is a separate maintenance action and is
-not implied by a successful render.
-
-Control Center-only rollout:
-
-```sh
-docker compose -p platform_infra_vps \
-  -f compose.yaml \
-  -f compose.secrets.yaml \
-  -f compose.vps.yaml \
-  -f compose.waf.yaml \
-  -f compose.vps-waf.yaml \
-  -f .tmp/vps-runtime-override.yaml \
-  up -d --force-recreate control-center
-```
+Starting or recreating the candidate is not implied by a successful render.
+Full and Control Center-only rollout must use the immutable release/admission
+`deploy-vps.sh` workflow. Direct Compose mutation and the legacy wrapper
+mutation interface are disabled; provider-backed admission remains
+`EXTERNAL-PENDING`/`NO-GO` until current external proof exists.
 
 Read-only status checks:
 
 ```sh
-docker compose -p platform_infra_vps \
-  -f compose.yaml \
-  -f compose.secrets.yaml \
-  -f compose.vps.yaml \
-  -f compose.waf.yaml \
-  -f compose.vps-waf.yaml \
-  -f .tmp/vps-runtime-override.yaml \
-  ps
+COMPOSE_ENV_FILE=.env \
+COMPOSE_PROJECT_NAME=platform_infra_vps \
+HOSTED_WORKLOAD_LOCK=/path/private/hosted-workloads.lock.json \
+bash ./scripts/compose-vps.sh ps
 
 curl -skS --resolve portal.platform-infrastructure.com:443:127.0.0.1 \
   https://portal.platform-infrastructure.com/control/status
@@ -526,9 +499,8 @@ Never use `docker compose down -v` as a troubleshooting shortcut.
 9. Recreate `.env` and platform Docker secrets from reviewed templates.
 10. Copy application repositories outside infra, validate their manifests and
     prepare a `0600` hosted-workload lock.
-11. Review zero-workload and combined renders, then activate only the exact
-    locked hosted service set with `hosted-workload-activation-gate.sh`; core
-    bootstrap remains in the separate release/rollback workflow.
+11. Review zero-workload and combined renders, then submit the admitted release
+    to the trusted `deploy-vps.sh` workflow with the approved lock.
 12. Verify WAF, Traefik, Portal, docs, Status API, observability and backups.
 13. Run restore drills before deleting rollback copies.
 14. Keep the old server as reference until the new server has current evidence
