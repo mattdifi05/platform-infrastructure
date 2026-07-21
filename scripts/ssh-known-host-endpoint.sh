@@ -17,7 +17,8 @@ case "$port" in ''|*[!0-9]*) echo "SSH port is invalid." >&2; exit 1 ;; esac
 lookup=$host
 [ "$port" = 22 ] || lookup="[$host]:$port"
 matches=$(mktemp "${TMPDIR:-/tmp}/ssh-known-host-endpoint.XXXXXX")
-trap 'rm -f "$matches"' EXIT HUP INT TERM
+fingerprints=$(mktemp "${TMPDIR:-/tmp}/ssh-known-host-fingerprints.XXXXXX")
+trap 'rm -f "$matches" "$fingerprints"' EXIT HUP INT TERM
 ssh-keygen -F "$lookup" -f "$known_hosts" > "$matches" 2>/dev/null || {
   echo "Owner-approved known_hosts has no pin for the exact SSH host and port." >&2
   exit 1
@@ -25,6 +26,14 @@ ssh-keygen -F "$lookup" -f "$known_hosts" > "$matches" 2>/dev/null || {
 records=$(awk 'NF && $1 !~ /^#/ { count++ } END { print count + 0 }' "$matches")
 [ "$records" -eq 1 ] || {
   echo "Owner-approved known_hosts must contain exactly one active key for the exact SSH host and port; replace the old key atomically during rotation." >&2
+  exit 1
+}
+ssh-keygen -l -E sha256 -f "$matches" > "$fingerprints" 2>/dev/null || {
+  echo "Owner-approved known_hosts contains malformed or unsupported public-key material." >&2
+  exit 1
+}
+[ "$(awk 'NF { count++ } END { print count + 0 }' "$fingerprints")" -eq 1 ] || {
+  echo "Owner-approved known_hosts must resolve to exactly one valid SSH public-key fingerprint." >&2
   exit 1
 }
 awk -v lookup="$lookup" '

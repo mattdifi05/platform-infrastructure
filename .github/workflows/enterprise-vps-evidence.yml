@@ -113,6 +113,16 @@ jobs:
           test -z "$(git status --porcelain=v1 --untracked-files=all)"
           workflow_tree=$(git rev-parse --verify "$WORKFLOW_SHA^{tree}")
           test -n "$workflow_tree"
+          ssh_trust_dir="$(mktemp -d "${RUNNER_TEMP}/vps-ssh-trust.XXXXXX")"
+          trap 'rm -rf "$ssh_trust_dir"' EXIT
+          ssh_key_snapshot="$ssh_trust_dir/deploy_key"
+          known_hosts_snapshot="$ssh_trust_dir/known_hosts"
+          install -m 600 "$HOME/.ssh/deploy_key" "$ssh_key_snapshot"
+          install -m 600 "$HOME/.ssh/known_hosts" "$known_hosts_snapshot"
+          node ./scripts/pinned-ssh-host-key.mjs verify \
+            --remote "$DEPLOY_REMOTE" \
+            --port "$DEPLOY_SSH_PORT" \
+            --file "$known_hosts_snapshot"
           if { [ "$RUN_BOOTSTRAP" = "true" ] || [ "$RUN_HARDENING" = "true" ]; } && [ "$CONFIRM_MUTATING_VPS" != "true" ]; then
             echo "Set confirm_mutating_vps=true before enabling VPS bootstrap or hardening." >&2
             exit 1
@@ -120,9 +130,9 @@ jobs:
           install -d .tmp
           remote_output=".tmp/vps-evidence-remote-output.txt"
           WORKFLOW_TREE="$workflow_tree" node ./scripts/vps-evidence-request.mjs render > .tmp/vps-evidence-remote.sh
-          ssh -F /dev/null -i ~/.ssh/deploy_key -p "$DEPLOY_SSH_PORT" \
+          ssh -F /dev/null -i "$ssh_key_snapshot" -p "$DEPLOY_SSH_PORT" \
             -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
-            -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
+            -o "UserKnownHostsFile=$known_hosts_snapshot" \
             -o GlobalKnownHostsFile=/dev/null -o UpdateHostKeys=no \
             "$DEPLOY_REMOTE" 'bash -s' < .tmp/vps-evidence-remote.sh > "$remote_output"
           sed -n '/^__PLATFORM_VPS_EVIDENCE_RECEIPT_BEGIN__$/,/^__PLATFORM_VPS_EVIDENCE_RECEIPT_END__$/p' "$remote_output" \

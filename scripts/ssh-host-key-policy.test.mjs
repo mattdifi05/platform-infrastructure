@@ -23,7 +23,7 @@ assert.match(combined, /IdentitiesOnly=yes/);
 assert.match(sources["scripts/deploy-vps.sh"], /ssh-known-host-endpoint\.sh/);
 assert.match(sources[".github/workflows/enterprise-vps-evidence.yml"], /ssh-known-host-endpoint\.sh/);
 assert.match(sources["scripts/deploy-vps.sh"], /ssh-known-host-endpoint\.sh[\s\S]*ssh "\$@" "\$REMOTE"/);
-assert.match(sources[".github/workflows/enterprise-vps-evidence.yml"], /ssh-known-host-endpoint\.sh[\s\S]*ssh -i ~\/\.ssh\/deploy_key/);
+assert.match(sources[".github/workflows/enterprise-vps-evidence.yml"], /known_hosts_snapshot[\s\S]*ssh-known-host-endpoint\.sh[\s\S]*ssh -i "\$ssh_key_snapshot"/);
 assert.match(sources["scripts/deploy-vps.sh"], /DEPLOY_SSH_KEY_PATH must be a readable, non-empty dedicated private-key file/);
 assert.doesNotMatch(sources["scripts/deploy-vps.sh"], /if \[ -f "\$SSH_KEY_PATH" \]/);
 
@@ -31,8 +31,8 @@ const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "ssh-host-key-policy-"))
 process.on("exit", () => fs.rmSync(temporary, { recursive: true, force: true }));
 const helper = path.resolve("scripts/ssh-known-host-endpoint.sh");
 const endpoint = "[example.internal]:2222";
-const key1 = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestOnlyPinnedHostKeyOne";
-const key2 = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestOnlyPinnedHostKeyTwo";
+const key1 = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILBajvJtpsX+LmnBbwAcOXdb9LRHK+d9WJlVKLaAklDO";
+const key2 = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAtGTSaFMsqramyTprMstB+XUzWdhAegQpEZoNyZT02T";
 
 function verify(contents, host = "example.internal", port = "2222") {
   const file = path.join(temporary, `known-hosts-${crypto.randomUUID()}`);
@@ -47,5 +47,7 @@ assert.notEqual(verify(`${endpoint} ${key1}\n`, "example.internal", "2200").stat
 assert.notEqual(verify(`${endpoint} ${key1}\n${endpoint} ${key2}\n`).status, 0, "a conflicting old/new key set must fail until atomically approved");
 assert.notEqual(verify(`[*.internal]:2222 ${key1}\n`).status, 0, "a wildcard host pattern must not satisfy an exact endpoint pin");
 assert.notEqual(verify(`${endpoint},[alias.internal]:2222 ${key1}\n`).status, 0, "a comma-separated alias must not widen the exact endpoint pin");
+assert.notEqual(verify(`${endpoint} ssh-ed25519 definitely-not-a-key\n`).status, 0, "malformed key base64 must fail before SSH");
+assert.notEqual(verify(`${endpoint} ssh-unknown ${key1.split(" ")[1]}\n`).status, 0, "an unsupported key type must fail before SSH");
 
-process.stdout.write("SSH host key policy tests passed 20/20\n");
+process.stdout.write("SSH host key policy tests passed 22/22\n");

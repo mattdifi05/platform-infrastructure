@@ -47,6 +47,16 @@ case "$SSH_KNOWN_HOSTS_PATH" in /*) ;; *) echo "DEPLOY_SSH_KNOWN_HOSTS_PATH must
   echo "DEPLOY_SSH_KNOWN_HOSTS_PATH must be a readable, non-empty owner-approved regular file, not a symlink." >&2
   exit 1
 }
+request_dir=$(mktemp -d "${TMPDIR:-/tmp}/platform-deploy-request.XXXXXX")
+trap 'rm -rf "$request_dir"' EXIT HUP INT TERM
+stable_ssh_key="$request_dir/deploy_key"
+stable_known_hosts="$request_dir/known_hosts"
+cp "$SSH_KEY_PATH" "$stable_ssh_key"
+cp "$SSH_KNOWN_HOSTS_PATH" "$stable_known_hosts"
+chmod 600 "$stable_ssh_key" "$stable_known_hosts"
+[ -s "$stable_ssh_key" ] && [ -s "$stable_known_hosts" ] || { echo "Stable SSH identity snapshot is incomplete." >&2; exit 1; }
+SSH_KEY_PATH=$stable_ssh_key
+SSH_KNOWN_HOSTS_PATH=$stable_known_hosts
 case "$ENV_FILE" in [A-Za-z0-9._/-]* ) ;; *) echo "DEPLOY_ENV_FILE is invalid." >&2; exit 1 ;; esac
 case "$ENV_FILE" in /*|*..*|*//*|*/ ) echo "DEPLOY_ENV_FILE must be a contained relative path." >&2; exit 1 ;; esac
 case "$PROJECT_NAME" in [a-z0-9]* ) ;; *) echo "DEPLOY_PROJECT_NAME is invalid." >&2; exit 1 ;; esac
@@ -95,8 +105,6 @@ hash_file() {
   if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'; else shasum -a 256 "$1" | awk '{print $1}'; fi
 }
 
-request_dir=$(mktemp -d "${TMPDIR:-/tmp}/platform-deploy-request.XXXXXX")
-trap 'rm -rf "$request_dir"' EXIT HUP INT TERM
 stable_artifact_receipt="$request_dir/artifact-verification.json"
 stable_admission_receipt="$request_dir/trusted-deployment-admission.json"
 cp "$ARTIFACT_RECEIPT" "$stable_artifact_receipt"

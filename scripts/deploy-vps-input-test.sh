@@ -17,6 +17,21 @@ hash_file() {
 cat > "$TMP/ssh" <<'SH'
 #!/usr/bin/env sh
 set -eu
+known_hosts=
+identity=
+previous=
+for argument in "$@"; do
+  case "$argument" in UserKnownHostsFile=*) known_hosts=${argument#UserKnownHostsFile=} ;; esac
+  [ "$previous" != -i ] || identity=$argument
+  previous=$argument
+done
+if [ -n "${SWAP_KNOWN_HOSTS_SOURCE:-}" ]; then
+  printf '%s\n' '[example.internal]:2222 ssh-ed25519 definitely-not-a-key' > "$SWAP_KNOWN_HOSTS_SOURCE"
+  [ "$known_hosts" != "$SWAP_KNOWN_HOSTS_SOURCE" ]
+  [ "$identity" != "$ORIGINAL_SSH_KEY_SOURCE" ]
+  grep -Fx "$EXPECTED_KNOWN_HOST_RECORD" "$known_hosts" >/dev/null
+  cmp "$ORIGINAL_SSH_KEY_SOURCE" "$identity" >/dev/null
+fi
 printf '%s\n' "$@" > "$FAKE_SSH_ARGS"
 cat > "$FAKE_SSH_STDIN"
 SH
@@ -43,7 +58,7 @@ cat > "$TMP/admission.json" <<EOF
 {"version":1,"kind":"platform-trusted-deployment-admission/v1","status":"READY","artifactVerification":"passed","deploymentAdmission":"READY","repository":"owner/repo","commitSha":"$RELEASE_SHA","treeSha":"$RELEASE_TREE","artifactVerificationReceiptSha256":"$ARTIFACT_SHA","manifestSha256":"$MANIFEST_SHA","sbomSha256":"$SBOM_SHA","generatedAt":"2026-07-21T00:00:00.000Z","decisionId":"decision:12345678","verifier":{"channel":"external-admission-controller/prod","fingerprint":"$(printf '3%.0s' $(seq 1 64))","selfAsserted":false,"verifiedAt":"2026-07-21T00:00:00.000Z"}}
 EOF
 ADMISSION_SHA=$(hash_file "$TMP/admission.json")
-printf '%s\n' '[example.internal]:2222 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestOnlyPinnedHostKey' > "$TMP/known_hosts"
+printf '%s\n' '[example.internal]:2222 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILBajvJtpsX+LmnBbwAcOXdb9LRHK+d9WJlVKLaAklDO' > "$TMP/known_hosts"
 printf '%s\n' 'test-only-private-key' > "$TMP/deploy_key"
 chmod 600 "$TMP/deploy_key"
 
@@ -126,16 +141,20 @@ sed 's/:2222/:2200/' "$TMP/wrong-port-known-hosts" > "$TMP/wrong-port-known-host
 mv "$TMP/wrong-port-known-hosts.next" "$TMP/wrong-port-known-hosts"
 expect_base_reject wrong-host-port-pin env DEPLOY_KNOWN_HOSTS_PATH="$TMP/wrong-port-known-hosts"
 
-base_env sh "$SCRIPT_DIR/deploy-vps.sh"
+expected_known_host_record='[example.internal]:2222 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILBajvJtpsX+LmnBbwAcOXdb9LRHK+d9WJlVKLaAklDO'
+base_env env SWAP_KNOWN_HOSTS_SOURCE="$TMP/known_hosts" ORIGINAL_SSH_KEY_SOURCE="$TMP/deploy_key" EXPECTED_KNOWN_HOST_RECORD="$expected_known_host_record" sh "$SCRIPT_DIR/deploy-vps.sh"
 grep -Fx 'deploy@example.internal' "$FAKE_SSH_ARGS" >/dev/null
 grep -Fx 'sh -s' "$FAKE_SSH_ARGS" >/dev/null
 grep -Fx 'StrictHostKeyChecking=yes' "$FAKE_SSH_ARGS" >/dev/null
-grep -Fx "UserKnownHostsFile=$TMP/known_hosts" "$FAKE_SSH_ARGS" >/dev/null
+stable_known_hosts=$(sed -n 's/^UserKnownHostsFile=//p' "$FAKE_SSH_ARGS")
+stable_identity=$(awk 'previous == "-i" { print; exit } { previous=$0 }' "$FAKE_SSH_ARGS")
+[ "$stable_known_hosts" != "$TMP/known_hosts" ]
+[ "$stable_identity" != "$TMP/deploy_key" ]
+printf 'PASS\tssh-identity-and-host-database-use-private-snapshots\n'
 grep -Fx 'GlobalKnownHostsFile=/dev/null' "$FAKE_SSH_ARGS" >/dev/null
 grep -Fx 'UpdateHostKeys=no' "$FAKE_SSH_ARGS" >/dev/null
 grep -Fx 'BatchMode=yes' "$FAKE_SSH_ARGS" >/dev/null
 grep -Fx 'IdentitiesOnly=yes' "$FAKE_SSH_ARGS" >/dev/null
-grep -Fx "$TMP/deploy_key" "$FAKE_SSH_ARGS" >/dev/null
 if grep -F 'accept-new' "$FAKE_SSH_ARGS" >/dev/null; then echo "FAIL: accept-new remained enabled" >&2; exit 1; fi
 if grep -F '/opt/platform-infrastructure' "$FAKE_SSH_STDIN" >/dev/null; then echo "FAIL: raw remote directory leaked into generated shell" >&2; exit 1; fi
 grep -E "^PLATFORM_RELEASE_SHA_B64='[A-Za-z0-9+/=]+'$" "$FAKE_SSH_STDIN" >/dev/null
@@ -149,4 +168,4 @@ expect_reject production-policy-stays-external-pending env \
   DEPLOY_ADMISSION_RECEIPT_PATH="$TMP/admission.json" DEPLOY_ADMISSION_RECEIPT_SHA256="$ADMISSION_SHA" \
   FAKE_RELEASE_SHA="$RELEASE_SHA" FAKE_RELEASE_TREE="$RELEASE_TREE"
 
-printf 'deploy VPS input tests passed 17/17\n'
+printf 'deploy VPS input tests passed 18/18\n'
