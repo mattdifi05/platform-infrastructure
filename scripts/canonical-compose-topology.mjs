@@ -7,6 +7,12 @@ function requiredIdentifier(value, label) {
   return clean;
 }
 
+function requiredSha256(value, label) {
+  const clean = String(value ?? "").trim().toLowerCase();
+  if (!/^[a-f0-9]{64}$/.test(clean)) throw new Error(`Invalid ${label}.`);
+  return clean;
+}
+
 function displayPath(root, filePath) {
   const relative = path.relative(root, filePath).replaceAll("\\", "/");
   return relative && !relative.startsWith("../") && relative !== ".." ? relative : filePath;
@@ -17,8 +23,10 @@ export function canonicalVpsTopologyPlan({ infraRoot, envFile, projectName = "pl
   const resolvedEnvFile = path.resolve(root, String(envFile ?? ""));
   const cleanProjectName = requiredIdentifier(projectName, "Compose project name");
   const rawLock = String(workloadLock ?? "").trim();
-  const resolvedWorkloadLock = rawLock ? path.resolve(root, rawLock) : null;
+  if (!rawLock) throw new Error("Hosted workload lock is required for canonical VPS topology.");
+  const resolvedWorkloadLock = path.resolve(root, rawLock);
   const wrapper = path.join(root, "scripts", "compose-vps.sh");
+  const lockVerifier = path.join(root, "scripts", "hosted-workload-lock.sh");
   return {
     source: "scripts/compose-vps.sh",
     root,
@@ -26,14 +34,19 @@ export function canonicalVpsTopologyPlan({ infraRoot, envFile, projectName = "pl
     envFileDisplay: displayPath(root, resolvedEnvFile),
     projectName: cleanProjectName,
     workloadLock: resolvedWorkloadLock,
-    workloadLockDisplay: resolvedWorkloadLock ? displayPath(root, resolvedWorkloadLock) : null,
+    workloadLockDisplay: displayPath(root, resolvedWorkloadLock),
+    verification: {
+      bin: "sh",
+      args: [lockVerifier, resolvedWorkloadLock, "verify"],
+      env: { HOSTED_WORKLOAD_ALLOW_RESOLVED: "0" },
+    },
     command: {
       bin: "bash",
       args: [wrapper, "config", "--format", "json"],
       env: {
         COMPOSE_ENV_FILE: resolvedEnvFile,
         COMPOSE_PROJECT_NAME: cleanProjectName,
-        HOSTED_WORKLOAD_LOCK: resolvedWorkloadLock ?? "",
+        HOSTED_WORKLOAD_LOCK: resolvedWorkloadLock,
         HOSTED_WORKLOAD_ALLOW_RESOLVED: "0",
       },
     },
@@ -41,6 +54,8 @@ export function canonicalVpsTopologyPlan({ infraRoot, envFile, projectName = "pl
 }
 
 export function parseCanonicalVpsTopology(configText, plan, { workloadLockSha256 = null } = {}) {
+  if (!plan?.workloadLock) throw new Error("Hosted workload lock is required for canonical VPS topology.");
+  const lockSha256 = requiredSha256(workloadLockSha256, "hosted workload lock SHA256");
   let config;
   try {
     config = JSON.parse(String(configText ?? ""));
@@ -63,11 +78,11 @@ export function parseCanonicalVpsTopology(configText, plan, { workloadLockSha256
       source: plan.source,
       projectName: plan.projectName,
       envFile: plan.envFileDisplay,
-      workloadLock: plan.workloadLock ? {
+      workloadLock: {
         path: plan.workloadLockDisplay,
-        sha256: workloadLockSha256,
+        sha256: lockSha256,
         verifiedOnly: true,
-      } : null,
+      },
       renderSha256,
       serviceNames,
       networkNames,

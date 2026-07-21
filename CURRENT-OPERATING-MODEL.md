@@ -230,8 +230,9 @@ HOSTED_WORKLOAD_LOCK=/path/private/hosted-workloads.lock.json \
 bash ./scripts/compose-vps.sh up -d --build
 ```
 
-For a zero-workload platform deploy, omit `HOSTED_WORKLOAD_LOCK`. Never point it
-at an unverified or world-readable file.
+Even a zero-workload platform deploy requires `HOSTED_WORKLOAD_LOCK`; prepare a
+verified lock whose `workloads` array is empty. Never point it at an unverified
+or world-readable file.
 
 For a Control Center-only code/documentation rollout:
 

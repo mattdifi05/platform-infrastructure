@@ -2802,12 +2802,15 @@ function canonicalVpsTopologyRender({ envFile, projectName, workloadLock } = {})
   const resolvedProjectName = String(projectName ?? argv.projectName ?? argv.project ?? process.env.COMPOSE_PROJECT_NAME ?? envValues.COMPOSE_PROJECT_NAME ?? "platform_infra_vps").trim();
   const configuredWorkloadLock = workloadLock ?? argv.workloadLock ?? process.env.HOSTED_WORKLOAD_LOCK ?? envValues.HOSTED_WORKLOAD_LOCK ?? "";
   const plan = canonicalVpsTopologyPlan({ infraRoot, envFile: resolvedEnvFile, projectName: resolvedProjectName, workloadLock: configuredWorkloadLock });
+  run(plan.verification.bin, plan.verification.args, { env: plan.verification.env });
+  const workloadLockSha256Before = sha256File(plan.workloadLock);
   const configText = output(plan.command.bin, plan.command.args, {
     env: plan.command.env,
     maxBuffer: 128 * 1024 * 1024,
   });
-  const workloadLockSha256 = plan.workloadLock ? sha256File(plan.workloadLock) : null;
-  return parseCanonicalVpsTopology(configText, plan, { workloadLockSha256 });
+  const workloadLockSha256After = sha256File(plan.workloadLock);
+  if (workloadLockSha256Before !== workloadLockSha256After) fail("Hosted workload lock changed during canonical topology render.");
+  return parseCanonicalVpsTopology(configText, plan, { workloadLockSha256: workloadLockSha256After });
 }
 
 function currentCandidateIdentity({ envFile, projectName, workloadLock, repository } = {}) {
@@ -4863,6 +4866,7 @@ async function productionPreflight() {
     if (!env[key]) fail(`Missing required production env: ${key}`);
     if (/change_me|your-domain|localhost|example\.com/i.test(env[key])) fail(`Production env ${key} still contains a placeholder or local value.`);
   };
+  requireKey("HOSTED_WORKLOAD_LOCK");
   ["TRAEFIK_ACME_EMAIL", "DOMAIN", "CONTROL_CENTER_PUBLIC_URL", "DOCS_PUBLIC_URL", "AUTH_HOST", "SMTP_HOST", "SMTP_USER", "MAILER_FROM", "ALERT_EMAIL_TO"].forEach(requireKey);
   for (const key of ["POSTGRES_PASSWORD", "KEYCLOAK_DB_PASSWORD", "REDIS_PASSWORD", "KC_BOOTSTRAP_ADMIN_PASSWORD", "NATS_PASSWORD", "MINIO_ROOT_PASSWORD", "MARIADB_ROOT_PASSWORD", "GF_SECURITY_ADMIN_PASSWORD", "SMTP_PASSWORD"]) {
     requireManagedSecret(env, key);
@@ -4878,11 +4882,10 @@ async function productionPreflight() {
       await dns.resolve4(host);
     }
   }
-  const workloadLock = env.HOSTED_WORKLOAD_LOCK ? path.resolve(infraRoot, env.HOSTED_WORKLOAD_LOCK) : null;
-  if (workloadLock) {
-    run("sh", [path.join(scriptDir, "hosted-workload-lock.sh"), workloadLock, "verify"], { env: { HOSTED_WORKLOAD_ALLOW_RESOLVED: "0" } });
-  }
-  log("Platform production preflight passed.");
+  const workloadLock = path.resolve(infraRoot, env.HOSTED_WORKLOAD_LOCK);
+  run("sh", [path.join(scriptDir, "hosted-workload-lock.sh"), workloadLock, "verify"], { env: { HOSTED_WORKLOAD_ALLOW_RESOLVED: "0" } });
+  const { evidence: topology } = canonicalVpsTopologyRender({ envFile, workloadLock });
+  log(`Platform production preflight passed for canonical render ${topology.renderSha256} and workload lock ${topology.workloadLock.sha256}.`);
 }
 
 async function haConfigCheck(options = {}) {
