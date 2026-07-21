@@ -28,6 +28,7 @@ import { runCommandSync } from "./command-safety.mjs";
 import { resticSecretTransport } from "./restic-secret-transport.mjs";
 import { safeTarCreateArgs, validateTarEntryName } from "./safe-tar-path.mjs";
 import { assertNoPlaintextFingerprints, legacyPlaintextFingerprintNames } from "./secret-store-metadata.mjs";
+import { validateBackupImportProvenance } from "./backup-import-policy.mjs";
 import {
   assertExactBranchProtection,
   assertExactGithubEnvironment,
@@ -1252,22 +1253,31 @@ function writeRollbackPlanReport({
 async function signExistingPostgresBackups() {
   const backupRoot = path.resolve(argv.backupRoot ?? path.join(infraRoot, "backups", "postgres"));
   resolveInside(path.join(infraRoot, "backups"), backupRoot);
-  const dumps = listDumpFilesRecursive(backupRoot);
-  let signed = 0;
+  const quarantineRoot = path.join(backupRoot, "quarantine", backupTimestamp());
+  const dumps = listDumpFilesRecursive(backupRoot).filter((dump) => !dump.startsWith(`${path.join(backupRoot, "quarantine")}${path.sep}`));
   let verified = 0;
+  const untrusted = [];
   for (const dump of dumps) {
-    const hash = sha256File(dump);
-    const shaPath = `${dump}.sha256`;
-    if (!fs.existsSync(shaPath) || fs.readFileSync(shaPath, "utf8").trim().split(/\s+/, 1)[0] !== hash) {
-      fs.writeFileSync(shaPath, `${hash}  ${path.basename(dump)}\n`, "ascii");
-    }
-    if (fs.existsSync(backupSignatureSidecarPath(dump)) && !booleanFlag(argv.force)) {
+    if (fs.existsSync(`${dump}.sha256`) && fs.existsSync(backupSignatureSidecarPath(dump))) {
       verifyBackupArtifact(dump);
       verified += 1;
       continue;
     }
-    signBackupArtifact(dump, hash);
-    signed += 1;
+    untrusted.push(dump);
+  }
+  if (untrusted.length && !booleanFlag(argv.quarantine)) {
+    fail(`Automatic bulk signing is disabled; ${untrusted.length} unsigned dump(s) remain untrusted. Re-run with --quarantine or import one artifact with import-postgres-backup.`);
+  }
+  const quarantined = [];
+  for (const dump of untrusted) {
+    const relative = path.relative(backupRoot, dump);
+    const target = path.join(quarantineRoot, relative);
+    fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
+    fs.renameSync(dump, target);
+    for (const sidecar of [`${dump}.sha256`, backupSignatureSidecarPath(dump)]) {
+      if (fs.existsSync(sidecar)) fs.renameSync(sidecar, `${target}${sidecar.slice(dump.length)}`);
+    }
+    quarantined.push(relative);
   }
   const stamp = reportTimestamp();
   const payload = {
@@ -1275,8 +1285,9 @@ async function signExistingPostgresBackups() {
     status: "passed",
     backupRoot,
     summary: {
-      signed,
+      signed: 0,
       verified,
+      quarantined: quarantined.length,
       total: dumps.length,
     },
   };
@@ -1288,12 +1299,62 @@ async function signExistingPostgresBackups() {
     `Status: ${payload.status}`,
     `Backup root: ${backupRoot}`,
     "",
-    "| Signed | Verified | Total |",
-    "| ---: | ---: | ---: |",
-    `| ${signed} | ${verified} | ${dumps.length} |`,
+    "| Signed | Verified | Quarantined | Total |",
+    "| ---: | ---: | ---: | ---: |",
+    `| 0 | ${verified} | ${quarantined.length} | ${dumps.length} |`,
   ]);
-  log(`Backup signatures ready: signed=${signed} verified=${verified} total=${dumps.length}.`);
+  log(`Backup trust audit ready: signed=0 verified=${verified} quarantined=${quarantined.length} total=${dumps.length}.`);
   log(`PostgreSQL backup signature report written to ${jsonPath} and ${markdownPath}`);
+}
+
+async function importPostgresBackup() {
+  const backupRoot = path.resolve(argv.backupRoot ?? path.join(infraRoot, "backups", "postgres"));
+  resolveInside(path.join(infraRoot, "backups"), backupRoot);
+  const backupFileArg = argv.backupFile ?? argv._[0];
+  if (!backupFileArg) fail("Import requires --backupFile for one PostgreSQL .dump artifact.");
+  const backupFile = resolveInside(backupRoot, path.resolve(backupFileArg));
+  if (!backupFile.endsWith(".dump") || !fs.statSync(backupFile).isFile()) fail("Import requires one PostgreSQL .dump artifact.");
+  if (fs.existsSync(backupSignatureSidecarPath(backupFile))) fail("Backup already has signature metadata; verify it instead of importing it again.");
+  if (!argv.provenanceFile) fail("Import requires --provenanceFile and an owner-pinned --provenanceSha256.");
+  const provenanceFile = path.resolve(argv.provenanceFile);
+  if (!fs.existsSync(provenanceFile) || !fs.statSync(provenanceFile).isFile()) fail("Import provenance file is missing or not a regular file.");
+  const artifactHash = sha256File(backupFile);
+  const artifactSizeBytes = fs.statSync(backupFile).size;
+  const provenance = readJsonFile(provenanceFile, provenanceFile);
+  const provenanceSha256 = sha256File(provenanceFile);
+  const provenanceResult = validateBackupImportProvenance({
+    artifactName: path.basename(backupFile),
+    artifactSha256: artifactHash,
+    artifactSizeBytes,
+    provenance,
+    provenanceSha256,
+    pinnedProvenanceSha256: String(argv.provenanceSha256 ?? ""),
+    expectedSourceSystem: String(argv.sourceSystem ?? ""),
+    expectedSourceId: String(argv.sourceId ?? ""),
+    confirmation: String(argv.confirmImport ?? ""),
+  });
+  const shaPath = `${backupFile}.sha256`;
+  if (fs.existsSync(shaPath)) {
+    const recordedHash = fs.readFileSync(shaPath, "utf8").trim().split(/\s+/, 1)[0];
+    if (recordedHash !== artifactHash) fail("Existing backup checksum sidecar does not match; refusing to rewrite it.");
+  } else {
+    fs.writeFileSync(shaPath, `${artifactHash}  ${path.basename(backupFile)}\n`, { encoding: "ascii", mode: 0o600 });
+  }
+  signBackupArtifact(backupFile, artifactHash);
+  verifyBackupArtifact(backupFile);
+  const payload = {
+    generatedAt: new Date().toISOString(),
+    status: "passed",
+    artifact: path.relative(backupRoot, backupFile),
+    artifactSha256: artifactHash,
+    artifactSizeBytes,
+    provenanceSha256,
+    sourceSystem: provenanceResult.sourceSystem,
+    sourceId: provenanceResult.sourceId,
+    trustMode: "owner-pinned-provenance-digest",
+  };
+  const reportPath = writeJsonReport("postgres-backup-signatures", `postgres-backup-import-${reportTimestamp()}`, payload);
+  log(`Imported one provenance-validated PostgreSQL backup. Report: ${reportPath}`);
 }
 
 
@@ -2623,6 +2684,8 @@ function infraTestingHygiene() {
     "scripts/secret-store-metadata.mjs",
     "scripts/infra-secret-manager.mjs",
     "scripts/infra-secret-manager.test.mjs",
+    "scripts/backup-import-policy.mjs",
+    "scripts/backup-import-policy.test.mjs",
   ];
   for (const file of checkFiles) {
     run(process.execPath, ["--check", file], { cwd: infraRoot });
@@ -2637,6 +2700,7 @@ function infraTestingHygiene() {
   run(process.execPath, ["--test", "scripts/restic-secret-transport.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/safe-tar-path.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/infra-secret-manager.test.mjs"], { cwd: infraRoot });
+  run(process.execPath, ["--test", "scripts/backup-import-policy.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "platform-alert-dispatcher/server.test.mjs"], { cwd: infraRoot });
   const shellFiles = fs.readdirSync(path.join(infraRoot, "scripts")).filter((name) => name.endsWith(".sh")).sort();
   for (const file of shellFiles) {
@@ -3017,8 +3081,7 @@ async function initLocalSecrets() {
 async function localSecretManager() {
   await initLocalSecrets();
   await validateLocalSecrets();
-  await signExistingPostgresBackups();
-  log("Local secret manager is ready: Docker secret files are materialized from the encrypted local store, and PostgreSQL backups are signed.");
+  log("Local secret manager is ready: Docker secret files are materialized from the encrypted local store. Existing backups are not granted trust automatically.");
 }
 
 async function secretManager() {
@@ -11779,6 +11842,7 @@ Commands:
   ha-config-check
   init-local-secrets
   infra-health
+  import-postgres-backup
   install-mariadb-backup-cron
   install-postgres-backup-cron
   local-secret-manager
@@ -11886,6 +11950,7 @@ const commands = {
   "ha-config-check": haConfigCheck,
   "init-local-secrets": initLocalSecrets,
   "infra-health": infraHealth,
+  "import-postgres-backup": importPostgresBackup,
   "install-mariadb-backup-cron": installMariadbBackupCron,
   "install-postgres-backup-cron": installPostgresBackupCron,
   "local-secret-manager": localSecretManager,

@@ -348,6 +348,7 @@ sh ./scripts/dr-evidence.sh
 ```
 
 Il restore reale e' protetto da `--confirmRestore` e accetta solo file sotto `backups/`. La retention dei dump richiede un `restore_test` riuscito recente in `platform_ops.backup_restore_runs` e mantiene sempre almeno 3 backup regolari e 3 drill.
+I dump PostgreSQL preesistenti non vengono mai firmati automaticamente. `sign-existing-postgres-backups` verifica soltanto artifact già firmati e può spostare gli unsigned in quarantena con `--quarantine`. L’import di un singolo dump richiede `import-postgres-backup`, un documento `platform.backup-import-provenance/v1`, il digest del documento ricevuto fuori banda, identità sorgente esatta e la conferma esatta mostrata dal comando.
 I backup MariaDB coprono tutti i database dei progetti PHP locali, sono compressi, hanno sidecar `.sha256` e firma HMAC, e il restore drill importa il dump in un container MariaDB disposable senza toccare il volume reale.
 I backup MinIO, Keycloak e Secret Manager metadata sono artifact tar.gz firmati e verificati. I restore drill sono non distruttivi: MinIO usa un volume/container disposable, Keycloak valida la configurazione esportata senza importarla sul realm live, Secret Manager verifica store/KMS metadata senza includere la master key.
 Ogni backup manuale, schedulato o eseguito dentro un drill scrive anche un report JSON e Markdown in `reports/backups/` con durata, artifact, dimensione, SHA256 e firma. La cartella `reports/` e' ignorata da Git.

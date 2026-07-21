@@ -438,6 +438,8 @@ sh ./scripts/backup-keycloak.sh
 sh ./scripts/backup-secret-manager-metadata.sh
 ```
 
+Existing unsigned PostgreSQL dumps are untrusted. Never run a bulk signing migration. Audit them with `sh ./scripts/infra-ops.sh sign-existing-postgres-backups`; use `--quarantine` to isolate unsigned artifacts. Import only one artifact at a time with `import-postgres-backup` after independently pinning the provenance-document SHA-256 and source identity.
+
 Daily Linux cron:
 
 ```sh
