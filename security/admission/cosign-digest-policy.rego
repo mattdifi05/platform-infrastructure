@@ -15,11 +15,6 @@ deny[msg] {
 }
 
 deny[msg] {
-  input.metadata.annotations["cosign.sigstore.dev/verified"] != "true"
-  msg := "deployment must be admitted only after cosign signature verification"
-}
-
-deny[msg] {
-  input.metadata.annotations["slsa.dev/provenance"] != "verified"
-  msg := "deployment must include verified SLSA provenance"
+  input.kind == "Deployment"
+  msg := "EXTERNAL-PENDING: repository policy has no trusted admission-controller verifier channel; self-asserted annotations are never accepted"
 }
