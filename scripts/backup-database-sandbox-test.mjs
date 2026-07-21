@@ -140,6 +140,7 @@ try {
     "offsite-restore-contract.mjs",
     "canonical-compose-topology.mjs",
     "candidate-identity.mjs",
+    "evidence-trust-envelope.mjs",
   ]) cpSync(path.join(repositoryRoot, "scripts", moduleName), path.join(replicaRoot, "scripts", moduleName));
   cpSync(path.join(repositoryRoot, "control-center", "backup", "contracts.mjs"), path.join(replicaRoot, "control-center", "backup", "contracts.mjs"));
   writeFileSync(keyFile, `sandbox-v1=${randomBytes(48).toString("base64url")}\n`, { mode: 0o600 });

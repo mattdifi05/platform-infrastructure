@@ -105,6 +105,7 @@ try {
     "offsite-restore-contract.mjs",
     "canonical-compose-topology.mjs",
     "candidate-identity.mjs",
+    "evidence-trust-envelope.mjs",
   ]) cpSync(path.join(repositoryRoot, "scripts", moduleName), path.join(replicaRoot, "scripts", moduleName));
   cpSync(path.join(repositoryRoot, "control-center", "backup", "contracts.mjs"), path.join(replicaRoot, "control-center", "backup", "contracts.mjs"));
   cpSync(path.join(repositoryRoot, "governance", "backup-data-policy.json"), path.join(replicaRoot, "governance", "backup-data-policy.json"));

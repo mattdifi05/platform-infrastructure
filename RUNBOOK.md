@@ -922,7 +922,10 @@ their reports:
 
 ```sh
 sh ./scripts/production-go-no-go.sh
-sh ./scripts/production-go-no-go.sh --enforce
+sh ./scripts/production-go-no-go.sh \
+  --evidenceTrustEnvelope /secure/approved-evidence-envelope.json \
+  --evidenceTrustEnvelopeSha256 <owner-pinned-sha256> \
+  --enforce
 sh ./scripts/production-readiness-live.sh
 ```
 
@@ -939,6 +942,15 @@ sections plus a Markdown remediation checklist. Local repository or runtime
 problems remain `failed`; public DNS/HTTPS, Cloudflare, external uptime,
 public load, off-site restore and live GitHub provenance remain
 `pending-live-proof` or `pending-provider` until real provider evidence exists.
+The final gate also requires a fresh `platform.evidence-trust-envelope/v1`
+document stored outside the mutable reports tree. It must list the exact path,
+SHA-256, size, `generatedAt` and current candidate ID for every selected JSON
+report. A release owner must approve and pin the envelope SHA-256 through an
+independent deployment-approval channel. Never calculate the value passed to
+`--evidenceTrustEnvelopeSha256` from the envelope inside the gate invocation.
+Without that independent pin, the authenticity check remains
+`EXTERNAL-PENDING`; a changed report, changed envelope, future timestamp, stale
+envelope or different candidate is a hard failure.
 `pre-go-live-evidence` uses the same separation: local blockers go to `issues`,
 while DNS/provider/GitHub requirements are listed in `pendingLiveProofs`.
 `production-readiness-live.sh` then maps the 19-point infrastructure production readiness

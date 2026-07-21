@@ -33,6 +33,7 @@ import { defaultPostgresRestoreImage, postgresRestoreSandboxPlan } from "./postg
 import { evaluateOffsiteRestoreCoverage, locateSnapshotManifest, offsiteManifestTags, validateOffsiteRestoreSet } from "./offsite-restore-contract.mjs";
 import { canonicalVpsTopologyPlan, parseCanonicalVpsTopology } from "./canonical-compose-topology.mjs";
 import { candidateIdentityMatches, createCandidateIdentity, evaluateCandidateReportBinding, normalizeRepositoryIdentity } from "./candidate-identity.mjs";
+import { verifyTrustedEvidenceReports } from "./evidence-trust-envelope.mjs";
 import {
   assertExactBranchProtection,
   assertExactGithubEnvironment,
@@ -2703,6 +2704,8 @@ function infraTestingHygiene() {
     "scripts/canonical-compose-topology.test.mjs",
     "scripts/candidate-identity.mjs",
     "scripts/candidate-identity.test.mjs",
+    "scripts/evidence-trust-envelope.mjs",
+    "scripts/evidence-trust-envelope.test.mjs",
   ];
   for (const file of checkFiles) {
     run(process.execPath, ["--check", file], { cwd: infraRoot });
@@ -2722,6 +2725,7 @@ function infraTestingHygiene() {
   run(process.execPath, ["--test", "scripts/offsite-restore-contract.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/canonical-compose-topology.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/candidate-identity.test.mjs"], { cwd: infraRoot });
+  run(process.execPath, ["--test", "scripts/evidence-trust-envelope.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "platform-alert-dispatcher/server.test.mjs"], { cwd: infraRoot });
   const shellFiles = fs.readdirSync(path.join(infraRoot, "scripts")).filter((name) => name.endsWith(".sh")).sort();
   for (const file of shellFiles) {
@@ -7419,14 +7423,19 @@ function latestJsonReport(directoryName, prefix, predicate = () => true) {
     .map((name) => {
       const filePath = path.join(directory, name);
       let payload = null;
+      let observedSha256 = null;
+      let observedSizeBytes = null;
       try {
-        payload = JSON.parse(readText(filePath));
+        const bytes = fs.readFileSync(filePath);
+        payload = JSON.parse(bytes.toString("utf8"));
+        observedSha256 = crypto.createHash("sha256").update(bytes).digest("hex");
+        observedSizeBytes = bytes.length;
       } catch {
         payload = null;
       }
       const generatedAt = payload?.generatedAt ? Date.parse(payload.generatedAt) : NaN;
       const timestamp = Number.isFinite(generatedAt) ? generatedAt : fs.statSync(filePath).mtimeMs;
-      return { filePath, payload, timestamp };
+      return { filePath, payload, timestamp, observedSha256, observedSizeBytes };
     })
     .filter((entry) => entry.payload)
     .filter((entry) => predicate(entry.payload, entry.filePath))
@@ -7445,6 +7454,9 @@ function reportFreshDetail(report, maxAgeHours) {
   if (!report) return { fresh: false, detail: "missing report" };
   const ageHours = reportAgeHours(report);
   if (!Number.isFinite(ageHours)) return { fresh: false, detail: `report has invalid generatedAt: ${report.filePath}` };
+  if (ageHours < 0) {
+    return { fresh: false, detail: `report generatedAt is in the future by more than ${Math.abs(ageHours * 60).toFixed(1)} minutes` };
+  }
   if (ageHours > maxAgeHours) {
     return { fresh: false, detail: `latest report is ${ageHours.toFixed(1)}h old; max ${maxAgeHours}h` };
   }
@@ -7495,6 +7507,8 @@ function addGoNoGoCheck(checks, { name, passed, detail, report = null, required 
       : (blocker ?? (resolvedStatus === "failed" ? "local" : "external")),
     detail,
     reportPath: report?.filePath ?? null,
+    reportSha256: report?.observedSha256 ?? null,
+    reportSizeBytes: report?.observedSizeBytes ?? null,
     generatedAt: report?.payload?.generatedAt ?? null,
   });
 }
@@ -7523,6 +7537,17 @@ function goNoGoRemediation(check) {
   const remediations = {
     "release-candidate-current": candidateRemediation,
     "candidate-report-set-consistent": candidateRemediation,
+    "evidence-report-authenticity": {
+      actions: [
+        "Export the exact final report set into a platform.evidence-trust-envelope/v1 document bound to the current candidate ID.",
+        "Have the release owner pin the envelope SHA-256 in the independent deployment approval channel, then pass that digest to the gate.",
+        "Do not derive the owner pin from the mutable reports directory or from the envelope being checked.",
+      ],
+      commands: [
+        "sh ./scripts/production-go-no-go.sh --evidenceTrustEnvelope /secure/approved-evidence-envelope.json --evidenceTrustEnvelopeSha256 <owner-pinned-sha256> --enforce",
+      ],
+      evidence: "An owner-pinned, fresh evidence envelope bound to the current candidate and every exact selected report digest.",
+    },
     "vps-bootstrap-applied": {
       actions: [
         "Run the VPS bootstrap on the actual VPS Ubuntu LTS host in apply mode, not from Docker Desktop or a diagnostic container.",
@@ -8742,6 +8767,54 @@ async function productionGoNoGo() {
     blocker: cloudflarePendingProvider ? "cloudflare-access-provider" : null,
   });
 
+  const evidenceTrustEnvelopePathValue = argv.evidenceTrustEnvelope ?? process.env.EVIDENCE_TRUST_ENVELOPE;
+  const evidenceTrustEnvelopeDigest = argv.evidenceTrustEnvelopeSha256 ?? process.env.EVIDENCE_TRUST_ENVELOPE_SHA256;
+  const evidenceTrustEnvelopePath = typeof evidenceTrustEnvelopePathValue === "string" && evidenceTrustEnvelopePathValue.trim()
+    ? path.resolve(evidenceTrustEnvelopePathValue)
+    : null;
+  const selectedReportSelections = checks
+    .filter((check) => check.reportPath)
+    .map((check) => ({
+      filePath: check.reportPath,
+      observedSha256: check.reportSha256,
+      observedSizeBytes: check.reportSizeBytes,
+    }));
+  let evidenceReportTrust = null;
+  let evidenceReportTrustError = null;
+  let evidenceReportTrustPending = false;
+  if (!evidenceTrustEnvelopePath && !evidenceTrustEnvelopeDigest) {
+    evidenceReportTrustPending = true;
+    evidenceReportTrustError = "EXTERNAL-PENDING: an independent release owner must provide the evidence trust envelope and its pinned SHA-256.";
+  } else if (!evidenceTrustEnvelopePath || !evidenceTrustEnvelopeDigest) {
+    evidenceReportTrustError = "Evidence trust configuration is incomplete; both envelope path and independently pinned SHA-256 are required.";
+  } else {
+    try {
+      const envelopeBytes = fs.readFileSync(evidenceTrustEnvelopePath);
+      const envelope = JSON.parse(envelopeBytes.toString("utf8"));
+      evidenceReportTrust = verifyTrustedEvidenceReports({
+        envelope,
+        envelopeBytes,
+        expectedEnvelopeSha256: evidenceTrustEnvelopeDigest,
+        currentCandidateId: currentCandidate?.id,
+        infraRoot,
+        reportSelections: selectedReportSelections,
+        maxAgeHours: Number(maxAge.evidenceTrustEnvelope ?? 24),
+      });
+    } catch (error) {
+      evidenceReportTrustError = String(error?.message ?? error);
+    }
+  }
+  addGoNoGoCheck(checks, {
+    name: "evidence-report-authenticity",
+    passed: evidenceReportTrust?.status === "passed",
+    detail: evidenceReportTrust
+      ? `owner-pinned envelope=${evidenceReportTrust.envelopeSha256}; candidate=${evidenceReportTrust.candidateId}; reports=${evidenceReportTrust.reportCount}`
+      : evidenceReportTrustError,
+    report: evidenceTrustEnvelopePath ? { filePath: evidenceTrustEnvelopePath, payload: { generatedAt: null } } : null,
+    status: evidenceReportTrustPending ? "pending-provider" : null,
+    blocker: evidenceReportTrustPending ? "external-owner-approval" : null,
+  });
+
   const blockingRequired = checks.filter((check) => check.required && check.status !== "passed");
   const failedRequired = blockingRequired.filter((check) => check.status === "failed");
   const pendingRequired = blockingRequired.filter((check) => check.status.startsWith("pending-"));
@@ -8762,6 +8835,7 @@ async function productionGoNoGo() {
     policyPath,
     candidate: currentCandidate,
     candidateError: candidateEvidence.error,
+    evidenceReportTrust,
     summary: {
       total: checks.length,
       required: checks.filter((check) => check.required).length,

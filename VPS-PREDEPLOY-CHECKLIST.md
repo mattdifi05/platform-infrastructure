@@ -115,7 +115,8 @@ Use this checklist on the VPS Ubuntu LTS VPS before exposing public traffic.
 - [ ] SBOM archived.
 - [ ] `gh workflow run release-attestation.yml --repo OWNER/REPO --ref main` completed, and `GITHUB_REF=refs/heads/main sh ./scripts/release-evidence.sh --requireProvenance --repo OWNER/REPO --sourceRef refs/heads/main --imageManifest .tmp/release-attestation/release-subjects.json --sbom reports/release/github-release-sbom-<run-id>.cdx.json --previousImagesFile ./release/previous-images.json` passed with `status=passed`; the gate directly verified signer workflow, commit/ref, issuer, timestamp and every image digest, linked a validated `reports/rollback/rollback-plan-*.json`, and `reports/release/` plus `reports/rollback/` were archived outside Git.
 - [ ] Image digests and rollback target recorded.
-- [ ] `sh ./scripts/production-go-no-go.sh --enforce` passed and `reports/go-no-go/` was archived outside Git.
+- [ ] An independent release owner approved a fresh `platform.evidence-trust-envelope/v1` for the exact candidate/report set and pinned its SHA-256 outside the reports tree.
+- [ ] `sh ./scripts/production-go-no-go.sh --evidenceTrustEnvelope /secure/approved-evidence-envelope.json --evidenceTrustEnvelopeSha256 <owner-pinned-sha256> --enforce` passed and `reports/go-no-go/` was archived outside Git.
 - [ ] If `production-go-no-go` returns `no-go`, every item in the report `remediation` checklist was completed and the gate was rerun until `status=go`.
 - [ ] `sh ./scripts/production-readiness-live.sh` passed and `reports/production-readiness/` was archived outside Git.
 - [ ] `sh ./scripts/evidence-bundle.sh` generated `.tmp/evidence-bundles/infra-evidence-bundle-*.tar.gz`; `manifest.json` was reviewed and the archive was stored outside Git.

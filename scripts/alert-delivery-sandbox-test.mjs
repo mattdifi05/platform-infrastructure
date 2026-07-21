@@ -177,6 +177,7 @@ try {
     "scripts/offsite-restore-contract.mjs",
     "scripts/canonical-compose-topology.mjs",
     "scripts/candidate-identity.mjs",
+    "scripts/evidence-trust-envelope.mjs",
     "alertmanager/alertmanager.yml",
     "prometheus/rules/enterprise-alerts.yml",
     "platform-alert-dispatcher/server.mjs",
