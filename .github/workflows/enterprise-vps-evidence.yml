@@ -82,26 +82,43 @@ jobs:
           REPLACE_DOCKER_DAEMON_CONFIG: ${{ inputs.replace_docker_daemon_config }}
           CONFIRM_MUTATING_VPS: ${{ inputs.confirm_mutating_vps }}
           DEPLOY_USER: ${{ inputs.deploy_user }}
+          WORKFLOW_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
           test -n "$DEPLOY_REMOTE"
           test -n "$DEPLOY_REMOTE_DIR"
           test -n "$DEPLOY_SSH_PORT"
           test -n "$VPS_HARDENED_SSH_PORT"
+          test "$WORKFLOW_SHA" = "$(git rev-parse --verify HEAD)"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+          workflow_tree=$(git rev-parse --verify "$WORKFLOW_SHA^{tree}")
+          test -n "$workflow_tree"
           if { [ "$RUN_BOOTSTRAP" = "true" ] || [ "$RUN_HARDENING" = "true" ]; } && [ "$CONFIRM_MUTATING_VPS" != "true" ]; then
             echo "Set confirm_mutating_vps=true before enabling VPS bootstrap or hardening." >&2
             exit 1
           fi
           install -d .tmp
           remote_output=".tmp/vps-evidence-remote-output.txt"
-          node ./scripts/vps-evidence-request.mjs render > .tmp/vps-evidence-remote.sh
+          WORKFLOW_TREE="$workflow_tree" node ./scripts/vps-evidence-request.mjs render > .tmp/vps-evidence-remote.sh
           ssh -i ~/.ssh/deploy_key -p "$DEPLOY_SSH_PORT" -o StrictHostKeyChecking=accept-new \
             "$DEPLOY_REMOTE" 'bash -s' < .tmp/vps-evidence-remote.sh > "$remote_output"
+          sed -n '/^__PLATFORM_VPS_EVIDENCE_RECEIPT_BEGIN__$/,/^__PLATFORM_VPS_EVIDENCE_RECEIPT_END__$/p' "$remote_output" \
+            | sed '1d;$d' > .tmp/vps-evidence-receipt.json.b64
           sed -n '/^__PLATFORM_VPS_EVIDENCE_TGZ_BEGIN__$/,/^__PLATFORM_VPS_EVIDENCE_TGZ_END__$/p' "$remote_output" \
             | sed '1d;$d' > .tmp/vps-evidence.tgz.b64
+          test -s .tmp/vps-evidence-receipt.json.b64
           test -s .tmp/vps-evidence.tgz.b64
+          base64 -d .tmp/vps-evidence-receipt.json.b64 > .tmp/vps-evidence-receipt.json
           base64 -d .tmp/vps-evidence.tgz.b64 > .tmp/vps-evidence.tgz
-          tar -xzf .tmp/vps-evidence.tgz
+          tar -tzf .tmp/vps-evidence.tgz > .tmp/vps-evidence.entries
+          node ./scripts/vps-evidence-request.mjs verify-receipt \
+            --receipt .tmp/vps-evidence-receipt.json \
+            --archive .tmp/vps-evidence.tgz \
+            --entries .tmp/vps-evidence.entries \
+            --expectedSha "$WORKFLOW_SHA" \
+            --expectedTree "$workflow_tree" \
+            > .tmp/vps-evidence-provenance.json
+          tar --extract --gzip --file .tmp/vps-evidence.tgz --no-same-owner --no-same-permissions
 
       - name: Upload VPS evidence reports
         if: always()
@@ -113,5 +130,8 @@ jobs:
             reports/vps-hardening/
             reports/vps-host/
             .tmp/vps-evidence-remote-output.txt
+            .tmp/vps-evidence-receipt.json
+            .tmp/vps-evidence-provenance.json
+            .tmp/vps-evidence.entries
           if-no-files-found: error
           retention-days: 30

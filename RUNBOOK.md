@@ -883,7 +883,14 @@ VPS bootstrap, hardening and host readiness reports from VPS over SSH. It
 requires `DEPLOY_SSH_KEY`, `DEPLOY_REMOTE`, `DEPLOY_SSH_PORT`,
 `DEPLOY_REMOTE_DIR` and `VPS_HARDENED_SSH_PORT`; bootstrap/hardening only run
 when the workflow inputs explicitly enable them and `confirm_mutating_vps=true`.
-Archive the uploaded artifact with `reports/vps-*` outside Git.
+The request carries the exact `${{ github.sha }}` and locally observed Git tree.
+The remote runner fetches that object, creates an isolated detached worktree and
+rejects commit, tree or clean-state drift before and after collection; it never
+pulls mutable `main`. Before extraction, the workflow validates a returned
+`platform.vps-evidence-receipt/v1` against the expected commit/tree, the exact
+archive SHA-256 and the allowed `reports/vps-*` entry set. Archive the uploaded
+receipt, provenance JSON and `reports/vps-*` outside Git. Repository tests prove
+the contract only; the actual SSH/VPS execution remains required live evidence.
 
 Before changing public traffic, generate the consolidated go-live evidence pack:
 

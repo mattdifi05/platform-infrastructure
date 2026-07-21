@@ -539,7 +539,11 @@ La workflow manuale `enterprise-vps-evidence` gira nello stesso environment,
 entra nel VPS con `DEPLOY_SSH_KEY`, `DEPLOY_REMOTE` e `DEPLOY_SSH_PORT`, puo'
 applicare bootstrap/hardening solo con conferma esplicita, esegue
 `vps-host-readiness --enforce` sulla porta `VPS_HARDENED_SSH_PORT` e carica i
-report `reports/vps-*` come artifact.
+report `reports/vps-*` come artifact. La richiesta include `github.sha` e il Git
+tree esatti: sul VPS crea un worktree isolato in detached HEAD, non esegue
+`checkout/pull main`, rifiuta worktree sporchi prima o dopo la raccolta e
+restituisce un receipt che lega commit, tree e SHA-256 dell'archivio. La workflow
+verifica il receipt e l'elenco path prima di estrarre i report.
 Il gate `scripts/infra-ops.sh repo-coverage-check` misura la copertura dei
 file tracciati della repo: ogni file deve rientrare in una categoria
 infrastrutturale e il workflow deve esercitare tutti i gate CI obbligatori.

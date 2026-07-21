@@ -2709,6 +2709,8 @@ function infraTestingHygiene() {
     "scripts/evidence-trust-envelope.test.mjs",
     "scripts/evidence-bundle-anchor.mjs",
     "scripts/evidence-bundle-anchor.test.mjs",
+    "scripts/vps-evidence-request.mjs",
+    "scripts/vps-evidence-request.test.mjs",
   ];
   for (const file of checkFiles) {
     run(process.execPath, ["--check", file], { cwd: infraRoot });
@@ -2730,6 +2732,7 @@ function infraTestingHygiene() {
   run(process.execPath, ["--test", "scripts/candidate-identity.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/evidence-trust-envelope.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/evidence-bundle-anchor.test.mjs"], { cwd: infraRoot });
+  run(process.execPath, ["scripts/vps-evidence-request.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "platform-alert-dispatcher/server.test.mjs"], { cwd: infraRoot });
   const shellFiles = fs.readdirSync(path.join(infraRoot, "scripts")).filter((name) => name.endsWith(".sh")).sort();
   for (const file of shellFiles) {

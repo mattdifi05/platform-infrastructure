@@ -13,7 +13,7 @@ Use this checklist on the VPS Ubuntu LTS VPS before exposing public traffic.
 - [ ] Password SSH login disabled.
 - [ ] `sudo sh ./scripts/vps-hardening-ubuntu.sh --apply --ssh-port 65002 --reload-sshd` executed after key access and the target SSH port were verified, including Docker daemon hardening, and the JSON/Markdown report under `reports/vps-hardening/` was archived outside Git. If an existing `/etc/docker/daemon.json` blocks the run, review the generated template and rerun with `--replace-docker-daemon-config`.
 - [ ] `sudo sh ./scripts/vps-host-readiness.sh --ssh-port 65002 --enforce` passed and the JSON/Markdown report under `reports/vps-host/`, including the expected SSH port, UFW allow rule and remediation guidance for every check, was archived outside Git.
-- [ ] GitHub Actions workflow `enterprise-vps-evidence` passed in the `production` environment and its `enterprise-vps-evidence` artifact was archived outside Git.
+- [ ] GitHub Actions workflow `enterprise-vps-evidence` passed in the `production` environment; its verified receipt/provenance binds the archive to the exact workflow commit and Git tree, and the artifact was archived outside Git.
 - [ ] `sudo ufw status verbose` reviewed.
 - [ ] fail2ban active.
 - [ ] `sh ./scripts/container-metrics-sandbox-test.sh` passed without touching the live Docker runtime.
