@@ -174,7 +174,7 @@ export function evaluateRuntimeFingerprint(expected, actual) {
     if (expectedService.expectedState === "completed" && (container.state !== "exited" || container.exitCode !== 0)) {
       issues.push(`service-not-completed:${expectedService.service}`);
     }
-    if (expectedService.expectedState === "running" && container.health === "unhealthy") issues.push(`service-unhealthy:${expectedService.service}`);
+    if (expectedService.expectedState === "running" && container.health !== "healthy") issues.push(`service-unhealthy:${expectedService.service}`);
   }
   for (const container of containers) {
     if (!expectedNames.has(container.service)) issues.push(`unexpected-service:${container.service}`);

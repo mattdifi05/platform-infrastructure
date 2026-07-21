@@ -156,6 +156,16 @@ test("dirty worktree and unhealthy runtime fail closed", () => {
   assert.match(result.issues.join(","), /service-unhealthy:api/);
 });
 
+test("expected-running requires exact healthy state", () => {
+  for (const health of ["none", "starting", "", "arbitrary"]) {
+    const result = evaluateRuntimeFingerprint(expected, {
+      ...actual,
+      containers: [{ ...actual.containers[0], health }],
+    });
+    assert.match(result.issues.join(","), /service-unhealthy:api/, `health=${JSON.stringify(health)}`);
+  }
+});
+
 test("an explicitly expected one-shot service must complete with exit code zero", () => {
   const oneShotServices = [{ ...services[0], expectedState: "completed" }];
   const oneShotExpected = {
