@@ -8,6 +8,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { AuthRequestError, createControlCenterAuth } from "./auth/oidc.mjs";
 import { resolveAuthorizationCapability } from "./auth/route-capabilities.mjs";
+import { authorizeDatabaseAdminForwardTarget, DATABASE_ADMIN_AUTHORIZATION_PATH } from "./auth/database-admin-gate.mjs";
 import { controlCenterScriptTags, controlCenterStylesheetLinks, controlCenterUiContract } from "./components/ui/controlCenterUi.mjs";
 import {
   activatePrincipalBinding,
@@ -417,6 +418,16 @@ const server = createServer(async (req, res) => {
       role: session.role,
       requestId: rid(),
     }, async () => {
+      if (["GET", "HEAD"].includes(String(req.method || "GET").toUpperCase()) && url.pathname === DATABASE_ADMIN_AUTHORIZATION_PATH) {
+        const decision = authorizeDatabaseAdminForwardTarget(req.headers, { expectedHost: controlCenterHost });
+        if (!decision.ok) {
+          json(res, { error: decision.error, message: decision.message }, decision.status);
+          return;
+        }
+        res.writeHead(204, { "cache-control": "no-store" });
+        res.end();
+        return;
+      }
       const state = readState();
       const projects = discoverProjects(state);
       if (req.method !== "GET") invalidateControlContextCache();

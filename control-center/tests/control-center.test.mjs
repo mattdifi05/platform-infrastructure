@@ -135,6 +135,24 @@ test("Admin Control Center local foundation", async (t) => {
   const health = await getJson(`${baseUrl}/__health`);
   assert.equal(health.service, "control-center");
 
+  const databaseAdminAuthorized = await fetch(`${baseUrl}/control/internal/database-admin-authorize`, {
+    headers: {
+      "x-forwarded-host": "portal.localhost.com",
+      "x-forwarded-method": "GET",
+      "x-forwarded-uri": "/phpmyadmin/index.php?route=%2Fdatabase%2Fstructure",
+    },
+  });
+  assert.equal(databaseAdminAuthorized.status, 204);
+  const databaseAdminWrongHost = await fetch(`${baseUrl}/control/internal/database-admin-authorize`, {
+    headers: {
+      "x-forwarded-host": "phpmyadmin.localhost.com",
+      "x-forwarded-method": "GET",
+      "x-forwarded-uri": "/phpmyadmin/",
+    },
+  });
+  assert.equal(databaseAdminWrongHost.status, 403);
+  assert.equal((await databaseAdminWrongHost.json()).error, "database_admin_target_rejected");
+
   const html = await getText(`${baseUrl}/`);
   assert.match(html, /Admin Control Center/);
   assert.match(html, /<body data-cc-theme="light">/);

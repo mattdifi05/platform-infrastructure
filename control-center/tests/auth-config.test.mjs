@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   AuthConfigurationError,
+  createControlCenterAuth,
   MemoryAuthStore,
   readAuthConfig,
 } from "../auth/oidc.mjs";
@@ -87,6 +88,25 @@ test("production OIDC token and JWKS endpoints require issuer-bound HTTPS", () =
       ...production,
       CONTROL_CENTER_OIDC_TOKEN_ENDPOINT: tokenEndpoint,
     }), /CONTROL_CENTER_OIDC_TOKEN_ENDPOINT/);
+  }
+});
+
+test("database admin ForwardAuth endpoint requires a fresh owner session", async () => {
+  const auth = await createControlCenterAuth({ env: completeOidcEnv() });
+  const request = { method: "GET" };
+  const target = new URL("https://portal.example.test/control/internal/database-admin-authorize");
+  const now = Date.now();
+  const session = (role, authTime) => ({ ok: true, role, identity: { authTime } });
+  try {
+    assert.equal(auth.authorize(request, target, { ok: false, status: 401 }).status, 401);
+    assert.equal(auth.authorize(request, target, session("viewer", new Date(now).toISOString())).status, 403);
+    assert.equal(auth.authorize(request, target, session("admin", new Date(now).toISOString())).status, 403);
+    assert.equal(auth.authorize(request, target, session("owner", new Date(now - 301_000).toISOString())).status, 428);
+    assert.equal(auth.authorize(request, target, session("owner", "malformed")).status, 428);
+    assert.equal(auth.authorize(request, target, session("owner", new Date(now + 60_000).toISOString())).status, 428);
+    assert.equal(auth.authorize(request, target, session("owner", new Date(now).toISOString())).ok, true);
+  } finally {
+    await auth.close();
   }
 });
 

@@ -1,23 +1,12 @@
 http:
   routers:
-    enterprise-phpmyadmin:
-      rule: Host(`phpmyadmin.platform-infrastructure.com`)
-      entryPoints:
-        - web
-      priority: 250
-      middlewares:
-        - enterprise-edge-forwarded-https@file
-        - enterprise-security-headers@file
-        - enterprise-rate-limit@file
-        - enterprise-compress@file
-      service: enterprise-phpmyadmin
-
     enterprise-phpmyadmin-portal-path:
       rule: Host(`portal.platform-infrastructure.com`) && PathPrefix(`/phpmyadmin`)
       entryPoints:
         - web
       priority: 300
       middlewares:
+        - enterprise-db-admin-owner-auth@file
         - enterprise-edge-forwarded-https@file
         - enterprise-phpmyadmin-prefix
         - enterprise-security-headers@file
@@ -25,24 +14,13 @@ http:
         - enterprise-compress@file
       service: enterprise-phpmyadmin
 
-    enterprise-phppgadmin:
-      rule: Host(`phppgadmin.platform-infrastructure.com`) && PathPrefix(`/phppgadmin`)
-      entryPoints:
-        - web
-      priority: 250
-      middlewares:
-        - enterprise-edge-forwarded-https@file
-        - enterprise-db-admin-frame-headers@file
-        - enterprise-rate-limit@file
-        - enterprise-compress@file
-      service: enterprise-phppgadmin
-
     enterprise-phppgadmin-portal-path:
       rule: Host(`portal.platform-infrastructure.com`) && PathPrefix(`/phppgadmin`)
       entryPoints:
         - web
       priority: 300
       middlewares:
+        - enterprise-db-admin-owner-auth@file
         - enterprise-edge-forwarded-https@file
         - enterprise-db-admin-frame-headers@file
         - enterprise-rate-limit@file
@@ -50,6 +28,13 @@ http:
       service: enterprise-phppgadmin
 
   middlewares:
+    enterprise-db-admin-owner-auth:
+      forwardAuth:
+        address: http://control-center:8080/control/internal/database-admin-authorize
+        trustForwardHeader: false
+        authRequestHeaders:
+          - Cookie
+
     enterprise-phpmyadmin-prefix:
       stripPrefix:
         prefixes:

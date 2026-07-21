@@ -144,6 +144,11 @@ const LEGACY_SENSITIVE_ROUTES = Object.freeze([
   ownerFresh("POST", "legacy.settings", "actions", "settings-command"),
 ]);
 
+const INTERNAL_CONTROL_ROUTES = Object.freeze([
+  ownerFresh("GET", "database-admin.forward-authorize", "control", "internal", "database-admin-authorize"),
+  ownerFresh("HEAD", "database-admin.forward-authorize.head", "control", "internal", "database-admin-authorize"),
+]);
+
 export function normalizeControlApiParts(parts) {
   const routeParts = Array.from(parts || [], (part) => String(part));
   if (routeParts[0] === "control" && routeParts[1] === "v1") {
@@ -185,7 +190,9 @@ export function resolveAuthorizationCapability(method, pathname, { rawPathname =
   }
 
   const parts = normalizeControlApiParts(parsed.parts);
-  const definitions = parts[0] === "control" ? CONTROL_ROUTES : LEGACY_SENSITIVE_ROUTES;
+  const definitions = parts[0] === "control"
+    ? (parts[1] === "internal" ? INTERNAL_CONTROL_ROUTES : CONTROL_ROUTES)
+    : LEGACY_SENSITIVE_ROUTES;
   for (const definition of definitions) {
     if (definition.method !== verb) continue;
     const parameters = matchRoute(parts, definition.segments);
