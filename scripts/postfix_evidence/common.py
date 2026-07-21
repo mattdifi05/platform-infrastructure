@@ -8,6 +8,7 @@ import os
 import re
 import stat
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
 
@@ -53,31 +54,134 @@ def strict_json_bytes(payload: bytes, *, label: str) -> Any:
         raise ContractError(f"{label}: malformed or duplicate-key JSON") from error
 
 
-def read_regular_bytes(path: Path, *, label: str) -> bytes:
+def _directory_flags() -> int:
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    directory = getattr(os, "O_DIRECTORY", None)
+    if nofollow is None or directory is None:
+        raise ContractError("file snapshot: O_NOFOLLOW/O_DIRECTORY are unavailable")
+    return os.O_RDONLY | nofollow | directory | getattr(os, "O_CLOEXEC", 0)
+
+
+def _file_flags() -> int:
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    if nofollow is None:
+        raise ContractError("file snapshot: O_NOFOLLOW is unavailable")
+    return os.O_RDONLY | nofollow | getattr(os, "O_CLOEXEC", 0)
+
+
+def _open_canonical_directory(path: Path, *, label: str) -> int:
+    """Open a directory by walking its canonical absolute path with no symlinks."""
     try:
-        before = path.lstat()
+        canonical = path.resolve(strict=True)
     except OSError as error:
-        raise ContractError(f"{label}: required file is unavailable") from error
-    if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
-        raise ContractError(f"{label}: required path is not a regular non-symlink file")
+        raise ContractError(f"{label}: trust directory is unavailable") from error
+    if not canonical.is_absolute():
+        raise ContractError(f"{label}: trust directory is not absolute")
     try:
-        payload = path.read_bytes()
-        after = path.lstat()
+        current = os.open(os.sep, _directory_flags())
+        for part in canonical.parts[1:]:
+            next_fd = os.open(part, _directory_flags(), dir_fd=current)
+            os.close(current)
+            current = next_fd
+        info = os.fstat(current)
+        if not stat.S_ISDIR(info.st_mode):
+            raise ContractError(f"{label}: trust root is not a directory")
+        return current
+    except ContractError:
+        try:
+            os.close(current)
+        except (OSError, UnboundLocalError):
+            pass
+        raise
+    except OSError as error:
+        try:
+            os.close(current)
+        except (OSError, UnboundLocalError):
+            pass
+        raise ContractError(f"{label}: trust directory could not be opened safely") from error
+
+
+def _read_fd(fd: int, *, label: str) -> bytes:
+    try:
+        before = os.fstat(fd)
+        if not stat.S_ISREG(before.st_mode):
+            raise ContractError(f"{label}: required path is not a regular non-symlink file")
+        chunks: list[bytes] = []
+        while True:
+            chunk = os.read(fd, 1024 * 1024)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        after = os.fstat(fd)
+    except ContractError:
+        raise
     except OSError as error:
         raise ContractError(f"{label}: required file could not be read") from error
-    identity_before = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
-    identity_after = (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
-    if identity_before != identity_after:
+    identity_before = (
+        before.st_dev,
+        before.st_ino,
+        before.st_mode,
+        before.st_nlink,
+        before.st_size,
+        before.st_mtime_ns,
+        before.st_ctime_ns,
+    )
+    identity_after = (
+        after.st_dev,
+        after.st_ino,
+        after.st_mode,
+        after.st_nlink,
+        after.st_size,
+        after.st_mtime_ns,
+        after.st_ctime_ns,
+    )
+    payload = b"".join(chunks)
+    if identity_before != identity_after or len(payload) != before.st_size:
         raise ContractError(f"{label}: file changed while it was read")
     return payload
 
 
+def read_regular_under(root: Path, relative: Any, *, label: str) -> bytes:
+    """Read one file under a trust root via dirfd traversal and one stable FD."""
+    pure = safe_relative(relative, label=label)
+    root_fd = _open_canonical_directory(root, label=label)
+    current = root_fd
+    try:
+        for part in pure.parts[:-1]:
+            next_fd = os.open(part, _directory_flags(), dir_fd=current)
+            if current != root_fd:
+                os.close(current)
+            current = next_fd
+        file_fd = os.open(pure.parts[-1], _file_flags(), dir_fd=current)
+        try:
+            return _read_fd(file_fd, label=label)
+        finally:
+            os.close(file_fd)
+    except ContractError:
+        raise
+    except OSError as error:
+        raise ContractError(f"{label}: required file is unavailable or unsafe") from error
+    finally:
+        if current != root_fd:
+            os.close(current)
+        os.close(root_fd)
+
+
+def read_regular_bytes(path: Path, *, label: str) -> bytes:
+    if path.name in {"", ".", ".."}:
+        raise ContractError(f"{label}: required file path is invalid")
+    return read_regular_under(path.parent, path.name, label=label)
+
+
+def load_json_bytes(payload: bytes, *, label: str) -> Any:
+    return strict_json_bytes(payload, label=label)
+
+
 def load_json(path: Path, *, label: str) -> Any:
-    return strict_json_bytes(read_regular_bytes(path, label=label), label=label)
+    return load_json_bytes(read_regular_bytes(path, label=label), label=label)
 
 
-def load_jsonl(path: Path, *, label: str) -> list[dict[str, Any]]:
-    payload = read_regular_bytes(path, label=label)
+def load_jsonl_bytes(payload: bytes, *, label: str) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for line_number, raw in enumerate(payload.splitlines(), start=1):
         if not raw.strip():
@@ -89,6 +193,10 @@ def load_jsonl(path: Path, *, label: str) -> list[dict[str, Any]]:
     if not rows:
         raise ContractError(f"{label}: JSONL file is empty")
     return rows
+
+
+def load_jsonl(path: Path, *, label: str) -> list[dict[str, Any]]:
+    return load_jsonl_bytes(read_regular_bytes(path, label=label), label=label)
 
 
 def canonical_json_bytes(value: Any, *, pretty: bool = False) -> bytes:
@@ -219,10 +327,22 @@ def write_manifest(root: Path) -> None:
     write_bytes(root / "MANIFEST.sha256", payload.encode("utf-8"))
 
 
-def validate_manifest(root: Path, *, exact: bool, required: Iterable[str] = ()) -> dict[str, str]:
-    manifest_path = root / "MANIFEST.sha256"
-    payload = read_regular_bytes(manifest_path, label="manifest")
+@dataclass(frozen=True)
+class ManifestSnapshot:
+    rows: dict[str, str]
+    files: dict[str, bytes]
+    manifest_bytes: bytes
+
+
+def validate_manifest_snapshot(
+    root: Path,
+    *,
+    exact: bool,
+    required: Iterable[str] = (),
+) -> ManifestSnapshot:
+    payload = read_regular_under(root, "MANIFEST.sha256", label="manifest")
     rows: dict[str, str] = {}
+    files: dict[str, bytes] = {}
     for line_number, raw in enumerate(payload.decode("utf-8").splitlines(), start=1):
         match = re.fullmatch(r"([0-9a-f]{64})  ([^\x00]+)", raw)
         if match is None:
@@ -232,10 +352,11 @@ def validate_manifest(root: Path, *, exact: bool, required: Iterable[str] = ()) 
         relative = pure.as_posix()
         if relative == "MANIFEST.sha256" or relative in rows:
             raise ContractError(f"manifest: duplicate or self-referential row {line_number}")
-        target = resolve_regular(root, relative, label=f"manifest:{relative}")
-        if sha256_file(target, label=f"manifest:{relative}") != digest:
+        file_payload = read_regular_under(root, relative, label=f"manifest:{relative}")
+        if sha256_bytes(file_payload) != digest:
             raise ContractError(f"manifest: hash mismatch for {relative}")
         rows[relative] = digest
+        files[relative] = file_payload
     required_set = set(required)
     if not required_set.issubset(rows):
         raise ContractError(f"manifest: required entries missing: {sorted(required_set - set(rows))}")
@@ -243,7 +364,11 @@ def validate_manifest(root: Path, *, exact: bool, required: Iterable[str] = ()) 
         actual = set(tree_index(root, exclude={"MANIFEST.sha256"}))
         if set(rows) != actual:
             raise ContractError("manifest: file set is not exact")
-    return rows
+    return ManifestSnapshot(rows=rows, files=files, manifest_bytes=payload)
+
+
+def validate_manifest(root: Path, *, exact: bool, required: Iterable[str] = ()) -> dict[str, str]:
+    return validate_manifest_snapshot(root, exact=exact, required=required).rows
 
 
 def git(repo: Path, *arguments: str, input_bytes: bytes | None = None) -> bytes:

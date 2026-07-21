@@ -30,18 +30,17 @@ from scripts.postfix_evidence.common import (
     git_head,
     git_text,
     git_tree,
-    load_json,
-    load_jsonl,
+    load_json_bytes,
+    load_jsonl_bytes,
     nonempty_string,
     read_regular_bytes,
+    read_regular_under,
     resolve_commit,
-    resolve_regular,
     safe_relative,
     sha256_bytes,
     sha256_file,
     string_list,
-    tree_index,
-    validate_manifest,
+    validate_manifest_snapshot,
 )
 
 
@@ -231,8 +230,10 @@ class ValidatedInputs:
     group_map_sha256: str
     handoff_path: Path
     handoff_sha256: str
+    handoff_bytes: bytes
     handoff_file_paths: dict[str, Path]
     handoff_file_sha256: dict[str, str]
+    handoff_file_bytes: dict[str, bytes]
     evidence_cutoff_at: str
     candidate_repo: Path
     candidate_final_commit: str
@@ -248,8 +249,8 @@ class ValidatedInputs:
     verdicts: dict[str, Any]
     residual_rows: list[dict[str, Any]]
     equivalence_records: list[dict[str, Any]]
-    test_log_sources: dict[str, Path]
-    pre_fix_log_sources: dict[str, Path]
+    test_log_bytes: dict[str, bytes]
+    pre_fix_log_bytes: dict[str, bytes]
     counts: dict[str, int]
 
 
@@ -274,21 +275,17 @@ def _validate_baseline(root: Path) -> Baseline:
         "evidence/validation/canonical_candidate_registry.jsonl",
         "schemas/matrix-schema-v1.json",
     }
-    validate_manifest(root, exact=False, required=required)
-    classification_path = resolve_regular(root, "finding_classification_ledger.jsonl", label="baseline classification")
-    registry_path = resolve_regular(
-        root,
-        "evidence/validation/canonical_candidate_registry.jsonl",
-        label="baseline canonical registry",
-    )
-    inventory_path = resolve_regular(root, "inventory_ledger.jsonl", label="baseline inventory")
-    matrix_path = resolve_regular(root, "schemas/matrix-schema-v1.json", label="baseline matrix schema")
-    rows = load_jsonl(classification_path, label="baseline classification")
+    snapshot = validate_manifest_snapshot(root, exact=False, required=required)
+    classification_bytes = snapshot.files["finding_classification_ledger.jsonl"]
+    registry_bytes = snapshot.files["evidence/validation/canonical_candidate_registry.jsonl"]
+    inventory_bytes = snapshot.files["inventory_ledger.jsonl"]
+    matrix_bytes = snapshot.files["schemas/matrix-schema-v1.json"]
+    rows = load_jsonl_bytes(classification_bytes, label="baseline classification")
     by_id = _unique_rows(rows, "id", label="baseline classification")
     if len(rows) != 341:
         raise ContractError("baseline: authoritative classification cardinality is not 341")
 
-    registry = load_jsonl(registry_path, label="baseline canonical registry")
+    registry = load_jsonl_bytes(registry_bytes, label="baseline canonical registry")
     registry_by_id = _unique_rows(registry, "id", label="baseline canonical registry")
     if len(registry_by_id) != 240:
         raise ContractError("baseline: canonical candidate cardinality is not 240")
@@ -330,10 +327,10 @@ def _validate_baseline(root: Path) -> Baseline:
     if len(commits) != 1 or len(trees) != 1:
         raise ContractError("baseline: canonical registry has mixed candidate identities")
 
-    inventory = load_jsonl(inventory_path, label="baseline inventory")
+    inventory = load_jsonl_bytes(inventory_bytes, label="baseline inventory")
     if len(inventory) != 134:
         raise ContractError("baseline: inventory cardinality is not 134")
-    matrix_schema = load_json(matrix_path, label="baseline matrix schema")
+    matrix_schema = load_json_bytes(matrix_bytes, label="baseline matrix schema")
     _validate_matrix_schema(matrix_schema)
     return Baseline(
         root=root,
@@ -346,11 +343,11 @@ def _validate_baseline(root: Path) -> Baseline:
         candidate_tree=next(iter(trees)),
         matrix_schema=matrix_schema,
         inventory_count=len(inventory),
-        manifest_sha256=sha256_file(root / "MANIFEST.sha256", label="baseline manifest"),
-        classification_sha256=sha256_file(classification_path),
-        registry_sha256=sha256_file(registry_path),
-        inventory_sha256=sha256_file(inventory_path),
-        matrix_schema_sha256=sha256_file(matrix_path),
+        manifest_sha256=sha256_bytes(snapshot.manifest_bytes),
+        classification_sha256=sha256_bytes(classification_bytes),
+        registry_sha256=sha256_bytes(registry_bytes),
+        inventory_sha256=sha256_bytes(inventory_bytes),
+        matrix_schema_sha256=sha256_bytes(matrix_bytes),
     )
 
 
@@ -386,7 +383,8 @@ def _validate_matrix_schema(value: Any) -> None:
 
 
 def _validate_group_map(path: Path, reportable_ids: frozenset[str]) -> tuple[list[dict[str, Any]], str]:
-    rows = load_jsonl(path, label="fix-group map")
+    payload = read_regular_bytes(path, label="fix-group map")
+    rows = load_jsonl_bytes(payload, label="fix-group map")
     by_id = _unique_rows(rows, "group_id", label="fix-group map")
     expected = {f"FG-{number:03d}" for number in range(1, 78)}
     if set(by_id) != expected:
@@ -400,7 +398,7 @@ def _validate_group_map(path: Path, reportable_ids: frozenset[str]) -> tuple[lis
             nonempty_string(row.get(key), label=f"fix-group map {group_id} {key}")
     if len(projection) != 135 or len(set(projection)) != 135 or set(projection) != set(reportable_ids):
         raise ContractError("fix-group map: reportable projection is not an exact one-to-one 135-CAN cover")
-    return [by_id[group_id] for group_id in sorted(by_id)], sha256_file(path, label="fix-group map")
+    return [by_id[group_id] for group_id in sorted(by_id)], sha256_bytes(payload)
 
 
 def _validate_candidate(repo: Path, baseline: Baseline, final_commit_value: Any) -> tuple[str, str]:
@@ -418,8 +416,11 @@ def _validate_candidate(repo: Path, baseline: Baseline, final_commit_value: Any)
     return final_commit, git_tree(repo, final_commit)
 
 
-def _validate_handoff_manifest(path: Path) -> tuple[dict[str, Any], dict[str, Path], dict[str, str]]:
-    handoff = load_json(path, label="handoff manifest")
+def _validate_handoff_manifest(
+    path: Path,
+) -> tuple[dict[str, Any], dict[str, Path], dict[str, str], dict[str, bytes], bytes]:
+    handoff_bytes = read_regular_bytes(path, label="handoff manifest")
+    handoff = load_json_bytes(handoff_bytes, label="handoff manifest")
     exact_keys(
         handoff,
         {"schema_version", "evidence_cutoff_at", "candidate_final_commit", "files"},
@@ -434,17 +435,21 @@ def _validate_handoff_manifest(path: Path) -> tuple[dict[str, Any], dict[str, Pa
     files = exact_keys(handoff["files"], HANDOFF_FILE_KEYS, label="handoff files")
     resolved: dict[str, Path] = {}
     hashes: dict[str, str] = {}
+    snapshots: dict[str, bytes] = {}
+    root = path.parent.resolve(strict=True)
     for key in HANDOFF_FILE_KEYS:
         entry = exact_keys(files[key], {"path", "sha256"}, label=f"handoff file {key}")
         if not isinstance(entry["sha256"], str) or SHA256_RE.fullmatch(entry["sha256"]) is None:
             raise ContractError(f"handoff file {key}: invalid SHA-256")
-        target = resolve_regular(path.parent, entry["path"], label=f"handoff file {key}")
-        actual = sha256_file(target, label=f"handoff file {key}")
+        relative = safe_relative(entry["path"], label=f"handoff file {key}")
+        payload = read_regular_under(path.parent, relative.as_posix(), label=f"handoff file {key}")
+        actual = sha256_bytes(payload)
         if actual != entry["sha256"]:
             raise ContractError(f"handoff file {key}: stale SHA-256")
-        resolved[key] = target
+        resolved[key] = root / Path(*relative.parts)
         hashes[key] = actual
-    return handoff, resolved, hashes
+        snapshots[key] = payload
+    return handoff, resolved, hashes, snapshots, handoff_bytes
 
 
 def _validate_classification(
@@ -534,14 +539,27 @@ def _validate_classification(
     return by_id, external_or_live
 
 
-def _validate_log_reference(root: Path, value: Any, *, label: str) -> Path:
+def _validate_log_reference(
+    root: Path,
+    value: Any,
+    *,
+    label: str,
+    artifact_snapshots: dict[str, bytes] | None = None,
+) -> bytes:
     entry = exact_keys(value, {"path", "sha256"}, label=label)
     if not isinstance(entry["sha256"], str) or SHA256_RE.fullmatch(entry["sha256"]) is None:
         raise ContractError(f"{label}: invalid SHA-256")
-    path = resolve_regular(root, entry["path"], label=label)
-    if sha256_file(path, label=label) != entry["sha256"]:
+    relative = safe_relative(entry["path"], label=f"{label} path").as_posix()
+    if artifact_snapshots is None:
+        payload = read_regular_under(root, relative, label=label)
+    else:
+        try:
+            payload = artifact_snapshots[relative]
+        except KeyError as error:
+            raise ContractError(f"{label}: log is absent from the package snapshot") from error
+    if sha256_bytes(payload) != entry["sha256"]:
         raise ContractError(f"{label}: stale log SHA-256")
-    return path
+    return payload
 
 
 def _parse_utc_second(value: Any, *, label: str) -> datetime:
@@ -618,7 +636,7 @@ def _validate_execution_proof(
     repo: Path,
     commit: str,
     tree: str,
-    log_path: Path,
+    log_bytes: bytes,
     label: str,
 ) -> set[tuple[str, str]]:
     if row["head_commit"] != commit or row["head_tree"] != tree:
@@ -678,7 +696,7 @@ def _validate_execution_proof(
     if ("test-script", script_path) not in artifacts:
         raise ContractError(f"{label}: script-at-commit lacks a test-script artifact anchor")
     try:
-        log_lines = read_regular_bytes(log_path, label=f"{label} log").decode("utf-8").splitlines()
+        log_lines = log_bytes.decode("utf-8").splitlines()
     except UnicodeDecodeError as error:
         raise ContractError(f"{label}: log is not UTF-8") from error
     identity_line = (
@@ -696,9 +714,10 @@ def _validate_test_receipts(
     final_commit: str,
     final_tree: str,
     valid_groups: set[str],
-) -> tuple[dict[str, dict[str, Any]], dict[str, Path]]:
+    artifact_snapshots: dict[str, bytes] | None = None,
+) -> tuple[dict[str, dict[str, Any]], dict[str, bytes]]:
     by_id = _unique_rows(rows, "receipt_id", label="test receipt registry")
-    logs: dict[str, Path] = {}
+    logs: dict[str, bytes] = {}
     seen_global: set[str] = set()
     allowed_phases = set(GROUP_RECEIPT_FIELDS.values()) | set(GLOBAL_TEST_PHASES)
     for receipt_id, row in by_id.items():
@@ -743,7 +762,12 @@ def _validate_test_receipts(
             seen_global.add(row["phase"])
         elif not groups:
             raise ContractError(f"test receipt {receipt_id}: group phase has empty group coverage")
-        logs[receipt_id] = _validate_log_reference(artifact_root, row["log"], label=f"test receipt {receipt_id} log")
+        logs[receipt_id] = _validate_log_reference(
+            artifact_root,
+            row["log"],
+            label=f"test receipt {receipt_id} log",
+            artifact_snapshots=artifact_snapshots,
+        )
         _validate_execution_proof(
             row,
             receipt_id=receipt_id,
@@ -751,7 +775,7 @@ def _validate_test_receipts(
             repo=repo,
             commit=final_commit,
             tree=final_tree,
-            log_path=logs[receipt_id],
+            log_bytes=logs[receipt_id],
             label=f"test receipt {receipt_id}",
         )
     if seen_global != set(GLOBAL_TEST_PHASES):
@@ -892,7 +916,8 @@ def _validate_pre_fix_receipt(
     baseline: Baseline,
     group_ids: set[str],
     repo: Path,
-) -> dict[str, Path]:
+    artifact_snapshots: dict[str, bytes] | None = None,
+) -> dict[str, bytes]:
     exact_keys(
         receipt,
         {
@@ -921,7 +946,7 @@ def _validate_pre_fix_receipt(
         raise ContractError("pre-fix negative receipt: expected exactly 77 executions")
     seen: set[str] = set()
     counts = {"make-wrapper": 0, "manual-harness": 0}
-    logs: dict[str, Path] = {}
+    logs: dict[str, bytes] = {}
     log_paths: set[str] = set()
     for index, row in enumerate(executions, start=1):
         exact_keys(
@@ -969,7 +994,12 @@ def _validate_pre_fix_receipt(
         if log_path_text in log_paths:
             raise ContractError("pre-fix negative receipt: execution logs are not one-to-one")
         log_paths.add(log_path_text)
-        logs[group_id] = _validate_log_reference(artifact_root, log_entry, label=f"pre-fix execution {group_id} log")
+        logs[group_id] = _validate_log_reference(
+            artifact_root,
+            log_entry,
+            label=f"pre-fix execution {group_id} log",
+            artifact_snapshots=artifact_snapshots,
+        )
         _validate_execution_proof(
             row,
             receipt_id=group_id,
@@ -977,7 +1007,7 @@ def _validate_pre_fix_receipt(
             repo=repo,
             commit=baseline.candidate_commit,
             tree=baseline.candidate_tree,
-            log_path=logs[group_id],
+            log_bytes=logs[group_id],
             label=f"pre-fix execution {group_id}",
         )
         if runner_kind == "make-wrapper":
@@ -1103,10 +1133,15 @@ def _validate_documentation(
         )
 
 
-def _validate_semantic(receipt: dict[str, Any], final_commit: str, path: Path, expected_sha256: str) -> None:
+def _validate_semantic(
+    receipt: dict[str, Any],
+    final_commit: str,
+    payload: bytes,
+    expected_sha256: str,
+) -> None:
     if SHA256_RE.fullmatch(expected_sha256) is None:
         raise ContractError("semantic completion: caller trust root is not a SHA-256")
-    if sha256_file(path, label="semantic completion receipt") != expected_sha256:
+    if sha256_bytes(payload) != expected_sha256:
         raise ContractError("semantic completion: receipt does not match caller-supplied current SHA-256")
     exact_keys(
         receipt,
@@ -1383,7 +1418,7 @@ def _validate_dataset(
     local_closure_rows: list[dict[str, Any]],
     documentation_receipt: dict[str, Any],
     semantic_receipt: dict[str, Any],
-    semantic_path: Path,
+    semantic_bytes: bytes,
     matrices_bytes: bytes,
     verdicts: dict[str, Any],
     residual_rows: list[dict[str, Any]],
@@ -1392,7 +1427,8 @@ def _validate_dataset(
     final_commit: str,
     evidence_cutoff: str,
     semantic_receipt_sha256: str,
-) -> tuple[list[dict[str, Any]], dict[str, Path], dict[str, Path], dict[str, int]]:
+    artifact_snapshots: dict[str, bytes] | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, bytes], dict[str, bytes], dict[str, int]]:
     classification, external_or_live = _validate_classification(classification_rows, baseline, final_commit)
     group_ids = {row["group_id"] for row in group_map_rows}
     final_tree = git_tree(candidate_repo, final_commit)
@@ -1403,6 +1439,7 @@ def _validate_dataset(
         final_commit,
         final_tree,
         group_ids,
+        artifact_snapshots,
     )
     equivalence = _validate_fix_groups(
         fix_group_rows,
@@ -1418,10 +1455,11 @@ def _validate_dataset(
         baseline,
         group_ids,
         candidate_repo,
+        artifact_snapshots,
     )
     _validate_local_closures(local_closure_rows, baseline, classification, final_commit, candidate_repo, receipts)
     _validate_documentation(documentation_receipt, final_commit, candidate_repo, receipts)
-    _validate_semantic(semantic_receipt, final_commit, semantic_path, semantic_receipt_sha256)
+    _validate_semantic(semantic_receipt, final_commit, semantic_bytes, semantic_receipt_sha256)
     _validate_matrices(matrices_bytes, baseline)
     _, blockers = _validate_residuals(residual_rows, classification, external_or_live, final_commit)
     residual_classification_ids = set().union(*blockers.values()) if blockers else set()
@@ -1454,18 +1492,23 @@ def validate_source_inputs(
 ) -> ValidatedInputs:
     baseline_data = _validate_baseline(baseline)
     group_rows, group_hash = _validate_group_map(group_map, baseline_data.reportable_ids)
-    handoff_value, files, hashes = _validate_handoff_manifest(handoff)
+    handoff_value, files, hashes, snapshots, handoff_bytes = _validate_handoff_manifest(handoff)
     final_commit, final_tree = _validate_candidate(candidate_repo, baseline_data, handoff_value["candidate_final_commit"])
-    classification_rows = load_jsonl(files["postfix_classification_ledger"], label="post-fix classification")
-    fix_group_rows = load_jsonl(files["fix_group_ledger"], label="fix-group ledger")
-    test_rows = load_jsonl(files["test_receipt_registry"], label="test receipt registry")
-    pre_fix = load_json(files["pre_fix_negative_receipt"], label="pre-fix negative receipt")
-    closures = load_jsonl(files["local_condition_closure"], label="local condition closure")
-    documentation = load_json(files["documentation_alignment_receipt"], label="documentation alignment receipt")
-    semantic = load_json(files["semantic_completion_receipt"], label="semantic completion receipt")
-    matrices_bytes = read_regular_bytes(files["required_matrices"], label="required matrices")
-    verdicts = load_json(files["four_verdicts"], label="four verdicts")
-    residuals = load_jsonl(files["provider_live_residuals"], label="provider/live residuals")
+    classification_rows = load_jsonl_bytes(
+        snapshots["postfix_classification_ledger"], label="post-fix classification"
+    )
+    fix_group_rows = load_jsonl_bytes(snapshots["fix_group_ledger"], label="fix-group ledger")
+    test_rows = load_jsonl_bytes(snapshots["test_receipt_registry"], label="test receipt registry")
+    pre_fix = load_json_bytes(snapshots["pre_fix_negative_receipt"], label="pre-fix negative receipt")
+    closures = load_jsonl_bytes(snapshots["local_condition_closure"], label="local condition closure")
+    documentation = load_json_bytes(
+        snapshots["documentation_alignment_receipt"], label="documentation alignment receipt"
+    )
+    semantic_bytes = snapshots["semantic_completion_receipt"]
+    semantic = load_json_bytes(semantic_bytes, label="semantic completion receipt")
+    matrices_bytes = snapshots["required_matrices"]
+    verdicts = load_json_bytes(snapshots["four_verdicts"], label="four verdicts")
+    residuals = load_jsonl_bytes(snapshots["provider_live_residuals"], label="provider/live residuals")
     equivalence, test_logs, pre_fix_logs, counts = _validate_dataset(
         baseline=baseline_data,
         group_map_rows=group_rows,
@@ -1476,7 +1519,7 @@ def validate_source_inputs(
         local_closure_rows=closures,
         documentation_receipt=documentation,
         semantic_receipt=semantic,
-        semantic_path=files["semantic_completion_receipt"],
+        semantic_bytes=semantic_bytes,
         matrices_bytes=matrices_bytes,
         verdicts=verdicts,
         residual_rows=residuals,
@@ -1492,9 +1535,11 @@ def validate_source_inputs(
         group_map_rows=group_rows,
         group_map_sha256=group_hash,
         handoff_path=handoff,
-        handoff_sha256=sha256_file(handoff, label="handoff manifest"),
+        handoff_sha256=sha256_bytes(handoff_bytes),
+        handoff_bytes=handoff_bytes,
         handoff_file_paths=files,
         handoff_file_sha256=hashes,
+        handoff_file_bytes=snapshots,
         evidence_cutoff_at=handoff_value["evidence_cutoff_at"],
         candidate_repo=candidate_repo,
         candidate_final_commit=final_commit,
@@ -1510,8 +1555,8 @@ def validate_source_inputs(
         verdicts=verdicts,
         residual_rows=residuals,
         equivalence_records=equivalence,
-        test_log_sources=test_logs,
-        pre_fix_log_sources=pre_fix_logs,
+        test_log_bytes=test_logs,
+        pre_fix_log_bytes=pre_fix_logs,
         counts=counts,
     )
 
@@ -1564,51 +1609,75 @@ def validate_package(
             pass
         else:
             raise ContractError(f"package: package must be external to the {label}")
-    manifest = validate_manifest(package, exact=True, required=PACKAGE_REQUIRED_FILES - {"MANIFEST.sha256"})
+    package_snapshot = validate_manifest_snapshot(
+        package,
+        exact=True,
+        required=PACKAGE_REQUIRED_FILES - {"MANIFEST.sha256"},
+    )
+    manifest = package_snapshot.rows
+    package_files = package_snapshot.files
+
+    def json_at(relative: str, *, label: str) -> Any:
+        try:
+            payload = package_files[relative]
+        except KeyError as error:
+            raise ContractError(f"{label}: file is absent from the package snapshot") from error
+        return load_json_bytes(payload, label=label)
+
+    def jsonl_at(relative: str, *, label: str) -> list[dict[str, Any]]:
+        try:
+            payload = package_files[relative]
+        except KeyError as error:
+            raise ContractError(f"{label}: file is absent from the package snapshot") from error
+        return load_jsonl_bytes(payload, label=label)
+
     baseline_data = _validate_baseline(baseline)
     group_rows, group_hash = _validate_group_map(group_map, baseline_data.reportable_ids)
+    candidate_identity = json_at("receipts/candidate_identity.json", label="candidate identity")
     final_commit, final_tree = _validate_candidate(
         candidate_repo,
         baseline_data,
-        load_json(package / "receipts/candidate_identity.json", label="candidate identity").get("final_commit"),
+        candidate_identity.get("final_commit"),
     )
-    binding = load_json(package / "baseline/baseline_binding.json", label="baseline binding")
+    binding = json_at("baseline/baseline_binding.json", label="baseline binding")
     if binding != expected_baseline_binding(baseline_data, group_hash):
         raise ContractError("package: baseline binding is stale")
-    packaged_group_map = load_jsonl(package / "baseline/security_fix_groups_v1.jsonl", label="packaged fix-group map")
+    packaged_group_map = jsonl_at(
+        "baseline/security_fix_groups_v1.jsonl", label="packaged fix-group map"
+    )
     if packaged_group_map != group_rows:
         raise ContractError("package: packaged fix-group map differs from caller trust root")
-    packaged_registry = load_jsonl(
-        package / "evidence/validation/canonical_candidate_registry.jsonl",
+    packaged_registry = jsonl_at(
+        "evidence/validation/canonical_candidate_registry.jsonl",
         label="packaged canonical registry",
     )
     if packaged_registry != baseline_data.registry:
         raise ContractError("package: canonical registry differs from baseline")
-    packaged_matrix_schema = load_json(package / "schemas/matrix-schema-v1.json", label="packaged matrix schema")
+    packaged_matrix_schema = json_at("schemas/matrix-schema-v1.json", label="packaged matrix schema")
     if packaged_matrix_schema != baseline_data.matrix_schema:
         raise ContractError("package: matrix schema differs from baseline")
 
-    classification_rows = load_jsonl(
-        package / "evidence/remediation/finding_classification_ledger.jsonl",
+    classification_rows = jsonl_at(
+        "evidence/remediation/finding_classification_ledger.jsonl",
         label="packaged classification",
     )
-    fix_rows = load_jsonl(package / "evidence/remediation/fix_group_ledger_v1.jsonl", label="packaged fix groups")
-    test_rows = load_jsonl(package / "evidence/test/test_receipt_registry_v1.jsonl", label="packaged test receipts")
-    pre_fix = load_json(package / "evidence/test/pre_fix_negative_receipt.json", label="packaged pre-fix receipt")
-    closure_rows = load_jsonl(
-        package / "evidence/remediation/local_condition_closure.jsonl",
+    fix_rows = jsonl_at("evidence/remediation/fix_group_ledger_v1.jsonl", label="packaged fix groups")
+    test_rows = jsonl_at("evidence/test/test_receipt_registry_v1.jsonl", label="packaged test receipts")
+    pre_fix = json_at("evidence/test/pre_fix_negative_receipt.json", label="packaged pre-fix receipt")
+    closure_rows = jsonl_at(
+        "evidence/remediation/local_condition_closure.jsonl",
         label="packaged local closures",
     )
-    documentation = load_json(
-        package / "evidence/remediation/documentation_alignment_receipt.json",
+    documentation = json_at(
+        "evidence/remediation/documentation_alignment_receipt.json",
         label="packaged documentation receipt",
     )
-    semantic_path = package / "evidence/validation/semantic_completion_receipt.json"
-    semantic = load_json(semantic_path, label="packaged semantic receipt")
-    matrices_bytes = read_regular_bytes(package / "required_matrices.md", label="packaged matrices")
-    verdicts = load_json(package / "four_verdicts_v1.json", label="packaged four verdicts")
-    residuals = load_jsonl(
-        package / "evidence/validation/provider_live_residuals.jsonl",
+    semantic_bytes = package_files["evidence/validation/semantic_completion_receipt.json"]
+    semantic = load_json_bytes(semantic_bytes, label="packaged semantic receipt")
+    matrices_bytes = package_files["required_matrices.md"]
+    verdicts = json_at("four_verdicts_v1.json", label="packaged four verdicts")
+    residuals = jsonl_at(
+        "evidence/validation/provider_live_residuals.jsonl",
         label="packaged residuals",
     )
     evidence_cutoff = verdicts.get("evidence_cutoff_at")
@@ -1624,7 +1693,7 @@ def validate_package(
         local_closure_rows=closure_rows,
         documentation_receipt=documentation,
         semantic_receipt=semantic,
-        semantic_path=semantic_path,
+        semantic_bytes=semantic_bytes,
         matrices_bytes=matrices_bytes,
         verdicts=verdicts,
         residual_rows=residuals,
@@ -1633,10 +1702,11 @@ def validate_package(
         final_commit=final_commit,
         evidence_cutoff=evidence_cutoff,
         semantic_receipt_sha256=semantic_receipt_sha256,
+        artifact_snapshots=package_files,
     )
 
-    finding_map = load_jsonl(
-        package / "evidence/remediation/finding_fix_commit_test_v1.jsonl",
+    finding_map = jsonl_at(
+        "evidence/remediation/finding_fix_commit_test_v1.jsonl",
         label="packaged finding map",
     )
     receipts_by_id = _unique_rows(test_rows, "receipt_id", label="packaged test receipts")
@@ -1645,7 +1715,6 @@ def validate_package(
     if len(finding_map) != 135 or {row["canonical_id"] for row in finding_map} != set(baseline_data.reportable_ids):
         raise ContractError("package: finding map is not the exact reportable projection")
 
-    candidate_identity = load_json(package / "receipts/candidate_identity.json", label="candidate identity")
     exact_keys(
         candidate_identity,
         {"schema_version", "final_commit", "final_tree", "worktree_clean", "cohort_final_equivalence"},
@@ -1662,9 +1731,13 @@ def validate_package(
         raise ContractError("package: candidate identity/equivalence receipt is stale")
 
     core_excluded = {"MANIFEST.sha256", "receipts/build_receipt.json", "receipts/replay_receipt.json"}
-    core_index = tree_index(package, exclude=core_excluded)
+    core_index = {
+        relative: {"sha256": manifest[relative], "size": len(payload)}
+        for relative, payload in sorted(package_files.items())
+        if relative not in core_excluded
+    }
     core_hash = sha256_bytes(canonical_json_bytes(core_index))
-    replay = load_json(package / "receipts/replay_receipt.json", label="replay receipt")
+    replay = json_at("receipts/replay_receipt.json", label="replay receipt")
     if replay != {
         "schema_version": 1,
         "replay_count": 2,
@@ -1672,7 +1745,7 @@ def validate_package(
         "core_index_sha256": core_hash,
     }:
         raise ContractError("package: replay receipt is inconsistent")
-    build = load_json(package / "receipts/build_receipt.json", label="build receipt")
+    build = json_at("receipts/build_receipt.json", label="build receipt")
     if not isinstance(build, dict):
         raise ContractError("package: build receipt is malformed")
     if (
@@ -1688,7 +1761,7 @@ def validate_package(
         raise ContractError("package: build receipt is inconsistent")
     return {
         "ok": True,
-        "package_manifest_sha256": sha256_file(package / "MANIFEST.sha256", label="package manifest"),
+        "package_manifest_sha256": sha256_bytes(package_snapshot.manifest_bytes),
         "manifest_entries": len(manifest),
         "candidate_final_commit": final_commit,
         "candidate_final_tree": final_tree,

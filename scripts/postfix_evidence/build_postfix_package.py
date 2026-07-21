@@ -40,8 +40,7 @@ SENSITIVE_LOG_RE = re.compile(
 )
 
 
-def _copy_verified_log(source: Path, expected_sha256: str, destination: Path) -> None:
-    payload = read_regular_bytes(source, label="evidence log")
+def _copy_verified_log(payload: bytes, expected_sha256: str, destination: Path) -> None:
     if len(payload) > 10 * 1024 * 1024:
         raise ContractError("evidence log: file exceeds the 10 MiB package limit")
     if sha256_bytes(payload) != expected_sha256:
@@ -58,7 +57,7 @@ def _rewrite_test_receipts(data: ValidatedInputs, destination: Path) -> list[dic
         receipt_id = row["receipt_id"]
         relative = f"evidence/test/logs/{receipt_id}.log"
         expected = row["log"]["sha256"]
-        _copy_verified_log(data.test_log_sources[receipt_id], expected, destination / relative)
+        _copy_verified_log(data.test_log_bytes[receipt_id], expected, destination / relative)
         row["log"] = {"path": relative, "sha256": expected}
         rows.append(row)
     return rows
@@ -72,7 +71,7 @@ def _rewrite_pre_fix_receipt(data: ValidatedInputs, destination: Path) -> dict[s
         group_id = row["group_id"]
         relative = f"evidence/test/pre-fix/{group_id}.log"
         expected = row["log"]["sha256"]
-        _copy_verified_log(data.pre_fix_log_sources[group_id], expected, destination / relative)
+        _copy_verified_log(data.pre_fix_log_bytes[group_id], expected, destination / relative)
         row["log"] = {"path": relative, "sha256": expected}
         executions.append(row)
     receipt["executions"] = executions
@@ -144,8 +143,7 @@ def _render_core(destination: Path, data: ValidatedInputs) -> None:
         _rewrite_pre_fix_receipt(data, destination),
     )
 
-    semantic_source = data.handoff_file_paths["semantic_completion_receipt"]
-    semantic_bytes = read_regular_bytes(semantic_source, label="semantic completion receipt")
+    semantic_bytes = data.handoff_file_bytes["semantic_completion_receipt"]
     if sha256_bytes(semantic_bytes) != data.handoff_file_sha256["semantic_completion_receipt"]:
         raise ContractError("semantic completion receipt changed after source validation")
     write_bytes(destination / "evidence/validation/semantic_completion_receipt.json", semantic_bytes)
@@ -153,7 +151,7 @@ def _render_core(destination: Path, data: ValidatedInputs) -> None:
         destination / "evidence/validation/provider_live_residuals.jsonl",
         sorted(data.residual_rows, key=lambda row: row["id"]),
     )
-    matrices_bytes = read_regular_bytes(data.handoff_file_paths["required_matrices"], label="required matrices")
+    matrices_bytes = data.handoff_file_bytes["required_matrices"]
     if sha256_bytes(matrices_bytes) != data.handoff_file_sha256["required_matrices"]:
         raise ContractError("required matrices changed after source validation")
     write_bytes(destination / "required_matrices.md", matrices_bytes)
