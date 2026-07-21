@@ -847,6 +847,13 @@ function assertPlatformServicesUnchanged(core, combined, workloadIds) {
     }
     const coreNetworks = serviceNetworks(coreService);
     const combinedNetworks = serviceNetworks(combinedService);
+    for (const network of coreNetworks) {
+      const coreAttachment = Array.isArray(coreService.networks) ? null : coreService.networks?.[network];
+      const combinedAttachment = Array.isArray(combinedService.networks) ? null : combinedService.networks?.[network];
+      if (!combinedNetworks.has(network) || !same(coreAttachment, combinedAttachment)) {
+        invalid(`Workload overlays removed or changed protected network attachment ${name}:${network}.`);
+      }
+    }
     const additions = [...combinedNetworks].filter((network) => !coreNetworks.has(network));
     for (const network of additions) {
       const owner = workloadNetworkOwner(network, workloadIds);

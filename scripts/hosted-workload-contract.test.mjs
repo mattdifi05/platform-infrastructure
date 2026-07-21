@@ -385,6 +385,15 @@ test("platform service can join only its assigned workload zone", () => {
   combined.networks.example_app_cache = { internal: true };
   assert.throws(() => validateRenderedWorkloads({ core, combined, lock }), /cannot join workload example-app zone cache/);
 });
+test("platform services preserve every original network attachment", () => {
+  const removed = combinedFixture();
+  delete removed.services["project-router"].networks.platform_routing;
+  assert.throws(() => validateRenderedWorkloads({ core, combined: removed, lock }), /removed or changed protected network attachment/);
+
+  const changed = combinedFixture();
+  changed.services["project-router"].networks.platform_routing = { aliases: ["impersonate-router"] };
+  assert.throws(() => validateRenderedWorkloads({ core, combined: changed, lock }), /removed or changed protected network attachment/);
+});
 test("deployment-private activation state has no non-router writable mount", () => {
   const privateLock = "/deployment-private/hosted-workloads.lock.json";
   const lockWithActivation = {
