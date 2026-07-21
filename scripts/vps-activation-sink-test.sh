@@ -35,8 +35,11 @@ fi
 grep -F -- '--confirmRollback is disabled' "$TMP/err" >/dev/null
 printf 'PASS\tlegacy-rollback-apply-is-deny-all\n'
 
-grep -F -- '--verify --status-file "$origin_status" --ssh-port "$EXPECTED_SSH_PORT"' \
-  "$SCRIPT_DIR/vps-host-readiness.sh" >/dev/null
+grep -F -- '--verify --ssh-port "$EXPECTED_SSH_PORT"' "$SCRIPT_DIR/vps-host-readiness.sh" >/dev/null
+if grep -F -- '--status-file' "$SCRIPT_DIR/vps-host-readiness.sh" >/dev/null; then
+  echo "FAIL: host readiness injects a caller-authored UFW status file" >&2
+  exit 1
+fi
 printf 'PASS\thost-readiness-binds-origin-check-to-ssh-port\n'
 
 if grep -F -- '--start-stack' "$ROOT_DIR/README.md" "$ROOT_DIR/RUNBOOK.md" | grep -v -E 'rifiutato|rejected' >/dev/null; then

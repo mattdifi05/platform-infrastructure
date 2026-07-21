@@ -286,14 +286,11 @@ check_ufw() {
   else
     add_check "ufw-ssh-port-allowed" "yes" "failed" "UFW does not show ${EXPECTED_SSH_PORT}/tcp"
   fi
-  origin_status=$(mktemp)
-  printf '%s\n' "$ufw_status" > "$origin_status"
-  if sh "$ROOT_DIR/scripts/cloudflare-origin-lock-ufw.sh" --verify --status-file "$origin_status" --ssh-port "$EXPECTED_SSH_PORT" >/dev/null 2>&1; then
+  if sh "$ROOT_DIR/scripts/cloudflare-origin-lock-ufw.sh" --verify --ssh-port "$EXPECTED_SSH_PORT" >/dev/null 2>&1; then
     add_check "ufw-origin-lock" "yes" "passed" "public web ports are restricted to the complete saved Cloudflare IPv4/IPv6 CIDR set"
   else
     add_check "ufw-origin-lock" "yes" "failed" "origin lock is incomplete, stale, duplicated, or still has a generic public web allow"
   fi
-  rm -f "$origin_status"
 }
 
 check_services() {
