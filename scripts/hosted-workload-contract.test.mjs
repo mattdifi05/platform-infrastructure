@@ -190,8 +190,12 @@ test("workload resolver accepts an all-regular contained tree", () => {
   try {
     const workloadRoot = path.join(root, "workloads");
     const fixture = catalogFixture(root);
-    const result = resolveCatalog({ ...fixture, workloadRoot, coreFiles: [fixture.coreFile], projectName: "fixture" });
-    assert.equal(result.workloads[0].manifestPath, fs.realpathSync.native(path.join(workloadRoot, "example-app", "manifest.json")));
+    const snapshotRoot = path.join(root, "snapshots");
+    const result = resolveCatalog({ ...fixture, workloadRoot, coreFiles: [fixture.coreFile], projectName: "fixture", snapshotRoot });
+    assert.equal(result.workloads[0].manifestSourcePath, fs.realpathSync.native(path.join(workloadRoot, "example-app", "manifest.json")));
+    assert.equal(path.dirname(result.workloads[0].manifestPath), result.snapshotGeneration);
+    assert.match(result.workloadContentSha256, /^[a-f0-9]{64}$/);
+    verifyLockFiles(result);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -202,20 +206,48 @@ test("workload resolver rejects intermediate and terminal symlinks", () => {
   try {
     const workloadRoot = path.join(root, "workloads");
     const outside = path.join(root, "outside-app");
+    const snapshotRoot = path.join(root, "snapshots");
     fs.mkdirSync(workloadRoot, { recursive: true });
     const fixture = catalogFixture(root, outside);
     fs.symlinkSync(outside, path.join(workloadRoot, "example-app"), "dir");
     assert.throws(
-      () => resolveCatalog({ ...fixture, workloadRoot, coreFiles: [fixture.coreFile], projectName: "fixture" }),
+      () => resolveCatalog({ ...fixture, workloadRoot, coreFiles: [fixture.coreFile], projectName: "fixture", snapshotRoot }),
       /symlink component/,
     );
     fs.rmSync(path.join(workloadRoot, "example-app"));
     fs.mkdirSync(path.join(workloadRoot, "example-app"));
     fs.symlinkSync(path.join(outside, "manifest.json"), path.join(workloadRoot, "example-app", "manifest.json"));
     assert.throws(
-      () => resolveCatalog({ ...fixture, workloadRoot, coreFiles: [fixture.coreFile], projectName: "fixture" }),
+      () => resolveCatalog({ ...fixture, workloadRoot, coreFiles: [fixture.coreFile], projectName: "fixture", snapshotRoot }),
       /symlink component/,
     );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("activation paths remain bound to immutable snapshots after source replacement", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "hosted-snapshot-"));
+  try {
+    const workloadRoot = path.join(root, "workloads");
+    const fixture = catalogFixture(root);
+    const lock = resolveCatalog({
+      ...fixture,
+      workloadRoot,
+      coreFiles: [fixture.coreFile],
+      projectName: "fixture",
+      snapshotRoot: path.join(root, "snapshots"),
+    });
+    const originalCompose = fs.readFileSync(lock.workloads[0].composePath, "utf8");
+    fs.writeFileSync(lock.workloads[0].composeSourcePath, "services:\n  hostile:\n    privileged: true\n");
+    const replacement = path.join(root, "replacement.yaml");
+    fs.writeFileSync(replacement, "services:\n  replaced: {}\n");
+    fs.renameSync(replacement, lock.workloads[0].composeSourcePath);
+    fs.unlinkSync(lock.workloads[0].composeSourcePath);
+    fs.symlinkSync(path.join(root, "hostile.yaml"), lock.workloads[0].composeSourcePath);
+    fs.writeFileSync(path.join(root, "hostile.yaml"), "services:\n  linked:\n    privileged: true\n");
+    assert.equal(fs.readFileSync(lock.workloads[0].composePath, "utf8"), originalCompose);
+    assert.equal(verifyLockFiles(lock), true);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

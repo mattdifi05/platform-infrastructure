@@ -45,6 +45,10 @@ function sha256File(filePath) {
   return crypto.createHash("sha256").update(fs.readFileSync(filePath)).digest("hex");
 }
 
+function sha256Bytes(bytes) {
+  return crypto.createHash("sha256").update(bytes).digest("hex");
+}
+
 function stable(value) {
   if (Array.isArray(value)) return value.map(stable);
   if (!value || typeof value !== "object") return value;
@@ -123,6 +127,69 @@ function fileRecord(filePath, kind) {
   return { kind, path: filePath, sha256: sha256File(filePath), sizeBytes: stat.size };
 }
 
+function readStableRegularFile(filePath, label) {
+  const noFollow = fs.constants.O_NOFOLLOW ?? 0;
+  let descriptor;
+  try {
+    descriptor = fs.openSync(filePath, fs.constants.O_RDONLY | noFollow);
+    const before = fs.fstatSync(descriptor);
+    if (!before.isFile()) invalid(`${label} must be a regular file.`);
+    const bytes = fs.readFileSync(descriptor);
+    const after = fs.fstatSync(descriptor);
+    if (before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size || before.mtimeMs !== after.mtimeMs) {
+      invalid(`${label} changed while it was being read.`);
+    }
+    return { bytes, stat: after };
+  } catch (error) {
+    invalid(`${label} could not be read safely: ${error.message}`);
+  } finally {
+    if (descriptor !== undefined) fs.closeSync(descriptor);
+  }
+}
+
+function createSnapshotGeneration(snapshotRoot) {
+  fs.mkdirSync(snapshotRoot, { recursive: true, mode: 0o700 });
+  const stat = fs.lstatSync(snapshotRoot, { throwIfNoEntry: false });
+  if (!stat?.isDirectory() || stat.isSymbolicLink()) invalid("Snapshot root must be a real directory.");
+  fs.chmodSync(snapshotRoot, 0o700);
+  const canonicalRoot = fs.realpathSync.native(snapshotRoot);
+  const generation = fs.mkdtempSync(path.join(canonicalRoot, "generation-"));
+  fs.chmodSync(generation, 0o700);
+  return { root: canonicalRoot, generation: fs.realpathSync.native(generation), nextIndex: 0 };
+}
+
+function snapshotFile(sourcePath, kind, snapshot, metadata = {}) {
+  const { bytes } = readStableRegularFile(sourcePath, kind);
+  const suffix = path.extname(sourcePath).replace(/[^A-Za-z0-9.]/g, "") || ".data";
+  const name = `${String(snapshot.nextIndex++).padStart(4, "0")}-${kind.replace(/[^a-z0-9-]/gi, "-")}${suffix}`;
+  const snapshotPath = path.join(snapshot.generation, name);
+  const descriptor = fs.openSync(snapshotPath, fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY, 0o400);
+  try {
+    fs.writeFileSync(descriptor, bytes);
+    fs.fsyncSync(descriptor);
+  } finally {
+    fs.closeSync(descriptor);
+  }
+  fs.chmodSync(snapshotPath, 0o400);
+  return {
+    kind,
+    sourcePath,
+    path: snapshotPath,
+    sha256: sha256Bytes(bytes),
+    sizeBytes: bytes.length,
+    snapshot: true,
+    ...metadata,
+  };
+}
+
+function workloadContentSha256(records) {
+  const content = records
+    .filter((record) => record.snapshot === true)
+    .map(({ kind, sourcePath, sha256, sizeBytes, workloadId = null }) => ({ kind, sourcePath, sha256, sizeBytes, workloadId }))
+    .sort((left, right) => `${left.workloadId}:${left.kind}:${left.sourcePath}`.localeCompare(`${right.workloadId}:${right.kind}:${right.sourcePath}`));
+  return sha256Bytes(Buffer.from(JSON.stringify(stable(content))));
+}
+
 export function validateWorkloadEnvironmentText(text, workloadId, label = "workload environment") {
   const prefix = `${workloadId.toUpperCase().replaceAll("-", "_")}_`;
   const names = new Set();
@@ -150,13 +217,13 @@ export function validateWorkloadEnvironmentText(text, workloadId, label = "workl
   return [...names].sort();
 }
 
-function workloadEnvironmentRecord(filePath, workloadId) {
-  const record = fileRecord(filePath, "workload-environment");
-  validateWorkloadEnvironmentText(fs.readFileSync(filePath, "utf8"), workloadId, filePath);
+function workloadEnvironmentRecord(filePath, workloadId, snapshot) {
+  const record = snapshotFile(filePath, "workload-environment", snapshot, { workloadId });
+  validateWorkloadEnvironmentText(fs.readFileSync(record.path, "utf8"), workloadId, filePath);
   return record;
 }
 
-function sqlRecords(root, relativeRoots) {
+function sqlRecords(root, relativeRoots, snapshot, workloadId) {
   const records = [];
   for (const relativeRoot of relativeRoots ?? []) {
     const directory = resolvePhysicalWithin(root, relativeRoot, "migration root", "directory");
@@ -164,7 +231,7 @@ function sqlRecords(root, relativeRoots) {
       if (!entry.name.endsWith(".sql")) continue;
       if (entry.isSymbolicLink() || !entry.isFile()) invalid(`Migration must be a regular non-symlink file: ${path.join(directory, entry.name)}`);
       const migrationPath = resolvePhysicalWithin(directory, entry.name, "migration", "file");
-      records.push(fileRecord(migrationPath, "migration"));
+      records.push(snapshotFile(migrationPath, "migration", snapshot, { workloadId }));
     }
   }
   return records;
@@ -218,13 +285,15 @@ export function validateWorkloadManifest(document, manifestPath = "manifest") {
   };
 }
 
-export function resolveCatalog({ catalogPath, workloadRoot, coreEnvFile, coreFiles, projectName }) {
-  const catalog = readJson(catalogPath, "hosted workload catalog");
+export function resolveCatalog({ catalogPath, workloadRoot, coreEnvFile, coreFiles, projectName, snapshotRoot }) {
+  const snapshot = createSnapshotGeneration(path.resolve(requiredText(snapshotRoot, "snapshot root")));
+  const catalogRecord = snapshotFile(path.resolve(catalogPath), "catalog", snapshot);
+  const catalog = readJson(catalogRecord.path, "hosted workload catalog");
   if (catalog?.version !== 1 || !Array.isArray(catalog.workloads)) {
     invalid("Hosted workload catalog must use version 1 and workloads[].");
   }
   const root = physicalRoot(workloadRoot, "workload root");
-  const records = [fileRecord(path.resolve(catalogPath), "catalog"), fileRecord(path.resolve(coreEnvFile), "core-environment")];
+  const records = [catalogRecord, fileRecord(path.resolve(coreEnvFile), "core-environment")];
   for (const coreFile of coreFiles) records.push(fileRecord(path.resolve(coreFile), "core-compose"));
   const ids = new Set();
   const services = new Set();
@@ -232,7 +301,8 @@ export function resolveCatalog({ catalogPath, workloadRoot, coreEnvFile, coreFil
   const workloads = catalog.workloads.map((entry) => {
     if (!entry || typeof entry !== "object" || Array.isArray(entry)) invalid("Each workload catalog entry must be an object.");
     const manifestPath = resolvePhysicalWithin(root, entry.manifest, "workload manifest", "file");
-    const manifest = validateWorkloadManifest(readJson(manifestPath), manifestPath);
+    const manifestRecord = snapshotFile(manifestPath, "workload-manifest", snapshot);
+    const manifest = validateWorkloadManifest(readJson(manifestRecord.path), manifestPath);
     const environmentPath = resolvePhysicalWithin(root, entry.environmentFile, `environment file for ${manifest.id}`, "file");
     if (ids.has(manifest.id)) invalid(`Duplicate workload id ${manifest.id}.`);
     ids.add(manifest.id);
@@ -245,18 +315,20 @@ export function resolveCatalog({ catalogPath, workloadRoot, coreEnvFile, coreFil
       }
     }
     const composePath = resolvePhysicalWithin(path.dirname(manifestPath), manifest.composeFile, "workload compose file", "file");
-    const workloadRecords = [
-      fileRecord(manifestPath, "workload-manifest"),
-      fileRecord(composePath, "workload-compose"),
-      workloadEnvironmentRecord(environmentPath, manifest.id),
-    ];
-    workloadRecords.push(...sqlRecords(path.dirname(manifestPath), manifest.migrationRoots));
+    manifestRecord.workloadId = manifest.id;
+    const composeRecord = snapshotFile(composePath, "workload-compose", snapshot, { workloadId: manifest.id });
+    const environmentRecord = workloadEnvironmentRecord(environmentPath, manifest.id, snapshot);
+    const workloadRecords = [manifestRecord, composeRecord, environmentRecord];
+    workloadRecords.push(...sqlRecords(path.dirname(manifestPath), manifest.migrationRoots, snapshot, manifest.id));
     records.push(...workloadRecords);
     return {
       ...manifest,
-      manifestPath,
-      composePath,
-      environmentPath,
+      manifestPath: manifestRecord.path,
+      manifestSourcePath: manifestPath,
+      composePath: composeRecord.path,
+      composeSourcePath: composePath,
+      environmentPath: environmentRecord.path,
+      environmentSourcePath: environmentPath,
       files: workloadRecords,
     };
   });
@@ -265,6 +337,8 @@ export function resolveCatalog({ catalogPath, workloadRoot, coreEnvFile, coreFil
     validatorVersion: HOSTED_WORKLOAD_VALIDATOR_VERSION,
     state: "resolved",
     generatedAt: new Date().toISOString(),
+    snapshotRoot: snapshot.root,
+    snapshotGeneration: snapshot.generation,
     workloadRoot: root,
     catalogPath: path.resolve(catalogPath),
     coreEnvFile: path.resolve(coreEnvFile),
@@ -272,6 +346,7 @@ export function resolveCatalog({ catalogPath, workloadRoot, coreEnvFile, coreFil
     coreFiles: coreFiles.map((file) => path.resolve(file)),
     workloads,
     files: records,
+    workloadContentSha256: workloadContentSha256(records),
   };
 }
 
@@ -436,9 +511,20 @@ export function verifyLockFiles(lock) {
     invalid(`Hosted workload lock must use schema ${HOSTED_WORKLOAD_LOCK_VERSION} and validator ${HOSTED_WORKLOAD_VALIDATOR_VERSION}.`);
   }
   if (!Array.isArray(lock?.files) || lock.files.length === 0) invalid("Workload lock has no file records.");
+  const snapshotGeneration = physicalRoot(requiredText(lock.snapshotGeneration, "snapshot generation"), "snapshot generation");
   for (const record of lock.files) {
     if (!SHA256.test(String(record.sha256 ?? ""))) invalid(`Invalid lock digest for ${record.path}.`);
-    if (sha256File(record.path) !== record.sha256) invalid(`Locked file changed: ${record.path}.`);
+    if (record.snapshot === true) {
+      if (path.dirname(record.path) !== snapshotGeneration) invalid(`Snapshot file is outside the locked generation: ${record.path}.`);
+      const stat = fs.lstatSync(record.path, { throwIfNoEntry: false });
+      if (!stat?.isFile() || stat.isSymbolicLink() || (stat.mode & 0o777) !== 0o400) invalid(`Snapshot file is not immutable: ${record.path}.`);
+    }
+    const { bytes } = readStableRegularFile(record.path, `locked ${record.kind}`);
+    if (sha256Bytes(bytes) !== record.sha256) invalid(`Locked file changed: ${record.path}.`);
+  }
+  const expectedContent = workloadContentSha256(lock.files);
+  if (!SHA256.test(String(lock.workloadContentSha256 ?? "")) || lock.workloadContentSha256 !== expectedContent) {
+    invalid("Hosted workload content digest does not match its verified snapshot records.");
   }
   return true;
 }
@@ -468,6 +554,7 @@ function main() {
       coreEnvFile: path.resolve(requiredText(args.envFile, "--envFile")),
       coreFiles: requiredText(args.coreFiles, "--coreFiles").split(",").map((file) => path.resolve(file)),
       projectName: requiredText(args.projectName, "--projectName"),
+      snapshotRoot: path.resolve(requiredText(args.snapshotRoot, "--snapshotRoot")),
     });
     writeJson(path.resolve(requiredText(args.output, "--output")), lock);
     return;

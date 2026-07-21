@@ -57,6 +57,9 @@ core_files=(
 core_csv=$(IFS=,; printf '%s' "${core_files[*]}")
 
 mkdir -p "$(dirname "$OUTPUT")"
+snapshot_root="$(dirname "$OUTPUT")/hosted-workload-snapshots"
+mkdir -p "$snapshot_root"
+chmod 700 "$snapshot_root"
 resolved="$TMP/hosted-workloads.resolved.json"
 core_render="$TMP/core-render.json"
 combined_render="$TMP/combined-render.json"
@@ -65,6 +68,7 @@ docker run --rm --network none --user "$(id -u):$(id -g)" --entrypoint node \
   -v "$INFRA_ROOT:$INFRA_ROOT:ro" \
   -v "$WORKLOAD_ROOT:$WORKLOAD_ROOT:ro" \
   -v "$(dirname "$CATALOG"):$(dirname "$CATALOG"):ro" \
+  -v "$(dirname "$OUTPUT"):$(dirname "$OUTPUT")" \
   -v "$TMP:$TMP" \
   -w "$INFRA_ROOT" \
   "$OPS_IMAGE" scripts/hosted-workload-contract.mjs resolve \
@@ -73,6 +77,7 @@ docker run --rm --network none --user "$(id -u):$(id -g)" --entrypoint node \
     --envFile "$ENV_FILE" \
     --projectName "$PROJECT_NAME" \
     --coreFiles "$core_csv" \
+    --snapshotRoot "$snapshot_root" \
     --output "$resolved"
 
 COMPOSE_ENV_FILE="$ENV_FILE" COMPOSE_PROJECT_NAME="$PROJECT_NAME" HOSTED_WORKLOAD_LOCK= \
