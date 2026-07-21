@@ -5,7 +5,9 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 INFRA_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 ENV_FILE=${COMPOSE_ENV_FILE:-$INFRA_ROOT/.env}
 PROJECT_NAME=${COMPOSE_PROJECT_NAME:-platform_infra_vps}
-OPS_IMAGE=${PLATFORM_OPS_IMAGE:-platform/ops:local}
+OPS_IMAGE=${PLATFORM_OPS_IMAGE:-}
+OPS_IMAGE_RECEIPT=${PLATFORM_OPS_IMAGE_ADMISSION_RECEIPT:-}
+OPS_IMAGE_RECEIPT_SHA256=${PLATFORM_OPS_IMAGE_ADMISSION_RECEIPT_SHA256:-}
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/hosted-workloads.XXXXXX")
 trap 'rm -rf "$TMP"' EXIT
 
@@ -83,6 +85,12 @@ ensure_private_directory() {
   }
 }
 
+[ -n "$OPS_IMAGE" ] && [ -n "$OPS_IMAGE_RECEIPT" ] && [ -n "$OPS_IMAGE_RECEIPT_SHA256" ] || {
+  printf '%s\n' "PLATFORM_OPS_IMAGE, PLATFORM_OPS_IMAGE_ADMISSION_RECEIPT and PLATFORM_OPS_IMAGE_ADMISSION_RECEIPT_SHA256 are required." >&2
+  exit 1
+}
+OPS_IMAGE_ID=$(sh "$SCRIPT_DIR/ops-image-trust.sh" "$OPS_IMAGE" "$OPS_IMAGE_RECEIPT" "$OPS_IMAGE_RECEIPT_SHA256")
+
 core_files=(
   "$INFRA_ROOT/compose.yaml"
   "$INFRA_ROOT/compose.secrets.yaml"
@@ -109,14 +117,14 @@ resolved="$TMP/hosted-workloads.resolved.json"
 core_render="$TMP/core-render.json"
 combined_render="$TMP/combined-render.json"
 
-docker run --rm --network none --user "$(id -u):$(id -g)" --entrypoint node \
+docker run --rm --pull=never --network none --user "$(id -u):$(id -g)" --entrypoint node \
   -v "$INFRA_ROOT:$INFRA_ROOT:ro" \
   -v "$WORKLOAD_ROOT:$WORKLOAD_ROOT:ro" \
   -v "$(dirname "$CATALOG"):$(dirname "$CATALOG"):ro" \
   -v "$(dirname "$OUTPUT"):$(dirname "$OUTPUT")" \
   -v "$TMP:$TMP" \
   -w "$INFRA_ROOT" \
-  "$OPS_IMAGE" scripts/hosted-workload-contract.mjs resolve \
+  "$OPS_IMAGE_ID" scripts/hosted-workload-contract.mjs resolve \
     --catalog "$CATALOG" \
     --workloadRoot "$WORKLOAD_ROOT" \
     --envFile "$ENV_FILE" \
@@ -131,7 +139,7 @@ docker run --rm --network none --user "$(id -u):$(id -g)" --entrypoint ruby \
   -v "$(dirname "$OUTPUT"):$(dirname "$OUTPUT"):ro" \
   -v "$TMP:$TMP" \
   -w "$INFRA_ROOT" \
-  "$OPS_IMAGE" scripts/hosted-workload-source-policy.rb --lock "$resolved"
+  "$OPS_IMAGE_ID" scripts/hosted-workload-source-policy.rb --lock "$resolved"
 
 [[ ! -L "$OUTPUT" && ( ! -e "$OUTPUT" || -f "$OUTPUT" ) ]] || {
   printf '%s\n' "Hosted workload activation output must be absent or a regular non-symlink file: $OUTPUT" >&2
@@ -148,13 +156,13 @@ HOSTED_WORKLOAD_LOCK="$OUTPUT" HOSTED_WORKLOAD_MODE=hosted HOSTED_WORKLOAD_PREPA
 HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE="$OUTPUT" \
   bash "$SCRIPT_DIR/compose-vps.sh" config --format json > "$combined_render"
 
-docker run --rm --network none --user "$(id -u):$(id -g)" --entrypoint node \
+docker run --rm --pull=never --network none --user "$(id -u):$(id -g)" --entrypoint node \
   -v "$INFRA_ROOT:$INFRA_ROOT:ro" \
   -v "$WORKLOAD_ROOT:$WORKLOAD_ROOT:ro" \
   -v "$TMP:$TMP:ro" \
   -v "$(dirname "$OUTPUT"):$(dirname "$OUTPUT")" \
   -w "$INFRA_ROOT" \
-  "$OPS_IMAGE" scripts/hosted-workload-contract.mjs verify-render \
+  "$OPS_IMAGE_ID" scripts/hosted-workload-contract.mjs verify-render \
     --lock "$OUTPUT" \
     --coreRender "$core_render" \
     --combinedRender "$combined_render" \
