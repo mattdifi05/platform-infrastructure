@@ -133,6 +133,20 @@ test("rejects external and foreign workload volume aliases at runtime", () => {
   }
 });
 
+test("rejects foreign external secret aliases at runtime", () => {
+  for (const definition of [
+    { external: true },
+    { external: true, name: "foreign_api_key" },
+  ]) {
+    const config = fixture();
+    config.secrets = { "example-app-api-key": definition };
+    config.services["example-app-web"].secrets = [{ source: "example-app-api-key", target: "example-app-api-key" }];
+    const report = evaluateRuntimeIsolation(config);
+    assert.equal(report.status, "failed");
+    assert.match(report.failures.join("\n"), /workload-owned-secrets-example-app-web/);
+  }
+});
+
 test("rejects workload Compose API socket access independently at runtime", () => {
   const config = fixture();
   config.services["example-app-web"].use_api_socket = true;

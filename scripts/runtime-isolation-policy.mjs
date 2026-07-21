@@ -88,6 +88,16 @@ export function evaluateRuntimeIsolation(config, options = {}) {
       acceleratorControls.push("deploy.resources.reservations.devices");
     }
     record(`workload-no-accelerators-${name}`, acceleratorControls.length === 0, `${name} acceleratorControls=${acceleratorControls.join(",") || "none"}`);
+    const foreignSecrets = (Array.isArray(service.secrets) ? service.secrets : [])
+      .map((entry) => typeof entry === "string" ? entry : String(entry?.source || ""))
+      .filter((source) => {
+        const definition = object(config?.secrets?.[source]);
+        return !source.startsWith(`${workloadId}-`)
+          || definition.external !== true
+          || typeof definition.name !== "string"
+          || !definition.name.endsWith(`_${source}`);
+      });
+    record(`workload-owned-secrets-${name}`, foreignSecrets.length === 0, `${name} foreignSecrets=${foreignSecrets.join(",") || "none"}`);
     const mounts = volumes(service);
     for (const target of FORBIDDEN_WORKLOAD_TARGETS) {
       const exposed = mounts.some((mount) => mount.target === target || mount.target.startsWith(`${target}/`));

@@ -17,7 +17,7 @@ const IMAGE = /^[a-z0-9][a-z0-9._/-]*(?::[A-Za-z0-9._-]+)?@sha256:[a-f0-9]{64}$/
 const SAFE_PATH = /^[A-Za-z0-9_./-]+$/;
 export const HOSTED_WORKLOAD_LOCK_VERSION = 2;
 export const HOSTED_WORKLOAD_VALIDATOR_VERSION = "hosted-contract-v2";
-const RAW_POLICY_CONTROLS = Object.freeze(["bind-owned-volumes", "deny-api-socket", "deny-device-access", "deny-env-file", "deny-extends", "deny-file-configs", "deny-gpu-access", "deny-include", "deny-lifecycle-hooks", "deny-local-volume-options", "deny-providers", "deny-runtime-overrides", "deny-scaling", "deny-stop-grace-overrides", "deny-supplemental-groups", "deny-volumes-from"]);
+const RAW_POLICY_CONTROLS = Object.freeze(["bind-owned-secret-aliases", "bind-owned-volumes", "deny-api-socket", "deny-device-access", "deny-env-file", "deny-extends", "deny-file-configs", "deny-gpu-access", "deny-include", "deny-lifecycle-hooks", "deny-local-volume-options", "deny-providers", "deny-runtime-overrides", "deny-scaling", "deny-stop-grace-overrides", "deny-supplemental-groups", "deny-volumes-from"]);
 const PLATFORM_DEPENDENCIES = new Set([
   "postgres",
   "redis",
@@ -907,12 +907,17 @@ function assertEnvironmentSecrets(name, service) {
   }
 }
 
-function assertSecrets(name, service, manifest, combined) {
+function assertSecrets(name, service, manifest, combined, projectName) {
   const allowed = new Set(manifest.secrets);
   for (const entry of service.secrets ?? []) {
     const source = typeof entry === "string" ? entry : entry.source;
     if (!allowed.has(source)) invalid(`${name} uses undeclared secret ${source}.`);
-    if (combined.secrets?.[source]?.external !== true) invalid(`${name} secret ${source} must be external.`);
+    const definition = combined.secrets?.[source];
+    const expectedPhysicalName = `${projectName}_${source}`;
+    if (!definition || !same(Object.keys(definition).sort(), ["external", "name"])
+        || definition.external !== true || definition.name !== expectedPhysicalName) {
+      invalid(`${name} secret ${source} must bind workload-owned external secret ${expectedPhysicalName}.`);
+    }
   }
 }
 
@@ -924,7 +929,7 @@ function assertVolumes(name, service, workloadId) {
   }
 }
 
-function assertWorkloadService({ serviceDefinition, manifestService, manifest, combined }) {
+function assertWorkloadService({ serviceDefinition, manifestService, manifest, combined, projectName }) {
   const name = manifestService.name;
   if (!IMAGE.test(String(serviceDefinition.image ?? ""))) invalid(`${name} image must be digest-pinned.`);
   if (serviceDefinition.build) invalid(`${name} cannot build inside the platform deployment.`);
@@ -961,7 +966,7 @@ function assertWorkloadService({ serviceDefinition, manifestService, manifest, c
   }
   assertResourceLimits(name, serviceDefinition);
   assertEnvironmentSecrets(name, serviceDefinition);
-  assertSecrets(name, serviceDefinition, manifest, combined);
+  assertSecrets(name, serviceDefinition, manifest, combined, projectName);
   assertVolumes(name, serviceDefinition, manifest.id);
   const networks = serviceNetworks(serviceDefinition);
   if (networks.size === 0) invalid(`${name} must declare networks.`);
@@ -1090,7 +1095,13 @@ export function validateRenderedWorkloads({ core, combined, lock }) {
   for (const [name, item] of declared) {
     const rendered = combined.services?.[name];
     if (!rendered) invalid(`Rendered service ${name} is missing.`);
-    assertWorkloadService({ serviceDefinition: rendered, manifestService: item.service, manifest: item.workload, combined });
+    assertWorkloadService({
+      serviceDefinition: rendered,
+      manifestService: item.service,
+      manifest: item.workload,
+      combined,
+      projectName: lock.projectName,
+    });
     const brokerUse = assertBrokerEnvironment(name, rendered, item.workload, item.service);
     if (brokerUse.usesRedis) redisUsers.add(item.workload.id);
     if (brokerUse.usesNats) natsUsers.add(`${item.workload.id}/${item.service.name}`);

@@ -74,11 +74,15 @@ function combinedFixture() {
       },
     },
     networks: { platform_routing: { internal: true }, example_app_ingress: { internal: true }, example_app_egress: { internal: false, enable_ipv6: false } },
-    secrets: { "example-app-database-url": { external: true } },
+    secrets: { "example-app-database-url": { external: true, name: "fixture_example-app-database-url" } },
   };
 }
 
-const lock = { workloads: [manifest], brokerPolicySha256: brokerPolicySha256([manifest]) };
+const lock = {
+  projectName: "fixture",
+  workloads: [manifest],
+  brokerPolicySha256: brokerPolicySha256([manifest]),
+};
 let passed = 0;
 function test(name, fn) {
   fn();
@@ -203,10 +207,16 @@ test("literal secret environment is rejected", () => {
   combined.services["example-app-web"].environment.DATABASE_URL = "postgres://user:password@postgres/db";
   assert.throws(() => validateRenderedWorkloads({ core, combined, lock }), /sensitive environment/);
 });
-test("file-backed secret must be external", () => {
-  const combined = combinedFixture();
-  combined.secrets["example-app-database-url"] = { file: "/tmp/secret" };
-  assert.throws(() => validateRenderedWorkloads({ core, combined, lock }), /must be external/);
+test("secrets must bind workload-owned external physical names", () => {
+  for (const definition of [
+    { file: "/tmp/secret" },
+    { external: true },
+    { external: true, name: "foreign_database_url" },
+  ]) {
+    const combined = combinedFixture();
+    combined.secrets["example-app-database-url"] = definition;
+    assert.throws(() => validateRenderedWorkloads({ core, combined, lock }), /must bind workload-owned external secret/);
+  }
 });
 test("file-backed configs and workload config grants are rejected after render", () => {
   const fileBacked = combinedFixture();
@@ -341,6 +351,7 @@ test("platform service can join only its assigned workload zone", () => {
 test("deployment-private activation state has no non-router writable mount", () => {
   const privateLock = "/deployment-private/hosted-workloads.lock.json";
   const lockWithActivation = {
+    projectName: "fixture",
     workloads: [manifest],
     activationLockPath: privateLock,
     snapshotRoot: "/deployment-private/snapshots",
@@ -576,7 +587,7 @@ test("legacy hosted workload locks fail closed", () => {
 test("raw policy receipt requires the exact current control set", () => {
   const rawPolicyReceipt = {
     policyVersion: "hosted-raw-v1",
-    controls: ["bind-owned-volumes", "deny-api-socket", "deny-device-access", "deny-env-file", "deny-extends", "deny-file-configs", "deny-gpu-access", "deny-include", "deny-lifecycle-hooks", "deny-local-volume-options", "deny-providers", "deny-runtime-overrides", "deny-scaling", "deny-stop-grace-overrides", "deny-supplemental-groups", "deny-volumes-from"],
+    controls: ["bind-owned-secret-aliases", "bind-owned-volumes", "deny-api-socket", "deny-device-access", "deny-env-file", "deny-extends", "deny-file-configs", "deny-gpu-access", "deny-include", "deny-lifecycle-hooks", "deny-local-volume-options", "deny-providers", "deny-runtime-overrides", "deny-scaling", "deny-stop-grace-overrides", "deny-supplemental-groups", "deny-volumes-from"],
     workloadContentSha256: "a".repeat(64),
     workloads: [{
       workloadId: "example-app",
@@ -598,12 +609,12 @@ test("raw policy receipt requires the exact current control set", () => {
     rawPolicyWorkloadContentSha256: "a".repeat(64),
     rawPolicyReceipt,
     rawPolicySha256: crypto.createHash("sha256").update(JSON.stringify(stable(rawPolicyReceipt))).digest("hex"),
-    rawPolicyControls: ["bind-owned-volumes", "deny-api-socket", "deny-device-access", "deny-env-file", "deny-extends", "deny-file-configs", "deny-gpu-access", "deny-include", "deny-lifecycle-hooks", "deny-local-volume-options", "deny-providers", "deny-runtime-overrides", "deny-scaling", "deny-stop-grace-overrides", "deny-supplemental-groups", "deny-volumes-from"],
+    rawPolicyControls: ["bind-owned-secret-aliases", "bind-owned-volumes", "deny-api-socket", "deny-device-access", "deny-env-file", "deny-extends", "deny-file-configs", "deny-gpu-access", "deny-include", "deny-lifecycle-hooks", "deny-local-volume-options", "deny-providers", "deny-runtime-overrides", "deny-scaling", "deny-stop-grace-overrides", "deny-supplemental-groups", "deny-volumes-from"],
   };
   assert.doesNotThrow(() => verifyRawPolicyReceipt(receipt));
   receipt.rawPolicyControls = ["deny-include"];
   assert.throws(() => verifyRawPolicyReceipt(receipt), /raw source policy receipt/);
-  receipt.rawPolicyControls = ["bind-owned-volumes", "deny-api-socket", "deny-device-access", "deny-env-file", "deny-extends", "deny-file-configs", "deny-gpu-access", "deny-include", "deny-lifecycle-hooks", "deny-local-volume-options", "deny-providers", "deny-runtime-overrides", "deny-scaling", "deny-stop-grace-overrides", "deny-supplemental-groups", "deny-volumes-from"];
+  receipt.rawPolicyControls = ["bind-owned-secret-aliases", "bind-owned-volumes", "deny-api-socket", "deny-device-access", "deny-env-file", "deny-extends", "deny-file-configs", "deny-gpu-access", "deny-include", "deny-lifecycle-hooks", "deny-local-volume-options", "deny-providers", "deny-runtime-overrides", "deny-scaling", "deny-stop-grace-overrides", "deny-supplemental-groups", "deny-volumes-from"];
   receipt.rawPolicySha256 = "b".repeat(64);
   assert.throws(() => verifyRawPolicyReceipt(receipt), /raw source policy receipt/);
   receipt.rawPolicyReceipt.workloads[0].composeSha256 = "d".repeat(64);

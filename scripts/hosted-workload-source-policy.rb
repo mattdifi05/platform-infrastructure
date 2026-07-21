@@ -8,7 +8,7 @@ require "psych"
 
 module HostedWorkloadSourcePolicy
   VERSION = "hosted-raw-v1"
-  CONTROLS = %w[bind-owned-volumes deny-api-socket deny-device-access deny-env-file deny-extends deny-file-configs deny-gpu-access deny-include deny-lifecycle-hooks deny-local-volume-options deny-providers deny-runtime-overrides deny-scaling deny-stop-grace-overrides deny-supplemental-groups deny-volumes-from].freeze
+  CONTROLS = %w[bind-owned-secret-aliases bind-owned-volumes deny-api-socket deny-device-access deny-env-file deny-extends deny-file-configs deny-gpu-access deny-include deny-lifecycle-hooks deny-local-volume-options deny-providers deny-runtime-overrides deny-scaling deny-stop-grace-overrides deny-supplemental-groups deny-volumes-from].freeze
   MAX_COMPOSE_BYTES = 1_048_576
   STANDARD_TAG_PREFIX = "tag:yaml.org,2002:"
 
@@ -83,6 +83,16 @@ module HostedWorkloadSourcePolicy
     fail!("#{label} configs must be a mapping.") if !configs.nil? && !configs.is_a?(Hash)
     (configs || {}).each do |name, definition|
       fail!("#{label} config #{name} cannot use a file source.") if definition.is_a?(Hash) && definition.key?("file")
+    end
+    secrets = model["secrets"]
+    fail!("#{label} secrets must be a mapping.") if !secrets.nil? && !secrets.is_a?(Hash)
+    (secrets || {}).each do |name, definition|
+      next unless workload_id
+      fail!("#{label} secret #{name} is not declared by the workload manifest.") unless declared_secrets.include?(name)
+      expected_name = "#{project_name}_#{name}"
+      unless definition.is_a?(Hash) && definition == { "external" => true, "name" => expected_name }
+        fail!("#{label} secret #{name} must bind workload-owned external secret #{expected_name}.")
+      end
     end
     volumes = model["volumes"]
     fail!("#{label} volumes must be a mapping.") if !volumes.nil? && !volumes.is_a?(Hash)

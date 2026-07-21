@@ -149,6 +149,25 @@ class HostedWorkloadSourcePolicyTest < Minitest::Test
     end
   end
 
+  def test_binds_external_secrets_to_workload_owned_physical_names
+    valid = {
+      "secrets" => { "example-app-api-key" => { "external" => true, "name" => "fixture_example-app-api-key" } },
+      "services" => { "example-app-web" => { "secrets" => ["example-app-api-key"] } }
+    }
+    assert HostedWorkloadSourcePolicy.validate_source_model(
+      valid, "fixture", workload_id: "example-app", project_name: "fixture", declared_secrets: ["example-app-api-key"]
+    )
+    [{ "external" => true }, { "external" => true, "name" => "foreign_key" }, { "file" => "/tmp/key" }].each do |definition|
+      model = { "secrets" => { "example-app-api-key" => definition }, "services" => { "example-app-web" => {} } }
+      error = assert_raises(ArgumentError) do
+        HostedWorkloadSourcePolicy.validate_source_model(
+          model, "fixture", workload_id: "example-app", project_name: "fixture", declared_secrets: ["example-app-api-key"]
+        )
+      end
+      assert_match(/must bind workload-owned external secret/, error.message)
+    end
+  end
+
   def test_rejects_compose_api_socket
     model = parse("services:\n  app:\n    use_api_socket: true\n")
     error = assert_raises(ArgumentError) do
