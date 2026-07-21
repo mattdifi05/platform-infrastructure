@@ -80,3 +80,61 @@ test("large sparse hashing stays within a bounded child-process RSS", () => {
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("rejects a file that grows while it is being hashed", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bounded-hash-growth-"));
+  try {
+    const filePath = path.join(root, "growing.dump");
+    fs.writeFileSync(filePath, Buffer.alloc(8192, 1));
+    let changed = false;
+    assert.throws(() => sha256FileBounded(filePath, {
+      chunkBytes: 1024,
+      onChunk() {
+        if (!changed) {
+          changed = true;
+          fs.appendFileSync(filePath, Buffer.from([2]));
+        }
+      },
+    }), /changed while hashing/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("rejects a file that is truncated while it is being hashed", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bounded-hash-truncate-"));
+  try {
+    const filePath = path.join(root, "truncated.dump");
+    fs.writeFileSync(filePath, Buffer.alloc(8192, 1));
+    let changed = false;
+    assert.throws(() => sha256FileBounded(filePath, {
+      chunkBytes: 1024,
+      onChunk() {
+        if (!changed) {
+          changed = true;
+          fs.truncateSync(filePath, 1);
+        }
+      },
+    }), /truncated while hashing/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("propagates read errors and closes the opened descriptor", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bounded-hash-read-error-"));
+  try {
+    const filePath = path.join(root, "unreadable.dump");
+    fs.writeFileSync(filePath, Buffer.alloc(4096, 1));
+    assert.throws(() => sha256FileBounded(filePath, {
+      readChunk() {
+        const error = new Error("synthetic read failure");
+        error.code = "EIO";
+        throw error;
+      },
+    }), /synthetic read failure/);
+    fs.renameSync(filePath, `${filePath}.closed`);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

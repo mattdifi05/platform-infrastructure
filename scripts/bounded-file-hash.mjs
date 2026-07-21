@@ -33,6 +33,10 @@ export function sha256FileBounded(filePath, options = {}) {
   const chunkBytes = positiveBound(options.chunkBytes ?? DEFAULT_CHUNK_BYTES, "chunkBytes");
   const startedAt = Date.now();
   const signal = options.signal;
+  const readChunk = options.readChunk ?? fs.readSync;
+  const onChunk = options.onChunk;
+  if (typeof readChunk !== "function") throw new Error("readChunk must be a function.");
+  if (onChunk !== undefined && typeof onChunk !== "function") throw new Error("onChunk must be a function.");
   if (signal?.aborted) throw abortError(filePath);
 
   const pathStat = fs.lstatSync(filePath);
@@ -63,13 +67,14 @@ export function sha256FileBounded(filePath, options = {}) {
         throw new Error(`Hashing deadline exceeded for ${filePath}.`);
       }
       const remaining = before.size - bytesReadTotal;
-      const bytesRead = fs.readSync(descriptor, buffer, 0, Math.min(buffer.length, remaining), null);
+      const bytesRead = readChunk(descriptor, buffer, 0, Math.min(buffer.length, remaining), null);
       if (bytesRead === 0) throw new Error(`File was truncated while hashing: ${filePath}`);
       bytesReadTotal += bytesRead;
       if (bytesReadTotal > maxBytes) {
         throw new Error(`File exceeds hash size limit while reading: ${filePath}`);
       }
       hash.update(buffer.subarray(0, bytesRead));
+      onChunk?.({ bytesRead, bytesReadTotal, expectedSizeBytes: before.size });
     }
 
     const after = fs.fstatSync(descriptor);
