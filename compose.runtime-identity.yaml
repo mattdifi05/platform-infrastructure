@@ -1,0 +1,64 @@
+# Loaded by compose-vps.sh only when the complete approved runtime identity is
+# supplied. External workload services must project the same six labels; the
+# exact runtime fingerprint rejects any service without them.
+x-platform-runtime-labels: &platform_runtime_labels
+  com.platform.runtime.candidate-id: ${PLATFORM_RUNTIME_CANDIDATE_ID:?Set the approved candidate ID}
+  com.platform.runtime.commit: ${PLATFORM_RUNTIME_COMMIT:?Set the approved candidate commit}
+  com.platform.runtime.tree: ${PLATFORM_RUNTIME_TREE:?Set the approved candidate tree}
+  com.platform.runtime.deployment-id: ${PLATFORM_RUNTIME_DEPLOYMENT_ID:?Set the approved deployment ID}
+  com.platform.runtime.render-sha256: ${PLATFORM_RUNTIME_RENDER_SHA256:?Set the approved Compose render SHA256}
+  com.platform.runtime.workload-lock-sha256: ${PLATFORM_RUNTIME_WORKLOAD_LOCK_SHA256:?Set the approved workload lock SHA256}
+
+services:
+  alertmanager:
+    labels: *platform_runtime_labels
+  backup-scheduler:
+    labels: *platform_runtime_labels
+  broker-auth-bootstrap:
+    labels: *platform_runtime_labels
+  cadvisor:
+    labels: *platform_runtime_labels
+  control-center:
+    labels: *platform_runtime_labels
+  docker-operation-gateway:
+    labels: *platform_runtime_labels
+  grafana:
+    labels: *platform_runtime_labels
+  keycloak:
+    labels: *platform_runtime_labels
+  local-dns:
+    labels: *platform_runtime_labels
+  local-registry:
+    labels: *platform_runtime_labels
+  loki:
+    labels: *platform_runtime_labels
+  mariadb:
+    labels: *platform_runtime_labels
+  minio:
+    labels: *platform_runtime_labels
+  nats:
+    labels: *platform_runtime_labels
+  node-exporter:
+    labels: *platform_runtime_labels
+  php-apache:
+    labels: *platform_runtime_labels
+  phpmyadmin:
+    labels: *platform_runtime_labels
+  phppgadmin:
+    labels: *platform_runtime_labels
+  platform-alert-dispatcher:
+    labels: *platform_runtime_labels
+  postgres:
+    labels: *platform_runtime_labels
+  project-router:
+    labels: *platform_runtime_labels
+  prometheus:
+    labels: *platform_runtime_labels
+  promtail:
+    labels: *platform_runtime_labels
+  redis:
+    labels: *platform_runtime_labels
+  traefik:
+    labels: *platform_runtime_labels
+  waf:
+    labels: *platform_runtime_labels

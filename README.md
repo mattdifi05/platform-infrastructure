@@ -113,6 +113,14 @@ SHA-256 di ogni input. Non crea database, non applica migrazioni e non avvia
 container. Il deploy usa soltanto un lock `verified`; se un file cambia, il
 render fallisce chiuso finche' il lock non viene rigenerato e approvato.
 
+Il deploy approvato proietta su ogni container core una tupla runtime completa
+tramite `compose.runtime-identity.yaml`: ID candidato FG-048, commit, tree,
+deployment ID, digest del render canonico e digest del workload lock. I sei
+valori devono essere presenti insieme e in formato esatto; un workload esterno
+deve proiettare le stesse label sui propri servizi. Il fingerprint rifiuta un
+servizio senza label, un container precedente all'evento di deploy o una tupla
+mista.
+
 Ogni route del manifest dichiara `slug`, host DNS canonico esatto, eventuali
 alias e porta. Il validatore assegna route e alias a un solo workload, rifiuta
 collisioni globali di slug, host e upstream (incluse le superfici riservate del
@@ -531,6 +539,15 @@ configurati puoi aggiungere `--requireEmailDelivery` o
 `audit-log-evidence.sh` scrive un report in `reports/audit-logs/` che verifica audit amministrativo, outbox durevole, dead-letter, alert Prometheus e dashboard Grafana. Eventuali audit table dei workload ospitati restano fuori dai gate platform.
 
 `retention-evidence.sh` scrive un report in `reports/retention/` che verifica logging Docker bounded, retention Loki/Promtail, retention TSDB Prometheus, datasource/pannelli Grafana e, quando il sorgente runtime e' montato, anche log JSON strutturati e redazione dei campi sensibili. In CI resta infra-only se il sorgente esterno non e' presente.
+
+`runtime-fingerprint` consuma un manifest `platform.runtime-target/v1` con la
+`candidate` `platform.release-candidate/v1` prodotta da FG-048, deployment ID e
+timestamp, digest aggregato dei config hash e lista ordinata
+`service/configHash/imageRef/imageId`. Il file deve essere regolare, non
+scrivibile da gruppo/altri e accompagnato dal suo SHA-256 approvato. Il runtime
+PASS confronta ref e ID immagine esatti, config hash Compose, commit/tree,
+candidate/render/workload lock label, evento di deploy, servizio, progetto e
+salute; un digest sintatticamente valido ma diverso non e' accettato.
 
 `load-benchmark.sh` senza `--url` misura il Control Center dentro la rete Docker
 ed e' utile per regressioni locali della piattaforma. Per il go-live devi usare

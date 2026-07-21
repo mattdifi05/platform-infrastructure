@@ -5158,26 +5158,130 @@ async function functionalHealthCheck(options = {}) {
   log("Platform functional health passed.");
 }
 
-function parseComposeServiceHashes(raw) {
-  const services = String(raw ?? "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean).map((line) => {
-    const match = line.match(/^([^\s]+)\s+([a-f0-9]{64})$/i);
-    if (!match) fail(`Invalid Docker Compose service hash line: ${line}`);
-    return { service: match[1], configHash: match[2].toLowerCase() };
-  });
-  if (!services.length) fail("Docker Compose returned no service hashes.");
-  return services;
+function readStableRuntimeIdentityFile(filePath, expectedSha256, label) {
+  const expectedHash = String(expectedSha256 ?? "").trim().toLowerCase();
+  if (!/^[a-f0-9]{64}$/.test(expectedHash)) fail(`${label} requires an independently supplied SHA256.`);
+  const noFollow = fs.constants.O_NOFOLLOW ?? 0;
+  let descriptor;
+  try {
+    descriptor = fs.openSync(filePath, fs.constants.O_RDONLY | noFollow);
+    const before = fs.fstatSync(descriptor);
+    if (!before.isFile() || before.size < 2 || before.size > 8 * 1024 * 1024 || (before.mode & 0o022) !== 0) {
+      fail(`${label} must be a bounded regular file that is not group/world writable.`);
+    }
+    const bytes = fs.readFileSync(descriptor);
+    const after = fs.fstatSync(descriptor);
+    if (before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size || before.mtimeMs !== after.mtimeMs) {
+      fail(`${label} changed while it was being read.`);
+    }
+    const observedHash = crypto.createHash("sha256").update(bytes).digest("hex");
+    if (observedHash !== expectedHash) fail(`${label} SHA256 does not match the approved receipt.`);
+    return { bytes, sha256: observedHash };
+  } catch (error) {
+    fail(`${label} could not be read safely: ${String(error?.message ?? error)}`);
+  } finally {
+    if (descriptor !== undefined) fs.closeSync(descriptor);
+  }
+}
+
+function sha256StableRuntimeFile(filePath, label) {
+  const noFollow = fs.constants.O_NOFOLLOW ?? 0;
+  let descriptor;
+  try {
+    descriptor = fs.openSync(filePath, fs.constants.O_RDONLY | noFollow);
+    const before = fs.fstatSync(descriptor);
+    if (!before.isFile() || before.size < 2 || before.size > 64 * 1024 * 1024) fail(`${label} is not a bounded regular file.`);
+    const bytes = fs.readFileSync(descriptor);
+    const after = fs.fstatSync(descriptor);
+    if (before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size || before.mtimeMs !== after.mtimeMs) {
+      fail(`${label} changed while it was being read.`);
+    }
+    return crypto.createHash("sha256").update(bytes).digest("hex");
+  } catch (error) {
+    fail(`${label} could not be read safely: ${String(error?.message ?? error)}`);
+  } finally {
+    if (descriptor !== undefined) fs.closeSync(descriptor);
+  }
+}
+
+function runtimeTargetManifest(options = {}) {
+  const manifestPath = path.resolve(options.targetManifest ?? argv.targetManifest ?? process.env.PLATFORM_RUNTIME_TARGET_MANIFEST ?? "");
+  const expectedSha256 = options.targetManifestSha256 ?? argv.targetManifestSha256 ?? process.env.PLATFORM_RUNTIME_TARGET_MANIFEST_SHA256;
+  if (!String(options.targetManifest ?? argv.targetManifest ?? process.env.PLATFORM_RUNTIME_TARGET_MANIFEST ?? "").trim()) {
+    fail("Runtime fingerprint requires --targetManifest from the approved release receipt.");
+  }
+  const stable = readStableRuntimeIdentityFile(manifestPath, expectedSha256, "Runtime target manifest");
+  let manifest;
+  try {
+    manifest = JSON.parse(stable.bytes.toString("utf8"));
+  } catch {
+    fail("Runtime target manifest is not valid JSON.");
+  }
+  if (manifest?.schema !== "platform.runtime-target/v1" || !manifest?.candidate || !manifest?.deployment || !Array.isArray(manifest?.services)) {
+    fail("Runtime target manifest does not use platform.runtime-target/v1.");
+  }
+  return {
+    path: manifestPath,
+    sha256: stable.sha256,
+    expected: {
+      candidate: manifest.candidate,
+      deploymentId: manifest.deployment.id,
+      deploymentStartedAt: manifest.deployment.startedAt,
+      serviceConfigSha256: manifest.serviceConfigSha256,
+      services: manifest.services,
+    },
+  };
+}
+
+function runtimeWorkloadLockPath(envValues) {
+  const configured = process.env.HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE
+    ?? envValues.HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE
+    ?? process.env.HOSTED_WORKLOAD_LOCK
+    ?? envValues.HOSTED_WORKLOAD_LOCK
+    ?? "config/no-hosted-workloads.lock.json";
+  return path.resolve(infraRoot, configured);
+}
+
+function observedRuntimeLabel(containers, field) {
+  const values = new Set(containers.map((container) => String(container?.[field] ?? "").trim()).filter(Boolean));
+  return values.size === 1 ? [...values][0] : "";
 }
 
 function inspectComposeRuntime(project) {
   const idsResult = run("docker", ["ps", "-aq", "--filter", `label=com.docker.compose.project=${project}`], { allowFailure: true, capture: true });
   if (idsResult.status !== 0) fail(`Unable to enumerate runtime containers for Compose project ${project}.`);
   const ids = String(idsResult.stdout ?? "").split(/\s+/).map((item) => item.trim()).filter(Boolean);
-  const format = '{{.Name}}|{{.Image}}|{{.Config.Image}}|{{index .Config.Labels "com.docker.compose.service"}}|{{index .Config.Labels "com.docker.compose.project"}}|{{index .Config.Labels "com.docker.compose.config-hash"}}|{{.State.Status}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}';
+  const format = '{{.Name}}|{{.Image}}|{{.Config.Image}}|{{index .Config.Labels "com.docker.compose.service"}}|{{index .Config.Labels "com.docker.compose.project"}}|{{index .Config.Labels "com.docker.compose.config-hash"}}|{{.State.Status}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}|{{.State.ExitCode}}|{{.State.StartedAt}}|{{json .Config.Labels}}';
   return ids.map((id) => {
     const result = run("docker", ["inspect", "--format", format, id], { allowFailure: true, capture: true });
     if (result.status !== 0) fail(`Unable to inspect runtime container ${id}.`);
-    const [name, imageId, imageRef, service, containerProject, configHash, state, health] = String(result.stdout ?? "").trim().split("|");
-    return { name, imageId, imageRef, service, project: containerProject, configHash, state, health };
+    const parts = String(result.stdout ?? "").trim().split("|");
+    if (parts.length < 11) fail(`Runtime container ${id} returned an incomplete identity record.`);
+    const [name, imageId, imageRef, service, containerProject, configHash, state, health, exitCode, startedAt] = parts;
+    let labels;
+    try {
+      labels = JSON.parse(parts.slice(10).join("|"));
+    } catch {
+      fail(`Runtime container ${id} returned invalid label metadata.`);
+    }
+    return {
+      name,
+      imageId,
+      imageRef,
+      service,
+      project: containerProject,
+      configHash,
+      state,
+      health,
+      exitCode: Number(exitCode),
+      startedAt,
+      runtimeCandidateId: labels?.["com.platform.runtime.candidate-id"] ?? "",
+      runtimeCommit: labels?.["com.platform.runtime.commit"] ?? "",
+      runtimeTree: labels?.["com.platform.runtime.tree"] ?? "",
+      runtimeDeploymentId: labels?.["com.platform.runtime.deployment-id"] ?? "",
+      runtimeRenderSha256: labels?.["com.platform.runtime.render-sha256"] ?? "",
+      runtimeWorkloadLockSha256: labels?.["com.platform.runtime.workload-lock-sha256"] ?? "",
+    };
   });
 }
 
@@ -5188,26 +5292,31 @@ async function runtimeFingerprint(options = {}) {
   const project = String(options.project ?? argv.project ?? envValues.COMPOSE_PROJECT_NAME ?? process.env.COMPOSE_PROJECT_NAME ?? "platform_infra_vps").trim();
   const git = gitEvidence();
   if (!git.commit) fail("Unable to resolve the candidate Git commit.");
-  const candidateEvidence = currentCandidateIdentityEvidence({
+  const target = runtimeTargetManifest(options);
+  const noDocker = noDockerMode(options);
+  const checkoutTree = String(git.tree ?? "").trim().toLowerCase();
+  const workloadLock = runtimeWorkloadLockPath(envValues);
+  const workloadLockSha256 = fs.existsSync(workloadLock) ? sha256StableRuntimeFile(workloadLock, "Runtime workload lock") : "";
+  const candidateEvidence = noDocker ? { candidate: null, error: "runtime-not-inspected" } : currentCandidateIdentityEvidence({
     envFile,
     projectName: project,
     repository: options.repository ?? options.repo ?? argv.repository ?? argv.repo,
   });
-  const hashResult = run("bash", [path.join(scriptDir, "compose-vps.sh"), "config", "--hash", "*"], {
-    allowFailure: true,
-    capture: true,
-    env: { COMPOSE_ENV_FILE: envFile, COMPOSE_PROJECT_NAME: project, HOSTED_WORKLOAD_ALLOW_RESOLVED: "0" },
-  });
-  if (hashResult.status !== 0) fail(`Unable to calculate Docker Compose service hashes: ${String(hashResult.stderr ?? "").trim()}`);
-  const services = parseComposeServiceHashes(hashResult.stdout);
-  const containers = noDockerMode(options) ? [] : inspectComposeRuntime(project);
-  const evaluation = noDockerMode(options)
-    ? { status: "static-policy", issues: ["runtime-not-inspected"], expectedServiceCount: services.length, actualContainerCount: 0, fingerprint: null, expected: { commit: git.commit, project, services }, actual: { commit: git.commit, clean: git.dirty === false, project, containers: [] } }
-    : evaluateRuntimeFingerprint(
-      { commit: options.expectedCommit ?? argv.expectedCommit ?? git.commit, project, services },
-      { commit: git.commit, clean: git.dirty === false, project, containers },
-    );
-  const candidateEndEvidence = currentCandidateIdentityEvidence({
+  const containers = noDocker ? [] : inspectComposeRuntime(project);
+  const actual = {
+    checkoutCommit: git.commit,
+    checkoutTree,
+    clean: git.dirty === false,
+    project,
+    workloadLockSha256,
+    renderSha256: observedRuntimeLabel(containers, "runtimeRenderSha256"),
+    containers,
+  };
+  const exactEvaluation = evaluateRuntimeFingerprint(target.expected, actual);
+  const evaluation = noDocker
+    ? { ...exactEvaluation, status: "static-policy", issues: ["runtime-not-inspected", ...exactEvaluation.issues], fingerprint: null }
+    : exactEvaluation;
+  const candidateEndEvidence = noDocker ? candidateEvidence : currentCandidateIdentityEvidence({
     envFile,
     projectName: project,
     repository: options.repository ?? options.repo ?? argv.repository ?? argv.repo,
@@ -5217,21 +5326,35 @@ async function runtimeFingerprint(options = {}) {
     && candidateEndEvidence.candidate?.trusted
     && candidateIdentityMatches(candidateEvidence.candidate, candidateEndEvidence.candidate),
   );
-  if (!candidateStable || candidateEvidence.error || candidateEndEvidence.error) {
+  const candidateTargetMatches = Boolean(
+    candidateEvidence.candidate?.trusted
+    && candidateIdentityMatches(candidateEvidence.candidate, target.expected.candidate),
+  );
+  if (!noDocker && (!candidateStable || !candidateTargetMatches || candidateEvidence.error || candidateEndEvidence.error)) {
     evaluation.issues.push(`candidate-identity:${candidateEvidence.error ?? candidateEndEvidence.error ?? "candidate-changed-or-worktree-not-clean"}`);
-    if (!noDockerMode(options)) evaluation.status = "failed";
+    evaluation.status = "failed";
   }
   const payload = {
     generatedAt: new Date().toISOString(),
-    mode: noDockerMode(options) ? "static-policy" : "runtime-exact",
+    mode: noDocker ? "static-policy" : "runtime-exact",
     status: evaluation.status,
     scope: "platform-infrastructure",
-    git: { commit: git.commit, tree: git.tree, repository: git.repository, branch: git.branch, clean: git.dirty === false },
+    git: { commit: git.commit, tree: checkoutTree, repository: git.repository, branch: git.branch, clean: git.dirty === false },
     candidate: candidateEvidence.candidate,
     candidateEnd: candidateEndEvidence.candidate,
     candidateStable,
+    candidateTargetMatches,
     candidateError: candidateEvidence.error,
     envFile: path.relative(infraRoot, envFile).replaceAll("\\", "/"),
+    targetManifest: {
+      path: path.relative(infraRoot, target.path).replaceAll("\\", "/"),
+      sha256: target.sha256,
+      source: "FG-048 platform.release-candidate/v1 receipt plus deployment image expectations",
+    },
+    workloadLock: {
+      path: path.relative(infraRoot, workloadLock).replaceAll("\\", "/"),
+      sha256: workloadLockSha256 || null,
+    },
     ...evaluation,
   };
   const stamp = reportTimestamp();
@@ -5242,7 +5365,10 @@ async function runtimeFingerprint(options = {}) {
     `Status: ${payload.status}`,
     `Mode: ${payload.mode}`,
     `Commit: ${payload.git.commit}`,
+    `Tree: ${payload.git.tree}`,
     `Worktree clean: ${payload.git.clean}`,
+    `Deployment ID: ${payload.expected.candidate ? payload.expected.deploymentId : "missing"}`,
+    `Target manifest SHA256: ${payload.targetManifest.sha256}`,
     `Compose project: ${project}`,
     `Candidate: ${payload.candidate?.id ?? "not-bound"}`,
     `Expected services: ${payload.expectedServiceCount}`,
@@ -5254,8 +5380,8 @@ async function runtimeFingerprint(options = {}) {
     ...(payload.issues.length ? payload.issues.map((issue) => `- ${issue}`) : ["- none"]),
   ]);
   log(`Runtime fingerprint reports written to ${jsonPath} and ${markdownPath}`);
-  if (!noDockerMode(options) && payload.status !== "passed") fail(`Runtime fingerprint mismatch. Report: ${jsonPath}`);
-  if (!noDockerMode(options)) log("Platform runtime fingerprint passed.");
+  if (!noDocker && payload.status !== "passed") fail(`Runtime fingerprint mismatch. Report: ${jsonPath}`);
+  if (!noDocker) log("Platform runtime fingerprint passed.");
 }
 
 function addRateLimitEvidenceCheck(checks, issues, { name, category, status, detail, required = true, file = null }) {

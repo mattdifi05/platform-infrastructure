@@ -79,6 +79,32 @@ if [[ -n "$workload_lock" ]]; then
   done
 fi
 
+runtime_identity_variables=(
+  PLATFORM_RUNTIME_CANDIDATE_ID
+  PLATFORM_RUNTIME_COMMIT
+  PLATFORM_RUNTIME_TREE
+  PLATFORM_RUNTIME_DEPLOYMENT_ID
+  PLATFORM_RUNTIME_RENDER_SHA256
+  PLATFORM_RUNTIME_WORKLOAD_LOCK_SHA256
+)
+runtime_identity_count=0
+for runtime_identity_variable in "${runtime_identity_variables[@]}"; do
+  [[ -z "${!runtime_identity_variable:-}" ]] || ((runtime_identity_count += 1))
+done
+if (( runtime_identity_count != 0 && runtime_identity_count != ${#runtime_identity_variables[@]} )); then
+  echo "Runtime identity labels require the complete approved candidate/deployment tuple." >&2
+  exit 1
+fi
+if (( runtime_identity_count == ${#runtime_identity_variables[@]} )); then
+  [[ "$PLATFORM_RUNTIME_CANDIDATE_ID" =~ ^[a-f0-9]{64}$ ]] || { echo "Invalid runtime candidate ID." >&2; exit 1; }
+  [[ "$PLATFORM_RUNTIME_COMMIT" =~ ^([a-f0-9]{40}|[a-f0-9]{64})$ ]] || { echo "Invalid runtime commit." >&2; exit 1; }
+  [[ "$PLATFORM_RUNTIME_TREE" =~ ^([a-f0-9]{40}|[a-f0-9]{64})$ ]] || { echo "Invalid runtime tree." >&2; exit 1; }
+  [[ "$PLATFORM_RUNTIME_DEPLOYMENT_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$ ]] || { echo "Invalid runtime deployment ID." >&2; exit 1; }
+  [[ "$PLATFORM_RUNTIME_RENDER_SHA256" =~ ^[a-f0-9]{64}$ ]] || { echo "Invalid runtime render SHA256." >&2; exit 1; }
+  [[ "$PLATFORM_RUNTIME_WORKLOAD_LOCK_SHA256" =~ ^[a-f0-9]{64}$ ]] || { echo "Invalid runtime workload lock SHA256." >&2; exit 1; }
+  compose+=(-f compose.runtime-identity.yaml)
+fi
+
 if [[ "${1:-}" == "up" ]]; then
   "${compose[@]}" --profile backup run --rm --no-deps broker-auth-bootstrap
 fi

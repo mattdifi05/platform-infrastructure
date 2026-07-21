@@ -379,16 +379,40 @@ Runtime candidate identity is a separate fail-closed gate:
 
 ```sh
 sh ./scripts/functional-health-check.sh
-sh ./scripts/infra-ops.sh runtime-fingerprint --envFile .env --project platform_infra_vps --repo OWNER/REPO
+sh ./scripts/infra-ops.sh runtime-fingerprint \
+  --envFile .env \
+  --project platform_infra_vps \
+  --targetManifest reports/deployments/approved-runtime-target.json \
+  --targetManifestSha256 "$APPROVED_RUNTIME_TARGET_SHA256"
 ```
 
-The runtime fingerprint passes only when the worktree is clean and every
-Compose service config hash matches exactly one running container. Its
-candidate identity binds repository, commit, Git tree, verified hosted-workload
-lock and canonical Compose render. Release, GitHub, pre-go-live and runtime
-reports must carry that same identity; reports from an earlier or mixed
-candidate are rejected even while still fresh. It reads no container
-environment values.
+The target uses schema `platform.runtime-target/v1`. Its `candidate` is the
+exact FG-048 `platform.release-candidate/v1` receipt; `deployment` contains the
+approved unique `id` and canonical ISO `startedAt`; `serviceConfigSha256` binds
+the sorted service/config-hash set; every `services` item carries exact
+`service`, `configHash`, `imageRef`, `imageId` and optional `expectedState`
+(`running` by default, `completed` only for an approved one-shot). Supply the target SHA256 from
+an independent release receipt, never by hashing the file inside the same gate.
+
+Before Compose convergence, the approved deploy pipeline must export
+`PLATFORM_RUNTIME_CANDIDATE_ID`, `PLATFORM_RUNTIME_COMMIT`,
+`PLATFORM_RUNTIME_TREE`, `PLATFORM_RUNTIME_DEPLOYMENT_ID`,
+`PLATFORM_RUNTIME_RENDER_SHA256` and
+`PLATFORM_RUNTIME_WORKLOAD_LOCK_SHA256` from that target. Do not reconstruct
+these values from the post-deploy checkout or running containers.
+
+`compose-vps.sh` rejects partial or malformed tuples and loads
+`compose.runtime-identity.yaml` after workload overlays. External workload
+services must carry the same six labels. The runtime fingerprint reads only
+selected Docker identity/state fields, not container environment values, and
+passes only for exact images/configuration and containers started no earlier
+than the declared deployment event.
+
+The gate also derives the canonical candidate identity independently at the
+start and end of the runtime inspection. Both observations must remain clean,
+must match each other, and must match the approved target's repository, commit,
+Git tree, hosted-workload lock and canonical Compose render. Reports from an
+earlier, mixed or concurrently changed candidate are rejected.
 
 ## Resilience drills
 
