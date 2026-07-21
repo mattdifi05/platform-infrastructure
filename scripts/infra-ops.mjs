@@ -2737,6 +2737,8 @@ function infraTestingHygiene() {
     "scripts/evidence-bundle-phase.test.mjs",
     "scripts/vps-evidence-request.mjs",
     "scripts/vps-evidence-request.test.mjs",
+    "scripts/pinned-ssh-host-key.mjs",
+    "scripts/pinned-ssh-host-key.test.mjs",
     "scripts/edge-provider-evidence.mjs",
     "scripts/edge-provider-evidence.test.mjs",
   ];
@@ -2762,6 +2764,7 @@ function infraTestingHygiene() {
   run(process.execPath, ["--test", "scripts/evidence-bundle-anchor.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/evidence-bundle-phase.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["scripts/vps-evidence-request.test.mjs"], { cwd: infraRoot });
+  run(process.execPath, ["--test", "scripts/pinned-ssh-host-key.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/edge-provider-evidence.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "platform-alert-dispatcher/server.test.mjs"], { cwd: infraRoot });
   const shellFiles = fs.readdirSync(path.join(infraRoot, "scripts")).filter((name) => name.endsWith(".sh")).sort();
@@ -9331,7 +9334,7 @@ function repoCoverageCategory(filePath) {
     ["dns", /^dns\//],
     ["docker-build", /^docker\/[^/]+\.Dockerfile$/],
     ["operations-script", /^scripts\/.+\.(?:sh|mjs)$/],
-    ["governance-policy", /^governance\/.+\.(?:json|md)$/],
+    ["governance-policy", /^governance\/.+\.(?:json|jsonl|md)$/],
     ["cloudflare-policy", /^cloudflare\/.+\.(?:json|md)$/],
     ["observability", /^(?:alertmanager|grafana|loki|monitoring|platform-alert-dispatcher|prometheus|promtail)\//],
     ["identity", /^keycloak\//],
@@ -9420,6 +9423,7 @@ async function repoCoverageCheck() {
     ["github-actions-run-evidence-verify-remote", /workflow_run:[\s\S]*enterprise-infra[\s\S]*Verify completed enterprise infra run[\s\S]*github-actions-run-evidence[\s\S]*--verifyRemote/],
     ["production-live-evidence-workflow", /workflow_dispatch:[\s\S]*evidence_not_before:[\s\S]*External uptime provider evidence[\s\S]*--providerEvidenceAttestation online[\s\S]*--providerEvidenceSourceDigest[\s\S]*--requireProviderEvidence[\s\S]*Production Cloudflare edge load benchmark[\s\S]*load-benchmark[\s\S]*--expectedEdgeProvider cloudflare[\s\S]*Cloudflare Access admin verify[\s\S]*cloudflare-access-admin[\s\S]*--verifyRemote[\s\S]*evidence-bundle --phase production-live --strict[\s\S]*evidence-bundle-verify --phase production-live[\s\S]*--requireComplete/],
     ["vps-evidence-workflow", /workflow_dispatch:[\s\S]*Run VPS evidence on VPS[\s\S]*vps-evidence-request\.mjs render[\s\S]*Upload VPS evidence reports/],
+    ["pinned-ssh-host-trust", /DEPLOY_SSH_HOST_KEY[\s\S]*pinned-ssh-host-key\.mjs render[\s\S]*StrictHostKeyChecking=yes[\s\S]*UserKnownHostsFile=/],
     ["secret-scan", /Secret scan[\s\S]*secret-scan/],
     ["ha-config-check", /HA configuration check[\s\S]*ha-config-check/],
     ["managed-secrets-preflight", /Managed secrets preflight[\s\S]*managed-secrets-preflight/],

@@ -8,6 +8,7 @@ REMOTE="${DEPLOY_REMOTE:-}"
 REMOTE_DIR="${DEPLOY_REMOTE_DIR:-/opt/platform/platform-infrastructure}"
 SSH_PORT="${DEPLOY_SSH_PORT:-22}"
 SSH_KEY_PATH="${DEPLOY_SSH_KEY_PATH:-$HOME/.ssh/deploy_key}"
+SSH_KNOWN_HOSTS_PATH="${DEPLOY_SSH_KNOWN_HOSTS_PATH:-$HOME/.ssh/known_hosts}"
 BRANCH="${DEPLOY_BRANCH:-main}"
 ENV_FILE="${DEPLOY_ENV_FILE:-.env}"
 PROJECT_NAME="${DEPLOY_PROJECT_NAME:-platform_infra_vps}"
@@ -70,7 +71,21 @@ encode() {
   printf '%s' "$1" | base64 | tr -d '\r\n'
 }
 
-set -- -p "$SSH_PORT" -o StrictHostKeyChecking=accept-new
+node "$SCRIPT_DIR/pinned-ssh-host-key.mjs" verify \
+  --remote "$REMOTE" \
+  --port "$SSH_PORT" \
+  --file "$SSH_KNOWN_HOSTS_PATH" >/dev/null || {
+    echo "Pinned SSH host trust validation failed." >&2
+    exit 1
+  }
+
+set -- -F /dev/null -p "$SSH_PORT" \
+  -o BatchMode=yes \
+  -o IdentitiesOnly=yes \
+  -o StrictHostKeyChecking=yes \
+  -o "UserKnownHostsFile=$SSH_KNOWN_HOSTS_PATH" \
+  -o GlobalKnownHostsFile=/dev/null \
+  -o UpdateHostKeys=no
 if [ -f "$SSH_KEY_PATH" ]; then
   set -- -i "$SSH_KEY_PATH" "$@"
 fi

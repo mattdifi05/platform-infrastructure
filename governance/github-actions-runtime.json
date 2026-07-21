@@ -23,6 +23,10 @@
           "purpose": "Private deploy key used by the VPS deployment job."
         },
         {
+          "name": "DEPLOY_SSH_HOST_KEY",
+          "purpose": "Pinned public SSH host key independently bound to the configured VPS hostname and port."
+        },
+        {
           "name": "EXTERNAL_UPTIME_PROVIDER_EVIDENCE_JSON",
           "purpose": "Provider-exported external uptime evidence JSON used by the live evidence workflow."
         },

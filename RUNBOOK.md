@@ -859,8 +859,8 @@ in `.env` or GitHub workflow logs. Exact deployment reviewer IDs are versioned
 in `governance/github-environments.json`; `--verifyRemote` rejects wrong,
 missing or additional reviewers as well as weaker self-review/wait/branch rules.
 The GitHub Actions runtime check only verifies secret presence and variable
-formats: it expects staging variable `DAST_TARGET`, production secret
-`DEPLOY_SSH_KEY`, production secrets `EXTERNAL_UPTIME_PROVIDER_EVIDENCE_JSON` and `EDGE_PROVIDER_EVIDENCE_JSON`,
+formats: it expects staging variable `DAST_TARGET`, production secrets
+`DEPLOY_SSH_KEY` and `DEPLOY_SSH_HOST_KEY`, production secrets `EXTERNAL_UPTIME_PROVIDER_EVIDENCE_JSON` and `EDGE_PROVIDER_EVIDENCE_JSON`,
 production secret `CLOUDFLARE_API_TOKEN`, and production variables
 `DEPLOY_REMOTE`, `DEPLOY_REMOTE_DIR`, `DEPLOY_SSH_PORT`,
 `VPS_HARDENED_SSH_PORT`, `PUBLIC_API_HEALTH_URL` plus `CLOUDFLARE_ACCOUNT_ID`.
@@ -880,10 +880,14 @@ it gathers external uptime, public Cloudflare load, Cloudflare Access, live
 go/no-go and complete evidence bundle reports without deploying.
 Run `enterprise-vps-evidence` from the same production environment to collect
 VPS bootstrap, hardening and host readiness reports from VPS over SSH. It
-requires `DEPLOY_SSH_KEY`, `DEPLOY_REMOTE`, `DEPLOY_SSH_PORT`,
+requires `DEPLOY_SSH_KEY`, the independently provisioned host-key pin
+`DEPLOY_SSH_HOST_KEY`, `DEPLOY_REMOTE`, `DEPLOY_SSH_PORT`,
 `DEPLOY_REMOTE_DIR` and `VPS_HARDENED_SSH_PORT`; bootstrap/hardening only run
 when the workflow inputs explicitly enable them and `confirm_mutating_vps=true`.
-The request carries the exact `${{ github.sha }}` and locally observed Git tree.
+The host-key pin contains only the SSH algorithm and base64 public key; the
+workflow binds it to the separately configured host and port and uses strict
+single-entry `known_hosts` verification, never trust-on-first-use. The request
+carries the exact `${{ github.sha }}` and locally observed Git tree.
 The remote runner fetches that object, creates an isolated detached worktree and
 rejects commit, tree or clean-state drift before and after collection; it never
 pulls mutable `main`. Before extraction, the workflow validates a returned

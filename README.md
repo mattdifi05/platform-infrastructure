@@ -505,7 +505,7 @@ policy su staging/production. Reviewer mancanti o aggiuntivi fanno fallire la
 verifica.
 La runtime config GitHub Actions e' versionata in
 `governance/github-actions-runtime.json`: `DAST_TARGET`, `DEPLOY_SSH_KEY`,
-`DEPLOY_REMOTE`, `DEPLOY_REMOTE_DIR`, `DEPLOY_SSH_PORT`,
+`DEPLOY_SSH_HOST_KEY`, `DEPLOY_REMOTE`, `DEPLOY_REMOTE_DIR`, `DEPLOY_SSH_PORT`,
 `VPS_HARDENED_SSH_PORT`, `PUBLIC_API_HEALTH_URL`, `CLOUDFLARE_ACCOUNT_ID`,
 `EXTERNAL_UPTIME_PROVIDER_EVIDENCE_JSON`, `EDGE_PROVIDER_EVIDENCE_JSON` e
 `CLOUDFLARE_API_TOKEN` piu' `CLOUDFLARE_ACCESS_ADMIN_MANIFEST_JSON` vengono verificati da
@@ -541,14 +541,18 @@ La workflow manuale `enterprise-live-evidence` gira nell'environment GitHub
 pubblico via Cloudflare, Cloudflare Access `--verifyRemote`, go/no-go live e
 bundle completo.
 La workflow manuale `enterprise-vps-evidence` gira nello stesso environment,
-entra nel VPS con `DEPLOY_SSH_KEY`, `DEPLOY_REMOTE` e `DEPLOY_SSH_PORT`, puo'
+entra nel VPS con `DEPLOY_SSH_KEY`, il pin dedicato `DEPLOY_SSH_HOST_KEY`,
+`DEPLOY_REMOTE` e `DEPLOY_SSH_PORT`, puo'
 applicare bootstrap/hardening solo con conferma esplicita, esegue
 `vps-host-readiness --enforce` sulla porta `VPS_HARDENED_SSH_PORT` e carica i
 report `reports/vps-*` come artifact. La richiesta include `github.sha` e il Git
 tree esatti: sul VPS crea un worktree isolato in detached HEAD, non esegue
 `checkout/pull main`, rifiuta worktree sporchi prima o dopo la raccolta e
 restituisce un receipt che lega commit, tree e SHA-256 dell'archivio. La workflow
-verifica il receipt e l'elenco path prima di estrarre i report.
+verifica il receipt e l'elenco path prima di estrarre i report. Il pin contiene
+soltanto `algoritmo base64-host-key`; hostname e porta arrivano da variabili
+separate e vengono legati in un `known_hosts` a voce singola. Non e' ammesso
+trust-on-first-use.
 Il gate `scripts/infra-ops.sh repo-coverage-check` misura la copertura dei
 file tracciati della repo: ogni file deve rientrare in una categoria
 infrastrutturale e il workflow deve esercitare tutti i gate CI obbligatori.

@@ -280,11 +280,27 @@ jobs:
       - name: Install SSH key
         env:
           DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_SSH_HOST_KEY: ${{ secrets.DEPLOY_SSH_HOST_KEY }}
+          DEPLOY_REMOTE: ${{ vars.DEPLOY_REMOTE }}
+          DEPLOY_SSH_PORT: ${{ vars.DEPLOY_SSH_PORT }}
         run: |
+          umask 077
           test -n "$DEPLOY_SSH_KEY"
+          test -n "$DEPLOY_SSH_HOST_KEY"
+          test -n "$DEPLOY_REMOTE"
+          test -n "$DEPLOY_SSH_PORT"
           install -m 700 -d ~/.ssh
           printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
+          node ./scripts/pinned-ssh-host-key.mjs render \
+            --remote "$DEPLOY_REMOTE" \
+            --port "$DEPLOY_SSH_PORT" \
+            > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+          node ./scripts/pinned-ssh-host-key.mjs verify \
+            --remote "$DEPLOY_REMOTE" \
+            --port "$DEPLOY_SSH_PORT" \
+            --file ~/.ssh/known_hosts
       - name: Deploy to VPS
         env:
           DEPLOY_REMOTE: ${{ vars.DEPLOY_REMOTE }}
@@ -297,5 +313,4 @@ jobs:
           DEPLOY_PRE_GO_LIVE_PRODUCTION_PREFLIGHT: "1"
           DEPLOY_PRE_GO_LIVE_RESTORE_DRILL: "1"
           DEPLOY_PRE_GO_LIVE_OFFSITE_RESTORE_DRY_RUN: "1"
-          GIT_SSH_COMMAND: ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=accept-new
         run: sh ./scripts/deploy-vps.sh

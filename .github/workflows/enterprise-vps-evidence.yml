@@ -64,11 +64,27 @@ jobs:
       - name: Install SSH key
         env:
           DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_SSH_HOST_KEY: ${{ secrets.DEPLOY_SSH_HOST_KEY }}
+          DEPLOY_REMOTE: ${{ vars.DEPLOY_REMOTE }}
+          DEPLOY_SSH_PORT: ${{ vars.DEPLOY_SSH_PORT }}
         run: |
+          umask 077
           test -n "$DEPLOY_SSH_KEY"
+          test -n "$DEPLOY_SSH_HOST_KEY"
+          test -n "$DEPLOY_REMOTE"
+          test -n "$DEPLOY_SSH_PORT"
           install -m 700 -d ~/.ssh
           printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
+          node ./scripts/pinned-ssh-host-key.mjs render \
+            --remote "$DEPLOY_REMOTE" \
+            --port "$DEPLOY_SSH_PORT" \
+            > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+          node ./scripts/pinned-ssh-host-key.mjs verify \
+            --remote "$DEPLOY_REMOTE" \
+            --port "$DEPLOY_SSH_PORT" \
+            --file ~/.ssh/known_hosts
 
       - name: Run VPS evidence on VPS
         env:
@@ -100,7 +116,10 @@ jobs:
           install -d .tmp
           remote_output=".tmp/vps-evidence-remote-output.txt"
           WORKFLOW_TREE="$workflow_tree" node ./scripts/vps-evidence-request.mjs render > .tmp/vps-evidence-remote.sh
-          ssh -i ~/.ssh/deploy_key -p "$DEPLOY_SSH_PORT" -o StrictHostKeyChecking=accept-new \
+          ssh -F /dev/null -i ~/.ssh/deploy_key -p "$DEPLOY_SSH_PORT" \
+            -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
+            -o GlobalKnownHostsFile=/dev/null -o UpdateHostKeys=no \
             "$DEPLOY_REMOTE" 'bash -s' < .tmp/vps-evidence-remote.sh > "$remote_output"
           sed -n '/^__PLATFORM_VPS_EVIDENCE_RECEIPT_BEGIN__$/,/^__PLATFORM_VPS_EVIDENCE_RECEIPT_END__$/p' "$remote_output" \
             | sed '1d;$d' > .tmp/vps-evidence-receipt.json.b64
