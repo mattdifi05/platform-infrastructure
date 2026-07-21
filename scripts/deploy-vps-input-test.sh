@@ -73,6 +73,15 @@ base_env() {
     DEPLOY_ARTIFACT_RECEIPT_SHA256="$ARTIFACT_SHA" \
     DEPLOY_ADMISSION_RECEIPT_PATH="$TMP/admission.json" \
     DEPLOY_ADMISSION_RECEIPT_SHA256="$ADMISSION_SHA" \
+    DEPLOY_RUN_WAF_SMOKE=1 \
+    DEPLOY_RUN_INFRA_HEALTH=1 \
+    DEPLOY_RUN_PRODUCTION_PREFLIGHT=1 \
+    DEPLOY_RUN_PRE_GO_LIVE=1 \
+    DEPLOY_RUN_GO_NO_GO=1 \
+    DEPLOY_PRE_GO_LIVE_PRODUCTION_PREFLIGHT=1 \
+    DEPLOY_PRE_GO_LIVE_RESTORE_DRILL=1 \
+    DEPLOY_PRE_GO_LIVE_OFFSITE_RESTORE_DRY_RUN=1 \
+    DEPLOY_PRE_GO_LIVE_GITHUB_REMOTE=1 \
     FAKE_RELEASE_SHA="$RELEASE_SHA" \
     FAKE_RELEASE_TREE="$RELEASE_TREE" \
     "$@"
@@ -98,14 +107,19 @@ expect_reject repo-metachar env DEPLOY_REMOTE='deploy@example.internal' DEPLOY_R
 expect_reject short-approved-sha env DEPLOY_REMOTE='deploy@example.internal' DEPLOY_REPO='owner/repo' DEPLOY_RELEASE_SHA=abc
 expect_reject missing-receipts env DEPLOY_REMOTE='deploy@example.internal' DEPLOY_REPO='owner/repo' DEPLOY_RELEASE_SHA="$RELEASE_SHA" DEPLOY_RELEASE_TREE="$RELEASE_TREE"
 expect_base_reject wrong-artifact-hash env DEPLOY_ARTIFACT_RECEIPT_SHA256="$(printf '9%.0s' $(seq 1 64))"
+export FAKE_SSH_ARGS="$TMP/ssh-args.txt"
+export FAKE_SSH_STDIN="$TMP/ssh-stdin.sh"
+rm -f "$FAKE_SSH_ARGS" "$FAKE_SSH_STDIN"
+expect_base_reject missing-mandatory-production-gate env -u DEPLOY_RUN_GO_NO_GO
+[ ! -e "$FAKE_SSH_ARGS" ] && [ ! -e "$FAKE_SSH_STDIN" ] || { echo "FAIL: missing mandatory gate reached SSH" >&2; exit 1; }
+expect_base_reject disabled-mandatory-production-gate env DEPLOY_RUN_GO_NO_GO=0
+[ ! -e "$FAKE_SSH_ARGS" ] && [ ! -e "$FAKE_SSH_STDIN" ] || { echo "FAIL: disabled mandatory gate reached SSH" >&2; exit 1; }
 
 cp "$TMP/known_hosts" "$TMP/wrong-port-known-hosts"
 sed 's/:2222/:2200/' "$TMP/wrong-port-known-hosts" > "$TMP/wrong-port-known-hosts.next"
 mv "$TMP/wrong-port-known-hosts.next" "$TMP/wrong-port-known-hosts"
 expect_base_reject wrong-host-port-pin env DEPLOY_KNOWN_HOSTS_PATH="$TMP/wrong-port-known-hosts"
 
-export FAKE_SSH_ARGS="$TMP/ssh-args.txt"
-export FAKE_SSH_STDIN="$TMP/ssh-stdin.sh"
 base_env sh "$SCRIPT_DIR/deploy-vps.sh"
 grep -Fx 'deploy@example.internal' "$FAKE_SSH_ARGS" >/dev/null
 grep -Fx 'sh -s' "$FAKE_SSH_ARGS" >/dev/null
@@ -126,4 +140,4 @@ expect_reject production-policy-stays-external-pending env \
   DEPLOY_ADMISSION_RECEIPT_PATH="$TMP/admission.json" DEPLOY_ADMISSION_RECEIPT_SHA256="$ADMISSION_SHA" \
   FAKE_RELEASE_SHA="$RELEASE_SHA" FAKE_RELEASE_TREE="$RELEASE_TREE"
 
-printf 'deploy VPS input tests passed 13/13\n'
+printf 'deploy VPS input tests passed 15/15\n'

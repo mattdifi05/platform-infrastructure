@@ -424,10 +424,13 @@ jobs:
           DEPLOY_REPO: ${{ github.repository }}
           DEPLOY_RELEASE_SHA: ${{ needs.release-admission.outputs.release_sha }}
           DEPLOY_RELEASE_TREE: ${{ needs.release-admission.outputs.release_tree }}
+          DEPLOY_RUN_WAF_SMOKE: "1"
+          DEPLOY_RUN_INFRA_HEALTH: "1"
           DEPLOY_RUN_PRODUCTION_PREFLIGHT: "1"
           DEPLOY_RUN_PRE_GO_LIVE: "1"
           DEPLOY_RUN_GO_NO_GO: "1"
           DEPLOY_PRE_GO_LIVE_PRODUCTION_PREFLIGHT: "1"
           DEPLOY_PRE_GO_LIVE_RESTORE_DRILL: "1"
           DEPLOY_PRE_GO_LIVE_OFFSITE_RESTORE_DRY_RUN: "1"
+          DEPLOY_PRE_GO_LIVE_GITHUB_REMOTE: "1"
         run: sh ./scripts/deploy-vps.sh

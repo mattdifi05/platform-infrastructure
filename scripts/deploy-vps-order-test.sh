@@ -18,6 +18,8 @@ RUNTIME_CONTAINER_ID=$(printf '1%.0s' $(seq 1 64))
 PREVIOUS_IMAGE="ghcr.io/owner/platform-infrastructure-php-apache@sha256:$(printf '0%.0s' $(seq 1 64))"
 PREVIOUS_IMAGE_ID="sha256:$(printf '2%.0s' $(seq 1 64))"
 PREVIOUS_CONTAINER_ID=$(printf '3%.0s' $(seq 1 64))
+PREVIOUS_COMMIT=$(printf '4%.0s' $(seq 1 40))
+PREVIOUS_TREE=$(printf '5%.0s' $(seq 1 40))
 
 hash_file() {
   if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'; else shasum -a 256 "$1" | awk '{print $1}'; fi
@@ -43,9 +45,13 @@ case "$*" in
   "status --porcelain --untracked-files=all") : ;;
   "fetch --no-tags origin $FAKE_RELEASE_SHA") printf 'git-fetch\n' >> "$ORDER_LOG" ;;
   "cat-file -e ${FAKE_RELEASE_SHA}^{commit}") : ;;
-  "checkout --detach $FAKE_RELEASE_SHA") printf 'git-checkout\n' >> "$ORDER_LOG" ;;
-  "rev-parse HEAD") printf '%s\n' "$FAKE_RELEASE_SHA" ;;
+  "checkout --detach $FAKE_RELEASE_SHA") printf '%s\n' "$FAKE_RELEASE_SHA" > "$GIT_STATE_FILE"; printf 'git-checkout\n' >> "$ORDER_LOG" ;;
+  "checkout --detach $FAKE_PREVIOUS_COMMIT") printf '%s\n' "$FAKE_PREVIOUS_COMMIT" > "$GIT_STATE_FILE"; printf 'rollback-git-checkout\n' >> "$ORDER_LOG" ;;
+  "rev-parse HEAD")
+    if [ -f "$GIT_STATE_FILE" ]; then cat "$GIT_STATE_FILE"; else printf '%s\n' "$FAKE_PREVIOUS_COMMIT"; fi
+    ;;
   "rev-parse ${FAKE_RELEASE_SHA}^{tree}") printf '%s\n' "$FAKE_RELEASE_TREE" ;;
+  "rev-parse ${FAKE_PREVIOUS_COMMIT}^{tree}") printf '%s\n' "$FAKE_PREVIOUS_TREE" ;;
   *) echo "unexpected git call: $*" >&2; exit 1 ;;
 esac
 SH
@@ -110,7 +116,7 @@ case "$*" in
       printf 'compose-config\n' >> "$ORDER_LOG"
       image=${FAKE_COMPOSE_IMAGE:-$FAKE_APPROVED_IMAGE}
     fi
-    printf '{"services":{"edge":{"ports":[{"published":443,"target":8443,"protocol":"tcp","host_ip":"0.0.0.0"}]} ,"php-apache":{"image":"%s","volumes":[{"type":"volume","source":"database","target":"/var/lib/php-data"}]}},"volumes":{"database":{"name":"platform_database","driver":"local"}}}\n' "$image"
+    printf '{"services":{"php-apache":{"image":"%s","ports":[{"published":443,"target":8443,"protocol":"tcp","host_ip":"0.0.0.0"}],"volumes":[{"type":"volume","source":"database","target":"/var/lib/php-data"}]}},"volumes":{"database":{"name":"platform_database","driver":"local"}}}\n' "$image"
     ;;
   *) echo "unexpected bash call: $*" >&2; exit 1 ;;
 esac
@@ -179,12 +185,13 @@ SH
 chmod 700 "$TMP/bin/git" "$TMP/bin/sudo" "$TMP/bin/sh" "$TMP/bin/bash" "$TMP/bin/docker" "$TMP/bin/timeout"
 
 run_remote() {
-  rm -f "$TMP/config-count" "$TMP/volume-count" "$TMP/compose-up-args"
+  rm -f "$TMP/config-count" "$TMP/volume-count" "$TMP/compose-up-args" "$TMP/git-state"
   env \
-    PATH="$TMP/bin:$PATH" ORDER_LOG="$LOG" COMPOSE_UP_ARGS="$TMP/compose-up-args" CONFIG_COUNT_FILE="$TMP/config-count" VOLUME_COUNT_FILE="$TMP/volume-count" \
+    PATH="$TMP/bin:$PATH" ORDER_LOG="$LOG" COMPOSE_UP_ARGS="$TMP/compose-up-args" CONFIG_COUNT_FILE="$TMP/config-count" VOLUME_COUNT_FILE="$TMP/volume-count" GIT_STATE_FILE="$TMP/git-state" \
     FAKE_RELEASE_SHA="$RELEASE_SHA" FAKE_RELEASE_TREE="$RELEASE_TREE" FAKE_CANONICAL_ORIGIN='https://github.com/owner/repo.git' \
     FAKE_APPROVED_IMAGE="$APPROVED_IMAGE" FAKE_APPROVED_IMAGE_ID="$APPROVED_IMAGE_ID" FAKE_RUNTIME_CONTAINER_ID="$RUNTIME_CONTAINER_ID" \
     FAKE_PREVIOUS_IMAGE="$PREVIOUS_IMAGE" FAKE_PREVIOUS_IMAGE_ID="$PREVIOUS_IMAGE_ID" FAKE_PREVIOUS_CONTAINER_ID="$PREVIOUS_CONTAINER_ID" \
+    FAKE_PREVIOUS_COMMIT="$PREVIOUS_COMMIT" FAKE_PREVIOUS_TREE="$PREVIOUS_TREE" \
     PLATFORM_REMOTE_DIR_B64="$(encode "$REMOTE_DIR")" \
     PLATFORM_ENV_FILE_B64="$(encode '.env')" \
     PLATFORM_PROJECT_NAME_B64="$(encode 'platform_infra_vps')" \
@@ -204,7 +211,7 @@ run_remote() {
     PLATFORM_PRE_GO_LIVE_PRODUCTION_PREFLIGHT_B64="$(encode 1)" \
     PLATFORM_PRE_GO_LIVE_RESTORE_DRILL_B64="$(encode 1)" \
     PLATFORM_PRE_GO_LIVE_OFFSITE_RESTORE_DRY_RUN_B64="$(encode 1)" \
-    PLATFORM_PRE_GO_LIVE_GITHUB_REMOTE_B64="$(encode 0)" \
+    PLATFORM_PRE_GO_LIVE_GITHUB_REMOTE_B64="$(encode 1)" \
     "$@" /bin/sh "$SCRIPT_DIR/deploy-vps-remote.sh"
 }
 
@@ -219,6 +226,17 @@ assert_not_activated() {
 if run_remote env FAKE_COMPOSE_IMAGE="$OTHER_IMAGE" >/dev/null 2>&1; then echo "FAIL: mismatched rendered release image was accepted" >&2; exit 1; fi
 if grep -Eq '^(origin-apply|prepare|compose-up)$' "$LOG"; then echo "FAIL: release subject mismatch reached a mutation" >&2; exit 1; fi
 printf 'PASS\tsubject-compose-mismatch-blocks-mutation\n'
+
+for gate in \
+  PLATFORM_RUN_WAF_SMOKE_B64 PLATFORM_RUN_INFRA_HEALTH_B64 PLATFORM_RUN_PRODUCTION_PREFLIGHT_B64 \
+  PLATFORM_RUN_PRE_GO_LIVE_B64 PLATFORM_RUN_GO_NO_GO_B64 PLATFORM_PRE_GO_LIVE_PRODUCTION_PREFLIGHT_B64 \
+  PLATFORM_PRE_GO_LIVE_RESTORE_DRILL_B64 PLATFORM_PRE_GO_LIVE_OFFSITE_RESTORE_DRY_RUN_B64 PLATFORM_PRE_GO_LIVE_GITHUB_REMOTE_B64
+do
+  : > "$LOG"
+  if run_remote env "$gate=$(encode 0)" >/dev/null 2>&1; then echo "FAIL: disabled mandatory remote gate $gate was accepted" >&2; exit 1; fi
+  if grep -Eq '^(git-fetch|origin-apply|prepare|compose-up|rollback-up)$' "$LOG"; then echo "FAIL: disabled mandatory remote gate reached checkout or mutation" >&2; exit 1; fi
+done
+printf 'PASS\tmandatory-remote-gates-cannot-be-skipped\n'
 
 : > "$LOG"
 if run_remote env FAIL_PULL=1 >/dev/null 2>&1; then echo "FAIL: failed exact image pull was accepted" >&2; exit 1; fi
@@ -281,6 +299,7 @@ cat > "$TMP/expected-order" <<'EOF'
 rollback-config
 volume-before
 previous-runtime-verify
+previous-runtime-verify
 rollback-image-bind
 git-fetch
 git-checkout
@@ -317,4 +336,4 @@ if grep -Eq 'docker (compose .*down|volume (rm|prune)|system prune)' "$SCRIPT_DI
 fi
 printf 'PASS\trollback-never-deletes-project-or-volumes\n'
 
-printf 'deploy VPS order tests passed 12/12\n'
+printf 'deploy VPS order tests passed 13/13\n'

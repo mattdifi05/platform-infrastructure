@@ -92,7 +92,10 @@ the previous normalized Compose model before checkout, rejects persistent mount
 or network drift, and uses bounded automatic rollback after the mutation
 boundary. Rollback restores the previous UFW/runtime model with no build, pull,
 volume deletion or project teardown and verifies the prior image and volume
-identities; rollback failure remains a hard deployment failure.
+identities plus the exact previous commit/tree and full running-service image
+identity set; rollback failure remains a hard deployment failure. Production
+evidence, remote-provider, DR/off-site, go/no-go, WAF and health gates are all
+mandatory; omitted or zero-valued flags fail before SSH or remote mutation.
 
 ## Tool integrity
 

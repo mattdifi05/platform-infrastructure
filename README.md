@@ -884,9 +884,12 @@ renderizzato; solo dopo puo' preparare il runtime e fare `compose up` con
 `--no-build --pull never`. Prima del checkout salva il modello Compose precedente, richiede
 storage/reti invariati e lega quel modello all'image ID gia' in esecuzione. Un
 errore dopo il confine di mutazione attiva un rollback bounded di UFW e runtime;
-il rollback verifica image ID e identita' dei volumi e fallisce hard se non puo'
-ripristinarli. `vps-postdeploy.sh` dopo l'attivazione resta limitato a WAF smoke
-e `infra-health`.
+il rollback ripristina l'esatto commit/tree precedente e verifica tutti gli
+image ID in esecuzione e le identita' dei volumi, fallendo hard se non puo'
+ripristinarli. I gate preflight, pre-go-live, provider remoto, DR/off-site,
+go/no-go, WAF e health sono obbligatori e non hanno un valore production che li
+disabiliti. `vps-postdeploy.sh` dopo l'attivazione resta limitato a WAF smoke e
+`infra-health`.
 
 Il repository non dispone ancora di un produttore esterno autenticato di
 trusted deployment receipt: `governance/deployment-admission.json` resta

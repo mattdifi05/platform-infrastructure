@@ -1269,7 +1269,11 @@ Use this path when TLS and public certificates are terminated by VPS, Cloudflare
    transazione. Da UFW in avanti ogni fase ha un timeout. Qualunque errore
    ripristina con timeout il modello precedente senza `down`, `-v`, build o
    pull, poi confronta image ID e identita' dei volumi pre/post. Un rollback
-   incompleto termina con stato hard-failure e richiede recovery operatore.
+   ripristina anche l'esatto commit/tree precedente e confronta l'intero set di
+   image ID dei servizi in esecuzione. Un rollback incompleto termina con stato
+   hard-failure e richiede recovery operatore. Tutti i flag evidence, provider
+   remoto, DR/off-site, go/no-go, WAF e health devono essere esplicitamente `1`;
+   omissione o `0` fermano il deploy prima di SSH.
 
    `governance/deployment-admission.json` is intentionally
    `EXTERNAL-PENDING`: no authenticated external trusted-receipt producer is

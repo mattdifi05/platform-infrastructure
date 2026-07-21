@@ -53,28 +53,28 @@ case "$RELEASE_TREE" in *[!a-f0-9]*|'') echo "DEPLOY_RELEASE_TREE must be a lowe
 [ "${#RELEASE_SHA}" -eq 40 ] && [ "${#RELEASE_TREE}" -eq 40 ] || { echo "Release commit and tree SHA must each contain 40 characters." >&2; exit 1; }
 CANONICAL_ORIGIN="https://github.com/${DEPLOY_REPO}.git"
 
-validate_bool() {
-  case "$2" in 0|1) ;; *) echo "$1 must be 0 or 1." >&2; exit 1 ;; esac
+require_gate_enabled() {
+  [ "$2" = 1 ] || { echo "$1=1 is mandatory for the production deployment entrypoint." >&2; exit 1; }
 }
 
-run_waf_smoke=${DEPLOY_RUN_WAF_SMOKE:-1}
-run_infra_health=${DEPLOY_RUN_INFRA_HEALTH:-1}
-run_production_preflight=${DEPLOY_RUN_PRODUCTION_PREFLIGHT:-0}
-run_pre_go_live=${DEPLOY_RUN_PRE_GO_LIVE:-0}
-run_go_no_go=${DEPLOY_RUN_GO_NO_GO:-0}
-pre_go_live_production_preflight=${DEPLOY_PRE_GO_LIVE_PRODUCTION_PREFLIGHT:-1}
-pre_go_live_restore_drill=${DEPLOY_PRE_GO_LIVE_RESTORE_DRILL:-0}
-pre_go_live_offsite_restore_dry_run=${DEPLOY_PRE_GO_LIVE_OFFSITE_RESTORE_DRY_RUN:-0}
-pre_go_live_github_remote=${DEPLOY_PRE_GO_LIVE_GITHUB_REMOTE:-0}
-validate_bool DEPLOY_RUN_WAF_SMOKE "$run_waf_smoke"
-validate_bool DEPLOY_RUN_INFRA_HEALTH "$run_infra_health"
-validate_bool DEPLOY_RUN_PRODUCTION_PREFLIGHT "$run_production_preflight"
-validate_bool DEPLOY_RUN_PRE_GO_LIVE "$run_pre_go_live"
-validate_bool DEPLOY_RUN_GO_NO_GO "$run_go_no_go"
-validate_bool DEPLOY_PRE_GO_LIVE_PRODUCTION_PREFLIGHT "$pre_go_live_production_preflight"
-validate_bool DEPLOY_PRE_GO_LIVE_RESTORE_DRILL "$pre_go_live_restore_drill"
-validate_bool DEPLOY_PRE_GO_LIVE_OFFSITE_RESTORE_DRY_RUN "$pre_go_live_offsite_restore_dry_run"
-validate_bool DEPLOY_PRE_GO_LIVE_GITHUB_REMOTE "$pre_go_live_github_remote"
+run_waf_smoke=${DEPLOY_RUN_WAF_SMOKE:-}
+run_infra_health=${DEPLOY_RUN_INFRA_HEALTH:-}
+run_production_preflight=${DEPLOY_RUN_PRODUCTION_PREFLIGHT:-}
+run_pre_go_live=${DEPLOY_RUN_PRE_GO_LIVE:-}
+run_go_no_go=${DEPLOY_RUN_GO_NO_GO:-}
+pre_go_live_production_preflight=${DEPLOY_PRE_GO_LIVE_PRODUCTION_PREFLIGHT:-}
+pre_go_live_restore_drill=${DEPLOY_PRE_GO_LIVE_RESTORE_DRILL:-}
+pre_go_live_offsite_restore_dry_run=${DEPLOY_PRE_GO_LIVE_OFFSITE_RESTORE_DRY_RUN:-}
+pre_go_live_github_remote=${DEPLOY_PRE_GO_LIVE_GITHUB_REMOTE:-}
+require_gate_enabled DEPLOY_RUN_WAF_SMOKE "$run_waf_smoke"
+require_gate_enabled DEPLOY_RUN_INFRA_HEALTH "$run_infra_health"
+require_gate_enabled DEPLOY_RUN_PRODUCTION_PREFLIGHT "$run_production_preflight"
+require_gate_enabled DEPLOY_RUN_PRE_GO_LIVE "$run_pre_go_live"
+require_gate_enabled DEPLOY_RUN_GO_NO_GO "$run_go_no_go"
+require_gate_enabled DEPLOY_PRE_GO_LIVE_PRODUCTION_PREFLIGHT "$pre_go_live_production_preflight"
+require_gate_enabled DEPLOY_PRE_GO_LIVE_RESTORE_DRILL "$pre_go_live_restore_drill"
+require_gate_enabled DEPLOY_PRE_GO_LIVE_OFFSITE_RESTORE_DRY_RUN "$pre_go_live_offsite_restore_dry_run"
+require_gate_enabled DEPLOY_PRE_GO_LIVE_GITHUB_REMOTE "$pre_go_live_github_remote"
 
 case "$ARTIFACT_RECEIPT_SHA256:$ADMISSION_RECEIPT_SHA256" in *[!a-f0-9:]*|:*) echo "Both expected receipt SHA256 values are required and must be lowercase." >&2; exit 1 ;; esac
 [ "${#ARTIFACT_RECEIPT_SHA256}" -eq 64 ] && [ "${#ADMISSION_RECEIPT_SHA256}" -eq 64 ] || { echo "Both expected receipt SHA256 values must be complete." >&2; exit 1; }
