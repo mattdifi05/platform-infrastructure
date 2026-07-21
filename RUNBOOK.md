@@ -137,7 +137,13 @@ curl -k -o /dev/null -s -w "%{http_code}\n" "https://portal.localhost.com/?x=<sc
 curl -k -o /dev/null -s -w "%{http_code}\n" "https://portal.localhost.com/.env"
 ```
 
-Both should return `403`. If a real workflow is blocked, keep `WAF_BLOCKING_PARANOIA=2`, inspect the JSON audit event in `enterprise-waf`, then add the smallest possible exclusion to `waf/RESPONSE-999-EXCLUSION-RULES-AFTER-CRS.conf` or `waf/REQUEST-900-EXCLUSION-RULES-BEFORE-CRS.conf`. Raise to PL3/PL4 only after the audit log is clean for the affected apps.
+Both should return `403`. If a real workflow is blocked, keep
+`WAF_BLOCKING_PARANOIA=2`, inspect only the non-payload `A/K/Z` JSON audit
+metadata in `enterprise-waf`, then add the smallest possible exclusion to
+`waf/RESPONSE-999-EXCLUSION-RULES-AFTER-CRS.conf` or
+`waf/REQUEST-900-EXCLUSION-RULES-BEFORE-CRS.conf`. Never widen audit parts to
+request/response headers or bodies. Raise to PL3/PL4 only after the audit log is
+clean for the affected apps.
 
 ## Feature Flags And Kill Switches
 
@@ -402,7 +408,12 @@ probe. Application outbox recovery belongs to the workload runbook.
 
 ## Centralized logs and audit
 
-Promtail reads Docker JSON logs from `/var/lib/docker/containers` without Docker socket service discovery. Its pipeline unwraps Docker log entries, redacts common sensitive fields (`authorization`, `cookie`, `set-cookie`, `password`, `secret`, `token`, `otp`, passkey credentials and challenges), parses JSON app logs and labels them by `service` and `level`.
+Promtail reads Docker JSON logs from `/var/lib/docker/containers` without Docker
+socket service discovery. Its pipeline unwraps Docker log entries, drops whole
+events containing body, Authorization, Cookie or Set-Cookie material, redacts
+remaining sensitive fields (`password`, `secret`, `token`, `otp`, passkey
+credentials and challenges), parses JSON app logs and labels them by `service`
+and `level`.
 
 Primary operator queries:
 

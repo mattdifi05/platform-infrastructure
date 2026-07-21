@@ -21,6 +21,12 @@ scrape_configs:
       - drop:
           older_than: 168h
           drop_counter_reason: stale_docker_log
+      # Fail closed if any producer emits request/response body material or
+      # authentication/session headers. ModSecurity is also configured not to
+      # emit these parts, so this is the independent Loki boundary.
+      - drop:
+          expression: '(?i)"?(?:request_?body|response_?body|body|authorization|cookie|set-cookie)"?\s*[:=]'
+          drop_counter_reason: sensitive_http_material
       - replace:
           expression: '(?i)("?(authorization|cookie|set-cookie|password|secret|token|otp|backupCode|backupCodes|credential|challenge)"?\s*[:=]\s*)("[^"]*"|[^,\s}]+)'
           replace: '$1"[REDACTED]"'

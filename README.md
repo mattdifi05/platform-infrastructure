@@ -336,7 +336,14 @@ docker compose --env-file .env -p platform_infra_local \
 sh ./scripts/waf-smoke.sh
 ```
 
-Baseline WAF: CRS paranoia level 2, blocking mode attivo, audit log `RelevantOnly`, request body inspection attiva, response body inspection spenta, file sensibili e scanner path bloccati prima del routing verso runtime o app collegate. PL3/PL4 vanno attivati solo dopo una finestra di tuning sui log, altrimenti il rischio falso positivo diventa alto per dashboard, OAuth e form PHP.
+Baseline WAF: CRS paranoia level 2, blocking mode attivo, audit log
+`RelevantOnly` limitato alle parti non sensibili `A/K/Z`, request body inspection
+attiva ma body e header di autenticazione/sessione esclusi da stdout, response
+body inspection spenta, file sensibili e scanner path bloccati prima del routing
+verso runtime o app collegate. Promtail scarta inoltre in modo fail-closed ogni
+evento che presenti campi body, Authorization, Cookie o Set-Cookie prima di
+Loki. PL3/PL4 vanno attivati solo dopo una finestra di tuning sui log, altrimenti
+il rischio falso positivo diventa alto per dashboard, OAuth e form PHP.
 
 Su Windows/Docker Desktop il certificato mkcert locale e' montato in un container non privilegiato. Se il WAF non riesce a leggere `local-key.pem`, rendi la copia locale leggibile dal runtime Docker e riavvia:
 

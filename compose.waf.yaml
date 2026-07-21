@@ -48,7 +48,10 @@ services:
       MODSEC_AUDIT_ENGINE: ${WAF_MODSEC_AUDIT_ENGINE:-RelevantOnly}
       MODSEC_AUDIT_LOG: /dev/stdout
       MODSEC_AUDIT_LOG_FORMAT: JSON
-      MODSEC_AUDIT_LOG_PARTS: ${WAF_MODSEC_AUDIT_LOG_PARTS:-ABIJFHZ}
+      # A/K/Z retain transaction identity and matched-rule metadata. Request
+      # and response headers/bodies are deliberately impossible to re-enable
+      # through environment interpolation.
+      MODSEC_AUDIT_LOG_PARTS: "AKZ"
       MODSEC_REQ_BODY_ACCESS: "On"
       MODSEC_REQ_BODY_LIMIT: ${WAF_MODSEC_REQ_BODY_LIMIT:-13107200}
       MODSEC_REQ_BODY_NOFILES_LIMIT: ${WAF_MODSEC_REQ_BODY_NOFILES_LIMIT:-262144}
