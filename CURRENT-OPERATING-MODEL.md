@@ -234,6 +234,10 @@ For a zero-workload platform deploy, omit `HOSTED_WORKLOAD_LOCK`. Never point it
 at an unverified or world-readable file. Its parent must be deployment-owned
 with mode `0700`, outside `projects-portal/state` or every other service-writable
 tree; workload snapshots are kept beside it and are never mounted writable.
+Snapshot mutations are descriptor-relative and the Compose wrapper materializes
+verified bytes into persistent, unlinked file descriptors before the final
+consumer exec. The deployment Unix identity is an administrative trust boundary
+and must not be shared with hosted services.
 
 For a Control Center-only code/documentation rollout:
 

@@ -621,6 +621,9 @@ test("workload resolver accepts an all-regular contained tree", () => {
     });
     assert.match(result.workloadContentSha256, /^[a-f0-9]{64}$/);
     verifyLockFiles(result);
+    const repeated = resolveCatalog({ ...fixture, workloadRoot, coreFiles: [fixture.coreFile], projectName: "fixture", snapshotRoot });
+    assert.equal(repeated.snapshotGeneration, result.snapshotGeneration);
+    verifyLockFiles(repeated);
   } finally {
     removeFixtureTree(root);
   }
@@ -758,6 +761,39 @@ test("snapshot capture rejects deterministic parent swaps before every workload 
     } finally {
       removeFixtureTree(root);
     }
+  }
+});
+
+test("descriptor-relative snapshot creation fails before a root symlink swap can write outside", () => {
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "hosted-root-create-race-")));
+  try {
+    const workloadRoot = path.join(root, "workloads");
+    const fixture = catalogFixture(root);
+    const snapshotRoot = path.join(root, "snapshots");
+    const originalRoot = `${snapshotRoot}.original`;
+    const outside = path.join(root, "outside");
+    fs.mkdirSync(snapshotRoot, { mode: 0o700 });
+    fs.mkdirSync(outside, { mode: 0o700 });
+    let swapped = false;
+    assert.throws(() => resolveCatalog({
+      ...fixture,
+      workloadRoot,
+      coreFiles: [fixture.coreFile],
+      projectName: "fixture",
+      snapshotRoot,
+      snapshotAccessHook(_snapshot, label) {
+        if (swapped || label !== "before descriptor-relative snapshot create") return;
+        swapped = true;
+        fs.renameSync(snapshotRoot, originalRoot);
+        fs.symlinkSync(outside, snapshotRoot, "dir");
+      },
+    }), /[Dd]escriptor-relative snapshot create failed|identity changed/);
+    assert.equal(swapped, true);
+    assert.deepEqual(fs.readdirSync(outside), []);
+    fs.unlinkSync(snapshotRoot);
+    fs.renameSync(originalRoot, snapshotRoot);
+  } finally {
+    removeFixtureTree(root);
   }
 });
 
@@ -908,7 +944,7 @@ test("compose-files CLI never emits a path not exactly bound to a compose snapsh
     const minimalBin = path.join(root, "minimal-bin");
     fs.mkdirSync(minimalBin);
     let realJq;
-    for (const command of ["jq", "stat", "awk", "dirname", "id"]) {
+    for (const command of ["jq", "stat", "awk", "dirname", "id", "mktemp", "chmod"]) {
       const executable = executablePath(command);
       assert.ok(executable, `${command} is required by the host lock reader test`);
       fs.symlinkSync(executable, path.join(minimalBin, command));
@@ -919,21 +955,21 @@ test("compose-files CLI never emits a path not exactly bound to a compose snapsh
     assert.ok(shaExecutable, "a SHA-256 utility is required by the host lock reader test");
     fs.symlinkSync(shaExecutable, path.join(minimalBin, shaCommand));
     assert.equal(fs.existsSync(path.join(minimalBin, "node")), false);
-    const shellReader = spawnSync("/bin/sh", [path.join(import.meta.dirname, "hosted-workload-lock.sh"), lockPath, "compose-files"], {
+    const shellReader = spawnSync("/bin/sh", [path.join(import.meta.dirname, "hosted-workload-lock.sh"), lockPath, "compose-records"], {
       encoding: "utf8",
       env: { PATH: minimalBin, HOSTED_WORKLOAD_ALLOW_RESOLVED: "1" },
     });
     assert.equal(shellReader.status, 0, shellReader.stderr);
-    assert.equal(shellReader.stdout.trim(), lock.workloads[0].composePath);
+    assert.equal(shellReader.stdout.trim().split("\t")[0], lock.workloads[0].composePath);
     const verifiedActivation = JSON.parse(fs.readFileSync(lockPath, "utf8"));
     verifiedActivation.state = "verified";
     fs.writeFileSync(verifiedActivation.activationLockPath, `${JSON.stringify(verifiedActivation, null, 2)}\n`, { mode: 0o600 });
-    const finalShellReader = spawnSync("/bin/sh", [path.join(import.meta.dirname, "hosted-workload-lock.sh"), verifiedActivation.activationLockPath, "compose-files"], {
+    const finalShellReader = spawnSync("/bin/sh", [path.join(import.meta.dirname, "hosted-workload-lock.sh"), verifiedActivation.activationLockPath, "compose-records"], {
       encoding: "utf8",
       env: { PATH: minimalBin, HOSTED_WORKLOAD_ALLOW_RESOLVED: "0" },
     });
     assert.equal(finalShellReader.status, 0, finalShellReader.stderr);
-    assert.equal(finalShellReader.stdout.trim(), lock.workloads[0].composePath);
+    assert.equal(finalShellReader.stdout.trim().split("\t")[0], lock.workloads[0].composePath);
 
     const hostilePath = path.join(root, "hostile.yaml");
     fs.writeFileSync(hostilePath, "services:\n  hostile:\n    privileged: true\n");
@@ -942,21 +978,55 @@ test("compose-files CLI never emits a path not exactly bound to a compose snapsh
     const raceReplacement = JSON.parse(verifiedLockText);
     raceReplacement.workloads[0].composePath = hostilePath;
     fs.writeFileSync(raceReplacementPath, `${JSON.stringify(raceReplacement, null, 2)}\n`, { mode: 0o600 });
+    const raceOriginalPath = path.join(root, "race-original.json");
+    fs.writeFileSync(raceOriginalPath, verifiedLockText, { mode: 0o600 });
     fs.unlinkSync(path.join(minimalBin, "jq"));
     fs.writeFileSync(path.join(minimalBin, "jq"), `#!/bin/sh
-if [ "\${HOSTED_TEST_SWAP_ON_CONSUMER:-0}" = 1 ]; then
+if [ -n "\${HOSTED_TEST_SWAP_MODE:-}" ]; then
   case "$*" in
-    *'.workloads[].composePath'*) /bin/mv "$HOSTED_TEST_REPLACEMENT" "$HOSTED_TEST_LOCK" ;;
+    *'workload-compose'*'@tsv'*)
+      case "$HOSTED_TEST_SWAP_MODE" in
+        transient)
+          /bin/cp "$HOSTED_TEST_REPLACEMENT" "$HOSTED_TEST_LOCK"
+          "$HOSTED_TEST_REAL_JQ" "$@"
+          status=$?
+          /bin/cp "$HOSTED_TEST_ORIGINAL" "$HOSTED_TEST_LOCK"
+          exit "$status"
+          ;;
+        replace) /bin/mv "$HOSTED_TEST_REPLACEMENT" "$HOSTED_TEST_LOCK" ;;
+      esac
+      ;;
   esac
 fi
 exec "$HOSTED_TEST_REAL_JQ" "$@"
 `, { mode: 0o755 });
-    const raced = spawnSync("/bin/sh", [path.join(import.meta.dirname, "hosted-workload-lock.sh"), lockPath, "compose-files"], {
+    const lockInode = fs.statSync(lockPath).ino;
+    const transient = spawnSync("/bin/sh", [path.join(import.meta.dirname, "hosted-workload-lock.sh"), lockPath, "compose-records"], {
       encoding: "utf8",
       env: {
         PATH: minimalBin,
         HOSTED_WORKLOAD_ALLOW_RESOLVED: "1",
-        HOSTED_TEST_SWAP_ON_CONSUMER: "1",
+        HOSTED_TEST_SWAP_MODE: "transient",
+        HOSTED_TEST_REPLACEMENT: raceReplacementPath,
+        HOSTED_TEST_ORIGINAL: raceOriginalPath,
+        HOSTED_TEST_LOCK: lockPath,
+        HOSTED_TEST_REAL_JQ: realJq,
+      },
+    });
+    assert.doesNotMatch(transient.stdout, /hostile\.yaml/);
+    if (transient.status === 0) {
+      assert.equal(transient.stdout.trim().split("\t")[0], lock.workloads[0].composePath);
+    } else {
+      assert.match(transient.stderr, /lock changed while being verified/i);
+    }
+    assert.equal(fs.statSync(lockPath).ino, lockInode);
+
+    const raced = spawnSync("/bin/sh", [path.join(import.meta.dirname, "hosted-workload-lock.sh"), lockPath, "compose-records"], {
+      encoding: "utf8",
+      env: {
+        PATH: minimalBin,
+        HOSTED_WORKLOAD_ALLOW_RESOLVED: "1",
+        HOSTED_TEST_SWAP_MODE: "replace",
         HOSTED_TEST_REPLACEMENT: raceReplacementPath,
         HOSTED_TEST_LOCK: lockPath,
         HOSTED_TEST_REAL_JQ: realJq,
@@ -974,12 +1044,106 @@ exec "$HOSTED_TEST_REAL_JQ" "$@"
     assert.notEqual(rejected.status, 0);
     assert.doesNotMatch(rejected.stdout, /hostile\.yaml/);
     assert.match(rejected.stderr, /activation pointers are not exactly bound/);
-    const shellRejected = spawnSync("/bin/sh", [path.join(import.meta.dirname, "hosted-workload-lock.sh"), lockPath, "compose-files"], {
+    const shellRejected = spawnSync("/bin/sh", [path.join(import.meta.dirname, "hosted-workload-lock.sh"), lockPath, "compose-records"], {
       encoding: "utf8",
       env: { PATH: minimalBin, HOSTED_WORKLOAD_ALLOW_RESOLVED: "1" },
     });
     assert.notEqual(shellRejected.status, 0);
     assert.doesNotMatch(shellRejected.stdout, /hostile\.yaml/);
+  } finally {
+    removeFixtureTree(root);
+  }
+});
+
+test("compose wrapper hands verified workload bytes to the consumer through persistent descriptors", () => {
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "hosted-fd-handoff-")));
+  try {
+    const workloadRoot = path.join(root, "workloads");
+    const fixture = catalogFixture(root);
+    const lock = resolveCatalog({
+      ...fixture,
+      workloadRoot,
+      coreFiles: [fixture.coreFile],
+      projectName: "fixture",
+      snapshotRoot: path.join(root, "snapshots"),
+    });
+    const lockPath = path.join(root, "lock.json");
+    fs.writeFileSync(lockPath, `${JSON.stringify(lock, null, 2)}\n`, { mode: 0o600 });
+    const rawPolicy = spawnSync("ruby", [path.join(import.meta.dirname, "hosted-workload-source-policy.rb"), "--lock", lockPath], { encoding: "utf8" });
+    assert.equal(rawPolicy.status, 0, rawPolicy.stderr);
+
+    const fakeBin = path.join(root, "fake-bin");
+    const capture = path.join(root, "consumer-capture.txt");
+    const originalGeneration = `${lock.snapshotGeneration}.original`;
+    const composeBasename = path.basename(lock.workloads[0].composePath);
+    const realJq = executablePath("jq");
+    assert.ok(realJq, "jq is required by the descriptor handoff race test");
+    fs.mkdirSync(fakeBin);
+    fs.writeFileSync(path.join(fakeBin, "docker"), `#!/bin/bash
+set -euo pipefail
+/bin/mv "$HOSTED_TEST_GENERATION" "$HOSTED_TEST_ORIGINAL_GENERATION"
+/bin/mkdir -m 700 "$HOSTED_TEST_GENERATION"
+printf 'services:\n  hostile:\n    privileged: true\n' > "$HOSTED_TEST_GENERATION/$HOSTED_TEST_COMPOSE_BASENAME"
+/bin/chmod 400 "$HOSTED_TEST_GENERATION/$HOSTED_TEST_COMPOSE_BASENAME"
+/bin/chmod 500 "$HOSTED_TEST_GENERATION"
+: > "$HOSTED_TEST_CAPTURE"
+for argument in "$@"; do
+  case "$argument" in
+    /dev/fd/*)
+      printf '%s\n' "---$argument" >> "$HOSTED_TEST_CAPTURE"
+      /bin/cat "$argument" >> "$HOSTED_TEST_CAPTURE"
+      ;;
+  esac
+done
+`, { mode: 0o755 });
+    fs.writeFileSync(path.join(fakeBin, "jq"), `#!/bin/sh
+if [ "\${HOSTED_TEST_QUERY_SWAP:-0}" = 1 ]; then
+  case "$*" in
+    *'workload-compose'*'@tsv'*)
+      /bin/mv "$HOSTED_TEST_GENERATION" "$HOSTED_TEST_ORIGINAL_GENERATION"
+      /bin/mkdir -m 700 "$HOSTED_TEST_GENERATION"
+      printf 'services:\n  hostile:\n    privileged: true\n' > "$HOSTED_TEST_GENERATION/$HOSTED_TEST_COMPOSE_BASENAME"
+      /bin/chmod 400 "$HOSTED_TEST_GENERATION/$HOSTED_TEST_COMPOSE_BASENAME"
+      /bin/chmod 500 "$HOSTED_TEST_GENERATION"
+      ;;
+  esac
+fi
+exec "$HOSTED_TEST_REAL_JQ" "$@"
+`, { mode: 0o755 });
+    const sharedEnvironment = {
+      ...process.env,
+      PATH: `${fakeBin}:${process.env.PATH}`,
+      COMPOSE_ENV_FILE: fixture.coreEnvFile,
+      COMPOSE_PROJECT_NAME: "fixture",
+      HOSTED_WORKLOAD_LOCK: lockPath,
+      HOSTED_WORKLOAD_ALLOW_RESOLVED: "1",
+      HOSTED_TEST_GENERATION: lock.snapshotGeneration,
+      HOSTED_TEST_ORIGINAL_GENERATION: originalGeneration,
+      HOSTED_TEST_COMPOSE_BASENAME: composeBasename,
+      HOSTED_TEST_CAPTURE: capture,
+      HOSTED_TEST_REAL_JQ: realJq,
+    };
+    const queryRace = spawnSync("/bin/bash", [path.join(import.meta.dirname, "compose-vps.sh"), "config", "--format", "json"], {
+      encoding: "utf8",
+      env: { ...sharedEnvironment, HOSTED_TEST_QUERY_SWAP: "1" },
+    });
+    assert.notEqual(queryRace.status, 0);
+    assert.match(queryRace.stderr, /handoff object identity changed/i);
+    assert.equal(fs.existsSync(capture), false);
+    removeFixtureTree(lock.snapshotGeneration);
+    fs.renameSync(originalGeneration, lock.snapshotGeneration);
+    fs.unlinkSync(path.join(fakeBin, "jq"));
+
+    const consumer = spawnSync("/bin/bash", [path.join(import.meta.dirname, "compose-vps.sh"), "config", "--format", "json"], {
+      encoding: "utf8",
+      env: sharedEnvironment,
+    });
+    assert.equal(consumer.status, 0, consumer.stderr);
+    const consumed = fs.readFileSync(capture, "utf8");
+    assert.match(consumed, /example-app-web/);
+    assert.match(consumed, /EXAMPLE_APP_THEME=dark/);
+    assert.doesNotMatch(consumed, /privileged: true/);
+    assert.notEqual(fs.statSync(lock.snapshotGeneration).ino, Number(lock.snapshotGenerationIdentity.inode));
   } finally {
     removeFixtureTree(root);
   }

@@ -1,13 +1,13 @@
 #!/usr/bin/env sh
 set -eu
 
-LOCK=${1:?Usage: hosted-workload-lock.sh <lock-file> [verify|compose-files]}
+LOCK=${1:?Usage: hosted-workload-lock.sh <lock-file> [verify|compose-records]}
 COMMAND=${2:-verify}
 RAW_POLICY_CONTROLS='["deny-api-socket","deny-device-access","deny-env-file","deny-extends","deny-file-configs","deny-gpu-access","deny-include","deny-lifecycle-hooks","deny-local-volume-options","deny-providers","deny-runtime-overrides","deny-scaling","deny-stop-grace-overrides","deny-volumes-from"]'
 
 case "$COMMAND" in
-  verify|compose-files|env-files|core-env-file|project-name) ;;
-  *) printf '%s\n' "Command must be verify, compose-files, env-files, core-env-file or project-name." >&2; exit 2 ;;
+  verify|compose-records|env-records|core-env-file|project-name) ;;
+  *) printf '%s\n' "Command must be verify, compose-records, env-records, core-env-file or project-name." >&2; exit 2 ;;
 esac
 
 die() {
@@ -95,6 +95,24 @@ lock_mode=$(printf '%s\n' "$lock_before" | awk -F'|' '{ print $4 }')
 lock_uid=$(printf '%s\n' "$lock_before" | awk -F'|' '{ print $3 }')
 case "$lock_mode" in 384|256) ;; *) die "Hosted workload lock must use mode 0600 or 0400." ;; esac
 [ "$lock_uid" = "$(id -u)" ] || die "Hosted workload lock must be owned by the deployment identity."
+
+umask 077
+LOCK_READ_DIRECTORY=$(mktemp -d "${TMPDIR:-/tmp}/hosted-workload-lock.XXXXXX") || die "Could not allocate a private lock read snapshot."
+LOCK_READ=$LOCK_READ_DIRECTORY/lock.json
+cleanup_lock_read() {
+  [ ! -e "$LOCK_READ" ] || /bin/rm -- "$LOCK_READ" >/dev/null 2>&1 || :
+  [ ! -d "$LOCK_READ_DIRECTORY" ] || /bin/rmdir -- "$LOCK_READ_DIRECTORY" >/dev/null 2>&1 || :
+}
+trap cleanup_lock_read 0
+exec 3<"$LOCK" || die "Hosted workload lock cannot be opened."
+lock_descriptor_identity=$(stat_stable_identity /dev/fd/3) || die "Hosted workload lock descriptor cannot be stated."
+lock_before_read_identity=$(printf '%s\n' "$lock_before" | awk -F'|' '{ print $2 "|" $3 "|" $5 "|" $6 "|" $7 }')
+lock_descriptor_read_identity=$(printf '%s\n' "$lock_descriptor_identity" | awk -F'|' '{ print $2 "|" $3 "|" $5 "|" $6 "|" $7 }')
+[ "$lock_before_read_identity" = "$lock_descriptor_read_identity" ] || die "Hosted workload lock changed before its read-once snapshot."
+/bin/cat <&3 > "$LOCK_READ" || die "Hosted workload lock could not be materialized once."
+exec 3<&-
+chmod 400 "$LOCK_READ" || die "Hosted workload lock read snapshot could not be protected."
+lock_read_sha256=$(stable_sha256_file "$LOCK_READ")
 
 if [ "${HOSTED_WORKLOAD_ALLOW_RESOLVED:-0}" = 1 ]; then
   allow_resolved=true
@@ -192,11 +210,11 @@ jq -e --arg lockPath "$LOCK" --argjson allowResolved "$allow_resolved" --argjson
         and (($receipt.topLevelKeys | index("services")) != null)
         and ($compose | length == 1 and $receipt.composeSha256 == $compose[0].sha256)
         and (([$workload.services[].name] - $receipt.serviceNames) | length == 0))
-' "$LOCK" >/dev/null
+' "$LOCK_READ" >/dev/null
 
-snapshot_root=$(jq -r '.snapshotRoot' "$LOCK")
-snapshot_generation=$(jq -r '.snapshotGeneration' "$LOCK")
-activation_lock_path=$(jq -r '.activationLockPath' "$LOCK")
+snapshot_root=$(jq -r '.snapshotRoot' "$LOCK_READ")
+snapshot_generation=$(jq -r '.snapshotGeneration' "$LOCK_READ")
+activation_lock_path=$(jq -r '.activationLockPath' "$LOCK_READ")
 snapshot_parent=$(dirname -- "$snapshot_root")
 lock_directory=$(dirname -- "$LOCK")
 assert_no_symlink_components "$lock_directory"
@@ -209,13 +227,13 @@ assert_no_symlink_components "$snapshot_generation"
 [ -d "$snapshot_generation" ] && [ ! -L "$snapshot_generation" ] || die "Snapshot generation must be a real directory."
 [ "$(dirname -- "$snapshot_generation")" = "$snapshot_root" ] || die "Snapshot generation is outside the locked snapshot root."
 [ "$(dirname -- "$activation_lock_path")" = "$snapshot_parent" ] || die "Activation lock is outside the deployment-private snapshot parent."
-if [ "$(jq -r '.state' "$LOCK")" = verified ]; then
+if [ "$(jq -r '.state' "$LOCK_READ")" = verified ]; then
   [ "$lock_directory" = "$snapshot_parent" ] || die "Verified lock is outside the deployment-private snapshot parent."
 fi
 
-expected_parent_identity=$(jq -r '.snapshotParentIdentity | [.device, .inode, .uid, .mode] | map(tostring) | join("|")' "$LOCK")
-expected_root_identity=$(jq -r '.snapshotRootIdentity | [.device, .inode, .uid, .mode] | map(tostring) | join("|")' "$LOCK")
-expected_generation_identity=$(jq -r '.snapshotGenerationIdentity | [.device, .inode, .uid, .mode] | map(tostring) | join("|")' "$LOCK")
+expected_parent_identity=$(jq -r '.snapshotParentIdentity | [.device, .inode, .uid, .mode] | map(tostring) | join("|")' "$LOCK_READ")
+expected_root_identity=$(jq -r '.snapshotRootIdentity | [.device, .inode, .uid, .mode] | map(tostring) | join("|")' "$LOCK_READ")
+expected_generation_identity=$(jq -r '.snapshotGenerationIdentity | [.device, .inode, .uid, .mode] | map(tostring) | join("|")' "$LOCK_READ")
 actual_parent_identity=$(stat_identity "$snapshot_parent") || die "Snapshot parent identity is missing."
 actual_root_identity=$(stat_identity "$snapshot_root") || die "Snapshot root identity is missing."
 actual_generation_identity=$(stat_identity "$snapshot_generation") || die "Snapshot generation identity is missing."
@@ -227,37 +245,37 @@ lock_directory_identity=$(stat_identity "$lock_directory") || die "Lock parent i
 lock_directory_uid=$(printf '%s\n' "$lock_directory_identity" | awk -F'|' '{ print $3 }')
 lock_directory_mode=$(printf '%s\n' "$lock_directory_identity" | awk -F'|' '{ print $4 }')
 [ "$lock_directory_uid" = "$deployment_uid" ] && [ "$lock_directory_mode" = 448 ] || die "Lock parent must be deployment-owned with mode 0700."
-[ "$(jq -r '.snapshotParentIdentity.uid | tostring' "$LOCK")" = "$deployment_uid" ] || die "Snapshot parent must be owned by the deployment identity."
-[ "$(jq -r '.snapshotRootIdentity.uid | tostring' "$LOCK")" = "$deployment_uid" ] || die "Snapshot root must be owned by the deployment identity."
-[ "$(jq -r '.snapshotGenerationIdentity.uid | tostring' "$LOCK")" = "$deployment_uid" ] || die "Snapshot generation must be owned by the deployment identity."
+[ "$(jq -r '.snapshotParentIdentity.uid | tostring' "$LOCK_READ")" = "$deployment_uid" ] || die "Snapshot parent must be owned by the deployment identity."
+[ "$(jq -r '.snapshotRootIdentity.uid | tostring' "$LOCK_READ")" = "$deployment_uid" ] || die "Snapshot root must be owned by the deployment identity."
+[ "$(jq -r '.snapshotGenerationIdentity.uid | tostring' "$LOCK_READ")" = "$deployment_uid" ] || die "Snapshot generation must be owned by the deployment identity."
 
-count=$(jq '.files | length' "$LOCK")
+count=$(jq '.files | length' "$LOCK_READ")
 index=0
 while [ "$index" -lt "$count" ]; do
-  file=$(jq -r ".files[$index].path" "$LOCK")
-  expected=$(jq -r ".files[$index].sha256" "$LOCK")
-  snapshot=$(jq -r ".files[$index].snapshot == true" "$LOCK")
+  file=$(jq -r ".files[$index].path" "$LOCK_READ")
+  expected=$(jq -r ".files[$index].sha256" "$LOCK_READ")
+  snapshot=$(jq -r ".files[$index].snapshot == true" "$LOCK_READ")
   assert_safe_absolute_path "$file"
   if [ "$snapshot" = true ]; then
     [ "$(dirname -- "$file")" = "$snapshot_generation" ] || die "Snapshot file is outside the locked generation: $file"
-    expected_file_identity=$(jq -r ".files[$index] | [.snapshotDevice, .snapshotInode, .snapshotUid, 256] | map(tostring) | join(\"|\")" "$LOCK")
+    expected_file_identity=$(jq -r ".files[$index] | [.snapshotDevice, .snapshotInode, .snapshotUid, 256] | map(tostring) | join(\"|\")" "$LOCK_READ")
     actual_file_identity=$(stat_identity "$file") || die "Snapshot file identity is missing: $file"
     [ "$actual_file_identity" = "$expected_file_identity" ] || die "Snapshot file identity, owner, or mode changed: $file"
-    [ "$(jq -r ".files[$index].snapshotUid | tostring" "$LOCK")" = "$deployment_uid" ] || die "Snapshot file owner differs from the deployment identity: $file"
+    [ "$(jq -r ".files[$index].snapshotUid | tostring" "$LOCK_READ")" = "$deployment_uid" ] || die "Snapshot file owner differs from the deployment identity: $file"
   fi
   actual=$(stable_sha256_file "$file")
   [ "$actual" = "$expected" ] || die "Locked file changed: $file"
   index=$((index + 1))
 done
 
-content_json=$(jq -cSj '[.files[] | select(.snapshot == true) | {kind, sourcePath, sha256, sizeBytes, workloadId:(.workloadId // null)}] | sort_by(((.workloadId | tostring) + ":" + .kind + ":" + .sourcePath))' "$LOCK")
+content_json=$(jq -cSj '[.files[] | select(.snapshot == true) | {kind, sourcePath, sha256, sizeBytes, workloadId:(.workloadId // null)}] | sort_by(((.workloadId | tostring) + ":" + .kind + ":" + .sourcePath))' "$LOCK_READ")
 actual_content_sha256=$(printf '%s' "$content_json" | sha256_stream)
-[ "$actual_content_sha256" = "$(jq -r '.workloadContentSha256' "$LOCK")" ] || die "Hosted workload content digest does not match its snapshot records."
-receipt_json=$(jq -cSj '.rawPolicyReceipt' "$LOCK")
+[ "$actual_content_sha256" = "$(jq -r '.workloadContentSha256' "$LOCK_READ")" ] || die "Hosted workload content digest does not match its snapshot records."
+receipt_json=$(jq -cSj '.rawPolicyReceipt' "$LOCK_READ")
 actual_receipt_sha256=$(printf '%s' "$receipt_json" | sha256_stream)
-[ "$actual_receipt_sha256" = "$(jq -r '.rawPolicySha256' "$LOCK")" ] || die "Hosted workload raw policy receipt digest is invalid."
+[ "$actual_receipt_sha256" = "$(jq -r '.rawPolicySha256' "$LOCK_READ")" ] || die "Hosted workload raw policy receipt digest is invalid."
 
-catalog_path=$(jq -r '.files[] | select(.kind == "catalog" and ((.workloadId // null) == null)) | .path' "$LOCK")
+catalog_path=$(jq -r '.files[] | select(.kind == "catalog" and ((.workloadId // null) == null)) | .path' "$LOCK_READ")
 jq -e --slurpfile catalog "$catalog_path" '
   def relative_to($root): if startswith($root + "/") then .[($root | length) + 1:] else null end;
   . as $lock
@@ -269,10 +287,10 @@ jq -e --slurpfile catalog "$catalog_path" '
           manifest: (.manifestSourcePath | relative_to($lock.workloadRoot)),
           environmentFile: (.environmentSourcePath | relative_to($lock.workloadRoot))
         }) | sort_by(.manifest)))
-' "$LOCK" >/dev/null
+' "$LOCK_READ" >/dev/null
 
-jq -r '.workloads[].id' "$LOCK" | while IFS= read -r workload_id; do
-  manifest_path=$(jq -r --arg id "$workload_id" '.workloads[] | select(.id == $id) | .manifestPath' "$LOCK")
+jq -r '.workloads[].id' "$LOCK_READ" | while IFS= read -r workload_id; do
+  manifest_path=$(jq -r --arg id "$workload_id" '.workloads[] | select(.id == $id) | .manifestPath' "$LOCK_READ")
   jq -e --arg id "$workload_id" --slurpfile manifest "$manifest_path" '
     def unique_preserve: reduce .[] as $item ([]; if index($item) == null then . + [$item] else . end);
     def normalized_manifest:
@@ -294,17 +312,18 @@ jq -r '.workloads[].id' "$LOCK" | while IFS= read -r workload_id; do
         version, id, composeFile, projectMetadataFile: (.projectMetadataFile // null),
         services, secrets, migrationRoots
       })
-  ' "$LOCK" >/dev/null
+  ' "$LOCK_READ" >/dev/null
 done
 
 case "$COMMAND" in
   verify) command_output= ;;
-  compose-files) command_output=$(jq -r '.workloads[].composePath' "$LOCK") ;;
-  env-files) command_output=$(jq -r '.workloads[].environmentPath' "$LOCK") ;;
-  core-env-file) command_output=$(jq -r '.coreEnvFile' "$LOCK") ;;
-  project-name) command_output=$(jq -r '.projectName' "$LOCK") ;;
+  compose-records) command_output=$(jq -r '.workloads[] as $workload | .files[] | select(.kind == "workload-compose" and .workloadId == $workload.id and .path == $workload.composePath) | [.path, .sha256, (.snapshotDevice | tostring), (.snapshotInode | tostring), (.snapshotUid | tostring), "256"] | @tsv' "$LOCK_READ") ;;
+  env-records) command_output=$(jq -r '.workloads[] as $workload | .files[] | select(.kind == "workload-environment" and .workloadId == $workload.id and .path == $workload.environmentPath) | [.path, .sha256, (.snapshotDevice | tostring), (.snapshotInode | tostring), (.snapshotUid | tostring), "256"] | @tsv' "$LOCK_READ") ;;
+  core-env-file) command_output=$(jq -r '.coreEnvFile' "$LOCK_READ") ;;
+  project-name) command_output=$(jq -r '.projectName' "$LOCK_READ") ;;
 esac
 
 lock_after=$(stat_stable_identity "$LOCK") || die "Hosted workload lock cannot be restated."
 [ "$lock_before" = "$lock_after" ] || die "Hosted workload lock changed while being verified."
+[ "$lock_read_sha256" = "$(stable_sha256_file "$LOCK")" ] || die "Hosted workload lock bytes changed after their read-once snapshot."
 [ -z "$command_output" ] || printf '%s\n' "$command_output"

@@ -111,7 +111,13 @@ La preparazione valida digest immutabili, nomi, route, secret dichiarati,
 network e budget, confronta render core e combinato e scrive un lock `0600` con
 SHA-256 di ogni input. Lock e snapshot content-addressed devono stare nello
 stesso parent deployment-owned `0700`, fuori da `projects-portal/state`; il
-router riceve soltanto il lock in read-only. Non crea database, non applica migrazioni e non avvia
+resolver crea e finalizza gli snapshot con operazioni descriptor-relative
+`openat`/`O_NOFOLLOW`. Il deploy legge il lock una sola volta e consegna copie
+digest-verificate di Compose/environment tramite file descriptor persistenti,
+senza riaprire i pathname workload dopo la verifica; il router riceve soltanto
+il lock in read-only. L'identita' Unix che prepara ed esegue il deploy resta una
+trust boundary amministrativa e non deve essere condivisa con servizi workload.
+Non crea database, non applica migrazioni e non avvia
 container. Il deploy usa soltanto un lock `verified`; se un file cambia, il
 render fallisce chiuso finche' il lock non viene rigenerato e approvato.
 

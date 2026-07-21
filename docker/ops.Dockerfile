@@ -17,6 +17,7 @@ RUN apk add --no-cache \
     docker-cli-compose \
     git \
     openssh-client \
+    python3 \
     ruby \
     tini
 

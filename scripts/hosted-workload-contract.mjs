@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import crypto from "node:crypto";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import {
@@ -43,6 +44,14 @@ function invalid(message) {
 function readJson(filePath, label = filePath) {
   try {
     const { bytes } = readStableRegularFile(filePath, label);
+    return JSON.parse(bytes.toString("utf8"));
+  } catch (error) {
+    invalid(`${label} is not valid JSON: ${error.message}`);
+  }
+}
+
+function parseJsonBytes(bytes, label) {
+  try {
     return JSON.parse(bytes.toString("utf8"));
   } catch (error) {
     invalid(`${label} is not valid JSON: ${error.message}`);
@@ -228,7 +237,30 @@ function readStableRegularFile(filePathOrSource, label, beforeOpen) {
   }
 }
 
-function createSnapshotGeneration(snapshotRoot) {
+function runSnapshotHelper(command, args, input = undefined) {
+  const python = process.env.HOSTED_WORKLOAD_PYTHON || "python3";
+  const helper = path.join(import.meta.dirname, "hosted-workload-fs.py");
+  const result = spawnSync(python, [helper, command, ...args], {
+    input,
+    encoding: input == null ? "utf8" : undefined,
+    maxBuffer: 16 * 1024 * 1024,
+  });
+  if (result.error || result.status !== 0) {
+    const detail = String(result.stderr ?? result.error?.message ?? "unknown helper error").trim();
+    invalid(`Descriptor-relative snapshot ${command} failed: ${detail}`);
+  }
+  try {
+    return JSON.parse(Buffer.isBuffer(result.stdout) ? result.stdout.toString("utf8") : result.stdout);
+  } catch (error) {
+    invalid(`Descriptor-relative snapshot ${command} returned invalid JSON: ${error.message}`);
+  }
+}
+
+function identityArgument(identity) {
+  return JSON.stringify(identity ?? null);
+}
+
+function createSnapshotGeneration(snapshotRoot, snapshotAccessHook) {
   const lexicalRoot = path.resolve(snapshotRoot);
   const lexicalParent = path.dirname(lexicalRoot);
   const canonicalParent = physicalRoot(lexicalParent, "snapshot root parent");
@@ -239,27 +271,35 @@ function createSnapshotGeneration(snapshotRoot) {
     invalid("Snapshot root parent must be deployment-owned with mode 0700.");
   }
   const existing = fs.lstatSync(lexicalRoot, { throwIfNoEntry: false });
-  if (!existing) {
-    fs.mkdirSync(lexicalRoot, { mode: 0o700 });
-    fsyncDirectory(canonicalParent);
-  } else if (!existing.isDirectory() || existing.isSymbolicLink()) {
+  if (existing && (!existing.isDirectory() || existing.isSymbolicLink())) {
     invalid("Snapshot root must be a real non-symlink directory.");
   }
-  const canonicalRoot = physicalRoot(lexicalRoot, "snapshot root");
-  const stat = fs.lstatSync(canonicalRoot, { throwIfNoEntry: false });
-  if (!stat?.isDirectory() || stat.isSymbolicLink()) invalid("Snapshot root must be a real directory.");
-  const rootIdentity = fileIdentity(canonicalRoot);
-  if (rootIdentity.uid !== effectiveUid || rootIdentity.mode !== 0o700) {
+  const existingRootIdentity = existing ? fileIdentity(lexicalRoot) : null;
+  if (existingRootIdentity && (existingRootIdentity.uid !== effectiveUid || existingRootIdentity.mode !== 0o700)) {
     invalid("Snapshot root must be deployment-owned with mode 0700.");
   }
-  const generation = fs.mkdtempSync(path.join(canonicalRoot, ".staging-"));
-  fs.chmodSync(generation, 0o700);
-  fsyncDirectory(canonicalRoot);
+  snapshotAccessHook?.({ parent: canonicalParent, root: lexicalRoot }, "before descriptor-relative snapshot create");
+  const created = runSnapshotHelper("create", [
+    "--parent", canonicalParent,
+    "--root-name", path.basename(lexicalRoot),
+    "--expected-parent", identityArgument(parentIdentity),
+    "--expected-root", identityArgument(existingRootIdentity),
+  ]);
+  const canonicalRoot = physicalRoot(lexicalRoot, "snapshot root");
+  if (!sameIdentity(fileIdentity(canonicalParent), created.parentIdentity)
+      || !sameIdentity(fileIdentity(canonicalRoot), created.rootIdentity)) {
+    invalid("Snapshot parent or root changed after descriptor-relative creation.");
+  }
+  const generation = path.join(canonicalRoot, created.stagingName);
   return {
     parent: canonicalParent,
-    parentIdentity: fileIdentity(canonicalParent),
+    parentIdentity: created.parentIdentity,
     root: canonicalRoot,
-    generation: fs.realpathSync.native(generation),
+    rootIdentity: created.rootIdentity,
+    rootName: path.basename(canonicalRoot),
+    generation,
+    stagingName: created.stagingName,
+    stagingIdentity: created.stagingIdentity,
     nextIndex: 0,
   };
 }
@@ -288,39 +328,32 @@ function sameIdentity(actual, expected) {
 }
 
 function finalizeSnapshot(snapshot, records, contentDigest) {
-  const staging = snapshot.generation;
-  const finalGeneration = path.join(snapshot.root, `content-${contentDigest}`);
-  fsyncDirectory(staging);
-  if (fs.existsSync(finalGeneration)) {
-    const existing = fs.lstatSync(finalGeneration);
-    if (!existing.isDirectory() || existing.isSymbolicLink()) invalid("Existing content-addressed snapshot is not a real directory.");
-    for (const record of records.filter((item) => item.snapshot === true)) {
-      const existingPath = path.join(finalGeneration, path.basename(record.path));
-      const stat = fs.lstatSync(existingPath, { throwIfNoEntry: false });
-      if (!stat?.isFile() || stat.isSymbolicLink() || sha256Bytes(readStableRegularFile(existingPath, record.kind).bytes) !== record.sha256) {
-        invalid(`Existing content-addressed snapshot does not match ${record.kind}.`);
-      }
-    }
-    fs.rmSync(staging, { recursive: true, force: true });
-    fsyncDirectory(snapshot.root);
-  } else {
-    fs.renameSync(staging, finalGeneration);
-  }
-  fs.chmodSync(finalGeneration, 0o500);
-  fsyncDirectory(finalGeneration);
-  fsyncDirectory(snapshot.root);
+  const finalName = `content-${contentDigest}`;
+  const snapshotRecords = records.filter((item) => item.snapshot === true);
+  const finalized = runSnapshotHelper("finalize", [
+    "--parent", snapshot.parent,
+    "--root-name", snapshot.rootName,
+    "--staging-name", snapshot.stagingName,
+    "--expected-parent", identityArgument(snapshot.parentIdentity),
+    "--expected-root", identityArgument(snapshot.rootIdentity),
+    "--expected-staging", identityArgument(snapshot.stagingIdentity),
+    "--final-name", finalName,
+  ], Buffer.from(JSON.stringify(snapshotRecords.map((record) => ({ name: path.basename(record.path), sha256: record.sha256 })))));
+  if (finalized.finalName !== finalName) invalid("Descriptor-relative snapshot helper returned an unexpected generation name.");
+  const finalGeneration = path.join(snapshot.root, finalName);
   snapshot.generation = finalGeneration;
-  for (const record of records.filter((item) => item.snapshot === true)) {
+  for (const record of snapshotRecords) {
     record.path = path.join(finalGeneration, path.basename(record.path));
-    const identity = fileIdentity(record.path);
+    const identity = finalized.fileIdentities[path.basename(record.path)];
+    if (!identity) invalid(`Descriptor-relative snapshot helper omitted ${record.kind} identity.`);
     record.snapshotDevice = identity.device;
     record.snapshotInode = identity.inode;
     record.snapshotUid = identity.uid;
   }
   return {
-    parentIdentity: fileIdentity(snapshot.parent),
-    rootIdentity: fileIdentity(snapshot.root),
-    generationIdentity: fileIdentity(finalGeneration),
+    parentIdentity: finalized.parentIdentity,
+    rootIdentity: finalized.rootIdentity,
+    generationIdentity: finalized.generationIdentity,
     durability: {
       version: 1,
       filesFsynced: true,
@@ -336,16 +369,16 @@ function snapshotFile(sourcePathOrEntry, kind, snapshot, metadata = {}, beforeOp
   const suffix = path.extname(source.path).replace(/[^A-Za-z0-9.]/g, "") || ".data";
   const name = `${String(snapshot.nextIndex++).padStart(4, "0")}-${kind.replace(/[^a-z0-9-]/gi, "-")}${suffix}`;
   const snapshotPath = path.join(snapshot.generation, name);
-  const descriptor = fs.openSync(snapshotPath, fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY, 0o400);
-  try {
-    fs.writeFileSync(descriptor, bytes);
-    fs.fsyncSync(descriptor);
-  } finally {
-    fs.closeSync(descriptor);
-  }
-  fs.chmodSync(snapshotPath, 0o400);
-  fsyncDirectory(snapshot.generation);
-  return {
+  runSnapshotHelper("write", [
+    "--parent", snapshot.parent,
+    "--root-name", snapshot.rootName,
+    "--staging-name", snapshot.stagingName,
+    "--expected-parent", identityArgument(snapshot.parentIdentity),
+    "--expected-root", identityArgument(snapshot.rootIdentity),
+    "--expected-staging", identityArgument(snapshot.stagingIdentity),
+    "--file-name", name,
+  ], bytes);
+  const record = {
     kind,
     sourcePath: source.path,
     path: snapshotPath,
@@ -354,6 +387,8 @@ function snapshotFile(sourcePathOrEntry, kind, snapshot, metadata = {}, beforeOp
     snapshot: true,
     ...metadata,
   };
+  Object.defineProperty(record, "snapshotBytes", { value: bytes, enumerable: false });
+  return record;
 }
 
 function workloadContentSha256(records) {
@@ -502,7 +537,7 @@ export function validateWorkloadEnvironmentText(text, workloadId, label = "workl
 
 function workloadEnvironmentRecord(fileEntry, workloadId, snapshot, sourceAccessHook) {
   const record = snapshotFile(fileEntry, "workload-environment", snapshot, { workloadId }, sourceAccessHook);
-  validateWorkloadEnvironmentText(fs.readFileSync(record.path, "utf8"), workloadId, fileEntry.path);
+  validateWorkloadEnvironmentText(record.snapshotBytes.toString("utf8"), workloadId, fileEntry.path);
   return record;
 }
 
@@ -665,14 +700,14 @@ export function validateWorkloadManifest(document, manifestPath = "manifest") {
   };
 }
 
-export function resolveCatalog({ catalogPath, workloadRoot, coreEnvFile, coreFiles, projectName, snapshotRoot, activationLockPath, sourceAccessHook }) {
-  const snapshot = createSnapshotGeneration(path.resolve(requiredText(snapshotRoot, "snapshot root")));
+export function resolveCatalog({ catalogPath, workloadRoot, coreEnvFile, coreFiles, projectName, snapshotRoot, activationLockPath, sourceAccessHook, snapshotAccessHook }) {
+  const snapshot = createSnapshotGeneration(path.resolve(requiredText(snapshotRoot, "snapshot root")), snapshotAccessHook);
   const activationPath = path.resolve(activationLockPath ?? path.join(path.dirname(snapshot.root), "hosted-workloads.lock.json"));
   if (path.dirname(activationPath) !== path.dirname(snapshot.root)) {
     invalid("Activation lock and snapshot root must share one deployment-private parent.");
   }
   const catalogRecord = snapshotFile(path.resolve(catalogPath), "catalog", snapshot, {}, sourceAccessHook);
-  const catalog = readJson(catalogRecord.path, "hosted workload catalog");
+  const catalog = parseJsonBytes(catalogRecord.snapshotBytes, "hosted workload catalog");
   if (catalog?.version !== 1 || !Array.isArray(catalog.workloads)) {
     invalid("Hosted workload catalog must use version 1 and workloads[].");
   }
@@ -686,7 +721,7 @@ export function resolveCatalog({ catalogPath, workloadRoot, coreEnvFile, coreFil
     const manifestEntry = resolvePhysicalEntryWithin(root, entry.manifest, "workload manifest", "file");
     const manifestPath = manifestEntry.path;
     const manifestRecord = snapshotFile(manifestEntry, "workload-manifest", snapshot, {}, sourceAccessHook);
-    const manifest = validateWorkloadManifest(readJson(manifestRecord.path), manifestPath);
+    const manifest = validateWorkloadManifest(parseJsonBytes(manifestRecord.snapshotBytes, manifestPath), manifestPath);
     const environmentEntry = resolvePhysicalEntryWithin(root, entry.environmentFile, `environment file for ${manifest.id}`, "file");
     const environmentPath = environmentEntry.path;
     if (ids.has(manifest.id)) invalid(`Duplicate workload id ${manifest.id}.`);

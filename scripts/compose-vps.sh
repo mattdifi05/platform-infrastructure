@@ -25,6 +25,80 @@ env_path_value() {
   printf '%s' "$value"
 }
 
+sha256_file() {
+  local target=$1
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$target" | awk '{ print $1 }'
+  else
+    shasum -a 256 "$target" | awk '{ print $1 }'
+  fi
+}
+
+fd_identity() {
+  local target=$1 raw device inode uid mode
+  if stat -c '%d|%i|%u|%a' "$target" >/dev/null 2>&1; then
+    raw=$(stat -c '%d|%i|%u|%a' "$target")
+  else
+    raw=$(stat -f '%d|%i|%u|%Lp' "$target")
+  fi
+  IFS='|' read -r device inode uid mode <<< "$raw"
+  [[ "$OSTYPE" != darwin* ]] || device='*'
+  printf '%s|%s|%s|%s\n' "$device" "$inode" "$uid" "$((8#$mode))"
+}
+
+next_handoff_fd=50
+handoff_files=()
+handoff_directory=
+HANDOFF_REFERENCE=
+
+cleanup_handoff() {
+  local item
+  for item in "${handoff_files[@]:-}"; do
+    [[ ! -e "$item" ]] || /bin/rm -- "$item" >/dev/null 2>&1 || true
+  done
+  [[ -z "$handoff_directory" || ! -d "$handoff_directory" ]] || /bin/rmdir -- "$handoff_directory" >/dev/null 2>&1 || true
+}
+
+open_locked_handoff() {
+  local source=$1 expected_sha=$2 expected_device=$3 expected_inode=$4 expected_uid=$5 expected_mode=$6
+  local source_fd source_reference before after actual_device actual_inode actual_uid actual_mode handoff_file actual_sha handoff_fd
+  [[ "$source" = /* && "$source" != *[!A-Za-z0-9_./-]* && "$source" != *//* && "$source" != */../* && "$source" != */.. ]] || {
+    printf 'Invalid locked handoff path: %s\n' "$source" >&2
+    return 1
+  }
+  source_fd=$next_handoff_fd
+  next_handoff_fd=$((next_handoff_fd + 1))
+  eval "exec ${source_fd}<\"\$source\""
+  source_reference=/dev/fd/$source_fd
+  before=$(fd_identity "$source_reference")
+  IFS='|' read -r actual_device actual_inode actual_uid actual_mode <<< "$before"
+  [[ ( "$actual_device" = '*' || "$actual_device" = "$expected_device" )
+      && "$actual_inode" = "$expected_inode" && "$actual_uid" = "$expected_uid" && "$actual_mode" = "$expected_mode" ]] || {
+    printf 'Locked handoff object identity changed: %s\n' "$source" >&2
+    return 1
+  }
+  handoff_file=$handoff_directory/object-$next_handoff_fd
+  handoff_files+=("$handoff_file")
+  /bin/cat <&$source_fd > "$handoff_file"
+  after=$(fd_identity "$source_reference")
+  [[ "$before" = "$after" ]] || {
+    printf 'Locked handoff object changed while being copied: %s\n' "$source" >&2
+    return 1
+  }
+  eval "exec ${source_fd}<&-"
+  chmod 400 "$handoff_file"
+  actual_sha=$(sha256_file "$handoff_file")
+  [[ "$actual_sha" = "$expected_sha" ]] || {
+    printf 'Locked handoff digest changed: %s\n' "$source" >&2
+    return 1
+  }
+  handoff_fd=$next_handoff_fd
+  next_handoff_fd=$((next_handoff_fd + 1))
+  eval "exec ${handoff_fd}<\"\$handoff_file\""
+  /bin/rm -- "$handoff_file"
+  HANDOFF_REFERENCE=/dev/fd/$handoff_fd
+}
+
 cd "$ROOT_DIR"
 
 compose=(
@@ -35,6 +109,9 @@ compose=(
 workload_lock=${HOSTED_WORKLOAD_LOCK:-$(env_path_value HOSTED_WORKLOAD_LOCK)}
 if [[ -n "$workload_lock" ]]; then
   [[ "$workload_lock" = /* ]] || workload_lock="$ROOT_DIR/$workload_lock"
+  handoff_directory=$(mktemp -d "${TMPDIR:-/tmp}/hosted-compose-handoff.XXXXXX")
+  chmod 700 "$handoff_directory"
+  trap cleanup_handoff EXIT
   export HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE=${HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE:-$workload_lock}
   locked_core_env=$(HOSTED_WORKLOAD_ALLOW_RESOLVED=${HOSTED_WORKLOAD_ALLOW_RESOLVED:-0} sh "$ROOT_DIR/scripts/hosted-workload-lock.sh" "$workload_lock" core-env-file)
   locked_project_name=$(HOSTED_WORKLOAD_ALLOW_RESOLVED=${HOSTED_WORKLOAD_ALLOW_RESOLVED:-0} sh "$ROOT_DIR/scripts/hosted-workload-lock.sh" "$workload_lock" project-name)
@@ -46,14 +123,15 @@ if [[ -n "$workload_lock" ]]; then
     echo "Hosted workload lock was prepared for a different Compose project name." >&2
     exit 1
   }
-  mapfile -t workload_env_files < <(
+  workload_env_records=$(
     HOSTED_WORKLOAD_ALLOW_RESOLVED=${HOSTED_WORKLOAD_ALLOW_RESOLVED:-0} \
-      sh "$ROOT_DIR/scripts/hosted-workload-lock.sh" "$workload_lock" env-files
+      sh "$ROOT_DIR/scripts/hosted-workload-lock.sh" "$workload_lock" env-records
   )
-  for workload_env_file in "${workload_env_files[@]}"; do
-    [[ -n "$workload_env_file" ]] || continue
-    compose+=(--env-file "$workload_env_file")
-  done
+  while IFS=$'\t' read -r source expected_sha expected_device expected_inode expected_uid expected_mode; do
+    [[ -n "$source" ]] || continue
+    open_locked_handoff "$source" "$expected_sha" "$expected_device" "$expected_inode" "$expected_uid" "$expected_mode"
+    compose+=(--env-file "$HANDOFF_REFERENCE")
+  done <<< "$workload_env_records"
 else
   export HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE=${HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE:-$ROOT_DIR/config/no-hosted-workloads.lock.json}
 fi
@@ -72,14 +150,15 @@ compose+=(
 )
 
 if [[ -n "$workload_lock" ]]; then
-  mapfile -t workload_files < <(
+  workload_compose_records=$(
     HOSTED_WORKLOAD_ALLOW_RESOLVED=${HOSTED_WORKLOAD_ALLOW_RESOLVED:-0} \
-      sh "$ROOT_DIR/scripts/hosted-workload-lock.sh" "$workload_lock" compose-files
+      sh "$ROOT_DIR/scripts/hosted-workload-lock.sh" "$workload_lock" compose-records
   )
-  for workload_file in "${workload_files[@]}"; do
-    [[ -n "$workload_file" ]] || continue
-    compose+=(-f "$workload_file")
-  done
+  while IFS=$'\t' read -r source expected_sha expected_device expected_inode expected_uid expected_mode; do
+    [[ -n "$source" ]] || continue
+    open_locked_handoff "$source" "$expected_sha" "$expected_device" "$expected_inode" "$expected_uid" "$expected_mode"
+    compose+=(-f "$HANDOFF_REFERENCE")
+  done <<< "$workload_compose_records"
 fi
 
 runtime_identity_variables=(
@@ -112,4 +191,6 @@ if [[ "${1:-}" == "up" ]]; then
   "${compose[@]}" --profile backup run --rm --no-deps broker-auth-bootstrap
 fi
 
+cleanup_handoff
+trap - EXIT
 exec "${compose[@]}" --profile backup "$@"
