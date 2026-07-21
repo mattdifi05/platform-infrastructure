@@ -51,6 +51,8 @@ REQUIRED_LIVE_RESIDUALS = (
     "LIVE-OPS-004",
 )
 
+REQUIRED_PROVIDER_RESIDUALS = ("PROVIDER-003",)
+
 DOCUMENTATION_TOPICS = (
     "architecture",
     "threat-model",
@@ -211,7 +213,11 @@ class Fixture:
     def _make_baseline(self) -> None:
         reportable_ids = [f"CAN-{number:03d}" for number in range(1, 136)]
         suppressed_ids = [f"CAN-{number:03d}" for number in range(136, 241)]
-        auxiliary_ids = [*BASELINE_LOCAL_BLOCKERS, *REQUIRED_LIVE_RESIDUALS]
+        auxiliary_ids = [
+            *BASELINE_LOCAL_BLOCKERS,
+            *REQUIRED_LIVE_RESIDUALS,
+            *REQUIRED_PROVIDER_RESIDUALS,
+        ]
         auxiliary_ids.extend(f"AUX-{number:03d}" for number in range(1, 102 - len(auxiliary_ids)))
         if len(auxiliary_ids) != 101:
             raise AssertionError("fixture auxiliary cardinality")
@@ -248,19 +254,38 @@ class Fixture:
         for item_id in auxiliary_ids:
             is_local = item_id in BASELINE_LOCAL_BLOCKERS
             is_live = item_id in REQUIRED_LIVE_RESIDUALS
-            rows.append(
-                self._classification_row(
-                    item_id,
-                    record_type="gap" if is_local else "operational-finding",
-                    category="STILL-OPEN-IN-CANDIDATE" if is_local else "LIVE-OPERATIONAL-FINDING",
-                    candidate_affected=is_local,
-                    live_affected=is_live,
-                    is_new=False,
-                    blocks_merge=is_local,
-                    blocks_deploy=is_local or is_live,
-                    blocks_go=is_local or is_live,
-                )
+            is_provider = item_id in REQUIRED_PROVIDER_RESIDUALS
+            row = self._classification_row(
+                item_id,
+                record_type=(
+                    "gap"
+                    if (is_local or is_provider)
+                    else ("operational-finding" if is_live else "documentation-drift")
+                ),
+                category=(
+                    "STILL-OPEN-IN-CANDIDATE"
+                    if is_local
+                    else (
+                        "PROVIDER-EXTERNAL"
+                        if is_provider
+                        else (
+                            "LIVE-OPERATIONAL-FINDING"
+                            if is_live
+                            else "DOCUMENTATION-EVIDENCE-DRIFT"
+                        )
+                    )
+                ),
+                candidate_affected=is_local,
+                live_affected=is_live,
+                is_new=False,
+                blocks_merge=is_local or is_provider,
+                blocks_deploy=is_local or is_live or is_provider,
+                blocks_go=is_local or is_live or is_provider,
             )
+            if is_provider:
+                row["affected_scope"] = ["provider", "evidence"]
+                row["final_state"] = "EXTERNAL-VALIDATION-REQUIRED"
+            rows.append(row)
         if len(rows) != 341:
             raise AssertionError("fixture classification cardinality")
         self.baseline_rows = rows
@@ -498,29 +523,35 @@ class Fixture:
 
         self._write_matrices(self.inputs / "required-matrices.md")
 
+        all_external_blockers = [*REQUIRED_LIVE_RESIDUALS, *REQUIRED_PROVIDER_RESIDUALS]
         verdicts = {
             "schema_version": 1,
             "candidate_final_commit": self.final_commit,
             "evidence_cutoff_at": "2026-07-21T20:00:00Z",
             "candidate_security": {"value": "PASS", "reason_ids": []},
-            "merge": {"value": "READY", "reason_ids": []},
-            "go_to_deploy": {"value": "NO-GO", "reason_ids": list(REQUIRED_LIVE_RESIDUALS)},
-            "full_production_go": {"value": "NO-GO", "reason_ids": list(REQUIRED_LIVE_RESIDUALS)},
+            "merge": {"value": "BLOCKED", "reason_ids": list(REQUIRED_PROVIDER_RESIDUALS)},
+            "go_to_deploy": {"value": "NO-GO", "reason_ids": sorted(all_external_blockers)},
+            "full_production_go": {"value": "NO-GO", "reason_ids": sorted(all_external_blockers)},
             "ready_for_commit_push_deploy_authorization": "NO",
         }
         self._write_json(self.inputs / "four-verdicts.json", verdicts)
 
         residuals = []
-        for item_id in REQUIRED_LIVE_RESIDUALS:
+        for item_id in [*REQUIRED_LIVE_RESIDUALS, *REQUIRED_PROVIDER_RESIDUALS]:
+            is_provider = item_id in REQUIRED_PROVIDER_RESIDUALS
             residuals.append(
                 {
                     "schema_version": 1,
                     "id": item_id,
-                    "locus": "LIVE-RUNTIME",
+                    "locus": "PROVIDER-EXTERNAL" if is_provider else "LIVE-RUNTIME",
                     "verification_status": "NOT-VERIFIED",
                     "candidate_final_commit": self.final_commit,
                     "classification_ids": [item_id],
-                    "blocks": ["go_to_deploy", "full_production_go"],
+                    "blocks": (
+                        ["merge", "go_to_deploy", "full_production_go"]
+                        if is_provider
+                        else ["go_to_deploy", "full_production_go"]
+                    ),
                     "required_evidence": ["direct live execution receipt"],
                     "owner": "platform operations",
                 }
@@ -649,6 +680,10 @@ class PostfixEvidenceTests(unittest.TestCase):
         self.assertEqual(validation["counts"]["reportable"], 135)
         self.assertEqual(validation["counts"]["suppressed"], 105)
         self.assertEqual(validation["counts"]["fix_groups"], 77)
+        verdicts = json.loads(
+            (self.fixture.output / "four_verdicts_v1.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(verdicts["merge"], {"value": "BLOCKED", "reason_ids": ["PROVIDER-003"]})
 
     def test_independent_publications_have_the_same_byte_index(self) -> None:
         first = self.fixture.root / "package-a"
@@ -782,7 +817,7 @@ class PostfixEvidenceTests(unittest.TestCase):
         verdicts["ready_for_commit_push_deploy_authorization"] = "YES"
         self.fixture.write_json("inputs/four-verdicts.json", verdicts)
         self.fixture.refresh_handoff_hash("four_verdicts")
-        with self.assertRaisesRegex(ContractError, "go_to_deploy"):
+        with self.assertRaisesRegex(ContractError, "derived|go_to_deploy"):
             self.build()
 
     def test_residual_block_axes_are_derived_from_the_full_classification_ledger(self) -> None:
@@ -797,6 +832,16 @@ class PostfixEvidenceTests(unittest.TestCase):
         self.fixture.write_json("inputs/four-verdicts.json", verdicts)
         self.fixture.refresh_handoff_hash("four_verdicts")
         with self.assertRaisesRegex(ContractError, "derived|exact residual"):
+            self.build()
+
+    def test_residual_classification_coverage_is_an_exact_non_overlapping_partition(self) -> None:
+        residuals = self.fixture.load_jsonl("inputs/provider-live-residuals.jsonl")
+        duplicate = copy.deepcopy(residuals[0])
+        duplicate["id"] = "DUPLICATE-LIVE-COVERAGE"
+        residuals.append(duplicate)
+        self.fixture.write_jsonl("inputs/provider-live-residuals.jsonl", residuals)
+        self.fixture.refresh_handoff_hash("provider_live_residuals")
+        with self.assertRaisesRegex(ContractError, "duplicate classification coverage"):
             self.build()
 
     def test_pass_log_cannot_substitute_for_a_script_present_at_final_commit(self) -> None:

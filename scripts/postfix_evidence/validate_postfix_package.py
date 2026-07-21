@@ -69,6 +69,17 @@ REQUIRED_LIVE_RESIDUALS = frozenset(
     {"LIVE-BKP-006", "LIVE-OPS-001", "LIVE-OPS-002", "LIVE-OPS-004"}
 )
 
+REQUIRED_PROVIDER_RESIDUALS = frozenset({"PROVIDER-003"})
+
+EXTERNAL_CATEGORIES = frozenset(
+    {
+        "PROVIDER-EXTERNAL",
+        "LIVE-OPERATIONAL-FINDING",
+        "HARDWARE-MAINTENANCE",
+        "DEPLOYMENT-PROCEDURE-FINDING",
+    }
+)
+
 DOCUMENTATION_TOPICS = frozenset(
     {
         "architecture",
@@ -437,6 +448,22 @@ def _validate_classification(
             not isinstance(scope, str) for scope in row["affected_scope"]
         ):
             raise ContractError(f"post-fix classification: invalid affected scope for {item_id}")
+        prior = baseline.by_id[item_id]
+        if prior.get("category") in EXTERNAL_CATEGORIES or prior.get("live_affected") is True:
+            for field in (
+                "category",
+                "candidate_affected",
+                "live_affected",
+                "blocks_merge",
+                "blocks_deploy",
+                "blocks_go_to_deploy",
+                "blocks_only_production_go",
+                "affected_scope",
+            ):
+                if row.get(field) != prior.get(field):
+                    raise ContractError(
+                        f"post-fix classification: external/live boundary was weakened for {item_id} ({field})"
+                    )
     for item_id in baseline.suppressed_ids:
         if by_id[item_id] != baseline.by_id[item_id]:
             raise ContractError(f"post-fix classification: suppressed row changed: {item_id}")
@@ -464,9 +491,18 @@ def _validate_classification(
     for item_id, row in by_id.items():
         if item_id in baseline.reportable_ids or item_id in baseline.suppressed_ids:
             continue
-        if row.get("candidate_affected") is True or row.get("blocks_merge") is True:
+        if row.get("candidate_affected") is True:
             raise ContractError(f"post-fix classification: local candidate/merge blocker remains: {item_id}")
-        if row.get("live_affected") is True or row.get("blocks_deploy") is True or row.get("blocks_go_to_deploy") is True:
+        if row.get("blocks_merge") is True and row.get("category") not in EXTERNAL_CATEGORIES:
+            raise ContractError(f"post-fix classification: local candidate/merge blocker remains: {item_id}")
+        if (
+            row.get("category") in EXTERNAL_CATEGORIES
+            or row.get("live_affected") is True
+            or row.get("blocks_merge") is True
+            or row.get("blocks_deploy") is True
+            or row.get("blocks_go_to_deploy") is True
+            or row.get("blocks_only_production_go") is True
+        ):
             external_or_live.add(item_id)
     return by_id, external_or_live
 
@@ -708,18 +744,12 @@ def _validate_local_closures(
     receipts: dict[str, dict[str, Any]],
 ) -> None:
     by_id = _unique_rows(rows, "id", label="local condition closure")
-    external_categories = {
-        "PROVIDER-EXTERNAL",
-        "LIVE-OPERATIONAL-FINDING",
-        "HARDWARE-MAINTENANCE",
-        "DEPLOYMENT-PROCEDURE-FINDING",
-    }
     baseline_local_blockers = {
         item_id
         for item_id, row in baseline.by_id.items()
         if item_id not in baseline.reportable_ids
         and item_id not in baseline.suppressed_ids
-        and row.get("category") not in external_categories
+        and row.get("category") not in EXTERNAL_CATEGORIES
         and any(
             row.get(field) is True
             for field in ("candidate_affected", "blocks_merge", "blocks_deploy", "blocks_go_to_deploy")
@@ -908,28 +938,90 @@ def _validate_residuals(
         ids = string_list(row["classification_ids"], label=f"provider/live residual {residual_id} classification IDs")
         if any(item not in classification for item in ids):
             raise ContractError(f"provider/live residual {residual_id}: unknown classification ID")
+        overlap = covered & set(ids)
+        if overlap:
+            raise ContractError(
+                f"provider/live residuals: duplicate classification coverage: {sorted(overlap)}"
+            )
         covered.update(ids)
         axes = string_list(row["blocks"], label=f"provider/live residual {residual_id} blocker axes", allow_empty=True)
         if not set(axes).issubset(blockers):
             raise ContractError(f"provider/live residual {residual_id}: invalid blocker axis")
-        for axis in axes:
-            blockers[axis].add(residual_id)
+        derived_axes: set[str] = {"full_production_go"}
+        for item_id in ids:
+            classification_row = classification[item_id]
+            if classification_row.get("candidate_affected") is True:
+                derived_axes.add("candidate_security")
+            if classification_row.get("blocks_merge") is True:
+                derived_axes.add("merge")
+            if (
+                classification_row.get("blocks_deploy") is True
+                or classification_row.get("blocks_go_to_deploy") is True
+            ):
+                derived_axes.add("go_to_deploy")
+        if set(axes) != derived_axes:
+            raise ContractError(
+                f"provider/live residual {residual_id}: blocks are not the exact residual axes derived from classification"
+            )
+        for axis in derived_axes:
+            blockers[axis].update(ids)
         string_list(row["required_evidence"], label=f"provider/live residual {residual_id} required evidence")
         nonempty_string(row["owner"], label=f"provider/live residual {residual_id} owner")
-    if not external_or_live.issubset(covered):
-        raise ContractError(f"provider/live residuals: unreported live/external classification rows: {sorted(external_or_live - covered)}")
-    required_live = REQUIRED_LIVE_RESIDUALS & set(classification)
-    if not required_live.issubset(covered):
-        raise ContractError("provider/live residuals: required High live operational rows were hidden")
+    if covered != external_or_live:
+        raise ContractError(
+            "provider/live residuals: coverage is not the exact live/external classification partition"
+        )
+    required_external = (REQUIRED_LIVE_RESIDUALS | REQUIRED_PROVIDER_RESIDUALS) & set(classification)
+    if not required_external.issubset(covered):
+        raise ContractError("provider/live residuals: required High/provider blocking rows were hidden")
     return by_id, blockers
+
+
+def _derive_verdicts(
+    classification: dict[str, dict[str, Any]],
+    final_commit: str,
+    evidence_cutoff: str,
+    residual_classification_ids: set[str],
+) -> dict[str, Any]:
+    candidate_reasons = sorted(
+        item_id for item_id, row in classification.items() if row.get("candidate_affected") is True
+    )
+    merge_reasons = sorted(
+        item_id for item_id, row in classification.items() if row.get("blocks_merge") is True
+    )
+    deploy_reasons = sorted(
+        item_id
+        for item_id, row in classification.items()
+        if row.get("blocks_deploy") is True or row.get("blocks_go_to_deploy") is True
+    )
+    production_reasons = sorted(
+        residual_classification_ids
+        | {
+            item_id
+            for item_id, row in classification.items()
+            if row.get("blocks_only_production_go") is True
+        }
+    )
+    candidate_value = "FAIL" if candidate_reasons else "PASS"
+    merge_value = "BLOCKED" if merge_reasons else "READY"
+    deploy_value = "NO-GO" if deploy_reasons else "GO"
+    production_value = "NO-GO" if production_reasons else "GO"
+    ready = "YES" if candidate_value == "PASS" and merge_value == "READY" and deploy_value == "GO" else "NO"
+    return {
+        "schema_version": 1,
+        "candidate_final_commit": final_commit,
+        "evidence_cutoff_at": evidence_cutoff,
+        "candidate_security": {"value": candidate_value, "reason_ids": candidate_reasons},
+        "merge": {"value": merge_value, "reason_ids": merge_reasons},
+        "go_to_deploy": {"value": deploy_value, "reason_ids": deploy_reasons},
+        "full_production_go": {"value": production_value, "reason_ids": production_reasons},
+        "ready_for_commit_push_deploy_authorization": ready,
+    }
 
 
 def _validate_verdicts(
     verdicts: dict[str, Any],
-    final_commit: str,
-    evidence_cutoff: str,
-    blockers: dict[str, set[str]],
-    residual_count: int,
+    derived: dict[str, Any],
 ) -> None:
     exact_keys(
         verdicts,
@@ -945,35 +1037,11 @@ def _validate_verdicts(
         },
         label="four verdicts",
     )
-    if verdicts["schema_version"] != 1 or verdicts["candidate_final_commit"] != final_commit or verdicts["evidence_cutoff_at"] != evidence_cutoff:
-        raise ContractError("four verdicts: version/final identity/cutoff mismatch")
-    axes = {
-        "candidate_security": {"PASS", "FAIL"},
-        "merge": {"READY", "BLOCKED"},
-        "go_to_deploy": {"GO", "NO-GO"},
-        "full_production_go": {"GO", "NO-GO"},
-    }
-    values: dict[str, str] = {}
-    reasons: dict[str, set[str]] = {}
-    for axis, allowed in axes.items():
-        value = exact_keys(verdicts[axis], {"value", "reason_ids"}, label=f"four verdicts {axis}")
-        if value["value"] not in allowed:
-            raise ContractError(f"four verdicts: invalid {axis} value")
-        values[axis] = value["value"]
-        reasons[axis] = set(string_list(value["reason_ids"], label=f"four verdicts {axis} reasons", allow_empty=True))
-    if values["candidate_security"] != "PASS" or values["merge"] != "READY":
-        raise ContractError("four verdicts: a complete post-fix package requires candidate PASS and merge READY")
-    positive = {"candidate_security": "PASS", "merge": "READY", "go_to_deploy": "GO", "full_production_go": "GO"}
-    for axis, blocking_ids in blockers.items():
-        if blocking_ids and values[axis] == positive[axis]:
-            raise ContractError(f"four verdicts: positive {axis} hides blocking provider/live residuals")
-        if blocking_ids and not blocking_ids.issubset(reasons[axis]):
-            raise ContractError(f"four verdicts: {axis} reasons omit blocking residual IDs")
-    if residual_count and values["full_production_go"] == "GO":
-        raise ContractError("four verdicts: full production GO cannot coexist with unverified residuals")
-    expected_ready = "YES" if values["go_to_deploy"] == "GO" else "NO"
-    if verdicts["ready_for_commit_push_deploy_authorization"] != expected_ready:
-        raise ContractError("four verdicts: authorization readiness is inconsistent with go_to_deploy")
+    for axis in ("candidate_security", "merge", "go_to_deploy", "full_production_go"):
+        exact_keys(verdicts[axis], {"value", "reason_ids"}, label=f"four verdicts {axis}")
+        string_list(verdicts[axis]["reason_ids"], label=f"four verdicts {axis} reasons", allow_empty=True)
+    if verdicts != derived:
+        raise ContractError("four verdicts: values and reasons are not derived from the full classification ledger")
 
 
 def _derive_finding_map(
@@ -1033,7 +1101,14 @@ def _validate_dataset(
     _validate_semantic(semantic_receipt, final_commit, semantic_path, semantic_receipt_sha256)
     _validate_matrices(matrices_bytes, baseline)
     _, blockers = _validate_residuals(residual_rows, classification, external_or_live, final_commit)
-    _validate_verdicts(verdicts, final_commit, evidence_cutoff, blockers, len(residual_rows))
+    residual_classification_ids = set().union(*blockers.values()) if blockers else set()
+    derived_verdicts = _derive_verdicts(
+        classification,
+        final_commit,
+        evidence_cutoff,
+        residual_classification_ids,
+    )
+    _validate_verdicts(verdicts, derived_verdicts)
     counts = {
         "classification_rows": len(classification_rows),
         "canonical_candidates": len(baseline.registry),
