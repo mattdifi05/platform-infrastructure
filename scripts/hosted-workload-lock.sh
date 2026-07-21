@@ -234,9 +234,12 @@ jq_lock -e --arg lockPath "$LOCK" --argjson allowResolved "$allow_resolved" --ar
     and $lock.rawPolicyWorkloadContentSha256 == $lock.workloadContentSha256
     and $lock.rawPolicyControls == $controls
     and (($lock.rawPolicySha256 | type) == "string" and ($lock.rawPolicySha256 | test("^[a-f0-9]{64}$")))
-    and (($lock.rawPolicyReceipt | keys | sort) == ["controls", "policyVersion", "workloadContentSha256", "workloads"])
+    and (($lock.rawPolicyReceipt | keys | sort) == ["controls", "policyVersion", "protectedNetworkNames", "workloadContentSha256", "workloads"])
     and $lock.rawPolicyReceipt.policyVersion == $lock.rawPolicyVersion
     and $lock.rawPolicyReceipt.controls == $controls
+    and ($lock.rawPolicyReceipt.protectedNetworkNames | type == "array")
+    and ($lock.rawPolicyReceipt.protectedNetworkNames == ($lock.rawPolicyReceipt.protectedNetworkNames | unique | sort))
+    and all($lock.rawPolicyReceipt.protectedNetworkNames[]; type == "string" and length > 0)
     and $lock.rawPolicyReceipt.workloadContentSha256 == $lock.workloadContentSha256
     and (($lock.rawPolicyReceipt.workloads | map(.workloadId) | sort) == ($workload_ids | sort))
     and all($lock.rawPolicyReceipt.workloads[];
@@ -246,6 +249,7 @@ jq_lock -e --arg lockPath "$LOCK" --argjson allowResolved "$allow_resolved" --ar
       | (($receipt | keys | sort) == ["composeSha256", "networkNames", "serviceNames", "topLevelKeys", "workloadId"])
         and ($receipt.networkNames | type == "array")
         and ($receipt.networkNames == ($receipt.networkNames | unique | sort))
+        and (($receipt.networkNames - $lock.rawPolicyReceipt.protectedNetworkNames) == $receipt.networkNames)
         and all($receipt.networkNames[];
           . as $name
           | (($receipt.workloadId | gsub("-"; "_")) + "_") as $prefix
@@ -378,6 +382,7 @@ case "$COMMAND" in
       coreEnvFile,
       projectName,
       workloadIds: [.workloads[].id] | sort,
+      protectedNetworkNames: .rawPolicyReceipt.protectedNetworkNames,
       networkRecords: [
         .rawPolicyReceipt.workloads[] as $workload
         | $workload.networkNames[]

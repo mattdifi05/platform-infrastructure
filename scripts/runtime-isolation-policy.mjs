@@ -28,6 +28,11 @@ const RUNTIME_IDENTITY_LABELS = [
 export function evaluateRuntimeIsolation(config, options = {}) {
   const services = object(config?.services);
   const networks = object(config?.networks);
+  const protectedNetworkNames = new Set(Array.isArray(options.protectedNetworkNames)
+    ? options.protectedNetworkNames.map(String)
+    : Object.entries(networks)
+      .filter(([, definition]) => typeof definition?.labels?.["com.platform.trust-zone"] === "string")
+      .map(([name]) => name));
   const projectName = String(options.projectName ?? "");
   const maxMemoryBytes = integer(options.maxMemoryBytes ?? 13_500 * 1024 * 1024);
   const maxWorkloadMemoryBytes = integer(options.maxWorkloadMemoryBytes ?? 8_000 * 1024 * 1024);
@@ -100,12 +105,15 @@ export function evaluateRuntimeIsolation(config, options = {}) {
     record(`workload-no-swap-${name}`, bytes(service.memswap_limit) === bytes(service.mem_limit), `${name} memswap=${bytes(service.memswap_limit)} memory=${bytes(service.mem_limit)}`);
     const oomControls = ["oom_kill_disable", "oom_score_adj", "mem_swappiness"].filter((field) => Object.hasOwn(service, field));
     record(`workload-no-oom-overrides-${name}`, oomControls.length === 0, `${name} oomControls=${oomControls.join(",") || "none"}`);
+    const joinedProtectedNetworks = networkNames(service).filter((network) => protectedNetworkNames.has(network));
+    record(`workload-no-protected-network-${name}`, joinedProtectedNetworks.length === 0, `${name} protectedNetworks=${joinedProtectedNetworks.join(",") || "none"}`);
     const foreignNetworkIdentities = networkNames(service).filter((network) => {
       const attachment = Array.isArray(service.networks) ? null : service.networks?.[network];
       const definition = object(networks[network]);
       const attachmentIsPlain = attachment == null
         || (typeof attachment === "object" && !Array.isArray(attachment) && Object.keys(attachment).length === 0);
-      return workloadNetworkOwner(network, workloadIds) !== workloadId
+      return protectedNetworkNames.has(network)
+        || workloadNetworkOwner(network, workloadIds) !== workloadId
         || !attachmentIsPlain
         || definition.external === true
         || definition.name !== `${projectName}_${network}`;

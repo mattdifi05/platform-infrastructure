@@ -233,6 +233,27 @@ test("rejects workload network topology overrides at runtime", () => {
   assert.equal(accepted.status, "passed", accepted.failures.join("\n"));
 });
 
+test("rejects a workload identity that collides with a protected core network", () => {
+  const config = fixture();
+  const service = config.services["example-app-web"];
+  delete config.services["example-app-web"];
+  config.services["platform-web"] = {
+    ...service,
+    labels: { "com.platform.workload-id": "platform", "com.platform.workload-role": "web" },
+    networks: { platform_postgres: null },
+  };
+  config.services.postgres.networks = { platform_postgres: null };
+  delete config.networks.example_app_ingress;
+  config.networks.platform_postgres = {
+    internal: true,
+    name: "fixture_platform_postgres",
+    labels: { "com.platform.trust-zone": "postgres" },
+  };
+  const report = evaluateRuntimeIsolation(config, { projectName: "fixture", protectedNetworkNames: ["platform_postgres"] });
+  assert.equal(report.status, "failed");
+  assert.match(report.failures.join("\n"), /workload-no-protected-network-platform-web/);
+});
+
 test("binds all six hosted workload runtime identity labels", () => {
   const expected = runtimeIdentityFixture();
   const accepted = fixture();

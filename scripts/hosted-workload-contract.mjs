@@ -946,7 +946,7 @@ function assertVolumes(name, service, workloadId) {
   }
 }
 
-function assertWorkloadService({ serviceDefinition, manifestService, manifest, combined, projectName }) {
+function assertWorkloadService({ serviceDefinition, manifestService, manifest, combined, projectName, protectedNetworkNames }) {
   const name = manifestService.name;
   const predeclaredRuntimeLabels = Object.keys(serviceDefinition.labels ?? {}).filter((label) => label.startsWith("com.platform.runtime."));
   if (predeclaredRuntimeLabels.length > 0) invalid(`${name} cannot predeclare trusted runtime identity labels.`);
@@ -996,6 +996,7 @@ function assertWorkloadService({ serviceDefinition, manifestService, manifest, c
   const networks = serviceNetworks(serviceDefinition);
   if (networks.size === 0) invalid(`${name} must declare networks.`);
   for (const network of networks) {
+    if (protectedNetworkNames.has(network)) invalid(`${name} cannot join protected core network ${network}.`);
     if (workloadNetworkOwner(network, combinedWorkloadIds(combined)) !== manifest.id) invalid(`${name} uses unauthorized network ${network}.`);
     const attachment = Array.isArray(serviceDefinition.networks) ? null : serviceDefinition.networks?.[network];
     if (attachment != null && (!attachment || typeof attachment !== "object" || Array.isArray(attachment) || Object.keys(attachment).length > 0)) {
@@ -1097,6 +1098,10 @@ export function validateRenderedWorkloads({ core, combined, lock }) {
   validateGlobalRouteOwnership(lock.workloads);
   assertBrokerPolicyDigest(lock);
   const workloadIds = lock.workloads.map((workload) => workload.id);
+  const protectedNetworkNames = new Set(Object.keys(core.networks ?? {}));
+  if (lock.rawPolicyReceipt && !same(lock.rawPolicyReceipt.protectedNetworkNames, [...protectedNetworkNames].sort())) {
+    invalid("Raw source policy protected-network receipt does not match the exact core render.");
+  }
   assertActivationStorageIsolation(core, combined, lock);
   assertProtectedTopLevelResourcesUnchanged(core, combined);
   assertPlatformServicesUnchanged(core, combined, workloadIds);
@@ -1139,6 +1144,7 @@ export function validateRenderedWorkloads({ core, combined, lock }) {
       manifest: item.workload,
       combined,
       projectName: lock.projectName,
+      protectedNetworkNames,
     });
     const brokerUse = assertBrokerEnvironment(name, rendered, item.workload, item.service);
     if (brokerUse.usesRedis) redisUsers.add(item.workload.id);
@@ -1255,10 +1261,13 @@ export function verifyRawPolicyReceipt(lock) {
       || lock?.rawPolicyWorkloadContentSha256 !== lock?.workloadContentSha256
       || !same(lock?.rawPolicyControls, RAW_POLICY_CONTROLS)
       || !receipt || typeof receipt !== "object" || Array.isArray(receipt)
-      || !same(Object.keys(receipt).sort(), ["controls", "policyVersion", "workloadContentSha256", "workloads"])
+      || !same(Object.keys(receipt).sort(), ["controls", "policyVersion", "protectedNetworkNames", "workloadContentSha256", "workloads"])
       || receipt.policyVersion !== lock.rawPolicyVersion
       || receipt.workloadContentSha256 !== lock.workloadContentSha256
       || !same(receipt.controls, RAW_POLICY_CONTROLS)
+      || !Array.isArray(receipt.protectedNetworkNames)
+      || !same(receipt.protectedNetworkNames, [...new Set(receipt.protectedNetworkNames)].sort())
+      || receipt.protectedNetworkNames.some((name) => typeof name !== "string" || name.length === 0)
       || !Array.isArray(receipt.workloads)
       || !SHA256.test(String(lock?.rawPolicySha256 ?? ""))
       || sha256Bytes(Buffer.from(JSON.stringify(stable(receipt)))) !== lock.rawPolicySha256) {
@@ -1279,7 +1288,7 @@ export function verifyRawPolicyReceipt(lock) {
     if (!workload || composeRecords.length !== 1 || item.composeSha256 !== composeRecords[0].sha256
         || !same(serviceNames, [...new Set(serviceNames)].sort())
         || !same(networkNames, [...new Set(networkNames)].sort())
-        || networkNames.some((name) => workloadNetworkOwner(name, expectedIds) !== item.workloadId)
+        || networkNames.some((name) => workloadNetworkOwner(name, expectedIds) !== item.workloadId || receipt.protectedNetworkNames.includes(name))
         || !same(topLevelKeys, [...new Set(topLevelKeys)].sort()) || !topLevelKeys.includes("services")
         || workload.services.some((service) => !serviceNames.includes(service.name))) {
       invalid(`Raw source policy receipt is not bound to ${item.workloadId ?? "a workload"}.`);

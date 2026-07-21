@@ -221,6 +221,23 @@ class HostedWorkloadSourcePolicyTest < Minitest::Test
     assert_match(/must declare only internal: false/, error.message)
   end
 
+  def test_rejects_workload_network_collision_with_protected_core_name
+    model = {
+      "networks" => { "platform_postgres" => { "internal" => true } },
+      "services" => { "platform-web" => { "networks" => ["platform_postgres"] } }
+    }
+    error = assert_raises(ArgumentError) do
+      HostedWorkloadSourcePolicy.validate_source_model(
+        model,
+        "fixture",
+        workload_id: "platform",
+        project_name: "fixture",
+        protected_networks: ["platform_postgres"]
+      )
+    end
+    assert_match(/collides with a protected core network/, error.message)
+  end
+
   def test_rejects_host_device_controls
     [
       "services:\n  app:\n    devices:\n      - /dev/kvm:/dev/kvm\n",

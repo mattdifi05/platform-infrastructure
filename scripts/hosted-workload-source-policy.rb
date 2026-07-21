@@ -79,7 +79,7 @@ module HostedWorkloadSourcePolicy
     fail!("#{label} is not safe YAML: #{e.message}")
   end
 
-  def validate_source_model(model, label, workload_id: nil, project_name: nil, declared_secrets: [])
+  def validate_source_model(model, label, workload_id: nil, project_name: nil, declared_secrets: [], protected_networks: [])
     fail!("#{label} cannot use top-level include.") if model.key?("include")
     configs = model["configs"]
     fail!("#{label} configs must be a mapping.") if !configs.nil? && !configs.is_a?(Hash)
@@ -123,6 +123,7 @@ module HostedWorkloadSourcePolicy
       unless name.is_a?(String) && name.start_with?(workload_network_prefix) && WORKLOAD_NETWORK_ZONES.include?(zone)
         fail!("#{label} network #{name} is not an exact workload-owned network.")
       end
+      fail!("#{label} network #{name} collides with a protected core network.") if protected_networks.include?(name)
       if definition.is_a?(Hash) && (definition.key?("external") || definition.key?("name"))
         fail!("#{label} network #{name} cannot alias an external or foreign physical network.")
       end
@@ -169,6 +170,9 @@ module HostedWorkloadSourcePolicy
           if workload_id && (!network.is_a?(String) || !network.start_with?(workload_network_prefix) || !WORKLOAD_NETWORK_ZONES.include?(zone))
             fail!("#{label} service #{name} uses foreign network #{network}.")
           end
+          if protected_networks.include?(network)
+            fail!("#{label} service #{name} cannot join protected core network #{network}.")
+          end
           unless attachment.nil? || (attachment.is_a?(Hash) && attachment.empty?)
             fail!("#{label} service #{name} cannot set network aliases or address overrides on #{network}.")
           end
@@ -214,10 +218,33 @@ module HostedWorkloadSourcePolicy
     end
   end
 
+  def top_level_mapping_names(bytes, key, label)
+    stream = Psych.parse_stream(bytes, filename: label)
+    fail!("#{label} must contain exactly one YAML document.") unless stream.children.length == 1
+    root = stream.children.first.root
+    fail!("#{label} must contain a mapping.") unless root.is_a?(Psych::Nodes::Mapping)
+    matches = root.children.each_slice(2).select { |name, _value| name.is_a?(Psych::Nodes::Scalar) && name.value == key }
+    fail!("#{label} contains duplicate top-level #{key}.") if matches.length > 1
+    return [] if matches.empty?
+    mapping = matches.first.fetch(1)
+    fail!("#{label} top-level #{key} must be a mapping.") unless mapping.is_a?(Psych::Nodes::Mapping)
+    mapping.children.each_slice(2).map do |name, _value|
+      fail!("#{label} #{key} must use scalar keys.") unless name.is_a?(Psych::Nodes::Scalar)
+      name.value.to_s
+    end
+  rescue Psych::Exception => e
+    fail!("#{label} is not valid YAML: #{e.message}")
+  end
+
   def validate_lock(lock)
     fail!("Hosted workload lock schema is not supported.") unless lock["version"] == 2 && lock["validatorVersion"] == "hosted-contract-v2"
     fail!("Hosted workload lock must be resolved.") unless lock["state"] == "resolved"
     generation = File.realpath(lock.fetch("snapshotGeneration"))
+    protected_networks = lock.fetch("files").select { |record| record["kind"] == "core-compose" }.flat_map do |record|
+      bytes = stable_read(record.fetch("path"), "core Compose source")
+      fail!("Core Compose digest changed.") unless Digest::SHA256.hexdigest(bytes) == record.fetch("sha256")
+      top_level_mapping_names(bytes, "networks", record.fetch("path"))
+    end.uniq.sort
     receipts = lock.fetch("workloads").map do |workload|
       workload_id = workload.fetch("id")
       records = lock.fetch("files").select { |item| item["kind"] == "workload-compose" && item["workloadId"] == workload_id }
@@ -234,7 +261,8 @@ module HostedWorkloadSourcePolicy
         "#{workload_id} Compose source",
         workload_id: workload_id,
         project_name: lock.fetch("projectName"),
-        declared_secrets: workload.fetch("secrets")
+        declared_secrets: workload.fetch("secrets"),
+        protected_networks: protected_networks
       )
       {
         "workloadId" => workload_id,
@@ -247,6 +275,7 @@ module HostedWorkloadSourcePolicy
     receipt = {
       "policyVersion" => VERSION,
       "controls" => CONTROLS,
+      "protectedNetworkNames" => protected_networks,
       "workloadContentSha256" => lock.fetch("workloadContentSha256"),
       "workloads" => receipts.sort_by { |item| item.fetch("workloadId") }
     }

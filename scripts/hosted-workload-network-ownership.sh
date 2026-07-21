@@ -52,9 +52,11 @@ printf '%s' "$activation_bundle" | jq -e --arg projectName "$PROJECT_NAME" '
   | type == "object"
   and .projectName == $projectName
   and ($bundle.workloadIds | type == "array" and length > 0 and . == (unique | sort))
+  and ($bundle.protectedNetworkNames | type == "array" and . == (unique | sort) and all(.[]; type == "string" and length > 0))
   and ($bundle.networkRecords | type == "array" and length >= ($bundle.workloadIds | length))
   and ($bundle.networkRecords == ($bundle.networkRecords | unique_by(.workloadId, .logicalName) | sort_by(.workloadId, .logicalName)))
   and all($bundle.networkRecords[]; network_record)
+  and all($bundle.networkRecords[]; . as $record | ($bundle.protectedNetworkNames | index($record.logicalName)) == null)
   and ([$bundle.networkRecords[].workloadId] | unique | sort) == $bundle.workloadIds
 ' >/dev/null || {
   printf '%s\n' "Hosted workload network ownership receipt is invalid." >&2

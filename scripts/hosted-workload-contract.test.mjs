@@ -376,6 +376,44 @@ test("unauthorized platform network extension is rejected", () => {
   combined.networks.evil = { internal: true };
   assert.throws(() => validateRenderedWorkloads({ core, combined, lock }), /non-workload network/);
 });
+test("workload logical networks cannot collide with protected core networks", () => {
+  const protectedDefinition = { internal: true, name: "fixture_platform_postgres", labels: { "com.platform.trust-zone": "postgres" } };
+  const collisionCore = {
+    services: { postgres: { image: `registry.example/postgres@sha256:${digest}`, networks: { platform_postgres: null } } },
+    networks: { platform_postgres: protectedDefinition },
+  };
+  const platformManifest = {
+    version: 1,
+    id: "platform",
+    composeFile: "compose.yaml",
+    services: [{ name: "platform-web", role: "worker", routes: [] }],
+    secrets: [],
+    migrationRoots: [],
+  };
+  const collisionCombined = {
+    services: {
+      postgres: structuredClone(collisionCore.services.postgres),
+      "platform-web": {
+        ...structuredClone(baseService),
+        networks: { platform_postgres: null },
+        labels: { "com.platform.workload-id": "platform", "com.platform.workload-role": "worker" },
+      },
+    },
+    networks: { platform_postgres: structuredClone(protectedDefinition) },
+  };
+  assert.throws(
+    () => validateRenderedWorkloads({
+      core: collisionCore,
+      combined: collisionCombined,
+      lock: {
+        projectName: "fixture",
+        workloads: [platformManifest],
+        brokerPolicySha256: brokerPolicySha256([platformManifest]),
+      },
+    }),
+    /cannot join protected core network platform_postgres/,
+  );
+});
 test("workload network cannot alias the Docker-control physical network", () => {
   for (const definition of [
     { external: true, name: "platform_infra_platform_docker_control" },
@@ -690,6 +728,7 @@ test("raw policy receipt requires the exact current control set", () => {
   const rawPolicyReceipt = {
     policyVersion: "hosted-raw-v1",
     controls: ["bind-bounded-local-logging", "bind-network-identity", "bind-network-topology", "bind-no-swap-oom-policy", "bind-owned-secret-aliases", "bind-owned-volumes", "bind-private-pid-numeric-user", "deny-api-socket", "deny-compose-interpolation", "deny-device-access", "deny-env-file", "deny-extends", "deny-file-configs", "deny-gpu-access", "deny-include", "deny-inline-configs", "deny-lifecycle-hooks", "deny-local-volume-options", "deny-providers", "deny-runtime-identity-labels", "deny-runtime-overrides", "deny-scaling", "deny-stop-grace-overrides", "deny-supplemental-groups", "deny-volumes-from"],
+    protectedNetworkNames: [],
     workloadContentSha256: "a".repeat(64),
     workloads: [{
       workloadId: "example-app",
@@ -743,7 +782,7 @@ function catalogFixture(root, appRoot = path.join(root, "workloads", "example-ap
   const coreEnvFile = path.join(root, "core.env");
   const coreFile = path.join(root, "compose.core.yaml");
   fs.writeFileSync(coreEnvFile, "CORE_VALUE=fixture\n");
-  fs.writeFileSync(coreFile, "services: {}\n");
+  fs.writeFileSync(coreFile, "services: {}\nnetworks:\n  platform_postgres: {}\n");
   return { catalogPath, coreEnvFile, coreFile };
 }
 
