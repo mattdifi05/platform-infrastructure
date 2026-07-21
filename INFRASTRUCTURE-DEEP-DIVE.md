@@ -147,7 +147,7 @@ platform's ability to host them.
 | `project-router` | hosting capability | Routes attached external PHP/Node/Static projects to dedicated upstreams. | Only via project routes when configured. | Reads project state/source metadata. |
 | `php-apache` | hosting capability | Generic PHP Apache runtime for external PHP projects. | No direct public route by default. | External project source bind mount. |
 | `platform-alert-dispatcher` | observability | Authenticated Alertmanager receiver with SMTP and optional generic webhook delivery. | No. | No named volume. |
-| `docker-socket-proxy` | control plane | Least-privilege Docker API boundary for approved platform operations. | Loopback/internal only. | No named volume. |
+| `docker-operation-gateway` | control plane | Authenticated typed backup/restore job boundary; never exposes the Docker API. | Internal only; no host port. | No named volume. |
 | `local-registry` | supply chain | Optional local registry/cache for platform image workflows. | No public route. | `enterprise_local_registry_data`. |
 | `postgres` | data | PostgreSQL managed by the platform for internal metadata, Keycloak DB and explicitly attached workload databases. | No. | `enterprise_postgres_data`. |
 | `mariadb` | data | MariaDB for attached PHP workloads and phpMyAdmin. | No. | `enterprise_mariadb_data`. |

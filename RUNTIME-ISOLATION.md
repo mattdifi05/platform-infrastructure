@@ -57,19 +57,20 @@ service receives the repository-parent mount.
 
 ## Docker Daemon Boundary
 
-Only `docker-socket-proxy` receives `/var/run/docker.sock`. Its image is pinned
-by digest. Auth, build, commit, secrets, services, swarm, system and task API
-sections are disabled.
+Only `docker-operation-gateway` receives `/var/run/docker.sock`. It exposes no
+host port and does not implement any Docker API route. Its sole mutation
+endpoint accepts a closed, versioned set of platform backup/restore jobs with
+exact JSON fields, a Docker-secret bearer token, a short timestamp window and
+request replay rejection. Docker command arrays, image references, bind paths,
+network names and volume names are never caller-controlled.
 
-The backup scheduler reaches the proxy through the internal
+The backup scheduler reaches the gateway through the internal
 `platform_docker_control` network. Hosted workloads are not members of this
-network.
+network and the scheduler receives neither the raw socket nor `DOCKER_HOST`.
 
-The host ops runner uses `127.0.0.1:2376`; no LAN or public address is bound.
-When the persistent VPS proxy is absent, `infra-ops.sh` creates a disposable
-digest-pinned proxy and private client network, runs the command with the SSH
-user UID/GID, then removes both. Raw socket mode is denied unless an operator
-sets both:
+The host ops runner defaults to no Docker authority. Enumerated jobs may use
+`PLATFORM_OPS_DOCKER_MODE=gateway`. Raw socket mode is denied unless an operator
+opens an approved recovery window and sets both:
 
 ```sh
 PLATFORM_OPS_DOCKER_MODE=raw \

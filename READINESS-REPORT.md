@@ -33,7 +33,7 @@ T18 candidate core, verified 2026-07-10 with no live recreate:
 
 ```text
 alertmanager, backup-scheduler, cadvisor, control-center,
-docker-socket-proxy, grafana, keycloak, local-dns, local-registry, loki,
+docker-operation-gateway, grafana, keycloak, local-dns, local-registry, loki,
 mariadb, minio, nats, node-exporter, phppgadmin, phpmyadmin,
 platform-alert-dispatcher, postgres, project-router, prometheus, promtail,
 redis, traefik, waf

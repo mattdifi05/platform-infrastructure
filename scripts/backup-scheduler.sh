@@ -38,12 +38,6 @@ case "${1:-}" in
   -h|--help) usage; exit 0 ;;
 esac
 
-detect_mount_source() {
-  destination="$1"
-  container_id="${HOSTNAME:-$(hostname)}"
-  docker inspect "$container_id" --format "{{range .Mounts}}{{if eq .Destination \"$destination\"}}{{.Source}}{{end}}{{end}}" 2>/dev/null || true
-}
-
 quote_shell_value() {
   printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
 }
@@ -82,21 +76,6 @@ load_runtime_env() {
 }
 
 prepare_runtime_env() {
-  if [ -z "$INFRA_HOST_ROOT" ]; then
-    INFRA_HOST_ROOT="$(detect_mount_source "$INFRA_CONTAINER_ROOT")"
-  fi
-  if [ -z "$SOURCE_HOST_ROOT" ]; then
-    SOURCE_HOST_ROOT="$(detect_mount_source "$SOURCE_ROOT")"
-  fi
-
-  if [ -z "$INFRA_HOST_ROOT" ]; then
-    echo "Unable to detect PLATFORM_INFRA_HOST_ROOT from the $INFRA_CONTAINER_ROOT mount. Set it explicitly before starting the backup scheduler." >&2
-    exit 1
-  fi
-  if [ -z "$SOURCE_HOST_ROOT" ]; then
-    echo "Warning: PROJECT_SOURCE_HOST_ROOT could not be detected from the $SOURCE_ROOT mount. Source-dependent ops will use container-local paths only." >&2
-  fi
-
   mkdir -p "$(dirname "$ENV_FILE")"
   : > "$ENV_FILE"
   chmod 600 "$ENV_FILE"
@@ -181,7 +160,7 @@ append_weekly() {
 }
 
 node_ops() {
-  printf 'BACKUP_SCHEDULER_ENV_FILE=%s sh %s --run %s' "$(quote_shell_value "$ENV_FILE")" "$(quote_shell_value "$INFRA_ROOT/scripts/backup-scheduler.sh")" "$1"
+  printf 'node %s %s' "$(quote_shell_value "$INFRA_ROOT/scripts/docker-operation-client.mjs")" "$1"
 }
 
 job_json_value() {
@@ -236,7 +215,7 @@ process_backup_job() {
     echo "Rejected unsupported backup job operation for $job_id" >> "$log_file"
   else
     echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] executing typed $operation job $job_id" >> "$log_file"
-    if BACKUP_SCHEDULER_ENV_FILE="$ENV_FILE" sh "$INFRA_ROOT/scripts/backup-scheduler.sh" --run execute-backup-job --jobFile "$running_file" >> "$log_file" 2>&1; then
+    if node "$INFRA_ROOT/scripts/docker-operation-client.mjs" execute-backup-job --jobFileName "$name" >> "$log_file" 2>&1; then
       echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] completed typed job $job_id" >> "$log_file"
     else
       exit_code=$?
@@ -270,9 +249,13 @@ if [ "${1:-}" = "--run" ]; then
     echo "Usage: backup-scheduler.sh --run <infra-ops-command>" >&2
     exit 1
   fi
-  load_runtime_env
-  cd "$INFRA_ROOT"
-  exec node "$INFRA_ROOT/scripts/infra-ops.mjs" "$@"
+  operation="$1"
+  shift
+  case "$operation" in
+    backup-platform-catalog|prune-manifest-backups-plan|prune-manifest-backups-apply|full-restore-drill|offsite-backup-restic|execute-backup-job) ;;
+    *) echo "Unsupported typed scheduler operation: $operation" >&2; exit 64 ;;
+  esac
+  exec node "$INFRA_ROOT/scripts/docker-operation-client.mjs" "$operation" "$@"
 fi
 
 mkdir -p "$LOG_DIR" "$(dirname "$CRON_FILE")" "$JOBS_DIR/queued" "$JOBS_DIR/running" "$JOBS_DIR/done" "$JOBS_DIR/failed"
@@ -282,9 +265,9 @@ prepare_runtime_env
 
 append_cron_expression "$CATALOG_BACKUP_CRON" "platform-catalog-backup" "$(node_ops backup-platform-catalog)"
 if [ "$ENABLE_RETENTION_APPLY" = "true" ] || [ "$ENABLE_RETENTION_APPLY" = "1" ]; then
-  append_cron_expression "$RETENTION_CRON" "platform-manifest-retention" "$(node_ops prune-manifest-backups) --confirmPruneManifestBackups"
+  append_cron_expression "$RETENTION_CRON" "platform-manifest-retention" "$(node_ops prune-manifest-backups-apply)"
 else
-  append_cron_expression "$RETENTION_CRON" "platform-manifest-retention-plan" "$(node_ops prune-manifest-backups)"
+  append_cron_expression "$RETENTION_CRON" "platform-manifest-retention-plan" "$(node_ops prune-manifest-backups-plan)"
 fi
 append_weekly "$FULL_RESTORE_DRILL_AT" "full-restore-drill" "$(node_ops full-restore-drill)"
 
@@ -301,8 +284,7 @@ fi
 
 if [ "$RUN_ON_START" = "true" ] || [ "$RUN_ON_START" = "1" ]; then
   cd "$INFRA_ROOT"
-  load_runtime_env
-  node "$INFRA_ROOT/scripts/infra-ops.mjs" backup-platform-catalog
+  node "$INFRA_ROOT/scripts/docker-operation-client.mjs" backup-platform-catalog
 fi
 
 process_backup_job_queue &

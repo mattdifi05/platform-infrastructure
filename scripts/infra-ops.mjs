@@ -11593,7 +11593,7 @@ function staticSecurityInfraOnlyCheck() {
   assertMatch(lockScript, /core-env-file[\s\S]*project-name[\s\S]*compose-files[\s\S]*env-files/, "Hosted workload lock reader must expose only verified fields.");
   assertMatch(prepareScript, /hosted-workload-contract\.mjs/, "Hosted workload preparation must use the contract validator.");
   assertMatch(composeNetworks, /platform_edge:[\s\S]*platform_routing:[\s\S]*platform_observability:[\s\S]*platform_egress:/, "Platform trust zones must be explicit.");
-  assertMatch(composeIsolation, /docker-socket-proxy:[\s\S]*\/var\/run\/docker\.sock:\/var\/run\/docker\.sock:ro/, "Only the Docker socket proxy may mount the raw socket.");
+  assertMatch(composeIsolation, /docker-operation-gateway:[\s\S]*\/var\/run\/docker\.sock:\/var\/run\/docker\.sock:ro/, "Only the typed Docker operation gateway may mount the raw socket.");
   assertMatch(router, /PROJECT_ROUTER_ALLOWED_UPSTREAMS[\s\S]*validateUpstream/, "Project Router must enforce an exact upstream allowlist.");
   assertNoMatch(router, /node:child_process|spawn\(|execFile\(|stopManagedProject/, "Project Router must remain proxy-only.");
   assertMatch(alertmanager, /platform-alert-dispatcher:3000/, "Alertmanager must deliver through the platform-owned dispatcher.");

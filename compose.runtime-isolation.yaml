@@ -37,56 +37,28 @@ x-runtime-observability: &runtime_observability
     weight: 400
 
 services:
-  docker-socket-proxy:
+  docker-operation-gateway:
     <<: *runtime_control
-    image: ${DOCKER_SOCKET_PROXY_IMAGE:-ghcr.io/tecnativa/docker-socket-proxy:v0.4.2@sha256:1f3a6f303320723d199d2316a3e82b2e2685d86c275d5e3deeaf182573b47476}
-    container_name: enterprise-docker-socket-proxy
-    init: true
     read_only: true
-    cpus: 0.10
-    mem_limit: 128m
-    mem_reservation: 32m
-    pids_limit: 64
-    security_opt:
-      - no-new-privileges:true
-    restart: unless-stopped
-    environment:
-      ALLOW_START: "1"
-      ALLOW_STOP: "1"
-      ALLOW_RESTARTS: "1"
-      AUTH: "0"
-      BUILD: "0"
-      COMMIT: "0"
-      CONFIGS: "0"
-      CONTAINERS: "1"
-      DISTRIBUTION: "0"
-      EVENTS: "1"
-      EXEC: "1"
-      GRPC: "0"
-      IMAGES: "1"
-      INFO: "1"
-      NETWORKS: "1"
-      NODES: "0"
-      PLUGINS: "0"
-      POST: "1"
-      SECRETS: "0"
-      SERVICES: "0"
-      SESSION: "0"
-      SWARM: "0"
-      SYSTEM: "0"
-      TASKS: "0"
-      VOLUMES: "1"
-    expose:
-      - "2375"
-    ports:
-      - "127.0.0.1:${DOCKER_SOCKET_PROXY_PORT:-2376}:2375"
-    volumes:
+    cpus: 0.50
+    mem_limit: 512m
+    mem_reservation: 128m
+    pids_limit: 256
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+      - /root:rw,noexec,nosuid,nodev,size=16m
+    volumes: !override
       - /var/run/docker.sock:/var/run/docker.sock:ro
-    networks:
+      - .:/infra:ro
+      - ./backups:/infra/backups
+      - ./reports:/infra/reports
+      - ./projects-portal/state:/var/www/project-state
+      - ${PROJECT_SOURCE_DIR:-../src}:/project:ro
+    networks: !override
       - platform_docker_control
     healthcheck:
-      test: ["CMD", "haproxy", "-c", "-f", "/usr/local/etc/haproxy/haproxy.cfg"]
-      interval: 30s
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
       timeout: 5s
       retries: 5
 
@@ -273,8 +245,8 @@ services:
     mem_reservation: 128m
     pids_limit: 256
     environment:
-      DOCKER_API_VERSION: "1.51"
-      DOCKER_HOST: tcp://docker-socket-proxy:2375
+      PLATFORM_DOCKER_GATEWAY_URL: http://docker-operation-gateway:8787
+      DOCKER_GATEWAY_TOKEN_FILE: /run/secrets/docker_gateway_token
     tmpfs:
       - /tmp:rw,nosuid,nodev,size=256m
       - /root:rw,nosuid,nodev,size=32m
@@ -286,7 +258,7 @@ services:
       - ${PROJECT_SOURCE_DIR:-../src}:/project:ro
       - backup_scheduler_logs:/var/log/platform
     depends_on:
-      docker-socket-proxy:
+      docker-operation-gateway:
         condition: service_healthy
     networks: !override
       - platform_db_admin

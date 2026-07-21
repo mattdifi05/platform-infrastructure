@@ -6,7 +6,7 @@ import { evaluateRuntimeIsolation } from "./runtime-isolation-policy.mjs";
 test("accepts bounded platform and external workload services", () => {
   const report = evaluateRuntimeIsolation(fixture());
   assert.equal(report.status, "passed", report.failures.join("\n"));
-  assert.equal(report.summary.rawSocketOwners.join(","), "docker-socket-proxy");
+  assert.equal(report.summary.rawSocketOwners.join(","), "docker-operation-gateway");
   assert.equal(report.summary.hostedWorkloads, 1);
 });
 
@@ -42,16 +42,24 @@ test("rejects missing memory limits and budget overcommit", () => {
   assert.match(report.failures.join("\n"), /resource-memory-admission/);
 });
 
-test("rejects mutable proxy images and extra socket-network members", () => {
+test("rejects host-published gateways and extra Docker-control network members", () => {
   const config = fixture();
-  config.services["docker-socket-proxy"].image = "ghcr.io/tecnativa/docker-socket-proxy:latest";
-  config.services["docker-socket-proxy"].ports[0].host_ip = "0.0.0.0";
+  config.services["docker-operation-gateway"].ports = ["0.0.0.0:8787:8787"];
   config.services["example-app-web"].networks.platform_docker_control = null;
   const report = evaluateRuntimeIsolation(config);
   assert.equal(report.status, "failed");
-  assert.match(report.failures.join("\n"), /socket-proxy-image-pinned/);
-  assert.match(report.failures.join("\n"), /socket-proxy-loopback-only/);
+  assert.match(report.failures.join("\n"), /docker-gateway-no-host-ports/);
   assert.match(report.failures.join("\n"), /socket-network-members/);
+});
+
+test("rejects scheduler Docker API access and missing gateway authentication", () => {
+  const config = fixture();
+  config.services["backup-scheduler"].environment.DOCKER_HOST = "tcp://docker-operation-gateway:2375";
+  config.services["docker-operation-gateway"].secrets = [];
+  const report = evaluateRuntimeIsolation(config);
+  assert.equal(report.status, "failed");
+  assert.match(report.failures.join("\n"), /scheduler-has-no-docker-api/);
+  assert.match(report.failures.join("\n"), /docker-gateway-secret-auth/);
 });
 
 function fixture() {
@@ -77,16 +85,17 @@ function fixture() {
   services["backup-scheduler"] = bounded({
     read_only: true,
     cpu_shares: 1024,
-    environment: { DOCKER_HOST: "tcp://docker-socket-proxy:2375", DOCKER_API_VERSION: "1.51" },
+    environment: { PLATFORM_DOCKER_GATEWAY_URL: "http://docker-operation-gateway:8787", DOCKER_GATEWAY_TOKEN_FILE: "/run/secrets/docker_gateway_token" },
+    secrets: ["docker_gateway_token"],
     volumes: [],
     networks: { platform_docker_control: null },
   });
-  services["docker-socket-proxy"] = bounded({
+  services["docker-operation-gateway"] = bounded({
     read_only: true,
     cpu_shares: 1024,
-    image: `ghcr.io/tecnativa/docker-socket-proxy:v0.4.2@sha256:${"a".repeat(64)}`,
-    environment: Object.fromEntries(["AUTH", "BUILD", "COMMIT", "CONFIGS", "SECRETS", "SERVICES", "SESSION", "SWARM", "SYSTEM", "TASKS"].map((key) => [key, "0"])),
-    ports: [{ host_ip: "127.0.0.1", published: "2376", target: 2375, protocol: "tcp" }],
+    entrypoint: ["node", "/infra/scripts/docker-operation-gateway.mjs"],
+    environment: { DOCKER_GATEWAY_TOKEN_FILE: "/run/secrets/docker_gateway_token" },
+    secrets: ["docker_gateway_token"],
     volumes: [{ type: "bind", source: "/var/run/docker.sock", target: "/var/run/docker.sock", read_only: true }],
     networks: { platform_docker_control: null },
   });

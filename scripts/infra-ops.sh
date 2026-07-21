@@ -20,6 +20,7 @@ fi
 OPS_IMAGE="${PLATFORM_OPS_IMAGE:-platform/ops:local}"
 NODE_IMAGE="${NODE_IMAGE:-node:26.3.1-alpine@sha256:a2dc166a387cc6ca1e62d0c8e265e49ca985d6e60abc9fe6e6c3d6ce8e63f606}"
 OPS_FINGERPRINT_LABEL=io.platform-infrastructure.ops-source-sha256
+OPS_DOCKER_MODE="${PLATFORM_OPS_DOCKER_MODE:-none}"
 
 if [ "${PLATFORM_OPS_USE_HOST_NODE:-0}" = "1" ]; then
   exec node "$SCRIPT_DIR/infra-ops.mjs" "$@"
@@ -28,6 +29,26 @@ fi
 if ! command -v docker >/dev/null 2>&1; then
   echo "Docker is required to run Platform ops without host Node." >&2
   exit 127
+fi
+
+if [ "$OPS_DOCKER_MODE" = "gateway" ]; then
+  GATEWAY_CONTAINER="${PLATFORM_DOCKER_GATEWAY_CONTAINER:-enterprise-docker-operation-gateway}"
+  [ "$(docker inspect --format '{{.State.Running}}' "$GATEWAY_CONTAINER" 2>/dev/null || true)" = "true" ] || {
+    echo "Typed Docker operation gateway is not running: $GATEWAY_CONTAINER" >&2
+    exit 127
+  }
+  operation="${1:-}"
+  shift || true
+  case "$operation" in
+    backup-platform-catalog|full-restore-drill|offsite-backup-restic|prune-manifest-backups-plan|prune-manifest-backups-apply)
+      [ "$#" -eq 0 ] || { echo "Typed gateway operation does not accept additional arguments." >&2; exit 64; }
+      exec docker exec "$GATEWAY_CONTAINER" node /infra/scripts/docker-operation-client.mjs "$operation"
+      ;;
+    *)
+      echo "Operation is not exposed by the typed Docker gateway: ${operation:-missing}" >&2
+      exit 64
+      ;;
+  esac
 fi
 
 OPS_SOURCE_FINGERPRINT=$(
@@ -54,7 +75,6 @@ INFRA_CONTAINER_ROOT="${PLATFORM_INFRA_CONTAINER_ROOT:-/infra}"
 SOURCE_CONTAINER_ROOT="${PROJECT_SOURCE_CONTAINER_ROOT:-/project}"
 OPS_UID="${PLATFORM_OPS_UID:-$(id -u)}"
 OPS_GID="${PLATFORM_OPS_GID:-$(id -g)}"
-OPS_DOCKER_MODE="${PLATFORM_OPS_DOCKER_MODE:-auto}"
 OPS_GIT_COMMIT="$(git -C "$INFRA_ROOT" rev-parse HEAD 2>/dev/null || true)"
 OPS_GIT_TREE="$(git -C "$INFRA_ROOT" rev-parse 'HEAD^{tree}' 2>/dev/null || true)"
 OPS_GIT_BRANCH="$(git -C "$INFRA_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
@@ -70,112 +90,8 @@ else
   OPS_GIT_DIRTY=0
 fi
 SOCKET_ARGS=""
-EPHEMERAL_PROXY_CONTAINER=""
-EPHEMERAL_PROXY_NETWORK=""
-PROXY_IMAGE="${DOCKER_SOCKET_PROXY_IMAGE:-ghcr.io/tecnativa/docker-socket-proxy:v0.4.2@sha256:1f3a6f303320723d199d2316a3e82b2e2685d86c275d5e3deeaf182573b47476}"
-
-cleanup_ephemeral_proxy() {
-  if [ -n "$EPHEMERAL_PROXY_CONTAINER" ]; then
-    docker rm -f "$EPHEMERAL_PROXY_CONTAINER" >/dev/null 2>&1 || true
-  fi
-  if [ -n "$EPHEMERAL_PROXY_NETWORK" ]; then
-    docker network rm "$EPHEMERAL_PROXY_NETWORK" >/dev/null 2>&1 || true
-  fi
-}
-
-start_ephemeral_proxy() {
-  EPHEMERAL_PROXY_NETWORK="platform-ops-proxy-$$"
-  EPHEMERAL_PROXY_CONTAINER="platform-ops-proxy-$$"
-  docker network create "$EPHEMERAL_PROXY_NETWORK" >/dev/null
-  docker run -d \
-    --name "$EPHEMERAL_PROXY_CONTAINER" \
-    --network "$EPHEMERAL_PROXY_NETWORK" \
-    --network-alias docker-socket-proxy \
-    --read-only \
-    --tmpfs /run:rw,noexec,nosuid,nodev,size=16m \
-    --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m \
-    --cpus 0.10 \
-    --cpu-shares 1024 \
-    --memory 128m \
-    --memory-reservation 32m \
-    --pids-limit 64 \
-    --ulimit nofile=16384:16384 \
-    --blkio-weight 700 \
-    --security-opt no-new-privileges:true \
-    -e ALLOW_RESTARTS=1 \
-    -e ALLOW_START=1 \
-    -e ALLOW_STOP=1 \
-    -e AUTH=0 \
-    -e BUILD=0 \
-    -e COMMIT=0 \
-    -e CONFIGS=0 \
-    -e CONTAINERS=1 \
-    -e EXEC=1 \
-    -e IMAGES=1 \
-    -e INFO=1 \
-    -e NETWORKS=1 \
-    -e POST=1 \
-    -e SECRETS=0 \
-    -e SERVICES=0 \
-    -e SESSION=0 \
-    -e SWARM=0 \
-    -e SYSTEM=0 \
-    -e TASKS=0 \
-    -e VOLUMES=1 \
-    -v /var/run/docker.sock:/var/run/docker.sock:ro \
-    "$PROXY_IMAGE" >/dev/null
-
-  proxy_ip="$(docker inspect --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$EPHEMERAL_PROXY_CONTAINER")"
-  proxy_ready=0
-  proxy_attempt=0
-  while [ "$proxy_attempt" -lt 50 ]; do
-    if [ "$(curl -fsS --max-time 1 "http://$proxy_ip:2375/_ping" 2>/dev/null || true)" = "OK" ]; then
-      proxy_ready=1
-      break
-    fi
-    proxy_attempt=$((proxy_attempt + 1))
-    sleep 0.1
-  done
-  if [ "$proxy_ready" -ne 1 ]; then
-    echo "Ephemeral Docker socket proxy did not become ready." >&2
-    docker logs --tail 40 "$EPHEMERAL_PROXY_CONTAINER" >&2 || true
-    return 1
-  fi
-
-  PROXY_CONTAINER="$EPHEMERAL_PROXY_CONTAINER"
-  PROXY_NETWORK="$EPHEMERAL_PROXY_NETWORK"
-}
-
-trap cleanup_ephemeral_proxy EXIT INT TERM
 
 case "$OPS_DOCKER_MODE" in
-  auto)
-    PROXY_CONTAINER="${PLATFORM_OPS_DOCKER_PROXY_CONTAINER:-enterprise-docker-socket-proxy}"
-    PROXY_NETWORK="${PLATFORM_OPS_DOCKER_NETWORK:-${COMPOSE_PROJECT_NAME:-platform_infra_vps}_platform_docker_control}"
-    if [ "$(docker inspect --format '{{.State.Running}}' "$PROXY_CONTAINER" 2>/dev/null || true)" != "true" ]; then
-      start_ephemeral_proxy
-      NETWORK_ARGS="${PLATFORM_OPS_NETWORK_ARGS:---network $PROXY_NETWORK}"
-      LOCAL_HOST_TARGET="${PLATFORM_LOCAL_HOST_TARGET:-host-gateway}"
-      OPS_DOCKER_HOST="${PLATFORM_OPS_DOCKER_HOST:-tcp://$PROXY_CONTAINER:2375}"
-    else
-      NETWORK_ARGS="${PLATFORM_OPS_NETWORK_ARGS:---network host}"
-      LOCAL_HOST_TARGET="${PLATFORM_LOCAL_HOST_TARGET:-127.0.0.1}"
-      OPS_DOCKER_HOST="${PLATFORM_OPS_DOCKER_HOST:-tcp://127.0.0.1:${DOCKER_SOCKET_PROXY_PORT:-2376}}"
-    fi
-    OPS_DOCKER_API_VERSION="${PLATFORM_OPS_DOCKER_API_VERSION:-1.51}"
-    ;;
-  proxy)
-    PROXY_CONTAINER="${PLATFORM_OPS_DOCKER_PROXY_CONTAINER:-enterprise-docker-socket-proxy}"
-    PROXY_NETWORK="${PLATFORM_OPS_DOCKER_NETWORK:-${COMPOSE_PROJECT_NAME:-platform_infra_vps}_platform_docker_control}"
-    if [ "$(docker inspect --format '{{.State.Running}}' "$PROXY_CONTAINER" 2>/dev/null || true)" != "true" ]; then
-      echo "Docker socket proxy is not running: $PROXY_CONTAINER. Start the hardened VPS runtime or choose an explicit trusted mode." >&2
-      exit 127
-    fi
-    NETWORK_ARGS="${PLATFORM_OPS_NETWORK_ARGS:---network host}"
-    LOCAL_HOST_TARGET="${PLATFORM_LOCAL_HOST_TARGET:-127.0.0.1}"
-    OPS_DOCKER_HOST="${PLATFORM_OPS_DOCKER_HOST:-tcp://127.0.0.1:${DOCKER_SOCKET_PROXY_PORT:-2376}}"
-    OPS_DOCKER_API_VERSION="${PLATFORM_OPS_DOCKER_API_VERSION:-1.51}"
-    ;;
   raw)
     if [ "${PLATFORM_ALLOW_RAW_DOCKER_SOCKET:-0}" != "1" ]; then
       echo "Raw Docker socket mode requires PLATFORM_ALLOW_RAW_DOCKER_SOCKET=1 and is reserved for an approved recovery window." >&2
@@ -199,7 +115,7 @@ case "$OPS_DOCKER_MODE" in
     OPS_DOCKER_API_VERSION=""
     ;;
   *)
-    echo "Unsupported PLATFORM_OPS_DOCKER_MODE: $OPS_DOCKER_MODE (expected auto, proxy, raw or none)." >&2
+    echo "Unsupported PLATFORM_OPS_DOCKER_MODE: $OPS_DOCKER_MODE (expected gateway, raw or none)." >&2
     exit 64
     ;;
 esac
@@ -323,5 +239,4 @@ docker run --rm -i \
   "$OPS_IMAGE" "$@"
 status=$?
 set -e
-cleanup_ephemeral_proxy
 exit "$status"

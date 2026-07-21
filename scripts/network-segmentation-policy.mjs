@@ -66,9 +66,9 @@ export function evaluateNetworkSegmentation(config) {
   requireShared("observability-prometheus-loki", "prometheus", "loki", "platform_observability");
   requireShared("observability-prometheus-alertmanager", "prometheus", "alertmanager", "platform_observability");
   requireShared("observability-alertmanager-dispatcher", "alertmanager", "platform-alert-dispatcher", "platform_observability");
-  requireShared("docker-control-scheduler-proxy", "backup-scheduler", "docker-socket-proxy", "platform_docker_control");
+  requireShared("docker-control-scheduler-gateway", "backup-scheduler", "docker-operation-gateway", "platform_docker_control");
   const socketMembers = [...(networkMembers.get("platform_docker_control") || [])].sort();
-  record("members-platform-docker-control", same(socketMembers, ["backup-scheduler", "docker-socket-proxy"]), `members=${socketMembers.join(",") || "none"}`);
+  record("members-platform-docker-control", same(socketMembers, ["backup-scheduler", "docker-operation-gateway"]), `members=${socketMembers.join(",") || "none"}`);
 
   const workloads = new Map();
   for (const [name, service] of Object.entries(services)) {
@@ -79,7 +79,7 @@ export function evaluateNetworkSegmentation(config) {
     const prefix = `${workloadId.replaceAll("-", "_")}_`;
     const foreign = (serviceNetworks.get(name) || []).filter((network) => !network.startsWith(prefix));
     record(`workload-dedicated-networks-${name}`, foreign.length === 0, `${name} foreign=${foreign.join(",") || "none"}`);
-    requireDenied(`deny-${name}-docker-socket-proxy`, name, "docker-socket-proxy");
+    requireDenied(`deny-${name}-docker-operation-gateway`, name, "docker-operation-gateway");
   }
 
   for (const [network, members] of networkMembers) {

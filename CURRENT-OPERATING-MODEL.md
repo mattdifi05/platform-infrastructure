@@ -112,7 +112,7 @@ The T18 candidate core instead renders exactly 24 services:
 
 ```text
 alertmanager, backup-scheduler, cadvisor, control-center,
-docker-socket-proxy, grafana, keycloak, local-dns, local-registry, loki,
+docker-operation-gateway, grafana, keycloak, local-dns, local-registry, loki,
 mariadb, minio, nats, node-exporter, phpmyadmin, phppgadmin,
 platform-alert-dispatcher, postgres, project-router, prometheus, promtail,
 redis, traefik, waf

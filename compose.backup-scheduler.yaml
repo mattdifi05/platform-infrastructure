@@ -1,4 +1,65 @@
 services:
+  docker-operation-gateway:
+    image: ${PLATFORM_OPS_IMAGE:-platform/ops:local}
+    build:
+      context: .
+      dockerfile: docker/ops.Dockerfile
+      args:
+        NODE_IMAGE: ${NODE_IMAGE:-node:26.3.1-alpine@sha256:a2dc166a387cc6ca1e62d0c8e265e49ca985d6e60abc9fe6e6c3d6ce8e63f606}
+    container_name: enterprise-docker-operation-gateway
+    profiles:
+      - backup
+    init: true
+    read_only: true
+    pids_limit: 256
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    entrypoint:
+      - node
+      - /infra/scripts/docker-operation-gateway.mjs
+    environment:
+      PLATFORM_INFRA_ROOT: /infra
+      PLATFORM_INFRA_CONTAINER_ROOT: /infra
+      PLATFORM_INFRA_HOST_ROOT: ${PLATFORM_INFRA_HOST_ROOT:-}
+      PROJECT_SOURCE_ROOT: /project
+      PROJECT_SOURCE_HOST_ROOT: ${PROJECT_SOURCE_HOST_ROOT:-}
+      PROJECT_STATE_ROOT: /var/www/project-state
+      PROJECT_DATABASES_FILE: /var/www/project-state/databases.json
+      BACKUP_SCHEDULER_JOBS_DIR: /var/www/project-state/backup-jobs
+      DOCKER_GATEWAY_TOKEN_FILE: /run/secrets/docker_gateway_token
+      BACKUP_SIGNING_KEYS_FILE: /infra/secrets/backup_signing_keys.txt
+      RESTIC_IMAGE: ${RESTIC_IMAGE:-}
+      RESTIC_REPOSITORY: ${RESTIC_REPOSITORY:-}
+      RESTIC_PASSWORD_FILE: ${RESTIC_PASSWORD_FILE:-/infra/secrets/restic_password.txt}
+      RESTIC_KEEP_LAST: ${RESTIC_KEEP_LAST:-42}
+      RESTIC_HOSTNAME: ${RESTIC_HOSTNAME:-platform-infrastructure}
+      RESTIC_REQUIRE_IMMUTABLE_IMAGE: ${RESTIC_REQUIRE_IMMUTABLE_IMAGE:-true}
+      RESTIC_MAX_REPOSITORY_BYTES: ${RESTIC_MAX_REPOSITORY_BYTES:-2500000000000}
+      RCLONE_CONFIG: ${RCLONE_CONFIG:-/infra/secrets/rclone/rclone.conf}
+      KEYCLOAK_DB_NAME: ${KEYCLOAK_DB_NAME:-keycloak}
+      BACKUP_LOCAL_KEEP_LAST: ${BACKUP_LOCAL_KEEP_LAST:-42}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+    expose:
+      - "8787"
+    secrets:
+      - docker_gateway_token
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - .:/infra:ro
+      - ./backups:/infra/backups
+      - ./reports:/infra/reports
+      - ./projects-portal/state:/var/www/project-state
+      - ${PROJECT_SOURCE_DIR:-../src}:/project:ro
+    networks:
+      - platform_docker_control
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
   backup-scheduler:
     image: ${PLATFORM_OPS_IMAGE:-platform/ops:local}
     build:
@@ -50,15 +111,20 @@ services:
       KEYCLOAK_DB_NAME: ${KEYCLOAK_DB_NAME:-keycloak}
       BACKUP_LOCAL_KEEP_LAST: ${BACKUP_LOCAL_KEEP_LAST:-42}
       BACKUP_SCHEDULER_JOBS_DIR: /var/www/project-state/backup-jobs
+      PLATFORM_DOCKER_GATEWAY_URL: http://docker-operation-gateway:8787
+      DOCKER_GATEWAY_TOKEN_FILE: /run/secrets/docker_gateway_token
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-      - .:/infra
+      - .:/infra:ro
       - ./projects-portal/state:/var/www/project-state
       - ${PROJECT_SOURCE_DIR:-../src}:/project:ro
       - backup_scheduler_logs:/var/log/platform
+    secrets:
+      - docker_gateway_token
     depends_on:
+      docker-operation-gateway:
+        condition: service_healthy
       postgres:
         condition: service_healthy
       mariadb:
@@ -68,7 +134,7 @@ services:
       keycloak:
         condition: service_healthy
     networks:
-      - enterprise_net
+      - platform_docker_control
     healthcheck:
       test: ["CMD-SHELL", "test -s /etc/crontabs/root && pgrep crond >/dev/null"]
       interval: 30s
@@ -78,3 +144,9 @@ services:
 volumes:
   backup_scheduler_logs:
     name: ${BACKUP_SCHEDULER_LOG_VOLUME:-platform_backup_scheduler_logs}
+
+networks:
+  platform_docker_control:
+    name: ${COMPOSE_PROJECT_NAME:-platform_infra}_platform_docker_control
+    internal: true
+    driver: bridge

@@ -15,7 +15,7 @@ cd "$ROOT_DIR"
 COMPOSE_ENV_FILE="$ENV_FILE" COMPOSE_PROJECT_NAME="$PROJECT_NAME" \
   bash ./scripts/compose-vps.sh config --format json > "$OUTPUT"
 
-for service in local-registry backup-scheduler project-router control-center \
+for service in local-registry backup-scheduler docker-operation-gateway project-router control-center \
   platform-alert-dispatcher postgres redis keycloak nats minio mariadb \
   traefik waf prometheus alertmanager grafana loki promtail node-exporter cadvisor; do
   jq -e --arg service "$service" '.services[$service] != null' "$OUTPUT" >/dev/null
@@ -32,11 +32,11 @@ if [ -n "${HOSTED_WORKLOAD_LOCK:-}" ]; then
 fi
 
 jq -e '.services["local-registry"].image | test("^registry:3@sha256:[a-f0-9]{64}$")' "$OUTPUT" >/dev/null
-jq -e '.services["docker-socket-proxy"].image | test("^ghcr.io/tecnativa/docker-socket-proxy:v0\\.4\\.2@sha256:[a-f0-9]{64}$")' "$OUTPUT" >/dev/null
-jq -e '[.services["docker-socket-proxy"].ports[] | select(.host_ip == "127.0.0.1" and .target == 2375)] | length == 1' "$OUTPUT" >/dev/null
 jq -e '.networks.platform_docker_control.internal == true' "$OUTPUT" >/dev/null
-jq -e '.services["backup-scheduler"].environment.DOCKER_HOST == "tcp://docker-socket-proxy:2375"' "$OUTPUT" >/dev/null
-jq -e '[.services[] | select(any(.volumes[]?; .source == "/var/run/docker.sock")) | .container_name] == ["enterprise-docker-socket-proxy"]' "$OUTPUT" >/dev/null
+jq -e '.services["docker-operation-gateway"].ports == null and .services["docker-operation-gateway"].entrypoint == ["node", "/infra/scripts/docker-operation-gateway.mjs"]' "$OUTPUT" >/dev/null
+jq -e '.services["backup-scheduler"].environment.PLATFORM_DOCKER_GATEWAY_URL == "http://docker-operation-gateway:8787" and (.services["backup-scheduler"].environment.DOCKER_HOST == null)' "$OUTPUT" >/dev/null
+jq -e '[.services[] | select(any(.volumes[]?; .source == "/var/run/docker.sock")) | .container_name] == ["enterprise-docker-operation-gateway"]' "$OUTPUT" >/dev/null
+jq -e '[.services["docker-operation-gateway"].secrets[].source] == ["docker_gateway_token"] and [.services["backup-scheduler"].secrets[].source] == ["docker_gateway_token"]' "$OUTPUT" >/dev/null
 jq -e '.volumes.enterprise_local_registry_data.name == "enterprise_local_registry_data"' "$OUTPUT" >/dev/null
 jq -e '.volumes.enterprise_local_registry_data.external == true' "$OUTPUT" >/dev/null
 

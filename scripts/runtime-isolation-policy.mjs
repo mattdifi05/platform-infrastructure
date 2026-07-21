@@ -3,7 +3,7 @@ const REQUIRED_READ_ONLY = new Set([
   "project-router",
   "platform-alert-dispatcher",
   "backup-scheduler",
-  "docker-socket-proxy",
+  "docker-operation-gateway",
 ]);
 
 const FORBIDDEN_WORKLOAD_TARGETS = [
@@ -81,29 +81,28 @@ export function evaluateRuntimeIsolation(config, options = {}) {
     .filter(([, service]) => volumes(service).some((mount) => mount.source === "/var/run/docker.sock" || mount.target === "/var/run/docker.sock"))
     .map(([name]) => name)
     .sort();
-  record("raw-socket-single-owner", rawSocketOwners.length === 1 && rawSocketOwners[0] === "docker-socket-proxy", `owners=${rawSocketOwners.join(",") || "none"}`);
+  record("raw-socket-single-owner", rawSocketOwners.length === 1 && rawSocketOwners[0] === "docker-operation-gateway", `owners=${rawSocketOwners.join(",") || "none"}`);
 
-  const proxy = services["docker-socket-proxy"] || {};
-  record("socket-proxy-image-pinned", /@sha256:[a-f0-9]{64}$/.test(String(proxy.image || "")), `image=${proxy.image || "unset"}`);
-  const proxyEnvironment = object(proxy.environment);
-  const disabledProxySections = ["AUTH", "BUILD", "COMMIT", "CONFIGS", "SECRETS", "SERVICES", "SESSION", "SWARM", "SYSTEM", "TASKS"];
-  const enabledDangerous = disabledProxySections.filter((key) => String(proxyEnvironment[key]) !== "0");
-  record("socket-proxy-dangerous-sections-disabled", enabledDangerous.length === 0, `enabled=${enabledDangerous.join(",") || "none"}`);
-  const proxyPorts = Array.isArray(proxy.ports) ? proxy.ports : [];
-  const loopbackPorts = proxyPorts.filter((port) => String(port?.host_ip || "") === "127.0.0.1" && integer(port?.target) === 2375);
-  const nonLoopbackPorts = proxyPorts.filter((port) => String(port?.host_ip || "") !== "127.0.0.1");
-  record("socket-proxy-loopback-only", loopbackPorts.length === 1 && nonLoopbackPorts.length === 0, `loopback=${loopbackPorts.length} nonLoopback=${nonLoopbackPorts.length}`);
+  const gateway = services["docker-operation-gateway"] || {};
+  const gatewayEnvironment = object(gateway.environment);
+  const gatewayEntrypoint = Array.isArray(gateway.entrypoint) ? gateway.entrypoint.map(String) : [String(gateway.entrypoint || "")];
+  record("docker-gateway-typed-entrypoint", gatewayEntrypoint.includes("/infra/scripts/docker-operation-gateway.mjs"), `entrypoint=${gatewayEntrypoint.join(" ")}`);
+  record("docker-gateway-no-host-ports", !Array.isArray(gateway.ports) || gateway.ports.length === 0, `ports=${JSON.stringify(gateway.ports || [])}`);
+  record("docker-gateway-secret-auth", secretNames(gateway).includes("docker_gateway_token") && gatewayEnvironment.DOCKER_GATEWAY_TOKEN_FILE === "/run/secrets/docker_gateway_token", `secrets=${secretNames(gateway).join(",") || "none"}`);
+  record("docker-gateway-no-remote-docker-host", !gatewayEnvironment.DOCKER_HOST, `DOCKER_HOST=${gatewayEnvironment.DOCKER_HOST || "unset"}`);
 
   const scheduler = services["backup-scheduler"] || {};
-  record("scheduler-uses-proxy", object(scheduler.environment).DOCKER_HOST === "tcp://docker-socket-proxy:2375", `DOCKER_HOST=${object(scheduler.environment).DOCKER_HOST || "unset"}`);
-  record("scheduler-api-version-bounded", object(scheduler.environment).DOCKER_API_VERSION === "1.51", `DOCKER_API_VERSION=${object(scheduler.environment).DOCKER_API_VERSION || "unset"}`);
+  const schedulerEnvironment = object(scheduler.environment);
+  record("scheduler-uses-typed-gateway", schedulerEnvironment.PLATFORM_DOCKER_GATEWAY_URL === "http://docker-operation-gateway:8787", `gateway=${schedulerEnvironment.PLATFORM_DOCKER_GATEWAY_URL || "unset"}`);
+  record("scheduler-has-no-docker-api", !schedulerEnvironment.DOCKER_HOST && !schedulerEnvironment.DOCKER_API_VERSION, `DOCKER_HOST=${schedulerEnvironment.DOCKER_HOST || "unset"}`);
+  record("scheduler-gateway-secret", secretNames(scheduler).includes("docker_gateway_token") && schedulerEnvironment.DOCKER_GATEWAY_TOKEN_FILE === "/run/secrets/docker_gateway_token", `secrets=${secretNames(scheduler).join(",") || "none"}`);
 
   record("socket-network-internal", networks.platform_docker_control?.internal === true, `internal=${networks.platform_docker_control?.internal === true}`);
   const socketMembers = Object.entries(services)
     .filter(([, service]) => networkNames(service).includes("platform_docker_control"))
     .map(([name]) => name)
     .sort();
-  record("socket-network-members", same(socketMembers, ["backup-scheduler", "docker-socket-proxy"]), `members=${socketMembers.join(",") || "none"}`);
+  record("socket-network-members", same(socketMembers, ["backup-scheduler", "docker-operation-gateway"]), `members=${socketMembers.join(",") || "none"}`);
 
   const workloadMemory = workloadServices.reduce((total, name) => total + bytes(services[name]?.mem_limit), 0);
   record("workload-memory-bounded", workloadServices.length === 0 || (workloadMemory > 0 && workloadMemory <= maxWorkloadMemoryBytes), `workloadMemory=${workloadMemory} max=${maxWorkloadMemoryBytes}`);
@@ -176,6 +175,10 @@ function volumes(service) {
 function networkNames(service) {
   if (Array.isArray(service?.networks)) return service.networks.map(String);
   return Object.keys(object(service?.networks));
+}
+
+function secretNames(service) {
+  return (service?.secrets || []).map((secret) => typeof secret === "string" ? secret : String(secret?.source || ""));
 }
 
 function stableId(value) {

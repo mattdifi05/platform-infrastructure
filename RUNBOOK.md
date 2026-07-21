@@ -18,12 +18,10 @@
 `audit-log-evidence.sh` verifies append-only audit events, durable outbox dispatch, alerts, dashboards and optional Platform source wiring, then writes non-secret reports under `reports/audit-logs/`.
 `retention-evidence.sh` verifies bounded Docker logs, Loki/Promtail retention, Prometheus TSDB retention, Grafana log panels and optional Platform structured log redaction, then writes non-secret reports under `reports/retention/`.
 
-The shell wrappers are container-first. They never mount the raw Docker socket
-by default. On the VPS they use the persistent proxy through
-`127.0.0.1:2376`; in CI/bootstrap they create and remove a digest-pinned
-ephemeral proxy. The container runs with the SSH user's UID/GID. Raw socket
-mode requires the explicit recovery flags documented in
-`RUNTIME-ISOLATION.md`.
+The shell wrappers are container-first and default to no Docker authority.
+Scheduled backup/restore jobs use the internal typed gateway; other Docker
+operations require the explicit recovery flags documented in
+`RUNTIME-ISOLATION.md`. No loopback or ephemeral raw Docker API is created.
 
 Terminology: **Infrastructure Portal** is the operator product surface,
 **Control Center** is the Node service that serves it, and `portal.<domain>` is
@@ -473,7 +471,9 @@ docker logs enterprise-backup-scheduler
 docker exec enterprise-backup-scheduler crontab -l
 ```
 
-This keeps scheduling inside Docker. The host only needs Docker, Compose and Git. The scheduler uses `docker-socket-proxy` on the isolated `platform_docker_control` network and never mounts the raw socket. It autodetects Docker mount sources; set `PLATFORM_INFRA_HOST_ROOT` and `PROJECT_SOURCE_HOST_ROOT` only when the VPS uses nonstandard paths. Enable off-site upload with `BACKUP_SCHEDULER_ENABLE_OFFSITE=true` after `RESTIC_REPOSITORY`, `RESTIC_PASSWORD_FILE` and provider credentials are valid. Scheduled jobs call `backup-scheduler.sh --run <command>` and parse the private runtime env file as data instead of sourcing it as shell code.
+This keeps scheduling inside Docker. The host only needs Docker, Compose and Git. The scheduler calls `docker-operation-gateway` on the isolated `platform_docker_control` network with a Docker-secret bearer token. The gateway has no host port and maps only documented backup/restore job names to fixed `infra-ops` invocations; it never accepts Docker paths, methods, commands, images, mounts, networks or volumes from the caller. Set `PLATFORM_INFRA_HOST_ROOT` and `PROJECT_SOURCE_HOST_ROOT` only when gateway mount discovery cannot identify nonstandard VPS paths. Enable off-site upload with `BACKUP_SCHEDULER_ENABLE_OFFSITE=true` after `RESTIC_REPOSITORY`, `RESTIC_PASSWORD_FILE` and provider credentials are valid.
+
+Host-side ops default to `PLATFORM_OPS_DOCKER_MODE=none`. Use `gateway` only for enumerated scheduled operations. Explicit `raw` recovery still requires `PLATFORM_ALLOW_RAW_DOCKER_SOCKET=1` and an approved maintenance window; no loopback Docker API is created.
 
 ## Home VPS LAN evidence
 
