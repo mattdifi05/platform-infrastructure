@@ -149,6 +149,7 @@ jobs:
           sh scripts/cloudflare-origin-lock-ufw-transaction-test.sh
           node scripts/release-trust.test.mjs
           node scripts/release-artifact-policy.test.mjs
+          node scripts/stable-json-artifact.test.mjs
           node scripts/release-subject-manifest.test.mjs
           node scripts/release-go-no-go-policy.test.mjs
           node scripts/deployment-admission-policy.test.mjs

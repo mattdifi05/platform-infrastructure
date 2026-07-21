@@ -63,6 +63,7 @@ import {
 import { evaluateProviderMfaAssurance } from "./provider-mfa-assurance.mjs";
 import { assertDeploymentAdmissionConfigured } from "./deployment-admission-policy.mjs";
 import { releaseEvidenceAdmissionReady } from "./release-go-no-go-policy.mjs";
+import { snapshotJsonArtifact } from "./stable-json-artifact.mjs";
 import {
   buildReleaseAdmissionReceipt,
   canonicalReleaseSubjects,
@@ -1115,12 +1116,7 @@ const releaseImageKeys = [
   "RESTIC_IMAGE",
 ];
 
-function releaseImageEntriesFromManifest(manifestPath) {
-  if (!manifestPath) {
-    return [];
-  }
-  const resolved = path.resolve(manifestPath);
-  const manifest = readJsonFile(resolved, resolved);
+function releaseImageEntriesFromManifestDocument(manifest) {
   const source = manifest.releaseImages ?? manifest.images ?? manifest.artifacts?.images ?? manifest.subjects ?? [];
   const entries = Array.isArray(source)
     ? source.map((entry, index) => {
@@ -1137,6 +1133,14 @@ function releaseImageEntriesFromManifest(manifestPath) {
       image: typeof value === "string" ? value : String(value?.image ?? value?.ref ?? value?.value ?? "").trim(),
     }));
   return entries.filter((entry) => entry.key && entry.image);
+}
+
+function releaseImageEntriesFromManifest(manifestPath) {
+  if (!manifestPath) {
+    return [];
+  }
+  const resolved = path.resolve(manifestPath);
+  return releaseImageEntriesFromManifestDocument(readJsonFile(resolved, resolved));
 }
 
 function releaseImageEntriesFromEnv(env) {
@@ -6262,88 +6266,91 @@ async function releaseArtifactGate(options = {}) {
 
 async function releaseArtifactGateBody(options = {}) {
   log("==> Release artifact admission gate");
-  const env = parseEnv(path.resolve(options.envFile ?? argv.envFile ?? path.join(infraRoot, ".env")));
   const manifestPath = options.imageManifest ?? argv.imageManifest ?? argv.projectManifest ?? argv.appManifest;
   if (!manifestPath) {
     fail("A versioned, attested release subject manifest is required; env-only and --images admission are not accepted.");
   }
-  const releaseManifest = readJsonFile(path.resolve(manifestPath), manifestPath);
-  const imageEntries = releaseImageEntries({
-    env,
-    imagesArg: options.images ?? argv.images,
-    manifestPath,
-  });
-  const images = imageEntries.map((entry) => entry.image);
-  if (!images.length) {
-    fail("No release images found. Pass --imageManifest <file> or --images <ref[,ref]>.");
-  }
-  for (const image of images) {
-    if (/:latest(?:@|$)/.test(image)) {
-      fail(`Mutable :latest image is not admissible: ${image}`);
+  const manifestArtifact = snapshotJsonArtifact(manifestPath, { label: "release subject manifest", maxBytes: 16 * 1024 * 1024 });
+  let sbomArtifact = null;
+  try {
+    const releaseManifest = manifestArtifact.document;
+    const imageEntries = releaseImageEntriesFromManifestDocument(releaseManifest);
+    const images = imageEntries.map((entry) => entry.image);
+    if (!images.length) {
+      fail("No release images found in the attested release subject manifest.");
     }
-    if (!/@sha256:[a-f0-9]{64}$/i.test(image)) {
-      fail(`Release image must be digest-pinned: ${image}`);
-    }
-  }
-  const subjects = canonicalReleaseSubjects(imageEntries);
-
-  const sbomFile = options.sbom ?? argv.sbom ?? latestFileByMtime(path.join(infraRoot, "security", "sbom"), (file) => /sbom.*\.(json|cdx\.json)$/i.test(path.basename(file)));
-  if (!sbomFile || !fs.existsSync(sbomFile)) {
-    fail("A release SBOM artifact is required. Run generate-sbom or pass --sbom <file>.");
-  }
-  const sbom = readJsonFile(sbomFile, sbomFile);
-
-  const admissionPolicy = readText(path.join(infraRoot, "security", "admission", "cosign-digest-policy.rego"));
-  assertMatch(admissionPolicy, /EXTERNAL-PENDING/, "Repository admission policy must remain fail-closed until a trusted verifier channel is configured.");
-  assertNoMatch(admissionPolicy, /metadata\.annotations/, "Repository admission policy must not trust workload-controlled annotations.");
-
-  rejectLegacyProvenanceInputs(options);
-  const releaseSha = options.releaseSha ?? argv.releaseSha ?? gitEvidence().commit;
-  const verificationOptions = releaseTrustVerificationOptions(options, releaseSha);
-  const sbomSha256 = sha256File(sbomFile);
-  validateAttestedReleaseManifest(releaseManifest, {
-    subjects,
-    repository: verificationOptions.repository,
-    commitSha: releaseSha,
-    sbomSha256,
-  });
-  validateCycloneDxReleaseSbom(sbom, {
-    subjects,
-    repository: verificationOptions.repository,
-    commitSha: releaseSha,
-  });
-  loadGithubTokenFromFile();
-  const manifestSha256 = sha256File(path.resolve(manifestPath));
-  const manifestVerification = verifyGithubAttestation({
-    subject: path.resolve(manifestPath),
-    expectedSubjectDigest: manifestSha256,
-    ...verificationOptions,
-  });
-  const githubAttestationValidation = verifyGithubReleaseImages({ images, ...verificationOptions });
-  validateCryptographicReleaseVerification(githubAttestationValidation, {
-    subjects,
-    repository: verificationOptions.repository,
-    commitSha: releaseSha,
-  });
-  if (booleanFlag(argv.verifyCosign)) {
     for (const image of images) {
-      run("cosign", ["verify", image]);
+      if (/:latest(?:@|$)/.test(image)) {
+        fail(`Mutable :latest image is not admissible: ${image}`);
+      }
+      if (!/@sha256:[a-f0-9]{64}$/i.test(image)) {
+        fail(`Release image must be digest-pinned: ${image}`);
+      }
     }
+    const subjects = canonicalReleaseSubjects(imageEntries);
+
+    const sbomFile = options.sbom ?? argv.sbom ?? latestFileByMtime(path.join(infraRoot, "security", "sbom"), (file) => /sbom.*\.(json|cdx\.json)$/i.test(path.basename(file)));
+    if (!sbomFile) {
+      fail("A release SBOM artifact is required. Run generate-sbom or pass --sbom <file>.");
+    }
+    sbomArtifact = snapshotJsonArtifact(sbomFile, { label: "release SBOM", maxBytes: 128 * 1024 * 1024 });
+    const sbom = sbomArtifact.document;
+
+    const admissionPolicy = readText(path.join(infraRoot, "security", "admission", "cosign-digest-policy.rego"));
+    assertMatch(admissionPolicy, /EXTERNAL-PENDING/, "Repository admission policy must remain fail-closed until a trusted verifier channel is configured.");
+    assertNoMatch(admissionPolicy, /metadata\.annotations/, "Repository admission policy must not trust workload-controlled annotations.");
+
+    rejectLegacyProvenanceInputs(options);
+    const releaseSha = options.releaseSha ?? argv.releaseSha ?? gitEvidence().commit;
+    const verificationOptions = releaseTrustVerificationOptions(options, releaseSha);
+    const sbomSha256 = sbomArtifact.sha256;
+    validateAttestedReleaseManifest(releaseManifest, {
+      subjects,
+      repository: verificationOptions.repository,
+      commitSha: releaseSha,
+      sbomSha256,
+    });
+    validateCycloneDxReleaseSbom(sbom, {
+      subjects,
+      repository: verificationOptions.repository,
+      commitSha: releaseSha,
+    });
+    loadGithubTokenFromFile();
+    const manifestSha256 = manifestArtifact.sha256;
+    const manifestVerification = verifyGithubAttestation({
+      subject: manifestArtifact.snapshotPath,
+      expectedSubjectDigest: manifestSha256,
+      ...verificationOptions,
+    });
+    const githubAttestationValidation = verifyGithubReleaseImages({ images, ...verificationOptions });
+    validateCryptographicReleaseVerification(githubAttestationValidation, {
+      subjects,
+      repository: verificationOptions.repository,
+      commitSha: releaseSha,
+    });
+    if (booleanFlag(argv.verifyCosign)) {
+      for (const image of images) {
+        run("cosign", ["verify", image]);
+      }
+    }
+    const receipt = buildReleaseAdmissionReceipt({
+      subjects,
+      repository: verificationOptions.repository,
+      commitSha: releaseSha,
+      sbomSha256,
+      manifestSha256,
+      verification: githubAttestationValidation,
+      manifestVerification,
+    });
+    const receiptPath = writeJsonReport("release", `release-artifact-admission-${reportTimestamp()}`, receipt);
+    const deploymentAdmission = readJsonFile(path.join(infraRoot, "governance", "deployment-admission.json"), "deployment admission policy");
+    assertDeploymentAdmissionConfigured(deploymentAdmission);
+    log(`Release artifact admission gate passed with SBOM ${sbomFile} and receipt ${receiptPath}.`);
+    return { sbomFile, receiptPath, provenanceValidation: null, githubAttestationValidation };
+  } finally {
+    sbomArtifact?.cleanup();
+    manifestArtifact.cleanup();
   }
-  const receipt = buildReleaseAdmissionReceipt({
-    subjects,
-    repository: verificationOptions.repository,
-    commitSha: releaseSha,
-    sbomSha256,
-    manifestSha256,
-    verification: githubAttestationValidation,
-    manifestVerification,
-  });
-  const receiptPath = writeJsonReport("release", `release-artifact-admission-${reportTimestamp()}`, receipt);
-  const deploymentAdmission = readJsonFile(path.join(infraRoot, "governance", "deployment-admission.json"), "deployment admission policy");
-  assertDeploymentAdmissionConfigured(deploymentAdmission);
-  log(`Release artifact admission gate passed with SBOM ${sbomFile} and receipt ${receiptPath}.`);
-  return { sbomFile, receiptPath, provenanceValidation: null, githubAttestationValidation };
 }
 
 function releaseImageMapFromEnv(env, manifestPath = null) {
