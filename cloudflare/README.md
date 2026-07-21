@@ -17,7 +17,11 @@ been reviewed and approved.
   and policies with `--apply`, and verifies the live account with
   `--verifyRemote`. Both successful and failed live verifications write
   `reports/cloudflare-access/` evidence for audit and troubleshooting. MFA is
-  enforced through the configured identity provider IDs.
+  enforced through the configured identity provider IDs. Reconciliation reads
+  every API page and requires exact application settings plus exact, unique
+  include/require/exclude selectors. Unknown or duplicate selectors and any
+  sibling allow/bypass policy fail closed; the tool never treats an expected
+  selector as sufficient when the effective policy is broader.
 - `zone-settings.json` lists safe zone settings plus manual-review items.
 - `scripts/cloudflare-origin-lock-ufw.sh` must run on the VPS so direct-origin
   bypass is blocked at the host firewall.

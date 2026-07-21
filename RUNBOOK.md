@@ -750,9 +750,13 @@ CLOUDFLARE_API_TOKEN=... CLOUDFLARE_ACCOUNT_ID=... sh ./scripts/cloudflare-acces
 CLOUDFLARE_API_TOKEN=... CLOUDFLARE_ACCOUNT_ID=... sh ./scripts/cloudflare-access-admin.sh --manifest cloudflare/access-admin.production.json --verifyRemote
 ```
 
-The apply path is additive-only. Existing Access applications are verified and left
-untouched; mismatched existing applications fail the run so the operator can review
-Cloudflare manually instead of weakening an admin surface by accident.
+The apply path is additive-only. Existing Access applications are verified and
+left untouched; all paginated applications and policies are reconciled before
+the result is accepted. Application name/domain/session/IdP settings and policy
+include/require/exclude selectors must match exactly. Duplicate or unknown
+selectors and every sibling policy fail the run, so an extra allow or bypass
+cannot hide behind the expected named policy. Review mismatches manually in
+Cloudflare instead of weakening an admin surface by accident.
 
 ## Linux portability
 

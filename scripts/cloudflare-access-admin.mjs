@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 const API_BASE = "https://api.cloudflare.com/client/v4";
 const DEFAULT_MANIFEST = "cloudflare/access-admin.example.json";
@@ -109,11 +110,25 @@ function cleanArray(value) {
   return Array.isArray(value) ? value.map((item) => String(item).trim()).filter(Boolean) : [];
 }
 
-function normalizeManifest(raw, argv) {
+function uniqueValues(values, label, lowerCase) {
+  const normalized = values.map((value) => lowerCase ? value.toLowerCase() : value);
+  requireUnique(normalized, label);
+  return normalized;
+}
+
+function requireUnique(values, label) {
+  const seen = new Set();
+  for (const value of values) {
+    if (seen.has(value)) throw new Error(`${label} is duplicated: ${value}.`);
+    seen.add(value);
+  }
+}
+
+export function normalizeManifest(raw, argv) {
   const accountId = argv.accountId || process.env.CLOUDFLARE_ACCOUNT_ID || raw.accountId;
-  const allowedIdentityProviderIds = cleanArray(raw.allowedIdentityProviderIds);
-  const allowedEmails = cleanArray(raw.allowedEmails);
-  const allowedEmailDomains = cleanArray(raw.allowedEmailDomains);
+  const allowedIdentityProviderIds = uniqueValues(cleanArray(raw.allowedIdentityProviderIds), "identity provider", false);
+  const allowedEmails = uniqueValues(cleanArray(raw.allowedEmails), "allowed email", true);
+  const allowedEmailDomains = uniqueValues(cleanArray(raw.allowedEmailDomains), "allowed email domain", true);
   const applications = Array.isArray(raw.applications) ? raw.applications : [];
 
   if (!raw.teamName) throw new Error("Cloudflare Access manifest must define teamName.");
@@ -138,6 +153,9 @@ function normalizeManifest(raw, argv) {
       sessionDuration: app.sessionDuration ? String(app.sessionDuration) : String(raw.adminSessionDuration),
     };
   });
+  requireUnique(normalizedApps.map((app) => app.name), "Access application name");
+  requireUnique(normalizedApps.map((app) => app.domain), "Access application domain");
+  requireUnique(normalizedApps.map((app) => app.policyName), "Access policy name");
 
   if (argv.apply || argv.verifyRemote) {
     if (isPlaceholder(accountId)) throw new Error("Set a real Cloudflare account id with --account-id or CLOUDFLARE_ACCOUNT_ID before live operations.");
@@ -158,7 +176,7 @@ function normalizeManifest(raw, argv) {
   };
 }
 
-function applicationPayload(app, manifest) {
+export function applicationPayload(app, manifest) {
   return {
     name: app.name,
     domain: app.domain,
@@ -172,7 +190,7 @@ function applicationPayload(app, manifest) {
   };
 }
 
-function policyPayload(app, manifest) {
+export function policyPayload(app, manifest) {
   return {
     name: app.policyName,
     decision: "allow",
@@ -204,47 +222,110 @@ async function cloudflareRequest({ method, requestPath, token, body }) {
   return json;
 }
 
-async function listApplications(accountId, token) {
-  const result = await cloudflareRequest({ method: "GET", requestPath: `/accounts/${accountId}/access/apps?per_page=1000`, token });
-  return result.result || [];
+export async function listApplications(accountId, token) {
+  return listPaginated(`/accounts/${accountId}/access/apps`, token, "Access applications");
 }
 
-async function listPolicies(accountId, appId, token) {
-  const result = await cloudflareRequest({ method: "GET", requestPath: `/accounts/${accountId}/access/apps/${appId}/policies?per_page=1000`, token });
-  return result.result || [];
+export async function listPolicies(accountId, appId, token) {
+  return listPaginated(`/accounts/${accountId}/access/apps/${appId}/policies`, token, "Access policies");
 }
 
-function selectorKeys(selectors = []) {
-  const keys = [];
-  for (const selector of selectors) {
-    if (selector.email?.email) keys.push(`email:${String(selector.email.email).toLowerCase()}`);
-    if (selector.email_domain?.domain) keys.push(`email_domain:${String(selector.email_domain.domain).toLowerCase()}`);
-    if (selector.login_method?.id) keys.push(`login_method:${String(selector.login_method.id)}`);
+async function listPaginated(requestPath, token, label) {
+  const items = [];
+  const ids = new Set();
+  const perPage = 50;
+  for (let page = 1; page <= 1000; page += 1) {
+    const separator = requestPath.includes("?") ? "&" : "?";
+    const response = await cloudflareRequest({ method: "GET", requestPath: `${requestPath}${separator}per_page=${perPage}&page=${page}`, token });
+    if (!Array.isArray(response.result)) throw new Error(`${label} response is not an array.`);
+    for (const item of response.result) {
+      const id = String(item?.id ?? "");
+      if (id && ids.has(id)) throw new Error(`${label} pagination returned duplicate id ${id}.`);
+      if (id) ids.add(id);
+      items.push(item);
+    }
+    const totalPages = Number(response.result_info?.total_pages);
+    if (Number.isSafeInteger(totalPages) && totalPages >= 0) {
+      if (page >= totalPages) return items;
+      continue;
+    }
+    if (response.result.length < perPage) return items;
   }
-  return new Set(keys);
+  throw new Error(`${label} pagination exceeded the safety limit.`);
 }
 
-function requireSelectorSet(remoteSelectors, expectedSelectors, label) {
-  const remote = selectorKeys(remoteSelectors);
-  for (const key of selectorKeys(expectedSelectors)) {
-    if (!remote.has(key)) throw new Error(`${label} is missing selector ${key}.`);
+function selectorKeys(selectors, label) {
+  if (!Array.isArray(selectors)) throw new Error(`${label} selectors must be an array.`);
+  const keys = selectors.map((selector, index) => selectorKey(selector, `${label}[${index}]`));
+  if (new Set(keys).size !== keys.length) throw new Error(`${label} contains a duplicate selector.`);
+  return keys.sort();
+}
+
+function selectorKey(selector, label) {
+  if (!selector || typeof selector !== "object" || Array.isArray(selector)) throw new Error(`${label} must be an exact selector object.`);
+  const types = Object.keys(selector);
+  if (types.length !== 1) throw new Error(`${label} must contain exactly one supported selector type.`);
+  const type = types[0];
+  const fields = { email: "email", email_domain: "domain", login_method: "id" };
+  const field = fields[type];
+  if (!field) throw new Error(`${label} uses unknown selector type ${type}.`);
+  const value = selector[type];
+  if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).length !== 1 || typeof value[field] !== "string" || !value[field].trim()) {
+    throw new Error(`${label} must contain only ${type}.${field}.`);
   }
+  const normalized = type === "login_method" ? value[field].trim() : value[field].trim().toLowerCase();
+  return `${type}:${normalized}`;
 }
 
-function assertAppMatches(remote, expected) {
+function requireExactSelectorSet(remoteSelectors, expectedSelectors, label) {
+  const remote = selectorKeys(remoteSelectors, `${label} remote`);
+  const expected = selectorKeys(expectedSelectors, `${label} expected`);
+  if (JSON.stringify(remote) !== JSON.stringify(expected)) throw new Error(`${label} selectors do not exactly match the manifest.`);
+}
+
+export function assertAppMatches(remote, expected) {
+  if (remote.name !== expected.name) throw new Error(`${expected.name} exists with a different name.`);
   if (remote.type !== expected.type) throw new Error(`${expected.name} exists but is not self_hosted.`);
   if (String(remote.domain).toLowerCase() !== expected.domain) throw new Error(`${expected.name} exists with a different domain.`);
+  if (String(remote.session_duration) !== expected.session_duration) throw new Error(`${expected.name} exists with a different session duration.`);
+  const remoteIdps = uniqueValues(cleanArray(remote.allowed_idps), `${expected.name} remote identity provider`, false).sort();
+  const expectedIdps = uniqueValues(cleanArray(expected.allowed_idps), `${expected.name} expected identity provider`, false).sort();
+  if (JSON.stringify(remoteIdps) !== JSON.stringify(expectedIdps)) throw new Error(`${expected.name} identity provider set does not exactly match.`);
   if (remote.auto_redirect_to_identity !== true) throw new Error(`${expected.name} must auto-redirect to the configured identity provider.`);
   if (remote.enable_binding_cookie !== true) throw new Error(`${expected.name} must enable binding cookies.`);
   if (remote.http_only_cookie_attribute !== true) throw new Error(`${expected.name} must use HTTP-only cookies.`);
   if (String(remote.same_site_cookie_attribute || "").toLowerCase() !== "strict") throw new Error(`${expected.name} must use SameSite=strict cookies.`);
 }
 
-function assertPolicyMatches(remote, expected) {
+export function findExactApplication(applications, expected) {
+  if (!Array.isArray(applications)) throw new Error(`${expected.name} application collection is invalid.`);
+  const domainMatches = applications.filter((item) => String(item?.domain ?? "").toLowerCase() === expected.domain);
+  if (domainMatches.length > 1) throw new Error(`${expected.name} domain is claimed by duplicate Access applications.`);
+  const siblingName = applications.find((item) => item?.name === expected.name && String(item?.domain ?? "").toLowerCase() !== expected.domain);
+  if (siblingName) throw new Error(`${expected.name} is reused by a sibling Access application.`);
+  return domainMatches[0] ?? null;
+}
+
+export function assertPolicyMatches(remote, expected) {
+  if (remote.name !== expected.name) throw new Error(`${expected.name} policy name does not exactly match.`);
   if (remote.decision !== "allow") throw new Error(`${expected.name} policy must be an allow policy.`);
   if (Number(remote.precedence) !== 1) throw new Error(`${expected.name} policy must have precedence 1.`);
-  requireSelectorSet(remote.include, expected.include, `${expected.name} include policy`);
-  requireSelectorSet(remote.require, expected.require, `${expected.name} require policy`);
+  if (String(remote.session_duration) !== expected.session_duration) throw new Error(`${expected.name} policy session duration does not exactly match.`);
+  requireExactSelectorSet(remote.include, expected.include, `${expected.name} include policy`);
+  requireExactSelectorSet(remote.require, expected.require, `${expected.name} require policy`);
+  requireExactSelectorSet(remote.exclude, expected.exclude, `${expected.name} exclude policy`);
+}
+
+export function assertExactPolicyCollection(policies, expected) {
+  if (!Array.isArray(policies)) throw new Error(`${expected.name} policy collection is invalid.`);
+  const matches = policies.filter((policy) => policy?.name === expected.name);
+  if (matches.length !== 1) throw new Error(`${expected.name} requires exactly one named policy; found ${matches.length}.`);
+  if (policies.length !== 1) {
+    const siblings = policies.filter((policy) => policy !== matches[0]).map((policy) => `${policy?.name ?? "unnamed"}:${policy?.decision ?? "unknown"}`);
+    throw new Error(`${expected.name} has extra sibling policies: ${siblings.join(", ")}.`);
+  }
+  assertPolicyMatches(matches[0], expected);
+  return matches[0];
 }
 
 function dryRun(manifest) {
@@ -273,7 +354,7 @@ async function apply(manifest) {
   const results = [];
   for (const app of manifest.applications) {
     const expectedApp = applicationPayload(app, manifest);
-    let remote = apps.find((item) => String(item.domain).toLowerCase() === app.domain);
+    let remote = findExactApplication(apps, expectedApp);
     let appResult = "matched";
     let policyResult = "matched";
     if (!remote) {
@@ -284,6 +365,7 @@ async function apply(manifest) {
         body: expectedApp,
       });
       remote = created.result;
+      assertAppMatches(remote, expectedApp);
       apps.push(remote);
       process.stdout.write(`Created Access application ${app.name} (${app.domain}).\n`);
       appResult = "created";
@@ -296,16 +378,18 @@ async function apply(manifest) {
     const policies = await listPolicies(manifest.accountId, remote.id, token);
     const policy = policies.find((item) => item.name === expectedPolicy.name);
     if (!policy) {
-      await cloudflareRequest({
+      if (policies.length !== 0) throw new Error(`${expectedPolicy.name} cannot be created beside existing sibling policies.`);
+      const created = await cloudflareRequest({
         method: "POST",
         requestPath: `/accounts/${manifest.accountId}/access/apps/${remote.id}/policies`,
         token,
         body: expectedPolicy,
       });
+      assertPolicyMatches(created.result, expectedPolicy);
       process.stdout.write(`Created Access allow policy ${expectedPolicy.name}.\n`);
       policyResult = "created";
     } else {
-      assertPolicyMatches(policy, expectedPolicy);
+      assertExactPolicyCollection(policies, expectedPolicy);
       process.stdout.write(`Access policy already exists and matches required selectors: ${expectedPolicy.name}.\n`);
     }
     results.push({
@@ -327,14 +411,12 @@ async function verifyRemote(manifest) {
   for (const app of manifest.applications) {
     try {
       const expectedApp = applicationPayload(app, manifest);
-      const remote = apps.find((item) => String(item.domain).toLowerCase() === app.domain);
+      const remote = findExactApplication(apps, expectedApp);
       if (!remote) throw new Error(`Missing Cloudflare Access application: ${app.domain}`);
       assertAppMatches(remote, expectedApp);
       const policies = await listPolicies(manifest.accountId, remote.id, token);
       const expectedPolicy = policyPayload(app, manifest);
-      const policy = policies.find((item) => item.name === expectedPolicy.name);
-      if (!policy) throw new Error(`Missing Cloudflare Access policy: ${expectedPolicy.name}`);
-      assertPolicyMatches(policy, expectedPolicy);
+      const policy = assertExactPolicyCollection(policies, expectedPolicy);
       results.push({
         name: app.name,
         domain: app.domain,
@@ -400,7 +482,9 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  process.stderr.write(`${error.message ?? error}\n`);
-  process.exitCode = 1;
-});
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch((error) => {
+    process.stderr.write(`${error.message ?? error}\n`);
+    process.exitCode = 1;
+  });
+}
