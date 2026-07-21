@@ -51,6 +51,7 @@ import {
   assertExactBranchProtection,
   assertExactGithubEnvironment,
   assertValidGithubEnvironmentCollection,
+  buildBranchProtectionApplyReceipt,
 } from "./github-governance-policy.mjs";
 import {
   GITHUB_ACTIONS_OIDC_ISSUER,
@@ -7022,7 +7023,7 @@ async function githubApi(method, apiPath, body = undefined) {
   const headers = {
     "Accept": "application/vnd.github+json",
     "User-Agent": "platform-infrastructure",
-    "X-GitHub-Api-Version": process.env.GITHUB_API_VERSION ?? "2026-03-10",
+    "X-GitHub-Api-Version": githubApiVersion(),
   };
   if (token) {
     headers.Authorization = `Bearer ${token}`;
@@ -7036,6 +7037,10 @@ async function githubApi(method, apiPath, body = undefined) {
     fail(`GitHub API ${method} ${apiPath} failed with HTTP ${response.status}: ${response.text}`);
   }
   return response.text ? JSON.parse(response.text) : null;
+}
+
+function githubApiVersion() {
+  return process.env.GITHUB_API_VERSION ?? "2026-03-10";
 }
 
 function assertRemoteBranchProtectionMatches(policy, remote) {
@@ -7070,7 +7075,16 @@ async function githubBranchProtection() {
     apply: (payload) => githubApi("PUT", apiPath, payload),
     read: () => githubApi("GET", apiPath),
   });
+  const receipt = buildBranchProtectionApplyReceipt({
+    repository: repo,
+    branch,
+    policySha256: sha256File(path.join(infraRoot, "governance", "github-branch-protection.json")),
+    apiVersion: githubApiVersion(),
+    expected: policy,
+  });
+  const receiptPath = writeJsonReport("github-governance", `branch-protection-apply-${reportTimestamp()}`, receipt);
   log(`Applied and freshly verified GitHub branch protection policy for ${repo}:${branch}.`);
+  log(`Branch protection apply receipt written to ${receiptPath}.`);
 }
 
 async function verifyGithubBranchProtectionRemote(repo, branch = "main") {

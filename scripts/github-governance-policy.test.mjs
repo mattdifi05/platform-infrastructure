@@ -4,6 +4,7 @@ import {
   applyAndVerifyBranchProtection,
   applyAndVerifyGithubEnvironment,
   assertValidGithubEnvironmentCollection,
+  buildBranchProtectionApplyReceipt,
   branchProtectionMismatches,
   githubEnvironmentMismatches,
   requiredStatusCheckMismatches,
@@ -74,6 +75,7 @@ const remoteEnvironment = {
       prevent_self_review: true,
       reviewers: [{ type: "User", reviewer: { id: 95946096, login: "mattdifi05" } }],
     },
+    { type: "branch_policy" },
   ],
   deployment_branch_policy: { protected_branches: true, custom_branch_policies: false },
 };
@@ -223,6 +225,16 @@ test("unexpected protection rule fails", () => {
   remote.protection_rules.push({ type: "unreviewed-provider-rule" });
   assert.match(githubEnvironmentMismatches(environmentPolicy, remote).join(" "), /unexpected/);
 });
+test("missing provider branch-policy marker fails", () => {
+  const remote = structuredClone(remoteEnvironment);
+  remote.protection_rules = remote.protection_rules.filter((rule) => rule.type !== "branch_policy");
+  assert.match(githubEnvironmentMismatches(environmentPolicy, remote).join(" "), /exactly once/);
+});
+test("duplicate provider branch-policy marker fails", () => {
+  const remote = structuredClone(remoteEnvironment);
+  remote.protection_rules.push({ type: "branch_policy" });
+  assert.match(githubEnvironmentMismatches(environmentPolicy, remote).join(" "), /exactly once/);
+});
 test("invalid tracked branch policy is rejected before PUT", async () => {
   const expected = structuredClone(branchPolicy);
   expected.required_status_checks.checks[0].app_id = "15368";
@@ -271,6 +283,19 @@ test("duplicate environment names fail collection preflight", () => {
   assert.throws(() => assertValidGithubEnvironmentCollection({
     environments: [environmentPolicy, structuredClone(environmentPolicy)],
   }), /unique/);
+});
+test("branch apply receipt binds policy hash API version and producer tuples", () => {
+  const receipt = buildBranchProtectionApplyReceipt({
+    repository: "owner/repo",
+    branch: "main",
+    policySha256: "a".repeat(64),
+    apiVersion: "2026-03-10",
+    expected: branchPolicy,
+  });
+  assert.equal(receipt.verification, "fresh-GET-exact");
+  assert.equal(receipt.policySha256, "a".repeat(64));
+  assert.equal(receipt.githubApiVersion, "2026-03-10");
+  assert.deepEqual(receipt.requiredStatusChecks.checks, branchPolicy.required_status_checks.checks);
 });
 
 let passed = 0;

@@ -232,8 +232,10 @@ export function githubEnvironmentMismatches(expected, remote) {
   if (!isObject(remote)) return [...issues, "remote environment must be an object"];
   const rules = remote.protection_rules;
   if (!Array.isArray(rules)) return [...issues, "remote protection_rules must be an array"];
-  const unknownRules = rules.filter((rule) => !isObject(rule) || !["wait_timer", "required_reviewers"].includes(rule.type));
+  const unknownRules = rules.filter((rule) => !isObject(rule) || !["wait_timer", "required_reviewers", "branch_policy"].includes(rule.type));
   if (unknownRules.length > 0) issues.push("remote protection_rules contain an unexpected or invalid rule type");
+  const branchPolicyRules = rules.filter((rule) => rule?.type === "branch_policy");
+  if (branchPolicyRules.length !== 1) issues.push("branch_policy protection rule must appear exactly once");
 
   const waitRules = rules.filter((rule) => rule?.type === "wait_timer");
   if (waitRules.length > 1) issues.push("wait_timer protection rule must appear at most once");
@@ -315,4 +317,37 @@ export async function applyAndVerifyGithubEnvironment({ expected, apply, read })
   const remote = await read();
   assertExactGithubEnvironment(expected, remote);
   return remote;
+}
+
+export function buildBranchProtectionApplyReceipt({ repository, branch, policySha256, apiVersion, expected }) {
+  assertExactBranchProtection(expected, expected);
+  if (!exactNonEmptyString(repository) || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository)) {
+    throw new Error("Branch-protection receipt repository is invalid");
+  }
+  if (!exactNonEmptyString(branch) || !/^[A-Za-z0-9._/-]+$/.test(branch)) {
+    throw new Error("Branch-protection receipt branch is invalid");
+  }
+  if (typeof policySha256 !== "string" || !/^[a-f0-9]{64}$/.test(policySha256)) {
+    throw new Error("Branch-protection receipt policy SHA256 is invalid");
+  }
+  if (typeof apiVersion !== "string" || !/^20[0-9]{2}-[0-9]{2}-[0-9]{2}$/.test(apiVersion)) {
+    throw new Error("Branch-protection receipt API version is invalid");
+  }
+  return {
+    version: 1,
+    kind: "platform-github-branch-protection-apply-receipt/v1",
+    status: "passed",
+    generatedAt: new Date().toISOString(),
+    repository,
+    branch,
+    policySha256,
+    githubApiVersion: apiVersion,
+    mutation: "PUT",
+    verification: "fresh-GET-exact",
+    requiredStatusChecks: {
+      strict: expected.required_status_checks.strict,
+      contexts: [],
+      checks: expected.required_status_checks.checks.map(({ context, app_id }) => ({ context, app_id })),
+    },
+  };
 }
