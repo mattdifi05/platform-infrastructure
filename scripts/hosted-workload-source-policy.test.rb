@@ -122,4 +122,12 @@ class HostedWorkloadSourcePolicyTest < Minitest::Test
     end
     assert_match(/cannot use local driver options/, error.message)
   end
+
+  def test_rejects_compose_api_socket
+    model = parse("services:\n  app:\n    use_api_socket: true\n")
+    error = assert_raises(ArgumentError) do
+      HostedWorkloadSourcePolicy.validate_source_model(model, "fixture")
+    end
+    assert_match(/cannot use the Compose API socket/, error.message)
+  end
 end

@@ -16,7 +16,7 @@ const IMAGE = /^[a-z0-9][a-z0-9._/-]*(?::[A-Za-z0-9._-]+)?@sha256:[a-f0-9]{64}$/
 const SAFE_PATH = /^[A-Za-z0-9_./-]+$/;
 export const HOSTED_WORKLOAD_LOCK_VERSION = 2;
 export const HOSTED_WORKLOAD_VALIDATOR_VERSION = "hosted-contract-v2";
-const RAW_POLICY_CONTROLS = Object.freeze(["deny-device-access", "deny-env-file", "deny-extends", "deny-file-configs", "deny-include", "deny-lifecycle-hooks", "deny-local-volume-options", "deny-scaling", "deny-volumes-from"]);
+const RAW_POLICY_CONTROLS = Object.freeze(["deny-api-socket", "deny-device-access", "deny-env-file", "deny-extends", "deny-file-configs", "deny-include", "deny-lifecycle-hooks", "deny-local-volume-options", "deny-scaling", "deny-volumes-from"]);
 const PLATFORM_DEPENDENCIES = new Set([
   "postgres",
   "redis",
@@ -898,6 +898,7 @@ function assertWorkloadService({ serviceDefinition, manifestService, manifest, c
   }
   if (serviceDefinition.scale != null || serviceDefinition.deploy?.replicas != null) invalid(`${name} cannot request service scaling.`);
   if ((serviceDefinition.configs?.length ?? 0) > 0) invalid(`${name} cannot mount platform or host-backed configs.`);
+  if (serviceDefinition.use_api_socket != null) invalid(`${name} cannot use the Compose API socket.`);
   if (serviceDefinition.devices != null || serviceDefinition.device_cgroup_rules != null) invalid(`${name} cannot request host device access.`);
   if (serviceDefinition.volumes_from != null) invalid(`${name} cannot inherit volumes from another service.`);
   if (serviceDefinition.container_name) invalid(`${name} cannot reserve a global container_name.`);

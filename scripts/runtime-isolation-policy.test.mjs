@@ -102,6 +102,14 @@ test("rejects workload local volume driver options independently at runtime", ()
   assert.match(report.failures.join("\n"), /workload-no-local-volume-options-example-app-web/);
 });
 
+test("rejects workload Compose API socket access independently at runtime", () => {
+  const config = fixture();
+  config.services["example-app-web"].use_api_socket = true;
+  const report = evaluateRuntimeIsolation(config);
+  assert.equal(report.status, "failed");
+  assert.match(report.failures.join("\n"), /workload-no-api-socket-example-app-web/);
+});
+
 test("rejects missing memory limits and budget overcommit", () => {
   const config = fixture();
   config.services["example-app-web"].mem_limit = 0;
