@@ -94,6 +94,21 @@ require_command() {
   command -v "$1" >/dev/null 2>&1 || { echo "$1 command not found" >&2; exit 1; }
 }
 
+verified_activation_bundle() {
+  if [ "$(id -u)" -eq 0 ]; then
+    require_command runuser
+    require_command getent
+    lock_uid=$(stat -c '%u' "$LOCK") || { echo "Cannot read hosted workload lock owner" >&2; exit 1; }
+    lock_owner=$(getent passwd "$lock_uid" | awk -F: 'NR == 1 { print $1 }')
+    [ -n "$lock_owner" ] || { echo "Hosted workload lock owner has no local deployment identity" >&2; exit 1; }
+    runuser -u "$lock_owner" -- env HOSTED_WORKLOAD_ALLOW_RESOLVED=0 \
+      sh "$SCRIPT_DIR/hosted-workload-lock.sh" "$LOCK" activation-bundle
+  else
+    HOSTED_WORKLOAD_ALLOW_RESOLVED=${HOSTED_WORKLOAD_ALLOW_RESOLVED:-0} \
+      sh "$SCRIPT_DIR/hosted-workload-lock.sh" "$LOCK" activation-bundle
+  fi
+}
+
 load_locked_egress_subnets() {
   require_command docker
   require_command jq
@@ -104,7 +119,7 @@ load_locked_egress_subnets() {
   case "$LOCK" in *[!A-Za-z0-9_./-]*|*//*|*/../*|*/..) echo "Invalid --lock path" >&2; exit 2 ;; esac
   [ -f "$LOCK" ] || { echo "Hosted workload lock does not exist: $LOCK" >&2; exit 1; }
   case "$PROJECT_NAME" in ''|*[!a-z0-9_-]* ) echo "Invalid --project-name" >&2; exit 2 ;; esac
-  activation_bundle=$(sh "$SCRIPT_DIR/hosted-workload-lock.sh" "$LOCK" activation-bundle)
+  activation_bundle=$(verified_activation_bundle)
   printf '%s' "$activation_bundle" | jq -e --arg projectName "$PROJECT_NAME" '
     .projectName == $projectName
     and (.networkRecords | type == "array")
