@@ -3,6 +3,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { canonicalReleaseSubjects, exactGitSha, exactRepository } from "./release-artifact-policy.mjs";
 import { snapshotJsonArtifact } from "./stable-json-artifact.mjs";
+import { trustedProducerConfiguration } from "./trusted-provider-run-policy.mjs";
 
 function invalid(message) {
   throw new Error(message);
@@ -53,6 +54,8 @@ export function validateTrustedDeploymentReceipt(receipt, {
   treeSha,
   artifactReceiptSha256,
   artifactReceipt,
+  providerRunId = null,
+  providerRunAttempt = null,
 }) {
   const expectedRepository = exactRepository(repository);
   const expectedCommit = exactGitSha(commitSha);
@@ -68,6 +71,7 @@ export function validateTrustedDeploymentReceipt(receipt, {
   ) {
     invalid(`EXTERNAL-PENDING: ${policy?.reason ?? "trusted deployment verifier channel is not configured"}`);
   }
+  const configuredProducer = trustedProducerConfiguration(policy);
   if (receipt?.version !== 1 || receipt?.kind !== policy.requiredReceiptKind) invalid("Trusted deployment receipt kind/version is invalid.");
   if (receipt.status !== "READY" || receipt.artifactVerification !== "passed" || receipt.deploymentAdmission !== "READY") {
     invalid("Trusted deployment receipt is not READY.");
@@ -86,6 +90,25 @@ export function validateTrustedDeploymentReceipt(receipt, {
     || receipt.verifier?.selfAsserted !== false
   ) {
     invalid("Trusted deployment receipt is not from the configured external verifier channel.");
+  }
+  const producer = receipt.producer;
+  if (
+    producer?.repository !== configuredProducer.repository
+    || producer?.workflowPath !== configuredProducer.workflowPath
+    || producer?.sourceRef !== configuredProducer.sourceRef
+    || producer?.event !== configuredProducer.event
+    || !/^[1-9][0-9]*$/.test(String(producer?.runId ?? ""))
+    || !Number.isInteger(producer?.runAttempt)
+    || producer.runAttempt < 1
+    || !/^[a-f0-9]{40}$/.test(String(producer?.workflowSha ?? ""))
+  ) {
+    invalid("Trusted deployment receipt producer identity is not bound to the configured workflow/repository/ref.");
+  }
+  if (
+    (providerRunId !== null && String(producer.runId) !== String(providerRunId))
+    || (providerRunAttempt !== null && String(producer.runAttempt) !== String(providerRunAttempt))
+  ) {
+    invalid("Trusted deployment receipt producer run identity is mismatched.");
   }
   exactSha256(receipt.verifier?.fingerprint, "trusted verifier fingerprint");
   exactTimestamp(receipt.verifier?.verifiedAt, "trusted verifier verifiedAt");
@@ -124,6 +147,8 @@ function main() {
       treeSha: options.tree,
       artifactReceiptSha256: artifact.sha256,
       artifactReceipt: artifact.document,
+      providerRunId: options.providerRunId ?? null,
+      providerRunAttempt: options.providerRunAttempt ?? null,
     });
     process.stdout.write(`${JSON.stringify({ status: "READY", repository: options.repo, commitSha: options.commit, treeSha: options.tree, artifactReceiptSha256: artifact.sha256, deploymentReceiptSha256: deployment.sha256 })}\n`);
   } finally {

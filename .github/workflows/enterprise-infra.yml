@@ -15,12 +15,20 @@ on:
         description: Release-attestation workflow run containing the bound manifest and SBOM
         required: true
         type: string
+      release_attestation_run_attempt:
+        description: Exact successful attempt of the authenticated release-attestation run
+        required: true
+        type: string
       release_manifest_sha256:
         description: Owner-reviewed SHA256 of the attested release subject manifest
         required: true
         type: string
       trusted_admission_run_id:
         description: Trusted-provider run containing the exact deployment admission receipt
+        required: true
+        type: string
+      trusted_admission_run_attempt:
+        description: Exact successful attempt of the configured trusted-provider workflow run
         required: true
         type: string
       artifact_receipt_sha256:
@@ -182,6 +190,8 @@ jobs:
           node scripts/release-go-no-go-policy.test.mjs
           node scripts/deployment-admission-policy.test.mjs
           node scripts/deployment-receipt-policy.test.mjs
+          node scripts/trusted-provider-run-policy.test.mjs
+          node scripts/gh-verifier-workflow-policy.test.mjs
           node scripts/trusted-receipt-workflow.test.mjs
           node scripts/privileged-workflow-policy.test.mjs
           node scripts/ssh-host-key-policy.test.mjs
@@ -325,6 +335,9 @@ jobs:
       release_tree: ${{ steps.bind.outputs.release_tree }}
       artifact_receipt_sha256: ${{ steps.artifacts.outputs.artifact_receipt_sha256 }}
       deployment_receipt_sha256: ${{ steps.artifacts.outputs.deployment_receipt_sha256 }}
+      trusted_provider_run_id: ${{ steps.provider.outputs.run_id }}
+      trusted_provider_run_attempt: ${{ steps.provider.outputs.run_attempt }}
+      trusted_provider_metadata_sha256: ${{ steps.provider.outputs.metadata_sha256 }}
     steps:
       - name: Checkout exact protected-main candidate
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
@@ -344,6 +357,52 @@ jobs:
           RELEASE_TREE="$(git rev-parse "${APPROVED_SHA}^{tree}")"
           printf 'release_sha=%s\n' "$APPROVED_SHA" >> "$GITHUB_OUTPUT"
           printf 'release_tree=%s\n' "$RELEASE_TREE" >> "$GITHUB_OUTPUT"
+      - name: Install checksum-pinned GitHub attestation verifier
+        run: sh ./scripts/install-gh-attestation-verifier.sh
+      - name: Authenticate release-attestation producer run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_RUN_ID: ${{ inputs.release_attestation_run_id }}
+          RELEASE_RUN_ATTEMPT: ${{ inputs.release_attestation_run_attempt }}
+          APPROVED_SHA: ${{ inputs.approved_sha }}
+        run: |
+          case "$RELEASE_RUN_ID:$RELEASE_RUN_ATTEMPT" in *[!0-9:]*|:*|*:) exit 1 ;; esac
+          RELEASE_RUN_METADATA="${RUNNER_TEMP}/release-attestation-run.json"
+          /usr/local/bin/gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${RELEASE_RUN_ID}" > "$RELEASE_RUN_METADATA"
+          jq -e \
+            --arg run "$RELEASE_RUN_ID" \
+            --argjson attempt "$RELEASE_RUN_ATTEMPT" \
+            --arg repo "$GITHUB_REPOSITORY" \
+            --arg sha "$APPROVED_SHA" '
+            (.id | tostring) == $run and
+            .run_attempt == $attempt and
+            .repository.full_name == $repo and .head_repository.full_name == $repo and
+            .path == ".github/workflows/release-attestation.yml" and
+            .head_branch == "main" and .head_sha == $sha and
+            .event == "workflow_dispatch" and .status == "completed" and .conclusion == "success"
+          ' "$RELEASE_RUN_METADATA" >/dev/null
+      - name: Authenticate configured trusted-provider run
+        id: provider
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TRUSTED_RUN_ID: ${{ inputs.trusted_admission_run_id }}
+          TRUSTED_RUN_ATTEMPT: ${{ inputs.trusted_admission_run_attempt }}
+        run: |
+          case "$TRUSTED_RUN_ID:$TRUSTED_RUN_ATTEMPT" in *[!0-9:]*|:*|*:) exit 1 ;; esac
+          CONFIG="$(node ./scripts/trusted-provider-run-policy.mjs --policy governance/deployment-admission.json)"
+          TRUSTED_REPOSITORY="$(printf '%s' "$CONFIG" | jq -er '.repository')"
+          TRUSTED_RUN_METADATA="${RUNNER_TEMP}/trusted-provider-run.json"
+          /usr/local/bin/gh api "repos/${TRUSTED_REPOSITORY}/actions/runs/${TRUSTED_RUN_ID}" > "$TRUSTED_RUN_METADATA"
+          RESULT="$(node ./scripts/trusted-provider-run-policy.mjs \
+            --policy governance/deployment-admission.json \
+            --metadata "$TRUSTED_RUN_METADATA" \
+            --runId "$TRUSTED_RUN_ID" \
+            --runAttempt "$TRUSTED_RUN_ATTEMPT")"
+          printf 'repository=%s\n' "$TRUSTED_REPOSITORY" >> "$GITHUB_OUTPUT"
+          printf 'run_id=%s\n' "$TRUSTED_RUN_ID" >> "$GITHUB_OUTPUT"
+          printf 'run_attempt=%s\n' "$TRUSTED_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
+          printf 'metadata=%s\n' "$TRUSTED_RUN_METADATA" >> "$GITHUB_OUTPUT"
+          printf 'metadata_sha256=%s\n' "$(printf '%s' "$RESULT" | jq -er '.metadataSha256')" >> "$GITHUB_OUTPUT"
       - name: Download exact release-attestation evidence
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -357,6 +416,7 @@ jobs:
           name: platform-trusted-deployment-admission
           path: ${{ runner.temp }}/trusted-admission
           run-id: ${{ inputs.trusted_admission_run_id }}
+          repository: ${{ steps.provider.outputs.repository }}
           github-token: ${{ github.token }}
       - name: Select one manifest, SBOM, registry and receipt evidence set
         id: artifacts
@@ -366,6 +426,7 @@ jobs:
           EXPECTED_MANIFEST_SHA256: ${{ inputs.release_manifest_sha256 }}
           EXPECTED_ARTIFACT_RECEIPT_SHA256: ${{ inputs.artifact_receipt_sha256 }}
           EXPECTED_DEPLOYMENT_RECEIPT_SHA256: ${{ inputs.deployment_receipt_sha256 }}
+          EXPECTED_RELEASE_RUN_ID: ${{ inputs.release_attestation_run_id }}
           APPROVED_SHA: ${{ inputs.approved_sha }}
         run: |
           case "$EXPECTED_MANIFEST_SHA256" in *[!a-f0-9]*|'') exit 1 ;; esac
@@ -393,6 +454,8 @@ jobs:
           test "$(sha256sum "${deployment_receipts[0]}" | awk '{print $1}')" = "$EXPECTED_DEPLOYMENT_RECEIPT_SHA256"
           test "$(jq -r '.repository' "${manifests[0]}")" = "$GITHUB_REPOSITORY"
           test "$(jq -r '.commitSha' "${manifests[0]}")" = "$APPROVED_SHA"
+          test "$(jq -r '.workflowRunId' "${manifests[0]}")" = "$EXPECTED_RELEASE_RUN_ID"
+          test "$(jq -r '.workflowRunUrl' "${manifests[0]}")" = "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${EXPECTED_RELEASE_RUN_ID}"
           printf 'manifest=%s\n' "${manifests[0]}" >> "$GITHUB_OUTPUT"
           printf 'sbom=%s\n' "${sboms[0]}" >> "$GITHUB_OUTPUT"
           printf 'buildkit_sbom=%s\n' "${buildkit_sboms[0]}" >> "$GITHUB_OUTPUT"
@@ -416,6 +479,10 @@ jobs:
           ARTIFACT_RECEIPT_SHA256: ${{ steps.artifacts.outputs.artifact_receipt_sha256 }}
           DEPLOYMENT_RECEIPT_SHA256: ${{ steps.artifacts.outputs.deployment_receipt_sha256 }}
           RELEASE_TREE: ${{ steps.bind.outputs.release_tree }}
+          TRUSTED_PROVIDER_METADATA: ${{ steps.provider.outputs.metadata }}
+          TRUSTED_PROVIDER_METADATA_SHA256: ${{ steps.provider.outputs.metadata_sha256 }}
+          TRUSTED_PROVIDER_RUN_ID: ${{ steps.provider.outputs.run_id }}
+          TRUSTED_PROVIDER_RUN_ATTEMPT: ${{ steps.provider.outputs.run_attempt }}
         run: |
           REVERIFIED_ARTIFACT_RECEIPT="${RUNNER_TEMP}/reverified-artifact-verification.json"
           node ./scripts/infra-ops.mjs release-artifact-gate \
@@ -432,6 +499,13 @@ jobs:
             --receiptOutput "$REVERIFIED_ARTIFACT_RECEIPT"
           test "$(sha256sum "$REVERIFIED_ARTIFACT_RECEIPT" | awk '{print $1}')" = "$ARTIFACT_RECEIPT_SHA256"
           cmp -- "$REVERIFIED_ARTIFACT_RECEIPT" "$ARTIFACT_RECEIPT"
+          node ./scripts/trusted-provider-run-policy.mjs \
+            --policy governance/deployment-admission.json \
+            --metadata "$TRUSTED_PROVIDER_METADATA" \
+            --metadataSha256 "$TRUSTED_PROVIDER_METADATA_SHA256" \
+            --deploymentReceipt "$DEPLOYMENT_RECEIPT" \
+            --runId "$TRUSTED_PROVIDER_RUN_ID" \
+            --runAttempt "$TRUSTED_PROVIDER_RUN_ATTEMPT"
           node ./scripts/deployment-receipt-policy.mjs \
             --policy governance/deployment-admission.json \
             --artifactReceipt "$REVERIFIED_ARTIFACT_RECEIPT" \
@@ -440,10 +514,13 @@ jobs:
             --deploymentReceiptSha256 "$DEPLOYMENT_RECEIPT_SHA256" \
             --repo "$GITHUB_REPOSITORY" \
             --commit "$APPROVED_SHA" \
-            --tree "$RELEASE_TREE"
+            --tree "$RELEASE_TREE" \
+            --providerRunId "$TRUSTED_PROVIDER_RUN_ID" \
+            --providerRunAttempt "$TRUSTED_PROVIDER_RUN_ATTEMPT"
           install -d -m 700 "${RUNNER_TEMP}/admitted-deployment-receipts"
           install -m 600 "$REVERIFIED_ARTIFACT_RECEIPT" "${RUNNER_TEMP}/admitted-deployment-receipts/artifact-verification.json"
           install -m 600 "$DEPLOYMENT_RECEIPT" "${RUNNER_TEMP}/admitted-deployment-receipts/trusted-deployment-admission.json"
+          install -m 600 "$TRUSTED_PROVIDER_METADATA" "${RUNNER_TEMP}/admitted-deployment-receipts/trusted-provider-run.json"
       - name: Upload exact admitted deployment receipts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -491,7 +568,19 @@ jobs:
           DEPLOYMENT_RECEIPT_SHA256: ${{ needs.release-admission.outputs.deployment_receipt_sha256 }}
           RELEASE_SHA: ${{ needs.release-admission.outputs.release_sha }}
           RELEASE_TREE: ${{ needs.release-admission.outputs.release_tree }}
+          TRUSTED_PROVIDER_METADATA: ${{ runner.temp }}/admitted-deployment-receipts/trusted-provider-run.json
+          TRUSTED_PROVIDER_METADATA_SHA256: ${{ needs.release-admission.outputs.trusted_provider_metadata_sha256 }}
+          TRUSTED_PROVIDER_RUN_ID: ${{ needs.release-admission.outputs.trusted_provider_run_id }}
+          TRUSTED_PROVIDER_RUN_ATTEMPT: ${{ needs.release-admission.outputs.trusted_provider_run_attempt }}
         run: |
+          test "$(sha256sum "$TRUSTED_PROVIDER_METADATA" | awk '{print $1}')" = "$TRUSTED_PROVIDER_METADATA_SHA256"
+          node ./scripts/trusted-provider-run-policy.mjs \
+            --policy governance/deployment-admission.json \
+            --metadata "$TRUSTED_PROVIDER_METADATA" \
+            --metadataSha256 "$TRUSTED_PROVIDER_METADATA_SHA256" \
+            --deploymentReceipt "$DEPLOYMENT_RECEIPT" \
+            --runId "$TRUSTED_PROVIDER_RUN_ID" \
+            --runAttempt "$TRUSTED_PROVIDER_RUN_ATTEMPT"
           node ./scripts/deployment-receipt-policy.mjs \
             --policy governance/deployment-admission.json \
             --artifactReceipt "$ARTIFACT_RECEIPT" \
@@ -500,7 +589,9 @@ jobs:
             --deploymentReceiptSha256 "$DEPLOYMENT_RECEIPT_SHA256" \
             --repo "$GITHUB_REPOSITORY" \
             --commit "$RELEASE_SHA" \
-            --tree "$RELEASE_TREE"
+            --tree "$RELEASE_TREE" \
+            --providerRunId "$TRUSTED_PROVIDER_RUN_ID" \
+            --providerRunAttempt "$TRUSTED_PROVIDER_RUN_ATTEMPT"
       - name: Install SSH key
         env:
           DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}

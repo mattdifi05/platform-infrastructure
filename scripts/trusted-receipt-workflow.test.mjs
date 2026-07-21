@@ -13,11 +13,21 @@ function wiringIssues(source) {
   const requireText = (text, label) => { if (!source.includes(text)) issues.push(label); };
   for (const input of [
     "trusted_admission_run_id:",
+    "trusted_admission_run_attempt:",
+    "release_attestation_run_attempt:",
     "artifact_receipt_sha256:",
     "deployment_receipt_sha256:",
   ]) requireText(input, `missing dispatch input ${input}`);
   requireText("name: platform-trusted-deployment-admission", "trusted provider artifact name is not fixed");
   requireText("run-id: ${{ inputs.trusted_admission_run_id }}", "trusted provider run identity is not bound");
+  requireText("repository: ${{ steps.provider.outputs.repository }}", "trusted provider repository is not policy-bound");
+  requireText("trusted-provider-run-policy.mjs", "trusted producer workflow/ref/run metadata is not authenticated");
+  requireText('--metadataSha256 "$TRUSTED_PROVIDER_METADATA_SHA256"', "trusted producer metadata hash is not handed off");
+  requireText('--providerRunId "$TRUSTED_PROVIDER_RUN_ID"', "deployment receipt is not bound to provider run ID");
+  requireText('--providerRunAttempt "$TRUSTED_PROVIDER_RUN_ATTEMPT"', "deployment receipt is not bound to provider run attempt");
+  requireText(".path == \".github/workflows/release-attestation.yml\"", "release producer workflow path is not authenticated");
+  requireText(".head_sha == $sha", "release producer commit is not authenticated");
+  requireText(".status == \"completed\" and .conclusion == \"success\"", "release producer completion is not authenticated");
   requireText("test \"${#artifact_receipts[@]}\" -eq 1", "artifact receipt cardinality is not exact");
   requireText("test \"${#deployment_receipts[@]}\" -eq 1", "deployment receipt cardinality is not exact");
   requireText("= \"$EXPECTED_ARTIFACT_RECEIPT_SHA256\"", "artifact receipt hash is not checked after download");
@@ -46,6 +56,8 @@ assert.notDeepEqual(wiringIssues(workflow.replace("name: platform-trusted-deploy
 assert.notDeepEqual(wiringIssues(workflow.replace("test \"${#deployment_receipts[@]}\" -eq 1", "test \"${#deployment_receipts[@]}\" -ge 1")), []);
 assert.notDeepEqual(wiringIssues(workflow.replace("--artifactVerificationOnly", "--skipDeploymentAdmission")), []);
 assert.notDeepEqual(wiringIssues(workflow.replace('cmp -- "$REVERIFIED_ARTIFACT_RECEIPT" "$ARTIFACT_RECEIPT"', "true")), []);
+assert.notDeepEqual(wiringIssues(workflow.replace("repository: ${{ steps.provider.outputs.repository }}", "repository: owner/caller-selected")), []);
+assert.notDeepEqual(wiringIssues(workflow.replaceAll('--providerRunAttempt "$TRUSTED_PROVIDER_RUN_ATTEMPT"', '--providerRunAttempt "1"')), []);
 
 const manifestAttestation = producerWorkflow.indexOf("- name: Attest release subject manifest provenance");
 const finalizedReceipt = producerWorkflow.indexOf('--receiptOutput "reports/release/release-artifact-admission-${GITHUB_RUN_ID}.json"');
@@ -57,4 +69,4 @@ assert.doesNotMatch(
   "pre-attestation generation must not mint an artifact receipt",
 );
 
-process.stdout.write("trusted receipt workflow wiring tests passed 9/9; provider channel remains EXTERNAL-PENDING\n");
+process.stdout.write("trusted receipt workflow wiring tests passed 17/17; provider channel remains EXTERNAL-PENDING\n");

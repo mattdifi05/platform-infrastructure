@@ -2,6 +2,12 @@
   "version": 1,
   "status": "EXTERNAL-PENDING",
   "trustedVerifierChannel": null,
+  "trustedProducer": {
+    "repository": null,
+    "workflowPath": null,
+    "sourceRef": null,
+    "event": null
+  },
   "reason": "No repository-enforced trusted admission-controller verifier channel is configured.",
   "requiredReceiptKind": "platform-trusted-deployment-admission/v1",
   "selfAssertedAnnotationsAccepted": false

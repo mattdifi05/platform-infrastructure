@@ -35,6 +35,9 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
 
+      - name: Install checksum-pinned GitHub attestation verifier
+        run: sh ./scripts/install-gh-attestation-verifier.sh
+
       - name: Prepare GHCR image names
         run: |
           owner="$(printf '%s' "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"

@@ -32,7 +32,7 @@ cat > "$TMP/artifact.json" <<EOF
 EOF
 ARTIFACT_SHA=$(hash_file "$TMP/artifact.json")
 cat > "$TMP/admission.json" <<EOF
-{"version":1,"kind":"platform-trusted-deployment-admission/v1","status":"READY","artifactVerification":"passed","deploymentAdmission":"READY","repository":"owner/repo","commitSha":"$RELEASE_SHA","treeSha":"$RELEASE_TREE","artifactVerificationReceiptSha256":"$ARTIFACT_SHA","manifestSha256":"$MANIFEST_SHA","sbomSha256":"$SBOM_SHA","decisionId":"decision:12345678","verifier":{"channel":"external/prod","fingerprint":"$(printf 'f%.0s' $(seq 1 64))","selfAsserted":false}}
+{"version":1,"kind":"platform-trusted-deployment-admission/v1","status":"READY","artifactVerification":"passed","deploymentAdmission":"READY","repository":"owner/repo","commitSha":"$RELEASE_SHA","treeSha":"$RELEASE_TREE","artifactVerificationReceiptSha256":"$ARTIFACT_SHA","manifestSha256":"$MANIFEST_SHA","sbomSha256":"$SBOM_SHA","decisionId":"decision:12345678","verifier":{"channel":"external/prod","fingerprint":"$(printf 'f%.0s' $(seq 1 64))","selfAsserted":false},"producer":{"repository":"owner/trusted-admission","workflowPath":".github/workflows/produce-admission.yml","sourceRef":"refs/heads/main","event":"workflow_dispatch","runId":"123456","runAttempt":1,"workflowSha":"$(printf '6%.0s' $(seq 1 40))"}}
 EOF
 ADMISSION_SHA=$(hash_file "$TMP/admission.json")
 

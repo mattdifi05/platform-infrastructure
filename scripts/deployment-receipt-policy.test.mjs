@@ -15,6 +15,12 @@ const policy = {
   trustedVerifierChannel: "external-admission-controller/prod",
   requiredReceiptKind: "platform-trusted-deployment-admission/v1",
   selfAssertedAnnotationsAccepted: false,
+  trustedProducer: {
+    repository: "owner/trusted-admission",
+    workflowPath: ".github/workflows/produce-admission.yml",
+    sourceRef: "refs/heads/main",
+    event: "workflow_dispatch",
+  },
 };
 const artifactReceipt = {
   version: 1,
@@ -54,8 +60,17 @@ const deploymentReceipt = {
     selfAsserted: false,
     verifiedAt: generatedAt,
   },
+  producer: {
+    ...policy.trustedProducer,
+    runId: "123456",
+    runAttempt: 2,
+    workflowSha: "4".repeat(40),
+  },
 };
-const options = { policy, repository, commitSha, treeSha, artifactReceiptSha256, artifactReceipt };
+const options = {
+  policy, repository, commitSha, treeSha, artifactReceiptSha256, artifactReceipt,
+  providerRunId: "123456", providerRunAttempt: "2",
+};
 
 assert.equal(validateTrustedDeploymentReceipt(deploymentReceipt, options), deploymentReceipt);
 assert.throws(() => validateTrustedDeploymentReceipt({ ...deploymentReceipt, commitSha: "9".repeat(40) }, options), /repository\/commit\/tree/);
@@ -63,5 +78,9 @@ assert.throws(() => validateTrustedDeploymentReceipt({ ...deploymentReceipt, art
 assert.throws(() => validateTrustedDeploymentReceipt({ ...deploymentReceipt, verifier: { ...deploymentReceipt.verifier, channel: "self" } }, options), /configured external/);
 assert.throws(() => validateTrustedDeploymentReceipt(deploymentReceipt, { ...options, policy: { ...policy, status: "EXTERNAL-PENDING", trustedVerifierChannel: null } }), /EXTERNAL-PENDING/);
 assert.throws(() => validateTrustedDeploymentReceipt({ ...deploymentReceipt, manifestSha256: "7".repeat(64) }, options), /manifest and SBOM/);
+assert.throws(() => validateTrustedDeploymentReceipt({
+  ...deploymentReceipt, producer: { ...deploymentReceipt.producer, workflowPath: ".github/workflows/attacker.yml" },
+}, options), /producer identity/);
+assert.throws(() => validateTrustedDeploymentReceipt(deploymentReceipt, { ...options, providerRunAttempt: "1" }), /run identity/);
 
-process.stdout.write("deployment receipt policy tests passed 6/6\n");
+process.stdout.write("deployment receipt policy tests passed 8/8\n");
