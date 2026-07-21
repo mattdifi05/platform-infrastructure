@@ -115,6 +115,16 @@ test("duplicate producer tuple fails", () => {
   remote.required_status_checks.checks.push({ context: "quality", app_id: 15368 });
   assert.match(requiredStatusCheckMismatches(branchPolicy.required_status_checks, remote.required_status_checks).join(" "), /duplicate/);
 });
+test("string-valued producer app id fails", () => {
+  const remote = structuredClone(remoteBranch);
+  remote.required_status_checks.checks[0].app_id = "15368";
+  assert.match(requiredStatusCheckMismatches(branchPolicy.required_status_checks, remote.required_status_checks).join(" "), /invalid app_id/);
+});
+test("same context with a different producer fails", () => {
+  const policy = structuredClone(branchPolicy.required_status_checks);
+  policy.checks.push({ context: "quality", app_id: 999 });
+  assert.match(requiredStatusCheckMismatches(policy, policy).join(" "), /exactly once/);
+});
 test("non-strict status checks fail", () => {
   const remote = structuredClone(remoteBranch);
   remote.required_status_checks.strict = false;

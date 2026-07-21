@@ -15,9 +15,14 @@ function sameStrings(left, right) {
 
 function requiredCheckKey(check) {
   const context = String(check?.context ?? "").trim();
-  const appId = Number(check?.app_id);
+  const appId = check?.app_id;
   if (!context || !Number.isInteger(appId) || appId <= 0) return null;
   return `${context}\u0000${appId}`;
+}
+
+function duplicateRequiredCheckContexts(checks) {
+  const contexts = (checks ?? []).map((check) => String(check?.context ?? "").trim()).filter(Boolean);
+  return new Set(contexts).size !== contexts.length;
 }
 
 export function requiredStatusCheckMismatches(expectedStatusChecks, remoteStatusChecks) {
@@ -39,6 +44,9 @@ export function requiredStatusCheckMismatches(expectedStatusChecks, remoteStatus
   if (new Set(expectedKeys.filter(Boolean)).size !== expectedKeys.filter(Boolean).length) {
     issues.push("policy required checks must not contain duplicate context/app_id tuples");
   }
+  if (duplicateRequiredCheckContexts(expectedChecks)) {
+    issues.push("policy required check contexts must each appear exactly once");
+  }
 
   const remoteContexts = remoteStatusChecks?.contexts;
   if (Array.isArray(remoteContexts) && remoteContexts.length > 0) {
@@ -55,6 +63,9 @@ export function requiredStatusCheckMismatches(expectedStatusChecks, remoteStatus
   }
   if (new Set(remoteKeys.filter(Boolean)).size !== remoteKeys.filter(Boolean).length) {
     issues.push("remote required checks contain duplicate context/app_id tuples");
+  }
+  if (duplicateRequiredCheckContexts(remoteChecks)) {
+    issues.push("remote required check contexts must each appear exactly once");
   }
   if (JSON.stringify([...expectedKeys].filter(Boolean).sort()) !== JSON.stringify([...remoteKeys].filter(Boolean).sort())) {
     issues.push("required status check producer bindings differ");
