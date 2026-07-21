@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-import { spawnSync } from "node:child_process";
 import crypto from "node:crypto";
 import dns from "node:dns/promises";
 import fs from "node:fs";
@@ -25,6 +24,8 @@ import { evaluateFunctionalHealth, validateFunctionalHealthProbes } from "./func
 import { evaluateRuntimeFingerprint } from "./runtime-fingerprint.mjs";
 import { providerEvidenceAttestationOptions } from "./provider-evidence-auth.mjs";
 import { sha256FileBounded } from "./bounded-file-hash.mjs";
+import { runCommandSync } from "./command-safety.mjs";
+import { resticSecretTransport } from "./restic-secret-transport.mjs";
 import {
   assertExactBranchProtection,
   assertExactGithubEnvironment,
@@ -149,31 +150,16 @@ function parseCronTime(value, optionName) {
 }
 
 function run(bin, args = [], options = {}) {
-  const result = spawnSync(bin, args, {
+  return runCommandSync(bin, args, {
     cwd: options.cwd ?? infraRoot,
     env: { ...process.env, ...options.env },
     input: options.input,
     encoding: options.encoding ?? "utf8",
     maxBuffer: options.maxBuffer ?? 64 * 1024 * 1024,
-    stdio: options.capture
-      ? ["pipe", "pipe", "pipe"]
-      : [options.input ? "pipe" : "inherit", "inherit", "inherit"],
+    capture: options.capture,
+    allowFailure: options.allowFailure,
+    sensitiveValues: options.sensitiveValues,
   });
-  if (result.error) {
-    if (options.allowFailure) {
-      return {
-        status: 1,
-        stdout: "",
-        stderr: String(result.error.message ?? result.error),
-      };
-    }
-    throw result.error;
-  }
-  if (result.status !== 0 && !options.allowFailure) {
-    const details = [result.stderr, result.stdout].filter(Boolean).join("\n").trim();
-    fail(`${bin} ${args.join(" ")} failed${details ? `:\n${details}` : ""}`);
-  }
-  return result;
 }
 
 function output(bin, args = [], options = {}) {
@@ -2625,6 +2611,9 @@ function infraTestingHygiene() {
     "scripts/provider-evidence-auth.test.mjs",
     "scripts/bounded-file-hash.mjs",
     "scripts/bounded-file-hash.test.mjs",
+    "scripts/command-safety.mjs",
+    "scripts/restic-secret-transport.mjs",
+    "scripts/restic-secret-transport.test.mjs",
     "scripts/infra-secret-manager.mjs",
   ];
   for (const file of checkFiles) {
@@ -2637,6 +2626,7 @@ function infraTestingHygiene() {
   run(process.execPath, ["--test", "scripts/runtime-fingerprint.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/provider-evidence-auth.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/bounded-file-hash.test.mjs"], { cwd: infraRoot });
+  run(process.execPath, ["--test", "scripts/restic-secret-transport.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "platform-alert-dispatcher/server.test.mjs"], { cwd: infraRoot });
   const shellFiles = fs.readdirSync(path.join(infraRoot, "scripts")).filter((name) => name.endsWith(".sh")).sort();
   for (const file of shellFiles) {
@@ -4075,6 +4065,7 @@ function resticDockerContainerArgs({ repository, passwordFile, mounts = [] }) {
   const resticPasswordName = path.basename(passwordFile);
   const repositoryClass = classifyResticRepository(repository);
   const rcloneConfig = resticRcloneConfig(repository);
+  const secretTransport = resticSecretTransport(repository, `/restic-password/${resticPasswordName}`);
   const image = process.env.RESTIC_IMAGE ?? (repositoryClass.type === "rclone" ? defaultResticRcloneImage : defaultResticImage);
   if (booleanFlag(process.env.RESTIC_REQUIRE_IMMUTABLE_IMAGE ?? true) && !immutableResticImage(image)) {
     fail("RESTIC_IMAGE must be pinned by digest before backup or restore execution.");
@@ -4082,10 +4073,7 @@ function resticDockerContainerArgs({ repository, passwordFile, mounts = [] }) {
   const args = [
     "run",
     "--rm",
-    "-e",
-    `RESTIC_REPOSITORY=${repository}`,
-    "-e",
-    `RESTIC_PASSWORD_FILE=/restic-password/${resticPasswordName}`,
+    ...secretTransport.dockerArgs,
     ...rcloneConfig.env,
   ];
   for (const key of resticPassthroughEnvKeys) {
@@ -4100,14 +4088,19 @@ function resticDockerContainerArgs({ repository, passwordFile, mounts = [] }) {
     `${hostPathForContainerMount(resticPasswordDir)}:/restic-password:ro`,
     image,
   );
-  return args;
+  return { args, secretTransport };
 }
 
 function resticDockerRun({ repository, passwordFile, mounts = [], resticArgs = [], runOptions = {} }) {
+  const invocation = resticDockerContainerArgs({ repository, passwordFile, mounts });
   return run("docker", [
-    ...resticDockerContainerArgs({ repository, passwordFile, mounts }),
+    ...invocation.args,
     ...resticArgs,
-  ], runOptions);
+  ], {
+    ...runOptions,
+    env: { ...runOptions.env, ...invocation.secretTransport.processEnv },
+    sensitiveValues: [...(runOptions.sensitiveValues ?? []), ...invocation.secretTransport.sensitiveValues],
+  });
 }
 
 function resticRepositorySizeBytes(repository) {
