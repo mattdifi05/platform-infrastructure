@@ -1263,17 +1263,22 @@ Use this path when TLS and public certificates are terminated by VPS, Cloudflare
    sh ./scripts/deploy-vps.sh
    ```
 
-   La transazione UFW cattura prima della prima mutazione l'esatto multinsieme
-   semantico delle regole possedute `cloudflare-origin-*` e le due regole di
-   recovery SSH. Un errore o `HUP`/`INT`/`TERM` rimuove il set gestito parziale,
-   ricrea il precedente set posseduto, forza `default deny incoming`, ricarica
+   La transazione UFW acquisisce prima un lock canonico esclusivo e cattura
+   l'esatto multinsieme semantico delle regole possedute
+   `cloudflare-origin-*`, tutte le regole non possedute e la coppia canonica di
+   recovery SSH. Prima e dopo ogni eliminazione numerata rilegge lo stato,
+   ricontrolla l'identita' della regola e rifiuta qualsiasi variazione del
+   multinsieme non posseduto. Un errore o `HUP`/`INT`/`TERM` rimuove il set
+   gestito parziale, ricrea il precedente set posseduto e, se necessario, ricrea
+   realmente entrambe le regole SSH; poi forza `default deny incoming`, ricarica
    UFW e confronta nuovamente regole possedute e SSH. Le regole web pubbliche
-   generiche, non possedute e insicure, non vengono ricreate. Se cattura,
+   generiche, non possedute e insicure, non vengono ricreate. Se lock, cattura,
    ripristino o verifica non sono esatti, il comando termina nonzero con recovery
    non verificato e il deploy resta bloccato. Il test locale
    `scripts/cloudflare-origin-lock-ufw-transaction-test.sh` usa soltanto un UFW
-   simulato e inietta un errore dopo ogni confine di mutazione; non sostituisce
-   una prova firewall/rete sul target approvato.
+   simulato, inietta un errore dopo ogni confine di mutazione, sposta
+   concorrentemente gli indici e avvia due apply simultanei; non sostituisce una
+   prova firewall/rete sul target approvato.
 
    Use `DEPLOY_PRE_GO_LIVE_RESTORE_DRILL=1`,
    `DEPLOY_PRE_GO_LIVE_OFFSITE_RESTORE_DRY_RUN=1` and
