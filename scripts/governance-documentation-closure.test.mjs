@@ -53,6 +53,12 @@ const REQUIRED_RUNBOOK_TYPES = [
   "restore",
   "access-recovery",
 ];
+const CANONICAL_ROLE_IDS = [
+  "role:platform-operations-primary",
+  "role:platform-operations-substitute",
+  "role:change-approval-authority",
+  "role:incident-escalation-authority",
+];
 
 function sha256(contents) {
   return createHash("sha256").update(contents).digest("hex");
@@ -211,6 +217,34 @@ function catalogsArgs(root) {
   ];
 }
 
+function receiptArgs(root, kind, receiptPath) {
+  return [
+    "receipt",
+    ...catalogsArgs(root).slice(1),
+    "--kind", kind,
+    "--receipt", receiptPath,
+  ];
+}
+
+function commitFixture(root, message) {
+  execFileSync("git", ["add", "--all"], { cwd: root });
+  execFileSync("git", ["commit", "-qm", message], { cwd: root });
+}
+
+function expectedRepositoryBinding(root) {
+  const commit = execFileSync("git", ["rev-parse", "--verify", "HEAD^{commit}"], { cwd: root, encoding: "utf8" }).trim();
+  const tree = execFileSync("git", ["rev-parse", "--verify", "HEAD^{tree}"], { cwd: root, encoding: "utf8" }).trim();
+  const authoritativePaths = [
+    "docs/reference.md",
+    "governance/runbook-catalog.json",
+    "governance/service-asset-ownership.json",
+  ].map((relative) => ({
+    path: relative,
+    sha256: sha256(readFileSync(path.join(root, relative))),
+  }));
+  return { commit, tree, authoritativePaths };
+}
+
 function parseOutput(result) {
   const source = result.stdout.trim() || result.stderr.trim();
   assert.ok(source, "validator must emit a machine-readable result");
@@ -263,6 +297,30 @@ test("published catalog and receipt schemas are closed", () => {
   }
 });
 
+test("published schemas lock canonical catalog paths and the exact four role ids", () => {
+  const ownershipSchema = JSON.parse(readFileSync(path.join(SCHEMA_DIRECTORY, "service-asset-ownership.schema.json"), "utf8"));
+  assert.equal(ownershipSchema.properties.roles.minItems, 4);
+  assert.equal(ownershipSchema.properties.roles.maxItems, 4);
+  assert.equal(ownershipSchema.properties.roles.uniqueItems, true);
+  assert.deepEqual(ownershipSchema.$defs.roleRef.enum, CANONICAL_ROLE_IDS);
+  assert.equal(ownershipSchema.$defs.roleAssignments.properties.primary.const, CANONICAL_ROLE_IDS[0]);
+  assert.equal(ownershipSchema.$defs.roleAssignments.properties.substitute.const, CANONICAL_ROLE_IDS[1]);
+  assert.equal(ownershipSchema.$defs.roleAssignments.properties.approval.const, CANONICAL_ROLE_IDS[2]);
+  assert.equal(ownershipSchema.$defs.roleAssignments.properties.escalation.const, CANONICAL_ROLE_IDS[3]);
+
+  const runbookSchema = JSON.parse(readFileSync(path.join(SCHEMA_DIRECTORY, "runbook-catalog.schema.json"), "utf8"));
+  assert.deepEqual(runbookSchema.$defs.roleRef.enum, CANONICAL_ROLE_IDS);
+  assert.equal(runbookSchema.$defs.roleAssignments.properties.primary.const, CANONICAL_ROLE_IDS[0]);
+  assert.equal(runbookSchema.$defs.roleAssignments.properties.substitute.const, CANONICAL_ROLE_IDS[1]);
+  assert.equal(runbookSchema.$defs.roleAssignments.properties.approval.const, CANONICAL_ROLE_IDS[2]);
+  assert.equal(runbookSchema.$defs.roleAssignments.properties.escalation.const, CANONICAL_ROLE_IDS[3]);
+
+  const acceptanceSchema = JSON.parse(readFileSync(path.join(SCHEMA_DIRECTORY, "governance-acceptance-receipt.schema.json"), "utf8"));
+  assert.equal(acceptanceSchema.$defs.catalogBinding.properties.path.const, "governance/service-asset-ownership.json");
+  const drillSchema = JSON.parse(readFileSync(path.join(SCHEMA_DIRECTORY, "runbook-drill-receipt.schema.json"), "utf8"));
+  assert.equal(drillSchema.$defs.catalogBinding.properties.path.const, "governance/runbook-catalog.json");
+});
+
 test("tracked repository catalogs retain exact local-support bindings", () => {
   const result = runCli(REPOSITORY_ROOT, catalogsArgs(REPOSITORY_ROOT));
   assert.equal(result.status, 0, result.stdout || result.stderr);
@@ -272,6 +330,17 @@ test("tracked repository catalogs retain exact local-support bindings", () => {
   assert.equal(parsed.gateAdmissible, false);
   assert.equal(parsed.externalConditions.length, 2);
   assert.ok(parsed.externalConditions.every((condition) => condition.includes("GOVERNANCE-EXTERNAL")));
+  assert.equal(parsed.repositoryBinding.commit, execFileSync("git", ["rev-parse", "HEAD"], { cwd: REPOSITORY_ROOT, encoding: "utf8" }).trim());
+  assert.equal(parsed.repositoryBinding.tree, execFileSync("git", ["rev-parse", "HEAD^{tree}"], { cwd: REPOSITORY_ROOT, encoding: "utf8" }).trim());
+  assert.deepEqual(
+    parsed.repositoryBinding.authoritativePaths.map((entry) => entry.path),
+    [
+      "governance/catalog-artifacts/asset-ownership-scope.md",
+      "governance/catalog-artifacts/governance-runbooks.md",
+      "governance/runbook-catalog.json",
+      "governance/service-asset-ownership.json",
+    ],
+  );
 });
 
 test("complete closed catalogs are locally ready but never claim GO", () => {
@@ -287,7 +356,49 @@ test("complete closed catalogs are locally ready but never claim GO", () => {
         "Authenticated primary and substitute acknowledgements for every catalog asset remain GOVERNANCE-EXTERNAL and GO-blocking.",
         "Independent authenticated drills for rollout, rollback, backup, restore, and access-recovery remain GOVERNANCE-EXTERNAL and GO-blocking.",
       ],
+      repositoryBinding: expectedRepositoryBinding(root),
     });
+  });
+});
+
+test("catalog validation rejects self-consistent worktree and index rehashes outside HEAD", () => {
+  withFixture(({ root, ownership, runbooks, reference }) => {
+    const mutatedReference = `${reference}Uncommitted authoritative mutation.\n`;
+    writeFileSync(path.join(root, "docs", "reference.md"), mutatedReference, "utf8");
+    const mutatedHash = sha256(mutatedReference);
+    const mutatedOwnership = structuredClone(ownership);
+    mutatedOwnership.assets.forEach((asset) => asset.artifactRefs.forEach((artifact) => artifact.sha256 = mutatedHash));
+    const mutatedRunbooks = structuredClone(runbooks);
+    mutatedRunbooks.runbooks.forEach((runbook) => runbook.artifact.sha256 = mutatedHash);
+    writeJson(path.join(root, "governance", "service-asset-ownership.json"), mutatedOwnership);
+    writeJson(path.join(root, "governance", "runbook-catalog.json"), mutatedRunbooks);
+
+    const dirtyWorktree = runCli(root, catalogsArgs(root));
+    assert.notEqual(dirtyWorktree.status, 0);
+    assert.equal(parseOutput(dirtyWorktree).error.code, "DIRTY_AUTHORITATIVE_PATH");
+
+    execFileSync("git", ["add", "docs/reference.md", "governance/service-asset-ownership.json", "governance/runbook-catalog.json"], { cwd: root });
+    const dirtyIndex = runCli(root, catalogsArgs(root));
+    assert.notEqual(dirtyIndex.status, 0);
+    assert.equal(parseOutput(dirtyIndex).error.code, "DIRTY_AUTHORITATIVE_PATH");
+  });
+});
+
+test("ownership uses a closed canonical role allowlist, not heuristic blacklists", () => {
+  withFixture(({ root, ownership, runbooks }) => {
+    const replacement = "role:accountable-platform-primary";
+    const mutatedOwnership = structuredClone(ownership);
+    mutatedOwnership.roles[0].id = replacement;
+    mutatedOwnership.assets.forEach((asset) => asset.roles.primary = replacement);
+    const mutatedRunbooks = structuredClone(runbooks);
+    mutatedRunbooks.runbooks.forEach((runbook) => runbook.roles.primary = replacement);
+    writeJson(path.join(root, "governance", "service-asset-ownership.json"), mutatedOwnership);
+    writeJson(path.join(root, "governance", "runbook-catalog.json"), mutatedRunbooks);
+    commitFixture(root, "replace primary with plausible shadow role");
+
+    const result = runCli(root, catalogsArgs(root));
+    assert.notEqual(result.status, 0);
+    assert.equal(parseOutput(result).error.code, "NON_CANONICAL_ROLE");
   });
 });
 
@@ -464,12 +575,7 @@ test("synthetic acknowledgement and drill receipts are structurally testable but
     writeJson(drillPath, drill);
 
     for (const [kind, receiptPath] of [["acceptance", acceptancePath], ["drill", drillPath]]) {
-      const result = runCli(root, [
-        "receipt",
-        "--root", root,
-        "--kind", kind,
-        "--receipt", path.relative(root, receiptPath),
-      ]);
+      const result = runCli(root, receiptArgs(root, kind, path.relative(root, receiptPath)));
       assert.equal(result.status, 0, result.stdout || result.stderr);
       const parsed = parseOutput(result);
       assert.equal(parsed.valid, true);
@@ -532,12 +638,7 @@ test("synthetic acknowledgement and drill receipts are structurally testable but
     }
     rmSync(drillPath);
 
-    const structurallyValidExternal = runCli(root, [
-      "receipt",
-      "--root", root,
-      "--kind", "acceptance",
-      "--receipt", path.relative(root, acceptancePath),
-    ]);
+    const structurallyValidExternal = runCli(root, receiptArgs(root, "acceptance", path.relative(root, acceptancePath)));
     assert.equal(structurallyValidExternal.status, 0, structurallyValidExternal.stdout || structurallyValidExternal.stderr);
     assert.deepEqual(parseOutput(structurallyValidExternal), {
       schema: "platform.governance-documentation-closure-result/v1",
@@ -545,6 +646,7 @@ test("synthetic acknowledgement and drill receipts are structurally testable but
       status: "GOVERNANCE-EXTERNAL-VERIFICATION-PENDING",
       gateAdmissible: false,
       doesNotAuthorizeDeployment: true,
+      repositoryBinding: expectedRepositoryBinding(root),
     });
 
     const externalGate = runCli(root, [
@@ -560,15 +662,62 @@ test("synthetic acknowledgement and drill receipts are structurally testable but
     assert.equal(parsedExternalGate.gateAdmissible, false);
     assert.equal(parsedExternalGate.doesNotAuthorizeDeployment, true);
     assert.match(parsedExternalGate.blockers.join(" "), /independent trusted verifier/i);
+    assert.deepEqual(parsedExternalGate.repositoryBinding, expectedRepositoryBinding(root));
 
-    externalAcceptance.gateAdmissible = true;
+    writeJson(path.join(root, "governance", "shadow-ownership.json"), ownership);
+    writeJson(path.join(root, "governance", "shadow-runbooks.json"), runbooks);
+    commitFixture(root, "add shadow governance catalogs");
+    externalAcceptance.catalog = {
+      path: "governance/shadow-ownership.json",
+      sha256: sha256(readFileSync(path.join(root, "governance", "shadow-ownership.json"))),
+    };
     writeJson(acceptancePath, externalAcceptance);
-    const falseGateClaim = runCli(root, [
+    for (const kind of ["rollout", "rollback", "backup", "restore", "access-recovery"]) {
+      const externalDrillPath = path.join(
+        root,
+        "governance",
+        "receipts",
+        "drills",
+        `${String(["rollout", "rollback", "backup", "restore", "access-recovery"].indexOf(kind) + 1).padStart(2, "0")}-${kind}.json`,
+      );
+      const externalDrill = JSON.parse(readFileSync(externalDrillPath, "utf8"));
+      externalDrill.catalog = {
+        path: "governance/shadow-runbooks.json",
+        sha256: sha256(readFileSync(path.join(root, "governance", "shadow-runbooks.json"))),
+      };
+      writeJson(externalDrillPath, externalDrill);
+    }
+
+    const shadowWithoutCanonical = runCli(root, [
       "receipt",
       "--root", root,
       "--kind", "acceptance",
       "--receipt", path.relative(root, acceptancePath),
     ]);
+    assert.notEqual(shadowWithoutCanonical.status, 0);
+    assert.equal(parseOutput(shadowWithoutCanonical).error.code, "MISSING_ARGUMENT");
+
+    const shadowReceipt = runCli(root, receiptArgs(root, "acceptance", path.relative(root, acceptancePath)));
+    assert.notEqual(shadowReceipt.status, 0);
+    assert.equal(parseOutput(shadowReceipt).error.code, "CATALOG_BINDING_MISMATCH");
+
+    const shadowGate = runCli(root, [
+      "gate",
+      ...catalogsArgs(root).slice(1),
+      "--acceptance-dir", "governance/receipts/acceptance",
+      "--drill-dir", "governance/receipts/drills",
+    ]);
+    assert.notEqual(shadowGate.status, 0);
+    assert.equal(parseOutput(shadowGate).valid, false);
+    assert.equal(parseOutput(shadowGate).error.code, "CATALOG_BINDING_MISMATCH");
+
+    externalAcceptance.catalog = {
+      path: "governance/service-asset-ownership.json",
+      sha256: sha256(readFileSync(path.join(root, "governance", "service-asset-ownership.json"))),
+    };
+    externalAcceptance.gateAdmissible = true;
+    writeJson(acceptancePath, externalAcceptance);
+    const falseGateClaim = runCli(root, receiptArgs(root, "acceptance", path.relative(root, acceptancePath)));
     assert.notEqual(falseGateClaim.status, 0);
     assert.equal(parseOutput(falseGateClaim).error.code, "FALSE_GATE_CLAIM");
   });
