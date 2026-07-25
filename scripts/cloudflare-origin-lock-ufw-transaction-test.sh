@@ -32,7 +32,7 @@ cat > "$TMP/rules.initial" <<'EOF'
 443/tcp ALLOW IN Anywhere
 8443/tcp ALLOW IN Anywhere
 80/tcp ALLOW IN 203.0.113.0/24 # cloudflare-origin-80
-80/tcp ALLOW IN 203.0.113.0/24 # cloudflare-origin-80
+443/tcp ALLOW IN 198.51.100.0/24 # cloudflare-origin-443
 9443/tcp (v6) ALLOW IN 2001:db8:ffff::/48 # cloudflare-origin-9443
 9000/tcp DENY IN Anywhere
 65002/tcp ALLOW IN Anywhere
@@ -256,6 +256,32 @@ assert_rollback_boundary() {
     || fail "$label did not report verified rollback"
   pass "$label"
 }
+
+reset_firewall
+printf '%s\n' '80/tcp ALLOW IN 203.0.113.0/24 # cloudflare-origin-80' \
+  >> "$TMP/rules.current"
+cp "$TMP/rules.current" "$TMP/rules.before-duplicate-check"
+set +e
+fake_env sh "$SCRIPT_DIR/cloudflare-origin-lock-ufw.sh" --apply \
+  --compose-json "$TMP/compose.json" \
+  --ipv4-file "$TMP/ips-v4" --ipv6-file "$TMP/ips-v6" \
+  --receipt-file "$TMP/receipt.json" --ssh-port "$SSH_PORT" \
+  --state-dir "$TMP/state" --machine-id-file "$TMP/machine-id" \
+  > "$TMP/duplicate-owned.out" 2>&1
+duplicate_rc=$?
+set -e
+[ "$duplicate_rc" -ne 0 ] \
+  || fail "duplicate same-family owned semantics were accepted"
+cmp "$TMP/rules.before-duplicate-check" "$TMP/rules.current" >/dev/null \
+  || fail "duplicate owned-rule preflight changed the ruleset"
+[ "$(cat "$TMP/mutation-count")" -eq 0 ] \
+  || fail "duplicate owned-rule preflight crossed a mutation boundary"
+if grep -Eq '^(--force delete|allow |default |reload)' "$TMP/ufw.log"; then
+  fail "duplicate owned-rule preflight issued a mutating UFW command"
+fi
+grep -Fq 'duplicate managed UFW rule semantics' "$TMP/duplicate-owned.out" \
+  || fail "duplicate owned-rule preflight did not report the semantic collision"
+pass duplicate-owned-semantics-are-rejected-before-mutation
 
 while IFS='|' read -r boundary label; do
   assert_rollback_boundary "$boundary" "$label"
