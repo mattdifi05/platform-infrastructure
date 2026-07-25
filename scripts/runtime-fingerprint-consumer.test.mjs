@@ -45,6 +45,9 @@ test("ULTRA-GAP-024 runtime consumer requires an independently hashed FG-048 tar
   assert.match(infraOps, /platform\.runtime-target\/v1/);
   assert.match(infraOps, /platform\.release-candidate\/v1 receipt plus deployment image expectations/);
   assert.match(infraOps, /SHA256 does not match the approved receipt/);
+  assert.match(infraOps, /candidateIdentityMatches\(candidateEvidence\.candidate,\s*candidateEndEvidence\.candidate\)/);
+  assert.match(infraOps, /candidateIdentityMatches\(candidateEvidence\.candidate,\s*target\.expected\.candidate\)/);
+  assert.match(infraOps, /const checkoutTree = String\(git\.tree \?\? ""\)/);
   for (const label of ["candidate-id", "commit", "tree", "deployment-id", "render-sha256", "workload-lock-sha256"]) {
     assert.match(infraOps, new RegExp(`com\\.platform\\.runtime\\.${label}`));
   }
