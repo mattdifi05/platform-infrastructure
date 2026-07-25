@@ -941,6 +941,32 @@ production secret `CLOUDFLARE_API_TOKEN`, and production variables
 `VPS_HARDENED_SSH_PORT`, `PUBLIC_API_HEALTH_URL` plus `CLOUDFLARE_ACCOUNT_ID`.
 It also expects production secret
 `CLOUDFLARE_ACCESS_ADMIN_MANIFEST_JSON` for live Cloudflare Access verification.
+`DAST_TARGET` is not itself trusted. For a manual production request it must
+exactly equal the canonical HTTPS origin configured under
+`governance/deployment-admission.json:stagingDast`. The dispatch must also carry
+the owner-reviewed `staging_receipt_sha256`. The configured external provider
+artifact must contain exactly one `trusted-staging-deployment-*.json` whose
+producer matches the authenticated provider run and whose
+`platform-trusted-staging-deployment/v1` body binds:
+
+- the exact repository commit and tree selected by `approved_sha`;
+- the exact artifact-verification receipt hash;
+- the canonical staging origin and fixed
+  `/.well-known/platform-release.json` probe path;
+- every active release subject image digest and local runtime image ID;
+- the recomputed active-runtime fingerprint and the exact probe SHA256.
+
+The staging endpoint must serve the provider-bound release-identity JSON at that
+fixed path. The DAST job rejects redirects and any probe mismatch before ZAP,
+then uploads one run-bound `platform-dast-verification/v1` receipt. The
+production job revalidates its hash, candidate, target, subject set, provider
+metadata, current workflow producer and freshness before installing the SSH key
+or invoking `deploy-vps.sh`. A successful ZAP exit or arbitrary report artifact
+without this chain never authorizes deployment. Until the provider channel and
+canonical target change from `EXTERNAL-PENDING` to an owner-reviewed
+configuration, provider/staging execution remains blocked; local tests do not
+close that external condition.
+
 Infrastructure CI intentionally does not checkout project
 repositories; attach an application project with `PROJECT_SOURCE_DIR` only when
 building application images. The run evidence command verifies that the remote

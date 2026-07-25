@@ -98,8 +98,26 @@ evidence, remote-provider, DR/off-site, go/no-go, WAF and health gates are all
 mandatory; omitted or zero-valued flags fail before SSH or remote mutation.
 The GitHub production job also has exact, non-skippable dependencies on
 enterprise readiness, protected-main release admission and the staging DAST
-job. The repository policy rejects `always()`, continue-on-error and alternate
-deployment sinks that could bypass failed or skipped prerequisites.
+job. Job success alone is not DAST admission. Release admission must first
+select exactly one owner-hash-pinned
+`platform-trusted-staging-deployment/v1` receipt from the authenticated external
+provider run. That receipt binds the exact repository commit/tree, the canonical
+HTTPS staging origin, the artifact receipt, and the complete active runtime
+image subject/image-ID set. The DAST job fetches the fixed release-identity
+path without redirects, requires the probed bytes and runtime fingerprint to
+match the provider receipt, scans only that canonical origin, and emits one
+run-bound `platform-dast-verification/v1` receipt containing hashes for the
+probe and all ZAP reports. The production job downloads and revalidates that
+receipt, including its current workflow producer and freshness, before the
+first deployment step. Wrong or stale commit/tree, target, image set, provider
+producer, DAST producer, probe, report hash or receipt hash fails closed.
+
+`governance/deployment-admission.json` intentionally leaves both the trusted
+provider and canonical staging target `EXTERNAL-PENDING`. Repository fixtures
+prove only the local consumer contract; they do not prove that staging was
+deployed, probed or scanned. The repository policy also rejects `always()`,
+continue-on-error and alternate deployment sinks that could bypass failed or
+skipped prerequisites.
 
 Both privileged SSH consumers require an owner-approved exact host:port pin and
 a readable, non-symlink dedicated private-key file. They use `BatchMode=yes`,
@@ -118,6 +136,8 @@ rerunning T15/T16 policy tests and producing new cryptographic evidence.
 
 ```sh
 node scripts/release-trust.test.mjs
+node --test scripts/dast-runtime-receipt-policy.test.mjs
+node scripts/privileged-workflow-policy.test.mjs
 node scripts/github-governance-policy.test.mjs
 node scripts/vps-evidence-request.test.mjs
 sh scripts/deploy-vps-input-test.sh
