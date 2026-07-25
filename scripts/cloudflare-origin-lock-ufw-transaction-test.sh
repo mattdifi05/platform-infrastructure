@@ -110,6 +110,16 @@ if [ "$1 ${2:-}" = "--force delete" ]; then
 fi
 
 if [ "$1" = allow ]; then
+  if [ "$#" -eq 2 ]; then
+    target=$2
+    port=${target%/tcp}
+    [ "$target" = "${port}/tcp" ] || exit 96
+    case "$port" in ''|*[!0-9]*) exit 96 ;; esac
+    printf '%s ALLOW IN Anywhere\n' "$target" >> "$FAKE_UFW_RULES"
+    printf '%s (v6) ALLOW IN Anywhere (v6)\n' "$target" >> "$FAKE_UFW_RULES"
+    after_mutation "add-canonical:$target"
+    exit 0
+  fi
   [ "$2 $3 $4 $6 $7 $8 ${10}" = "proto tcp from to any port comment" ] || exit 96
   cidr=$5
   port=$9

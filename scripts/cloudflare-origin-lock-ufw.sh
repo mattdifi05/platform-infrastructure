@@ -134,6 +134,13 @@ TMP=$(mktemp -d "${TMPDIR:-/tmp}/origin-lock.XXXXXX")
 TRANSACTION_ACTIVE=0
 TRANSACTION_COMMITTED=0
 ROLLBACK_RUNNING=0
+LOCK_HELD=0
+DELETE_SEQUENCE=0
+if [ "$TEST_MODE" = 1 ]; then
+  LOCK_DIR="${STATE_DIR}.apply-lock"
+else
+  LOCK_DIR=/run/lock/platform-origin-lock-ufw
+fi
 
 on_exit() {
   exit_status=$1
@@ -144,6 +151,13 @@ on_exit() {
     if ! rollback_firewall; then
       exit_status=1
     fi
+  fi
+  if [ "$LOCK_HELD" -eq 1 ]; then
+    if ! rmdir "$LOCK_DIR"; then
+      echo "Origin lock transaction lock could not be released safely: $LOCK_DIR" >&2
+      exit_status=1
+    fi
+    LOCK_HELD=0
   fi
   rm -rf "$TMP"
   exit "$exit_status"
@@ -224,13 +238,23 @@ capture_policy() {
   fi
 }
 
+acquire_transaction_lock() {
+  if ! (umask 077 && mkdir "$LOCK_DIR") 2>/dev/null; then
+    echo "Origin lock apply refused: another origin lock apply owns the transaction lock." >&2
+    return 1
+  fi
+  LOCK_HELD=1
+}
+
 snapshot_boundary_status() {
   status=$1
   owned_output=$2
   ssh_output=$3
+  nonowned_output=$4
   : > "$owned_output"
   : > "$ssh_output"
-  if ! awk -v owned="$owned_output" -v ssh_rules="$ssh_output" -v ssh_port="$SSH_PORT" '
+  : > "$nonowned_output"
+  if ! awk -v owned="$owned_output" -v ssh_rules="$ssh_output" -v nonowned="$nonowned_output" -v ssh_port="$SSH_PORT" '
     /^[[:space:]]*\[[[:space:]]*[0-9]+\]/ {
       raw=$0
       line=$0
@@ -239,6 +263,7 @@ snapshot_boundary_status() {
       sub(/\].*$/, "", number)
       gsub(/[[:space:]]/, "", number)
       sub(/^[^]]*\][[:space:]]*/, "", line)
+      sub(/[[:space:]]+$/, "", line)
 
       comment=""
       hash=index(line, "#")
@@ -254,6 +279,7 @@ snapshot_boundary_status() {
       for (i=1; i<=count; i++) if (fields[i] == "ALLOW") { allow=i; break }
       if (!allow) {
         if (index(raw, "cloudflare-origin-")) exit 42
+        print line > nonowned
         next
       }
       target=fields[1]
@@ -278,6 +304,7 @@ snapshot_boundary_status() {
       if (numeric_target == ssh_port "/tcp" && direction == "IN" && source == "Anywhere") {
         print target "|" direction "|" source "|" comment > ssh_rules
       }
+      print line > nonowned
     }
   ' "$status"; then
     echo "Origin lock apply refused: the current managed UFW rules cannot be snapshotted exactly." >&2
@@ -327,6 +354,158 @@ normalize_ssh_snapshot() {
   LC_ALL=C sort "$input" > "$output"
 }
 
+normalize_nonowned_snapshot() {
+  input=$1
+  output=$2
+  LC_ALL=C sort "$input" > "$output"
+}
+
+normalize_non_ssh_nonowned_snapshot() {
+  input=$1
+  output=$2
+  awk -v target4="${SSH_PORT}/tcp" -v target6="${SSH_PORT}/tcp (v6)" '
+    {
+      body=$0
+      hash=index(body, "#")
+      if (hash) body=substr(body, 1, hash - 1)
+      count=split(body, fields, /[[:space:]]+/)
+      allow=0
+      for (i=1; i<=count; i++) if (fields[i] == "ALLOW") { allow=i; break }
+      target=fields[1]
+      for (i=2; i<allow; i++) target=target " " fields[i]
+      if (allow && (target == target4 || target == target6) &&
+          fields[allow + 1] == "IN" && fields[allow + 2] == "Anywhere") next
+      print
+    }
+  ' "$input" | LC_ALL=C sort > "$output"
+}
+
+verify_canonical_ssh_snapshot() {
+  input=$1
+  {
+    printf '%s|IN|Anywhere|\n' "${SSH_PORT}/tcp"
+    printf '%s|IN|Anywhere|\n' "${SSH_PORT}/tcp (v6)"
+  } | LC_ALL=C sort > "$TMP/canonical-ssh-expected"
+  normalize_ssh_snapshot "$input" "$TMP/canonical-ssh-actual"
+  if ! cmp "$TMP/canonical-ssh-expected" "$TMP/canonical-ssh-actual" >/dev/null; then
+    echo "Origin lock apply refused: SSH recovery rules must be the exact canonical IPv4/IPv6 allow pair without comments." >&2
+    return 1
+  fi
+}
+
+delete_one_owned_rule() {
+  delete_port=$1
+  delete_source=$2
+  delete_comment=$3
+  required_nonowned=${4:-}
+  DELETE_SEQUENCE=$((DELETE_SEQUENCE + 1))
+  delete_prefix="$TMP/delete-owned-${DELETE_SEQUENCE}"
+
+  if ! capture_status "${delete_prefix}.before" ||
+     ! snapshot_boundary_status "${delete_prefix}.before" \
+       "${delete_prefix}.owned-before" "${delete_prefix}.ssh-before" "${delete_prefix}.nonowned-before"; then
+    echo "Origin lock could not capture the current rule identity before deletion." >&2
+    return 1
+  fi
+  normalize_ssh_snapshot "${delete_prefix}.ssh-before" "${delete_prefix}.ssh-before-normalized"
+  normalize_nonowned_snapshot "${delete_prefix}.nonowned-before" "${delete_prefix}.nonowned-before-normalized"
+
+  if [ -n "$required_nonowned" ] &&
+     ! cmp "$required_nonowned" "${delete_prefix}.nonowned-before-normalized" >/dev/null; then
+    echo "Origin lock apply refused: non-owned UFW rules changed after the transaction snapshot." >&2
+    return 1
+  fi
+
+  delete_number=$(awk -F '|' -v port="$delete_port" -v source="$delete_source" -v comment="$delete_comment" '
+    $2 == port && $3 == source && $4 == comment { print $1; exit }
+  ' "${delete_prefix}.owned-before")
+  [ -n "$delete_number" ] || {
+    echo "Origin lock managed-rule identity changed before deletion." >&2
+    return 1
+  }
+
+  if ! awk -F '|' -v port="$delete_port" -v source="$delete_source" -v comment="$delete_comment" '
+    $2 == port && $3 == source && $4 == comment && !removed { removed=1; next }
+    { print $2 "|" $3 "|" $4 }
+    END { if (!removed) exit 1 }
+  ' "${delete_prefix}.owned-before" | LC_ALL=C sort > "${delete_prefix}.owned-expected"; then
+    echo "Origin lock could not construct the exact managed-rule deletion expectation." >&2
+    return 1
+  fi
+
+  delete_rc=0
+  "$UFW_BIN" --force delete "$delete_number" || delete_rc=$?
+
+  if ! capture_status "${delete_prefix}.after" ||
+     ! snapshot_boundary_status "${delete_prefix}.after" \
+       "${delete_prefix}.owned-after" "${delete_prefix}.ssh-after" "${delete_prefix}.nonowned-after"; then
+    echo "Origin lock could not capture the effective rule identity after deletion." >&2
+    return 1
+  fi
+  normalize_owned_snapshot "${delete_prefix}.owned-after" "${delete_prefix}.owned-after-normalized"
+  normalize_ssh_snapshot "${delete_prefix}.ssh-after" "${delete_prefix}.ssh-after-normalized"
+  normalize_nonowned_snapshot "${delete_prefix}.nonowned-after" "${delete_prefix}.nonowned-after-normalized"
+
+  delete_verified=1
+  if ! cmp "${delete_prefix}.owned-expected" "${delete_prefix}.owned-after-normalized" >/dev/null; then
+    echo "Origin lock managed-rule deletion verification failed: a different rule was removed." >&2
+    delete_verified=0
+  fi
+  if ! cmp "${delete_prefix}.ssh-before-normalized" "${delete_prefix}.ssh-after-normalized" >/dev/null; then
+    echo "Origin lock managed-rule deletion verification failed: SSH recovery rules changed." >&2
+    delete_verified=0
+  fi
+  if ! cmp "${delete_prefix}.nonowned-before-normalized" "${delete_prefix}.nonowned-after-normalized" >/dev/null; then
+    echo "Origin lock managed-rule deletion verification failed: non-owned UFW rules changed." >&2
+    delete_verified=0
+  fi
+  if [ "$delete_rc" -ne 0 ]; then
+    echo "Origin lock managed-rule deletion command returned an error." >&2
+    delete_verified=0
+  fi
+  [ "$delete_verified" -eq 1 ]
+}
+
+restore_ssh_boundary() {
+  if ! capture_status "$TMP/rollback-ssh-before" ||
+     ! snapshot_boundary_status "$TMP/rollback-ssh-before" \
+       "$TMP/rollback-ssh-owned-before" "$TMP/rollback-ssh-rules-before" "$TMP/rollback-ssh-nonowned-before"; then
+    echo "Origin lock rollback could not capture the SSH recovery boundary." >&2
+    return 1
+  fi
+  normalize_ssh_snapshot "$TMP/rollback-ssh-rules-before" "$TMP/rollback-ssh-before-normalized"
+  normalize_ssh_snapshot "$TMP/prior-ssh-rules" "$TMP/prior-ssh-normalized"
+  if cmp "$TMP/prior-ssh-normalized" "$TMP/rollback-ssh-before-normalized" >/dev/null; then
+    return 0
+  fi
+
+  normalize_non_ssh_nonowned_snapshot "$TMP/rollback-ssh-nonowned-before" "$TMP/rollback-non-ssh-before-normalized"
+  if ! "$UFW_BIN" --force delete allow "${SSH_PORT}/tcp"; then
+    echo "Origin lock rollback warning: canonical SSH rule deletion returned an error; restoration verification remains authoritative." >&2
+  fi
+  if ! "$UFW_BIN" allow "${SSH_PORT}/tcp"; then
+    echo "Origin lock rollback could not recreate the canonical SSH recovery pair." >&2
+    return 1
+  fi
+
+  if ! capture_status "$TMP/rollback-ssh-after" ||
+     ! snapshot_boundary_status "$TMP/rollback-ssh-after" \
+       "$TMP/rollback-ssh-owned-after" "$TMP/rollback-ssh-rules-after" "$TMP/rollback-ssh-nonowned-after"; then
+    echo "Origin lock rollback could not verify the recreated SSH recovery boundary." >&2
+    return 1
+  fi
+  normalize_ssh_snapshot "$TMP/rollback-ssh-rules-after" "$TMP/rollback-ssh-after-normalized"
+  normalize_non_ssh_nonowned_snapshot "$TMP/rollback-ssh-nonowned-after" "$TMP/rollback-non-ssh-after-normalized"
+  if ! cmp "$TMP/prior-ssh-normalized" "$TMP/rollback-ssh-after-normalized" >/dev/null; then
+    echo "Origin lock rollback could not restore the exact SSH recovery boundary." >&2
+    return 1
+  fi
+  if ! cmp "$TMP/rollback-non-ssh-before-normalized" "$TMP/rollback-non-ssh-after-normalized" >/dev/null; then
+    echo "Origin lock rollback SSH restoration changed another non-owned UFW rule." >&2
+    return 1
+  fi
+}
+
 rollback_firewall() {
   ROLLBACK_RUNNING=1
   echo "Origin lock apply failed; restoring the exact prior managed UFW rules." >&2
@@ -335,19 +514,25 @@ rollback_firewall() {
   if ! capture_status "$TMP/rollback-current"; then
     echo "Origin lock rollback could not capture the partially applied UFW state." >&2
     rollback_parse_ok=0
-  elif ! snapshot_boundary_status "$TMP/rollback-current" "$TMP/rollback-current-owned" "$TMP/rollback-current-ssh"; then
+  elif ! snapshot_boundary_status "$TMP/rollback-current" \
+    "$TMP/rollback-current-owned" "$TMP/rollback-current-ssh" "$TMP/rollback-current-nonowned"; then
     rollback_parse_ok=0
   fi
+  owned_cleanup_possible=$rollback_parse_ok
 
-  if [ "$rollback_parse_ok" -eq 1 ]; then
-    awk -F '|' '{ print $1 }' "$TMP/rollback-current-owned" | sort -rn > "$TMP/rollback-managed-rule-numbers"
-    while IFS= read -r number; do
-      [ -n "$number" ] || continue
-      if ! "$UFW_BIN" --force delete "$number"; then
-        echo "Origin lock rollback warning: managed rule deletion returned an error; exact final verification remains authoritative." >&2
+  if [ "$owned_cleanup_possible" -eq 1 ]; then
+    while IFS='|' read -r _number port source comment; do
+      [ -n "$port" ] || continue
+      if ! delete_one_owned_rule "$port" "$source" "$comment"; then
+        echo "Origin lock rollback warning: identity-checked managed rule deletion failed; exact final verification remains authoritative." >&2
       fi
-    done < "$TMP/rollback-managed-rule-numbers"
+    done < "$TMP/rollback-current-owned"
+  fi
 
+  if ! restore_ssh_boundary; then
+    rollback_parse_ok=0
+  fi
+  if [ "$owned_cleanup_possible" -eq 1 ]; then
     while IFS='|' read -r _number port source comment; do
       [ -n "$port" ] || continue
       if ! "$UFW_BIN" allow proto tcp from "$source" to any port "$port" comment "$comment"; then
@@ -372,7 +557,8 @@ rollback_firewall() {
   if ! capture_status "$TMP/rollback-restored" || ! capture_policy "$TMP/rollback-policy"; then
     echo "Origin lock rollback verification could not capture effective UFW state." >&2
     rollback_verified=0
-  elif ! snapshot_boundary_status "$TMP/rollback-restored" "$TMP/rollback-restored-owned" "$TMP/rollback-restored-ssh"; then
+  elif ! snapshot_boundary_status "$TMP/rollback-restored" \
+    "$TMP/rollback-restored-owned" "$TMP/rollback-restored-ssh" "$TMP/rollback-restored-nonowned"; then
     rollback_verified=0
   else
     normalize_owned_snapshot "$TMP/prior-owned-rules" "$TMP/prior-owned-normalized"
@@ -578,15 +764,18 @@ if [ "$(id -u)" -ne 0 ] && [ "$TEST_MODE" != 1 ]; then
   exit 1
 fi
 
+acquire_transaction_lock
 capture_status "$TMP/before"
 verify_recovery_before_mutation "$TMP/before"
-snapshot_boundary_status "$TMP/before" "$TMP/prior-owned-rules" "$TMP/prior-ssh-rules"
-awk -F '|' '{ print $1 }' "$TMP/prior-owned-rules" | sort -rn > "$TMP/managed-rule-numbers"
+snapshot_boundary_status "$TMP/before" \
+  "$TMP/prior-owned-rules" "$TMP/prior-ssh-rules" "$TMP/prior-nonowned-rules"
+verify_canonical_ssh_snapshot "$TMP/prior-ssh-rules"
+normalize_nonowned_snapshot "$TMP/prior-nonowned-rules" "$TMP/prior-nonowned-normalized"
 TRANSACTION_ACTIVE=1
-while IFS= read -r number; do
-  [ -n "$number" ] || continue
-  "$UFW_BIN" --force delete "$number"
-done < "$TMP/managed-rule-numbers"
+while IFS='|' read -r _number port source comment; do
+  [ -n "$port" ] || continue
+  delete_one_owned_rule "$port" "$source" "$comment" "$TMP/prior-nonowned-normalized"
+done < "$TMP/prior-owned-rules"
 
 for port in $PORTS; do
   for file in "$IPV4_FILE" "$IPV6_FILE"; do

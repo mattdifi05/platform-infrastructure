@@ -145,6 +145,8 @@ jobs:
           printf '%s\n' '{"releaseImages":[{"key":"PLATFORM_ALERT_DISPATCHER_IMAGE","image":"registry.example/platform/alert-dispatcher:ci@sha256:1111111111111111111111111111111111111111111111111111111111111111"}]}' > .tmp/ci-release-images.json
           printf '%s\n' '{"bomFormat":"CycloneDX","specVersion":"1.5","components":[]}' > .tmp/ci-sbom/pnpm-sbom-ci.json
           sh ./scripts/infra-ops.sh release-artifact-gate --envFile .tmp/ci-release.env --imageManifest .tmp/ci-release-images.json --sbom .tmp/ci-sbom/pnpm-sbom-ci.json
+          sh scripts/cloudflare-origin-lock-ufw-test.sh
+          sh scripts/cloudflare-origin-lock-ufw-transaction-test.sh
       - name: Upload supply-chain evidence reports
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
