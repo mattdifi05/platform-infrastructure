@@ -479,6 +479,15 @@ L'upload Restic off-site parte solo con `BACKUP_SCHEDULER_ENABLE_OFFSITE=true` e
 credenziali reali. Il runtime env file privato dello scheduler viene letto con
 parser dedicato dai job `--run` e non viene eseguito con `source`.
 
+Le richieste privilegiate di backup del Control Center non scrivono direttamente
+file `queued`: consumano l'operazione autorizzata e immutabile e attraversano
+lo stesso ledger atomico usato dallo scheduler. L'overlay
+`compose.backup-scheduler.yaml` passa a entrambi i servizi gli stessi limiti
+`BACKUP_QUEUE_*` per profondita', rate per principal, concorrenza, scansione e
+retention. Il Control Center limita i documenti terminali durante
+l'ammissione; la rimozione dei log correlati resta proprieta' dello scheduler,
+che monta `backup_scheduler_logs`.
+
 Schedulazione Linux host fallback:
 
 ```sh

@@ -4,6 +4,7 @@ import {
   existsSync,
   mkdtempSync,
   mkdirSync,
+  readFileSync,
   readdirSync,
   rmSync,
   writeFileSync,
@@ -28,6 +29,7 @@ import {
 } from "../backup/queue-operation-adapter.mjs";
 
 const BASE_TIME = Date.parse("2026-07-21T20:00:00.000Z");
+const infraRoot = path.resolve(import.meta.dirname, "..", "..");
 const raceWorker = path.join(import.meta.dirname, "fixtures", "backup-queue-race-worker.mjs");
 const claimRaceWorker = path.join(import.meta.dirname, "fixtures", "backup-queue-claim-race-worker.mjs");
 const queueCli = path.resolve(import.meta.dirname, "..", "..", "scripts", "backup-queue-control.mjs");
@@ -37,7 +39,13 @@ function operation(operationId = "backup.run", control = true) {
     method: "POST",
     operationId,
     capability: "owner:fresh",
-    canonicalPath: operationId === "legacy.backup" ? "/actions/backup-command" : operationId === "database.backup" ? "/control/databases/db-one/backup" : "/control/backups/run",
+    canonicalPath: operationId === "legacy.backup"
+      ? "/actions/backup-command"
+      : operationId === "legacy.database"
+        ? "/actions/database-command"
+        : operationId === "database.backup"
+          ? "/control/databases/db-one/backup"
+          : "/control/backups/run",
     classified: true,
     control,
     parameters: Object.freeze(operationId === "database.backup" ? { databaseId: "db-one" } : {}),
@@ -96,7 +104,7 @@ function rejectedCode(fn, code, ErrorType = BackupQueueAdmissionError) {
 }
 
 test("registry adapter accepts canonical aliases by operation identity and fails closed", () => {
-  assert.deepEqual(listBackupQueueOperationIds(), ["backup.run", "database.backup", "legacy.backup"]);
+  assert.deepEqual(listBackupQueueOperationIds(), ["backup.run", "database.backup", "legacy.backup", "legacy.database"]);
   // FG-004/043 resolves /control and /control/v1 aliases to this same frozen
   // canonical identity; FG-069 never receives or re-matches their raw paths.
   for (const alias of ["/control/backups/run", "/control/v1/backups/run"]) {
@@ -108,12 +116,40 @@ test("registry adapter accepts canonical aliases by operation identity and fails
     assert.equal(admitted.operationId, "database.backup", alias);
   }
   assert.equal(requireCanonicalBackupQueueOperation(operation("legacy.backup", false), "restore-drill").jobOperation, "restore-drill");
+  assert.equal(requireCanonicalBackupQueueOperation(operation("legacy.database", false), "backup").jobOperation, "backup");
 
   rejectedCode(() => requireCanonicalBackupQueueOperation({ ...operation() }, "backup"), "operation_not_canonical", BackupQueueOperationError);
   rejectedCode(() => requireCanonicalBackupQueueOperation(Object.freeze({ ...operation(), classified: false }), "backup"), "operation_not_privileged", BackupQueueOperationError);
   rejectedCode(() => requireCanonicalBackupQueueOperation(Object.freeze({ ...operation(), capability: "admin" }), "backup"), "operation_not_privileged", BackupQueueOperationError);
   rejectedCode(() => requireCanonicalBackupQueueOperation(Object.freeze({ ...operation(), operationId: "default.mutation" }), "backup"), "operation_not_admitted", BackupQueueOperationError);
   rejectedCode(() => requireCanonicalBackupQueueOperation(operation("backup.run", true), "restore-drill"), "job_operation_mismatch", BackupQueueOperationError);
+});
+
+test("Control Center and scheduler share one declared queue policy and consumer", () => {
+  const compose = readFileSync(path.join(infraRoot, "compose.backup-scheduler.yaml"), "utf8");
+  for (const variable of [
+    "BACKUP_QUEUE_MAX_OUTSTANDING",
+    "BACKUP_QUEUE_MAX_PER_PRINCIPAL",
+    "BACKUP_QUEUE_RATE_WINDOW_SECONDS",
+    "BACKUP_QUEUE_MAX_CONCURRENCY",
+    "BACKUP_QUEUE_TERMINAL_MAX_PER_STATUS",
+    "BACKUP_QUEUE_TERMINAL_MAX_AGE_DAYS",
+    "BACKUP_QUEUE_LEDGER_MAX_ENTRIES",
+    "BACKUP_QUEUE_MAX_SCAN_ENTRIES",
+    "BACKUP_QUEUE_LOCK_TIMEOUT_MS",
+  ]) {
+    assert.equal(
+      compose.match(new RegExp(`^\\s+${variable}:`, "gm"))?.length || 0,
+      2,
+      `${variable} must be passed to both services`,
+    );
+  }
+  const server = readFileSync(path.join(infraRoot, "control-center", "server.mjs"), "utf8");
+  const consumer = server.match(/function createBackupJob\([\s\S]*?\n}\n\nfunction readBackupJobs/)?.[0] || "";
+  assert.match(consumer, /admitBackupJob\(\{/);
+  assert.match(consumer, /operation:\s*identity\?\.operation/);
+  assert.match(consumer, /requestedBy:\s*principal/);
+  assert.doesNotMatch(consumer, /writePrivateJsonAtomic|requestedBy:\s*identity\?\.subject\s*\|\|/);
 });
 
 test("active deduplication spans API aliases and principals", (t) => {

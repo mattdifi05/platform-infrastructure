@@ -113,6 +113,8 @@ test("Admin Control Center local foundation", async (t) => {
       CONTROL_CENTER_STATUS_STEP_DELAY_MS: "0",
       CONTROL_CENTER_STATUS_STREAM_MAX_PER_PRINCIPAL: "1",
       CONTROL_CENTER_STATUS_PROBE_TIMEOUT_MS: "500",
+      BACKUP_QUEUE_MAX_OUTSTANDING: "16",
+      BACKUP_QUEUE_MAX_PER_PRINCIPAL: "16",
       CONTROL_CENTER_HOST: "portal.localhost.com",
       DOCS_HOST: "docs.localhost.com",
       PROJECT_HOST_SUFFIX: ".localhost.com",

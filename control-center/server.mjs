@@ -39,6 +39,12 @@ import {
 } from "./backup/contracts.mjs";
 import { safeBackupPreview } from "./backup/preview.mjs";
 import {
+  BackupQueueAdmissionError,
+  admitBackupJob,
+  backupQueuePolicyFromEnvironment,
+} from "./backup/queue-admission.mjs";
+import { BackupQueueOperationError } from "./backup/queue-operation-adapter.mjs";
+import {
   loadVaultKeyring,
   openLegacyVaultCiphertext,
   openVaultCiphertext,
@@ -76,6 +82,7 @@ const existingSecretsDir = process.env.CONTROL_CENTER_EXISTING_SECRETS_DIR || pa
 const includeRunSecretsInVaultImport = parseBoolean(process.env.CONTROL_CENTER_IMPORT_RUN_SECRETS || "");
 const vaultRevealTtlMs = clampNumber(Number(process.env.CONTROL_CENTER_VAULT_REVEAL_TTL_MS || 120000), 10000, 600000);
 const backupJobsDir = process.env.PROJECT_BACKUP_JOBS_DIR || "/var/www/project-state/backup-jobs";
+const backupQueuePolicy = backupQueuePolicyFromEnvironment();
 const dockerStatsFile = process.env.PROJECT_DOCKER_STATS_FILE || "/var/www/project-state/docker-stats.json";
 const reportsRoot = process.env.CONTROL_CENTER_REPORTS_ROOT || path.join(platformInfraRoot, "reports");
 const databaseDeleteEvidenceMaxAgeMs = clampNumber(Number(process.env.CONTROL_CENTER_DATABASE_DELETE_EVIDENCE_MAX_AGE_SECONDS || 86400), 3600, 604800) * 1000;
@@ -388,10 +395,12 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    const resolvedOperation = resolveAuthorizationCapability(req.method, url.pathname, {
+    // Resolve once, then pass this exact frozen catalog object through
+    // authorization, dispatch and privileged queue admission.
+    const requestOperation = resolveAuthorizationCapability(req.method, url.pathname, {
       rawPathname: rawRequestPathname(req.url),
     });
-    const controlOperation = resolvedOperation.control === true ? resolvedOperation : null;
+    const controlOperation = requestOperation.control === true ? requestOperation : null;
     if (controlOperation) req.controlCenterOperation = controlOperation;
 
     const session = await controlAuth.authenticate(req);
@@ -420,6 +429,7 @@ const server = createServer(async (req, res) => {
       subject: session.identity.subject,
       role: session.role,
       requestId: rid(),
+      operation: requestOperation,
     }, async () => {
       if (["GET", "HEAD"].includes(String(req.method || "GET").toUpperCase()) && url.pathname === DATABASE_ADMIN_AUTHORIZATION_PATH) {
         const decision = authorizeDatabaseAdminForwardTarget(req.headers, { expectedHost: controlCenterHost });
@@ -438,8 +448,8 @@ const server = createServer(async (req, res) => {
         ? await buildCachedContext({ projects, state })
         : await buildContext({ projects, state });
 
-    if (controlOperation) {
-      await handleApi(req, res, url, context, controlOperation);
+    if (requestOperation.control === true) {
+      await handleApi(req, res, url, context, requestOperation);
       return;
     }
 
@@ -546,6 +556,7 @@ const server = createServer(async (req, res) => {
       htmlPage(req, res, renderControlCenter(context, url.searchParams));
     });
   } catch (error) {
+    if (writeBackupQueueError(res, error)) return;
     const message = error instanceof Error ? error.message : String(error);
     const status = error instanceof AuthRequestError ? error.status : 500;
     json(res, { error: status === 413 ? "payload_too_large" : "control_center_error", message: sanitizeMessage(message) }, status);
@@ -834,6 +845,7 @@ async function handleApi(req, res, url, context, operation) {
     if (error instanceof StatusEventStreamError && !res.headersSent) {
       return json(res, { error: error.code.toLowerCase(), message: error.message }, error.status);
     }
+    if (writeBackupQueueError(res, error)) return;
     throw error;
   }
 
@@ -4947,20 +4959,30 @@ function queueRestoreDrill(payload, context) {
 function createBackupJob({ operation, scope, sourceManifestPath = "", resources, context }) {
   const now = new Date().toISOString();
   const identity = requestIdentity.getStore();
+  const principal = String(identity?.subject || "").trim();
+  if (!principal) {
+    throw new BackupQueueOperationError(
+      "principal_missing",
+      "Backup queue admission requires an authenticated principal.",
+    );
+  }
   const job = createBackupJobDocument({
     id: rid(),
     operation,
     scope,
     resources,
-    requestedBy: identity?.subject || "control-center",
+    requestedBy: principal,
     environment: context.environment,
     createdAt: now,
     sourceManifestPath,
   });
-  const queuedDir = path.join(backupJobsDir, "queued");
-  mkdirSync(queuedDir, { recursive: true, mode: 0o700 });
-  writePrivateJsonAtomic(path.join(queuedDir, `${job.id}.json`), job);
-  return job;
+  return admitBackupJob({
+    jobsDir: backupJobsDir,
+    operation: identity?.operation,
+    principal,
+    job,
+    policy: backupQueuePolicy,
+  }).job;
 }
 
 function readBackupJobs() {
@@ -12980,6 +13002,20 @@ function advancedItems(section) {
 function json(res, payload, status = 200) {
   res.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store", "x-platform-control-center-runtime": "node" });
   res.end(`${JSON.stringify(payload, null, 2)}\n`);
+}
+
+function writeBackupQueueError(res, error) {
+  if (!(error instanceof BackupQueueAdmissionError) && !(error instanceof BackupQueueOperationError)) {
+    return false;
+  }
+  const status = Number.isInteger(error.status) && error.status >= 400 && error.status <= 599
+    ? error.status
+    : 503;
+  json(res, {
+    error: String(error.code || "backup_queue_rejected"),
+    message: sanitizeMessage(error.message),
+  }, status);
+  return true;
 }
 
 function html(res, content, status = 200) {

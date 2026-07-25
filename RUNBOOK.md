@@ -520,6 +520,15 @@ networks, volumes, capabilities, devices or host namespaces. Manual jobs are
 stably snapshotted before execution. Raw-socket recovery remains a separate,
 explicit operator maintenance path and is never exposed to hosted workloads.
 
+Control Center backup requests and scheduled work share the exact
+`BACKUP_QUEUE_*` policy declared in `compose.backup-scheduler.yaml`. Queue
+admission is atomic and fail-closed: duplicate active work returns `409`,
+principal exhaustion `429`, and capacity, scheduler reservation or lock
+exhaustion `503`; rejected requests must not create a job. Keep these values
+identical for `control-center` and `backup-scheduler`. Terminal job documents
+are pruned at admission/claim/finish boundaries; owned job logs are pruned only
+by the scheduler because only it mounts `backup_scheduler_logs`.
+
 ## Home VPS LAN evidence
 
 Use explicit runtime overrides when the home VPS is reachable only over LAN

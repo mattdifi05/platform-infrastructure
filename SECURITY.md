@@ -34,6 +34,10 @@ database dumps or live exploitation output in public reports.
   and `SameSite=Lax`; transactions and revocable sessions are server-side.
 - Mutating Control Center API calls reject untrusted `Origin` headers and hostile
   Fetch Metadata.
+- Privileged backup producers must pass the exact frozen route-capability
+  object and authenticated subject into the bounded queue admission layer.
+  Direct queue-file writes and fallback principals are forbidden; modern,
+  versioned and legacy routes share one durable admission/concurrency budget.
 - Cloudflare Access or equivalent provider MFA is required for production admin
   surfaces.
 - Redis-backed rate limiting is an infrastructure capability; hosted app auth

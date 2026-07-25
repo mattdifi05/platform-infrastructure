@@ -1,4 +1,17 @@
 services:
+  control-center:
+    environment:
+      PROJECT_BACKUP_JOBS_DIR: /var/www/project-state/backup-jobs
+      BACKUP_QUEUE_MAX_OUTSTANDING: ${BACKUP_QUEUE_MAX_OUTSTANDING:-32}
+      BACKUP_QUEUE_MAX_PER_PRINCIPAL: ${BACKUP_QUEUE_MAX_PER_PRINCIPAL:-4}
+      BACKUP_QUEUE_RATE_WINDOW_SECONDS: ${BACKUP_QUEUE_RATE_WINDOW_SECONDS:-900}
+      BACKUP_QUEUE_MAX_CONCURRENCY: ${BACKUP_QUEUE_MAX_CONCURRENCY:-1}
+      BACKUP_QUEUE_TERMINAL_MAX_PER_STATUS: ${BACKUP_QUEUE_TERMINAL_MAX_PER_STATUS:-200}
+      BACKUP_QUEUE_TERMINAL_MAX_AGE_DAYS: ${BACKUP_QUEUE_TERMINAL_MAX_AGE_DAYS:-30}
+      BACKUP_QUEUE_LEDGER_MAX_ENTRIES: ${BACKUP_QUEUE_LEDGER_MAX_ENTRIES:-4096}
+      BACKUP_QUEUE_MAX_SCAN_ENTRIES: ${BACKUP_QUEUE_MAX_SCAN_ENTRIES:-4096}
+      BACKUP_QUEUE_LOCK_TIMEOUT_MS: ${BACKUP_QUEUE_LOCK_TIMEOUT_MS:-2000}
+
   docker-action-activation-sidecar:
     image: ${PLATFORM_PROVIDER_ACTIVATION_SIDECAR_IMAGE_REPOSITORY:?set provider/admin activation sidecar repository}@sha256:${PLATFORM_PROVIDER_ACTIVATION_SIDECAR_IMAGE_SHA256:?set provider/admin activation sidecar sha256}
     container_name: enterprise-docker-action-activation-sidecar
@@ -103,7 +116,6 @@ services:
     depends_on:
       docker-action-activation-sidecar:
         condition: service_completed_successfully
-
   backup-scheduler:
     image: ${PLATFORM_BACKUP_SCHEDULER_IMAGE_REPOSITORY:?set digest-pinned scheduler repository}@sha256:${PLATFORM_BACKUP_SCHEDULER_IMAGE_SHA256:?set scheduler image sha256}
     container_name: enterprise-backup-scheduler
