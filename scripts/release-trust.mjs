@@ -101,6 +101,7 @@ export function buildGithubAttestationVerifyArgs({
   sourceRef,
   bundle = null,
   trustedRoot = null,
+  useGithubPublicGoodRoot = false,
   predicateType = SLSA_PROVENANCE_V1,
   certOidcIssuer = GITHUB_ACTIONS_OIDC_ISSUER,
 }) {
@@ -111,8 +112,12 @@ export function buildGithubAttestationVerifyArgs({
   const normalizedSourceRef = normalizeGithubRef(sourceRef);
   const normalizedPredicate = requiredText(predicateType, "predicate type");
   const normalizedIssuer = requiredText(certOidcIssuer, "certificate OIDC issuer");
-  if ((bundle && !trustedRoot) || (!bundle && trustedRoot)) {
-    invalid("Offline verification requires both an attestation bundle and a custom trusted root.");
+  if (
+    (!bundle && (trustedRoot || useGithubPublicGoodRoot))
+    || (bundle && !trustedRoot && !useGithubPublicGoodRoot)
+    || (trustedRoot && useGithubPublicGoodRoot)
+  ) {
+    invalid("Offline verification requires a bundle plus exactly one explicit trust mode: custom trusted root or GitHub public-good roots.");
   }
 
   const args = [
@@ -139,7 +144,9 @@ export function buildGithubAttestationVerifyArgs({
   ];
   if (bundle) {
     args.push("--bundle", existingFile(bundle, "attestation bundle"));
-    args.push("--custom-trusted-root", existingFile(trustedRoot, "trusted root"));
+    if (trustedRoot) {
+      args.push("--custom-trusted-root", existingFile(trustedRoot, "trusted root"));
+    }
   }
   return args;
 }

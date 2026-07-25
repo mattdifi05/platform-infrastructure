@@ -22,12 +22,60 @@ function exactTimestamp(value, label) {
   return text;
 }
 
+function exactPositiveInteger(value, label) {
+  const number = typeof value === "number" ? value : Number(String(value ?? ""));
+  if (!Number.isSafeInteger(number) || number < 1) invalid(`${label} must be a positive integer.`);
+  return number;
+}
+
 function exactClosedObject(value, label, expectedKeys) {
   if (!value || typeof value !== "object" || Array.isArray(value)
     || JSON.stringify(Object.keys(value).sort()) !== JSON.stringify([...expectedKeys].sort())) {
     invalid(`${label} does not use the exact closed schema.`);
   }
   return value;
+}
+
+export function canonicalConsumerChallenge(value) {
+  exactClosedObject(value, "Deploy consumer challenge", [
+    "challengeNonce",
+    "consumerJob",
+    "consumerRepository",
+    "consumerRunAttempt",
+    "consumerRunId",
+  ]);
+  const challenge = {
+    consumerRepository: exactRepository(value.consumerRepository),
+    consumerRunId: String(value.consumerRunId ?? ""),
+    consumerRunAttempt: exactPositiveInteger(value.consumerRunAttempt, "Deploy consumer run attempt"),
+    consumerJob: String(value.consumerJob ?? ""),
+    challengeNonce: exactSha256(value.challengeNonce, "Deploy consumer challenge nonce"),
+  };
+  if (!/^[1-9][0-9]*$/.test(challenge.consumerRunId) || challenge.consumerJob !== "deploy-vps") {
+    invalid("Deploy consumer challenge must bind the exact current deploy-vps run identity.");
+  }
+  return challenge;
+}
+
+function consumerChallengeFromOptions(options) {
+  const values = [
+    options.consumerRepository,
+    options.consumerRunId,
+    options.consumerRunAttempt,
+    options.consumerJob,
+    options.challengeNonce,
+  ];
+  if (values.every((value) => value === undefined || value === null)) return null;
+  if (values.some((value) => value === undefined || value === null)) {
+    invalid("All deploy consumer challenge bindings are required together.");
+  }
+  return canonicalConsumerChallenge({
+    consumerRepository: options.consumerRepository,
+    consumerRunId: options.consumerRunId,
+    consumerRunAttempt: options.consumerRunAttempt,
+    consumerJob: options.consumerJob,
+    challengeNonce: options.challengeNonce,
+  });
 }
 
 function validatePrivilegedRuntime(runtime) {
@@ -132,6 +180,8 @@ export function validateTrustedDeploymentReceipt(receipt, {
   providerRunAttempt = null,
   targetHost = null,
   environmentSha256 = null,
+  consumerChallenge = null,
+  runtimeIntentSha256 = null,
 }) {
   const expectedRepository = exactRepository(repository);
   const expectedCommit = exactGitSha(commitSha);
@@ -151,6 +201,9 @@ export function validateTrustedDeploymentReceipt(receipt, {
     invalid(`EXTERNAL-PENDING: ${policy?.reason ?? "trusted deployment verifier channel is not configured"}`);
   }
   const configuredProducer = trustedProducerConfiguration(policy);
+  if (configuredProducer.repository === expectedRepository) {
+    invalid("Trusted deployment producer must be independent from the candidate repository.");
+  }
   const configuredOpsRepository = String(policy.trustedOpsImageRepository ?? "");
   if (!/^[a-z0-9.-]+(?::[0-9]+)?(?:\/[a-z0-9._-]+)+$/.test(configuredOpsRepository)) {
     invalid("EXTERNAL-PENDING: trusted ops image repository is not configured");
@@ -200,6 +253,13 @@ export function validateTrustedDeploymentReceipt(receipt, {
   ) {
     invalid("Trusted deployment receipt producer run identity is mismatched.");
   }
+  if (consumerChallenge !== null) {
+    const expectedChallenge = canonicalConsumerChallenge(consumerChallenge);
+    const actualChallenge = canonicalConsumerChallenge(receipt.consumerChallenge);
+    if (JSON.stringify(actualChallenge) !== JSON.stringify(expectedChallenge)) {
+      invalid("Trusted deployment receipt does not bind the exact deploy consumer challenge.");
+    }
+  }
   const opsImage = parseReleaseImage(receipt.opsRunner?.image, "PLATFORM_OPS_IMAGE");
   if (
     opsImage.name !== configuredOpsRepository
@@ -222,6 +282,10 @@ export function validateTrustedDeploymentReceipt(receipt, {
   });
   if (receipt.runtimeIntentSha256 !== runtimeIntent.sha256) {
     invalid("Trusted deployment receipt does not authenticate the exact canonical runtime intent.");
+  }
+  if (runtimeIntentSha256 !== null
+    && receipt.runtimeIntentSha256 !== exactSha256(runtimeIntentSha256, "expected runtime intent SHA256")) {
+    invalid("Trusted deployment receipt runtime intent binding is mismatched.");
   }
   const target = exactClosedObject(receipt.deploymentTarget, "Trusted deployment target", [
     "environment",
@@ -284,6 +348,8 @@ function main() {
       providerRunAttempt: options.providerRunAttempt ?? null,
       targetHost: options.targetHost ?? null,
       environmentSha256: options.environmentSha256 ?? null,
+      consumerChallenge: consumerChallengeFromOptions(options),
+      runtimeIntentSha256: options.runtimeIntentSha256 ?? null,
     });
     process.stdout.write(`${JSON.stringify({ status: "READY", repository: options.repo, commitSha: options.commit, treeSha: options.tree, sourceArchiveSha256: deployment.document.sourceArchiveSha256, artifactReceiptSha256: artifact.sha256, deploymentReceiptSha256: deployment.sha256, runtimeIntentSha256: deployment.document.runtimeIntentSha256 })}\n`);
   } finally {

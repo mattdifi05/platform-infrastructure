@@ -14,7 +14,6 @@ docker run --rm \
   -t "$TARGET" \
   -r zap-baseline.html \
   -J zap-baseline.json \
-  -x zap-baseline.xml \
-  -I
+  -x zap-baseline.xml
 
 echo "ZAP baseline completed for $TARGET. Reports written to $OUT_DIR."

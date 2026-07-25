@@ -23,24 +23,8 @@ on:
         description: Owner-reviewed SHA256 of the attested release subject manifest
         required: true
         type: string
-      trusted_admission_run_id:
-        description: Trusted-provider run containing the exact deployment admission receipt
-        required: true
-        type: string
-      trusted_admission_run_attempt:
-        description: Exact successful attempt of the configured trusted-provider workflow run
-        required: true
-        type: string
       artifact_receipt_sha256:
         description: Owner-reviewed SHA256 of the artifact-only verification receipt
-        required: true
-        type: string
-      deployment_receipt_sha256:
-        description: Owner-reviewed SHA256 of the trusted-provider deployment receipt
-        required: true
-        type: string
-      staging_receipt_sha256:
-        description: Owner-reviewed SHA256 of the provider-authenticated exact-candidate staging deployment receipt
         required: true
         type: string
 
@@ -245,6 +229,7 @@ jobs:
           node scripts/activation-receipt-policy.test.mjs
           node scripts/activation-promotion-policy.test.mjs
           node --test scripts/dast-runtime-receipt-policy.test.mjs
+          node --test scripts/dast-provider-countersign.test.mjs
           node scripts/trusted-provider-run-policy.test.mjs
           node scripts/gh-verifier-workflow-policy.test.mjs
           node scripts/trusted-receipt-workflow.test.mjs
@@ -366,10 +351,17 @@ jobs:
     if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.ref_protected == true
     permissions:
       actions: read
+      attestations: read
       contents: read
     outputs:
-      receipt_sha256: ${{ steps.activation_dast.outputs.receipt_sha256 }}
-      dast_receipt_sha256: ${{ steps.receipt.outputs.dast_receipt_sha256 }}
+      dast_scan_request_sha256: ${{ steps.request.outputs.dast_scan_request_sha256 }}
+      dast_report_artifact_id: ${{ steps.upload-request.outputs.artifact-id }}
+      dast_report_artifact_sha256: ${{ steps.upload-request.outputs.artifact-digest }}
+      dast_receipt_sha256: ${{ steps.verify-provider.outputs.dast_receipt_sha256 }}
+      dast_provider_metadata_sha256: ${{ steps.verify-provider.outputs.dast_provider_metadata_sha256 }}
+      dast_provider_run_id: ${{ steps.dast-provider.outputs.run_id }}
+      dast_provider_run_attempt: ${{ steps.dast-provider.outputs.run_attempt }}
+      dast_attestation_bundle_sha256: ${{ steps.verify-provider.outputs.dast_attestation_bundle_sha256 }}
     environment:
       name: staging
       url: ${{ vars.DAST_TARGET }}
@@ -378,147 +370,375 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+      - name: Install checksum-pinned GitHub attestation verifier and preserve exact archive
+        env:
+          GH_VERIFIER_ARCHIVE_OUTPUT: ${{ runner.temp }}/gh_2.93.0_linux_amd64.tar.gz
+        run: sh ./scripts/install-gh-attestation-verifier.sh
       - name: Download exact admitted deployment and staging receipts
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: admitted-deployment-receipts-${{ github.run_id }}
           path: ${{ runner.temp }}/admitted-deployment-receipts
-      - name: Validate provider-authenticated staging runtime and probe exact candidate
+      - name: Validate provider-authenticated staging runtime and observe exact candidate before scan
         id: staging
         env:
           DAST_TARGET: ${{ vars.DAST_TARGET }}
           ARTIFACT_RECEIPT: ${{ runner.temp }}/admitted-deployment-receipts/artifact-verification.json
           ARTIFACT_RECEIPT_SHA256: ${{ needs.release-admission.outputs.artifact_receipt_sha256 }}
-          STAGING_RECEIPT: ${{ runner.temp }}/admitted-deployment-receipts/trusted-staging-deployment.json
-          STAGING_RECEIPT_SHA256: ${{ needs.release-admission.outputs.staging_receipt_sha256 }}
-          TRUSTED_PROVIDER_METADATA: ${{ runner.temp }}/admitted-deployment-receipts/trusted-provider-run.json
-          TRUSTED_PROVIDER_METADATA_SHA256: ${{ needs.release-admission.outputs.trusted_provider_metadata_sha256 }}
-          TRUSTED_PROVIDER_RUN_ID: ${{ needs.release-admission.outputs.trusted_provider_run_id }}
-          TRUSTED_PROVIDER_RUN_ATTEMPT: ${{ needs.release-admission.outputs.trusted_provider_run_attempt }}
-          RELEASE_SHA: ${{ needs.release-admission.outputs.release_sha }}
-          RELEASE_TREE: ${{ needs.release-admission.outputs.release_tree }}
-        run: |
-          RESULT="$(node ./scripts/dast-runtime-receipt-policy.mjs \
-            --policy governance/deployment-admission.json \
-            --artifactReceipt "$ARTIFACT_RECEIPT" \
-            --artifactReceiptSha256 "$ARTIFACT_RECEIPT_SHA256" \
-            --providerMetadata "$TRUSTED_PROVIDER_METADATA" \
-            --providerMetadataSha256 "$TRUSTED_PROVIDER_METADATA_SHA256" \
-            --stagingReceipt "$STAGING_RECEIPT" \
-            --stagingReceiptSha256 "$STAGING_RECEIPT_SHA256" \
-            --repo "$GITHUB_REPOSITORY" \
-            --commit "$RELEASE_SHA" \
-            --tree "$RELEASE_TREE" \
-            --providerRunId "$TRUSTED_PROVIDER_RUN_ID" \
-            --providerRunAttempt "$TRUSTED_PROVIDER_RUN_ATTEMPT")"
-          CANONICAL_TARGET="$(printf '%s' "$RESULT" | jq -er '.target')"
-          IDENTITY_PATH="$(printf '%s' "$RESULT" | jq -er '.identityPath')"
-          test "$DAST_TARGET" = "$CANONICAL_TARGET"
-          PROBE="${RUNNER_TEMP}/staging-release-identity.json"
-          curl --fail --silent --show-error --proto '=https' --tlsv1.2 --max-redirs 0 \
-            --output "$PROBE" "${CANONICAL_TARGET}${IDENTITY_PATH}"
-          node ./scripts/dast-runtime-receipt-policy.mjs \
-            --policy governance/deployment-admission.json \
-            --artifactReceipt "$ARTIFACT_RECEIPT" \
-            --artifactReceiptSha256 "$ARTIFACT_RECEIPT_SHA256" \
-            --providerMetadata "$TRUSTED_PROVIDER_METADATA" \
-            --providerMetadataSha256 "$TRUSTED_PROVIDER_METADATA_SHA256" \
-            --stagingReceipt "$STAGING_RECEIPT" \
-            --stagingReceiptSha256 "$STAGING_RECEIPT_SHA256" \
-            --probe "$PROBE" \
-            --repo "$GITHUB_REPOSITORY" \
-            --commit "$RELEASE_SHA" \
-            --tree "$RELEASE_TREE" \
-            --providerRunId "$TRUSTED_PROVIDER_RUN_ID" \
-            --providerRunAttempt "$TRUSTED_PROVIDER_RUN_ATTEMPT"
-          printf 'target=%s\n' "$CANONICAL_TARGET" >> "$GITHUB_OUTPUT"
-          printf 'probe=%s\n' "$PROBE" >> "$GITHUB_OUTPUT"
-      - name: Run ZAP baseline against staging
-        env:
-          DAST_TARGET: ${{ steps.staging.outputs.target }}
-          ZAP_IMAGE: ghcr.io/zaproxy/zaproxy@sha256:8d387b1a63e3425beef4846e39719f5af2a787753af2d8b6558c6257d7a577a2
-        run: |
-          test -n "$DAST_TARGET"
-          sh ./scripts/dast-zap-baseline.sh "$DAST_TARGET"
-      - name: Mint exact run-bound DAST admission for activation promotion
-        id: activation_dast
-        env:
           DEPLOYMENT_RECEIPT: ${{ runner.temp }}/admitted-deployment-receipts/trusted-deployment-admission.json
-          RELEASE_SHA: ${{ needs.release-admission.outputs.release_sha }}
-          RELEASE_TREE: ${{ needs.release-admission.outputs.release_tree }}
-          DAST_TARGET: ${{ vars.DAST_TARGET }}
-        run: |
-          DAST_DIR="${RUNNER_TEMP}/dast-admission"
-          install -d -m 700 "$DAST_DIR"
-          CHALLENGE_NONCE="$(openssl rand -hex 32)"
-          node ./scripts/dast-admission-policy.mjs \
-            --deploymentReceipt "$DEPLOYMENT_RECEIPT" \
-            --report security/dast/zap-baseline.json \
-            --repository "$GITHUB_REPOSITORY" \
-            --commit "$RELEASE_SHA" \
-            --tree "$RELEASE_TREE" \
-            --consumerRunId "$GITHUB_RUN_ID" \
-            --consumerRunAttempt "$GITHUB_RUN_ATTEMPT" \
-            --challengeNonce "$CHALLENGE_NONCE" \
-            --target "$DAST_TARGET" \
-            --output "$DAST_DIR/dast-admission.json" >/dev/null
-          printf 'receipt_sha256=%s\n' "$(sha256sum "$DAST_DIR/dast-admission.json" | awk '{print $1}')" >> "$GITHUB_OUTPUT"
-      - name: Emit exact-candidate DAST receipt
-        id: receipt
-        env:
-          ARTIFACT_RECEIPT: ${{ runner.temp }}/admitted-deployment-receipts/artifact-verification.json
-          ARTIFACT_RECEIPT_SHA256: ${{ needs.release-admission.outputs.artifact_receipt_sha256 }}
+          DEPLOYMENT_RECEIPT_SHA256: ${{ needs.release-admission.outputs.deployment_receipt_sha256 }}
           STAGING_RECEIPT: ${{ runner.temp }}/admitted-deployment-receipts/trusted-staging-deployment.json
           STAGING_RECEIPT_SHA256: ${{ needs.release-admission.outputs.staging_receipt_sha256 }}
           TRUSTED_PROVIDER_METADATA: ${{ runner.temp }}/admitted-deployment-receipts/trusted-provider-run.json
           TRUSTED_PROVIDER_METADATA_SHA256: ${{ needs.release-admission.outputs.trusted_provider_metadata_sha256 }}
           TRUSTED_PROVIDER_RUN_ID: ${{ needs.release-admission.outputs.trusted_provider_run_id }}
           TRUSTED_PROVIDER_RUN_ATTEMPT: ${{ needs.release-admission.outputs.trusted_provider_run_attempt }}
+          CONSUMER_RUN_ID: ${{ needs.release-admission.outputs.consumer_run_id }}
+          CONSUMER_RUN_ATTEMPT: ${{ needs.release-admission.outputs.consumer_run_attempt }}
+          CONSUMER_JOB: ${{ needs.release-admission.outputs.consumer_job }}
+          CHALLENGE_NONCE: ${{ needs.release-admission.outputs.challenge_nonce }}
           RELEASE_SHA: ${{ needs.release-admission.outputs.release_sha }}
           RELEASE_TREE: ${{ needs.release-admission.outputs.release_tree }}
-          PROBE: ${{ steps.staging.outputs.probe }}
-          ZAP_IMAGE: ghcr.io/zaproxy/zaproxy@sha256:8d387b1a63e3425beef4846e39719f5af2a787753af2d8b6558c6257d7a577a2
+          RUNTIME_INTENT_SHA256: ${{ needs.release-admission.outputs.runtime_intent_sha256 }}
         run: |
-          install -d -m 700 "${RUNNER_TEMP}/dast-verification"
-          DAST_RECEIPT="${RUNNER_TEMP}/dast-verification/dast-verification.json"
           RESULT="$(node ./scripts/dast-runtime-receipt-policy.mjs \
             --policy governance/deployment-admission.json \
             --artifactReceipt "$ARTIFACT_RECEIPT" \
             --artifactReceiptSha256 "$ARTIFACT_RECEIPT_SHA256" \
+            --deploymentReceipt "$DEPLOYMENT_RECEIPT" \
+            --deploymentReceiptSha256 "$DEPLOYMENT_RECEIPT_SHA256" \
             --providerMetadata "$TRUSTED_PROVIDER_METADATA" \
             --providerMetadataSha256 "$TRUSTED_PROVIDER_METADATA_SHA256" \
             --stagingReceipt "$STAGING_RECEIPT" \
             --stagingReceiptSha256 "$STAGING_RECEIPT_SHA256" \
-            --probe "$PROBE" \
             --repo "$GITHUB_REPOSITORY" \
             --commit "$RELEASE_SHA" \
             --tree "$RELEASE_TREE" \
             --providerRunId "$TRUSTED_PROVIDER_RUN_ID" \
             --providerRunAttempt "$TRUSTED_PROVIDER_RUN_ATTEMPT" \
+            --consumerRunId "$CONSUMER_RUN_ID" \
+            --consumerRunAttempt "$CONSUMER_RUN_ATTEMPT" \
+            --consumerJob "$CONSUMER_JOB" \
+            --challengeNonce "$CHALLENGE_NONCE" \
+            --runtimeIntentSha256 "$RUNTIME_INTENT_SHA256")"
+          CANONICAL_TARGET="$(printf '%s' "$RESULT" | jq -er '.target')"
+          IDENTITY_PATH="$(printf '%s' "$RESULT" | jq -er '.identityPath')"
+          test "$DAST_TARGET" = "$CANONICAL_TARGET"
+          PRE_PROBE="${RUNNER_TEMP}/staging-release-identity-pre.json"
+          curl --fail --silent --show-error --proto '=https' --tlsv1.2 --max-redirs 0 \
+            --output "$PRE_PROBE" "${CANONICAL_TARGET}${IDENTITY_PATH}"
+          PRE_OBSERVED_AT="$(date -u +'%Y-%m-%dT%H:%M:%S.%3NZ')"
+          node ./scripts/dast-runtime-receipt-policy.mjs \
+            --policy governance/deployment-admission.json \
+            --artifactReceipt "$ARTIFACT_RECEIPT" \
+            --artifactReceiptSha256 "$ARTIFACT_RECEIPT_SHA256" \
+            --deploymentReceipt "$DEPLOYMENT_RECEIPT" \
+            --deploymentReceiptSha256 "$DEPLOYMENT_RECEIPT_SHA256" \
+            --providerMetadata "$TRUSTED_PROVIDER_METADATA" \
+            --providerMetadataSha256 "$TRUSTED_PROVIDER_METADATA_SHA256" \
+            --stagingReceipt "$STAGING_RECEIPT" \
+            --stagingReceiptSha256 "$STAGING_RECEIPT_SHA256" \
+            --preProbe "$PRE_PROBE" \
+            --preObservedAt "$PRE_OBSERVED_AT" \
+            --repo "$GITHUB_REPOSITORY" \
+            --commit "$RELEASE_SHA" \
+            --tree "$RELEASE_TREE" \
+            --providerRunId "$TRUSTED_PROVIDER_RUN_ID" \
+            --providerRunAttempt "$TRUSTED_PROVIDER_RUN_ATTEMPT" \
+            --consumerRunId "$CONSUMER_RUN_ID" \
+            --consumerRunAttempt "$CONSUMER_RUN_ATTEMPT" \
+            --consumerJob "$CONSUMER_JOB" \
+            --challengeNonce "$CHALLENGE_NONCE" \
+            --runtimeIntentSha256 "$RUNTIME_INTENT_SHA256"
+          printf 'target=%s\n' "$CANONICAL_TARGET" >> "$GITHUB_OUTPUT"
+          printf 'identity_path=%s\n' "$IDENTITY_PATH" >> "$GITHUB_OUTPUT"
+          printf 'pre_probe=%s\n' "$PRE_PROBE" >> "$GITHUB_OUTPUT"
+          printf 'pre_observed_at=%s\n' "$PRE_OBSERVED_AT" >> "$GITHUB_OUTPUT"
+      - name: Run ZAP baseline against staging
+        id: scan
+        env:
+          DAST_TARGET: ${{ steps.staging.outputs.target }}
+          PRE_OBSERVED_AT: ${{ steps.staging.outputs.pre_observed_at }}
+          ZAP_IMAGE: ghcr.io/zaproxy/zaproxy@sha256:8d387b1a63e3425beef4846e39719f5af2a787753af2d8b6558c6257d7a577a2
+        run: |
+          test -n "$DAST_TARGET"
+          SCAN_STARTED_AT="$(date -u +'%Y-%m-%dT%H:%M:%S.%3NZ')"
+          while test "$SCAN_STARTED_AT" = "$PRE_OBSERVED_AT"; do SCAN_STARTED_AT="$(date -u +'%Y-%m-%dT%H:%M:%S.%3NZ')"; done
+          sh ./scripts/dast-zap-baseline.sh "$DAST_TARGET"
+          SCAN_FINISHED_AT="$(date -u +'%Y-%m-%dT%H:%M:%S.%3NZ')"
+          while test "$SCAN_FINISHED_AT" = "$SCAN_STARTED_AT"; do SCAN_FINISHED_AT="$(date -u +'%Y-%m-%dT%H:%M:%S.%3NZ')"; done
+          printf 'scan_started_at=%s\n' "$SCAN_STARTED_AT" >> "$GITHUB_OUTPUT"
+          printf 'scan_finished_at=%s\n' "$SCAN_FINISHED_AT" >> "$GITHUB_OUTPUT"
+      - name: Observe exact candidate again after scan
+        id: post
+        env:
+          CANONICAL_TARGET: ${{ steps.staging.outputs.target }}
+          IDENTITY_PATH: ${{ steps.staging.outputs.identity_path }}
+          SCAN_FINISHED_AT: ${{ steps.scan.outputs.scan_finished_at }}
+        run: |
+          POST_PROBE="${RUNNER_TEMP}/staging-release-identity-post.json"
+          curl --fail --silent --show-error --proto '=https' --tlsv1.2 --max-redirs 0 \
+            --output "$POST_PROBE" "${CANONICAL_TARGET}${IDENTITY_PATH}"
+          POST_OBSERVED_AT="$(date -u +'%Y-%m-%dT%H:%M:%S.%3NZ')"
+          while test "$POST_OBSERVED_AT" = "$SCAN_FINISHED_AT"; do POST_OBSERVED_AT="$(date -u +'%Y-%m-%dT%H:%M:%S.%3NZ')"; done
+          printf 'post_probe=%s\n' "$POST_PROBE" >> "$GITHUB_OUTPUT"
+          printf 'post_observed_at=%s\n' "$POST_OBSERVED_AT" >> "$GITHUB_OUTPUT"
+      - name: Emit non-authorizing exact-candidate DAST scan request
+        id: request
+        env:
+          ARTIFACT_RECEIPT: ${{ runner.temp }}/admitted-deployment-receipts/artifact-verification.json
+          ARTIFACT_RECEIPT_SHA256: ${{ needs.release-admission.outputs.artifact_receipt_sha256 }}
+          DEPLOYMENT_RECEIPT: ${{ runner.temp }}/admitted-deployment-receipts/trusted-deployment-admission.json
+          DEPLOYMENT_RECEIPT_SHA256: ${{ needs.release-admission.outputs.deployment_receipt_sha256 }}
+          STAGING_RECEIPT: ${{ runner.temp }}/admitted-deployment-receipts/trusted-staging-deployment.json
+          STAGING_RECEIPT_SHA256: ${{ needs.release-admission.outputs.staging_receipt_sha256 }}
+          TRUSTED_PROVIDER_METADATA: ${{ runner.temp }}/admitted-deployment-receipts/trusted-provider-run.json
+          TRUSTED_PROVIDER_METADATA_SHA256: ${{ needs.release-admission.outputs.trusted_provider_metadata_sha256 }}
+          TRUSTED_PROVIDER_RUN_ID: ${{ needs.release-admission.outputs.trusted_provider_run_id }}
+          TRUSTED_PROVIDER_RUN_ATTEMPT: ${{ needs.release-admission.outputs.trusted_provider_run_attempt }}
+          RELEASE_SHA: ${{ needs.release-admission.outputs.release_sha }}
+          RELEASE_TREE: ${{ needs.release-admission.outputs.release_tree }}
+          RUNTIME_INTENT_SHA256: ${{ needs.release-admission.outputs.runtime_intent_sha256 }}
+          CONSUMER_RUN_ID: ${{ needs.release-admission.outputs.consumer_run_id }}
+          CONSUMER_RUN_ATTEMPT: ${{ needs.release-admission.outputs.consumer_run_attempt }}
+          CONSUMER_JOB: ${{ needs.release-admission.outputs.consumer_job }}
+          CHALLENGE_NONCE: ${{ needs.release-admission.outputs.challenge_nonce }}
+          PRE_PROBE: ${{ steps.staging.outputs.pre_probe }}
+          PRE_OBSERVED_AT: ${{ steps.staging.outputs.pre_observed_at }}
+          SCAN_STARTED_AT: ${{ steps.scan.outputs.scan_started_at }}
+          SCAN_FINISHED_AT: ${{ steps.scan.outputs.scan_finished_at }}
+          POST_PROBE: ${{ steps.post.outputs.post_probe }}
+          POST_OBSERVED_AT: ${{ steps.post.outputs.post_observed_at }}
+          ZAP_IMAGE: ghcr.io/zaproxy/zaproxy@sha256:8d387b1a63e3425beef4846e39719f5af2a787753af2d8b6558c6257d7a577a2
+        run: |
+          REQUEST_DIR="${RUNNER_TEMP}/dast-scan-request"
+          install -d -m 700 "$REQUEST_DIR"
+          DAST_SCAN_REQUEST="${REQUEST_DIR}/dast-scan-request.json"
+          REPORT_ARTIFACT_NAME="dast-scan-request-${CONSUMER_RUN_ID}-${CONSUMER_RUN_ATTEMPT}-${CHALLENGE_NONCE}"
+          RESULT="$(node ./scripts/dast-runtime-receipt-policy.mjs \
+            --policy governance/deployment-admission.json \
+            --artifactReceipt "$ARTIFACT_RECEIPT" \
+            --artifactReceiptSha256 "$ARTIFACT_RECEIPT_SHA256" \
+            --deploymentReceipt "$DEPLOYMENT_RECEIPT" \
+            --deploymentReceiptSha256 "$DEPLOYMENT_RECEIPT_SHA256" \
+            --providerMetadata "$TRUSTED_PROVIDER_METADATA" \
+            --providerMetadataSha256 "$TRUSTED_PROVIDER_METADATA_SHA256" \
+            --stagingReceipt "$STAGING_RECEIPT" \
+            --stagingReceiptSha256 "$STAGING_RECEIPT_SHA256" \
+            --preProbe "$PRE_PROBE" \
+            --preObservedAt "$PRE_OBSERVED_AT" \
+            --scanStartedAt "$SCAN_STARTED_AT" \
+            --scanFinishedAt "$SCAN_FINISHED_AT" \
+            --postProbe "$POST_PROBE" \
+            --postObservedAt "$POST_OBSERVED_AT" \
+            --repo "$GITHUB_REPOSITORY" \
+            --commit "$RELEASE_SHA" \
+            --tree "$RELEASE_TREE" \
+            --providerRunId "$TRUSTED_PROVIDER_RUN_ID" \
+            --providerRunAttempt "$TRUSTED_PROVIDER_RUN_ATTEMPT" \
+            --consumerRunId "$CONSUMER_RUN_ID" \
+            --consumerRunAttempt "$CONSUMER_RUN_ATTEMPT" \
+            --consumerJob "$CONSUMER_JOB" \
+            --challengeNonce "$CHALLENGE_NONCE" \
+            --runtimeIntentSha256 "$RUNTIME_INTENT_SHA256" \
             --zapImage "$ZAP_IMAGE" \
             --zapJson security/dast/zap-baseline.json \
             --zapHtml security/dast/zap-baseline.html \
             --zapXml security/dast/zap-baseline.xml \
+            --reportArtifactName "$REPORT_ARTIFACT_NAME" \
             --workflowPath .github/workflows/enterprise-infra.yml \
             --sourceRef "$GITHUB_REF" \
             --event "$GITHUB_EVENT_NAME" \
             --runId "$GITHUB_RUN_ID" \
             --runAttempt "$GITHUB_RUN_ATTEMPT" \
             --job dast-zap \
-            --receiptOutput "$DAST_RECEIPT")"
-          printf 'dast_receipt_sha256=%s\n' "$(printf '%s' "$RESULT" | jq -er '.dastReceiptSha256')" >> "$GITHUB_OUTPUT"
-      - name: Upload exact run-bound DAST receipt
+            --scanRequestOutput "$DAST_SCAN_REQUEST")"
+          test "$(printf '%s' "$RESULT" | jq -er '.status')" = PENDING-PROVIDER-ATTESTATION
+          install -m 600 security/dast/zap-baseline.json "$REQUEST_DIR/zap-baseline.json"
+          install -m 600 security/dast/zap-baseline.html "$REQUEST_DIR/zap-baseline.html"
+          install -m 600 security/dast/zap-baseline.xml "$REQUEST_DIR/zap-baseline.xml"
+          printf 'dast_scan_request_sha256=%s\n' "$(printf '%s' "$RESULT" | jq -er '.scanRequestSha256')" >> "$GITHUB_OUTPUT"
+          printf 'artifact_name=%s\n' "$REPORT_ARTIFACT_NAME" >> "$GITHUB_OUTPUT"
+          printf 'request_path=%s\n' "$DAST_SCAN_REQUEST" >> "$GITHUB_OUTPUT"
+      - name: Upload exact run-bound DAST request and raw reports
+        id: upload-request
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ${{ steps.request.outputs.artifact_name }}
+          path: ${{ runner.temp }}/dast-scan-request/
+          if-no-files-found: error
+          retention-days: 1
+      - name: Dispatch and authenticate independent post-scan DAST provider
+        id: dast-provider
+        env:
+          GH_TOKEN: ${{ secrets.TRUSTED_PROVIDER_TOKEN }}
+          DAST_SCAN_REQUEST_SHA256: ${{ steps.request.outputs.dast_scan_request_sha256 }}
+          DAST_SCAN_REQUEST_ARTIFACT: ${{ steps.request.outputs.artifact_name }}
+          DAST_REPORT_ARTIFACT_ID: ${{ steps.upload-request.outputs.artifact-id }}
+          DAST_REPORT_ARTIFACT_SHA256: ${{ steps.upload-request.outputs.artifact-digest }}
+          RELEASE_SHA: ${{ needs.release-admission.outputs.release_sha }}
+          RELEASE_TREE: ${{ needs.release-admission.outputs.release_tree }}
+          RUNTIME_INTENT_SHA256: ${{ needs.release-admission.outputs.runtime_intent_sha256 }}
+          CHALLENGE_NONCE: ${{ needs.release-admission.outputs.challenge_nonce }}
+        run: |
+          test -n "$GH_TOKEN"
+          CONFIG="$(node ./scripts/trusted-provider-run-policy.mjs --policy governance/deployment-admission.json)"
+          TRUSTED_REPOSITORY="$(printf '%s' "$CONFIG" | jq -er '.repository')"
+          TRUSTED_WORKFLOW_PATH="$(printf '%s' "$CONFIG" | jq -er '.workflowPath')"
+          TRUSTED_WORKFLOW_FILE="${TRUSTED_WORKFLOW_PATH##*/}"
+          TRUSTED_SOURCE_REF="$(printf '%s' "$CONFIG" | jq -er '.sourceRef')"
+          test "$TRUSTED_REPOSITORY" != "$GITHUB_REPOSITORY"
+          test "$TRUSTED_SOURCE_REF" = refs/heads/main
+          test "$(printf '%s' "$DAST_REPORT_ARTIFACT_SHA256" | grep -Ec '^[a-f0-9]{64}$')" -eq 1
+          PROVIDER_ARTIFACT_NAME="platform-trusted-dast-verification-${CHALLENGE_NONCE}"
+          /usr/local/bin/gh api --method POST \
+            "repos/${TRUSTED_REPOSITORY}/actions/workflows/${TRUSTED_WORKFLOW_FILE}/dispatches" \
+            -f ref=main \
+            -f "inputs[mode]=dast-countersign" \
+            -f "inputs[candidate_repository]=${GITHUB_REPOSITORY}" \
+            -f "inputs[candidate_commit_sha]=${RELEASE_SHA}" \
+            -f "inputs[candidate_tree_sha]=${RELEASE_TREE}" \
+            -f "inputs[consumer_run_id]=${GITHUB_RUN_ID}" \
+            -f "inputs[consumer_run_attempt]=${GITHUB_RUN_ATTEMPT}" \
+            -f "inputs[consumer_job]=deploy-vps" \
+            -f "inputs[consumer_workflow_path]=.github/workflows/enterprise-infra.yml" \
+            -f "inputs[consumer_workflow_sha]=${GITHUB_SHA}" \
+            -f "inputs[challenge_nonce]=${CHALLENGE_NONCE}" \
+            -f "inputs[runtime_intent_sha256]=${RUNTIME_INTENT_SHA256}" \
+            -f "inputs[dast_scan_request_artifact]=${DAST_SCAN_REQUEST_ARTIFACT}" \
+            -f "inputs[dast_report_artifact_id]=${DAST_REPORT_ARTIFACT_ID}" \
+            -f "inputs[dast_report_artifact_sha256]=${DAST_REPORT_ARTIFACT_SHA256}" \
+            -f "inputs[dast_scan_request_sha256]=${DAST_SCAN_REQUEST_SHA256}"
+          TRUSTED_RUN_ID=
+          TRUSTED_RUN_ATTEMPT=
+          TRUSTED_RUN_METADATA="${RUNNER_TEMP}/dast-provider-run.json"
+          for poll in $(seq 1 90); do
+            ARTIFACTS="$(/usr/local/bin/gh api "repos/${TRUSTED_REPOSITORY}/actions/artifacts?name=${PROVIDER_ARTIFACT_NAME}&per_page=100")"
+            mapfile -t RUN_IDS < <(printf '%s' "$ARTIFACTS" | jq -r --arg name "$PROVIDER_ARTIFACT_NAME" \
+              '.artifacts | map(select(.name == $name and .expired == false) | .workflow_run.id) | unique[]')
+            test "${#RUN_IDS[@]}" -le 1
+            if test "${#RUN_IDS[@]}" -eq 1; then
+              TRUSTED_RUN_ID="${RUN_IDS[0]}"
+              /usr/local/bin/gh api "repos/${TRUSTED_REPOSITORY}/actions/runs/${TRUSTED_RUN_ID}" > "$TRUSTED_RUN_METADATA"
+              if test "$(jq -r '.status' "$TRUSTED_RUN_METADATA")" = completed; then
+                TRUSTED_RUN_ATTEMPT="$(jq -er '.run_attempt' "$TRUSTED_RUN_METADATA")"
+                break
+              fi
+            fi
+            sleep 10
+          done
+          test -n "$TRUSTED_RUN_ID"
+          test -n "$TRUSTED_RUN_ATTEMPT"
+          RESULT="$(node ./scripts/trusted-provider-run-policy.mjs \
+            --policy governance/deployment-admission.json \
+            --metadata "$TRUSTED_RUN_METADATA" \
+            --runId "$TRUSTED_RUN_ID" \
+            --runAttempt "$TRUSTED_RUN_ATTEMPT")"
+          printf 'repository=%s\n' "$TRUSTED_REPOSITORY" >> "$GITHUB_OUTPUT"
+          printf 'run_id=%s\n' "$TRUSTED_RUN_ID" >> "$GITHUB_OUTPUT"
+          printf 'run_attempt=%s\n' "$TRUSTED_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
+          printf 'metadata=%s\n' "$TRUSTED_RUN_METADATA" >> "$GITHUB_OUTPUT"
+          printf 'metadata_sha256=%s\n' "$(printf '%s' "$RESULT" | jq -er '.metadataSha256')" >> "$GITHUB_OUTPUT"
+          printf 'artifact_name=%s\n' "$PROVIDER_ARTIFACT_NAME" >> "$GITHUB_OUTPUT"
+      - name: Download independent provider DAST receipt and Sigstore bundle
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ${{ steps.dast-provider.outputs.artifact_name }}
+          path: ${{ runner.temp }}/dast-provider-verification
+          run-id: ${{ steps.dast-provider.outputs.run_id }}
+          repository: ${{ steps.dast-provider.outputs.repository }}
+          github-token: ${{ secrets.TRUSTED_PROVIDER_TOKEN }}
+      - name: Verify provider-countersigned DAST receipt and exact reports
+        id: verify-provider
+        env:
+          ARTIFACT_RECEIPT: ${{ runner.temp }}/admitted-deployment-receipts/artifact-verification.json
+          ARTIFACT_RECEIPT_SHA256: ${{ needs.release-admission.outputs.artifact_receipt_sha256 }}
+          DEPLOYMENT_RECEIPT: ${{ runner.temp }}/admitted-deployment-receipts/trusted-deployment-admission.json
+          DEPLOYMENT_RECEIPT_SHA256: ${{ needs.release-admission.outputs.deployment_receipt_sha256 }}
+          STAGING_RECEIPT: ${{ runner.temp }}/admitted-deployment-receipts/trusted-staging-deployment.json
+          STAGING_RECEIPT_SHA256: ${{ needs.release-admission.outputs.staging_receipt_sha256 }}
+          TRUSTED_PROVIDER_METADATA: ${{ runner.temp }}/admitted-deployment-receipts/trusted-provider-run.json
+          TRUSTED_PROVIDER_METADATA_SHA256: ${{ needs.release-admission.outputs.trusted_provider_metadata_sha256 }}
+          TRUSTED_PROVIDER_RUN_ID: ${{ needs.release-admission.outputs.trusted_provider_run_id }}
+          TRUSTED_PROVIDER_RUN_ATTEMPT: ${{ needs.release-admission.outputs.trusted_provider_run_attempt }}
+          DAST_SCAN_REQUEST: ${{ steps.request.outputs.request_path }}
+          DAST_SCAN_REQUEST_SHA256: ${{ steps.request.outputs.dast_scan_request_sha256 }}
+          DAST_REPORT_ARTIFACT_ID: ${{ steps.upload-request.outputs.artifact-id }}
+          DAST_REPORT_ARTIFACT_SHA256: ${{ steps.upload-request.outputs.artifact-digest }}
+          DAST_PROVIDER_METADATA: ${{ steps.dast-provider.outputs.metadata }}
+          DAST_PROVIDER_METADATA_SHA256: ${{ steps.dast-provider.outputs.metadata_sha256 }}
+          DAST_PROVIDER_RUN_ID: ${{ steps.dast-provider.outputs.run_id }}
+          DAST_PROVIDER_RUN_ATTEMPT: ${{ steps.dast-provider.outputs.run_attempt }}
+          RELEASE_SHA: ${{ needs.release-admission.outputs.release_sha }}
+          RELEASE_TREE: ${{ needs.release-admission.outputs.release_tree }}
+          RUNTIME_INTENT_SHA256: ${{ needs.release-admission.outputs.runtime_intent_sha256 }}
+          CONSUMER_RUN_ID: ${{ needs.release-admission.outputs.consumer_run_id }}
+          CONSUMER_RUN_ATTEMPT: ${{ needs.release-admission.outputs.consumer_run_attempt }}
+          CONSUMER_JOB: ${{ needs.release-admission.outputs.consumer_job }}
+          CHALLENGE_NONCE: ${{ needs.release-admission.outputs.challenge_nonce }}
+        run: |
+          mapfile -t DAST_RECEIPTS < <(find "${RUNNER_TEMP}/dast-provider-verification" -type f -name dast-provider-verification.json -print)
+          mapfile -t DAST_BUNDLES < <(find "${RUNNER_TEMP}/dast-provider-verification" -type f -name dast-provider-attestation.bundle.jsonl -print)
+          test "${#DAST_RECEIPTS[@]}" -eq 1
+          test "${#DAST_BUNDLES[@]}" -eq 1
+          DAST_RECEIPT="${DAST_RECEIPTS[0]}"
+          DAST_BUNDLE="${DAST_BUNDLES[0]}"
+          DAST_RECEIPT_SHA256="$(sha256sum "$DAST_RECEIPT" | awk '{print $1}')"
+          DAST_BUNDLE_SHA256="$(sha256sum "$DAST_BUNDLE" | awk '{print $1}')"
+          node ./scripts/dast-runtime-receipt-policy.mjs \
+            --policy governance/deployment-admission.json \
+            --artifactReceipt "$ARTIFACT_RECEIPT" \
+            --artifactReceiptSha256 "$ARTIFACT_RECEIPT_SHA256" \
+            --deploymentReceipt "$DEPLOYMENT_RECEIPT" \
+            --deploymentReceiptSha256 "$DEPLOYMENT_RECEIPT_SHA256" \
+            --providerMetadata "$TRUSTED_PROVIDER_METADATA" \
+            --providerMetadataSha256 "$TRUSTED_PROVIDER_METADATA_SHA256" \
+            --stagingReceipt "$STAGING_RECEIPT" \
+            --stagingReceiptSha256 "$STAGING_RECEIPT_SHA256" \
+            --scanRequest "$DAST_SCAN_REQUEST" \
+            --scanRequestSha256 "$DAST_SCAN_REQUEST_SHA256" \
+            --reportArtifactId "$DAST_REPORT_ARTIFACT_ID" \
+            --reportArtifactSha256 "$DAST_REPORT_ARTIFACT_SHA256" \
+            --dastReceipt "$DAST_RECEIPT" \
+            --dastReceiptSha256 "$DAST_RECEIPT_SHA256" \
+            --dastProviderMetadata "$DAST_PROVIDER_METADATA" \
+            --dastProviderMetadataSha256 "$DAST_PROVIDER_METADATA_SHA256" \
+            --dastProviderRunId "$DAST_PROVIDER_RUN_ID" \
+            --dastProviderRunAttempt "$DAST_PROVIDER_RUN_ATTEMPT" \
+            --dastAttestationBundle "$DAST_BUNDLE" \
+            --dastAttestationBundleSha256 "$DAST_BUNDLE_SHA256" \
+            --attestationVerifier /usr/local/bin/gh \
+            --repo "$GITHUB_REPOSITORY" \
+            --commit "$RELEASE_SHA" \
+            --tree "$RELEASE_TREE" \
+            --providerRunId "$TRUSTED_PROVIDER_RUN_ID" \
+            --providerRunAttempt "$TRUSTED_PROVIDER_RUN_ATTEMPT" \
+            --consumerRunId "$CONSUMER_RUN_ID" \
+            --consumerRunAttempt "$CONSUMER_RUN_ATTEMPT" \
+            --consumerJob "$CONSUMER_JOB" \
+            --challengeNonce "$CHALLENGE_NONCE" \
+            --runtimeIntentSha256 "$RUNTIME_INTENT_SHA256" \
+            --workflowPath .github/workflows/enterprise-infra.yml \
+            --sourceRef "$GITHUB_REF" \
+            --event "$GITHUB_EVENT_NAME" \
+            --runId "$GITHUB_RUN_ID" \
+            --runAttempt "$GITHUB_RUN_ATTEMPT" \
+            --job dast-zap
+          FINAL_DIR="${RUNNER_TEMP}/dast-verification"
+          install -d -m 700 "$FINAL_DIR"
+          install -m 600 "$DAST_SCAN_REQUEST" "$FINAL_DIR/dast-scan-request.json"
+          install -m 600 "$DAST_RECEIPT" "$FINAL_DIR/dast-provider-verification.json"
+          install -m 600 "$DAST_PROVIDER_METADATA" "$FINAL_DIR/dast-provider-run.json"
+          install -m 600 "$DAST_BUNDLE" "$FINAL_DIR/dast-provider-attestation.bundle.jsonl"
+          install -m 600 "${RUNNER_TEMP}/gh_2.93.0_linux_amd64.tar.gz" "$FINAL_DIR/gh_2.93.0_linux_amd64.tar.gz"
+          printf 'dast_receipt_sha256=%s\n' "$DAST_RECEIPT_SHA256" >> "$GITHUB_OUTPUT"
+          printf 'dast_provider_metadata_sha256=%s\n' "$DAST_PROVIDER_METADATA_SHA256" >> "$GITHUB_OUTPUT"
+          printf 'dast_attestation_bundle_sha256=%s\n' "$DAST_BUNDLE_SHA256" >> "$GITHUB_OUTPUT"
+      - name: Upload cryptographically verified run-bound DAST handoff
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: dast-verification-${{ github.run_id }}
-          path: ${{ runner.temp }}/dast-verification/dast-verification.json
-          if-no-files-found: error
-          retention-days: 1
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        if: always()
-        with:
-          name: dast-admission-${{ github.run_id }}
-          path: ${{ runner.temp }}/dast-admission/dast-admission.json
+          path: ${{ runner.temp }}/dast-verification/
           if-no-files-found: error
           retention-days: 1
       - name: Upload DAST report evidence
@@ -546,9 +766,14 @@ jobs:
       artifact_receipt_sha256: ${{ steps.artifacts.outputs.artifact_receipt_sha256 }}
       deployment_receipt_sha256: ${{ steps.artifacts.outputs.deployment_receipt_sha256 }}
       staging_receipt_sha256: ${{ steps.artifacts.outputs.staging_receipt_sha256 }}
+      runtime_intent_sha256: ${{ steps.artifacts.outputs.runtime_intent_sha256 }}
       trusted_provider_run_id: ${{ steps.provider.outputs.run_id }}
       trusted_provider_run_attempt: ${{ steps.provider.outputs.run_attempt }}
       trusted_provider_metadata_sha256: ${{ steps.provider.outputs.metadata_sha256 }}
+      consumer_run_id: ${{ github.run_id }}
+      consumer_run_attempt: ${{ github.run_attempt }}
+      consumer_job: deploy-vps
+      challenge_nonce: ${{ steps.challenge.outputs.challenge_nonce }}
     steps:
       - name: Checkout exact protected-main candidate
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
@@ -592,18 +817,79 @@ jobs:
             .head_branch == "main" and .head_sha == $sha and
             .event == "workflow_dispatch" and .status == "completed" and .conclusion == "success"
           ' "$RELEASE_RUN_METADATA" >/dev/null
-      - name: Authenticate configured trusted-provider run
+      - name: Generate current deploy-consumer challenge
+        id: challenge
+        env:
+          RELEASE_SHA: ${{ steps.bind.outputs.release_sha }}
+          RELEASE_TREE: ${{ steps.bind.outputs.release_tree }}
+        run: |
+          install -d -m 700 "${RUNNER_TEMP}/deploy-consumer-challenge"
+          CHALLENGE_FILE="${RUNNER_TEMP}/deploy-consumer-challenge/challenge.json"
+          RESULT="$(node ./scripts/dast-runtime-receipt-policy.mjs \
+            --repo "$GITHUB_REPOSITORY" \
+            --consumerRunId "$GITHUB_RUN_ID" \
+            --consumerRunAttempt "$GITHUB_RUN_ATTEMPT" \
+            --consumerJob deploy-vps \
+            --challengeOutput "$CHALLENGE_FILE")"
+          test "$(sha256sum "$CHALLENGE_FILE" | awk '{print $1}')" = "$(printf '%s' "$RESULT" | jq -er '.challengeSha256')"
+          printf 'challenge_nonce=%s\n' "$(printf '%s' "$RESULT" | jq -er '.challengeNonce')" >> "$GITHUB_OUTPUT"
+          printf 'challenge_file=%s\n' "$CHALLENGE_FILE" >> "$GITHUB_OUTPUT"
+      - name: Dispatch and authenticate independent trusted-provider run
         id: provider
         env:
-          GH_TOKEN: ${{ github.token }}
-          TRUSTED_RUN_ID: ${{ inputs.trusted_admission_run_id }}
-          TRUSTED_RUN_ATTEMPT: ${{ inputs.trusted_admission_run_attempt }}
+          GH_TOKEN: ${{ secrets.TRUSTED_PROVIDER_TOKEN }}
+          APPROVED_SHA: ${{ inputs.approved_sha }}
+          RELEASE_TREE: ${{ steps.bind.outputs.release_tree }}
+          RELEASE_ATTESTATION_RUN_ID: ${{ inputs.release_attestation_run_id }}
+          RELEASE_ATTESTATION_RUN_ATTEMPT: ${{ inputs.release_attestation_run_attempt }}
+          RELEASE_MANIFEST_SHA256: ${{ inputs.release_manifest_sha256 }}
+          ARTIFACT_RECEIPT_SHA256: ${{ inputs.artifact_receipt_sha256 }}
+          CHALLENGE_NONCE: ${{ steps.challenge.outputs.challenge_nonce }}
         run: |
-          case "$TRUSTED_RUN_ID:$TRUSTED_RUN_ATTEMPT" in *[!0-9:]*|:*|*:) exit 1 ;; esac
+          test -n "$GH_TOKEN"
           CONFIG="$(node ./scripts/trusted-provider-run-policy.mjs --policy governance/deployment-admission.json)"
           TRUSTED_REPOSITORY="$(printf '%s' "$CONFIG" | jq -er '.repository')"
+          TRUSTED_WORKFLOW_PATH="$(printf '%s' "$CONFIG" | jq -er '.workflowPath')"
+          TRUSTED_WORKFLOW_FILE="${TRUSTED_WORKFLOW_PATH##*/}"
+          TRUSTED_SOURCE_REF="$(printf '%s' "$CONFIG" | jq -er '.sourceRef')"
+          test "$TRUSTED_REPOSITORY" != "$GITHUB_REPOSITORY"
+          test "$TRUSTED_SOURCE_REF" = refs/heads/main
+          ARTIFACT_NAME="platform-trusted-deployment-admission-${CHALLENGE_NONCE}"
+          /usr/local/bin/gh api --method POST \
+            "repos/${TRUSTED_REPOSITORY}/actions/workflows/${TRUSTED_WORKFLOW_FILE}/dispatches" \
+            -f ref=main \
+            -f "inputs[candidate_repository]=${GITHUB_REPOSITORY}" \
+            -f "inputs[candidate_commit_sha]=${APPROVED_SHA}" \
+            -f "inputs[candidate_tree_sha]=${RELEASE_TREE}" \
+            -f "inputs[release_attestation_run_id]=${RELEASE_ATTESTATION_RUN_ID}" \
+            -f "inputs[release_attestation_run_attempt]=${RELEASE_ATTESTATION_RUN_ATTEMPT}" \
+            -f "inputs[release_manifest_sha256]=${RELEASE_MANIFEST_SHA256}" \
+            -f "inputs[artifact_receipt_sha256]=${ARTIFACT_RECEIPT_SHA256}" \
+            -f "inputs[consumer_repository]=${GITHUB_REPOSITORY}" \
+            -f "inputs[consumer_run_id]=${GITHUB_RUN_ID}" \
+            -f "inputs[consumer_run_attempt]=${GITHUB_RUN_ATTEMPT}" \
+            -f "inputs[consumer_job]=deploy-vps" \
+            -f "inputs[challenge_nonce]=${CHALLENGE_NONCE}"
+          TRUSTED_RUN_ID=
+          TRUSTED_RUN_ATTEMPT=
           TRUSTED_RUN_METADATA="${RUNNER_TEMP}/trusted-provider-run.json"
-          /usr/local/bin/gh api "repos/${TRUSTED_REPOSITORY}/actions/runs/${TRUSTED_RUN_ID}" > "$TRUSTED_RUN_METADATA"
+          for poll in $(seq 1 90); do
+            ARTIFACTS="$(/usr/local/bin/gh api "repos/${TRUSTED_REPOSITORY}/actions/artifacts?name=${ARTIFACT_NAME}&per_page=100")"
+            mapfile -t RUN_IDS < <(printf '%s' "$ARTIFACTS" | jq -r --arg name "$ARTIFACT_NAME" \
+              '.artifacts | map(select(.name == $name and .expired == false) | .workflow_run.id) | unique[]')
+            test "${#RUN_IDS[@]}" -le 1
+            if test "${#RUN_IDS[@]}" -eq 1; then
+              TRUSTED_RUN_ID="${RUN_IDS[0]}"
+              /usr/local/bin/gh api "repos/${TRUSTED_REPOSITORY}/actions/runs/${TRUSTED_RUN_ID}" > "$TRUSTED_RUN_METADATA"
+              if test "$(jq -r '.status' "$TRUSTED_RUN_METADATA")" = completed; then
+                TRUSTED_RUN_ATTEMPT="$(jq -er '.run_attempt' "$TRUSTED_RUN_METADATA")"
+                break
+              fi
+            fi
+            sleep 10
+          done
+          test -n "$TRUSTED_RUN_ID"
+          test -n "$TRUSTED_RUN_ATTEMPT"
           RESULT="$(node ./scripts/trusted-provider-run-policy.mjs \
             --policy governance/deployment-admission.json \
             --metadata "$TRUSTED_RUN_METADATA" \
@@ -614,6 +900,7 @@ jobs:
           printf 'run_attempt=%s\n' "$TRUSTED_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
           printf 'metadata=%s\n' "$TRUSTED_RUN_METADATA" >> "$GITHUB_OUTPUT"
           printf 'metadata_sha256=%s\n' "$(printf '%s' "$RESULT" | jq -er '.metadataSha256')" >> "$GITHUB_OUTPUT"
+          printf 'artifact_name=%s\n' "$ARTIFACT_NAME" >> "$GITHUB_OUTPUT"
       - name: Download exact release-attestation evidence
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -624,11 +911,11 @@ jobs:
       - name: Download trusted-provider admission receipt
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: platform-trusted-deployment-admission
+          name: ${{ steps.provider.outputs.artifact_name }}
           path: ${{ runner.temp }}/trusted-admission
-          run-id: ${{ inputs.trusted_admission_run_id }}
+          run-id: ${{ steps.provider.outputs.run_id }}
           repository: ${{ steps.provider.outputs.repository }}
-          github-token: ${{ github.token }}
+          github-token: ${{ secrets.TRUSTED_PROVIDER_TOKEN }}
       - name: Select one manifest, SBOM, registry and receipt evidence set
         id: artifacts
         env:
@@ -636,19 +923,13 @@ jobs:
           TRUSTED_ADMISSION_DIR: ${{ runner.temp }}/trusted-admission
           EXPECTED_MANIFEST_SHA256: ${{ inputs.release_manifest_sha256 }}
           EXPECTED_ARTIFACT_RECEIPT_SHA256: ${{ inputs.artifact_receipt_sha256 }}
-          EXPECTED_DEPLOYMENT_RECEIPT_SHA256: ${{ inputs.deployment_receipt_sha256 }}
-          EXPECTED_STAGING_RECEIPT_SHA256: ${{ inputs.staging_receipt_sha256 }}
           EXPECTED_RELEASE_RUN_ID: ${{ inputs.release_attestation_run_id }}
           APPROVED_SHA: ${{ inputs.approved_sha }}
         run: |
           case "$EXPECTED_MANIFEST_SHA256" in *[!a-f0-9]*|'') exit 1 ;; esac
           case "$EXPECTED_ARTIFACT_RECEIPT_SHA256" in *[!a-f0-9]*|'') exit 1 ;; esac
-          case "$EXPECTED_DEPLOYMENT_RECEIPT_SHA256" in *[!a-f0-9]*|'') exit 1 ;; esac
-          case "$EXPECTED_STAGING_RECEIPT_SHA256" in *[!a-f0-9]*|'') exit 1 ;; esac
           test "${#EXPECTED_MANIFEST_SHA256}" -eq 64
           test "${#EXPECTED_ARTIFACT_RECEIPT_SHA256}" -eq 64
-          test "${#EXPECTED_DEPLOYMENT_RECEIPT_SHA256}" -eq 64
-          test "${#EXPECTED_STAGING_RECEIPT_SHA256}" -eq 64
           mapfile -t manifests < <(find "$CANDIDATE_DIR" -type f -name 'release-subjects-*.json' -print)
           mapfile -t source_archives < <(find "$CANDIDATE_DIR" -type f -name 'source-archive-*.tar' -print)
           mapfile -t sboms < <(find "$CANDIDATE_DIR" -type f -name 'github-release-sbom-*.cdx.json' -print)
@@ -665,11 +946,13 @@ jobs:
           test "${#staging_receipts[@]}" -eq 1
           test "$(sha256sum "${manifests[0]}" | awk '{print $1}')" = "$EXPECTED_MANIFEST_SHA256"
           test "$(sha256sum "${artifact_receipts[0]}" | awk '{print $1}')" = "$EXPECTED_ARTIFACT_RECEIPT_SHA256"
-          test "$(sha256sum "${deployment_receipts[0]}" | awk '{print $1}')" = "$EXPECTED_DEPLOYMENT_RECEIPT_SHA256"
+          DEPLOYMENT_RECEIPT_SHA256="$(sha256sum "${deployment_receipts[0]}" | awk '{print $1}')"
+          STAGING_RECEIPT_SHA256="$(sha256sum "${staging_receipts[0]}" | awk '{print $1}')"
+          RUNTIME_INTENT_SHA256="$(jq -er '.runtimeIntentSha256 | select(test("^[a-f0-9]{64}$"))' "${staging_receipts[0]}")"
           SOURCE_ARCHIVE_SHA256="$(sha256sum "${source_archives[0]}" | awk '{print $1}')"
           test "$(jq -r '.sourceArchiveSha256' "${artifact_receipts[0]}")" = "$SOURCE_ARCHIVE_SHA256"
           test "$(jq -r '.sourceArchiveSha256' "${deployment_receipts[0]}")" = "$SOURCE_ARCHIVE_SHA256"
-          test "$(sha256sum "${staging_receipts[0]}" | awk '{print $1}')" = "$EXPECTED_STAGING_RECEIPT_SHA256"
+          test "$(jq -r '.deploymentAdmissionReceiptSha256' "${staging_receipts[0]}")" = "$DEPLOYMENT_RECEIPT_SHA256"
           test "$(jq -r '.repository' "${manifests[0]}")" = "$GITHUB_REPOSITORY"
           test "$(jq -r '.commitSha' "${manifests[0]}")" = "$APPROVED_SHA"
           test "$(jq -r '.workflowRunId' "${manifests[0]}")" = "$EXPECTED_RELEASE_RUN_ID"
@@ -683,8 +966,9 @@ jobs:
           printf 'deployment_receipt=%s\n' "${deployment_receipts[0]}" >> "$GITHUB_OUTPUT"
           printf 'staging_receipt=%s\n' "${staging_receipts[0]}" >> "$GITHUB_OUTPUT"
           printf 'artifact_receipt_sha256=%s\n' "$EXPECTED_ARTIFACT_RECEIPT_SHA256" >> "$GITHUB_OUTPUT"
-          printf 'deployment_receipt_sha256=%s\n' "$EXPECTED_DEPLOYMENT_RECEIPT_SHA256" >> "$GITHUB_OUTPUT"
-          printf 'staging_receipt_sha256=%s\n' "$EXPECTED_STAGING_RECEIPT_SHA256" >> "$GITHUB_OUTPUT"
+          printf 'deployment_receipt_sha256=%s\n' "$DEPLOYMENT_RECEIPT_SHA256" >> "$GITHUB_OUTPUT"
+          printf 'staging_receipt_sha256=%s\n' "$STAGING_RECEIPT_SHA256" >> "$GITHUB_OUTPUT"
+          printf 'runtime_intent_sha256=%s\n' "$RUNTIME_INTENT_SHA256" >> "$GITHUB_OUTPUT"
       - name: Verify release subjects and trusted-provider deployment admission
         env:
           GH_TOKEN: ${{ github.token }}
@@ -700,11 +984,16 @@ jobs:
           DEPLOYMENT_RECEIPT_SHA256: ${{ steps.artifacts.outputs.deployment_receipt_sha256 }}
           STAGING_RECEIPT: ${{ steps.artifacts.outputs.staging_receipt }}
           STAGING_RECEIPT_SHA256: ${{ steps.artifacts.outputs.staging_receipt_sha256 }}
+          RUNTIME_INTENT_SHA256: ${{ steps.artifacts.outputs.runtime_intent_sha256 }}
           RELEASE_TREE: ${{ steps.bind.outputs.release_tree }}
           TRUSTED_PROVIDER_METADATA: ${{ steps.provider.outputs.metadata }}
           TRUSTED_PROVIDER_METADATA_SHA256: ${{ steps.provider.outputs.metadata_sha256 }}
           TRUSTED_PROVIDER_RUN_ID: ${{ steps.provider.outputs.run_id }}
           TRUSTED_PROVIDER_RUN_ATTEMPT: ${{ steps.provider.outputs.run_attempt }}
+          CONSUMER_RUN_ID: ${{ github.run_id }}
+          CONSUMER_RUN_ATTEMPT: ${{ github.run_attempt }}
+          CONSUMER_JOB: deploy-vps
+          CHALLENGE_NONCE: ${{ steps.challenge.outputs.challenge_nonce }}
         run: |
           REVERIFIED_ARTIFACT_RECEIPT="${RUNNER_TEMP}/reverified-artifact-verification.json"
           node ./scripts/infra-ops.mjs release-artifact-gate \
@@ -738,11 +1027,19 @@ jobs:
             --tree "$RELEASE_TREE" \
             --sourceArchiveSha256 "$RELEASE_SOURCE_ARCHIVE_SHA256" \
             --providerRunId "$TRUSTED_PROVIDER_RUN_ID" \
-            --providerRunAttempt "$TRUSTED_PROVIDER_RUN_ATTEMPT"
+            --providerRunAttempt "$TRUSTED_PROVIDER_RUN_ATTEMPT" \
+            --consumerRepository "$GITHUB_REPOSITORY" \
+            --consumerRunId "$CONSUMER_RUN_ID" \
+            --consumerRunAttempt "$CONSUMER_RUN_ATTEMPT" \
+            --consumerJob "$CONSUMER_JOB" \
+            --challengeNonce "$CHALLENGE_NONCE" \
+            --runtimeIntentSha256 "$RUNTIME_INTENT_SHA256"
           node ./scripts/dast-runtime-receipt-policy.mjs \
             --policy governance/deployment-admission.json \
             --artifactReceipt "$REVERIFIED_ARTIFACT_RECEIPT" \
             --artifactReceiptSha256 "$ARTIFACT_RECEIPT_SHA256" \
+            --deploymentReceipt "$DEPLOYMENT_RECEIPT" \
+            --deploymentReceiptSha256 "$DEPLOYMENT_RECEIPT_SHA256" \
             --providerMetadata "$TRUSTED_PROVIDER_METADATA" \
             --providerMetadataSha256 "$TRUSTED_PROVIDER_METADATA_SHA256" \
             --stagingReceipt "$STAGING_RECEIPT" \
@@ -751,7 +1048,12 @@ jobs:
             --commit "$APPROVED_SHA" \
             --tree "$RELEASE_TREE" \
             --providerRunId "$TRUSTED_PROVIDER_RUN_ID" \
-            --providerRunAttempt "$TRUSTED_PROVIDER_RUN_ATTEMPT"
+            --providerRunAttempt "$TRUSTED_PROVIDER_RUN_ATTEMPT" \
+            --consumerRunId "$CONSUMER_RUN_ID" \
+            --consumerRunAttempt "$CONSUMER_RUN_ATTEMPT" \
+            --consumerJob "$CONSUMER_JOB" \
+            --challengeNonce "$CHALLENGE_NONCE" \
+            --runtimeIntentSha256 "$RUNTIME_INTENT_SHA256"
           install -d -m 700 "${RUNNER_TEMP}/admitted-deployment-receipts"
           install -m 600 "$REVERIFIED_ARTIFACT_RECEIPT" "${RUNNER_TEMP}/admitted-deployment-receipts/artifact-verification.json"
           install -m 600 "$DEPLOYMENT_RECEIPT" "${RUNNER_TEMP}/admitted-deployment-receipts/trusted-deployment-admission.json"
@@ -797,11 +1099,11 @@ jobs:
         with:
           name: admitted-deployment-receipts-${{ github.run_id }}
           path: ${{ runner.temp }}/admitted-deployment-receipts
-      - name: Download exact run-bound DAST admission
+      - name: Download cryptographically verified run-bound DAST handoff
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: dast-admission-${{ github.run_id }}
-          path: ${{ runner.temp }}/dast-admission
+          name: dast-verification-${{ github.run_id }}
+          path: ${{ runner.temp }}/dast-verification
       - name: Load trusted post-DAST promoter policy
         id: promotion_config
         run: |
@@ -841,8 +1143,8 @@ jobs:
           PROMOTER_METADATA: ${{ steps.promoter.outputs.metadata }}
           PROMOTER_RUN_ID: ${{ steps.promoter.outputs.run_id }}
           PROMOTER_RUN_ATTEMPT: ${{ steps.promoter.outputs.run_attempt }}
-          DAST_RECEIPT: ${{ runner.temp }}/dast-admission/dast-admission.json
-          DAST_RECEIPT_SHA256: ${{ needs.dast-zap.outputs.receipt_sha256 }}
+          DAST_RECEIPT: ${{ runner.temp }}/dast-verification/dast-provider-verification.json
+          DAST_RECEIPT_SHA256: ${{ needs.dast-zap.outputs.dast_receipt_sha256 }}
         run: |
           test "$(sha256sum "$DAST_RECEIPT" | awk '{print $1}')" = "$DAST_RECEIPT_SHA256"
           test -z "$(find "$PROMOTED" -mindepth 1 ! -type f -print -quit)"
@@ -866,11 +1168,12 @@ jobs:
             --providerRunId "$PROMOTER_RUN_ID" \
             --providerRunAttempt "$PROMOTER_RUN_ATTEMPT" > "$RESULT"
           printf 'result=%s\n' "$RESULT" >> "$GITHUB_OUTPUT"
-      - name: Download exact run-bound DAST receipt
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: dast-verification-${{ github.run_id }}
-          path: ${{ runner.temp }}/dast-verification
+      - name: Install and compare checksum-pinned DAST attestation verifier
+        env:
+          GH_VERIFIER_ARCHIVE_OUTPUT: ${{ runner.temp }}/installed-gh_2.93.0_linux_amd64.tar.gz
+        run: |
+          sh ./scripts/install-gh-attestation-verifier.sh
+          cmp -- "$GH_VERIFIER_ARCHIVE_OUTPUT" "${RUNNER_TEMP}/dast-verification/gh_2.93.0_linux_amd64.tar.gz"
       - name: Revalidate deployment receipt handoff
         env:
           ARTIFACT_RECEIPT: ${{ runner.temp }}/admitted-deployment-receipts/artifact-verification.json
@@ -878,17 +1181,32 @@ jobs:
           SOURCE_ARCHIVE: ${{ runner.temp }}/admitted-deployment-receipts/exact-source-archive.tar
           SOURCE_ARCHIVE_SHA256: ${{ needs.release-admission.outputs.source_archive_sha256 }}
           STAGING_RECEIPT: ${{ runner.temp }}/admitted-deployment-receipts/trusted-staging-deployment.json
-          DAST_RECEIPT: ${{ runner.temp }}/dast-verification/dast-verification.json
+          DAST_SCAN_REQUEST: ${{ runner.temp }}/dast-verification/dast-scan-request.json
+          DAST_RECEIPT: ${{ runner.temp }}/dast-verification/dast-provider-verification.json
+          DAST_PROVIDER_METADATA: ${{ runner.temp }}/dast-verification/dast-provider-run.json
+          DAST_ATTESTATION_BUNDLE: ${{ runner.temp }}/dast-verification/dast-provider-attestation.bundle.jsonl
           ARTIFACT_RECEIPT_SHA256: ${{ needs.release-admission.outputs.artifact_receipt_sha256 }}
           DEPLOYMENT_RECEIPT_SHA256: ${{ needs.release-admission.outputs.deployment_receipt_sha256 }}
           STAGING_RECEIPT_SHA256: ${{ needs.release-admission.outputs.staging_receipt_sha256 }}
+          DAST_SCAN_REQUEST_SHA256: ${{ needs.dast-zap.outputs.dast_scan_request_sha256 }}
+          DAST_REPORT_ARTIFACT_ID: ${{ needs.dast-zap.outputs.dast_report_artifact_id }}
+          DAST_REPORT_ARTIFACT_SHA256: ${{ needs.dast-zap.outputs.dast_report_artifact_sha256 }}
           DAST_RECEIPT_SHA256: ${{ needs.dast-zap.outputs.dast_receipt_sha256 }}
+          DAST_PROVIDER_METADATA_SHA256: ${{ needs.dast-zap.outputs.dast_provider_metadata_sha256 }}
+          DAST_PROVIDER_RUN_ID: ${{ needs.dast-zap.outputs.dast_provider_run_id }}
+          DAST_PROVIDER_RUN_ATTEMPT: ${{ needs.dast-zap.outputs.dast_provider_run_attempt }}
+          DAST_ATTESTATION_BUNDLE_SHA256: ${{ needs.dast-zap.outputs.dast_attestation_bundle_sha256 }}
           RELEASE_SHA: ${{ needs.release-admission.outputs.release_sha }}
           RELEASE_TREE: ${{ needs.release-admission.outputs.release_tree }}
+          RUNTIME_INTENT_SHA256: ${{ needs.release-admission.outputs.runtime_intent_sha256 }}
           TRUSTED_PROVIDER_METADATA: ${{ runner.temp }}/admitted-deployment-receipts/trusted-provider-run.json
           TRUSTED_PROVIDER_METADATA_SHA256: ${{ needs.release-admission.outputs.trusted_provider_metadata_sha256 }}
           TRUSTED_PROVIDER_RUN_ID: ${{ needs.release-admission.outputs.trusted_provider_run_id }}
           TRUSTED_PROVIDER_RUN_ATTEMPT: ${{ needs.release-admission.outputs.trusted_provider_run_attempt }}
+          CONSUMER_RUN_ID: ${{ needs.release-admission.outputs.consumer_run_id }}
+          CONSUMER_RUN_ATTEMPT: ${{ needs.release-admission.outputs.consumer_run_attempt }}
+          CONSUMER_JOB: ${{ needs.release-admission.outputs.consumer_job }}
+          CHALLENGE_NONCE: ${{ needs.release-admission.outputs.challenge_nonce }}
         run: |
           test "$(sha256sum "$SOURCE_ARCHIVE" | awk '{print $1}')" = "$SOURCE_ARCHIVE_SHA256"
           test "$(jq -r '.sourceArchiveSha256' "$ARTIFACT_RECEIPT")" = "$SOURCE_ARCHIVE_SHA256"
@@ -912,22 +1230,46 @@ jobs:
             --tree "$RELEASE_TREE" \
             --sourceArchiveSha256 "$SOURCE_ARCHIVE_SHA256" \
             --providerRunId "$TRUSTED_PROVIDER_RUN_ID" \
-            --providerRunAttempt "$TRUSTED_PROVIDER_RUN_ATTEMPT"
+            --providerRunAttempt "$TRUSTED_PROVIDER_RUN_ATTEMPT" \
+            --consumerRepository "$GITHUB_REPOSITORY" \
+            --consumerRunId "$CONSUMER_RUN_ID" \
+            --consumerRunAttempt "$CONSUMER_RUN_ATTEMPT" \
+            --consumerJob "$CONSUMER_JOB" \
+            --challengeNonce "$CHALLENGE_NONCE" \
+            --runtimeIntentSha256 "$RUNTIME_INTENT_SHA256"
           node ./scripts/dast-runtime-receipt-policy.mjs \
             --policy governance/deployment-admission.json \
             --artifactReceipt "$ARTIFACT_RECEIPT" \
             --artifactReceiptSha256 "$ARTIFACT_RECEIPT_SHA256" \
+            --deploymentReceipt "$DEPLOYMENT_RECEIPT" \
+            --deploymentReceiptSha256 "$DEPLOYMENT_RECEIPT_SHA256" \
             --providerMetadata "$TRUSTED_PROVIDER_METADATA" \
             --providerMetadataSha256 "$TRUSTED_PROVIDER_METADATA_SHA256" \
             --stagingReceipt "$STAGING_RECEIPT" \
             --stagingReceiptSha256 "$STAGING_RECEIPT_SHA256" \
+            --scanRequest "$DAST_SCAN_REQUEST" \
+            --scanRequestSha256 "$DAST_SCAN_REQUEST_SHA256" \
+            --reportArtifactId "$DAST_REPORT_ARTIFACT_ID" \
+            --reportArtifactSha256 "$DAST_REPORT_ARTIFACT_SHA256" \
             --dastReceipt "$DAST_RECEIPT" \
             --dastReceiptSha256 "$DAST_RECEIPT_SHA256" \
+            --dastProviderMetadata "$DAST_PROVIDER_METADATA" \
+            --dastProviderMetadataSha256 "$DAST_PROVIDER_METADATA_SHA256" \
+            --dastProviderRunId "$DAST_PROVIDER_RUN_ID" \
+            --dastProviderRunAttempt "$DAST_PROVIDER_RUN_ATTEMPT" \
+            --dastAttestationBundle "$DAST_ATTESTATION_BUNDLE" \
+            --dastAttestationBundleSha256 "$DAST_ATTESTATION_BUNDLE_SHA256" \
+            --attestationVerifier /usr/local/bin/gh \
             --repo "$GITHUB_REPOSITORY" \
             --commit "$RELEASE_SHA" \
             --tree "$RELEASE_TREE" \
             --providerRunId "$TRUSTED_PROVIDER_RUN_ID" \
             --providerRunAttempt "$TRUSTED_PROVIDER_RUN_ATTEMPT" \
+            --consumerRunId "$CONSUMER_RUN_ID" \
+            --consumerRunAttempt "$CONSUMER_RUN_ATTEMPT" \
+            --consumerJob "$CONSUMER_JOB" \
+            --challengeNonce "$CHALLENGE_NONCE" \
+            --runtimeIntentSha256 "$RUNTIME_INTENT_SHA256" \
             --workflowPath .github/workflows/enterprise-infra.yml \
             --sourceRef "$GITHUB_REF" \
             --event "$GITHUB_EVENT_NAME" \
@@ -969,12 +1311,26 @@ jobs:
           DEPLOY_ARTIFACT_RECEIPT_SHA256: ${{ needs.release-admission.outputs.artifact_receipt_sha256 }}
           DEPLOY_ADMISSION_RECEIPT_PATH: ${{ runner.temp }}/admitted-deployment-receipts/trusted-deployment-admission.json
           DEPLOY_ADMISSION_RECEIPT_SHA256: ${{ needs.release-admission.outputs.deployment_receipt_sha256 }}
+          DEPLOY_STAGING_RECEIPT_PATH: ${{ runner.temp }}/admitted-deployment-receipts/trusted-staging-deployment.json
+          DEPLOY_STAGING_RECEIPT_SHA256: ${{ needs.release-admission.outputs.staging_receipt_sha256 }}
+          DEPLOY_DAST_SCAN_REQUEST_PATH: ${{ runner.temp }}/dast-verification/dast-scan-request.json
+          DEPLOY_DAST_SCAN_REQUEST_SHA256: ${{ needs.dast-zap.outputs.dast_scan_request_sha256 }}
+          DEPLOY_DAST_REPORT_ARTIFACT_ID: ${{ needs.dast-zap.outputs.dast_report_artifact_id }}
+          DEPLOY_DAST_REPORT_ARTIFACT_SHA256: ${{ needs.dast-zap.outputs.dast_report_artifact_sha256 }}
+          DEPLOY_DAST_RECEIPT_PATH: ${{ runner.temp }}/dast-verification/dast-provider-verification.json
+          DEPLOY_DAST_RECEIPT_SHA256: ${{ needs.dast-zap.outputs.dast_receipt_sha256 }}
+          DEPLOY_DAST_PROVIDER_METADATA_PATH: ${{ runner.temp }}/dast-verification/dast-provider-run.json
+          DEPLOY_DAST_PROVIDER_METADATA_SHA256: ${{ needs.dast-zap.outputs.dast_provider_metadata_sha256 }}
+          DEPLOY_DAST_PROVIDER_RUN_ID: ${{ needs.dast-zap.outputs.dast_provider_run_id }}
+          DEPLOY_DAST_PROVIDER_RUN_ATTEMPT: ${{ needs.dast-zap.outputs.dast_provider_run_attempt }}
+          DEPLOY_DAST_ATTESTATION_BUNDLE_PATH: ${{ runner.temp }}/dast-verification/dast-provider-attestation.bundle.jsonl
+          DEPLOY_DAST_ATTESTATION_BUNDLE_SHA256: ${{ needs.dast-zap.outputs.dast_attestation_bundle_sha256 }}
+          DEPLOY_GH_VERIFIER_ARCHIVE_PATH: ${{ runner.temp }}/dast-verification/gh_2.93.0_linux_amd64.tar.gz
+          DEPLOY_RUNTIME_INTENT_SHA256: ${{ needs.release-admission.outputs.runtime_intent_sha256 }}
           DEPLOY_TRUSTED_PROVIDER_METADATA_PATH: ${{ runner.temp }}/admitted-deployment-receipts/trusted-provider-run.json
           DEPLOY_TRUSTED_PROVIDER_METADATA_SHA256: ${{ needs.release-admission.outputs.trusted_provider_metadata_sha256 }}
           DEPLOY_TRUSTED_PROVIDER_RUN_ID: ${{ needs.release-admission.outputs.trusted_provider_run_id }}
           DEPLOY_TRUSTED_PROVIDER_RUN_ATTEMPT: ${{ needs.release-admission.outputs.trusted_provider_run_attempt }}
-          DEPLOY_DAST_RECEIPT_PATH: ${{ runner.temp }}/dast-admission/dast-admission.json
-          DEPLOY_DAST_RECEIPT_SHA256: ${{ needs.dast-zap.outputs.receipt_sha256 }}
           DEPLOY_ACTIVATION_PROMOTION_RESULT: ${{ steps.promotion.outputs.result }}
         run: |
           PROMOTED="${RUNNER_TEMP}/promoted-activation"

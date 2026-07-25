@@ -10,6 +10,13 @@ const artifactReceiptSha256 = "c".repeat(64);
 const manifestSha256 = "d".repeat(64);
 const sbomSha256 = "e".repeat(64);
 const sourceArchiveSha256 = "0".repeat(64);
+const consumerChallenge = {
+  consumerRepository: repository,
+  consumerRunId: "7654321",
+  consumerRunAttempt: 1,
+  consumerJob: "deploy-vps",
+  challengeNonce: "9".repeat(64),
+};
 const generatedAt = "2026-07-21T00:00:00.000Z";
 const image = `ghcr.io/owner/app@sha256:${"f".repeat(64)}`;
 const schedulerImage = `ghcr.io/owner/platform-infrastructure-backup-scheduler@sha256:${"7".repeat(64)}`;
@@ -145,6 +152,7 @@ const deploymentReceipt = {
     runId: "123456",
     runAttempt: 2,
   },
+  consumerChallenge,
   opsRunner: {
     image: `ghcr.io/owner/platform-infrastructure-ops@sha256:${"5".repeat(64)}`,
     imageId: `sha256:${"6".repeat(64)}`,
@@ -183,6 +191,8 @@ const options = {
   policy, repository, commitSha, treeSha, artifactReceiptSha256, artifactReceipt,
   providerRunId: "123456", providerRunAttempt: "2",
   targetHost: "vps.example.internal", environmentSha256: runtimeIntent.environmentSha256,
+  consumerChallenge,
+  runtimeIntentSha256: deploymentReceipt.runtimeIntentSha256,
 };
 
 assert.equal(validateTrustedDeploymentReceipt(deploymentReceipt, options), deploymentReceipt);
@@ -197,6 +207,18 @@ assert.throws(() => validateTrustedDeploymentReceipt({
   ...deploymentReceipt, producer: { ...deploymentReceipt.producer, workflowPath: ".github/workflows/attacker.yml" },
 }, options), /producer identity/);
 assert.throws(() => validateTrustedDeploymentReceipt(deploymentReceipt, { ...options, providerRunAttempt: "1" }), /run identity/);
+assert.throws(() => validateTrustedDeploymentReceipt(deploymentReceipt, {
+  ...options,
+  consumerChallenge: { ...consumerChallenge, consumerRunId: "7654322" },
+}), /consumer challenge/);
+assert.throws(() => validateTrustedDeploymentReceipt(deploymentReceipt, {
+  ...options,
+  policy: { ...policy, trustedProducer: { ...policy.trustedProducer, repository } },
+}), /independent/);
+assert.throws(() => validateTrustedDeploymentReceipt(deploymentReceipt, {
+  ...options,
+  runtimeIntentSha256: "f".repeat(64),
+}), /runtime intent binding/);
 assert.throws(() => validateTrustedDeploymentReceipt({
   ...deploymentReceipt, opsRunner: { ...deploymentReceipt.opsRunner, image: `ghcr.io/owner/attacker@sha256:${"5".repeat(64)}` },
 }, options), /ops image/);
@@ -235,4 +257,4 @@ assert.throws(() => validateTrustedDeploymentReceipt(deploymentReceipt, {
   ...options, environmentSha256: "0".repeat(64),
 }), /environment hash/);
 
-process.stdout.write("deployment receipt policy tests passed 18/18\n");
+process.stdout.write("deployment receipt policy tests passed 21/21\n");

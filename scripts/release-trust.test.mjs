@@ -169,7 +169,7 @@ try {
   test("requires bundle and trusted root together", () => {
     const bundle = path.join(tmp, "bundle.jsonl");
     fs.writeFileSync(bundle, "{}\n");
-    assert.throws(() => buildGithubAttestationVerifyArgs({ ...baseOptions, bundle }), /both an attestation bundle/);
+    assert.throws(() => buildGithubAttestationVerifyArgs({ ...baseOptions, bundle }), /explicit trust mode/);
   });
 
   test("passes signed offline bundle and trusted root to the verifier", () => {
@@ -180,6 +180,26 @@ try {
     const args = buildGithubAttestationVerifyArgs({ ...baseOptions, bundle, trustedRoot });
     assert.equal(args.at(args.indexOf("--bundle") + 1), bundle);
     assert.equal(args.at(args.indexOf("--custom-trusted-root") + 1), trustedRoot);
+  });
+
+  test("public-good bundle verification requires explicit opt-in and never accepts a supplied root", () => {
+    const bundle = path.join(tmp, "public-good-bundle.jsonl");
+    const trustedRoot = path.join(tmp, "unexpected-root.jsonl");
+    fs.writeFileSync(bundle, "{}\n");
+    fs.writeFileSync(trustedRoot, "{}\n");
+    const args = buildGithubAttestationVerifyArgs({
+      ...baseOptions,
+      bundle,
+      useGithubPublicGoodRoot: true,
+    });
+    assert.equal(args.at(args.indexOf("--bundle") + 1), bundle);
+    assert.equal(args.includes("--custom-trusted-root"), false);
+    assert.throws(() => buildGithubAttestationVerifyArgs({
+      ...baseOptions,
+      bundle,
+      trustedRoot,
+      useGithubPublicGoodRoot: true,
+    }), /explicit trust mode/);
   });
 
   process.stdout.write(`release trust tests passed ${passed}/${passed}\n`);

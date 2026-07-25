@@ -20,6 +20,8 @@ const treeSha = "2".repeat(40);
 const target = "https://staging.platform-infrastructure.test";
 const generatedAt = "2026-07-25T10:10:00.000Z";
 const scanRequestSha256 = "3".repeat(64);
+const reportArtifactId = "456789";
+const reportArtifactSha256 = "a".repeat(64);
 const providerMetadataSha256 = "4".repeat(64);
 const provider = {
   repository: providerRepository,
@@ -176,6 +178,9 @@ test("candidate request remains pending and only authenticated provider can issu
   const receipt = buildDastProviderReceipt({
     scanRequest,
     scanRequestSha256,
+    reportArtifactId,
+    reportArtifactSha256,
+    providerObservedReportEvidence: structuredClone(reportEvidence),
     providerProducer: provider,
     providerMetadataSha256,
     generatedAt,
@@ -188,6 +193,8 @@ test("candidate request remains pending and only authenticated provider can issu
     policy,
     scanRequest,
     scanRequestSha256,
+    reportArtifactId,
+    reportArtifactSha256,
     providerMetadata,
     providerMetadataSha256,
     providerRunId: provider.runId,
@@ -200,6 +207,9 @@ test("cross-run, nonce, request digest and candidate-repository provider substit
   const receipt = buildDastProviderReceipt({
     scanRequest,
     scanRequestSha256,
+    reportArtifactId,
+    reportArtifactSha256,
+    providerObservedReportEvidence: structuredClone(reportEvidence),
     providerProducer: provider,
     providerMetadataSha256,
     generatedAt,
@@ -209,6 +219,8 @@ test("cross-run, nonce, request digest and candidate-repository provider substit
       policy,
       scanRequest,
       scanRequestSha256,
+      reportArtifactId,
+      reportArtifactSha256,
       providerMetadata,
       providerMetadataSha256,
       providerRunId: provider.runId,
@@ -225,6 +237,8 @@ test("cross-run, nonce, request digest and candidate-repository provider substit
       policy,
       scanRequest,
       scanRequestSha256,
+      reportArtifactId,
+      reportArtifactSha256,
       providerMetadata,
       providerMetadataSha256,
       providerRunId: provider.runId,
@@ -250,6 +264,8 @@ test("cross-run, nonce, request digest and candidate-repository provider substit
       policy: selfPolicy,
       scanRequest,
       scanRequestSha256,
+      reportArtifactId,
+      reportArtifactSha256,
       providerMetadata: selfMetadata,
       providerMetadataSha256,
       providerRunId: provider.runId,
@@ -257,6 +273,116 @@ test("cross-run, nonce, request digest and candidate-repository provider substit
       now: generatedAt,
     }),
     /independent/i,
+  );
+});
+
+test("same artifact ID with a different provider-observed archive digest rejects", () => {
+  const receipt = buildDastProviderReceipt({
+    scanRequest,
+    scanRequestSha256,
+    reportArtifactId,
+    reportArtifactSha256,
+    providerObservedReportEvidence: structuredClone(reportEvidence),
+    providerProducer: provider,
+    providerMetadataSha256,
+    generatedAt,
+  });
+  const forged = {
+    ...receipt,
+    reportArtifact: {
+      ...receipt.reportArtifact,
+      id: reportArtifactId,
+      archiveSha256: "b".repeat(64),
+    },
+  };
+  assert.throws(
+    () => validateDastProviderReceipt(forged, {
+      policy,
+      scanRequest,
+      scanRequestSha256,
+      reportArtifactId,
+      reportArtifactSha256,
+      providerMetadata,
+      providerMetadataSha256,
+      providerRunId: provider.runId,
+      providerRunAttempt: provider.runAttempt,
+      now: generatedAt,
+    }),
+    /report binding|mismatch/i,
+  );
+});
+
+test("altered report bytes or hash in the provider receipt rejects", () => {
+  const receipt = buildDastProviderReceipt({
+    scanRequest,
+    scanRequestSha256,
+    reportArtifactId,
+    reportArtifactSha256,
+    providerObservedReportEvidence: structuredClone(reportEvidence),
+    providerProducer: provider,
+    providerMetadataSha256,
+    generatedAt,
+  });
+  for (const mutate of [
+    (evidence) => {
+      evidence.files.html.bytes += 1;
+    },
+    (evidence) => {
+      evidence.files.html.sha256 = "b".repeat(64);
+    },
+  ]) {
+    const forged = structuredClone(receipt);
+    mutate(forged.validatedReportEvidence);
+    assert.throws(
+      () => validateDastProviderReceipt(forged, {
+        policy,
+        scanRequest,
+        scanRequestSha256,
+        reportArtifactId,
+        reportArtifactSha256,
+        providerMetadata,
+        providerMetadataSha256,
+        providerRunId: provider.runId,
+        providerRunAttempt: provider.runAttempt,
+        now: generatedAt,
+      }),
+      /report binding|mismatch/i,
+    );
+  }
+});
+
+test("self-asserted semantic verdict cannot replace the provider-observed verdict", () => {
+  const receipt = buildDastProviderReceipt({
+    scanRequest,
+    scanRequestSha256,
+    reportArtifactId,
+    reportArtifactSha256,
+    providerObservedReportEvidence: structuredClone(reportEvidence),
+    providerProducer: provider,
+    providerMetadataSha256,
+    generatedAt,
+  });
+  const forged = {
+    ...receipt,
+    semanticVerdict: {
+      ...receipt.semanticVerdict,
+      siteCount: receipt.semanticVerdict.siteCount + 1,
+    },
+  };
+  assert.throws(
+    () => validateDastProviderReceipt(forged, {
+      policy,
+      scanRequest,
+      scanRequestSha256,
+      reportArtifactId,
+      reportArtifactSha256,
+      providerMetadata,
+      providerMetadataSha256,
+      providerRunId: provider.runId,
+      providerRunAttempt: provider.runAttempt,
+      now: generatedAt,
+    }),
+    /report binding|mismatch/i,
   );
 });
 
@@ -270,6 +396,9 @@ test("Sigstore bundle is verified against GitHub public-good roots and exact pro
   const receiptBytes = `${JSON.stringify(buildDastProviderReceipt({
     scanRequest,
     scanRequestSha256,
+    reportArtifactId,
+    reportArtifactSha256,
+    providerObservedReportEvidence: structuredClone(reportEvidence),
     providerProducer: provider,
     providerMetadataSha256,
     generatedAt,
