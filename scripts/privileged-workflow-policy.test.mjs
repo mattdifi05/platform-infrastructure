@@ -1,7 +1,11 @@
 #!/usr/bin/env node
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import { deploymentPrerequisiteMismatches, privilegedWorkflowMismatches } from "./privileged-workflow-policy.mjs";
+import {
+  dastReceiptWiringMismatches,
+  deploymentPrerequisiteMismatches,
+  privilegedWorkflowMismatches,
+} from "./privileged-workflow-policy.mjs";
 
 const fixtures = [
   [".github/workflows/enterprise-infra.yml", "deploy-vps", false],
@@ -31,6 +35,7 @@ assert.match(
 
 const deployment = fs.readFileSync(".github/workflows/enterprise-infra.yml", "utf8");
 assert.deepEqual(deploymentPrerequisiteMismatches(deployment), []);
+assert.deepEqual(dastReceiptWiringMismatches(deployment), []);
 assert.match(deploymentPrerequisiteMismatches(deployment.replace("      - dast-zap\n", "")).join(" "), /exact .* prerequisite set/);
 assert.match(
   deploymentPrerequisiteMismatches(deployment.replace("      - release-admission\n", "")).join(" "),
@@ -60,6 +65,34 @@ assert.match(
   deploymentPrerequisiteMismatches(deployment.replace("        run: |\n          PROMOTED=", "        run: sh ./scripts/deploy-vps.sh\n          PROMOTED=")).join(" "),
   /must not invoke .* directly/,
 );
+assert.match(
+  dastReceiptWiringMismatches(deployment.replace("staging_receipt_sha256:", "removed_staging_receipt_sha256:")).join(" "),
+  /staging receipt input/,
+);
+assert.match(
+  dastReceiptWiringMismatches(deployment.replace("      - release-admission\n    if: github.event_name == 'workflow_dispatch' && github.ref", "    if: github.event_name == 'workflow_dispatch' && github.ref")).join(" "),
+  /release admission dependency/,
+);
+assert.match(
+  dastReceiptWiringMismatches(deployment.replace("--stagingReceipt \"$STAGING_RECEIPT\"", "--stagingReceipt /tmp/unbound.json")).join(" "),
+  /staging receipt validation/,
+);
+assert.match(
+  dastReceiptWiringMismatches(deployment.replace("name: dast-verification-${{ github.run_id }}", "name: caller-selected-dast")).join(" "),
+  /run-bound DAST artifact/,
+);
+assert.match(
+  dastReceiptWiringMismatches(deployment.replace("--dastReceipt \"$DAST_RECEIPT\"", "--dastReceipt /tmp/unbound.json")).join(" "),
+  /deploy must revalidate/,
+);
+assert.match(
+  dastReceiptWiringMismatches(deployment.replace("DAST_RECEIPT_SHA256: ${{ needs.dast-zap.outputs.dast_receipt_sha256 }}", "DAST_RECEIPT_SHA256: deadbeef")).join(" "),
+  /DAST receipt hash output/,
+);
+assert.match(
+  dastReceiptWiringMismatches(deployment.replace("test \"$DAST_TARGET\" = \"$CANONICAL_TARGET\"", "true")).join(" "),
+  /canonical target/,
+);
 
-const total = fixtures.length * 3 + 1 + 9;
+const total = fixtures.length * 3 + 1 + 17;
 process.stdout.write(`privileged workflow policy tests passed ${total}/${total}\n`);
