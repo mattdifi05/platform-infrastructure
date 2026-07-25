@@ -263,6 +263,17 @@ test("published catalog and receipt schemas are closed", () => {
   }
 });
 
+test("tracked repository catalogs retain exact local-support bindings", () => {
+  const result = runCli(REPOSITORY_ROOT, catalogsArgs(REPOSITORY_ROOT));
+  assert.equal(result.status, 0, result.stdout || result.stderr);
+  const parsed = parseOutput(result);
+  assert.equal(parsed.valid, true);
+  assert.equal(parsed.status, "LOCAL-SUPPORT-READY-EXTERNAL-PENDING");
+  assert.equal(parsed.gateAdmissible, false);
+  assert.equal(parsed.externalConditions.length, 2);
+  assert.ok(parsed.externalConditions.every((condition) => condition.includes("GOVERNANCE-EXTERNAL")));
+});
+
 test("complete closed catalogs are locally ready but never claim GO", () => {
   withFixture(({ root }) => {
     const result = runCli(root, catalogsArgs(root));
