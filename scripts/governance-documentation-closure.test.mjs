@@ -8,6 +8,8 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 const SCRIPT = fileURLToPath(new URL("./governance-documentation-closure.mjs", import.meta.url));
+const REPOSITORY_ROOT = fileURLToPath(new URL("../", import.meta.url));
+const SCHEMA_DIRECTORY = path.join(REPOSITORY_ROOT, "governance", "schemas");
 const REQUIRED_DOMAINS = [
   "hardware",
   "network",
@@ -137,7 +139,7 @@ function initFixture() {
     roles,
     assets,
     externalConditions: [
-      "Authenticated primary and substitute acknowledgements remain GOVERNANCE-EXTERNAL.",
+      "Authenticated primary and substitute acknowledgements for every catalog asset remain GOVERNANCE-EXTERNAL and GO-blocking.",
     ],
   };
 
@@ -176,7 +178,7 @@ function initFixture() {
       },
     })),
     externalConditions: [
-      "Independent authenticated drills remain GOVERNANCE-EXTERNAL and GO-blocking.",
+      "Independent authenticated drills for rollout, rollback, backup, restore, and access-recovery remain GOVERNANCE-EXTERNAL and GO-blocking.",
     ],
   };
 
@@ -224,18 +226,55 @@ function withFixture(callback) {
   }
 }
 
+function assertClosedObjectSchemas(value, location = "$") {
+  if (Array.isArray(value)) {
+    value.forEach((entry, index) => assertClosedObjectSchemas(entry, `${location}[${index}]`));
+    return;
+  }
+  if (value === null || typeof value !== "object") return;
+  if (value.type === "object") {
+    assert.equal(value.additionalProperties, false, `${location} must reject additional properties`);
+    if (value.properties) {
+      assert.deepEqual(
+        [...(value.required ?? [])].sort(),
+        Object.keys(value.properties).sort(),
+        `${location} must require every declared object property`,
+      );
+    }
+  }
+  Object.entries(value).forEach(([key, entry]) => assertClosedObjectSchemas(entry, `${location}.${key}`));
+}
+
+test("published catalog and receipt schemas are closed", () => {
+  const files = [
+    "governance-acceptance-receipt.schema.json",
+    "runbook-catalog.schema.json",
+    "runbook-drill-receipt.schema.json",
+    "service-asset-ownership.schema.json",
+  ];
+  const ids = new Set();
+  for (const file of files) {
+    const schema = JSON.parse(readFileSync(path.join(SCHEMA_DIRECTORY, file), "utf8"));
+    assert.equal(schema.$schema, "https://json-schema.org/draft/2020-12/schema");
+    assert.match(schema.$id, /^urn:platform-infrastructure:schema:/);
+    assert.equal(ids.has(schema.$id), false, `${file} has a duplicate schema id`);
+    ids.add(schema.$id);
+    assertClosedObjectSchemas(schema, file);
+  }
+});
+
 test("complete closed catalogs are locally ready but never claim GO", () => {
   withFixture(({ root }) => {
     const result = runCli(root, catalogsArgs(root));
-    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.status, 0, result.stdout || result.stderr);
     assert.deepEqual(parseOutput(result), {
       schema: "platform.governance-documentation-closure-result/v1",
       valid: true,
       status: "LOCAL-SUPPORT-READY-EXTERNAL-PENDING",
       gateAdmissible: false,
       externalConditions: [
-        "Authenticated owner and substitute acknowledgements remain GOVERNANCE-EXTERNAL.",
-        "Independent authenticated runbook drills remain GOVERNANCE-EXTERNAL.",
+        "Authenticated primary and substitute acknowledgements for every catalog asset remain GOVERNANCE-EXTERNAL and GO-blocking.",
+        "Independent authenticated drills for rollout, rollback, backup, restore, and access-recovery remain GOVERNANCE-EXTERNAL and GO-blocking.",
       ],
     });
   });
@@ -306,6 +345,7 @@ test("ownership rejects placeholders, runtime identities, shared primary/substit
         copy.assets.forEach((asset) => asset.roles.primary = "role:root");
       },
       (copy) => copy.assets[0].roles.substitute = copy.assets[0].roles.primary,
+      (copy) => copy.assets[0].roles.approval = copy.assets[0].roles.primary,
       (copy) => delete copy.assets[0].lifecycle.rollback,
       (copy) => copy.assets[0].lifecycle.review.beforeRollout = false,
     ]) {
@@ -358,7 +398,7 @@ test("synthetic acknowledgement and drill receipts are structurally testable but
       acknowledgements: ownership.assets.flatMap((asset) => [asset.roles.primary, asset.roles.substitute].map((roleRef) => ({
         assetId: asset.id,
         roleRef,
-        authenticatedSubjectRef: `test-subject-sha256:${sha256(`${asset.id}:${roleRef}`)}`,
+        authenticatedSubjectRef: `test-subject-sha256:${sha256(roleRef)}`,
         authentication: {
           method: "synthetic",
           issuerRef: "test-fixture",
@@ -413,12 +453,18 @@ test("synthetic acknowledgement and drill receipts are structurally testable but
     writeJson(drillPath, drill);
 
     for (const [kind, receiptPath] of [["acceptance", acceptancePath], ["drill", drillPath]]) {
-      const result = runCli(root, ["receipt", "--root", root, "--kind", kind, "--receipt", receiptPath]);
-      assert.equal(result.status, 0, result.stderr);
+      const result = runCli(root, [
+        "receipt",
+        "--root", root,
+        "--kind", kind,
+        "--receipt", path.relative(root, receiptPath),
+      ]);
+      assert.equal(result.status, 0, result.stdout || result.stderr);
       const parsed = parseOutput(result);
       assert.equal(parsed.valid, true);
       assert.equal(parsed.gateAdmissible, false);
       assert.equal(parsed.status, "SYNTHETIC-NON-GATE-ADMISSIBLE");
+      assert.equal(parsed.doesNotAuthorizeDeployment, true);
     }
 
     const gate = runCli(root, [
@@ -431,5 +477,88 @@ test("synthetic acknowledgement and drill receipts are structurally testable but
     const parsedGate = parseOutput(gate);
     assert.equal(parsedGate.gateAdmissible, false);
     assert.equal(parsedGate.status, "GOVERNANCE-EXTERNAL-BLOCKING");
+
+    const externalAcceptance = structuredClone(acceptance);
+    externalAcceptance.receiptId = "external-acceptance-structural-001";
+    externalAcceptance.evidenceClass = "GOVERNANCE-EXTERNAL";
+    externalAcceptance.synthetic = false;
+    externalAcceptance.gateAdmissible = false;
+    externalAcceptance.acknowledgements.forEach((entry) => {
+      entry.authenticatedSubjectRef = `provider-subject-sha256:${sha256(entry.roleRef)}`;
+      entry.authentication = {
+        method: "oidc-mfa",
+        issuerRef: "external-governance-identity-verifier",
+        evidenceSha256: sha256(`external-auth:${entry.roleRef}`),
+      };
+    });
+    externalAcceptance.approval.authenticatedSubjectRef = `provider-subject-sha256:${"7".repeat(64)}`;
+    externalAcceptance.approval.authentication = {
+      method: "webauthn",
+      issuerRef: "external-governance-identity-verifier",
+      evidenceSha256: "8".repeat(64),
+    };
+    writeJson(acceptancePath, externalAcceptance);
+
+    for (const [index, kind] of ["rollout", "rollback", "backup", "restore", "access-recovery"].entries()) {
+      const externalDrill = structuredClone(drill);
+      externalDrill.receiptId = `external-drill-structural-${kind}`;
+      externalDrill.evidenceClass = "GOVERNANCE-EXTERNAL";
+      externalDrill.synthetic = false;
+      externalDrill.gateAdmissible = false;
+      externalDrill.runbookId = `runbook:${kind}`;
+      externalDrill.runbookType = kind;
+      externalDrill.artifact = runbooks.runbooks.find((entry) => entry.type === kind).artifact;
+      externalDrill.independentOperator.authenticatedSubjectRef = `provider-subject-sha256:${sha256(`independent:${kind}`)}`;
+      externalDrill.independentOperator.authentication = {
+        method: "provider-signed",
+        issuerRef: "external-independent-drill-verifier",
+        evidenceSha256: sha256(`external-drill-auth:${kind}`),
+      };
+      writeJson(
+        path.join(root, "governance", "receipts", "drills", `${String(index + 1).padStart(2, "0")}-${kind}.json`),
+        externalDrill,
+      );
+    }
+    rmSync(drillPath);
+
+    const structurallyValidExternal = runCli(root, [
+      "receipt",
+      "--root", root,
+      "--kind", "acceptance",
+      "--receipt", path.relative(root, acceptancePath),
+    ]);
+    assert.equal(structurallyValidExternal.status, 0, structurallyValidExternal.stdout || structurallyValidExternal.stderr);
+    assert.deepEqual(parseOutput(structurallyValidExternal), {
+      schema: "platform.governance-documentation-closure-result/v1",
+      valid: true,
+      status: "GOVERNANCE-EXTERNAL-VERIFICATION-PENDING",
+      gateAdmissible: false,
+      doesNotAuthorizeDeployment: true,
+    });
+
+    const externalGate = runCli(root, [
+      "gate",
+      ...catalogsArgs(root).slice(1),
+      "--acceptance-dir", "governance/receipts/acceptance",
+      "--drill-dir", "governance/receipts/drills",
+    ]);
+    assert.notEqual(externalGate.status, 0);
+    const parsedExternalGate = parseOutput(externalGate);
+    assert.equal(parsedExternalGate.valid, true);
+    assert.equal(parsedExternalGate.status, "GOVERNANCE-EXTERNAL-VERIFICATION-PENDING");
+    assert.equal(parsedExternalGate.gateAdmissible, false);
+    assert.equal(parsedExternalGate.doesNotAuthorizeDeployment, true);
+    assert.match(parsedExternalGate.blockers.join(" "), /independent trusted verifier/i);
+
+    externalAcceptance.gateAdmissible = true;
+    writeJson(acceptancePath, externalAcceptance);
+    const falseGateClaim = runCli(root, [
+      "receipt",
+      "--root", root,
+      "--kind", "acceptance",
+      "--receipt", path.relative(root, acceptancePath),
+    ]);
+    assert.notEqual(falseGateClaim.status, 0);
+    assert.equal(parseOutput(falseGateClaim).error.code, "FALSE_GATE_CLAIM");
   });
 });

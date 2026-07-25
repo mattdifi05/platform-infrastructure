@@ -1,0 +1,213 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:platform-infrastructure:schema:governance-acceptance-receipt:v1",
+  "title": "Governance ownership acceptance receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "receiptId",
+    "evidenceClass",
+    "synthetic",
+    "gateAdmissible",
+    "scope",
+    "catalog",
+    "issuedAt",
+    "acknowledgements",
+    "approval"
+  ],
+  "properties": {
+    "schema": {
+      "const": "platform.governance-acceptance-receipt/v1"
+    },
+    "receiptId": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{7,127}$"
+    },
+    "evidenceClass": {
+      "enum": [
+        "SYNTHETIC-TEST",
+        "GOVERNANCE-EXTERNAL"
+      ]
+    },
+    "synthetic": {
+      "type": "boolean"
+    },
+    "gateAdmissible": {
+      "const": false
+    },
+    "scope": {
+      "const": "platform-infrastructure"
+    },
+    "catalog": {
+      "$ref": "#/$defs/catalogBinding"
+    },
+    "issuedAt": {
+      "$ref": "#/$defs/timestamp"
+    },
+    "acknowledgements": {
+      "type": "array",
+      "minItems": 2,
+      "items": {
+        "$ref": "#/$defs/acknowledgement"
+      }
+    },
+    "approval": {
+      "$ref": "#/$defs/approval"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "evidenceClass": {
+            "const": "SYNTHETIC-TEST"
+          }
+        },
+        "required": [
+          "evidenceClass"
+        ]
+      },
+      "then": {
+        "properties": {
+          "synthetic": {
+            "const": true
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "synthetic": {
+            "const": false
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{3})?Z$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "subjectRef": {
+      "type": "string",
+      "pattern": "^(?:provider|oidc|webauthn|test)-subject-sha256:[a-f0-9]{64}$"
+    },
+    "catalogBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "sha256"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "authentication": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "method",
+        "issuerRef",
+        "evidenceSha256"
+      ],
+      "properties": {
+        "method": {
+          "enum": [
+            "synthetic",
+            "provider-signed",
+            "oidc-mfa",
+            "webauthn"
+          ]
+        },
+        "issuerRef": {
+          "type": "string",
+          "minLength": 4
+        },
+        "evidenceSha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "acknowledgement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "assetId",
+        "roleRef",
+        "authenticatedSubjectRef",
+        "authentication",
+        "responsibilities",
+        "acknowledgedAt"
+      ],
+      "properties": {
+        "assetId": {
+          "type": "string",
+          "pattern": "^asset:[a-z][a-z0-9-]{1,79}$"
+        },
+        "roleRef": {
+          "$ref": "service-asset-ownership.schema.json#/$defs/roleRef"
+        },
+        "authenticatedSubjectRef": {
+          "$ref": "#/$defs/subjectRef"
+        },
+        "authentication": {
+          "$ref": "#/$defs/authentication"
+        },
+        "responsibilities": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "closure",
+              "rollback",
+              "preservation",
+              "review"
+            ]
+          }
+        },
+        "acknowledgedAt": {
+          "$ref": "#/$defs/timestamp"
+        }
+      }
+    },
+    "approval": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "roleRef",
+        "authenticatedSubjectRef",
+        "authentication",
+        "approvedAt"
+      ],
+      "properties": {
+        "roleRef": {
+          "$ref": "service-asset-ownership.schema.json#/$defs/roleRef"
+        },
+        "authenticatedSubjectRef": {
+          "$ref": "#/$defs/subjectRef"
+        },
+        "authentication": {
+          "$ref": "#/$defs/authentication"
+        },
+        "approvedAt": {
+          "$ref": "#/$defs/timestamp"
+        }
+      }
+    }
+  }
+}

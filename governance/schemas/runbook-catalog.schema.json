@@ -1,0 +1,236 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:platform-infrastructure:schema:runbook-catalog:v1",
+  "title": "Platform runbook catalog",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "scope",
+    "status",
+    "gateAdmissible",
+    "requiredTypes",
+    "requiredIndependentDrillTypes",
+    "runbooks",
+    "externalConditions"
+  ],
+  "properties": {
+    "schema": {
+      "const": "platform.runbook-catalog/v1"
+    },
+    "scope": {
+      "const": "platform-infrastructure"
+    },
+    "status": {
+      "const": "LOCAL-SUPPORT-READY-EXTERNAL-PENDING"
+    },
+    "gateAdmissible": {
+      "const": false
+    },
+    "requiredTypes": {
+      "type": "array",
+      "minItems": 8,
+      "maxItems": 8,
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "operations",
+          "incident",
+          "provider",
+          "rollout",
+          "rollback",
+          "backup",
+          "restore",
+          "access-recovery"
+        ]
+      }
+    },
+    "requiredIndependentDrillTypes": {
+      "type": "array",
+      "minItems": 5,
+      "maxItems": 5,
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "rollout",
+          "rollback",
+          "backup",
+          "restore",
+          "access-recovery"
+        ]
+      }
+    },
+    "runbooks": {
+      "type": "array",
+      "minItems": 8,
+      "maxItems": 8,
+      "items": {
+        "$ref": "#/$defs/runbook"
+      }
+    },
+    "externalConditions": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 1,
+      "uniqueItems": true,
+      "prefixItems": [
+        {
+          "const": "Independent authenticated drills for rollout, rollback, backup, restore, and access-recovery remain GOVERNANCE-EXTERNAL and GO-blocking."
+        }
+      ],
+      "items": false
+    }
+  },
+  "$defs": {
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "sha256",
+        "anchors"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\\\)[^\\u0000\\r\\n]+$"
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "anchors": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 4,
+            "pattern": "^[^\\r\\n]+$"
+          }
+        }
+      }
+    },
+    "roleRef": {
+      "type": "string",
+      "pattern": "^role:[a-z][a-z0-9-]{4,79}$"
+    },
+    "roleAssignments": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "primary",
+        "substitute",
+        "approval",
+        "escalation"
+      ],
+      "properties": {
+        "primary": {
+          "$ref": "#/$defs/roleRef"
+        },
+        "substitute": {
+          "$ref": "#/$defs/roleRef"
+        },
+        "approval": {
+          "$ref": "#/$defs/roleRef"
+        },
+        "escalation": {
+          "$ref": "#/$defs/roleRef"
+        }
+      }
+    },
+    "review": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "cadenceDays",
+        "beforeRollout",
+        "afterMaterialChange"
+      ],
+      "properties": {
+        "cadenceDays": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 365
+        },
+        "beforeRollout": {
+          "const": true
+        },
+        "afterMaterialChange": {
+          "const": true
+        }
+      }
+    },
+    "drill": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "independentOperatorRequired",
+        "exactArtifactBindingRequired"
+      ],
+      "properties": {
+        "state": {
+          "const": "GOVERNANCE-EXTERNAL"
+        },
+        "independentOperatorRequired": {
+          "const": true
+        },
+        "exactArtifactBindingRequired": {
+          "const": true
+        }
+      }
+    },
+    "runbook": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "type",
+        "artifact",
+        "roles",
+        "preservationRequired",
+        "rollbackRequired",
+        "review",
+        "drill"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^runbook:(?:operations|incident|provider|rollout|rollback|backup|restore|access-recovery)$"
+        },
+        "type": {
+          "enum": [
+            "operations",
+            "incident",
+            "provider",
+            "rollout",
+            "rollback",
+            "backup",
+            "restore",
+            "access-recovery"
+          ]
+        },
+        "artifact": {
+          "$ref": "#/$defs/artifact"
+        },
+        "roles": {
+          "$ref": "#/$defs/roleAssignments"
+        },
+        "preservationRequired": {
+          "const": true
+        },
+        "rollbackRequired": {
+          "const": true
+        },
+        "review": {
+          "$ref": "#/$defs/review"
+        },
+        "drill": {
+          "$ref": "#/$defs/drill"
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,195 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:platform-infrastructure:schema:runbook-drill-receipt:v1",
+  "title": "Independent runbook drill receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "receiptId",
+    "evidenceClass",
+    "synthetic",
+    "gateAdmissible",
+    "scope",
+    "runbookId",
+    "runbookType",
+    "catalog",
+    "artifact",
+    "performedAt",
+    "independentOperator",
+    "result",
+    "preservationVerified",
+    "rollbackVerified",
+    "evidenceSha256"
+  ],
+  "properties": {
+    "schema": {
+      "const": "platform.runbook-drill-receipt/v1"
+    },
+    "receiptId": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{7,127}$"
+    },
+    "evidenceClass": {
+      "enum": [
+        "SYNTHETIC-TEST",
+        "GOVERNANCE-EXTERNAL"
+      ]
+    },
+    "synthetic": {
+      "type": "boolean"
+    },
+    "gateAdmissible": {
+      "const": false
+    },
+    "scope": {
+      "const": "platform-infrastructure"
+    },
+    "runbookId": {
+      "type": "string",
+      "pattern": "^runbook:(?:operations|incident|provider|rollout|rollback|backup|restore|access-recovery)$"
+    },
+    "runbookType": {
+      "enum": [
+        "operations",
+        "incident",
+        "provider",
+        "rollout",
+        "rollback",
+        "backup",
+        "restore",
+        "access-recovery"
+      ]
+    },
+    "catalog": {
+      "$ref": "#/$defs/catalogBinding"
+    },
+    "artifact": {
+      "$ref": "runbook-catalog.schema.json#/$defs/artifact"
+    },
+    "performedAt": {
+      "$ref": "#/$defs/timestamp"
+    },
+    "independentOperator": {
+      "$ref": "#/$defs/independentOperator"
+    },
+    "result": {
+      "const": "PASS"
+    },
+    "preservationVerified": {
+      "const": true
+    },
+    "rollbackVerified": {
+      "const": true
+    },
+    "evidenceSha256": {
+      "$ref": "#/$defs/sha256"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "evidenceClass": {
+            "const": "SYNTHETIC-TEST"
+          }
+        },
+        "required": [
+          "evidenceClass"
+        ]
+      },
+      "then": {
+        "properties": {
+          "synthetic": {
+            "const": true
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "synthetic": {
+            "const": false
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{3})?Z$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "subjectRef": {
+      "type": "string",
+      "pattern": "^(?:provider|oidc|webauthn|test)-subject-sha256:[a-f0-9]{64}$"
+    },
+    "catalogBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "sha256"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "authentication": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "method",
+        "issuerRef",
+        "evidenceSha256"
+      ],
+      "properties": {
+        "method": {
+          "enum": [
+            "synthetic",
+            "provider-signed",
+            "oidc-mfa",
+            "webauthn"
+          ]
+        },
+        "issuerRef": {
+          "type": "string",
+          "minLength": 4
+        },
+        "evidenceSha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "independentOperator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "authenticatedSubjectRef",
+        "authentication",
+        "independentFromPrimary"
+      ],
+      "properties": {
+        "authenticatedSubjectRef": {
+          "$ref": "#/$defs/subjectRef"
+        },
+        "authentication": {
+          "$ref": "#/$defs/authentication"
+        },
+        "independentFromPrimary": {
+          "const": true
+        }
+      }
+    }
+  }
+}

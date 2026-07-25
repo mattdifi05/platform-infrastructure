@@ -1,0 +1,335 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:platform-infrastructure:schema:service-asset-ownership:v1",
+  "title": "Platform service and asset ownership catalog",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "scope",
+    "status",
+    "gateAdmissible",
+    "requiredDomains",
+    "requiredCapabilities",
+    "roles",
+    "assets",
+    "externalConditions"
+  ],
+  "properties": {
+    "schema": {
+      "const": "platform.service-asset-ownership/v1"
+    },
+    "scope": {
+      "const": "platform-infrastructure"
+    },
+    "status": {
+      "const": "LOCAL-SUPPORT-READY-EXTERNAL-PENDING"
+    },
+    "gateAdmissible": {
+      "const": false
+    },
+    "requiredDomains": {
+      "type": "array",
+      "minItems": 9,
+      "maxItems": 9,
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "hardware",
+          "network",
+          "applications",
+          "data",
+          "backups",
+          "secrets",
+          "observability",
+          "ci",
+          "providers"
+        ]
+      }
+    },
+    "requiredCapabilities": {
+      "type": "array",
+      "minItems": 20,
+      "maxItems": 20,
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "host-capacity",
+          "host-recovery",
+          "network-segmentation",
+          "edge-routing",
+          "platform-service-lifecycle",
+          "hosted-workload-boundary",
+          "database-storage",
+          "object-storage",
+          "backup",
+          "restore",
+          "secret-lifecycle",
+          "key-recovery",
+          "metrics",
+          "logs",
+          "alerting",
+          "source-governance",
+          "release-provenance",
+          "dns-edge-provider",
+          "identity-provider",
+          "notification-provider"
+        ]
+      }
+    },
+    "roles": {
+      "type": "array",
+      "minItems": 4,
+      "items": {
+        "$ref": "#/$defs/role"
+      }
+    },
+    "assets": {
+      "type": "array",
+      "minItems": 9,
+      "items": {
+        "$ref": "#/$defs/asset"
+      }
+    },
+    "externalConditions": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 1,
+      "uniqueItems": true,
+      "prefixItems": [
+        {
+          "const": "Authenticated primary and substitute acknowledgements for every catalog asset remain GOVERNANCE-EXTERNAL and GO-blocking."
+        }
+      ],
+      "items": false
+    }
+  },
+  "$defs": {
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "sha256",
+        "anchors"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\\\)[^\\u0000\\r\\n]+$"
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "anchors": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 4,
+            "pattern": "^[^\\r\\n]+$"
+          }
+        }
+      }
+    },
+    "roleRef": {
+      "type": "string",
+      "pattern": "^role:[a-z][a-z0-9-]{4,79}$"
+    },
+    "roleAssignments": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "primary",
+        "substitute",
+        "approval",
+        "escalation"
+      ],
+      "properties": {
+        "primary": {
+          "$ref": "#/$defs/roleRef"
+        },
+        "substitute": {
+          "$ref": "#/$defs/roleRef"
+        },
+        "approval": {
+          "$ref": "#/$defs/roleRef"
+        },
+        "escalation": {
+          "$ref": "#/$defs/roleRef"
+        }
+      }
+    },
+    "review": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "cadenceDays",
+        "beforeRollout",
+        "afterMaterialChange"
+      ],
+      "properties": {
+        "cadenceDays": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 365
+        },
+        "beforeRollout": {
+          "const": true
+        },
+        "afterMaterialChange": {
+          "const": true
+        }
+      }
+    },
+    "role": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "kind",
+        "runtimePrincipalAllowed",
+        "identityBinding"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/roleRef"
+        },
+        "kind": {
+          "const": "human-accountability-role"
+        },
+        "runtimePrincipalAllowed": {
+          "const": false
+        },
+        "identityBinding": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "state",
+            "authenticatedReceiptRequired"
+          ],
+          "properties": {
+            "state": {
+              "const": "GOVERNANCE-EXTERNAL"
+            },
+            "authenticatedReceiptRequired": {
+              "const": true
+            }
+          }
+        }
+      }
+    },
+    "asset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "domain",
+        "capabilities",
+        "artifactRefs",
+        "roles",
+        "acknowledgement",
+        "lifecycle"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^asset:[a-z][a-z0-9-]{1,79}$"
+        },
+        "domain": {
+          "enum": [
+            "hardware",
+            "network",
+            "applications",
+            "data",
+            "backups",
+            "secrets",
+            "observability",
+            "ci",
+            "providers"
+          ]
+        },
+        "capabilities": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "host-capacity",
+              "host-recovery",
+              "network-segmentation",
+              "edge-routing",
+              "platform-service-lifecycle",
+              "hosted-workload-boundary",
+              "database-storage",
+              "object-storage",
+              "backup",
+              "restore",
+              "secret-lifecycle",
+              "key-recovery",
+              "metrics",
+              "logs",
+              "alerting",
+              "source-governance",
+              "release-provenance",
+              "dns-edge-provider",
+              "identity-provider",
+              "notification-provider"
+            ]
+          }
+        },
+        "artifactRefs": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/artifact"
+          }
+        },
+        "roles": {
+          "$ref": "#/$defs/roleAssignments"
+        },
+        "acknowledgement": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "state",
+            "authenticatedReceiptRequired"
+          ],
+          "properties": {
+            "state": {
+              "const": "GOVERNANCE-EXTERNAL"
+            },
+            "authenticatedReceiptRequired": {
+              "const": true
+            }
+          }
+        },
+        "lifecycle": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "preserve",
+            "rollback",
+            "review"
+          ],
+          "properties": {
+            "preserve": {
+              "type": "string",
+              "minLength": 24
+            },
+            "rollback": {
+              "type": "string",
+              "minLength": 24
+            },
+            "review": {
+              "$ref": "#/$defs/review"
+            }
+          }
+        }
+      }
+    }
+  }
+}
