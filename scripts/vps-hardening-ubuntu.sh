@@ -287,7 +287,7 @@ fi
 
 echo "==> Ubuntu package baseline"
 run apt-get update
-run apt-get install -y ca-certificates curl gnupg ufw fail2ban unattended-upgrades auditd apparmor apparmor-utils
+run apt-get install -y ca-certificates curl gnupg python3 ufw fail2ban unattended-upgrades auditd apparmor apparmor-utils
 
 echo "==> SSH hardening"
 write_file "$SSH_HARDENING_CONFIG" 0644 "Port ${SSH_PORT}
@@ -324,9 +324,8 @@ echo "==> UFW baseline"
 run ufw default deny incoming
 run ufw default allow outgoing
 run ufw allow "${SSH_PORT}/tcp"
-run ufw allow 80/tcp
-run ufw allow 443/tcp
 run ufw --force enable
+add_step "origin-lock-boundary" "$([ "$APPLY" -eq 1 ] && printf applied || printf planned)" "no generic 80/443 allow" "web ports remain closed until cloudflare-origin-lock-ufw.sh --apply reconciles exact Cloudflare CIDRs"
 reload_sshd_if_requested
 
 echo "==> fail2ban baseline"
