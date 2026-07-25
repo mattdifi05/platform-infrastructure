@@ -62,6 +62,7 @@ const artifactReceipt = {
   usageScope: "artifact-verification-only",
   repository,
   commitSha,
+  sourceArchiveSha256: "0".repeat(64),
   generatedAt,
   manifestSha256: "5".repeat(64),
   sbomSha256: "6".repeat(64),
@@ -393,4 +394,55 @@ test("offline CLI creates and deploy-revalidates one exact run-bound receipt", (
     "--dastReceipt", receiptPath,
     "--dastReceiptSha256", "f".repeat(64),
   ], { encoding: "utf8", stdio: "pipe" }), /Command failed/);
+});
+
+test("provider-authenticated staging evidence must be independent from the candidate repository", () => {
+  const sameRepositoryPolicy = {
+    ...policy,
+    trustedProducer: { ...policy.trustedProducer, repository },
+  };
+  const sameRepositoryMetadata = {
+    ...providerMetadata,
+    repository: { full_name: repository },
+    head_repository: { full_name: repository },
+  };
+  const sameRepositoryReceipt = {
+    ...stagingReceipt,
+    producer: { ...stagingReceipt.producer, repository },
+  };
+  assert.throws(
+    () => validateStagingDeploymentReceipt(sameRepositoryReceipt, {
+      ...stagingOptions,
+      policy: sameRepositoryPolicy,
+      providerMetadata: sameRepositoryMetadata,
+    }),
+    /independent/,
+  );
+});
+
+test("one pre-scan identity blob cannot authorize a scan without a fresh post-scan observation", () => {
+  assert.throws(
+    () => buildDastReceipt({
+      stagingBinding,
+      stagingReceiptSha256,
+      providerMetadataSha256,
+      preProbeBinding: probeBinding,
+      scan,
+      scanStartedAt: "2026-07-25T10:01:00.000Z",
+      scanFinishedAt: "2026-07-25T10:02:00.000Z",
+      producer: expectedDastProducer,
+      generatedAt,
+    }),
+    /post-scan/,
+  );
+});
+
+test("DAST authorization must carry the provider-bound current deploy consumer challenge", () => {
+  assert.deepEqual(dastReceipt.consumerChallenge, {
+    consumerRepository: repository,
+    consumerRunId: expectedDastProducer.runId,
+    consumerRunAttempt: expectedDastProducer.runAttempt,
+    consumerJob: "deploy-vps",
+    challengeNonce: "0".repeat(64),
+  });
 });
