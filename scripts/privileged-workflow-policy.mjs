@@ -91,9 +91,6 @@ export function dastReceiptWiringMismatches(workflowText) {
   const deploy = jobBlock(text, "deploy-vps");
   if (!release || !dast || !deploy) return ["DAST receipt workflow jobs are missing"];
 
-  if (!/^      staging_receipt_sha256:\s*\r?\n\s+description:[^\r\n]+\r?\n\s+required: true\s*\r?\n\s+type: string\s*$/m.test(text)) {
-    issues.push("workflow_dispatch lacks the required owner-reviewed staging receipt input");
-  }
   if (JSON.stringify(exactNeeds(dast)) !== JSON.stringify(["enterprise-readiness", "release-admission"])) {
     issues.push("dast-zap lacks the exact release admission dependency");
   }
@@ -102,37 +99,56 @@ export function dastReceiptWiringMismatches(workflowText) {
   }
   if (
     !release.includes("staging_receipt_sha256: ${{ steps.artifacts.outputs.staging_receipt_sha256 }}")
-    || !release.includes("EXPECTED_STAGING_RECEIPT_SHA256: ${{ inputs.staging_receipt_sha256 }}")
     || !release.includes("test \"${#staging_receipts[@]}\" -eq 1")
-    || !release.includes("= \"$EXPECTED_STAGING_RECEIPT_SHA256\"")
+    || !release.includes('STAGING_RECEIPT_SHA256="$(sha256sum "${staging_receipts[0]}"')
+    || !release.includes('test "$(jq -er \'.runtimeIntentSha256\' "${staging_receipts[0]}")" = "$RUNTIME_INTENT_SHA256"')
     || !release.includes('install -m 600 "$STAGING_RECEIPT" "${RUNNER_TEMP}/admitted-deployment-receipts/trusted-staging-deployment.json"')
   ) {
-    issues.push("release admission does not select, hash-check, validate and hand off exactly one staging receipt");
+    issues.push("release admission does not select, hash-bind, validate and hand off exactly one provider staging receipt");
   }
   const stagingValidationCalls = dast.match(/--stagingReceipt "\$STAGING_RECEIPT"/g) ?? [];
   if (
-    stagingValidationCalls.length !== 3
+    stagingValidationCalls.length !== 4
     || !dast.includes('--stagingReceiptSha256 "$STAGING_RECEIPT_SHA256"')
     || !dast.includes('--providerMetadata "$TRUSTED_PROVIDER_METADATA"')
     || !dast.includes('--artifactReceipt "$ARTIFACT_RECEIPT"')
+    || !dast.includes('--runtimeIntentSha256 "$RUNTIME_INTENT_SHA256"')
   ) {
     issues.push("dast-zap lacks exact provider-authenticated staging receipt validation");
   }
   if (
     !dast.includes('test "$DAST_TARGET" = "$CANONICAL_TARGET"')
     || !dast.includes("curl --fail --silent --show-error --proto '=https' --tlsv1.2 --max-redirs 0")
-    || (dast.match(/--probe "\$PROBE"/g) ?? []).length !== 2
+    || !dast.includes('--preProbe "$PRE_PROBE"')
+    || !dast.includes('--postProbe "$POST_PROBE"')
+    || !dast.includes('--scanStartedAt "$SCAN_STARTED_AT"')
+    || !dast.includes('--scanFinishedAt "$SCAN_FINISHED_AT"')
   ) {
     issues.push("dast-zap does not bind the canonical target to the provider probe and scan");
   }
   if (
-    !dast.includes("dast_receipt_sha256: ${{ steps.receipt.outputs.dast_receipt_sha256 }}")
-    || !dast.includes('--receiptOutput "$DAST_RECEIPT"')
+    !dast.includes("dast_scan_request_sha256: ${{ steps.request.outputs.dast_scan_request_sha256 }}")
+    || !dast.includes("dast_report_artifact_id: ${{ steps.upload-request.outputs.artifact-id }}")
+    || !dast.includes("dast_report_artifact_sha256: ${{ steps.upload-request.outputs.artifact-digest }}")
+    || !dast.includes('--scanRequestOutput "$DAST_SCAN_REQUEST"')
+    || dast.includes('--receiptOutput "$DAST_RECEIPT"')
+    || !dast.includes("PENDING-PROVIDER-ATTESTATION")
+    || !dast.includes("id: upload-request")
+    || !dast.includes("path: ${{ runner.temp }}/dast-scan-request/")
+    || !dast.includes("inputs[dast_report_artifact_sha256]=${DAST_REPORT_ARTIFACT_SHA256}")
+    || !dast.includes("mode]=dast-countersign")
+    || !dast.includes("repository: ${{ steps.dast-provider.outputs.repository }}")
+    || !dast.includes('--scanRequest "$DAST_SCAN_REQUEST"')
+    || !dast.includes('--reportArtifactId "$DAST_REPORT_ARTIFACT_ID"')
+    || !dast.includes('--reportArtifactSha256 "$DAST_REPORT_ARTIFACT_SHA256"')
+    || !dast.includes('--dastProviderMetadata "$DAST_PROVIDER_METADATA"')
+    || !dast.includes('--dastAttestationBundle "$DAST_BUNDLE"')
+    || !dast.includes("--attestationVerifier /usr/local/bin/gh")
     || !dast.includes("name: dast-verification-${{ github.run_id }}")
-    || !dast.includes("path: ${{ runner.temp }}/dast-verification/dast-verification.json")
+    || !dast.includes("path: ${{ runner.temp }}/dast-verification/")
     || !dast.includes("if-no-files-found: error")
   ) {
-    issues.push("dast-zap lacks one exact run-bound DAST artifact and hash output");
+    issues.push("dast-zap lacks independent provider authorization over the exact report artifact and final handoff");
   }
   if (
     !dast.includes("--workflowPath .github/workflows/enterprise-infra.yml")
@@ -145,12 +161,19 @@ export function dastReceiptWiringMismatches(workflowText) {
   }
   if (
     !deploy.includes("name: dast-verification-${{ github.run_id }}")
+    || !deploy.includes("DAST_SCAN_REQUEST_SHA256: ${{ needs.dast-zap.outputs.dast_scan_request_sha256 }}")
+    || !deploy.includes("DAST_REPORT_ARTIFACT_SHA256: ${{ needs.dast-zap.outputs.dast_report_artifact_sha256 }}")
     || !deploy.includes("DAST_RECEIPT_SHA256: ${{ needs.dast-zap.outputs.dast_receipt_sha256 }}")
+    || !deploy.includes('--scanRequest "$DAST_SCAN_REQUEST"')
+    || !deploy.includes('--reportArtifactSha256 "$DAST_REPORT_ARTIFACT_SHA256"')
     || !deploy.includes('--dastReceipt "$DAST_RECEIPT"')
     || !deploy.includes('--dastReceiptSha256 "$DAST_RECEIPT_SHA256"')
+    || !deploy.includes('--dastAttestationBundle "$DAST_ATTESTATION_BUNDLE"')
+    || !deploy.includes('--attestationVerifier /usr/local/bin/gh')
+    || !deploy.includes("DEPLOY_DAST_REPORT_ARTIFACT_SHA256:")
     || (deploy.match(/node \.\/scripts\/dast-runtime-receipt-policy\.mjs/g) ?? []).length !== 1
   ) {
-    issues.push("deploy must revalidate the exact run-bound DAST receipt hash output before mutation");
+    issues.push("deploy must cryptographically revalidate the exact request, report archive and provider receipt before mutation");
   }
   if (/continue-on-error:\s*true/.test(`${release}\n${dast}\n${deploy}`)) {
     issues.push("release, DAST and deploy receipt gates may not continue on error");

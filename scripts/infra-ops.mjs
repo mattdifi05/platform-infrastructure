@@ -2823,6 +2823,8 @@ function infraTestingHygiene() {
     "scripts/supply-chain-policy.test.mjs",
     "scripts/runtime-fingerprint.mjs",
     "scripts/runtime-fingerprint.test.mjs",
+    "scripts/runtime-intent-policy.mjs",
+    "scripts/runtime-intent-policy.test.mjs",
     "scripts/dast-runtime-receipt-policy.mjs",
     "scripts/dast-runtime-receipt-policy.test.mjs",
     "scripts/dast-provider-countersign.test.mjs",
@@ -2875,6 +2877,7 @@ function infraTestingHygiene() {
   run(process.execPath, ["--test", "scripts/runtime-isolation-policy.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/functional-health.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/runtime-fingerprint.test.mjs"], { cwd: infraRoot });
+  run(process.execPath, ["--test", "scripts/runtime-intent-policy.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/dast-runtime-receipt-policy.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/dast-provider-countersign.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/dast-deploy-sink.test.mjs"], { cwd: infraRoot });

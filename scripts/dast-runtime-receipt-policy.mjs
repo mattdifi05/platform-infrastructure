@@ -1053,7 +1053,6 @@ export function buildDastProviderReceipt({
   reportArtifactSha256,
   providerObservedReportEvidence,
   providerProducer,
-  providerMetadataSha256,
   generatedAt = new Date().toISOString(),
 }) {
   const request = canonicalScanRequest(scanRequest);
@@ -1103,7 +1102,6 @@ export function buildDastProviderReceipt({
     },
     semanticVerdict: request.reportEvidence.semanticVerdict,
     candidateProducer: request.producer,
-    providerMetadataSha256: exactSha256(providerMetadataSha256, "DAST provider metadata SHA256"),
     provider: producer,
     generatedAt: exactTimestamp(generatedAt, "provider DAST receipt generatedAt"),
   };
@@ -1116,7 +1114,6 @@ export function validateDastProviderReceipt(receipt, {
   reportArtifactId,
   reportArtifactSha256,
   providerMetadata,
-  providerMetadataSha256,
   providerRunId,
   providerRunAttempt,
   now = new Date().toISOString(),
@@ -1131,7 +1128,6 @@ export function validateDastProviderReceipt(receipt, {
     "kind",
     "provider",
     "providerValidation",
-    "providerMetadataSha256",
     "reportArtifact",
     "reportEvidenceSha256",
     "repository",
@@ -1155,15 +1151,8 @@ export function validateDastProviderReceipt(receipt, {
     invalid("Provider DAST receipt kind/version/status is invalid.");
   }
   const expectedScanRequestSha256 = exactSha256(scanRequestSha256, "DAST scan request SHA256");
-  const expectedProviderMetadataSha256 = exactSha256(
-    providerMetadataSha256,
-    "DAST provider metadata SHA256",
-  );
-  if (
-    receipt.scanRequestSha256 !== expectedScanRequestSha256
-    || receipt.providerMetadataSha256 !== expectedProviderMetadataSha256
-  ) {
-    invalid("Provider DAST receipt does not bind the exact scan request/provider metadata.");
+  if (receipt.scanRequestSha256 !== expectedScanRequestSha256) {
+    invalid("Provider DAST receipt does not bind the exact scan request.");
   }
   const scalarKeys = [
     "repository",
@@ -1552,7 +1541,6 @@ function main() {
         reportArtifactId: options.reportArtifactId,
         reportArtifactSha256: options.reportArtifactSha256,
         providerMetadata: dastProvider.document,
-        providerMetadataSha256: dastProvider.sha256,
         providerRunId: options.dastProviderRunId,
         providerRunAttempt: options.dastProviderRunAttempt,
         now: options.now,

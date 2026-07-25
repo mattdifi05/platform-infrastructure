@@ -223,6 +223,7 @@ jobs:
           node scripts/release-go-no-go-policy.test.mjs
           node scripts/deployment-admission-policy.test.mjs
           node scripts/deployment-receipt-policy.test.mjs
+          node scripts/runtime-intent-policy.test.mjs
           node scripts/dast-admission-policy.test.mjs
           node scripts/activation-bundle.test.mjs
           node scripts/activation-request.test.mjs
@@ -948,7 +949,10 @@ jobs:
           test "$(sha256sum "${artifact_receipts[0]}" | awk '{print $1}')" = "$EXPECTED_ARTIFACT_RECEIPT_SHA256"
           DEPLOYMENT_RECEIPT_SHA256="$(sha256sum "${deployment_receipts[0]}" | awk '{print $1}')"
           STAGING_RECEIPT_SHA256="$(sha256sum "${staging_receipts[0]}" | awk '{print $1}')"
-          RUNTIME_INTENT_SHA256="$(jq -er '.runtimeIntentSha256 | select(test("^[a-f0-9]{64}$"))' "${staging_receipts[0]}")"
+          RUNTIME_INTENT_SHA256="$(jq -er '.runtimeIntentSha256 | select(test("^[a-f0-9]{64}$"))' "${deployment_receipts[0]}")"
+          test "$(jq -er '.runtimeIntentSha256' "${staging_receipts[0]}")" = "$RUNTIME_INTENT_SHA256"
+          jq -c '.runtimeIntent' "${deployment_receipts[0]}" > "${RUNNER_TEMP}/authenticated-runtime-intent.json"
+          test "$(node ./scripts/runtime-intent-policy.mjs --hash "${RUNNER_TEMP}/authenticated-runtime-intent.json")" = "$RUNTIME_INTENT_SHA256"
           SOURCE_ARCHIVE_SHA256="$(sha256sum "${source_archives[0]}" | awk '{print $1}')"
           test "$(jq -r '.sourceArchiveSha256' "${artifact_receipts[0]}")" = "$SOURCE_ARCHIVE_SHA256"
           test "$(jq -r '.sourceArchiveSha256' "${deployment_receipts[0]}")" = "$SOURCE_ARCHIVE_SHA256"
