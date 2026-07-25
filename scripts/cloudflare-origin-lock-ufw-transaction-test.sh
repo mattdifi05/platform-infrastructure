@@ -34,6 +34,7 @@ cat > "$TMP/rules.initial" <<'EOF'
 80/tcp ALLOW IN 203.0.113.0/24 # cloudflare-origin-80
 80/tcp ALLOW IN 203.0.113.0/24 # cloudflare-origin-80
 9443/tcp (v6) ALLOW IN 2001:db8:ffff::/48 # cloudflare-origin-9443
+9000/tcp DENY IN Anywhere
 65002/tcp ALLOW IN Anywhere
 65002/tcp (v6) ALLOW IN Anywhere (v6)
 EOF
@@ -83,24 +84,49 @@ if [ "$1 ${2:-}" = "status numbered" ] || [ "$1 ${2:-}" = "status verbose" ]; th
 fi
 
 if [ "$1 ${2:-}" = "--force delete" ]; then
-  if [ "$3" = allow ]; then
-    target=${4:?missing generic target}
-    awk -v target="$target" '
-      index($0, target " ALLOW IN Anywhere") != 1 &&
-      index($0, target " (v6) ALLOW IN Anywhere") != 1
-    ' "$FAKE_UFW_RULES" > "$FAKE_UFW_RULES.next"
-    mv "$FAKE_UFW_RULES.next" "$FAKE_UFW_RULES"
-    after_mutation "delete-generic:$target"
-    exit 0
-  fi
-  if [ "${FAKE_UFW_CONCURRENT_DROP_GENERIC:-}" = 1 ] && [ ! -e "$FAKE_UFW_CONCURRENT_MARKER" ]; then
+  if [ "${FAKE_UFW_CONCURRENT_SHIFT:-}" = 1 ] && [ ! -e "$FAKE_UFW_CONCURRENT_MARKER" ]; then
     : > "$FAKE_UFW_CONCURRENT_MARKER"
     awk '
-      index($0, "80/tcp ALLOW IN Anywhere") != 1 &&
-      index($0, "443/tcp ALLOW IN Anywhere") != 1 &&
-      index($0, "8443/tcp ALLOW IN Anywhere") != 1
+      index($0, "80/tcp ALLOW IN Anywhere") == 1 ||
+      index($0, "443/tcp ALLOW IN Anywhere") == 1 ||
+      index($0, "8443/tcp ALLOW IN Anywhere") == 1 {
+        generic[++count]=$0
+        next
+      }
+      { print }
+      END { for (i=1; i<=count; i++) print generic[i] }
     ' "$FAKE_UFW_RULES" > "$FAKE_UFW_RULES.next"
     mv "$FAKE_UFW_RULES.next" "$FAKE_UFW_RULES"
+  fi
+  if [ "$3" = allow ]; then
+    if [ "$#" -eq 4 ]; then
+      target=${4:?missing generic target}
+      awk -v target="$target" '
+        index($0, target " ALLOW IN Anywhere") != 1 &&
+        index($0, target " (v6) ALLOW IN Anywhere") != 1
+      ' "$FAKE_UFW_RULES" > "$FAKE_UFW_RULES.next"
+      mutation_label="delete-generic:$target"
+    else
+      [ "$4 $5 $6 $8 $9 ${10} ${12}" = "proto tcp from to any port comment" ] || exit 96
+      cidr=$7
+      port=${11}
+      comment=${13}
+      case "$cidr" in
+        *:*) target="${port}/tcp (v6)" ;;
+        *) target="${port}/tcp" ;;
+      esac
+      if ! awk -v expected="$target ALLOW IN $cidr # $comment" '
+        $0 == expected && !removed { removed=1; next }
+        { print }
+        END { if (!removed) exit 1 }
+      ' "$FAKE_UFW_RULES" > "$FAKE_UFW_RULES.next"; then
+        exit 96
+      fi
+      mutation_label="delete-semantic:$port:$cidr:$comment"
+    fi
+    mv "$FAKE_UFW_RULES.next" "$FAKE_UFW_RULES"
+    after_mutation "$mutation_label"
+    exit 0
   fi
   number=$3
   awk -v drop="$number" 'NR != drop' "$FAKE_UFW_RULES" > "$FAKE_UFW_RULES.next"
@@ -158,7 +184,7 @@ fake_env() {
     FAKE_UFW_MUTATION_COUNT="$TMP/mutation-count" \
     FAKE_UFW_FAIL_AFTER="${FAKE_UFW_FAIL_AFTER:-}" \
     FAKE_UFW_SIGNAL_AFTER="${FAKE_UFW_SIGNAL_AFTER:-}" \
-    FAKE_UFW_CONCURRENT_DROP_GENERIC="${FAKE_UFW_CONCURRENT_DROP_GENERIC:-}" \
+    FAKE_UFW_CONCURRENT_SHIFT="${FAKE_UFW_CONCURRENT_SHIFT:-}" \
     FAKE_UFW_CONCURRENT_MARKER="$TMP/concurrent-marker" \
     FAKE_UFW_PAUSE_AFTER="${FAKE_UFW_PAUSE_AFTER:-}" \
     FAKE_UFW_PAUSE_READY="$TMP/pause-ready" \
@@ -189,6 +215,12 @@ normalize_owned() {
 normalize_ssh() {
   sed -E 's/^[[:space:]]*\[[[:space:]]*[0-9]+\][[:space:]]*//' "$1" \
     | grep -E "^${SSH_PORT}/tcp( \\(v6\\))?[[:space:]]+ALLOW IN Anywhere" \
+    | LC_ALL=C sort
+}
+
+normalize_nonowned() {
+  sed -nE 's/^[[:space:]]*\[[[:space:]]*[0-9]+\][[:space:]]*(.*)$/\1/p' "$1" \
+    | grep -Ev '# cloudflare-origin-[0-9]+$' \
     | LC_ALL=C sort
 }
 
@@ -272,9 +304,9 @@ grep -Fq 'Origin lock rollback verified' "$TMP/signal.out" \
 pass signal-runs-verified-rollback
 
 reset_firewall
-FAKE_UFW_FAIL_AFTER=3
-FAKE_UFW_CONCURRENT_DROP_GENERIC=1
-export FAKE_UFW_FAIL_AFTER FAKE_UFW_CONCURRENT_DROP_GENERIC
+FAKE_UFW_FAIL_AFTER=1
+FAKE_UFW_CONCURRENT_SHIFT=1
+export FAKE_UFW_FAIL_AFTER FAKE_UFW_CONCURRENT_SHIFT
 set +e
 fake_env sh "$SCRIPT_DIR/cloudflare-origin-lock-ufw.sh" --apply \
   --compose-json "$TMP/compose.json" \
@@ -284,7 +316,7 @@ fake_env sh "$SCRIPT_DIR/cloudflare-origin-lock-ufw.sh" --apply \
   > "$TMP/race.out" 2>&1
 race_rc=$?
 set -e
-unset FAKE_UFW_FAIL_AFTER FAKE_UFW_CONCURRENT_DROP_GENERIC
+unset FAKE_UFW_FAIL_AFTER FAKE_UFW_CONCURRENT_SHIFT
 [ "$race_rc" -ne 0 ] || fail "concurrent numbered-rule shift was accepted"
 capture_current_status "$TMP/status.after-race"
 normalize_owned "$TMP/status.before" > "$TMP/owned.before-race"
@@ -295,11 +327,15 @@ normalize_ssh "$TMP/status.before" > "$TMP/ssh.before-race"
 normalize_ssh "$TMP/status.after-race" > "$TMP/ssh.after-race"
 cmp "$TMP/ssh.before-race" "$TMP/ssh.after-race" >/dev/null \
   || fail "concurrent numbered-rule shift deleted SSH recovery rules"
+normalize_nonowned "$TMP/status.before" > "$TMP/nonowned.before-race"
+normalize_nonowned "$TMP/status.after-race" > "$TMP/nonowned.after-race"
+cmp "$TMP/nonowned.before-race" "$TMP/nonowned.after-race" >/dev/null \
+  || fail "concurrent numbered-rule shift lost a non-owned rule"
 grep -Fq 'Default: deny (incoming)' "$TMP/status.after-race" \
   || fail "concurrent numbered-rule shift rollback did not remain fail-closed"
 grep -Fq 'Origin lock rollback verified' "$TMP/race.out" \
   || fail "concurrent numbered-rule shift did not produce verified rollback"
-pass concurrent-numbered-rule-shift-restores-owned-and-ssh
+pass concurrent-index-rotation-preserves-all-nonowned-rules
 
 reset_firewall
 FAKE_UFW_PAUSE_AFTER=1
