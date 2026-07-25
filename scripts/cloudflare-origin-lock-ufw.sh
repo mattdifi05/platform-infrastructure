@@ -360,6 +360,19 @@ normalize_nonowned_snapshot() {
   LC_ALL=C sort "$input" > "$output"
 }
 
+verify_unique_owned_snapshot() {
+  input=$1
+  if ! awk -F '|' '
+    {
+      identity=$2 SUBSEP $3 SUBSEP $4
+      if (++seen[identity] > 1) exit 1
+    }
+  ' "$input"; then
+    echo "Origin lock apply refused: duplicate managed UFW rule semantics must be resolved before mutation." >&2
+    return 1
+  fi
+}
+
 normalize_non_ssh_nonowned_snapshot() {
   input=$1
   output=$2
@@ -420,8 +433,8 @@ delete_one_owned_rule() {
     $2 == port && $3 == source && $4 == comment { count++ }
     END { print count + 0 }
   ' "${delete_prefix}.owned-before")
-  [ "$delete_matches" -ge 1 ] || {
-    echo "Origin lock managed-rule identity changed before deletion." >&2
+  [ "$delete_matches" -eq 1 ] || {
+    echo "Origin lock managed-rule identity is missing or duplicated before deletion." >&2
     return 1
   }
 
@@ -771,6 +784,7 @@ capture_status "$TMP/before"
 verify_recovery_before_mutation "$TMP/before"
 snapshot_boundary_status "$TMP/before" \
   "$TMP/prior-owned-rules" "$TMP/prior-ssh-rules" "$TMP/prior-nonowned-rules"
+verify_unique_owned_snapshot "$TMP/prior-owned-rules"
 verify_canonical_ssh_snapshot "$TMP/prior-ssh-rules"
 normalize_nonowned_snapshot "$TMP/prior-nonowned-rules" "$TMP/prior-nonowned-normalized"
 TRANSACTION_ACTIVE=1
