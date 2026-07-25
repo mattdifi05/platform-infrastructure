@@ -107,8 +107,7 @@
       ],
       "properties": {
         "path": {
-          "type": "string",
-          "minLength": 1
+          "const": "governance/service-asset-ownership.json"
         },
         "sha256": {
           "$ref": "#/$defs/sha256"

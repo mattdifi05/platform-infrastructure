@@ -15,6 +15,8 @@ const RESULT_SCHEMA = "platform.governance-documentation-closure-result/v1";
 const LOCAL_STATUS = "LOCAL-SUPPORT-READY-EXTERNAL-PENDING";
 const EXTERNAL_STATE = "GOVERNANCE-EXTERNAL";
 const SYNTHETIC_STATE = "SYNTHETIC-TEST";
+const CANONICAL_OWNERSHIP_PATH = "governance/service-asset-ownership.json";
+const CANONICAL_RUNBOOKS_PATH = "governance/runbook-catalog.json";
 
 const REQUIRED_DOMAINS = Object.freeze([
   "hardware",
@@ -78,6 +80,13 @@ const RESPONSIBILITIES = Object.freeze([
 ]);
 
 const ROLE_KEYS = Object.freeze(["primary", "substitute", "approval", "escalation"]);
+const CANONICAL_ROLE_BY_KEY = Object.freeze({
+  primary: "role:platform-governance-primary",
+  substitute: "role:platform-governance-substitute",
+  approval: "role:release-approval-authority",
+  escalation: "role:incident-escalation-authority",
+});
+const CANONICAL_ROLE_IDS = Object.freeze(Object.values(CANONICAL_ROLE_BY_KEY));
 const OWNERSHIP_EXTERNAL_CONDITIONS = Object.freeze([
   "Authenticated primary and substitute acknowledgements for every catalog asset remain GOVERNANCE-EXTERNAL and GO-blocking.",
 ]);
@@ -85,9 +94,7 @@ const RUNBOOK_EXTERNAL_CONDITIONS = Object.freeze([
   "Independent authenticated drills for rollout, rollback, backup, restore, and access-recovery remain GOVERNANCE-EXTERNAL and GO-blocking.",
 ]);
 const PLACEHOLDER_PATTERN = /(?:^|[^a-z0-9])(?:todo|tbd|placeholder|unknown|unassigned|someone|fixme|n\/a)(?:$|[^a-z0-9])/i;
-const RUNTIME_ROLE_PATTERN = /(?:^|[:/_-])(?:root|docker|daemon|container|runtime|system|www-data|node|postgres|mysql|mariadb|redis|nats|keycloak)(?:$|[:/_-])/i;
 const HASH_PATTERN = /^[a-f0-9]{64}$/;
-const ROLE_PATTERN = /^role:[a-z][a-z0-9-]{4,79}$/;
 const SUBJECT_PATTERN = /^(?:provider|oidc|webauthn|test)-subject-sha256:[a-f0-9]{64}$/;
 const RECEIPT_ID_PATTERN = /^[a-z0-9][a-z0-9._-]{7,127}$/;
 
@@ -139,6 +146,25 @@ function sha256(data) {
   return createHash("sha256").update(data).digest("hex");
 }
 
+function gitText(root, args, label) {
+  const result = spawnSync("git", ["-C", root, ...args], {
+    encoding: "utf8",
+    env: { PATH: process.env.PATH },
+  });
+  if (result.status !== 0) fail("GIT_STATE_UNAVAILABLE", `${label} could not be read from Git.`);
+  return result.stdout.trim();
+}
+
+function gitBytes(root, args, label) {
+  const result = spawnSync("git", ["-C", root, ...args], {
+    encoding: null,
+    env: { PATH: process.env.PATH },
+    maxBuffer: 16 * 1024 * 1024,
+  });
+  if (result.status !== 0) fail("GIT_STATE_UNAVAILABLE", `${label} could not be read from Git.`);
+  return result.stdout;
+}
+
 function canonicalRelativePath(value, label) {
   nonPlaceholderString(value, label);
   if (value.includes("\\") || value.includes("\0") || value.includes("\n") || value.includes("\r")) {
@@ -161,6 +187,28 @@ function repositoryRoot(value) {
     fail("INVALID_ROOT", "Root must be the exact top level of a Git worktree.");
   }
   return resolved;
+}
+
+function repositoryContext(root) {
+  const commit = gitText(root, ["rev-parse", "--verify", "HEAD^{commit}"], "Current repository commit");
+  const tree = gitText(root, ["rev-parse", "--verify", "HEAD^{tree}"], "Current repository tree");
+  if (!/^[a-f0-9]{40,64}$/.test(commit) || !/^[a-f0-9]{40,64}$/.test(tree)) {
+    fail("INVALID_GIT_IDENTITY", "Current repository commit and tree must be exact hexadecimal object ids.");
+  }
+  return {
+    root,
+    commit,
+    tree,
+    authoritativePaths: new Map(),
+  };
+}
+
+function assertRepositoryIdentity(context) {
+  const commit = gitText(context.root, ["rev-parse", "--verify", "HEAD^{commit}"], "Current repository commit");
+  const tree = gitText(context.root, ["rev-parse", "--verify", "HEAD^{tree}"], "Current repository tree");
+  if (commit !== context.commit || tree !== context.tree) {
+    fail("REPOSITORY_IDENTITY_CHANGED", "Repository commit or tree changed during governance validation.");
+  }
 }
 
 function resolveRegularFile(root, relative, label, { tracked = true } = {}) {
@@ -224,26 +272,51 @@ function resolveUntrackedRegularFile(root, relative, label) {
   return file;
 }
 
-function readJsonFile(root, relative, label, { tracked = true } = {}) {
-  const file = resolveRegularFile(root, relative, label, { tracked });
+function readAuthoritativeFile(context, relative, label) {
+  const safeRelative = canonicalRelativePath(relative, label);
+  const file = resolveRegularFile(context.root, safeRelative, label);
+  const dirty = spawnSync("git", ["-C", context.root, "diff", "--quiet", "HEAD", "--", safeRelative], {
+    encoding: "utf8",
+    env: { PATH: process.env.PATH },
+  });
+  if (dirty.status !== 0) {
+    fail("DIRTY_AUTHORITATIVE_PATH", `${label} must be unchanged from HEAD in both the index and worktree.`);
+  }
+  const headBytes = gitBytes(context.root, ["show", `HEAD:${safeRelative}`], `${label} HEAD bytes`);
+  const indexBytes = gitBytes(context.root, ["show", `:${safeRelative}`], `${label} index bytes`);
+  const worktreeBytes = readFileSync(file);
+  if (!headBytes.equals(indexBytes) || !headBytes.equals(worktreeBytes)) {
+    fail("AUTHORITATIVE_BYTES_MISMATCH", `${label} must be byte-identical in HEAD, the index, and the worktree.`);
+  }
+  const digest = sha256(worktreeBytes);
+  const existing = context.authoritativePaths.get(safeRelative);
+  if (existing && existing !== digest) {
+    fail("AUTHORITATIVE_BYTES_CHANGED", `${label} changed during governance validation.`);
+  }
+  context.authoritativePaths.set(safeRelative, digest);
+  return { file, contents: worktreeBytes, relative: safeRelative, sha256: digest };
+}
+
+function readJsonFile(context, relative, label) {
+  const authoritative = readAuthoritativeFile(context, relative, label);
   let value;
   try {
-    value = JSON.parse(readFileSync(file, "utf8"));
+    value = JSON.parse(authoritative.contents.toString("utf8"));
   } catch {
     fail("INVALID_JSON", `${label} must contain valid JSON.`);
   }
-  return { file, value };
+  return { ...authoritative, value };
 }
 
-function validateArtifact(root, artifact, label) {
+function validateArtifact(context, artifact, label) {
   exactKeys(artifact, ["path", "sha256", "anchors"], label);
   if (!HASH_PATTERN.test(artifact.sha256)) fail("INVALID_HASH", `${label}.sha256 must be a lowercase SHA-256 digest.`);
   if (!Array.isArray(artifact.anchors) || artifact.anchors.length === 0) {
     fail("MISSING_ANCHOR", `${label}.anchors must contain at least one exact anchor.`);
   }
-  const file = resolveRegularFile(root, artifact.path, `${label}.path`);
-  const contents = readFileSync(file);
-  if (sha256(contents) !== artifact.sha256) fail("HASH_MISMATCH", `${label} hash does not match the tracked regular file.`);
+  const authoritative = readAuthoritativeFile(context, artifact.path, `${label}.path`);
+  const contents = authoritative.contents;
+  if (authoritative.sha256 !== artifact.sha256) fail("HASH_MISMATCH", `${label} hash does not match the tracked regular file.`);
   const text = contents.toString("utf8");
   const seen = new Set();
   for (const [index, anchor] of artifact.anchors.entries()) {
@@ -260,9 +333,9 @@ function validateArtifact(root, artifact, label) {
 }
 
 function validateRoleRef(value, label) {
-  if (typeof value !== "string" || !ROLE_PATTERN.test(value)) fail("INVALID_ROLE", `${label} is not a canonical role reference.`);
-  if (PLACEHOLDER_PATTERN.test(value)) fail("PLACEHOLDER_REJECTED", `${label} contains a placeholder role.`);
-  if (RUNTIME_ROLE_PATTERN.test(value)) fail("RUNTIME_IDENTITY_REJECTED", `${label} cannot identify a runtime principal.`);
+  if (typeof value !== "string" || !CANONICAL_ROLE_IDS.includes(value)) {
+    fail("NON_CANONICAL_ROLE", `${label} must be one of the four closed canonical accountability role ids.`);
+  }
   return value;
 }
 
@@ -270,6 +343,9 @@ function validateRoleAssignments(value, roles, label) {
   exactKeys(value, ROLE_KEYS, label);
   for (const key of ROLE_KEYS) {
     validateRoleRef(value[key], `${label}.${key}`);
+    if (value[key] !== CANONICAL_ROLE_BY_KEY[key]) {
+      fail("NON_CANONICAL_ROLE_ASSIGNMENT", `${label}.${key} must use its exact canonical accountability role id.`);
+    }
     if (!roles.has(value[key])) fail("UNKNOWN_ROLE", `${label}.${key} is not declared in the ownership role catalog.`);
   }
   if (new Set(ROLE_KEYS.map((key) => value[key])).size !== ROLE_KEYS.length) {
@@ -287,7 +363,7 @@ function validateReview(value, label) {
   }
 }
 
-function validateOwnership(root, manifest) {
+function validateOwnership(context, manifest) {
   exactKeys(manifest, [
     "schema",
     "scope",
@@ -307,7 +383,9 @@ function validateOwnership(root, manifest) {
   exactSet(manifest.requiredDomains, REQUIRED_DOMAINS, "ownership requiredDomains");
   exactSet(manifest.requiredCapabilities, REQUIRED_CAPABILITIES, "ownership requiredCapabilities");
   exactSet(manifest.externalConditions, OWNERSHIP_EXTERNAL_CONDITIONS, "ownership externalConditions");
-  if (!Array.isArray(manifest.roles) || manifest.roles.length < 4) fail("MISSING_ROLES", "Ownership catalog must declare accountability roles.");
+  if (!Array.isArray(manifest.roles) || manifest.roles.length !== CANONICAL_ROLE_IDS.length) {
+    fail("NON_CANONICAL_ROLE", "Ownership catalog must declare exactly the four closed canonical accountability roles.");
+  }
   const roles = new Map();
   for (const [index, role] of manifest.roles.entries()) {
     const label = `ownership roles[${index}]`;
@@ -323,6 +401,7 @@ function validateOwnership(root, manifest) {
     }
     roles.set(role.id, role);
   }
+  exactSet([...roles.keys()], CANONICAL_ROLE_IDS, "ownership canonical role ids");
 
   if (!Array.isArray(manifest.assets) || manifest.assets.length === 0) fail("MISSING_ASSETS", "Ownership catalog must contain assets.");
   const assetIds = new Set();
@@ -344,7 +423,7 @@ function validateOwnership(root, manifest) {
       capabilities.push(capability);
     }
     if (!Array.isArray(asset.artifactRefs) || asset.artifactRefs.length === 0) fail("MISSING_ARTIFACT", `${label} must bind tracked artifacts.`);
-    asset.artifactRefs.forEach((artifact, artifactIndex) => validateArtifact(root, artifact, `${label}.artifactRefs[${artifactIndex}]`));
+    asset.artifactRefs.forEach((artifact, artifactIndex) => validateArtifact(context, artifact, `${label}.artifactRefs[${artifactIndex}]`));
     validateRoleAssignments(asset.roles, roles, `${label}.roles`);
     exactKeys(asset.acknowledgement, ["state", "authenticatedReceiptRequired"], `${label}.acknowledgement`);
     if (asset.acknowledgement.state !== EXTERNAL_STATE || asset.acknowledgement.authenticatedReceiptRequired !== true) {
@@ -360,7 +439,7 @@ function validateOwnership(root, manifest) {
   return { roles, assetIds, manifest };
 }
 
-function validateRunbooks(root, manifest, roles) {
+function validateRunbooks(context, manifest, roles) {
   exactKeys(manifest, [
     "schema",
     "scope",
@@ -401,7 +480,7 @@ function validateRunbooks(root, manifest, roles) {
     if (ids.has(runbook.id)) fail("DUPLICATE_RUNBOOK", `${label}.id is duplicated.`);
     ids.add(runbook.id);
     types.push(runbook.type);
-    validateArtifact(root, runbook.artifact, `${label}.artifact`);
+    validateArtifact(context, runbook.artifact, `${label}.artifact`);
     validateRoleAssignments(runbook.roles, roles, `${label}.roles`);
     if (runbook.preservationRequired !== true || runbook.rollbackRequired !== true) {
       fail("INCOMPLETE_RUNBOOK_SAFETY", `${label} must require preservation and rollback.`);
@@ -445,19 +524,13 @@ function validateReceiptClass(receipt, label) {
   return synthetic;
 }
 
-function validateCatalogBinding(root, value, label) {
+function validateCatalogBinding(value, expected, label) {
   exactKeys(value, ["path", "sha256"], label);
   if (!HASH_PATTERN.test(value.sha256)) fail("INVALID_HASH", `${label}.sha256 must be a lowercase SHA-256 digest.`);
-  const file = resolveRegularFile(root, value.path, `${label}.path`);
-  const contents = readFileSync(file);
-  if (sha256(contents) !== value.sha256) fail("HASH_MISMATCH", `${label} does not bind the exact catalog bytes.`);
-  let catalog;
-  try {
-    catalog = JSON.parse(contents.toString("utf8"));
-  } catch {
-    fail("INVALID_JSON", `${label}.path does not contain valid JSON.`);
+  canonicalRelativePath(value.path, `${label}.path`);
+  if (value.path !== expected.path || value.sha256 !== expected.sha256) {
+    fail("CATALOG_BINDING_MISMATCH", `${label} must match the exact canonical catalog path and SHA-256 passed to the validator.`);
   }
-  return catalog;
 }
 
 function validateSubject(value, evidenceClass, label) {
@@ -465,7 +538,7 @@ function validateSubject(value, evidenceClass, label) {
   if (evidenceClass === EXTERNAL_STATE && value.startsWith("test-")) fail("SYNTHETIC_IDENTITY_REJECTED", `${label} cannot use a test identity in external evidence.`);
 }
 
-function validateAcceptanceReceipt(root, receipt) {
+function validateAcceptanceReceipt(catalogs, receipt) {
   exactKeys(receipt, [
     "schema",
     "receiptId",
@@ -483,8 +556,9 @@ function validateAcceptanceReceipt(root, receipt) {
   if (receipt.scope !== "platform-infrastructure") fail("INVALID_SCOPE", "Acceptance receipt scope must be platform-infrastructure.");
   const synthetic = validateReceiptClass(receipt, "acceptance receipt");
   const issuedAt = parseTime(receipt.issuedAt, "acceptance receipt.issuedAt");
-  const ownershipManifest = validateCatalogBinding(root, receipt.catalog, "acceptance receipt.catalog");
-  const ownership = validateOwnership(root, ownershipManifest);
+  validateCatalogBinding(receipt.catalog, catalogs.ownershipBinding, "acceptance receipt.catalog");
+  const ownershipManifest = catalogs.ownership.manifest;
+  const ownership = catalogs.ownership;
   if (!Array.isArray(receipt.acknowledgements)) fail("MISSING_ACKNOWLEDGEMENTS", "Acceptance receipt must contain acknowledgements.");
   const expectedPairs = new Set();
   for (const asset of ownershipManifest.assets) {
@@ -566,7 +640,7 @@ function sameArtifact(left, right) {
     left.anchors.length === right.anchors.length && left.anchors.every((anchor, index) => anchor === right.anchors[index]);
 }
 
-function validateDrillReceipt(root, receipt, rolesOverride = null) {
+function validateDrillReceipt(catalogs, receipt) {
   exactKeys(receipt, [
     "schema",
     "receiptId",
@@ -590,16 +664,11 @@ function validateDrillReceipt(root, receipt, rolesOverride = null) {
   if (receipt.scope !== "platform-infrastructure") fail("INVALID_SCOPE", "Drill receipt scope must be platform-infrastructure.");
   const synthetic = validateReceiptClass(receipt, "drill receipt");
   parseTime(receipt.performedAt, "drill receipt.performedAt");
-  const catalogManifest = validateCatalogBinding(root, receipt.catalog, "drill receipt.catalog");
-  let roles = rolesOverride;
-  if (!roles) {
-    const defaultOwnership = readJsonFile(root, "governance/service-asset-ownership.json", "default ownership catalog");
-    roles = validateOwnership(root, defaultOwnership.value).roles;
-  }
-  const catalog = validateRunbooks(root, catalogManifest, roles);
+  validateCatalogBinding(receipt.catalog, catalogs.runbooksBinding, "drill receipt.catalog");
+  const catalog = catalogs.runbooks;
   const runbook = catalog.byId.get(receipt.runbookId);
   if (!runbook || runbook.type !== receipt.runbookType) fail("UNKNOWN_RUNBOOK", "Drill receipt does not match an exact catalog runbook id and type.");
-  validateArtifact(root, receipt.artifact, "drill receipt.artifact");
+  validateArtifact(catalogs.context, receipt.artifact, "drill receipt.artifact");
   if (!sameArtifact(receipt.artifact, runbook.artifact)) fail("ARTIFACT_BINDING_MISMATCH", "Drill receipt artifact does not exactly match the runbook catalog binding.");
   exactKeys(receipt.independentOperator, ["authenticatedSubjectRef", "authentication", "independentFromPrimary"], "drill receipt.independentOperator");
   validateSubject(receipt.independentOperator.authenticatedSubjectRef, receipt.evidenceClass, "drill receipt.independentOperator.authenticatedSubjectRef");
@@ -636,14 +705,40 @@ function loadCatalogs(options) {
   const root = repositoryRoot(requiredOption(options, "root"));
   const ownershipPath = requiredOption(options, "ownership");
   const runbooksPath = requiredOption(options, "runbooks");
-  const ownershipFile = readJsonFile(root, ownershipPath, "ownership catalog");
-  const ownership = validateOwnership(root, ownershipFile.value);
-  const runbookFile = readJsonFile(root, runbooksPath, "runbook catalog");
-  const runbooks = validateRunbooks(root, runbookFile.value, ownership.roles);
-  return { root, ownership, runbooks, ownershipPath, runbooksPath };
+  if (ownershipPath !== CANONICAL_OWNERSHIP_PATH || runbooksPath !== CANONICAL_RUNBOOKS_PATH) {
+    fail(
+      "NON_CANONICAL_CATALOG_PATH",
+      `Catalog arguments must be exactly ${CANONICAL_OWNERSHIP_PATH} and ${CANONICAL_RUNBOOKS_PATH}.`,
+    );
+  }
+  const context = repositoryContext(root);
+  const ownershipFile = readJsonFile(context, ownershipPath, "ownership catalog");
+  const ownership = validateOwnership(context, ownershipFile.value);
+  const runbookFile = readJsonFile(context, runbooksPath, "runbook catalog");
+  const runbooks = validateRunbooks(context, runbookFile.value, ownership.roles);
+  assertRepositoryIdentity(context);
+  return {
+    root,
+    context,
+    ownership,
+    runbooks,
+    ownershipBinding: { path: ownershipPath, sha256: ownershipFile.sha256 },
+    runbooksBinding: { path: runbooksPath, sha256: runbookFile.sha256 },
+  };
 }
 
-function catalogResult() {
+function repositoryBinding(catalogs) {
+  assertRepositoryIdentity(catalogs.context);
+  return {
+    commit: catalogs.context.commit,
+    tree: catalogs.context.tree,
+    authoritativePaths: [...catalogs.context.authoritativePaths]
+      .map(([pathValue, digest]) => ({ path: pathValue, sha256: digest }))
+      .sort((left, right) => left.path.localeCompare(right.path)),
+  };
+}
+
+function catalogResult(catalogs) {
   return {
     schema: RESULT_SCHEMA,
     valid: true,
@@ -653,6 +748,7 @@ function catalogResult() {
       ...OWNERSHIP_EXTERNAL_CONDITIONS,
       ...RUNBOOK_EXTERNAL_CONDITIONS,
     ],
+    repositoryBinding: repositoryBinding(catalogs),
   };
 }
 
@@ -693,13 +789,13 @@ function gateResult(catalogs, options) {
   const externalDrills = [];
   const receiptIds = new Set();
   for (const file of acceptanceFiles) {
-    const result = validateAcceptanceReceipt(catalogs.root, readUntrackedReceipt(catalogs.root, file, "acceptance receipt"));
+    const result = validateAcceptanceReceipt(catalogs, readUntrackedReceipt(catalogs.root, file, "acceptance receipt"));
     if (receiptIds.has(result.receipt.receiptId)) fail("DUPLICATE_RECEIPT_ID", "Governance receipt ids must be unique.");
     receiptIds.add(result.receipt.receiptId);
     if (!result.synthetic) externalAcceptances.push(result);
   }
   for (const file of drillFiles) {
-    const result = validateDrillReceipt(catalogs.root, readUntrackedReceipt(catalogs.root, file, "drill receipt"), catalogs.ownership.roles);
+    const result = validateDrillReceipt(catalogs, readUntrackedReceipt(catalogs.root, file, "drill receipt"));
     if (receiptIds.has(result.receipt.receiptId)) fail("DUPLICATE_RECEIPT_ID", "Governance receipt ids must be unique.");
     receiptIds.add(result.receipt.receiptId);
     if (!result.synthetic) externalDrills.push(result);
@@ -747,6 +843,7 @@ function gateResult(catalogs, options) {
     gateAdmissible: false,
     doesNotAuthorizeDeployment: true,
     blockers,
+    repositoryBinding: repositoryBinding(catalogs),
   };
 }
 
@@ -754,20 +851,21 @@ function main(argv) {
   const command = argv[0];
   if (command === "catalogs") {
     const options = parseOptions(argv.slice(1), new Set(["root", "ownership", "runbooks"]));
-    loadCatalogs(options);
-    return { result: catalogResult(), exitCode: 0 };
+    const catalogs = loadCatalogs(options);
+    return { result: catalogResult(catalogs), exitCode: 0 };
   }
   if (command === "receipt") {
-    const options = parseOptions(argv.slice(1), new Set(["root", "kind", "receipt"]));
-    const root = repositoryRoot(requiredOption(options, "root"));
+    const options = parseOptions(argv.slice(1), new Set(["root", "ownership", "runbooks", "kind", "receipt"]));
+    const catalogs = loadCatalogs(options);
+    const root = catalogs.root;
     const kind = requiredOption(options, "kind");
     const receiptPath = requiredOption(options, "receipt");
     if (path.isAbsolute(receiptPath)) fail("INVALID_PATH", "Receipt path must be repository-relative.");
     const receipt = readUntrackedReceipt(root, receiptPath, "receipt");
     const validated = kind === "acceptance"
-      ? validateAcceptanceReceipt(root, receipt)
+      ? validateAcceptanceReceipt(catalogs, receipt)
       : kind === "drill"
-        ? validateDrillReceipt(root, receipt)
+        ? validateDrillReceipt(catalogs, receipt)
         : fail("INVALID_RECEIPT_KIND", "Receipt kind must be acceptance or drill.");
     return {
       result: {
@@ -776,6 +874,7 @@ function main(argv) {
         status: validated.synthetic ? "SYNTHETIC-NON-GATE-ADMISSIBLE" : "GOVERNANCE-EXTERNAL-VERIFICATION-PENDING",
         gateAdmissible: false,
         doesNotAuthorizeDeployment: true,
+        repositoryBinding: repositoryBinding(catalogs),
       },
       exitCode: 0,
     };

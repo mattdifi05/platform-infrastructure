@@ -54,9 +54,9 @@ const REQUIRED_RUNBOOK_TYPES = [
   "access-recovery",
 ];
 const CANONICAL_ROLE_IDS = [
-  "role:platform-operations-primary",
-  "role:platform-operations-substitute",
-  "role:change-approval-authority",
+  "role:platform-governance-primary",
+  "role:platform-governance-substitute",
+  "role:release-approval-authority",
   "role:incident-escalation-authority",
 ];
 
@@ -83,9 +83,9 @@ function initFixture() {
   writeFileSync(path.join(root, "docs", "reference.md"), reference, "utf8");
 
   const roles = [
-    "role:platform-operations-primary",
-    "role:platform-operations-substitute",
-    "role:change-approval-authority",
+    "role:platform-governance-primary",
+    "role:platform-governance-substitute",
+    "role:release-approval-authority",
     "role:incident-escalation-authority",
   ].map((id) => ({
     id,
@@ -114,9 +114,9 @@ function initFixture() {
         anchors: [`## Domain ${domain}`],
       }],
       roles: {
-        primary: "role:platform-operations-primary",
-        substitute: "role:platform-operations-substitute",
-        approval: "role:change-approval-authority",
+        primary: "role:platform-governance-primary",
+        substitute: "role:platform-governance-substitute",
+        approval: "role:release-approval-authority",
         escalation: "role:incident-escalation-authority",
       },
       acknowledgement: {
@@ -165,9 +165,9 @@ function initFixture() {
         anchors: [`## Runbook ${kind}`],
       },
       roles: {
-        primary: "role:platform-operations-primary",
-        substitute: "role:platform-operations-substitute",
-        approval: "role:change-approval-authority",
+        primary: "role:platform-governance-primary",
+        substitute: "role:platform-governance-substitute",
+        approval: "role:release-approval-authority",
         escalation: "role:incident-escalation-authority",
       },
       preservationRequired: true,
@@ -226,8 +226,8 @@ function receiptArgs(root, kind, receiptPath) {
   ];
 }
 
-function commitFixture(root, message) {
-  execFileSync("git", ["add", "--all"], { cwd: root });
+function commitFixture(root, message, paths = null) {
+  execFileSync("git", paths ? ["add", "--", ...paths] : ["add", "--all"], { cwd: root });
   execFileSync("git", ["commit", "-qm", message], { cwd: root });
 }
 
@@ -530,7 +530,7 @@ test("synthetic acknowledgement and drill receipts are structurally testable but
         acknowledgedAt: "2026-07-22T00:00:00Z",
       }))),
       approval: {
-        roleRef: "role:change-approval-authority",
+        roleRef: "role:release-approval-authority",
         authenticatedSubjectRef: `test-subject-sha256:${"2".repeat(64)}`,
         authentication: {
           method: "synthetic",
@@ -666,7 +666,10 @@ test("synthetic acknowledgement and drill receipts are structurally testable but
 
     writeJson(path.join(root, "governance", "shadow-ownership.json"), ownership);
     writeJson(path.join(root, "governance", "shadow-runbooks.json"), runbooks);
-    commitFixture(root, "add shadow governance catalogs");
+    commitFixture(root, "add shadow governance catalogs", [
+      "governance/shadow-ownership.json",
+      "governance/shadow-runbooks.json",
+    ]);
     externalAcceptance.catalog = {
       path: "governance/shadow-ownership.json",
       sha256: sha256(readFileSync(path.join(root, "governance", "shadow-ownership.json"))),

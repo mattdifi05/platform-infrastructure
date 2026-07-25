@@ -80,6 +80,8 @@
     "roles": {
       "type": "array",
       "minItems": 4,
+      "maxItems": 4,
+      "uniqueItems": true,
       "items": {
         "$ref": "#/$defs/role"
       }
@@ -137,7 +139,12 @@
     },
     "roleRef": {
       "type": "string",
-      "pattern": "^role:[a-z][a-z0-9-]{4,79}$"
+      "enum": [
+        "role:platform-governance-primary",
+        "role:platform-governance-substitute",
+        "role:release-approval-authority",
+        "role:incident-escalation-authority"
+      ]
     },
     "roleAssignments": {
       "type": "object",
@@ -150,16 +157,16 @@
       ],
       "properties": {
         "primary": {
-          "$ref": "#/$defs/roleRef"
+          "const": "role:platform-governance-primary"
         },
         "substitute": {
-          "$ref": "#/$defs/roleRef"
+          "const": "role:platform-governance-substitute"
         },
         "approval": {
-          "$ref": "#/$defs/roleRef"
+          "const": "role:release-approval-authority"
         },
         "escalation": {
-          "$ref": "#/$defs/roleRef"
+          "const": "role:incident-escalation-authority"
         }
       }
     },
