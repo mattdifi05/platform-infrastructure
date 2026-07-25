@@ -51,6 +51,15 @@ after_mutation() {
   count=$((count + 1))
   printf '%s\n' "$count" > "$FAKE_UFW_MUTATION_COUNT"
   log "MUTATION $count: $*"
+  if [ "${FAKE_UFW_PAUSE_AFTER:-}" = "$count" ]; then
+    : > "$FAKE_UFW_PAUSE_READY"
+    attempts=0
+    while [ ! -f "$FAKE_UFW_PAUSE_RELEASE" ]; do
+      attempts=$((attempts + 1))
+      [ "$attempts" -le 100 ] || exit 98
+      sleep 0.05
+    done
+  fi
   if [ "${FAKE_UFW_SIGNAL_AFTER:-}" = "$count" ]; then
     kill -TERM "$PPID"
     exit 0
@@ -83,6 +92,15 @@ if [ "$1 ${2:-}" = "--force delete" ]; then
     mv "$FAKE_UFW_RULES.next" "$FAKE_UFW_RULES"
     after_mutation "delete-generic:$target"
     exit 0
+  fi
+  if [ "${FAKE_UFW_CONCURRENT_DROP_GENERIC:-}" = 1 ] && [ ! -e "$FAKE_UFW_CONCURRENT_MARKER" ]; then
+    : > "$FAKE_UFW_CONCURRENT_MARKER"
+    awk '
+      index($0, "80/tcp ALLOW IN Anywhere") != 1 &&
+      index($0, "443/tcp ALLOW IN Anywhere") != 1 &&
+      index($0, "8443/tcp ALLOW IN Anywhere") != 1
+    ' "$FAKE_UFW_RULES" > "$FAKE_UFW_RULES.next"
+    mv "$FAKE_UFW_RULES.next" "$FAKE_UFW_RULES"
   fi
   number=$3
   awk -v drop="$number" 'NR != drop' "$FAKE_UFW_RULES" > "$FAKE_UFW_RULES.next"
@@ -130,6 +148,11 @@ fake_env() {
     FAKE_UFW_MUTATION_COUNT="$TMP/mutation-count" \
     FAKE_UFW_FAIL_AFTER="${FAKE_UFW_FAIL_AFTER:-}" \
     FAKE_UFW_SIGNAL_AFTER="${FAKE_UFW_SIGNAL_AFTER:-}" \
+    FAKE_UFW_CONCURRENT_DROP_GENERIC="${FAKE_UFW_CONCURRENT_DROP_GENERIC:-}" \
+    FAKE_UFW_CONCURRENT_MARKER="$TMP/concurrent-marker" \
+    FAKE_UFW_PAUSE_AFTER="${FAKE_UFW_PAUSE_AFTER:-}" \
+    FAKE_UFW_PAUSE_READY="$TMP/pause-ready" \
+    FAKE_UFW_PAUSE_RELEASE="$TMP/pause-release" \
     "$@"
 }
 
@@ -139,6 +162,7 @@ reset_firewall() {
   printf '%s\n' 0 > "$TMP/mutation-count"
   : > "$TMP/ufw.log"
   rm -rf "$TMP/state"
+  rm -f "$TMP/concurrent-marker" "$TMP/pause-ready" "$TMP/pause-release"
   fake_env "$TMP/ufw" status numbered > "$TMP/status.before"
 }
 
@@ -236,6 +260,77 @@ cmp "$TMP/ssh.before-signal" "$TMP/ssh.after-signal" >/dev/null \
 grep -Fq 'Origin lock rollback verified' "$TMP/signal.out" \
   || fail "TERM did not report verified rollback"
 pass signal-runs-verified-rollback
+
+reset_firewall
+FAKE_UFW_FAIL_AFTER=3
+FAKE_UFW_CONCURRENT_DROP_GENERIC=1
+export FAKE_UFW_FAIL_AFTER FAKE_UFW_CONCURRENT_DROP_GENERIC
+set +e
+fake_env sh "$SCRIPT_DIR/cloudflare-origin-lock-ufw.sh" --apply \
+  --compose-json "$TMP/compose.json" \
+  --ipv4-file "$TMP/ips-v4" --ipv6-file "$TMP/ips-v6" \
+  --receipt-file "$TMP/receipt.json" --ssh-port "$SSH_PORT" \
+  --state-dir "$TMP/state" --machine-id-file "$TMP/machine-id" \
+  > "$TMP/race.out" 2>&1
+race_rc=$?
+set -e
+unset FAKE_UFW_FAIL_AFTER FAKE_UFW_CONCURRENT_DROP_GENERIC
+[ "$race_rc" -ne 0 ] || fail "concurrent numbered-rule shift was accepted"
+capture_current_status "$TMP/status.after-race"
+normalize_owned "$TMP/status.before" > "$TMP/owned.before-race"
+normalize_owned "$TMP/status.after-race" > "$TMP/owned.after-race"
+cmp "$TMP/owned.before-race" "$TMP/owned.after-race" >/dev/null \
+  || fail "concurrent numbered-rule shift did not restore the prior owned rules"
+normalize_ssh "$TMP/status.before" > "$TMP/ssh.before-race"
+normalize_ssh "$TMP/status.after-race" > "$TMP/ssh.after-race"
+cmp "$TMP/ssh.before-race" "$TMP/ssh.after-race" >/dev/null \
+  || fail "concurrent numbered-rule shift deleted SSH recovery rules"
+grep -Fq 'Default: deny (incoming)' "$TMP/status.after-race" \
+  || fail "concurrent numbered-rule shift rollback did not remain fail-closed"
+grep -Fq 'Origin lock rollback verified' "$TMP/race.out" \
+  || fail "concurrent numbered-rule shift did not produce verified rollback"
+pass concurrent-numbered-rule-shift-restores-owned-and-ssh
+
+reset_firewall
+FAKE_UFW_PAUSE_AFTER=1
+export FAKE_UFW_PAUSE_AFTER
+fake_env sh "$SCRIPT_DIR/cloudflare-origin-lock-ufw.sh" --apply \
+  --compose-json "$TMP/compose.json" \
+  --ipv4-file "$TMP/ips-v4" --ipv6-file "$TMP/ips-v6" \
+  --receipt-file "$TMP/receipt.json" --ssh-port "$SSH_PORT" \
+  --state-dir "$TMP/state" --machine-id-file "$TMP/machine-id" \
+  > "$TMP/concurrent-first.out" 2>&1 &
+first_pid=$!
+attempts=0
+while [ ! -f "$TMP/pause-ready" ]; do
+  attempts=$((attempts + 1))
+  if [ "$attempts" -gt 100 ]; then
+    : > "$TMP/pause-release"
+    wait "$first_pid" || true
+    fail "first concurrent apply did not reach its mutation boundary"
+  fi
+  sleep 0.05
+done
+unset FAKE_UFW_PAUSE_AFTER
+set +e
+fake_env sh "$SCRIPT_DIR/cloudflare-origin-lock-ufw.sh" --apply \
+  --compose-json "$TMP/compose.json" \
+  --ipv4-file "$TMP/ips-v4" --ipv6-file "$TMP/ips-v6" \
+  --receipt-file "$TMP/receipt.json" --ssh-port "$SSH_PORT" \
+  --state-dir "$TMP/state" --machine-id-file "$TMP/machine-id" \
+  > "$TMP/concurrent-second.out" 2>&1
+second_rc=$?
+set -e
+: > "$TMP/pause-release"
+set +e
+wait "$first_pid"
+first_rc=$?
+set -e
+[ "$first_rc" -eq 0 ] || fail "lock owner apply failed"
+[ "$second_rc" -ne 0 ] || fail "second concurrent apply was not rejected"
+grep -Fq 'another origin lock apply owns the transaction lock' "$TMP/concurrent-second.out" \
+  || fail "second concurrent apply did not fail on the transaction lock"
+pass concurrent-apply-is-serialized-before-second-mutation
 
 reset_firewall
 fake_env sh "$SCRIPT_DIR/cloudflare-origin-lock-ufw.sh" --apply \
