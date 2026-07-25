@@ -1,0 +1,260 @@
+{
+  "schema": "platform.runbook-catalog/v1",
+  "scope": "platform-infrastructure",
+  "status": "LOCAL-SUPPORT-READY-EXTERNAL-PENDING",
+  "gateAdmissible": false,
+  "requiredTypes": [
+    "operations",
+    "incident",
+    "provider",
+    "rollout",
+    "rollback",
+    "backup",
+    "restore",
+    "access-recovery"
+  ],
+  "requiredIndependentDrillTypes": [
+    "rollout",
+    "rollback",
+    "backup",
+    "restore",
+    "access-recovery"
+  ],
+  "runbooks": [
+    {
+      "id": "runbook:operations",
+      "type": "operations",
+      "artifact": {
+        "path": "governance/catalog-artifacts/governance-runbooks.md",
+        "sha256": "99faa1d1dfd6cc2b3d2b1d983ad6167a7c2f1a60c0ea16bb6d832bf5b861e3c4",
+        "anchors": [
+          "runbook:operations"
+        ]
+      },
+      "roles": {
+        "primary": "role:platform-governance-primary",
+        "substitute": "role:platform-governance-substitute",
+        "approval": "role:release-approval-authority",
+        "escalation": "role:incident-escalation-authority"
+      },
+      "preservationRequired": true,
+      "rollbackRequired": true,
+      "review": {
+        "cadenceDays": 90,
+        "beforeRollout": true,
+        "afterMaterialChange": true
+      },
+      "drill": {
+        "state": "GOVERNANCE-EXTERNAL",
+        "independentOperatorRequired": true,
+        "exactArtifactBindingRequired": true
+      }
+    },
+    {
+      "id": "runbook:incident",
+      "type": "incident",
+      "artifact": {
+        "path": "governance/catalog-artifacts/governance-runbooks.md",
+        "sha256": "99faa1d1dfd6cc2b3d2b1d983ad6167a7c2f1a60c0ea16bb6d832bf5b861e3c4",
+        "anchors": [
+          "runbook:incident"
+        ]
+      },
+      "roles": {
+        "primary": "role:platform-governance-primary",
+        "substitute": "role:platform-governance-substitute",
+        "approval": "role:release-approval-authority",
+        "escalation": "role:incident-escalation-authority"
+      },
+      "preservationRequired": true,
+      "rollbackRequired": true,
+      "review": {
+        "cadenceDays": 90,
+        "beforeRollout": true,
+        "afterMaterialChange": true
+      },
+      "drill": {
+        "state": "GOVERNANCE-EXTERNAL",
+        "independentOperatorRequired": true,
+        "exactArtifactBindingRequired": true
+      }
+    },
+    {
+      "id": "runbook:provider",
+      "type": "provider",
+      "artifact": {
+        "path": "governance/catalog-artifacts/governance-runbooks.md",
+        "sha256": "99faa1d1dfd6cc2b3d2b1d983ad6167a7c2f1a60c0ea16bb6d832bf5b861e3c4",
+        "anchors": [
+          "runbook:provider"
+        ]
+      },
+      "roles": {
+        "primary": "role:platform-governance-primary",
+        "substitute": "role:platform-governance-substitute",
+        "approval": "role:release-approval-authority",
+        "escalation": "role:incident-escalation-authority"
+      },
+      "preservationRequired": true,
+      "rollbackRequired": true,
+      "review": {
+        "cadenceDays": 90,
+        "beforeRollout": true,
+        "afterMaterialChange": true
+      },
+      "drill": {
+        "state": "GOVERNANCE-EXTERNAL",
+        "independentOperatorRequired": true,
+        "exactArtifactBindingRequired": true
+      }
+    },
+    {
+      "id": "runbook:rollout",
+      "type": "rollout",
+      "artifact": {
+        "path": "governance/catalog-artifacts/governance-runbooks.md",
+        "sha256": "99faa1d1dfd6cc2b3d2b1d983ad6167a7c2f1a60c0ea16bb6d832bf5b861e3c4",
+        "anchors": [
+          "runbook:rollout"
+        ]
+      },
+      "roles": {
+        "primary": "role:platform-governance-primary",
+        "substitute": "role:platform-governance-substitute",
+        "approval": "role:release-approval-authority",
+        "escalation": "role:incident-escalation-authority"
+      },
+      "preservationRequired": true,
+      "rollbackRequired": true,
+      "review": {
+        "cadenceDays": 90,
+        "beforeRollout": true,
+        "afterMaterialChange": true
+      },
+      "drill": {
+        "state": "GOVERNANCE-EXTERNAL",
+        "independentOperatorRequired": true,
+        "exactArtifactBindingRequired": true
+      }
+    },
+    {
+      "id": "runbook:rollback",
+      "type": "rollback",
+      "artifact": {
+        "path": "governance/catalog-artifacts/governance-runbooks.md",
+        "sha256": "99faa1d1dfd6cc2b3d2b1d983ad6167a7c2f1a60c0ea16bb6d832bf5b861e3c4",
+        "anchors": [
+          "runbook:rollback"
+        ]
+      },
+      "roles": {
+        "primary": "role:platform-governance-primary",
+        "substitute": "role:platform-governance-substitute",
+        "approval": "role:release-approval-authority",
+        "escalation": "role:incident-escalation-authority"
+      },
+      "preservationRequired": true,
+      "rollbackRequired": true,
+      "review": {
+        "cadenceDays": 90,
+        "beforeRollout": true,
+        "afterMaterialChange": true
+      },
+      "drill": {
+        "state": "GOVERNANCE-EXTERNAL",
+        "independentOperatorRequired": true,
+        "exactArtifactBindingRequired": true
+      }
+    },
+    {
+      "id": "runbook:backup",
+      "type": "backup",
+      "artifact": {
+        "path": "governance/catalog-artifacts/governance-runbooks.md",
+        "sha256": "99faa1d1dfd6cc2b3d2b1d983ad6167a7c2f1a60c0ea16bb6d832bf5b861e3c4",
+        "anchors": [
+          "runbook:backup"
+        ]
+      },
+      "roles": {
+        "primary": "role:platform-governance-primary",
+        "substitute": "role:platform-governance-substitute",
+        "approval": "role:release-approval-authority",
+        "escalation": "role:incident-escalation-authority"
+      },
+      "preservationRequired": true,
+      "rollbackRequired": true,
+      "review": {
+        "cadenceDays": 90,
+        "beforeRollout": true,
+        "afterMaterialChange": true
+      },
+      "drill": {
+        "state": "GOVERNANCE-EXTERNAL",
+        "independentOperatorRequired": true,
+        "exactArtifactBindingRequired": true
+      }
+    },
+    {
+      "id": "runbook:restore",
+      "type": "restore",
+      "artifact": {
+        "path": "governance/catalog-artifacts/governance-runbooks.md",
+        "sha256": "99faa1d1dfd6cc2b3d2b1d983ad6167a7c2f1a60c0ea16bb6d832bf5b861e3c4",
+        "anchors": [
+          "runbook:restore"
+        ]
+      },
+      "roles": {
+        "primary": "role:platform-governance-primary",
+        "substitute": "role:platform-governance-substitute",
+        "approval": "role:release-approval-authority",
+        "escalation": "role:incident-escalation-authority"
+      },
+      "preservationRequired": true,
+      "rollbackRequired": true,
+      "review": {
+        "cadenceDays": 90,
+        "beforeRollout": true,
+        "afterMaterialChange": true
+      },
+      "drill": {
+        "state": "GOVERNANCE-EXTERNAL",
+        "independentOperatorRequired": true,
+        "exactArtifactBindingRequired": true
+      }
+    },
+    {
+      "id": "runbook:access-recovery",
+      "type": "access-recovery",
+      "artifact": {
+        "path": "governance/catalog-artifacts/governance-runbooks.md",
+        "sha256": "99faa1d1dfd6cc2b3d2b1d983ad6167a7c2f1a60c0ea16bb6d832bf5b861e3c4",
+        "anchors": [
+          "runbook:access-recovery"
+        ]
+      },
+      "roles": {
+        "primary": "role:platform-governance-primary",
+        "substitute": "role:platform-governance-substitute",
+        "approval": "role:release-approval-authority",
+        "escalation": "role:incident-escalation-authority"
+      },
+      "preservationRequired": true,
+      "rollbackRequired": true,
+      "review": {
+        "cadenceDays": 90,
+        "beforeRollout": true,
+        "afterMaterialChange": true
+      },
+      "drill": {
+        "state": "GOVERNANCE-EXTERNAL",
+        "independentOperatorRequired": true,
+        "exactArtifactBindingRequired": true
+      }
+    }
+  ],
+  "externalConditions": [
+    "Independent authenticated drills for rollout, rollback, backup, restore, and access-recovery remain GOVERNANCE-EXTERNAL and GO-blocking."
+  ]
+}
