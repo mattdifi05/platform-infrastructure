@@ -317,24 +317,24 @@ fake_env sh "$SCRIPT_DIR/cloudflare-origin-lock-ufw.sh" --apply \
 race_rc=$?
 set -e
 unset FAKE_UFW_FAIL_AFTER FAKE_UFW_CONCURRENT_SHIFT
-[ "$race_rc" -ne 0 ] || fail "concurrent numbered-rule shift was accepted"
+[ "$race_rc" -ne 0 ] || fail "concurrent index rotation at the delete boundary was accepted"
 capture_current_status "$TMP/status.after-race"
 normalize_owned "$TMP/status.before" > "$TMP/owned.before-race"
 normalize_owned "$TMP/status.after-race" > "$TMP/owned.after-race"
 cmp "$TMP/owned.before-race" "$TMP/owned.after-race" >/dev/null \
-  || fail "concurrent numbered-rule shift did not restore the prior owned rules"
+  || fail "concurrent index rotation did not restore the prior owned rules"
 normalize_ssh "$TMP/status.before" > "$TMP/ssh.before-race"
 normalize_ssh "$TMP/status.after-race" > "$TMP/ssh.after-race"
 cmp "$TMP/ssh.before-race" "$TMP/ssh.after-race" >/dev/null \
-  || fail "concurrent numbered-rule shift deleted SSH recovery rules"
+  || fail "concurrent index rotation deleted SSH recovery rules"
 normalize_nonowned "$TMP/status.before" > "$TMP/nonowned.before-race"
 normalize_nonowned "$TMP/status.after-race" > "$TMP/nonowned.after-race"
 cmp "$TMP/nonowned.before-race" "$TMP/nonowned.after-race" >/dev/null \
-  || fail "concurrent numbered-rule shift lost a non-owned rule"
+  || fail "concurrent index rotation lost a non-owned rule"
 grep -Fq 'Default: deny (incoming)' "$TMP/status.after-race" \
-  || fail "concurrent numbered-rule shift rollback did not remain fail-closed"
+  || fail "concurrent index rotation rollback did not remain fail-closed"
 grep -Fq 'Origin lock rollback verified' "$TMP/race.out" \
-  || fail "concurrent numbered-rule shift did not produce verified rollback"
+  || fail "concurrent index rotation did not produce verified rollback"
 pass concurrent-index-rotation-preserves-all-nonowned-rules
 
 reset_firewall
