@@ -863,6 +863,12 @@ Esegui DAST solo su staging:
 sh ./scripts/dast-zap-baseline.sh https://api-staging.example.com
 ```
 
+Questa esecuzione manuale produce solo report diagnostici e non autorizza un
+deploy. Il percorso di release protetto richiede la request `PENDING`, il digest
+dell'archivio con i tre report, la validazione semantica di un secondo provider
+indipendente e la relativa attestazione GitHub/Sigstore, tutti vincolati allo
+stesso runtime intent e allo stesso inventario staging pre/post scansione.
+
 ### VPS prod-like con TLS esterno
 
 Usa questo profilo quando dominio e certificati sono gestiti fuori da Docker, per esempio da VPS o da Cloudflare davanti alla VPS. Traefik resta il reverse proxy interno, ascolta solo HTTP sulla porta 80 e inoltra alle app `X-Forwarded-Proto=https`.

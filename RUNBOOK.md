@@ -943,28 +943,44 @@ It also expects production secret
 `CLOUDFLARE_ACCESS_ADMIN_MANIFEST_JSON` for live Cloudflare Access verification.
 `DAST_TARGET` is not itself trusted. For a manual production request it must
 exactly equal the canonical HTTPS origin configured under
-`governance/deployment-admission.json:stagingDast`. The dispatch must also carry
-the owner-reviewed `staging_receipt_sha256`. The configured external provider
-artifact must contain exactly one `trusted-staging-deployment-*.json` whose
-producer matches the authenticated provider run and whose
+`governance/deployment-admission.json:stagingDast`. The workflow generates a
+fresh CSPRNG challenge inside the current protected-main run and dispatches the
+configured independent provider; callers do not select a staging receipt or
+nonce. The provider artifact must contain exactly one
+`trusted-staging-deployment-*.json` whose producer matches the authenticated
+provider run and whose
 `platform-trusted-staging-deployment/v1` body binds:
 
 - the exact repository commit and tree selected by `approved_sha`;
-- the exact artifact-verification receipt hash;
+- the exact artifact-verification and deployment-admission receipt hashes;
+- the canonical `platform-runtime-intent/v1` hash;
 - the canonical staging origin and fixed
   `/.well-known/platform-release.json` probe path;
-- every active release subject image digest and local runtime image ID;
-- the recomputed active-runtime fingerprint and the exact probe SHA256.
+- the sorted target-serving service, container, immutable image, local image ID,
+  health and route inventory, including `control-center`, `project-router` and
+  `traefik`;
+- the recomputed complete and target-serving inventory hashes and exact probe
+  SHA256.
 
 The staging endpoint must serve the provider-bound release-identity JSON at that
-fixed path. The DAST job rejects redirects and any probe mismatch before ZAP,
-then uploads one run-bound `platform-dast-verification/v1` receipt. The
-production job revalidates its hash, candidate, target, subject set, provider
-metadata, current workflow producer and freshness before installing the SSH key
-or invoking `deploy-vps.sh`. A successful ZAP exit or arbitrary report artifact
-without this chain never authorizes deployment. Until the provider channel and
-canonical target change from `EXTERNAL-PENDING` to an owner-reviewed
-configuration, provider/staging execution remains blocked; local tests do not
+fixed path. The DAST job rejects redirects and any pre/post continuity mismatch,
+runs the immutable ZAP engine, and can emit only a
+`platform-dast-scan-request/v1` with status
+`PENDING-PROVIDER-ATTESTATION`. It uploads that request plus the exact JSON,
+HTML and XML reports as one run/challenge-bound artifact and carries both the
+GitHub artifact ID and archive SHA256 to a second independent provider run.
+That provider must download and parse the observed report bytes, countersign the
+complete file inventory and strict zero-risk semantic verdict, and publish a
+`platform-dast-verification/v1` receipt with a GitHub/Sigstore attestation.
+
+The production job and both local and remote deployment sinks revalidate the
+request, archive digest, provider metadata/run identity, countersigned receipt,
+offline attestation bundle, canonical runtime intent and pinned verifier before
+SSH or any checkout/mutation boundary. A successful ZAP exit, copied candidate
+verdict, artifact ID without its archive digest, or unsigned report receipt
+never authorizes deployment. Until the provider channel and canonical target
+change from `EXTERNAL-PENDING` to an owner-reviewed configuration,
+provider/staging/network/live execution remains blocked; local tests do not
 close that external condition.
 
 Infrastructure CI intentionally does not checkout project
