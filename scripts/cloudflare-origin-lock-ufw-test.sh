@@ -187,7 +187,8 @@ if [ "$1 ${2:-}" = "status numbered" ] || [ "$1 ${2:-}" = "status verbose" ]; th
   else
     cat "$FAKE_UFW_BEFORE"
   fi
-elif [ "$1 ${2:-}" = "--force delete" ] && [ "$3" != allow ]; then
+elif [ "$1 ${2:-}" = "--force delete" ] &&
+     { [ "$3" != allow ] || [ "${4:-}" = proto ]; }; then
   : > "$FAKE_UFW_DELETED"
 elif [ "$1" = reload ]; then
   : > "$FAKE_UFW_RELOADED"
@@ -202,7 +203,8 @@ FAKE_UFW_BEFORE="$TMP/status-before" FAKE_UFW_AFTER="$TMP/status-good" \
   sh "$SCRIPT_DIR/cloudflare-origin-lock-ufw.sh" --apply --compose-json "$TMP/compose.json" \
     --ipv4-file "$TMP/ips-v4" --ipv6-file "$TMP/ips-v6" --receipt-file "$TMP/receipt.json" \
     --ssh-port "$SSH_PORT" --state-dir "$TMP/state" --machine-id-file "$TMP/machine-id" >/dev/null
-grep -Fx -- '--force delete 3' "$TMP/ufw.log" >/dev/null
+grep -Fx -- '--force delete allow proto tcp from 203.0.113.0/24 to any port 80 comment cloudflare-origin-80' \
+  "$TMP/ufw.log" >/dev/null
 grep -F 'allow proto tcp from 173.245.48.0/20 to any port 80 comment cloudflare-origin-80' "$TMP/ufw.log" >/dev/null
 grep -Fx -- '--force delete allow 80/tcp' "$TMP/ufw.log" >/dev/null
 grep -Fx 'default deny incoming' "$TMP/ufw.log" >/dev/null

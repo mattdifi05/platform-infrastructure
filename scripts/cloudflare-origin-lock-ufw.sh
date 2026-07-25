@@ -416,10 +416,11 @@ delete_one_owned_rule() {
     return 1
   fi
 
-  delete_number=$(awk -F '|' -v port="$delete_port" -v source="$delete_source" -v comment="$delete_comment" '
-    $2 == port && $3 == source && $4 == comment { print $1; exit }
+  delete_matches=$(awk -F '|' -v port="$delete_port" -v source="$delete_source" -v comment="$delete_comment" '
+    $2 == port && $3 == source && $4 == comment { count++ }
+    END { print count + 0 }
   ' "${delete_prefix}.owned-before")
-  [ -n "$delete_number" ] || {
+  [ "$delete_matches" -ge 1 ] || {
     echo "Origin lock managed-rule identity changed before deletion." >&2
     return 1
   }
@@ -434,7 +435,8 @@ delete_one_owned_rule() {
   fi
 
   delete_rc=0
-  "$UFW_BIN" --force delete "$delete_number" || delete_rc=$?
+  "$UFW_BIN" --force delete allow proto tcp from "$delete_source" to any \
+    port "$delete_port" comment "$delete_comment" || delete_rc=$?
 
   if ! capture_status "${delete_prefix}.after" ||
      ! snapshot_boundary_status "${delete_prefix}.after" \
