@@ -137,16 +137,49 @@ jobs:
           docker build --iidfile "${RUNNER_TEMP}/ops-test-image-id" -f docker/ops.Dockerfile .
           OPS_TEST_IMAGE_ID="$(cat "${RUNNER_TEMP}/ops-test-image-id")"
           case "$OPS_TEST_IMAGE_ID" in sha256:????????????????????????????????????????????????????????????????) ;; *) exit 1 ;; esac
-          docker run --rm \
+          install -d -m 700 "${RUNNER_TEMP}/scheduler-state" projects-portal/state backups reports .tmp/ops
+          docker run --rm --read-only \
+            --tmpfs /tmp:rw,noexec,nosuid,nodev,size=32m \
+            --tmpfs /etc/platform:rw,noexec,nosuid,nodev,size=1m,mode=0700 \
+            --tmpfs /etc/crontabs:rw,noexec,nosuid,nodev,size=1m,mode=0700 \
+            --tmpfs /var/log/platform:rw,noexec,nosuid,nodev,size=8m,mode=0700 \
             -e BACKUP_SCHEDULER_DRY_RUN=true \
+            -e PLATFORM_DOCKER_BROKER_STATUS=READY \
             -e PLATFORM_INFRA_ROOT=/infra \
+            -e PLATFORM_INFRA_CONTAINER_ROOT=/infra \
             -e PLATFORM_OPS_CODE_ROOT=/opt/platform-infrastructure \
             -e PLATFORM_INFRA_HOST_ROOT="${{ github.workspace }}" \
+            -e PLATFORM_RELEASE_CONTAINER_ROOT=/infra \
+            -e PLATFORM_RELEASE_HOST_ROOT="${{ github.workspace }}" \
+            -e PLATFORM_DATA_ROOT=/runtime-data \
+            -e PLATFORM_DATA_CONTAINER_ROOT=/runtime-data \
+            -e PLATFORM_DATA_HOST_ROOT="${{ github.workspace }}" \
+            -e PLATFORM_STATE_ROOT=/runtime-state \
+            -e PLATFORM_STATE_CONTAINER_ROOT=/runtime-state \
+            -e PLATFORM_STATE_HOST_ROOT="${RUNNER_TEMP}/scheduler-state" \
+            -e PLATFORM_SECRETS_ROOT=/runtime-secrets \
+            -e PLATFORM_SECRETS_CONTAINER_ROOT=/runtime-secrets \
+            -e PLATFORM_SECRETS_HOST_ROOT="${{ github.workspace }}/secrets" \
+            -e PLATFORM_CLOSED_HOST_PATH_MAPPINGS=1 \
+            -e PROJECT_STATE_ROOT=/runtime-data/projects-portal/state \
+            -e BACKUP_SCHEDULER_JOBS_DIR=/runtime-data/projects-portal/state/backup-jobs \
             -e PROJECT_SOURCE_HOST_ROOT="${{ github.workspace }}/.tmp/optional-project-source" \
-            -v /var/run/docker.sock:/var/run/docker.sock \
             -v "${{ github.workspace }}:/infra:ro" \
+            -v "${{ github.workspace }}/backups:/runtime-data/backups" \
+            -v "${{ github.workspace }}/reports:/runtime-data/reports" \
+            -v "${{ github.workspace }}/.tmp:/runtime-data/.tmp" \
+            -v "${{ github.workspace }}/projects-portal/state:/runtime-data/projects-portal/state" \
+            -v "${RUNNER_TEMP}/scheduler-state:/runtime-state:ro" \
+            -v "${{ github.workspace }}/secrets:/runtime-secrets:ro" \
             -v "${{ github.workspace }}/.tmp/optional-project-source:/project:ro" \
             "$OPS_TEST_IMAGE_ID" backup-scheduler
+          set +e
+          docker run --rm --read-only \
+            --tmpfs /tmp:rw,noexec,nosuid,nodev,size=8m \
+            "$OPS_TEST_IMAGE_ID" backup-scheduler
+          status=$?
+          set -e
+          test "$status" -eq 78
       - name: Upload Compose evidence reports
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7

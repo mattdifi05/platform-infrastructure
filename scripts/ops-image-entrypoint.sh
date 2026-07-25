@@ -57,20 +57,29 @@ actual_sha256=$(sha256sum "$local_archive" | awk '{print $1}')
   echo "Infrastructure snapshot archive SHA256 mismatch." >&2
   exit 1
 }
-tar -tf "$local_archive" | awk '
-  /^\/|(^|\/)\.\.(\/|$)|(^|\/)\.(\/|$)|[\r\n]/ { invalid = 1 }
-  END { exit invalid ? 1 : 0 }
-' || {
-  echo "Infrastructure snapshot archive contains an unsafe path." >&2
+node "$CODE_ROOT/scripts/source-archive-policy.mjs" \
+  --archive "$local_archive" \
+  --sha256 "$EXPECTED_SHA256" \
+  --commit "${DEPLOY_RELEASE_SHA:-}" \
+  --inspectOnly true >/dev/null
+
+[ ! -L "$RUNTIME_ROOT" ] || {
+  echo "Infrastructure runtime root must not be a symlink." >&2
   exit 1
 }
-if tar -tf "$local_archive" | grep -Eq '^(projects-portal/state|secrets|traefik/acme|traefik/certs)(/|$)'; then
-  echo "Infrastructure snapshot archive crossed a persistent-data boundary." >&2
-  exit 1
+if [ -e "$RUNTIME_ROOT" ]; then
+  [ -d "$RUNTIME_ROOT" ] && [ -z "$(find "$RUNTIME_ROOT" -mindepth 1 -print -quit)" ] || {
+    echo "Infrastructure runtime root must be a new empty private directory." >&2
+    exit 1
+  }
+else
+  mkdir -m 700 "$RUNTIME_ROOT"
 fi
-
-mkdir -p "$RUNTIME_ROOT"
-tar -xf "$local_archive" -C "$RUNTIME_ROOT"
+node "$CODE_ROOT/scripts/source-archive-policy.mjs" \
+  --archive "$local_archive" \
+  --sha256 "$EXPECTED_SHA256" \
+  --commit "${DEPLOY_RELEASE_SHA:-}" \
+  --extractRoot "$RUNTIME_ROOT" >/dev/null
 rm -f "$local_archive"
 trap - EXIT HUP INT TERM
 

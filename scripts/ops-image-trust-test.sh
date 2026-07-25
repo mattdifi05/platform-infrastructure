@@ -13,6 +13,27 @@ cp -R "$ROOT/scripts" "$ROOT/governance" "$ROOT/vendor" "$FIXTURE_ROOT/"
 mkdir -p "$FIXTURE_ROOT/control-center"
 cp -R "$ROOT/control-center/backup" "$FIXTURE_ROOT/control-center/"
 tar -cf "$TMP/fake-infra-source.tar" -C "$FIXTURE_ROOT" scripts governance
+cat > "$FIXTURE_ROOT/scripts/source-archive-policy.mjs" <<'JS'
+#!/usr/bin/env node
+import crypto from "node:crypto";
+import fs from "node:fs";
+export function validateExactSourceArchive() { return { status: "passed" }; }
+export function validateExtractedSourceArchive() { return { status: "passed" }; }
+export function validateExtractedSourceTree() { return { status: "passed" }; }
+if (process.argv[1]?.endsWith("source-archive-policy.mjs")) {
+const args = Object.fromEntries(process.argv.slice(2).reduce((rows, value, index, values) => {
+  if (value.startsWith("--")) rows.push([value.slice(2), values[index + 1]]);
+  return rows;
+}, []));
+if (args.extractedRoot) {
+  if (!fs.statSync(args.extractedRoot).isDirectory()) process.exit(1);
+} else {
+  const actual = crypto.createHash("sha256").update(fs.readFileSync(args.archive)).digest("hex");
+  if (args.sha256 && actual !== args.sha256) process.exit(1);
+}
+process.stdout.write(`${JSON.stringify({status:"passed",files:["scripts/infra-ops.mjs"]})}\n`);
+}
+JS
 
 IMAGE="ghcr.io/owner/platform-infrastructure-ops@sha256:$(printf '5%.0s' $(seq 1 64))"
 IMAGE_ID="sha256:$(printf '6%.0s' $(seq 1 64))"
@@ -28,6 +49,8 @@ hash_file() {
   if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'; else shasum -a 256 "$1" | awk '{print $1}'; fi
 }
 SOURCE_ARCHIVE_SHA=$(hash_file "$TMP/fake-infra-source.tar")
+mkdir -p "$TMP/data/reports" "$TMP/state" "$TMP/secrets"
+printf 'TEST_ENV=1\n' > "$TMP/state/environment.env"
 
 cat > "$FIXTURE_ROOT/governance/deployment-admission.json" <<'EOF'
 {"version":1,"status":"READY","trustedVerifierChannel":"external-admission-controller/prod","trustedOpsImageRepository":"ghcr.io/owner/platform-infrastructure-ops","requiredReceiptKind":"platform-trusted-deployment-admission/v1","selfAssertedAnnotationsAccepted":false,"trustedProducer":{"repository":"owner/trusted-admission","workflowPath":".github/workflows/produce-admission.yml","workflowSha":"4444444444444444444444444444444444444444","sourceRef":"refs/heads/main","event":"workflow_dispatch"}}
@@ -108,6 +131,11 @@ trust_env() {
     DEPLOY_RELEASE_SHA="$RELEASE_SHA" \
     DEPLOY_RELEASE_TREE="$RELEASE_TREE" \
     DEPLOY_SOURCE_ARCHIVE_PATH="${TEST_SOURCE_ARCHIVE_PATH:-$TMP/fake-infra-source.tar}" \
+    DEPLOY_SOURCE_ARCHIVE_SHA256="$SOURCE_ARCHIVE_SHA" \
+    PLATFORM_DATA_ROOT="$TMP/data" \
+    PLATFORM_STATE_ROOT="$TMP/state" \
+    PLATFORM_SECRETS_ROOT="$TMP/secrets" \
+    PLATFORM_ENV_FILE="$TMP/state/environment.env" \
     DEPLOY_ARTIFACT_RECEIPT_PATH="$TMP/artifact.json" \
     DEPLOY_ARTIFACT_RECEIPT_SHA256="${TEST_ARTIFACT_SHA256:-$ARTIFACT_SHA}" \
     DEPLOY_ADMISSION_RECEIPT_PATH="${TEST_ADMISSION_PATH:-$TMP/admission.json}" \
@@ -321,27 +349,19 @@ for denied_name in GITHUB_TOKEN GH_TOKEN RESTIC_REPOSITORY RESTIC_PASSWORD_FILE 
   fi
 done
 rm -f "$TMP/docker-run-args"
-trust_env sh "$FIXTURE_ROOT/scripts/infra-ops.sh" pre-go-live-evidence
-for required_name in \
-  GITHUB_TOKEN GH_TOKEN RESTIC_REPOSITORY RESTIC_PASSWORD_FILE RESTIC_IMAGE \
-  RCLONE_CONFIG AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN \
-  B2_ACCOUNT_ID B2_ACCOUNT_KEY AZURE_ACCOUNT_NAME AZURE_ACCOUNT_KEY \
-  GOOGLE_PROJECT_ID GOOGLE_ACCESS_TOKEN OS_AUTH_URL OS_PASSWORD
-do
-  awk -v expected="$required_name" '
-    previous == "-e" && $0 == expected { found = 1 }
-    { previous = $0 }
-    END { exit(found ? 0 : 1) }
-  ' "$TMP/docker-run-args"
-done
-printf 'PASS\tcommand-capability-matrix-forwards-only-required-backends\n'
+if trust_env sh "$FIXTURE_ROOT/scripts/infra-ops.sh" pre-go-live-evidence >/dev/null 2>&1; then
+  echo "FAIL: Docker-backed pre-go-live evidence bypassed the missing fixed-action broker" >&2
+  exit 1
+fi
+[ ! -e "$TMP/docker-run-args" ]
+printf 'PASS\tcommand-capability-matrix-fails-closed-without-broker\n'
 
 hostile_source="$TMP/project --entrypoint sh --label keep"
 mkdir -p "$hostile_source"
 rm -f "$TMP/docker-run-args"
 PROJECT_SOURCE_ROOT="$hostile_source"
 export PROJECT_SOURCE_ROOT
-trust_env sh "$FIXTURE_ROOT/scripts/infra-ops.sh" -c 'printf "%s\n" safe-command'
+trust_env sh "$FIXTURE_ROOT/scripts/infra-ops.sh" project-router-tests
 unset PROJECT_SOURCE_ROOT
 awk -v expected="$hostile_source:/project:ro" '
   previous == "-v" && $0 == expected { found = 1 }
@@ -349,7 +369,7 @@ awk -v expected="$hostile_source:/project:ro" '
   END { exit(found ? 0 : 1) }
 ' "$TMP/docker-run-args"
 awk -v image="$IMAGE_ID" '
-  previous == image && $0 == "-c" { found = 1 }
+  previous == image && $0 == "project-router-tests" { found = 1 }
   { previous = $0 }
   END { exit(found ? 0 : 1) }
 ' "$TMP/docker-run-args"

@@ -101,7 +101,7 @@ jobs:
           PHP_APACHE_DIGEST: ${{ steps.php-apache.outputs.digest }}
         run: |
           mkdir -p .tmp/release-attestation reports/release
-          git archive \
+          git -c tar.umask=0000 archive \
             --format=tar \
             --output="reports/release/source-archive-${GITHUB_RUN_ID}.tar" \
             "${GITHUB_SHA}"

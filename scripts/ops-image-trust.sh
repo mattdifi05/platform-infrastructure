@@ -17,6 +17,9 @@ PROVIDER_RUN_ATTEMPT=${DEPLOY_TRUSTED_PROVIDER_RUN_ATTEMPT:-}
 REPOSITORY=${DEPLOY_REPO:-}
 COMMIT_SHA=${DEPLOY_RELEASE_SHA:-}
 TREE_SHA=${DEPLOY_RELEASE_TREE:-}
+GIT_OBJECT_ROOT=${DEPLOY_GIT_OBJECT_ROOT:-$ROOT}
+SOURCE_ARCHIVE=${DEPLOY_SOURCE_ARCHIVE_PATH:-}
+SOURCE_ARCHIVE_SHA256_EXPECTED=${DEPLOY_SOURCE_ARCHIVE_SHA256:-}
 
 case "$COMMIT_SHA:$TREE_SHA" in
   *[!a-f0-9:]*|::*|:*|*:) echo "EXTERNAL-PENDING: exact release commit and tree SHA values are required." >&2; exit 78 ;;
@@ -25,16 +28,28 @@ esac
   echo "EXTERNAL-PENDING: release commit and tree SHA values must be complete." >&2
   exit 78
 }
-actual_commit=$(git -C "$ROOT" rev-parse HEAD)
-actual_tree=$(git -C "$ROOT" rev-parse "${COMMIT_SHA}^{tree}")
-[ "$actual_commit" = "$COMMIT_SHA" ] && [ "$actual_tree" = "$TREE_SHA" ] || {
-  echo "Ops admission does not match the exact local checkout commit/tree." >&2
-  exit 1
-}
-[ -z "$(git -C "$ROOT" status --porcelain --untracked-files=all)" ] || {
-  echo "Ops admission requires a clean local checkout." >&2
-  exit 1
-}
+if [ "${PLATFORM_IMMUTABLE_RELEASE_ROOT:-0}" = 1 ]; then
+  case "$SOURCE_ARCHIVE_SHA256_EXPECTED" in *[!a-f0-9]*|"") exit 78 ;; esac
+  [ "${#SOURCE_ARCHIVE_SHA256_EXPECTED}" -eq 64 ] || exit 78
+  [ -f "$SOURCE_ARCHIVE" ] && [ -r "$SOURCE_ARCHIVE" ] && [ -s "$SOURCE_ARCHIVE" ] && [ ! -L "$SOURCE_ARCHIVE" ] || exit 78
+  node "$SCRIPT_DIR/source-archive-policy.mjs" \
+    --extractedRoot "$ROOT" \
+    --archive "$SOURCE_ARCHIVE" \
+    --sha256 "$SOURCE_ARCHIVE_SHA256_EXPECTED" \
+    --commit "$COMMIT_SHA" \
+    --requireImmutableOwnership true >/dev/null
+else
+  actual_commit=$(git -C "$ROOT" rev-parse HEAD)
+  actual_tree=$(git -C "$ROOT" rev-parse "${COMMIT_SHA}^{tree}")
+  [ "$actual_commit" = "$COMMIT_SHA" ] && [ "$actual_tree" = "$TREE_SHA" ] || {
+    echo "Ops admission does not match the exact local checkout commit/tree." >&2
+    exit 1
+  }
+  [ -z "$(git -C "$ROOT" status --porcelain --untracked-files=all)" ] || {
+    echo "Ops admission requires a clean local checkout." >&2
+    exit 1
+  }
+fi
 
 case "$ARTIFACT_SHA256:$ADMISSION_SHA256:$PROVIDER_METADATA_SHA256" in
   *[!a-f0-9:]*|::*|:*|*:) echo "EXTERNAL-PENDING: exact trusted receipt and provider metadata SHA256 values are required." >&2; exit 78 ;;
@@ -91,6 +106,12 @@ node "$SCRIPT_DIR/deployment-receipt-policy.mjs" \
 IMAGE=$(jq -er '.opsRunner.image' "$stable_admission")
 IMAGE_ID=$(jq -er '.opsRunner.imageId' "$stable_admission")
 SOURCE_ARCHIVE_SHA256=$(jq -er '.sourceArchiveSha256' "$stable_admission")
+if [ "${PLATFORM_IMMUTABLE_RELEASE_ROOT:-0}" = 1 ] || [ -n "$SOURCE_ARCHIVE_SHA256_EXPECTED" ]; then
+  [ "$SOURCE_ARCHIVE_SHA256_EXPECTED" = "$SOURCE_ARCHIVE_SHA256" ] || {
+    echo "Ops admission source archive differs from the coordinator-authenticated archive." >&2
+    exit 1
+  }
+fi
 command -v docker >/dev/null 2>&1 || {
   echo "Docker is required to inspect the already-present admitted ops image." >&2
   exit 127

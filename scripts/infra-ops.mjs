@@ -71,6 +71,7 @@ import { validateTrustedProviderRun } from "./trusted-provider-run-policy.mjs";
 import { releaseEvidenceAdmissionReady } from "./release-go-no-go-policy.mjs";
 import { deploymentPrerequisiteMismatches } from "./privileged-workflow-policy.mjs";
 import { snapshotFileArtifact, snapshotJsonArtifact } from "./stable-json-artifact.mjs";
+import { validateExactSourceArchive } from "./source-archive-policy.mjs";
 import { assertExactBuildkitComponentSet, buildkitSbomSha256, buildkitSpdxInventory } from "./buildkit-sbom-policy.mjs";
 import { validateRegistryResolutionReceipt } from "./release-registry-resolution.mjs";
 import {
@@ -87,6 +88,14 @@ process.umask(0o077);
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const codeRoot = path.resolve(scriptDir, "..");
 const infraRoot = path.resolve(process.env.PLATFORM_INFRA_ROOT || codeRoot);
+const dataRoot = path.resolve(process.env.PLATFORM_DATA_ROOT || infraRoot);
+const projectStateRoot = path.resolve(process.env.PROJECT_STATE_ROOT || path.join(dataRoot, "projects-portal", "state"));
+const secretsRoot = path.resolve(process.env.PLATFORM_SECRETS_ROOT || path.join(infraRoot, "secrets"));
+const reportsRoot = path.join(dataRoot, "reports");
+const backupsRoot = path.join(dataRoot, "backups");
+const releaseStateRoot = path.join(dataRoot, "release");
+const operationsTempRoot = path.join(dataRoot, ".tmp");
+const securityOutputRoot = path.join(dataRoot, "security");
 const command = process.argv[2] ?? "help";
 const argv = parseArgs(process.argv.slice(3));
 const configuredSourceRoot = process.env.PROJECT_SOURCE_ROOT ?? process.env.PROJECT_SOURCE_DIR ?? argv.sourceRoot;
@@ -274,7 +283,7 @@ function postgresOut(container, database, user, sql, options = {}) {
 }
 
 function backupRestoreRunLogPath() {
-  const stateRoot = path.resolve(process.env.PROJECT_STATE_ROOT || path.join(infraRoot, "projects-portal", "state"));
+  const stateRoot = path.resolve(process.env.PROJECT_STATE_ROOT || projectStateRoot);
   fs.mkdirSync(stateRoot, { recursive: true, mode: 0o700 });
   return path.join(stateRoot, "backup-restore-runs.jsonl");
 }
@@ -286,7 +295,7 @@ function backupRestoreRunRecords() {
 }
 
 function writeBackupFreshnessMetrics(records = backupRestoreRunRecords()) {
-  const outputDir = path.join(infraRoot, "projects-portal", "state", "node-exporter-textfile");
+  const outputDir = path.join(projectStateRoot, "node-exporter-textfile");
   fs.mkdirSync(outputDir, { recursive: true, mode: 0o755 });
   const now = Date.now();
   const lines = [
@@ -685,7 +694,7 @@ function timingSafeEqualBuffer(a, b) {
 }
 
 function backupSigningKeys() {
-  const filePath = path.resolve(argv.backupSigningKeysFile ?? process.env.BACKUP_SIGNING_KEYS_FILE ?? path.join(infraRoot, "secrets", "backup_signing_keys.txt"));
+  const filePath = path.resolve(argv.backupSigningKeysFile ?? process.env.BACKUP_SIGNING_KEYS_FILE ?? path.join(secretsRoot, "backup_signing_keys.txt"));
   const value = readSecretFileIfExists(filePath);
   let keys = parseVersionedSecretKeys(value);
   if (!keys.length && String(value ?? "").trim().length >= 48) {
@@ -841,7 +850,7 @@ function listDumpFilesRecursive(root) {
 }
 
 function backupRootPath() {
-  const root = path.join(infraRoot, "backups");
+  const root = backupsRoot;
   fs.mkdirSync(root, { recursive: true, mode: 0o700 });
   fs.chmodSync(root, 0o700);
   return root;
@@ -889,7 +898,7 @@ function reportTimestamp() {
 }
 
 function ensureReportDir(name) {
-  const directory = path.join(infraRoot, "reports", name);
+  const directory = path.join(reportsRoot, name);
   fs.mkdirSync(directory, { recursive: true });
   return directory;
 }
@@ -1067,15 +1076,25 @@ function publishBackupArtifactWithEvidence({ stagingPath, hostPath, engine, sour
 function hostPathForContainerMount(filePath) {
   const resolved = path.resolve(filePath).replaceAll("\\", "/");
   const mappings = [
-    [process.env.PLATFORM_INFRA_CONTAINER_ROOT || infraRoot, process.env.PLATFORM_INFRA_HOST_ROOT],
+    [process.env.PLATFORM_RELEASE_CONTAINER_ROOT || process.env.PLATFORM_INFRA_CONTAINER_ROOT || infraRoot, process.env.PLATFORM_RELEASE_HOST_ROOT || process.env.PLATFORM_INFRA_HOST_ROOT],
+    [process.env.PLATFORM_DATA_CONTAINER_ROOT || dataRoot, process.env.PLATFORM_DATA_HOST_ROOT],
+    [process.env.PLATFORM_STATE_CONTAINER_ROOT || projectStateRoot, process.env.PLATFORM_STATE_HOST_ROOT],
+    [process.env.PLATFORM_SECRETS_CONTAINER_ROOT || secretsRoot, process.env.PLATFORM_SECRETS_HOST_ROOT],
     [sourceRoot, process.env.PROJECT_SOURCE_HOST_ROOT],
-  ].filter(([, hostRoot]) => Boolean(hostRoot));
-  for (const [containerRootRaw, hostRootRaw] of mappings) {
-    const containerRoot = path.resolve(containerRootRaw).replaceAll("\\", "/").replace(/\/$/, "");
-    const hostRoot = String(hostRootRaw).replaceAll("\\", "/").replace(/\/$/, "");
+  ]
+    .filter(([, hostRoot]) => Boolean(hostRoot))
+    .map(([containerRoot, hostRoot]) => [
+      path.resolve(containerRoot).replaceAll("\\", "/").replace(/\/$/, ""),
+      path.resolve(String(hostRoot)).replaceAll("\\", "/").replace(/\/$/, ""),
+    ])
+    .sort((left, right) => right[0].length - left[0].length);
+  for (const [containerRoot, hostRoot] of mappings) {
     if (resolved === containerRoot || resolved.startsWith(`${containerRoot}/`)) {
       return `${hostRoot}${resolved.slice(containerRoot.length)}`;
     }
+  }
+  if (process.env.PLATFORM_CLOSED_HOST_PATH_MAPPINGS === "1") {
+    fail(`No admitted host-path mapping exists for container path ${resolved}.`);
   }
   return resolved;
 }
@@ -1085,7 +1104,7 @@ function dockerRun(args, options = {}) {
 }
 
 function makeOpsTempDir(prefix) {
-  const root = path.join(infraRoot, ".tmp", "ops");
+  const root = path.join(operationsTempRoot, "ops");
   fs.mkdirSync(root, { recursive: true });
   return fs.mkdtempSync(path.join(root, prefix));
 }
@@ -1353,8 +1372,8 @@ function writeRollbackPlanReport({
 }
 
 async function signExistingPostgresBackups() {
-  const backupRoot = path.resolve(argv.backupRoot ?? path.join(infraRoot, "backups", "postgres"));
-  resolveInside(path.join(infraRoot, "backups"), backupRoot);
+  const backupRoot = path.resolve(argv.backupRoot ?? path.join(backupsRoot, "postgres"));
+  resolveInside(backupsRoot, backupRoot);
   const quarantineRoot = path.join(backupRoot, "quarantine", backupTimestamp());
   const dumps = listDumpFilesRecursive(backupRoot).filter((dump) => !dump.startsWith(`${path.join(backupRoot, "quarantine")}${path.sep}`));
   let verified = 0;
@@ -1610,7 +1629,7 @@ async function backupPostgres(options = {}) {
   const container = options.container ?? argv.container ?? "enterprise-postgres";
   const database = options.database ?? argv.database ?? defaultPostgresBackupDatabase();
   const user = options.user ?? argv.user ?? "postgres";
-  const outputDir = path.resolve(options.outputDir ?? argv.outputDir ?? path.join(infraRoot, "backups", "postgres"));
+  const outputDir = path.resolve(options.outputDir ?? argv.outputDir ?? path.join(backupsRoot, "postgres"));
   const startedAt = new Date();
   fs.mkdirSync(outputDir, { recursive: true });
   const timestamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\..+/, "").replace("T", "-");
@@ -1744,7 +1763,7 @@ function applicationSourceDirectories(options = {}) {
 async function backupApplications(options = {}) {
   const startedAt = new Date();
   const timestamp = backupTimestamp();
-  const outputRoot = ensureBackupOutputDir(path.join(infraRoot, "backups", "applications"));
+  const outputRoot = ensureBackupOutputDir(path.join(backupsRoot, "applications"));
   const excludeArgs = applicationSourceBackupExcludes().flatMap((pattern) => ["--exclude", pattern]);
   const artifacts = [];
   const publications = [];
@@ -1829,7 +1848,7 @@ function controlCenterStateRoot() {
   const candidates = [
     process.env.PROJECT_STATE_ROOT,
     "/var/www/project-state",
-    path.join(infraRoot, "projects-portal", "state"),
+    projectStateRoot,
   ].filter(Boolean).map((value) => path.resolve(value));
   const stateRoot = candidates.find((candidate) => fs.existsSync(candidate) && fs.statSync(candidate).isDirectory());
   if (!stateRoot) fail("Control Center state root is not available for backup.");
@@ -1846,7 +1865,7 @@ function validateControlCenterStateRoot(stateRoot) {
 async function backupControlCenterState(options = {}) {
   const stateRoot = path.resolve(options.stateRoot ?? controlCenterStateRoot());
   const required = validateControlCenterStateRoot(stateRoot);
-  const outputDir = ensureBackupOutputDir(path.resolve(options.outputDir ?? argv.outputDir ?? path.join(infraRoot, "backups", "control-center-state")));
+  const outputDir = ensureBackupOutputDir(path.resolve(options.outputDir ?? argv.outputDir ?? path.join(backupsRoot, "control-center-state")));
   const startedAt = new Date();
   const fileName = `control-center-state-${backupTimestamp()}.tar.gz`;
   const hostPath = path.join(outputDir, fileName);
@@ -1904,7 +1923,7 @@ function restoreTestControlCenterState(options = {}) {
 }
 
 function typedBackupJobPath(options = {}) {
-  const jobsRoot = path.resolve(process.env.BACKUP_SCHEDULER_JOBS_DIR || path.join(infraRoot, "projects-portal", "state", "backup-jobs"));
+  const jobsRoot = path.resolve(process.env.BACKUP_SCHEDULER_JOBS_DIR || path.join(projectStateRoot, "backup-jobs"));
   const allowedRoot = path.resolve(path.join(jobsRoot, "running"));
   const jobFile = options.jobFile ?? argv.jobFile;
   const requested = path.resolve(jobFile || "");
@@ -2262,7 +2281,7 @@ function writeBackupCoverageReport(resources, options = {}) {
 async function backupPlatformCatalog(options = {}) {
   const resources = platformBackupResources(options);
   writeBackupCoverageReport(resources, options);
-  const jobsRoot = path.resolve(process.env.BACKUP_SCHEDULER_JOBS_DIR || path.join(infraRoot, "projects-portal", "state", "backup-jobs"));
+  const jobsRoot = path.resolve(process.env.BACKUP_SCHEDULER_JOBS_DIR || path.join(projectStateRoot, "backup-jobs"));
   const directories = Object.fromEntries(["running", "done", "failed"].map((name) => {
     const directory = path.join(jobsRoot, name);
     fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
@@ -2661,7 +2680,7 @@ function writeInfraSbom(outputDir) {
 }
 
 async function generateSbom() {
-  const outputDir = path.resolve(argv.outputDir ?? path.join(infraRoot, "security", "sbom"));
+  const outputDir = path.resolve(argv.outputDir ?? path.join(securityOutputRoot, "sbom"));
   await withLocalCheckReport("generate-sbom", async () => {
     const sbom = writeInfraSbom(outputDir);
     log(`Infrastructure SBOM written to ${sbom.outputFile} (${sbom.componentCount} component(s)).`);
@@ -2746,7 +2765,7 @@ async function cloudflareAccessAdmin() {
 async function supplyChainHygiene() {
   await withLocalCheckReport("supply-chain-hygiene", async () => {
     infraDependencyHygiene();
-    const sbom = writeInfraSbom(path.join(infraRoot, "security", "sbom"));
+    const sbom = writeInfraSbom(path.join(securityOutputRoot, "sbom"));
     log(`Platform infrastructure supply-chain hygiene passed with SBOM ${sbom.outputFile}.`);
   }, { scope: "platform-infrastructure" });
 }
@@ -3307,7 +3326,7 @@ async function infraPerformanceHygiene() {
 
 async function initLocalSecrets() {
   const envFile = path.resolve(argv.envFile ?? path.join(infraRoot, ".env"));
-  const secretsDir = path.resolve(argv.secretsDir ?? path.join(infraRoot, "secrets"));
+  const secretsDir = path.resolve(argv.secretsDir ?? secretsRoot);
   const args = ["init", "--secretsDir", secretsDir, "--envFile", envFile];
   if (booleanFlag(argv.force)) args.push("--force");
   runSecretManager(args);
@@ -4346,7 +4365,7 @@ const defaultResticMaxRepositoryBytes = 2_500_000_000_000;
 
 function resticConfig(options = {}) {
   const repository = options.repository ?? argv.repository ?? process.env.RESTIC_REPOSITORY;
-  const passwordFile = path.resolve(options.passwordFile ?? argv.passwordFile ?? process.env.RESTIC_PASSWORD_FILE ?? path.join(infraRoot, "secrets", "restic_password.txt"));
+  const passwordFile = path.resolve(options.passwordFile ?? argv.passwordFile ?? process.env.RESTIC_PASSWORD_FILE ?? path.join(secretsRoot, "restic_password.txt"));
   const tag = options.tag ?? argv.tag ?? "platform-backups";
   const hostname = String(options.hostname ?? argv.hostname ?? process.env.RESTIC_HOSTNAME ?? "platform-infrastructure").trim();
   if (!/^[a-z0-9](?:[a-z0-9.-]{0,62}[a-z0-9])?$/.test(hostname)) fail("RESTIC_HOSTNAME must be a stable DNS-safe identity.");
@@ -4452,7 +4471,7 @@ function resticRcloneConfig(repository) {
   if (repositoryClass.type !== "rclone") {
     return { env: [], mounts: [] };
   }
-  const rcloneConfig = path.resolve(process.env.RCLONE_CONFIG ?? path.join(infraRoot, "secrets", "rclone", "rclone.conf"));
+  const rcloneConfig = path.resolve(process.env.RCLONE_CONFIG ?? path.join(secretsRoot, "rclone", "rclone.conf"));
   if (!fs.existsSync(rcloneConfig)) {
     fail("Set RCLONE_CONFIG to a valid rclone.conf before using a Restic rclone: repository.");
   }
@@ -4633,7 +4652,7 @@ async function offsiteBackupRestic() {
   const repositoryClass = classifyResticRepository(repository);
   if (!repositoryClass.offsite) fail("Off-site backup requires a remote Restic repository.");
   const startedAt = new Date();
-  const backupRoot = path.join(infraRoot, "backups");
+  const backupRoot = backupsRoot;
   const { manifestPath, manifest } = latestVerifiedPlatformBackupManifest();
   const pathSet = new Set([`/backups/${path.relative(backupRoot, manifestPath).replaceAll("\\", "/")}`]);
   for (const artifact of manifest.artifacts) {
@@ -4886,7 +4905,7 @@ async function offsiteRestoreDrillRestic(options = {}) {
 
   let restoreRoot = null;
   let stagingRoot = null;
-  const restoreTempRoot = path.join(infraRoot, ".tmp", "ops");
+  const restoreTempRoot = path.join(operationsTempRoot, "ops");
   const stagingParent = path.join(backupRootPath(), "offsite-restore-drills");
   let payload = { ...basePayload };
 
@@ -5798,7 +5817,7 @@ function auditRecordHasSensitiveKey(value, pathParts = []) {
 
 async function platformAdminAuditEvidence() {
   log("==> Platform admin audit evidence");
-  const auditPath = path.resolve(argv.auditFile ?? process.env.PROJECT_AUDIT_FILE ?? path.join(infraRoot, "projects-portal", "state", "audit.jsonl"));
+  const auditPath = path.resolve(argv.auditFile ?? process.env.PROJECT_AUDIT_FILE ?? path.join(projectStateRoot, "audit.jsonl"));
   const requiredCategories = [
     "login",
     "logout",
@@ -5990,7 +6009,7 @@ function secretRotationEventSummary(entry) {
 async function secretRotationEvidence(options = {}) {
   log("==> Secret rotation evidence");
   const enforce = options.enforce ?? booleanFlag(argv.enforce);
-  const secretsDir = path.resolve(options.secretsDir ?? argv.secretsDir ?? path.join(infraRoot, "secrets"));
+  const secretsDir = path.resolve(options.secretsDir ?? argv.secretsDir ?? secretsRoot);
   const storePath = path.resolve(options.store ?? argv.store ?? path.join(secretsDir, "infra-secret-manager-store.json"));
   const auditLogPath = path.resolve(options.auditLog ?? argv.auditLog ?? path.join(secretsDir, "infra-secret-manager-audit.log"));
   const maxKmsAgeDays = optionalPositiveNumber(options.maxKmsAgeDays ?? argv.maxKmsAgeDays, "--maxKmsAgeDays", 180);
@@ -6333,7 +6352,7 @@ async function releaseArtifactGateBody(options = {}) {
     const rawBuildkitSha256 = buildkitSbomSha256(fs.readFileSync(buildkitSbomArtifact.snapshotPath));
     const buildkitInventory = buildkitSpdxInventory(buildkitSbomArtifact.document, { subjects, expectedPlatforms: approvedPlatforms });
 
-    const sbomFile = options.sbom ?? argv.sbom ?? latestFileByMtime(path.join(infraRoot, "security", "sbom"), (file) => /sbom.*\.(json|cdx\.json)$/i.test(path.basename(file)));
+    const sbomFile = options.sbom ?? argv.sbom ?? latestFileByMtime(path.join(securityOutputRoot, "sbom"), (file) => /sbom.*\.(json|cdx\.json)$/i.test(path.basename(file)));
     if (!sbomFile) {
       fail("A release SBOM artifact is required. Run generate-sbom or pass --sbom <file>.");
     }
@@ -6346,6 +6365,14 @@ async function releaseArtifactGateBody(options = {}) {
 
     rejectLegacyProvenanceInputs(options);
     const releaseSha = options.releaseSha ?? argv.releaseSha ?? gitEvidence().commit;
+    const releaseTreeSha = run("git", ["rev-parse", `${releaseSha}^{tree}`], { capture: true }).stdout.trim();
+    validateExactSourceArchive({
+      archivePath: sourceArchiveArtifact.snapshotPath,
+      gitRoot: infraRoot,
+      commitSha: releaseSha,
+      treeSha: releaseTreeSha,
+      expectedSha256: sourceArchiveArtifact.sha256,
+    });
     const verificationOptions = releaseTrustVerificationOptions(options, releaseSha);
     const sbomSha256 = sbomArtifact.sha256;
     validateAttestedReleaseManifest(releaseManifest, {
@@ -6638,7 +6665,7 @@ async function releaseEvidence(options = {}) {
   const previousImagesFile = previousImagesFileArg ? path.resolve(previousImagesFileArg) : null;
   const previousFileImages = previousImagesFile && fs.existsSync(previousImagesFile) ? readJsonFile(previousImagesFile, previousImagesFile) : {};
   const previousImages = previousReleaseImageMap(env, previousFileImages, Object.keys(currentImages));
-  const sbomPath = options.sbom ?? argv.sbom ?? latestFileByMtime(path.join(infraRoot, "security", "sbom"), (file) => /sbom.*\.(json|cdx\.json)$/i.test(path.basename(file)));
+  const sbomPath = options.sbom ?? argv.sbom ?? latestFileByMtime(path.join(securityOutputRoot, "sbom"), (file) => /sbom.*\.(json|cdx\.json)$/i.test(path.basename(file)));
   const provenanceArg = options.provenance ?? argv.provenance;
   const legacyGithubAttestationArg = options.githubAttestation ?? options.githubAttestations ?? argv.githubAttestation ?? argv.githubAttestations;
   const attestationBundleArg = options.attestationBundle ?? argv.attestationBundle;
@@ -6734,7 +6761,7 @@ async function releaseEvidence(options = {}) {
   const trustedRoot = safeReleaseArtifactRef(trustedRootPath, issues, "trusted root");
   const signatureBundle = safeReleaseArtifactRef(signatureBundlePath, issues, "Signature bundle");
   const rollbackComplete = Object.keys(currentImages).length > 0 && Object.keys(currentImages).every((key) => Boolean(previousImages[key]));
-  const releaseRoot = path.join(infraRoot, "release");
+  const releaseRoot = releaseStateRoot;
   let rollbackFilePath = null;
   let rollbackDryRun = null;
   if (!planOnly && issues.length === 0 && rollbackComplete) {
@@ -7155,7 +7182,7 @@ function loadGithubTokenFromFile() {
   if (process.env.GITHUB_TOKEN || process.env.GH_TOKEN) return;
   const tokenFile = process.env.GITHUB_TOKEN_FILE
     || process.env.GH_TOKEN_FILE
-    || path.join(infraRoot, "secrets", "github_token.txt");
+    || path.join(secretsRoot, "github_token.txt");
   try {
     if (!fs.existsSync(tokenFile)) return;
     const token = fs.readFileSync(tokenFile, "utf8").trim();
@@ -8106,7 +8133,7 @@ function productionGoNoGoPolicy() {
 }
 
 function latestJsonReport(directoryName, prefix, predicate = () => true) {
-  const directory = path.join(infraRoot, "reports", directoryName);
+  const directory = path.join(reportsRoot, directoryName);
   if (!fs.existsSync(directory)) return null;
   const reports = fs.readdirSync(directory)
     .filter((name) => name.startsWith(prefix) && name.endsWith(".json"))
@@ -8513,7 +8540,7 @@ function listEvidenceBundleReportFiles({ allReports, phase }) {
   const policy = evidenceBundlePhasePolicy(phase, { productionRequiredLabels: evidenceBundleProductionRequiredLabels() });
   const requiredLabels = new Set(policy.requiredLabels);
   for (const spec of evidenceBundleSpecsForPhase(phase)) {
-    const directory = path.join(infraRoot, "reports", spec.directory);
+    const directory = path.join(reportsRoot, spec.directory);
     if (!fs.existsSync(directory)) {
       if (requiredLabels.has(spec.label)) missing.push({ label: spec.label, reason: "missing report directory" });
       continue;
@@ -8744,7 +8771,7 @@ async function evidenceBundleBody() {
   const maxAgeHours = Number(argv.maxAgeHours ?? process.env.EVIDENCE_BUNDLE_MAX_AGE_HOURS ?? 24);
   const notBefore = argv.notBefore ?? process.env.EVIDENCE_BUNDLE_NOT_BEFORE ?? null;
   const stamp = reportTimestamp();
-  const outputRoot = path.resolve(argv.outputDir ?? path.join(infraRoot, ".tmp", "evidence-bundles"));
+  const outputRoot = path.resolve(argv.outputDir ?? path.join(operationsTempRoot, "evidence-bundles"));
   fs.mkdirSync(outputRoot, { recursive: true });
   const bundleName = `infra-evidence-bundle-${stamp}`;
   const bundleDir = path.join(outputRoot, bundleName);
@@ -8910,7 +8937,7 @@ async function evidenceBundleBody() {
 
 async function evidenceBundleVerify() {
   log("==> Evidence bundle verify");
-  const outputRoot = path.resolve(argv.outputDir ?? path.join(infraRoot, ".tmp", "evidence-bundles"));
+  const outputRoot = path.resolve(argv.outputDir ?? path.join(operationsTempRoot, "evidence-bundles"));
   const bundleDir = path.resolve(argv.bundleDir ?? argv._[0] ?? latestEvidenceBundleDir(outputRoot) ?? "");
   const requireComplete = booleanFlag(argv.requireComplete);
   const expectedPhaseValue = argv.phase ?? process.env.EVIDENCE_BUNDLE_PHASE;
@@ -9816,8 +9843,8 @@ async function productionGoNoGo() {
   const stamp = reportTimestamp();
   const baseName = `production-go-no-go-${stamp}`;
   const report = {
-    jsonPath: path.join(infraRoot, "reports", "go-no-go", `${baseName}.json`),
-    markdownPath: path.join(infraRoot, "reports", "go-no-go", `${baseName}.md`),
+    jsonPath: path.join(reportsRoot, "go-no-go", `${baseName}.json`),
+    markdownPath: path.join(reportsRoot, "go-no-go", `${baseName}.md`),
   };
   const payload = {
     generatedAt,
@@ -10617,7 +10644,7 @@ async function restorePostgres() {
   const container = argv.container ?? "enterprise-postgres";
   const database = argv.database ?? defaultPostgresBackupDatabase();
   const user = argv.user ?? "postgres";
-  const backupFile = resolveInside(path.join(infraRoot, "backups"), path.resolve(backupFileArg));
+  const backupFile = resolveInside(backupsRoot, path.resolve(backupFileArg));
   const fileName = path.basename(backupFile);
   const containerPath = `/tmp/${fileName}`;
   const startedAt = new Date();
@@ -10673,7 +10700,7 @@ async function restoreTestPostgres(options = {}) {
   const schemaName = requestedSchema ? sqlIdentifierName(requestedSchema, "PostgreSQL restore schema") : "";
   const countAllUserTables = !schemaName || options.countAllUserTables === true || booleanFlag(argv.countAllUserTables);
   const minimumTables = positiveInteger(options.minimumTables ?? argv.minimumTables ?? 1, "--minimumTables", 1);
-  const backupFile = resolveInside(path.join(infraRoot, "backups"), path.resolve(backupFileArg));
+  const backupFile = resolveInside(backupsRoot, path.resolve(backupFileArg));
   const startedAt = new Date();
   const { hash } = verifyBackupArtifact(backupFile);
   const image = options.image ?? argv.image ?? process.env.POSTGRES_RESTORE_TEST_IMAGE ?? process.env.POSTGRES_IMAGE ?? defaultPostgresRestoreImage;
@@ -10745,7 +10772,7 @@ async function backupRestoreDrill() {
   const container = argv.container ?? "enterprise-postgres";
   const database = argv.database ?? defaultPostgresBackupDatabase();
   const user = argv.user ?? "postgres";
-  const outputDir = path.resolve(argv.outputDir ?? path.join(infraRoot, "backups", "postgres", "drills"));
+  const outputDir = path.resolve(argv.outputDir ?? path.join(backupsRoot, "postgres", "drills"));
   const suffix = new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 14);
   const testDatabase = argv.testDatabase ?? `platform_restore_test_${suffix}`;
   const backup = await backupPostgres({ container, database, user, outputDir });
@@ -10765,7 +10792,7 @@ async function backupMariadb(options = {}) {
   const container = options.container ?? argv.container ?? "mariadb";
   const requestedDatabase = options.database ?? argv.database ?? "";
   const database = requestedDatabase ? sqlIdentifierName(requestedDatabase, "MariaDB database") : "";
-  const outputDir = ensureBackupOutputDir(path.resolve(options.outputDir ?? argv.outputDir ?? path.join(infraRoot, "backups", "mariadb")));
+  const outputDir = ensureBackupOutputDir(path.resolve(options.outputDir ?? argv.outputDir ?? path.join(backupsRoot, "mariadb")));
   const startedAt = new Date();
   const timestamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\..+/, "").replace("T", "-");
   const fileName = `mariadb-${database || "all"}-${timestamp}.sql.gz`;
@@ -10952,7 +10979,7 @@ function countMariadbUserSchemas(container) {
 async function backupRestoreDrillMariadb() {
   log("==> MariaDB backup/restore drill");
   const container = argv.container ?? "mariadb";
-  const outputDir = path.resolve(argv.outputDir ?? path.join(infraRoot, "backups", "mariadb", "drills"));
+  const outputDir = path.resolve(argv.outputDir ?? path.join(backupsRoot, "mariadb", "drills"));
   const sourceSchemaCount = countMariadbUserSchemas(container);
   const backup = await backupMariadb({ container, outputDir });
   await restoreTestMariadb({ container, backupFile: backup.hostPath, minSchemas: sourceSchemaCount });
@@ -10961,7 +10988,7 @@ async function backupRestoreDrillMariadb() {
 
 async function backupMinio(options = {}) {
   const container = options.container ?? argv.container ?? "enterprise-minio";
-  const outputDir = ensureBackupOutputDir(path.resolve(options.outputDir ?? argv.outputDir ?? path.join(infraRoot, "backups", "minio")));
+  const outputDir = ensureBackupOutputDir(path.resolve(options.outputDir ?? argv.outputDir ?? path.join(backupsRoot, "minio")));
   const startedAt = new Date();
   const fileName = `minio-data-${backupTimestamp()}.tar.gz`;
   const hostPath = path.join(outputDir, fileName);
@@ -11152,7 +11179,7 @@ async function restoreTestMinio(options = {}) {
 async function backupRestoreDrillMinio() {
   log("==> MinIO backup/restore drill");
   const container = argv.container ?? "enterprise-minio";
-  const outputDir = path.resolve(argv.outputDir ?? path.join(infraRoot, "backups", "minio", "drills"));
+  const outputDir = path.resolve(argv.outputDir ?? path.join(backupsRoot, "minio", "drills"));
   const backup = await backupMinio({ container, outputDir });
   await restoreTestMinio({ container, backupFile: backup.hostPath });
   log(`MinIO backup/restore drill completed for ${path.basename(backup.hostPath)}.`);
@@ -11160,7 +11187,7 @@ async function backupRestoreDrillMinio() {
 
 async function backupKeycloakConfig(options = {}) {
   const container = options.container ?? argv.container ?? "enterprise-keycloak";
-  const outputDir = ensureBackupOutputDir(path.resolve(options.outputDir ?? argv.outputDir ?? path.join(infraRoot, "backups", "keycloak")));
+  const outputDir = ensureBackupOutputDir(path.resolve(options.outputDir ?? argv.outputDir ?? path.join(backupsRoot, "keycloak")));
   const startedAt = new Date();
   const fileName = `keycloak-config-${backupTimestamp()}.tar.gz`;
   const hostPath = path.join(outputDir, fileName);
@@ -11334,14 +11361,14 @@ async function restoreTestKeycloakConfig(options = {}) {
 async function backupRestoreDrillKeycloakConfig() {
   log("==> Keycloak config backup/restore drill");
   const container = argv.container ?? "enterprise-keycloak";
-  const outputDir = path.resolve(argv.outputDir ?? path.join(infraRoot, "backups", "keycloak", "drills"));
+  const outputDir = path.resolve(argv.outputDir ?? path.join(backupsRoot, "keycloak", "drills"));
   const backup = await backupKeycloakConfig({ container, outputDir });
   await restoreTestKeycloakConfig({ container, backupFile: backup.hostPath });
   log(`Keycloak config backup/restore drill completed for ${path.basename(backup.hostPath)}.`);
 }
 
 async function backupSecretManagerMetadata(options = {}) {
-  const outputDir = ensureBackupOutputDir(path.resolve(options.outputDir ?? argv.outputDir ?? path.join(infraRoot, "backups", "secret-manager")));
+  const outputDir = ensureBackupOutputDir(path.resolve(options.outputDir ?? argv.outputDir ?? path.join(backupsRoot, "secret-manager")));
   const startedAt = new Date();
   const fileName = `secret-manager-metadata-${backupTimestamp()}.tar.gz`;
   const hostPath = path.join(outputDir, fileName);
@@ -11350,13 +11377,13 @@ async function backupSecretManagerMetadata(options = {}) {
   const workDir = makeOpsTempDir("infra-secret-manager-metadata-");
 
   try {
-    const secretManagerStorePath = path.join(infraRoot, "secrets", "infra-secret-manager-store.json");
+    const secretManagerStorePath = path.join(secretsRoot, "infra-secret-manager-store.json");
     if (fs.existsSync(secretManagerStorePath)) {
       assertNoPlaintextFingerprints(readJsonFile(secretManagerStorePath, secretManagerStorePath), "secret manager metadata backup");
     }
     const files = [
       ["infra-secret-manager-store.json", secretManagerStorePath],
-      ["infra-secret-manager-audit.log", path.join(infraRoot, "secrets", "infra-secret-manager-audit.log")],
+      ["infra-secret-manager-audit.log", path.join(secretsRoot, "infra-secret-manager-audit.log")],
     ];
     for (const [name, filePath] of files) {
       if (fs.existsSync(filePath)) {
@@ -11488,7 +11515,7 @@ async function restoreTestSecretManagerMetadata(options = {}) {
 
 async function backupRestoreDrillSecretManagerMetadata() {
   log("==> Secret Manager metadata backup/restore drill");
-  const outputDir = path.resolve(argv.outputDir ?? path.join(infraRoot, "backups", "secret-manager", "drills"));
+  const outputDir = path.resolve(argv.outputDir ?? path.join(backupsRoot, "secret-manager", "drills"));
   const backup = await backupSecretManagerMetadata({ outputDir });
   await restoreTestSecretManagerMetadata({ backupFile: backup.hostPath });
   log(`Secret Manager metadata backup/restore drill completed for ${path.basename(backup.hostPath)}.`);
@@ -11565,7 +11592,7 @@ const drEvidenceFamilies = [
 ];
 
 function readJsonReports(directoryName) {
-  const directory = path.join(infraRoot, "reports", directoryName);
+  const directory = path.join(reportsRoot, directoryName);
   if (!fs.existsSync(directory)) {
     return [];
   }
@@ -11841,7 +11868,7 @@ async function prunePostgresBackups(options = {}) {
   const container = options.container ?? argv.container ?? "enterprise-postgres";
   const database = options.database ?? argv.database ?? defaultPostgresBackupDatabase();
   const user = options.user ?? argv.user ?? "postgres";
-  const backupDir = path.resolve(options.backupDir ?? argv.backupDir ?? path.join(infraRoot, "backups", "postgres"));
+  const backupDir = path.resolve(options.backupDir ?? argv.backupDir ?? path.join(backupsRoot, "postgres"));
   const drillDir = path.resolve(options.drillDir ?? argv.drillDir ?? path.join(backupDir, "drills"));
   const backupRetentionDays = positiveInteger(options.retentionDays ?? argv.retentionDays ?? 30, "--retentionDays");
   const drillRetentionDays = positiveInteger(options.drillRetentionDays ?? argv.drillRetentionDays ?? 14, "--drillRetentionDays");
@@ -11850,9 +11877,9 @@ async function prunePostgresBackups(options = {}) {
   const maxRestoreTestAgeDays = positiveInteger(options.maxRestoreTestAgeDays ?? argv.maxRestoreTestAgeDays ?? 35, "--maxRestoreTestAgeDays");
   const dryRun = options.dryRun ?? booleanFlag(argv.dryRun);
 
-  resolveInside(path.join(infraRoot, "backups"), backupDir);
+  resolveInside(backupsRoot, backupDir);
   if (fs.existsSync(drillDir)) {
-    resolveInside(path.join(infraRoot, "backups"), drillDir);
+    resolveInside(backupsRoot, drillDir);
   }
   assertRecentRestoreTest(container, database, user, maxRestoreTestAgeDays);
 
@@ -12187,7 +12214,7 @@ async function staticSecurityCheck() {
 
 
 async function validateLocalSecrets() {
-  const secretsDir = path.resolve(argv.secretsDir ?? path.join(infraRoot, "secrets"));
+  const secretsDir = path.resolve(argv.secretsDir ?? secretsRoot);
   const required = [
     "docker_action_runtime_intent_trust_key",
     "docker_action_backup_catalog",

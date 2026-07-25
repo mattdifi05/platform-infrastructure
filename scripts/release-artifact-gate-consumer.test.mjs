@@ -38,7 +38,9 @@ function reportDocuments(directory, prefix) {
 
 try {
   const repository = "owner/repo";
-  const commitSha = "b".repeat(40);
+  const commitResult = spawnSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8" });
+  assert.equal(commitResult.status, 0, commitResult.stderr);
+  const commitSha = commitResult.stdout.trim();
   const runtimeDigest = `sha256:${"c".repeat(64)}`;
   const descriptor = {
     schemaVersion: 2,
@@ -140,8 +142,9 @@ try {
   const manifestArtifact = writeJson("release-subjects.json", artifacts.manifest);
   const sbomArtifact = writeJson("release-sbom.cdx.json", artifacts.sbom);
   const sourceArchivePath = path.join(temporary, "source-archive.tar");
-  const sourceArchiveBytes = Buffer.from("exact source archive fixture\n");
-  fs.writeFileSync(sourceArchivePath, sourceArchiveBytes, { mode: 0o600 });
+  const archiveResult = spawnSync("git", ["-C", root, "-c", "tar.umask=0000", "archive", "--format=tar", `--output=${sourceArchivePath}`, commitSha], { encoding: "utf8" });
+  assert.equal(archiveResult.status, 0, archiveResult.stderr);
+  const sourceArchiveBytes = fs.readFileSync(sourceArchivePath);
   const sourceArchiveSha256 = crypto.createHash("sha256").update(sourceArchiveBytes).digest("hex");
   assert.equal(manifestArtifact.sha256.length, 64);
   assert.equal(sbomArtifact.sha256, artifacts.manifest.sbom.sha256);
@@ -182,6 +185,9 @@ process.stdout.write(JSON.stringify([{ verificationResult: {
       return ![".git", ".tmp", "backups", "node_modules", "reports"].includes(topLevel);
     },
   });
+  const gitDirectoryResult = spawnSync("git", ["-C", root, "rev-parse", "--absolute-git-dir"], { encoding: "utf8" });
+  assert.equal(gitDirectoryResult.status, 0, gitDirectoryResult.stderr);
+  fs.writeFileSync(path.join(fixtureRoot, ".git"), `gitdir: ${gitDirectoryResult.stdout.trim()}\n`, { mode: 0o600 });
   const fixtureReleaseTrustPath = path.join(fixtureRoot, "scripts", "release-trust.mjs");
   const fixtureReleaseTrust = fs.readFileSync(fixtureReleaseTrustPath, "utf8");
   const pinnedVerifierDeclaration = 'verifierBinary = "/usr/local/bin/gh"';

@@ -109,11 +109,13 @@ record("deploy-vps-no-remote-argv", !includes(deployVps, "sh -s --") && !include
 record(
   "deploy-vps-remote-revalidation",
   includes(deployVpsRemote, "decode_field")
-    && includes(deployVpsRemote, 'git checkout --detach "$release_sha"')
+    && includes(deployVpsRemote, "candidate_release_root")
+    && includes(deployVpsRemote, "--extractedRoot")
+    && includes(deployVpsRemote, "--archive")
     && includes(deployVpsRemote, "platform-trusted-deployment-admission/v1")
-    && includes(deployVpsRemote, 'git remote get-url --all origin')
+    && !includes(deployVpsRemote, "git checkout")
     && !includes(deployVpsRemote, "PLATFORM_BRANCH_B64"),
-  "remote deploy decodes receipts, verifies canonical origin and checks out the exact admitted commit detached",
+  "remote deploy decodes receipts and activates only an exact immutable archive root without checkout mutation",
 );
 
 record("branch-strict", branchPolicy.required_status_checks?.strict === true, "status checks require the latest branch state");

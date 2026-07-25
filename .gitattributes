@@ -23,3 +23,9 @@
 /secrets export-ignore
 /traefik/acme export-ignore
 /traefik/certs export-ignore
+/reports export-ignore
+/backups export-ignore
+/release export-ignore
+/.tmp export-ignore
+/security/sbom export-ignore
+/security/dast export-ignore
