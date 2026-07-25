@@ -5,6 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   approvedReleaseSubjects,
+  sha256Json,
   validateCryptographicReleaseVerification,
   validateCycloneDxReleaseSbom,
 } from "./release-artifact-policy.mjs";
@@ -15,7 +16,7 @@ import { verifyGithubReleaseImages } from "./release-trust.mjs";
 function invalid(message) { throw new Error(message); }
 
 function parseArgs(args) {
-  const out = { images: [] };
+  const out = { images: [], buildkitSboms: [], registryDescriptors: [], registryResolutions: [] };
   for (let index = 0; index < args.length; index += 1) {
     const key = args[index];
     if (!key.startsWith("--")) invalid(`Unexpected argument ${key}.`);
@@ -23,6 +24,9 @@ function parseArgs(args) {
     if (!value || value.startsWith("--")) invalid(`Missing value for ${key}.`);
     index += 1;
     if (key === "--image") out.images.push(value);
+    else if (key === "--buildkitSbom") out.buildkitSboms.push(value);
+    else if (key === "--registryDescriptor") out.registryDescriptors.push(value);
+    else if (key === "--registryResolution") out.registryResolutions.push(value);
     else out[key.slice(2)] = value;
   }
   return out;
@@ -32,6 +36,12 @@ function imageEntry(value) {
   const separator = String(value).indexOf("=");
   if (separator < 1) invalid("--image must use KEY=registry/repository@sha256:digest.");
   return { key: value.slice(0, separator), image: value.slice(separator + 1) };
+}
+
+function keyedPath(value, label) {
+  const separator = String(value).indexOf("=");
+  if (separator < 1 || separator === value.length - 1) invalid(`${label} must use SUBJECT_KEY=path.`);
+  return { key: value.slice(0, separator), pathname: value.slice(separator + 1) };
 }
 
 export function createVerifiedReleaseArtifacts({
@@ -47,21 +57,61 @@ export function createVerifiedReleaseArtifacts({
   registryResolution,
   registryResolutionSha256,
   registryDescriptorBytes,
+  subjectEvidence = null,
   expectedPlatforms = ["linux/amd64"],
   generatedAt = new Date().toISOString(),
   serialNumber = `urn:uuid:${crypto.randomUUID()}`,
 }) {
   const requestedSubjects = approvedReleaseSubjects(entries, repository);
   validateCryptographicReleaseVerification(verification, { subjects: requestedSubjects, repository, commitSha });
-  if (requestedSubjects.length !== 1) invalid("Each release artifact invocation must bind one image to one registry/SBOM evidence set.");
-  const resolution = validateRegistryResolutionReceipt(registryResolution, {
-    image: requestedSubjects[0].image,
-    descriptorBytes: registryDescriptorBytes,
-    expectedPlatforms,
+  const rawEvidence = subjectEvidence ?? [{
+    key: requestedSubjects[0]?.key,
+    buildkitSbom,
+    buildkitSbomBytes,
+    registryResolution,
+    registryResolutionSha256,
+    registryDescriptorBytes,
+  }];
+  if (!Array.isArray(rawEvidence) || rawEvidence.length !== requestedSubjects.length) {
+    invalid("Every release subject must have exactly one registry and BuildKit SBOM evidence set.");
+  }
+  const evidenceByKey = new Map();
+  for (const evidence of rawEvidence) {
+    if (!evidence?.key || evidenceByKey.has(evidence.key)) invalid("Release subject evidence keys must be present and unique.");
+    evidenceByKey.set(evidence.key, evidence);
+  }
+  const verifiedEvidence = requestedSubjects.map((subject) => {
+    const evidence = evidenceByKey.get(subject.key);
+    if (!evidence) invalid(`Release subject evidence is missing ${subject.key}.`);
+    const resolution = validateRegistryResolutionReceipt(evidence.registryResolution, {
+      image: subject.image,
+      descriptorBytes: evidence.registryDescriptorBytes,
+      expectedPlatforms,
+    });
+    if (!/^[a-f0-9]{64}$/.test(String(evidence.registryResolutionSha256 ?? ""))) {
+      invalid(`Registry resolution receipt SHA256 is required for ${subject.key}.`);
+    }
+    const buildkitSbomSha256 = hashBuildkitSbom(evidence.buildkitSbomBytes);
+    const inventory = buildkitSpdxInventory(evidence.buildkitSbom, { subjects: [subject], expectedPlatforms });
+    return {
+      subject,
+      resolution,
+      inventory,
+      buildkitSbomSha256,
+      registryResolutionSha256: evidence.registryResolutionSha256,
+    };
   });
-  if (!/^[a-f0-9]{64}$/.test(String(registryResolutionSha256 ?? ""))) invalid("Registry resolution receipt SHA256 is required.");
-  const rawBuildkitSha256 = hashBuildkitSbom(buildkitSbomBytes);
-  const inventory = buildkitSpdxInventory(buildkitSbom, { subjects: requestedSubjects, expectedPlatforms });
+  if (evidenceByKey.size !== requestedSubjects.length) invalid("Release subject evidence contains an unexpected key.");
+  const buildkitBindings = verifiedEvidence
+    .map(({ subject, buildkitSbomSha256 }) => ({ key: subject.key, sha256: buildkitSbomSha256 }))
+    .sort((left, right) => left.key.localeCompare(right.key));
+  const rawBuildkitSha256 = requestedSubjects.length === 1
+    ? buildkitBindings[0].sha256
+    : sha256Json(buildkitBindings);
+  const inventory = {
+    platforms: [...new Set(verifiedEvidence.flatMap((entry) => entry.inventory.platforms))].sort(),
+    components: verifiedEvidence.flatMap((entry) => entry.inventory.components),
+  };
   const verifiedByImage = new Map(verification.releaseImages.map((image) => [image, image]));
   const subjects = requestedSubjects.map((requested) => {
     const verifiedImage = verifiedByImage.get(requested.image);
@@ -71,7 +121,8 @@ export function createVerifiedReleaseArtifacts({
       image: verifiedImage,
       name: requested.name,
       digest: requested.digest,
-      platforms: resolution.platforms.map(({ platform, digest: descriptorDigest, size, mediaType }) => ({
+      platforms: verifiedEvidence.find((entry) => entry.subject.key === requested.key).resolution.platforms
+        .map(({ platform, digest: descriptorDigest, size, mediaType }) => ({
         platform, descriptorDigest, size, mediaType,
       })),
     };
@@ -112,7 +163,7 @@ export function createVerifiedReleaseArtifacts({
   const sbomBytes = `${JSON.stringify(sbom, null, 2)}\n`;
   const sbomSha256 = crypto.createHash("sha256").update(sbomBytes).digest("hex");
   const manifest = {
-    version: 3,
+    version: 4,
     generatedAt,
     releaseName: String(releaseName || commitSha),
     repository,
@@ -123,17 +174,45 @@ export function createVerifiedReleaseArtifacts({
     sbom: {
       schema: "http://cyclonedx.org/schema/bom-1.5.schema.json",
       sha256: sbomSha256,
-      buildkitSha256: rawBuildkitSha256,
+      buildkitEvidenceSha256: rawBuildkitSha256,
     },
-    registryResolution: {
-      sha256: registryResolutionSha256,
+    subjectEvidence: verifiedEvidence.map(({ subject, resolution, buildkitSbomSha256, registryResolutionSha256: resolutionSha256 }) => ({
+      key: subject.key,
+      image: subject.image,
+      buildkitSbomSha256,
+      registryResolutionSha256: resolutionSha256,
       descriptorSha256: resolution.descriptorSha256,
       descriptorArtifactSha256: resolution.descriptorArtifactSha256,
-      platforms: inventory.platforms,
-    },
+      platforms: resolution.platforms.map((entry) => entry.platform),
+    })).sort((left, right) => left.key.localeCompare(right.key)),
     subjects,
   };
-  return { manifest, sbom, subjects };
+  return {
+    manifest,
+    sbom,
+    subjects,
+    evidenceBundle: {
+      version: 1,
+      kind: "platform-release-subject-evidence-bundle/v1",
+      subjects: rawEvidence.map((entry) => {
+        const resolutionBytes = entry.registryResolutionBytes
+          ?? Buffer.from(`${JSON.stringify(entry.registryResolution, null, 2)}\n`);
+        if (crypto.createHash("sha256").update(resolutionBytes).digest("hex") !== entry.registryResolutionSha256) {
+          invalid(`Registry resolution bytes are not bound to ${entry.key}.`);
+        }
+        return {
+          key: entry.key,
+          image: requestedSubjects.find((subject) => subject.key === entry.key)?.image,
+          buildkitSbomBase64: entry.buildkitSbomBytes.toString("base64"),
+          buildkitSbomSha256: hashBuildkitSbom(entry.buildkitSbomBytes),
+          registryResolutionBase64: resolutionBytes.toString("base64"),
+          registryResolutionSha256: entry.registryResolutionSha256,
+          registryDescriptorBase64: entry.registryDescriptorBytes.toString("base64"),
+          registryDescriptorSha256: crypto.createHash("sha256").update(entry.registryDescriptorBytes).digest("hex"),
+        };
+      }).sort((left, right) => left.key.localeCompare(right.key)),
+    },
+  };
 }
 
 function readBoundedJson(pathname, label, maxBytes = 128 * 1024 * 1024) {
@@ -153,11 +232,23 @@ function writeJson(pathname, value) {
   return { text, sha256: crypto.createHash("sha256").update(text).digest("hex") };
 }
 
+function evidencePaths(values, subjects, label) {
+  if (subjects.length === 1 && values.length === 1 && !values[0].includes("=")) {
+    return new Map([[subjects[0].key, values[0]]]);
+  }
+  const entries = values.map((value) => keyedPath(value, label));
+  if (entries.length !== subjects.length || new Set(entries.map((entry) => entry.key)).size !== entries.length) {
+    invalid(`${label} must provide exactly one keyed path for every release subject.`);
+  }
+  return new Map(entries.map((entry) => [entry.key, entry.pathname]));
+}
+
 function main() {
   const options = parseArgs(process.argv.slice(2));
   if (options.receipt) invalid("Artifact admission receipts can only be finalized after the release manifest attestation is verified.");
   const entries = options.images.map(imageEntry);
-  const images = approvedReleaseSubjects(entries, options.repo).map((subject) => subject.image);
+  const approved = approvedReleaseSubjects(entries, options.repo);
+  const images = approved.map((subject) => subject.image);
   const verification = verifyGithubReleaseImages({
     images,
     repository: options.repo,
@@ -165,9 +256,23 @@ function main() {
     sourceDigest: options.sha,
     sourceRef: options.ref,
   });
-  const buildkit = readBoundedJson(options.buildkitSbom, "BuildKit SBOM");
-  const registryReceipt = readBoundedJson(options.registryResolution, "registry resolution receipt", 16 * 1024 * 1024);
-  const registryDescriptor = readBoundedJson(options.registryDescriptor, "registry descriptor", 16 * 1024 * 1024);
+  const buildkitPaths = evidencePaths(options.buildkitSboms, approved, "--buildkitSbom");
+  const resolutionPaths = evidencePaths(options.registryResolutions, approved, "--registryResolution");
+  const descriptorPaths = evidencePaths(options.registryDescriptors, approved, "--registryDescriptor");
+  const subjectEvidence = approved.map((subject) => {
+    const buildkit = readBoundedJson(buildkitPaths.get(subject.key), `BuildKit SBOM ${subject.key}`);
+    const registryReceipt = readBoundedJson(resolutionPaths.get(subject.key), `registry resolution receipt ${subject.key}`, 16 * 1024 * 1024);
+    const registryDescriptor = readBoundedJson(descriptorPaths.get(subject.key), `registry descriptor ${subject.key}`, 16 * 1024 * 1024);
+    return {
+      key: subject.key,
+      buildkitSbom: buildkit.document,
+      buildkitSbomBytes: buildkit.bytes,
+      registryResolution: registryReceipt.document,
+      registryResolutionBytes: registryReceipt.bytes,
+      registryResolutionSha256: registryReceipt.sha256,
+      registryDescriptorBytes: registryDescriptor.bytes,
+    };
+  });
   const artifacts = createVerifiedReleaseArtifacts({
     entries,
     repository: options.repo,
@@ -176,11 +281,7 @@ function main() {
     workflowRunId: options.workflowRunId,
     workflowRunUrl: options.workflowRunUrl,
     verification,
-    buildkitSbom: buildkit.document,
-    buildkitSbomBytes: buildkit.bytes,
-    registryResolution: registryReceipt.document,
-    registryResolutionSha256: registryReceipt.sha256,
-    registryDescriptorBytes: registryDescriptor.bytes,
+    subjectEvidence,
     expectedPlatforms: [options.platform],
   });
   const manifestPath = path.resolve(options.manifest);
@@ -188,6 +289,8 @@ function main() {
   const sbomArtifact = writeJson(sbomPath, artifacts.sbom);
   if (artifacts.manifest.sbom.sha256 !== sbomArtifact.sha256) invalid("Generated SBOM bytes do not match the manifest binding.");
   const manifestArtifact = writeJson(manifestPath, artifacts.manifest);
+  if (approved.length > 1 && !options.evidenceBundle) invalid("--evidenceBundle is required for a multi-subject release.");
+  if (options.evidenceBundle) writeJson(path.resolve(options.evidenceBundle), artifacts.evidenceBundle);
   process.stdout.write(`${manifestArtifact.sha256}\n`);
 }
 

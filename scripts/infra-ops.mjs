@@ -78,6 +78,7 @@ import {
   buildReleaseAdmissionReceipt,
   approvedReleaseSubjects,
   canonicalReleaseSubjects,
+  sha256Json,
   validateAttestedReleaseManifest,
   validateCryptographicReleaseVerification,
   validateCycloneDxReleaseSbom,
@@ -6288,6 +6289,89 @@ async function secretRotationEvidence(options = {}) {
   }
 }
 
+function exactReleaseEvidenceBase64(value, label, maxBytes) {
+  if (typeof value !== "string" || value.length === 0 || value.length > Math.ceil(maxBytes / 3) * 4 + 4
+    || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value)) {
+    fail(`${label} is not bounded canonical base64.`);
+  }
+  const bytes = Buffer.from(value, "base64");
+  if (bytes.length < 1 || bytes.length > maxBytes || bytes.toString("base64") !== value) {
+    fail(`${label} is not bounded canonical base64.`);
+  }
+  return bytes;
+}
+
+function releaseSubjectEvidenceFromBundle(bundle, subjects) {
+  if (!bundle || typeof bundle !== "object" || Array.isArray(bundle)
+    || JSON.stringify(Object.keys(bundle).sort()) !== JSON.stringify(["kind", "subjects", "version"])
+    || bundle.version !== 1 || bundle.kind !== "platform-release-subject-evidence-bundle/v1"
+    || !Array.isArray(bundle.subjects) || bundle.subjects.length !== subjects.length) {
+    fail("Release subject evidence bundle kind, schema or cardinality is invalid.");
+  }
+  const subjectByKey = new Map(subjects.map((subject) => [subject.key, subject]));
+  const expectedEntryKeys = [
+    "buildkitSbomBase64",
+    "buildkitSbomSha256",
+    "image",
+    "key",
+    "registryDescriptorBase64",
+    "registryDescriptorSha256",
+    "registryResolutionBase64",
+    "registryResolutionSha256",
+  ].sort();
+  const entries = bundle.subjects.map((entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)
+      || JSON.stringify(Object.keys(entry).sort()) !== JSON.stringify(expectedEntryKeys)) {
+      fail("Release subject evidence bundle entry does not use the exact closed schema.");
+    }
+    const subject = subjectByKey.get(entry.key);
+    if (!subject || entry.image !== subject.image
+      || !/^[a-f0-9]{64}$/.test(String(entry.buildkitSbomSha256 ?? ""))
+      || !/^[a-f0-9]{64}$/.test(String(entry.registryResolutionSha256 ?? ""))
+      || !/^[a-f0-9]{64}$/.test(String(entry.registryDescriptorSha256 ?? ""))) {
+      fail("Release subject evidence bundle key, image or hash binding is invalid.");
+    }
+    const buildkitBytes = exactReleaseEvidenceBase64(entry.buildkitSbomBase64, `${entry.key} BuildKit SBOM`, 128 * 1024 * 1024);
+    const resolutionBytes = exactReleaseEvidenceBase64(entry.registryResolutionBase64, `${entry.key} registry resolution`, 16 * 1024 * 1024);
+    const descriptorBytes = exactReleaseEvidenceBase64(entry.registryDescriptorBase64, `${entry.key} registry descriptor`, 16 * 1024 * 1024);
+    if (crypto.createHash("sha256").update(buildkitBytes).digest("hex") !== entry.buildkitSbomSha256
+      || crypto.createHash("sha256").update(resolutionBytes).digest("hex") !== entry.registryResolutionSha256
+      || crypto.createHash("sha256").update(descriptorBytes).digest("hex") !== entry.registryDescriptorSha256) {
+      fail(`Release subject evidence bytes for ${entry.key} do not match their hashes.`);
+    }
+    let buildkitSbom;
+    let registryResolution;
+    try {
+      const buildkitText = buildkitBytes.toString("utf8");
+      const resolutionText = resolutionBytes.toString("utf8");
+      if (!Buffer.from(buildkitText, "utf8").equals(buildkitBytes)
+        || !Buffer.from(resolutionText, "utf8").equals(resolutionBytes)) {
+        fail(`Release subject evidence for ${entry.key} is not valid UTF-8.`);
+      }
+      buildkitSbom = JSON.parse(buildkitText);
+      registryResolution = JSON.parse(resolutionText);
+    } catch (error) {
+      fail(`Release subject evidence for ${entry.key} is invalid JSON: ${error.message}`);
+    }
+    return {
+      key: entry.key,
+      image: entry.image,
+      buildkitSbom,
+      buildkitSbomBytes: buildkitBytes,
+      buildkitSbomSha256: entry.buildkitSbomSha256,
+      registryResolution,
+      registryResolutionSha256: entry.registryResolutionSha256,
+      registryDescriptorBytes: descriptorBytes,
+    };
+  });
+  const keys = entries.map((entry) => entry.key);
+  if (new Set(keys).size !== keys.length || JSON.stringify(keys) !== JSON.stringify([...keys].sort())
+    || keys.some((key) => !subjectByKey.has(key))) {
+    fail("Release subject evidence bundle keys must be the exact sorted subject set.");
+  }
+  return entries;
+}
+
 async function releaseArtifactGate(options = {}) {
   let result = null;
   const artifactVerificationOnly = booleanFlag(options.artifactVerificationOnly ?? argv.artifactVerificationOnly);
@@ -6313,6 +6397,7 @@ async function releaseArtifactGateBody(options = {}) {
   let buildkitSbomArtifact = null;
   let registryResolutionArtifact = null;
   let registryDescriptorArtifact = null;
+  let evidenceBundleArtifact = null;
   let sourceArchiveArtifact = null;
   try {
     const releaseManifest = manifestArtifact.document;
@@ -6330,27 +6415,68 @@ async function releaseArtifactGateBody(options = {}) {
       }
     }
     const subjects = approvedReleaseSubjects(imageEntries, releaseManifest.repository);
-    if (subjects.length !== 1) fail("One release gate invocation must bind exactly one image evidence set.");
 
     const sourceArchiveFile = options.sourceArchive ?? argv.sourceArchive;
-    const buildkitSbomFile = options.buildkitSbom ?? argv.buildkitSbom;
-    const registryResolutionFile = options.registryResolution ?? argv.registryResolution;
-    const registryDescriptorFile = options.registryDescriptor ?? argv.registryDescriptor;
-    if (!sourceArchiveFile || !buildkitSbomFile || !registryResolutionFile || !registryDescriptorFile) {
-      fail("Exact source archive, raw BuildKit SBOM, registry resolution receipt and raw registry descriptor are mandatory release evidence.");
-    }
+    if (!sourceArchiveFile) fail("Exact source archive evidence is mandatory.");
     sourceArchiveArtifact = snapshotFileArtifact(sourceArchiveFile, { label: "exact release source archive", maxBytes: 256 * 1024 * 1024 });
-    buildkitSbomArtifact = snapshotJsonArtifact(buildkitSbomFile, { label: "raw BuildKit SBOM", maxBytes: 128 * 1024 * 1024 });
-    registryResolutionArtifact = snapshotJsonArtifact(registryResolutionFile, { label: "registry resolution receipt", maxBytes: 16 * 1024 * 1024 });
-    registryDescriptorArtifact = snapshotJsonArtifact(registryDescriptorFile, { label: "raw registry descriptor", maxBytes: 16 * 1024 * 1024 });
     const approvedPlatforms = ["linux/amd64"];
-    const registryResolution = validateRegistryResolutionReceipt(registryResolutionArtifact.document, {
-      image: subjects[0].image,
-      descriptorBytes: fs.readFileSync(registryDescriptorArtifact.snapshotPath),
-      expectedPlatforms: approvedPlatforms,
+    let subjectEvidence;
+    if (releaseManifest.version === 4) {
+      const evidenceBundleFile = options.subjectEvidenceBundle ?? argv.subjectEvidenceBundle;
+      if (!evidenceBundleFile) fail("Schema-v4 releases require the exact per-subject evidence bundle.");
+      evidenceBundleArtifact = snapshotJsonArtifact(evidenceBundleFile, {
+        label: "release subject evidence bundle",
+        maxBytes: 512 * 1024 * 1024,
+      });
+      subjectEvidence = releaseSubjectEvidenceFromBundle(evidenceBundleArtifact.document, subjects);
+    } else {
+      if (subjects.length !== 1) fail("Legacy schema-v3 releases can bind exactly one image evidence set.");
+      const buildkitSbomFile = options.buildkitSbom ?? argv.buildkitSbom;
+      const registryResolutionFile = options.registryResolution ?? argv.registryResolution;
+      const registryDescriptorFile = options.registryDescriptor ?? argv.registryDescriptor;
+      if (!buildkitSbomFile || !registryResolutionFile || !registryDescriptorFile) {
+        fail("Raw BuildKit SBOM, registry resolution receipt and raw registry descriptor are mandatory legacy release evidence.");
+      }
+      buildkitSbomArtifact = snapshotJsonArtifact(buildkitSbomFile, { label: "raw BuildKit SBOM", maxBytes: 128 * 1024 * 1024 });
+      registryResolutionArtifact = snapshotJsonArtifact(registryResolutionFile, { label: "registry resolution receipt", maxBytes: 16 * 1024 * 1024 });
+      registryDescriptorArtifact = snapshotJsonArtifact(registryDescriptorFile, { label: "raw registry descriptor", maxBytes: 16 * 1024 * 1024 });
+      subjectEvidence = [{
+        key: subjects[0].key,
+        image: subjects[0].image,
+        buildkitSbom: buildkitSbomArtifact.document,
+        buildkitSbomBytes: fs.readFileSync(buildkitSbomArtifact.snapshotPath),
+        buildkitSbomSha256: buildkitSbomArtifact.sha256,
+        registryResolution: registryResolutionArtifact.document,
+        registryResolutionSha256: registryResolutionArtifact.sha256,
+        registryDescriptorBytes: fs.readFileSync(registryDescriptorArtifact.snapshotPath),
+      }];
+    }
+    const verifiedSubjectEvidence = subjectEvidence.map((entry) => {
+      const subject = subjects.find((candidate) => candidate.key === entry.key);
+      if (!subject || subject.image !== entry.image) fail("Release subject evidence set is mismatched.");
+      const registryResolution = validateRegistryResolutionReceipt(entry.registryResolution, {
+        image: subject.image,
+        descriptorBytes: entry.registryDescriptorBytes,
+        expectedPlatforms: approvedPlatforms,
+      });
+      const rawSha256 = buildkitSbomSha256(entry.buildkitSbomBytes);
+      if (rawSha256 !== entry.buildkitSbomSha256) fail(`BuildKit SBOM hash mismatch for ${subject.key}.`);
+      const inventory = buildkitSpdxInventory(entry.buildkitSbom, { subjects: [subject], expectedPlatforms: approvedPlatforms });
+      return {
+        ...entry,
+        registryResolution,
+        buildkitSbomSha256: rawSha256,
+        inventory,
+      };
     });
-    const rawBuildkitSha256 = buildkitSbomSha256(fs.readFileSync(buildkitSbomArtifact.snapshotPath));
-    const buildkitInventory = buildkitSpdxInventory(buildkitSbomArtifact.document, { subjects, expectedPlatforms: approvedPlatforms });
+    const buildkitBindings = verifiedSubjectEvidence.map((entry) => ({
+      key: entry.key,
+      sha256: entry.buildkitSbomSha256,
+    })).sort((left, right) => left.key.localeCompare(right.key));
+    const rawBuildkitSha256 = subjects.length === 1 ? buildkitBindings[0].sha256 : sha256Json(buildkitBindings);
+    const buildkitInventory = {
+      components: verifiedSubjectEvidence.flatMap((entry) => entry.inventory.components),
+    };
 
     const sbomFile = options.sbom ?? argv.sbom ?? latestFileByMtime(path.join(securityOutputRoot, "sbom"), (file) => /sbom.*\.(json|cdx\.json)$/i.test(path.basename(file)));
     if (!sbomFile) {
@@ -6381,11 +6507,14 @@ async function releaseArtifactGateBody(options = {}) {
       commitSha: releaseSha,
       sbomSha256,
       buildkitSbomSha256: rawBuildkitSha256,
-      registryResolutionSha256: registryResolutionArtifact.sha256,
-      registryResolution,
-      registryDescriptorSha256: registryDescriptorArtifact.sha256,
-      registryRootDescriptorSha256: registryResolution.descriptorSha256,
-      resolvedPlatforms: registryResolution.platforms,
+      registryResolutionSha256: subjects.length === 1 ? verifiedSubjectEvidence[0].registryResolutionSha256 : null,
+      registryResolution: subjects.length === 1 ? verifiedSubjectEvidence[0].registryResolution : null,
+      registryDescriptorSha256: subjects.length === 1
+        ? crypto.createHash("sha256").update(verifiedSubjectEvidence[0].registryDescriptorBytes).digest("hex")
+        : null,
+      registryRootDescriptorSha256: subjects.length === 1 ? verifiedSubjectEvidence[0].registryResolution.descriptorSha256 : null,
+      resolvedPlatforms: subjects.length === 1 ? verifiedSubjectEvidence[0].registryResolution.platforms : null,
+      subjectEvidence: verifiedSubjectEvidence,
     });
     const sbomValidation = validateCycloneDxReleaseSbom(sbom, {
       subjects,
@@ -6420,8 +6549,9 @@ async function releaseArtifactGateBody(options = {}) {
       sourceArchiveSha256: sourceArchiveArtifact.sha256,
       sbomSha256,
       buildkitSbomSha256: rawBuildkitSha256,
-      registryResolutionSha256: registryResolutionArtifact.sha256,
-      registryResolution,
+      registryResolutionSha256: subjects.length === 1 ? verifiedSubjectEvidence[0].registryResolutionSha256 : null,
+      registryResolution: subjects.length === 1 ? verifiedSubjectEvidence[0].registryResolution : null,
+      subjectEvidence: verifiedSubjectEvidence,
       manifestSha256,
       verification: githubAttestationValidation,
       manifestVerification,
@@ -6458,6 +6588,7 @@ async function releaseArtifactGateBody(options = {}) {
     registryDescriptorArtifact?.cleanup();
     registryResolutionArtifact?.cleanup();
     buildkitSbomArtifact?.cleanup();
+    evidenceBundleArtifact?.cleanup();
     sourceArchiveArtifact?.cleanup();
     sbomArtifact?.cleanup();
     manifestArtifact.cleanup();

@@ -41,7 +41,9 @@ jobs:
       - name: Prepare GHCR image names
         run: |
           owner="$(printf '%s' "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
-          echo "PHP_APACHE_IMAGE=ghcr.io/${owner}/platform-infrastructure-php-apache" >> "$GITHUB_ENV"
+          echo "CONTROL_CENTER_IMAGE=ghcr.io/${owner}/platform-infrastructure-control-center" >> "$GITHUB_ENV"
+          echo "PROJECT_ROUTER_IMAGE=ghcr.io/${owner}/platform-infrastructure-project-router" >> "$GITHUB_ENV"
+          echo "PLATFORM_ALERT_DISPATCHER_IMAGE=ghcr.io/${owner}/platform-infrastructure-alert-dispatcher" >> "$GITHUB_ENV"
 
       - name: Login to GHCR
         uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4
@@ -55,50 +57,105 @@ jobs:
         with:
           driver: docker-container
 
-      - name: Build and push infra PHP Apache image
-        id: php-apache
+      - name: Build and push Control Center image
+        id: control-center
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
         with:
           context: .
-          file: docker/php-apache.Dockerfile
+          file: docker/control-center.Dockerfile
           push: true
           sbom: true
           platforms: linux/amd64
-          tags: |
-            ${{ env.PHP_APACHE_IMAGE }}:${{ github.sha }}
-            ${{ env.PHP_APACHE_IMAGE }}:${{ github.ref_name }}
+          tags: ${{ env.CONTROL_CENTER_IMAGE }}:${{ github.sha }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.title=platform-infrastructure-php-apache
+            org.opencontainers.image.title=platform-infrastructure-control-center
 
-      - name: Attest infra PHP Apache image provenance
-        id: attest-php-apache
+      - name: Attest Control Center image provenance
         uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4
         with:
-          subject-name: ${{ env.PHP_APACHE_IMAGE }}
-          subject-digest: ${{ steps.php-apache.outputs.digest }}
+          subject-name: ${{ env.CONTROL_CENTER_IMAGE }}
+          subject-digest: ${{ steps.control-center.outputs.digest }}
+          push-to-registry: true
+
+      - name: Build and push Project Router image
+        id: project-router
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        with:
+          context: .
+          file: docker/project-router.Dockerfile
+          push: true
+          sbom: true
+          platforms: linux/amd64
+          tags: ${{ env.PROJECT_ROUTER_IMAGE }}:${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.title=platform-infrastructure-project-router
+
+      - name: Attest Project Router image provenance
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4
+        with:
+          subject-name: ${{ env.PROJECT_ROUTER_IMAGE }}
+          subject-digest: ${{ steps.project-router.outputs.digest }}
+          push-to-registry: true
+
+      - name: Build and push Alert Dispatcher image
+        id: alert-dispatcher
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        with:
+          context: .
+          file: docker/alert-dispatcher.Dockerfile
+          push: true
+          sbom: true
+          platforms: linux/amd64
+          tags: ${{ env.PLATFORM_ALERT_DISPATCHER_IMAGE }}:${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.title=platform-infrastructure-alert-dispatcher
+
+      - name: Attest Alert Dispatcher image provenance
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4
+        with:
+          subject-name: ${{ env.PLATFORM_ALERT_DISPATCHER_IMAGE }}
+          subject-digest: ${{ steps.alert-dispatcher.outputs.digest }}
           push-to-registry: true
 
       - name: Resolve immutable registry platform and extract BuildKit SBOM
         env:
-          PHP_APACHE_DIGEST: ${{ steps.php-apache.outputs.digest }}
+          CONTROL_CENTER_DIGEST: ${{ steps.control-center.outputs.digest }}
+          PROJECT_ROUTER_DIGEST: ${{ steps.project-router.outputs.digest }}
+          PLATFORM_ALERT_DISPATCHER_DIGEST: ${{ steps.alert-dispatcher.outputs.digest }}
         run: |
           mkdir -p reports/release
-          SUBJECT="${PHP_APACHE_IMAGE}@${PHP_APACHE_DIGEST}"
-          docker buildx imagetools inspect "$SUBJECT" --raw > "reports/release/registry-descriptor-${GITHUB_RUN_ID}.json"
-          node ./scripts/release-registry-resolution.mjs \
-            --image "$SUBJECT" \
-            --descriptor "reports/release/registry-descriptor-${GITHUB_RUN_ID}.json" \
-            --platform linux/amd64 \
-            --receipt "reports/release/registry-resolution-${GITHUB_RUN_ID}.json"
-          docker buildx imagetools inspect "$SUBJECT" --format '{{ json .SBOM }}' > "reports/release/buildkit-sbom-${GITHUB_RUN_ID}.spdx.json"
-          test -s "reports/release/buildkit-sbom-${GITHUB_RUN_ID}.spdx.json"
+          while IFS='|' read -r key image digest; do
+            test -n "$key" && test -n "$image" && test -n "$digest"
+            subject="${image}@${digest}"
+            descriptor="reports/release/registry-descriptor-${key}-${GITHUB_RUN_ID}.json"
+            resolution="reports/release/registry-resolution-${key}-${GITHUB_RUN_ID}.json"
+            buildkit="reports/release/buildkit-sbom-${key}-${GITHUB_RUN_ID}.spdx.json"
+            docker buildx imagetools inspect "$subject" --raw > "$descriptor"
+            node ./scripts/release-registry-resolution.mjs \
+              --image "$subject" \
+              --descriptor "$descriptor" \
+              --platform linux/amd64 \
+              --receipt "$resolution"
+            docker buildx imagetools inspect "$subject" --format '{{ json .SBOM }}' > "$buildkit"
+            test -s "$buildkit"
+          done <<EOF
+          CONTROL_CENTER_IMAGE|${CONTROL_CENTER_IMAGE}|${CONTROL_CENTER_DIGEST}
+          PLATFORM_ALERT_DISPATCHER_IMAGE|${PLATFORM_ALERT_DISPATCHER_IMAGE}|${PLATFORM_ALERT_DISPATCHER_DIGEST}
+          PROJECT_ROUTER_IMAGE|${PROJECT_ROUTER_IMAGE}|${PROJECT_ROUTER_DIGEST}
+          EOF
 
       - name: Verify image provenance and generate bound release artifacts
         env:
           GH_TOKEN: ${{ github.token }}
-          PHP_APACHE_DIGEST: ${{ steps.php-apache.outputs.digest }}
+          CONTROL_CENTER_DIGEST: ${{ steps.control-center.outputs.digest }}
+          PROJECT_ROUTER_DIGEST: ${{ steps.project-router.outputs.digest }}
+          PLATFORM_ALERT_DISPATCHER_DIGEST: ${{ steps.alert-dispatcher.outputs.digest }}
         run: |
           mkdir -p .tmp/release-attestation reports/release
           git -c tar.umask=0000 archive \
@@ -107,7 +164,9 @@ jobs:
             "${GITHUB_SHA}"
           test -s "reports/release/source-archive-${GITHUB_RUN_ID}.tar"
           RELEASE_SUBJECTS_SHA256="$(node ./scripts/release-subject-manifest.mjs \
-            --image "PHP_APACHE_IMAGE=${PHP_APACHE_IMAGE}@${PHP_APACHE_DIGEST}" \
+            --image "CONTROL_CENTER_IMAGE=${CONTROL_CENTER_IMAGE}@${CONTROL_CENTER_DIGEST}" \
+            --image "PROJECT_ROUTER_IMAGE=${PROJECT_ROUTER_IMAGE}@${PROJECT_ROUTER_DIGEST}" \
+            --image "PLATFORM_ALERT_DISPATCHER_IMAGE=${PLATFORM_ALERT_DISPATCHER_IMAGE}@${PLATFORM_ALERT_DISPATCHER_DIGEST}" \
             --repo "${GITHUB_REPOSITORY}" \
             --sha "${GITHUB_SHA}" \
             --ref "${GITHUB_REF}" \
@@ -115,9 +174,16 @@ jobs:
             --releaseName "${RELEASE_NAME}" \
             --workflowRunId "${GITHUB_RUN_ID}" \
             --workflowRunUrl "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
-            --buildkitSbom "reports/release/buildkit-sbom-${GITHUB_RUN_ID}.spdx.json" \
-            --registryDescriptor "reports/release/registry-descriptor-${GITHUB_RUN_ID}.json" \
-            --registryResolution "reports/release/registry-resolution-${GITHUB_RUN_ID}.json" \
+            --buildkitSbom "CONTROL_CENTER_IMAGE=reports/release/buildkit-sbom-CONTROL_CENTER_IMAGE-${GITHUB_RUN_ID}.spdx.json" \
+            --buildkitSbom "PLATFORM_ALERT_DISPATCHER_IMAGE=reports/release/buildkit-sbom-PLATFORM_ALERT_DISPATCHER_IMAGE-${GITHUB_RUN_ID}.spdx.json" \
+            --buildkitSbom "PROJECT_ROUTER_IMAGE=reports/release/buildkit-sbom-PROJECT_ROUTER_IMAGE-${GITHUB_RUN_ID}.spdx.json" \
+            --registryDescriptor "CONTROL_CENTER_IMAGE=reports/release/registry-descriptor-CONTROL_CENTER_IMAGE-${GITHUB_RUN_ID}.json" \
+            --registryDescriptor "PLATFORM_ALERT_DISPATCHER_IMAGE=reports/release/registry-descriptor-PLATFORM_ALERT_DISPATCHER_IMAGE-${GITHUB_RUN_ID}.json" \
+            --registryDescriptor "PROJECT_ROUTER_IMAGE=reports/release/registry-descriptor-PROJECT_ROUTER_IMAGE-${GITHUB_RUN_ID}.json" \
+            --registryResolution "CONTROL_CENTER_IMAGE=reports/release/registry-resolution-CONTROL_CENTER_IMAGE-${GITHUB_RUN_ID}.json" \
+            --registryResolution "PLATFORM_ALERT_DISPATCHER_IMAGE=reports/release/registry-resolution-PLATFORM_ALERT_DISPATCHER_IMAGE-${GITHUB_RUN_ID}.json" \
+            --registryResolution "PROJECT_ROUTER_IMAGE=reports/release/registry-resolution-PROJECT_ROUTER_IMAGE-${GITHUB_RUN_ID}.json" \
+            --evidenceBundle "reports/release/release-subject-evidence-${GITHUB_RUN_ID}.json" \
             --platform linux/amd64 \
             --manifest "reports/release/release-subjects-${GITHUB_RUN_ID}.json" \
             --sbom "reports/release/github-release-sbom-${GITHUB_RUN_ID}.cdx.json")"
@@ -132,7 +198,6 @@ jobs:
       - name: Cryptographically verify and record attestations
         env:
           GH_TOKEN: ${{ github.token }}
-          PHP_APACHE_DIGEST: ${{ steps.php-apache.outputs.digest }}
         run: |
           node ./scripts/infra-ops.mjs github-attestation-evidence \
             --subject "reports/release/release-subjects-${GITHUB_RUN_ID}.json" \
@@ -145,9 +210,7 @@ jobs:
             --imageManifest "reports/release/release-subjects-${GITHUB_RUN_ID}.json" \
             --sbom "reports/release/github-release-sbom-${GITHUB_RUN_ID}.cdx.json" \
             --sourceArchive "reports/release/source-archive-${GITHUB_RUN_ID}.tar" \
-            --buildkitSbom "reports/release/buildkit-sbom-${GITHUB_RUN_ID}.spdx.json" \
-            --registryDescriptor "reports/release/registry-descriptor-${GITHUB_RUN_ID}.json" \
-            --registryResolution "reports/release/registry-resolution-${GITHUB_RUN_ID}.json" \
+            --subjectEvidenceBundle "reports/release/release-subject-evidence-${GITHUB_RUN_ID}.json" \
             --releaseSha "${GITHUB_SHA}" \
             --repo "${GITHUB_REPOSITORY}" \
             --sourceRef "${GITHUB_REF}" \
@@ -167,6 +230,7 @@ jobs:
             reports/release/buildkit-sbom-*.spdx.json
             reports/release/registry-descriptor-*.json
             reports/release/registry-resolution-*.json
+            reports/release/release-subject-evidence-*.json
             reports/release/release-artifact-admission-*.json
             reports/release/release-subjects-*.json
             reports/release/source-archive-*.tar

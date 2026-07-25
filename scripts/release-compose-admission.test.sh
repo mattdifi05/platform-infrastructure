@@ -2,25 +2,38 @@
 set -eu
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/release-compose-admission-test.XXXXXX")
 trap 'rm -rf "$TMP"' EXIT HUP INT TERM
-IMAGE="ghcr.io/owner/platform-infrastructure-php-apache@sha256:$(printf 'a%.0s' $(seq 1 64))"
-OTHER_IMAGE="ghcr.io/owner/platform-infrastructure-php-apache@sha256:$(printf 'b%.0s' $(seq 1 64))"
-OPS_IMAGE="ghcr.io/owner/platform-infrastructure-ops@sha256:$(printf 'c%.0s' $(seq 1 64))"
-OTHER_OPS_IMAGE="ghcr.io/owner/platform-infrastructure-ops@sha256:$(printf 'd%.0s' $(seq 1 64))"
-printf '{"opsRunner":{"image":"%s","imageId":"sha256:%s","providerAttested":true}}\n' \
-  "$OPS_IMAGE" "$(printf 'e%.0s' $(seq 1 64))" > "$TMP/deployment.json"
+
+CONTROL_IMAGE="ghcr.io/owner/platform-infrastructure-control-center@sha256:$(printf 'a%.0s' $(seq 1 64))"
+ALERT_IMAGE="ghcr.io/owner/platform-infrastructure-alert-dispatcher@sha256:$(printf 'b%.0s' $(seq 1 64))"
+ROUTER_IMAGE="ghcr.io/owner/platform-infrastructure-project-router@sha256:$(printf 'c%.0s' $(seq 1 64))"
+OPS_IMAGE="ghcr.io/owner/platform-infrastructure-ops@sha256:$(printf 'd%.0s' $(seq 1 64))"
+OPS_IMAGE_ID="sha256:$(printf 'e%.0s' $(seq 1 64))"
 
 write_receipt() {
-  subjects=$1
-  printf '{"subjects":%s}\n' "$subjects" > "$TMP/receipt.json"
+  cat > "$TMP/receipt.json" <<EOF
+{"subjects":[{"key":"CONTROL_CENTER_IMAGE","image":"$CONTROL_IMAGE"},{"key":"PLATFORM_ALERT_DISPATCHER_IMAGE","image":"$ALERT_IMAGE"},{"key":"PROJECT_ROUTER_IMAGE","image":"$ROUTER_IMAGE"}]}
+EOF
+}
+
+write_deployment() {
+  cat > "$TMP/deployment.json" <<EOF
+{"opsRunner":{"image":"$OPS_IMAGE","imageId":"$OPS_IMAGE_ID","providerAttested":true},"runtimeIntentSha256":"$(printf 'f%.0s' $(seq 1 64))","runtimeIntent":{"version":1,"kind":"platform-runtime-intent/v1","projectName":"platform_infra_vps","services":[{"service":"backup-scheduler","image":"$OPS_IMAGE","admission":{"kind":"ops-runner"},"expectedLocalImageId":"$OPS_IMAGE_ID"},{"service":"control-center","image":"$CONTROL_IMAGE","admission":{"kind":"artifact-subject","subjectKey":"CONTROL_CENTER_IMAGE"},"expectedLocalImageId":"sha256:$(printf '1%.0s' $(seq 1 64))"},{"service":"platform-alert-dispatcher","image":"$ALERT_IMAGE","admission":{"kind":"artifact-subject","subjectKey":"PLATFORM_ALERT_DISPATCHER_IMAGE"},"expectedLocalImageId":"sha256:$(printf '2%.0s' $(seq 1 64))"},{"service":"project-router","image":"$ROUTER_IMAGE","admission":{"kind":"artifact-subject","subjectKey":"PROJECT_ROUTER_IMAGE"},"expectedLocalImageId":"sha256:$(printf '3%.0s' $(seq 1 64))"}]}}
+EOF
 }
 
 write_compose() {
-  image=$1
-  ops_image=${2:-$OPS_IMAGE}
-  printf '{"services":{"php-apache":{"image":"%s","volumes":[{"type":"volume","source":"database","target":"/data"}]},"backup-scheduler":{"image":"%s"}},"volumes":{"database":{"name":"platform_database","driver":"local"}}}\n' \
-    "$image" "$ops_image" > "$TMP/compose.json"
+  cat > "$TMP/compose.json" <<EOF
+{"services":{"backup-scheduler":{"image":"$OPS_IMAGE"},"control-center":{"image":"$CONTROL_IMAGE","volumes":[{"type":"volume","source":"database","target":"/data"}]},"platform-alert-dispatcher":{"image":"$ALERT_IMAGE"},"project-router":{"image":"$ROUTER_IMAGE"}},"volumes":{"database":{"name":"platform_database","driver":"local"}}}
+EOF
+}
+
+reset_fixtures() {
+  write_receipt
+  write_deployment
+  write_compose
 }
 
 expect_reject() {
@@ -32,68 +45,99 @@ expect_reject() {
   printf 'PASS\t%s\n' "$label"
 }
 
-write_receipt "[{\"key\":\"PHP_APACHE_IMAGE\",\"image\":\"$IMAGE\"}]"
-write_compose "$IMAGE"
-sh "$SCRIPT_DIR/release-compose-admission.sh" "$TMP/receipt.json" "$TMP/deployment.json" "$TMP/compose.json"
-printf 'PASS\texact-release-and-ops-subject-service-digests\n'
+expect_reject_with_previous() {
+  label=$1
+  if sh "$SCRIPT_DIR/release-compose-admission.sh" "$TMP/receipt.json" "$TMP/deployment.json" "$TMP/compose.json" "$TMP/previous.json" >/dev/null 2>&1; then
+    echo "FAIL: $label was accepted" >&2
+    exit 1
+  fi
+  printf 'PASS\t%s\n' "$label"
+}
 
-write_compose "$OTHER_IMAGE"
+reset_fixtures
+sh "$SCRIPT_DIR/release-compose-admission.sh" "$TMP/receipt.json" "$TMP/deployment.json" "$TMP/compose.json"
+printf 'PASS\texact-runtime-intent-subject-and-service-set\n'
+
+jq '.services["project-router"].image = "ghcr.io/owner/attacker@sha256:'"$(printf '4%.0s' $(seq 1 64))"'"' "$TMP/compose.json" > "$TMP/changed.json"
+mv "$TMP/changed.json" "$TMP/compose.json"
 expect_reject wrong-rendered-digest
 
-write_receipt '[]'
-write_compose "$IMAGE"
+reset_fixtures
+jq '.subjects = .subjects[1:]' "$TMP/receipt.json" > "$TMP/changed.json"
+mv "$TMP/changed.json" "$TMP/receipt.json"
 expect_reject missing-subject
 
-write_receipt "[{\"key\":\"PHP_APACHE_IMAGE\",\"image\":\"$IMAGE\"},{\"key\":\"EXTRA_IMAGE\",\"image\":\"$OTHER_IMAGE\"}]"
+reset_fixtures
+jq '.subjects += [{"key":"ATTACKER_IMAGE","image":"ghcr.io/owner/attacker@sha256:'"$(printf '5%.0s' $(seq 1 64))"'"}]' "$TMP/receipt.json" > "$TMP/changed.json"
+mv "$TMP/changed.json" "$TMP/receipt.json"
 expect_reject extra-subject
 
-write_receipt "[{\"key\":\"PHP_APACHE_IMAGE\",\"image\":\"$IMAGE\"}]"
-printf '{"services":{"edge":{"image":"%s"},"backup-scheduler":{"image":"%s"}}}\n' "$IMAGE" "$OPS_IMAGE" > "$TMP/compose.json"
+reset_fixtures
+jq 'del(.services["control-center"])' "$TMP/compose.json" > "$TMP/changed.json"
+mv "$TMP/changed.json" "$TMP/compose.json"
 expect_reject missing-service
 
-write_receipt '[{"key":"PHP_APACHE_IMAGE","image":"ghcr.io/owner/platform-infrastructure-php-apache:latest"}]'
-write_compose 'ghcr.io/owner/platform-infrastructure-php-apache:latest'
-expect_reject mutable-subject
+reset_fixtures
+jq '.services.attacker={"image":"ghcr.io/owner/attacker@sha256:'"$(printf '5%.0s' $(seq 1 64))"'"}' "$TMP/compose.json" > "$TMP/changed.json"
+mv "$TMP/changed.json" "$TMP/compose.json"
+expect_reject extra-service
 
-TAGGED_IMAGE="ghcr.io/owner/platform-infrastructure-php-apache:release@sha256:$(printf 'f%.0s' $(seq 1 64))"
-write_receipt "[{\"key\":\"PHP_APACHE_IMAGE\",\"image\":\"$TAGGED_IMAGE\"}]"
-write_compose "$TAGGED_IMAGE"
-expect_reject tag-plus-digest-alias
+reset_fixtures
+jq '.services["control-center"].image = "ghcr.io/owner/platform-infrastructure-control-center:latest"' "$TMP/compose.json" > "$TMP/changed.json"
+mv "$TMP/changed.json" "$TMP/compose.json"
+expect_reject mutable-image
 
-write_receipt "[{\"key\":\"PHP_APACHE_IMAGE\",\"image\":\"$IMAGE\"}]"
-write_compose "$IMAGE" "$OTHER_OPS_IMAGE"
-expect_reject wrong-ops-runner-digest
+reset_fixtures
+jq '.services["project-router"].build={"context":"."}' "$TMP/compose.json" > "$TMP/changed.json"
+mv "$TMP/changed.json" "$TMP/compose.json"
+expect_reject build-fallback
 
-write_compose "$IMAGE"
-jq '.services["backup-scheduler"].build={"context":"."}' "$TMP/compose.json" > "$TMP/compose-with-build.json"
-mv "$TMP/compose-with-build.json" "$TMP/compose.json"
-expect_reject ops-runner-build-fallback
+reset_fixtures
+jq '.runtimeIntent.services |= reverse' "$TMP/deployment.json" > "$TMP/changed.json"
+mv "$TMP/changed.json" "$TMP/deployment.json"
+expect_reject unordered-runtime-intent
 
-write_receipt "[{\"key\":\"PHP_APACHE_IMAGE\",\"image\":\"$IMAGE\"}]"
-write_compose "$IMAGE"
+reset_fixtures
+jq '.runtimeIntent.services[0].expectedLocalImageId = "sha256:'"$(printf '6%.0s' $(seq 1 64))"'"' "$TMP/deployment.json" > "$TMP/changed.json"
+mv "$TMP/changed.json" "$TMP/deployment.json"
+expect_reject wrong-ops-image-id
+
+reset_fixtures
 cp "$TMP/compose.json" "$TMP/previous.json"
 sh "$SCRIPT_DIR/release-compose-admission.sh" "$TMP/receipt.json" "$TMP/deployment.json" "$TMP/compose.json" "$TMP/previous.json"
 printf 'PASS\texact-persistent-storage-identity\n'
 
-sed 's/"source":"database"/"source":"replacement_database"/' "$TMP/compose.json" > "$TMP/changed-storage.json"
-if sh "$SCRIPT_DIR/release-compose-admission.sh" "$TMP/receipt.json" "$TMP/deployment.json" "$TMP/changed-storage.json" "$TMP/previous.json" >/dev/null 2>&1; then
-  echo "FAIL: changed persistent storage identity was accepted" >&2
-  exit 1
-fi
-printf 'PASS\tchanged-persistent-storage-rejected\n'
+sed 's/"source":"database"/"source":"replacement_database"/' "$TMP/compose.json" > "$TMP/changed.json"
+mv "$TMP/changed.json" "$TMP/compose.json"
+expect_reject_with_previous changed-persistent-storage
 
-jq '.services["php-apache"].volumes[0].volume = {"subpath":"other"}' "$TMP/compose.json" > "$TMP/changed-subpath.json"
-if sh "$SCRIPT_DIR/release-compose-admission.sh" "$TMP/receipt.json" "$TMP/deployment.json" "$TMP/changed-subpath.json" "$TMP/previous.json" >/dev/null 2>&1; then
-  echo "FAIL: changed volume subpath semantics were accepted" >&2
-  exit 1
-fi
-printf 'PASS\tchanged-volume-subpath-rejected\n'
+reset_fixtures
+cp "$TMP/compose.json" "$TMP/previous.json"
+jq '.services["control-center"].volumes[0].volume={"subpath":"other"}' "$TMP/compose.json" > "$TMP/changed.json"
+mv "$TMP/changed.json" "$TMP/compose.json"
+expect_reject_with_previous changed-volume-subpath
 
-jq '.services["php-apache"].networks = {"candidate_only":null} | .networks = {"candidate_only":{"name":"candidate_only"}}' "$TMP/compose.json" > "$TMP/changed-network.json"
-if sh "$SCRIPT_DIR/release-compose-admission.sh" "$TMP/receipt.json" "$TMP/deployment.json" "$TMP/changed-network.json" "$TMP/previous.json" >/dev/null 2>&1; then
-  echo "FAIL: changed network identity was accepted" >&2
-  exit 1
-fi
-printf 'PASS\tchanged-network-identity-rejected\n'
+reset_fixtures
+cp "$TMP/compose.json" "$TMP/previous.json"
+jq '.services["control-center"].networks={"candidate_only":null} | .networks={"candidate_only":{"name":"candidate_only"}}' "$TMP/compose.json" > "$TMP/changed.json"
+mv "$TMP/changed.json" "$TMP/compose.json"
+expect_reject_with_previous changed-network-identity
 
-printf 'release Compose admission tests passed 13/13\n'
+! grep -R -F './project-router:/app' "$ROOT/compose.yaml" "$ROOT/compose.runtime-isolation.yaml"
+grep -F 'COPY --chown=node:node project-router/server.mjs /app/server.mjs' "$ROOT/docker/project-router.Dockerfile" >/dev/null
+printf 'PASS\tproject-router-code-is-image-baked\n'
+
+[ "$(grep -c 'build: !reset null' "$ROOT/compose.runtime-isolation.yaml")" -eq 4 ]
+printf 'PASS\tvps-repository-build-fallbacks-reset\n'
+
+! grep -F 'profiles: !reset []' "$ROOT/compose.runtime.yaml" >/dev/null
+grep -A4 '^  local-registry:' "$ROOT/compose.runtime.yaml" | grep -F 'local-runtime-disabled' >/dev/null
+printf 'PASS\tlocal-admin-dns-registry-profiles-remain-disabled\n'
+
+for key in CONTROL_CENTER_IMAGE PLATFORM_ALERT_DISPATCHER_IMAGE PROJECT_ROUTER_IMAGE; do
+  grep -F -- "--image \"$key=" "$ROOT/.github/workflows/release-attestation.yml" >/dev/null
+done
+! grep -F -- '--image "PHP_APACHE_IMAGE=' "$ROOT/.github/workflows/release-attestation.yml" >/dev/null
+printf 'PASS\trelease-subjects-match-active-repository-services\n'
+
+printf 'release Compose admission tests passed 18/18\n'

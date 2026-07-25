@@ -73,4 +73,77 @@ assert.throws(() => createVerifiedReleaseArtifacts({
   entries, repository, commitSha, verification: wrong, buildkitSbom, buildkitSbomBytes,
   registryResolution, registryResolutionSha256, registryDescriptorBytes,
 }), /subject set/);
-process.stdout.write("release subject manifest tests passed 8/8\n");
+
+const releaseNames = [
+  ["CONTROL_CENTER_IMAGE", "platform-infrastructure-control-center"],
+  ["PHP_APACHE_IMAGE", "platform-infrastructure-php-apache"],
+  ["PLATFORM_ALERT_DISPATCHER_IMAGE", "platform-infrastructure-alert-dispatcher"],
+  ["PROJECT_ROUTER_IMAGE", "platform-infrastructure-project-router"],
+];
+const multiEntries = [];
+const multiEvidence = [];
+const multiAttestations = [];
+for (const [key, name] of releaseNames) {
+  const subjectDescriptor = { ...descriptor, annotations: { "platform.release-subject-key": key } };
+  const subjectDescriptorBytes = Buffer.from(JSON.stringify(subjectDescriptor));
+  const subjectDigest = crypto.createHash("sha256").update(subjectDescriptorBytes).digest("hex");
+  const subjectImage = `ghcr.io/owner/${name}@sha256:${subjectDigest}`;
+  const resolution = resolveRegistryDescriptor({
+    image: subjectImage,
+    descriptorBytes: subjectDescriptorBytes,
+    expectedPlatforms: ["linux/amd64"],
+    resolvedAt: "2026-07-21T00:00:00Z",
+  });
+  const resolutionBytes = Buffer.from(`${JSON.stringify(resolution, null, 2)}\n`);
+  const subjectSbom = structuredClone(buildkitSbom);
+  subjectSbom["linux/amd64"].SPDX.documentNamespace = `https://example.invalid/spdx/${key.toLowerCase()}`;
+  const subjectSbomBytes = Buffer.from(`${JSON.stringify(subjectSbom)}\n`);
+  multiEntries.push({ key, image: subjectImage });
+  multiEvidence.push({
+    key,
+    buildkitSbom: subjectSbom,
+    buildkitSbomBytes: subjectSbomBytes,
+    registryResolution: resolution,
+    registryResolutionBytes: resolutionBytes,
+    registryResolutionSha256: crypto.createHash("sha256").update(resolutionBytes).digest("hex"),
+    registryDescriptorBytes: subjectDescriptorBytes,
+  });
+  multiAttestations.push({
+    ...verification.attestations[0],
+    subjects: [{ name: `ghcr.io/owner/${name}`, sha256: subjectDigest }],
+  });
+}
+const multiVerification = {
+  ...verification,
+  releaseImages: multiEntries.map((entry) => entry.image),
+  attestations: multiAttestations,
+};
+const multi = createVerifiedReleaseArtifacts({
+  entries: multiEntries,
+  repository,
+  commitSha,
+  releaseName: "multi-release",
+  workflowRunId: "2",
+  workflowRunUrl: "https://example.invalid/2",
+  verification: multiVerification,
+  subjectEvidence: multiEvidence,
+  expectedPlatforms: ["linux/amd64"],
+  generatedAt: "2026-07-21T00:00:00.000Z",
+  serialNumber: "urn:uuid:223e4567-e89b-42d3-a456-426614174000",
+});
+assert.equal(multi.manifest.version, 4);
+assert.equal(multi.manifest.subjects.length, 4);
+assert.equal(multi.manifest.subjectEvidence.length, 4);
+assert.equal(multi.evidenceBundle.subjects.length, 4);
+assert.equal(multi.sbom.components.filter((component) => component.type === "container").length, 4);
+assert.equal(multi.sbom.components.filter((component) => component.type === "library").length, 4);
+assert.throws(() => createVerifiedReleaseArtifacts({
+  entries: multiEntries,
+  repository,
+  commitSha,
+  verification: multiVerification,
+  subjectEvidence: multiEvidence.slice(1),
+  expectedPlatforms: ["linux/amd64"],
+}), /Every release subject/);
+
+process.stdout.write("release subject manifest tests passed 15/15\n");

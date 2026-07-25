@@ -19,25 +19,48 @@ require_private_input "Artifact verification receipt" "$artifact_receipt"
 require_private_input "Trusted deployment receipt" "$deployment_receipt"
 require_private_input "Candidate Compose model" "$candidate_compose"
 
-# The release workflow currently authenticates exactly one repository-built
-# subject. Keep this mapping explicit: accepting arbitrary *_IMAGE keys would
-# reintroduce an attacker-controlled subject-to-service projection.
 jq -e -s '
+  def digest_image:
+    type == "string" and test("^[a-z0-9.-]+(?::[0-9]+)?(?:/[a-z0-9._-]+)+@sha256:[a-f0-9]{64}$");
+  def exact_subject($receipt; $deployment; $compose; $key; $service):
+    ([ $receipt.subjects[] | select(.key == $key) ] | length == 1) and
+    ([ $receipt.subjects[] | select(.key == $key) ][0].image) as $image |
+    ($image | digest_image) and
+    ([ $receipt.subjects[] | select(.key == $key) ][0].key == $key) and
+    ([ $receipt.subjects[] | select(.key == $key) ][0].image == $image) and
+    ([ $deployment.runtimeIntent.services[]
+       | select(.service == $service and .admission.kind == "artifact-subject" and .admission.subjectKey == $key and .image == $image)
+     ] | length == 1) and
+    ($compose.services[$service].image == $image);
   .[0] as $receipt | .[1] as $deployment | .[2] as $compose |
-  ($receipt.subjects | type == "array" and length == 1) and
-  ($receipt.subjects[0].key == "PHP_APACHE_IMAGE") and
-  ($receipt.subjects[0].image | type == "string" and test("^[a-z0-9.-]+(?::[0-9]+)?(?:/[a-z0-9._-]+)+@sha256:[a-f0-9]{64}$")) and
-  ($deployment.opsRunner.image | type == "string" and test("^[a-z0-9.-]+(?::[0-9]+)?(?:/[a-z0-9._-]+)+@sha256:[a-f0-9]{64}$")) and
+  ($receipt.subjects | type == "array" and length == 3) and
+  (($receipt.subjects | map(.key) | sort) == ["CONTROL_CENTER_IMAGE", "PLATFORM_ALERT_DISPATCHER_IMAGE", "PROJECT_ROUTER_IMAGE"]) and
+  ($deployment.opsRunner.image | digest_image) and
   ($deployment.opsRunner.imageId | type == "string" and test("^sha256:[a-f0-9]{64}$")) and
   ($deployment.opsRunner.providerAttested == true) and
+  ($deployment.runtimeIntentSha256 | type == "string" and test("^[a-f0-9]{64}$")) and
+  ($deployment.runtimeIntent.version == 1) and
+  ($deployment.runtimeIntent.kind == "platform-runtime-intent/v1") and
+  ($deployment.runtimeIntent.projectName == "platform_infra_vps") and
+  ($deployment.runtimeIntent.services | type == "array" and length > 0) and
+  (($deployment.runtimeIntent.services | map(.service)) == ($deployment.runtimeIntent.services | map(.service) | sort)) and
   ($compose.services | type == "object") and
-  ($compose.services["php-apache"] | type == "object") and
-  ($compose.services["php-apache"].image == $receipt.subjects[0].image) and
-  ($compose.services["backup-scheduler"] | type == "object") and
-  ($compose.services["backup-scheduler"].image == $deployment.opsRunner.image) and
-  ($compose.services["backup-scheduler"] | has("build") | not)
+  (($compose.services | keys | sort) == ($deployment.runtimeIntent.services | map(.service) | sort)) and
+  (all($deployment.runtimeIntent.services[];
+    (.image | digest_image) and
+    (.expectedLocalImageId | type == "string" and test("^sha256:[a-f0-9]{64}$")) and
+    ($compose.services[.service] | type == "object") and
+    ($compose.services[.service].image == .image) and
+    ($compose.services[.service] | has("build") | not)
+  )) and
+  ([ $deployment.runtimeIntent.services[]
+     | select(.admission.kind == "ops-runner" and .image == $deployment.opsRunner.image and .expectedLocalImageId == $deployment.opsRunner.imageId)
+   ] | length == 1) and
+  exact_subject($receipt; $deployment; $compose; "CONTROL_CENTER_IMAGE"; "control-center") and
+  exact_subject($receipt; $deployment; $compose; "PLATFORM_ALERT_DISPATCHER_IMAGE"; "platform-alert-dispatcher") and
+  exact_subject($receipt; $deployment; $compose; "PROJECT_ROUTER_IMAGE"; "project-router")
 ' "$artifact_receipt" "$deployment_receipt" "$candidate_compose" >/dev/null || {
-  echo "Release admission does not exactly bind php-apache and backup-scheduler to their authenticated image digests." >&2
+  echo "Release admission does not exactly bind the complete rendered service set to runtime intent and authenticated image subjects." >&2
   exit 1
 }
 

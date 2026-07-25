@@ -141,6 +141,7 @@ try {
   });
   const manifestArtifact = writeJson("release-subjects.json", artifacts.manifest);
   const sbomArtifact = writeJson("release-sbom.cdx.json", artifacts.sbom);
+  const evidenceBundleArtifact = writeJson("release-subject-evidence.json", artifacts.evidenceBundle);
   const sourceArchivePath = path.join(temporary, "source-archive.tar");
   const archiveResult = spawnSync("git", ["-C", root, "-c", "tar.umask=0000", "archive", "--format=tar", `--output=${sourceArchivePath}`, commitSha], { encoding: "utf8" });
   assert.equal(archiveResult.status, 0, archiveResult.stderr);
@@ -226,9 +227,7 @@ process.stdout.write(JSON.stringify([{ verificationResult: {
     "--imageManifest", manifestArtifact.pathname,
     "--sbom", sbomArtifact.pathname,
     "--sourceArchive", sourceArchivePath,
-    "--buildkitSbom", buildkitArtifact.pathname,
-    "--registryDescriptor", descriptorPath,
-    "--registryResolution", registryArtifact.pathname,
+    "--subjectEvidenceBundle", evidenceBundleArtifact.pathname,
     "--releaseSha", commitSha,
     "--repo", repository,
     "--sourceRef", "refs/heads/main",
@@ -279,11 +278,15 @@ process.stdout.write(JSON.stringify([{ verificationResult: {
   assert.deepEqual(fs.readFileSync(reverifiedReceipt), fs.readFileSync(producerReceipt),
     "the consumer must regenerate the exact provider-bound artifact receipt bytes");
 
-  const tampered = structuredClone(registryResolution);
+  const tamperedBundle = structuredClone(artifacts.evidenceBundle);
+  const tampered = JSON.parse(Buffer.from(tamperedBundle.subjects[0].registryResolutionBase64, "base64").toString("utf8"));
   tampered.platforms[0].size += 1;
-  const tamperedArtifact = writeJson("registry-resolution-tampered.json", tampered);
+  const tamperedBytes = Buffer.from(`${JSON.stringify(tampered, null, 2)}\n`);
+  tamperedBundle.subjects[0].registryResolutionBase64 = tamperedBytes.toString("base64");
+  tamperedBundle.subjects[0].registryResolutionSha256 = crypto.createHash("sha256").update(tamperedBytes).digest("hex");
+  const tamperedArtifact = writeJson("release-subject-evidence-tampered.json", tamperedBundle);
   const negativeArgs = [...commonArgs];
-  negativeArgs[negativeArgs.indexOf(registryArtifact.pathname)] = tamperedArtifact.pathname;
+  negativeArgs[negativeArgs.indexOf(evidenceBundleArtifact.pathname)] = tamperedArtifact.pathname;
   const negative = spawnSync(process.execPath, negativeArgs, { cwd: fixtureRoot, env: environment, encoding: "utf8" });
   assert.equal(negative.status, 1);
   assert.match(negative.stderr, /differs from exact descriptor resolution/);

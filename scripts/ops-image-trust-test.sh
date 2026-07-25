@@ -422,7 +422,7 @@ if grep -q 'platform/ops:local' "$ROOT/compose.backup-scheduler.yaml" || grep -q
   exit 1
 fi
 grep -F '${PLATFORM_OPS_IMAGE:?' "$ROOT/compose.backup-scheduler.yaml" >/dev/null
-grep -F '$compose.services["backup-scheduler"].image == $deployment.opsRunner.image' "$ROOT/scripts/release-compose-admission.sh" >/dev/null
+grep -F '.admission.kind == "ops-runner" and .image == $deployment.opsRunner.image and .expectedLocalImageId == $deployment.opsRunner.imageId' "$ROOT/scripts/release-compose-admission.sh" >/dev/null
 printf 'PASS\tbackup-scheduler-binds-provider-admitted-ops-image\n'
 
 live_workflow="$ROOT/.github/workflows/enterprise-live-evidence.yml"

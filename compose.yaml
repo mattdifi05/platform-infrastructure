@@ -252,7 +252,7 @@ services:
       retries: 10
 
   php-apache:
-    image: ${PHP_APACHE_BUILD_IMAGE:-platform/php-apache:local}
+    image: ${PHP_APACHE_IMAGE:-platform/php-apache:local}
     build:
       context: .
       dockerfile: docker/php-apache.Dockerfile
@@ -435,7 +435,12 @@ services:
       retries: 10
 
   project-router:
-    image: ${NODE_IMAGE:-node:26.3.1-alpine@sha256:a2dc166a387cc6ca1e62d0c8e265e49ca985d6e60abc9fe6e6c3d6ce8e63f606}
+    image: ${PROJECT_ROUTER_IMAGE:-platform/project-router:local}
+    build:
+      context: .
+      dockerfile: docker/project-router.Dockerfile
+      args:
+        NODE_IMAGE: ${NODE_IMAGE:-node:26.3.1-alpine@sha256:a2dc166a387cc6ca1e62d0c8e265e49ca985d6e60abc9fe6e6c3d6ce8e63f606}
     container_name: enterprise-project-router
     init: true
     pids_limit: 512
@@ -462,7 +467,6 @@ services:
       CONTROL_CENTER_UPSTREAM: http://control-center:8080
       PROJECT_ROUTER_ALLOWED_UPSTREAMS: ${PROJECT_ROUTER_ALLOWED_UPSTREAMS:-control-center:8080}
     volumes:
-      - ./project-router:/app:ro
       - ${PHP_PROJECTS_DIR:-../src}:/var/www/projects
       - ${PROJECTS_SYMLINK_TARGET_ROOT:-..}:/mnt/host/d/docker
       - ./projects-portal/state:/var/www/project-state

@@ -136,6 +136,7 @@ services:
 
   php-apache:
     <<: *runtime_app
+    build: !reset null
     cpus: 0.50
     mem_limit: 256m
     mem_reservation: 64m
@@ -143,6 +144,7 @@ services:
 
   control-center:
     <<: *runtime_control
+    build: !reset null
     read_only: true
     cpus: 1.00
     mem_limit: 512m
@@ -157,6 +159,7 @@ services:
 
   project-router:
     <<: *runtime_control
+    build: !reset null
     read_only: true
     cpus: 0.50
     mem_limit: 192m
@@ -165,7 +168,6 @@ services:
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,size=32m
     volumes: !override
-      - ./project-router:/app:ro
       - ${PHP_PROJECTS_DIR:-../src}:/var/www/projects:ro
       - ./projects-portal/state:/var/www/project-state:ro
       - ${HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE:-./config/no-hosted-workloads.lock.json}:/run/platform/hosted-workloads.lock.json:ro
@@ -228,6 +230,7 @@ services:
 
   platform-alert-dispatcher:
     <<: *runtime_observability
+    build: !reset null
     cpus: 0.20
     mem_limit: 128m
     mem_reservation: 32m

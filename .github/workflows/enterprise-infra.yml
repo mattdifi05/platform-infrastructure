@@ -493,17 +493,13 @@ jobs:
           mapfile -t manifests < <(find "$CANDIDATE_DIR" -type f -name 'release-subjects-*.json' -print)
           mapfile -t source_archives < <(find "$CANDIDATE_DIR" -type f -name 'source-archive-*.tar' -print)
           mapfile -t sboms < <(find "$CANDIDATE_DIR" -type f -name 'github-release-sbom-*.cdx.json' -print)
-          mapfile -t buildkit_sboms < <(find "$CANDIDATE_DIR" -type f -name 'buildkit-sbom-*.spdx.json' -print)
-          mapfile -t registry_descriptors < <(find "$CANDIDATE_DIR" -type f -name 'registry-descriptor-*.json' -print)
-          mapfile -t registry_resolutions < <(find "$CANDIDATE_DIR" -type f -name 'registry-resolution-*.json' -print)
+          mapfile -t subject_evidence_bundles < <(find "$CANDIDATE_DIR" -type f -name 'release-subject-evidence-*.json' -print)
           mapfile -t artifact_receipts < <(find "$CANDIDATE_DIR" -type f -name 'release-artifact-admission-*.json' -print)
           mapfile -t deployment_receipts < <(find "$TRUSTED_ADMISSION_DIR" -type f -name 'trusted-deployment-admission-*.json' -print)
           test "${#manifests[@]}" -eq 1
           test "${#source_archives[@]}" -eq 1
           test "${#sboms[@]}" -eq 1
-          test "${#buildkit_sboms[@]}" -eq 1
-          test "${#registry_descriptors[@]}" -eq 1
-          test "${#registry_resolutions[@]}" -eq 1
+          test "${#subject_evidence_bundles[@]}" -eq 1
           test "${#artifact_receipts[@]}" -eq 1
           test "${#deployment_receipts[@]}" -eq 1
           test "$(sha256sum "${manifests[0]}" | awk '{print $1}')" = "$EXPECTED_MANIFEST_SHA256"
@@ -520,9 +516,7 @@ jobs:
           printf 'source_archive=%s\n' "${source_archives[0]}" >> "$GITHUB_OUTPUT"
           printf 'source_archive_sha256=%s\n' "$SOURCE_ARCHIVE_SHA256" >> "$GITHUB_OUTPUT"
           printf 'sbom=%s\n' "${sboms[0]}" >> "$GITHUB_OUTPUT"
-          printf 'buildkit_sbom=%s\n' "${buildkit_sboms[0]}" >> "$GITHUB_OUTPUT"
-          printf 'registry_descriptor=%s\n' "${registry_descriptors[0]}" >> "$GITHUB_OUTPUT"
-          printf 'registry_resolution=%s\n' "${registry_resolutions[0]}" >> "$GITHUB_OUTPUT"
+          printf 'subject_evidence_bundle=%s\n' "${subject_evidence_bundles[0]}" >> "$GITHUB_OUTPUT"
           printf 'artifact_receipt=%s\n' "${artifact_receipts[0]}" >> "$GITHUB_OUTPUT"
           printf 'deployment_receipt=%s\n' "${deployment_receipts[0]}" >> "$GITHUB_OUTPUT"
           printf 'artifact_receipt_sha256=%s\n' "$EXPECTED_ARTIFACT_RECEIPT_SHA256" >> "$GITHUB_OUTPUT"
@@ -535,9 +529,7 @@ jobs:
           RELEASE_SOURCE_ARCHIVE: ${{ steps.artifacts.outputs.source_archive }}
           RELEASE_SOURCE_ARCHIVE_SHA256: ${{ steps.artifacts.outputs.source_archive_sha256 }}
           RELEASE_SBOM: ${{ steps.artifacts.outputs.sbom }}
-          BUILDKIT_SBOM: ${{ steps.artifacts.outputs.buildkit_sbom }}
-          REGISTRY_DESCRIPTOR: ${{ steps.artifacts.outputs.registry_descriptor }}
-          REGISTRY_RESOLUTION: ${{ steps.artifacts.outputs.registry_resolution }}
+          SUBJECT_EVIDENCE_BUNDLE: ${{ steps.artifacts.outputs.subject_evidence_bundle }}
           ARTIFACT_RECEIPT: ${{ steps.artifacts.outputs.artifact_receipt }}
           DEPLOYMENT_RECEIPT: ${{ steps.artifacts.outputs.deployment_receipt }}
           ARTIFACT_RECEIPT_SHA256: ${{ steps.artifacts.outputs.artifact_receipt_sha256 }}
@@ -553,9 +545,7 @@ jobs:
             --imageManifest "$RELEASE_MANIFEST" \
             --sbom "$RELEASE_SBOM" \
             --sourceArchive "$RELEASE_SOURCE_ARCHIVE" \
-            --buildkitSbom "$BUILDKIT_SBOM" \
-            --registryDescriptor "$REGISTRY_DESCRIPTOR" \
-            --registryResolution "$REGISTRY_RESOLUTION" \
+            --subjectEvidenceBundle "$SUBJECT_EVIDENCE_BUNDLE" \
             --releaseSha "$APPROVED_SHA" \
             --repo "$GITHUB_REPOSITORY" \
             --sourceRef refs/heads/main \
