@@ -1,0 +1,408 @@
+{
+  "schema": "platform.service-asset-ownership/v1",
+  "scope": "platform-infrastructure",
+  "status": "LOCAL-SUPPORT-READY-EXTERNAL-PENDING",
+  "gateAdmissible": false,
+  "requiredDomains": [
+    "hardware",
+    "network",
+    "applications",
+    "data",
+    "backups",
+    "secrets",
+    "observability",
+    "ci",
+    "providers"
+  ],
+  "requiredCapabilities": [
+    "host-capacity",
+    "host-recovery",
+    "network-segmentation",
+    "edge-routing",
+    "platform-service-lifecycle",
+    "hosted-workload-boundary",
+    "database-storage",
+    "object-storage",
+    "backup",
+    "restore",
+    "secret-lifecycle",
+    "key-recovery",
+    "metrics",
+    "logs",
+    "alerting",
+    "source-governance",
+    "release-provenance",
+    "dns-edge-provider",
+    "identity-provider",
+    "notification-provider"
+  ],
+  "roles": [
+    {
+      "id": "role:platform-governance-primary",
+      "kind": "human-accountability-role",
+      "runtimePrincipalAllowed": false,
+      "identityBinding": {
+        "state": "GOVERNANCE-EXTERNAL",
+        "authenticatedReceiptRequired": true
+      }
+    },
+    {
+      "id": "role:platform-governance-substitute",
+      "kind": "human-accountability-role",
+      "runtimePrincipalAllowed": false,
+      "identityBinding": {
+        "state": "GOVERNANCE-EXTERNAL",
+        "authenticatedReceiptRequired": true
+      }
+    },
+    {
+      "id": "role:release-approval-authority",
+      "kind": "human-accountability-role",
+      "runtimePrincipalAllowed": false,
+      "identityBinding": {
+        "state": "GOVERNANCE-EXTERNAL",
+        "authenticatedReceiptRequired": true
+      }
+    },
+    {
+      "id": "role:incident-escalation-authority",
+      "kind": "human-accountability-role",
+      "runtimePrincipalAllowed": false,
+      "identityBinding": {
+        "state": "GOVERNANCE-EXTERNAL",
+        "authenticatedReceiptRequired": true
+      }
+    }
+  ],
+  "assets": [
+    {
+      "id": "asset:hardware",
+      "domain": "hardware",
+      "capabilities": [
+        "host-capacity",
+        "host-recovery"
+      ],
+      "artifactRefs": [
+        {
+          "path": "governance/catalog-artifacts/asset-ownership-scope.md",
+          "sha256": "63763e054ba187bb28a923c76895e2f268c858881ad7fc4991ce0a9cf20ab869",
+          "anchors": [
+            "asset-scope:hardware"
+          ]
+        }
+      ],
+      "roles": {
+        "primary": "role:platform-governance-primary",
+        "substitute": "role:platform-governance-substitute",
+        "approval": "role:release-approval-authority",
+        "escalation": "role:incident-escalation-authority"
+      },
+      "acknowledgement": {
+        "state": "GOVERNANCE-EXTERNAL",
+        "authenticatedReceiptRequired": true
+      },
+      "lifecycle": {
+        "preserve": "Preserve exact state identifiers and non-secret evidence before every material change.",
+        "rollback": "Restore only the bounded approved prior state when a required verification fails.",
+        "review": {
+          "cadenceDays": 90,
+          "beforeRollout": true,
+          "afterMaterialChange": true
+        }
+      }
+    },
+    {
+      "id": "asset:network",
+      "domain": "network",
+      "capabilities": [
+        "network-segmentation",
+        "edge-routing"
+      ],
+      "artifactRefs": [
+        {
+          "path": "governance/catalog-artifacts/asset-ownership-scope.md",
+          "sha256": "63763e054ba187bb28a923c76895e2f268c858881ad7fc4991ce0a9cf20ab869",
+          "anchors": [
+            "asset-scope:network"
+          ]
+        }
+      ],
+      "roles": {
+        "primary": "role:platform-governance-primary",
+        "substitute": "role:platform-governance-substitute",
+        "approval": "role:release-approval-authority",
+        "escalation": "role:incident-escalation-authority"
+      },
+      "acknowledgement": {
+        "state": "GOVERNANCE-EXTERNAL",
+        "authenticatedReceiptRequired": true
+      },
+      "lifecycle": {
+        "preserve": "Preserve exact state identifiers and non-secret evidence before every material change.",
+        "rollback": "Restore only the bounded approved prior state when a required verification fails.",
+        "review": {
+          "cadenceDays": 90,
+          "beforeRollout": true,
+          "afterMaterialChange": true
+        }
+      }
+    },
+    {
+      "id": "asset:applications",
+      "domain": "applications",
+      "capabilities": [
+        "platform-service-lifecycle",
+        "hosted-workload-boundary"
+      ],
+      "artifactRefs": [
+        {
+          "path": "governance/catalog-artifacts/asset-ownership-scope.md",
+          "sha256": "63763e054ba187bb28a923c76895e2f268c858881ad7fc4991ce0a9cf20ab869",
+          "anchors": [
+            "asset-scope:applications"
+          ]
+        }
+      ],
+      "roles": {
+        "primary": "role:platform-governance-primary",
+        "substitute": "role:platform-governance-substitute",
+        "approval": "role:release-approval-authority",
+        "escalation": "role:incident-escalation-authority"
+      },
+      "acknowledgement": {
+        "state": "GOVERNANCE-EXTERNAL",
+        "authenticatedReceiptRequired": true
+      },
+      "lifecycle": {
+        "preserve": "Preserve exact state identifiers and non-secret evidence before every material change.",
+        "rollback": "Restore only the bounded approved prior state when a required verification fails.",
+        "review": {
+          "cadenceDays": 90,
+          "beforeRollout": true,
+          "afterMaterialChange": true
+        }
+      }
+    },
+    {
+      "id": "asset:data",
+      "domain": "data",
+      "capabilities": [
+        "database-storage",
+        "object-storage"
+      ],
+      "artifactRefs": [
+        {
+          "path": "governance/catalog-artifacts/asset-ownership-scope.md",
+          "sha256": "63763e054ba187bb28a923c76895e2f268c858881ad7fc4991ce0a9cf20ab869",
+          "anchors": [
+            "asset-scope:data"
+          ]
+        }
+      ],
+      "roles": {
+        "primary": "role:platform-governance-primary",
+        "substitute": "role:platform-governance-substitute",
+        "approval": "role:release-approval-authority",
+        "escalation": "role:incident-escalation-authority"
+      },
+      "acknowledgement": {
+        "state": "GOVERNANCE-EXTERNAL",
+        "authenticatedReceiptRequired": true
+      },
+      "lifecycle": {
+        "preserve": "Preserve exact state identifiers and non-secret evidence before every material change.",
+        "rollback": "Restore only the bounded approved prior state when a required verification fails.",
+        "review": {
+          "cadenceDays": 90,
+          "beforeRollout": true,
+          "afterMaterialChange": true
+        }
+      }
+    },
+    {
+      "id": "asset:backups",
+      "domain": "backups",
+      "capabilities": [
+        "backup",
+        "restore"
+      ],
+      "artifactRefs": [
+        {
+          "path": "governance/catalog-artifacts/asset-ownership-scope.md",
+          "sha256": "63763e054ba187bb28a923c76895e2f268c858881ad7fc4991ce0a9cf20ab869",
+          "anchors": [
+            "asset-scope:backups"
+          ]
+        }
+      ],
+      "roles": {
+        "primary": "role:platform-governance-primary",
+        "substitute": "role:platform-governance-substitute",
+        "approval": "role:release-approval-authority",
+        "escalation": "role:incident-escalation-authority"
+      },
+      "acknowledgement": {
+        "state": "GOVERNANCE-EXTERNAL",
+        "authenticatedReceiptRequired": true
+      },
+      "lifecycle": {
+        "preserve": "Preserve exact state identifiers and non-secret evidence before every material change.",
+        "rollback": "Restore only the bounded approved prior state when a required verification fails.",
+        "review": {
+          "cadenceDays": 90,
+          "beforeRollout": true,
+          "afterMaterialChange": true
+        }
+      }
+    },
+    {
+      "id": "asset:secrets",
+      "domain": "secrets",
+      "capabilities": [
+        "secret-lifecycle",
+        "key-recovery"
+      ],
+      "artifactRefs": [
+        {
+          "path": "governance/catalog-artifacts/asset-ownership-scope.md",
+          "sha256": "63763e054ba187bb28a923c76895e2f268c858881ad7fc4991ce0a9cf20ab869",
+          "anchors": [
+            "asset-scope:secrets"
+          ]
+        }
+      ],
+      "roles": {
+        "primary": "role:platform-governance-primary",
+        "substitute": "role:platform-governance-substitute",
+        "approval": "role:release-approval-authority",
+        "escalation": "role:incident-escalation-authority"
+      },
+      "acknowledgement": {
+        "state": "GOVERNANCE-EXTERNAL",
+        "authenticatedReceiptRequired": true
+      },
+      "lifecycle": {
+        "preserve": "Preserve exact state identifiers and non-secret evidence before every material change.",
+        "rollback": "Restore only the bounded approved prior state when a required verification fails.",
+        "review": {
+          "cadenceDays": 90,
+          "beforeRollout": true,
+          "afterMaterialChange": true
+        }
+      }
+    },
+    {
+      "id": "asset:observability",
+      "domain": "observability",
+      "capabilities": [
+        "metrics",
+        "logs",
+        "alerting"
+      ],
+      "artifactRefs": [
+        {
+          "path": "governance/catalog-artifacts/asset-ownership-scope.md",
+          "sha256": "63763e054ba187bb28a923c76895e2f268c858881ad7fc4991ce0a9cf20ab869",
+          "anchors": [
+            "asset-scope:observability"
+          ]
+        }
+      ],
+      "roles": {
+        "primary": "role:platform-governance-primary",
+        "substitute": "role:platform-governance-substitute",
+        "approval": "role:release-approval-authority",
+        "escalation": "role:incident-escalation-authority"
+      },
+      "acknowledgement": {
+        "state": "GOVERNANCE-EXTERNAL",
+        "authenticatedReceiptRequired": true
+      },
+      "lifecycle": {
+        "preserve": "Preserve exact state identifiers and non-secret evidence before every material change.",
+        "rollback": "Restore only the bounded approved prior state when a required verification fails.",
+        "review": {
+          "cadenceDays": 90,
+          "beforeRollout": true,
+          "afterMaterialChange": true
+        }
+      }
+    },
+    {
+      "id": "asset:ci",
+      "domain": "ci",
+      "capabilities": [
+        "source-governance",
+        "release-provenance"
+      ],
+      "artifactRefs": [
+        {
+          "path": "governance/catalog-artifacts/asset-ownership-scope.md",
+          "sha256": "63763e054ba187bb28a923c76895e2f268c858881ad7fc4991ce0a9cf20ab869",
+          "anchors": [
+            "asset-scope:ci"
+          ]
+        }
+      ],
+      "roles": {
+        "primary": "role:platform-governance-primary",
+        "substitute": "role:platform-governance-substitute",
+        "approval": "role:release-approval-authority",
+        "escalation": "role:incident-escalation-authority"
+      },
+      "acknowledgement": {
+        "state": "GOVERNANCE-EXTERNAL",
+        "authenticatedReceiptRequired": true
+      },
+      "lifecycle": {
+        "preserve": "Preserve exact state identifiers and non-secret evidence before every material change.",
+        "rollback": "Restore only the bounded approved prior state when a required verification fails.",
+        "review": {
+          "cadenceDays": 90,
+          "beforeRollout": true,
+          "afterMaterialChange": true
+        }
+      }
+    },
+    {
+      "id": "asset:providers",
+      "domain": "providers",
+      "capabilities": [
+        "dns-edge-provider",
+        "identity-provider",
+        "notification-provider"
+      ],
+      "artifactRefs": [
+        {
+          "path": "governance/catalog-artifacts/asset-ownership-scope.md",
+          "sha256": "63763e054ba187bb28a923c76895e2f268c858881ad7fc4991ce0a9cf20ab869",
+          "anchors": [
+            "asset-scope:providers"
+          ]
+        }
+      ],
+      "roles": {
+        "primary": "role:platform-governance-primary",
+        "substitute": "role:platform-governance-substitute",
+        "approval": "role:release-approval-authority",
+        "escalation": "role:incident-escalation-authority"
+      },
+      "acknowledgement": {
+        "state": "GOVERNANCE-EXTERNAL",
+        "authenticatedReceiptRequired": true
+      },
+      "lifecycle": {
+        "preserve": "Preserve exact state identifiers and non-secret evidence before every material change.",
+        "rollback": "Restore only the bounded approved prior state when a required verification fails.",
+        "review": {
+          "cadenceDays": 90,
+          "beforeRollout": true,
+          "afterMaterialChange": true
+        }
+      }
+    }
+  ],
+  "externalConditions": [
+    "Authenticated primary and substitute acknowledgements for every catalog asset remain GOVERNANCE-EXTERNAL and GO-blocking."
+  ]
+}
