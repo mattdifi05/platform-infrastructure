@@ -15,6 +15,7 @@ import {
   validateStagingDeploymentReceipt,
   validateStagingProbe,
 } from "./dast-runtime-receipt-policy.mjs";
+import { runtimeIntentSha256 } from "./runtime-intent-policy.mjs";
 
 const hashBytes = (value) => crypto.createHash("sha256").update(value).digest("hex");
 const repository = "owner/platform-infrastructure";
@@ -31,7 +32,6 @@ const scanFinishedAt = "2026-07-25T10:04:00.000Z";
 const postObservedAt = "2026-07-25T10:05:00.000Z";
 const requestGeneratedAt = "2026-07-25T10:06:00.000Z";
 const now = "2026-07-25T10:10:00.000Z";
-const runtimeIntentSha = "3".repeat(64);
 const challengeNonce = "4".repeat(64);
 const consumerChallenge = {
   consumerRepository: repository,
@@ -115,6 +115,53 @@ const artifactReceipt = {
   },
 };
 const artifactReceiptSha256 = "d".repeat(64);
+const opsRunner = {
+  image: `ghcr.io/owner/platform-infrastructure-ops@sha256:${"f".repeat(64)}`,
+  imageId: `sha256:${"0".repeat(64)}`,
+  verificationFingerprint: "1".repeat(64),
+  providerAttested: true,
+};
+const runtimeIntent = {
+  version: 1,
+  kind: "platform-runtime-intent/v1",
+  repository,
+  commitSha,
+  treeSha,
+  sourceArchiveSha256: artifactReceipt.sourceArchiveSha256,
+  projectName: "platform_infra_vps",
+  environmentSha256: "3".repeat(64),
+  hostedWorkloadLockSha256: null,
+  coreComposeSha256: "4".repeat(64),
+  combinedComposeSha256: "5".repeat(64),
+  services: [
+    {
+      service: "backup-scheduler",
+      image: opsRunner.image,
+      admission: { kind: "ops-runner" },
+      expectedLocalImageId: opsRunner.imageId,
+    },
+    {
+      service: "control-center",
+      image: releaseSubjects[0].image,
+      admission: { kind: "artifact-subject", subjectKey: releaseSubjects[0].key },
+      expectedLocalImageId: `sha256:${"2".repeat(64)}`,
+    },
+    {
+      service: "project-router",
+      image: releaseSubjects[1].image,
+      admission: { kind: "artifact-subject", subjectKey: releaseSubjects[1].key },
+      expectedLocalImageId: `sha256:${"4".repeat(64)}`,
+    },
+    {
+      service: "traefik",
+      image: `docker.io/library/traefik@sha256:${"6".repeat(64)}`,
+      admission: { kind: "external-digest", sourceKey: "TRAEFIK_IMAGE" },
+      expectedLocalImageId: `sha256:${"7".repeat(64)}`,
+    },
+  ],
+  targetServingServices: ["control-center", "project-router", "traefik"],
+};
+const runtimeIntentSha = runtimeIntentSha256(runtimeIntent);
 const deploymentReceipt = {
   version: 1,
   kind: "platform-trusted-deployment-admission/v1",
@@ -128,6 +175,7 @@ const deploymentReceipt = {
   artifactVerificationReceiptSha256: artifactReceiptSha256,
   manifestSha256: artifactReceipt.manifestSha256,
   sbomSha256: artifactReceipt.sbomSha256,
+  runtimeIntent,
   runtimeIntentSha256: runtimeIntentSha,
   generatedAt,
   decisionId: "decision:987654",
@@ -139,12 +187,7 @@ const deploymentReceipt = {
   },
   producer: provider,
   consumerChallenge,
-  opsRunner: {
-    image: `ghcr.io/owner/platform-infrastructure-ops@sha256:${"f".repeat(64)}`,
-    imageId: `sha256:${"0".repeat(64)}`,
-    verificationFingerprint: "1".repeat(64),
-    providerAttested: true,
-  },
+  opsRunner,
 };
 const deploymentReceiptSha256 = "2".repeat(64);
 const targetServingServices = ["control-center", "project-router", "traefik"];
