@@ -10,6 +10,16 @@
     "sourceRef": null,
     "event": null
   },
+  "stagingDast": {
+    "status": "EXTERNAL-PENDING",
+    "canonicalTarget": null,
+    "releaseIdentityPath": "/.well-known/platform-release.json",
+    "requiredStagingReceiptKind": "platform-trusted-staging-deployment/v1",
+    "requiredDastReceiptKind": "platform-dast-verification/v1",
+    "maxStagingReceiptAgeSeconds": 3600,
+    "maxDastReceiptAgeSeconds": 1800,
+    "reason": "No provider-authenticated exact-candidate staging deployment and canonical DAST target are configured."
+  },
   "reason": "No repository-enforced trusted admission-controller verifier channel is configured.",
   "requiredReceiptKind": "platform-trusted-deployment-admission/v1",
   "selfAssertedAnnotationsAccepted": false

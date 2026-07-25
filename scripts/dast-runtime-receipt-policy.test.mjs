@@ -1,6 +1,10 @@
 #!/usr/bin/env node
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { execFileSync } from "node:child_process";
 import test from "node:test";
 import {
   activeRuntimeFingerprint,
@@ -108,7 +112,7 @@ const stagingReceipt = {
   target,
   deploymentId: "staging-deployment:12345678",
   deployedAt: generatedAt,
-  artifactVerificationReceiptSha256,
+  artifactVerificationReceiptSha256: artifactReceiptSha256,
   activeRuntime: { subjects, fingerprint: runtimeFingerprint },
   probe: { path: identityPath, sha256: probeSha256 },
   producer: provider,
@@ -313,4 +317,80 @@ test("EXTERNAL-PENDING policy cannot mint or accept readiness", () => {
     }),
     /EXTERNAL-PENDING/,
   );
+});
+
+test("offline CLI creates and deploy-revalidates one exact run-bound receipt", (context) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "platform-dast-policy-test-"));
+  context.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const writeJson = (name, value) => {
+    const pathname = path.join(directory, name);
+    fs.writeFileSync(pathname, `${JSON.stringify(value)}\n`, { mode: 0o600 });
+    return pathname;
+  };
+  const digest = (pathname) => crypto.createHash("sha256").update(fs.readFileSync(pathname)).digest("hex");
+  const artifactPath = writeJson("artifact.json", artifactReceipt);
+  const providerPath = writeJson("provider.json", providerMetadata);
+  const probePath = writeJson("probe.json", probe);
+  const runtimeStagingReceipt = {
+    ...stagingReceipt,
+    artifactVerificationReceiptSha256: digest(artifactPath),
+    probe: { ...stagingReceipt.probe, sha256: digest(probePath) },
+  };
+  const stagingPath = writeJson("staging.json", runtimeStagingReceipt);
+  const policyPath = writeJson("policy.json", policy);
+  const zapJson = path.join(directory, "zap.json");
+  const zapHtml = path.join(directory, "zap.html");
+  const zapXml = path.join(directory, "zap.xml");
+  fs.writeFileSync(zapJson, "{\"site\":[]}\n");
+  fs.writeFileSync(zapHtml, "<html>passed</html>\n");
+  fs.writeFileSync(zapXml, "<OWASPZAPReport/>\n");
+  const receiptPath = path.join(directory, "dast.json");
+  const common = [
+    "--policy", policyPath,
+    "--artifactReceipt", artifactPath,
+    "--artifactReceiptSha256", digest(artifactPath),
+    "--providerMetadata", providerPath,
+    "--providerMetadataSha256", digest(providerPath),
+    "--stagingReceipt", stagingPath,
+    "--stagingReceiptSha256", digest(stagingPath),
+    "--repo", repository,
+    "--commit", commitSha,
+    "--tree", treeSha,
+    "--providerRunId", provider.runId,
+    "--providerRunAttempt", String(provider.runAttempt),
+    "--workflowPath", expectedDastProducer.workflowPath,
+    "--sourceRef", expectedDastProducer.sourceRef,
+    "--event", expectedDastProducer.event,
+    "--runId", expectedDastProducer.runId,
+    "--runAttempt", String(expectedDastProducer.runAttempt),
+    "--job", expectedDastProducer.job,
+    "--now", generatedAt,
+  ];
+  const created = JSON.parse(execFileSync(process.execPath, [
+    "scripts/dast-runtime-receipt-policy.mjs",
+    ...common,
+    "--probe", probePath,
+    "--zapImage", scan.engineImage,
+    "--zapJson", zapJson,
+    "--zapHtml", zapHtml,
+    "--zapXml", zapXml,
+    "--receiptOutput", receiptPath,
+  ], { encoding: "utf8" }));
+  assert.equal(created.status, "READY");
+  assert.equal(created.dastReceiptSha256, digest(receiptPath));
+
+  const verified = JSON.parse(execFileSync(process.execPath, [
+    "scripts/dast-runtime-receipt-policy.mjs",
+    ...common,
+    "--dastReceipt", receiptPath,
+    "--dastReceiptSha256", digest(receiptPath),
+  ], { encoding: "utf8" }));
+  assert.equal(verified.status, "READY");
+  assert.equal(verified.commitSha, commitSha);
+  assert.throws(() => execFileSync(process.execPath, [
+    "scripts/dast-runtime-receipt-policy.mjs",
+    ...common,
+    "--dastReceipt", receiptPath,
+    "--dastReceiptSha256", "f".repeat(64),
+  ], { encoding: "utf8", stdio: "pipe" }), /Command failed/);
 });

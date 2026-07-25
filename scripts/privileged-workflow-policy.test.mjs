@@ -39,11 +39,14 @@ assert.deepEqual(dastReceiptWiringMismatches(deployment), []);
 assert.match(deploymentPrerequisiteMismatches(deployment.replace("      - dast-zap\n", "")).join(" "), /exact .* prerequisite set/);
 assert.match(
   deploymentPrerequisiteMismatches(deployment.replace("      - release-admission\n", "")).join(" "),
-  /run-bound DAST receipt/,
+  /runtime verification and activation admission receipts/,
 );
 assert.match(
-  deploymentPrerequisiteMismatches(deployment.replace("    if: github.event_name == 'workflow_dispatch'\n    environment:\n      name: staging", "    if: false\n    environment:\n      name: staging")).join(" "),
-  /unconditionally/,
+  deploymentPrerequisiteMismatches(deployment.replace(
+    "    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.ref_protected == true\n    permissions:",
+    "    if: true\n    permissions:",
+  )).join(" "),
+  /protected-main manual release guard/,
 );
 assert.match(
   deploymentPrerequisiteMismatches(deployment.replace("    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.ref_protected == true\n    environment:\n      name: production", "    if: ${{ always() }}\n    environment:\n      name: production")).join(" "),

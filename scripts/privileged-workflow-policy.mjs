@@ -50,14 +50,15 @@ export function deploymentPrerequisiteMismatches(workflowText) {
   if (/if:\s*.*(?:always\(\)|!\s*cancelled\(\))/.test(deploy)) {
     issues.push("deploy-vps must preserve default fail/skip propagation from every prerequisite");
   }
-  if (!/^    if: github\.event_name == 'workflow_dispatch'\s*$/m.test(dast)) {
-    issues.push("dast-zap must run unconditionally for every manual production deployment request");
+  if (!dast.includes(`    if: github.event_name == 'workflow_dispatch' && ${TRUSTED_REF_GUARD}\n`)) {
+    issues.push("dast-zap must use the exact protected-main manual release guard");
   }
   if (JSON.stringify(exactNeeds(dast)) !== JSON.stringify(["enterprise-readiness", "release-admission"])
     || !/environment:\s*\n\s+name:\s+staging/.test(dast)
     || !/dast-zap-baseline\.sh/.test(dast)
-    || !/dast-admission-policy\.mjs/.test(dast)) {
-    issues.push("dast-zap must consume the exact readiness and release-admission prerequisites and mint the run-bound DAST receipt");
+    || !/dast-admission-policy\.mjs/.test(dast)
+    || !/dast-runtime-receipt-policy\.mjs/.test(dast)) {
+    issues.push("dast-zap must consume the exact readiness and release-admission prerequisites and bind both runtime verification and activation admission receipts");
   }
   if (!/^    needs: enterprise-readiness\s*$/m.test(admission)
     || !admission.includes(TRUSTED_REF_GUARD)
@@ -78,6 +79,81 @@ export function deploymentPrerequisiteMismatches(workflowText) {
   const productionEnvironments = text.match(/environment:\s*\n\s+name:\s+production/g) ?? [];
   if (productionEnvironments.length !== 1) {
     issues.push("enterprise-infra must expose exactly one production environment job");
+  }
+  return issues;
+}
+
+export function dastReceiptWiringMismatches(workflowText) {
+  const text = String(workflowText);
+  const issues = [];
+  const release = jobBlock(text, "release-admission");
+  const dast = jobBlock(text, "dast-zap");
+  const deploy = jobBlock(text, "deploy-vps");
+  if (!release || !dast || !deploy) return ["DAST receipt workflow jobs are missing"];
+
+  if (!/^      staging_receipt_sha256:\s*\r?\n\s+description:[^\r\n]+\r?\n\s+required: true\s*\r?\n\s+type: string\s*$/m.test(text)) {
+    issues.push("workflow_dispatch lacks the required owner-reviewed staging receipt input");
+  }
+  if (JSON.stringify(exactNeeds(dast)) !== JSON.stringify(["enterprise-readiness", "release-admission"])) {
+    issues.push("dast-zap lacks the exact release admission dependency");
+  }
+  if (!dast.includes(`    if: github.event_name == 'workflow_dispatch' && ${TRUSTED_REF_GUARD}\n`)) {
+    issues.push("dast-zap lacks the protected-main producer guard");
+  }
+  if (
+    !release.includes("staging_receipt_sha256: ${{ steps.artifacts.outputs.staging_receipt_sha256 }}")
+    || !release.includes("EXPECTED_STAGING_RECEIPT_SHA256: ${{ inputs.staging_receipt_sha256 }}")
+    || !release.includes("test \"${#staging_receipts[@]}\" -eq 1")
+    || !release.includes("= \"$EXPECTED_STAGING_RECEIPT_SHA256\"")
+    || !release.includes('install -m 600 "$STAGING_RECEIPT" "${RUNNER_TEMP}/admitted-deployment-receipts/trusted-staging-deployment.json"')
+  ) {
+    issues.push("release admission does not select, hash-check, validate and hand off exactly one staging receipt");
+  }
+  const stagingValidationCalls = dast.match(/--stagingReceipt "\$STAGING_RECEIPT"/g) ?? [];
+  if (
+    stagingValidationCalls.length !== 3
+    || !dast.includes('--stagingReceiptSha256 "$STAGING_RECEIPT_SHA256"')
+    || !dast.includes('--providerMetadata "$TRUSTED_PROVIDER_METADATA"')
+    || !dast.includes('--artifactReceipt "$ARTIFACT_RECEIPT"')
+  ) {
+    issues.push("dast-zap lacks exact provider-authenticated staging receipt validation");
+  }
+  if (
+    !dast.includes('test "$DAST_TARGET" = "$CANONICAL_TARGET"')
+    || !dast.includes("curl --fail --silent --show-error --proto '=https' --tlsv1.2 --max-redirs 0")
+    || (dast.match(/--probe "\$PROBE"/g) ?? []).length !== 2
+  ) {
+    issues.push("dast-zap does not bind the canonical target to the provider probe and scan");
+  }
+  if (
+    !dast.includes("dast_receipt_sha256: ${{ steps.receipt.outputs.dast_receipt_sha256 }}")
+    || !dast.includes('--receiptOutput "$DAST_RECEIPT"')
+    || !dast.includes("name: dast-verification-${{ github.run_id }}")
+    || !dast.includes("path: ${{ runner.temp }}/dast-verification/dast-verification.json")
+    || !dast.includes("if-no-files-found: error")
+  ) {
+    issues.push("dast-zap lacks one exact run-bound DAST artifact and hash output");
+  }
+  if (
+    !dast.includes("--workflowPath .github/workflows/enterprise-infra.yml")
+    || !dast.includes('--sourceRef "$GITHUB_REF"')
+    || !dast.includes('--runId "$GITHUB_RUN_ID"')
+    || !dast.includes('--runAttempt "$GITHUB_RUN_ATTEMPT"')
+    || !dast.includes("--job dast-zap")
+  ) {
+    issues.push("DAST receipt producer identity is not bound to the current workflow run");
+  }
+  if (
+    !deploy.includes("name: dast-verification-${{ github.run_id }}")
+    || !deploy.includes("DAST_RECEIPT_SHA256: ${{ needs.dast-zap.outputs.dast_receipt_sha256 }}")
+    || !deploy.includes('--dastReceipt "$DAST_RECEIPT"')
+    || !deploy.includes('--dastReceiptSha256 "$DAST_RECEIPT_SHA256"')
+    || (deploy.match(/node \.\/scripts\/dast-runtime-receipt-policy\.mjs/g) ?? []).length !== 1
+  ) {
+    issues.push("deploy must revalidate the exact run-bound DAST receipt hash output before mutation");
+  }
+  if (/continue-on-error:\s*true/.test(`${release}\n${dast}\n${deploy}`)) {
+    issues.push("release, DAST and deploy receipt gates may not continue on error");
   }
   return issues;
 }

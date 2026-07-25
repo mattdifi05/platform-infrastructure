@@ -69,7 +69,7 @@ import { assertDeploymentAdmissionConfigured } from "./deployment-admission-poli
 import { validateTrustedDeploymentReceipt } from "./deployment-receipt-policy.mjs";
 import { validateTrustedProviderRun } from "./trusted-provider-run-policy.mjs";
 import { releaseEvidenceAdmissionReady } from "./release-go-no-go-policy.mjs";
-import { deploymentPrerequisiteMismatches } from "./privileged-workflow-policy.mjs";
+import { dastReceiptWiringMismatches, deploymentPrerequisiteMismatches } from "./privileged-workflow-policy.mjs";
 import { snapshotFileArtifact, snapshotJsonArtifact } from "./stable-json-artifact.mjs";
 import { validateExactSourceArchive } from "./source-archive-policy.mjs";
 import { assertExactBuildkitComponentSet, buildkitSbomSha256, buildkitSpdxInventory } from "./buildkit-sbom-policy.mjs";
@@ -2823,6 +2823,8 @@ function infraTestingHygiene() {
     "scripts/supply-chain-policy.test.mjs",
     "scripts/runtime-fingerprint.mjs",
     "scripts/runtime-fingerprint.test.mjs",
+    "scripts/dast-runtime-receipt-policy.mjs",
+    "scripts/dast-runtime-receipt-policy.test.mjs",
     "scripts/provider-evidence-auth.mjs",
     "scripts/provider-evidence-auth.test.mjs",
     "scripts/bounded-file-hash.mjs",
@@ -2871,6 +2873,7 @@ function infraTestingHygiene() {
   run(process.execPath, ["--test", "scripts/runtime-isolation-policy.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/functional-health.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/runtime-fingerprint.test.mjs"], { cwd: infraRoot });
+  run(process.execPath, ["--test", "scripts/dast-runtime-receipt-policy.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/provider-evidence-auth.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/bounded-file-hash.test.mjs"], { cwd: infraRoot });
   run(process.execPath, ["--test", "scripts/backup-artifact-publication.test.mjs"], { cwd: infraRoot });
@@ -7247,9 +7250,12 @@ async function governanceCheckBody() {
   assertMatch(infraWorkflow, /deploy-vps:[\s\S]*concurrency:[\s\S]*infra-production-deploy[\s\S]*cancel-in-progress:\s+false/, "Production deploys must be serialized.");
   assertNoMatch(infraWorkflow, /^\s{2}(?:compose-and-policy|shell-syntax):/m, "Infrastructure CI must use the four canonical required gates without duplicate legacy jobs.");
   assertMatch(infraWorkflow, /enterprise-readiness:[\s\S]*needs:\s*\r?\n\s+- quality\s*\r?\n\s+- compose\s*\r?\n\s+- supply-chain/, "Enterprise readiness must depend on all three behavior gates.");
+  assertMatch(infraWorkflow, /dast-zap:[\s\S]*needs:\s*\r?\n\s+- enterprise-readiness\s*\r?\n\s+- release-admission/, "DAST must run only after enterprise readiness and exact release admission.");
   assertMatch(infraWorkflow, /release-admission:[\s\S]*needs:\s*enterprise-readiness[\s\S]*(?:release-artifact-gate\.sh|node \.\/scripts\/infra-ops\.mjs release-artifact-gate)/, "Release admission must verify artifacts after enterprise readiness and before deploy.");
   const deploymentDagIssues = deploymentPrerequisiteMismatches(infraWorkflow);
   if (deploymentDagIssues.length) fail(`Production deployment DAG is unsafe: ${deploymentDagIssues.join("; ")}`);
+  const dastReceiptIssues = dastReceiptWiringMismatches(infraWorkflow);
+  if (dastReceiptIssues.length) fail(`Staging DAST receipt wiring is unsafe: ${dastReceiptIssues.join("; ")}`);
   assertMatch(infraWorkflow, /deploy-vps:[\s\S]*needs:\s*\r?\n\s+- enterprise-readiness\s*\r?\n\s+- release-admission\s*\r?\n\s+- dast-zap/, "Production deploy must require enterprise readiness, release admission and staging DAST.");
   assertMatch(runbook, /Production deploy/, "Runbook must document production deploy.");
   assertMatch(runbook, /Rollback/, "Runbook must document rollback.");

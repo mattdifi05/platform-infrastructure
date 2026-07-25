@@ -9,6 +9,10 @@ assert.equal(policy.status, "EXTERNAL-PENDING");
 assert.equal(policy.trustedVerifierChannel, null);
 assert.equal(policy.trustedOpsImageRepository, null);
 assert.deepEqual(policy.trustedProducer, { repository: null, workflowPath: null, workflowSha: null, sourceRef: null, event: null });
+assert.equal(policy.stagingDast.status, "EXTERNAL-PENDING");
+assert.equal(policy.stagingDast.canonicalTarget, null);
+assert.equal(policy.stagingDast.requiredStagingReceiptKind, "platform-trusted-staging-deployment/v1");
+assert.equal(policy.stagingDast.requiredDastReceiptKind, "platform-dast-verification/v1");
 assert.equal(policy.selfAssertedAnnotationsAccepted, false);
 assert.match(rego, /EXTERNAL-PENDING/);
 assert.doesNotMatch(rego, /metadata\.annotations/);
@@ -24,4 +28,4 @@ assert.throws(
   }),
   /EXTERNAL-PENDING/,
 );
-process.stdout.write("deployment admission policy tests passed 10/10; state=EXTERNAL-PENDING\n");
+process.stdout.write("deployment admission policy tests passed 14/14; state=EXTERNAL-PENDING\n");
