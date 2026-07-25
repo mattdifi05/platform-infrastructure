@@ -20,29 +20,37 @@ GO-blocking until their external evidence is independently authenticated.
 | `scripts/governance-documentation-closure.mjs` | Offline fail-closed catalog and receipt structure validator. |
 | `scripts/governance-documentation-closure.test.mjs` | Positive, negative, hostile, path, binding, identity, and false-GO regression coverage. |
 
-The catalogs bind tracked regular files by repository-relative path, SHA-256,
-and an exact unique anchor. Missing files, untracked artifacts, symlinks, stale
-hashes, unknown fields, duplicate coverage, undeclared roles, collapsed role
-separation, placeholders, and runtime identities fail validation.
+Only `governance/service-asset-ownership.json` and
+`governance/runbook-catalog.json` are accepted as canonical catalog paths. The
+catalogs bind tracked regular files by repository-relative path, SHA-256, and
+an exact unique anchor. Every canonical catalog and referenced artifact must be
+byte-identical in the current commit, index, and worktree. Validation records
+the exact current commit, tree, and SHA-256 of every authoritative path under
+`repositoryBinding`. A staged or unstaged rehash, shadow catalog, shadow
+procedure, missing file, untracked artifact, symlink, stale hash, unknown field,
+duplicate coverage, or collapsed role separation fails closed. Untracked
+external receipts do not make the authoritative tracked portion dirty.
 
 ## Accountability boundary
 
-The identifiers under `roles` are human-accountability slots, not people:
+The identifiers under `roles` are a closed allowlist of human-accountability
+slots, not people:
 
-- primary;
-- substitute;
-- release approval;
-- incident escalation.
+- `role:platform-governance-primary`;
+- `role:platform-governance-substitute`;
+- `role:release-approval-authority`;
+- `role:incident-escalation-authority`.
 
-Every asset uses four distinct slots. `root`, containers, daemons, services,
-database users, and other runtime principals are invalid owners. The repository
+Every asset and runbook uses those exact identifiers in their corresponding
+slot. Additional or plausible-looking replacement identifiers are invalid;
+this is an allowlist, not a placeholder/runtime-name blacklist. The repository
 does not infer a person from an account name and contains no acknowledgement
 receipt. Identity binding remains `GOVERNANCE-EXTERNAL`.
 
 To close `COND-DOC-EVD-001`, an external process must authenticate exactly one
 current acceptance set that:
 
-1. binds the exact ownership catalog bytes;
+1. binds the exact canonical ownership catalog path and SHA-256;
 2. covers the primary and substitute role for every catalog asset;
 3. binds each role consistently to a distinct authenticated subject;
 4. acknowledges closure, preservation, rollback, and review;
@@ -59,10 +67,13 @@ artifact binding, and independent execution are mandatory.
 
 To close `COND-DOC-EVD-002`, external independent operators must successfully
 exercise rollout, rollback, backup, restore, and access recovery against the
-exact approved artifact bytes. Every receipt must bind the catalog and
-procedure hashes, authenticated operator identity, execution time, preservation
-result, rollback result, and independently held evidence. The operator must not
-match an accepted accountability subject.
+exact approved artifact bytes. Every receipt must bind the exact canonical
+runbook catalog path and SHA-256 plus the exact procedure path, SHA-256, and
+anchors already declared by that catalog. A receipt cannot nominate a
+self-consistent shadow catalog or procedure. It must also bind authenticated
+operator identity, execution time, preservation result, rollback result, and
+independently held evidence. The operator must not match an accepted
+accountability subject.
 
 No real drill is stored or claimed in this repository. A configuration check,
 dry run, local restore, provider-free simulation, or test of the original state
@@ -86,14 +97,29 @@ The catalog command must return:
 ```text
 status=LOCAL-SUPPORT-READY-EXTERNAL-PENDING
 gateAdmissible=false
+repositoryBinding.commit=<exact current commit>
+repositoryBinding.tree=<exact current tree>
 ```
 
 Receipt fixtures in the test suite use `evidenceClass=SYNTHETIC-TEST`,
 `synthetic=true`, and `gateAdmissible=false`. They test parsing and rejection
 only. They never satisfy an external condition.
 
-The validator may also check the structure and exact catalog binding of an
-untracked external receipt. That result remains
+The validator may also check the structure and exact canonical catalog binding
+of an untracked external receipt. The `receipt` command requires both canonical
+catalog arguments; it never treats a catalog path asserted only by the receipt
+as authoritative:
+
+```sh
+node scripts/governance-documentation-closure.mjs receipt \
+  --root "$PWD" \
+  --ownership governance/service-asset-ownership.json \
+  --runbooks governance/runbook-catalog.json \
+  --kind acceptance \
+  --receipt reports/governance/acceptance/current.json
+```
+
+That result remains
 `GOVERNANCE-EXTERNAL-VERIFICATION-PENDING`, is non-gate-admissible, and does not
 authorize deployment. Strings such as `provider-signed`, subject digests, and
 evidence hashes are not cryptographic verification by themselves. An
@@ -113,9 +139,10 @@ node scripts/governance-documentation-closure.mjs gate \
 ```
 
 Receipt directories must remain untracked, contain only regular JSON files,
-and contain no symlinks or ambiguous entries. Never commit personal identity,
-authentication material, secret values, or live provider responses merely to
-make a local test pass.
+and contain no symlinks or ambiguous entries. Their untracked state is kept
+separate from the byte-clean requirement for canonical catalogs and referenced
+artifacts. Never commit personal identity, authentication material, secret
+values, or live provider responses merely to make a local test pass.
 
 ## Closure and rollback
 

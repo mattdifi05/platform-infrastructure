@@ -25,7 +25,7 @@ operation explicitly requires it and has approval.
 | `SERVICE-IDENTITY-AND-TENANCY.md` | T14 per-service PostgreSQL identities, MinIO prefix policy, tenancy decision and dual-credential rollout. |
 | `SUPPLY-CHAIN.md` | T15 immutable image/action/download lock and build sandbox. |
 | `RELEASE-TRUST-AND-WORKFLOW-SECURITY.md` | T16 cryptographic provenance, exact GitHub governance and safe remote-input contract. |
-| `GOVERNANCE-OWNERSHIP-AND-RUNBOOKS.md` | Machine-readable ownership/runbook catalogs, local validator, receipt boundary and external closure conditions. |
+| `GOVERNANCE-OWNERSHIP-AND-RUNBOOKS.md` | Canonical clean-HEAD ownership/runbook catalogs, closed role allowlist, receipt binding boundary and external closure conditions. |
 | `control-center/CONTROL-CENTER-CORE.md` | T19 backend modules, versioned API, state and Status executor boundaries. |
 | `control-center/STATE-STORE-MIGRATION.md` | Plan-only state export/import/rollback procedure and activation gates. |
 | `ENTERPRISE-MATURITY.md` | Enterprise maturity matrix and 30-point readiness model. |
@@ -40,7 +40,7 @@ operation explicitly requires it and has approval.
 | `keycloak/README.md` | Keycloak import and realm bootstrap notes. |
 | `minio/README.md` | MinIO setup and production exposure notes. |
 | `secrets/README.md` | Infra Secret Manager files, rotation and Docker secret rules. |
-| `governance/service-asset-ownership.json` | Closed local asset/capability scope and unbound accountability role slots. |
+| `governance/service-asset-ownership.json` | Closed local asset/capability scope and exact four-role accountability allowlist. |
 | `governance/runbook-catalog.json` | Closed required runbook set and independent external drill requirements. |
 | `governance/schemas/` | Closed JSON Schema contracts for governance catalogs and receipts. |
 
