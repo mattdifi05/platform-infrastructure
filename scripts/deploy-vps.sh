@@ -16,6 +16,7 @@ PROJECT_NAME="${DEPLOY_PROJECT_NAME:-platform_infra_vps}"
 RELEASE_SHA="${DEPLOY_RELEASE_SHA:-}"
 RELEASE_TREE="${DEPLOY_RELEASE_TREE:-}"
 DEPLOY_REPO="${DEPLOY_REPO:-}"
+SOURCE_ARCHIVE="${DEPLOY_SOURCE_ARCHIVE_PATH:-}"
 ARTIFACT_RECEIPT="${DEPLOY_ARTIFACT_RECEIPT_PATH:-}"
 ARTIFACT_RECEIPT_SHA256="${DEPLOY_ARTIFACT_RECEIPT_SHA256:-}"
 ADMISSION_RECEIPT="${DEPLOY_ADMISSION_RECEIPT_PATH:-}"
@@ -106,8 +107,8 @@ esac
   echo "Trusted-provider run ID and attempt must be positive." >&2
   exit 1
 }
-for receipt in "$ARTIFACT_RECEIPT" "$ADMISSION_RECEIPT" "$PROVIDER_METADATA"; do
-  [ -f "$receipt" ] && [ -r "$receipt" ] && [ -s "$receipt" ] && [ ! -L "$receipt" ] || { echo "Deployment trust input is missing, unreadable, empty, or a symlink." >&2; exit 1; }
+for trust_input in "$SOURCE_ARCHIVE" "$ARTIFACT_RECEIPT" "$ADMISSION_RECEIPT" "$PROVIDER_METADATA"; do
+  [ -f "$trust_input" ] && [ -r "$trust_input" ] && [ -s "$trust_input" ] && [ ! -L "$trust_input" ] || { echo "Deployment trust input is missing, unreadable, empty, or a symlink." >&2; exit 1; }
 done
 
 head_sha=$(git -C "$ROOT_DIR" rev-parse HEAD)
@@ -122,13 +123,21 @@ hash_file() {
 stable_artifact_receipt="$request_dir/artifact-verification.json"
 stable_admission_receipt="$request_dir/trusted-deployment-admission.json"
 stable_provider_metadata="$request_dir/trusted-provider-run.json"
+stable_source_archive="$request_dir/exact-source-archive.tar"
 cp "$ARTIFACT_RECEIPT" "$stable_artifact_receipt"
 cp "$ADMISSION_RECEIPT" "$stable_admission_receipt"
 cp "$PROVIDER_METADATA" "$stable_provider_metadata"
-chmod 600 "$stable_artifact_receipt" "$stable_admission_receipt" "$stable_provider_metadata"
+cp "$SOURCE_ARCHIVE" "$stable_source_archive"
+chmod 600 "$stable_artifact_receipt" "$stable_admission_receipt" "$stable_provider_metadata" "$stable_source_archive"
 [ "$(hash_file "$stable_artifact_receipt")" = "$ARTIFACT_RECEIPT_SHA256" ] || { echo "Artifact verification receipt SHA256 mismatch." >&2; exit 1; }
 [ "$(hash_file "$stable_admission_receipt")" = "$ADMISSION_RECEIPT_SHA256" ] || { echo "Trusted deployment receipt SHA256 mismatch." >&2; exit 1; }
 [ "$(hash_file "$stable_provider_metadata")" = "$PROVIDER_METADATA_SHA256" ] || { echo "Trusted provider metadata SHA256 mismatch." >&2; exit 1; }
+SOURCE_ARCHIVE_SHA256=$(jq -er '.sourceArchiveSha256 | select(test("^[a-f0-9]{64}$"))' "$stable_artifact_receipt")
+[ "$(jq -er '.sourceArchiveSha256' "$stable_admission_receipt")" = "$SOURCE_ARCHIVE_SHA256" ] || {
+  echo "Trusted deployment receipt does not bind the artifact-verification source archive." >&2
+  exit 1
+}
+[ "$(hash_file "$stable_source_archive")" = "$SOURCE_ARCHIVE_SHA256" ] || { echo "Exact source archive SHA256 mismatch." >&2; exit 1; }
 node "$SCRIPT_DIR/trusted-provider-run-policy.mjs" \
   --policy "$ADMISSION_POLICY" \
   --metadata "$stable_provider_metadata" \
@@ -143,6 +152,7 @@ node "$SCRIPT_DIR/deployment-receipt-policy.mjs" \
   --deploymentReceipt "$stable_admission_receipt" \
   --deploymentReceiptSha256 "$ADMISSION_RECEIPT_SHA256" \
   --repo "$DEPLOY_REPO" --commit "$RELEASE_SHA" --tree "$RELEASE_TREE" \
+  --sourceArchiveSha256 "$SOURCE_ARCHIVE_SHA256" \
   --providerRunId "$PROVIDER_RUN_ID" \
   --providerRunAttempt "$PROVIDER_RUN_ATTEMPT" >/dev/null
 
@@ -172,6 +182,7 @@ request_file="$request_dir/request.sh"
   printf "PLATFORM_PROJECT_NAME_B64='%s'\n" "$(encode "$PROJECT_NAME")"
   printf "PLATFORM_RELEASE_SHA_B64='%s'\n" "$(encode "$RELEASE_SHA")"
   printf "PLATFORM_RELEASE_TREE_B64='%s'\n" "$(encode "$RELEASE_TREE")"
+  printf "PLATFORM_SOURCE_ARCHIVE_SHA256_B64='%s'\n" "$(encode "$SOURCE_ARCHIVE_SHA256")"
   printf "PLATFORM_DEPLOY_REPO_B64='%s'\n" "$(encode "$DEPLOY_REPO")"
   printf "PLATFORM_CANONICAL_ORIGIN_B64='%s'\n" "$(encode "$CANONICAL_ORIGIN")"
   printf "PLATFORM_SSH_PORT_B64='%s'\n" "$(encode "$SSH_PORT")"
@@ -183,6 +194,11 @@ request_file="$request_dir/request.sh"
   printf "PLATFORM_ARTIFACT_RECEIPT_B64='%s'\n" "$(encode_file "$stable_artifact_receipt")"
   printf "PLATFORM_ADMISSION_RECEIPT_B64='%s'\n" "$(encode_file "$stable_admission_receipt")"
   printf "PLATFORM_PROVIDER_METADATA_B64='%s'\n" "$(encode_file "$stable_provider_metadata")"
+  printf '%s\n' 'platform_write_source_archive() {'
+  printf '%s\n' "  base64 -d <<'__PLATFORM_EXACT_SOURCE_ARCHIVE__'"
+  base64 < "$stable_source_archive"
+  printf '%s\n' '__PLATFORM_EXACT_SOURCE_ARCHIVE__'
+  printf '%s\n' '}'
   printf "PLATFORM_RUN_WAF_SMOKE_B64='%s'\n" "$(encode "$run_waf_smoke")"
   printf "PLATFORM_RUN_INFRA_HEALTH_B64='%s'\n" "$(encode "$run_infra_health")"
   printf "PLATFORM_RUN_PRODUCTION_PREFLIGHT_B64='%s'\n" "$(encode "$run_production_preflight")"

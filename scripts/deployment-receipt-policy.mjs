@@ -38,6 +38,7 @@ export function validateArtifactVerificationReceipt(receipt, { repository, commi
   if (receipt.repository !== expectedRepository || receipt.commitSha !== expectedCommit) {
     invalid("Artifact verification receipt repository/commit binding is mismatched.");
   }
+  exactSha256(receipt.sourceArchiveSha256, "artifact receipt source archive SHA256");
   exactSha256(receipt.sbomSha256, "artifact receipt SBOM SHA256");
   exactSha256(receipt.manifestSha256, "artifact receipt manifest SHA256");
   exactSha256(receipt.provenance?.verificationFingerprint, "artifact receipt verification fingerprint");
@@ -54,6 +55,7 @@ export function validateTrustedDeploymentReceipt(receipt, {
   treeSha,
   artifactReceiptSha256,
   artifactReceipt,
+  sourceArchiveSha256 = null,
   providerRunId = null,
   providerRunAttempt = null,
 }) {
@@ -62,6 +64,9 @@ export function validateTrustedDeploymentReceipt(receipt, {
   const expectedTree = exactGitSha(treeSha, "tree SHA");
   const expectedArtifactReceipt = exactSha256(artifactReceiptSha256, "artifact verification receipt SHA256");
   validateArtifactVerificationReceipt(artifactReceipt, { repository: expectedRepository, commitSha: expectedCommit });
+  const expectedSourceArchive = sourceArchiveSha256 === null
+    ? artifactReceipt.sourceArchiveSha256
+    : exactSha256(sourceArchiveSha256, "expected source archive SHA256");
   if (
     policy?.status !== "READY"
     || typeof policy?.trustedVerifierChannel !== "string"
@@ -85,6 +90,12 @@ export function validateTrustedDeploymentReceipt(receipt, {
   }
   if (receipt.artifactVerificationReceiptSha256 !== expectedArtifactReceipt) {
     invalid("Trusted deployment receipt does not bind the exact artifact verification receipt.");
+  }
+  if (
+    artifactReceipt.sourceArchiveSha256 !== expectedSourceArchive
+    || receipt.sourceArchiveSha256 !== expectedSourceArchive
+  ) {
+    invalid("Trusted deployment receipt does not bind the exact source archive.");
   }
   if (receipt.manifestSha256 !== artifactReceipt.manifestSha256 || receipt.sbomSha256 !== artifactReceipt.sbomSha256) {
     invalid("Trusted deployment receipt does not bind the admitted manifest and SBOM.");
@@ -162,10 +173,11 @@ function main() {
       treeSha: options.tree,
       artifactReceiptSha256: artifact.sha256,
       artifactReceipt: artifact.document,
+      sourceArchiveSha256: options.sourceArchiveSha256 ?? null,
       providerRunId: options.providerRunId ?? null,
       providerRunAttempt: options.providerRunAttempt ?? null,
     });
-    process.stdout.write(`${JSON.stringify({ status: "READY", repository: options.repo, commitSha: options.commit, treeSha: options.tree, artifactReceiptSha256: artifact.sha256, deploymentReceiptSha256: deployment.sha256 })}\n`);
+    process.stdout.write(`${JSON.stringify({ status: "READY", repository: options.repo, commitSha: options.commit, treeSha: options.tree, sourceArchiveSha256: deployment.document.sourceArchiveSha256, artifactReceiptSha256: artifact.sha256, deploymentReceiptSha256: deployment.sha256 })}\n`);
   } finally {
     for (const artifact of artifacts.reverse()) artifact.cleanup();
   }

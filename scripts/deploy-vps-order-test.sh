@@ -30,13 +30,15 @@ hash_file() {
 }
 encode() { printf '%s' "$1" | base64 | tr -d '\r\n'; }
 encode_file() { base64 < "$1" | tr -d '\r\n'; }
+printf 'exact authenticated source archive fixture\n' > "$TMP/source-archive.tar"
+SOURCE_ARCHIVE_SHA=$(hash_file "$TMP/source-archive.tar")
 
 cat > "$TMP/artifact.json" <<EOF
-{"version":1,"kind":"platform-release-artifact-verification/v1","status":"EXTERNAL-PENDING","artifactVerification":"passed","deploymentAdmission":"EXTERNAL-PENDING","usageScope":"artifact-verification-only","repository":"owner/repo","commitSha":"$RELEASE_SHA","manifestSha256":"$MANIFEST_SHA","sbomSha256":"$SBOM_SHA","subjects":[{"key":"PHP_APACHE_IMAGE","image":"$APPROVED_IMAGE"}]}
+{"version":1,"kind":"platform-release-artifact-verification/v1","status":"EXTERNAL-PENDING","artifactVerification":"passed","deploymentAdmission":"EXTERNAL-PENDING","usageScope":"artifact-verification-only","repository":"owner/repo","commitSha":"$RELEASE_SHA","sourceArchiveSha256":"$SOURCE_ARCHIVE_SHA","manifestSha256":"$MANIFEST_SHA","sbomSha256":"$SBOM_SHA","subjects":[{"key":"PHP_APACHE_IMAGE","image":"$APPROVED_IMAGE"}]}
 EOF
 ARTIFACT_SHA=$(hash_file "$TMP/artifact.json")
 cat > "$TMP/admission.json" <<EOF
-{"version":1,"kind":"platform-trusted-deployment-admission/v1","status":"READY","artifactVerification":"passed","deploymentAdmission":"READY","repository":"owner/repo","commitSha":"$RELEASE_SHA","treeSha":"$RELEASE_TREE","artifactVerificationReceiptSha256":"$ARTIFACT_SHA","manifestSha256":"$MANIFEST_SHA","sbomSha256":"$SBOM_SHA","decisionId":"decision:12345678","verifier":{"channel":"external/prod","fingerprint":"$(printf 'f%.0s' $(seq 1 64))","selfAsserted":false},"producer":{"repository":"owner/trusted-admission","workflowPath":".github/workflows/produce-admission.yml","sourceRef":"refs/heads/main","event":"workflow_dispatch","runId":"123456","runAttempt":1,"workflowSha":"$(printf '6%.0s' $(seq 1 40))"},"opsRunner":{"image":"$OPS_IMAGE","imageId":"$OPS_IMAGE_ID","verificationFingerprint":"$(printf '9%.0s' $(seq 1 64))","providerAttested":true}}
+{"version":1,"kind":"platform-trusted-deployment-admission/v1","status":"READY","artifactVerification":"passed","deploymentAdmission":"READY","repository":"owner/repo","commitSha":"$RELEASE_SHA","treeSha":"$RELEASE_TREE","sourceArchiveSha256":"$SOURCE_ARCHIVE_SHA","artifactVerificationReceiptSha256":"$ARTIFACT_SHA","manifestSha256":"$MANIFEST_SHA","sbomSha256":"$SBOM_SHA","decisionId":"decision:12345678","verifier":{"channel":"external/prod","fingerprint":"$(printf 'f%.0s' $(seq 1 64))","selfAsserted":false},"producer":{"repository":"owner/trusted-admission","workflowPath":".github/workflows/produce-admission.yml","sourceRef":"refs/heads/main","event":"workflow_dispatch","runId":"123456","runAttempt":1,"workflowSha":"$(printf '6%.0s' $(seq 1 40))"},"opsRunner":{"image":"$OPS_IMAGE","imageId":"$OPS_IMAGE_ID","verificationFingerprint":"$(printf '9%.0s' $(seq 1 64))","providerAttested":true}}
 EOF
 ADMISSION_SHA=$(hash_file "$TMP/admission.json")
 printf '{"id":123456,"run_attempt":1,"repository":{"full_name":"owner/trusted-admission"}}\n' > "$TMP/provider.json"
@@ -105,6 +107,8 @@ case "$1" in
     esac
     ;;
   ./scripts/vps-postdeploy.sh)
+    [ -s "$DEPLOY_SOURCE_ARCHIVE_PATH" ]
+    [ "$(if command -v sha256sum >/dev/null 2>&1; then sha256sum "$DEPLOY_SOURCE_ARCHIVE_PATH"; else shasum -a 256 "$DEPLOY_SOURCE_ARCHIVE_PATH"; fi | awk '{print $1}')" = "$FAKE_SOURCE_ARCHIVE_SHA" ]
     [ -s "$DEPLOY_ARTIFACT_RECEIPT_PATH" ]
     [ -s "$DEPLOY_ADMISSION_RECEIPT_PATH" ]
     [ -s "$DEPLOY_TRUSTED_PROVIDER_METADATA_PATH" ]
@@ -254,11 +258,13 @@ run_remote() {
     FAKE_OPS_IMAGE="$OPS_IMAGE" FAKE_OPS_IMAGE_ID="$OPS_IMAGE_ID" FAKE_OPS_CONTAINER_ID="$OPS_CONTAINER_ID" FAKE_PROVIDER_SHA="$PROVIDER_SHA" \
     FAKE_PREVIOUS_IMAGE="$PREVIOUS_IMAGE" FAKE_PREVIOUS_IMAGE_ID="$PREVIOUS_IMAGE_ID" FAKE_PREVIOUS_CONTAINER_ID="$PREVIOUS_CONTAINER_ID" FAKE_PREVIOUS_OPS_CONTAINER_ID="$PREVIOUS_OPS_CONTAINER_ID" \
     FAKE_PREVIOUS_COMMIT="$PREVIOUS_COMMIT" FAKE_PREVIOUS_TREE="$PREVIOUS_TREE" \
+    FAKE_SOURCE_ARCHIVE_SHA="$SOURCE_ARCHIVE_SHA" \
     PLATFORM_REMOTE_DIR_B64="$(encode "$REMOTE_DIR")" \
     PLATFORM_ENV_FILE_B64="$(encode '.env')" \
     PLATFORM_PROJECT_NAME_B64="$(encode 'platform_infra_vps')" \
     PLATFORM_RELEASE_SHA_B64="$(encode "$RELEASE_SHA")" \
     PLATFORM_RELEASE_TREE_B64="$(encode "$RELEASE_TREE")" \
+    PLATFORM_SOURCE_ARCHIVE_SHA256_B64="$(encode "$SOURCE_ARCHIVE_SHA")" \
     PLATFORM_DEPLOY_REPO_B64="$(encode 'owner/repo')" \
     PLATFORM_CANONICAL_ORIGIN_B64="$(encode 'https://github.com/owner/repo.git')" \
     PLATFORM_SSH_PORT_B64="$(encode 65002)" \
@@ -270,6 +276,7 @@ run_remote() {
     PLATFORM_ARTIFACT_RECEIPT_B64="$(encode_file "$TMP/artifact.json")" \
     PLATFORM_ADMISSION_RECEIPT_B64="$(encode_file "$TMP/admission.json")" \
     PLATFORM_PROVIDER_METADATA_B64="$(encode_file "$TMP/provider.json")" \
+    PLATFORM_SOURCE_ARCHIVE_B64="$(encode_file "$TMP/source-archive.tar")" \
     PLATFORM_RUN_WAF_SMOKE_B64="$(encode 1)" \
     PLATFORM_RUN_INFRA_HEALTH_B64="$(encode 1)" \
     PLATFORM_RUN_PRODUCTION_PREFLIGHT_B64="$(encode 1)" \
@@ -279,7 +286,12 @@ run_remote() {
     PLATFORM_PRE_GO_LIVE_RESTORE_DRILL_B64="$(encode 1)" \
     PLATFORM_PRE_GO_LIVE_OFFSITE_RESTORE_DRY_RUN_B64="$(encode 1)" \
     PLATFORM_PRE_GO_LIVE_GITHUB_REMOTE_B64="$(encode 1)" \
-    "$@" /bin/sh "$SCRIPT_DIR/deploy-vps-remote.sh"
+    "$@" /bin/sh -c '
+      platform_write_source_archive() {
+        printf "%s" "$PLATFORM_SOURCE_ARCHIVE_B64" | base64 -d
+      }
+      . "$1"
+    ' sh "$SCRIPT_DIR/deploy-vps-remote.sh"
 }
 
 assert_not_activated() {

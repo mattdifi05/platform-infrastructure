@@ -241,8 +241,9 @@ export function sha256Json(value) {
   return crypto.createHash("sha256").update(JSON.stringify(value)).digest("hex");
 }
 
-export function buildReleaseAdmissionReceipt({ subjects, repository, commitSha, sbomSha256, buildkitSbomSha256 = null, registryResolutionSha256 = null, registryResolution = null, manifestSha256, verification, manifestVerification = null, generatedAt = new Date().toISOString() }) {
+export function buildReleaseAdmissionReceipt({ subjects, repository, commitSha, sourceArchiveSha256, sbomSha256, buildkitSbomSha256 = null, registryResolutionSha256 = null, registryResolution = null, manifestSha256, verification, manifestVerification = null, generatedAt = new Date().toISOString() }) {
   const binding = validateCryptographicReleaseVerification(verification, { subjects, repository, commitSha });
+  if (!/^[a-f0-9]{64}$/.test(String(sourceArchiveSha256 ?? ""))) invalid("Exact source archive SHA256 is required for the admission receipt.");
   if (!/^[a-f0-9]{64}$/.test(String(sbomSha256 ?? ""))) invalid("SBOM artifact SHA256 is required for the admission receipt.");
   if (!registryResolution || registryResolution.status !== "passed" || registryResolution.image !== binding.subjects[0]?.image
     || registryResolution.rootDigest !== binding.subjects[0]?.digest || registryResolution.descriptorSha256 !== binding.subjects[0]?.sha256
@@ -259,6 +260,7 @@ export function buildReleaseAdmissionReceipt({ subjects, repository, commitSha, 
     generatedAt,
     repository: binding.repository,
     commitSha: binding.commitSha,
+    sourceArchiveSha256,
     subjects: binding.subjects.map(({ key, image, name, digest }) => ({ key, image, name, digest })),
     subjectVerificationReceipts: binding.perSubjectVerification.map(({ subject, attestation }) => ({
       key: subject.key,

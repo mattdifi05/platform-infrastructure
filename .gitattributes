@@ -15,3 +15,11 @@
 *.tar binary
 *.dump binary
 *.db binary
+
+# Runtime data is mounted separately from the exact release archive. Keeping
+# even placeholder files out of git archive prevents tracked code/config
+# extraction from crossing a persistent-data mount boundary.
+/projects-portal/state export-ignore
+/secrets export-ignore
+/traefik/acme export-ignore
+/traefik/certs export-ignore

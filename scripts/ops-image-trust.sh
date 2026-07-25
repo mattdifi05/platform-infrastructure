@@ -90,6 +90,7 @@ node "$SCRIPT_DIR/deployment-receipt-policy.mjs" \
 
 IMAGE=$(jq -er '.opsRunner.image' "$stable_admission")
 IMAGE_ID=$(jq -er '.opsRunner.imageId' "$stable_admission")
+SOURCE_ARCHIVE_SHA256=$(jq -er '.sourceArchiveSha256' "$stable_admission")
 command -v docker >/dev/null 2>&1 || {
   echo "Docker is required to inspect the already-present admitted ops image." >&2
   exit 127
@@ -104,4 +105,8 @@ printf '%s' "$inspect_json" | jq -e --arg image "$IMAGE" --arg image_id "$IMAGE_
   exit 1
 }
 
-printf '%s\n' "$(jq -cn --arg image "$IMAGE" --arg imageId "$IMAGE_ID" '{image:$image,imageId:$imageId}')"
+printf '%s\n' "$(jq -cn \
+  --arg image "$IMAGE" \
+  --arg imageId "$IMAGE_ID" \
+  --arg sourceArchiveSha256 "$SOURCE_ARCHIVE_SHA256" \
+  '{image:$image,imageId:$imageId,sourceArchiveSha256:$sourceArchiveSha256}')"

@@ -89,6 +89,15 @@ admitted=$(sh "$SCRIPT_DIR/ops-image-trust.sh")
 OPS_IMAGE=$(printf '%s' "$admitted" | jq -er '.image')
 OPS_IMAGE_ID=$(printf '%s' "$admitted" | jq -er '.imageId')
 
+assert_admitted_checkout() {
+  [[ "$(git -C "$INFRA_ROOT" rev-parse HEAD)" == "$DEPLOY_RELEASE_SHA" ]]
+  [[ "$(git -C "$INFRA_ROOT" rev-parse "${DEPLOY_RELEASE_SHA}^{tree}")" == "$DEPLOY_RELEASE_TREE" ]]
+  [[ -z "$(git -C "$INFRA_ROOT" status --porcelain --untracked-files=all)" ]] || {
+    printf '%s\n' "Hosted workload preparation checkout changed after ops admission." >&2
+    exit 1
+  }
+}
+
 core_files=(
   "$INFRA_ROOT/compose.yaml"
   "$INFRA_ROOT/compose.secrets.yaml"
@@ -115,14 +124,14 @@ resolved="$TMP/hosted-workloads.resolved.json"
 core_render="$TMP/core-render.json"
 combined_render="$TMP/combined-render.json"
 
-docker run --rm --pull=never --network none --user "$(id -u):$(id -g)" --entrypoint node \
+assert_admitted_checkout
+docker run --rm --pull=never --network none --user "$(id -u):$(id -g)" \
   -v "$INFRA_ROOT:$INFRA_ROOT:ro" \
   -v "$WORKLOAD_ROOT:$WORKLOAD_ROOT:ro" \
   -v "$(dirname "$CATALOG"):$(dirname "$CATALOG"):ro" \
   -v "$(dirname "$OUTPUT"):$(dirname "$OUTPUT")" \
   -v "$TMP:$TMP" \
-  -w "$INFRA_ROOT" \
-  "$OPS_IMAGE_ID" scripts/hosted-workload-contract.mjs resolve \
+  "$OPS_IMAGE_ID" hosted-workload-contract resolve \
     --catalog "$CATALOG" \
     --workloadRoot "$WORKLOAD_ROOT" \
     --envFile "$ENV_FILE" \
@@ -132,7 +141,7 @@ docker run --rm --pull=never --network none --user "$(id -u):$(id -g)" --entrypo
     --activationLock "$OUTPUT" \
     --output "$resolved"
 
-docker run --rm --network none --user "$(id -u):$(id -g)" --entrypoint ruby \
+docker run --rm --pull=never --network none --user "$(id -u):$(id -g)" --entrypoint ruby \
   -v "$INFRA_ROOT:$INFRA_ROOT:ro" \
   -v "$(dirname "$OUTPUT"):$(dirname "$OUTPUT"):ro" \
   -v "$TMP:$TMP" \
@@ -154,13 +163,13 @@ HOSTED_WORKLOAD_LOCK="$OUTPUT" HOSTED_WORKLOAD_MODE=hosted HOSTED_WORKLOAD_PREPA
 HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE="$OUTPUT" \
   bash "$SCRIPT_DIR/compose-vps.sh" config --format json > "$combined_render"
 
-docker run --rm --pull=never --network none --user "$(id -u):$(id -g)" --entrypoint node \
+assert_admitted_checkout
+docker run --rm --pull=never --network none --user "$(id -u):$(id -g)" \
   -v "$INFRA_ROOT:$INFRA_ROOT:ro" \
   -v "$WORKLOAD_ROOT:$WORKLOAD_ROOT:ro" \
   -v "$TMP:$TMP:ro" \
   -v "$(dirname "$OUTPUT"):$(dirname "$OUTPUT")" \
-  -w "$INFRA_ROOT" \
-  "$OPS_IMAGE_ID" scripts/hosted-workload-contract.mjs verify-render \
+  "$OPS_IMAGE_ID" hosted-workload-contract verify-render \
     --lock "$OUTPUT" \
     --coreRender "$core_render" \
     --combinedRender "$combined_render" \

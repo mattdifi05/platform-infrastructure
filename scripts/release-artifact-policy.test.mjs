@@ -11,6 +11,7 @@ import {
 
 const repository = "owner/repo";
 const commitSha = "b".repeat(40);
+const sourceArchiveSha256 = "0".repeat(64);
 const image = `ghcr.io/owner/platform-infrastructure-php-apache@sha256:${"a".repeat(64)}`;
 const subjects = canonicalReleaseSubjects([{ key: "PHP_APACHE_IMAGE", image }]);
 const sbom = {
@@ -173,15 +174,22 @@ test("rejects provenance from a different commit", () => {
 });
 test("builds a receipt bound to SBOM and verifier output", () => {
   const receipt = buildReleaseAdmissionReceipt({
-    subjects, repository, commitSha, sbomSha256: "d".repeat(64), verification, registryResolution,
+    subjects, repository, commitSha, sourceArchiveSha256, sbomSha256: "d".repeat(64), verification, registryResolution,
     manifestVerification: verification.attestations[0], generatedAt: "2026-07-21T00:00:00.000Z",
   });
   assert.equal(receipt.status, "EXTERNAL-PENDING");
   assert.equal(receipt.artifactVerification, "passed");
   assert.equal(receipt.deploymentAdmission, "EXTERNAL-PENDING");
+  assert.equal(receipt.sourceArchiveSha256, sourceArchiveSha256);
   assert.match(receipt.provenance.manifestVerificationFingerprint, /^[a-f0-9]{64}$/);
   assert.equal(receipt.generatedAt, "2026-07-21T00:00:00.000Z");
   assert.equal(receipt.subjectVerificationReceipts[0].attestationReference.subject, `oci://${image}`);
+});
+test("rejects a receipt without an exact source archive hash", () => {
+  assert.throws(() => buildReleaseAdmissionReceipt({
+    subjects, repository, commitSha, sbomSha256: "d".repeat(64), verification, registryResolution,
+    manifestVerification: verification.attestations[0],
+  }), /source archive SHA256/);
 });
 test("rejects an unapproved release subject key and repository", () => {
   assert.throws(() => validateCryptographicReleaseVerification(verification, {

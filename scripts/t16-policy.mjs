@@ -56,7 +56,13 @@ for (const flag of [
 ]) {
   record(`verifier-flag-${flag.slice(2)}`, includes(trustModule, `"${flag}"`), `cryptographic verifier enforces ${flag}`);
 }
-record("verifier-fixed-binary", includes(trustModule, 'return "/usr/local/bin/gh"'), "production verifier uses the image-owned binary");
+record(
+  "verifier-fixed-binary",
+  /export function verifyGithubAttestation\(options,\s*\{\s*verifierBinary = "\/usr\/local\/bin\/gh"\s*\} = \{\}\)/.test(trustModule)
+    && /spawnSync\(verifierBinary,\s*args,/.test(trustModule)
+    && !/GITHUB_CLI_BIN|PLATFORM_RELEASE_TRUST_TEST_MODE/.test(trustModule),
+  "production verification defaults to the image-owned binary and exposes no environment-controlled override",
+);
 record("verifier-certificate", includes(trustModule, "verification.signature?.certificate"), "verified certificate is required");
 record("verifier-transparency", includes(trustModule, "verification.verifiedTimestamps"), "transparency/timestamp witness is required");
 record("verifier-no-self-assertion", includes(trustModule, "self-asserted reports are not accepted"), "legacy verified booleans are rejected");
@@ -67,7 +73,17 @@ record("ops-rejects-local-json", includes(ops, "Unsigned local SLSA JSON is not 
 record("ops-rejects-normalized-json", includes(ops, "Normalized GitHub attestation reports are not trust inputs"), "release gate rejects normalized reports");
 record("ops-direct-verifier", includes(ops, "verifyGithubReleaseImages"), "release gate invokes cryptographic verification");
 record("ops-no-legacy-validator", !includes(ops, "function validateSlsaProvenance") && !includes(ops, "function validateGithubSigstoreAttestation"), "self-asserted validators are removed");
-record("ops-forwards-source-ref", /GITHUB_REF \\/.test(opsWrapper), "ops container receives the exact source ref");
+const envForwardingLoop = opsWrapper.match(
+  /for name in \\\n[\s\S]*?\n\s*do\n\s+set -- -e "\$name" "\$@"\n\s*done/,
+)?.[0] ?? "";
+record(
+  "ops-forwards-source-ref",
+  /\bGITHUB_REF\b/.test(envForwardingLoop)
+    && /set -- -e "\$name" "\$@"/.test(envForwardingLoop)
+    && /set -- "\$OPS_IMAGE_ID" "\$@"/.test(opsWrapper)
+    && /docker run[\s\S]*?"\$@"/.test(opsWrapper),
+  "ops container forwards the exact source ref through the bounded environment allowlist",
+);
 
 record("gh-version-pinned", /ARG GH_VERSION=2\.93\.0/.test(opsDockerfile), "GitHub CLI version is fixed");
 record("gh-checksum-pinned", /ARG GH_SHA256=[a-f0-9]{64}/.test(opsDockerfile), "GitHub CLI archive checksum is fixed");

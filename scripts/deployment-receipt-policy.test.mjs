@@ -8,6 +8,7 @@ const treeSha = "b".repeat(40);
 const artifactReceiptSha256 = "c".repeat(64);
 const manifestSha256 = "d".repeat(64);
 const sbomSha256 = "e".repeat(64);
+const sourceArchiveSha256 = "0".repeat(64);
 const generatedAt = "2026-07-21T00:00:00.000Z";
 const image = `ghcr.io/owner/app@sha256:${"f".repeat(64)}`;
 const policy = {
@@ -33,6 +34,7 @@ const artifactReceipt = {
   usageScope: "artifact-verification-only",
   repository,
   commitSha,
+  sourceArchiveSha256,
   generatedAt,
   manifestSha256,
   sbomSha256,
@@ -51,6 +53,7 @@ const deploymentReceipt = {
   repository,
   commitSha,
   treeSha,
+  sourceArchiveSha256,
   artifactVerificationReceiptSha256: artifactReceiptSha256,
   manifestSha256,
   sbomSha256,
@@ -82,6 +85,8 @@ const options = {
 assert.equal(validateTrustedDeploymentReceipt(deploymentReceipt, options), deploymentReceipt);
 assert.throws(() => validateTrustedDeploymentReceipt({ ...deploymentReceipt, commitSha: "9".repeat(40) }, options), /repository\/commit\/tree/);
 assert.throws(() => validateTrustedDeploymentReceipt({ ...deploymentReceipt, artifactVerificationReceiptSha256: "8".repeat(64) }, options), /exact artifact/);
+assert.throws(() => validateTrustedDeploymentReceipt({ ...deploymentReceipt, sourceArchiveSha256: "8".repeat(64) }, options), /exact source archive/);
+assert.throws(() => validateTrustedDeploymentReceipt(deploymentReceipt, { ...options, sourceArchiveSha256: "8".repeat(64) }), /exact source archive/);
 assert.throws(() => validateTrustedDeploymentReceipt({ ...deploymentReceipt, verifier: { ...deploymentReceipt.verifier, channel: "self" } }, options), /configured external/);
 assert.throws(() => validateTrustedDeploymentReceipt(deploymentReceipt, { ...options, policy: { ...policy, status: "EXTERNAL-PENDING", trustedVerifierChannel: null } }), /EXTERNAL-PENDING/);
 assert.throws(() => validateTrustedDeploymentReceipt({ ...deploymentReceipt, manifestSha256: "7".repeat(64) }, options), /manifest and SBOM/);
@@ -93,4 +98,4 @@ assert.throws(() => validateTrustedDeploymentReceipt({
   ...deploymentReceipt, opsRunner: { ...deploymentReceipt.opsRunner, image: `ghcr.io/owner/attacker@sha256:${"5".repeat(64)}` },
 }, options), /ops image/);
 
-process.stdout.write("deployment receipt policy tests passed 9/9\n");
+process.stdout.write("deployment receipt policy tests passed 11/11\n");

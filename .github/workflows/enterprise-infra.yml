@@ -139,12 +139,14 @@ jobs:
           case "$OPS_TEST_IMAGE_ID" in sha256:????????????????????????????????????????????????????????????????) ;; *) exit 1 ;; esac
           docker run --rm \
             -e BACKUP_SCHEDULER_DRY_RUN=true \
+            -e PLATFORM_INFRA_ROOT=/infra \
+            -e PLATFORM_OPS_CODE_ROOT=/opt/platform-infrastructure \
             -e PLATFORM_INFRA_HOST_ROOT="${{ github.workspace }}" \
             -e PROJECT_SOURCE_HOST_ROOT="${{ github.workspace }}/.tmp/optional-project-source" \
             -v /var/run/docker.sock:/var/run/docker.sock \
             -v "${{ github.workspace }}:/infra:ro" \
             -v "${{ github.workspace }}/.tmp/optional-project-source:/project:ro" \
-            --entrypoint sh "$OPS_TEST_IMAGE_ID" /infra/scripts/backup-scheduler.sh
+            "$OPS_TEST_IMAGE_ID" backup-scheduler
       - name: Upload Compose evidence reports
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -352,6 +354,7 @@ jobs:
     outputs:
       release_sha: ${{ steps.bind.outputs.release_sha }}
       release_tree: ${{ steps.bind.outputs.release_tree }}
+      source_archive_sha256: ${{ steps.artifacts.outputs.source_archive_sha256 }}
       artifact_receipt_sha256: ${{ steps.artifacts.outputs.artifact_receipt_sha256 }}
       deployment_receipt_sha256: ${{ steps.artifacts.outputs.deployment_receipt_sha256 }}
       trusted_provider_run_id: ${{ steps.provider.outputs.run_id }}
@@ -455,6 +458,7 @@ jobs:
           test "${#EXPECTED_ARTIFACT_RECEIPT_SHA256}" -eq 64
           test "${#EXPECTED_DEPLOYMENT_RECEIPT_SHA256}" -eq 64
           mapfile -t manifests < <(find "$CANDIDATE_DIR" -type f -name 'release-subjects-*.json' -print)
+          mapfile -t source_archives < <(find "$CANDIDATE_DIR" -type f -name 'source-archive-*.tar' -print)
           mapfile -t sboms < <(find "$CANDIDATE_DIR" -type f -name 'github-release-sbom-*.cdx.json' -print)
           mapfile -t buildkit_sboms < <(find "$CANDIDATE_DIR" -type f -name 'buildkit-sbom-*.spdx.json' -print)
           mapfile -t registry_descriptors < <(find "$CANDIDATE_DIR" -type f -name 'registry-descriptor-*.json' -print)
@@ -462,6 +466,7 @@ jobs:
           mapfile -t artifact_receipts < <(find "$CANDIDATE_DIR" -type f -name 'release-artifact-admission-*.json' -print)
           mapfile -t deployment_receipts < <(find "$TRUSTED_ADMISSION_DIR" -type f -name 'trusted-deployment-admission-*.json' -print)
           test "${#manifests[@]}" -eq 1
+          test "${#source_archives[@]}" -eq 1
           test "${#sboms[@]}" -eq 1
           test "${#buildkit_sboms[@]}" -eq 1
           test "${#registry_descriptors[@]}" -eq 1
@@ -471,11 +476,16 @@ jobs:
           test "$(sha256sum "${manifests[0]}" | awk '{print $1}')" = "$EXPECTED_MANIFEST_SHA256"
           test "$(sha256sum "${artifact_receipts[0]}" | awk '{print $1}')" = "$EXPECTED_ARTIFACT_RECEIPT_SHA256"
           test "$(sha256sum "${deployment_receipts[0]}" | awk '{print $1}')" = "$EXPECTED_DEPLOYMENT_RECEIPT_SHA256"
+          SOURCE_ARCHIVE_SHA256="$(sha256sum "${source_archives[0]}" | awk '{print $1}')"
+          test "$(jq -r '.sourceArchiveSha256' "${artifact_receipts[0]}")" = "$SOURCE_ARCHIVE_SHA256"
+          test "$(jq -r '.sourceArchiveSha256' "${deployment_receipts[0]}")" = "$SOURCE_ARCHIVE_SHA256"
           test "$(jq -r '.repository' "${manifests[0]}")" = "$GITHUB_REPOSITORY"
           test "$(jq -r '.commitSha' "${manifests[0]}")" = "$APPROVED_SHA"
           test "$(jq -r '.workflowRunId' "${manifests[0]}")" = "$EXPECTED_RELEASE_RUN_ID"
           test "$(jq -r '.workflowRunUrl' "${manifests[0]}")" = "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${EXPECTED_RELEASE_RUN_ID}"
           printf 'manifest=%s\n' "${manifests[0]}" >> "$GITHUB_OUTPUT"
+          printf 'source_archive=%s\n' "${source_archives[0]}" >> "$GITHUB_OUTPUT"
+          printf 'source_archive_sha256=%s\n' "$SOURCE_ARCHIVE_SHA256" >> "$GITHUB_OUTPUT"
           printf 'sbom=%s\n' "${sboms[0]}" >> "$GITHUB_OUTPUT"
           printf 'buildkit_sbom=%s\n' "${buildkit_sboms[0]}" >> "$GITHUB_OUTPUT"
           printf 'registry_descriptor=%s\n' "${registry_descriptors[0]}" >> "$GITHUB_OUTPUT"
@@ -489,6 +499,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           APPROVED_SHA: ${{ inputs.approved_sha }}
           RELEASE_MANIFEST: ${{ steps.artifacts.outputs.manifest }}
+          RELEASE_SOURCE_ARCHIVE: ${{ steps.artifacts.outputs.source_archive }}
+          RELEASE_SOURCE_ARCHIVE_SHA256: ${{ steps.artifacts.outputs.source_archive_sha256 }}
           RELEASE_SBOM: ${{ steps.artifacts.outputs.sbom }}
           BUILDKIT_SBOM: ${{ steps.artifacts.outputs.buildkit_sbom }}
           REGISTRY_DESCRIPTOR: ${{ steps.artifacts.outputs.registry_descriptor }}
@@ -507,6 +519,7 @@ jobs:
           node ./scripts/infra-ops.mjs release-artifact-gate \
             --imageManifest "$RELEASE_MANIFEST" \
             --sbom "$RELEASE_SBOM" \
+            --sourceArchive "$RELEASE_SOURCE_ARCHIVE" \
             --buildkitSbom "$BUILDKIT_SBOM" \
             --registryDescriptor "$REGISTRY_DESCRIPTOR" \
             --registryResolution "$REGISTRY_RESOLUTION" \
@@ -534,12 +547,14 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --commit "$APPROVED_SHA" \
             --tree "$RELEASE_TREE" \
+            --sourceArchiveSha256 "$RELEASE_SOURCE_ARCHIVE_SHA256" \
             --providerRunId "$TRUSTED_PROVIDER_RUN_ID" \
             --providerRunAttempt "$TRUSTED_PROVIDER_RUN_ATTEMPT"
           install -d -m 700 "${RUNNER_TEMP}/admitted-deployment-receipts"
           install -m 600 "$REVERIFIED_ARTIFACT_RECEIPT" "${RUNNER_TEMP}/admitted-deployment-receipts/artifact-verification.json"
           install -m 600 "$DEPLOYMENT_RECEIPT" "${RUNNER_TEMP}/admitted-deployment-receipts/trusted-deployment-admission.json"
           install -m 600 "$TRUSTED_PROVIDER_METADATA" "${RUNNER_TEMP}/admitted-deployment-receipts/trusted-provider-run.json"
+          install -m 600 "$RELEASE_SOURCE_ARCHIVE" "${RUNNER_TEMP}/admitted-deployment-receipts/exact-source-archive.tar"
       - name: Upload exact admitted deployment receipts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -583,6 +598,8 @@ jobs:
         env:
           ARTIFACT_RECEIPT: ${{ runner.temp }}/admitted-deployment-receipts/artifact-verification.json
           DEPLOYMENT_RECEIPT: ${{ runner.temp }}/admitted-deployment-receipts/trusted-deployment-admission.json
+          SOURCE_ARCHIVE: ${{ runner.temp }}/admitted-deployment-receipts/exact-source-archive.tar
+          SOURCE_ARCHIVE_SHA256: ${{ needs.release-admission.outputs.source_archive_sha256 }}
           ARTIFACT_RECEIPT_SHA256: ${{ needs.release-admission.outputs.artifact_receipt_sha256 }}
           DEPLOYMENT_RECEIPT_SHA256: ${{ needs.release-admission.outputs.deployment_receipt_sha256 }}
           RELEASE_SHA: ${{ needs.release-admission.outputs.release_sha }}
@@ -592,6 +609,9 @@ jobs:
           TRUSTED_PROVIDER_RUN_ID: ${{ needs.release-admission.outputs.trusted_provider_run_id }}
           TRUSTED_PROVIDER_RUN_ATTEMPT: ${{ needs.release-admission.outputs.trusted_provider_run_attempt }}
         run: |
+          test "$(sha256sum "$SOURCE_ARCHIVE" | awk '{print $1}')" = "$SOURCE_ARCHIVE_SHA256"
+          test "$(jq -r '.sourceArchiveSha256' "$ARTIFACT_RECEIPT")" = "$SOURCE_ARCHIVE_SHA256"
+          test "$(jq -r '.sourceArchiveSha256' "$DEPLOYMENT_RECEIPT")" = "$SOURCE_ARCHIVE_SHA256"
           test "$(sha256sum "$TRUSTED_PROVIDER_METADATA" | awk '{print $1}')" = "$TRUSTED_PROVIDER_METADATA_SHA256"
           node ./scripts/trusted-provider-run-policy.mjs \
             --policy governance/deployment-admission.json \
@@ -609,6 +629,7 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --commit "$RELEASE_SHA" \
             --tree "$RELEASE_TREE" \
+            --sourceArchiveSha256 "$SOURCE_ARCHIVE_SHA256" \
             --providerRunId "$TRUSTED_PROVIDER_RUN_ID" \
             --providerRunAttempt "$TRUSTED_PROVIDER_RUN_ATTEMPT"
       - name: Install SSH key
@@ -643,6 +664,7 @@ jobs:
           DEPLOY_REPO: ${{ github.repository }}
           DEPLOY_RELEASE_SHA: ${{ needs.release-admission.outputs.release_sha }}
           DEPLOY_RELEASE_TREE: ${{ needs.release-admission.outputs.release_tree }}
+          DEPLOY_SOURCE_ARCHIVE_PATH: ${{ runner.temp }}/admitted-deployment-receipts/exact-source-archive.tar
           DEPLOY_ARTIFACT_RECEIPT_PATH: ${{ runner.temp }}/admitted-deployment-receipts/artifact-verification.json
           DEPLOY_ARTIFACT_RECEIPT_SHA256: ${{ needs.release-admission.outputs.artifact_receipt_sha256 }}
           DEPLOY_ADMISSION_RECEIPT_PATH: ${{ runner.temp }}/admitted-deployment-receipts/trusted-deployment-admission.json

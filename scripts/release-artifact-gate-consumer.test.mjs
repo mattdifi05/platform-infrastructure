@@ -29,6 +29,13 @@ function fileHashes(directory, prefix) {
     }));
 }
 
+function reportDocuments(directory, prefix) {
+  if (!fs.existsSync(directory)) return [];
+  return fs.readdirSync(directory)
+    .filter((name) => name.startsWith(prefix) && name.endsWith(".json"))
+    .map((name) => JSON.parse(fs.readFileSync(path.join(directory, name), "utf8")));
+}
+
 try {
   const repository = "owner/repo";
   const commitSha = "b".repeat(40);
@@ -132,6 +139,10 @@ try {
   });
   const manifestArtifact = writeJson("release-subjects.json", artifacts.manifest);
   const sbomArtifact = writeJson("release-sbom.cdx.json", artifacts.sbom);
+  const sourceArchivePath = path.join(temporary, "source-archive.tar");
+  const sourceArchiveBytes = Buffer.from("exact source archive fixture\n");
+  fs.writeFileSync(sourceArchivePath, sourceArchiveBytes, { mode: 0o600 });
+  const sourceArchiveSha256 = crypto.createHash("sha256").update(sourceArchiveBytes).digest("hex");
   assert.equal(manifestArtifact.sha256.length, 64);
   assert.equal(sbomArtifact.sha256, artifacts.manifest.sbom.sha256);
 
@@ -181,12 +192,34 @@ process.stdout.write(JSON.stringify([{ verificationResult: {
     fixtureReleaseTrust.replace(pinnedVerifierDeclaration, `verifierBinary = ${JSON.stringify(fakeGh)}`),
     { mode: 0o600 },
   );
+  const readyPolicy = {
+    version: 1,
+    status: "READY",
+    trustedVerifierChannel: "external-admission-controller/prod",
+    trustedOpsImageRepository: "ghcr.io/owner/platform-infrastructure-ops",
+    trustedProducer: {
+      repository: "owner/trusted-admission",
+      workflowPath: ".github/workflows/produce-admission.yml",
+      workflowSha: "4".repeat(40),
+      sourceRef: "refs/heads/main",
+      event: "workflow_dispatch",
+    },
+    reason: "Disposable hostile fixture: policy readiness must never replace receipts.",
+    requiredReceiptKind: "platform-trusted-deployment-admission/v1",
+    selfAssertedAnnotationsAccepted: false,
+  };
+  fs.writeFileSync(
+    path.join(fixtureRoot, "governance", "deployment-admission.json"),
+    `${JSON.stringify(readyPolicy, null, 2)}\n`,
+    { mode: 0o600 },
+  );
 
   const commonArgs = [
     path.join(fixtureRoot, "scripts", "infra-ops.mjs"),
     "release-artifact-gate",
     "--imageManifest", manifestArtifact.pathname,
     "--sbom", sbomArtifact.pathname,
+    "--sourceArchive", sourceArchivePath,
     "--buildkitSbom", buildkitArtifact.pathname,
     "--registryDescriptor", descriptorPath,
     "--registryResolution", registryArtifact.pathname,
@@ -198,12 +231,17 @@ process.stdout.write(JSON.stringify([{ verificationResult: {
     ...process.env,
     GH_TOKEN: "release-gate-consumer-test-token",
   };
+  const localChecks = path.join(fixtureRoot, "reports", "local-checks");
   const positive = spawnSync(process.execPath, commonArgs, { cwd: fixtureRoot, env: environment, encoding: "utf8" });
   assert.equal(positive.status, 1);
-  assert.match(positive.stderr, /EXTERNAL-PENDING/);
+  assert.match(positive.stderr, /EXTERNAL-PENDING: exact artifact, deployment, and authenticated provider-run inputs are required/);
   assert.doesNotMatch(positive.stderr, /Exact per-subject registry resolution is required/);
+  assert.doesNotMatch(positive.stdout, /Release artifact and trusted deployment admission gate passed/);
+  const defaultGateReports = reportDocuments(localChecks, "release-artifact-gate-");
+  assert.ok(defaultGateReports.length > 0, "failed default gate must emit diagnostic local-check evidence");
+  assert.ok(defaultGateReports.every((report) => report.status === "failed"),
+    "READY policy without deployment/provider receipts must never mint a PASS report");
 
-  const localChecks = path.join(fixtureRoot, "reports", "local-checks");
   const gateReportsBeforeArtifactOnly = fileHashes(localChecks, "release-artifact-gate-");
   const producerReceipt = path.join(temporary, "producer-artifact-receipt.json");
   const artifactOnly = spawnSync(process.execPath, [
@@ -221,6 +259,7 @@ process.stdout.write(JSON.stringify([{ verificationResult: {
   const cryptoOnlyReports = [...fileHashes(localChecks, "release-artifact-crypto-only-").keys()];
   assert.ok(cryptoOnlyReports.length > 0, "artifact-only verification must be phase-scoped in local evidence");
   const artifactReceipt = JSON.parse(fs.readFileSync(producerReceipt, "utf8"));
+  assert.equal(artifactReceipt.sourceArchiveSha256, sourceArchiveSha256);
   assert.match(artifactReceipt.provenance.manifestVerificationFingerprint, /^[a-f0-9]{64}$/);
   assert.equal(artifactReceipt.generatedAt, artifacts.manifest.generatedAt);
 
@@ -244,7 +283,7 @@ process.stdout.write(JSON.stringify([{ verificationResult: {
   assert.match(negative.stderr, /differs from exact descriptor resolution/);
   assert.doesNotMatch(negative.stderr, /EXTERNAL-PENDING/);
 
-  process.stdout.write("release artifact gate consumer tests passed 7/7; trusted channel remains EXTERNAL-PENDING\n");
+  process.stdout.write("release artifact gate consumer tests passed 8/8; trusted channel remains EXTERNAL-PENDING without authenticated receipts\n");
 } finally {
   fs.rmSync(temporary, { recursive: true, force: true });
 }

@@ -15,6 +15,8 @@ SBOM_SHA=$(printf 'e%.0s' $(seq 1 64))
 hash_file() {
   if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'; else shasum -a 256 "$1" | awk '{print $1}'; fi
 }
+printf 'exact authenticated source archive fixture\n' > "$TMP/source-archive.tar"
+SOURCE_ARCHIVE_SHA=$(hash_file "$TMP/source-archive.tar")
 
 cat > "$TMP/ssh" <<'SH'
 #!/usr/bin/env sh
@@ -53,11 +55,11 @@ cat > "$TMP/ready-policy.json" <<'EOF'
 {"version":1,"status":"READY","trustedVerifierChannel":"external-admission-controller/prod","trustedOpsImageRepository":"ghcr.io/owner/platform-infrastructure-ops","requiredReceiptKind":"platform-trusted-deployment-admission/v1","selfAssertedAnnotationsAccepted":false,"trustedProducer":{"repository":"owner/trusted-admission","workflowPath":".github/workflows/produce-admission.yml","workflowSha":"4444444444444444444444444444444444444444","sourceRef":"refs/heads/main","event":"workflow_dispatch"}}
 EOF
 cat > "$TMP/artifact.json" <<EOF
-{"version":1,"kind":"platform-release-artifact-verification/v1","status":"EXTERNAL-PENDING","artifactVerification":"passed","deploymentAdmission":"EXTERNAL-PENDING","usageScope":"artifact-verification-only","repository":"owner/repo","commitSha":"$RELEASE_SHA","generatedAt":"2026-07-21T00:00:00.000Z","manifestSha256":"$MANIFEST_SHA","sbomSha256":"$SBOM_SHA","subjects":[{"key":"APP_IMAGE","image":"$IMAGE"}],"provenance":{"verificationFingerprint":"$(printf '1%.0s' $(seq 1 64))","manifestVerificationFingerprint":"$(printf '2%.0s' $(seq 1 64))"}}
+{"version":1,"kind":"platform-release-artifact-verification/v1","status":"EXTERNAL-PENDING","artifactVerification":"passed","deploymentAdmission":"EXTERNAL-PENDING","usageScope":"artifact-verification-only","repository":"owner/repo","commitSha":"$RELEASE_SHA","sourceArchiveSha256":"$SOURCE_ARCHIVE_SHA","generatedAt":"2026-07-21T00:00:00.000Z","manifestSha256":"$MANIFEST_SHA","sbomSha256":"$SBOM_SHA","subjects":[{"key":"APP_IMAGE","image":"$IMAGE"}],"provenance":{"verificationFingerprint":"$(printf '1%.0s' $(seq 1 64))","manifestVerificationFingerprint":"$(printf '2%.0s' $(seq 1 64))"}}
 EOF
 ARTIFACT_SHA=$(hash_file "$TMP/artifact.json")
 cat > "$TMP/admission.json" <<EOF
-{"version":1,"kind":"platform-trusted-deployment-admission/v1","status":"READY","artifactVerification":"passed","deploymentAdmission":"READY","repository":"owner/repo","commitSha":"$RELEASE_SHA","treeSha":"$RELEASE_TREE","artifactVerificationReceiptSha256":"$ARTIFACT_SHA","manifestSha256":"$MANIFEST_SHA","sbomSha256":"$SBOM_SHA","generatedAt":"2026-07-21T00:00:00.000Z","decisionId":"decision:12345678","verifier":{"channel":"external-admission-controller/prod","fingerprint":"$(printf '3%.0s' $(seq 1 64))","selfAsserted":false,"verifiedAt":"2026-07-21T00:00:00.000Z"},"producer":{"repository":"owner/trusted-admission","workflowPath":".github/workflows/produce-admission.yml","workflowSha":"$(printf '4%.0s' $(seq 1 40))","sourceRef":"refs/heads/main","event":"workflow_dispatch","runId":"123456","runAttempt":1},"opsRunner":{"image":"ghcr.io/owner/platform-infrastructure-ops@sha256:$(printf '5%.0s' $(seq 1 64))","imageId":"sha256:$(printf '6%.0s' $(seq 1 64))","verificationFingerprint":"$(printf '7%.0s' $(seq 1 64))","providerAttested":true}}
+{"version":1,"kind":"platform-trusted-deployment-admission/v1","status":"READY","artifactVerification":"passed","deploymentAdmission":"READY","repository":"owner/repo","commitSha":"$RELEASE_SHA","treeSha":"$RELEASE_TREE","sourceArchiveSha256":"$SOURCE_ARCHIVE_SHA","artifactVerificationReceiptSha256":"$ARTIFACT_SHA","manifestSha256":"$MANIFEST_SHA","sbomSha256":"$SBOM_SHA","generatedAt":"2026-07-21T00:00:00.000Z","decisionId":"decision:12345678","verifier":{"channel":"external-admission-controller/prod","fingerprint":"$(printf '3%.0s' $(seq 1 64))","selfAsserted":false,"verifiedAt":"2026-07-21T00:00:00.000Z"},"producer":{"repository":"owner/trusted-admission","workflowPath":".github/workflows/produce-admission.yml","workflowSha":"$(printf '4%.0s' $(seq 1 40))","sourceRef":"refs/heads/main","event":"workflow_dispatch","runId":"123456","runAttempt":1},"opsRunner":{"image":"ghcr.io/owner/platform-infrastructure-ops@sha256:$(printf '5%.0s' $(seq 1 64))","imageId":"sha256:$(printf '6%.0s' $(seq 1 64))","verificationFingerprint":"$(printf '7%.0s' $(seq 1 64))","providerAttested":true}}
 EOF
 ADMISSION_SHA=$(hash_file "$TMP/admission.json")
 cat > "$TMP/provider.json" <<'EOF'
@@ -101,6 +103,7 @@ base_env() {
     DEPLOY_REPO='owner/repo' \
     DEPLOY_RELEASE_SHA="$RELEASE_SHA" \
     DEPLOY_RELEASE_TREE="$RELEASE_TREE" \
+    DEPLOY_SOURCE_ARCHIVE_PATH="$TMP/source-archive.tar" \
     DEPLOY_ARTIFACT_RECEIPT_PATH="$TMP/artifact.json" \
     DEPLOY_ARTIFACT_RECEIPT_SHA256="$ARTIFACT_SHA" \
     DEPLOY_ADMISSION_RECEIPT_PATH="$TMP/admission.json" \
@@ -178,6 +181,8 @@ grep -Fx 'IdentitiesOnly=yes' "$FAKE_SSH_ARGS" >/dev/null
 if grep -F 'accept-new' "$FAKE_SSH_ARGS" >/dev/null; then echo "FAIL: accept-new remained enabled" >&2; exit 1; fi
 if grep -F '/opt/platform-infrastructure' "$FAKE_SSH_STDIN" >/dev/null; then echo "FAIL: raw remote directory leaked into generated shell" >&2; exit 1; fi
 grep -E "^PLATFORM_RELEASE_SHA_B64='[A-Za-z0-9+/=]+'$" "$FAKE_SSH_STDIN" >/dev/null
+grep -E "^PLATFORM_SOURCE_ARCHIVE_SHA256_B64='[A-Za-z0-9+/=]+'$" "$FAKE_SSH_STDIN" >/dev/null
+grep -F "base64 -d <<'__PLATFORM_EXACT_SOURCE_ARCHIVE__'" "$FAKE_SSH_STDIN" >/dev/null
 grep -E "^PLATFORM_ADMISSION_RECEIPT_B64='[A-Za-z0-9+/=]+'$" "$FAKE_SSH_STDIN" >/dev/null
 grep -E "^PLATFORM_PROVIDER_METADATA_B64='[A-Za-z0-9+/=]+'$" "$FAKE_SSH_STDIN" >/dev/null
 grep -E "^PLATFORM_PROVIDER_RUN_ID_B64='[A-Za-z0-9+/=]+'$" "$FAKE_SSH_STDIN" >/dev/null

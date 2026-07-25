@@ -7,8 +7,8 @@ function invalid(message) {
   throw new Error(message);
 }
 
-export function snapshotJsonArtifact(sourcePath, {
-  label = "JSON artifact",
+export function snapshotFileArtifact(sourcePath, {
+  label = "artifact",
   maxBytes = 128 * 1024 * 1024,
   afterCapture = null,
 } = {}) {
@@ -51,24 +51,17 @@ export function snapshotJsonArtifact(sourcePath, {
     afterCapture();
   }
 
-  let document;
-  try {
-    document = JSON.parse(bytes.toString("utf8").replace(/^\uFEFF/, ""));
-  } catch (error) {
-    invalid(`Invalid JSON in ${label}: ${String(error?.message ?? error)}`);
-  }
-
   const sha256 = crypto.createHash("sha256").update(bytes).digest("hex");
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "platform-release-artifact-"));
   fs.chmodSync(directory, 0o700);
-  const snapshotPath = path.join(directory, path.basename(resolved) || "artifact.json");
+  const snapshotPath = path.join(directory, path.basename(resolved) || "artifact");
   fs.writeFileSync(snapshotPath, bytes, { flag: "wx", mode: 0o600 });
 
   let cleaned = false;
   return {
     sourcePath: resolved,
     snapshotPath,
-    document,
+    bytes,
     sha256,
     sizeBytes: bytes.length,
     cleanup() {
@@ -78,4 +71,20 @@ export function snapshotJsonArtifact(sourcePath, {
       }
     },
   };
+}
+
+export function snapshotJsonArtifact(sourcePath, options = {}) {
+  const artifact = snapshotFileArtifact(sourcePath, {
+    label: options.label ?? "JSON artifact",
+    maxBytes: options.maxBytes,
+    afterCapture: options.afterCapture,
+  });
+  try {
+    artifact.document = JSON.parse(artifact.bytes.toString("utf8").replace(/^\uFEFF/, ""));
+    delete artifact.bytes;
+    return artifact;
+  } catch (error) {
+    artifact.cleanup();
+    invalid(`Invalid JSON in ${options.label ?? "JSON artifact"}: ${String(error?.message ?? error)}`);
+  }
 }

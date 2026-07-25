@@ -70,7 +70,7 @@ import { validateTrustedDeploymentReceipt } from "./deployment-receipt-policy.mj
 import { validateTrustedProviderRun } from "./trusted-provider-run-policy.mjs";
 import { releaseEvidenceAdmissionReady } from "./release-go-no-go-policy.mjs";
 import { deploymentPrerequisiteMismatches } from "./privileged-workflow-policy.mjs";
-import { snapshotJsonArtifact } from "./stable-json-artifact.mjs";
+import { snapshotFileArtifact, snapshotJsonArtifact } from "./stable-json-artifact.mjs";
 import { assertExactBuildkitComponentSet, buildkitSbomSha256, buildkitSpdxInventory } from "./buildkit-sbom-policy.mjs";
 import { validateRegistryResolutionReceipt } from "./release-registry-resolution.mjs";
 import {
@@ -85,7 +85,8 @@ import {
 process.umask(0o077);
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
-const infraRoot = path.resolve(scriptDir, "..");
+const codeRoot = path.resolve(scriptDir, "..");
+const infraRoot = path.resolve(process.env.PLATFORM_INFRA_ROOT || codeRoot);
 const command = process.argv[2] ?? "help";
 const argv = parseArgs(process.argv.slice(3));
 const configuredSourceRoot = process.env.PROJECT_SOURCE_ROOT ?? process.env.PROJECT_SOURCE_DIR ?? argv.sourceRoot;
@@ -6293,6 +6294,7 @@ async function releaseArtifactGateBody(options = {}) {
   let buildkitSbomArtifact = null;
   let registryResolutionArtifact = null;
   let registryDescriptorArtifact = null;
+  let sourceArchiveArtifact = null;
   try {
     const releaseManifest = manifestArtifact.document;
     const imageEntries = releaseImageEntriesFromManifestDocument(releaseManifest);
@@ -6311,12 +6313,14 @@ async function releaseArtifactGateBody(options = {}) {
     const subjects = approvedReleaseSubjects(imageEntries, releaseManifest.repository);
     if (subjects.length !== 1) fail("One release gate invocation must bind exactly one image evidence set.");
 
+    const sourceArchiveFile = options.sourceArchive ?? argv.sourceArchive;
     const buildkitSbomFile = options.buildkitSbom ?? argv.buildkitSbom;
     const registryResolutionFile = options.registryResolution ?? argv.registryResolution;
     const registryDescriptorFile = options.registryDescriptor ?? argv.registryDescriptor;
-    if (!buildkitSbomFile || !registryResolutionFile || !registryDescriptorFile) {
-      fail("Raw BuildKit SBOM, registry resolution receipt and raw registry descriptor are mandatory release evidence.");
+    if (!sourceArchiveFile || !buildkitSbomFile || !registryResolutionFile || !registryDescriptorFile) {
+      fail("Exact source archive, raw BuildKit SBOM, registry resolution receipt and raw registry descriptor are mandatory release evidence.");
     }
+    sourceArchiveArtifact = snapshotFileArtifact(sourceArchiveFile, { label: "exact release source archive", maxBytes: 256 * 1024 * 1024 });
     buildkitSbomArtifact = snapshotJsonArtifact(buildkitSbomFile, { label: "raw BuildKit SBOM", maxBytes: 128 * 1024 * 1024 });
     registryResolutionArtifact = snapshotJsonArtifact(registryResolutionFile, { label: "registry resolution receipt", maxBytes: 16 * 1024 * 1024 });
     registryDescriptorArtifact = snapshotJsonArtifact(registryDescriptorFile, { label: "raw registry descriptor", maxBytes: 16 * 1024 * 1024 });
@@ -6386,6 +6390,7 @@ async function releaseArtifactGateBody(options = {}) {
       subjects,
       repository: verificationOptions.repository,
       commitSha: releaseSha,
+      sourceArchiveSha256: sourceArchiveArtifact.sha256,
       sbomSha256,
       buildkitSbomSha256: rawBuildkitSha256,
       registryResolutionSha256: registryResolutionArtifact.sha256,
@@ -6407,14 +6412,26 @@ async function releaseArtifactGateBody(options = {}) {
       log(`Artifact-only release verification passed; trusted deployment admission remains EXTERNAL-PENDING. Receipt: ${receiptPath}`);
       return { sbomFile, receiptPath, provenanceValidation: null, githubAttestationValidation };
     }
-    const deploymentAdmission = readJsonFile(path.join(infraRoot, "governance", "deployment-admission.json"), "deployment admission policy");
-    assertDeploymentAdmissionConfigured(deploymentAdmission);
-    log(`Release artifact admission gate passed with SBOM ${sbomFile} and receipt ${receiptPath}.`);
-    return { sbomFile, receiptPath, provenanceValidation: null, githubAttestationValidation };
+    const deploymentAdmissionEvidence = trustedDeploymentAdmissionEvidence({
+      ...options,
+      artifactReceiptPath: receiptPath,
+      artifactReceiptSha256: sha256File(receiptPath),
+      repository: verificationOptions.repository,
+      commitSha: releaseSha,
+    });
+    log(`Release artifact and trusted deployment admission gate passed with SBOM ${sbomFile}, receipt ${receiptPath}, and authenticated provider run ${deploymentAdmissionEvidence.providerRunId}/${deploymentAdmissionEvidence.providerRunAttempt}.`);
+    return {
+      sbomFile,
+      receiptPath,
+      provenanceValidation: null,
+      githubAttestationValidation,
+      deploymentAdmissionEvidence,
+    };
   } finally {
     registryDescriptorArtifact?.cleanup();
     registryResolutionArtifact?.cleanup();
     buildkitSbomArtifact?.cleanup();
+    sourceArchiveArtifact?.cleanup();
     sbomArtifact?.cleanup();
     manifestArtifact.cleanup();
   }
@@ -6458,7 +6475,23 @@ function trustedDeploymentAdmissionEvidence(options = {}) {
     const repository = options.repository ?? argv.repo ?? process.env.DEPLOY_REPO ?? process.env.GITHUB_REPOSITORY;
     const checkout = gitEvidence();
     const commitSha = options.commitSha ?? process.env.DEPLOY_RELEASE_SHA ?? checkout.commit;
-    const observedTreeSha = run("git", ["rev-parse", `${commitSha}^{tree}`], { capture: true }).stdout.trim();
+    const snapshotExpectedSha256 = String(process.env.PLATFORM_INFRA_SNAPSHOT_SHA256 ?? "");
+    const snapshotVerifiedSha256 = String(process.env.PLATFORM_INFRA_SNAPSHOT_VERIFIED_SHA256 ?? "");
+    const snapshotTreeSha = String(process.env.PLATFORM_GIT_TREE ?? "");
+    const hasSnapshotIdentity = Boolean(snapshotExpectedSha256 || snapshotVerifiedSha256 || snapshotTreeSha);
+    let observedTreeSha;
+    if (hasSnapshotIdentity) {
+      if (
+        !/^[a-f0-9]{64}$/.test(snapshotExpectedSha256)
+        || snapshotVerifiedSha256 !== snapshotExpectedSha256
+        || !/^[a-f0-9]{40}$/.test(snapshotTreeSha)
+      ) {
+        fail("Trusted deployment admission immutable snapshot identity is incomplete or mismatched.");
+      }
+      observedTreeSha = snapshotTreeSha;
+    } else {
+      observedTreeSha = run("git", ["rev-parse", `${commitSha}^{tree}`], { capture: true }).stdout.trim();
+    }
     const treeSha = options.treeSha ?? process.env.DEPLOY_RELEASE_TREE ?? observedTreeSha;
     if (
       checkout.dirty !== false
@@ -6480,6 +6513,7 @@ function trustedDeploymentAdmissionEvidence(options = {}) {
       treeSha,
       artifactReceiptSha256: artifact.sha256,
       artifactReceipt: artifact.document,
+      sourceArchiveSha256: hasSnapshotIdentity ? snapshotExpectedSha256 : artifact.document.sourceArchiveSha256,
       providerRunId,
       providerRunAttempt,
     });
@@ -6489,6 +6523,7 @@ function trustedDeploymentAdmissionEvidence(options = {}) {
       repository,
       commitSha,
       treeSha,
+      sourceArchiveSha256: deployment.document.sourceArchiveSha256,
       artifactReceiptSha256: artifact.sha256,
       deploymentReceiptSha256: deployment.sha256,
       providerMetadataSha256: providerMetadata.sha256,
@@ -6682,10 +6717,10 @@ async function releaseEvidence(options = {}) {
         signerWorkflow: options.signerWorkflow ?? argv.signerWorkflow ?? null,
       });
       githubAttestationValidation = artifactGate.githubAttestationValidation;
-      deploymentAdmissionEvidence = trustedDeploymentAdmissionEvidence({
-        repository: options.repository ?? options.repo ?? argv.repository ?? argv.repo ?? process.env.GITHUB_REPOSITORY ?? null,
-        commitSha: releaseSha,
-      });
+      deploymentAdmissionEvidence = artifactGate.deploymentAdmissionEvidence;
+      if (deploymentAdmissionEvidence?.status !== "READY") {
+        fail("Release artifact gate did not return authenticated deployment-admission evidence.");
+      }
       if (sha256File(artifactGate.receiptPath) !== deploymentAdmissionEvidence.artifactReceiptSha256) {
         fail("Reverified release artifact receipt differs from the authenticated deployment-admission handoff.");
       }
@@ -13294,6 +13329,7 @@ const commands = {
   "supply-chain-lock-check": supplyChainLockCheck,
   "supply-chain-hygiene": supplyChainHygiene,
   "testing-hygiene": testingHygiene,
+  "trusted-deployment-admission-check": trustedDeploymentAdmissionEvidence,
   "validate-local-secrets": validateLocalSecrets,
   "vulnerability-disclosure": vulnerabilityDisclosure,
   "vps-preflight": vpsPreflight,

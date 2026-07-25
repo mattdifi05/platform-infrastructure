@@ -35,10 +35,18 @@ RUN npm ci --prefix /tmp/control-center-dependencies --omit=dev --ignore-scripts
     && mv /tmp/control-center-dependencies/node_modules /node_modules \
     && rm -rf /tmp/control-center-dependencies
 
-WORKDIR /infra
+COPY scripts/ /opt/platform-infrastructure/scripts/
+COPY control-center/backup/ /opt/platform-infrastructure/control-center/backup/
+RUN chmod -R a-w /opt/platform-infrastructure \
+    && chmod 0555 /opt/platform-infrastructure \
+    && find /opt/platform-infrastructure -type d -exec chmod 0555 {} + \
+    && find /opt/platform-infrastructure -type f -exec chmod 0444 {} + \
+    && chmod 0555 /opt/platform-infrastructure/scripts/ops-image-entrypoint.sh
+
+WORKDIR /workspace
 
 ENV GH_CONFIG_DIR=/tmp/gh \
     GH_NO_UPDATE_NOTIFIER=1 \
     GH_PROMPT_DISABLED=1
 
-ENTRYPOINT ["tini", "--", "node", "/infra/scripts/infra-ops.mjs"]
+ENTRYPOINT ["tini", "--", "/opt/platform-infrastructure/scripts/ops-image-entrypoint.sh"]

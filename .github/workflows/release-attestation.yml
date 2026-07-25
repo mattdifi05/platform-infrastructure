@@ -101,6 +101,11 @@ jobs:
           PHP_APACHE_DIGEST: ${{ steps.php-apache.outputs.digest }}
         run: |
           mkdir -p .tmp/release-attestation reports/release
+          git archive \
+            --format=tar \
+            --output="reports/release/source-archive-${GITHUB_RUN_ID}.tar" \
+            "${GITHUB_SHA}"
+          test -s "reports/release/source-archive-${GITHUB_RUN_ID}.tar"
           RELEASE_SUBJECTS_SHA256="$(node ./scripts/release-subject-manifest.mjs \
             --image "PHP_APACHE_IMAGE=${PHP_APACHE_IMAGE}@${PHP_APACHE_DIGEST}" \
             --repo "${GITHUB_REPOSITORY}" \
@@ -139,6 +144,7 @@ jobs:
           node ./scripts/infra-ops.mjs release-artifact-gate \
             --imageManifest "reports/release/release-subjects-${GITHUB_RUN_ID}.json" \
             --sbom "reports/release/github-release-sbom-${GITHUB_RUN_ID}.cdx.json" \
+            --sourceArchive "reports/release/source-archive-${GITHUB_RUN_ID}.tar" \
             --buildkitSbom "reports/release/buildkit-sbom-${GITHUB_RUN_ID}.spdx.json" \
             --registryDescriptor "reports/release/registry-descriptor-${GITHUB_RUN_ID}.json" \
             --registryResolution "reports/release/registry-resolution-${GITHUB_RUN_ID}.json" \
@@ -163,4 +169,5 @@ jobs:
             reports/release/registry-resolution-*.json
             reports/release/release-artifact-admission-*.json
             reports/release/release-subjects-*.json
+            reports/release/source-archive-*.tar
           retention-days: 30
