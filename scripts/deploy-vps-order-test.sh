@@ -15,11 +15,15 @@ APPROVED_IMAGE="ghcr.io/owner/platform-infrastructure-php-apache@sha256:$(printf
 OTHER_IMAGE="ghcr.io/owner/platform-infrastructure-php-apache@sha256:$(printf '9%.0s' $(seq 1 64))"
 APPROVED_IMAGE_ID="sha256:$(printf 'f%.0s' $(seq 1 64))"
 RUNTIME_CONTAINER_ID=$(printf '1%.0s' $(seq 1 64))
+OPS_CONTAINER_ID=$(printf 'a%.0s' $(seq 1 64))
 PREVIOUS_IMAGE="ghcr.io/owner/platform-infrastructure-php-apache@sha256:$(printf '0%.0s' $(seq 1 64))"
 PREVIOUS_IMAGE_ID="sha256:$(printf '2%.0s' $(seq 1 64))"
 PREVIOUS_CONTAINER_ID=$(printf '3%.0s' $(seq 1 64))
+PREVIOUS_OPS_CONTAINER_ID=$(printf 'b%.0s' $(seq 1 64))
 PREVIOUS_COMMIT=$(printf '4%.0s' $(seq 1 40))
 PREVIOUS_TREE=$(printf '5%.0s' $(seq 1 40))
+OPS_IMAGE="ghcr.io/owner/platform-infrastructure-ops@sha256:$(printf '7%.0s' $(seq 1 64))"
+OPS_IMAGE_ID="sha256:$(printf '8%.0s' $(seq 1 64))"
 
 hash_file() {
   if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'; else shasum -a 256 "$1" | awk '{print $1}'; fi
@@ -32,9 +36,11 @@ cat > "$TMP/artifact.json" <<EOF
 EOF
 ARTIFACT_SHA=$(hash_file "$TMP/artifact.json")
 cat > "$TMP/admission.json" <<EOF
-{"version":1,"kind":"platform-trusted-deployment-admission/v1","status":"READY","artifactVerification":"passed","deploymentAdmission":"READY","repository":"owner/repo","commitSha":"$RELEASE_SHA","treeSha":"$RELEASE_TREE","artifactVerificationReceiptSha256":"$ARTIFACT_SHA","manifestSha256":"$MANIFEST_SHA","sbomSha256":"$SBOM_SHA","decisionId":"decision:12345678","verifier":{"channel":"external/prod","fingerprint":"$(printf 'f%.0s' $(seq 1 64))","selfAsserted":false},"producer":{"repository":"owner/trusted-admission","workflowPath":".github/workflows/produce-admission.yml","sourceRef":"refs/heads/main","event":"workflow_dispatch","runId":"123456","runAttempt":1,"workflowSha":"$(printf '6%.0s' $(seq 1 40))"}}
+{"version":1,"kind":"platform-trusted-deployment-admission/v1","status":"READY","artifactVerification":"passed","deploymentAdmission":"READY","repository":"owner/repo","commitSha":"$RELEASE_SHA","treeSha":"$RELEASE_TREE","artifactVerificationReceiptSha256":"$ARTIFACT_SHA","manifestSha256":"$MANIFEST_SHA","sbomSha256":"$SBOM_SHA","decisionId":"decision:12345678","verifier":{"channel":"external/prod","fingerprint":"$(printf 'f%.0s' $(seq 1 64))","selfAsserted":false},"producer":{"repository":"owner/trusted-admission","workflowPath":".github/workflows/produce-admission.yml","sourceRef":"refs/heads/main","event":"workflow_dispatch","runId":"123456","runAttempt":1,"workflowSha":"$(printf '6%.0s' $(seq 1 40))"},"opsRunner":{"image":"$OPS_IMAGE","imageId":"$OPS_IMAGE_ID","verificationFingerprint":"$(printf '9%.0s' $(seq 1 64))","providerAttested":true}}
 EOF
 ADMISSION_SHA=$(hash_file "$TMP/admission.json")
+printf '{"id":123456,"run_attempt":1,"repository":{"full_name":"owner/trusted-admission"}}\n' > "$TMP/provider.json"
+PROVIDER_SHA=$(hash_file "$TMP/provider.json")
 
 cat > "$TMP/bin/git" <<'SH'
 #!/bin/sh
@@ -76,7 +82,8 @@ case "$1" in
   ./scripts/vps-preflight.sh) printf 'preflight\n' >> "$ORDER_LOG" ;;
   ./scripts/release-compose-admission.sh)
     jq -e -s '.[0].subjects == [{"key":"PHP_APACHE_IMAGE","image":$image}] and .[1].services["php-apache"].image == $image' \
-      --arg image "$FAKE_APPROVED_IMAGE" "$2" "$3" >/dev/null
+      --arg image "$FAKE_APPROVED_IMAGE" "$2" "$4" >/dev/null
+    jq -e --arg ops "$FAKE_OPS_IMAGE" '.opsRunner.image == $ops' "$3" >/dev/null
     printf 'subject-bind\n' >> "$ORDER_LOG"
     ;;
   ./scripts/cloudflare-origin-lock-ufw.sh)
@@ -98,6 +105,12 @@ case "$1" in
     esac
     ;;
   ./scripts/vps-postdeploy.sh)
+    [ -s "$DEPLOY_ARTIFACT_RECEIPT_PATH" ]
+    [ -s "$DEPLOY_ADMISSION_RECEIPT_PATH" ]
+    [ -s "$DEPLOY_TRUSTED_PROVIDER_METADATA_PATH" ]
+    [ "$DEPLOY_TRUSTED_PROVIDER_METADATA_SHA256" = "$FAKE_PROVIDER_SHA" ]
+    [ "$DEPLOY_TRUSTED_PROVIDER_RUN_ID" = 123456 ]
+    [ "$DEPLOY_TRUSTED_PROVIDER_RUN_ATTEMPT" = 1 ]
     if [ "${DEPLOY_RUN_RATE_LIMIT_EVIDENCE:-0}" = 1 ]; then
       printf 'preactivation\n' >> "$ORDER_LOG"
     else
@@ -107,6 +120,31 @@ case "$1" in
     ;;
   ./scripts/prepare-vps-runtime.sh) printf 'prepare\n' >> "$ORDER_LOG" ;;
   *) echo "unexpected sh call: $*" >&2; exit 1 ;;
+esac
+SH
+cat > "$TMP/bin/node" <<'SH'
+#!/bin/sh
+set -eu
+script=$1
+shift
+case "$script" in
+  ./scripts/trusted-provider-run-policy.mjs)
+    [ "$1" = --policy ] && [ "$2" = governance/deployment-admission.json ]
+    [ "$3" = --metadata ] && [ -s "$4" ]
+    [ "$5" = --metadataSha256 ] && [ "$6" = "$FAKE_PROVIDER_SHA" ]
+    [ "$7" = --deploymentReceipt ] && [ -s "$8" ]
+    [ "$9" = --runId ] && [ "${10}" = 123456 ]
+    [ "${11}" = --runAttempt ] && [ "${12}" = 1 ]
+    printf 'provider-run-verify\n' >> "$ORDER_LOG"
+    ;;
+  ./scripts/deployment-receipt-policy.mjs)
+    case "$*" in
+      *"--policy governance/deployment-admission.json"*"--artifactReceipt "*"--deploymentReceipt "*"--providerRunId 123456 --providerRunAttempt 1") ;;
+      *) echo "unexpected deployment receipt policy args: $*" >&2; exit 1 ;;
+    esac
+    printf 'deployment-receipt-verify\n' >> "$ORDER_LOG"
+    ;;
+  *) echo "unexpected node call: $*" >&2; exit 1 ;;
 esac
 SH
 cat > "$TMP/bin/bash" <<'SH'
@@ -125,7 +163,7 @@ case "$*" in
       printf 'compose-config\n' >> "$ORDER_LOG"
       image=${FAKE_COMPOSE_IMAGE:-$FAKE_APPROVED_IMAGE}
     fi
-    printf '{"services":{"php-apache":{"image":"%s","ports":[{"published":443,"target":8443,"protocol":"tcp","host_ip":"0.0.0.0"}],"volumes":[{"type":"volume","source":"database","target":"/var/lib/php-data"}]}},"volumes":{"database":{"name":"platform_database","driver":"local"}}}\n' "$image"
+    printf '{"services":{"php-apache":{"image":"%s","ports":[{"published":443,"target":8443,"protocol":"tcp","host_ip":"0.0.0.0"}],"volumes":[{"type":"volume","source":"database","target":"/var/lib/php-data"}]},"backup-scheduler":{"image":"%s"}},"volumes":{"database":{"name":"platform_database","driver":"local"}}}\n' "$image" "$FAKE_OPS_IMAGE"
     ;;
   *) echo "unexpected bash call: $*" >&2; exit 1 ;;
 esac
@@ -174,6 +212,12 @@ case "$*" in
       *) printf '%s\n' "$FAKE_RUNTIME_CONTAINER_ID" ;;
     esac
     ;;
+  "compose "*rollback-compose.json*" ps --no-trunc -q backup-scheduler")
+    printf '%s\n' "$FAKE_PREVIOUS_OPS_CONTAINER_ID"
+    ;;
+  "compose "*" ps --no-trunc -q backup-scheduler")
+    printf '%s\n' "$FAKE_OPS_CONTAINER_ID"
+    ;;
   "inspect --format {{.Image}} $FAKE_RUNTIME_CONTAINER_ID")
     printf 'runtime-verify\n' >> "$ORDER_LOG"
     printf '%s\n' "${FAKE_RUNTIME_IMAGE_ID:-$FAKE_APPROVED_IMAGE_ID}"
@@ -181,6 +225,14 @@ case "$*" in
   "inspect --format {{.Image}} $FAKE_PREVIOUS_CONTAINER_ID")
     printf 'previous-runtime-verify\n' >> "$ORDER_LOG"
     printf '%s\n' "$FAKE_PREVIOUS_IMAGE_ID"
+    ;;
+  "inspect --format {{.Image}} $FAKE_OPS_CONTAINER_ID")
+    printf 'ops-runtime-verify\n' >> "$ORDER_LOG"
+    printf '%s\n' "${FAKE_OPS_RUNTIME_IMAGE_ID:-$FAKE_OPS_IMAGE_ID}"
+    ;;
+  "inspect --format {{.Image}} $FAKE_PREVIOUS_OPS_CONTAINER_ID")
+    printf 'previous-ops-runtime-verify\n' >> "$ORDER_LOG"
+    printf '%s\n' "$FAKE_OPS_IMAGE_ID"
     ;;
   *) echo "unexpected docker call: $*" >&2; exit 1 ;;
 esac
@@ -191,7 +243,7 @@ set -eu
 shift
 exec "$@"
 SH
-chmod 700 "$TMP/bin/git" "$TMP/bin/sudo" "$TMP/bin/sh" "$TMP/bin/bash" "$TMP/bin/docker" "$TMP/bin/timeout"
+chmod 700 "$TMP/bin/git" "$TMP/bin/sudo" "$TMP/bin/sh" "$TMP/bin/bash" "$TMP/bin/docker" "$TMP/bin/node" "$TMP/bin/timeout"
 
 run_remote() {
   rm -f "$TMP/config-count" "$TMP/volume-count" "$TMP/verify-count" "$TMP/compose-up-args" "$TMP/git-state"
@@ -199,7 +251,8 @@ run_remote() {
     PATH="$TMP/bin:$PATH" ORDER_LOG="$LOG" COMPOSE_UP_ARGS="$TMP/compose-up-args" CONFIG_COUNT_FILE="$TMP/config-count" VOLUME_COUNT_FILE="$TMP/volume-count" VERIFY_COUNT_FILE="$TMP/verify-count" GIT_STATE_FILE="$TMP/git-state" \
     FAKE_RELEASE_SHA="$RELEASE_SHA" FAKE_RELEASE_TREE="$RELEASE_TREE" FAKE_CANONICAL_ORIGIN='https://github.com/owner/repo.git' \
     FAKE_APPROVED_IMAGE="$APPROVED_IMAGE" FAKE_APPROVED_IMAGE_ID="$APPROVED_IMAGE_ID" FAKE_RUNTIME_CONTAINER_ID="$RUNTIME_CONTAINER_ID" \
-    FAKE_PREVIOUS_IMAGE="$PREVIOUS_IMAGE" FAKE_PREVIOUS_IMAGE_ID="$PREVIOUS_IMAGE_ID" FAKE_PREVIOUS_CONTAINER_ID="$PREVIOUS_CONTAINER_ID" \
+    FAKE_OPS_IMAGE="$OPS_IMAGE" FAKE_OPS_IMAGE_ID="$OPS_IMAGE_ID" FAKE_OPS_CONTAINER_ID="$OPS_CONTAINER_ID" FAKE_PROVIDER_SHA="$PROVIDER_SHA" \
+    FAKE_PREVIOUS_IMAGE="$PREVIOUS_IMAGE" FAKE_PREVIOUS_IMAGE_ID="$PREVIOUS_IMAGE_ID" FAKE_PREVIOUS_CONTAINER_ID="$PREVIOUS_CONTAINER_ID" FAKE_PREVIOUS_OPS_CONTAINER_ID="$PREVIOUS_OPS_CONTAINER_ID" \
     FAKE_PREVIOUS_COMMIT="$PREVIOUS_COMMIT" FAKE_PREVIOUS_TREE="$PREVIOUS_TREE" \
     PLATFORM_REMOTE_DIR_B64="$(encode "$REMOTE_DIR")" \
     PLATFORM_ENV_FILE_B64="$(encode '.env')" \
@@ -211,8 +264,12 @@ run_remote() {
     PLATFORM_SSH_PORT_B64="$(encode 65002)" \
     PLATFORM_ARTIFACT_RECEIPT_SHA256_B64="$(encode "$ARTIFACT_SHA")" \
     PLATFORM_ADMISSION_RECEIPT_SHA256_B64="$(encode "$ADMISSION_SHA")" \
+    PLATFORM_PROVIDER_METADATA_SHA256_B64="$(encode "$PROVIDER_SHA")" \
+    PLATFORM_PROVIDER_RUN_ID_B64="$(encode 123456)" \
+    PLATFORM_PROVIDER_RUN_ATTEMPT_B64="$(encode 1)" \
     PLATFORM_ARTIFACT_RECEIPT_B64="$(encode_file "$TMP/artifact.json")" \
     PLATFORM_ADMISSION_RECEIPT_B64="$(encode_file "$TMP/admission.json")" \
+    PLATFORM_PROVIDER_METADATA_B64="$(encode_file "$TMP/provider.json")" \
     PLATFORM_RUN_WAF_SMOKE_B64="$(encode 1)" \
     PLATFORM_RUN_INFRA_HEALTH_B64="$(encode 1)" \
     PLATFORM_RUN_PRODUCTION_PREFLIGHT_B64="$(encode 1)" \
@@ -288,6 +345,16 @@ if grep -Fx 'postactivation' "$LOG" >/dev/null; then echo "FAIL: runtime mismatc
 printf 'PASS\truntime-image-mismatch-rolls-back\n'
 
 : > "$LOG"
+if run_remote env FAKE_OPS_RUNTIME_IMAGE_ID="$APPROVED_IMAGE_ID" >"$TMP/ops-runtime-mismatch.out" 2>"$TMP/ops-runtime-mismatch.err"; then
+  echo "FAIL: backup scheduler image ID mismatch was accepted" >&2
+  exit 1
+fi
+grep -Fx 'ops-runtime-verify' "$LOG" >/dev/null
+grep -Fx 'rollback-up' "$LOG" >/dev/null
+if grep -Fx 'postactivation' "$LOG" >/dev/null; then echo "FAIL: backup scheduler mismatch reached postactivation" >&2; exit 1; fi
+printf 'PASS\tbackup-scheduler-image-mismatch-rolls-back\n'
+
+: > "$LOG"
 if run_remote env FAIL_POSTACTIVATION=1 >/dev/null 2>&1; then echo "FAIL: synthetic postactivation failure was accepted" >&2; exit 1; fi
 grep -Fx 'rollback-up' "$LOG" >/dev/null
 grep -Fx 'previous-runtime-verify' "$LOG" >/dev/null
@@ -315,11 +382,14 @@ run_remote env >/dev/null
 cat > "$TMP/expected-order" <<'EOF'
 rollback-config
 volume-before
+previous-ops-runtime-verify
 previous-runtime-verify
 previous-runtime-verify
 rollback-image-bind
 git-fetch
 git-checkout
+provider-run-verify
+deployment-receipt-verify
 preactivation
 preflight
 compose-config
@@ -331,6 +401,7 @@ prepare
 origin-verify-final
 compose-up
 runtime-verify
+ops-runtime-verify
 postactivation
 EOF
 cmp "$TMP/expected-order" "$LOG"
@@ -354,4 +425,4 @@ if grep -Eq 'docker (compose .*down|volume (rm|prune)|system prune)' "$SCRIPT_DI
 fi
 printf 'PASS\trollback-never-deletes-project-or-volumes\n'
 
-printf 'deploy VPS order tests passed 14/14\n'
+printf 'deploy VPS order tests passed 15/15\n'

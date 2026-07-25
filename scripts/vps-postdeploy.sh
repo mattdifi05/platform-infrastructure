@@ -96,7 +96,7 @@ if [ "${DEPLOY_RUN_PRE_GO_LIVE:-0}" = "1" ]; then
     echo "Set DEPLOY_REPO=OWNER/REPO before enabling DEPLOY_RUN_PRE_GO_LIVE=1." >&2
     exit 1
   fi
-  set -- --repo "$DEPLOY_REPO" --includeRuntime
+  set -- --repo "$DEPLOY_REPO" --envFile "$ENV_FILE" --includeRuntime
   if [ "${DEPLOY_PRE_GO_LIVE_PRODUCTION_PREFLIGHT:-1}" = "1" ]; then
     set -- "$@" --includeProductionPreflight
   fi

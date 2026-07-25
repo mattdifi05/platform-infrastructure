@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { canonicalReleaseSubjects, exactGitSha, exactRepository } from "./release-artifact-policy.mjs";
+import { canonicalReleaseSubjects, exactGitSha, exactRepository, parseReleaseImage } from "./release-artifact-policy.mjs";
 import { snapshotJsonArtifact } from "./stable-json-artifact.mjs";
 import { trustedProducerConfiguration } from "./trusted-provider-run-policy.mjs";
 
@@ -72,6 +72,10 @@ export function validateTrustedDeploymentReceipt(receipt, {
     invalid(`EXTERNAL-PENDING: ${policy?.reason ?? "trusted deployment verifier channel is not configured"}`);
   }
   const configuredProducer = trustedProducerConfiguration(policy);
+  const configuredOpsRepository = String(policy.trustedOpsImageRepository ?? "");
+  if (!/^[a-z0-9.-]+(?::[0-9]+)?(?:\/[a-z0-9._-]+)+$/.test(configuredOpsRepository)) {
+    invalid("EXTERNAL-PENDING: trusted ops image repository is not configured");
+  }
   if (receipt?.version !== 1 || receipt?.kind !== policy.requiredReceiptKind) invalid("Trusted deployment receipt kind/version is invalid.");
   if (receipt.status !== "READY" || receipt.artifactVerification !== "passed" || receipt.deploymentAdmission !== "READY") {
     invalid("Trusted deployment receipt is not READY.");
@@ -110,6 +114,16 @@ export function validateTrustedDeploymentReceipt(receipt, {
     || (providerRunAttempt !== null && String(producer.runAttempt) !== String(providerRunAttempt))
   ) {
     invalid("Trusted deployment receipt producer run identity is mismatched.");
+  }
+  const opsImage = parseReleaseImage(receipt.opsRunner?.image, "PLATFORM_OPS_IMAGE");
+  if (
+    opsImage.name !== configuredOpsRepository
+    || receipt.opsRunner?.imageId !== `sha256:${String(receipt.opsRunner?.imageId ?? "").replace(/^sha256:/, "")}`
+    || !/^sha256:[a-f0-9]{64}$/.test(String(receipt.opsRunner?.imageId ?? ""))
+    || !/^[a-f0-9]{64}$/.test(String(receipt.opsRunner?.verificationFingerprint ?? ""))
+    || receipt.opsRunner?.providerAttested !== true
+  ) {
+    invalid("Trusted deployment receipt does not admit one exact provider-attested ops image digest and local image ID.");
   }
   exactSha256(receipt.verifier?.fingerprint, "trusted verifier fingerprint");
   exactTimestamp(receipt.verifier?.verifiedAt, "trusted verifier verifiedAt");

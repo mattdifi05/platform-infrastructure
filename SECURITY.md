@@ -142,5 +142,9 @@ not platform go-live gates.
   forbidden.
 - `sh ./scripts/runtime-isolation-check.sh --env-file=.env.vps.example` after every Compose/runtime change.
 - `sh ./scripts/runtime-isolation-sandbox-test.sh` before limit changes.
-- `sh ./scripts/infra-ops.sh testing-hygiene` and
-  `sh ./scripts/prepare-hosted-workloads.sh` before accepting a workload lock.
+- the non-privileged `testing-hygiene` CI job on the exact checkout; and
+- a workload lock emitted through the configured trusted ops producer. The
+  `infra-ops.sh` and `prepare-hosted-workloads.sh` paths may execute only after
+  revalidating the exact provider receipt chain, clean checkout, digest and
+  local image ID. The repository policy remains `EXTERNAL-PENDING`, so it
+  cannot currently satisfy production admission.

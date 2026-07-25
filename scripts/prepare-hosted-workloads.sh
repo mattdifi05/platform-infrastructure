@@ -5,9 +5,6 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 INFRA_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 ENV_FILE=${COMPOSE_ENV_FILE:-$INFRA_ROOT/.env}
 PROJECT_NAME=${COMPOSE_PROJECT_NAME:-platform_infra_vps}
-OPS_IMAGE=${PLATFORM_OPS_IMAGE:-}
-OPS_IMAGE_RECEIPT=${PLATFORM_OPS_IMAGE_ADMISSION_RECEIPT:-}
-OPS_IMAGE_RECEIPT_SHA256=${PLATFORM_OPS_IMAGE_ADMISSION_RECEIPT_SHA256:-}
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/hosted-workloads.XXXXXX")
 trap 'rm -rf "$TMP"' EXIT
 
@@ -85,11 +82,12 @@ ensure_private_directory() {
   }
 }
 
-[ -n "$OPS_IMAGE" ] && [ -n "$OPS_IMAGE_RECEIPT" ] && [ -n "$OPS_IMAGE_RECEIPT_SHA256" ] || {
-  printf '%s\n' "PLATFORM_OPS_IMAGE, PLATFORM_OPS_IMAGE_ADMISSION_RECEIPT and PLATFORM_OPS_IMAGE_ADMISSION_RECEIPT_SHA256 are required." >&2
-  exit 1
-}
-OPS_IMAGE_ID=$(sh "$SCRIPT_DIR/ops-image-trust.sh" "$OPS_IMAGE" "$OPS_IMAGE_RECEIPT" "$OPS_IMAGE_RECEIPT_SHA256")
+# The provider-authenticated deployment receipt is the only source of the ops
+# image reference and local image ID. No caller-selected image, local build,
+# mutable tag, or implicit pull is accepted.
+admitted=$(sh "$SCRIPT_DIR/ops-image-trust.sh")
+OPS_IMAGE=$(printf '%s' "$admitted" | jq -er '.image')
+OPS_IMAGE_ID=$(printf '%s' "$admitted" | jq -er '.imageId')
 
 core_files=(
   "$INFRA_ROOT/compose.yaml"
@@ -170,4 +168,4 @@ docker run --rm --pull=never --network none --user "$(id -u):$(id -g)" --entrypo
 
 chmod 600 "$OUTPUT"
 sh "$SCRIPT_DIR/hosted-workload-lock.sh" "$OUTPUT" verify
-printf 'Verified hosted workload lock: %s\n' "$OUTPUT"
+printf 'Verified hosted workload lock with admitted ops image %s: %s\n' "$OPS_IMAGE" "$OUTPUT"

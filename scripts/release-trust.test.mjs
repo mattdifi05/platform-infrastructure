@@ -45,8 +45,6 @@ fi
 printf '%s' "$FAKE_GH_OUTPUT"
 `, { mode: 0o700 });
 
-process.env.PLATFORM_RELEASE_TRUST_TEST_MODE = "1";
-process.env.GITHUB_CLI_BIN = fakeGh;
 process.env.FAKE_GH_ARGS_FILE = argsFile;
 process.env.FAKE_GH_OUTPUT = JSON.stringify(verifiedFixture);
 
@@ -86,7 +84,7 @@ try {
   });
 
   test("accepts only output produced after verifier success", () => {
-    const result = verifyGithubAttestation(baseOptions);
+    const result = verifyGithubAttestation(baseOptions, { verifierBinary: fakeGh });
     assert.equal(result.verified, true);
     assert.equal(result.verifiedTimestampCount, 1);
     assert.equal(result.commitSha, sourceDigest);
@@ -145,7 +143,7 @@ try {
 
   test("rejects verifier command failure", () => {
     process.env.FAKE_GH_MODE = "fail";
-    assert.throws(() => verifyGithubAttestation(baseOptions), /cryptographic verification failed/);
+    assert.throws(() => verifyGithubAttestation(baseOptions, { verifierBinary: fakeGh }), /cryptographic verification failed/);
     delete process.env.FAKE_GH_MODE;
   });
 

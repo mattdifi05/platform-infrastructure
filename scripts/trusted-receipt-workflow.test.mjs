@@ -46,6 +46,10 @@ function wiringIssues(source) {
     "DEPLOY_ARTIFACT_RECEIPT_SHA256:",
     "DEPLOY_ADMISSION_RECEIPT_PATH:",
     "DEPLOY_ADMISSION_RECEIPT_SHA256:",
+    "DEPLOY_TRUSTED_PROVIDER_METADATA_PATH:",
+    "DEPLOY_TRUSTED_PROVIDER_METADATA_SHA256:",
+    "DEPLOY_TRUSTED_PROVIDER_RUN_ID:",
+    "DEPLOY_TRUSTED_PROVIDER_RUN_ATTEMPT:",
   ]) requireText(variable, `deploy consumer is missing ${variable}`);
   return issues;
 }
@@ -58,6 +62,7 @@ assert.notDeepEqual(wiringIssues(workflow.replace("--artifactVerificationOnly", 
 assert.notDeepEqual(wiringIssues(workflow.replace('cmp -- "$REVERIFIED_ARTIFACT_RECEIPT" "$ARTIFACT_RECEIPT"', "true")), []);
 assert.notDeepEqual(wiringIssues(workflow.replace("repository: ${{ steps.provider.outputs.repository }}", "repository: owner/caller-selected")), []);
 assert.notDeepEqual(wiringIssues(workflow.replaceAll('--providerRunAttempt "$TRUSTED_PROVIDER_RUN_ATTEMPT"', '--providerRunAttempt "1"')), []);
+assert.notDeepEqual(wiringIssues(workflow.replace("DEPLOY_TRUSTED_PROVIDER_METADATA_PATH:", "REMOVED_PROVIDER_METADATA_PATH:")), []);
 
 const manifestAttestation = producerWorkflow.indexOf("- name: Attest release subject manifest provenance");
 const finalizedReceipt = producerWorkflow.indexOf('--receiptOutput "reports/release/release-artifact-admission-${GITHUB_RUN_ID}.json"');
@@ -69,4 +74,4 @@ assert.doesNotMatch(
   "pre-attestation generation must not mint an artifact receipt",
 );
 
-process.stdout.write("trusted receipt workflow wiring tests passed 17/17; provider channel remains EXTERNAL-PENDING\n");
+process.stdout.write("trusted receipt workflow wiring tests passed 18/18; provider channel remains EXTERNAL-PENDING\n");

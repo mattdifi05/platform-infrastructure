@@ -13,6 +13,7 @@ const image = `ghcr.io/owner/app@sha256:${"f".repeat(64)}`;
 const policy = {
   status: "READY",
   trustedVerifierChannel: "external-admission-controller/prod",
+  trustedOpsImageRepository: "ghcr.io/owner/platform-infrastructure-ops",
   requiredReceiptKind: "platform-trusted-deployment-admission/v1",
   selfAssertedAnnotationsAccepted: false,
   trustedProducer: {
@@ -66,6 +67,12 @@ const deploymentReceipt = {
     runId: "123456",
     runAttempt: 2,
   },
+  opsRunner: {
+    image: `ghcr.io/owner/platform-infrastructure-ops@sha256:${"5".repeat(64)}`,
+    imageId: `sha256:${"6".repeat(64)}`,
+    verificationFingerprint: "7".repeat(64),
+    providerAttested: true,
+  },
 };
 const options = {
   policy, repository, commitSha, treeSha, artifactReceiptSha256, artifactReceipt,
@@ -82,5 +89,8 @@ assert.throws(() => validateTrustedDeploymentReceipt({
   ...deploymentReceipt, producer: { ...deploymentReceipt.producer, workflowPath: ".github/workflows/attacker.yml" },
 }, options), /producer identity/);
 assert.throws(() => validateTrustedDeploymentReceipt(deploymentReceipt, { ...options, providerRunAttempt: "1" }), /run identity/);
+assert.throws(() => validateTrustedDeploymentReceipt({
+  ...deploymentReceipt, opsRunner: { ...deploymentReceipt.opsRunner, image: `ghcr.io/owner/attacker@sha256:${"5".repeat(64)}` },
+}, options), /ops image/);
 
-process.stdout.write("deployment receipt policy tests passed 8/8\n");
+process.stdout.write("deployment receipt policy tests passed 9/9\n");

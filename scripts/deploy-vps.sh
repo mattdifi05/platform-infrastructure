@@ -20,11 +20,11 @@ ARTIFACT_RECEIPT="${DEPLOY_ARTIFACT_RECEIPT_PATH:-}"
 ARTIFACT_RECEIPT_SHA256="${DEPLOY_ARTIFACT_RECEIPT_SHA256:-}"
 ADMISSION_RECEIPT="${DEPLOY_ADMISSION_RECEIPT_PATH:-}"
 ADMISSION_RECEIPT_SHA256="${DEPLOY_ADMISSION_RECEIPT_SHA256:-}"
+PROVIDER_METADATA="${DEPLOY_TRUSTED_PROVIDER_METADATA_PATH:-}"
+PROVIDER_METADATA_SHA256="${DEPLOY_TRUSTED_PROVIDER_METADATA_SHA256:-}"
+PROVIDER_RUN_ID="${DEPLOY_TRUSTED_PROVIDER_RUN_ID:-}"
+PROVIDER_RUN_ATTEMPT="${DEPLOY_TRUSTED_PROVIDER_RUN_ATTEMPT:-}"
 ADMISSION_POLICY="$ROOT_DIR/governance/deployment-admission.json"
-if [ -n "${DEPLOY_ADMISSION_POLICY_PATH:-}" ]; then
-  [ "${PLATFORM_DEPLOY_TEST_MODE:-0}" = 1 ] || { echo "DEPLOY_ADMISSION_POLICY_PATH is test-only." >&2; exit 1; }
-  ADMISSION_POLICY=$DEPLOY_ADMISSION_POLICY_PATH
-fi
 
 case "$REMOTE" in
   *@*) remote_user=${REMOTE%%@*}; remote_host=${REMOTE#*@} ;;
@@ -90,10 +90,24 @@ require_gate_enabled DEPLOY_PRE_GO_LIVE_RESTORE_DRILL "$pre_go_live_restore_dril
 require_gate_enabled DEPLOY_PRE_GO_LIVE_OFFSITE_RESTORE_DRY_RUN "$pre_go_live_offsite_restore_dry_run"
 require_gate_enabled DEPLOY_PRE_GO_LIVE_GITHUB_REMOTE "$pre_go_live_github_remote"
 
-case "$ARTIFACT_RECEIPT_SHA256:$ADMISSION_RECEIPT_SHA256" in *[!a-f0-9:]*|:*) echo "Both expected receipt SHA256 values are required and must be lowercase." >&2; exit 1 ;; esac
-[ "${#ARTIFACT_RECEIPT_SHA256}" -eq 64 ] && [ "${#ADMISSION_RECEIPT_SHA256}" -eq 64 ] || { echo "Both expected receipt SHA256 values must be complete." >&2; exit 1; }
-for receipt in "$ARTIFACT_RECEIPT" "$ADMISSION_RECEIPT"; do
-  [ -f "$receipt" ] && [ -r "$receipt" ] && [ -s "$receipt" ] && [ ! -L "$receipt" ] || { echo "Deployment receipt input is missing, unreadable, empty, or a symlink." >&2; exit 1; }
+case "$ARTIFACT_RECEIPT_SHA256:$ADMISSION_RECEIPT_SHA256:$PROVIDER_METADATA_SHA256" in
+  *[!a-f0-9:]*|::*|:*|*:) echo "Exact artifact, admission, and provider-metadata SHA256 values are required and must be lowercase." >&2; exit 1 ;;
+esac
+[ "${#ARTIFACT_RECEIPT_SHA256}" -eq 64 ] \
+  && [ "${#ADMISSION_RECEIPT_SHA256}" -eq 64 ] \
+  && [ "${#PROVIDER_METADATA_SHA256}" -eq 64 ] || {
+  echo "Artifact, admission, and provider-metadata SHA256 values must be complete." >&2
+  exit 1
+}
+case "$PROVIDER_RUN_ID:$PROVIDER_RUN_ATTEMPT" in
+  *[!0-9:]*|::*|:*|*:) echo "Exact trusted-provider run ID and attempt are required." >&2; exit 1 ;;
+esac
+[ "$PROVIDER_RUN_ID" -ge 1 ] && [ "$PROVIDER_RUN_ATTEMPT" -ge 1 ] || {
+  echo "Trusted-provider run ID and attempt must be positive." >&2
+  exit 1
+}
+for receipt in "$ARTIFACT_RECEIPT" "$ADMISSION_RECEIPT" "$PROVIDER_METADATA"; do
+  [ -f "$receipt" ] && [ -r "$receipt" ] && [ -s "$receipt" ] && [ ! -L "$receipt" ] || { echo "Deployment trust input is missing, unreadable, empty, or a symlink." >&2; exit 1; }
 done
 
 head_sha=$(git -C "$ROOT_DIR" rev-parse HEAD)
@@ -107,18 +121,30 @@ hash_file() {
 
 stable_artifact_receipt="$request_dir/artifact-verification.json"
 stable_admission_receipt="$request_dir/trusted-deployment-admission.json"
+stable_provider_metadata="$request_dir/trusted-provider-run.json"
 cp "$ARTIFACT_RECEIPT" "$stable_artifact_receipt"
 cp "$ADMISSION_RECEIPT" "$stable_admission_receipt"
-chmod 600 "$stable_artifact_receipt" "$stable_admission_receipt"
+cp "$PROVIDER_METADATA" "$stable_provider_metadata"
+chmod 600 "$stable_artifact_receipt" "$stable_admission_receipt" "$stable_provider_metadata"
 [ "$(hash_file "$stable_artifact_receipt")" = "$ARTIFACT_RECEIPT_SHA256" ] || { echo "Artifact verification receipt SHA256 mismatch." >&2; exit 1; }
 [ "$(hash_file "$stable_admission_receipt")" = "$ADMISSION_RECEIPT_SHA256" ] || { echo "Trusted deployment receipt SHA256 mismatch." >&2; exit 1; }
+[ "$(hash_file "$stable_provider_metadata")" = "$PROVIDER_METADATA_SHA256" ] || { echo "Trusted provider metadata SHA256 mismatch." >&2; exit 1; }
+node "$SCRIPT_DIR/trusted-provider-run-policy.mjs" \
+  --policy "$ADMISSION_POLICY" \
+  --metadata "$stable_provider_metadata" \
+  --metadataSha256 "$PROVIDER_METADATA_SHA256" \
+  --deploymentReceipt "$stable_admission_receipt" \
+  --runId "$PROVIDER_RUN_ID" \
+  --runAttempt "$PROVIDER_RUN_ATTEMPT" >/dev/null
 node "$SCRIPT_DIR/deployment-receipt-policy.mjs" \
   --policy "$ADMISSION_POLICY" \
   --artifactReceipt "$stable_artifact_receipt" \
   --artifactReceiptSha256 "$ARTIFACT_RECEIPT_SHA256" \
   --deploymentReceipt "$stable_admission_receipt" \
   --deploymentReceiptSha256 "$ADMISSION_RECEIPT_SHA256" \
-  --repo "$DEPLOY_REPO" --commit "$RELEASE_SHA" --tree "$RELEASE_TREE" >/dev/null
+  --repo "$DEPLOY_REPO" --commit "$RELEASE_SHA" --tree "$RELEASE_TREE" \
+  --providerRunId "$PROVIDER_RUN_ID" \
+  --providerRunAttempt "$PROVIDER_RUN_ATTEMPT" >/dev/null
 
 encode() { printf '%s' "$1" | base64 | tr -d '\r\n'; }
 encode_file() { base64 < "$1" | tr -d '\r\n'; }
@@ -151,8 +177,12 @@ request_file="$request_dir/request.sh"
   printf "PLATFORM_SSH_PORT_B64='%s'\n" "$(encode "$SSH_PORT")"
   printf "PLATFORM_ARTIFACT_RECEIPT_SHA256_B64='%s'\n" "$(encode "$ARTIFACT_RECEIPT_SHA256")"
   printf "PLATFORM_ADMISSION_RECEIPT_SHA256_B64='%s'\n" "$(encode "$ADMISSION_RECEIPT_SHA256")"
+  printf "PLATFORM_PROVIDER_METADATA_SHA256_B64='%s'\n" "$(encode "$PROVIDER_METADATA_SHA256")"
+  printf "PLATFORM_PROVIDER_RUN_ID_B64='%s'\n" "$(encode "$PROVIDER_RUN_ID")"
+  printf "PLATFORM_PROVIDER_RUN_ATTEMPT_B64='%s'\n" "$(encode "$PROVIDER_RUN_ATTEMPT")"
   printf "PLATFORM_ARTIFACT_RECEIPT_B64='%s'\n" "$(encode_file "$stable_artifact_receipt")"
   printf "PLATFORM_ADMISSION_RECEIPT_B64='%s'\n" "$(encode_file "$stable_admission_receipt")"
+  printf "PLATFORM_PROVIDER_METADATA_B64='%s'\n" "$(encode_file "$stable_provider_metadata")"
   printf "PLATFORM_RUN_WAF_SMOKE_B64='%s'\n" "$(encode "$run_waf_smoke")"
   printf "PLATFORM_RUN_INFRA_HEALTH_B64='%s'\n" "$(encode "$run_infra_health")"
   printf "PLATFORM_RUN_PRODUCTION_PREFLIGHT_B64='%s'\n" "$(encode "$run_production_preflight")"

@@ -2,6 +2,7 @@
   "version": 1,
   "status": "EXTERNAL-PENDING",
   "trustedVerifierChannel": null,
+  "trustedOpsImageRepository": null,
   "trustedProducer": {
     "repository": null,
     "workflowPath": null,

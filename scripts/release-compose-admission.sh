@@ -2,8 +2,9 @@
 set -eu
 
 artifact_receipt=${1:-}
-candidate_compose=${2:-}
-previous_compose=${3:-}
+deployment_receipt=${2:-}
+candidate_compose=${3:-}
+previous_compose=${4:-}
 
 require_private_input() {
   label=$1
@@ -15,21 +16,28 @@ require_private_input() {
 }
 
 require_private_input "Artifact verification receipt" "$artifact_receipt"
+require_private_input "Trusted deployment receipt" "$deployment_receipt"
 require_private_input "Candidate Compose model" "$candidate_compose"
 
 # The release workflow currently authenticates exactly one repository-built
 # subject. Keep this mapping explicit: accepting arbitrary *_IMAGE keys would
 # reintroduce an attacker-controlled subject-to-service projection.
 jq -e -s '
-  .[0] as $receipt | .[1] as $compose |
+  .[0] as $receipt | .[1] as $deployment | .[2] as $compose |
   ($receipt.subjects | type == "array" and length == 1) and
   ($receipt.subjects[0].key == "PHP_APACHE_IMAGE") and
   ($receipt.subjects[0].image | type == "string" and test("^[a-z0-9.-]+(?::[0-9]+)?(?:/[a-z0-9._-]+)+@sha256:[a-f0-9]{64}$")) and
+  ($deployment.opsRunner.image | type == "string" and test("^[a-z0-9.-]+(?::[0-9]+)?(?:/[a-z0-9._-]+)+@sha256:[a-f0-9]{64}$")) and
+  ($deployment.opsRunner.imageId | type == "string" and test("^sha256:[a-f0-9]{64}$")) and
+  ($deployment.opsRunner.providerAttested == true) and
   ($compose.services | type == "object") and
   ($compose.services["php-apache"] | type == "object") and
-  ($compose.services["php-apache"].image == $receipt.subjects[0].image)
-' "$artifact_receipt" "$candidate_compose" >/dev/null || {
-  echo "Release subjects do not exactly bind PHP_APACHE_IMAGE to the rendered php-apache service digest." >&2
+  ($compose.services["php-apache"].image == $receipt.subjects[0].image) and
+  ($compose.services["backup-scheduler"] | type == "object") and
+  ($compose.services["backup-scheduler"].image == $deployment.opsRunner.image) and
+  ($compose.services["backup-scheduler"] | has("build") | not)
+' "$artifact_receipt" "$deployment_receipt" "$candidate_compose" >/dev/null || {
+  echo "Release admission does not exactly bind php-apache and backup-scheduler to their authenticated image digests." >&2
   exit 1
 }
 

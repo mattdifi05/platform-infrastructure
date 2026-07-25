@@ -23,12 +23,13 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
+          persist-credentials: false
 
       - name: Verify completed enterprise infra run
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
-          sh ./scripts/infra-ops.sh github-actions-run-evidence \
+          node ./scripts/infra-ops.mjs github-actions-run-evidence \
             --repo "${{ github.repository }}" \
             --envFile .env.vps.example \
             --workflow enterprise-infra.yml \

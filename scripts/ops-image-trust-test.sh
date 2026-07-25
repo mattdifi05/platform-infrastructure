@@ -2,77 +2,223 @@
 set -eu
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/ops-image-trust.XXXXXX")
+TMP=$(CDPATH= cd -- "$TMP" && pwd -P)
 trap 'rm -rf "$TMP"' EXIT HUP INT TERM
-IMAGE="ghcr.io/owner/platform-ops@sha256:$(printf 'a%.0s' $(seq 1 64))"
-IMAGE_ID="sha256:$(printf 'b%.0s' $(seq 1 64))"
-RECEIPT="$TMP/receipt.json"
+FIXTURE_ROOT="$TMP/fixture-root"
+FIXTURE_BIN="$TMP/bin"
+mkdir -p "$FIXTURE_ROOT" "$FIXTURE_BIN"
+cp -R "$ROOT/scripts" "$ROOT/governance" "$ROOT/vendor" "$FIXTURE_ROOT/"
 
-cat > "$TMP/docker" <<'SH'
+IMAGE="ghcr.io/owner/platform-infrastructure-ops@sha256:$(printf '5%.0s' $(seq 1 64))"
+IMAGE_ID="sha256:$(printf '6%.0s' $(seq 1 64))"
+RELEASE_IMAGE="ghcr.io/owner/platform-infrastructure-php-apache@sha256:$(printf 'f%.0s' $(seq 1 64))"
+RELEASE_SHA=$(printf 'a%.0s' $(seq 1 40))
+RELEASE_TREE=$(printf 'b%.0s' $(seq 1 40))
+MANIFEST_SHA=$(printf 'd%.0s' $(seq 1 64))
+SBOM_SHA=$(printf 'e%.0s' $(seq 1 64))
+PROVIDER_RUN_ID=123456
+PROVIDER_RUN_ATTEMPT=2
+
+hash_file() {
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'; else shasum -a 256 "$1" | awk '{print $1}'; fi
+}
+
+cat > "$FIXTURE_ROOT/governance/deployment-admission.json" <<'EOF'
+{"version":1,"status":"READY","trustedVerifierChannel":"external-admission-controller/prod","trustedOpsImageRepository":"ghcr.io/owner/platform-infrastructure-ops","requiredReceiptKind":"platform-trusted-deployment-admission/v1","selfAssertedAnnotationsAccepted":false,"trustedProducer":{"repository":"owner/trusted-admission","workflowPath":".github/workflows/produce-admission.yml","workflowSha":"4444444444444444444444444444444444444444","sourceRef":"refs/heads/main","event":"workflow_dispatch"}}
+EOF
+cat > "$TMP/artifact.json" <<EOF
+{"version":1,"kind":"platform-release-artifact-verification/v1","status":"EXTERNAL-PENDING","artifactVerification":"passed","deploymentAdmission":"EXTERNAL-PENDING","usageScope":"artifact-verification-only","repository":"owner/repo","commitSha":"$RELEASE_SHA","generatedAt":"2026-07-21T00:00:00.000Z","manifestSha256":"$MANIFEST_SHA","sbomSha256":"$SBOM_SHA","subjects":[{"key":"PHP_APACHE_IMAGE","image":"$RELEASE_IMAGE"}],"provenance":{"verificationFingerprint":"$(printf '1%.0s' $(seq 1 64))","manifestVerificationFingerprint":"$(printf '2%.0s' $(seq 1 64))"}}
+EOF
+ARTIFACT_SHA=$(hash_file "$TMP/artifact.json")
+cat > "$TMP/admission.json" <<EOF
+{"version":1,"kind":"platform-trusted-deployment-admission/v1","status":"READY","artifactVerification":"passed","deploymentAdmission":"READY","repository":"owner/repo","commitSha":"$RELEASE_SHA","treeSha":"$RELEASE_TREE","artifactVerificationReceiptSha256":"$ARTIFACT_SHA","manifestSha256":"$MANIFEST_SHA","sbomSha256":"$SBOM_SHA","generatedAt":"2026-07-21T00:00:00.000Z","decisionId":"decision:12345678","verifier":{"channel":"external-admission-controller/prod","fingerprint":"$(printf '3%.0s' $(seq 1 64))","selfAsserted":false,"verifiedAt":"2026-07-21T00:00:00.000Z"},"producer":{"repository":"owner/trusted-admission","workflowPath":".github/workflows/produce-admission.yml","workflowSha":"$(printf '4%.0s' $(seq 1 40))","sourceRef":"refs/heads/main","event":"workflow_dispatch","runId":"$PROVIDER_RUN_ID","runAttempt":$PROVIDER_RUN_ATTEMPT},"opsRunner":{"image":"$IMAGE","imageId":"$IMAGE_ID","verificationFingerprint":"$(printf '7%.0s' $(seq 1 64))","providerAttested":true}}
+EOF
+ADMISSION_SHA=$(hash_file "$TMP/admission.json")
+cat > "$TMP/provider.json" <<EOF
+{"id":$PROVIDER_RUN_ID,"run_attempt":$PROVIDER_RUN_ATTEMPT,"repository":{"full_name":"owner/trusted-admission"},"head_repository":{"full_name":"owner/trusted-admission"},"path":".github/workflows/produce-admission.yml","head_branch":"main","head_sha":"$(printf '4%.0s' $(seq 1 40))","event":"workflow_dispatch","status":"completed","conclusion":"success"}
+EOF
+PROVIDER_SHA=$(hash_file "$TMP/provider.json")
+
+cat > "$FIXTURE_BIN/docker" <<'SH'
 #!/usr/bin/env sh
 set -eu
-[ "$1 $2" = "image inspect" ]
-printf '[{"Id":"%s","RepoDigests":["%s"]}]\n' "$FAKE_IMAGE_ID" "$FAKE_REPO_DIGEST"
+case "$1 ${2:-}" in
+  "image inspect")
+    : > "$DOCKER_INSPECTED"
+    printf '[{"Id":"%s","RepoDigests":["%s"]}]\n' "$FAKE_IMAGE_ID" "$FAKE_REPO_DIGEST"
+    ;;
+  "run --rm")
+    printf '%s\n' "$@" > "$DOCKER_RUN_ARGS"
+    ;;
+  *) echo "unexpected docker invocation: $*" >&2; exit 99 ;;
+esac
 SH
-chmod 700 "$TMP/docker"
+cat > "$FIXTURE_BIN/git" <<'SH'
+#!/usr/bin/env sh
+set -eu
+case "$*" in
+  *"rev-parse HEAD") printf '%s\n' "$FAKE_RELEASE_SHA" ;;
+  *"rev-parse ${FAKE_RELEASE_SHA}^{tree}") printf '%s\n' "$FAKE_RELEASE_TREE" ;;
+  *"rev-parse --abbrev-ref HEAD") printf 'main\n' ;;
+  *"ls-files -z") printf 'scripts/infra-ops.mjs\0' ;;
+  *"status --porcelain --untracked-files=all") [ "${FAKE_DIRTY:-0}" != 1 ] || printf ' M scripts/infra-ops.mjs\n' ;;
+  *) echo "unexpected git invocation: $*" >&2; exit 99 ;;
+esac
+SH
+chmod 700 "$FIXTURE_BIN/docker" "$FIXTURE_BIN/git"
 
-write_receipt() {
-  cat > "$RECEIPT" <<EOF
-{"kind":"platform-release-artifact-verification/v1","status":"EXTERNAL-PENDING","artifactVerification":"passed","deploymentAdmission":"EXTERNAL-PENDING","usageScope":"artifact-verification-only","repository":"owner/repo","commitSha":"$(printf 'c%.0s' $(seq 1 40))","subjects":[{"key":"PLATFORM_OPS_IMAGE","image":"$1"}],"provenance":{"verificationFingerprint":"$(printf 'd%.0s' $(seq 1 64))"}}
-EOF
+trust_env() {
+  env \
+    PATH="$FIXTURE_BIN:$PATH" \
+    DOCKER_INSPECTED="$TMP/docker-inspected" \
+    DOCKER_RUN_ARGS="$TMP/docker-run-args" \
+    FAKE_IMAGE_ID="${TEST_FAKE_IMAGE_ID:-$IMAGE_ID}" \
+    FAKE_REPO_DIGEST="$IMAGE" \
+    FAKE_RELEASE_SHA="${TEST_FAKE_RELEASE_SHA:-$RELEASE_SHA}" \
+    FAKE_RELEASE_TREE="$RELEASE_TREE" \
+    FAKE_DIRTY="${TEST_FAKE_DIRTY:-0}" \
+    PLATFORM_OPS_DOCKER_MODE=none \
+    DEPLOY_REPO=owner/repo \
+    DEPLOY_RELEASE_SHA="$RELEASE_SHA" \
+    DEPLOY_RELEASE_TREE="$RELEASE_TREE" \
+    DEPLOY_ARTIFACT_RECEIPT_PATH="$TMP/artifact.json" \
+    DEPLOY_ARTIFACT_RECEIPT_SHA256="${TEST_ARTIFACT_SHA256:-$ARTIFACT_SHA}" \
+    DEPLOY_ADMISSION_RECEIPT_PATH="${TEST_ADMISSION_PATH:-$TMP/admission.json}" \
+    DEPLOY_ADMISSION_RECEIPT_SHA256="${TEST_ADMISSION_SHA256:-$ADMISSION_SHA}" \
+    DEPLOY_TRUSTED_PROVIDER_METADATA_PATH="${TEST_PROVIDER_METADATA_PATH:-$TMP/provider.json}" \
+    DEPLOY_TRUSTED_PROVIDER_METADATA_SHA256="${TEST_PROVIDER_METADATA_SHA256:-$PROVIDER_SHA}" \
+    DEPLOY_TRUSTED_PROVIDER_RUN_ID="$PROVIDER_RUN_ID" \
+    DEPLOY_TRUSTED_PROVIDER_RUN_ATTEMPT="$PROVIDER_RUN_ATTEMPT" \
+    "$@"
 }
-receipt_sha() {
-  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$RECEIPT" | awk '{print $1}'; else shasum -a 256 "$RECEIPT" | awk '{print $1}'; fi
-}
-expect_reject() {
+
+expect_reject_without_docker() {
   label=$1
   shift
-  if "$@" >/dev/null 2>&1; then echo "FAIL: $label was accepted" >&2; exit 1; fi
+  rm -f "$TMP/docker-inspected"
+  if "$@" >/dev/null 2>&1; then
+    echo "FAIL: $label was accepted" >&2
+    exit 1
+  fi
+  [ ! -e "$TMP/docker-inspected" ] || {
+    echo "FAIL: $label reached Docker before trust validation" >&2
+    exit 1
+  }
   printf 'PASS\t%s\n' "$label"
 }
 
-write_receipt "$IMAGE"
-SHA=$(receipt_sha)
-result=$(PATH="$TMP:$PATH" FAKE_IMAGE_ID="$IMAGE_ID" FAKE_REPO_DIGEST="$IMAGE" sh "$SCRIPT_DIR/ops-image-trust.sh" "$IMAGE" "$RECEIPT" "$SHA")
-[ "$result" = "$IMAGE_ID" ]
-printf 'PASS\texact-receipt-and-local-repodigest\n'
+result=$(trust_env sh "$FIXTURE_ROOT/scripts/ops-image-trust.sh")
+[ "$(printf '%s' "$result" | jq -r '.image')" = "$IMAGE" ]
+[ "$(printf '%s' "$result" | jq -r '.imageId')" = "$IMAGE_ID" ]
+printf 'PASS\tprovider-receipt-and-local-image-positive-path\n'
 
-expect_reject receipt-hash-mismatch env PATH="$TMP:$PATH" FAKE_IMAGE_ID="$IMAGE_ID" FAKE_REPO_DIGEST="$IMAGE" sh "$SCRIPT_DIR/ops-image-trust.sh" "$IMAGE" "$RECEIPT" "$(printf 'e%.0s' $(seq 1 64))"
-write_receipt "ghcr.io/owner/other@sha256:$(printf 'a%.0s' $(seq 1 64))"
-SHA=$(receipt_sha)
-expect_reject wrong-receipt-subject env PATH="$TMP:$PATH" FAKE_IMAGE_ID="$IMAGE_ID" FAKE_REPO_DIGEST="$IMAGE" sh "$SCRIPT_DIR/ops-image-trust.sh" "$IMAGE" "$RECEIPT" "$SHA"
-write_receipt "$IMAGE"
-SHA=$(receipt_sha)
-expect_reject wrong-local-repodigest env PATH="$TMP:$PATH" FAKE_IMAGE_ID="$IMAGE_ID" FAKE_REPO_DIGEST="ghcr.io/owner/other@sha256:$(printf 'a%.0s' $(seq 1 64))" sh "$SCRIPT_DIR/ops-image-trust.sh" "$IMAGE" "$RECEIPT" "$SHA"
-expect_reject mutable-image env PATH="$TMP:$PATH" FAKE_IMAGE_ID="$IMAGE_ID" FAKE_REPO_DIGEST="$IMAGE" sh "$SCRIPT_DIR/ops-image-trust.sh" "ghcr.io/owner/platform-ops:latest" "$RECEIPT" "$SHA"
+TEST_ARTIFACT_SHA256=$(printf '8%.0s' $(seq 1 64))
+expect_reject_without_docker wrong-artifact-hash trust_env sh "$FIXTURE_ROOT/scripts/ops-image-trust.sh"
+unset TEST_ARTIFACT_SHA256
+jq '.run_attempt = 1' "$TMP/provider.json" > "$TMP/provider-wrong-attempt.json"
+WRONG_PROVIDER_SHA=$(hash_file "$TMP/provider-wrong-attempt.json")
+if node "$FIXTURE_ROOT/scripts/trusted-provider-run-policy.mjs" \
+  --policy "$FIXTURE_ROOT/governance/deployment-admission.json" \
+  --metadata "$TMP/provider-wrong-attempt.json" \
+  --metadataSha256 "$WRONG_PROVIDER_SHA" \
+  --deploymentReceipt "$TMP/admission.json" \
+  --runId "$PROVIDER_RUN_ID" \
+  --runAttempt "$PROVIDER_RUN_ATTEMPT" >/dev/null 2>&1; then
+  echo "FAIL: direct provider policy accepted the wrong run attempt" >&2
+  exit 1
+fi
+TEST_PROVIDER_METADATA_PATH="$TMP/provider-wrong-attempt.json"
+TEST_PROVIDER_METADATA_SHA256="$WRONG_PROVIDER_SHA"
+expect_reject_without_docker wrong-provider-run-attempt trust_env sh "$FIXTURE_ROOT/scripts/ops-image-trust.sh"
+unset TEST_PROVIDER_METADATA_PATH TEST_PROVIDER_METADATA_SHA256
+TEST_FAKE_RELEASE_SHA=$(printf '9%.0s' $(seq 1 40))
+expect_reject_without_docker wrong-local-checkout trust_env sh "$FIXTURE_ROOT/scripts/ops-image-trust.sh"
+unset TEST_FAKE_RELEASE_SHA
+TEST_FAKE_DIRTY=1
+expect_reject_without_docker dirty-local-checkout trust_env sh "$FIXTURE_ROOT/scripts/ops-image-trust.sh"
+unset TEST_FAKE_DIRTY
 
-APPROVED_IMAGE="$IMAGE"
-FORGED_IMAGE="ghcr.io/owner/forged-ops@sha256:$(printf 'f%.0s' $(seq 1 64))"
-write_receipt "$APPROVED_IMAGE"
-SHA=$(receipt_sha)
-cp "$RECEIPT" "$TMP/approved-receipt.json"
-write_receipt "$FORGED_IMAGE"
-cp "$RECEIPT" "$TMP/forged-receipt.json"
-cp "$TMP/approved-receipt.json" "$RECEIPT"
-REAL_SHASUM=$(command -v shasum)
-cat > "$TMP/sha256sum" <<'SH'
-#!/usr/bin/env sh
-set -eu
-sum=$("$REAL_SHASUM" -a 256 "$1" | awk '{print $1}')
-printf '%s  %s\n' "$sum" "$1"
-cp "$SWAP_RECEIPT" "$SWAP_TARGET"
-SH
-chmod 700 "$TMP/sha256sum"
-expect_reject receipt-swap-after-hash env \
-  PATH="$TMP:$PATH" REAL_SHASUM="$REAL_SHASUM" SWAP_RECEIPT="$TMP/forged-receipt.json" SWAP_TARGET="$RECEIPT" \
-  FAKE_IMAGE_ID="$IMAGE_ID" FAKE_REPO_DIGEST="$FORGED_IMAGE" \
-  sh "$SCRIPT_DIR/ops-image-trust.sh" "$FORGED_IMAGE" "$RECEIPT" "$SHA"
+jq '.opsRunner.image = "ghcr.io/owner/platform-infrastructure-ops:latest"' "$TMP/admission.json" > "$TMP/admission-mutable.json"
+MUTABLE_SHA=$(hash_file "$TMP/admission-mutable.json")
+TEST_ADMISSION_PATH="$TMP/admission-mutable.json"
+TEST_ADMISSION_SHA256="$MUTABLE_SHA"
+expect_reject_without_docker mutable-ops-image trust_env sh "$FIXTURE_ROOT/scripts/ops-image-trust.sh"
+unset TEST_ADMISSION_PATH TEST_ADMISSION_SHA256
 
-ln -s "$TMP/approved-receipt.json" "$TMP/receipt-link.json"
-expect_reject symbolic-link-receipt env PATH="$TMP:$PATH" FAKE_IMAGE_ID="$IMAGE_ID" FAKE_REPO_DIGEST="$APPROVED_IMAGE" sh "$SCRIPT_DIR/ops-image-trust.sh" "$APPROVED_IMAGE" "$TMP/receipt-link.json" "$SHA"
+rm -f "$TMP/docker-inspected"
+TEST_FAKE_IMAGE_ID="sha256:$(printf '9%.0s' $(seq 1 64))"
+if trust_env sh "$FIXTURE_ROOT/scripts/ops-image-trust.sh" >/dev/null 2>&1; then
+  echo "FAIL: wrong local image ID was accepted" >&2
+  exit 1
+fi
+unset TEST_FAKE_IMAGE_ID
+[ -e "$TMP/docker-inspected" ]
+printf 'PASS\twrong-local-image-id\n'
 
-run_lines=$(grep -c 'docker run --rm --pull=never' "$SCRIPT_DIR/prepare-hosted-workloads.sh")
-[ "$run_lines" -eq 2 ]
-if grep -q 'platform/ops:local' "$SCRIPT_DIR/prepare-hosted-workloads.sh"; then echo "FAIL: local ops fallback remains" >&2; exit 1; fi
-printf 'PASS\tboth-runs-use-captured-image-id-and-pull-never\n'
-printf 'ops image trust tests passed 8/8\n'
+expect_reject_without_docker repository-policy-remains-external-pending \
+  trust_env sh "$ROOT/scripts/ops-image-trust.sh"
+
+rm -f "$TMP/docker-run-args"
+trust_env sh "$FIXTURE_ROOT/scripts/infra-ops.sh" testing-hygiene
+grep -Fx -- '--pull=never' "$TMP/docker-run-args" >/dev/null
+grep -Fx -- "$IMAGE_ID" "$TMP/docker-run-args" >/dev/null
+if grep -Fx -- "$IMAGE" "$TMP/docker-run-args" >/dev/null; then
+  echo "FAIL: wrapper executed the digest alias instead of the admitted local image ID" >&2
+  exit 1
+fi
+printf 'PASS\twrapper-executes-admitted-id-without-pull\n'
+
+if grep -Eq 'docker build|platform/ops:local|OPS_FINGERPRINT_LABEL|PLATFORM_OPS_USE_HOST_NODE' "$ROOT/scripts/infra-ops.sh"; then
+  echo "FAIL: mutable, self-attested, or host bypass remains in infra-ops.sh" >&2
+  exit 1
+fi
+printf 'PASS\tno-wrapper-build-label-or-host-bypass\n'
+
+prepare_runs=$(grep -c 'docker run --rm --pull=never' "$ROOT/scripts/prepare-hosted-workloads.sh")
+prepare_ids=$(grep -c '"$OPS_IMAGE_ID" scripts/' "$ROOT/scripts/prepare-hosted-workloads.sh")
+[ "$prepare_runs" -ge 2 ] && [ "$prepare_ids" -eq "$prepare_runs" ]
+if grep -Eq 'platform/ops:local|docker build|"\$OPS_IMAGE" scripts/' "$ROOT/scripts/prepare-hosted-workloads.sh"; then
+  echo "FAIL: hosted preparation retains a mutable or caller-selected execution path" >&2
+  exit 1
+fi
+printf 'PASS\thosted-preparation-positive-path-uses-admitted-id\n'
+
+if grep -q 'platform/ops:local' "$ROOT/compose.backup-scheduler.yaml" || grep -q '^    build:' "$ROOT/compose.backup-scheduler.yaml"; then
+  echo "FAIL: backup scheduler retains a mutable default or local build" >&2
+  exit 1
+fi
+grep -F '${PLATFORM_OPS_IMAGE:?' "$ROOT/compose.backup-scheduler.yaml" >/dev/null
+grep -F '$compose.services["backup-scheduler"].image == $deployment.opsRunner.image' "$ROOT/scripts/release-compose-admission.sh" >/dev/null
+printf 'PASS\tbackup-scheduler-binds-provider-admitted-ops-image\n'
+
+live_workflow="$ROOT/.github/workflows/enterprise-live-evidence.yml"
+[ "$(grep -c 'sh ./scripts/infra-ops.sh' "$live_workflow")" -eq 7 ]
+if grep -q 'node ./scripts/infra-ops.mjs' "$live_workflow"; then
+  echo "FAIL: privileged live-evidence workflow bypasses the admitted ops runner" >&2
+  exit 1
+fi
+printf 'PASS\tprivileged-live-evidence-uses-admitted-runner\n'
+
+if grep -q 'sh ./scripts/github-attestation-evidence.sh' "$ROOT/.github/workflows/release-attestation.yml"; then
+  echo "FAIL: release producer routes its repository-only verifier through the privileged runner" >&2
+  exit 1
+fi
+if grep -q 'PLATFORM_OPS_USE_HOST_NODE' "$ROOT/.github/workflows/enterprise-infra.yml"; then
+  echo "FAIL: repository-only CI retains the removed host-node bypass" >&2
+  exit 1
+fi
+if grep -q 'platform/ops:ci' "$ROOT/.github/workflows/enterprise-infra.yml"; then
+  echo "FAIL: CI backup dry-run retains a mutable local ops tag" >&2
+  exit 1
+fi
+grep -F 'docker build --iidfile "${RUNNER_TEMP}/ops-test-image-id"' "$ROOT/.github/workflows/enterprise-infra.yml" >/dev/null
+printf 'PASS\trepository-only-workflows-use-direct-node\n'
+
+grep -F 'ref: ${{ github.sha }}' "$ROOT/.github/workflows/enterprise-infra.yml" >/dev/null
+grep -F 'persist-credentials: false' "$ROOT/.github/workflows/enterprise-infra.yml" >/dev/null
+grep -F 'ref: ${{ github.event.workflow_run.head_sha }}' "$ROOT/.github/workflows/enterprise-infra-run-evidence.yml" >/dev/null
+printf 'PASS\tdirect-node-workflows-bind-exact-checkouts\n'
+
+printf 'ops image trust tests passed 15/15; production provider state=EXTERNAL-PENDING\n'

@@ -156,11 +156,34 @@ process.stdout.write(JSON.stringify([{ verificationResult: {
   signature: { certificate: { testCertificate: true } },
   verifiedTimestamps: [{ source: "test" }],
   statement: { predicateType, subject: [{ name, digest: { sha256: digest } }] },
-} }]));
-`, { mode: 0o700 });
+	} }]));
+	`, { mode: 0o700 });
+
+  const productionReleaseTrust = fs.readFileSync(path.join(root, "scripts", "release-trust.mjs"), "utf8");
+  assert.doesNotMatch(productionReleaseTrust, /GITHUB_CLI_BIN|PLATFORM_RELEASE_TRUST_TEST_MODE/,
+    "production verification must not expose an environment-controlled verifier override");
+  const fixtureRoot = path.join(temporary, "repo");
+  fs.cpSync(root, fixtureRoot, {
+    recursive: true,
+    filter(source) {
+      const relative = path.relative(root, source);
+      const topLevel = relative.split(path.sep)[0];
+      return ![".git", ".tmp", "backups", "node_modules", "reports"].includes(topLevel);
+    },
+  });
+  const fixtureReleaseTrustPath = path.join(fixtureRoot, "scripts", "release-trust.mjs");
+  const fixtureReleaseTrust = fs.readFileSync(fixtureReleaseTrustPath, "utf8");
+  const pinnedVerifierDeclaration = 'verifierBinary = "/usr/local/bin/gh"';
+  assert.equal(fixtureReleaseTrust.split(pinnedVerifierDeclaration).length, 2,
+    "test fixture expected one pinned verifier declaration");
+  fs.writeFileSync(
+    fixtureReleaseTrustPath,
+    fixtureReleaseTrust.replace(pinnedVerifierDeclaration, `verifierBinary = ${JSON.stringify(fakeGh)}`),
+    { mode: 0o600 },
+  );
 
   const commonArgs = [
-    path.join(root, "scripts", "infra-ops.mjs"),
+    path.join(fixtureRoot, "scripts", "infra-ops.mjs"),
     "release-artifact-gate",
     "--imageManifest", manifestArtifact.pathname,
     "--sbom", sbomArtifact.pathname,
@@ -173,16 +196,14 @@ process.stdout.write(JSON.stringify([{ verificationResult: {
   ];
   const environment = {
     ...process.env,
-    PLATFORM_RELEASE_TRUST_TEST_MODE: "1",
-    GITHUB_CLI_BIN: fakeGh,
     GH_TOKEN: "release-gate-consumer-test-token",
   };
-  const positive = spawnSync(process.execPath, commonArgs, { cwd: root, env: environment, encoding: "utf8" });
+  const positive = spawnSync(process.execPath, commonArgs, { cwd: fixtureRoot, env: environment, encoding: "utf8" });
   assert.equal(positive.status, 1);
   assert.match(positive.stderr, /EXTERNAL-PENDING/);
   assert.doesNotMatch(positive.stderr, /Exact per-subject registry resolution is required/);
 
-  const localChecks = path.join(root, "reports", "local-checks");
+  const localChecks = path.join(fixtureRoot, "reports", "local-checks");
   const gateReportsBeforeArtifactOnly = fileHashes(localChecks, "release-artifact-gate-");
   const producerReceipt = path.join(temporary, "producer-artifact-receipt.json");
   const artifactOnly = spawnSync(process.execPath, [
@@ -190,7 +211,7 @@ process.stdout.write(JSON.stringify([{ verificationResult: {
     "--artifactVerificationOnly",
     "--receiptOutput", producerReceipt,
   ], {
-    cwd: root, env: environment, encoding: "utf8",
+    cwd: fixtureRoot, env: environment, encoding: "utf8",
   });
   assert.equal(artifactOnly.status, 0, artifactOnly.stderr);
   assert.match(artifactOnly.stdout, /Artifact-only release verification passed/);
@@ -208,7 +229,7 @@ process.stdout.write(JSON.stringify([{ verificationResult: {
     ...commonArgs,
     "--artifactVerificationOnly",
     "--receiptOutput", reverifiedReceipt,
-  ], { cwd: root, env: environment, encoding: "utf8" });
+  ], { cwd: fixtureRoot, env: environment, encoding: "utf8" });
   assert.equal(reverify.status, 0, reverify.stderr);
   assert.deepEqual(fs.readFileSync(reverifiedReceipt), fs.readFileSync(producerReceipt),
     "the consumer must regenerate the exact provider-bound artifact receipt bytes");
@@ -218,7 +239,7 @@ process.stdout.write(JSON.stringify([{ verificationResult: {
   const tamperedArtifact = writeJson("registry-resolution-tampered.json", tampered);
   const negativeArgs = [...commonArgs];
   negativeArgs[negativeArgs.indexOf(registryArtifact.pathname)] = tamperedArtifact.pathname;
-  const negative = spawnSync(process.execPath, negativeArgs, { cwd: root, env: environment, encoding: "utf8" });
+  const negative = spawnSync(process.execPath, negativeArgs, { cwd: fixtureRoot, env: environment, encoding: "utf8" });
   assert.equal(negative.status, 1);
   assert.match(negative.stderr, /differs from exact descriptor resolution/);
   assert.doesNotMatch(negative.stderr, /EXTERNAL-PENDING/);

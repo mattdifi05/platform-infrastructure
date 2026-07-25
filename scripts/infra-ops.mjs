@@ -67,6 +67,7 @@ import {
 import { evaluateProviderMfaAssurance } from "./provider-mfa-assurance.mjs";
 import { assertDeploymentAdmissionConfigured } from "./deployment-admission-policy.mjs";
 import { validateTrustedDeploymentReceipt } from "./deployment-receipt-policy.mjs";
+import { validateTrustedProviderRun } from "./trusted-provider-run-policy.mjs";
 import { releaseEvidenceAdmissionReady } from "./release-go-no-go-policy.mjs";
 import { deploymentPrerequisiteMismatches } from "./privileged-workflow-policy.mjs";
 import { snapshotJsonArtifact } from "./stable-json-artifact.mjs";
@@ -3213,8 +3214,9 @@ function infraMaintainabilityHygiene() {
   const compose = readText(path.join(infraRoot, "compose.yaml"));
   const controlCenterServer = readText(path.join(infraRoot, "control-center", "server.mjs"));
   const projectRouterServer = readText(path.join(infraRoot, "project-router", "server.mjs"));
-  assertMatch(opsWrapper, /docker build[\s\S]*docker\/ops\.Dockerfile[\s\S]*docker run --rm/, "infra-ops wrapper must stay Dockerized.");
-  assertMatch(opsWrapper, /PROJECT_SOURCE_ROOT=\$SOURCE_CONTAINER_ROOT/, "infra-ops wrapper must pass source root explicitly into the ops container.");
+  assertMatch(opsWrapper, /ops-image-trust\.sh/, "infra-ops wrapper must obtain its runner from the trusted deployment admission chain.");
+  assertMatch(opsWrapper, /docker run --rm --pull=never[\s\S]*"\$OPS_IMAGE_ID"/, "infra-ops wrapper must execute only the admitted local image ID without pulling.");
+  assertNoMatch(opsWrapper, /docker build|platform\/ops:local|PLATFORM_OPS_USE_HOST_NODE|OPS_FINGERPRINT_LABEL/, "infra-ops wrapper must not build, self-attest, or expose a host-Node bypass.");
   assertNoMatch(`${compose}\n${controlCenterServer}\n${projectRouterServer}`, /stexor|fireport|matthewdifilippo/i, "Core infrastructure must stay project-generic.");
   assertNoMatch(projectRouterServer, /node:child_process|spawn\(|execFile\(|exec\(/, "Project router must stay proxy-only.");
   const shellWrappers = fs.readdirSync(path.join(infraRoot, "scripts"))
@@ -3247,16 +3249,20 @@ function infraMaintainabilityHygiene() {
     "php-runtime-supply-chain-test.sh",
     "prepare-hosted-workloads.sh",
     "prepare-vps-runtime.sh",
+    "release-compose-admission.sh",
     "runtime-isolation-sandbox-test.sh",
+    "ssh-known-host-endpoint.sh",
     "verify-locked-images.sh",
     "vps-evidence-remote.sh",
     "workload-egress-firewall.sh",
     "dast-zap-baseline.sh",
     "deploy-vps.sh",
     "infra-ops.sh",
+    "install-gh-attestation-verifier.sh",
     "install-container-metrics-collector.sh",
     "install-offsite-backup-cron.sh",
     "node-project-runtime.sh",
+    "ops-image-trust.sh",
     "vps-bootstrap-ubuntu.sh",
     "vps-go-live.sh",
     "vps-hardening-ubuntu.sh",
@@ -3267,7 +3273,7 @@ function infraMaintainabilityHygiene() {
   ]);
   for (const name of shellWrappers) {
     const text = readText(path.join(infraRoot, "scripts", name));
-    if (directOperationalScripts.has(name)) {
+    if (directOperationalScripts.has(name) || /(?:-|\.)test\.sh$/.test(name)) {
       if (name === "dast-zap-baseline.sh") {
         assertMatch(text, /docker run[\s\S]*zap-baseline\.py/, "DAST ZAP wrapper must stay containerized.");
       }
@@ -6417,23 +6423,56 @@ async function releaseArtifactGateBody(options = {}) {
 function trustedDeploymentAdmissionEvidence(options = {}) {
   const artifactReceiptPath = options.artifactReceiptPath ?? argv.artifactReceipt ?? process.env.DEPLOY_ARTIFACT_RECEIPT_PATH;
   const deploymentReceiptPath = options.deploymentReceiptPath ?? argv.deploymentReceipt ?? process.env.DEPLOY_ADMISSION_RECEIPT_PATH;
+  const providerMetadataPath = options.providerMetadataPath ?? argv.providerMetadata ?? process.env.DEPLOY_TRUSTED_PROVIDER_METADATA_PATH;
   const expectedArtifactSha256 = String(options.artifactReceiptSha256 ?? argv.artifactReceiptSha256 ?? process.env.DEPLOY_ARTIFACT_RECEIPT_SHA256 ?? "");
   const expectedDeploymentSha256 = String(options.deploymentReceiptSha256 ?? argv.deploymentReceiptSha256 ?? process.env.DEPLOY_ADMISSION_RECEIPT_SHA256 ?? "");
-  if (!artifactReceiptPath || !deploymentReceiptPath || !/^[a-f0-9]{64}$/.test(expectedArtifactSha256) || !/^[a-f0-9]{64}$/.test(expectedDeploymentSha256)) {
-    fail("EXTERNAL-PENDING: exact artifact and trusted deployment receipt paths and SHA256 values are required.");
+  const expectedProviderMetadataSha256 = String(options.providerMetadataSha256 ?? argv.providerMetadataSha256 ?? process.env.DEPLOY_TRUSTED_PROVIDER_METADATA_SHA256 ?? "");
+  const providerRunId = String(options.providerRunId ?? argv.providerRunId ?? process.env.DEPLOY_TRUSTED_PROVIDER_RUN_ID ?? "");
+  const providerRunAttempt = String(options.providerRunAttempt ?? argv.providerRunAttempt ?? process.env.DEPLOY_TRUSTED_PROVIDER_RUN_ATTEMPT ?? "");
+  if (
+    !artifactReceiptPath
+    || !deploymentReceiptPath
+    || !providerMetadataPath
+    || !/^[a-f0-9]{64}$/.test(expectedArtifactSha256)
+    || !/^[a-f0-9]{64}$/.test(expectedDeploymentSha256)
+    || !/^[a-f0-9]{64}$/.test(expectedProviderMetadataSha256)
+    || !/^[1-9][0-9]*$/.test(providerRunId)
+    || !/^[1-9][0-9]*$/.test(providerRunAttempt)
+  ) {
+    fail("EXTERNAL-PENDING: exact artifact, deployment, and authenticated provider-run inputs are required.");
   }
   const snapshots = [];
   try {
     const artifact = snapshotJsonArtifact(artifactReceiptPath, { label: "artifact verification receipt", maxBytes: 16 * 1024 * 1024 });
     const deployment = snapshotJsonArtifact(deploymentReceiptPath, { label: "trusted deployment receipt", maxBytes: 16 * 1024 * 1024 });
-    snapshots.push(artifact, deployment);
-    if (artifact.sha256 !== expectedArtifactSha256 || deployment.sha256 !== expectedDeploymentSha256) {
+    const providerMetadata = snapshotJsonArtifact(providerMetadataPath, { label: "trusted provider run metadata", maxBytes: 4 * 1024 * 1024 });
+    snapshots.push(artifact, deployment, providerMetadata);
+    if (
+      artifact.sha256 !== expectedArtifactSha256
+      || deployment.sha256 !== expectedDeploymentSha256
+      || providerMetadata.sha256 !== expectedProviderMetadataSha256
+    ) {
       fail("Deployment admission receipt checksum mismatch.");
     }
     const policy = readJsonFile(path.join(infraRoot, "governance", "deployment-admission.json"), "deployment admission policy");
     const repository = options.repository ?? argv.repo ?? process.env.DEPLOY_REPO ?? process.env.GITHUB_REPOSITORY;
-    const commitSha = options.commitSha ?? process.env.DEPLOY_RELEASE_SHA ?? gitEvidence().commit;
-    const treeSha = options.treeSha ?? process.env.DEPLOY_RELEASE_TREE ?? run("git", ["rev-parse", `${commitSha}^{tree}`], { capture: true }).stdout.trim();
+    const checkout = gitEvidence();
+    const commitSha = options.commitSha ?? process.env.DEPLOY_RELEASE_SHA ?? checkout.commit;
+    const observedTreeSha = run("git", ["rev-parse", `${commitSha}^{tree}`], { capture: true }).stdout.trim();
+    const treeSha = options.treeSha ?? process.env.DEPLOY_RELEASE_TREE ?? observedTreeSha;
+    if (
+      checkout.dirty !== false
+      || checkout.commit !== commitSha
+      || observedTreeSha !== treeSha
+    ) {
+      fail("Trusted deployment admission is not bound to the exact clean local checkout commit/tree.");
+    }
+    validateTrustedProviderRun(providerMetadata.document, {
+      policy,
+      runId: providerRunId,
+      runAttempt: providerRunAttempt,
+      deploymentReceipt: deployment.document,
+    });
     validateTrustedDeploymentReceipt(deployment.document, {
       policy,
       repository,
@@ -6441,8 +6480,10 @@ function trustedDeploymentAdmissionEvidence(options = {}) {
       treeSha,
       artifactReceiptSha256: artifact.sha256,
       artifactReceipt: artifact.document,
+      providerRunId,
+      providerRunAttempt,
     });
-    log(`Deployment receipt contract is bound to ${repository}@${commitSha}; repository policy remains authoritative for external verifier readiness.`);
+    log(`Deployment receipt contract is bound to authenticated provider run ${providerRunId}/${providerRunAttempt} and clean checkout ${repository}@${commitSha}.`);
     return {
       status: "READY",
       repository,
@@ -6450,6 +6491,9 @@ function trustedDeploymentAdmissionEvidence(options = {}) {
       treeSha,
       artifactReceiptSha256: artifact.sha256,
       deploymentReceiptSha256: deployment.sha256,
+      providerMetadataSha256: providerMetadata.sha256,
+      providerRunId,
+      providerRunAttempt: Number(providerRunAttempt),
     };
   } finally {
     for (const snapshot of snapshots.reverse()) snapshot.cleanup();
@@ -6525,6 +6569,7 @@ function writeReleaseEvidenceReport(payload) {
     `| Signed attestation bundle | ${payload.artifacts?.attestationBundle?.path ?? "online verification"} | ${payload.artifacts?.attestationBundle?.sha256 ?? "n/a"} |`,
     `| Trusted root | ${payload.artifacts?.trustedRoot?.path ?? "provider trust root"} | ${payload.artifacts?.trustedRoot?.sha256 ?? "n/a"} |`,
     `| Signature bundle | ${payload.artifacts?.signatureBundle?.path ?? "n/a"} | ${payload.artifacts?.signatureBundle?.sha256 ?? "n/a"} |`,
+    `| Trusted deployment admission | authenticated provider receipt | ${payload.artifacts?.admissionReceipt?.sha256 ?? "n/a"} |`,
     "",
     `Rollback file: ${rollbackFilePath ?? (firstDeploy ? "first deploy" : "n/a")}`,
     `Rollback dry-run: ${rollbackDryRun?.validated ? rollbackDryRun.reportPath : (firstDeploy ? "first deploy" : "n/a")}`,
@@ -6581,6 +6626,7 @@ async function releaseEvidence(options = {}) {
     projectName: candidateProjectName,
     repository: options.repository ?? options.repo ?? argv.repository ?? argv.repo,
   });
+  let deploymentAdmissionEvidence = null;
 
   if (!planOnly) {
     try {
@@ -6636,6 +6682,13 @@ async function releaseEvidence(options = {}) {
         signerWorkflow: options.signerWorkflow ?? argv.signerWorkflow ?? null,
       });
       githubAttestationValidation = artifactGate.githubAttestationValidation;
+      deploymentAdmissionEvidence = trustedDeploymentAdmissionEvidence({
+        repository: options.repository ?? options.repo ?? argv.repository ?? argv.repo ?? process.env.GITHUB_REPOSITORY ?? null,
+        commitSha: releaseSha,
+      });
+      if (sha256File(artifactGate.receiptPath) !== deploymentAdmissionEvidence.artifactReceiptSha256) {
+        fail("Reverified release artifact receipt differs from the authenticated deployment-admission handoff.");
+      }
     } catch (error) {
       issues.push(String(error?.message ?? error));
     }
@@ -6719,6 +6772,18 @@ async function releaseEvidence(options = {}) {
       attestationBundle,
       trustedRoot,
       signatureBundle,
+      admissionReceipt: deploymentAdmissionEvidence ? {
+        kind: "platform-trusted-deployment-admission/v1",
+        status: "READY",
+        sha256: deploymentAdmissionEvidence.deploymentReceiptSha256,
+        artifactReceiptSha256: deploymentAdmissionEvidence.artifactReceiptSha256,
+        providerMetadataSha256: deploymentAdmissionEvidence.providerMetadataSha256,
+        repository: deploymentAdmissionEvidence.repository,
+        commitSha: deploymentAdmissionEvidence.commitSha,
+        treeSha: deploymentAdmissionEvidence.treeSha,
+        providerRunId: deploymentAdmissionEvidence.providerRunId,
+        providerRunAttempt: deploymentAdmissionEvidence.providerRunAttempt,
+      } : null,
     },
     attestations: {
       provenanceRequired: true,
@@ -6729,7 +6794,7 @@ async function releaseEvidence(options = {}) {
     },
     admission: {
       artifactVerification: githubAttestationValidation?.verified === true ? "passed" : "missing",
-      deploymentAdmission: "EXTERNAL-PENDING",
+      deploymentAdmission: deploymentAdmissionEvidence?.status === "READY" ? "READY" : "EXTERNAL-PENDING",
     },
     issues,
     nextCommands: [
@@ -6842,6 +6907,8 @@ async function rollbackRelease() {
 
 async function drReadinessCheck(options = {}) {
   log("==> DR / PITR readiness check");
+  const envFile = path.resolve(options.envFile ?? argv.envFile ?? path.join(infraRoot, ".env.example"));
+  if (!fs.existsSync(envFile)) fail(`DR Compose env file not found: ${envFile}`);
   const drCompose = readText(path.join(infraRoot, "compose.dr.yaml"));
   const plan = readText(path.join(infraRoot, "ENTERPRISE-10-PLAN.md"));
   const runbook = readText(path.join(infraRoot, "RUNBOOK.md"));
@@ -6858,7 +6925,7 @@ async function drReadinessCheck(options = {}) {
     run("docker", [
       "compose",
       "--env-file",
-      ".env",
+      envFile,
       "-p",
       "enterprise_prod_dr",
       "-f",
@@ -6869,7 +6936,7 @@ async function drReadinessCheck(options = {}) {
       "compose.dr.yaml",
       "config",
       "--quiet",
-    ], { env: localProductionImageEnv() });
+    ]);
   }
   log("DR / PITR readiness check passed.");
 }
@@ -9527,7 +9594,18 @@ async function productionGoNoGo() {
       && githubProvenance?.attestationCount > 0,
   );
   const releaseProvenanceOk = !policy.requireReleaseProvenance || releaseGithubProvenanceOk;
-  const releaseAdmissionOk = releaseEvidenceAdmissionReady(releasePayload);
+  let directlyVerifiedReleaseAdmission = null;
+  let directReleaseAdmissionError = null;
+  try {
+    directlyVerifiedReleaseAdmission = trustedDeploymentAdmissionEvidence({
+      repository: releasePayload.artifacts?.admissionReceipt?.repository ?? process.env.DEPLOY_REPO ?? null,
+      commitSha: releasePayload.releaseSha ?? process.env.DEPLOY_RELEASE_SHA ?? null,
+      treeSha: releasePayload.artifacts?.admissionReceipt?.treeSha ?? process.env.DEPLOY_RELEASE_TREE ?? null,
+    });
+  } catch (error) {
+    directReleaseAdmissionError = String(error?.message ?? error).replace(/[\r\n]+/g, " ").slice(0, 500);
+  }
+  const releaseAdmissionOk = releaseEvidenceAdmissionReady(releasePayload, directlyVerifiedReleaseAdmission);
   const releaseGitOk = !policy.requireCleanReleaseGit || (
     releasePayload.git?.dirty === false
     && String(releasePayload.git?.commit ?? "").toLowerCase() === currentCandidate?.commit
@@ -9539,20 +9617,24 @@ async function productionGoNoGo() {
   );
   const releasePendingProvider = Boolean(
     release
-    && policy.requireReleaseProvenance
-    && !releaseGithubProvenanceOk
+    && (
+      (policy.requireReleaseProvenance && !releaseGithubProvenanceOk)
+      || !releaseAdmissionOk
+    )
   );
   addGoNoGoCheck(checks, {
     name: "release-evidence-and-rollback",
     passed: Boolean(release && releaseFresh.fresh && releasePayload.mode === "evidence" && releasePayload.status === "passed" && releaseRollbackOk && releasePayload.artifacts?.sbom && releaseProvenanceOk && releaseGitOk && releaseAdmissionOk),
     detail: release
-      ? `${releaseFresh.detail}; mode=${releasePayload.mode}; status=${releasePayload.status ?? "unknown"}; rollback=${releaseRollbackOk ? "validated" : "missing"}; provenance=${releaseGithubProvenanceOk ? "github-sigstore-cryptographic" : "missing"}; deploymentAdmission=${releasePayload.admission?.deploymentAdmission ?? "missing"}; cleanGit=${releaseGitOk ? "yes" : "no"}`
+      ? `${releaseFresh.detail}; mode=${releasePayload.mode}; status=${releasePayload.status ?? "unknown"}; rollback=${releaseRollbackOk ? "validated" : "missing"}; provenance=${releaseGithubProvenanceOk ? "github-sigstore-cryptographic" : "missing"}; deploymentAdmission=${releasePayload.admission?.deploymentAdmission ?? "missing"}; directAdmission=${releaseAdmissionOk ? "authenticated" : directReleaseAdmissionError ?? "missing"}; cleanGit=${releaseGitOk ? "yes" : "no"}`
       : latestReleaseReport
         ? `missing evidence report; latestReleaseMode=${latestReleaseReport.payload.mode ?? "unknown"}; latestStatus=${latestReleaseReport.payload.status ?? "unknown"}; ${latestReleaseFresh.detail}`
        : releaseFresh.detail,
     report: release ?? latestReleaseReport,
     status: releasePendingProvider ? "pending-provider" : null,
-    blocker: releasePendingProvider ? "github-sigstore-release-provenance" : null,
+    blocker: releasePendingProvider
+      ? (!releaseAdmissionOk ? "trusted-deployment-admission" : "github-sigstore-release-provenance")
+      : null,
   });
 
   const candidateReportBindings = [
@@ -12045,6 +12127,9 @@ function staticSecurityInfraOnlyCheck() {
   assertMatch(lockScript, /LOCK_READ_DIRECTORY[\s\S]*\/bin\/rm -- "\$LOCK_READ"[\s\S]*LOCK_JSON/, "Host lock reader must consume one unlinked private snapshot.");
   assertMatch(lockScript, /snapshotParentIdentity[\s\S]*rawPolicyReceipt/, "Host lock reader must enforce snapshot identity plus raw receipt binding.");
   assertMatch(prepareScript, /hosted-workload-contract\.mjs/, "Hosted workload preparation must use the contract validator.");
+  assertMatch(prepareScript, /ops-image-trust\.sh/, "Hosted workload preparation must obtain its runner from the trusted deployment admission chain.");
+  assertMatch(prepareScript, /docker run --rm --pull=never[\s\S]*"\$OPS_IMAGE_ID"/, "Hosted workload preparation must execute only the admitted local image ID without pulling.");
+  assertNoMatch(prepareScript, /platform\/ops:local|docker build|"\$OPS_IMAGE" scripts\//, "Hosted workload preparation must not retain a mutable, local-build, or caller-selected execution sink.");
   assertMatch(composeNetworks, /platform_edge:[\s\S]*platform_routing:[\s\S]*platform_observability:[\s\S]*platform_egress:/, "Platform trust zones must be explicit.");
   assertMatch(composeIsolation, /docker-action-broker:[\s\S]*\/var\/run\/docker\.sock:\/var\/run\/docker\.sock:ro/, "Only the immutable fixed-action Docker broker may mount the raw socket.");
   assertNoMatch(composeIsolation, /docker-operation-gateway|platform_docker_control|237[56]|AUTH\s*=\s*0/, "The generic Docker gateway and TCP proxy surface must remain absent.");

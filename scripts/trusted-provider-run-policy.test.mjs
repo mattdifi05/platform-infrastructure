@@ -52,8 +52,14 @@ assert.throws(() => validateTrustedProviderRun(run, {
 assert.throws(() => validateTrustedProviderRun(run, {
   policy, runId: "123456", runAttempt: "2", deploymentReceipt: { producer: { ...producer, runId: "999999" } },
 }), /does not bind/);
+assert.throws(() => validateTrustedProviderRun({ ...run, head_branch: "release" }, {
+  policy, runId: "123456", runAttempt: "2",
+}), /does not match/);
+assert.throws(() => trustedProducerConfiguration({
+  ...policy, trustedProducer: { ...policy.trustedProducer, sourceRef: "refs/heads/release" },
+}), /EXTERNAL-PENDING.*exact main/);
 assert.throws(() => trustedProducerConfiguration({
   status: "EXTERNAL-PENDING", trustedVerifierChannel: null, selfAssertedAnnotationsAccepted: false,
 }), /EXTERNAL-PENDING/);
 
-process.stdout.write("trusted provider run policy tests passed 9/9\n");
+process.stdout.write("trusted provider run policy tests passed 11/11\n");

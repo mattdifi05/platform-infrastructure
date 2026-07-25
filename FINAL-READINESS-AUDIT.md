@@ -240,14 +240,7 @@ docker compose --env-file .env.vps.example -p platform_infra_vps_ci -f compose.y
 docker compose --env-file .env.vps.example -p platform_infra_vps_ci -f compose.yaml -f compose.secrets.yaml -f compose.vps.yaml -f compose.waf.yaml -f compose.vps-waf.yaml -f compose.backup-scheduler.yaml --profile backup config --quiet
 docker compose --env-file .env.staging.example -p platform_infra_staging_ci -f compose.yaml -f compose.secrets.yaml -f compose.vps.yaml -f compose.waf.yaml -f compose.vps-waf.yaml -f compose.staging.yaml config --quiet
 docker compose --env-file .env -p enterprise_prod_ci -f compose.yaml -f compose.prod.yaml -f compose.managed-secrets.yaml config --quiet
-docker build -f docker/ops.Dockerfile -t platform/ops:local .
-docker run --rm -e BACKUP_SCHEDULER_DRY_RUN=true -v D:/docker/platform-infrastructure:/infra:ro --entrypoint sh platform/ops:local /infra/scripts/backup-scheduler.sh
-docker run --rm -e BACKUP_SCHEDULER_DRY_RUN=true -e BACKUP_SCHEDULER_ENABLE_OFFSITE=true -v D:/docker/platform-infrastructure:/infra:ro --entrypoint sh platform/ops:local /infra/scripts/backup-scheduler.sh
-sh ./scripts/infra-ops.sh external-uptime-check --dryRun
-sh ./scripts/infra-ops.sh github-branch-protection --repo OWNER/REPO --branch main --dryRun
-sh ./scripts/infra-ops.sh github-environments --repo OWNER/REPO --dryRun
-sh ./scripts/infra-ops.sh github-actions-config --repo OWNER/REPO
-sh ./scripts/infra-ops.sh pre-go-live-evidence --repo OWNER/REPO
+# Historical mutable local ops-runner commands retired. The authenticated exact-image-ID path remains EXTERNAL-PENDING until the external producer is configured.
 node --check scripts/infra-ops.mjs
 node scripts/infra-ops.mjs offsite-restore-drill-restic --planOnly
 node scripts/infra-ops.mjs linux-portability-check

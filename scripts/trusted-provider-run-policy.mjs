@@ -19,8 +19,8 @@ function exactWorkflowPath(value) {
 
 function exactSourceRef(value) {
   const text = String(value ?? "");
-  if (!/^refs\/heads\/[A-Za-z0-9._/-]+$/.test(text) || text.includes("..") || text.endsWith("/")) {
-    invalid("trusted producer source ref is invalid.");
+  if (text !== "refs/heads/main") {
+    invalid("trusted producer source ref must be exact main.");
   }
   return text;
 }

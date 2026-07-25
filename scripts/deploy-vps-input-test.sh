@@ -2,7 +2,9 @@
 set -eu
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/deploy-vps-input-test.XXXXXX")
+TMP=$(CDPATH= cd -- "$TMP" && pwd -P)
 trap 'rm -rf "$TMP"' EXIT HUP INT TERM
 RELEASE_SHA=$(printf 'a%.0s' $(seq 1 40))
 RELEASE_TREE=$(printf 'b%.0s' $(seq 1 40))
@@ -48,19 +50,33 @@ SH
 chmod 700 "$TMP/ssh" "$TMP/git"
 
 cat > "$TMP/ready-policy.json" <<'EOF'
-{"version":1,"status":"READY","trustedVerifierChannel":"external-admission-controller/prod","requiredReceiptKind":"platform-trusted-deployment-admission/v1","selfAssertedAnnotationsAccepted":false,"trustedProducer":{"repository":"owner/trusted-admission","workflowPath":".github/workflows/produce-admission.yml","workflowSha":"4444444444444444444444444444444444444444","sourceRef":"refs/heads/main","event":"workflow_dispatch"}}
+{"version":1,"status":"READY","trustedVerifierChannel":"external-admission-controller/prod","trustedOpsImageRepository":"ghcr.io/owner/platform-infrastructure-ops","requiredReceiptKind":"platform-trusted-deployment-admission/v1","selfAssertedAnnotationsAccepted":false,"trustedProducer":{"repository":"owner/trusted-admission","workflowPath":".github/workflows/produce-admission.yml","workflowSha":"4444444444444444444444444444444444444444","sourceRef":"refs/heads/main","event":"workflow_dispatch"}}
 EOF
 cat > "$TMP/artifact.json" <<EOF
 {"version":1,"kind":"platform-release-artifact-verification/v1","status":"EXTERNAL-PENDING","artifactVerification":"passed","deploymentAdmission":"EXTERNAL-PENDING","usageScope":"artifact-verification-only","repository":"owner/repo","commitSha":"$RELEASE_SHA","generatedAt":"2026-07-21T00:00:00.000Z","manifestSha256":"$MANIFEST_SHA","sbomSha256":"$SBOM_SHA","subjects":[{"key":"APP_IMAGE","image":"$IMAGE"}],"provenance":{"verificationFingerprint":"$(printf '1%.0s' $(seq 1 64))","manifestVerificationFingerprint":"$(printf '2%.0s' $(seq 1 64))"}}
 EOF
 ARTIFACT_SHA=$(hash_file "$TMP/artifact.json")
 cat > "$TMP/admission.json" <<EOF
-{"version":1,"kind":"platform-trusted-deployment-admission/v1","status":"READY","artifactVerification":"passed","deploymentAdmission":"READY","repository":"owner/repo","commitSha":"$RELEASE_SHA","treeSha":"$RELEASE_TREE","artifactVerificationReceiptSha256":"$ARTIFACT_SHA","manifestSha256":"$MANIFEST_SHA","sbomSha256":"$SBOM_SHA","generatedAt":"2026-07-21T00:00:00.000Z","decisionId":"decision:12345678","verifier":{"channel":"external-admission-controller/prod","fingerprint":"$(printf '3%.0s' $(seq 1 64))","selfAsserted":false,"verifiedAt":"2026-07-21T00:00:00.000Z"},"producer":{"repository":"owner/trusted-admission","workflowPath":".github/workflows/produce-admission.yml","sourceRef":"refs/heads/main","event":"workflow_dispatch","runId":"123456","runAttempt":1,"workflowSha":"$(printf '4%.0s' $(seq 1 40))"}}
+{"version":1,"kind":"platform-trusted-deployment-admission/v1","status":"READY","artifactVerification":"passed","deploymentAdmission":"READY","repository":"owner/repo","commitSha":"$RELEASE_SHA","treeSha":"$RELEASE_TREE","artifactVerificationReceiptSha256":"$ARTIFACT_SHA","manifestSha256":"$MANIFEST_SHA","sbomSha256":"$SBOM_SHA","generatedAt":"2026-07-21T00:00:00.000Z","decisionId":"decision:12345678","verifier":{"channel":"external-admission-controller/prod","fingerprint":"$(printf '3%.0s' $(seq 1 64))","selfAsserted":false,"verifiedAt":"2026-07-21T00:00:00.000Z"},"producer":{"repository":"owner/trusted-admission","workflowPath":".github/workflows/produce-admission.yml","workflowSha":"$(printf '4%.0s' $(seq 1 40))","sourceRef":"refs/heads/main","event":"workflow_dispatch","runId":"123456","runAttempt":1},"opsRunner":{"image":"ghcr.io/owner/platform-infrastructure-ops@sha256:$(printf '5%.0s' $(seq 1 64))","imageId":"sha256:$(printf '6%.0s' $(seq 1 64))","verificationFingerprint":"$(printf '7%.0s' $(seq 1 64))","providerAttested":true}}
 EOF
 ADMISSION_SHA=$(hash_file "$TMP/admission.json")
+cat > "$TMP/provider.json" <<'EOF'
+{"id":123456,"run_attempt":1,"repository":{"full_name":"owner/trusted-admission"},"head_repository":{"full_name":"owner/trusted-admission"},"path":".github/workflows/produce-admission.yml","head_branch":"main","head_sha":"4444444444444444444444444444444444444444","event":"workflow_dispatch","status":"completed","conclusion":"success"}
+EOF
+PROVIDER_SHA=$(hash_file "$TMP/provider.json")
 printf '%s\n' '[example.internal]:2222 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILBajvJtpsX+LmnBbwAcOXdb9LRHK+d9WJlVKLaAklDO' > "$TMP/known_hosts"
 printf '%s\n' 'test-only-private-key' > "$TMP/deploy_key"
 chmod 600 "$TMP/deploy_key"
+
+# Positive-path fixtures execute an unmodified copy of the deployment scripts
+# with a fixture policy in that copy. The production checkout keeps its
+# repository-owned EXTERNAL-PENDING policy and exposes no policy-path override.
+TEST_ROOT="$TMP/test-root"
+mkdir -p "$TEST_ROOT/governance"
+cp -R "$SCRIPT_DIR" "$TEST_ROOT/scripts"
+cp -R "$ROOT/vendor" "$TEST_ROOT/vendor"
+cp "$TMP/ready-policy.json" "$TEST_ROOT/governance/deployment-admission.json"
+TEST_DEPLOY_SCRIPT="$TEST_ROOT/scripts/deploy-vps.sh"
 
 expect_reject() {
   label=$1
@@ -75,8 +91,6 @@ expect_reject() {
 base_env() {
   env \
     PATH="$TMP:$PATH" \
-    PLATFORM_DEPLOY_TEST_MODE=1 \
-    DEPLOY_ADMISSION_POLICY_PATH="$TMP/ready-policy.json" \
     DEPLOY_REMOTE='deploy@example.internal' \
     DEPLOY_SSH_PORT=2222 \
     DEPLOY_REMOTE_DIR='/opt/platform-infrastructure' \
@@ -91,6 +105,10 @@ base_env() {
     DEPLOY_ARTIFACT_RECEIPT_SHA256="$ARTIFACT_SHA" \
     DEPLOY_ADMISSION_RECEIPT_PATH="$TMP/admission.json" \
     DEPLOY_ADMISSION_RECEIPT_SHA256="$ADMISSION_SHA" \
+    DEPLOY_TRUSTED_PROVIDER_METADATA_PATH="$TMP/provider.json" \
+    DEPLOY_TRUSTED_PROVIDER_METADATA_SHA256="$PROVIDER_SHA" \
+    DEPLOY_TRUSTED_PROVIDER_RUN_ID=123456 \
+    DEPLOY_TRUSTED_PROVIDER_RUN_ATTEMPT=1 \
     DEPLOY_RUN_WAF_SMOKE=1 \
     DEPLOY_RUN_INFRA_HEALTH=1 \
     DEPLOY_RUN_PRODUCTION_PREFLIGHT=1 \
@@ -108,7 +126,7 @@ base_env() {
 expect_base_reject() {
   label=$1
   shift
-  if base_env "$@" sh "$SCRIPT_DIR/deploy-vps.sh" >/dev/null 2>&1; then
+  if base_env "$@" sh "$TEST_DEPLOY_SCRIPT" >/dev/null 2>&1; then
     echo "FAIL: $label was accepted" >&2
     exit 1
   fi
@@ -125,6 +143,8 @@ expect_reject repo-metachar env DEPLOY_REMOTE='deploy@example.internal' DEPLOY_R
 expect_reject short-approved-sha env DEPLOY_REMOTE='deploy@example.internal' DEPLOY_REPO='owner/repo' DEPLOY_RELEASE_SHA=abc
 expect_reject missing-receipts env DEPLOY_REMOTE='deploy@example.internal' DEPLOY_REPO='owner/repo' DEPLOY_RELEASE_SHA="$RELEASE_SHA" DEPLOY_RELEASE_TREE="$RELEASE_TREE"
 expect_base_reject wrong-artifact-hash env DEPLOY_ARTIFACT_RECEIPT_SHA256="$(printf '9%.0s' $(seq 1 64))"
+expect_base_reject wrong-provider-metadata-hash env DEPLOY_TRUSTED_PROVIDER_METADATA_SHA256="$(printf '8%.0s' $(seq 1 64))"
+expect_base_reject wrong-provider-run-attempt env DEPLOY_TRUSTED_PROVIDER_RUN_ATTEMPT=2
 export FAKE_SSH_ARGS="$TMP/ssh-args.txt"
 export FAKE_SSH_STDIN="$TMP/ssh-stdin.sh"
 rm -f "$FAKE_SSH_ARGS" "$FAKE_SSH_STDIN"
@@ -142,7 +162,7 @@ mv "$TMP/wrong-port-known-hosts.next" "$TMP/wrong-port-known-hosts"
 expect_base_reject wrong-host-port-pin env DEPLOY_KNOWN_HOSTS_PATH="$TMP/wrong-port-known-hosts"
 
 expected_known_host_record='[example.internal]:2222 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILBajvJtpsX+LmnBbwAcOXdb9LRHK+d9WJlVKLaAklDO'
-base_env env SWAP_KNOWN_HOSTS_SOURCE="$TMP/known_hosts" ORIGINAL_SSH_KEY_SOURCE="$TMP/deploy_key" EXPECTED_KNOWN_HOST_RECORD="$expected_known_host_record" sh "$SCRIPT_DIR/deploy-vps.sh"
+base_env env SWAP_KNOWN_HOSTS_SOURCE="$TMP/known_hosts" ORIGINAL_SSH_KEY_SOURCE="$TMP/deploy_key" EXPECTED_KNOWN_HOST_RECORD="$expected_known_host_record" sh "$TEST_DEPLOY_SCRIPT"
 grep -Fx 'deploy@example.internal' "$FAKE_SSH_ARGS" >/dev/null
 grep -Fx 'sh -s' "$FAKE_SSH_ARGS" >/dev/null
 grep -Fx 'StrictHostKeyChecking=yes' "$FAKE_SSH_ARGS" >/dev/null
@@ -159,6 +179,8 @@ if grep -F 'accept-new' "$FAKE_SSH_ARGS" >/dev/null; then echo "FAIL: accept-new
 if grep -F '/opt/platform-infrastructure' "$FAKE_SSH_STDIN" >/dev/null; then echo "FAIL: raw remote directory leaked into generated shell" >&2; exit 1; fi
 grep -E "^PLATFORM_RELEASE_SHA_B64='[A-Za-z0-9+/=]+'$" "$FAKE_SSH_STDIN" >/dev/null
 grep -E "^PLATFORM_ADMISSION_RECEIPT_B64='[A-Za-z0-9+/=]+'$" "$FAKE_SSH_STDIN" >/dev/null
+grep -E "^PLATFORM_PROVIDER_METADATA_B64='[A-Za-z0-9+/=]+'$" "$FAKE_SSH_STDIN" >/dev/null
+grep -E "^PLATFORM_PROVIDER_RUN_ID_B64='[A-Za-z0-9+/=]+'$" "$FAKE_SSH_STDIN" >/dev/null
 printf 'PASS\texact-release-receipts-host-port-and-encoded-request\n'
 
 expect_reject production-policy-stays-external-pending env \
@@ -166,6 +188,8 @@ expect_reject production-policy-stays-external-pending env \
   DEPLOY_REPO='owner/repo' DEPLOY_RELEASE_SHA="$RELEASE_SHA" DEPLOY_RELEASE_TREE="$RELEASE_TREE" \
   DEPLOY_ARTIFACT_RECEIPT_PATH="$TMP/artifact.json" DEPLOY_ARTIFACT_RECEIPT_SHA256="$ARTIFACT_SHA" \
   DEPLOY_ADMISSION_RECEIPT_PATH="$TMP/admission.json" DEPLOY_ADMISSION_RECEIPT_SHA256="$ADMISSION_SHA" \
+  DEPLOY_TRUSTED_PROVIDER_METADATA_PATH="$TMP/provider.json" DEPLOY_TRUSTED_PROVIDER_METADATA_SHA256="$PROVIDER_SHA" \
+  DEPLOY_TRUSTED_PROVIDER_RUN_ID=123456 DEPLOY_TRUSTED_PROVIDER_RUN_ATTEMPT=1 \
   FAKE_RELEASE_SHA="$RELEASE_SHA" FAKE_RELEASE_TREE="$RELEASE_TREE"
 
-printf 'deploy VPS input tests passed 18/18\n'
+printf 'deploy VPS input tests passed 20/20\n'

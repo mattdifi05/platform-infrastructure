@@ -230,13 +230,6 @@ export function parseCryptographicallyVerifiedGithubOutput(rawOutput, {
   };
 }
 
-function verifierBinary() {
-  if (process.env.PLATFORM_RELEASE_TRUST_TEST_MODE === "1" && process.env.GITHUB_CLI_BIN) {
-    return process.env.GITHUB_CLI_BIN;
-  }
-  return "/usr/local/bin/gh";
-}
-
 function safeVerifierError(value) {
   return String(value ?? "")
     .replace(/(?:Bearer|token)\s+[A-Za-z0-9._~-]+/gi, "[credential redacted]")
@@ -245,9 +238,9 @@ function safeVerifierError(value) {
     .slice(0, 1000);
 }
 
-export function verifyGithubAttestation(options) {
+export function verifyGithubAttestation(options, { verifierBinary = "/usr/local/bin/gh" } = {}) {
   const args = buildGithubAttestationVerifyArgs(options);
-  const result = spawnSync(verifierBinary(), args, {
+  const result = spawnSync(verifierBinary, args, {
     encoding: "utf8",
     env: process.env,
     maxBuffer: 16 * 1024 * 1024,
@@ -283,7 +276,7 @@ export function verifyGithubAttestation(options) {
   };
 }
 
-export function verifyGithubReleaseImages({ images, ...options }) {
+export function verifyGithubReleaseImages({ images, ...options }, runtime = {}) {
   if (!Array.isArray(images) || images.length === 0) {
     invalid("At least one release image is required for attestation verification.");
   }
@@ -294,7 +287,7 @@ export function verifyGithubReleaseImages({ images, ...options }) {
       subject: normalized.subject,
       expectedSubjectDigest: normalized.sha256,
       expectedSubjectName: normalized.name,
-    });
+    }, runtime);
   });
   const subjects = [];
   const seen = new Set();

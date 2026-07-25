@@ -1,5 +1,17 @@
 # Platform Enterprise Runbook
 
+## Stato di admission corrente
+
+Il producer ops trusted non e' configurato nella policy versionata:
+`scripts/infra-ops.sh` e `scripts/prepare-hosted-workloads.sh` terminano
+`EXTERNAL-PENDING` con codice 78 prima di eseguire un container operativo.
+Il percorso positivo esiste, ma richiede receipt artifact/deployment, metadata
+del run provider, checkout pulito ed esatto e corrispondenza fra digest e image
+ID locale; esegue quell'ID con `--pull=never`. Finche' la policy resta pending,
+i comandi wrapper non sono procedure production ne' evidence positiva. I
+controlli repository attivi girano nei job CI non privilegiati sul checkout
+esatto.
+
 ## Incident triage
 
 1. Check service health:
@@ -18,10 +30,14 @@
 `audit-log-evidence.sh` verifies append-only audit events, durable outbox dispatch, alerts, dashboards and optional Platform source wiring, then writes non-secret reports under `reports/audit-logs/`.
 `retention-evidence.sh` verifies bounded Docker logs, Loki/Promtail retention, Prometheus TSDB retention, Grafana log panels and optional Platform structured log redaction, then writes non-secret reports under `reports/retention/`.
 
-The shell wrappers are container-first and default to no Docker authority.
-Scheduled backup/restore jobs use the internal typed gateway; other Docker
-operations require the explicit recovery flags documented in
-`RUNTIME-ISOLATION.md`. No loopback or ephemeral raw Docker API is created.
+The shell wrappers are fail-closed: there is no local image default, automatic
+build, image-label trust or host-Node bypass. When the trusted producer policy
+is READY, the wrapper revalidates the exact provider receipt chain and local
+checkout before executing only the admitted local image ID with
+`--pull=never`; with the repository policy still pending, execution stops.
+Scheduled backup/restore jobs remain socketless and submit only fixed semantic
+actions to the root-owned broker. No loopback or ephemeral raw Docker API is
+created.
 
 Terminology: **Infrastructure Portal** is the operator product surface,
 **Control Center** is the Node service that serves it, and `portal.<domain>` is
@@ -276,17 +292,11 @@ portal quota metadata. The T13 candidate now applies hard CPU/RAM/PID/FD/I/O
 limits through `compose.runtime-isolation.yaml`; the old live containers remain
 unlimited until an approved per-service rollout.
 
-Validate the desired runtime without recreating live services:
+The non-privileged CI validates the desired runtime without recreating live
+services. Locally, the isolated sandbox below remains available:
 
 ```sh
-sh ./scripts/runtime-isolation-check.sh --env-file=.env.vps.example
 sh ./scripts/runtime-isolation-sandbox-test.sh
-sh ./scripts/infra-ops.sh testing-hygiene
-HOSTED_WORKLOAD_CATALOG=/path/hosted-workloads.json \
-HOSTED_WORKLOAD_ROOT=/path/applications \
-HOSTED_WORKLOAD_LOCK=/path/private/hosted-workloads.lock.json \
-COMPOSE_ENV_FILE=.env.vps \
-sh ./scripts/prepare-hosted-workloads.sh
 ```
 
 The stress sandbox is capped at 0.25 CPU and 96 MiB. The hosted workload
@@ -296,6 +306,8 @@ compares core/combined renders and writes a hash-locked contract. Follow
 Runtime renders use `HOSTED_WORKLOAD_MODE=hosted` with a verified non-empty
 lock, or explicit `HOSTED_WORKLOAD_MODE=no-hosted` with an empty lock and the
 canonical `config/no-hosted-workloads.lock.json`.
+The lock preparation becomes available only through the authenticated ops image
+ID after the external producer is configured.
 
 ## Service identities and storage policy
 
@@ -871,14 +883,13 @@ sh ./scripts/platform-admin-audit.sh
 
 Release approval is mandatory before public traffic is changed. The approver
 must verify the release SHA, immutable image digests, SBOM artifact, provenance
-attestation, rollback target and the output of:
+attestation, rollback target and the authenticated workflow artifacts. Start
+only the pinned `release-attestation.yml` and `enterprise-infra.yml` workflows;
+local wrapper output is not admission evidence:
 
 ```sh
-GITHUB_REF=refs/heads/main sh ./scripts/infra-ops.sh release-artifact-gate --requireProvenance --repo OWNER/REPO --sourceRef refs/heads/main
 gh workflow run release-attestation.yml --repo OWNER/REPO --ref main
-GITHUB_REF=refs/heads/main sh ./scripts/release-evidence.sh --requireProvenance --repo OWNER/REPO --sourceRef refs/heads/main --imageManifest reports/release/release-subjects-<run-id>.json --sbom reports/release/github-release-sbom-<run-id>.cdx.json --buildkitSbom reports/release/buildkit-sbom-<run-id>.spdx.json --registryDescriptor reports/release/registry-descriptor-<run-id>.json --registryResolution reports/release/registry-resolution-<run-id>.json --previousImagesFile ./release/previous-images.json
-sh ./scripts/infra-ops.sh governance-check
-sh ./scripts/infra-ops.sh enterprise-10-check
+gh workflow run enterprise-infra.yml --repo OWNER/REPO --ref main
 ```
 
 Loose local SLSA statements, unsigned DSSE-looking envelopes and normalized
@@ -1184,21 +1195,18 @@ or live execution into a pass.
 The platform must render and pass its gates with zero hosted applications.
 Before attaching an external workload, publish its digest-pinned images and
 keep its manifest, Compose overlay, non-secret runtime environment and database
-migrations in the application repository. Then prepare and verify the lock:
+migrations in the application repository. Run preparation only with the exact
+trusted receipt/provider environment from the configured producer; the wrapper
+revalidates that chain and executes the admitted image ID. With the current
+policy it returns `EXTERNAL-PENDING`. Verify the delivered regular lock file:
 
 ```sh
-HOSTED_WORKLOAD_CATALOG=/path/hosted-workloads.json \
-HOSTED_WORKLOAD_ROOT=/path/applications \
-HOSTED_WORKLOAD_LOCK=/path/private/hosted-workloads.lock.json \
-COMPOSE_ENV_FILE=.env \
-sh ./scripts/prepare-hosted-workloads.sh
-
 sh ./scripts/hosted-workload-lock.sh \
   /path/private/hosted-workloads.lock.json verify
 ```
 
-Preparation does not start services or change a database. Review the generated
-core and combined render evidence, take fresh backup/restore evidence, and apply
+The trusted preparation stage must not start services or change a database.
+Review its core and combined render evidence, take fresh backup/restore evidence, and apply
 application migrations only through the application runbook with its explicit
 confirmation gate. Activation or replacement of workload containers requires a
 separate approved maintenance window. A changed manifest, image environment or

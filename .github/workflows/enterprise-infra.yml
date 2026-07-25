@@ -53,6 +53,9 @@ jobs:
     steps:
       - name: Checkout infrastructure
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
       - name: Check shell scripts parse
         run: |
           for file in scripts/*.sh; do
@@ -63,9 +66,9 @@ jobs:
             fi
           done
       - name: Maintainability policy
-        run: sh ./scripts/infra-ops.sh maintainability-hygiene
+        run: node ./scripts/infra-ops.mjs maintainability-hygiene
       - name: Infrastructure behavior tests
-        run: sh ./scripts/infra-ops.sh testing-hygiene
+        run: node ./scripts/infra-ops.mjs testing-hygiene
       - name: Upload quality evidence reports
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -78,9 +81,14 @@ jobs:
   compose:
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    env:
+      PLATFORM_OPS_IMAGE: ghcr.io/example.invalid/platform-ops@sha256:0000000000000000000000000000000000000000000000000000000000000000
     steps:
       - name: Checkout infrastructure
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
       - name: Prepare Compose fixtures
         run: |
           mkdir -p .tmp/optional-project-source secrets traefik/certs
@@ -115,18 +123,20 @@ jobs:
             -f compose.yaml -f compose.secrets.yaml -f compose.backup-scheduler.yaml \
             --profile backup config --quiet
       - name: Network segmentation policy
-        run: sh ./scripts/infra-ops.sh network-segmentation-check --envFile .env.vps.example
+        run: node ./scripts/infra-ops.mjs network-segmentation-check --envFile .env.vps.example
       - name: HA configuration check
-        run: sh ./scripts/infra-ops.sh ha-config-check
+        run: node ./scripts/infra-ops.mjs ha-config-check
       - name: Managed secrets preflight
-        run: sh ./scripts/infra-ops.sh managed-secrets-preflight --noDocker
+        run: node ./scripts/infra-ops.mjs managed-secrets-preflight --noDocker
       - name: Compose healthcheck coverage
-        run: sh ./scripts/infra-ops.sh compose-healthcheck-coverage
+        run: node ./scripts/infra-ops.mjs compose-healthcheck-coverage
       - name: Functional health policy
-        run: sh ./scripts/infra-ops.sh functional-health-check --noDocker
+        run: node ./scripts/infra-ops.mjs functional-health-check --noDocker
       - name: Backup scheduler dry run
         run: |
-          docker build -f docker/ops.Dockerfile -t platform/ops:ci .
+          docker build --iidfile "${RUNNER_TEMP}/ops-test-image-id" -f docker/ops.Dockerfile .
+          OPS_TEST_IMAGE_ID="$(cat "${RUNNER_TEMP}/ops-test-image-id")"
+          case "$OPS_TEST_IMAGE_ID" in sha256:????????????????????????????????????????????????????????????????) ;; *) exit 1 ;; esac
           docker run --rm \
             -e BACKUP_SCHEDULER_DRY_RUN=true \
             -e PLATFORM_INFRA_HOST_ROOT="${{ github.workspace }}" \
@@ -134,7 +144,7 @@ jobs:
             -v /var/run/docker.sock:/var/run/docker.sock \
             -v "${{ github.workspace }}:/infra:ro" \
             -v "${{ github.workspace }}/.tmp/optional-project-source:/project:ro" \
-            --entrypoint sh platform/ops:ci /infra/scripts/backup-scheduler.sh
+            --entrypoint sh "$OPS_TEST_IMAGE_ID" /infra/scripts/backup-scheduler.sh
       - name: Upload Compose evidence reports
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -150,6 +160,9 @@ jobs:
     steps:
       - name: Checkout infrastructure
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
       - name: GitHub Actions workflow lint
         run: |
           docker run --rm -v "$PWD:/repo" -w /repo \
@@ -158,7 +171,7 @@ jobs:
       - name: Supply-chain lock and negative fixtures
         run: |
           node --test scripts/supply-chain-policy.test.mjs
-          PLATFORM_OPS_USE_HOST_NODE=1 sh ./scripts/supply-chain-lock-check.sh
+          node ./scripts/infra-ops.mjs supply-chain-lock-check
       - name: Build context and daemon isolation sandboxes
         run: |
           sh ./scripts/build-context-sandbox-test.sh
@@ -166,9 +179,9 @@ jobs:
           sh ./scripts/core-image-supply-chain-test.sh
           sh ./scripts/helper-image-supply-chain-test.sh
       - name: Secret scan
-        run: sh ./scripts/infra-ops.sh secret-scan
+        run: node ./scripts/infra-ops.mjs secret-scan
       - name: Static security checks
-        run: sh ./scripts/infra-ops.sh static-security-check --infraOnly
+        run: node ./scripts/infra-ops.mjs static-security-check --infraOnly
       - name: Hosted workload contract tests
         run: node --test scripts/hosted-workload-contract.test.mjs
       - name: Release artifact and admission policy tests
@@ -220,6 +233,9 @@ jobs:
     steps:
       - name: Checkout infrastructure
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
       - name: Download gate evidence
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -227,61 +243,61 @@ jobs:
           path: reports
           merge-multiple: true
       - name: External uptime manifest dry run
-        run: sh ./scripts/infra-ops.sh external-uptime-check --dryRun
+        run: node ./scripts/infra-ops.mjs external-uptime-check --dryRun
       - name: Cloudflare Access admin dry run
-        run: sh ./scripts/infra-ops.sh cloudflare-access-admin --manifest cloudflare/access-admin.example.json
+        run: node ./scripts/infra-ops.mjs cloudflare-access-admin --manifest cloudflare/access-admin.example.json
       - name: Cloudflare from-zero dry run
-        run: sh ./scripts/infra-ops.sh cloudflare-from-zero --manifest cloudflare/from-zero.example.json
+        run: node ./scripts/infra-ops.mjs cloudflare-from-zero --manifest cloudflare/from-zero.example.json
       - name: GitHub branch protection policy dry run
-        run: sh ./scripts/infra-ops.sh github-branch-protection --repo "${{ github.repository }}" --branch main --dryRun
+        run: node ./scripts/infra-ops.mjs github-branch-protection --repo "${{ github.repository }}" --branch main --dryRun
       - name: GitHub environments policy dry run
-        run: sh ./scripts/infra-ops.sh github-environments --repo "${{ github.repository }}" --dryRun
+        run: node ./scripts/infra-ops.mjs github-environments --repo "${{ github.repository }}" --dryRun
       - name: GitHub Actions runtime policy dry run
-        run: sh ./scripts/infra-ops.sh github-actions-config --repo "${{ github.repository }}"
+        run: node ./scripts/infra-ops.mjs github-actions-config --repo "${{ github.repository }}"
       - name: GitHub Actions run evidence plan
-        run: sh ./scripts/infra-ops.sh github-actions-run-evidence --repo "${{ github.repository }}" --workflow enterprise-infra.yml --branch main --sha "${{ github.sha }}"
+        run: node ./scripts/infra-ops.mjs github-actions-run-evidence --repo "${{ github.repository }}" --workflow enterprise-infra.yml --branch main --sha "${{ github.sha }}"
       - name: Rate limit evidence
-        run: sh ./scripts/infra-ops.sh rate-limit-evidence
+        run: node ./scripts/infra-ops.mjs rate-limit-evidence
       - name: Audit log evidence
-        run: sh ./scripts/infra-ops.sh audit-log-evidence
+        run: node ./scripts/infra-ops.mjs audit-log-evidence
       - name: Retention evidence
-        run: sh ./scripts/infra-ops.sh retention-evidence
+        run: node ./scripts/infra-ops.mjs retention-evidence
       - name: Secret rotation evidence plan
-        run: sh ./scripts/infra-ops.sh secret-rotation-evidence
+        run: node ./scripts/infra-ops.mjs secret-rotation-evidence
       - name: DR readiness check
-        run: sh ./scripts/infra-ops.sh dr-readiness-check
+        run: node ./scripts/infra-ops.mjs dr-readiness-check --envFile .env.example
       - name: DR evidence summary
-        run: sh ./scripts/infra-ops.sh dr-evidence
+        run: node ./scripts/infra-ops.mjs dr-evidence
       - name: Off-site restore drill plan
-        run: sh ./scripts/infra-ops.sh offsite-restore-drill-restic --planOnly
+        run: node ./scripts/infra-ops.mjs offsite-restore-drill-restic --planOnly
       - name: Release evidence plan
-        run: sh ./scripts/infra-ops.sh release-evidence --planOnly
+        run: node ./scripts/infra-ops.mjs release-evidence --planOnly
       - name: Alert evidence summary
-        run: sh ./scripts/infra-ops.sh alert-evidence
+        run: node ./scripts/infra-ops.mjs alert-evidence
       - name: Production go-no-go summary
-        run: sh ./scripts/infra-ops.sh production-go-no-go
+        run: node ./scripts/infra-ops.mjs production-go-no-go
       - name: Pre go-live evidence report
-        run: sh ./scripts/infra-ops.sh pre-go-live-evidence --infraOnly --repo "${{ github.repository }}" --allowFailures
+        run: node ./scripts/infra-ops.mjs pre-go-live-evidence --infraOnly --repo "${{ github.repository }}" --allowFailures
       - name: Enterprise requirements traceability
-        run: sh ./scripts/infra-ops.sh enterprise-requirements-check
+        run: node ./scripts/infra-ops.mjs enterprise-requirements-check
       - name: Production readiness checklist
-        run: sh ./scripts/infra-ops.sh enterprise-requirements-check --manifest governance/production-readiness.json
+        run: node ./scripts/infra-ops.mjs enterprise-requirements-check --manifest governance/production-readiness.json
       - name: Production live proof gate rejects missing evidence
         run: |
-          if sh ./scripts/infra-ops.sh enterprise-requirements-check --manifest governance/production-readiness.json --requireLiveProofs; then
+          if node ./scripts/infra-ops.mjs enterprise-requirements-check --manifest governance/production-readiness.json --requireLiveProofs; then
             echo "Live proof gate passed without real production evidence." >&2
             exit 1
           fi
       - name: Repository coverage audit
-        run: sh ./scripts/infra-ops.sh repo-coverage-check
+        run: node ./scripts/infra-ops.mjs repo-coverage-check
       - name: Linux portability check
-        run: sh ./scripts/infra-ops.sh linux-portability-check
+        run: node ./scripts/infra-ops.mjs linux-portability-check
       - name: Evidence bundle smoke
-        run: sh ./scripts/infra-ops.sh evidence-bundle --phase candidate-ci --strict --noArchive
+        run: node ./scripts/infra-ops.mjs evidence-bundle --phase candidate-ci --strict --noArchive
       - name: Evidence bundle integrity verify
         run: |
           set +e
-          output=$(sh ./scripts/infra-ops.sh evidence-bundle-verify --phase candidate-ci --requireComplete 2>&1)
+          output=$(node ./scripts/infra-ops.mjs evidence-bundle-verify --phase candidate-ci --requireComplete 2>&1)
           status=$?
           set -e
           printf '%s\n' "$output"
@@ -309,6 +325,9 @@ jobs:
       url: ${{ vars.DAST_TARGET }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
       - name: Run ZAP baseline against staging
         env:
           DAST_TARGET: ${{ vars.DAST_TARGET }}
@@ -628,6 +647,10 @@ jobs:
           DEPLOY_ARTIFACT_RECEIPT_SHA256: ${{ needs.release-admission.outputs.artifact_receipt_sha256 }}
           DEPLOY_ADMISSION_RECEIPT_PATH: ${{ runner.temp }}/admitted-deployment-receipts/trusted-deployment-admission.json
           DEPLOY_ADMISSION_RECEIPT_SHA256: ${{ needs.release-admission.outputs.deployment_receipt_sha256 }}
+          DEPLOY_TRUSTED_PROVIDER_METADATA_PATH: ${{ runner.temp }}/admitted-deployment-receipts/trusted-provider-run.json
+          DEPLOY_TRUSTED_PROVIDER_METADATA_SHA256: ${{ needs.release-admission.outputs.trusted_provider_metadata_sha256 }}
+          DEPLOY_TRUSTED_PROVIDER_RUN_ID: ${{ needs.release-admission.outputs.trusted_provider_run_id }}
+          DEPLOY_TRUSTED_PROVIDER_RUN_ATTEMPT: ${{ needs.release-admission.outputs.trusted_provider_run_attempt }}
           DEPLOY_RUN_WAF_SMOKE: "1"
           DEPLOY_RUN_INFRA_HEALTH: "1"
           DEPLOY_RUN_PRODUCTION_PREFLIGHT: "1"

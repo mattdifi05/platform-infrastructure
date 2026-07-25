@@ -43,7 +43,7 @@ Use this checklist on the VPS Ubuntu LTS VPS before exposing public traffic.
 - [ ] `sh ./scripts/vps-preflight.sh .env` passed and rendered the canonical VPS+WAF stack, including `compose.runtime.yaml` and `compose.networks.yaml` loaded last.
 - [ ] The zero-workload core render passed independently and contains no application backend, frontend, worker, schema migration or application secret requirement.
 - [ ] Each attached application has an external catalog entry, application-owned manifest and Compose overlay, digest-pinned images, ignored non-secret runtime environment and application-owned migration/rollback procedure.
-- [ ] `sh ./scripts/prepare-hosted-workloads.sh` produced a `verified` lock with mode `0600`; core and combined render diffs contain only the declared workload services, routes, networks and secrets.
+- [ ] The configured trusted ops producer delivered a `verified` lock with mode `0600`; repository-local preparation is `EXTERNAL-PENDING`, and core/combined render diffs contain only the declared workload services, routes, networks and secrets.
 - [ ] `sh ./scripts/hosted-workload-lock.sh <lock-file> verify` passed immediately before the approved workload activation window.
 - [ ] `sh ./scripts/network-segmentation-check.sh --envFile .env` passed and its non-secret report under `reports/network-segmentation/` was archived outside Git.
 - [ ] `sh ./scripts/network-segmentation-sandbox-test.sh` passed, proving allowed ingress/data paths and denied router-to-DB, app-to-observability and cross-app paths.

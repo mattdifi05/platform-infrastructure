@@ -28,7 +28,7 @@ for command in up start restart build pull create run exec cp down stop kill rm;
 done
 printf 'PASS\tcompose-wrapper-is-read-only\n'
 
-if PLATFORM_OPS_USE_HOST_NODE=1 sh "$SCRIPT_DIR/rollback-release.sh" --confirmRollback >"$TMP/out" 2>"$TMP/err"; then
+if node "$SCRIPT_DIR/infra-ops.mjs" rollback-release --confirmRollback >"$TMP/out" 2>"$TMP/err"; then
   echo "FAIL: legacy rollback apply sink accepted --confirmRollback" >&2
   exit 1
 fi

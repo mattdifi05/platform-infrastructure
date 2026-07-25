@@ -129,7 +129,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           PHP_APACHE_DIGEST: ${{ steps.php-apache.outputs.digest }}
         run: |
-          sh ./scripts/github-attestation-evidence.sh \
+          node ./scripts/infra-ops.mjs github-attestation-evidence \
             --subject "reports/release/release-subjects-${GITHUB_RUN_ID}.json" \
             --expectedSubjectDigest "sha256:${RELEASE_SUBJECTS_SHA256}" \
             --repo "${GITHUB_REPOSITORY}" \

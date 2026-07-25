@@ -122,9 +122,16 @@ trust boundary amministrativa e non deve essere condivisa con servizi workload.
 Il runtime richiede `HOSTED_WORKLOAD_MODE=hosted` con un lock non vuoto; lo
 stato senza workload richiede invece `HOSTED_WORKLOAD_MODE=no-hosted`, lock
 vuoto e il lock canonico `config/no-hosted-workloads.lock.json`.
-Non crea database, non applica migrazioni e non avvia
-container. Il deploy usa soltanto un lock `verified`; se un file cambia, il
-render fallisce chiuso finche' il lock non viene rigenerato e approvato.
+Non crea database, non applica migrazioni e non avvia container. La preparazione
+del lock procede soltanto dopo che `ops-image-trust.sh` ha verificato policy repository-owned,
+receipt artifact/deployment, metadata del run provider, checkout pulito ed
+esatto, digest dell'immagine ops e relativo image ID locale. Il runner viene
+eseguito tramite quell'ID con `--pull=never`; non esiste un fallback locale,
+auto-build o host-Node. Il deploy usa soltanto un lock `verified`; se il
+producer non e' configurato o un input cambia, fallisce chiuso finche' il lock
+non viene rigenerato e approvato. La policy versionata in questa baseline resta
+`EXTERNAL-PENDING`, quindi oggi il percorso production si arresta prima di
+eseguire il container ops.
 
 Il deploy approvato proietta su ogni container core una tupla runtime completa
 tramite `compose.runtime-identity.yaml`: ID candidato FG-048, commit, tree,
@@ -208,9 +215,17 @@ docker compose --env-file .env -p platform_infra_local -f compose.yaml -f compos
 docker compose -f compose.yaml -f compose.secrets.yaml --env-file .env -p platform_infra_local stop phpmyadmin
 ```
 
-## Operazioni container-first
+## Operazioni privilegiate fail-closed
 
-Tutti i wrapper in `scripts/*.sh` delegano a `scripts/infra-ops.sh`, che avvia l'immagine Linux `platform/ops:local` e monta solo repo, eventuale sorgente esterno read-only e Docker socket. L'host non deve avere Node/PHP installati per backup, restore drill, health check, audit o deploy helper.
+`scripts/infra-ops.sh` non costruisce immagini, non accetta label locali e non
+espone un bypass host-Node. Il percorso positivo richiede un producer trusted
+con repo, workflow, revisione, ref `main`, run/attempt provider autenticati e
+receipt legate al checkout pulito ed esatto. Esegue poi esclusivamente l'image
+ID locale ammesso con `--pull=never`. Finche'
+`governance/deployment-admission.json` resta `EXTERNAL-PENDING`, il wrapper
+termina con codice 78. I job CI non privilegiati eseguono direttamente il
+modulo Node dal checkout esatto; questo non abilita operazioni VPS o una
+receipt production.
 
 Per raggiungere i domini locali durante i check runtime, il runner usa `--network host` su Linux e mappa `*.localhost.com` a `host-gateway` su Docker Desktop. Se la tua installazione Docker richiede un target diverso, imposta `PLATFORM_LOCAL_HOST_TARGET`, ad esempio:
 
@@ -476,26 +491,27 @@ I comandi stampano le righe cron da installare sull'host: backup quotidiano, res
 
 ## Gate e controlli
 
-Gate infrastrutturale canonico:
-
-```sh
-cd /opt/platform/platform-infrastructure
-sh ./scripts/infra-ops.sh enterprise-requirements-check
-sh ./scripts/infra-ops.sh enterprise-requirements-check --manifest governance/production-readiness.json
-```
+Il gate infrastrutturale canonico gira nei job non privilegiati del workflow
+`enterprise-infra.yml` sul checkout esatto. Non esiste un equivalente locale
+ammesso tramite `infra-ops.sh` finche' il producer ops trusted resta
+`EXTERNAL-PENDING`.
 
 Se lavori in un vecchio monorepo applicativo puoi trovare ancora riferimenti a
 `/opt/platform/src` e `pnpm enterprise:check`; sono compatibilita' legacy e non
 sono necessari per validare questa repository infrastrutturale.
 
-Audit infrastrutturale diretto:
+Le interfacce shell sotto restano documentate come catalogo operativo, ma ogni
+comando che delega a `infra-ops.sh` deve attualmente terminare con codice 78;
+non usarne l'output come evidence positiva.
+
+Audit infrastrutturale (bloccato senza runner ammesso):
 
 ```sh
 cd /opt/platform/platform-infrastructure
 sh ./scripts/enterprise-hardening-audit.sh
 ```
 
-Controlli disponibili:
+Interfacce di controllo (bloccate senza runner ammesso):
 
 ```sh
 sh ./scripts/static-security-check.sh
@@ -576,11 +592,12 @@ Le vecchie suite account/passkey e le migration account sono compatibilita'
 workload. Non fanno parte dei gate GO/NO-GO della piattaforma hosting e non
 devono essere usate come evidence per promuovere `platform-infrastructure`.
 
-Tutti gli entrypoint sono Linux/Docker-first; il runner comune e' `scripts/infra-ops.sh`.
-Sul VPS non servono Node, pnpm o una toolchain JS installati sull'host: i wrapper
-`scripts/*.sh` costruiscono e usano automaticamente il runner containerizzato
-`platform/ops:local` da `docker/ops.Dockerfile`. L'host deve avere solo Ubuntu LTS,
-Docker Engine, Docker Compose plugin, Git e `jq` per il collector operativo.
+Gli entrypoint privilegiati convergono su `scripts/infra-ops.sh`. Il codice
+preserva un percorso positivo solo per l'immagine ops digest-pinned e per
+l'image ID locale autenticati dalla catena provider; la policy inclusa resta
+bloccata finche' tale producer non viene configurato. Non viene costruita o
+taggata alcuna immagine locale e nessuna label dell'immagine e' considerata
+prova di trust.
 
 La policy GitHub live e' versionata in `governance/github-branch-protection.json`.
 Usa `scripts/github-branch-protection.sh` in dry-run, poi `--apply` e
@@ -641,7 +658,7 @@ verifica il receipt e l'elenco path prima di estrarre i report. Il pin contiene
 soltanto `algoritmo base64-host-key`; hostname e porta arrivano da variabili
 separate e vengono legati in un `known_hosts` a voce singola. Non e' ammesso
 trust-on-first-use.
-Il gate `scripts/infra-ops.sh repo-coverage-check` misura la copertura dei
+Il job CI `node scripts/infra-ops.mjs repo-coverage-check` misura la copertura dei
 file tracciati della repo: ogni file deve rientrare in una categoria
 infrastrutturale e il workflow deve esercitare tutti i gate CI obbligatori.
 Prima del go-live genera un evidence pack con
@@ -901,6 +918,9 @@ Il repository non dispone ancora di un produttore esterno autenticato di
 trusted deployment receipt: `governance/deployment-admission.json` resta
 `EXTERNAL-PENDING` e il workflow blocca intenzionalmente prima di installare la
 chiave SSH. Non impostare localmente `READY` e non usare receipt auto-dichiarate.
+Lo stesso limite vale per `PLATFORM_OPS_IMAGE`, il backup scheduler e la
+preparazione dei workload: nessuno di questi ha un default mutabile o un
+percorso auto-build.
 
 Per il server home-VPS/LAN senza DNS pubblico, mantieni i valori production in
 `.env` e punta i client/operatori ai nomi canonici tramite DNS locale o
@@ -1015,14 +1035,14 @@ fuori dal GO/NO-GO infra.
 - `compose.vps-waf.yaml`: adattamento WAF per VPS con TLS/CDN esterno.
 - `compose.backup-scheduler.yaml`: scheduler backup/restore drill container-first.
 - `config/hosted-workloads.example.json`: catalogo di esempio per workload esterni.
-- `scripts/prepare-hosted-workloads.sh`: risolve catalogo, render core/combined e genera un lock verificato senza avviare container.
+- `scripts/prepare-hosted-workloads.sh`: prepara core/combined render e lock solo dentro l'image ID ops autenticato; con la policy inclusa termina `EXTERNAL-PENDING`.
 - `scripts/hosted-workload-contract.mjs`: valida manifest, immagini immutabili, route, environment e confini core/workload.
 - `scripts/hosted-workload-lock.sh`: verifica hash, permessi e file Compose/environment bloccati dal lock.
 - `traefik/traefik.edge-http.yml`: Traefik per edge TLS esterno.
 - `scripts/*.sh`: entrypoint operativi Linux/Docker.
-- `scripts/infra-ops.sh`: entrypoint container-first che non richiede Node sull'host.
-- `scripts/infra-ops.mjs`: runner operativo eseguito dentro il container ops.
-- `docker/ops.Dockerfile`: immagine operativa con Node, Docker CLI e Compose plugin.
+- `scripts/infra-ops.sh`: confine fail-closed; esegue solo l'image ID ammesso, senza host Node, pull o build.
+- `scripts/infra-ops.mjs`: implementazione usata direttamente dai job CI non privilegiati e dal runner ops dopo admission.
+- `docker/ops.Dockerfile`: definizione dell'immagine ops; non viene auto-buildata ne' auto-ammessa.
 - `BACKUP-RECOVERY-COVERAGE.md`: catalogo dati, retention e recovery della piattaforma.
 - `DATABASE-DELETION-SAFETY.md`: gate, state machine e recovery per le cancellazioni DB.
 - `NETWORK-SEGMENTATION.md`: matrice di comunicazione, SSRF boundary e rollout reti T12.
