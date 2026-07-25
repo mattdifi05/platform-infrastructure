@@ -110,6 +110,8 @@ try {
     "evidence-bundle-anchor.mjs",
     "evidence-bundle-phase.mjs",
     "edge-provider-evidence.mjs",
+    "admin-access-inventory.mjs",
+    "provider-mfa-assurance.mjs",
   ]) cpSync(path.join(repositoryRoot, "scripts", moduleName), path.join(replicaRoot, "scripts", moduleName));
   cpSync(path.join(repositoryRoot, "control-center", "backup", "contracts.mjs"), path.join(replicaRoot, "control-center", "backup", "contracts.mjs"));
   cpSync(path.join(repositoryRoot, "governance", "backup-data-policy.json"), path.join(replicaRoot, "governance", "backup-data-policy.json"));
