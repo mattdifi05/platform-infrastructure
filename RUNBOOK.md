@@ -1268,15 +1268,17 @@ Use this path when TLS and public certificates are terminated by VPS, Cloudflare
    `cloudflare-origin-*`, tutte le regole non possedute e la coppia canonica di
    recovery SSH. Ogni regola posseduta viene eliminata con la sua semantica
    completa (protocollo, sorgente, destinazione, porta e commento), mai tramite
-   un indice numerico catturato in precedenza. Prima e dopo ogni eliminazione
-   rilegge lo stato e rifiuta qualsiasi variazione del multinsieme non posseduto.
-   Un errore o `HUP`/`INT`/`TERM` rimuove il set gestito parziale, ricrea il
-   precedente set posseduto e, se necessario, ricrea realmente entrambe le
-   regole SSH; poi forza `default deny incoming`, ricarica UFW e confronta
-   nuovamente regole possedute e SSH. Le regole web pubbliche generiche, non
-   possedute e insicure, non vengono ricreate. Se lock, cattura, ripristino o
-   verifica non sono esatti, il comando termina nonzero con recovery non
-   verificato e il deploy resta bloccato. Il test locale
+   un indice numerico catturato in precedenza. Prima di attivare la transazione
+   rifiuta anche qualsiasi duplicato con identica semantica posseduta. Prima e
+   dopo ogni eliminazione rilegge lo stato e rifiuta sia identita' mancanti o
+   duplicate sia qualsiasi variazione del multinsieme non posseduto. Un errore o
+   `HUP`/`INT`/`TERM` rimuove il set gestito parziale, ricrea il precedente set
+   posseduto e, se necessario, ricrea realmente entrambe le regole SSH; poi
+   forza `default deny incoming`, ricarica UFW e confronta nuovamente regole
+   possedute e SSH. Le regole web pubbliche generiche, non possedute e insicure,
+   non vengono ricreate. Se lock, cattura, ripristino o verifica non sono esatti,
+   il comando termina nonzero con recovery non verificato e il deploy resta
+   bloccato. Il test locale
    `scripts/cloudflare-origin-lock-ufw-transaction-test.sh` usa soltanto un UFW
    simulato, inietta un errore dopo ogni confine di mutazione, sposta
    concorrentemente gli indici e avvia due apply simultanei; non sostituisce una
