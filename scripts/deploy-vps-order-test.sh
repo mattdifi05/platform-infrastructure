@@ -2,6 +2,7 @@
 set -eu
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/deploy-vps-order-test.XXXXXX")
 trap 'rm -rf "$TMP"' EXIT HUP INT TERM
 mkdir -p "$TMP/remote" "$TMP/bin"
@@ -37,8 +38,13 @@ cat > "$TMP/artifact.json" <<EOF
 {"version":1,"kind":"platform-release-artifact-verification/v1","status":"EXTERNAL-PENDING","artifactVerification":"passed","deploymentAdmission":"EXTERNAL-PENDING","usageScope":"artifact-verification-only","repository":"owner/repo","commitSha":"$RELEASE_SHA","sourceArchiveSha256":"$SOURCE_ARCHIVE_SHA","manifestSha256":"$MANIFEST_SHA","sbomSha256":"$SBOM_SHA","subjects":[{"key":"PHP_APACHE_IMAGE","image":"$APPROVED_IMAGE"}]}
 EOF
 ARTIFACT_SHA=$(hash_file "$TMP/artifact.json")
+cat > "$TMP/runtime-intent.json" <<EOF
+{"version":1,"kind":"platform-runtime-intent/v1","repository":"owner/repo","commitSha":"$RELEASE_SHA","treeSha":"$RELEASE_TREE","sourceArchiveSha256":"$SOURCE_ARCHIVE_SHA","projectName":"platform_infra_vps","environmentSha256":"$(printf '8%.0s' $(seq 1 64))","hostedWorkloadLockSha256":null,"coreComposeSha256":"$(printf '9%.0s' $(seq 1 64))","combinedComposeSha256":"$(printf '0%.0s' $(seq 1 64))","services":[{"service":"backup-scheduler","image":"$OPS_IMAGE","admission":{"kind":"ops-runner"},"expectedLocalImageId":"$OPS_IMAGE_ID"},{"service":"php-apache","image":"$APPROVED_IMAGE","admission":{"kind":"artifact-subject","subjectKey":"PHP_APACHE_IMAGE"},"expectedLocalImageId":"$APPROVED_IMAGE_ID"}],"targetServingServices":["php-apache"]}
+EOF
+RUNTIME_INTENT_SHA=$(node "$ROOT/scripts/runtime-intent-policy.mjs" --hash "$TMP/runtime-intent.json")
+RUNTIME_INTENT=$(tr -d '\r\n' < "$TMP/runtime-intent.json")
 cat > "$TMP/admission.json" <<EOF
-{"version":1,"kind":"platform-trusted-deployment-admission/v1","status":"READY","artifactVerification":"passed","deploymentAdmission":"READY","repository":"owner/repo","commitSha":"$RELEASE_SHA","treeSha":"$RELEASE_TREE","sourceArchiveSha256":"$SOURCE_ARCHIVE_SHA","artifactVerificationReceiptSha256":"$ARTIFACT_SHA","manifestSha256":"$MANIFEST_SHA","sbomSha256":"$SBOM_SHA","decisionId":"decision:12345678","verifier":{"channel":"external/prod","fingerprint":"$(printf 'f%.0s' $(seq 1 64))","selfAsserted":false},"producer":{"repository":"owner/trusted-admission","workflowPath":".github/workflows/produce-admission.yml","sourceRef":"refs/heads/main","event":"workflow_dispatch","runId":"123456","runAttempt":1,"workflowSha":"$(printf '6%.0s' $(seq 1 40))"},"opsRunner":{"image":"$OPS_IMAGE","imageId":"$OPS_IMAGE_ID","verificationFingerprint":"$(printf '9%.0s' $(seq 1 64))","providerAttested":true}}
+{"version":1,"kind":"platform-trusted-deployment-admission/v1","status":"READY","artifactVerification":"passed","deploymentAdmission":"READY","repository":"owner/repo","commitSha":"$RELEASE_SHA","treeSha":"$RELEASE_TREE","sourceArchiveSha256":"$SOURCE_ARCHIVE_SHA","artifactVerificationReceiptSha256":"$ARTIFACT_SHA","manifestSha256":"$MANIFEST_SHA","sbomSha256":"$SBOM_SHA","decisionId":"decision:12345678","verifier":{"channel":"external/prod","fingerprint":"$(printf 'f%.0s' $(seq 1 64))","selfAsserted":false},"producer":{"repository":"owner/trusted-admission","workflowPath":".github/workflows/produce-admission.yml","sourceRef":"refs/heads/main","event":"workflow_dispatch","runId":"123456","runAttempt":1,"workflowSha":"$(printf '6%.0s' $(seq 1 40))"},"opsRunner":{"image":"$OPS_IMAGE","imageId":"$OPS_IMAGE_ID","verificationFingerprint":"$(printf '9%.0s' $(seq 1 64))","providerAttested":true},"runtimeIntent":$RUNTIME_INTENT,"runtimeIntentSha256":"$RUNTIME_INTENT_SHA"}
 EOF
 ADMISSION_SHA=$(hash_file "$TMP/admission.json")
 printf '{"id":123456,"run_attempt":1,"repository":{"full_name":"owner/trusted-admission"}}\n' > "$TMP/provider.json"

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import assert from "node:assert/strict";
 import { validateTrustedDeploymentReceipt } from "./deployment-receipt-policy.mjs";
+import { runtimeIntentSha256 } from "./runtime-intent-policy.mjs";
 
 const repository = "owner/repo";
 const commitSha = "a".repeat(40);
@@ -44,6 +45,34 @@ const artifactReceipt = {
     manifestVerificationFingerprint: "2".repeat(64),
   },
 };
+const runtimeIntent = {
+  version: 1,
+  kind: "platform-runtime-intent/v1",
+  repository,
+  commitSha,
+  treeSha,
+  sourceArchiveSha256,
+  projectName: "platform_infra_vps",
+  environmentSha256: "8".repeat(64),
+  hostedWorkloadLockSha256: null,
+  coreComposeSha256: "9".repeat(64),
+  combinedComposeSha256: "0".repeat(64),
+  services: [
+    {
+      service: "app",
+      image,
+      admission: { kind: "artifact-subject", subjectKey: "APP_IMAGE" },
+      expectedLocalImageId: `sha256:${"8".repeat(64)}`,
+    },
+    {
+      service: "backup-scheduler",
+      image: `ghcr.io/owner/platform-infrastructure-ops@sha256:${"5".repeat(64)}`,
+      admission: { kind: "ops-runner" },
+      expectedLocalImageId: `sha256:${"6".repeat(64)}`,
+    },
+  ],
+  targetServingServices: ["app"],
+};
 const deploymentReceipt = {
   version: 1,
   kind: "platform-trusted-deployment-admission/v1",
@@ -76,6 +105,8 @@ const deploymentReceipt = {
     verificationFingerprint: "7".repeat(64),
     providerAttested: true,
   },
+  runtimeIntent,
+  runtimeIntentSha256: runtimeIntentSha256(runtimeIntent),
 };
 const options = {
   policy, repository, commitSha, treeSha, artifactReceiptSha256, artifactReceipt,
@@ -97,5 +128,11 @@ assert.throws(() => validateTrustedDeploymentReceipt(deploymentReceipt, { ...opt
 assert.throws(() => validateTrustedDeploymentReceipt({
   ...deploymentReceipt, opsRunner: { ...deploymentReceipt.opsRunner, image: `ghcr.io/owner/attacker@sha256:${"5".repeat(64)}` },
 }, options), /ops image/);
+assert.throws(() => validateTrustedDeploymentReceipt({
+  ...deploymentReceipt, runtimeIntent: { ...runtimeIntent, environmentSha256: "7".repeat(64) },
+}, options), /canonical runtime intent/);
+assert.throws(() => validateTrustedDeploymentReceipt({
+  ...deploymentReceipt, runtimeIntent: { ...runtimeIntent, services: runtimeIntent.services.slice().reverse() },
+}, options), /lexicographically sorted/);
 
-process.stdout.write("deployment receipt policy tests passed 11/11\n");
+process.stdout.write("deployment receipt policy tests passed 13/13\n");

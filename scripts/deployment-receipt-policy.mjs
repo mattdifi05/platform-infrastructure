@@ -2,6 +2,7 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { canonicalReleaseSubjects, exactGitSha, exactRepository, parseReleaseImage } from "./release-artifact-policy.mjs";
+import { validateRuntimeIntent } from "./runtime-intent-policy.mjs";
 import { snapshotJsonArtifact } from "./stable-json-artifact.mjs";
 import { trustedProducerConfiguration } from "./trusted-provider-run-policy.mjs";
 
@@ -136,6 +137,17 @@ export function validateTrustedDeploymentReceipt(receipt, {
   ) {
     invalid("Trusted deployment receipt does not admit one exact provider-attested ops image digest and local image ID.");
   }
+  const runtimeIntent = validateRuntimeIntent(receipt.runtimeIntent, {
+    repository: expectedRepository,
+    commitSha: expectedCommit,
+    treeSha: expectedTree,
+    sourceArchiveSha256: expectedSourceArchive,
+    artifactSubjects: artifactReceipt.subjects,
+    opsRunner: receipt.opsRunner,
+  });
+  if (receipt.runtimeIntentSha256 !== runtimeIntent.sha256) {
+    invalid("Trusted deployment receipt does not authenticate the exact canonical runtime intent.");
+  }
   exactSha256(receipt.verifier?.fingerprint, "trusted verifier fingerprint");
   exactTimestamp(receipt.verifier?.verifiedAt, "trusted verifier verifiedAt");
   exactTimestamp(receipt.generatedAt, "trusted deployment receipt generatedAt");
@@ -177,7 +189,7 @@ function main() {
       providerRunId: options.providerRunId ?? null,
       providerRunAttempt: options.providerRunAttempt ?? null,
     });
-    process.stdout.write(`${JSON.stringify({ status: "READY", repository: options.repo, commitSha: options.commit, treeSha: options.tree, sourceArchiveSha256: deployment.document.sourceArchiveSha256, artifactReceiptSha256: artifact.sha256, deploymentReceiptSha256: deployment.sha256 })}\n`);
+    process.stdout.write(`${JSON.stringify({ status: "READY", repository: options.repo, commitSha: options.commit, treeSha: options.tree, sourceArchiveSha256: deployment.document.sourceArchiveSha256, artifactReceiptSha256: artifact.sha256, deploymentReceiptSha256: deployment.sha256, runtimeIntentSha256: deployment.document.runtimeIntentSha256 })}\n`);
   } finally {
     for (const artifact of artifacts.reverse()) artifact.cleanup();
   }
