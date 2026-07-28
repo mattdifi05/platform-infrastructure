@@ -81,6 +81,45 @@ test("shell lock consumer rejects a schema- and digest-coherent nested-id forger
   }
 });
 
+test("shell verify and activation bundle reject digest-coherent foreign resource owners", () => {
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "hosted-shell-owner-forged-")));
+  try {
+    const fixture = createResolvedLock(root, [
+      {
+        id: "billing",
+        serviceName: "billing-web",
+        secretName: "billing-api-key",
+        volumeName: "billing_data",
+      },
+      { id: "billingapi", serviceName: "billingapi-web" },
+    ]);
+    validateRawAndReadBundle(fixture.lockPath);
+    forgeForeignOwnedResources(fixture.lockPath);
+
+    const forged = JSON.parse(fs.readFileSync(fixture.lockPath, "utf8"));
+    const billing = forged.rawPolicyReceipt.workloads.find((item) => item.workloadId === "billing");
+    assert.deepEqual(billing.serviceNames, ["billingapi-stolen-web"]);
+    assert.deepEqual(billing.secretNames, ["billingapi-api-key"]);
+    assert.deepEqual(billing.volumeNames, ["billingapi_data"]);
+    assert.equal(
+      forged.rawPolicySha256,
+      sha256(Buffer.from(JSON.stringify(stable(forged.rawPolicyReceipt)))),
+    );
+    assert.equal(forged.rawPolicyWorkloadContentSha256, forged.workloadContentSha256);
+
+    for (const command of ["verify", "activation-bundle"]) {
+      const rejected = spawnSync("/bin/sh", [lockScript, fixture.lockPath, command], {
+        encoding: "utf8",
+        env: { ...process.env, HOSTED_WORKLOAD_ALLOW_RESOLVED: "1" },
+      });
+      assert.notEqual(rejected.status, 0, `${command} accepted foreign resource owners`);
+      assert.match(rejected.stderr, /canonical ownership is invalid/);
+    }
+  } finally {
+    removeFixtureTree(root);
+  }
+});
+
 function createResolvedLock(root, workloads) {
   fs.mkdirSync(root, { recursive: true });
   fs.chmodSync(root, 0o700);
@@ -229,6 +268,43 @@ function forgeNestedIdentity(lockPath, oldId, newId) {
   receipt.serviceNames = [newServiceName];
   receipt.composeSha256 = composeRecord.sha256;
   lock.rawPolicyReceipt.workloads.sort((left, right) => left.workloadId.localeCompare(right.workloadId));
+  lock.rawPolicySha256 = sha256(Buffer.from(JSON.stringify(stable(lock.rawPolicyReceipt))));
+  fs.writeFileSync(lockPath, `${JSON.stringify(lock, null, 2)}\n`, { mode: 0o600 });
+  fs.chmodSync(lockPath, 0o600);
+}
+
+function forgeForeignOwnedResources(lockPath) {
+  const lock = JSON.parse(fs.readFileSync(lockPath, "utf8"));
+  const workload = lock.workloads.find((item) => item.id === "billing");
+  assert.ok(workload);
+  const replacements = [
+    ["billing-web", "billingapi-stolen-web"],
+    ["billing-api-key", "billingapi-api-key"],
+    ["billing_data", "billingapi_data"],
+  ];
+  workload.services[0].name = replacements[0][1];
+  workload.secrets = [replacements[1][1]];
+
+  fs.chmodSync(lock.snapshotGeneration, 0o700);
+  const manifestRecord = lock.files.find((record) => record.kind === "workload-manifest" && record.workloadId === workload.id);
+  const composeRecord = lock.files.find((record) => record.kind === "workload-compose" && record.workloadId === workload.id);
+  const manifest = JSON.parse(fs.readFileSync(manifestRecord.path, "utf8"));
+  manifest.services[0].name = replacements[0][1];
+  manifest.secrets = [replacements[1][1]];
+  rewriteSnapshotRecord(lock, workload, manifestRecord, Buffer.from(JSON.stringify(manifest)));
+  let compose = fs.readFileSync(composeRecord.path, "utf8");
+  for (const [before, after] of replacements) compose = compose.replaceAll(before, after);
+  rewriteSnapshotRecord(lock, workload, composeRecord, Buffer.from(compose));
+  fs.chmodSync(lock.snapshotGeneration, 0o500);
+
+  lock.workloadContentSha256 = workloadContentSha256(lock.files);
+  lock.rawPolicyWorkloadContentSha256 = lock.workloadContentSha256;
+  lock.rawPolicyReceipt.workloadContentSha256 = lock.workloadContentSha256;
+  const receipt = lock.rawPolicyReceipt.workloads.find((item) => item.workloadId === workload.id);
+  receipt.serviceNames = [replacements[0][1]];
+  receipt.secretNames = [replacements[1][1]];
+  receipt.volumeNames = [replacements[2][1]];
+  receipt.composeSha256 = composeRecord.sha256;
   lock.rawPolicySha256 = sha256(Buffer.from(JSON.stringify(stable(lock.rawPolicyReceipt))));
   fs.writeFileSync(lockPath, `${JSON.stringify(lock, null, 2)}\n`, { mode: 0o600 });
   fs.chmodSync(lockPath, 0o600);

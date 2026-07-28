@@ -60,9 +60,98 @@ class HostedWorkloadSourcePolicyTest < Minitest::Test
     )
   end
 
+  def test_rejects_a_sole_claimant_stealing_another_exact_workload_secret
+    model = secret_model(
+      secret_names: ["billingapi-api-key"],
+      grants: [{ "source" => "billingapi-api-key", "target" => "billingapi-api-key" }],
+      file_target: "billingapi-api-key"
+    )
+    error = assert_raises(ArgumentError) do
+      HostedWorkloadSourcePolicy.validate_source_model(
+        model,
+        "fixture",
+        workload_id: "billing",
+        workload_ids: %w[billing billingapi],
+        project_name: "fixture",
+        declared_secrets: ["billingapi-api-key"]
+      )
+    end
+    assert_match(/canonical secret owner|belongs to workload billingapi/i, error.message)
+  end
+
+  def test_rejects_secret_file_without_an_exact_grant
+    ungranted = secret_model(
+      secret_names: ["billing-api-key"],
+      grants: [{ "source" => "billing-api-key", "target" => "billing-api-key" }],
+      file_target: "ungranted-secret"
+    )
+    error = assert_raises(ArgumentError) do
+      HostedWorkloadSourcePolicy.validate_source_model(
+        ungranted,
+        "fixture",
+        workload_id: "billing",
+        project_name: "fixture",
+        declared_secrets: ["billing-api-key"]
+      )
+    end
+    assert_match(/secret file.*grant|ungranted secret target/i, error.message)
+  end
+
+  def test_rejects_duplicate_secret_grant_targets
+    duplicate = secret_model(
+      secret_names: %w[billing-api-key billing-signing-key],
+      grants: [
+        { "source" => "billing-api-key", "target" => "billing-token" },
+        { "source" => "billing-signing-key", "target" => "billing-token" }
+      ],
+      file_target: "billing-token"
+    )
+    error = assert_raises(ArgumentError) do
+      HostedWorkloadSourcePolicy.validate_source_model(
+        duplicate,
+        "fixture",
+        workload_id: "billing",
+        project_name: "fixture",
+        declared_secrets: %w[billing-api-key billing-signing-key]
+      )
+    end
+    assert_match(/duplicate secret grant target|secret target.*duplicate/i, error.message)
+  end
+
+  def test_preserves_short_long_alias_and_long_default_secret_grants
+    [
+      ["billing-api-key", "billing-api-key"],
+      [{ "source" => "billing-api-key", "target" => "billing-token" }, "billing-token"],
+      [{ "source" => "billing-api-key" }, "billing-api-key"]
+    ].each do |grant, file_target|
+      assert HostedWorkloadSourcePolicy.validate_source_model(
+        secret_model(secret_names: ["billing-api-key"], grants: [grant], file_target: file_target),
+        "fixture",
+        workload_id: "billing",
+        project_name: "fixture",
+        declared_secrets: ["billing-api-key"]
+      )
+    end
+  end
+
   def test_rejects_aliases_and_merge_keys
     assert_raises(ArgumentError) { parse("x: &base {}\nservices:\n  app: *base\n") }
     assert_raises(ArgumentError) { parse("services:\n  app:\n    <<: {}\n") }
+  end
+
+  def secret_model(secret_names:, grants:, file_target:)
+    {
+      "secrets" => secret_names.to_h do |name|
+        [name, { "external" => true, "name" => "fixture_#{name}" }]
+      end,
+      "services" => {
+        "billing-web" => {
+          "environment" => { "BILLING_TOKEN_FILE" => "/run/secrets/#{file_target}" },
+          "secrets" => grants,
+          "security_opt" => ["no-new-privileges:true"]
+        }
+      }
+    }
   end
 
   def test_rejects_custom_tags_and_multiple_documents
