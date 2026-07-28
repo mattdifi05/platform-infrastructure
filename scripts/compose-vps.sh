@@ -256,6 +256,19 @@ if [[ -n "$workload_lock" ]]; then
       sh "$ROOT_DIR/scripts/hosted-workload-lock.sh" "$workload_lock" activation-bundle
   )
   printf '%s' "$activation_bundle" | jq -e --arg prepare "$PREPARE_RESOLVED" '
+    def prefix_disjoint:
+      . as $ids
+      | all($ids[];
+          . as $left
+          | all($ids[];
+              . as $right
+              | $left == $right
+                or (((($left | startswith($right + "-")) | not))
+                  and ((($right | startswith($left + "-")) | not)))));
+    def protected_resource_names:
+      type == "object"
+      and ((keys | sort) == ["configs", "networks", "secrets", "services", "volumes"])
+      and all(.[]; type == "array" and . == (unique | sort) and all(.[]; type == "string" and length > 0));
     def record:
       type == "object"
       and ((keys | sort) == ["device", "inode", "mode", "path", "sha256", "uid"])
@@ -283,24 +296,22 @@ if [[ -n "$workload_lock" ]]; then
       and .logicalName == ((.workloadId | gsub("-"; "_")) + "_" + (.logicalName | split("_") | last))
       and .physicalName == ($projectName + "_" + .logicalName);
     def service_record:
-      . as $record
-      | type == "object"
+      type == "object"
       and ((keys | sort) == ["serviceName", "workloadId"])
       and (.workloadId | type == "string" and test("^[a-z0-9][a-z0-9-]*$"))
-      and (.serviceName | type == "string" and test("^[a-z][a-z0-9-]{1,62}$"))
-      and ($record.serviceName | startswith($record.workloadId + "-"));
+      and (.serviceName | type == "string" and test("^[a-z][a-z0-9-]{1,62}$"));
     def route_record:
       . as $record
       | type == "object"
       and ((keys | sort) == ["port", "serviceName", "slug", "upstream", "workloadId"])
       and (.workloadId | type == "string" and test("^[a-z0-9][a-z0-9-]*$"))
       and (.slug | type == "string" and test("^[a-z0-9][a-z0-9-]*$"))
-      and (.serviceName | type == "string" and startswith($record.workloadId + "-"))
+      and (.serviceName | type == "string" and test("^[a-z][a-z0-9-]{1,62}$"))
       and (.port | type == "number" and . >= 1 and . <= 65535 and floor == .)
       and .upstream == ("http://" + .serviceName + ":" + (.port | tostring));
     . as $bundle
     | type == "object"
-    and ((keys | sort) == ["combinedRenderSha256", "composeRecords", "coreEnvFile", "coreEnvironmentRecord", "coreRenderSha256", "environmentRecords", "lockSha256", "networkRecords", "platformExtensionRecords", "projectName", "protectedNetworkNames", "routeRecords", "serviceRecords", "version", "workloadIds"])
+    and ((keys | sort) == ["combinedRenderSha256", "composeRecords", "coreEnvFile", "coreEnvironmentRecord", "coreRenderSha256", "environmentRecords", "lockSha256", "networkRecords", "platformExtensionRecords", "projectName", "protectedNetworkNames", "protectedResourceNames", "routeRecords", "serviceRecords", "version", "workloadIds"])
     and .version == 2
     and (.lockSha256 | type == "string" and test("^[a-f0-9]{64}$"))
     and (if $prepare == "1" then
@@ -312,8 +323,10 @@ if [[ -n "$workload_lock" ]]; then
     and (.coreEnvFile | type == "string" and length > 0)
     and (.coreEnvironmentRecord | core_record)
     and (.projectName | type == "string" and test("^[a-z0-9][a-z0-9_-]*$"))
-    and ($bundle.workloadIds | type == "array" and length > 0 and . == (unique | sort) and all(.[]; type == "string" and test("^[a-z0-9][a-z0-9-]*$")))
+    and ($bundle.workloadIds | type == "array" and length > 0 and . == (unique | sort) and prefix_disjoint and all(.[]; type == "string" and test("^[a-z0-9][a-z0-9-]*$")))
     and ($bundle.protectedNetworkNames | type == "array" and . == (unique | sort) and all(.[]; type == "string" and length > 0))
+    and ($bundle.protectedResourceNames | protected_resource_names)
+    and ($bundle.protectedResourceNames.networks == $bundle.protectedNetworkNames)
     and ($bundle.networkRecords | type == "array" and length >= ($bundle.workloadIds | length))
     and ($bundle.networkRecords == ($bundle.networkRecords | unique_by(.workloadId, .logicalName) | sort_by(.workloadId, .logicalName)))
     and all($bundle.networkRecords[]; network_record($bundle.projectName))

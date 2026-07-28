@@ -32,6 +32,34 @@ class HostedWorkloadSourcePolicyTest < Minitest::Test
     end
   end
 
+  def test_preserves_non_colliding_and_single_owner_textual_prefixes
+    assert_equal %w[billing billingapi],
+                 HostedWorkloadSourcePolicy.validate_workload_id_set!([
+                   { "id" => "billing" },
+                   { "id" => "billingapi" }
+                 ])
+    assert HostedWorkloadSourcePolicy.validate_source_model(
+      {
+        "secrets" => {
+          "billing-api-key" => {
+            "external" => true,
+            "name" => "fixture_billing-api-key"
+          }
+        },
+        "services" => {
+          "billing-api-web" => {
+            "secrets" => ["billing-api-key"],
+            "security_opt" => ["no-new-privileges:true"]
+          }
+        }
+      },
+      "fixture",
+      workload_id: "billing",
+      project_name: "fixture",
+      declared_secrets: ["billing-api-key"]
+    )
+  end
+
   def test_rejects_aliases_and_merge_keys
     assert_raises(ArgumentError) { parse("x: &base {}\nservices:\n  app: *base\n") }
     assert_raises(ArgumentError) { parse("services:\n  app:\n    <<: {}\n") }

@@ -91,9 +91,16 @@ function workloadNetworkPrefix(id) {
 }
 
 function workloadNetworkOwner(network, workloadIds) {
-  const owners = workloadIds.filter((id) => network.startsWith(workloadNetworkPrefix(id))
-    && WORKLOAD_NETWORK_ZONES.has(workloadNetworkZone(network, id)));
-  return owners.length === 1 ? owners[0] : null;
+  const owners = new Map();
+  for (const id of assertNonPrefixCollidingWorkloadIds(workloadIds)) {
+    for (const zone of WORKLOAD_NETWORK_ZONES) {
+      const logicalName = `${workloadNetworkPrefix(id)}${zone}`;
+      const prior = owners.get(logicalName);
+      if (prior && prior !== id) invalid(`Workload network ${logicalName} has ambiguous canonical owners.`);
+      owners.set(logicalName, id);
+    }
+  }
+  return owners.get(network) ?? null;
 }
 
 function workloadNetworkZone(network, workloadId) {
@@ -113,6 +120,16 @@ function assertNonPrefixCollidingWorkloadIds(workloadIds) {
     }
   }
   return ordered;
+}
+
+function addCanonicalOwner(owners, resourceType, logicalName, workloadId) {
+  const name = requiredText(logicalName, `${resourceType} logical name`);
+  const owner = requiredText(workloadId, `${resourceType} workload owner`);
+  const prior = owners.get(name);
+  if (prior && prior !== owner) {
+    invalid(`${resourceType} ${name} is ambiguously owned by ${prior} and ${owner}.`);
+  }
+  owners.set(name, owner);
 }
 
 function requiredText(value, label) {
@@ -1401,13 +1418,23 @@ export function validateRenderedWorkloads({ core, combined, lock }) {
       invalid(`Workload config ${name} cannot use inline or host-environment content.`);
     }
   }
+  const renderedVolumeOwners = new Map();
+  for (const workload of lock.workloads) {
+    for (const manifestService of workload.services) {
+      for (const mount of combined.services?.[manifestService.name]?.volumes ?? []) {
+        if (mount?.type === "volume" && typeof mount.source === "string") {
+          addCanonicalOwner(renderedVolumeOwners, "Workload volume", mount.source, workload.id);
+        }
+      }
+    }
+  }
   for (const [name, definition] of Object.entries(combined.volumes ?? {})) {
     if (!Object.hasOwn(core.volumes ?? {}, name) && Object.hasOwn(definition ?? {}, "driver_opts")) {
       invalid(`Workload volume ${name} cannot use local driver options.`);
     }
     if (Object.hasOwn(core.volumes ?? {}, name)) continue;
-    const owner = lock.workloads.find((workload) => name.startsWith(`${workload.id}_`));
-    if (!owner) invalid(`Undeclared workload volume ${name}.`);
+    const ownerId = renderedVolumeOwners.get(name);
+    if (!ownerId) invalid(`Undeclared workload volume ${name}.`);
     const expectedPhysicalName = `${lock.projectName}_${name}`;
     if (!definition || typeof definition !== "object" || Array.isArray(definition)
         || !same(Object.keys(definition).sort(), ["name"]) || definition.name !== expectedPhysicalName) {
@@ -1582,6 +1609,12 @@ export function verifyRawPolicyReceipt(lock) {
   const expectedIds = lock.workloads.map((workload) => workload.id).sort();
   const receiptIds = receipt.workloads.map((item) => item?.workloadId).sort();
   if (!same(receiptIds, expectedIds)) invalid("Raw source policy receipt does not cover the exact workload set.");
+  const canonicalOwners = {
+    networks: new Map(),
+    secrets: new Map(),
+    services: new Map(),
+    volumes: new Map(),
+  };
   for (const item of receipt.workloads) {
     if (!same(Object.keys(item ?? {}).sort(), [
       "composeSha256", "configNames", "networkNames", "platformExtensions",
@@ -1624,6 +1657,10 @@ export function verifyRawPolicyReceipt(lock) {
         })) {
       invalid(`Raw source policy receipt is not bound to ${item.workloadId ?? "a workload"}.`);
     }
+    for (const serviceName of serviceNames) addCanonicalOwner(canonicalOwners.services, "Workload service", serviceName, item.workloadId);
+    for (const secretName of secretNames) addCanonicalOwner(canonicalOwners.secrets, "Workload secret", secretName, item.workloadId);
+    for (const volumeName of volumeNames) addCanonicalOwner(canonicalOwners.volumes, "Workload volume", volumeName, item.workloadId);
+    for (const networkName of networkNames) addCanonicalOwner(canonicalOwners.networks, "Workload network", networkName, item.workloadId);
   }
 }
 

@@ -64,6 +64,17 @@ module HostedWorkloadSourcePolicy
     ids
   end
 
+  def add_canonical_owner!(owners, resource_type, logical_name, workload_id)
+    name = logical_name.to_s
+    owner = workload_id.to_s
+    fail!("#{resource_type} has an invalid canonical owner record.") if name.empty? || owner.empty?
+    prior = owners[name]
+    if prior && prior != owner
+      fail!("#{resource_type} #{name} is ambiguously owned by #{prior} and #{owner}.")
+    end
+    owners[name] = owner
+  end
+
   def inspect_ast(node, location = "document")
     if node.respond_to?(:tag)
       tag = node.tag.to_s
@@ -431,6 +442,20 @@ module HostedWorkloadSourcePolicy
     fail!("Hosted workload lock schema is not supported.") unless lock["version"] == 4 && lock["validatorVersion"] == "hosted-contract-v4"
     fail!("Hosted workload lock must be resolved.") unless lock["state"] == "resolved"
     validate_workload_id_set!(lock["workloads"])
+    canonical_owners = {
+      "services" => {},
+      "secrets" => {},
+      "volumes" => {},
+      "networks" => {}
+    }
+    lock.fetch("workloads").each do |workload|
+      workload.fetch("services").each do |service|
+        add_canonical_owner!(canonical_owners.fetch("services"), "Workload service", service.fetch("name"), workload.fetch("id"))
+      end
+      workload.fetch("secrets").each do |secret_name|
+        add_canonical_owner!(canonical_owners.fetch("secrets"), "Workload secret", secret_name, workload.fetch("id"))
+      end
+    end
     generation = File.realpath(lock.fetch("snapshotGeneration"))
     protected_resources = {
       "configs" => [],
@@ -480,6 +505,12 @@ module HostedWorkloadSourcePolicy
           "serviceName" => service_name,
           "networkNames" => model.fetch("services").fetch(service_name).fetch("networks").keys.map(&:to_s).sort
         }
+      end
+      (model["volumes"] || {}).each_key do |volume_name|
+        add_canonical_owner!(canonical_owners.fetch("volumes"), "Workload volume", volume_name, workload_id)
+      end
+      (model["networks"] || {}).each_key do |network_name|
+        add_canonical_owner!(canonical_owners.fetch("networks"), "Workload network", network_name, workload_id)
       end
       router_extension = platform_extensions.find { |item| item.fetch("serviceName") == "project-router" }
       if router_extension

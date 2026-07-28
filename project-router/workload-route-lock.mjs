@@ -23,6 +23,36 @@ function same(left, right) {
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
+function assertPrefixDisjointWorkloadIds(workloadIds) {
+  const ordered = [...workloadIds].sort();
+  if (new Set(ordered).size !== ordered.length) {
+    throw new Error("Hosted workload declarations are invalid.");
+  }
+  for (let leftIndex = 0; leftIndex < ordered.length; leftIndex += 1) {
+    for (let rightIndex = leftIndex + 1; rightIndex < ordered.length; rightIndex += 1) {
+      const left = ordered[leftIndex];
+      const right = ordered[rightIndex];
+      if (left.startsWith(`${right}-`) || right.startsWith(`${left}-`)) {
+        throw new Error(`Hosted workload ids are not prefix-disjoint: ${left}, ${right}.`);
+      }
+    }
+  }
+}
+
+function hasExactProtectedResourceNames(receipt) {
+  const resources = receipt?.protectedResourceNames;
+  const expectedKeys = ["configs", "networks", "secrets", "services", "volumes"];
+  if (!resources || typeof resources !== "object" || Array.isArray(resources)
+      || !same(Object.keys(resources).sort(), expectedKeys)) return false;
+  for (const names of Object.values(resources)) {
+    if (!Array.isArray(names)
+        || !same(names, [...new Set(names)].sort())
+        || names.some((name) => typeof name !== "string" || name.length === 0)) return false;
+  }
+  return Array.isArray(receipt.protectedNetworkNames)
+    && same(receipt.protectedNetworkNames, resources.networks);
+}
+
 export function parseHostedRouteLock(lock) {
   if (!lock || typeof lock !== "object" || Array.isArray(lock)
       || lock.version !== HOSTED_ROUTE_LOCK_VERSION
@@ -37,6 +67,7 @@ export function parseHostedRouteLock(lock) {
         || !same(lock.rawPolicyControls, HOSTED_ROUTE_RAW_POLICY_CONTROLS)
         || lock.rawPolicyReceipt?.policyVersion !== HOSTED_ROUTE_RAW_POLICY_VERSION
         || !same(lock.rawPolicyReceipt?.controls, HOSTED_ROUTE_RAW_POLICY_CONTROLS)
+        || !hasExactProtectedResourceNames(lock.rawPolicyReceipt)
         || !SHA256.test(String(lock.rawPolicySha256 ?? ""))
         || !SHA256.test(String(lock.workloadContentSha256 ?? ""))
         || !SHA256.test(String(lock.coreRenderSha256 ?? ""))
@@ -47,13 +78,24 @@ export function parseHostedRouteLock(lock) {
     throw new Error("Zero-workload route lock is not canonical.");
   }
 
+  const workloadIds = lock.workloads.map((workload) => String(workload?.id ?? ""));
+  if (workloadIds.some((workloadId) => !ID.test(workloadId))) {
+    throw new Error("Hosted workload declarations are invalid.");
+  }
+  assertPrefixDisjointWorkloadIds(workloadIds);
   const declaredServices = new Map();
   for (const workload of lock.workloads) {
     const workloadId = String(workload?.id ?? "");
-    if (!ID.test(workloadId) || !Array.isArray(workload.services) || declaredServices.has(workloadId)) {
+    if (!Array.isArray(workload.services)) {
       throw new Error("Hosted workload declarations are invalid.");
     }
-    declaredServices.set(workloadId, new Set(workload.services.map((service) => String(service?.name ?? ""))));
+    for (const service of workload.services) {
+      const serviceName = String(service?.name ?? "");
+      if (!ID.test(serviceName) || !serviceName.startsWith(`${workloadId}-`) || declaredServices.has(serviceName)) {
+        throw new Error("Hosted workload declarations do not have exact canonical service owners.");
+      }
+      declaredServices.set(serviceName, workloadId);
+    }
   }
 
   const routes = new Map();
@@ -66,11 +108,10 @@ export function parseHostedRouteLock(lock) {
     if (!ID.test(workloadId)
         || !ID.test(slug)
         || !ID.test(service)
-        || !service.startsWith(`${workloadId}-`)
         || !Number.isInteger(port) || port < 1 || port > 65535
         || route.upstream !== `http://${service}:${port}`
         || routes.has(slug)
-        || !declaredServices.get(workloadId)?.has(service)) {
+        || declaredServices.get(service) !== workloadId) {
       throw new Error("Hosted workload route violates the verified lock contract.");
     }
     routes.set(slug, route.upstream);

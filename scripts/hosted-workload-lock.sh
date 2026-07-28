@@ -162,6 +162,19 @@ fi
 
 jq_lock -e --arg lockPath "$LOCK" --argjson allowResolved "$allow_resolved" --argjson controls "$RAW_POLICY_CONTROLS" '
   def record_sort: sort_by([(.workloadId // ""), (.kind // ""), (.sourcePath // ""), (.path // "")]);
+  def prefix_disjoint:
+    . as $ids
+    | all($ids[];
+        . as $left
+        | all($ids[];
+            . as $right
+            | $left == $right
+              or (((($left | startswith($right + "-")) | not))
+                and ((($right | startswith($left + "-")) | not)))));
+  def protected_resource_names:
+    type == "object"
+    and ((keys | sort) == ["configs", "networks", "secrets", "services", "volumes"])
+    and all(.[]; type == "array" and . == (unique | sort) and all(.[]; type == "string" and length > 0));
   . as $lock
   | ($lock.workloads | map(.id)) as $workload_ids
   | ($lock.files | map(.path)) as $file_paths
@@ -191,6 +204,7 @@ jq_lock -e --arg lockPath "$LOCK" --argjson allowResolved "$allow_resolved" --ar
     and ($lock.projectName | type == "string" and test("^[a-z0-9][a-z0-9_-]*$"))
     and (($file_paths | unique | length) == ($file_paths | length))
     and (($workload_ids | unique | length) == ($workload_ids | length))
+    and ($workload_ids | prefix_disjoint)
     and all($lock.workloads[]; (.id | type == "string" and test("^[a-z][a-z0-9-]{1,62}$")))
     and all($lock.files[];
       (.kind | type == "string" and length > 0)
@@ -248,19 +262,30 @@ jq_lock -e --arg lockPath "$LOCK" --argjson allowResolved "$allow_resolved" --ar
     and $lock.rawPolicyWorkloadContentSha256 == $lock.workloadContentSha256
     and $lock.rawPolicyControls == $controls
     and (($lock.rawPolicySha256 | type) == "string" and ($lock.rawPolicySha256 | test("^[a-f0-9]{64}$")))
-    and (($lock.rawPolicyReceipt | keys | sort) == ["controls", "policyVersion", "protectedNetworkNames", "workloadContentSha256", "workloads"])
+    and (($lock.rawPolicyReceipt | keys | sort) == ["controls", "policyVersion", "protectedNetworkNames", "protectedResourceNames", "workloadContentSha256", "workloads"])
     and $lock.rawPolicyReceipt.policyVersion == $lock.rawPolicyVersion
     and $lock.rawPolicyReceipt.controls == $controls
     and ($lock.rawPolicyReceipt.protectedNetworkNames | type == "array")
     and ($lock.rawPolicyReceipt.protectedNetworkNames == ($lock.rawPolicyReceipt.protectedNetworkNames | unique | sort))
     and all($lock.rawPolicyReceipt.protectedNetworkNames[]; type == "string" and length > 0)
+    and ($lock.rawPolicyReceipt.protectedResourceNames | protected_resource_names)
+    and ($lock.rawPolicyReceipt.protectedResourceNames.networks == $lock.rawPolicyReceipt.protectedNetworkNames)
     and $lock.rawPolicyReceipt.workloadContentSha256 == $lock.workloadContentSha256
     and (($lock.rawPolicyReceipt.workloads | map(.workloadId) | sort) == ($workload_ids | sort))
+    and (([$lock.rawPolicyReceipt.workloads[].serviceNames[]] | length)
+      == ([$lock.rawPolicyReceipt.workloads[].serviceNames[]] | unique | length))
+    and (([$lock.rawPolicyReceipt.workloads[].secretNames[]] | length)
+      == ([$lock.rawPolicyReceipt.workloads[].secretNames[]] | unique | length))
+    and (([$lock.rawPolicyReceipt.workloads[].volumeNames[]] | length)
+      == ([$lock.rawPolicyReceipt.workloads[].volumeNames[]] | unique | length))
+    and (([$lock.rawPolicyReceipt.workloads[].networkNames[]] | length)
+      == ([$lock.rawPolicyReceipt.workloads[].networkNames[]] | unique | length))
     and all($lock.rawPolicyReceipt.workloads[];
       . as $receipt
       | ($lock.files | map(select(.kind == "workload-compose" and .workloadId == $receipt.workloadId))) as $compose
       | ($lock.workloads | map(select(.id == $receipt.workloadId))[0]) as $workload
-      | (($receipt | keys | sort) == ["composeSha256", "networkNames", "platformExtensions", "serviceNames", "topLevelKeys", "workloadId"])
+      | (($receipt | keys | sort) == ["composeSha256", "configNames", "networkNames", "platformExtensions", "secretNames", "serviceNames", "topLevelKeys", "volumeNames", "workloadId"])
+        and ($receipt.configNames == [])
         and ($receipt.networkNames | type == "array")
         and ($receipt.networkNames == ($receipt.networkNames | unique | sort))
         and (($receipt.networkNames - $lock.rawPolicyReceipt.protectedNetworkNames) == $receipt.networkNames)
@@ -271,19 +296,28 @@ jq_lock -e --arg lockPath "$LOCK" --argjson allowResolved "$allow_resolved" --ar
           | any(.[]; $name == ($prefix + .))
         )
         and ($receipt.serviceNames | type == "array")
+        and ($receipt.secretNames | type == "array")
+        and ($receipt.volumeNames | type == "array")
         and ($receipt.topLevelKeys | type == "array")
         and ($receipt.serviceNames == ($receipt.serviceNames | unique | sort))
+        and ($receipt.secretNames == ($receipt.secretNames | unique | sort))
+        and ($receipt.volumeNames == ($receipt.volumeNames | unique | sort))
         and ($receipt.topLevelKeys == ($receipt.topLevelKeys | unique | sort))
         and (($receipt.topLevelKeys | index("services")) != null)
         and ($compose | length == 1 and $receipt.composeSha256 == $compose[0].sha256)
         and ($receipt.serviceNames == ([$workload.services[].name] | unique | sort))
+        and ($receipt.secretNames == ($workload.secrets | unique | sort))
+        and (($receipt.secretNames - $lock.rawPolicyReceipt.protectedResourceNames.secrets) == $receipt.secretNames)
+        and (($receipt.volumeNames - $lock.rawPolicyReceipt.protectedResourceNames.volumes) == $receipt.volumeNames)
+        and (($receipt.serviceNames - $lock.rawPolicyReceipt.protectedResourceNames.services) == $receipt.serviceNames)
         and ($receipt.platformExtensions | type == "array")
         and ($receipt.platformExtensions == ($receipt.platformExtensions | unique_by(.serviceName) | sort_by(.serviceName)))
         and all($receipt.platformExtensions[];
           ((keys | sort) == ["networkNames", "serviceName"])
           and (.serviceName | IN("project-router", "postgres", "redis", "nats", "keycloak", "minio", "prometheus"))
-          and (.networkNames | type == "array" and length > 0 and . == (unique | sort))))
-' >/dev/null
+          and (.networkNames | type == "array" and length > 0 and . == (unique | sort))
+          and ((.networkNames - $receipt.networkNames) == [])))
+' >/dev/null || die "Hosted workload lock schema or canonical ownership is invalid."
 
 snapshot_root=$(jq_lock -r '.snapshotRoot')
 snapshot_generation=$(jq_lock -r '.snapshotGeneration')
@@ -419,6 +453,7 @@ case "$COMMAND" in
       projectName,
       workloadIds: [.workloads[].id] | sort,
       protectedNetworkNames: .rawPolicyReceipt.protectedNetworkNames,
+      protectedResourceNames: .rawPolicyReceipt.protectedResourceNames,
       networkRecords: [
         .rawPolicyReceipt.workloads[] as $workload
         | $workload.networkNames[]

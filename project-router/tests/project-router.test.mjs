@@ -644,9 +644,50 @@ test("forged nested-id route locks cannot assign a child service to its parent",
     }];
     assert.throws(
       () => parseHostedRouteLock(forged),
-      /prefix-colliding|canonical owner|declarations are invalid/i,
+      /prefix-colliding|prefix-disjoint|canonical owner|declarations are invalid/i,
     );
   }
+});
+
+test("exact route owners preserve non-colliding and single-owner textual prefixes", () => {
+  const nonColliding = verifiedRouteLock();
+  nonColliding.workloads = [
+    { id: "billing", services: [{ name: "billing-web" }] },
+    { id: "billingapi", services: [{ name: "billingapi-web" }] },
+  ];
+  nonColliding.routes = [{
+    workloadId: "billingapi",
+    slug: "billingapi",
+    service: "billingapi-web",
+    port: 3000,
+    upstream: "http://billingapi-web:3000",
+  }];
+  assert.equal(parseHostedRouteLock(nonColliding).routes.get("billingapi"), "http://billingapi-web:3000");
+
+  const singleOwner = verifiedRouteLock();
+  singleOwner.workloads = [{ id: "billing", services: [{ name: "billing-api-web" }] }];
+  singleOwner.routes = [{
+    workloadId: "billing",
+    slug: "billing",
+    service: "billing-api-web",
+    port: 3000,
+    upstream: "http://billing-api-web:3000",
+  }];
+  assert.equal(parseHostedRouteLock(singleOwner).routes.get("billing"), "http://billing-api-web:3000");
+
+  const wrongExactOwner = structuredClone(nonColliding);
+  wrongExactOwner.routes[0] = {
+    workloadId: "billing",
+    slug: "billingapi",
+    service: "billingapi-web",
+    port: 3000,
+    upstream: "http://billingapi-web:3000",
+  };
+  assert.throws(() => parseHostedRouteLock(wrongExactOwner), /verified lock contract/);
+
+  const incompleteProtectedResources = structuredClone(nonColliding);
+  delete incompleteProtectedResources.rawPolicyReceipt.protectedResourceNames.volumes;
+  assert.throws(() => parseHostedRouteLock(incompleteProtectedResources), /policy\/render receipt is incomplete/);
 });
 
 function removeFixtureTree() {
@@ -816,7 +857,18 @@ function verifiedRouteLock() {
     state: "verified",
     rawPolicyVersion: "hosted-raw-v3",
     rawPolicyControls: HOSTED_ROUTE_RAW_POLICY_CONTROLS,
-    rawPolicyReceipt: { policyVersion: "hosted-raw-v3", controls: HOSTED_ROUTE_RAW_POLICY_CONTROLS },
+    rawPolicyReceipt: {
+      policyVersion: "hosted-raw-v3",
+      controls: HOSTED_ROUTE_RAW_POLICY_CONTROLS,
+      protectedNetworkNames: [],
+      protectedResourceNames: {
+        configs: [],
+        networks: [],
+        secrets: [],
+        services: [],
+        volumes: [],
+      },
+    },
     rawPolicySha256: "a".repeat(64),
     workloadContentSha256: "b".repeat(64),
     coreRenderSha256: "c".repeat(64),

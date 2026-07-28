@@ -1228,6 +1228,53 @@ test("workload resolver rejects prefix-colliding ids independent of secret decla
   }
 });
 
+test("resolver preserves billing plus billingapi and one billing textual child resource", () => {
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "hosted-prefix-positive-")));
+  try {
+    const workloadRoot = path.join(root, "workloads");
+    const entries = [];
+    for (const id of ["billing", "billingapi"]) {
+      const appRoot = path.join(workloadRoot, id);
+      fs.mkdirSync(appRoot, { recursive: true });
+      fs.writeFileSync(path.join(appRoot, "manifest.json"), JSON.stringify({
+        version: 1,
+        id,
+        composeFile: "compose.yaml",
+        services: [{ name: `${id}-web`, role: "web" }],
+      }));
+      fs.writeFileSync(path.join(appRoot, "compose.yaml"), `services:\n  ${id}-web:\n    image: example.invalid/${id}@sha256:${digest}\n`);
+      fs.writeFileSync(path.join(appRoot, "workload.env"), `${id.toUpperCase()}_THEME=dark\n`);
+      entries.push({ manifest: `${id}/manifest.json`, environmentFile: `${id}/workload.env` });
+    }
+    const catalogPath = path.join(root, "catalog.json");
+    const coreEnvFile = path.join(root, "core.env");
+    const coreFile = path.join(root, "compose.core.yaml");
+    fs.writeFileSync(catalogPath, JSON.stringify({ version: 1, workloads: entries }));
+    fs.writeFileSync(coreEnvFile, "CORE_VALUE=fixture\n", { mode: 0o600 });
+    fs.chmodSync(coreEnvFile, 0o600);
+    fs.writeFileSync(coreFile, "services: {}\n");
+    const resolved = resolveCatalog({
+      catalogPath,
+      coreEnvFile,
+      workloadRoot,
+      coreFiles: [coreFile],
+      projectName: "fixture",
+      snapshotRoot: path.join(root, "snapshots"),
+    });
+    assert.deepEqual(resolved.workloads.map((workload) => workload.id), ["billing", "billingapi"]);
+
+    assert.doesNotThrow(() => validateWorkloadManifest({
+      version: 1,
+      id: "billing",
+      composeFile: "compose.yaml",
+      secrets: ["billing-api-key"],
+      services: [{ name: "billing-api-web", role: "web" }],
+    }));
+  } finally {
+    removeFixtureTree(root);
+  }
+});
+
 test("supplied or forged nested-id locks cannot assign child resources to the parent", () => {
   const forgedCore = {
     services: { "project-router": { networks: { platform_routing: null } } },
@@ -1645,6 +1692,24 @@ test("compose-files CLI never emits a path not exactly bound to a compose snapsh
     });
     assert.equal(shellReader.status, 0, shellReader.stderr);
     assert.equal(shellReader.stdout.trim().split("\t")[0], lock.workloads[0].composePath);
+    const bundleReader = spawnSync("/bin/sh", [
+      path.join(import.meta.dirname, "hosted-workload-lock.sh"),
+      lockPath,
+      "activation-bundle",
+    ], {
+      encoding: "utf8",
+      env: { PATH: minimalBin, HOSTED_WORKLOAD_ALLOW_RESOLVED: "1" },
+    });
+    assert.equal(bundleReader.status, 0, bundleReader.stderr);
+    const activationBundle = JSON.parse(bundleReader.stdout);
+    assert.deepEqual(
+      activationBundle.protectedResourceNames,
+      JSON.parse(fs.readFileSync(lockPath, "utf8")).rawPolicyReceipt.protectedResourceNames,
+    );
+    assert.deepEqual(
+      Object.keys(activationBundle.protectedResourceNames).sort(),
+      ["configs", "networks", "secrets", "services", "volumes"],
+    );
     const verifiedActivation = JSON.parse(fs.readFileSync(lockPath, "utf8"));
     verifiedActivation.state = "verified";
     verifiedActivation.coreRenderSha256 = "c".repeat(64);
@@ -1931,7 +1996,7 @@ exit "$status"
     assert.match(consumed, /"com\.platform\.runtime\.commit":"b{40}"/);
     assert.match(consumed, /"com\.platform\.runtime\.tree":"c{40}"/);
     assert.match(consumed, /"com\.platform\.runtime\.deployment-id":"deploy-20260721"/);
-    assert.match(consumed, /"com\.platform\.runtime\.render-sha256":"d{64}"/);
+    assert.match(consumed, /"com\.platform\.runtime\.source-render-sha256":"d{64}"/);
     assert.match(consumed, /"com\.platform\.runtime\.workload-lock-sha256":"e{64}"/);
     assert.doesNotMatch(consumed, /privileged: true/);
     assert.equal(fs.existsSync(sharedEnvironment.HOSTED_TEST_HASH_RACE_MARKER), false);

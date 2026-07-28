@@ -476,6 +476,79 @@ test("forged nested ids cannot let billing consume billing-api authority", () =>
   }
 });
 
+test("canonical owner maps reject isolated cross-workload service, secret, volume and network claims", () => {
+  const serviceClaim = workloadIdentityFixture([
+    ["billing", "billing-web"],
+    ["billingapi", "billingapi-web"],
+  ]);
+  serviceClaim.services["billing-web"].depends_on = {
+    "billingapi-web": { condition: "service_started", required: true, restart: false },
+  };
+  let report = evaluateRuntimeIsolation(serviceClaim, { projectName: "fixture" });
+  assert.equal(report.status, "failed");
+  assert.match(report.failures.join("\n"), /workload-bounded-dependencies-billing-web/);
+
+  const secretClaim = workloadIdentityFixture([
+    ["billing", "billing-web"],
+    ["billingapi", "billingapi-web"],
+  ]);
+  secretClaim.secrets = {
+    "billingapi-api-key": { external: true, name: "fixture_billingapi-api-key" },
+  };
+  secretClaim.services["billingapi-web"].secrets = ["billingapi-api-key"];
+  secretClaim.services["billing-web"].secrets = ["billingapi-api-key"];
+  secretClaim.services["billing-web"].environment = {
+    BILLINGAPI_TOKEN_FILE: "/run/secrets/billingapi-api-key",
+  };
+  report = evaluateRuntimeIsolation(secretClaim, { projectName: "fixture" });
+  assert.equal(report.status, "failed");
+  assert.match(report.failures.join("\n"), /workload-canonical-resource-owners|workload-owned-secrets-billing/);
+
+  const volumeClaim = workloadIdentityFixture([
+    ["billing", "billing-web"],
+    ["billingapi", "billingapi-web"],
+  ]);
+  volumeClaim.volumes = {
+    billingapi_data: { name: "fixture_billingapi_data" },
+  };
+  volumeClaim.services["billingapi-web"].volumes = [{ type: "volume", source: "billingapi_data", target: "/data" }];
+  volumeClaim.services["billing-web"].volumes = [{ type: "volume", source: "billingapi_data", target: "/data" }];
+  report = evaluateRuntimeIsolation(volumeClaim, { projectName: "fixture" });
+  assert.equal(report.status, "failed");
+  assert.match(report.failures.join("\n"), /workload-canonical-resource-owners|workload-(exact-volume-mounts|owned-volumes)-billing/);
+
+  const networkClaim = workloadIdentityFixture([
+    ["billing", "billing-web"],
+    ["billingapi", "billingapi-web"],
+  ]);
+  networkClaim.services["billing-web"].networks.billingapi_ingress = null;
+  report = evaluateRuntimeIsolation(networkClaim, { projectName: "fixture" });
+  assert.equal(report.status, "failed");
+  assert.match(report.failures.join("\n"), /workload-network-identity-billing-web/);
+});
+
+test("canonical owner maps preserve billing plus billingapi and one billing textual child name", () => {
+  const nonColliding = workloadIdentityFixture([
+    ["billing", "billing-web"],
+    ["billingapi", "billingapi-web"],
+  ]);
+  assert.equal(
+    evaluateRuntimeIsolation(nonColliding, { projectName: "fixture" }).status,
+    "passed",
+  );
+
+  const singleOwner = workloadIdentityFixture([["billing", "billing-api-web"]]);
+  singleOwner.secrets = {
+    "billing-api-key": { external: true, name: "fixture_billing-api-key" },
+  };
+  singleOwner.services["billing-api-web"].secrets = ["billing-api-key"];
+  singleOwner.services["billing-api-web"].environment = {
+    BILLING_API_TOKEN_FILE: "/run/secrets/billing-api-key",
+  };
+  const report = evaluateRuntimeIsolation(singleOwner, { projectName: "fixture" });
+  assert.equal(report.status, "passed", report.failures.join("\n"));
+});
+
 function fixture() {
   const services = {};
   services["example-app-web"] = bounded({
@@ -546,6 +619,26 @@ function fixture() {
       example_app_ingress: { internal: true, name: "fixture_example_app_ingress" },
     },
   };
+}
+
+function workloadIdentityFixture(entries) {
+  const config = fixture();
+  delete config.services["example-app-web"];
+  delete config.networks.example_app_ingress;
+  for (const [workloadId, serviceName] of entries) {
+    const networkName = `${workloadId.replaceAll("-", "_")}_ingress`;
+    config.services[serviceName] = bounded({
+      read_only: true,
+      user: "1000:1000",
+      logging: { driver: "local", options: { "max-size": "10m", "max-file": "3" } },
+      security_opt: ["no-new-privileges:true"],
+      cap_drop: ["ALL"],
+      labels: { "com.platform.workload-id": workloadId, "com.platform.workload-role": "web" },
+      networks: { [networkName]: null },
+    });
+    config.networks[networkName] = { internal: true, name: `fixture_${networkName}` };
+  }
+  return config;
 }
 
 function runtimeIdentityFixture() {

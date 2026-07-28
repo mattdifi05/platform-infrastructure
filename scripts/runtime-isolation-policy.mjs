@@ -85,6 +85,17 @@ export function evaluateRuntimeIsolation(config, options = {}) {
     .map(([name]) => name)
     .sort();
   const workloadIds = new Set(workloadServices.map((name) => String(services[name]?.labels?.["com.platform.workload-id"] || "")));
+  const workloadIdentity = canonicalWorkloadIdentity(services, workloadServices, workloadIds);
+  record(
+    "workload-id-prefix-disjoint",
+    workloadIdentity.prefixDisjoint,
+    `ids=${[...workloadIds].sort().join(",") || "none"}`,
+  );
+  record(
+    "workload-canonical-resource-owners",
+    workloadIdentity.conflicts.length === 0,
+    `conflicts=${workloadIdentity.conflicts.join(",") || "none"}`,
+  );
   record(
     "workload-project-name-bound",
     workloadServices.length === 0 || (/^[a-z0-9][a-z0-9_-]*$/.test(projectName) && config?.name === projectName),
@@ -125,7 +136,7 @@ export function evaluateRuntimeIsolation(config, options = {}) {
       const attachmentIsPlain = attachment == null
         || (typeof attachment === "object" && !Array.isArray(attachment) && Object.keys(attachment).length === 0);
       return protectedNetworkNames.has(network)
-        || workloadNetworkOwner(network, workloadIds) !== workloadId
+        || workloadIdentity.networks.get(network) !== workloadId
         || !attachmentIsPlain
         || definition.external === true
         || definition.name !== `${projectName}_${network}`;
@@ -211,7 +222,7 @@ export function evaluateRuntimeIsolation(config, options = {}) {
     record(`workload-closed-service-schema-${name}`, unsupportedServiceFields.length === 0, `${name} unsupported=${unsupportedServiceFields.join(",") || "none"}`);
     const dependencyEntries = Object.entries(object(service.depends_on));
     const invalidDependencies = dependencyEntries.filter(([dependency, condition]) => {
-      const sameWorkload = dependency.startsWith(`${workloadId}-`);
+      const sameWorkload = workloadIdentity.services.get(dependency) === workloadId;
       const exactCondition = condition && typeof condition === "object" && !Array.isArray(condition)
         && Object.keys(condition).every((field) => ["condition", "required", "restart"].includes(field))
         && ["service_started", "service_healthy"].includes(condition.condition)
@@ -227,7 +238,7 @@ export function evaluateRuntimeIsolation(config, options = {}) {
       .map((entry) => typeof entry === "string" ? entry : String(entry?.source || ""))
       .filter((source) => {
         const definition = object(config?.secrets?.[source]);
-        return !source.startsWith(`${workloadId}-`)
+        return workloadIdentity.secrets.get(source) !== workloadId
           || definition.external !== true
           || definition.name !== `${projectName}_${source}`;
       });
@@ -235,7 +246,7 @@ export function evaluateRuntimeIsolation(config, options = {}) {
     const mounts = volumes(service);
     const exactVolumeMounts = mounts.length <= 1 && mounts.every((mount) => (
       mount.type === "volume"
-      && mount.source.startsWith(`${workloadId}_`)
+      && workloadIdentity.volumes.get(mount.source) === workloadId
       && mount.target === "/data"
       && JSON.stringify(mount.rawKeys) === JSON.stringify(["source", "target", "type"])
     ));
@@ -258,7 +269,7 @@ export function evaluateRuntimeIsolation(config, options = {}) {
       .filter((mount) => mount.type === "volume")
       .filter((mount) => {
         const definition = object(config?.volumes?.[mount.source]);
-        return !mount.source.startsWith(`${workloadId}_`)
+        return workloadIdentity.volumes.get(mount.source) !== workloadId
           || JSON.stringify(Object.keys(definition).sort()) !== JSON.stringify(["name"])
           || definition.name !== `${projectName}_${mount.source}`;
       })
@@ -417,12 +428,48 @@ function secretNames(service) {
 
 const WORKLOAD_NETWORK_ZONES = new Set(["ingress", "postgres", "cache", "bus", "identity", "storage", "observability", "egress"]);
 
-function workloadNetworkOwner(network, workloadIds) {
-  const owners = [...workloadIds].filter((id) => {
-    const prefix = `${id.replaceAll("-", "_")}_`;
-    return network.startsWith(prefix) && WORKLOAD_NETWORK_ZONES.has(network.slice(prefix.length));
-  });
-  return owners.length === 1 ? owners[0] : null;
+function canonicalWorkloadIdentity(services, workloadServices, workloadIds) {
+  const ids = [...workloadIds].sort();
+  let prefixDisjoint = new Set(ids).size === ids.length;
+  for (let leftIndex = 0; leftIndex < ids.length; leftIndex += 1) {
+    for (let rightIndex = leftIndex + 1; rightIndex < ids.length; rightIndex += 1) {
+      const left = ids[leftIndex];
+      const right = ids[rightIndex];
+      if (left.startsWith(`${right}-`) || right.startsWith(`${left}-`)) prefixDisjoint = false;
+    }
+  }
+  const conflicts = [];
+  const addOwner = (owners, kind, name, owner) => {
+    if (!name) return;
+    const prior = owners.get(name);
+    if (prior && prior !== owner) conflicts.push(`${kind}:${name}:${prior}:${owner}`);
+    else owners.set(name, owner);
+  };
+  const identity = {
+    prefixDisjoint,
+    conflicts,
+    services: new Map(),
+    secrets: new Map(),
+    volumes: new Map(),
+    networks: new Map(),
+  };
+  for (const workloadId of ids) {
+    for (const zone of WORKLOAD_NETWORK_ZONES) {
+      addOwner(identity.networks, "network", `${workloadId.replaceAll("-", "_")}_${zone}`, workloadId);
+    }
+  }
+  for (const serviceName of workloadServices) {
+    const service = services[serviceName] ?? {};
+    const workloadId = String(service?.labels?.["com.platform.workload-id"] ?? "");
+    addOwner(identity.services, "service", serviceName, workloadId);
+    for (const entry of Array.isArray(service.secrets) ? service.secrets : []) {
+      addOwner(identity.secrets, "secret", typeof entry === "string" ? entry : String(entry?.source ?? ""), workloadId);
+    }
+    for (const mount of volumes(service)) {
+      if (mount.type === "volume") addOwner(identity.volumes, "volume", mount.source, workloadId);
+    }
+  }
+  return identity;
 }
 
 function workloadNetworkZone(network, workloadId) {
