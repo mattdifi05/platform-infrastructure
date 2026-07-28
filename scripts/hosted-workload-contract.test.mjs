@@ -300,6 +300,7 @@ test("Compose wrapper rejects a missing or non-canonical runtime lock source bef
         ...process.env,
         COMPOSE_ENV_FILE: envFile,
         HOSTED_WORKLOAD_LOCK: "",
+        HOSTED_WORKLOAD_MODE: "no-hosted",
         HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE: path.join(root, "missing.lock.json"),
       },
     });
@@ -313,6 +314,7 @@ test("Compose wrapper rejects a missing or non-canonical runtime lock source bef
         ...process.env,
         COMPOSE_ENV_FILE: envFile,
         HOSTED_WORKLOAD_LOCK: "",
+        HOSTED_WORKLOAD_MODE: "no-hosted",
         HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE: foreign,
       },
     });
@@ -1875,6 +1877,7 @@ for argument in "$@"; do
       ;;
   esac
 done
+printf '%s\n' "$HOSTED_TEST_RENDER_JSON"
 `, { mode: 0o755 });
     fs.writeFileSync(path.join(fakeBin, "sh"), `#!/bin/sh
 count=0
@@ -1916,6 +1919,14 @@ exec "$HOSTED_TEST_REAL_JQ" "$@"
       HOSTED_TEST_HASH_RACE_MARKER: path.join(root, "hash-race-fired"),
       HOSTED_TEST_LOCK_READER_COUNT: path.join(root, "lock-reader-count"),
       HOSTED_TEST_CORE_ENV: fixture.coreEnvFile,
+      HOSTED_TEST_RENDER_JSON: JSON.stringify({
+        name: "platform_infra_vps",
+        configs: {},
+        networks: {},
+        secrets: {},
+        services: { "example-app-web": {} },
+        volumes: {},
+      }),
       PLATFORM_RUNTIME_CANDIDATE_ID: "a".repeat(64),
       PLATFORM_RUNTIME_COMMIT: "b".repeat(40),
       PLATFORM_RUNTIME_TREE: "c".repeat(40),
@@ -1948,6 +1959,37 @@ exec "$HOSTED_TEST_REAL_JQ" "$@"
     assert.notEqual(resolvedRejected.status, 0);
     assert.equal(fs.existsSync(capture), false);
     promoteFixtureLock(lockPath);
+    fs.writeFileSync(sharedEnvironment.HOSTED_TEST_LOCK_READER_COUNT, "0\n");
+    const envelopeConsumer = spawnSync("/bin/bash", [
+      path.join(import.meta.dirname, "compose-vps.sh"),
+      "runtime-isolation-envelope",
+    ], {
+      encoding: "utf8",
+      env: { ...sharedEnvironment, HOSTED_TEST_NO_SWAP: "1" },
+    });
+    assert.equal(envelopeConsumer.status, 0, envelopeConsumer.stderr);
+    const runtimeIsolationEnvelope = JSON.parse(envelopeConsumer.stdout);
+    const verifiedLock = JSON.parse(fs.readFileSync(lockPath, "utf8"));
+    assert.deepEqual(Object.keys(runtimeIsolationEnvelope).sort(), [
+      "config", "lockSha256", "projectName", "protectedResourceNames", "version",
+    ]);
+    assert.equal(runtimeIsolationEnvelope.version, 1);
+    assert.equal(runtimeIsolationEnvelope.projectName, verifiedLock.projectName);
+    assert.equal(
+      runtimeIsolationEnvelope.lockSha256,
+      crypto.createHash("sha256").update(fs.readFileSync(lockPath)).digest("hex"),
+    );
+    assert.deepEqual(runtimeIsolationEnvelope.protectedResourceNames, {
+      configs: [],
+      networks: ["platform_postgres"],
+      secrets: [],
+      services: [],
+      volumes: [],
+    });
+    assert.deepEqual(runtimeIsolationEnvelope.config, JSON.parse(sharedEnvironment.HOSTED_TEST_RENDER_JSON));
+    assert.match(fs.readFileSync(capture, "utf8"), /example-app-web/);
+    assert.equal(fs.readFileSync(sharedEnvironment.HOSTED_TEST_LOCK_READER_COUNT, "utf8").trim(), "1");
+    fs.unlinkSync(capture);
     fs.writeFileSync(sharedEnvironment.HOSTED_TEST_LOCK_READER_COUNT, "0\n");
     const queryRace = spawnSync("/bin/bash", [path.join(import.meta.dirname, "compose-vps.sh"), "config", "--format", "json"], {
       encoding: "utf8",

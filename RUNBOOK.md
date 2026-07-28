@@ -303,6 +303,9 @@ The stress sandbox is capped at 0.25 CPU and 96 MiB. The hosted workload
 preparation is non-mutating: it validates the external manifest and environment,
 compares core/combined renders and writes a hash-locked contract. Follow
 `RUNTIME-ISOLATION.md` for rollout and rollback.
+Runtime renders use `HOSTED_WORKLOAD_MODE=hosted` with a verified non-empty
+lock, or explicit `HOSTED_WORKLOAD_MODE=no-hosted` with an empty lock and the
+canonical `config/no-hosted-workloads.lock.json`.
 
 ## Service identities and storage policy
 

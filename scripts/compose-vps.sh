@@ -6,6 +6,13 @@ ENV_FILE=${COMPOSE_ENV_FILE:-$ROOT_DIR/.env}
 PROJECT_NAME=${COMPOSE_PROJECT_NAME:-platform_infra_vps}
 PREPARE_RESOLVED=${HOSTED_WORKLOAD_PREPARE_RESOLVED:-0}
 CANONICAL_DOCKER_HOST=unix:///var/run/docker.sock
+REQUEST_MODE=invalid
+
+if (( $# == 1 )) && [[ "$1" == runtime-isolation-envelope ]]; then
+  REQUEST_MODE=runtime-isolation-envelope
+elif (( $# == 3 )) && [[ "$1" == config && "$2" == --format && "$3" == json ]]; then
+  REQUEST_MODE=compose-config
+fi
 
 case "${DOCKER_HOST:-}" in
   ""|"$CANONICAL_DOCKER_HOST") ;;
@@ -26,7 +33,7 @@ export DOCKER_HOST=$CANONICAL_DOCKER_HOST
 case "$PREPARE_RESOLVED" in
   0) ;;
   1)
-    if (( $# != 3 )) || [[ "$1" != config || "$2" != --format || "$3" != json ]]; then
+    if [[ "$REQUEST_MODE" != compose-config ]]; then
       printf '%s\n' "Resolved hosted workload locks are limited to the exact prepare-time config render." >&2
       exit 2
     fi
@@ -62,6 +69,11 @@ if [[ ${HOSTED_WORKLOAD_LOCK+x} ]]; then
 else
   workload_lock=$(env_path_value HOSTED_WORKLOAD_LOCK)
 fi
+if [[ ${HOSTED_WORKLOAD_MODE+x} ]]; then
+  workload_mode=$HOSTED_WORKLOAD_MODE
+else
+  workload_mode=$(env_path_value HOSTED_WORKLOAD_MODE)
+fi
 for argument in "$@"; do
   case "$argument" in
     -f|-f?*|--file|--file=*|--env-file|--env-file=*|-p|-p?*|--project-name|--project-name=*|--project-directory|--project-directory=*|--profile|--profile=*)
@@ -74,9 +86,32 @@ for argument in "$@"; do
       ;;
   esac
 done
-if (( $# != 3 )) || [[ "$1" != config || "$2" != --format || "$3" != json ]]; then
+if [[ "$REQUEST_MODE" = invalid ]]; then
   printf '%s\n' "The VPS Compose wrapper is render-only in every hosted/no-hosted state; use the global activation transaction for runtime mutation." >&2
   exit 2
+fi
+if [[ "$PREPARE_RESOLVED" = 1 ]]; then
+  [[ "$workload_mode" != no-hosted ]] || {
+    printf '%s\n' "Prepare-time Hosted renders cannot use no-hosted runtime mode." >&2
+    exit 2
+  }
+elif [[ -n "$workload_lock" ]]; then
+  case "$workload_mode" in
+    ""|hosted) ;;
+    no-hosted)
+      printf '%s\n' "HOSTED_WORKLOAD_MODE=no-hosted forbids a non-empty Hosted workload lock." >&2
+      exit 2
+      ;;
+    *)
+      printf 'HOSTED_WORKLOAD_MODE must be hosted or no-hosted: %s\n' "$workload_mode" >&2
+      exit 2
+      ;;
+  esac
+else
+  [[ "$workload_mode" = no-hosted ]] || {
+    printf '%s\n' "An empty HOSTED_WORKLOAD_LOCK requires explicit HOSTED_WORKLOAD_MODE=no-hosted." >&2
+    exit 2
+  }
 fi
 
 canonical_existing_file() {
@@ -488,6 +523,54 @@ if (( runtime_identity_count == ${#runtime_identity_variables[@]} )); then
     open_generated_handoff "$runtime_identity_override"
     compose+=(-f "$HANDOFF_REFERENCE")
   fi
+fi
+
+if [[ "$REQUEST_MODE" = runtime-isolation-envelope ]]; then
+  compose_config=$("${compose[@]}" --profile backup config --format json)
+  printf '%s' "$compose_config" | jq -e 'type == "object"' >/dev/null || {
+    printf '%s\n' "The descriptor-bound Compose render is not one JSON object." >&2
+    exit 1
+  }
+  if [[ -n "$workload_lock" ]]; then
+    printf '%s\n%s\n' "$activation_bundle" "$compose_config" | jq -sc '
+      .[0] as $activation_bundle
+      | .[1] as $config
+      | {
+          version: 1,
+          projectName: $activation_bundle.projectName,
+          lockSha256: $activation_bundle.lockSha256,
+          protectedResourceNames: $activation_bundle.protectedResourceNames,
+          config: $config
+        }
+    '
+  else
+    protected_resource_names=$(printf '%s' "$compose_config" | jq -c '
+      {
+        configs: ((.configs // {}) | keys | sort),
+        networks: ((.networks // {}) | keys | sort),
+        secrets: ((.secrets // {}) | keys | sort),
+        services: ((.services // {}) | keys | sort),
+        volumes: ((.volumes // {}) | keys | sort)
+      }
+    ')
+    no_hosted_lock_sha256=$(sha256_stream < "$runtime_lock_source")
+    printf '%s\n%s\n' "$protected_resource_names" "$compose_config" | jq -sc \
+      --arg projectName "$PROJECT_NAME" \
+      --arg lockSha256 "$no_hosted_lock_sha256" '
+        .[0] as $protectedResourceNames
+        | .[1] as $config
+        | {
+            version: 1,
+            projectName: $projectName,
+            lockSha256: $lockSha256,
+            protectedResourceNames: $protectedResourceNames,
+            config: $config
+          }
+      '
+  fi
+  cleanup_handoff
+  trap - EXIT
+  exit 0
 fi
 
 if [[ "${1:-}" == "up" ]]; then

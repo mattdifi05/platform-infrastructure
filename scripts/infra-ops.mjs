@@ -174,9 +174,11 @@ function parseCronTime(value, optionName) {
 }
 
 function run(bin, args = [], options = {}) {
+  const childEnvironment = { ...process.env };
+  for (const key of options.unsetEnv ?? []) delete childEnvironment[key];
   return runCommandSync(bin, args, {
     cwd: options.cwd ?? infraRoot,
-    env: { ...process.env, ...options.env },
+    env: { ...childEnvironment, ...options.env },
     input: options.input,
     encoding: options.encoding ?? "utf8",
     maxBuffer: options.maxBuffer ?? 64 * 1024 * 1024,
@@ -2953,9 +2955,76 @@ async function networkSegmentationCheck() {
 async function runtimeIsolationCheck() {
   await withLocalCheckReport("runtime-isolation", async () => {
     const envFile = path.resolve(infraRoot, argv.envFile || argv["env-file"] || ".env.vps.example");
-    const { config, evidence: topology } = canonicalVpsTopologyRender({ envFile });
-    const report = evaluateRuntimeIsolation(config);
-    report.canonicalTopology = topology;
+    if (!fs.existsSync(envFile)) fail(`Compose env file not found: ${envFile}`);
+    const envelopeText = output("bash", [
+      path.join(scriptDir, "compose-vps.sh"),
+      "runtime-isolation-envelope",
+    ], {
+      env: { COMPOSE_ENV_FILE: envFile },
+      unsetEnv: [
+        "COMPOSE_PROJECT_NAME",
+        "DOCKER_CONTEXT",
+        "DOCKER_HOST",
+        "HOSTED_WORKLOAD_ALLOW_RESOLVED",
+        "HOSTED_WORKLOAD_LOCK",
+        "HOSTED_WORKLOAD_MODE",
+        "HOSTED_WORKLOAD_PREPARE_RESOLVED",
+        "HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE",
+        "PLATFORM_RUNTIME_CANDIDATE_ID",
+        "PLATFORM_RUNTIME_COMMIT",
+        "PLATFORM_RUNTIME_DEPLOYMENT_ID",
+        "PLATFORM_RUNTIME_SOURCE_RENDER_SHA256",
+        "PLATFORM_RUNTIME_TREE",
+        "PLATFORM_RUNTIME_WORKLOAD_LOCK_SHA256",
+      ],
+      maxBuffer: 128 * 1024 * 1024,
+    });
+    let runtimeIsolationEnvelope;
+    try {
+      runtimeIsolationEnvelope = JSON.parse(envelopeText);
+    } catch {
+      fail("Canonical runtime-isolation envelope was not valid JSON.");
+    }
+    const envelopeKeys = ["config", "lockSha256", "projectName", "protectedResourceNames", "version"];
+    const resourceKeys = ["configs", "networks", "secrets", "services", "volumes"];
+    if (!runtimeIsolationEnvelope || typeof runtimeIsolationEnvelope !== "object"
+        || Array.isArray(runtimeIsolationEnvelope)
+        || JSON.stringify(Object.keys(runtimeIsolationEnvelope).sort()) !== JSON.stringify(envelopeKeys)
+        || runtimeIsolationEnvelope.version !== 1
+        || typeof runtimeIsolationEnvelope.lockSha256 !== "string"
+        || !/^[a-f0-9]{64}$/.test(runtimeIsolationEnvelope.lockSha256)
+        || typeof runtimeIsolationEnvelope.projectName !== "string"
+        || !/^[a-z0-9][a-z0-9_-]*$/.test(runtimeIsolationEnvelope.projectName)
+        || !runtimeIsolationEnvelope.config || typeof runtimeIsolationEnvelope.config !== "object"
+        || Array.isArray(runtimeIsolationEnvelope.config)
+        || runtimeIsolationEnvelope.config.name !== runtimeIsolationEnvelope.projectName
+        || !runtimeIsolationEnvelope.protectedResourceNames
+        || typeof runtimeIsolationEnvelope.protectedResourceNames !== "object"
+        || Array.isArray(runtimeIsolationEnvelope.protectedResourceNames)
+        || JSON.stringify(Object.keys(runtimeIsolationEnvelope.protectedResourceNames).sort()) !== JSON.stringify(resourceKeys)) {
+      fail("Canonical runtime-isolation envelope did not match the closed schema.");
+    }
+    for (const resourceKind of resourceKeys) {
+      const names = runtimeIsolationEnvelope.protectedResourceNames[resourceKind];
+      const definitions = runtimeIsolationEnvelope.config[resourceKind];
+      if (!definitions || typeof definitions !== "object" || Array.isArray(definitions)
+          || !Array.isArray(names)
+          || JSON.stringify(names) !== JSON.stringify([...new Set(names)].sort())
+          || names.some((name) => typeof name !== "string" || name.length === 0 || !Object.hasOwn(definitions, name))) {
+        fail(`Canonical runtime-isolation envelope has an invalid ${resourceKind} inventory.`);
+      }
+    }
+    const report = evaluateRuntimeIsolation(runtimeIsolationEnvelope.config, {
+      projectName: runtimeIsolationEnvelope.projectName,
+      protectedResourceNames: runtimeIsolationEnvelope.protectedResourceNames,
+      protectedNetworkNames: runtimeIsolationEnvelope.protectedResourceNames.networks,
+    });
+    report.sourceEnvelope = {
+      version: runtimeIsolationEnvelope.version,
+      lockSha256: runtimeIsolationEnvelope.lockSha256,
+      projectName: runtimeIsolationEnvelope.projectName,
+      protectedResourceNames: runtimeIsolationEnvelope.protectedResourceNames,
+    };
     const stamp = reportTimestamp();
     const jsonPath = writeJsonReport("runtime-isolation", `runtime-isolation-${stamp}`, report);
     const markdownPath = writeMarkdownReport("runtime-isolation", `runtime-isolation-${stamp}`, [
@@ -2969,8 +3038,6 @@ async function runtimeIsolationCheck() {
       `Hosted applications: ${report.summary.hostedApplications}`,
       `Total memory ceiling bytes: ${report.summary.totalMemoryLimitBytes}`,
       `Raw socket owners: ${report.summary.rawSocketOwners.join(",") || "none"}`,
-      `Canonical render: ${topology.renderSha256}`,
-      `Hosted workloads: ${topology.hostedWorkloadIds.join(", ") || "none"}`,
       "",
       "| Check | Status | Detail |",
       "| --- | --- | --- |",

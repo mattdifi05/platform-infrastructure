@@ -120,6 +120,9 @@ Preparation does not start containers or connect to a database. It validates
 the external workload inputs, renders core and combined Compose models and
 writes a permission-restricted SHA-256 lock. Runtime activation is a separate
 approved maintenance action.
+Set `HOSTED_WORKLOAD_MODE=hosted` for a verified non-empty workload lock. A
+core-only render is accepted only with explicit `HOSTED_WORKLOAD_MODE=no-hosted`,
+an empty workload lock and `config/no-hosted-workloads.lock.json`.
 
 ## Rollout Gate
 

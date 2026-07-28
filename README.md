@@ -119,6 +119,9 @@ digest-verificate di Compose/environment tramite file descriptor persistenti,
 senza riaprire i pathname workload dopo la verifica; il router riceve soltanto
 il lock in read-only. L'identita' Unix che prepara ed esegue il deploy resta una
 trust boundary amministrativa e non deve essere condivisa con servizi workload.
+Il runtime richiede `HOSTED_WORKLOAD_MODE=hosted` con un lock non vuoto; lo
+stato senza workload richiede invece `HOSTED_WORKLOAD_MODE=no-hosted`, lock
+vuoto e il lock canonico `config/no-hosted-workloads.lock.json`.
 Non crea database, non applica migrazioni e non avvia
 container. Il deploy usa soltanto un lock `verified`; se un file cambia, il
 render fallisce chiuso finche' il lock non viene rigenerato e approvato.
