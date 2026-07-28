@@ -290,11 +290,31 @@ test("Compose wrapper is render-only and canonical-project-bound in no-hosted mo
   }
 });
 test("Compose wrapper rejects a missing or non-canonical runtime lock source before render", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "hosted-runtime-lock-source-"));
+  const root = fs.realpathSync.native(
+    fs.mkdtempSync(path.join(os.tmpdir(), "hosted-runtime-lock-source-")),
+  );
   try {
-    const envFile = path.join(root, "core.env");
-    fs.writeFileSync(envFile, "CORE_VALUE=fixture\n");
-    const missing = spawnSync("/bin/bash", [path.join(import.meta.dirname, "compose-vps.sh"), "config", "--format", "json"], {
+    const scripts = path.join(root, "scripts");
+    const config = path.join(root, "config");
+    fs.mkdirSync(scripts);
+    fs.mkdirSync(config);
+    for (const name of [
+      "compose-vps.sh",
+      "no-hosted-core-policy.mjs",
+      "runtime-isolation-policy.mjs",
+    ]) {
+      fs.copyFileSync(path.join(import.meta.dirname, name), path.join(scripts, name));
+    }
+    const wrapper = path.join(scripts, "compose-vps.sh");
+    fs.chmodSync(wrapper, 0o755);
+    const canonicalLock = path.join(config, "no-hosted-workloads.lock.json");
+    fs.copyFileSync(
+      path.join(import.meta.dirname, "..", "config", "no-hosted-workloads.lock.json"),
+      canonicalLock,
+    );
+    const envFile = path.join(root, ".env");
+    fs.writeFileSync(envFile, "CORE_VALUE=fixture\n", { mode: 0o600 });
+    const missing = spawnSync("/bin/bash", [wrapper, "config", "--format", "json"], {
       encoding: "utf8",
       env: {
         ...process.env,
@@ -307,8 +327,8 @@ test("Compose wrapper rejects a missing or non-canonical runtime lock source bef
     assert.notEqual(missing.status, 0);
     assert.match(missing.stderr, /existing regular non-symlink file/);
     const foreign = path.join(root, "foreign.lock.json");
-    fs.copyFileSync(path.join(import.meta.dirname, "..", "config", "no-hosted-workloads.lock.json"), foreign);
-    const nonCanonical = spawnSync("/bin/bash", [path.join(import.meta.dirname, "compose-vps.sh"), "config", "--format", "json"], {
+    fs.copyFileSync(canonicalLock, foreign);
+    const nonCanonical = spawnSync("/bin/bash", [wrapper, "config", "--format", "json"], {
       encoding: "utf8",
       env: {
         ...process.env,
@@ -1858,28 +1878,45 @@ test("compose wrapper uses one activation bundle and hands verified bytes throug
     assert.ok(realJq, "jq is required by the descriptor handoff race test");
     assert.ok(realSha, "a SHA-256 utility is required by the descriptor handoff race test");
     fs.mkdirSync(fakeBin);
+    const dockerNoSwap = path.join(root, "docker-no-swap");
+    const dockerCoreEnvSwap = path.join(root, "docker-core-env-swap");
+    const dockerRender = path.join(root, "docker-render.json");
+    fs.writeFileSync(dockerRender, `${JSON.stringify({
+      name: "platform_infra_vps",
+      configs: {},
+      networks: {},
+      secrets: {},
+      services: { "example-app-web": {} },
+      volumes: {},
+    })}\n`, { mode: 0o600 });
     fs.writeFileSync(path.join(fakeBin, "docker"), `#!/bin/bash
 set -euo pipefail
-if [[ "\${HOSTED_TEST_NO_SWAP:-0}" != 1 ]]; then
-  /bin/mv "$HOSTED_TEST_GENERATION" "$HOSTED_TEST_ORIGINAL_GENERATION"
-  /bin/mkdir -m 700 "$HOSTED_TEST_GENERATION"
-  printf 'services:\n  hostile:\n    privileged: true\n' > "$HOSTED_TEST_GENERATION/$HOSTED_TEST_COMPOSE_BASENAME"
-  /bin/chmod 400 "$HOSTED_TEST_GENERATION/$HOSTED_TEST_COMPOSE_BASENAME"
-  /bin/chmod 500 "$HOSTED_TEST_GENERATION"
+fixture_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+generation=${JSON.stringify(lock.snapshotGeneration)}
+original_generation=${JSON.stringify(originalGeneration)}
+compose_basename=${JSON.stringify(composeBasename)}
+core_env=${JSON.stringify(fixture.coreEnvFile)}
+if [[ ! -f "$fixture_root/docker-no-swap" ]]; then
+  /bin/mv "$generation" "$original_generation"
+  /bin/mkdir -m 700 "$generation"
+  printf 'services:\n  hostile:\n    privileged: true\n' > "$generation/$compose_basename"
+  /bin/chmod 400 "$generation/$compose_basename"
+  /bin/chmod 500 "$generation"
 fi
-if [[ "\${HOSTED_TEST_CORE_ENV_SWAP:-0}" = 1 ]]; then
-  printf 'CORE_VALUE=hostile\n' > "$HOSTED_TEST_CORE_ENV"
+if [[ -f "$fixture_root/docker-core-env-swap" ]]; then
+  /bin/rm "$fixture_root/docker-core-env-swap"
+  printf 'CORE_VALUE=hostile\n' > "$core_env"
 fi
-: > "$HOSTED_TEST_CAPTURE"
+: > "$fixture_root/consumer-capture.txt"
 for argument in "$@"; do
   case "$argument" in
     /dev/fd/*)
-      printf '%s\n' "---$argument" >> "$HOSTED_TEST_CAPTURE"
-      /bin/cat "$argument" >> "$HOSTED_TEST_CAPTURE"
+      printf '%s\n' "---$argument" >> "$fixture_root/consumer-capture.txt"
+      /bin/cat "$argument" >> "$fixture_root/consumer-capture.txt"
       ;;
   esac
 done
-printf '%s\n' "$HOSTED_TEST_RENDER_JSON"
+/bin/cat "$fixture_root/docker-render.json"
 `, { mode: 0o755 });
     fs.writeFileSync(path.join(fakeBin, "sh"), `#!/bin/sh
 count=0
@@ -1938,6 +1975,7 @@ exec "$HOSTED_TEST_REAL_JQ" "$@"
       PLATFORM_RUNTIME_WORKLOAD_LOCK_SHA256: "e".repeat(64),
       TMPDIR: root,
     };
+    fs.writeFileSync(dockerNoSwap, "1\n", { mode: 0o600 });
     const prepareConfig = spawnSync("/bin/bash", [path.join(import.meta.dirname, "compose-vps.sh"), "config", "--format", "json"], {
       encoding: "utf8",
       env: { ...sharedEnvironment, HOSTED_WORKLOAD_PREPARE_RESOLVED: "1", HOSTED_TEST_NO_SWAP: "1" },
@@ -2050,24 +2088,17 @@ printf '%s\n' "$output"
 exit "$status"
 `, { mode: 0o755 });
 
+    fs.rmSync(dockerNoSwap, { force: true });
+    fs.writeFileSync(dockerCoreEnvSwap, "1\n", { mode: 0o600 });
     const consumer = spawnSync("/bin/bash", [path.join(import.meta.dirname, "compose-vps.sh"), "config", "--format", "json"], {
       encoding: "utf8",
       env: { ...sharedEnvironment, HOSTED_TEST_CORE_ENV_SWAP: "1" },
     });
-    assert.equal(consumer.status, 0, consumer.stderr);
-    const consumed = fs.readFileSync(capture, "utf8");
-    assert.match(consumed, /example-app-web/);
-    assert.match(consumed, /EXAMPLE_APP_THEME=dark/);
-    assert.match(consumed, /CORE_VALUE=fixture/);
-    assert.doesNotMatch(consumed, /CORE_VALUE=hostile/);
-    assert.match(consumed, /"example-app-web"/);
-    assert.match(consumed, /"com\.platform\.runtime\.candidate-id":"a{64}"/);
-    assert.match(consumed, /"com\.platform\.runtime\.commit":"b{40}"/);
-    assert.match(consumed, /"com\.platform\.runtime\.tree":"c{40}"/);
-    assert.match(consumed, /"com\.platform\.runtime\.deployment-id":"deploy-20260721"/);
-    assert.match(consumed, /"com\.platform\.runtime\.source-render-sha256":"d{64}"/);
-    assert.match(consumed, /"com\.platform\.runtime\.workload-lock-sha256":"e{64}"/);
-    assert.doesNotMatch(consumed, /privileged: true/);
+    assert.notEqual(consumer.status, 0);
+    assert.match(consumer.stderr, /Core environment identity or digest changed during render\./);
+    assert.equal(consumer.stdout, "");
+    assert.equal(fs.existsSync(dockerCoreEnvSwap), false);
+    assert.equal(fs.readFileSync(fixture.coreEnvFile, "utf8"), "CORE_VALUE=hostile\n");
     assert.equal(fs.existsSync(sharedEnvironment.HOSTED_TEST_HASH_RACE_MARKER), false);
     assert.equal(fs.readFileSync(sharedEnvironment.HOSTED_TEST_LOCK_READER_COUNT, "utf8").trim(), "1");
     assert.notEqual(fs.statSync(lock.snapshotGeneration).ino, Number(lock.snapshotGenerationIdentity.inode));

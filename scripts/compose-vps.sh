@@ -191,10 +191,11 @@ if [ ! -f "$ENV_FILE" ]; then
 fi
 
 ENV_SOURCE_FILE=$ENV_FILE
-open_read_once_snapshot "$ENV_SOURCE_FILE" "core environment" 3
+open_read_once_snapshot "$ENV_SOURCE_FILE" "core environment" 4
 ENV_LOCK_REFERENCE=${SNAPSHOT_REFERENCES[0]}
 ENV_MODE_REFERENCE=${SNAPSHOT_REFERENCES[1]}
 ENV_RENDER_REFERENCE=${SNAPSHOT_REFERENCES[2]}
+ENV_SEMANTIC_REFERENCE=${SNAPSHOT_REFERENCES[3]}
 ENV_SNAPSHOT_SHA256=$SNAPSHOT_SHA256
 ENV_SOURCE_IDENTITY=$SNAPSHOT_SOURCE_IDENTITY
 
@@ -260,6 +261,19 @@ else
   [[ "$workload_mode" = no-hosted ]] || {
     printf '%s\n' "An empty HOSTED_WORKLOAD_LOCK requires explicit HOSTED_WORKLOAD_MODE=no-hosted." >&2
     exit 2
+  }
+fi
+
+if [[ -z "$workload_lock" && "$PREPARE_RESOLVED" = 0 ]]; then
+  env_parent=$(CDPATH= cd -- "$(dirname -- "$ENV_SOURCE_FILE")" && pwd -P)
+  env_canonical_source=$env_parent/$(basename -- "$ENV_SOURCE_FILE")
+  IFS='|' read -r _env_device _env_inode env_uid env_mode <<< "$ENV_SOURCE_IDENTITY"
+  [[ "$env_canonical_source" = "$ROOT_DIR/.env"
+      && ! -L "$ENV_SOURCE_FILE"
+      && "$env_uid" = "$(id -u)"
+      && ( "$env_mode" = 256 || "$env_mode" = 384 ) ]] || {
+    printf '%s\n' "No-hosted core environment must be canonical, deployment-owned and mode 0400 or 0600." >&2
+    exit 1
   }
 fi
 
@@ -539,24 +553,29 @@ else
       printf '%s\n' "A non-empty HOSTED_WORKLOAD_LOCK is required for a hosted runtime lock source." >&2
       exit 1
     }
-    open_read_once_snapshot "$runtime_lock_source" "canonical no-hosted lock" 2
+    open_read_once_snapshot "$runtime_lock_source" "canonical no-hosted lock" 3
     no_hosted_lock_validation_reference=${SNAPSHOT_REFERENCES[0]}
     no_hosted_lock_inventory_reference=${SNAPSHOT_REFERENCES[1]}
+    no_hosted_lock_semantic_reference=${SNAPSHOT_REFERENCES[2]}
     no_hosted_lock_sha256=$SNAPSHOT_SHA256
     no_hosted_lock_source_identity=$SNAPSHOT_SOURCE_IDENTITY
-    [[ "$no_hosted_lock_sha256" = b45b17afaf9c9db19b97425392a25cadae1afd5656bac07789d02188a53bf66c ]] || {
+    [[ "$no_hosted_lock_sha256" = 2be024b78f2e27116ff6f956d97f596937ee02361691bfcd01f907d1cb6c82fb ]] || {
       printf '%s\n' "Canonical no-hosted lock raw digest mismatch." >&2
       exit 1
     }
     jq -e '
       type == "object"
-      and ((keys | sort) == ["brokerPolicySha256", "projectName", "protectedResourceNames", "routes", "state", "validatorVersion", "version", "workloads"])
+      and ((keys | sort) == ["brokerPolicySha256", "coreSemanticPolicy", "projectName", "protectedResourceNames", "routes", "state", "validatorVersion", "version", "workloads"])
       and .version == 4
       and .validatorVersion == "hosted-contract-v4"
       and .state == "verified"
       and .routes == []
       and .workloads == []
       and .brokerPolicySha256 == "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+      and (.coreSemanticPolicy | type == "object")
+      and ((.coreSemanticPolicy | keys | sort) == ["schema", "sha256"])
+      and .coreSemanticPolicy.schema == "platform-no-hosted-core-capability-policy/v1"
+      and .coreSemanticPolicy.sha256 == "6931457ee76eff59ba6788d47f4ad6cac2da4bb171a94d51ffc3b3239bb71151"
       and .projectName == "platform_infra_vps"
       and (.protectedResourceNames | type == "object")
       and ((.protectedResourceNames | keys | sort) == ["configs", "networks", "secrets", "services", "volumes"])
@@ -645,44 +664,56 @@ if (( runtime_identity_count == ${#runtime_identity_variables[@]} )); then
   fi
 fi
 
-if [[ "$REQUEST_MODE" = runtime-isolation-envelope ]]; then
-  compose_render_file=$handoff_directory/compose-render-$next_handoff_fd
-  next_handoff_fd=$((next_handoff_fd + 1))
-  handoff_files+=("$compose_render_file")
-  set -C
-  if ! "${compose[@]}" --profile backup config --format json > "$compose_render_file"; then
-    set +C
-    printf '%s\n' "The descriptor-bound Compose render failed." >&2
-    exit 1
-  fi
+compose_render_file=$handoff_directory/compose-render-$next_handoff_fd
+next_handoff_fd=$((next_handoff_fd + 1))
+handoff_files+=("$compose_render_file")
+compose_environment=(
+  /usr/bin/env
+  -i
+  "PATH=${PATH:-/usr/bin:/bin}"
+  "DOCKER_HOST=$CANONICAL_DOCKER_HOST"
+  "HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE=$runtime_lock_source"
+)
+if [[ -n "${HOME:-}" ]]; then
+  compose_environment+=("HOME=$HOME")
+fi
+set -C
+if ! "${compose_environment[@]}" "${compose[@]}" --profile backup config --format json > "$compose_render_file"; then
   set +C
-  chmod 600 "$compose_render_file"
-  open_read_once_snapshot "$compose_render_file" "descriptor-bound Compose render" 3
-  compose_render_validation_reference=${SNAPSHOT_REFERENCES[0]}
-  compose_render_policy_reference=${SNAPSHOT_REFERENCES[1]}
-  compose_render_envelope_reference=${SNAPSHOT_REFERENCES[2]}
-  compose_render_sha256=$SNAPSHOT_SHA256
-  /bin/rm -- "$compose_render_file"
-  jq -e -s 'length == 1 and (.[0] | type == "object")' "$compose_render_validation_reference" >/dev/null || {
-    printf '%s\n' "The descriptor-bound Compose render is not one JSON object." >&2
-    exit 1
-  }
+  printf '%s\n' "The descriptor-bound Compose render failed." >&2
+  exit 1
+fi
+set +C
+chmod 600 "$compose_render_file"
+open_read_once_snapshot "$compose_render_file" "descriptor-bound Compose render" 4
+compose_render_validation_reference=${SNAPSHOT_REFERENCES[0]}
+compose_render_authority_reference=${SNAPSHOT_REFERENCES[1]}
+compose_render_semantic_reference=${SNAPSHOT_REFERENCES[2]}
+compose_render_result_reference=${SNAPSHOT_REFERENCES[3]}
+compose_render_sha256=$SNAPSHOT_SHA256
+/bin/rm -- "$compose_render_file"
+jq -e -s 'length == 1 and (.[0] | type == "object")' "$compose_render_validation_reference" >/dev/null || {
+  printf '%s\n' "The descriptor-bound Compose render is not one JSON object." >&2
+  exit 1
+}
+initial_env_snapshot_sha256=$ENV_SNAPSHOT_SHA256
+initial_env_source_identity=$ENV_SOURCE_IDENTITY
+open_read_once_snapshot "$ENV_SOURCE_FILE" "core environment revalidation" 0
+[[ "$SNAPSHOT_SHA256" = "$initial_env_snapshot_sha256"
+    && "$SNAPSHOT_SOURCE_IDENTITY" = "$initial_env_source_identity" ]] || {
+  printf '%s\n' "Core environment identity or digest changed during render." >&2
+  exit 1
+}
+
+if [[ "$PREPARE_RESOLVED" = 0 ]]; then
   if [[ -n "$workload_lock" ]]; then
-    expected_combined_render_sha256=$(printf '%s' "$activation_bundle" | jq -r '.combinedRenderSha256')
-    [[ "$compose_render_sha256" = "$expected_combined_render_sha256" ]] || {
-      printf '%s\n' "Hosted combined render raw digest mismatches the activation bundle." >&2
-      exit 1
-    }
-    jq -n --argjson activationBundle "$activation_bundle" --slurpfile configDocuments "$compose_render_envelope_reference" '
-      $configDocuments[0] as $config
-      | {
-          version: 1,
-          projectName: $activationBundle.projectName,
-          lockSha256: $activationBundle.lockSha256,
-          protectedResourceNames: $activationBundle.protectedResourceNames,
-          config: $config
-        }
-    '
+    if (( runtime_identity_count == 0 )); then
+      expected_combined_render_sha256=$(printf '%s' "$activation_bundle" | jq -r '.combinedRenderSha256')
+      [[ "$compose_render_sha256" = "$expected_combined_render_sha256" ]] || {
+        printf '%s\n' "Hosted combined render raw digest mismatches the activation bundle." >&2
+        exit 1
+      }
+    fi
   else
     jq -e --arg projectName "$PROJECT_NAME" --argjson protected "$no_hosted_protected_resource_names" '
       . as $config
@@ -692,8 +723,16 @@ if [[ "$REQUEST_MODE" = runtime-isolation-envelope ]]; then
         . as $kind
         | ($config[$kind] | type == "object")
         and (($config[$kind] | keys | sort) == $protected[$kind]))
-    ' "$compose_render_policy_reference" >/dev/null || {
+    ' "$compose_render_authority_reference" >/dev/null || {
       printf '%s\n' "No-hosted render resource inventory mismatches canonical lock authority." >&2
+      exit 1
+    }
+    node "$ROOT_DIR/scripts/no-hosted-core-policy.mjs" \
+      --root "$ROOT_DIR" \
+      --lock "$no_hosted_lock_semantic_reference" \
+      --config "$compose_render_semantic_reference" \
+      --env "$ENV_SEMANTIC_REFERENCE" || {
+      printf '%s\n' "No-hosted render semantic authority validation failed." >&2
       exit 1
     }
     initial_no_hosted_lock_sha256=$no_hosted_lock_sha256
@@ -704,30 +743,43 @@ if [[ "$REQUEST_MODE" = runtime-isolation-envelope ]]; then
       printf '%s\n' "Canonical no-hosted lock identity or digest changed during render." >&2
       exit 1
     }
-    jq -n \
-      --arg projectName "$PROJECT_NAME" \
-      --arg lockSha256 "$initial_no_hosted_lock_sha256" \
-      --argjson protectedResourceNames "$no_hosted_protected_resource_names" \
-      --slurpfile configDocuments "$compose_render_envelope_reference" '
-        $configDocuments[0] as $config
-        | {
-            version: 1,
-            projectName: $projectName,
-            lockSha256: $lockSha256,
-            protectedResourceNames: $protectedResourceNames,
-            config: $config
-          }
-    '
   fi
+fi
+
+if [[ "$REQUEST_MODE" = compose-config ]]; then
   cleanup_handoff
   trap - EXIT
+  /bin/cat "$compose_render_result_reference"
   exit 0
 fi
 
-if [[ "${1:-}" == "up" ]]; then
-  "${compose[@]}" --profile backup run --rm --no-deps broker-auth-bootstrap
+if [[ -n "$workload_lock" ]]; then
+  jq -n --argjson activationBundle "$activation_bundle" --slurpfile configDocuments "$compose_render_result_reference" '
+    $configDocuments[0] as $config
+    | {
+        version: 1,
+        projectName: $activationBundle.projectName,
+        lockSha256: $activationBundle.lockSha256,
+        protectedResourceNames: $activationBundle.protectedResourceNames,
+        config: $config
+      }
+  '
+else
+  jq -n \
+    --arg projectName "$PROJECT_NAME" \
+    --arg lockSha256 "$initial_no_hosted_lock_sha256" \
+    --argjson protectedResourceNames "$no_hosted_protected_resource_names" \
+    --slurpfile configDocuments "$compose_render_result_reference" '
+      $configDocuments[0] as $config
+      | {
+          version: 1,
+          projectName: $projectName,
+          lockSha256: $lockSha256,
+          protectedResourceNames: $protectedResourceNames,
+          config: $config
+        }
+  '
 fi
-
 cleanup_handoff
 trap - EXIT
-exec "${compose[@]}" --profile backup "$@"
+exit 0
