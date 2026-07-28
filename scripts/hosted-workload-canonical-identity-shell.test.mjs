@@ -160,9 +160,10 @@ test("shell binds the manifest snapshot workload id byte-exactly", () => {
   const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "hosted-shell-id-exact-")));
   try {
     const fixture = createResolvedLock(root, [{
-      id: "Billing",
+      id: "billing",
       serviceName: "billing-web",
     }]);
+    forgeManifestSnapshotId(fixture.lockPath, "Billing");
     const rawPolicy = spawnSync("ruby", [policyScript, "--lock", fixture.lockPath], { encoding: "utf8" });
     assert.equal(rawPolicy.status, 0, rawPolicy.stderr);
     const rejected = spawnSync("/bin/sh", [lockScript, fixture.lockPath, "verify"], {
@@ -366,6 +367,21 @@ function forgeForeignOwnedResources(lockPath) {
   receipt.volumeNames = [replacements[2][1]];
   receipt.composeSha256 = composeRecord.sha256;
   lock.rawPolicySha256 = sha256(Buffer.from(JSON.stringify(stable(lock.rawPolicyReceipt))));
+  fs.writeFileSync(lockPath, `${JSON.stringify(lock, null, 2)}\n`, { mode: 0o600 });
+  fs.chmodSync(lockPath, 0o600);
+}
+
+function forgeManifestSnapshotId(lockPath, forgedId) {
+  const lock = JSON.parse(fs.readFileSync(lockPath, "utf8"));
+  const workload = lock.workloads[0];
+  const manifestRecord = lock.files.find((record) =>
+    record.kind === "workload-manifest" && record.workloadId === workload.id);
+  fs.chmodSync(lock.snapshotGeneration, 0o700);
+  const manifest = JSON.parse(fs.readFileSync(manifestRecord.path, "utf8"));
+  manifest.id = forgedId;
+  rewriteSnapshotRecord(lock, workload, manifestRecord, Buffer.from(JSON.stringify(manifest)));
+  fs.chmodSync(lock.snapshotGeneration, 0o500);
+  lock.workloadContentSha256 = workloadContentSha256(lock.files);
   fs.writeFileSync(lockPath, `${JSON.stringify(lock, null, 2)}\n`, { mode: 0o600 });
   fs.chmodSync(lockPath, 0o600);
 }

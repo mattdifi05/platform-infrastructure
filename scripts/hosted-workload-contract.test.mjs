@@ -1076,8 +1076,13 @@ test("raw policy receipt requires the exact current control set", () => {
     return Object.fromEntries(Object.keys(value).sort().map((key) => [key, stable(value[key])]));
   };
   const receipt = {
+    state: "resolved",
     workloadContentSha256: "a".repeat(64),
-    workloads: [{ id: "example-app", services: [{ name: "example-app-web" }], secrets: [] }],
+    workloads: [{
+      id: "example-app",
+      services: [{ name: "example-app-web", role: "web", routes: [] }],
+      secrets: [],
+    }],
     files: [{ kind: "workload-compose", workloadId: "example-app", sha256: "c".repeat(64) }],
     rawPolicyVersion: "hosted-raw-v3",
     rawPolicyWorkloadContentSha256: "a".repeat(64),

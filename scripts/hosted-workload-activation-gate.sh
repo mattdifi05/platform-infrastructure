@@ -329,14 +329,14 @@ validate_bundle() {
       . as $record
       | type == "object"
       and ((keys | sort) == ["serviceName", "workloadId"])
-      and (.workloadId | type == "string" and test("^[a-z0-9][a-z0-9-]*$"))
+      and (.workloadId | type == "string" and test("^[a-z][a-z0-9-]{1,62}$"))
       and (.serviceName | type == "string" and test("^[a-z][a-z0-9-]{1,62}$"))
       and $record.workloadId == service_owner($record.serviceName; $ids);
     def network_record($ids; $projectName):
       . as $record
       | type == "object"
       and ((keys | sort) == ["logicalName", "physicalName", "workloadId"])
-      and (.workloadId | type == "string" and test("^[a-z0-9][a-z0-9-]*$"))
+      and (.workloadId | type == "string" and test("^[a-z][a-z0-9-]{1,62}$"))
       and (.logicalName | type == "string" and test("^[a-z0-9][a-z0-9_]*$"))
       and $record.workloadId == network_owner($record.logicalName; $ids)
       and (($record.logicalName | split("_") | last) as $zone
@@ -346,10 +346,20 @@ validate_bundle() {
     def extension_record:
       type == "object"
       and ((keys | sort) == ["networkNames", "serviceName", "workloadId"])
-      and (.workloadId | type == "string" and test("^[a-z0-9][a-z0-9-]*$"))
+      and (.workloadId | type == "string" and test("^[a-z][a-z0-9-]{1,62}$"))
       and (.serviceName | IN("project-router", "postgres", "redis", "nats", "keycloak", "minio", "prometheus"))
       and (.networkNames | type == "array" and length > 0 and . == (unique | sort))
       and all(.networkNames[]; type == "string" and length > 0);
+    def route_record($ids):
+      . as $record
+      | type == "object"
+      and ((keys | sort) == ["port", "serviceName", "slug", "upstream", "workloadId"])
+      and (.workloadId | type == "string" and test("^[a-z][a-z0-9-]{1,62}$"))
+      and (.slug | type == "string" and test("^[a-z][a-z0-9-]{1,62}$"))
+      and (.serviceName | type == "string" and test("^[a-z][a-z0-9-]{1,62}$"))
+      and (.port | type == "number" and floor == . and . >= 1 and . <= 65535)
+      and $record.workloadId == service_owner($record.serviceName; $ids)
+      and $record.upstream == ("http://" + $record.serviceName + ":" + ($record.port | tostring));
     . as $bundle
     | type == "object"
     and $bundle.version == 2
@@ -358,7 +368,7 @@ validate_bundle() {
     and ($bundle.coreRenderSha256 | type == "string" and test("^[a-f0-9]{64}$"))
     and ($bundle.combinedRenderSha256 | type == "string" and test("^[a-f0-9]{64}$"))
     and ($bundle.workloadIds | type == "array" and length > 0 and . == (unique | sort)
-      and prefix_disjoint and all(.[]; type == "string" and test("^[a-z0-9][a-z0-9-]*$")))
+      and prefix_disjoint and all(.[]; type == "string" and test("^[a-z][a-z0-9-]{1,62}$")))
     and ($bundle.protectedNetworkNames | type == "array" and . == (unique | sort)
       and all(.[]; type == "string" and length > 0))
     and ($bundle.protectedResourceNames | protected_resource_names)
@@ -386,6 +396,12 @@ validate_bundle() {
           | any($bundle.networkRecords[];
               .workloadId == $record.workloadId and .logicalName == $networkName)))
     and ($bundle.routeRecords | type == "array")
+    and ($bundle.routeRecords == ($bundle.routeRecords | unique_by(.slug) | sort_by(.workloadId, .slug)))
+    and all($bundle.routeRecords[]; route_record($bundle.workloadIds))
+    and all($bundle.routeRecords[];
+      . as $route
+      | any($bundle.serviceRecords[];
+          .workloadId == $route.workloadId and .serviceName == $route.serviceName))
   ' >/dev/null
 }
 

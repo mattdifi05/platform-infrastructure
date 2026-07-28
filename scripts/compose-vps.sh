@@ -291,21 +291,21 @@ if [[ -n "$workload_lock" ]]; then
     def network_record($projectName):
       type == "object"
       and ((keys | sort) == ["logicalName", "physicalName", "workloadId"])
-      and (.workloadId | type == "string" and test("^[a-z0-9][a-z0-9-]*$"))
+      and (.workloadId | type == "string" and test("^[a-z][a-z0-9-]{1,62}$"))
       and (.logicalName | type == "string" and test("^[a-z0-9][a-z0-9_]*(ingress|postgres|cache|bus|identity|storage|observability|egress)$"))
       and .logicalName == ((.workloadId | gsub("-"; "_")) + "_" + (.logicalName | split("_") | last))
       and .physicalName == ($projectName + "_" + .logicalName);
     def service_record:
       type == "object"
       and ((keys | sort) == ["serviceName", "workloadId"])
-      and (.workloadId | type == "string" and test("^[a-z0-9][a-z0-9-]*$"))
+      and (.workloadId | type == "string" and test("^[a-z][a-z0-9-]{1,62}$"))
       and (.serviceName | type == "string" and test("^[a-z][a-z0-9-]{1,62}$"));
     def route_record:
       . as $record
       | type == "object"
       and ((keys | sort) == ["port", "serviceName", "slug", "upstream", "workloadId"])
-      and (.workloadId | type == "string" and test("^[a-z0-9][a-z0-9-]*$"))
-      and (.slug | type == "string" and test("^[a-z0-9][a-z0-9-]*$"))
+      and (.workloadId | type == "string" and test("^[a-z][a-z0-9-]{1,62}$"))
+      and (.slug | type == "string" and test("^[a-z][a-z0-9-]{1,62}$"))
       and (.serviceName | type == "string" and test("^[a-z][a-z0-9-]{1,62}$"))
       and (.port | type == "number" and . >= 1 and . <= 65535 and floor == .)
       and .upstream == ("http://" + .serviceName + ":" + (.port | tostring));
@@ -323,7 +323,7 @@ if [[ -n "$workload_lock" ]]; then
     and (.coreEnvFile | type == "string" and length > 0)
     and (.coreEnvironmentRecord | core_record)
     and (.projectName | type == "string" and test("^[a-z0-9][a-z0-9_-]*$"))
-    and ($bundle.workloadIds | type == "array" and length > 0 and . == (unique | sort) and prefix_disjoint and all(.[]; type == "string" and test("^[a-z0-9][a-z0-9-]*$")))
+    and ($bundle.workloadIds | type == "array" and length > 0 and . == (unique | sort) and prefix_disjoint and all(.[]; type == "string" and test("^[a-z][a-z0-9-]{1,62}$")))
     and ($bundle.protectedNetworkNames | type == "array" and . == (unique | sort) and all(.[]; type == "string" and length > 0))
     and ($bundle.protectedResourceNames | protected_resource_names)
     and ($bundle.protectedResourceNames.networks == $bundle.protectedNetworkNames)
@@ -344,7 +344,7 @@ if [[ -n "$workload_lock" ]]; then
     and ($bundle.platformExtensionRecords == ($bundle.platformExtensionRecords | unique_by(.workloadId, .serviceName) | sort_by(.workloadId, .serviceName)))
     and all($bundle.platformExtensionRecords[];
       ((keys | sort) == ["networkNames", "serviceName", "workloadId"])
-      and (.workloadId | type == "string" and test("^[a-z0-9][a-z0-9-]*$"))
+      and (.workloadId | type == "string" and test("^[a-z][a-z0-9-]{1,62}$"))
       and (.serviceName | IN("project-router", "postgres", "redis", "nats", "keycloak", "minio", "prometheus"))
       and (.networkNames | type == "array" and length > 0 and . == (unique | sort))
       and all(.networkNames[]; type == "string"))

@@ -192,12 +192,40 @@ jq_lock -e --arg lockPath "$LOCK" --argjson allowResolved "$allow_resolved" --ar
         and $name == (($id | gsub("-"; "_")) + "_" + $zone))
       | $id]
     | if length == 1 then .[0] else null end;
+  def canonical_manifest_service($workload_id):
+    . as $service
+    | type == "object"
+    and ((keys | sort) == ["name", "role", "routes"])
+    and ($service.name | type == "string" and test("^[a-z][a-z0-9-]{1,62}$"))
+    and ($service.name | startswith($workload_id + "-"))
+    and ($service.role | IN("api", "web", "worker", "scheduled-worker"))
+    and ($service.routes | type == "array")
+    and (if ($service.routes | length) > 0 then ($service.role | IN("api", "web")) else true end)
+    and all($service.routes[];
+      type == "object"
+      and ((keys | sort) == ["port", "slug"])
+      and (.slug | type == "string" and test("^[a-z][a-z0-9-]{1,62}$"))
+      and (.port | type == "number" and floor == . and . >= 1 and . <= 65535));
+  def canonical_routes:
+    [
+      .workloads[] as $workload
+      | $workload.services[] as $service
+      | $service.routes[]
+      | {
+          workloadId: $workload.id,
+          slug,
+          service: $service.name,
+          port,
+          upstream: ("http://" + $service.name + ":" + (.port | tostring))
+        }
+    ] | sort_by(.slug);
   . as $lock
   | ($lock.workloads | map(.id)) as $workload_ids
   | ($lock.files | map(.path)) as $file_paths
   | ($lock.files | map(select(.kind == "catalog" and ((.workloadId // null) == null)))) as $catalog_records
   | ($lock.files | map(select(.kind == "core-environment" and ((.workloadId // null) == null)))) as $core_environment_records
   | ($lock.files | map(select(.kind == "core-compose" and ((.workloadId // null) == null)))) as $core_records
+  | ($lock | canonical_routes) as $canonical_routes
   | $lock.version == 4
     and $lock.validatorVersion == "hosted-contract-v4"
     and (if $allowResolved then ($lock.state == "resolved" or $lock.state == "verified") else $lock.state == "verified" end)
@@ -223,6 +251,15 @@ jq_lock -e --arg lockPath "$LOCK" --argjson allowResolved "$allow_resolved" --ar
     and (($workload_ids | unique | length) == ($workload_ids | length))
     and ($workload_ids | prefix_disjoint)
     and all($lock.workloads[]; (.id | type == "string" and test("^[a-z][a-z0-9-]{1,62}$")))
+    and all($lock.workloads[];
+      . as $workload
+      | ($workload.services | type == "array" and length > 0)
+      and all($workload.services[]; canonical_manifest_service($workload.id)))
+    and (($canonical_routes | map(.slug) | length) == ($canonical_routes | map(.slug) | unique | length))
+    and (if $lock.state == "verified"
+      then ($lock.routes | type == "array") and $lock.routes == $canonical_routes
+      else ($lock | has("routes") | not)
+    end)
     and all($lock.files[];
       (.kind | type == "string" and length > 0)
       and (.path | type == "string" and length > 0)
@@ -332,7 +369,7 @@ jq_lock -e --arg lockPath "$LOCK" --argjson allowResolved "$allow_resolved" --ar
           and (.serviceName | IN("project-router", "postgres", "redis", "nats", "keycloak", "minio", "prometheus"))
           and (.networkNames | type == "array" and length > 0 and . == (unique | sort))
           and ((.networkNames - $receipt.networkNames) == [])))
-' >/dev/null || die "Hosted workload lock schema or canonical ownership is invalid."
+' >/dev/null || die "Hosted workload lock schema or canonical ownership is invalid; canonical route lineage is invalid."
 
 snapshot_root=$(jq_lock -r '.snapshotRoot')
 snapshot_generation=$(jq_lock -r '.snapshotGeneration')
@@ -427,7 +464,7 @@ jq_lock -r '.workloads[].id' | while IFS= read -r workload_id; do
     def normalized_manifest:
       {
         version,
-        id: (.id | ascii_downcase),
+        id: .id,
         composeFile,
         projectMetadataFile: (.projectMetadataFile // null),
         services: [.services[] | {
@@ -443,7 +480,7 @@ jq_lock -r '.workloads[].id' | while IFS= read -r workload_id; do
         version, id, composeFile, projectMetadataFile: (.projectMetadataFile // null),
         services, secrets, migrationRoots
       })
-  ' >/dev/null
+  ' >/dev/null || die "Locked semantic manifest workload id is not byte-exact."
 done
 
 case "$COMMAND" in
@@ -485,8 +522,16 @@ case "$COMMAND" in
         | {workloadId: $workload.workloadId, serviceName, networkNames}
       ] | sort_by(.workloadId, .serviceName),
       routeRecords: [
-        (.routes // [])[]
-        | {workloadId, slug, serviceName: .service, port, upstream}
+        .workloads[] as $workload
+        | $workload.services[] as $service
+        | $service.routes[]
+        | {
+            workloadId: $workload.id,
+            slug,
+            serviceName: $service.name,
+            port,
+            upstream: ("http://" + $service.name + ":" + (.port | tostring))
+          }
       ] | sort_by(.workloadId, .slug),
       environmentRecords: [
         .workloads[] as $workload

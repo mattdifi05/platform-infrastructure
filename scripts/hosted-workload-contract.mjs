@@ -128,7 +128,10 @@ function workloadNetworkZone(network, workloadId) {
 }
 
 function assertNonPrefixCollidingWorkloadIds(workloadIds) {
-  const ordered = [...workloadIds].map((id) => requiredText(id, "workload id")).sort();
+  const ordered = [...workloadIds].map((id) => {
+    if (typeof id !== "string" || !ID.test(id)) invalid("Hosted workload lock contains a noncanonical workload id.");
+    return id;
+  }).sort();
   if (new Set(ordered).size !== ordered.length) invalid("Hosted workload ids must be unique.");
   for (let leftIndex = 0; leftIndex < ordered.length; leftIndex += 1) {
     for (let rightIndex = leftIndex + 1; rightIndex < ordered.length; rightIndex += 1) {
@@ -716,8 +719,8 @@ function reservedHostsFromEnvironment(filePath) {
 
 export function validateWorkloadManifest(document, manifestPath = "manifest") {
   if (document?.version !== 1) invalid(`${manifestPath} must use version 1.`);
-  const id = requiredText(document.id, "workload id").toLowerCase();
-  if (!ID.test(id)) invalid(`Workload id '${id}' is invalid.`);
+  const id = document?.id;
+  if (typeof id !== "string" || !ID.test(id)) invalid(`Workload id '${String(id ?? "")}' is invalid.`);
   const composeFile = requiredText(document.composeFile, "composeFile");
   if (!SAFE_PATH.test(composeFile) || path.isAbsolute(composeFile) || composeFile.split("/").includes("..")) {
     invalid("composeFile must be a contained relative path.");
@@ -767,6 +770,67 @@ export function validateWorkloadManifest(document, manifestPath = "manifest") {
       return relativeRoot;
     }))],
   };
+}
+
+export function deriveCanonicalRoutes(workloads) {
+  if (!Array.isArray(workloads)) invalid("Hosted workload route lineage has no workloads array.");
+  const workloadIds = assertNonPrefixCollidingWorkloadIds(workloads.map((workload) => workload?.id));
+  const serviceNames = new Set();
+  const routeSlugs = new Set();
+  const routes = [];
+  for (const workload of workloads) {
+    if (!workload || typeof workload !== "object" || Array.isArray(workload)
+        || !Array.isArray(workload.services) || workload.services.length === 0) {
+      invalid("Hosted workload route lineage has invalid workload declarations.");
+    }
+    for (const service of workload.services) {
+      if (!service || typeof service !== "object" || Array.isArray(service)
+          || !same(Object.keys(service).sort(), ["name", "role", "routes"])
+          || typeof service.name !== "string" || !SERVICE.test(service.name)
+          || canonicalHyphenOwner(service.name, workloadIds, "Workload service") !== workload.id
+          || !new Set(["api", "web", "worker", "scheduled-worker"]).has(service.role)
+          || !Array.isArray(service.routes)
+          || serviceNames.has(service.name)) {
+        invalid("Hosted workload route lineage has invalid service declarations.");
+      }
+      serviceNames.add(service.name);
+      if (service.routes.length > 0 && !new Set(["api", "web"]).has(service.role)) {
+        invalid(`Hosted workload route lineage cannot expose ${service.role} service ${service.name}.`);
+      }
+      for (const route of service.routes) {
+        if (!route || typeof route !== "object" || Array.isArray(route)
+            || !same(Object.keys(route).sort(), ["port", "slug"])
+            || typeof route.slug !== "string" || !ID.test(route.slug)
+            || typeof route.port !== "number" || !Number.isInteger(route.port)
+            || route.port < 1 || route.port > 65535
+            || routeSlugs.has(route.slug)) {
+          invalid("Hosted workload route lineage has invalid route declarations.");
+        }
+        routeSlugs.add(route.slug);
+        routes.push({
+          workloadId: workload.id,
+          slug: route.slug,
+          service: service.name,
+          port: route.port,
+          upstream: `http://${service.name}:${route.port}`,
+        });
+      }
+    }
+  }
+  return routes.sort((left, right) => (left.slug < right.slug ? -1 : (left.slug > right.slug ? 1 : 0)));
+}
+
+function verifyCanonicalRouteLineage(lock) {
+  if (lock?.state === "resolved") {
+    if (Object.hasOwn(lock, "routes")) invalid("Resolved workload lock must not contain canonical routes.");
+    return true;
+  }
+  if (lock?.state !== "verified"
+      || !Array.isArray(lock.routes)
+      || !same(lock.routes, deriveCanonicalRoutes(lock.workloads))) {
+    invalid("Verified workload lock canonical route lineage is invalid.");
+  }
+  return true;
 }
 
 export function resolveCatalog({ catalogPath, workloadRoot, coreEnvFile, coreFiles, projectName, snapshotRoot, activationLockPath, sourceAccessHook, snapshotAccessHook }) {
@@ -1644,6 +1708,7 @@ export function verifyLockFiles(lock) {
   if (!SHA256.test(String(lock.workloadContentSha256 ?? "")) || lock.workloadContentSha256 !== expectedContent) {
     invalid("Hosted workload content digest does not match its verified snapshot records.");
   }
+  verifyCanonicalRouteLineage(lock);
   return true;
 }
 
@@ -1738,6 +1803,7 @@ export function verifyRawPolicyReceipt(lock) {
     for (const volumeName of volumeNames) addCanonicalOwner(canonicalOwners.volumes, "Workload volume", volumeName, item.workloadId);
     for (const networkName of networkNames) addCanonicalOwner(canonicalOwners.networks, "Workload network", networkName, item.workloadId);
   }
+  verifyCanonicalRouteLineage(lock);
 }
 
 export function verifyActivationRender({ lockPath, coreRenderPath, combinedRenderPath }) {
@@ -1759,7 +1825,10 @@ export function verifyActivationRender({ lockPath, coreRenderPath, combinedRende
   };
   const core = readPinnedRender(coreRenderPath, lock.coreRenderSha256, "activation core render");
   const combined = readPinnedRender(combinedRenderPath, lock.combinedRenderSha256, "activation combined render");
-  validateRenderedWorkloads({ core, combined, lock });
+  const validation = validateRenderedWorkloads({ core, combined, lock });
+  if (!same(lock.routes, validation.routes)) {
+    invalid("Activation render does not match the verified canonical route lineage.");
+  }
   return true;
 }
 

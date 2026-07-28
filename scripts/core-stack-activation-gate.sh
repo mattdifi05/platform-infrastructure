@@ -159,7 +159,7 @@ validate_lock_bundle() {
     and (.combinedRenderSha256 | type == "string" and test("^[a-f0-9]{64}$"))
     and (.workloadIds | type == "array" and length > 0)
     and (.workloadIds == (.workloadIds | unique | sort))
-    and all(.workloadIds[]; type == "string" and test("^[a-z0-9][a-z0-9-]*$"))
+    and all(.workloadIds[]; type == "string" and test("^[a-z][a-z0-9-]{1,62}$"))
     and (.serviceRecords | type == "array" and length > 0)
   ' >/dev/null
 }

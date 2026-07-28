@@ -79,7 +79,7 @@ printf '%s' "$activation_bundle" | jq -e --arg projectName "$PROJECT_NAME" '
   def network_record:
     type == "object"
     and ((keys | sort) == ["logicalName", "physicalName", "workloadId"])
-    and (.workloadId | type == "string" and test("^[a-z0-9][a-z0-9-]*$"))
+    and (.workloadId | type == "string" and test("^[a-z][a-z0-9-]{1,62}$"))
     and (.logicalName | type == "string")
     and (.logicalName == ((.workloadId | gsub("-"; "_")) + "_" + (.logicalName | split("_") | last)))
     and (.logicalName | test("_(ingress|postgres|cache|bus|identity|storage|observability|egress)$"))

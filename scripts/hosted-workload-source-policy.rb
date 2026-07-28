@@ -12,6 +12,7 @@ module HostedWorkloadSourcePolicy
   MAX_COMPOSE_BYTES = 1_048_576
   STANDARD_TAG_PREFIX = "tag:yaml.org,2002:"
   SERVICE_NAME = /\A[a-z][a-z0-9-]{1,62}\z/
+  WORKLOAD_ID = SERVICE_NAME
   WORKLOAD_NETWORK_ZONES = %w[ingress postgres cache bus identity storage observability egress].freeze
   WORKLOAD_SERVICE_KEYS = %w[
     image command entrypoint working_dir environment volumes secrets networks healthcheck
@@ -55,7 +56,11 @@ module HostedWorkloadSourcePolicy
 
   def validate_workload_id_set!(workloads)
     fail!("Hosted workload lock workloads must be an array.") unless workloads.is_a?(Array)
-    ids = workloads.map { |workload| workload.fetch("id").to_s }
+    ids = workloads.map do |workload|
+      id = workload.is_a?(Hash) ? workload["id"] : nil
+      fail!("Hosted workload lock contains a noncanonical workload id.") unless id.is_a?(String) && WORKLOAD_ID.match?(id)
+      id
+    end
     fail!("Hosted workload ids must be unique.") unless ids.uniq.length == ids.length
     ids.sort.combination(2) do |left, right|
       if left.start_with?("#{right}-") || right.start_with?("#{left}-")

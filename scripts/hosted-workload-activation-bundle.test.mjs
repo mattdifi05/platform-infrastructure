@@ -60,7 +60,7 @@ test("activation bundle validator binds exact closed route records to exact serv
     (route) => { route.workloadId = "billingapi"; },
     (route) => { route.slug = "Billing"; },
     (route) => { route.serviceName = "billing-worker"; },
-    (route) => { route.port = 9999; },
+    (route) => { route.port = 0; },
     (route) => { route.upstream = "http://billing-web:9999"; },
     (route) => { route.extra = true; },
   ];

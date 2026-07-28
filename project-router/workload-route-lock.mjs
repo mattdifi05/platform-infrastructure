@@ -39,6 +39,52 @@ function assertPrefixDisjointWorkloadIds(workloadIds) {
   }
 }
 
+function deriveCanonicalRoutes(workloads) {
+  const serviceNames = new Set();
+  const routeSlugs = new Set();
+  const routes = [];
+  for (const workload of workloads) {
+    if (!workload || typeof workload !== "object" || Array.isArray(workload)
+        || !Array.isArray(workload.services) || workload.services.length === 0) {
+      throw new Error("Hosted workload canonical route lineage has invalid workload declarations.");
+    }
+    for (const service of workload.services) {
+      if (!service || typeof service !== "object" || Array.isArray(service)
+          || !same(Object.keys(service).sort(), ["name", "role", "routes"])
+          || typeof service.name !== "string" || !ID.test(service.name)
+          || !service.name.startsWith(`${workload.id}-`)
+          || !new Set(["api", "web", "worker", "scheduled-worker"]).has(service.role)
+          || !Array.isArray(service.routes)
+          || serviceNames.has(service.name)) {
+        throw new Error("Hosted workload canonical route lineage has invalid service declarations.");
+      }
+      serviceNames.add(service.name);
+      if (service.routes.length > 0 && !new Set(["api", "web"]).has(service.role)) {
+        throw new Error("Hosted workload canonical route lineage exposes a non-routable role.");
+      }
+      for (const route of service.routes) {
+        if (!route || typeof route !== "object" || Array.isArray(route)
+            || !same(Object.keys(route).sort(), ["port", "slug"])
+            || typeof route.slug !== "string" || !ID.test(route.slug)
+            || typeof route.port !== "number" || !Number.isInteger(route.port)
+            || route.port < 1 || route.port > 65535
+            || routeSlugs.has(route.slug)) {
+          throw new Error("Hosted workload canonical route lineage has invalid route declarations.");
+        }
+        routeSlugs.add(route.slug);
+        routes.push({
+          workloadId: workload.id,
+          slug: route.slug,
+          service: service.name,
+          port: route.port,
+          upstream: `http://${service.name}:${route.port}`,
+        });
+      }
+    }
+  }
+  return routes.sort((left, right) => (left.slug < right.slug ? -1 : (left.slug > right.slug ? 1 : 0)));
+}
+
 function hasExactProtectedResourceNames(receipt) {
   const resources = receipt?.protectedResourceNames;
   const expectedKeys = ["configs", "networks", "secrets", "services", "volumes"];
@@ -83,39 +129,16 @@ export function parseHostedRouteLock(lock) {
     throw new Error("Hosted workload declarations are invalid.");
   }
   assertPrefixDisjointWorkloadIds(workloadIds);
-  const declaredServices = new Map();
-  for (const workload of lock.workloads) {
-    const workloadId = String(workload?.id ?? "");
-    if (!Array.isArray(workload.services)) {
-      throw new Error("Hosted workload declarations are invalid.");
-    }
-    for (const service of workload.services) {
-      const serviceName = String(service?.name ?? "");
-      if (!ID.test(serviceName) || !serviceName.startsWith(`${workloadId}-`) || declaredServices.has(serviceName)) {
-        throw new Error("Hosted workload declarations do not have exact canonical service owners.");
-      }
-      declaredServices.set(serviceName, workloadId);
-    }
+  const canonicalRoutes = deriveCanonicalRoutes(lock.workloads);
+  if (!same(lock.routes, canonicalRoutes)) {
+    throw new Error("Hosted workload canonical route lineage differs from the verified lock contract.");
   }
 
   const routes = new Map();
   const allowed = new Set();
-  for (const route of lock.routes) {
-    const workloadId = String(route?.workloadId ?? "").toLowerCase();
-    const slug = String(route?.slug ?? "").toLowerCase();
-    const service = String(route?.service ?? "").toLowerCase();
-    const port = Number(route?.port);
-    if (!ID.test(workloadId)
-        || !ID.test(slug)
-        || !ID.test(service)
-        || !Number.isInteger(port) || port < 1 || port > 65535
-        || route.upstream !== `http://${service}:${port}`
-        || routes.has(slug)
-        || declaredServices.get(service) !== workloadId) {
-      throw new Error("Hosted workload route violates the verified lock contract.");
-    }
-    routes.set(slug, route.upstream);
-    allowed.add(`${service}:${port}`);
+  for (const route of canonicalRoutes) {
+    routes.set(route.slug, route.upstream);
+    allowed.add(`${route.service}:${route.port}`);
   }
   return { routes, allowed };
 }

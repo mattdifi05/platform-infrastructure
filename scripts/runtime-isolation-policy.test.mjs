@@ -724,15 +724,17 @@ test("runtime secret grants use the exact canonical short and long grammar", () 
     assert.match(report.failures.join("\n"), /workload-exact-secret-grants-billing-web/, label);
   }
 
-  for (const [label, configure] of [
-    ["absent", (service) => { delete service.secrets; }],
-    ["empty", (service) => { service.secrets = []; }],
-    ["short", (service) => { service.secrets = ["billing-api-key"]; }],
-    ["long alias", (service) => { service.secrets = [{ source: "billing-api-key", target: "billing-token" }]; }],
-    ["long omitted target", (service) => { service.secrets = [{ source: "billing-api-key" }]; }],
+  for (const [label, usesSecret, configure] of [
+    ["absent", false, (service) => { delete service.secrets; }],
+    ["empty", false, (service) => { service.secrets = []; }],
+    ["short", true, (service) => { service.secrets = ["billing-api-key"]; }],
+    ["long alias", true, (service) => { service.secrets = [{ source: "billing-api-key", target: "billing-token" }]; }],
+    ["long omitted target", true, (service) => { service.secrets = [{ source: "billing-api-key" }]; }],
   ]) {
     const config = workloadIdentityFixture([["billing", "billing-web"]]);
-    config.secrets = { "billing-api-key": { external: true, name: "fixture_billing-api-key" } };
+    if (usesSecret) {
+      config.secrets = { "billing-api-key": { external: true, name: "fixture_billing-api-key" } };
+    }
     configure(config.services["billing-web"]);
     const report = evaluateRuntimeIsolation(config, { projectName: "fixture" });
     assert.equal(report.status, "passed", `${label}: ${report.failures.join("\n")}`);
