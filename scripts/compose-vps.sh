@@ -44,6 +44,142 @@ case "$PREPARE_RESOLVED" in
     ;;
 esac
 
+runtime_identity_variables=(
+  PLATFORM_RUNTIME_CANDIDATE_ID
+  PLATFORM_RUNTIME_COMMIT
+  PLATFORM_RUNTIME_TREE
+  PLATFORM_RUNTIME_DEPLOYMENT_ID
+  PLATFORM_RUNTIME_SOURCE_RENDER_SHA256
+  PLATFORM_RUNTIME_WORKLOAD_LOCK_SHA256
+)
+runtime_identity_count=0
+for runtime_identity_variable in "${runtime_identity_variables[@]}"; do
+  [[ -z "${!runtime_identity_variable:-}" ]] || runtime_identity_count=$((runtime_identity_count + 1))
+done
+if [[ "$REQUEST_MODE" = runtime-isolation-envelope ]] && (( runtime_identity_count != 0 )); then
+  printf '%s\n' "Runtime identity overlays are deferred to the Release boundary and forbidden in the semantic envelope." >&2
+  exit 1
+fi
+
+sha256_stream() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum | awk '{ print $1 }'
+  else
+    shasum -a 256 | awk '{ print $1 }'
+  fi
+}
+
+fd_identity() {
+  local target=$1 raw device inode uid mode
+  if stat -c '%d|%i|%u|%a' "$target" >/dev/null 2>&1; then
+    raw=$(stat -c '%d|%i|%u|%a' "$target")
+  else
+    raw=$(stat -f '%d|%i|%u|%Lp' "$target")
+  fi
+  IFS='|' read -r device inode uid mode <<< "$raw"
+  printf '%s|%s|%s|%s\n' "$device" "$inode" "$uid" "$((8#$mode))"
+}
+
+fd_object_identity() {
+  local identity device inode uid mode
+  identity=$(fd_identity "$1")
+  IFS='|' read -r device inode uid mode <<< "$identity"
+  printf '%s|%s\n' "$inode" "$uid"
+}
+
+next_handoff_fd=50
+handoff_files=()
+handoff_directory=$(mktemp -d "${TMPDIR:-/tmp}/hosted-compose-handoff.XXXXXX")
+chmod 700 "$handoff_directory"
+umask 077
+HANDOFF_REFERENCE=
+SNAPSHOT_REFERENCES=()
+SNAPSHOT_SHA256=
+SNAPSHOT_SOURCE_IDENTITY=
+
+cleanup_handoff() {
+  local item
+  for item in "${handoff_files[@]:-}"; do
+    if [[ -e "$item" ]] && ! /bin/rm -- "$item"; then
+      printf 'Could not remove private handoff object: %s\n' "$item" >&2
+      return 1
+    fi
+  done
+  if [[ -d "$handoff_directory" ]] && ! /bin/rmdir -- "$handoff_directory"; then
+    printf 'Could not remove private handoff directory: %s\n' "$handoff_directory" >&2
+    return 1
+  fi
+}
+trap cleanup_handoff EXIT
+
+open_read_once_snapshot() {
+  local source=$1 label=$2 reader_count=$3
+  local path_before source_fd source_reference source_before source_after
+  local path_device path_inode path_uid path_mode source_device source_inode source_uid source_mode
+  local snapshot_file writer_fd hash_fd reader_fd snapshot_identity snapshot_device snapshot_inode snapshot_uid snapshot_mode
+  local reader_identity index
+  path_before=$(fd_identity "$source")
+  IFS='|' read -r path_device path_inode path_uid path_mode <<< "$path_before"
+  source_fd=$next_handoff_fd
+  next_handoff_fd=$((next_handoff_fd + 1))
+  if ! eval "exec ${source_fd}<\"\$source\""; then
+    printf 'Could not open %s snapshot source: %s\n' "$label" "$source" >&2
+    return 1
+  fi
+  source_reference=/dev/fd/$source_fd
+  source_before=$(fd_identity "$source_reference")
+  IFS='|' read -r source_device source_inode source_uid source_mode <<< "$source_before"
+  [[ "$source_inode" = "$path_inode" && "$source_uid" = "$path_uid"
+      && ( "$OSTYPE" = darwin* || "$source_device" = "$path_device" ) ]] || {
+    printf '%s source identity changed before snapshot: %s\n' "$label" "$source" >&2
+    return 1
+  }
+  snapshot_file=$handoff_directory/snapshot-$next_handoff_fd
+  handoff_files+=("$snapshot_file")
+  writer_fd=$next_handoff_fd
+  next_handoff_fd=$((next_handoff_fd + 1))
+  set -C
+  if ! eval "exec ${writer_fd}>\"\$snapshot_file\""; then
+    set +C
+    printf 'Could not create private %s snapshot.\n' "$label" >&2
+    return 1
+  fi
+  set +C
+  /bin/cat <&$source_fd >&$writer_fd
+  source_after=$(fd_identity "$source_reference")
+  [[ "$source_before" = "$source_after" ]] || {
+    printf '%s source changed while being snapshotted: %s\n' "$label" "$source" >&2
+    return 1
+  }
+  eval "exec ${source_fd}<&-"
+  eval "exec ${writer_fd}>&-"
+  snapshot_identity=$(fd_identity "$snapshot_file")
+  IFS='|' read -r snapshot_device snapshot_inode snapshot_uid snapshot_mode <<< "$snapshot_identity"
+  [[ "$snapshot_mode" = 384 ]] || {
+    printf 'Private %s snapshot has an invalid mode.\n' "$label" >&2
+    return 1
+  }
+  hash_fd=$next_handoff_fd
+  next_handoff_fd=$((next_handoff_fd + 1))
+  eval "exec ${hash_fd}<\"\$snapshot_file\""
+  SNAPSHOT_REFERENCES=()
+  for (( index=0; index<reader_count; index+=1 )); do
+    reader_fd=$next_handoff_fd
+    next_handoff_fd=$((next_handoff_fd + 1))
+    eval "exec ${reader_fd}<\"\$snapshot_file\""
+    reader_identity=$(fd_object_identity "/dev/fd/$reader_fd")
+    [[ "$reader_identity" = "$snapshot_inode|$snapshot_uid" ]] || {
+      printf 'Private %s snapshot readers do not reference one object.\n' "$label" >&2
+      return 1
+    }
+    SNAPSHOT_REFERENCES+=("/dev/fd/$reader_fd")
+  done
+  /bin/rm -- "$snapshot_file"
+  SNAPSHOT_SHA256=$(sha256_stream <&$hash_fd)
+  eval "exec ${hash_fd}<&-"
+  SNAPSHOT_SOURCE_IDENTITY=$path_before
+}
+
 case "$ENV_FILE" in
   /*) ;;
   *) ENV_FILE="$ROOT_DIR/$ENV_FILE" ;;
@@ -54,11 +190,24 @@ if [ ! -f "$ENV_FILE" ]; then
   exit 1
 fi
 
+ENV_SOURCE_FILE=$ENV_FILE
+open_read_once_snapshot "$ENV_SOURCE_FILE" "core environment" 3
+ENV_LOCK_REFERENCE=${SNAPSHOT_REFERENCES[0]}
+ENV_MODE_REFERENCE=${SNAPSHOT_REFERENCES[1]}
+ENV_RENDER_REFERENCE=${SNAPSHOT_REFERENCES[2]}
+ENV_SNAPSHOT_SHA256=$SNAPSHOT_SHA256
+ENV_SOURCE_IDENTITY=$SNAPSHOT_SOURCE_IDENTITY
+
 env_path_value() {
-  local key=$1 value
-  value=$(awk -F= -v key="$key" '$1 == key { sub(/^[^=]*=/, ""); print; exit }' "$ENV_FILE")
+  local key=$1 source value
+  case "$key" in
+    HOSTED_WORKLOAD_LOCK) source=$ENV_LOCK_REFERENCE ;;
+    HOSTED_WORKLOAD_MODE) source=$ENV_MODE_REFERENCE ;;
+    *) printf 'Unsupported environment lookup key: %s\n' "$key" >&2; return 1 ;;
+  esac
+  value=$(awk -F= -v key="$key" '$1 == key { sub(/^[^=]*=/, ""); print; exit }' "$source")
   [[ -z "$value" || "$value" =~ ^[A-Za-z0-9_./-]+$ ]] || {
-    echo "Invalid path value for $key in $ENV_FILE" >&2
+    echo "Invalid path value for $key in $ENV_SOURCE_FILE" >&2
     exit 1
   }
   printf '%s' "$value"
@@ -91,8 +240,8 @@ if [[ "$REQUEST_MODE" = invalid ]]; then
   exit 2
 fi
 if [[ "$PREPARE_RESOLVED" = 1 ]]; then
-  [[ "$workload_mode" != no-hosted ]] || {
-    printf '%s\n' "Prepare-time Hosted renders cannot use no-hosted runtime mode." >&2
+  [[ "$workload_mode" = hosted ]] || {
+    printf '%s\n' "Prepare-time Hosted renders require exact HOSTED_WORKLOAD_MODE=hosted." >&2
     exit 2
   }
 elif [[ -n "$workload_lock" ]]; then
@@ -125,45 +274,6 @@ canonical_existing_file() {
   }
   parent=$(CDPATH= cd -- "$parent" && pwd -P)
   printf '%s/%s\n' "$parent" "$base"
-}
-
-sha256_stream() {
-  if command -v sha256sum >/dev/null 2>&1; then
-    sha256sum | awk '{ print $1 }'
-  else
-    shasum -a 256 | awk '{ print $1 }'
-  fi
-}
-
-fd_identity() {
-  local target=$1 raw device inode uid mode
-  if stat -c '%d|%i|%u|%a' "$target" >/dev/null 2>&1; then
-    raw=$(stat -c '%d|%i|%u|%a' "$target")
-  else
-    raw=$(stat -f '%d|%i|%u|%Lp' "$target")
-  fi
-  IFS='|' read -r device inode uid mode <<< "$raw"
-  printf '%s|%s|%s|%s\n' "$device" "$inode" "$uid" "$((8#$mode))"
-}
-
-fd_object_identity() {
-  local identity device inode uid mode
-  identity=$(fd_identity "$1")
-  IFS='|' read -r device inode uid mode <<< "$identity"
-  printf '%s|%s\n' "$inode" "$uid"
-}
-
-next_handoff_fd=50
-handoff_files=()
-handoff_directory=
-HANDOFF_REFERENCE=
-
-cleanup_handoff() {
-  local item
-  for item in "${handoff_files[@]:-}"; do
-    [[ ! -e "$item" ]] || /bin/rm -- "$item" >/dev/null 2>&1 || true
-  done
-  [[ -z "$handoff_directory" || ! -d "$handoff_directory" ]] || /bin/rmdir -- "$handoff_directory" >/dev/null 2>&1 || true
 }
 
 open_locked_handoff() {
@@ -276,10 +386,6 @@ declare -a compose=()
 if [[ -n "$workload_lock" ]]; then
   [[ "$workload_lock" = /* ]] || workload_lock="$ROOT_DIR/$workload_lock"
   workload_lock=$(canonical_existing_file "$workload_lock")
-  handoff_directory=$(mktemp -d "${TMPDIR:-/tmp}/hosted-compose-handoff.XXXXXX")
-  chmod 700 "$handoff_directory"
-  umask 077
-  trap cleanup_handoff EXIT
   runtime_lock_source=$(canonical_existing_file "${HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE:-$workload_lock}")
   [[ "$runtime_lock_source" = "$workload_lock" ]] || {
     printf '%s\n' "Runtime lock mount source must be the exact verified activation lock." >&2
@@ -393,7 +499,7 @@ if [[ -n "$workload_lock" ]]; then
   locked_project_name=$(printf '%s' "$activation_bundle" | jq -r '.projectName')
   workload_env_records=$(printf '%s' "$activation_bundle" | jq -r '.environmentRecords[] | [.path, .sha256, .device, .inode, .uid, (.mode | tostring)] | @tsv')
   workload_compose_records=$(printf '%s' "$activation_bundle" | jq -r '.composeRecords[] | [.path, .sha256, .device, .inode, .uid, (.mode | tostring)] | @tsv')
-  [[ "$locked_core_env" = "$ENV_FILE" ]] || {
+  [[ "$locked_core_env" = "$ENV_SOURCE_FILE" ]] || {
     echo "Hosted workload lock was prepared for a different core env file." >&2
     exit 1
   }
@@ -404,7 +510,7 @@ if [[ -n "$workload_lock" ]]; then
   IFS=$'\t' read -r core_env_source core_env_sha core_env_device core_env_inode core_env_uid core_env_mode < <(
     printf '%s' "$activation_bundle" | jq -r '.coreEnvironmentRecord | [.path, .sha256, .device, .inode, .uid, (.mode | tostring)] | @tsv'
   )
-  [[ "$core_env_source" = "$ENV_FILE" ]] || {
+  [[ "$core_env_source" = "$ENV_SOURCE_FILE" ]] || {
     printf '%s\n' "Hosted workload core environment record differs from the selected env file." >&2
     exit 1
   }
@@ -412,8 +518,12 @@ if [[ -n "$workload_lock" ]]; then
     printf '%s\n' "Hosted workload core environment must be deployment-owned with mode 0400 or 0600." >&2
     exit 1
   }
-  open_locked_handoff "$core_env_source" "$core_env_sha" "$core_env_device" "$core_env_inode" "$core_env_uid" "$core_env_mode"
-  compose=(docker compose --env-file "$HANDOFF_REFERENCE")
+  [[ "$core_env_sha" = "$ENV_SNAPSHOT_SHA256"
+      && "$ENV_SOURCE_IDENTITY" = "$core_env_device|$core_env_inode|$core_env_uid|$core_env_mode" ]] || {
+    printf '%s\n' "Hosted workload core environment snapshot mismatches the activation bundle." >&2
+    exit 1
+  }
+  compose=(docker compose --env-file "$ENV_RENDER_REFERENCE")
   while IFS=$'\t' read -r source expected_sha expected_device expected_inode expected_uid expected_mode; do
     [[ -n "$source" ]] || continue
     open_locked_handoff "$source" "$expected_sha" "$expected_device" "$expected_inode" "$expected_uid" "$expected_mode"
@@ -429,22 +539,44 @@ else
       printf '%s\n' "A non-empty HOSTED_WORKLOAD_LOCK is required for a hosted runtime lock source." >&2
       exit 1
     }
+    open_read_once_snapshot "$runtime_lock_source" "canonical no-hosted lock" 2
+    no_hosted_lock_validation_reference=${SNAPSHOT_REFERENCES[0]}
+    no_hosted_lock_inventory_reference=${SNAPSHOT_REFERENCES[1]}
+    no_hosted_lock_sha256=$SNAPSHOT_SHA256
+    no_hosted_lock_source_identity=$SNAPSHOT_SOURCE_IDENTITY
+    [[ "$no_hosted_lock_sha256" = b45b17afaf9c9db19b97425392a25cadae1afd5656bac07789d02188a53bf66c ]] || {
+      printf '%s\n' "Canonical no-hosted lock raw digest mismatch." >&2
+      exit 1
+    }
     jq -e '
       type == "object"
-      and ((keys | sort) == ["brokerPolicySha256", "routes", "state", "validatorVersion", "version", "workloads"])
+      and ((keys | sort) == ["brokerPolicySha256", "projectName", "protectedResourceNames", "routes", "state", "validatorVersion", "version", "workloads"])
       and .version == 4
       and .validatorVersion == "hosted-contract-v4"
       and .state == "verified"
       and .routes == []
       and .workloads == []
       and .brokerPolicySha256 == "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
-    ' "$runtime_lock_source" >/dev/null || {
+      and .projectName == "platform_infra_vps"
+      and (.protectedResourceNames | type == "object")
+      and ((.protectedResourceNames | keys | sort) == ["configs", "networks", "secrets", "services", "volumes"])
+      and ([.protectedResourceNames.configs, .protectedResourceNames.networks, .protectedResourceNames.secrets, .protectedResourceNames.services, .protectedResourceNames.volumes]
+        | map(type == "array") | all)
+      and (.protectedResourceNames.configs | length) == 1
+      and (.protectedResourceNames.networks | length) == 11
+      and (.protectedResourceNames.secrets | length) == 15
+      and (.protectedResourceNames.services | length) == 24
+      and (.protectedResourceNames.volumes | length) == 12
+      and all(.protectedResourceNames[]; . == (unique | sort) and all(.[]; type == "string" and length > 0))
+      and (.protectedResourceNames.services | index("php-apache")) == null
+    ' "$no_hosted_lock_validation_reference" >/dev/null || {
       printf '%s\n' "Canonical no-hosted-workloads runtime lock is invalid." >&2
       exit 1
     }
+    no_hosted_protected_resource_names=$(jq -c '.protectedResourceNames' "$no_hosted_lock_inventory_reference")
   fi
   export HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE=$runtime_lock_source
-  compose=(docker compose --env-file "$ENV_FILE")
+  compose=(docker compose --env-file "$ENV_RENDER_REFERENCE")
 fi
 
 compose+=(
@@ -468,18 +600,6 @@ if [[ -n "$workload_lock" ]]; then
   done <<< "$workload_compose_records"
 fi
 
-runtime_identity_variables=(
-  PLATFORM_RUNTIME_CANDIDATE_ID
-  PLATFORM_RUNTIME_COMMIT
-  PLATFORM_RUNTIME_TREE
-  PLATFORM_RUNTIME_DEPLOYMENT_ID
-  PLATFORM_RUNTIME_SOURCE_RENDER_SHA256
-  PLATFORM_RUNTIME_WORKLOAD_LOCK_SHA256
-)
-runtime_identity_count=0
-for runtime_identity_variable in "${runtime_identity_variables[@]}"; do
-  [[ -z "${!runtime_identity_variable:-}" ]] || runtime_identity_count=$((runtime_identity_count + 1))
-done
 if (( runtime_identity_count != 0 && runtime_identity_count != ${#runtime_identity_variables[@]} )); then
   printf '%s\n' "Runtime identity labels require the complete approved candidate/deployment tuple." >&2
   exit 1
@@ -526,39 +646,70 @@ if (( runtime_identity_count == ${#runtime_identity_variables[@]} )); then
 fi
 
 if [[ "$REQUEST_MODE" = runtime-isolation-envelope ]]; then
-  compose_config=$("${compose[@]}" --profile backup config --format json)
-  printf '%s' "$compose_config" | jq -e 'type == "object"' >/dev/null || {
+  compose_render_file=$handoff_directory/compose-render-$next_handoff_fd
+  next_handoff_fd=$((next_handoff_fd + 1))
+  handoff_files+=("$compose_render_file")
+  set -C
+  if ! "${compose[@]}" --profile backup config --format json > "$compose_render_file"; then
+    set +C
+    printf '%s\n' "The descriptor-bound Compose render failed." >&2
+    exit 1
+  fi
+  set +C
+  chmod 600 "$compose_render_file"
+  open_read_once_snapshot "$compose_render_file" "descriptor-bound Compose render" 3
+  compose_render_validation_reference=${SNAPSHOT_REFERENCES[0]}
+  compose_render_policy_reference=${SNAPSHOT_REFERENCES[1]}
+  compose_render_envelope_reference=${SNAPSHOT_REFERENCES[2]}
+  compose_render_sha256=$SNAPSHOT_SHA256
+  /bin/rm -- "$compose_render_file"
+  jq -e -s 'length == 1 and (.[0] | type == "object")' "$compose_render_validation_reference" >/dev/null || {
     printf '%s\n' "The descriptor-bound Compose render is not one JSON object." >&2
     exit 1
   }
   if [[ -n "$workload_lock" ]]; then
-    printf '%s\n%s\n' "$activation_bundle" "$compose_config" | jq -sc '
-      .[0] as $activation_bundle
-      | .[1] as $config
+    expected_combined_render_sha256=$(printf '%s' "$activation_bundle" | jq -r '.combinedRenderSha256')
+    [[ "$compose_render_sha256" = "$expected_combined_render_sha256" ]] || {
+      printf '%s\n' "Hosted combined render raw digest mismatches the activation bundle." >&2
+      exit 1
+    }
+    jq -n --argjson activationBundle "$activation_bundle" --slurpfile configDocuments "$compose_render_envelope_reference" '
+      $configDocuments[0] as $config
       | {
           version: 1,
-          projectName: $activation_bundle.projectName,
-          lockSha256: $activation_bundle.lockSha256,
-          protectedResourceNames: $activation_bundle.protectedResourceNames,
+          projectName: $activationBundle.projectName,
+          lockSha256: $activationBundle.lockSha256,
+          protectedResourceNames: $activationBundle.protectedResourceNames,
           config: $config
         }
     '
   else
-    protected_resource_names=$(printf '%s' "$compose_config" | jq -c '
-      {
-        configs: ((.configs // {}) | keys | sort),
-        networks: ((.networks // {}) | keys | sort),
-        secrets: ((.secrets // {}) | keys | sort),
-        services: ((.services // {}) | keys | sort),
-        volumes: ((.volumes // {}) | keys | sort)
-      }
-    ')
-    no_hosted_lock_sha256=$(sha256_stream < "$runtime_lock_source")
-    printf '%s\n%s\n' "$protected_resource_names" "$compose_config" | jq -sc \
+    jq -e --arg projectName "$PROJECT_NAME" --argjson protected "$no_hosted_protected_resource_names" '
+      . as $config
+      | type == "object"
+      and .name == $projectName
+      and all(["configs", "networks", "secrets", "services", "volumes"][];
+        . as $kind
+        | ($config[$kind] | type == "object")
+        and (($config[$kind] | keys | sort) == $protected[$kind]))
+    ' "$compose_render_policy_reference" >/dev/null || {
+      printf '%s\n' "No-hosted render resource inventory mismatches canonical lock authority." >&2
+      exit 1
+    }
+    initial_no_hosted_lock_sha256=$no_hosted_lock_sha256
+    initial_no_hosted_lock_identity=$no_hosted_lock_source_identity
+    open_read_once_snapshot "$runtime_lock_source" "canonical no-hosted lock revalidation" 0
+    [[ "$SNAPSHOT_SHA256" = "$initial_no_hosted_lock_sha256"
+        && "$SNAPSHOT_SOURCE_IDENTITY" = "$initial_no_hosted_lock_identity" ]] || {
+      printf '%s\n' "Canonical no-hosted lock identity or digest changed during render." >&2
+      exit 1
+    }
+    jq -n \
       --arg projectName "$PROJECT_NAME" \
-      --arg lockSha256 "$no_hosted_lock_sha256" '
-        .[0] as $protectedResourceNames
-        | .[1] as $config
+      --arg lockSha256 "$initial_no_hosted_lock_sha256" \
+      --argjson protectedResourceNames "$no_hosted_protected_resource_names" \
+      --slurpfile configDocuments "$compose_render_envelope_reference" '
+        $configDocuments[0] as $config
         | {
             version: 1,
             projectName: $projectName,
@@ -566,7 +717,7 @@ if [[ "$REQUEST_MODE" = runtime-isolation-envelope ]]; then
             protectedResourceNames: $protectedResourceNames,
             config: $config
           }
-      '
+    '
   fi
   cleanup_handoff
   trap - EXIT

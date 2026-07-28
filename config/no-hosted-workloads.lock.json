@@ -4,5 +4,81 @@
   "state": "verified",
   "routes": [],
   "workloads": [],
-  "brokerPolicySha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+  "brokerPolicySha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+  "projectName": "platform_infra_vps",
+  "protectedResourceNames": {
+    "configs": [
+      "enterprise_traefik_routes"
+    ],
+    "networks": [
+      "enterprise_net",
+      "platform_bus",
+      "platform_cache",
+      "platform_db_admin",
+      "platform_docker_control",
+      "platform_edge",
+      "platform_egress",
+      "platform_observability",
+      "platform_postgres",
+      "platform_routing",
+      "platform_storage"
+    ],
+    "secrets": [
+      "alertmanager_webhook_token",
+      "backup_signing_keys",
+      "control_center_database_url",
+      "control_center_vault_keys",
+      "grafana_admin_password",
+      "keycloak_admin_password",
+      "keycloak_db_password",
+      "mariadb_root_password",
+      "minio_root_password",
+      "nats_password",
+      "phpmyadmin_control_password",
+      "postgres_superuser_password",
+      "projects_gateway_signing_keys",
+      "redis_password",
+      "smtp_password"
+    ],
+    "services": [
+      "alertmanager",
+      "backup-scheduler",
+      "cadvisor",
+      "control-center",
+      "docker-socket-proxy",
+      "grafana",
+      "keycloak",
+      "local-dns",
+      "local-registry",
+      "loki",
+      "mariadb",
+      "minio",
+      "nats",
+      "node-exporter",
+      "phpmyadmin",
+      "phppgadmin",
+      "platform-alert-dispatcher",
+      "postgres",
+      "project-router",
+      "prometheus",
+      "promtail",
+      "redis",
+      "traefik",
+      "waf"
+    ],
+    "volumes": [
+      "backup_scheduler_logs",
+      "enterprise_alertmanager_data",
+      "enterprise_grafana_data",
+      "enterprise_keycloak_data",
+      "enterprise_local_registry_data",
+      "enterprise_loki_data",
+      "enterprise_mariadb_data",
+      "enterprise_minio_data",
+      "enterprise_nats_data",
+      "enterprise_postgres_data",
+      "enterprise_prometheus_data",
+      "enterprise_redis_data"
+    ]
+  }
 }

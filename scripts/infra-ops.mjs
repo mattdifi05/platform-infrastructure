@@ -2954,7 +2954,24 @@ async function networkSegmentationCheck() {
 
 async function runtimeIsolationCheck() {
   await withLocalCheckReport("runtime-isolation", async () => {
-    const envFile = path.resolve(infraRoot, argv.envFile || argv["env-file"] || ".env.vps.example");
+    const rawRuntimeArguments = process.argv.slice(3);
+    const splitForm = rawRuntimeArguments.length === 2
+      && (rawRuntimeArguments[0] === "--env-file" || rawRuntimeArguments[0] === "--envFile")
+      && rawRuntimeArguments[1].length > 0
+      && !rawRuntimeArguments[1].startsWith("-");
+    const equalsPrefix = rawRuntimeArguments.length === 1
+      ? ["--env-file=", "--envFile="].find((prefix) => rawRuntimeArguments[0].startsWith(prefix))
+      : undefined;
+    const equalsForm = Boolean(
+      equalsPrefix && rawRuntimeArguments[0].length > equalsPrefix.length,
+    );
+    if (!splitForm && !equalsForm) {
+      fail("Invalid runtime-isolation-check arguments: expected exactly one --env-file or --envFile option with one non-empty path.");
+    }
+    const envFileArgument = splitForm
+      ? rawRuntimeArguments[1]
+      : rawRuntimeArguments[0].slice(equalsPrefix.length);
+    const envFile = path.resolve(infraRoot, envFileArgument);
     if (!fs.existsSync(envFile)) fail(`Compose env file not found: ${envFile}`);
     const envelopeText = output("bash", [
       path.join(scriptDir, "compose-vps.sh"),

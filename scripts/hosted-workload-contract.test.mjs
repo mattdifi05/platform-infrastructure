@@ -1143,12 +1143,14 @@ function executablePath(name) {
   return result.status === 0 ? result.stdout.trim() : null;
 }
 
-function promoteFixtureLock(lockPath) {
+function promoteFixtureLock(lockPath, combinedRenderBytes = null) {
   const verified = JSON.parse(fs.readFileSync(lockPath, "utf8"));
   assert.equal(verified.activationLockPath, lockPath);
   verified.state = "verified";
   verified.coreRenderSha256 = "c".repeat(64);
-  verified.combinedRenderSha256 = "d".repeat(64);
+  verified.combinedRenderSha256 = combinedRenderBytes === null
+    ? "d".repeat(64)
+    : crypto.createHash("sha256").update(combinedRenderBytes).digest("hex");
   verified.routes = [];
   fs.writeFileSync(lockPath, `${JSON.stringify(verified, null, 2)}\n`, { mode: 0o600 });
 }
@@ -1908,6 +1910,7 @@ exec "$HOSTED_TEST_REAL_JQ" "$@"
       COMPOSE_ENV_FILE: fixture.coreEnvFile,
       COMPOSE_PROJECT_NAME: "platform_infra_vps",
       HOSTED_WORKLOAD_LOCK: lockPath,
+      HOSTED_WORKLOAD_MODE: "hosted",
       HOSTED_WORKLOAD_ALLOW_RESOLVED: "1",
       HOSTED_TEST_GENERATION: lock.snapshotGeneration,
       HOSTED_TEST_ORIGINAL_GENERATION: originalGeneration,
@@ -1958,14 +1961,33 @@ exec "$HOSTED_TEST_REAL_JQ" "$@"
     });
     assert.notEqual(resolvedRejected.status, 0);
     assert.equal(fs.existsSync(capture), false);
-    promoteFixtureLock(lockPath);
+    promoteFixtureLock(lockPath, `${sharedEnvironment.HOSTED_TEST_RENDER_JSON}\n`);
     fs.writeFileSync(sharedEnvironment.HOSTED_TEST_LOCK_READER_COUNT, "0\n");
-    const envelopeConsumer = spawnSync("/bin/bash", [
+    const runtimeIdentityEnvelope = spawnSync("/bin/bash", [
       path.join(import.meta.dirname, "compose-vps.sh"),
       "runtime-isolation-envelope",
     ], {
       encoding: "utf8",
       env: { ...sharedEnvironment, HOSTED_TEST_NO_SWAP: "1" },
+    });
+    assert.notEqual(runtimeIdentityEnvelope.status, 0);
+    assert.match(runtimeIdentityEnvelope.stderr, /runtime identity|deferred to the Release boundary/i);
+    assert.equal(fs.existsSync(capture), false);
+    const envelopeConsumer = spawnSync("/bin/bash", [
+      path.join(import.meta.dirname, "compose-vps.sh"),
+      "runtime-isolation-envelope",
+    ], {
+      encoding: "utf8",
+      env: {
+        ...sharedEnvironment,
+        HOSTED_TEST_NO_SWAP: "1",
+        PLATFORM_RUNTIME_CANDIDATE_ID: "",
+        PLATFORM_RUNTIME_COMMIT: "",
+        PLATFORM_RUNTIME_TREE: "",
+        PLATFORM_RUNTIME_DEPLOYMENT_ID: "",
+        PLATFORM_RUNTIME_SOURCE_RENDER_SHA256: "",
+        PLATFORM_RUNTIME_WORKLOAD_LOCK_SHA256: "",
+      },
     });
     assert.equal(envelopeConsumer.status, 0, envelopeConsumer.stderr);
     const runtimeIsolationEnvelope = JSON.parse(envelopeConsumer.stdout);
