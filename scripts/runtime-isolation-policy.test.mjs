@@ -70,6 +70,22 @@ test("rejects workload service volume inheritance independently at runtime", () 
   assert.match(report.failures.join("\n"), /workload-no-volumes-from-example-app-web/);
 });
 
+test("rejects named-volume protected-target shadowing and nested mount controls", () => {
+  for (const mount of [
+    { type: "volume", source: "example-app_data", target: "/var/run/docker.sock" },
+    { type: "volume", source: "example-app_data", target: "/run/platform/hosted-workloads.lock.json" },
+    { type: "volume", source: "example-app_data", target: "/data", read_only: false },
+    { type: "volume", source: "example-app_data", target: "/data", volume: { nocopy: false, subpath: "host" } },
+  ]) {
+    const config = fixture();
+    config.volumes = { "example-app_data": { name: "fixture_example-app_data" } };
+    config.services["example-app-web"].volumes = [mount];
+    const report = evaluateRuntimeIsolation(config, { projectName: "fixture" });
+    assert.equal(report.status, "failed");
+    assert.match(report.failures.join("\n"), /workload-exact-volume-mounts-example-app-web/);
+  }
+});
+
 test("FG-057 countercheck rejects external-container volume inheritance", () => {
   const config = fixture();
   config.services["example-app-web"].volumes_from = ["container:platform-postgres:rw"];
@@ -124,12 +140,28 @@ test("rejects workload host device controls independently at runtime", () => {
   for (const mutation of [
     (service) => { service.devices = [{ source: "/dev/kvm", target: "/dev/kvm" }]; },
     (service) => { service.device_cgroup_rules = ["c 10:232 rwm"]; },
+    (service) => { service.blkio_config.device_write_iops = [{ path: "/dev/sda", rate: 1000 }]; },
   ]) {
     const config = fixture();
     mutation(config.services["example-app-web"]);
     const report = evaluateRuntimeIsolation(config, { projectName: "fixture" });
     assert.equal(report.status, "failed");
-    assert.match(report.failures.join("\n"), /workload-no-device-access-example-app-web/);
+    assert.match(report.failures.join("\n"), /workload-(no-device-access|bounded-global-blkio)-example-app-web/);
+  }
+});
+
+test("rejects workload label files, ambient environment and deploy controls independently at runtime", () => {
+  for (const [mutation, check] of [
+    [(service) => { service.label_file = "/tmp/attacker.labels"; }, "workload-no-label-file"],
+    [(service) => { service.environment = { DATABASE_URL: null }; }, "workload-explicit-environment"],
+    [(service) => { service.environment = ["DATABASE_URL"]; }, "workload-explicit-environment"],
+    [(service) => { service.deploy = { resources: { limits: { cpus: "64", memory: "64G", pids: 999999 } } }; }, "workload-no-deploy-controls"],
+  ]) {
+    const config = fixture();
+    mutation(config.services["example-app-web"]);
+    const report = evaluateRuntimeIsolation(config, { projectName: "fixture" });
+    assert.equal(report.status, "failed");
+    assert.match(report.failures.join("\n"), new RegExp(`${check}-example-app-web`));
   }
 });
 
@@ -271,6 +303,14 @@ test("binds all six hosted workload runtime identity labels", () => {
   Object.assign(missing.services["example-app-web"].labels, expected);
   delete missing.services["example-app-web"].labels["com.platform.runtime.tree"];
   assert.equal(evaluateRuntimeIsolation(missing, { projectName: "fixture", runtimeIdentity: expected }).status, "failed");
+
+  const legacy = fixture();
+  Object.assign(legacy.services["example-app-web"].labels, expected, {
+    "com.platform.runtime.render-sha256": "f".repeat(64),
+  });
+  const legacyReport = evaluateRuntimeIsolation(legacy, { projectName: "fixture", runtimeIdentity: expected });
+  assert.equal(legacyReport.status, "failed");
+  assert.match(legacyReport.failures.join("\n"), /workload-runtime-identity-example-app-web/);
 });
 
 test("rejects workload Compose API socket access independently at runtime", () => {
@@ -310,6 +350,7 @@ test("rejects workload GPU and accelerator requests independently at runtime", (
     (service) => { service.gpus = "all"; },
     (service) => { service.device_requests = [{ capabilities: [["gpu"]] }]; },
     (service) => { service.deploy = { resources: { reservations: { devices: [{ driver: "nvidia", capabilities: ["gpu"] }] } } }; },
+    (service) => { service.deploy = { resources: { reservations: { generic_resources: [{ discrete_resource_spec: { kind: "GPU", value: 1 } }] } } }; },
   ]) {
     const config = fixture();
     mutation(config.services["example-app-web"]);
@@ -327,6 +368,14 @@ test("rejects missing memory limits and budget overcommit", () => {
   assert.equal(report.status, "failed");
   assert.match(report.failures.join("\n"), /resource-memory-example-app-web/);
   assert.match(report.failures.join("\n"), /resource-memory-admission/);
+});
+
+test("rejects security_opt entries that disable confinement", () => {
+  const config = fixture();
+  config.services["example-app-web"].security_opt = ["no-new-privileges:true", "seccomp=unconfined"];
+  const report = evaluateRuntimeIsolation(config, { projectName: "fixture" });
+  assert.equal(report.status, "failed");
+  assert.match(report.failures.join("\n"), /workload-exact-security-opt-example-app-web/);
 });
 
 test("rejects host-published gateways and extra Docker-control network members", () => {
@@ -447,7 +496,7 @@ function runtimeIdentityFixture() {
     "com.platform.runtime.commit": "b".repeat(40),
     "com.platform.runtime.tree": "c".repeat(40),
     "com.platform.runtime.deployment-id": "deploy-20260721",
-    "com.platform.runtime.render-sha256": "d".repeat(64),
+    "com.platform.runtime.source-render-sha256": "d".repeat(64),
     "com.platform.runtime.workload-lock-sha256": "e".repeat(64),
   };
 }
@@ -462,6 +511,8 @@ function bounded(overrides = {}) {
     pids_limit: 128,
     ulimits: { nofile: { soft: 8192, hard: 8192 } },
     blkio_config: { weight: 300 },
+    restart: "no",
+    healthcheck: { test: ["CMD", "true"] },
     environment: {},
     secrets: [],
     volumes: [],

@@ -15,9 +15,9 @@ const SERVICE = /^[a-z][a-z0-9-]{1,62}$/;
 const SHA256 = /^[a-f0-9]{64}$/;
 const IMAGE = /^[a-z0-9][a-z0-9._/-]*(?::[A-Za-z0-9._-]+)?@sha256:[a-f0-9]{64}$/;
 const SAFE_PATH = /^[A-Za-z0-9_./-]+$/;
-export const HOSTED_WORKLOAD_LOCK_VERSION = 2;
-export const HOSTED_WORKLOAD_VALIDATOR_VERSION = "hosted-contract-v2";
-const RAW_POLICY_CONTROLS = Object.freeze(["bind-bounded-local-logging", "bind-network-identity", "bind-network-topology", "bind-no-swap-oom-policy", "bind-owned-secret-aliases", "bind-owned-volumes", "bind-private-pid-numeric-user", "deny-api-socket", "deny-compose-interpolation", "deny-device-access", "deny-env-file", "deny-extends", "deny-file-configs", "deny-gpu-access", "deny-include", "deny-inline-configs", "deny-lifecycle-hooks", "deny-local-volume-options", "deny-providers", "deny-runtime-identity-labels", "deny-runtime-overrides", "deny-scaling", "deny-stop-grace-overrides", "deny-supplemental-groups", "deny-volumes-from"]);
+export const HOSTED_WORKLOAD_LOCK_VERSION = 4;
+export const HOSTED_WORKLOAD_VALIDATOR_VERSION = "hosted-contract-v4";
+const RAW_POLICY_CONTROLS = Object.freeze(["bind-bounded-dependencies", "bind-bounded-local-logging", "bind-closed-service-schema", "bind-exact-healthcheck", "bind-exact-security-opt", "bind-exact-ulimits", "bind-exact-volume-mounts", "bind-firewall-gated-restart", "bind-network-identity", "bind-network-topology", "bind-no-swap-oom-policy", "bind-owned-secret-aliases", "bind-owned-volume-driver", "bind-owned-volumes", "bind-platform-extension-records", "bind-private-pid-numeric-user", "deny-accelerator-environment", "deny-api-socket", "deny-compose-interpolation", "deny-deploy-controls", "deny-device-access", "deny-env-file", "deny-extends", "deny-file-configs", "deny-generic-resources", "deny-gpu-access", "deny-include", "deny-inline-configs", "deny-label-file", "deny-lifecycle-hooks", "deny-local-volume-options", "deny-providers", "deny-runtime-identity-labels", "deny-runtime-overrides", "deny-scaling", "deny-stop-grace-overrides", "deny-supplemental-groups", "deny-volumes-from"]);
 const PLATFORM_DEPENDENCIES = new Set([
   "postgres",
   "redis",
@@ -36,6 +36,16 @@ const PLATFORM_NETWORK_EXTENSION_ZONES = new Map([
   ["prometheus", new Set(["observability"])],
 ]);
 const WORKLOAD_NETWORK_ZONES = new Set(["ingress", "postgres", "cache", "bus", "identity", "storage", "observability", "egress"]);
+const WORKLOAD_SERVICE_KEYS = new Set([
+  "image", "command", "entrypoint", "working_dir", "environment", "volumes", "secrets", "networks",
+  "healthcheck", "read_only", "init", "restart", "security_opt", "cap_drop", "cap_add", "user",
+  "logging", "pids_limit", "cpu_shares", "blkio_config", "ulimits", "cpus", "mem_limit",
+  "memswap_limit", "mem_reservation", "labels", "depends_on",
+]);
+const ACCELERATOR_ENVIRONMENT_NAMES = new Set([
+  "CUDA_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "ONEAPI_DEVICE_SELECTOR",
+  "ROCR_VISIBLE_DEVICES", "SYCL_DEVICE_FILTER", "ZE_AFFINITY_MASK",
+]);
 
 function invalid(message) {
   throw new Error(message);
@@ -88,6 +98,21 @@ function workloadNetworkOwner(network, workloadIds) {
 
 function workloadNetworkZone(network, workloadId) {
   return network.slice(workloadNetworkPrefix(workloadId).length);
+}
+
+function assertNonPrefixCollidingWorkloadIds(workloadIds) {
+  const ordered = [...workloadIds].map((id) => requiredText(id, "workload id")).sort();
+  if (new Set(ordered).size !== ordered.length) invalid("Hosted workload ids must be unique.");
+  for (let leftIndex = 0; leftIndex < ordered.length; leftIndex += 1) {
+    for (let rightIndex = leftIndex + 1; rightIndex < ordered.length; rightIndex += 1) {
+      const left = ordered[leftIndex];
+      const right = ordered[rightIndex];
+      if (left.startsWith(`${right}-`) || right.startsWith(`${left}-`)) {
+        invalid(`Prefix-colliding workload ids ${left} and ${right} are forbidden.`);
+      }
+    }
+  }
+  return ordered;
 }
 
 function requiredText(value, label) {
@@ -166,7 +191,7 @@ function resolvePhysicalWithin(root, value, label, expectedType) {
 function fileRecord(filePath, kind) {
   const source = captureRegularFile(filePath, kind);
   const { bytes } = readStableRegularFile(source, kind);
-  return { kind, path: source.path, sha256: sha256Bytes(bytes), sizeBytes: bytes.length };
+  return { kind, path: source.path, sha256: sha256Bytes(bytes), sizeBytes: bytes.length, ...fileIdentity(source.path) };
 }
 
 function stableEntryIdentity(stat) {
@@ -427,6 +452,7 @@ function workloadManifestSemantics(workload) {
 
 function verifyWorkloadRecordBindings(lock) {
   if (!Array.isArray(lock.workloads)) invalid("Hosted workload lock has no workloads array.");
+  assertNonPrefixCollidingWorkloadIds(lock.workloads.map((workload) => workload?.id));
   const records = lock.files;
   const recordPaths = records.map((record) => record.path);
   if (new Set(recordPaths).size !== recordPaths.length) invalid("Hosted workload lock contains duplicate file paths.");
@@ -435,6 +461,10 @@ function verifyWorkloadRecordBindings(lock) {
   const coreEnvironmentRecord = exactRecord(records, "core-environment");
   if (catalogRecord.snapshot !== true || coreEnvironmentRecord.snapshot === true || coreEnvironmentRecord.path !== lock.coreEnvFile) {
     invalid("Hosted workload catalog or core environment role is not bound to its file record.");
+  }
+  const effectiveUid = typeof process.getuid === "function" ? String(process.getuid()) : String(coreEnvironmentRecord.uid);
+  if (String(coreEnvironmentRecord.uid) !== effectiveUid || ![0o400, 0o600].includes(Number(coreEnvironmentRecord.mode))) {
+    invalid("Hosted workload core environment must be deployment-owned with mode 0400 or 0600.");
   }
   const coreRecords = records.filter((record) => record.kind === "core-compose" && record.snapshot !== true);
   const coreRecordPaths = coreRecords.map((record) => record.path).sort();
@@ -714,10 +744,16 @@ export function resolveCatalog({ catalogPath, workloadRoot, coreEnvFile, coreFil
     invalid("Hosted workload catalog must use version 1 and workloads[].");
   }
   const root = physicalRoot(workloadRoot, "workload root");
-  const records = [catalogRecord, fileRecord(path.resolve(coreEnvFile), "core-environment")];
+  const coreEnvironmentRecord = fileRecord(path.resolve(coreEnvFile), "core-environment");
+  const effectiveUid = typeof process.getuid === "function" ? String(process.getuid()) : String(coreEnvironmentRecord.uid);
+  if (String(coreEnvironmentRecord.uid) !== effectiveUid || ![0o400, 0o600].includes(Number(coreEnvironmentRecord.mode))) {
+    invalid("Hosted workload core environment must be deployment-owned with mode 0400 or 0600.");
+  }
+  const records = [catalogRecord, coreEnvironmentRecord];
   for (const coreFile of coreFiles) records.push(fileRecord(path.resolve(coreFile), "core-compose"));
   const ids = new Set();
   const services = new Set();
+  const secretOwners = new Map();
   const workloads = catalog.workloads.map((entry) => {
     if (!entry || typeof entry !== "object" || Array.isArray(entry)) invalid("Each workload catalog entry must be an object.");
     const manifestEntry = resolvePhysicalEntryWithin(root, entry.manifest, "workload manifest", "file");
@@ -731,6 +767,11 @@ export function resolveCatalog({ catalogPath, workloadRoot, coreEnvFile, coreFil
     for (const service of manifest.services) {
       if (services.has(service.name)) invalid(`Duplicate workload service ${service.name}.`);
       services.add(service.name);
+    }
+    for (const secret of manifest.secrets) {
+      const existingOwner = secretOwners.get(secret);
+      if (existingOwner) invalid(`Secret ${secret} is ambiguously declared by ${existingOwner} and ${manifest.id}.`);
+      secretOwners.set(secret, manifest.id);
     }
     const composeEntry = resolvePhysicalEntryWithin(path.dirname(manifestPath), manifest.composeFile, "workload compose file", "file");
     const composePath = composeEntry.path;
@@ -761,6 +802,7 @@ export function resolveCatalog({ catalogPath, workloadRoot, coreEnvFile, coreFil
   });
   validateGlobalRouteOwnership(workloads, { reservedHosts: reservedHostsFromEnvironment(coreEnvFile) });
   validateGlobalBrokerOwnership(workloads);
+  assertNonPrefixCollidingWorkloadIds(ids);
   const contentDigest = workloadContentSha256(records);
   const snapshotReceipt = finalizeSnapshot(snapshot, records, contentDigest);
   for (const workload of workloads) {
@@ -872,6 +914,27 @@ function assertPlatformServicesUnchanged(core, combined, workloadIds) {
   }
 }
 
+function assertPlatformExtensionReceipt(core, combined, lock) {
+  const expected = [];
+  for (const workloadReceipt of lock.rawPolicyReceipt?.workloads ?? []) {
+    for (const extension of workloadReceipt.platformExtensions ?? []) {
+      for (const networkName of extension.networkNames ?? []) {
+        expected.push(`${extension.serviceName}:${networkName}`);
+      }
+    }
+  }
+  const actual = [];
+  for (const [serviceName, coreService] of Object.entries(core.services ?? {})) {
+    const coreNetworks = serviceNetworks(coreService);
+    for (const networkName of serviceNetworks(combined.services?.[serviceName])) {
+      if (!coreNetworks.has(networkName)) actual.push(`${serviceName}:${networkName}`);
+    }
+  }
+  if (!same([...new Set(actual)].sort(), [...new Set(expected)].sort())) {
+    invalid("Platform workload-network extensions do not exactly match the raw policy receipt.");
+  }
+}
+
 function assertProtectedTopLevelResourcesUnchanged(core, combined) {
   for (const resourceType of ["configs", "secrets", "volumes", "networks"]) {
     for (const [name, definition] of Object.entries(core[resourceType] ?? {})) {
@@ -885,7 +948,155 @@ function assertProtectedTopLevelResourcesUnchanged(core, combined) {
   }
 }
 
+function assertClosedTopLevelResources(core, combined, lock) {
+  const physicalName = (document, resourceType, logicalName) =>
+    document[resourceType]?.[logicalName]?.name ?? `${lock.projectName}_${logicalName}`;
+  const assertNoPhysicalCollisions = (resourceType, logicalNames, protectedPhysicalNames) => {
+    const owners = new Map();
+    for (const logicalName of logicalNames) {
+      const physical = physicalName(combined, resourceType, logicalName);
+      if (protectedPhysicalNames.has(physical)) {
+        invalid(`Workload ${resourceType} ${logicalName} aliases protected physical resource ${physical}.`);
+      }
+      const prior = owners.get(physical);
+      if (prior) invalid(`Workload ${resourceType} ${logicalName} aliases physical resource already owned by ${prior}.`);
+      owners.set(physical, logicalName);
+    }
+  };
+
+  const coreConfigNames = Object.keys(core.configs ?? {}).sort();
+  const combinedConfigNames = Object.keys(combined.configs ?? {}).sort();
+  if (!same(combinedConfigNames, coreConfigNames)) {
+    invalid("Workload overlays cannot add, alias, replace, or remove top-level configs.");
+  }
+
+  const coreSecretNames = Object.keys(core.secrets ?? {}).sort();
+  const coreSecretSet = new Set(coreSecretNames);
+  const secretOwners = new Map();
+  const referencedSecretNames = new Set();
+  for (const workload of lock.workloads) {
+    for (const secretName of workload.secrets) {
+      if (coreSecretSet.has(secretName)) {
+        invalid(`Workload ${workload.id} secret ${secretName} collides with a protected core secret.`);
+      }
+      const prior = secretOwners.get(secretName);
+      if (prior) invalid(`Workload secret ${secretName} is ambiguously owned by ${prior} and ${workload.id}.`);
+      secretOwners.set(secretName, workload.id);
+    }
+    for (const service of workload.services) {
+      for (const entry of combined.services?.[service.name]?.secrets ?? []) {
+        referencedSecretNames.add(typeof entry === "string" ? entry : entry.source);
+      }
+    }
+  }
+  const declaredSecretNames = [...secretOwners.keys()].sort();
+  if (!same([...referencedSecretNames].sort(), declaredSecretNames)) {
+    invalid("Signed workload secrets must be exactly owned and referenced by workload services.");
+  }
+  const expectedSecretNames = [...coreSecretNames, ...declaredSecretNames].sort();
+  const combinedSecretNames = Object.keys(combined.secrets ?? {}).sort();
+  if (!same(combinedSecretNames, [...new Set(expectedSecretNames)].sort())) {
+    invalid("Rendered top-level secrets do not exactly match protected core plus signed workload secrets.");
+  }
+  assertNoPhysicalCollisions(
+    "secrets",
+    declaredSecretNames,
+    new Set(coreSecretNames.map((name) => physicalName(core, "secrets", name))),
+  );
+
+  const coreServiceNames = new Set(Object.keys(core.services ?? {}));
+  const coreVolumeNames = Object.keys(core.volumes ?? {}).sort();
+  const coreVolumeSet = new Set(coreVolumeNames);
+  const volumeOwners = new Map();
+  for (const workload of lock.workloads) {
+    for (const manifestService of workload.services) {
+      const service = combined.services?.[manifestService.name];
+      for (const mount of service?.volumes ?? []) {
+        if (mount?.type !== "volume" || typeof mount.source !== "string") continue;
+        if (coreVolumeSet.has(mount.source)) {
+          invalid(`Workload ${workload.id} volume ${mount.source} collides with a protected core volume.`);
+        }
+        const prior = volumeOwners.get(mount.source);
+        if (prior && prior !== workload.id) {
+          invalid(`Workload volume ${mount.source} is ambiguously owned by ${prior} and ${workload.id}.`);
+        }
+        volumeOwners.set(mount.source, workload.id);
+      }
+    }
+  }
+  const workloadVolumeNames = [...volumeOwners.keys()].sort();
+  const expectedVolumeNames = [
+    ...coreVolumeNames,
+    ...workloadVolumeNames,
+  ].sort();
+  const combinedVolumeNames = Object.keys(combined.volumes ?? {}).sort();
+  if (!same(combinedVolumeNames, [...new Set(expectedVolumeNames)].sort())) {
+    invalid("Rendered top-level volumes do not exactly match protected core plus mounted workload volumes.");
+  }
+  assertNoPhysicalCollisions(
+    "volumes",
+    workloadVolumeNames,
+    new Set(coreVolumeNames.map((name) => physicalName(core, "volumes", name))),
+  );
+
+  const coreNetworkNames = Object.keys(core.networks ?? {}).sort();
+  const coreNetworkSet = new Set(coreNetworkNames);
+  const referencedWorkloadNetworks = new Set();
+  const workloadNetworkConsumers = new Map();
+  for (const workload of lock.workloads) {
+    for (const manifestService of workload.services) {
+      for (const networkName of serviceNetworks(combined.services?.[manifestService.name])) {
+        if (!coreNetworkSet.has(networkName)) {
+          referencedWorkloadNetworks.add(networkName);
+          const consumers = workloadNetworkConsumers.get(networkName) ?? [];
+          consumers.push(manifestService.name);
+          workloadNetworkConsumers.set(networkName, consumers);
+        }
+      }
+    }
+  }
+  for (const [serviceName, service] of Object.entries(combined.services ?? {})) {
+    if (!coreServiceNames.has(serviceName)) continue;
+    const coreNetworks = serviceNetworks(core.services?.[serviceName]);
+    for (const networkName of serviceNetworks(service)) {
+      if (!coreNetworks.has(networkName)) referencedWorkloadNetworks.add(networkName);
+    }
+  }
+  const renderedWorkloadNetworks = Object.keys(combined.networks ?? {})
+    .filter((name) => !coreNetworkSet.has(name))
+    .sort();
+  if (!same([...referencedWorkloadNetworks].sort(), renderedWorkloadNetworks)) {
+    invalid("Rendered workload networks must be exactly referenced by signed workload services or platform extensions.");
+  }
+  for (const networkName of renderedWorkloadNetworks) {
+    if ((workloadNetworkConsumers.get(networkName) ?? []).length === 0) {
+      invalid(`Workload network ${networkName} has no signed workload service consumer.`);
+    }
+  }
+  const routerNetworks = serviceNetworks(combined.services?.["project-router"]);
+  for (const networkName of routerNetworks) {
+    if (coreNetworkSet.has(networkName)) continue;
+    const owner = lock.workloads.find((workload) => networkName === `${workloadNetworkPrefix(workload.id)}ingress`);
+    if (!owner) continue;
+    const routedConsumers = owner.services.filter((service) =>
+      service.routes.length > 0
+      && serviceNetworks(combined.services?.[service.name]).has(networkName));
+    if (routedConsumers.length === 0) {
+      invalid(`Router ingress network ${networkName} has no signed routed workload consumer.`);
+    }
+  }
+  assertNoPhysicalCollisions(
+    "networks",
+    renderedWorkloadNetworks,
+    new Set(coreNetworkNames.map((name) => physicalName(core, "networks", name))),
+  );
+}
+
 function assertResourceLimits(name, service) {
+  if (!service.blkio_config || typeof service.blkio_config !== "object" || Array.isArray(service.blkio_config)
+      || !same(Object.keys(service.blkio_config).sort(), ["weight"])) {
+    invalid(`${name} blkio_config must contain only the bounded global weight.`);
+  }
   const cpus = Number(service.cpus);
   const memLimit = Number(service.mem_limit);
   const memReservation = Number(service.mem_reservation);
@@ -907,7 +1118,15 @@ function assertResourceLimits(name, service) {
 }
 
 function assertEnvironmentSecrets(name, service) {
+  if (Object.hasOwn(service, "environment")
+      && (!service.environment || typeof service.environment !== "object" || Array.isArray(service.environment)
+        || Object.values(service.environment).some((value) => value == null))) {
+    invalid(`${name} environment must be an explicit mapping with no ambient null values.`);
+  }
   for (const [key, rawValue] of Object.entries(service.environment ?? {})) {
+    if (key.startsWith("NVIDIA_") || ACCELERATOR_ENVIRONMENT_NAMES.has(key)) {
+      invalid(`${name} cannot request accelerator access through environment variable ${key}.`);
+    }
     const value = String(rawValue ?? "");
     if (key.endsWith("_FILE")) {
       if (!value.startsWith("/run/secrets/") || !SERVICE.test(value.slice("/run/secrets/".length))) {
@@ -924,11 +1143,14 @@ function assertEnvironmentSecrets(name, service) {
   }
 }
 
-function assertSecrets(name, service, manifest, combined, projectName) {
+function assertSecrets(name, service, manifest, combined, projectName, protectedSecretNames) {
   const allowed = new Set(manifest.secrets);
   for (const entry of service.secrets ?? []) {
     const source = typeof entry === "string" ? entry : entry.source;
     if (!allowed.has(source)) invalid(`${name} uses undeclared secret ${source}.`);
+    if (protectedSecretNames.has(source)) {
+      invalid(`${name} secret ${source} collides with a protected core secret.`);
+    }
     const definition = combined.secrets?.[source];
     const expectedPhysicalName = `${projectName}_${source}`;
     if (!definition || !same(Object.keys(definition).sort(), ["external", "name"])
@@ -938,20 +1160,41 @@ function assertSecrets(name, service, manifest, combined, projectName) {
   }
 }
 
-function assertVolumes(name, service, workloadId) {
+function assertVolumes(name, service, workloadId, protectedVolumeNames) {
+  const targets = new Set();
   for (const volume of service.volumes ?? []) {
-    if (volume.type !== "volume" || !String(volume.source ?? "").startsWith(`${workloadId}_`)) {
+    if (!volume || typeof volume !== "object" || Array.isArray(volume)
+        || !same(Object.keys(volume).sort(), ["source", "target", "type"])
+        || volume.type !== "volume"
+        || !String(volume.source ?? "").startsWith(`${workloadId}_`)) {
       invalid(`${name} may use only workload-prefixed named volumes; bind mounts are forbidden.`);
     }
+    if (volume.target !== "/data" || targets.has(volume.target)) {
+      invalid(`${name} workload volume targets must be the single closed /data mount; protected and overlapping targets are forbidden.`);
+    }
+    if (protectedVolumeNames.has(volume.source)) {
+      invalid(`${name} volume ${volume.source} collides with a protected core volume.`);
+    }
+    targets.add(volume.target);
   }
 }
 
-function assertWorkloadService({ serviceDefinition, manifestService, manifest, combined, projectName, protectedNetworkNames }) {
+function assertWorkloadService({
+  serviceDefinition,
+  manifestService,
+  manifest,
+  combined,
+  projectName,
+  protectedNetworkNames,
+  protectedSecretNames,
+  protectedVolumeNames,
+}) {
   const name = manifestService.name;
   const predeclaredRuntimeLabels = Object.keys(serviceDefinition.labels ?? {}).filter((label) => label.startsWith("com.platform.runtime."));
   if (predeclaredRuntimeLabels.length > 0) invalid(`${name} cannot predeclare trusted runtime identity labels.`);
   if (!IMAGE.test(String(serviceDefinition.image ?? ""))) invalid(`${name} image must be digest-pinned.`);
   if (serviceDefinition.build) invalid(`${name} cannot build inside the platform deployment.`);
+  if (serviceDefinition.label_file != null) invalid(`${name} cannot load labels from a host file.`);
   if (["post_start", "pre_start", "pre_stop"].some((field) => serviceDefinition[field] != null)) {
     invalid(`${name} cannot define service lifecycle hooks.`);
   }
@@ -967,8 +1210,10 @@ function assertWorkloadService({ serviceDefinition, manifestService, manifest, c
   if (serviceDefinition.group_add != null) invalid(`${name} cannot add supplemental groups.`);
   const acceleratorRequest = serviceDefinition.gpus != null
     || serviceDefinition.device_requests != null
-    || Object.hasOwn(serviceDefinition.deploy?.resources?.reservations ?? {}, "devices");
+    || Object.hasOwn(serviceDefinition.deploy?.resources?.reservations ?? {}, "devices")
+    || Object.hasOwn(serviceDefinition.deploy?.resources?.reservations ?? {}, "generic_resources");
   if (acceleratorRequest) invalid(`${name} cannot request GPU or accelerator access.`);
+  if (serviceDefinition.deploy != null) invalid(`${name} cannot define deploy controls; use the bounded top-level workload resource contract.`);
   if (serviceDefinition.volumes_from != null) invalid(`${name} cannot inherit volumes from another service.`);
   if (serviceDefinition.container_name) invalid(`${name} cannot reserve a global container_name.`);
   if (serviceDefinition.privileged || serviceDefinition.network_mode === "host" || serviceDefinition.ipc === "host") {
@@ -977,8 +1222,10 @@ function assertWorkloadService({ serviceDefinition, manifestService, manifest, c
   if (serviceDefinition.pid != null) invalid(`${name} cannot share another PID namespace.`);
   if (Array.isArray(serviceDefinition.ports) && serviceDefinition.ports.length > 0) invalid(`${name} cannot publish host ports.`);
   if (serviceDefinition.read_only !== true) invalid(`${name} must use a read-only root filesystem.`);
-  if (serviceDefinition.init !== true || serviceDefinition.restart !== "unless-stopped") invalid(`${name} requires init and restart=unless-stopped.`);
-  if (!serviceDefinition.security_opt?.includes("no-new-privileges:true")) invalid(`${name} must enable no-new-privileges.`);
+  if (serviceDefinition.init !== true || serviceDefinition.restart !== "no") invalid(`${name} requires init and restart=no for firewall-gated activation.`);
+  if (!same(serviceDefinition.security_opt, ["no-new-privileges:true"])) {
+    invalid(`${name} security_opt must be exactly [no-new-privileges:true].`);
+  }
   if (!serviceDefinition.cap_drop?.includes("ALL") || (serviceDefinition.cap_add?.length ?? 0) > 0) invalid(`${name} must drop all capabilities.`);
   if (!/^[1-9][0-9]{0,9}:[1-9][0-9]{0,9}$/.test(String(serviceDefinition.user ?? ""))) {
     invalid(`${name} must declare a canonical numeric non-root uid:gid.`);
@@ -986,13 +1233,29 @@ function assertWorkloadService({ serviceDefinition, manifestService, manifest, c
   if (!same(serviceDefinition.logging, { driver: "local", options: { "max-size": "10m", "max-file": "3" } })) {
     invalid(`${name} must use local logging with max-size=10m and max-file=3.`);
   }
-  if (!Array.isArray(serviceDefinition.healthcheck?.test) || serviceDefinition.healthcheck.test.length < 2 || serviceDefinition.healthcheck.disable === true) {
+  const healthcheck = serviceDefinition.healthcheck;
+  if (!healthcheck || typeof healthcheck !== "object" || Array.isArray(healthcheck)
+      || !same(Object.keys(healthcheck).sort(), ["test"])
+      || !Array.isArray(healthcheck.test) || healthcheck.test.length < 2 || healthcheck.test.length > 16
+      || healthcheck.test[0] !== "CMD"
+      || healthcheck.test.slice(1).some((value) => typeof value !== "string" || value.length === 0 || value.length > 256 || /[\0\r\n]/.test(value))) {
     invalid(`${name} requires a functional healthcheck.`);
   }
+  const nofile = serviceDefinition.ulimits?.nofile;
+  if (!serviceDefinition.ulimits || typeof serviceDefinition.ulimits !== "object" || Array.isArray(serviceDefinition.ulimits)
+      || !same(Object.keys(serviceDefinition.ulimits).sort(), ["nofile"])
+      || !nofile || typeof nofile !== "object" || Array.isArray(nofile)
+      || !same(Object.keys(nofile).sort(), ["hard", "soft"])
+      || !Number.isInteger(Number(nofile.soft)) || !Number.isInteger(Number(nofile.hard))
+      || Number(nofile.soft) < 1024 || Number(nofile.hard) > 65536 || Number(nofile.soft) > Number(nofile.hard)) {
+    invalid(`${name} ulimits must contain only bounded nofile soft/hard values.`);
+  }
+  const unsupportedFields = Object.keys(serviceDefinition).filter((field) => !WORKLOAD_SERVICE_KEYS.has(field)).sort();
+  if (unsupportedFields.length > 0) invalid(`${name} uses unsupported Compose service fields: ${unsupportedFields.join(", ")}.`);
   assertResourceLimits(name, serviceDefinition);
   assertEnvironmentSecrets(name, serviceDefinition);
-  assertSecrets(name, serviceDefinition, manifest, combined, projectName);
-  assertVolumes(name, serviceDefinition, manifest.id);
+  assertSecrets(name, serviceDefinition, manifest, combined, projectName, protectedSecretNames);
+  assertVolumes(name, serviceDefinition, manifest.id, protectedVolumeNames);
   const networks = serviceNetworks(serviceDefinition);
   if (networks.size === 0) invalid(`${name} must declare networks.`);
   for (const network of networks) {
@@ -1003,9 +1266,20 @@ function assertWorkloadService({ serviceDefinition, manifestService, manifest, c
       invalid(`${name} cannot set aliases or address overrides on network ${network}.`);
     }
   }
-  for (const dependency of Object.keys(serviceDefinition.depends_on ?? {})) {
+  const dependencies = serviceDefinition.depends_on ?? {};
+  if (!dependencies || typeof dependencies !== "object" || Array.isArray(dependencies)) {
+    invalid(`${name} depends_on must be an exact normalized mapping.`);
+  }
+  for (const [dependency, condition] of Object.entries(dependencies)) {
     if (!manifest.services.some((service) => service.name === dependency) && !PLATFORM_DEPENDENCIES.has(dependency)) {
       invalid(`${name} depends on unauthorized service ${dependency}.`);
+    }
+    if (!condition || typeof condition !== "object" || Array.isArray(condition)
+        || Object.keys(condition).some((field) => !["condition", "required", "restart"].includes(field))
+        || !["service_started", "service_healthy"].includes(condition.condition)
+        || (Object.hasOwn(condition, "required") && condition.required !== true)
+        || (Object.hasOwn(condition, "restart") && condition.restart !== false)) {
+      invalid(`${name} dependency ${dependency} must use a bounded required start/health condition.`);
     }
   }
   if (serviceDefinition.labels?.["com.platform.workload-id"] !== manifest.id || serviceDefinition.labels?.["com.platform.workload-role"] !== manifestService.role) {
@@ -1098,13 +1372,27 @@ export function validateRenderedWorkloads({ core, combined, lock }) {
   validateGlobalRouteOwnership(lock.workloads);
   assertBrokerPolicyDigest(lock);
   const workloadIds = lock.workloads.map((workload) => workload.id);
+  assertNonPrefixCollidingWorkloadIds(workloadIds);
   const protectedNetworkNames = new Set(Object.keys(core.networks ?? {}));
-  if (lock.rawPolicyReceipt && !same(lock.rawPolicyReceipt.protectedNetworkNames, [...protectedNetworkNames].sort())) {
-    invalid("Raw source policy protected-network receipt does not match the exact core render.");
+  const protectedSecretNames = new Set(Object.keys(core.secrets ?? {}));
+  const protectedVolumeNames = new Set(Object.keys(core.volumes ?? {}));
+  const protectedResourceNames = {
+    configs: Object.keys(core.configs ?? {}).sort(),
+    networks: [...protectedNetworkNames].sort(),
+    secrets: [...protectedSecretNames].sort(),
+    services: Object.keys(core.services ?? {}).sort(),
+    volumes: [...protectedVolumeNames].sort(),
+  };
+  if (lock.rawPolicyReceipt
+      && (!same(lock.rawPolicyReceipt.protectedNetworkNames, protectedResourceNames.networks)
+        || !same(lock.rawPolicyReceipt.protectedResourceNames, protectedResourceNames))) {
+    invalid("Raw source policy protected-resource receipt does not match the exact core render.");
   }
   assertActivationStorageIsolation(core, combined, lock);
   assertProtectedTopLevelResourcesUnchanged(core, combined);
+  assertClosedTopLevelResources(core, combined, lock);
   assertPlatformServicesUnchanged(core, combined, workloadIds);
+  assertPlatformExtensionReceipt(core, combined, lock);
   for (const [name, definition] of Object.entries(combined.configs ?? {})) {
     if (!Object.hasOwn(core.configs ?? {}, name) && definition?.file != null) {
       invalid(`Workload config ${name} cannot use a host file source.`);
@@ -1121,7 +1409,8 @@ export function validateRenderedWorkloads({ core, combined, lock }) {
     const owner = lock.workloads.find((workload) => name.startsWith(`${workload.id}_`));
     if (!owner) invalid(`Undeclared workload volume ${name}.`);
     const expectedPhysicalName = `${lock.projectName}_${name}`;
-    if (definition?.external === true || definition?.name !== expectedPhysicalName) {
+    if (!definition || typeof definition !== "object" || Array.isArray(definition)
+        || !same(Object.keys(definition).sort(), ["name"]) || definition.name !== expectedPhysicalName) {
       invalid(`Workload volume ${name} must bind physical volume ${expectedPhysicalName}.`);
     }
   }
@@ -1145,14 +1434,18 @@ export function validateRenderedWorkloads({ core, combined, lock }) {
       combined,
       projectName: lock.projectName,
       protectedNetworkNames,
+      protectedSecretNames,
+      protectedVolumeNames,
     });
     const brokerUse = assertBrokerEnvironment(name, rendered, item.workload, item.service);
     if (brokerUse.usesRedis) redisUsers.add(item.workload.id);
     if (brokerUse.usesNats) natsUsers.add(`${item.workload.id}/${item.service.name}`);
     for (const route of item.service.routes) {
-      const workloadNetworks = [...serviceNetworks(rendered)].filter((network) => network.startsWith(workloadNetworkPrefix(item.workload.id)));
+      const requiredIngressNetwork = `${workloadNetworkPrefix(item.workload.id)}ingress`;
       const routerNetworks = serviceNetworks(combined.services?.["project-router"]);
-      if (!workloadNetworks.some((network) => routerNetworks.has(network))) invalid(`Route ${route.slug} has no dedicated network shared with project-router.`);
+      if (!serviceNetworks(rendered).has(requiredIngressNetwork) || !routerNetworks.has(requiredIngressNetwork)) {
+        invalid(`Route ${route.slug} has no exact dedicated ingress network shared with project-router.`);
+      }
       routes.push({
         owner: item.workload.id,
         workloadId: item.workload.id,
@@ -1243,6 +1536,8 @@ export function verifyLockFiles(lock) {
           || identity.uid !== String(record.snapshotUid) || identity.uid !== String(lock.snapshotGenerationIdentity.uid)) {
         invalid(`Snapshot file identity or owner changed: ${record.path}.`);
       }
+    } else if (!sameIdentity(fileIdentity(record.path), record)) {
+      invalid(`Locked non-snapshot file identity changed: ${record.path}.`);
     }
     const { bytes } = readStableRegularFile(record.path, `locked ${record.kind}`);
     if (sha256Bytes(bytes) !== record.sha256) invalid(`Locked file changed: ${record.path}.`);
@@ -1257,17 +1552,28 @@ export function verifyLockFiles(lock) {
 
 export function verifyRawPolicyReceipt(lock) {
   const receipt = lock?.rawPolicyReceipt;
-  if (lock?.rawPolicyVersion !== "hosted-raw-v1"
+  if (Array.isArray(lock?.workloads)) {
+    assertNonPrefixCollidingWorkloadIds(lock.workloads.map((workload) => workload?.id));
+  }
+  if (lock?.rawPolicyVersion !== "hosted-raw-v3"
       || lock?.rawPolicyWorkloadContentSha256 !== lock?.workloadContentSha256
       || !same(lock?.rawPolicyControls, RAW_POLICY_CONTROLS)
       || !receipt || typeof receipt !== "object" || Array.isArray(receipt)
-      || !same(Object.keys(receipt).sort(), ["controls", "policyVersion", "protectedNetworkNames", "workloadContentSha256", "workloads"])
+      || !same(Object.keys(receipt).sort(), ["controls", "policyVersion", "protectedNetworkNames", "protectedResourceNames", "workloadContentSha256", "workloads"])
       || receipt.policyVersion !== lock.rawPolicyVersion
       || receipt.workloadContentSha256 !== lock.workloadContentSha256
       || !same(receipt.controls, RAW_POLICY_CONTROLS)
       || !Array.isArray(receipt.protectedNetworkNames)
       || !same(receipt.protectedNetworkNames, [...new Set(receipt.protectedNetworkNames)].sort())
       || receipt.protectedNetworkNames.some((name) => typeof name !== "string" || name.length === 0)
+      || !receipt.protectedResourceNames || typeof receipt.protectedResourceNames !== "object"
+      || Array.isArray(receipt.protectedResourceNames)
+      || !same(Object.keys(receipt.protectedResourceNames).sort(), ["configs", "networks", "secrets", "services", "volumes"])
+      || Object.values(receipt.protectedResourceNames).some((names) =>
+        !Array.isArray(names)
+        || !same(names, [...new Set(names)].sort())
+        || names.some((name) => typeof name !== "string" || name.length === 0))
+      || !same(receipt.protectedResourceNames.networks, receipt.protectedNetworkNames)
       || !Array.isArray(receipt.workloads)
       || !SHA256.test(String(lock?.rawPolicySha256 ?? ""))
       || sha256Bytes(Buffer.from(JSON.stringify(stable(receipt)))) !== lock.rawPolicySha256) {
@@ -1277,20 +1583,45 @@ export function verifyRawPolicyReceipt(lock) {
   const receiptIds = receipt.workloads.map((item) => item?.workloadId).sort();
   if (!same(receiptIds, expectedIds)) invalid("Raw source policy receipt does not cover the exact workload set.");
   for (const item of receipt.workloads) {
-    if (!same(Object.keys(item ?? {}).sort(), ["composeSha256", "networkNames", "serviceNames", "topLevelKeys", "workloadId"])) {
+    if (!same(Object.keys(item ?? {}).sort(), [
+      "composeSha256", "configNames", "networkNames", "platformExtensions",
+      "secretNames", "serviceNames", "topLevelKeys", "volumeNames", "workloadId",
+    ])) {
       invalid("Raw source policy workload receipt has an unexpected shape.");
     }
     const workload = lock.workloads.find((candidate) => candidate.id === item.workloadId);
     const composeRecords = lock.files.filter((record) => record.kind === "workload-compose" && record.workloadId === item.workloadId);
     const serviceNames = Array.isArray(item.serviceNames) ? item.serviceNames : [];
+    const configNames = Array.isArray(item.configNames) ? item.configNames : [];
+    const secretNames = Array.isArray(item.secretNames) ? item.secretNames : [];
+    const volumeNames = Array.isArray(item.volumeNames) ? item.volumeNames : [];
     const networkNames = Array.isArray(item.networkNames) ? item.networkNames : [];
     const topLevelKeys = Array.isArray(item.topLevelKeys) ? item.topLevelKeys : [];
+    const platformExtensions = Array.isArray(item.platformExtensions) ? item.platformExtensions : [];
+    const platformExtensionNames = platformExtensions.map((entry) => entry?.serviceName);
     if (!workload || composeRecords.length !== 1 || item.composeSha256 !== composeRecords[0].sha256
         || !same(serviceNames, [...new Set(serviceNames)].sort())
         || !same(networkNames, [...new Set(networkNames)].sort())
         || networkNames.some((name) => workloadNetworkOwner(name, expectedIds) !== item.workloadId || receipt.protectedNetworkNames.includes(name))
+        || !same(configNames, [])
+        || !same(secretNames, workload.secrets)
+        || secretNames.some((name) => receipt.protectedResourceNames.secrets.includes(name))
+        || !same(volumeNames, [...new Set(volumeNames)].sort())
+        || volumeNames.some((name) => receipt.protectedResourceNames.volumes.includes(name))
+        || serviceNames.some((name) => receipt.protectedResourceNames.services.includes(name))
         || !same(topLevelKeys, [...new Set(topLevelKeys)].sort()) || !topLevelKeys.includes("services")
-        || workload.services.some((service) => !serviceNames.includes(service.name))) {
+        || !same(serviceNames, workload.services.map((service) => service.name).sort())
+        || !same(platformExtensionNames, [...new Set(platformExtensionNames)].sort())
+        || platformExtensions.some((extension) => {
+          const allowedZones = PLATFORM_NETWORK_EXTENSION_ZONES.get(extension?.serviceName);
+          const extensionNetworks = Array.isArray(extension?.networkNames) ? extension.networkNames : [];
+          return !same(Object.keys(extension ?? {}).sort(), ["networkNames", "serviceName"])
+            || !allowedZones
+            || !same(extensionNetworks, [...new Set(extensionNetworks)].sort())
+            || extensionNetworks.length === 0
+            || extensionNetworks.some((name) => workloadNetworkOwner(name, expectedIds) !== item.workloadId
+              || !allowedZones.has(workloadNetworkZone(name, item.workloadId)));
+        })) {
       invalid(`Raw source policy receipt is not bound to ${item.workloadId ?? "a workload"}.`);
     }
   }

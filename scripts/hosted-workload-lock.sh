@@ -3,7 +3,7 @@ set -eu
 
 LOCK=${1:?Usage: hosted-workload-lock.sh <lock-file> [verify|compose-records|activation-bundle]}
 COMMAND=${2:-verify}
-RAW_POLICY_CONTROLS='["bind-bounded-local-logging","bind-network-identity","bind-network-topology","bind-no-swap-oom-policy","bind-owned-secret-aliases","bind-owned-volumes","bind-private-pid-numeric-user","deny-api-socket","deny-compose-interpolation","deny-device-access","deny-env-file","deny-extends","deny-file-configs","deny-gpu-access","deny-include","deny-inline-configs","deny-lifecycle-hooks","deny-local-volume-options","deny-providers","deny-runtime-identity-labels","deny-runtime-overrides","deny-scaling","deny-stop-grace-overrides","deny-supplemental-groups","deny-volumes-from"]'
+RAW_POLICY_CONTROLS='["bind-bounded-dependencies","bind-bounded-local-logging","bind-closed-service-schema","bind-exact-healthcheck","bind-exact-security-opt","bind-exact-ulimits","bind-exact-volume-mounts","bind-firewall-gated-restart","bind-network-identity","bind-network-topology","bind-no-swap-oom-policy","bind-owned-secret-aliases","bind-owned-volume-driver","bind-owned-volumes","bind-platform-extension-records","bind-private-pid-numeric-user","deny-accelerator-environment","deny-api-socket","deny-compose-interpolation","deny-deploy-controls","deny-device-access","deny-env-file","deny-extends","deny-file-configs","deny-generic-resources","deny-gpu-access","deny-include","deny-inline-configs","deny-label-file","deny-lifecycle-hooks","deny-local-volume-options","deny-providers","deny-runtime-identity-labels","deny-runtime-overrides","deny-scaling","deny-stop-grace-overrides","deny-supplemental-groups","deny-volumes-from"]'
 
 case "$COMMAND" in
   verify|compose-records|env-records|core-env-file|project-name|activation-bundle) ;;
@@ -168,8 +168,8 @@ jq_lock -e --arg lockPath "$LOCK" --argjson allowResolved "$allow_resolved" --ar
   | ($lock.files | map(select(.kind == "catalog" and ((.workloadId // null) == null)))) as $catalog_records
   | ($lock.files | map(select(.kind == "core-environment" and ((.workloadId // null) == null)))) as $core_environment_records
   | ($lock.files | map(select(.kind == "core-compose" and ((.workloadId // null) == null)))) as $core_records
-  | $lock.version == 2
-    and $lock.validatorVersion == "hosted-contract-v2"
+  | $lock.version == 4
+    and $lock.validatorVersion == "hosted-contract-v4"
     and (if $allowResolved then ($lock.state == "resolved" or $lock.state == "verified") else $lock.state == "verified" end)
     and ($lock.snapshotRoot | type == "string" and length > 0)
     and ($lock.snapshotGeneration | type == "string" and length > 0)
@@ -196,9 +196,23 @@ jq_lock -e --arg lockPath "$LOCK" --argjson allowResolved "$allow_resolved" --ar
       (.kind | type == "string" and length > 0)
       and (.path | type == "string" and length > 0)
       and (.sha256 | type == "string" and test("^[a-f0-9]{64}$"))
-      and (.sizeBytes | type == "number" and . >= 0))
+      and (.sizeBytes | type == "number" and . >= 0)
+      and (if .snapshot == true then true else
+        (.device | type == "string" and test("^[0-9]+$"))
+        and (.inode | type == "string" and test("^[0-9]+$"))
+        and (.uid | type == "string" and test("^[0-9]+$"))
+        and (.mode | type == "number" and . >= 0 and . <= 511)
+      end))
+    and (if $lock.state == "verified" then
+      ($lock.coreRenderSha256 | type == "string" and test("^[a-f0-9]{64}$"))
+      and ($lock.combinedRenderSha256 | type == "string" and test("^[a-f0-9]{64}$"))
+    else true end)
     and ($catalog_records | length == 1 and .[0].snapshot == true)
-    and ($core_environment_records | length == 1 and .[0].snapshot != true and .[0].path == $lock.coreEnvFile)
+    and ($core_environment_records | length == 1
+      and .[0] as $core_environment_record
+      | $core_environment_record.snapshot != true
+      and $core_environment_record.path == $lock.coreEnvFile
+      and ([256, 384] | index($core_environment_record.mode)) != null)
     and (($core_records | map(.path) | sort) == ($lock.coreFiles | unique | sort))
     and all($lock.workloads[];
       . as $workload
@@ -230,7 +244,7 @@ jq_lock -e --arg lockPath "$LOCK" --argjson allowResolved "$allow_resolved" --ar
         elif $record.kind == "core-environment" or $record.kind == "core-compose" then (($record.workloadId // null) == null and $record.snapshot != true)
         else (($workload_ids | index($record.workloadId)) != null and $record.snapshot == true)
         end)
-    and $lock.rawPolicyVersion == "hosted-raw-v1"
+    and $lock.rawPolicyVersion == "hosted-raw-v3"
     and $lock.rawPolicyWorkloadContentSha256 == $lock.workloadContentSha256
     and $lock.rawPolicyControls == $controls
     and (($lock.rawPolicySha256 | type) == "string" and ($lock.rawPolicySha256 | test("^[a-f0-9]{64}$")))
@@ -246,7 +260,7 @@ jq_lock -e --arg lockPath "$LOCK" --argjson allowResolved "$allow_resolved" --ar
       . as $receipt
       | ($lock.files | map(select(.kind == "workload-compose" and .workloadId == $receipt.workloadId))) as $compose
       | ($lock.workloads | map(select(.id == $receipt.workloadId))[0]) as $workload
-      | (($receipt | keys | sort) == ["composeSha256", "networkNames", "serviceNames", "topLevelKeys", "workloadId"])
+      | (($receipt | keys | sort) == ["composeSha256", "networkNames", "platformExtensions", "serviceNames", "topLevelKeys", "workloadId"])
         and ($receipt.networkNames | type == "array")
         and ($receipt.networkNames == ($receipt.networkNames | unique | sort))
         and (($receipt.networkNames - $lock.rawPolicyReceipt.protectedNetworkNames) == $receipt.networkNames)
@@ -262,7 +276,13 @@ jq_lock -e --arg lockPath "$LOCK" --argjson allowResolved "$allow_resolved" --ar
         and ($receipt.topLevelKeys == ($receipt.topLevelKeys | unique | sort))
         and (($receipt.topLevelKeys | index("services")) != null)
         and ($compose | length == 1 and $receipt.composeSha256 == $compose[0].sha256)
-        and (([$workload.services[].name] - $receipt.serviceNames) | length == 0))
+        and ($receipt.serviceNames == ([$workload.services[].name] | unique | sort))
+        and ($receipt.platformExtensions | type == "array")
+        and ($receipt.platformExtensions == ($receipt.platformExtensions | unique_by(.serviceName) | sort_by(.serviceName)))
+        and all($receipt.platformExtensions[];
+          ((keys | sort) == ["networkNames", "serviceName"])
+          and (.serviceName | IN("project-router", "postgres", "redis", "nats", "keycloak", "minio", "prometheus"))
+          and (.networkNames | type == "array" and length > 0 and . == (unique | sort))))
 ' >/dev/null
 
 snapshot_root=$(jq_lock -r '.snapshotRoot')
@@ -301,6 +321,11 @@ lock_directory_mode=$(printf '%s\n' "$lock_directory_identity" | awk -F'|' '{ pr
 [ "$(jq_lock -r '.snapshotParentIdentity.uid | tostring')" = "$deployment_uid" ] || die "Snapshot parent must be owned by the deployment identity."
 [ "$(jq_lock -r '.snapshotRootIdentity.uid | tostring')" = "$deployment_uid" ] || die "Snapshot root must be owned by the deployment identity."
 [ "$(jq_lock -r '.snapshotGenerationIdentity.uid | tostring')" = "$deployment_uid" ] || die "Snapshot generation must be owned by the deployment identity."
+core_environment_uid=$(jq_lock -r '.files[] | select(.kind == "core-environment" and ((.workloadId // null) == null)) | .uid')
+core_environment_mode=$(jq_lock -r '.files[] | select(.kind == "core-environment" and ((.workloadId // null) == null)) | .mode')
+[ "$core_environment_uid" = "$deployment_uid" ] \
+  && { [ "$core_environment_mode" = 256 ] || [ "$core_environment_mode" = 384 ]; } \
+  || die "Core environment must be deployment-owned with mode 0400 or 0600."
 
 count=$(jq_lock '.files | length')
 index=0
@@ -315,6 +340,10 @@ while [ "$index" -lt "$count" ]; do
     actual_file_identity=$(stat_identity "$file") || die "Snapshot file identity is missing: $file"
     [ "$actual_file_identity" = "$expected_file_identity" ] || die "Snapshot file identity, owner, or mode changed: $file"
     [ "$(jq_lock -r ".files[$index].snapshotUid | tostring")" = "$deployment_uid" ] || die "Snapshot file owner differs from the deployment identity: $file"
+  else
+    expected_file_identity=$(jq_lock -r ".files[$index] | [.device, .inode, .uid, .mode] | map(tostring) | join(\"|\")")
+    actual_file_identity=$(stat_identity "$file") || die "Locked non-snapshot file identity is missing: $file"
+    [ "$actual_file_identity" = "$expected_file_identity" ] || die "Locked non-snapshot file identity, owner, or mode changed: $file"
   fi
   actual=$(stable_sha256_file "$file")
   [ "$actual" = "$expected" ] || die "Locked file changed: $file"
@@ -377,9 +406,16 @@ case "$COMMAND" in
   activation-bundle) command_output=$(jq_lock -c --arg lockSha256 "$lock_read_sha256" '
     . as $lock
     | {
-      version: 1,
+      version: 2,
       lockSha256: $lockSha256,
+      coreRenderSha256,
+      combinedRenderSha256,
       coreEnvFile,
+      coreEnvironmentRecord: (
+        .files[]
+        | select(.kind == "core-environment" and ((.workloadId // null) == null) and .path == $lock.coreEnvFile)
+        | {path, sha256, device, inode, uid, mode}
+      ),
       projectName,
       workloadIds: [.workloads[].id] | sort,
       protectedNetworkNames: .rawPolicyReceipt.protectedNetworkNames,
@@ -393,6 +429,15 @@ case "$COMMAND" in
         | $workload.serviceNames[]
         | {workloadId: $workload.workloadId, serviceName: .}
       ] | sort_by(.workloadId, .serviceName),
+      platformExtensionRecords: [
+        .rawPolicyReceipt.workloads[] as $workload
+        | $workload.platformExtensions[]
+        | {workloadId: $workload.workloadId, serviceName, networkNames}
+      ] | sort_by(.workloadId, .serviceName),
+      routeRecords: [
+        (.routes // [])[]
+        | {workloadId, slug, serviceName: .service, port, upstream}
+      ] | sort_by(.workloadId, .slug),
       environmentRecords: [
         .workloads[] as $workload
         | .files[]

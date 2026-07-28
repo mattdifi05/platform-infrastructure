@@ -221,13 +221,15 @@ cd /home/platform_infrastructure/platform-infrastructure
 COMPOSE_ENV_FILE=.env \
 COMPOSE_PROJECT_NAME=platform_infra_vps \
 HOSTED_WORKLOAD_LOCK=/path/private/hosted-workloads.lock.json \
-bash ./scripts/compose-vps.sh config --quiet
+bash ./scripts/compose-vps.sh config --format json > /tmp/reviewed-hosted-compose.json
 
 # Run only after reviewed backup, lock and maintenance approval.
-COMPOSE_ENV_FILE=.env \
-COMPOSE_PROJECT_NAME=platform_infra_vps \
-HOSTED_WORKLOAD_LOCK=/path/private/hosted-workloads.lock.json \
-bash ./scripts/compose-vps.sh up -d --build
+bash ./scripts/hosted-workload-activation-gate.sh \
+  --project-name platform_infra_vps \
+  --env-file .env \
+  --lock /path/private/hosted-workloads.lock.json \
+  --previous-lock /path/private/previous-hosted-workloads.lock.json \
+  --confirm ACTIVATE-HOSTED-WORKLOADS
 ```
 
 For a zero-workload platform deploy, omit `HOSTED_WORKLOAD_LOCK`. Never point it
@@ -241,25 +243,15 @@ immutable in-memory bytes, and projected as one digest-bound activation bundle;
 separate helper calls cannot mix generations. The deployment Unix identity is an
 administrative trust boundary and must not be shared with hosted services.
 
-For a Control Center-only code/documentation rollout:
-
-```sh
-cd /home/platform_infrastructure/platform-infrastructure
-
-COMPOSE_ENV_FILE=.env \
-COMPOSE_PROJECT_NAME=platform_infra_vps \
-HOSTED_WORKLOAD_LOCK=/path/private/hosted-workloads.lock.json \
-bash ./scripts/compose-vps.sh up -d --no-deps --force-recreate control-center
-```
+Control Center-only code/documentation rollout remains owned by the verified
+release/rollback workflow. The Compose wrapper refuses runtime mutation while a
+hosted lock is selected; do not bypass the activation or release gates with
+direct `up`, `start`, `restart`, `run`, `unpause`, `watch`, late `-f`, env,
+project or profile arguments.
 
 Health and status checks:
 
 ```sh
-COMPOSE_ENV_FILE=.env \
-COMPOSE_PROJECT_NAME=platform_infra_vps \
-HOSTED_WORKLOAD_LOCK=/path/private/hosted-workloads.lock.json \
-bash ./scripts/compose-vps.sh ps control-center traefik waf
-
 curl -skS --resolve portal.platform-infrastructure.com:443:127.0.0.1 \
   https://portal.platform-infrastructure.com/control/status
 ```

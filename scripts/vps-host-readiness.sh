@@ -119,7 +119,7 @@ remediation_for_check() {
       printf '%s' "Install Docker Engine and the Docker Compose plugin from the official Docker Ubuntu repository, then ensure the deploy user can reach the Docker daemon."
       ;;
     docker-daemon-hardening)
-      printf '%s' "Run sudo sh ./scripts/vps-hardening-ubuntu.sh --apply. If /etc/docker/daemon.json already exists and is missing Platform keys, review /etc/docker/daemon.json.platform-template and rerun with --replace-docker-daemon-config to create a backup, write /etc/docker/daemon.json and restart Docker."
+      printf '%s' "Run sudo sh ./scripts/vps-hardening-ubuntu.sh --apply. The reviewed contract requires live-restore=false so a daemon restart cannot bypass the firewall-gated restart=no workload policy. If replacement is needed, archive the backup and rerun with --replace-docker-daemon-config during an approved Docker restart window."
       ;;
     ufw-active|ufw-no-direct-internal-ports)
       printf '%s' "Run sudo sh ./scripts/vps-hardening-ubuntu.sh --apply --ssh-port <port>, then apply Cloudflare origin lock before removing generic 80/443 exposure."
@@ -248,7 +248,7 @@ check_docker_daemon_hardening() {
     return
   fi
   missing=""
-  grep -q '"live-restore"[[:space:]]*:[[:space:]]*true' "$daemon_file" || missing="$missing live-restore"
+  grep -q '"live-restore"[[:space:]]*:[[:space:]]*false' "$daemon_file" || missing="$missing live-restore=false"
   grep -q '"no-new-privileges"[[:space:]]*:[[:space:]]*true' "$daemon_file" || missing="$missing no-new-privileges"
   grep -q '"max-size"[[:space:]]*:[[:space:]]*"10m"' "$daemon_file" || missing="$missing log-max-size"
   grep -q '"max-file"[[:space:]]*:[[:space:]]*"5"' "$daemon_file" || missing="$missing log-max-file"

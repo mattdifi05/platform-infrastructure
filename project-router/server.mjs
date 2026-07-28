@@ -16,12 +16,14 @@ import { isIP } from "node:net";
 import path from "node:path";
 import { createProjectMetadataReader, ProjectMetadataError } from "./project-metadata.mjs";
 import { validateVerifiedWorkloadLock } from "./verified-workload-lock.mjs";
+import { parseHostedRouteLock } from "./workload-route-lock.mjs";
 
 const port = Number(process.env.PROJECT_ROUTER_PORT || 8080);
 const projectsRoot = process.env.PROJECTS_ROOT || "/var/www/projects";
 const stateFile = process.env.PROJECT_STATE_FILE || "/var/www/project-state/projects.json";
 const workloadLockFile = process.env.PROJECT_ROUTER_WORKLOAD_LOCK_FILE || "/var/www/project-state/hosted-workloads.lock.json";
 const workloadLockMode = explicitWorkloadLockMode(process.env.PROJECT_ROUTER_WORKLOAD_LOCK_MODE);
+const workloadLockSha256 = String(process.env.PROJECT_ROUTER_WORKLOAD_LOCK_SHA256 || "").toLowerCase();
 const testLoopbackAllowed = process.env.NODE_ENV === "test" && process.env.PROJECT_ROUTER_TEST_ALLOW_LOOPBACK === "true";
 const testLegacyDiscoveryAllowed = process.env.NODE_ENV === "test" && process.env.PROJECT_ROUTER_TEST_ALLOW_LEGACY_DISCOVERY === "true";
 const allowedUpstreams = parseAllowedUpstreams(process.env.PROJECT_ROUTER_ALLOWED_UPSTREAMS || "control-center:8080");
@@ -58,6 +60,7 @@ const server = createServer(async (req, res) => {
   try {
     const host = normalizeHost(req.headers.host || "");
     if (req.url === "/__health") {
+      assertPinnedLockUnchanged();
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({ ok: true }));
       return;
@@ -86,7 +89,8 @@ const server = createServer(async (req, res) => {
 
     const projects = await discoverProjects(workloadRoutes);
     const slug = slugFromHost(host);
-    const project = projects.find((item) => item.slug === slug || item.aliases?.includes(slug) || normalizeHost(item.host) === host);
+    const project = projects.find((item) => item.slug === slug)
+      || projects.find((item) => item.aliases?.includes(slug) || normalizeHost(item.host) === host);
     if (!project) {
       disabled(res, "Project not found", host);
       return;
@@ -97,7 +101,7 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    const upstream = dedicatedUpstreamFor(project);
+    const upstream = dedicatedUpstreamFor(project, workloadRoutes);
     if (!upstream) {
       disabled(res, `${runtimeLabel(project.type)} project has no dedicated upstream`, host, 503);
       return;
@@ -110,6 +114,7 @@ const server = createServer(async (req, res) => {
   }
 });
 
+workloadRoutesFromLock();
 server.listen(port, "0.0.0.0", () => {
   console.log(`project-router listening on ${port}`);
 });
@@ -151,13 +156,18 @@ function proxy(clientReq, clientRes, upstream) {
   clientReq.pipe(proxyReq);
 }
 
-function dedicatedUpstreamFor(project) {
+function dedicatedUpstreamFor(project, workloadRoutes) {
   const mapped = project.upstream
     || mappedProjectValue(projectUpstreams, project)
     || mappedProjectValue(upstreamMapForType(project.type), project);
   if (!mapped) return null;
   try {
-    return validateUpstream(expandProjectValue(mapped, project), project.slug);
+    const expanded = expandProjectValue(mapped, project);
+    const candidate = new URL(expanded);
+    if (workloadRoutes.allowed.has(`${candidate.hostname.toLowerCase()}:${Number(candidate.port || 80)}`)) {
+      throw new Error("Unsigned project metadata cannot claim a hosted workload endpoint.");
+    }
+    return validateUpstream(expanded, project.slug);
   } catch {
     console.error(`rejected project upstream for ${project.slug}: service allowlist policy violation`);
     return null;
@@ -211,15 +221,25 @@ function validateUpstream(value, label, additionalAllowed = new Set()) {
 }
 
 function workloadRoutesFromLock() {
+  if (workloadRouteCache.key) return workloadRouteCache;
   if (!existsSync(workloadLockFile)) {
     if (workloadLockMode === "required") throw new Error("Required hosted workload lock is unavailable.");
-    return emptyWorkloadRoutes();
+    workloadRouteCache = emptyWorkloadRoutes();
+    return workloadRouteCache;
   }
   const bytes = readStableLockFile(workloadLockFile);
   const key = createHash("sha256").update(bytes).digest("hex");
-  if (workloadRouteCache.key === key) return workloadRouteCache;
+  if (workloadLockMode === "required" && !/^[a-f0-9]{64}$/.test(workloadLockSha256)) {
+    throw new Error("Hosted workload lock expected digest is missing.");
+  }
+  if (workloadLockSha256 && (!/^[a-f0-9]{64}$/.test(workloadLockSha256) || key !== workloadLockSha256)) {
+    throw new Error("Hosted workload lock digest differs from the activated receipt.");
+  }
   const lock = JSON.parse(bytes.toString("utf8"));
-  const verified = validateVerifiedWorkloadLock(lock);
+  const parsed = parseHostedRouteLock(lock);
+  const verified = lock.workloads.length > 0
+    ? validateVerifiedWorkloadLock(lock)
+    : { trustedEpoch: key, projectMetadata: new Map() };
   const byHost = new Map();
   const names = new Map();
   const upstreams = new Map();
@@ -249,10 +269,17 @@ function workloadRoutesFromLock() {
       throw new Error("Hosted workload route violates the verified lock contract.");
     }
     const identity = `${workloadId}/${service}/${slug}`;
+    if (parsed.routes.get(slug) !== route.upstream) {
+      throw new Error("Hosted workload route differs from its policy-bound lineage.");
+    }
     for (const name of [slug, ...aliases]) claimRouteValue(names, name, identity);
     for (const host of hosts) claimRouteValue(byHost, host, { ...route, owner, workloadId, slug, aliases, canonicalHost, hosts, service, port });
     claimRouteValue(upstreams, `${service}:${port}`, identity);
     allowed.add(`${service}:${port}`);
+  }
+  if (parsed.routes.size !== lock.routes.length
+      || JSON.stringify([...parsed.allowed].sort()) !== JSON.stringify([...allowed].sort())) {
+    throw new Error("Hosted workload route inventory differs from its policy-bound lineage.");
   }
   workloadRouteCache = {
     key,
@@ -262,6 +289,17 @@ function workloadRoutesFromLock() {
     projectMetadata: verified.projectMetadata,
   };
   return workloadRouteCache;
+}
+
+function assertPinnedLockUnchanged() {
+  if (!workloadRouteCache.key) throw new Error("Hosted workload route snapshot was not initialized.");
+  if (workloadRouteCache.key === "missing") {
+    if (existsSync(workloadLockFile)) throw new Error("Hosted workload lock appeared after startup.");
+    return;
+  }
+  if (!existsSync(workloadLockFile)) throw new Error("Hosted workload lock disappeared after startup.");
+  const currentKey = createHash("sha256").update(readStableLockFile(workloadLockFile)).digest("hex");
+  if (currentKey !== workloadRouteCache.key) throw new Error("Hosted workload lock changed after startup.");
 }
 
 function emptyWorkloadRoutes() {

@@ -21,9 +21,20 @@ const RUNTIME_IDENTITY_LABELS = [
   "com.platform.runtime.commit",
   "com.platform.runtime.tree",
   "com.platform.runtime.deployment-id",
-  "com.platform.runtime.render-sha256",
+  "com.platform.runtime.source-render-sha256",
   "com.platform.runtime.workload-lock-sha256",
 ];
+const WORKLOAD_SERVICE_KEYS = new Set([
+  "image", "command", "entrypoint", "working_dir", "environment", "volumes", "secrets", "networks",
+  "healthcheck", "read_only", "init", "restart", "security_opt", "cap_drop", "cap_add", "user",
+  "logging", "pids_limit", "cpu_shares", "blkio_config", "ulimits", "cpus", "mem_limit",
+  "memswap_limit", "mem_reservation", "labels", "depends_on",
+]);
+const PLATFORM_DEPENDENCIES = new Set(["postgres", "redis", "nats", "minio", "keycloak", "alertmanager"]);
+const ACCELERATOR_ENVIRONMENT_NAMES = new Set([
+  "CUDA_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "ONEAPI_DEVICE_SELECTOR",
+  "ROCR_VISIBLE_DEVICES", "SYCL_DEVICE_FILTER", "ZE_AFFINITY_MASK",
+]);
 
 export function evaluateRuntimeIsolation(config, options = {}) {
   const services = object(config?.services);
@@ -102,6 +113,7 @@ export function evaluateRuntimeIsolation(config, options = {}) {
     record(`workload-role-${name}`, ["api", "web", "worker", "scheduled-worker"].includes(role), `${name} role=${role}`);
     record(`workload-numeric-user-${name}`, /^[1-9][0-9]{0,9}:[1-9][0-9]{0,9}$/.test(String(service.user || "")), `${name} user=${service.user || "unset"}`);
     record(`workload-private-pid-${name}`, !Object.hasOwn(service, "pid"), `${name} pid=${service.pid ?? "private"}`);
+    record(`workload-gated-restart-${name}`, service.restart === "no", `${name} restart=${service.restart ?? "unset"}`);
     record(`workload-no-swap-${name}`, bytes(service.memswap_limit) === bytes(service.mem_limit), `${name} memswap=${bytes(service.memswap_limit)} memory=${bytes(service.mem_limit)}`);
     const oomControls = ["oom_kill_disable", "oom_score_adj", "mem_swappiness"].filter((field) => Object.hasOwn(service, field));
     record(`workload-no-oom-overrides-${name}`, oomControls.length === 0, `${name} oomControls=${oomControls.join(",") || "none"}`);
@@ -132,7 +144,16 @@ export function evaluateRuntimeIsolation(config, options = {}) {
       JSON.stringify(service.logging) === JSON.stringify({ driver: "local", options: { "max-size": "10m", "max-file": "3" } }),
       `${name} logging=${JSON.stringify(service.logging ?? null)}`,
     );
-    record(`workload-no-new-privileges-${name}`, service.security_opt?.includes("no-new-privileges:true"), `${name} securityOpt=${service.security_opt || "unset"}`);
+    record(
+      `workload-bounded-global-blkio-${name}`,
+      JSON.stringify(Object.keys(object(service.blkio_config)).sort()) === JSON.stringify(["weight"]),
+      `${name} blkioKeys=${Object.keys(object(service.blkio_config)).sort().join(",") || "none"}`,
+    );
+    record(
+      `workload-exact-security-opt-${name}`,
+      JSON.stringify(service.security_opt) === JSON.stringify(["no-new-privileges:true"]),
+      `${name} securityOpt=${service.security_opt || "unset"}`,
+    );
     record(`workload-drop-all-capabilities-${name}`, service.cap_drop?.includes("ALL") && !(service.cap_add?.length > 0), `${name} capDrop=${service.cap_drop || "unset"}`);
     record(`workload-no-volumes-from-${name}`, !Object.hasOwn(service, "volumes_from"), `${name} volumesFrom=${service.volumes_from || "none"}`);
     const externalContainerInheritance = (Array.isArray(service.volumes_from) ? service.volumes_from : [])
@@ -145,6 +166,14 @@ export function evaluateRuntimeIsolation(config, options = {}) {
     );
     const lifecycleHooks = ["post_start", "pre_start", "pre_stop"].filter((field) => Object.hasOwn(service, field));
     record(`workload-no-lifecycle-hooks-${name}`, lifecycleHooks.length === 0, `${name} hooks=${lifecycleHooks.join(",") || "none"}`);
+    record(`workload-no-label-file-${name}`, !Object.hasOwn(service, "label_file"), `${name} labelFile=${service.label_file ?? "none"}`);
+    const explicitEnvironment = !Object.hasOwn(service, "environment")
+      || (service.environment && typeof service.environment === "object" && !Array.isArray(service.environment)
+        && Object.values(service.environment).every((value) => value != null));
+    record(`workload-explicit-environment-${name}`, explicitEnvironment, `${name} environmentType=${Array.isArray(service.environment) ? "array" : typeof service.environment}`);
+    const acceleratorEnvironment = Object.keys(object(service.environment))
+      .filter((key) => key.startsWith("NVIDIA_") || ACCELERATOR_ENVIRONMENT_NAMES.has(key));
+    record(`workload-no-accelerator-environment-${name}`, acceleratorEnvironment.length === 0, `${name} acceleratorEnvironment=${acceleratorEnvironment.join(",") || "none"}`);
     const hasScaling = Object.hasOwn(service, "scale")
       || Object.hasOwn(object(service.deploy), "replicas")
       || Object.hasOwn(object(service.deploy), "mode");
@@ -161,7 +190,39 @@ export function evaluateRuntimeIsolation(config, options = {}) {
     if (Object.hasOwn(object(service.deploy?.resources?.reservations), "devices")) {
       acceleratorControls.push("deploy.resources.reservations.devices");
     }
+    if (Object.hasOwn(object(service.deploy?.resources?.reservations), "generic_resources")) {
+      acceleratorControls.push("deploy.resources.reservations.generic_resources");
+    }
     record(`workload-no-accelerators-${name}`, acceleratorControls.length === 0, `${name} acceleratorControls=${acceleratorControls.join(",") || "none"}`);
+    record(`workload-no-deploy-controls-${name}`, !Object.hasOwn(service, "deploy"), `${name} deploy=${JSON.stringify(service.deploy ?? null)}`);
+    const healthcheck = object(service.healthcheck);
+    const healthTest = Array.isArray(healthcheck.test) ? healthcheck.test : [];
+    const exactHealthcheck = JSON.stringify(Object.keys(healthcheck).sort()) === JSON.stringify(["test"])
+      && healthTest.length >= 2 && healthTest.length <= 16 && healthTest[0] === "CMD"
+      && healthTest.slice(1).every((value) => typeof value === "string" && value.length > 0 && value.length <= 256 && !/[\0\r\n]/.test(value));
+    record(`workload-exact-healthcheck-${name}`, exactHealthcheck, `${name} healthcheck=${JSON.stringify(service.healthcheck ?? null)}`);
+    const ulimits = object(service.ulimits);
+    const nofile = object(ulimits.nofile);
+    const exactUlimits = JSON.stringify(Object.keys(ulimits).sort()) === JSON.stringify(["nofile"])
+      && JSON.stringify(Object.keys(nofile).sort()) === JSON.stringify(["hard", "soft"])
+      && integer(nofile.soft) >= 1024 && integer(nofile.hard) <= 65536 && integer(nofile.soft) <= integer(nofile.hard);
+    record(`workload-exact-ulimits-${name}`, exactUlimits, `${name} ulimits=${JSON.stringify(service.ulimits ?? null)}`);
+    const unsupportedServiceFields = Object.keys(service).filter((field) => !WORKLOAD_SERVICE_KEYS.has(field)).sort();
+    record(`workload-closed-service-schema-${name}`, unsupportedServiceFields.length === 0, `${name} unsupported=${unsupportedServiceFields.join(",") || "none"}`);
+    const dependencyEntries = Object.entries(object(service.depends_on));
+    const invalidDependencies = dependencyEntries.filter(([dependency, condition]) => {
+      const sameWorkload = dependency.startsWith(`${workloadId}-`);
+      const exactCondition = condition && typeof condition === "object" && !Array.isArray(condition)
+        && Object.keys(condition).every((field) => ["condition", "required", "restart"].includes(field))
+        && ["service_started", "service_healthy"].includes(condition.condition)
+        && (!Object.hasOwn(condition, "required") || condition.required === true)
+        && (!Object.hasOwn(condition, "restart") || condition.restart === false);
+      return (!sameWorkload && !PLATFORM_DEPENDENCIES.has(dependency)) || !exactCondition;
+    }).map(([dependency]) => dependency);
+    const exactDependsOn = !Object.hasOwn(service, "depends_on")
+      || (service.depends_on && typeof service.depends_on === "object" && !Array.isArray(service.depends_on)
+        && invalidDependencies.length === 0);
+    record(`workload-bounded-dependencies-${name}`, exactDependsOn, `${name} invalidDependencies=${invalidDependencies.join(",") || "none"}`);
     const foreignSecrets = (Array.isArray(service.secrets) ? service.secrets : [])
       .map((entry) => typeof entry === "string" ? entry : String(entry?.source || ""))
       .filter((source) => {
@@ -172,6 +233,17 @@ export function evaluateRuntimeIsolation(config, options = {}) {
       });
     record(`workload-owned-secrets-${name}`, foreignSecrets.length === 0, `${name} foreignSecrets=${foreignSecrets.join(",") || "none"}`);
     const mounts = volumes(service);
+    const exactVolumeMounts = mounts.length <= 1 && mounts.every((mount) => (
+      mount.type === "volume"
+      && mount.source.startsWith(`${workloadId}_`)
+      && mount.target === "/data"
+      && JSON.stringify(mount.rawKeys) === JSON.stringify(["source", "target", "type"])
+    ));
+    record(
+      `workload-exact-volume-mounts-${name}`,
+      exactVolumeMounts,
+      `${name} mounts=${mounts.map((mount) => `${mount.type}:${mount.source}:${mount.target}:${mount.rawKeys.join(",")}`).join("|") || "none"}`,
+    );
     for (const target of FORBIDDEN_WORKLOAD_TARGETS) {
       const exposed = mounts.some((mount) => mount.target === target || mount.target.startsWith(`${target}/`));
       record(`workload-deny-mount-${stableId(target)}-${name}`, !exposed, `${name} target=${target} exposed=${exposed}`);
@@ -187,7 +259,7 @@ export function evaluateRuntimeIsolation(config, options = {}) {
       .filter((mount) => {
         const definition = object(config?.volumes?.[mount.source]);
         return !mount.source.startsWith(`${workloadId}_`)
-          || definition.external === true
+          || JSON.stringify(Object.keys(definition).sort()) !== JSON.stringify(["name"])
           || definition.name !== `${projectName}_${mount.source}`;
       })
       .map((mount) => mount.source);
@@ -316,13 +388,20 @@ function volumes(service) {
   return (service?.volumes || []).map((mount) => {
     if (typeof mount === "string") {
       const parts = mount.split(":");
-      return { type: parts[0]?.startsWith("/") || parts[0]?.startsWith(".") ? "bind" : "volume", source: parts[0] || "", target: parts[1] || "", readOnly: parts.slice(2).includes("ro") };
+      return {
+        type: parts[0]?.startsWith("/") || parts[0]?.startsWith(".") ? "bind" : "volume",
+        source: parts[0] || "",
+        target: parts[1] || "",
+        readOnly: parts.slice(2).includes("ro"),
+        rawKeys: ["string"],
+      };
     }
     return {
       type: String(mount?.type || ""),
       source: String(mount?.source || ""),
       target: String(mount?.target || ""),
       readOnly: mount?.read_only === true,
+      rawKeys: Object.keys(object(mount)).sort(),
     };
   });
 }

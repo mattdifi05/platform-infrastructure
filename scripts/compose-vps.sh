@@ -5,6 +5,23 @@ ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 ENV_FILE=${COMPOSE_ENV_FILE:-$ROOT_DIR/.env}
 PROJECT_NAME=${COMPOSE_PROJECT_NAME:-platform_infra_vps}
 PREPARE_RESOLVED=${HOSTED_WORKLOAD_PREPARE_RESOLVED:-0}
+CANONICAL_DOCKER_HOST=unix:///var/run/docker.sock
+
+case "${DOCKER_HOST:-}" in
+  ""|"$CANONICAL_DOCKER_HOST") ;;
+  *) printf 'Caller-selected DOCKER_HOST is forbidden: %s\n' "$DOCKER_HOST" >&2; exit 2 ;;
+esac
+case "${DOCKER_CONTEXT:-}" in
+  ""|default) ;;
+  *) printf 'Caller-selected DOCKER_CONTEXT is forbidden: %s\n' "$DOCKER_CONTEXT" >&2; exit 2 ;;
+esac
+unset DOCKER_CONTEXT
+export DOCKER_HOST=$CANONICAL_DOCKER_HOST
+
+[[ "$PROJECT_NAME" == platform_infra_vps ]] || {
+  printf '%s\n' "The VPS Compose wrapper is bound to canonical project platform_infra_vps." >&2
+  exit 2
+}
 
 case "$PREPARE_RESOLVED" in
   0) ;;
@@ -19,15 +36,6 @@ case "$PREPARE_RESOLVED" in
     exit 2
     ;;
 esac
-
-for argument in "$@"; do
-  case "$argument" in
-    --scale|--scale=*|scale)
-      printf '%s\n' "Caller-controlled scaling is forbidden; regenerate and verify the hosted workload contract." >&2
-      exit 2
-      ;;
-  esac
-done
 
 case "$ENV_FILE" in
   /*) ;;
@@ -48,6 +56,28 @@ env_path_value() {
   }
   printf '%s' "$value"
 }
+
+if [[ ${HOSTED_WORKLOAD_LOCK+x} ]]; then
+  workload_lock=$HOSTED_WORKLOAD_LOCK
+else
+  workload_lock=$(env_path_value HOSTED_WORKLOAD_LOCK)
+fi
+for argument in "$@"; do
+  case "$argument" in
+    -f|-f?*|--file|--file=*|--env-file|--env-file=*|-p|-p?*|--project-name|--project-name=*|--project-directory|--project-directory=*|--profile|--profile=*)
+      printf '%s\n' "Caller-controlled Compose files, environment, project and profiles are forbidden." >&2
+      exit 2
+      ;;
+    --scale|--scale=*|scale)
+      printf '%s\n' "Caller-controlled scaling is forbidden; regenerate and verify the hosted workload contract." >&2
+      exit 2
+      ;;
+  esac
+done
+if (( $# != 3 )) || [[ "$1" != config || "$2" != --format || "$3" != json ]]; then
+  printf '%s\n' "The VPS Compose wrapper is render-only in every hosted/no-hosted state; use the global activation transaction for runtime mutation." >&2
+  exit 2
+fi
 
 canonical_existing_file() {
   local candidate=$1 parent base
@@ -78,7 +108,6 @@ fd_identity() {
     raw=$(stat -f '%d|%i|%u|%Lp' "$target")
   fi
   IFS='|' read -r device inode uid mode <<< "$raw"
-  [[ "$OSTYPE" != darwin* ]] || device='*'
   printf '%s|%s|%s|%s\n' "$device" "$inode" "$uid" "$((8#$mode))"
 }
 
@@ -104,11 +133,16 @@ cleanup_handoff() {
 
 open_locked_handoff() {
   local source=$1 expected_sha=$2 expected_device=$3 expected_inode=$4 expected_uid=$5 expected_mode=$6
-  local source_fd source_reference before after actual_device actual_inode actual_uid actual_mode handoff_file
+  local source_fd source_reference path_before before after actual_device actual_inode actual_uid actual_mode handoff_file
   local writer_fd hash_fd handoff_fd path_identity path_device path_inode path_uid path_mode
   local writer_identity hash_identity handoff_identity actual_sha
   [[ "$source" = /* && "$source" != *[!A-Za-z0-9_./-]* && "$source" != *//* && "$source" != */../* && "$source" != */.. ]] || {
     printf 'Invalid locked handoff path: %s\n' "$source" >&2
+    return 1
+  }
+  path_before=$(fd_identity "$source")
+  [[ "$path_before" = "$expected_device|$expected_inode|$expected_uid|$expected_mode" ]] || {
+    printf 'Locked handoff path identity changed: %s\n' "$source" >&2
     return 1
   }
   source_fd=$next_handoff_fd
@@ -120,8 +154,8 @@ open_locked_handoff() {
   source_reference=/dev/fd/$source_fd
   before=$(fd_identity "$source_reference")
   IFS='|' read -r actual_device actual_inode actual_uid actual_mode <<< "$before"
-  [[ ( "$actual_device" = '*' || "$actual_device" = "$expected_device" )
-      && "$actual_inode" = "$expected_inode" && "$actual_uid" = "$expected_uid" && "$actual_mode" = "$expected_mode" ]] || {
+  [[ "$actual_inode" = "$expected_inode" && "$actual_uid" = "$expected_uid"
+      && ( "$OSTYPE" = darwin* || "$actual_device" = "$expected_device" ) ]] || {
     printf 'Locked handoff object identity changed: %s\n' "$source" >&2
     return 1
   }
@@ -202,12 +236,8 @@ open_generated_handoff() {
 
 cd "$ROOT_DIR"
 
-compose=(
-  docker compose
-  --env-file "$ENV_FILE"
-)
+declare -a compose=()
 
-workload_lock=${HOSTED_WORKLOAD_LOCK:-$(env_path_value HOSTED_WORKLOAD_LOCK)}
 if [[ -n "$workload_lock" ]]; then
   [[ "$workload_lock" = /* ]] || workload_lock="$ROOT_DIR/$workload_lock"
   workload_lock=$(canonical_existing_file "$workload_lock")
@@ -225,7 +255,7 @@ if [[ -n "$workload_lock" ]]; then
     HOSTED_WORKLOAD_ALLOW_RESOLVED=$PREPARE_RESOLVED \
       sh "$ROOT_DIR/scripts/hosted-workload-lock.sh" "$workload_lock" activation-bundle
   )
-  printf '%s' "$activation_bundle" | jq -e '
+  printf '%s' "$activation_bundle" | jq -e --arg prepare "$PREPARE_RESOLVED" '
     def record:
       type == "object"
       and ((keys | sort) == ["device", "inode", "mode", "path", "sha256", "uid"])
@@ -235,6 +265,16 @@ if [[ -n "$workload_lock" ]]; then
       and (.inode | type == "string" and test("^[0-9]+$"))
       and (.uid | type == "string" and test("^[0-9]+$"))
       and .mode == 256;
+    def core_record:
+      . as $record
+      | type == "object"
+      and ((keys | sort) == ["device", "inode", "mode", "path", "sha256", "uid"])
+      and (.path | type == "string" and length > 0)
+      and (.sha256 | type == "string" and test("^[a-f0-9]{64}$"))
+      and (.device | type == "string" and test("^[0-9]+$"))
+      and (.inode | type == "string" and test("^[0-9]+$"))
+      and (.uid | type == "string" and test("^[0-9]+$"))
+      and ([256, 384] | index($record.mode)) != null;
     def network_record($projectName):
       type == "object"
       and ((keys | sort) == ["logicalName", "physicalName", "workloadId"])
@@ -249,12 +289,28 @@ if [[ -n "$workload_lock" ]]; then
       and (.workloadId | type == "string" and test("^[a-z0-9][a-z0-9-]*$"))
       and (.serviceName | type == "string" and test("^[a-z][a-z0-9-]{1,62}$"))
       and ($record.serviceName | startswith($record.workloadId + "-"));
+    def route_record:
+      . as $record
+      | type == "object"
+      and ((keys | sort) == ["port", "serviceName", "slug", "upstream", "workloadId"])
+      and (.workloadId | type == "string" and test("^[a-z0-9][a-z0-9-]*$"))
+      and (.slug | type == "string" and test("^[a-z0-9][a-z0-9-]*$"))
+      and (.serviceName | type == "string" and startswith($record.workloadId + "-"))
+      and (.port | type == "number" and . >= 1 and . <= 65535 and floor == .)
+      and .upstream == ("http://" + .serviceName + ":" + (.port | tostring));
     . as $bundle
     | type == "object"
-    and ((keys | sort) == ["composeRecords", "coreEnvFile", "environmentRecords", "lockSha256", "networkRecords", "projectName", "protectedNetworkNames", "serviceRecords", "version", "workloadIds"])
-    and .version == 1
+    and ((keys | sort) == ["combinedRenderSha256", "composeRecords", "coreEnvFile", "coreEnvironmentRecord", "coreRenderSha256", "environmentRecords", "lockSha256", "networkRecords", "platformExtensionRecords", "projectName", "protectedNetworkNames", "routeRecords", "serviceRecords", "version", "workloadIds"])
+    and .version == 2
     and (.lockSha256 | type == "string" and test("^[a-f0-9]{64}$"))
+    and (if $prepare == "1" then
+      .coreRenderSha256 == null and .combinedRenderSha256 == null
+    else
+      (.coreRenderSha256 | type == "string" and test("^[a-f0-9]{64}$"))
+      and (.combinedRenderSha256 | type == "string" and test("^[a-f0-9]{64}$"))
+    end)
     and (.coreEnvFile | type == "string" and length > 0)
+    and (.coreEnvironmentRecord | core_record)
     and (.projectName | type == "string" and test("^[a-z0-9][a-z0-9_-]*$"))
     and ($bundle.workloadIds | type == "array" and length > 0 and . == (unique | sort) and all(.[]; type == "string" and test("^[a-z0-9][a-z0-9-]*$")))
     and ($bundle.protectedNetworkNames | type == "array" and . == (unique | sort) and all(.[]; type == "string" and length > 0))
@@ -267,6 +323,18 @@ if [[ -n "$workload_lock" ]]; then
     and ($bundle.serviceRecords == ($bundle.serviceRecords | unique_by(.serviceName) | sort_by(.workloadId, .serviceName)))
     and all($bundle.serviceRecords[]; service_record)
     and ([$bundle.serviceRecords[].workloadId] | unique | sort) == $bundle.workloadIds
+    and ($bundle.routeRecords | type == "array")
+    and ($bundle.routeRecords == ($bundle.routeRecords | unique_by(.slug) | sort_by(.workloadId, .slug)))
+    and all($bundle.routeRecords[]; route_record)
+    and all($bundle.routeRecords[]; . as $route | any($bundle.serviceRecords[]; .workloadId == $route.workloadId and .serviceName == $route.serviceName))
+    and ($bundle.platformExtensionRecords | type == "array")
+    and ($bundle.platformExtensionRecords == ($bundle.platformExtensionRecords | unique_by(.workloadId, .serviceName) | sort_by(.workloadId, .serviceName)))
+    and all($bundle.platformExtensionRecords[];
+      ((keys | sort) == ["networkNames", "serviceName", "workloadId"])
+      and (.workloadId | type == "string" and test("^[a-z0-9][a-z0-9-]*$"))
+      and (.serviceName | IN("project-router", "postgres", "redis", "nats", "keycloak", "minio", "prometheus"))
+      and (.networkNames | type == "array" and length > 0 and . == (unique | sort))
+      and all(.networkNames[]; type == "string"))
     and (.environmentRecords | type == "array" and all(.[]; record))
     and (.composeRecords | type == "array" and all(.[]; record))
   ' >/dev/null || {
@@ -285,6 +353,19 @@ if [[ -n "$workload_lock" ]]; then
     echo "Hosted workload lock was prepared for a different Compose project name." >&2
     exit 1
   }
+  IFS=$'\t' read -r core_env_source core_env_sha core_env_device core_env_inode core_env_uid core_env_mode < <(
+    printf '%s' "$activation_bundle" | jq -r '.coreEnvironmentRecord | [.path, .sha256, .device, .inode, .uid, (.mode | tostring)] | @tsv'
+  )
+  [[ "$core_env_source" = "$ENV_FILE" ]] || {
+    printf '%s\n' "Hosted workload core environment record differs from the selected env file." >&2
+    exit 1
+  }
+  [[ "$core_env_uid" = "$(id -u)" && ( "$core_env_mode" = 256 || "$core_env_mode" = 384 ) ]] || {
+    printf '%s\n' "Hosted workload core environment must be deployment-owned with mode 0400 or 0600." >&2
+    exit 1
+  }
+  open_locked_handoff "$core_env_source" "$core_env_sha" "$core_env_device" "$core_env_inode" "$core_env_uid" "$core_env_mode"
+  compose=(docker compose --env-file "$HANDOFF_REFERENCE")
   while IFS=$'\t' read -r source expected_sha expected_device expected_inode expected_uid expected_mode; do
     [[ -n "$source" ]] || continue
     open_locked_handoff "$source" "$expected_sha" "$expected_device" "$expected_inode" "$expected_uid" "$expected_mode"
@@ -303,8 +384,8 @@ else
     jq -e '
       type == "object"
       and ((keys | sort) == ["brokerPolicySha256", "routes", "state", "validatorVersion", "version", "workloads"])
-      and .version == 2
-      and .validatorVersion == "hosted-contract-v2"
+      and .version == 4
+      and .validatorVersion == "hosted-contract-v4"
       and .state == "verified"
       and .routes == []
       and .workloads == []
@@ -315,6 +396,7 @@ else
     }
   fi
   export HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE=$runtime_lock_source
+  compose=(docker compose --env-file "$ENV_FILE")
 fi
 
 compose+=(
@@ -343,7 +425,7 @@ runtime_identity_variables=(
   PLATFORM_RUNTIME_COMMIT
   PLATFORM_RUNTIME_TREE
   PLATFORM_RUNTIME_DEPLOYMENT_ID
-  PLATFORM_RUNTIME_RENDER_SHA256
+  PLATFORM_RUNTIME_SOURCE_RENDER_SHA256
   PLATFORM_RUNTIME_WORKLOAD_LOCK_SHA256
 )
 runtime_identity_count=0
@@ -359,7 +441,7 @@ if (( runtime_identity_count == ${#runtime_identity_variables[@]} )); then
   [[ "$PLATFORM_RUNTIME_COMMIT" =~ ^([a-f0-9]{40}|[a-f0-9]{64})$ ]] || { printf '%s\n' "Invalid runtime commit." >&2; exit 1; }
   [[ "$PLATFORM_RUNTIME_TREE" =~ ^([a-f0-9]{40}|[a-f0-9]{64})$ ]] || { printf '%s\n' "Invalid runtime tree." >&2; exit 1; }
   [[ "$PLATFORM_RUNTIME_DEPLOYMENT_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$ ]] || { printf '%s\n' "Invalid runtime deployment ID." >&2; exit 1; }
-  [[ "$PLATFORM_RUNTIME_RENDER_SHA256" =~ ^[a-f0-9]{64}$ ]] || { printf '%s\n' "Invalid runtime render SHA256." >&2; exit 1; }
+  [[ "$PLATFORM_RUNTIME_SOURCE_RENDER_SHA256" =~ ^[a-f0-9]{64}$ ]] || { printf '%s\n' "Invalid runtime source render SHA256." >&2; exit 1; }
   [[ "$PLATFORM_RUNTIME_WORKLOAD_LOCK_SHA256" =~ ^[a-f0-9]{64}$ ]] || { printf '%s\n' "Invalid runtime workload lock SHA256." >&2; exit 1; }
   compose+=(-f compose.runtime-identity.yaml)
   if [[ -n "$workload_lock" ]]; then
@@ -368,7 +450,7 @@ if (( runtime_identity_count == ${#runtime_identity_variables[@]} )); then
       --arg commit "$PLATFORM_RUNTIME_COMMIT" \
       --arg tree "$PLATFORM_RUNTIME_TREE" \
       --arg deploymentId "$PLATFORM_RUNTIME_DEPLOYMENT_ID" \
-      --arg renderSha256 "$PLATFORM_RUNTIME_RENDER_SHA256" \
+      --arg sourceRenderSha256 "$PLATFORM_RUNTIME_SOURCE_RENDER_SHA256" \
       --arg workloadLockSha256 "$PLATFORM_RUNTIME_WORKLOAD_LOCK_SHA256" '
         {
           services: (
@@ -381,7 +463,7 @@ if (( runtime_identity_count == ${#runtime_identity_variables[@]} )); then
                     "com.platform.runtime.commit": $commit,
                     "com.platform.runtime.tree": $tree,
                     "com.platform.runtime.deployment-id": $deploymentId,
-                    "com.platform.runtime.render-sha256": $renderSha256,
+                    "com.platform.runtime.source-render-sha256": $sourceRenderSha256,
                     "com.platform.runtime.workload-lock-sha256": $workloadLockSha256
                   }
                 }

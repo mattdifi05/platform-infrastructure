@@ -64,6 +64,30 @@ class HostedWorkloadSourcePolicyTest < Minitest::Test
     end
   end
 
+  def test_requires_exact_no_new_privileges_security_option
+    [
+      ["no-new-privileges:true", "seccomp=unconfined"],
+      ["no-new-privileges:true", "apparmor=unconfined"],
+      ["seccomp=unconfined"]
+    ].each do |security_opt|
+      error = assert_raises(ArgumentError) do
+        HostedWorkloadSourcePolicy.validate_source_model(
+          { "services" => { "example-app-web" => { "security_opt" => security_opt } } },
+          "fixture",
+          workload_id: "example-app",
+          project_name: "fixture"
+        )
+      end
+      assert_match(/security_opt must be exactly/, error.message)
+    end
+    assert HostedWorkloadSourcePolicy.validate_source_model(
+      { "services" => { "example-app-web" => { "security_opt" => ["no-new-privileges:true"] } } },
+      "fixture",
+      workload_id: "example-app",
+      project_name: "fixture"
+    )
+  end
+
   def test_binds_memswap_and_rejects_oom_priority_controls
     error = assert_raises(ArgumentError) do
       HostedWorkloadSourcePolicy.validate_source_model(
@@ -109,6 +133,33 @@ class HostedWorkloadSourcePolicyTest < Minitest::Test
     assert_match(/cannot use volumes_from/, error.message)
   end
 
+  def test_named_volumes_cannot_shadow_protected_targets_or_use_nested_controls
+    [
+      { "type" => "volume", "source" => "example-app_data", "target" => "/var/run/docker.sock" },
+      { "type" => "volume", "source" => "example-app_data", "target" => "/run/platform/hosted-workloads.lock.json" },
+      { "type" => "volume", "source" => "example-app_data", "target" => "/data", "read_only" => false },
+      { "type" => "volume", "source" => "example-app_data", "target" => "/data", "volume" => { "nocopy" => false, "subpath" => "host" } }
+    ].each do |mount|
+      error = assert_raises(ArgumentError) do
+        HostedWorkloadSourcePolicy.validate_source_model(
+          {
+            "volumes" => { "example-app_data" => {} },
+            "services" => {
+              "example-app-web" => {
+                "security_opt" => ["no-new-privileges:true"],
+                "volumes" => [mount]
+              }
+            }
+          },
+          "fixture",
+          workload_id: "example-app",
+          project_name: "fixture"
+        )
+      end
+      assert_match(/exact long-syntax mounts targeting only \/data/, error.message)
+    end
+  end
+
   def test_rejects_every_service_lifecycle_hook_before_render
     %w[post_start pre_start pre_stop].each do |hook|
       model = parse("services:\n  app:\n    #{hook}:\n      - command: id\n")
@@ -128,7 +179,7 @@ class HostedWorkloadSourcePolicyTest < Minitest::Test
       error = assert_raises(ArgumentError) do
         HostedWorkloadSourcePolicy.validate_source_model({ "services" => { "app" => service } }, "fixture")
       end
-      assert_match(/cannot set (?:scale|deploy\.(?:replicas|mode))/, error.message)
+      assert_match(/cannot (?:set (?:scale|deploy\.(?:replicas|mode))|define deploy controls)/, error.message)
     end
   end
 
@@ -137,6 +188,23 @@ class HostedWorkloadSourcePolicyTest < Minitest::Test
     assert_raises(ArgumentError) { HostedWorkloadSourcePolicy.validate_source_model(file_config, "fixture") }
     grant = parse("services:\n  app:\n    configs:\n      - platform-config\n")
     assert_raises(ArgumentError) { HostedWorkloadSourcePolicy.validate_source_model(grant, "fixture") }
+  end
+
+  def test_rejects_any_workload_top_level_config_alias
+    model = {
+      "configs" => { "attacker_trust_key" => { "external" => true } },
+      "services" => { "example-app-web" => {} }
+    }
+    error = assert_raises(ArgumentError) do
+      HostedWorkloadSourcePolicy.validate_source_model(
+        model,
+        "fixture",
+        workload_id: "example-app",
+        project_name: "fixture",
+        declared_secrets: []
+      )
+    end
+    assert_match(/cannot define, alias, or replace top-level configs/, error.message)
   end
 
   def test_rejects_inline_and_host_environment_configs
@@ -192,7 +260,12 @@ class HostedWorkloadSourcePolicyTest < Minitest::Test
           "example_app_ingress" => { "internal" => true },
           "example_app_egress" => { "internal" => false }
         },
-        "services" => { "example-app-web" => { "networks" => ["example_app_ingress", "example_app_egress"] } }
+        "services" => {
+          "example-app-web" => {
+            "networks" => ["example_app_ingress", "example_app_egress"],
+            "security_opt" => ["no-new-privileges:true"]
+          }
+        }
       },
       "fixture",
       workload_id: "example-app",
@@ -241,12 +314,27 @@ class HostedWorkloadSourcePolicyTest < Minitest::Test
   def test_rejects_host_device_controls
     [
       "services:\n  app:\n    devices:\n      - /dev/kvm:/dev/kvm\n",
-      "services:\n  app:\n    device_cgroup_rules:\n      - c 10:232 rwm\n"
+      "services:\n  app:\n    device_cgroup_rules:\n      - c 10:232 rwm\n",
+      "services:\n  app:\n    blkio_config:\n      weight: 300\n      device_read_bps:\n        - path: /dev/sda\n          rate: 1mb\n"
     ].each do |document|
       error = assert_raises(ArgumentError) do
         HostedWorkloadSourcePolicy.validate_source_model(parse(document), "fixture")
       end
-      assert_match(/cannot request host device access/, error.message)
+      assert_match(/cannot request host device access|bounded global weight/, error.message)
+    end
+  end
+
+  def test_rejects_label_files_ambient_environment_and_deploy_controls
+    [
+      ["services:\n  app:\n    label_file: /tmp/attacker.labels\n", /cannot load labels from a host file/],
+      ["services:\n  app:\n    environment:\n      DATABASE_URL:\n", /explicit mapping with no ambient null values/],
+      ["services:\n  app:\n    environment:\n      - DATABASE_URL\n", /explicit mapping with no ambient null values/],
+      ["services:\n  app:\n    deploy:\n      resources:\n        limits:\n          cpus: '64'\n          memory: 64G\n          pids: 999999\n", /cannot define deploy controls/]
+    ].each do |document, message|
+      error = assert_raises(ArgumentError) do
+        HostedWorkloadSourcePolicy.validate_source_model(parse(document), "fixture")
+      end
+      assert_match(message, error.message)
     end
   end
 
@@ -287,7 +375,7 @@ class HostedWorkloadSourcePolicyTest < Minitest::Test
       error = assert_raises(ArgumentError) do
         HostedWorkloadSourcePolicy.validate_source_model(model, "fixture", workload_id: "example-app", project_name: "fixture")
       end
-      assert_match(/cannot alias an external or foreign physical volume/, error.message)
+      assert_match(/implicit Docker local driver/, error.message)
     end
     model = { "volumes" => { "other_data" => {} }, "services" => { "example-app-web" => {} } }
     assert_raises(ArgumentError) do
@@ -302,10 +390,95 @@ class HostedWorkloadSourcePolicyTest < Minitest::Test
     end
   end
 
+  def test_rejects_protected_core_resource_collisions_and_unused_resources
+    volume_collision = {
+      "volumes" => { "enterprise_local_registry_data" => {} },
+      "services" => {
+        "enterprise-web" => {
+          "security_opt" => ["no-new-privileges:true"],
+          "volumes" => [
+            { "type" => "volume", "source" => "enterprise_local_registry_data", "target" => "/data" }
+          ]
+        }
+      }
+    }
+    error = assert_raises(ArgumentError) do
+      HostedWorkloadSourcePolicy.validate_source_model(
+        volume_collision,
+        "fixture",
+        workload_id: "enterprise",
+        project_name: "fixture",
+        protected_resources: {
+          "configs" => [],
+          "networks" => [],
+          "secrets" => [],
+          "services" => [],
+          "volumes" => ["enterprise_local_registry_data"]
+        }
+      )
+    end
+    assert_match(/collides with a protected core volume/, error.message)
+
+    secret_collision = {
+      "secrets" => {
+        "enterprise-api-key" => {
+          "external" => true,
+          "name" => "fixture_enterprise-api-key"
+        }
+      },
+      "services" => {
+        "enterprise-web" => {
+          "security_opt" => ["no-new-privileges:true"],
+          "secrets" => ["enterprise-api-key"]
+        }
+      }
+    }
+    error = assert_raises(ArgumentError) do
+      HostedWorkloadSourcePolicy.validate_source_model(
+        secret_collision,
+        "fixture",
+        workload_id: "enterprise",
+        project_name: "fixture",
+        declared_secrets: ["enterprise-api-key"],
+        protected_resources: {
+          "configs" => [],
+          "networks" => [],
+          "secrets" => ["enterprise-api-key"],
+          "services" => [],
+          "volumes" => []
+        }
+      )
+    end
+    assert_match(/collides with a protected core secret/, error.message)
+
+    unused_network = {
+      "networks" => { "enterprise_egress" => { "internal" => false } },
+      "services" => {
+        "enterprise-web" => {
+          "security_opt" => ["no-new-privileges:true"]
+        }
+      }
+    }
+    error = assert_raises(ArgumentError) do
+      HostedWorkloadSourcePolicy.validate_source_model(
+        unused_network,
+        "fixture",
+        workload_id: "enterprise",
+        project_name: "fixture"
+      )
+    end
+    assert_match(/networks must be exactly declared and referenced/, error.message)
+  end
+
   def test_binds_external_secrets_to_workload_owned_physical_names
     valid = {
       "secrets" => { "example-app-api-key" => { "external" => true, "name" => "fixture_example-app-api-key" } },
-      "services" => { "example-app-web" => { "secrets" => ["example-app-api-key"] } }
+      "services" => {
+        "example-app-web" => {
+          "secrets" => ["example-app-api-key"],
+          "security_opt" => ["no-new-privileges:true"]
+        }
+      }
     }
     assert HostedWorkloadSourcePolicy.validate_source_model(
       valid, "fixture", workload_id: "example-app", project_name: "fixture", declared_secrets: ["example-app-api-key"]
@@ -377,7 +550,8 @@ class HostedWorkloadSourcePolicyTest < Minitest::Test
     [
       "services:\n  app:\n    gpus: all\n",
       "services:\n  app:\n    device_requests:\n      - capabilities: [gpu]\n",
-      "services:\n  app:\n    deploy:\n      resources:\n        reservations:\n          devices:\n            - driver: nvidia\n              capabilities: [gpu]\n"
+      "services:\n  app:\n    deploy:\n      resources:\n        reservations:\n          devices:\n            - driver: nvidia\n              capabilities: [gpu]\n",
+      "services:\n  app:\n    deploy:\n      resources:\n        reservations:\n          generic_resources:\n            - discrete_resource_spec:\n                kind: GPU\n                value: 1\n"
     ].each do |document|
       error = assert_raises(ArgumentError) do
         HostedWorkloadSourcePolicy.validate_source_model(parse(document), "fixture")

@@ -9,6 +9,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createProjectMetadataReader } from "../project-metadata.mjs";
 import { validateVerifiedWorkloadLock, workloadContentDigest } from "../verified-workload-lock.mjs";
+import { HOSTED_ROUTE_RAW_POLICY_CONTROLS } from "../workload-route-lock.mjs";
 
 const infraRoot = path.resolve(import.meta.dirname, "..", "..");
 const testRoot = path.join(infraRoot, ".tmp", "project-router-tests", randomUUID());
@@ -16,9 +17,11 @@ const projectsRoot = path.join(testRoot, "projects");
 const stateDir = path.join(testRoot, "state");
 const stateFile = path.join(stateDir, "projects.json");
 const workloadLockFile = path.join(stateDir, "hosted-workloads.lock.json");
+const routerScript = path.join(infraRoot, "project-router", "server.mjs");
 
 test("project-router proxies PHP, Node and Static projects only to dedicated upstreams", async (t) => {
   const verifiedLock = prepareFixture();
+  const expectedWorkloadLockSha256 = createHash("sha256").update(readFileSync(workloadLockFile)).digest("hex");
   let phpRequestCount = 0;
   const phpServer = createServer((req, res) => {
     phpRequestCount += 1;
@@ -52,7 +55,7 @@ test("project-router proxies PHP, Node and Static projects only to dedicated ups
   await listen(controlServer);
 
   const routerPort = await freePort();
-  const child = spawn(process.execPath, [path.join(infraRoot, "project-router", "server.mjs")], {
+  const child = spawn(process.execPath, [routerScript], {
     cwd: infraRoot,
     env: {
       ...process.env,
@@ -62,11 +65,13 @@ test("project-router proxies PHP, Node and Static projects only to dedicated ups
       PROJECT_STATE_FILE: stateFile,
       PROJECT_ROUTER_WORKLOAD_LOCK_FILE: workloadLockFile,
       PROJECT_ROUTER_WORKLOAD_LOCK_MODE: "required",
+      PROJECT_ROUTER_WORKLOAD_LOCK_SHA256: expectedWorkloadLockSha256,
       CONTROL_CENTER_HOST: "portal.localhost.com",
       PROJECT_HOST_SUFFIX: ".localhost.com",
       PHP_PROJECT_UPSTREAMS: `php-demo=http://127.0.0.1:${serverPort(phpServer)},fiplatform=http://127.0.0.1:${serverPort(phpServer)}`,
       NODE_PROJECT_UPSTREAMS: `node-demo=http://127.0.0.1:${serverPort(nodeServer)}`,
       STATIC_PROJECT_UPSTREAMS: `static-demo=http://127.0.0.1:${serverPort(staticServer)}`,
+      PROJECT_UPSTREAMS: "legacy-php=http://fixture-app-web:3000",
       CONTROL_CENTER_UPSTREAM: `http://127.0.0.1:${serverPort(controlServer)}`,
       PROJECT_ROUTER_TEST_ALLOW_LOOPBACK: "true",
       PROJECT_ROUTER_TEST_ALLOW_LEGACY_DISCOVERY: "true",
@@ -92,7 +97,7 @@ test("project-router proxies PHP, Node and Static projects only to dedicated ups
     await closeServer(nodeServer);
     await closeServer(staticServer);
     await closeServer(controlServer);
-    rmSync(testRoot, { recursive: true, force: true });
+    removeFixtureTree();
   });
 
   await waitForHealth(routerPort);
@@ -159,6 +164,14 @@ test("project-router proxies PHP, Node and Static projects only to dedicated ups
   assert.equal(oversizedMetadata.statusCode, 404);
   assert.match(oversizedMetadata.body, /Project not found/);
 
+  const unsignedHostedClaim = await httpGet(routerPort, "unsigned-hosted-claim.localhost.com", "/");
+  assert.equal(unsignedHostedClaim.statusCode, 404);
+  assert.match(unsignedHostedClaim.body, /Project not found/);
+
+  const legacyHostedClaim = await httpGet(routerPort, "legacy-php.localhost.com", "/");
+  assert.equal(legacyHostedClaim.statusCode, 503);
+  assert.match(legacyHostedClaim.body, /no dedicated upstream/);
+
   writeFileSync(stateFile, `${JSON.stringify({ projects: { "node-demo": { enabled: false } } }, null, 2)}\n`);
   const disabledNode = await httpGet(routerPort, "node-demo.localhost.com", "/api/ping");
   assert.equal(disabledNode.statusCode, 404);
@@ -187,8 +200,8 @@ test("project-router proxies PHP, Node and Static projects only to dedicated ups
     routes: [routeFixture({ service: "postgres", port: 5432 })],
   }, null, 2)}\n`);
   const forgedLockedRoute = await httpGet(routerPort, "locked-demo.localhost.com", "/");
-  assert.equal(forgedLockedRoute.statusCode, 500);
-  assert.match(forgedLockedRoute.body, /internal proxy error/);
+  assert.equal(forgedLockedRoute.statusCode, 502);
+  assert.match(forgedLockedRoute.body, /upstream unavailable/);
 
   writeFileSync(workloadLockFile, `${JSON.stringify({
     version: 2,
@@ -197,14 +210,13 @@ test("project-router proxies PHP, Node and Static projects only to dedicated ups
     routes: [routeFixture({ canonicalHost: "*.localhost.com", hosts: ["*.localhost.com"] })],
   }, null, 2)}\n`);
   const wildcardLockedRoute = await httpGet(routerPort, "locked-demo.localhost.com", "/");
-  assert.equal(wildcardLockedRoute.statusCode, 500);
-  assert.match(wildcardLockedRoute.body, /internal proxy error/);
+  assert.equal(wildcardLockedRoute.statusCode, 502);
+  assert.match(wildcardLockedRoute.body, /upstream unavailable/);
 
   writeFileSync(workloadLockFile, `${JSON.stringify(verifiedLock, null, 2)}\n`);
   const wildcardRequest = await httpGet(routerPort, "anything.example.invalid", "/");
   assert.equal(wildcardRequest.statusCode, 404);
   assert.match(wildcardRequest.body, /Project not found/);
-
   assert.equal(existsSync(path.join(projectsRoot, "php-demo", "public", "index.php")), true);
   assert.equal(stderr.includes("project-router error"), false);
   assert.equal(stderr.includes("169.254.169.254"), false);
@@ -212,7 +224,7 @@ test("project-router proxies PHP, Node and Static projects only to dedicated ups
   assert.match(stderr, /rejected project metadata for oversized-demo: PROJECT_METADATA_UNSIGNED/);
 });
 
-test("project-router explicit lock-required mode rejects a missing lock and Compose enables it", async (t) => {
+test("project-router explicit lock-required mode rejects a missing lock and Compose enables it", async () => {
   const root = mkdtempSync(path.join(os.tmpdir(), "project-router-lock-required-"));
   const routerPort = await freePort();
   const missingLock = path.join(root, "missing.lock.json");
@@ -231,15 +243,10 @@ test("project-router explicit lock-required mode rejects a missing lock and Comp
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
-  t.after(async () => {
-    await stopChild(child);
-    rmSync(root, { recursive: true, force: true });
-  });
-
-  await waitForHealth(routerPort);
-  const response = await httpGet(routerPort, "untrusted.localhost.com", "/");
-  assert.equal(response.statusCode, 500);
-  assert.match(response.body, /internal proxy error/);
+  const result = await childOutputAndExit(child);
+  assert.notEqual(result.code, 0);
+  assert.match(result.stderr, /Required hosted workload lock is unavailable/);
+  rmSync(root, { recursive: true, force: true });
 
   const serverSource = readFileSync(path.join(infraRoot, "project-router", "server.mjs"), "utf8");
   const composeSource = readFileSync(path.join(infraRoot, "compose.yaml"), "utf8");
@@ -251,7 +258,7 @@ test("project-router explicit lock-required mode rejects a missing lock and Comp
 test("project-router rejects IP and external-host upstream policy at production startup", async () => {
   for (const target of ["169.254.169.254:80", "example.com:80", "localhost:8080"]) {
     const routerPort = await freePort();
-    const child = spawn(process.execPath, [path.join(infraRoot, "project-router", "server.mjs")], {
+    const child = spawn(process.execPath, [routerScript], {
       cwd: infraRoot,
       env: {
         ...process.env,
@@ -332,28 +339,18 @@ test("FG-042 production consumer rejects route-owner, sibling-upstream and wildc
           PROJECT_ROUTER_PORT: String(routerPort),
           PROJECT_ROUTER_WORKLOAD_LOCK_FILE: lockFile,
           PROJECT_ROUTER_WORKLOAD_LOCK_MODE: "required",
+          PROJECT_ROUTER_WORKLOAD_LOCK_SHA256: sha256(readFileSync(lockFile)),
           CONTROL_CENTER_HOST: "portal.localhost.com",
           CONTROL_CENTER_UPSTREAM: "http://control-center:8080",
           PROJECT_ROUTER_ALLOWED_UPSTREAMS: "control-center:8080",
         },
         stdio: ["ignore", "pipe", "pipe"],
       });
-      let stderr = "";
-      child.stderr.on("data", (chunk) => {
-        stderr += chunk.toString("utf8");
-      });
-      t.after(async () => {
-        await stopChild(child);
-        chmodWritableSnapshot(verifiedLock.snapshotGeneration);
-        rmSync(root, { recursive: true, force: true });
-      });
-
-      await waitForHealth(routerPort);
-      const response = await httpGet(routerPort, "locked-demo.localhost.com", "/");
-      assert.equal(response.statusCode, 500);
-      assert.match(response.body, /internal proxy error/);
-      assert.match(stderr, /project-router request failed/);
-      assert.doesNotMatch(stderr, /sibling-app|example\.invalid/);
+      const result = await childOutputAndExit(child);
+      assert.notEqual(result.code, 0);
+      assert.doesNotMatch(result.stderr, /sibling-app|example\.invalid/);
+      chmodWritableSnapshot(verifiedLock.snapshotGeneration);
+      rmSync(root, { recursive: true, force: true });
     });
   }
 });
@@ -465,8 +462,170 @@ test("project metadata trust rejects legacy locks, pointer tampering, and digest
   assert.throws(() => validateVerifiedWorkloadLock(digestTamper), /content digest/);
 });
 
-function prepareFixture() {
+test("project-router fails startup when the activated lock digest is missing or wrong", async () => {
+  for (const expectedSha256 of [undefined, "0".repeat(64)]) {
+    prepareFixture();
+    const routerPort = await freePort();
+    const child = spawnFixtureRouter(routerPort, expectedSha256);
+    const result = await childOutputAndExit(child);
+    assert.notEqual(result.code, 0);
+    assert.match(
+      result.stderr,
+      expectedSha256 === undefined
+        ? /expected digest is missing/
+        : /digest differs from the activated receipt/,
+    );
+    removeFixtureTree();
+  }
+});
+
+test("project-router keeps the startup route snapshot frozen and rejects a replaced lock on restart", async (t) => {
+  prepareFixture();
+  const originalSha256 = lockSha256();
+  const routerPort = await freePort();
+  const child = spawnFixtureRouter(routerPort, originalSha256);
+  let stderr = "";
+  child.stderr.on("data", (chunk) => {
+    stderr += chunk.toString("utf8");
+  });
+  t.after(async () => {
+    await stopChild(child);
+    removeFixtureTree();
+  });
+
+  await waitForHealth(routerPort);
+  const originalRoute = await httpGet(routerPort, "locked-demo.localhost.com", "/before-replacement");
+  assert.equal(originalRoute.statusCode, 502);
+  assert.match(stderr, /fixture-app-web:3000/);
+
+  const replacement = JSON.parse(readFileSync(workloadLockFile, "utf8"));
+  replacement.workloads[0].services = [{ name: "fixture-app-alt" }];
+  replacement.routes = [{
+    workloadId: "fixture-app",
+    slug: "locked-demo",
+    service: "fixture-app-alt",
+    port: 3001,
+    upstream: "http://fixture-app-alt:3001",
+  }];
+  writeLock(replacement);
+
+  const healthAfterReplacement = await httpGet(routerPort, "portal.localhost.com", "/__health");
+  assert.equal(healthAfterReplacement.statusCode, 500);
+  assert.match(healthAfterReplacement.body, /internal proxy error/);
+
+  const routeAfterReplacement = await httpGet(routerPort, "locked-demo.localhost.com", "/after-replacement");
+  assert.equal(routeAfterReplacement.statusCode, 502);
+  assert.match(stderr, /fixture-app-web:3000/);
+  assert.doesNotMatch(stderr, /fixture-app-alt:3001/);
+
+  await stopChild(child);
+  const restartPort = await freePort();
+  const restarted = spawnFixtureRouter(restartPort, originalSha256);
+  const restartResult = await childOutputAndExit(restarted);
+  assert.notEqual(restartResult.code, 0);
+  assert.match(restartResult.stderr, /digest differs from the activated receipt/);
+});
+
+test("project-router hashes exact lock bytes, not a semantically equivalent JSON object", async () => {
+  prepareFixture();
+  const originalBytes = readFileSync(workloadLockFile);
+  const originalObject = JSON.parse(originalBytes.toString("utf8"));
+  const originalSha256 = sha256(originalBytes);
+  const equivalentBytes = Buffer.from(JSON.stringify(originalObject), "utf8");
+  assert.deepEqual(JSON.parse(equivalentBytes.toString("utf8")), originalObject);
+  assert.notDeepEqual(equivalentBytes, originalBytes);
+  writeFileSync(workloadLockFile, equivalentBytes);
+
+  const routerPort = await freePort();
+  const child = spawnFixtureRouter(routerPort, originalSha256);
+  const result = await childOutputAndExit(child);
+  assert.notEqual(result.code, 0);
+  assert.match(result.stderr, /digest differs from the activated receipt/);
+  removeFixtureTree();
+});
+
+test("unsigned metadata and legacy mappings cannot claim a signed workload endpoint", async (t) => {
+  prepareFixture();
+  const routerPort = await freePort();
+  const child = spawnFixtureRouter(routerPort, lockSha256(), {
+    PROJECT_ROUTER_ALLOWED_UPSTREAMS: "control-center:8080,fixture-app-web:3000",
+    PROJECT_UPSTREAMS: "legacy-php=http://fixture-app-web:3000",
+  });
+  t.after(async () => {
+    await stopChild(child);
+    removeFixtureTree();
+  });
+
+  await waitForHealth(routerPort);
+  const metadataClaim = await httpGet(routerPort, "unsigned-hosted-claim.localhost.com", "/");
+  assert.equal(metadataClaim.statusCode, 404);
+  assert.match(metadataClaim.body, /Project not found/);
+
+  const legacyClaim = await httpGet(routerPort, "legacy-php.localhost.com", "/");
+  assert.equal(legacyClaim.statusCode, 503);
+  assert.match(legacyClaim.body, /no dedicated upstream/);
+});
+
+test("canonical project slugs outrank aliases and aliases cannot claim signed routes", async (t) => {
+  prepareFixture();
+  const lockedProjectConfig = path.join(projectsRoot, "locked-demo", ".platform", "project.json");
+  mkdirSync(path.dirname(lockedProjectConfig), { recursive: true });
+  writeFileSync(lockedProjectConfig, `${JSON.stringify({
+    type: "node",
+    projects: [
+      {
+        slug: "alias-claim",
+        type: "node",
+        aliases: ["locked-demo"],
+        upstream: "http://fixture-app-web:3000",
+      },
+      {
+        slug: "locked-demo",
+        type: "node",
+      },
+    ],
+  }, null, 2)}\n`);
+  writeFileSync(stateFile, `${JSON.stringify({
+    projects: { "alias-claim": { enabled: false } },
+  }, null, 2)}\n`);
+
+  const routerPort = await freePort();
+  const child = spawnFixtureRouter(routerPort, lockSha256(), {
+    PROJECT_ROUTER_ALLOWED_UPSTREAMS: "control-center:8080,fixture-app-web:3000",
+  });
+  t.after(async () => {
+    await stopChild(child);
+    removeFixtureTree();
+  });
+
+  await waitForHealth(routerPort);
+  const canonicalRoute = await httpGet(routerPort, "locked-demo.localhost.com", "/canonical");
+  assert.equal(canonicalRoute.statusCode, 502);
+  assert.match(canonicalRoute.body, /upstream unavailable/);
+
+  writeFileSync(lockedProjectConfig, `${JSON.stringify({
+    type: "node",
+    projects: [{
+      slug: "alias-claim",
+      type: "node",
+      aliases: ["locked-demo"],
+      upstream: "http://fixture-app-web:3000",
+    }],
+  }, null, 2)}\n`);
+  writeFileSync(stateFile, `${JSON.stringify({ projects: {} }, null, 2)}\n`);
+
+  const aliasClaim = await httpGet(routerPort, "locked-demo.localhost.com", "/alias");
+  assert.equal(aliasClaim.statusCode, 502);
+  assert.match(aliasClaim.body, /upstream unavailable/);
+});
+
+function removeFixtureTree() {
+  chmodWritableSnapshot(path.join(stateDir, "verified-snapshots", "content-fixture"));
   rmSync(testRoot, { recursive: true, force: true });
+}
+
+function prepareFixture() {
+  removeFixtureTree();
   mkdirSync(path.join(projectsRoot, "php-demo", "public"), { recursive: true });
   mkdirSync(path.join(projectsRoot, "legacy-php", "public"), { recursive: true });
   mkdirSync(path.join(projectsRoot, "fiplatform", ".platform"), { recursive: true });
@@ -475,6 +634,7 @@ function prepareFixture() {
   mkdirSync(path.join(projectsRoot, "static-demo", "public"), { recursive: true });
   mkdirSync(path.join(projectsRoot, "metadata-demo", ".platform"), { recursive: true });
   mkdirSync(path.join(projectsRoot, "oversized-demo", ".platform"), { recursive: true });
+  mkdirSync(path.join(projectsRoot, "unsigned-hosted-claim", ".platform"), { recursive: true });
   mkdirSync(path.join(projectsRoot, "locked-demo"), { recursive: true });
   const snapshotRoot = path.join(stateDir, "verified-snapshots");
   const snapshotGeneration = path.join(snapshotRoot, "content-fixture");
@@ -513,6 +673,11 @@ function prepareFixture() {
     type: "node",
     padding: "x".repeat(8192),
   })}\n`);
+  writeFileSync(path.join(projectsRoot, "unsigned-hosted-claim", "package.json"), `${JSON.stringify({ scripts: { start: "node server.mjs" } }, null, 2)}\n`);
+  writeFileSync(path.join(projectsRoot, "unsigned-hosted-claim", ".platform", "project.json"), `${JSON.stringify({
+    type: "node",
+    upstream: "http://fixture-app-web:3000",
+  }, null, 2)}\n`);
   writeFileSync(path.join(projectsRoot, "locked-demo", "package.json"), `${JSON.stringify({ scripts: { start: "node server.mjs" } }, null, 2)}\n`);
   writeFileSync(stateFile, `${JSON.stringify({ projects: {} }, null, 2)}\n`);
   const metadataStat = statSync(fiplatformMetadataSnapshot, { bigint: true });
@@ -538,6 +703,7 @@ function prepareFixture() {
     snapshotGenerationIdentity: statIdentity(snapshotGenerationStat),
     workloads: [{
       id: "fixture-app",
+      services: [{ name: "fixture-app-web" }],
       projectMetadataSourcePath: fiplatformMetadataSource,
       projectMetadataPath: fiplatformMetadataSnapshot,
     }],
@@ -577,14 +743,18 @@ function verifiedMetadataLockFixture(root) {
     snapshotUid: String(fileStat.uid),
   };
   const lock = {
-    version: 2,
-    validatorVersion: "hosted-contract-v2",
+    ...verifiedRouteLock(),
     state: "verified",
     snapshotRoot,
     snapshotGeneration,
     snapshotRootIdentity: statIdentity(statSync(snapshotRoot, { bigint: true })),
     snapshotGenerationIdentity: statIdentity(statSync(snapshotGeneration, { bigint: true })),
-    workloads: [{ id: "fixture-app", projectMetadataSourcePath: sourcePath, projectMetadataPath: snapshotPath }],
+    workloads: [{
+      id: "fixture-app",
+      services: [{ name: "fixture-app-web" }],
+      projectMetadataSourcePath: sourcePath,
+      projectMetadataPath: snapshotPath,
+    }],
     files: [record],
     routes: [{ workloadId: "fixture-app", slug: "fixture", service: "fixture-app-web", port: 3000, upstream: "http://fixture-app-web:3000" }],
   };
@@ -611,9 +781,17 @@ function chmodWritableSnapshot(snapshotGeneration) {
 
 function verifiedRouteLock() {
   return {
-    version: 2,
-    validatorVersion: "hosted-contract-v2",
+    version: 4,
+    validatorVersion: "hosted-contract-v4",
     state: "verified",
+    rawPolicyVersion: "hosted-raw-v3",
+    rawPolicyControls: HOSTED_ROUTE_RAW_POLICY_CONTROLS,
+    rawPolicyReceipt: { policyVersion: "hosted-raw-v3", controls: HOSTED_ROUTE_RAW_POLICY_CONTROLS },
+    rawPolicySha256: "a".repeat(64),
+    workloadContentSha256: "b".repeat(64),
+    coreRenderSha256: "c".repeat(64),
+    combinedRenderSha256: "d".repeat(64),
+    workloads: [{ id: "fixture-app", services: [{ name: "fixture-app-web" }] }],
     routes: [routeFixture()],
   };
 }
@@ -631,6 +809,46 @@ function routeFixture(overrides = {}) {
     upstream: "http://fixture-app-web:3000",
     ...overrides,
   };
+}
+
+function writeLock(lock) {
+  writeFileSync(workloadLockFile, `${JSON.stringify(lock, null, 2)}\n`, { mode: 0o600 });
+  chmodSync(workloadLockFile, 0o600);
+}
+
+function sha256(bytes) {
+  return createHash("sha256").update(bytes).digest("hex");
+}
+
+function lockSha256() {
+  return sha256(readFileSync(workloadLockFile));
+}
+
+function spawnFixtureRouter(routerPort, expectedSha256, extraEnv = {}) {
+  const env = {
+    ...process.env,
+    NODE_ENV: "test",
+    PROJECT_ROUTER_PORT: String(routerPort),
+    PROJECTS_ROOT: projectsRoot,
+    PROJECT_STATE_FILE: stateFile,
+    PROJECT_ROUTER_WORKLOAD_LOCK_FILE: workloadLockFile,
+    PROJECT_ROUTER_WORKLOAD_LOCK_MODE: "required",
+    CONTROL_CENTER_HOST: "portal.localhost.com",
+    PROJECT_HOST_SUFFIX: ".localhost.com",
+    PROJECT_ROUTER_ALLOWED_UPSTREAMS: "control-center:8080",
+    CONTROL_CENTER_UPSTREAM: "http://control-center:8080",
+    PROJECT_ROUTER_TEST_ALLOW_LEGACY_DISCOVERY: "true",
+    ...extraEnv,
+  };
+  delete env.PROJECT_ROUTER_WORKLOAD_LOCK_SHA256;
+  if (expectedSha256 !== undefined) {
+    env.PROJECT_ROUTER_WORKLOAD_LOCK_SHA256 = expectedSha256;
+  }
+  return spawn(process.execPath, [routerScript], {
+    cwd: infraRoot,
+    env,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
 }
 
 function freePort() {
@@ -655,14 +873,24 @@ function serverPort(server) {
   return server.address().port;
 }
 
-function childOutputAndExit(child) {
+function childOutputAndExit(child, timeoutMs = 5000) {
   return new Promise((resolve, reject) => {
     let stderr = "";
     child.stderr.on("data", (chunk) => {
       stderr += chunk.toString("utf8");
     });
-    child.once("error", reject);
-    child.once("exit", (code) => resolve({ code, stderr }));
+    const timeout = setTimeout(() => {
+      child.kill("SIGKILL");
+      reject(new Error("Child did not fail closed before the test timeout."));
+    }, timeoutMs);
+    child.once("error", (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+    child.once("exit", (code) => {
+      clearTimeout(timeout);
+      resolve({ code, stderr });
+    });
   });
 }
 

@@ -7,11 +7,30 @@ require "optparse"
 require "psych"
 
 module HostedWorkloadSourcePolicy
-  VERSION = "hosted-raw-v1"
-  CONTROLS = %w[bind-bounded-local-logging bind-network-identity bind-network-topology bind-no-swap-oom-policy bind-owned-secret-aliases bind-owned-volumes bind-private-pid-numeric-user deny-api-socket deny-compose-interpolation deny-device-access deny-env-file deny-extends deny-file-configs deny-gpu-access deny-include deny-inline-configs deny-lifecycle-hooks deny-local-volume-options deny-providers deny-runtime-identity-labels deny-runtime-overrides deny-scaling deny-stop-grace-overrides deny-supplemental-groups deny-volumes-from].freeze
+  VERSION = "hosted-raw-v3"
+  CONTROLS = %w[bind-bounded-dependencies bind-bounded-local-logging bind-closed-service-schema bind-exact-healthcheck bind-exact-security-opt bind-exact-ulimits bind-exact-volume-mounts bind-firewall-gated-restart bind-network-identity bind-network-topology bind-no-swap-oom-policy bind-owned-secret-aliases bind-owned-volume-driver bind-owned-volumes bind-platform-extension-records bind-private-pid-numeric-user deny-accelerator-environment deny-api-socket deny-compose-interpolation deny-deploy-controls deny-device-access deny-env-file deny-extends deny-file-configs deny-generic-resources deny-gpu-access deny-include deny-inline-configs deny-label-file deny-lifecycle-hooks deny-local-volume-options deny-providers deny-runtime-identity-labels deny-runtime-overrides deny-scaling deny-stop-grace-overrides deny-supplemental-groups deny-volumes-from].freeze
   MAX_COMPOSE_BYTES = 1_048_576
   STANDARD_TAG_PREFIX = "tag:yaml.org,2002:"
   WORKLOAD_NETWORK_ZONES = %w[ingress postgres cache bus identity storage observability egress].freeze
+  WORKLOAD_SERVICE_KEYS = %w[
+    image command entrypoint working_dir environment volumes secrets networks healthcheck
+    read_only init restart security_opt cap_drop cap_add user logging pids_limit cpu_shares
+    blkio_config ulimits cpus mem_limit memswap_limit mem_reservation labels depends_on
+  ].freeze
+  PLATFORM_DEPENDENCIES = %w[postgres redis nats minio keycloak alertmanager].freeze
+  PLATFORM_NETWORK_EXTENSION_ZONES = {
+    "project-router" => %w[ingress],
+    "postgres" => %w[postgres],
+    "redis" => %w[cache],
+    "nats" => %w[bus],
+    "keycloak" => %w[identity],
+    "minio" => %w[storage],
+    "prometheus" => %w[observability]
+  }.freeze
+  ACCELERATOR_ENVIRONMENT_NAMES = %w[
+    CUDA_VISIBLE_DEVICES HIP_VISIBLE_DEVICES ONEAPI_DEVICE_SELECTOR
+    ROCR_VISIBLE_DEVICES SYCL_DEVICE_FILTER ZE_AFFINITY_MASK
+  ].freeze
 
   module_function
 
@@ -31,6 +50,18 @@ module HostedWorkloadSourcePolicy
     else
       value
     end
+  end
+
+  def validate_workload_id_set!(workloads)
+    fail!("Hosted workload lock workloads must be an array.") unless workloads.is_a?(Array)
+    ids = workloads.map { |workload| workload.fetch("id").to_s }
+    fail!("Hosted workload ids must be unique.") unless ids.uniq.length == ids.length
+    ids.sort.combination(2) do |left, right|
+      if left.start_with?("#{right}-") || right.start_with?("#{left}-")
+        fail!("Prefix-colliding workload ids #{left} and #{right} are forbidden.")
+      end
+    end
+    ids
   end
 
   def inspect_ast(node, location = "document")
@@ -79,11 +110,27 @@ module HostedWorkloadSourcePolicy
     fail!("#{label} is not safe YAML: #{e.message}")
   end
 
-  def validate_source_model(model, label, workload_id: nil, project_name: nil, declared_secrets: [], protected_networks: [])
+  def validate_source_model(
+    model,
+    label,
+    workload_id: nil,
+    project_name: nil,
+    declared_secrets: [],
+    protected_networks: [],
+    protected_resources: {}
+  )
+    protected_configs = Array(protected_resources["configs"])
+    protected_secrets = Array(protected_resources["secrets"])
+    protected_services = Array(protected_resources["services"])
+    protected_volumes = Array(protected_resources["volumes"])
     fail!("#{label} cannot use top-level include.") if model.key?("include")
     configs = model["configs"]
     fail!("#{label} configs must be a mapping.") if !configs.nil? && !configs.is_a?(Hash)
+    if workload_id && !configs.nil? && !configs.empty?
+      fail!("#{label} cannot define, alias, or replace top-level configs.")
+    end
     (configs || {}).each do |name, definition|
+      fail!("#{label} config #{name} collides with a protected core config.") if workload_id && protected_configs.include?(name)
       fail!("#{label} config #{name} cannot use a file source.") if definition.is_a?(Hash) && definition.key?("file")
       if definition.is_a?(Hash) && (definition.key?("content") || definition.key?("environment"))
         fail!("#{label} config #{name} cannot use inline or host-environment content.")
@@ -93,6 +140,7 @@ module HostedWorkloadSourcePolicy
     fail!("#{label} secrets must be a mapping.") if !secrets.nil? && !secrets.is_a?(Hash)
     (secrets || {}).each do |name, definition|
       next unless workload_id
+      fail!("#{label} secret #{name} collides with a protected core secret.") if protected_secrets.include?(name)
       fail!("#{label} secret #{name} is not declared by the workload manifest.") unless declared_secrets.include?(name)
       expected_name = "#{project_name}_#{name}"
       unless definition.is_a?(Hash) && definition == { "external" => true, "name" => expected_name }
@@ -104,12 +152,12 @@ module HostedWorkloadSourcePolicy
     (volumes || {}).each do |name, definition|
       fail!("#{label} volume #{name} must be null or a mapping.") unless definition.nil? || definition.is_a?(Hash)
       if workload_id
+        fail!("#{label} volume #{name} collides with a protected core volume.") if protected_volumes.include?(name)
         fail!("#{label} volume #{name} is not workload-prefixed.") unless name.start_with?("#{workload_id}_")
-        if definition.is_a?(Hash) && (definition["external"] == true || definition.key?("name"))
-          fail!("#{label} volume #{name} cannot alias an external or foreign physical volume.")
+        unless definition.nil? || definition.empty?
+          fail!("#{label} volume #{name} must use the implicit Docker local driver with no plugin, alias, external binding, or driver options.")
         end
-      end
-      if definition.is_a?(Hash) && definition.key?("driver_opts")
+      elsif definition.is_a?(Hash) && definition.key?("driver_opts")
         fail!("#{label} volume #{name} cannot use local driver options.")
       end
     end
@@ -134,6 +182,9 @@ module HostedWorkloadSourcePolicy
     end
     model.fetch("services").each do |name, service|
       fail!("#{label} service #{name} must be a mapping.") unless service.is_a?(Hash)
+      if workload_id && protected_services.include?(name) && !PLATFORM_NETWORK_EXTENSION_ZONES.key?(name)
+        fail!("#{label} service #{name} collides with a protected core service.")
+      end
       labels = service["labels"]
       label_names = case labels
                     when nil then []
@@ -145,12 +196,31 @@ module HostedWorkloadSourcePolicy
       if label_names.any? { |label_name| label_name.start_with?("com.platform.runtime.") }
         fail!("#{label} service #{name} cannot predeclare trusted runtime identity labels.")
       end
+      if workload_id && service.key?("restart") && service["restart"] != "no"
+        fail!("#{label} service #{name} must use restart: no so firewall-gated activation cannot be bypassed after daemon or host restart.")
+      end
+      fail!("#{label} service #{name} cannot load labels from a host file.") if service.key?("label_file")
+      if service.key?("environment")
+        environment = service["environment"]
+        unless environment.is_a?(Hash) && environment.values.none?(&:nil?)
+          fail!("#{label} service #{name} environment must be an explicit mapping with no ambient null values.")
+        end
+        accelerator_environment = environment.keys.map(&:to_s).select do |key|
+          key.start_with?("NVIDIA_") || ACCELERATOR_ENVIRONMENT_NAMES.include?(key)
+        end
+        unless accelerator_environment.empty?
+          fail!("#{label} service #{name} cannot request accelerator access through environment controls: #{accelerator_environment.sort.join(', ')}.")
+        end
+      end
       fail!("#{label} service #{name} cannot share another PID namespace.") if service.key?("pid")
       if service.key?("user") && !service["user"].to_s.match?(/\A[1-9][0-9]{0,9}:[1-9][0-9]{0,9}\z/)
         fail!("#{label} service #{name} must use a canonical numeric uid:gid.")
       end
       if service.key?("logging") && service["logging"] != { "driver" => "local", "options" => { "max-size" => "10m", "max-file" => "3" } }
         fail!("#{label} service #{name} must use bounded local logging.")
+      end
+      if service.key?("blkio_config") && (!service["blkio_config"].is_a?(Hash) || service["blkio_config"].keys != ["weight"])
+        fail!("#{label} service #{name} blkio_config must contain only the bounded global weight.")
       end
       if service.key?("mem_limit") && service["memswap_limit"] != service["mem_limit"]
         fail!("#{label} service #{name} must bind memswap_limit exactly to mem_limit.")
@@ -178,6 +248,47 @@ module HostedWorkloadSourcePolicy
           end
         end
       end
+      if PLATFORM_NETWORK_EXTENSION_ZONES.key?(name)
+        unless service.keys.map(&:to_s).sort == ["networks"] && service_networks.is_a?(Hash) && !service_networks.empty?
+          fail!("#{label} platform extension #{name} must contain only an explicit non-empty networks mapping.")
+        end
+        service_networks.each_key do |network|
+          zone = network.to_s.delete_prefix(workload_network_prefix)
+          unless PLATFORM_NETWORK_EXTENSION_ZONES.fetch(name).include?(zone)
+            fail!("#{label} platform extension #{name} cannot join workload zone #{zone}.")
+          end
+        end
+        next
+      end
+      if workload_id && service.key?("volumes")
+        mounts = service["volumes"]
+        fail!("#{label} service #{name} volumes must use exact long syntax.") unless mounts.is_a?(Array)
+        targets = {}
+        mounts.each do |mount|
+          exact = mount.is_a?(Hash) && mount.keys.sort == %w[source target type] \
+            && mount["type"] == "volume" \
+            && mount["source"].is_a?(String) && mount["source"].start_with?("#{workload_id}_") \
+            && mount["target"] == "/data"
+          unless exact
+            fail!("#{label} service #{name} volumes must be workload-owned exact long-syntax mounts targeting only /data.")
+          end
+          if protected_volumes.include?(mount["source"])
+            fail!("#{label} service #{name} volume #{mount['source']} collides with a protected core volume.")
+          end
+          fail!("#{label} service #{name} contains duplicate or overlapping volume targets.") if targets[mount["target"]]
+          targets[mount["target"]] = true
+        end
+      end
+      if workload_id && service.key?("secrets")
+        grants = service["secrets"]
+        fail!("#{label} service #{name} secrets must be a sequence.") unless grants.is_a?(Array)
+        grants.each do |entry|
+          source = entry.is_a?(Hash) ? entry["source"] : entry
+          if protected_secrets.include?(source)
+            fail!("#{label} service #{name} secret #{source} collides with a protected core secret.")
+          end
+        end
+      end
       fail!("#{label} service #{name} cannot use env_file.") if service.key?("env_file")
       fail!("#{label} service #{name} cannot use extends.") if service.key?("extends")
       fail!("#{label} service #{name} cannot mount configs.") if service.key?("configs")
@@ -191,15 +302,95 @@ module HostedWorkloadSourcePolicy
       accelerator_controls = %w[gpus device_requests].select { |key| service.key?(key) }
       reservations = service.dig("deploy", "resources", "reservations") if service["deploy"].is_a?(Hash)
       accelerator_controls << "deploy.resources.reservations.devices" if reservations.is_a?(Hash) && reservations.key?("devices")
+      accelerator_controls << "deploy.resources.reservations.generic_resources" if reservations.is_a?(Hash) && reservations.key?("generic_resources")
       unless accelerator_controls.empty?
         fail!("#{label} service #{name} cannot request GPU or accelerator access: #{accelerator_controls.join(', ')}.")
       end
+      fail!("#{label} service #{name} cannot define deploy controls.") if service.key?("deploy")
       lifecycle_hooks = %w[post_start pre_start pre_stop].select { |key| service.key?(key) }
       fail!("#{label} service #{name} cannot use lifecycle hooks: #{lifecycle_hooks.join(', ')}.") unless lifecycle_hooks.empty?
       fail!("#{label} service #{name} cannot set scale.") if service.key?("scale")
       fail!("#{label} service #{name} cannot set deploy.replicas.") if service["deploy"].is_a?(Hash) && service["deploy"].key?("replicas")
       fail!("#{label} service #{name} cannot set deploy.mode.") if service["deploy"].is_a?(Hash) && service["deploy"].key?("mode")
       fail!("#{label} service #{name} cannot use volumes_from.") if service.key?("volumes_from")
+      if service.key?("healthcheck")
+        healthcheck = service["healthcheck"]
+        test = healthcheck["test"] if healthcheck.is_a?(Hash)
+        exact_healthcheck = healthcheck.is_a?(Hash) && healthcheck.keys == ["test"] && test.is_a?(Array) \
+          && test.length.between?(2, 16) && test.first == "CMD" \
+          && test.drop(1).all? { |value| value.is_a?(String) && !value.empty? && value.bytesize <= 256 && !value.match?(/[\0\r\n]/) }
+        unless exact_healthcheck
+          fail!("#{label} service #{name} requires an exact bounded CMD healthcheck.")
+        end
+      end
+      if service.key?("ulimits")
+        ulimits = service["ulimits"]
+        nofile = ulimits["nofile"] if ulimits.is_a?(Hash)
+        exact_ulimits = ulimits.is_a?(Hash) && ulimits.keys == ["nofile"] && nofile.is_a?(Hash) \
+          && nofile.keys.sort == %w[hard soft] \
+          && nofile.values.all? { |value| value.is_a?(Integer) } \
+          && nofile["soft"].between?(1024, 65_536) && nofile["hard"].between?(1024, 65_536) \
+          && nofile["soft"] <= nofile["hard"]
+        unless exact_ulimits
+          fail!("#{label} service #{name} ulimits must contain only bounded nofile soft/hard values.")
+        end
+      end
+      if service.key?("depends_on")
+        dependencies = service["depends_on"]
+        fail!("#{label} service #{name} depends_on must be an explicit mapping.") unless dependencies.is_a?(Hash)
+        dependencies.each do |dependency, condition|
+          allowed_dependency = model.fetch("services").key?(dependency) || PLATFORM_DEPENDENCIES.include?(dependency)
+          fail!("#{label} service #{name} depends on unauthorized service #{dependency}.") unless allowed_dependency
+          unless condition.is_a?(Hash) \
+            && (condition.keys.map(&:to_s) - %w[condition required restart]).empty? \
+            && %w[service_started service_healthy].include?(condition["condition"]) \
+            && (!condition.key?("required") || condition["required"] == true) \
+            && (!condition.key?("restart") || condition["restart"] == false)
+            fail!("#{label} service #{name} dependency #{dependency} must use a bounded required start/health condition.")
+          end
+        end
+      end
+      unsupported_fields = service.keys.map(&:to_s) - WORKLOAD_SERVICE_KEYS
+      unless unsupported_fields.empty?
+        fail!("#{label} service #{name} uses unsupported Compose service fields: #{unsupported_fields.sort.join(', ')}.")
+      end
+      if workload_id && service["security_opt"] != ["no-new-privileges:true"]
+        fail!("#{label} service #{name} security_opt must be exactly [no-new-privileges:true].")
+      end
+    end
+    if workload_id
+      workload_services = model.fetch("services").reject { |name, _service| PLATFORM_NETWORK_EXTENSION_ZONES.key?(name) }
+      referenced_volumes = workload_services.values.flat_map do |service|
+        Array(service["volumes"]).map do |mount|
+          mount["source"] if mount.is_a?(Hash) && mount["type"] == "volume"
+        end.compact
+      end.uniq.sort
+      referenced_secrets = workload_services.values.flat_map do |service|
+        Array(service["secrets"]).map { |entry| entry.is_a?(Hash) ? entry["source"] : entry }
+      end.compact.uniq.sort
+      referenced_networks = model.fetch("services").values.flat_map do |service|
+        service_networks = service["networks"]
+        service_networks.is_a?(Hash) ? service_networks.keys : Array(service_networks)
+      end.uniq.sort
+      workload_referenced_networks = workload_services.values.flat_map do |service|
+        service_networks = service["networks"]
+        service_networks.is_a?(Hash) ? service_networks.keys : Array(service_networks)
+      end.uniq.sort
+      declared_volumes = (volumes || {}).keys.map(&:to_s).sort
+      declared_secret_names = (secrets || {}).keys.map(&:to_s).sort
+      declared_networks = (networks || {}).keys.map(&:to_s).sort
+      unless referenced_volumes == declared_volumes
+        fail!("#{label} workload volumes must be exactly declared and referenced.")
+      end
+      unless referenced_secrets == declared_secret_names && declared_secret_names == declared_secrets.sort
+        fail!("#{label} workload secrets must be exactly manifest-owned, declared, and referenced.")
+      end
+      unless referenced_networks == declared_networks
+        fail!("#{label} workload networks must be exactly declared and referenced.")
+      end
+      unless workload_referenced_networks == declared_networks
+        fail!("#{label} every workload network requires a signed workload service consumer.")
+      end
     end
     true
   end
@@ -237,14 +428,28 @@ module HostedWorkloadSourcePolicy
   end
 
   def validate_lock(lock)
-    fail!("Hosted workload lock schema is not supported.") unless lock["version"] == 2 && lock["validatorVersion"] == "hosted-contract-v2"
+    fail!("Hosted workload lock schema is not supported.") unless lock["version"] == 4 && lock["validatorVersion"] == "hosted-contract-v4"
     fail!("Hosted workload lock must be resolved.") unless lock["state"] == "resolved"
+    validate_workload_id_set!(lock["workloads"])
     generation = File.realpath(lock.fetch("snapshotGeneration"))
-    protected_networks = lock.fetch("files").select { |record| record["kind"] == "core-compose" }.flat_map do |record|
+    protected_resources = {
+      "configs" => [],
+      "secrets" => [],
+      "services" => [],
+      "volumes" => [],
+      "networks" => []
+    }
+    lock.fetch("files").select { |record| record["kind"] == "core-compose" }.each do |record|
       bytes = stable_read(record.fetch("path"), "core Compose source")
       fail!("Core Compose digest changed.") unless Digest::SHA256.hexdigest(bytes) == record.fetch("sha256")
-      top_level_mapping_names(bytes, "networks", record.fetch("path"))
-    end.uniq.sort
+      protected_resources.each_key do |resource_type|
+        protected_resources.fetch(resource_type).concat(
+          top_level_mapping_names(bytes, resource_type, record.fetch("path"))
+        )
+      end
+    end
+    protected_resources.transform_values! { |names| names.uniq.sort }
+    protected_networks = protected_resources.fetch("networks")
     receipts = lock.fetch("workloads").map do |workload|
       workload_id = workload.fetch("id")
       records = lock.fetch("files").select { |item| item["kind"] == "workload-compose" && item["workloadId"] == workload_id }
@@ -262,13 +467,43 @@ module HostedWorkloadSourcePolicy
         workload_id: workload_id,
         project_name: lock.fetch("projectName"),
         declared_secrets: workload.fetch("secrets"),
-        protected_networks: protected_networks
+        protected_networks: protected_networks,
+        protected_resources: protected_resources
       )
+      declared_service_names = workload.fetch("services").map { |service| service.fetch("name") }.sort
+      source_service_names = model.fetch("services").keys.map(&:to_s).sort
+      fail!("#{workload_id} Compose source must contain every and only declared workload service plus allowed platform extension stubs.") \
+        unless (declared_service_names - source_service_names).empty? \
+          && (source_service_names - declared_service_names - PLATFORM_NETWORK_EXTENSION_ZONES.keys).empty?
+      platform_extensions = (source_service_names - declared_service_names).map do |service_name|
+        {
+          "serviceName" => service_name,
+          "networkNames" => model.fetch("services").fetch(service_name).fetch("networks").keys.map(&:to_s).sort
+        }
+      end
+      router_extension = platform_extensions.find { |item| item.fetch("serviceName") == "project-router" }
+      if router_extension
+        router_extension.fetch("networkNames").each do |network_name|
+          routed_consumers = workload.fetch("services").select do |service|
+            rendered_networks = model.fetch("services").fetch(service.fetch("name"))["networks"]
+            rendered_network_names = rendered_networks.is_a?(Hash) ? rendered_networks.keys : Array(rendered_networks)
+            !Array(service["routes"]).empty? \
+              && rendered_network_names.include?(network_name)
+          end
+          if routed_consumers.empty?
+            fail!("#{workload_id} router ingress network #{network_name} has no signed routed workload consumer.")
+          end
+        end
+      end
       {
         "workloadId" => workload_id,
         "composeSha256" => record.fetch("sha256"),
         "topLevelKeys" => model.keys.map(&:to_s).sort,
-        "serviceNames" => model.fetch("services").keys.map(&:to_s).sort,
+        "serviceNames" => declared_service_names,
+        "configNames" => (model["configs"] || {}).keys.map(&:to_s).sort,
+        "secretNames" => (model["secrets"] || {}).keys.map(&:to_s).sort,
+        "volumeNames" => (model["volumes"] || {}).keys.map(&:to_s).sort,
+        "platformExtensions" => platform_extensions.sort_by { |item| item.fetch("serviceName") },
         "networkNames" => (model["networks"] || {}).keys.map(&:to_s).sort
       }
     end
@@ -276,6 +511,7 @@ module HostedWorkloadSourcePolicy
       "policyVersion" => VERSION,
       "controls" => CONTROLS,
       "protectedNetworkNames" => protected_networks,
+      "protectedResourceNames" => protected_resources,
       "workloadContentSha256" => lock.fetch("workloadContentSha256"),
       "workloads" => receipts.sort_by { |item| item.fetch("workloadId") }
     }

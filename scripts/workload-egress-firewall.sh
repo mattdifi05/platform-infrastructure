@@ -6,6 +6,8 @@ CONFIRM=""
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 LOCK=""
 PROJECT_NAME=""
+EXPECTED_DAEMON_ID=""
+CANONICAL_DOCKER_HOST=unix:///var/run/docker.sock
 CHAIN=PLATFORM-WORKLOAD-EGRESS
 STAGING_CHAIN=${CHAIN}-NEW
 STAGING_CREATED=0
@@ -18,11 +20,18 @@ cleanup() {
   fi
   rm -f "$SUBNET_FILE"
 }
-trap cleanup EXIT HUP INT TERM
+signal_failure() {
+  trap - HUP INT TERM
+  exit "$1"
+}
+trap cleanup EXIT
+trap 'signal_failure 129' HUP
+trap 'signal_failure 130' INT
+trap 'signal_failure 143' TERM
 
 usage() {
   cat <<'EOF'
-Usage: workload-egress-firewall.sh [--plan|--apply|--verify|--rollback] --lock ABSOLUTE_PATH --project-name NAME [--subnet CIDR] [--confirm TOKEN]
+Usage: workload-egress-firewall.sh [--plan|--privilege-preflight|--apply|--verify|--rollback] --lock ABSOLUTE_PATH --project-name NAME --expected-daemon-id ID [--subnet CIDR] [--confirm TOKEN]
 
 Default mode is plan. Apply reads the exact egress-network inventory from one
 verified hosted workload lock and blocks its IPv4 subnets to private, loopback,
@@ -36,6 +45,7 @@ EOF
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --plan) MODE=plan ;;
+    --privilege-preflight) MODE=privilege-preflight ;;
     --apply) MODE=apply ;;
     --verify) MODE=verify ;;
     --rollback) MODE=rollback ;;
@@ -46,6 +56,10 @@ while [ "$#" -gt 0 ]; do
     --project-name)
       shift
       PROJECT_NAME="${1:?Missing value for --project-name}"
+      ;;
+    --expected-daemon-id)
+      shift
+      EXPECTED_DAEMON_ID="${1:?Missing value for --expected-daemon-id}"
       ;;
     --subnet)
       shift
@@ -89,6 +103,24 @@ require_command() {
   command -v "$1" >/dev/null 2>&1 || { echo "$1 command not found" >&2; exit 1; }
 }
 
+bind_local_docker_transport() {
+  case "${DOCKER_HOST:-}" in ""|"$CANONICAL_DOCKER_HOST") ;; *) echo "Caller-selected DOCKER_HOST is forbidden" >&2; exit 2 ;; esac
+  case "${DOCKER_CONTEXT:-}" in ""|default) ;; *) echo "Caller-selected DOCKER_CONTEXT is forbidden" >&2; exit 2 ;; esac
+  unset DOCKER_CONTEXT
+  export DOCKER_HOST=$CANONICAL_DOCKER_HOST
+}
+
+assert_daemon_identity() {
+  current_daemon_id=$(docker --host "$CANONICAL_DOCKER_HOST" info --format '{{.ID}}') || {
+    echo "Canonical local Docker daemon is unavailable" >&2
+    exit 1
+  }
+  [ -n "$EXPECTED_DAEMON_ID" ] && [ "$current_daemon_id" = "$EXPECTED_DAEMON_ID" ] || {
+    echo "Docker daemon identity differs from the activation gate" >&2
+    exit 1
+  }
+}
+
 verified_activation_bundle() {
   if [ "$(id -u)" -eq 0 ]; then
     require_command runuser
@@ -128,7 +160,8 @@ load_locked_egress_subnets() {
   egress_records=$(printf '%s' "$activation_bundle" | jq -r '.networkRecords[] | select(.logicalName | endswith("_egress")) | [.logicalName, .physicalName] | @tsv')
   while IFS="$(printf '\t')" read -r logical_name physical_name; do
     [ -n "$physical_name" ] || continue
-    inspection=$(docker network inspect "$physical_name") || {
+    assert_daemon_identity
+    inspection=$(docker --host "$CANONICAL_DOCKER_HOST" network inspect "$physical_name") || {
       echo "Locked workload egress network is missing: $physical_name" >&2
       exit 1
     }
@@ -165,10 +198,36 @@ if [ "$MODE" != plan ] && [ -s "$SUBNET_FILE" ]; then
   exit 2
 fi
 
+bind_local_docker_transport
+case "$EXPECTED_DAEMON_ID" in
+  [A-Za-z0-9][A-Za-z0-9._:-][A-Za-z0-9._:-]*) ;;
+  *)
+    if [ "$MODE" = plan ] && [ -s "$SUBNET_FILE" ]; then :; else
+      echo "--expected-daemon-id is required for Docker-backed firewall operations" >&2
+      exit 2
+    fi
+    ;;
+esac
+
+if [ "$MODE" = privilege-preflight ]; then
+  [ "$(id -u)" -eq 0 ] || { echo "--privilege-preflight requires root" >&2; exit 1; }
+  require_command iptables
+  require_command docker
+  assert_daemon_identity
+  iptables -w -S DOCKER-USER >/dev/null 2>&1 || {
+    echo "DOCKER-USER chain is unavailable; verify Docker firewall backend before rollout" >&2
+    exit 1
+  }
+  echo "Noninteractive workload egress firewall privilege preflight passed."
+  exit 0
+fi
+
 if [ "$MODE" = rollback ]; then
   [ "$(id -u)" -eq 0 ] || { echo "--rollback requires root" >&2; exit 1; }
   [ "$CONFIRM" = "ROLLBACK-WORKLOAD-EGRESS-FIREWALL" ] || { echo "Rollback requires --confirm ROLLBACK-WORKLOAD-EGRESS-FIREWALL" >&2; exit 1; }
   require_command iptables
+  require_command docker
+  assert_daemon_identity
   while iptables -w -C DOCKER-USER -j "$CHAIN" >/dev/null 2>&1; do
     iptables -w -D DOCKER-USER -j "$CHAIN"
   done
@@ -179,6 +238,7 @@ if [ "$MODE" = rollback ]; then
   iptables -w -X "$CHAIN" >/dev/null 2>&1 || true
   iptables -w -F "$STAGING_CHAIN" >/dev/null 2>&1 || true
   iptables -w -X "$STAGING_CHAIN" >/dev/null 2>&1 || true
+  assert_daemon_identity
   echo "Workload egress firewall chain removed; verify Docker/UFW policy before restarting workloads."
   exit 0
 fi
@@ -204,6 +264,8 @@ if [ "$MODE" = plan ]; then
 fi
 
 require_command iptables
+require_command docker
+assert_daemon_identity
 iptables -w -S DOCKER-USER >/dev/null 2>&1 || { echo "DOCKER-USER chain is unavailable; verify Docker firewall backend before rollout" >&2; exit 1; }
 
 verify_chain_body() {
@@ -225,6 +287,7 @@ verify_chain_body() {
 }
 
 verify_rules() {
+  assert_daemon_identity
   iptables -w -C DOCKER-USER -j "$CHAIN" >/dev/null
   docker_user_rules=$(iptables -w -S DOCKER-USER)
   jump_count=$(printf '%s\n' "$docker_user_rules" | awk -v chain="$CHAIN" '$1 == "-A" && $2 == "DOCKER-USER" && $3 == "-j" && $4 == chain && NF == 4 { count += 1 } END { print count + 0 }')
@@ -243,12 +306,14 @@ verify_rules() {
 
 if [ "$MODE" = verify ]; then
   verify_rules
+  assert_daemon_identity
   echo "Workload egress firewall verified for $(awk 'END { print NR + 0 }' "$SUBNET_FILE") subnet(s)."
   exit 0
 fi
 
 [ "$(id -u)" -eq 0 ] || { echo "--apply requires root" >&2; exit 1; }
 [ "$CONFIRM" = "APPLY-WORKLOAD-EGRESS-FIREWALL" ] || { echo "Apply requires --confirm APPLY-WORKLOAD-EGRESS-FIREWALL" >&2; exit 1; }
+assert_daemon_identity
 
 if iptables -w -S "$STAGING_CHAIN" >/dev/null 2>&1; then
   echo "Stale workload egress staging chain exists; refusing a non-atomic replacement" >&2
@@ -280,4 +345,5 @@ iptables -w -X "$CHAIN" >/dev/null 2>&1 || true
 iptables -w -E "$STAGING_CHAIN" "$CHAIN"
 
 verify_rules
+assert_daemon_identity
 echo "Workload egress firewall applied and verified for $(awk 'END { print NR + 0 }' "$SUBNET_FILE") subnet(s)."

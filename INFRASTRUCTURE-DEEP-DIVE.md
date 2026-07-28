@@ -476,7 +476,7 @@ sh ./scripts/prepare-hosted-workloads.sh
 COMPOSE_ENV_FILE=.env \
 COMPOSE_PROJECT_NAME=platform_infra_vps \
 HOSTED_WORKLOAD_LOCK=/path/private/hosted-workloads.lock.json \
-bash ./scripts/compose-vps.sh config --quiet
+bash ./scripts/compose-vps.sh config --format json > /tmp/reviewed-hosted-compose.json
 ```
 
 Starting or recreating the candidate is a separate maintenance action and is
@@ -526,8 +526,9 @@ Never use `docker compose down -v` as a troubleshooting shortcut.
 9. Recreate `.env` and platform Docker secrets from reviewed templates.
 10. Copy application repositories outside infra, validate their manifests and
     prepare a `0600` hosted-workload lock.
-11. Review zero-workload and combined renders, then start the stack with
-    `compose-vps.sh` and the approved lock.
+11. Review zero-workload and combined renders, then activate only the exact
+    locked hosted service set with `hosted-workload-activation-gate.sh`; core
+    bootstrap remains in the separate release/rollback workflow.
 12. Verify WAF, Traefik, Portal, docs, Status API, observability and backups.
 13. Run restore drills before deleting rollback copies.
 14. Keep the old server as reference until the new server has current evidence

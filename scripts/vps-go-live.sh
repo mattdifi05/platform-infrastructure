@@ -21,6 +21,7 @@ INCLUDE_OFFSITE_RESTORE_DRY_RUN=0
 VERIFY_GITHUB_REMOTE=0
 REPLACE_DOCKER_DAEMON_CONFIG=0
 RELOAD_SSHD=0
+ACTIVATION_REQUEST=
 
 usage() {
   cat <<'EOF'
@@ -47,7 +48,10 @@ Options:
   --replace-docker-daemon-config        When applying hardening, back up and
                                         replace an existing Docker daemon config
                                         that is missing Platform hardening keys.
-  --start-stack                         Run docker compose up for VPS stack.
+  --start-stack                         Submit one authenticated activation request
+                                        to the fixed provider-installed broker.
+  --activation-request PATH             Bounded activation request JSON generated
+                                        by the trusted release workflow.
   --skip-production-preflight           Skip production-preflight during
                                         postdeploy. Use only for LAN/single-host
                                         orchestration evidence without a public
@@ -106,6 +110,10 @@ while [ "$#" -gt 0 ]; do
     --start-stack)
       START_STACK=1
       ;;
+    --activation-request)
+      ACTIVATION_REQUEST="$2"
+      shift
+      ;;
     --skip-production-preflight)
       RUN_PRODUCTION_PREFLIGHT=0
       ;;
@@ -146,6 +154,11 @@ while [ "$#" -gt 0 ]; do
   esac
   shift
 done
+
+[ "$PROJECT_NAME" = platform_infra_vps ] || {
+  echo "Go-live requires canonical project platform_infra_vps." >&2
+  exit 64
+}
 
 case "$ENV_FILE" in
   /*) ;;
@@ -307,9 +320,15 @@ step_vps_preflight() {
 }
 
 step_start_stack() {
-  sh ./scripts/prepare-vps-runtime.sh
-  COMPOSE_ENV_FILE="$ENV_FILE" COMPOSE_PROJECT_NAME="$PROJECT_NAME" \
-    bash ./scripts/compose-vps.sh up -d --build --remove-orphans
+  case "$ACTIVATION_REQUEST" in
+    /*) ;;
+    *) echo "--start-stack requires an absolute --activation-request path." >&2; return 64 ;;
+  esac
+  [ -f "$ACTIVATION_REQUEST" ] && [ ! -L "$ACTIVATION_REQUEST" ] || {
+    echo "Activation request must be a regular non-symlink file." >&2
+    return 64
+  }
+  sudo -n /usr/local/libexec/platform-activation-broker activate < "$ACTIVATION_REQUEST"
 }
 
 step_vps_postdeploy() {
@@ -401,12 +420,11 @@ run_step "vps-host-readiness" "sudo sh ./scripts/vps-host-readiness.sh --ssh-por
 run_step "vps-preflight" "sh ./scripts/vps-preflight.sh $ENV_FILE" step_vps_preflight
 
 if [ "$START_STACK" -eq 1 ]; then
-  run_step "compose-up" "sh ./scripts/prepare-vps-runtime.sh && COMPOSE_ENV_FILE=$ENV_FILE COMPOSE_PROJECT_NAME=$PROJECT_NAME bash ./scripts/compose-vps.sh up -d --build --remove-orphans" step_start_stack
+  run_step "platform-activation-transaction" "sudo -n /usr/local/libexec/platform-activation-broker activate < AUTHENTICATED_REQUEST" step_start_stack
 else
-  add_step "compose-up" "skipped" "docker compose --env-file $ENV_FILE -p $PROJECT_NAME ... up -d --build --remove-orphans" "enable with --start-stack"
+  add_step "platform-activation-transaction" "skipped" "sudo -n /usr/local/libexec/platform-activation-broker activate < AUTHENTICATED_REQUEST" "enable with --start-stack --activation-request ABSOLUTE_PATH"
+  run_step "vps-postdeploy" "sh ./scripts/vps-postdeploy.sh $ENV_FILE" step_vps_postdeploy
 fi
-
-run_step "vps-postdeploy" "sh ./scripts/vps-postdeploy.sh $ENV_FILE" step_vps_postdeploy
 
 if [ "$RUN_GO_NO_GO" -eq 1 ]; then
   run_step "github-actions-run-evidence" "sh ./scripts/github-actions-run-evidence.sh --repo $DEPLOY_REPO_VALUE --workflow enterprise-infra.yml --branch main --verifyRemote" step_github_actions_run_evidence

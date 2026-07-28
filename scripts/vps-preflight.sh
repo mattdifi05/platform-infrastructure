@@ -61,13 +61,17 @@ ALERTMANAGER_SECRET_GID="$ALERTMANAGER_SECRET_GID" \
     --file "$ROOT_DIR/secrets/alertmanager_webhook_token.txt" \
     --gid "$ALERTMANAGER_SECRET_GID"
 
+rendered=$(mktemp)
+trap 'rm -f "$rendered"' EXIT HUP INT TERM
 COMPOSE_ENV_FILE="$ENV_FILE" COMPOSE_PROJECT_NAME="$PROJECT_NAME" \
-  bash ./scripts/compose-vps.sh config --quiet
+  bash ./scripts/compose-vps.sh config --format json > "$rendered"
+jq -e '.services | type == "object" and length > 0' "$rendered" >/dev/null
 
-if COMPOSE_ENV_FILE="$ENV_FILE" COMPOSE_PROJECT_NAME="$PROJECT_NAME" \
-  bash ./scripts/compose-vps.sh config | grep -E 'image: .+:latest(@|$)' >/dev/null; then
+if jq -e '.services[]?.image | select(type == "string" and test(":latest(@|$)"))' "$rendered" >/dev/null; then
   echo "Mutable :latest image found in rendered VPS config." >&2
   exit 1
 fi
 
+rm -f "$rendered"
+trap - EXIT HUP INT TERM
 echo "VPS preflight passed."

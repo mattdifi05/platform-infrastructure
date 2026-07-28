@@ -193,7 +193,7 @@ write_file() {
 daemon_contains_hardening() {
   daemon_file="$1"
   [ -r "$daemon_file" ] || return 1
-  grep -q '"live-restore"[[:space:]]*:[[:space:]]*true' "$daemon_file" || return 1
+  grep -q '"live-restore"[[:space:]]*:[[:space:]]*false' "$daemon_file" || return 1
   grep -q '"no-new-privileges"[[:space:]]*:[[:space:]]*true' "$daemon_file" || return 1
   grep -q '"max-size"[[:space:]]*:[[:space:]]*"10m"' "$daemon_file" || return 1
   grep -q '"max-file"[[:space:]]*:[[:space:]]*"5"' "$daemon_file" || return 1
@@ -344,7 +344,7 @@ if [ ! -d /etc/docker ]; then
 fi
 DOCKER_DAEMON_CONFIG="{
   \"icc\": false,
-  \"live-restore\": true,
+  \"live-restore\": false,
   \"log-driver\": \"json-file\",
   \"log-opts\": {
     \"max-size\": \"10m\",

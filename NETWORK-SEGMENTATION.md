@@ -87,11 +87,18 @@ Review the destination-aware IPv4 egress policy without changing the host:
 ```bash
 sh ./scripts/workload-egress-firewall.sh \
   --plan \
-  --network-prefix platform_infra_vps
+  --lock /absolute/deployment-private/hosted-workloads.lock.json \
+  --project-name platform_infra_vps
 ```
 
-After candidate egress networks exist, apply requires root and the exact
-`APPLY-WORKLOAD-EGRESS-FIREWALL` confirmation. The dedicated
+The production deploy gate creates containers without starting them, verifies
+the exact Engine network ownership from that same lock, applies and verifies
+the firewall, repeats both read-only verifications, and only then starts the
+containers. Apply requires root and the exact
+`APPLY-WORKLOAD-EGRESS-FIREWALL` confirmation; it never discovers networks by
+prefix or accepts a caller-supplied subnet. A replacement chain is populated
+and verified before it becomes the first `DOCKER-USER` rule, so the previous
+chain remains enforcing until the complete replacement is active. The dedicated
 `PLATFORM-WORKLOAD-EGRESS` chain is reached from `DOCKER-USER` and blocks
 loopback, RFC1918, link-local/metadata, CGNAT and reserved IPv4 ranges. The
 Compose egress networks explicitly disable IPv6. Rollback has a different

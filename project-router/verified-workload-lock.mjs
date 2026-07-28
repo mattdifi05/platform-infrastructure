@@ -3,8 +3,8 @@ import { lstatSync, realpathSync } from "node:fs";
 import path from "node:path";
 
 const SHA256 = /^[a-f0-9]{64}$/;
-export const VERIFIED_WORKLOAD_LOCK_VERSION = 2;
-export const VERIFIED_WORKLOAD_VALIDATOR_VERSION = "hosted-contract-v2";
+export const VERIFIED_WORKLOAD_LOCK_VERSION = 4;
+export const VERIFIED_WORKLOAD_VALIDATOR_VERSION = "hosted-contract-v4";
 
 export function validateVerifiedWorkloadLock(lock) {
   if (lock?.version !== VERIFIED_WORKLOAD_LOCK_VERSION
