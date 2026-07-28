@@ -19,21 +19,79 @@ const runtimeIsolationConsumer = source.slice(start, end);
 const composeVpsSource = fs.readFileSync(path.join(import.meta.dirname, "compose-vps.sh"), "utf8");
 const repositoryRoot = path.resolve(import.meta.dirname, "..");
 const canonicalNoHostedLockPath = path.join(repositoryRoot, "config", "no-hosted-workloads.lock.json");
-const canonicalNoHostedAuthorityPath = path.join(repositoryRoot, "config", "no-hosted-runtime-authority.json");
 const protectedKinds = ["configs", "networks", "secrets", "services", "volumes"];
-const fallbackCoreInventory = {
-  configs: [],
-  networks: ["platform_docker_control"],
-  secrets: [],
+const expectedCoreInventory = {
+  configs: ["enterprise_traefik_routes"],
+  networks: [
+    "enterprise_net",
+    "platform_bus",
+    "platform_cache",
+    "platform_db_admin",
+    "platform_docker_control",
+    "platform_edge",
+    "platform_egress",
+    "platform_observability",
+    "platform_postgres",
+    "platform_routing",
+    "platform_storage",
+  ],
+  secrets: [
+    "alertmanager_webhook_token",
+    "backup_signing_keys",
+    "control_center_database_url",
+    "control_center_vault_keys",
+    "grafana_admin_password",
+    "keycloak_admin_password",
+    "keycloak_db_password",
+    "mariadb_root_password",
+    "minio_root_password",
+    "nats_password",
+    "phpmyadmin_control_password",
+    "postgres_superuser_password",
+    "projects_gateway_signing_keys",
+    "redis_password",
+    "smtp_password",
+  ],
   services: [
+    "alertmanager",
     "backup-scheduler",
+    "cadvisor",
     "control-center",
     "docker-socket-proxy",
+    "grafana",
+    "keycloak",
+    "local-dns",
+    "local-registry",
+    "loki",
+    "mariadb",
+    "minio",
+    "nats",
+    "node-exporter",
+    "phpmyadmin",
+    "phppgadmin",
     "platform-alert-dispatcher",
     "postgres",
     "project-router",
+    "prometheus",
+    "promtail",
+    "redis",
+    "traefik",
+    "waf",
   ],
-  volumes: [],
+  volumes: [
+    "backup_scheduler_logs",
+    "enterprise_alertmanager_data",
+    "enterprise_grafana_data",
+    "enterprise_keycloak_data",
+    "enterprise_local_registry_data",
+    "enterprise_loki_data",
+    "enterprise_mariadb_data",
+    "enterprise_minio_data",
+    "enterprise_nats_data",
+    "enterprise_postgres_data",
+    "enterprise_prometheus_data",
+    "enterprise_redis_data",
+  ],
 };
 
 function sha256(value) {
@@ -83,12 +141,6 @@ function copyRepositoryFile(root, relativePath) {
   return target;
 }
 
-function authoritativeCoreInventory() {
-  if (!fs.existsSync(canonicalNoHostedAuthorityPath)) return structuredClone(fallbackCoreInventory);
-  const authority = JSON.parse(fs.readFileSync(canonicalNoHostedAuthorityPath, "utf8"));
-  return structuredClone(authority.protectedResourceNames);
-}
-
 function createConsumerSandbox() {
   const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "runtime-consumer-qa6-")));
   const scripts = path.join(root, "scripts");
@@ -100,15 +152,7 @@ function createConsumerSandbox() {
   const composeVps = copyRepositoryFile(root, "scripts/compose-vps.sh");
   fs.chmodSync(composeVps, 0o755);
   const canonicalLock = copyRepositoryFile(root, "config/no-hosted-workloads.lock.json");
-  const inventory = authoritativeCoreInventory();
-  const authority = {
-    version: 1,
-    lockSha256: sha256(fs.readFileSync(canonicalLock)),
-    projectName: "platform_infra_vps",
-    protectedResourceNames: inventory,
-  };
-  const authorityFile = path.join(configDirectory, "no-hosted-runtime-authority.json");
-  fs.writeFileSync(authorityFile, `${JSON.stringify(authority, null, 2)}\n`, { mode: 0o600 });
+  const inventory = structuredClone(expectedCoreInventory);
   const environmentFile = path.join(root, "core.env");
   fs.writeFileSync(environmentFile, "HOSTED_WORKLOAD_LOCK=\nHOSTED_WORKLOAD_MODE=no-hosted\nCORE_VALUE=trusted\n", { mode: 0o600 });
   const workloadLock = path.join(root, "hosted.lock.json");
@@ -162,8 +206,6 @@ esac
     scripts,
     composeVps,
     canonicalLock,
-    authority,
-    authorityFile,
     inventory,
     environmentFile,
     workloadLock,
@@ -375,7 +417,7 @@ test("production runtime-isolation consumer binds the authoritative Hosted activ
   assert.doesNotMatch(
     runtimeIsolationConsumer,
     /protectedResourceNames\s*[:=][\s\S]{0,400}Object\.keys\(\s*config/,
-    "runtime-isolation-check derives a protected-resource fallback from the rendered config",
+    "runtime-isolation-check derives protected-resource authority from the rendered config",
   );
   assert.doesNotMatch(
     runtimeIsolationConsumer,
@@ -422,14 +464,7 @@ test("VPS wrapper derives a core-only envelope only in explicit canonical no-hos
     const envFile = path.join(root, "core.env");
     const fakeBin = path.join(root, "bin");
     const marker = path.join(root, "docker.args");
-    const config = {
-      name: "platform_infra_vps",
-      configs: { core_config: {} },
-      networks: { core_net: { name: "platform_infra_vps_core_net" } },
-      secrets: { core_secret: { file: "/private/core-secret" } },
-      services: { core: { image: "example.invalid/core@sha256:fixture" } },
-      volumes: { core_volume: {} },
-    };
+    const config = coreRuntimeConfig(expectedCoreInventory);
     fs.writeFileSync(envFile, "CORE_VALUE=fixture\n");
     fs.mkdirSync(fakeBin);
     fs.writeFileSync(path.join(fakeBin, "docker"), `#!/bin/sh
@@ -472,13 +507,7 @@ printf '%s\n' "$RUNTIME_ENVELOPE_CONFIG"
     assert.equal(envelope.version, 1);
     assert.equal(envelope.projectName, "platform_infra_vps");
     assert.deepEqual(envelope.config, config);
-    assert.deepEqual(envelope.protectedResourceNames, {
-      configs: ["core_config"],
-      networks: ["core_net"],
-      secrets: ["core_secret"],
-      services: ["core"],
-      volumes: ["core_volume"],
-    });
+    assert.deepEqual(envelope.protectedResourceNames, expectedCoreInventory);
     const canonicalNoHostedLock = path.join(import.meta.dirname, "..", "config", "no-hosted-workloads.lock.json");
     assert.equal(
       envelope.lockSha256,
@@ -493,12 +522,25 @@ printf '%s\n' "$RUNTIME_ENVELOPE_CONFIG"
 test("QA6 Hosted envelope binds the exact descriptor render digest before runtime policy", () => {
   const sandbox = addInfraConsumer(createConsumerSandbox());
   try {
-    const protectedResourceNames = structuredClone(fallbackCoreInventory);
+    const protectedResourceNames = structuredClone(expectedCoreInventory);
     const configA = coreRuntimeConfig(protectedResourceNames, { hosted: true });
     const configB = structuredClone(configA);
     configB.services["example-app-web"].image =
       `example.invalid/example-app@sha256:${"b".repeat(64)}`;
-    for (const [label, config] of [["baseline", configA], ["image mutation", configB]]) {
+    const reorderedConfig = {
+      volumes: configA.volumes,
+      services: configA.services,
+      secrets: configA.secrets,
+      networks: configA.networks,
+      configs: configA.configs,
+      name: configA.name,
+    };
+    assert.deepEqual(reorderedConfig, configA);
+    for (const [label, config] of [
+      ["baseline", configA],
+      ["image mutation", configB],
+      ["semantic-equivalent byte mutation", reorderedConfig],
+    ]) {
       const policy = evaluateRuntimeIsolation(config, {
         projectName: "platform_infra_vps",
         protectedResourceNames,
@@ -520,12 +562,20 @@ test("QA6 Hosted envelope binds the exact descriptor render digest before runtim
     const baseline = runInfraConsumer(sandbox);
     assert.equal(baseline.status, 0, baseline.stderr);
 
-    writeDockerOutput(sandbox, `${JSON.stringify(configB)}\n`);
-    const substituted = runInfraConsumer(sandbox);
-    assert.notEqual(
-      substituted.status,
-      0,
-      `combinedRenderSha256 accepted policy-valid renderer substitution:\n${substituted.stdout}\n${substituted.stderr}`,
+    const acceptedMutations = [];
+    for (const [label, bytes] of [
+      ["image mutation", `${JSON.stringify(configB)}\n`],
+      ["semantic-equivalent whitespace/key-order mutation", `${JSON.stringify(reorderedConfig, null, 2)}\n`],
+    ]) {
+      assert.notEqual(bytes, baselineBytes, `${label} did not alter renderer bytes`);
+      writeDockerOutput(sandbox, bytes);
+      const substituted = runInfraConsumer(sandbox);
+      if (substituted.status === 0) acceptedMutations.push(label);
+    }
+    assert.deepEqual(
+      acceptedMutations,
+      [],
+      `combinedRenderSha256 accepted renderer substitutions: ${acceptedMutations.join(", ")}`,
     );
   } finally {
     removeSandbox(sandbox);
@@ -563,101 +613,175 @@ test("QA6 wrapper accepts exactly one JSON object and consumes that exact object
   }
 });
 
-test("QA6 canonical no-hosted authority is closed and digest-bound to the canonical lock", () => {
-  assert.equal(
-    fs.existsSync(canonicalNoHostedAuthorityPath),
-    true,
-    "missing config/no-hosted-runtime-authority.json",
-  );
-  const authority = JSON.parse(fs.readFileSync(canonicalNoHostedAuthorityPath, "utf8"));
-  assert.deepEqual(Object.keys(authority).sort(), [
-    "lockSha256", "projectName", "protectedResourceNames", "version",
+test("QA6 canonical no-hosted lock contains the exact authoritative core inventory", () => {
+  const lock = JSON.parse(fs.readFileSync(canonicalNoHostedLockPath, "utf8"));
+  assert.deepEqual(Object.keys(lock).sort(), [
+    "brokerPolicySha256",
+    "projectName",
+    "protectedResourceNames",
+    "routes",
+    "state",
+    "validatorVersion",
+    "version",
+    "workloads",
   ]);
-  assert.equal(authority.version, 1);
-  assert.equal(authority.projectName, "platform_infra_vps");
-  assert.equal(authority.lockSha256, sha256(fs.readFileSync(canonicalNoHostedLockPath)));
-  assert.deepEqual(Object.keys(authority.protectedResourceNames).sort(), protectedKinds);
+  assert.equal(lock.projectName, "platform_infra_vps");
+  assert.deepEqual(Object.keys(lock.protectedResourceNames).sort(), protectedKinds);
+  assert.deepEqual(lock.protectedResourceNames, expectedCoreInventory);
+  assert.deepEqual(
+    Object.fromEntries(protectedKinds.map((kind) => [kind, lock.protectedResourceNames[kind].length])),
+    { configs: 1, networks: 11, secrets: 15, services: 24, volumes: 12 },
+  );
+  assert.equal(lock.protectedResourceNames.services.includes("php-apache"), false);
   for (const kind of protectedKinds) {
-    const names = authority.protectedResourceNames[kind];
-    assert.ok(Array.isArray(names), `${kind} inventory is not an array`);
-    assert.deepEqual(names, [...new Set(names)].sort(), `${kind} inventory is not closed/sorted/unique`);
-    assert.ok(names.every((name) => typeof name === "string" && name.length > 0));
+    const names = lock.protectedResourceNames[kind];
+    assert.deepEqual(names, [...new Set(names)].sort(), `${kind} inventory is not sorted/unique`);
   }
 });
 
-test("QA6 no-hosted authority rejects missing, extra, unsafe and tampered resource inventories", () => {
-  const bypasses = [];
+test("QA6 no-hosted exact inventory baseline passes end-to-end", () => {
   const sandbox = addInfraConsumer(createConsumerSandbox());
   try {
-    const config = coreRuntimeConfig(sandbox.inventory);
+    const config = coreRuntimeConfig(expectedCoreInventory);
     writeDockerOutput(sandbox, `${JSON.stringify(config)}\n`);
-    const baseline = runInfraConsumer(sandbox);
-    assert.equal(baseline.status, 0, baseline.stderr);
-
-    const removableService = sandbox.inventory.services.find((name) =>
-      !["backup-scheduler", "control-center", "docker-socket-proxy", "platform-alert-dispatcher", "project-router"].includes(name));
-    assert.ok(removableService, "fixture needs one non-special protected service");
-    const missing = structuredClone(config);
-    delete missing.services[removableService];
-    writeDockerOutput(sandbox, `${JSON.stringify(missing)}\n`);
-    const missingResult = runInfraConsumer(sandbox);
-
-    const attacker = structuredClone(config);
-    attacker.configs.attacker_config = { file: "/attacker/config" };
-    attacker.networks.attacker_network = { internal: false };
-    attacker.secrets.attacker_secret = { file: "/attacker/secret" };
-    attacker.volumes.attacker_volume = { name: "attacker_volume" };
-    attacker.services["attacker-daemon"] = boundedService({
-      privileged: true,
-      pid: "host",
-      network_mode: "host",
-      cap_add: ["SYS_ADMIN"],
-      devices: ["/dev/null:/dev/attacker"],
-      volumes: [{ type: "bind", source: "/", target: "/host" }],
-    });
-    writeDockerOutput(sandbox, `${JSON.stringify(attacker)}\n`);
-    const attackerResult = runInfraConsumer(sandbox);
-
-    if (missingResult.status === 0) bypasses.push("candidate-minus-authority");
-    if (attackerResult.status === 0) bypasses.push("unsafe-candidate-extras");
+    const result = runInfraConsumer(sandbox);
+    assert.equal(result.status, 0, result.stderr);
+    const envelope = JSON.parse(
+      runWrapper(sandbox).stdout,
+    );
+    assert.deepEqual(envelope.protectedResourceNames, expectedCoreInventory);
+    assert.deepEqual(envelope.config, config);
+    assert.equal(envelope.lockSha256, sha256(fs.readFileSync(sandbox.canonicalLock)));
   } finally {
     removeSandbox(sandbox);
   }
-
-  for (const mutation of ["lockSha256", "protectedResourceNames"]) {
-    const candidate = createConsumerSandbox();
-    try {
-      const config = coreRuntimeConfig(candidate.inventory);
-      writeDockerOutput(candidate, `${JSON.stringify(config)}\n`);
-      const authority = JSON.parse(fs.readFileSync(candidate.authorityFile, "utf8"));
-      if (mutation === "lockSha256") {
-        authority.lockSha256 = "f".repeat(64);
-      } else {
-        authority.protectedResourceNames.services = [
-          ...authority.protectedResourceNames.services,
-          "attacker-daemon",
-        ].sort();
-      }
-      fs.writeFileSync(candidate.authorityFile, `${JSON.stringify(authority, null, 2)}\n`, { mode: 0o600 });
-      const result = runWrapper(candidate);
-      if (result.status === 0) bypasses.push(`authority-${mutation}`);
-    } finally {
-      removeSandbox(candidate);
-    }
-  }
-  assert.deepEqual(
-    bypasses,
-    [],
-    `no-hosted authority bypasses: ${bypasses.join(", ")}`,
-  );
 });
 
-test("QA6 no-hosted lock swap after validation fails without emitting replacement SHA", () => {
+const candidateMissingNames = {
+  configs: "enterprise_traefik_routes",
+  networks: "enterprise_net",
+  secrets: "alertmanager_webhook_token",
+  services: "alertmanager",
+  volumes: "backup_scheduler_logs",
+};
+
+for (const kind of protectedKinds) {
+  test(`QA6 no-hosted rejects candidate missing one authoritative ${kind} entry`, () => {
+    const sandbox = addInfraConsumer(createConsumerSandbox());
+    try {
+      const config = coreRuntimeConfig(expectedCoreInventory);
+      delete config[kind][candidateMissingNames[kind]];
+      writeDockerOutput(sandbox, `${JSON.stringify(config)}\n`);
+      const result = runInfraConsumer(sandbox);
+      assert.notEqual(result.status, 0, `candidate missing ${kind} was auto-authorized`);
+      assert.match(result.stderr, /inventory|protected|resource/i);
+    } finally {
+      removeSandbox(sandbox);
+    }
+  });
+}
+
+for (const kind of protectedKinds) {
+  test(`QA6 no-hosted rejects candidate extra ${kind} before it becomes core authority`, () => {
+    const sandbox = addInfraConsumer(createConsumerSandbox());
+    try {
+      const config = coreRuntimeConfig(expectedCoreInventory);
+      if (kind === "configs") config.configs.attacker_config = { file: "/attacker/config" };
+      if (kind === "networks") config.networks.attacker_network = { internal: false };
+      if (kind === "secrets") config.secrets.attacker_secret = { file: "/attacker/secret" };
+      if (kind === "volumes") config.volumes.attacker_volume = { name: "attacker_volume" };
+      if (kind === "services") {
+        config.services["attacker-daemon"] = boundedService({
+          privileged: true,
+          pid: "host",
+          network_mode: "host",
+          cap_add: ["SYS_ADMIN"],
+          devices: ["/dev/null:/dev/attacker"],
+          volumes: [{ type: "bind", source: "/", target: "/host" }],
+        });
+      }
+      writeDockerOutput(sandbox, `${JSON.stringify(config)}\n`);
+      const result = runInfraConsumer(sandbox);
+      assert.notEqual(result.status, 0, `candidate extra ${kind} was auto-authorized`);
+      assert.match(result.stderr, /inventory|protected|resource/i);
+    } finally {
+      removeSandbox(sandbox);
+    }
+  });
+}
+
+function futureNoHostedLock() {
+  return {
+    ...JSON.parse(fs.readFileSync(canonicalNoHostedLockPath, "utf8")),
+    projectName: "platform_infra_vps",
+    protectedResourceNames: structuredClone(expectedCoreInventory),
+  };
+}
+
+const lockInventoryMutations = [
+  ...protectedKinds.map((kind) => [`missing-${kind}`, (lock) => {
+    delete lock.protectedResourceNames[kind];
+  }]),
+  ...protectedKinds.map((kind) => [`minus-${kind}`, (lock) => {
+    lock.protectedResourceNames[kind] = lock.protectedResourceNames[kind].slice(1);
+  }]),
+  ...protectedKinds.map((kind) => [`extra-${kind}`, (lock) => {
+    lock.protectedResourceNames[kind] = [...lock.protectedResourceNames[kind], `attacker_${kind}`].sort();
+  }]),
+  ["duplicate", (lock) => {
+    lock.protectedResourceNames.services = [
+      lock.protectedResourceNames.services[0],
+      ...lock.protectedResourceNames.services,
+    ];
+  }],
+  ["unsorted", (lock) => {
+    lock.protectedResourceNames.networks = [...lock.protectedResourceNames.networks].reverse();
+  }],
+  ["wrong-type", (lock) => {
+    lock.protectedResourceNames.volumes = {};
+  }],
+  ["inventory-key-extra", (lock) => {
+    lock.protectedResourceNames.images = [];
+  }],
+  ["top-level-key-extra", (lock) => {
+    lock.attacker = true;
+  }],
+  ["project-name", (lock) => {
+    lock.projectName = "attacker";
+  }],
+];
+
+for (const [label, mutate] of lockInventoryMutations) {
+  test(`QA6 no-hosted lock rejects ${label} before renderer`, () => {
+    const sandbox = createConsumerSandbox();
+    try {
+      const lock = futureNoHostedLock();
+      mutate(lock);
+      fs.writeFileSync(sandbox.canonicalLock, `${JSON.stringify(lock, null, 2)}\n`, { mode: 0o600 });
+      writeDockerOutput(sandbox, `${JSON.stringify(coreRuntimeConfig(expectedCoreInventory))}\n`);
+      const result = runWrapper(sandbox);
+      assert.notEqual(result.status, 0, `${label} lock inventory reached renderer`);
+      assert.equal(fs.existsSync(sandbox.dockerMarker), false, `${label} lock inventory invoked Docker`);
+    } finally {
+      removeSandbox(sandbox);
+    }
+  });
+}
+
+test("QA6 no-hosted lock race preserves the initial authoritative snapshot or fails explicitly", () => {
   const sandbox = createConsumerSandbox();
   try {
     const originalLockBytes = fs.readFileSync(sandbox.canonicalLock);
+    const initialLockSha256 = sha256(originalLockBytes);
     const config = coreRuntimeConfig(sandbox.inventory);
     writeDockerOutput(sandbox, `${JSON.stringify(config)}\n`);
+
+    const baseline = runWrapper(sandbox);
+    assert.equal(baseline.status, 0, baseline.stderr);
+    const baselineEnvelope = JSON.parse(baseline.stdout);
+    assert.equal(baselineEnvelope.lockSha256, initialLockSha256);
+    assert.deepEqual(baselineEnvelope.protectedResourceNames, expectedCoreInventory);
+    assert.deepEqual(baselineEnvelope.config, config);
 
     const foreignLock = path.join(sandbox.root, "foreign-no-hosted.lock.json");
     fs.writeFileSync(foreignLock, originalLockBytes, { mode: 0o600 });
@@ -678,8 +802,19 @@ test("QA6 no-hosted lock swap after validation fails without emitting replacemen
       QA6_SWAP_LOCK_REPLACEMENT: replacement,
       QA6_SWAP_LOCK_TARGET: sandbox.canonicalLock,
     });
-    assert.notEqual(raced.status, 0, `canonical lock swap emitted an envelope:\n${raced.stdout}`);
-    assert.doesNotMatch(raced.stdout, new RegExp(sha256(replacementBytes)));
+    if (raced.status !== 0) {
+      assert.match(
+        raced.stderr,
+        /(?:no-hosted|lock).*(?:changed|identity|snapshot|swap|digest)|(?:changed|identity|snapshot|swap|digest).*(?:no-hosted|lock)/i,
+        `lock race failed for an unrelated reason:\n${raced.stderr}`,
+      );
+    } else {
+      const racedEnvelope = JSON.parse(raced.stdout);
+      assert.equal(racedEnvelope.lockSha256, initialLockSha256);
+      assert.notEqual(racedEnvelope.lockSha256, sha256(replacementBytes));
+      assert.deepEqual(racedEnvelope.protectedResourceNames, expectedCoreInventory);
+      assert.deepEqual(racedEnvelope.config, config);
+    }
   } finally {
     removeSandbox(sandbox);
   }
@@ -697,17 +832,28 @@ test("QA6 no-hosted env bytes are stable from mode parse through Compose render"
       { mode: 0o600 },
     );
     writeDockerOutput(sandbox, `${JSON.stringify(coreRuntimeConfig(sandbox.inventory))}\n`);
-    const result = runWrapper(sandbox, undefined, {
+    const baseline = runWrapper(sandbox);
+    assert.equal(baseline.status, 0, baseline.stderr);
+    assert.equal(fs.readFileSync(sandbox.dockerEnvironmentCapture, "utf8"), initialEnvironment);
+
+    fs.rmSync(sandbox.dockerMarker, { force: true });
+    fs.rmSync(sandbox.dockerEnvironmentCapture, { force: true });
+    const raced = runWrapper(sandbox, undefined, {
       QA6_SWAP_ENV_REPLACEMENT: hostileEnvironment,
       QA6_SWAP_ENV_TARGET: sandbox.environmentFile,
     });
     const consumedBytes = fs.existsSync(sandbox.dockerEnvironmentCapture)
       ? fs.readFileSync(sandbox.dockerEnvironmentCapture, "utf8")
       : "";
-    assert.ok(
-      result.status !== 0 || consumedBytes === initialEnvironment,
-      `Compose consumed swapped env bytes:\n${consumedBytes}`,
-    );
+    if (raced.status !== 0) {
+      assert.match(
+        raced.stderr,
+        /(?:environment|env).*(?:changed|identity|snapshot|swap|digest)|(?:changed|identity|snapshot|swap|digest).*(?:environment|env)/i,
+        `env race failed for an unrelated reason:\n${raced.stderr}`,
+      );
+    } else {
+      assert.equal(consumedBytes, initialEnvironment, `Compose consumed swapped env bytes:\n${consumedBytes}`);
+    }
   } finally {
     removeSandbox(sandbox);
   }
@@ -731,7 +877,7 @@ test("QA6 PREPARE_RESOLVED accepts only exact hosted mode and forbids envelope",
     assert.equal(fs.existsSync(sandbox.dockerMarker), false, "forbidden PREPARE envelope reached Docker");
 
     const acceptedModes = [];
-    for (const mode of ["evil", "HOSTED", " hosted", "hosted ", "No-hosted", "NO-HOSTED"]) {
+    for (const mode of ["", "no-hosted", "evil", "HOSTED", " hosted", "hosted ", "No-hosted", "NO-HOSTED"]) {
       fs.rmSync(sandbox.dockerMarker, { force: true });
       const result = runWrapper(sandbox, ["config", "--format", "json"], {
         ...prepareEnvironment,
@@ -752,21 +898,34 @@ test("QA6 infra runtime-isolation CLI closes argv before invoking the renderer",
     for (const allowedArguments of [
       ["--env-file", sandbox.environmentFile],
       ["--envFile", sandbox.environmentFile],
+      [`--env-file=${sandbox.environmentFile}`],
+      [`--envFile=${sandbox.environmentFile}`],
     ]) {
+      fs.rmSync(sandbox.dockerMarker, { force: true });
       const allowed = runInfraArguments(sandbox, allowedArguments);
       assert.equal(allowed.status, 0, allowed.stderr);
     }
 
     const accepted = [];
-    for (const arguments_ of [
-      ["--env-file", sandbox.environmentFile, "--config", "/attacker/config.json"],
-      ["--env-file", sandbox.environmentFile, "--protectedResourceNames", "{}"],
-      ["--env-file", sandbox.environmentFile, "--workloadLock", "/attacker/lock.json"],
-      ["--env-file", sandbox.environmentFile, "attacker-positional"],
+    for (const [label, arguments_] of [
+      ["unknown split", ["--env-file", sandbox.environmentFile, "--foo", "attacker"]],
+      ["unknown equals", ["--env-file", sandbox.environmentFile, "--foo=attacker"]],
+      ["unknown flag", ["--env-file", sandbox.environmentFile, "--foo"]],
+      ["positional", ["--env-file", sandbox.environmentFile, "attacker-positional"]],
+      ["duplicate env-file", [
+        "--env-file", sandbox.environmentFile,
+        "--env-file", sandbox.environmentFile,
+      ]],
+      ["both aliases", [
+        "--env-file", sandbox.environmentFile,
+        "--envFile", sandbox.environmentFile,
+      ]],
+      ["empty env-file", ["--env-file="]],
+      ["empty envFile", ["--envFile="]],
     ]) {
       fs.rmSync(sandbox.dockerMarker, { force: true });
       const result = runInfraArguments(sandbox, arguments_);
-      if (result.status === 0 || fs.existsSync(sandbox.dockerMarker)) accepted.push(arguments_.slice(2).join(" "));
+      if (result.status === 0 || fs.existsSync(sandbox.dockerMarker)) accepted.push(label);
     }
     assert.deepEqual(accepted, [], `runtime-isolation-check accepted unknown argv: ${accepted.join(", ")}`);
   } finally {
