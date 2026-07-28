@@ -40,6 +40,60 @@ test("activation bundle validator consumes the exact protected resource schema",
   assert.notEqual(result.status, 0);
 });
 
+test("activation bundle validator rejects the canonical one-character id drift", () => {
+  const result = validate(bundleFor(["b"]));
+  assert.notEqual(result.status, 0);
+});
+
+test("activation bundle validator binds exact closed route records to exact service owners", () => {
+  const valid = bundleFor(["billing"]);
+  valid.routeRecords = [{
+    workloadId: "billing",
+    slug: "billing",
+    serviceName: "billing-web",
+    port: 3000,
+    upstream: "http://billing-web:3000",
+  }];
+  assert.equal(validate(valid).status, 0);
+
+  const mutations = [
+    (route) => { route.workloadId = "billingapi"; },
+    (route) => { route.slug = "Billing"; },
+    (route) => { route.serviceName = "billing-worker"; },
+    (route) => { route.port = 9999; },
+    (route) => { route.upstream = "http://billing-web:9999"; },
+    (route) => { route.extra = true; },
+  ];
+  for (const mutate of mutations) {
+    const forged = structuredClone(valid);
+    mutate(forged.routeRecords[0]);
+    assert.notEqual(validate(forged).status, 0, JSON.stringify(forged.routeRecords[0]));
+  }
+});
+
+test("all Hosted shell bundle consumers use the exact workload-id regex", () => {
+  for (const relativePath of [
+    "hosted-workload-activation-gate.sh",
+    "compose-vps.sh",
+    "core-stack-activation-gate.sh",
+    "hosted-workload-network-ownership.sh",
+  ]) {
+    const source = fs.readFileSync(path.join(import.meta.dirname, relativePath), "utf8");
+    const workloadIdRegexLines = source.split("\n")
+      .filter((line) => /workloadId|workloadIds/.test(line) && line.includes("test("));
+    assert.equal(
+      workloadIdRegexLines.some((line) => line.includes("^[a-z0-9][a-z0-9-]*$")),
+      false,
+      `${relativePath} still contains the permissive workload-id regex`,
+    );
+    assert.equal(
+      workloadIdRegexLines.some((line) => line.includes("^[a-z][a-z0-9-]{1,62}$")),
+      true,
+      `${relativePath} has no exact workload-id regex`,
+    );
+  }
+});
+
 function validate(bundle) {
   return spawnSync("/bin/bash", [
     "-c",

@@ -58,6 +58,39 @@ test("final Node consumer rejects duplicate exact secret grant targets", () => {
   );
 });
 
+test("final Node consumer rejects noncanonical workload ids without normalization", () => {
+  for (const workloadId of ["b", "billing_api", "billing.api", `b${"a".repeat(63)}`]) {
+    const fixture = renderedFixture({
+      workloadIds: [workloadId],
+      consumerId: workloadId,
+      secretNames: [],
+      grants: [],
+      fileTarget: null,
+      forgeManifests: true,
+    });
+    assert.throws(
+      () => validateRenderedWorkloads(fixture),
+      /canonical workload id/i,
+      workloadId,
+    );
+  }
+});
+
+test("manifest intake rejects workload id case and whitespace normalization", () => {
+  for (const workloadId of ["Billing", " billing "]) {
+    assert.throws(
+      () => validateWorkloadManifest({
+        version: 1,
+        id: workloadId,
+        composeFile: "compose.yaml",
+        secrets: [],
+        services: [{ name: "billing-web", role: "web", routes: [] }],
+      }),
+      /workload id.*invalid|canonical workload id/i,
+    );
+  }
+});
+
 for (const [label, grant, fileTarget] of [
   ["short syntax", "billing-api-key", "billing-api-key"],
   ["long alias", { source: "billing-api-key", target: "billing-token" }, "billing-token"],
@@ -82,6 +115,7 @@ function renderedFixture({
   secretNames = [secretName],
   grants = [{ source: secretName, target: secretName }],
   fileTarget,
+  forgeManifests = false,
 }) {
   const projectName = "fixture";
   const core = {
@@ -103,7 +137,7 @@ function renderedFixture({
       services: [{ name: `${workloadId}-web`, role: "web", routes: [] }],
       migrationRoots: [],
     };
-    if (document.secrets.every((name) => name.startsWith(`${workloadId}-`))) {
+    if (!forgeManifests && document.secrets.every((name) => name.startsWith(`${workloadId}-`))) {
       return validateWorkloadManifest(document);
     }
     // Model a digest-coherent forged lock that bypassed the earlier parser.
@@ -134,7 +168,7 @@ function renderedFixture({
     };
   }
   combined.services[`${consumerId}-web`].secrets = grants;
-  combined.services[`${consumerId}-web`].environment = {
+  combined.services[`${consumerId}-web`].environment = fileTarget == null ? {} : {
     [`${consumerId.toUpperCase().replaceAll("-", "_")}_TOKEN_FILE`]: `/run/secrets/${fileTarget}`,
   };
   return {

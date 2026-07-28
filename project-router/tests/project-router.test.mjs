@@ -502,7 +502,11 @@ test("project-router keeps the startup route snapshot frozen and rejects a repla
   assert.match(stderr, /fixture-app-web:3000/);
 
   const replacement = JSON.parse(readFileSync(workloadLockFile, "utf8"));
-  replacement.workloads[0].services = [{ name: "fixture-app-alt" }];
+  replacement.workloads[0].services = [{
+    name: "fixture-app-alt",
+    role: "web",
+    routes: [{ slug: "locked-demo", port: 3001 }],
+  }];
   replacement.routes = [{
     workloadId: "fixture-app",
     slug: "locked-demo",
@@ -652,8 +656,8 @@ test("forged nested-id route locks cannot assign a child service to its parent",
 test("exact route owners preserve non-colliding and single-owner textual prefixes", () => {
   const nonColliding = verifiedRouteLock();
   nonColliding.workloads = [
-    { id: "billing", services: [{ name: "billing-web" }] },
-    { id: "billingapi", services: [{ name: "billingapi-web" }] },
+    { id: "billing", services: [{ name: "billing-web", role: "worker", routes: [] }] },
+    { id: "billingapi", services: [{ name: "billingapi-web", role: "web", routes: [{ slug: "billingapi", port: 3000 }] }] },
   ];
   nonColliding.routes = [{
     workloadId: "billingapi",
@@ -665,7 +669,10 @@ test("exact route owners preserve non-colliding and single-owner textual prefixe
   assert.equal(parseHostedRouteLock(nonColliding).routes.get("billingapi"), "http://billingapi-web:3000");
 
   const singleOwner = verifiedRouteLock();
-  singleOwner.workloads = [{ id: "billing", services: [{ name: "billing-api-web" }] }];
+  singleOwner.workloads = [{
+    id: "billing",
+    services: [{ name: "billing-api-web", role: "web", routes: [{ slug: "billing", port: 3000 }] }],
+  }];
   singleOwner.routes = [{
     workloadId: "billing",
     slug: "billing",
@@ -688,6 +695,46 @@ test("exact route owners preserve non-colliding and single-owner textual prefixe
   const incompleteProtectedResources = structuredClone(nonColliding);
   delete incompleteProtectedResources.rawPolicyReceipt.protectedResourceNames.volumes;
   assert.throws(() => parseHostedRouteLock(incompleteProtectedResources), /policy\/render receipt is incomplete/);
+});
+
+test("project-router derives exact route lineage from declared api and web services", () => {
+  const validWeb = verifiedRouteLock();
+  assert.equal(parseHostedRouteLock(validWeb).routes.get("locked-demo"), "http://fixture-app-web:3000");
+
+  const validApi = verifiedRouteLock();
+  validApi.workloads[0].services[0].role = "api";
+  assert.equal(parseHostedRouteLock(validApi).routes.get("locked-demo"), "http://fixture-app-web:3000");
+
+  const workerForgery = verifiedRouteLock();
+  workerForgery.workloads[0].services = [{
+    name: "fixture-app-worker",
+    role: "worker",
+    routes: [],
+  }];
+  workerForgery.routes = [routeFixture({
+    slug: "admin",
+    canonicalHost: "admin.localhost.com",
+    hosts: ["admin.localhost.com"],
+    service: "fixture-app-worker",
+    port: 9999,
+    upstream: "http://fixture-app-worker:9999",
+  })];
+  assert.throws(() => parseHostedRouteLock(workerForgery), /canonical route|route lineage/i);
+
+  for (const mutate of [
+    (lock) => { lock.routes[0].workloadId = "FIXTURE-APP"; },
+    (lock) => { lock.routes[0].slug = "Locked-demo"; },
+    (lock) => { lock.routes[0].service = "FIXTURE-APP-WEB"; },
+    (lock) => { lock.routes[0].service = "fixture-app-worker"; },
+    (lock) => { lock.routes[0].port = 9999; lock.routes[0].upstream = "http://fixture-app-web:9999"; },
+    (lock) => { lock.routes[0].upstream = "http://fixture-app-web:9999"; },
+    (lock) => { lock.routes[0].extra = true; },
+    (lock) => { lock.workloads[0].services[0].routes[0].extra = true; },
+  ]) {
+    const forged = verifiedRouteLock();
+    mutate(forged);
+    assert.throws(() => parseHostedRouteLock(forged), /canonical route|route lineage/i);
+  }
 });
 
 function removeFixtureTree() {
@@ -873,7 +920,14 @@ function verifiedRouteLock() {
     workloadContentSha256: "b".repeat(64),
     coreRenderSha256: "c".repeat(64),
     combinedRenderSha256: "d".repeat(64),
-    workloads: [{ id: "fixture-app", services: [{ name: "fixture-app-web" }] }],
+    workloads: [{
+      id: "fixture-app",
+      services: [{
+        name: "fixture-app-web",
+        role: "web",
+        routes: [{ slug: "locked-demo", port: 3000 }],
+      }],
+    }],
     routes: [routeFixture()],
   };
 }

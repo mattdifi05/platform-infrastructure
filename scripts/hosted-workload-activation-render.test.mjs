@@ -10,6 +10,8 @@ import test from "node:test";
 import {
   resolveCatalog,
   verifyActivationRender,
+  verifyLockFiles,
+  verifyRawPolicyReceipt,
 } from "./hosted-workload-contract.mjs";
 
 const digest = "a".repeat(64);
@@ -53,6 +55,29 @@ test("read-only activation render verification binds both SHAs and final secret 
   }
 });
 
+test("verified lock and activation render reject a re-pinned undeclared worker route", () => {
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "hosted-route-lineage-")));
+  try {
+    const fixture = verifiedRenderFixture(root);
+    const forged = JSON.parse(fs.readFileSync(fixture.lockPath, "utf8"));
+    forged.routes = [{
+      workloadId: "billing",
+      slug: "admin",
+      service: "billing-worker",
+      port: 9999,
+      upstream: "http://billing-worker:9999",
+    }];
+    writeJson(fixture.lockPath, forged);
+    fs.chmodSync(fixture.lockPath, 0o600);
+
+    assert.throws(() => verifyLockFiles(forged), /canonical route|route lineage/i);
+    assert.throws(() => verifyRawPolicyReceipt(forged), /canonical route|route lineage/i);
+    assert.throws(() => verifyActivationRender(fixture), /canonical route|route lineage/i);
+  } finally {
+    removeFixtureTree(root);
+  }
+});
+
 function verifiedRenderFixture(root) {
   const workloadRoot = path.join(root, "workloads");
   const appRoot = path.join(workloadRoot, "billing");
@@ -66,6 +91,10 @@ function verifiedRenderFixture(root) {
       name: "billing-web",
       role: "web",
       routes: [{ slug: "billing", port: 3000 }],
+    }, {
+      name: "billing-worker",
+      role: "worker",
+      routes: [],
     }],
   }));
   fs.writeFileSync(path.join(appRoot, "compose.yaml"), [
@@ -76,6 +105,11 @@ function verifiedRenderFixture(root) {
     "    secrets:",
     "      - source: billing-api-key",
     "        target: billing-api-key",
+    "    networks:",
+    "      billing_ingress:",
+    "  billing-worker:",
+    "    security_opt:",
+    "      - no-new-privileges:true",
     "    networks:",
     "      billing_ingress:",
     "  project-router:",
@@ -167,6 +201,33 @@ function verifiedRenderFixture(root) {
         labels: {
           "com.platform.workload-id": "billing",
           "com.platform.workload-role": "web",
+        },
+      },
+      "billing-worker": {
+        image: `example.invalid/billing@sha256:${digest}`,
+        read_only: true,
+        init: true,
+        restart: "no",
+        security_opt: ["no-new-privileges:true"],
+        cap_drop: ["ALL"],
+        user: "1000:1000",
+        logging: { driver: "local", options: { "max-size": "10m", "max-file": "3" } },
+        pids_limit: 128,
+        cpu_shares: 256,
+        blkio_config: { weight: 300 },
+        ulimits: { nofile: { soft: 8192, hard: 8192 } },
+        cpus: 0.5,
+        mem_limit: String(256 * 1024 * 1024),
+        memswap_limit: String(256 * 1024 * 1024),
+        mem_reservation: String(64 * 1024 * 1024),
+        healthcheck: { test: ["CMD", "true"] },
+        environment: {},
+        secrets: [],
+        volumes: [],
+        networks: { billing_ingress: null },
+        labels: {
+          "com.platform.workload-id": "billing",
+          "com.platform.workload-role": "worker",
         },
       },
     },

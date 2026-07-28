@@ -120,6 +120,62 @@ test("shell verify and activation bundle reject digest-coherent foreign resource
   }
 });
 
+test("shell independently rejects a re-pinned undeclared worker route", () => {
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "hosted-shell-route-forged-")));
+  try {
+    const fixture = createResolvedLock(root, [{
+      id: "billing",
+      serviceName: "billing-worker",
+      role: "worker",
+      routes: [],
+    }]);
+    validateRawAndReadBundle(fixture.lockPath);
+    const forged = JSON.parse(fs.readFileSync(fixture.lockPath, "utf8"));
+    forged.state = "verified";
+    forged.coreRenderSha256 = "b".repeat(64);
+    forged.combinedRenderSha256 = "c".repeat(64);
+    forged.routes = [{
+      workloadId: "billing",
+      slug: "admin",
+      service: "billing-worker",
+      port: 9999,
+      upstream: "http://billing-worker:9999",
+    }];
+    fs.writeFileSync(fixture.lockPath, `${JSON.stringify(forged, null, 2)}\n`, { mode: 0o600 });
+    fs.chmodSync(fixture.lockPath, 0o600);
+
+    for (const command of ["verify", "activation-bundle"]) {
+      const rejected = spawnSync("/bin/sh", [lockScript, fixture.lockPath, command], {
+        encoding: "utf8",
+      });
+      assert.notEqual(rejected.status, 0, `${command} accepted an undeclared worker route`);
+      assert.match(rejected.stderr, /canonical route|route lineage/i);
+    }
+  } finally {
+    removeFixtureTree(root);
+  }
+});
+
+test("shell binds the manifest snapshot workload id byte-exactly", () => {
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "hosted-shell-id-exact-")));
+  try {
+    const fixture = createResolvedLock(root, [{
+      id: "Billing",
+      serviceName: "billing-web",
+    }]);
+    const rawPolicy = spawnSync("ruby", [policyScript, "--lock", fixture.lockPath], { encoding: "utf8" });
+    assert.equal(rawPolicy.status, 0, rawPolicy.stderr);
+    const rejected = spawnSync("/bin/sh", [lockScript, fixture.lockPath, "verify"], {
+      encoding: "utf8",
+      env: { ...process.env, HOSTED_WORKLOAD_ALLOW_RESOLVED: "1" },
+    });
+    assert.notEqual(rejected.status, 0, "shell normalized the manifest snapshot workload id");
+    assert.match(rejected.stderr, /manifest.*workload id|semantic manifest/i);
+  } finally {
+    removeFixtureTree(root);
+  }
+});
+
 function createResolvedLock(root, workloads) {
   fs.mkdirSync(root, { recursive: true });
   fs.chmodSync(root, 0o700);
@@ -133,7 +189,11 @@ function createResolvedLock(root, workloads) {
       id: workload.id,
       composeFile: "compose.yaml",
       secrets: workload.secretName ? [workload.secretName] : [],
-      services: [{ name: workload.serviceName, role: "web" }],
+      services: [{
+        name: workload.serviceName,
+        role: workload.role ?? "web",
+        routes: workload.routes ?? [],
+      }],
     }));
     const serviceLines = [
       "services:",

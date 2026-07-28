@@ -60,6 +60,20 @@ class HostedWorkloadSourcePolicyTest < Minitest::Test
     )
   end
 
+  def test_rejects_noncanonical_workload_ids_without_normalization
+    ["b", "Billing", " billing ", "1billing", "billing_api", "billing.api", "b#{"a" * 63}"].each do |id|
+      error = assert_raises(ArgumentError) do
+        HostedWorkloadSourcePolicy.validate_workload_id_set!([{ "id" => id }])
+      end
+      assert_match(/canonical workload id/i, error.message)
+    end
+    assert_equal ["ab"], HostedWorkloadSourcePolicy.validate_workload_id_set!([{ "id" => "ab" }])
+    assert_equal ["billing-api"],
+                 HostedWorkloadSourcePolicy.validate_workload_id_set!([{ "id" => "billing-api" }])
+    assert_equal ["b#{"a" * 62}"],
+                 HostedWorkloadSourcePolicy.validate_workload_id_set!([{ "id" => "b#{"a" * 62}" }])
+  end
+
   def test_rejects_a_sole_claimant_stealing_another_exact_workload_secret
     model = secret_model(
       secret_names: ["billingapi-api-key"],

@@ -698,6 +698,148 @@ test("canonical owner maps preserve billing plus billingapi and one billing text
   assert.equal(report.status, "passed", report.failures.join("\n"));
 });
 
+test("runtime secret grants use the exact canonical short and long grammar", () => {
+  const invalidGrants = [
+    { label: "mapping instead of array", grants: { source: "billing-api-key" } },
+    { label: "missing source", grants: [{}] },
+    { label: "null target", grants: [{ source: "billing-api-key", target: null }] },
+    { label: "empty target", grants: [{ source: "billing-api-key", target: "" }] },
+    { label: "traversal target", grants: [{ source: "billing-api-key", target: "../billing-token" }] },
+    { label: "underscore target", grants: [{ source: "billing-api-key", target: "billing_token" }] },
+    { label: "leading digit target", grants: [{ source: "billing-api-key", target: "1billing-token" }] },
+    { label: "oversized target", grants: [{ source: "billing-api-key", target: `b${"a".repeat(63)}` }] },
+    { label: "uid field", grants: [{ source: "billing-api-key", uid: "0" }] },
+    { label: "mode field", grants: [{ source: "billing-api-key", mode: 0o777 }] },
+    { label: "extra field", grants: [{ source: "billing-api-key", extra: true }] },
+    { label: "underscore source", grants: [{ source: "billing-api_key" }], source: "billing-api_key" },
+    { label: "traversal source", grants: [{ source: "billing-../key" }], source: "billing-../key" },
+    { label: "oversized source", grants: [{ source: `billing-${"a".repeat(64)}` }], source: `billing-${"a".repeat(64)}` },
+  ];
+  for (const { label, grants, source = "billing-api-key" } of invalidGrants) {
+    const config = workloadIdentityFixture([["billing", "billing-web"]]);
+    config.secrets = { [source]: { external: true, name: `fixture_${source}` } };
+    config.services["billing-web"].secrets = grants;
+    const report = evaluateRuntimeIsolation(config, { projectName: "fixture" });
+    assert.equal(report.status, "failed", `${label} bypassed runtime grant validation`);
+    assert.match(report.failures.join("\n"), /workload-exact-secret-grants-billing-web/, label);
+  }
+
+  for (const [label, configure] of [
+    ["absent", (service) => { delete service.secrets; }],
+    ["empty", (service) => { service.secrets = []; }],
+    ["short", (service) => { service.secrets = ["billing-api-key"]; }],
+    ["long alias", (service) => { service.secrets = [{ source: "billing-api-key", target: "billing-token" }]; }],
+    ["long omitted target", (service) => { service.secrets = [{ source: "billing-api-key" }]; }],
+  ]) {
+    const config = workloadIdentityFixture([["billing", "billing-web"]]);
+    config.secrets = { "billing-api-key": { external: true, name: "fixture_billing-api-key" } };
+    configure(config.services["billing-web"]);
+    const report = evaluateRuntimeIsolation(config, { projectName: "fixture" });
+    assert.equal(report.status, "passed", `${label}: ${report.failures.join("\n")}`);
+  }
+});
+
+test("runtime workload labels require exact non-normalized canonical ids", () => {
+  for (const workloadId of [
+    "b",
+    "billing_api",
+    "billing.api",
+    `b${"a".repeat(63)}`,
+  ]) {
+    const config = workloadIdentityFixture([[workloadId, `${workloadId}-web`]]);
+    const report = evaluateRuntimeIsolation(config, { projectName: "fixture" });
+    assert.equal(report.status, "failed", `${workloadId} bypassed runtime workload-id validation`);
+    assert.match(report.failures.join("\n"), /workload-id-canonical/);
+  }
+  for (const workloadId of ["ab", "billing-api"]) {
+    const config = workloadIdentityFixture([[workloadId, `${workloadId}-web`]]);
+    const report = evaluateRuntimeIsolation(config, { projectName: "fixture" });
+    assert.equal(report.status, "passed", report.failures.join("\n"));
+  }
+});
+
+test("runtime rejects invalid workload network zones and canonical workload orphans", () => {
+  const invalidZone = workloadIdentityFixture([["billing", "billing-web"]]);
+  delete invalidZone.networks.billing_ingress;
+  invalidZone.services["billing-web"].networks = { billing_admin: null };
+  invalidZone.networks.billing_admin = { internal: true, name: "fixture_billing_admin" };
+  let report = evaluateRuntimeIsolation(invalidZone, { projectName: "fixture" });
+  assert.equal(report.status, "failed", "billing_admin bypassed exact zone validation");
+  assert.match(report.failures.join("\n"), /workload-(network-topology|canonical-resource-owners)/);
+
+  for (const [kind, mutate] of [
+    ["secret", (config) => {
+      config.secrets = { "example-app-unused": { external: true, name: "fixture_example-app-unused" } };
+    }],
+    ["volume", (config) => {
+      config.volumes = { "example-app_unused": { name: "fixture_example-app_unused" } };
+    }],
+    ["network", (config) => {
+      config.networks.example_app_cache = { internal: true, name: "fixture_example_app_cache" };
+    }],
+  ]) {
+    const config = fixture();
+    mutate(config);
+    report = evaluateRuntimeIsolation(config, { projectName: "fixture" });
+    assert.equal(report.status, "failed", `${kind} orphan bypassed runtime inventory`);
+    assert.match(report.failures.join("\n"), /workload-exact-resource-inventory/);
+  }
+
+  const disconnected = fixture();
+  delete disconnected.services["example-app-web"].networks.example_app_ingress;
+  delete disconnected.networks.example_app_ingress;
+  report = evaluateRuntimeIsolation(disconnected, { projectName: "fixture" });
+  assert.equal(report.status, "failed", "workload service without a network bypassed runtime inventory");
+  assert.match(report.failures.join("\n"), /workload-service-network-inventory/);
+});
+
+test("runtime inventory binds exact protected core resources and every workload reference", () => {
+  const protectedResourceNames = {
+    configs: [],
+    networks: ["platform_docker_control"],
+    secrets: ["platform-secret"],
+    services: [
+      "backup-scheduler",
+      "control-center",
+      "docker-socket-proxy",
+      "platform-alert-dispatcher",
+      "postgres",
+      "project-router",
+    ],
+    volumes: ["platform_data"],
+  };
+  const config = workloadIdentityFixture([["billing", "billing-web"]]);
+  config.secrets = {
+    "billing-api-key": { external: true, name: "fixture_billing-api-key" },
+    "platform-secret": { external: true, name: "fixture_platform-secret" },
+  };
+  config.volumes = {
+    billing_data: { name: "fixture_billing_data" },
+    platform_data: { name: "fixture_platform_data" },
+  };
+  config.services["billing-web"].secrets = [{ source: "billing-api-key" }];
+  config.services["billing-web"].environment = {
+    BILLING_TOKEN_FILE: "/run/secrets/billing-api-key",
+  };
+  config.services["billing-web"].volumes = [
+    { type: "volume", source: "billing_data", target: "/data" },
+  ];
+  let report = evaluateRuntimeIsolation(config, { projectName: "fixture", protectedResourceNames });
+  assert.equal(report.status, "passed", report.failures.join("\n"));
+
+  for (const [kind, mutate] of [
+    ["secret", (candidate) => { delete candidate.secrets["billing-api-key"]; }],
+    ["volume", (candidate) => { delete candidate.volumes.billing_data; }],
+    ["network", (candidate) => { delete candidate.networks.billing_ingress; }],
+  ]) {
+    const missing = structuredClone(config);
+    mutate(missing);
+    report = evaluateRuntimeIsolation(missing, { projectName: "fixture", protectedResourceNames });
+    assert.equal(report.status, "failed", `missing referenced ${kind} bypassed runtime inventory`);
+    assert.match(report.failures.join("\n"), /workload-exact-resource-inventory/);
+  }
+});
+
 function fixture() {
   const services = {};
   services["example-app-web"] = bounded({
