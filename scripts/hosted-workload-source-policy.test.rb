@@ -70,8 +70,16 @@ class HostedWorkloadSourcePolicyTest < Minitest::Test
     assert_equal ["ab"], HostedWorkloadSourcePolicy.validate_workload_id_set!([{ "id" => "ab" }])
     assert_equal ["billing-api"],
                  HostedWorkloadSourcePolicy.validate_workload_id_set!([{ "id" => "billing-api" }])
-    assert_equal ["b#{"a" * 62}"],
-                 HostedWorkloadSourcePolicy.validate_workload_id_set!([{ "id" => "b#{"a" * 62}" }])
+    maximum_id = "b#{"a" * 60}"
+    assert_equal [maximum_id],
+                 HostedWorkloadSourcePolicy.validate_workload_id_set!([{ "id" => maximum_id }])
+    [62, 63, 64].each do |length|
+      oversized_id = "b#{"a" * (length - 1)}"
+      error = assert_raises(ArgumentError) do
+        HostedWorkloadSourcePolicy.validate_workload_id_set!([{ "id" => oversized_id }])
+      end
+      assert_match(/canonical workload id/i, error.message)
+    end
   end
 
   def test_rejects_a_sole_claimant_stealing_another_exact_workload_secret

@@ -91,6 +91,79 @@ test("manifest intake rejects workload id case and whitespace normalization", ()
   }
 });
 
+test("manifest intake rejects raw service role route and secret normalization", () => {
+  const mutations = [
+    ["service case", (document) => { document.services[0].name = "Billing-Web"; }],
+    ["service whitespace", (document) => { document.services[0].name = " billing-web "; }],
+    ["role case", (document) => { document.services[0].role = "WEB"; }],
+    ["role whitespace", (document) => { document.services[0].role = " web "; }],
+    ["route case", (document) => { document.services[0].routes[0].slug = "Billing"; }],
+    ["route whitespace", (document) => { document.services[0].routes[0].slug = " billing "; }],
+    ["secret whitespace", (document) => { document.secrets[0] = " billing-key "; }],
+  ];
+  for (const [label, mutate] of mutations) {
+    const document = {
+      version: 1,
+      id: "billing",
+      composeFile: "compose.yaml",
+      secrets: ["billing-key"],
+      services: [{
+        name: "billing-web",
+        role: "web",
+        routes: [{ slug: "billing", port: 3000 }],
+      }],
+    };
+    mutate(document);
+    assert.throws(
+      () => validateWorkloadManifest(document),
+      /invalid|canonical|unsupported|prefixed/i,
+      label,
+    );
+  }
+});
+
+test("workload id leaves exact room for a canonical service and secret suffix", () => {
+  const maxId = `a${"b".repeat(60)}`;
+  assert.equal(maxId.length, 61);
+  assert.equal(`${maxId}-x`.length, 63);
+  assert.equal(`${maxId}-s`.length, 63);
+  assert.doesNotThrow(() => validateWorkloadManifest({
+    version: 1,
+    id: maxId,
+    composeFile: "compose.yaml",
+    secrets: [`${maxId}-s`],
+    services: [{ name: `${maxId}-x`, role: "worker", routes: [] }],
+  }));
+  const maxRouteSlug = `a${"b".repeat(62)}`;
+  assert.equal(maxRouteSlug.length, 63);
+  assert.doesNotThrow(() => validateWorkloadManifest({
+    version: 1,
+    id: "billing",
+    composeFile: "compose.yaml",
+    secrets: [],
+    services: [{
+      name: "billing-web",
+      role: "web",
+      routes: [{ slug: maxRouteSlug, port: 3000 }],
+    }],
+  }));
+
+  for (const length of [62, 63, 64]) {
+    const workloadId = `a${"b".repeat(length - 1)}`;
+    assert.throws(
+      () => validateWorkloadManifest({
+        version: 1,
+        id: workloadId,
+        composeFile: "compose.yaml",
+        secrets: [],
+        services: [{ name: `${workloadId}-x`, role: "worker", routes: [] }],
+      }),
+      /workload id.*invalid/i,
+      `length=${length}`,
+    );
+  }
+});
+
 for (const [label, grant, fileTarget] of [
   ["short syntax", "billing-api-key", "billing-api-key"],
   ["long alias", { source: "billing-api-key", target: "billing-token" }, "billing-token"],

@@ -8,7 +8,8 @@ import {
 import { evaluateRuntimeIsolation } from "./runtime-isolation-policy.mjs";
 
 test("accepts bounded platform and external workload services", () => {
-  const report = evaluateRuntimeIsolation(fixture(), { projectName: "fixture" });
+  const config = fixture();
+  const report = evaluateRuntimeIsolation(config, fixtureRuntimeOptions(config));
   assert.equal(report.status, "passed", report.failures.join("\n"));
   assert.equal(report.summary.rawSocketOwners.join(","), "docker-operation-gateway");
   assert.equal(report.summary.hostedWorkloads, 1);
@@ -265,7 +266,7 @@ test("rejects workload network topology overrides at runtime", () => {
   egress.services["example-app-web"].networks = { example_app_egress: null };
   delete egress.networks.example_app_ingress;
   egress.networks.example_app_egress = { internal: false, name: "fixture_example_app_egress" };
-  const accepted = evaluateRuntimeIsolation(egress, { projectName: "fixture" });
+  const accepted = evaluateRuntimeIsolation(egress, fixtureRuntimeOptions(egress));
   assert.equal(accepted.status, "passed", accepted.failures.join("\n"));
 });
 
@@ -294,7 +295,7 @@ test("binds all six hosted workload runtime identity labels", () => {
   const expected = runtimeIdentityFixture();
   const accepted = fixture();
   Object.assign(accepted.services["example-app-web"].labels, expected);
-  assert.equal(evaluateRuntimeIsolation(accepted, { projectName: "fixture", runtimeIdentity: expected }).status, "passed");
+  assert.equal(evaluateRuntimeIsolation(accepted, fixtureRuntimeOptions(accepted, { runtimeIdentity: expected })).status, "passed");
   for (const label of Object.keys(expected)) {
     const config = fixture();
     Object.assign(config.services["example-app-web"].labels, expected);
@@ -653,7 +654,7 @@ test("runtime preserves the authoritative dashed workload volume prefix", () => 
   runtime.services[serviceName].volumes = [
     { type: "volume", source: volumeName, target: "/data" },
   ];
-  const report = evaluateRuntimeIsolation(runtime, { projectName: "fixture" });
+  const report = evaluateRuntimeIsolation(runtime, fixtureRuntimeOptions(runtime));
   assert.equal(report.status, "passed", report.failures.join("\n"));
 });
 
@@ -676,7 +677,7 @@ test("canonical owner maps preserve billing plus billingapi and one billing text
     { type: "volume", source: "billingapi_data", target: "/data" },
   ];
   assert.equal(
-    evaluateRuntimeIsolation(nonColliding, { projectName: "fixture" }).status,
+    evaluateRuntimeIsolation(nonColliding, fixtureRuntimeOptions(nonColliding)).status,
     "passed",
   );
 
@@ -694,7 +695,7 @@ test("canonical owner maps preserve billing plus billingapi and one billing text
   singleOwner.services["billing-api-web"].volumes = [
     { type: "volume", source: "billing_data", target: "/data" },
   ];
-  const report = evaluateRuntimeIsolation(singleOwner, { projectName: "fixture" });
+  const report = evaluateRuntimeIsolation(singleOwner, fixtureRuntimeOptions(singleOwner));
   assert.equal(report.status, "passed", report.failures.join("\n"));
 });
 
@@ -736,7 +737,7 @@ test("runtime secret grants use the exact canonical short and long grammar", () 
       config.secrets = { "billing-api-key": { external: true, name: "fixture_billing-api-key" } };
     }
     configure(config.services["billing-web"]);
-    const report = evaluateRuntimeIsolation(config, { projectName: "fixture" });
+    const report = evaluateRuntimeIsolation(config, fixtureRuntimeOptions(config));
     assert.equal(report.status, "passed", `${label}: ${report.failures.join("\n")}`);
   }
 });
@@ -746,16 +747,16 @@ test("runtime workload labels require exact non-normalized canonical ids", () =>
     "b",
     "billing_api",
     "billing.api",
-    `b${"a".repeat(63)}`,
+    ...[62, 63, 64].map((length) => `b${"a".repeat(length - 1)}`),
   ]) {
     const config = workloadIdentityFixture([[workloadId, `${workloadId}-web`]]);
-    const report = evaluateRuntimeIsolation(config, { projectName: "fixture" });
+    const report = evaluateRuntimeIsolation(config, fixtureRuntimeOptions(config));
     assert.equal(report.status, "failed", `${workloadId} bypassed runtime workload-id validation`);
     assert.match(report.failures.join("\n"), /workload-id-canonical/);
   }
-  for (const workloadId of ["ab", "billing-api"]) {
+  for (const workloadId of ["ab", "billing-api", `b${"a".repeat(60)}`]) {
     const config = workloadIdentityFixture([[workloadId, `${workloadId}-web`]]);
-    const report = evaluateRuntimeIsolation(config, { projectName: "fixture" });
+    const report = evaluateRuntimeIsolation(config, fixtureRuntimeOptions(config));
     assert.equal(report.status, "passed", report.failures.join("\n"));
   }
 });
@@ -794,6 +795,65 @@ test("runtime rejects invalid workload network zones and canonical workload orph
   assert.equal(report.status, "failed", "workload service without a network bypassed runtime inventory");
   assert.match(report.failures.join("\n"), /workload-service-network-inventory/);
 });
+
+for (const [label, protectedResourceNames] of [
+  ["absent", undefined],
+  ["null", null],
+  ["empty mapping", {}],
+  ["missing kind", {
+    configs: [],
+    networks: ["platform_docker_control"],
+    secrets: [],
+    services: [
+      "backup-scheduler",
+      "control-center",
+      "docker-socket-proxy",
+      "platform-alert-dispatcher",
+      "postgres",
+      "project-router",
+    ],
+  }],
+  ["duplicate name", {
+    configs: [],
+    networks: ["platform_docker_control", "platform_docker_control"],
+    secrets: [],
+    services: [
+      "backup-scheduler",
+      "control-center",
+      "docker-socket-proxy",
+      "platform-alert-dispatcher",
+      "postgres",
+      "project-router",
+    ],
+    volumes: [],
+  }],
+]) {
+  test(`runtime rejects ${label} authoritative protected-resource inventory`, () => {
+    const config = fixture();
+    const options = { projectName: "fixture" };
+    if (label !== "absent") options.protectedResourceNames = protectedResourceNames;
+    const report = evaluateRuntimeIsolation(config, options);
+    assert.equal(report.status, "failed", `${label} protected inventory bypassed the runtime boundary`);
+    assert.match(report.failures.join("\n"), /workload-protected-resource-inventory/, label);
+  });
+}
+
+for (const [kind, mutate] of [
+  ["configs", (config) => { config.configs = { orphan: { file: "/tmp/orphan" } }; }],
+  ["networks", (config) => { config.networks.orphan = { internal: true, name: "fixture_orphan" }; }],
+  ["secrets", (config) => { config.secrets = { orphan: { external: true, name: "fixture_orphan" } }; }],
+  ["services", (config) => { config.services.orphan = bounded({ read_only: true, networks: {} }); }],
+  ["volumes", (config) => { config.volumes = { orphan: { name: "fixture_orphan" } }; }],
+]) {
+  test(`runtime rejects top-level ${kind} zero-owner extras outside the authoritative inventory`, () => {
+    const config = fixture();
+    const options = fixtureRuntimeOptions(config);
+    mutate(config);
+    const report = evaluateRuntimeIsolation(config, options);
+    assert.equal(report.status, "failed", `${kind} zero-owner extra bypassed the authoritative inventory`);
+    assert.match(report.failures.join("\n"), /workload-exact-resource-inventory/, kind);
+  });
+}
 
 test("runtime inventory binds exact protected core resources and every workload reference", () => {
   const protectedResourceNames = {
@@ -932,6 +992,35 @@ function workloadIdentityFixture(entries) {
     config.networks[networkName] = { internal: true, name: `fixture_${networkName}` };
   }
   return config;
+}
+
+function fixtureRuntimeOptions(config, overrides = {}) {
+  const knownProtected = {
+    configs: ["platform_config"],
+    networks: ["platform_docker_control", "platform_postgres", "platform_routing"],
+    secrets: ["platform-secret"],
+    services: [
+      "backup-scheduler",
+      "control-center",
+      "core-service",
+      "docker-socket-proxy",
+      "platform-alert-dispatcher",
+      "postgres",
+      "project-router",
+    ],
+    volumes: ["platform_data"],
+  };
+  const protectedResourceNames = Object.fromEntries(
+    Object.entries(knownProtected).map(([kind, names]) => [
+      kind,
+      names.filter((name) => Object.hasOwn(config?.[kind] ?? {}, name)).sort(),
+    ]),
+  );
+  return {
+    projectName: "fixture",
+    protectedResourceNames,
+    ...overrides,
+  };
 }
 
 function runtimeIdentityFixture() {

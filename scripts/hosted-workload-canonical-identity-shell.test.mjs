@@ -7,7 +7,10 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { resolveCatalog } from "./hosted-workload-contract.mjs";
+import {
+  resolveCatalog,
+  verifyRawPolicyReceipt,
+} from "./hosted-workload-contract.mjs";
 
 const digest = "a".repeat(64);
 const policyScript = path.join(import.meta.dirname, "hosted-workload-source-policy.rb");
@@ -177,6 +180,78 @@ test("shell binds the manifest snapshot workload id byte-exactly", () => {
   }
 });
 
+test("manifest to raw receipt to shell verification rejects noncanonical raw semantic bytes", () => {
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "hosted-shell-raw-e2e-")));
+  try {
+    const outcome = runRawManifestPipeline(root, {
+      id: "billing",
+      serviceName: "billing-web",
+      manifestServiceName: "Billing-Web",
+      manifestRole: "WEB",
+      routes: [{ slug: "billing", port: 3000 }],
+      manifestRoutes: [{ slug: "Billing", port: 3000 }],
+    });
+    assert.notEqual(
+      outcome.stage,
+      "accepted",
+      "manifest, resolveCatalog, Ruby receipt, verifyRawPolicyReceipt and shell verification normalized noncanonical raw bytes",
+    );
+    assert.match(outcome.detail, /canonical|manifest|service|role|route/i);
+  } finally {
+    removeFixtureTree(root);
+  }
+});
+
+for (const [label, mutate] of [
+  ["service case", (manifest) => { manifest.services[0].name = "Billing-Web"; }],
+  ["service whitespace", (manifest) => { manifest.services[0].name = " billing-web "; }],
+  ["role case", (manifest) => { manifest.services[0].role = "WEB"; }],
+  ["role whitespace", (manifest) => { manifest.services[0].role = " web "; }],
+  ["route case", (manifest) => { manifest.services[0].routes[0].slug = "Billing"; }],
+  ["route whitespace", (manifest) => { manifest.services[0].routes[0].slug = " billing "; }],
+  ["secret whitespace", (manifest) => { manifest.secrets[0] = " billing-key "; }],
+]) {
+  test(`shell semantic manifest consumer rejects raw ${label}`, () => {
+    const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "hosted-shell-raw-bytes-")));
+    try {
+      const fixture = createResolvedLock(root, [{
+        id: "billing",
+        serviceName: "billing-web",
+        secretName: "billing-key",
+        routes: [{ slug: "billing", port: 3000 }],
+      }]);
+      forgeManifestSnapshot(fixture.lockPath, mutate);
+      const rawPolicy = spawnSync("ruby", [policyScript, "--lock", fixture.lockPath], { encoding: "utf8" });
+      assert.equal(rawPolicy.status, 0, rawPolicy.stderr);
+      const lock = JSON.parse(fs.readFileSync(fixture.lockPath, "utf8"));
+      assert.doesNotThrow(() => verifyRawPolicyReceipt(lock));
+      const rejected = spawnSync("/bin/sh", [lockScript, fixture.lockPath, "verify"], {
+        encoding: "utf8",
+        env: { ...process.env, HOSTED_WORKLOAD_ALLOW_RESOLVED: "1" },
+      });
+      assert.notEqual(rejected.status, 0, `shell normalized raw ${label}`);
+      assert.match(rejected.stderr, /semantic manifest|manifest.*(service|role|route|secret)/i);
+    } finally {
+      removeFixtureTree(root);
+    }
+  });
+}
+
+test("shell lock consumer accepts the exact 61-byte id with 63-byte service and secret names", () => {
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "hosted-shell-id-limit-")));
+  try {
+    const workloadId = `b${"a".repeat(60)}`;
+    const fixture = createResolvedLock(root, [{
+      id: workloadId,
+      serviceName: `${workloadId}-x`,
+      secretName: `${workloadId}-s`,
+    }]);
+    assert.deepEqual(validateRawAndReadBundle(fixture.lockPath).workloadIds, [workloadId]);
+  } finally {
+    removeFixtureTree(root);
+  }
+});
+
 function createResolvedLock(root, workloads) {
   fs.mkdirSync(root, { recursive: true });
   fs.chmodSync(root, 0o700);
@@ -189,11 +264,11 @@ function createResolvedLock(root, workloads) {
       version: 1,
       id: workload.id,
       composeFile: "compose.yaml",
-      secrets: workload.secretName ? [workload.secretName] : [],
+      secrets: workload.manifestSecrets ?? (workload.secretName ? [workload.secretName] : []),
       services: [{
-        name: workload.serviceName,
-        role: workload.role ?? "web",
-        routes: workload.routes ?? [],
+        name: workload.manifestServiceName ?? workload.serviceName,
+        role: workload.manifestRole ?? workload.role ?? "web",
+        routes: workload.manifestRoutes ?? workload.routes ?? [],
       }],
     }));
     const serviceLines = [
@@ -265,6 +340,30 @@ function createResolvedLock(root, workloads) {
   fs.writeFileSync(lockPath, `${JSON.stringify(lock, null, 2)}\n`, { mode: 0o600 });
   fs.chmodSync(lockPath, 0o600);
   return { lockPath };
+}
+
+function runRawManifestPipeline(root, workload) {
+  let fixture;
+  try {
+    fixture = createResolvedLock(root, [workload]);
+  } catch (error) {
+    return { stage: "resolveCatalog", detail: String(error?.message ?? error) };
+  }
+  const rawPolicy = spawnSync("ruby", [policyScript, "--lock", fixture.lockPath], { encoding: "utf8" });
+  if (rawPolicy.status !== 0) {
+    return { stage: "Ruby raw receipt", detail: rawPolicy.stderr };
+  }
+  try {
+    verifyRawPolicyReceipt(JSON.parse(fs.readFileSync(fixture.lockPath, "utf8")));
+  } catch (error) {
+    return { stage: "verifyRawPolicyReceipt", detail: String(error?.message ?? error) };
+  }
+  const shell = spawnSync("/bin/sh", [lockScript, fixture.lockPath, "verify"], {
+    encoding: "utf8",
+    env: { ...process.env, HOSTED_WORKLOAD_ALLOW_RESOLVED: "1" },
+  });
+  if (shell.status !== 0) return { stage: "hosted-workload-lock", detail: shell.stderr };
+  return { stage: "accepted", detail: "all raw-manifest consumer stages accepted the input" };
 }
 
 function validateRawAndReadBundle(lockPath) {
@@ -372,13 +471,19 @@ function forgeForeignOwnedResources(lockPath) {
 }
 
 function forgeManifestSnapshotId(lockPath, forgedId) {
+  forgeManifestSnapshot(lockPath, (manifest) => {
+    manifest.id = forgedId;
+  });
+}
+
+function forgeManifestSnapshot(lockPath, mutate) {
   const lock = JSON.parse(fs.readFileSync(lockPath, "utf8"));
   const workload = lock.workloads[0];
   const manifestRecord = lock.files.find((record) =>
     record.kind === "workload-manifest" && record.workloadId === workload.id);
   fs.chmodSync(lock.snapshotGeneration, 0o700);
   const manifest = JSON.parse(fs.readFileSync(manifestRecord.path, "utf8"));
-  manifest.id = forgedId;
+  mutate(manifest);
   rewriteSnapshotRecord(lock, workload, manifestRecord, Buffer.from(JSON.stringify(manifest)));
   fs.chmodSync(lock.snapshotGeneration, 0o500);
   lock.workloadContentSha256 = workloadContentSha256(lock.files);

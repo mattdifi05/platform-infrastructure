@@ -653,6 +653,42 @@ test("forged nested-id route locks cannot assign a child service to its parent",
   }
 });
 
+test("project-router enforces the exact 61-byte workload-id boundary before route lineage", () => {
+  const maximumId = `b${"a".repeat(60)}`;
+  const valid = canonicalFixtureLock();
+  valid.workloads = [{
+    id: maximumId,
+    services: [{
+      name: `${maximumId}-x`,
+      role: "web",
+      routes: [{ slug: "ok", port: 3000 }],
+    }],
+  }];
+  valid.routes = [{
+    workloadId: maximumId,
+    slug: "ok",
+    service: `${maximumId}-x`,
+    port: 3000,
+    upstream: `http://${maximumId}-x:3000`,
+  }];
+  assert.equal(parseHostedRouteLock(valid).routes.get("ok"), `http://${maximumId}-x:3000`);
+
+  for (const length of [62, 63, 64]) {
+    const oversizedId = `b${"a".repeat(length - 1)}`;
+    const forged = structuredClone(valid);
+    forged.workloads[0].id = oversizedId;
+    forged.workloads[0].services[0].name = `${oversizedId}-x`;
+    forged.routes[0].workloadId = oversizedId;
+    forged.routes[0].service = `${oversizedId}-x`;
+    forged.routes[0].upstream = `http://${oversizedId}-x:3000`;
+    assert.throws(
+      () => parseHostedRouteLock(forged),
+      /Hosted workload declarations are invalid/i,
+      `${length}-byte workload id bypassed the project-router boundary`,
+    );
+  }
+});
+
 test("exact route owners preserve non-colliding and single-owner textual prefixes", () => {
   const nonColliding = verifiedRouteLock();
   nonColliding.workloads = [

@@ -45,6 +45,12 @@ test("activation bundle validator rejects the canonical one-character id drift",
   assert.notEqual(result.status, 0);
 });
 
+test("activation bundle validator leaves exact suffix room at the 61-byte workload-id limit", () => {
+  const workloadId = `b${"a".repeat(60)}`;
+  const result = validate(bundleFor([workloadId], { [workloadId]: `${workloadId}-x` }));
+  assert.equal(result.status, 0, result.stderr);
+});
+
 test("activation bundle validator binds exact closed route records to exact service owners", () => {
   const valid = bundleFor(["billing"]);
   valid.routeRecords = [{
@@ -87,11 +93,23 @@ test("all Hosted shell bundle consumers use the exact workload-id regex", () => 
       `${relativePath} still contains the permissive workload-id regex`,
     );
     assert.equal(
-      workloadIdRegexLines.some((line) => line.includes("^[a-z][a-z0-9-]{1,62}$")),
+      workloadIdRegexLines.some((line) => line.includes("^[a-z][a-z0-9-]{1,60}$")),
       true,
-      `${relativePath} has no exact workload-id regex`,
+      `${relativePath} has no exact 61-byte workload-id regex`,
+    );
+    assert.equal(
+      workloadIdRegexLines.some((line) => line.includes("^[a-z][a-z0-9-]{1,62}$")),
+      false,
+      `${relativePath} still accepts workload ids longer than 61 bytes`,
     );
   }
+
+  const lockSource = fs.readFileSync(path.join(import.meta.dirname, "hosted-workload-lock.sh"), "utf8");
+  assert.match(
+    lockSource,
+    /all\(\$lock\.workloads\[\];\s*\(\.id\s*\|\s*type\s*==\s*"string"\s+and\s+test\("\^\[a-z\]\[a-z0-9-\]\{1,60\}\$"\)\)\)/,
+    "hosted-workload-lock.sh has no exact 61-byte workload-id validator",
+  );
 });
 
 function validate(bundle) {
