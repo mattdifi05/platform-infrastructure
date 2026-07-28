@@ -1,12 +1,31 @@
 services:
-  docker-operation-gateway:
-    image: ${PLATFORM_OPS_IMAGE:-platform/ops:local}
-    build:
-      context: .
-      dockerfile: docker/ops.Dockerfile
-      args:
-        NODE_IMAGE: ${NODE_IMAGE:-node:26.3.1-alpine@sha256:a2dc166a387cc6ca1e62d0c8e265e49ca985d6e60abc9fe6e6c3d6ce8e63f606}
-    container_name: enterprise-docker-operation-gateway
+  docker-action-activation-sidecar:
+    image: ${PLATFORM_PROVIDER_ACTIVATION_SIDECAR_IMAGE_REPOSITORY:?set provider/admin activation sidecar repository}@sha256:${PLATFORM_PROVIDER_ACTIVATION_SIDECAR_IMAGE_SHA256:?set provider/admin activation sidecar sha256}
+    container_name: enterprise-docker-action-activation-sidecar
+    profiles:
+      - backup
+    init: true
+    user: "0:0"
+    read_only: true
+    pids_limit: 64
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    restart: "no"
+    network_mode: none
+    entrypoint:
+      - /opt/provider-activation/materialize-dsse-cas
+    environment:
+      ACTIVATION_INBOX: /run/platform/provider-activation/inbox
+      ACTIVATION_CAS: /run/platform/docker-action-activation/by-bundle-sha256
+    volumes:
+      - ${DOCKER_ACTION_ACTIVATION_INBOX:?set provider/admin-owned activation inbox}:/run/platform/provider-activation/inbox:ro
+      - docker_action_activation_cas:/run/platform/docker-action-activation/by-bundle-sha256
+
+  docker-action-broker:
+    image: ${PLATFORM_DOCKER_ACTION_BROKER_IMAGE_REPOSITORY:?set digest-pinned broker repository}@sha256:${PLATFORM_DOCKER_ACTION_BROKER_IMAGE_SHA256:?set broker image sha256}
+    container_name: enterprise-docker-action-broker
     profiles:
       - backup
     init: true
@@ -14,51 +33,49 @@ services:
     pids_limit: 256
     security_opt:
       - no-new-privileges:true
+    cap_drop:
+      - ALL
     restart: unless-stopped
+    network_mode: none
     entrypoint:
       - node
-      - /infra/scripts/docker-operation-gateway.mjs
+      - /opt/platform-docker-broker/docker-action-broker.mjs
     environment:
-      PLATFORM_INFRA_ROOT: /infra
-      PLATFORM_INFRA_CONTAINER_ROOT: /infra
-      PLATFORM_INFRA_HOST_ROOT: ${PLATFORM_INFRA_HOST_ROOT:-}
-      PROJECT_SOURCE_ROOT: /project
-      PROJECT_SOURCE_HOST_ROOT: ${PROJECT_SOURCE_HOST_ROOT:-}
-      PROJECT_STATE_ROOT: /var/www/project-state
-      PROJECT_DATABASES_FILE: /var/www/project-state/databases.json
-      BACKUP_SCHEDULER_JOBS_DIR: /var/www/project-state/backup-jobs
-      BACKUP_SCHEDULER_DOCKER_GATEWAY_TOKEN_FILE: /run/secrets/backup_scheduler_docker_gateway_token
-      BACKUP_SIGNING_KEYS_FILE: /infra/secrets/backup_signing_keys.txt
-      RESTIC_IMAGE: ${RESTIC_IMAGE:-}
-      RESTIC_REPOSITORY: ${RESTIC_REPOSITORY:-}
-      RESTIC_PASSWORD_FILE: ${RESTIC_PASSWORD_FILE:-/infra/secrets/restic_password.txt}
-      RESTIC_KEEP_LAST: ${RESTIC_KEEP_LAST:-42}
-      RESTIC_HOSTNAME: ${RESTIC_HOSTNAME:-platform-infrastructure}
-      RESTIC_REQUIRE_IMMUTABLE_IMAGE: ${RESTIC_REQUIRE_IMMUTABLE_IMAGE:-true}
-      RESTIC_MAX_REPOSITORY_BYTES: ${RESTIC_MAX_REPOSITORY_BYTES:-2500000000000}
-      RCLONE_CONFIG: ${RCLONE_CONFIG:-/infra/secrets/rclone/rclone.conf}
-      KEYCLOAK_DB_NAME: ${KEYCLOAK_DB_NAME:-keycloak}
-      BACKUP_LOCAL_KEEP_LAST: ${BACKUP_LOCAL_KEEP_LAST:-42}
-      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
-      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
-    expose:
-      - "8787"
+      DOCKER_ACTION_BROKER_SOCKET: /run/platform/docker-action-broker/broker.sock
+      DOCKER_ACTION_RUNTIME_INTENT_FILE: /run/platform/docker-action-trust/runtime-intent.json
+      DOCKER_ACTION_ACTIVE_RECEIPT_FILE: /run/platform/docker-action-trust/active-receipt.json
+      DOCKER_ACTION_RUNTIME_INTENT_TRUST_KEY_FILE: /run/secrets/docker_action_runtime_intent_trust_key
     secrets:
-      - backup_scheduler_docker_gateway_token
+      - source: docker_action_runtime_intent_trust_key
+        target: docker_action_runtime_intent_trust_key
+        uid: "0"
+        gid: "0"
+        mode: 0400
+      - source: docker_action_backup_prune_plan
+        target: docker_action_backup_prune_plan
+        uid: "0"
+        gid: "0"
+        mode: 0400
+      - source: docker_action_evidence_runtime_snapshot
+        target: docker_action_evidence_runtime_snapshot
+        uid: "0"
+        gid: "0"
+        mode: 0400
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
-      - .:/infra:ro
-      - ./backups:/infra/backups
-      - ./reports:/infra/reports
-      - ./projects-portal/state:/var/www/project-state
-      - ${PROJECT_SOURCE_DIR:-../src}:/project:ro
-    networks:
-      - platform_docker_control
+      - docker_action_broker_socket:/run/platform/docker-action-broker
+      - docker_action_broker_state:/var/lib/platform/docker-action-broker
+      - docker_action_activation_cas:/run/platform/docker-action-activation/by-bundle-sha256:ro
+      - ${DOCKER_ACTION_RUNTIME_INTENT_FILE:?set root-owned runtime intent}:/run/platform/docker-action-trust/runtime-intent.json:ro
+      - ${DOCKER_ACTION_ACTIVE_RECEIPT_FILE:?set root-owned active receipt}:/run/platform/docker-action-trust/active-receipt.json:ro
     healthcheck:
-      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      test: ["CMD", "node", "-e", "const fs=require('node:fs');process.exit(fs.statSync('/run/platform/docker-action-broker/broker.sock').isSocket()?0:1)"]
       interval: 15s
       timeout: 5s
       retries: 5
+    depends_on:
+      docker-action-activation-sidecar:
+        condition: service_completed_successfully
 
   backup-scheduler:
     image: ${PLATFORM_OPS_IMAGE:-platform/ops:local}
@@ -111,8 +128,10 @@ services:
       KEYCLOAK_DB_NAME: ${KEYCLOAK_DB_NAME:-keycloak}
       BACKUP_LOCAL_KEEP_LAST: ${BACKUP_LOCAL_KEEP_LAST:-42}
       BACKUP_SCHEDULER_JOBS_DIR: /var/www/project-state/backup-jobs
-      PLATFORM_DOCKER_GATEWAY_URL: http://docker-operation-gateway:8787
-      BACKUP_SCHEDULER_DOCKER_GATEWAY_TOKEN_FILE: /run/secrets/backup_scheduler_docker_gateway_token
+      DOCKER_ACTION_BROKER_SOCKET: /run/platform/docker-action-broker/broker.sock
+      DOCKER_ACTION_RUNTIME_INTENT_ID: ${DOCKER_ACTION_RUNTIME_INTENT_ID:?set admitted runtime intent id}
+      DOCKER_ACTION_ACTIVE_RECEIPT_SHA256: ${DOCKER_ACTION_ACTIVE_RECEIPT_SHA256:?set admitted active receipt sha256}
+      DOCKER_ACTION_COMBINED_RENDER_SHA256: ${DOCKER_ACTION_COMBINED_RENDER_SHA256:?set exact final combined render sha256}
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
     volumes:
@@ -120,10 +139,20 @@ services:
       - ./projects-portal/state:/var/www/project-state
       - ${PROJECT_SOURCE_DIR:-../src}:/project:ro
       - backup_scheduler_logs:/var/log/platform
+      - docker_action_broker_socket:/run/platform/docker-action-broker:ro
     secrets:
-      - backup_scheduler_docker_gateway_token
+      - source: docker_action_backup_prune_plan
+        target: docker_action_backup_prune_plan
+        uid: "0"
+        gid: "0"
+        mode: 0400
+      - source: docker_action_evidence_runtime_snapshot
+        target: docker_action_evidence_runtime_snapshot
+        uid: "0"
+        gid: "0"
+        mode: 0400
     depends_on:
-      docker-operation-gateway:
+      docker-action-broker:
         condition: service_healthy
       postgres:
         condition: service_healthy
@@ -134,7 +163,9 @@ services:
       keycloak:
         condition: service_healthy
     networks:
-      - platform_docker_control
+      - platform_db_admin
+      - platform_storage
+      - platform_egress
     healthcheck:
       test: ["CMD-SHELL", "test -s /etc/crontabs/root && pgrep crond >/dev/null"]
       interval: 30s
@@ -144,9 +175,6 @@ services:
 volumes:
   backup_scheduler_logs:
     name: ${BACKUP_SCHEDULER_LOG_VOLUME:-platform_backup_scheduler_logs}
-
-networks:
-  platform_docker_control:
-    name: ${COMPOSE_PROJECT_NAME:-platform_infra}_platform_docker_control
-    internal: true
-    driver: bridge
+  docker_action_broker_socket:
+  docker_action_broker_state:
+  docker_action_activation_cas:

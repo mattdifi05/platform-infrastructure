@@ -41,9 +41,13 @@ test("FG-005 wrapper and scheduler retain the complete isolation boundary", () =
 
   const scheduler = serviceBlock(fs.readFileSync(path.join(root, "compose.backup-scheduler.yaml"), "utf8"), "backup-scheduler");
   assert.match(scheduler, /- \.:\/infra:ro/);
-  assert.match(scheduler, /PLATFORM_DOCKER_GATEWAY_URL: http:\/\/docker-operation-gateway:8787/);
+  assert.match(scheduler, /DOCKER_ACTION_BROKER_SOCKET: \/run\/platform\/docker-action-broker\/broker\.sock/);
+  assert.match(scheduler, /DOCKER_ACTION_RUNTIME_INTENT_ID:/);
+  assert.match(scheduler, /DOCKER_ACTION_ACTIVE_RECEIPT_SHA256:/);
+  assert.match(scheduler, /DOCKER_ACTION_COMBINED_RENDER_SHA256:/);
+  assert.match(scheduler, /docker_action_broker_socket:\/run\/platform\/docker-action-broker:ro/);
   assert.doesNotMatch(scheduler, /\/var\/run\/docker\.sock|DOCKER_HOST|:\/infra(?:\s|$)/m);
-  assert.match(scheduler, /- platform_docker_control/);
+  assert.doesNotMatch(scheduler, /docker-action-trust|tcp:\/\/|237[56]|:8787/);
 });
 
 function serviceBlock(source, name) {

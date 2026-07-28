@@ -7,7 +7,6 @@ const CORE_INTERNAL_NETWORKS = [
   "platform_bus",
   "platform_storage",
   "platform_observability",
-  "platform_docker_control",
 ];
 
 const ZONE_CORE_SERVICE = new Map([
@@ -68,9 +67,13 @@ export function evaluateNetworkSegmentation(config) {
   requireShared("observability-prometheus-loki", "prometheus", "loki", "platform_observability");
   requireShared("observability-prometheus-alertmanager", "prometheus", "alertmanager", "platform_observability");
   requireShared("observability-alertmanager-dispatcher", "alertmanager", "platform-alert-dispatcher", "platform_observability");
-  requireShared("docker-control-scheduler-gateway", "backup-scheduler", "docker-operation-gateway", "platform_docker_control");
-  const socketMembers = [...(networkMembers.get("platform_docker_control") || [])].sort();
-  record("members-platform-docker-control", same(socketMembers, ["backup-scheduler", "docker-operation-gateway"]), `members=${socketMembers.join(",") || "none"}`);
+  const dockerBrokerNetworks = serviceNetworks.get("docker-action-broker") || [];
+  record("docker-control-network-removed", !Object.hasOwn(networks, "platform_docker_control"), `declared=${Object.hasOwn(networks, "platform_docker_control")}`);
+  record("docker-broker-network-disabled", services["docker-action-broker"]?.network_mode === "none"
+    && dockerBrokerNetworks.length === 0, `networkMode=${services["docker-action-broker"]?.network_mode || "unset"} networks=${dockerBrokerNetworks.join(",") || "none"}`);
+  for (const name of Object.keys(services).filter((name) => name !== "docker-action-broker")) {
+    requireDenied(`deny-docker-broker-${name}`, "docker-action-broker", name);
+  }
 
   const workloads = new Map();
   for (const [name, service] of Object.entries(services)) {
@@ -81,7 +84,7 @@ export function evaluateNetworkSegmentation(config) {
     const prefix = `${workloadId.replaceAll("-", "_")}_`;
     const foreign = (serviceNetworks.get(name) || []).filter((network) => !network.startsWith(prefix));
     record(`workload-dedicated-networks-${name}`, foreign.length === 0, `${name} foreign=${foreign.join(",") || "none"}`);
-    requireDenied(`deny-${name}-docker-operation-gateway`, name, "docker-operation-gateway");
+    requireDenied(`deny-${name}-docker-action-broker`, name, "docker-action-broker");
   }
 
   for (const [network, members] of networkMembers) {

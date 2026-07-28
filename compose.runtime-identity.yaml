@@ -6,7 +6,7 @@ x-platform-runtime-labels: &platform_runtime_labels
   com.platform.runtime.commit: ${PLATFORM_RUNTIME_COMMIT:?Set the approved candidate commit}
   com.platform.runtime.tree: ${PLATFORM_RUNTIME_TREE:?Set the approved candidate tree}
   com.platform.runtime.deployment-id: ${PLATFORM_RUNTIME_DEPLOYMENT_ID:?Set the approved deployment ID}
-  com.platform.runtime.render-sha256: ${PLATFORM_RUNTIME_RENDER_SHA256:?Set the approved Compose render SHA256}
+  com.platform.runtime.source-render-sha256: ${PLATFORM_RUNTIME_SOURCE_RENDER_SHA256:?Set the exact source Compose render SHA256}
   com.platform.runtime.workload-lock-sha256: ${PLATFORM_RUNTIME_WORKLOAD_LOCK_SHA256:?Set the approved workload lock SHA256}
 
 services:
@@ -20,7 +20,9 @@ services:
     labels: *platform_runtime_labels
   control-center:
     labels: *platform_runtime_labels
-  docker-operation-gateway:
+  docker-action-activation-sidecar:
+    labels: *platform_runtime_labels
+  docker-action-broker:
     labels: *platform_runtime_labels
   grafana:
     labels: *platform_runtime_labels

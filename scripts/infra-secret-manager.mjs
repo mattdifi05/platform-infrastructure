@@ -12,7 +12,9 @@ const command = process.argv[2] ?? "help";
 const argv = parseArgs(process.argv.slice(3));
 
 const requiredSecrets = [
-  { name: "backup_scheduler_docker_gateway_token", kind: "opaque", bytes: 48, rotationDays: 90 },
+  { name: "docker_action_runtime_intent_trust_key", kind: "opaque", bytes: 48, rotationDays: 90 },
+  { name: "docker_action_backup_prune_plan", kind: "opaque", bytes: 48, rotationDays: 90 },
+  { name: "docker_action_evidence_runtime_snapshot", kind: "opaque", bytes: 48, rotationDays: 90 },
   { name: "postgres_superuser_password", kind: "opaque", bytes: 36, rotationDays: 90, manualRotation: true },
   { name: "keycloak_db_password", kind: "opaque", bytes: 36, rotationDays: 90, manualRotation: true },
   { name: "redis_password", kind: "opaque", bytes: 36, rotationDays: 90 },

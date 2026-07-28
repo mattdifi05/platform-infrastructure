@@ -37,27 +37,40 @@ x-runtime-observability: &runtime_observability
     weight: 400
 
 services:
-  docker-operation-gateway:
+  docker-action-activation-sidecar:
+    <<: *runtime_control
+    read_only: true
+    cpus: 0.25
+    mem_limit: 128m
+    mem_reservation: 32m
+    pids_limit: 64
+    network_mode: none
+    volumes: !override
+      - ${DOCKER_ACTION_ACTIVATION_INBOX:?set provider/admin-owned activation inbox}:/run/platform/provider-activation/inbox:ro
+      - docker_action_activation_cas:/run/platform/docker-action-activation/by-bundle-sha256
+    networks: !reset []
+
+  docker-action-broker:
     <<: *runtime_control
     read_only: true
     cpus: 0.50
     mem_limit: 512m
     mem_reservation: 128m
     pids_limit: 256
+    network_mode: none
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,size=64m
       - /root:rw,noexec,nosuid,nodev,size=16m
     volumes: !override
       - /var/run/docker.sock:/var/run/docker.sock:ro
-      - .:/infra:ro
-      - ./backups:/infra/backups
-      - ./reports:/infra/reports
-      - ./projects-portal/state:/var/www/project-state
-      - ${PROJECT_SOURCE_DIR:-../src}:/project:ro
-    networks: !override
-      - platform_docker_control
+      - docker_action_broker_socket:/run/platform/docker-action-broker
+      - docker_action_broker_state:/var/lib/platform/docker-action-broker
+      - docker_action_activation_cas:/run/platform/docker-action-activation/by-bundle-sha256:ro
+      - ${DOCKER_ACTION_RUNTIME_INTENT_FILE:?set root-owned runtime intent}:/run/platform/docker-action-trust/runtime-intent.json:ro
+      - ${DOCKER_ACTION_ACTIVE_RECEIPT_FILE:?set root-owned active receipt}:/run/platform/docker-action-trust/active-receipt.json:ro
+    networks: !reset []
     healthcheck:
-      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      test: ["CMD", "node", "-e", "const fs=require('node:fs');process.exit(fs.statSync('/run/platform/docker-action-broker/broker.sock').isSocket()?0:1)"]
       interval: 15s
       timeout: 5s
       retries: 5
@@ -254,8 +267,10 @@ services:
     mem_reservation: 128m
     pids_limit: 256
     environment:
-      PLATFORM_DOCKER_GATEWAY_URL: http://docker-operation-gateway:8787
-      BACKUP_SCHEDULER_DOCKER_GATEWAY_TOKEN_FILE: /run/secrets/backup_scheduler_docker_gateway_token
+      DOCKER_ACTION_BROKER_SOCKET: /run/platform/docker-action-broker/broker.sock
+      DOCKER_ACTION_RUNTIME_INTENT_ID: ${DOCKER_ACTION_RUNTIME_INTENT_ID:?set admitted runtime intent id}
+      DOCKER_ACTION_ACTIVE_RECEIPT_SHA256: ${DOCKER_ACTION_ACTIVE_RECEIPT_SHA256:?set admitted active receipt sha256}
+      DOCKER_ACTION_COMBINED_RENDER_SHA256: ${DOCKER_ACTION_COMBINED_RENDER_SHA256:?set exact final combined render sha256}
     tmpfs:
       - /tmp:rw,nosuid,nodev,size=256m
       - /root:rw,nosuid,nodev,size=32m
@@ -266,17 +281,11 @@ services:
       - ./projects-portal/state:/var/www/project-state
       - ${PROJECT_SOURCE_DIR:-../src}:/project:ro
       - backup_scheduler_logs:/var/log/platform
+      - docker_action_broker_socket:/run/platform/docker-action-broker:ro
     depends_on:
-      docker-operation-gateway:
+      docker-action-broker:
         condition: service_healthy
     networks: !override
       - platform_db_admin
       - platform_storage
       - platform_egress
-      - platform_docker_control
-
-networks:
-  platform_docker_control:
-    name: ${COMPOSE_PROJECT_NAME:-platform_infra}_platform_docker_control
-    internal: true
-    driver: bridge

@@ -160,7 +160,7 @@ append_weekly() {
 }
 
 node_ops() {
-  printf 'node %s %s' "$(quote_shell_value "$INFRA_ROOT/scripts/docker-operation-client.mjs")" "$1"
+  printf 'node %s %s' "$(quote_shell_value "$INFRA_ROOT/scripts/docker-action-client.mjs")" "$1"
 }
 
 job_json_value() {
@@ -215,7 +215,7 @@ process_backup_job() {
     echo "Rejected unsupported backup job operation for $job_id" >> "$log_file"
   else
     echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] executing typed $operation job $job_id" >> "$log_file"
-    if node "$INFRA_ROOT/scripts/docker-operation-client.mjs" execute-backup-job --jobFileName "$name" >> "$log_file" 2>&1; then
+    if node "$INFRA_ROOT/scripts/docker-action-client.mjs" execute-backup-job --jobId "$job_id" >> "$log_file" 2>&1; then
       echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] completed typed job $job_id" >> "$log_file"
     else
       exit_code=$?
@@ -255,7 +255,7 @@ if [ "${1:-}" = "--run" ]; then
     backup-platform-catalog|prune-manifest-backups-plan|prune-manifest-backups-apply|full-restore-drill|offsite-backup-restic|execute-backup-job) ;;
     *) echo "Unsupported typed scheduler operation: $operation" >&2; exit 64 ;;
   esac
-  exec node "$INFRA_ROOT/scripts/docker-operation-client.mjs" "$operation" "$@"
+  exec node "$INFRA_ROOT/scripts/docker-action-client.mjs" "$operation" "$@"
 fi
 
 mkdir -p "$LOG_DIR" "$(dirname "$CRON_FILE")" "$JOBS_DIR/queued" "$JOBS_DIR/running" "$JOBS_DIR/done" "$JOBS_DIR/failed"
@@ -284,7 +284,7 @@ fi
 
 if [ "$RUN_ON_START" = "true" ] || [ "$RUN_ON_START" = "1" ]; then
   cd "$INFRA_ROOT"
-  node "$INFRA_ROOT/scripts/docker-operation-client.mjs" backup-platform-catalog
+  node "$INFRA_ROOT/scripts/docker-action-client.mjs" backup-platform-catalog
 fi
 
 process_backup_job_queue &

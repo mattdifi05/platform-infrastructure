@@ -176,6 +176,9 @@ function parseCronTime(value, optionName) {
 function run(bin, args = [], options = {}) {
   const childEnvironment = { ...process.env };
   for (const key of options.unsetEnv ?? []) delete childEnvironment[key];
+  if (path.basename(String(bin)) === "docker") {
+    fail("Raw Docker execution from candidate infra code is disabled; use an admitted fixed broker action or an external host orchestrator.");
+  }
   return runCommandSync(bin, args, {
     cwd: options.cwd ?? infraRoot,
     env: { ...childEnvironment, ...options.env },
@@ -1878,14 +1881,11 @@ function restoreTestControlCenterState(options = {}) {
 
 function typedBackupJobPath(options = {}) {
   const jobsRoot = path.resolve(process.env.BACKUP_SCHEDULER_JOBS_DIR || path.join(infraRoot, "projects-portal", "state", "backup-jobs"));
-  const gatewaySnapshotRoot = process.env.PLATFORM_DOCKER_GATEWAY_CHILD === "1"
-    ? String(process.env.DOCKER_GATEWAY_JOB_SNAPSHOT_ROOT || "")
-    : "";
-  const allowedRoot = path.resolve(gatewaySnapshotRoot || path.join(jobsRoot, "running"));
+  const allowedRoot = path.resolve(path.join(jobsRoot, "running"));
   const jobFile = options.jobFile ?? argv.jobFile;
   const requested = path.resolve(jobFile || "");
   if (!jobFile || !requested.startsWith(`${allowedRoot}${path.sep}`)) {
-    fail("Typed backup jobs must be read from the scheduler queue or gateway snapshot.");
+    fail("Typed backup jobs must be read from the scheduler queue.");
   }
   const stat = fs.lstatSync(requested);
   const parent = fs.realpathSync.native(path.dirname(requested));
@@ -5070,7 +5070,7 @@ async function managedSecretsPreflight(options = {}) {
     const envFile = path.resolve(options.envFile ?? argv.envFile ?? path.join(infraRoot, ".env"));
     const managedCompose = readText(path.join(infraRoot, "compose.managed-secrets.yaml"));
     const required = [
-      "backup_scheduler_docker_gateway_token", "postgres_superuser_password", "keycloak_db_password", "redis_password", "keycloak_admin_password", "nats_password", "minio_root_password", "mariadb_root_password", "phpmyadmin_control_password", "grafana_admin_password", "control_center_vault_keys", "projects_gateway_signing_keys", "backup_signing_keys", "alertmanager_webhook_token", "smtp_password",
+      "postgres_superuser_password", "keycloak_db_password", "redis_password", "keycloak_admin_password", "nats_password", "minio_root_password", "mariadb_root_password", "phpmyadmin_control_password", "grafana_admin_password", "control_center_vault_keys", "projects_gateway_signing_keys", "backup_signing_keys", "alertmanager_webhook_token", "smtp_password",
     ];
     for (const secretName of required) {
       assertMatch(managedCompose, new RegExp(`^\\s{2}${secretName}:\\s*\\r?\\n\\s+external:\\s+true`, "m"), `${secretName} must be declared as an external Docker secret.`);
@@ -5690,7 +5690,9 @@ async function retentionEvidence(options = {}) {
 }
 
 const managedSecretRotationExpectations = [
-  { name: "backup_scheduler_docker_gateway_token", kind: "opaque", rotationDays: 90 },
+  { name: "docker_action_runtime_intent_trust_key", kind: "opaque", rotationDays: 90 },
+  { name: "docker_action_backup_prune_plan", kind: "opaque", rotationDays: 90 },
+  { name: "docker_action_evidence_runtime_snapshot", kind: "opaque", rotationDays: 90 },
   { name: "postgres_superuser_password", kind: "opaque", rotationDays: 90, manualRotation: true },
   { name: "keycloak_db_password", kind: "opaque", rotationDays: 90, manualRotation: true },
   { name: "redis_password", kind: "opaque", rotationDays: 90 },
@@ -11883,7 +11885,8 @@ function staticSecurityInfraOnlyCheck() {
   assertMatch(lockScript, /snapshotParentIdentity[\s\S]*rawPolicyReceipt/, "Host lock reader must enforce snapshot identity plus raw receipt binding.");
   assertMatch(prepareScript, /hosted-workload-contract\.mjs/, "Hosted workload preparation must use the contract validator.");
   assertMatch(composeNetworks, /platform_edge:[\s\S]*platform_routing:[\s\S]*platform_observability:[\s\S]*platform_egress:/, "Platform trust zones must be explicit.");
-  assertMatch(composeIsolation, /docker-operation-gateway:[\s\S]*\/var\/run\/docker\.sock:\/var\/run\/docker\.sock:ro/, "Only the typed Docker operation gateway may mount the raw socket.");
+  assertMatch(composeIsolation, /docker-action-broker:[\s\S]*\/var\/run\/docker\.sock:\/var\/run\/docker\.sock:ro/, "Only the immutable fixed-action Docker broker may mount the raw socket.");
+  assertNoMatch(composeIsolation, /docker-operation-gateway|platform_docker_control|237[56]|AUTH\s*=\s*0/, "The generic Docker gateway and TCP proxy surface must remain absent.");
   assertMatch(router, /PROJECT_ROUTER_ALLOWED_UPSTREAMS[\s\S]*validateUpstream/, "Project Router must enforce an exact upstream allowlist.");
   assertNoMatch(router, /node:child_process|spawn\(|execFile\(|stopManagedProject/, "Project Router must remain proxy-only.");
   assertMatch(alertmanager, /platform-alert-dispatcher:3000/, "Alertmanager must deliver through the platform-owned dispatcher.");
@@ -11905,7 +11908,9 @@ async function staticSecurityCheck() {
 async function validateLocalSecrets() {
   const secretsDir = path.resolve(argv.secretsDir ?? path.join(infraRoot, "secrets"));
   const required = [
-    "backup_scheduler_docker_gateway_token",
+    "docker_action_runtime_intent_trust_key",
+    "docker_action_backup_prune_plan",
+    "docker_action_evidence_runtime_snapshot",
     "postgres_superuser_password",
     "keycloak_db_password",
     "redis_password",

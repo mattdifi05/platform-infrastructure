@@ -1,923 +1,185 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import {
-  validateRenderedWorkloads,
-  validateWorkloadManifest,
-} from "./hosted-workload-contract.mjs";
 import { evaluateRuntimeIsolation } from "./runtime-isolation-policy.mjs";
 
-test("accepts bounded platform and external workload services", () => {
-  const config = fixture();
-  const report = evaluateRuntimeIsolation(config, fixtureRuntimeOptions(config));
+test("accepts the host-private immutable action broker boundary", () => {
+  const report = evaluateRuntimeIsolation(fixture());
   assert.equal(report.status, "passed", report.failures.join("\n"));
-  assert.equal(report.summary.rawSocketOwners.join(","), "docker-operation-gateway");
+  assert.equal(report.summary.rawSocketOwners.join(","), "docker-action-broker");
   assert.equal(report.summary.hostedWorkloads, 1);
-  assert.equal(report.checks.find((item) => item.id === "scheduler-has-no-docker-api")?.status, "passed");
-  assert.equal(report.checks.find((item) => item.id === "socket-network-members")?.status, "passed");
-  assert.equal(report.checks.find((item) => item.id === "docker-gateway-no-host-ports")?.status, "passed");
-  assert.equal(report.checks.find((item) => item.id === "docker-gateway-principal-secret-exclusive")?.status, "passed");
+  for (const id of [
+    "docker-broker-immutable-image",
+    "docker-broker-host-private",
+    "docker-broker-exact-raw-socket",
+    "docker-broker-socket-volume-not-aliased",
+    "docker-broker-state-volume-not-aliased",
+    "scheduler-uses-local-action-socket",
+    "scheduler-has-no-docker-api",
+  ]) {
+    assert.equal(report.checks.find((item) => item.id === id)?.status, "passed", id);
+  }
 });
 
-test("rejects a workload raw socket, bind and broad host mount", () => {
+test("rejects workload raw socket, bind and broad host mounts", () => {
   const config = fixture();
   config.services["example-app-web"].volumes.push(
-    { type: "bind", source: "/var/run/docker.sock", target: "/var/run/docker.sock" },
-    { type: "bind", source: "/srv/platform", target: "/mnt/host/platform" },
+    { type: "bind", source: "/var/run/docker.sock", target: "/var/run/docker.sock", read_only: true },
+    { type: "bind", source: "/srv/platform", target: "/mnt/host/platform", read_only: true },
   );
-  const report = evaluateRuntimeIsolation(config, fixtureRuntimeOptions(config));
+  const report = evaluateRuntimeIsolation(config);
   assert.equal(report.status, "failed");
+  assert.match(report.failures.join("\n"), /raw-socket-single-owner/);
   assert.match(report.failures.join("\n"), /workload-no-bind-mounts-example-app-web/);
   assert.match(report.failures.join("\n"), /workload-deny-mount-mnt-host-example-app-web/);
 });
 
-test("rejects PID sharing, non-numeric workload identity and added capabilities", () => {
+test("rejects root workload identity, added capabilities and supplemental Docker group", () => {
   const config = fixture();
-  config.services["example-app-web"].user = "app:app";
-  config.services["example-app-web"].pid = "service:postgres";
+  config.services["example-app-web"].user = "0:0";
   config.services["example-app-web"].cap_add = ["NET_ADMIN"];
-  const report = evaluateRuntimeIsolation(config, fixtureRuntimeOptions(config));
+  config.services["example-app-web"].group_add = ["998"];
+  const report = evaluateRuntimeIsolation(config);
   assert.equal(report.status, "failed");
-  assert.match(report.failures.join("\n"), /workload-numeric-user-example-app-web/);
-  assert.match(report.failures.join("\n"), /workload-private-pid-example-app-web/);
+  assert.match(report.failures.join("\n"), /workload-non-root-example-app-web/);
   assert.match(report.failures.join("\n"), /workload-drop-all-capabilities-example-app-web/);
-});
-
-test("rejects unbounded or non-local workload logging at runtime", () => {
-  for (const logging of [
-    undefined,
-    { driver: "json-file" },
-    { driver: "local", options: { "max-size": "1g", "max-file": "99" } },
-  ]) {
-    const config = fixture();
-    config.services["example-app-web"].logging = logging;
-    const report = evaluateRuntimeIsolation(config, fixtureRuntimeOptions(config));
-    assert.equal(report.status, "failed");
-    assert.match(report.failures.join("\n"), /workload-bounded-local-logging-example-app-web/);
-  }
-});
-
-test("rejects workload swap and OOM overrides at runtime", () => {
-  const config = fixture();
-  config.services["example-app-web"].memswap_limit = 512 * 1024 * 1024;
-  config.services["example-app-web"].oom_score_adj = -1000;
-  const report = evaluateRuntimeIsolation(config, fixtureRuntimeOptions(config));
-  assert.equal(report.status, "failed");
-  assert.match(report.failures.join("\n"), /workload-no-swap-example-app-web/);
-  assert.match(report.failures.join("\n"), /workload-no-oom-overrides-example-app-web/);
-});
-
-test("rejects workload service volume inheritance independently at runtime", () => {
-  const config = fixture();
-  config.services["example-app-web"].volumes_from = ["postgres:rw"];
-  const report = evaluateRuntimeIsolation(config, fixtureRuntimeOptions(config));
-  assert.equal(report.status, "failed");
-  assert.match(report.failures.join("\n"), /workload-no-volumes-from-example-app-web/);
-});
-
-test("rejects named-volume protected-target shadowing and nested mount controls", () => {
-  for (const mount of [
-    { type: "volume", source: "example-app_data", target: "/var/run/docker.sock" },
-    { type: "volume", source: "example-app_data", target: "/run/platform/hosted-workloads.lock.json" },
-    { type: "volume", source: "example-app_data", target: "/data", read_only: false },
-    { type: "volume", source: "example-app_data", target: "/data", volume: { nocopy: false, subpath: "host" } },
-  ]) {
-    const config = fixture();
-    config.volumes = { "example-app_data": { name: "fixture_example-app_data" } };
-    config.services["example-app-web"].volumes = [mount];
-    const report = evaluateRuntimeIsolation(config, fixtureRuntimeOptions(config));
-    assert.equal(report.status, "failed");
-    assert.match(report.failures.join("\n"), /workload-exact-volume-mounts-example-app-web/);
-  }
-});
-
-test("FG-057 countercheck rejects external-container volume inheritance", () => {
-  const config = fixture();
-  config.services["example-app-web"].volumes_from = ["container:platform-postgres:rw"];
-  const report = evaluateRuntimeIsolation(config, fixtureRuntimeOptions(config));
-  assert.equal(report.status, "failed");
-  assert.match(report.failures.join("\n"), /workload-no-external-container-volume-inheritance-example-app-web/);
-});
-
-test("rejects workload lifecycle hooks independently at runtime", () => {
-  for (const hook of ["post_start", "pre_start", "pre_stop"]) {
-    const config = fixture();
-    config.services["example-app-web"][hook] = [{ command: "id" }];
-    const report = evaluateRuntimeIsolation(config, fixtureRuntimeOptions(config));
-    assert.equal(report.status, "failed");
-    assert.match(report.failures.join("\n"), /workload-no-lifecycle-hooks-example-app-web/);
-  }
-});
-
-test("rejects both workload scaling controls independently at runtime", () => {
-  for (const mutation of [
-    (service) => { service.scale = 2; },
-    (service) => { service.deploy = { replicas: 2 }; },
-    (service) => { service.deploy = { mode: "global" }; },
-  ]) {
-    const config = fixture();
-    mutation(config.services["example-app-web"]);
-    const report = evaluateRuntimeIsolation(config, fixtureRuntimeOptions(config));
-    assert.equal(report.status, "failed");
-    assert.match(report.failures.join("\n"), /workload-no-scaling-example-app-web/);
-  }
-});
-
-test("rejects workload config grants independently at runtime", () => {
-  const config = fixture();
-  config.services["example-app-web"].configs = [{ source: "platform-config", target: "/run/config" }];
-  const report = evaluateRuntimeIsolation(config, fixtureRuntimeOptions(config));
-  assert.equal(report.status, "failed");
-  assert.match(report.failures.join("\n"), /workload-no-configs-example-app-web/);
-});
-
-test("rejects workload inline and host-environment config definitions at runtime", () => {
-  for (const definition of [{ content: "hostile" }, { environment: "HOST_SECRET" }]) {
-    const config = fixture();
-    config.configs = { example_app_inline: definition };
-    const report = evaluateRuntimeIsolation(config, fixtureRuntimeOptions(config));
-    assert.equal(report.status, "failed");
-    assert.match(report.failures.join("\n"), /workload-no-inline-config-definitions/);
-  }
-});
-
-test("rejects workload host device controls independently at runtime", () => {
-  for (const mutation of [
-    (service) => { service.devices = [{ source: "/dev/kvm", target: "/dev/kvm" }]; },
-    (service) => { service.device_cgroup_rules = ["c 10:232 rwm"]; },
-    (service) => { service.blkio_config.device_write_iops = [{ path: "/dev/sda", rate: 1000 }]; },
-  ]) {
-    const config = fixture();
-    mutation(config.services["example-app-web"]);
-    const report = evaluateRuntimeIsolation(config, fixtureRuntimeOptions(config));
-    assert.equal(report.status, "failed");
-    assert.match(report.failures.join("\n"), /workload-(no-device-access|bounded-global-blkio)-example-app-web/);
-  }
-});
-
-test("rejects workload label files, ambient environment and deploy controls independently at runtime", () => {
-  for (const [mutation, check] of [
-    [(service) => { service.label_file = "/tmp/attacker.labels"; }, "workload-no-label-file"],
-    [(service) => { service.environment = { DATABASE_URL: null }; }, "workload-explicit-environment"],
-    [(service) => { service.environment = ["DATABASE_URL"]; }, "workload-explicit-environment"],
-    [(service) => { service.deploy = { resources: { limits: { cpus: "64", memory: "64G", pids: 999999 } } }; }, "workload-no-deploy-controls"],
-  ]) {
-    const config = fixture();
-    mutation(config.services["example-app-web"]);
-    const report = evaluateRuntimeIsolation(config, fixtureRuntimeOptions(config));
-    assert.equal(report.status, "failed");
-    assert.match(report.failures.join("\n"), new RegExp(`${check}-example-app-web`));
-  }
-});
-
-test("rejects workload supplemental device groups independently at runtime", () => {
-  const config = fixture();
-  config.services["example-app-web"].group_add = ["video", "44"];
-  const report = evaluateRuntimeIsolation(config, fixtureRuntimeOptions(config));
-  assert.equal(report.status, "failed");
   assert.match(report.failures.join("\n"), /workload-no-supplemental-groups-example-app-web/);
 });
 
-test("rejects workload local volume driver options independently at runtime", () => {
+test("rejects a workload named-volume alias to a host path", () => {
   const config = fixture();
-  config.volumes = {
-    example_app_data: {
-      driver: "local",
-      driver_opts: { type: "none", o: "bind", device: "/srv/platform" },
-    },
+  config.volumes.example_data = {
+    driver: "local",
+    driver_opts: { type: "none", o: "bind", device: "/var/run" },
   };
-  config.services["example-app-web"].volumes.push({ type: "volume", source: "example_app_data", target: "/data" });
-  const report = evaluateRuntimeIsolation(config, fixtureRuntimeOptions(config));
+  const report = evaluateRuntimeIsolation(config);
   assert.equal(report.status, "failed");
-  assert.match(report.failures.join("\n"), /workload-no-local-volume-options-example-app-web/);
+  assert.match(report.failures.join("\n"), /workload-volume-no-host-alias-example-data-example-app-web/);
 });
 
-test("rejects external and foreign workload volume aliases at runtime", () => {
-  for (const definition of [
-    { external: true, name: "foreign_data" },
-    { name: "foreign_data" },
-    { name: "attacker_example-app_data" },
-  ]) {
-    const config = fixture();
-    config.volumes = { "example-app_data": definition };
-    config.services["example-app-web"].volumes.push({ type: "volume", source: "example-app_data", target: "/data" });
-    const report = evaluateRuntimeIsolation(config, fixtureRuntimeOptions(config));
-    assert.equal(report.status, "failed");
-    assert.match(report.failures.join("\n"), /workload-owned-volumes-example-app-web/);
-  }
+test("rejects broker socket and state volume alias substitution", () => {
+  const external = fixture();
+  external.volumes.docker_action_broker_socket = { external: true, name: "attacker_socket" };
+  let report = evaluateRuntimeIsolation(external);
+  assert.equal(report.status, "failed");
+  assert.match(report.failures.join("\n"), /docker-broker-socket-volume-not-aliased/);
+
+  const driverOpts = fixture();
+  driverOpts.volumes.docker_action_broker_state = {
+    driver: "local",
+    driver_opts: { type: "none", o: "bind", device: "/var/run" },
+  };
+  report = evaluateRuntimeIsolation(driverOpts);
+  assert.equal(report.status, "failed");
+  assert.match(report.failures.join("\n"), /docker-broker-state-volume-not-aliased/);
+
+  const activationCas = fixture();
+  activationCas.volumes.docker_action_activation_cas = { external: true, name: "shared_cas" };
+  report = evaluateRuntimeIsolation(activationCas);
+  assert.equal(report.status, "failed");
+  assert.match(report.failures.join("\n"), /docker-broker-activation-cas-volume-not-aliased/);
 });
 
-test("rejects foreign external secret aliases at runtime", () => {
-  for (const definition of [
-    { external: true },
-    { external: true, name: "foreign_api_key" },
-    { external: true, name: "attacker_example-app-api-key" },
-  ]) {
-    const config = fixture();
-    config.secrets = { "example-app-api-key": definition };
-    config.services["example-app-web"].secrets = [{ source: "example-app-api-key", target: "example-app-api-key" }];
-    const report = evaluateRuntimeIsolation(config, fixtureRuntimeOptions(config));
-    assert.equal(report.status, "failed");
-    assert.match(report.failures.join("\n"), /workload-owned-secrets-example-app-web/);
-  }
-});
-
-test("rejects foreign workload networks and attachment aliases at runtime", () => {
-  for (const mutation of [
-    (config) => { config.networks.example_app_ingress.name = "attacker_example_app_ingress"; },
-    (config) => { config.services["example-app-web"].networks.example_app_ingress = { aliases: ["postgres"] }; },
-    (config) => { config.services["example-app-web"].networks.foreign_ingress = null; },
-  ]) {
-    const config = fixture();
-    mutation(config);
-    const report = evaluateRuntimeIsolation(config, fixtureRuntimeOptions(config));
-    assert.equal(report.status, "failed");
-    assert.match(report.failures.join("\n"), /workload-network-identity-example-app-web/);
-  }
-  const missingExpectedProjectConfig = fixture();
-  const missingExpectedProjectOptions = fixtureRuntimeOptions(missingExpectedProjectConfig);
-  delete missingExpectedProjectOptions.projectName;
-  const missingExpectedProject = evaluateRuntimeIsolation(
-    missingExpectedProjectConfig,
-    missingExpectedProjectOptions,
-  );
-  assert.equal(missingExpectedProject.status, "failed");
-  assert.match(missingExpectedProject.failures.join("\n"), /workload-project-name-bound/);
-  const spoofed = fixture();
-  spoofed.name = "attacker";
-  spoofed.networks.example_app_ingress.name = "attacker_example_app_ingress";
-  const spoofedProject = evaluateRuntimeIsolation(spoofed, fixtureRuntimeOptions(spoofed));
-  assert.equal(spoofedProject.status, "failed");
-  assert.match(spoofedProject.failures.join("\n"), /workload-project-name-bound|workload-network-identity/);
-});
-
-test("rejects workload network topology overrides at runtime", () => {
-  for (const mutate of [
-    (network) => { network.internal = false; },
-    (network) => { network.driver = "bridge"; },
-    (network) => { network.driver_opts = { "com.docker.network.bridge.name": "host0" }; },
-    (network) => { network.ipam = { config: [{ subnet: "172.30.0.0/16" }] }; },
-    (network) => { network.attachable = true; },
-    (network) => { network.labels = { owner: "attacker" }; },
-    (network) => { network.enable_ipv4 = false; },
-    (network) => { network.enable_ipv6 = true; },
-  ]) {
-    const config = fixture();
-    mutate(config.networks.example_app_ingress);
-    const report = evaluateRuntimeIsolation(config, fixtureRuntimeOptions(config));
-    assert.equal(report.status, "failed");
-    assert.match(report.failures.join("\n"), /workload-network-topology-example-app-web/);
-  }
-  const egress = fixture();
-  egress.services["example-app-web"].networks = { example_app_egress: null };
-  delete egress.networks.example_app_ingress;
-  egress.networks.example_app_egress = { internal: false, name: "fixture_example_app_egress" };
-  const accepted = evaluateRuntimeIsolation(egress, fixtureRuntimeOptions(egress));
-  assert.equal(accepted.status, "passed", accepted.failures.join("\n"));
-});
-
-test("rejects a workload identity that collides with a protected core network", () => {
+test("rejects mutable, networked or candidate-mounted brokers", () => {
   const config = fixture();
-  const service = config.services["example-app-web"];
-  delete config.services["example-app-web"];
-  config.services["platform-web"] = {
-    ...service,
-    labels: { "com.platform.workload-id": "platform", "com.platform.workload-role": "web" },
-    networks: { platform_postgres: null },
-  };
-  config.services.postgres.networks = { platform_postgres: null };
-  delete config.networks.example_app_ingress;
-  config.networks.platform_postgres = {
-    internal: true,
-    name: "fixture_platform_postgres",
-    labels: { "com.platform.trust-zone": "postgres" },
-  };
-  const report = evaluateRuntimeIsolation(
-    config,
-    fixtureRuntimeOptions(config, {
-      protectedNetworkNames: ["platform_docker_control", "platform_postgres"],
-    }),
-  );
+  const broker = config.services["docker-action-broker"];
+  broker.image = "platform/docker-action-broker:latest";
+  broker.build = { context: "." };
+  broker.network_mode = "bridge";
+  broker.ports = ["0.0.0.0:2376:2376"];
+  broker.environment.DOCKER_HOST = "tcp://evil:2376";
+  broker.volumes.push({ type: "bind", source: ".", target: "/infra", read_only: true });
+  const report = evaluateRuntimeIsolation(config);
   assert.equal(report.status, "failed");
-  assert.match(report.failures.join("\n"), /workload-no-protected-network-platform-web/);
+  assert.match(report.failures.join("\n"), /docker-broker-immutable-image/);
+  assert.match(report.failures.join("\n"), /docker-broker-host-private/);
+  assert.match(report.failures.join("\n"), /docker-broker-no-candidate-code/);
+  assert.match(report.failures.join("\n"), /docker-broker-no-remote-host/);
+  assert.match(report.failures.join("\n"), /docker-broker-exact-mount-targets/);
 });
 
-test("binds all six hosted workload runtime identity labels", () => {
-  const expected = runtimeIdentityFixture();
-  const accepted = fixture();
-  Object.assign(accepted.services["example-app-web"].labels, expected);
-  assert.equal(evaluateRuntimeIsolation(accepted, fixtureRuntimeOptions(accepted, { runtimeIdentity: expected })).status, "passed");
-  for (const label of Object.keys(expected)) {
-    const config = fixture();
-    Object.assign(config.services["example-app-web"].labels, expected);
-    config.services["example-app-web"].labels[label] = `wrong-${label}`;
-    const report = evaluateRuntimeIsolation(config, fixtureRuntimeOptions(config, { runtimeIdentity: expected }));
-    assert.equal(report.status, "failed");
-    assert.match(report.failures.join("\n"), /workload-runtime-identity-example-app-web/);
-  }
-  const missing = fixture();
-  Object.assign(missing.services["example-app-web"].labels, expected);
-  delete missing.services["example-app-web"].labels["com.platform.runtime.tree"];
-  assert.equal(
-    evaluateRuntimeIsolation(missing, fixtureRuntimeOptions(missing, { runtimeIdentity: expected })).status,
-    "failed",
-  );
+test("rejects broker and scheduler supplemental groups", () => {
+  const config = fixture();
+  config.services["docker-action-broker"].group_add = ["998"];
+  config.services["backup-scheduler"].group_add = ["998"];
+  const report = evaluateRuntimeIsolation(config);
+  assert.equal(report.status, "failed");
+  assert.match(report.failures.join("\n"), /docker-broker-no-supplemental-groups/);
+  assert.match(report.failures.join("\n"), /scheduler-no-supplemental-groups/);
+});
 
-  const legacy = fixture();
-  Object.assign(legacy.services["example-app-web"].labels, expected, {
-    "com.platform.runtime.render-sha256": "f".repeat(64),
+test("rejects a mutable, networked or Docker-bearing activation sidecar", () => {
+  const config = fixture();
+  const sidecar = config.services["docker-action-activation-sidecar"];
+  sidecar.image = "provider/activation-sidecar:latest";
+  sidecar.build = { context: "." };
+  sidecar.network_mode = "bridge";
+  sidecar.group_add = ["998"];
+  sidecar.volumes.push({
+    type: "bind",
+    source: "/var/run/docker.sock",
+    target: "/var/run/docker.sock",
+    read_only: true,
   });
-  const legacyReport = evaluateRuntimeIsolation(legacy, fixtureRuntimeOptions(legacy, { runtimeIdentity: expected }));
-  assert.equal(legacyReport.status, "failed");
-  assert.match(legacyReport.failures.join("\n"), /workload-runtime-identity-example-app-web/);
-});
-
-test("rejects workload Compose API socket access independently at runtime", () => {
-  const config = fixture();
-  config.services["example-app-web"].use_api_socket = true;
-  const report = evaluateRuntimeIsolation(config, fixtureRuntimeOptions(config));
+  const report = evaluateRuntimeIsolation(config);
   assert.equal(report.status, "failed");
-  assert.match(report.failures.join("\n"), /workload-no-api-socket-example-app-web/);
+  assert.match(report.failures.join("\n"), /activation-sidecar-immutable-provider-image/);
+  assert.match(report.failures.join("\n"), /activation-sidecar-host-private/);
+  assert.match(report.failures.join("\n"), /activation-sidecar-minimum-authority/);
+  assert.match(report.failures.join("\n"), /activation-sidecar-exact-mounts/);
+  assert.match(report.failures.join("\n"), /activation-sidecar-no-docker-control/);
+  assert.match(report.failures.join("\n"), /raw-socket-single-owner/);
 });
 
-test("rejects workload external service providers independently at runtime", () => {
+test("rejects secret external/name substitution, third-party owners and weak mounts", () => {
   const config = fixture();
-  config.services["example-app-web"].provider = { type: "hostile-provider", options: { command: "/host/tool" } };
-  const report = evaluateRuntimeIsolation(config, fixtureRuntimeOptions(config));
+  config.secrets.docker_action_backup_prune_plan = {
+    external: true,
+    name: "shared_admin_token",
+  };
+  config.services["example-app-web"].secrets = [
+    secret("docker_action_backup_prune_plan"),
+  ];
+  config.services["backup-scheduler"].secrets[0].mode = 0o444;
+  const report = evaluateRuntimeIsolation(config);
   assert.equal(report.status, "failed");
-  assert.match(report.failures.join("\n"), /workload-no-provider-example-app-web/);
+  assert.match(report.failures.join("\n"), /docker-broker-secret-source-docker_action_backup_prune_plan/);
+  assert.match(report.failures.join("\n"), /docker-broker-secret-owners-docker_action_backup_prune_plan/);
+  assert.match(report.failures.join("\n"), /docker-broker-secret-mode-docker_action_backup_prune_plan-backup-scheduler/);
 });
 
-test("rejects workload OCI runtime overrides independently at runtime", () => {
+test("rejects scheduler Docker API, trust documents and aliased broker socket", () => {
   const config = fixture();
-  config.services["example-app-web"].runtime = "kata-runtime";
-  const report = evaluateRuntimeIsolation(config, fixtureRuntimeOptions(config));
+  const scheduler = config.services["backup-scheduler"];
+  scheduler.environment.DOCKER_HOST = "unix:///var/run/docker.sock";
+  scheduler.volumes.push({
+    type: "bind",
+    source: "/srv/platform/trust/runtime-intent.json",
+    target: "/run/platform/docker-action-trust/runtime-intent.json",
+    read_only: true,
+  });
+  scheduler.volumes[0].source = "attacker_socket";
+  const report = evaluateRuntimeIsolation(config);
   assert.equal(report.status, "failed");
-  assert.match(report.failures.join("\n"), /workload-no-runtime-override-example-app-web/);
+  assert.match(report.failures.join("\n"), /scheduler-uses-local-action-socket/);
+  assert.match(report.failures.join("\n"), /scheduler-has-no-docker-api/);
+  assert.match(report.failures.join("\n"), /scheduler-no-trust-documents/);
 });
 
-test("rejects workload stop grace period overrides independently at runtime", () => {
-  const config = fixture();
-  config.services["example-app-web"].stop_grace_period = "24h";
-  const report = evaluateRuntimeIsolation(config, fixtureRuntimeOptions(config));
-  assert.equal(report.status, "failed");
-  assert.match(report.failures.join("\n"), /workload-no-stop-grace-override-example-app-web/);
-});
-
-test("rejects workload GPU and accelerator requests independently at runtime", () => {
-  for (const mutation of [
-    (service) => { service.gpus = "all"; },
-    (service) => { service.device_requests = [{ capabilities: [["gpu"]] }]; },
-    (service) => { service.deploy = { resources: { reservations: { devices: [{ driver: "nvidia", capabilities: ["gpu"] }] } } }; },
-    (service) => { service.deploy = { resources: { reservations: { generic_resources: [{ discrete_resource_spec: { kind: "GPU", value: 1 } }] } } }; },
-  ]) {
-    const config = fixture();
-    mutation(config.services["example-app-web"]);
-    const report = evaluateRuntimeIsolation(config, fixtureRuntimeOptions(config));
-    assert.equal(report.status, "failed");
-    assert.match(report.failures.join("\n"), /workload-no-accelerators-example-app-web/);
-  }
-});
-
-test("rejects missing memory limits and budget overcommit", () => {
+test("rejects missing limits, budget overcommit and unsafe broker bootstrap", () => {
   const config = fixture();
   config.services["example-app-web"].mem_limit = 0;
   config.services.postgres.mem_limit = 99 * 1024 * 1024 * 1024;
-  const report = evaluateRuntimeIsolation(config, fixtureRuntimeOptions(config));
-  assert.equal(report.status, "failed");
-  assert.match(report.failures.join("\n"), /resource-memory-example-app-web/);
-  assert.match(report.failures.join("\n"), /resource-memory-admission/);
-});
-
-test("rejects security_opt entries that disable confinement", () => {
-  const config = fixture();
-  config.services["example-app-web"].security_opt = ["no-new-privileges:true", "seccomp=unconfined"];
-  const report = evaluateRuntimeIsolation(config, fixtureRuntimeOptions(config));
-  assert.equal(report.status, "failed");
-  assert.match(report.failures.join("\n"), /workload-exact-security-opt-example-app-web/);
-});
-
-test("rejects host-published gateways and extra Docker-control network members", () => {
-  const config = fixture();
-  config.services["docker-operation-gateway"].ports = ["0.0.0.0:8787:8787"];
-  config.services["example-app-web"].networks.platform_docker_control = null;
-  const report = evaluateRuntimeIsolation(config, fixtureRuntimeOptions(config));
-  assert.equal(report.status, "failed");
-  assert.match(report.failures.join("\n"), /docker-gateway-no-host-ports/);
-  assert.match(report.failures.join("\n"), /socket-network-members/);
-});
-
-test("rejects scheduler Docker API access and missing principal authentication", () => {
-  const config = fixture();
-  config.services["backup-scheduler"].environment.DOCKER_HOST = "tcp://docker-operation-gateway:2375";
-  config.services["docker-operation-gateway"].secrets = [];
-  const report = evaluateRuntimeIsolation(config);
-  assert.equal(report.status, "failed");
-  assert.match(report.failures.join("\n"), /scheduler-has-no-docker-api/);
-  assert.match(report.failures.join("\n"), /docker-gateway-principal-auth/);
-});
-
-test("rejects mounting the scheduler principal credential into any third service", () => {
-  const config = fixture();
-  config.services["example-app-web"].secrets = ["backup_scheduler_docker_gateway_token"];
-  const report = evaluateRuntimeIsolation(config);
-  assert.equal(report.status, "failed");
-  assert.match(report.failures.join("\n"), /docker-gateway-principal-secret-exclusive/);
-});
-
-test("rejects a networked broker bootstrap or writable workload lock", () => {
-  const config = fixture();
   config.services["broker-auth-bootstrap"].network_mode = "bridge";
   config.services["broker-auth-bootstrap"].volumes[0].read_only = false;
   config.services.nats.command.push("--user", "global", "--pass", "shared");
   const report = evaluateRuntimeIsolation(config);
   assert.equal(report.status, "failed");
+  assert.match(report.failures.join("\n"), /resource-memory-example-app-web/);
+  assert.match(report.failures.join("\n"), /resource-memory-admission/);
   assert.match(report.failures.join("\n"), /broker-bootstrap-no-network/);
   assert.match(report.failures.join("\n"), /broker-bootstrap-lock-read-only/);
   assert.match(report.failures.join("\n"), /nats-no-global-credential-flags/);
-});
-
-test("forged nested ids cannot let billing consume billing-api authority", () => {
-  for (const workloadIds of [
-    ["billing", "billing-api"],
-    ["billing-api", "billing"],
-    ["billing-api-admin", "billing", "billing-api"],
-  ]) {
-    const config = fixture();
-    delete config.services["example-app-web"];
-    delete config.networks.example_app_ingress;
-    const childId = workloadIds.find((id) => id !== "billing" && id.startsWith("billing-"));
-    const childService = `${childId}-web`;
-    const childNetwork = `${childId.replaceAll("-", "_")}_ingress`;
-    const parentNetwork = "billing_ingress";
-    const childVolume = `${childId.replaceAll("-", "_")}_data`;
-    const childSecret = `${childId}-api-key`;
-    for (const id of workloadIds) {
-      const serviceName = id === "billing"
-        ? "billing-web"
-        : (id === childId ? childService : `${id}-worker`);
-      config.services[serviceName] = bounded({
-        read_only: true,
-        user: "1000:1000",
-        logging: { driver: "local", options: { "max-size": "10m", "max-file": "3" } },
-        security_opt: ["no-new-privileges:true"],
-        cap_drop: ["ALL"],
-        labels: { "com.platform.workload-id": id, "com.platform.workload-role": "web" },
-        networks: id === "billing" ? { [parentNetwork]: null } : {},
-      });
-    }
-    config.services["billing-web"].depends_on = {
-      [childService]: { condition: "service_started", required: true, restart: false },
-    };
-    config.services["billing-web"].environment = {
-      [`${childId.toUpperCase().replaceAll("-", "_")}_TOKEN_FILE`]: `/run/secrets/${childSecret}`,
-    };
-    config.services["billing-web"].secrets = [{ source: childSecret, target: childSecret }];
-    config.services["billing-web"].volumes = [{ type: "volume", source: childVolume, target: "/data" }];
-    config.networks[parentNetwork] = { internal: true, name: `fixture_${parentNetwork}` };
-    config.secrets = { [childSecret]: { external: true, name: `fixture_${childSecret}` } };
-    config.volumes = { [childVolume]: { name: `fixture_${childVolume}` } };
-
-    const report = evaluateRuntimeIsolation(config, fixtureRuntimeOptions(config));
-    assert.equal(report.status, "failed");
-    assert.match(report.failures.join("\n"), /prefix-disjoint|canonical-owner|nested-workload/i);
-
-    const networkClaim = structuredClone(config);
-    delete networkClaim.networks[parentNetwork];
-    networkClaim.services["billing-web"].networks = { [childNetwork]: null };
-    networkClaim.networks[childNetwork] = { internal: true, name: `fixture_${childNetwork}` };
-    const networkReport = evaluateRuntimeIsolation(networkClaim, fixtureRuntimeOptions(networkClaim));
-    assert.equal(networkReport.status, "failed");
-    assert.match(
-      networkReport.failures.join("\n"),
-      /prefix-disjoint|canonical-owner|nested-workload|workload-network-identity-billing-web/i,
-    );
-  }
-});
-
-test("canonical owner maps reject isolated cross-workload service, secret, volume and network claims", () => {
-  const serviceClaim = workloadIdentityFixture([
-    ["billing", "billing-web"],
-    ["billingapi", "billingapi-web"],
-  ]);
-  serviceClaim.services["billing-web"].depends_on = {
-    "billingapi-web": { condition: "service_started", required: true, restart: false },
-  };
-  let report = evaluateRuntimeIsolation(serviceClaim, fixtureRuntimeOptions(serviceClaim));
-  assert.equal(report.status, "failed");
-  assert.match(report.failures.join("\n"), /workload-bounded-dependencies-billing-web/);
-
-  const secretClaim = workloadIdentityFixture([
-    ["billing", "billing-web"],
-    ["billingapi", "billingapi-web"],
-  ]);
-  secretClaim.secrets = {
-    "billingapi-api-key": { external: true, name: "fixture_billingapi-api-key" },
-  };
-  secretClaim.services["billingapi-web"].secrets = ["billingapi-api-key"];
-  secretClaim.services["billing-web"].secrets = ["billingapi-api-key"];
-  secretClaim.services["billing-web"].environment = {
-    BILLINGAPI_TOKEN_FILE: "/run/secrets/billingapi-api-key",
-  };
-  report = evaluateRuntimeIsolation(secretClaim, fixtureRuntimeOptions(secretClaim));
-  assert.equal(report.status, "failed");
-  assert.match(report.failures.join("\n"), /workload-canonical-resource-owners|workload-owned-secrets-billing/);
-
-  const volumeClaim = workloadIdentityFixture([
-    ["billing", "billing-web"],
-    ["billingapi", "billingapi-web"],
-  ]);
-  volumeClaim.volumes = {
-    billingapi_data: { name: "fixture_billingapi_data" },
-  };
-  volumeClaim.services["billingapi-web"].volumes = [{ type: "volume", source: "billingapi_data", target: "/data" }];
-  volumeClaim.services["billing-web"].volumes = [{ type: "volume", source: "billingapi_data", target: "/data" }];
-  report = evaluateRuntimeIsolation(volumeClaim, fixtureRuntimeOptions(volumeClaim));
-  assert.equal(report.status, "failed");
-  assert.match(report.failures.join("\n"), /workload-canonical-resource-owners|workload-(exact-volume-mounts|owned-volumes)-billing/);
-
-  const networkClaim = workloadIdentityFixture([
-    ["billing", "billing-web"],
-    ["billingapi", "billingapi-web"],
-  ]);
-  networkClaim.services["billing-web"].networks.billingapi_ingress = null;
-  report = evaluateRuntimeIsolation(networkClaim, fixtureRuntimeOptions(networkClaim));
-  assert.equal(report.status, "failed");
-  assert.match(report.failures.join("\n"), /workload-network-identity-billing-web/);
-});
-
-test("canonical owner maps reject a sole claimant stealing another workload secret through _FILE", () => {
-  const config = workloadIdentityFixture([
-    ["billing", "billing-web"],
-    ["billingapi", "billingapi-web"],
-  ]);
-  config.secrets = {
-    "billingapi-api-key": { external: true, name: "fixture_billingapi-api-key" },
-  };
-  config.services["billing-web"].secrets = ["billingapi-api-key"];
-  config.services["billing-web"].environment = {
-    BILLINGAPI_TOKEN_FILE: "/run/secrets/billingapi-api-key",
-  };
-
-  const report = evaluateRuntimeIsolation(config, fixtureRuntimeOptions(config));
-  assert.equal(report.status, "failed");
-  assert.match(
-    report.failures.join("\n"),
-    /workload-owned-secrets-billing-web|workload-file-secret-bindings-billing-web/,
-  );
-
-  const nonCanonicalFile = workloadIdentityFixture([["billing", "billing-web"]]);
-  nonCanonicalFile.secrets = {
-    "billing-api-key": { external: true, name: "fixture_billing-api-key" },
-  };
-  nonCanonicalFile.services["billing-web"].secrets = ["billing-api-key"];
-  nonCanonicalFile.services["billing-web"].environment = {
-    BILLING_TOKEN_FILE: "/tmp/billing-api-key",
-  };
-  const nonCanonicalReport = evaluateRuntimeIsolation(
-    nonCanonicalFile,
-    fixtureRuntimeOptions(nonCanonicalFile),
-  );
-  assert.equal(nonCanonicalReport.status, "failed");
-  assert.match(nonCanonicalReport.failures.join("\n"), /workload-file-secret-bindings-billing-web/);
-});
-
-test("canonical owner maps reject a sole claimant stealing another workload volume", () => {
-  const config = workloadIdentityFixture([
-    ["billing", "billing-web"],
-    ["billingapi", "billingapi-web"],
-  ]);
-  config.volumes = {
-    billingapi_data: { name: "fixture_billingapi_data" },
-  };
-  config.services["billing-web"].volumes = [
-    { type: "volume", source: "billingapi_data", target: "/data" },
-  ];
-
-  const report = evaluateRuntimeIsolation(config, fixtureRuntimeOptions(config));
-  assert.equal(report.status, "failed");
-  assert.match(
-    report.failures.join("\n"),
-    /workload-exact-volume-mounts-billing-web|workload-owned-volumes-billing-web/,
-  );
-});
-
-test("runtime preserves the authoritative dashed workload volume prefix", () => {
-  const workloadId = "billing-api";
-  const serviceName = "billing-api-web";
-  const networkName = "billing_api_ingress";
-  const volumeName = "billing-api_data";
-  const finalManifest = validateWorkloadManifest({
-    version: 1,
-    id: workloadId,
-    composeFile: "compose.yaml",
-    secrets: [],
-    services: [{ name: serviceName, role: "web" }],
-  });
-  const finalCore = {
-    services: {
-      "project-router": {
-        image: `example.invalid/router@sha256:${"a".repeat(64)}`,
-        networks: { platform_routing: null },
-      },
-    },
-    networks: { platform_routing: { internal: true } },
-  };
-  const finalCombined = {
-    services: {
-      "project-router": structuredClone(finalCore.services["project-router"]),
-      [serviceName]: bounded({
-        image: `example.invalid/billing-api@sha256:${"b".repeat(64)}`,
-        read_only: true,
-        init: true,
-        user: "1000:1000",
-        logging: { driver: "local", options: { "max-size": "10m", "max-file": "3" } },
-        security_opt: ["no-new-privileges:true"],
-        cap_drop: ["ALL"],
-        labels: { "com.platform.workload-id": workloadId, "com.platform.workload-role": "web" },
-        networks: { [networkName]: null },
-        volumes: [{ type: "volume", source: volumeName, target: "/data" }],
-      }),
-    },
-    networks: {
-      platform_routing: { internal: true },
-      [networkName]: { internal: true, name: `fixture_${networkName}` },
-    },
-    volumes: { [volumeName]: { name: `fixture_${volumeName}` } },
-  };
-  const finalLock = {
-    projectName: "fixture",
-    workloads: [finalManifest],
-    rawPolicyReceipt: {
-      protectedNetworkNames: ["platform_routing"],
-      protectedResourceNames: {
-        configs: [],
-        networks: ["platform_routing"],
-        secrets: [],
-        services: ["project-router"],
-        volumes: [],
-      },
-      workloads: [{ workloadId, platformExtensions: [] }],
-    },
-  };
-  assert.doesNotThrow(() => validateRenderedWorkloads({
-    core: finalCore,
-    combined: finalCombined,
-    lock: finalLock,
-  }));
-
-  const runtime = workloadIdentityFixture([[workloadId, serviceName]]);
-  runtime.volumes = { [volumeName]: { name: `fixture_${volumeName}` } };
-  runtime.services[serviceName].volumes = [
-    { type: "volume", source: volumeName, target: "/data" },
-  ];
-  const report = evaluateRuntimeIsolation(runtime, fixtureRuntimeOptions(runtime));
-  assert.equal(report.status, "passed", report.failures.join("\n"));
-});
-
-test("canonical owner maps preserve billing plus billingapi and one billing textual child name", () => {
-  const nonColliding = workloadIdentityFixture([
-    ["billing", "billing-web"],
-    ["billingapi", "billingapi-web"],
-  ]);
-  nonColliding.secrets = {
-    "billingapi-api-key": { external: true, name: "fixture_billingapi-api-key" },
-  };
-  nonColliding.volumes = {
-    billingapi_data: { name: "fixture_billingapi_data" },
-  };
-  nonColliding.services["billingapi-web"].secrets = ["billingapi-api-key"];
-  nonColliding.services["billingapi-web"].environment = {
-    BILLINGAPI_TOKEN_FILE: "/run/secrets/billingapi-api-key",
-  };
-  nonColliding.services["billingapi-web"].volumes = [
-    { type: "volume", source: "billingapi_data", target: "/data" },
-  ];
-  assert.equal(
-    evaluateRuntimeIsolation(nonColliding, fixtureRuntimeOptions(nonColliding)).status,
-    "passed",
-  );
-
-  const singleOwner = workloadIdentityFixture([["billing", "billing-api-web"]]);
-  singleOwner.secrets = {
-    "billing-api-key": { external: true, name: "fixture_billing-api-key" },
-  };
-  singleOwner.services["billing-api-web"].secrets = ["billing-api-key"];
-  singleOwner.services["billing-api-web"].environment = {
-    BILLING_API_TOKEN_FILE: "/run/secrets/billing-api-key",
-  };
-  singleOwner.volumes = {
-    billing_data: { name: "fixture_billing_data" },
-  };
-  singleOwner.services["billing-api-web"].volumes = [
-    { type: "volume", source: "billing_data", target: "/data" },
-  ];
-  const report = evaluateRuntimeIsolation(singleOwner, fixtureRuntimeOptions(singleOwner));
-  assert.equal(report.status, "passed", report.failures.join("\n"));
-});
-
-test("runtime secret grants use the exact canonical short and long grammar", () => {
-  const invalidGrants = [
-    { label: "mapping instead of array", grants: { source: "billing-api-key" } },
-    { label: "missing source", grants: [{}] },
-    { label: "null target", grants: [{ source: "billing-api-key", target: null }] },
-    { label: "empty target", grants: [{ source: "billing-api-key", target: "" }] },
-    { label: "traversal target", grants: [{ source: "billing-api-key", target: "../billing-token" }] },
-    { label: "underscore target", grants: [{ source: "billing-api-key", target: "billing_token" }] },
-    { label: "leading digit target", grants: [{ source: "billing-api-key", target: "1billing-token" }] },
-    { label: "oversized target", grants: [{ source: "billing-api-key", target: `b${"a".repeat(63)}` }] },
-    { label: "uid field", grants: [{ source: "billing-api-key", uid: "0" }] },
-    { label: "mode field", grants: [{ source: "billing-api-key", mode: 0o777 }] },
-    { label: "extra field", grants: [{ source: "billing-api-key", extra: true }] },
-    { label: "underscore source", grants: [{ source: "billing-api_key" }], source: "billing-api_key" },
-    { label: "traversal source", grants: [{ source: "billing-../key" }], source: "billing-../key" },
-    { label: "oversized source", grants: [{ source: `billing-${"a".repeat(64)}` }], source: `billing-${"a".repeat(64)}` },
-  ];
-  for (const { label, grants, source = "billing-api-key" } of invalidGrants) {
-    const config = workloadIdentityFixture([["billing", "billing-web"]]);
-    config.secrets = { [source]: { external: true, name: `fixture_${source}` } };
-    config.services["billing-web"].secrets = grants;
-    const report = evaluateRuntimeIsolation(config, fixtureRuntimeOptions(config));
-    assert.equal(report.status, "failed", `${label} bypassed runtime grant validation`);
-    assert.match(report.failures.join("\n"), /workload-exact-secret-grants-billing-web/, label);
-  }
-
-  for (const [label, usesSecret, configure] of [
-    ["absent", false, (service) => { delete service.secrets; }],
-    ["empty", false, (service) => { service.secrets = []; }],
-    ["short", true, (service) => { service.secrets = ["billing-api-key"]; }],
-    ["long alias", true, (service) => { service.secrets = [{ source: "billing-api-key", target: "billing-token" }]; }],
-    ["long omitted target", true, (service) => { service.secrets = [{ source: "billing-api-key" }]; }],
-  ]) {
-    const config = workloadIdentityFixture([["billing", "billing-web"]]);
-    if (usesSecret) {
-      config.secrets = { "billing-api-key": { external: true, name: "fixture_billing-api-key" } };
-    }
-    configure(config.services["billing-web"]);
-    const report = evaluateRuntimeIsolation(config, fixtureRuntimeOptions(config));
-    assert.equal(report.status, "passed", `${label}: ${report.failures.join("\n")}`);
-  }
-});
-
-test("runtime workload labels require exact non-normalized canonical ids", () => {
-  for (const workloadId of [
-    "b",
-    "billing_api",
-    "billing.api",
-    ...[62, 63, 64].map((length) => `b${"a".repeat(length - 1)}`),
-  ]) {
-    const config = workloadIdentityFixture([[workloadId, `${workloadId}-web`]]);
-    const report = evaluateRuntimeIsolation(config, fixtureRuntimeOptions(config));
-    assert.equal(report.status, "failed", `${workloadId} bypassed runtime workload-id validation`);
-    assert.match(report.failures.join("\n"), /workload-id-canonical/);
-  }
-  for (const workloadId of ["ab", "billing-api", `b${"a".repeat(60)}`]) {
-    const serviceName = workloadId.length === 61 ? `${workloadId}-x` : `${workloadId}-web`;
-    const config = workloadIdentityFixture([[workloadId, serviceName]]);
-    const report = evaluateRuntimeIsolation(config, fixtureRuntimeOptions(config));
-    assert.equal(report.status, "passed", report.failures.join("\n"));
-  }
-});
-
-test("runtime rejects invalid workload network zones and canonical workload orphans", () => {
-  const invalidZone = workloadIdentityFixture([["billing", "billing-web"]]);
-  delete invalidZone.networks.billing_ingress;
-  invalidZone.services["billing-web"].networks = { billing_admin: null };
-  invalidZone.networks.billing_admin = { internal: true, name: "fixture_billing_admin" };
-  let report = evaluateRuntimeIsolation(invalidZone, fixtureRuntimeOptions(invalidZone));
-  assert.equal(report.status, "failed", "billing_admin bypassed exact zone validation");
-  assert.match(report.failures.join("\n"), /workload-(network-topology|canonical-resource-owners)/);
-
-  for (const [kind, mutate] of [
-    ["secret", (config) => {
-      config.secrets = { "example-app-unused": { external: true, name: "fixture_example-app-unused" } };
-    }],
-    ["volume", (config) => {
-      config.volumes = { "example-app_unused": { name: "fixture_example-app_unused" } };
-    }],
-    ["network", (config) => {
-      config.networks.example_app_cache = { internal: true, name: "fixture_example_app_cache" };
-    }],
-  ]) {
-    const config = fixture();
-    mutate(config);
-    report = evaluateRuntimeIsolation(config, fixtureRuntimeOptions(config));
-    assert.equal(report.status, "failed", `${kind} orphan bypassed runtime inventory`);
-    assert.match(report.failures.join("\n"), /workload-exact-resource-inventory/);
-  }
-
-  const disconnected = fixture();
-  delete disconnected.services["example-app-web"].networks.example_app_ingress;
-  delete disconnected.networks.example_app_ingress;
-  report = evaluateRuntimeIsolation(disconnected, fixtureRuntimeOptions(disconnected));
-  assert.equal(report.status, "failed", "workload service without a network bypassed runtime inventory");
-  assert.match(report.failures.join("\n"), /workload-service-network-inventory/);
-});
-
-for (const [label, protectedResourceNames] of [
-  ["absent", undefined],
-  ["null", null],
-  ["empty mapping", {}],
-  ["missing kind", {
-    configs: [],
-    networks: ["platform_docker_control"],
-    secrets: [],
-    services: [
-      "backup-scheduler",
-      "control-center",
-      "docker-socket-proxy",
-      "platform-alert-dispatcher",
-      "postgres",
-      "project-router",
-    ],
-  }],
-  ["duplicate name", {
-    configs: [],
-    networks: ["platform_docker_control", "platform_docker_control"],
-    secrets: [],
-    services: [
-      "backup-scheduler",
-      "control-center",
-      "docker-socket-proxy",
-      "platform-alert-dispatcher",
-      "postgres",
-      "project-router",
-    ],
-    volumes: [],
-  }],
-]) {
-  test(`runtime rejects ${label} authoritative protected-resource inventory`, () => {
-    const config = fixture();
-    const options = { projectName: "fixture" };
-    if (label !== "absent") options.protectedResourceNames = protectedResourceNames;
-    const report = evaluateRuntimeIsolation(config, options);
-    assert.equal(report.status, "failed", `${label} protected inventory bypassed the runtime boundary`);
-    assert.match(report.failures.join("\n"), /workload-protected-resource-inventory/, label);
-  });
-}
-
-for (const [kind, mutate] of [
-  ["configs", (config) => { config.configs = { orphan: { file: "/tmp/orphan" } }; }],
-  ["networks", (config) => { config.networks.orphan = { internal: true, name: "fixture_orphan" }; }],
-  ["secrets", (config) => { config.secrets = { orphan: { external: true, name: "fixture_orphan" } }; }],
-  ["services", (config) => { config.services.orphan = bounded({ read_only: true, networks: {} }); }],
-  ["volumes", (config) => { config.volumes = { orphan: { name: "fixture_orphan" } }; }],
-]) {
-  test(`runtime rejects top-level ${kind} zero-owner extras outside the authoritative inventory`, () => {
-    const config = fixture();
-    const options = fixtureRuntimeOptions(config);
-    mutate(config);
-    const report = evaluateRuntimeIsolation(config, options);
-    assert.equal(report.status, "failed", `${kind} zero-owner extra bypassed the authoritative inventory`);
-    assert.match(report.failures.join("\n"), /workload-exact-resource-inventory/, kind);
-  });
-}
-
-test("runtime inventory binds exact protected core resources and every workload reference", () => {
-  const protectedResourceNames = {
-    configs: [],
-    networks: ["platform_docker_control"],
-    secrets: ["platform-secret"],
-    services: [
-      "backup-scheduler",
-      "control-center",
-      "docker-socket-proxy",
-      "platform-alert-dispatcher",
-      "postgres",
-      "project-router",
-    ],
-    volumes: ["platform_data"],
-  };
-  const config = workloadIdentityFixture([["billing", "billing-web"]]);
-  config.secrets = {
-    "billing-api-key": { external: true, name: "fixture_billing-api-key" },
-    "platform-secret": { external: true, name: "fixture_platform-secret" },
-  };
-  config.volumes = {
-    billing_data: { name: "fixture_billing_data" },
-    platform_data: { name: "fixture_platform_data" },
-  };
-  config.services["billing-web"].secrets = [{ source: "billing-api-key" }];
-  config.services["billing-web"].environment = {
-    BILLING_TOKEN_FILE: "/run/secrets/billing-api-key",
-  };
-  config.services["billing-web"].volumes = [
-    { type: "volume", source: "billing_data", target: "/data" },
-  ];
-  let report = evaluateRuntimeIsolation(config, { projectName: "fixture", protectedResourceNames });
-  assert.equal(report.status, "passed", report.failures.join("\n"));
-
-  for (const [kind, mutate] of [
-    ["secret", (candidate) => { delete candidate.secrets["billing-api-key"]; }],
-    ["volume", (candidate) => { delete candidate.volumes.billing_data; }],
-    ["network", (candidate) => { delete candidate.networks.billing_ingress; }],
-  ]) {
-    const missing = structuredClone(config);
-    mutate(missing);
-    report = evaluateRuntimeIsolation(missing, { projectName: "fixture", protectedResourceNames });
-    assert.equal(report.status, "failed", `missing referenced ${kind} bypassed runtime inventory`);
-    assert.match(report.failures.join("\n"), /workload-exact-resource-inventory/);
-  }
 });
 
 function fixture() {
@@ -925,10 +187,15 @@ function fixture() {
   services["example-app-web"] = bounded({
     read_only: true,
     user: "1000:1000",
-    logging: { driver: "local", options: { "max-size": "10m", "max-file": "3" } },
     security_opt: ["no-new-privileges:true"],
     cap_drop: ["ALL"],
-    labels: { "com.platform.workload-id": "example-app", "com.platform.workload-role": "web" },
+    labels: {
+      "com.platform.workload-id": "example-app",
+      "com.platform.workload-role": "web",
+    },
+    volumes: [
+      { type: "volume", source: "example_data", target: "/app/data", read_only: false },
+    ],
     networks: { example_app_ingress: null },
   });
   services["control-center"] = bounded({ read_only: true, cpu_shares: 1024, volumes: [], networks: {} });
@@ -967,88 +234,104 @@ function fixture() {
   services["backup-scheduler"] = bounded({
     read_only: true,
     cpu_shares: 1024,
-    environment: { PLATFORM_DOCKER_GATEWAY_URL: "http://docker-operation-gateway:8787", BACKUP_SCHEDULER_DOCKER_GATEWAY_TOKEN_FILE: "/run/secrets/backup_scheduler_docker_gateway_token" },
-    secrets: ["backup_scheduler_docker_gateway_token"],
-    volumes: [],
-    networks: { platform_docker_control: null },
+    environment: {
+      DOCKER_ACTION_BROKER_SOCKET: "/run/platform/docker-action-broker/broker.sock",
+      DOCKER_ACTION_RUNTIME_INTENT_ID: INTENT_ID,
+      DOCKER_ACTION_ACTIVE_RECEIPT_SHA256: "a".repeat(64),
+      DOCKER_ACTION_COMBINED_RENDER_SHA256: "b".repeat(64),
+    },
+    secrets: [
+      secret("docker_action_backup_prune_plan"),
+      secret("docker_action_evidence_runtime_snapshot"),
+    ],
+    volumes: [
+      { type: "volume", source: "docker_action_broker_socket", target: "/run/platform/docker-action-broker", read_only: true },
+    ],
+    networks: { platform_db_admin: null, platform_storage: null, platform_egress: null },
   });
-  services["docker-operation-gateway"] = bounded({
+  services["docker-action-activation-sidecar"] = bounded({
+    image: `provider.example/platform/activation-sidecar@sha256:${"c".repeat(64)}`,
+    read_only: true,
+    user: "0:0",
+    network_mode: "none",
+    entrypoint: ["/opt/provider-activation/materialize-dsse-cas"],
+    cap_drop: ["ALL"],
+    security_opt: ["no-new-privileges:true"],
+    volumes: [
+      {
+        type: "bind",
+        source: "/srv/platform/provider-activation/inbox",
+        target: "/run/platform/provider-activation/inbox",
+        read_only: true,
+      },
+      {
+        type: "volume",
+        source: "docker_action_activation_cas",
+        target: "/run/platform/docker-action-activation/by-bundle-sha256",
+        read_only: false,
+      },
+    ],
+    networks: {},
+  });
+  services["docker-action-broker"] = bounded({
+    image: `platform/docker-action-broker@sha256:${"d".repeat(64)}`,
     read_only: true,
     cpu_shares: 1024,
-    entrypoint: ["node", "/infra/scripts/docker-operation-gateway.mjs"],
-    environment: { BACKUP_SCHEDULER_DOCKER_GATEWAY_TOKEN_FILE: "/run/secrets/backup_scheduler_docker_gateway_token" },
-    secrets: ["backup_scheduler_docker_gateway_token"],
-    volumes: [{ type: "bind", source: "/var/run/docker.sock", target: "/var/run/docker.sock", read_only: true }],
-    networks: { platform_docker_control: null },
+    network_mode: "none",
+    entrypoint: ["node", "/opt/platform-docker-broker/docker-action-broker.mjs"],
+    environment: {
+      DOCKER_ACTION_BROKER_SOCKET: "/run/platform/docker-action-broker/broker.sock",
+    },
+    cap_drop: ["ALL"],
+    security_opt: ["no-new-privileges:true"],
+    secrets: [
+      secret("docker_action_runtime_intent_trust_key"),
+      secret("docker_action_backup_prune_plan"),
+      secret("docker_action_evidence_runtime_snapshot"),
+    ],
+    volumes: [
+      { type: "bind", source: "/var/run/docker.sock", target: "/var/run/docker.sock", read_only: true },
+      { type: "volume", source: "docker_action_broker_socket", target: "/run/platform/docker-action-broker", read_only: false },
+      { type: "volume", source: "docker_action_broker_state", target: "/var/lib/platform/docker-action-broker", read_only: false },
+      { type: "volume", source: "docker_action_activation_cas", target: "/run/platform/docker-action-activation/by-bundle-sha256", read_only: true },
+      { type: "bind", source: "/srv/platform/trust/runtime-intent.json", target: "/run/platform/docker-action-trust/runtime-intent.json", read_only: true },
+      { type: "bind", source: "/srv/platform/trust/active-receipt.json", target: "/run/platform/docker-action-trust/active-receipt.json", read_only: true },
+    ],
+    networks: {},
   });
   services.postgres = bounded({ networks: {} });
+  const secrets = Object.fromEntries([
+    "docker_action_runtime_intent_trust_key",
+    "docker_action_backup_prune_plan",
+    "docker_action_evidence_runtime_snapshot",
+  ].map((name) => [name, { file: `./secrets/${name}.txt` }]));
   return {
-    name: "fixture",
     services,
     networks: {
-      platform_docker_control: { internal: true },
-      example_app_ingress: { internal: true, name: "fixture_example_app_ingress" },
+      platform_db_admin: { internal: true },
+      platform_storage: { internal: true },
+      platform_egress: {},
+      example_app_ingress: { internal: true },
     },
+    volumes: {
+      docker_action_broker_socket: {},
+      docker_action_broker_state: {},
+      docker_action_activation_cas: {},
+      example_data: {},
+      redis_auth_config: {},
+      nats_auth_config: {},
+    },
+    secrets,
   };
 }
 
-function workloadIdentityFixture(entries) {
-  const config = fixture();
-  delete config.services["example-app-web"];
-  delete config.networks.example_app_ingress;
-  for (const [workloadId, serviceName] of entries) {
-    const networkName = `${workloadId.replaceAll("-", "_")}_ingress`;
-    config.services[serviceName] = bounded({
-      read_only: true,
-      user: "1000:1000",
-      logging: { driver: "local", options: { "max-size": "10m", "max-file": "3" } },
-      security_opt: ["no-new-privileges:true"],
-      cap_drop: ["ALL"],
-      labels: { "com.platform.workload-id": workloadId, "com.platform.workload-role": "web" },
-      networks: { [networkName]: null },
-    });
-    config.networks[networkName] = { internal: true, name: `fixture_${networkName}` };
-  }
-  return config;
-}
-
-function fixtureRuntimeOptions(config, overrides = {}) {
-  const knownProtected = {
-    configs: ["platform_config"],
-    networks: ["platform_docker_control", "platform_postgres", "platform_routing"],
-    secrets: ["platform-secret"],
-    services: [
-      "backup-scheduler",
-      "control-center",
-      "core-service",
-      "docker-socket-proxy",
-      "platform-alert-dispatcher",
-      "postgres",
-      "project-router",
-    ],
-    volumes: ["platform_data"],
-  };
-  const protectedResourceNames = Object.fromEntries(
-    Object.entries(knownProtected).map(([kind, names]) => [
-      kind,
-      names.filter((name) => Object.hasOwn(config?.[kind] ?? {}, name)).sort(),
-    ]),
-  );
+function secret(name) {
   return {
-    projectName: "fixture",
-    protectedResourceNames,
-    ...overrides,
-  };
-}
-
-function runtimeIdentityFixture() {
-  return {
-    "com.platform.runtime.candidate-id": "a".repeat(64),
-    "com.platform.runtime.commit": "b".repeat(40),
-    "com.platform.runtime.tree": "c".repeat(40),
-    "com.platform.runtime.deployment-id": "deploy-20260721",
-    "com.platform.runtime.source-render-sha256": "d".repeat(64),
-    "com.platform.runtime.workload-lock-sha256": "e".repeat(64),
+    source: name,
+    target: name,
+    uid: "0",
+    gid: "0",
+    mode: 0o400,
   };
 }
 
@@ -1057,13 +340,10 @@ function bounded(overrides = {}) {
     cpus: 0.5,
     cpu_shares: 256,
     mem_limit: 128 * 1024 * 1024,
-    memswap_limit: 128 * 1024 * 1024,
     mem_reservation: 32 * 1024 * 1024,
     pids_limit: 128,
     ulimits: { nofile: { soft: 8192, hard: 8192 } },
     blkio_config: { weight: 300 },
-    restart: "no",
-    healthcheck: { test: ["CMD", "true"] },
     environment: {},
     secrets: [],
     volumes: [],
@@ -1071,3 +351,5 @@ function bounded(overrides = {}) {
     ...overrides,
   };
 }
+
+const INTENT_ID = "intent.release-1";
