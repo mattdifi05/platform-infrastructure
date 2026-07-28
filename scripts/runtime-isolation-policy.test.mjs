@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import {
+  validateRenderedWorkloads,
+  validateWorkloadManifest,
+} from "./hosted-workload-contract.mjs";
 import { evaluateRuntimeIsolation } from "./runtime-isolation-policy.mjs";
 
 test("accepts bounded platform and external workload services", () => {
@@ -578,6 +582,79 @@ test("canonical owner maps reject a sole claimant stealing another workload volu
     report.failures.join("\n"),
     /workload-exact-volume-mounts-billing-web|workload-owned-volumes-billing-web/,
   );
+});
+
+test("runtime preserves the authoritative dashed workload volume prefix", () => {
+  const workloadId = "billing-api";
+  const serviceName = "billing-api-web";
+  const networkName = "billing_api_ingress";
+  const volumeName = "billing-api_data";
+  const finalManifest = validateWorkloadManifest({
+    version: 1,
+    id: workloadId,
+    composeFile: "compose.yaml",
+    secrets: [],
+    services: [{ name: serviceName, role: "web" }],
+  });
+  const finalCore = {
+    services: {
+      "project-router": {
+        image: `example.invalid/router@sha256:${"a".repeat(64)}`,
+        networks: { platform_routing: null },
+      },
+    },
+    networks: { platform_routing: { internal: true } },
+  };
+  const finalCombined = {
+    services: {
+      "project-router": structuredClone(finalCore.services["project-router"]),
+      [serviceName]: bounded({
+        image: `example.invalid/billing-api@sha256:${"b".repeat(64)}`,
+        read_only: true,
+        init: true,
+        user: "1000:1000",
+        logging: { driver: "local", options: { "max-size": "10m", "max-file": "3" } },
+        security_opt: ["no-new-privileges:true"],
+        cap_drop: ["ALL"],
+        labels: { "com.platform.workload-id": workloadId, "com.platform.workload-role": "web" },
+        networks: { [networkName]: null },
+        volumes: [{ type: "volume", source: volumeName, target: "/data" }],
+      }),
+    },
+    networks: {
+      platform_routing: { internal: true },
+      [networkName]: { internal: true, name: `fixture_${networkName}` },
+    },
+    volumes: { [volumeName]: { name: `fixture_${volumeName}` } },
+  };
+  const finalLock = {
+    projectName: "fixture",
+    workloads: [finalManifest],
+    rawPolicyReceipt: {
+      protectedNetworkNames: ["platform_routing"],
+      protectedResourceNames: {
+        configs: [],
+        networks: ["platform_routing"],
+        secrets: [],
+        services: ["project-router"],
+        volumes: [],
+      },
+      workloads: [{ workloadId, platformExtensions: [] }],
+    },
+  };
+  assert.doesNotThrow(() => validateRenderedWorkloads({
+    core: finalCore,
+    combined: finalCombined,
+    lock: finalLock,
+  }));
+
+  const runtime = workloadIdentityFixture([[workloadId, serviceName]]);
+  runtime.volumes = { [volumeName]: { name: `fixture_${volumeName}` } };
+  runtime.services[serviceName].volumes = [
+    { type: "volume", source: volumeName, target: "/data" },
+  ];
+  const report = evaluateRuntimeIsolation(runtime, { projectName: "fixture" });
+  assert.equal(report.status, "passed", report.failures.join("\n"));
 });
 
 test("canonical owner maps preserve billing plus billingapi and one billing textual child name", () => {
