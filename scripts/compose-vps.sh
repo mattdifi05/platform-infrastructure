@@ -87,7 +87,8 @@ fd_object_identity() {
   printf '%s|%s\n' "$inode" "$uid"
 }
 
-next_handoff_fd=50
+first_handoff_fd=50
+next_handoff_fd=$first_handoff_fd
 handoff_files=()
 handoff_directory=$(mktemp -d "${TMPDIR:-/tmp}/hosted-compose-handoff.XXXXXX")
 chmod 700 "$handoff_directory"
@@ -262,6 +263,12 @@ else
     printf '%s\n' "An empty HOSTED_WORKLOAD_LOCK requires explicit HOSTED_WORKLOAD_MODE=no-hosted." >&2
     exit 2
   }
+fi
+
+if [[ "$PREPARE_RESOLVED" = 0 && -z "$workload_lock" && "$workload_mode" = no-hosted ]] \
+    && (( runtime_identity_count != 0 )); then
+  printf '%s\n' "No-hosted mode forbids any runtime identity tuple." >&2
+  exit 1
 fi
 
 if [[ -z "$workload_lock" && "$PREPARE_RESOLVED" = 0 ]]; then
@@ -559,7 +566,7 @@ else
     no_hosted_lock_semantic_reference=${SNAPSHOT_REFERENCES[2]}
     no_hosted_lock_sha256=$SNAPSHOT_SHA256
     no_hosted_lock_source_identity=$SNAPSHOT_SOURCE_IDENTITY
-    [[ "$no_hosted_lock_sha256" = 2be024b78f2e27116ff6f956d97f596937ee02361691bfcd01f907d1cb6c82fb ]] || {
+    [[ "$no_hosted_lock_sha256" = 84f0b7b111d285e4ad6827e71f55cbc0fc64febf484c6ba8e057579622584924 ]] || {
       printf '%s\n' "Canonical no-hosted lock raw digest mismatch." >&2
       exit 1
     }
@@ -575,7 +582,7 @@ else
       and (.coreSemanticPolicy | type == "object")
       and ((.coreSemanticPolicy | keys | sort) == ["schema", "sha256"])
       and .coreSemanticPolicy.schema == "platform-no-hosted-core-capability-policy/v1"
-      and .coreSemanticPolicy.sha256 == "6931457ee76eff59ba6788d47f4ad6cac2da4bb171a94d51ffc3b3239bb71151"
+      and .coreSemanticPolicy.sha256 == "03fe5fa325885f61b61c26e1ac4bfdc241cbf3d661309d670c5efc4ab3910783"
       and .projectName == "platform_infra_vps"
       and (.protectedResourceNames | type == "object")
       and ((.protectedResourceNames | keys | sort) == ["configs", "networks", "secrets", "services", "volumes"])
@@ -665,8 +672,50 @@ if (( runtime_identity_count == ${#runtime_identity_variables[@]} )); then
 fi
 
 compose_render_file=$handoff_directory/compose-render-$next_handoff_fd
-next_handoff_fd=$((next_handoff_fd + 1))
 handoff_files+=("$compose_render_file")
+compose_render_writer_fd=$next_handoff_fd
+next_handoff_fd=$((next_handoff_fd + 1))
+set -C
+if ! eval "exec ${compose_render_writer_fd}>\"\$compose_render_file\""; then
+  set +C
+  printf '%s\n' "Could not exclusively create the private Compose render handoff." >&2
+  exit 1
+fi
+set +C
+chmod 600 "$compose_render_file"
+compose_render_identity=$(fd_identity "$compose_render_file")
+IFS='|' read -r compose_render_device compose_render_inode compose_render_uid compose_render_mode \
+  <<< "$compose_render_identity"
+compose_render_writer_identity=$(fd_object_identity "/dev/fd/$compose_render_writer_fd")
+[[ "$compose_render_mode" = 384
+    && "$compose_render_uid" = "$(id -u)"
+    && "$compose_render_writer_identity" = "$compose_render_inode|$compose_render_uid" ]] || {
+  printf '%s\n' "Private Compose render writer does not reference the deployment-owned mode 0600 object." >&2
+  exit 1
+}
+compose_render_hash_fd=$next_handoff_fd
+next_handoff_fd=$((next_handoff_fd + 1))
+eval "exec ${compose_render_hash_fd}<\"\$compose_render_file\""
+compose_render_hash_identity=$(fd_object_identity "/dev/fd/$compose_render_hash_fd")
+[[ "$compose_render_hash_identity" = "$compose_render_inode|$compose_render_uid" ]] || {
+  printf '%s\n' "Private Compose render hash descriptor does not reference the render object." >&2
+  exit 1
+}
+compose_render_reader_fds=()
+compose_render_references=()
+for (( compose_render_reader_index=0; compose_render_reader_index<4; compose_render_reader_index+=1 )); do
+  compose_render_reader_fd=$next_handoff_fd
+  next_handoff_fd=$((next_handoff_fd + 1))
+  eval "exec ${compose_render_reader_fd}<\"\$compose_render_file\""
+  compose_render_reader_identity=$(fd_object_identity "/dev/fd/$compose_render_reader_fd")
+  [[ "$compose_render_reader_identity" = "$compose_render_inode|$compose_render_uid" ]] || {
+    printf '%s\n' "Private Compose render readers do not reference one object." >&2
+    exit 1
+  }
+  compose_render_reader_fds+=("$compose_render_reader_fd")
+  compose_render_references+=("/dev/fd/$compose_render_reader_fd")
+done
+/bin/rm -- "$compose_render_file"
 compose_environment=(
   /usr/bin/env
   -i
@@ -677,21 +726,40 @@ compose_environment=(
 if [[ -n "${HOME:-}" ]]; then
   compose_environment+=("HOME=$HOME")
 fi
-set -C
-if ! "${compose_environment[@]}" "${compose[@]}" --profile backup config --format json > "$compose_render_file"; then
-  set +C
+compose_render_status=0
+if (
+  eval "exec ${compose_render_writer_fd}>&-"
+  eval "exec ${compose_render_hash_fd}<&-"
+  for compose_render_child_fd in "${compose_render_reader_fds[@]}"; do
+    eval "exec ${compose_render_child_fd}<&-"
+  done
+  "${compose_environment[@]}" "${compose[@]}" --profile backup config --format json
+) | (
+  for (( compose_render_child_fd=first_handoff_fd;
+      compose_render_child_fd<next_handoff_fd;
+      compose_render_child_fd+=1 )); do
+    [[ "$compose_render_child_fd" = "$compose_render_writer_fd" ]] && continue
+    eval "exec ${compose_render_child_fd}<&-"
+  done
+  eval "exec 1>&${compose_render_writer_fd}"
+  eval "exec ${compose_render_writer_fd}>&-"
+  /bin/cat
+); then
+  :
+else
+  compose_render_status=$?
+fi
+eval "exec ${compose_render_writer_fd}>&-"
+if (( compose_render_status != 0 )); then
   printf '%s\n' "The descriptor-bound Compose render failed." >&2
   exit 1
 fi
-set +C
-chmod 600 "$compose_render_file"
-open_read_once_snapshot "$compose_render_file" "descriptor-bound Compose render" 4
-compose_render_validation_reference=${SNAPSHOT_REFERENCES[0]}
-compose_render_authority_reference=${SNAPSHOT_REFERENCES[1]}
-compose_render_semantic_reference=${SNAPSHOT_REFERENCES[2]}
-compose_render_result_reference=${SNAPSHOT_REFERENCES[3]}
-compose_render_sha256=$SNAPSHOT_SHA256
-/bin/rm -- "$compose_render_file"
+compose_render_sha256=$(sha256_stream <&$compose_render_hash_fd)
+eval "exec ${compose_render_hash_fd}<&-"
+compose_render_validation_reference=${compose_render_references[0]}
+compose_render_authority_reference=${compose_render_references[1]}
+compose_render_semantic_reference=${compose_render_references[2]}
+compose_render_result_reference=${compose_render_references[3]}
 jq -e -s 'length == 1 and (.[0] | type == "object")' "$compose_render_validation_reference" >/dev/null || {
   printf '%s\n' "The descriptor-bound Compose render is not one JSON object." >&2
   exit 1

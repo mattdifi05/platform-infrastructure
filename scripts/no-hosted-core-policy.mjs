@@ -92,8 +92,8 @@ const CORE_SEMANTIC_POLICY = {
     minio: "always",
     nats: "always",
     "node-exporter": "unless-stopped",
-    phpmyadmin: "no",
-    phppgadmin: "no",
+    phpmyadmin: "unless-stopped",
+    phppgadmin: "unless-stopped",
     "platform-alert-dispatcher": "always",
     postgres: "always",
     "project-router": "always",
@@ -128,6 +128,2263 @@ const CORE_SEMANTIC_POLICY = {
     externalNetworkNames: ["enterprise_net"],
     volumeFields: ["external", "labels", "name"],
   },
+  serviceEnvironmentAuthority: {
+    "services": {
+      "alertmanager": {
+        "present": false,
+        "entries": {}
+      },
+      "backup-scheduler": {
+        "present": true,
+        "entries": {
+          "AWS_ACCESS_KEY_ID": {
+            "variable": "AWS_ACCESS_KEY_ID",
+            "fallback": ""
+          },
+          "AWS_SECRET_ACCESS_KEY": {
+            "variable": "AWS_SECRET_ACCESS_KEY",
+            "fallback": ""
+          },
+          "BACKUP_LOCAL_KEEP_LAST": {
+            "variable": "BACKUP_LOCAL_KEEP_LAST",
+            "fallback": "42"
+          },
+          "BACKUP_SCHEDULER_CATALOG_CRON": {
+            "variable": "BACKUP_SCHEDULER_CATALOG_CRON",
+            "fallback": "5 */8 * * *"
+          },
+          "BACKUP_SCHEDULER_ENABLE_OFFSITE": {
+            "variable": "BACKUP_SCHEDULER_ENABLE_OFFSITE",
+            "fallback": "false"
+          },
+          "BACKUP_SCHEDULER_ENABLE_RETENTION_APPLY": {
+            "variable": "BACKUP_SCHEDULER_ENABLE_RETENTION_APPLY",
+            "fallback": "false"
+          },
+          "BACKUP_SCHEDULER_FULL_RESTORE_DRILL_AT": {
+            "variable": "BACKUP_SCHEDULER_FULL_RESTORE_DRILL_AT",
+            "fallback": "04:45"
+          },
+          "BACKUP_SCHEDULER_JOBS_DIR": {
+            "literal": "/var/www/project-state/backup-jobs"
+          },
+          "BACKUP_SCHEDULER_OFFSITE_CRON": {
+            "variable": "BACKUP_SCHEDULER_OFFSITE_CRON",
+            "fallback": "35 */8 * * *"
+          },
+          "BACKUP_SCHEDULER_RESTORE_DRILL_WEEKDAY": {
+            "variable": "BACKUP_SCHEDULER_RESTORE_DRILL_WEEKDAY",
+            "fallback": "0"
+          },
+          "BACKUP_SCHEDULER_RETENTION_CRON": {
+            "variable": "BACKUP_SCHEDULER_RETENTION_CRON",
+            "fallback": "50 */8 * * *"
+          },
+          "BACKUP_SIGNING_KEYS_FILE": {
+            "literal": "/infra/secrets/backup_signing_keys.txt"
+          },
+          "DOCKER_API_VERSION": {
+            "literal": "1.51"
+          },
+          "DOCKER_HOST": {
+            "literal": "tcp://docker-socket-proxy:2375"
+          },
+          "KEYCLOAK_DB_NAME": {
+            "variable": "KEYCLOAK_DB_NAME",
+            "fallback": "keycloak"
+          },
+          "NODE_IMAGE": {
+            "variable": "NODE_IMAGE",
+            "fallback": "node:26.3.1-alpine@sha256:a2dc166a387cc6ca1e62d0c8e265e49ca985d6e60abc9fe6e6c3d6ce8e63f606"
+          },
+          "PLATFORM_INFRA_CONTAINER_ROOT": {
+            "literal": "/infra"
+          },
+          "PLATFORM_INFRA_HOST_ROOT": {
+            "variable": "PLATFORM_INFRA_HOST_ROOT",
+            "fallback": ""
+          },
+          "PLATFORM_INFRA_ROOT": {
+            "literal": "/infra"
+          },
+          "PROJECT_DATABASES_FILE": {
+            "literal": "/var/www/project-state/databases.json"
+          },
+          "PROJECT_SOURCE_HOST_ROOT": {
+            "variable": "PROJECT_SOURCE_HOST_ROOT",
+            "fallback": ""
+          },
+          "PROJECT_SOURCE_ROOT": {
+            "literal": "/project"
+          },
+          "PROJECT_STATE_ROOT": {
+            "literal": "/var/www/project-state"
+          },
+          "RCLONE_CONFIG": {
+            "variable": "RCLONE_CONFIG",
+            "fallback": "/infra/secrets/rclone/rclone.conf"
+          },
+          "RESTIC_HOSTNAME": {
+            "variable": "RESTIC_HOSTNAME",
+            "fallback": "platform-infrastructure"
+          },
+          "RESTIC_IMAGE": {
+            "variable": "RESTIC_IMAGE",
+            "fallback": ""
+          },
+          "RESTIC_KEEP_LAST": {
+            "variable": "RESTIC_KEEP_LAST",
+            "fallback": "42"
+          },
+          "RESTIC_MAX_REPOSITORY_BYTES": {
+            "variable": "RESTIC_MAX_REPOSITORY_BYTES",
+            "fallback": "2500000000000"
+          },
+          "RESTIC_PASSWORD_FILE": {
+            "variable": "RESTIC_PASSWORD_FILE",
+            "fallback": "/infra/secrets/restic_password.txt"
+          },
+          "RESTIC_REPOSITORY": {
+            "variable": "RESTIC_REPOSITORY",
+            "fallback": ""
+          },
+          "RESTIC_REQUIRE_IMMUTABLE_IMAGE": {
+            "variable": "RESTIC_REQUIRE_IMMUTABLE_IMAGE",
+            "fallback": "true"
+          }
+        }
+      },
+      "cadvisor": {
+        "present": false,
+        "entries": {}
+      },
+      "control-center": {
+        "present": true,
+        "entries": {
+          "ADMIN_HOST": {
+            "variable": "ADMIN_HOST",
+            "fallback": "portal.${DOMAIN:-localhost.com}",
+            "template": "${ADMIN_HOST:-portal.${DOMAIN:-localhost.com}}"
+          },
+          "CONTROL_CENTER_AUTH_DATABASE_URL_FILE": {
+            "literal": "/run/secrets/control_center_database_url"
+          },
+          "CONTROL_CENTER_AUTH_MODE": {
+            "literal": "oidc-passkey"
+          },
+          "CONTROL_CENTER_AUTH_STORE": {
+            "literal": "postgres"
+          },
+          "CONTROL_CENTER_BIND_HOST": {
+            "literal": "0.0.0.0"
+          },
+          "CONTROL_CENTER_DATABASE_DELETE_EVIDENCE_MAX_AGE_SECONDS": {
+            "variable": "CONTROL_CENTER_DATABASE_DELETE_EVIDENCE_MAX_AGE_SECONDS",
+            "fallback": "86400"
+          },
+          "CONTROL_CENTER_DATABASE_LIVE_APPLY": {
+            "variable": "CONTROL_CENTER_DATABASE_LIVE_APPLY",
+            "fallback": "true"
+          },
+          "CONTROL_CENTER_DISCOVER_HOSTED_PROJECTS": {
+            "literal": "true"
+          },
+          "CONTROL_CENTER_DOCKER_STATS_MAX_AGE_SECONDS": {
+            "variable": "CONTROL_CENTER_DOCKER_STATS_MAX_AGE_SECONDS",
+            "fallback": "15"
+          },
+          "CONTROL_CENTER_DOCS_ROOT": {
+            "literal": "/var/www/infra-docs"
+          },
+          "CONTROL_CENTER_ENV": {
+            "variable": "CONTROL_CENTER_ENV",
+            "fallback": "local"
+          },
+          "CONTROL_CENTER_EXISTING_SECRETS_DIR": {
+            "literal": "/var/www/infra-docs/secrets"
+          },
+          "CONTROL_CENTER_FRESH_AUTH_SECONDS": {
+            "variable": "CONTROL_CENTER_FRESH_AUTH_SECONDS",
+            "fallback": "300"
+          },
+          "CONTROL_CENTER_HOST": {
+            "variable": "CONTROL_CENTER_HOST",
+            "fallback": "${ADMIN_HOST:-portal.${DOMAIN:-localhost.com}}",
+            "template": "${CONTROL_CENTER_HOST:-${ADMIN_HOST:-portal.${DOMAIN:-localhost.com}}}"
+          },
+          "CONTROL_CENTER_LOGIN_LOCK_SECONDS": {
+            "variable": "CONTROL_CENTER_LOGIN_LOCK_SECONDS",
+            "fallback": "60"
+          },
+          "CONTROL_CENTER_LOGIN_MAX_ATTEMPTS": {
+            "variable": "CONTROL_CENTER_LOGIN_MAX_ATTEMPTS",
+            "fallback": "20"
+          },
+          "CONTROL_CENTER_LOGIN_WINDOW_SECONDS": {
+            "variable": "CONTROL_CENTER_LOGIN_WINDOW_SECONDS",
+            "fallback": "60"
+          },
+          "CONTROL_CENTER_MARIADB_HOST": {
+            "variable": "CONTROL_CENTER_MARIADB_HOST",
+            "fallback": "mariadb"
+          },
+          "CONTROL_CENTER_MARIADB_PORT": {
+            "variable": "CONTROL_CENTER_MARIADB_PORT",
+            "fallback": "3306"
+          },
+          "CONTROL_CENTER_MARIADB_ROOT_PASSWORD_FILE": {
+            "literal": "/run/secrets/mariadb_root_password"
+          },
+          "CONTROL_CENTER_MARIADB_ROOT_USER": {
+            "variable": "CONTROL_CENTER_MARIADB_ROOT_USER",
+            "fallback": "root"
+          },
+          "CONTROL_CENTER_OIDC_ADMIN_ROLE": {
+            "variable": "CONTROL_CENTER_OIDC_ADMIN_ROLE",
+            "fallback": "admin"
+          },
+          "CONTROL_CENTER_OIDC_AUTHORIZATION_ENDPOINT": {
+            "variable": "CONTROL_CENTER_OIDC_AUTHORIZATION_ENDPOINT",
+            "fallback": "https://${AUTH_HOST:-auth.${DOMAIN:-localhost.com}}/realms/platform/protocol/openid-connect/auth",
+            "template": "${CONTROL_CENTER_OIDC_AUTHORIZATION_ENDPOINT:-https://${AUTH_HOST:-auth.${DOMAIN:-localhost.com}}/realms/platform/protocol/openid-connect/auth}"
+          },
+          "CONTROL_CENTER_OIDC_CLIENT_ID": {
+            "variable": "CONTROL_CENTER_OIDC_CLIENT_ID",
+            "fallback": "platform-control-center"
+          },
+          "CONTROL_CENTER_OIDC_ISSUER": {
+            "variable": "CONTROL_CENTER_OIDC_ISSUER",
+            "fallback": "https://${AUTH_HOST:-auth.${DOMAIN:-localhost.com}}/realms/platform",
+            "template": "${CONTROL_CENTER_OIDC_ISSUER:-https://${AUTH_HOST:-auth.${DOMAIN:-localhost.com}}/realms/platform}"
+          },
+          "CONTROL_CENTER_OIDC_JWKS_URI": {
+            "variable": "CONTROL_CENTER_OIDC_JWKS_URI",
+            "fallback": "http://keycloak:8080/realms/platform/protocol/openid-connect/certs"
+          },
+          "CONTROL_CENTER_OIDC_OWNER_ROLE": {
+            "variable": "CONTROL_CENTER_OIDC_OWNER_ROLE",
+            "fallback": "owner"
+          },
+          "CONTROL_CENTER_OIDC_REDIRECT_URI": {
+            "variable": "CONTROL_CENTER_OIDC_REDIRECT_URI",
+            "fallback": "https://${CONTROL_CENTER_HOST:-${ADMIN_HOST:-portal.${DOMAIN:-localhost.com}}}/auth/callback",
+            "template": "${CONTROL_CENTER_OIDC_REDIRECT_URI:-https://${CONTROL_CENTER_HOST:-${ADMIN_HOST:-portal.${DOMAIN:-localhost.com}}}/auth/callback}"
+          },
+          "CONTROL_CENTER_OIDC_REQUIRED_ACR": {
+            "variable": "CONTROL_CENTER_OIDC_REQUIRED_ACR",
+            "fallback": "urn:platform:loa:passkey"
+          },
+          "CONTROL_CENTER_OIDC_REQUIRED_AMR": {
+            "variable": "CONTROL_CENTER_OIDC_REQUIRED_AMR",
+            "fallback": "webauthn"
+          },
+          "CONTROL_CENTER_OIDC_TOKEN_ENDPOINT": {
+            "variable": "CONTROL_CENTER_OIDC_TOKEN_ENDPOINT",
+            "fallback": "http://keycloak:8080/realms/platform/protocol/openid-connect/token"
+          },
+          "CONTROL_CENTER_OIDC_VIEWER_ROLE": {
+            "variable": "CONTROL_CENTER_OIDC_VIEWER_ROLE",
+            "fallback": "viewer"
+          },
+          "CONTROL_CENTER_PHPPGADMIN_INTERNAL_URL": {
+            "variable": "CONTROL_CENTER_PHPPGADMIN_INTERNAL_URL",
+            "fallback": "http://phppgadmin:80"
+          },
+          "CONTROL_CENTER_PORT": {
+            "literal": "8080"
+          },
+          "CONTROL_CENTER_POSTGRES_HOST": {
+            "variable": "CONTROL_CENTER_POSTGRES_HOST",
+            "fallback": "postgres"
+          },
+          "CONTROL_CENTER_POSTGRES_PORT": {
+            "variable": "CONTROL_CENTER_POSTGRES_PORT",
+            "fallback": "5432"
+          },
+          "CONTROL_CENTER_POSTGRES_SUPERUSER": {
+            "variable": "POSTGRES_SUPERUSER",
+            "fallback": "postgres"
+          },
+          "CONTROL_CENTER_POSTGRES_SUPERUSER_PASSWORD_FILE": {
+            "literal": "/run/secrets/postgres_superuser_password"
+          },
+          "CONTROL_CENTER_PUBLIC_ORIGIN": {
+            "variable": "CONTROL_CENTER_PUBLIC_ORIGIN",
+            "fallback": "https://${CONTROL_CENTER_HOST:-${ADMIN_HOST:-portal.${DOMAIN:-localhost.com}}}",
+            "template": "${CONTROL_CENTER_PUBLIC_ORIGIN:-https://${CONTROL_CENTER_HOST:-${ADMIN_HOST:-portal.${DOMAIN:-localhost.com}}}}"
+          },
+          "CONTROL_CENTER_PUBLIC_ROOT": {
+            "literal": "/app/public"
+          },
+          "CONTROL_CENTER_REPORTS_ROOT": {
+            "literal": "/var/www/infra-docs/reports"
+          },
+          "CONTROL_CENTER_SESSION_IDLE_SECONDS": {
+            "variable": "CONTROL_CENTER_SESSION_IDLE_SECONDS",
+            "fallback": "1800"
+          },
+          "CONTROL_CENTER_SESSION_MAX_AGE_SECONDS": {
+            "variable": "CONTROL_CENTER_SESSION_MAX_AGE_SECONDS",
+            "fallback": "28800"
+          },
+          "CONTROL_CENTER_SESSION_POLICY_VERSION": {
+            "variable": "CONTROL_CENTER_SESSION_POLICY_VERSION",
+            "fallback": "1"
+          },
+          "CONTROL_CENTER_STATUS_CHECK_TIMEOUT_MS": {
+            "variable": "CONTROL_CENTER_STATUS_CHECK_TIMEOUT_MS",
+            "fallback": "30000"
+          },
+          "CONTROL_CENTER_STATUS_STEP_DELAY_MS": {
+            "variable": "CONTROL_CENTER_STATUS_STEP_DELAY_MS",
+            "fallback": "1500"
+          },
+          "CONTROL_CENTER_VAULT_ACTIVE_KEY_ID": {
+            "variable": "CONTROL_CENTER_VAULT_ACTIVE_KEY_ID",
+            "fallback": ""
+          },
+          "CONTROL_CENTER_VAULT_KEY_FILE": {
+            "literal": "/run/secrets/control_center_vault_keys"
+          },
+          "CONTROL_CENTER_VAULT_LEGACY_KEY_FILE": {
+            "literal": "/run/secrets/projects_gateway_signing_keys"
+          },
+          "DOCS_HOST": {
+            "variable": "DOCS_HOST",
+            "fallback": "docs.${DOMAIN:-localhost.com}",
+            "template": "${DOCS_HOST:-docs.${DOMAIN:-localhost.com}}"
+          },
+          "DOMAIN": {
+            "variable": "DOMAIN",
+            "fallback": "localhost.com"
+          },
+          "LOCAL_DOMAIN": {
+            "variable": "LOCAL_DOMAIN",
+            "fallback": "localhost.com"
+          },
+          "NODE_PROJECT_HOSTS": {
+            "variable": "NODE_PROJECT_HOSTS",
+            "fallback": ""
+          },
+          "PLATFORM_NAME": {
+            "variable": "PLATFORM_NAME",
+            "fallback": "Platform Infrastructure"
+          },
+          "PROJECTS_HOST": {
+            "variable": "PROJECTS_HOST",
+            "fallback": ""
+          },
+          "PROJECTS_ROOT": {
+            "literal": "/var/www/projects"
+          },
+          "PROJECT_ALERTS_FILE": {
+            "literal": "/var/www/project-state/alerts.json"
+          },
+          "PROJECT_APPLICATIONS_FILE": {
+            "literal": "/var/www/project-state/applications.json"
+          },
+          "PROJECT_AUDIT_FILE": {
+            "literal": "/var/www/project-state/audit.jsonl"
+          },
+          "PROJECT_BACKUP_RECORDS_FILE": {
+            "literal": "/var/www/project-state/backups.jsonl"
+          },
+          "PROJECT_DATABASES_FILE": {
+            "literal": "/var/www/project-state/databases.json"
+          },
+          "PROJECT_DATABASE_DESTRUCTIVE_OPERATIONS_FILE": {
+            "literal": "/var/www/project-state/database-destructive-operations.json"
+          },
+          "PROJECT_DATABASE_PRINCIPALS_FILE": {
+            "literal": "/var/www/project-state/database-principals.json"
+          },
+          "PROJECT_DEPLOYMENTS_FILE": {
+            "literal": "/var/www/project-state/deployments.jsonl"
+          },
+          "PROJECT_DOCKER_STATS_FILE": {
+            "literal": "/var/www/project-state/docker-stats.json"
+          },
+          "PROJECT_DOMAINS_FILE": {
+            "literal": "/var/www/project-state/domains.json"
+          },
+          "PROJECT_HOST_SUFFIX": {
+            "variable": "PROJECT_HOST_SUFFIX",
+            "fallback": ".localhost.com"
+          },
+          "PROJECT_IDENTITY_ACCESS_FILE": {
+            "literal": "/var/www/project-state/identity-access.json"
+          },
+          "PROJECT_NAME": {
+            "variable": "PROJECT_NAME",
+            "fallback": "platform"
+          },
+          "PROJECT_NOTIFICATION_CHANNELS_FILE": {
+            "literal": "/var/www/project-state/notification-channels.json"
+          },
+          "PROJECT_OPERATIONS_FILE": {
+            "literal": "/var/www/project-state/operations.jsonl"
+          },
+          "PROJECT_PROVIDER_CONNECTIONS_FILE": {
+            "literal": "/var/www/project-state/provider-connections.json"
+          },
+          "PROJECT_RESOURCE_LIMITS_FILE": {
+            "literal": "/var/www/project-state/resource-limits.json"
+          },
+          "PROJECT_SECURITY_POLICIES_FILE": {
+            "literal": "/var/www/project-state/security-policies.json"
+          },
+          "PROJECT_SENSITIVE_MATERIALS_FILE": {
+            "literal": "/var/www/project-state/sensitive-materials.json"
+          },
+          "PROJECT_SETTINGS_FILE": {
+            "literal": "/var/www/project-state/settings.json"
+          },
+          "PROJECT_STATE_FILE": {
+            "literal": "/var/www/project-state/projects.json"
+          },
+          "PROJECT_STATUS_RUNS_FILE": {
+            "literal": "/var/www/project-state/status-runs.jsonl"
+          },
+          "PROJECT_STATUS_RUN_EVENTS_FILE": {
+            "literal": "/var/www/project-state/status-run-events.jsonl"
+          },
+          "PROJECT_STORAGE_BUCKETS_FILE": {
+            "literal": "/var/www/project-state/storage-buckets.json"
+          },
+          "PROJECT_VAULT_FILE": {
+            "literal": "/var/www/project-state/secret-vault.json"
+          },
+          "PROJECT_WEBSPACES_FILE": {
+            "literal": "/var/www/project-state/webspaces.json"
+          },
+          "PROJECT_WORKER_JOBS_FILE": {
+            "literal": "/var/www/project-state/worker-jobs.json"
+          },
+          "PROVIDER_PROFILE": {
+            "variable": "PROVIDER_PROFILE",
+            "fallback": "local"
+          }
+        }
+      },
+      "docker-socket-proxy": {
+        "present": true,
+        "entries": {
+          "ALLOW_RESTARTS": {
+            "literal": "1"
+          },
+          "ALLOW_START": {
+            "literal": "1"
+          },
+          "ALLOW_STOP": {
+            "literal": "1"
+          },
+          "AUTH": {
+            "literal": "0"
+          },
+          "BUILD": {
+            "literal": "0"
+          },
+          "COMMIT": {
+            "literal": "0"
+          },
+          "CONFIGS": {
+            "literal": "0"
+          },
+          "CONTAINERS": {
+            "literal": "1"
+          },
+          "DISTRIBUTION": {
+            "literal": "0"
+          },
+          "EVENTS": {
+            "literal": "1"
+          },
+          "EXEC": {
+            "literal": "1"
+          },
+          "GRPC": {
+            "literal": "0"
+          },
+          "IMAGES": {
+            "literal": "1"
+          },
+          "INFO": {
+            "literal": "1"
+          },
+          "NETWORKS": {
+            "literal": "1"
+          },
+          "NODES": {
+            "literal": "0"
+          },
+          "PLUGINS": {
+            "literal": "0"
+          },
+          "POST": {
+            "literal": "1"
+          },
+          "SECRETS": {
+            "literal": "0"
+          },
+          "SERVICES": {
+            "literal": "0"
+          },
+          "SESSION": {
+            "literal": "0"
+          },
+          "SWARM": {
+            "literal": "0"
+          },
+          "SYSTEM": {
+            "literal": "0"
+          },
+          "TASKS": {
+            "literal": "0"
+          },
+          "VOLUMES": {
+            "literal": "1"
+          }
+        }
+      },
+      "grafana": {
+        "present": true,
+        "entries": {
+          "GF_ANALYTICS_CHECK_FOR_UPDATES": {
+            "literal": "false"
+          },
+          "GF_ANALYTICS_REPORTING_ENABLED": {
+            "literal": "false"
+          },
+          "GF_LOG_LEVEL": {
+            "literal": "info"
+          },
+          "GF_LOG_MODE": {
+            "literal": "console"
+          },
+          "GF_PLUGINS_PREINSTALL_DISABLED": {
+            "literal": "true"
+          },
+          "GF_SECURITY_ADMIN_PASSWORD__FILE": {
+            "literal": "/run/secrets/grafana_admin_password"
+          },
+          "GF_SECURITY_ADMIN_USER": {
+            "variable": "GRAFANA_ADMIN_USER",
+            "fallback": "admin"
+          },
+          "GF_SECURITY_COOKIE_SAMESITE": {
+            "literal": "strict"
+          },
+          "GF_SERVER_ROOT_URL": {
+            "variable": "GRAFANA_ROOT_URL",
+            "fallback": "https://grafana.localhost.com"
+          },
+          "GF_USERS_ALLOW_SIGN_UP": {
+            "literal": "false"
+          }
+        }
+      },
+      "keycloak": {
+        "present": true,
+        "entries": {
+          "KC_BOOTSTRAP_ADMIN_PASSWORD_FILE": {
+            "literal": "/run/secrets/keycloak_admin_password"
+          },
+          "KC_BOOTSTRAP_ADMIN_USERNAME": {
+            "variable": "KEYCLOAK_ADMIN",
+            "fallback": "admin"
+          },
+          "KC_DB": {
+            "literal": "postgres"
+          },
+          "KC_DB_PASSWORD_FILE": {
+            "literal": "/run/secrets/keycloak_db_password"
+          },
+          "KC_DB_URL": {
+            "variable": "KEYCLOAK_DB_NAME",
+            "fallback": "keycloak",
+            "template": "jdbc:postgresql://postgres:5432/${KEYCLOAK_DB_NAME:-keycloak}"
+          },
+          "KC_DB_USERNAME": {
+            "variable": "KEYCLOAK_DB_USER",
+            "fallback": "keycloak"
+          },
+          "KC_EVENT_METRICS_USER_ENABLED": {
+            "literal": "true"
+          },
+          "KC_EVENT_METRICS_USER_EVENTS": {
+            "literal": "login,logout,user_disabled_by_temporary_lockout,user_disabled_by_permanent_lockout,update_credential,remove_credential"
+          },
+          "KC_EVENT_METRICS_USER_TAGS": {
+            "literal": "realm,clientId"
+          },
+          "KC_HEALTH_ENABLED": {
+            "literal": "true"
+          },
+          "KC_HOSTNAME": {
+            "variable": "AUTH_HOST",
+            "fallback": "keycloak.local"
+          },
+          "KC_HOSTNAME_STRICT": {
+            "literal": "true"
+          },
+          "KC_HTTP_ENABLED": {
+            "literal": "true"
+          },
+          "KC_METRICS_ENABLED": {
+            "literal": "true"
+          },
+          "KC_PROXY_HEADERS": {
+            "literal": "xforwarded"
+          }
+        }
+      },
+      "local-dns": {
+        "present": false,
+        "entries": {}
+      },
+      "local-registry": {
+        "present": false,
+        "entries": {}
+      },
+      "loki": {
+        "present": false,
+        "entries": {}
+      },
+      "mariadb": {
+        "present": true,
+        "entries": {
+          "MARIADB_ROOT_PASSWORD_FILE": {
+            "literal": "/run/secrets/mariadb_root_password"
+          }
+        }
+      },
+      "minio": {
+        "present": true,
+        "entries": {
+          "MINIO_BROWSER_REDIRECT_URL": {
+            "variable": "MINIO_BROWSER_REDIRECT_URL",
+            "fallback": "https://minio.localhost.com"
+          },
+          "MINIO_ROOT_PASSWORD_FILE": {
+            "literal": "/run/secrets/minio_root_password"
+          },
+          "MINIO_ROOT_USER": {
+            "variable": "MINIO_ROOT_USER",
+            "fallback": "minio_admin"
+          },
+          "MINIO_SERVER_URL": {
+            "variable": "MINIO_SERVER_URL",
+            "fallback": "http://localhost:9000"
+          }
+        }
+      },
+      "nats": {
+        "present": true,
+        "entries": {
+          "NATS_PASSWORD_FILE": {
+            "literal": "/run/secrets/nats_password"
+          },
+          "NATS_USER": {
+            "variable": "NATS_USER",
+            "fallback": "enterprise"
+          }
+        }
+      },
+      "node-exporter": {
+        "present": false,
+        "entries": {}
+      },
+      "phpmyadmin": {
+        "present": true,
+        "entries": {
+          "PMA_CONTROL_PASSWORD_FILE": {
+            "literal": "/run/secrets/phpmyadmin_control_password"
+          },
+          "PMA_HOST": {
+            "literal": "platform.local"
+          },
+          "PMA_PORT": {
+            "literal": "3306"
+          },
+          "PMA_SSL_CA": {
+            "literal": "/etc/phpmyadmin/certs/ca.pem"
+          },
+          "PMA_SSL_VERIFIES": {
+            "literal": "1"
+          },
+          "UPLOAD_LIMIT": {
+            "literal": "256M"
+          }
+        }
+      },
+      "phppgadmin": {
+        "present": true,
+        "entries": {
+          "PHPPGADMIN_HOST": {
+            "variable": "CONTROL_CENTER_POSTGRES_HOST",
+            "fallback": "postgres"
+          },
+          "PHPPGADMIN_PORT": {
+            "variable": "CONTROL_CENTER_POSTGRES_PORT",
+            "fallback": "5432"
+          }
+        }
+      },
+      "platform-alert-dispatcher": {
+        "present": true,
+        "entries": {
+          "ALERTMANAGER_WEBHOOK_TOKEN_FILE": {
+            "literal": "/run/secrets/alertmanager_webhook_token"
+          },
+          "ALERT_EMAIL_TO": {
+            "variable": "ALERT_EMAIL_TO",
+            "required": "Set ALERT_EMAIL_TO"
+          },
+          "ALERT_FORWARD_WEBHOOK_URL_FILE": {
+            "variable": "ALERT_FORWARD_WEBHOOK_URL_FILE",
+            "fallback": ""
+          },
+          "MAILER_FROM": {
+            "variable": "MAILER_FROM",
+            "required": "Set MAILER_FROM"
+          },
+          "MAILER_REPLY_TO": {
+            "variable": "MAILER_REPLY_TO",
+            "required": "Set MAILER_REPLY_TO"
+          },
+          "PORT": {
+            "literal": "3000"
+          },
+          "SMTP_HOST": {
+            "variable": "SMTP_HOST",
+            "required": "Set SMTP_HOST"
+          },
+          "SMTP_PASSWORD_FILE": {
+            "literal": "/run/secrets/smtp_password"
+          },
+          "SMTP_PORT": {
+            "variable": "SMTP_PORT",
+            "fallback": "465"
+          },
+          "SMTP_SECURE": {
+            "variable": "SMTP_SECURE",
+            "fallback": "true"
+          },
+          "SMTP_USER": {
+            "variable": "SMTP_USER",
+            "required": "Set SMTP_USER"
+          }
+        }
+      },
+      "postgres": {
+        "present": true,
+        "entries": {
+          "KEYCLOAK_DB_NAME": {
+            "variable": "KEYCLOAK_DB_NAME",
+            "fallback": "keycloak"
+          },
+          "KEYCLOAK_DB_PASSWORD_FILE": {
+            "literal": "/run/secrets/keycloak_db_password"
+          },
+          "KEYCLOAK_DB_USER": {
+            "variable": "KEYCLOAK_DB_USER",
+            "fallback": "keycloak"
+          },
+          "POSTGRES_DB": {
+            "literal": "postgres"
+          },
+          "POSTGRES_PASSWORD_FILE": {
+            "literal": "/run/secrets/postgres_superuser_password"
+          },
+          "POSTGRES_USER": {
+            "variable": "POSTGRES_SUPERUSER",
+            "fallback": "postgres"
+          }
+        }
+      },
+      "project-router": {
+        "present": true,
+        "entries": {
+          "ADMIN_HOST": {
+            "variable": "ADMIN_HOST",
+            "fallback": "portal.${DOMAIN:-localhost.com}",
+            "template": "${ADMIN_HOST:-portal.${DOMAIN:-localhost.com}}"
+          },
+          "CONTROL_CENTER_HOST": {
+            "variable": "CONTROL_CENTER_HOST",
+            "fallback": "${ADMIN_HOST:-portal.${DOMAIN:-localhost.com}}",
+            "template": "${CONTROL_CENTER_HOST:-${ADMIN_HOST:-portal.${DOMAIN:-localhost.com}}}"
+          },
+          "CONTROL_CENTER_UPSTREAM": {
+            "literal": "http://control-center:8080"
+          },
+          "NODE_PROJECT_HOSTS": {
+            "variable": "NODE_PROJECT_HOSTS",
+            "fallback": ""
+          },
+          "NODE_PROJECT_UPSTREAMS": {
+            "variable": "NODE_PROJECT_UPSTREAMS",
+            "fallback": ""
+          },
+          "PHP_PROJECT_UPSTREAMS": {
+            "variable": "PHP_PROJECT_UPSTREAMS",
+            "fallback": ""
+          },
+          "PROJECTS_HOST": {
+            "variable": "PROJECTS_HOST",
+            "fallback": ""
+          },
+          "PROJECTS_ROOT": {
+            "literal": "/var/www/projects"
+          },
+          "PROJECT_HOST_SUFFIX": {
+            "variable": "PROJECT_HOST_SUFFIX",
+            "fallback": ".localhost.com"
+          },
+          "PROJECT_ROUTER_ALLOWED_UPSTREAMS": {
+            "variable": "PROJECT_ROUTER_ALLOWED_UPSTREAMS",
+            "fallback": "control-center:8080"
+          },
+          "PROJECT_ROUTER_PORT": {
+            "literal": "8080"
+          },
+          "PROJECT_ROUTER_WORKLOAD_LOCK_FILE": {
+            "literal": "/run/platform/hosted-workloads.lock.json"
+          },
+          "PROJECT_STATE_FILE": {
+            "literal": "/var/www/project-state/projects.json"
+          },
+          "PROJECT_UPSTREAMS": {
+            "variable": "PROJECT_UPSTREAMS",
+            "fallback": ""
+          },
+          "STATIC_PROJECT_UPSTREAMS": {
+            "variable": "STATIC_PROJECT_UPSTREAMS",
+            "fallback": ""
+          }
+        }
+      },
+      "prometheus": {
+        "present": false,
+        "entries": {}
+      },
+      "promtail": {
+        "present": false,
+        "entries": {}
+      },
+      "redis": {
+        "present": true,
+        "entries": {
+          "REDIS_PASSWORD_FILE": {
+            "literal": "/run/secrets/redis_password"
+          }
+        }
+      },
+      "traefik": {
+        "present": false,
+        "entries": {}
+      },
+      "waf": {
+        "present": true,
+        "entries": {
+          "ACCESSLOG": {
+            "literal": "/dev/stdout"
+          },
+          "ALLOWED_HTTP_VERSIONS": {
+            "variable": "WAF_ALLOWED_HTTP_VERSIONS",
+            "fallback": "HTTP/1.1 HTTP/2 HTTP/2.0"
+          },
+          "ALLOWED_METHODS": {
+            "variable": "WAF_ALLOWED_METHODS",
+            "fallback": "GET HEAD POST OPTIONS PUT PATCH DELETE"
+          },
+          "ANOMALY_INBOUND": {
+            "variable": "WAF_ANOMALY_INBOUND",
+            "fallback": "5"
+          },
+          "ANOMALY_OUTBOUND": {
+            "variable": "WAF_ANOMALY_OUTBOUND",
+            "fallback": "4"
+          },
+          "ARG_LENGTH": {
+            "variable": "WAF_ARG_LENGTH",
+            "fallback": "4096"
+          },
+          "ARG_NAME_LENGTH": {
+            "variable": "WAF_ARG_NAME_LENGTH",
+            "fallback": "100"
+          },
+          "BACKEND": {
+            "variable": "WAF_BACKEND",
+            "fallback": "http://traefik:80"
+          },
+          "BLOCKING_PARANOIA": {
+            "variable": "WAF_BLOCKING_PARANOIA",
+            "fallback": "2"
+          },
+          "COMBINED_FILE_SIZES": {
+            "variable": "WAF_COMBINED_FILE_SIZES",
+            "fallback": "26214400"
+          },
+          "CORS_HEADER_ACCESS_CONTROL_ALLOW_HEADERS": {
+            "variable": "WAF_CORS_ALLOW_HEADERS",
+            "fallback": "accept,authorization,content-type,x-request-id,x-platform-csrf,x-platform-session-client"
+          },
+          "DETECTION_PARANOIA": {
+            "variable": "WAF_DETECTION_PARANOIA",
+            "fallback": "2"
+          },
+          "ENFORCE_BODYPROC_URLENCODED": {
+            "literal": "1"
+          },
+          "ERRORLOG": {
+            "literal": "/dev/stderr"
+          },
+          "LOGLEVEL": {
+            "variable": "WAF_LOGLEVEL",
+            "fallback": "warn"
+          },
+          "MAX_FILE_SIZE": {
+            "variable": "WAF_MAX_FILE_SIZE",
+            "fallback": "10485760"
+          },
+          "MAX_NUM_ARGS": {
+            "variable": "WAF_MAX_NUM_ARGS",
+            "fallback": "256"
+          },
+          "MODSEC_AUDIT_ENGINE": {
+            "variable": "WAF_MODSEC_AUDIT_ENGINE",
+            "fallback": "RelevantOnly"
+          },
+          "MODSEC_AUDIT_LOG": {
+            "literal": "/dev/stdout"
+          },
+          "MODSEC_AUDIT_LOG_FORMAT": {
+            "literal": "JSON"
+          },
+          "MODSEC_AUDIT_LOG_PARTS": {
+            "variable": "WAF_MODSEC_AUDIT_LOG_PARTS",
+            "fallback": "ABIJFHZ"
+          },
+          "MODSEC_PCRE_MATCH_LIMIT": {
+            "variable": "WAF_MODSEC_PCRE_MATCH_LIMIT",
+            "fallback": "10000"
+          },
+          "MODSEC_PCRE_MATCH_LIMIT_RECURSION": {
+            "variable": "WAF_MODSEC_PCRE_MATCH_LIMIT_RECURSION",
+            "fallback": "10000"
+          },
+          "MODSEC_REQ_BODY_ACCESS": {
+            "literal": "On"
+          },
+          "MODSEC_REQ_BODY_JSON_DEPTH_LIMIT": {
+            "variable": "WAF_MODSEC_REQ_BODY_JSON_DEPTH_LIMIT",
+            "fallback": "128"
+          },
+          "MODSEC_REQ_BODY_LIMIT": {
+            "variable": "WAF_MODSEC_REQ_BODY_LIMIT",
+            "fallback": "13107200"
+          },
+          "MODSEC_REQ_BODY_NOFILES_LIMIT": {
+            "variable": "WAF_MODSEC_REQ_BODY_NOFILES_LIMIT",
+            "fallback": "262144"
+          },
+          "MODSEC_RESP_BODY_ACCESS": {
+            "variable": "WAF_MODSEC_RESP_BODY_ACCESS",
+            "fallback": "Off"
+          },
+          "MODSEC_RULE_ENGINE": {
+            "variable": "WAF_MODSEC_RULE_ENGINE",
+            "fallback": "On"
+          },
+          "NGINX_ALWAYS_TLS_REDIRECT": {
+            "variable": "WAF_NGINX_ALWAYS_TLS_REDIRECT",
+            "fallback": "on"
+          },
+          "NGINX_PORT_IN_REDIRECT": {
+            "literal": "off"
+          },
+          "NGINX_X_FORWARDED_PROTO": {
+            "variable": "WAF_X_FORWARDED_PROTO",
+            "fallback": "https"
+          },
+          "PORT": {
+            "literal": "8080"
+          },
+          "PROXY_SSL_VERIFY": {
+            "literal": "off"
+          },
+          "PROXY_TIMEOUT": {
+            "variable": "WAF_PROXY_TIMEOUT",
+            "fallback": "60s"
+          },
+          "REPORTING_LEVEL": {
+            "variable": "WAF_REPORTING_LEVEL",
+            "fallback": "4"
+          },
+          "RESTRICTED_EXTENSIONS": {
+            "variable": "WAF_RESTRICTED_EXTENSIONS",
+            "fallback": ".asa/ .asax/ .ascx/ .backup/ .bak/ .bat/ .cdx/ .cer/ .cfg/ .cmd/ .com/ .config/ .conf/ .cs/ .csproj/ .dat/ .db/ .dll/ .dos/ .htr/ .htw/ .ida/ .idc/ .idq/ .inc/ .ini/ .key/ .licx/ .log/ .old/ .pass/ .pdb/ .pol/ .printer/ .pwd/ .resources/ .resx/ .sql/ .swp/ .sys/ .vb/ .vbs/ .vbproj/ .vsdisco/ .webinfo/"
+          },
+          "RESTRICTED_HEADERS": {
+            "variable": "WAF_RESTRICTED_HEADERS",
+            "fallback": "/proxy/ /if/ /lock-token/ /content-range/ /translate/ /via/"
+          },
+          "SERVER_NAME": {
+            "variable": "WAF_SERVER_NAME",
+            "fallback": "localhost"
+          },
+          "SERVER_TOKENS": {
+            "literal": "off"
+          },
+          "SSL_CERT_FILE": {
+            "literal": "/etc/nginx/conf/server.crt"
+          },
+          "SSL_CERT_KEY_FILE": {
+            "literal": "/etc/nginx/conf/server.key"
+          },
+          "SSL_PORT": {
+            "literal": "8443"
+          },
+          "TOTAL_ARG_LENGTH": {
+            "variable": "WAF_TOTAL_ARG_LENGTH",
+            "fallback": "32768"
+          },
+          "VALIDATE_UTF8_ENCODING": {
+            "literal": "1"
+          }
+        }
+      }
+    },
+    "counts": {
+      "services": 24,
+      "total": 258,
+      "literals": 128,
+      "projections": 130,
+      "required": 5,
+      "templates": 10,
+      "perService": [
+        {
+          "service": "alertmanager",
+          "count": 0,
+          "present": false
+        },
+        {
+          "service": "backup-scheduler",
+          "count": 31,
+          "present": true
+        },
+        {
+          "service": "cadvisor",
+          "count": 0,
+          "present": false
+        },
+        {
+          "service": "control-center",
+          "count": 84,
+          "present": true
+        },
+        {
+          "service": "docker-socket-proxy",
+          "count": 25,
+          "present": true
+        },
+        {
+          "service": "grafana",
+          "count": 10,
+          "present": true
+        },
+        {
+          "service": "keycloak",
+          "count": 15,
+          "present": true
+        },
+        {
+          "service": "local-dns",
+          "count": 0,
+          "present": false
+        },
+        {
+          "service": "local-registry",
+          "count": 0,
+          "present": false
+        },
+        {
+          "service": "loki",
+          "count": 0,
+          "present": false
+        },
+        {
+          "service": "mariadb",
+          "count": 1,
+          "present": true
+        },
+        {
+          "service": "minio",
+          "count": 4,
+          "present": true
+        },
+        {
+          "service": "nats",
+          "count": 2,
+          "present": true
+        },
+        {
+          "service": "node-exporter",
+          "count": 0,
+          "present": false
+        },
+        {
+          "service": "phpmyadmin",
+          "count": 6,
+          "present": true
+        },
+        {
+          "service": "phppgadmin",
+          "count": 2,
+          "present": true
+        },
+        {
+          "service": "platform-alert-dispatcher",
+          "count": 11,
+          "present": true
+        },
+        {
+          "service": "postgres",
+          "count": 6,
+          "present": true
+        },
+        {
+          "service": "project-router",
+          "count": 15,
+          "present": true
+        },
+        {
+          "service": "prometheus",
+          "count": 0,
+          "present": false
+        },
+        {
+          "service": "promtail",
+          "count": 0,
+          "present": false
+        },
+        {
+          "service": "redis",
+          "count": 1,
+          "present": true
+        },
+        {
+          "service": "traefik",
+          "count": 0,
+          "present": false
+        },
+        {
+          "service": "waf",
+          "count": 45,
+          "present": true
+        }
+      ]
+    }
+  },
+  exactAuthorityShape: {
+    "serviceFields": {
+      "traefik": [
+        "blkio_config",
+        "command",
+        "configs",
+        "container_name",
+        "cpu_shares",
+        "cpus",
+        "healthcheck",
+        "image",
+        "init",
+        "logging",
+        "mem_limit",
+        "mem_reservation",
+        "networks",
+        "pids_limit",
+        "ports",
+        "restart",
+        "security_opt",
+        "ulimits",
+        "volumes"
+      ],
+      "postgres": [
+        "blkio_config",
+        "container_name",
+        "cpu_shares",
+        "cpus",
+        "entrypoint",
+        "environment",
+        "healthcheck",
+        "image",
+        "init",
+        "logging",
+        "mem_limit",
+        "mem_reservation",
+        "networks",
+        "pids_limit",
+        "ports",
+        "restart",
+        "secrets",
+        "security_opt",
+        "ulimits",
+        "volumes"
+      ],
+      "redis": [
+        "blkio_config",
+        "command",
+        "container_name",
+        "cpu_shares",
+        "cpus",
+        "environment",
+        "healthcheck",
+        "image",
+        "init",
+        "logging",
+        "mem_limit",
+        "mem_reservation",
+        "networks",
+        "pids_limit",
+        "ports",
+        "restart",
+        "secrets",
+        "security_opt",
+        "ulimits",
+        "volumes"
+      ],
+      "keycloak": [
+        "blkio_config",
+        "command",
+        "container_name",
+        "cpu_shares",
+        "cpus",
+        "depends_on",
+        "entrypoint",
+        "environment",
+        "healthcheck",
+        "image",
+        "init",
+        "labels",
+        "logging",
+        "mem_limit",
+        "mem_reservation",
+        "networks",
+        "pids_limit",
+        "ports",
+        "restart",
+        "secrets",
+        "security_opt",
+        "ulimits",
+        "volumes"
+      ],
+      "nats": [
+        "blkio_config",
+        "container_name",
+        "cpu_shares",
+        "cpus",
+        "entrypoint",
+        "environment",
+        "healthcheck",
+        "image",
+        "init",
+        "logging",
+        "mem_limit",
+        "mem_reservation",
+        "networks",
+        "pids_limit",
+        "ports",
+        "restart",
+        "secrets",
+        "security_opt",
+        "ulimits",
+        "volumes"
+      ],
+      "minio": [
+        "blkio_config",
+        "command",
+        "container_name",
+        "cpu_shares",
+        "cpus",
+        "entrypoint",
+        "environment",
+        "healthcheck",
+        "image",
+        "init",
+        "labels",
+        "logging",
+        "mem_limit",
+        "mem_reservation",
+        "networks",
+        "pids_limit",
+        "ports",
+        "restart",
+        "secrets",
+        "security_opt",
+        "ulimits",
+        "volumes"
+      ],
+      "control-center": [
+        "blkio_config",
+        "build",
+        "command",
+        "container_name",
+        "cpu_shares",
+        "cpus",
+        "depends_on",
+        "environment",
+        "expose",
+        "healthcheck",
+        "image",
+        "init",
+        "logging",
+        "mem_limit",
+        "mem_reservation",
+        "networks",
+        "pids_limit",
+        "read_only",
+        "restart",
+        "secrets",
+        "security_opt",
+        "tmpfs",
+        "ulimits",
+        "volumes",
+        "working_dir"
+      ],
+      "project-router": [
+        "blkio_config",
+        "command",
+        "container_name",
+        "cpu_shares",
+        "cpus",
+        "depends_on",
+        "environment",
+        "expose",
+        "healthcheck",
+        "image",
+        "init",
+        "logging",
+        "mem_limit",
+        "mem_reservation",
+        "networks",
+        "pids_limit",
+        "read_only",
+        "restart",
+        "security_opt",
+        "tmpfs",
+        "ulimits",
+        "volumes",
+        "working_dir"
+      ],
+      "mariadb": [
+        "blkio_config",
+        "container_name",
+        "cpu_shares",
+        "cpus",
+        "environment",
+        "healthcheck",
+        "image",
+        "init",
+        "logging",
+        "mem_limit",
+        "mem_reservation",
+        "networks",
+        "pids_limit",
+        "ports",
+        "restart",
+        "secrets",
+        "security_opt",
+        "ulimits",
+        "volumes"
+      ],
+      "phpmyadmin": [
+        "blkio_config",
+        "container_name",
+        "cpu_shares",
+        "cpus",
+        "depends_on",
+        "environment",
+        "expose",
+        "healthcheck",
+        "image",
+        "init",
+        "labels",
+        "logging",
+        "mem_limit",
+        "mem_reservation",
+        "networks",
+        "pids_limit",
+        "restart",
+        "secrets",
+        "security_opt",
+        "ulimits",
+        "volumes"
+      ],
+      "phppgadmin": [
+        "blkio_config",
+        "container_name",
+        "cpu_shares",
+        "cpus",
+        "depends_on",
+        "environment",
+        "expose",
+        "healthcheck",
+        "image",
+        "init",
+        "labels",
+        "logging",
+        "mem_limit",
+        "mem_reservation",
+        "networks",
+        "pids_limit",
+        "restart",
+        "security_opt",
+        "ulimits",
+        "volumes"
+      ],
+      "local-dns": [
+        "blkio_config",
+        "command",
+        "container_name",
+        "cpu_shares",
+        "cpus",
+        "expose",
+        "healthcheck",
+        "image",
+        "init",
+        "logging",
+        "mem_limit",
+        "mem_reservation",
+        "networks",
+        "pids_limit",
+        "ports",
+        "restart",
+        "security_opt",
+        "ulimits",
+        "volumes"
+      ],
+      "prometheus": [
+        "blkio_config",
+        "command",
+        "container_name",
+        "cpu_shares",
+        "cpus",
+        "depends_on",
+        "healthcheck",
+        "image",
+        "init",
+        "logging",
+        "mem_limit",
+        "mem_reservation",
+        "networks",
+        "pids_limit",
+        "ports",
+        "restart",
+        "security_opt",
+        "ulimits",
+        "volumes"
+      ],
+      "node-exporter": [
+        "blkio_config",
+        "command",
+        "container_name",
+        "cpu_shares",
+        "cpus",
+        "healthcheck",
+        "image",
+        "init",
+        "logging",
+        "mem_limit",
+        "mem_reservation",
+        "networks",
+        "pid",
+        "pids_limit",
+        "restart",
+        "security_opt",
+        "ulimits",
+        "volumes"
+      ],
+      "cadvisor": [
+        "blkio_config",
+        "command",
+        "container_name",
+        "cpu_shares",
+        "cpus",
+        "healthcheck",
+        "image",
+        "init",
+        "logging",
+        "mem_limit",
+        "mem_reservation",
+        "networks",
+        "pids_limit",
+        "restart",
+        "security_opt",
+        "ulimits",
+        "volumes"
+      ],
+      "platform-alert-dispatcher": [
+        "blkio_config",
+        "build",
+        "cap_drop",
+        "container_name",
+        "cpu_shares",
+        "cpus",
+        "environment",
+        "expose",
+        "healthcheck",
+        "image",
+        "init",
+        "logging",
+        "mem_limit",
+        "mem_reservation",
+        "networks",
+        "pids_limit",
+        "read_only",
+        "restart",
+        "secrets",
+        "security_opt",
+        "tmpfs",
+        "ulimits",
+        "user"
+      ],
+      "alertmanager": [
+        "blkio_config",
+        "command",
+        "container_name",
+        "cpu_shares",
+        "cpus",
+        "depends_on",
+        "group_add",
+        "healthcheck",
+        "image",
+        "init",
+        "logging",
+        "mem_limit",
+        "mem_reservation",
+        "networks",
+        "pids_limit",
+        "ports",
+        "restart",
+        "secrets",
+        "security_opt",
+        "ulimits",
+        "volumes"
+      ],
+      "grafana": [
+        "blkio_config",
+        "container_name",
+        "cpu_shares",
+        "cpus",
+        "depends_on",
+        "environment",
+        "healthcheck",
+        "image",
+        "init",
+        "labels",
+        "logging",
+        "mem_limit",
+        "mem_reservation",
+        "networks",
+        "pids_limit",
+        "ports",
+        "restart",
+        "secrets",
+        "security_opt",
+        "ulimits",
+        "volumes"
+      ],
+      "loki": [
+        "blkio_config",
+        "command",
+        "container_name",
+        "cpu_shares",
+        "cpus",
+        "depends_on",
+        "healthcheck",
+        "image",
+        "init",
+        "logging",
+        "mem_limit",
+        "mem_reservation",
+        "networks",
+        "pids_limit",
+        "ports",
+        "restart",
+        "security_opt",
+        "ulimits",
+        "volumes"
+      ],
+      "promtail": [
+        "blkio_config",
+        "command",
+        "container_name",
+        "cpu_shares",
+        "cpus",
+        "depends_on",
+        "healthcheck",
+        "image",
+        "init",
+        "logging",
+        "mem_limit",
+        "mem_reservation",
+        "networks",
+        "pids_limit",
+        "restart",
+        "security_opt",
+        "ulimits",
+        "volumes"
+      ],
+      "waf": [
+        "blkio_config",
+        "container_name",
+        "cpu_shares",
+        "cpus",
+        "depends_on",
+        "environment",
+        "healthcheck",
+        "image",
+        "init",
+        "logging",
+        "mem_limit",
+        "mem_reservation",
+        "networks",
+        "pids_limit",
+        "ports",
+        "restart",
+        "security_opt",
+        "ulimits",
+        "volumes"
+      ],
+      "backup-scheduler": [
+        "blkio_config",
+        "build",
+        "container_name",
+        "cpu_shares",
+        "cpus",
+        "depends_on",
+        "entrypoint",
+        "environment",
+        "healthcheck",
+        "image",
+        "init",
+        "logging",
+        "mem_limit",
+        "mem_reservation",
+        "networks",
+        "pids_limit",
+        "profiles",
+        "read_only",
+        "restart",
+        "security_opt",
+        "tmpfs",
+        "ulimits",
+        "volumes"
+      ],
+      "local-registry": [
+        "blkio_config",
+        "container_name",
+        "cpu_shares",
+        "cpus",
+        "healthcheck",
+        "image",
+        "mem_limit",
+        "mem_reservation",
+        "network_mode",
+        "pids_limit",
+        "ports",
+        "restart",
+        "ulimits",
+        "volumes"
+      ],
+      "docker-socket-proxy": [
+        "blkio_config",
+        "container_name",
+        "cpu_shares",
+        "cpus",
+        "environment",
+        "expose",
+        "healthcheck",
+        "image",
+        "init",
+        "mem_limit",
+        "mem_reservation",
+        "networks",
+        "pids_limit",
+        "ports",
+        "read_only",
+        "restart",
+        "security_opt",
+        "ulimits",
+        "volumes"
+      ]
+    },
+    "serviceResources": {
+      "traefik": {
+        "init": true,
+        "pids_limit": 192,
+        "cpu_shares": 1024,
+        "ulimits": {
+          "nofile": {
+            "soft": 16384,
+            "hard": 16384
+          }
+        },
+        "blkio_config": {
+          "weight": 700
+        },
+        "cpus": 0.5,
+        "mem_limit": 268435456,
+        "mem_reservation": 67108864
+      },
+      "postgres": {
+        "init": true,
+        "pids_limit": 768,
+        "cpu_shares": 768,
+        "ulimits": {
+          "nofile": {
+            "soft": 16384,
+            "hard": 16384
+          }
+        },
+        "blkio_config": {
+          "weight": 600
+        },
+        "cpus": 1.0,
+        "mem_limit": 1073741824,
+        "mem_reservation": 268435456
+      },
+      "redis": {
+        "init": true,
+        "pids_limit": 192,
+        "cpu_shares": 768,
+        "ulimits": {
+          "nofile": {
+            "soft": 16384,
+            "hard": 16384
+          }
+        },
+        "blkio_config": {
+          "weight": 600
+        },
+        "cpus": 0.5,
+        "mem_limit": 268435456,
+        "mem_reservation": 67108864
+      },
+      "keycloak": {
+        "init": true,
+        "pids_limit": 768,
+        "cpu_shares": 768,
+        "ulimits": {
+          "nofile": {
+            "soft": 16384,
+            "hard": 16384
+          }
+        },
+        "blkio_config": {
+          "weight": 600
+        },
+        "cpus": 1.5,
+        "mem_limit": 1342177280,
+        "mem_reservation": 402653184
+      },
+      "nats": {
+        "init": true,
+        "pids_limit": 192,
+        "cpu_shares": 768,
+        "ulimits": {
+          "nofile": {
+            "soft": 16384,
+            "hard": 16384
+          }
+        },
+        "blkio_config": {
+          "weight": 600
+        },
+        "cpus": 0.25,
+        "mem_limit": 134217728,
+        "mem_reservation": 33554432
+      },
+      "minio": {
+        "init": true,
+        "pids_limit": 384,
+        "cpu_shares": 768,
+        "ulimits": {
+          "nofile": {
+            "soft": 16384,
+            "hard": 16384
+          }
+        },
+        "blkio_config": {
+          "weight": 600
+        },
+        "cpus": 1.0,
+        "mem_limit": 805306368,
+        "mem_reservation": 201326592
+      },
+      "control-center": {
+        "init": true,
+        "pids_limit": 384,
+        "working_dir": "/app",
+        "expose": [
+          "8080"
+        ],
+        "cpu_shares": 1024,
+        "ulimits": {
+          "nofile": {
+            "soft": 16384,
+            "hard": 16384
+          }
+        },
+        "blkio_config": {
+          "weight": 700
+        },
+        "cpus": 1.0,
+        "mem_limit": 536870912,
+        "mem_reservation": 134217728
+      },
+      "project-router": {
+        "init": true,
+        "pids_limit": 192,
+        "working_dir": "/app",
+        "expose": [
+          "8080"
+        ],
+        "cpu_shares": 1024,
+        "ulimits": {
+          "nofile": {
+            "soft": 16384,
+            "hard": 16384
+          }
+        },
+        "blkio_config": {
+          "weight": 700
+        },
+        "cpus": 0.5,
+        "mem_limit": 201326592,
+        "mem_reservation": 50331648
+      },
+      "mariadb": {
+        "init": true,
+        "pids_limit": 768,
+        "cpu_shares": 768,
+        "ulimits": {
+          "nofile": {
+            "soft": 16384,
+            "hard": 16384
+          }
+        },
+        "blkio_config": {
+          "weight": 600
+        },
+        "cpus": 1.5,
+        "mem_limit": 1073741824,
+        "mem_reservation": 268435456
+      },
+      "phpmyadmin": {
+        "init": true,
+        "pids_limit": 256,
+        "expose": [
+          "80"
+        ],
+        "cpu_shares": 256,
+        "ulimits": {
+          "nofile": {
+            "soft": 8192,
+            "hard": 8192
+          }
+        },
+        "blkio_config": {
+          "weight": 300
+        },
+        "cpus": 0.25,
+        "mem_limit": 268435456,
+        "mem_reservation": 50331648
+      },
+      "phppgadmin": {
+        "init": true,
+        "pids_limit": 256,
+        "expose": [
+          "80"
+        ],
+        "cpu_shares": 256,
+        "ulimits": {
+          "nofile": {
+            "soft": 8192,
+            "hard": 8192
+          }
+        },
+        "blkio_config": {
+          "weight": 300
+        },
+        "cpus": 0.25,
+        "mem_limit": 268435456,
+        "mem_reservation": 50331648
+      },
+      "local-dns": {
+        "init": true,
+        "pids_limit": 64,
+        "expose": [
+          "53/tcp",
+          "53/udp"
+        ],
+        "cpu_shares": 768,
+        "ulimits": {
+          "nofile": {
+            "soft": 16384,
+            "hard": 16384
+          }
+        },
+        "blkio_config": {
+          "weight": 600
+        },
+        "cpus": 0.1,
+        "mem_limit": 67108864,
+        "mem_reservation": 16777216
+      },
+      "prometheus": {
+        "init": true,
+        "pids_limit": 320,
+        "cpu_shares": 512,
+        "ulimits": {
+          "nofile": {
+            "soft": 8192,
+            "hard": 8192
+          }
+        },
+        "blkio_config": {
+          "weight": 400
+        },
+        "cpus": 0.5,
+        "mem_limit": 536870912,
+        "mem_reservation": 134217728
+      },
+      "node-exporter": {
+        "init": true,
+        "pids_limit": 96,
+        "cpu_shares": 512,
+        "ulimits": {
+          "nofile": {
+            "soft": 8192,
+            "hard": 8192
+          }
+        },
+        "blkio_config": {
+          "weight": 400
+        },
+        "cpus": 0.15,
+        "mem_limit": 67108864,
+        "mem_reservation": 16777216
+      },
+      "cadvisor": {
+        "init": true,
+        "pids_limit": 192,
+        "cpu_shares": 512,
+        "ulimits": {
+          "nofile": {
+            "soft": 8192,
+            "hard": 8192
+          }
+        },
+        "blkio_config": {
+          "weight": 400
+        },
+        "cpus": 0.25,
+        "mem_limit": 201326592,
+        "mem_reservation": 50331648
+      },
+      "platform-alert-dispatcher": {
+        "init": true,
+        "user": "1000:1000",
+        "pids_limit": 128,
+        "cap_drop": [
+          "ALL"
+        ],
+        "expose": [
+          "3000"
+        ],
+        "cpu_shares": 512,
+        "ulimits": {
+          "nofile": {
+            "soft": 8192,
+            "hard": 8192
+          }
+        },
+        "blkio_config": {
+          "weight": 400
+        },
+        "cpus": 0.2,
+        "mem_limit": 134217728,
+        "mem_reservation": 33554432
+      },
+      "alertmanager": {
+        "init": true,
+        "pids_limit": 128,
+        "cpu_shares": 512,
+        "ulimits": {
+          "nofile": {
+            "soft": 8192,
+            "hard": 8192
+          }
+        },
+        "blkio_config": {
+          "weight": 400
+        },
+        "cpus": 0.25,
+        "mem_limit": 134217728,
+        "mem_reservation": 33554432
+      },
+      "grafana": {
+        "init": true,
+        "pids_limit": 256,
+        "cpu_shares": 512,
+        "ulimits": {
+          "nofile": {
+            "soft": 8192,
+            "hard": 8192
+          }
+        },
+        "blkio_config": {
+          "weight": 400
+        },
+        "cpus": 0.5,
+        "mem_limit": 402653184,
+        "mem_reservation": 100663296
+      },
+      "loki": {
+        "init": true,
+        "pids_limit": 320,
+        "cpu_shares": 512,
+        "ulimits": {
+          "nofile": {
+            "soft": 8192,
+            "hard": 8192
+          }
+        },
+        "blkio_config": {
+          "weight": 400
+        },
+        "cpus": 0.5,
+        "mem_limit": 536870912,
+        "mem_reservation": 134217728
+      },
+      "promtail": {
+        "init": true,
+        "pids_limit": 192,
+        "cpu_shares": 512,
+        "ulimits": {
+          "nofile": {
+            "soft": 8192,
+            "hard": 8192
+          }
+        },
+        "blkio_config": {
+          "weight": 400
+        },
+        "cpus": 0.25,
+        "mem_limit": 201326592,
+        "mem_reservation": 50331648
+      },
+      "waf": {
+        "init": true,
+        "pids_limit": 384,
+        "cpu_shares": 1024,
+        "ulimits": {
+          "nofile": {
+            "soft": 16384,
+            "hard": 16384
+          }
+        },
+        "blkio_config": {
+          "weight": 700
+        },
+        "cpus": 1.0,
+        "mem_limit": 402653184,
+        "mem_reservation": 100663296
+      },
+      "backup-scheduler": {
+        "init": true,
+        "pids_limit": 256,
+        "cpu_shares": 1024,
+        "ulimits": {
+          "nofile": {
+            "soft": 16384,
+            "hard": 16384
+          }
+        },
+        "blkio_config": {
+          "weight": 700
+        },
+        "cpus": 1.0,
+        "mem_limit": 536870912,
+        "mem_reservation": 134217728
+      },
+      "local-registry": {
+        "cpu_shares": 768,
+        "ulimits": {
+          "nofile": {
+            "soft": 16384,
+            "hard": 16384
+          }
+        },
+        "blkio_config": {
+          "weight": 600
+        },
+        "cpus": 0.25,
+        "mem_limit": 268435456,
+        "mem_reservation": 67108864,
+        "pids_limit": 192
+      },
+      "docker-socket-proxy": {
+        "cpu_shares": 1024,
+        "ulimits": {
+          "nofile": {
+            "soft": 16384,
+            "hard": 16384
+          }
+        },
+        "blkio_config": {
+          "weight": 700
+        },
+        "init": true,
+        "cpus": 0.1,
+        "mem_limit": 134217728,
+        "mem_reservation": 33554432,
+        "pids_limit": 64,
+        "expose": [
+          "2375"
+        ]
+      }
+    },
+    "networkFields": {
+      "enterprise_net": [
+        "external",
+        "name"
+      ],
+      "platform_edge": [
+        "internal",
+        "labels",
+        "name"
+      ],
+      "platform_routing": [
+        "internal",
+        "labels",
+        "name"
+      ],
+      "platform_db_admin": [
+        "internal",
+        "labels",
+        "name"
+      ],
+      "platform_postgres": [
+        "internal",
+        "labels",
+        "name"
+      ],
+      "platform_cache": [
+        "internal",
+        "labels",
+        "name"
+      ],
+      "platform_bus": [
+        "internal",
+        "labels",
+        "name"
+      ],
+      "platform_storage": [
+        "internal",
+        "labels",
+        "name"
+      ],
+      "platform_observability": [
+        "internal",
+        "labels",
+        "name"
+      ],
+      "platform_egress": [
+        "enable_ipv6",
+        "labels",
+        "name"
+      ],
+      "platform_docker_control": [
+        "driver",
+        "internal",
+        "name"
+      ]
+    },
+    "volumeFields": {
+      "enterprise_mariadb_data": [
+        "external",
+        "name"
+      ],
+      "enterprise_postgres_data": [
+        "name"
+      ],
+      "enterprise_redis_data": [
+        "name"
+      ],
+      "enterprise_keycloak_data": [
+        "name"
+      ],
+      "enterprise_nats_data": [
+        "name"
+      ],
+      "enterprise_minio_data": [
+        "name"
+      ],
+      "enterprise_alertmanager_data": [
+        "name"
+      ],
+      "enterprise_grafana_data": [
+        "name"
+      ],
+      "enterprise_prometheus_data": [
+        "name"
+      ],
+      "enterprise_loki_data": [
+        "name"
+      ],
+      "backup_scheduler_logs": [
+        "name"
+      ],
+      "enterprise_local_registry_data": [
+        "external",
+        "name"
+      ]
+    },
+    "topLevelFields": [
+      "configs",
+      "name",
+      "networks",
+      "secrets",
+      "services",
+      "volumes"
+    ]
+  },
+  directoryBindTargets: [
+    "/app",
+    "/docker-entrypoint-initdb.d",
+    "/etc/coredns",
+    "/etc/grafana/provisioning",
+    "/etc/mysql/conf.d",
+    "/etc/mysql/ssl",
+    "/etc/phpmyadmin/certs",
+    "/etc/prometheus/rules",
+    "/infra",
+    "/infra/backups",
+    "/infra/reports",
+    "/loki/rules",
+    "/opt/keycloak/data/import",
+    "/platform-postgres-init",
+    "/project",
+    "/var/lib/grafana/dashboards",
+    "/var/lib/node-exporter/textfile",
+    "/var/www/infra-docs",
+    "/var/www/project-state",
+    "/var/www/projects",
+  ],
+
   secretFiles: {
     alertmanager_webhook_token: "secrets/alertmanager_webhook_token.txt",
     backup_signing_keys: "secrets/backup_signing_keys.txt",
@@ -700,7 +2957,13 @@ const CORE_SEMANTIC_POLICY = {
     },
     nats: {
       command: null,
-      entrypoint: ["/bin/sh", "-ec", 'NATS_PASSWORD="$$(cat "$$NATS_PASSWORD_FILE")"; exec nats-server -c /etc/nats/nats-server.conf --user "$$NATS_USER" --pass "$$NATS_PASSWORD"\n'],
+      entrypoint: [
+        "/bin/sh",
+        "-ec",
+        'NATS_PASSWORD="$$(cat "$${NATS_PASSWORD_FILE}")"\n'
+          + 'exec nats-server -c /etc/nats/nats-server.conf '
+          + '--user "$$NATS_USER" --pass "$$NATS_PASSWORD"\n',
+      ],
     },
     "node-exporter": {
       command: [
@@ -972,6 +3235,123 @@ function envOr(environment, key, fallback) {
   return value === undefined || value === "" ? fallback : value;
 }
 
+function composeInterpolationEnd(value, offset) {
+  let depth = 1;
+  for (let index = offset + 2; index < value.length; index += 1) {
+    if (value.startsWith("${", index)) {
+      depth += 1;
+      index += 1;
+    } else if (value[index] === "}") {
+      depth -= 1;
+      if (depth === 0) return index;
+    }
+  }
+  return -1;
+}
+
+function expandComposeFallbackTemplate(value, environment, depth = 0) {
+  if (typeof value !== "string" || depth > 16) return null;
+  let expanded = "";
+  for (let index = 0; index < value.length;) {
+    if (!value.startsWith("${", index)) {
+      expanded += value[index];
+      index += 1;
+      continue;
+    }
+    const end = composeInterpolationEnd(value, index);
+    if (end === -1) return null;
+    const expression = value.slice(index + 2, end);
+    const operator = expression.indexOf(":-");
+    if (operator === -1) return null;
+    const variable = expression.slice(0, operator);
+    const fallback = expression.slice(operator + 2);
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(variable)) return null;
+    const observed = environment.get(variable);
+    const projected = observed === undefined || observed === ""
+      ? expandComposeFallbackTemplate(fallback, environment, depth + 1)
+      : observed;
+    if (typeof projected !== "string") return null;
+    expanded += projected;
+    index = end + 1;
+  }
+  return expanded;
+}
+
+function expectedServiceEnvironment(serviceName, environment) {
+  const authority = CORE_SEMANTIC_POLICY.serviceEnvironmentAuthority.services[serviceName];
+  if (!plainObject(authority)
+      || typeof authority.present !== "boolean"
+      || !plainObject(authority.entries)) {
+    return { valid: false, present: false, value: null };
+  }
+  if (!authority.present) {
+    return {
+      valid: Object.keys(authority.entries).length === 0,
+      present: false,
+      value: null,
+    };
+  }
+  const value = {};
+  for (const [key, projection] of Object.entries(authority.entries)) {
+    if (!plainObject(projection)) return { valid: false, present: true, value: null };
+    if (Object.hasOwn(projection, "literal")) {
+      if (!sameJson(Object.keys(projection), ["literal"])
+          || typeof projection.literal !== "string") {
+        return { valid: false, present: true, value: null };
+      }
+      value[key] = projection.literal;
+      continue;
+    }
+    if (typeof projection.variable !== "string"
+        || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(projection.variable)) {
+      return { valid: false, present: true, value: null };
+    }
+    if (Object.hasOwn(projection, "required")) {
+      if (!sameJson(Object.keys(projection).sort(), ["required", "variable"])
+          || typeof projection.required !== "string") {
+        return { valid: false, present: true, value: null };
+      }
+      const observed = environment.get(projection.variable);
+      if (observed === undefined || observed === "") {
+        return { valid: false, present: true, value: null };
+      }
+      value[key] = observed;
+      continue;
+    }
+    if (typeof projection.fallback !== "string"
+        || !sameJson(
+          Object.keys(projection).sort(),
+          Object.hasOwn(projection, "template")
+            ? ["fallback", "template", "variable"]
+            : ["fallback", "variable"],
+        )) {
+      return { valid: false, present: true, value: null };
+    }
+    const template = Object.hasOwn(projection, "template")
+      ? projection.template
+      : `\${${projection.variable}:-${projection.fallback}}`;
+    const projected = expandComposeFallbackTemplate(template, environment);
+    if (projected === null) return { valid: false, present: true, value: null };
+    value[key] = projected;
+  }
+  return { valid: true, present: true, value };
+}
+
+function validateServiceEnvironmentAuthority(
+  serviceName,
+  service,
+  environment,
+  violations,
+) {
+  const expected = expectedServiceEnvironment(serviceName, environment);
+  const observedPresent = Object.hasOwn(service, "environment");
+  if (!expected.valid
+      || observedPresent !== expected.present
+      || (expected.present && !sameFlatObject(service.environment, expected.value))) {
+    violations.push(`${serviceName}:environment-authority`);
+  }
+}
+
 function expectedControlCenterOidcIssuer(environment) {
   const domain = envOr(environment, "DOMAIN", "localhost.com");
   const authHost = envOr(environment, "AUTH_HOST", `auth.${domain}`);
@@ -1019,35 +3399,104 @@ function pathWithinRoot(candidate, rootDirectory) {
   return candidate === rootDirectory || candidate.startsWith(`${rootDirectory}/`);
 }
 
+function filesystemPathAuthority(
+  candidate,
+  anchor,
+  {
+    expectedType,
+    fileMode,
+    requireNonempty = true,
+  },
+) {
+  try {
+    if (!path.isAbsolute(candidate) || !path.isAbsolute(anchor)) return false;
+    const normalizedCandidate = path.resolve(candidate);
+    const normalizedAnchor = path.resolve(anchor);
+    if (candidate !== normalizedCandidate
+        || anchor !== normalizedAnchor
+        || !pathWithinRoot(normalizedCandidate, normalizedAnchor)) {
+      return false;
+    }
+    const relative = path.relative(normalizedAnchor, normalizedCandidate);
+    if (relative === ".." || relative.startsWith(`..${path.sep}`)) return false;
+    const anchorStat = fs.lstatSync(normalizedAnchor);
+    if (!anchorStat.isDirectory() || anchorStat.isSymbolicLink()) return false;
+    const ownerUid = anchorStat.uid;
+    const components = relative === "" ? [] : relative.split(path.sep);
+    let current = normalizedAnchor;
+    const paths = [current];
+    for (const component of components) {
+      if (component === "" || component === "." || component === "..") return false;
+      current = path.join(current, component);
+      paths.push(current);
+    }
+    for (let index = 0; index < paths.length; index += 1) {
+      const currentStat = fs.lstatSync(paths[index]);
+      const final = index === paths.length - 1;
+      const mode = currentStat.mode & 0o7777;
+      if (currentStat.isSymbolicLink()
+          || currentStat.uid !== ownerUid
+          || (mode & 0o7000) !== 0) {
+        return false;
+      }
+      if (!final || expectedType === "directory") {
+        if (!currentStat.isDirectory()
+            || (mode & 0o500) !== 0o500
+            || (mode & 0o022) !== 0) {
+          return false;
+        }
+        continue;
+      }
+      if (expectedType !== "file"
+          || !currentStat.isFile()
+          || currentStat.nlink !== 1
+          || (requireNonempty && currentStat.size < 1)
+          || mode !== fileMode) {
+        return false;
+      }
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function sensitiveOrdinarySource(source, rootDirectory) {
   if (pathWithinRoot(source, rootDirectory)) return false;
   return CORE_SEMANTIC_POLICY.sensitiveSourcePrefixes.some((prefix) =>
     source === prefix || source.startsWith(`${prefix}/`));
 }
 
-function materializeBindRule(serviceName, rule, rootDirectory, environment) {
+function bindTargetType(target) {
+  return CORE_SEMANTIC_POLICY.directoryBindTargets.includes(target)
+    ? "directory"
+    : "file";
+}
+
+function bindTargetFileMode(target) {
+  return target === "/usr/local/bin/platform-postgres-entrypoint" ? 0o755 : 0o644;
+}
+
+function materializeBindRule(serviceName, rule, target, rootDirectory, environment) {
   if (rule.startsWith("root:")) {
-    return path.resolve(rootDirectory, rule.slice("root:".length));
+    const resolved = path.resolve(rootDirectory, rule.slice("root:".length));
+    return filesystemPathAuthority(resolved, rootDirectory, {
+      expectedType: bindTargetType(target),
+      fileMode: bindTargetFileMode(target),
+    }) ? resolved : null;
   }
   if (rule.startsWith("sibling:")) {
     const variable = serviceName === "backup-scheduler" ? "PROJECT_SOURCE_DIR" : "PHP_PROJECTS_DIR";
     const source = envOr(environment, variable, "../src");
     const resolved = path.resolve(rootDirectory, source);
-    const parentWorkspace = fs.realpathSync.native(path.resolve(rootDirectory, ".."));
+    const parentWorkspace = path.resolve(rootDirectory, "..");
     if (!pathWithinRoot(resolved, parentWorkspace)
-        || resolved === parentWorkspace
-        || !fs.existsSync(resolved)) {
+        || resolved === parentWorkspace) {
       return null;
     }
-    const sourceStat = fs.lstatSync(resolved);
-    if (!sourceStat.isDirectory() || sourceStat.isSymbolicLink()) return null;
-    const canonicalSource = fs.realpathSync.native(resolved);
-    if (canonicalSource !== resolved
-        || !pathWithinRoot(canonicalSource, parentWorkspace)
-        || canonicalSource === parentWorkspace) {
-      return null;
-    }
-    return canonicalSource;
+    return filesystemPathAuthority(resolved, parentWorkspace, {
+      expectedType: "directory",
+    }) ? resolved : null;
   }
   return rule.startsWith("exact:") ? rule.slice("exact:".length) : null;
 }
@@ -1055,7 +3504,7 @@ function materializeBindRule(serviceName, rule, rootDirectory, environment) {
 function bindSourceAllowed(serviceName, source, target, rootDirectory, environment) {
   const rules = CORE_SEMANTIC_POLICY.bindSourceRules[serviceName]?.[target] ?? [];
   return rules.some((rule) =>
-    source === materializeBindRule(serviceName, rule, rootDirectory, environment));
+    source === materializeBindRule(serviceName, rule, target, rootDirectory, environment));
 }
 
 function exactHostBindAllowed(serviceName, source, target, mode) {
@@ -1212,7 +3661,12 @@ function validateMount(serviceName, mount, rootDirectory, environment, violation
     const requiredMode = CORE_SEMANTIC_POLICY.bindTargets[serviceName]?.[mount.target];
     if (requiredMode !== mode
         || !bindSourceAllowed(serviceName, mount.source, mount.target, rootDirectory, environment)) {
-      violations.push(`${serviceName}:bind-authority`);
+      violations.push(
+        serviceName === "project-router"
+          && mount.target === "/run/platform/hosted-workloads.lock.json"
+          ? `${serviceName}:workload-lock-identity-changed`
+          : `${serviceName}:bind-authority`,
+      );
     }
     return;
   }
@@ -1243,7 +3697,13 @@ function expectedMountKeys(serviceName, rootDirectory, environment) {
   )) {
     const rules = CORE_SEMANTIC_POLICY.bindSourceRules[serviceName]?.[target] ?? [];
     if (rules.length !== 1) return null;
-    const source = materializeBindRule(serviceName, rules[0], rootDirectory, environment);
+    const source = materializeBindRule(
+      serviceName,
+      rules[0],
+      target,
+      rootDirectory,
+      environment,
+    );
     if (source === null) return null;
     expected.push(mountKey("bind", source, target, mode));
   }
@@ -1260,6 +3720,7 @@ function expectedMountKeys(serviceName, rootDirectory, environment) {
 }
 
 function observedMountKeys(service) {
+  if (!Object.hasOwn(service, "volumes")) return [];
   if (!Array.isArray(service.volumes)) return null;
   return service.volumes.map((mount) => {
     if (!plainObject(mount)) return null;
@@ -1270,6 +3731,62 @@ function observedMountKeys(service) {
       mountMode(mount.read_only),
     );
   }).sort();
+}
+
+function validateExactAuthorityShape(config, violations) {
+  const authority = CORE_SEMANTIC_POLICY.exactAuthorityShape;
+  if (!plainObject(authority)
+      || !sameJson(Object.keys(config).sort(), authority.topLevelFields)) {
+    violations.push("document:fields");
+  }
+  if (config.name !== "platform_infra_vps") violations.push("document:name");
+
+  const expectedServiceNames = Object.keys(authority.serviceFields).sort();
+  const observedServiceNames = Object.keys(config.services || {}).sort();
+  if (!sameJson(observedServiceNames, expectedServiceNames)) {
+    violations.push("services:exact-inventory");
+  }
+  const declaredFieldCount = Object.values(authority.serviceFields)
+    .reduce((count, fields) => count + (Array.isArray(fields) ? fields.length : 0), 0);
+  if (declaredFieldCount !== 482) violations.push("policy:service-field-count");
+  for (const [serviceName, service] of Object.entries(config.services || {})) {
+    const expectedFields = authority.serviceFields[serviceName];
+    const expectedResources = authority.serviceResources[serviceName];
+    if (!Array.isArray(expectedFields)
+        || !plainObject(service)) {
+      violations.push(`${serviceName}:service-shape-exact`);
+      continue;
+    }
+    const observedFields = Object.keys(service).sort();
+    for (const field of new Set([...expectedFields, ...observedFields])) {
+      if (expectedFields.includes(field) !== observedFields.includes(field)) {
+        violations.push(`${serviceName}:${field}`);
+      }
+    }
+    if (!plainObject(expectedResources)
+        || Object.entries(expectedResources).some(([field, expected]) =>
+          !sameStructuredJson(service[field], expected))) {
+      violations.push(`${serviceName}:resources-exact`);
+    }
+  }
+
+  for (const [kind, fieldAuthority] of [
+    ["network", authority.networkFields],
+    ["volume", authority.volumeFields],
+  ]) {
+    const collection = config[`${kind}s`] || {};
+    if (!plainObject(fieldAuthority)
+        || !sameJson(Object.keys(collection).sort(), Object.keys(fieldAuthority).sort())) {
+      violations.push(`${kind}s:exact-inventory`);
+    }
+    for (const [name, definition] of Object.entries(collection)) {
+      if (!Array.isArray(fieldAuthority[name])
+          || !plainObject(definition)
+          || !sameJson(Object.keys(definition).sort(), fieldAuthority[name])) {
+        violations.push(`${kind}:${name}:fields`);
+      }
+    }
+  }
 }
 
 function validateTopLevelAuthority(config, rootDirectory, environment, violations) {
@@ -1313,9 +3830,10 @@ function validateTopLevelAuthority(config, rootDirectory, environment, violation
     const resolvedExpectedFile = path.resolve(rootDirectory, expectedFile);
     const secretsRoot = path.resolve(rootDirectory, "secrets");
     const safeSecretPath = pathWithinRoot(resolvedExpectedFile, secretsRoot)
-      && (!fs.existsSync(resolvedExpectedFile)
-        || (fs.lstatSync(resolvedExpectedFile).isFile()
-          && !fs.lstatSync(resolvedExpectedFile).isSymbolicLink()));
+      && filesystemPathAuthority(resolvedExpectedFile, rootDirectory, {
+        expectedType: "file",
+        fileMode: secretName === "alertmanager_webhook_token" ? 0o640 : 0o600,
+      });
     if (!sameJson(Object.keys(definition).sort(), ["file"])
         || relativeDefault === undefined
         || !safeSecretPath
@@ -1391,6 +3909,7 @@ function validateCoreCapabilityCeiling(config, rootDirectory, environment) {
   for (const kind of ["configs", "networks", "secrets", "volumes"]) {
     if (!plainObject(config[kind])) violations.push(`${kind}:shape`);
   }
+  validateExactAuthorityShape(config, violations);
   validateTopLevelAuthority(config, rootDirectory, environment, violations);
   const allowedServiceFields = new Set(CORE_SEMANTIC_POLICY.allowedServiceFields);
   for (const [serviceName, service] of Object.entries(config.services)) {
@@ -1491,6 +4010,7 @@ function validateCoreCapabilityCeiling(config, rootDirectory, environment) {
         violations.push(`${serviceName}:build`);
       }
     }
+    validateServiceEnvironmentAuthority(serviceName, service, environment, violations);
     const serviceEnvironment = plainObject(service.environment) ? service.environment : {};
     if (serviceName === "docker-socket-proxy"
         && !sameFlatObject(serviceEnvironment, CORE_SEMANTIC_POLICY.proxyEnvironment)) {

@@ -25,6 +25,13 @@ const repositoryRoot = path.resolve(import.meta.dirname, "..");
 const canonicalNoHostedLockPath = path.join(repositoryRoot, "config", "no-hosted-workloads.lock.json");
 let fixtureRootDirectory = repositoryRoot;
 const protectedKinds = ["configs", "networks", "secrets", "services", "volumes"];
+const requiredCoreEnvironmentLines = [
+  "ALERT_EMAIL_TO=qa@fixture.invalid",
+  "MAILER_FROM=qa@fixture.invalid",
+  "MAILER_REPLY_TO=qa@fixture.invalid",
+  "SMTP_HOST=smtp.fixture.invalid",
+  "SMTP_USER=qa",
+];
 const expectedCoreInventory = {
   configs: ["enterprise_traefik_routes"],
   networks: [
@@ -166,8 +173,14 @@ function createConsumerSandbox() {
   copyRepositoryFile(root, "scripts/runtime-isolation-policy.mjs");
   const canonicalLock = copyRepositoryFile(root, "config/no-hosted-workloads.lock.json");
   const inventory = structuredClone(expectedCoreInventory);
-  const trustedEnvironmentBytes =
-    "HOSTED_WORKLOAD_LOCK=\nHOSTED_WORKLOAD_MODE=no-hosted\nCORE_VALUE=trusted\nDOMAIN=fixture.invalid\n";
+  const trustedEnvironmentBytes = [
+    "HOSTED_WORKLOAD_LOCK=",
+    "HOSTED_WORKLOAD_MODE=no-hosted",
+    "CORE_VALUE=trusted",
+    "DOMAIN=fixture.invalid",
+    ...requiredCoreEnvironmentLines,
+    "",
+  ].join("\n");
   const environmentFile = path.join(root, ".env");
   fs.writeFileSync(environmentFile, trustedEnvironmentBytes, { mode: 0o600 });
   fs.writeFileSync(path.join(root, ".env.vps.example"), trustedEnvironmentBytes, { mode: 0o600 });
@@ -497,6 +510,10 @@ function coreRuntimeConfig(inventory, { hosted = false } = {}) {
       service.volumes.push({ type: "volume", source, target });
     }
   }
+  const authoritativeConfig = coreTestGoldenConfig(inventory);
+  for (const key of ["name", ...protectedKinds]) {
+    config[key] = authoritativeConfig[key];
+  }
   if (hosted) {
     config.services["example-app-web"] = boundedService({
       image: `example.invalid/example-app@sha256:${"a".repeat(64)}`,
@@ -617,26 +634,160 @@ function qa8RepositoryGolden() {
   }
 }
 
-function rewriteQa8GoldenPaths(value, sandbox) {
+function testComposeInterpolationEnd(value, offset) {
+  let depth = 1;
+  for (let index = offset + 2; index < value.length; index += 1) {
+    if (value.startsWith("${", index)) {
+      depth += 1;
+      index += 1;
+    } else if (value[index] === "}") {
+      depth -= 1;
+      if (depth === 0) return index;
+    }
+  }
+  return -1;
+}
+
+function expandTestComposeTemplate(value, environment, depth = 0) {
+  assert.equal(typeof value, "string");
+  assert.ok(depth <= 16, "test Compose interpolation exceeded its closed depth");
+  let expanded = "";
+  for (let index = 0; index < value.length;) {
+    if (!value.startsWith("${", index)) {
+      expanded += value[index];
+      index += 1;
+      continue;
+    }
+    const end = testComposeInterpolationEnd(value, index);
+    assert.notEqual(end, -1, `unterminated test Compose interpolation: ${value}`);
+    const expression = value.slice(index + 2, end);
+    const operator = expression.indexOf(":-");
+    assert.notEqual(operator, -1, `unsupported test Compose interpolation: ${expression}`);
+    const variable = expression.slice(0, operator);
+    const fallback = expression.slice(operator + 2);
+    assert.match(variable, /^[A-Za-z_][A-Za-z0-9_]*$/);
+    const observed = environment.get(variable);
+    expanded += observed === undefined || observed === ""
+      ? expandTestComposeTemplate(fallback, environment, depth + 1)
+      : observed;
+    index = end + 1;
+  }
+  return expanded;
+}
+
+function readCoreTestEnvironment() {
+  const environment = new Map([
+    ["DOMAIN", "fixture.invalid"],
+    ...requiredCoreEnvironmentLines.map((line) => {
+      const separator = line.indexOf("=");
+      return [line.slice(0, separator), line.slice(separator + 1)];
+    }),
+  ]);
+  const environmentPath = path.join(fixtureRootDirectory, ".env");
+  if (!fs.existsSync(environmentPath)) return environment;
+  const bytes = fs.readFileSync(environmentPath, "utf8");
+  for (const line of bytes.replaceAll("\r\n", "\n").split("\n")) {
+    if (/^\s*(?:#.*)?$/.test(line)) continue;
+    const match = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/.exec(line);
+    assert.ok(match, `invalid core test dotenv line: ${line}`);
+    environment.set(match[1], match[2]);
+  }
+  return environment;
+}
+
+function materializeCoreTestEnvironment(config, environment) {
+  const authority = coreSemanticPolicyDescriptor.serviceEnvironmentAuthority.services;
+  for (const [serviceName, service] of Object.entries(config.services)) {
+    const serviceAuthority = authority[serviceName];
+    assert.ok(serviceAuthority, `missing environment authority for ${serviceName}`);
+    if (!serviceAuthority.present) {
+      delete service.environment;
+      continue;
+    }
+    service.environment = Object.fromEntries(
+      Object.entries(serviceAuthority.entries).map(([key, projection]) => {
+        if (Object.hasOwn(projection, "literal")) return [key, projection.literal];
+        if (Object.hasOwn(projection, "required")) {
+          const value = environment.get(projection.variable);
+          assert.ok(value, `missing required core test environment ${projection.variable}`);
+          return [key, value];
+        }
+        const template = projection.template
+          ?? `\${${projection.variable}:-${projection.fallback}}`;
+        return [key, expandTestComposeTemplate(template, environment)];
+      }),
+    );
+  }
+}
+
+function rewriteRepositoryGoldenPaths(value, root, siblingSource) {
   if (Array.isArray(value)) {
-    return value.map((entry) => rewriteQa8GoldenPaths(entry, sandbox));
+    return value.map((entry) => rewriteRepositoryGoldenPaths(entry, root, siblingSource));
   }
   if (value !== null && typeof value === "object") {
     return Object.fromEntries(
       Object.entries(value)
-        .map(([key, entry]) => [key, rewriteQa8GoldenPaths(entry, sandbox)]),
+        .map(([key, entry]) => [
+          key,
+          rewriteRepositoryGoldenPaths(entry, root, siblingSource),
+        ]),
     );
   }
   if (typeof value !== "string") return value;
   const repositorySource = path.resolve(repositoryRoot, "../compose-source");
-  const sandboxSource = path.join(sandbox.cleanupRoot, "compose-source");
   if (value === repositorySource || value.startsWith(`${repositorySource}${path.sep}`)) {
-    return `${sandboxSource}${value.slice(repositorySource.length)}`;
+    return `${siblingSource}${value.slice(repositorySource.length)}`;
   }
   if (value === repositoryRoot || value.startsWith(`${repositoryRoot}${path.sep}`)) {
-    return `${sandbox.root}${value.slice(repositoryRoot.length)}`;
+    return `${root}${value.slice(repositoryRoot.length)}`;
   }
   return value;
+}
+
+function coreTestGoldenConfig(inventory) {
+  const siblingSource = path.resolve(fixtureRootDirectory, "../src");
+  const config = rewriteRepositoryGoldenPaths(
+    qa8RepositoryGolden(),
+    fixtureRootDirectory,
+    siblingSource,
+  );
+  for (const kind of protectedKinds) {
+    config[kind] = Object.fromEntries(
+      inventory[kind].map((name) => {
+        assert.ok(Object.hasOwn(config[kind], name), `unknown core test ${kind} entry: ${name}`);
+        return [name, config[kind][name]];
+      }),
+    );
+  }
+  const environment = readCoreTestEnvironment();
+  materializeCoreTestEnvironment(config, environment);
+  for (const [secretName, variable] of Object.entries(
+    coreSemanticPolicyDescriptor.secretFileVariables,
+  )) {
+    const relative = environment.get(variable)
+      || coreSemanticPolicyDescriptor.secretFiles[secretName];
+    config.secrets[secretName].file = path.resolve(fixtureRootDirectory, relative);
+  }
+  if (fixtureRootDirectory !== repositoryRoot && fs.existsSync(fixtureRootDirectory)) {
+    materializeQa8CanonicalSources({
+      root: fixtureRootDirectory,
+      cleanupRoot: path.dirname(fixtureRootDirectory),
+      canonicalLock: path.join(
+        fixtureRootDirectory,
+        "config",
+        "no-hosted-workloads.lock.json",
+      ),
+    }, config);
+  }
+  return config;
+}
+
+function rewriteQa8GoldenPaths(value, sandbox) {
+  return rewriteRepositoryGoldenPaths(
+    value,
+    sandbox.root,
+    path.join(sandbox.cleanupRoot, "compose-source"),
+  );
 }
 
 function qa8IndependentGolden(sandbox) {
@@ -753,6 +904,10 @@ function materializeQa8CanonicalSources(sandbox, config) {
       if (!inRoot && !inSibling) continue;
       if (mount.source === sandbox.root || qa8DirectoryMountTargets.has(mount.target)) {
         fs.mkdirSync(mount.source, { recursive: true, mode: 0o755 });
+        continue;
+      }
+      if (mount.target === "/run/platform/hosted-workloads.lock.json"
+          && fs.existsSync(mount.source)) {
         continue;
       }
       fs.mkdirSync(path.dirname(mount.source), { recursive: true, mode: 0o755 });
@@ -1076,7 +1231,14 @@ test("VPS wrapper derives a core-only envelope only in explicit canonical no-hos
     );
     fs.writeFileSync(
       envFile,
-      "CORE_VALUE=fixture\nDOMAIN=fixture.invalid\nPHP_PROJECTS_DIR=applications/example-app\nPROJECT_SOURCE_DIR=applications/example-app\n",
+      [
+        "CORE_VALUE=fixture",
+        "DOMAIN=fixture.invalid",
+        "PHP_PROJECTS_DIR=applications/example-app",
+        "PROJECT_SOURCE_DIR=applications/example-app",
+        ...requiredCoreEnvironmentLines,
+        "",
+      ].join("\n"),
       { mode: 0o600 },
     );
     fs.mkdirSync(fakeBin);
@@ -1477,6 +1639,7 @@ test("QA7 no-hosted accepts canonical workspace sources and rejects escapes", ()
         "DOMAIN=fixture.invalid",
         "PHP_PROJECTS_DIR=../applications/example-app",
         "PROJECT_SOURCE_DIR=../applications/example-app",
+        ...requiredCoreEnvironmentLines,
         "",
       ].join("\n"),
       { mode: 0o600 },
@@ -1490,7 +1653,15 @@ test("QA7 no-hosted accepts canonical workspace sources and rejects escapes", ()
 
     fs.writeFileSync(
       sandbox.environmentFile,
-      "HOSTED_WORKLOAD_LOCK=\nHOSTED_WORKLOAD_MODE=no-hosted\nDOMAIN=fixture.invalid\nPHP_PROJECTS_DIR=/etc\nPROJECT_SOURCE_DIR=/etc\n",
+      [
+        "HOSTED_WORKLOAD_LOCK=",
+        "HOSTED_WORKLOAD_MODE=no-hosted",
+        "DOMAIN=fixture.invalid",
+        "PHP_PROJECTS_DIR=/etc",
+        "PROJECT_SOURCE_DIR=/etc",
+        ...requiredCoreEnvironmentLines,
+        "",
+      ].join("\n"),
       { mode: 0o600 },
     );
     const absoluteEscape = coreAuthorityConfig();
@@ -1507,7 +1678,15 @@ test("QA7 no-hosted accepts canonical workspace sources and rejects escapes", ()
     fs.symlinkSync("/etc", symlinkSource);
     fs.writeFileSync(
       sandbox.environmentFile,
-      "HOSTED_WORKLOAD_LOCK=\nHOSTED_WORKLOAD_MODE=no-hosted\nDOMAIN=fixture.invalid\nPHP_PROJECTS_DIR=../applications/escape\nPROJECT_SOURCE_DIR=../applications/escape\n",
+      [
+        "HOSTED_WORKLOAD_LOCK=",
+        "HOSTED_WORKLOAD_MODE=no-hosted",
+        "DOMAIN=fixture.invalid",
+        "PHP_PROJECTS_DIR=../applications/escape",
+        "PROJECT_SOURCE_DIR=../applications/escape",
+        ...requiredCoreEnvironmentLines,
+        "",
+      ].join("\n"),
       { mode: 0o600 },
     );
     const symlinkEscape = coreAuthorityConfig();
@@ -1757,6 +1936,7 @@ test("QA7 no-hosted semantic projection follows the exact trusted env snapshot",
       "CONTROL_CENTER_DATABASE_URL_SECRET_FILE=secrets/parity-control-url.txt",
       "BACKUP_SCHEDULER_ENABLE_RETENTION_APPLY=true",
       "BACKUP_SCHEDULER_ENABLE_OFFSITE=false",
+      ...requiredCoreEnvironmentLines,
       "",
     ].join("\n");
     fs.writeFileSync(sandbox.environmentFile, environmentBytes, { mode: 0o600 });
@@ -1842,10 +2022,10 @@ test("QA7 no-hosted exact Engine authority rejects grants ports topology and red
         config.services.alertmanager.secrets.push("postgres_superuser_password");
       }],
       ["config grant", (config) => {
-        config.services.alertmanager.configs.push({
+        config.services.alertmanager.configs = [{
           source: "enterprise_traefik_routes",
           target: "/tmp/routes.yml",
-        });
+        }];
       }],
       ["repository bind source", (config) => {
         config.services.alertmanager.volumes = [{
@@ -1954,7 +2134,7 @@ test("QA6 canonical no-hosted lock contains the exact authoritative core invento
   ]);
   assert.deepEqual(lock.coreSemanticPolicy, {
     schema: "platform-no-hosted-core-capability-policy/v1",
-    sha256: "6931457ee76eff59ba6788d47f4ad6cac2da4bb171a94d51ffc3b3239bb71151",
+    sha256: "03fe5fa325885f61b61c26e1ac4bfdc241cbf3d661309d670c5efc4ab3910783",
   });
   assert.equal(lock.projectName, "platform_infra_vps");
   assert.deepEqual(Object.keys(lock.protectedResourceNames).sort(), protectedKinds);
@@ -2156,12 +2336,26 @@ test("QA6 no-hosted lock race preserves the initial authoritative snapshot or fa
 test("QA6 no-hosted env bytes are stable from mode parse through Compose render", () => {
   const sandbox = createConsumerSandbox();
   try {
-    const initialEnvironment = "HOSTED_WORKLOAD_LOCK=\nHOSTED_WORKLOAD_MODE=no-hosted\nCORE_VALUE=trusted\nDOMAIN=fixture.invalid\n";
+    const initialEnvironment = [
+      "HOSTED_WORKLOAD_LOCK=",
+      "HOSTED_WORKLOAD_MODE=no-hosted",
+      "CORE_VALUE=trusted",
+      "DOMAIN=fixture.invalid",
+      ...requiredCoreEnvironmentLines,
+      "",
+    ].join("\n");
     fs.writeFileSync(sandbox.environmentFile, initialEnvironment, { mode: 0o600 });
     const hostileEnvironment = path.join(sandbox.root, "swap-env-replacement");
     fs.writeFileSync(
       hostileEnvironment,
-      "HOSTED_WORKLOAD_LOCK=/attacker.lock\nHOSTED_WORKLOAD_MODE=hosted\nCORE_VALUE=hostile\nDOMAIN=attacker.invalid\n",
+      [
+        "HOSTED_WORKLOAD_LOCK=/attacker.lock",
+        "HOSTED_WORKLOAD_MODE=hosted",
+        "CORE_VALUE=hostile",
+        "DOMAIN=attacker.invalid",
+        ...requiredCoreEnvironmentLines,
+        "",
+      ].join("\n"),
       { mode: 0o600 },
     );
     writeDockerOutput(sandbox, `${JSON.stringify(coreRuntimeConfig(sandbox.inventory))}\n`);
