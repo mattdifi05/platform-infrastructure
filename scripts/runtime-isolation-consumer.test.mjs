@@ -544,6 +544,231 @@ function writeDockerOutput(sandbox, documents) {
   fs.writeFileSync(sandbox.dockerOutputFile, documents);
 }
 
+const qa8GoldenParserPath = path.join(
+  import.meta.dirname,
+  "fixtures",
+  "hosted-golden-parser.rb",
+);
+let qa8RepositoryGoldenTemplate;
+
+function qa8EnvironmentObject(sandbox) {
+  return {
+    COMPOSE_PROJECT_NAME: "platform_infra_vps",
+    DOMAIN: "fixture.invalid",
+    PHP_PROJECTS_DIR: "../compose-source",
+    PROJECT_SOURCE_DIR: "../compose-source",
+    HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE: sandbox.canonicalLock,
+    ALERT_EMAIL_TO: "qa@fixture.invalid",
+    MAILER_FROM: "qa@fixture.invalid",
+    MAILER_REPLY_TO: "qa@fixture.invalid",
+    SMTP_HOST: "smtp.fixture.invalid",
+    SMTP_USER: "qa",
+  };
+}
+
+function qa8EnvironmentMap(sandbox) {
+  return new Map(Object.entries(qa8EnvironmentObject(sandbox)));
+}
+
+function installQa8Environment(sandbox) {
+  const values = qa8EnvironmentObject(sandbox);
+  const bytes = [
+    "HOSTED_WORKLOAD_LOCK=",
+    "HOSTED_WORKLOAD_MODE=no-hosted",
+    ...Object.entries(values).map(([key, value]) => `${key}=${value}`),
+    "",
+  ].join("\n");
+  fs.mkdirSync(path.join(sandbox.cleanupRoot, "compose-source"), { recursive: true });
+  fs.writeFileSync(sandbox.environmentFile, bytes, { mode: 0o600 });
+  fs.writeFileSync(path.join(sandbox.root, ".env.vps.example"), bytes, { mode: 0o600 });
+  Object.assign(sandbox.environment, {
+    COMPOSE_PROJECT_NAME: values.COMPOSE_PROJECT_NAME,
+    HOSTED_WORKLOAD_LOCK: "",
+    HOSTED_WORKLOAD_MODE: "no-hosted",
+    HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE: "",
+  });
+  return qa8EnvironmentMap(sandbox);
+}
+
+function qa8RepositoryGolden() {
+  if (qa8RepositoryGoldenTemplate !== undefined) {
+    return structuredClone(qa8RepositoryGoldenTemplate);
+  }
+  const outputDirectory =
+    fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "hosted-golden-qa8-")));
+  const outputPath = path.join(outputDirectory, "golden.json");
+  try {
+    const result = spawnSync("/usr/bin/ruby", [qa8GoldenParserPath], {
+      encoding: "utf8",
+      env: cleanEnvironment({
+        ROOT: repositoryRoot,
+        GOLDEN_OUT: outputPath,
+      }),
+    });
+    assert.equal(
+      result.status,
+      0,
+      `independent nine-overlay parser failed:\n${result.stderr}`,
+    );
+    qa8RepositoryGoldenTemplate = JSON.parse(fs.readFileSync(outputPath, "utf8"));
+    return structuredClone(qa8RepositoryGoldenTemplate);
+  } finally {
+    fs.rmSync(outputDirectory, { recursive: true, force: true });
+  }
+}
+
+function rewriteQa8GoldenPaths(value, sandbox) {
+  if (Array.isArray(value)) {
+    return value.map((entry) => rewriteQa8GoldenPaths(entry, sandbox));
+  }
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value)
+        .map(([key, entry]) => [key, rewriteQa8GoldenPaths(entry, sandbox)]),
+    );
+  }
+  if (typeof value !== "string") return value;
+  const repositorySource = path.resolve(repositoryRoot, "../compose-source");
+  const sandboxSource = path.join(sandbox.cleanupRoot, "compose-source");
+  if (value === repositorySource || value.startsWith(`${repositorySource}${path.sep}`)) {
+    return `${sandboxSource}${value.slice(repositorySource.length)}`;
+  }
+  if (value === repositoryRoot || value.startsWith(`${repositoryRoot}${path.sep}`)) {
+    return `${sandbox.root}${value.slice(repositoryRoot.length)}`;
+  }
+  return value;
+}
+
+function qa8IndependentGolden(sandbox) {
+  return rewriteQa8GoldenPaths(qa8RepositoryGolden(), sandbox);
+}
+
+function qa8LegacyCompatibleGolden(sandbox) {
+  const config = qa8IndependentGolden(sandbox);
+  config.services.nats.entrypoint =
+    structuredClone(coreSemanticPolicyDescriptor.serviceProcessModel.nats.entrypoint);
+  config.services.phpmyadmin.restart = "no";
+  config.services.phppgadmin.restart = "no";
+  config.services["platform-alert-dispatcher"].volumes = [];
+  return config;
+}
+
+function qa8KnownCompatibilityViolations(violations) {
+  const joined = violations.join("\n");
+  return [
+    /nats:(?:process-model|entrypoint)/i,
+    /phpmyadmin:restart/i,
+    /phppgadmin:restart/i,
+    /platform-alert-dispatcher:(?:mount-inventory|volumes)/i,
+  ].every((pattern) => pattern.test(joined));
+}
+
+function selectQa8AcceptedBaseline(sandbox, lock, environment) {
+  const candidateDefinitions = [
+    ["independent", qa8IndependentGolden(sandbox)],
+    ["legacy-compatible", qa8LegacyCompatibleGolden(sandbox)],
+  ];
+  materializeQa8CanonicalSources(sandbox, candidateDefinitions[0][1]);
+  const candidates = candidateDefinitions.map(([label, config]) => ({
+    label,
+    config,
+    violations: validateNoHostedCoreAuthority(
+      lock,
+      config,
+      sandbox.root,
+      environment,
+    ),
+  }));
+  const accepted = candidates.filter(({ violations }) => violations.length === 0);
+  assert.equal(
+    accepted.length,
+    1,
+    `expected exactly one accepted golden variant: ${JSON.stringify(
+      candidates.map(({ label, violations }) => ({ label, violations })),
+    )}`,
+  );
+  const rejected = candidates.find(({ violations }) => violations.length !== 0);
+  assert.ok(rejected, "the non-authoritative compatibility variant was unexpectedly absent");
+  assert.equal(
+    rejected.violations.length,
+    4,
+    `compatibility delta is not the exact four-field transition: ${rejected.violations.join(",")}`,
+  );
+  assert.equal(
+    qa8KnownCompatibilityViolations(rejected.violations),
+    true,
+    `compatibility delta failed outside the four known fields: ${rejected.violations.join(",")}`,
+  );
+  return accepted[0];
+}
+
+const qa8DirectoryMountTargets = new Set([
+  "/app",
+  "/docker-entrypoint-initdb.d",
+  "/etc/coredns",
+  "/etc/grafana/provisioning",
+  "/etc/mysql/conf.d",
+  "/etc/mysql/ssl",
+  "/etc/phpmyadmin/certs",
+  "/infra",
+  "/infra/backups",
+  "/infra/reports",
+  "/loki/rules",
+  "/opt/keycloak/data/import",
+  "/platform-postgres-init",
+  "/project",
+  "/var/lib/grafana/dashboards",
+  "/var/lib/node-exporter/textfile",
+  "/var/www/infra-docs",
+  "/var/www/project-state",
+  "/var/www/projects",
+  "/etc/prometheus/rules",
+]);
+
+function materializeQa8CanonicalSources(sandbox, config) {
+  fs.mkdirSync(path.join(sandbox.cleanupRoot, "compose-source"), {
+    recursive: true,
+    mode: 0o755,
+  });
+  for (const [secretName, definition] of Object.entries(config.secrets ?? {})) {
+    assert.equal(typeof definition?.file, "string", `missing ${secretName} secret path`);
+    fs.mkdirSync(path.dirname(definition.file), { recursive: true, mode: 0o755 });
+    fs.writeFileSync(definition.file, `qa8-${secretName}\n`, {
+      mode: secretName === "alertmanager_webhook_token" ? 0o640 : 0o600,
+    });
+  }
+  for (const service of Object.values(config.services ?? {})) {
+    for (const mount of service.volumes ?? []) {
+      if (mount?.type !== "bind" || typeof mount.source !== "string") continue;
+      const inRoot =
+        mount.source === sandbox.root || mount.source.startsWith(`${sandbox.root}${path.sep}`);
+      const siblingSource = path.join(sandbox.cleanupRoot, "compose-source");
+      const inSibling =
+        mount.source === siblingSource || mount.source.startsWith(`${siblingSource}${path.sep}`);
+      if (!inRoot && !inSibling) continue;
+      if (mount.source === sandbox.root || qa8DirectoryMountTargets.has(mount.target)) {
+        fs.mkdirSync(mount.source, { recursive: true, mode: 0o755 });
+        continue;
+      }
+      fs.mkdirSync(path.dirname(mount.source), { recursive: true, mode: 0o755 });
+      const repositoryPath = inRoot
+        ? `${repositoryRoot}${mount.source.slice(sandbox.root.length)}`
+        : `${path.resolve(repositoryRoot, "../compose-source")}${
+          mount.source.slice(siblingSource.length)
+        }`;
+      if (fs.existsSync(repositoryPath) && fs.lstatSync(repositoryPath).isFile()) {
+        fs.copyFileSync(repositoryPath, mount.source);
+      } else {
+        fs.writeFileSync(mount.source, `qa8-source:${mount.target}\n`, { mode: 0o644 });
+      }
+      fs.chmodSync(
+        mount.source,
+        mount.target === "/usr/local/bin/platform-postgres-entrypoint" ? 0o755 : 0o644,
+      );
+    }
+  }
+}
+
 function installCountingRenderer(sandbox) {
   const renderCountFile = path.join(sandbox.root, "docker-render-count");
   fs.writeFileSync(renderCountFile, "0\n", { mode: 0o600 });
@@ -569,7 +794,7 @@ printf '%s\\n' "$count" > "$render_count_file"
   };
 }
 
-function runCoreStackNoHostedScenario(config) {
+function runCoreStackNoHostedScenario(config, { materializeSources = false } = {}) {
   const cleanupRoot =
     fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "core-stack-no-hosted-qa7-")));
   const root = path.join(cleanupRoot, "platform-infrastructure");
@@ -589,7 +814,7 @@ function runCoreStackNoHostedScenario(config) {
       const [rule] = rules;
       mount.source = rule.startsWith("root:")
         ? path.resolve(root, rule.slice("root:".length))
-        : path.resolve(root, "../src");
+        : path.resolve(root, "../compose-source");
     }
   }
   const fakeBin = path.join(root, "bin");
@@ -677,7 +902,15 @@ exit 97
 `);
 
   const environmentFile = path.join(root, ".env");
-  fs.writeFileSync(environmentFile, "CORE_VALUE=trusted\nDOMAIN=fixture.invalid\n", { mode: 0o600 });
+  const scenarioSandbox = {
+    cleanupRoot,
+    root,
+    canonicalLock: path.join(root, "config", "no-hosted-workloads.lock.json"),
+    environmentFile,
+    environment: {},
+  };
+  installQa8Environment(scenarioSandbox);
+  if (materializeSources) materializeQa8CanonicalSources(scenarioSandbox, config);
   const result = spawnSync("/bin/bash", [
     gate,
     "--project-name", "platform_infra_vps",
@@ -2085,22 +2318,15 @@ test("QA6 infra runtime-isolation CLI closes argv before invoking the renderer",
 test("QA8 exact overlay golden preserves the four independently derived canonical states", () => {
   const sandbox = createConsumerSandbox();
   try {
-    const config = coreAuthorityConfig();
-    config.services.nats.entrypoint = [
-      "/bin/sh",
-      "-ec",
-      'NATS_PASSWORD="$$(cat "$${NATS_PASSWORD_FILE}")"\n'
-        + 'exec nats-server -c /etc/nats/nats-server.conf --user "$$NATS_USER" --pass "$$NATS_PASSWORD"\n',
-    ];
-    config.services.phpmyadmin.restart = "unless-stopped";
-    config.services.phppgadmin.restart = "unless-stopped";
-    delete config.services["platform-alert-dispatcher"].volumes;
+    const environment = installQa8Environment(sandbox);
+    const config = qa8IndependentGolden(sandbox);
+    materializeQa8CanonicalSources(sandbox, config);
     const lock = JSON.parse(fs.readFileSync(sandbox.canonicalLock, "utf8"));
     const violations = validateNoHostedCoreAuthority(
       lock,
       config,
       sandbox.root,
-      new Map([["DOMAIN", "fixture.invalid"]]),
+      environment,
     );
     assert.deepEqual(
       violations,
@@ -2115,8 +2341,15 @@ test("QA8 exact overlay golden preserves the four independently derived canonica
 test("QA8 exact environment authority rejects same-name security and endpoint widening", () => {
   const sandbox = createConsumerSandbox();
   try {
+    const environment = installQa8Environment(sandbox);
     const lock = JSON.parse(fs.readFileSync(sandbox.canonicalLock, "utf8"));
-    const environment = new Map([["DOMAIN", "fixture.invalid"]]);
+    const baseline = selectQa8AcceptedBaseline(sandbox, lock, environment);
+    materializeQa8CanonicalSources(sandbox, baseline.config);
+    assert.deepEqual(
+      validateNoHostedCoreAuthority(lock, baseline.config, sandbox.root, environment),
+      [],
+      "selected independent baseline is not accepted before mutation",
+    );
     const mutations = [
       ["postgres trust", "postgres", "POSTGRES_HOST_AUTH_METHOD", "trust"],
       ["keycloak non-strict", "keycloak", "KC_HOSTNAME_STRICT", "false"],
@@ -2137,7 +2370,7 @@ test("QA8 exact environment authority rejects same-name security and endpoint wi
     ];
     const accepted = [];
     for (const [label, serviceName, key, value] of mutations) {
-      const config = coreAuthorityConfig();
+      const config = structuredClone(baseline.config);
       config.services[serviceName].environment ??= {};
       config.services[serviceName].environment[key] = value;
       const violations = validateNoHostedCoreAuthority(
@@ -2146,7 +2379,8 @@ test("QA8 exact environment authority rejects same-name security and endpoint wi
         sandbox.root,
         environment,
       );
-      if (!violations.some((violation) => violation.startsWith(`${serviceName}:environment`))) {
+      if (!violations.some((violation) =>
+        violation.includes(serviceName) && violation.includes("environment"))) {
         accepted.push(label);
       }
     }
@@ -2157,20 +2391,43 @@ test("QA8 exact environment authority rejects same-name security and endpoint wi
 });
 
 test("QA8 environment widening cannot reach core create or start", () => {
+  const fixture = createConsumerSandbox();
+  let baselineConfig;
+  try {
+    const environment = installQa8Environment(fixture);
+    const lock = JSON.parse(fs.readFileSync(fixture.canonicalLock, "utf8"));
+    baselineConfig = selectQa8AcceptedBaseline(fixture, lock, environment).config;
+    materializeQa8CanonicalSources(fixture, baselineConfig);
+  } finally {
+    removeSandbox(fixture);
+  }
+  const baselineScenario = runCoreStackNoHostedScenario(
+    baselineConfig,
+    { materializeSources: true },
+  );
+  try {
+    const createCalls = baselineScenario.log.split("\n")
+      .filter((line) => /(?:^| )create(?: |$)/.test(line));
+    const startCalls = baselineScenario.log.split("\n")
+      .filter((line) => /^--host unix:\/\/\/var\/run\/docker\.sock start(?: |$)/.test(line));
+    assert.equal(baselineScenario.result.status, 0, baselineScenario.result.stderr);
+    assert.equal(createCalls.length, 1, `baseline create count: ${baselineScenario.log}`);
+    assert.equal(startCalls.length, 1, `baseline start count: ${baselineScenario.log}`);
+  } finally {
+    fs.rmSync(baselineScenario.root, { recursive: true, force: true });
+  }
   const accepted = [];
-  for (const [label, mutate] of [
-    ["postgres trust", (config) => {
+  for (const [label, serviceName, mutate] of [
+    ["postgres trust", "postgres", (config) => {
       config.services.postgres.environment.POSTGRES_HOST_AUTH_METHOD = "trust";
     }],
-    ["grafana anonymous", (config) => {
+    ["grafana anonymous", "grafana", (config) => {
       config.services.grafana.environment.GF_AUTH_ANONYMOUS_ENABLED = "true";
     }],
   ]) {
-    const sandbox = createConsumerSandbox();
-    const config = coreAuthorityConfig();
-    removeSandbox(sandbox);
+    const config = structuredClone(baselineConfig);
     mutate(config);
-    const scenario = runCoreStackNoHostedScenario(config);
+    const scenario = runCoreStackNoHostedScenario(config, { materializeSources: true });
     try {
       const createCalls = scenario.log.split("\n").filter((line) => /(?:^| )create(?: |$)/.test(line));
       const startCalls = scenario.log.split("\n").filter((line) =>
@@ -2182,6 +2439,12 @@ test("QA8 environment widening cannot reach core create or start", () => {
           create: createCalls.length,
           start: startCalls.length,
         });
+      } else {
+        assert.match(
+          scenario.result.stderr,
+          new RegExp(`semantic authority.*${serviceName}.*environment`, "is"),
+          `${label} failed before Engine sinks for an unrelated reason:\n${scenario.result.stderr}`,
+        );
       }
     } finally {
       fs.rmSync(scenario.root, { recursive: true, force: true });
@@ -2193,30 +2456,43 @@ test("QA8 environment widening cannot reach core create or start", () => {
 test("QA8 exact service and top-level authority rejects every safe-looking semantic drift", () => {
   const sandbox = createConsumerSandbox();
   try {
+    const environment = installQa8Environment(sandbox);
     const lock = JSON.parse(fs.readFileSync(sandbox.canonicalLock, "utf8"));
-    const environment = new Map([["DOMAIN", "fixture.invalid"]]);
+    const baseline = selectQa8AcceptedBaseline(sandbox, lock, environment);
+    materializeQa8CanonicalSources(sandbox, baseline.config);
+    assert.deepEqual(
+      validateNoHostedCoreAuthority(lock, baseline.config, sandbox.root, environment),
+      [],
+      "selected independent baseline is not accepted before mutation",
+    );
     const mutations = [
-      ["pids_limit", (config) => { config.services.postgres.pids_limit = 2_147_483_647; }],
-      ["working_dir", (config) => { config.services.postgres.working_dir = "/tmp"; }],
-      ["init", (config) => { config.services.postgres.init = true; }],
-      ["expose", (config) => { config.services.postgres.expose = [65_535]; }],
-      ["cpus", (config) => { config.services.postgres.cpus = 999; }],
-      ["cpu_shares", (config) => { config.services.postgres.cpu_shares = 262_144; }],
-      ["memory tuple", (config) => {
+      ["pids_limit", /postgres/i, (config) => {
+        config.services.postgres.pids_limit = 2_147_483_647;
+      }],
+      ["working_dir", /postgres/i, (config) => { config.services.postgres.working_dir = "/tmp"; }],
+      ["init", /postgres/i, (config) => { config.services.postgres.init = false; }],
+      ["expose", /postgres/i, (config) => { config.services.postgres.expose = [65_535]; }],
+      ["cpus", /postgres/i, (config) => { config.services.postgres.cpus = 999; }],
+      ["cpu_shares", /postgres/i, (config) => { config.services.postgres.cpu_shares = 262_144; }],
+      ["memory tuple", /postgres/i, (config) => {
         config.services.postgres.mem_limit = 512 * 1024 * 1024;
         config.services.postgres.mem_reservation = 511 * 1024 * 1024;
         config.services.postgres.memswap_limit = 512 * 1024 * 1024;
       }],
-      ["blkio", (config) => { config.services.postgres.blkio_config = { weight: 1000 }; }],
-      ["ulimit", (config) => {
+      ["blkio", /postgres/i, (config) => {
+        config.services.postgres.blkio_config = { weight: 1000 };
+      }],
+      ["ulimit", /postgres/i, (config) => {
         config.services.postgres.ulimits = { nofile: { soft: 65_536, hard: 65_536 } };
       }],
-      ["numeric user", (config) => { config.services.postgres.user = "1:1"; }],
-      ["cap_drop presence", (config) => { config.services.postgres.cap_drop = ["ALL"]; }],
-      ["volume labels", (config) => {
+      ["numeric user", /postgres/i, (config) => { config.services.postgres.user = "1:1"; }],
+      ["cap_drop presence", /postgres/i, (config) => {
+        config.services.postgres.cap_drop = ["ALL"];
+      }],
+      ["volume labels", /volume.*enterprise_postgres_data/i, (config) => {
         config.volumes.enterprise_postgres_data.labels = { "qa8.attacker": "true" };
       }],
-      ["network options", (config) => {
+      ["network options", /network.*platform_postgres/i, (config) => {
         Object.assign(config.networks.platform_postgres, {
           driver: "bridge",
           attachable: false,
@@ -2224,11 +2500,13 @@ test("QA8 exact service and top-level authority rejects every safe-looking seman
           enable_ipv6: false,
         });
       }],
-      ["unknown document field", (config) => { config["x-qa8-attacker"] = {}; }],
+      ["unknown document field", /(?:document|top|field|config)/i, (config) => {
+        config["x-qa8-attacker"] = {};
+      }],
     ];
     const accepted = [];
-    for (const [label, mutate] of mutations) {
-      const config = coreAuthorityConfig();
+    for (const [label, violationPattern, mutate] of mutations) {
+      const config = structuredClone(baseline.config);
       mutate(config);
       const violations = validateNoHostedCoreAuthority(
         lock,
@@ -2236,7 +2514,9 @@ test("QA8 exact service and top-level authority rejects every safe-looking seman
         sandbox.root,
         environment,
       );
-      if (violations.length === 0) accepted.push(label);
+      if (!violations.some((violation) => violationPattern.test(violation))) {
+        accepted.push(label);
+      }
     }
     assert.deepEqual(accepted, [], `semantic authority drift was accepted: ${accepted.join(", ")}`);
   } finally {
@@ -2249,30 +2529,47 @@ test("QA8 secret and root bind ancestry cannot escape through a symlinked parent
   for (const mode of ["secret", "bind"]) {
     const sandbox = createConsumerSandbox();
     try {
+      const environment = installQa8Environment(sandbox);
+      const lock = JSON.parse(fs.readFileSync(sandbox.canonicalLock, "utf8"));
+      const config = selectQa8AcceptedBaseline(sandbox, lock, environment).config;
+      materializeQa8CanonicalSources(sandbox, config);
+      const bytes = `${JSON.stringify(config)}\n`;
+      writeDockerOutput(sandbox, bytes);
+      const baseline = runWrapper(sandbox, ["config", "--format", "json"]);
+      assert.equal(baseline.status, 0, baseline.stderr);
+      assert.equal(baseline.stdout, bytes, `${mode} baseline bytes changed`);
+      fs.rmSync(sandbox.dockerMarker, { force: true });
       const outside = path.join(sandbox.cleanupRoot, `outside-${mode}`);
-      fs.mkdirSync(outside);
-      const config = coreAuthorityConfig();
       if (mode === "secret") {
-        const relative = coreSemanticPolicyDescriptor.secretFiles.control_center_database_url;
-        const relativeInsideSecrets = path.relative("secrets", relative);
-        const outsideFile = path.join(outside, relativeInsideSecrets);
-        fs.mkdirSync(path.dirname(outsideFile), { recursive: true });
-        fs.writeFileSync(outsideFile, "shadow\n", { mode: 0o600 });
+        fs.renameSync(path.join(sandbox.root, "secrets"), outside);
         fs.symlinkSync(outside, path.join(sandbox.root, "secrets"), "dir");
       } else {
-        const relative = "alertmanager/alertmanager.yml";
-        const outsideFile = path.join(outside, "alertmanager.yml");
-        fs.writeFileSync(outsideFile, "route: {}\n", { mode: 0o600 });
+        fs.renameSync(path.join(sandbox.root, "alertmanager"), outside);
         fs.symlinkSync(outside, path.join(sandbox.root, "alertmanager"), "dir");
         assert.equal(
           config.services.alertmanager.volumes.some((mount) =>
-            mount.source === path.join(sandbox.root, relative)),
+            mount.source === path.join(sandbox.root, "alertmanager", "alertmanager.yml")),
           true,
           "bind escape fixture does not use the lexical root path",
         );
       }
-      writeDockerOutput(sandbox, `${JSON.stringify(config)}\n`);
+      const escapedLeaf = mode === "secret"
+        ? config.secrets.control_center_database_url.file
+        : path.join(sandbox.root, "alertmanager", "alertmanager.yml");
+      assert.equal(
+        fs.realpathSync.native(escapedLeaf).startsWith(`${sandbox.root}${path.sep}`),
+        false,
+        `${mode} parent symlink did not escape the canonical root`,
+      );
       const result = runWrapper(sandbox, ["config", "--format", "json"]);
+      if (result.status !== 0) {
+        assert.equal(result.stdout, "", `${mode} authority failure leaked rendered bytes`);
+        assert.match(
+          result.stderr,
+          /(?:secret|bind|path|symlink|authority)/i,
+          `${mode} escape failed for an unrelated reason:\n${result.stderr}`,
+        );
+      }
       outcomes.push({
         mode,
         status: result.status,
@@ -2295,16 +2592,28 @@ test("QA8 secret and root bind ancestry cannot escape through a symlinked parent
 test("QA8 Compose render bytes are bound to an FD before the renderer can replace the pathname", () => {
   const sandbox = createConsumerSandbox();
   try {
-    const config = coreAuthorityConfig();
+    const environment = installQa8Environment(sandbox);
+    const lock = JSON.parse(fs.readFileSync(sandbox.canonicalLock, "utf8"));
+    const config = selectQa8AcceptedBaseline(sandbox, lock, environment).config;
+    materializeQa8CanonicalSources(sandbox, config);
     const originalBytes = `${JSON.stringify(config)}\n`;
     const replacementBytes = `${JSON.stringify(config, null, 2)}\n`;
     writeDockerOutput(sandbox, originalBytes);
+    const baseline = runWrapper(sandbox, ["config", "--format", "json"]);
+    assert.equal(baseline.status, 0, baseline.stderr);
+    assert.equal(baseline.stdout, originalBytes, "baseline wrapper changed renderer bytes");
     fs.writeFileSync(path.join(sandbox.root, "docker-replacement.json"), replacementBytes, {
       mode: 0o600,
     });
+    fs.writeFileSync(path.join(sandbox.root, "docker-render-count"), "0\n", { mode: 0o600 });
     writeExecutable(path.join(sandbox.root, "bin", "docker"), `#!/bin/sh
 set -eu
 sandbox_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+: > "$sandbox_root/render-attempted"
+count=0
+IFS= read -r count < "$sandbox_root/docker-render-count"
+count=$((count + 1))
+printf '%s\\n' "$count" > "$sandbox_root/docker-render-count"
 /bin/cat "$sandbox_root/docker-output.json"
 for candidate in "$sandbox_root"/hosted-compose-handoff.*/compose-render-*; do
   [ -e "$candidate" ] || continue
@@ -2321,14 +2630,22 @@ done
       { TMPDIR: sandbox.root },
     );
     assert.equal(
-      fs.existsSync(path.join(sandbox.root, "render-path-swap-fired")),
+      fs.existsSync(path.join(sandbox.root, "render-attempted")),
       true,
-      "renderer pathname replacement marker did not fire",
+      "renderer attempt marker did not fire",
     );
-    assert.ok(
-      (result.status !== 0 && result.stdout.length === 0) || result.stdout === originalBytes,
-      `wrapper consumed pathname replacement bytes (status ${result.status})`,
+    assert.equal(
+      fs.readFileSync(path.join(sandbox.root, "docker-render-count"), "utf8").trim(),
+      "1",
+      "wrapper rendered more than once",
     );
+    assert.equal(
+      fs.existsSync(path.join(sandbox.root, "render-path-swap-fired")),
+      false,
+      "renderer observed and replaced the supposedly private handoff pathname",
+    );
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, originalBytes, "wrapper did not consume the pre-bound render FD");
     assert.notEqual(result.stdout, replacementBytes, "replacement pathname became validated authority");
   } finally {
     removeSandbox(sandbox);
@@ -2338,7 +2655,15 @@ done
 test("QA8 no-hosted mode rejects a complete runtime identity tuple instead of ignoring it", () => {
   const sandbox = createConsumerSandbox();
   try {
-    writeDockerOutput(sandbox, `${JSON.stringify(coreAuthorityConfig())}\n`);
+    const environment = installQa8Environment(sandbox);
+    const lock = JSON.parse(fs.readFileSync(sandbox.canonicalLock, "utf8"));
+    const config = selectQa8AcceptedBaseline(sandbox, lock, environment).config;
+    materializeQa8CanonicalSources(sandbox, config);
+    const bytes = `${JSON.stringify(config)}\n`;
+    writeDockerOutput(sandbox, bytes);
+    const baseline = runWrapper(sandbox, ["config", "--format", "json"]);
+    assert.equal(baseline.status, 0, baseline.stderr);
+    assert.equal(baseline.stdout, bytes, "runtime tuple baseline changed renderer bytes");
     fs.rmSync(sandbox.dockerMarker, { force: true });
     const result = runWrapper(sandbox, ["config", "--format", "json"], {
       PLATFORM_RUNTIME_CANDIDATE_ID: "a".repeat(64),
@@ -2350,6 +2675,11 @@ test("QA8 no-hosted mode rejects a complete runtime identity tuple instead of ig
     });
     assert.notEqual(result.status, 0, "no-hosted silently ignored a complete runtime identity tuple");
     assert.equal(fs.existsSync(sandbox.dockerMarker), false, "ignored runtime identity reached renderer");
+    assert.match(
+      result.stderr,
+      /(?:no-hosted.*runtime identity|runtime identity.*no-hosted)/i,
+      `runtime tuple failed before renderer for an unrelated reason:\n${result.stderr}`,
+    );
   } finally {
     removeSandbox(sandbox);
   }
