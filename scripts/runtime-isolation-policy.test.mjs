@@ -527,6 +527,47 @@ test("canonical owner maps reject isolated cross-workload service, secret, volum
   assert.match(report.failures.join("\n"), /workload-network-identity-billing-web/);
 });
 
+test("canonical owner maps reject a sole claimant stealing another workload secret through _FILE", () => {
+  const config = workloadIdentityFixture([
+    ["billing", "billing-web"],
+    ["billingapi", "billingapi-web"],
+  ]);
+  config.secrets = {
+    "billingapi-api-key": { external: true, name: "fixture_billingapi-api-key" },
+  };
+  config.services["billing-web"].secrets = ["billingapi-api-key"];
+  config.services["billing-web"].environment = {
+    BILLINGAPI_TOKEN_FILE: "/run/secrets/billingapi-api-key",
+  };
+
+  const report = evaluateRuntimeIsolation(config, { projectName: "fixture" });
+  assert.equal(report.status, "failed");
+  assert.match(
+    report.failures.join("\n"),
+    /workload-owned-secrets-billing-web|workload-file-secret-bindings-billing-web/,
+  );
+});
+
+test("canonical owner maps reject a sole claimant stealing another workload volume", () => {
+  const config = workloadIdentityFixture([
+    ["billing", "billing-web"],
+    ["billingapi", "billingapi-web"],
+  ]);
+  config.volumes = {
+    billingapi_data: { name: "fixture_billingapi_data" },
+  };
+  config.services["billing-web"].volumes = [
+    { type: "volume", source: "billingapi_data", target: "/data" },
+  ];
+
+  const report = evaluateRuntimeIsolation(config, { projectName: "fixture" });
+  assert.equal(report.status, "failed");
+  assert.match(
+    report.failures.join("\n"),
+    /workload-exact-volume-mounts-billing-web|workload-owned-volumes-billing-web/,
+  );
+});
+
 test("canonical owner maps preserve billing plus billingapi and one billing textual child name", () => {
   const nonColliding = workloadIdentityFixture([
     ["billing", "billing-web"],
