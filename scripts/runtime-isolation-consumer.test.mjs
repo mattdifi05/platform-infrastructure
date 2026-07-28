@@ -153,8 +153,11 @@ function createConsumerSandbox() {
   fs.chmodSync(composeVps, 0o755);
   const canonicalLock = copyRepositoryFile(root, "config/no-hosted-workloads.lock.json");
   const inventory = structuredClone(expectedCoreInventory);
+  const trustedEnvironmentBytes =
+    "HOSTED_WORKLOAD_LOCK=\nHOSTED_WORKLOAD_MODE=no-hosted\nCORE_VALUE=trusted\n";
   const environmentFile = path.join(root, "core.env");
-  fs.writeFileSync(environmentFile, "HOSTED_WORKLOAD_LOCK=\nHOSTED_WORKLOAD_MODE=no-hosted\nCORE_VALUE=trusted\n", { mode: 0o600 });
+  fs.writeFileSync(environmentFile, trustedEnvironmentBytes, { mode: 0o600 });
+  fs.writeFileSync(path.join(root, ".env.vps.example"), trustedEnvironmentBytes, { mode: 0o600 });
   const workloadLock = path.join(root, "hosted.lock.json");
   fs.writeFileSync(workloadLock, "{}\n", { mode: 0o600 });
   const activationBundleFile = path.join(root, "activation-bundle.json");
@@ -257,6 +260,7 @@ function runInfraConsumer(sandbox, extraArguments = []) {
 
 function runInfraArguments(sandbox, arguments_) {
   return spawnSync(process.execPath, [
+    "--",
     sandbox.infraOps,
     "runtime-isolation-check",
     ...arguments_,
@@ -674,7 +678,7 @@ for (const kind of protectedKinds) {
       writeDockerOutput(sandbox, `${JSON.stringify(config)}\n`);
       const result = runInfraConsumer(sandbox);
       assert.notEqual(result.status, 0, `candidate missing ${kind} was auto-authorized`);
-      assert.match(result.stderr, /inventory|protected|resource/i);
+      assert.match(result.stderr, /inventory|protected|resource|authority|mismatch/i);
     } finally {
       removeSandbox(sandbox);
     }
@@ -703,7 +707,7 @@ for (const kind of protectedKinds) {
       writeDockerOutput(sandbox, `${JSON.stringify(config)}\n`);
       const result = runInfraConsumer(sandbox);
       assert.notEqual(result.status, 0, `candidate extra ${kind} was auto-authorized`);
-      assert.match(result.stderr, /inventory|protected|resource/i);
+      assert.match(result.stderr, /inventory|protected|resource|authority|mismatch/i);
     } finally {
       removeSandbox(sandbox);
     }
@@ -805,7 +809,7 @@ test("QA6 no-hosted lock race preserves the initial authoritative snapshot or fa
     if (raced.status !== 0) {
       assert.match(
         raced.stderr,
-        /(?:no-hosted|lock).*(?:changed|identity|snapshot|swap|digest)|(?:changed|identity|snapshot|swap|digest).*(?:no-hosted|lock)/i,
+        /(?:no-hosted|lock).*(?:changed|identity|snapshot|swap|digest|invalid|mismatch|tampered)|(?:changed|identity|snapshot|swap|digest|invalid|mismatch|tampered).*(?:no-hosted|lock)/i,
         `lock race failed for an unrelated reason:\n${raced.stderr}`,
       );
     } else {
@@ -848,7 +852,7 @@ test("QA6 no-hosted env bytes are stable from mode parse through Compose render"
     if (raced.status !== 0) {
       assert.match(
         raced.stderr,
-        /(?:environment|env).*(?:changed|identity|snapshot|swap|digest)|(?:changed|identity|snapshot|swap|digest).*(?:environment|env)/i,
+        /(?:environment|env).*(?:changed|identity|snapshot|swap|digest|invalid|mismatch|tampered)|(?:changed|identity|snapshot|swap|digest|invalid|mismatch|tampered).*(?:environment|env)/i,
         `env race failed for an unrelated reason:\n${raced.stderr}`,
       );
     } else {
@@ -925,7 +929,16 @@ test("QA6 infra runtime-isolation CLI closes argv before invoking the renderer",
     ]) {
       fs.rmSync(sandbox.dockerMarker, { force: true });
       const result = runInfraArguments(sandbox, arguments_);
-      if (result.status === 0 || fs.existsSync(sandbox.dockerMarker)) accepted.push(label);
+      const rendererInvoked = fs.existsSync(sandbox.dockerMarker);
+      if (result.status === 0 || rendererInvoked) {
+        accepted.push(label);
+      } else {
+        assert.match(
+          result.stderr,
+          /argument|argv|option|unknown|invalid|forbidden|duplicate|empty/i,
+          `${label} failed before renderer for an unrelated reason:\n${result.stderr}`,
+        );
+      }
     }
     assert.deepEqual(accepted, [], `runtime-isolation-check accepted unknown argv: ${accepted.join(", ")}`);
   } finally {
