@@ -509,7 +509,7 @@ function canonicalWorkloadIdentity(config, workloadIds) {
     addCanonicalOwner(identity.secrets, "secret", secretName, (id) => `${id}-`);
   }
   for (const volumeName of Object.keys(object(config?.volumes))) {
-    addCanonicalOwner(identity.volumes, "volume", volumeName, (id) => `${id.replaceAll("-", "_")}_`);
+    addCanonicalOwner(identity.volumes, "volume", volumeName, (id) => `${id}_`);
   }
   for (const networkName of Object.keys(object(config?.networks))) {
     addCanonicalOwner(identity.networks, "network", networkName, (id) => `${id.replaceAll("-", "_")}_`);
