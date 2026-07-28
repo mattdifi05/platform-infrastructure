@@ -353,8 +353,165 @@ function coreRuntimeConfig(inventory, { hosted = false } = {}) {
   return config;
 }
 
+function hostileCoreService(overrides = {}) {
+  return boundedService({
+    image: `attacker.invalid/hostile@sha256:${"f".repeat(64)}`,
+    privileged: true,
+    pid: "host",
+    network_mode: "host",
+    cap_add: ["SYS_ADMIN"],
+    devices: ["/dev/null:/dev/qa7"],
+    volumes: [{ type: "bind", source: "/", target: "/host" }],
+    ...overrides,
+  });
+}
+
+function coreAuthorityConfig() {
+  const config = coreRuntimeConfig(expectedCoreInventory);
+  for (const [serviceName, definition] of Object.entries(config.services)) {
+    definition.image ||= `trusted.invalid/${serviceName}@sha256:${sha256(serviceName)}`;
+  }
+  return config;
+}
+
 function writeDockerOutput(sandbox, documents) {
   fs.writeFileSync(sandbox.dockerOutputFile, documents);
+}
+
+function installCountingRenderer(sandbox) {
+  const renderCountFile = path.join(sandbox.root, "docker-render-count");
+  fs.writeFileSync(renderCountFile, "0\n", { mode: 0o600 });
+  writeExecutable(path.join(sandbox.root, "bin", "docker"), `#!/bin/sh
+set -eu
+count=0
+if [ -f "$QA7_RENDER_COUNT_FILE" ]; then
+  IFS= read -r count < "$QA7_RENDER_COUNT_FILE"
+fi
+count=$((count + 1))
+printf '%s\\n' "$count" > "$QA7_RENDER_COUNT_FILE"
+/bin/cat "$QA6_DOCKER_OUTPUT_FILE"
+`);
+  sandbox.environment.QA7_RENDER_COUNT_FILE = renderCountFile;
+  return {
+    count() {
+      return Number.parseInt(fs.readFileSync(renderCountFile, "utf8").trim(), 10);
+    },
+    reset() {
+      fs.writeFileSync(renderCountFile, "0\n", { mode: 0o600 });
+    },
+  };
+}
+
+function runCoreStackNoHostedScenario(config) {
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "core-stack-no-hosted-qa7-")));
+  const fakeBin = path.join(root, "bin");
+  const stateDirectory = path.join(root, "state");
+  fs.mkdirSync(fakeBin);
+  fs.mkdirSync(stateDirectory);
+  const gate = copyRepositoryFile(root, "scripts/core-stack-activation-gate.sh");
+  const composeVps = copyRepositoryFile(root, "scripts/compose-vps.sh");
+  copyRepositoryFile(root, "config/no-hosted-workloads.lock.json");
+  fs.chmodSync(gate, 0o755);
+  fs.chmodSync(composeVps, 0o755);
+
+  const modelPath = path.join(root, "candidate-render.json");
+  fs.writeFileSync(modelPath, `${JSON.stringify(config)}\n`, { mode: 0o600 });
+  const extensionServices = new Set([
+    "project-router", "postgres", "redis", "nats", "keycloak", "minio", "prometheus",
+  ]);
+  const mutableServices = Object.keys(config.services)
+    .filter((serviceName) => !extensionServices.has(serviceName))
+    .sort();
+  const idsPath = path.join(root, "container-ids");
+  fs.writeFileSync(idsPath, `${mutableServices.map((serviceName) => `cid-${serviceName}`).join("\n")}\n`);
+  const inspections = mutableServices.map((serviceName) => ({
+    Config: {
+      Labels: {
+        "com.docker.compose.project": "platform_infra_vps",
+        "com.docker.compose.service": serviceName,
+      },
+      Image: config.services[serviceName].image,
+    },
+    State: { Running: true },
+  }));
+  const inspectPath = path.join(root, "inspect.json");
+  fs.writeFileSync(inspectPath, `${JSON.stringify(inspections)}\n`, { mode: 0o600 });
+
+  writeExecutable(path.join(root, "scripts", "platform-activation-state.mjs"), `#!/usr/bin/env node
+const expected = ["read", process.env.PLATFORM_ACTIVATION_STATE_DIR, "journal.json"];
+if (JSON.stringify(process.argv.slice(2)) !== JSON.stringify(expected)) process.exit(64);
+process.stdout.write(JSON.stringify({
+  version: 2,
+  state: "pending",
+  transactionId: process.env.PLATFORM_ACTIVATION_TRANSACTION_ID,
+  projectName: "platform_infra_vps",
+  phase: "intent"
+}));
+`);
+  writeExecutable(path.join(fakeBin, "timeout"), `#!/bin/sh
+set -eu
+shift
+exec "$@"
+`);
+  const engineLog = path.join(root, "fake-engine.log");
+  writeExecutable(path.join(fakeBin, "docker"), `#!/bin/sh
+set -eu
+printf '%s\\n' "$*" >> "$QA7_ENGINE_LOG"
+if [ "\${1:-}" = "compose" ]; then
+  /bin/cat "$QA7_RENDER_MODEL"
+  exit 0
+fi
+if [ "\${1:-}" = "--host" ] && [ "\${3:-}" = "info" ]; then
+  printf '%s\\n' "daemon-qa7"
+  exit 0
+fi
+if [ "\${1:-}" = "--host" ] && [ "\${3:-}" = "compose" ]; then
+  case " $* " in
+    *" create "*) exit 0 ;;
+    *" ps -aq "*)
+      /bin/cat "$QA7_CONTAINER_IDS"
+      exit 0
+      ;;
+  esac
+fi
+if [ "\${1:-}" = "--host" ] && [ "\${3:-}" = "start" ]; then
+  exit 0
+fi
+if [ "\${1:-}" = "--host" ] && [ "\${3:-}" = "inspect" ]; then
+  /bin/cat "$QA7_INSPECT_MODEL"
+  exit 0
+fi
+printf '%s\\n' "UNEXPECTED_DOCKER_CALL $*" >> "$QA7_ENGINE_LOG"
+exit 97
+`);
+
+  const environmentFile = path.join(root, "core.env");
+  fs.writeFileSync(environmentFile, "CORE_VALUE=trusted\n", { mode: 0o600 });
+  const result = spawnSync("/bin/bash", [
+    gate,
+    "--project-name", "platform_infra_vps",
+    "--env-file", environmentFile,
+    "--no-hosted-workloads",
+    "--action", "activate",
+    "--confirm", "ACTIVATE-CORE-STACK",
+  ], {
+    cwd: root,
+    env: cleanEnvironment({
+      PATH: `${fakeBin}:${process.env.PATH}`,
+      PLATFORM_ACTIVATION_TRANSACTION_ID: "a".repeat(64),
+      PLATFORM_ACTIVATION_EXPECTED_DAEMON_ID: "daemon-qa7",
+      PLATFORM_ACTIVATION_STATE_DIR: stateDirectory,
+      QA7_CONTAINER_IDS: idsPath,
+      QA7_ENGINE_LOG: engineLog,
+      QA7_INSPECT_MODEL: inspectPath,
+      QA7_RENDER_MODEL: modelPath,
+      TMPDIR: root,
+    }),
+    encoding: "utf8",
+    timeout: 30_000,
+  });
+  const log = fs.existsSync(engineLog) ? fs.readFileSync(engineLog, "utf8") : "";
+  return { root, result, log };
 }
 
 function activationBundle(sandbox, protectedResourceNames, combinedRenderBytes) {
@@ -615,6 +772,138 @@ test("QA6 wrapper accepts exactly one JSON object and consumes that exact object
   } finally {
     removeSandbox(sandbox);
   }
+});
+
+test("QA7 no-hosted compose-config validates and forwards one exact renderer byte stream", () => {
+  const sandbox = createConsumerSandbox();
+  try {
+    const renderer = installCountingRenderer(sandbox);
+    const config = coreAuthorityConfig();
+    const baselineBytes = `${JSON.stringify(config, null, 2)}\n`;
+    writeDockerOutput(sandbox, baselineBytes);
+    const baseline = runWrapper(sandbox, ["config", "--format", "json"]);
+    assert.equal(baseline.status, 0, baseline.stderr);
+    assert.equal(renderer.count(), 1, "baseline no-hosted config rendered more than once");
+    assert.equal(baseline.stdout, baselineBytes, "validated no-hosted config bytes were not forwarded exactly");
+    assert.equal(sha256(baseline.stdout), sha256(baselineBytes));
+    const forwarded = JSON.parse(baseline.stdout);
+    for (const kind of protectedKinds) {
+      assert.deepEqual(
+        Object.keys(forwarded[kind]).sort(),
+        expectedCoreInventory[kind],
+        `baseline ${kind} differs from canonical no-hosted authority`,
+      );
+    }
+
+    const invalidStreams = new Map([
+      ["zero documents", ""],
+      ["two objects", `${JSON.stringify(config)}\n{}\n`],
+      ["leading scalar", `0\n${JSON.stringify(config)}\n`],
+      ["trailing scalar", `${JSON.stringify(config)}\n0\n`],
+    ]);
+    const accepted = [];
+    for (const [label, bytes] of invalidStreams) {
+      renderer.reset();
+      writeDockerOutput(sandbox, bytes);
+      const result = runWrapper(sandbox, ["config", "--format", "json"]);
+      assert.equal(renderer.count(), 1, `${label} caused a second no-hosted render`);
+      if (result.status === 0 || result.stdout.length > 0) {
+        accepted.push({ label, status: result.status, stdoutBytes: result.stdout.length });
+      }
+    }
+    assert.deepEqual(accepted, [], `no-hosted config accepted non-singleton JSON streams: ${JSON.stringify(accepted)}`);
+  } finally {
+    removeSandbox(sandbox);
+  }
+});
+
+test("QA7 no-hosted compose-config rejects extra and same-name hostile core authority", () => {
+  const sandbox = createConsumerSandbox();
+  try {
+    const renderer = installCountingRenderer(sandbox);
+    const extraService = coreAuthorityConfig();
+    extraService.services["attacker-daemon"] = hostileCoreService();
+    const sameNameMutation = coreAuthorityConfig();
+    sameNameMutation.services.alertmanager = hostileCoreService({
+      image: sameNameMutation.services.alertmanager.image,
+    });
+    assert.deepEqual(
+      Object.keys(sameNameMutation.services).sort(),
+      expectedCoreInventory.services,
+      "same-name hostile fixture accidentally changed service inventory",
+    );
+
+    const accepted = [];
+    for (const [label, config] of [
+      ["extra attacker-daemon", extraService],
+      ["same-name alertmanager mutation", sameNameMutation],
+    ]) {
+      renderer.reset();
+      writeDockerOutput(sandbox, `${JSON.stringify(config)}\n`);
+      const result = runWrapper(sandbox, ["config", "--format", "json"]);
+      assert.equal(renderer.count(), 1, `${label} caused a second no-hosted render`);
+      if (result.status === 0 || result.stdout.length > 0) {
+        accepted.push({ label, status: result.status, stdoutBytes: result.stdout.length });
+      } else {
+        assert.match(
+          result.stderr,
+          /no-hosted|semantic|runtime|isolation|inventory|authority|resource|mismatch|forbidden/i,
+          `${label} failed for an unrelated reason:\n${result.stderr}`,
+        );
+      }
+    }
+    assert.deepEqual(accepted, [], `no-hosted config forwarded hostile authority: ${JSON.stringify(accepted)}`);
+  } finally {
+    removeSandbox(sandbox);
+  }
+});
+
+test("QA7 core activation rejects hostile no-hosted renders before create and start", () => {
+  const extraService = coreAuthorityConfig();
+  extraService.services["attacker-daemon"] = hostileCoreService();
+  const sameNameMutation = coreAuthorityConfig();
+  sameNameMutation.services.alertmanager = hostileCoreService({
+    image: sameNameMutation.services.alertmanager.image,
+  });
+  const violations = [];
+  for (const [label, config] of [
+    ["extra attacker-daemon", extraService],
+    ["same-name alertmanager mutation", sameNameMutation],
+  ]) {
+    const scenario = runCoreStackNoHostedScenario(config);
+    try {
+      const trace = scenario.log.trim().split("\n").filter(Boolean);
+      const renderCalls = trace.filter((line) =>
+        line.startsWith("compose ") && line.endsWith(" config --format json"));
+      const createCalls = trace.filter((line) => /(?:^| )create(?: |$)/.test(line));
+      const startCalls = trace.filter((line) =>
+        /^--host unix:\/\/\/var\/run\/docker\.sock start(?: |$)/.test(line));
+      assert.equal(renderCalls.length, 1, `${label} did not acquire exactly one renderer stream:\n${scenario.log}`);
+      if (scenario.result.status === 0 || createCalls.length > 0 || startCalls.length > 0
+          || /Core activation gate completed/.test(scenario.result.stdout)) {
+        violations.push({
+          label,
+          status: scenario.result.status,
+          createCalls,
+          startCalls,
+          completed: /Core activation gate completed/.test(scenario.result.stdout),
+        });
+      } else {
+        assert.match(
+          scenario.result.stderr,
+          /no-hosted|semantic|runtime|isolation|inventory|authority|resource|mismatch|forbidden/i,
+          `${label} was stopped for an unrelated reason:\n${scenario.result.stderr}`,
+        );
+      }
+    } finally {
+      fs.rmSync(scenario.root, { recursive: true, force: true });
+    }
+  }
+  assert.deepEqual(
+    violations,
+    [],
+    `hostile no-hosted render reached a core mutation sink: ${JSON.stringify(violations)}`,
+  );
 });
 
 test("QA6 canonical no-hosted lock contains the exact authoritative core inventory", () => {
