@@ -250,7 +250,7 @@ jq_lock -e --arg lockPath "$LOCK" --argjson allowResolved "$allow_resolved" --ar
     and (($file_paths | unique | length) == ($file_paths | length))
     and (($workload_ids | unique | length) == ($workload_ids | length))
     and ($workload_ids | prefix_disjoint)
-    and all($lock.workloads[]; (.id | type == "string" and test("^[a-z][a-z0-9-]{1,62}$")))
+    and all($lock.workloads[]; (.id | type == "string" and test("^[a-z][a-z0-9-]{1,60}$")))
     and all($lock.workloads[];
       . as $workload
       | ($workload.services | type == "array" and length > 0)
@@ -468,9 +468,9 @@ jq_lock -r '.workloads[].id' | while IFS= read -r workload_id; do
         composeFile,
         projectMetadataFile: (.projectMetadataFile // null),
         services: [.services[] | {
-          name: (.name | ascii_downcase),
-          role: (.role | ascii_downcase),
-          routes: [(.routes // [])[] | {slug: (.slug | ascii_downcase), port: (.port | tonumber)}]
+          name: .name,
+          role: .role,
+          routes: [(.routes // [])[] | {slug: .slug, port: .port}]
         }],
         secrets: ((.secrets // []) | unique | sort),
         migrationRoots: ((.migrationRoots // []) | unique_preserve)
@@ -480,7 +480,7 @@ jq_lock -r '.workloads[].id' | while IFS= read -r workload_id; do
         version, id, composeFile, projectMetadataFile: (.projectMetadataFile // null),
         services, secrets, migrationRoots
       })
-  ' >/dev/null || die "Locked semantic manifest workload id is not byte-exact."
+  ' >/dev/null || die "Locked semantic manifest fields are not byte-exact."
 done
 
 case "$COMMAND" in

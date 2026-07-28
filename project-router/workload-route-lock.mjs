@@ -1,5 +1,7 @@
 const SHA256 = /^[a-f0-9]{64}$/;
-const ID = /^[a-z][a-z0-9-]{1,62}$/;
+const WORKLOAD_ID = /^[a-z][a-z0-9-]{1,60}$/;
+const SERVICE_NAME = /^[a-z][a-z0-9-]{1,62}$/;
+const ROUTE_SLUG = /^[a-z][a-z0-9-]{1,62}$/;
 
 export const HOSTED_ROUTE_LOCK_VERSION = 4;
 export const HOSTED_ROUTE_VALIDATOR_VERSION = "hosted-contract-v4";
@@ -51,7 +53,7 @@ function deriveCanonicalRoutes(workloads) {
     for (const service of workload.services) {
       if (!service || typeof service !== "object" || Array.isArray(service)
           || !same(Object.keys(service).sort(), ["name", "role", "routes"])
-          || typeof service.name !== "string" || !ID.test(service.name)
+          || typeof service.name !== "string" || !SERVICE_NAME.test(service.name)
           || !service.name.startsWith(`${workload.id}-`)
           || !new Set(["api", "web", "worker", "scheduled-worker"]).has(service.role)
           || !Array.isArray(service.routes)
@@ -65,7 +67,7 @@ function deriveCanonicalRoutes(workloads) {
       for (const route of service.routes) {
         if (!route || typeof route !== "object" || Array.isArray(route)
             || !same(Object.keys(route).sort(), ["port", "slug"])
-            || typeof route.slug !== "string" || !ID.test(route.slug)
+            || typeof route.slug !== "string" || !ROUTE_SLUG.test(route.slug)
             || typeof route.port !== "number" || !Number.isInteger(route.port)
             || route.port < 1 || route.port > 65535
             || routeSlugs.has(route.slug)) {
@@ -125,7 +127,7 @@ export function parseHostedRouteLock(lock) {
   }
 
   const workloadIds = lock.workloads.map((workload) => String(workload?.id ?? ""));
-  if (workloadIds.some((workloadId) => !ID.test(workloadId))) {
+  if (workloadIds.some((workloadId) => !WORKLOAD_ID.test(workloadId))) {
     throw new Error("Hosted workload declarations are invalid.");
   }
   assertPrefixDisjointWorkloadIds(workloadIds);

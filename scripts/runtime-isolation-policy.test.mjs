@@ -772,7 +772,8 @@ test("runtime workload labels require exact non-normalized canonical ids", () =>
     assert.match(report.failures.join("\n"), /workload-id-canonical/);
   }
   for (const workloadId of ["ab", "billing-api", `b${"a".repeat(60)}`]) {
-    const config = workloadIdentityFixture([[workloadId, `${workloadId}-web`]]);
+    const serviceName = workloadId.length === 61 ? `${workloadId}-x` : `${workloadId}-web`;
+    const config = workloadIdentityFixture([[workloadId, serviceName]]);
     const report = evaluateRuntimeIsolation(config, fixtureRuntimeOptions(config));
     assert.equal(report.status, "passed", report.failures.join("\n"));
   }

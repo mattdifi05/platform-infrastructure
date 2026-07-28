@@ -10,8 +10,10 @@ import {
   validateGlobalBrokerOwnership,
 } from "./workload-broker-policy.mjs";
 
-const ID = /^[a-z][a-z0-9-]{1,62}$/;
-const SERVICE = /^[a-z][a-z0-9-]{1,62}$/;
+const WORKLOAD_ID = /^[a-z][a-z0-9-]{1,60}$/;
+const SERVICE_NAME = /^[a-z][a-z0-9-]{1,62}$/;
+const RESOURCE_NAME = /^[a-z][a-z0-9-]{1,62}$/;
+const ROUTE_SLUG = /^[a-z][a-z0-9-]{1,62}$/;
 const SHA256 = /^[a-f0-9]{64}$/;
 const IMAGE = /^[a-z0-9][a-z0-9._/-]*(?::[A-Za-z0-9._-]+)?@sha256:[a-f0-9]{64}$/;
 const SAFE_PATH = /^[A-Za-z0-9_./-]+$/;
@@ -129,7 +131,7 @@ function workloadNetworkZone(network, workloadId) {
 
 function assertNonPrefixCollidingWorkloadIds(workloadIds) {
   const ordered = [...workloadIds].map((id) => {
-    if (typeof id !== "string" || !ID.test(id)) invalid("Hosted workload lock contains a noncanonical workload id.");
+    if (typeof id !== "string" || !WORKLOAD_ID.test(id)) invalid("Hosted workload lock contains a noncanonical workload id.");
     return id;
   }).sort();
   if (new Set(ordered).size !== ordered.length) invalid("Hosted workload ids must be unique.");
@@ -159,6 +161,13 @@ function requiredText(value, label) {
   const text = String(value ?? "").trim();
   if (!text || /[\0\r\n]/.test(text)) invalid(`${label} is missing or invalid.`);
   return text;
+}
+
+function exactText(value, label) {
+  if (typeof value !== "string" || value.length === 0 || value !== value.trim() || /[\0\r\n]/.test(value)) {
+    invalid(`${label} is missing or invalid.`);
+  }
+  return value;
 }
 
 function resolveWithin(root, value, label) {
@@ -642,7 +651,7 @@ function normalizeDnsHost(value, label) {
 function normalizeRoute(route, serviceName, workloadId) {
   const slug = requiredText(route?.slug, `route slug for ${serviceName}`).toLowerCase();
   const port = Number(route?.port);
-  if (!ID.test(slug)) invalid(`Route slug '${slug}' is invalid.`);
+  if (!ROUTE_SLUG.test(slug)) invalid(`Route slug '${slug}' is invalid.`);
   if (!Number.isInteger(port) || port < 1 || port > 65535) invalid(`Route port for ${slug} is invalid.`);
   const canonicalHost = normalizeDnsHost(route?.host, `route host for ${slug}`);
   const labels = canonicalHost.split(".");
@@ -650,7 +659,7 @@ function normalizeRoute(route, serviceName, workloadId) {
   if (route?.aliases !== undefined && !Array.isArray(route.aliases)) invalid(`Route aliases for ${slug} must be an array.`);
   const aliases = [...new Set((route?.aliases ?? []).map((value) => requiredText(value, `route alias for ${slug}`).toLowerCase()))].sort();
   for (const alias of aliases) {
-    if (!ID.test(alias) || alias === slug) invalid(`Route alias '${alias}' for ${slug} is invalid.`);
+    if (!ROUTE_SLUG.test(alias) || alias === slug) invalid(`Route alias '${alias}' for ${slug} is invalid.`);
   }
   const suffix = labels.slice(1).join(".");
   const hosts = [canonicalHost, ...aliases.map((alias) => suffix ? `${alias}.${suffix}` : alias)];
@@ -720,7 +729,7 @@ function reservedHostsFromEnvironment(filePath) {
 export function validateWorkloadManifest(document, manifestPath = "manifest") {
   if (document?.version !== 1) invalid(`${manifestPath} must use version 1.`);
   const id = document?.id;
-  if (typeof id !== "string" || !ID.test(id)) invalid(`Workload id '${String(id ?? "")}' is invalid.`);
+  if (typeof id !== "string" || !WORKLOAD_ID.test(id)) invalid(`Workload id '${String(id ?? "")}' is invalid.`);
   const composeFile = requiredText(document.composeFile, "composeFile");
   if (!SAFE_PATH.test(composeFile) || path.isAbsolute(composeFile) || composeFile.split("/").includes("..")) {
     invalid("composeFile must be a contained relative path.");
@@ -735,9 +744,9 @@ export function validateWorkloadManifest(document, manifestPath = "manifest") {
   const serviceNames = new Set();
   const routeSlugs = new Set();
   const services = document.services.map((service) => {
-    const name = requiredText(service?.name, `service name for ${id}`).toLowerCase();
-    const role = requiredText(service?.role, `service role for ${name}`).toLowerCase();
-    if (!SERVICE.test(name) || !name.startsWith(`${id}-`)) invalid(`Service ${name} must be prefixed with ${id}-.`);
+    const name = exactText(service?.name, `service name for ${id}`);
+    const role = exactText(service?.role, `service role for ${name}`);
+    if (!SERVICE_NAME.test(name) || !name.startsWith(`${id}-`)) invalid(`Service ${name} must be prefixed with ${id}-.`);
     if (!new Set(["api", "web", "worker", "scheduled-worker"]).has(role)) invalid(`Service ${name} has unsupported role ${role}.`);
     if (serviceNames.has(name)) invalid(`Duplicate service ${name}.`);
     serviceNames.add(name);
@@ -749,9 +758,10 @@ export function validateWorkloadManifest(document, manifestPath = "manifest") {
     }
     return { name, role, routes };
   });
-  const secrets = [...new Set((document.secrets ?? []).map((value) => requiredText(value, "secret name")))].sort();
+  if (document.secrets != null && !Array.isArray(document.secrets)) invalid(`${id} secrets must be an array.`);
+  const secrets = [...new Set((document.secrets ?? []).map((value) => exactText(value, "secret name")))].sort();
   for (const secret of secrets) {
-    if (!SERVICE.test(secret) || !secret.startsWith(`${id}-`)) invalid(`Secret ${secret} must be workload-prefixed.`);
+    if (!RESOURCE_NAME.test(secret) || !secret.startsWith(`${id}-`)) invalid(`Secret ${secret} must be workload-prefixed.`);
   }
   const brokers = normalizeWorkloadBrokers(document.brokers, { id, services, secrets });
   return {
@@ -786,7 +796,7 @@ export function deriveCanonicalRoutes(workloads) {
     for (const service of workload.services) {
       if (!service || typeof service !== "object" || Array.isArray(service)
           || !same(Object.keys(service).sort(), ["name", "role", "routes"])
-          || typeof service.name !== "string" || !SERVICE.test(service.name)
+          || typeof service.name !== "string" || !SERVICE_NAME.test(service.name)
           || canonicalHyphenOwner(service.name, workloadIds, "Workload service") !== workload.id
           || !new Set(["api", "web", "worker", "scheduled-worker"]).has(service.role)
           || !Array.isArray(service.routes)
@@ -800,7 +810,7 @@ export function deriveCanonicalRoutes(workloads) {
       for (const route of service.routes) {
         if (!route || typeof route !== "object" || Array.isArray(route)
             || !same(Object.keys(route).sort(), ["port", "slug"])
-            || typeof route.slug !== "string" || !ID.test(route.slug)
+            || typeof route.slug !== "string" || !ROUTE_SLUG.test(route.slug)
             || typeof route.port !== "number" || !Number.isInteger(route.port)
             || route.port < 1 || route.port > 65535
             || routeSlugs.has(route.slug)) {
@@ -1272,7 +1282,7 @@ function assertSecrets(name, service, manifest, combined, projectName, protected
     }
     const source = typeof entry === "string" ? entry : entry.source;
     const target = typeof entry === "string" ? entry : (Object.hasOwn(entry, "target") ? entry.target : entry.source);
-    if (!SERVICE.test(String(source ?? "")) || !SERVICE.test(String(target ?? ""))) {
+    if (!RESOURCE_NAME.test(String(source ?? "")) || !RESOURCE_NAME.test(String(target ?? ""))) {
       invalid(`${name} secret grants require canonical source and target names.`);
     }
     if (targets.has(target)) {

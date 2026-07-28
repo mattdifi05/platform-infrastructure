@@ -35,7 +35,8 @@ const ACCELERATOR_ENVIRONMENT_NAMES = new Set([
   "CUDA_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "ONEAPI_DEVICE_SELECTOR",
   "ROCR_VISIBLE_DEVICES", "SYCL_DEVICE_FILTER", "ZE_AFFINITY_MASK",
 ]);
-const WORKLOAD_ID = /^[a-z][a-z0-9-]{1,62}$/;
+const WORKLOAD_ID = /^[a-z][a-z0-9-]{1,60}$/;
+const RESOURCE_NAME = /^[a-z][a-z0-9-]{1,62}$/;
 const PROTECTED_RESOURCE_KEYS = ["configs", "networks", "secrets", "services", "volumes"];
 
 export function evaluateRuntimeIsolation(config, options = {}) {
@@ -44,11 +45,7 @@ export function evaluateRuntimeIsolation(config, options = {}) {
   const protectedResources = exactProtectedResourceNames(options.protectedResourceNames, config);
   const protectedNetworkNames = new Set(Array.isArray(options.protectedNetworkNames)
     ? options.protectedNetworkNames.map(String)
-    : (protectedResources.provided && protectedResources.valid
-      ? [...protectedResources.sets.networks]
-      : Object.entries(networks)
-        .filter(([, definition]) => typeof definition?.labels?.["com.platform.trust-zone"] === "string")
-        .map(([name]) => name)));
+    : [...protectedResources.sets.networks]);
   const projectName = String(options.projectName ?? "");
   const maxMemoryBytes = integer(options.maxMemoryBytes ?? 13_500 * 1024 * 1024);
   const maxWorkloadMemoryBytes = integer(options.maxWorkloadMemoryBytes ?? 8_000 * 1024 * 1024);
@@ -70,12 +67,11 @@ export function evaluateRuntimeIsolation(config, options = {}) {
     if (!passed) failures.push(`${id}: ${detail}`);
   };
   record("workload-runtime-identity-input", runtimeIdentityValid, `required=${runtimeIdentityRequired} valid=${runtimeIdentityValid}`);
-  const protectedNetworksMatch = !protectedResources.provided
-    || !Array.isArray(options.protectedNetworkNames)
+  const protectedNetworksMatch = !Array.isArray(options.protectedNetworkNames)
     || same(protectedNetworkNames, protectedResources.sets.networks);
   record(
     "workload-protected-resource-inventory",
-    protectedResources.valid && protectedNetworksMatch,
+    protectedResources.provided && protectedResources.valid && protectedNetworksMatch,
     `provided=${protectedResources.provided} valid=${protectedResources.valid} networksMatch=${protectedNetworksMatch}`,
   );
 
@@ -345,7 +341,7 @@ export function evaluateRuntimeIsolation(config, options = {}) {
     record(`workload-owned-volumes-${name}`, foreignVolumes.length === 0, `${name} foreignVolumes=${foreignVolumes.join(",") || "none"}`);
   }
 
-  const inventoryMismatches = [];
+  const inventoryMismatches = [...workloadIdentity.inventoryMismatches];
   for (const kind of ["networks", "secrets", "volumes"]) {
     const owned = new Set([...workloadIdentity[kind]].map(([resourceName, workloadId]) => `${workloadId}\0${resourceName}`));
     const referenced = workloadReferences[kind];
@@ -481,7 +477,7 @@ function nofileHard(service) {
 
 function exactProtectedResourceNames(value, config) {
   const emptySets = Object.fromEntries(PROTECTED_RESOURCE_KEYS.map((key) => [key, new Set()]));
-  if (value == null) return { provided: false, valid: true, sets: emptySets };
+  if (value == null) return { provided: false, valid: false, sets: emptySets };
   if (!value || typeof value !== "object" || Array.isArray(value)
       || JSON.stringify(Object.keys(value).sort()) !== JSON.stringify(PROTECTED_RESOURCE_KEYS)) {
     return { provided: true, valid: false, sets: emptySets };
@@ -513,7 +509,7 @@ function exactSecretGrants(service) {
   for (let index = 0; index < service.secrets.length; index += 1) {
     const entry = service.secrets[index];
     if (typeof entry === "string") {
-      if (!WORKLOAD_ID.test(entry)) errors.push(`${index}:invalid-source`);
+      if (!RESOURCE_NAME.test(entry)) errors.push(`${index}:invalid-source`);
       else grants.push({ source: entry, target: entry });
       continue;
     }
@@ -525,8 +521,8 @@ function exactSecretGrants(service) {
     const hasTarget = Object.hasOwn(entry, "target");
     const expectedKeys = hasTarget ? ["source", "target"] : ["source"];
     if (JSON.stringify(keys) !== JSON.stringify(expectedKeys)
-        || typeof entry.source !== "string" || !WORKLOAD_ID.test(entry.source)
-        || (hasTarget && (typeof entry.target !== "string" || !WORKLOAD_ID.test(entry.target)))) {
+        || typeof entry.source !== "string" || !RESOURCE_NAME.test(entry.source)
+        || (hasTarget && (typeof entry.target !== "string" || !RESOURCE_NAME.test(entry.target)))) {
       errors.push(`${index}:invalid-long-syntax`);
       continue;
     }
@@ -572,6 +568,7 @@ function canonicalWorkloadIdentity(config, workloadIds, protectedResourceNames) 
   const services = object(config?.services);
   const ids = [...workloadIds].sort();
   const idsValid = ids.every((id) => WORKLOAD_ID.test(id));
+  const canonicalIds = ids.filter((id) => WORKLOAD_ID.test(id));
   let prefixDisjoint = idsValid && new Set(ids).size === ids.length;
   for (let leftIndex = 0; leftIndex < ids.length; leftIndex += 1) {
     for (let rightIndex = leftIndex + 1; rightIndex < ids.length; rightIndex += 1) {
@@ -581,55 +578,85 @@ function canonicalWorkloadIdentity(config, workloadIds, protectedResourceNames) 
     }
   }
   const conflicts = [];
-  const addCanonicalOwner = (owners, kind, name, separator, required = false) => {
-    if (!name) return;
-    if (protectedResourceNames[kind]?.has(name)) return null;
-    const candidates = ids.filter((id) => name.startsWith(`${separator(id)}`));
-    if (candidates.length === 1) {
-      owners.set(name, candidates[0]);
-      return candidates[0];
-    }
-    if (required || candidates.length > 1) {
-      conflicts.push(`${kind}:${name}:owners=${candidates.join("|") || "none"}`);
-    }
-    return null;
-  };
   const identity = {
     idsValid,
     prefixDisjoint,
     conflicts,
+    inventoryMismatches: [],
     services: new Map(),
     secrets: new Map(),
     volumes: new Map(),
     networks: new Map(),
   };
+  const canonicalOwners = (name, separator) =>
+    canonicalIds.filter((id) => name.startsWith(separator(id)));
+  const registerOwner = (kind, name, candidates, { validName = true, labelledOwner = null } = {}) => {
+    if (protectedResourceNames[kind]?.has(name)) {
+      if (candidates.length > 0 || labelledOwner) {
+        conflicts.push(`${kind}:${name}:protected-claimed=${candidates.join("|") || labelledOwner}`);
+      }
+      return null;
+    }
+    if (!validName || candidates.length !== 1) {
+      conflicts.push(`${kind}:${name}:owners=${candidates.join("|") || "none"}`);
+      return null;
+    }
+    const owner = candidates[0];
+    if (labelledOwner !== null && labelledOwner !== owner) {
+      conflicts.push(`service-label:${name}:canonical=${owner}:label=${labelledOwner || "none"}`);
+      return null;
+    }
+    identity[kind].set(name, owner);
+    return owner;
+  };
+
   for (const [serviceName, service] of Object.entries(services)) {
-    const labelledOwner = String(service?.labels?.["com.platform.workload-id"] ?? "");
-    const canonicalOwner = addCanonicalOwner(
-      identity.services,
+    const rawLabelledOwner = service?.labels?.["com.platform.workload-id"];
+    const labelledOwner = typeof rawLabelledOwner === "string" ? rawLabelledOwner : "";
+    registerOwner(
       "services",
       serviceName,
-      (id) => `${id}-`,
-      labelledOwner.length > 0,
+      canonicalOwners(serviceName, (id) => `${id}-`),
+      {
+        validName: RESOURCE_NAME.test(serviceName),
+        labelledOwner,
+      },
     );
-    if ((canonicalOwner || labelledOwner) && canonicalOwner !== labelledOwner) {
-      conflicts.push(`service-label:${serviceName}:canonical=${canonicalOwner || "none"}:label=${labelledOwner || "none"}`);
-    }
   }
   for (const secretName of Object.keys(object(config?.secrets))) {
-    addCanonicalOwner(identity.secrets, "secrets", secretName, (id) => `${id}-`);
+    registerOwner(
+      "secrets",
+      secretName,
+      canonicalOwners(secretName, (id) => `${id}-`),
+      { validName: RESOURCE_NAME.test(secretName) },
+    );
   }
   for (const volumeName of Object.keys(object(config?.volumes))) {
-    addCanonicalOwner(identity.volumes, "volumes", volumeName, (id) => `${id}_`);
+    registerOwner("volumes", volumeName, canonicalOwners(volumeName, (id) => `${id}_`));
   }
   for (const networkName of Object.keys(object(config?.networks))) {
-    if (protectedResourceNames.networks?.has(networkName)) continue;
-    const owners = ids.filter((id) => [...WORKLOAD_NETWORK_ZONES]
+    const owners = canonicalIds.filter((id) => [...WORKLOAD_NETWORK_ZONES]
       .some((zone) => networkName === `${id.replaceAll("-", "_")}_${zone}`));
-    const prefixOwners = ids.filter((id) => networkName.startsWith(`${id.replaceAll("-", "_")}_`));
-    if (owners.length === 1) identity.networks.set(networkName, owners[0]);
-    else if (owners.length > 1 || prefixOwners.length > 0) {
-      conflicts.push(`networks:${networkName}:owners=${owners.join("|") || "none"}`);
+    registerOwner("networks", networkName, owners);
+  }
+  for (const configName of Object.keys(object(config?.configs))) {
+    if (!protectedResourceNames.configs?.has(configName)) {
+      conflicts.push(`configs:${configName}:owners=none`);
+    }
+  }
+
+  for (const kind of PROTECTED_RESOURCE_KEYS) {
+    const actual = new Set(Object.keys(object(config?.[kind])));
+    const classified = new Set([
+      ...protectedResourceNames[kind],
+      ...(identity[kind]?.keys() ?? []),
+    ]);
+    if (!same(actual, classified)) {
+      const extras = [...actual].filter((name) => !classified.has(name)).sort();
+      const missing = [...classified].filter((name) => !actual.has(name)).sort();
+      identity.inventoryMismatches.push(
+        `${kind}:unclassified=${extras.join("|") || "none"}:missing=${missing.join("|") || "none"}`,
+      );
     }
   }
   return identity;

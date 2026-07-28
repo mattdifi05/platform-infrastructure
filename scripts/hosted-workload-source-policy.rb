@@ -12,7 +12,7 @@ module HostedWorkloadSourcePolicy
   MAX_COMPOSE_BYTES = 1_048_576
   STANDARD_TAG_PREFIX = "tag:yaml.org,2002:"
   SERVICE_NAME = /\A[a-z][a-z0-9-]{1,62}\z/
-  WORKLOAD_ID = SERVICE_NAME
+  WORKLOAD_ID = /\A[a-z][a-z0-9-]{1,60}\z/
   WORKLOAD_NETWORK_ZONES = %w[ingress postgres cache bus identity storage observability egress].freeze
   WORKLOAD_SERVICE_KEYS = %w[
     image command entrypoint working_dir environment volumes secrets networks healthcheck
