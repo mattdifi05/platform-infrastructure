@@ -306,13 +306,43 @@ load_bundle() {
 validate_bundle() {
   local bundle=$1
   printf '%s' "$bundle" | jq -e --arg projectName "$PROJECT_NAME" '
-    def service_record:
+    def prefix_disjoint:
+      . as $ids
+      | all($ids[];
+          . as $left
+          | all($ids[];
+              . as $right
+              | $left == $right
+                or (((($left | startswith($right + "-")) | not))
+                  and ((($right | startswith($left + "-")) | not)))));
+    def protected_resource_names:
+      type == "object"
+      and ((keys | sort) == ["configs", "networks", "secrets", "services", "volumes"])
+      and all(.[]; type == "array" and . == (unique | sort) and all(.[]; type == "string" and length > 0));
+    def service_owner($name; $ids):
+      [$ids[] as $id | select($name | startswith($id + "-")) | $id]
+      | if length == 1 then .[0] else null end;
+    def network_owner($name; $ids):
+      [$ids[] as $id | select($name | startswith(($id | gsub("-"; "_")) + "_")) | $id]
+      | if length == 1 then .[0] else null end;
+    def service_record($ids):
       . as $record
       | type == "object"
       and ((keys | sort) == ["serviceName", "workloadId"])
       and (.workloadId | type == "string" and test("^[a-z0-9][a-z0-9-]*$"))
       and (.serviceName | type == "string" and test("^[a-z][a-z0-9-]{1,62}$"))
-      and ($record.serviceName | startswith($record.workloadId + "-"));
+      and $record.workloadId == service_owner($record.serviceName; $ids);
+    def network_record($ids; $projectName):
+      . as $record
+      | type == "object"
+      and ((keys | sort) == ["logicalName", "physicalName", "workloadId"])
+      and (.workloadId | type == "string" and test("^[a-z0-9][a-z0-9-]*$"))
+      and (.logicalName | type == "string" and test("^[a-z0-9][a-z0-9_]*$"))
+      and $record.workloadId == network_owner($record.logicalName; $ids)
+      and (($record.logicalName | split("_") | last) as $zone
+        | ($zone | IN("ingress", "postgres", "cache", "bus", "identity", "storage", "observability", "egress"))
+        and $record.logicalName == (($record.workloadId | gsub("-"; "_")) + "_" + $zone))
+      and $record.physicalName == ($projectName + "_" + $record.logicalName);
     def extension_record:
       type == "object"
       and ((keys | sort) == ["networkNames", "serviceName", "workloadId"])
@@ -320,20 +350,42 @@ validate_bundle() {
       and (.serviceName | IN("project-router", "postgres", "redis", "nats", "keycloak", "minio", "prometheus"))
       and (.networkNames | type == "array" and length > 0 and . == (unique | sort))
       and all(.networkNames[]; type == "string" and length > 0);
-    type == "object"
-    and .version == 2
-    and .projectName == $projectName
-    and (.lockSha256 | type == "string" and test("^[a-f0-9]{64}$"))
-    and (.coreRenderSha256 | type == "string" and test("^[a-f0-9]{64}$"))
-    and (.combinedRenderSha256 | type == "string" and test("^[a-f0-9]{64}$"))
-    and (.serviceRecords | type == "array" and length > 0)
-    and (.serviceRecords == (.serviceRecords | unique_by(.serviceName) | sort_by(.workloadId, .serviceName)))
-    and all(.serviceRecords[]; service_record)
-    and (.platformExtensionRecords | type == "array" and length > 0)
-    and (.platformExtensionRecords == (.platformExtensionRecords | unique_by(.workloadId, .serviceName) | sort_by(.workloadId, .serviceName)))
-    and all(.platformExtensionRecords[]; extension_record)
-    and (([.platformExtensionRecords[].workloadId] | unique | sort) == .workloadIds)
-    and (.routeRecords | type == "array")
+    . as $bundle
+    | type == "object"
+    and $bundle.version == 2
+    and $bundle.projectName == $projectName
+    and ($bundle.lockSha256 | type == "string" and test("^[a-f0-9]{64}$"))
+    and ($bundle.coreRenderSha256 | type == "string" and test("^[a-f0-9]{64}$"))
+    and ($bundle.combinedRenderSha256 | type == "string" and test("^[a-f0-9]{64}$"))
+    and ($bundle.workloadIds | type == "array" and length > 0 and . == (unique | sort)
+      and prefix_disjoint and all(.[]; type == "string" and test("^[a-z0-9][a-z0-9-]*$")))
+    and ($bundle.protectedNetworkNames | type == "array" and . == (unique | sort)
+      and all(.[]; type == "string" and length > 0))
+    and ($bundle.protectedResourceNames | protected_resource_names)
+    and ($bundle.protectedResourceNames.networks == $bundle.protectedNetworkNames)
+    and ($bundle.networkRecords | type == "array" and length >= ($bundle.workloadIds | length))
+    and ($bundle.networkRecords == ($bundle.networkRecords | unique_by(.logicalName) | sort_by(.workloadId, .logicalName)))
+    and all($bundle.networkRecords[]; network_record($bundle.workloadIds; $projectName))
+    and (([$bundle.networkRecords[].workloadId] | unique | sort) == $bundle.workloadIds)
+    and all($bundle.networkRecords[];
+      . as $record | ($bundle.protectedResourceNames.networks | index($record.logicalName)) == null)
+    and ($bundle.serviceRecords | type == "array" and length >= ($bundle.workloadIds | length))
+    and ($bundle.serviceRecords == ($bundle.serviceRecords | unique_by(.serviceName) | sort_by(.workloadId, .serviceName)))
+    and all($bundle.serviceRecords[]; service_record($bundle.workloadIds))
+    and (([$bundle.serviceRecords[].workloadId] | unique | sort) == $bundle.workloadIds)
+    and all($bundle.serviceRecords[];
+      . as $record | ($bundle.protectedResourceNames.services | index($record.serviceName)) == null)
+    and ($bundle.platformExtensionRecords | type == "array" and length > 0)
+    and ($bundle.platformExtensionRecords == ($bundle.platformExtensionRecords | unique_by(.workloadId, .serviceName) | sort_by(.workloadId, .serviceName)))
+    and all($bundle.platformExtensionRecords[]; extension_record)
+    and (([$bundle.platformExtensionRecords[].workloadId] | unique | sort) == $bundle.workloadIds)
+    and all($bundle.platformExtensionRecords[];
+      . as $record
+      | all($record.networkNames[];
+          . as $networkName
+          | any($bundle.networkRecords[];
+              .workloadId == $record.workloadId and .logicalName == $networkName)))
+    and ($bundle.routeRecords | type == "array")
   ' >/dev/null
 }
 
@@ -343,6 +395,9 @@ verify_extension_records() {
     --slurpfile core "$core_model" \
     --slurpfile combined "$combined_model" '
       . as $bundle
+      | ($bundle.networkRecords
+          | map({key: .logicalName, value: .workloadId})
+          | from_entries) as $lockedNetworkOwners
       | [
           .platformExtensionRecords[] as $record
           | $record.networkNames[]
@@ -361,12 +416,8 @@ verify_extension_records() {
           | (($service.value.networks // {}) | keys[])
           | . as $networkName
           | select(($coreNetworks | index($networkName)) == null)
-          | ($bundle.workloadIds
-              | map(. as $workloadId
-                | select($networkName | startswith(($workloadId | gsub("-"; "_")) + "_")))) as $owners
-          | select(($owners | length) == 1)
           | {
-              workloadId: $owners[0],
+              workloadId: ($lockedNetworkOwners[$networkName] // null),
               serviceName: $service.key,
               networkName: $networkName
             }

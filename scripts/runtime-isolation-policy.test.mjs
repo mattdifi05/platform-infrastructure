@@ -546,6 +546,18 @@ test("canonical owner maps reject a sole claimant stealing another workload secr
     report.failures.join("\n"),
     /workload-owned-secrets-billing-web|workload-file-secret-bindings-billing-web/,
   );
+
+  const nonCanonicalFile = workloadIdentityFixture([["billing", "billing-web"]]);
+  nonCanonicalFile.secrets = {
+    "billing-api-key": { external: true, name: "fixture_billing-api-key" },
+  };
+  nonCanonicalFile.services["billing-web"].secrets = ["billing-api-key"];
+  nonCanonicalFile.services["billing-web"].environment = {
+    BILLING_TOKEN_FILE: "/tmp/billing-api-key",
+  };
+  const nonCanonicalReport = evaluateRuntimeIsolation(nonCanonicalFile, { projectName: "fixture" });
+  assert.equal(nonCanonicalReport.status, "failed");
+  assert.match(nonCanonicalReport.failures.join("\n"), /workload-file-secret-bindings-billing-web/);
 });
 
 test("canonical owner maps reject a sole claimant stealing another workload volume", () => {
@@ -573,6 +585,19 @@ test("canonical owner maps preserve billing plus billingapi and one billing text
     ["billing", "billing-web"],
     ["billingapi", "billingapi-web"],
   ]);
+  nonColliding.secrets = {
+    "billingapi-api-key": { external: true, name: "fixture_billingapi-api-key" },
+  };
+  nonColliding.volumes = {
+    billingapi_data: { name: "fixture_billingapi_data" },
+  };
+  nonColliding.services["billingapi-web"].secrets = ["billingapi-api-key"];
+  nonColliding.services["billingapi-web"].environment = {
+    BILLINGAPI_TOKEN_FILE: "/run/secrets/billingapi-api-key",
+  };
+  nonColliding.services["billingapi-web"].volumes = [
+    { type: "volume", source: "billingapi_data", target: "/data" },
+  ];
   assert.equal(
     evaluateRuntimeIsolation(nonColliding, { projectName: "fixture" }).status,
     "passed",
@@ -586,6 +611,12 @@ test("canonical owner maps preserve billing plus billingapi and one billing text
   singleOwner.services["billing-api-web"].environment = {
     BILLING_API_TOKEN_FILE: "/run/secrets/billing-api-key",
   };
+  singleOwner.volumes = {
+    billing_data: { name: "fixture_billing_data" },
+  };
+  singleOwner.services["billing-api-web"].volumes = [
+    { type: "volume", source: "billing_data", target: "/data" },
+  ];
   const report = evaluateRuntimeIsolation(singleOwner, { projectName: "fixture" });
   assert.equal(report.status, "passed", report.failures.join("\n"));
 });

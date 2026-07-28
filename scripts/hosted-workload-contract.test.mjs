@@ -2331,6 +2331,19 @@ process.stdout.write(JSON.stringify({ ...document, activationCoordinatorRoot }) 
     coreRenderSha256: crypto.createHash("sha256").update(modelText(baseModelValue)).digest("hex"),
     combinedRenderSha256: crypto.createHash("sha256").update(modelText(modelValue)).digest("hex"),
     workloadIds: [workloadId],
+    protectedNetworkNames: [platformNetwork],
+    protectedResourceNames: {
+      configs: [],
+      networks: [platformNetwork],
+      secrets: [],
+      services: baseServices,
+      volumes: [],
+    },
+    networkRecords: [{
+      workloadId,
+      logicalName: `${workloadId.replaceAll("-", "_")}_private`,
+      physicalName: `platform_infra_vps_${workloadId.replaceAll("-", "_")}_private`,
+    }],
     serviceRecords: [{ workloadId, serviceName }],
     platformExtensionRecords: [{
       workloadId,

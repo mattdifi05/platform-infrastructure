@@ -85,7 +85,7 @@ export function evaluateRuntimeIsolation(config, options = {}) {
     .map(([name]) => name)
     .sort();
   const workloadIds = new Set(workloadServices.map((name) => String(services[name]?.labels?.["com.platform.workload-id"] || "")));
-  const workloadIdentity = canonicalWorkloadIdentity(services, workloadServices, workloadIds);
+  const workloadIdentity = canonicalWorkloadIdentity(config, workloadIds);
   record(
     "workload-id-prefix-disjoint",
     workloadIdentity.prefixDisjoint,
@@ -120,7 +120,11 @@ export function evaluateRuntimeIsolation(config, options = {}) {
       && JSON.stringify(runtimeLabelKeys) === JSON.stringify([...RUNTIME_IDENTITY_LABELS].sort())
       && RUNTIME_IDENTITY_LABELS.every((label) => service.labels?.[label] === runtimeIdentity[label]));
     record(`workload-runtime-identity-${name}`, runtimeIdentityMatches, `${name} labels=${runtimeLabelKeys.join(",") || "none"}`);
-    record(`workload-name-prefix-${name}`, name.startsWith(`${workloadId}-`), `${name} workload=${workloadId}`);
+    record(
+      `workload-name-prefix-${name}`,
+      workloadIdentity.services.get(name) === workloadId,
+      `${name} workload=${workloadId} canonicalOwner=${workloadIdentity.services.get(name) || "none"}`,
+    );
     record(`workload-role-${name}`, ["api", "web", "worker", "scheduled-worker"].includes(role), `${name} role=${role}`);
     record(`workload-numeric-user-${name}`, /^[1-9][0-9]{0,9}:[1-9][0-9]{0,9}$/.test(String(service.user || "")), `${name} user=${service.user || "unset"}`);
     record(`workload-private-pid-${name}`, !Object.hasOwn(service, "pid"), `${name} pid=${service.pid ?? "private"}`);
@@ -234,8 +238,16 @@ export function evaluateRuntimeIsolation(config, options = {}) {
       || (service.depends_on && typeof service.depends_on === "object" && !Array.isArray(service.depends_on)
         && invalidDependencies.length === 0);
     record(`workload-bounded-dependencies-${name}`, exactDependsOn, `${name} invalidDependencies=${invalidDependencies.join(",") || "none"}`);
-    const foreignSecrets = (Array.isArray(service.secrets) ? service.secrets : [])
-      .map((entry) => typeof entry === "string" ? entry : String(entry?.source || ""))
+    const secretGrants = (Array.isArray(service.secrets) ? service.secrets : [])
+      .map((entry) => {
+        const source = typeof entry === "string" ? entry : String(entry?.source || "");
+        return {
+          source,
+          target: typeof entry === "string" ? entry : String(entry?.target || source),
+        };
+      });
+    const foreignSecrets = secretGrants
+      .map((grant) => grant.source)
       .filter((source) => {
         const definition = object(config?.secrets?.[source]);
         return workloadIdentity.secrets.get(source) !== workloadId
@@ -243,6 +255,26 @@ export function evaluateRuntimeIsolation(config, options = {}) {
           || definition.name !== `${projectName}_${source}`;
       });
     record(`workload-owned-secrets-${name}`, foreignSecrets.length === 0, `${name} foreignSecrets=${foreignSecrets.join(",") || "none"}`);
+    const secretTargets = new Map();
+    const duplicateSecretTargets = new Set();
+    for (const grant of secretGrants) {
+      if (!grant.target || secretTargets.has(grant.target)) duplicateSecretTargets.add(grant.target || "<empty>");
+      else secretTargets.set(grant.target, grant.source);
+    }
+    const invalidFileSecretBindings = Object.entries(object(service.environment))
+      .filter(([key]) => key.endsWith("_FILE"))
+      .filter(([, value]) => {
+        const match = String(value).match(/^\/run\/secrets\/([a-z0-9][a-z0-9_-]*)$/);
+        if (!match || duplicateSecretTargets.size > 0) return true;
+        const source = secretTargets.get(match[1]);
+        return !source || workloadIdentity.secrets.get(source) !== workloadId;
+      })
+      .map(([key]) => key);
+    record(
+      `workload-file-secret-bindings-${name}`,
+      invalidFileSecretBindings.length === 0 && duplicateSecretTargets.size === 0,
+      `${name} invalidBindings=${invalidFileSecretBindings.join(",") || "none"} duplicateTargets=${[...duplicateSecretTargets].join(",") || "none"}`,
+    );
     const mounts = volumes(service);
     const exactVolumeMounts = mounts.length <= 1 && mounts.every((mount) => (
       mount.type === "volume"
@@ -428,7 +460,8 @@ function secretNames(service) {
 
 const WORKLOAD_NETWORK_ZONES = new Set(["ingress", "postgres", "cache", "bus", "identity", "storage", "observability", "egress"]);
 
-function canonicalWorkloadIdentity(services, workloadServices, workloadIds) {
+function canonicalWorkloadIdentity(config, workloadIds) {
+  const services = object(config?.services);
   const ids = [...workloadIds].sort();
   let prefixDisjoint = new Set(ids).size === ids.length;
   for (let leftIndex = 0; leftIndex < ids.length; leftIndex += 1) {
@@ -439,11 +472,17 @@ function canonicalWorkloadIdentity(services, workloadServices, workloadIds) {
     }
   }
   const conflicts = [];
-  const addOwner = (owners, kind, name, owner) => {
+  const addCanonicalOwner = (owners, kind, name, separator, required = false) => {
     if (!name) return;
-    const prior = owners.get(name);
-    if (prior && prior !== owner) conflicts.push(`${kind}:${name}:${prior}:${owner}`);
-    else owners.set(name, owner);
+    const candidates = ids.filter((id) => name.startsWith(`${separator(id)}`));
+    if (candidates.length === 1) {
+      owners.set(name, candidates[0]);
+      return candidates[0];
+    }
+    if (required || candidates.length > 1) {
+      conflicts.push(`${kind}:${name}:owners=${candidates.join("|") || "none"}`);
+    }
+    return null;
   };
   const identity = {
     prefixDisjoint,
@@ -453,21 +492,27 @@ function canonicalWorkloadIdentity(services, workloadServices, workloadIds) {
     volumes: new Map(),
     networks: new Map(),
   };
-  for (const workloadId of ids) {
-    for (const zone of WORKLOAD_NETWORK_ZONES) {
-      addOwner(identity.networks, "network", `${workloadId.replaceAll("-", "_")}_${zone}`, workloadId);
+  for (const [serviceName, service] of Object.entries(services)) {
+    const labelledOwner = String(service?.labels?.["com.platform.workload-id"] ?? "");
+    const canonicalOwner = addCanonicalOwner(
+      identity.services,
+      "service",
+      serviceName,
+      (id) => `${id}-`,
+      labelledOwner.length > 0,
+    );
+    if ((canonicalOwner || labelledOwner) && canonicalOwner !== labelledOwner) {
+      conflicts.push(`service-label:${serviceName}:canonical=${canonicalOwner || "none"}:label=${labelledOwner || "none"}`);
     }
   }
-  for (const serviceName of workloadServices) {
-    const service = services[serviceName] ?? {};
-    const workloadId = String(service?.labels?.["com.platform.workload-id"] ?? "");
-    addOwner(identity.services, "service", serviceName, workloadId);
-    for (const entry of Array.isArray(service.secrets) ? service.secrets : []) {
-      addOwner(identity.secrets, "secret", typeof entry === "string" ? entry : String(entry?.source ?? ""), workloadId);
-    }
-    for (const mount of volumes(service)) {
-      if (mount.type === "volume") addOwner(identity.volumes, "volume", mount.source, workloadId);
-    }
+  for (const secretName of Object.keys(object(config?.secrets))) {
+    addCanonicalOwner(identity.secrets, "secret", secretName, (id) => `${id}-`);
+  }
+  for (const volumeName of Object.keys(object(config?.volumes))) {
+    addCanonicalOwner(identity.volumes, "volume", volumeName, (id) => `${id.replaceAll("-", "_")}_`);
+  }
+  for (const networkName of Object.keys(object(config?.networks))) {
+    addCanonicalOwner(identity.networks, "network", networkName, (id) => `${id.replaceAll("-", "_")}_`);
   }
   return identity;
 }
