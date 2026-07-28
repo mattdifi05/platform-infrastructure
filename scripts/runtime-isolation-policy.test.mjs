@@ -418,6 +418,64 @@ test("rejects a networked broker bootstrap or writable workload lock", () => {
   assert.match(report.failures.join("\n"), /nats-no-global-credential-flags/);
 });
 
+test("forged nested ids cannot let billing consume billing-api authority", () => {
+  for (const workloadIds of [
+    ["billing", "billing-api"],
+    ["billing-api", "billing"],
+    ["billing-api-admin", "billing", "billing-api"],
+  ]) {
+    const config = fixture();
+    delete config.services["example-app-web"];
+    delete config.networks.example_app_ingress;
+    const childId = workloadIds.find((id) => id !== "billing" && id.startsWith("billing-"));
+    const childService = `${childId}-web`;
+    const childNetwork = `${childId.replaceAll("-", "_")}_ingress`;
+    const parentNetwork = "billing_ingress";
+    const childVolume = `${childId.replaceAll("-", "_")}_data`;
+    const childSecret = `${childId}-api-key`;
+    for (const id of workloadIds) {
+      const serviceName = id === "billing"
+        ? "billing-web"
+        : (id === childId ? childService : `${id}-worker`);
+      config.services[serviceName] = bounded({
+        read_only: true,
+        user: "1000:1000",
+        logging: { driver: "local", options: { "max-size": "10m", "max-file": "3" } },
+        security_opt: ["no-new-privileges:true"],
+        cap_drop: ["ALL"],
+        labels: { "com.platform.workload-id": id, "com.platform.workload-role": "web" },
+        networks: id === "billing" ? { [parentNetwork]: null } : {},
+      });
+    }
+    config.services["billing-web"].depends_on = {
+      [childService]: { condition: "service_started", required: true, restart: false },
+    };
+    config.services["billing-web"].environment = {
+      [`${childId.toUpperCase().replaceAll("-", "_")}_TOKEN_FILE`]: `/run/secrets/${childSecret}`,
+    };
+    config.services["billing-web"].secrets = [{ source: childSecret, target: childSecret }];
+    config.services["billing-web"].volumes = [{ type: "volume", source: childVolume, target: "/data" }];
+    config.networks[parentNetwork] = { internal: true, name: `fixture_${parentNetwork}` };
+    config.secrets = { [childSecret]: { external: true, name: `fixture_${childSecret}` } };
+    config.volumes = { [childVolume]: { name: `fixture_${childVolume}` } };
+
+    const report = evaluateRuntimeIsolation(config, { projectName: "fixture" });
+    assert.equal(report.status, "failed");
+    assert.match(report.failures.join("\n"), /prefix-disjoint|canonical-owner|nested-workload/i);
+
+    const networkClaim = structuredClone(config);
+    delete networkClaim.networks[parentNetwork];
+    networkClaim.services["billing-web"].networks = { [childNetwork]: null };
+    networkClaim.networks[childNetwork] = { internal: true, name: `fixture_${childNetwork}` };
+    const networkReport = evaluateRuntimeIsolation(networkClaim, { projectName: "fixture" });
+    assert.equal(networkReport.status, "failed");
+    assert.match(
+      networkReport.failures.join("\n"),
+      /prefix-disjoint|canonical-owner|nested-workload|workload-network-identity-billing-web/i,
+    );
+  }
+});
+
 function fixture() {
   const services = {};
   services["example-app-web"] = bounded({

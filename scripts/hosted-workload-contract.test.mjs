@@ -1228,6 +1228,91 @@ test("workload resolver rejects prefix-colliding ids independent of secret decla
   }
 });
 
+test("supplied or forged nested-id locks cannot assign child resources to the parent", () => {
+  const forgedCore = {
+    services: { "project-router": { networks: { platform_routing: null } } },
+    networks: { platform_routing: { internal: true } },
+  };
+  for (const workloadIds of [
+    ["billing", "billing-api"],
+    ["billing-api", "billing"],
+    ["billing-api-admin", "billing", "billing-api"],
+  ]) {
+    const childId = workloadIds.find((id) => id !== "billing" && id.startsWith("billing-"));
+    const childService = `${childId}-web`;
+    const childNetwork = `${childId.replaceAll("-", "_")}_ingress`;
+    const childVolume = `${childId.replaceAll("-", "_")}_data`;
+    const childSecret = `${childId}-api-key`;
+    const parentService = {
+      ...structuredClone(baseService),
+      labels: { "com.platform.workload-id": "billing", "com.platform.workload-role": "web" },
+      networks: { [childNetwork]: null },
+      environment: {
+        [`${childId.toUpperCase().replaceAll("-", "_")}_TOKEN_FILE`]: `/run/secrets/${childSecret}`,
+      },
+      secrets: [{ source: childSecret, target: childSecret }],
+      volumes: [{ type: "volume", source: childVolume, target: "/data" }],
+    };
+    const forgedCombined = {
+      services: {
+        "project-router": {
+          ...forgedCore.services["project-router"],
+          networks: { platform_routing: null, [childNetwork]: null },
+        },
+        [childService]: parentService,
+        ...Object.fromEntries(workloadIds
+          .filter((id) => id !== "billing")
+          .map((id) => [`${id}-worker`, {
+            ...structuredClone(baseService),
+            labels: { "com.platform.workload-id": id, "com.platform.workload-role": "worker" },
+            networks: {},
+          }])),
+      },
+      networks: {
+        platform_routing: { internal: true },
+        [childNetwork]: { internal: true, name: `fixture_${childNetwork}` },
+      },
+      secrets: { [childSecret]: { external: true, name: `fixture_${childSecret}` } },
+      volumes: { [childVolume]: { name: `fixture_${childVolume}` } },
+    };
+    const forgedWorkloads = workloadIds.map((id) => ({
+      version: 1,
+      id,
+      composeFile: "compose.yaml",
+      projectMetadataFile: null,
+      services: id === "billing"
+        ? [{ name: childService, role: "web", routes: [{ slug: "billing", port: 3000 }] }]
+        : [{ name: `${id}-worker`, role: "worker", routes: [] }],
+      secrets: id === "billing" ? [childSecret] : [],
+      migrationRoots: [],
+    }));
+    const forgedLock = {
+      projectName: "fixture",
+      workloads: forgedWorkloads,
+      rawPolicyReceipt: {
+        protectedNetworkNames: ["platform_routing"],
+        protectedResourceNames: {
+          configs: [],
+          networks: ["platform_routing"],
+          secrets: [],
+          services: ["project-router"],
+          volumes: [],
+        },
+        workloads: workloadIds.map((id) => ({
+          workloadId: id,
+          platformExtensions: id === "billing"
+            ? [{ serviceName: "project-router", networkNames: [childNetwork] }]
+            : [],
+        })),
+      },
+    };
+    assert.throws(
+      () => validateRenderedWorkloads({ core: forgedCore, combined: forgedCombined, lock: forgedLock }),
+      /Prefix-colliding workload ids/,
+    );
+  }
+});
+
 test("lock verification rejects missing, duplicate, and semantically tampered workload roles", () => {
   const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "hosted-role-binding-")));
   try {

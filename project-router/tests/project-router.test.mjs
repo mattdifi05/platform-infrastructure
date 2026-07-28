@@ -9,7 +9,10 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createProjectMetadataReader } from "../project-metadata.mjs";
 import { validateVerifiedWorkloadLock, workloadContentDigest } from "../verified-workload-lock.mjs";
-import { HOSTED_ROUTE_RAW_POLICY_CONTROLS } from "../workload-route-lock.mjs";
+import {
+  HOSTED_ROUTE_RAW_POLICY_CONTROLS,
+  parseHostedRouteLock,
+} from "../workload-route-lock.mjs";
 
 const infraRoot = path.resolve(import.meta.dirname, "..", "..");
 const testRoot = path.join(infraRoot, ".tmp", "project-router-tests", randomUUID());
@@ -617,6 +620,33 @@ test("canonical project slugs outrank aliases and aliases cannot claim signed ro
   const aliasClaim = await httpGet(routerPort, "locked-demo.localhost.com", "/alias");
   assert.equal(aliasClaim.statusCode, 502);
   assert.match(aliasClaim.body, /upstream unavailable/);
+});
+
+test("forged nested-id route locks cannot assign a child service to its parent", () => {
+  for (const workloadIds of [
+    ["billing", "billing-api"],
+    ["billing-api", "billing"],
+    ["billing-api-admin", "billing", "billing-api"],
+  ]) {
+    const parentId = "billing";
+    const childId = workloadIds.find((id) => id !== parentId && id.startsWith(`${parentId}-`));
+    const forged = verifiedRouteLock();
+    forged.workloads = workloadIds.map((id) => ({
+      id,
+      services: [{ name: id === parentId ? `${childId}-web` : `${id}-worker` }],
+    }));
+    forged.routes = [{
+      workloadId: parentId,
+      slug: "billing",
+      service: `${childId}-web`,
+      port: 3000,
+      upstream: `http://${childId}-web:3000`,
+    }];
+    assert.throws(
+      () => parseHostedRouteLock(forged),
+      /prefix-colliding|canonical owner|declarations are invalid/i,
+    );
+  }
 });
 
 function removeFixtureTree() {

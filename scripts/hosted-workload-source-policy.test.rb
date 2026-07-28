@@ -18,6 +18,20 @@ class HostedWorkloadSourcePolicyTest < Minitest::Test
     assert_match(/duplicate key app/, error.message)
   end
 
+  def test_rejects_nested_workload_ids_independent_of_order_and_depth
+    [
+      %w[billing billing-api],
+      %w[billing-api billing],
+      %w[billing-api-admin billing billing-api]
+    ].each do |ids|
+      workloads = ids.map { |id| { "id" => id } }
+      error = assert_raises(ArgumentError) do
+        HostedWorkloadSourcePolicy.validate_workload_id_set!(workloads)
+      end
+      assert_match(/Prefix-colliding workload ids/, error.message)
+    end
+  end
+
   def test_rejects_aliases_and_merge_keys
     assert_raises(ArgumentError) { parse("x: &base {}\nservices:\n  app: *base\n") }
     assert_raises(ArgumentError) { parse("services:\n  app:\n    <<: {}\n") }
