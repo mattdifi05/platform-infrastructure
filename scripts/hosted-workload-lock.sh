@@ -175,6 +175,23 @@ jq_lock -e --arg lockPath "$LOCK" --argjson allowResolved "$allow_resolved" --ar
     type == "object"
     and ((keys | sort) == ["configs", "networks", "secrets", "services", "volumes"])
     and all(.[]; type == "array" and . == (unique | sort) and all(.[]; type == "string" and length > 0));
+  def hyphen_owner($name; $ids):
+    [$ids[] as $id
+      | select(($name | type) == "string" and ($name | startswith($id + "-")))
+      | $id]
+    | if length == 1 then .[0] else null end;
+  def volume_owner($name; $ids):
+    [$ids[] as $id
+      | select(($name | type) == "string" and ($name | startswith($id + "_")))
+      | $id]
+    | if length == 1 then .[0] else null end;
+  def network_owner($name; $ids):
+    [$ids[] as $id
+      | ["ingress", "postgres", "cache", "bus", "identity", "storage", "observability", "egress"][] as $zone
+      | select(($name | type) == "string"
+        and $name == (($id | gsub("-"; "_")) + "_" + $zone))
+      | $id]
+    | if length == 1 then .[0] else null end;
   . as $lock
   | ($lock.workloads | map(.id)) as $workload_ids
   | ($lock.files | map(.path)) as $file_paths
@@ -289,12 +306,7 @@ jq_lock -e --arg lockPath "$LOCK" --argjson allowResolved "$allow_resolved" --ar
         and ($receipt.networkNames | type == "array")
         and ($receipt.networkNames == ($receipt.networkNames | unique | sort))
         and (($receipt.networkNames - $lock.rawPolicyReceipt.protectedNetworkNames) == $receipt.networkNames)
-        and all($receipt.networkNames[];
-          . as $name
-          | (($receipt.workloadId | gsub("-"; "_")) + "_") as $prefix
-          | ["ingress", "postgres", "cache", "bus", "identity", "storage", "observability", "egress"]
-          | any(.[]; $name == ($prefix + .))
-        )
+        and all($receipt.networkNames[]; network_owner(.; $workload_ids) == $receipt.workloadId)
         and ($receipt.serviceNames | type == "array")
         and ($receipt.secretNames | type == "array")
         and ($receipt.volumeNames | type == "array")
@@ -303,6 +315,9 @@ jq_lock -e --arg lockPath "$LOCK" --argjson allowResolved "$allow_resolved" --ar
         and ($receipt.secretNames == ($receipt.secretNames | unique | sort))
         and ($receipt.volumeNames == ($receipt.volumeNames | unique | sort))
         and ($receipt.topLevelKeys == ($receipt.topLevelKeys | unique | sort))
+        and all($receipt.serviceNames[]; hyphen_owner(.; $workload_ids) == $receipt.workloadId)
+        and all($receipt.secretNames[]; hyphen_owner(.; $workload_ids) == $receipt.workloadId)
+        and all($receipt.volumeNames[]; volume_owner(.; $workload_ids) == $receipt.workloadId)
         and (($receipt.topLevelKeys | index("services")) != null)
         and ($compose | length == 1 and $receipt.composeSha256 == $compose[0].sha256)
         and ($receipt.serviceNames == ([$workload.services[].name] | unique | sort))

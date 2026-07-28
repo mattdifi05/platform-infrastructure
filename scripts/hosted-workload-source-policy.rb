@@ -11,6 +11,7 @@ module HostedWorkloadSourcePolicy
   CONTROLS = %w[bind-bounded-dependencies bind-bounded-local-logging bind-closed-service-schema bind-exact-healthcheck bind-exact-security-opt bind-exact-ulimits bind-exact-volume-mounts bind-firewall-gated-restart bind-network-identity bind-network-topology bind-no-swap-oom-policy bind-owned-secret-aliases bind-owned-volume-driver bind-owned-volumes bind-platform-extension-records bind-private-pid-numeric-user deny-accelerator-environment deny-api-socket deny-compose-interpolation deny-deploy-controls deny-device-access deny-env-file deny-extends deny-file-configs deny-generic-resources deny-gpu-access deny-include deny-inline-configs deny-label-file deny-lifecycle-hooks deny-local-volume-options deny-providers deny-runtime-identity-labels deny-runtime-overrides deny-scaling deny-stop-grace-overrides deny-supplemental-groups deny-volumes-from].freeze
   MAX_COMPOSE_BYTES = 1_048_576
   STANDARD_TAG_PREFIX = "tag:yaml.org,2002:"
+  SERVICE_NAME = /\A[a-z][a-z0-9-]{1,62}\z/
   WORKLOAD_NETWORK_ZONES = %w[ingress postgres cache bus identity storage observability egress].freeze
   WORKLOAD_SERVICE_KEYS = %w[
     image command entrypoint working_dir environment volumes secrets networks healthcheck
@@ -75,6 +76,29 @@ module HostedWorkloadSourcePolicy
     owners[name] = owner
   end
 
+  def canonical_hyphen_owner!(logical_name, workload_ids, resource_type)
+    name = logical_name.to_s
+    owners = workload_ids.select { |workload_id| name.start_with?("#{workload_id}-") }
+    fail!("#{resource_type} #{name} must have exactly one canonical owner.") unless owners.length == 1
+    owners.fetch(0)
+  end
+
+  def canonical_volume_owner!(logical_name, workload_ids)
+    name = logical_name.to_s
+    owners = workload_ids.select { |workload_id| name.start_with?("#{workload_id}_") }
+    fail!("Workload volume #{name} must have exactly one canonical owner.") unless owners.length == 1
+    owners.fetch(0)
+  end
+
+  def canonical_network_owner!(logical_name, workload_ids)
+    name = logical_name.to_s
+    owners = workload_ids.select do |workload_id|
+      WORKLOAD_NETWORK_ZONES.any? { |zone| name == "#{workload_id.tr('-', '_')}_#{zone}" }
+    end
+    fail!("Workload network #{name} must have exactly one canonical owner.") unless owners.length == 1
+    owners.fetch(0)
+  end
+
   def inspect_ast(node, location = "document")
     if node.respond_to?(:tag)
       tag = node.tag.to_s
@@ -125,11 +149,21 @@ module HostedWorkloadSourcePolicy
     model,
     label,
     workload_id: nil,
+    workload_ids: nil,
     project_name: nil,
     declared_secrets: [],
     protected_networks: [],
     protected_resources: {}
   )
+    all_workload_ids = if workload_id
+                         Array(workload_ids || [workload_id]).map(&:to_s)
+                       else
+                         []
+                       end
+    unless workload_id.nil?
+      validate_workload_id_set!(all_workload_ids.map { |id| { "id" => id } })
+      fail!("#{label} workload id is absent from the canonical workload set.") unless all_workload_ids.include?(workload_id.to_s)
+    end
     protected_configs = Array(protected_resources["configs"])
     protected_secrets = Array(protected_resources["secrets"])
     protected_services = Array(protected_resources["services"])
@@ -151,6 +185,10 @@ module HostedWorkloadSourcePolicy
     fail!("#{label} secrets must be a mapping.") if !secrets.nil? && !secrets.is_a?(Hash)
     (secrets || {}).each do |name, definition|
       next unless workload_id
+      canonical_owner = canonical_hyphen_owner!(name, all_workload_ids, "Workload secret")
+      unless canonical_owner == workload_id
+        fail!("#{label} secret #{name} belongs to workload #{canonical_owner}, not #{workload_id}.")
+      end
       fail!("#{label} secret #{name} collides with a protected core secret.") if protected_secrets.include?(name)
       fail!("#{label} secret #{name} is not declared by the workload manifest.") unless declared_secrets.include?(name)
       expected_name = "#{project_name}_#{name}"
@@ -163,6 +201,10 @@ module HostedWorkloadSourcePolicy
     (volumes || {}).each do |name, definition|
       fail!("#{label} volume #{name} must be null or a mapping.") unless definition.nil? || definition.is_a?(Hash)
       if workload_id
+        canonical_owner = canonical_volume_owner!(name, all_workload_ids)
+        unless canonical_owner == workload_id
+          fail!("#{label} volume #{name} belongs to workload #{canonical_owner}, not #{workload_id}.")
+        end
         fail!("#{label} volume #{name} collides with a protected core volume.") if protected_volumes.include?(name)
         fail!("#{label} volume #{name} is not workload-prefixed.") unless name.start_with?("#{workload_id}_")
         unless definition.nil? || definition.empty?
@@ -182,6 +224,10 @@ module HostedWorkloadSourcePolicy
       unless name.is_a?(String) && name.start_with?(workload_network_prefix) && WORKLOAD_NETWORK_ZONES.include?(zone)
         fail!("#{label} network #{name} is not an exact workload-owned network.")
       end
+      canonical_owner = canonical_network_owner!(name, all_workload_ids)
+      unless canonical_owner == workload_id
+        fail!("#{label} network #{name} belongs to workload #{canonical_owner}, not #{workload_id}.")
+      end
       fail!("#{label} network #{name} collides with a protected core network.") if protected_networks.include?(name)
       if definition.is_a?(Hash) && (definition.key?("external") || definition.key?("name"))
         fail!("#{label} network #{name} cannot alias an external or foreign physical network.")
@@ -195,6 +241,44 @@ module HostedWorkloadSourcePolicy
       fail!("#{label} service #{name} must be a mapping.") unless service.is_a?(Hash)
       if workload_id && protected_services.include?(name) && !PLATFORM_NETWORK_EXTENSION_ZONES.key?(name)
         fail!("#{label} service #{name} collides with a protected core service.")
+      end
+      workload_service = workload_id && !PLATFORM_NETWORK_EXTENSION_ZONES.key?(name)
+      if workload_service
+        canonical_owner = canonical_hyphen_owner!(name, all_workload_ids, "Workload service")
+        unless canonical_owner == workload_id
+          fail!("#{label} service #{name} belongs to workload #{canonical_owner}, not #{workload_id}.")
+        end
+      end
+      secret_targets = {}
+      if workload_service
+        grants = service.fetch("secrets", [])
+        fail!("#{label} service #{name} secrets must be a sequence.") unless grants.is_a?(Array)
+        grants.each do |entry|
+          if entry.is_a?(String)
+            source = entry
+            target = entry
+          elsif entry.is_a?(Hash) && [ ["source"], %w[source target] ].include?(entry.keys.map(&:to_s).sort)
+            source = entry["source"]
+            target = entry.key?("target") ? entry["target"] : source
+          else
+            fail!("#{label} service #{name} secret grants must use exact short syntax or exact source/target long syntax.")
+          end
+          unless source.is_a?(String) && source.match?(SERVICE_NAME) && target.is_a?(String) && target.match?(SERVICE_NAME)
+            fail!("#{label} service #{name} secret grants require canonical source and target names.")
+          end
+          fail!("#{label} service #{name} uses undeclared secret #{source}.") unless declared_secrets.include?(source)
+          canonical_owner = canonical_hyphen_owner!(source, all_workload_ids, "Workload secret")
+          unless canonical_owner == workload_id
+            fail!("#{label} service #{name} secret #{source} belongs to workload #{canonical_owner}, not #{workload_id}.")
+          end
+          if protected_secrets.include?(source)
+            fail!("#{label} service #{name} secret #{source} collides with a protected core secret.")
+          end
+          if secret_targets.key?(target)
+            fail!("#{label} service #{name} has duplicate secret grant target #{target}.")
+          end
+          secret_targets[target] = source
+        end
       end
       labels = service["labels"]
       label_names = case labels
@@ -222,6 +306,17 @@ module HostedWorkloadSourcePolicy
         unless accelerator_environment.empty?
           fail!("#{label} service #{name} cannot request accelerator access through environment controls: #{accelerator_environment.sort.join(', ')}.")
         end
+        if workload_service
+          environment.each do |key, raw_value|
+            next unless key.to_s.end_with?("_FILE")
+            match = raw_value.to_s.match(%r{\A/run/secrets/([a-z][a-z0-9-]{1,62})\z})
+            fail!("#{label} service #{name} has an invalid secret file path for #{key}.") unless match
+            target = match[1]
+            unless secret_targets.key?(target)
+              fail!("#{label} service #{name} secret file #{key} references ungranted secret target #{target}.")
+            end
+          end
+        end
       end
       fail!("#{label} service #{name} cannot share another PID namespace.") if service.key?("pid")
       if service.key?("user") && !service["user"].to_s.match?(/\A[1-9][0-9]{0,9}:[1-9][0-9]{0,9}\z/)
@@ -248,11 +343,15 @@ module HostedWorkloadSourcePolicy
         fail!("#{label} service #{name} networks must be a sequence or mapping.") unless entries.is_a?(Hash)
         entries.each do |network, attachment|
           zone = network.to_s.delete_prefix(workload_network_prefix)
-          if workload_id && (!network.is_a?(String) || !network.start_with?(workload_network_prefix) || !WORKLOAD_NETWORK_ZONES.include?(zone))
-            fail!("#{label} service #{name} uses foreign network #{network}.")
-          end
           if protected_networks.include?(network)
             fail!("#{label} service #{name} cannot join protected core network #{network}.")
+          end
+          if workload_id
+            canonical_owner = canonical_network_owner!(network, all_workload_ids)
+            unless canonical_owner == workload_id && network.is_a?(String) \
+              && network.start_with?(workload_network_prefix) && WORKLOAD_NETWORK_ZONES.include?(zone)
+              fail!("#{label} service #{name} uses foreign network #{network}.")
+            end
           end
           unless attachment.nil? || (attachment.is_a?(Hash) && attachment.empty?)
             fail!("#{label} service #{name} cannot set network aliases or address overrides on #{network}.")
@@ -265,7 +364,8 @@ module HostedWorkloadSourcePolicy
         end
         service_networks.each_key do |network|
           zone = network.to_s.delete_prefix(workload_network_prefix)
-          unless PLATFORM_NETWORK_EXTENSION_ZONES.fetch(name).include?(zone)
+          canonical_owner = canonical_network_owner!(network, all_workload_ids)
+          unless canonical_owner == workload_id && PLATFORM_NETWORK_EXTENSION_ZONES.fetch(name).include?(zone)
             fail!("#{label} platform extension #{name} cannot join workload zone #{zone}.")
           end
         end
@@ -278,7 +378,7 @@ module HostedWorkloadSourcePolicy
         mounts.each do |mount|
           exact = mount.is_a?(Hash) && mount.keys.sort == %w[source target type] \
             && mount["type"] == "volume" \
-            && mount["source"].is_a?(String) && mount["source"].start_with?("#{workload_id}_") \
+            && mount["source"].is_a?(String) \
             && mount["target"] == "/data"
           unless exact
             fail!("#{label} service #{name} volumes must be workload-owned exact long-syntax mounts targeting only /data.")
@@ -286,18 +386,12 @@ module HostedWorkloadSourcePolicy
           if protected_volumes.include?(mount["source"])
             fail!("#{label} service #{name} volume #{mount['source']} collides with a protected core volume.")
           end
+          canonical_owner = canonical_volume_owner!(mount["source"], all_workload_ids)
+          unless canonical_owner == workload_id
+            fail!("#{label} service #{name} volume #{mount['source']} belongs to workload #{canonical_owner}, not #{workload_id}.")
+          end
           fail!("#{label} service #{name} contains duplicate or overlapping volume targets.") if targets[mount["target"]]
           targets[mount["target"]] = true
-        end
-      end
-      if workload_id && service.key?("secrets")
-        grants = service["secrets"]
-        fail!("#{label} service #{name} secrets must be a sequence.") unless grants.is_a?(Array)
-        grants.each do |entry|
-          source = entry.is_a?(Hash) ? entry["source"] : entry
-          if protected_secrets.include?(source)
-            fail!("#{label} service #{name} secret #{source} collides with a protected core secret.")
-          end
         end
       end
       fail!("#{label} service #{name} cannot use env_file.") if service.key?("env_file")
@@ -441,7 +535,7 @@ module HostedWorkloadSourcePolicy
   def validate_lock(lock)
     fail!("Hosted workload lock schema is not supported.") unless lock["version"] == 4 && lock["validatorVersion"] == "hosted-contract-v4"
     fail!("Hosted workload lock must be resolved.") unless lock["state"] == "resolved"
-    validate_workload_id_set!(lock["workloads"])
+    workload_ids = validate_workload_id_set!(lock["workloads"])
     canonical_owners = {
       "services" => {},
       "secrets" => {},
@@ -490,6 +584,7 @@ module HostedWorkloadSourcePolicy
         model,
         "#{workload_id} Compose source",
         workload_id: workload_id,
+        workload_ids: workload_ids,
         project_name: lock.fetch("projectName"),
         declared_secrets: workload.fetch("secrets"),
         protected_networks: protected_networks,

@@ -442,6 +442,18 @@ render_model() {
   chmod 600 "$output"
 }
 
+render_core_model() {
+  local lock_path=$1 output=$2
+  COMPOSE_ENV_FILE="$ENV_FILE" \
+  COMPOSE_PROJECT_NAME="$PROJECT_NAME" \
+  HOSTED_WORKLOAD_LOCK= \
+  HOSTED_WORKLOAD_RUNTIME_LOCK_SOURCE="$lock_path" \
+  HOSTED_WORKLOAD_ALLOW_RESOLVED=1 \
+  HOSTED_WORKLOAD_PREPARE_RESOLVED=1 \
+    bash "$SCRIPT_DIR/compose-vps.sh" config --format json > "$output"
+  chmod 600 "$output"
+}
+
 render_no_hosted_model() {
   local output=$1
   COMPOSE_ENV_FILE="$ENV_FILE" \
@@ -561,12 +573,21 @@ verify_release_subjects() {
 }
 
 verify_model_for_bundle() {
-  local model=$1 expected_sha=$2 bundle=$3
+  local model=$1 expected_sha=$2 bundle=$3 lock_path=$4 core_model=$5
   [[ -f "$model" && ! -L "$model" && "$(sha256_file "$model")" == "$expected_sha" ]] || return 1
-  printf '%s' "$bundle" | jq -e --arg expectedSha "$expected_sha" --slurpfile model "$model" '
+  [[ -f "$core_model" && ! -L "$core_model" ]] || return 1
+  node "$SCRIPT_DIR/hosted-workload-contract.mjs" verify-activation-render \
+    --lock "$lock_path" \
+    --coreRender "$core_model" \
+    --combinedRender "$model" || return 1
+  printf '%s' "$bundle" | jq -e \
+    --arg expectedSha "$expected_sha" \
+    --arg coreSha "$(sha256_file "$core_model")" \
+    --slurpfile model "$model" '
     (.serviceRecords | map(.serviceName) | sort) as $lockedServices
     | (.serviceRecords | map({ key: .serviceName, value: .workloadId }) | from_entries) as $lockedOwners
     | .combinedRenderSha256 == $expectedSha
+    and .coreRenderSha256 == $coreSha
     and (
         $model[0].services
         | to_entries
@@ -581,8 +602,8 @@ verify_model_for_bundle() {
 }
 
 verify_inputs() {
-  local lock_path=$1 initial_bundle=$2 model=$3 model_sha=$4 current_bundle
-  verify_model_for_bundle "$model" "$model_sha" "$initial_bundle" || {
+  local lock_path=$1 initial_bundle=$2 model=$3 model_sha=$4 core_model=$5 current_bundle
+  verify_model_for_bundle "$model" "$model_sha" "$initial_bundle" "$lock_path" "$core_model" || {
     printf '%s\n' "Pinned Compose model is no longer exact for its verified lock." >&2
     return 1
   }
@@ -979,10 +1000,10 @@ rollback_previous() {
   return 1
   # The code below remains unreachable until the retained release-context
   # interface supplies the previous immutable root and image subjects.
-  verify_inputs "$PREVIOUS_LOCK" "$PREVIOUS_BUNDLE" "$PREVIOUS_MODEL" "$PREVIOUS_MODEL_SHA256" || return 1
+  verify_inputs "$PREVIOUS_LOCK" "$PREVIOUS_BUNDLE" "$PREVIOUS_MODEL" "$PREVIOUS_MODEL_SHA256" "$PREVIOUS_CORE_MODEL" || return 1
   stop_and_prove "$CURRENT_RUNTIME_MODEL" "${CURRENT_ALL_SERVICES[@]}" || return 1
   create_services "$PREVIOUS_RUNTIME_MODEL" "${PREVIOUS_ALL_SERVICES[@]}" || return 1
-  verify_inputs "$PREVIOUS_LOCK" "$PREVIOUS_BUNDLE" "$PREVIOUS_MODEL" "$PREVIOUS_MODEL_SHA256" || return 1
+  verify_inputs "$PREVIOUS_LOCK" "$PREVIOUS_BUNDLE" "$PREVIOUS_MODEL" "$PREVIOUS_MODEL_SHA256" "$PREVIOUS_CORE_MODEL" || return 1
   verify_ownership "$PREVIOUS_LOCK" "$PREVIOUS_RUNTIME_MODEL" || return 1
   firewall apply "$PREVIOUS_LOCK" || return 1
   firewall verify "$PREVIOUS_LOCK" || return 1
@@ -993,7 +1014,7 @@ rollback_previous() {
   verify_running_services "$PREVIOUS_RUNTIME_MODEL" \
     "$(printf '%s' "$PREVIOUS_BUNDLE" | jq -r '.lockSha256')" \
     "${PREVIOUS_ALL_SERVICES[@]}" || return 1
-  verify_inputs "$PREVIOUS_LOCK" "$PREVIOUS_BUNDLE" "$PREVIOUS_MODEL" "$PREVIOUS_MODEL_SHA256" || return 1
+  verify_inputs "$PREVIOUS_LOCK" "$PREVIOUS_BUNDLE" "$PREVIOUS_MODEL" "$PREVIOUS_MODEL_SHA256" "$PREVIOUS_CORE_MODEL" || return 1
   verify_ownership "$PREVIOUS_LOCK" "$PREVIOUS_RUNTIME_MODEL" || return 1
   firewall verify "$PREVIOUS_LOCK" || return 1
 }
@@ -1155,9 +1176,11 @@ fi
 TEMP_DIRECTORY=$(mktemp -d "${TMPDIR:-/tmp}/hosted-activation-gate.XXXXXX")
 chmod 700 "$TEMP_DIRECTORY"
 CURRENT_MODEL=$TEMP_DIRECTORY/current-compose.json
+CURRENT_CORE_MODEL=$TEMP_DIRECTORY/current-core-compose.json
 CURRENT_RUNTIME_MODEL=$TEMP_DIRECTORY/current-runtime-compose.json
 FALLBACK_MODEL=$TEMP_DIRECTORY/no-hosted-compose.json
 FALLBACK_RUNTIME_MODEL=$TEMP_DIRECTORY/no-hosted-runtime-compose.json
+PREVIOUS_CORE_MODEL=
 
 if (( NO_HOSTED == 1 )); then
   NO_HOSTED_LOCK=$(canonical_file "$NO_HOSTED_LOCK") || {
@@ -1165,6 +1188,7 @@ if (( NO_HOSTED == 1 )); then
     exit 70
   }
   render_no_hosted_model "$CURRENT_MODEL"
+  cp "$CURRENT_MODEL" "$CURRENT_CORE_MODEL"
   CURRENT_MODEL_SHA256=$(sha256_file "$CURRENT_MODEL")
   CURRENT_LOCK_SHA256=$(sha256_file "$NO_HOSTED_LOCK")
   CURRENT_CORE_SHA256=$CURRENT_MODEL_SHA256
@@ -1184,10 +1208,11 @@ else
   while IFS= read -r service_name; do
     [[ -n "$service_name" ]] && CURRENT_SERVICES+=("$service_name")
   done < <(printf '%s' "$CURRENT_BUNDLE" | jq -r '.serviceRecords[].serviceName')
+  render_core_model "$LOCK" "$CURRENT_CORE_MODEL"
   render_model "$LOCK" "$CURRENT_MODEL"
   assert_daemon_identity
   CURRENT_MODEL_SHA256=$(sha256_file "$CURRENT_MODEL")
-  verify_model_for_bundle "$CURRENT_MODEL" "$CURRENT_MODEL_SHA256" "$CURRENT_BUNDLE" || {
+  verify_model_for_bundle "$CURRENT_MODEL" "$CURRENT_MODEL_SHA256" "$CURRENT_BUNDLE" "$LOCK" "$CURRENT_CORE_MODEL" || {
     printf '%s\n' "Current Compose model is not exact for the verified hosted lock." >&2
     exit 70
   }
@@ -1227,10 +1252,12 @@ if [[ -n "$PREVIOUS_LOCK" ]]; then
     [[ -n "$service_name" ]] && PREVIOUS_SERVICES+=("$service_name")
   done < <(printf '%s' "$PREVIOUS_BUNDLE" | jq -r '.serviceRecords[].serviceName')
   PREVIOUS_MODEL=$TEMP_DIRECTORY/previous-compose.json
+  PREVIOUS_CORE_MODEL=$TEMP_DIRECTORY/previous-core-compose.json
   PREVIOUS_RUNTIME_MODEL=$TEMP_DIRECTORY/previous-runtime-compose.json
+  render_core_model "$PREVIOUS_LOCK" "$PREVIOUS_CORE_MODEL"
   render_model "$PREVIOUS_LOCK" "$PREVIOUS_MODEL"
   PREVIOUS_MODEL_SHA256=$(sha256_file "$PREVIOUS_MODEL")
-  verify_model_for_bundle "$PREVIOUS_MODEL" "$PREVIOUS_MODEL_SHA256" "$PREVIOUS_BUNDLE" || {
+  verify_model_for_bundle "$PREVIOUS_MODEL" "$PREVIOUS_MODEL_SHA256" "$PREVIOUS_BUNDLE" "$PREVIOUS_LOCK" "$PREVIOUS_CORE_MODEL" || {
     printf '%s\n' "Previous Compose model is not exact; cross-release rollback requires the retained immutable release-root dependency." >&2
     exit 70
   }
@@ -1281,7 +1308,8 @@ printf '%s' "$RELEASE_CONTEXT_JSON" | jq -e \
   }
 verify_release_context_unchanged || exit 70
 verify_release_subjects "$CURRENT_MODEL" 1 || exit 70
-model_paths=("$CURRENT_MODEL" "$CURRENT_RUNTIME_MODEL" "$FALLBACK_MODEL" "$FALLBACK_RUNTIME_MODEL")
+model_paths=("$CURRENT_CORE_MODEL" "$CURRENT_MODEL" "$CURRENT_RUNTIME_MODEL" "$FALLBACK_MODEL" "$FALLBACK_RUNTIME_MODEL")
+[[ -z "$PREVIOUS_CORE_MODEL" ]] || model_paths+=("$PREVIOUS_CORE_MODEL")
 [[ -z "$PREVIOUS_MODEL" ]] || model_paths+=("$PREVIOUS_MODEL")
 [[ -z "$PREVIOUS_RUNTIME_MODEL" ]] || model_paths+=("$PREVIOUS_RUNTIME_MODEL")
 node "$SCRIPT_DIR/platform-activation-state.mjs" assert-unmounted "$STATE_DIR" "${model_paths[@]}" || exit 70
@@ -1301,7 +1329,7 @@ if [[ "$ACTION" == stop ]]; then
 fi
 
 if (( NO_HOSTED == 0 )); then
-  verify_inputs "$LOCK" "$CURRENT_BUNDLE" "$CURRENT_MODEL" "$CURRENT_MODEL_SHA256"
+  verify_inputs "$LOCK" "$CURRENT_BUNDLE" "$CURRENT_MODEL" "$CURRENT_MODEL_SHA256" "$CURRENT_CORE_MODEL"
   firewall preflight "$LOCK"
 fi
 TRANSACTION_ID=$(node "$SCRIPT_DIR/platform-activation-state.mjs" nonce)
@@ -1335,7 +1363,7 @@ create_services "$CURRENT_RUNTIME_MODEL" "${CURRENT_ALL_SERVICES[@]}"
 assert_mutex_identity
 journal_phase created "exact current hosted/extension containers created stopped"
 if (( NO_HOSTED == 0 )); then
-  verify_inputs "$LOCK" "$CURRENT_BUNDLE" "$CURRENT_MODEL" "$CURRENT_MODEL_SHA256"
+  verify_inputs "$LOCK" "$CURRENT_BUNDLE" "$CURRENT_MODEL" "$CURRENT_MODEL_SHA256" "$CURRENT_CORE_MODEL"
   verify_ownership "$LOCK" "$CURRENT_RUNTIME_MODEL"
   firewall apply "$LOCK"
   firewall verify "$LOCK"
@@ -1348,7 +1376,7 @@ start_services_ordered "$CURRENT_RUNTIME_MODEL" "$CURRENT_LOCK_SHA256" "${CURREN
 verify_running_services "$CURRENT_RUNTIME_MODEL" "$CURRENT_LOCK_SHA256" "${CURRENT_ALL_SERVICES[@]}"
 verify_exact_workload_inventory
 if (( NO_HOSTED == 0 )); then
-  verify_inputs "$LOCK" "$CURRENT_BUNDLE" "$CURRENT_MODEL" "$CURRENT_MODEL_SHA256"
+  verify_inputs "$LOCK" "$CURRENT_BUNDLE" "$CURRENT_MODEL" "$CURRENT_MODEL_SHA256" "$CURRENT_CORE_MODEL"
   verify_ownership "$LOCK" "$CURRENT_RUNTIME_MODEL"
   firewall verify "$LOCK"
 fi

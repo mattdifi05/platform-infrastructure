@@ -103,6 +103,26 @@ function workloadNetworkOwner(network, workloadIds) {
   return owners.get(network) ?? null;
 }
 
+function canonicalHyphenOwner(logicalName, workloadIds, resourceType) {
+  const name = requiredText(logicalName, `${resourceType} logical name`);
+  const owners = assertNonPrefixCollidingWorkloadIds(workloadIds)
+    .filter((id) => name.startsWith(`${id}-`));
+  if (owners.length !== 1) {
+    invalid(`${resourceType} ${name} must have exactly one canonical owner.`);
+  }
+  return owners[0];
+}
+
+function canonicalVolumeOwner(logicalName, workloadIds) {
+  const name = requiredText(logicalName, "Workload volume logical name");
+  const owners = assertNonPrefixCollidingWorkloadIds(workloadIds)
+    .filter((id) => name.startsWith(`${id}_`));
+  if (owners.length !== 1) {
+    invalid(`Workload volume ${name} must have exactly one canonical owner.`);
+  }
+  return owners[0];
+}
+
 function workloadNetworkZone(network, workloadId) {
   return network.slice(workloadNetworkPrefix(workloadId).length);
 }
@@ -991,10 +1011,15 @@ function assertClosedTopLevelResources(core, combined, lock) {
   const coreSecretSet = new Set(coreSecretNames);
   const secretOwners = new Map();
   const referencedSecretNames = new Set();
+  const workloadIds = lock.workloads.map((workload) => workload.id);
   for (const workload of lock.workloads) {
     for (const secretName of workload.secrets) {
       if (coreSecretSet.has(secretName)) {
         invalid(`Workload ${workload.id} secret ${secretName} collides with a protected core secret.`);
+      }
+      const canonicalOwner = canonicalHyphenOwner(secretName, workloadIds, "Workload secret");
+      if (canonicalOwner !== workload.id) {
+        invalid(`Workload secret ${secretName} belongs to workload ${canonicalOwner}, not ${workload.id}.`);
       }
       const prior = secretOwners.get(secretName);
       if (prior) invalid(`Workload secret ${secretName} is ambiguously owned by ${prior} and ${workload.id}.`);
@@ -1032,6 +1057,10 @@ function assertClosedTopLevelResources(core, combined, lock) {
         if (mount?.type !== "volume" || typeof mount.source !== "string") continue;
         if (coreVolumeSet.has(mount.source)) {
           invalid(`Workload ${workload.id} volume ${mount.source} collides with a protected core volume.`);
+        }
+        const canonicalOwner = canonicalVolumeOwner(mount.source, workloadIds);
+        if (canonicalOwner !== workload.id) {
+          invalid(`Workload volume ${mount.source} belongs to workload ${canonicalOwner}, not ${workload.id}.`);
         }
         const prior = volumeOwners.get(mount.source);
         if (prior && prior !== workload.id) {
@@ -1134,7 +1163,7 @@ function assertResourceLimits(name, service) {
   if (!(nofile >= 1024 && nofile <= 65536)) invalid(`${name} requires a bounded nofile limit.`);
 }
 
-function assertEnvironmentSecrets(name, service) {
+function assertEnvironmentSecrets(name, service, secretGrants) {
   if (Object.hasOwn(service, "environment")
       && (!service.environment || typeof service.environment !== "object" || Array.isArray(service.environment)
         || Object.values(service.environment).some((value) => value == null))) {
@@ -1146,8 +1175,12 @@ function assertEnvironmentSecrets(name, service) {
     }
     const value = String(rawValue ?? "");
     if (key.endsWith("_FILE")) {
-      if (!value.startsWith("/run/secrets/") || !SERVICE.test(value.slice("/run/secrets/".length))) {
+      const match = value.match(/^\/run\/secrets\/([a-z][a-z0-9-]{1,62})$/);
+      if (!match) {
         invalid(`${name} has an invalid secret file path for ${key}.`);
+      }
+      if (!secretGrants.has(match[1])) {
+        invalid(`${name} secret file ${key} references ungranted secret target ${match[1]}.`);
       }
       continue;
     }
@@ -1160,11 +1193,33 @@ function assertEnvironmentSecrets(name, service) {
   }
 }
 
-function assertSecrets(name, service, manifest, combined, projectName, protectedSecretNames) {
+function assertSecrets(name, service, manifest, combined, projectName, protectedSecretNames, workloadIds) {
   const allowed = new Set(manifest.secrets);
+  const targets = new Map();
+  if (!Array.isArray(service.secrets ?? [])) {
+    invalid(`${name} secrets must be an exact sequence.`);
+  }
   for (const entry of service.secrets ?? []) {
+    const longSyntax = entry && typeof entry === "object" && !Array.isArray(entry);
+    if (typeof entry !== "string"
+        && (!longSyntax
+          || !same(Object.keys(entry).sort(), Object.hasOwn(entry, "target") ? ["source", "target"] : ["source"]))) {
+      invalid(`${name} secret grants must use exact short syntax or exact source/target long syntax.`);
+    }
     const source = typeof entry === "string" ? entry : entry.source;
+    const target = typeof entry === "string" ? entry : (Object.hasOwn(entry, "target") ? entry.target : entry.source);
+    if (!SERVICE.test(String(source ?? "")) || !SERVICE.test(String(target ?? ""))) {
+      invalid(`${name} secret grants require canonical source and target names.`);
+    }
+    if (targets.has(target)) {
+      invalid(`${name} has duplicate secret grant target ${target}.`);
+    }
+    targets.set(target, source);
     if (!allowed.has(source)) invalid(`${name} uses undeclared secret ${source}.`);
+    const canonicalOwner = canonicalHyphenOwner(source, workloadIds, "Workload secret");
+    if (canonicalOwner !== manifest.id) {
+      invalid(`${name} secret ${source} belongs to workload ${canonicalOwner}, not ${manifest.id}.`);
+    }
     if (protectedSecretNames.has(source)) {
       invalid(`${name} secret ${source} collides with a protected core secret.`);
     }
@@ -1175,6 +1230,7 @@ function assertSecrets(name, service, manifest, combined, projectName, protected
       invalid(`${name} secret ${source} must bind workload-owned external secret ${expectedPhysicalName}.`);
     }
   }
+  return targets;
 }
 
 function assertVolumes(name, service, workloadId, protectedVolumeNames) {
@@ -1205,8 +1261,13 @@ function assertWorkloadService({
   protectedNetworkNames,
   protectedSecretNames,
   protectedVolumeNames,
+  workloadIds,
 }) {
   const name = manifestService.name;
+  const canonicalServiceOwner = canonicalHyphenOwner(name, workloadIds, "Workload service");
+  if (canonicalServiceOwner !== manifest.id) {
+    invalid(`Workload service ${name} belongs to workload ${canonicalServiceOwner}, not ${manifest.id}.`);
+  }
   const predeclaredRuntimeLabels = Object.keys(serviceDefinition.labels ?? {}).filter((label) => label.startsWith("com.platform.runtime."));
   if (predeclaredRuntimeLabels.length > 0) invalid(`${name} cannot predeclare trusted runtime identity labels.`);
   if (!IMAGE.test(String(serviceDefinition.image ?? ""))) invalid(`${name} image must be digest-pinned.`);
@@ -1270,8 +1331,16 @@ function assertWorkloadService({
   const unsupportedFields = Object.keys(serviceDefinition).filter((field) => !WORKLOAD_SERVICE_KEYS.has(field)).sort();
   if (unsupportedFields.length > 0) invalid(`${name} uses unsupported Compose service fields: ${unsupportedFields.join(", ")}.`);
   assertResourceLimits(name, serviceDefinition);
-  assertEnvironmentSecrets(name, serviceDefinition);
-  assertSecrets(name, serviceDefinition, manifest, combined, projectName, protectedSecretNames);
+  const secretGrants = assertSecrets(
+    name,
+    serviceDefinition,
+    manifest,
+    combined,
+    projectName,
+    protectedSecretNames,
+    workloadIds,
+  );
+  assertEnvironmentSecrets(name, serviceDefinition, secretGrants);
   assertVolumes(name, serviceDefinition, manifest.id, protectedVolumeNames);
   const networks = serviceNetworks(serviceDefinition);
   if (networks.size === 0) invalid(`${name} must declare networks.`);
@@ -1463,6 +1532,7 @@ export function validateRenderedWorkloads({ core, combined, lock }) {
       protectedNetworkNames,
       protectedSecretNames,
       protectedVolumeNames,
+      workloadIds,
     });
     const brokerUse = assertBrokerEnvironment(name, rendered, item.workload, item.service);
     if (brokerUse.usesRedis) redisUsers.add(item.workload.id);
@@ -1638,10 +1708,16 @@ export function verifyRawPolicyReceipt(lock) {
         || networkNames.some((name) => workloadNetworkOwner(name, expectedIds) !== item.workloadId || receipt.protectedNetworkNames.includes(name))
         || !same(configNames, [])
         || !same(secretNames, workload.secrets)
-        || secretNames.some((name) => receipt.protectedResourceNames.secrets.includes(name))
+        || secretNames.some((name) =>
+          canonicalHyphenOwner(name, expectedIds, "Workload secret") !== item.workloadId
+          || receipt.protectedResourceNames.secrets.includes(name))
         || !same(volumeNames, [...new Set(volumeNames)].sort())
-        || volumeNames.some((name) => receipt.protectedResourceNames.volumes.includes(name))
-        || serviceNames.some((name) => receipt.protectedResourceNames.services.includes(name))
+        || volumeNames.some((name) =>
+          canonicalVolumeOwner(name, expectedIds) !== item.workloadId
+          || receipt.protectedResourceNames.volumes.includes(name))
+        || serviceNames.some((name) =>
+          canonicalHyphenOwner(name, expectedIds, "Workload service") !== item.workloadId
+          || receipt.protectedResourceNames.services.includes(name))
         || !same(topLevelKeys, [...new Set(topLevelKeys)].sort()) || !topLevelKeys.includes("services")
         || !same(serviceNames, workload.services.map((service) => service.name).sort())
         || !same(platformExtensionNames, [...new Set(platformExtensionNames)].sort())
@@ -1662,6 +1738,29 @@ export function verifyRawPolicyReceipt(lock) {
     for (const volumeName of volumeNames) addCanonicalOwner(canonicalOwners.volumes, "Workload volume", volumeName, item.workloadId);
     for (const networkName of networkNames) addCanonicalOwner(canonicalOwners.networks, "Workload network", networkName, item.workloadId);
   }
+}
+
+export function verifyActivationRender({ lockPath, coreRenderPath, combinedRenderPath }) {
+  const canonicalLockPath = path.resolve(requiredText(lockPath, "activation lock"));
+  const lock = readJson(canonicalLockPath, "activation workload lock");
+  if (lock.state !== "verified") invalid("Activation workload lock is not verified.");
+  if (canonicalLockPath !== path.resolve(requiredText(lock.activationLockPath, "activation lock path"))) {
+    invalid("Verified lock is not read from its activation path.");
+  }
+  verifyLockFiles(lock);
+  verifyRawPolicyReceipt(lock);
+  const readPinnedRender = (renderPath, expectedSha256, label) => {
+    const canonicalPath = path.resolve(requiredText(renderPath, label));
+    const { bytes } = readStableRegularFile(canonicalPath, label);
+    if (!SHA256.test(String(expectedSha256 ?? "")) || sha256Bytes(bytes) !== expectedSha256) {
+      invalid(`${label} does not match the SHA-256 pinned by the verified lock.`);
+    }
+    return parseJsonBytes(bytes, label);
+  };
+  const core = readPinnedRender(coreRenderPath, lock.coreRenderSha256, "activation core render");
+  const combined = readPinnedRender(combinedRenderPath, lock.combinedRenderSha256, "activation combined render");
+  validateRenderedWorkloads({ core, combined, lock });
+  return true;
 }
 
 function parseArgs(values) {
@@ -1746,6 +1845,14 @@ function main() {
     verifyRawPolicyReceipt(lock);
     return;
   }
+  if (command === "verify-activation-render") {
+    verifyActivationRender({
+      lockPath: path.resolve(requiredText(args.lock, "--lock")),
+      coreRenderPath: path.resolve(requiredText(args.coreRender, "--coreRender")),
+      combinedRenderPath: path.resolve(requiredText(args.combinedRender, "--combinedRender")),
+    });
+    return;
+  }
   if (command === "compose-files") {
     const lockPath = path.resolve(requiredText(args.lock, "--lock"));
     const lock = readJson(lockPath, "workload lock");
@@ -1766,7 +1873,7 @@ function main() {
     process.stdout.write(`${lock.workloads.map((workload) => workload.environmentPath).join("\n")}\n`);
     return;
   }
-  invalid("Usage: hosted-workload-contract.mjs resolve|verify-render|verify-lock|compose-files|env-files");
+  invalid("Usage: hosted-workload-contract.mjs resolve|verify-render|verify-lock|verify-activation-render|compose-files|env-files");
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(new URL(import.meta.url).pathname)) {

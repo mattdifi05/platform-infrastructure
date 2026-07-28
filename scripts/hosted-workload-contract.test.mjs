@@ -2436,6 +2436,20 @@ process.stdout.write(JSON.stringify({ ...document, activationCoordinatorRoot }) 
 printf 'lock:%s:%s\\n' "$1" "\${2:-}" >> "$HOSTED_TEST_TRACE"
 cat "$1"
 `, { mode: 0o755 });
+  fs.writeFileSync(path.join(scripts, "hosted-workload-contract.mjs"), `#!/usr/bin/env node
+import fs from "node:fs";
+const [command, ...args] = process.argv.slice(2);
+const value = (name) => {
+  const index = args.indexOf(name);
+  return index >= 0 ? args[index + 1] : "";
+};
+const lock = value("--lock");
+const core = value("--coreRender");
+const combined = value("--combinedRender");
+if (command !== "verify-activation-render"
+    || ![lock, core, combined].every((file) => file && fs.statSync(file).isFile())) process.exit(1);
+fs.appendFileSync(process.env.HOSTED_TEST_TRACE, \`semantic:\${lock}:\${core}:\${combined}\\n\`);
+`, { mode: 0o755 });
   fs.writeFileSync(path.join(scripts, "compose-vps.sh"), `#!/bin/sh
 printf 'render:%s:%s\\n' "\${HOSTED_WORKLOAD_LOCK:-}" "$*" >> "$HOSTED_TEST_TRACE"
 case "\${HOSTED_WORKLOAD_LOCK:-}" in
