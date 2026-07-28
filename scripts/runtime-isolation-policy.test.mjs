@@ -25,7 +25,7 @@ test("rejects a workload raw socket, bind and broad host mount", () => {
     { type: "bind", source: "/var/run/docker.sock", target: "/var/run/docker.sock" },
     { type: "bind", source: "/srv/platform", target: "/mnt/host/platform" },
   );
-  const report = evaluateRuntimeIsolation(config, { projectName: "fixture" });
+  const report = evaluateRuntimeIsolation(config, fixtureRuntimeOptions(config));
   assert.equal(report.status, "failed");
   assert.match(report.failures.join("\n"), /workload-no-bind-mounts-example-app-web/);
   assert.match(report.failures.join("\n"), /workload-deny-mount-mnt-host-example-app-web/);
@@ -36,7 +36,7 @@ test("rejects PID sharing, non-numeric workload identity and added capabilities"
   config.services["example-app-web"].user = "app:app";
   config.services["example-app-web"].pid = "service:postgres";
   config.services["example-app-web"].cap_add = ["NET_ADMIN"];
-  const report = evaluateRuntimeIsolation(config, { projectName: "fixture" });
+  const report = evaluateRuntimeIsolation(config, fixtureRuntimeOptions(config));
   assert.equal(report.status, "failed");
   assert.match(report.failures.join("\n"), /workload-numeric-user-example-app-web/);
   assert.match(report.failures.join("\n"), /workload-private-pid-example-app-web/);
@@ -51,7 +51,7 @@ test("rejects unbounded or non-local workload logging at runtime", () => {
   ]) {
     const config = fixture();
     config.services["example-app-web"].logging = logging;
-    const report = evaluateRuntimeIsolation(config, { projectName: "fixture" });
+    const report = evaluateRuntimeIsolation(config, fixtureRuntimeOptions(config));
     assert.equal(report.status, "failed");
     assert.match(report.failures.join("\n"), /workload-bounded-local-logging-example-app-web/);
   }
@@ -61,7 +61,7 @@ test("rejects workload swap and OOM overrides at runtime", () => {
   const config = fixture();
   config.services["example-app-web"].memswap_limit = 512 * 1024 * 1024;
   config.services["example-app-web"].oom_score_adj = -1000;
-  const report = evaluateRuntimeIsolation(config, { projectName: "fixture" });
+  const report = evaluateRuntimeIsolation(config, fixtureRuntimeOptions(config));
   assert.equal(report.status, "failed");
   assert.match(report.failures.join("\n"), /workload-no-swap-example-app-web/);
   assert.match(report.failures.join("\n"), /workload-no-oom-overrides-example-app-web/);
@@ -70,7 +70,7 @@ test("rejects workload swap and OOM overrides at runtime", () => {
 test("rejects workload service volume inheritance independently at runtime", () => {
   const config = fixture();
   config.services["example-app-web"].volumes_from = ["postgres:rw"];
-  const report = evaluateRuntimeIsolation(config, { projectName: "fixture" });
+  const report = evaluateRuntimeIsolation(config, fixtureRuntimeOptions(config));
   assert.equal(report.status, "failed");
   assert.match(report.failures.join("\n"), /workload-no-volumes-from-example-app-web/);
 });
@@ -85,7 +85,7 @@ test("rejects named-volume protected-target shadowing and nested mount controls"
     const config = fixture();
     config.volumes = { "example-app_data": { name: "fixture_example-app_data" } };
     config.services["example-app-web"].volumes = [mount];
-    const report = evaluateRuntimeIsolation(config, { projectName: "fixture" });
+    const report = evaluateRuntimeIsolation(config, fixtureRuntimeOptions(config));
     assert.equal(report.status, "failed");
     assert.match(report.failures.join("\n"), /workload-exact-volume-mounts-example-app-web/);
   }
@@ -94,7 +94,7 @@ test("rejects named-volume protected-target shadowing and nested mount controls"
 test("FG-057 countercheck rejects external-container volume inheritance", () => {
   const config = fixture();
   config.services["example-app-web"].volumes_from = ["container:platform-postgres:rw"];
-  const report = evaluateRuntimeIsolation(config, { projectName: "fixture" });
+  const report = evaluateRuntimeIsolation(config, fixtureRuntimeOptions(config));
   assert.equal(report.status, "failed");
   assert.match(report.failures.join("\n"), /workload-no-external-container-volume-inheritance-example-app-web/);
 });
@@ -103,7 +103,7 @@ test("rejects workload lifecycle hooks independently at runtime", () => {
   for (const hook of ["post_start", "pre_start", "pre_stop"]) {
     const config = fixture();
     config.services["example-app-web"][hook] = [{ command: "id" }];
-    const report = evaluateRuntimeIsolation(config, { projectName: "fixture" });
+    const report = evaluateRuntimeIsolation(config, fixtureRuntimeOptions(config));
     assert.equal(report.status, "failed");
     assert.match(report.failures.join("\n"), /workload-no-lifecycle-hooks-example-app-web/);
   }
@@ -117,7 +117,7 @@ test("rejects both workload scaling controls independently at runtime", () => {
   ]) {
     const config = fixture();
     mutation(config.services["example-app-web"]);
-    const report = evaluateRuntimeIsolation(config, { projectName: "fixture" });
+    const report = evaluateRuntimeIsolation(config, fixtureRuntimeOptions(config));
     assert.equal(report.status, "failed");
     assert.match(report.failures.join("\n"), /workload-no-scaling-example-app-web/);
   }
@@ -126,7 +126,7 @@ test("rejects both workload scaling controls independently at runtime", () => {
 test("rejects workload config grants independently at runtime", () => {
   const config = fixture();
   config.services["example-app-web"].configs = [{ source: "platform-config", target: "/run/config" }];
-  const report = evaluateRuntimeIsolation(config, { projectName: "fixture" });
+  const report = evaluateRuntimeIsolation(config, fixtureRuntimeOptions(config));
   assert.equal(report.status, "failed");
   assert.match(report.failures.join("\n"), /workload-no-configs-example-app-web/);
 });
@@ -135,7 +135,7 @@ test("rejects workload inline and host-environment config definitions at runtime
   for (const definition of [{ content: "hostile" }, { environment: "HOST_SECRET" }]) {
     const config = fixture();
     config.configs = { example_app_inline: definition };
-    const report = evaluateRuntimeIsolation(config, { projectName: "fixture" });
+    const report = evaluateRuntimeIsolation(config, fixtureRuntimeOptions(config));
     assert.equal(report.status, "failed");
     assert.match(report.failures.join("\n"), /workload-no-inline-config-definitions/);
   }
@@ -149,7 +149,7 @@ test("rejects workload host device controls independently at runtime", () => {
   ]) {
     const config = fixture();
     mutation(config.services["example-app-web"]);
-    const report = evaluateRuntimeIsolation(config, { projectName: "fixture" });
+    const report = evaluateRuntimeIsolation(config, fixtureRuntimeOptions(config));
     assert.equal(report.status, "failed");
     assert.match(report.failures.join("\n"), /workload-(no-device-access|bounded-global-blkio)-example-app-web/);
   }
@@ -164,7 +164,7 @@ test("rejects workload label files, ambient environment and deploy controls inde
   ]) {
     const config = fixture();
     mutation(config.services["example-app-web"]);
-    const report = evaluateRuntimeIsolation(config, { projectName: "fixture" });
+    const report = evaluateRuntimeIsolation(config, fixtureRuntimeOptions(config));
     assert.equal(report.status, "failed");
     assert.match(report.failures.join("\n"), new RegExp(`${check}-example-app-web`));
   }
@@ -173,7 +173,7 @@ test("rejects workload label files, ambient environment and deploy controls inde
 test("rejects workload supplemental device groups independently at runtime", () => {
   const config = fixture();
   config.services["example-app-web"].group_add = ["video", "44"];
-  const report = evaluateRuntimeIsolation(config, { projectName: "fixture" });
+  const report = evaluateRuntimeIsolation(config, fixtureRuntimeOptions(config));
   assert.equal(report.status, "failed");
   assert.match(report.failures.join("\n"), /workload-no-supplemental-groups-example-app-web/);
 });
@@ -187,7 +187,7 @@ test("rejects workload local volume driver options independently at runtime", ()
     },
   };
   config.services["example-app-web"].volumes.push({ type: "volume", source: "example_app_data", target: "/data" });
-  const report = evaluateRuntimeIsolation(config, { projectName: "fixture" });
+  const report = evaluateRuntimeIsolation(config, fixtureRuntimeOptions(config));
   assert.equal(report.status, "failed");
   assert.match(report.failures.join("\n"), /workload-no-local-volume-options-example-app-web/);
 });
@@ -201,7 +201,7 @@ test("rejects external and foreign workload volume aliases at runtime", () => {
     const config = fixture();
     config.volumes = { "example-app_data": definition };
     config.services["example-app-web"].volumes.push({ type: "volume", source: "example-app_data", target: "/data" });
-    const report = evaluateRuntimeIsolation(config, { projectName: "fixture" });
+    const report = evaluateRuntimeIsolation(config, fixtureRuntimeOptions(config));
     assert.equal(report.status, "failed");
     assert.match(report.failures.join("\n"), /workload-owned-volumes-example-app-web/);
   }
@@ -216,7 +216,7 @@ test("rejects foreign external secret aliases at runtime", () => {
     const config = fixture();
     config.secrets = { "example-app-api-key": definition };
     config.services["example-app-web"].secrets = [{ source: "example-app-api-key", target: "example-app-api-key" }];
-    const report = evaluateRuntimeIsolation(config, { projectName: "fixture" });
+    const report = evaluateRuntimeIsolation(config, fixtureRuntimeOptions(config));
     assert.equal(report.status, "failed");
     assert.match(report.failures.join("\n"), /workload-owned-secrets-example-app-web/);
   }
@@ -230,17 +230,23 @@ test("rejects foreign workload networks and attachment aliases at runtime", () =
   ]) {
     const config = fixture();
     mutation(config);
-    const report = evaluateRuntimeIsolation(config, { projectName: "fixture" });
+    const report = evaluateRuntimeIsolation(config, fixtureRuntimeOptions(config));
     assert.equal(report.status, "failed");
     assert.match(report.failures.join("\n"), /workload-network-identity-example-app-web/);
   }
-  const missingExpectedProject = evaluateRuntimeIsolation(fixture());
+  const missingExpectedProjectConfig = fixture();
+  const missingExpectedProjectOptions = fixtureRuntimeOptions(missingExpectedProjectConfig);
+  delete missingExpectedProjectOptions.projectName;
+  const missingExpectedProject = evaluateRuntimeIsolation(
+    missingExpectedProjectConfig,
+    missingExpectedProjectOptions,
+  );
   assert.equal(missingExpectedProject.status, "failed");
   assert.match(missingExpectedProject.failures.join("\n"), /workload-project-name-bound/);
   const spoofed = fixture();
   spoofed.name = "attacker";
   spoofed.networks.example_app_ingress.name = "attacker_example_app_ingress";
-  const spoofedProject = evaluateRuntimeIsolation(spoofed, { projectName: "fixture" });
+  const spoofedProject = evaluateRuntimeIsolation(spoofed, fixtureRuntimeOptions(spoofed));
   assert.equal(spoofedProject.status, "failed");
   assert.match(spoofedProject.failures.join("\n"), /workload-project-name-bound|workload-network-identity/);
 });
@@ -258,7 +264,7 @@ test("rejects workload network topology overrides at runtime", () => {
   ]) {
     const config = fixture();
     mutate(config.networks.example_app_ingress);
-    const report = evaluateRuntimeIsolation(config, { projectName: "fixture" });
+    const report = evaluateRuntimeIsolation(config, fixtureRuntimeOptions(config));
     assert.equal(report.status, "failed");
     assert.match(report.failures.join("\n"), /workload-network-topology-example-app-web/);
   }
@@ -286,7 +292,12 @@ test("rejects a workload identity that collides with a protected core network", 
     name: "fixture_platform_postgres",
     labels: { "com.platform.trust-zone": "postgres" },
   };
-  const report = evaluateRuntimeIsolation(config, { projectName: "fixture", protectedNetworkNames: ["platform_postgres"] });
+  const report = evaluateRuntimeIsolation(
+    config,
+    fixtureRuntimeOptions(config, {
+      protectedNetworkNames: ["platform_docker_control", "platform_postgres"],
+    }),
+  );
   assert.equal(report.status, "failed");
   assert.match(report.failures.join("\n"), /workload-no-protected-network-platform-web/);
 });
@@ -300,20 +311,23 @@ test("binds all six hosted workload runtime identity labels", () => {
     const config = fixture();
     Object.assign(config.services["example-app-web"].labels, expected);
     config.services["example-app-web"].labels[label] = `wrong-${label}`;
-    const report = evaluateRuntimeIsolation(config, { projectName: "fixture", runtimeIdentity: expected });
+    const report = evaluateRuntimeIsolation(config, fixtureRuntimeOptions(config, { runtimeIdentity: expected }));
     assert.equal(report.status, "failed");
     assert.match(report.failures.join("\n"), /workload-runtime-identity-example-app-web/);
   }
   const missing = fixture();
   Object.assign(missing.services["example-app-web"].labels, expected);
   delete missing.services["example-app-web"].labels["com.platform.runtime.tree"];
-  assert.equal(evaluateRuntimeIsolation(missing, { projectName: "fixture", runtimeIdentity: expected }).status, "failed");
+  assert.equal(
+    evaluateRuntimeIsolation(missing, fixtureRuntimeOptions(missing, { runtimeIdentity: expected })).status,
+    "failed",
+  );
 
   const legacy = fixture();
   Object.assign(legacy.services["example-app-web"].labels, expected, {
     "com.platform.runtime.render-sha256": "f".repeat(64),
   });
-  const legacyReport = evaluateRuntimeIsolation(legacy, { projectName: "fixture", runtimeIdentity: expected });
+  const legacyReport = evaluateRuntimeIsolation(legacy, fixtureRuntimeOptions(legacy, { runtimeIdentity: expected }));
   assert.equal(legacyReport.status, "failed");
   assert.match(legacyReport.failures.join("\n"), /workload-runtime-identity-example-app-web/);
 });
@@ -321,7 +335,7 @@ test("binds all six hosted workload runtime identity labels", () => {
 test("rejects workload Compose API socket access independently at runtime", () => {
   const config = fixture();
   config.services["example-app-web"].use_api_socket = true;
-  const report = evaluateRuntimeIsolation(config, { projectName: "fixture" });
+  const report = evaluateRuntimeIsolation(config, fixtureRuntimeOptions(config));
   assert.equal(report.status, "failed");
   assert.match(report.failures.join("\n"), /workload-no-api-socket-example-app-web/);
 });
@@ -329,7 +343,7 @@ test("rejects workload Compose API socket access independently at runtime", () =
 test("rejects workload external service providers independently at runtime", () => {
   const config = fixture();
   config.services["example-app-web"].provider = { type: "hostile-provider", options: { command: "/host/tool" } };
-  const report = evaluateRuntimeIsolation(config, { projectName: "fixture" });
+  const report = evaluateRuntimeIsolation(config, fixtureRuntimeOptions(config));
   assert.equal(report.status, "failed");
   assert.match(report.failures.join("\n"), /workload-no-provider-example-app-web/);
 });
@@ -337,7 +351,7 @@ test("rejects workload external service providers independently at runtime", () 
 test("rejects workload OCI runtime overrides independently at runtime", () => {
   const config = fixture();
   config.services["example-app-web"].runtime = "kata-runtime";
-  const report = evaluateRuntimeIsolation(config, { projectName: "fixture" });
+  const report = evaluateRuntimeIsolation(config, fixtureRuntimeOptions(config));
   assert.equal(report.status, "failed");
   assert.match(report.failures.join("\n"), /workload-no-runtime-override-example-app-web/);
 });
@@ -345,7 +359,7 @@ test("rejects workload OCI runtime overrides independently at runtime", () => {
 test("rejects workload stop grace period overrides independently at runtime", () => {
   const config = fixture();
   config.services["example-app-web"].stop_grace_period = "24h";
-  const report = evaluateRuntimeIsolation(config, { projectName: "fixture" });
+  const report = evaluateRuntimeIsolation(config, fixtureRuntimeOptions(config));
   assert.equal(report.status, "failed");
   assert.match(report.failures.join("\n"), /workload-no-stop-grace-override-example-app-web/);
 });
@@ -359,7 +373,7 @@ test("rejects workload GPU and accelerator requests independently at runtime", (
   ]) {
     const config = fixture();
     mutation(config.services["example-app-web"]);
-    const report = evaluateRuntimeIsolation(config, { projectName: "fixture" });
+    const report = evaluateRuntimeIsolation(config, fixtureRuntimeOptions(config));
     assert.equal(report.status, "failed");
     assert.match(report.failures.join("\n"), /workload-no-accelerators-example-app-web/);
   }
@@ -369,7 +383,7 @@ test("rejects missing memory limits and budget overcommit", () => {
   const config = fixture();
   config.services["example-app-web"].mem_limit = 0;
   config.services.postgres.mem_limit = 99 * 1024 * 1024 * 1024;
-  const report = evaluateRuntimeIsolation(config, { projectName: "fixture" });
+  const report = evaluateRuntimeIsolation(config, fixtureRuntimeOptions(config));
   assert.equal(report.status, "failed");
   assert.match(report.failures.join("\n"), /resource-memory-example-app-web/);
   assert.match(report.failures.join("\n"), /resource-memory-admission/);
@@ -378,7 +392,7 @@ test("rejects missing memory limits and budget overcommit", () => {
 test("rejects security_opt entries that disable confinement", () => {
   const config = fixture();
   config.services["example-app-web"].security_opt = ["no-new-privileges:true", "seccomp=unconfined"];
-  const report = evaluateRuntimeIsolation(config, { projectName: "fixture" });
+  const report = evaluateRuntimeIsolation(config, fixtureRuntimeOptions(config));
   assert.equal(report.status, "failed");
   assert.match(report.failures.join("\n"), /workload-exact-security-opt-example-app-web/);
 });
@@ -387,7 +401,7 @@ test("rejects host-published gateways and extra Docker-control network members",
   const config = fixture();
   config.services["docker-operation-gateway"].ports = ["0.0.0.0:8787:8787"];
   config.services["example-app-web"].networks.platform_docker_control = null;
-  const report = evaluateRuntimeIsolation(config, { projectName: "fixture" });
+  const report = evaluateRuntimeIsolation(config, fixtureRuntimeOptions(config));
   assert.equal(report.status, "failed");
   assert.match(report.failures.join("\n"), /docker-gateway-no-host-ports/);
   assert.match(report.failures.join("\n"), /socket-network-members/);
@@ -464,7 +478,7 @@ test("forged nested ids cannot let billing consume billing-api authority", () =>
     config.secrets = { [childSecret]: { external: true, name: `fixture_${childSecret}` } };
     config.volumes = { [childVolume]: { name: `fixture_${childVolume}` } };
 
-    const report = evaluateRuntimeIsolation(config, { projectName: "fixture" });
+    const report = evaluateRuntimeIsolation(config, fixtureRuntimeOptions(config));
     assert.equal(report.status, "failed");
     assert.match(report.failures.join("\n"), /prefix-disjoint|canonical-owner|nested-workload/i);
 
@@ -472,7 +486,7 @@ test("forged nested ids cannot let billing consume billing-api authority", () =>
     delete networkClaim.networks[parentNetwork];
     networkClaim.services["billing-web"].networks = { [childNetwork]: null };
     networkClaim.networks[childNetwork] = { internal: true, name: `fixture_${childNetwork}` };
-    const networkReport = evaluateRuntimeIsolation(networkClaim, { projectName: "fixture" });
+    const networkReport = evaluateRuntimeIsolation(networkClaim, fixtureRuntimeOptions(networkClaim));
     assert.equal(networkReport.status, "failed");
     assert.match(
       networkReport.failures.join("\n"),
@@ -489,7 +503,7 @@ test("canonical owner maps reject isolated cross-workload service, secret, volum
   serviceClaim.services["billing-web"].depends_on = {
     "billingapi-web": { condition: "service_started", required: true, restart: false },
   };
-  let report = evaluateRuntimeIsolation(serviceClaim, { projectName: "fixture" });
+  let report = evaluateRuntimeIsolation(serviceClaim, fixtureRuntimeOptions(serviceClaim));
   assert.equal(report.status, "failed");
   assert.match(report.failures.join("\n"), /workload-bounded-dependencies-billing-web/);
 
@@ -505,7 +519,7 @@ test("canonical owner maps reject isolated cross-workload service, secret, volum
   secretClaim.services["billing-web"].environment = {
     BILLINGAPI_TOKEN_FILE: "/run/secrets/billingapi-api-key",
   };
-  report = evaluateRuntimeIsolation(secretClaim, { projectName: "fixture" });
+  report = evaluateRuntimeIsolation(secretClaim, fixtureRuntimeOptions(secretClaim));
   assert.equal(report.status, "failed");
   assert.match(report.failures.join("\n"), /workload-canonical-resource-owners|workload-owned-secrets-billing/);
 
@@ -518,7 +532,7 @@ test("canonical owner maps reject isolated cross-workload service, secret, volum
   };
   volumeClaim.services["billingapi-web"].volumes = [{ type: "volume", source: "billingapi_data", target: "/data" }];
   volumeClaim.services["billing-web"].volumes = [{ type: "volume", source: "billingapi_data", target: "/data" }];
-  report = evaluateRuntimeIsolation(volumeClaim, { projectName: "fixture" });
+  report = evaluateRuntimeIsolation(volumeClaim, fixtureRuntimeOptions(volumeClaim));
   assert.equal(report.status, "failed");
   assert.match(report.failures.join("\n"), /workload-canonical-resource-owners|workload-(exact-volume-mounts|owned-volumes)-billing/);
 
@@ -527,7 +541,7 @@ test("canonical owner maps reject isolated cross-workload service, secret, volum
     ["billingapi", "billingapi-web"],
   ]);
   networkClaim.services["billing-web"].networks.billingapi_ingress = null;
-  report = evaluateRuntimeIsolation(networkClaim, { projectName: "fixture" });
+  report = evaluateRuntimeIsolation(networkClaim, fixtureRuntimeOptions(networkClaim));
   assert.equal(report.status, "failed");
   assert.match(report.failures.join("\n"), /workload-network-identity-billing-web/);
 });
@@ -545,7 +559,7 @@ test("canonical owner maps reject a sole claimant stealing another workload secr
     BILLINGAPI_TOKEN_FILE: "/run/secrets/billingapi-api-key",
   };
 
-  const report = evaluateRuntimeIsolation(config, { projectName: "fixture" });
+  const report = evaluateRuntimeIsolation(config, fixtureRuntimeOptions(config));
   assert.equal(report.status, "failed");
   assert.match(
     report.failures.join("\n"),
@@ -560,7 +574,10 @@ test("canonical owner maps reject a sole claimant stealing another workload secr
   nonCanonicalFile.services["billing-web"].environment = {
     BILLING_TOKEN_FILE: "/tmp/billing-api-key",
   };
-  const nonCanonicalReport = evaluateRuntimeIsolation(nonCanonicalFile, { projectName: "fixture" });
+  const nonCanonicalReport = evaluateRuntimeIsolation(
+    nonCanonicalFile,
+    fixtureRuntimeOptions(nonCanonicalFile),
+  );
   assert.equal(nonCanonicalReport.status, "failed");
   assert.match(nonCanonicalReport.failures.join("\n"), /workload-file-secret-bindings-billing-web/);
 });
@@ -577,7 +594,7 @@ test("canonical owner maps reject a sole claimant stealing another workload volu
     { type: "volume", source: "billingapi_data", target: "/data" },
   ];
 
-  const report = evaluateRuntimeIsolation(config, { projectName: "fixture" });
+  const report = evaluateRuntimeIsolation(config, fixtureRuntimeOptions(config));
   assert.equal(report.status, "failed");
   assert.match(
     report.failures.join("\n"),
@@ -720,7 +737,7 @@ test("runtime secret grants use the exact canonical short and long grammar", () 
     const config = workloadIdentityFixture([["billing", "billing-web"]]);
     config.secrets = { [source]: { external: true, name: `fixture_${source}` } };
     config.services["billing-web"].secrets = grants;
-    const report = evaluateRuntimeIsolation(config, { projectName: "fixture" });
+    const report = evaluateRuntimeIsolation(config, fixtureRuntimeOptions(config));
     assert.equal(report.status, "failed", `${label} bypassed runtime grant validation`);
     assert.match(report.failures.join("\n"), /workload-exact-secret-grants-billing-web/, label);
   }
@@ -766,7 +783,7 @@ test("runtime rejects invalid workload network zones and canonical workload orph
   delete invalidZone.networks.billing_ingress;
   invalidZone.services["billing-web"].networks = { billing_admin: null };
   invalidZone.networks.billing_admin = { internal: true, name: "fixture_billing_admin" };
-  let report = evaluateRuntimeIsolation(invalidZone, { projectName: "fixture" });
+  let report = evaluateRuntimeIsolation(invalidZone, fixtureRuntimeOptions(invalidZone));
   assert.equal(report.status, "failed", "billing_admin bypassed exact zone validation");
   assert.match(report.failures.join("\n"), /workload-(network-topology|canonical-resource-owners)/);
 
@@ -783,7 +800,7 @@ test("runtime rejects invalid workload network zones and canonical workload orph
   ]) {
     const config = fixture();
     mutate(config);
-    report = evaluateRuntimeIsolation(config, { projectName: "fixture" });
+    report = evaluateRuntimeIsolation(config, fixtureRuntimeOptions(config));
     assert.equal(report.status, "failed", `${kind} orphan bypassed runtime inventory`);
     assert.match(report.failures.join("\n"), /workload-exact-resource-inventory/);
   }
@@ -791,7 +808,7 @@ test("runtime rejects invalid workload network zones and canonical workload orph
   const disconnected = fixture();
   delete disconnected.services["example-app-web"].networks.example_app_ingress;
   delete disconnected.networks.example_app_ingress;
-  report = evaluateRuntimeIsolation(disconnected, { projectName: "fixture" });
+  report = evaluateRuntimeIsolation(disconnected, fixtureRuntimeOptions(disconnected));
   assert.equal(report.status, "failed", "workload service without a network bypassed runtime inventory");
   assert.match(report.failures.join("\n"), /workload-service-network-inventory/);
 });
