@@ -645,8 +645,13 @@ function qa8IndependentGolden(sandbox) {
 
 function qa8LegacyCompatibleGolden(sandbox) {
   const config = qa8IndependentGolden(sandbox);
-  config.services.nats.entrypoint =
-    structuredClone(coreSemanticPolicyDescriptor.serviceProcessModel.nats.entrypoint);
+  config.services.nats.entrypoint = [
+    "/bin/sh",
+    "-ec",
+    'NATS_PASSWORD="$$(cat "$$NATS_PASSWORD_FILE")"; '
+      + 'exec nats-server -c /etc/nats/nats-server.conf '
+      + '--user "$$NATS_USER" --pass "$$NATS_PASSWORD"\n',
+  ];
   config.services.phpmyadmin.restart = "no";
   config.services.phppgadmin.restart = "no";
   config.services["platform-alert-dispatcher"].volumes = [];
@@ -2589,7 +2594,7 @@ test("QA8 secret and root bind ancestry cannot escape through a symlinked parent
   );
 });
 
-test("QA8 Compose render bytes are bound to an FD before the renderer can replace the pathname", () => {
+test("QA8 Compose render bytes use pre-bound FDs after unlinking the renderer pathname", () => {
   const sandbox = createConsumerSandbox();
   try {
     const environment = installQa8Environment(sandbox);
@@ -2642,7 +2647,7 @@ done
     assert.equal(
       fs.existsSync(path.join(sandbox.root, "render-path-swap-fired")),
       false,
-      "renderer observed and replaced the supposedly private handoff pathname",
+      "renderer observed a handoff pathname that should already be unlinked",
     );
     assert.equal(result.status, 0, result.stderr);
     assert.equal(result.stdout, originalBytes, "wrapper did not consume the pre-bound render FD");
