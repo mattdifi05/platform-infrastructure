@@ -3,23 +3,87 @@ import test from "node:test";
 
 import { evaluateRuntimeIsolation } from "./runtime-isolation-policy.mjs";
 
+const CAPABILITY_SECRETS = [
+  "docker_action_backup_catalog",
+  "docker_action_backup_job_execute",
+  "docker_action_backup_prune_plan",
+  "docker_action_backup_prune_apply",
+  "docker_action_restore_drill_full",
+  "docker_action_backup_offsite_sync",
+];
+const EVIDENCE_SECRET = "docker_action_evidence_runtime_snapshot";
+const TRUST_SECRET = "docker_action_runtime_intent_trust_key";
+
 test("accepts the host-private immutable action broker boundary", () => {
   const report = evaluateRuntimeIsolation(fixture());
-  assert.equal(report.status, "passed", report.failures.join("\n"));
-  assert.equal(report.summary.rawSocketOwners.join(","), "docker-action-broker");
-  assert.equal(report.summary.hostedWorkloads, 1);
   for (const id of [
     "docker-broker-immutable-image",
     "docker-broker-host-private",
+    "docker-broker-root-identity",
+    "docker-broker-trust-aware-readiness",
     "docker-broker-exact-raw-socket",
     "docker-broker-socket-volume-not-aliased",
     "docker-broker-state-volume-not-aliased",
+    "docker-broker-exact-capability-secrets",
+    "scheduler-immutable-image",
+    "scheduler-minimum-authority",
+    "scheduler-host-private",
+    "scheduler-exact-mount-targets",
+    "scheduler-writable-paths",
+    "scheduler-exact-capability-secrets",
     "scheduler-uses-local-action-socket",
     "scheduler-has-no-docker-api",
   ]) {
     assert.equal(report.checks.find((item) => item.id === id)?.status, "passed", id);
   }
+  assert.equal(report.status, "passed", report.failures.join("\n"));
+  assert.equal(report.summary.rawSocketOwners.join(","), "docker-action-broker");
+  assert.equal(report.summary.hostedWorkloads, 1);
 });
+
+for (const source of ["/", "/run", "/var/run", "/run/docker.sock"]) {
+  test(`rejects cAdvisor raw socket exposing mount ${source}`, () => {
+    const config = fixture();
+    config.services.cadvisor = bounded({
+      read_only: true,
+      volumes: [
+        { type: "bind", source, target: "/host-runtime", read_only: true },
+      ],
+      networks: { platform_observability: null },
+    });
+    const report = evaluateRuntimeIsolation(config);
+    assert.equal(
+      report.checks.find((item) => item.id === "raw-socket-single-owner")?.status,
+      "failed",
+      `${source} exposes /var/run/docker.sock even when mounted read-only`,
+    );
+    assert.ok(report.summary.rawSocketOwners.includes("cadvisor"), `${source} must make cAdvisor a raw socket owner`);
+  });
+}
+
+for (const device of ["/", "/run", "/var/run"]) {
+  test(`rejects cAdvisor named-volume alias ${device} to the raw socket`, () => {
+    const config = fixture();
+    config.services.cadvisor = bounded({
+      read_only: true,
+      volumes: [
+        { type: "volume", source: "cadvisor_runtime", target: "/host-runtime", read_only: true },
+      ],
+      networks: { platform_observability: null },
+    });
+    config.volumes.cadvisor_runtime = {
+      driver: "local",
+      driver_opts: { type: "none", o: "bind,ro", device },
+    };
+    const report = evaluateRuntimeIsolation(config);
+    assert.equal(
+      report.checks.find((item) => item.id === "raw-socket-single-owner")?.status,
+      "failed",
+      "named-volume bind aliases must be resolved before raw socket ownership is decided",
+    );
+    assert.ok(report.summary.rawSocketOwners.includes("cadvisor"), "aliased cAdvisor mount must be reported as an owner");
+  });
+}
 
 test("rejects workload raw socket, bind and broad host mounts", () => {
   const config = fixture();
@@ -108,6 +172,79 @@ test("rejects broker and scheduler supplemental groups", () => {
   assert.match(report.failures.join("\n"), /scheduler-no-supplemental-groups/);
 });
 
+test("rejects a broker without the explicit root identity required by its private state", () => {
+  const config = fixture();
+  delete config.services["docker-action-broker"].user;
+  const report = evaluateRuntimeIsolation(config);
+  assert.equal(report.checks.find((item) => item.id === "docker-broker-root-identity")?.status, "failed");
+  assert.match(report.failures.join("\n"), /docker-broker-root-identity/);
+});
+
+test("rejects broker readiness that proves only the UDS exists", () => {
+  const config = fixture();
+  config.services["docker-action-broker"].healthcheck = {
+    test: ["CMD", "node", "-e", "const fs=require('node:fs');process.exit(fs.statSync('/run/platform/docker-action-broker/broker.sock').isSocket()?0:1)"],
+  };
+  const report = evaluateRuntimeIsolation(config);
+  assert.equal(report.checks.find((item) => item.id === "docker-broker-trust-aware-readiness")?.status, "failed");
+  assert.match(report.failures.join("\n"), /docker-broker-trust-aware-readiness/);
+});
+
+test("rejects a mutable or generic scheduler image", () => {
+  const config = fixture();
+  const scheduler = config.services["backup-scheduler"];
+  scheduler.image = "platform/ops:local";
+  scheduler.build = { context: ".", dockerfile: "docker/ops.Dockerfile" };
+  const report = evaluateRuntimeIsolation(config);
+  assert.equal(report.checks.find((item) => item.id === "scheduler-immutable-image")?.status, "failed");
+  assert.match(report.failures.join("\n"), /scheduler-immutable-image/);
+});
+
+test("rejects scheduler Linux capability widening", () => {
+  const config = fixture();
+  const scheduler = config.services["backup-scheduler"];
+  scheduler.cap_drop = [];
+  scheduler.cap_add = ["NET_ADMIN"];
+  const report = evaluateRuntimeIsolation(config);
+  assert.equal(report.checks.find((item) => item.id === "scheduler-minimum-authority")?.status, "failed");
+  assert.match(report.failures.join("\n"), /scheduler-minimum-authority/);
+});
+
+test("rejects scheduler external egress", () => {
+  const config = fixture();
+  const scheduler = config.services["backup-scheduler"];
+  scheduler.network_mode = "bridge";
+  scheduler.networks = { platform_egress: null };
+  const report = evaluateRuntimeIsolation(config);
+  assert.equal(report.checks.find((item) => item.id === "scheduler-host-private")?.status, "failed");
+  assert.match(report.failures.join("\n"), /scheduler-host-private/);
+});
+
+test("rejects scheduler repository, backup, report, state or source mounts", () => {
+  const config = fixture();
+  config.services["backup-scheduler"].volumes.push(
+    { type: "bind", source: ".", target: "/infra", read_only: true },
+    { type: "bind", source: "./backups", target: "/infra/backups", read_only: false },
+    { type: "bind", source: "./reports", target: "/infra/reports", read_only: false },
+    { type: "bind", source: "./projects-portal/state", target: "/var/www/project-state", read_only: false },
+    { type: "bind", source: "../src", target: "/project", read_only: true },
+  );
+  const report = evaluateRuntimeIsolation(config);
+  assert.equal(report.checks.find((item) => item.id === "scheduler-exact-mount-targets")?.status, "failed");
+  assert.match(report.failures.join("\n"), /scheduler-exact-mount-targets/);
+});
+
+test("rejects scheduler writable paths under a read-only /etc", () => {
+  const config = fixture();
+  const scheduler = config.services["backup-scheduler"];
+  scheduler.environment.BACKUP_SCHEDULER_CRON_FILE = "/etc/crontabs/root";
+  scheduler.environment.BACKUP_SCHEDULER_ENV_FILE = "/etc/platform/backup-scheduler.env";
+  scheduler.tmpfs.push("/etc:rw,nosuid,nodev,size=8m");
+  const report = evaluateRuntimeIsolation(config);
+  assert.equal(report.checks.find((item) => item.id === "scheduler-writable-paths")?.status, "failed");
+  assert.match(report.failures.join("\n"), /scheduler-writable-paths/);
+});
+
 test("rejects a mutable, networked or Docker-bearing activation sidecar", () => {
   const config = fixture();
   const sidecar = config.services["docker-action-activation-sidecar"];
@@ -140,12 +277,60 @@ test("rejects secret external/name substitution, third-party owners and weak mou
   config.services["example-app-web"].secrets = [
     secret("docker_action_backup_prune_plan"),
   ];
-  config.services["backup-scheduler"].secrets[0].mode = 0o444;
+  config.services["backup-scheduler"].secrets
+    .find((item) => item.source === "docker_action_backup_prune_plan").mode = 0o444;
   const report = evaluateRuntimeIsolation(config);
   assert.equal(report.status, "failed");
   assert.match(report.failures.join("\n"), /docker-broker-secret-source-docker_action_backup_prune_plan/);
   assert.match(report.failures.join("\n"), /docker-broker-secret-owners-docker_action_backup_prune_plan/);
   assert.match(report.failures.join("\n"), /docker-broker-secret-mode-docker_action_backup_prune_plan-backup-scheduler/);
+});
+
+test("assigns exact root-owned capability and evidence secret ownership", () => {
+  const report = evaluateRuntimeIsolation(fixture());
+  for (const name of CAPABILITY_SECRETS) {
+    assert.equal(
+      report.checks.find((item) => item.id === `docker-broker-secret-owners-${name}`)?.status,
+      "passed",
+      `${name} must belong exactly to backup-scheduler and docker-action-broker`,
+    );
+    for (const owner of ["backup-scheduler", "docker-action-broker"]) {
+      assert.equal(
+        report.checks.find((item) => item.id === `docker-broker-secret-mode-${name}-${owner}`)?.status,
+        "passed",
+        `${name} must be mounted root:root 0400 by ${owner}`,
+      );
+    }
+  }
+  assert.equal(
+    report.checks.find((item) => item.id === `docker-broker-secret-owners-${EVIDENCE_SECRET}`)?.status,
+    "passed",
+    "runtime snapshot evidence authority belongs only to docker-action-broker",
+  );
+});
+
+test("requires all six scheduler capability secrets", () => {
+  const missingCapability = fixture();
+  missingCapability.services["backup-scheduler"].secrets = missingCapability.services["backup-scheduler"].secrets
+    .filter((item) => item.source !== "docker_action_backup_catalog");
+  const report = evaluateRuntimeIsolation(missingCapability);
+  assert.equal(report.checks.find((item) => item.id === "scheduler-exact-capability-secrets")?.status, "failed");
+  assert.equal(
+    report.checks.find((item) => item.id === "docker-broker-secret-owners-docker_action_backup_catalog")?.status,
+    "failed",
+  );
+});
+
+test("excludes runtime snapshot evidence authority from the scheduler", () => {
+  const evidenceWidening = fixture();
+  evidenceWidening.services["backup-scheduler"].secrets.push(secret(EVIDENCE_SECRET));
+  const report = evaluateRuntimeIsolation(evidenceWidening);
+  assert.equal(report.checks.find((item) => item.id === "scheduler-exact-capability-secrets")?.status, "failed");
+  assert.equal(
+    report.checks.find((item) => item.id === `docker-broker-secret-owners-${EVIDENCE_SECRET}`)?.status,
+    "failed",
+    "runtime snapshot is evidence authority and must not be delegated to backup-scheduler",
+  );
 });
 
 test("rejects scheduler Docker API, trust documents and aliased broker socket", () => {
@@ -158,7 +343,8 @@ test("rejects scheduler Docker API, trust documents and aliased broker socket", 
     target: "/run/platform/docker-action-trust/runtime-intent.json",
     read_only: true,
   });
-  scheduler.volumes[0].source = "attacker_socket";
+  scheduler.volumes
+    .find((mount) => mount.target === "/run/platform/docker-action-broker").source = "attacker_socket";
   const report = evaluateRuntimeIsolation(config);
   assert.equal(report.status, "failed");
   assert.match(report.failures.join("\n"), /scheduler-uses-local-action-socket/);
@@ -232,22 +418,34 @@ function fixture() {
     networks: {},
   });
   services["backup-scheduler"] = bounded({
+    image: `platform/backup-scheduler@sha256:${"e".repeat(64)}`,
     read_only: true,
     cpu_shares: 1024,
+    network_mode: "none",
+    entrypoint: ["/opt/platform-backup-scheduler/backup-scheduler.sh"],
+    cap_drop: ["ALL"],
+    security_opt: ["no-new-privileges:true"],
     environment: {
       DOCKER_ACTION_BROKER_SOCKET: "/run/platform/docker-action-broker/broker.sock",
       DOCKER_ACTION_RUNTIME_INTENT_ID: INTENT_ID,
       DOCKER_ACTION_ACTIVE_RECEIPT_SHA256: "a".repeat(64),
       DOCKER_ACTION_COMBINED_RENDER_SHA256: "b".repeat(64),
+      BACKUP_SCHEDULER_JOBS_DIR: "/var/www/project-state/backup-jobs",
+      BACKUP_SCHEDULER_LOG_DIR: "/var/log/platform",
+      BACKUP_SCHEDULER_CRON_FILE: "/run/platform/backup-scheduler/crontabs/root",
+      BACKUP_SCHEDULER_ENV_FILE: "/run/platform/backup-scheduler/backup-scheduler.env",
     },
-    secrets: [
-      secret("docker_action_backup_prune_plan"),
-      secret("docker_action_evidence_runtime_snapshot"),
-    ],
+    secrets: CAPABILITY_SECRETS.map(secret),
     volumes: [
+      { type: "volume", source: "backup_scheduler_jobs", target: "/var/www/project-state/backup-jobs", read_only: false },
+      { type: "volume", source: "backup_scheduler_logs", target: "/var/log/platform", read_only: false },
       { type: "volume", source: "docker_action_broker_socket", target: "/run/platform/docker-action-broker", read_only: true },
     ],
-    networks: { platform_db_admin: null, platform_storage: null, platform_egress: null },
+    tmpfs: [
+      "/tmp:rw,noexec,nosuid,nodev,size=64m",
+      "/run/platform/backup-scheduler:rw,noexec,nosuid,nodev,size=8m",
+    ],
+    networks: {},
   });
   services["docker-action-activation-sidecar"] = bounded({
     image: `provider.example/platform/activation-sidecar@sha256:${"c".repeat(64)}`,
@@ -276,6 +474,7 @@ function fixture() {
   services["docker-action-broker"] = bounded({
     image: `platform/docker-action-broker@sha256:${"d".repeat(64)}`,
     read_only: true,
+    user: "0:0",
     cpu_shares: 1024,
     network_mode: "none",
     entrypoint: ["node", "/opt/platform-docker-broker/docker-action-broker.mjs"],
@@ -285,9 +484,9 @@ function fixture() {
     cap_drop: ["ALL"],
     security_opt: ["no-new-privileges:true"],
     secrets: [
-      secret("docker_action_runtime_intent_trust_key"),
-      secret("docker_action_backup_prune_plan"),
-      secret("docker_action_evidence_runtime_snapshot"),
+      secret(TRUST_SECRET),
+      ...CAPABILITY_SECRETS.map(secret),
+      secret(EVIDENCE_SECRET),
     ],
     volumes: [
       { type: "bind", source: "/var/run/docker.sock", target: "/var/run/docker.sock", read_only: true },
@@ -297,13 +496,21 @@ function fixture() {
       { type: "bind", source: "/srv/platform/trust/runtime-intent.json", target: "/run/platform/docker-action-trust/runtime-intent.json", read_only: true },
       { type: "bind", source: "/srv/platform/trust/active-receipt.json", target: "/run/platform/docker-action-trust/active-receipt.json", read_only: true },
     ],
+    healthcheck: {
+      test: [
+        "CMD",
+        "node",
+        "/opt/platform-docker-broker/docker-action-readiness.mjs",
+        "--require-trusted-activation",
+      ],
+    },
     networks: {},
   });
   services.postgres = bounded({ networks: {} });
   const secrets = Object.fromEntries([
-    "docker_action_runtime_intent_trust_key",
-    "docker_action_backup_prune_plan",
-    "docker_action_evidence_runtime_snapshot",
+    TRUST_SECRET,
+    ...CAPABILITY_SECRETS,
+    EVIDENCE_SECRET,
   ].map((name) => [name, { file: `./secrets/${name}.txt` }]));
   return {
     services,
@@ -317,6 +524,8 @@ function fixture() {
       docker_action_broker_socket: {},
       docker_action_broker_state: {},
       docker_action_activation_cas: {},
+      backup_scheduler_jobs: {},
+      backup_scheduler_logs: {},
       example_data: {},
       redis_auth_config: {},
       nats_auth_config: {},
