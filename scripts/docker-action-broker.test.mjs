@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -18,6 +17,7 @@ import {
   buildFixtureActionResultV2,
   buildFixtureNetworkInspect,
   buildFixturePhaseOutputV2,
+  buildFixtureSignedActionRequestV2,
   buildFixtureVolumeInspect,
   buildRawActiveReceiptV2,
   canonicalFixtureJson,
@@ -25,7 +25,6 @@ import {
 } from "./docker-action-v2-fixtures.mjs";
 
 const NOW = FIXTURE_NOW;
-const REQUEST_ID = "123e4567-e89b-42d3-a456-426614174000";
 const SNAPSHOT_CONTAINER_PATH = "/run/platform/claimed-job/job.json";
 const WORKER_ID = "2".repeat(64);
 const RESTORE_WORKER_ID = "3".repeat(64);
@@ -34,7 +33,10 @@ const RESULT_SCHEMA_V2 = "platform.docker-action.result/v2";
 const WORKER_RESULT_SCHEMA_V2 = "platform.docker-worker.result/v2";
 const LEASE_SCHEMA_V2 = "platform.docker-action.lease/v2";
 const JOURNAL_ENTRY_SCHEMA_V2 = "platform.docker-action.lease-journal-entry/v2";
+let requestSequence = 1000;
 const HAS_SEMANTIC_EXECUTOR = typeof broker.createSemanticActionExecutor === "function";
+const HAS_CLAIMED_JOB_READER = typeof broker.readClaimedJobSnapshot === "function";
+const HAS_SNAPSHOT_STORE = typeof broker.createSnapshotFileStore === "function";
 
 testRunner("RED v2: broker exports one already-admitted semantic executor API", () => {
   assert.equal(
@@ -58,6 +60,58 @@ function test(name, callback) {
     { todo: "blocked only by the active createSemanticActionExecutor API RED" },
     () => {},
   );
+}
+
+if (HAS_SEMANTIC_EXECUTOR) {
+  testRunner("RED v2: broker exports the descriptor-stable claimed-job reader", () => {
+    assert.equal(
+      typeof broker.readClaimedJobSnapshot,
+      "function",
+      "docker-action-broker must export readClaimedJobSnapshot",
+    );
+  });
+} else {
+  testRunner(
+    "RED v2: broker exports the descriptor-stable claimed-job reader",
+    { todo: "blocked only by the active createSemanticActionExecutor API RED" },
+    () => {},
+  );
+}
+
+function readerTest(name, callback) {
+  if (HAS_SEMANTIC_EXECUTOR && HAS_CLAIMED_JOB_READER) {
+    return testRunner(name, callback);
+  }
+  const reason = HAS_SEMANTIC_EXECUTOR
+    ? "blocked only by the active readClaimedJobSnapshot export RED"
+    : "blocked only by the active createSemanticActionExecutor API RED";
+  return testRunner(name, { todo: reason }, () => {});
+}
+
+if (HAS_SEMANTIC_EXECUTOR) {
+  testRunner("RED v2: broker exports the root-owned immutable snapshot file store", () => {
+    assert.equal(
+      typeof broker.createSnapshotFileStore,
+      "function",
+      "docker-action-broker must export createSnapshotFileStore",
+    );
+  });
+} else {
+  testRunner(
+    "RED v2: broker exports the root-owned immutable snapshot file store",
+    { todo: "blocked only by the active createSemanticActionExecutor API RED" },
+    () => {},
+  );
+}
+
+function snapshotTest(name, callback) {
+  if (HAS_SEMANTIC_EXECUTOR && HAS_SNAPSHOT_STORE) {
+    return testRunner(name, callback);
+  }
+  const reason = HAS_SEMANTIC_EXECUTOR
+    ? "blocked only by the active createSnapshotFileStore export RED"
+    : "blocked only by the active createSemanticActionExecutor API RED";
+  return testRunner(name, { todo: reason }, () => {});
 }
 
 const BACKUP_JOB_ID = "0123456789abcdef";
@@ -118,6 +172,10 @@ for (const phase of PHASE_CASES) {
     assert.equal(fixture.transport.startedIds.length, 1);
     assert.equal(fixture.transport.deletedIds.length, 1);
     assert.equal(fixture.transport.created.length, 1);
+    assert.deepEqual(fixture.context.request, fixture.request);
+    assert.equal(fixture.context.requestSha256, fixture.requestSha256);
+    assert.deepEqual(fixture.context.lease.lineage.request, fixture.request);
+    assert.equal(fixture.context.lease.lineage.requestSha256, fixture.requestSha256);
     assertExactBody(
       fixture.transport.created[0].body,
       phase,
@@ -137,6 +195,13 @@ for (const phase of PHASE_CASES) {
 }
 
 const INSPECT_WIDENINGS = Object.freeze([
+  widening("container-id", (inspect) => ({ ...inspect, Id: "9".repeat(64) })),
+  widening("container-name", (inspect) => ({ ...inspect, Name: "/attacker-worker" })),
+  widening("resolved-image", (inspect) => ({ ...inspect, Image: `sha256:${"9".repeat(64)}` })),
+  widening("config-image", (inspect) => ({
+    ...inspect,
+    Config: { ...inspect.Config, Image: "attacker/image:latest" },
+  })),
   widening("env.snapshot-path", (inspect) => mutateEnv(inspect, "PLATFORM_CLAIMED_JOB_PATH", "/host/attacker")),
   widening("env.snapshot-metadata", (inspect) => mutateEnv(inspect, "PLATFORM_CLAIMED_JOB_SHA256", "9".repeat(64))),
   widening("entrypoint", (inspect) => ({ ...inspect, Config: { ...inspect.Config, Entrypoint: ["sh"] } })),
@@ -345,6 +410,14 @@ test("v2 job capture is read once, sealed once, immutable, file-bound and never 
 
   assert.equal(fixture.providerCalls(), 1);
   assert.equal(fixture.snapshotStore.calls.length, 1);
+  assert.deepEqual(fixture.snapshotStore.calls[0].authority.request, fixture.request);
+  assert.equal(
+    fixture.snapshotStore.calls[0].authority.requestSha256,
+    fixture.requestSha256,
+  );
+  assert.notEqual(fixture.requestSha256, fixtureSha256(fixture.request.requestId));
+  assert.equal(fixture.sealedSnapshot.requestSha256, fixture.requestSha256);
+  assert.match(fixture.sealedSnapshot.hostPath, new RegExp(`/${fixture.requestSha256}/job\\.json$`));
   assert.deepEqual(providerBuffer, Buffer.alloc(BACKUP_JOB_BYTES.length, 0x78));
   assert.deepEqual(fixture.snapshotStore.calls[0].sealedBytes, BACKUP_JOB_BYTES);
   const body = fixture.transport.created[0].body;
@@ -398,7 +471,7 @@ test("v2 uncertain snapshot cleanup preserves the lease instead of permitting re
   assert.equal(fixture.snapshotStore.cleanupCalls.length, 1);
 });
 
-test("v2 snapshot store uses O_EXCL 0400 fsync under the exact Engine Mountpoint and cleans only its request leaf", async (t) => {
+snapshotTest("v2 snapshot store uses O_EXCL 0400 fsync under the exact Engine Mountpoint and cleans only its request leaf", async (t) => {
   assert.equal(
     typeof broker.createSnapshotFileStore,
     "function",
@@ -409,22 +482,28 @@ test("v2 snapshot store uses O_EXCL 0400 fsync under the exact Engine Mountpoint
   fs.mkdirSync(mountpoint, { mode: 0o700 });
   const uid = fs.statSync(mountpoint).uid;
   const gid = fs.statSync(mountpoint).gid;
-  const audit = { fsync: 0, exclusiveOpen: 0 };
+  const audit = { descriptors: new Map(), fsyncs: [], opens: [], unlinks: [] };
   const io = new Proxy(fs, {
     get(target, property) {
       if (property === "openSync") {
         return (file, flags, mode) => {
-          if ((flags & fs.constants.O_EXCL) !== 0) {
-            audit.exclusiveOpen += 1;
-            assert.equal(mode, 0o400);
-          }
-          return fs.openSync(file, flags, mode);
+          const descriptor = fs.openSync(file, flags, mode);
+          const resolved = path.resolve(String(file));
+          audit.descriptors.set(descriptor, resolved);
+          audit.opens.push({ descriptor, file: resolved, flags, mode });
+          return descriptor;
         };
       }
       if (property === "fsyncSync") {
         return (descriptor) => {
-          audit.fsync += 1;
+          audit.fsyncs.push(audit.descriptors.get(descriptor) ?? `fd:${descriptor}`);
           return fs.fsyncSync(descriptor);
+        };
+      }
+      if (property === "unlinkSync") {
+        return (file) => {
+          audit.unlinks.push(path.resolve(String(file)));
+          return fs.unlinkSync(file);
         };
       }
       const value = Reflect.get(target, property);
@@ -446,81 +525,226 @@ test("v2 snapshot store uses O_EXCL 0400 fsync under the exact Engine Mountpoint
     ...findPhase("job.backup.capture").claimedJob,
     bytes: Buffer.from(BACKUP_JOB_BYTES),
   };
+  const trusted = directTrustedContext();
+  const request = admittedRequest(
+    "backup.job.execute",
+    findPhase("job.backup.capture").parameters,
+    trusted,
+    2001,
+  );
+  const requestSha256 = fixtureSha256(canonicalFixtureJson(request));
+  assert.notEqual(
+    requestSha256,
+    fixtureSha256(request.requestId),
+    "snapshot lineage must never collapse to sha256(requestId)",
+  );
   const sealed = await store.seal(snapshot, {
-    requestId: REQUEST_ID,
+    request,
+    requestId: request.requestId,
+    requestSha256,
     source,
     volumeInspect,
   });
   const expectedDirectory = path.join(
     mountpoint,
     source.snapshotVolumeSubpath,
-    fixtureSha256(REQUEST_ID),
+    requestSha256,
   );
   assert.equal(sealed.hostPath, path.join(expectedDirectory, "job.json"));
   assert.equal(sealed.containerPath, SNAPSHOT_CONTAINER_PATH);
   assert.deepEqual(fs.readFileSync(sealed.hostPath), BACKUP_JOB_BYTES);
   assert.equal(fs.statSync(expectedDirectory).mode & 0o777, 0o700);
   assert.equal(fs.statSync(sealed.hostPath).mode & 0o777, 0o400);
-  assert.equal(audit.exclusiveOpen, 1);
-  assert.ok(audit.fsync >= 2, "snapshot file and its containing directory must be durable");
+  const snapshotOpen = audit.opens.find(({ file }) => file === sealed.hostPath);
+  assert.ok(snapshotOpen, "snapshot leaf was not descriptor-opened");
+  assert.equal(
+    snapshotOpen.flags & (
+      fs.constants.O_CREAT
+      | fs.constants.O_EXCL
+      | fs.constants.O_NOFOLLOW
+    ),
+    fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW,
+  );
+  assert.equal(snapshotOpen.mode, 0o400);
+  assert.ok(audit.fsyncs.includes(sealed.hostPath), "snapshot file was not fsynced");
+  assert.ok(audit.fsyncs.includes(expectedDirectory), "snapshot request directory was not fsynced");
   snapshot.bytes.fill(0x78);
   assert.deepEqual(fs.readFileSync(sealed.hostPath), BACKUP_JOB_BYTES);
   await assert.rejects(
-    () => Promise.resolve(store.seal({
+    async () => store.seal({
       ...snapshot,
       bytes: Buffer.from(BACKUP_JOB_BYTES),
     }, {
-      requestId: REQUEST_ID,
+      request,
+      requestId: request.requestId,
+      requestSha256,
       source,
       volumeInspect,
-    })),
+    }),
     /exist|exclusive|snapshot|replay/i,
   );
+  const fsyncCountBeforeCleanup = audit.fsyncs.length;
   await store.cleanup(sealed);
   assert.equal(fs.existsSync(sealed.hostPath), false);
   assert.equal(fs.existsSync(expectedDirectory), false);
   assert.equal(fs.existsSync(mountpoint), true);
+  assert.deepEqual(audit.unlinks, [sealed.hostPath]);
+  assert.ok(
+    audit.fsyncs.slice(fsyncCountBeforeCleanup).some(
+      (file) => file === path.dirname(expectedDirectory) || file === mountpoint,
+    ),
+    "snapshot cleanup must durably fsync the surviving parent directory",
+  );
 });
 
-test("v2 snapshot store rejects symlinked Mountpoints, hostile subpaths and caller host paths", async (t) => {
+snapshotTest("v2 snapshot store independently rejects each path-authority substitution after a positive control", async (t) => {
   assert.equal(typeof broker.createSnapshotFileStore, "function");
-  const root = tempDir(t);
-  const real = path.join(root, "real-state");
-  const alias = path.join(root, "state-alias");
-  fs.mkdirSync(real, { mode: 0o700 });
-  fs.symlinkSync(real, alias);
-  const stat = fs.statSync(real);
-  const receipt = buildRawActiveReceiptV2();
-  const source = receipt.resources.claimedJobSources["jobs.running"];
-  const inspect = {
-    ...buildFixtureVolumeInspect(receipt, source.snapshotVolumeId),
-    Mountpoint: alias,
-  };
-  const store = broker.createSnapshotFileStore({
-    expectedGid: stat.gid,
-    expectedUid: stat.uid,
-  });
-  const snapshot = {
-    ...findPhase("job.backup.capture").claimedJob,
-    bytes: Buffer.from(BACKUP_JOB_BYTES),
-    hostPath: "/tmp/attacker/job.json",
-  };
-  await assert.rejects(
-    () => Promise.resolve(store.seal(snapshot, {
-      requestId: REQUEST_ID,
+  for (const [id, hostile] of [
+    ["symlink-mountpoint", ({ alias, inspect, snapshot, source }) => ({
+      inspect: { ...inspect, Mountpoint: alias },
+      snapshot,
       source,
-      volumeInspect: inspect,
-    })),
-    /symlink|canonical|mountpoint|host.?path|unsupported/i,
-  );
-  await assert.rejects(
-    () => Promise.resolve(store.seal(snapshot, {
-      requestId: REQUEST_ID,
+    })],
+    ["traversal-subpath", ({ inspect, snapshot, source }) => ({
+      inspect,
+      snapshot,
       source: { ...source, snapshotVolumeSubpath: "../attacker" },
-      volumeInspect: { ...inspect, Mountpoint: real },
-    })),
-    /subpath|traversal|snapshot|unsupported/i,
+    })],
+    ["caller-host-path", ({ inspect, snapshot, source }) => ({
+      inspect,
+      snapshot: { ...snapshot, hostPath: "/tmp/attacker/job.json" },
+      source,
+    })],
+    ["request-digest", ({ inspect, snapshot, source }) => ({
+      inspect,
+      requestSha256: "9".repeat(64),
+      snapshot,
+      source,
+    })],
+  ]) {
+    await t.test(id, async (t) => {
+      const root = tempDir(t);
+      const real = path.join(root, "real-state");
+      const alias = path.join(root, "state-alias");
+      fs.mkdirSync(real, { mode: 0o700 });
+      fs.symlinkSync(real, alias);
+      const stat = fs.statSync(real);
+      const receipt = buildRawActiveReceiptV2();
+      const source = receipt.resources.claimedJobSources["jobs.running"];
+      const inspect = {
+        ...buildFixtureVolumeInspect(receipt, source.snapshotVolumeId),
+        Mountpoint: real,
+      };
+      const store = broker.createSnapshotFileStore({
+        expectedGid: stat.gid,
+        expectedUid: stat.uid,
+      });
+      const snapshot = {
+        ...findPhase("job.backup.capture").claimedJob,
+        bytes: Buffer.from(BACKUP_JOB_BYTES),
+      };
+      const trusted = directTrustedContext();
+      const positiveRequest = admittedRequest(
+        "backup.job.execute",
+        findPhase("job.backup.capture").parameters,
+        trusted,
+      );
+      const positiveSha256 = fixtureSha256(canonicalFixtureJson(positiveRequest));
+      const sealed = await store.seal(snapshot, {
+        request: positiveRequest,
+        requestId: positiveRequest.requestId,
+        requestSha256: positiveSha256,
+        source,
+        volumeInspect: inspect,
+      });
+      assert.equal(fs.existsSync(sealed.hostPath), true, `${id} positive control did not seal`);
+      await store.cleanup(sealed);
+
+      const hostileRequest = admittedRequest(
+        "backup.job.execute",
+        findPhase("job.backup.capture").parameters,
+        trusted,
+      );
+      const hostileSha256 = fixtureSha256(canonicalFixtureJson(hostileRequest));
+      const candidate = hostile({ alias, inspect, snapshot, source });
+      await assert.rejects(
+        async () => store.seal(candidate.snapshot, {
+          request: hostileRequest,
+          requestId: hostileRequest.requestId,
+          requestSha256: candidate.requestSha256 ?? hostileSha256,
+          source: candidate.source,
+          volumeInspect: candidate.inspect,
+        }),
+        /symlink|canonical|mountpoint|host.?path|subpath|traversal|unsupported|digest|lineage|request/i,
+      );
+    });
+  }
+});
+
+readerTest("v2 claimed-job reader uses O_NOFOLLOW, two descriptor reads and stable pre/post fstat", (t) => {
+  const fixture = claimedReaderFixture(t);
+  const probe = claimedReaderIoProbe(fixture.file);
+  const snapshot = broker.readClaimedJobSnapshot(fixture.input, { io: probe.io });
+  assert.deepEqual(snapshot.bytes, BACKUP_JOB_BYTES);
+  assert.equal(snapshot.jobSha256, fixture.parameters.jobSha256);
+  assert.equal(probe.audit.opens.length, 1);
+  assert.equal(
+    probe.audit.opens[0].flags & fs.constants.O_NOFOLLOW,
+    fs.constants.O_NOFOLLOW,
   );
+  assert.equal(probe.audit.opens[0].file, fixture.file);
+  assert.equal(
+    probe.audit.descriptorReadFileCalls,
+    2,
+    "claimed job must be read twice through the same already-open descriptor",
+  );
+  assert.ok(probe.audit.fstats.length >= 2, "claimed job requires pre/post descriptor metadata");
+  assert.equal(new Set(probe.audit.fstats).size, 1, "pre/post fstat must use the same descriptor");
+});
+
+readerTest("v2 claimed-job reader rejects a same-size content race between descriptor reads", (t) => {
+  const baseline = claimedReaderFixture(t);
+  const positive = claimedReaderIoProbe(baseline.file);
+  assert.deepEqual(
+    broker.readClaimedJobSnapshot(baseline.input, { io: positive.io }).bytes,
+    BACKUP_JOB_BYTES,
+  );
+
+  const hostile = claimedReaderFixture(t);
+  const substituted = Buffer.from(BACKUP_JOB_BYTES);
+  substituted[substituted.length - 2] ^= 1;
+  assert.equal(substituted.length, BACKUP_JOB_BYTES.length);
+  const racing = claimedReaderIoProbe(hostile.file, {
+    afterFirstDescriptorRead() {
+      fs.writeFileSync(hostile.file, substituted);
+      fs.chmodSync(hostile.file, 0o600);
+    },
+    freezeMetadata: true,
+  });
+  assert.throws(
+    () => broker.readClaimedJobSnapshot(hostile.input, { io: racing.io }),
+    /changed|race|stable|substitution|digest|content/i,
+  );
+  assert.equal(racing.audit.descriptorReadFileCalls, 2);
+});
+
+readerTest("v2 claimed-job reader rejects descriptor metadata changes even when bytes and length match", (t) => {
+  const baseline = claimedReaderFixture(t);
+  assert.deepEqual(
+    broker.readClaimedJobSnapshot(
+      baseline.input,
+      { io: claimedReaderIoProbe(baseline.file).io },
+    ).bytes,
+    BACKUP_JOB_BYTES,
+  );
+
+  const hostile = claimedReaderFixture(t);
+  const racing = claimedReaderIoProbe(hostile.file, { metadataRace: true });
+  assert.throws(
+    () => broker.readClaimedJobSnapshot(hostile.input, { io: racing.io }),
+    /metadata|changed|race|stable|inode|descriptor/i,
+  );
+  assert.ok(racing.audit.fstats.length >= 2);
 });
 
 for (const [id, mutate] of [
@@ -635,22 +859,24 @@ test("v2 restore capture failure prevents creation of restore.verify", async (t)
 test("v2 restore phase two is created only after a durable phase-one journal barrier", async (t) => {
   const flow = actionFlows().find(({ id }) => id === "restore-full");
   const root = tempDir(t);
+  const ioProbe = durableIoProbe();
   const trusted = directTrustedContext();
-  const store = createReplayStore(root, "a".repeat(48));
+  const store = createReplayStore(root, "a".repeat(48), { io: ioProbe.io });
   store.admitTrustedContext(trusted);
-  const request = admittedRequest(flow.action, {});
+  const request = admittedRequest(flow.action, {}, trusted);
   const lease = store.acquire(request, trusted);
   const fixture = actionFixture(t, flow, {
     trusted,
     lease,
     onCreate(phase) {
       if (phase.phaseId !== "restore.verify") return;
-      assertDurableBarrier(root, "restore.capture");
+      assertDurableBarrier(root, "restore.capture", request);
+      assertBarrierFsyncOrder(root, "restore.capture", ioProbe.audit);
     },
   });
   await fixture.executor.execute(flow.action, fixture.context);
   lease.preserve();
-  assertJournalChain(root);
+  assertJournalChain(root, request);
 });
 
 for (const mutation of [
@@ -692,12 +918,13 @@ for (const mutation of [
 ]) {
   test(`v2 restart rejects lease journal ${mutation.id} and preserves the lock`, async (t) => {
     const baseline = await preservedJournalFixture(t);
-    assertJournalChain(baseline.root);
+    assertJournalChain(baseline.root, baseline.request);
     mutation.apply(journalFiles(baseline.root));
 
     const recoveryTransport = new OracleEngineTransport({
       trusted: baseline.trusted,
       phases: [],
+      request: baseline.request,
       requestId: baseline.request.requestId,
       rawResults: [],
     });
@@ -718,12 +945,12 @@ test("v2 journal sequence/head bind exactly and post-terminal appends are reject
   const trusted = directTrustedContext();
   const store = createReplayStore(root, "a".repeat(48));
   store.admitTrustedContext(trusted);
-  const request = admittedRequest(phase.action, {});
+  const request = admittedRequest(phase.action, {}, trusted);
   const lease = store.acquire(request, trusted);
-  const fixture = semanticFixture(t, phase, { trusted, lease, requestId: request.requestId });
+  const fixture = semanticFixture(t, phase, { trusted, lease, request });
   await fixture.executor.executePhase(phase.action, phase.phaseId, fixture.context);
   lease.preserve();
-  const entries = assertJournalChain(root);
+  const entries = assertJournalChain(root, request);
   assert.equal(entries.at(-1).event, "action-completed");
   assert.throws(
     () => lease.recordEvent({ event: "worker-recorded", phaseId: phase.phaseId }),
@@ -736,7 +963,7 @@ test("v2 recovery exact-inspects every live worker before reverse-order deletion
   const trusted = directTrustedContext();
   const store = createReplayStore(root, "a".repeat(48));
   store.admitTrustedContext(trusted);
-  const request = admittedRequest("restore.drill.full", {});
+  const request = admittedRequest("restore.drill.full", {}, trusted);
   const lease = store.acquire(request, trusted);
   const phases = [
     PHASE_CASES.find(({ phaseId }) => phaseId === "restore.capture"),
@@ -763,6 +990,7 @@ test("v2 recovery exact-inspects every live worker before reverse-order deletion
   const transport = new OracleEngineTransport({
     trusted,
     phases,
+    request,
     requestId: request.requestId,
     rawResults: phases.map((phase) => rawWorkerResult(phase, request.requestId)),
     recoveryOnly: true,
@@ -788,18 +1016,132 @@ test("v2 recovery exact-inspects every live worker before reverse-order deletion
   assert.equal(fs.existsSync(path.join(root, "active.lock")), false);
 });
 
+test("v2 recovery inspect mismatch performs zero delete and preserves the durable lock", async (t) => {
+  const root = tempDir(t);
+  const trusted = directTrustedContext();
+  const phase = findPhase("prune.apply");
+  const request = admittedRequest(phase.action, phase.parameters, trusted);
+  const store = createReplayStore(root, "a".repeat(48));
+  store.admitTrustedContext(trusted);
+  const lease = store.acquire(request, trusted);
+  const resourceName = "platform-action-prune-apply-recovery";
+  lease.recordWorker({
+    action: phase.action,
+    phaseId: phase.phaseId,
+    phaseProfileSha256: trusted.receipt.resources.phaseProfiles[phase.phaseId].phaseSha256,
+    receiptDigest: trusted.receiptDigest,
+    requestSha256: fixtureSha256(canonicalFixtureJson(request)),
+    resourceName,
+  });
+  lease.recordEvent({
+    event: "worker-created",
+    phaseId: phase.phaseId,
+    resourceName,
+    workerId: WORKER_ID,
+  });
+  lease.preserve();
+
+  const transport = new OracleEngineTransport({
+    inspectMutation: (inspect) => ({
+      ...inspect,
+      Config: { ...inspect.Config, Image: "attacker/image:latest" },
+    }),
+    phases: [phase],
+    rawResults: [rawWorkerResult(phase, request.requestId)],
+    recoveryOnly: true,
+    request,
+    requestId: request.requestId,
+    trusted,
+  });
+  transport.seedRecoveryWorkers([{ id: WORKER_ID, name: resourceName, phase }]);
+  const executor = createSemanticExecutor({ transport });
+  const restarted = createReplayStore(root, "b".repeat(48));
+  await assert.rejects(
+    () => restarted.recover(executor),
+    /inspect|image|exact|mismatch|recovery/i,
+  );
+  assert.deepEqual(transport.deletedIds, []);
+  assert.deepEqual(
+    transport.calls.map(({ method }) => method),
+    ["inspectContainerForRecovery"],
+  );
+  assert.equal(fs.existsSync(path.join(root, "active.lock")), true);
+});
+
+test("v2 recovery carries claimed-job lineage, exact-inspects its worker and cleans its sealed snapshot", async (t) => {
+  const root = tempDir(t);
+  const trusted = directTrustedContext();
+  const phase = findPhase("job.backup.capture");
+  const request = admittedRequest(phase.action, phase.parameters, trusted);
+  const requestSha256 = fixtureSha256(canonicalFixtureJson(request));
+  const sealed = sealedSnapshot(phase.claimedJob, request);
+  const store = createReplayStore(root, "a".repeat(48));
+  store.admitTrustedContext(trusted);
+  const lease = store.acquire(request, trusted);
+  lease.recordEvent({
+    event: "snapshot-materialized",
+    phaseId: phase.phaseId,
+    requestSha256,
+    snapshot: sealed,
+  });
+  const resourceName = "platform-action-job-backup-recovery";
+  lease.recordWorker({
+    action: phase.action,
+    phaseId: phase.phaseId,
+    phaseProfileSha256: trusted.receipt.resources.phaseProfiles[phase.phaseId].phaseSha256,
+    receiptDigest: trusted.receiptDigest,
+    requestSha256,
+    resourceName,
+    snapshot: sealed,
+  });
+  lease.recordEvent({
+    event: "worker-created",
+    phaseId: phase.phaseId,
+    resourceName,
+    workerId: WORKER_ID,
+  });
+  lease.preserve();
+
+  const snapshotFileStore = snapshotStoreFixture({});
+  const transport = new OracleEngineTransport({
+    phases: [phase],
+    rawResults: [rawWorkerResult(phase, request.requestId)],
+    recoveryOnly: true,
+    request,
+    requestId: request.requestId,
+    trusted,
+  });
+  transport.seedRecoveryWorkers([{
+    id: WORKER_ID,
+    name: resourceName,
+    phase,
+    sealed,
+  }]);
+  const executor = createSemanticExecutor({ snapshotFileStore, transport });
+  const restarted = createReplayStore(root, "b".repeat(48));
+  await restarted.recover(executor);
+  assert.deepEqual(
+    transport.calls
+      .filter(({ method }) => method === "inspectContainerForRecovery" || method === "deleteContainer")
+      .map(({ method }) => method),
+    ["inspectContainerForRecovery", "deleteContainer"],
+  );
+  assert.deepEqual(snapshotFileStore.cleanupCalls, [sealed]);
+  assert.equal(fs.existsSync(path.join(root, "active.lock")), false);
+});
+
 test("v2 offsite remote-unknown is terminal, preserves the lease and forbids automatic replay", async (t) => {
   const phase = PHASE_CASES.find(({ phaseId }) => phaseId === "offsite.sync");
   const root = tempDir(t);
   const trusted = directTrustedContext();
   const store = createReplayStore(root, "a".repeat(48));
   store.admitTrustedContext(trusted);
-  const request = admittedRequest(phase.action, {});
+  const request = admittedRequest(phase.action, {}, trusted);
   const lease = store.acquire(request, trusted);
   const fixture = semanticFixture(t, phase, {
     trusted,
     lease,
-    requestId: request.requestId,
+    request,
     logsError: Object.assign(
       new Error("remote side effect completed but terminal receipt is unknown"),
       { remoteEffectUnknown: true },
@@ -814,15 +1156,40 @@ test("v2 offsite remote-unknown is terminal, preserves the lease and forbids aut
   assert.equal(failure?.remoteEffectUnknown, true);
   assert.equal(failure?.preserveLease, true);
   lease.preserve();
-  const entries = assertJournalChain(root);
+  const entries = assertJournalChain(root, request);
   assert.equal(entries.at(-1).event, "remote-effect-unknown");
-  assert.throws(() => store.acquire(admittedRequest(phase.action, {}), trusted), /another|remote|reconcile/i);
+  assert.throws(
+    () => store.acquire(admittedRequest(phase.action, {}, trusted), trusted),
+    /another|remote|reconcile/i,
+  );
   assert.equal(fixture.transport.created.length, 1);
+  const recoveryTransport = new OracleEngineTransport({
+    phases: [],
+    rawResults: [],
+    recoveryOnly: true,
+    request,
+    requestId: request.requestId,
+    trusted,
+  });
+  const restarted = createReplayStore(root, "b".repeat(48));
+  await assert.rejects(
+    () => restarted.recover(createSemanticExecutor({ transport: recoveryTransport })),
+    /remote|unknown|reconcile|terminal/i,
+  );
+  assert.deepEqual(recoveryTransport.calls, []);
+  assert.equal(fs.existsSync(path.join(root, "active.lock")), true);
 });
 
 function semanticFixture(t, phase, options = {}) {
   const trusted = options.trusted ?? directTrustedContext();
-  const requestId = options.requestId ?? REQUEST_ID;
+  const request = options.request ?? admittedRequest(
+    phase.action,
+    phase.parameters,
+    trusted,
+    options.requestIndex,
+  );
+  const requestId = request.requestId;
+  const requestSha256 = fixtureSha256(canonicalFixtureJson(request));
   const snapshotStore = snapshotStoreFixture(options);
   let providerCalls = 0;
   const rawResult = rawWorkerResult(phase, requestId);
@@ -832,6 +1199,7 @@ function semanticFixture(t, phase, options = {}) {
   const transport = new OracleEngineTransport({
     trusted,
     phases: [phase],
+    request,
     requestId,
     rawResults: [mutatedResult],
     inspectMutation: options.inspectMutation,
@@ -857,9 +1225,11 @@ function semanticFixture(t, phase, options = {}) {
     transport,
   });
   const context = {
-    lease: options.lease ?? recordingLease(),
+    lease: options.lease ?? recordingLease(request, trusted),
     parameters: structuredClone(phase.parameters),
+    request: structuredClone(request),
     requestId,
+    requestSha256,
     signal: new AbortController().signal,
     trusted,
   };
@@ -868,7 +1238,9 @@ function semanticFixture(t, phase, options = {}) {
     executor,
     providerCalls: () => providerCalls,
     rawResult,
-    sealedSnapshot: phase.claimedJob ? sealedSnapshot(phase.claimedJob, requestId) : null,
+    request,
+    requestSha256,
+    sealedSnapshot: phase.claimedJob ? sealedSnapshot(phase.claimedJob, request) : null,
     snapshotStore,
     transport,
     trusted,
@@ -877,12 +1249,20 @@ function semanticFixture(t, phase, options = {}) {
 
 function actionFixture(t, flow, options = {}) {
   const trusted = options.trusted ?? directTrustedContext();
-  const requestId = options.requestId ?? REQUEST_ID;
+  const request = options.request ?? admittedRequest(
+    flow.action,
+    flow.parameters,
+    trusted,
+    options.requestIndex,
+  );
+  const requestId = request.requestId;
+  const requestSha256 = fixtureSha256(canonicalFixtureJson(request));
   const snapshotStore = snapshotStoreFixture(options);
   const rawResults = flow.phases.map((phase) => rawWorkerResult(phase, requestId));
   const transport = new OracleEngineTransport({
     trusted,
     phases: flow.phases,
+    request,
     requestId,
     rawResults,
     onCreate: options.onCreate,
@@ -901,14 +1281,18 @@ function actionFixture(t, flow, options = {}) {
   });
   return {
     context: {
-      lease: options.lease ?? recordingLease(),
+      lease: options.lease ?? recordingLease(request, trusted),
       parameters: structuredClone(flow.parameters),
+      request: structuredClone(request),
       requestId,
+      requestSha256,
       signal: new AbortController().signal,
       trusted,
     },
     executor,
     rawResults,
+    request,
+    requestSha256,
     snapshotStore,
     transport,
     trusted,
@@ -932,6 +1316,7 @@ class OracleEngineTransport {
   constructor({
     trusted,
     phases,
+    request,
     requestId,
     rawResults,
     inspectMutation,
@@ -944,6 +1329,7 @@ class OracleEngineTransport {
   }) {
     this.trusted = trusted;
     this.phases = phases;
+    this.request = request;
     this.requestId = requestId;
     this.rawResults = rawResults;
     this.inspectMutation = inspectMutation;
@@ -998,7 +1384,7 @@ class OracleEngineTransport {
     const created = this.created.find((value) => value.id === id);
     assert.ok(created, `oracle has no created worker ${id}`);
     const sealed = created.phase.claimedJob
-      ? sealedSnapshot(created.phase.claimedJob, this.requestId)
+      ? sealedSnapshot(created.phase.claimedJob, this.request)
       : null;
     const inspect = oracleWorkerInspect({
       id,
@@ -1038,14 +1424,17 @@ class OracleEngineTransport {
     this.calls.push({ method: "inspectContainerForRecovery", name });
     const worker = this.recoveryWorkers.find((value) => value.name === name);
     if (!worker) return null;
-    return oracleWorkerInspect({
+    const inspect = oracleWorkerInspect({
       id: worker.id,
       name: worker.name,
       phase: worker.phase,
       requestId: this.requestId,
-      sealed: null,
+      sealed: worker.sealed ?? null,
       trusted: this.trusted,
     });
+    return this.inspectMutation
+      ? this.inspectMutation(structuredClone(inspect), worker.phase)
+      : inspect;
   }
 
   seedRecoveryWorkers(workers) {
@@ -1102,17 +1491,17 @@ function expectedWorkerBody(phaseCaseValue, trusted, sealed, requestId) {
     "LANG=C.UTF-8",
     "NODE_ENV=production",
     `PLATFORM_DOCKER_ACTION=${phaseCaseValue.action}`,
-    `PLATFORM_DOCKER_PHASE_ID=${phase.phaseId}`,
-    `PLATFORM_DOCKER_REQUEST_ID=${requestId}`,
     `PLATFORM_DOCKER_PHASE_AUTHORITY_BASE64=${Buffer.from(canonicalFixtureJson(authority)).toString("base64url")}`,
     `PLATFORM_DOCKER_PHASE_AUTHORITY_SHA256=${fixtureSha256(canonicalFixtureJson(authority))}`,
+    `PLATFORM_DOCKER_PHASE_ID=${phase.phaseId}`,
+    `PLATFORM_DOCKER_REQUEST_ID=${requestId}`,
   ];
   if (sealed) {
     env.push(
-      `PLATFORM_CLAIMED_JOB_PATH=${sealed.containerPath}`,
       `PLATFORM_CLAIMED_JOB_FILE_NAME=${sealed.jobFileName}`,
       `PLATFORM_CLAIMED_JOB_ID=${sealed.jobId}`,
       `PLATFORM_CLAIMED_JOB_OPERATION=${sealed.jobOperation}`,
+      `PLATFORM_CLAIMED_JOB_PATH=${sealed.containerPath}`,
       `PLATFORM_CLAIMED_JOB_SHA256=${sealed.jobSha256}`,
       `PLATFORM_CLAIMED_JOB_SOURCE_ID=${sealed.sourceId}`,
     );
@@ -1366,10 +1755,22 @@ function snapshotStoreFixture(options) {
   return {
     calls,
     cleanupCalls,
-    seal(snapshot, { requestId, source, volumeInspect } = {}) {
+    seal(snapshot, {
+      request,
+      requestId,
+      requestSha256,
+      source,
+      volumeInspect,
+    } = {}) {
       const sealedBytes = Buffer.from(snapshot.bytes);
       assert.equal(fixtureSha256(sealedBytes), snapshot.jobSha256);
-      assert.match(requestId, /^[0-9a-f-]{36}$/);
+      assert.deepEqual(request, admittedRequestShape(request));
+      assert.equal(requestId, request.requestId);
+      assert.equal(
+        requestSha256,
+        fixtureSha256(canonicalFixtureJson(request)),
+        "snapshot lineage must hash the full canonical signed request",
+      );
       assert.equal(source?.snapshotVolumeId, "broker.state");
       assert.equal(source?.snapshotVolumeSubpath, "claimed-jobs");
       assert.equal(source?.snapshotContainerPath, SNAPSHOT_CONTAINER_PATH);
@@ -1381,7 +1782,6 @@ function snapshotStoreFixture(options) {
       assert.equal(path.isAbsolute(volumeInspect?.Mountpoint ?? ""), true);
       assert.equal(path.normalize(volumeInspect.Mountpoint), volumeInspect.Mountpoint);
       assert.doesNotMatch(volumeInspect.Mountpoint, /\0/);
-      const requestSha256 = fixtureSha256(requestId);
       const result = Object.freeze({
         containerPath: source.snapshotContainerPath,
         hostPath: `${volumeInspect.Mountpoint}/${source.snapshotVolumeSubpath}/${requestSha256}/job.json`,
@@ -1397,7 +1797,13 @@ function snapshotStoreFixture(options) {
         sourceId: snapshot.sourceId,
       });
       calls.push({
-        authority: structuredClone({ requestId, source, volumeInspect }),
+        authority: structuredClone({
+          request,
+          requestId,
+          requestSha256,
+          source,
+          volumeInspect,
+        }),
         result,
         sealedBytes,
       });
@@ -1411,12 +1817,13 @@ function snapshotStoreFixture(options) {
   };
 }
 
-function sealedSnapshot(snapshot, requestId) {
+function sealedSnapshot(snapshot, request) {
   const receipt = buildRawActiveReceiptV2();
   const source = receipt.resources.claimedJobSources["jobs.running"];
   const volume = receipt.resources.volumes[source.snapshotVolumeId];
   const mountpoint = `/var/lib/docker/volumes/${volume.engineName}/_data`;
-  const requestSha256 = fixtureSha256(requestId);
+  admittedRequestShape(request);
+  const requestSha256 = fixtureSha256(canonicalFixtureJson(request));
   return Object.freeze({
     containerPath: source.snapshotContainerPath,
     hostPath: `${mountpoint}/${source.snapshotVolumeSubpath}/${requestSha256}/job.json`,
@@ -1587,10 +1994,20 @@ function assertPreflightBeforeCreate(transport, phase, receipt) {
   }
 }
 
-function recordingLease() {
+function recordingLease(request, trusted) {
   const events = [];
+  admittedRequestShape(request);
+  const lineage = Object.freeze({
+    action: request.action,
+    intentId: trusted.intent.intentId,
+    receiptDigest: trusted.receiptDigest,
+    request: structuredClone(request),
+    requestId: request.requestId,
+    requestSha256: fixtureSha256(canonicalFixtureJson(request)),
+  });
   return {
     events,
+    lineage,
     recordEvent(event) { events.push(structuredClone(event)); },
     recordWorker(event) { events.push({ event: "worker-recorded", ...structuredClone(event) }); },
     preserve() { events.push({ event: "lease-preserved" }); },
@@ -1598,22 +2015,48 @@ function recordingLease() {
   };
 }
 
-function admittedRequest(action, parameters) {
-  return {
-    schema: REQUEST_SCHEMA_V2,
-    requestId: crypto.randomUUID(),
-    nonce: crypto.randomBytes(32).toString("base64url"),
-    action,
-    parameters,
-  };
+function admittedRequest(action, parameters, trusted = directTrustedContext(), index) {
+  const request = buildFixtureSignedActionRequestV2(action, parameters, {
+    index: index ?? (requestSequence += 1),
+    now: NOW,
+    trustedContext: trusted,
+  });
+  assert.equal(request.schema, REQUEST_SCHEMA_V2);
+  assert.match(request.mac, /^[a-f0-9]{64}$/);
+  return Object.freeze(request);
 }
 
-function createReplayStore(root, bootId) {
+function admittedRequestShape(request) {
+  assert.deepEqual(Object.keys(request ?? {}).sort(), [
+    "action",
+    "activeReceiptSha256",
+    "capabilityId",
+    "combinedRenderSha256",
+    "expiresAt",
+    "issuedAt",
+    "mac",
+    "nonce",
+    "parameters",
+    "requestId",
+    "runtimeIntentId",
+    "schema",
+  ]);
+  assert.equal(request?.schema, REQUEST_SCHEMA_V2);
+  assert.match(request?.requestId ?? "", /^[0-9a-f-]{36}$/);
+  assert.match(request?.nonce ?? "", /^[A-Za-z0-9_-]{43}$/);
+  assert.match(request?.mac ?? "", /^[a-f0-9]{64}$/);
+  assert.equal(typeof request?.action, "string");
+  assert.equal(typeof request?.parameters, "object");
+  return request;
+}
+
+function createReplayStore(root, bootId, { io = fs } = {}) {
   return new broker.PersistentReplayStore(root, {
     now: () => NOW,
     bootId,
     expectedUid: process.getuid(),
     expectedGid: process.getgid(),
+    io,
   });
 }
 
@@ -1623,9 +2066,9 @@ async function preservedJournalFixture(t) {
   const trusted = directTrustedContext();
   const store = createReplayStore(root, "a".repeat(48));
   store.admitTrustedContext(trusted);
-  const request = admittedRequest(phase.action, {});
+  const request = admittedRequest(phase.action, {}, trusted);
   const lease = store.acquire(request, trusted);
-  const fixture = semanticFixture(t, phase, { trusted, lease, requestId: request.requestId });
+  const fixture = semanticFixture(t, phase, { trusted, lease, request });
   await fixture.executor.executePhase(phase.action, phase.phaseId, fixture.context);
   lease.preserve();
   return { fixture, lease, request, root, store, trusted };
@@ -1639,14 +2082,24 @@ function journalFiles(root) {
   return { active, directory, entries, root };
 }
 
-function assertJournalChain(root) {
+function assertJournalChain(root, expectedRequest) {
   const { active, entries } = journalFiles(root);
+  const request = expectedRequest ?? active.request;
+  admittedRequestShape(request);
+  const requestSha256 = fixtureSha256(canonicalFixtureJson(request));
+  assert.deepEqual(active.request, request);
+  assert.equal(active.requestId, request.requestId);
+  assert.equal(active.requestSha256, requestSha256);
+  assert.equal(active.action, request.action);
   let previous = "0".repeat(64);
   const values = entries.map((file, index) => {
     const value = readJson(file);
     assert.equal(value.schema, JOURNAL_ENTRY_SCHEMA_V2);
     assert.equal(value.sequence, index);
     assert.equal(value.previousEntrySha256, previous);
+    assert.equal(value.requestId, request.requestId);
+    assert.equal(value.requestSha256, requestSha256);
+    assert.equal(value.action, request.action);
     previous = fixtureSha256(canonicalFixtureJson(value));
     return value;
   });
@@ -1655,8 +2108,8 @@ function assertJournalChain(root) {
   return values;
 }
 
-function assertDurableBarrier(root, phaseId) {
-  const entries = assertJournalChain(root);
+function assertDurableBarrier(root, phaseId, request) {
+  const entries = assertJournalChain(root, request);
   assert.equal(
     entries.some((entry) => entry.event === "worker-result-recorded" && entry.phaseId === phaseId),
     true,
@@ -1715,6 +2168,174 @@ function readJson(file) {
 
 function writeJson(file, value) {
   fs.writeFileSync(file, `${canonicalFixtureJson(value)}\n`);
+}
+
+function claimedReaderFixture(t) {
+  const root = tempDir(t);
+  const queueRoot = path.join(root, "running");
+  fs.mkdirSync(queueRoot, { mode: 0o700 });
+  const file = path.join(queueRoot, `${BACKUP_JOB_ID}.json`);
+  fs.writeFileSync(file, BACKUP_JOB_BYTES, { mode: 0o600 });
+  fs.chmodSync(file, 0o600);
+  const stat = fs.statSync(queueRoot);
+  const receipt = buildRawActiveReceiptV2();
+  const canonicalSource = receipt.resources.claimedJobSources["jobs.running"];
+  const parameters = structuredClone(findPhase("job.backup.capture").parameters);
+  return {
+    file,
+    parameters,
+    input: {
+      parameters,
+      policy: {
+        expectedGid: stat.gid,
+        expectedMode: 0o600,
+        expectedUid: stat.uid,
+        maximumBytes: canonicalSource.maximumBytes,
+        parentRoot: queueRoot,
+      },
+      source: { ...canonicalSource, brokerRoot: queueRoot },
+      sourceId: "jobs.running",
+    },
+  };
+}
+
+function claimedReaderIoProbe(file, {
+  afterFirstDescriptorRead,
+  freezeMetadata = false,
+  metadataRace = false,
+} = {}) {
+  const audit = {
+    descriptorReadFileCalls: 0,
+    fstats: [],
+    opens: [],
+  };
+  let baselineStat;
+  let postMetadata = false;
+  const io = new Proxy(fs, {
+    get(target, property) {
+      if (property === "openSync") {
+        return (candidate, flags, mode) => {
+          const descriptor = fs.openSync(candidate, flags, mode);
+          audit.opens.push({
+            descriptor,
+            file: path.resolve(String(candidate)),
+            flags,
+            mode,
+          });
+          return descriptor;
+        };
+      }
+      if (property === "readFileSync") {
+        return (descriptor, ...args) => {
+          const value = fs.readFileSync(descriptor, ...args);
+          if (typeof descriptor === "number") {
+            audit.descriptorReadFileCalls += 1;
+            if (audit.descriptorReadFileCalls === 1) {
+              afterFirstDescriptorRead?.();
+              postMetadata = true;
+            }
+          }
+          return value;
+        };
+      }
+      if (property === "fstatSync") {
+        return (descriptor, ...args) => {
+          const value = fs.fstatSync(descriptor, ...args);
+          audit.fstats.push(descriptor);
+          baselineStat ??= value;
+          if (freezeMetadata) return baselineStat;
+          if (!metadataRace || !postMetadata || audit.fstats.length < 2) return value;
+          return new Proxy(value, {
+            get(targetStat, key) {
+              if (key === "ino") return targetStat.ino + 1;
+              if (key === "mtimeMs") return targetStat.mtimeMs + 1;
+              if (key === "ctimeMs") return targetStat.ctimeMs + 1;
+              return Reflect.get(targetStat, key);
+            },
+          });
+        };
+      }
+      const value = Reflect.get(target, property);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+  return { audit, io };
+}
+
+function durableIoProbe() {
+  const audit = { descriptors: new Map(), events: [] };
+  const io = new Proxy(fs, {
+    get(target, property) {
+      if (property === "openSync") {
+        return (file, flags, mode) => {
+          const descriptor = fs.openSync(file, flags, mode);
+          const resolved = path.resolve(String(file));
+          audit.descriptors.set(descriptor, resolved);
+          audit.events.push({ type: "open", file: resolved, flags, mode });
+          return descriptor;
+        };
+      }
+      if (property === "fsyncSync") {
+        return (descriptor) => {
+          audit.events.push({
+            type: "fsync",
+            file: audit.descriptors.get(descriptor) ?? `fd:${descriptor}`,
+          });
+          return fs.fsyncSync(descriptor);
+        };
+      }
+      if (property === "renameSync") {
+        return (from, to) => {
+          audit.events.push({
+            type: "rename",
+            from: path.resolve(String(from)),
+            to: path.resolve(String(to)),
+          });
+          return fs.renameSync(from, to);
+        };
+      }
+      const value = Reflect.get(target, property);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+  return { audit, io };
+}
+
+function assertBarrierFsyncOrder(root, phaseId, audit) {
+  const { directory, entries } = journalFiles(root);
+  const barrierFiles = entries.filter((file) => {
+    const entry = readJson(file);
+    return entry.phaseId === phaseId
+      && ["worker-result-recorded", "worker-deleted"].includes(entry.event);
+  });
+  assert.equal(barrierFiles.length, 2, `${phaseId} requires result and cleanup barrier entries`);
+  let cursor = -1;
+  for (const file of barrierFiles) {
+    const index = audit.events.findIndex(
+      (event, eventIndex) => eventIndex > cursor && event.type === "fsync" && event.file === file,
+    );
+    assert.ok(index > cursor, `${phaseId} journal entry was not fsynced in append order: ${file}`);
+    cursor = index;
+  }
+  const directoryFsync = audit.events.findIndex(
+    (event, index) => index > cursor && event.type === "fsync" && event.file === directory,
+  );
+  assert.ok(directoryFsync > cursor, `${phaseId} journal directory was not fsynced`);
+  const activePath = path.join(root, "active.lock");
+  const headFsync = audit.events.findIndex(
+    (event, index) => index > directoryFsync
+      && event.type === "fsync"
+      && path.basename(event.file).includes("active.lock"),
+  );
+  assert.ok(headFsync > directoryFsync, `${phaseId} lease head file was not fsynced`);
+  const headRename = audit.events.findIndex(
+    (event, index) => index > headFsync && event.type === "rename" && event.to === activePath,
+  );
+  assert.ok(headRename > headFsync, `${phaseId} lease head was not atomically installed`);
+  const stateFsync = audit.events.findIndex(
+    (event, index) => index > headRename && event.type === "fsync" && event.file === root,
+  );
+  assert.ok(stateFsync > headRename, `${phaseId} broker state directory was not fsynced`);
 }
 
 function tempDir(t) {

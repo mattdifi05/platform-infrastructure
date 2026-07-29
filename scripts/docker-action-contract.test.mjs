@@ -22,6 +22,7 @@ import {
   REQUEST_SCHEMA_V2,
   RESPONSE_SCHEMA_V2,
   RESULT_SCHEMA_V2,
+  RUNTIME_INTENT_SCHEMA_V1,
   PHASE_PROFILE_KEYS,
   SCHEDULER_ACTION_NAMES,
   buildFixtureActionResultV2,
@@ -177,6 +178,43 @@ test("RED v2: request MAC is canonical and domain-separated", () => {
     expectedMac,
     crypto.createHmac("sha256", key).update(canonicalFixtureJson(unsigned)).digest("hex"),
     "v1-compatible bare canonical JSON must not authenticate as a v2 request",
+  );
+});
+
+test("runtime intent v1 preserves its legacy bare-canonical MAC contract", () => {
+  assert.equal(contract.RUNTIME_INTENT_SCHEMA, RUNTIME_INTENT_SCHEMA_V1);
+  const unsigned = {
+    schema: RUNTIME_INTENT_SCHEMA_V1,
+    activeReceiptSha256: "a".repeat(64),
+    activationBundleSha256: "b".repeat(64),
+    allowedActions: ["backup.prune.plan"],
+    candidateId: "candidate.v2",
+    combinedRenderSha256: "c".repeat(64),
+    dastChainSha256: "d".repeat(64),
+    environment: "production",
+    expiresAt: new Date(NOW + 30 * 60_000).toISOString(),
+    generation: 2,
+    intentId: "intent.release-v2",
+    issuedAt: new Date(NOW - 30_000).toISOString(),
+    releaseId: "release.v2",
+    targetId: "platform.primary",
+  };
+  const signed = contract.signRuntimeIntent(unsigned, TRUST_KEY);
+  const legacyMac = crypto
+    .createHmac("sha256", TRUST_KEY)
+    .update(canonicalFixtureJson(unsigned))
+    .digest("hex");
+  const schemaDomainMac = crypto
+    .createHmac("sha256", TRUST_KEY)
+    .update(`${RUNTIME_INTENT_SCHEMA_V1}\0`)
+    .update(canonicalFixtureJson(unsigned))
+    .digest("hex");
+
+  assert.equal(signed.mac, legacyMac);
+  assert.notEqual(
+    signed.mac,
+    schemaDomainMac,
+    "the v1 intent compatibility MAC must not inherit the v2 request/response domain format",
   );
 });
 
@@ -429,9 +467,15 @@ test("RED v2: broker core emits the exact authenticated response wire contract",
 
   const wire = await core.handle(Buffer.from(JSON.stringify(request)));
   const response = wire.body;
-  const requestSha256 = fixtureSha256(canonicalFixtureJson(request));
+  const requestSha256 = canonicalSignedRequestSha256(request);
+  const requestIdOnlySha256 = fixtureSha256(request.requestId);
   const resultSha256 = fixtureSha256(canonicalFixtureJson(result));
 
+  assert.notEqual(
+    requestSha256,
+    requestIdOnlySha256,
+    "the response request digest must cover the complete signed request, not only requestId",
+  );
   assert.equal(wire.statusCode, 200);
   assert.deepEqual(Object.keys(response).sort(), [...RESPONSE_KEYS].sort());
   assert.equal(response.schema, RESPONSE_SCHEMA_V2);
@@ -443,8 +487,65 @@ test("RED v2: broker core emits the exact authenticated response wire contract",
   assert.equal(response.requestSha256, requestSha256);
   assert.equal(response.resultSha256, resultSha256);
   assert.deepEqual(response.result, result);
-  assertResultBoundToRequest(response.result, request);
+  assertResponseBoundToSignedRequestAndResult(response, request);
   assert.equal(response.mac, responseMac(omit(response, "mac"), key));
+});
+
+test("RED v2: evidence output is bounded before the broker releases its replay lease", async (t) => {
+  await t.test("bounded evidence result reaches the authenticated consumer", async (st) => {
+    if (!requestConsumerV2Ready(st)) return;
+    if (!responseConsumerV2Ready(st)) return;
+    const trusted = requestTrustedFixture("evidence.runtime.snapshot");
+    const key = capabilityKey("evidence.runtime.snapshot");
+    const request = signedRequest("evidence.runtime.snapshot", {}, trusted, 31);
+    const result = buildFixtureActionResultV2("evidence.runtime.snapshot");
+    const outputBytes = Buffer.byteLength(canonicalFixtureJson(result.phases[0].output));
+    const harness = evidenceBrokerHarness({ key, result, trusted });
+
+    assert.ok(outputBytes <= MAX_PHASE_OUTPUT_BYTES_V2);
+    const wire = await harness.core.handle(Buffer.from(JSON.stringify(request)));
+    assert.equal(wire.statusCode, 200);
+    assert.equal(harness.executeCount(), 1);
+    assert.deepEqual(harness.leaseEvents, ["acquire", "release"]);
+    assertResponseBoundToSignedRequestAndResult(wire.body, request);
+  });
+
+  await t.test("oversized evidence result is rejected and preserves the replay lease", async (st) => {
+    if (!requestConsumerV2Ready(st)) return;
+    if (!responseConsumerV2Ready(st)) return;
+    const trusted = requestTrustedFixture("evidence.runtime.snapshot");
+    const key = capabilityKey("evidence.runtime.snapshot");
+    const request = signedRequest("evidence.runtime.snapshot", {}, trusted, 32);
+    const bounded = buildFixtureActionResultV2("evidence.runtime.snapshot");
+    const oversizedOutput = {
+      ...bounded.phases[0].output,
+      resources: {
+        padding: "x".repeat(MAX_PHASE_OUTPUT_BYTES_V2),
+      },
+    };
+    const result = {
+      ...bounded,
+      phases: [phaseResultWithResealedOutput(bounded.phases[0], oversizedOutput)],
+    };
+    const outputBytes = Buffer.byteLength(canonicalFixtureJson(oversizedOutput));
+    const harness = evidenceBrokerHarness({ key, result, trusted });
+
+    assert.ok(
+      outputBytes > MAX_PHASE_OUTPUT_BYTES_V2,
+      "the negative must cross the unchanged 4096-byte phase-output boundary",
+    );
+    await assert.rejects(
+      () => harness.core.handle(Buffer.from(JSON.stringify(request))),
+      undefined,
+      "an oversized evidence result must not reach the authenticated response consumer",
+    );
+    assert.equal(harness.executeCount(), 1);
+    assert.deepEqual(
+      harness.leaseEvents,
+      ["acquire", "preserve"],
+      "post-execution result rejection must fail closed without consuming the replay lease",
+    );
+  });
 });
 
 test("RED v2: response signing binds request and result digests and exact fields", () => {
@@ -470,7 +571,7 @@ test("RED v2: response signing binds request and result digests and exact fields
     errorCode: null,
     action: request.action,
     requestId: request.requestId,
-    requestSha256: fixtureSha256(canonicalFixtureJson(request)),
+    requestSha256: canonicalSignedRequestSha256(request),
     result,
     resultSha256: fixtureSha256(canonicalFixtureJson(result)),
   };
@@ -492,7 +593,7 @@ test("RED v2: response signing binds request and result digests and exact fields
     contract.normalizeActionResponse(response, request, key),
     response,
   );
-  assertResultBoundToRequest(response.result, request);
+  assertResponseBoundToSignedRequestAndResult(response, request);
 
   const rejectedUnsigned = {
     schema: RESPONSE_SCHEMA_V2,
@@ -501,7 +602,7 @@ test("RED v2: response signing binds request and result digests and exact fields
     errorCode: "ACTION_REJECTED",
     action: request.action,
     requestId: request.requestId,
-    requestSha256: fixtureSha256(canonicalFixtureJson(request)),
+    requestSha256: canonicalSignedRequestSha256(request),
     result: null,
     resultSha256: fixtureSha256(canonicalFixtureJson(null)),
   };
@@ -513,6 +614,7 @@ test("RED v2: response signing binds request and result digests and exact fields
     rejected,
     "an admitted request rejection must be authenticated and bound to that exact request",
   );
+  assertResponseBoundToSignedRequestAndResult(rejected, request);
   assert.throws(
     () => contract.normalizeActionResponse(
       { ...rejected, errorCode: "OTHER_REJECTION" },
@@ -528,6 +630,10 @@ test("RED v2: response signing binds request and result digests and exact fields
     ["cross-action", { ...unsigned, action: "backup.catalog" }],
     ["cross-request ID", { ...unsigned, requestId: "123e4567-e89b-42d3-a456-426614174999" }],
     ["request digest", { ...unsigned, requestSha256: "0".repeat(64) }],
+    ["requestId-only digest", {
+      ...unsigned,
+      requestSha256: fixtureSha256(request.requestId),
+    }],
     ["result without matching digest", {
       ...unsigned,
       result: buildFixtureActionResultV2("backup.catalog"),
@@ -658,6 +764,7 @@ test("RED v2: response consumer admits the v2 domain control and rejects legacy 
   await t.test("positive v2 response-domain control reaches the consumer", (st) => {
     if (!responseConsumerV2Ready(st)) return;
     assert.deepEqual(contract.normalizeActionResponse(valid, request, key), valid);
+    assertResponseBoundToSignedRequestAndResult(valid, request);
   });
   for (const [label, candidate] of candidates) {
     await t.test(label, (st) => {
@@ -693,7 +800,7 @@ test("RED v2: typed job result is bound to the exact request operation, job iden
   await t.test("positive exact job and phase control", (st) => {
     if (!responseConsumerV2Ready(st)) return;
     assert.deepEqual(contract.normalizeActionResponse(valid, request, key), valid);
-    assertResultBoundToRequest(valid.result, request);
+    assertResponseBoundToSignedRequestAndResult(valid, request);
   });
 
   const restoreParameters = {
@@ -701,25 +808,27 @@ test("RED v2: typed job result is bound to the exact request operation, job iden
     jobOperation: "restore-drill",
     jobSha256: "3".repeat(64),
   };
+  const reboundIdentityParameters = {
+    ...parameters,
+    jobFileName: "fedcba9876543210.json",
+    jobId: "fedcba9876543210",
+    jobSha256: "2".repeat(64),
+  };
   const mutations = [
     ["valid operation and phase rebind", buildFixtureActionResultV2(
       "backup.job.execute",
       restoreParameters,
-    )],
-    ["valid job identity rebind", {
-      ...result,
-      job: {
-        ...result.job,
-        jobFileName: "job-0123456789abcdef.json",
-        jobId: "job-0123456789abcdef",
-      },
-    }],
+    ), restoreParameters],
+    ["valid job identity rebind", buildFixtureActionResultV2(
+      "backup.job.execute",
+      reboundIdentityParameters,
+    ), reboundIdentityParameters],
     ["valid phase rebind with original operation", {
       ...result,
       phases: buildFixtureActionResultV2("backup.job.execute", restoreParameters).phases,
     }],
   ];
-  for (const [label, mutatedResult] of mutations) {
+  for (const [index, [label, mutatedResult, coherentParameters]] of mutations.entries()) {
     await t.test(label, (st) => {
       if (!responseConsumerV2Ready(st)) return;
       assert.deepEqual(
@@ -727,8 +836,32 @@ test("RED v2: typed job result is bound to the exact request operation, job iden
         valid,
         `${label} negative is meaningful only after the exact request-bound result is admitted`,
       );
+      if (coherentParameters) {
+        const coherentRequest = signedRequest(
+          "backup.job.execute",
+          coherentParameters,
+          trusted,
+          50 + index,
+        );
+        const coherentUnsigned = responseUnsigned(coherentRequest, mutatedResult);
+        const coherent = {
+          ...coherentUnsigned,
+          mac: responseMac(coherentUnsigned, key),
+        };
+        assert.deepEqual(
+          contract.normalizeActionResponse(coherent, coherentRequest, key),
+          coherent,
+          `${label} must first be admitted as an internally coherent result for its own request`,
+        );
+        assertResponseBoundToSignedRequestAndResult(coherent, coherentRequest);
+      }
       const candidateUnsigned = responseWithResealedResult(validUnsigned, mutatedResult);
       const candidate = { ...candidateUnsigned, mac: responseMac(candidateUnsigned, key) };
+      assert.equal(
+        candidate.resultSha256,
+        fixtureSha256(canonicalFixtureJson(mutatedResult)),
+        `${label} must reseal the internally coherent result before request binding is tested`,
+      );
       assert.throws(
         () => contract.normalizeActionResponse(candidate, request, key),
         /result|job|operation|phase/i,
@@ -864,6 +997,9 @@ test("RED v2: active receipt binds exact action plans to phase-scoped Docker aut
       value.resources.actionProfiles["backup.catalog"].profileId =
         value.resources.actionProfiles["backup.job.execute"].profileId;
     }],
+    ["canonical phase plan substitution", (value) => {
+      value.resources.actionProfiles["backup.catalog"].phaseIds = ["prune.plan"];
+    }],
     ["fixed action gains operation", (value) => {
       value.resources.actionProfiles["backup.catalog"].jobOperations = ["backup"];
     }],
@@ -988,9 +1124,6 @@ test("RED v2: active receipt binds exact action plans to phase-scoped Docker aut
       value.resources.capabilityFiles["capability.backup.catalog"].brokerPath =
         "/run/secrets/docker_action_backup_prune_plan";
     }],
-    ["capability digest substitution", (value) => {
-      value.resources.capabilityFiles["capability.backup.catalog"].sha256 = "9".repeat(64);
-    }],
     ["secret-set volume substitution", (value) => {
       value.resources.workerSecretSets["manifest.signing"].volumeId = "jobs.queue";
     }],
@@ -999,9 +1132,6 @@ test("RED v2: active receipt binds exact action plans to phase-scoped Docker aut
     }],
     ["worker file extension", (value) => {
       value.resources.workerSecretSets["manifest.verification"].files.key.extension = true;
-    }],
-    ["network ID substitution", (value) => {
-      value.resources.networks.platform_egress.engineId = "9".repeat(64);
     }],
     ["network extension", (value) => {
       value.resources.networks.platform_egress.extension = true;
@@ -1075,63 +1205,75 @@ test("RED v2: coherent valid-to-valid receipt rebinds cannot be accepted after e
   }
 });
 
-test("RED v2: signed runtime intent detects every Release-owned receipt reference mutation", (t) => {
-  if (!activeReceiptV2Ready(t)) return;
-  const {
-    intent,
-    rawReceipt: receipt,
-    receiptDigest,
-    trusted,
-  } = buildTrustedContextV2(contract, {
-    allowedActions: SCHEDULER_ACTION_NAMES,
-    now: NOW,
-    trustKey: TRUST_KEY,
-  });
-  assert.match(intent.mac, /^[a-f0-9]{64}$/);
-  assert.equal(trusted.receiptDigest, intent.activeReceiptSha256);
-  assert.equal(trusted.receiptDigest, receiptDigest);
-
+test("RED v2: signed runtime intent detects every Release-owned receipt reference mutation", async (t) => {
   const mutations = [
     ["coherent worker image substitution", (value) => {
-      value.resources.phaseProfiles["catalog.capture"].workerImageId = `sha256:${"8".repeat(64)}`;
-      value.resources.phaseProfiles["catalog.capture"].workerImageRef =
-        `registry.example/platform/docker-action-substitute@sha256:${"8".repeat(64)}`;
-    }],
-    ["phase plan substitution", (value) => {
-      value.resources.actionProfiles["backup.catalog"].phaseIds = ["prune.plan"];
+      const profile = value.resources.phaseProfiles["catalog.capture"];
+      const digest = alternateSha256(profile.workerImageId.slice("sha256:".length));
+      profile.workerImageId = `sha256:${digest}`;
+      profile.workerImageRef = profile.workerImageRef.replace(
+        /sha256:[a-f0-9]{64}$/,
+        `sha256:${digest}`,
+      );
     }],
     ["capability file digest", (value) => {
-      value.resources.capabilityFiles["capability.backup.catalog"].sha256 = "9".repeat(64);
+      const file = value.resources.capabilityFiles["capability.backup.catalog"];
+      file.sha256 = alternateSha256(file.sha256);
     }],
     ["worker verification file digest", (value) => {
-      value.resources.workerSecretSets["manifest.verification"].files.key.sha256 = "8".repeat(64);
+      const file = value.resources.workerSecretSets["manifest.verification"].files.key;
+      file.sha256 = alternateSha256(file.sha256);
     }],
     ["mount inode", (value) => { value.resources.mounts["backup.root.ro"].inode += 1; }],
     ["network identity", (value) => {
-      value.resources.networks.platform_egress.engineId = "9".repeat(64);
+      const network = value.resources.networks.platform_egress;
+      network.engineId = alternateSha256(network.engineId);
     }],
     ["volume options", (value) => {
-      value.resources.volumes["restore.scratch"].optionsSha256 = "f".repeat(64);
-    }],
-    ["claimed queue identity", (value) => {
-      value.resources.volumes["jobs.queue"].engineName = "attacker_queue";
-    }],
-    ["quarantine same-device binding", (value) => {
-      value.resources.writableSubpaths["backup.quarantine"].device = 99;
+      const volume = value.resources.volumes["restore.scratch"];
+      volume.optionsSha256 = alternateSha256(volume.optionsSha256);
     }],
   ];
   for (const [label, mutate] of mutations) {
-    const candidate = structuredClone(receipt);
-    mutate(candidate);
-    resealActionProfiles(candidate);
-    const normalizedCandidate = contract.normalizeActiveReceipt(candidate, { now: NOW });
-    const candidateDigest = fixtureSha256(canonicalFixtureJson(normalizedCandidate));
-    assert.notEqual(candidateDigest, receiptDigest, `${label} must alter signed receipt lineage`);
-    assert.throws(
-      () => contract.normalizeTrustedContext(intent, candidate, TRUST_KEY, { now: NOW }),
-      /receipt digest|does not match/i,
-      label,
-    );
+    await t.test(label, (st) => {
+      if (!activeReceiptV2Ready(st)) return;
+      const {
+        intent,
+        rawReceipt: receipt,
+        receiptDigest,
+        trusted,
+      } = buildTrustedContextV2(contract, {
+        allowedActions: SCHEDULER_ACTION_NAMES,
+        now: NOW,
+        trustKey: TRUST_KEY,
+      });
+      assert.match(intent.mac, /^[a-f0-9]{64}$/);
+      assert.equal(trusted.receiptDigest, intent.activeReceiptSha256);
+      assert.equal(trusted.receiptDigest, receiptDigest);
+      assert.equal(
+        fixtureSha256(canonicalFixtureJson(
+          contract.normalizeActiveReceipt(structuredClone(receipt), { now: NOW }),
+        )),
+        receiptDigest,
+        `${label} negative is meaningful only after the original receipt normalizes`,
+      );
+      assert.doesNotThrow(
+        () => contract.normalizeTrustedContext(intent, receipt, TRUST_KEY, { now: NOW }),
+        `${label} negative is meaningful only after the original signed lineage is admitted`,
+      );
+
+      const candidate = structuredClone(receipt);
+      mutate(candidate);
+      resealActionProfiles(candidate);
+      const normalizedCandidate = contract.normalizeActiveReceipt(candidate, { now: NOW });
+      const candidateDigest = fixtureSha256(canonicalFixtureJson(normalizedCandidate));
+      assert.notEqual(candidateDigest, receiptDigest, `${label} must alter signed receipt lineage`);
+      assert.throws(
+        () => contract.normalizeTrustedContext(intent, candidate, TRUST_KEY, { now: NOW }),
+        /receipt digest|does not match/i,
+        `${label} must cross semantic receipt admission and fail only at signed intent lineage`,
+      );
+    });
   }
 });
 
@@ -1171,7 +1313,7 @@ function responseUnsigned(request, result) {
     errorCode: null,
     action: request.action,
     requestId: request.requestId,
-    requestSha256: fixtureSha256(canonicalFixtureJson(request)),
+    requestSha256: canonicalSignedRequestSha256(request),
     result,
     resultSha256: fixtureSha256(canonicalFixtureJson(result)),
   };
@@ -1199,6 +1341,76 @@ function requestMac(unsigned, key) {
     .update(REQUEST_MAC_DOMAIN)
     .update(canonicalFixtureJson(unsigned))
     .digest("hex");
+}
+
+function canonicalSignedRequestSha256(request) {
+  assert.deepEqual(
+    Object.keys(request).sort(),
+    [...REQUEST_KEYS].sort(),
+    "requestSha256 requires the exact complete signed request",
+  );
+  assert.match(request.mac, /^[a-f0-9]{64}$/);
+  return fixtureSha256(canonicalFixtureJson(request));
+}
+
+function assertResponseBoundToSignedRequestAndResult(response, request) {
+  const requestSha256 = canonicalSignedRequestSha256(request);
+  assert.equal(
+    response.requestSha256,
+    requestSha256,
+    "response requestSha256 must bind the complete canonical signed request",
+  );
+  assert.notEqual(
+    response.requestSha256,
+    fixtureSha256(request.requestId),
+    "requestId alone is not a request identity digest",
+  );
+  assert.equal(
+    response.resultSha256,
+    fixtureSha256(canonicalFixtureJson(response.result)),
+    "response resultSha256 must bind the complete canonical result",
+  );
+  if (response.result !== null) assertResultBoundToRequest(response.result, request);
+}
+
+function evidenceBrokerHarness({ key, result, trusted }) {
+  const leaseEvents = [];
+  let executions = 0;
+  const replayStore = {
+    acquire() {
+      leaseEvents.push("acquire");
+      return {
+        preserve() {
+          leaseEvents.push("preserve");
+        },
+        recordWorker() {},
+        release() {
+          leaseEvents.push("release");
+        },
+      };
+    },
+    admitActivation() {},
+    admitTrustedContext() {},
+    consume() {},
+  };
+  const core = createBrokerCore({
+    trustedContextProvider: async () => trusted,
+    capabilityProvider: async () => key,
+    engine: {
+      async execute() {
+        executions += 1;
+        return structuredClone(result);
+      },
+    },
+    replayStore,
+    now: () => NOW,
+    operationTimeoutMs: 100,
+  });
+  return {
+    core,
+    executeCount: () => executions,
+    leaseEvents,
+  };
 }
 
 function capabilityKey(action) {
@@ -1286,6 +1498,11 @@ function activeReceiptV2Ready(t) {
   if (contract.ACTIVE_RECEIPT_SCHEMA === ACTIVE_RECEIPT_SCHEMA_V2) return true;
   t.todo("blocked until the product active receipt schema reaches v2");
   return false;
+}
+
+function alternateSha256(value) {
+  assert.match(value, /^[a-f0-9]{64}$/);
+  return `${value[0] === "0" ? "1" : "0"}${value.slice(1)}`;
 }
 
 function omit(value, key) {

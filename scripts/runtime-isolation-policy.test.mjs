@@ -175,8 +175,53 @@ test("follows rendered volumes_from authority instead of trusting an empty local
   });
 });
 
+test("rejects an unprovable external container volumes_from authority", (t) => {
+  assertMutationRejected(t, {
+    checks: ["raw-socket-single-owner"],
+    mutate(config) {
+      config.services.cadvisor.volumes = [];
+      config.services.cadvisor.volumes_from = ["container:untrusted-runtime:ro"];
+    },
+  });
+});
+
+test("accepts a project-private safe volume as a raw-authority positive control", (t) => {
+  const baseline = rawAuthorityBaselineOrTodo(t);
+  if (!baseline) return;
+  baseline.services.cadvisor.volumes = [{
+    type: "volume",
+    source: "metrics_scratch",
+    target: "/var/lib/cadvisor",
+    read_only: true,
+    volume: {},
+  }];
+  baseline.volumes.metrics_scratch = { name: "platform_infra_vps_metrics_scratch" };
+
+  assert.equal(renderedServiceOwnsRawSocket(baseline, "cadvisor"), false);
+  assert.equal(
+    checkStatus(evaluateRuntimeIsolation(baseline), "raw-socket-single-owner"),
+    "passed",
+    "a proven project-private volume must not be misclassified as raw Docker authority",
+  );
+});
+
+test("accepts internal volumes_from from a socketless service as a positive control", (t) => {
+  const baseline = rawAuthorityBaselineOrTodo(t);
+  if (!baseline) return;
+  assert.equal(renderedServiceOwnsRawSocket(baseline, "node-exporter"), false);
+  baseline.services.cadvisor.volumes = [];
+  baseline.services.cadvisor.volumes_from = ["node-exporter:ro"];
+
+  assert.equal(renderedServiceOwnsRawSocket(baseline, "cadvisor"), false);
+  assert.equal(
+    checkStatus(evaluateRuntimeIsolation(baseline), "raw-socket-single-owner"),
+    "passed",
+    "internal volumes_from must remain safe when its exact source service is socketless",
+  );
+});
+
 for (const serviceName of ["cadvisor", "node-exporter"]) {
-  for (const source of ["/", "/run", "/var/run", "/run/docker.sock"]) {
+  for (const source of ["/", "/var", "/run", "/var/run", "/run/docker.sock"]) {
     test(`rejects ${serviceName} raw socket exposing mount ${source}`, (t) => {
       assertMutationRejected(t, {
         checks: ["raw-socket-single-owner"],
@@ -194,7 +239,7 @@ for (const serviceName of ["cadvisor", "node-exporter"]) {
   }
 }
 
-for (const device of ["/", "/run", "/var/run"]) {
+for (const device of ["/", "/var", "/run", "/var/run"]) {
   test(`rejects cAdvisor named-volume alias ${device} to the raw socket`, (t) => {
     assertMutationRejected(t, {
       checks: ["raw-socket-single-owner"],
@@ -210,6 +255,33 @@ for (const device of ["/", "/run", "/var/run"]) {
           driver: "local",
           driver_opts: { type: "none", o: "bind,ro", device },
         };
+      },
+    });
+  });
+}
+
+for (const [label, declaration] of [
+  [
+    "external precreated volume",
+    { external: true, name: "untrusted_precreated_runtime" },
+  ],
+  [
+    "explicitly named precreated volume",
+    { name: "untrusted_precreated_runtime" },
+  ],
+]) {
+  test(`rejects cAdvisor ${label} because its Engine definition is unprovable`, (t) => {
+    assertMutationRejected(t, {
+      checks: ["raw-socket-single-owner"],
+      mutate(config) {
+        config.services.cadvisor.volumes = [{
+          type: "volume",
+          source: "precreated_runtime",
+          target: "/host-runtime",
+          read_only: true,
+          volume: {},
+        }];
+        config.volumes.precreated_runtime = structuredClone(declaration);
       },
     });
   });
@@ -462,7 +534,7 @@ for (const [label, check, mutate] of [
 for (const declaration of [
   { external: true, name: "platform_infra_vps_backup_scheduler_jobs" },
   { name: "shared_backup_scheduler_jobs" },
-  { name: "${COMPOSE_PROJECT_NAME}_backup_scheduler_jobs" },
+  { name: "platform_infra_vps_docker_action_broker_state" },
 ]) {
   test(`rejects claimed queue alias ${JSON.stringify(declaration)}`, (t) => {
     assertMutationRejected(t, {
@@ -689,6 +761,13 @@ function assertMutationRejected(t, { checks, mutate }) {
   if (!baseline) return;
 
   const baselineReport = evaluateRuntimeIsolation(baseline);
+  if (checks.includes("raw-socket-single-owner")) {
+    assert.deepEqual(
+      renderedRawSocketOwners(baseline),
+      ["docker-action-broker"],
+      "raw-authority mutation baseline must independently prove one exact owner",
+    );
+  }
   const blockedTargets = checks
     .map((id) => ({ id, status: checkStatus(baselineReport, id) ?? "missing" }))
     .filter(({ status }) => status !== "passed");
@@ -703,6 +782,13 @@ function assertMutationRejected(t, { checks, mutate }) {
 
   const candidate = structuredClone(baseline);
   mutate(candidate);
+  if (checks.includes("raw-socket-single-owner")) {
+    assert.notDeepEqual(
+      renderedRawSocketOwners(candidate),
+      ["docker-action-broker"],
+      "raw-authority mutation must independently widen or make authority unprovable",
+    );
+  }
   const report = evaluateRuntimeIsolation(candidate);
   for (const id of checks) {
     assert.equal(
@@ -711,6 +797,19 @@ function assertMutationRejected(t, { checks, mutate }) {
       `mutation did not reject at its intended consumer check: ${id}\n${report.failures.join("\n")}`,
     );
   }
+}
+
+function rawAuthorityBaselineOrTodo(t) {
+  const baseline = canonicalComposeRenderOrSkip(t, "candidate");
+  if (!baseline) return null;
+  const report = evaluateRuntimeIsolation(baseline);
+  const status = checkStatus(report, "raw-socket-single-owner");
+  if (status !== "passed") {
+    t.todo(`blocked by candidate policy consumer RED: raw-socket-single-owner=${status ?? "missing"}`);
+    return null;
+  }
+  assert.deepEqual(renderedRawSocketOwners(baseline), ["docker-action-broker"]);
+  return baseline;
 }
 
 function admittedCandidatePolicyOrTodo(t) {
@@ -812,15 +911,26 @@ function findComposeCli() {
     "/sbin",
   ].filter(Boolean).join(path.delimiter);
 
-  const bundledCompose = process.env.PLATFORM_TEST_DOCKER_COMPOSE_BIN
+  const composeOverride = process.env.PLATFORM_TEST_DOCKER_COMPOSE_BIN;
+  const bundledCompose = composeOverride
     || path.resolve(root, "../compose-runtime/docker-compose");
   if (fs.existsSync(bundledCompose) && fs.statSync(bundledCompose).isFile()) {
-    const sha256 = createHash("sha256").update(fs.readFileSync(bundledCompose)).digest("hex");
-    if (!process.env.PLATFORM_TEST_DOCKER_COMPOSE_BIN && sha256 !== pinnedComposeSha256) {
+    const expectedSha256 = composeOverride
+      ? String(process.env.PLATFORM_TEST_DOCKER_COMPOSE_SHA256 || "")
+      : pinnedComposeSha256;
+    if (!/^[a-f0-9]{64}$/.test(expectedSha256)) {
       return {
         available: false,
         path: searchPath,
-        reason: `bundled Compose SHA256 mismatch at ${bundledCompose}: ${sha256}`,
+        reason: "PLATFORM_TEST_DOCKER_COMPOSE_BIN requires PLATFORM_TEST_DOCKER_COMPOSE_SHA256",
+      };
+    }
+    const sha256 = createHash("sha256").update(fs.readFileSync(bundledCompose)).digest("hex");
+    if (sha256 !== expectedSha256) {
+      return {
+        available: false,
+        path: searchPath,
+        reason: `Compose SHA256 mismatch at ${bundledCompose}: expected ${expectedSha256}, got ${sha256}`,
       };
     }
     const probe = spawnSync(bundledCompose, ["version", "--short"], {
@@ -850,41 +960,11 @@ function findComposeCli() {
     };
   }
 
-  const resolved = spawnSync("/usr/bin/which", ["docker"], {
-    encoding: "utf8",
-    env: { LANG: "C", LC_ALL: "C", PATH: searchPath },
-    timeout: 5_000,
-  });
-  if (resolved.status !== 0 || !resolved.stdout.trim()) {
-    return {
-      available: false,
-      path: searchPath,
-      reason: "docker CLI not found in local PATH or Docker Desktop; no stored canonical render exists",
-    };
-  }
-
-  const docker = resolved.stdout.trim();
-  const dockerPath = [path.dirname(docker), searchPath].join(path.delimiter);
-  const probe = spawnSync(docker, ["compose", "version", "--short"], {
-    encoding: "utf8",
-    env: {
-      DOCKER_HOST: "unix:///tmp/platform-compose-probe-engine-must-not-exist.sock",
-      HOME: os.tmpdir(),
-      LANG: "C",
-      LC_ALL: "C",
-      PATH: dockerPath,
-    },
-    timeout: 10_000,
-  });
-  if (probe.status !== 0) {
-    const detail = `${probe.stderr || probe.stdout || `status ${probe.status}`}`.trim();
-    return {
-      available: false,
-      path: dockerPath,
-      reason: `docker CLI found at ${docker}, but the local Compose plugin is unavailable: ${detail}`,
-    };
-  }
-  return { available: true, path: dockerPath, reason: "", docker };
+  return {
+    available: false,
+    path: searchPath,
+    reason: "no SHA-pinned standalone Compose renderer is available; an unpinned docker compose plugin is not admissible",
+  };
 }
 
 function prepareComposeExecutionPath(temporaryRoot, candidateOverlay) {
@@ -1121,12 +1201,21 @@ function renderedServiceOwnsRawSocket(config, name, ancestry = new Set()) {
   assert.ok(service, `unknown rendered service ${name}`);
   const next = new Set(ancestry).add(name);
   if ((service.volumes ?? []).some((mount) => {
-    const source = mount?.type === "volume"
-      ? config.volumes?.[mount.source]?.driver_opts?.device
-      : mount?.source;
-    return exposesDockerSocket(source);
+    if (mount?.type !== "volume") return exposesDockerSocket(mount?.source);
+    const volumeName = String(mount?.source || "");
+    const declaration = config.volumes?.[volumeName];
+    const targetCarriesHostAuthority = /(?:^|\/)(?:host(?:-runtime)?|rootfs)(?:\/|$)/.test(String(mount?.target || ""));
+    if (!declaration || declaration.external === true) return targetCarriesHostAuthority;
+    if (declaration.name && declaration.name !== `platform_infra_vps_${volumeName}`) return targetCarriesHostAuthority;
+    if (declaration.driver && declaration.driver !== "local") return targetCarriesHostAuthority;
+    if (declaration.driver_opts) {
+      const device = declaration.driver_opts.device;
+      return device ? exposesDockerSocket(device) : targetCarriesHostAuthority;
+    }
+    return false;
   })) return true;
   return (service.volumes_from ?? []).some((rawReference) => {
+    if (typeof rawReference === "string" && rawReference.startsWith("container:")) return true;
     const reference = typeof rawReference === "string"
       ? rawReference.split(":")[0]
       : String(rawReference?.source || rawReference?.service || "");

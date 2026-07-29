@@ -1,13 +1,22 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 import { BACKUP_JOB_SCHEMA } from "../control-center/backup/contracts.mjs";
+import * as broker from "./docker-action-broker.mjs";
+import * as actionContract from "./docker-action-contract.mjs";
 import * as client from "./docker-action-client.mjs";
+import {
+  buildFixtureActionResultV2,
+  buildFixtureTrustedContextV2,
+  fixtureCapabilityKey,
+} from "./docker-action-v2-fixtures.mjs";
 
 const {
   buildClientRequest,
@@ -31,6 +40,7 @@ const MAX_CLAIMED_JOB_BYTES = 128 * 1024;
 const MAX_SIGNED_REQUEST_BYTES = 16 * 1024;
 const MAX_EXECVE_STRING_BYTES = 128 * 1024;
 const MAX_PHASE_OUTPUT_BYTES = 4096;
+const REPOSITORY_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 test("client rejects raw argument injection before constructing a request", () => {
   const control = buildClientRequest("prune-manifest-backups-plan", [], {
@@ -130,6 +140,36 @@ test("RED v2: real UDS consumer accepts canonical success and authenticated reje
     });
     assert.deepEqual(admitted, rejected);
   });
+});
+
+test("RED v2: real UDS producer emits one bounded canonical request frame", async () => {
+  const request = wireRequest();
+  assertManualRequestV2(request);
+  const result = canonicalActionResultV2(request);
+  const response = signedResponse(request, {
+    status: "completed",
+    statusCode: 200,
+    errorCode: null,
+    result,
+  });
+  const exchange = await invokeWithLocalBroker(
+    (socketPath) => sendActionRequest(request, socketPath, CAPABILITY),
+    (received) => {
+      assert.deepEqual(received, request);
+      return response;
+    },
+    { encodeResponse: canonicalJsonOracle },
+  );
+  assert.equal(
+    exchange.requestWire,
+    canonicalJsonOracle(request),
+    "the request wire itself, not merely its MAC input, must be canonical JSON",
+  );
+  assert.ok(
+    Buffer.byteLength(exchange.requestWire) <= MAX_SIGNED_REQUEST_BYTES,
+    "the exact signed request frame must stay inside the broker's 16 KiB admission bound",
+  );
+  assert.deepEqual(exchange.value, response);
 });
 
 test("RED v2: real UDS consumer rejects the complete authenticated response mutation matrix", async (t) => {
@@ -244,6 +284,123 @@ test("RED v2: real UDS consumer rejects the complete authenticated response muta
     });
   }
 });
+
+test("RED v2: real UDS consumer requires exactly one canonical response frame and one LF", async (t) => {
+  const request = wireRequest();
+  assertManualRequestV2(request);
+  const result = canonicalActionResultV2(request);
+  const valid = signedResponse(request, {
+    status: "completed",
+    statusCode: 200,
+    errorCode: null,
+    result,
+  });
+  const canonical = canonicalJsonOracle(valid);
+  const control = await exchangeWithLocalBroker(request, valid, {
+    responseFrame: () => `${canonical}\n`,
+  });
+  assert.deepEqual(control, valid);
+
+  const invalidFrames = [
+    ["missing LF", canonical],
+    ["two valid response frames", `${canonical}\n${canonical}\n`],
+    ["bytes after the only delimited frame", `${canonical}\ntrailing`],
+    ["extra trailing LF", `${canonical}\n\n`],
+    ["empty delimited frame", "\n"],
+  ];
+  for (const [label, frame] of invalidFrames) {
+    await t.test(label, async () => {
+      const positive = await exchangeWithLocalBroker(request, valid, {
+        responseFrame: () => `${canonical}\n`,
+      });
+      assert.deepEqual(positive, valid, `${label} requires a real single-frame positive control`);
+      await assert.rejects(
+        () => exchangeWithLocalBroker(request, valid, {
+          responseFrame: () => frame,
+        }),
+        /response.*(?:canonical|delimiter|frame|malformed|wire)/i,
+        `${label} must be rejected only after reaching the real UDS response consumer`,
+      );
+    });
+  }
+});
+
+testWhenProductionExports(
+  [
+    [actionContract, "normalizeActionResponse"],
+    [actionContract, "signActionResponse"],
+    [broker, "encodeActionResponseFrame"],
+  ],
+  "RED v2: production broker encoder round-trips real core success and signed rejection through the real client",
+  async () => {
+    const action = "backup.prune.plan";
+    const command = "prune-manifest-backups-plan";
+    const capabilityKey = fixtureCapabilityKey(action);
+    const { trusted } = buildFixtureTrustedContextV2({
+      allowedActions: [action],
+      now: NOW,
+    });
+    const request = buildClientRequest(command, [], {
+      runtimeIntentId: trusted.intent.intentId,
+      activeReceiptSha256: trusted.receiptDigest,
+      combinedRenderSha256: trusted.receipt.combinedRenderSha256,
+      capabilityKey,
+      now: NOW,
+      requestId: "123e4567-e89b-42d3-a456-426614174100",
+      nonce: "B".repeat(43),
+    });
+    const result = buildFixtureActionResultV2(action);
+    const replayStore = {
+      acquire() {
+        return { preserve() {}, recordWorker() {}, release() {} };
+      },
+      admitActivation() {},
+      admitTrustedContext() {},
+      consume() {},
+    };
+    const core = broker.createBrokerCore({
+      trustedContextProvider: async () => trusted,
+      capabilityProvider: async () => capabilityKey,
+      engine: { execute: async () => result },
+      replayStore,
+      now: () => NOW,
+      operationTimeoutMs: 100,
+    });
+    const wire = await core.handle(Buffer.from(canonicalJsonOracle(request)));
+    assert.equal(wire.statusCode, 200);
+    const encodedSuccess = broker.encodeActionResponseFrame(wire.body);
+    assertProductionResponseFrame(encodedSuccess, wire.body);
+    const completed = await exchangeWithLocalBroker(request, wire.body, {
+      capabilityKey,
+      responseFrame: () => encodedSuccess,
+    });
+    assert.deepEqual(completed, wire.body);
+
+    const rejectedUnsigned = {
+      schema: RESPONSE_SCHEMA_V2,
+      status: "rejected",
+      statusCode: 403,
+      errorCode: "ACTION_REJECTED",
+      action: request.action,
+      requestId: request.requestId,
+      requestSha256: sha256Bytes(canonicalJsonOracle(request)),
+      result: null,
+      resultSha256: sha256Bytes(canonicalJsonOracle(null)),
+    };
+    const rejected = actionContract.signActionResponse(rejectedUnsigned, capabilityKey);
+    const encodedRejection = broker.encodeActionResponseFrame(rejected);
+    assertProductionResponseFrame(encodedRejection, rejected);
+    const admittedRejection = await exchangeWithLocalBroker(request, rejected, {
+      capabilityKey,
+      responseFrame: () => encodedRejection,
+    });
+    assert.deepEqual(
+      admittedRejection,
+      rejected,
+      "the production encoder and real client must preserve an authenticated semantic rejection",
+    );
+  },
+);
 
 test("capability reader requires stable private ownership, parents and one link", async (t) => {
   for (const scenario of [
@@ -366,6 +523,58 @@ test("RED v2 API: real client exports the testable CLI command boundary", () => 
   );
 });
 
+test("RED v2 API: real client exports the root-owned default claimed-job policy", () => {
+  assert.equal(
+    typeof client.defaultClaimedJobPolicy,
+    "function",
+    "docker-action-client.mjs must export defaultClaimedJobPolicy so main's real queue boundary is testable",
+  );
+});
+
+test("RED v2 API: real broker exports its canonical response frame encoder", () => {
+  assert.equal(
+    typeof broker.encodeActionResponseFrame,
+    "function",
+    "docker-action-broker.mjs must export encodeActionResponseFrame so the client is tested against production wire bytes",
+  );
+});
+
+testWhenClientExports(
+  ["defaultClaimedJobPolicy"],
+  "RED v2: default claimed-job policy is the exact root-owned running queue boundary",
+  () => {
+    const jobsDirectory = "/var/lib/platform/test-only-backup-jobs";
+    const policy = client.defaultClaimedJobPolicy({
+      BACKUP_SCHEDULER_JOBS_DIR: jobsDirectory,
+      DOCKER_ACTION_CLAIMED_JOB_GID: "501",
+      DOCKER_ACTION_CLAIMED_JOB_MAXIMUM_BYTES: String(MAX_CLAIMED_JOB_BYTES * 4),
+      DOCKER_ACTION_CLAIMED_JOB_UID: "501",
+    });
+    assert.deepEqual(Object.keys(policy).sort(), [
+      "expectedGid",
+      "expectedUid",
+      "maximumBytes",
+      "trustedRoot",
+    ]);
+    assert.deepEqual(policy, {
+      expectedGid: 0,
+      expectedUid: 0,
+      maximumBytes: MAX_CLAIMED_JOB_BYTES,
+      trustedRoot: path.join(jobsDirectory, "running"),
+    });
+    assert.deepEqual(
+      client.defaultClaimedJobPolicy({}),
+      {
+        expectedGid: 0,
+        expectedUid: 0,
+        maximumBytes: MAX_CLAIMED_JOB_BYTES,
+        trustedRoot: "/var/www/project-state/backup-jobs/running",
+      },
+      "an empty environment must retain the production queue default",
+    );
+  },
+);
+
 testWhenClientExports(
   ["readClaimedBackupJob", "runClientCommand"],
   "RED v2: real CLI command carries one claimed file through signed request and local UDS response",
@@ -418,6 +627,55 @@ testWhenClientExports(
       }));
     });
   }
+  },
+);
+
+testWhenProductionExports(
+  [
+    [client, "readClaimedBackupJob"],
+    [client, "runClientCommand"],
+    [actionContract, "normalizeActionResponse"],
+    [broker, "encodeActionResponseFrame"],
+  ],
+  "RED v2: scheduler filename reaches the real client module and real UDS response consumer",
+  async (t) => {
+    const fixture = claimedJobFixture(t);
+    const expected = await assertValidClaimedJobControl(
+      requireClaimedJobReader(),
+      fixture,
+    );
+    const exchange = await invokeWithLocalBroker(
+      (socketPath) => invokeSchedulerThroughRealClient(t, fixture, socketPath),
+      (request) => {
+        assert.equal(request.action, "backup.job.execute");
+        assert.deepEqual(
+          request.parameters,
+          expected,
+          "the scheduler-to-client bridge must preserve only the claimed filename-derived metadata",
+        );
+        return signedResponse(request, {
+          status: "completed",
+          statusCode: 200,
+          errorCode: null,
+          result: canonicalActionResultV2(request),
+        });
+      },
+      {
+        responseFrame(response) {
+          return broker.encodeActionResponseFrame(response);
+        },
+      },
+    );
+    assert.equal(exchange.requestWire, canonicalJsonOracle(exchange.request));
+    assert.deepEqual(
+      exchange.value,
+      signedResponse(exchange.request, {
+        status: "completed",
+        statusCode: 200,
+        errorCode: null,
+        result: canonicalActionResultV2(exchange.request),
+      }),
+    );
   },
 );
 
@@ -734,6 +992,26 @@ testWhenClientExports(
     true,
     "both stable reads must come from protected descriptor(s)",
   );
+  assert.equal(
+    observed.state.protectedFstatCount >= 2,
+    true,
+    "the protected descriptor must be fstat'ed before and after its stable reads",
+  );
+  assert.equal(
+    observed.state.fstatBeforeFirstCompleteRead,
+    true,
+    "the first complete descriptor read must be preceded by protected metadata",
+  );
+  assert.equal(
+    observed.state.fstatAfterSecondCompleteRead,
+    true,
+    "the second complete descriptor read must be followed by protected metadata",
+  );
+  assert.deepEqual(
+    Object.keys(observed.state.protectedFstatSnapshots[0]).sort(),
+    ["ctimeMs", "dev", "gid", "ino", "mode", "mtimeMs", "nlink", "size", "uid"],
+    "the harness must expose the complete protected metadata comparison surface",
+  );
   },
 );
 
@@ -764,6 +1042,7 @@ testWhenClientExports(
     afterFirstCompleteRead() {
       fs.writeFileSync(fixture.file, replacement, { mode: 0o600 });
     },
+    freezeProtectedStats: true,
   });
   await assert.rejects(
     async () => readClaimedBackupJob(fixture.fileName, {
@@ -781,6 +1060,87 @@ testWhenClientExports(
     true,
     "the race must be detected only after the consumer performs its second complete descriptor read",
   );
+  assert.deepEqual(
+    observed.state.protectedFstatSnapshots[0],
+    observed.state.protectedFstatSnapshots.at(-1),
+    "the content race freezes every protected stat field so only the two real descriptor buffers expose it",
+  );
+  },
+);
+
+testWhenClientExports(
+  ["readClaimedBackupJob"],
+  "RED v2: metadata-only races are rejected after two identical descriptor reads",
+  async (t) => {
+    const fixture = claimedJobFixture(t);
+    const readClaimedBackupJob = requireClaimedJobReader();
+    const control = observedFilesystem(fixture);
+    await readClaimedBackupJob(fixture.fileName, {
+      ...claimedJobPolicy(fixture),
+      fileSystem: control.fileSystem,
+    });
+    assert.equal(control.state.completeDescriptorReads >= 2, true);
+    assert.equal(control.state.fstatBeforeFirstCompleteRead, true);
+    assert.equal(control.state.fstatAfterSecondCompleteRead, true);
+
+    const observed = observedFilesystem(fixture, {
+      afterFirstCompleteRead() {
+        fs.chmodSync(fixture.file, 0o400);
+      },
+    });
+    await assert.rejects(
+      async () => readClaimedBackupJob(fixture.fileName, {
+        ...claimedJobPolicy(fixture),
+        fileSystem: observed.fileSystem,
+      }),
+      /claimed job.*(?:changed|metadata|mode|permission|race|stable)/i,
+    );
+    assert.equal(observed.state.completeDescriptorReads >= 2, true);
+    assert.equal(observed.state.pathReadAttempts, 0);
+    assert.equal(observed.state.fstatBeforeFirstCompleteRead, true);
+    assert.equal(observed.state.fstatAfterSecondCompleteRead, true);
+    assert.notDeepEqual(
+      observed.state.protectedFstatSnapshots[0],
+      observed.state.protectedFstatSnapshots.at(-1),
+      "the independent metadata-only race must leave the two data buffers unchanged but alter protected stat",
+    );
+  },
+);
+
+testWhenClientExports(
+  ["readClaimedBackupJob"],
+  "RED v2: stable-read compares every security-relevant fstat field",
+  async (t) => {
+    const fields = ["dev", "ino", "size", "mtimeMs", "ctimeMs", "mode", "uid", "gid", "nlink"];
+    for (const field of fields) {
+      await t.test(field, async (st) => {
+        const fixture = claimedJobFixture(st);
+        const readClaimedBackupJob = requireClaimedJobReader();
+        const control = observedFilesystem(fixture);
+        await readClaimedBackupJob(fixture.fileName, {
+          ...claimedJobPolicy(fixture),
+          fileSystem: control.fileSystem,
+        });
+        assert.equal(control.state.fstatAfterSecondCompleteRead, true);
+
+        const observed = observedFilesystem(fixture, {
+          afterSecondReadStatOverrides(stat) {
+            return { [field]: stat[field] + 1 };
+          },
+        });
+        await assert.rejects(
+          async () => readClaimedBackupJob(fixture.fileName, {
+            ...claimedJobPolicy(fixture),
+            fileSystem: observed.fileSystem,
+          }),
+          /claimed job.*(?:changed|metadata|race|stable|stat|mode|owner|link|size)/i,
+          `${field} substitution must be rejected after the positive stable-read control`,
+        );
+        assert.equal(observed.state.completeDescriptorReads >= 2, true);
+        assert.equal(observed.state.fstatBeforeFirstCompleteRead, true);
+        assert.equal(observed.state.fstatAfterSecondCompleteRead, true);
+      });
+    }
   },
 );
 
@@ -796,6 +1156,14 @@ testWhenClientExports(
         document.id = 1234567890123456;
       },
       expected: /job id.*string|claimed job.*id/i,
+    },
+    {
+      label: "raw ID whitespace with a canonical filename",
+      fileName: "0123456789abcdef.json",
+      mutate(document) {
+        document.id = " 0123456789abcdef ";
+      },
+      expected: /claimed job.*id|invalid job id/i,
     },
     {
       label: "array operation",
@@ -826,13 +1194,102 @@ testWhenClientExports(
       },
       expected: /claimed job.*operation|backup operation/i,
     },
+    {
+      label: "dot is outside the exact v2 job identity alphabet",
+      id: "job.0123456789ab",
+      expected: /claimed job.*id|invalid job id/i,
+    },
+    {
+      label: "underscore is outside the exact v2 job identity alphabet",
+      id: "job_0123456789ab",
+      expected: /claimed job.*id|invalid job id/i,
+    },
+    {
+      label: "colon is outside the exact v2 job identity alphabet",
+      id: "job:0123456789ab",
+      expected: /claimed job.*id|invalid job id/i,
+    },
+    {
+      label: "job identity is shorter than sixteen bytes",
+      id: "a".repeat(15),
+      expected: /claimed job.*id|invalid job id/i,
+    },
+    {
+      label: "job identity exceeds one hundred twenty eight bytes",
+      id: "a".repeat(129),
+      expected: /claimed job.*id|invalid job id/i,
+    },
+    {
+      label: "numeric startedAt is not a primitive ISO timestamp",
+      mutate(document) {
+        document.startedAt = Date.parse("2026-07-28T12:00:00.000Z");
+      },
+      expected: /claimed job.*startedAt|startedAt.*(?:string|ISO|timestamp)/i,
+    },
+    {
+      label: "non-canonical startedAt is not admitted by Date coercion",
+      mutate(document) {
+        document.startedAt = "2026-07-28 12:00:00Z";
+      },
+      expected: /claimed job.*startedAt|startedAt.*(?:ISO|timestamp)/i,
+    },
+    {
+      label: "resource external identity whitespace is not trimmed",
+      mutate(document) {
+        document.resources[0].externalId = " catalog ";
+      },
+      expected: /claimed job.*resource|resource identity|externalId/i,
+    },
+    {
+      label: "resource name array is not string-coerced",
+      mutate(document) {
+        document.resources[0].name = ["catalog"];
+      },
+      expected: /claimed job.*resource|resource name.*string/i,
+    },
+    {
+      label: "restore manifest path array is not string-coerced",
+      operation: "restore-drill",
+      mutate(document) {
+        document.sourceManifestPath = ["manifests/source.json"];
+      },
+      expected: /restore.*manifest|source manifest.*string|backup path/i,
+    },
+    {
+      label: "restore manifest backslash is not normalized",
+      operation: "restore-drill",
+      mutate(document) {
+        document.sourceManifestPath = "manifests\\source.json";
+      },
+      expected: /restore.*manifest|source manifest|backup path/i,
+    },
+    {
+      label: "restore manifest whitespace is not trimmed",
+      operation: "restore-drill",
+      mutate(document) {
+        document.sourceManifestPath = " manifests/source.json ";
+      },
+      expected: /restore.*manifest|source manifest|backup path/i,
+    },
+    {
+      label: "restore manifest nested traversal is rejected before normalization",
+      operation: "restore-drill",
+      mutate(document) {
+        document.sourceManifestPath = "manifests/../source.json";
+      },
+      expected: /restore.*manifest|source manifest|backup path/i,
+    },
   ];
   for (const scenario of invalidDocuments) {
     await t.test(scenario.label, async (st) => {
       const readClaimedBackupJob = requireClaimedJobReader();
-      const control = claimedJobFixture(st);
+      const control = claimedJobFixture(st, {
+        operation: scenario.operation ?? "backup",
+      });
       await assertValidClaimedJobControl(readClaimedBackupJob, control);
       const fixture = claimedJobFixture(st, {
+        id: scenario.id,
+        operation: scenario.operation,
         fileName: scenario.fileName,
         mutateDocument: scenario.mutate,
       });
@@ -904,6 +1361,16 @@ testWhenClientExports(
 
 function testWhenClientExports(exportNames, name, body) {
   const missing = exportNames.filter((exportName) => typeof client[exportName] !== "function");
+  if (missing.length > 0) {
+    return test.todo(`${name} [activates when ${missing.join(", ")} is exported]`);
+  }
+  return test(name, body);
+}
+
+function testWhenProductionExports(requirements, name, body) {
+  const missing = requirements
+    .filter(([module, exportName]) => typeof module[exportName] !== "function")
+    .map(([, exportName]) => exportName);
   if (missing.length > 0) {
     return test.todo(`${name} [activates when ${missing.join(", ")} is exported]`);
   }
@@ -1069,15 +1536,22 @@ function* jsonStrings(value) {
 
 function observedFilesystem(fixture, {
   afterFirstCompleteRead,
+  afterSecondReadStatOverrides,
+  freezeProtectedStats = false,
 } = {}) {
   const target = path.resolve(fixture.file);
   const descriptorState = new Map();
+  let frozenProtectedStat;
   const state = {
     allProtectedOpensNoFollow: true,
     completeDescriptorReads: 0,
     descriptorBytesRead: 0,
+    fstatAfterSecondCompleteRead: false,
+    fstatBeforeFirstCompleteRead: false,
     firstCompleteReadObserved: false,
     pathReadAttempts: 0,
+    protectedFstatCount: 0,
+    protectedFstatSnapshots: [],
     protectedOpenCount: 0,
   };
 
@@ -1152,6 +1626,26 @@ function observedFilesystem(fixture, {
       }
       return bytes;
     },
+    fstatSync(descriptor, ...args) {
+      const actual = fs.fstatSync(descriptor, ...args);
+      if (!descriptorState.has(descriptor)) return actual;
+      state.protectedFstatCount += 1;
+      state.fstatBeforeFirstCompleteRead ||= state.completeDescriptorReads === 0;
+      state.fstatAfterSecondCompleteRead ||= state.completeDescriptorReads >= 2;
+      frozenProtectedStat ??= statMetadata(actual);
+      let overridesForRead = freezeProtectedStats
+        ? frozenProtectedStat
+        : {};
+      if (state.completeDescriptorReads >= 2 && afterSecondReadStatOverrides) {
+        overridesForRead = {
+          ...overridesForRead,
+          ...afterSecondReadStatOverrides(actual),
+        };
+      }
+      const observed = statWithOverrides(actual, overridesForRead);
+      state.protectedFstatSnapshots.push(statMetadata(observed));
+      return observed;
+    },
     closeSync(descriptor) {
       descriptorState.delete(descriptor);
       return fs.closeSync(descriptor);
@@ -1165,6 +1659,23 @@ function observedFilesystem(fixture, {
     },
   });
   return { fileSystem, state };
+}
+
+function statMetadata(stat) {
+  return Object.fromEntries(
+    ["dev", "ino", "size", "mtimeMs", "ctimeMs", "mode", "uid", "gid", "nlink"]
+      .map((field) => [field, stat[field]]),
+  );
+}
+
+function statWithOverrides(stat, overrides) {
+  return new Proxy(stat, {
+    get(target, property) {
+      if (Object.hasOwn(overrides, property)) return overrides[property];
+      const value = Reflect.get(target, property, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
 }
 
 function observedDescriptorRead(fileSystem, descriptor, size) {
@@ -1187,6 +1698,19 @@ function observedDescriptorRead(fileSystem, descriptor, size) {
 
 function sha256Bytes(value) {
   return crypto.createHash("sha256").update(value).digest("hex");
+}
+
+function assertProductionResponseFrame(frame, response) {
+  assert.ok(
+    typeof frame === "string" || Buffer.isBuffer(frame),
+    "the production response encoder must return exact string or Buffer wire bytes",
+  );
+  const bytes = Buffer.isBuffer(frame) ? frame : Buffer.from(frame);
+  assert.deepEqual(
+    bytes,
+    Buffer.from(`${canonicalJsonOracle(response)}\n`),
+    "the production broker encoder must emit exactly canonical JSON plus one LF",
+  );
 }
 
 function canonicalJsonOracle(value) {
@@ -1431,15 +1955,19 @@ function omit(value, key) {
 async function exchangeWithLocalBroker(
   request,
   response,
-  { encodeResponse = JSON.stringify } = {},
+  {
+    capabilityKey = CAPABILITY,
+    encodeResponse = JSON.stringify,
+    responseFrame,
+  } = {},
 ) {
   const exchange = await invokeWithLocalBroker(
-    (socketPath) => sendActionRequest(request, socketPath, CAPABILITY),
+    (socketPath) => sendActionRequest(request, socketPath, capabilityKey),
     (received) => {
       assert.deepEqual(received, request, "sendActionRequest must carry the exact request over the local UDS");
       return response;
     },
-    { encodeResponse },
+    { encodeResponse, responseFrame },
   );
   assert.deepEqual(exchange.request, request);
   return exchange.value;
@@ -1476,15 +2004,110 @@ async function invokeValidCliControl(
   );
 }
 
+async function invokeSchedulerThroughRealClient(t, fixture, socketPath) {
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "docker-action-scheduler-client-"));
+  const bin = path.join(temporary, "bin");
+  const bridge = path.join(temporary, "real-client-bridge.mjs");
+  const nodeShim = path.join(bin, "node");
+  fs.mkdirSync(bin, { mode: 0o700 });
+  fs.writeFileSync(
+    bridge,
+    [
+      'import { pathToFileURL } from "node:url";',
+      "const [clientPath, command, ...args] = process.argv.slice(2);",
+      "const client = await import(pathToFileURL(clientPath).href);",
+      'if (typeof client.runClientCommand !== "function") throw new Error("real client command seam is unavailable");',
+      'const options = JSON.parse(Buffer.from(process.env.SCHEDULER_CLIENT_OPTIONS_B64, "base64url").toString("utf8"));',
+      'options.capabilityKey = Buffer.from(process.env.SCHEDULER_CLIENT_CAPABILITY_B64, "base64url");',
+      "const response = await client.runClientCommand(command, args, options);",
+      'process.stdout.write(`${JSON.stringify(response)}\\n`);',
+      'if (response.statusCode !== 200 || response.status !== "completed") process.exitCode = 77;',
+      "",
+    ].join("\n"),
+    { mode: 0o600 },
+  );
+  fs.writeFileSync(
+    nodeShim,
+    [
+      "#!/bin/sh",
+      'exec "$SCHEDULER_REAL_NODE" "$SCHEDULER_REAL_CLIENT_BRIDGE" "$@"',
+      "",
+    ].join("\n"),
+    { mode: 0o700 },
+  );
+  t.after(() => fs.rmSync(temporary, { force: true, recursive: true }));
+
+  const options = {
+    ...clientOptions(),
+    claimedJobPolicy: claimedJobPolicy(fixture),
+    socketPath,
+  };
+  const outcome = await collectChildProcess(
+    "/bin/sh",
+    [
+      path.join(REPOSITORY_ROOT, "scripts", "backup-scheduler.sh"),
+      "--run",
+      "execute-backup-job",
+      "--jobFileName",
+      fixture.fileName,
+    ],
+    {
+      cwd: REPOSITORY_ROOT,
+      env: {
+        ...process.env,
+        PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
+        PLATFORM_INFRA_ROOT: REPOSITORY_ROOT,
+        SCHEDULER_CLIENT_CAPABILITY_B64: CAPABILITY.toString("base64url"),
+        SCHEDULER_CLIENT_OPTIONS_B64: Buffer.from(JSON.stringify(options)).toString("base64url"),
+        SCHEDULER_REAL_CLIENT_BRIDGE: bridge,
+        SCHEDULER_REAL_NODE: process.execPath,
+      },
+    },
+  );
+  assert.equal(outcome.code, 0, `${outcome.stdout}\n${outcome.stderr}`);
+  const lines = outcome.stdout.trim().split("\n").filter(Boolean);
+  assert.equal(lines.length, 1, "the scheduler/client bridge must emit exactly one authenticated response");
+  return JSON.parse(lines[0]);
+}
+
+function collectChildProcess(command, args, options) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      ...options,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk;
+      if (Buffer.byteLength(stdout) > 1024 * 1024) child.kill("SIGKILL");
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+      if (Buffer.byteLength(stderr) > 1024 * 1024) child.kill("SIGKILL");
+    });
+    child.once("error", reject);
+    child.once("close", (code, signal) => {
+      resolve({ code, signal, stderr, stdout });
+    });
+  });
+}
+
 async function invokeWithLocalBroker(
   invokeClient,
   responseForRequest,
-  { encodeResponse = JSON.stringify } = {},
+  {
+    encodeResponse = JSON.stringify,
+    responseFrame,
+  } = {},
 ) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "docker-action-client-uds-"));
   fs.chmodSync(directory, 0o700);
   const socketPath = path.join(directory, "broker.sock");
   let receivedFrame;
+  let receivedWire;
   let serverFailure;
   const server = net.createServer((connection) => {
     let bytes = "";
@@ -1497,9 +2120,14 @@ async function invokeWithLocalBroker(
         assert.equal(bytes.endsWith("\n"), true, "the client request must end in one frame delimiter");
         const frames = bytes.slice(0, -1).split("\n");
         assert.equal(frames.length, 1, "the client must emit exactly one request frame");
+        [receivedWire] = frames;
         receivedFrame = JSON.parse(frames[0]);
         const response = responseForRequest(receivedFrame);
-        connection.end(`${encodeResponse(response)}\n`);
+        connection.end(
+          responseFrame
+            ? responseFrame(response)
+            : `${encodeResponse(response)}\n`,
+        );
       } catch (error) {
         serverFailure = error;
         connection.destroy(error);
@@ -1529,5 +2157,5 @@ async function invokeWithLocalBroker(
   if (serverFailure) throw serverFailure;
   if (clientFailure) throw clientFailure;
   assert.ok(receivedFrame, "the local UDS broker must observe exactly one request");
-  return { request: receivedFrame, value };
+  return { request: receivedFrame, requestWire: receivedWire, value };
 }

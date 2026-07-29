@@ -21,6 +21,8 @@ import {
   MAX_PHASE_OUTPUT_BYTES_V2,
   buildFixtureNetworkInspect,
   buildFixturePhaseOutputV2,
+  buildFixtureSignedActionRequestV2,
+  buildFixtureTrustedContextV2,
   buildFixtureVolumeInspect,
   buildRawActiveReceiptV2,
   canonicalFixtureJson,
@@ -37,8 +39,11 @@ const PRUNE_TEST_KEY = Buffer.alloc(48, 0x50);
 const BACKUP_JOB_ID = "0123456789abcdef";
 const BACKUP_JOB_CREATED_AT = "2026-07-28T11:59:00.000Z";
 const REQUEST_ID = "123e4567-e89b-42d3-a456-426614174000";
-const REQUEST_SHA256 = fixtureSha256(REQUEST_ID);
+const REQUEST_INDEX = 426614174000;
 const SNAPSHOT_CONTAINER_PATH = "/run/platform/claimed-job/job.json";
+const MAX_WORKER_ENV_ENTRY_BYTES = 32 * 1024;
+const MAX_WORKER_ENV_TOTAL_BYTES = 64 * 1024;
+const WORKER_TRUSTED_CONTEXT = buildFixtureTrustedContextV2().trusted;
 const BACKUP_JOB_DOCUMENT = Object.freeze({
   ...createBackupJobDocument({
     id: BACKUP_JOB_ID,
@@ -63,6 +68,16 @@ const BACKUP_JOB_DOCUMENT = Object.freeze({
 parseBackupJobDocument(BACKUP_JOB_DOCUMENT);
 const BACKUP_JOB_BYTES = Buffer.from(`${JSON.stringify(BACKUP_JOB_DOCUMENT, null, 2)}\n`);
 const BACKUP_JOB_SHA256 = fixtureSha256(BACKUP_JOB_BYTES);
+const BACKUP_SIGNED_REQUEST = buildFixtureSignedActionRequestV2(
+  "backup.job.execute",
+  backupJobParameters("backup"),
+  {
+    index: REQUEST_INDEX,
+    trustedContext: WORKER_TRUSTED_CONTEXT,
+  },
+);
+assert.equal(BACKUP_SIGNED_REQUEST.requestId, REQUEST_ID);
+const REQUEST_SHA256 = signedRequestSha256(BACKUP_SIGNED_REQUEST);
 const RESTORE_JOB_ID = "job-0123456789abcdef";
 const RESTORE_JOB_DOCUMENT = Object.freeze({
   ...createBackupJobDocument({
@@ -236,6 +251,98 @@ workerTest("CLI entrypoint delegates one fixed command and emits one bounded nor
   );
 });
 
+workerTest("CLI backup and restore jobs consume one exact protected snapshot before fixed dispatch", [
+  "loadClaimedJobSnapshot",
+  "runWorkerCli",
+], async (t) => {
+  const runWorkerCli = requireWorkerFunction("runWorkerCli");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "docker-worker-cli-jobs-"));
+  t.after(() => fs.rmSync(root, { force: true, recursive: true }));
+  fs.chmodSync(root, 0o700);
+  const uid = process.getuid?.() ?? fs.statSync(root).uid;
+  const gid = process.getgid?.() ?? fs.statSync(root).gid;
+  const cases = [
+    {
+      action: "backup.job.execute",
+      bytes: BACKUP_JOB_BYTES,
+      command: "backup-job",
+      job: backupJobParameters("backup"),
+      phaseId: "job.backup.capture",
+    },
+    {
+      action: "backup.job.execute",
+      bytes: RESTORE_JOB_BYTES,
+      command: "restore-job",
+      job: {
+        jobFileName: `${RESTORE_JOB_ID}.json`,
+        jobId: RESTORE_JOB_ID,
+        jobOperation: "restore-drill",
+        jobSha256: RESTORE_JOB_SHA256,
+      },
+      phaseId: "job.restore.verify",
+    },
+  ];
+
+  for (const fixture of cases) {
+    await t.test(fixture.command, async () => {
+      const snapshotPath = path.join(root, `${fixture.command}.json`);
+      fs.writeFileSync(snapshotPath, fixture.bytes, { mode: 0o400 });
+      fs.chmodSync(snapshotPath, 0o400);
+      const toolCalls = [];
+      let stdout = "";
+      let stderr = "";
+      const identity = {
+        action: fixture.action,
+        job: fixture.job,
+        phaseId: fixture.phaseId,
+        requestId: REQUEST_ID,
+      };
+      const expected = rawWorkerResult({
+        ...identity,
+        command: fixture.command,
+      });
+      const exitCode = await runWorkerCli(
+        [process.execPath, workerPath, fixture.command],
+        {
+          writeStdout: (chunk) => { stdout += String(chunk); },
+          writeStderr: (chunk) => { stderr += String(chunk); },
+        },
+        {
+          claimedJobPolicy: {
+            expectedGid: gid,
+            expectedMode: 0o400,
+            expectedUid: uid,
+            maximumBytes: 128 * 1024,
+            parentRoot: root,
+          },
+          env: workerCliEnvironment({
+            ...identity,
+            snapshotPath,
+          }),
+          runFixedTool: async (invocation) => {
+            toolCalls.push(structuredClone(invocation));
+            assert.deepEqual(
+              invocation.parameters,
+              fixture.job,
+              `${fixture.command} dispatcher lost the byte-bound claimed-job identity`,
+            );
+            return fixtureToolOutput(invocation.command, invocation.parameters);
+          },
+        },
+      );
+
+      assert.equal(exitCode, 0);
+      assert.equal(stderr, "");
+      assert.equal(stdout, `${JSON.stringify(expected)}\n`);
+      assert.deepEqual(fs.readFileSync(snapshotPath), fixture.bytes);
+      assert.equal(fs.statSync(snapshotPath).mode & 0o777, 0o400);
+      assert.equal(toolCalls.length, 1, `${fixture.command} dispatched more than once`);
+      assert.equal(toolCalls[0].command, fixture.command);
+      assert.equal(toolCalls[0].shell, false);
+    });
+  }
+});
+
 workerTest("protected-file reader enforces leaf and ancestor identity, mode, links and byte bounds", [
   "readProtectedFile",
 ], (t) => {
@@ -369,17 +476,17 @@ workerTest("worker loads the protected claimed-job file and binds its exact meta
     sourceId: "jobs.running",
   });
 
-  const sameSizeTamper = Buffer.from(BACKUP_JOB_BYTES);
-  sameSizeTamper[sameSizeTamper.length - 2] = sameSizeTamper[sameSizeTamper.length - 2] === 0x7d
-    ? 0x20
-    : 0x7d;
-  assert.equal(sameSizeTamper.length, BACKUP_JOB_BYTES.length);
+  const sameSizeTamper = validSameSizeClaimedJobTamper(
+    BACKUP_JOB_DOCUMENT,
+    BACKUP_JOB_BYTES,
+  );
   fs.chmodSync(file, 0o600);
   fs.writeFileSync(file, sameSizeTamper);
   fs.chmodSync(file, 0o400);
   assert.throws(
     () => loadClaimedJobSnapshot(input),
-    /claimed|job|digest|sha256|metadata|identity|parse|JSON/i,
+    /digest|sha256/i,
+    "a contract-valid same-size substitution must reach the exact digest boundary",
   );
 });
 
@@ -429,13 +536,16 @@ brokerTest("broker stable-reads the exact claimed queue document into an immutab
   assert.equal(snapshot.sourceId, "jobs.running");
   assert.ok(snapshot.bytes.length <= canonicalSource.maximumBytes);
 
-  const sameSizeTamper = Buffer.from(BACKUP_JOB_BYTES);
-  sameSizeTamper[sameSizeTamper.length - 1] = 0x20;
+  const sameSizeTamper = validSameSizeClaimedJobTamper(
+    BACKUP_JOB_DOCUMENT,
+    BACKUP_JOB_BYTES,
+  );
   fs.writeFileSync(jobFile, sameSizeTamper);
   fs.chmodSync(jobFile, 0o600);
   assert.throws(
     () => readClaimedJobSnapshot(input),
-    /digest|sha256|claimed|job|substitution/i,
+    /digest|sha256/i,
+    "the broker reader must reject a valid same-size document only at the digest boundary",
   );
 
   fs.writeFileSync(jobFile, BACKUP_JOB_BYTES);
@@ -455,12 +565,10 @@ brokerTest("semantic executor stable-reads once, seals once, then binds the immu
 ], async (t) => {
   const createSemanticActionExecutor = requireBrokerFunction("createSemanticActionExecutor");
   const readClaimedJobSnapshot = requireBrokerFunction("readClaimedJobSnapshot");
-  const receipt = buildRawActiveReceiptV2();
-  const trusted = {
-    intent: { intentId: "intent.release-v2" },
-    receipt,
-    receiptDigest: fixtureSha256(canonicalFixtureJson(receipt)),
-  };
+  const trusted = WORKER_TRUSTED_CONTEXT;
+  const receipt = trusted.receipt;
+  const request = BACKUP_SIGNED_REQUEST;
+  const requestSha256 = signedRequestSha256(request);
   const source = receipt.resources.claimedJobSources["jobs.running"];
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "docker-worker-read-once-"));
   const queueRoot = path.join(root, "queue");
@@ -475,25 +583,13 @@ brokerTest("semantic executor stable-reads once, seals once, then binds the immu
   fs.chmodSync(sourceFile, 0o600);
 
   let providerCalls = 0;
-  let protectedReadCalls = 0;
   let sealCalls = 0;
   let sourceBufferAfterSeal;
   let sealedHostPath;
   let sealedSnapshot;
   let createdBody;
   const transportCalls = [];
-  const countingIo = new Proxy(fs, {
-    get(target, property) {
-      const value = Reflect.get(target, property);
-      if (property === "readFileSync" || property === "readSync") {
-        return (...args) => {
-          protectedReadCalls += 1;
-          return value.apply(target, args);
-        };
-      }
-      return typeof value === "function" ? value.bind(target) : value;
-    },
-  });
+  const stableReadObservation = observeDescriptorStableReadIo(sourceFile);
   const phase = receipt.resources.phaseProfiles["job.backup.capture"];
   const expectedJobIdentity = {
     jobFileName: `${BACKUP_JOB_ID}.json`,
@@ -506,10 +602,17 @@ brokerTest("semantic executor stable-reads once, seals once, then binds the immu
     command: phase.command,
     job: expectedJobIdentity,
     phaseId: phase.phaseId,
-    requestId: REQUEST_ID,
+    requestId: request.requestId,
   });
   const transport = semanticWorkerTransport({
     brokerStateMountpoint,
+    expectedPhaseCase: () => ({
+      action: "backup.job.execute",
+      parameters: expectedJobIdentity,
+      phaseId: "job.backup.capture",
+      request,
+      snapshot: sealedSnapshot,
+    }),
     onCreateBody: (body) => {
       assert.ok(sealedSnapshot, "worker create occurred before the claimed job was sealed");
       assertExactWorkerBody({
@@ -518,6 +621,7 @@ brokerTest("semantic executor stable-reads once, seals once, then binds the immu
           action: "backup.job.execute",
           parameters: expectedJobIdentity,
           phaseId: "job.backup.capture",
+          request,
           snapshot: sealedSnapshot,
         },
         trusted,
@@ -527,15 +631,20 @@ brokerTest("semantic executor stable-reads once, seals once, then binds the immu
     rawWorkerResult: rawResult,
     receipt,
     calls: transportCalls,
+    trusted,
   });
   const snapshotFileStore = {
     seal(snapshot, {
+      request: admittedRequest,
       requestId,
+      requestSha256: admittedRequestSha256,
       source: admittedSource,
       volumeInspect,
     } = {}) {
       sealCalls += 1;
-      assert.equal(requestId, REQUEST_ID);
+      assert.deepEqual(admittedRequest, request);
+      assert.equal(requestId, request.requestId);
+      assert.equal(admittedRequestSha256, requestSha256);
       assert.deepEqual(admittedSource, source);
       assert.deepEqual(volumeInspect, {
         ...buildFixtureVolumeInspect(receipt, "broker.state"),
@@ -554,7 +663,7 @@ brokerTest("semantic executor stable-reads once, seals once, then binds the immu
       const directory = path.join(
         brokerStateMountpoint,
         source.snapshotVolumeSubpath,
-        REQUEST_SHA256,
+        requestSha256,
       );
       fs.mkdirSync(directory, { mode: 0o700, recursive: true });
       sealedHostPath = path.join(directory, "job.json");
@@ -572,7 +681,7 @@ brokerTest("semantic executor stable-reads once, seals once, then binds the immu
         jobId: snapshot.jobId,
         jobOperation: snapshot.jobOperation,
         jobSha256: snapshot.jobSha256,
-        requestSha256: REQUEST_SHA256,
+        requestSha256,
         snapshotVolumeId: source.snapshotVolumeId,
         snapshotVolumeMountpoint: brokerStateMountpoint,
         snapshotVolumeName: receipt.resources.volumes[source.snapshotVolumeId].engineName,
@@ -598,7 +707,7 @@ brokerTest("semantic executor stable-reads once, seals once, then binds the immu
         },
         source: { ...source, brokerRoot: queueRoot },
         sourceId,
-      }, { io: countingIo });
+      }, { io: stableReadObservation.io });
       assert.equal(Buffer.isBuffer(snapshot.bytes), true);
       return snapshot;
     },
@@ -615,14 +724,16 @@ brokerTest("semantic executor stable-reads once, seals once, then binds the immu
       release: () => leaseEvents.push({ event: "release" }),
     },
     parameters: backupJobParameters("backup"),
-    requestId: REQUEST_ID,
+    request: structuredClone(request),
+    requestId: request.requestId,
+    requestSha256,
     signal: new AbortController().signal,
     trusted,
   });
 
   assert.equal(providerCalls, 1, "the queue consumer must capture one descriptor-stable snapshot");
   assert.equal(sealCalls, 1, "the broker must materialize one immutable snapshot file");
-  assert.ok(protectedReadCalls >= 1, "the injected stable reader was not reached");
+  assertStableReadEvidence(stableReadObservation.evidence);
   assert.equal(
     sourceBufferAfterSeal.length,
     BACKUP_JOB_BYTES.length,
@@ -642,7 +753,7 @@ brokerTest("semantic executor stable-reads once, seals once, then binds the immu
   const env = environmentMap(createdBody.Env);
   assert.equal(env.PLATFORM_CLAIMED_JOB_PATH, SNAPSHOT_CONTAINER_PATH);
   assert.equal(env.PLATFORM_CLAIMED_JOB_SHA256, BACKUP_JOB_SHA256);
-  assert.equal(env.PLATFORM_DOCKER_REQUEST_ID, REQUEST_ID);
+  assert.equal(env.PLATFORM_DOCKER_REQUEST_ID, request.requestId);
   assert.equal(Object.hasOwn(env, "PLATFORM_CLAIMED_JOB_BASE64"), false);
   assert.equal(
     createdBody.HostConfig.Binds.includes(`${sealedHostPath}:${SNAPSHOT_CONTAINER_PATH}:ro`),
@@ -674,13 +785,8 @@ brokerTest("semantic executor stable-reads once, seals once, then binds the immu
 });
 
 test("workerCreateBody emits one exact phase-scoped body for every canonical phase", async (t) => {
-  const receipt = buildRawActiveReceiptV2();
-  const trusted = {
-    intent: { intentId: "intent.release-v2" },
-    receipt,
-    receiptDigest: fixtureSha256(canonicalFixtureJson(receipt)),
-  };
-  const cases = phaseActionCases();
+  const trusted = WORKER_TRUSTED_CONTEXT;
+  const cases = phaseActionCases(trusted);
   await Promise.all(cases.map((phaseCase) => t.test(
     `${phaseCase.action}/${phaseCase.phaseId}`,
     () => assertExactWorkerBody({ phaseCase, trusted }),
@@ -688,29 +794,29 @@ test("workerCreateBody emits one exact phase-scoped body for every canonical pha
 });
 
 bodyMatrixTest("workerCreateBody never collapses operation phases into an action-wide authority union", () => {
-  const receipt = buildRawActiveReceiptV2();
-  const trusted = {
-    intent: { intentId: "intent.release-v2" },
-    receipt,
-    receiptDigest: fixtureSha256(canonicalFixtureJson(receipt)),
-  };
-  const backupCase = phaseActionCases().find(({ phaseId }) => phaseId === "job.backup.capture");
-  const restoreCase = phaseActionCases().find(({ phaseId }) => phaseId === "job.restore.verify");
+  const trusted = WORKER_TRUSTED_CONTEXT;
+  const cases = phaseActionCases(trusted);
+  const backupCase = cases.find(({ phaseId }) => phaseId === "job.backup.capture");
+  const restoreCase = cases.find(({ phaseId }) => phaseId === "job.restore.verify");
   const backupBody = broker.workerCreateBody({
     action: backupCase.action,
-    phaseId: backupCase.phaseId,
-    parameters: backupCase.parameters,
-    requestId: REQUEST_ID,
-    trusted,
     claimedJobSnapshot: backupCase.snapshot,
+    parameters: backupCase.parameters,
+    phaseId: backupCase.phaseId,
+    request: backupCase.request,
+    requestId: backupCase.request.requestId,
+    requestSha256: signedRequestSha256(backupCase.request),
+    trusted,
   });
   const restoreBody = broker.workerCreateBody({
     action: restoreCase.action,
-    phaseId: restoreCase.phaseId,
-    parameters: restoreCase.parameters,
-    requestId: REQUEST_ID,
-    trusted,
     claimedJobSnapshot: restoreCase.snapshot,
+    parameters: restoreCase.parameters,
+    phaseId: restoreCase.phaseId,
+    request: restoreCase.request,
+    requestId: restoreCase.request.requestId,
+    requestSha256: signedRequestSha256(restoreCase.request),
+    trusted,
   });
   const backupSerialized = canonicalFixtureJson(backupBody);
   const restoreSerialized = canonicalFixtureJson(restoreBody);
@@ -721,26 +827,82 @@ bodyMatrixTest("workerCreateBody never collapses operation phases into an action
   assert.equal(restoreBody.Labels["com.platform.docker-phase"], "job.restore.verify");
   assert.notEqual(backupBody.Image, restoreBody.Image);
 
-  const capture = broker.workerCreateBody({
-    action: "restore.drill.full",
-    parameters: {},
-    phaseId: "restore.capture",
-    requestId: REQUEST_ID,
-    trusted,
-  });
-  const verify = broker.workerCreateBody({
-    action: "restore.drill.full",
-    parameters: {},
-    phaseId: "restore.verify",
-    requestId: REQUEST_ID,
-    trusted,
-  });
+  const captureCase = cases.find(({ phaseId }) => phaseId === "restore.capture");
+  const verifyCase = cases.find(({ phaseId }) => phaseId === "restore.verify");
+  const capture = workerBodyForCase(captureCase, trusted);
+  const verify = workerBodyForCase(verifyCase, trusted);
   assert.deepEqual(capture.Cmd, ["backup-catalog"]);
   assert.deepEqual(verify.Cmd, ["restore-drill-full"]);
   assert.notEqual(
     capture.Labels["com.platform.docker-phase-sha256"],
     verify.Labels["com.platform.docker-phase-sha256"],
   );
+});
+
+bodyMatrixTest("workerCreateBody bounds AUTHORITY_BASE64 and keeps the largest admissible environment below the aggregate limit", () => {
+  const oversizedEntryReceipt = receiptWithAuthorityEntryAtLeast(
+    MAX_WORKER_ENV_ENTRY_BYTES + 1,
+  );
+  const oversizedEntryTrusted = buildFixtureTrustedContextV2({
+    rawReceipt: oversizedEntryReceipt,
+  }).trusted;
+  const oversizedEntryCase = phaseActionCases(oversizedEntryTrusted)
+    .find(({ phaseId }) => phaseId === "job.backup.capture");
+  const oversizedAuthority = expectedPhaseAuthority(
+    oversizedEntryTrusted.receipt,
+    oversizedEntryCase.action,
+    oversizedEntryCase.phaseId,
+  );
+  const oversizedAuthorityEntry = authorityEnvironmentEntry(oversizedAuthority);
+  assert.ok(
+    environmentEntryBytes(oversizedAuthorityEntry) > MAX_WORKER_ENV_ENTRY_BYTES,
+    "hostile authority fixture did not exceed the per-entry byte limit",
+  );
+  assert.ok(
+    environmentEntryBytes(oversizedAuthorityEntry) < MAX_WORKER_ENV_TOTAL_BYTES,
+    "per-entry hostile fixture must remain below the aggregate limit",
+  );
+  assert.throws(
+    () => workerBodyForCase(oversizedEntryCase, oversizedEntryTrusted),
+    /AUTHORITY_BASE64|environment.?entry|32768|oversized/i,
+    "oversized authority crossed workerCreateBody without a per-entry rejection",
+  );
+
+  const nearLimitReceipt = receiptWithAuthorityEntryAtLeast(
+    MAX_WORKER_ENV_ENTRY_BYTES - 512,
+  );
+  const nearLimitTrusted = buildFixtureTrustedContextV2({
+    rawReceipt: nearLimitReceipt,
+  }).trusted;
+  const nearLimitCase = phaseActionCases(nearLimitTrusted)
+    .find(({ phaseId }) => phaseId === "job.backup.capture");
+  const phase = nearLimitTrusted.receipt.resources.phaseProfiles[nearLimitCase.phaseId];
+  const authority = expectedPhaseAuthority(
+    nearLimitTrusted.receipt,
+    nearLimitCase.action,
+    nearLimitCase.phaseId,
+  );
+  const expectedEnvironment = expectedWorkerEnvironment({
+    action: nearLimitCase.action,
+    authority,
+    claimedJobSnapshot: nearLimitCase.snapshot,
+    phase,
+    phaseId: nearLimitCase.phaseId,
+    requestId: nearLimitCase.request.requestId,
+  });
+  const nearLimitEntries = Object.entries(expectedEnvironment)
+    .map(([name, value]) => `${name}=${value}`);
+  const nearLimitSizes = nearLimitEntries.map(environmentEntryBytes);
+  assert.ok(
+    nearLimitSizes.every((size) => size <= MAX_WORKER_ENV_ENTRY_BYTES),
+    "largest admissible fixture exceeded the per-entry limit",
+  );
+  assert.ok(
+    nearLimitSizes.reduce((sum, size) => sum + size, 0) <= MAX_WORKER_ENV_TOTAL_BYTES,
+    "largest admissible fixture exceeded the complete Env byte limit",
+  );
+  const nearLimitBody = workerBodyForCase(nearLimitCase, nearLimitTrusted);
+  assert.deepEqual(nearLimitBody.Env, nearLimitEntries);
 });
 
 test("worker source is socketless while its fixed subprocess adapter remains testable", () => {
@@ -839,7 +1001,7 @@ workerTest("real manifest and sidecar files are bound by digest, key ID and doma
   );
 });
 
-workerTest("worker result normalization binds request, action, phase and exact claimed-job operation", [
+workerTest("worker result normalization binds request, action, phase and the complete claimed-job identity", [
   "normalizeWorkerResult",
 ], () => {
   const normalizeWorkerResult = requireWorkerFunction("normalizeWorkerResult");
@@ -882,6 +1044,10 @@ workerTest("worker result normalization binds request, action, phase and exact c
     ["job operation", {
       ...candidate,
       job: { ...candidate.job, jobOperation: "restore-drill" },
+    }],
+    ["job filename", {
+      ...candidate,
+      job: { ...candidate.job, jobFileName: `${RESTORE_JOB_ID}.json` },
     }],
     ["job ID", {
       ...candidate,
@@ -1065,39 +1231,56 @@ workerTest("offsite state binds idempotency and preserves remote-unknown ambigui
   );
 });
 
-function phaseActionCases() {
-  const backupSnapshot = sealedClaimedJobSnapshot({
-    jobFileName: `${BACKUP_JOB_ID}.json`,
-    jobId: BACKUP_JOB_ID,
-    jobOperation: "backup",
-    jobSha256: BACKUP_JOB_SHA256,
-  });
-  const restoreSnapshot = sealedClaimedJobSnapshot({
-    jobFileName: `${RESTORE_JOB_ID}.json`,
-    jobId: RESTORE_JOB_ID,
-    jobOperation: "restore-drill",
-    jobSha256: RESTORE_JOB_SHA256,
-  });
-  const cases = [
-    { action: "backup.catalog", parameters: {}, phaseId: "catalog.capture" },
+function phaseActionCases(trusted = WORKER_TRUSTED_CONTEXT) {
+  const definitions = [
+    { action: "backup.catalog", parameters: {}, phaseId: "catalog.capture", requestOffset: 2 },
     {
       action: "backup.job.execute",
-      parameters: claimedJobParameters(backupSnapshot),
+      parameters: backupJobParameters("backup"),
       phaseId: "job.backup.capture",
-      snapshot: backupSnapshot,
+      requestOffset: 0,
     },
     {
       action: "backup.job.execute",
-      parameters: claimedJobParameters(restoreSnapshot),
+      parameters: {
+        jobFileName: `${RESTORE_JOB_ID}.json`,
+        jobId: RESTORE_JOB_ID,
+        jobOperation: "restore-drill",
+        jobSha256: RESTORE_JOB_SHA256,
+      },
       phaseId: "job.restore.verify",
-      snapshot: restoreSnapshot,
+      requestOffset: 1,
     },
-    { action: "backup.prune.plan", parameters: {}, phaseId: "prune.plan" },
-    { action: "backup.prune.apply", parameters: {}, phaseId: "prune.apply" },
-    { action: "restore.drill.full", parameters: {}, phaseId: "restore.capture" },
-    { action: "restore.drill.full", parameters: {}, phaseId: "restore.verify" },
-    { action: "backup.offsite.sync", parameters: {}, phaseId: "offsite.sync" },
+    { action: "backup.prune.plan", parameters: {}, phaseId: "prune.plan", requestOffset: 3 },
+    { action: "backup.prune.apply", parameters: {}, phaseId: "prune.apply", requestOffset: 4 },
+    { action: "restore.drill.full", parameters: {}, phaseId: "restore.capture", requestOffset: 5 },
+    { action: "restore.drill.full", parameters: {}, phaseId: "restore.verify", requestOffset: 6 },
+    { action: "backup.offsite.sync", parameters: {}, phaseId: "offsite.sync", requestOffset: 7 },
   ];
+  const cases = definitions.map((definition) => {
+    const request = buildFixtureSignedActionRequestV2(
+      definition.action,
+      definition.parameters,
+      {
+        index: REQUEST_INDEX + definition.requestOffset,
+        trustedContext: trusted,
+      },
+    );
+    const snapshot = definition.action === "backup.job.execute"
+      ? sealedClaimedJobSnapshot({
+          ...definition.parameters,
+          receipt: trusted.receipt,
+          request,
+        })
+      : undefined;
+    return {
+      action: definition.action,
+      parameters: structuredClone(definition.parameters),
+      phaseId: definition.phaseId,
+      request,
+      ...(snapshot ? { snapshot } : {}),
+    };
+  });
   assert.deepEqual(
     cases.map(({ phaseId }) => phaseId).sort(),
     Object.keys(EXPECTED_PHASE_PROFILES).sort(),
@@ -1122,20 +1305,21 @@ function assertExactWorkerBody({ observedBody, phaseCase, trusted }) {
     action,
     parameters,
     phaseId,
+    request,
     snapshot: claimedJobSnapshot,
   } = phaseCase;
+  const requestSha256 = signedRequestSha256(request);
   const receipt = trusted.receipt;
   const phase = receipt.resources.phaseProfiles[phaseId];
   const actionProfile = receipt.resources.actionProfiles[action];
   const authority = expectedPhaseAuthority(receipt, action, phaseId);
-  const body = observedBody ?? broker.workerCreateBody({
-    action,
-    claimedJobSnapshot,
-    parameters,
-    phaseId,
-    requestId: REQUEST_ID,
-    trusted,
-  });
+  assert.equal(request.action, action);
+  assert.deepEqual(request.parameters, parameters);
+  assert.equal(request.runtimeIntentId, trusted.intent.intentId);
+  assert.equal(request.activeReceiptSha256, trusted.receiptDigest);
+  assert.match(request.mac, /^[a-f0-9]{64}$/);
+  if (claimedJobSnapshot) assert.equal(claimedJobSnapshot.requestSha256, requestSha256);
+  const body = observedBody ?? workerBodyForCase(phaseCase, trusted);
   const env = environmentMap(body.Env);
   const expectedNetworkNames = phase.networkIds.map(
     (networkId) => receipt.resources.networks[networkId].engineName,
@@ -1194,7 +1378,7 @@ function assertExactWorkerBody({ observedBody, phaseCase, trusted }) {
   assert.equal(env.NODE_ENV, "production");
   assert.equal(env.PLATFORM_DOCKER_ACTION, action);
   assert.equal(env.PLATFORM_DOCKER_PHASE_ID, phaseId);
-  assert.equal(env.PLATFORM_DOCKER_REQUEST_ID, REQUEST_ID);
+  assert.equal(env.PLATFORM_DOCKER_REQUEST_ID, request.requestId);
   assert.equal(
     env.PLATFORM_DOCKER_PHASE_AUTHORITY_BASE64,
     Buffer.from(canonicalFixtureJson(authority)).toString("base64url"),
@@ -1240,7 +1424,9 @@ function assertExactWorkerBody({ observedBody, phaseCase, trusted }) {
       }],
       ["request digest", {
         ...claimedJobSnapshot,
-        requestSha256: "f".repeat(64),
+        requestSha256: requestSha256 === "f".repeat(64)
+          ? "e".repeat(64)
+          : "f".repeat(64),
       }],
       ["state volume ID", {
         ...claimedJobSnapshot,
@@ -1285,7 +1471,9 @@ function assertExactWorkerBody({ observedBody, phaseCase, trusted }) {
           claimedJobSnapshot: substitutedSnapshot,
           parameters,
           phaseId,
-          requestId: REQUEST_ID,
+          request,
+          requestId: request.requestId,
+          requestSha256,
           trusted,
         }),
         /broker.?state|mountpoint|snapshot|host.?path|authority|descendant|container|request|volume|source|job|filename|operation|digest|sha256|parameter/i,
@@ -1319,7 +1507,7 @@ function assertExactWorkerBody({ observedBody, phaseCase, trusted }) {
     claimedJobSnapshot,
     phase,
     phaseId,
-    requestId: REQUEST_ID,
+    requestId: request.requestId,
   });
   assert.deepEqual(
     env,
@@ -1331,11 +1519,25 @@ function assertExactWorkerBody({ observedBody, phaseCase, trusted }) {
     Object.entries(expectedEnvironment).map(([name, value]) => `${name}=${value}`),
     `${phaseId} worker environment order must be deterministic`,
   );
+  assertWorkerEnvironmentBounds(body.Env, phaseId);
   const serialized = canonicalFixtureJson(body);
   assert.doesNotMatch(serialized, /(?:^|[/:])docker\.sock(?:$|["/:])/);
   assert.doesNotMatch(serialized, /DOCKER_HOST/);
   assert.doesNotMatch(serialized, /jobs\.queue|\/run\/platform\/backup-jobs/);
   assert.doesNotMatch(serialized, /\/run\/secrets\/docker_action_/);
+}
+
+function workerBodyForCase(phaseCase, trusted) {
+  return broker.workerCreateBody({
+    action: phaseCase.action,
+    claimedJobSnapshot: phaseCase.snapshot,
+    parameters: phaseCase.parameters,
+    phaseId: phaseCase.phaseId,
+    request: phaseCase.request,
+    requestId: phaseCase.request.requestId,
+    requestSha256: signedRequestSha256(phaseCase.request),
+    trusted,
+  });
 }
 
 function expectedWorkerEnvironment({
@@ -1491,21 +1693,26 @@ function sealedClaimedJobSnapshot({
   jobId,
   jobOperation,
   jobSha256,
+  receipt = WORKER_TRUSTED_CONTEXT.receipt,
+  request = BACKUP_SIGNED_REQUEST,
 }) {
-  const snapshotVolumeName = "platform_infra_vps_docker_action_broker_state";
+  const requestSha256 = signedRequestSha256(request);
+  const source = receipt.resources.claimedJobSources["jobs.running"];
+  const snapshotVolumeId = source.snapshotVolumeId;
+  const snapshotVolumeName = receipt.resources.volumes[snapshotVolumeId].engineName;
   const snapshotVolumeMountpoint = `/var/lib/docker/volumes/${snapshotVolumeName}/_data`;
   return Object.freeze({
-    containerPath: SNAPSHOT_CONTAINER_PATH,
-    hostPath: `${snapshotVolumeMountpoint}/claimed-jobs/${REQUEST_SHA256}/job.json`,
+    containerPath: source.snapshotContainerPath,
+    hostPath: `${snapshotVolumeMountpoint}/${source.snapshotVolumeSubpath}/${requestSha256}/job.json`,
     jobFileName,
     jobId,
     jobOperation,
     jobSha256,
-    requestSha256: REQUEST_SHA256,
-    snapshotVolumeId: "broker.state",
+    requestSha256,
+    snapshotVolumeId,
     snapshotVolumeMountpoint,
     snapshotVolumeName,
-    snapshotVolumeSubpath: "claimed-jobs",
+    snapshotVolumeSubpath: source.snapshotVolumeSubpath,
     sourceId: "jobs.running",
   });
 }
@@ -1591,14 +1798,96 @@ function environmentMap(values) {
   return result;
 }
 
+function expectedWorkerBodyDocument(phaseCase, trusted) {
+  const receipt = trusted.receipt;
+  const phase = receipt.resources.phaseProfiles[phaseCase.phaseId];
+  const actionProfile = receipt.resources.actionProfiles[phaseCase.action];
+  const authority = expectedPhaseAuthority(receipt, phaseCase.action, phaseCase.phaseId);
+  const networkNames = phase.networkIds.map(
+    (networkId) => receipt.resources.networks[networkId].engineName,
+  );
+  const environment = expectedWorkerEnvironment({
+    action: phaseCase.action,
+    authority,
+    claimedJobSnapshot: phaseCase.snapshot,
+    phase,
+    phaseId: phaseCase.phaseId,
+    requestId: phaseCase.request.requestId,
+  });
+  return {
+    AttachStderr: false,
+    AttachStdin: false,
+    AttachStdout: false,
+    Cmd: [phase.command],
+    Entrypoint: ["node", "/opt/platform-docker-worker/docker-action-worker.mjs"],
+    Env: Object.entries(environment).map(([name, value]) => `${name}=${value}`),
+    HostConfig: expectedWorkerHostConfig(receipt, phase, phaseCase.snapshot),
+    Image: phase.workerImageRef,
+    Labels: {
+      "com.platform.active-receipt-sha256": trusted.receiptDigest,
+      "com.platform.docker-action": phaseCase.action,
+      "com.platform.docker-action-profile": actionProfile.profileId,
+      "com.platform.docker-action-profile-sha256": actionProfile.profileSha256,
+      "com.platform.docker-phase": phaseCase.phaseId,
+      "com.platform.docker-phase-sha256": phase.phaseSha256,
+      "com.platform.runtime-intent": trusted.intent.intentId,
+    },
+    NetworkDisabled: networkNames.length === 0,
+    NetworkingConfig: {
+      EndpointsConfig: Object.fromEntries(networkNames.map((name) => [name, { Aliases: [] }])),
+    },
+    OpenStdin: false,
+    StdinOnce: false,
+    Tty: false,
+    User: "0:0",
+    WorkingDir: "/opt/platform-docker-worker",
+  };
+}
+
+function expectedWorkerInspectMounts(receipt, phase, claimedJobSnapshot) {
+  const bindMounts = phase.mountIds.map((mountId) => {
+    const mount = receipt.resources.mounts[mountId];
+    return {
+      Destination: mount.containerPath,
+      Mode: mount.access,
+      Name: "",
+      RW: mount.access === "rw",
+      Source: mount.canonicalPath,
+      Type: "bind",
+    };
+  });
+  if (claimedJobSnapshot) {
+    bindMounts.push({
+      Destination: claimedJobSnapshot.containerPath,
+      Mode: "ro",
+      Name: "",
+      RW: false,
+      Source: claimedJobSnapshot.hostPath,
+      Type: "bind",
+    });
+  }
+  const volumeMounts = expectedNamedVolumeMounts(receipt, phase).map((mount) => ({
+    Destination: mount.Target,
+    Driver: "local",
+    Mode: mount.ReadOnly ? "ro" : "rw",
+    Name: mount.Source,
+    RW: mount.ReadOnly !== true,
+    Source: `/var/lib/docker/volumes/${mount.Source}/_data`,
+    Type: "volume",
+  }));
+  return [...bindMounts, ...volumeMounts];
+}
+
 function semanticWorkerTransport({
   brokerStateMountpoint,
   calls,
+  expectedPhaseCase,
+  inspectMutation,
   onCreateBody,
   rawWorkerResult: result,
   receipt,
+  trusted,
 }) {
-  let createdBody;
   let createdName;
   const workerId = "a".repeat(64);
   return Object.freeze({
@@ -1624,59 +1913,36 @@ function semanticWorkerTransport({
     async createWorker(name, body) {
       calls.push({ method: "createWorker", name });
       createdName = name;
-      createdBody = structuredClone(body);
       onCreateBody(body);
       return { Id: workerId };
     },
     async inspectContainer(id) {
       calls.push({ method: "inspectContainer", id });
       assert.equal(id, workerId);
-      assert.ok(createdBody, "worker inspect occurred before create");
-      const phaseId = createdBody.Labels["com.platform.docker-phase"];
-      const phase = receipt.resources.phaseProfiles[phaseId];
+      assert.ok(createdName, "worker inspect occurred before create");
+      const phaseCase = expectedPhaseCase();
+      const phase = receipt.resources.phaseProfiles[phaseCase.phaseId];
+      const expectedBody = expectedWorkerBodyDocument(phaseCase, trusted);
       const config = {
-        AttachStderr: createdBody.AttachStderr,
-        AttachStdin: createdBody.AttachStdin,
-        AttachStdout: createdBody.AttachStdout,
-        Cmd: structuredClone(createdBody.Cmd),
-        Entrypoint: structuredClone(createdBody.Entrypoint),
-        Env: structuredClone(createdBody.Env),
+        AttachStderr: expectedBody.AttachStderr,
+        AttachStdin: expectedBody.AttachStdin,
+        AttachStdout: expectedBody.AttachStdout,
+        Cmd: structuredClone(expectedBody.Cmd),
+        Entrypoint: structuredClone(expectedBody.Entrypoint),
+        Env: structuredClone(expectedBody.Env),
         ExposedPorts: {},
         Healthcheck: null,
-        Image: createdBody.Image,
-        Labels: structuredClone(createdBody.Labels),
-        NetworkDisabled: createdBody.NetworkDisabled,
+        Image: expectedBody.Image,
+        Labels: structuredClone(expectedBody.Labels),
+        NetworkDisabled: expectedBody.NetworkDisabled,
         OnBuild: [],
-        OpenStdin: createdBody.OpenStdin,
-        StdinOnce: createdBody.StdinOnce,
-        Tty: createdBody.Tty,
-        User: createdBody.User,
+        OpenStdin: expectedBody.OpenStdin,
+        StdinOnce: expectedBody.StdinOnce,
+        Tty: expectedBody.Tty,
+        User: expectedBody.User,
         Volumes: {},
-        WorkingDir: createdBody.WorkingDir,
+        WorkingDir: expectedBody.WorkingDir,
       };
-      const mounts = [
-        ...createdBody.HostConfig.Binds.map((bind) => {
-          const match = String(bind).match(/^(.*):([^:]+):(ro|rw)$/);
-          assert.ok(match, `malformed worker bind: ${bind}`);
-          return {
-            Destination: match[2],
-            Mode: match[3],
-            Name: "",
-            RW: match[3] === "rw",
-            Source: match[1],
-            Type: "bind",
-          };
-        }),
-        ...createdBody.HostConfig.Mounts.map((mount) => ({
-          Destination: mount.Target,
-          Driver: "local",
-          Mode: mount.ReadOnly ? "ro" : "rw",
-          Name: mount.Source,
-          RW: mount.ReadOnly !== true,
-          Source: `/var/lib/docker/volumes/${mount.Source}/_data`,
-          Type: "volume",
-        })),
-      ];
       const networks = Object.fromEntries(
         phase.networkIds.map((logicalId) => {
           const network = receipt.resources.networks[logicalId];
@@ -1687,15 +1953,18 @@ function semanticWorkerTransport({
           }];
         }),
       );
-      return {
+      const inspect = {
         Config: config,
-        HostConfig: structuredClone(createdBody.HostConfig),
+        HostConfig: expectedWorkerHostConfig(receipt, phase, phaseCase.snapshot),
         Id: workerId,
         Image: phase.workerImageId,
-        Mounts: mounts,
+        Mounts: expectedWorkerInspectMounts(receipt, phase, phaseCase.snapshot),
         Name: `/${createdName}`,
         NetworkSettings: { Networks: networks },
       };
+      return inspectMutation
+        ? inspectMutation(structuredClone(inspect), phaseCase)
+        : inspect;
     },
     async startContainer(id) {
       calls.push({ method: "startContainer", id });
@@ -1753,6 +2022,7 @@ function workerCliEnvironment({
   job = null,
   phaseId,
   requestId,
+  snapshotPath = SNAPSHOT_CONTAINER_PATH,
 }) {
   const env = {
     PLATFORM_DOCKER_ACTION: action,
@@ -1764,7 +2034,7 @@ function workerCliEnvironment({
       PLATFORM_CLAIMED_JOB_FILE_NAME: job.jobFileName,
       PLATFORM_CLAIMED_JOB_ID: job.jobId,
       PLATFORM_CLAIMED_JOB_OPERATION: job.jobOperation,
-      PLATFORM_CLAIMED_JOB_PATH: SNAPSHOT_CONTAINER_PATH,
+      PLATFORM_CLAIMED_JOB_PATH: snapshotPath,
       PLATFORM_CLAIMED_JOB_SHA256: job.jobSha256,
       PLATFORM_CLAIMED_JOB_SOURCE_ID: "jobs.running",
     });
@@ -1854,14 +2124,9 @@ function bodyMatrixTest(name, body) {
 }
 
 function hasExactWorkerBodyBaseline() {
-  const receipt = buildRawActiveReceiptV2();
-  const trusted = {
-    intent: { intentId: "intent.release-v2" },
-    receipt,
-    receiptDigest: fixtureSha256(canonicalFixtureJson(receipt)),
-  };
+  const trusted = WORKER_TRUSTED_CONTEXT;
   try {
-    for (const phaseCase of phaseActionCases()) {
+    for (const phaseCase of phaseActionCases(trusted)) {
       assertExactWorkerBody({ phaseCase, trusted });
     }
     return true;
@@ -1877,6 +2142,163 @@ function backupJobParameters(jobOperation) {
     jobOperation,
     jobSha256: jobOperation === "backup" ? BACKUP_JOB_SHA256 : "7".repeat(64),
   };
+}
+
+function signedRequestSha256(request) {
+  return fixtureSha256(canonicalFixtureJson(request));
+}
+
+function validSameSizeClaimedJobTamper(document, admittedBytes) {
+  const tamperedDocument = {
+    ...structuredClone(document),
+    requestedBy: document.requestedBy === "scheduler-test"
+      ? "scheduler-evil"
+      : "scheduler-test",
+  };
+  parseBackupJobDocument(tamperedDocument);
+  const tamperedBytes = Buffer.from(`${JSON.stringify(tamperedDocument, null, 2)}\n`);
+  assert.equal(
+    tamperedBytes.length,
+    admittedBytes.length,
+    "digest tamper fixture must preserve exact byte length",
+  );
+  assert.notEqual(
+    fixtureSha256(tamperedBytes),
+    fixtureSha256(admittedBytes),
+    "digest tamper fixture must change the admitted bytes",
+  );
+  return tamperedBytes;
+}
+
+function observeDescriptorStableReadIo(file) {
+  const expectedPath = path.resolve(file);
+  const leafDescriptors = new Set();
+  const evidence = {
+    descriptorReadStarts: 0,
+    fstatCalls: 0,
+    leafOpenFlags: [],
+    pathReadCalls: 0,
+  };
+  const io = new Proxy(fs, {
+    get(target, property) {
+      if (property === "openSync") {
+        return (candidate, flags, ...args) => {
+          const descriptor = target.openSync(candidate, flags, ...args);
+          if (path.resolve(String(candidate)) === expectedPath) {
+            evidence.leafOpenFlags.push(flags);
+            leafDescriptors.add(descriptor);
+          }
+          return descriptor;
+        };
+      }
+      if (property === "fstatSync") {
+        return (descriptor, ...args) => {
+          if (leafDescriptors.has(descriptor)) evidence.fstatCalls += 1;
+          return target.fstatSync(descriptor, ...args);
+        };
+      }
+      if (property === "readFileSync") {
+        return (candidate, ...args) => {
+          if (typeof candidate === "number" && leafDescriptors.has(candidate)) {
+            evidence.descriptorReadStarts += 1;
+          } else if (typeof candidate !== "number"
+            && path.resolve(String(candidate)) === expectedPath) {
+            evidence.pathReadCalls += 1;
+          }
+          return target.readFileSync(candidate, ...args);
+        };
+      }
+      if (property === "readSync") {
+        return (descriptor, buffer, offset, length, position) => {
+          if (leafDescriptors.has(descriptor) && position === 0) {
+            evidence.descriptorReadStarts += 1;
+          }
+          return target.readSync(descriptor, buffer, offset, length, position);
+        };
+      }
+      if (property === "closeSync") {
+        return (descriptor) => {
+          const result = target.closeSync(descriptor);
+          leafDescriptors.delete(descriptor);
+          return result;
+        };
+      }
+      const value = Reflect.get(target, property);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+  return { evidence, io };
+}
+
+function assertStableReadEvidence(evidence) {
+  assert.ok(evidence.leafOpenFlags.length >= 1, "claimed-job leaf was not descriptor-opened");
+  assert.equal(
+    evidence.leafOpenFlags.every(
+      (flags) => Number.isInteger(flags)
+        && (flags & fs.constants.O_NOFOLLOW) === fs.constants.O_NOFOLLOW,
+    ),
+    true,
+    "claimed-job leaf open did not observe O_NOFOLLOW",
+  );
+  assert.ok(
+    evidence.descriptorReadStarts >= 2,
+    "claimed-job consumer did not perform two independent descriptor reads",
+  );
+  assert.ok(evidence.fstatCalls >= 2, "claimed-job consumer did not fstat before and after reading");
+  assert.equal(evidence.pathReadCalls, 0, "claimed-job bytes were re-opened by pathname");
+}
+
+function environmentEntryBytes(entry) {
+  return Buffer.byteLength(String(entry)) + 1;
+}
+
+function assertWorkerEnvironmentBounds(entries, label) {
+  const sizes = entries.map(environmentEntryBytes);
+  assert.ok(
+    sizes.every((size) => size <= MAX_WORKER_ENV_ENTRY_BYTES),
+    `${label} exceeds the ${MAX_WORKER_ENV_ENTRY_BYTES}-byte per-entry Env limit`,
+  );
+  assert.ok(
+    sizes.reduce((sum, size) => sum + size, 0) <= MAX_WORKER_ENV_TOTAL_BYTES,
+    `${label} exceeds the ${MAX_WORKER_ENV_TOTAL_BYTES}-byte aggregate Env limit`,
+  );
+  const authorityEntries = entries.filter(
+    (entry) => String(entry).startsWith("PLATFORM_DOCKER_PHASE_AUTHORITY_BASE64="),
+  );
+  assert.equal(authorityEntries.length, 1, `${label} must carry one authority entry`);
+  assert.ok(
+    environmentEntryBytes(authorityEntries[0]) <= MAX_WORKER_ENV_ENTRY_BYTES,
+    `${label} authority exceeds the per-entry Env limit`,
+  );
+}
+
+function authorityEnvironmentEntry(authority) {
+  return `PLATFORM_DOCKER_PHASE_AUTHORITY_BASE64=${Buffer.from(
+    canonicalFixtureJson(authority),
+  ).toString("base64url")}`;
+}
+
+function receiptWithAuthorityEntryAtLeast(minimumEntryBytes) {
+  const receipt = buildRawActiveReceiptV2();
+  const phaseId = "job.backup.capture";
+  const phase = receipt.resources.phaseProfiles[phaseId];
+  const secretSet = receipt.resources.workerSecretSets[phase.workerSecretSetIds[0]];
+  const template = secretSet.files.key;
+  let index = 0;
+  while (environmentEntryBytes(authorityEnvironmentEntry(
+    expectedPhaseAuthority(receipt, "backup.job.execute", phaseId),
+  )) < minimumEntryBytes) {
+    const suffix = String(index).padStart(4, "0");
+    secretSet.files[`extra-${suffix}`] = {
+      ...structuredClone(template),
+      inode: 10_000 + index,
+      relativePath: `extra-${suffix}.key`,
+      sha256: fixtureSha256(`hostile-authority-file:${suffix}`),
+    };
+    index += 1;
+    assert.ok(index < 2_000, "failed to construct a bounded hostile authority fixture");
+  }
+  return receipt;
 }
 
 function sameSizeRaceIo(file, substitutedBytes) {

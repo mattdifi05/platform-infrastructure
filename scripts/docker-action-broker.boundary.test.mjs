@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -163,6 +164,64 @@ test("unit support: the parser rejects Compose volume constructs it cannot prove
   }
 });
 
+test("unit support: raw-authority classification is fail-closed with positive controls", () => {
+  const config = {
+    services: {
+      safe: {
+        volumes: [{
+          type: "volume",
+          source: "safe_runtime",
+          target: "/host-runtime",
+          read_only: true,
+        }],
+      },
+      bindParent: {
+        volumes: [{
+          type: "bind",
+          source: "/var",
+          target: "/host-runtime",
+          read_only: true,
+        }],
+      },
+      externalVolume: {
+        volumes: [{
+          type: "volume",
+          source: "external_runtime",
+          target: "/host-runtime",
+          read_only: true,
+        }],
+      },
+      namedVolume: {
+        volumes: [{
+          type: "volume",
+          source: "named_runtime",
+          target: "/host-runtime",
+          read_only: true,
+        }],
+      },
+      internalInheritance: {
+        volumes: [],
+        volumes_from: ["safe:ro"],
+      },
+      externalInheritance: {
+        volumes: [],
+        volumes_from: ["container:untrusted-runtime:ro"],
+      },
+    },
+    volumes: {
+      safe_runtime: { name: "platform_infra_vps_safe_runtime" },
+      external_runtime: { external: true, name: "untrusted_precreated_runtime" },
+      named_runtime: { name: "untrusted_precreated_runtime" },
+    },
+  };
+
+  assert.equal(renderedServiceOwnsRawSocket(config, "safe"), false);
+  assert.equal(renderedServiceOwnsRawSocket(config, "internalInheritance"), false);
+  for (const name of ["bindParent", "externalVolume", "namedVolume", "externalInheritance"]) {
+    assert.equal(renderedServiceOwnsRawSocket(config, name), true, `${name} must remain unprovable/fail-closed`);
+  }
+});
+
 test("canonical Compose rendering is available without a Docker Engine", () => {
   assert.equal(
     composeAvailability.available,
@@ -238,7 +297,7 @@ test("broker and scheduler share only the root-owned claimed-job queue boundary"
   );
 });
 
-test("broker readiness rejects incoherent trusted activation state, not merely a present UDS", async (t) => {
+test("the canonical broker healthcheck invokes mandatory behavioral readiness", (t) => {
   const config = canonicalComposeRenderOrSkip(t);
   if (!config) return;
   const broker = config.services?.["docker-action-broker"];
@@ -252,9 +311,16 @@ test("broker readiness rejects incoherent trusted activation state, not merely a
     ],
     "the effective last-overlay healthcheck must invoke the behavioral readiness module with no optional bypass",
   );
+});
 
+test("the behavioral readiness module exists as a direct production boundary", () => {
   const modulePath = path.join(root, "scripts", "docker-action-readiness.mjs");
   assert.ok(fs.existsSync(modulePath), "missing behaviorally testable broker readiness module");
+});
+
+test("the behavioral readiness module is copied to the exact immutable image path", (t) => {
+  const modulePath = readinessModuleOrTodo(t);
+  if (!modulePath) return;
   assert.equal(
     dockerfileCopyTarget(
       read("docker/docker-action-broker.Dockerfile"),
@@ -263,6 +329,11 @@ test("broker readiness rejects incoherent trusted activation state, not merely a
     "/opt/platform-docker-broker/docker-action-readiness.mjs",
     "the healthcheck command must address the exact immutable module copied into the broker image",
   );
+});
+
+test("unit support: readiness evaluator rejects incoherent trusted activation state", async (t) => {
+  const modulePath = readinessModuleOrTodo(t);
+  if (!modulePath) return;
   const readiness = await import(`${pathToFileURL(modulePath).href}?test=${Date.now()}`);
   assert.equal(typeof readiness.evaluateBrokerReadiness, "function");
 
@@ -281,6 +352,69 @@ test("broker readiness rejects incoherent trusted activation state, not merely a
     const result = readiness.evaluateBrokerReadiness(candidate);
     assert.equal(result?.ready, false, `${name} mutation must fail readiness`);
     assert.ok(Array.isArray(result?.failures) && result.failures.length > 0, `${name} must identify a failed invariant`);
+  }
+});
+
+test("the true readiness CLI reads documents, stats the UDS and rejects tamper", async (t) => {
+  const modulePath = readinessModuleOrTodo(t);
+  if (!modulePath) return;
+
+  const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "platform-readiness-cli-"));
+  const inputFile = path.join(temporaryRoot, "readiness-input.json");
+  const socketPath = path.join(temporaryRoot, "broker.sock");
+  const server = net.createServer();
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(socketPath, resolve);
+  });
+
+  const runCli = () => spawnSync(process.execPath, [
+    "scripts/docker-action-readiness.mjs",
+    "--require-trusted-activation",
+  ], {
+    cwd: root,
+    encoding: "utf8",
+    env: {
+      DOCKER_ACTION_BROKER_SOCKET: socketPath,
+      DOCKER_ACTION_READINESS_INPUT_FILE: inputFile,
+      HOME: temporaryRoot,
+      LANG: "C",
+      LC_ALL: "C",
+      PATH: process.env.PATH,
+    },
+    timeout: 10_000,
+  });
+
+  try {
+    const trusted = trustedReadinessInput();
+    fs.writeFileSync(inputFile, `${JSON.stringify(trusted)}\n`, { mode: 0o600 });
+    const valid = runCli();
+    assert.equal(valid.status, 0, `valid readiness CLI fixture rejected:\n${valid.stdout}\n${valid.stderr}`);
+
+    const tampered = structuredClone(trusted);
+    tampered.activeReceipt.document.combinedRenderSha256 = "e".repeat(64);
+    fs.writeFileSync(inputFile, `${JSON.stringify(tampered)}\n`, { mode: 0o600 });
+    const rejectedDocument = runCli();
+    assert.notEqual(
+      rejectedDocument.status,
+      0,
+      "readiness CLI accepted a tampered on-disk active receipt document",
+    );
+
+    fs.writeFileSync(inputFile, `${JSON.stringify(trusted)}\n`, { mode: 0o600 });
+    await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    fs.rmSync(socketPath, { force: true });
+    const rejectedSocket = runCli();
+    assert.notEqual(
+      rejectedSocket.status,
+      0,
+      "readiness CLI trusted fixture-reported socket state instead of statting the actual UDS",
+    );
+  } finally {
+    if (server.listening) {
+      await new Promise((resolve) => server.close(() => resolve()));
+    }
+    fs.rmSync(temporaryRoot, { recursive: true, force: true });
   }
 });
 
@@ -309,6 +443,15 @@ test("activation remains external-pending until Release materializes exact v2 va
   const policy = JSON.parse(read("policy/docker-action-activation-policy.json"));
   assert.equal(policy.status, "external-pending");
 });
+
+function readinessModuleOrTodo(t) {
+  const modulePath = path.join(root, "scripts", "docker-action-readiness.mjs");
+  if (!fs.existsSync(modulePath)) {
+    t.todo("blocked by direct readiness module presence RED");
+    return null;
+  }
+  return modulePath;
+}
 
 function canonicalComposeRenderOrSkip(t) {
   if (!composeAvailability.available) {
@@ -385,15 +528,26 @@ function findComposeCli() {
     "/sbin",
   ].filter(Boolean).join(path.delimiter);
 
-  const bundledCompose = process.env.PLATFORM_TEST_DOCKER_COMPOSE_BIN
+  const composeOverride = process.env.PLATFORM_TEST_DOCKER_COMPOSE_BIN;
+  const bundledCompose = composeOverride
     || path.resolve(root, "../compose-runtime/docker-compose");
   if (fs.existsSync(bundledCompose) && fs.statSync(bundledCompose).isFile()) {
-    const sha256 = createHash("sha256").update(fs.readFileSync(bundledCompose)).digest("hex");
-    if (!process.env.PLATFORM_TEST_DOCKER_COMPOSE_BIN && sha256 !== pinnedComposeSha256) {
+    const expectedSha256 = composeOverride
+      ? String(process.env.PLATFORM_TEST_DOCKER_COMPOSE_SHA256 || "")
+      : pinnedComposeSha256;
+    if (!/^[a-f0-9]{64}$/.test(expectedSha256)) {
       return {
         available: false,
         path: searchPath,
-        reason: `bundled Compose SHA256 mismatch at ${bundledCompose}: ${sha256}`,
+        reason: "PLATFORM_TEST_DOCKER_COMPOSE_BIN requires PLATFORM_TEST_DOCKER_COMPOSE_SHA256",
+      };
+    }
+    const sha256 = createHash("sha256").update(fs.readFileSync(bundledCompose)).digest("hex");
+    if (sha256 !== expectedSha256) {
+      return {
+        available: false,
+        path: searchPath,
+        reason: `Compose SHA256 mismatch at ${bundledCompose}: expected ${expectedSha256}, got ${sha256}`,
       };
     }
     const probe = spawnSync(bundledCompose, ["version", "--short"], {
@@ -423,41 +577,11 @@ function findComposeCli() {
     };
   }
 
-  const resolved = spawnSync("/usr/bin/which", ["docker"], {
-    encoding: "utf8",
-    env: { LANG: "C", LC_ALL: "C", PATH: searchPath },
-    timeout: 5_000,
-  });
-  if (resolved.status !== 0 || !resolved.stdout.trim()) {
-    return {
-      available: false,
-      path: searchPath,
-      reason: "docker CLI not found in local PATH or Docker Desktop; no stored canonical render exists",
-    };
-  }
-
-  const docker = resolved.stdout.trim();
-  const dockerPath = [path.dirname(docker), searchPath].join(path.delimiter);
-  const probe = spawnSync(docker, ["compose", "version", "--short"], {
-    encoding: "utf8",
-    env: {
-      DOCKER_HOST: "unix:///tmp/platform-compose-probe-engine-must-not-exist.sock",
-      HOME: os.tmpdir(),
-      LANG: "C",
-      LC_ALL: "C",
-      PATH: dockerPath,
-    },
-    timeout: 10_000,
-  });
-  if (probe.status !== 0) {
-    const detail = `${probe.stderr || probe.stdout || `status ${probe.status}`}`.trim();
-    return {
-      available: false,
-      path: dockerPath,
-      reason: `docker CLI found at ${docker}, but the local Compose plugin is unavailable: ${detail}`,
-    };
-  }
-  return { available: true, path: dockerPath, reason: "" };
+  return {
+    available: false,
+    path: searchPath,
+    reason: "no SHA-pinned standalone Compose renderer is available; an unpinned docker compose plugin is not admissible",
+  };
 }
 
 function prepareComposeExecutionPath(temporaryRoot) {
@@ -553,12 +677,21 @@ function renderedServiceOwnsRawSocket(config, name, ancestry = new Set()) {
   if (!service) throw new Error(`unknown rendered volumes_from service ${name}`);
   const next = new Set(ancestry).add(name);
   if ((service.volumes ?? []).some((mount) => {
-    const source = mount?.type === "volume"
-      ? config.volumes?.[mount.source]?.driver_opts?.device
-      : mount?.source;
-    return exposesDockerSocket(source);
+    if (mount?.type !== "volume") return exposesDockerSocket(mount?.source);
+    const volumeName = String(mount?.source || "");
+    const declaration = config.volumes?.[volumeName];
+    const targetCarriesHostAuthority = /(?:^|\/)(?:host(?:-runtime)?|rootfs)(?:\/|$)/.test(String(mount?.target || ""));
+    if (!declaration || declaration.external === true) return targetCarriesHostAuthority;
+    if (declaration.name && declaration.name !== `platform_infra_vps_${volumeName}`) return targetCarriesHostAuthority;
+    if (declaration.driver && declaration.driver !== "local") return targetCarriesHostAuthority;
+    if (declaration.driver_opts) {
+      const device = declaration.driver_opts.device;
+      return device ? exposesDockerSocket(device) : targetCarriesHostAuthority;
+    }
+    return false;
   })) return true;
   return (service.volumes_from ?? []).some((rawReference) => {
+    if (typeof rawReference === "string" && rawReference.startsWith("container:")) return true;
     const reference = typeof rawReference === "string"
       ? rawReference.split(":")[0]
       : String(rawReference?.source || rawReference?.service || "");
