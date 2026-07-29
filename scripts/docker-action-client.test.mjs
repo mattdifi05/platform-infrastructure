@@ -329,10 +329,11 @@ testWhenProductionExports(
   [
     [actionContract, "normalizeActionResponse"],
     [actionContract, "signActionResponse"],
+    [broker, "createSemanticActionExecutor"],
     [broker, "encodeActionResponseFrame"],
   ],
-  "RED v2: production broker encoder round-trips real core success and signed rejection through the real client",
-  async () => {
+  "RED v2: real broker assembly signs and writes semantic success and rejection to the real client",
+  async (t) => {
     const action = "backup.prune.plan";
     const command = "prune-manifest-backups-plan";
     const capabilityKey = fixtureCapabilityKey(action);
@@ -340,7 +341,17 @@ testWhenProductionExports(
       allowedActions: [action],
       now: NOW,
     });
-    const request = buildClientRequest(command, [], {
+    const result = buildFixtureActionResultV2(action);
+    const assembly = await realBrokerAssembly(t, {
+      capabilityKey,
+      outcomes: [
+        { result },
+        { rejection: "semantic policy rejected the admitted action" },
+      ],
+      trusted,
+    });
+
+    const successRequest = buildClientRequest(command, [], {
       runtimeIntentId: trusted.intent.intentId,
       activeReceiptSha256: trusted.receiptDigest,
       combinedRenderSha256: trusted.receipt.combinedRenderSha256,
@@ -349,55 +360,113 @@ testWhenProductionExports(
       requestId: "123e4567-e89b-42d3-a456-426614174100",
       nonce: "B".repeat(43),
     });
-    const result = buildFixtureActionResultV2(action);
-    const replayStore = {
-      acquire() {
-        return { preserve() {}, recordWorker() {}, release() {} };
-      },
-      admitActivation() {},
-      admitTrustedContext() {},
-      consume() {},
-    };
-    const core = broker.createBrokerCore({
-      trustedContextProvider: async () => trusted,
-      capabilityProvider: async () => capabilityKey,
-      engine: { execute: async () => result },
-      replayStore,
-      now: () => NOW,
-      operationTimeoutMs: 100,
-    });
-    const wire = await core.handle(Buffer.from(canonicalJsonOracle(request)));
-    assert.equal(wire.statusCode, 200);
-    const encodedSuccess = broker.encodeActionResponseFrame(wire.body);
-    assertProductionResponseFrame(encodedSuccess, wire.body);
-    const completed = await exchangeWithLocalBroker(request, wire.body, {
+    const completed = await sendActionRequest(
+      successRequest,
+      assembly.socketPath,
       capabilityKey,
-      responseFrame: () => encodedSuccess,
-    });
-    assert.deepEqual(completed, wire.body);
+    );
+    assert.equal(completed.status, "completed");
+    assert.equal(completed.statusCode, 200);
+    assert.equal(completed.errorCode, null);
+    assert.deepEqual(completed.result, result);
 
-    const rejectedUnsigned = {
-      schema: RESPONSE_SCHEMA_V2,
-      status: "rejected",
-      statusCode: 403,
-      errorCode: "ACTION_REJECTED",
-      action: request.action,
-      requestId: request.requestId,
-      requestSha256: sha256Bytes(canonicalJsonOracle(request)),
-      result: null,
-      resultSha256: sha256Bytes(canonicalJsonOracle(null)),
-    };
-    const rejected = actionContract.signActionResponse(rejectedUnsigned, capabilityKey);
-    const encodedRejection = broker.encodeActionResponseFrame(rejected);
-    assertProductionResponseFrame(encodedRejection, rejected);
-    const admittedRejection = await exchangeWithLocalBroker(request, rejected, {
+    const rejectionRequest = buildClientRequest(command, [], {
+      runtimeIntentId: trusted.intent.intentId,
+      activeReceiptSha256: trusted.receiptDigest,
+      combinedRenderSha256: trusted.receipt.combinedRenderSha256,
       capabilityKey,
-      responseFrame: () => encodedRejection,
+      now: NOW,
+      requestId: "123e4567-e89b-42d3-a456-426614174101",
+      nonce: "C".repeat(43),
     });
+    const rejected = await sendActionRequest(
+      rejectionRequest,
+      assembly.socketPath,
+      capabilityKey,
+    );
+    assert.equal(rejected.status, "rejected");
+    assert.equal(rejected.statusCode, 403);
+    assert.equal(rejected.errorCode, "ACTION_REJECTED");
+    assert.equal(rejected.result, null);
+
+    assert.equal(assembly.semanticExecutorFactoryCalls, 1);
     assert.deepEqual(
-      admittedRejection,
+      assembly.executedActions,
+      [action, action],
+      "both responses must traverse the semantic executor selected by the real assembly",
+    );
+    assert.deepEqual(assembly.replayEvents.slice(0, 2), ["recover", "activation"]);
+    assert.equal(assembly.responseFrames.length, 2);
+    assertProductionEncoderMatchesWrittenFrame(
+      assembly.responseFrames[0],
+      completed,
+      "semantic success",
+    );
+    assertProductionEncoderMatchesWrittenFrame(
+      assembly.responseFrames[1],
       rejected,
-      "the production encoder and real client must preserve an authenticated semantic rejection",
+      "semantic rejection",
+    );
+  },
+);
+
+testWhenProductionExports(
+  [
+    [actionContract, "normalizeActionResponse"],
+    [actionContract, "signActionResponse"],
+    [broker, "createSemanticActionExecutor"],
+    [broker, "encodeActionResponseFrame"],
+  ],
+  "RED v2: real broker assembly defaults behaviorally to the semantic executor",
+  async (t) => {
+    const action = "backup.prune.plan";
+    const command = "prune-manifest-backups-plan";
+    const capabilityKey = fixtureCapabilityKey(action);
+    const { trusted } = buildFixtureTrustedContextV2({
+      allowedActions: [action],
+      now: NOW,
+    });
+    const assembly = await realDefaultSemanticBrokerAssembly(t, {
+      capabilityKey,
+      trusted,
+    });
+    const request = buildClientRequest(command, [], {
+      runtimeIntentId: trusted.intent.intentId,
+      activeReceiptSha256: trusted.receiptDigest,
+      combinedRenderSha256: trusted.receipt.combinedRenderSha256,
+      capabilityKey,
+      now: NOW,
+      requestId: "123e4567-e89b-42d3-a456-426614174102",
+      nonce: "D".repeat(43),
+    });
+
+    const rejected = await sendActionRequest(
+      request,
+      assembly.socketPath,
+      capabilityKey,
+    );
+    assert.equal(rejected.status, "rejected");
+    assert.equal(rejected.statusCode, 403);
+    assert.equal(rejected.errorCode, "ACTION_REJECTED");
+    assert.equal(rejected.result, null);
+    assert.equal(
+      assembly.recoveredSemanticExecutor,
+      true,
+      "initialize must recover the semantic executor selected by the default assembly path",
+    );
+    assert.ok(
+      assembly.transportCalls.length > 0,
+      "the no-override assembly must reach an injected low-level semantic transport method",
+    );
+    assert.equal(
+      assembly.transportCalls.some(({ method }) => method === "execute"),
+      false,
+      "the transport intentionally exposes no legacy engine execute shortcut",
+    );
+    assertProductionEncoderMatchesWrittenFrame(
+      assembly.responseFrames[0],
+      rejected,
+      "default semantic rejection",
     );
   },
 );
@@ -505,6 +574,64 @@ test("test-only filesystem double independently observes O_NOFOLLOW, descriptor 
 
   racing.fileSystem.readFileSync(fixture.file);
   assert.equal(racing.state.pathReadAttempts, 1, "the double must expose a pathname read");
+});
+
+test("test-only real-main preload is a narrow filesystem redirect, not a client bridge", async (t) => {
+  const fixture = claimedJobFixture(t);
+  const redirect = clientMainFsRedirectFixture(t, {
+    capabilityKey: CAPABILITY,
+    capabilityPath: actionContract.ACTIONS["backup.job.execute"].capabilityFile,
+  });
+  const source = fs.readFileSync(redirect.preloadFile, "utf8");
+  assert.doesNotMatch(source, /docker-action-client|runClientCommand|sendActionRequest|node:net/);
+  const checked = await collectChildProcess(
+    process.execPath,
+    ["--check", redirect.preloadFile],
+    {
+      cwd: REPOSITORY_ROOT,
+      env: {
+        PATH: path.dirname(process.execPath),
+      },
+    },
+  );
+  assert.equal(checked.code, 0, `${checked.stdout}\n${checked.stderr}`);
+  assert.equal(checked.stdout, "");
+  assert.equal(checked.stderr, "");
+  const exercised = await collectChildProcess(
+    process.execPath,
+    [
+      "--input-type=module",
+      "--eval",
+      [
+        'import { protectedCapability } from "./scripts/docker-action-client.mjs";',
+        "const value = protectedCapability(process.env.DOCKER_ACTION_TEST_CAPABILITY_PATH);",
+        'if (!Buffer.isBuffer(value) || value.length !== 32) throw new Error("redirected capability was not read");',
+      ].join("\n"),
+    ],
+    {
+      cwd: REPOSITORY_ROOT,
+      env: {
+        DOCKER_ACTION_TEST_AUDIT_FILE: redirect.auditFile,
+        DOCKER_ACTION_TEST_CAPABILITY_FILE: redirect.capabilityFile,
+        DOCKER_ACTION_TEST_CAPABILITY_PATH: redirect.capabilityPath,
+        DOCKER_ACTION_TEST_CLAIMED_FILE: fixture.file,
+        DOCKER_ACTION_TEST_CLAIMED_ROOT: fixture.directory,
+        DOCKER_ACTION_TEST_RUN_ID: "preload-control",
+        NODE_OPTIONS: `--require=${redirect.preloadFile}`,
+        PATH: path.dirname(process.execPath),
+      },
+    },
+  );
+  assert.equal(exercised.code, 0, `${exercised.stdout}\n${exercised.stderr}`);
+  assert.equal(exercised.stdout, "");
+  assert.equal(exercised.stderr, "");
+  assertProtectedMainReads(redirect.readAudit(), {
+    capabilityBytes: CAPABILITY.length,
+    capabilityRuns: ["preload-control"],
+    claimedJobBytes: fixture.bytes.length,
+    claimedJobRuns: [],
+  });
+  assert.equal(fs.statSync(fixture.file).mode & 0o777, 0o600);
 });
 
 test("RED v2 API: real client exports the claimed-job reader boundary", () => {
@@ -632,49 +759,137 @@ testWhenClientExports(
 
 testWhenProductionExports(
   [
+    [client, "defaultClaimedJobPolicy"],
     [client, "readClaimedBackupJob"],
     [client, "runClientCommand"],
     [actionContract, "normalizeActionResponse"],
+    [actionContract, "signActionResponse"],
+    [broker, "createSemanticActionExecutor"],
     [broker, "encodeActionResponseFrame"],
   ],
-  "RED v2: scheduler filename reaches the real client module and real UDS response consumer",
+  "RED v2: scheduler executes the real client main through the real broker assembly",
   async (t) => {
     const fixture = claimedJobFixture(t);
     const expected = await assertValidClaimedJobControl(
       requireClaimedJobReader(),
       fixture,
     );
-    const exchange = await invokeWithLocalBroker(
-      (socketPath) => invokeSchedulerThroughRealClient(t, fixture, socketPath),
-      (request) => {
-        assert.equal(request.action, "backup.job.execute");
-        assert.deepEqual(
-          request.parameters,
-          expected,
-          "the scheduler-to-client bridge must preserve only the claimed filename-derived metadata",
-        );
-        return signedResponse(request, {
-          status: "completed",
-          statusCode: 200,
-          errorCode: null,
-          result: canonicalActionResultV2(request),
-        });
-      },
-      {
-        responseFrame(response) {
-          return broker.encodeActionResponseFrame(response);
-        },
-      },
+    const action = "backup.job.execute";
+    const capabilityKey = fixtureCapabilityKey(action);
+    const { trusted } = buildFixtureTrustedContextV2({
+      allowedActions: [action],
+      now: NOW,
+    });
+    const result = buildFixtureActionResultV2(action, expected);
+    const assembly = await realBrokerAssembly(t, {
+      capabilityKey,
+      now: () => Date.now(),
+      outcomes: [
+        { result },
+        { rejection: "semantic policy rejected the admitted claimed job" },
+      ],
+      trusted,
+    });
+    const redirect = clientMainFsRedirectFixture(t, {
+      capabilityKey,
+      capabilityPath: actionContract.ACTIONS[action].capabilityFile,
+    });
+
+    const completed = await invokeSchedulerRealMain(fixture, assembly.socketPath, redirect, {
+      activeReceiptSha256: trusted.receiptDigest,
+      combinedRenderSha256: trusted.receipt.combinedRenderSha256,
+      runtimeIntentId: trusted.intent.intentId,
+    }, "completed");
+    assert.equal(completed.code, 0, `${completed.stdout}\n${completed.stderr}`);
+    assert.equal(completed.stderr, "");
+    assertSingleJsonLine(completed.stdout, "completed scheduler/client main output");
+    const completedResponse = JSON.parse(completed.stdout);
+    assert.equal(
+      completed.stdout,
+      `${canonicalJsonOracle(completedResponse)}\n`,
+      "the real client main must emit exactly one canonical completed response frame",
     );
-    assert.equal(exchange.requestWire, canonicalJsonOracle(exchange.request));
-    assert.deepEqual(
-      exchange.value,
-      signedResponse(exchange.request, {
-        status: "completed",
-        statusCode: 200,
-        errorCode: null,
-        result: canonicalActionResultV2(exchange.request),
-      }),
+    assert.equal(completedResponse.status, "completed");
+    assert.equal(completedResponse.statusCode, 200);
+    assert.deepEqual(completedResponse.result, result);
+
+    const rejected = await invokeSchedulerRealMain(fixture, assembly.socketPath, redirect, {
+      activeReceiptSha256: trusted.receiptDigest,
+      combinedRenderSha256: trusted.receipt.combinedRenderSha256,
+      runtimeIntentId: trusted.intent.intentId,
+    }, "rejected");
+    assert.equal(rejected.code, 77, `${rejected.stdout}\n${rejected.stderr}`);
+    assert.equal(rejected.stderr, "");
+    assertSingleJsonLine(rejected.stdout, "rejected scheduler/client main output");
+    const rejectedResponse = JSON.parse(rejected.stdout);
+    assert.equal(
+      rejected.stdout,
+      `${canonicalJsonOracle(rejectedResponse)}\n`,
+      "the real client main must emit exactly one canonical rejected response frame",
+    );
+    assert.equal(rejectedResponse.status, "rejected");
+    assert.equal(rejectedResponse.statusCode, 403);
+    assert.equal(rejectedResponse.errorCode, "ACTION_REJECTED");
+    assert.equal(rejectedResponse.result, null);
+
+    assertProtectedMainReads(redirect.readAudit(), {
+      capabilityBytes: capabilityKey.length,
+      capabilityRuns: ["completed", "rejected"],
+      claimedJobBytes: fixture.bytes.length,
+      claimedJobRuns: ["completed", "rejected"],
+    });
+
+    fs.chmodSync(redirect.capabilityFile, 0o440);
+    const exposedCapability = await invokeSchedulerRealMain(
+      fixture,
+      assembly.socketPath,
+      redirect,
+      {
+        activeReceiptSha256: trusted.receiptDigest,
+        combinedRenderSha256: trusted.receipt.combinedRenderSha256,
+        runtimeIntentId: trusted.intent.intentId,
+      },
+      "exposed-capability",
+    );
+    assert.equal(exposedCapability.code, 1, `${exposedCapability.stdout}\n${exposedCapability.stderr}`);
+    assert.equal(exposedCapability.stdout, "");
+    assert.match(
+      exposedCapability.stderr,
+      /capability.*(?:ownership|link|mode|permission|protected|size)/i,
+    );
+
+    fs.chmodSync(redirect.capabilityFile, 0o400);
+    fs.chmodSync(fixture.file, 0o640);
+    const exposedClaimedJob = await invokeSchedulerRealMain(
+      fixture,
+      assembly.socketPath,
+      redirect,
+      {
+        activeReceiptSha256: trusted.receiptDigest,
+        combinedRenderSha256: trusted.receipt.combinedRenderSha256,
+        runtimeIntentId: trusted.intent.intentId,
+      },
+      "exposed-claimed-job",
+    );
+    assert.equal(exposedClaimedJob.code, 1, `${exposedClaimedJob.stdout}\n${exposedClaimedJob.stderr}`);
+    assert.equal(exposedClaimedJob.stdout, "");
+    assert.match(
+      exposedClaimedJob.stderr,
+      /claimed job.*(?:metadata|mode|owner|permission|protected)/i,
+    );
+
+    assert.deepEqual(assembly.executedActions, [action, action]);
+    assert.deepEqual(assembly.executedParameters, [expected, expected]);
+    assert.equal(assembly.responseFrames.length, 2);
+    assertProductionEncoderMatchesWrittenFrame(
+      assembly.responseFrames[0],
+      completedResponse,
+      "scheduler completed response",
+    );
+    assertProductionEncoderMatchesWrittenFrame(
+      assembly.responseFrames[1],
+      rejectedResponse,
+      "scheduler rejected response",
     );
   },
 );
@@ -1713,6 +1928,24 @@ function assertProductionResponseFrame(frame, response) {
   );
 }
 
+function assertProductionEncoderMatchesWrittenFrame(frame, response, label) {
+  const reordered = Object.fromEntries(Object.entries(response).reverse());
+  const legacyFrame = Buffer.from(`${JSON.stringify(reordered)}\n`);
+  const canonicalFrame = Buffer.from(`${canonicalJsonOracle(response)}\n`);
+  assert.notDeepEqual(
+    legacyFrame,
+    canonicalFrame,
+    `${label} fixture must distinguish legacy JSON.stringify from canonical encoding`,
+  );
+  const encoded = broker.encodeActionResponseFrame(reordered);
+  assertProductionResponseFrame(encoded, response);
+  assert.deepEqual(
+    Buffer.from(frame),
+    Buffer.from(encoded),
+    `${label} bytes written by the real broker must be the production encoder bytes`,
+  );
+}
+
 function canonicalJsonOracle(value) {
   return JSON.stringify(canonicalValueOracle(value));
 }
@@ -2004,45 +2237,438 @@ async function invokeValidCliControl(
   );
 }
 
-async function invokeSchedulerThroughRealClient(t, fixture, socketPath) {
-  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "docker-action-scheduler-client-"));
-  const bin = path.join(temporary, "bin");
-  const bridge = path.join(temporary, "real-client-bridge.mjs");
-  const nodeShim = path.join(bin, "node");
-  fs.mkdirSync(bin, { mode: 0o700 });
+async function realBrokerAssembly(t, {
+  capabilityKey,
+  now = () => NOW,
+  outcomes,
+  trusted,
+}) {
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "docker-action-real-assembly-"));
+  fs.chmodSync(temporary, 0o700);
+  const socketPath = path.join(temporary, "broker.sock");
+  const responseFrames = [];
+  const executedActions = [];
+  const executedParameters = [];
+  const replayEvents = [];
+  let semanticExecutorFactoryCalls = 0;
+  let outcomeIndex = 0;
+  const semanticExecutorOptions = Object.freeze({
+    assemblyProbe: "client-real-uds",
+  });
+  const semanticExecutor = Object.freeze({
+    async execute(action, { parameters }) {
+      executedActions.push(action);
+      executedParameters.push(structuredClone(parameters));
+      const outcome = outcomes[outcomeIndex++];
+      assert.ok(outcome, "the real assembly executed an unplanned semantic action");
+      if (outcome.rejection) {
+        const error = new Error(outcome.rejection);
+        error.statusCode = 403;
+        error.errorCode = "ACTION_REJECTED";
+        error.semanticRejection = true;
+        throw error;
+      }
+      return structuredClone(outcome.result);
+    },
+    async recoverLease() {
+      throw new Error("the clean replay fixture must not recover a worker");
+    },
+  });
+  const replayStore = {
+    async recover(engine) {
+      replayEvents.push("recover");
+      assert.equal(engine, semanticExecutor);
+      return { status: "clean" };
+    },
+    admitActivation() {
+      replayEvents.push("activation");
+    },
+    admitTrustedContext() {
+      replayEvents.push("trusted");
+    },
+    consume() {
+      replayEvents.push("consume");
+    },
+    acquire() {
+      replayEvents.push("acquire");
+      return {
+        preserve() {
+          replayEvents.push("preserve");
+        },
+        recordWorker() {},
+        release() {
+          replayEvents.push("release");
+        },
+      };
+    },
+  };
+  const server = broker.createDockerActionBroker({
+    socketPath,
+    stateDir: path.join(temporary, "state-must-remain-unmaterialized"),
+    trustedContextProvider: async () => trusted,
+    capabilityProvider: async () => capabilityKey,
+    replayStore,
+    semanticExecutorFactory(options) {
+      semanticExecutorFactoryCalls += 1;
+      assert.deepEqual(options, semanticExecutorOptions);
+      return semanticExecutor;
+    },
+    semanticExecutorOptions,
+    onResponseFrame(frame) {
+      responseFrames.push(Buffer.from(frame));
+    },
+    now,
+    operationTimeoutMs: 100,
+  });
+  t.after(async () => {
+    if (server.listening) {
+      await new Promise((resolve, reject) => {
+        server.close((error) => {
+          if (error) reject(error);
+          else resolve();
+        });
+      });
+    }
+    fs.rmSync(temporary, { force: true, recursive: true });
+  });
+  await server.initialize();
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(socketPath, resolve);
+  });
+  return {
+    executedActions,
+    executedParameters,
+    get semanticExecutorFactoryCalls() {
+      return semanticExecutorFactoryCalls;
+    },
+    replayEvents,
+    responseFrames,
+    socketPath,
+  };
+}
+
+async function realDefaultSemanticBrokerAssembly(t, {
+  capabilityKey,
+  trusted,
+}) {
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "docker-action-default-semantic-"));
+  fs.chmodSync(temporary, 0o700);
+  const socketPath = path.join(temporary, "broker.sock");
+  const responseFrames = [];
+  const transportCalls = [];
+  let recoveredSemanticExecutor = false;
+  const rejection = Object.assign(
+    new Error("default semantic transport rejected the admitted action"),
+    {
+      errorCode: "ACTION_REJECTED",
+      semanticRejection: true,
+      statusCode: 403,
+    },
+  );
+  const transport = new Proxy(Object.create(null), {
+    get(_target, property) {
+      if (property === "execute" || property === "then" || typeof property === "symbol") {
+        return undefined;
+      }
+      return (...args) => {
+        transportCalls.push({ argumentCount: args.length, method: String(property) });
+        throw rejection;
+      };
+    },
+  });
+  const replayStore = {
+    async recover(executor) {
+      assert.equal(typeof executor?.execute, "function");
+      assert.equal(typeof executor?.executePhase, "function");
+      assert.equal(typeof executor?.recoverLease, "function");
+      recoveredSemanticExecutor = true;
+      return { status: "clean" };
+    },
+    admitActivation() {},
+    admitTrustedContext() {},
+    consume() {},
+    acquire() {
+      return {
+        preserve() {},
+        recordEvent() {},
+        recordWorker() {},
+        release() {},
+      };
+    },
+  };
+  const server = broker.createDockerActionBroker({
+    socketPath,
+    stateDir: path.join(temporary, "state-must-remain-unmaterialized"),
+    trustedContextProvider: async () => trusted,
+    capabilityProvider: async () => capabilityKey,
+    replayStore,
+    semanticExecutorOptions: Object.freeze({
+      snapshotFileStore: Object.freeze({}),
+      transport,
+    }),
+    onResponseFrame(frame) {
+      responseFrames.push(Buffer.from(frame));
+    },
+    now: () => NOW,
+    operationTimeoutMs: 100,
+  });
+  t.after(async () => {
+    if (server.listening) {
+      await new Promise((resolve, rejectClose) => {
+        server.close((error) => {
+          if (error) rejectClose(error);
+          else resolve();
+        });
+      });
+    }
+    fs.rmSync(temporary, { force: true, recursive: true });
+  });
+  await server.initialize();
+  await new Promise((resolve, rejectListen) => {
+    server.once("error", rejectListen);
+    server.listen(socketPath, resolve);
+  });
+  return {
+    get recoveredSemanticExecutor() {
+      return recoveredSemanticExecutor;
+    },
+    responseFrames,
+    socketPath,
+    transportCalls,
+  };
+}
+
+function clientMainFsRedirectFixture(t, {
+  capabilityKey,
+  capabilityPath,
+}) {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "docker-action-client-main-fs-"));
+  fs.chmodSync(directory, 0o700);
+  const auditFile = path.join(directory, "audit.jsonl");
+  const capabilityFile = path.join(directory, "capability");
+  const preloadFile = path.join(directory, "root-owned-fs-preload.cjs");
+  fs.writeFileSync(auditFile, "", { mode: 0o600 });
+  fs.writeFileSync(capabilityFile, capabilityKey, { mode: 0o400 });
+  fs.chmodSync(capabilityFile, 0o400);
   fs.writeFileSync(
-    bridge,
+    preloadFile,
     [
-      'import { pathToFileURL } from "node:url";',
-      "const [clientPath, command, ...args] = process.argv.slice(2);",
-      "const client = await import(pathToFileURL(clientPath).href);",
-      'if (typeof client.runClientCommand !== "function") throw new Error("real client command seam is unavailable");',
-      'const options = JSON.parse(Buffer.from(process.env.SCHEDULER_CLIENT_OPTIONS_B64, "base64url").toString("utf8"));',
-      'options.capabilityKey = Buffer.from(process.env.SCHEDULER_CLIENT_CAPABILITY_B64, "base64url");',
-      "const response = await client.runClientCommand(command, args, options);",
-      'process.stdout.write(`${JSON.stringify(response)}\\n`);',
-      'if (response.statusCode !== 200 || response.status !== "completed") process.exitCode = 77;',
+      '"use strict";',
+      'const fs = require("node:fs");',
+      'const path = require("node:path");',
+      'const { syncBuiltinESMExports } = require("node:module");',
+      "const original = {",
+      "  appendFileSync: fs.appendFileSync.bind(fs),",
+      "  closeSync: fs.closeSync.bind(fs),",
+      "  fstatSync: fs.fstatSync.bind(fs),",
+      "  lstatSync: fs.lstatSync.bind(fs),",
+      "  openSync: fs.openSync.bind(fs),",
+      "  readFileSync: fs.readFileSync.bind(fs),",
+      "  readSync: fs.readSync.bind(fs),",
+      "  realpathSync: fs.realpathSync.bind(fs),",
+      "  statSync: fs.statSync.bind(fs),",
+      "};",
+      "const auditFile = process.env.DOCKER_ACTION_TEST_AUDIT_FILE;",
+      "const capabilityFile = path.resolve(process.env.DOCKER_ACTION_TEST_CAPABILITY_FILE);",
+      "const capabilityPath = path.resolve(process.env.DOCKER_ACTION_TEST_CAPABILITY_PATH);",
+      "const claimedFile = path.resolve(process.env.DOCKER_ACTION_TEST_CLAIMED_FILE);",
+      "const claimedRoot = path.resolve(process.env.DOCKER_ACTION_TEST_CLAIMED_ROOT);",
+      "const runId = process.env.DOCKER_ACTION_TEST_RUN_ID;",
+      "const descriptors = new Map();",
+      "const capabilityParents = new Set();",
+      "for (let current = path.dirname(capabilityPath); current !== path.parse(current).root; current = path.dirname(current)) {",
+      "  capabilityParents.add(current);",
+      "}",
+      "function resolved(value) {",
+      '  return typeof value === "string" ? path.resolve(value) : null;',
+      "}",
+      "function inside(candidate, root) {",
+      "  return candidate === root || candidate.startsWith(`${root}${path.sep}`);",
+      "}",
+      "function rootOwned(stat) {",
+      "  return new Proxy(stat, {",
+      "    get(target, property) {",
+      '      if (property === "uid" || property === "gid") return 0;',
+      "      const value = Reflect.get(target, property, target);",
+      '      return typeof value === "function" ? value.bind(target) : value;',
+      "    },",
+      "  });",
+      "}",
+      "function audit(event) {",
+      "  original.appendFileSync(auditFile, `${JSON.stringify({ ...event, runId })}\\n`);",
+      "}",
+      "function protectedKind(candidate) {",
+      '  if (candidate === capabilityPath) return "capability";',
+      '  if (candidate === claimedFile) return "claimed-job";',
+      "  return null;",
+      "}",
+      "fs.lstatSync = function testLstat(file, options) {",
+      "  const candidate = resolved(file);",
+      "  if (candidate === capabilityPath) return rootOwned(original.lstatSync(capabilityFile, options));",
+      "  if (capabilityParents.has(candidate)) return rootOwned(original.lstatSync(path.parse(candidate).root, options));",
+      "  if (candidate && inside(candidate, claimedRoot)) return rootOwned(original.lstatSync(file, options));",
+      "  return original.lstatSync(file, options);",
+      "};",
+      "fs.statSync = function testStat(file, options) {",
+      "  const candidate = resolved(file);",
+      "  if (candidate === capabilityPath) return rootOwned(original.statSync(capabilityFile, options));",
+      "  if (capabilityParents.has(candidate)) return rootOwned(original.statSync(path.parse(candidate).root, options));",
+      "  if (candidate && inside(candidate, claimedRoot)) return rootOwned(original.statSync(file, options));",
+      "  return original.statSync(file, options);",
+      "};",
+      "fs.realpathSync = function testRealpath(file, options) {",
+      "  const candidate = resolved(file);",
+      "  if (candidate === capabilityPath || capabilityParents.has(candidate)) return candidate;",
+      "  return original.realpathSync(file, options);",
+      "};",
+      "fs.openSync = function testOpen(file, flags, mode) {",
+      "  const candidate = resolved(file);",
+      "  const kind = protectedKind(candidate);",
+      "  const selected = candidate === capabilityPath ? capabilityFile : file;",
+      "  const descriptor = original.openSync(selected, flags, mode);",
+      "  if (kind) {",
+      "    descriptors.set(descriptor, kind);",
+      '    audit({ descriptor, event: "open", flags, kind, path: candidate });',
+      "  }",
+      "  return descriptor;",
+      "};",
+      "fs.fstatSync = function testFstat(descriptor, options) {",
+      "  const stat = original.fstatSync(descriptor, options);",
+      "  const kind = descriptors.get(descriptor);",
+      "  if (!kind) return stat;",
+      '  audit({ descriptor, event: "fstat", kind });',
+      "  return rootOwned(stat);",
+      "};",
+      "fs.readSync = function testRead(...args) {",
+      "  const bytesRead = original.readSync(...args);",
+      "  const kind = descriptors.get(args[0]);",
+      "  if (kind) {",
+      '    const options = args[2] && typeof args[2] === "object" ? args[2] : null;',
+      "    const position = options ? options.position : args[4];",
+      "    const requested = options ? options.length : args[3];",
+      '    audit({ bytesRead, descriptor: args[0], event: "read", kind, position, requested });',
+      "  }",
+      "  return bytesRead;",
+      "};",
+      "fs.readFileSync = function testReadFile(file, options) {",
+      '  const descriptorKind = typeof file === "number" ? descriptors.get(file) : null;',
+      "  const candidate = resolved(file);",
+      "  const kind = descriptorKind || protectedKind(candidate);",
+      '  if (kind) audit({ descriptor: typeof file === "number" ? file : null, event: "readFile", kind, path: candidate });',
+      "  return original.readFileSync(candidate === capabilityPath ? capabilityFile : file, options);",
+      "};",
+      "fs.closeSync = function testClose(descriptor) {",
+      "  const kind = descriptors.get(descriptor);",
+      "  if (kind) {",
+      '    audit({ descriptor, event: "close", kind });',
+      "    descriptors.delete(descriptor);",
+      "  }",
+      "  return original.closeSync(descriptor);",
+      "};",
+      "syncBuiltinESMExports();",
       "",
     ].join("\n"),
     { mode: 0o600 },
   );
-  fs.writeFileSync(
-    nodeShim,
-    [
-      "#!/bin/sh",
-      'exec "$SCHEDULER_REAL_NODE" "$SCHEDULER_REAL_CLIENT_BRIDGE" "$@"',
-      "",
-    ].join("\n"),
-    { mode: 0o700 },
-  );
-  t.after(() => fs.rmSync(temporary, { force: true, recursive: true }));
-
-  const options = {
-    ...clientOptions(),
-    claimedJobPolicy: claimedJobPolicy(fixture),
-    socketPath,
+  fs.chmodSync(preloadFile, 0o600);
+  t.after(() => fs.rmSync(directory, { force: true, recursive: true }));
+  return {
+    auditFile,
+    capabilityFile,
+    capabilityPath,
+    preloadFile,
+    readAudit() {
+      const value = fs.readFileSync(auditFile, "utf8");
+      return value
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => JSON.parse(line));
+    },
   };
-  const outcome = await collectChildProcess(
+}
+
+function assertProtectedMainReads(events, {
+  capabilityBytes,
+  capabilityRuns,
+  claimedJobBytes,
+  claimedJobRuns,
+}) {
+  for (const [kind, runs, expectedBytes] of [
+    ["capability", capabilityRuns, capabilityBytes],
+    ["claimed-job", claimedJobRuns, claimedJobBytes],
+  ]) {
+    for (const runId of runs) {
+      const selected = events.filter((event) => event.kind === kind && event.runId === runId);
+      const opens = selected.filter(({ event }) => event === "open");
+      assert.equal(opens.length, 1, `${runId} must open ${kind} exactly once`);
+      assert.equal(
+        (opens[0].flags & fs.constants.O_NOFOLLOW) === fs.constants.O_NOFOLLOW,
+        true,
+        `${runId} must open ${kind} with O_NOFOLLOW`,
+      );
+      assert.equal(
+        selected.some(({ event }) => event === "readFile"),
+        false,
+        `${runId} must not shortcut ${kind} through readFileSync`,
+      );
+      const reads = selected.filter(({ event }) => event === "read");
+      assertTwoCompleteDescriptorReads(reads, expectedBytes, `${runId} ${kind}`);
+      assert.ok(
+        selected.filter(({ event }) => event === "fstat").length >= 2,
+        `${runId} must bind ${kind} bytes to stable descriptor metadata`,
+      );
+      assert.equal(
+        selected.filter(({ event }) => event === "close").length,
+        1,
+        `${runId} must close the one protected ${kind} descriptor`,
+      );
+    }
+  }
+}
+
+function assertTwoCompleteDescriptorReads(reads, expectedBytes, label) {
+  let pass = -1;
+  let cursor = 0;
+  for (const read of reads) {
+    if (read.position === 0) {
+      if (pass >= 0) {
+        assert.equal(cursor, expectedBytes, `${label} descriptor pass was incomplete`);
+      }
+      pass += 1;
+      cursor = 0;
+    }
+    assert.equal(
+      read.position,
+      cursor,
+      `${label} descriptor reads must be explicit and contiguous`,
+    );
+    assert.ok(read.bytesRead > 0, `${label} descriptor read made no progress`);
+    cursor += read.bytesRead;
+    assert.ok(cursor <= expectedBytes, `${label} descriptor read exceeded the protected file`);
+  }
+  assert.equal(pass, 1, `${label} must have exactly two descriptor passes`);
+  assert.equal(cursor, expectedBytes, `${label} final descriptor pass was incomplete`);
+}
+
+function invokeSchedulerRealMain(fixture, socketPath, redirect, trustedEnvironment, runId) {
+  const env = {
+    BACKUP_SCHEDULER_JOBS_DIR: fixture.directory,
+    DOCKER_ACTION_ACTIVE_RECEIPT_SHA256: trustedEnvironment.activeReceiptSha256,
+    DOCKER_ACTION_BROKER_SOCKET: socketPath,
+    DOCKER_ACTION_COMBINED_RENDER_SHA256: trustedEnvironment.combinedRenderSha256,
+    DOCKER_ACTION_RUNTIME_INTENT_ID: trustedEnvironment.runtimeIntentId,
+    DOCKER_ACTION_TEST_AUDIT_FILE: redirect.auditFile,
+    DOCKER_ACTION_TEST_CAPABILITY_FILE: redirect.capabilityFile,
+    DOCKER_ACTION_TEST_CAPABILITY_PATH: redirect.capabilityPath,
+    DOCKER_ACTION_TEST_CLAIMED_FILE: fixture.file,
+    DOCKER_ACTION_TEST_CLAIMED_ROOT: fixture.directory,
+    DOCKER_ACTION_TEST_RUN_ID: runId,
+    NODE_OPTIONS: `--require=${redirect.preloadFile}`,
+    PATH: `${path.dirname(process.execPath)}${path.delimiter}${process.env.PATH ?? ""}`,
+    PLATFORM_INFRA_ROOT: REPOSITORY_ROOT,
+  };
+  return collectChildProcess(
     "/bin/sh",
     [
       path.join(REPOSITORY_ROOT, "scripts", "backup-scheduler.sh"),
@@ -2053,21 +2679,15 @@ async function invokeSchedulerThroughRealClient(t, fixture, socketPath) {
     ],
     {
       cwd: REPOSITORY_ROOT,
-      env: {
-        ...process.env,
-        PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
-        PLATFORM_INFRA_ROOT: REPOSITORY_ROOT,
-        SCHEDULER_CLIENT_CAPABILITY_B64: CAPABILITY.toString("base64url"),
-        SCHEDULER_CLIENT_OPTIONS_B64: Buffer.from(JSON.stringify(options)).toString("base64url"),
-        SCHEDULER_REAL_CLIENT_BRIDGE: bridge,
-        SCHEDULER_REAL_NODE: process.execPath,
-      },
+      env,
     },
   );
-  assert.equal(outcome.code, 0, `${outcome.stdout}\n${outcome.stderr}`);
-  const lines = outcome.stdout.trim().split("\n").filter(Boolean);
-  assert.equal(lines.length, 1, "the scheduler/client bridge must emit exactly one authenticated response");
-  return JSON.parse(lines[0]);
+}
+
+function assertSingleJsonLine(value, label) {
+  assert.equal(value.endsWith("\n"), true, `${label} must end in exactly one LF`);
+  assert.equal(value.slice(0, -1).includes("\n"), false, `${label} must contain exactly one frame`);
+  assert.doesNotThrow(() => JSON.parse(value.slice(0, -1)), `${label} must be one JSON document`);
 }
 
 function collectChildProcess(command, args, options) {

@@ -20,6 +20,22 @@ const CAPABILITY_SECRETS = [
 ];
 const EVIDENCE_SECRET = "docker_action_evidence_runtime_snapshot";
 const TRUST_SECRET = "docker_action_runtime_intent_trust_key";
+const CANDIDATE_PROJECT_PRIVATE_VOLUMES = [
+  "backup_scheduler_logs",
+  "enterprise_alertmanager_data",
+  "enterprise_grafana_data",
+  "enterprise_keycloak_data",
+  "enterprise_local_registry_data",
+  "enterprise_loki_data",
+  "enterprise_mariadb_data",
+  "enterprise_minio_data",
+  "enterprise_nats_data",
+  "enterprise_postgres_data",
+  "enterprise_prometheus_data",
+  "enterprise_redis_data",
+  "nats_auth_config",
+  "redis_auth_config",
+];
 const pinnedComposeSha256 = "32691ba1196d819fa68cbdc0aad9a5569e730a35ae40c6fdd8458110ecd69488";
 const composeAvailability = findComposeCli();
 const cachedCanonicalRenders = new Map();
@@ -185,23 +201,48 @@ test("rejects an unprovable external container volumes_from authority", (t) => {
   });
 });
 
-test("accepts a project-private safe volume as a raw-authority positive control", (t) => {
+test("accepts a project-private canonical local volume as a raw-authority positive control", (t) => {
   const baseline = rawAuthorityBaselineOrTodo(t);
   if (!baseline) return;
   baseline.services.cadvisor.volumes = [{
     type: "volume",
-    source: "metrics_scratch",
-    target: "/var/lib/cadvisor",
+    source: "metrics_runtime",
+    target: "/mnt/runtime",
     read_only: true,
     volume: {},
   }];
-  baseline.volumes.metrics_scratch = { name: "platform_infra_vps_metrics_scratch" };
+  baseline.volumes.metrics_runtime = {
+    name: "platform_infra_vps_metrics_runtime",
+    driver: "local",
+  };
 
   assert.equal(renderedServiceOwnsRawSocket(baseline, "cadvisor"), false);
   assert.equal(
     checkStatus(evaluateRuntimeIsolation(baseline), "raw-socket-single-owner"),
     "passed",
-    "a proven project-private volume must not be misclassified as raw Docker authority",
+    "a proven project-private canonical local volume must not be misclassified as raw Docker authority",
+  );
+});
+
+test("accepts a canonical rendered named volume without classifying every named volume", (t) => {
+  const baseline = rawAuthorityBaselineOrTodo(t);
+  if (!baseline) return;
+  baseline.services.cadvisor.volumes = [{
+    type: "volume",
+    source: "metrics_cache",
+    target: "/mnt/runtime",
+    read_only: true,
+    volume: {},
+  }];
+  baseline.volumes.metrics_cache = {
+    name: "platform_infra_vps_metrics_cache",
+  };
+
+  assert.equal(renderedServiceOwnsRawSocket(baseline, "cadvisor"), false);
+  assert.equal(
+    checkStatus(evaluateRuntimeIsolation(baseline), "raw-socket-single-owner"),
+    "passed",
+    "a canonical default-local rendered volume must remain distinct from unprovable volume authority",
   );
 });
 
@@ -247,7 +288,7 @@ for (const device of ["/", "/var", "/run", "/var/run"]) {
         config.services.cadvisor.volumes = [{
           type: "volume",
           source: "cadvisor_runtime",
-          target: "/host-runtime",
+          target: "/mnt/runtime",
           read_only: true,
         }];
         config.volumes.cadvisor_runtime = {
@@ -260,32 +301,74 @@ for (const device of ["/", "/var", "/run", "/var/run"]) {
   });
 }
 
-for (const [label, declaration] of [
+for (const [label, volumeName, declaration] of [
   [
-    "external precreated volume",
-    { external: true, name: "untrusted_precreated_runtime" },
+    "external volume",
+    "external_runtime",
+    { external: true, name: "platform_infra_vps_external_runtime" },
   ],
   [
-    "explicitly named precreated volume",
-    { name: "untrusted_precreated_runtime" },
+    "non-canonical custom alias",
+    "aliased_runtime",
+    { name: "shared_runtime" },
+  ],
+  [
+    "unprovable volume driver",
+    "driver_runtime",
+    { name: "platform_infra_vps_driver_runtime", driver: "untrusted.remote" },
   ],
 ]) {
-  test(`rejects cAdvisor ${label} because its Engine definition is unprovable`, (t) => {
+  test(`rejects cAdvisor ${label} independently of its mount target`, (t) => {
     assertMutationRejected(t, {
       checks: ["raw-socket-single-owner"],
       mutate(config) {
         config.services.cadvisor.volumes = [{
           type: "volume",
-          source: "precreated_runtime",
-          target: "/host-runtime",
+          source: volumeName,
+          target: "/mnt/runtime",
           read_only: true,
           volume: {},
         }];
-        config.volumes.precreated_runtime = structuredClone(declaration);
+        config.volumes[volumeName] = structuredClone(declaration);
       },
     });
   });
 }
+
+test("rejects an arbitrary service external volume at a neutral target", (t) => {
+  assertMutationRejected(t, {
+    checks: ["raw-socket-single-owner"],
+    mutate(config) {
+      config.services.postgres.volumes = [{
+        type: "volume",
+        source: "neutral_runtime",
+        target: "/mnt/runtime",
+        read_only: true,
+        volume: {},
+      }];
+      config.volumes.neutral_runtime = {
+        external: true,
+        name: "platform_infra_vps_neutral_runtime",
+      };
+    },
+  });
+});
+
+test("rejects an arbitrary service volume with no provable definition", (t) => {
+  assertMutationRejected(t, {
+    checks: ["raw-socket-single-owner"],
+    mutate(config) {
+      config.services.postgres.volumes = [{
+        type: "volume",
+        source: "undefined_runtime",
+        target: "/mnt/runtime",
+        read_only: true,
+        volume: {},
+      }];
+      delete config.volumes.undefined_runtime;
+    },
+  });
+});
 
 test("rejects workload raw socket, bind and broad host mounts", (t) => {
   assertMutationRejected(t, {
@@ -1044,6 +1127,11 @@ function candidateRuntimeIsolationOverlay() {
         mode: 256`).join("\n");
   const secretDeclarations = CAPABILITY_SECRETS.map((name) => `  ${name}:
     file: ./secrets/${name}.txt`).join("\n");
+  const privateVolumeDeclarations = CANDIDATE_PROJECT_PRIVATE_VOLUMES
+    .map((name) => `  ${name}: !override
+    name: platform_infra_vps_${name}
+    driver: local`)
+    .join("\n");
   return `services:
   node-exporter:
     pid: !reset null
@@ -1149,6 +1237,7 @@ ${capabilitySecrets}
       retries: 5
 
 volumes:
+${privateVolumeDeclarations}
   backup_scheduler_jobs:
 
 secrets:
@@ -1204,13 +1293,13 @@ function renderedServiceOwnsRawSocket(config, name, ancestry = new Set()) {
     if (mount?.type !== "volume") return exposesDockerSocket(mount?.source);
     const volumeName = String(mount?.source || "");
     const declaration = config.volumes?.[volumeName];
-    const targetCarriesHostAuthority = /(?:^|\/)(?:host(?:-runtime)?|rootfs)(?:\/|$)/.test(String(mount?.target || ""));
-    if (!declaration || declaration.external === true) return targetCarriesHostAuthority;
-    if (declaration.name && declaration.name !== `platform_infra_vps_${volumeName}`) return targetCarriesHostAuthority;
-    if (declaration.driver && declaration.driver !== "local") return targetCarriesHostAuthority;
+    if (!declaration || declaration.external === true) return true;
+    const canonicalName = `${String(config.name || "")}_${volumeName}`;
+    if (!config.name || declaration.name !== canonicalName) return true;
+    if (declaration.driver && declaration.driver !== "local") return true;
     if (declaration.driver_opts) {
       const device = declaration.driver_opts.device;
-      return device ? exposesDockerSocket(device) : targetCarriesHostAuthority;
+      return device ? exposesDockerSocket(device) : true;
     }
     return false;
   })) return true;

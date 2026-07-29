@@ -444,28 +444,62 @@ test("RED v2: typed job parameters preserve real identifiers and reject normaliz
 
 test("RED v2: broker core emits the exact authenticated response wire contract", async (t) => {
   if (!requestConsumerV2Ready(t)) return;
-  const trusted = requestTrustedFixture("backup.prune.plan");
-  const key = capabilityKey("backup.prune.plan");
-  const request = signedRequest("backup.prune.plan", {}, trusted, 30);
-  const result = buildFixtureActionResultV2("backup.prune.plan");
+  const parameters = {
+    jobFileName: "0123456789abcdef.json",
+    jobId: "0123456789abcdef",
+    jobOperation: "backup",
+    jobSha256: "1".repeat(64),
+  };
+  const trusted = requestTrustedFixture("backup.job.execute");
+  const key = capabilityKey("backup.job.execute");
+  const request = signedRequest("backup.job.execute", parameters, trusted, 30);
+  const result = buildFixtureActionResultV2("backup.job.execute", parameters);
+  const calls = {
+    acquire: [],
+    consume: [],
+    engine: [],
+  };
+  let lease;
   const replayStore = {
-    acquire() {
-      return { preserve() {}, recordWorker() {}, release() {} };
+    acquire(...args) {
+      calls.acquire.push(args);
+      const [observedRequest, observedTrusted] = args;
+      lease = Object.freeze({
+        lineage: Object.freeze({
+          action: observedRequest.action,
+          intentId: observedTrusted.intent.intentId,
+          receiptDigest: observedTrusted.receiptDigest,
+          request: structuredClone(observedRequest),
+          requestId: observedRequest.requestId,
+          requestSha256: fixtureSha256(canonicalFixtureJson(observedRequest)),
+        }),
+        preserve() {},
+        recordWorker() {},
+        release() {},
+      });
+      return lease;
     },
     admitActivation() {},
     admitTrustedContext() {},
-    consume() {},
+    consume(...args) {
+      calls.consume.push(args);
+    },
   };
   const core = createBrokerCore({
     trustedContextProvider: async () => trusted,
     capabilityProvider: async () => key,
-    engine: { execute: async () => result },
+    engine: {
+      async execute(...args) {
+        calls.engine.push(args);
+        return result;
+      },
+    },
     replayStore,
     now: () => NOW,
     operationTimeoutMs: 100,
   });
 
-  const wire = await core.handle(Buffer.from(JSON.stringify(request)));
+  const wire = await core.handle(Buffer.from(canonicalFixtureJson(request)));
   const response = wire.body;
   const requestSha256 = canonicalSignedRequestSha256(request);
   const requestIdOnlySha256 = fixtureSha256(request.requestId);
@@ -476,6 +510,36 @@ test("RED v2: broker core emits the exact authenticated response wire contract",
     requestIdOnlySha256,
     "the response request digest must cover the complete signed request, not only requestId",
   );
+  assert.equal(calls.consume.length, 1);
+  assert.equal(calls.consume[0].length, 1);
+  assertCompleteSignedRequestBoundary(
+    calls.consume[0][0],
+    request,
+    "replayStore.consume request",
+  );
+  assert.equal(calls.acquire.length, 1);
+  assert.equal(calls.acquire[0].length, 2);
+  assertCompleteSignedRequestBoundary(
+    calls.acquire[0][0],
+    request,
+    "replayStore.acquire request",
+  );
+  assert.strictEqual(
+    calls.acquire[0][1],
+    trusted,
+    "replayStore.acquire must receive the exact trusted lineage admitted by the provider",
+  );
+  assertTrustedRequestLineage(lease.lineage, request, trusted, "lease");
+  assert.equal(calls.engine.length, 1);
+  assert.equal(calls.engine[0].length, 2);
+  assert.equal(calls.engine[0][0], request.action);
+  assertSemanticCoreContext(
+    calls.engine[0][1],
+    request,
+    trusted,
+    lease,
+    "engine.execute context",
+  );
   assert.equal(wire.statusCode, 200);
   assert.deepEqual(Object.keys(response).sort(), [...RESPONSE_KEYS].sort());
   assert.equal(response.schema, RESPONSE_SCHEMA_V2);
@@ -485,10 +549,65 @@ test("RED v2: broker core emits the exact authenticated response wire contract",
   assert.equal(response.action, request.action);
   assert.equal(response.requestId, request.requestId);
   assert.equal(response.requestSha256, requestSha256);
+  assert.equal(response.requestSha256, lease.lineage.requestSha256);
+  assert.equal(response.requestSha256, calls.engine[0][1].requestSha256);
   assert.equal(response.resultSha256, resultSha256);
   assert.deepEqual(response.result, result);
   assertResponseBoundToSignedRequestAndResult(response, request);
   assert.equal(response.mac, responseMac(omit(response, "mac"), key));
+
+  const truncated = admittedRequestShape(request);
+  assert.throws(
+    () => assertCompleteSignedRequestBoundary(
+      truncated,
+      request,
+      "negative truncated request",
+    ),
+    /complete signed request/i,
+    "the oracle must reject a normalized or truncated request at an internal boundary",
+  );
+  assert.throws(
+    () => assertSemanticCoreContext(
+      {
+        ...calls.engine[0][1],
+        requestSha256: requestIdOnlySha256,
+      },
+      request,
+      trusted,
+      lease,
+      "negative requestId-only engine context",
+    ),
+    /canonical full signed request/i,
+    "the oracle must reject a digest derived from requestId even when the response is otherwise valid",
+  );
+  assert.throws(
+    () => assertSemanticCoreContext(
+      {
+        ...calls.engine[0][1],
+        parameters: {},
+      },
+      request,
+      trusted,
+      lease,
+      "negative truncated engine parameters",
+    ),
+    /exact request parameters/i,
+    "the oracle must reject an engine context that drops typed request parameters",
+  );
+  assert.throws(
+    () => assertTrustedRequestLineage(
+      {
+        ...lease.lineage,
+        request: truncated,
+        requestSha256: requestIdOnlySha256,
+      },
+      request,
+      trusted,
+      "negative truncated lease",
+    ),
+    /complete signed request/i,
+    "the oracle must reject a lease lineage that discarded authenticated request fields",
+  );
 });
 
 test("RED v2: evidence output is bounded before the broker releases its replay lease", async (t) => {
@@ -1351,6 +1470,121 @@ function canonicalSignedRequestSha256(request) {
   );
   assert.match(request.mac, /^[a-f0-9]{64}$/);
   return fixtureSha256(canonicalFixtureJson(request));
+}
+
+function assertCompleteSignedRequestBoundary(observed, expected, label) {
+  assert.ok(
+    observed
+      && typeof observed === "object"
+      && !Array.isArray(observed)
+      && Object.getPrototypeOf(observed) === Object.prototype,
+    `${label} must receive the complete signed request as a plain object`,
+  );
+  assert.deepEqual(
+    Object.keys(observed).sort(),
+    [...REQUEST_KEYS].sort(),
+    `${label} must receive the complete signed request`,
+  );
+  assert.deepEqual(
+    observed,
+    expected,
+    `${label} must preserve every authenticated request field byte-for-byte`,
+  );
+  const expectedSha256 = canonicalSignedRequestSha256(expected);
+  assert.equal(
+    canonicalSignedRequestSha256(observed),
+    expectedSha256,
+    `${label} must preserve sha256 of the canonical full signed request`,
+  );
+  assert.notEqual(
+    expectedSha256,
+    fixtureSha256(expected.requestId),
+    `${label} must not collapse request identity to requestId`,
+  );
+  assert.deepEqual(
+    observed.parameters,
+    expected.parameters,
+    `${label} must preserve the exact admitted parameters`,
+  );
+  return expectedSha256;
+}
+
+function assertTrustedRequestLineage(lineage, request, trusted, label) {
+  assert.ok(lineage && typeof lineage === "object", `${label} lineage is missing`);
+  const requestSha256 = assertCompleteSignedRequestBoundary(
+    lineage.request,
+    request,
+    `${label} lineage request`,
+  );
+  assert.equal(lineage.action, request.action, `${label} action lineage`);
+  assert.equal(lineage.requestId, request.requestId, `${label} requestId lineage`);
+  assert.equal(
+    lineage.requestSha256,
+    requestSha256,
+    `${label} must bind sha256 of the canonical full signed request`,
+  );
+  assert.notEqual(
+    lineage.requestSha256,
+    fixtureSha256(request.requestId),
+    `${label} lineage must not use a requestId-only digest`,
+  );
+  assert.equal(lineage.intentId, trusted.intent.intentId, `${label} runtime intent lineage`);
+  assert.equal(lineage.receiptDigest, trusted.receiptDigest, `${label} receipt lineage`);
+  assert.equal(
+    lineage.request.runtimeIntentId,
+    trusted.intent.intentId,
+    `${label} signed request must retain trusted intent identity`,
+  );
+  assert.equal(
+    lineage.request.activeReceiptSha256,
+    trusted.receiptDigest,
+    `${label} signed request must retain trusted receipt identity`,
+  );
+}
+
+function assertSemanticCoreContext(context, request, trusted, lease, label) {
+  assert.ok(context && typeof context === "object", `${label} is missing`);
+  assert.deepEqual(
+    Object.keys(context).sort(),
+    [
+      "lease",
+      "parameters",
+      "request",
+      "requestId",
+      "requestSha256",
+      "signal",
+      "trusted",
+    ],
+    `${label} must expose the exact semantic request lineage`,
+  );
+  const requestSha256 = assertCompleteSignedRequestBoundary(
+    context.request,
+    request,
+    `${label} request`,
+  );
+  assert.equal(context.requestId, request.requestId, `${label} requestId`);
+  assert.equal(
+    context.requestSha256,
+    requestSha256,
+    `${label} must bind sha256 of the canonical full signed request`,
+  );
+  assert.notEqual(
+    context.requestSha256,
+    fixtureSha256(request.requestId),
+    `${label} must not use a requestId-only digest`,
+  );
+  assert.deepEqual(
+    context.parameters,
+    request.parameters,
+    `${label} must carry the exact request parameters`,
+  );
+  assert.strictEqual(context.trusted, trusted, `${label} must carry the exact trusted context`);
+  assert.strictEqual(context.lease, lease, `${label} must carry the acquired lease`);
+  assertTrustedRequestLineage(context.lease.lineage, request, trusted, `${label} lease`);
+  assert.ok(
+    context.signal && typeof context.signal.aborted === "boolean",
+    `${label} must carry an AbortSignal`,
+  );
 }
 
 function assertResponseBoundToSignedRequestAndResult(response, request) {

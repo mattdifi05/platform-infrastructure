@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -18,9 +19,11 @@ import {
   buildFixtureNetworkInspect,
   buildFixturePhaseOutputV2,
   buildFixtureSignedActionRequestV2,
+  buildFixtureTrustedContextV2,
   buildFixtureVolumeInspect,
   buildRawActiveReceiptV2,
   canonicalFixtureJson,
+  fixtureCapabilityKey,
   fixtureSha256,
 } from "./docker-action-v2-fixtures.mjs";
 
@@ -37,6 +40,13 @@ let requestSequence = 1000;
 const HAS_SEMANTIC_EXECUTOR = typeof broker.createSemanticActionExecutor === "function";
 const HAS_CLAIMED_JOB_READER = typeof broker.readClaimedJobSnapshot === "function";
 const HAS_SNAPSHOT_STORE = typeof broker.createSnapshotFileStore === "function";
+const HAS_RESPONSE_ENCODER = typeof broker.encodeActionResponseFrame === "function";
+const HAS_RAW_FRAME_E2E_APIS = HAS_SEMANTIC_EXECUTOR
+  && HAS_CLAIMED_JOB_READER
+  && HAS_SNAPSHOT_STORE
+  && HAS_RESPONSE_ENCODER
+  && ["PersistentReplayStore", "createBrokerCore"]
+    .every((name) => typeof broker[name] === "function");
 
 testRunner("RED v2: broker exports one already-admitted semantic executor API", () => {
   assert.equal(
@@ -112,6 +122,42 @@ function snapshotTest(name, callback) {
     ? "blocked only by the active createSnapshotFileStore export RED"
     : "blocked only by the active createSemanticActionExecutor API RED";
   return testRunner(name, { todo: reason }, () => {});
+}
+
+if (HAS_SEMANTIC_EXECUTOR) {
+  testRunner("RED v2: broker exports the canonical response frame encoder", () => {
+    assert.equal(
+      typeof broker.encodeActionResponseFrame,
+      "function",
+      "docker-action-broker must export encodeActionResponseFrame",
+    );
+  });
+} else {
+  testRunner(
+    "RED v2: broker exports the canonical response frame encoder",
+    { todo: "blocked only by the active createSemanticActionExecutor API RED" },
+    () => {},
+  );
+}
+
+function rawFrameE2eTest(name, callback) {
+  if (HAS_RAW_FRAME_E2E_APIS) return testRunner(name, callback);
+  const missing = [
+    ["PersistentReplayStore", typeof broker.PersistentReplayStore],
+    ["createBrokerCore", typeof broker.createBrokerCore],
+    ["createSemanticActionExecutor", typeof broker.createSemanticActionExecutor],
+    ["createSnapshotFileStore", typeof broker.createSnapshotFileStore],
+    ["encodeActionResponseFrame", typeof broker.encodeActionResponseFrame],
+    ["readClaimedJobSnapshot", typeof broker.readClaimedJobSnapshot],
+  ]
+    .filter(([, type]) => type !== "function")
+    .map(([name]) => name)
+    .join(", ");
+  return testRunner(
+    name,
+    { todo: `blocked by missing raw-frame E2E prerequisite API(s): ${missing}` },
+    () => {},
+  );
 }
 
 const BACKUP_JOB_ID = "0123456789abcdef";
@@ -482,34 +528,8 @@ snapshotTest("v2 snapshot store uses O_EXCL 0400 fsync under the exact Engine Mo
   fs.mkdirSync(mountpoint, { mode: 0o700 });
   const uid = fs.statSync(mountpoint).uid;
   const gid = fs.statSync(mountpoint).gid;
-  const audit = { descriptors: new Map(), fsyncs: [], opens: [], unlinks: [] };
-  const io = new Proxy(fs, {
-    get(target, property) {
-      if (property === "openSync") {
-        return (file, flags, mode) => {
-          const descriptor = fs.openSync(file, flags, mode);
-          const resolved = path.resolve(String(file));
-          audit.descriptors.set(descriptor, resolved);
-          audit.opens.push({ descriptor, file: resolved, flags, mode });
-          return descriptor;
-        };
-      }
-      if (property === "fsyncSync") {
-        return (descriptor) => {
-          audit.fsyncs.push(audit.descriptors.get(descriptor) ?? `fd:${descriptor}`);
-          return fs.fsyncSync(descriptor);
-        };
-      }
-      if (property === "unlinkSync") {
-        return (file) => {
-          audit.unlinks.push(path.resolve(String(file)));
-          return fs.unlinkSync(file);
-        };
-      }
-      const value = Reflect.get(target, property);
-      return typeof value === "function" ? value.bind(target) : value;
-    },
-  });
+  const history = filesystemHistoryProbe();
+  const { audit, io } = history;
   const receipt = buildRawActiveReceiptV2();
   const source = receipt.resources.claimedJobSources["jobs.running"];
   const volumeInspect = {
@@ -545,14 +565,17 @@ snapshotTest("v2 snapshot store uses O_EXCL 0400 fsync under the exact Engine Mo
     source,
     volumeInspect,
   });
+  const sealHistoryEnd = audit.events.length;
   const expectedDirectory = path.join(
     mountpoint,
     source.snapshotVolumeSubpath,
     requestSha256,
   );
+  const claimedJobsDirectory = path.dirname(expectedDirectory);
   assert.equal(sealed.hostPath, path.join(expectedDirectory, "job.json"));
   assert.equal(sealed.containerPath, SNAPSHOT_CONTAINER_PATH);
   assert.deepEqual(fs.readFileSync(sealed.hostPath), BACKUP_JOB_BYTES);
+  assert.equal(fs.statSync(claimedJobsDirectory).mode & 0o777, 0o700);
   assert.equal(fs.statSync(expectedDirectory).mode & 0o777, 0o700);
   assert.equal(fs.statSync(sealed.hostPath).mode & 0o777, 0o400);
   const snapshotOpen = audit.opens.find(({ file }) => file === sealed.hostPath);
@@ -566,8 +589,71 @@ snapshotTest("v2 snapshot store uses O_EXCL 0400 fsync under the exact Engine Mo
     fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW,
   );
   assert.equal(snapshotOpen.mode, 0o400);
-  assert.ok(audit.fsyncs.includes(sealed.hostPath), "snapshot file was not fsynced");
-  assert.ok(audit.fsyncs.includes(expectedDirectory), "snapshot request directory was not fsynced");
+  let durabilityCursor = historyIndex(
+    audit.events,
+    -1,
+    ({ file, type }) => type === "mkdir" && file === claimedJobsDirectory,
+    "claimed-jobs directory creation was not observed",
+  );
+  durabilityCursor = historyIndex(
+    audit.events,
+    durabilityCursor,
+    ({ file, type }) => type === "fsync" && file === mountpoint,
+    "the Engine Mountpoint was not fsynced after claimed-jobs creation",
+  );
+  durabilityCursor = historyIndex(
+    audit.events,
+    durabilityCursor,
+    ({ file, type }) => type === "mkdir" && file === expectedDirectory,
+    "request snapshot directory creation was not observed",
+  );
+  durabilityCursor = historyIndex(
+    audit.events,
+    durabilityCursor,
+    ({ file, type }) => type === "fsync" && file === claimedJobsDirectory,
+    "claimed-jobs was not fsynced after request directory creation",
+  );
+  durabilityCursor = historyIndex(
+    audit.events,
+    durabilityCursor,
+    ({ file, type }) => type === "open" && file === sealed.hostPath,
+    "snapshot leaf open was not observed after its durable directory creation",
+  );
+  const leafWriteIndex = historyIndex(
+    audit.events,
+    durabilityCursor,
+    ({ file, type }) => type === "write" && file === sealed.hostPath,
+    "snapshot bytes were not written through the opened leaf",
+  );
+  const leafFsyncIndex = historyIndex(
+    audit.events,
+    leafWriteIndex,
+    ({ file, type }) => type === "fsync" && file === sealed.hostPath,
+    "snapshot leaf was fsynced before its bytes were written",
+  );
+  const bytesWrittenBeforeFsync = audit.events
+    .slice(durabilityCursor + 1, leafFsyncIndex)
+    .filter(({ file, type }) => type === "write" && file === sealed.hostPath)
+    .reduce((sum, { bytes }) => sum + bytes, 0);
+  assert.equal(
+    bytesWrittenBeforeFsync,
+    BACKUP_JOB_BYTES.length,
+    "snapshot leaf fsync did not follow one complete file write",
+  );
+  const requestDirectoryFsync = historyIndex(
+    audit.events,
+    leafFsyncIndex,
+    ({ file, type }) => type === "fsync" && file === expectedDirectory,
+    "snapshot request directory was not fsynced after the durable leaf write",
+  );
+  assert.equal(
+    audit.events
+      .slice(leafFsyncIndex + 1, sealHistoryEnd)
+      .some(({ file, type }) => type === "write" && file === sealed.hostPath),
+    false,
+    "snapshot leaf was modified after its only durable fsync",
+  );
+  assert.ok(requestDirectoryFsync < sealHistoryEnd);
   snapshot.bytes.fill(0x78);
   assert.deepEqual(fs.readFileSync(sealed.hostPath), BACKUP_JOB_BYTES);
   await assert.rejects(
@@ -583,17 +669,62 @@ snapshotTest("v2 snapshot store uses O_EXCL 0400 fsync under the exact Engine Mo
     }),
     /exist|exclusive|snapshot|replay/i,
   );
-  const fsyncCountBeforeCleanup = audit.fsyncs.length;
+  const siblingRequestSha256 = requestSha256 === "a".repeat(64)
+    ? "b".repeat(64)
+    : "a".repeat(64);
+  const siblingDirectory = path.join(claimedJobsDirectory, siblingRequestSha256);
+  const siblingFile = path.join(siblingDirectory, "job.json");
+  fs.mkdirSync(siblingDirectory, { mode: 0o700 });
+  fs.writeFileSync(siblingFile, "survivor\n", { mode: 0o400 });
+  fs.chmodSync(siblingFile, 0o400);
+  const siblingBefore = fs.statSync(siblingFile);
+  const cleanupStart = audit.events.length;
   await store.cleanup(sealed);
   assert.equal(fs.existsSync(sealed.hostPath), false);
   assert.equal(fs.existsSync(expectedDirectory), false);
   assert.equal(fs.existsSync(mountpoint), true);
-  assert.deepEqual(audit.unlinks, [sealed.hostPath]);
-  assert.ok(
-    audit.fsyncs.slice(fsyncCountBeforeCleanup).some(
-      (file) => file === path.dirname(expectedDirectory) || file === mountpoint,
+  assert.equal(fs.existsSync(claimedJobsDirectory), true);
+  assert.equal(fs.readFileSync(siblingFile, "utf8"), "survivor\n");
+  const siblingAfter = fs.statSync(siblingFile);
+  assert.deepEqual(
+    Object.fromEntries(
+      ["dev", "ino", "mode", "uid", "gid", "nlink", "size"]
+        .map((field) => [field, siblingAfter[field]]),
     ),
-    "snapshot cleanup must durably fsync the surviving parent directory",
+    Object.fromEntries(
+      ["dev", "ino", "mode", "uid", "gid", "nlink", "size"]
+        .map((field) => [field, siblingBefore[field]]),
+    ),
+    "snapshot cleanup changed a sibling request artifact",
+  );
+  const cleanupEvents = audit.events.slice(cleanupStart);
+  assert.deepEqual(
+    cleanupEvents
+      .filter(({ type }) => type === "unlink" || type === "rmdir" || type === "rm")
+      .map(({ file, type }) => ({ file, type })),
+    [
+      { file: sealed.hostPath, type: "unlink" },
+      { file: expectedDirectory, type: "rmdir" },
+    ],
+    "snapshot cleanup escaped its exact request leaf/directory or used recursive removal",
+  );
+  const unlinkIndex = historyIndex(
+    audit.events,
+    cleanupStart - 1,
+    ({ file, type }) => type === "unlink" && file === sealed.hostPath,
+    "snapshot cleanup did not unlink the exact leaf",
+  );
+  const rmdirIndex = historyIndex(
+    audit.events,
+    unlinkIndex,
+    ({ file, type }) => type === "rmdir" && file === expectedDirectory,
+    "snapshot cleanup did not remove the empty request directory after its leaf",
+  );
+  historyIndex(
+    audit.events,
+    rmdirIndex,
+    ({ file, type }) => type === "fsync" && file === claimedJobsDirectory,
+    "snapshot cleanup did not fsync claimed-jobs after unlink/rmdir",
   );
 });
 
@@ -605,6 +736,25 @@ snapshotTest("v2 snapshot store independently rejects each path-authority substi
       snapshot,
       source,
     })],
+    ["symlink-claimed-jobs", ({ attacker, inspect, real, snapshot, source }) => {
+      const claimedJobs = path.join(real, source.snapshotVolumeSubpath);
+      fs.rmSync(claimedJobs, { force: true, recursive: true });
+      fs.symlinkSync(attacker, claimedJobs);
+      return { inspect, snapshot, source };
+    }],
+    ["symlink-request-directory", ({
+      attacker,
+      hostileSha256,
+      inspect,
+      real,
+      snapshot,
+      source,
+    }) => {
+      const claimedJobs = path.join(real, source.snapshotVolumeSubpath);
+      fs.mkdirSync(claimedJobs, { mode: 0o700, recursive: true });
+      fs.symlinkSync(attacker, path.join(claimedJobs, hostileSha256));
+      return { inspect, snapshot, source };
+    }],
     ["traversal-subpath", ({ inspect, snapshot, source }) => ({
       inspect,
       snapshot,
@@ -626,7 +776,11 @@ snapshotTest("v2 snapshot store independently rejects each path-authority substi
       const root = tempDir(t);
       const real = path.join(root, "real-state");
       const alias = path.join(root, "state-alias");
+      const attacker = path.join(root, "attacker");
       fs.mkdirSync(real, { mode: 0o700 });
+      fs.mkdirSync(attacker, { mode: 0o700 });
+      const attackerSentinel = path.join(attacker, "sentinel.txt");
+      fs.writeFileSync(attackerSentinel, "outside-survivor\n", { mode: 0o600 });
       fs.symlinkSync(real, alias);
       const stat = fs.statSync(real);
       const receipt = buildRawActiveReceiptV2();
@@ -635,9 +789,11 @@ snapshotTest("v2 snapshot store independently rejects each path-authority substi
         ...buildFixtureVolumeInspect(receipt, source.snapshotVolumeId),
         Mountpoint: real,
       };
+      const pathHistory = filesystemHistoryProbe();
       const store = broker.createSnapshotFileStore({
         expectedGid: stat.gid,
         expectedUid: stat.uid,
+        io: pathHistory.io,
       });
       const snapshot = {
         ...findPhase("job.backup.capture").claimedJob,
@@ -659,6 +815,7 @@ snapshotTest("v2 snapshot store independently rejects each path-authority substi
       });
       assert.equal(fs.existsSync(sealed.hostPath), true, `${id} positive control did not seal`);
       await store.cleanup(sealed);
+      const hostileHistoryStart = pathHistory.audit.events.length;
 
       const hostileRequest = admittedRequest(
         "backup.job.execute",
@@ -666,7 +823,15 @@ snapshotTest("v2 snapshot store independently rejects each path-authority substi
         trusted,
       );
       const hostileSha256 = fixtureSha256(canonicalFixtureJson(hostileRequest));
-      const candidate = hostile({ alias, inspect, snapshot, source });
+      const candidate = hostile({
+        alias,
+        attacker,
+        hostileSha256,
+        inspect,
+        real,
+        snapshot,
+        source,
+      });
       await assert.rejects(
         async () => store.seal(candidate.snapshot, {
           request: hostileRequest,
@@ -675,10 +840,237 @@ snapshotTest("v2 snapshot store independently rejects each path-authority substi
           source: candidate.source,
           volumeInspect: candidate.inspect,
         }),
-        /symlink|canonical|mountpoint|host.?path|subpath|traversal|unsupported|digest|lineage|request/i,
+        /symlink|canonical|exist|exclusive|mountpoint|host.?path|subpath|traversal|unsupported|digest|lineage|request/i,
+      );
+      assert.equal(
+        pathHistory.audit.events
+          .slice(hostileHistoryStart)
+          .some(({ type }) => type === "write"),
+        false,
+        `${id} wrote snapshot bytes before rejecting hostile path authority`,
+      );
+      assert.deepEqual(
+        fs.readdirSync(attacker),
+        ["sentinel.txt"],
+        `${id} wrote through an untrusted intermediate symlink`,
+      );
+      assert.equal(fs.readFileSync(attackerSentinel, "utf8"), "outside-survivor\n");
+    });
+  }
+});
+
+snapshotTest("v2 snapshot store independently enforces private owner/mode ancestry", async (t) => {
+  for (const [id, hostile] of [
+    ["uid-policy", ({ gid, uid }) => ({
+      storeOptions: { expectedGid: gid, expectedUid: uid + 1 },
+    })],
+    ["gid-policy", ({ gid, uid }) => ({
+      storeOptions: { expectedGid: gid + 1, expectedUid: uid },
+    })],
+    ["mountpoint-mode", ({ gid, mountpoint, uid }) => {
+      fs.chmodSync(mountpoint, 0o770);
+      return { storeOptions: { expectedGid: gid, expectedUid: uid } };
+    }],
+    ["claimed-jobs-mode", ({ gid, mountpoint, source, uid }) => {
+      fs.chmodSync(path.join(mountpoint, source.snapshotVolumeSubpath), 0o750);
+      return { storeOptions: { expectedGid: gid, expectedUid: uid } };
+    }],
+    ["ancestor-mode", ({ gid, mountpoint, root, uid }) => {
+      const unsafeParent = path.join(root, "unsafe-parent");
+      fs.mkdirSync(unsafeParent, { mode: 0o700 });
+      fs.renameSync(mountpoint, path.join(unsafeParent, "broker-state"));
+      fs.chmodSync(unsafeParent, 0o770);
+      return {
+        mountpoint: path.join(unsafeParent, "broker-state"),
+        storeOptions: { expectedGid: gid, expectedUid: uid },
+      };
+    }],
+  ]) {
+    await t.test(id, async (t) => {
+      const root = tempDir(t);
+      let mountpoint = path.join(root, "broker-state");
+      fs.mkdirSync(mountpoint, { mode: 0o700 });
+      const stat = fs.statSync(mountpoint);
+      const receipt = buildRawActiveReceiptV2();
+      const source = receipt.resources.claimedJobSources["jobs.running"];
+      const volumeInspect = {
+        ...buildFixtureVolumeInspect(receipt, source.snapshotVolumeId),
+        Mountpoint: mountpoint,
+      };
+      const snapshot = {
+        ...findPhase("job.backup.capture").claimedJob,
+        bytes: Buffer.from(BACKUP_JOB_BYTES),
+      };
+      const trusted = directTrustedContext();
+      const positiveRequest = admittedRequest(
+        "backup.job.execute",
+        findPhase("job.backup.capture").parameters,
+        trusted,
+      );
+      const positiveStore = broker.createSnapshotFileStore({
+        expectedGid: stat.gid,
+        expectedUid: stat.uid,
+      });
+      const positive = await positiveStore.seal(snapshot, {
+        request: positiveRequest,
+        requestId: positiveRequest.requestId,
+        requestSha256: fixtureSha256(canonicalFixtureJson(positiveRequest)),
+        source,
+        volumeInspect,
+      });
+      assert.equal(fs.existsSync(positive.hostPath), true, `${id} positive control did not seal`);
+      await positiveStore.cleanup(positive);
+
+      const candidate = hostile({
+        gid: stat.gid,
+        mountpoint,
+        root,
+        source,
+        uid: stat.uid,
+      });
+      mountpoint = candidate.mountpoint ?? mountpoint;
+      const hostileRequest = admittedRequest(
+        "backup.job.execute",
+        findPhase("job.backup.capture").parameters,
+        trusted,
+      );
+      const hostileSha256 = fixtureSha256(canonicalFixtureJson(hostileRequest));
+      const hostileDirectory = path.join(
+        mountpoint,
+        source.snapshotVolumeSubpath,
+        hostileSha256,
+      );
+      const hostileHistory = filesystemHistoryProbe();
+      const hostileStore = broker.createSnapshotFileStore({
+        ...candidate.storeOptions,
+        io: hostileHistory.io,
+      });
+      await assert.rejects(
+        async () => hostileStore.seal(snapshot, {
+          request: hostileRequest,
+          requestId: hostileRequest.requestId,
+          requestSha256: hostileSha256,
+          source,
+          volumeInspect: { ...volumeInspect, Mountpoint: mountpoint },
+        }),
+        /ancestor|directory|gid|mode|owner|permission|private|root|safe|uid/i,
+      );
+      assert.equal(fs.existsSync(hostileDirectory), false);
+      assert.equal(
+        hostileHistory.audit.events.some(({ type }) => type === "write"),
+        false,
+        `${id} wrote snapshot state before rejecting the private-owner policy`,
       );
     });
   }
+});
+
+snapshotTest("v2 snapshot store default ownership is exactly root 0:0", async (t) => {
+  const root = tempDir(t);
+  const mountpoint = path.join(root, "broker-state");
+  fs.mkdirSync(mountpoint, { mode: 0o700 });
+  const receipt = buildRawActiveReceiptV2();
+  const source = receipt.resources.claimedJobSources["jobs.running"];
+  const volumeInspect = {
+    ...buildFixtureVolumeInspect(receipt, source.snapshotVolumeId),
+    Mountpoint: mountpoint,
+  };
+  const snapshot = {
+    ...findPhase("job.backup.capture").claimedJob,
+    bytes: Buffer.from(BACKUP_JOB_BYTES),
+  };
+  const trusted = directTrustedContext();
+  const rootHistory = filesystemHistoryProbe();
+  const rootStore = broker.createSnapshotFileStore({
+    io: statIdentityIo(rootHistory.io, { gid: 0, uid: 0 }),
+  });
+  const positiveRequest = admittedRequest(
+    "backup.job.execute",
+    findPhase("job.backup.capture").parameters,
+    trusted,
+  );
+  const sealed = await rootStore.seal(snapshot, {
+    request: positiveRequest,
+    requestId: positiveRequest.requestId,
+    requestSha256: fixtureSha256(canonicalFixtureJson(positiveRequest)),
+    source,
+    volumeInspect,
+  });
+  assert.equal(fs.existsSync(sealed.hostPath), true);
+  await rootStore.cleanup(sealed);
+
+  const nonRootHistory = filesystemHistoryProbe();
+  const nonRootStore = broker.createSnapshotFileStore({
+    io: statIdentityIo(nonRootHistory.io, { gid: 1, uid: 1 }),
+  });
+  const hostileRequest = admittedRequest(
+    "backup.job.execute",
+    findPhase("job.backup.capture").parameters,
+    trusted,
+  );
+  const hostileSha256 = fixtureSha256(canonicalFixtureJson(hostileRequest));
+  await assert.rejects(
+    async () => nonRootStore.seal(snapshot, {
+      request: hostileRequest,
+      requestId: hostileRequest.requestId,
+      requestSha256: hostileSha256,
+      source,
+      volumeInspect,
+    }),
+    /gid|owner|root|uid/i,
+  );
+  assert.equal(
+    fs.existsSync(path.join(
+      mountpoint,
+      source.snapshotVolumeSubpath,
+      hostileSha256,
+    )),
+    false,
+  );
+  assert.equal(
+    nonRootHistory.audit.events.some(({ type }) => type === "write"),
+    false,
+  );
+});
+
+snapshotTest("v2 snapshot cleanup refuses a hard-linked leaf without deleting either name", async (t) => {
+  const root = tempDir(t);
+  const mountpoint = path.join(root, "broker-state");
+  fs.mkdirSync(mountpoint, { mode: 0o700 });
+  const stat = fs.statSync(mountpoint);
+  const receipt = buildRawActiveReceiptV2();
+  const source = receipt.resources.claimedJobSources["jobs.running"];
+  const store = broker.createSnapshotFileStore({
+    expectedGid: stat.gid,
+    expectedUid: stat.uid,
+  });
+  const trusted = directTrustedContext();
+  const request = admittedRequest(
+    "backup.job.execute",
+    findPhase("job.backup.capture").parameters,
+    trusted,
+  );
+  const sealed = await store.seal({
+    ...findPhase("job.backup.capture").claimedJob,
+    bytes: Buffer.from(BACKUP_JOB_BYTES),
+  }, {
+    request,
+    requestId: request.requestId,
+    requestSha256: fixtureSha256(canonicalFixtureJson(request)),
+    source,
+    volumeInspect: {
+      ...buildFixtureVolumeInspect(receipt, source.snapshotVolumeId),
+      Mountpoint: mountpoint,
+    },
+  });
+  const alias = path.join(path.dirname(sealed.hostPath), "job-hardlink.json");
+  fs.linkSync(sealed.hostPath, alias);
+  await assert.rejects(
+    async () => store.cleanup(sealed),
+    /hard.?link|link|snapshot|integrity|nlink/i,
+  );
+  assert.equal(fs.existsSync(sealed.hostPath), true);
+  assert.equal(fs.existsSync(alias), true);
 });
 
 readerTest("v2 claimed-job reader uses O_NOFOLLOW, two descriptor reads and stable pre/post fstat", (t) => {
@@ -687,19 +1079,60 @@ readerTest("v2 claimed-job reader uses O_NOFOLLOW, two descriptor reads and stab
   const snapshot = broker.readClaimedJobSnapshot(fixture.input, { io: probe.io });
   assert.deepEqual(snapshot.bytes, BACKUP_JOB_BYTES);
   assert.equal(snapshot.jobSha256, fixture.parameters.jobSha256);
-  assert.equal(probe.audit.opens.length, 1);
+  const leafOpens = probe.audit.opens.filter(({ file }) => file === fixture.file);
+  assert.equal(leafOpens.length, 1);
   assert.equal(
-    probe.audit.opens[0].flags & fs.constants.O_NOFOLLOW,
+    leafOpens[0].flags & fs.constants.O_NOFOLLOW,
     fs.constants.O_NOFOLLOW,
   );
-  assert.equal(probe.audit.opens[0].file, fixture.file);
+  assert.equal(leafOpens[0].file, fixture.file);
+  assert.equal(
+    probe.audit.completedReadPasses.length,
+    2,
+    "claimed job must be read in two complete positioned passes",
+  );
+  assert.deepEqual(
+    probe.audit.completedReadPasses.map(({ bytes, initialPosition }) => ({
+      bytes,
+      initialPosition,
+    })),
+    [
+      { bytes: BACKUP_JOB_BYTES.length, initialPosition: 0 },
+      { bytes: BACKUP_JOB_BYTES.length, initialPosition: 0 },
+    ],
+    "each descriptor pass must restart explicitly at position zero and consume the complete file",
+  );
+  assert.equal(
+    new Set(probe.audit.completedReadPasses.map(({ descriptor }) => descriptor)).size,
+    1,
+    "both complete reads must use the same already-open descriptor",
+  );
   assert.equal(
     probe.audit.descriptorReadFileCalls,
-    2,
-    "claimed job must be read twice through the same already-open descriptor",
+    0,
+    "the oracle must not require readFileSync(fd), whose second call begins at EOF",
   );
+  assert.equal(probe.audit.pathReadFileCalls, 0, "claimed-job bytes were reopened by pathname");
   assert.ok(probe.audit.fstats.length >= 2, "claimed job requires pre/post descriptor metadata");
   assert.equal(new Set(probe.audit.fstats).size, 1, "pre/post fstat must use the same descriptor");
+  const firstPassIndex = probe.audit.events.findIndex(
+    ({ pass, type }) => type === "read-pass-complete" && pass === 0,
+  );
+  const secondPassIndex = probe.audit.events.findIndex(
+    ({ pass, type }) => type === "read-pass-complete" && pass === 1,
+  );
+  const preFstatIndex = probe.audit.events.findIndex(({ type }) => type === "fstat");
+  assert.ok(
+    preFstatIndex >= 0 && preFstatIndex < firstPassIndex,
+    "claimed-job reader did not fstat the leaf before its first pass",
+  );
+  assert.ok(firstPassIndex >= 0 && secondPassIndex > firstPassIndex);
+  assert.ok(
+    probe.audit.events.findIndex(
+      ({ type }, index) => index > secondPassIndex && type === "fstat",
+    ) > secondPassIndex,
+    "claimed-job reader did not fstat the same leaf after its second pass",
+  );
 });
 
 readerTest("v2 claimed-job reader rejects a same-size content race between descriptor reads", (t) => {
@@ -711,8 +1144,12 @@ readerTest("v2 claimed-job reader rejects a same-size content race between descr
   );
 
   const hostile = claimedReaderFixture(t);
-  const substituted = Buffer.from(BACKUP_JOB_BYTES);
-  substituted[substituted.length - 2] ^= 1;
+  const substitutedDocument = {
+    ...BACKUP_JOB_DOCUMENT,
+    resultSummary: BACKUP_JOB_DOCUMENT.resultSummary.replace("scheduler", "schedulEr"),
+  };
+  parseBackupJobDocument(substitutedDocument);
+  const substituted = Buffer.from(`${JSON.stringify(substitutedDocument, null, 2)}\n`);
   assert.equal(substituted.length, BACKUP_JOB_BYTES.length);
   const racing = claimedReaderIoProbe(hostile.file, {
     afterFirstDescriptorRead() {
@@ -722,10 +1159,17 @@ readerTest("v2 claimed-job reader rejects a same-size content race between descr
     freezeMetadata: true,
   });
   assert.throws(
-    () => broker.readClaimedJobSnapshot(hostile.input, { io: racing.io }),
-    /changed|race|stable|substitution|digest|content/i,
+    () => broker.readClaimedJobSnapshot({
+      ...hostile.input,
+      parameters: {
+        ...hostile.input.parameters,
+        jobSha256: fixtureSha256(substituted),
+      },
+    }, { io: racing.io }),
+    /changed|race|stable|substitution|content/i,
   );
-  assert.equal(racing.audit.descriptorReadFileCalls, 2);
+  assert.equal(racing.audit.completedReadPasses.length, 2);
+  assert.equal(racing.audit.raceInjectedAfterPass, 1);
 });
 
 readerTest("v2 claimed-job reader rejects descriptor metadata changes even when bytes and length match", (t) => {
@@ -745,6 +1189,88 @@ readerTest("v2 claimed-job reader rejects descriptor metadata changes even when 
     /metadata|changed|race|stable|inode|descriptor/i,
   );
   assert.ok(racing.audit.fstats.length >= 2);
+});
+
+readerTest("v2 claimed-job reader independently enforces queue owner/mode/link policy", async (t) => {
+  for (const [id, mutate] of [
+    ["uid-policy", ({ input, uid }) => ({
+      ...input,
+      policy: { ...input.policy, expectedUid: uid + 1 },
+    })],
+    ["gid-policy", ({ gid, input }) => ({
+      ...input,
+      policy: { ...input.policy, expectedGid: gid + 1 },
+    })],
+    ["leaf-mode", ({ file, input }) => {
+      fs.chmodSync(file, 0o640);
+      return input;
+    }],
+    ["leaf-hardlink", ({ file, input, root }) => {
+      fs.linkSync(file, path.join(root, "job-hardlink.json"));
+      return input;
+    }],
+    ["ancestor-mode", ({ input, queueRoot }) => {
+      fs.chmodSync(queueRoot, 0o770);
+      return input;
+    }],
+  ]) {
+    await t.test(id, (st) => {
+      const fixture = claimedReaderFixture(st);
+      const stat = fs.statSync(path.dirname(fixture.file));
+      assert.deepEqual(
+        broker.readClaimedJobSnapshot(
+          fixture.input,
+          { io: claimedReaderIoProbe(fixture.file).io },
+        ).bytes,
+        BACKUP_JOB_BYTES,
+        `${id} positive control did not read the claimed job`,
+      );
+      const hostileInput = mutate({
+        file: fixture.file,
+        gid: stat.gid,
+        input: fixture.input,
+        queueRoot: path.dirname(fixture.file),
+        root: path.dirname(path.dirname(fixture.file)),
+        uid: stat.uid,
+      });
+      assert.throws(
+        () => broker.readClaimedJobSnapshot(
+          hostileInput,
+          { io: claimedReaderIoProbe(fixture.file).io },
+        ),
+        /ancestor|directory|gid|hard.?link|link|mode|owner|permission|policy|root|safe|uid/i,
+      );
+    });
+  }
+});
+
+readerTest("v2 claimed-job reader default ownership is exactly root 0:0", (t) => {
+  const rootFixture = claimedReaderFixture(t);
+  const rootPolicy = { ...rootFixture.input.policy };
+  delete rootPolicy.expectedUid;
+  delete rootPolicy.expectedGid;
+  const rootProbe = claimedReaderIoProbe(rootFixture.file);
+  assert.deepEqual(
+    broker.readClaimedJobSnapshot(
+      { ...rootFixture.input, policy: rootPolicy },
+      { io: statIdentityIo(rootProbe.io, { gid: 0, uid: 0 }) },
+    ).bytes,
+    BACKUP_JOB_BYTES,
+    "default root policy rejected an input independently attested as 0:0",
+  );
+
+  const nonRootFixture = claimedReaderFixture(t);
+  const nonRootPolicy = { ...nonRootFixture.input.policy };
+  delete nonRootPolicy.expectedUid;
+  delete nonRootPolicy.expectedGid;
+  const nonRootProbe = claimedReaderIoProbe(nonRootFixture.file);
+  assert.throws(
+    () => broker.readClaimedJobSnapshot(
+      { ...nonRootFixture.input, policy: nonRootPolicy },
+      { io: statIdentityIo(nonRootProbe.io, { gid: 1, uid: 1 }) },
+    ),
+    /gid|owner|root|uid/i,
+  );
 });
 
 for (const [id, mutate] of [
@@ -958,6 +1484,34 @@ test("v2 journal sequence/head bind exactly and post-terminal appends are reject
   );
 });
 
+test("v2 lease release follows a durable action-completed append and fsyncs the surviving state parent", async (t) => {
+  const phase = PHASE_CASES.find(({ phaseId }) => phaseId === "prune.apply");
+  const root = tempDir(t);
+  const ioProbe = durableIoProbe();
+  const trusted = directTrustedContext();
+  const store = createReplayStore(root, "a".repeat(48), { io: ioProbe.io });
+  store.admitTrustedContext(trusted);
+  const request = admittedRequest(phase.action, {}, trusted);
+  const lease = store.acquire(request, trusted);
+  const fixture = semanticFixture(t, phase, { trusted, lease, request });
+  await fixture.executor.executePhase(phase.action, phase.phaseId, fixture.context);
+
+  const journal = journalFiles(root);
+  const entries = assertJournalChain(root, request);
+  assert.equal(entries.at(-1).event, "action-completed");
+  assertJournalAppendFsyncOrder(
+    root,
+    journal.directory,
+    [journal.entries.at(-1)],
+    ioProbe.audit,
+    "action-completed",
+  );
+  const releaseStart = ioProbe.audit.events.length;
+  lease.release();
+  assert.equal(fs.existsSync(path.join(root, "active.lock")), false);
+  assertLeaseRemovalFsync(root, ioProbe.audit, releaseStart, "lease release");
+});
+
 test("v2 recovery exact-inspects every live worker before reverse-order deletion", async (t) => {
   const root = tempDir(t);
   const trusted = directTrustedContext();
@@ -987,6 +1541,14 @@ test("v2 recovery exact-inspects every live worker before reverse-order deletion
   }
   lease.preserve();
 
+  const lifecycle = [];
+  const recoveryIo = durableIoProbe({
+    onEvent(event) {
+      if (event.type === "unlink" && event.file === path.join(root, "active.lock")) {
+        lifecycle.push("lease-unlinked");
+      }
+    },
+  });
   const transport = new OracleEngineTransport({
     trusted,
     phases,
@@ -994,13 +1556,14 @@ test("v2 recovery exact-inspects every live worker before reverse-order deletion
     requestId: request.requestId,
     rawResults: phases.map((phase) => rawWorkerResult(phase, request.requestId)),
     recoveryOnly: true,
+    onDelete: (id) => lifecycle.push(`worker-deleted:${id}`),
   });
   transport.seedRecoveryWorkers([
     { id: WORKER_ID, name: "platform-action-restore-capture-0", phase: phases[0] },
     { id: RESTORE_WORKER_ID, name: "platform-action-restore-verify-1", phase: phases[1] },
   ]);
   const executor = createSemanticExecutor({ transport });
-  const restarted = createReplayStore(root, "b".repeat(48));
+  const restarted = createReplayStore(root, "b".repeat(48), { io: recoveryIo.io });
   await restarted.recover(executor);
   assert.deepEqual(
     transport.calls
@@ -1013,59 +1576,83 @@ test("v2 recovery exact-inspects every live worker before reverse-order deletion
       ["deleteContainer", WORKER_ID],
     ],
   );
+  assert.deepEqual(lifecycle, [
+    `worker-deleted:${RESTORE_WORKER_ID}`,
+    `worker-deleted:${WORKER_ID}`,
+    "lease-unlinked",
+  ]);
   assert.equal(fs.existsSync(path.join(root, "active.lock")), false);
+  assertLeaseRemovalFsync(root, recoveryIo.audit, 0, "worker recovery");
 });
 
-test("v2 recovery inspect mismatch performs zero delete and preserves the durable lock", async (t) => {
-  const root = tempDir(t);
-  const trusted = directTrustedContext();
-  const phase = findPhase("prune.apply");
-  const request = admittedRequest(phase.action, phase.parameters, trusted);
-  const store = createReplayStore(root, "a".repeat(48));
-  store.admitTrustedContext(trusted);
-  const lease = store.acquire(request, trusted);
-  const resourceName = "platform-action-prune-apply-recovery";
-  lease.recordWorker({
-    action: phase.action,
-    phaseId: phase.phaseId,
-    phaseProfileSha256: trusted.receipt.resources.phaseProfiles[phase.phaseId].phaseSha256,
-    receiptDigest: trusted.receiptDigest,
-    requestSha256: fixtureSha256(canonicalFixtureJson(request)),
-    resourceName,
-  });
-  lease.recordEvent({
-    event: "worker-created",
-    phaseId: phase.phaseId,
-    resourceName,
-    workerId: WORKER_ID,
-  });
-  lease.preserve();
+test("v2 recovery independently rejects the complete inspect widening matrix or missing inspect", async (t) => {
+  for (const { id, inspectMutation, seedWorker } of [
+    ...INSPECT_WIDENINGS.map(({ id, mutate }) => ({
+      id,
+      inspectMutation: mutate,
+      seedWorker: true,
+    })),
+    { id: "missing-inspect", inspectMutation: null, seedWorker: false },
+  ]) {
+    await t.test(id, async (t) => {
+      const root = tempDir(t);
+      const trusted = directTrustedContext();
+      const phase = findPhase("prune.apply");
+      const request = admittedRequest(phase.action, phase.parameters, trusted);
+      const store = createReplayStore(root, "a".repeat(48));
+      store.admitTrustedContext(trusted);
+      const lease = store.acquire(request, trusted);
+      const resourceName = `platform-action-prune-apply-recovery-${id}`;
+      lease.recordWorker({
+        action: phase.action,
+        phaseId: phase.phaseId,
+        phaseProfileSha256: trusted.receipt.resources.phaseProfiles[phase.phaseId].phaseSha256,
+        receiptDigest: trusted.receiptDigest,
+        requestSha256: fixtureSha256(canonicalFixtureJson(request)),
+        resourceName,
+      });
+      lease.recordEvent({
+        event: "worker-created",
+        phaseId: phase.phaseId,
+        resourceName,
+        workerId: WORKER_ID,
+      });
+      lease.preserve();
 
-  const transport = new OracleEngineTransport({
-    inspectMutation: (inspect) => ({
-      ...inspect,
-      Config: { ...inspect.Config, Image: "attacker/image:latest" },
-    }),
-    phases: [phase],
-    rawResults: [rawWorkerResult(phase, request.requestId)],
-    recoveryOnly: true,
-    request,
-    requestId: request.requestId,
-    trusted,
-  });
-  transport.seedRecoveryWorkers([{ id: WORKER_ID, name: resourceName, phase }]);
-  const executor = createSemanticExecutor({ transport });
-  const restarted = createReplayStore(root, "b".repeat(48));
-  await assert.rejects(
-    () => restarted.recover(executor),
-    /inspect|image|exact|mismatch|recovery/i,
-  );
-  assert.deepEqual(transport.deletedIds, []);
-  assert.deepEqual(
-    transport.calls.map(({ method }) => method),
-    ["inspectContainerForRecovery"],
-  );
-  assert.equal(fs.existsSync(path.join(root, "active.lock")), true);
+      const transport = new OracleEngineTransport({
+        inspectMutation,
+        phases: [phase],
+        rawResults: [rawWorkerResult(phase, request.requestId)],
+        recoveryOnly: true,
+        request,
+        requestId: request.requestId,
+        trusted,
+      });
+      if (seedWorker) {
+        transport.seedRecoveryWorkers([{ id: WORKER_ID, name: resourceName, phase }]);
+      }
+      const recoveryIo = durableIoProbe();
+      const executor = createSemanticExecutor({ transport });
+      const restarted = createReplayStore(root, "b".repeat(48), { io: recoveryIo.io });
+      await assert.rejects(
+        () => restarted.recover(executor),
+        /absent|authority|forbidden|identity|image|inspect|exact|mismatch|missing|mount|name|network|recovery|worker/i,
+      );
+      assert.deepEqual(transport.deletedIds, []);
+      assert.deepEqual(
+        transport.calls.map(({ method }) => method),
+        ["inspectContainerForRecovery"],
+      );
+      assert.deepEqual(
+        recoveryIo.audit.events.filter(
+          ({ type }) => type === "unlink" || type === "rmdir" || type === "rm",
+        ),
+        [],
+        `${id} performed destructive recovery IO after an unproven inspect`,
+      );
+      assert.equal(fs.existsSync(path.join(root, "active.lock")), true);
+    });
+  }
 });
 
 test("v2 recovery carries claimed-job lineage, exact-inspects its worker and cleans its sealed snapshot", async (t) => {
@@ -1102,7 +1689,17 @@ test("v2 recovery carries claimed-job lineage, exact-inspects its worker and cle
   });
   lease.preserve();
 
-  const snapshotFileStore = snapshotStoreFixture({});
+  const lifecycle = [];
+  const recoveryIo = durableIoProbe({
+    onEvent(event) {
+      if (event.type === "unlink" && event.file === path.join(root, "active.lock")) {
+        lifecycle.push("lease-unlinked");
+      }
+    },
+  });
+  const snapshotFileStore = snapshotStoreFixture({
+    onCleanup: () => lifecycle.push("snapshot-cleaned"),
+  });
   const transport = new OracleEngineTransport({
     phases: [phase],
     rawResults: [rawWorkerResult(phase, request.requestId)],
@@ -1110,6 +1707,7 @@ test("v2 recovery carries claimed-job lineage, exact-inspects its worker and cle
     request,
     requestId: request.requestId,
     trusted,
+    onDelete: () => lifecycle.push("worker-deleted"),
   });
   transport.seedRecoveryWorkers([{
     id: WORKER_ID,
@@ -1118,7 +1716,7 @@ test("v2 recovery carries claimed-job lineage, exact-inspects its worker and cle
     sealed,
   }]);
   const executor = createSemanticExecutor({ snapshotFileStore, transport });
-  const restarted = createReplayStore(root, "b".repeat(48));
+  const restarted = createReplayStore(root, "b".repeat(48), { io: recoveryIo.io });
   await restarted.recover(executor);
   assert.deepEqual(
     transport.calls
@@ -1127,7 +1725,9 @@ test("v2 recovery carries claimed-job lineage, exact-inspects its worker and cle
     ["inspectContainerForRecovery", "deleteContainer"],
   );
   assert.deepEqual(snapshotFileStore.cleanupCalls, [sealed]);
+  assert.deepEqual(lifecycle, ["worker-deleted", "snapshot-cleaned", "lease-unlinked"]);
   assert.equal(fs.existsSync(path.join(root, "active.lock")), false);
+  assertLeaseRemovalFsync(root, recoveryIo.audit, 0, "claimed-job recovery");
 });
 
 test("v2 offsite remote-unknown is terminal, preserves the lease and forbids automatic replay", async (t) => {
@@ -1178,6 +1778,247 @@ test("v2 offsite remote-unknown is terminal, preserves the lease and forbids aut
   );
   assert.deepEqual(recoveryTransport.calls, []);
   assert.equal(fs.existsSync(path.join(root, "active.lock")), true);
+});
+
+rawFrameE2eTest("v2 raw signed frame preserves one full-request digest through core, lease, snapshot, journal and response", async (t) => {
+  assert.equal(typeof broker.readClaimedJobSnapshot, "function");
+  assert.equal(typeof broker.createSnapshotFileStore, "function");
+  assert.equal(typeof broker.encodeActionResponseFrame, "function");
+  const root = tempDir(t);
+  const queueRoot = path.join(root, "queue");
+  const brokerStateMountpoint = path.join(root, "broker-state");
+  const replayRoot = path.join(root, "replay-state");
+  fs.mkdirSync(queueRoot, { mode: 0o700 });
+  fs.mkdirSync(brokerStateMountpoint, { mode: 0o700 });
+  const stat = fs.statSync(root);
+  const phase = findPhase("job.backup.capture");
+  const { trusted } = buildFixtureTrustedContextV2({
+    allowedActions: [phase.action],
+    now: NOW,
+  });
+  const request = buildFixtureSignedActionRequestV2(
+    phase.action,
+    phase.parameters,
+    {
+      index: 2601,
+      now: NOW,
+      trustedContext: trusted,
+    },
+  );
+  const canonicalRequestBytes = Buffer.from(canonicalFixtureJson(request));
+  const rawFrame = Buffer.from(JSON.stringify(
+    Object.fromEntries(Object.entries(request).reverse()),
+  ));
+  const requestSha256 = crypto
+    .createHash("sha256")
+    .update(canonicalRequestBytes)
+    .digest("hex");
+  assert.notEqual(
+    crypto.createHash("sha256").update(rawFrame).digest("hex"),
+    requestSha256,
+    "the raw-frame fixture must distinguish byte hashing from canonical request hashing",
+  );
+  const unsignedRequest = Object.fromEntries(
+    Object.entries(request).filter(([key]) => key !== "mac"),
+  );
+  assert.notEqual(requestSha256, fixtureSha256(request.requestId));
+  assert.notEqual(requestSha256, fixtureSha256(canonicalFixtureJson(unsignedRequest)));
+  const queueFile = path.join(queueRoot, request.parameters.jobFileName);
+  fs.writeFileSync(queueFile, BACKUP_JOB_BYTES, { mode: 0o600 });
+  fs.chmodSync(queueFile, 0o600);
+
+  let providerCalls = 0;
+  let sealedSnapshotValue;
+  const observed = {
+    acquire: [],
+    journalAtRelease: [],
+    semantic: [],
+    snapshot: [],
+  };
+  const snapshotHistory = filesystemHistoryProbe();
+  const realSnapshotStore = broker.createSnapshotFileStore({
+    expectedGid: stat.gid,
+    expectedUid: stat.uid,
+    io: snapshotHistory.io,
+  });
+  const snapshotFileStore = {
+    async seal(snapshot, authority) {
+      observed.snapshot.push({
+        request: structuredClone(authority.request),
+        requestId: authority.requestId,
+        requestSha256: authority.requestSha256,
+      });
+      assert.deepEqual(authority.request, request);
+      assert.equal(authority.requestId, request.requestId);
+      assert.equal(authority.requestSha256, requestSha256);
+      sealedSnapshotValue = await realSnapshotStore.seal(snapshot, authority);
+      assert.match(sealedSnapshotValue.hostPath, new RegExp(`/${requestSha256}/job\\.json$`));
+      return sealedSnapshotValue;
+    },
+    cleanup(sealed) {
+      return realSnapshotStore.cleanup(sealed);
+    },
+  };
+  const transport = new OracleEngineTransport({
+    phases: [phase],
+    rawResults: [rawWorkerResult(phase, request.requestId)],
+    request,
+    requestId: request.requestId,
+    trusted,
+    sealedSnapshotProvider: () => sealedSnapshotValue,
+    volumeMutation(inspect, logicalId) {
+      return logicalId === "broker.state"
+        ? { ...inspect, Mountpoint: brokerStateMountpoint }
+        : inspect;
+    },
+  });
+  const semantic = broker.createSemanticActionExecutor({
+    cleanupTimeoutMs: 100,
+    claimedJobSnapshotProvider: async ({ parameters, sourceId }) => {
+      providerCalls += 1;
+      assert.equal(sourceId, "jobs.running");
+      assert.deepEqual(parameters, request.parameters);
+      const source = trusted.receipt.resources.claimedJobSources[sourceId];
+      return broker.readClaimedJobSnapshot({
+        parameters,
+        policy: {
+          expectedGid: stat.gid,
+          expectedMode: 0o600,
+          expectedUid: stat.uid,
+          maximumBytes: source.maximumBytes,
+          parentRoot: queueRoot,
+        },
+        source: { ...source, brokerRoot: queueRoot },
+        sourceId,
+      }, { io: claimedReaderIoProbe(queueFile).io });
+    },
+    randomBytes: () => Buffer.alloc(12, 0x32),
+    snapshotFileStore,
+    transport,
+  });
+  const engine = {
+    recoverLease: semantic.recoverLease,
+    async execute(action, context) {
+      observed.semantic.push({
+        action,
+        request: structuredClone(context.request),
+        requestId: context.requestId,
+        requestSha256: context.requestSha256,
+      });
+      assert.deepEqual(context.request, request);
+      assert.equal(context.requestId, request.requestId);
+      assert.equal(context.requestSha256, requestSha256);
+      assert.deepEqual(context.lease.lineage.request, request);
+      assert.equal(context.lease.lineage.requestSha256, requestSha256);
+      return semantic.execute(action, context);
+    },
+  };
+
+  const persistentReplayStore = createReplayStore(replayRoot, "a".repeat(48));
+  let released = false;
+  const replayStore = {
+    admitActivation() {},
+    admitTrustedContext: (...args) => persistentReplayStore.admitTrustedContext(...args),
+    consume: (...args) => persistentReplayStore.consume(...args),
+    acquire(candidateRequest, candidateTrusted) {
+      observed.acquire.push({
+        request: structuredClone(candidateRequest),
+        requestSha256: fixtureSha256(canonicalFixtureJson(candidateRequest)),
+      });
+      assert.deepEqual(candidateRequest, request);
+      assert.equal(observed.acquire.at(-1).requestSha256, requestSha256);
+      const lease = persistentReplayStore.acquire(candidateRequest, candidateTrusted);
+      const wrapped = {
+        lineage: lease.lineage,
+        preserve: () => lease.preserve(),
+        recordEvent: (event) => lease.recordEvent(event),
+        recordWorker: (event) => lease.recordWorker(event),
+        release() {
+          if (released) return;
+          const active = readJson(path.join(replayRoot, "active.lock"));
+          assert.deepEqual(active.request, request);
+          assert.equal(active.requestSha256, requestSha256);
+          observed.journalAtRelease = assertJournalChain(replayRoot, request);
+          assert.ok(observed.journalAtRelease.length > 0);
+          assert.equal(observed.journalAtRelease.at(-1).event, "action-completed");
+          assert.equal(
+            observed.journalAtRelease.every(
+              (entry) => entry.requestSha256 === requestSha256,
+            ),
+            true,
+          );
+          released = true;
+          return lease.release();
+        },
+      };
+      assert.deepEqual(wrapped.lineage.request, request);
+      assert.equal(wrapped.lineage.requestSha256, requestSha256);
+      return Object.freeze(wrapped);
+    },
+  };
+  const capabilityKey = fixtureCapabilityKey(request.action);
+  const core = broker.createBrokerCore({
+    capabilityProvider: async (action) => {
+      assert.equal(action, request.action);
+      return capabilityKey;
+    },
+    engine,
+    now: () => NOW,
+    operationTimeoutMs: 1_000,
+    replayStore,
+    trustedContextProvider: async () => trusted,
+  });
+  const wire = await core.handle(rawFrame);
+  assert.equal(providerCalls, 1);
+  assert.equal(observed.acquire.length, 1);
+  assert.equal(observed.semantic.length, 1);
+  assert.equal(observed.snapshot.length, 1);
+  assert.equal(released, true);
+  assert.equal(fs.existsSync(path.join(replayRoot, "active.lock")), false);
+  assert.ok(sealedSnapshotValue);
+  assert.equal(fs.existsSync(sealedSnapshotValue.hostPath), false);
+  assert.equal(wire.statusCode, 200);
+  assert.deepEqual(Object.keys(wire.body).sort(), [
+    "action",
+    "errorCode",
+    "mac",
+    "requestId",
+    "requestSha256",
+    "result",
+    "resultSha256",
+    "schema",
+    "status",
+    "statusCode",
+  ]);
+  assert.equal(wire.body.schema, "platform.docker-action.response/v2");
+  assert.equal(wire.body.status, "completed");
+  assert.equal(wire.body.statusCode, 200);
+  assert.equal(wire.body.errorCode, null);
+  assert.equal(wire.body.action, request.action);
+  assert.equal(wire.body.requestId, request.requestId);
+  assert.equal(wire.body.requestSha256, requestSha256);
+  assert.equal(
+    wire.body.resultSha256,
+    fixtureSha256(canonicalFixtureJson(wire.body.result)),
+  );
+  const unsignedResponse = Object.fromEntries(
+    Object.entries(wire.body).filter(([key]) => key !== "mac"),
+  );
+  const expectedResponseMac = crypto
+    .createHmac("sha256", capabilityKey)
+    .update(`${wire.body.schema}\0`)
+    .update(canonicalFixtureJson(unsignedResponse))
+    .digest("hex");
+  assert.equal(
+    wire.body.mac,
+    expectedResponseMac,
+    "response MAC must authenticate the exact canonical unsigned response",
+  );
+  const encoded = broker.encodeActionResponseFrame(wire.body);
+  const encodedBytes = Buffer.isBuffer(encoded) ? encoded : Buffer.from(encoded);
+  assert.deepEqual(encodedBytes, Buffer.from(`${canonicalFixtureJson(wire.body)}\n`));
+  assert.equal(encodedBytes.at(-1), 0x0a);
+  assert.equal(encodedBytes.subarray(0, -1).includes(0x0a), false);
 });
 
 function semanticFixture(t, phase, options = {}) {
@@ -1324,6 +2165,8 @@ class OracleEngineTransport {
     volumeMutation,
     logsError,
     onCreate,
+    onDelete,
+    sealedSnapshotProvider,
     workerStatus,
     recoveryOnly = false,
   }) {
@@ -1337,6 +2180,8 @@ class OracleEngineTransport {
     this.volumeMutation = volumeMutation;
     this.logsError = logsError;
     this.onCreate = onCreate;
+    this.onDelete = onDelete;
+    this.sealedSnapshotProvider = sealedSnapshotProvider;
     this.workerStatus = workerStatus ?? {};
     this.recoveryOnly = recoveryOnly;
     this.calls = [];
@@ -1384,7 +2229,8 @@ class OracleEngineTransport {
     const created = this.created.find((value) => value.id === id);
     assert.ok(created, `oracle has no created worker ${id}`);
     const sealed = created.phase.claimedJob
-      ? sealedSnapshot(created.phase.claimedJob, this.request)
+      ? this.sealedSnapshotProvider?.(created.phase)
+        ?? sealedSnapshot(created.phase.claimedJob, this.request)
       : null;
     const inspect = oracleWorkerInspect({
       id,
@@ -1418,6 +2264,7 @@ class OracleEngineTransport {
   async deleteContainer(id) {
     this.calls.push({ method: "deleteContainer", id });
     this.deletedIds.push(id);
+    this.onDelete?.(id);
   }
 
   async inspectContainerForRecovery(name) {
@@ -1813,6 +2660,7 @@ function snapshotStoreFixture(options) {
     cleanup(sealed) {
       cleanupCalls.push(structuredClone(sealed));
       if (options.cleanupError) throw options.cleanupError;
+      options.onCleanup?.(structuredClone(sealed));
     },
   };
 }
@@ -2204,24 +3052,35 @@ function claimedReaderIoProbe(file, {
   freezeMetadata = false,
   metadataRace = false,
 } = {}) {
+  const resolvedFile = path.resolve(file);
+  const expectedBytes = fs.statSync(resolvedFile).size;
   const audit = {
+    completedReadPasses: [],
     descriptorReadFileCalls: 0,
+    events: [],
     fstats: [],
     opens: [],
+    pathReadFileCalls: 0,
+    raceInjectedAfterPass: null,
+    readSyncCalls: [],
   };
   let baselineStat;
+  let currentPass = null;
+  let leafDescriptor;
   let postMetadata = false;
   const io = new Proxy(fs, {
     get(target, property) {
       if (property === "openSync") {
         return (candidate, flags, mode) => {
           const descriptor = fs.openSync(candidate, flags, mode);
+          const resolved = path.resolve(String(candidate));
           audit.opens.push({
             descriptor,
-            file: path.resolve(String(candidate)),
+            file: resolved,
             flags,
             mode,
           });
+          if (resolved === resolvedFile) leafDescriptor = descriptor;
           return descriptor;
         };
       }
@@ -2230,18 +3089,112 @@ function claimedReaderIoProbe(file, {
           const value = fs.readFileSync(descriptor, ...args);
           if (typeof descriptor === "number") {
             audit.descriptorReadFileCalls += 1;
-            if (audit.descriptorReadFileCalls === 1) {
+          } else {
+            audit.pathReadFileCalls += 1;
+          }
+          return value;
+        };
+      }
+      if (property === "readSync") {
+        return (descriptor, buffer, offsetOrOptions, length, position) => {
+          const options = offsetOrOptions && typeof offsetOrOptions === "object"
+            ? offsetOrOptions
+            : {
+                offset: offsetOrOptions,
+                length,
+                position,
+              };
+          const performRead = () => (
+            offsetOrOptions && typeof offsetOrOptions === "object"
+              ? fs.readSync(descriptor, buffer, offsetOrOptions)
+              : fs.readSync(descriptor, buffer, offsetOrOptions, length, position)
+          );
+          const explicitPosition = options.position;
+          if (descriptor !== leafDescriptor) {
+            return performRead();
+          }
+          assert.equal(
+            Number.isInteger(explicitPosition) && explicitPosition >= 0,
+            true,
+            "claimed-job descriptor reads must use an explicit non-negative position",
+          );
+          if (currentPass?.complete && explicitPosition === expectedBytes) {
+            const count = performRead();
+            audit.readSyncCalls.push({
+              bytes: count,
+              descriptor,
+              pass: currentPass.index,
+              position: explicitPosition,
+            });
+            assert.equal(count, 0, "a positioned EOF probe returned unexpected bytes");
+            return count;
+          }
+          if (!currentPass || currentPass.complete) {
+            assert.equal(
+              explicitPosition,
+              0,
+              "each complete claimed-job descriptor pass must restart at position zero",
+            );
+            currentPass = {
+              bytes: 0,
+              complete: false,
+              descriptor,
+              index: audit.completedReadPasses.length,
+              initialPosition: explicitPosition,
+              nextPosition: 0,
+            };
+          }
+          assert.equal(
+            explicitPosition,
+            currentPass.nextPosition,
+            "claimed-job descriptor pass skipped or repeated a byte range",
+          );
+          const count = performRead();
+          audit.readSyncCalls.push({
+            bytes: count,
+            descriptor,
+            pass: currentPass.index,
+            position: explicitPosition,
+          });
+          currentPass.bytes += count;
+          currentPass.nextPosition += count;
+          assert.ok(
+            currentPass.bytes <= expectedBytes,
+            "claimed-job descriptor pass exceeded the attested file size",
+          );
+          if (currentPass.bytes === expectedBytes && !currentPass.complete) {
+            currentPass.complete = true;
+            audit.completedReadPasses.push({
+              bytes: currentPass.bytes,
+              descriptor,
+              initialPosition: currentPass.initialPosition,
+            });
+            audit.events.push({
+              type: "read-pass-complete",
+              bytes: currentPass.bytes,
+              descriptor,
+              pass: currentPass.index,
+            });
+            if (currentPass.index === 0) {
+              audit.raceInjectedAfterPass = 1;
               afterFirstDescriptorRead?.();
+              audit.events.push({
+                type: "first-pass-hook-complete",
+                descriptor,
+                pass: currentPass.index,
+              });
               postMetadata = true;
             }
           }
-          return value;
+          return count;
         };
       }
       if (property === "fstatSync") {
         return (descriptor, ...args) => {
           const value = fs.fstatSync(descriptor, ...args);
+          if (descriptor !== leafDescriptor) return value;
           audit.fstats.push(descriptor);
+          audit.events.push({ type: "fstat", descriptor });
           baselineStat ??= value;
           if (freezeMetadata) return baselineStat;
           if (!metadataRace || !postMetadata || audit.fstats.length < 2) return value;
@@ -2262,8 +3215,40 @@ function claimedReaderIoProbe(file, {
   return { audit, io };
 }
 
-function durableIoProbe() {
-  const audit = { descriptors: new Map(), events: [] };
+function statIdentityIo(io, { uid, gid }) {
+  const withIdentity = (stat) => {
+    if (!stat || typeof stat !== "object") return stat;
+    return new Proxy(stat, {
+      get(target, property) {
+        if (property === "uid") return uid;
+        if (property === "gid") return gid;
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+  };
+  return new Proxy(io, {
+    get(target, property) {
+      if (["fstatSync", "lstatSync", "statSync"].includes(property)) {
+        return (...args) => withIdentity(Reflect.get(target, property)(...args));
+      }
+      const value = Reflect.get(target, property);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+}
+
+function filesystemHistoryProbe({ onEvent = () => {} } = {}) {
+  const audit = { descriptors: new Map(), events: [], opens: [] };
+  const record = (event) => {
+    audit.events.push(event);
+    onEvent(structuredClone(event));
+  };
+  const resolvedFile = (value) => (
+    typeof value === "number"
+      ? audit.descriptors.get(value) ?? `fd:${value}`
+      : path.resolve(String(value))
+  );
   const io = new Proxy(fs, {
     get(target, property) {
       if (property === "openSync") {
@@ -2271,27 +3256,111 @@ function durableIoProbe() {
           const descriptor = fs.openSync(file, flags, mode);
           const resolved = path.resolve(String(file));
           audit.descriptors.set(descriptor, resolved);
-          audit.events.push({ type: "open", file: resolved, flags, mode });
+          const event = { type: "open", file: resolved, flags, mode, descriptor };
+          record(event);
+          audit.opens.push(event);
           return descriptor;
+        };
+      }
+      if (property === "mkdirSync") {
+        return (directory, options) => {
+          const result = fs.mkdirSync(directory, options);
+          record({
+            type: "mkdir",
+            file: path.resolve(String(directory)),
+            options: structuredClone(options ?? null),
+          });
+          return result;
+        };
+      }
+      if (property === "writeFileSync") {
+        return (file, data, options) => {
+          const result = fs.writeFileSync(file, data, options);
+          record({
+            type: "write",
+            file: resolvedFile(file),
+            bytes: Buffer.byteLength(
+              Buffer.isBuffer(data) || ArrayBuffer.isView(data)
+                ? Buffer.from(data.buffer, data.byteOffset, data.byteLength)
+                : String(data),
+            ),
+            method: "writeFileSync",
+          });
+          return result;
+        };
+      }
+      if (property === "writeSync") {
+        return (descriptor, ...args) => {
+          const count = fs.writeSync(descriptor, ...args);
+          record({
+            type: "write",
+            file: resolvedFile(descriptor),
+            bytes: count,
+            method: "writeSync",
+          });
+          return count;
         };
       }
       if (property === "fsyncSync") {
         return (descriptor) => {
-          audit.events.push({
+          const result = fs.fsyncSync(descriptor);
+          record({
             type: "fsync",
-            file: audit.descriptors.get(descriptor) ?? `fd:${descriptor}`,
+            file: resolvedFile(descriptor),
           });
-          return fs.fsyncSync(descriptor);
+          return result;
+        };
+      }
+      if (property === "closeSync") {
+        return (descriptor) => {
+          const file = resolvedFile(descriptor);
+          const result = fs.closeSync(descriptor);
+          record({
+            type: "close",
+            file,
+          });
+          audit.descriptors.delete(descriptor);
+          return result;
+        };
+      }
+      if (property === "unlinkSync") {
+        return (file) => {
+          const result = fs.unlinkSync(file);
+          record({ type: "unlink", file: path.resolve(String(file)) });
+          return result;
+        };
+      }
+      if (property === "rmdirSync") {
+        return (directory, options) => {
+          const result = fs.rmdirSync(directory, options);
+          record({
+            type: "rmdir",
+            file: path.resolve(String(directory)),
+            options: structuredClone(options ?? null),
+          });
+          return result;
+        };
+      }
+      if (property === "rmSync") {
+        return (file, options) => {
+          const result = fs.rmSync(file, options);
+          record({
+            type: "rm",
+            file: path.resolve(String(file)),
+            options: structuredClone(options ?? null),
+          });
+          return result;
         };
       }
       if (property === "renameSync") {
         return (from, to) => {
-          audit.events.push({
+          const result = fs.renameSync(from, to);
+          record({
             type: "rename",
             from: path.resolve(String(from)),
             to: path.resolve(String(to)),
           });
-          return fs.renameSync(from, to);
+          return result;
         };
       }
       const value = Reflect.get(target, property);
@@ -2299,6 +3368,44 @@ function durableIoProbe() {
     },
   });
   return { audit, io };
+}
+
+function durableIoProbe(options) {
+  return filesystemHistoryProbe(options);
+}
+
+function historyIndex(events, after, predicate, message) {
+  const index = events.findIndex(
+    (event, eventIndex) => eventIndex > after && predicate(event),
+  );
+  assert.ok(index > after, message);
+  return index;
+}
+
+function assertLeaseRemovalFsync(root, audit, startIndex, label) {
+  const activePath = path.join(root, "active.lock");
+  const destructive = audit.events
+    .map((event, index) => ({ event, index }))
+    .filter(({ event, index }) => index >= startIndex
+      && ["rm", "rmdir", "unlink"].includes(event.type));
+  assert.equal(
+    destructive.some(({ event }) => event.type === "rm"),
+    false,
+    `${label} used opaque recursive removal instead of exact unlink/rmdir`,
+  );
+  const activeUnlinks = destructive.filter(
+    ({ event }) => event.type === "unlink" && event.file === activePath,
+  );
+  assert.equal(activeUnlinks.length, 1, `${label} must unlink active.lock exactly once`);
+  for (const { event, index } of destructive) {
+    historyIndex(
+      audit.events,
+      index,
+      (candidate) => candidate.type === "fsync"
+        && candidate.file === path.dirname(event.file),
+      `${label} did not fsync ${path.dirname(event.file)} after ${event.type}(${event.file})`,
+    );
+  }
 }
 
 function assertBarrierFsyncOrder(root, phaseId, audit) {
@@ -2309,33 +3416,92 @@ function assertBarrierFsyncOrder(root, phaseId, audit) {
       && ["worker-result-recorded", "worker-deleted"].includes(entry.event);
   });
   assert.equal(barrierFiles.length, 2, `${phaseId} requires result and cleanup barrier entries`);
+  assertJournalAppendFsyncOrder(root, directory, barrierFiles, audit, phaseId);
+}
+
+function assertJournalAppendFsyncOrder(root, directory, files, audit, label) {
   let cursor = -1;
-  for (const file of barrierFiles) {
-    const index = audit.events.findIndex(
-      (event, eventIndex) => eventIndex > cursor && event.type === "fsync" && event.file === file,
+  for (const file of files) {
+    const openIndex = historyIndex(
+      audit.events,
+      cursor,
+      (event) => event.type === "open"
+        && event.file === file
+        && (event.flags & fs.constants.O_EXCL) === fs.constants.O_EXCL,
+      `${label} journal entry was not opened exclusively: ${file}`,
     );
-    assert.ok(index > cursor, `${phaseId} journal entry was not fsynced in append order: ${file}`);
-    cursor = index;
+    const writeIndex = historyIndex(
+      audit.events,
+      openIndex,
+      (event) => event.type === "write" && event.file === file && event.bytes > 0,
+      `${label} journal entry was not written after its exclusive open: ${file}`,
+    );
+    const entryFsync = historyIndex(
+      audit.events,
+      writeIndex,
+      (event) => event.type === "fsync" && event.file === file,
+      `${label} journal entry was fsynced before its write: ${file}`,
+    );
+    assert.equal(
+      audit.events
+        .slice(openIndex + 1, entryFsync)
+        .filter((event) => event.type === "write" && event.file === file)
+        .reduce((sum, event) => sum + event.bytes, 0),
+      fs.statSync(file).size,
+      `${label} journal entry was not completely written before fsync: ${file}`,
+    );
+    const directoryFsync = historyIndex(
+      audit.events,
+      entryFsync,
+      (event) => event.type === "fsync" && event.file === directory,
+      `${label} journal directory was not fsynced for entry: ${file}`,
+    );
+    assert.equal(
+      audit.events
+        .slice(entryFsync + 1, directoryFsync)
+        .some((event) => event.type === "write" && event.file === file),
+      false,
+      `${label} journal entry changed after its durable fsync: ${file}`,
+    );
+    const headWrite = historyIndex(
+      audit.events,
+      directoryFsync,
+      (event) => event.type === "write"
+        && event.file !== path.join(root, "active.lock")
+        && path.basename(event.file).includes("active.lock")
+        && event.bytes > 0,
+      `${label} lease head temp was not written after journal durability: ${file}`,
+    );
+    const headFile = audit.events[headWrite].file;
+    const headFsync = historyIndex(
+      audit.events,
+      headWrite,
+      (event) => event.type === "fsync" && event.file === headFile,
+      `${label} lease head temp was fsynced before its write: ${headFile}`,
+    );
+    const headRename = historyIndex(
+      audit.events,
+      headFsync,
+      (event) => event.type === "rename"
+        && event.from === headFile
+        && event.to === path.join(root, "active.lock"),
+      `${label} lease head was not atomically installed from its fsynced temp`,
+    );
+    assert.equal(
+      audit.events
+        .slice(headFsync + 1, headRename)
+        .some((event) => event.type === "write" && event.file === headFile),
+      false,
+      `${label} lease head temp changed after its durable fsync`,
+    );
+    cursor = historyIndex(
+      audit.events,
+      headRename,
+      (event) => event.type === "fsync" && event.file === root,
+      `${label} broker state directory was not fsynced after head install`,
+    );
   }
-  const directoryFsync = audit.events.findIndex(
-    (event, index) => index > cursor && event.type === "fsync" && event.file === directory,
-  );
-  assert.ok(directoryFsync > cursor, `${phaseId} journal directory was not fsynced`);
-  const activePath = path.join(root, "active.lock");
-  const headFsync = audit.events.findIndex(
-    (event, index) => index > directoryFsync
-      && event.type === "fsync"
-      && path.basename(event.file).includes("active.lock"),
-  );
-  assert.ok(headFsync > directoryFsync, `${phaseId} lease head file was not fsynced`);
-  const headRename = audit.events.findIndex(
-    (event, index) => index > headFsync && event.type === "rename" && event.to === activePath,
-  );
-  assert.ok(headRename > headFsync, `${phaseId} lease head was not atomically installed`);
-  const stateFsync = audit.events.findIndex(
-    (event, index) => index > headRename && event.type === "fsync" && event.file === root,
-  );
-  assert.ok(stateFsync > headRename, `${phaseId} broker state directory was not fsynced`);
+  return cursor;
 }
 
 function tempDir(t) {

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
@@ -266,6 +267,7 @@ workerTest("CLI backup and restore jobs consume one exact protected snapshot bef
       action: "backup.job.execute",
       bytes: BACKUP_JOB_BYTES,
       command: "backup-job",
+      document: BACKUP_JOB_DOCUMENT,
       job: backupJobParameters("backup"),
       phaseId: "job.backup.capture",
     },
@@ -273,6 +275,7 @@ workerTest("CLI backup and restore jobs consume one exact protected snapshot bef
       action: "backup.job.execute",
       bytes: RESTORE_JOB_BYTES,
       command: "restore-job",
+      document: RESTORE_JOB_DOCUMENT,
       job: {
         jobFileName: `${RESTORE_JOB_ID}.json`,
         jobId: RESTORE_JOB_ID,
@@ -339,6 +342,79 @@ workerTest("CLI backup and restore jobs consume one exact protected snapshot bef
       assert.equal(toolCalls.length, 1, `${fixture.command} dispatched more than once`);
       assert.equal(toolCalls[0].command, fixture.command);
       assert.equal(toolCalls[0].shell, false);
+
+      const rejectedTarget = `${snapshotPath}.target`;
+      const assertRejectedBeforeDispatch = async (label, prepare, pattern) => {
+        fs.rmSync(snapshotPath, { force: true });
+        fs.rmSync(rejectedTarget, { force: true });
+        prepare(rejectedTarget);
+        let rejectedToolCalls = 0;
+        await assert.rejects(
+          () => runWorkerCli(
+            [process.execPath, workerPath, fixture.command],
+            { writeStdout: () => {}, writeStderr: () => {} },
+            {
+              claimedJobPolicy: {
+                expectedGid: gid,
+                expectedMode: 0o400,
+                expectedUid: uid,
+                maximumBytes: 128 * 1024,
+                parentRoot: root,
+              },
+              env: workerCliEnvironment({
+                ...identity,
+                snapshotPath,
+              }),
+              runFixedTool: async () => {
+                rejectedToolCalls += 1;
+                return assert.fail(`${label} reached the fixed tool adapter`);
+              },
+            },
+          ),
+          pattern,
+          `${fixture.command}/${label} did not fail at the protected snapshot boundary`,
+        );
+        assert.equal(
+          rejectedToolCalls,
+          0,
+          `${fixture.command}/${label} dispatched a tool before snapshot admission`,
+        );
+      };
+
+      await assertRejectedBeforeDispatch(
+        "missing snapshot",
+        () => {},
+        /ENOENT|missing|open|file|snapshot/i,
+      );
+      await assertRejectedBeforeDispatch(
+        "symlink snapshot",
+        (target) => {
+          fs.writeFileSync(target, fixture.bytes, { mode: 0o400 });
+          fs.chmodSync(target, 0o400);
+          fs.symlinkSync(target, snapshotPath);
+        },
+        /symlink|follow|regular|file|link/i,
+      );
+      await assertRejectedBeforeDispatch(
+        "world-readable snapshot",
+        () => {
+          fs.writeFileSync(snapshotPath, fixture.bytes, { mode: 0o644 });
+          fs.chmodSync(snapshotPath, 0o644);
+        },
+        /mode|permission|ownership/i,
+      );
+      await assertRejectedBeforeDispatch(
+        "valid same-size digest substitution",
+        () => {
+          fs.writeFileSync(
+            snapshotPath,
+            validSameSizeClaimedJobTamper(fixture.document, fixture.bytes),
+            { mode: 0o400 },
+          );
+          fs.chmodSync(snapshotPath, 0o400);
+        },
+        /digest|sha256/i,
+      );
     });
   }
 });
@@ -421,14 +497,23 @@ workerTest("protected-file reader rejects a same-size content swap even when des
   assert.equal(original.length, substituted.length, "race fixture must preserve byte length");
   fs.writeFileSync(file, original, { mode: 0o600 });
 
-  const racingIo = sameSizeRaceIo(file, substituted);
+  const racing = sameSizeRaceIo(file, substituted);
   assert.throws(
     () => readProtectedFile(
       file,
       protectedFilePolicy(root, uid, gid),
-      { io: racingIo },
+      { io: racing.io },
     ),
     /changed|race|stable|substitution|content/i,
+  );
+  assert.deepEqual(
+    {
+      completedPassesBeforeSubstitution:
+        racing.evidence.completedPassesBeforeSubstitution,
+      substitutions: racing.evidence.substitutions,
+    },
+    { completedPassesBeforeSubstitution: 1, substitutions: 1 },
+    "race fixture did not substitute exactly after the first complete descriptor pass",
   );
 });
 
@@ -466,7 +551,9 @@ workerTest("worker loads the protected claimed-job file and binds its exact meta
     },
     snapshotPath: file,
   };
-  const loaded = loadClaimedJobSnapshot(input);
+  const stableReadObservation = observeDescriptorStableReadIo(file);
+  const loaded = loadClaimedJobSnapshot(input, { io: stableReadObservation.io });
+  assertStableReadEvidence(stableReadObservation.evidence);
   assert.deepEqual(loaded, {
     document: BACKUP_JOB_DOCUMENT,
     jobFileName: job.jobFileName,
@@ -480,6 +567,50 @@ workerTest("worker loads the protected claimed-job file and binds its exact meta
     BACKUP_JOB_DOCUMENT,
     BACKUP_JOB_BYTES,
   );
+  for (const [label, env] of [
+    ["job filename", {
+      ...input.env,
+      PLATFORM_CLAIMED_JOB_FILE_NAME: `${RESTORE_JOB_ID}.json`,
+    }],
+    ["job ID", {
+      ...input.env,
+      PLATFORM_CLAIMED_JOB_ID: RESTORE_JOB_ID,
+    }],
+    ["job operation", {
+      ...input.env,
+      PLATFORM_CLAIMED_JOB_OPERATION: "restore-drill",
+    }],
+    ["source ID", {
+      ...input.env,
+      PLATFORM_CLAIMED_JOB_SOURCE_ID: "jobs.attacker",
+    }],
+  ]) {
+    assert.throws(
+      () => loadClaimedJobSnapshot({ ...input, env }),
+      /identity|filename|job|operation|source|parameter|metadata/i,
+      `${label} substitution crossed claimed-job identity admission`,
+    );
+  }
+
+  const racing = sameSizeRaceIo(file, sameSizeTamper);
+  assert.throws(
+    () => loadClaimedJobSnapshot(input, { io: racing.io }),
+    /changed|race|stable|substitution|content/i,
+    "claimed-job loading bypassed the descriptor-stable read boundary",
+  );
+  assert.deepEqual(
+    {
+      completedPassesBeforeSubstitution:
+        racing.evidence.completedPassesBeforeSubstitution,
+      substitutions: racing.evidence.substitutions,
+    },
+    { completedPassesBeforeSubstitution: 1, substitutions: 1 },
+    "claimed-job race did not substitute exactly after the first complete descriptor pass",
+  );
+  fs.chmodSync(file, 0o600);
+  fs.writeFileSync(file, BACKUP_JOB_BYTES);
+  fs.chmodSync(file, 0o400);
+
   fs.chmodSync(file, 0o600);
   fs.writeFileSync(file, sameSizeTamper);
   fs.chmodSync(file, 0o400);
@@ -905,11 +1036,389 @@ bodyMatrixTest("workerCreateBody bounds AUTHORITY_BASE64 and keeps the largest a
   assert.deepEqual(nearLimitBody.Env, nearLimitEntries);
 });
 
-test("worker source is socketless while its fixed subprocess adapter remains testable", () => {
+test("worker source is socketless while its fixed subprocess adapter remains testable", (t) => {
   const source = fs.readFileSync(workerPath, "utf8");
-  assert.doesNotMatch(source, /from\s+["']node:(?:net|http|https|tls|dgram|dns)["']/);
-  assert.doesNotMatch(source, /require\(["'](?:net|http|https|tls|dgram|dns)["']\)/);
-  assert.doesNotMatch(source, /docker\.sock|DOCKER_HOST|\/containers\/(?:create|[^"']*\/start)|\/images\/create/);
+  assertSocketlessWorkerSource(source, "real worker source");
+  for (const [label, hostileSource] of [
+    ["bare net import", 'import net from "net";'],
+    ["HTTP/2 import", 'import http2 from "node:http2";'],
+    ["dynamic network import", 'const net = await import("node:" + "net");'],
+    ["global fetch", 'await fetch("http://engine/containers/json");'],
+    ["joined Docker socket", 'const socket = ["/var/run/", "docker", ".sock"].join("");'],
+    ["templated Docker socket", 'const socket = `/var/run/${"docker"}${".sock"}`;'],
+  ]) {
+    assert.throws(
+      () => assertSocketlessWorkerSource(hostileSource, label),
+      /socketless|network|Docker|Engine|dynamic|fetch/i,
+      `socketless scanner missed ${label}`,
+    );
+  }
+
+  const staged = stageDockerWorkerImageLayout(t, "docker-worker-oracle-stage-");
+  assert.equal(
+    fs.readFileSync(staged.workerPath, "utf8"),
+    source,
+    "Dockerfile-exact staging changed the worker fixture",
+  );
+  const hookPath = path.join(staged.root, "fixed-adapter-hook-check.mjs");
+  fs.writeFileSync(
+    hookPath,
+    fixedAdapterHookSource(path.join(staged.root, "unused-trace.jsonl")),
+    { mode: 0o600 },
+  );
+  const hookCheck = spawnSync(process.execPath, ["--check", hookPath], {
+    encoding: "utf8",
+  });
+  assert.deepEqual(
+    {
+      signal: hookCheck.signal,
+      status: hookCheck.status,
+      stderr: hookCheck.stderr,
+      stdout: hookCheck.stdout,
+    },
+    { signal: null, status: 0, stderr: "", stdout: "" },
+    "fixed-adapter preload oracle is not syntactically valid",
+  );
+});
+
+test("descriptor-stable read oracle requires exactly two complete positional passes", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "docker-worker-read-oracle-"));
+  t.after(() => fs.rmSync(root, { force: true, recursive: true }));
+  const file = path.join(root, "snapshot.bin");
+  const bytes = Buffer.from("descriptor-stable-read-oracle\n");
+  fs.writeFileSync(file, bytes, { mode: 0o600 });
+  const observed = observeDescriptorStableReadIo(file);
+  const descriptor = observed.io.openSync(
+    file,
+    fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW,
+  );
+  observed.io.fstatSync(descriptor);
+  const split = Math.floor(bytes.length / 2);
+  for (let pass = 0; pass < 2; pass += 1) {
+    const buffer = Buffer.alloc(bytes.length);
+    assert.equal(observed.io.readSync(descriptor, buffer, 0, split, 0), split);
+    assert.equal(
+      observed.io.readSync(
+        descriptor,
+        buffer,
+        split,
+        bytes.length - split,
+        split,
+      ),
+      bytes.length - split,
+    );
+    assert.deepEqual(buffer, bytes);
+  }
+  observed.io.fstatSync(descriptor);
+  observed.io.closeSync(descriptor);
+  assertStableReadEvidence(observed.evidence);
+
+  const hostileEvidence = [
+    {
+      label: "zero-count dummy read",
+      mutate(evidence) {
+        evidence.readSyncCalls[0].returnedCount = 0;
+      },
+      pattern: /positive bounded progress/i,
+    },
+    {
+      label: "partial restart",
+      mutate(evidence) {
+        evidence.readSyncCalls.splice(1, 0, {
+          ...evidence.readSyncCalls[0],
+          order: evidence.readSyncCalls[0].order + 0.5,
+        });
+      },
+      pattern: /restarted at position zero before completing/i,
+    },
+    {
+      label: "third complete pass",
+      mutate(evidence) {
+        const nextOrder = evidence.readSyncCalls.at(-1).order + 1;
+        evidence.readSyncCalls.push(
+          ...evidence.readSyncCalls.slice(0, 2).map((call, index) => ({
+            ...call,
+            order: nextOrder + index,
+          })),
+        );
+      },
+      pattern: /exactly two complete descriptor passes/i,
+    },
+    {
+      label: "descriptor substitution",
+      mutate(evidence) {
+        evidence.readSyncCalls.at(-1).descriptor += 1;
+      },
+      pattern: /changed descriptors/i,
+    },
+  ];
+  for (const { label, mutate, pattern } of hostileEvidence) {
+    const evidence = structuredClone(observed.evidence);
+    mutate(evidence);
+    assert.throws(
+      () => assertStableReadEvidence(evidence),
+      pattern,
+      `stable-read oracle admitted ${label}`,
+    );
+  }
+
+  fs.chmodSync(file, 0o400);
+  const substituted = Buffer.from(bytes);
+  substituted[0] ^= 0x20;
+  const racing = sameSizeRaceIo(file, substituted);
+  const racingDescriptor = racing.io.openSync(
+    file,
+    fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW,
+  );
+  racing.io.fstatSync(racingDescriptor);
+  const firstPass = Buffer.alloc(bytes.length);
+  assert.equal(racing.io.readSync(racingDescriptor, firstPass, 0, split, 0), split);
+  assert.equal(racing.evidence.substitutions, 0, "race fired before pass one completed");
+  assert.equal(
+    racing.io.readSync(
+      racingDescriptor,
+      firstPass,
+      split,
+      bytes.length - split,
+      split,
+    ),
+    bytes.length - split,
+  );
+  assert.deepEqual(firstPass, bytes);
+  assert.deepEqual(
+    {
+      completedPassesBeforeSubstitution:
+        racing.evidence.completedPassesBeforeSubstitution,
+      substitutions: racing.evidence.substitutions,
+    },
+    { completedPassesBeforeSubstitution: 1, substitutions: 1 },
+  );
+  const secondPass = Buffer.alloc(bytes.length);
+  assert.equal(
+    racing.io.readSync(racingDescriptor, secondPass, 0, bytes.length, 0),
+    bytes.length,
+  );
+  assert.deepEqual(secondPass, substituted);
+  racing.io.closeSync(racingDescriptor);
+  assert.equal(fs.statSync(file).mode & 0o777, 0o400, "race fixture changed snapshot mode");
+});
+
+workerTest("Dockerfile-exact staged worker layout closes import and CLI dependencies", [
+  "runWorkerCli",
+], (t) => {
+  const staged = stageDockerWorkerImageLayout(t, "docker-worker-dependency-stage-");
+  const importProbe = spawnSync(
+    process.execPath,
+    [
+      "--input-type=module",
+      "--eval",
+      `await import(${JSON.stringify(pathToFileURL(staged.workerPath).href)});`,
+    ],
+    {
+      cwd: staged.root,
+      encoding: "utf8",
+      env: {
+        HOME: staged.root,
+        LANG: "C.UTF-8",
+        NODE_ENV: "production",
+      },
+    },
+  );
+  assert.deepEqual(
+    {
+      signal: importProbe.signal,
+      status: importProbe.status,
+      stderr: importProbe.stderr,
+      stdout: importProbe.stdout,
+    },
+    { signal: null, status: 0, stderr: "", stdout: "" },
+    "worker import failed from the exact Dockerfile COPY closure",
+  );
+
+  const cliProbe = spawnSync(
+    process.execPath,
+    [staged.workerPath, "__dependency-closure-probe__"],
+    {
+      cwd: staged.root,
+      encoding: "utf8",
+      env: {
+        HOME: staged.root,
+        LANG: "C.UTF-8",
+        NODE_ENV: "production",
+      },
+    },
+  );
+  assert.equal(cliProbe.signal, null);
+  assert.notEqual(cliProbe.status, 0, "invalid staged CLI probe unexpectedly succeeded");
+  assert.doesNotMatch(
+    `${cliProbe.stderr}\n${cliProbe.stdout}`,
+    /ERR_MODULE_NOT_FOUND|MODULE_NOT_FOUND|Cannot find (?:module|package)/i,
+    "worker CLI dependency graph is absent from the Dockerfile-exact stage",
+  );
+  assert.match(
+    cliProbe.stderr,
+    /argument|command|environment|unsupported|worker action/i,
+    "staged CLI did not reach the worker's own fail-closed argument boundary",
+  );
+});
+
+workerBodyMatrixTest("real worker main executes all eight phases through one code-owned socketless adapter", [
+  "loadClaimedJobSnapshot",
+  "normalizeWorkerResult",
+  "runWorkerCli",
+], (t) => {
+  const staged = stageDockerWorkerImageLayout(t, "docker-worker-main-stage-");
+  const hookPath = path.join(staged.root, "fixed-adapter-hook.mjs");
+  const tracePath = path.join(staged.root, "fixed-adapter-trace.jsonl");
+  fs.writeFileSync(hookPath, fixedAdapterHookSource(tracePath), { mode: 0o600 });
+  const hookUrl = pathToFileURL(hookPath).href;
+  const snapshotPath = path.join(staged.root, "claimed-job", "job.json");
+  fs.mkdirSync(path.dirname(snapshotPath), { mode: 0o700, recursive: true });
+  fs.chmodSync(path.dirname(snapshotPath), 0o700);
+
+  const rawReceipt = buildRawActiveReceiptV2();
+  rawReceipt.resources.claimedJobSources["jobs.running"].snapshotContainerPath = snapshotPath;
+  const trusted = buildFixtureTrustedContextV2({ rawReceipt }).trusted;
+  const cases = phaseActionCases(trusted);
+  assert.equal(cases.length, 8, "real-main matrix must cover every canonical phase");
+  const invocationByCommand = new Map();
+  let traceCount = 0;
+
+  for (const phaseCase of cases) {
+    fs.rmSync(snapshotPath, { force: true });
+    if (phaseCase.snapshot) {
+      const bytes = phaseCase.parameters.jobOperation === "backup"
+        ? BACKUP_JOB_BYTES
+        : RESTORE_JOB_BYTES;
+      fs.writeFileSync(snapshotPath, bytes, { mode: 0o400 });
+      fs.chmodSync(snapshotPath, 0o400);
+    }
+    const body = workerBodyForCase(phaseCase, trusted);
+    const exactEnvironment = environmentMap(body.Env);
+    const result = spawnSync(
+      process.execPath,
+      [staged.workerPath, ...body.Cmd],
+      {
+        cwd: path.dirname(staged.workerPath),
+        encoding: "utf8",
+        env: {
+          ...exactEnvironment,
+          NODE_OPTIONS: `--import=${hookUrl}`,
+        },
+        maxBuffer: 32 * 1024,
+      },
+    );
+    assert.deepEqual(
+      { signal: result.signal, status: result.status, stderr: result.stderr },
+      { signal: null, status: 0, stderr: "" },
+      `${phaseCase.action}/${phaseCase.phaseId} real main failed`,
+    );
+    const expected = rawWorkerResult({
+      action: phaseCase.action,
+      command: body.Cmd[0],
+      job: phaseCase.snapshot ? claimedJobParameters(phaseCase.snapshot) : null,
+      phaseId: phaseCase.phaseId,
+      requestId: phaseCase.request.requestId,
+    });
+    assert.equal(result.stdout, `${JSON.stringify(expected)}\n`);
+    assert.ok(
+      Buffer.byteLength(result.stdout.trimEnd()) <= MAX_PHASE_OUTPUT_BYTES_V2,
+      `${phaseCase.phaseId} main output exceeded the worker stdout contract`,
+    );
+
+    const traces = readJsonLines(tracePath);
+    assert.equal(
+      traces.length,
+      traceCount + 1,
+      `${phaseCase.phaseId} did not invoke exactly one fixed adapter process`,
+    );
+    traceCount = traces.length;
+    const trace = traces.at(-1);
+    assert.deepEqual(
+      trace.environment,
+      Object.fromEntries(Object.entries(exactEnvironment).sort(([left], [right]) => left.localeCompare(right))),
+      `${phaseCase.phaseId} adapter did not inherit the exact broker body environment`,
+    );
+    assert.equal(trace.shell, false, `${phaseCase.phaseId} adapter did not set shell:false`);
+    assert.ok(path.isAbsolute(trace.executable), `${phaseCase.phaseId} adapter executable is PATH-resolved`);
+    assert.ok(Array.isArray(trace.argv), `${phaseCase.phaseId} adapter argv is not an array`);
+    assert.equal(
+      [path.basename(trace.executable), ...trace.argv].includes(body.Cmd[0]),
+      true,
+      `${phaseCase.phaseId} adapter invocation is not bound to its fixed command`,
+    );
+    const callerValues = new Set([
+      ...Object.values(exactEnvironment),
+      phaseCase.parameters.jobFileName,
+      phaseCase.parameters.jobId,
+      phaseCase.parameters.jobOperation,
+      phaseCase.parameters.jobSha256,
+    ].filter(Boolean));
+    assert.equal(
+      trace.argv.some((entry) => callerValues.has(entry)),
+      false,
+      `${phaseCase.phaseId} projected caller-controlled identity into adapter argv`,
+    );
+    const invocationIdentity = {
+      argv: trace.argv,
+      executable: trace.executable,
+      shell: trace.shell,
+    };
+    const prior = invocationByCommand.get(body.Cmd[0]);
+    if (prior) {
+      assert.deepEqual(
+        invocationIdentity,
+        prior,
+        `${body.Cmd[0]} adapter identity changed across canonical phases`,
+      );
+    } else {
+      invocationByCommand.set(body.Cmd[0], invocationIdentity);
+    }
+  }
+  assert.equal(traceCount, 8, "real main matrix did not execute all eight phase adapters");
+
+  const hostileCase = cases.find(({ phaseId }) => phaseId === "restore.verify");
+  const hostileBody = workerBodyForCase(hostileCase, trusted);
+  const hostileEnvironment = environmentMap(hostileBody.Env);
+  for (const [label, hookOptions, pattern] of [
+    [
+      "oversized adapter output",
+      { oversizedOutput: true },
+      /output|oversized|length|byte|schema/i,
+    ],
+    [
+      "non-zero adapter exit",
+      { exitStatus: 17 },
+      /adapter|command|exit|failed|status|tool/i,
+    ],
+  ]) {
+    const suffix = label.replaceAll(" ", "-");
+    const hostileHookPath = path.join(staged.root, `${suffix}-hook.mjs`);
+    const hostileTracePath = path.join(staged.root, `${suffix}-trace.jsonl`);
+    fs.writeFileSync(
+      hostileHookPath,
+      fixedAdapterHookSource(hostileTracePath, hookOptions),
+      { mode: 0o600 },
+    );
+    const rejected = spawnSync(
+      process.execPath,
+      [staged.workerPath, ...hostileBody.Cmd],
+      {
+        cwd: path.dirname(staged.workerPath),
+        encoding: "utf8",
+        env: {
+          ...hostileEnvironment,
+          NODE_OPTIONS: `--import=${pathToFileURL(hostileHookPath).href}`,
+        },
+        maxBuffer: 32 * 1024,
+      },
+    );
+    assert.equal(rejected.signal, null, `${label} killed the real worker main`);
+    assert.equal(rejected.status, 78, `${label} did not produce the fixed worker failure exit`);
+    assert.equal(rejected.stdout, "", `${label} emitted an admitted result`);
+    assert.match(rejected.stderr, pattern, `${label} failed at an unrelated boundary`);
+    assert.equal(readJsonLines(hostileTracePath).length, 1, `${label} did not reach one adapter`);
+  }
 });
 
 workerTest("real manifest and sidecar files are bound by digest, key ID and domain-separated HMAC", [
@@ -1798,6 +2307,32 @@ function environmentMap(values) {
   return result;
 }
 
+function assertSocketlessWorkerSource(source, label) {
+  assert.doesNotMatch(
+    source,
+    /(?:\bfrom\s*|\bimport\s*|\brequire\s*\(\s*)["'](?:node:)?(?:net|http|https|http2|tls|dgram|dns)["']/,
+    `${label} violates the socketless network-module boundary`,
+  );
+  assert.doesNotMatch(
+    source,
+    /\bimport\s*\(/,
+    `${label} violates the socketless dynamic-import boundary`,
+  );
+  assert.doesNotMatch(
+    source,
+    /\bfetch\s*\(/,
+    `${label} violates the socketless fetch boundary`,
+  );
+  const folded = source
+    .toLowerCase()
+    .replace(/[\s"'`+\[\](){},;$]/g, "");
+  assert.doesNotMatch(
+    folded,
+    /docker\.sock|docker_host|\/containers\/(?:create|[^/]*\/start)|\/images\/create/,
+    `${label} reconstructs forbidden Docker Engine authority`,
+  );
+}
+
 function expectedWorkerBodyDocument(phaseCase, trusted) {
   const receipt = trusted.receipt;
   const phase = receipt.resources.phaseProfiles[phaseCase.phaseId];
@@ -2123,6 +2658,25 @@ function bodyMatrixTest(name, body) {
   test(name, body);
 }
 
+function workerBodyMatrixTest(name, requiredFunctions, body) {
+  const missing = requiredFunctions.filter(
+    (functionName) => typeof worker[functionName] !== "function",
+  );
+  if (missing.length > 0) {
+    test(name, {
+      todo: `blocked by worker pure-API boundary: ${missing.join(", ")}`,
+    });
+    return;
+  }
+  if (!exactWorkerBodyBaselineReady) {
+    test(name, {
+      todo: "blocked until all eight exact workerCreateBody phase baselines pass",
+    });
+    return;
+  }
+  test(name, body);
+}
+
 function hasExactWorkerBodyBaseline() {
   const trusted = WORKER_TRUSTED_CONTEXT;
   try {
@@ -2172,12 +2726,17 @@ function validSameSizeClaimedJobTamper(document, admittedBytes) {
 
 function observeDescriptorStableReadIo(file) {
   const expectedPath = path.resolve(file);
+  const expectedSize = fs.statSync(file).size;
   const leafDescriptors = new Set();
+  let eventOrder = 0;
   const evidence = {
-    descriptorReadStarts: 0,
-    fstatCalls: 0,
-    leafOpenFlags: [],
+    descriptorReadFileCalls: 0,
+    expectedSize,
+    fstatEvents: [],
+    leafCloseEvents: [],
+    leafOpenEvents: [],
     pathReadCalls: 0,
+    readSyncCalls: [],
   };
   const io = new Proxy(fs, {
     get(target, property) {
@@ -2185,22 +2744,33 @@ function observeDescriptorStableReadIo(file) {
         return (candidate, flags, ...args) => {
           const descriptor = target.openSync(candidate, flags, ...args);
           if (path.resolve(String(candidate)) === expectedPath) {
-            evidence.leafOpenFlags.push(flags);
             leafDescriptors.add(descriptor);
+            evidence.leafOpenEvents.push({
+              descriptor,
+              flags,
+              order: eventOrder += 1,
+            });
           }
           return descriptor;
         };
       }
       if (property === "fstatSync") {
         return (descriptor, ...args) => {
-          if (leafDescriptors.has(descriptor)) evidence.fstatCalls += 1;
-          return target.fstatSync(descriptor, ...args);
+          const stat = target.fstatSync(descriptor, ...args);
+          if (leafDescriptors.has(descriptor)) {
+            evidence.fstatEvents.push({
+              descriptor,
+              order: eventOrder += 1,
+              size: stat.size,
+            });
+          }
+          return stat;
         };
       }
       if (property === "readFileSync") {
         return (candidate, ...args) => {
           if (typeof candidate === "number" && leafDescriptors.has(candidate)) {
-            evidence.descriptorReadStarts += 1;
+            evidence.descriptorReadFileCalls += 1;
           } else if (typeof candidate !== "number"
             && path.resolve(String(candidate)) === expectedPath) {
             evidence.pathReadCalls += 1;
@@ -2210,16 +2780,36 @@ function observeDescriptorStableReadIo(file) {
       }
       if (property === "readSync") {
         return (descriptor, buffer, offset, length, position) => {
-          if (leafDescriptors.has(descriptor) && position === 0) {
-            evidence.descriptorReadStarts += 1;
+          const returnedCount = target.readSync(
+            descriptor,
+            buffer,
+            offset,
+            length,
+            position,
+          );
+          if (leafDescriptors.has(descriptor)) {
+            evidence.readSyncCalls.push({
+              bufferLength: buffer?.byteLength,
+              bufferOffset: offset,
+              descriptor,
+              order: eventOrder += 1,
+              position,
+              requestedLength: length,
+              returnedCount,
+            });
           }
-          return target.readSync(descriptor, buffer, offset, length, position);
+          return returnedCount;
         };
       }
       if (property === "closeSync") {
         return (descriptor) => {
           const result = target.closeSync(descriptor);
-          leafDescriptors.delete(descriptor);
+          if (leafDescriptors.delete(descriptor)) {
+            evidence.leafCloseEvents.push({
+              descriptor,
+              order: eventOrder += 1,
+            });
+          }
           return result;
         };
       }
@@ -2231,21 +2821,139 @@ function observeDescriptorStableReadIo(file) {
 }
 
 function assertStableReadEvidence(evidence) {
-  assert.ok(evidence.leafOpenFlags.length >= 1, "claimed-job leaf was not descriptor-opened");
   assert.equal(
-    evidence.leafOpenFlags.every(
-      (flags) => Number.isInteger(flags)
-        && (flags & fs.constants.O_NOFOLLOW) === fs.constants.O_NOFOLLOW,
-    ),
+    evidence.leafOpenEvents.length,
+    1,
+    "claimed-job leaf must be opened exactly once for one descriptor-stable read",
+  );
+  const [{ descriptor: leafDescriptor, flags: leafFlags }] = evidence.leafOpenEvents;
+  assert.equal(
+    Number.isInteger(leafFlags)
+      && (leafFlags & fs.constants.O_NOFOLLOW) === fs.constants.O_NOFOLLOW,
     true,
     "claimed-job leaf open did not observe O_NOFOLLOW",
   );
-  assert.ok(
-    evidence.descriptorReadStarts >= 2,
-    "claimed-job consumer did not perform two independent descriptor reads",
+  assert.deepEqual(
+    evidence.leafCloseEvents.map(({ descriptor }) => descriptor),
+    [leafDescriptor],
+    "claimed-job consumer did not close the one admitted leaf descriptor exactly once",
   );
-  assert.ok(evidence.fstatCalls >= 2, "claimed-job consumer did not fstat before and after reading");
+  assert.ok(
+    Number.isSafeInteger(evidence.expectedSize) && evidence.expectedSize > 0,
+    "claimed-job stable-read fixture has an invalid byte size",
+  );
+  assert.equal(
+    evidence.descriptorReadFileCalls,
+    0,
+    "claimed-job consumer used offset-dependent readFileSync on the descriptor",
+  );
   assert.equal(evidence.pathReadCalls, 0, "claimed-job bytes were re-opened by pathname");
+  assert.ok(evidence.readSyncCalls.length >= 2, "claimed-job consumer did not read two passes");
+  assert.equal(
+    evidence.readSyncCalls.every(({ descriptor }) => descriptor === leafDescriptor),
+    true,
+    "claimed-job consumer changed descriptors between stable-read passes",
+  );
+
+  const passes = [];
+  let activePass = null;
+  for (const call of evidence.readSyncCalls) {
+    assert.ok(
+      Number.isSafeInteger(call.bufferLength) && call.bufferLength > 0,
+      "claimed-job readSync used an invalid buffer",
+    );
+    assert.ok(
+      Number.isSafeInteger(call.bufferOffset) && call.bufferOffset >= 0,
+      "claimed-job readSync used an invalid buffer offset",
+    );
+    assert.ok(
+      Number.isSafeInteger(call.requestedLength) && call.requestedLength > 0,
+      "claimed-job readSync issued a zero-length or invalid request",
+    );
+    assert.ok(
+      call.bufferOffset + call.requestedLength <= call.bufferLength,
+      "claimed-job readSync request escaped its destination buffer",
+    );
+    assert.ok(
+      Number.isSafeInteger(call.position) && call.position >= 0,
+      "claimed-job consumer did not use an explicit positional readSync",
+    );
+    assert.ok(
+      Number.isSafeInteger(call.returnedCount)
+        && call.returnedCount > 0
+        && call.returnedCount <= call.requestedLength,
+      "claimed-job readSync made no positive bounded progress",
+    );
+    assert.ok(
+      call.requestedLength <= evidence.expectedSize - call.position,
+      "claimed-job readSync requested bytes beyond the admitted stat size",
+    );
+
+    if (call.position === 0) {
+      if (activePass) {
+        assert.equal(
+          activePass.returnedBytes,
+          evidence.expectedSize,
+          "claimed-job consumer restarted at position zero before completing a pass",
+        );
+      }
+      activePass = { calls: 0, returnedBytes: 0 };
+      passes.push(activePass);
+    }
+    assert.ok(activePass, "claimed-job descriptor read did not start at position zero");
+    assert.equal(
+      call.position,
+      activePass.returnedBytes,
+      "claimed-job descriptor pass was not contiguous",
+    );
+    activePass.calls += 1;
+    activePass.returnedBytes += call.returnedCount;
+    assert.ok(
+      activePass.returnedBytes <= evidence.expectedSize,
+      "claimed-job descriptor pass exceeded the admitted stat size",
+    );
+  }
+  assert.equal(
+    passes.length,
+    2,
+    "claimed-job consumer must perform exactly two complete descriptor passes",
+  );
+  for (const [index, pass] of passes.entries()) {
+    assert.ok(pass.calls >= 1, `claimed-job descriptor pass ${index + 1} was empty`);
+    assert.equal(
+      pass.returnedBytes,
+      evidence.expectedSize,
+      `claimed-job descriptor pass ${index + 1} did not cover the complete stat size`,
+    );
+  }
+
+  assert.ok(
+    evidence.fstatEvents.length >= 2,
+    "claimed-job consumer did not fstat before and after reading",
+  );
+  assert.equal(
+    evidence.fstatEvents.every(
+      ({ descriptor, size }) => descriptor === leafDescriptor && size === evidence.expectedSize,
+    ),
+    true,
+    "claimed-job fstat observations changed descriptor identity or size",
+  );
+  const firstReadOrder = evidence.readSyncCalls[0].order;
+  const lastReadOrder = evidence.readSyncCalls.at(-1).order;
+  assert.equal(
+    evidence.fstatEvents.some(({ order }) => order < firstReadOrder),
+    true,
+    "claimed-job consumer omitted the pre-read fstat",
+  );
+  assert.equal(
+    evidence.fstatEvents.some(({ order }) => order > lastReadOrder),
+    true,
+    "claimed-job consumer omitted the post-read fstat",
+  );
+  assert.ok(
+    evidence.leafCloseEvents[0].order > lastReadOrder,
+    "claimed-job descriptor closed before both complete passes finished",
+  );
 }
 
 function environmentEntryBytes(entry) {
@@ -2302,42 +3010,91 @@ function receiptWithAuthorityEntryAtLeast(minimumEntryBytes) {
 }
 
 function sameSizeRaceIo(file, substitutedBytes) {
-  let stableStat;
-  let bytesRead = 0;
+  const expectedPath = path.resolve(file);
+  const originalStat = fs.statSync(file);
+  const originalMode = originalStat.mode & 0o777;
+  assert.equal(
+    substitutedBytes.length,
+    originalStat.size,
+    "race substitution must preserve the admitted stat size",
+  );
+  const evidence = {
+    completedPassesBeforeSubstitution: null,
+    firstPassBytes: 0,
+    substitutions: 0,
+  };
+  let leafDescriptor;
+  const stableStat = originalStat;
   let substituted = false;
   const substitute = () => {
     if (substituted) return;
     substituted = true;
-    fs.writeFileSync(file, substitutedBytes);
-    fs.chmodSync(file, 0o600);
+    evidence.completedPassesBeforeSubstitution = 1;
+    evidence.substitutions += 1;
+    fs.chmodSync(file, originalMode | 0o200);
+    try {
+      fs.writeFileSync(file, substitutedBytes);
+    } finally {
+      fs.chmodSync(file, originalMode);
+    }
   };
-  return new Proxy(fs, {
+  const observeFirstPassProgress = (descriptor, position, returnedCount) => {
+    if (substituted || descriptor !== leafDescriptor) return;
+    if (!Number.isSafeInteger(position)
+      || !Number.isSafeInteger(returnedCount)
+      || returnedCount <= 0
+      || position !== evidence.firstPassBytes) {
+      return;
+    }
+    evidence.firstPassBytes += returnedCount;
+    if (evidence.firstPassBytes === originalStat.size) substitute();
+  };
+  const io = new Proxy(fs, {
     get(target, property) {
+      if (property === "openSync") {
+        return (candidate, flags, ...args) => {
+          const descriptor = target.openSync(candidate, flags, ...args);
+          if (path.resolve(String(candidate)) === expectedPath) leafDescriptor = descriptor;
+          return descriptor;
+        };
+      }
       if (property === "fstatSync") {
-        return (descriptor) => {
-          stableStat ??= target.fstatSync(descriptor);
+        return (descriptor, ...args) => {
+          if (descriptor !== leafDescriptor) return target.fstatSync(descriptor, ...args);
           return stableStat;
         };
       }
       if (property === "readFileSync") {
         return (descriptor, ...args) => {
           const value = target.readFileSync(descriptor, ...args);
-          if (typeof descriptor === "number") substitute();
+          if (descriptor === leafDescriptor) {
+            const returnedCount = Buffer.isBuffer(value)
+              ? value.length
+              : Buffer.byteLength(String(value));
+            observeFirstPassProgress(descriptor, 0, returnedCount);
+          }
           return value;
         };
       }
       if (property === "readSync") {
         return (descriptor, buffer, offset, length, position) => {
           const count = target.readSync(descriptor, buffer, offset, length, position);
-          bytesRead += count;
-          if (bytesRead >= substitutedBytes.length) substitute();
+          observeFirstPassProgress(descriptor, position, count);
           return count;
+        };
+      }
+      if (property === "closeSync") {
+        return (descriptor) => {
+          const result = target.closeSync(descriptor);
+          if (descriptor === leafDescriptor) leafDescriptor = undefined;
+          return result;
         };
       }
       const value = Reflect.get(target, property);
       return typeof value === "function" ? value.bind(target) : value;
     },
   });
+  return { evidence, io };
 }
 
 function protectedFilePolicy(parentRoot, expectedUid, expectedGid) {
@@ -2348,6 +3105,245 @@ function protectedFilePolicy(parentRoot, expectedUid, expectedGid) {
     maximumBytes: 2 * 1024 * 1024,
     parentRoot,
   };
+}
+
+function stageDockerWorkerImageLayout(t, prefix) {
+  const repositoryRoot = path.resolve(scriptDir, "..");
+  const dockerfile = path.join(repositoryRoot, "docker", "docker-action-broker.Dockerfile");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  t.after(() => fs.rmSync(root, { force: true, recursive: true }));
+  const logicalLines = [];
+  let pending = "";
+  for (const rawLine of fs.readFileSync(dockerfile, "utf8").split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith("#")) continue;
+    pending += `${pending ? " " : ""}${line.replace(/\\$/, "").trim()}`;
+    if (line.endsWith("\\")) continue;
+    logicalLines.push(pending);
+    pending = "";
+  }
+  assert.equal(pending, "", "Dockerfile ended inside a continued instruction");
+  let copyCount = 0;
+  for (const instruction of logicalLines) {
+    const match = instruction.match(/^COPY\s+(.+)$/i);
+    if (!match) continue;
+    const tokens = match[1].split(/\s+/).filter(Boolean);
+    assert.equal(
+      tokens.some((token) => token.startsWith("--from=")),
+      false,
+      "dependency closure cannot materialize a COPY --from stage",
+    );
+    const paths = tokens.filter((token) => !token.startsWith("--"));
+    assert.ok(paths.length >= 2, `malformed Dockerfile COPY: ${instruction}`);
+    const destination = paths.at(-1);
+    const sources = paths.slice(0, -1);
+    for (const source of sources) {
+      assert.doesNotMatch(source, /[*?[\]{}]/, `unbounded Dockerfile COPY source: ${source}`);
+      const sourcePath = path.resolve(repositoryRoot, source);
+      const repositoryPrefix = `${repositoryRoot}${path.sep}`;
+      assert.ok(
+        sourcePath.startsWith(repositoryPrefix),
+        `Dockerfile COPY escaped the repository root: ${source}`,
+      );
+      assert.equal(fs.existsSync(sourcePath), true, `Dockerfile COPY source is missing: ${source}`);
+      const destinationPath = path.join(
+        root,
+        destination.replace(/^\/+/, ""),
+        sources.length > 1 || destination.endsWith("/") ? path.basename(source) : "",
+      );
+      fs.mkdirSync(path.dirname(destinationPath), { mode: 0o700, recursive: true });
+      fs.cpSync(sourcePath, destinationPath, {
+        errorOnExist: true,
+        force: false,
+        preserveTimestamps: true,
+        recursive: fs.statSync(sourcePath).isDirectory(),
+      });
+      copyCount += 1;
+    }
+  }
+  assert.ok(copyCount >= 1, "Dockerfile stage did not materialize any COPY instruction");
+  const stagedWorkerPath = path.join(
+    root,
+    "opt",
+    "platform-docker-worker",
+    "docker-action-worker.mjs",
+  );
+  assert.equal(fs.existsSync(stagedWorkerPath), true, "Dockerfile stage omitted the worker entrypoint");
+  return { dockerfile, root, workerPath: stagedWorkerPath };
+}
+
+function fixedAdapterHookSource(tracePath, {
+  exitStatus = 0,
+  oversizedOutput = false,
+} = {}) {
+  return `
+import childProcess from "node:child_process";
+import crypto from "node:crypto";
+import { EventEmitter } from "node:events";
+import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
+import { PassThrough } from "node:stream";
+
+const TRACE_PATH = ${JSON.stringify(tracePath)};
+const EXIT_STATUS = ${JSON.stringify(exitStatus)};
+const OVERSIZED_OUTPUT = ${JSON.stringify(oversizedOutput)};
+
+function sha256(value) {
+  return crypto.createHash("sha256").update(value).digest("hex");
+}
+
+function phaseOutput() {
+  const phaseId = process.env.PLATFORM_DOCKER_PHASE_ID;
+  const schemas = {
+    "catalog.capture": "platform.backup-catalog/v1",
+    "job.backup.capture": "platform.backup-job-result/v1",
+    "job.restore.verify": "platform.backup-job-result/v1",
+    "prune.plan": "platform.backup-prune-plan/v1",
+    "prune.apply": "platform.backup-prune-apply/v1",
+    "restore.capture": "platform.backup-catalog/v1",
+    "restore.verify": "platform.restore-drill/v1",
+    "offsite.sync": "platform.offsite-backup-receipt/v1",
+  };
+  const schema = schemas[phaseId];
+  if (!schema) throw new Error("test adapter received an unsupported phase");
+  if (phaseId === "prune.plan") {
+    return {
+      schema,
+      mode: "plan",
+      keepCompleteManifests: 42,
+      completeManifestCount: 2,
+      retainedManifestIds: ["manifest:one"],
+      expiredManifestIds: ["manifest:two"],
+      mutationPerformed: false,
+    };
+  }
+  const result = {
+    schema,
+    status: "passed",
+    evidenceSha256: sha256("fixture:worker-evidence:" + phaseId),
+    mutationPerformed: true,
+  };
+  if (phaseId === "job.backup.capture" || phaseId === "job.restore.verify") {
+    result.jobId = process.env.PLATFORM_CLAIMED_JOB_ID;
+    result.jobOperation = process.env.PLATFORM_CLAIMED_JOB_OPERATION;
+  }
+  if (phaseId === "offsite.sync") result.repositoryOffsite = true;
+  return result;
+}
+
+function normalizedInvocation(argv, options) {
+  if (Array.isArray(argv)) return { argv, options: options ?? {} };
+  return { argv: [], options: argv ?? options ?? {} };
+}
+
+function encodedOutput(options) {
+  const output = phaseOutput();
+  if (OVERSIZED_OUTPUT) output.unmodeledOversizedEvidence = "a".repeat(8192);
+  const rendered = JSON.stringify(output) + "\\n";
+  return options?.encoding ? rendered : Buffer.from(rendered);
+}
+
+function record(api, executable, argv, options) {
+  const effectiveEnvironment = options?.env ?? process.env;
+  const environment = Object.fromEntries(
+    Object.entries(effectiveEnvironment)
+      .filter(([name]) => name !== "NODE_OPTIONS")
+      .sort(([left], [right]) => left.localeCompare(right)),
+  );
+  fs.appendFileSync(TRACE_PATH, JSON.stringify({
+    api,
+    argv: argv.map(String),
+    environment,
+    executable: String(executable),
+    shell: options?.shell ?? null,
+  }) + "\\n");
+}
+
+function asynchronousChild(stdout) {
+  const child = new EventEmitter();
+  child.pid = 4242;
+  child.stdin = new PassThrough();
+  child.stdout = new PassThrough();
+  child.stderr = new PassThrough();
+  child.kill = () => true;
+  queueMicrotask(() => {
+    child.stdout.end(stdout);
+    child.stderr.end();
+    child.emit("exit", EXIT_STATUS, null);
+    child.emit("close", EXIT_STATUS, null);
+  });
+  return child;
+}
+
+childProcess.spawnSync = (executable, argv = [], options = {}) => {
+  const normalized = normalizedInvocation(argv, options);
+  record("spawnSync", executable, normalized.argv, normalized.options);
+  const stdout = encodedOutput(normalized.options);
+  const stderr = normalized.options?.encoding ? "" : Buffer.alloc(0);
+  return {
+    error: undefined,
+    output: [null, stdout, stderr],
+    pid: 4242,
+    signal: null,
+    status: EXIT_STATUS,
+    stderr,
+    stdout,
+  };
+};
+
+childProcess.execFileSync = (executable, argv = [], options = {}) => {
+  const normalized = normalizedInvocation(argv, options);
+  record("execFileSync", executable, normalized.argv, normalized.options);
+  const stdout = encodedOutput(normalized.options);
+  if (EXIT_STATUS !== 0) {
+    const error = new Error("fixed adapter exited non-zero");
+    error.status = EXIT_STATUS;
+    error.stdout = stdout;
+    error.stderr = normalized.options?.encoding ? "" : Buffer.alloc(0);
+    throw error;
+  }
+  return stdout;
+};
+
+childProcess.spawn = (executable, argv = [], options = {}) => {
+  const normalized = normalizedInvocation(argv, options);
+  record("spawn", executable, normalized.argv, normalized.options);
+  return asynchronousChild(encodedOutput(normalized.options));
+};
+
+childProcess.execFile = (executable, argv = [], options = {}, callback) => {
+  if (typeof options === "function") {
+    callback = options;
+    options = {};
+  }
+  const normalized = normalizedInvocation(argv, options);
+  record("execFile", executable, normalized.argv, normalized.options);
+  const stdout = encodedOutput(normalized.options);
+  const stderr = normalized.options?.encoding ? "" : Buffer.alloc(0);
+  const child = asynchronousChild(stdout);
+  queueMicrotask(() => {
+    if (EXIT_STATUS === 0) {
+      callback?.(null, stdout, stderr);
+      return;
+    }
+    const error = new Error("fixed adapter exited non-zero");
+    error.code = EXIT_STATUS;
+    callback?.(error, stdout, stderr);
+  });
+  return child;
+};
+
+syncBuiltinESMExports();
+`;
+}
+
+function readJsonLines(file) {
+  if (!fs.existsSync(file)) return [];
+  const text = fs.readFileSync(file, "utf8");
+  return text
+    .split(/\r?\n/)
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
 }
 
 function writeProtectedJson(file, value) {
