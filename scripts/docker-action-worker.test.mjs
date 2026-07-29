@@ -40,6 +40,7 @@ const REQUEST_INDEX = 426614174000;
 const SNAPSHOT_CONTAINER_PATH = "/run/platform/claimed-job/job.json";
 const MAX_WORKER_ENV_ENTRY_BYTES = 32 * 1024;
 const MAX_WORKER_ENV_TOTAL_BYTES = 64 * 1024;
+const MAX_FIXED_ADAPTER_SOURCE_BYTES = 128 * 1024;
 const EXPECTED_FIXED_ADAPTERS = Object.freeze({
   "backup-catalog": Object.freeze({
     api: "spawn",
@@ -83,6 +84,43 @@ const EXPECTED_FIXED_ADAPTERS = Object.freeze({
     argv: Object.freeze([]),
     shell: false,
   }),
+});
+const EXPECTED_FIXED_ADAPTER_SOURCE_TEXT = Object.freeze({
+  "backup-catalog": `#!/usr/local/bin/node
+import { runFixedToolEntry } from "../docker-action-worker.mjs";
+
+await runFixedToolEntry("backup-catalog");
+`,
+  "backup-job": `#!/usr/local/bin/node
+import { runFixedToolEntry } from "../docker-action-worker.mjs";
+
+await runFixedToolEntry("backup-job");
+`,
+  "backup-offsite-sync": `#!/usr/local/bin/node
+import { runFixedToolEntry } from "../docker-action-worker.mjs";
+
+await runFixedToolEntry("backup-offsite-sync");
+`,
+  "backup-prune-apply": `#!/usr/local/bin/node
+import { runFixedToolEntry } from "../docker-action-worker.mjs";
+
+await runFixedToolEntry("backup-prune-apply");
+`,
+  "backup-prune-plan": `#!/usr/local/bin/node
+import { runFixedToolEntry } from "../docker-action-worker.mjs";
+
+await runFixedToolEntry("backup-prune-plan");
+`,
+  "restore-drill-full": `#!/usr/local/bin/node
+import { runFixedToolEntry } from "../docker-action-worker.mjs";
+
+await runFixedToolEntry("restore-drill-full");
+`,
+  "restore-job": `#!/usr/local/bin/node
+import { runFixedToolEntry } from "../docker-action-worker.mjs";
+
+await runFixedToolEntry("restore-job");
+`,
 });
 const ALLOWED_WORKER_BUILTINS = new Set([
   "node:buffer",
@@ -171,6 +209,7 @@ test("worker module is import-safe and exposes the complete fixed pure API", () 
     "planPruneTransition",
     "readProtectedFile",
     "reverseCleanupOrder",
+    "runFixedToolEntry",
     "runWorkerCli",
     "transitionOffsiteAttempt",
     "transitionRestorePhase",
@@ -1174,6 +1213,7 @@ test("worker source is socketless while its fixed subprocess adapter remains tes
   assertSocketlessWorkerSource(source, "real worker source");
   for (const [label, hostileSource] of [
     ["bare net import", 'import net from "net";'],
+    ["comment-obfuscated static import", 'import net from/*x*/"node:net";'],
     ["bare undici import", 'import { request } from "undici";'],
     ["HTTP/2 import", 'import http2 from "node:http2";'],
     ["dynamic network import", 'const net = await import("node:" + "net");'],
@@ -1182,6 +1222,22 @@ test("worker source is socketless while its fixed subprocess adapter remains tes
     [
       "createRequire",
       'import { createRequire } from "node:module"; createRequire(import.meta.url)("node:net");',
+    ],
+    [
+      "Module._load",
+      'import Module from "node:module"; Module._load("node:net");',
+    ],
+    [
+      "computed Module._load",
+      'import Module from "node:module"; Module["_" + "load"]("node:net");',
+    ],
+    [
+      "base64 Module._load",
+      'import Module from "node:module"; Module[Buffer.from("X2xvYWQ=", "base64").toString()]("node:net");',
+    ],
+    [
+      "reflected Module._load",
+      'import Module from "node:module"; Reflect.get(Module, "_load")("node:net");',
     ],
     ["eval", 'eval("process.getBuiltinModule(\\"node:net\\")");'],
     ["Function constructor", 'Function("return fetch(\\"http://engine\\")")();'],
@@ -1283,10 +1339,38 @@ test("worker source is socketless while its fixed subprocess adapter remains tes
     "socketless runtime guard broke the admitted builtin control",
   );
   for (const [label, snippet] of [
+    [
+      "comment-obfuscated static import",
+      'import net from/*x*/"node:net"; void net;',
+    ],
     ["getBuiltinModule", 'process.getBuiltinModule("node:net");'],
     [
       "createRequire",
       'const { createRequire } = await import("node:module"); createRequire(import.meta.url)("node:net");',
+    ],
+    [
+      "Module._load",
+      'const Module = (await import("node:module")).default; Module._load("node:net");',
+    ],
+    [
+      "computed Module._load",
+      'const Module = (await import("node:module")).default; Module["_" + "load"]("node:net");',
+    ],
+    [
+      "base64 Module._load",
+      'const Module = (await import("node:module")).default; Module[Buffer.from("X2xvYWQ=", "base64").toString()]("node:net");',
+    ],
+    [
+      "reflected Module._load",
+      'const Module = (await import("node:module")).default; Reflect.get(Module, "_load")("node:net");',
+    ],
+    [
+      "Module.prototype.require",
+      'const Module = (await import("node:module")).default; Module.prototype.require.call({}, "node:net");',
+    ],
+    [
+      "registerHooks replacement",
+      'const Module = (await import("node:module")).default; Module.registerHooks({ resolve() { return { url: "node:net" }; } });',
     ],
     ["eval", 'eval("1 + 1");'],
     ["Function", 'Function("return 1")();'],
@@ -1464,10 +1548,12 @@ test("Dockerfile stage packages all seven exact root-owned fixed adapter targets
     [...new Set(Object.values(EXPECTED_PHASE_PROFILES).map(({ command }) => command))].sort(),
     "fixed adapter oracle does not cover the exact seven phase commands",
   );
+  assert.deepEqual(
+    Object.keys(EXPECTED_FIXED_ADAPTER_SOURCE_TEXT).sort(),
+    commands,
+    "fixed adapter source oracle does not cover the exact seven phase commands",
+  );
   const dockerfileSource = fs.readFileSync(staged.dockerfile, "utf8");
-  const missingTargets = [];
-  const nonRegularTargets = [];
-  const missingModeDeclarations = [];
   for (const [command, expected] of Object.entries(EXPECTED_FIXED_ADAPTERS)) {
     assert.deepEqual(Object.keys(expected).sort(), ["api", "argv", "executable", "shell"]);
     assert.equal(expected.api, "spawn", `${command} must use the one admitted subprocess API`);
@@ -1482,15 +1568,6 @@ test("Dockerfile stage packages all seven exact root-owned fixed adapter targets
       /(?:^|\/)(?:env|sh|bash|dash|zsh|node|python|perl|ruby|curl|wget|nc|ncat|socat|ssh)$/,
       `${command} collapsed to an interpreter, wrapper, shell, or network tool`,
     );
-    const stagedTarget = stagedContainerPath(staged.root, expected.executable);
-    if (!fs.existsSync(stagedTarget)) {
-      missingTargets.push(expected.executable);
-    } else if (!fs.lstatSync(stagedTarget).isFile()) {
-      nonRegularTargets.push(expected.executable);
-    }
-    if (!dockerfileDeclaresExactMode(dockerfileSource, expected.executable, "0555")) {
-      missingModeDeclarations.push(expected.executable);
-    }
   }
   for (const [label, invocation] of [
     ["shell with token smuggling", {
@@ -1530,32 +1607,189 @@ test("Dockerfile stage packages all seven exact root-owned fixed adapter targets
       `fixed adapter oracle admitted ${label}`,
     );
   }
+  const assessment = fixedAdapterPackageAssessment({
+    dockerfileSource,
+    repositoryRoot: path.resolve(scriptDir, ".."),
+    stagedRoot: staged.root,
+  });
   assert.deepEqual(
     {
-      missingModeDeclarations,
-      missingTargets,
-      nonRegularTargets,
-      rootOwnedWorkerTree:
-        dockerfileDeclaresRootOwnedTree(dockerfileSource, "/opt/platform-docker-worker"),
+      auditedCommands: assessment.auditedCommands,
+      issues: assessment.issues,
     },
     {
-      missingModeDeclarations: [],
-      missingTargets: [],
-      nonRegularTargets: [],
-      rootOwnedWorkerTree: true,
+      auditedCommands: commands,
+      issues: [],
     },
-    "Dockerfile-exact stage is missing the root-owned 0555 fixed adapter package",
+    "Dockerfile final stage is missing the seven repository-bound root:root 0555 adapter COPY contracts",
   );
 });
 
-test("fixed adapter preload rejects every non-exact process identity before output", (t) => {
+test("fixed adapter package oracle rejects post-COPY mutations and non-canonical source semantics", (t) => {
+  const repositoryRoot = fs.mkdtempSync(
+    path.join(os.tmpdir(), "docker-worker-adapter-oracle-repository-"),
+  );
+  t.after(() => fs.rmSync(repositoryRoot, { force: true, recursive: true }));
+  const dockerfile = path.join(repositoryRoot, "Dockerfile");
+  const sourceDirectory = path.join(repositoryRoot, "adapters");
+  fs.mkdirSync(sourceDirectory, { mode: 0o700, recursive: true });
+  fs.mkdirSync(path.join(repositoryRoot, "scripts"), { mode: 0o700, recursive: true });
+  fs.writeFileSync(
+    path.join(repositoryRoot, "scripts", "docker-action-worker.mjs"),
+    "export async function runFixedToolEntry(command) { return command; }\n",
+    { mode: 0o600 },
+  );
+  const commands = Object.keys(EXPECTED_FIXED_ADAPTERS).sort();
+  const sourceByCommand = Object.fromEntries(commands.map((command) => [
+    command,
+    `adapters/${command}.mjs`,
+  ]));
+  for (const [command, source] of Object.entries(sourceByCommand)) {
+    fs.writeFileSync(
+      path.join(repositoryRoot, source),
+      EXPECTED_FIXED_ADAPTER_SOURCE_TEXT[command],
+      { mode: 0o600 },
+    );
+  }
+  const adapterCopies = commands.map((command) => (
+    `COPY --chown=0:0 --chmod=0555 ${sourceByCommand[command]} ${EXPECTED_FIXED_ADAPTERS[command].executable}`
+  ));
+  const validDockerfileSource = [
+    "FROM node:fixture",
+    "COPY scripts/docker-action-worker.mjs /opt/platform-docker-worker/docker-action-worker.mjs",
+    ...adapterCopies,
+    'ENTRYPOINT ["node", "/opt/platform-docker-worker/docker-action-worker.mjs"]',
+    "",
+  ].join("\n");
+  fs.writeFileSync(dockerfile, validDockerfileSource, { mode: 0o600 });
+  const staged = stageDockerWorkerImageLayout(
+    t,
+    "docker-worker-adapter-oracle-stage-",
+    { dockerfile, repositoryRoot },
+  );
+  const valid = fixedAdapterPackageAssessment({
+    dockerfileSource: validDockerfileSource,
+    repositoryRoot,
+    stagedRoot: staged.root,
+  });
+  assert.deepEqual(valid, {
+    auditedCommands: commands,
+    issues: [],
+  });
+
+  for (const [label, suffix, pattern] of [
+    [
+      "later chmod 0777",
+      "\nRUN chmod 0777 /opt/platform-docker-worker/bin/backup-catalog\n",
+      /filesystem-mutating instruction after the adapter COPY block/i,
+    ],
+    [
+      "later chown 65532",
+      "\nRUN chown 65532:65532 /opt/platform-docker-worker/bin/backup-catalog\n",
+      /filesystem-mutating instruction after the adapter COPY block/i,
+    ],
+    [
+      "dead branch chmod",
+      "\nRUN false && chmod 0555 /opt/platform-docker-worker/bin/backup-catalog\n",
+      /filesystem-mutating instruction after the adapter COPY block/i,
+    ],
+  ]) {
+    const mutated = fixedAdapterPackageAssessment({
+      dockerfileSource: `${validDockerfileSource}${suffix}`,
+      repositoryRoot,
+      stagedRoot: staged.root,
+    });
+    assert.match(
+      mutated.issues.join("\n"),
+      pattern,
+      `ordered package oracle admitted ${label}`,
+    );
+  }
+
+  const firstCommand = commands[0];
+  const firstSource = path.join(repositoryRoot, sourceByCommand[firstCommand]);
+  const admittedSource = fs.readFileSync(firstSource);
+  fs.rmSync(firstSource);
+  fs.symlinkSync(path.join(repositoryRoot, sourceByCommand[commands[1]]), firstSource);
+  assert.match(
+    fixedAdapterPackageAssessment({
+      dockerfileSource: validDockerfileSource,
+      repositoryRoot,
+      stagedRoot: staged.root,
+    }).issues.join("\n"),
+    /source.*regular.*non-symlink/i,
+    "package oracle admitted a symlinked repository source",
+  );
+  fs.rmSync(firstSource);
+  fs.writeFileSync(firstSource, admittedSource, { mode: 0o600 });
+
+  const firstTarget = stagedContainerPath(
+    staged.root,
+    EXPECTED_FIXED_ADAPTERS[firstCommand].executable,
+  );
+  const admittedTarget = fs.readFileSync(firstTarget);
+  fs.chmodSync(firstTarget, 0o755);
+  fs.appendFileSync(firstTarget, "tampered\n");
+  fs.chmodSync(firstTarget, 0o555);
+  assert.match(
+    fixedAdapterPackageAssessment({
+      dockerfileSource: validDockerfileSource,
+      repositoryRoot,
+      stagedRoot: staged.root,
+    }).issues.join("\n"),
+    /target bytes diverge/i,
+    "package oracle admitted staged bytes different from the repository source",
+  );
+  fs.chmodSync(firstTarget, 0o755);
+  fs.writeFileSync(firstTarget, admittedTarget, { mode: 0o555 });
+  fs.chmodSync(firstTarget, 0o555);
+
+  for (const [label, hostileSource] of [
+    [
+      "wrong literal command identity",
+      EXPECTED_FIXED_ADAPTER_SOURCE_TEXT[firstCommand].replace(
+        `"${firstCommand}"`,
+        '"backup-job"',
+      ),
+    ],
+    [
+      "socketless forged output",
+      `#!/usr/local/bin/node
+import { runFixedToolEntry } from "../docker-action-worker.mjs";
+
+void runFixedToolEntry;
+process.stdout.write('{"status":"completed"}\\n');
+`,
+    ],
+  ]) {
+    fs.writeFileSync(firstSource, hostileSource, { mode: 0o600 });
+    fs.chmodSync(firstTarget, 0o755);
+    fs.writeFileSync(firstTarget, hostileSource, { mode: 0o555 });
+    fs.chmodSync(firstTarget, 0o555);
+    assert.match(
+      fixedAdapterPackageAssessment({
+        dockerfileSource: validDockerfileSource,
+        repositoryRoot,
+        stagedRoot: staged.root,
+      }).issues.join("\n"),
+      /source bytes do not match the exact adapter contract/i,
+      `package oracle admitted ${label}`,
+    );
+  }
+});
+
+test("dummy fixed-adapter preload rejects every non-exact process identity before output", (t) => {
   const staged = stageDockerWorkerImageLayout(t, "docker-worker-adapter-hook-stage-");
   const command = "backup-catalog";
   const phaseId = "catalog.capture";
   const expected = EXPECTED_FIXED_ADAPTERS[command];
   const stagedTarget = stagedContainerPath(staged.root, expected.executable);
   fs.mkdirSync(path.dirname(stagedTarget), { mode: 0o700, recursive: true });
-  fs.writeFileSync(stagedTarget, "#!/bin/false\n", { mode: 0o555 });
+  fs.writeFileSync(
+    stagedTarget,
+    EXPECTED_FIXED_ADAPTER_SOURCE_TEXT[command],
+    { mode: 0o555 },
+  );
   fs.chmodSync(stagedTarget, 0o555);
   const expectedEnvironment = {
     HOME: staged.root,
@@ -1672,6 +1906,32 @@ test("fixed adapter preload rejects every non-exact process identity before outp
       `${label} was traced as an admitted fixed adapter invocation`,
     );
   }
+
+  fs.chmodSync(stagedTarget, 0o755);
+  fs.writeFileSync(
+    stagedTarget,
+    EXPECTED_FIXED_ADAPTER_SOURCE_TEXT[command].replace(
+      `"${command}"`,
+      '"backup-job"',
+    ),
+  );
+  fs.chmodSync(stagedTarget, 0o555);
+  const wrongAdapter = runProbe(`
+    import childProcess from "node:child_process";
+    const child = childProcess.spawn(
+      ${JSON.stringify(expected.executable)},
+      [],
+      { shell: false },
+    );
+    child.stdout.on("data", (chunk) => process.stdout.write(chunk));
+  `);
+  assert.notEqual(wrongAdapter.status, 0, "preload admitted a socketless wrong adapter body");
+  assert.equal(wrongAdapter.stdout, "", "wrong adapter body received synthesized output");
+  assert.match(
+    wrongAdapter.stderr,
+    /source bytes diverged from the exact adapter contract/i,
+  );
+  assert.equal(readJsonLines(tracePath).length, 1);
 });
 
 workerTest("Dockerfile-exact staged worker layout closes import and CLI dependencies", [
@@ -1733,11 +1993,26 @@ workerTest("Dockerfile-exact staged worker layout closes import and CLI dependen
   );
 });
 
-workerBodyMatrixTest("real worker main executes all eight phases through one code-owned socketless adapter", [
-  "loadClaimedJobSnapshot",
-  "normalizeWorkerResult",
-  "runWorkerCli",
-], (t) => {
+test("real worker main executes all eight phases through one code-owned socketless adapter", (t) => {
+  const requiredFunctions = [
+    "loadClaimedJobSnapshot",
+    "normalizeWorkerResult",
+    "runFixedToolEntry",
+    "runWorkerCli",
+  ];
+  assert.deepEqual(
+    {
+      exactWorkerBodyBaselineReady,
+      missingFunctions: requiredFunctions.filter(
+        (functionName) => typeof worker[functionName] !== "function",
+      ),
+    },
+    {
+      exactWorkerBodyBaselineReady: true,
+      missingFunctions: [],
+    },
+    "true-main prerequisites must fail actively and may not collapse into a TODO gate",
+  );
   const staged = stageDockerWorkerImageLayout(t, "docker-worker-main-stage-");
   const snapshotPath = path.join(staged.root, "claimed-job", "job.json");
   fs.mkdirSync(path.dirname(snapshotPath), { mode: 0o700, recursive: true });
@@ -3008,7 +3283,9 @@ function assertFixedAdapterInvocation(invocation, command) {
 }
 
 function assertSocketlessWorkerSource(source, label) {
-  const decoded = decodeStaticJavaScriptEscapes(String(source));
+  const decoded = stripStaticJavaScriptComments(
+    expandStaticBase64Literals(decodeStaticJavaScriptEscapes(String(source))),
+  );
   assert.doesNotMatch(
     decoded,
     /(?:\bfrom\s*|\bimport\s*|\brequire\s*\(\s*)["'](?:node:)?(?:net|http|https|http2|tls|dgram|dns|undici)["']/,
@@ -3026,7 +3303,7 @@ function assertSocketlessWorkerSource(source, label) {
   );
   assert.doesNotMatch(
     decoded,
-    /\b(?:createRequire|getBuiltinModule|_linkedBinding|binding|dlopen|registerHooks?)\b/,
+    /\b(?:createRequire|getBuiltinModule|_linkedBinding|binding|dlopen|registerHooks?|_load|_resolveFilename)\b/,
     `${label} violates the socketless runtime-loader boundary`,
   );
   assert.doesNotMatch(
@@ -3039,7 +3316,7 @@ function assertSocketlessWorkerSource(source, label) {
     .replace(/[\s"'`+\[\](){},;$\\]/g, "");
   assert.doesNotMatch(
     folded,
-    /docker\.sock|docker_host|\/containers\/(?:create|[^/]*\/start)|\/images\/create|getbuiltinmodule|createrequire/,
+    /docker\.sock|docker_host|\/containers\/(?:create|[^/]*\/start)|\/images\/create|getbuiltinmodule|createrequire|module(?:builtin)?\.?_load|module(?:builtin)?prototype\.?require/,
     `${label} reconstructs forbidden Docker Engine authority`,
   );
   assert.doesNotMatch(
@@ -3064,8 +3341,11 @@ function assertSocketlessWorkerSource(source, label) {
   }
 }
 
-function assertSocketlessWorkerImportGraph(entryFile) {
-  const graphRoot = path.dirname(path.resolve(entryFile));
+function assertSocketlessWorkerImportGraph(
+  entryFile,
+  graphRoot = path.dirname(path.resolve(entryFile)),
+) {
+  graphRoot = path.resolve(graphRoot);
   const queue = [path.resolve(entryFile)];
   const visited = new Set();
   while (queue.length > 0) {
@@ -3108,12 +3388,15 @@ function assertSocketlessWorkerImportGraph(entryFile) {
 
 function staticModuleSpecifiers(source) {
   const specifiers = [];
+  const normalized = stripStaticJavaScriptComments(
+    expandStaticBase64Literals(decodeStaticJavaScriptEscapes(String(source))),
+  );
   const patterns = [
     /\bimport\s*["']([^"']+)["']/g,
-    /\b(?:import|export)\s+[\s\S]{0,500}?\sfrom\s*["']([^"']+)["']/g,
+    /\b(?:import|export)\b[\s\S]{0,500}?\bfrom\s*["']([^"']+)["']/g,
   ];
   for (const pattern of patterns) {
-    for (const match of String(source).matchAll(pattern)) specifiers.push(match[1]);
+    for (const match of normalized.matchAll(pattern)) specifiers.push(match[1]);
   }
   return [...new Set(specifiers)];
 }
@@ -3126,6 +3409,82 @@ function decodeStaticJavaScriptEscapes(source) {
         Number.parseInt(codePoint ?? shortUnicode ?? hexadecimal, 16),
       ),
     );
+}
+
+function expandStaticBase64Literals(source) {
+  const decode = (_match, _prefix, quote, encoded) => {
+    try {
+      const bytes = Buffer.from(encoded, "base64");
+      if (bytes.toString("base64").replace(/=+$/, "") !== encoded.replace(/=+$/, "")) {
+        return _match;
+      }
+      return JSON.stringify(bytes.toString("utf8"));
+    } catch {
+      return _match;
+    }
+  };
+  return String(source)
+    .replace(
+      /((?:globalThis\.)?Buffer\s*\.\s*from\s*\(\s*)(["'])([A-Za-z0-9+/]+={0,2})\2\s*,\s*["']base64["']\s*\)(?:\s*\.\s*toString\s*\(\s*(?:["']utf-?8["'])?\s*\))?/gi,
+      (match, prefix, quote, encoded) => decode(match, prefix, quote, encoded),
+    )
+    .replace(
+      /\batob\s*\(\s*(["'])([A-Za-z0-9+/]+={0,2})\1\s*\)/gi,
+      (match, quote, encoded) => decode(match, "", quote, encoded),
+    );
+}
+
+function stripStaticJavaScriptComments(source) {
+  const input = String(source);
+  let output = "";
+  let quote = null;
+  let escaped = false;
+  for (let index = 0; index < input.length; index += 1) {
+    const character = input[index];
+    const next = input[index + 1];
+    if (quote) {
+      output += character;
+      if (escaped) {
+        escaped = false;
+      } else if (character === "\\") {
+        escaped = true;
+      } else if (character === quote) {
+        quote = null;
+      }
+      continue;
+    }
+    if (character === "'" || character === '"' || character === "`") {
+      quote = character;
+      output += character;
+      continue;
+    }
+    if (character === "/" && next === "*") {
+      output += "  ";
+      index += 2;
+      while (index < input.length) {
+        if (input[index] === "*" && input[index + 1] === "/") {
+          output += "  ";
+          index += 1;
+          break;
+        }
+        output += input[index] === "\n" ? "\n" : " ";
+        index += 1;
+      }
+      continue;
+    }
+    if (character === "/" && next === "/") {
+      output += "  ";
+      index += 2;
+      while (index < input.length && input[index] !== "\n") {
+        output += " ";
+        index += 1;
+      }
+      if (index < input.length) output += "\n";
+      continue;
+    }
+    output += character;
+  }
+  return output;
 }
 
 function expectedWorkerBodyDocument(phaseCase, trusted) {
@@ -3444,25 +3803,6 @@ function brokerTest(name, requiredFunctions, body) {
 }
 
 function bodyMatrixTest(name, body) {
-  if (!exactWorkerBodyBaselineReady) {
-    test(name, {
-      todo: "blocked until all eight exact workerCreateBody phase baselines pass",
-    });
-    return;
-  }
-  test(name, body);
-}
-
-function workerBodyMatrixTest(name, requiredFunctions, body) {
-  const missing = requiredFunctions.filter(
-    (functionName) => typeof worker[functionName] !== "function",
-  );
-  if (missing.length > 0) {
-    test(name, {
-      todo: `blocked by worker pure-API boundary: ${missing.join(", ")}`,
-    });
-    return;
-  }
   if (!exactWorkerBodyBaselineReady) {
     test(name, {
       todo: "blocked until all eight exact workerCreateBody phase baselines pass",
@@ -4052,28 +4392,191 @@ function dockerfileLogicalLines(source) {
   return logicalLines;
 }
 
-function dockerfileDeclaresExactMode(source, containerPath, mode) {
-  return dockerfileLogicalLines(source).some((instruction) => {
-    const match = instruction.match(/\bchmod\s+([0-7]{3,4})\s+(.+?)(?=\s+&&|$)/);
-    if (!match || match[1] !== mode) return false;
-    return match[2].split(/\s+/).includes(containerPath);
-  });
+function dockerfileInstructionRecords(source) {
+  return dockerfileLogicalLines(source).map((instruction, index) => ({
+    index,
+    instruction,
+    keyword: instruction.match(/^([A-Z]+)/i)?.[1]?.toUpperCase() ?? "",
+  }));
 }
 
-function dockerfileDeclaresRootOwnedTree(source, containerPath) {
-  return dockerfileLogicalLines(source).some((instruction) => {
-    const match = instruction.match(/\bchown\s+-R\s+root:root\s+(.+)$/);
-    return Boolean(match && match[1].split(/\s+/).includes(containerPath));
-  });
+function parseDockerCopyInstruction(instruction) {
+  const match = String(instruction).match(/^COPY\s+(.+)$/i);
+  if (!match) return null;
+  const tokens = match[1].split(/\s+/).filter(Boolean);
+  const flags = [];
+  while (tokens[0]?.startsWith("--")) flags.push(tokens.shift());
+  if (tokens.length < 2) return { destination: null, flags, sources: [] };
+  return {
+    destination: tokens.at(-1),
+    flags,
+    sources: tokens.slice(0, -1),
+  };
+}
+
+function fixedAdapterPackageAssessment({
+  dockerfileSource,
+  repositoryRoot,
+  stagedRoot,
+}) {
+  const records = dockerfileInstructionRecords(dockerfileSource);
+  const issues = [];
+  const auditedCommands = [];
+  const finalFromIndex = records.findLastIndex(({ keyword }) => keyword === "FROM");
+  if (finalFromIndex < 0) {
+    return {
+      auditedCommands,
+      issues: ["Dockerfile has no final image stage"],
+    };
+  }
+  const finalStage = records.filter(({ index }) => index > finalFromIndex);
+  const admittedCopyIndexes = new Set();
+  const adapterCopyIndexes = [];
+  const requiredFlags = ["--chown=0:0", "--chmod=0555"].sort();
+
+  for (const [command, expected] of Object.entries(EXPECTED_FIXED_ADAPTERS)) {
+    const issueCount = issues.length;
+    const candidates = finalStage
+      .map((record) => ({ ...record, copy: parseDockerCopyInstruction(record.instruction) }))
+      .filter(({ copy }) => copy?.destination === expected.executable);
+    if (candidates.length !== 1) {
+      issues.push(
+        `${command}: requires exactly one final-stage per-target COPY to ${expected.executable}`,
+      );
+      continue;
+    }
+    const candidate = candidates[0];
+    adapterCopyIndexes.push(candidate.index);
+    if (
+      candidate.copy.sources.length !== 1
+      || !exactStringArray(candidate.copy.flags.slice().sort(), requiredFlags)
+    ) {
+      issues.push(
+        `${command}: final COPY must be exactly one source with --chown=0:0 --chmod=0555`,
+      );
+      continue;
+    }
+    admittedCopyIndexes.add(candidate.index);
+    const [source] = candidate.copy.sources;
+    if (
+      path.isAbsolute(source)
+      || /[*?[\]{}]/.test(source)
+      || source.startsWith("../")
+    ) {
+      issues.push(`${command}: repository source path is not one bounded relative path`);
+      continue;
+    }
+    const sourcePath = path.resolve(repositoryRoot, source);
+    if (
+      sourcePath === path.resolve(repositoryRoot)
+      || !sourcePath.startsWith(`${path.resolve(repositoryRoot)}${path.sep}`)
+      || !fs.existsSync(sourcePath)
+      || hasSymlinkPathComponent(repositoryRoot, sourcePath)
+    ) {
+      issues.push(`${command}: repository source must exist inside the root as a regular non-symlink`);
+      continue;
+    }
+    const sourceStat = fs.lstatSync(sourcePath);
+    if (!sourceStat.isFile() || sourceStat.isSymbolicLink()) {
+      issues.push(`${command}: repository source must be one regular non-symlink file`);
+      continue;
+    }
+    const sourceBytes = fs.readFileSync(sourcePath);
+    if (
+      sourceBytes.length < 1
+      || sourceBytes.length > MAX_FIXED_ADAPTER_SOURCE_BYTES
+      || !Buffer.from(sourceBytes.toString("utf8"), "utf8").equals(sourceBytes)
+      || sourceBytes.includes(0)
+    ) {
+      issues.push(`${command}: repository source bytes are empty, oversized, binary, or non-UTF-8`);
+      continue;
+    }
+    const expectedSourceBytes = Buffer.from(
+      EXPECTED_FIXED_ADAPTER_SOURCE_TEXT[command],
+      "utf8",
+    );
+    if (!sourceBytes.equals(expectedSourceBytes)) {
+      issues.push(`${command}: repository source bytes do not match the exact adapter contract`);
+      continue;
+    }
+    const stagedTarget = stagedContainerPath(stagedRoot, expected.executable);
+    if (!fs.existsSync(stagedTarget)) {
+      issues.push(`${command}: staged target is missing`);
+      continue;
+    }
+    const stagedStat = fs.lstatSync(stagedTarget);
+    if (!stagedStat.isFile() || stagedStat.isSymbolicLink()) {
+      issues.push(`${command}: staged target must be one regular non-symlink file`);
+      continue;
+    }
+    if ((stagedStat.mode & 0o777) !== 0o555) {
+      issues.push(`${command}: staged target does not simulate final mode 0555`);
+      continue;
+    }
+    const stagedBytes = fs.readFileSync(stagedTarget);
+    if (
+      stagedBytes.length !== sourceBytes.length
+      || testCryptoSha256(stagedBytes) !== testCryptoSha256(sourceBytes)
+      || !stagedBytes.equals(sourceBytes)
+    ) {
+      issues.push(`${command}: staged target bytes diverge from the repository source`);
+      continue;
+    }
+    if (issues.length === issueCount) auditedCommands.push(command);
+  }
+
+  if (adapterCopyIndexes.length > 0) {
+    const firstAdapterCopyIndex = Math.min(...adapterCopyIndexes);
+    const filesystemMutatingKeywords = new Set([
+      "ADD",
+      "COPY",
+      "ONBUILD",
+      "RUN",
+      "VOLUME",
+      "WORKDIR",
+    ]);
+    for (const record of finalStage) {
+      if (
+        record.index > firstAdapterCopyIndex
+        && filesystemMutatingKeywords.has(record.keyword)
+        && !admittedCopyIndexes.has(record.index)
+      ) {
+        issues.push(
+          `Dockerfile has a filesystem-mutating instruction after the adapter COPY block: ${record.instruction}`,
+        );
+      }
+    }
+  }
+  return {
+    auditedCommands: auditedCommands.sort(),
+    issues: [...new Set(issues)].sort(),
+  };
+}
+
+function exactStringArray(left, right) {
+  return left.length === right.length
+    && left.every((value, index) => value === right[index]);
+}
+
+function hasSymlinkPathComponent(root, file) {
+  const relative = path.relative(path.resolve(root), path.resolve(file));
+  if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) return true;
+  let cursor = path.resolve(root);
+  for (const component of relative.split(path.sep)) {
+    cursor = path.join(cursor, component);
+    if (fs.lstatSync(cursor).isSymbolicLink()) return true;
+  }
+  return false;
 }
 
 function escapeRegExp(value) {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-function stageDockerWorkerImageLayout(t, prefix) {
-  const repositoryRoot = path.resolve(scriptDir, "..");
-  const dockerfile = path.join(repositoryRoot, "docker", "docker-action-broker.Dockerfile");
+function stageDockerWorkerImageLayout(t, prefix, {
+  dockerfile = path.join(path.resolve(scriptDir, ".."), "docker", "docker-action-broker.Dockerfile"),
+  repositoryRoot = path.resolve(scriptDir, ".."),
+} = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
   t.after(() => fs.rmSync(root, { force: true, recursive: true }));
   const logicalLines = dockerfileLogicalLines(fs.readFileSync(dockerfile, "utf8"));
@@ -4112,6 +4615,12 @@ function stageDockerWorkerImageLayout(t, prefix) {
         preserveTimestamps: true,
         recursive: fs.statSync(sourcePath).isDirectory(),
       });
+      const modeFlag = tokens.find((token) => token.startsWith("--chmod="));
+      if (modeFlag) {
+        const mode = Number.parseInt(modeFlag.slice("--chmod=".length), 8);
+        assert.equal(Number.isInteger(mode), true, `invalid Dockerfile COPY mode: ${modeFlag}`);
+        fs.chmodSync(destinationPath, mode);
+      }
       copyCount += 1;
     }
   }
@@ -4131,6 +4640,8 @@ function socketlessRuntimeGuardSource() {
 import childProcess from "node:child_process";
 import moduleBuiltin, { syncBuiltinESMExports } from "node:module";
 
+const ALLOWED_BUILTINS = new Set(${JSON.stringify([...ALLOWED_WORKER_BUILTINS].sort())});
+
 if (process.platform === "darwin" && Object.hasOwn(process.env, "__CF_USER_TEXT_ENCODING")) {
   if (!/^0x[0-9a-f]+:0x[0-9a-f]+:0x[0-9a-f]+$/i.test(process.env.__CF_USER_TEXT_ENCODING)) {
     throw new Error("socketless runtime guard rejected malformed Darwin launcher metadata");
@@ -4146,6 +4657,29 @@ function blocked(label) {
     throw new Error("socketless runtime guard blocked " + label);
   };
 }
+
+const registerHooks = moduleBuiltin.registerHooks?.bind(moduleBuiltin);
+if (typeof registerHooks !== "function") {
+  throw new Error("socketless runtime guard requires module.registerHooks");
+}
+globalThis[Symbol.for("platform.worker.socketless-resolution-hook")] = registerHooks({
+  resolve(specifier, context, nextResolve) {
+    if (String(specifier).startsWith("node:")) {
+      if (!ALLOWED_BUILTINS.has(String(specifier))) {
+        throw new Error("socketless runtime guard blocked module resolution: " + specifier);
+      }
+      return nextResolve(specifier, context);
+    }
+    if (
+      String(specifier).startsWith("./")
+      || String(specifier).startsWith("../")
+      || String(specifier).startsWith("file:")
+    ) {
+      return nextResolve(specifier, context);
+    }
+    throw new Error("socketless runtime guard blocked bare or remote module resolution: " + specifier);
+  },
+});
 
 const OriginalFunction = globalThis.Function;
 for (const name of ["eval", "fetch", "WebSocket", "EventSource"]) {
@@ -4171,6 +4705,10 @@ for (const name of ["getBuiltinModule", "binding", "_linkedBinding", "dlopen"]) 
   });
 }
 moduleBuiltin.createRequire = blocked("module.createRequire");
+moduleBuiltin._load = blocked("module._load");
+moduleBuiltin.prototype.require = blocked("module.require");
+moduleBuiltin.register = blocked("module.register");
+moduleBuiltin.registerHooks = blocked("module.registerHooks");
 
 const childApis = [
   "exec",
@@ -4213,6 +4751,7 @@ import { PassThrough } from "node:stream";
 
 const TRACE_PATH = ${JSON.stringify(tracePath)};
 const EXPECTED_ADAPTERS = ${JSON.stringify(EXPECTED_FIXED_ADAPTERS)};
+const EXPECTED_ADAPTER_SOURCE_TEXT = ${JSON.stringify(EXPECTED_FIXED_ADAPTER_SOURCE_TEXT)};
 const EXPECTED_COMMAND_BY_PHASE = ${JSON.stringify(expectedCommandByPhase)};
 const EXPECTED_ENVIRONMENT_BY_PHASE = ${JSON.stringify(expectedEnvironmentByPhase)};
 const EXPECTED_OUTPUT_BY_PHASE = ${JSON.stringify(expectedOutputByPhase)};
@@ -4292,8 +4831,14 @@ function assertExactInvocation(api, executable, argv, options) {
     throw new Error("fixed adapter staged target escaped the image root");
   }
   const stat = fs.lstatSync(stagedExecutable);
-  if (!stat.isFile() || stat.isSymbolicLink()) {
+  if (!stat.isFile() || stat.isSymbolicLink() || (stat.mode & 0o777) !== 0o555) {
     throw new Error("fixed adapter staged target is not one regular file");
+  }
+  if (
+    fs.readFileSync(stagedExecutable, "utf8")
+    !== EXPECTED_ADAPTER_SOURCE_TEXT[context.command]
+  ) {
+    throw new Error("fixed adapter source bytes diverged from the exact adapter contract");
   }
   return { actual, context, effectiveEnvironment };
 }

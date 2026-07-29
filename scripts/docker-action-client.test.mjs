@@ -351,6 +351,230 @@ test("test-only nested response fixture defeats a shallow canonicalizer with a v
   );
 });
 
+test("test-only raw response fixtures survive the exact vulnerable self-mutants", () => {
+  const request = wireRequest();
+  const canonicalControl = canonicalValueOracle(signedResponse(request, {
+    status: "completed",
+    statusCode: 200,
+    errorCode: null,
+    result: canonicalActionResultV2(request),
+  }));
+  const nestedNonCanonical = independentlySignedNestedNonCanonicalResponse(
+    canonicalControl,
+    CAPABILITY,
+  );
+  const nestedRawFrame = `${JSON.stringify(nestedNonCanonical)}\n`;
+  assert.equal(
+    shallowResponseWireMutantAccepts(nestedRawFrame),
+    true,
+    "the nested-order fixture must survive a validator that sorts only response-level keys",
+  );
+  assert.equal(
+    nestedRawFrame,
+    `${shallowCanonicalJsonOracle(nestedNonCanonical)}\n`,
+  );
+  assert.notEqual(
+    nestedRawFrame,
+    `${canonicalJsonOracle(nestedNonCanonical)}\n`,
+  );
+
+  const actionOnlyResult = canonicalValueOracle({
+    ...canonicalControl.result,
+    action: "backup.catalog",
+  });
+  const actionOnly = independentlySignedResponseWithResult(
+    canonicalControl,
+    actionOnlyResult,
+    CAPABILITY,
+  );
+  assert.equal(
+    digestAndMacOnlyResponseMutantAccepts(actionOnly, CAPABILITY),
+    true,
+    "the identity fixture must survive a validator that checks only result digest and response MAC",
+  );
+  assert.equal(
+    outerPlanIdentityBlindMutantAccepts(actionOnly, canonicalControl, CAPABILITY),
+    true,
+    "the action-only fixture must survive an identity-blind validator driven by the outer plan",
+  );
+
+  const alternateResult = canonicalValueOracle(
+    buildFixtureActionResultV2("backup.catalog"),
+  );
+  const fullyRebound = independentlySignedResponseWithResult(
+    canonicalControl,
+    alternateResult,
+    CAPABILITY,
+  );
+  assert.equal(
+    nestedPlanIdentityBlindMutantAccepts(fullyRebound, CAPABILITY),
+    true,
+    "the full-result fixture must survive an identity-blind validator driven by the nested plan",
+  );
+  assert.equal(fullyRebound.action, request.action);
+  assert.equal(fullyRebound.result.action, "backup.catalog");
+  assert.notEqual(fullyRebound.result.action, fullyRebound.action);
+});
+
+// Intentionally not TODO-gated: sendActionRequest is the already-exported
+// consumer under test, and this raw frame must bypass every broker encoder.
+test("RED v2: real UDS consumer rejects a raw top-level-canonical nested-noncanonical response", async () => {
+  assert.equal(
+    typeof sendActionRequest,
+    "function",
+    "the raw client consumer RED must stay active without broker or contract export gates",
+  );
+  const request = wireRequest();
+  const canonicalControl = canonicalValueOracle(signedResponse(request, {
+    status: "completed",
+    statusCode: 200,
+    errorCode: null,
+    result: canonicalActionResultV2(request),
+  }));
+  const canonicalFrame = `${JSON.stringify(canonicalControl)}\n`;
+  assert.equal(canonicalFrame, `${canonicalJsonOracle(canonicalControl)}\n`);
+  const admitted = await exchangeWithLocalBroker(request, canonicalControl, {
+    responseFrame: () => canonicalFrame,
+  });
+  assert.deepEqual(admitted, canonicalControl);
+
+  const nestedNonCanonical = independentlySignedNestedNonCanonicalResponse(
+    canonicalControl,
+    CAPABILITY,
+  );
+  assertNestedNonCanonicalResponseFixture(
+    nestedNonCanonical,
+    canonicalControl,
+    CAPABILITY,
+  );
+  const rawFrame = `${JSON.stringify(nestedNonCanonical)}\n`;
+  assert.equal(
+    rawFrame,
+    `${shallowCanonicalJsonOracle(nestedNonCanonical)}\n`,
+    "the hostile raw frame must pass the exact shallow-client mutant",
+  );
+  assert.notEqual(
+    rawFrame,
+    `${canonicalJsonOracle(nestedNonCanonical)}\n`,
+    "the hostile raw frame must remain recursively non-canonical",
+  );
+  await assert.rejects(
+    () => exchangeWithLocalBroker(request, nestedNonCanonical, {
+      responseFrame: () => rawFrame,
+    }),
+    /response.*(?:canonical|wire)/i,
+    "sendActionRequest must reject the direct raw frame after the real UDS exchange",
+  );
+});
+
+// Also intentionally active: this semantic identity boundary uses only the
+// existing sendActionRequest consumer and an independently signed raw frame.
+test("RED v2: real UDS consumer binds result.action to response.action and request.action", async (t) => {
+  assert.equal(
+    typeof sendActionRequest,
+    "function",
+    "the nested identity RED must stay active without unrelated export gates",
+  );
+  const request = wireRequest();
+  const canonicalControl = canonicalValueOracle(signedResponse(request, {
+    status: "completed",
+    statusCode: 200,
+    errorCode: null,
+    result: canonicalActionResultV2(request),
+  }));
+  assert.equal(canonicalControl.action, request.action);
+  assert.equal(canonicalControl.result.action, canonicalControl.action);
+  const admitted = await exchangeWithLocalBroker(request, canonicalControl, {
+    responseFrame: () => `${JSON.stringify(canonicalControl)}\n`,
+  });
+  assert.deepEqual(admitted, canonicalControl);
+  assert.equal(admitted.result.action, admitted.action);
+  assert.equal(admitted.action, request.action);
+
+  const actionOnlyResult = canonicalValueOracle({
+    ...canonicalControl.result,
+    action: "backup.catalog",
+  });
+  const fullyReboundResult = canonicalValueOracle(
+    buildFixtureActionResultV2("backup.catalog"),
+  );
+  const mutations = [
+    {
+      label: "action-only rebind with the outer request phase plan",
+      result: actionOnlyResult,
+      selfMutantAccepts(candidate) {
+        return outerPlanIdentityBlindMutantAccepts(
+          candidate,
+          canonicalControl,
+          CAPABILITY,
+        );
+      },
+    },
+    {
+      label: "fully coherent alternate nested action plan",
+      result: fullyReboundResult,
+      selfMutantAccepts(candidate) {
+        return nestedPlanIdentityBlindMutantAccepts(candidate, CAPABILITY);
+      },
+    },
+  ];
+
+  for (const mutation of mutations) {
+    await t.test(mutation.label, async () => {
+      const candidate = independentlySignedResponseWithResult(
+        canonicalControl,
+        mutation.result,
+        CAPABILITY,
+      );
+      assert.deepEqual(
+        Object.fromEntries(
+          Object.entries(candidate)
+            .filter(([key]) => !["mac", "result", "resultSha256"].includes(key)),
+        ),
+        Object.fromEntries(
+          Object.entries(canonicalControl)
+            .filter(([key]) => !["mac", "result", "resultSha256"].includes(key)),
+        ),
+        "the mutation must preserve every outer response identity field",
+      );
+      assert.deepEqual(candidate.result, mutation.result);
+      assert.equal(candidate.action, request.action);
+      assert.equal(candidate.result.action, "backup.catalog");
+      assert.notEqual(candidate.result.action, candidate.action);
+      for (const phase of candidate.result.phases) {
+        assert.equal(
+          phase.outputSha256,
+          sha256Bytes(canonicalJsonOracle(phase.output)),
+          "the alternate result must retain independently valid phase output digests",
+        );
+      }
+      assert.equal(
+        candidate.resultSha256,
+        sha256Bytes(canonicalJsonOracle(candidate.result)),
+        "the hostile nested result must be coherently re-digested",
+      );
+      assert.equal(
+        candidate.mac,
+        domainMacWithKey(RESPONSE_MAC_DOMAIN, omit(candidate, "mac"), CAPABILITY),
+        "the hostile response must be coherently re-MACed with the independent oracle",
+      );
+      assert.equal(
+        mutation.selfMutantAccepts(candidate),
+        true,
+        "the fixture must survive its exact identity-blind validator mutant",
+      );
+      const rawFrame = `${JSON.stringify(candidate)}\n`;
+      assert.equal(rawFrame, `${canonicalJsonOracle(candidate)}\n`);
+      await assert.rejects(
+        () => exchangeWithLocalBroker(request, candidate, {
+          responseFrame: () => rawFrame,
+        }),
+        "the real client must reject a fully authenticated nested action divergence",
+      );
+    });
+  }
+});
+
 testWhenProductionExports(
   [
     [actionContract, "normalizeActionResponse"],
@@ -2404,6 +2628,20 @@ function resignResponseWithResult(unsigned, result) {
   });
 }
 
+function independentlySignedResponseWithResult(response, result, capabilityKey) {
+  const canonicalResponse = canonicalValueOracle(response);
+  const canonicalResult = canonicalValueOracle(result);
+  const unsigned = canonicalValueOracle({
+    ...omit(canonicalResponse, "mac"),
+    result: canonicalResult,
+    resultSha256: sha256Bytes(canonicalJsonOracle(canonicalResult)),
+  });
+  return canonicalValueOracle({
+    ...unsigned,
+    mac: domainMacWithKey(RESPONSE_MAC_DOMAIN, unsigned, capabilityKey),
+  });
+}
+
 function independentlySignedNestedNonCanonicalResponse(response, capabilityKey) {
   const canonicalResponse = canonicalValueOracle(response);
   assert.ok(canonicalResponse.result, "nested-order fixture requires a completed result");
@@ -2442,6 +2680,11 @@ function independentlySignedNestedNonCanonicalResponse(response, capabilityKey) 
 
 function assertNestedNonCanonicalResponseFixture(candidate, canonicalControl, capabilityKey) {
   assert.deepEqual(
+    canonicalValueOracle(candidate),
+    canonicalControl,
+    "the hostile nested-order fixture must differ from its control only by insertion order",
+  );
+  assert.deepEqual(
     Object.keys(candidate),
     Object.keys(candidate).sort(),
     "the hostile fixture must keep the response's top-level insertion order canonical",
@@ -2469,11 +2712,73 @@ function assertNestedNonCanonicalResponseFixture(candidate, canonicalControl, ca
     candidate.resultSha256,
     sha256Bytes(canonicalJsonOracle(candidate.result)),
   );
+  assert.equal(
+    candidate.result.phases[0].outputSha256,
+    sha256Bytes(canonicalJsonOracle(candidate.result.phases[0].output)),
+    "the hostile nested output must retain its independently valid digest",
+  );
+  assert.equal(
+    candidate.resultSha256,
+    canonicalControl.resultSha256,
+    "order-only result mutation must preserve the canonical result digest",
+  );
+  assert.equal(
+    candidate.mac,
+    canonicalControl.mac,
+    "order-only response mutation must preserve the canonical response MAC",
+  );
   assert.notEqual(
     shallowCanonicalJsonOracle(candidate),
     canonicalJsonOracle(candidate),
     "sorting only the top-level keys must fail this recursive canonicalization oracle",
   );
+}
+
+function shallowResponseWireMutantAccepts(frame) {
+  if (typeof frame !== "string" || !frame.endsWith("\n")) return false;
+  const wire = frame.slice(0, -1);
+  if (wire.includes("\n")) return false;
+  let parsed;
+  try {
+    parsed = JSON.parse(wire);
+  } catch {
+    return false;
+  }
+  return wire === shallowCanonicalJsonOracle(parsed);
+}
+
+function digestAndMacOnlyResponseMutantAccepts(response, capabilityKey) {
+  if (!response?.result || typeof response.mac !== "string") return false;
+  return response.resultSha256 === sha256Bytes(canonicalJsonOracle(response.result))
+    && response.mac === domainMacWithKey(
+      RESPONSE_MAC_DOMAIN,
+      omit(response, "mac"),
+      capabilityKey,
+    );
+}
+
+function outerPlanIdentityBlindMutantAccepts(response, canonicalControl, capabilityKey) {
+  if (!digestAndMacOnlyResponseMutantAccepts(response, capabilityKey)) return false;
+  if (response.action !== canonicalControl.action) return false;
+  const reboundResult = canonicalValueOracle({
+    ...response.result,
+    action: response.action,
+  });
+  return canonicalJsonOracle(reboundResult)
+    === canonicalJsonOracle(canonicalControl.result);
+}
+
+function nestedPlanIdentityBlindMutantAccepts(response, capabilityKey) {
+  if (!digestAndMacOnlyResponseMutantAccepts(response, capabilityKey)) return false;
+  let expected;
+  try {
+    expected = canonicalValueOracle(
+      buildFixtureActionResultV2(response.result.action),
+    );
+  } catch {
+    return false;
+  }
+  return canonicalJsonOracle(response.result) === canonicalJsonOracle(expected);
 }
 
 function omit(value, key) {
