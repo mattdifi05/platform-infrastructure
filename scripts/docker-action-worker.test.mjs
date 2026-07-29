@@ -661,6 +661,46 @@ function assertRuntimeGuardLexicalHandleDiscipline(source, label) {
     /platform\.worker\.socketless-resolution-hook/,
     `${label} exposes a deregistration handle through a global symbol`,
   );
+  for (const [capability, pattern] of [
+    [
+      "ChildProcess constructor export",
+      /\bchildProcess\.ChildProcess\s*=\s*undefined\s*;/,
+    ],
+    [
+      "ChildProcess internal fork export",
+      /\bchildProcess\._forkChild\s*=\s*undefined\s*;/,
+    ],
+    [
+      "Module prototype compiler",
+      /\bmoduleBuiltin\.prototype\._compile\s*=\s*blocked\("module\._compile"\)\s*;/,
+    ],
+    [
+      "Module prototype loader",
+      /\bmoduleBuiltin\.prototype\.load\s*=\s*blocked\("module\.load"\)\s*;/,
+    ],
+    [
+      "Module main loader",
+      /\bmoduleBuiltin\.runMain\s*=\s*blocked\("module\.runMain"\)\s*;/,
+    ],
+    [
+      "Module extension registry",
+      /\bmoduleBuiltin\._extensions\s*=\s*Object\.freeze\(Object\.create\(null\)\)\s*;/,
+    ],
+    [
+      "Module preload loader",
+      /\bmoduleBuiltin\._preloadModules\s*=\s*blocked\("module\._preloadModules"\)\s*;/,
+    ],
+    [
+      "builtin export resynchronizer",
+      /\bmoduleBuiltin\.syncBuiltinESMExports\s*=\s*undefined\s*;/,
+    ],
+  ]) {
+    assert.match(
+      source,
+      pattern,
+      `${label} exposes the original ${capability}`,
+    );
+  }
 }
 
 function runRuntimeGuardGlobalIdentityBoundary(guardPath, root) {
@@ -3172,6 +3212,41 @@ process.stdout.write("guard-ok" + String.fromCharCode(10));`,
       'const Module = (await import("node:module")).default; Module.prototype.require.call({}, "node:net");',
     ],
     [
+      "computed Module.prototype._compile",
+      'const Module = (await import("node:module")).default; const instance = new Module("mutant"); instance[["_", "compile"].join("")]("void 0", "mutant.cjs");',
+      /socketless runtime guard blocked module\._compile/i,
+    ],
+    [
+      "computed Module.prototype.load",
+      'const Module = (await import("node:module")).default; const instance = new Module("mutant"); instance[["lo", "ad"].join("")]("/tmp/mutant.cjs");',
+      /socketless runtime guard blocked module\.load/i,
+    ],
+    [
+      "computed Module.runMain",
+      'const Module = (await import("node:module")).default; Module[["run", "Main"].join("")]();',
+      /socketless runtime guard blocked module\.runMain/i,
+    ],
+    [
+      "reflected Module._extensions",
+      'const Module = (await import("node:module")).default; Reflect.get(Module, ["_", "extensions"].join(""))[".js"]({}, "/tmp/mutant.cjs");',
+      /not a function|undefined/i,
+    ],
+    [
+      "computed Module._preloadModules",
+      'const Module = (await import("node:module")).default; Module[["_", "preload", "Modules"].join("")](["/tmp/mutant.cjs"]);',
+      /socketless runtime guard blocked module\._preloadModules/i,
+    ],
+    [
+      "computed Module.syncBuiltinESMExports",
+      'const Module = (await import("node:module")).default; Module[["sync", "Builtin", "ESM", "Exports"].join("")]();',
+      /not a function|undefined/i,
+    ],
+    [
+      "named syncBuiltinESMExports export",
+      'const namespace = await import("node:module"); namespace.syncBuiltinESMExports();',
+      /not a function|undefined/i,
+    ],
+    [
       "registerHooks replacement",
       'const Module = (await import("node:module")).default; Module.registerHooks({ resolve() { return { url: "node:net" }; } });',
     ],
@@ -3201,6 +3276,57 @@ process.stdout.write("guard-ok" + String.fromCharCode(10));`,
     [
       "child-process curl",
       'const { spawnSync } = await import("node:child_process"); spawnSync("/usr/bin/curl", []);',
+    ],
+    [
+      "ChildProcess native handle spawn",
+      `const childProcess = (await import("node:child_process")).default;
+       const child = new childProcess.ChildProcess();
+       child._handle.spawn(
+         "/usr/bin/printf",
+         ["printf", "native-handle-admitted"],
+         undefined,
+         [],
+         [
+           { type: "inherit", fd: 0 },
+           { type: "inherit", fd: 1 },
+           { type: "inherit", fd: 2 },
+         ],
+         0,
+         undefined,
+         undefined,
+       );`,
+      /not a constructor|undefined/i,
+    ],
+    [
+      "computed ChildProcess native handle spawn",
+      `const childProcess = (await import("node:child_process")).default;
+       const Constructor = childProcess[["Child", "Process"].join("")];
+       const child = new Constructor();
+       child[["_", "handle"].join("")][["sp", "awn"].join("")](
+         "/usr/bin/printf",
+         ["printf", "computed-native-handle-admitted"],
+         undefined,
+         [],
+         [
+           { type: "inherit", fd: 0 },
+           { type: "inherit", fd: 1 },
+           { type: "inherit", fd: 2 },
+         ],
+         0,
+         undefined,
+         undefined,
+       );`,
+      /not a constructor|undefined/i,
+    ],
+    [
+      "named ChildProcess export",
+      'const { ChildProcess } = await import("node:child_process"); new ChildProcess();',
+      /not a constructor|undefined/i,
+    ],
+    [
+      "computed internal fork export",
+      'const childProcess = (await import("node:child_process")).default; childProcess[["_fork", "Child"].join("")]();',
+      /not a function|undefined/i,
     ],
     [
       "shell indirection",
@@ -3366,6 +3492,26 @@ syncBuiltinESMExports();
     EXPECTED_FIXED_ADAPTERS["backup-catalog"].executable;
   const admitted = runGuarded(`
     import childProcess from "node:child_process";
+    const childProcessNamespace = await import("node:child_process");
+    const moduleNamespace = await import("node:module");
+    if (
+      childProcess.ChildProcess !== undefined
+      || childProcessNamespace.ChildProcess !== undefined
+      || childProcess._forkChild !== undefined
+      || childProcessNamespace._forkChild !== undefined
+      || moduleNamespace.default.syncBuiltinESMExports !== undefined
+      || moduleNamespace.syncBuiltinESMExports !== undefined
+      || moduleNamespace.Module !== moduleNamespace.default
+      || moduleNamespace.runMain !== moduleNamespace.default.runMain
+      || moduleNamespace._extensions !== moduleNamespace.default._extensions
+      || moduleNamespace._preloadModules
+        !== moduleNamespace.default._preloadModules
+      || Object.getPrototypeOf(moduleNamespace.default._extensions) !== null
+      || Reflect.ownKeys(moduleNamespace.default._extensions).length !== 0
+      || !Object.isFrozen(moduleNamespace.default._extensions)
+    ) {
+      throw new Error("original constructor or builtin export authority escaped");
+    }
     const callerArgv = [];
     const callerOptions = {
       env: process.env,
@@ -3517,7 +3663,7 @@ syncBuiltinESMExports();
          windowsHide: false,
          windowsVerbatimArguments: false,
        });`,
-      /blocked ChildProcess\.prototype\.spawn/i,
+      /blocked ChildProcess\.prototype\.spawn|not a constructor|undefined/i,
     ],
     [
       "computed process execve",
@@ -3575,6 +3721,115 @@ syncBuiltinESMExports();
       stdout: "prototype-spawn-vulnerable\n",
     },
     "ChildProcess.prototype.spawn mutant is not a live child-process bypass",
+  );
+
+  const nativeHandleVulnerabilityControl = spawnSync(
+    process.execPath,
+    [
+      "--input-type=module",
+      "--eval",
+      `const childProcess = (await import("node:child_process")).default;
+       const Constructor = childProcess[["Child", "Process"].join("")];
+       const child = new Constructor();
+       const nativeHandle = child[["_", "handle"].join("")];
+       const result = nativeHandle[["sp", "awn"].join("")](
+         "/usr/bin/printf",
+         ["printf", "native-handle-vulnerable\\\\n"],
+         undefined,
+         [],
+         [
+           { type: "inherit", fd: 0 },
+           { type: "inherit", fd: 1 },
+           { type: "inherit", fd: 2 },
+         ],
+         0,
+         undefined,
+         undefined,
+       );
+       if (result !== 0) throw new Error("native spawn failed: " + result);`,
+    ],
+    { encoding: "utf8" },
+  );
+  assert.deepEqual(
+    {
+      signal: nativeHandleVulnerabilityControl.signal,
+      status: nativeHandleVulnerabilityControl.status,
+      stderr: nativeHandleVulnerabilityControl.stderr,
+      stdout: nativeHandleVulnerabilityControl.stdout,
+    },
+    {
+      signal: null,
+      status: 0,
+      stderr: "",
+      stdout: "native-handle-vulnerable\n",
+    },
+    "computed ChildProcess constructor->_handle.spawn mutant is not a live bypass",
+  );
+
+  const moduleCapabilityPaths = Object.fromEntries(
+    ["load", "extension", "preload", "runmain"].map((label) => {
+      const file = path.join(root, `module-${label}-vulnerability.cjs`);
+      fs.writeFileSync(
+        file,
+        `process.stdout.write(${JSON.stringify(`module-${label}-vulnerable\n`)});\n`,
+        { mode: 0o600 },
+      );
+      return [label, file];
+    }),
+  );
+  const moduleCapabilityVulnerabilityControl = spawnSync(
+    process.execPath,
+    [
+      "--input-type=module",
+      "--eval",
+      `const Module = (await import("node:module")).default;
+       const compileModule = new Module("module-compile-vulnerability");
+       compileModule[["_", "compile"].join("")](
+         "process.stdout.write('module-compile-vulnerable\\\\n')",
+         "module-compile-vulnerability.cjs",
+       );
+       const loadPath = ${JSON.stringify(moduleCapabilityPaths.load)};
+       const loadModule = new Module(loadPath);
+       loadModule[["lo", "ad"].join("")](loadPath);
+       const extensionPath = ${JSON.stringify(moduleCapabilityPaths.extension)};
+       const extensionModule = new Module(extensionPath);
+       extensionModule.filename = extensionPath;
+       extensionModule.paths = Module._nodeModulePaths(
+         ${JSON.stringify(root)},
+       );
+       Reflect.get(Module, ["_", "extensions"].join(""))[".js"](
+         extensionModule,
+         extensionPath,
+       );
+       Module[["_", "preload", "Modules"].join("")]([
+         ${JSON.stringify(moduleCapabilityPaths.preload)},
+       ]);
+       process.argv[1] = ${JSON.stringify(moduleCapabilityPaths.runmain)};
+       Module[["run", "Main"].join("")]();`,
+    ],
+    { encoding: "utf8" },
+  );
+  assert.deepEqual(
+    {
+      signal: moduleCapabilityVulnerabilityControl.signal,
+      status: moduleCapabilityVulnerabilityControl.status,
+      stderr: moduleCapabilityVulnerabilityControl.stderr,
+      stdout: moduleCapabilityVulnerabilityControl.stdout,
+    },
+    {
+      signal: null,
+      status: 0,
+      stderr: "",
+      stdout: [
+        "module-compile-vulnerable",
+        "module-load-vulnerable",
+        "module-extension-vulnerable",
+        "module-preload-vulnerable",
+        "module-runmain-vulnerable",
+        "",
+      ].join("\n"),
+    },
+    "computed legacy Module loader mutants are not live execution capabilities",
   );
 
   const toctouVulnerabilityControl = spawnSync(
@@ -3970,10 +4225,13 @@ test("Dockerfile image identities bind exact supply-chain lock keys", () => {
 
 test("Dockerignore semantics preserve every exact Dockerfile COPY source", () => {
   const repositoryRoot = path.resolve(scriptDir, "..");
-  const dockerignoreSource = fs.readFileSync(
-    path.join(repositoryRoot, ".dockerignore"),
-    "utf8",
+  const dockerfilePath = path.join(
+    repositoryRoot,
+    "docker",
+    "docker-action-broker.Dockerfile",
   );
+  const { source: dockerignoreSource } =
+    effectiveDockerignoreForDockerfile(repositoryRoot, dockerfilePath);
   const canonicalDockerfile = [
     `# syntax=${EXPECTED_DOCKERFILE_FRONTEND_REFERENCE}`,
     ...canonicalProductionDockerfileInstructions(),
@@ -4061,6 +4319,106 @@ test("Dockerignore semantics preserve every exact Dockerfile COPY source", () =>
     ),
     ["scripts/docker-action-worker.mjs"],
     "Dockerignore closure did not honor explicit parent and leaf negations",
+  );
+});
+
+test("Dockerignore uses Dockerfile-specific precedence and filepath.Clean identities", (t) => {
+  const repositoryRoot = fs.mkdtempSync(
+    path.join(os.tmpdir(), "docker-worker-dockerignore-precedence-"),
+  );
+  t.after(() => fs.rmSync(repositoryRoot, { force: true, recursive: true }));
+  const dockerDirectory = path.join(repositoryRoot, "docker");
+  const dockerfilePath = path.join(dockerDirectory, "fixture.Dockerfile");
+  const rootDockerignorePath = path.join(repositoryRoot, ".dockerignore");
+  const dockerfileDockerignorePath = `${dockerfilePath}.dockerignore`;
+  fs.mkdirSync(dockerDirectory, { mode: 0o700, recursive: true });
+  fs.writeFileSync(dockerfilePath, "FROM node:fixture\n", { mode: 0o600 });
+  fs.writeFileSync(rootDockerignorePath, "./scripts/../scripts/\n", {
+    mode: 0o600,
+  });
+  const fixtureDockerfile = [
+    "FROM node:fixture",
+    `COPY ./scripts/./docker-action-worker.mjs ${WORKER_CONTAINER_PATH}`,
+    "",
+  ].join("\n");
+
+  const rootFallback = effectiveDockerignoreForDockerfile(
+    repositoryRoot,
+    dockerfilePath,
+  );
+  assert.equal(rootFallback.path, rootDockerignorePath);
+  assert.throws(
+    () => assertDockerCopySourcesIncludedByDockerignore(
+      fixtureDockerfile,
+      rootFallback.source,
+    ),
+    /Dockerignore excludes an exact Dockerfile COPY source/i,
+    "root Dockerignore fallback ignored filepath.Clean parent exclusion",
+  );
+
+  fs.writeFileSync(
+    dockerfileDockerignorePath,
+    "scripts/*.tmp\n",
+    { mode: 0o600 },
+  );
+  const dockerfileSpecific = effectiveDockerignoreForDockerfile(
+    repositoryRoot,
+    dockerfilePath,
+  );
+  assert.equal(
+    dockerfileSpecific.path,
+    dockerfileDockerignorePath,
+    "Dockerfile-specific Dockerignore did not take precedence over the root file",
+  );
+  assert.deepEqual(
+    assertDockerCopySourcesIncludedByDockerignore(
+      fixtureDockerfile,
+      dockerfileSpecific.source,
+    ),
+    ["scripts/docker-action-worker.mjs"],
+    "root Dockerignore leaked into Dockerfile-specific precedence",
+  );
+
+  for (const [label, dockerignoreSource] of [
+    [
+      "cleaned parent remains excluded under a leaf-only negation",
+      [
+        "*",
+        "!./scripts/../scripts/docker-action-worker.mjs",
+        "",
+      ].join("\n"),
+    ],
+    [
+      "last cleaned rule re-excludes a previously admitted leaf",
+      [
+        "./scripts/../scripts/*.mjs",
+        "!./scripts/./docker-action-worker.mjs",
+        "./scripts/../scripts/docker-action-worker.mjs",
+        "",
+      ].join("\n"),
+    ],
+  ]) {
+    assert.throws(
+      () => assertDockerCopySourcesIncludedByDockerignore(
+        fixtureDockerfile,
+        dockerignoreSource,
+      ),
+      /Dockerignore excludes an exact Dockerfile COPY source/i,
+      `Dockerignore filepath.Clean oracle admitted ${label}`,
+    );
+  }
+  assert.deepEqual(
+    assertDockerCopySourcesIncludedByDockerignore(
+      fixtureDockerfile,
+      [
+        "*",
+        "!./scripts/../scripts/",
+        "!./scripts/./docker-action-worker.mjs",
+        "",
+      ].join("\n"),
+    ),
+    ["scripts/docker-action-worker.mjs"],
+    "cleaned parent and leaf negations did not restore the exact COPY identity",
   );
 });
 
@@ -5115,6 +5473,40 @@ test("prune seal oracle independently binds canonical digest, key and MAC domain
     seal,
     "prune seal changed under recursive object-key reordering",
   );
+  assert.equal(
+    testPrunePlanDigest({ ...structuredClone(plan), seal }),
+    seal.digest,
+    "prune canonicalizer did not omit the one exact top-level seal field",
+  );
+  for (const [label, mutant] of [
+    [
+      "legacy signature alias",
+      {
+        ...structuredClone(plan),
+        signature: structuredClone(seal),
+      },
+    ],
+    [
+      "seal alias",
+      {
+        ...structuredClone(plan),
+        authenticatedSeal: structuredClone(seal),
+      },
+    ],
+    [
+      "schema drift",
+      {
+        ...structuredClone(plan),
+        schema: "platform.backup-prune-sealed-plan/v2",
+      },
+    ],
+  ]) {
+    assert.throws(
+      () => testPrunePlanDigest(mutant),
+      /exact prune plan schema|schema identity/i,
+      `prune canonicalizer admitted ${label}`,
+    );
+  }
   for (const [label, mutant] of [
     [
       "same-size nested candidate substitution",
@@ -5189,6 +5581,21 @@ workerTest("prune state requires a sealed plan, quarantine barrier and exact com
     ],
   };
   const sealKey = { keyId: "prune-test-v1", key: PRUNE_TEST_KEY };
+  assert.throws(
+    () => planPruneTransition(
+      { phase: "empty" },
+      {
+        type: "seal",
+        plan: {
+          ...structuredClone(plan),
+          signature: testPrunePlanSeal(plan, sealKey),
+        },
+      },
+      sealKey,
+    ),
+    /field|schema|signature|seal|unsupported/i,
+    "prune transition admitted a legacy signature alias outside the exact plan schema",
+  );
   const sealed = planPruneTransition({ phase: "empty" }, { type: "seal", plan }, sealKey);
   assert.equal(sealed.phase, "sealed");
   assert.deepEqual(
@@ -5263,6 +5670,55 @@ workerTest("prune state requires a sealed plan, quarantine barrier and exact com
       `prune transition admitted ${label}`,
     );
   }
+  const retainedSealPlanMutants = [
+    [
+      "same-size candidatePaths substitution",
+      [
+        "postgres/expired-two.dump",
+        "manifests/manifest-expired.json",
+      ],
+    ],
+    [
+      "candidatePaths reordering",
+      [...plan.candidatePaths].reverse(),
+    ],
+  ];
+  for (const [label, candidatePaths] of retainedSealPlanMutants) {
+    const tamperedSealed = structuredClone(sealed);
+    tamperedSealed.plan.candidatePaths = candidatePaths;
+    assert.equal(
+      JSON.stringify(tamperedSealed.plan).length,
+      JSON.stringify(sealed.plan).length,
+      `${label} changed the sealed plan byte length`,
+    );
+    assert.deepEqual(
+      tamperedSealed.plan.seal,
+      sealed.plan.seal,
+      `${label} did not retain the original authenticated seal`,
+    );
+    assert.throws(
+      () => applyPruneTransition(tamperedSealed, {
+        type: "quarantine",
+        planDigest: sealed.plan.seal.digest,
+        quarantineDigest: "c".repeat(64),
+        artifactCount: plan.artifactCount,
+      }, { keys: { [sealKey.keyId]: sealKey.key } }),
+      /digest|HMAC|MAC|seal|signature|authenticated|substitution|candidate/i,
+      `quarantine consumer did not recalculate the plan after ${label}`,
+    );
+  }
+  const signatureAliasSealed = structuredClone(sealed);
+  signatureAliasSealed.plan.signature = structuredClone(sealed.plan.seal);
+  assert.throws(
+    () => applyPruneTransition(signatureAliasSealed, {
+      type: "quarantine",
+      planDigest: sealed.plan.seal.digest,
+      quarantineDigest: "c".repeat(64),
+      artifactCount: plan.artifactCount,
+    }, { keys: { [sealKey.keyId]: sealKey.key } }),
+    /field|schema|signature|seal|unsupported/i,
+    "quarantine consumer admitted a signature alias outside the exact plan schema",
+  );
   const quarantined = applyPruneTransition(sealed, {
     type: "quarantine",
     planDigest: sealed.plan.seal.digest,
@@ -5271,6 +5727,29 @@ workerTest("prune state requires a sealed plan, quarantine barrier and exact com
   }, { keys: { [sealKey.keyId]: sealKey.key } });
   assert.equal(quarantined.phase, "quarantined");
   assert.equal(quarantined.deletionCommitted, false);
+  for (const [label, candidatePaths] of retainedSealPlanMutants) {
+    const tamperedQuarantined = structuredClone(quarantined);
+    tamperedQuarantined.plan.candidatePaths = candidatePaths;
+    assert.equal(
+      JSON.stringify(tamperedQuarantined.plan).length,
+      JSON.stringify(quarantined.plan).length,
+      `${label} changed the quarantined plan byte length`,
+    );
+    assert.deepEqual(
+      tamperedQuarantined.plan.seal,
+      quarantined.plan.seal,
+      `${label} did not retain the quarantined authenticated seal`,
+    );
+    assert.throws(
+      () => applyPruneTransition(tamperedQuarantined, {
+        type: "commit-delete",
+        planDigest: sealed.plan.seal.digest,
+        quarantineDigest: quarantined.quarantineDigest,
+      }, { keys: { [sealKey.keyId]: sealKey.key } }),
+      /digest|HMAC|MAC|seal|signature|authenticated|substitution|candidate/i,
+      `commit consumer did not recalculate the plan after ${label}`,
+    );
+  }
   assert.throws(
     () => applyPruneTransition(quarantined, {
       type: "commit-delete",
@@ -7208,16 +7687,18 @@ function dockerIgnoreRules(source) {
       line = line.slice(1);
     }
     line = line.replaceAll("\\", "/");
-    const directoryOnly = line.endsWith("/");
     line = line.replace(/^\/+|\/+$/g, "");
+    line = path.posix.normalize(line);
     if (!line || line === ".") continue;
     assert.equal(
-      line.split("/").every((component) => component !== ".."),
+      !line.startsWith("/")
+        && line !== ".."
+        && !line.startsWith("../")
+        && line.split("/").every((component) => component !== ".."),
       true,
       "Dockerignore pattern may not escape its build context",
     );
     rules.push({
-      directoryOnly,
       hasSlash: line.includes("/"),
       negated,
       pattern: line,
@@ -7226,34 +7707,45 @@ function dockerIgnoreRules(source) {
   return rules;
 }
 
-function dockerIgnoreRuleMatches(rule, candidate, isDirectory) {
-  if (rule.directoryOnly && !isDirectory) return false;
+function dockerIgnoreRuleMatches(rule, candidate) {
   if (rule.hasSlash) {
     return path.matchesGlob(candidate, rule.pattern);
   }
   return path.matchesGlob(path.posix.basename(candidate), rule.pattern);
 }
 
-function dockerBuildContextPathIsIncluded(relativePath, dockerignoreSource) {
-  const normalized = String(relativePath).replaceAll("\\", "/").replace(/^\.\/+/, "");
+function dockerBuildContextPathIdentity(relativePath) {
+  const raw = String(relativePath).replaceAll("\\", "/");
+  assert.equal(
+    raw.length > 0 && !raw.startsWith("/"),
+    true,
+    `Docker build-context path is not one bounded relative identity: ${relativePath}`,
+  );
+  const normalized = path.posix.normalize(raw);
   assert.equal(
     normalized.length > 0
-      && !normalized.startsWith("/")
+      && normalized !== "."
+      && normalized !== ".."
+      && !normalized.startsWith("../")
       && normalized.split("/").every(
         (component) => component.length > 0 && component !== "." && component !== "..",
       ),
     true,
     `Docker build-context path is not one bounded relative identity: ${relativePath}`,
   );
+  return normalized;
+}
+
+function dockerBuildContextPathIsIncluded(relativePath, dockerignoreSource) {
+  const normalized = dockerBuildContextPathIdentity(relativePath);
   const components = normalized.split("/");
   const prefixes = components.map((_, index) => ({
     ignored: false,
-    isDirectory: index < components.length - 1,
     path: components.slice(0, index + 1).join("/"),
   }));
   for (const rule of dockerIgnoreRules(dockerignoreSource)) {
     for (const prefix of prefixes) {
-      if (dockerIgnoreRuleMatches(rule, prefix.path, prefix.isDirectory)) {
+      if (dockerIgnoreRuleMatches(rule, prefix.path)) {
         prefix.ignored = !rule.negated;
       }
     }
@@ -7285,11 +7777,32 @@ function assertDockerCopySourcesIncludedByDockerignore(
         true,
         `Dockerignore excludes an exact Dockerfile COPY source: ${source}`,
       );
-      sources.push(source);
+      sources.push(dockerBuildContextPathIdentity(source));
     }
   }
   assert.ok(sources.length > 0, "Dockerfile has no exact COPY source closure");
   return sources.sort();
+}
+
+function effectiveDockerignoreForDockerfile(repositoryRoot, dockerfilePath) {
+  const root = path.resolve(repositoryRoot);
+  const dockerfile = path.resolve(dockerfilePath);
+  assert.equal(
+    dockerfile.startsWith(`${root}${path.sep}`),
+    true,
+    "Dockerfile-specific Dockerignore lookup escaped the repository root",
+  );
+  const dockerfileSpecificPath = `${dockerfile}.dockerignore`;
+  const rootPath = path.join(root, ".dockerignore");
+  const selectedPath = fs.existsSync(dockerfileSpecificPath)
+    ? dockerfileSpecificPath
+    : rootPath;
+  return {
+    path: selectedPath,
+    source: fs.existsSync(selectedPath)
+      ? fs.readFileSync(selectedPath, "utf8")
+      : "",
+  };
 }
 
 function canonicalProductionDockerfileInstructions() {
@@ -7533,15 +8046,19 @@ function escapeRegExp(value) {
 
 function stageDockerWorkerImageLayout(t, prefix, {
   repositoryRoot = path.resolve(scriptDir, ".."),
-  dockerignore = path.join(repositoryRoot, ".dockerignore"),
+  dockerignore,
   dockerfile = path.join(path.resolve(scriptDir, ".."), "docker", "docker-action-broker.Dockerfile"),
 } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
   t.after(() => fs.rmSync(root, { force: true, recursive: true }));
   const dockerfileSource = fs.readFileSync(dockerfile, "utf8");
-  const dockerignoreSource = fs.existsSync(dockerignore)
-    ? fs.readFileSync(dockerignore, "utf8")
-    : "";
+  const dockerignoreSource = dockerignore === undefined
+    ? effectiveDockerignoreForDockerfile(repositoryRoot, dockerfile).source
+    : (
+      fs.existsSync(dockerignore)
+        ? fs.readFileSync(dockerignore, "utf8")
+        : ""
+    );
   assertDockerCopySourcesIncludedByDockerignore(
     dockerfileSource,
     dockerignoreSource,
@@ -7611,7 +8128,7 @@ function socketlessRuntimeGuardSource() {
   return `
 import childProcess from "node:child_process";
 import { EventEmitter } from "node:events";
-import moduleBuiltin, { syncBuiltinESMExports } from "node:module";
+import moduleBuiltin from "node:module";
 import { PassThrough } from "node:stream";
 import { types as utilTypes } from "node:util";
 
@@ -7643,6 +8160,8 @@ function blocked(label) {
   };
 }
 
+const syncBuiltinExports =
+  moduleBuiltin.syncBuiltinESMExports.bind(moduleBuiltin);
 const registerHooks = moduleBuiltin.registerHooks?.bind(moduleBuiltin);
 if (typeof registerHooks !== "function") {
   throw new Error("socketless runtime guard requires module.registerHooks");
@@ -7726,6 +8245,11 @@ for (const name of [
 }
 moduleBuiltin.createRequire = blocked("module.createRequire");
 moduleBuiltin._load = blocked("module._load");
+moduleBuiltin.runMain = blocked("module.runMain");
+moduleBuiltin._preloadModules = blocked("module._preloadModules");
+moduleBuiltin._extensions = Object.freeze(Object.create(null));
+moduleBuiltin.prototype._compile = blocked("module._compile");
+moduleBuiltin.prototype.load = blocked("module.load");
 moduleBuiltin.prototype.require = blocked("module.require");
 moduleBuiltin.register = blocked("module.register");
 moduleBuiltin.registerHooks = blocked("module.registerHooks");
@@ -7852,7 +8376,8 @@ function hasExactOptionsShape(value) {
 }
 
 const originalSpawn = childProcess.spawn.bind(childProcess);
-const ChildProcessPrototype = childProcess.ChildProcess.prototype;
+const OriginalChildProcess = childProcess.ChildProcess;
+const ChildProcessPrototype = OriginalChildProcess.prototype;
 const originalPrototypeSpawnDescriptor =
   Object.getOwnPropertyDescriptor(ChildProcessPrototype, "spawn");
 if (
@@ -7883,6 +8408,8 @@ Object.defineProperty(
   "spawn",
   guardedPrototypeSpawnDescriptor,
 );
+childProcess.ChildProcess = undefined;
+childProcess._forkChild = undefined;
 for (const api of [
   "exec",
   "execFile",
@@ -7985,7 +8512,9 @@ childProcess.spawn = (executable, argv, options) => {
   admittedSpawnCount += 1;
   return safeChildFacade(spawnWithGuardOwnedInputs(executable));
 };
-syncBuiltinESMExports();
+syncBuiltinExports();
+moduleBuiltin.syncBuiltinESMExports = undefined;
+syncBuiltinExports();
 `;
 }
 
@@ -8350,9 +8879,37 @@ function testManifestDigest(document) {
 }
 
 function testPrunePlanUnsignedValue(plan) {
-  const unsigned = structuredClone(plan);
-  delete unsigned.seal;
-  return testCanonicalBackupValue(unsigned);
+  assert.equal(
+    plan !== null
+      && typeof plan === "object"
+      && !Array.isArray(plan)
+      && Object.getPrototypeOf(plan) === Object.prototype,
+    true,
+    "exact prune plan schema requires one plain object",
+  );
+  const expectedKeys = [
+    "artifactCount",
+    "artifactSetSha256",
+    "candidatePaths",
+    "planId",
+    "schema",
+    ...(Object.hasOwn(plan, "seal") ? ["seal"] : []),
+  ].sort();
+  assert.deepEqual(
+    Reflect.ownKeys(plan).sort(),
+    expectedKeys,
+    "exact prune plan schema contains an unsupported field",
+  );
+  assert.equal(
+    plan.schema,
+    "platform.backup-prune-sealed-plan/v1",
+    "exact prune plan schema identity changed",
+  );
+  return testCanonicalPrunePlanValue(
+    Object.fromEntries(
+      Object.entries(plan).filter(([key]) => key !== "seal"),
+    ),
+  );
 }
 
 function testPrunePlanDigest(plan) {
@@ -8375,6 +8932,18 @@ function testPrunePlanSeal(plan, key) {
     keyId: key.keyId,
     value: testPrunePlanMac(plan, key, digest),
   };
+}
+
+function testCanonicalPrunePlanValue(value) {
+  if (Array.isArray(value)) return value.map(testCanonicalPrunePlanValue);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.keys(value)
+        .sort()
+        .map((key) => [key, testCanonicalPrunePlanValue(value[key])]),
+    );
+  }
+  return value;
 }
 
 function testCanonicalBackupValue(value) {

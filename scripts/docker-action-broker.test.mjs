@@ -117,6 +117,93 @@ testRunner("RED v2: broker exports the canonical response frame encoder independ
   );
 });
 
+testRunner(
+  "RED v2: response encoder directly emits recursive canonical JSON and exactly one LF without a socket",
+  () => {
+    assert.equal(
+      typeof broker.encodeActionResponseFrame,
+      "function",
+      "behavioral response-encoder RED requires the direct encoder export",
+    );
+    const result = {
+      status: "completed",
+      phases: [{
+        status: "completed",
+        phaseId: "catalog.capture",
+        outputSha256: "3".repeat(64),
+        outputSchema: "platform.docker-worker.catalog-capture-output/v2",
+        output: {
+          schema: "platform.docker-worker.catalog-capture-output/v2",
+          catalog: {
+            zeta: ["last", { zeta: 2, alpha: 1 }],
+            alpha: { zeta: false, alpha: true },
+          },
+        },
+      }],
+      job: null,
+      action: "backup.catalog",
+      schema: RESULT_SCHEMA_V2,
+    };
+    const bodyWithoutMac = {
+      statusCode: 200,
+      status: "completed",
+      schema: "platform.docker-action.response/v2",
+      resultSha256: fixtureSha256(canonicalFixtureJson(result)),
+      result,
+      requestSha256: "2".repeat(64),
+      requestId: "123e4567-e89b-42d3-a456-426614174091",
+      errorCode: null,
+      action: "backup.catalog",
+    };
+    const capabilityKey = fixtureCapabilityKey(bodyWithoutMac.action);
+    const body = {
+      ...bodyWithoutMac,
+      mac: crypto
+        .createHmac("sha256", capabilityKey)
+        .update(`${bodyWithoutMac.schema}\0`)
+        .update(canonicalFixtureJson(bodyWithoutMac))
+        .digest("hex"),
+    };
+    const expected = Buffer.from(`${canonicalFixtureJson(body)}\n`);
+    assert.notDeepEqual(
+      Buffer.from(`${JSON.stringify(body)}\n`),
+      expected,
+      "response fixture no longer distinguishes recursive canonical encoding from JSON.stringify",
+    );
+    const encoded = broker.encodeActionResponseFrame(body);
+    assert.equal(
+      typeof encoded === "string" || Buffer.isBuffer(encoded),
+      true,
+      "response encoder returned an unbounded byte container",
+    );
+    const encodedBytes = Buffer.isBuffer(encoded)
+      ? encoded
+      : Buffer.from(encoded);
+
+    assert.deepEqual(
+      encodedBytes,
+      expected,
+      "encoder did not recursively canonicalize the complete response body",
+    );
+    assert.deepEqual(
+      JSON.parse(encodedBytes.subarray(0, -1).toString("utf8")),
+      body,
+      "direct encoder changed the admitted response value",
+    );
+    assert.equal(encodedBytes.at(-1), 0x0a, "response frame lacks its terminal LF");
+    assert.equal(
+      encodedBytes.subarray(0, -1).includes(0x0a),
+      false,
+      "response frame contains an interior LF",
+    );
+    assert.equal(
+      encodedBytes.includes(0x0d),
+      false,
+      "response frame widened LF framing to CRLF",
+    );
+  },
+);
+
 function rawFrameE2eTest(name, callback) {
   if (HAS_RAW_FRAME_E2E_APIS) return testRunner(name, callback);
   const missing = [
@@ -244,53 +331,105 @@ for (const reorderKind of ["top-level", "recursive-parameters"]) {
 }
 
 testRunner(
-  "RED v2: default broker assembly injects one root-owned snapshot store into the semantic executor",
+  "RED v2: broker core rejects coherently signed action affixes as noncanonical identities",
   async (t) => {
-    const root = tempDir(t);
-    const calls = {
-      recover: [],
-      semantic: [],
-      snapshot: [],
-    };
-    const snapshotFileStore = Object.freeze({
-      cleanup() {},
-      seal() {
-        throw new Error("assembly-only snapshot store must not be invoked");
-      },
+    const phase = findPhase("job.backup.capture");
+    const { trusted } = buildFixtureTrustedContextV2({
+      allowedActions: [phase.action],
+      now: NOW,
     });
-    const semanticExecutor = Object.freeze({
-      execute() {
-        throw new Error("assembly-only semantic executor must not be invoked");
+    const canonicalRequest = buildFixtureSignedActionRequestV2(
+      phase.action,
+      phase.parameters,
+      {
+        index: 2593,
+        now: NOW,
+        trustedContext: trusted,
       },
-      executePhase() {
-        throw new Error("assembly-only semantic executor must not be invoked");
-      },
-      recoverLease() {},
-    });
-    const replayStore = Object.freeze({
-      acquire() {
-        throw new Error("assembly-only replay store must not be invoked");
-      },
-      admitActivation() {},
-      admitTrustedContext() {},
-      consume() {},
-      async recover(engine) {
-        calls.recover.push(engine);
-      },
-    });
-    const transport = Object.freeze({});
-    const claimedJobSnapshotProvider = async () => {
-      throw new Error("assembly-only claimed-job provider must not be invoked");
-    };
-    const snapshotFileStoreFactory = (options) => {
-      calls.snapshot.push(options);
-      return snapshotFileStore;
-    };
-    const semanticExecutorFactory = (options) => {
-      calls.semantic.push(options);
-      return semanticExecutor;
-    };
+    );
+    const capabilityKey = fixtureCapabilityKey(phase.action);
 
+    for (const hostileAction of [
+      `${phase.action}.nested`,
+      `nested.${phase.action}`,
+      `${phase.action}-api`,
+    ]) {
+      await t.test(hostileAction, async () => {
+        const unsigned = {
+          ...Object.fromEntries(
+            Object.entries(canonicalRequest).filter(([key]) => key !== "mac"),
+          ),
+          action: hostileAction,
+        };
+        const hostileRequest = {
+          ...unsigned,
+          mac: crypto
+            .createHmac("sha256", capabilityKey)
+            .update(`${REQUEST_SCHEMA_V2}\0`)
+            .update(canonicalFixtureJson(unsigned))
+            .digest("hex"),
+        };
+        const calls = {
+          capability: 0,
+          engine: 0,
+          replay: 0,
+          trust: 0,
+        };
+        const core = broker.createBrokerCore({
+          capabilityProvider: async () => {
+            calls.capability += 1;
+            return capabilityKey;
+          },
+          engine: {
+            async execute() {
+              calls.engine += 1;
+              return {};
+            },
+          },
+          now: () => NOW,
+          operationTimeoutMs: 1_000,
+          replayStore: {
+            acquire() {
+              calls.replay += 1;
+              throw new Error("unknown action acquired a lease");
+            },
+            admitActivation() {
+              calls.replay += 1;
+            },
+            admitTrustedContext() {
+              calls.replay += 1;
+            },
+            consume() {
+              calls.replay += 1;
+            },
+          },
+          trustedContextProvider: async () => {
+            calls.trust += 1;
+            return trusted;
+          },
+        });
+
+        await assert.rejects(
+          () => core.handle(Buffer.from(canonicalFixtureJson(hostileRequest))),
+          /action|authorized|exact|identity/i,
+          `${hostileAction} was treated as ${phase.action}`,
+        );
+        assert.equal(calls.capability, 0);
+        assert.equal(calls.engine, 0);
+        assert.equal(calls.replay, 0);
+        assert.equal(
+          calls.trust <= 1,
+          true,
+          "unknown action repeated the trusted-context lookup",
+        );
+      });
+    }
+  },
+);
+
+testRunner(
+  "RED v2: default socketless broker traverses backup.job.execute through one root-owned snapshot store",
+  async () => {
     const assemblySource = Function.prototype.toString.call(
       broker.createDockerActionBroker,
     );
@@ -301,7 +440,8 @@ testRunner(
     for (const seam of [
       "claimedJobSnapshotProvider",
       "replayStore",
-      "semanticExecutorFactory",
+      "semanticExecutorOptions",
+      "serverFactory",
       "snapshotFileStoreFactory",
       "transport",
     ]) {
@@ -312,46 +452,217 @@ testRunner(
       );
     }
 
-    const server = broker.createDockerActionBroker({
-      capabilityProvider: async () => {
-        throw new Error("assembly-only capability provider must not be invoked");
-      },
-      claimedJobSnapshotProvider,
-      now: () => NOW,
-      operationTimeoutMs: 1_000,
-      replayStore,
-      semanticExecutorFactory,
-      snapshotFileStoreFactory,
-      socketPath: path.join(root, "never-listened.sock"),
-      stateDir: path.join(root, "fallback-state-must-remain-unused"),
-      transport,
-      trustedContextProvider: async () => {
-        throw new Error("assembly-only trust provider must not be invoked");
-      },
-    });
+    async function runAssembly({ injectSnapshotStore = false } = {}) {
+      const phase = findPhase("job.backup.capture");
+      const { trusted } = buildFixtureTrustedContextV2({
+        allowedActions: [phase.action],
+        now: NOW,
+      });
+      const request = buildFixtureSignedActionRequestV2(
+        phase.action,
+        phase.parameters,
+        {
+          index: injectSnapshotStore ? 2595 : 2594,
+          now: NOW,
+          trustedContext: trusted,
+        },
+      );
+      const defaultStore = snapshotStoreFixture({});
+      const injectedStore = snapshotStoreFixture({});
+      const trace = {
+        acceptConnection: null,
+        connectionEnd: [],
+        defaultStore,
+        factoryOptions: [],
+        injectedStore,
+        providerCalls: 0,
+        request,
+        serverEvents: [],
+        timeoutMs: [],
+      };
+      const transport = new OracleEngineTransport({
+        phases: [phase],
+        rawResults: [rawWorkerResult(phase, request.requestId)],
+        request,
+        requestId: request.requestId,
+        trusted,
+      });
+      const replayStore = Object.freeze({
+        acquire(candidateRequest, candidateTrusted) {
+          assert.deepEqual(candidateRequest, request);
+          return recordingLease(candidateRequest, candidateTrusted);
+        },
+        admitActivation() {},
+        admitTrustedContext() {},
+        consume() {},
+        async recover() {
+          throw new Error("socketless request harness must not invoke recovery");
+        },
+      });
+      const serverFactory = (...args) => {
+        assert.equal(args.length, 1, "serverFactory received ambient options");
+        assert.equal(typeof args[0], "function");
+        trace.acceptConnection = args[0];
+        return {
+          listening: false,
+          on(event, listener) {
+            assert.equal(typeof listener, "function");
+            trace.serverEvents.push(event);
+            return this;
+          },
+        };
+      };
+      const semanticExecutorOptions = Object.freeze({
+        cleanupTimeoutMs: 100,
+        randomBytes: () => Buffer.alloc(12, 0x31),
+        ...(injectSnapshotStore
+          ? { snapshotFileStore: injectedStore }
+          : {}),
+      });
+      const semanticOptionsBefore = Reflect.ownKeys(semanticExecutorOptions);
+      const server = broker.createDockerActionBroker({
+        capabilityProvider: async (action) => {
+          assert.equal(action, request.action);
+          return fixtureCapabilityKey(action);
+        },
+        claimedJobSnapshotProvider: async ({ parameters, sourceId }) => {
+          trace.providerCalls += 1;
+          assert.equal(sourceId, "jobs.running");
+          assert.deepEqual(parameters, request.parameters);
+          return {
+            ...phase.claimedJob,
+            bytes: Buffer.from(phase.claimedJob.bytes),
+            sourceId,
+          };
+        },
+        now: () => NOW,
+        operationTimeoutMs: 1_000,
+        replayStore,
+        semanticExecutorOptions,
+        serverFactory,
+        snapshotFileStoreFactory(options) {
+          trace.factoryOptions.push(structuredClone(options));
+          return defaultStore;
+        },
+        socketPath: "/in-memory/never-listened.sock",
+        stateDir: "/in-memory/unused-state",
+        transport,
+        trustedContextProvider: async () => trusted,
+      });
+      assert.deepEqual(
+        Reflect.ownKeys(semanticExecutorOptions),
+        semanticOptionsBefore,
+        "assembly mutated caller-owned semantic options",
+      );
+      assert.equal(server.listening, false);
+      assert.equal(typeof trace.acceptConnection, "function");
 
-    assert.equal(server.listening, false, "assembly test must never listen on a socket");
-    assert.deepEqual(calls.snapshot, [{
-      expectedGid: 0,
-      expectedUid: 0,
-    }]);
-    assert.equal(calls.semantic.length, 1);
-    assert.equal(calls.semantic[0].snapshotFileStore, snapshotFileStore);
-    assert.equal(calls.semantic[0].transport, transport);
-    assert.equal(
-      calls.semantic[0].claimedJobSnapshotProvider,
-      claimedJobSnapshotProvider,
-    );
-    await server.initialize();
-    assert.deepEqual(
-      calls.recover,
-      [semanticExecutor],
-      "default recovery must traverse the same semantic executor assembled for requests",
-    );
-    assert.equal(
-      fs.existsSync(path.join(root, "fallback-state-must-remain-unused")),
-      false,
-      "an injected replay store must prevent default state-directory I/O",
+      const connectionHandlers = new Map();
+      const connection = {
+        destroy() {
+          assert.fail("socketless connection was destroyed");
+        },
+        end(frame) {
+          assert.equal(
+            typeof frame === "string" || Buffer.isBuffer(frame),
+            true,
+            "connection received an unbounded frame container",
+          );
+          trace.connectionEnd.push(Buffer.isBuffer(frame)
+            ? Buffer.from(frame)
+            : Buffer.from(frame, "utf8"));
+          return this;
+        },
+        on(event, listener) {
+          assert.equal(["data", "error"].includes(event), true);
+          assert.equal(typeof listener, "function");
+          connectionHandlers.set(event, listener);
+          return this;
+        },
+        setTimeout(milliseconds, listener) {
+          trace.timeoutMs.push(milliseconds);
+          assert.equal(typeof listener, "function");
+          connectionHandlers.set("timeout", listener);
+          return this;
+        },
+      };
+      trace.acceptConnection(connection);
+      assert.deepEqual([...connectionHandlers.keys()].sort(), [
+        "data",
+        "error",
+        "timeout",
+      ]);
+      await connectionHandlers.get("data")(
+        Buffer.from(`${canonicalFixtureJson(request)}\n`),
+      );
+      assert.deepEqual(trace.timeoutMs, [5_000]);
+      assert.equal(trace.connectionEnd.length, 1);
+      const responseFrame = trace.connectionEnd[0];
+      assert.equal(responseFrame.at(-1), 0x0a);
+      assert.equal(responseFrame.subarray(0, -1).includes(0x0a), false);
+      const response = JSON.parse(
+        responseFrame.subarray(0, -1).toString("utf8"),
+      );
+      assert.equal(response.schema, "platform.docker-action.response/v2");
+      assert.equal(response.status, "completed");
+      assert.equal(response.action, request.action);
+      assert.equal(response.requestId, request.requestId);
+      assert.equal(
+        response.requestSha256,
+        fixtureSha256(canonicalFixtureJson(request)),
+      );
+      assert.deepEqual(
+        responseFrame,
+        Buffer.from(`${canonicalFixtureJson(response)}\n`),
+      );
+      return trace;
+    }
+
+    function assertDefaultRootTrace(trace) {
+      assert.deepEqual(
+        trace.factoryOptions,
+        [{ expectedGid: 0, expectedUid: 0 }],
+        "default root-owned store factory options were bypassed",
+      );
+      assert.equal(
+        trace.defaultStore.calls.length,
+        1,
+        "default root-owned store did not receive exactly one seal",
+      );
+      assert.equal(
+        trace.defaultStore.cleanupCalls.length,
+        1,
+        "default root-owned store did not receive exactly one cleanup",
+      );
+      assert.equal(
+        trace.injectedStore.calls.length,
+        0,
+        "an injected store masqueraded as the default root-owned store",
+      );
+      assert.equal(trace.providerCalls, 1);
+      const authority = trace.defaultStore.calls[0].authority;
+      assert.deepEqual(
+        authority.request,
+        trace.request,
+        "default seal did not receive the exact complete signed request",
+      );
+      assert.equal(
+        authority.requestSha256,
+        fixtureSha256(canonicalFixtureJson(authority.request)),
+        "default seal lost the complete canonical signed-request digest",
+      );
+    }
+
+    const defaultTrace = await runAssembly();
+    assertDefaultRootTrace(defaultTrace);
+    const injectedTrace = await runAssembly({ injectSnapshotStore: true });
+    assert.equal(injectedTrace.factoryOptions.length, 0);
+    assert.equal(injectedTrace.defaultStore.calls.length, 0);
+    assert.equal(injectedTrace.injectedStore.calls.length, 1);
+    assert.throws(
+      () => assertDefaultRootTrace(injectedTrace),
+      /default root-owned|masqueraded/,
+      "default-store oracle admitted an explicitly injected-store mutant",
     );
   },
 );
@@ -2396,6 +2707,7 @@ import Module, {
 } from "node:module";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { types as utilTypes } from "node:util";
 
 function assertNoPreload(argv, nodeOptions) {
   assert.equal(
@@ -2473,15 +2785,18 @@ for (const key of Reflect.ownKeys(fs.promises)) {
 const loaderScope = new AsyncLocalStorage();
 const snapshotScope = new AsyncLocalStorage();
 const loaderToken = Object.freeze(Object.create(null));
-const snapshotToken = Object.freeze(Object.create(null));
+const snapshotTokenBrand = new WeakSet();
 const directAttempts = [];
 const loaderAudit = [];
 const loaderDescriptors = new Map();
+const loaderRejects = [];
 const loaderResolves = [];
 const loaderLoads = [];
 const snapshotAudit = [];
+const snapshotCallValidationRejects = [];
 const snapshotDescriptors = new Map();
 let loaderActive = true;
+let snapshotCallSequence = 0;
 let snapshotPhase = "seal";
 let snapshotRevoked = false;
 const loaderApiNames = new Set([
@@ -2495,11 +2810,21 @@ const loaderApiNames = new Set([
   "statSync",
 ]);
 
-function exactResolvedPath(value) {
+function exactLoaderPath(value) {
   if (value instanceof URL && value.protocol === "file:") {
     return path.resolve(fileURLToPath(value));
   }
   return path.resolve(String(value));
+}
+
+function exactSnapshotPath(value, label) {
+  assert.equal(
+    typeof value,
+    "string",
+    label + " pathname must be a primitive string",
+  );
+  assert.doesNotMatch(value, /\0/, label + " pathname contains NUL");
+  return path.resolve(value);
 }
 
 function assertLoaderPath(name, args) {
@@ -2512,7 +2837,7 @@ function assertLoaderPath(name, args) {
     );
     return descriptorPath;
   }
-  const resolved = exactResolvedPath(args[0]);
+  const resolved = exactLoaderPath(args[0]);
   assert.equal(
     productionPaths.has(resolved),
     true,
@@ -2552,41 +2877,226 @@ function snapshotPathFor(name, args) {
     "closeSync",
     "fstatSync",
     "fsyncSync",
+    "readFileSync",
     "writeFileSync",
     "writeSync",
   ].includes(name)) {
     return snapshotDescriptors.get(args[0]) ?? null;
   }
-  return typeof args[0] === "string" || Buffer.isBuffer(args[0])
-    ? exactResolvedPath(args[0])
+  return typeof args[0] === "string"
+    ? path.resolve(args[0])
     : null;
 }
 
-function plainDataOptions(value, allowedKeys) {
-  if (value === undefined) return;
+function cloneExactOptions(value, expected, label) {
   assert.equal(
     value !== null
+      && typeof value === "object"
+      && !utilTypes.isProxy(value)
       && Object.getPrototypeOf(value) === Object.prototype,
     true,
-    "snapshot io options must be one exact plain object",
+    label + " options must be one non-Proxy plain object",
   );
   const descriptors = Object.getOwnPropertyDescriptors(value);
-  assert.deepEqual(
-    Object.keys(descriptors).sort(),
-    [...allowedKeys].sort(),
-    "snapshot io options keys are not exact",
+  assert.equal(
+    Reflect.ownKeys(descriptors).every((key) => typeof key === "string"),
+    true,
+    label + " options forbid symbol keys",
   );
-  for (const descriptor of Object.values(descriptors)) {
+  assert.deepEqual(
+    Reflect.ownKeys(descriptors).sort(),
+    Object.keys(expected).sort(),
+    label + " options keys are not exact",
+  );
+  const clone = {};
+  for (const [key, expectedValue] of Object.entries(expected)) {
+    const descriptor = descriptors[key];
     assert.equal(
       Object.hasOwn(descriptor, "value"),
       true,
-      "snapshot io options forbid accessors",
+      label + " options forbid accessors",
     );
+    assert.equal(
+      descriptor.value,
+      expectedValue,
+      label + " option " + key + " is not exact",
+    );
+    clone[key] = expectedValue;
   }
+  return Object.freeze(clone);
 }
 
-const mountpoint = exactResolvedPath(
+function assertExactArity(name, args, arities) {
+  assert.equal(
+    arities.includes(args.length),
+    true,
+    name + " argument count is not exact",
+  );
+}
+
+function trackedDescriptor(value, name) {
+  assert.equal(
+    Number.isInteger(value) && snapshotDescriptors.has(value),
+    true,
+    name + " requires one tracked descriptor",
+  );
+  return value;
+}
+
+function normalizeSnapshotArguments(name, callerArgs) {
+  assert.equal(
+    Array.isArray(callerArgs) && !utilTypes.isProxy(callerArgs),
+    true,
+    name + " arguments must be an unproxied argument list",
+  );
+  if (["closeSync", "fsyncSync"].includes(name)) {
+    assertExactArity(name, callerArgs, [1]);
+    return Object.freeze([trackedDescriptor(callerArgs[0], name)]);
+  }
+  if (name === "fstatSync") {
+    assertExactArity(name, callerArgs, [2]);
+    return Object.freeze([
+      trackedDescriptor(callerArgs[0], name),
+      cloneExactOptions(callerArgs[1], { bigint: true }, name),
+    ]);
+  }
+  if (["existsSync", "realpathSync", "rmdirSync", "unlinkSync"].includes(name)) {
+    assertExactArity(name, callerArgs, [1]);
+    return Object.freeze([
+      exactSnapshotPath(callerArgs[0], name),
+    ]);
+  }
+  if (["lstatSync", "statSync"].includes(name)) {
+    assertExactArity(name, callerArgs, [2]);
+    assert.equal(
+      !utilTypes.isProxy(callerArgs[1]),
+      true,
+      name + " options forbid Proxy objects",
+    );
+    const descriptors = Object.getOwnPropertyDescriptors(callerArgs[1] ?? {});
+    const expected = {
+      bigint: true,
+      ...(Object.hasOwn(descriptors, "throwIfNoEntry")
+        ? { throwIfNoEntry: false }
+        : {}),
+    };
+    return Object.freeze([
+      exactSnapshotPath(callerArgs[0], name),
+      cloneExactOptions(callerArgs[1], expected, name),
+    ]);
+  }
+  if (name === "mkdirSync") {
+    assertExactArity(name, callerArgs, [2]);
+    const options = typeof callerArgs[1] === "number"
+      ? callerArgs[1]
+      : cloneExactOptions(callerArgs[1], { mode: 0o700 }, name);
+    assert.equal(
+      typeof options === "number" ? options : options.mode,
+      0o700,
+      "mkdirSync mode must be exactly 0700",
+    );
+    return Object.freeze([
+      exactSnapshotPath(callerArgs[0], name),
+      options,
+    ]);
+  }
+  if (name === "openSync") {
+    assertExactArity(name, callerArgs, [2, 3]);
+    assert.equal(
+      typeof callerArgs[1],
+      "number",
+      "openSync flags must be a primitive number",
+    );
+    if (callerArgs.length === 3) {
+      assert.equal(
+        typeof callerArgs[2],
+        "number",
+        "openSync mode must be a primitive number",
+      );
+    }
+    return Object.freeze([
+      exactSnapshotPath(callerArgs[0], name),
+      callerArgs[1],
+      ...(callerArgs.length === 3 ? [callerArgs[2]] : []),
+    ]);
+  }
+  if (name === "readFileSync") {
+    assertExactArity(name, callerArgs, [1]);
+    return Object.freeze([trackedDescriptor(callerArgs[0], name)]);
+  }
+  if (name === "readdirSync") {
+    assertExactArity(name, callerArgs, [1, 2]);
+    const file = exactSnapshotPath(callerArgs[0], name);
+    if (callerArgs.length === 1) return Object.freeze([file]);
+    assert.equal(
+      !utilTypes.isProxy(callerArgs[1]),
+      true,
+      "readdirSync options forbid Proxy objects",
+    );
+    const descriptors = Object.getOwnPropertyDescriptors(callerArgs[1] ?? {});
+    const expected = {};
+    for (const key of Reflect.ownKeys(descriptors)) {
+      if (key === "encoding") expected.encoding = "utf8";
+      else if (key === "recursive") expected.recursive = false;
+      else if (key === "withFileTypes") expected.withFileTypes = false;
+      else assert.fail("readdirSync options keys are not exact");
+    }
+    return Object.freeze([
+      file,
+      cloneExactOptions(callerArgs[1], expected, name),
+    ]);
+  }
+  if (name === "writeFileSync") {
+    assertExactArity(name, callerArgs, [2]);
+    trackedDescriptor(callerArgs[0], name);
+    assert.equal(
+      Buffer.isBuffer(callerArgs[1]) && !utilTypes.isProxy(callerArgs[1]),
+      true,
+      "writeFileSync bytes must be one unproxied Buffer",
+    );
+    return Object.freeze([
+      callerArgs[0],
+      Buffer.from(callerArgs[1]),
+    ]);
+  }
+  if (name === "writeSync") {
+    assertExactArity(name, callerArgs, [2, 5]);
+    trackedDescriptor(callerArgs[0], name);
+    assert.equal(
+      Buffer.isBuffer(callerArgs[1]) && !utilTypes.isProxy(callerArgs[1]),
+      true,
+      "writeSync bytes must be one unproxied Buffer",
+    );
+    const bytes = Buffer.from(callerArgs[1]);
+    if (callerArgs.length === 2) {
+      return Object.freeze([callerArgs[0], bytes, 0, bytes.length, null]);
+    }
+    for (const [label, value] of [
+      ["offset", callerArgs[2]],
+      ["length", callerArgs[3]],
+    ]) {
+      assert.equal(Number.isInteger(value) && value >= 0, true, "writeSync " + label);
+    }
+    assert.equal(
+      callerArgs[4] === null
+        || (Number.isInteger(callerArgs[4]) && callerArgs[4] >= 0),
+      true,
+      "writeSync position is invalid",
+    );
+    return Object.freeze([
+      callerArgs[0],
+      bytes,
+      callerArgs[2],
+      callerArgs[3],
+      callerArgs[4],
+    ]);
+  }
+  throw new Error("SNAPSHOT_IO_METHOD_FORBIDDEN:" + name);
+}
+
+const mountpoint = exactSnapshotPath(
   payload.authority.volumeInspect.Mountpoint,
+  "Engine Mountpoint",
 );
 const claimedJobsDirectory = path.join(
   mountpoint,
@@ -2644,15 +3154,21 @@ function assertSnapshotOperation(name, args) {
     throw new Error("SNAPSHOT_IO_PATH_FORBIDDEN:" + String(file));
   }
   if (name === "lstatSync" || name === "statSync") {
-    if (args[1] !== undefined) {
-      const keys = Object.keys(args[1]).sort();
-      assert.equal(
-        keys.every((key) => ["bigint", "throwIfNoEntry"].includes(key)),
-        true,
-      );
-      assert.equal(args[1].bigint, true);
-      plainDataOptions(args[1], keys);
-    }
+    const keys = Object.keys(args[1]).sort();
+    assert.equal(
+      keys.every((key) => ["bigint", "throwIfNoEntry"].includes(key)),
+      true,
+    );
+    assert.equal(args[1].bigint, true);
+    assert.equal(
+      Object.hasOwn(args[1], "throwIfNoEntry")
+        ? args[1].throwIfNoEntry === false
+        : true,
+      true,
+    );
+  }
+  if (name === "fstatSync") {
+    assert.deepEqual(args[1], { bigint: true });
   }
   if (name === "mkdirSync") {
     assert.equal(
@@ -2663,8 +3179,7 @@ function assertSnapshotOperation(name, args) {
     const mode = typeof args[1] === "number" ? args[1] : args[1]?.mode;
     assert.equal(mode, 0o700, "snapshot directory mode must be 0700");
     if (typeof args[1] === "object") {
-      plainDataOptions(args[1], Object.keys(args[1]));
-      assert.equal(args[1].recursive ?? false, false);
+      assert.deepEqual(args[1], { mode: 0o700 });
     }
   }
   if (name === "openSync") {
@@ -2707,7 +3222,6 @@ function assertSnapshotOperation(name, args) {
       requestDirectory,
       "cleanup may remove only its exact request directory",
     );
-    assert.equal(args[1], undefined);
   }
   if ([
     "closeSync",
@@ -2727,18 +3241,64 @@ function assertSnapshotOperation(name, args) {
 
 function invokeSnapshotOriginal(ownerName, owner, name, original, args) {
   assert.equal(ownerName, "fs", "snapshot token reached promise filesystem I/O");
+  const call = snapshotScope.getStore();
+  if (!snapshotTokenBrand.has(call) || call.active !== true) {
+    throw new Error("SNAPSHOT_IO_TOKEN_REVOKED:" + String(name));
+  }
+  assert.equal(call.method, name, "snapshot token crossed into a different method");
+  assert.equal(call.phase, snapshotPhase, "snapshot token crossed phase boundary");
+  assert.equal(
+    args.length,
+    call.args.length,
+    "snapshot guard-owned argument count changed",
+  );
+  assert.equal(
+    args.every((value, index) => Object.is(value, call.args[index])),
+    true,
+    "snapshot call forwarded a caller-owned object or substituted argument",
+  );
   const event = {
     api: ownerName + "." + String(name),
+    descriptor: Number.isInteger(args[0]) ? args[0] : null,
+    error: null,
+    flags: name === "openSync" ? args[1] : null,
     file: snapshotPathFor(String(name), args),
+    method: String(name),
+    mode: name === "openSync" ? args[2] ?? null : null,
+    optionKeys:
+      args[1] !== null
+        && typeof args[1] === "object"
+        && !Buffer.isBuffer(args[1])
+        ? Object.keys(args[1]).sort()
+        : [],
     phase: snapshotPhase,
     rejected: false,
+    sequence: snapshotAudit.length,
   };
   snapshotAudit.push(event);
   try {
     const file = assertSnapshotOperation(String(name), args);
     const result = Reflect.apply(original, owner, args);
-    if (name === "openSync") snapshotDescriptors.set(result, file);
+    if (name === "openSync") {
+      snapshotDescriptors.set(result, file);
+      event.descriptor = result;
+    }
     if (name === "closeSync") snapshotDescriptors.delete(args[0]);
+    if (name === "readdirSync") {
+      assert.equal(
+        Array.isArray(result)
+          && result.every((entry) => typeof entry === "string"),
+        true,
+        "snapshot readdir exposed a raw Dir or Dirent capability",
+      );
+    }
+    assert.equal(
+      result !== null
+        && typeof result === "object"
+        && typeof result.then === "function",
+      false,
+      "sync snapshot io returned an asynchronous capability",
+    );
     return result;
   } catch (error) {
     event.rejected = true;
@@ -2751,7 +3311,7 @@ function invokeTrapped(ownerName, owner, name, original, args) {
   if (loaderScope.getStore() === loaderToken) {
     return invokeLoaderOriginal(ownerName, owner, name, original, args);
   }
-  if (snapshotScope.getStore() === snapshotToken) {
+  if (snapshotTokenBrand.has(snapshotScope.getStore())) {
     return invokeSnapshotOriginal(ownerName, owner, name, original, args);
   }
   const qualifiedName = ownerName + "." + String(name);
@@ -2800,6 +3360,7 @@ const hookHandle = rawRegisterHooks({
         /^(?:data|file):/.test(specifier)
         && !productionGraph.has(specifier)
       ) {
+        loaderRejects.push("resolve:" + specifier);
         throw new Error("LOADER_GRAPH_FORBIDDEN:" + specifier);
       }
       const resolved = nextResolve(specifier, context);
@@ -2809,14 +3370,17 @@ const hookHandle = rawRegisterHooks({
           !productionBuiltins.has(resolved.url)
           || !productionGraph.has(parentUrl)
         ) {
+          loaderRejects.push("resolve:" + resolved.url);
           throw new Error("LOADER_GRAPH_FORBIDDEN:" + resolved.url);
         }
       } else if (!productionGraph.has(resolved.url)) {
+        loaderRejects.push("resolve:" + resolved.url);
         throw new Error("LOADER_GRAPH_FORBIDDEN:" + resolved.url);
       } else if (
         resolved.url !== brokerUrl
         && !productionGraph.has(parentUrl)
       ) {
+        loaderRejects.push("parent:" + String(parentUrl));
         throw new Error("LOADER_PARENT_FORBIDDEN:" + String(parentUrl));
       }
       loaderResolves.push({
@@ -2833,6 +3397,7 @@ const hookHandle = rawRegisterHooks({
         !productionGraph.has(url)
         && !productionBuiltins.has(url)
       ) {
+        loaderRejects.push("load:" + url);
         throw new Error("LOADER_GRAPH_FORBIDDEN:" + url);
       }
       const loaded = nextLoad(url, context);
@@ -2847,25 +3412,45 @@ const hookHandle = rawRegisterHooks({
 
 const rawSyncBuiltinESMExports = importedSyncBuiltinESMExports;
 for (const name of [
+  "_findPath",
   "_load",
   "_preloadModules",
+  "_resolveFilename",
   "createRequire",
   "register",
   "registerHooks",
+  "runMain",
 ]) {
   Object.defineProperty(Module, name, {
     ...Object.getOwnPropertyDescriptor(Module, name),
+    configurable: false,
     value: blockedModuleApi(name),
+    writable: false,
   });
 }
-Object.defineProperty(Module.prototype, "require", {
-  ...Object.getOwnPropertyDescriptor(Module.prototype, "require"),
-  value: blockedModuleApi("require"),
-});
+for (const name of ["_compile", "load", "require"]) {
+  Object.defineProperty(Module.prototype, name, {
+    ...Object.getOwnPropertyDescriptor(Module.prototype, name),
+    configurable: false,
+    value: blockedModuleApi("prototype." + name),
+    writable: false,
+  });
+}
+for (const extension of [".js", ".json", ".node"]) {
+  Object.defineProperty(Module._extensions, extension, {
+    ...Object.getOwnPropertyDescriptor(Module._extensions, extension),
+    configurable: false,
+    value: blockedModuleApi("extension:" + extension),
+    writable: false,
+  });
+}
+Object.freeze(Module._extensions);
 rawSyncBuiltinESMExports();
 Object.defineProperty(Module, "syncBuiltinESMExports", {
   ...Object.getOwnPropertyDescriptor(Module, "syncBuiltinESMExports"),
+  configurable: false,
   value: blockedModuleApi("syncBuiltinESMExports"),
+  writable: false,
 });
 rawSyncBuiltinESMExports();
 
@@ -2873,13 +3458,84 @@ for (const name of [
   "_linkedBinding",
   "binding",
   "dlopen",
+  "execve",
   "getBuiltinModule",
+  "loadEnvFile",
 ]) {
   Object.defineProperty(process, name, {
     ...Object.getOwnPropertyDescriptor(process, name),
+    configurable: false,
     value: blockedProcessApi(name),
+    writable: false,
   });
 }
+const lockedProcessReport = process.report;
+Object.defineProperty(lockedProcessReport, "writeReport", {
+  ...Object.getOwnPropertyDescriptor(lockedProcessReport, "writeReport"),
+  configurable: false,
+  value: blockedProcessApi("report.writeReport"),
+  writable: false,
+});
+Object.defineProperty(process, "report", {
+  configurable: false,
+  enumerable: true,
+  value: lockedProcessReport,
+  writable: false,
+});
+for (const [owner, name] of [
+  ...[
+    "_findPath",
+    "_load",
+    "_preloadModules",
+    "_resolveFilename",
+    "createRequire",
+    "register",
+    "registerHooks",
+    "runMain",
+    "syncBuiltinESMExports",
+  ].map((name) => [Module, name]),
+  ...["_compile", "load", "require"]
+    .map((name) => [Module.prototype, name]),
+  ...[".js", ".json", ".node"]
+    .map((name) => [Module._extensions, name]),
+  ...[
+    "_linkedBinding",
+    "binding",
+    "dlopen",
+    "execve",
+    "getBuiltinModule",
+    "loadEnvFile",
+  ].map((name) => [process, name]),
+  [lockedProcessReport, "writeReport"],
+  [process, "report"],
+]) {
+  const descriptor = Object.getOwnPropertyDescriptor(owner, name);
+  assert.equal(descriptor.configurable, false, name + " blocker is configurable");
+  if (Object.hasOwn(descriptor, "writable")) {
+    assert.equal(descriptor.writable, false, name + " blocker is writable");
+  }
+}
+assert.equal(
+  Reflect.defineProperty(Module, "registerHooks", {
+    value: () => {},
+  }),
+  false,
+  "Module blocker could be replaced",
+);
+assert.equal(
+  Reflect.defineProperty(process, "execve", {
+    value: () => {},
+  }),
+  false,
+  "process blocker could be replaced",
+);
+assert.equal(
+  Reflect.defineProperty(process, "report", {
+    value: {},
+  }),
+  false,
+  "process.report pin could be replaced",
+);
 
 const broker = await import(brokerUrl);
 await assert.rejects(
@@ -2887,12 +3543,15 @@ await assert.rejects(
   /LOADER_GRAPH_FORBIDDEN/,
   "unexpected JSON import escaped the exact production graph",
 );
-hookHandle.deregister();
-loaderActive = false;
+await assert.rejects(
+  () => import("data:text/javascript,export default 'lazy-loader-mutant'"),
+  /LOADER_GRAPH_FORBIDDEN/,
+  "lazy data-module import escaped the still-active production graph hook",
+);
 assert.equal(
   loaderDescriptors.size,
   0,
-  "Node ESM loader retained a descriptor after production graph closure",
+  "Node ESM loader retained a descriptor after initial production graph load",
 );
 assert.deepEqual(
   [...new Set(loaderLoads)].sort(),
@@ -2924,16 +3583,36 @@ const directMutants = [
     cachedReflectedLstat(target, { bigint: true })],
   ["truncate", () => fs.truncateSync(payloadPath, 0)],
   ["callback read", () => fs.readFile(target, () => {})],
+  ["callback raw Dir", () => fs.opendir(target, () => {})],
+  ["raw Dir", () => fs.opendirSync(target)],
+  ["promise raw Dir", () => fs.promises.opendir(target)],
+  ["openAsBlob", () => fs.openAsBlob(target)],
   ["watch", () => fs.watch(target, () => {})],
   ["module registerHooks", () => Module.registerHooks({})],
   ["module register", () => Module.register("data:text/javascript,")],
   ["module createRequire", () => Module.createRequire(import.meta.url)],
+  ["module _findPath", () => Module._findPath("node:fs", [])],
   ["module _load", () => Module._load("node:fs")],
+  ["module _preloadModules", () => Module._preloadModules([])],
+  ["module _resolveFilename", () => Module._resolveFilename("node:fs", null)],
+  ["module runMain", () => Module.runMain()],
+  ["module prototype _compile", () =>
+    Module.prototype._compile.call({}, "module.exports = 1", payloadPath)],
+  ["module prototype load", () =>
+    Module.prototype.load.call({}, payloadPath)],
   ["module require", () => Module.prototype.require.call({}, "node:fs")],
+  ["module extension js", () => Module._extensions[".js"]({}, payloadPath)],
+  ["module extension json", () => Module._extensions[".json"]({}, payloadPath)],
+  ["module extension node", () => Module._extensions[".node"]({}, payloadPath)],
+  ["module syncBuiltinESMExports", () => Module.syncBuiltinESMExports()],
   ["process binding", () => process.binding("fs")],
   ["process linked binding", () => process._linkedBinding("fs")],
   ["process dlopen", () => process.dlopen({}, "/tmp/never.node")],
+  ["process execve", () =>
+    process.execve(payloadPath + ".nonexistent-executable", [], {})],
   ["process getBuiltinModule", () => process.getBuiltinModule("fs")],
+  ["process loadEnvFile", () => process.loadEnvFile(payloadPath)],
+  ["process report writeReport", () => process.report.writeReport(payloadPath)],
 ];
 for (const [label, run] of directMutants) {
   assert.throws(
@@ -2996,6 +3675,43 @@ const ioDescriptors = {
     writable: false,
   },
 };
+function runSnapshotIo(name, callerArgs) {
+  let guardArgs;
+  try {
+    guardArgs = normalizeSnapshotArguments(name, callerArgs);
+  } catch (error) {
+    snapshotCallValidationRejects.push(Object.freeze({
+      error: error?.message ?? String(error),
+      method: name,
+      phase: snapshotPhase,
+    }));
+    throw error;
+  }
+  const call = Object.seal({
+    active: true,
+    args: guardArgs,
+    id: ++snapshotCallSequence,
+    method: name,
+    phase: snapshotPhase,
+  });
+  snapshotTokenBrand.add(call);
+  try {
+    const result = snapshotScope.run(
+      call,
+      () => fs[name](...guardArgs),
+    );
+    assert.equal(
+      result !== null
+        && typeof result === "object"
+        && typeof result.then === "function",
+      false,
+      "snapshot io call escaped asynchronously",
+    );
+    return result;
+  } finally {
+    call.active = false;
+  }
+}
 for (const name of SNAPSHOT_IO_METHODS) {
   assert.equal(
     typeof rawFs[name],
@@ -3004,8 +3720,7 @@ for (const name of SNAPSHOT_IO_METHODS) {
   );
   ioDescriptors[name] = {
     enumerable: true,
-    value: (...args) =>
-      snapshotScope.run(snapshotToken, () => fs[name](...args)),
+    value: (...args) => runSnapshotIo(name, args),
     writable: false,
   };
 }
@@ -3014,16 +3729,99 @@ assert.equal(Object.getPrototypeOf(io), null);
 assert.equal(Object.isFrozen(io), true);
 assert.equal(Object.hasOwn(io, "promises"), false);
 assert.equal(Object.hasOwn(io, "readFile"), false);
+assert.equal(Object.hasOwn(io, "opendir"), false);
+assert.equal(Object.hasOwn(io, "opendirSync"), false);
 assert.equal(Object.hasOwn(io, "watch"), false);
 assert.equal(
   io.lstatSync(target, { bigint: true }).isDirectory(),
   true,
   "strict injected io positive control did not reach the real filesystem",
 );
+assert.deepEqual(
+  io.readdirSync(target),
+  [],
+  "snapshot readdir positive control did not return exact primitive names",
+);
+const directoryFlags = rawFs.constants.O_RDONLY
+  | (rawFs.constants.O_DIRECTORY ?? 0)
+  | (rawFs.constants.O_NOFOLLOW ?? 0);
+const targetDescriptor = io.openSync(target, directoryFlags);
+assert.equal(
+  io.fstatSync(targetDescriptor, { bigint: true }).isDirectory(),
+  true,
+  "tracked descriptor fstat positive control failed",
+);
 assert.throws(
-  () => io.readFileSync(payloadPath),
+  () => io.fstatSync(targetDescriptor, { bigint: false }),
+  /option bigint is not exact/,
+  "fstat bigint mutant escaped exact option validation",
+);
+io.closeSync(targetDescriptor);
+assert.throws(
+  () => io.lstatSync(payloadPath, { bigint: true }),
   /SNAPSHOT_IO_PATH_FORBIDDEN/,
   "snapshot io read an unrelated path",
+);
+assert.throws(
+  () => io.lstatSync(Buffer.from(target), { bigint: true }),
+  /primitive string/,
+  "Buffer pathname escaped primitive-string validation",
+);
+let toPrimitiveCalls = 0;
+const coerciblePath = {
+  [Symbol.toPrimitive]() {
+    toPrimitiveCalls += 1;
+    return target;
+  },
+};
+assert.throws(
+  () => io.lstatSync(coerciblePath, { bigint: true }),
+  /primitive string/,
+  "Symbol.toPrimitive pathname escaped primitive-string validation",
+);
+assert.equal(toPrimitiveCalls, 0, "pathname policy invoked attacker coercion");
+let proxyOptionReads = 0;
+const proxyOptions = new Proxy({ bigint: true }, {
+  get(targetValue, property, receiver) {
+    proxyOptionReads += 1;
+    return Reflect.get(targetValue, property, receiver);
+  },
+});
+assert.throws(
+  () => io.lstatSync(target, proxyOptions),
+  /Proxy/,
+  "Proxy options escaped exact data-descriptor validation",
+);
+assert.equal(proxyOptionReads, 0, "snapshot policy read Proxy-controlled options");
+let accessorReads = 0;
+const accessorOptions = {};
+Object.defineProperty(accessorOptions, "bigint", {
+  enumerable: true,
+  get() {
+    accessorReads += 1;
+    return true;
+  },
+});
+assert.throws(
+  () => io.lstatSync(target, accessorOptions),
+  /forbid accessors/,
+  "accessor options escaped exact data-descriptor validation",
+);
+assert.equal(accessorReads, 0, "snapshot policy invoked an options getter");
+assert.throws(
+  () => io.readFileSync(snapshotLeaf, { flag: "w+" }),
+  /argument count|tracked descriptor|no options/,
+  "readFileSync w+ mutant escaped descriptor-only read policy",
+);
+assert.throws(
+  () => io.readdirSync(target, { recursive: true }),
+  /option recursive is not exact/,
+  "recursive readdir mutant escaped exact option validation",
+);
+assert.throws(
+  () => io.readdirSync(target, { withFileTypes: true }),
+  /option withFileTypes is not exact/,
+  "raw Dirent readdir mutant escaped exact option validation",
 );
 assert.throws(
   () => io.openSync(
@@ -3039,7 +3837,7 @@ assert.throws(
 );
 assert.throws(
   () => io.fsyncSync(987654),
-  /PATH_FORBIDDEN|untracked descriptor/,
+  /tracked descriptor/,
   "snapshot io accepted a substituted descriptor",
 );
 snapshotPhase = "cleanup";
@@ -3064,13 +3862,81 @@ assert.throws(
 );
 snapshotRevoked = false;
 
+const escapedCall = Object.seal({
+  active: true,
+  args: Object.freeze([target]),
+  id: ++snapshotCallSequence,
+  method: "existsSync",
+  phase: snapshotPhase,
+});
+snapshotTokenBrand.add(escapedCall);
+const asyncEscape = snapshotScope.run(escapedCall, async () => {
+  await Promise.resolve();
+  return fs.existsSync(target);
+});
+escapedCall.active = false;
+await assert.rejects(
+  asyncEscape,
+  /SNAPSHOT_IO_TOKEN_REVOKED/,
+  "AsyncLocalStorage continuation reused a revoked per-call token",
+);
+
+const transcriptKeys = [
+  "api",
+  "descriptor",
+  "error",
+  "file",
+  "flags",
+  "method",
+  "mode",
+  "optionKeys",
+  "phase",
+  "rejected",
+  "sequence",
+];
+for (const [index, event] of snapshotAudit.entries()) {
+  assert.deepEqual(
+    Object.keys(event).sort(),
+    transcriptKeys,
+    "snapshot transcript event shape is not exact",
+  );
+  assert.equal(event.sequence, index, "snapshot transcript sequence has a gap");
+  assert.equal(event.api, "fs." + event.method);
+  assert.equal(
+    snapshotPaths.has(event.file)
+      || (event.rejected === true && event.file === payloadPath),
+    true,
+    "snapshot transcript contains an unknown pathname",
+  );
+  assert.equal(
+    snapshotMethodsByPhase[event.phase]?.has(event.method),
+    true,
+    "snapshot transcript crossed its phase/method matrix",
+  );
+  assert.equal(
+    event.descriptor === null || Number.isInteger(event.descriptor),
+    true,
+    "snapshot transcript descriptor is not exact",
+  );
+  if (event.method !== "openSync") {
+    assert.equal(event.flags, null);
+    assert.equal(event.mode, null);
+  }
+  assert.equal(
+    Array.isArray(event.optionKeys)
+      && event.optionKeys.every((key) => typeof key === "string"),
+    true,
+    "snapshot transcript option keys are not primitive strings",
+  );
+}
+assert.equal(
+  snapshotCallValidationRejects.length,
+  9,
+  "one or more argument/option/path mutants missed the call validator",
+);
 const mutantCount =
   directMutants.length
-  + 1
-  + 2
-  + 1
-  + 4
-  + 1;
+  + 23;
 assert.equal(
   snapshotAudit.some(({ api, rejected }) =>
     api === "fs.lstatSync" && rejected === false),
@@ -3079,7 +3945,7 @@ assert.equal(
 );
 assert.equal(
   snapshotAudit.filter(({ rejected }) => rejected).length,
-  5,
+  4,
   "snapshot capability mutants did not all reach the central policy",
 );
 assert.equal(
@@ -3089,25 +3955,35 @@ assert.equal(
 );
 assert.equal(
   blockedModuleAttempts.length,
-  5,
+  15,
   "module authority mutants did not reach every blocked API",
 );
 assert.equal(
   blockedProcessAttempts.length,
-  4,
+  7,
   "native process authority mutants did not reach every blocked API",
 );
 directAttempts.length = 0;
 blockedModuleAttempts.length = 0;
 blockedProcessAttempts.length = 0;
 if (process.env.SNAPSHOT_TRAP_SELF_TEST === "1") {
+  snapshotRevoked = true;
+  await assert.rejects(
+    () => import("data:text/javascript,export default 'post-revoke-mutant'"),
+    /LOADER_GRAPH_FORBIDDEN/,
+    "lazy loader escaped before self-oracle revocation",
+  );
+  hookHandle.deregister();
+  loaderActive = false;
   process.stdout.write(JSON.stringify({
     directAttempts,
     loaderFiles: [...new Set(loaderLoads)].sort(),
     loaderIoCount: loaderAudit.length,
+    loaderRejectCount: loaderRejects.length,
     mutantCount,
     processId: process.pid,
     snapshotAuditCount: snapshotAudit.length,
+    snapshotCallValidationRejectCount: snapshotCallValidationRejects.length,
     stage: "first-import-oracle-ready",
   }) + "\n");
   process.exit(0);
@@ -3139,6 +4015,11 @@ assert.equal(
   true,
   "fresh first-import snapshot bytes diverged",
 );
+await assert.rejects(
+  () => import("data:text/javascript,export default 'during-store-mutant'"),
+  /LOADER_GRAPH_FORBIDDEN/,
+  "lazy loader escaped while the snapshot store remained live",
+);
 snapshotPhase = "cleanup";
 await store.cleanup(sealed);
 snapshotRevoked = true;
@@ -3147,6 +4028,14 @@ assert.throws(
   /SNAPSHOT_IO_REVOKED/,
   "snapshot capability remained usable after cleanup",
 );
+await assert.rejects(
+  () => import("data:text/javascript,export default 'post-cleanup-mutant'"),
+  /LOADER_GRAPH_FORBIDDEN/,
+  "lazy loader escaped before capability revocation and hook teardown",
+);
+assert.equal(loaderActive, true, "loader hook was removed before cleanup/revocation");
+hookHandle.deregister();
+loaderActive = false;
 assert.deepEqual(
   directAttempts,
   [],
@@ -3156,9 +4045,11 @@ process.stdout.write(JSON.stringify({
   directAttempts,
   loaderFiles: [...new Set(loaderLoads)].sort(),
   loaderIoCount: loaderAudit.length,
+  loaderRejectCount: loaderRejects.length,
   mutantCount,
   processId: process.pid,
   snapshotAuditCount: snapshotAudit.length,
+  snapshotCallValidationRejectCount: snapshotCallValidationRejects.length,
 }) + "\n");
 `;
 
@@ -3189,7 +4080,7 @@ process.stdout.write(JSON.stringify({
     const oracleProof = JSON.parse(oracleChild.stdout);
     assert.notEqual(oracleProof.processId, process.pid);
     assert.equal(oracleProof.stage, "first-import-oracle-ready");
-    assert.equal(oracleProof.mutantCount, 23);
+    assert.equal(oracleProof.mutantCount, 54);
     assert.deepEqual(oracleProof.directAttempts, []);
     assert.deepEqual(oracleProof.loaderFiles, [
       new URL("./docker-action-activation.mjs", BROKER_MODULE_URL).href,
@@ -3197,7 +4088,9 @@ process.stdout.write(JSON.stringify({
       new URL("./docker-action-contract.mjs", BROKER_MODULE_URL).href,
     ].sort());
     assert.equal(Number.isInteger(oracleProof.loaderIoCount), true);
+    assert.equal(oracleProof.loaderRejectCount, 3);
     assert.equal(oracleProof.snapshotAuditCount >= 6, true);
+    assert.equal(oracleProof.snapshotCallValidationRejectCount, 9);
 
     const child = runChild(false);
     assert.equal(
@@ -3209,11 +4102,13 @@ process.stdout.write(JSON.stringify({
     );
     const proof = JSON.parse(child.stdout);
     assert.notEqual(proof.processId, process.pid);
-    assert.equal(proof.mutantCount, 23);
+    assert.equal(proof.mutantCount, 54);
     assert.deepEqual(proof.directAttempts, []);
     assert.deepEqual(proof.loaderFiles, oracleProof.loaderFiles);
     assert.equal(Number.isInteger(proof.loaderIoCount), true);
+    assert.equal(proof.loaderRejectCount, 4);
     assert.equal(proof.snapshotAuditCount > oracleProof.snapshotAuditCount, true);
+    assert.equal(proof.snapshotCallValidationRejectCount, 9);
   },
 );
 
@@ -6715,6 +7610,7 @@ rawFrameE2eTest("v2 raw signed frame preserves one full-request digest through c
 
   for (const nestedAction of [
     `${request.action}.nested`,
+    `nested.${request.action}`,
     `${request.action}-api`,
   ]) {
     const unsignedNestedActionRequest = {

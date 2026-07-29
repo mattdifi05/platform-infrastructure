@@ -278,10 +278,18 @@ test("RED v2: request consumer admits the v2 domain control and rejects legacy o
       );
     });
   }
-  for (const [label, nestedAction] of [
-    ["authenticated dot-nested action", `${valid.action}.nested`],
-    ["authenticated path-nested action", `${valid.action}/child`],
-  ]) {
+  const nestedActionCollisions = actionIdentityCollisions(valid.action);
+  assert.deepEqual(
+    nestedActionCollisions
+      .filter(([, nestedAction]) => identityBlindEndsWithActionMutant(
+        nestedAction,
+        valid.action,
+      ))
+      .map(([label]) => label),
+    ["authenticated expected-suffix action"],
+    "the active identity-blind endsWith mutant must admit only the hostile expected-suffix collision",
+  );
+  for (const [label, nestedAction] of nestedActionCollisions) {
     await t.test(label, (st) => {
       if (!requestConsumerV2Ready(st)) return;
       const unsignedCandidate = {
@@ -782,10 +790,18 @@ test("RED v2: response signing binds request and result digests and exact fields
   );
 
   const exactIdentityMutations = [];
-  for (const [position, nestedAction] of [
-    ["suffix", `${request.action}.nested`],
-    ["prefix", `nested.${request.action}`],
-  ]) {
+  const nestedActionCollisions = actionIdentityCollisions(request.action);
+  assert.deepEqual(
+    nestedActionCollisions
+      .filter(([, nestedAction]) => identityBlindEndsWithActionMutant(
+        nestedAction,
+        request.action,
+      ))
+      .map(([label]) => label),
+    ["authenticated expected-suffix action"],
+    "the active response identity-blind endsWith mutant must admit only the hostile expected-suffix collision",
+  );
+  for (const [position, nestedAction] of nestedActionCollisions) {
     exactIdentityMutations.push(
       [`response action ${position}`, responseWithRecomputedSeals({
         ...unsigned,
@@ -795,6 +811,16 @@ test("RED v2: response signing binds request and result digests and exact fields
         ...result,
         action: nestedAction,
       }), /action|result|binding|identity/i],
+      [`response/result action ${position}`, responseWithRecomputedSeals({
+        ...unsigned,
+        action: nestedAction,
+      }, {
+        ...result,
+        action: nestedAction,
+      }), /action|result|binding|identity/i, identityBlindEndsWithActionMutant(
+        nestedAction,
+        request.action,
+      )],
     );
   }
   const expectedPhaseId = result.phases[0].phaseId;
@@ -901,7 +927,12 @@ test("RED v2: response signing binds request and result digests and exact fields
       statusCode: 200,
     }],
   ];
-  for (const [label, mutation, exactIdentityError] of signedMutations) {
+  for (const [
+    label,
+    mutation,
+    exactIdentityError,
+    identityBlindEndsWithAdmission,
+  ] of signedMutations) {
     const candidate = { ...mutation, mac: responseMac(mutation, key) };
     if (!exactIdentityError) {
       assert.throws(
@@ -912,6 +943,23 @@ test("RED v2: response signing binds request and result digests and exact fields
       continue;
     }
     assertAuthenticatedResponseEnvelope(candidate, key, label);
+    if (identityBlindEndsWithAdmission) {
+      assert.equal(
+        candidate.action,
+        candidate.result.action,
+        `${label} must coherently bind the same hostile action in response and result`,
+      );
+      assert.notEqual(
+        candidate.action,
+        request.action,
+        `${label} must remain an actually distinct hostile identity`,
+      );
+      assert.equal(
+        identityBlindEndsWithActionMutant(candidate.action, request.action),
+        true,
+        `${label} must be admitted by the active identity-blind endsWith mutant`,
+      );
+    }
     const error = assert.throws(
       () => contract.normalizeActionResponse(candidate, request, key),
       exactIdentityError,
@@ -1611,6 +1659,18 @@ function requestMac(unsigned, key) {
     .update(REQUEST_MAC_DOMAIN)
     .update(canonicalFixtureJson(unsigned))
     .digest("hex");
+}
+
+function actionIdentityCollisions(expectedAction) {
+  return [
+    ["authenticated expected-prefix dot action", `${expectedAction}.nested`],
+    ["authenticated expected-prefix path action", `${expectedAction}/child`],
+    ["authenticated expected-suffix action", `nested.${expectedAction}`],
+  ];
+}
+
+function identityBlindEndsWithActionMutant(candidateAction, expectedAction) {
+  return candidateAction.endsWith(expectedAction);
 }
 
 function canonicalSignedRequestSha256(request) {

@@ -43,6 +43,7 @@ const MAX_CLAIMED_JOB_BYTES = 128 * 1024;
 const MAX_SIGNED_REQUEST_BYTES = 16 * 1024;
 const MAX_EXECVE_STRING_BYTES = 128 * 1024;
 const MAX_PHASE_OUTPUT_BYTES = 4096;
+const SAFE_ACTION_IDENTITY = /^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$/;
 const REPOSITORY_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 test("client rejects raw argument injection before constructing a request", () => {
@@ -604,8 +605,8 @@ test("test-only canonical identity-collision fixtures are fully re-digested and 
   assert.deepEqual(
     fixture.mutations.map(({ label }) => label),
     [
-      "action exact prefix plus slash child",
       "action exact prefix plus dotted nested identity",
+      "action dotted nested identity plus exact suffix",
       "job identity with the exact job as a prefix",
       "job identity with the exact job as a suffix",
       "phase identity with the exact phase as a prefix",
@@ -616,14 +617,14 @@ test("test-only canonical identity-collision fixtures are fully re-digested and 
   assert.deepEqual(
     fixture.mutations.map(({ boundary }) => boundary),
     [
-      "grammar",
+      "exact-identity",
       "exact-identity",
       "exact-identity",
       "exact-identity",
       "exact-identity",
       "exact-identity",
     ],
-    "slash-child is the explicit grammar fail-closed control; every other affix is a valid exact-identity collision",
+    "the identity-collision matrix must contain only syntactically SAFE identities",
   );
 
   for (const mutation of fixture.mutations) {
@@ -724,7 +725,39 @@ test("test-only canonical identity-collision fixtures are fully re-digested and 
   );
 });
 
-test("RED v2: real UDS consumer rejects fully sealed action, job and phase affix collisions", async (t) => {
+test("test-only slash-child fixture is a grammar failure, not an exact-identity collision", () => {
+  const fixture = slashChildActionGrammarFixture();
+  assert.equal(
+    fixture.mutation.candidateIdentity.startsWith(fixture.expectedAction),
+    true,
+    "the slash-child control must still survive a naive prefix matcher",
+  );
+  assert.doesNotMatch(
+    fixture.mutation.candidateIdentity,
+    SAFE_ACTION_IDENTITY,
+    "slash-child belongs exclusively to the grammar-rejection boundary",
+  );
+  assertCanonicalIdentityResponseSeal(
+    fixture.mutation.candidate,
+    fixture.request,
+    fixture.capabilityKey,
+  );
+  assert.equal(
+    affixIdentityBlindResponseMutantAccepts(
+      fixture.mutation.candidate,
+      fixture.control,
+      fixture.request,
+      fixture.mutation,
+      fixture.capabilityKey,
+    ),
+    true,
+    "the grammar control must remain causal against the explicit prefix-blind mutant",
+  );
+});
+
+// UDS cohort: intentionally separate from the socketless producer/semantic-
+// core cohort below, and excluded from its focused NO-UDS execution.
+test("RED v2: real UDS consumer rejects fully sealed SAFE action, job and phase affix collisions", async (t) => {
   const fixture = canonicalIdentityCollisionFixture();
   const admitted = await exchangeWithLocalBroker(
     fixture.request,
@@ -761,6 +794,32 @@ test("RED v2: real UDS consumer rejects fully sealed action, job and phase affix
       );
     });
   }
+});
+
+// UDS cohort: grammar rejection stays independent from canonical identity
+// equality and is likewise NOT_RUN by the focused socketless cohort.
+test("RED v2: real UDS consumer rejects the fully sealed slash-child grammar control", async () => {
+  const fixture = slashChildActionGrammarFixture();
+  const admitted = await exchangeWithLocalBroker(
+    fixture.request,
+    fixture.control,
+    {
+      capabilityKey: fixture.capabilityKey,
+      responseFrame: (response) => `${canonicalJsonOracle(response)}\n`,
+    },
+  );
+  assert.deepEqual(admitted, fixture.control);
+  await assert.rejects(
+    () => exchangeWithLocalBroker(
+      fixture.request,
+      fixture.mutation.candidate,
+      {
+        capabilityKey: fixture.capabilityKey,
+        responseFrame: (response) => `${canonicalJsonOracle(response)}\n`,
+      },
+    ),
+    "the real response consumer must reject slash-child at its grammar boundary",
+  );
 });
 
 testWhenProductionExports(
@@ -818,7 +877,6 @@ test("test-only assembly gates do not depend on an unrelated semantic-executor e
   });
   const requirementSets = [
     injectedAssemblyRequirements({ brokerModule, contractModule }),
-    defaultAssemblyRequirements({ brokerModule, contractModule }),
     schedulerMainRequirements({ brokerModule, clientModule, contractModule }),
   ];
   for (const requirements of requirementSets) {
@@ -830,12 +888,19 @@ test("test-only assembly gates do not depend on an unrelated semantic-executor e
     assert.equal(
       requirements.some(([, exportName]) => exportName === "createSemanticActionExecutor"),
       false,
-      "an injected/default assembly body must not become TODO because an unrelated export is absent",
+      "an injected or scheduler assembly body must not become TODO because an unrelated export is absent",
     );
   }
+  assert.deepEqual(
+    missingProductionExports(
+      semanticCoreRequirements({ brokerModule, contractModule }),
+    ),
+    ["createSemanticActionExecutor"],
+    "the socketless semantic-core body must activate only when its real semantic executor exists",
+  );
 });
 
-test("test-only default semantic transport proxy rejects every method outside its exact whitelist", () => {
+test("test-only semantic transport proxy rejects every method outside its exact whitelist", () => {
   const { trusted } = buildFixtureTrustedContextV2({
     allowedActions: ["backup.prune.plan"],
     now: NOW,
@@ -867,6 +932,53 @@ test("test-only default semantic transport proxy rejects every method outside it
     /unexpected semantic transport method pullImage/i,
   );
   assert.deepEqual(oracle.calls, [], "wrong-method probes must not become admitted transport calls");
+});
+
+test("test-only producer, result and semantic-core helpers are permanently NO-UDS", () => {
+  assert.equal(
+    SAFE_ACTION_IDENTITY.source,
+    "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$",
+    "all socketless identity gates must share the one explicit SAFE grammar",
+  );
+  const source = [
+    inMemoryBrokerCoreFixture,
+    inMemoryCoreConnection,
+    inMemorySemanticExecutorCoreFixture,
+  ].map((value) => Function.prototype.toString.call(value)).join("\n");
+  assert.doesNotMatch(
+    source,
+    /\b(?:createDockerActionBroker|exchangeWithLocalBroker|sendActionRequest|socketPath)\b|(?:^|[^\w])net\.(?:connect|createConnection|createServer)\s*\(|\.listen\s*\(/m,
+    "a future GREEN may not turn the SAFE cohort into a UDS or network test",
+  );
+  assert.match(
+    source,
+    /\bcreateBrokerCore\b/,
+    "the socketless fixture must still cross the real production broker core",
+  );
+  assert.match(
+    source,
+    /\bencodeActionResponseFrame\b/,
+    "the socketless connection must still cross the real production response encoder",
+  );
+  const completeTestSource = fs.readFileSync(fileURLToPath(import.meta.url), "utf8");
+  for (const testName of [
+    "RED v2: in-memory request producer rejects SAFE action affixes before every provider",
+    "RED v2: in-memory response producer emits no success frame for identity-blind semantic results",
+    "RED v2: in-memory core crosses the real semantic executor without UDS",
+  ]) {
+    const marker = `"${testName}"`;
+    const start = completeTestSource.lastIndexOf(marker);
+    assert.notEqual(start, -1, `${testName} source marker must remain unique and reachable`);
+    const remainder = completeTestSource.slice(start + marker.length);
+    const nextTest = /\n(?:test|testWhenClientExports|testWhenProductionExports)\s*\(/.exec(remainder);
+    assert.ok(nextTest, `${testName} must retain a bounded source region`);
+    const testBodySource = remainder.slice(0, nextTest.index);
+    assert.doesNotMatch(
+      testBodySource,
+      /\b(?:exchangeWithLocalBroker|realBrokerAssembly|realDefaultSemanticBrokerAssembly|sendActionRequest|socketPath)\b|(?:^|[^\w])net\.(?:connect|createConnection|createServer)\s*\(|\.listen\s*\(/m,
+      `${testName} may never open or traverse a UDS, even after its RED exports exist`,
+    );
+  }
 });
 
 testWhenProductionExports(
@@ -951,7 +1063,7 @@ testWhenProductionExports(
 
 testWhenProductionExports(
   injectedAssemblyRequirements(),
-  "RED v2: request producer cannot turn action affix collisions into broker side effects",
+  "RED v2: in-memory request producer rejects SAFE action affixes before every provider",
   async (t) => {
     const expectedAction = "backup.prune.plan";
     const capabilityKey = fixtureCapabilityKey(expectedAction);
@@ -979,95 +1091,88 @@ testWhenProductionExports(
       "the exact request producer control must carry an independently verified request MAC",
     );
 
-    const assembly = await realBrokerAssembly(t, {
+    const controlResult = buildFixtureActionResultV2(expectedAction);
+    const coreFixture = await inMemoryBrokerCoreFixture({
       capabilityKey,
-      outcomes: [{
-        rejection: "exact producer control reached the semantic executor",
-      }],
+      outcomes: [{ result: controlResult }],
       trusted,
     });
     assert.equal(
-      assembly.semanticExecutorFactoryCalls,
+      coreFixture.fixtureExecutorFactoryCalls,
       1,
-      "the control must prove that the injected semantic factory owns this assembly",
+      "the control must prove the fixture-owned executor factory is reachable",
     );
     assert.deepEqual(
-      assembly.replayEvents,
+      coreFixture.fixtureReplayEvents,
       ["recover"],
-      "the control must prove that the injected replay store owns initialization",
+      "the fixture-owned replay double must be initialized before the production core",
     );
-    assert.equal(assembly.capabilityProviderCalls, 0);
-    assert.equal(assembly.trustedContextProviderCalls, 0);
-    assert.deepEqual(assembly.executedActions, []);
-    assert.equal(
-      fs.existsSync(assembly.stateDir),
-      false,
-      "the injected replay store must keep the default persistent state directory unmaterialized",
-    );
+    assert.equal(coreFixture.capabilityProviderCalls, 0);
+    assert.equal(coreFixture.trustedContextProviderCalls, 0);
+    assert.deepEqual(coreFixture.executedActions, []);
 
-    const admittedControl = await sendActionRequest(
+    const controlExchange = await coreFixture.exchange(control);
+    const admittedControl = consumeInMemoryAssemblyResponse(
+      controlExchange,
       control,
-      assembly.socketPath,
       capabilityKey,
+      "exact request producer success control",
     );
-    assert.equal(admittedControl.status, "rejected");
-    assert.equal(admittedControl.statusCode, 403);
-    assert.equal(admittedControl.errorCode, "ACTION_REJECTED");
-    assert.equal(admittedControl.result, null);
-    assert.equal(assembly.capabilityProviderCalls, 1);
-    assert.equal(assembly.trustedContextProviderCalls, 1);
-    assert.deepEqual(assembly.executedActions, [expectedAction]);
+    assert.equal(admittedControl.status, "completed");
+    assert.equal(admittedControl.statusCode, 200);
+    assert.equal(admittedControl.errorCode, null);
+    assert.deepEqual(admittedControl.result, controlResult);
+    assert.equal(coreFixture.capabilityProviderCalls, 1);
+    assert.equal(coreFixture.trustedContextProviderCalls, 1);
+    assert.deepEqual(coreFixture.executedActions, [expectedAction]);
     assert.ok(
-      assembly.replayEvents.includes("consume"),
-      "the exact request must prove that the injected replay store crosses real admission",
+      coreFixture.fixtureReplayEvents.includes("consume"),
+      "the exact request must prove that the fixture replay double crosses real core admission",
     );
-    assert.equal(assembly.responseFrames.length, 1);
+    assert.equal(coreFixture.responseFrames.length, 1);
     assertProductionEncoderMatchesWrittenFrame(
-      assembly.responseFrames[0],
+      controlExchange.frame,
       admittedControl,
-      "exact request producer rejection control",
+      "exact request producer success control",
+    );
+    assert.deepEqual(
+      coreFixture.responseFrames[0],
+      controlExchange.frame,
+      "the in-memory connection must receive the exact frame observed at the production encoder boundary",
     );
 
     const baseline = {
-      capabilityProviderCalls: assembly.capabilityProviderCalls,
-      executedActions: [...assembly.executedActions],
-      replayEvents: [...assembly.replayEvents],
-      semanticExecutorFactoryCalls: assembly.semanticExecutorFactoryCalls,
-      stateDirExists: fs.existsSync(assembly.stateDir),
-      trustedContextProviderCalls: assembly.trustedContextProviderCalls,
+      capabilityProviderCalls: coreFixture.capabilityProviderCalls,
+      executedActions: [...coreFixture.executedActions],
+      fixtureExecutorFactoryCalls: coreFixture.fixtureExecutorFactoryCalls,
+      fixtureReplayEvents: [...coreFixture.fixtureReplayEvents],
+      trustedContextProviderCalls: coreFixture.trustedContextProviderCalls,
     };
-    const mutations = [
-      {
-        action: `${expectedAction}/child`,
-        boundary: "grammar",
-        nonce: "G".repeat(43),
-        requestId: "123e4567-e89b-42d3-a456-426614174105",
-      },
+    const grammarMutation = {
+      action: `${expectedAction}/child`,
+      boundary: "grammar",
+      label: "slash child",
+      relationship: "prefix",
+    };
+    const identityMutations = [
       {
         action: `${expectedAction}.nested`,
         boundary: "exact-identity",
-        nonce: "H".repeat(43),
-        requestId: "123e4567-e89b-42d3-a456-426614174106",
+        label: "exact prefix plus dotted nested identity",
+        relationship: "prefix",
+      },
+      {
+        action: `nested.${expectedAction}`,
+        boundary: "exact-identity",
+        label: "dotted nested identity plus exact suffix",
+        relationship: "suffix",
       },
     ];
 
-    for (const mutation of mutations) {
-      await t.test(`${mutation.boundary}: ${mutation.action}`, async () => {
-        const exactRequest = buildClientRequest(
-          "prune-manifest-backups-plan",
-          [],
-          {
-            runtimeIntentId: trusted.intent.intentId,
-            activeReceiptSha256: trusted.receiptDigest,
-            combinedRenderSha256: trusted.receipt.combinedRenderSha256,
-            capabilityKey,
-            now: NOW,
-            requestId: mutation.requestId,
-            nonce: mutation.nonce,
-          },
-        );
+    async function assertPreProviderRejection(mutation) {
+      await t.test(`${mutation.boundary}: ${mutation.label}`, async () => {
         const candidate = independentlyResignedRequest(
-          exactRequest,
+          control,
           { action: mutation.action },
           capabilityKey,
         );
@@ -1081,32 +1186,45 @@ testWhenProductionExports(
           ),
           "the hostile action request must be coherently re-MACed before broker admission",
         );
-        if (mutation.boundary === "grammar") {
-          assert.equal(candidate.action.startsWith(expectedAction), true);
-        } else {
+        assert.equal(
+          affixIdentityBlindRequestMutantAccepts(
+            candidate,
+            control,
+            mutation,
+            capabilityKey,
+          ),
+          true,
+          "the request fixture must survive its exact affix-blind authorization mutant",
+        );
+        if (mutation.boundary === "exact-identity") {
           assert.match(
             candidate.action,
-            /^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$/,
-            "the dotted action collision must itself remain a syntactically valid logical identity",
+            SAFE_ACTION_IDENTITY,
+            "the exact-identity collision must pass the shared SAFE grammar",
+          );
+        } else {
+          assert.doesNotMatch(
+            candidate.action,
+            SAFE_ACTION_IDENTITY,
+            "slash-child must remain isolated at the grammar boundary",
           );
         }
 
-        const outcome = await sendActionRequest(
-          candidate,
-          assembly.socketPath,
-          capabilityKey,
-        ).then(
+        const outcome = await coreFixture.exchange(candidate).then(
           (value) => ({ kind: "response", value }),
           (error) => ({ error, kind: "error" }),
         );
         if (outcome.kind === "response") {
-          assert.equal(
-            outcome.value.status,
-            "rejected",
-            "a hostile action collision may only produce an authenticated rejection",
+          assertProductionResponseFrame(
+            outcome.value.frame,
+            outcome.value.response,
           );
-          assert.notEqual(outcome.value.statusCode, 200);
-          assert.equal(outcome.value.result, null);
+          assert.notEqual(
+            `${outcome.value.response.status}:${outcome.value.response.statusCode}`,
+            "completed:200",
+            "a hostile action collision may not produce a completed response",
+          );
+          assert.equal(outcome.value.response.result ?? null, null);
         } else {
           assert.ok(
             outcome.error instanceof Error,
@@ -1116,40 +1234,65 @@ testWhenProductionExports(
 
         assert.deepEqual(
           {
-            capabilityProviderCalls: assembly.capabilityProviderCalls,
-            executedActions: assembly.executedActions,
-            replayEvents: assembly.replayEvents,
-            semanticExecutorFactoryCalls: assembly.semanticExecutorFactoryCalls,
-            stateDirExists: fs.existsSync(assembly.stateDir),
-            trustedContextProviderCalls: assembly.trustedContextProviderCalls,
+            capabilityProviderCalls: coreFixture.capabilityProviderCalls,
+            executedActions: coreFixture.executedActions,
+            fixtureExecutorFactoryCalls: coreFixture.fixtureExecutorFactoryCalls,
+            fixtureReplayEvents: coreFixture.fixtureReplayEvents,
+            trustedContextProviderCalls: coreFixture.trustedContextProviderCalls,
           },
           baseline,
           "an affix collision must not reach trust, capability, replay, or semantic execution side effects",
         );
       });
     }
+
+    await assertPreProviderRejection(grammarMutation);
+    for (const mutation of identityMutations) {
+      await assertPreProviderRejection(mutation);
+    }
   },
 );
 
 testWhenProductionExports(
   injectedAssemblyRequirements(),
-  "RED v2: real response producer emits no success frame for identity-blind semantic results",
+  "RED v2: in-memory response producer emits no success frame for identity-blind semantic results",
   async (t) => {
     const seed = canonicalIdentityCollisionFixture();
     const { trusted } = buildFixtureTrustedContextV2({
       allowedActions: [seed.expectedAction],
       now: NOW,
     });
-    const assembly = await realBrokerAssembly(t, {
+    const coreFixture = await inMemoryBrokerCoreFixture({
       capabilityKey: seed.capabilityKey,
-      outcomes: seed.mutations.map(({ candidate }) => ({
-        result: candidate.result,
-      })),
+      outcomes: [
+        { result: seed.control.result },
+        ...seed.mutations.map(({ candidate }) => ({
+          result: candidate.result,
+        })),
+      ],
       trusted,
     });
-    assert.equal(assembly.semanticExecutorFactoryCalls, 1);
-    assert.deepEqual(assembly.replayEvents, ["recover"]);
-    assert.equal(fs.existsSync(assembly.stateDir), false);
+    assert.equal(coreFixture.fixtureExecutorFactoryCalls, 1);
+    assert.deepEqual(coreFixture.fixtureReplayEvents, ["recover"]);
+
+    const controlExchange = await coreFixture.exchange(seed.request);
+    const admittedControl = consumeInMemoryAssemblyResponse(
+      controlExchange,
+      seed.request,
+      seed.capabilityKey,
+      "exact semantic result success control",
+    );
+    assert.deepEqual(
+      admittedControl,
+      seed.control,
+      "the positive baseline must cross the real core providers, fixture executor and production encoder intact",
+    );
+    assert.equal(coreFixture.capabilityProviderCalls, 1);
+    assert.equal(coreFixture.trustedContextProviderCalls, 1);
+    assert.deepEqual(coreFixture.executedActions, [seed.expectedAction]);
+    assert.ok(coreFixture.fixtureReplayEvents.includes("consume"));
+    assert.equal(coreFixture.responseFrames.length, 1);
+    assert.deepEqual(coreFixture.responseFrames[0], controlExchange.frame);
 
     for (const [index, seedMutation] of seed.mutations.entries()) {
       await t.test(`${seedMutation.boundary}: ${seedMutation.label}`, async () => {
@@ -1170,31 +1313,31 @@ testWhenProductionExports(
           "the hostile semantic result must first survive the exact identity-blind mutant",
         );
 
-        const frameBaseline = assembly.responseFrames.length;
-        const outcome = await sendActionRequest(
-          fixture.request,
-          assembly.socketPath,
-          fixture.capabilityKey,
-        ).then(
+        const frameBaseline = coreFixture.responseFrames.length;
+        const outcome = await coreFixture.exchange(fixture.request).then(
           (value) => ({ kind: "response", value }),
           (error) => ({ error, kind: "error" }),
         );
         if (outcome.kind === "response") {
           assert.notEqual(
-            `${outcome.value.status}:${outcome.value.statusCode}`,
+            `${outcome.value.response.status}:${outcome.value.response.statusCode}`,
             "completed:200",
             "an identity-blind semantic result may not become a completed response",
           );
           assert.equal(
-            outcome.value.result,
+            outcome.value.response.result ?? null,
             null,
             "a fail-closed producer response may not expose the hostile semantic result",
+          );
+          assertProductionResponseFrame(
+            outcome.value.frame,
+            outcome.value.response,
           );
         } else {
           assert.ok(outcome.error instanceof Error);
         }
 
-        const newFrames = assembly.responseFrames.slice(frameBaseline);
+        const newFrames = coreFixture.responseFrames.slice(frameBaseline);
         for (const frame of newFrames) {
           const wire = frame.toString("utf8");
           assert.equal(wire.endsWith("\n"), true);
@@ -1213,14 +1356,9 @@ testWhenProductionExports(
           assert.equal(response.result, null);
         }
         assert.deepEqual(
-          assembly.executedActions,
-          Array(index + 1).fill(seed.expectedAction),
+          coreFixture.executedActions,
+          Array(index + 2).fill(seed.expectedAction),
           "the semantic executor receives only the exact request action; the producer must reject its hostile result",
-        );
-        assert.equal(
-          fs.existsSync(assembly.stateDir),
-          false,
-          "the injected replay store must keep default state unmaterialized during producer rejection",
         );
       });
     }
@@ -1228,9 +1366,9 @@ testWhenProductionExports(
 );
 
 testWhenProductionExports(
-  defaultAssemblyRequirements(),
-  "RED v2: real broker assembly defaults behaviorally to the semantic executor",
-  async (t) => {
+  semanticCoreRequirements(),
+  "RED v2: in-memory core crosses the real semantic executor without UDS",
+  async () => {
     const action = "backup.prune.plan";
     const command = "prune-manifest-backups-plan";
     const capabilityKey = fixtureCapabilityKey(action);
@@ -1256,52 +1394,72 @@ testWhenProductionExports(
       requestId: "123e4567-e89b-42d3-a456-426614174103",
       nonce: "E".repeat(43),
     });
-    const assembly = await realDefaultSemanticBrokerAssembly(t, {
+    const coreFixture = await inMemorySemanticExecutorCoreFixture({
       capabilityKey,
       successRequestId: successRequest.requestId,
       trusted,
     });
-    const completed = await sendActionRequest(
+    const successExchange = await coreFixture.exchange(successRequest);
+    const completed = consumeInMemoryAssemblyResponse(
+      successExchange,
       successRequest,
-      assembly.socketPath,
       capabilityKey,
+      "semantic executor success",
     );
     assert.equal(completed.status, "completed");
     assert.equal(completed.statusCode, 200);
     assert.equal(completed.errorCode, null);
     assert.deepEqual(completed.result, buildFixtureActionResultV2(action));
-    const rejected = await sendActionRequest(
+    const rejectionExchange = await coreFixture.exchange(rejectionRequest);
+    const rejected = consumeInMemoryAssemblyResponse(
+      rejectionExchange,
       rejectionRequest,
-      assembly.socketPath,
       capabilityKey,
+      "semantic executor rejection",
     );
     assert.equal(rejected.status, "rejected");
     assert.equal(rejected.statusCode, 403);
     assert.equal(rejected.errorCode, "ACTION_REJECTED");
     assert.equal(rejected.result, null);
     assert.equal(
-      assembly.recoveredSemanticExecutor,
+      coreFixture.fixtureRecoveredExecutor,
       true,
-      "initialize must recover the semantic executor selected by the default assembly path",
+      "the fixture-owned replay recovery must receive the real semantic executor",
     );
-    assembly.assertTransportComplete();
     assert.equal(
-      Object.hasOwn(assembly.transport, "execute"),
+      coreFixture.fixtureSemanticExecutorCreations,
+      1,
+      "the fixture must construct the real semantic executor exactly once",
+    );
+    coreFixture.assertTransportComplete();
+    assert.equal(
+      Object.hasOwn(coreFixture.transport, "execute"),
       false,
       "the transport intentionally exposes no legacy engine execute shortcut",
     );
-    assert.equal(assembly.transport.execute, undefined);
-    assert.equal(assembly.responseFrames.length, 2);
+    assert.equal(coreFixture.transport.execute, undefined);
+    assert.equal(coreFixture.capabilityProviderCalls, 2);
+    assert.equal(coreFixture.trustedContextProviderCalls, 2);
+    assert.deepEqual(
+      coreFixture.fixtureReplayEvents.slice(0, 2),
+      ["recover", "activation"],
+      "the semantic-core baseline must cross the fixture replay double before execution",
+    );
+    assert.equal(coreFixture.responseFrames.length, 2);
     assertProductionEncoderMatchesWrittenFrame(
-      assembly.responseFrames[0],
+      successExchange.frame,
       completed,
-      "default semantic success",
+      "semantic executor success",
     );
     assertProductionEncoderMatchesWrittenFrame(
-      assembly.responseFrames[1],
+      rejectionExchange.frame,
       rejected,
-      "default semantic rejection",
+      "semantic executor rejection",
     );
+    assert.deepEqual(coreFixture.responseFrames, [
+      successExchange.frame,
+      rejectionExchange.frame,
+    ]);
   },
 );
 
@@ -2460,8 +2618,14 @@ function injectedAssemblyRequirements({
   ];
 }
 
-function defaultAssemblyRequirements(options = {}) {
-  return injectedAssemblyRequirements(options);
+function semanticCoreRequirements(options = {}) {
+  const {
+    brokerModule = broker,
+  } = options;
+  return [
+    ...injectedAssemblyRequirements(options),
+    [brokerModule, "createSemanticActionExecutor"],
+  ];
 }
 
 function schedulerMainRequirements({
@@ -3208,16 +3372,18 @@ function canonicalIdentityCollisionFixture({
 
   const actionMutations = [
     {
-      boundary: "grammar",
-      candidateIdentity: `${expectedAction}/child`,
-      label: "action exact prefix plus slash child",
-    },
-    {
       boundary: "exact-identity",
       candidateIdentity: `${expectedAction}.nested`,
       label: "action exact prefix plus dotted nested identity",
+      relationship: "prefix",
     },
-  ].map(({ boundary, candidateIdentity, label }) => {
+    {
+      boundary: "exact-identity",
+      candidateIdentity: `nested.${expectedAction}`,
+      label: "action dotted nested identity plus exact suffix",
+      relationship: "suffix",
+    },
+  ].map(({ boundary, candidateIdentity, label, relationship }) => {
     const reboundResult = independentlyResealedIdentityResult(result, {
       action: candidateIdentity,
     });
@@ -3233,10 +3399,8 @@ function canonicalIdentityCollisionFixture({
       expectedIdentity: expectedAction,
       label,
       layer: "action",
-      relationship: "prefix",
-      syntaxPattern: label.includes("dotted")
-        ? /^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$/
-        : null,
+      relationship,
+      syntaxPattern: SAFE_ACTION_IDENTITY,
     };
   });
 
@@ -3321,6 +3485,38 @@ function canonicalIdentityCollisionFixture({
     ],
     producerControlSnapshot,
     request,
+  };
+}
+
+function slashChildActionGrammarFixture({
+  requestIndex = 74,
+} = {}) {
+  const fixture = canonicalIdentityCollisionFixture({ requestIndex });
+  const candidateIdentity = `${fixture.expectedAction}/child`;
+  const reboundResult = independentlyResealedIdentityResult(
+    fixture.control.result,
+    { action: candidateIdentity },
+  );
+  return {
+    capabilityKey: fixture.capabilityKey,
+    control: fixture.control,
+    expectedAction: fixture.expectedAction,
+    mutation: {
+      boundary: "grammar",
+      candidate: independentlySignedActionResponse(
+        fixture.request,
+        reboundResult,
+        fixture.capabilityKey,
+        { action: candidateIdentity },
+      ),
+      candidateIdentity,
+      expectedIdentity: fixture.expectedAction,
+      label: "action exact prefix plus slash child",
+      layer: "action",
+      relationship: "prefix",
+      syntaxPattern: null,
+    },
+    request: fixture.request,
   };
 }
 
@@ -3428,6 +3624,36 @@ function affixIdentityBlindResponseMutantAccepts(
   }
   normalized.resultSha256 = control.resultSha256;
   normalized.mac = control.mac;
+  return canonicalJsonOracle(normalized) === canonicalJsonOracle(control);
+}
+
+function affixIdentityBlindRequestMutantAccepts(
+  request,
+  control,
+  {
+    action,
+    relationship,
+  },
+  capabilityKey,
+) {
+  if (JSON.stringify(request) !== canonicalJsonOracle(request)) return false;
+  if (request.action !== action || request.action === control.action) return false;
+  if (request.mac !== domainMacWithKey(
+    REQUEST_MAC_DOMAIN,
+    omit(request, "mac"),
+    capabilityKey,
+  )) {
+    return false;
+  }
+  const affixMatches = relationship === "prefix"
+    ? request.action.startsWith(control.action)
+    : request.action.endsWith(control.action);
+  if (!affixMatches) return false;
+  const normalized = canonicalValueOracle({
+    ...request,
+    action: control.action,
+    mac: control.mac,
+  });
   return canonicalJsonOracle(normalized) === canonicalJsonOracle(control);
 }
 
@@ -3626,6 +3852,183 @@ async function invokeValidCliControl(
   );
 }
 
+async function inMemoryBrokerCoreFixture({
+  capabilityKey,
+  now = () => NOW,
+  outcomes,
+  trusted,
+}) {
+  const responseFrames = [];
+  const executedActions = [];
+  const executedParameters = [];
+  const fixtureReplayEvents = [];
+  let capabilityProviderCalls = 0;
+  let fixtureExecutorFactoryCalls = 0;
+  let trustedContextProviderCalls = 0;
+  let outcomeIndex = 0;
+  const semanticExecutorOptions = Object.freeze({
+    fixtureProbe: "client-in-memory-core",
+  });
+  const semanticExecutorFactory = (options) => {
+    fixtureExecutorFactoryCalls += 1;
+    assert.deepEqual(options, semanticExecutorOptions);
+    return Object.freeze({
+      async execute(action, { parameters }) {
+        executedActions.push(action);
+        executedParameters.push(structuredClone(parameters));
+        const outcome = outcomes[outcomeIndex++];
+        assert.ok(outcome, "the in-memory core fixture executed an unplanned semantic action");
+        if (outcome.rejection) {
+          const error = new Error(outcome.rejection);
+          error.statusCode = 403;
+          error.errorCode = "ACTION_REJECTED";
+          error.semanticRejection = true;
+          throw error;
+        }
+        return structuredClone(outcome.result);
+      },
+      async recoverLease() {
+        throw new Error("the clean in-memory replay fixture must not recover a worker");
+      },
+    });
+  };
+  const semanticExecutor = semanticExecutorFactory(semanticExecutorOptions);
+  const replayStore = {
+    async recover(engine) {
+      fixtureReplayEvents.push("recover");
+      assert.equal(engine, semanticExecutor);
+      return { status: "clean" };
+    },
+    admitActivation() {
+      fixtureReplayEvents.push("activation");
+    },
+    admitTrustedContext() {
+      fixtureReplayEvents.push("trusted");
+    },
+    consume() {
+      fixtureReplayEvents.push("consume");
+    },
+    acquire(request, admittedTrusted) {
+      fixtureReplayEvents.push("acquire");
+      const lineage = Object.freeze({
+        action: request.action,
+        intentId: admittedTrusted.intent.intentId,
+        receiptDigest: admittedTrusted.receiptDigest,
+        request: structuredClone(request),
+        requestId: request.requestId,
+        requestSha256: sha256Bytes(canonicalJsonOracle(request)),
+      });
+      return Object.freeze({
+        lineage,
+        preserve() {
+          fixtureReplayEvents.push("preserve");
+        },
+        recordEvent(event) {
+          fixtureReplayEvents.push(`event:${String(event?.event ?? event?.type ?? "unknown")}`);
+        },
+        recordWorker() {},
+        release() {
+          fixtureReplayEvents.push("release");
+        },
+      });
+    },
+  };
+  await replayStore.recover(semanticExecutor);
+  const core = broker.createBrokerCore({
+    trustedContextProvider: async () => {
+      trustedContextProviderCalls += 1;
+      return trusted;
+    },
+    capabilityProvider: async () => {
+      capabilityProviderCalls += 1;
+      return capabilityKey;
+    },
+    engine: semanticExecutor,
+    replayStore,
+    now,
+    operationTimeoutMs: 100,
+  });
+  return {
+    get capabilityProviderCalls() {
+      return capabilityProviderCalls;
+    },
+    core,
+    async exchange(request) {
+      const exchange = await inMemoryCoreConnection(core, request);
+      responseFrames.push(Buffer.from(exchange.frame));
+      return exchange;
+    },
+    executedActions,
+    executedParameters,
+    get fixtureExecutorFactoryCalls() {
+      return fixtureExecutorFactoryCalls;
+    },
+    fixtureReplayEvents,
+    responseFrames,
+    get trustedContextProviderCalls() {
+      return trustedContextProviderCalls;
+    },
+  };
+}
+
+async function inMemoryCoreConnection(core, request) {
+  assert.equal(
+    JSON.stringify(request),
+    canonicalJsonOracle(request),
+    "the in-memory connection accepts only the exact canonical request object",
+  );
+  const requestFrame = Buffer.from(canonicalJsonOracle(request));
+  assert.equal(
+    requestFrame.includes(0x0a),
+    false,
+    "createBrokerCore receives the one frame payload without a transport delimiter",
+  );
+  const wire = await core.handle(requestFrame);
+  assert.ok(wire && typeof wire === "object");
+  assert.ok(wire.body && typeof wire.body === "object");
+  assert.equal(
+    wire.statusCode,
+    wire.body.statusCode,
+    "the in-memory connection must retain the core response status exactly",
+  );
+  const response = canonicalValueOracle(wire.body);
+  const encoded = broker.encodeActionResponseFrame(response);
+  const frame = Buffer.isBuffer(encoded)
+    ? Buffer.from(encoded)
+    : Buffer.from(encoded);
+  assertProductionResponseFrame(frame, response);
+  return Object.freeze({
+    frame,
+    requestFrame,
+    response,
+  });
+}
+
+function consumeInMemoryAssemblyResponse(
+  exchange,
+  request,
+  capabilityKey,
+  label,
+) {
+  assertProductionResponseFrame(exchange.frame, exchange.response);
+  const admitted = actionContract.normalizeActionResponse(
+    exchange.response,
+    request,
+    capabilityKey,
+  );
+  assert.deepEqual(
+    admitted,
+    exchange.response,
+    `${label} must cross the real response consumer without normalization drift`,
+  );
+  assertProductionEncoderMatchesWrittenFrame(
+    exchange.frame,
+    admitted,
+    label,
+  );
+  return admitted;
+}
+
 async function realBrokerAssembly(t, {
   capabilityKey,
   now = () => NOW,
@@ -3772,7 +4175,7 @@ function exactPrunePlanTransportOracle({ successRequestId, trusted }) {
   let inspectVolumeCount = 0;
   let rejectionMethod;
   const rejection = Object.assign(
-    new Error("default semantic transport rejected prune.plan preflight"),
+    new Error("semantic transport fixture rejected prune.plan preflight"),
     {
       errorCode: "ACTION_REJECTED",
       semanticRejection: true,
@@ -3808,7 +4211,7 @@ function exactPrunePlanTransportOracle({ successRequestId, trusted }) {
       assert.equal(
         inspectVolumeCount,
         2,
-        "the default semantic assembly must not perform an unplanned volume inspection",
+        "the semantic-core fixture must not perform an unplanned volume inspection",
       );
       assert.notEqual(signal, firstRequestSignal, "the second request needs a fresh signal");
       assert.notEqual(signal, cleanupSignal, "a request must not reuse the cleanup signal");
@@ -3917,7 +4320,7 @@ function exactPrunePlanTransportOracle({ successRequestId, trusted }) {
           "deleteContainer",
           "inspectVolume",
         ],
-        "default semantic transport must follow the one exact method sequence",
+        "the semantic transport fixture must follow the one exact method sequence",
       );
       assert.equal(
         rejectionMethod,
@@ -4219,82 +4622,121 @@ function dockerStdoutFrame(value) {
   return Buffer.concat([header, payload]);
 }
 
-async function realDefaultSemanticBrokerAssembly(t, {
+async function inMemorySemanticExecutorCoreFixture({
   capabilityKey,
   successRequestId,
   trusted,
 }) {
-  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "docker-action-default-semantic-"));
-  fs.chmodSync(temporary, 0o700);
-  const socketPath = path.join(temporary, "broker.sock");
   const responseFrames = [];
-  let recoveredSemanticExecutor = false;
+  const fixtureReplayEvents = [];
+  let capabilityProviderCalls = 0;
+  let fixtureRecoveredExecutor = false;
+  let fixtureSemanticExecutorCreations = 0;
+  let trustedContextProviderCalls = 0;
   const transportOracle = exactPrunePlanTransportOracle({
     successRequestId,
     trusted,
   });
   const replayStore = {
     async recover(executor) {
+      fixtureReplayEvents.push("recover");
       assert.equal(typeof executor?.execute, "function");
       assert.equal(typeof executor?.executePhase, "function");
       assert.equal(typeof executor?.recoverLease, "function");
-      recoveredSemanticExecutor = true;
+      fixtureRecoveredExecutor = true;
       return { status: "clean" };
     },
-    admitActivation() {},
-    admitTrustedContext() {},
-    consume() {},
-    acquire() {
-      return {
-        preserve() {},
-        recordEvent() {},
+    admitActivation() {
+      fixtureReplayEvents.push("activation");
+    },
+    admitTrustedContext() {
+      fixtureReplayEvents.push("trusted");
+    },
+    consume() {
+      fixtureReplayEvents.push("consume");
+    },
+    acquire(request, admittedTrusted) {
+      fixtureReplayEvents.push("acquire");
+      return Object.freeze({
+        lineage: Object.freeze({
+          action: request.action,
+          intentId: admittedTrusted.intent.intentId,
+          receiptDigest: admittedTrusted.receiptDigest,
+          request: structuredClone(request),
+          requestId: request.requestId,
+          requestSha256: sha256Bytes(canonicalJsonOracle(request)),
+        }),
+        preserve() {
+          fixtureReplayEvents.push("preserve");
+        },
+        recordEvent(event) {
+          fixtureReplayEvents.push(`event:${String(event?.event ?? event?.type ?? "unknown")}`);
+        },
         recordWorker() {},
-        release() {},
-      };
+        release() {
+          fixtureReplayEvents.push("release");
+        },
+      });
     },
   };
-  const server = broker.createDockerActionBroker({
-    socketPath,
-    stateDir: path.join(temporary, "state-must-remain-unmaterialized"),
-    trustedContextProvider: async () => trusted,
-    capabilityProvider: async () => capabilityKey,
-    replayStore,
-    semanticExecutorOptions: Object.freeze({
-      cleanupTimeoutMs: 100,
-      randomBytes: () => Buffer.alloc(12, 1),
-      snapshotFileStore: Object.freeze({}),
-      transport: transportOracle.transport,
-    }),
-    onResponseFrame(frame) {
-      responseFrames.push(Buffer.from(frame));
+  const semanticExecutorOptions = Object.freeze({
+    async claimedJobSnapshotProvider() {
+      throw new Error("the prune-plan semantic-core fixture may not claim a queued job");
     },
+    cleanupTimeoutMs: 100,
+    randomBytes: () => Buffer.alloc(12, 1),
+    snapshotFileStore: Object.freeze({
+      cleanup() {
+        throw new Error("the prune-plan semantic-core fixture may not clean a claimed-job snapshot");
+      },
+      async seal() {
+        throw new Error("the prune-plan semantic-core fixture may not seal a claimed-job snapshot");
+      },
+    }),
+    transport: transportOracle.transport,
+  });
+  fixtureSemanticExecutorCreations += 1;
+  const semanticExecutor = broker.createSemanticActionExecutor(
+    semanticExecutorOptions,
+  );
+  await replayStore.recover(semanticExecutor);
+  const core = broker.createBrokerCore({
+    trustedContextProvider: async () => {
+      trustedContextProviderCalls += 1;
+      return trusted;
+    },
+    capabilityProvider: async () => {
+      capabilityProviderCalls += 1;
+      return capabilityKey;
+    },
+    engine: semanticExecutor,
+    replayStore,
     now: () => NOW,
     operationTimeoutMs: 100,
   });
-  t.after(async () => {
-    if (server.listening) {
-      await new Promise((resolve, rejectClose) => {
-        server.close((error) => {
-          if (error) rejectClose(error);
-          else resolve();
-        });
-      });
-    }
-    fs.rmSync(temporary, { force: true, recursive: true });
-  });
-  await server.initialize();
-  await new Promise((resolve, rejectListen) => {
-    server.once("error", rejectListen);
-    server.listen(socketPath, resolve);
-  });
   return {
     assertTransportComplete: transportOracle.assertComplete,
-    get recoveredSemanticExecutor() {
-      return recoveredSemanticExecutor;
+    get capabilityProviderCalls() {
+      return capabilityProviderCalls;
     },
+    core,
+    async exchange(request) {
+      const exchange = await inMemoryCoreConnection(core, request);
+      responseFrames.push(Buffer.from(exchange.frame));
+      return exchange;
+    },
+    get fixtureRecoveredExecutor() {
+      return fixtureRecoveredExecutor;
+    },
+    fixtureReplayEvents,
     responseFrames,
-    socketPath,
+    get fixtureSemanticExecutorCreations() {
+      return fixtureSemanticExecutorCreations;
+    },
     transport: transportOracle.transport,
+    get trustedContextProviderCalls() {
+      return trustedContextProviderCalls;
+    },
   };
 }
 
