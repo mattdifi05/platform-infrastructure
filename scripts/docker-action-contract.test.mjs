@@ -4,25 +4,41 @@ import test from "node:test";
 
 import * as contract from "./docker-action-contract.mjs";
 import { createBrokerCore } from "./docker-action-broker.mjs";
+import {
+  ALL_ACTION_NAMES,
+  ACTION_PROFILE_KEYS,
+  ACTIVE_RECEIPT_KEYS,
+  ACTIVE_RECEIPT_RESOURCE_KEYS,
+  ACTIVE_RECEIPT_SCHEMA_V2,
+  EVIDENCE_ACTION_NAMES,
+  EXPECTED_ACTION_BINDINGS,
+  EXPECTED_ACTION_PHASES,
+  EXPECTED_CLAIMED_JOB_SOURCE_IDS,
+  EXPECTED_PHASE_PROFILES,
+  FIXTURE_NOW,
+  FIXTURE_TRUST_KEY,
+  REQUEST_SCHEMA_V2,
+  RESPONSE_SCHEMA_V2,
+  PHASE_PROFILE_KEYS,
+  SCHEDULER_ACTION_NAMES,
+  buildRawActiveReceiptV2,
+  buildTrustedContextV2,
+  canonicalFixtureJson,
+  capabilityFileId,
+  expectedActionPhases,
+  expectedClaimedJobSourceId,
+  expectedPhaseProfile,
+  fixtureCapabilityKey,
+  fixtureSha256,
+  phaseDigest,
+  profileDigest,
+  resealActionProfiles,
+} from "./docker-action-v2-fixtures.mjs";
 
-const NOW = Date.parse("2026-07-28T12:00:00.000Z");
-const CAPABILITY_KEY = Buffer.from("capability-v2-contract-key-material".repeat(2));
-const TRUST_KEY = Buffer.from("runtime-intent-v2-trust-key-material".repeat(2));
-const REQUEST_SCHEMA_V2 = "platform.docker-action.request/v2";
-const RESPONSE_SCHEMA_V2 = "platform.docker-action.response/v2";
-const ACTIVE_RECEIPT_SCHEMA_V2 = "platform.docker-active-receipt/v2";
+const NOW = FIXTURE_NOW;
+const TRUST_KEY = FIXTURE_TRUST_KEY;
 const REQUEST_MAC_DOMAIN = `${REQUEST_SCHEMA_V2}\0`;
 const RESPONSE_MAC_DOMAIN = `${RESPONSE_SCHEMA_V2}\0`;
-
-const SCHEDULER_ACTION_NAMES = Object.freeze([
-  "backup.catalog",
-  "backup.job.execute",
-  "backup.prune.plan",
-  "backup.prune.apply",
-  "restore.drill.full",
-  "backup.offsite.sync",
-]);
-const EVIDENCE_ACTION_NAMES = Object.freeze(["evidence.runtime.snapshot"]);
 const REQUEST_KEYS = Object.freeze([
   "action",
   "activeReceiptSha256",
@@ -49,35 +65,6 @@ const RESPONSE_KEYS = Object.freeze([
   "status",
   "statusCode",
 ]);
-const ACTION_PROFILE_KEYS = Object.freeze([
-  "jobOperations",
-  "mountIds",
-  "networkIds",
-  "profileId",
-  "profileSha256",
-  "quarantineVolumeIds",
-  "scratchVolumeIds",
-  "secretFileIds",
-  "workerImageId",
-  "workerImageRef",
-]);
-const ACTIVE_RECEIPT_KEYS = Object.freeze([
-  "activationBundleSha256",
-  "candidateId",
-  "combinedRenderSha256",
-  "dastChainSha256",
-  "environment",
-  "expiresAt",
-  "generation",
-  "issuedAt",
-  "receiptId",
-  "releaseId",
-  "resources",
-  "schema",
-  "sourceRenderSha256",
-  "targetId",
-  "treeSha256",
-]);
 
 test("RED v2: scheduler and runtime-evidence registries are disjoint, complete, modeled and uniquely bound", () => {
   assert.ok(
@@ -89,27 +76,22 @@ test("RED v2: scheduler and runtime-evidence registries are disjoint, complete, 
     "the product must export the disjoint EVIDENCE_ACTIONS registry",
   );
 
-  assert.deepEqual(Object.keys(contract.SCHEDULER_ACTIONS), SCHEDULER_ACTION_NAMES);
-  assert.deepEqual(Object.keys(contract.EVIDENCE_ACTIONS), EVIDENCE_ACTION_NAMES);
+  assert.deepEqual(Object.keys(contract.SCHEDULER_ACTIONS).sort(), [...SCHEDULER_ACTION_NAMES].sort());
+  assert.deepEqual(Object.keys(contract.EVIDENCE_ACTIONS).sort(), [...EVIDENCE_ACTION_NAMES].sort());
   assert.deepEqual(
-    Object.keys(contract.ACTIONS),
-    [...SCHEDULER_ACTION_NAMES, ...EVIDENCE_ACTION_NAMES],
+    Object.keys(contract.ACTIONS).sort(),
+    [...SCHEDULER_ACTION_NAMES, ...EVIDENCE_ACTION_NAMES].sort(),
     "ACTIONS must be only the exact union of the two disjoint registries",
   );
 
-  for (const action of SCHEDULER_ACTION_NAMES) {
-    assert.strictEqual(contract.ACTIONS[action], contract.SCHEDULER_ACTIONS[action]);
-  }
-  for (const action of EVIDENCE_ACTION_NAMES) {
-    assert.strictEqual(contract.ACTIONS[action], contract.EVIDENCE_ACTIONS[action]);
-  }
-
   const entries = Object.entries(contract.ACTIONS);
   for (const [action, entry] of entries) {
+    const expected = EXPECTED_ACTION_BINDINGS[action];
+    assert.ok(expected, `${action} is not an approved action binding`);
     assert.equal(entry.modeled, true, `${action} must have an implemented fixed model`);
-    assert.match(entry.capabilityId, /^[a-z][a-z0-9.-]+\.v2$/);
-    assert.match(entry.capabilityFile, /^\/run\/secrets\/[a-z0-9_]+$/);
-    assert.match(entry.profileId, /^[a-z][a-z0-9._-]+$/);
+    assert.equal(entry.capabilityId, expected.capabilityId, `${action} capability identity`);
+    assert.equal(entry.capabilityFile, expected.capabilityFile, `${action} capability path`);
+    assert.equal(entry.profileId, expected.profileId, `${action} semantic profile identity`);
   }
   assertUnique(entries.map(([, entry]) => entry.capabilityId), "capabilityId");
   assertUnique(entries.map(([, entry]) => entry.capabilityFile), "capabilityFile");
@@ -117,17 +99,19 @@ test("RED v2: scheduler and runtime-evidence registries are disjoint, complete, 
 });
 
 test("RED v2: request schema has exact keys and rejects extensions", () => {
+  assert.equal(contract.REQUEST_SCHEMA, REQUEST_SCHEMA_V2);
   const trusted = requestTrustedFixture("backup.catalog");
   const unsigned = contract.buildUnsignedRequest("backup.catalog", {}, trusted, {
     now: NOW,
     requestId: "123e4567-e89b-42d3-a456-426614174000",
     nonce: "A".repeat(43),
   });
-  const signed = contract.signActionRequest(unsigned, CAPABILITY_KEY);
+  const key = capabilityKey("backup.catalog");
+  const signed = contract.signActionRequest(unsigned, key);
 
   assert.deepEqual(Object.keys(unsigned).sort(), REQUEST_KEYS.filter((key) => key !== "mac").sort());
   assert.deepEqual(Object.keys(signed).sort(), [...REQUEST_KEYS].sort());
-  const admitted = contract.normalizeActionRequest(signed, trusted, CAPABILITY_KEY, { now: NOW });
+  const admitted = contract.normalizeActionRequest(signed, trusted, key, { now: NOW });
   assert.equal(admitted.action, "backup.catalog");
   assert.equal(admitted.activeReceiptSha256, trusted.receiptDigest);
   assert.equal(admitted.capabilityId, contract.ACTIONS["backup.catalog"].capabilityId);
@@ -137,16 +121,16 @@ test("RED v2: request schema has exact keys and rejects extensions", () => {
   assert.equal(admitted.requestId, signed.requestId);
   assert.equal(admitted.runtimeIntentId, trusted.intent.intentId);
 
-  const injected = contract.signActionRequest({ ...unsigned, rawDockerArgs: ["run", "--privileged"] }, CAPABILITY_KEY);
+  const injected = contract.signActionRequest({ ...unsigned, rawDockerArgs: ["run", "--privileged"] }, key);
   assert.throws(
-    () => contract.normalizeActionRequest(injected, trusted, CAPABILITY_KEY, { now: NOW }),
+    () => contract.normalizeActionRequest(injected, trusted, key, { now: NOW }),
     /unsupported or missing fields/,
   );
   assert.equal(unsigned.schema, REQUEST_SCHEMA_V2);
-  assert.equal(contract.REQUEST_SCHEMA, REQUEST_SCHEMA_V2);
 });
 
 test("RED v2: request MAC is canonical and domain-separated", () => {
+  assert.equal(contract.REQUEST_SCHEMA, REQUEST_SCHEMA_V2);
   const trusted = requestTrustedFixture("backup.catalog");
   const unsigned = {
     ...contract.buildUnsignedRequest("backup.catalog", {}, trusted, {
@@ -156,24 +140,81 @@ test("RED v2: request MAC is canonical and domain-separated", () => {
     }),
     schema: REQUEST_SCHEMA_V2,
   };
-  const signed = contract.signActionRequest(unsigned, CAPABILITY_KEY);
-  const expectedMac = requestMac(unsigned, CAPABILITY_KEY);
+  const key = capabilityKey("backup.catalog");
+  const signed = contract.signActionRequest(unsigned, key);
+  const expectedMac = requestMac(unsigned, key);
 
   assert.equal(signed.mac, expectedMac);
   assert.equal(
-    contract.signActionRequest(Object.fromEntries(Object.entries(unsigned).reverse()), CAPABILITY_KEY).mac,
+    contract.signActionRequest(Object.fromEntries(Object.entries(unsigned).reverse()), key).mac,
     expectedMac,
     "property insertion order must not change the domain-separated request MAC",
   );
   assert.notEqual(
     expectedMac,
-    crypto.createHmac("sha256", CAPABILITY_KEY).update(contract.canonicalJson(unsigned)).digest("hex"),
+    crypto.createHmac("sha256", key).update(canonicalFixtureJson(unsigned)).digest("hex"),
     "v1-compatible bare canonical JSON must not authenticate as a v2 request",
   );
 });
 
+test("RED v2: every capability is action-distinct and bound to the attested file bytes", () => {
+  const receipt = activeReceiptFixture();
+  const keyDigests = [];
+  for (const action of ALL_ACTION_NAMES) {
+    const fileId = capabilityFileId(action);
+    const key = capabilityKey(action);
+    const file = receipt.resources.capabilityFiles[fileId];
+    assert.ok(file, `${action} capability file is missing`);
+    assert.equal(file.brokerPath, EXPECTED_ACTION_BINDINGS[action].capabilityFile);
+    assert.equal(file.sha256, fixtureSha256(key), `${action} capability digest must bind its real bytes`);
+    keyDigests.push(file.sha256);
+  }
+  assertUnique(keyDigests, "action capability key digest");
+
+  const action = "backup.catalog";
+  const trusted = requestTrustedFixture(action);
+  const request = signedRequest(action, {}, trusted, 10);
+  assert.throws(
+    () => contract.normalizeActionRequest(
+      request,
+      trusted,
+      capabilityKey("backup.prune.plan"),
+      { now: NOW },
+    ),
+    /capability|authentication|mac|digest/i,
+    "a different action capability must not authenticate",
+  );
+
+  const wrongDigestReceipt = activeReceiptFixture();
+  wrongDigestReceipt.resources.capabilityFiles[capabilityFileId(action)].sha256 = "0".repeat(64);
+  const wrongDigestTrusted = buildTrustedContextV2(contract, {
+    allowedActions: [action],
+    now: NOW,
+    rawReceipt: wrongDigestReceipt,
+    trustKey: TRUST_KEY,
+  }).trusted;
+  const wrongDigestRequest = signedRequest(action, {}, wrongDigestTrusted, 11);
+  assert.throws(
+    () => contract.normalizeActionRequest(
+      wrongDigestRequest,
+      wrongDigestTrusted,
+      capabilityKey(action),
+      { now: NOW },
+    ),
+    /capability.*(?:digest|sha)|digest.*capability/i,
+    "the broker must compare loaded capability bytes with the signed receipt",
+  );
+});
+
 test("RED v2: typed job parameters preserve real identifiers and reject normalization or aliases", () => {
+  assert.equal(contract.REQUEST_SCHEMA, REQUEST_SCHEMA_V2);
+  assert.deepEqual(
+    Object.keys(contract.SCHEDULER_ACTIONS ?? {}).sort(),
+    [...SCHEDULER_ACTION_NAMES].sort(),
+    "typed scheduler requests require the exact v2 scheduler registry",
+  );
   const trusted = requestTrustedFixture("backup.job.execute");
+  const key = capabilityKey("backup.job.execute");
   const accepted = [
     {
       jobFileName: "0123456789abcdef.json",
@@ -197,7 +238,7 @@ test("RED v2: typed job parameters preserve real identifiers and reject normaliz
 
   for (const [index, parameters] of accepted.entries()) {
     const request = signedRequest("backup.job.execute", parameters, trusted, index);
-    const normalized = contract.normalizeActionRequest(request, trusted, CAPABILITY_KEY, { now: NOW });
+    const normalized = contract.normalizeActionRequest(request, trusted, key, { now: NOW });
     assert.deepEqual(Object.keys(normalized.parameters).sort(), [
       "jobFileName",
       "jobId",
@@ -228,7 +269,7 @@ test("RED v2: typed job parameters preserve real identifiers and reject normaliz
   for (const [label, parameters] of invalid) {
     const request = signedRequest("backup.job.execute", parameters, trusted, 20);
     assert.throws(
-      () => contract.normalizeActionRequest(request, trusted, CAPABILITY_KEY, { now: NOW }),
+      () => contract.normalizeActionRequest(request, trusted, key, { now: NOW }),
       undefined,
       label,
     );
@@ -237,6 +278,7 @@ test("RED v2: typed job parameters preserve real identifiers and reject normaliz
 
 test("RED v2: broker core emits the exact authenticated response wire contract", async () => {
   const trusted = requestTrustedFixture("backup.prune.plan");
+  const key = capabilityKey("backup.prune.plan");
   const request = signedRequest("backup.prune.plan", {}, trusted, 30);
   const result = { mode: "plan", mutationPerformed: false };
   const replayStore = {
@@ -249,7 +291,7 @@ test("RED v2: broker core emits the exact authenticated response wire contract",
   };
   const core = createBrokerCore({
     trustedContextProvider: async () => trusted,
-    capabilityProvider: async () => CAPABILITY_KEY,
+    capabilityProvider: async () => key,
     engine: { execute: async () => result },
     replayStore,
     now: () => NOW,
@@ -258,8 +300,8 @@ test("RED v2: broker core emits the exact authenticated response wire contract",
 
   const wire = await core.handle(Buffer.from(JSON.stringify(request)));
   const response = wire.body;
-  const requestSha256 = contract.sha256(contract.canonicalJson(request));
-  const resultSha256 = contract.sha256(contract.canonicalJson(result));
+  const requestSha256 = fixtureSha256(canonicalFixtureJson(request));
+  const resultSha256 = fixtureSha256(canonicalFixtureJson(result));
 
   assert.equal(wire.statusCode, 200);
   assert.deepEqual(Object.keys(response).sort(), [...RESPONSE_KEYS].sort());
@@ -272,7 +314,7 @@ test("RED v2: broker core emits the exact authenticated response wire contract",
   assert.equal(response.requestSha256, requestSha256);
   assert.equal(response.resultSha256, resultSha256);
   assert.deepEqual(response.result, result);
-  assert.equal(response.mac, responseMac(omit(response, "mac"), CAPABILITY_KEY));
+  assert.equal(response.mac, responseMac(omit(response, "mac"), key));
 });
 
 test("RED v2: response signing binds request and result digests and exact fields", () => {
@@ -288,6 +330,7 @@ test("RED v2: response signing binds request and result digests and exact fields
   );
 
   const trusted = requestTrustedFixture("backup.prune.plan");
+  const key = capabilityKey("backup.prune.plan");
   const request = signedRequest("backup.prune.plan", {}, trusted, 40);
   const result = { mode: "plan", mutationPerformed: false };
   const unsigned = {
@@ -297,27 +340,56 @@ test("RED v2: response signing binds request and result digests and exact fields
     errorCode: null,
     action: request.action,
     requestId: request.requestId,
-    requestSha256: contract.sha256(contract.canonicalJson(request)),
+    requestSha256: fixtureSha256(canonicalFixtureJson(request)),
     result,
-    resultSha256: contract.sha256(contract.canonicalJson(result)),
+    resultSha256: fixtureSha256(canonicalFixtureJson(result)),
   };
-  const response = contract.signActionResponse(unsigned, CAPABILITY_KEY);
+  const response = contract.signActionResponse(unsigned, key);
 
   assert.deepEqual(Object.keys(response).sort(), [...RESPONSE_KEYS].sort());
-  assert.equal(response.mac, responseMac(unsigned, CAPABILITY_KEY));
+  assert.equal(response.mac, responseMac(unsigned, key));
   assert.equal(
-    contract.signActionResponse(Object.fromEntries(Object.entries(unsigned).reverse()), CAPABILITY_KEY).mac,
+    contract.signActionResponse(Object.fromEntries(Object.entries(unsigned).reverse()), key).mac,
     response.mac,
     "property insertion order must not change the domain-separated response MAC",
   );
   assert.notEqual(
     response.mac,
-    crypto.createHmac("sha256", CAPABILITY_KEY).update(contract.canonicalJson(unsigned)).digest("hex"),
+    crypto.createHmac("sha256", key).update(canonicalFixtureJson(unsigned)).digest("hex"),
     "bare canonical JSON must not authenticate as a v2 response",
   );
   assert.deepEqual(
-    contract.normalizeActionResponse(response, request, CAPABILITY_KEY),
+    contract.normalizeActionResponse(response, request, key),
     response,
+  );
+
+  const rejectedUnsigned = {
+    schema: RESPONSE_SCHEMA_V2,
+    status: "rejected",
+    statusCode: 403,
+    errorCode: "ACTION_REJECTED",
+    action: request.action,
+    requestId: request.requestId,
+    requestSha256: fixtureSha256(canonicalFixtureJson(request)),
+    result: null,
+    resultSha256: fixtureSha256(canonicalFixtureJson(null)),
+  };
+  const rejected = contract.signActionResponse(rejectedUnsigned, key);
+  assert.deepEqual(Object.keys(rejected).sort(), [...RESPONSE_KEYS].sort());
+  assert.equal(rejected.mac, responseMac(rejectedUnsigned, key));
+  assert.deepEqual(
+    contract.normalizeActionResponse(rejected, request, key),
+    rejected,
+    "an admitted request rejection must be authenticated and bound to that exact request",
+  );
+  assert.throws(
+    () => contract.normalizeActionResponse(
+      { ...rejected, errorCode: "OTHER_REJECTION" },
+      request,
+      key,
+    ),
+    undefined,
+    "an unauthenticated rejected response mutation must fail",
   );
 
   const signedMutations = [
@@ -327,166 +399,275 @@ test("RED v2: response signing binds request and result digests and exact fields
     ["request digest", { ...unsigned, requestSha256: "0".repeat(64) }],
     ["result without matching digest", { ...unsigned, result: { mode: "apply", mutationPerformed: true } }],
     ["result digest", { ...unsigned, resultSha256: "0".repeat(64) }],
+    ["completed response with an error code", { ...unsigned, errorCode: "ACTION_REJECTED" }],
+    ["rejected response without an error code", {
+      ...rejectedUnsigned,
+      errorCode: null,
+    }],
+    ["rejected response with a success status", {
+      ...rejectedUnsigned,
+      statusCode: 200,
+    }],
   ];
   for (const [label, mutation] of signedMutations) {
-    const candidate = { ...mutation, mac: responseMac(mutation, CAPABILITY_KEY) };
+    const candidate = { ...mutation, mac: responseMac(mutation, key) };
     assert.throws(
-      () => contract.normalizeActionResponse(candidate, request, CAPABILITY_KEY),
+      () => contract.normalizeActionResponse(candidate, request, key),
       undefined,
       label,
     );
   }
   assert.throws(
-    () => contract.normalizeActionResponse({ ...response, mac: "0".repeat(64) }, request, CAPABILITY_KEY),
+    () => contract.normalizeActionResponse({ ...response, mac: "0".repeat(64) }, request, key),
     undefined,
     "MAC mutation",
   );
 });
 
-test("RED v2: active receipt admits only exact complete profiles and sorted live references", () => {
+test("RED v2: active receipt binds exact action plans to phase-scoped Docker authority", () => {
   const receipt = activeReceiptFixture();
   const normalized = contract.normalizeActiveReceipt(receipt, { now: NOW });
 
   assert.equal(contract.ACTIVE_RECEIPT_SCHEMA, ACTIVE_RECEIPT_SCHEMA_V2);
   assert.equal(normalized.schema, ACTIVE_RECEIPT_SCHEMA_V2);
   assert.deepEqual(Object.keys(receipt).sort(), [...ACTIVE_RECEIPT_KEYS].sort());
-  assert.deepEqual(Object.keys(receipt.resources).sort(), [
-    "actionProfiles",
-    "backupResources",
-    "containers",
-    "mounts",
-    "networks",
-    "secretFiles",
-    "volumes",
-  ]);
-  assert.deepEqual(Object.keys(receipt.resources.actionProfiles), SCHEDULER_ACTION_NAMES);
+  assert.deepEqual(Object.keys(receipt.resources).sort(), [...ACTIVE_RECEIPT_RESOURCE_KEYS].sort());
+  assert.deepEqual(
+    Object.keys(receipt.resources.actionProfiles).sort(),
+    [...SCHEDULER_ACTION_NAMES].sort(),
+  );
+  assert.deepEqual(
+    Object.keys(receipt.resources.phaseProfiles).sort(),
+    Object.keys(EXPECTED_PHASE_PROFILES).sort(),
+  );
+
   for (const action of SCHEDULER_ACTION_NAMES) {
-    assert.deepEqual(
-      Object.keys(receipt.resources.actionProfiles[action]).sort(),
-      [...ACTION_PROFILE_KEYS].sort(),
-      action,
-    );
-    assert.deepEqual(
-      receipt.resources.actionProfiles[action].networkIds,
-      expectedNetworkIds(action),
-      `${action} network authority`,
+    const profile = receipt.resources.actionProfiles[action];
+    const expected = expectedActionPhases(action);
+    const capabilityId = capabilityFileId(action);
+    assert.deepEqual(Object.keys(profile).sort(), [...ACTION_PROFILE_KEYS].sort(), action);
+    assert.equal(profile.profileId, EXPECTED_ACTION_BINDINGS[action].profileId);
+    assert.equal(profile.profileSha256, profileDigest(profile), `${action} profile digest`);
+    assert.equal(profile.capabilityFileId, capabilityId);
+    assert.equal(profile.claimedJobSourceId, expectedClaimedJobSourceId(action));
+    assert.deepEqual(profile.jobOperations, expected.jobOperations);
+    assert.deepEqual(profile.operationPhaseIds, expected.operationPhaseIds);
+    assert.deepEqual(profile.phaseIds, expected.phaseIds);
+    assert.ok(receipt.resources.capabilityFiles[capabilityId]);
+    assert.equal(
+      receipt.resources.capabilityFiles[capabilityId].sha256,
+      fixtureSha256(fixtureCapabilityKey(action)),
     );
   }
-  assertUnique(
-    SCHEDULER_ACTION_NAMES.map((action) => receipt.resources.actionProfiles[action].profileId),
-    "receipt profileId",
+
+  for (const [phaseId, profile] of Object.entries(receipt.resources.phaseProfiles)) {
+    const expected = expectedPhaseProfile(phaseId);
+    assert.deepEqual(Object.keys(profile).sort(), [...PHASE_PROFILE_KEYS].sort(), phaseId);
+    assert.equal(profile.phaseId, phaseId);
+    assert.equal(profile.phaseSha256, phaseDigest(profile), `${phaseId} digest`);
+    for (const field of [
+      "command",
+      "mountIds",
+      "mutationPolicy",
+      "networkIds",
+      "outputSchema",
+      "scratchVolumeIds",
+      "workerSecretSetIds",
+      "writableSubpathIds",
+    ]) {
+      assert.deepEqual(profile[field], expected[field], `${phaseId}.${field}`);
+    }
+    assert.match(profile.workerImageId, /^sha256:[a-f0-9]{64}$/);
+    assert.match(profile.workerImageRef, /@sha256:[a-f0-9]{64}$/);
+    for (const mountId of profile.mountIds) assert.ok(receipt.resources.mounts[mountId], mountId);
+    for (const networkId of profile.networkIds) assert.ok(receipt.resources.networks[networkId], networkId);
+    for (const volumeId of profile.scratchVolumeIds) assert.ok(receipt.resources.volumes[volumeId], volumeId);
+    for (const setId of profile.workerSecretSetIds) {
+      assert.ok(receipt.resources.workerSecretSets[setId], setId);
+      assert.equal(setId.startsWith("capability."), false);
+    }
+    for (const subpathId of profile.writableSubpathIds) {
+      assert.ok(receipt.resources.writableSubpaths[subpathId], subpathId);
+    }
+    assert.equal(
+      profile.mountIds.includes("backup.root.ro") && profile.mountIds.includes("backup.root.rw"),
+      false,
+      `${phaseId} cannot receive both backup-root alternatives`,
+    );
+  }
+
+  assert.deepEqual(receipt.resources.phaseProfiles["job.restore.verify"].networkIds, []);
+  assert.deepEqual(receipt.resources.phaseProfiles["restore.verify"].networkIds, []);
+  assert.deepEqual(receipt.resources.phaseProfiles["offsite.sync"].networkIds, ["platform_egress"]);
+  assert.equal(
+    Object.entries(receipt.resources.phaseProfiles)
+      .filter(([phaseId]) => phaseId !== "offsite.sync")
+      .some(([, profile]) => profile.networkIds.includes("platform_egress")),
+    false,
   );
-  assertUnique(
-    SCHEDULER_ACTION_NAMES.map((action) => receipt.resources.actionProfiles[action].profileSha256),
-    "receipt profileSha256",
+  assert.equal(
+    receipt.resources.volumes["jobs.queue"].engineName,
+    "platform_infra_vps_backup_scheduler_jobs",
   );
-  assert.deepEqual(Object.keys(receipt.resources.networks["offsite.egress"]).sort(), [
-    "driver",
-    "externalEgress",
-    "internal",
-    "name",
-    "networkId",
-    "optionsSha256",
-  ]);
-  assert.deepEqual(Object.keys(receipt.resources.secretFiles["capability.backup.catalog"]).sort(), [
-    "canonicalPath",
-    "device",
-    "inode",
-    "mode",
-    "ownerGid",
-    "ownerUid",
-    "sha256",
-    "symlinkFree",
-  ]);
-  assert.deepEqual(Object.keys(receipt.resources.volumes["backup.quarantine"]).sort(), [
-    "driver",
-    "labelsSha256",
-    "name",
-    "optionsSha256",
-  ]);
+  assert.equal(receipt.resources.claimedJobSources["jobs.running"].volumeId, "jobs.queue");
+  assert.equal(receipt.resources.claimedJobSources["jobs.running"].brokerRoot, "/run/platform/backup-jobs/running");
+  assert.equal(receipt.resources.writableSubpaths["backup.quarantine"].device, 42);
+  assert.equal(receipt.resources.mounts["backup.root.rw"].device, 42);
+  assert.equal(receipt.resources.volumes["backup.quarantine"], undefined);
 
   const invalid = [
     ["top-level extension", (value) => { value.extension = true; }],
     ["resources extension", (value) => { value.resources.extension = {}; }],
-    ["missing resources map", (value) => { delete value.resources.secretFiles; }],
+    ["missing capability map", (value) => { delete value.resources.capabilityFiles; }],
     ["missing scheduler action", (value) => { delete value.resources.actionProfiles["backup.catalog"]; }],
-    ["runtime evidence mixed into scheduler profiles", (value) => {
-      value.resources.actionProfiles["evidence.runtime.snapshot"] = structuredClone(value.resources.actionProfiles["backup.catalog"]);
+    ["evidence mixed into scheduler profiles", (value) => {
+      value.resources.actionProfiles["evidence.runtime.snapshot"] =
+        structuredClone(value.resources.actionProfiles["backup.catalog"]);
     }],
-    ["action profile extension", (value) => { value.resources.actionProfiles["backup.catalog"].extension = true; }],
-    ["profile digest mismatch", (value) => {
+    ["action extension", (value) => {
+      value.resources.actionProfiles["backup.catalog"].extension = true;
+    }],
+    ["action digest mismatch", (value) => {
       value.resources.actionProfiles["backup.catalog"].profileSha256 = "0".repeat(64);
     }, false],
-    ["duplicate profile identity", (value) => {
+    ["duplicate action profile identity", (value) => {
       value.resources.actionProfiles["backup.catalog"].profileId =
         value.resources.actionProfiles["backup.job.execute"].profileId;
     }],
-    ["duplicate job operation", (value) => {
-      value.resources.actionProfiles["backup.job.execute"].jobOperations = ["backup", "backup"];
-    }],
-    ["unsorted job operations", (value) => {
-      value.resources.actionProfiles["backup.job.execute"].jobOperations = ["restore-drill", "backup"];
-    }],
-    ["job operation on fixed action", (value) => {
+    ["fixed action gains operation", (value) => {
       value.resources.actionProfiles["backup.catalog"].jobOperations = ["backup"];
     }],
-    ["dangling mount", (value) => {
-      value.resources.actionProfiles["backup.catalog"].mountIds = ["missing.mount"];
+    ["job operation is duplicated", (value) => {
+      value.resources.actionProfiles["backup.job.execute"].jobOperations = ["backup", "backup"];
     }],
-    ["duplicate mount", (value) => {
-      value.resources.actionProfiles["backup.catalog"].mountIds = ["backup.root", "backup.root"];
+    ["job operation mapping is missing", (value) => {
+      delete value.resources.actionProfiles["backup.job.execute"].operationPhaseIds.backup;
     }],
-    ["unsorted mounts", (value) => {
-      value.resources.actionProfiles["backup.job.execute"].mountIds = ["jobs.running", "backup.root"];
+    ["fixed action gains operation mapping", (value) => {
+      value.resources.actionProfiles["backup.catalog"].operationPhaseIds = {
+        backup: ["catalog.capture"],
+      };
     }],
-    ["dangling secret file", (value) => {
-      value.resources.actionProfiles["backup.catalog"].secretFileIds = ["missing.secret"];
-    }],
-    ["duplicate secret file", (value) => {
-      const id = value.resources.actionProfiles["backup.catalog"].secretFileIds[0];
-      value.resources.actionProfiles["backup.catalog"].secretFileIds = [id, id];
-    }],
-    ["unsorted secret files", (value) => {
-      value.resources.actionProfiles["backup.offsite.sync"].secretFileIds.reverse();
-    }],
-    ["dangling quarantine volume", (value) => {
-      value.resources.actionProfiles["backup.prune.apply"].quarantineVolumeIds = ["missing.volume"];
-    }],
-    ["duplicate scratch volume", (value) => {
-      value.resources.actionProfiles["restore.drill.full"].scratchVolumeIds = [
-        "restore.scratch",
-        "restore.scratch",
+    ["job action gains fixed phase union", (value) => {
+      value.resources.actionProfiles["backup.job.execute"].phaseIds = [
+        "job.backup.capture",
+        "job.restore.verify",
       ];
     }],
-    ["duplicate network", (value) => {
-      value.resources.actionProfiles["backup.catalog"].networkIds = [
+    ["dangling claimed source", (value) => {
+      value.resources.actionProfiles["backup.job.execute"].claimedJobSourceId = "jobs.missing";
+    }],
+    ["fixed action gains claimed source", (value) => {
+      value.resources.actionProfiles["backup.catalog"].claimedJobSourceId = "jobs.running";
+    }],
+    ["missing phase", (value) => { delete value.resources.phaseProfiles["prune.apply"]; }],
+    ["phase extension", (value) => {
+      value.resources.phaseProfiles["prune.plan"].extension = true;
+    }],
+    ["phase digest mismatch", (value) => {
+      value.resources.phaseProfiles["prune.plan"].phaseSha256 = "0".repeat(64);
+    }, false],
+    ["phase ID substitution", (value) => {
+      value.resources.phaseProfiles["prune.plan"].phaseId = "prune.apply";
+    }],
+    ["phase command substitution", (value) => {
+      value.resources.phaseProfiles["restore.verify"].command = "restore-full";
+    }],
+    ["phase output schema substitution", (value) => {
+      value.resources.phaseProfiles["restore.verify"].outputSchema = "platform.generic/v1";
+    }],
+    ["restore phase gains DB network", (value) => {
+      value.resources.phaseProfiles["restore.verify"].networkIds = ["platform_db_admin"];
+    }],
+    ["non-offsite phase gains egress", (value) => {
+      value.resources.phaseProfiles["catalog.capture"].networkIds = ["platform_egress"];
+    }],
+    ["offsite loses egress", (value) => {
+      value.resources.phaseProfiles["offsite.sync"].networkIds = [];
+    }],
+    ["phase has duplicate network", (value) => {
+      value.resources.phaseProfiles["catalog.capture"].networkIds = [
         "platform_db_admin",
         "platform_db_admin",
       ];
     }],
-    ["unsorted networks", (value) => {
-      value.resources.actionProfiles["backup.catalog"].networkIds.reverse();
+    ["phase has dangling mount", (value) => {
+      value.resources.phaseProfiles["catalog.capture"].mountIds = ["missing.mount"];
     }],
-    ["dangling network", (value) => {
-      value.resources.actionProfiles["backup.offsite.sync"].networkIds = ["missing.network"];
+    ["phase gains RO and RW backup roots", (value) => {
+      value.resources.phaseProfiles["restore.verify"].mountIds = [
+        "backup.root.ro",
+        "backup.root.rw",
+        "report.root.rw",
+      ];
     }],
-    ["egress network on non-offsite action", (value) => {
-      value.resources.actionProfiles["backup.catalog"].networkIds = ["offsite.egress"];
+    ["phase has dangling secret set", (value) => {
+      value.resources.phaseProfiles["offsite.sync"].workerSecretSetIds = ["missing.secret-set"];
     }],
-    ["offsite action without exact egress", (value) => {
-      value.resources.actionProfiles["backup.offsite.sync"].networkIds = [];
+    ["capability referenced as worker set", (value) => {
+      value.resources.phaseProfiles["offsite.sync"].workerSecretSetIds = [
+        "capability.backup.offsite.sync",
+      ];
     }],
-    ["external egress flag on an internal network", (value) => {
-      value.resources.networks.platform_db_admin.externalEgress = true;
+    ["phase has dangling scratch volume", (value) => {
+      value.resources.phaseProfiles["restore.verify"].scratchVolumeIds = ["missing.volume"];
     }],
-    ["non-internal database network", (value) => {
-      value.resources.networks.platform_db_admin.internal = false;
+    ["phase has dangling writable subpath", (value) => {
+      value.resources.phaseProfiles["prune.apply"].writableSubpathIds = ["missing.subpath"];
     }],
-    ["network extension", (value) => { value.resources.networks["offsite.egress"].extension = true; }],
-    ["secret extension", (value) => {
-      value.resources.secretFiles["capability.backup.catalog"].extension = true;
+    ["quarantine leaves backup filesystem", (value) => {
+      value.resources.writableSubpaths["backup.quarantine"].device = 99;
     }],
-    ["volume extension", (value) => { value.resources.volumes["backup.quarantine"].extension = true; }],
+    ["quarantine uses RO parent", (value) => {
+      value.resources.writableSubpaths["backup.quarantine"].mountId = "backup.root.ro";
+    }],
+    ["quarantine path traversal", (value) => {
+      value.resources.writableSubpaths["backup.quarantine"].relativePath = "../quarantine";
+    }],
+    ["queue volume substitution", (value) => {
+      value.resources.volumes["jobs.queue"].engineName = "attacker_queue";
+    }],
+    ["queue source points to other volume", (value) => {
+      value.resources.claimedJobSources["jobs.running"].volumeId = "restore.scratch";
+    }],
+    ["queue root traversal", (value) => {
+      value.resources.claimedJobSources["jobs.running"].brokerRoot =
+        "/run/platform/backup-jobs/../queued";
+    }],
+    ["queue is unbounded", (value) => {
+      value.resources.claimedJobSources["jobs.running"].maximumBytes = Number.MAX_SAFE_INTEGER;
+    }],
+    ["missing evidence capability", (value) => {
+      delete value.resources.capabilityFiles["capability.evidence.runtime.snapshot"];
+    }],
+    ["capability path substitution", (value) => {
+      value.resources.capabilityFiles["capability.backup.catalog"].brokerPath =
+        "/run/secrets/docker_action_backup_prune_plan";
+    }],
+    ["capability digest substitution", (value) => {
+      value.resources.capabilityFiles["capability.backup.catalog"].sha256 = "9".repeat(64);
+    }],
+    ["secret-set volume substitution", (value) => {
+      value.resources.workerSecretSets["manifest.signing"].volumeId = "jobs.queue";
+    }],
+    ["secret-set path traversal", (value) => {
+      value.resources.workerSecretSets["offsite.credentials"].files.password.relativePath = "../password";
+    }],
+    ["worker file extension", (value) => {
+      value.resources.workerSecretSets["manifest.verification"].files.key.extension = true;
+    }],
+    ["network ID substitution", (value) => {
+      value.resources.networks.platform_egress.engineId = "9".repeat(64);
+    }],
+    ["network extension", (value) => {
+      value.resources.networks.platform_egress.extension = true;
+    }],
+    ["volume extension", (value) => {
+      value.resources.volumes["restore.scratch"].extension = true;
+    }],
+    ["backup root is not root-private", (value) => {
+      value.resources.mounts["backup.root.ro"].mode = 0o755;
+    }],
   ];
   for (const [label, mutate, reseal = true] of invalid) {
     const candidate = structuredClone(receipt);
@@ -501,76 +682,70 @@ test("RED v2: active receipt admits only exact complete profiles and sorted live
 });
 
 test("RED v2: signed runtime intent detects every Release-owned receipt reference mutation", () => {
-  const receipt = activeReceiptFixture();
-  const normalized = contract.normalizeActiveReceipt(receipt, { now: NOW });
-  const intent = contract.signRuntimeIntent({
-    schema: contract.RUNTIME_INTENT_SCHEMA,
-    activeReceiptSha256: contract.sha256(contract.canonicalJson(normalized)),
-    activationBundleSha256: receipt.activationBundleSha256,
-    allowedActions: [...SCHEDULER_ACTION_NAMES],
-    candidateId: receipt.candidateId,
-    combinedRenderSha256: receipt.combinedRenderSha256,
-    dastChainSha256: receipt.dastChainSha256,
-    environment: receipt.environment,
-    expiresAt: new Date(NOW + 30 * 60_000).toISOString(),
-    generation: receipt.generation,
-    intentId: "intent.release-v2",
-    issuedAt: new Date(NOW - 30_000).toISOString(),
-    releaseId: receipt.releaseId,
-    targetId: receipt.targetId,
-  }, TRUST_KEY);
-
-  const trusted = contract.normalizeTrustedContext(intent, receipt, TRUST_KEY, { now: NOW });
+  const {
+    intent,
+    rawReceipt: receipt,
+    receiptDigest,
+    trusted,
+  } = buildTrustedContextV2(contract, {
+    allowedActions: SCHEDULER_ACTION_NAMES,
+    now: NOW,
+    trustKey: TRUST_KEY,
+  });
+  assert.match(intent.mac, /^[a-f0-9]{64}$/);
   assert.equal(trusted.receiptDigest, intent.activeReceiptSha256);
+  assert.equal(trusted.receiptDigest, receiptDigest);
 
   const mutations = [
-    ["profileSha256", (value) => {
-      value.resources.actionProfiles["backup.catalog"].profileSha256 = "d".repeat(64);
-    }],
-    ["workerImageId", (value) => {
-      value.resources.actionProfiles["backup.catalog"].workerImageId = `sha256:${"b".repeat(64)}`;
-    }],
-    ["workerImageRef", (value) => {
-      value.resources.actionProfiles["backup.catalog"].workerImageRef =
-        `registry.example/platform/other-worker@sha256:${"c".repeat(64)}`;
-    }],
     ["coherent worker image substitution", (value) => {
-      value.resources.actionProfiles["backup.catalog"].workerImageId = `sha256:${"8".repeat(64)}`;
-      value.resources.actionProfiles["backup.catalog"].workerImageRef =
+      value.resources.phaseProfiles["catalog.capture"].workerImageId = `sha256:${"8".repeat(64)}`;
+      value.resources.phaseProfiles["catalog.capture"].workerImageRef =
         `registry.example/platform/docker-action-substitute@sha256:${"8".repeat(64)}`;
     }],
-    ["secret sha256", (value) => {
-      value.resources.secretFiles["capability.backup.catalog"].sha256 = "9".repeat(64);
+    ["phase plan substitution", (value) => {
+      value.resources.actionProfiles["backup.catalog"].phaseIds = ["prune.plan"];
     }],
-    ["mount inode", (value) => { value.resources.mounts["backup.root"].inode += 1; }],
+    ["capability file digest", (value) => {
+      value.resources.capabilityFiles["capability.backup.catalog"].sha256 = "9".repeat(64);
+    }],
+    ["worker verification file digest", (value) => {
+      value.resources.workerSecretSets["manifest.verification"].files.key.sha256 = "8".repeat(64);
+    }],
+    ["mount inode", (value) => { value.resources.mounts["backup.root.ro"].inode += 1; }],
     ["network identity", (value) => {
-      value.resources.networks["offsite.egress"].networkId = "9".repeat(64);
+      value.resources.networks.platform_egress.engineId = "9".repeat(64);
     }],
     ["volume options", (value) => {
-      value.resources.volumes["backup.quarantine"].optionsSha256 = "f".repeat(64);
+      value.resources.volumes["restore.scratch"].optionsSha256 = "f".repeat(64);
+    }],
+    ["claimed queue identity", (value) => {
+      value.resources.volumes["jobs.queue"].engineName = "attacker_queue";
+    }],
+    ["quarantine same-device binding", (value) => {
+      value.resources.writableSubpaths["backup.quarantine"].device = 99;
     }],
   ];
   for (const [label, mutate] of mutations) {
     const candidate = structuredClone(receipt);
     mutate(candidate);
+    resealActionProfiles(candidate);
+    const normalizedCandidate = contract.normalizeActiveReceipt(candidate, { now: NOW });
+    const candidateDigest = fixtureSha256(canonicalFixtureJson(normalizedCandidate));
+    assert.notEqual(candidateDigest, receiptDigest, `${label} must alter signed receipt lineage`);
     assert.throws(
       () => contract.normalizeTrustedContext(intent, candidate, TRUST_KEY, { now: NOW }),
-      undefined,
+      /receipt digest|does not match/i,
       label,
     );
   }
 });
 
 function requestTrustedFixture(action) {
-  const receipt = activeReceiptFixture();
-  return Object.freeze({
-    intent: Object.freeze({
-      allowedActions: Object.freeze([action]),
-      intentId: "intent.release-v2",
-    }),
-    receipt,
-    receiptDigest: contract.sha256(contract.canonicalJson(receipt)),
-  });
+  return buildTrustedContextV2(contract, {
+    allowedActions: [action],
+    now: NOW,
+    trustKey: TRUST_KEY,
+  }).trusted;
 }
 
 function signedRequest(action, parameters, trusted, index) {
@@ -580,158 +755,18 @@ function signedRequest(action, parameters, trusted, index) {
     requestId: `123e4567-e89b-42d3-a456-${suffix}`,
     nonce: Buffer.alloc(32, index + 1).toString("base64url"),
   });
-  return contract.signActionRequest(unsigned, CAPABILITY_KEY);
+  return contract.signActionRequest(unsigned, capabilityKey(action));
 }
 
 function activeReceiptFixture() {
-  const actionProfiles = {};
-  const secretFiles = {};
-  for (const [index, action] of SCHEDULER_ACTION_NAMES.entries()) {
-    const capabilitySecretId = `capability.${action}`;
-    const digest = (index + 1).toString(16).repeat(64);
-    const profileId = contract.SCHEDULER_ACTIONS?.[action]?.profileId ?? `scheduler.${action}.v2`;
-    secretFiles[capabilitySecretId] = {
-      canonicalPath: `/run/secrets/docker_action_${action.replaceAll(".", "_")}`,
-      device: 100,
-      inode: 1000 + index,
-      mode: 0o400,
-      ownerGid: 0,
-      ownerUid: 0,
-      sha256: digest,
-      symlinkFree: true,
-    };
-    const unsignedProfile = {
-      jobOperations: action === "backup.job.execute" ? ["backup", "restore-drill"] : [],
-      mountIds: action === "backup.job.execute" ? ["backup.root", "jobs.running"] : ["backup.root"],
-      networkIds: expectedNetworkIds(action),
-      profileId,
-      quarantineVolumeIds: action === "backup.prune.apply" ? ["backup.quarantine"] : [],
-      scratchVolumeIds: action === "restore.drill.full" ? ["restore.scratch"] : [],
-      secretFileIds: action === "backup.offsite.sync"
-        ? [capabilitySecretId, "offsite.restic.credentials"].sort()
-        : [capabilitySecretId],
-      workerImageId: `sha256:${digest}`,
-      workerImageRef: `registry.example/platform/docker-action-${index + 1}@sha256:${digest}`,
-    };
-    actionProfiles[action] = {
-      ...unsignedProfile,
-      profileSha256: contract.sha256(contract.canonicalJson(unsignedProfile)),
-    };
-  }
-  secretFiles["offsite.restic.credentials"] = {
-    canonicalPath: "/run/secrets/restic_repository_credentials",
-    device: 100,
-    inode: 2000,
-    mode: 0o400,
-    ownerGid: 0,
-    ownerUid: 0,
-    sha256: "d".repeat(64),
-    symlinkFree: true,
-  };
-
-  return {
-    schema: ACTIVE_RECEIPT_SCHEMA_V2,
-    activationBundleSha256: "a".repeat(64),
-    candidateId: "candidate.v2",
-    combinedRenderSha256: "b".repeat(64),
-    dastChainSha256: "c".repeat(64),
-    environment: "production",
-    expiresAt: new Date(NOW + 60 * 60_000).toISOString(),
-    generation: 2,
-    issuedAt: new Date(NOW - 60_000).toISOString(),
-    receiptId: "receipt.v2",
-    releaseId: "release.v2",
-    resources: {
-      actionProfiles,
-      backupResources: {
-        "source:platform": {
-          externalId: "platform",
-          kind: "source",
-          name: "platform",
-          projectId: "platform",
-          sourceDirectory: "platform",
-        },
-      },
-      containers: {},
-      mounts: {
-        "backup.root": {
-          access: "ro",
-          canonicalPath: "/srv/platform/backups",
-          containerPath: "/data/backups",
-          device: 42,
-          inode: 4242,
-          kind: "directory",
-          mode: 0o755,
-          ownerGid: 0,
-          ownerUid: 0,
-          symlinkFree: true,
-        },
-        "jobs.running": {
-          access: "ro",
-          canonicalPath: "/srv/platform/project-state/backup-jobs/running",
-          containerPath: "/var/www/project-state",
-          device: 42,
-          inode: 4243,
-          kind: "directory",
-          mode: 0o700,
-          ownerGid: 0,
-          ownerUid: 0,
-          symlinkFree: true,
-        },
-      },
-      networks: {
-        platform_db_admin: {
-          driver: "bridge",
-          externalEgress: false,
-          internal: true,
-          name: "platform-db-admin",
-          networkId: "a".repeat(64),
-          optionsSha256: "b".repeat(64),
-        },
-        platform_storage: {
-          driver: "bridge",
-          externalEgress: false,
-          internal: true,
-          name: "platform-storage",
-          networkId: "c".repeat(64),
-          optionsSha256: "d".repeat(64),
-        },
-        "offsite.egress": {
-          driver: "bridge",
-          externalEgress: true,
-          internal: false,
-          name: "platform-offsite-egress",
-          networkId: "e".repeat(64),
-          optionsSha256: "f".repeat(64),
-        },
-      },
-      secretFiles,
-      volumes: {
-        "backup.quarantine": {
-          driver: "local",
-          labelsSha256: "1".repeat(64),
-          name: "platform-backup-quarantine",
-          optionsSha256: "2".repeat(64),
-        },
-        "restore.scratch": {
-          driver: "local",
-          labelsSha256: "3".repeat(64),
-          name: "platform-restore-scratch",
-          optionsSha256: "4".repeat(64),
-        },
-      },
-    },
-    sourceRenderSha256: "5".repeat(64),
-    targetId: "platform.primary",
-    treeSha256: "6".repeat(64),
-  };
+  return buildRawActiveReceiptV2({ now: NOW });
 }
 
 function responseMac(unsigned, key) {
   return crypto
     .createHmac("sha256", key)
     .update(RESPONSE_MAC_DOMAIN)
-    .update(contract.canonicalJson(unsigned))
+    .update(canonicalFixtureJson(unsigned))
     .digest("hex");
 }
 
@@ -739,24 +774,12 @@ function requestMac(unsigned, key) {
   return crypto
     .createHmac("sha256", key)
     .update(REQUEST_MAC_DOMAIN)
-    .update(contract.canonicalJson(unsigned))
+    .update(canonicalFixtureJson(unsigned))
     .digest("hex");
 }
 
-function expectedNetworkIds(action) {
-  if (action === "backup.offsite.sync") return ["offsite.egress"];
-  if (["backup.catalog", "backup.job.execute", "restore.drill.full"].includes(action)) {
-    return ["platform_db_admin", "platform_storage"];
-  }
-  return [];
-}
-
-function resealActionProfiles(receipt) {
-  for (const profile of Object.values(receipt.resources.actionProfiles)) {
-    if (!profile || typeof profile !== "object" || Array.isArray(profile)) continue;
-    const unsigned = Object.fromEntries(Object.entries(profile).filter(([key]) => key !== "profileSha256"));
-    profile.profileSha256 = contract.sha256(contract.canonicalJson(unsigned));
-  }
+function capabilityKey(action) {
+  return fixtureCapabilityKey(action);
 }
 
 function omit(value, key) {

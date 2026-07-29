@@ -25,10 +25,13 @@ test("accepts the host-private immutable action broker boundary", () => {
     "docker-broker-socket-volume-not-aliased",
     "docker-broker-state-volume-not-aliased",
     "docker-broker-exact-capability-secrets",
+    "docker-broker-claimed-job-queue-read-only",
+    "docker-broker-claimed-job-queue-not-aliased",
     "scheduler-immutable-image",
     "scheduler-minimum-authority",
     "scheduler-host-private",
     "scheduler-exact-mount-targets",
+    "scheduler-claimed-job-queue-read-write",
     "scheduler-writable-paths",
     "scheduler-exact-capability-secrets",
     "scheduler-uses-local-action-socket",
@@ -41,24 +44,56 @@ test("accepts the host-private immutable action broker boundary", () => {
   assert.equal(report.summary.hostedWorkloads, 1);
 });
 
-for (const source of ["/", "/run", "/var/run", "/run/docker.sock"]) {
-  test(`rejects cAdvisor raw socket exposing mount ${source}`, () => {
-    const config = fixture();
-    config.services.cadvisor = bounded({
+test("the policy consumes a realistic Compose JSON render, not a source-only fixture shape", () => {
+  const renderedJson = JSON.stringify(fixture());
+  const parsedRender = JSON.parse(renderedJson);
+  const report = evaluateRuntimeIsolation(parsedRender);
+
+  assert.equal(report.status, "passed", report.failures.join("\n"));
+  assert.deepEqual(report.summary.rawSocketOwners, ["docker-action-broker"]);
+
+  parsedRender.services["node-exporter"].volumes = [
+    {
+      type: "bind",
+      source: "/",
+      target: "/host",
       read_only: true,
-      volumes: [
-        { type: "bind", source, target: "/host-runtime", read_only: true },
-      ],
-      networks: { platform_observability: null },
+      bind: { create_host_path: true },
+    },
+  ];
+  const widened = evaluateRuntimeIsolation(JSON.parse(JSON.stringify(parsedRender)));
+  assert.equal(widened.checks.find((item) => item.id === "raw-socket-single-owner")?.status, "failed");
+  assert.ok(widened.summary.rawSocketOwners.includes("node-exporter"));
+});
+
+test("the rendered policy follows volumes_from authority instead of trusting an empty local mount list", () => {
+  const config = fixture();
+  config.services.cadvisor.volumes_from = ["docker-action-broker:ro"];
+  const report = evaluateRuntimeIsolation(JSON.parse(JSON.stringify(config)));
+  assert.equal(report.checks.find((item) => item.id === "raw-socket-single-owner")?.status, "failed");
+  assert.ok(report.summary.rawSocketOwners.includes("cadvisor"));
+});
+
+for (const serviceName of ["cadvisor", "node-exporter"]) {
+  for (const source of ["/", "/run", "/var/run", "/run/docker.sock"]) {
+    test(`rejects ${serviceName} raw socket exposing mount ${source}`, () => {
+      const config = fixture();
+      config.services[serviceName] = bounded({
+        read_only: true,
+        volumes: [
+          { type: "bind", source, target: "/host-runtime", read_only: true },
+        ],
+        networks: { platform_observability: null },
+      });
+      const report = evaluateRuntimeIsolation(config);
+      assert.equal(
+        report.checks.find((item) => item.id === "raw-socket-single-owner")?.status,
+        "failed",
+        `${source} exposes /var/run/docker.sock even when mounted read-only`,
+      );
+      assert.ok(report.summary.rawSocketOwners.includes(serviceName), `${source} must make ${serviceName} a raw socket owner`);
     });
-    const report = evaluateRuntimeIsolation(config);
-    assert.equal(
-      report.checks.find((item) => item.id === "raw-socket-single-owner")?.status,
-      "failed",
-      `${source} exposes /var/run/docker.sock even when mounted read-only`,
-    );
-    assert.ok(report.summary.rawSocketOwners.includes("cadvisor"), `${source} must make cAdvisor a raw socket owner`);
-  });
+  }
 }
 
 for (const device of ["/", "/run", "/var/run"]) {
@@ -142,6 +177,15 @@ test("rejects broker socket and state volume alias substitution", () => {
   report = evaluateRuntimeIsolation(activationCas);
   assert.equal(report.status, "failed");
   assert.match(report.failures.join("\n"), /docker-broker-activation-cas-volume-not-aliased/);
+
+  const jobQueue = fixture();
+  jobQueue.volumes.backup_scheduler_jobs = {
+    driver: "local",
+    driver_opts: { type: "none", o: "bind,ro", device: "/srv/shared/jobs" },
+  };
+  report = evaluateRuntimeIsolation(jobQueue);
+  assert.equal(report.status, "failed");
+  assert.match(report.failures.join("\n"), /docker-broker-claimed-job-queue-not-aliased/);
 });
 
 test("rejects mutable, networked or candidate-mounted brokers", () => {
@@ -190,6 +234,33 @@ test("rejects broker readiness that proves only the UDS exists", () => {
   assert.match(report.failures.join("\n"), /docker-broker-trust-aware-readiness/);
 });
 
+test("rejects readiness commands that merely contain trusted-looking words", () => {
+  const config = fixture();
+  config.services["docker-action-broker"].healthcheck = {
+    test: ["CMD", "echo", "readiness trusted activation receipt"],
+  };
+  const report = evaluateRuntimeIsolation(config);
+  assert.equal(report.checks.find((item) => item.id === "docker-broker-trust-aware-readiness")?.status, "failed");
+});
+
+test("requires the exact readiness module command and mandatory trust argument", () => {
+  for (const command of [
+    ["CMD", "node", "/opt/platform-docker-broker/docker-action-readiness.mjs"],
+    ["CMD", "node", "/opt/platform-docker-broker/docker-action-readiness.mjs", "--require-trusted-activation", "--allow-pending"],
+    ["CMD", "node", "/tmp/docker-action-readiness.mjs", "--require-trusted-activation"],
+    ["CMD-SHELL", "node /opt/platform-docker-broker/docker-action-readiness.mjs --require-trusted-activation"],
+  ]) {
+    const config = fixture();
+    config.services["docker-action-broker"].healthcheck = { test: command };
+    const report = evaluateRuntimeIsolation(config);
+    assert.equal(
+      report.checks.find((item) => item.id === "docker-broker-trust-aware-readiness")?.status,
+      "failed",
+      `healthcheck widening was accepted: ${JSON.stringify(command)}`,
+    );
+  }
+});
+
 test("rejects a mutable or generic scheduler image", () => {
   const config = fixture();
   const scheduler = config.services["backup-scheduler"];
@@ -234,15 +305,93 @@ test("rejects scheduler repository, backup, report, state or source mounts", () 
   assert.match(report.failures.join("\n"), /scheduler-exact-mount-targets/);
 });
 
-test("rejects scheduler writable paths under a read-only /etc", () => {
+test("requires the private claimed-job queue read-write on scheduler and read-only on broker", () => {
+  const schedulerReadOnly = fixture();
+  schedulerReadOnly.services["backup-scheduler"].volumes
+    .find((mount) => mount.source === "backup_scheduler_jobs").read_only = true;
+  let report = evaluateRuntimeIsolation(schedulerReadOnly);
+  assert.equal(report.checks.find((item) => item.id === "scheduler-claimed-job-queue-read-write")?.status, "failed");
+
+  const brokerWritable = fixture();
+  brokerWritable.services["docker-action-broker"].volumes
+    .find((mount) => mount.source === "backup_scheduler_jobs").read_only = false;
+  report = evaluateRuntimeIsolation(brokerWritable);
+  assert.equal(report.checks.find((item) => item.id === "docker-broker-claimed-job-queue-read-only")?.status, "failed");
+
+  const thirdParty = fixture();
+  thirdParty.services["example-app-web"].volumes.push({
+    type: "volume",
+    source: "backup_scheduler_jobs",
+    target: "/app/jobs",
+    read_only: true,
+  });
+  report = evaluateRuntimeIsolation(thirdParty);
+  assert.equal(report.checks.find((item) => item.id === "docker-broker-claimed-job-queue-not-aliased")?.status, "failed");
+
+  for (const declaration of [
+    { external: true, name: "platform_infra_vps_backup_scheduler_jobs" },
+    { name: "shared_backup_scheduler_jobs" },
+    { name: "${COMPOSE_PROJECT_NAME}_backup_scheduler_jobs" },
+  ]) {
+    const aliased = fixture();
+    aliased.volumes.backup_scheduler_jobs = declaration;
+    report = evaluateRuntimeIsolation(aliased);
+    assert.equal(
+      report.checks.find((item) => item.id === "docker-broker-claimed-job-queue-not-aliased")?.status,
+      "failed",
+      `claimed queue alias was accepted: ${JSON.stringify(declaration)}`,
+    );
+  }
+});
+
+test("rejects scheduler control files outside its exact hardened tmpfs", () => {
   const config = fixture();
   const scheduler = config.services["backup-scheduler"];
-  scheduler.environment.BACKUP_SCHEDULER_CRON_FILE = "/etc/crontabs/root";
-  scheduler.environment.BACKUP_SCHEDULER_ENV_FILE = "/etc/platform/backup-scheduler.env";
-  scheduler.tmpfs.push("/etc:rw,nosuid,nodev,size=8m");
+  scheduler.environment.BACKUP_SCHEDULER_CRON_FILE = "/tmp/root.cron";
+  scheduler.environment.BACKUP_SCHEDULER_ENV_FILE = "/var/lib/platform/backup-scheduler.env";
   const report = evaluateRuntimeIsolation(config);
   assert.equal(report.checks.find((item) => item.id === "scheduler-writable-paths")?.status, "failed");
   assert.match(report.failures.join("\n"), /scheduler-writable-paths/);
+});
+
+test("rejects scheduler tmpfs without noexec/nosuid/nodev or with an unbounded size", () => {
+  for (const tmpfs of [
+    [
+      "/tmp:rw,nosuid,nodev,size=64m",
+      "/run/platform/backup-scheduler:rw,noexec,nosuid,nodev,size=8m",
+    ],
+    [
+      "/tmp:rw,noexec,nosuid,nodev,size=1024m",
+      "/run/platform/backup-scheduler:rw,noexec,nosuid,nodev,size=8m",
+    ],
+    [
+      "/tmp:rw,noexec,nosuid,nodev,size=64m",
+      "/run/platform/backup-scheduler:rw,noexec,nosuid,size=8m",
+    ],
+  ]) {
+    const config = fixture();
+    config.services["backup-scheduler"].tmpfs = tmpfs;
+    const report = evaluateRuntimeIsolation(config);
+    assert.equal(
+      report.checks.find((item) => item.id === "scheduler-writable-paths")?.status,
+      "failed",
+      `unsafe tmpfs was accepted: ${JSON.stringify(tmpfs)}`,
+    );
+  }
+});
+
+test("rejects scheduler mount source, target, type and option widening", () => {
+  for (const mutate of [
+    (scheduler) => { scheduler.volumes.find((mount) => mount.target === "/var/log/platform").source = "shared_logs"; },
+    (scheduler) => { scheduler.volumes.find((mount) => mount.target === "/run/platform/docker-action-broker").read_only = false; },
+    (scheduler) => { scheduler.volumes.find((mount) => mount.source === "backup_scheduler_jobs").target = "/run/jobs"; },
+    (scheduler) => { scheduler.volumes.find((mount) => mount.source === "backup_scheduler_jobs").type = "bind"; },
+  ]) {
+    const config = fixture();
+    mutate(config.services["backup-scheduler"]);
+    const report = evaluateRuntimeIsolation(config);
+    assert.equal(report.checks.find((item) => item.id === "scheduler-exact-mount-targets")?.status, "failed");
+  }
 });
 
 test("rejects a mutable, networked or Docker-bearing activation sidecar", () => {
@@ -394,6 +543,18 @@ function fixture() {
     networks: {},
   });
   services["platform-alert-dispatcher"] = bounded({ read_only: true, networks: {} });
+  services["node-exporter"] = bounded({
+    read_only: true,
+    volumes: [
+      { type: "volume", source: "node_exporter_textfiles", target: "/var/lib/node-exporter/textfile", read_only: true },
+    ],
+    networks: { platform_observability: null },
+  });
+  services.cadvisor = bounded({
+    read_only: true,
+    volumes: [],
+    networks: { platform_observability: null },
+  });
   services["broker-auth-bootstrap"] = bounded({
     read_only: true,
     network_mode: "none",
@@ -492,6 +653,7 @@ function fixture() {
       { type: "bind", source: "/var/run/docker.sock", target: "/var/run/docker.sock", read_only: true },
       { type: "volume", source: "docker_action_broker_socket", target: "/run/platform/docker-action-broker", read_only: false },
       { type: "volume", source: "docker_action_broker_state", target: "/var/lib/platform/docker-action-broker", read_only: false },
+      { type: "volume", source: "backup_scheduler_jobs", target: "/run/platform/backup-jobs", read_only: true },
       { type: "volume", source: "docker_action_activation_cas", target: "/run/platform/docker-action-activation/by-bundle-sha256", read_only: true },
       { type: "bind", source: "/srv/platform/trust/runtime-intent.json", target: "/run/platform/docker-action-trust/runtime-intent.json", read_only: true },
       { type: "bind", source: "/srv/platform/trust/active-receipt.json", target: "/run/platform/docker-action-trust/active-receipt.json", read_only: true },
@@ -524,8 +686,9 @@ function fixture() {
       docker_action_broker_socket: {},
       docker_action_broker_state: {},
       docker_action_activation_cas: {},
-      backup_scheduler_jobs: {},
+      backup_scheduler_jobs: { name: "platform_infra_vps_backup_scheduler_jobs" },
       backup_scheduler_logs: {},
+      node_exporter_textfiles: {},
       example_data: {},
       redis_auth_config: {},
       nats_auth_config: {},
