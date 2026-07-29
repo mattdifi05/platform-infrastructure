@@ -7,12 +7,8 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import {
-  sha256,
-} from "./docker-action-contract.mjs";
 import * as broker from "./docker-action-broker.mjs";
 import {
-  backupDocumentDigest,
   createBackupJobDocument,
   parseBackupJobDocument,
 } from "../control-center/backup/contracts.mjs";
@@ -44,6 +40,62 @@ const REQUEST_INDEX = 426614174000;
 const SNAPSHOT_CONTAINER_PATH = "/run/platform/claimed-job/job.json";
 const MAX_WORKER_ENV_ENTRY_BYTES = 32 * 1024;
 const MAX_WORKER_ENV_TOTAL_BYTES = 64 * 1024;
+const EXPECTED_FIXED_ADAPTERS = Object.freeze({
+  "backup-catalog": Object.freeze({
+    api: "spawn",
+    executable: "/opt/platform-docker-worker/bin/backup-catalog",
+    argv: Object.freeze([]),
+    shell: false,
+  }),
+  "backup-job": Object.freeze({
+    api: "spawn",
+    executable: "/opt/platform-docker-worker/bin/backup-job",
+    argv: Object.freeze([]),
+    shell: false,
+  }),
+  "backup-offsite-sync": Object.freeze({
+    api: "spawn",
+    executable: "/opt/platform-docker-worker/bin/backup-offsite-sync",
+    argv: Object.freeze([]),
+    shell: false,
+  }),
+  "backup-prune-apply": Object.freeze({
+    api: "spawn",
+    executable: "/opt/platform-docker-worker/bin/backup-prune-apply",
+    argv: Object.freeze([]),
+    shell: false,
+  }),
+  "backup-prune-plan": Object.freeze({
+    api: "spawn",
+    executable: "/opt/platform-docker-worker/bin/backup-prune-plan",
+    argv: Object.freeze([]),
+    shell: false,
+  }),
+  "restore-drill-full": Object.freeze({
+    api: "spawn",
+    executable: "/opt/platform-docker-worker/bin/restore-drill-full",
+    argv: Object.freeze([]),
+    shell: false,
+  }),
+  "restore-job": Object.freeze({
+    api: "spawn",
+    executable: "/opt/platform-docker-worker/bin/restore-job",
+    argv: Object.freeze([]),
+    shell: false,
+  }),
+});
+const ALLOWED_WORKER_BUILTINS = new Set([
+  "node:buffer",
+  "node:child_process",
+  "node:crypto",
+  "node:events",
+  "node:fs",
+  "node:module",
+  "node:path",
+  "node:stream",
+  "node:url",
+  "node:util",
+]);
 const WORKER_TRUSTED_CONTEXT = buildFixtureTrustedContextV2().trusted;
 const BACKUP_JOB_DOCUMENT = Object.freeze({
   ...createBackupJobDocument({
@@ -452,6 +504,19 @@ workerTest("protected-file reader enforces leaf and ancestor identity, mode, lin
     /owner|uid/i,
     "the same inode under a substituted owner attestation must fail",
   );
+  assert.throws(
+    () => readProtectedFile(file, { ...policy, expectedGid: gid + 1 }),
+    /group|gid|owner/i,
+    "the same inode under a substituted group attestation must fail",
+  );
+
+  fs.chmodSync(file, 0o400);
+  assert.throws(
+    () => readProtectedFile(file, policy),
+    /mode|permission/i,
+    "a private but non-exact leaf mode must fail",
+  );
+  fs.chmodSync(file, 0o600);
 
   const oversized = path.join(root, "oversized.json");
   fs.writeFileSync(oversized, Buffer.alloc(65, 0x61), { mode: 0o600 });
@@ -479,6 +544,74 @@ workerTest("protected-file reader enforces leaf and ancestor identity, mode, lin
   assert.throws(
     () => readProtectedFile(path.join(parentAlias, "child.json"), policy),
     /ancestor|parent|symlink|canonical|realpath|directory/i,
+  );
+
+  const exactParent = path.join(root, "exact-parent");
+  fs.mkdirSync(exactParent, { mode: 0o700 });
+  const exactChild = path.join(exactParent, "child.json");
+  fs.writeFileSync(exactChild, "{}\n", { mode: 0o600 });
+  fs.chmodSync(exactParent, 0o500);
+  assert.throws(
+    () => readProtectedFile(exactChild, policy),
+    /ancestor|parent|directory|permission|mode/i,
+    "a private but non-exact ancestor mode must fail",
+  );
+  fs.chmodSync(exactParent, 0o700);
+
+  for (const [label, targetPath, field, value] of [
+    ["ancestor UID", exactParent, "uid", uid + 1],
+    ["ancestor GID", exactParent, "gid", gid + 1],
+    ["ancestor mode", exactParent, "mode", fs.statSync(exactParent).mode ^ 0o100],
+  ]) {
+    assert.throws(
+      () => readProtectedFile(
+        exactChild,
+        policy,
+        {
+          io: statMutationIo(exactChild, {
+            family: "path",
+            field,
+            targetPath,
+            value,
+          }),
+        },
+      ),
+      /ancestor|parent|directory|owner|uid|gid|group|permission|mode|identity/i,
+      `protected reader ignored isolated ${label} substitution`,
+    );
+  }
+
+  assert.throws(
+    () => readProtectedFile(
+      file,
+      policy,
+      {
+        io: statMutationIo(file, {
+          family: "fstat",
+          field: "isFile",
+          targetPath: file,
+          value: false,
+        }),
+      },
+    ),
+    /regular|file|identity|stat/i,
+    "protected reader admitted a non-regular descriptor",
+  );
+  assert.throws(
+    () => readProtectedFile(
+      file,
+      policy,
+      {
+        io: statMutationIo(file, {
+          family: "fstat",
+          field: "ino",
+          targetPath: file,
+          value: fs.lstatSync(file).ino + 1,
+        }),
+      },
+    ),
+    /identity|inode|ino|changed|race|stat/i,
+    "protected reader ignored leaf lstat/fstat divergence",
   );
 });
 
@@ -1041,11 +1174,26 @@ test("worker source is socketless while its fixed subprocess adapter remains tes
   assertSocketlessWorkerSource(source, "real worker source");
   for (const [label, hostileSource] of [
     ["bare net import", 'import net from "net";'],
+    ["bare undici import", 'import { request } from "undici";'],
     ["HTTP/2 import", 'import http2 from "node:http2";'],
     ["dynamic network import", 'const net = await import("node:" + "net");'],
+    ["getBuiltinModule", 'process.getBuiltinModule("node:net");'],
+    ["constructed getBuiltinModule", 'process["get" + "BuiltinModule"]("node:net");'],
+    [
+      "createRequire",
+      'import { createRequire } from "node:module"; createRequire(import.meta.url)("node:net");',
+    ],
+    ["eval", 'eval("process.getBuiltinModule(\\"node:net\\")");'],
+    ["Function constructor", 'Function("return fetch(\\"http://engine\\")")();'],
     ["global fetch", 'await fetch("http://engine/containers/json");'],
+    ["WebSocket", 'new WebSocket("ws://engine/events");'],
+    [
+      "child process network tool",
+      'import { spawn } from "node:child_process"; spawn("/usr/bin/curl", ["http://engine"]);',
+    ],
     ["joined Docker socket", 'const socket = ["/var/run/", "docker", ".sock"].join("");'],
     ["templated Docker socket", 'const socket = `/var/run/${"docker"}${".sock"}`;'],
+    ["unicode Docker socket", 'const socket = "docker\\u002esock";'],
   ]) {
     assert.throws(
       () => assertSocketlessWorkerSource(hostileSource, label),
@@ -1059,6 +1207,28 @@ test("worker source is socketless while its fixed subprocess adapter remains tes
     fs.readFileSync(staged.workerPath, "utf8"),
     source,
     "Dockerfile-exact staging changed the worker fixture",
+  );
+  assert.deepEqual(
+    assertSocketlessWorkerImportGraph(staged.workerPath),
+    ["docker-action-worker.mjs"],
+    "worker import graph escaped its one staged entrypoint",
+  );
+  const hostileGraphRoot = path.join(staged.root, "hostile-worker-graph");
+  fs.mkdirSync(hostileGraphRoot, { mode: 0o700 });
+  const hostileGraphEntry = path.join(hostileGraphRoot, "entry.mjs");
+  const hostileGraphNested = path.join(hostileGraphRoot, "nested.mjs");
+  fs.writeFileSync(hostileGraphEntry, 'import "./nested.mjs";\n', { mode: 0o600 });
+  fs.writeFileSync(hostileGraphNested, 'import "node:net";\n', { mode: 0o600 });
+  assert.throws(
+    () => assertSocketlessWorkerImportGraph(hostileGraphEntry),
+    /allowlist|socketless|builtin|network/i,
+    "socketless graph scanner ignored a nested forbidden builtin",
+  );
+  fs.writeFileSync(hostileGraphEntry, 'import "../escaped.mjs";\n', { mode: 0o600 });
+  assert.throws(
+    () => assertSocketlessWorkerImportGraph(hostileGraphEntry),
+    /escaped|root|graph|local/i,
+    "socketless graph scanner ignored a local import escaping its root",
   );
   const hookPath = path.join(staged.root, "fixed-adapter-hook-check.mjs");
   fs.writeFileSync(
@@ -1079,6 +1249,68 @@ test("worker source is socketless while its fixed subprocess adapter remains tes
     { signal: null, status: 0, stderr: "", stdout: "" },
     "fixed-adapter preload oracle is not syntactically valid",
   );
+
+  const guardPath = path.join(staged.root, "socketless-runtime-guard.mjs");
+  fs.writeFileSync(guardPath, socketlessRuntimeGuardSource(), { mode: 0o600 });
+  const guardCheck = spawnSync(process.execPath, ["--check", guardPath], {
+    encoding: "utf8",
+  });
+  assert.deepEqual(
+    { signal: guardCheck.signal, status: guardCheck.status, stderr: guardCheck.stderr },
+    { signal: null, status: 0, stderr: "" },
+    "socketless runtime guard is not syntactically valid",
+  );
+  const guardUrl = pathToFileURL(guardPath).href;
+  const positiveGuard = spawnSync(
+    process.execPath,
+    [
+      "--import",
+      guardUrl,
+      "--input-type=module",
+      "--eval",
+      'if (globalThis[Symbol.for("platform.worker.socketless-guard-count")] !== 1) throw new Error("guard sentinel"); await import("node:fs"); process.stdout.write("guard-ok\\n");',
+    ],
+    { encoding: "utf8", env: { HOME: staged.root, LANG: "C.UTF-8" } },
+  );
+  assert.deepEqual(
+    {
+      signal: positiveGuard.signal,
+      status: positiveGuard.status,
+      stderr: positiveGuard.stderr,
+      stdout: positiveGuard.stdout,
+    },
+    { signal: null, status: 0, stderr: "", stdout: "guard-ok\n" },
+    "socketless runtime guard broke the admitted builtin control",
+  );
+  for (const [label, snippet] of [
+    ["getBuiltinModule", 'process.getBuiltinModule("node:net");'],
+    [
+      "createRequire",
+      'const { createRequire } = await import("node:module"); createRequire(import.meta.url)("node:net");',
+    ],
+    ["eval", 'eval("1 + 1");'],
+    ["Function", 'Function("return 1")();'],
+    ["fetch", 'await fetch("http://engine");'],
+    [
+      "child-process curl",
+      'const { spawnSync } = await import("node:child_process"); spawnSync("/usr/bin/curl", []);',
+    ],
+  ]) {
+    const guarded = spawnSync(
+      process.execPath,
+      ["--import", guardUrl, "--input-type=module", "--eval", snippet],
+      {
+        encoding: "utf8",
+        env: { HOME: staged.root, LANG: "C.UTF-8" },
+      },
+    );
+    assert.notEqual(guarded.status, 0, `socketless runtime guard admitted ${label}`);
+    assert.match(
+      guarded.stderr,
+      /socketless runtime guard/i,
+      `${label} failed outside the socketless runtime guard`,
+    );
+  }
 });
 
 test("descriptor-stable read oracle requires exactly two complete positional passes", (t) => {
@@ -1088,6 +1320,7 @@ test("descriptor-stable read oracle requires exactly two complete positional pas
   const bytes = Buffer.from("descriptor-stable-read-oracle\n");
   fs.writeFileSync(file, bytes, { mode: 0o600 });
   const observed = observeDescriptorStableReadIo(file);
+  observed.io.lstatSync(file);
   const descriptor = observed.io.openSync(
     file,
     fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW,
@@ -1161,6 +1394,26 @@ test("descriptor-stable read oracle requires exactly two complete positional pas
       `stable-read oracle admitted ${label}`,
     );
   }
+  for (const field of Object.keys(observed.evidence.expectedIdentity)) {
+    const evidence = structuredClone(observed.evidence);
+    evidence.fstatEvents.at(-1).identity[field] = differentStatIdentityValue(
+      evidence.fstatEvents.at(-1).identity[field],
+    );
+    assert.throws(
+      () => assertStableReadEvidence(evidence),
+      /fstat identity changed across descriptor reads/i,
+      `stable-read oracle ignored post-read fstat ${field}`,
+    );
+  }
+  const divergentLeaf = structuredClone(observed.evidence);
+  divergentLeaf.leafLstatEvents[0].identity.ino = differentStatIdentityValue(
+    divergentLeaf.leafLstatEvents[0].identity.ino,
+  );
+  assert.throws(
+    () => assertStableReadEvidence(divergentLeaf),
+    /leaf lstat identity changed/i,
+    "stable-read oracle ignored leaf lstat/fstat divergence",
+  );
 
   fs.chmodSync(file, 0o400);
   const substituted = Buffer.from(bytes);
@@ -1201,6 +1454,224 @@ test("descriptor-stable read oracle requires exactly two complete positional pas
   assert.deepEqual(secondPass, substituted);
   racing.io.closeSync(racingDescriptor);
   assert.equal(fs.statSync(file).mode & 0o777, 0o400, "race fixture changed snapshot mode");
+});
+
+test("Dockerfile stage packages all seven exact root-owned fixed adapter targets", (t) => {
+  const staged = stageDockerWorkerImageLayout(t, "docker-worker-adapter-package-stage-");
+  const commands = Object.keys(EXPECTED_FIXED_ADAPTERS).sort();
+  assert.deepEqual(
+    commands,
+    [...new Set(Object.values(EXPECTED_PHASE_PROFILES).map(({ command }) => command))].sort(),
+    "fixed adapter oracle does not cover the exact seven phase commands",
+  );
+  const dockerfileSource = fs.readFileSync(staged.dockerfile, "utf8");
+  const missingTargets = [];
+  const nonRegularTargets = [];
+  const missingModeDeclarations = [];
+  for (const [command, expected] of Object.entries(EXPECTED_FIXED_ADAPTERS)) {
+    assert.deepEqual(Object.keys(expected).sort(), ["api", "argv", "executable", "shell"]);
+    assert.equal(expected.api, "spawn", `${command} must use the one admitted subprocess API`);
+    assert.deepEqual(expected.argv, [], `${command} must not carry caller identity in argv`);
+    assert.equal(expected.shell, false, `${command} must explicitly disable shell execution`);
+    assert.match(
+      expected.executable,
+      new RegExp(`^/opt/platform-docker-worker/bin/${escapeRegExp(command)}$`),
+    );
+    assert.doesNotMatch(
+      expected.executable,
+      /(?:^|\/)(?:env|sh|bash|dash|zsh|node|python|perl|ruby|curl|wget|nc|ncat|socat|ssh)$/,
+      `${command} collapsed to an interpreter, wrapper, shell, or network tool`,
+    );
+    const stagedTarget = stagedContainerPath(staged.root, expected.executable);
+    if (!fs.existsSync(stagedTarget)) {
+      missingTargets.push(expected.executable);
+    } else if (!fs.lstatSync(stagedTarget).isFile()) {
+      nonRegularTargets.push(expected.executable);
+    }
+    if (!dockerfileDeclaresExactMode(dockerfileSource, expected.executable, "0555")) {
+      missingModeDeclarations.push(expected.executable);
+    }
+  }
+  for (const [label, invocation] of [
+    ["shell with token smuggling", {
+      api: "spawn",
+      executable: "/bin/sh",
+      argv: ["-c", "id", "backup-catalog"],
+      shell: false,
+    }],
+    ["environment wrapper", {
+      api: "spawn",
+      executable: "/usr/bin/env",
+      argv: [EXPECTED_FIXED_ADAPTERS["backup-catalog"].executable],
+      shell: false,
+    }],
+    ["network tool", {
+      api: "spawn",
+      executable: "/usr/bin/curl",
+      argv: ["backup-catalog"],
+      shell: false,
+    }],
+    ["wrong child API", {
+      ...EXPECTED_FIXED_ADAPTERS["backup-catalog"],
+      api: "execFile",
+    }],
+    ["caller argv", {
+      ...EXPECTED_FIXED_ADAPTERS["backup-catalog"],
+      argv: ["attacker"],
+    }],
+    ["implicit shell", {
+      ...EXPECTED_FIXED_ADAPTERS["backup-catalog"],
+      shell: true,
+    }],
+  ]) {
+    assert.throws(
+      () => assertFixedAdapterInvocation(invocation, "backup-catalog"),
+      /exact code-owned adapter identity/i,
+      `fixed adapter oracle admitted ${label}`,
+    );
+  }
+  assert.deepEqual(
+    {
+      missingModeDeclarations,
+      missingTargets,
+      nonRegularTargets,
+      rootOwnedWorkerTree:
+        dockerfileDeclaresRootOwnedTree(dockerfileSource, "/opt/platform-docker-worker"),
+    },
+    {
+      missingModeDeclarations: [],
+      missingTargets: [],
+      nonRegularTargets: [],
+      rootOwnedWorkerTree: true,
+    },
+    "Dockerfile-exact stage is missing the root-owned 0555 fixed adapter package",
+  );
+});
+
+test("fixed adapter preload rejects every non-exact process identity before output", (t) => {
+  const staged = stageDockerWorkerImageLayout(t, "docker-worker-adapter-hook-stage-");
+  const command = "backup-catalog";
+  const phaseId = "catalog.capture";
+  const expected = EXPECTED_FIXED_ADAPTERS[command];
+  const stagedTarget = stagedContainerPath(staged.root, expected.executable);
+  fs.mkdirSync(path.dirname(stagedTarget), { mode: 0o700, recursive: true });
+  fs.writeFileSync(stagedTarget, "#!/bin/false\n", { mode: 0o555 });
+  fs.chmodSync(stagedTarget, 0o555);
+  const expectedEnvironment = {
+    HOME: staged.root,
+    LANG: "C.UTF-8",
+    PLATFORM_DOCKER_PHASE_ID: phaseId,
+  };
+  const expectedOutput = buildFixturePhaseOutputV2(
+    "backup.catalog",
+    phaseId,
+    {},
+  );
+  const tracePath = path.join(staged.root, "adapter-hook-self-test.jsonl");
+  const hookPath = path.join(staged.root, "adapter-hook-self-test.mjs");
+  const guardPath = path.join(staged.root, "adapter-hook-runtime-guard.mjs");
+  fs.writeFileSync(
+    hookPath,
+    fixedAdapterHookSource(tracePath, {
+      expectedCommandByPhase: { [phaseId]: command },
+      expectedEnvironmentByPhase: { [phaseId]: expectedEnvironment },
+      expectedOutputByPhase: { [phaseId]: expectedOutput },
+      stagedRoot: staged.root,
+    }),
+    { mode: 0o600 },
+  );
+  fs.writeFileSync(guardPath, socketlessRuntimeGuardSource(), { mode: 0o600 });
+  const preloadArguments = [
+    "--import",
+    pathToFileURL(guardPath).href,
+    "--import",
+    pathToFileURL(hookPath).href,
+    "--input-type=module",
+    "--eval",
+  ];
+  const runProbe = (source) => spawnSync(
+    process.execPath,
+    [...preloadArguments, source],
+    {
+      encoding: "utf8",
+      env: expectedEnvironment,
+      maxBuffer: 32 * 1024,
+    },
+  );
+  const admitted = runProbe(`
+    import childProcess from "node:child_process";
+    const child = childProcess.spawn(
+      ${JSON.stringify(expected.executable)},
+      [],
+      { shell: false },
+    );
+    child.stdout.on("data", (chunk) => process.stdout.write(chunk));
+    child.stderr.on("data", (chunk) => process.stderr.write(chunk));
+    child.on("close", (code) => { process.exitCode = code; });
+  `);
+  assert.deepEqual(
+    {
+      signal: admitted.signal,
+      status: admitted.status,
+      stderr: admitted.stderr,
+      stdout: admitted.stdout,
+    },
+    {
+      signal: null,
+      status: 0,
+      stderr: "",
+      stdout: `${JSON.stringify(expectedOutput)}\n`,
+    },
+  );
+  const [trace] = readJsonLines(tracePath);
+  assertFixedAdapterInvocation(trace, command);
+  assert.deepEqual(trace.environment, expectedEnvironment);
+  assert.deepEqual(trace.processEnvironment, expectedEnvironment);
+  assert.equal(trace.preloadCount, 1);
+  assert.equal(trace.socketlessGuardCount, 1);
+
+  for (const [label, source, pattern] of [
+    [
+      "shell token smuggling",
+      `import childProcess from "node:child_process";
+       childProcess.spawn("/bin/sh", ["-c", "id", ${JSON.stringify(command)}], { shell: false });`,
+      /exact code-owned identity/i,
+    ],
+    [
+      "environment wrapper",
+      `import childProcess from "node:child_process";
+       childProcess.spawn("/usr/bin/env", [${JSON.stringify(expected.executable)}], { shell: false });`,
+      /exact code-owned identity/i,
+    ],
+    [
+      "network tool",
+      `import childProcess from "node:child_process";
+       childProcess.spawn("/usr/bin/curl", [${JSON.stringify(command)}], { shell: false });`,
+      /exact code-owned identity/i,
+    ],
+    [
+      "caller argv",
+      `import childProcess from "node:child_process";
+       childProcess.spawn(${JSON.stringify(expected.executable)}, ["attacker"], { shell: false });`,
+      /exact code-owned identity/i,
+    ],
+    [
+      "wrong API",
+      `import childProcess from "node:child_process";
+       childProcess.execFile(${JSON.stringify(expected.executable)}, [], { shell: false });`,
+      /non-admitted child_process API/i,
+    ],
+  ]) {
+    const rejected = runProbe(source);
+    assert.notEqual(rejected.status, 0, `adapter preload admitted ${label}`);
+    assert.equal(rejected.stdout, "", `${label} received forged adapter output`);
+    assert.match(rejected.stderr, pattern, `${label} failed outside the exact adapter guard`);
+    assert.equal(
+      readJsonLines(tracePath).length,
+      1,
+      `${label} was traced as an admitted fixed adapter invocation`,
+    );
+  }
 });
 
 workerTest("Dockerfile-exact staged worker layout closes import and CLI dependencies", [
@@ -1268,10 +1739,6 @@ workerBodyMatrixTest("real worker main executes all eight phases through one cod
   "runWorkerCli",
 ], (t) => {
   const staged = stageDockerWorkerImageLayout(t, "docker-worker-main-stage-");
-  const hookPath = path.join(staged.root, "fixed-adapter-hook.mjs");
-  const tracePath = path.join(staged.root, "fixed-adapter-trace.jsonl");
-  fs.writeFileSync(hookPath, fixedAdapterHookSource(tracePath), { mode: 0o600 });
-  const hookUrl = pathToFileURL(hookPath).href;
   const snapshotPath = path.join(staged.root, "claimed-job", "job.json");
   fs.mkdirSync(path.dirname(snapshotPath), { mode: 0o700, recursive: true });
   fs.chmodSync(path.dirname(snapshotPath), 0o700);
@@ -1279,9 +1746,49 @@ workerBodyMatrixTest("real worker main executes all eight phases through one cod
   const rawReceipt = buildRawActiveReceiptV2();
   rawReceipt.resources.claimedJobSources["jobs.running"].snapshotContainerPath = snapshotPath;
   const trusted = buildFixtureTrustedContextV2({ rawReceipt }).trusted;
+  assert.notEqual(
+    trusted.receiptDigest,
+    WORKER_TRUSTED_CONTEXT.receiptDigest,
+    "true-main matrix did not bind a custom trusted receipt",
+  );
+  assert.equal(
+    trusted.receipt.resources.claimedJobSources["jobs.running"].snapshotContainerPath,
+    snapshotPath,
+  );
   const cases = phaseActionCases(trusted);
   assert.equal(cases.length, 8, "real-main matrix must cover every canonical phase");
-  const invocationByCommand = new Map();
+  const expectedEnvironmentByPhase = Object.fromEntries(cases.map((phaseCase) => {
+    const expectedBody = expectedWorkerBodyDocument(phaseCase, trusted);
+    return [phaseCase.phaseId, environmentMap(expectedBody.Env)];
+  }));
+  const expectedCommandByPhase = Object.fromEntries(cases.map((phaseCase) => [
+    phaseCase.phaseId,
+    EXPECTED_PHASE_PROFILES[phaseCase.phaseId].command,
+  ]));
+  const expectedOutputByPhase = Object.fromEntries(cases.map((phaseCase) => [
+    phaseCase.phaseId,
+    buildFixturePhaseOutputV2(
+      phaseCase.action,
+      phaseCase.phaseId,
+      phaseCase.parameters,
+    ),
+  ]));
+  const hookPath = path.join(staged.root, "fixed-adapter-hook.mjs");
+  const tracePath = path.join(staged.root, "fixed-adapter-trace.jsonl");
+  fs.writeFileSync(
+    hookPath,
+    fixedAdapterHookSource(tracePath, {
+      expectedCommandByPhase,
+      expectedEnvironmentByPhase,
+      expectedOutputByPhase,
+      stagedRoot: staged.root,
+    }),
+    { mode: 0o600 },
+  );
+  const hookUrl = pathToFileURL(hookPath).href;
+  const runtimeGuardPath = path.join(staged.root, "socketless-runtime-guard.mjs");
+  fs.writeFileSync(runtimeGuardPath, socketlessRuntimeGuardSource(), { mode: 0o600 });
+  const runtimeGuardUrl = pathToFileURL(runtimeGuardPath).href;
   let traceCount = 0;
 
   for (const phaseCase of cases) {
@@ -1294,17 +1801,39 @@ workerBodyMatrixTest("real worker main executes all eight phases through one cod
       fs.chmodSync(snapshotPath, 0o400);
     }
     const body = workerBodyForCase(phaseCase, trusted);
-    const exactEnvironment = environmentMap(body.Env);
+    const expectedBody = expectedWorkerBodyDocument(phaseCase, trusted);
+    assertExactWorkerBody({ observedBody: body, phaseCase, trusted });
+    assert.deepEqual(
+      body,
+      expectedBody,
+      `${phaseCase.action}/${phaseCase.phaseId} diverged from the independent body oracle`,
+    );
+    assert.equal(
+      body.Labels["com.platform.active-receipt-sha256"],
+      trusted.receiptDigest,
+      `${phaseCase.phaseId} did not bind the custom trusted receipt`,
+    );
+    const exactEnvironment = environmentMap(expectedBody.Env);
+    assert.equal(Object.hasOwn(exactEnvironment, "NODE_OPTIONS"), false);
+    if (phaseCase.snapshot) {
+      assert.equal(exactEnvironment.PLATFORM_CLAIMED_JOB_PATH, snapshotPath);
+    } else {
+      assert.equal(Object.hasOwn(exactEnvironment, "PLATFORM_CLAIMED_JOB_PATH"), false);
+    }
     const result = spawnSync(
       process.execPath,
-      [staged.workerPath, ...body.Cmd],
+      [
+        "--import",
+        runtimeGuardUrl,
+        "--import",
+        hookUrl,
+        staged.workerPath,
+        ...expectedBody.Cmd,
+      ],
       {
         cwd: path.dirname(staged.workerPath),
         encoding: "utf8",
-        env: {
-          ...exactEnvironment,
-          NODE_OPTIONS: `--import=${hookUrl}`,
-        },
+        env: exactEnvironment,
         maxBuffer: 32 * 1024,
       },
     );
@@ -1315,7 +1844,7 @@ workerBodyMatrixTest("real worker main executes all eight phases through one cod
     );
     const expected = rawWorkerResult({
       action: phaseCase.action,
-      command: body.Cmd[0],
+      command: expectedBody.Cmd[0],
       job: phaseCase.snapshot ? claimedJobParameters(phaseCase.snapshot) : null,
       phaseId: phaseCase.phaseId,
       requestId: phaseCase.request.requestId,
@@ -1339,13 +1868,26 @@ workerBodyMatrixTest("real worker main executes all eight phases through one cod
       Object.fromEntries(Object.entries(exactEnvironment).sort(([left], [right]) => left.localeCompare(right))),
       `${phaseCase.phaseId} adapter did not inherit the exact broker body environment`,
     );
-    assert.equal(trace.shell, false, `${phaseCase.phaseId} adapter did not set shell:false`);
-    assert.ok(path.isAbsolute(trace.executable), `${phaseCase.phaseId} adapter executable is PATH-resolved`);
-    assert.ok(Array.isArray(trace.argv), `${phaseCase.phaseId} adapter argv is not an array`);
+    assert.deepEqual(
+      trace.processEnvironment,
+      Object.fromEntries(Object.entries(exactEnvironment).sort(([left], [right]) => left.localeCompare(right))),
+      `${phaseCase.phaseId} preload observed a widened worker process environment`,
+    );
+    assert.equal(trace.preloadCount, 1, `${phaseCase.phaseId} preload did not execute exactly once`);
     assert.equal(
-      [path.basename(trace.executable), ...trace.argv].includes(body.Cmd[0]),
-      true,
-      `${phaseCase.phaseId} adapter invocation is not bound to its fixed command`,
+      trace.socketlessGuardCount,
+      1,
+      `${phaseCase.phaseId} socketless runtime guard did not execute exactly once`,
+    );
+    assert.deepEqual(
+      {
+        api: trace.api,
+        argv: trace.argv,
+        executable: trace.executable,
+        shell: trace.shell,
+      },
+      EXPECTED_FIXED_ADAPTERS[expectedBody.Cmd[0]],
+      `${phaseCase.phaseId} escaped the exact fixed adapter identity`,
     );
     const callerValues = new Set([
       ...Object.values(exactEnvironment),
@@ -1353,33 +1895,23 @@ workerBodyMatrixTest("real worker main executes all eight phases through one cod
       phaseCase.parameters.jobId,
       phaseCase.parameters.jobOperation,
       phaseCase.parameters.jobSha256,
-    ].filter(Boolean));
+    ].filter((value) => typeof value === "string" && value.length > 0));
     assert.equal(
-      trace.argv.some((entry) => callerValues.has(entry)),
+      [trace.executable, ...trace.argv].some(
+        (entry) => [...callerValues].some((value) => String(entry).includes(value)),
+      ),
       false,
-      `${phaseCase.phaseId} projected caller-controlled identity into adapter argv`,
+      `${phaseCase.phaseId} projected caller-controlled identity into adapter executable/argv`,
     );
-    const invocationIdentity = {
-      argv: trace.argv,
-      executable: trace.executable,
-      shell: trace.shell,
-    };
-    const prior = invocationByCommand.get(body.Cmd[0]);
-    if (prior) {
-      assert.deepEqual(
-        invocationIdentity,
-        prior,
-        `${body.Cmd[0]} adapter identity changed across canonical phases`,
-      );
-    } else {
-      invocationByCommand.set(body.Cmd[0], invocationIdentity);
-    }
+    assertFixedAdapterInvocation(trace, expectedBody.Cmd[0]);
   }
   assert.equal(traceCount, 8, "real main matrix did not execute all eight phase adapters");
 
   const hostileCase = cases.find(({ phaseId }) => phaseId === "restore.verify");
   const hostileBody = workerBodyForCase(hostileCase, trusted);
-  const hostileEnvironment = environmentMap(hostileBody.Env);
+  const hostileExpectedBody = expectedWorkerBodyDocument(hostileCase, trusted);
+  assert.deepEqual(hostileBody, hostileExpectedBody);
+  const hostileEnvironment = environmentMap(hostileExpectedBody.Env);
   for (const [label, hookOptions, pattern] of [
     [
       "oversized adapter output",
@@ -1397,19 +1929,29 @@ workerBodyMatrixTest("real worker main executes all eight phases through one cod
     const hostileTracePath = path.join(staged.root, `${suffix}-trace.jsonl`);
     fs.writeFileSync(
       hostileHookPath,
-      fixedAdapterHookSource(hostileTracePath, hookOptions),
+      fixedAdapterHookSource(hostileTracePath, {
+        ...hookOptions,
+        expectedCommandByPhase,
+        expectedEnvironmentByPhase,
+        expectedOutputByPhase,
+        stagedRoot: staged.root,
+      }),
       { mode: 0o600 },
     );
     const rejected = spawnSync(
       process.execPath,
-      [staged.workerPath, ...hostileBody.Cmd],
+      [
+        "--import",
+        runtimeGuardUrl,
+        "--import",
+        pathToFileURL(hostileHookPath).href,
+        staged.workerPath,
+        ...hostileExpectedBody.Cmd,
+      ],
       {
         cwd: path.dirname(staged.workerPath),
         encoding: "utf8",
-        env: {
-          ...hostileEnvironment,
-          NODE_OPTIONS: `--import=${pathToFileURL(hostileHookPath).href}`,
-        },
+        env: hostileEnvironment,
         maxBuffer: 32 * 1024,
       },
     );
@@ -1419,6 +1961,78 @@ workerBodyMatrixTest("real worker main executes all eight phases through one cod
     assert.match(rejected.stderr, pattern, `${label} failed at an unrelated boundary`);
     assert.equal(readJsonLines(hostileTracePath).length, 1, `${label} did not reach one adapter`);
   }
+});
+
+test("manifest fixture oracle independently canonicalizes digests and separates HMAC domains", () => {
+  const fixture = signedManifestEnvelope();
+  const artifactPath = "postgres/worker-test.dump";
+  const sidecar = fixture.sidecars[artifactPath];
+  const digest = testManifestDigest(fixture.unsigned);
+  assert.equal(digest, fixture.manifest.signature.digest);
+  assert.equal(testManifestDigest(fixture.manifest), digest);
+  assert.equal(
+    testManifestDigest(reverseObjectKeyOrder(fixture.unsigned)),
+    digest,
+    "manifest digest must be independent of object insertion order",
+  );
+  assert.notEqual(
+    testCryptoSha256(JSON.stringify(fixture.unsigned)),
+    digest,
+    "manifest fixture accidentally collapsed to insertion-order JSON hashing",
+  );
+  assert.equal(
+    testCryptoSha256(fixture.artifactBytes),
+    fixture.manifest.artifacts[0].sha256,
+  );
+  assert.equal(
+    testHmacBase64Url(
+      MANIFEST_TEST_KEY,
+      `platform-backup-manifest-v1\n${fixture.unsigned.id}\n${digest}\n`,
+    ),
+    fixture.manifest.signature.value,
+  );
+  assert.equal(
+    testHmacBase64Url(
+      ARTIFACT_TEST_KEY,
+      `platform-postgres-backup-v1\n${path.basename(artifactPath)}\n${sidecar.sha256}\n`,
+    ),
+    sidecar.signature,
+  );
+  assert.notEqual(
+    testHmacBase64Url(
+      MANIFEST_TEST_KEY,
+      `platform-backup-manifest-v1\n${fixture.unsigned.id}\n${digest}\n`,
+    ),
+    testHmacBase64Url(
+      MANIFEST_TEST_KEY,
+      `platform-postgres-backup-v1\n${path.basename(artifactPath)}\n${sidecar.sha256}\n`,
+    ),
+    "manifest and artifact HMAC messages collapsed across domains",
+  );
+
+  for (const [label, mutate] of [
+    ["manifest ID", (value) => { value.id = "manifest-worker-evil"; }],
+    ["nested resource", (value) => { value.resources[0].name = "postgres-evil"; }],
+    ["artifact path", (value) => { value.artifacts[0].path = "postgres/evil-test.dump"; }],
+    ["coverage", (value) => { value.coverage.requiredResourceIds = ["database:mariadb"]; }],
+    ["timestamp", (value) => { value.createdAt = "2026-07-26T12:00:01.000Z"; }],
+  ]) {
+    const mutated = structuredClone(fixture.unsigned);
+    mutate(mutated);
+    assert.notEqual(
+      testManifestDigest(mutated),
+      digest,
+      `independent manifest digest collapsed ${label}`,
+    );
+  }
+  const artifactTamper = Buffer.from(fixture.artifactBytes);
+  artifactTamper[0] ^= 0x20;
+  assert.equal(artifactTamper.length, fixture.artifactBytes.length);
+  assert.notEqual(
+    testCryptoSha256(artifactTamper),
+    sidecar.sha256,
+    "independent artifact digest collapsed a same-size byte mutation",
+  );
 });
 
 workerTest("real manifest and sidecar files are bound by digest, key ID and domain-separated HMAC", [
@@ -1460,9 +2074,48 @@ workerTest("real manifest and sidecar files are bound by digest, key ID and doma
   assert.equal(verified.manifestDigest, fixture.manifest.signature.digest);
   assert.equal(verified.artifactCount, 1);
   assert.equal(
-    sha256(options.artifactBytes["postgres/worker-test.dump"]),
+    testCryptoSha256(options.artifactBytes["postgres/worker-test.dump"]),
     fixture.manifest.artifacts[0].sha256,
   );
+
+  writeProtectedJson(manifestFile, {
+    ...fixture.manifest,
+    resources: [{
+      ...fixture.manifest.resources[0],
+      name: "postgres-evil",
+    }],
+  });
+  assert.throws(
+    () => verifyManifestEnvelope(loadEnvelope(), loadOptions()),
+    /manifest|digest|sha256|authentication|signature/i,
+    "nested manifest mutation collapsed under the admitted digest",
+  );
+  writeProtectedJson(manifestFile, fixture.manifest);
+
+  writeProtectedJson(manifestFile, {
+    ...fixture.manifest,
+    signature: {
+      ...fixture.manifest.signature,
+      value: fixture.sidecars["postgres/worker-test.dump"].signature,
+    },
+  });
+  assert.throws(
+    () => verifyManifestEnvelope(loadEnvelope(), loadOptions()),
+    /manifest|HMAC|authentication|signature/i,
+    "artifact-domain HMAC authenticated a manifest-domain message",
+  );
+  writeProtectedJson(manifestFile, fixture.manifest);
+
+  writeProtectedJson(sidecarFile, {
+    ...fixture.sidecars["postgres/worker-test.dump"],
+    signature: fixture.manifest.signature.value,
+  });
+  assert.throws(
+    () => verifyManifestEnvelope(loadEnvelope(), loadOptions()),
+    /sidecar|artifact|HMAC|authentication|signature/i,
+    "manifest-domain HMAC authenticated an artifact-domain message",
+  );
+  writeProtectedJson(sidecarFile, fixture.sidecars["postgres/worker-test.dump"]);
 
   fs.writeFileSync(artifactFile, Buffer.from("worker test attacker\n"));
   fs.chmodSync(artifactFile, 0o600);
@@ -1705,7 +2358,7 @@ workerTest("offsite state binds idempotency and preserves remote-unknown ambigui
 ], () => {
   const transitionOffsiteAttempt = requireWorkerFunction("transitionOffsiteAttempt");
   const manifestDigest = "1".repeat(64);
-  const idempotencyKey = sha256(`platform-offsite-sync-v1\n${manifestDigest}\n`);
+  const idempotencyKey = testCryptoSha256(`platform-offsite-sync-v1\n${manifestDigest}\n`);
   const begin = { type: "begin", idempotencyKey, manifestDigest };
   const idle = {
     phase: "idle",
@@ -1911,14 +2564,18 @@ function assertExactWorkerBody({ observedBody, phaseCase, trusted }) {
     `${phaseId} must not encode a claimed job in execve environment bytes`,
   );
   if (claimedJobSnapshot) {
-    assert.equal(env.PLATFORM_CLAIMED_JOB_PATH, SNAPSHOT_CONTAINER_PATH);
+    const expectedSnapshotContainerPath =
+      receipt.resources.claimedJobSources[claimedJobSnapshot.sourceId].snapshotContainerPath;
+    assert.equal(env.PLATFORM_CLAIMED_JOB_PATH, expectedSnapshotContainerPath);
     assert.equal(env.PLATFORM_CLAIMED_JOB_FILE_NAME, claimedJobSnapshot.jobFileName);
     assert.equal(env.PLATFORM_CLAIMED_JOB_ID, claimedJobSnapshot.jobId);
     assert.equal(env.PLATFORM_CLAIMED_JOB_OPERATION, claimedJobSnapshot.jobOperation);
     assert.equal(env.PLATFORM_CLAIMED_JOB_SHA256, claimedJobSnapshot.jobSha256);
     assert.equal(env.PLATFORM_CLAIMED_JOB_SOURCE_ID, claimedJobSnapshot.sourceId);
     assert.equal(
-      body.HostConfig.Binds.filter((bind) => bind.endsWith(`:${SNAPSHOT_CONTAINER_PATH}:ro`)).length,
+      body.HostConfig.Binds.filter(
+        (bind) => bind.endsWith(`:${expectedSnapshotContainerPath}:ro`),
+      ).length,
       1,
       `${phaseId} must bind exactly one sealed snapshot file`,
     );
@@ -1992,7 +2649,9 @@ function assertExactWorkerBody({ observedBody, phaseCase, trusted }) {
   } else {
     for (const key of claimedKeys) assert.equal(Object.hasOwn(env, key), false, `${phaseId}/${key}`);
     assert.equal(
-      body.HostConfig.Binds.some((bind) => bind.includes(SNAPSHOT_CONTAINER_PATH)),
+      body.HostConfig.Binds.some((bind) => Object.values(
+        receipt.resources.claimedJobSources,
+      ).some(({ snapshotContainerPath }) => bind.includes(snapshotContainerPath))),
       false,
       `${phaseId} must not receive a claimed-job snapshot`,
     );
@@ -2307,30 +2966,166 @@ function environmentMap(values) {
   return result;
 }
 
+function assertFixedAdapterInvocation(invocation, command) {
+  const expected = EXPECTED_FIXED_ADAPTERS[command];
+  assert.ok(expected, `fixed adapter oracle has no command: ${command}`);
+  assert.deepEqual(
+    {
+      api: invocation.api,
+      argv: invocation.argv,
+      executable: invocation.executable,
+      shell: invocation.shell,
+    },
+    expected,
+    `${command} did not use its one exact code-owned adapter identity`,
+  );
+  assert.equal(path.isAbsolute(invocation.executable), true);
+  assert.deepEqual(invocation.argv, []);
+  assert.equal(
+    [path.basename(invocation.executable), ...invocation.argv].some(
+      (token) => [
+        "-c",
+        "bash",
+        "curl",
+        "dash",
+        "env",
+        "nc",
+        "ncat",
+        "node",
+        "perl",
+        "python",
+        "ruby",
+        "sh",
+        "socat",
+        "ssh",
+        "wget",
+        "zsh",
+      ].includes(token),
+    ),
+    false,
+    `${command} crossed a shell, interpreter, wrapper, or network-tool boundary`,
+  );
+}
+
 function assertSocketlessWorkerSource(source, label) {
+  const decoded = decodeStaticJavaScriptEscapes(String(source));
   assert.doesNotMatch(
-    source,
-    /(?:\bfrom\s*|\bimport\s*|\brequire\s*\(\s*)["'](?:node:)?(?:net|http|https|http2|tls|dgram|dns)["']/,
+    decoded,
+    /(?:\bfrom\s*|\bimport\s*|\brequire\s*\(\s*)["'](?:node:)?(?:net|http|https|http2|tls|dgram|dns|undici)["']/,
     `${label} violates the socketless network-module boundary`,
   );
   assert.doesNotMatch(
-    source,
+    decoded,
     /\bimport\s*\(/,
     `${label} violates the socketless dynamic-import boundary`,
   );
   assert.doesNotMatch(
-    source,
-    /\bfetch\s*\(/,
-    `${label} violates the socketless fetch boundary`,
+    decoded,
+    /\b(?:eval|fetch|WebSocket|EventSource)\s*\(|(?:\bnew\s+)?\bFunction\s*\(/,
+    `${label} violates the socketless dynamic-code or global-network boundary`,
   );
-  const folded = source
+  assert.doesNotMatch(
+    decoded,
+    /\b(?:createRequire|getBuiltinModule|_linkedBinding|binding|dlopen|registerHooks?)\b/,
+    `${label} violates the socketless runtime-loader boundary`,
+  );
+  assert.doesNotMatch(
+    decoded,
+    /\brequire\s*\(/,
+    `${label} violates the socketless CommonJS-loader boundary`,
+  );
+  const folded = decoded
     .toLowerCase()
-    .replace(/[\s"'`+\[\](){},;$]/g, "");
+    .replace(/[\s"'`+\[\](){},;$\\]/g, "");
   assert.doesNotMatch(
     folded,
-    /docker\.sock|docker_host|\/containers\/(?:create|[^/]*\/start)|\/images\/create/,
+    /docker\.sock|docker_host|\/containers\/(?:create|[^/]*\/start)|\/images\/create|getbuiltinmodule|createrequire/,
     `${label} reconstructs forbidden Docker Engine authority`,
   );
+  assert.doesNotMatch(
+    folded,
+    /(?:spawn|exec|fork)[a-z]*.*\/(?:curl|wget|nc|ncat|socat|ssh)/,
+    `${label} invokes a forbidden child_process network tool`,
+  );
+  for (const specifier of staticModuleSpecifiers(decoded)) {
+    if (specifier.startsWith("node:")) {
+      assert.equal(
+        ALLOWED_WORKER_BUILTINS.has(specifier),
+        true,
+        `${label} imports a builtin outside the socketless allowlist: ${specifier}`,
+      );
+      continue;
+    }
+    assert.equal(
+      specifier.startsWith("./") || specifier.startsWith("../"),
+      true,
+      `${label} imports a bare or remote module outside the socketless allowlist: ${specifier}`,
+    );
+  }
+}
+
+function assertSocketlessWorkerImportGraph(entryFile) {
+  const graphRoot = path.dirname(path.resolve(entryFile));
+  const queue = [path.resolve(entryFile)];
+  const visited = new Set();
+  while (queue.length > 0) {
+    const file = queue.shift();
+    if (visited.has(file)) continue;
+    assert.equal(
+      file === graphRoot || file.startsWith(`${graphRoot}${path.sep}`),
+      true,
+      `socketless worker import escaped its local graph root: ${file}`,
+    );
+    const stat = fs.lstatSync(file);
+    assert.equal(
+      stat.isFile() && !stat.isSymbolicLink(),
+      true,
+      `socketless worker import is not one regular staged file: ${file}`,
+    );
+    const source = fs.readFileSync(file, "utf8");
+    assertSocketlessWorkerSource(source, path.relative(graphRoot, file) || path.basename(file));
+    visited.add(file);
+    for (const specifier of staticModuleSpecifiers(source)) {
+      if (specifier.startsWith("node:")) continue;
+      const imported = path.resolve(path.dirname(file), specifier);
+      assert.equal(
+        imported.startsWith(`${graphRoot}${path.sep}`),
+        true,
+        `socketless worker local import escaped its graph root: ${specifier}`,
+      );
+      assert.equal(
+        fs.existsSync(imported),
+        true,
+        `socketless worker local import is absent from the staged closure: ${specifier}`,
+      );
+      queue.push(imported);
+    }
+  }
+  return [...visited]
+    .map((file) => path.relative(graphRoot, file) || path.basename(file))
+    .sort();
+}
+
+function staticModuleSpecifiers(source) {
+  const specifiers = [];
+  const patterns = [
+    /\bimport\s*["']([^"']+)["']/g,
+    /\b(?:import|export)\s+[\s\S]{0,500}?\sfrom\s*["']([^"']+)["']/g,
+  ];
+  for (const pattern of patterns) {
+    for (const match of String(source).matchAll(pattern)) specifiers.push(match[1]);
+  }
+  return [...new Set(specifiers)];
+}
+
+function decodeStaticJavaScriptEscapes(source) {
+  return String(source)
+    .replace(
+      /\\u\{([0-9a-f]{1,6})\}|\\u([0-9a-f]{4})|\\x([0-9a-f]{2})/gi,
+      (_match, codePoint, shortUnicode, hexadecimal) => String.fromCodePoint(
+        Number.parseInt(codePoint ?? shortUnicode ?? hexadecimal, 16),
+      ),
+    );
 }
 
 function expectedWorkerBodyDocument(phaseCase, trusted) {
@@ -2726,20 +3521,33 @@ function validSameSizeClaimedJobTamper(document, admittedBytes) {
 
 function observeDescriptorStableReadIo(file) {
   const expectedPath = path.resolve(file);
-  const expectedSize = fs.statSync(file).size;
+  const expectedIdentity = fileStatIdentity(fs.lstatSync(file));
   const leafDescriptors = new Set();
   let eventOrder = 0;
   const evidence = {
     descriptorReadFileCalls: 0,
-    expectedSize,
+    expectedIdentity,
     fstatEvents: [],
     leafCloseEvents: [],
+    leafLstatEvents: [],
     leafOpenEvents: [],
     pathReadCalls: 0,
     readSyncCalls: [],
   };
   const io = new Proxy(fs, {
     get(target, property) {
+      if (property === "lstatSync") {
+        return (candidate, ...args) => {
+          const stat = target.lstatSync(candidate, ...args);
+          if (path.resolve(String(candidate)) === expectedPath) {
+            evidence.leafLstatEvents.push({
+              identity: fileStatIdentity(stat),
+              order: eventOrder += 1,
+            });
+          }
+          return stat;
+        };
+      }
       if (property === "openSync") {
         return (candidate, flags, ...args) => {
           const descriptor = target.openSync(candidate, flags, ...args);
@@ -2760,8 +3568,8 @@ function observeDescriptorStableReadIo(file) {
           if (leafDescriptors.has(descriptor)) {
             evidence.fstatEvents.push({
               descriptor,
+              identity: fileStatIdentity(stat),
               order: eventOrder += 1,
-              size: stat.size,
             });
           }
           return stat;
@@ -2839,8 +3647,27 @@ function assertStableReadEvidence(evidence) {
     "claimed-job consumer did not close the one admitted leaf descriptor exactly once",
   );
   assert.ok(
-    Number.isSafeInteger(evidence.expectedSize) && evidence.expectedSize > 0,
+    Number.isSafeInteger(evidence.expectedIdentity.size)
+      && evidence.expectedIdentity.size > 0,
     "claimed-job stable-read fixture has an invalid byte size",
+  );
+  assert.ok(
+    evidence.leafLstatEvents.length >= 1,
+    "claimed-job consumer did not lstat the leaf before descriptor admission",
+  );
+  assert.equal(
+    evidence.leafLstatEvents.every(
+      ({ identity }) => sameFileIdentity(identity, evidence.expectedIdentity),
+    ),
+    true,
+    "claimed-job leaf lstat identity changed before descriptor admission",
+  );
+  assert.equal(
+    evidence.leafLstatEvents.some(
+      ({ order }) => order < evidence.leafOpenEvents[0].order,
+    ),
+    true,
+    "claimed-job consumer did not lstat the leaf before opening it",
   );
   assert.equal(
     evidence.descriptorReadFileCalls,
@@ -2885,7 +3712,7 @@ function assertStableReadEvidence(evidence) {
       "claimed-job readSync made no positive bounded progress",
     );
     assert.ok(
-      call.requestedLength <= evidence.expectedSize - call.position,
+      call.requestedLength <= evidence.expectedIdentity.size - call.position,
       "claimed-job readSync requested bytes beyond the admitted stat size",
     );
 
@@ -2893,7 +3720,7 @@ function assertStableReadEvidence(evidence) {
       if (activePass) {
         assert.equal(
           activePass.returnedBytes,
-          evidence.expectedSize,
+          evidence.expectedIdentity.size,
           "claimed-job consumer restarted at position zero before completing a pass",
         );
       }
@@ -2909,7 +3736,7 @@ function assertStableReadEvidence(evidence) {
     activePass.calls += 1;
     activePass.returnedBytes += call.returnedCount;
     assert.ok(
-      activePass.returnedBytes <= evidence.expectedSize,
+      activePass.returnedBytes <= evidence.expectedIdentity.size,
       "claimed-job descriptor pass exceeded the admitted stat size",
     );
   }
@@ -2922,7 +3749,7 @@ function assertStableReadEvidence(evidence) {
     assert.ok(pass.calls >= 1, `claimed-job descriptor pass ${index + 1} was empty`);
     assert.equal(
       pass.returnedBytes,
-      evidence.expectedSize,
+      evidence.expectedIdentity.size,
       `claimed-job descriptor pass ${index + 1} did not cover the complete stat size`,
     );
   }
@@ -2933,27 +3760,119 @@ function assertStableReadEvidence(evidence) {
   );
   assert.equal(
     evidence.fstatEvents.every(
-      ({ descriptor, size }) => descriptor === leafDescriptor && size === evidence.expectedSize,
+      ({ descriptor }) => descriptor === leafDescriptor,
     ),
     true,
-    "claimed-job fstat observations changed descriptor identity or size",
+    "claimed-job fstat observations changed descriptor identity",
   );
   const firstReadOrder = evidence.readSyncCalls[0].order;
   const lastReadOrder = evidence.readSyncCalls.at(-1).order;
-  assert.equal(
-    evidence.fstatEvents.some(({ order }) => order < firstReadOrder),
-    true,
-    "claimed-job consumer omitted the pre-read fstat",
+  const preReadFstat = evidence.fstatEvents
+    .filter(({ order }) => order < firstReadOrder)
+    .at(-1);
+  const postReadFstat = evidence.fstatEvents
+    .find(({ order }) => order > lastReadOrder);
+  assert.ok(preReadFstat, "claimed-job consumer omitted the pre-read fstat");
+  assert.ok(postReadFstat, "claimed-job consumer omitted the post-read fstat");
+  assert.deepEqual(
+    preReadFstat.identity,
+    evidence.expectedIdentity,
+    "claimed-job leaf lstat and pre-read fstat identities diverged",
   );
-  assert.equal(
-    evidence.fstatEvents.some(({ order }) => order > lastReadOrder),
-    true,
-    "claimed-job consumer omitted the post-read fstat",
+  assert.deepEqual(
+    postReadFstat.identity,
+    preReadFstat.identity,
+    "claimed-job fstat identity changed across descriptor reads",
   );
   assert.ok(
     evidence.leafCloseEvents[0].order > lastReadOrder,
     "claimed-job descriptor closed before both complete passes finished",
   );
+}
+
+function fileStatIdentity(stat) {
+  return {
+    ctimeMs: stat.ctimeMs,
+    dev: stat.dev,
+    gid: stat.gid,
+    ino: stat.ino,
+    isFile: stat.isFile(),
+    mode: stat.mode,
+    mtimeMs: stat.mtimeMs,
+    nlink: stat.nlink,
+    size: stat.size,
+    uid: stat.uid,
+  };
+}
+
+function sameFileIdentity(left, right) {
+  return Object.keys(right).every((field) => Object.is(left[field], right[field]));
+}
+
+function differentStatIdentityValue(value) {
+  if (typeof value === "boolean") return !value;
+  if (typeof value === "bigint") return value + 1n;
+  if (typeof value === "number") return value + 1;
+  throw new TypeError("unsupported stat identity fixture field");
+}
+
+function statMutationIo(file, {
+  family,
+  field,
+  targetPath,
+  value,
+}) {
+  const expectedLeaf = path.resolve(file);
+  const expectedTarget = path.resolve(targetPath);
+  const leafDescriptors = new Set();
+  const mutateStat = (stat) => new Proxy(stat, {
+    get(target, property) {
+      if (property === field) {
+        return field === "isFile" ? () => Boolean(value) : value;
+      }
+      const member = Reflect.get(target, property);
+      return typeof member === "function" ? member.bind(target) : member;
+    },
+  });
+  return new Proxy(fs, {
+    get(target, property) {
+      if (property === "openSync") {
+        return (candidate, flags, ...args) => {
+          const descriptor = target.openSync(candidate, flags, ...args);
+          if (path.resolve(String(candidate)) === expectedLeaf) {
+            leafDescriptors.add(descriptor);
+          }
+          return descriptor;
+        };
+      }
+      if (property === "closeSync") {
+        return (descriptor) => {
+          const result = target.closeSync(descriptor);
+          leafDescriptors.delete(descriptor);
+          return result;
+        };
+      }
+      if (property === "fstatSync") {
+        return (descriptor, ...args) => {
+          const stat = target.fstatSync(descriptor, ...args);
+          return family === "fstat" && leafDescriptors.has(descriptor)
+            ? mutateStat(stat)
+            : stat;
+        };
+      }
+      if (property === "lstatSync" || property === "statSync") {
+        return (candidate, ...args) => {
+          const stat = target[property](candidate, ...args);
+          return family === "path"
+              && path.resolve(String(candidate)) === expectedTarget
+            ? mutateStat(stat)
+            : stat;
+        };
+      }
+      const member = Reflect.get(target, property);
+      return typeof member === "function" ? member.bind(target) : member;
+    },
+  });
 }
 
 function environmentEntryBytes(entry) {
@@ -3107,14 +4026,21 @@ function protectedFilePolicy(parentRoot, expectedUid, expectedGid) {
   };
 }
 
-function stageDockerWorkerImageLayout(t, prefix) {
-  const repositoryRoot = path.resolve(scriptDir, "..");
-  const dockerfile = path.join(repositoryRoot, "docker", "docker-action-broker.Dockerfile");
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
-  t.after(() => fs.rmSync(root, { force: true, recursive: true }));
+function stagedContainerPath(root, containerPath) {
+  assert.equal(path.isAbsolute(containerPath), true, "staged container path must be absolute");
+  const stagedPath = path.resolve(root, containerPath.replace(/^\/+/, ""));
+  assert.equal(
+    stagedPath.startsWith(`${path.resolve(root)}${path.sep}`),
+    true,
+    "staged container path escaped its image root",
+  );
+  return stagedPath;
+}
+
+function dockerfileLogicalLines(source) {
   const logicalLines = [];
   let pending = "";
-  for (const rawLine of fs.readFileSync(dockerfile, "utf8").split(/\r?\n/)) {
+  for (const rawLine of String(source).split(/\r?\n/)) {
     const line = rawLine.trim();
     if (!line || line.startsWith("#")) continue;
     pending += `${pending ? " " : ""}${line.replace(/\\$/, "").trim()}`;
@@ -3123,6 +4049,34 @@ function stageDockerWorkerImageLayout(t, prefix) {
     pending = "";
   }
   assert.equal(pending, "", "Dockerfile ended inside a continued instruction");
+  return logicalLines;
+}
+
+function dockerfileDeclaresExactMode(source, containerPath, mode) {
+  return dockerfileLogicalLines(source).some((instruction) => {
+    const match = instruction.match(/\bchmod\s+([0-7]{3,4})\s+(.+?)(?=\s+&&|$)/);
+    if (!match || match[1] !== mode) return false;
+    return match[2].split(/\s+/).includes(containerPath);
+  });
+}
+
+function dockerfileDeclaresRootOwnedTree(source, containerPath) {
+  return dockerfileLogicalLines(source).some((instruction) => {
+    const match = instruction.match(/\bchown\s+-R\s+root:root\s+(.+)$/);
+    return Boolean(match && match[1].split(/\s+/).includes(containerPath));
+  });
+}
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function stageDockerWorkerImageLayout(t, prefix) {
+  const repositoryRoot = path.resolve(scriptDir, "..");
+  const dockerfile = path.join(repositoryRoot, "docker", "docker-action-broker.Dockerfile");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  t.after(() => fs.rmSync(root, { force: true, recursive: true }));
+  const logicalLines = dockerfileLogicalLines(fs.readFileSync(dockerfile, "utf8"));
   let copyCount = 0;
   for (const instruction of logicalLines) {
     const match = instruction.match(/^COPY\s+(.+)$/i);
@@ -3172,63 +4126,134 @@ function stageDockerWorkerImageLayout(t, prefix) {
   return { dockerfile, root, workerPath: stagedWorkerPath };
 }
 
+function socketlessRuntimeGuardSource() {
+  return `
+import childProcess from "node:child_process";
+import moduleBuiltin, { syncBuiltinESMExports } from "node:module";
+
+if (process.platform === "darwin" && Object.hasOwn(process.env, "__CF_USER_TEXT_ENCODING")) {
+  if (!/^0x[0-9a-f]+:0x[0-9a-f]+:0x[0-9a-f]+$/i.test(process.env.__CF_USER_TEXT_ENCODING)) {
+    throw new Error("socketless runtime guard rejected malformed Darwin launcher metadata");
+  }
+  delete process.env.__CF_USER_TEXT_ENCODING;
+}
+
+const SENTINEL = Symbol.for("platform.worker.socketless-guard-count");
+globalThis[SENTINEL] = (globalThis[SENTINEL] ?? 0) + 1;
+
+function blocked(label) {
+  return () => {
+    throw new Error("socketless runtime guard blocked " + label);
+  };
+}
+
+const OriginalFunction = globalThis.Function;
+for (const name of ["eval", "fetch", "WebSocket", "EventSource"]) {
+  Object.defineProperty(globalThis, name, {
+    configurable: true,
+    value: blocked(name),
+    writable: true,
+  });
+}
+Object.defineProperty(globalThis, "Function", {
+  configurable: true,
+  value: new Proxy(OriginalFunction, {
+    apply: blocked("Function"),
+    construct: blocked("Function"),
+  }),
+  writable: true,
+});
+for (const name of ["getBuiltinModule", "binding", "_linkedBinding", "dlopen"]) {
+  Object.defineProperty(process, name, {
+    configurable: true,
+    value: blocked("process." + name),
+    writable: true,
+  });
+}
+moduleBuiltin.createRequire = blocked("module.createRequire");
+
+const childApis = [
+  "exec",
+  "execFile",
+  "execFileSync",
+  "execSync",
+  "fork",
+  "spawn",
+  "spawnSync",
+];
+const forbiddenTool = /(?:^|[\\/\\s])(?:curl|wget|nc|ncat|socat|ssh|telnet|openssl)(?:$|[\\s])/i;
+for (const api of childApis) {
+  const original = childProcess[api].bind(childProcess);
+  childProcess[api] = (executable, ...args) => {
+    if (forbiddenTool.test(String(executable))) {
+      throw new Error("socketless runtime guard blocked child_process network tool");
+    }
+    return original(executable, ...args);
+  };
+}
+syncBuiltinESMExports();
+`;
+}
+
 function fixedAdapterHookSource(tracePath, {
+  expectedCommandByPhase = {},
+  expectedEnvironmentByPhase = {},
+  expectedOutputByPhase = {},
   exitStatus = 0,
   oversizedOutput = false,
+  stagedRoot = "",
 } = {}) {
   return `
 import childProcess from "node:child_process";
-import crypto from "node:crypto";
 import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
+import path from "node:path";
 import { PassThrough } from "node:stream";
 
 const TRACE_PATH = ${JSON.stringify(tracePath)};
+const EXPECTED_ADAPTERS = ${JSON.stringify(EXPECTED_FIXED_ADAPTERS)};
+const EXPECTED_COMMAND_BY_PHASE = ${JSON.stringify(expectedCommandByPhase)};
+const EXPECTED_ENVIRONMENT_BY_PHASE = ${JSON.stringify(expectedEnvironmentByPhase)};
+const EXPECTED_OUTPUT_BY_PHASE = ${JSON.stringify(expectedOutputByPhase)};
 const EXIT_STATUS = ${JSON.stringify(exitStatus)};
 const OVERSIZED_OUTPUT = ${JSON.stringify(oversizedOutput)};
+const STAGED_ROOT = ${JSON.stringify(stagedRoot)};
+const PRELOAD_SENTINEL = Symbol.for("platform.worker.fixed-adapter-preload-count");
+globalThis[PRELOAD_SENTINEL] = (globalThis[PRELOAD_SENTINEL] ?? 0) + 1;
+const PRELOAD_COUNT = globalThis[PRELOAD_SENTINEL];
+const SOCKETLESS_GUARD_COUNT =
+  globalThis[Symbol.for("platform.worker.socketless-guard-count")] ?? 0;
 
-function sha256(value) {
-  return crypto.createHash("sha256").update(value).digest("hex");
+function sortedEnvironment(value) {
+  return Object.fromEntries(
+    Object.entries(value).sort(([left], [right]) => left.localeCompare(right)),
+  );
 }
 
-function phaseOutput() {
+function exactJson(left, right) {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function expectedPhaseContext() {
+  if (SOCKETLESS_GUARD_COUNT !== 1) {
+    throw new Error("socketless runtime guard was not loaded exactly once");
+  }
   const phaseId = process.env.PLATFORM_DOCKER_PHASE_ID;
-  const schemas = {
-    "catalog.capture": "platform.backup-catalog/v1",
-    "job.backup.capture": "platform.backup-job-result/v1",
-    "job.restore.verify": "platform.backup-job-result/v1",
-    "prune.plan": "platform.backup-prune-plan/v1",
-    "prune.apply": "platform.backup-prune-apply/v1",
-    "restore.capture": "platform.backup-catalog/v1",
-    "restore.verify": "platform.restore-drill/v1",
-    "offsite.sync": "platform.offsite-backup-receipt/v1",
-  };
-  const schema = schemas[phaseId];
-  if (!schema) throw new Error("test adapter received an unsupported phase");
-  if (phaseId === "prune.plan") {
-    return {
-      schema,
-      mode: "plan",
-      keepCompleteManifests: 42,
-      completeManifestCount: 2,
-      retainedManifestIds: ["manifest:one"],
-      expiredManifestIds: ["manifest:two"],
-      mutationPerformed: false,
-    };
+  const expectedEnvironment = EXPECTED_ENVIRONMENT_BY_PHASE[phaseId];
+  const command = EXPECTED_COMMAND_BY_PHASE[phaseId];
+  const output = EXPECTED_OUTPUT_BY_PHASE[phaseId];
+  if (!expectedEnvironment || !command || !output) {
+    throw new Error("test preload received an unsupported phase context");
   }
-  const result = {
-    schema,
-    status: "passed",
-    evidenceSha256: sha256("fixture:worker-evidence:" + phaseId),
-    mutationPerformed: true,
-  };
-  if (phaseId === "job.backup.capture" || phaseId === "job.restore.verify") {
-    result.jobId = process.env.PLATFORM_CLAIMED_JOB_ID;
-    result.jobOperation = process.env.PLATFORM_CLAIMED_JOB_OPERATION;
+  const processEnvironment = sortedEnvironment(process.env);
+  if (Object.hasOwn(processEnvironment, "NODE_OPTIONS")) {
+    throw new Error("worker process environment contains forbidden NODE_OPTIONS");
   }
-  if (phaseId === "offsite.sync") result.repositoryOffsite = true;
-  return result;
+  if (!exactJson(processEnvironment, sortedEnvironment(expectedEnvironment))) {
+    throw new Error("worker process environment diverged from the independent body oracle");
+  }
+  return { command, expectedEnvironment, output, phaseId, processEnvironment };
 }
 
 function normalizedInvocation(argv, options) {
@@ -3236,26 +4261,51 @@ function normalizedInvocation(argv, options) {
   return { argv: [], options: argv ?? options ?? {} };
 }
 
-function encodedOutput(options) {
-  const output = phaseOutput();
+function encodedOutput(output) {
+  output = JSON.parse(JSON.stringify(output));
   if (OVERSIZED_OUTPUT) output.unmodeledOversizedEvidence = "a".repeat(8192);
-  const rendered = JSON.stringify(output) + "\\n";
-  return options?.encoding ? rendered : Buffer.from(rendered);
+  return Buffer.from(JSON.stringify(output) + "\\n");
 }
 
-function record(api, executable, argv, options) {
-  const effectiveEnvironment = options?.env ?? process.env;
-  const environment = Object.fromEntries(
-    Object.entries(effectiveEnvironment)
-      .filter(([name]) => name !== "NODE_OPTIONS")
-      .sort(([left], [right]) => left.localeCompare(right)),
-  );
-  fs.appendFileSync(TRACE_PATH, JSON.stringify({
+function assertExactInvocation(api, executable, argv, options) {
+  const context = expectedPhaseContext();
+  const expected = EXPECTED_ADAPTERS[context.command];
+  if (!expected) throw new Error("fixed adapter command has no exact oracle");
+  const actual = {
     api,
-    argv: argv.map(String),
-    environment,
     executable: String(executable),
+    argv: argv.map(String),
     shell: options?.shell ?? null,
+  };
+  if (!exactJson(actual, expected)) {
+    throw new Error("fixed adapter invocation diverged from its exact code-owned identity");
+  }
+  const effectiveEnvironment = sortedEnvironment(options?.env ?? process.env);
+  if (!exactJson(effectiveEnvironment, sortedEnvironment(context.expectedEnvironment))) {
+    throw new Error("fixed adapter environment diverged from the worker process environment");
+  }
+  const stagedExecutable = path.resolve(
+    STAGED_ROOT,
+    expected.executable.replace(/^\\/+/, ""),
+  );
+  if (!stagedExecutable.startsWith(path.resolve(STAGED_ROOT) + path.sep)) {
+    throw new Error("fixed adapter staged target escaped the image root");
+  }
+  const stat = fs.lstatSync(stagedExecutable);
+  if (!stat.isFile() || stat.isSymbolicLink()) {
+    throw new Error("fixed adapter staged target is not one regular file");
+  }
+  return { actual, context, effectiveEnvironment };
+}
+
+function record(validated) {
+  fs.appendFileSync(TRACE_PATH, JSON.stringify({
+    ...validated.actual,
+    environment: validated.effectiveEnvironment,
+    phaseId: validated.context.phaseId,
+    preloadCount: PRELOAD_COUNT,
+    processEnvironment: validated.context.processEnvironment,
+    socketlessGuardCount: SOCKETLESS_GUARD_COUNT,
   }) + "\\n");
 }
 
@@ -3275,63 +4325,23 @@ function asynchronousChild(stdout) {
   return child;
 }
 
-childProcess.spawnSync = (executable, argv = [], options = {}) => {
-  const normalized = normalizedInvocation(argv, options);
-  record("spawnSync", executable, normalized.argv, normalized.options);
-  const stdout = encodedOutput(normalized.options);
-  const stderr = normalized.options?.encoding ? "" : Buffer.alloc(0);
-  return {
-    error: undefined,
-    output: [null, stdout, stderr],
-    pid: 4242,
-    signal: null,
-    status: EXIT_STATUS,
-    stderr,
-    stdout,
-  };
-};
-
-childProcess.execFileSync = (executable, argv = [], options = {}) => {
-  const normalized = normalizedInvocation(argv, options);
-  record("execFileSync", executable, normalized.argv, normalized.options);
-  const stdout = encodedOutput(normalized.options);
-  if (EXIT_STATUS !== 0) {
-    const error = new Error("fixed adapter exited non-zero");
-    error.status = EXIT_STATUS;
-    error.stdout = stdout;
-    error.stderr = normalized.options?.encoding ? "" : Buffer.alloc(0);
-    throw error;
-  }
-  return stdout;
-};
-
 childProcess.spawn = (executable, argv = [], options = {}) => {
   const normalized = normalizedInvocation(argv, options);
-  record("spawn", executable, normalized.argv, normalized.options);
-  return asynchronousChild(encodedOutput(normalized.options));
+  const validated = assertExactInvocation(
+    "spawn",
+    executable,
+    normalized.argv,
+    normalized.options,
+  );
+  record(validated);
+  return asynchronousChild(encodedOutput(validated.context.output));
 };
 
-childProcess.execFile = (executable, argv = [], options = {}, callback) => {
-  if (typeof options === "function") {
-    callback = options;
-    options = {};
-  }
-  const normalized = normalizedInvocation(argv, options);
-  record("execFile", executable, normalized.argv, normalized.options);
-  const stdout = encodedOutput(normalized.options);
-  const stderr = normalized.options?.encoding ? "" : Buffer.alloc(0);
-  const child = asynchronousChild(stdout);
-  queueMicrotask(() => {
-    if (EXIT_STATUS === 0) {
-      callback?.(null, stdout, stderr);
-      return;
-    }
-    const error = new Error("fixed adapter exited non-zero");
-    error.code = EXIT_STATUS;
-    callback?.(error, stdout, stderr);
-  });
-  return child;
-};
+for (const api of ["exec", "execFile", "execFileSync", "execSync", "fork", "spawnSync"]) {
+  childProcess[api] = () => {
+    throw new Error("worker crossed a non-admitted child_process API: " + api);
+  };
+}
 
 syncBuiltinESMExports();
 `;
@@ -3354,7 +4364,7 @@ function writeProtectedJson(file, value) {
 function signedManifestEnvelope() {
   const artifactPath = "postgres/worker-test.dump";
   const artifactBytes = Buffer.from("worker test artifact\n");
-  const artifactSha256 = sha256(artifactBytes);
+  const artifactSha256 = testCryptoSha256(artifactBytes);
   const unsigned = {
     schema: "platform.backup-manifest/v1",
     id: "manifest-worker-test",
@@ -3385,14 +4395,16 @@ function signedManifestEnvelope() {
     },
     createdAt: "2026-07-26T12:00:00.000Z",
   };
-  const digest = backupDocumentDigest(unsigned);
-  const manifestMac = crypto.createHmac("sha256", MANIFEST_TEST_KEY)
-    .update(`platform-backup-manifest-v1\n${unsigned.id}\n${digest}\n`)
-    .digest("base64url");
+  const digest = testManifestDigest(unsigned);
+  const manifestMac = testHmacBase64Url(
+    MANIFEST_TEST_KEY,
+    `platform-backup-manifest-v1\n${unsigned.id}\n${digest}\n`,
+  );
   const artifactName = path.basename(artifactPath);
-  const artifactMac = crypto.createHmac("sha256", ARTIFACT_TEST_KEY)
-    .update(`platform-postgres-backup-v1\n${artifactName}\n${artifactSha256}\n`)
-    .digest("base64url");
+  const artifactMac = testHmacBase64Url(
+    ARTIFACT_TEST_KEY,
+    `platform-postgres-backup-v1\n${artifactName}\n${artifactSha256}\n`,
+  );
   return {
     artifactBytes,
     manifest: {
@@ -3414,7 +4426,45 @@ function signedManifestEnvelope() {
         signature: artifactMac,
       },
     },
+    unsigned,
   };
+}
+
+function testCryptoSha256(value) {
+  return crypto.createHash("sha256").update(value).digest("hex");
+}
+
+function testHmacBase64Url(key, value) {
+  return crypto.createHmac("sha256", key).update(value).digest("base64url");
+}
+
+function testManifestDigest(document) {
+  return testCryptoSha256(JSON.stringify(testCanonicalBackupValue(document)));
+}
+
+function testCanonicalBackupValue(value) {
+  if (Array.isArray(value)) return value.map(testCanonicalBackupValue);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.keys(value)
+        .filter((key) => key !== "signature")
+        .sort()
+        .map((key) => [key, testCanonicalBackupValue(value[key])]),
+    );
+  }
+  return value;
+}
+
+function reverseObjectKeyOrder(value) {
+  if (Array.isArray(value)) return value.map(reverseObjectKeyOrder);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.keys(value)
+        .reverse()
+        .map((key) => [key, reverseObjectKeyOrder(value[key])]),
+    );
+  }
+  return value;
 }
 
 function manifestVerificationOptions() {

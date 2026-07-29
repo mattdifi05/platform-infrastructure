@@ -20,6 +20,28 @@ const CAPABILITY_SECRETS = [
 ];
 const EVIDENCE_SECRET = "docker_action_evidence_runtime_snapshot";
 const TRUST_SECRET = "docker_action_runtime_intent_trust_key";
+const CANONICAL_REQUIRED_CHECK_IDS = Object.freeze([
+  "raw-socket-single-owner",
+  "docker-broker-immutable-image",
+  "docker-broker-host-private",
+  "docker-broker-root-identity",
+  "docker-broker-trust-aware-readiness",
+  "docker-broker-exact-raw-socket",
+  "docker-broker-socket-volume-not-aliased",
+  "docker-broker-state-volume-not-aliased",
+  "docker-broker-exact-capability-secrets",
+  "docker-broker-claimed-job-queue-read-only",
+  "docker-broker-claimed-job-queue-not-aliased",
+  "scheduler-immutable-image",
+  "scheduler-minimum-authority",
+  "scheduler-host-private",
+  "scheduler-exact-mount-targets",
+  "scheduler-claimed-job-queue-read-write",
+  "scheduler-writable-paths",
+  "scheduler-exact-capability-secrets",
+  "scheduler-uses-local-action-socket",
+  "scheduler-has-no-docker-api",
+]);
 const CANDIDATE_PROJECT_PRIVATE_VOLUMES = [
   "backup_scheduler_logs",
   "enterprise_alertmanager_data",
@@ -46,6 +68,55 @@ test("canonical Compose policy rendering is available without a Docker Engine", 
     true,
     `NOT_RUN: canonical docker compose config renderer unavailable: ${composeAvailability.reason}`,
   );
+});
+
+test("missing or renamed canonical check IDs hard-fail instead of becoming TODO", () => {
+  const report = {
+    checks: CANONICAL_REQUIRED_CHECK_IDS.map((id) => ({ id, status: "failed" })),
+  };
+  const todoMessages = [];
+  const stagingContext = {
+    todo(message) {
+      todoMessages.push(message);
+    },
+  };
+  assert.equal(
+    requiredCheckStatus(report, "raw-socket-single-owner"),
+    "failed",
+    "a known present failed check remains eligible for explicit RED staging",
+  );
+  assert.equal(
+    stageKnownPresentPolicyFailures(stagingContext, report, ["raw-socket-single-owner"]),
+    false,
+  );
+  assert.equal(todoMessages.length, 1, "only the known present failed check may become TODO");
+
+  const removed = structuredClone(report);
+  removed.checks = removed.checks.filter(({ id }) => id !== "raw-socket-single-owner");
+  todoMessages.length = 0;
+  assert.throws(
+    () => stageKnownPresentPolicyFailures(
+      stagingContext,
+      removed,
+      CANONICAL_REQUIRED_CHECK_IDS,
+    ),
+    /required policy check missing or renamed: raw-socket-single-owner/,
+  );
+  assert.deepEqual(todoMessages, [], "a missing check must hard-fail before TODO staging");
+
+  const renamed = structuredClone(report);
+  renamed.checks.find(({ id }) => id === "raw-socket-single-owner").id =
+    "raw-socket-owner-renamed";
+  todoMessages.length = 0;
+  assert.throws(
+    () => stageKnownPresentPolicyFailures(
+      stagingContext,
+      renamed,
+      CANONICAL_REQUIRED_CHECK_IDS,
+    ),
+    /required policy check missing or renamed: raw-socket-single-owner/,
+  );
+  assert.deepEqual(todoMessages, [], "a renamed check must hard-fail before TODO staging");
 });
 
 test("the test-only candidate overlay resolves to the intended authority boundary", (t) => {
@@ -115,6 +186,7 @@ test("the unmodified canonical source render itself satisfies the policy (real-c
   if (!config) return;
   assertRenderedPolicySurface(config);
   const report = evaluateRuntimeIsolation(config);
+  requiredPolicyChecks(report, CANONICAL_REQUIRED_CHECK_IDS);
   assert.equal(report.status, "passed", report.failures.join("\n"));
 });
 
@@ -123,31 +195,12 @@ test("accepts the complete canonical Compose JSON render", (t) => {
   if (!config) return;
   assertRenderedPolicySurface(config);
   const report = evaluateRuntimeIsolation(config);
+  const requiredChecks = requiredPolicyChecks(report, CANONICAL_REQUIRED_CHECK_IDS);
 
   assert.equal(report.status, "passed", report.failures.join("\n"));
   assert.deepEqual(report.summary.rawSocketOwners, ["docker-action-broker"]);
-  for (const id of [
-    "docker-broker-immutable-image",
-    "docker-broker-host-private",
-    "docker-broker-root-identity",
-    "docker-broker-trust-aware-readiness",
-    "docker-broker-exact-raw-socket",
-    "docker-broker-socket-volume-not-aliased",
-    "docker-broker-state-volume-not-aliased",
-    "docker-broker-exact-capability-secrets",
-    "docker-broker-claimed-job-queue-read-only",
-    "docker-broker-claimed-job-queue-not-aliased",
-    "scheduler-immutable-image",
-    "scheduler-minimum-authority",
-    "scheduler-host-private",
-    "scheduler-exact-mount-targets",
-    "scheduler-claimed-job-queue-read-write",
-    "scheduler-writable-paths",
-    "scheduler-exact-capability-secrets",
-    "scheduler-uses-local-action-socket",
-    "scheduler-has-no-docker-api",
-  ]) {
-    assert.equal(checkStatus(report, id), "passed", id);
+  for (const check of requiredChecks) {
+    assert.equal(check.status, "passed", check.id);
   }
 });
 
@@ -191,6 +244,17 @@ test("follows rendered volumes_from authority instead of trusting an empty local
   });
 });
 
+test("follows transitive rendered volumes_from authority to the exact raw socket owner", (t) => {
+  assertMutationRejected(t, {
+    checks: ["raw-socket-single-owner"],
+    mutate(config) {
+      config.services.cadvisor.volumes = [];
+      config.services.cadvisor.volumes_from = ["node-exporter:ro"];
+      config.services["node-exporter"].volumes_from = ["docker-action-broker:ro"];
+    },
+  });
+});
+
 test("rejects an unprovable external container volumes_from authority", (t) => {
   assertMutationRejected(t, {
     checks: ["raw-socket-single-owner"],
@@ -218,7 +282,7 @@ test("accepts a project-private canonical local volume as a raw-authority positi
 
   assert.equal(renderedServiceOwnsRawSocket(baseline, "cadvisor"), false);
   assert.equal(
-    checkStatus(evaluateRuntimeIsolation(baseline), "raw-socket-single-owner"),
+    requiredCheckStatus(evaluateRuntimeIsolation(baseline), "raw-socket-single-owner"),
     "passed",
     "a proven project-private canonical local volume must not be misclassified as raw Docker authority",
   );
@@ -240,7 +304,7 @@ test("accepts a canonical rendered named volume without classifying every named 
 
   assert.equal(renderedServiceOwnsRawSocket(baseline, "cadvisor"), false);
   assert.equal(
-    checkStatus(evaluateRuntimeIsolation(baseline), "raw-socket-single-owner"),
+    requiredCheckStatus(evaluateRuntimeIsolation(baseline), "raw-socket-single-owner"),
     "passed",
     "a canonical default-local rendered volume must remain distinct from unprovable volume authority",
   );
@@ -255,7 +319,7 @@ test("accepts internal volumes_from from a socketless service as a positive cont
 
   assert.equal(renderedServiceOwnsRawSocket(baseline, "cadvisor"), false);
   assert.equal(
-    checkStatus(evaluateRuntimeIsolation(baseline), "raw-socket-single-owner"),
+    requiredCheckStatus(evaluateRuntimeIsolation(baseline), "raw-socket-single-owner"),
     "passed",
     "internal volumes_from must remain safe when its exact source service is socketless",
   );
@@ -295,6 +359,50 @@ for (const device of ["/", "/var", "/run", "/var/run"]) {
           name: "platform_infra_vps_cadvisor_runtime",
           driver: "local",
           driver_opts: { type: "none", o: "bind,ro", device },
+        };
+      },
+    });
+  });
+}
+
+for (const [label, serviceName, volumeName, driverOpts] of [
+  [
+    "local NFS driver_opts with a neutral remote device",
+    "postgres",
+    "postgres_unprovable_runtime",
+    { type: "nfs", o: "addr=192.0.2.10,ro", device: ":/srv/runtime" },
+  ],
+  [
+    "local bind-like driver_opts with a neutral host device",
+    "redis",
+    "redis_unprovable_runtime",
+    { type: "none", o: "bind,ro", device: "/srv/application-cache" },
+  ],
+  [
+    "local driver_opts without a device",
+    "nats",
+    "nats_unprovable_runtime",
+    { type: "nfs", o: "addr=192.0.2.11,ro" },
+  ],
+]) {
+  test(`rejects ${serviceName} ${label} independently of its mount target`, (t) => {
+    assertMutationRejected(t, {
+      checks: ["raw-socket-single-owner"],
+      mutate(config) {
+        config.services[serviceName].volumes = [
+          ...(config.services[serviceName].volumes ?? []),
+          {
+            type: "volume",
+            source: volumeName,
+            target: "/mnt/runtime",
+            read_only: true,
+            volume: {},
+          },
+        ];
+        config.volumes[volumeName] = {
+          name: `platform_infra_vps_${volumeName}`,
+          driver: "local",
+          driver_opts: structuredClone(driverOpts),
         };
       },
     });
@@ -754,13 +862,13 @@ test("assigns exact root-owned capability, evidence and trust secret ownership",
   const { report } = admitted;
 
   for (const name of CAPABILITY_SECRETS) {
-    assert.equal(checkStatus(report, `docker-broker-secret-owners-${name}`), "passed", name);
+    assert.equal(requiredCheckStatus(report, `docker-broker-secret-owners-${name}`), "passed", name);
     for (const owner of ["backup-scheduler", "docker-action-broker"]) {
-      assert.equal(checkStatus(report, `docker-broker-secret-mode-${name}-${owner}`), "passed", `${name}:${owner}`);
+      assert.equal(requiredCheckStatus(report, `docker-broker-secret-mode-${name}-${owner}`), "passed", `${name}:${owner}`);
     }
   }
-  assert.equal(checkStatus(report, `docker-broker-secret-owners-${EVIDENCE_SECRET}`), "passed");
-  assert.equal(checkStatus(report, `docker-broker-secret-owners-${TRUST_SECRET}`), "passed");
+  assert.equal(requiredCheckStatus(report, `docker-broker-secret-owners-${EVIDENCE_SECRET}`), "passed");
+  assert.equal(requiredCheckStatus(report, `docker-broker-secret-owners-${TRUST_SECRET}`), "passed");
 });
 
 test("requires all six scheduler capability secrets", (t) => {
@@ -844,23 +952,13 @@ function assertMutationRejected(t, { checks, mutate }) {
   if (!baseline) return;
 
   const baselineReport = evaluateRuntimeIsolation(baseline);
+  if (!stageKnownPresentPolicyFailures(t, baselineReport, checks)) return;
   if (checks.includes("raw-socket-single-owner")) {
     assert.deepEqual(
       renderedRawSocketOwners(baseline),
       ["docker-action-broker"],
       "raw-authority mutation baseline must independently prove one exact owner",
     );
-  }
-  const blockedTargets = checks
-    .map((id) => ({ id, status: checkStatus(baselineReport, id) ?? "missing" }))
-    .filter(({ status }) => status !== "passed");
-  if (blockedTargets.length > 0) {
-    t.todo(
-      `blocked by candidate policy consumer RED: ${blockedTargets
-        .map(({ id, status }) => `${id}=${status}`)
-        .join(", ")}`,
-    );
-    return;
   }
 
   const candidate = structuredClone(baseline);
@@ -873,11 +971,11 @@ function assertMutationRejected(t, { checks, mutate }) {
     );
   }
   const report = evaluateRuntimeIsolation(candidate);
-  for (const id of checks) {
+  for (const check of requiredPolicyChecks(report, checks)) {
     assert.equal(
-      checkStatus(report, id),
+      check.status,
       "failed",
-      `mutation did not reject at its intended consumer check: ${id}\n${report.failures.join("\n")}`,
+      `mutation did not reject at its intended consumer check: ${check.id}\n${report.failures.join("\n")}`,
     );
   }
 }
@@ -886,11 +984,7 @@ function rawAuthorityBaselineOrTodo(t) {
   const baseline = canonicalComposeRenderOrSkip(t, "candidate");
   if (!baseline) return null;
   const report = evaluateRuntimeIsolation(baseline);
-  const status = checkStatus(report, "raw-socket-single-owner");
-  if (status !== "passed") {
-    t.todo(`blocked by candidate policy consumer RED: raw-socket-single-owner=${status ?? "missing"}`);
-    return null;
-  }
+  if (!stageKnownPresentPolicyFailures(t, report, ["raw-socket-single-owner"])) return null;
   assert.deepEqual(renderedRawSocketOwners(baseline), ["docker-action-broker"]);
   return baseline;
 }
@@ -899,18 +993,71 @@ function admittedCandidatePolicyOrTodo(t) {
   const config = canonicalComposeRenderOrSkip(t, "candidate");
   if (!config) return null;
   const report = evaluateRuntimeIsolation(config);
+  if (!stageKnownPresentPolicyFailures(t, report, CANONICAL_REQUIRED_CHECK_IDS)) return null;
   if (report.status !== "passed") {
     const failedIds = report.checks
       .filter((item) => item.status === "failed")
       .map((item) => item.id);
-    t.todo(`blocked by candidate policy consumer RED: ${failedIds.join(", ") || "status=failed"}`);
-    return null;
+    assert.ok(
+      failedIds.length > 0,
+      "candidate policy report status is failed without a known present failed check",
+    );
+    if (!stageKnownPresentPolicyFailures(t, report, failedIds)) return null;
+    assert.fail("candidate policy report status is failed but every check passed");
   }
   return { config, report };
 }
 
-function checkStatus(report, id) {
-  return report.checks.find((item) => item.id === id)?.status;
+function policyCheckIndex(report) {
+  assert.ok(Array.isArray(report?.checks), "policy report checks must be an array");
+  const index = new Map();
+  for (const check of report.checks) {
+    const id = String(check?.id || "");
+    assert.ok(id, "policy report contains a check without an exact ID");
+    assert.equal(index.has(id), false, `policy report contains duplicate check ID: ${id}`);
+    index.set(id, check);
+  }
+  return index;
+}
+
+function requiredPolicyChecks(report, ids) {
+  assert.ok(Array.isArray(ids) && ids.length > 0, "required policy check IDs must be non-empty");
+  assert.equal(
+    new Set(ids).size,
+    ids.length,
+    "required policy check IDs must be exact and unique",
+  );
+  const index = policyCheckIndex(report);
+  const missing = ids.filter((id) => !index.has(id));
+  assert.equal(
+    missing.length,
+    0,
+    `required policy check missing or renamed: ${missing.join(", ")}`,
+  );
+  const checks = ids.map((id) => index.get(id));
+  for (const check of checks) {
+    assert.ok(
+      check.status === "passed" || check.status === "failed",
+      `required policy check has unknown status: ${check.id}=${String(check.status)}`,
+    );
+  }
+  return checks;
+}
+
+function requiredCheckStatus(report, id) {
+  return requiredPolicyChecks(report, [id])[0].status;
+}
+
+function stageKnownPresentPolicyFailures(t, report, ids) {
+  const failed = requiredPolicyChecks(report, ids)
+    .filter((check) => check.status === "failed");
+  if (failed.length === 0) return true;
+  t.todo(
+    `blocked by explicitly staged present candidate policy RED: ${failed
+      .map((check) => `${check.id}=${check.status}`)
+      .join(", ")}`,
+  );
+  return false;
 }
 
 function canonicalComposeRenderOrSkip(t, variant = "candidate") {
@@ -1296,11 +1443,8 @@ function renderedServiceOwnsRawSocket(config, name, ancestry = new Set()) {
     if (!declaration || declaration.external === true) return true;
     const canonicalName = `${String(config.name || "")}_${volumeName}`;
     if (!config.name || declaration.name !== canonicalName) return true;
-    if (declaration.driver && declaration.driver !== "local") return true;
-    if (declaration.driver_opts) {
-      const device = declaration.driver_opts.device;
-      return device ? exposesDockerSocket(device) : true;
-    }
+    if (Object.hasOwn(declaration, "driver") && declaration.driver !== "local") return true;
+    if (Object.hasOwn(declaration, "driver_opts")) return true;
     return false;
   })) return true;
   return (service.volumes_from ?? []).some((rawReference) => {

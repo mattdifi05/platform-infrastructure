@@ -160,6 +160,205 @@ function rawFrameE2eTest(name, callback) {
   );
 }
 
+testRunner("broker security-oracle self-mutants reject every previously accepted bypass", async (t) => {
+  await t.test("snapshot decoy fd plus pathname/reopen write", () => {
+    const file = "/oracle/snapshot/job.json";
+    const safeFlags = fs.constants.O_WRONLY
+      | fs.constants.O_CREAT
+      | fs.constants.O_EXCL
+      | fs.constants.O_NOFOLLOW;
+    const positive = [
+      { type: "open", file, flags: safeFlags, mode: 0o400, descriptor: 10 },
+      {
+        type: "write",
+        file,
+        descriptor: 10,
+        pathnameWrite: false,
+        bytes: 4,
+      },
+      { type: "fsync", file, descriptor: 10, size: 4 },
+      { type: "close", file, descriptor: 10 },
+    ];
+    assert.doesNotThrow(() => assertSnapshotLeafSealHistory(positive, {
+      expectedBytes: 4,
+      file,
+    }));
+    const decoy = [
+      positive[0],
+      { type: "close", file, descriptor: 10 },
+      { type: "open", file, flags: fs.constants.O_WRONLY, mode: 0o400, descriptor: 11 },
+      {
+        type: "write",
+        file,
+        descriptor: 11,
+        pathnameWrite: true,
+        bytes: 4,
+      },
+      { type: "fsync", file, descriptor: 11, size: 4 },
+      { type: "close", file, descriptor: 11 },
+    ];
+    assert.throws(
+      () => assertSnapshotLeafSealHistory(decoy, { expectedBytes: 4, file }),
+      /exactly one|descriptor|pathname|reopen/i,
+    );
+  });
+
+  await t.test("claimed reader third incomplete pass", () => {
+    const completed = [
+      { descriptor: 12, initialPosition: 0, pass: 0 },
+      { descriptor: 12, initialPosition: 0, pass: 1 },
+    ];
+    assert.doesNotThrow(() => assertExactlyTwoDescriptorReadPasses({
+      completedReadPasses: completed,
+      startedReadPasses: structuredClone(completed),
+    }));
+    assert.throws(
+      () => assertExactlyTwoDescriptorReadPasses({
+        completedReadPasses: completed,
+        startedReadPasses: [
+          ...structuredClone(completed),
+          { descriptor: 12, initialPosition: 0, pass: 2 },
+        ],
+      }),
+      /start exactly two|incomplete|substituted/i,
+    );
+  });
+
+  await t.test("journal post-fsync rewrite", () => {
+    const file = "/oracle/journal/0001.json";
+    const positive = [{ type: "fsync", file }, { type: "close", file }];
+    assert.doesNotThrow(
+      () => assertPathImmutableAfter(positive, file, 0, positive.length, "positive"),
+    );
+    const rewritten = [
+      ...positive,
+      {
+        type: "write",
+        file,
+        descriptor: 14,
+        pathnameWrite: false,
+        bytes: 1,
+      },
+    ];
+    assert.throws(
+      () => assertPathImmutableAfter(rewritten, file, 0, rewritten.length, "mutant"),
+      /mutated.*durability/i,
+    );
+  });
+
+  await t.test("journal extra attacker field", () => {
+    const base = {
+      action: "backup.prune.apply",
+      event: "action-completed",
+      leaseId: "a".repeat(64),
+      previousEntrySha256: "0".repeat(64),
+      recordedAt: new Date(NOW).toISOString(),
+      requestId: "123e4567-e89b-42d3-a456-426614174000",
+      requestSha256: "1".repeat(64),
+      resultSha256: "2".repeat(64),
+      schema: JOURNAL_ENTRY_SCHEMA_V2,
+      sequence: 0,
+    };
+    assert.doesNotThrow(() => assertExactJournalEventKeys(
+      base,
+      { requestSha256: base.requestSha256, resultSha256: base.resultSha256 },
+      "positive",
+    ));
+    assert.throws(
+      () => assertExactJournalEventKeys(
+        { ...base, attackerHostPath: "/host/secret" },
+        { requestSha256: base.requestSha256, resultSha256: base.resultSha256 },
+        "mutant",
+      ),
+      /exact canonical fields/i,
+    );
+  });
+
+  await t.test("lease unlink before durable head root-fsync", () => {
+    const activePath = "/oracle/replay/active.lock";
+    const root = path.dirname(activePath);
+    const positive = [
+      { type: "rename", from: `${activePath}.tmp`, to: activePath },
+      { type: "fsync", file: root },
+      { type: "unlink", file: activePath },
+      { type: "fsync", file: root },
+    ];
+    assert.doesNotThrow(() => assertActiveUnlinkFsyncOrder(
+      positive,
+      activePath,
+      1,
+      "positive",
+    ));
+    const earlyUnlink = [
+      { type: "rename", from: `${activePath}.tmp`, to: activePath },
+      { type: "unlink", file: activePath },
+      { type: "fsync", file: root },
+    ];
+    assert.throws(
+      () => assertActiveUnlinkFsyncOrder(
+        earlyUnlink,
+        activePath,
+        2,
+        "mutant",
+      ),
+      /after.*durable head|before.*head/i,
+    );
+  });
+
+  await t.test("recovery early delete before second inspect", () => {
+    const expectedInspects = ["worker-second", "worker-first"];
+    const expectedDeletes = [RESTORE_WORKER_ID, WORKER_ID];
+    const positive = [
+      { method: "inspectContainerForRecovery", name: "worker-second" },
+      { method: "inspectContainerForRecovery", name: "worker-first" },
+      { method: "deleteContainer", id: RESTORE_WORKER_ID },
+      { method: "deleteContainer", id: WORKER_ID },
+    ];
+    assert.doesNotThrow(() => assertInspectAllBeforeDeleteAll(
+      positive,
+      expectedInspects,
+      expectedDeletes,
+      "positive",
+    ));
+    const earlyDelete = [
+      positive[0],
+      positive[2],
+      positive[1],
+      positive[3],
+    ];
+    assert.throws(
+      () => assertInspectAllBeforeDeleteAll(
+        earlyDelete,
+        expectedInspects,
+        expectedDeletes,
+        "mutant",
+      ),
+      /entire.*before deletion/i,
+    );
+  });
+
+  await t.test("preserved lock overwrite", () => {
+    const root = "/oracle/replay";
+    assert.doesNotThrow(() => assertNoStateMutationEvents([
+      {
+        type: "open",
+        file: path.join(root, "active.lock"),
+        flags: fs.constants.O_RDONLY,
+      },
+    ], root, "positive"));
+    assert.throws(
+      () => assertNoStateMutationEvents([{
+        type: "write",
+        file: path.join(root, "active.lock"),
+        descriptor: 15,
+        pathnameWrite: false,
+        bytes: 128,
+      }], root, "mutant"),
+      /mutated.*replay tree/i,
+    );
+  });
+});
+
 const BACKUP_JOB_ID = "0123456789abcdef";
 const RESTORE_JOB_ID = "job-0123456789abcdef";
 const JOB_CREATED_AT = "2026-07-28T11:59:00.000Z";
@@ -240,6 +439,25 @@ for (const phase of PHASE_CASES) {
   });
 }
 
+const HOST_CONFIG_WIDENING_FIELDS = Object.freeze(
+  Object.keys(expectedWorkerHostConfig(
+    directTrustedContext().receipt,
+    findPhase("job.backup.capture"),
+    null,
+  )).sort(),
+);
+
+const INSPECT_MOUNT_WIDENING_FIELDS = Object.freeze([
+  "Destination",
+  "Driver",
+  "Mode",
+  "Name",
+  "Propagation",
+  "RW",
+  "Source",
+  "Type",
+]);
+
 const INSPECT_WIDENINGS = Object.freeze([
   widening("container-id", (inspect) => ({ ...inspect, Id: "9".repeat(64) })),
   widening("container-name", (inspect) => ({ ...inspect, Name: "/attacker-worker" })),
@@ -248,8 +466,79 @@ const INSPECT_WIDENINGS = Object.freeze([
     ...inspect,
     Config: { ...inspect.Config, Image: "attacker/image:latest" },
   })),
-  widening("env.snapshot-path", (inspect) => mutateEnv(inspect, "PLATFORM_CLAIMED_JOB_PATH", "/host/attacker")),
-  widening("env.snapshot-metadata", (inspect) => mutateEnv(inspect, "PLATFORM_CLAIMED_JOB_SHA256", "9".repeat(64))),
+  widening("env.action", (inspect) => mutateEnvToDifferent(
+    inspect,
+    "PLATFORM_DOCKER_ACTION",
+    "backup.prune.apply",
+    "backup.catalog",
+  )),
+  widening("env.phase", (inspect) => mutateEnvToDifferent(
+    inspect,
+    "PLATFORM_DOCKER_PHASE_ID",
+    "restore.verify",
+    "catalog.capture",
+  )),
+  widening("env.request", (inspect) => mutateEnv(
+    inspect,
+    "PLATFORM_DOCKER_REQUEST_ID",
+    "123e4567-e89b-42d3-a456-426614174999",
+  )),
+  widening("env.authority-base64", (inspect) => mutateEnv(
+    inspect,
+    "PLATFORM_DOCKER_PHASE_AUTHORITY_BASE64",
+    Buffer.from('{"attacker":true}').toString("base64url"),
+  )),
+  widening("env.authority-sha256", (inspect) => mutateEnv(
+    inspect,
+    "PLATFORM_DOCKER_PHASE_AUTHORITY_SHA256",
+    "9".repeat(64),
+  )),
+  widening("env.claimed-file-name", (inspect) => mutateEnv(
+    inspect,
+    "PLATFORM_CLAIMED_JOB_FILE_NAME",
+    "attacker.json",
+  )),
+  widening("env.claimed-id", (inspect) => mutateEnv(
+    inspect,
+    "PLATFORM_CLAIMED_JOB_ID",
+    "attacker-job",
+  )),
+  widening("env.claimed-operation", (inspect) => mutateEnv(
+    inspect,
+    "PLATFORM_CLAIMED_JOB_OPERATION",
+    "attacker-operation",
+  )),
+  widening("env.claimed-path", (inspect) => mutateEnv(
+    inspect,
+    "PLATFORM_CLAIMED_JOB_PATH",
+    "/host/attacker",
+  )),
+  widening("env.claimed-sha256", (inspect) => mutateEnv(
+    inspect,
+    "PLATFORM_CLAIMED_JOB_SHA256",
+    "9".repeat(64),
+  )),
+  widening("env.claimed-source", (inspect) => mutateEnv(
+    inspect,
+    "PLATFORM_CLAIMED_JOB_SOURCE_ID",
+    "attacker.source",
+  )),
+  widening("env-missing", removeInspectEnvEntry),
+  widening("env-extra", (inspect) => ({
+    ...inspect,
+    Config: {
+      ...inspect.Config,
+      Env: [...inspect.Config.Env, "ATTACKER_EXTRA=1"],
+    },
+  })),
+  widening("env-duplicate", duplicateInspectEnvEntry),
+  widening("env-reordered", (inspect) => ({
+    ...inspect,
+    Config: {
+      ...inspect.Config,
+      Env: [...inspect.Config.Env].reverse(),
+    },
+  })),
   widening("entrypoint", (inspect) => ({ ...inspect, Config: { ...inspect.Config, Entrypoint: ["sh"] } })),
   widening("cmd", (inspect) => ({ ...inspect, Config: { ...inspect.Config, Cmd: ["sh", "-c", "id"] } })),
   widening("user", (inspect) => ({ ...inspect, Config: { ...inspect.Config, User: "65532:65532" } })),
@@ -259,66 +548,46 @@ const INSPECT_WIDENINGS = Object.freeze([
     delete labels["com.platform.docker-phase-sha256"];
     return { ...inspect, Config: { ...inspect.Config, Labels: labels } };
   }),
-  widening("readonly-rootfs", (inspect) => ({
-    ...inspect,
-    HostConfig: { ...inspect.HostConfig, ReadonlyRootfs: false },
-  })),
-  widening("security-opt", (inspect) => ({
-    ...inspect,
-    HostConfig: { ...inspect.HostConfig, SecurityOpt: [] },
-  })),
-  widening("namespace-cgroup", (inspect) => ({
-    ...inspect,
-    HostConfig: { ...inspect.HostConfig, CgroupnsMode: "host" },
-  })),
-  widening("namespace-pid", (inspect) => ({
-    ...inspect,
-    HostConfig: { ...inspect.HostConfig, PidMode: "host" },
-  })),
-  widening("namespace-ipc", (inspect) => ({
-    ...inspect,
-    HostConfig: { ...inspect.HostConfig, IpcMode: "host" },
-  })),
-  widening("namespace-user", (inspect) => ({
-    ...inspect,
-    HostConfig: { ...inspect.HostConfig, UsernsMode: "host" },
-  })),
-  widening("namespace-uts", (inspect) => ({
-    ...inspect,
-    HostConfig: { ...inspect.HostConfig, UTSMode: "host" },
-  })),
-  widening("privileged", (inspect) => ({
-    ...inspect,
-    HostConfig: { ...inspect.HostConfig, Privileged: true },
-  })),
-  widening("capability", (inspect) => ({
-    ...inspect,
-    HostConfig: { ...inspect.HostConfig, CapAdd: ["SYS_ADMIN"] },
-  })),
-  widening("bind", (inspect) => ({
-    ...inspect,
-    HostConfig: { ...inspect.HostConfig, Binds: ["/:/host:rw"] },
-    Mounts: [{ Type: "bind", Source: "/", Destination: "/host", RW: true }],
-  })),
-  widening("named-volume", (inspect) => ({
-    ...inspect,
-    Mounts: inspect.Mounts.length === 0
-      ? [{
-          Type: "volume",
-          Name: "attacker",
-          Source: "/var/lib/docker/volumes/attacker/_data",
-          Destination: "/run/attacker",
-          Driver: "local",
-          Mode: "",
-          RW: true,
-          Propagation: "",
-        }]
-      : inspect.Mounts.map((mount, index) => (
-          index === inspect.Mounts.length - 1
-            ? { ...mount, Name: "attacker", Source: "/var/lib/docker/volumes/attacker/_data" }
-            : mount
-        )),
-  })),
+  widening("config-volumes", (inspect) => mutateInspectConfig(
+    inspect,
+    "Volumes",
+    { "/attacker": {} },
+  )),
+  widening("config-exposed-ports", (inspect) => mutateInspectConfig(
+    inspect,
+    "ExposedPorts",
+    { "2375/tcp": {} },
+  )),
+  widening("config-healthcheck", (inspect) => mutateInspectConfig(
+    inspect,
+    "Healthcheck",
+    { Test: ["CMD-SHELL", "id"] },
+  )),
+  widening("config-onbuild", (inspect) => mutateInspectConfig(
+    inspect,
+    "OnBuild",
+    ["RUN id"],
+  )),
+  ...HOST_CONFIG_WIDENING_FIELDS.map((field) => widening(
+    `hostconfig.${field}`,
+    (inspect) => mutateInspectHostConfig(inspect, field),
+  )),
+  ...INSPECT_MOUNT_WIDENING_FIELDS.map((field) => widening(
+    `mount.${field}`,
+    (inspect) => mutateInspectMount(inspect, field),
+  )),
+  widening("snapshot-bind-source", (inspect) => mutateSnapshotBind(
+    inspect,
+    { Source: "/host/attacker/job.json" },
+  )),
+  widening("snapshot-bind-destination", (inspect) => mutateSnapshotBind(
+    inspect,
+    { Destination: "/run/platform/attacker/job.json" },
+  )),
+  widening("snapshot-bind-read-write", (inspect) => mutateSnapshotBind(
+    inspect,
+    { Mode: "rw", RW: true },
+  )),
   widening("network-id", (inspect) => {
     const entries = Object.entries(inspect.NetworkSettings.Networks);
     if (entries.length === 0) {
@@ -566,6 +835,11 @@ snapshotTest("v2 snapshot store uses O_EXCL 0400 fsync under the exact Engine Mo
     volumeInspect,
   });
   const sealHistoryEnd = audit.events.length;
+  const leafSeal = assertSnapshotLeafSealHistory(audit.events, {
+    expectedBytes: BACKUP_JOB_BYTES.length,
+    file: sealed.hostPath,
+    historyEnd: sealHistoryEnd,
+  });
   const expectedDirectory = path.join(
     mountpoint,
     source.snapshotVolumeSubpath,
@@ -642,9 +916,9 @@ snapshotTest("v2 snapshot store uses O_EXCL 0400 fsync under the exact Engine Mo
   );
   const requestDirectoryFsync = historyIndex(
     audit.events,
-    leafFsyncIndex,
+    leafSeal.closeIndex,
     ({ file, type }) => type === "fsync" && file === expectedDirectory,
-    "snapshot request directory was not fsynced after the durable leaf write",
+    "snapshot request directory was not fsynced after the durable leaf close",
   );
   assert.equal(
     audit.events
@@ -656,6 +930,8 @@ snapshotTest("v2 snapshot store uses O_EXCL 0400 fsync under the exact Engine Mo
   assert.ok(requestDirectoryFsync < sealHistoryEnd);
   snapshot.bytes.fill(0x78);
   assert.deepEqual(fs.readFileSync(sealed.hostPath), BACKUP_JOB_BYTES);
+  const collisionBefore = captureTreeSnapshot(expectedDirectory);
+  const collisionHistoryStart = audit.events.length;
   await assert.rejects(
     async () => store.seal({
       ...snapshot,
@@ -669,6 +945,16 @@ snapshotTest("v2 snapshot store uses O_EXCL 0400 fsync under the exact Engine Mo
     }),
     /exist|exclusive|snapshot|replay/i,
   );
+  assert.deepEqual(
+    captureTreeSnapshot(expectedDirectory),
+    collisionBefore,
+    "existing snapshot collision changed bytes, inode, metadata or inventory",
+  );
+  assertNoStateMutationEvents(
+    audit.events.slice(collisionHistoryStart),
+    expectedDirectory,
+    "existing snapshot collision",
+  );
   const siblingRequestSha256 = requestSha256 === "a".repeat(64)
     ? "b".repeat(64)
     : "a".repeat(64);
@@ -678,6 +964,7 @@ snapshotTest("v2 snapshot store uses O_EXCL 0400 fsync under the exact Engine Mo
   fs.writeFileSync(siblingFile, "survivor\n", { mode: 0o400 });
   fs.chmodSync(siblingFile, 0o400);
   const siblingBefore = fs.statSync(siblingFile);
+  const siblingTreeBefore = captureTreeSnapshot(siblingDirectory);
   const cleanupStart = audit.events.length;
   await store.cleanup(sealed);
   assert.equal(fs.existsSync(sealed.hostPath), false);
@@ -686,6 +973,11 @@ snapshotTest("v2 snapshot store uses O_EXCL 0400 fsync under the exact Engine Mo
   assert.equal(fs.existsSync(claimedJobsDirectory), true);
   assert.equal(fs.readFileSync(siblingFile, "utf8"), "survivor\n");
   const siblingAfter = fs.statSync(siblingFile);
+  assert.deepEqual(
+    captureTreeSnapshot(siblingDirectory),
+    siblingTreeBefore,
+    "snapshot cleanup renamed or transiently replaced the sibling subtree",
+  );
   assert.deepEqual(
     Object.fromEntries(
       ["dev", "ino", "mode", "uid", "gid", "nlink", "size"]
@@ -698,15 +990,29 @@ snapshotTest("v2 snapshot store uses O_EXCL 0400 fsync under the exact Engine Mo
     "snapshot cleanup changed a sibling request artifact",
   );
   const cleanupEvents = audit.events.slice(cleanupStart);
+  assertSnapshotCleanupHistory(audit.events, {
+    historyStart: cleanupStart,
+    sealed,
+  });
   assert.deepEqual(
     cleanupEvents
-      .filter(({ type }) => type === "unlink" || type === "rmdir" || type === "rm")
-      .map(({ file, type }) => ({ file, type })),
+      .filter(isMutatingIoEvent)
+      .map(({ file, from, to, type }) => ({ file, from, to, type })),
     [
-      { file: sealed.hostPath, type: "unlink" },
-      { file: expectedDirectory, type: "rmdir" },
+      {
+        file: sealed.hostPath,
+        from: undefined,
+        to: undefined,
+        type: "unlink",
+      },
+      {
+        file: expectedDirectory,
+        from: undefined,
+        to: undefined,
+        type: "rmdir",
+      },
     ],
-    "snapshot cleanup escaped its exact request leaf/directory or used recursive removal",
+    "snapshot cleanup wrote, renamed or escaped its exact request leaf/directory",
   );
   const unlinkIndex = historyIndex(
     audit.events,
@@ -714,11 +1020,17 @@ snapshotTest("v2 snapshot store uses O_EXCL 0400 fsync under the exact Engine Mo
     ({ file, type }) => type === "unlink" && file === sealed.hostPath,
     "snapshot cleanup did not unlink the exact leaf",
   );
-  const rmdirIndex = historyIndex(
+  const requestDirectoryCleanupFsync = historyIndex(
     audit.events,
     unlinkIndex,
+    ({ file, type }) => type === "fsync" && file === expectedDirectory,
+    "snapshot cleanup did not fsync the request directory after leaf unlink",
+  );
+  const rmdirIndex = historyIndex(
+    audit.events,
+    requestDirectoryCleanupFsync,
     ({ file, type }) => type === "rmdir" && file === expectedDirectory,
-    "snapshot cleanup did not remove the empty request directory after its leaf",
+    "snapshot cleanup removed the request directory before its unlink was durable",
   );
   historyIndex(
     audit.events,
@@ -753,6 +1065,26 @@ snapshotTest("v2 snapshot store independently rejects each path-authority substi
       const claimedJobs = path.join(real, source.snapshotVolumeSubpath);
       fs.mkdirSync(claimedJobs, { mode: 0o700, recursive: true });
       fs.symlinkSync(attacker, path.join(claimedJobs, hostileSha256));
+      return { inspect, snapshot, source };
+    }],
+    ["symlink-leaf-collision", ({
+      attacker,
+      hostileSha256,
+      inspect,
+      real,
+      snapshot,
+      source,
+    }) => {
+      const requestDirectory = path.join(
+        real,
+        source.snapshotVolumeSubpath,
+        hostileSha256,
+      );
+      fs.mkdirSync(requestDirectory, { mode: 0o700, recursive: true });
+      fs.symlinkSync(
+        path.join(attacker, "sentinel.txt"),
+        path.join(requestDirectory, "job.json"),
+      );
       return { inspect, snapshot, source };
     }],
     ["traversal-subpath", ({ inspect, snapshot, source }) => ({
@@ -832,6 +1164,8 @@ snapshotTest("v2 snapshot store independently rejects each path-authority substi
         snapshot,
         source,
       });
+      const realBeforeHostileSeal = captureTreeSnapshot(real);
+      const attackerBeforeHostileSeal = captureTreeSnapshot(attacker);
       await assert.rejects(
         async () => store.seal(candidate.snapshot, {
           request: hostileRequest,
@@ -848,6 +1182,21 @@ snapshotTest("v2 snapshot store independently rejects each path-authority substi
           .some(({ type }) => type === "write"),
         false,
         `${id} wrote snapshot bytes before rejecting hostile path authority`,
+      );
+      assertNoStateMutationEvents(
+        pathHistory.audit.events.slice(hostileHistoryStart),
+        root,
+        `${id} hostile path authority`,
+      );
+      assert.deepEqual(
+        captureTreeSnapshot(real),
+        realBeforeHostileSeal,
+        `${id} changed trusted-tree bytes, inode, metadata or inventory`,
+      );
+      assert.deepEqual(
+        captureTreeSnapshot(attacker),
+        attackerBeforeHostileSeal,
+        `${id} changed attacker-tree bytes, inode, metadata or inventory`,
       );
       assert.deepEqual(
         fs.readdirSync(attacker),
@@ -965,6 +1314,88 @@ snapshotTest("v2 snapshot store independently enforces private owner/mode ancest
   }
 });
 
+snapshotTest("v2 snapshot store isolates owner, mode and hardlink checks to each exact ancestry node", async (t) => {
+  for (const [nodeId, nodePath] of [
+    ["ancestor", ({ root }) => root],
+    ["mountpoint", ({ mountpoint }) => mountpoint],
+    ["claimed-jobs", ({ claimedJobs }) => claimedJobs],
+    ["request-directory", ({ requestDirectory }) => requestDirectory],
+    ["leaf", ({ leaf }) => leaf],
+  ]) {
+    for (const [mutationId, mutationFor] of [
+      ["uid", ({ uid }) => ({ uid: uid + 1 })],
+      ["gid", ({ gid }) => ({ gid: gid + 1 })],
+      ["mode", ({ isLeaf }) => ({ permissions: isLeaf ? 0o600 : 0o750 })],
+      ...(nodeId === "leaf"
+        ? [["hardlink", () => ({ nlink: 2 })]]
+        : []),
+    ]) {
+      await t.test(`${nodeId}-${mutationId}`, async (t) => {
+        const root = tempDir(t);
+        const mountpoint = path.join(root, "broker-state");
+        fs.mkdirSync(mountpoint, { mode: 0o700 });
+        const claimedJobs = path.join(mountpoint, "claimed-jobs");
+        fs.mkdirSync(claimedJobs, { mode: 0o700 });
+        const stat = fs.statSync(mountpoint);
+        const receipt = buildRawActiveReceiptV2();
+        const source = receipt.resources.claimedJobSources["jobs.running"];
+        const trusted = directTrustedContext();
+        const request = admittedRequest(
+          "backup.job.execute",
+          findPhase("job.backup.capture").parameters,
+          trusted,
+        );
+        const requestSha256 = fixtureSha256(canonicalFixtureJson(request));
+        const requestDirectory = path.join(claimedJobs, requestSha256);
+        const leaf = path.join(requestDirectory, "job.json");
+        const paths = { claimedJobs, leaf, mountpoint, requestDirectory, root };
+        const target = nodePath(paths);
+        const history = filesystemHistoryProbe();
+        const mutation = mutationFor({
+          gid: stat.gid,
+          isLeaf: nodeId === "leaf",
+          uid: stat.uid,
+        });
+        const store = broker.createSnapshotFileStore({
+          expectedGid: stat.gid,
+          expectedUid: stat.uid,
+          io: pathStatMutationIo(history.io, {
+            mutations: new Map([[target, mutation]]),
+          }),
+        });
+        await assert.rejects(
+          async () => store.seal({
+            ...findPhase("job.backup.capture").claimedJob,
+            bytes: Buffer.from(BACKUP_JOB_BYTES),
+          }, {
+            request,
+            requestId: request.requestId,
+            requestSha256,
+            source,
+            volumeInspect: {
+              ...buildFixtureVolumeInspect(receipt, source.snapshotVolumeId),
+              Mountpoint: mountpoint,
+            },
+          }),
+          /ancestor|directory|gid|hard.?link|integrity|link|mode|owner|permission|private|root|safe|uid/i,
+        );
+        assert.equal(
+          fs.existsSync(requestDirectory),
+          false,
+          `${nodeId}-${mutationId} left a partial snapshot tree`,
+        );
+        assert.equal(
+          history.audit.events.some(
+            (event) => event.type === "write" && event.file === leaf,
+          ),
+          false,
+          `${nodeId}-${mutationId} wrote bytes before completing exact-node attestation`,
+        );
+      });
+    }
+  }
+});
+
 snapshotTest("v2 snapshot store default ownership is exactly root 0:0", async (t) => {
   const root = tempDir(t);
   const mountpoint = path.join(root, "broker-state");
@@ -1033,6 +1464,67 @@ snapshotTest("v2 snapshot store default ownership is exactly root 0:0", async (t
   );
 });
 
+snapshotTest("v2 snapshot store default root policy independently attests every ancestry node", async (t) => {
+  for (const [nodeId, nodePath] of [
+    ["ancestor", ({ root }) => root],
+    ["mountpoint", ({ mountpoint }) => mountpoint],
+    ["claimed-jobs", ({ claimedJobs }) => claimedJobs],
+    ["request-directory", ({ requestDirectory }) => requestDirectory],
+    ["leaf", ({ leaf }) => leaf],
+  ]) {
+    await t.test(nodeId, async (t) => {
+      const root = tempDir(t);
+      const mountpoint = path.join(root, "broker-state");
+      fs.mkdirSync(mountpoint, { mode: 0o700 });
+      const claimedJobs = path.join(mountpoint, "claimed-jobs");
+      fs.mkdirSync(claimedJobs, { mode: 0o700 });
+      const receipt = buildRawActiveReceiptV2();
+      const source = receipt.resources.claimedJobSources["jobs.running"];
+      const trusted = directTrustedContext();
+      const request = admittedRequest(
+        "backup.job.execute",
+        findPhase("job.backup.capture").parameters,
+        trusted,
+      );
+      const requestSha256 = fixtureSha256(canonicalFixtureJson(request));
+      const requestDirectory = path.join(claimedJobs, requestSha256);
+      const leaf = path.join(requestDirectory, "job.json");
+      const paths = { claimedJobs, leaf, mountpoint, requestDirectory, root };
+      const history = filesystemHistoryProbe();
+      const store = broker.createSnapshotFileStore({
+        io: pathStatMutationIo(history.io, {
+          defaultGid: 0,
+          defaultUid: 0,
+          mutations: new Map([[nodePath(paths), { gid: 1, uid: 1 }]]),
+        }),
+      });
+      await assert.rejects(
+        async () => store.seal({
+          ...findPhase("job.backup.capture").claimedJob,
+          bytes: Buffer.from(BACKUP_JOB_BYTES),
+        }, {
+          request,
+          requestId: request.requestId,
+          requestSha256,
+          source,
+          volumeInspect: {
+            ...buildFixtureVolumeInspect(receipt, source.snapshotVolumeId),
+            Mountpoint: mountpoint,
+          },
+        }),
+        /gid|owner|root|uid/i,
+      );
+      assert.equal(fs.existsSync(requestDirectory), false);
+      assert.equal(
+        history.audit.events.some(
+          (event) => event.type === "write" && event.file === leaf,
+        ),
+        false,
+      );
+    });
+  }
+});
+
 snapshotTest("v2 snapshot cleanup refuses a hard-linked leaf without deleting either name", async (t) => {
   const root = tempDir(t);
   const mountpoint = path.join(root, "broker-state");
@@ -1086,11 +1578,7 @@ readerTest("v2 claimed-job reader uses O_NOFOLLOW, two descriptor reads and stab
     fs.constants.O_NOFOLLOW,
   );
   assert.equal(leafOpens[0].file, fixture.file);
-  assert.equal(
-    probe.audit.completedReadPasses.length,
-    2,
-    "claimed job must be read in two complete positioned passes",
-  );
+  assertExactlyTwoDescriptorReadPasses(probe.audit);
   assert.deepEqual(
     probe.audit.completedReadPasses.map(({ bytes, initialPosition }) => ({
       bytes,
@@ -1168,7 +1656,7 @@ readerTest("v2 claimed-job reader rejects a same-size content race between descr
     }, { io: racing.io }),
     /changed|race|stable|substitution|content/i,
   );
-  assert.equal(racing.audit.completedReadPasses.length, 2);
+  assertExactlyTwoDescriptorReadPasses(racing.audit, "same-size race reader");
   assert.equal(racing.audit.raceInjectedAfterPass, 1);
 });
 
@@ -1304,22 +1792,50 @@ for (const phase of PHASE_CASES) {
   test(`v2 ${phase.phaseId} independently rejects every preflight identity substitution`, async (t) => {
     for (const resourceKind of ["network", "volume"]) {
       const required = requiredPreflightIds(phase, directTrustedContext().receipt)[resourceKind];
-      if (required.length === 0) continue;
-      await t.test(resourceKind, async (t) => {
-        const baseline = semanticFixture(t, phase);
-        await baseline.executor.executePhase(phase.action, phase.phaseId, baseline.context);
-        assert.equal(baseline.transport.created.length, 1);
+      for (const targetLogicalId of required) {
+        await t.test(`${resourceKind}.${targetLogicalId}`, async (t) => {
+          const baseline = semanticFixture(t, phase);
+          await baseline.executor.executePhase(phase.action, phase.phaseId, baseline.context);
+          assert.equal(baseline.transport.created.length, 1);
+          assertExactPreflightInspectInventory(
+            baseline.transport,
+            phase,
+            baseline.trusted.receipt,
+          );
 
-        const option = resourceKind === "network"
-          ? { networkMutation: (inspect) => ({ ...inspect, Id: "9".repeat(64) }) }
-          : { volumeMutation: (inspect) => ({ ...inspect, Name: "attacker-volume" }) };
-        const hostile = semanticFixture(t, phase, option);
-        await assert.rejects(
-          () => hostile.executor.executePhase(phase.action, phase.phaseId, hostile.context),
-          /network|volume|inspect|identity|exact/i,
-        );
-        assert.equal(hostile.transport.created.length, 0);
-      });
+          let mutationCalls = 0;
+          const option = resourceKind === "network"
+            ? {
+                networkMutation: (inspect, logicalId) => {
+                  if (logicalId !== targetLogicalId) return inspect;
+                  mutationCalls += 1;
+                  return { ...inspect, Id: "9".repeat(64) };
+                },
+              }
+            : {
+                volumeMutation: (inspect, logicalId) => {
+                  if (logicalId !== targetLogicalId) return inspect;
+                  mutationCalls += 1;
+                  return { ...inspect, Name: "attacker-volume" };
+                },
+              };
+          const hostile = semanticFixture(t, phase, option);
+          await assert.rejects(
+            () => hostile.executor.executePhase(phase.action, phase.phaseId, hostile.context),
+            /network|volume|inspect|identity|exact/i,
+          );
+          assert.equal(mutationCalls, 1, "target resource mutation was not reached exactly once");
+          assertExactPreflightInspectInventory(
+            hostile.transport,
+            phase,
+            hostile.trusted.receipt,
+          );
+          assert.equal(hostile.providerCalls(), 0);
+          assert.deepEqual(hostile.snapshotStore.calls, []);
+          assert.deepEqual(hostile.snapshotStore.cleanupCalls, []);
+          assert.equal(hostile.transport.created.length, 0);
+        });
+      }
     }
   });
 }
@@ -1455,29 +1971,59 @@ for (const mutation of [
       rawResults: [],
     });
     const recovery = createSemanticExecutor({ transport: recoveryTransport });
-    const restarted = createReplayStore(baseline.root, "b".repeat(48));
+    const preservedTree = captureTreeSnapshot(baseline.root);
+    const recoveryIo = durableIoProbe();
+    const restarted = createReplayStore(
+      baseline.root,
+      "b".repeat(48),
+      { io: recoveryIo.io },
+    );
     await assert.rejects(
       () => restarted.recover(recovery),
       /journal|chain|sequence|head|duplicate|corrupt|integrity|entry/i,
     );
     assert.equal(fs.existsSync(path.join(baseline.root, "active.lock")), true);
     assert.deepEqual(recoveryTransport.calls, []);
+    assert.deepEqual(captureTreeSnapshot(baseline.root), preservedTree);
+    assertNoStateMutationEvents(
+      recoveryIo.audit.events,
+      baseline.root,
+      `${mutation.id} corrupt-journal restart`,
+    );
   });
 }
 
 test("v2 journal sequence/head bind exactly and post-terminal appends are rejected", async (t) => {
-  const phase = PHASE_CASES.find(({ phaseId }) => phaseId === "prune.apply");
+  const phase = PHASE_CASES.find(({ phaseId }) => phaseId === "job.backup.capture");
   const root = tempDir(t);
+  const ioProbe = durableIoProbe();
   const trusted = directTrustedContext();
-  const store = createReplayStore(root, "a".repeat(48));
+  const store = createReplayStore(root, "a".repeat(48), { io: ioProbe.io });
   store.admitTrustedContext(trusted);
-  const request = admittedRequest(phase.action, {}, trusted);
+  const request = admittedRequest(phase.action, phase.parameters, trusted);
   const lease = store.acquire(request, trusted);
   const fixture = semanticFixture(t, phase, { trusted, lease, request });
   await fixture.executor.executePhase(phase.action, phase.phaseId, fixture.context);
   lease.preserve();
   const entries = assertJournalChain(root, request);
+  assertExactRealExecutionJournal(entries, {
+    phase,
+    rawResult: fixture.rawResult,
+    request,
+    resourceName: fixture.transport.created[0].name,
+    sealed: fixture.sealedSnapshot,
+    trusted,
+    workerId: WORKER_ID,
+  });
   assert.equal(entries.at(-1).event, "action-completed");
+  const journal = journalFiles(root);
+  assertJournalAppendFsyncOrder(
+    root,
+    journal.directory,
+    journal.entries,
+    ioProbe.audit,
+    "complete claimed-job execution",
+  );
   assert.throws(
     () => lease.recordEvent({ event: "worker-recorded", phaseId: phase.phaseId }),
     /terminal|closed|completed|append/i,
@@ -1565,16 +2111,14 @@ test("v2 recovery exact-inspects every live worker before reverse-order deletion
   const executor = createSemanticExecutor({ transport });
   const restarted = createReplayStore(root, "b".repeat(48), { io: recoveryIo.io });
   await restarted.recover(executor);
-  assert.deepEqual(
-    transport.calls
-      .filter(({ method }) => method === "inspectContainerForRecovery" || method === "deleteContainer")
-      .map(({ method, id, name }) => [method, name ?? id]),
+  assertInspectAllBeforeDeleteAll(
+    transport.calls,
     [
-      ["inspectContainerForRecovery", "platform-action-restore-verify-1"],
-      ["deleteContainer", RESTORE_WORKER_ID],
-      ["inspectContainerForRecovery", "platform-action-restore-capture-0"],
-      ["deleteContainer", WORKER_ID],
+      "platform-action-restore-verify-1",
+      "platform-action-restore-capture-0",
     ],
+    [RESTORE_WORKER_ID, WORKER_ID],
+    "two-worker recovery",
   );
   assert.deepEqual(lifecycle, [
     `worker-deleted:${RESTORE_WORKER_ID}`,
@@ -1583,6 +2127,87 @@ test("v2 recovery exact-inspects every live worker before reverse-order deletion
   ]);
   assert.equal(fs.existsSync(path.join(root, "active.lock")), false);
   assertLeaseRemovalFsync(root, recoveryIo.audit, 0, "worker recovery");
+});
+
+test("v2 multi-worker recovery preserves the exact tree when the second reverse inspect is hostile", async (t) => {
+  for (const { id, mutate } of [
+    ...INSPECT_WIDENINGS,
+    widening("missing-inspect", () => null),
+  ]) {
+    await t.test(id, async (t) => {
+      const root = tempDir(t);
+      const trusted = directTrustedContext();
+      const request = admittedRequest("restore.drill.full", {}, trusted);
+      const phases = [findPhase("restore.capture"), findPhase("restore.verify")];
+      const resourceNames = [
+        "platform-action-restore-capture-batch",
+        "platform-action-restore-verify-batch",
+      ];
+      const workerIds = [WORKER_ID, RESTORE_WORKER_ID];
+      const store = createReplayStore(root, "a".repeat(48));
+      store.admitTrustedContext(trusted);
+      const lease = store.acquire(request, trusted);
+      for (const [index, phase] of phases.entries()) {
+        lease.recordWorker({
+          action: phase.action,
+          phaseId: phase.phaseId,
+          phaseProfileSha256: trusted.receipt.resources.phaseProfiles[phase.phaseId].phaseSha256,
+          receiptDigest: trusted.receiptDigest,
+          requestSha256: fixtureSha256(canonicalFixtureJson(request)),
+          resourceName: resourceNames[index],
+        });
+        lease.recordEvent({
+          event: "worker-created",
+          phaseId: phase.phaseId,
+          resourceName: resourceNames[index],
+          workerId: workerIds[index],
+        });
+      }
+      lease.preserve();
+
+      const transport = new OracleEngineTransport({
+        inspectMutation: mutate,
+        inspectMutationPhaseId: "restore.capture",
+        phases,
+        rawResults: phases.map((phase) => rawWorkerResult(phase, request.requestId)),
+        recoveryOnly: true,
+        request,
+        requestId: request.requestId,
+        trusted,
+      });
+      transport.seedRecoveryWorkers(phases.map((phase, index) => ({
+        id: workerIds[index],
+        name: resourceNames[index],
+        phase,
+      })));
+      const recoveryIo = durableIoProbe();
+      const preservedTree = captureTreeSnapshot(root);
+      const recoveryStart = 0;
+      const restarted = createReplayStore(root, "b".repeat(48), { io: recoveryIo.io });
+      await assert.rejects(
+        () => restarted.recover(createSemanticExecutor({ transport })),
+        /absent|authority|forbidden|identity|image|inspect|exact|mismatch|missing|mount|name|network|recovery|worker/i,
+      );
+      assertInspectAllBeforeDeleteAll(
+        transport.calls,
+        [resourceNames[1], resourceNames[0]],
+        [],
+        `${id} batch recovery`,
+      );
+      assert.deepEqual(transport.deletedIds, []);
+      assert.deepEqual(
+        captureTreeSnapshot(root),
+        preservedTree,
+        `${id} changed lock bytes, inode, metadata or replay inventory`,
+      );
+      assertNoStateMutationEvents(
+        recoveryIo.audit.events.slice(recoveryStart),
+        root,
+        `${id} batch recovery`,
+      );
+      assert.equal(fs.existsSync(path.join(root, "active.lock")), true);
+    });
+  }
 });
 
 test("v2 recovery independently rejects the complete inspect widening matrix or missing inspect", async (t) => {
@@ -1633,22 +2258,29 @@ test("v2 recovery independently rejects the complete inspect widening matrix or 
       }
       const recoveryIo = durableIoProbe();
       const executor = createSemanticExecutor({ transport });
+      const preservedTree = captureTreeSnapshot(root);
+      const recoveryStart = 0;
       const restarted = createReplayStore(root, "b".repeat(48), { io: recoveryIo.io });
       await assert.rejects(
         () => restarted.recover(executor),
         /absent|authority|forbidden|identity|image|inspect|exact|mismatch|missing|mount|name|network|recovery|worker/i,
       );
       assert.deepEqual(transport.deletedIds, []);
-      assert.deepEqual(
-        transport.calls.map(({ method }) => method),
-        ["inspectContainerForRecovery"],
+      assertInspectAllBeforeDeleteAll(
+        transport.calls,
+        [resourceName],
+        [],
+        `${id} prune recovery`,
       );
       assert.deepEqual(
-        recoveryIo.audit.events.filter(
-          ({ type }) => type === "unlink" || type === "rmdir" || type === "rm",
-        ),
-        [],
-        `${id} performed destructive recovery IO after an unproven inspect`,
+        captureTreeSnapshot(root),
+        preservedTree,
+        `${id} changed the preserved prune lock/replay tree`,
+      );
+      assertNoStateMutationEvents(
+        recoveryIo.audit.events.slice(recoveryStart),
+        root,
+        `${id} prune recovery`,
       );
       assert.equal(fs.existsSync(path.join(root, "active.lock")), true);
     });
@@ -1718,11 +2350,11 @@ test("v2 recovery carries claimed-job lineage, exact-inspects its worker and cle
   const executor = createSemanticExecutor({ snapshotFileStore, transport });
   const restarted = createReplayStore(root, "b".repeat(48), { io: recoveryIo.io });
   await restarted.recover(executor);
-  assert.deepEqual(
-    transport.calls
-      .filter(({ method }) => method === "inspectContainerForRecovery" || method === "deleteContainer")
-      .map(({ method }) => method),
-    ["inspectContainerForRecovery", "deleteContainer"],
+  assertInspectAllBeforeDeleteAll(
+    transport.calls,
+    [resourceName],
+    [WORKER_ID],
+    "claimed-job recovery",
   );
   assert.deepEqual(snapshotFileStore.cleanupCalls, [sealed]);
   assert.deepEqual(lifecycle, ["worker-deleted", "snapshot-cleaned", "lease-unlinked"]);
@@ -1730,11 +2362,373 @@ test("v2 recovery carries claimed-job lineage, exact-inspects its worker and cle
   assertLeaseRemovalFsync(root, recoveryIo.audit, 0, "claimed-job recovery");
 });
 
+test("v2 claimed-job recovery rejects the complete inspect widening matrix without cleanup or deletion", async (t) => {
+  for (const { id, mutate, seedWorker = true } of [
+    ...INSPECT_WIDENINGS,
+    { id: "missing-inspect", mutate: null, seedWorker: false },
+  ]) {
+    await t.test(id, async (t) => {
+      const root = tempDir(t);
+      const trusted = directTrustedContext();
+      const phase = findPhase("job.backup.capture");
+      const request = admittedRequest(phase.action, phase.parameters, trusted);
+      const requestSha256 = fixtureSha256(canonicalFixtureJson(request));
+      const sealed = sealedSnapshot(phase.claimedJob, request);
+      const resourceName = "platform-action-job-backup-hostile-recovery";
+      const store = createReplayStore(root, "a".repeat(48));
+      store.admitTrustedContext(trusted);
+      const lease = store.acquire(request, trusted);
+      lease.recordEvent({
+        event: "snapshot-materialized",
+        phaseId: phase.phaseId,
+        requestSha256,
+        snapshot: sealed,
+      });
+      lease.recordWorker({
+        action: phase.action,
+        phaseId: phase.phaseId,
+        phaseProfileSha256: trusted.receipt.resources.phaseProfiles[phase.phaseId].phaseSha256,
+        receiptDigest: trusted.receiptDigest,
+        requestSha256,
+        resourceName,
+        snapshot: sealed,
+      });
+      lease.recordEvent({
+        event: "worker-created",
+        phaseId: phase.phaseId,
+        resourceName,
+        workerId: WORKER_ID,
+      });
+      lease.preserve();
+
+      const snapshotFileStore = snapshotStoreFixture();
+      const transport = new OracleEngineTransport({
+        inspectMutation: mutate,
+        phases: [phase],
+        rawResults: [rawWorkerResult(phase, request.requestId)],
+        recoveryOnly: true,
+        request,
+        requestId: request.requestId,
+        trusted,
+      });
+      if (seedWorker) {
+        transport.seedRecoveryWorkers([{
+          id: WORKER_ID,
+          name: resourceName,
+          phase,
+          sealed,
+        }]);
+      }
+      const recoveryIo = durableIoProbe();
+      const preservedTree = captureTreeSnapshot(root);
+      const recoveryStart = 0;
+      const restarted = createReplayStore(root, "b".repeat(48), { io: recoveryIo.io });
+      await assert.rejects(
+        () => restarted.recover(createSemanticExecutor({
+          snapshotFileStore,
+          transport,
+        })),
+        /absent|authority|forbidden|identity|image|inspect|exact|mismatch|missing|mount|name|network|recovery|worker/i,
+      );
+      assertInspectAllBeforeDeleteAll(
+        transport.calls,
+        [resourceName],
+        [],
+        `${id} claimed-job recovery`,
+      );
+      assert.deepEqual(transport.deletedIds, []);
+      assert.deepEqual(snapshotFileStore.cleanupCalls, []);
+      assert.deepEqual(
+        captureTreeSnapshot(root),
+        preservedTree,
+        `${id} changed the claimed-job lock/replay tree`,
+      );
+      assertNoStateMutationEvents(
+        recoveryIo.audit.events.slice(recoveryStart),
+        root,
+        `${id} claimed-job recovery`,
+      );
+      assert.equal(fs.existsSync(path.join(root, "active.lock")), true);
+    });
+  }
+});
+
+snapshotTest("v2 real executor journals crash checkpoints after seal and create for real recovery", async (t) => {
+  for (const scenario of [
+    {
+      id: "after-seal",
+      preRecoveryEvents: [],
+      postRecoveryEvents: ["snapshot-cleaned"],
+      workerCreated: false,
+    },
+    {
+      id: "after-create",
+      preRecoveryEvents: [
+        "snapshot-materialized",
+        "worker-recorded",
+      ],
+      postRecoveryEvents: [
+        "snapshot-materialized",
+        "worker-recorded",
+        "worker-deleted",
+        "snapshot-cleaned",
+      ],
+      workerCreated: true,
+    },
+  ]) {
+    await t.test(scenario.id, async (t) => {
+      const root = tempDir(t);
+      const replayRoot = path.join(root, "replay");
+      const mountpoint = path.join(root, "broker-state");
+      fs.mkdirSync(mountpoint, { mode: 0o700 });
+      const mountStat = fs.statSync(mountpoint);
+      const lifecycle = [];
+      const replayHistory = durableIoProbe({
+        onEvent(event) {
+          if (event.type === "unlink"
+            && event.file === path.join(replayRoot, "active.lock")) {
+            lifecycle.push("lease-unlinked");
+          }
+        },
+      });
+      const snapshotHistory = filesystemHistoryProbe();
+      const realSnapshotStore = broker.createSnapshotFileStore({
+        expectedGid: mountStat.gid,
+        expectedUid: mountStat.uid,
+        io: snapshotHistory.io,
+      });
+      const phase = findPhase("job.backup.capture");
+      const trusted = directTrustedContext();
+      const request = admittedRequest(phase.action, phase.parameters, trusted);
+      const requestSha256 = fixtureSha256(canonicalFixtureJson(request));
+      const store = createReplayStore(
+        replayRoot,
+        "a".repeat(48),
+        { io: replayHistory.io },
+      );
+      store.admitTrustedContext(trusted);
+      const persistentLease = store.acquire(request, trusted);
+      const crashError = Object.assign(
+        new Error(`simulated abrupt process crash ${scenario.id}`),
+        { simulatedProcessCrash: true },
+      );
+      let sealed;
+      const crashSnapshotStore = {
+        async seal(...args) {
+          sealed = await realSnapshotStore.seal(...args);
+          if (scenario.id === "after-seal") throw crashError;
+          return sealed;
+        },
+        cleanup() {
+          throw crashError;
+        },
+      };
+      const liveTransport = new OracleEngineTransport({
+        deleteError: crashError,
+        phases: [phase],
+        rawResults: [rawWorkerResult(phase, request.requestId)],
+        request,
+        requestId: request.requestId,
+        sealedSnapshotProvider: () => sealed,
+        trusted,
+        onCreate: scenario.id === "after-create"
+          ? () => {
+              throw crashError;
+            }
+          : undefined,
+        volumeMutation(inspect, logicalId) {
+          return logicalId === "broker.state"
+            ? { ...inspect, Mountpoint: mountpoint }
+            : inspect;
+        },
+      });
+      const executor = createSemanticExecutor({
+        cleanupTimeoutMs: 100,
+        claimedJobSnapshotProvider: async ({ parameters, sourceId }) => {
+          assert.deepEqual(parameters, request.parameters);
+          assert.equal(sourceId, "jobs.running");
+          return {
+            ...phase.claimedJob,
+            bytes: Buffer.from(phase.claimedJob.bytes),
+            sourceId,
+          };
+        },
+        randomBytes: () => Buffer.alloc(12, 1),
+        snapshotFileStore: crashSnapshotStore,
+        transport: liveTransport,
+      });
+      await assert.rejects(
+        () => executor.executePhase(phase.action, phase.phaseId, {
+          lease: persistentLease,
+          parameters: structuredClone(request.parameters),
+          request: structuredClone(request),
+          requestId: request.requestId,
+          requestSha256,
+          signal: new AbortController().signal,
+          trusted,
+        }),
+        /abrupt|crash|cleanup|simulated/i,
+      );
+      persistentLease.preserve();
+      assert.ok(sealed, `${scenario.id} did not complete the real snapshot seal`);
+      assert.equal(fs.existsSync(sealed.hostPath), true);
+      assert.equal(fs.existsSync(path.join(replayRoot, "active.lock")), true);
+      assert.equal(liveTransport.created.length, scenario.workerCreated ? 1 : 0);
+      assert.deepEqual(liveTransport.deletedIds, []);
+      const resourceName = scenario.workerCreated
+        ? liveTransport.created[0].name
+        : null;
+      const snapshotMaterializedEntry = {
+        event: "snapshot-materialized",
+        phaseId: phase.phaseId,
+        requestSha256,
+        snapshot: sealed,
+      };
+      const workerRecordedEntry = scenario.workerCreated
+        ? {
+            action: phase.action,
+            event: "worker-recorded",
+            phaseId: phase.phaseId,
+            phaseProfileSha256: trusted.receipt.resources.phaseProfiles[phase.phaseId].phaseSha256,
+            receiptDigest: trusted.receiptDigest,
+            requestSha256,
+            resourceName,
+            snapshot: sealed,
+          }
+        : null;
+      const preRecoveryExpected = scenario.workerCreated
+        ? [snapshotMaterializedEntry, workerRecordedEntry]
+        : [];
+      const preRecoveryJournal = journalFiles(replayRoot);
+      const preRecoveryEntries = assertJournalChain(replayRoot, request);
+      assertExactJournalEntries(
+        preRecoveryEntries,
+        preRecoveryExpected,
+        `${scenario.id} did not stop at the exact real journal checkpoint`,
+      );
+      if (preRecoveryJournal.entries.length > 0) {
+        assertJournalAppendFsyncOrder(
+          replayRoot,
+          preRecoveryJournal.directory,
+          preRecoveryJournal.entries,
+          replayHistory.audit,
+          `${scenario.id} pre-recovery journal`,
+        );
+      }
+
+      const snapshotCleanupStart = snapshotHistory.audit.events.length;
+      const recoveryRealSnapshotStore = broker.createSnapshotFileStore({
+        expectedGid: mountStat.gid,
+        expectedUid: mountStat.uid,
+        io: snapshotHistory.io,
+      });
+      const recoverySnapshotStore = {
+        seal() {
+          throw new Error("recovery must not create a new snapshot");
+        },
+        cleanup(candidate) {
+          assert.deepEqual(candidate, sealed);
+          const result = recoveryRealSnapshotStore.cleanup(candidate);
+          lifecycle.push("snapshot-cleaned");
+          return result;
+        },
+      };
+      const recoveryTransport = new OracleEngineTransport({
+        phases: [phase],
+        rawResults: [rawWorkerResult(phase, request.requestId)],
+        recoveryOnly: true,
+        request,
+        requestId: request.requestId,
+        trusted,
+        onDelete: (id) => lifecycle.push(`worker-deleted:${id}`),
+      });
+      if (scenario.workerCreated) {
+        recoveryTransport.seedRecoveryWorkers([{
+          id: WORKER_ID,
+          name: resourceName,
+          phase,
+          sealed,
+        }]);
+      }
+      const recoveryStart = replayHistory.audit.events.length;
+      const restarted = createReplayStore(
+        replayRoot,
+        "b".repeat(48),
+        { io: replayHistory.io },
+      );
+      await restarted.recover(createSemanticExecutor({
+        snapshotFileStore: recoverySnapshotStore,
+        transport: recoveryTransport,
+      }));
+      assert.equal(fs.existsSync(path.join(replayRoot, "active.lock")), false);
+      assert.equal(fs.existsSync(sealed.hostPath), false);
+      assertSnapshotCleanupHistory(snapshotHistory.audit.events, {
+        historyStart: snapshotCleanupStart,
+        label: `${scenario.id} recovery snapshot cleanup`,
+        sealed,
+      });
+      assertInspectAllBeforeDeleteAll(
+        recoveryTransport.calls,
+        scenario.workerCreated ? [resourceName] : [],
+        scenario.workerCreated ? [WORKER_ID] : [],
+        `${scenario.id} real recovery`,
+      );
+      assert.deepEqual(
+        lifecycle,
+        scenario.workerCreated
+          ? [`worker-deleted:${WORKER_ID}`, "snapshot-cleaned", "lease-unlinked"]
+          : ["snapshot-cleaned", "lease-unlinked"],
+      );
+      const recoveredJournal = assertJournalDirectoryChain(
+        preRecoveryJournal.directory,
+        request,
+      );
+      const postRecoveryExpected = [
+        ...preRecoveryExpected,
+        ...(scenario.workerCreated
+          ? [{
+              event: "worker-deleted",
+              phaseId: phase.phaseId,
+              resourceName,
+              workerId: WORKER_ID,
+            }]
+          : []),
+        {
+          event: "snapshot-cleaned",
+          phaseId: phase.phaseId,
+          requestSha256,
+          snapshot: sealed,
+        },
+      ];
+      assertExactJournalEntries(
+        recoveredJournal.values,
+        postRecoveryExpected,
+        `${scenario.id} recovery did not append the exact cleanup journal`,
+      );
+      assertJournalAppendFsyncOrder(
+        replayRoot,
+        preRecoveryJournal.directory,
+        recoveredJournal.entries,
+        replayHistory.audit,
+        `${scenario.id} recovered journal`,
+        { allowActiveUnlink: true },
+      );
+      assertLeaseRemovalFsync(
+        replayRoot,
+        replayHistory.audit,
+        recoveryStart,
+        `${scenario.id} real recovery`,
+      );
+    });
+  }
+});
+
 test("v2 offsite remote-unknown is terminal, preserves the lease and forbids automatic replay", async (t) => {
   const phase = PHASE_CASES.find(({ phaseId }) => phaseId === "offsite.sync");
   const root = tempDir(t);
+  const ioProbe = durableIoProbe();
   const trusted = directTrustedContext();
-  const store = createReplayStore(root, "a".repeat(48));
+  const store = createReplayStore(root, "a".repeat(48), { io: ioProbe.io });
   store.admitTrustedContext(trusted);
   const request = admittedRequest(phase.action, {}, trusted);
   const lease = store.acquire(request, trusted);
@@ -1757,7 +2751,50 @@ test("v2 offsite remote-unknown is terminal, preserves the lease and forbids aut
   assert.equal(failure?.preserveLease, true);
   lease.preserve();
   const entries = assertJournalChain(root, request);
+  const requestSha256 = fixtureSha256(canonicalFixtureJson(request));
+  const resourceName = fixture.transport.created[0].name;
+  assertExactJournalEntries(
+    entries,
+    [
+      {
+        action: phase.action,
+        event: "worker-recorded",
+        phaseId: phase.phaseId,
+        phaseProfileSha256: trusted.receipt.resources.phaseProfiles[phase.phaseId].phaseSha256,
+        receiptDigest: trusted.receiptDigest,
+        requestSha256,
+        resourceName,
+      },
+      {
+        event: "worker-created",
+        phaseId: phase.phaseId,
+        resourceName,
+        workerId: WORKER_ID,
+      },
+      {
+        event: "worker-deleted",
+        phaseId: phase.phaseId,
+        resourceName,
+        workerId: WORKER_ID,
+      },
+      {
+        event: "remote-effect-unknown",
+        phaseId: phase.phaseId,
+        resourceName,
+        workerId: WORKER_ID,
+      },
+    ],
+    "remote-effect-unknown exact journal",
+  );
   assert.equal(entries.at(-1).event, "remote-effect-unknown");
+  const journal = journalFiles(root);
+  assertJournalAppendFsyncOrder(
+    root,
+    journal.directory,
+    journal.entries,
+    ioProbe.audit,
+    "remote-effect-unknown",
+  );
   assert.throws(
     () => store.acquire(admittedRequest(phase.action, {}, trusted), trusted),
     /another|remote|reconcile/i,
@@ -1771,13 +2808,26 @@ test("v2 offsite remote-unknown is terminal, preserves the lease and forbids aut
     requestId: request.requestId,
     trusted,
   });
-  const restarted = createReplayStore(root, "b".repeat(48));
+  const preservedBeforeRestart = captureTreeSnapshot(root);
+  const recoveryIo = durableIoProbe();
+  const recoveryStart = 0;
+  const restarted = createReplayStore(root, "b".repeat(48), { io: recoveryIo.io });
   await assert.rejects(
     () => restarted.recover(createSemanticExecutor({ transport: recoveryTransport })),
     /remote|unknown|reconcile|terminal/i,
   );
   assert.deepEqual(recoveryTransport.calls, []);
   assert.equal(fs.existsSync(path.join(root, "active.lock")), true);
+  assert.deepEqual(
+    captureTreeSnapshot(root),
+    preservedBeforeRestart,
+    "remote-unknown restart changed the preserved lock/replay tree",
+  );
+  assertNoStateMutationEvents(
+    recoveryIo.audit.events.slice(recoveryStart),
+    root,
+    "remote-unknown restart",
+  );
 });
 
 rawFrameE2eTest("v2 raw signed frame preserves one full-request digest through core, lease, snapshot, journal and response", async (t) => {
@@ -2161,9 +3211,11 @@ class OracleEngineTransport {
     requestId,
     rawResults,
     inspectMutation,
+    inspectMutationPhaseId,
     networkMutation,
     volumeMutation,
     logsError,
+    deleteError,
     onCreate,
     onDelete,
     sealedSnapshotProvider,
@@ -2176,9 +3228,11 @@ class OracleEngineTransport {
     this.requestId = requestId;
     this.rawResults = rawResults;
     this.inspectMutation = inspectMutation;
+    this.inspectMutationPhaseId = inspectMutationPhaseId;
     this.networkMutation = networkMutation;
     this.volumeMutation = volumeMutation;
     this.logsError = logsError;
+    this.deleteError = deleteError;
     this.onCreate = onCreate;
     this.onDelete = onDelete;
     this.sealedSnapshotProvider = sealedSnapshotProvider;
@@ -2240,7 +3294,18 @@ class OracleEngineTransport {
       sealed,
       trusted: this.trusted,
     });
-    return this.inspectMutation ? this.inspectMutation(structuredClone(inspect), created.phase) : inspect;
+    if (!this.inspectMutation
+      || (this.inspectMutationPhaseId
+        && this.inspectMutationPhaseId !== created.phase.phaseId)) {
+      return inspect;
+    }
+    const mutated = this.inspectMutation(structuredClone(inspect), created.phase);
+    assert.notDeepEqual(
+      mutated,
+      inspect,
+      `inspect mutation ${created.phase.phaseId} did not change the Engine response`,
+    );
+    return mutated;
   }
 
   async startContainer(id) {
@@ -2263,6 +3328,7 @@ class OracleEngineTransport {
 
   async deleteContainer(id) {
     this.calls.push({ method: "deleteContainer", id });
+    if (this.deleteError) throw this.deleteError;
     this.deletedIds.push(id);
     this.onDelete?.(id);
   }
@@ -2279,9 +3345,18 @@ class OracleEngineTransport {
       sealed: worker.sealed ?? null,
       trusted: this.trusted,
     });
-    return this.inspectMutation
-      ? this.inspectMutation(structuredClone(inspect), worker.phase)
-      : inspect;
+    if (!this.inspectMutation
+      || (this.inspectMutationPhaseId
+        && this.inspectMutationPhaseId !== worker.phase.phaseId)) {
+      return inspect;
+    }
+    const mutated = this.inspectMutation(structuredClone(inspect), worker.phase);
+    assert.notDeepEqual(
+      mutated,
+      inspect,
+      `recovery inspect mutation ${worker.phase.phaseId} did not change the Engine response`,
+    );
+    return mutated;
   }
 
   seedRecoveryWorkers(workers) {
@@ -2829,6 +3904,7 @@ function requiredPreflightIds(phaseCaseValue, receipt) {
 function assertPreflightBeforeCreate(transport, phase, receipt) {
   const createIndex = transport.calls.findIndex(({ method }) => method === "createWorker");
   assert.ok(createIndex >= 0);
+  assertExactPreflightInspectInventory(transport, phase, receipt);
   const required = requiredPreflightIds(phase, receipt);
   for (const logicalId of required.network) {
     const id = receipt.resources.networks[logicalId].engineId;
@@ -2840,6 +3916,31 @@ function assertPreflightBeforeCreate(transport, phase, receipt) {
     const index = transport.calls.findIndex((call) => call.method === "inspectVolume" && call.name === name);
     assert.ok(index >= 0 && index < createIndex, `${phase.phaseId} volume ${logicalId} was not preflighted`);
   }
+}
+
+function assertExactPreflightInspectInventory(transport, phase, receipt) {
+  const required = requiredPreflightIds(phase, receipt);
+  const expected = [
+    ...required.network.map(
+      (logicalId) => ["inspectNetwork", receipt.resources.networks[logicalId].engineId],
+    ),
+    ...required.volume.map(
+      (logicalId) => ["inspectVolume", receipt.resources.volumes[logicalId].engineName],
+    ),
+  ].sort(([methodA, valueA], [methodB, valueB]) => (
+    methodA.localeCompare(methodB) || valueA.localeCompare(valueB)
+  ));
+  const observed = transport.calls
+    .filter(({ method }) => method === "inspectNetwork" || method === "inspectVolume")
+    .map(({ id, method, name }) => [method, id ?? name])
+    .sort(([methodA, valueA], [methodB, valueB]) => (
+      methodA.localeCompare(methodB) || valueA.localeCompare(valueB)
+    ));
+  assert.deepEqual(
+    observed,
+    expected,
+    `${phase.phaseId} must inspect every required logical resource exactly once`,
+  );
 }
 
 function recordingLease(request, trusted) {
@@ -2931,7 +4032,7 @@ function journalFiles(root) {
 }
 
 function assertJournalChain(root, expectedRequest) {
-  const { active, entries } = journalFiles(root);
+  const { active, directory } = journalFiles(root);
   const request = expectedRequest ?? active.request;
   admittedRequestShape(request);
   const requestSha256 = fixtureSha256(canonicalFixtureJson(request));
@@ -2939,10 +4040,25 @@ function assertJournalChain(root, expectedRequest) {
   assert.equal(active.requestId, request.requestId);
   assert.equal(active.requestSha256, requestSha256);
   assert.equal(active.action, request.action);
+  const { head, values } = assertJournalDirectoryChain(directory, request);
+  assert.equal(active.journalEntryCount, values.length);
+  assert.equal(active.journalHeadSha256, head);
+  return values;
+}
+
+function assertJournalDirectoryChain(directory, request) {
+  admittedRequestShape(request);
+  const requestSha256 = fixtureSha256(canonicalFixtureJson(request));
+  const entries = fs.readdirSync(directory)
+    .sort()
+    .map((name) => path.join(directory, name));
   let previous = "0".repeat(64);
+  const leaseId = path.basename(directory);
   const values = entries.map((file, index) => {
     const value = readJson(file);
     assert.equal(value.schema, JOURNAL_ENTRY_SCHEMA_V2);
+    assert.equal(value.leaseId, leaseId);
+    assert.equal(value.recordedAt, new Date(NOW).toISOString());
     assert.equal(value.sequence, index);
     assert.equal(value.previousEntrySha256, previous);
     assert.equal(value.requestId, request.requestId);
@@ -2951,9 +4067,134 @@ function assertJournalChain(root, expectedRequest) {
     previous = fixtureSha256(canonicalFixtureJson(value));
     return value;
   });
-  assert.equal(active.journalEntryCount, values.length);
-  assert.equal(active.journalHeadSha256, previous);
-  return values;
+  return { entries, head: previous, values };
+}
+
+function assertExactJournalEventKeys(entry, expectedFields, label) {
+  const expectedKeys = [...new Set([
+    "action",
+    "event",
+    "leaseId",
+    "previousEntrySha256",
+    "recordedAt",
+    "requestId",
+    "requestSha256",
+    "schema",
+    "sequence",
+    ...Object.keys(expectedFields),
+  ])].sort();
+  assert.deepEqual(
+    Object.keys(entry).sort(),
+    expectedKeys,
+    `${label} must contain only its exact canonical fields`,
+  );
+}
+
+function assertExactJournalEntries(entries, expectedEntries, label) {
+  assert.equal(
+    entries.length,
+    expectedEntries.length,
+    `${label}: journal entry count is not exact`,
+  );
+  for (const [index, expected] of expectedEntries.entries()) {
+    const entry = entries[index];
+    assert.equal(entry.event, expected.event, `${label}: event ${index} is not exact`);
+    assertExactJournalEventKeys(entry, expected, `${label}: ${expected.event}`);
+    for (const [field, value] of Object.entries(expected)) {
+      assert.deepEqual(
+        entry[field],
+        value,
+        `${label}: ${expected.event}.${field} is not exact`,
+      );
+    }
+  }
+}
+
+function assertExactRealExecutionJournal(entries, {
+  phase,
+  rawResult,
+  request,
+  resourceName,
+  sealed,
+  trusted,
+  workerId,
+}) {
+  const requestSha256 = fixtureSha256(canonicalFixtureJson(request));
+  const expectedResourceName = `platform-action-${phase.phaseId.replaceAll(".", "-")}-${"01".repeat(12)}`;
+  assert.equal(
+    resourceName,
+    expectedResourceName,
+    "real executor used a noncanonical or caller-derived worker resource name",
+  );
+  assert.deepEqual(
+    entries.map(({ event }) => event),
+    [
+      "snapshot-materialized",
+      "worker-recorded",
+      "worker-created",
+      "worker-result-recorded",
+      "worker-deleted",
+      "snapshot-cleaned",
+      "action-completed",
+    ],
+    "real claimed-job execution journal sequence is not exact",
+  );
+  const expectedByEvent = {
+    "snapshot-materialized": {
+      phaseId: phase.phaseId,
+      requestSha256,
+      snapshot: sealed,
+    },
+    "worker-recorded": {
+      action: phase.action,
+      phaseId: phase.phaseId,
+      phaseProfileSha256: trusted.receipt.resources.phaseProfiles[phase.phaseId].phaseSha256,
+      receiptDigest: trusted.receiptDigest,
+      requestSha256,
+      resourceName,
+      snapshot: sealed,
+    },
+    "worker-created": {
+      phaseId: phase.phaseId,
+      resourceName,
+      workerId,
+    },
+    "worker-result-recorded": {
+      phaseId: phase.phaseId,
+      resourceName,
+      workerId,
+      workerResultSha256: fixtureSha256(canonicalFixtureJson(rawResult)),
+    },
+    "worker-deleted": {
+      phaseId: phase.phaseId,
+      resourceName,
+      workerId,
+    },
+    "snapshot-cleaned": {
+      phaseId: phase.phaseId,
+      requestSha256,
+      snapshot: sealed,
+    },
+    "action-completed": {
+      requestSha256,
+      resultSha256: fixtureSha256(canonicalFixtureJson(
+        expectedActionResult(phase, rawResult),
+      )),
+    },
+  };
+  for (const entry of entries) {
+    const expected = expectedByEvent[entry.event];
+    assert.ok(expected, `unexpected journal event ${entry.event}`);
+    assertExactJournalEventKeys(entry, expected, entry.event);
+    for (const [field, value] of Object.entries(expected)) {
+      assert.equal(
+        Object.hasOwn(entry, field),
+        true,
+        `${entry.event} is missing exact field ${field}`,
+      );
+      assert.deepEqual(entry[field], value, `${entry.event}.${field} is not exact`);
+    }
+  }
 }
 
 function assertDurableBarrier(root, phaseId, request) {
@@ -2988,6 +4229,106 @@ function mutateEnv(inspect, key, value) {
       Env: Object.entries(env).map(([name, content]) => `${name}=${content}`),
     },
   };
+}
+
+function mutateEnvToDifferent(inspect, key, preferred, alternate) {
+  const current = environmentMap(inspect.Config.Env)[key];
+  return mutateEnv(inspect, key, current === preferred ? alternate : preferred);
+}
+
+function removeInspectEnvEntry(inspect) {
+  assert.ok(inspect.Config.Env.length > 0, "inspect Env removal requires a positive control");
+  return {
+    ...inspect,
+    Config: {
+      ...inspect.Config,
+      Env: inspect.Config.Env.slice(1),
+    },
+  };
+}
+
+function duplicateInspectEnvEntry(inspect) {
+  assert.ok(inspect.Config.Env.length > 0, "inspect Env duplication requires a positive control");
+  return {
+    ...inspect,
+    Config: {
+      ...inspect.Config,
+      Env: [...inspect.Config.Env, inspect.Config.Env[0]],
+    },
+  };
+}
+
+function mutateInspectConfig(inspect, field, value) {
+  return {
+    ...inspect,
+    Config: {
+      ...inspect.Config,
+      [field]: structuredClone(value),
+    },
+  };
+}
+
+function differentExactValue(value) {
+  if (value === null) return { attacker: true };
+  if (value === undefined) return "attacker";
+  if (typeof value === "boolean") return !value;
+  if (typeof value === "number") return value + 1;
+  if (typeof value === "string") return `${value}-attacker`;
+  if (Array.isArray(value)) return [...structuredClone(value), "__attacker__"];
+  return { ...structuredClone(value), __attacker__: true };
+}
+
+function mutateInspectHostConfig(inspect, field) {
+  assert.equal(
+    Object.hasOwn(inspect.HostConfig, field),
+    true,
+    `HostConfig positive control is missing ${field}`,
+  );
+  return {
+    ...inspect,
+    HostConfig: {
+      ...inspect.HostConfig,
+      [field]: differentExactValue(inspect.HostConfig[field]),
+    },
+  };
+}
+
+function mutateInspectMount(inspect, field) {
+  const mounts = inspect.Mounts.length > 0
+    ? structuredClone(inspect.Mounts)
+    : [{
+        Type: "bind",
+        Source: "/var/lib/platform/positive",
+        Destination: "/run/platform/positive",
+        Mode: "ro",
+        RW: false,
+        Propagation: "rprivate",
+      }];
+  mounts[0] = {
+    ...mounts[0],
+    [field]: differentExactValue(mounts[0][field]),
+  };
+  return { ...inspect, Mounts: mounts };
+}
+
+function mutateSnapshotBind(inspect, mutation) {
+  const mounts = structuredClone(inspect.Mounts);
+  let index = mounts.findIndex(
+    ({ Destination }) => Destination === SNAPSHOT_CONTAINER_PATH,
+  );
+  if (index < 0) {
+    mounts.push({
+      Type: "bind",
+      Source: "/var/lib/platform/unexpected/job.json",
+      Destination: SNAPSHOT_CONTAINER_PATH,
+      Mode: "ro",
+      RW: false,
+      Propagation: "rprivate",
+    });
+    index = mounts.length - 1;
+  }
+  mounts[index] = { ...mounts[index], ...structuredClone(mutation) };
+  return { ...inspect, Mounts: mounts };
 }
 
 function environmentMap(values) {
@@ -3063,6 +4404,7 @@ function claimedReaderIoProbe(file, {
     pathReadFileCalls: 0,
     raceInjectedAfterPass: null,
     readSyncCalls: [],
+    startedReadPasses: [],
   };
   let baselineStat;
   let currentPass = null;
@@ -3143,6 +4485,17 @@ function claimedReaderIoProbe(file, {
               initialPosition: explicitPosition,
               nextPosition: 0,
             };
+            audit.startedReadPasses.push({
+              descriptor,
+              initialPosition: explicitPosition,
+              pass: currentPass.index,
+            });
+            audit.events.push({
+              type: "read-pass-start",
+              descriptor,
+              pass: currentPass.index,
+              position: explicitPosition,
+            });
           }
           assert.equal(
             explicitPosition,
@@ -3168,6 +4521,7 @@ function claimedReaderIoProbe(file, {
               bytes: currentPass.bytes,
               descriptor,
               initialPosition: currentPass.initialPosition,
+              pass: currentPass.index,
             });
             audit.events.push({
               type: "read-pass-complete",
@@ -3238,6 +4592,79 @@ function statIdentityIo(io, { uid, gid }) {
   });
 }
 
+function pathStatMutationIo(io, {
+  defaultGid,
+  defaultUid,
+  mutations = new Map(),
+} = {}) {
+  const descriptors = new Map();
+  const normalizeMutations = new Map(
+    [...mutations.entries()].map(([candidate, mutation]) => [
+      path.resolve(candidate),
+      mutation,
+    ]),
+  );
+  const transform = (stat, candidate) => {
+    if (!stat || typeof stat !== "object") return stat;
+    const mutation = normalizeMutations.get(candidate) ?? {};
+    return new Proxy(stat, {
+      get(target, property) {
+        if (property === "uid" && mutation.uid !== undefined) return mutation.uid;
+        if (property === "uid" && defaultUid !== undefined) return defaultUid;
+        if (property === "gid" && mutation.gid !== undefined) return mutation.gid;
+        if (property === "gid" && defaultGid !== undefined) return defaultGid;
+        if (property === "mode" && mutation.permissions !== undefined) {
+          return (target.mode & ~0o777) | mutation.permissions;
+        }
+        if (property === "nlink" && mutation.nlink !== undefined) return mutation.nlink;
+        if (property === "isFile" && mutation.kind) {
+          return () => mutation.kind === "file";
+        }
+        if (property === "isDirectory" && mutation.kind) {
+          return () => mutation.kind === "directory";
+        }
+        if (property === "isSymbolicLink" && mutation.kind) {
+          return () => mutation.kind === "symlink";
+        }
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+  };
+  return new Proxy(io, {
+    get(target, property) {
+      if (property === "openSync") {
+        return (candidate, ...args) => {
+          const descriptor = Reflect.get(target, property)(candidate, ...args);
+          descriptors.set(descriptor, path.resolve(String(candidate)));
+          return descriptor;
+        };
+      }
+      if (property === "closeSync") {
+        return (descriptor, ...args) => {
+          const result = Reflect.get(target, property)(descriptor, ...args);
+          descriptors.delete(descriptor);
+          return result;
+        };
+      }
+      if (property === "fstatSync") {
+        return (descriptor, ...args) => transform(
+          Reflect.get(target, property)(descriptor, ...args),
+          descriptors.get(descriptor),
+        );
+      }
+      if (property === "lstatSync" || property === "statSync") {
+        return (candidate, ...args) => transform(
+          Reflect.get(target, property)(candidate, ...args),
+          path.resolve(String(candidate)),
+        );
+      }
+      const value = Reflect.get(target, property);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+}
+
 function filesystemHistoryProbe({ onEvent = () => {} } = {}) {
   const audit = { descriptors: new Map(), events: [], opens: [] };
   const record = (event) => {
@@ -3264,10 +4691,12 @@ function filesystemHistoryProbe({ onEvent = () => {} } = {}) {
       }
       if (property === "mkdirSync") {
         return (directory, options) => {
+          const existed = fs.existsSync(directory);
           const result = fs.mkdirSync(directory, options);
           record({
             type: "mkdir",
             file: path.resolve(String(directory)),
+            created: !existed,
             options: structuredClone(options ?? null),
           });
           return result;
@@ -3279,12 +4708,14 @@ function filesystemHistoryProbe({ onEvent = () => {} } = {}) {
           record({
             type: "write",
             file: resolvedFile(file),
+            descriptor: typeof file === "number" ? file : null,
             bytes: Buffer.byteLength(
               Buffer.isBuffer(data) || ArrayBuffer.isView(data)
                 ? Buffer.from(data.buffer, data.byteOffset, data.byteLength)
                 : String(data),
             ),
             method: "writeFileSync",
+            pathnameWrite: typeof file !== "number",
           });
           return result;
         };
@@ -3295,8 +4726,10 @@ function filesystemHistoryProbe({ onEvent = () => {} } = {}) {
           record({
             type: "write",
             file: resolvedFile(descriptor),
+            descriptor,
             bytes: count,
             method: "writeSync",
+            pathnameWrite: false,
           });
           return count;
         };
@@ -3304,9 +4737,14 @@ function filesystemHistoryProbe({ onEvent = () => {} } = {}) {
       if (property === "fsyncSync") {
         return (descriptor) => {
           const result = fs.fsyncSync(descriptor);
+          const stat = fs.fstatSync(descriptor);
           record({
             type: "fsync",
             file: resolvedFile(descriptor),
+            descriptor,
+            dev: stat.dev,
+            ino: stat.ino,
+            size: stat.size,
           });
           return result;
         };
@@ -3318,8 +4756,34 @@ function filesystemHistoryProbe({ onEvent = () => {} } = {}) {
           record({
             type: "close",
             file,
+            descriptor,
           });
           audit.descriptors.delete(descriptor);
+          return result;
+        };
+      }
+      if (property === "truncateSync") {
+        return (file, length) => {
+          const result = fs.truncateSync(file, length);
+          record({
+            type: "truncate",
+            file: path.resolve(String(file)),
+            length: length ?? 0,
+            pathnameWrite: true,
+          });
+          return result;
+        };
+      }
+      if (property === "ftruncateSync") {
+        return (descriptor, length) => {
+          const result = fs.ftruncateSync(descriptor, length);
+          record({
+            type: "truncate",
+            file: resolvedFile(descriptor),
+            descriptor,
+            length: length ?? 0,
+            pathnameWrite: false,
+          });
           return result;
         };
       }
@@ -3354,11 +4818,71 @@ function filesystemHistoryProbe({ onEvent = () => {} } = {}) {
       }
       if (property === "renameSync") {
         return (from, to) => {
+          const resolvedFrom = path.resolve(String(from));
+          const resolvedTo = path.resolve(String(to));
+          const sourceSize = fs.lstatSync(from).size;
           const result = fs.renameSync(from, to);
           record({
             type: "rename",
+            from: resolvedFrom,
+            to: resolvedTo,
+            sourceSize,
+          });
+          return result;
+        };
+      }
+      if (property === "copyFileSync") {
+        return (from, to, mode) => {
+          const result = fs.copyFileSync(from, to, mode);
+          record({
+            type: "copy",
             from: path.resolve(String(from)),
             to: path.resolve(String(to)),
+            mode: mode ?? 0,
+          });
+          return result;
+        };
+      }
+      if (property === "linkSync") {
+        return (existing, created) => {
+          const result = fs.linkSync(existing, created);
+          record({
+            type: "link",
+            from: path.resolve(String(existing)),
+            to: path.resolve(String(created)),
+          });
+          return result;
+        };
+      }
+      if (property === "symlinkSync") {
+        return (targetValue, created, type) => {
+          const result = fs.symlinkSync(targetValue, created, type);
+          record({
+            type: "symlink",
+            target: String(targetValue),
+            to: path.resolve(String(created)),
+          });
+          return result;
+        };
+      }
+      if (property === "chmodSync" || property === "chownSync") {
+        return (file, ...args) => {
+          const result = Reflect.get(fs, property)(file, ...args);
+          record({
+            type: property === "chmodSync" ? "chmod" : "chown",
+            file: path.resolve(String(file)),
+            args: [...args],
+          });
+          return result;
+        };
+      }
+      if (property === "utimesSync" || property === "lutimesSync") {
+        return (file, ...args) => {
+          const result = Reflect.get(fs, property)(file, ...args);
+          record({
+            type: "utimes",
+            file: path.resolve(String(file)),
+            args: args.map((value) => String(value)),
           });
           return result;
         };
@@ -3380,6 +4904,306 @@ function historyIndex(events, after, predicate, message) {
   );
   assert.ok(index > after, message);
   return index;
+}
+
+const MUTATING_IO_EVENT_TYPES = new Set([
+  "chmod",
+  "chown",
+  "copy",
+  "link",
+  "mkdir",
+  "rename",
+  "rm",
+  "rmdir",
+  "symlink",
+  "truncate",
+  "unlink",
+  "utimes",
+  "write",
+]);
+
+function isMutatingIoEvent(event) {
+  return MUTATING_IO_EVENT_TYPES.has(event.type)
+    && !(event.type === "mkdir" && event.created === false);
+}
+
+function eventTouchesPath(event, targetPath) {
+  return event.file === targetPath
+    || event.from === targetPath
+    || event.to === targetPath;
+}
+
+function assertPathImmutableAfter(events, targetPath, afterIndex, endIndex, label) {
+  assert.equal(
+    events
+      .slice(afterIndex + 1, endIndex)
+      .some((event) => isMutatingIoEvent(event)
+        && eventTouchesPath(event, targetPath)),
+    false,
+    `${label} mutated ${targetPath} after its durability point`,
+  );
+}
+
+function assertSnapshotLeafSealHistory(events, {
+  expectedBytes,
+  file,
+  historyEnd = events.length,
+  label = "snapshot leaf",
+}) {
+  const history = events.slice(0, historyEnd);
+  const opens = history.filter((event) => event.type === "open" && event.file === file);
+  assert.equal(opens.length, 1, `${label} must have exactly one successful open`);
+  const [open] = opens;
+  assert.equal(
+    open.flags & (
+      fs.constants.O_CREAT
+      | fs.constants.O_EXCL
+      | fs.constants.O_NOFOLLOW
+    ),
+    fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW,
+    `${label} was not safely opened`,
+  );
+  assert.equal(open.mode, 0o400, `${label} open mode must be 0400`);
+  const openIndex = history.indexOf(open);
+  const writes = history
+    .map((event, index) => ({ event, index }))
+    .filter(({ event }) => event.type === "write" && event.file === file);
+  assert.ok(writes.length > 0, `${label} has no descriptor write`);
+  assert.equal(
+    writes.every(({ event, index }) => index > openIndex
+      && event.descriptor === open.descriptor
+      && event.pathnameWrite === false),
+    true,
+    `${label} write escaped the one safely-opened descriptor`,
+  );
+  const fsyncs = history
+    .map((event, index) => ({ event, index }))
+    .filter(({ event }) => event.type === "fsync" && event.file === file);
+  assert.equal(fsyncs.length, 1, `${label} must fsync its one descriptor exactly once`);
+  const [leafFsync] = fsyncs;
+  assert.equal(
+    leafFsync.event.descriptor,
+    open.descriptor,
+    `${label} fsync used a decoy or reopened descriptor`,
+  );
+  assert.equal(
+    writes
+      .filter(({ index }) => index < leafFsync.index)
+      .reduce((sum, { event }) => sum + event.bytes, 0),
+    expectedBytes,
+    `${label} was not completely written before fsync`,
+  );
+  assert.equal(
+    writes.some(({ index }) => index > leafFsync.index),
+    false,
+    `${label} was rewritten after fsync`,
+  );
+  const closes = history
+    .map((event, index) => ({ event, index }))
+    .filter(({ event }) => event.type === "close"
+      && event.file === file
+      && event.descriptor === open.descriptor);
+  assert.equal(closes.length, 1, `${label} must close its one descriptor exactly once`);
+  assert.ok(
+    closes[0].index > leafFsync.index,
+    `${label} descriptor closed before its fsync`,
+  );
+  assertPathImmutableAfter(
+    history,
+    file,
+    leafFsync.index,
+    history.length,
+    label,
+  );
+  return {
+    closeIndex: closes[0].index,
+    descriptor: open.descriptor,
+    fsyncIndex: leafFsync.index,
+    openIndex,
+  };
+}
+
+function assertSnapshotCleanupHistory(events, {
+  historyStart,
+  sealed,
+  label = "snapshot cleanup",
+}) {
+  const requestDirectory = path.dirname(sealed.hostPath);
+  const claimedJobsDirectory = path.dirname(requestDirectory);
+  const mutations = events
+    .slice(historyStart)
+    .filter(isMutatingIoEvent)
+    .map(({ file, from, to, type }) => ({ file, from, to, type }));
+  assert.deepEqual(
+    mutations,
+    [
+      {
+        file: sealed.hostPath,
+        from: undefined,
+        to: undefined,
+        type: "unlink",
+      },
+      {
+        file: requestDirectory,
+        from: undefined,
+        to: undefined,
+        type: "rmdir",
+      },
+    ],
+    `${label} performed an unexpected write, rename or destructive operation`,
+  );
+  const unlinkIndex = historyIndex(
+    events,
+    historyStart - 1,
+    ({ file, type }) => type === "unlink" && file === sealed.hostPath,
+    `${label} did not unlink the exact leaf`,
+  );
+  const requestFsync = historyIndex(
+    events,
+    unlinkIndex,
+    ({ file, type }) => type === "fsync" && file === requestDirectory,
+    `${label} did not fsync the request directory after leaf unlink`,
+  );
+  const rmdirIndex = historyIndex(
+    events,
+    requestFsync,
+    ({ file, type }) => type === "rmdir" && file === requestDirectory,
+    `${label} removed the request directory before its unlink was durable`,
+  );
+  return historyIndex(
+    events,
+    rmdirIndex,
+    ({ file, type }) => type === "fsync" && file === claimedJobsDirectory,
+    `${label} did not fsync claimed-jobs after request-directory removal`,
+  );
+}
+
+function assertExactlyTwoDescriptorReadPasses(audit, label = "claimed-job reader") {
+  assert.equal(
+    audit.startedReadPasses.length,
+    2,
+    `${label} must start exactly two descriptor passes`,
+  );
+  assert.equal(
+    audit.completedReadPasses.length,
+    2,
+    `${label} must complete exactly two descriptor passes`,
+  );
+  assert.deepEqual(
+    audit.startedReadPasses.map(({ descriptor, initialPosition, pass }) => ({
+      descriptor,
+      initialPosition,
+      pass,
+    })),
+    audit.completedReadPasses.map(({ descriptor, initialPosition, pass }) => ({
+      descriptor,
+      initialPosition,
+      pass,
+    })),
+    `${label} started an incomplete or substituted descriptor pass`,
+  );
+}
+
+function assertInspectAllBeforeDeleteAll(calls, expectedInspects, expectedDeletes, label) {
+  assert.deepEqual(
+    calls
+      .filter(({ method }) => method === "inspectContainerForRecovery"
+        || method === "deleteContainer")
+      .map(({ id, method, name }) => [method, name ?? id]),
+    [
+      ...expectedInspects.map((name) => ["inspectContainerForRecovery", name]),
+      ...expectedDeletes.map((id) => ["deleteContainer", id]),
+    ],
+    `${label} did not attest the entire reverse-order worker set before deletion`,
+  );
+}
+
+function stableStatFingerprint(stat) {
+  return Object.fromEntries([
+    "dev",
+    "ino",
+    "mode",
+    "nlink",
+    "uid",
+    "gid",
+    "rdev",
+    "size",
+    "blksize",
+    "blocks",
+    "mtimeNs",
+    "ctimeNs",
+    "birthtimeNs",
+  ].map((field) => [field, stat[field]]));
+}
+
+function captureTreeSnapshot(root) {
+  const resolvedRoot = path.resolve(root);
+  const entries = [];
+  const visit = (candidate) => {
+    const stat = fs.lstatSync(candidate, { bigint: true });
+    const relative = path.relative(resolvedRoot, candidate) || ".";
+    const entry = {
+      path: relative,
+      stat: stableStatFingerprint(stat),
+      type: stat.isDirectory()
+        ? "directory"
+        : stat.isFile()
+          ? "file"
+          : stat.isSymbolicLink()
+            ? "symlink"
+            : "other",
+    };
+    if (stat.isFile()) {
+      entry.bytes = fs.readFileSync(candidate).toString("base64");
+    } else if (stat.isSymbolicLink()) {
+      entry.target = fs.readlinkSync(candidate);
+    }
+    entries.push(entry);
+    if (stat.isDirectory()) {
+      for (const name of fs.readdirSync(candidate).sort()) {
+        visit(path.join(candidate, name));
+      }
+    }
+  };
+  visit(resolvedRoot);
+  return entries;
+}
+
+function assertNoStateMutationEvents(events, root, label) {
+  const resolvedRoot = path.resolve(root);
+  const writeFlags = fs.constants.O_WRONLY
+    | fs.constants.O_RDWR
+    | fs.constants.O_CREAT
+    | fs.constants.O_TRUNC
+    | fs.constants.O_APPEND;
+  const inside = (candidate) => typeof candidate === "string"
+    && (candidate === resolvedRoot || candidate.startsWith(`${resolvedRoot}${path.sep}`));
+  const hostile = events.filter((event) => (
+    event.type === "open"
+      ? inside(event.file) && (event.flags & writeFlags) !== 0
+      : isMutatingIoEvent(event)
+        && [event.file, event.from, event.to].some(inside)
+  ));
+  assert.deepEqual(hostile, [], `${label} mutated the preserved replay tree`);
+}
+
+function assertActiveUnlinkFsyncOrder(events, activePath, lastHeadRootFsync, label) {
+  const unlinks = events
+    .map((event, index) => ({ event, index }))
+    .filter(({ event }) => event.type === "unlink" && event.file === activePath);
+  assert.equal(unlinks.length, 1, `${label} must unlink active.lock exactly once`);
+  const [unlink] = unlinks;
+  assert.ok(
+    unlink.index > lastHeadRootFsync,
+    `${label} unlinked active.lock before the final durable head root-fsync`,
+  );
+  const removalRootFsync = historyIndex(
+    events,
+    unlink.index,
+    (event) => event.type === "fsync" && event.file === path.dirname(activePath),
+    `${label} did not fsync the state root after active.lock unlink`,
+  );
+  return { removalRootFsync, unlinkIndex: unlink.index };
 }
 
 function assertLeaseRemovalFsync(root, audit, startIndex, label) {
@@ -3419,79 +5243,184 @@ function assertBarrierFsyncOrder(root, phaseId, audit) {
   assertJournalAppendFsyncOrder(root, directory, barrierFiles, audit, phaseId);
 }
 
-function assertJournalAppendFsyncOrder(root, directory, files, audit, label) {
+function assertJournalAppendFsyncOrder(
+  root,
+  directory,
+  files,
+  audit,
+  label,
+  { allowActiveUnlink = false } = {},
+) {
   let cursor = -1;
+  let scopeStart = null;
+  const historyEnd = audit.events.length;
+  const activePath = path.join(root, "active.lock");
+  const headTemps = new Set();
+  const headRenameIndexes = new Set();
   for (const file of files) {
     const openIndex = historyIndex(
       audit.events,
       cursor,
       (event) => event.type === "open"
         && event.file === file
-        && (event.flags & fs.constants.O_EXCL) === fs.constants.O_EXCL,
+        && (event.flags & (
+          fs.constants.O_WRONLY
+          | fs.constants.O_CREAT
+          | fs.constants.O_EXCL
+          | fs.constants.O_NOFOLLOW
+        )) === (
+          fs.constants.O_WRONLY
+          | fs.constants.O_CREAT
+          | fs.constants.O_EXCL
+          | fs.constants.O_NOFOLLOW
+        ),
       `${label} journal entry was not opened exclusively: ${file}`,
     );
-    const writeIndex = historyIndex(
-      audit.events,
-      openIndex,
-      (event) => event.type === "write" && event.file === file && event.bytes > 0,
-      `${label} journal entry was not written after its exclusive open: ${file}`,
+    scopeStart ??= openIndex;
+    const entryOpen = audit.events[openIndex];
+    assert.equal(
+      audit.events
+        .slice(0, historyEnd)
+        .filter((event) => event.type === "open" && event.file === file)
+        .length,
+      1,
+      `${label} journal entry was reopened: ${file}`,
+    );
+    const entryWrites = audit.events
+      .slice(openIndex + 1, historyEnd)
+      .map((event, relativeIndex) => ({ event, index: openIndex + 1 + relativeIndex }))
+      .filter(({ event }) => event.type === "write" && event.file === file);
+    assert.ok(entryWrites.length > 0, `${label} journal entry has no write: ${file}`);
+    assert.equal(
+      entryWrites.every(({ event }) => event.descriptor === entryOpen.descriptor
+        && event.pathnameWrite === false),
+      true,
+      `${label} journal entry write escaped its exclusive descriptor: ${file}`,
     );
     const entryFsync = historyIndex(
       audit.events,
-      writeIndex,
-      (event) => event.type === "fsync" && event.file === file,
+      openIndex,
+      (event) => event.type === "fsync"
+        && event.file === file
+        && event.descriptor === entryOpen.descriptor,
       `${label} journal entry was fsynced before its write: ${file}`,
     );
     assert.equal(
-      audit.events
-        .slice(openIndex + 1, entryFsync)
-        .filter((event) => event.type === "write" && event.file === file)
-        .reduce((sum, event) => sum + event.bytes, 0),
-      fs.statSync(file).size,
+      entryWrites
+        .filter(({ index }) => index < entryFsync)
+        .reduce((sum, { event }) => sum + event.bytes, 0),
+      audit.events[entryFsync].size,
       `${label} journal entry was not completely written before fsync: ${file}`,
+    );
+    const entryClose = historyIndex(
+      audit.events,
+      entryFsync,
+      (event) => event.type === "close"
+        && event.file === file
+        && event.descriptor === entryOpen.descriptor,
+      `${label} journal entry descriptor was not closed after fsync: ${file}`,
     );
     const directoryFsync = historyIndex(
       audit.events,
-      entryFsync,
+      entryClose,
       (event) => event.type === "fsync" && event.file === directory,
       `${label} journal directory was not fsynced for entry: ${file}`,
     );
-    assert.equal(
-      audit.events
-        .slice(entryFsync + 1, directoryFsync)
-        .some((event) => event.type === "write" && event.file === file),
-      false,
-      `${label} journal entry changed after its durable fsync: ${file}`,
+    assertPathImmutableAfter(
+      audit.events,
+      file,
+      entryFsync,
+      historyEnd,
+      `${label} journal entry`,
     );
-    const headWrite = historyIndex(
+    const headOpen = historyIndex(
       audit.events,
       directoryFsync,
-      (event) => event.type === "write"
-        && event.file !== path.join(root, "active.lock")
+      (event) => event.type === "open"
+        && event.file !== activePath
+        && path.dirname(event.file) === root
         && path.basename(event.file).includes("active.lock")
-        && event.bytes > 0,
-      `${label} lease head temp was not written after journal durability: ${file}`,
+        && (event.flags & (
+          fs.constants.O_WRONLY
+          | fs.constants.O_CREAT
+          | fs.constants.O_EXCL
+          | fs.constants.O_NOFOLLOW
+        )) === (
+          fs.constants.O_WRONLY
+          | fs.constants.O_CREAT
+          | fs.constants.O_EXCL
+          | fs.constants.O_NOFOLLOW
+        ),
+      `${label} lease head temp was not exclusively opened after journal durability: ${file}`,
     );
-    const headFile = audit.events[headWrite].file;
+    const headOpenEvent = audit.events[headOpen];
+    const headFile = headOpenEvent.file;
+    assert.equal(
+      headTemps.has(headFile),
+      false,
+      `${label} reused a prior lease head temp: ${headFile}`,
+    );
+    headTemps.add(headFile);
+    const headWrites = audit.events
+      .slice(headOpen + 1, historyEnd)
+      .map((event, relativeIndex) => ({ event, index: headOpen + 1 + relativeIndex }))
+      .filter(({ event }) => event.type === "write" && event.file === headFile);
+    assert.ok(headWrites.length > 0, `${label} lease head temp has no write: ${headFile}`);
+    assert.equal(
+      headWrites.every(({ event }) => event.descriptor === headOpenEvent.descriptor
+        && event.pathnameWrite === false),
+      true,
+      `${label} lease head temp write escaped its exclusive descriptor`,
+    );
     const headFsync = historyIndex(
       audit.events,
-      headWrite,
-      (event) => event.type === "fsync" && event.file === headFile,
+      headOpen,
+      (event) => event.type === "fsync"
+        && event.file === headFile
+        && event.descriptor === headOpenEvent.descriptor,
       `${label} lease head temp was fsynced before its write: ${headFile}`,
+    );
+    assert.equal(
+      headWrites
+        .filter(({ index }) => index < headFsync)
+        .reduce((sum, { event }) => sum + event.bytes, 0),
+      audit.events[headFsync].size,
+      `${label} lease head temp was not completely written before fsync`,
+    );
+    const headClose = historyIndex(
+      audit.events,
+      headFsync,
+      (event) => event.type === "close"
+        && event.file === headFile
+        && event.descriptor === headOpenEvent.descriptor,
+      `${label} lease head temp descriptor was not closed after fsync`,
     );
     const headRename = historyIndex(
       audit.events,
-      headFsync,
+      headClose,
       (event) => event.type === "rename"
         && event.from === headFile
-        && event.to === path.join(root, "active.lock"),
+        && event.to === activePath,
       `${label} lease head was not atomically installed from its fsynced temp`,
     );
+    headRenameIndexes.add(headRename);
     assert.equal(
-      audit.events
-        .slice(headFsync + 1, headRename)
-        .some((event) => event.type === "write" && event.file === headFile),
-      false,
+      audit.events[headRename].sourceSize,
+      audit.events[headFsync].size,
+      `${label} renamed an incomplete or substituted lease head temp`,
+    );
+    const forbiddenTempMutation = audit.events
+      .slice(headFsync + 1, historyEnd)
+      .map((event, relativeIndex) => ({ event, index: headFsync + 1 + relativeIndex }))
+      .filter(({ event, index }) => isMutatingIoEvent(event)
+        && eventTouchesPath(event, headFile)
+        && !(index === headRename
+          && event.type === "rename"
+          && event.from === headFile
+          && event.to === activePath));
+    assert.deepEqual(
+      forbiddenTempMutation,
+      [],
       `${label} lease head temp changed after its durable fsync`,
     );
     cursor = historyIndex(
@@ -3501,6 +5430,36 @@ function assertJournalAppendFsyncOrder(root, directory, files, audit, label) {
       `${label} broker state directory was not fsynced after head install`,
     );
   }
+  const activeMutations = audit.events
+    .slice(scopeStart ?? 0, historyEnd)
+    .map((event, relativeIndex) => ({
+      event,
+      index: (scopeStart ?? 0) + relativeIndex,
+    }))
+    .filter(({ event }) => isMutatingIoEvent(event)
+      && eventTouchesPath(event, activePath));
+  const activeUnlink = allowActiveUnlink
+    ? assertActiveUnlinkFsyncOrder(
+        audit.events,
+        activePath,
+        cursor,
+        label,
+      )
+    : null;
+  assert.equal(
+    activeMutations.every(({ event, index }) => (
+      headRenameIndexes.has(index)
+        && event.type === "rename"
+        && event.to === activePath
+    ) || (
+      allowActiveUnlink
+        && index === activeUnlink.unlinkIndex
+        && event.type === "unlink"
+        && event.file === activePath
+    )),
+    true,
+    `${label} mutated or rekeyed active.lock outside an expected durable-head rename`,
+  );
   return cursor;
 }
 

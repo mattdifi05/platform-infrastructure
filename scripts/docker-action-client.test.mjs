@@ -14,7 +14,9 @@ import * as actionContract from "./docker-action-contract.mjs";
 import * as client from "./docker-action-client.mjs";
 import {
   buildFixtureActionResultV2,
+  buildFixturePhaseOutputV2,
   buildFixtureTrustedContextV2,
+  buildFixtureVolumeInspect,
   fixtureCapabilityKey,
 } from "./docker-action-v2-fixtures.mjs";
 
@@ -325,13 +327,138 @@ test("RED v2: real UDS consumer requires exactly one canonical response frame an
   }
 });
 
+test("test-only nested response fixture defeats a shallow canonicalizer with a valid MAC", () => {
+  const request = wireRequest();
+  const canonicalControl = canonicalValueOracle(signedResponse(request, {
+    status: "completed",
+    statusCode: 200,
+    errorCode: null,
+    result: canonicalActionResultV2(request),
+  }));
+  assert.equal(
+    JSON.stringify(canonicalControl),
+    canonicalJsonOracle(canonicalControl),
+    "the independent positive control must already be recursively canonical",
+  );
+  const nestedNonCanonical = independentlySignedNestedNonCanonicalResponse(
+    canonicalControl,
+    CAPABILITY,
+  );
+  assertNestedNonCanonicalResponseFixture(
+    nestedNonCanonical,
+    canonicalControl,
+    CAPABILITY,
+  );
+});
+
 testWhenProductionExports(
   [
     [actionContract, "normalizeActionResponse"],
-    [actionContract, "signActionResponse"],
-    [broker, "createSemanticActionExecutor"],
     [broker, "encodeActionResponseFrame"],
   ],
+  "RED v2: production response framing recursively canonicalizes nested signed values",
+  async () => {
+    const request = wireRequest();
+    const canonicalControl = canonicalValueOracle(signedResponse(request, {
+      status: "completed",
+      statusCode: 200,
+      errorCode: null,
+      result: canonicalActionResultV2(request),
+    }));
+    const canonicalFrame = broker.encodeActionResponseFrame(canonicalControl);
+    assertProductionResponseFrame(canonicalFrame, canonicalControl);
+    const admittedControl = await exchangeWithLocalBroker(request, canonicalControl, {
+      responseFrame: () => canonicalFrame,
+    });
+    assert.deepEqual(admittedControl, canonicalControl);
+
+    const nestedNonCanonical = independentlySignedNestedNonCanonicalResponse(
+      canonicalControl,
+      CAPABILITY,
+    );
+    assertNestedNonCanonicalResponseFixture(
+      nestedNonCanonical,
+      canonicalControl,
+      CAPABILITY,
+    );
+
+    const encoded = broker.encodeActionResponseFrame(nestedNonCanonical);
+    assertProductionResponseFrame(encoded, nestedNonCanonical);
+    const admitted = await exchangeWithLocalBroker(request, nestedNonCanonical, {
+      responseFrame: () => encoded,
+    });
+    assert.deepEqual(admitted, nestedNonCanonical);
+  },
+);
+
+test("test-only assembly gates do not depend on an unrelated semantic-executor export", () => {
+  const contractModule = Object.freeze({
+    normalizeActionResponse() {},
+    signActionResponse() {},
+  });
+  const brokerModule = Object.freeze({
+    encodeActionResponseFrame() {},
+  });
+  const clientModule = Object.freeze({
+    defaultClaimedJobPolicy() {},
+    readClaimedBackupJob() {},
+    runClientCommand() {},
+  });
+  const requirementSets = [
+    injectedAssemblyRequirements({ brokerModule, contractModule }),
+    defaultAssemblyRequirements({ brokerModule, contractModule }),
+    schedulerMainRequirements({ brokerModule, clientModule, contractModule }),
+  ];
+  for (const requirements of requirementSets) {
+    assert.deepEqual(
+      missingProductionExports(requirements),
+      [],
+      "a gate body must activate when every API it calls is present",
+    );
+    assert.equal(
+      requirements.some(([, exportName]) => exportName === "createSemanticActionExecutor"),
+      false,
+      "an injected/default assembly body must not become TODO because an unrelated export is absent",
+    );
+  }
+});
+
+test("test-only default semantic transport proxy rejects every method outside its exact whitelist", () => {
+  const { trusted } = buildFixtureTrustedContextV2({
+    allowedActions: ["backup.prune.plan"],
+    now: NOW,
+  });
+  const oracle = exactPrunePlanTransportOracle({
+    successRequestId: "123e4567-e89b-42d3-a456-426614174102",
+    trusted,
+  });
+  assert.deepEqual(
+    Object.keys(oracle.transport).sort(),
+    [
+      "createWorker",
+      "deleteContainer",
+      "inspectContainer",
+      "inspectVolume",
+      "logsContainer",
+      "startContainer",
+      "waitContainer",
+    ],
+  );
+  assert.equal(Object.hasOwn(oracle.transport, "execute"), false);
+  assert.equal(oracle.transport.execute, undefined);
+  assert.throws(
+    () => oracle.transport.inspectNetwork,
+    /unexpected semantic transport method inspectNetwork/i,
+  );
+  assert.throws(
+    () => oracle.transport.pullImage,
+    /unexpected semantic transport method pullImage/i,
+  );
+  assert.deepEqual(oracle.calls, [], "wrong-method probes must not become admitted transport calls");
+});
+
+testWhenProductionExports(
+  injectedAssemblyRequirements(),
   "RED v2: real broker assembly signs and writes semantic success and rejection to the real client",
   async (t) => {
     const action = "backup.prune.plan";
@@ -411,12 +538,7 @@ testWhenProductionExports(
 );
 
 testWhenProductionExports(
-  [
-    [actionContract, "normalizeActionResponse"],
-    [actionContract, "signActionResponse"],
-    [broker, "createSemanticActionExecutor"],
-    [broker, "encodeActionResponseFrame"],
-  ],
+  defaultAssemblyRequirements(),
   "RED v2: real broker assembly defaults behaviorally to the semantic executor",
   async (t) => {
     const action = "backup.prune.plan";
@@ -426,11 +548,7 @@ testWhenProductionExports(
       allowedActions: [action],
       now: NOW,
     });
-    const assembly = await realDefaultSemanticBrokerAssembly(t, {
-      capabilityKey,
-      trusted,
-    });
-    const request = buildClientRequest(command, [], {
+    const successRequest = buildClientRequest(command, [], {
       runtimeIntentId: trusted.intent.intentId,
       activeReceiptSha256: trusted.receiptDigest,
       combinedRenderSha256: trusted.receipt.combinedRenderSha256,
@@ -439,9 +557,31 @@ testWhenProductionExports(
       requestId: "123e4567-e89b-42d3-a456-426614174102",
       nonce: "D".repeat(43),
     });
-
+    const rejectionRequest = buildClientRequest(command, [], {
+      runtimeIntentId: trusted.intent.intentId,
+      activeReceiptSha256: trusted.receiptDigest,
+      combinedRenderSha256: trusted.receipt.combinedRenderSha256,
+      capabilityKey,
+      now: NOW,
+      requestId: "123e4567-e89b-42d3-a456-426614174103",
+      nonce: "E".repeat(43),
+    });
+    const assembly = await realDefaultSemanticBrokerAssembly(t, {
+      capabilityKey,
+      successRequestId: successRequest.requestId,
+      trusted,
+    });
+    const completed = await sendActionRequest(
+      successRequest,
+      assembly.socketPath,
+      capabilityKey,
+    );
+    assert.equal(completed.status, "completed");
+    assert.equal(completed.statusCode, 200);
+    assert.equal(completed.errorCode, null);
+    assert.deepEqual(completed.result, buildFixtureActionResultV2(action));
     const rejected = await sendActionRequest(
-      request,
+      rejectionRequest,
       assembly.socketPath,
       capabilityKey,
     );
@@ -454,17 +594,21 @@ testWhenProductionExports(
       true,
       "initialize must recover the semantic executor selected by the default assembly path",
     );
-    assert.ok(
-      assembly.transportCalls.length > 0,
-      "the no-override assembly must reach an injected low-level semantic transport method",
-    );
+    assembly.assertTransportComplete();
     assert.equal(
-      assembly.transportCalls.some(({ method }) => method === "execute"),
+      Object.hasOwn(assembly.transport, "execute"),
       false,
       "the transport intentionally exposes no legacy engine execute shortcut",
     );
+    assert.equal(assembly.transport.execute, undefined);
+    assert.equal(assembly.responseFrames.length, 2);
     assertProductionEncoderMatchesWrittenFrame(
       assembly.responseFrames[0],
+      completed,
+      "default semantic success",
+    );
+    assertProductionEncoderMatchesWrittenFrame(
+      assembly.responseFrames[1],
       rejected,
       "default semantic rejection",
     );
@@ -616,6 +760,7 @@ test("test-only real-main preload is a narrow filesystem redirect, not a client 
         DOCKER_ACTION_TEST_CAPABILITY_PATH: redirect.capabilityPath,
         DOCKER_ACTION_TEST_CLAIMED_FILE: fixture.file,
         DOCKER_ACTION_TEST_CLAIMED_ROOT: fixture.directory,
+        DOCKER_ACTION_TEST_NOW: String(NOW),
         DOCKER_ACTION_TEST_RUN_ID: "preload-control",
         NODE_OPTIONS: `--require=${redirect.preloadFile}`,
         PATH: path.dirname(process.execPath),
@@ -631,6 +776,46 @@ test("test-only real-main preload is a narrow filesystem redirect, not a client 
     claimedJobBytes: fixture.bytes.length,
     claimedJobRuns: [],
   });
+  const fakeEntrypoint = await collectChildProcess(
+    process.execPath,
+    ["--eval", ""],
+    {
+      cwd: REPOSITORY_ROOT,
+      env: {
+        DOCKER_ACTION_TEST_AUDIT_FILE: redirect.auditFile,
+        DOCKER_ACTION_TEST_CAPABILITY_FILE: redirect.capabilityFile,
+        DOCKER_ACTION_TEST_CAPABILITY_PATH: redirect.capabilityPath,
+        DOCKER_ACTION_TEST_CLAIMED_FILE: fixture.file,
+        DOCKER_ACTION_TEST_CLAIMED_ROOT: fixture.directory,
+        DOCKER_ACTION_TEST_EXPECTED_ARGS_JSON: JSON.stringify([
+          "execute-backup-job",
+          "--jobFileName",
+          fixture.fileName,
+        ]),
+        DOCKER_ACTION_TEST_EXPECTED_ENTRYPOINT: path.join(
+          REPOSITORY_ROOT,
+          "scripts",
+          "docker-action-client.mjs",
+        ),
+        DOCKER_ACTION_TEST_NOW: String(NOW),
+        DOCKER_ACTION_TEST_REQUIRE_REAL_MAIN: "1",
+        DOCKER_ACTION_TEST_RUN_ID: "fake-entrypoint",
+        NODE_OPTIONS: `--require=${redirect.preloadFile}`,
+        PATH: path.dirname(process.execPath),
+      },
+    },
+  );
+  assert.notEqual(fakeEntrypoint.code, 0, "the preload must fail closed on a replacement entrypoint");
+  assert.equal(fakeEntrypoint.stdout, "");
+  assert.match(fakeEntrypoint.stderr, /real client entrypoint or arguments mismatch/i);
+  assert.throws(
+    () => assertRealClientMainInvocation(redirect.readAudit(), {
+      fileName: fixture.fileName,
+      runId: "fake-entrypoint",
+    }),
+    /exact real client entrypoint/i,
+    "the independent audit oracle must also reject the fake process",
+  );
   assert.equal(fs.statSync(fixture.file).mode & 0o777, 0o600);
 });
 
@@ -758,15 +943,7 @@ testWhenClientExports(
 );
 
 testWhenProductionExports(
-  [
-    [client, "defaultClaimedJobPolicy"],
-    [client, "readClaimedBackupJob"],
-    [client, "runClientCommand"],
-    [actionContract, "normalizeActionResponse"],
-    [actionContract, "signActionResponse"],
-    [broker, "createSemanticActionExecutor"],
-    [broker, "encodeActionResponseFrame"],
-  ],
+  schedulerMainRequirements(),
   "RED v2: scheduler executes the real client main through the real broker assembly",
   async (t) => {
     const fixture = claimedJobFixture(t);
@@ -783,7 +960,7 @@ testWhenProductionExports(
     const result = buildFixtureActionResultV2(action, expected);
     const assembly = await realBrokerAssembly(t, {
       capabilityKey,
-      now: () => Date.now(),
+      now: () => NOW,
       outcomes: [
         { result },
         { rejection: "semantic policy rejected the admitted claimed job" },
@@ -1582,10 +1759,42 @@ function testWhenClientExports(exportNames, name, body) {
   return test(name, body);
 }
 
-function testWhenProductionExports(requirements, name, body) {
-  const missing = requirements
+function injectedAssemblyRequirements({
+  brokerModule = broker,
+  contractModule = actionContract,
+} = {}) {
+  return [
+    [contractModule, "normalizeActionResponse"],
+    [contractModule, "signActionResponse"],
+    [brokerModule, "encodeActionResponseFrame"],
+  ];
+}
+
+function defaultAssemblyRequirements(options = {}) {
+  return injectedAssemblyRequirements(options);
+}
+
+function schedulerMainRequirements({
+  brokerModule = broker,
+  clientModule = client,
+  contractModule = actionContract,
+} = {}) {
+  return [
+    [clientModule, "defaultClaimedJobPolicy"],
+    [clientModule, "readClaimedBackupJob"],
+    [clientModule, "runClientCommand"],
+    ...injectedAssemblyRequirements({ brokerModule, contractModule }),
+  ];
+}
+
+function missingProductionExports(requirements) {
+  return requirements
     .filter(([module, exportName]) => typeof module[exportName] !== "function")
     .map(([, exportName]) => exportName);
+}
+
+function testWhenProductionExports(requirements, name, body) {
+  const missing = missingProductionExports(requirements);
   if (missing.length > 0) {
     return test.todo(`${name} [activates when ${missing.join(", ")} is exported]`);
   }
@@ -1950,6 +2159,16 @@ function canonicalJsonOracle(value) {
   return JSON.stringify(canonicalValueOracle(value));
 }
 
+function shallowCanonicalJsonOracle(value) {
+  assert.ok(
+    value && typeof value === "object" && !Array.isArray(value),
+    "shallow canonicalization oracle requires one object",
+  );
+  return JSON.stringify(
+    Object.fromEntries(Object.keys(value).sort().map((key) => [key, value[key]])),
+  );
+}
+
 function canonicalValueOracle(value) {
   if (value === null || typeof value === "string" || typeof value === "boolean") return value;
   if (typeof value === "number" && Number.isFinite(value)) return value;
@@ -1992,8 +2211,12 @@ function requestMac(unsigned) {
 }
 
 function domainMac(domain, unsigned) {
+  return domainMacWithKey(domain, unsigned, CAPABILITY);
+}
+
+function domainMacWithKey(domain, unsigned, capabilityKey) {
   return crypto
-    .createHmac("sha256", CAPABILITY)
+    .createHmac("sha256", capabilityKey)
     .update(domain)
     .update(canonicalJsonOracle(unsigned))
     .digest("hex");
@@ -2181,6 +2404,78 @@ function resignResponseWithResult(unsigned, result) {
   });
 }
 
+function independentlySignedNestedNonCanonicalResponse(response, capabilityKey) {
+  const canonicalResponse = canonicalValueOracle(response);
+  assert.ok(canonicalResponse.result, "nested-order fixture requires a completed result");
+  assert.ok(
+    canonicalResponse.result.phases?.[0]?.output,
+    "nested-order fixture requires one worker output",
+  );
+  const reverseEntries = (value) => Object.fromEntries(Object.entries(value).reverse());
+  const nestedResult = reverseEntries({
+    ...canonicalResponse.result,
+    phases: canonicalResponse.result.phases.map((phase, index) => (
+      index === 0
+        ? {
+            ...phase,
+            output: reverseEntries(phase.output),
+          }
+        : phase
+    )),
+  });
+  const unsignedValues = {
+    ...omit(canonicalResponse, "mac"),
+    result: nestedResult,
+    resultSha256: sha256Bytes(canonicalJsonOracle(nestedResult)),
+  };
+  const unsigned = Object.fromEntries(
+    Object.keys(unsignedValues).sort().map((key) => [key, unsignedValues[key]]),
+  );
+  const complete = {
+    ...unsigned,
+    mac: domainMacWithKey(RESPONSE_MAC_DOMAIN, unsigned, capabilityKey),
+  };
+  return Object.fromEntries(
+    Object.keys(complete).sort().map((key) => [key, complete[key]]),
+  );
+}
+
+function assertNestedNonCanonicalResponseFixture(candidate, canonicalControl, capabilityKey) {
+  assert.deepEqual(
+    Object.keys(candidate),
+    Object.keys(candidate).sort(),
+    "the hostile fixture must keep the response's top-level insertion order canonical",
+  );
+  assert.deepEqual(
+    Object.keys(candidate.result),
+    [...Object.keys(canonicalControl.result)].reverse(),
+    "the hostile fixture must reverse the nested result insertion order",
+  );
+  assert.deepEqual(
+    Object.keys(candidate.result.phases[0].output),
+    [...Object.keys(canonicalControl.result.phases[0].output)].reverse(),
+    "the hostile fixture must independently reverse the nested worker output",
+  );
+  assert.equal(
+    candidate.mac,
+    domainMacWithKey(
+      RESPONSE_MAC_DOMAIN,
+      omit(candidate, "mac"),
+      capabilityKey,
+    ),
+    "the hostile nested-order fixture must carry an independently valid response MAC",
+  );
+  assert.equal(
+    candidate.resultSha256,
+    sha256Bytes(canonicalJsonOracle(candidate.result)),
+  );
+  assert.notEqual(
+    shallowCanonicalJsonOracle(candidate),
+    canonicalJsonOracle(candidate),
+    "sorting only the top-level keys must fail this recursive canonicalization oracle",
+  );
+}
+
 function omit(value, key) {
   return Object.fromEntries(Object.entries(value).filter(([name]) => name !== key));
 }
@@ -2348,34 +2643,480 @@ async function realBrokerAssembly(t, {
   };
 }
 
-async function realDefaultSemanticBrokerAssembly(t, {
-  capabilityKey,
-  trusted,
-}) {
-  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "docker-action-default-semantic-"));
-  fs.chmodSync(temporary, 0o700);
-  const socketPath = path.join(temporary, "broker.sock");
-  const responseFrames = [];
-  const transportCalls = [];
-  let recoveredSemanticExecutor = false;
+function exactPrunePlanTransportOracle({ successRequestId, trusted }) {
+  const action = "backup.prune.plan";
+  const phaseId = "prune.plan";
+  const volumeId = "worker.input.manifest-verification";
+  const workerId = "2".repeat(64);
+  const workerName = "platform-action-prune-plan-010101010101010101010101";
+  const phase = trusted.receipt.resources.phaseProfiles[phaseId];
+  const volume = trusted.receipt.resources.volumes[volumeId];
+  const expectedBody = expectedPrunePlanWorkerBody({
+    requestId: successRequestId,
+    trusted,
+  });
+  const calls = [];
+  let cleanupSignal;
+  let created = false;
+  let firstRequestSignal;
+  let inspectVolumeCount = 0;
+  let rejectionMethod;
   const rejection = Object.assign(
-    new Error("default semantic transport rejected the admitted action"),
+    new Error("default semantic transport rejected prune.plan preflight"),
     {
       errorCode: "ACTION_REJECTED",
       semanticRejection: true,
       statusCode: 403,
     },
   );
-  const transport = new Proxy(Object.create(null), {
-    get(_target, property) {
-      if (property === "execute" || property === "then" || typeof property === "symbol") {
-        return undefined;
+
+  function assertSignal(signal, label) {
+    assert.equal(typeof signal?.aborted, "boolean", `${label} must receive an AbortSignal`);
+    assert.equal(
+      typeof signal?.addEventListener,
+      "function",
+      `${label} must receive a functional AbortSignal`,
+    );
+  }
+
+  function assertFirstRequestSignal(signal, label) {
+    assertSignal(signal, label);
+    assert.equal(signal, firstRequestSignal, `${label} must retain the first request signal`);
+  }
+
+  const exactMethods = Object.freeze({
+    async inspectVolume(name, signal) {
+      assert.equal(arguments.length, 2, "inspectVolume exact argument count");
+      assertSignal(signal, "inspectVolume");
+      assert.equal(name, volume.engineName, "inspectVolume exact admitted engine name");
+      inspectVolumeCount += 1;
+      calls.push({ method: "inspectVolume", name, signal });
+      if (inspectVolumeCount === 1) {
+        firstRequestSignal = signal;
+        return buildFixtureVolumeInspect(trusted.receipt, volumeId);
       }
-      return (...args) => {
-        transportCalls.push({ argumentCount: args.length, method: String(property) });
-        throw rejection;
-      };
+      assert.equal(
+        inspectVolumeCount,
+        2,
+        "the default semantic assembly must not perform an unplanned volume inspection",
+      );
+      assert.notEqual(signal, firstRequestSignal, "the second request needs a fresh signal");
+      assert.notEqual(signal, cleanupSignal, "a request must not reuse the cleanup signal");
+      rejectionMethod = "inspectVolume#2";
+      throw rejection;
     },
+
+    async createWorker(name, body, signal) {
+      assert.equal(arguments.length, 3, "createWorker exact argument count");
+      assertFirstRequestSignal(signal, "createWorker");
+      assert.equal(name, workerName, "createWorker exact deterministic worker name");
+      assert.deepEqual(body, expectedBody, "createWorker exact independently derived body");
+      created = true;
+      calls.push({
+        body: structuredClone(body),
+        method: "createWorker",
+        name,
+        signal,
+      });
+      return { Id: workerId };
+    },
+
+    async inspectContainer(id, signal) {
+      assert.equal(arguments.length, 2, "inspectContainer exact argument count");
+      assertFirstRequestSignal(signal, "inspectContainer");
+      assert.equal(created, true, "inspectContainer must follow the exact createWorker call");
+      assert.equal(id, workerId, "inspectContainer exact worker ID");
+      calls.push({ id, method: "inspectContainer", signal });
+      return expectedPrunePlanWorkerInspect({
+        body: expectedBody,
+        id,
+        name: workerName,
+        trusted,
+      });
+    },
+
+    async startContainer(id, signal) {
+      assert.equal(arguments.length, 2, "startContainer exact argument count");
+      assertFirstRequestSignal(signal, "startContainer");
+      assert.equal(id, workerId, "startContainer exact worker ID");
+      calls.push({ id, method: "startContainer", signal });
+    },
+
+    async waitContainer(id, signal) {
+      assert.equal(arguments.length, 2, "waitContainer exact argument count");
+      assertFirstRequestSignal(signal, "waitContainer");
+      assert.equal(id, workerId, "waitContainer exact worker ID");
+      calls.push({ id, method: "waitContainer", signal });
+      return { StatusCode: 0 };
+    },
+
+    async logsContainer(id, signal) {
+      assert.equal(arguments.length, 2, "logsContainer exact argument count");
+      assertFirstRequestSignal(signal, "logsContainer");
+      assert.equal(id, workerId, "logsContainer exact worker ID");
+      calls.push({ id, method: "logsContainer", signal });
+      return dockerStdoutFrame({
+        schema: "platform.docker-worker.result/v2",
+        requestId: successRequestId,
+        action,
+        phaseId,
+        command: phase.command,
+        job: null,
+        status: "completed",
+        output: buildFixturePhaseOutputV2(action, phaseId, {}),
+      });
+    },
+
+    async deleteContainer(id, signal) {
+      assert.equal(arguments.length, 2, "deleteContainer exact argument count");
+      assertSignal(signal, "deleteContainer");
+      assert.equal(id, workerId, "deleteContainer exact worker ID");
+      assert.notEqual(signal, firstRequestSignal, "cleanup must use its own bounded signal");
+      cleanupSignal = signal;
+      calls.push({ id, method: "deleteContainer", signal });
+    },
+  });
+
+  const transport = new Proxy(exactMethods, {
+    get(target, property, receiver) {
+      if (
+        typeof property === "symbol"
+        || property === "execute"
+        || property === "then"
+      ) {
+        return Reflect.get(target, property, receiver);
+      }
+      if (!Object.hasOwn(target, property)) {
+        throw new TypeError(`unexpected semantic transport method ${String(property)}`);
+      }
+      return Reflect.get(target, property, receiver);
+    },
+  });
+
+  return Object.freeze({
+    assertComplete() {
+      assert.deepEqual(
+        calls.map(({ method }) => method),
+        [
+          "inspectVolume",
+          "createWorker",
+          "inspectContainer",
+          "startContainer",
+          "waitContainer",
+          "logsContainer",
+          "deleteContainer",
+          "inspectVolume",
+        ],
+        "default semantic transport must follow the one exact method sequence",
+      );
+      assert.equal(
+        rejectionMethod,
+        "inspectVolume#2",
+        "the unique semantic rejection must occur at the second exact preflight method",
+      );
+    },
+    calls,
+    transport,
+  });
+}
+
+function expectedPrunePlanPhaseAuthority(receipt) {
+  const action = "backup.prune.plan";
+  const phaseId = "prune.plan";
+  const phase = receipt.resources.phaseProfiles[phaseId];
+  const workerSecretSets = Object.fromEntries(
+    phase.workerSecretSetIds.map((id) => [
+      id,
+      structuredClone(receipt.resources.workerSecretSets[id]),
+    ]),
+  );
+  const volumeIds = [
+    ...phase.workerSecretSetIds.map(
+      (id) => receipt.resources.workerSecretSets[id].volumeId,
+    ),
+    ...phase.scratchVolumeIds,
+  ];
+  return {
+    schema: "platform.docker-worker.phase-authority/v2",
+    action,
+    actionProfile: structuredClone(receipt.resources.actionProfiles[action]),
+    phaseProfile: structuredClone(phase),
+    resources: {
+      mounts: Object.fromEntries(
+        phase.mountIds.map((id) => [
+          id,
+          structuredClone(receipt.resources.mounts[id]),
+        ]),
+      ),
+      networks: Object.fromEntries(
+        phase.networkIds.map((id) => [
+          id,
+          structuredClone(receipt.resources.networks[id]),
+        ]),
+      ),
+      volumes: Object.fromEntries(
+        [...new Set(volumeIds)].map((id) => [
+          id,
+          structuredClone(receipt.resources.volumes[id]),
+        ]),
+      ),
+      workerSecretSets,
+      writableSubpaths: Object.fromEntries(
+        phase.writableSubpathIds.map((id) => [
+          id,
+          structuredClone(receipt.resources.writableSubpaths[id]),
+        ]),
+      ),
+    },
+  };
+}
+
+function expectedPrunePlanWorkerBody({ requestId, trusted }) {
+  const action = "backup.prune.plan";
+  const phaseId = "prune.plan";
+  const receipt = trusted.receipt;
+  const phase = receipt.resources.phaseProfiles[phaseId];
+  const actionProfile = receipt.resources.actionProfiles[action];
+  const authority = expectedPrunePlanPhaseAuthority(receipt);
+  const verificationSet = receipt.resources.workerSecretSets["manifest.verification"];
+  const verificationVolume = receipt.resources.volumes[verificationSet.volumeId];
+  const binds = phase.mountIds.map((mountId) => {
+    const mount = receipt.resources.mounts[mountId];
+    return `${mount.canonicalPath}:${mount.containerPath}:${mount.access}`;
+  });
+  return {
+    Image: phase.workerImageRef,
+    Entrypoint: ["node", "/opt/platform-docker-worker/docker-action-worker.mjs"],
+    Cmd: [phase.command],
+    Env: [
+      "HOME=/tmp",
+      "LANG=C.UTF-8",
+      "NODE_ENV=production",
+      `PLATFORM_DOCKER_ACTION=${action}`,
+      `PLATFORM_DOCKER_PHASE_AUTHORITY_BASE64=${Buffer.from(canonicalJsonOracle(authority)).toString("base64url")}`,
+      `PLATFORM_DOCKER_PHASE_AUTHORITY_SHA256=${sha256Bytes(canonicalJsonOracle(authority))}`,
+      `PLATFORM_DOCKER_PHASE_ID=${phaseId}`,
+      `PLATFORM_DOCKER_REQUEST_ID=${requestId}`,
+    ],
+    User: "0:0",
+    WorkingDir: "/opt/platform-docker-worker",
+    NetworkDisabled: true,
+    AttachStdin: false,
+    AttachStdout: false,
+    AttachStderr: false,
+    OpenStdin: false,
+    StdinOnce: false,
+    Tty: false,
+    Labels: {
+      "com.platform.active-receipt-sha256": trusted.receiptDigest,
+      "com.platform.docker-action": action,
+      "com.platform.docker-action-profile": actionProfile.profileId,
+      "com.platform.docker-action-profile-sha256": actionProfile.profileSha256,
+      "com.platform.docker-phase": phaseId,
+      "com.platform.docker-phase-sha256": phase.phaseSha256,
+      "com.platform.runtime-intent": trusted.intent.intentId,
+    },
+    HostConfig: {
+      Annotations: null,
+      AutoRemove: false,
+      Binds: binds,
+      BlkioDeviceReadBps: null,
+      BlkioDeviceReadIOps: null,
+      BlkioDeviceWriteBps: null,
+      BlkioDeviceWriteIOps: null,
+      BlkioWeight: 0,
+      BlkioWeightDevice: null,
+      CapAdd: [],
+      CapDrop: ["ALL"],
+      Cgroup: "",
+      CgroupnsMode: "private",
+      CgroupParent: "",
+      ConsoleSize: [0, 0],
+      CpuCount: 0,
+      CpuPercent: 0,
+      CpuPeriod: 0,
+      CpuQuota: 0,
+      CpuRealtimePeriod: 0,
+      CpuRealtimeRuntime: 0,
+      CpuShares: 0,
+      CpusetCpus: "",
+      CpusetMems: "",
+      DeviceCgroupRules: [],
+      Devices: [],
+      DeviceRequests: [],
+      DiskQuota: 0,
+      Dns: [],
+      DnsOptions: [],
+      DnsSearch: [],
+      ExtraHosts: [],
+      GroupAdd: [],
+      IOMaximumBandwidth: 0,
+      IOMaximumIOps: 0,
+      Init: false,
+      IpcMode: "private",
+      Isolation: "",
+      KernelMemory: 0,
+      KernelMemoryTCP: 0,
+      Links: [],
+      LogConfig: {
+        Type: "json-file",
+        Config: {
+          "max-file": "1",
+          "max-size": "1m",
+        },
+      },
+      MaskedPaths: [
+        "/proc/acpi",
+        "/proc/asound",
+        "/proc/kcore",
+        "/proc/keys",
+        "/proc/latency_stats",
+        "/proc/timer_list",
+        "/proc/timer_stats",
+        "/proc/sched_debug",
+        "/proc/scsi",
+        "/sys/devices/virtual/powercap",
+        "/sys/firmware",
+      ],
+      Memory: 134217728,
+      MemoryReservation: 0,
+      MemorySwap: 134217728,
+      MemorySwappiness: null,
+      Mounts: [{
+        Type: "volume",
+        Source: verificationVolume.engineName,
+        Target: verificationSet.containerRoot,
+        ReadOnly: true,
+        VolumeOptions: { NoCopy: true },
+      }],
+      NanoCpus: 250000000,
+      NetworkMode: "none",
+      OomKillDisable: false,
+      OomScoreAdj: 0,
+      PidMode: "",
+      PidsLimit: 96,
+      PortBindings: {},
+      Privileged: false,
+      PublishAllPorts: false,
+      ReadonlyPaths: [
+        "/proc/asound",
+        "/proc/acpi",
+        "/proc/interrupts",
+        "/proc/kcore",
+        "/proc/keys",
+        "/proc/latency_stats",
+        "/proc/timer_list",
+        "/proc/timer_stats",
+        "/proc/sched_debug",
+        "/proc/scsi",
+        "/sys/firmware",
+      ],
+      ReadonlyRootfs: true,
+      RestartPolicy: {
+        Name: "no",
+        MaximumRetryCount: 0,
+      },
+      Runtime: "runc",
+      SecurityOpt: ["no-new-privileges:true"],
+      ShmSize: 67108864,
+      StorageOpt: {},
+      Sysctls: {},
+      Tmpfs: {
+        "/tmp": "rw,noexec,nosuid,nodev,size=32m,mode=700",
+      },
+      Ulimits: [{
+        Name: "nofile",
+        Soft: 1024,
+        Hard: 1024,
+      }],
+      UsernsMode: "",
+      UTSMode: "",
+      VolumeDriver: "",
+      VolumesFrom: [],
+    },
+    NetworkingConfig: {
+      EndpointsConfig: {},
+    },
+  };
+}
+
+function expectedPrunePlanWorkerInspect({ body, id, name, trusted }) {
+  const receipt = trusted.receipt;
+  const phase = receipt.resources.phaseProfiles["prune.plan"];
+  const verificationSet = receipt.resources.workerSecretSets["manifest.verification"];
+  const verificationVolume = receipt.resources.volumes[verificationSet.volumeId];
+  const bindMounts = phase.mountIds.map((mountId) => {
+    const mount = receipt.resources.mounts[mountId];
+    return {
+      Type: "bind",
+      Source: mount.canonicalPath,
+      Destination: mount.containerPath,
+      Mode: mount.access,
+      RW: mount.access !== "ro",
+      Propagation: "rprivate",
+    };
+  });
+  return {
+    Id: id,
+    Name: `/${name}`,
+    Image: phase.workerImageId,
+    Config: {
+      Image: body.Image,
+      Entrypoint: body.Entrypoint,
+      Cmd: body.Cmd,
+      Env: body.Env,
+      User: body.User,
+      WorkingDir: body.WorkingDir,
+      NetworkDisabled: body.NetworkDisabled,
+      AttachStdin: false,
+      AttachStdout: false,
+      AttachStderr: false,
+      OpenStdin: false,
+      StdinOnce: false,
+      Tty: false,
+      Labels: body.Labels,
+    },
+    HostConfig: body.HostConfig,
+    Mounts: [
+      ...bindMounts,
+      {
+        Type: "volume",
+        Name: verificationVolume.engineName,
+        Source: `/var/lib/docker/volumes/${verificationVolume.engineName}/_data`,
+        Destination: verificationSet.containerRoot,
+        Driver: "local",
+        Mode: "",
+        RW: false,
+        Propagation: "",
+      },
+    ],
+    NetworkSettings: {
+      Networks: {},
+    },
+  };
+}
+
+function dockerStdoutFrame(value) {
+  const payload = Buffer.from(`${JSON.stringify(value)}\n`);
+  const header = Buffer.alloc(8);
+  header[0] = 1;
+  header.writeUInt32BE(payload.length, 4);
+  return Buffer.concat([header, payload]);
+}
+
+async function realDefaultSemanticBrokerAssembly(t, {
+  capabilityKey,
+  successRequestId,
+  trusted,
+}) {
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "docker-action-default-semantic-"));
+  fs.chmodSync(temporary, 0o700);
+  const socketPath = path.join(temporary, "broker.sock");
+  const responseFrames = [];
+  let recoveredSemanticExecutor = false;
+  const transportOracle = exactPrunePlanTransportOracle({
+    successRequestId,
+    trusted,
   });
   const replayStore = {
     async recover(executor) {
@@ -2404,8 +3145,10 @@ async function realDefaultSemanticBrokerAssembly(t, {
     capabilityProvider: async () => capabilityKey,
     replayStore,
     semanticExecutorOptions: Object.freeze({
+      cleanupTimeoutMs: 100,
+      randomBytes: () => Buffer.alloc(12, 1),
       snapshotFileStore: Object.freeze({}),
-      transport,
+      transport: transportOracle.transport,
     }),
     onResponseFrame(frame) {
       responseFrames.push(Buffer.from(frame));
@@ -2430,12 +3173,13 @@ async function realDefaultSemanticBrokerAssembly(t, {
     server.listen(socketPath, resolve);
   });
   return {
+    assertTransportComplete: transportOracle.assertComplete,
     get recoveredSemanticExecutor() {
       return recoveredSemanticExecutor;
     },
     responseFrames,
     socketPath,
-    transportCalls,
+    transport: transportOracle.transport,
   };
 }
 
@@ -2475,6 +3219,9 @@ function clientMainFsRedirectFixture(t, {
       "const claimedFile = path.resolve(process.env.DOCKER_ACTION_TEST_CLAIMED_FILE);",
       "const claimedRoot = path.resolve(process.env.DOCKER_ACTION_TEST_CLAIMED_ROOT);",
       "const runId = process.env.DOCKER_ACTION_TEST_RUN_ID;",
+      "const fixedNow = Number(process.env.DOCKER_ACTION_TEST_NOW);",
+      'if (!Number.isSafeInteger(fixedNow)) throw new Error("test-only fixed Date.now value is invalid");',
+      "Date.now = () => fixedNow;",
       "const descriptors = new Map();",
       "const capabilityParents = new Set();",
       "for (let current = path.dirname(capabilityPath); current !== path.parse(current).root; current = path.dirname(current)) {",
@@ -2497,6 +3244,21 @@ function clientMainFsRedirectFixture(t, {
       "}",
       "function audit(event) {",
       "  original.appendFileSync(auditFile, `${JSON.stringify({ ...event, runId })}\\n`);",
+      "}",
+      "const observedProcess = {",
+      '  argv: [...process.argv],',
+      '  event: "process",',
+      "  execPath: process.execPath,",
+      "  now: Date.now(),",
+      "};",
+      "audit(observedProcess);",
+      'if (process.env.DOCKER_ACTION_TEST_REQUIRE_REAL_MAIN === "1") {',
+      "  const expectedEntrypoint = process.env.DOCKER_ACTION_TEST_EXPECTED_ENTRYPOINT;",
+      "  const expectedArgs = JSON.parse(process.env.DOCKER_ACTION_TEST_EXPECTED_ARGS_JSON);",
+      "  if (process.argv[1] !== expectedEntrypoint",
+      "      || JSON.stringify(process.argv.slice(2)) !== JSON.stringify(expectedArgs)) {",
+      '    throw new Error("test-only real client entrypoint or arguments mismatch");',
+      "  }",
       "}",
       "function protectedKind(candidate) {",
       '  if (candidate === capabilityPath) return "capability";',
@@ -2651,7 +3413,46 @@ function assertTwoCompleteDescriptorReads(reads, expectedBytes, label) {
   assert.equal(cursor, expectedBytes, `${label} final descriptor pass was incomplete`);
 }
 
-function invokeSchedulerRealMain(fixture, socketPath, redirect, trustedEnvironment, runId) {
+function assertRealClientMainInvocation(events, { fileName, runId }) {
+  const selected = events.filter((event) => event.event === "process" && event.runId === runId);
+  assert.equal(selected.length, 1, `${runId} must audit exactly one child process`);
+  const [observed] = selected;
+  const expectedEntrypoint = path.join(
+    REPOSITORY_ROOT,
+    "scripts",
+    "docker-action-client.mjs",
+  );
+  assert.equal(
+    observed.argv[1],
+    expectedEntrypoint,
+    `${runId} must execute the exact real client entrypoint`,
+  );
+  assert.equal(
+    observed.execPath,
+    process.execPath,
+    `${runId} must execute the expected Node command`,
+  );
+  assert.deepEqual(
+    observed.argv.slice(2),
+    ["execute-backup-job", "--jobFileName", fileName],
+    `${runId} must preserve the exact scheduler command and arguments`,
+  );
+  assert.equal(observed.now, NOW, `${runId} must share the one frozen clock`);
+}
+
+async function invokeSchedulerRealMain(
+  fixture,
+  socketPath,
+  redirect,
+  trustedEnvironment,
+  runId,
+) {
+  const expectedEntrypoint = path.join(
+    REPOSITORY_ROOT,
+    "scripts",
+    "docker-action-client.mjs",
+  );
+  const expectedArgs = ["execute-backup-job", "--jobFileName", fixture.fileName];
   const env = {
     BACKUP_SCHEDULER_JOBS_DIR: fixture.directory,
     DOCKER_ACTION_ACTIVE_RECEIPT_SHA256: trustedEnvironment.activeReceiptSha256,
@@ -2663,12 +3464,16 @@ function invokeSchedulerRealMain(fixture, socketPath, redirect, trustedEnvironme
     DOCKER_ACTION_TEST_CAPABILITY_PATH: redirect.capabilityPath,
     DOCKER_ACTION_TEST_CLAIMED_FILE: fixture.file,
     DOCKER_ACTION_TEST_CLAIMED_ROOT: fixture.directory,
+    DOCKER_ACTION_TEST_EXPECTED_ARGS_JSON: JSON.stringify(expectedArgs),
+    DOCKER_ACTION_TEST_EXPECTED_ENTRYPOINT: expectedEntrypoint,
+    DOCKER_ACTION_TEST_NOW: String(NOW),
+    DOCKER_ACTION_TEST_REQUIRE_REAL_MAIN: "1",
     DOCKER_ACTION_TEST_RUN_ID: runId,
     NODE_OPTIONS: `--require=${redirect.preloadFile}`,
     PATH: `${path.dirname(process.execPath)}${path.delimiter}${process.env.PATH ?? ""}`,
     PLATFORM_INFRA_ROOT: REPOSITORY_ROOT,
   };
-  return collectChildProcess(
+  const result = await collectChildProcess(
     "/bin/sh",
     [
       path.join(REPOSITORY_ROOT, "scripts", "backup-scheduler.sh"),
@@ -2682,6 +3487,11 @@ function invokeSchedulerRealMain(fixture, socketPath, redirect, trustedEnvironme
       env,
     },
   );
+  assertRealClientMainInvocation(redirect.readAudit(), {
+    fileName: fixture.fileName,
+    runId,
+  });
+  return result;
 }
 
 function assertSingleJsonLine(value, label) {
