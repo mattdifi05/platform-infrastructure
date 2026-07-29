@@ -28,11 +28,727 @@ import {
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const workerPath = path.join(scriptDir, "docker-action-worker.mjs");
+const workerRuntimeGuardPath = path.join(
+  scriptDir,
+  "docker-action-worker-runtime-guard.mjs",
+);
+const WORKER_CONTAINER_PATH =
+  "/opt/platform-docker-worker/docker-action-worker.mjs";
+const WORKER_RUNTIME_GUARD_CONTAINER_PATH =
+  "/opt/platform-docker-worker/docker-action-worker-runtime-guard.mjs";
+const EXPECTED_WORKER_ENTRYPOINT = Object.freeze([
+  "node",
+  "--import",
+  WORKER_RUNTIME_GUARD_CONTAINER_PATH,
+  WORKER_CONTAINER_PATH,
+]);
+const EXPECTED_BROKER_IMAGE_ENTRYPOINT = Object.freeze([
+  "node",
+  "/opt/platform-docker-broker/docker-action-broker.mjs",
+]);
+const EXPECTED_NODE_IMAGE_REFERENCE =
+  "node:26.3.1-alpine@sha256:a2dc166a387cc6ca1e62d0c8e265e49ca985d6e60abc9fe6e6c3d6ce8e63f606";
+const EXPECTED_DOCKERFILE_FRONTEND_REFERENCE =
+  "docker/dockerfile:1.7@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e";
+const FIXED_ADAPTER_SOURCE_DIRECTORY = "scripts/docker-action-adapters";
+const SUPPLY_CHAIN_LOCK_PATH = path.join(
+  path.resolve(scriptDir, ".."),
+  "governance",
+  "supply-chain-lock.json",
+);
+const EXPECTED_COMMAND_BY_ACTION_PHASE = Object.freeze({
+  "backup.catalog\0catalog.capture": "backup-catalog",
+  "backup.job.execute\0job.backup.capture": "backup-job",
+  "backup.job.execute\0job.restore.verify": "restore-job",
+  "backup.prune.apply\0prune.apply": "backup-prune-apply",
+  "backup.prune.plan\0prune.plan": "backup-prune-plan",
+  "restore.drill.full\0restore.capture": "backup-catalog",
+  "restore.drill.full\0restore.verify": "restore-drill-full",
+  "backup.offsite.sync\0offsite.sync": "backup-offsite-sync",
+});
+const GLOBAL_REACHABILITY_SNAPSHOT_SOURCE = String.raw`
+function globalReachabilityShape() {
+  const sentinel = Symbol.for("platform.worker.socketless-guard-count");
+  const skippedGlobalNames = new Set();
+  const skippedProcessNames = new Set(["stdin", "stdout", "stderr"]);
+  const keyLabel = (key) => typeof key === "symbol"
+    ? "symbol:" + (Symbol.keyFor(key) ?? "") + ":" + (key.description ?? "")
+    : "string:" + key;
+  const functionLabel = (value) => {
+    if (typeof value !== "function") return typeof value;
+    try {
+      return "function:"
+        + JSON.stringify(String(value.name))
+        + ":"
+        + JSON.stringify(Function.prototype.toString.call(value));
+    } catch {
+      return "function:<uninspectable>";
+    }
+  };
+  const descriptorLabel = (descriptor) => {
+    if (Object.hasOwn(descriptor, "value")) {
+      return "data:" + (
+        typeof descriptor.value === "function"
+          ? functionLabel(descriptor.value)
+          : typeof descriptor.value
+      );
+    }
+    return "accessor:get=" + functionLabel(descriptor.get)
+      + ":set=" + functionLabel(descriptor.set);
+  };
+  const rows = [];
+  const cryptoDescriptor =
+    Object.getOwnPropertyDescriptor(globalThis, "crypto");
+  if (!cryptoDescriptor || typeof cryptoDescriptor.get !== "function") {
+    throw new Error("global reachability snapshot requires the crypto accessor");
+  }
+  const firstCryptoAccessorValue = Reflect.get(globalThis, "crypto");
+  const secondCryptoAccessorValue = Reflect.get(globalThis, "crypto");
+  if (
+    firstCryptoAccessorValue === null
+    || (
+      typeof firstCryptoAccessorValue !== "object"
+      && typeof firstCryptoAccessorValue !== "function"
+    )
+    || !Object.is(firstCryptoAccessorValue, secondCryptoAccessorValue)
+  ) {
+    throw new Error(
+      "global reachability snapshot requires one stable crypto accessor value",
+    );
+  }
+  const queue = [[
+    firstCryptoAccessorValue,
+    0,
+    "accessor-root:string:crypto",
+    false,
+  ]];
+  rows.push(
+    "0|accessor-root:string:crypto|"
+      + (
+        typeof firstCryptoAccessorValue === "function"
+          ? functionLabel(firstCryptoAccessorValue)
+          : typeof firstCryptoAccessorValue
+      ),
+  );
+  const rootKeys = Reflect.ownKeys(globalThis)
+    .sort((left, right) => keyLabel(left).localeCompare(keyLabel(right)));
+  for (const key of rootKeys) {
+    if (key === sentinel) continue;
+    if (typeof key === "string" && skippedGlobalNames.has(key)) continue;
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, key);
+    if (!descriptor) continue;
+    const rootLabel = keyLabel(key);
+    rows.push("0|" + rootLabel + "|" + descriptorLabel(descriptor));
+    if (Object.hasOwn(descriptor, "value")) {
+      queue.push([descriptor.value, 0, rootLabel, key === "process"]);
+    }
+  }
+  const seen = new WeakSet();
+  let scanCount = 0;
+  while (queue.length > 0) {
+    const [value, depth, parentLabel, processRoot] = queue.shift();
+    if (
+      value === null
+      || (typeof value !== "object" && typeof value !== "function")
+      || seen.has(value)
+    ) {
+      continue;
+    }
+    if (scanCount >= 32768) {
+      throw new Error("global reachability snapshot exceeded its object bound");
+    }
+    seen.add(value);
+    scanCount += 1;
+    let descriptors;
+    try {
+      descriptors = Object.getOwnPropertyDescriptors(value);
+    } catch {
+      rows.push(String(depth + 1) + "|" + parentLabel + "|<uninspectable>");
+      continue;
+    }
+    const nestedKeys = Reflect.ownKeys(descriptors)
+      .sort((left, right) => keyLabel(left).localeCompare(keyLabel(right)));
+    for (const nestedKey of nestedKeys) {
+      if (value === globalThis) {
+        if (nestedKey === sentinel) continue;
+        if (
+          typeof nestedKey === "string"
+          && skippedGlobalNames.has(nestedKey)
+        ) {
+          continue;
+        }
+      }
+      if (
+        processRoot
+        && typeof nestedKey === "string"
+        && skippedProcessNames.has(nestedKey)
+      ) {
+        continue;
+      }
+      const nestedLabel = parentLabel + ">" + keyLabel(nestedKey);
+      const nestedDescriptor = descriptors[nestedKey];
+      rows.push(
+        String(depth + 1)
+          + "|"
+          + nestedLabel
+          + "|"
+          + descriptorLabel(nestedDescriptor),
+      );
+      if (Object.hasOwn(nestedDescriptor, "value")) {
+        queue.push([
+          nestedDescriptor.value,
+          depth + 1,
+          nestedLabel,
+          processRoot,
+        ]);
+      }
+    }
+    let prototype;
+    try {
+      prototype = Object.getPrototypeOf(value);
+    } catch {
+      throw new Error("global reachability snapshot encountered an uninspectable prototype");
+    }
+    rows.push(
+      String(depth + 1)
+        + "|"
+        + parentLabel
+        + ">[[Prototype]]|"
+        + (
+          typeof prototype === "function"
+            ? functionLabel(prototype)
+            : typeof prototype
+        ),
+    );
+    queue.push([
+      prototype,
+      depth + 1,
+      parentLabel + ">[[Prototype]]",
+      processRoot,
+    ]);
+  }
+  rows.push("scan-count|" + scanCount);
+  return rows.sort();
+}
+`;
+
+const GLOBAL_REACHABILITY_IDENTITY_SOURCE = String.raw`
+function captureGlobalReachabilityIdentities() {
+  const sentinel = Symbol.for("platform.worker.socketless-guard-count");
+  const cryptoDescriptor =
+    Object.getOwnPropertyDescriptor(globalThis, "crypto");
+  if (!cryptoDescriptor || typeof cryptoDescriptor.get !== "function") {
+    throw new Error("global identity snapshot requires the crypto accessor");
+  }
+  const firstCryptoAccessorValue = Reflect.get(globalThis, "crypto");
+  const secondCryptoAccessorValue = Reflect.get(globalThis, "crypto");
+  if (
+    firstCryptoAccessorValue === null
+    || (
+      typeof firstCryptoAccessorValue !== "object"
+      && typeof firstCryptoAccessorValue !== "function"
+    )
+    || !Object.is(firstCryptoAccessorValue, secondCryptoAccessorValue)
+  ) {
+    throw new Error(
+      "global identity snapshot requires one stable crypto accessor value",
+    );
+  }
+  const queue = [globalThis, firstCryptoAccessorValue];
+  const seen = new WeakSet();
+  const owners = [];
+  let scanCount = 0;
+  while (queue.length > 0) {
+    const owner = queue.shift();
+    if (
+      owner === null
+      || (typeof owner !== "object" && typeof owner !== "function")
+      || seen.has(owner)
+    ) {
+      continue;
+    }
+    if (scanCount >= 32768) {
+      throw new Error("global identity snapshot exceeded its object bound");
+    }
+    seen.add(owner);
+    scanCount += 1;
+    let descriptors;
+    try {
+      descriptors = Object.getOwnPropertyDescriptors(owner);
+    } catch {
+      throw new Error("global identity snapshot encountered an uninspectable owner");
+    }
+    const keys = Reflect.ownKeys(descriptors)
+      .filter((key) => owner !== globalThis || key !== sentinel);
+    let prototype;
+    try {
+      prototype = Object.getPrototypeOf(owner);
+    } catch {
+      throw new Error("global identity snapshot encountered an uninspectable prototype");
+    }
+    owners.push({
+      descriptors: new Map(keys.map((key) => [key, descriptors[key]])),
+      keys,
+      owner,
+      prototype,
+    });
+    for (const key of keys) {
+      const descriptor = descriptors[key];
+      if (Object.hasOwn(descriptor, "value")) {
+        queue.push(descriptor.value);
+      }
+    }
+    queue.push(prototype);
+  }
+  return { owners, scanCount };
+}
+
+function assertGlobalReachabilityIdentitiesUnchanged(snapshot) {
+  for (const expected of snapshot.owners) {
+    let descriptors;
+    try {
+      descriptors = Object.getOwnPropertyDescriptors(expected.owner);
+    } catch {
+      throw new Error("global reachability identity owner became uninspectable");
+    }
+    let prototype;
+    try {
+      prototype = Object.getPrototypeOf(expected.owner);
+    } catch {
+      throw new Error("global reachability identity prototype became uninspectable");
+    }
+    if (prototype !== expected.prototype) {
+      throw new Error("global reachability identity prototype changed");
+    }
+    const currentKeys = Reflect.ownKeys(descriptors)
+      .filter((key) =>
+        expected.owner !== globalThis
+        || key !== Symbol.for("platform.worker.socketless-guard-count"));
+    if (
+      currentKeys.length !== expected.keys.length
+      || currentKeys.some((key) => !expected.keys.includes(key))
+    ) {
+      throw new Error("global reachability identity key set changed");
+    }
+    for (const key of expected.keys) {
+      const before = expected.descriptors.get(key);
+      const after = descriptors[key];
+      if (
+        !after
+        || before.configurable !== after.configurable
+        || before.enumerable !== after.enumerable
+        || (
+          Object.hasOwn(before, "value")
+          !== Object.hasOwn(after, "value")
+        )
+        || (
+          Object.hasOwn(before, "value")
+          && (
+            before.writable !== after.writable
+            || !Object.is(before.value, after.value)
+          )
+        )
+        || (
+          !Object.hasOwn(before, "value")
+          && (
+            before.get !== after.get
+            || before.set !== after.set
+          )
+        )
+      ) {
+        throw new Error(
+          "global reachability identity changed at "
+            + (typeof key === "symbol" ? String(key) : key),
+        );
+      }
+    }
+  }
+}
+`;
+
+let cachedPlainGlobalReachabilityShape;
+
+function plainGlobalReachabilityShape() {
+  if (cachedPlainGlobalReachabilityShape) {
+    return cachedPlainGlobalReachabilityShape;
+  }
+  const observed = spawnSync(
+    process.execPath,
+    [
+      "--input-type=module",
+      "--eval",
+      `${GLOBAL_REACHABILITY_SNAPSHOT_SOURCE}
+await import("node:child_process");
+const baselineModule = await import("node:module");
+baselineModule.registerHooks({
+  resolve(specifier, context, nextResolve) {
+    return nextResolve(specifier, context);
+  },
+});
+function baselineBlocked(label) {
+  return () => {
+    throw new Error("socketless runtime guard blocked " + label);
+  };
+}
+const BaselineOriginalFunction = globalThis.Function;
+const BaselineFunctionPrototype = BaselineOriginalFunction.prototype;
+const BaselineAsyncFunctionPrototype =
+  Object.getPrototypeOf(async function () {});
+const BaselineGeneratorFunctionPrototype =
+  Object.getPrototypeOf(function* () {});
+const BaselineAsyncGeneratorFunctionPrototype =
+  Object.getPrototypeOf(async function* () {});
+const baselineConstructorIntrinsics = [
+  ["Function", BaselineFunctionPrototype.constructor, BaselineFunctionPrototype],
+  [
+    "AsyncFunction",
+    BaselineAsyncFunctionPrototype.constructor,
+    BaselineAsyncFunctionPrototype,
+  ],
+  [
+    "GeneratorFunction",
+    BaselineGeneratorFunctionPrototype.constructor,
+    BaselineGeneratorFunctionPrototype,
+  ],
+  [
+    "AsyncGeneratorFunction",
+    BaselineAsyncGeneratorFunctionPrototype.constructor,
+    BaselineAsyncGeneratorFunctionPrototype,
+  ],
+];
+const baselineGuardedConstructors = new Map();
+for (const [name, intrinsic, prototype] of baselineConstructorIntrinsics) {
+  const guarded = new Proxy(intrinsic, {
+    apply: baselineBlocked(name),
+    construct: baselineBlocked(name),
+  });
+  Object.defineProperty(prototype, "constructor", {
+    configurable: true,
+    value: guarded,
+    writable: true,
+  });
+  baselineGuardedConstructors.set(name, guarded);
+}
+Object.defineProperty(globalThis, "Function", {
+  configurable: true,
+  value: baselineGuardedConstructors.get("Function"),
+  writable: true,
+});
+for (const name of ["eval", "fetch", "WebSocket", "EventSource"]) {
+  Object.defineProperty(globalThis, name, {
+    configurable: true,
+    value: baselineBlocked(name),
+    writable: true,
+  });
+}
+for (const name of [
+  "getBuiltinModule",
+  "binding",
+  "_linkedBinding",
+  "dlopen",
+  "execve",
+  "_getActiveHandles",
+  "_getActiveRequests",
+]) {
+  Object.defineProperty(process, name, {
+    configurable: true,
+    value: baselineBlocked("process." + name),
+    writable: true,
+  });
+}
+baselineModule.syncBuiltinESMExports();
+void globalThis.fetch;
+const baselineCrypto = await import("node:crypto");
+const baselineRows = globalReachabilityShape();
+process.stdout.write(JSON.stringify({
+  digest: baselineCrypto
+    .createHash("sha256")
+    .update(JSON.stringify(baselineRows))
+    .digest("hex"),
+  rowCount: baselineRows.length,
+}));`,
+    ],
+    {
+      encoding: "utf8",
+      env: {
+        HOME: os.tmpdir(),
+        LANG: "C.UTF-8",
+        NODE_ENV: "production",
+      },
+    },
+  );
+  assert.deepEqual(
+    {
+      signal: observed.signal,
+      status: observed.status,
+      stderr: observed.stderr,
+    },
+    {
+      signal: null,
+      status: 0,
+      stderr: "",
+    },
+    "plain Node global reachability baseline failed",
+  );
+  cachedPlainGlobalReachabilityShape = Object.freeze(
+    JSON.parse(observed.stdout),
+  );
+  return cachedPlainGlobalReachabilityShape;
+}
+
+function assertNoGlobalDeregistrationHandleSource() {
+  const baseline = JSON.stringify(plainGlobalReachabilityShape());
+  return `
+${GLOBAL_REACHABILITY_SNAPSHOT_SOURCE}
+if (typeof exactGlobalReachabilityIdentitySnapshot !== "undefined") {
+  assertGlobalReachabilityIdentitiesUnchanged(
+    exactGlobalReachabilityIdentitySnapshot,
+  );
+}
+const expectedGlobalReachabilityShape = ${baseline};
+const reachabilityCrypto = await import("node:crypto");
+const observedGlobalReachabilityRows = globalReachabilityShape();
+const observedGlobalReachabilityShape = {
+  digest: reachabilityCrypto
+    .createHash("sha256")
+    .update(JSON.stringify(observedGlobalReachabilityRows))
+    .digest("hex"),
+  rowCount: observedGlobalReachabilityRows.length,
+};
+if (
+  JSON.stringify(observedGlobalReachabilityShape)
+  !== JSON.stringify(expectedGlobalReachabilityShape)
+) {
+  throw new Error(
+    "global reachability shape changed outside the exact guard allowlist: expected="
+      + JSON.stringify(expectedGlobalReachabilityShape)
+      + " observed="
+      + JSON.stringify(observedGlobalReachabilityShape),
+  );
+}
+const handleCryptoDescriptor =
+  Object.getOwnPropertyDescriptor(globalThis, "crypto");
+if (!handleCryptoDescriptor || typeof handleCryptoDescriptor.get !== "function") {
+  throw new Error("global reachability handle scan requires the crypto accessor");
+}
+const firstHandleCryptoValue = Reflect.get(globalThis, "crypto");
+const secondHandleCryptoValue = Reflect.get(globalThis, "crypto");
+if (
+  firstHandleCryptoValue === null
+  || (
+    typeof firstHandleCryptoValue !== "object"
+    && typeof firstHandleCryptoValue !== "function"
+  )
+  || !Object.is(firstHandleCryptoValue, secondHandleCryptoValue)
+) {
+  throw new Error(
+    "global reachability handle scan requires one stable crypto accessor value",
+  );
+}
+const handleQueue = [[firstHandleCryptoValue, 0], ...Reflect.ownKeys(globalThis).flatMap((key) => {
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, key);
+  return descriptor && Object.hasOwn(descriptor, "value")
+    ? [[descriptor.value, 0]]
+    : [];
+})];
+const handleSeen = new WeakSet();
+let handleLeak = false;
+let handleScanCount = 0;
+const functionFingerprint = (value) => {
+  if (typeof value !== "function") return "";
+  try {
+    return String(value.name) + String.fromCharCode(10)
+      + Function.prototype.toString.call(value);
+  } catch {
+    return "";
+  }
+};
+while (handleQueue.length > 0 && handleScanCount < 32768) {
+  const [value, depth] = handleQueue.shift();
+  if (
+    value === null
+    || (typeof value !== "object" && typeof value !== "function")
+    || handleSeen.has(value)
+  ) {
+    continue;
+  }
+  handleSeen.add(value);
+  handleScanCount += 1;
+  if (/deregister/i.test(functionFingerprint(value))) {
+    handleLeak = true;
+    break;
+  }
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  const deregister = descriptors.deregister;
+  if (
+    deregister
+    && (
+      (Object.hasOwn(deregister, "value") && typeof deregister.value === "function")
+      || typeof deregister.get === "function"
+    )
+  ) {
+    handleLeak = true;
+    break;
+  }
+  if (
+    Object.values(descriptors).some((descriptor) =>
+      /deregister/i.test(functionFingerprint(descriptor.get))
+      || /deregister/i.test(functionFingerprint(descriptor.set)))
+  ) {
+    handleLeak = true;
+    break;
+  }
+  for (const descriptor of Object.values(descriptors)) {
+    if (Object.hasOwn(descriptor, "value")) {
+      handleQueue.push([descriptor.value, depth + 1]);
+    }
+  }
+  let prototype;
+  try {
+    prototype = Object.getPrototypeOf(value);
+  } catch {
+    throw new Error("global reachability handle scan encountered an uninspectable prototype");
+  }
+  handleQueue.push([prototype, depth + 1]);
+}
+if (handleLeak) throw new Error("resolution handle leaked through global reachability");
+if (handleQueue.length > 0) {
+  throw new Error("global reachability handle scan exceeded its object bound");
+}
+`;
+}
+
+function assertRuntimeGuardRejectsDirectNetworkImport(
+  runGuardedSource,
+  label = "runtime guard",
+) {
+  const rejected = runGuardedSource('await import("node:net");');
+  assert.notEqual(
+    rejected.status,
+    0,
+    `${label} admitted direct node:net module resolution`,
+  );
+  assert.match(
+    rejected.stderr,
+    /socketless runtime guard blocked module resolution: node:net/i,
+    `${label} rejected node:net outside its registered resolver boundary`,
+  );
+}
+
+function assertRuntimeGuardLexicalHandleDiscipline(source, label) {
+  assert.equal(
+    String(source),
+    socketlessRuntimeGuardSource(),
+    `${label} must match the exact canonical socketless runtime-guard source`,
+  );
+  assert.equal(
+    (String(source).match(/\bregisterHooks\s*\(/g) ?? []).length,
+    1,
+    `${label} must register exactly one resolution hook`,
+  );
+  assert.match(
+    source,
+    /\bconst\s+resolutionHookRegistration\s*=\s*registerHooks\s*\(\s*\{/,
+    `${label} must retain the one hook handle in the exact lexical binding`,
+  );
+  assert.equal(
+    (String(source).match(/\bresolutionHookRegistration\b/g) ?? []).length,
+    2,
+    `${label} may reference its lexical hook handle only for binding and validation`,
+  );
+  assert.doesNotMatch(
+    source,
+    /platform\.worker\.socketless-resolution-hook/,
+    `${label} exposes a deregistration handle through a global symbol`,
+  );
+}
+
+function runRuntimeGuardGlobalIdentityBoundary(guardPath, root) {
+  const guardUrl = pathToFileURL(guardPath).href;
+  return spawnSync(
+    process.execPath,
+    [
+      "--input-type=module",
+      "--eval",
+      `${GLOBAL_REACHABILITY_IDENTITY_SOURCE}
+await import("node:child_process");
+const observedModuleNamespace = await import("node:module");
+const observedModuleBuiltin = observedModuleNamespace.default;
+const originalObservedRegisterHooks = observedModuleBuiltin.registerHooks;
+let observedRegisterHooksCallCount = 0;
+observedModuleBuiltin.registerHooks = function (...args) {
+  observedRegisterHooksCallCount += 1;
+  return Reflect.apply(originalObservedRegisterHooks, observedModuleBuiltin, args);
+};
+observedModuleNamespace.syncBuiltinESMExports();
+const OriginalFunction = globalThis.Function;
+const allowedOwnersAndKeys = [
+  [globalThis, "Function"],
+  [globalThis, "eval"],
+  [globalThis, "fetch"],
+  [globalThis, "WebSocket"],
+  [globalThis, "EventSource"],
+  [OriginalFunction.prototype, "constructor"],
+  [Object.getPrototypeOf(async function () {}), "constructor"],
+  [Object.getPrototypeOf(function* () {}), "constructor"],
+  [Object.getPrototypeOf(async function* () {}), "constructor"],
+  [process, "getBuiltinModule"],
+  [process, "binding"],
+  [process, "_linkedBinding"],
+  [process, "dlopen"],
+  [process, "execve"],
+  [process, "_getActiveHandles"],
+  [process, "_getActiveRequests"],
+  [process, "stdin"],
+  [process, "stdout"],
+  [process, "stderr"],
+].map(([owner, key]) => ({
+  descriptor: Object.getOwnPropertyDescriptor(owner, key),
+  key,
+  owner,
+}));
+const exactGlobalReachabilityIdentitySnapshot =
+  captureGlobalReachabilityIdentities();
+await import(${JSON.stringify(guardUrl)});
+if (observedRegisterHooksCallCount !== 1) {
+  throw new Error(
+    "runtime guard registered "
+      + observedRegisterHooksCallCount
+      + " resolution hooks",
+  );
+}
+for (const { descriptor, key, owner } of allowedOwnersAndKeys) {
+  if (descriptor) {
+    Object.defineProperty(owner, key, descriptor);
+  } else {
+    delete owner[key];
+  }
+}
+delete globalThis[Symbol.for("platform.worker.socketless-guard-count")];
+assertGlobalReachabilityIdentitiesUnchanged(
+  exactGlobalReachabilityIdentitySnapshot,
+);
+process.stdout.write("identity-ok" + String.fromCharCode(10));`,
+    ],
+    {
+      encoding: "utf8",
+      env: {
+        HOME: root,
+        LANG: "C.UTF-8",
+        NODE_ENV: "production",
+      },
+    },
+  );
+}
 
 // Test-only deterministic key material. These bytes are not deployment secrets.
 const MANIFEST_TEST_KEY = Buffer.alloc(48, 0x4d);
 const ARTIFACT_TEST_KEY = Buffer.alloc(48, 0x41);
 const PRUNE_TEST_KEY = Buffer.alloc(48, 0x50);
+const PRUNE_PLAN_DIGEST_DOMAIN =
+  "platform.backup-prune-sealed-plan-digest/v1\0";
+const PRUNE_PLAN_MAC_DOMAIN =
+  "platform.backup-prune-sealed-plan-mac/v1\0";
 const BACKUP_JOB_ID = "0123456789abcdef";
 const BACKUP_JOB_CREATED_AT = "2026-07-28T11:59:00.000Z";
 const REQUEST_ID = "123e4567-e89b-42d3-a456-426614174000";
@@ -85,43 +801,23 @@ const EXPECTED_FIXED_ADAPTERS = Object.freeze({
     shell: false,
   }),
 });
-const EXPECTED_FIXED_ADAPTER_SOURCE_TEXT = Object.freeze({
-  "backup-catalog": `#!/usr/local/bin/node
-import { runFixedToolEntry } from "../docker-action-worker.mjs";
+function expectedFixedAdapterSource(command) {
+  return `#!/usr/local/bin/node
+import "../docker-action-worker-runtime-guard.mjs";
 
-await runFixedToolEntry("backup-catalog");
-`,
-  "backup-job": `#!/usr/local/bin/node
-import { runFixedToolEntry } from "../docker-action-worker.mjs";
+const { runFixedToolEntry } = await import("../docker-action-worker.mjs");
+await runFixedToolEntry(${JSON.stringify(command)});
+`;
+}
 
-await runFixedToolEntry("backup-job");
-`,
-  "backup-offsite-sync": `#!/usr/local/bin/node
-import { runFixedToolEntry } from "../docker-action-worker.mjs";
-
-await runFixedToolEntry("backup-offsite-sync");
-`,
-  "backup-prune-apply": `#!/usr/local/bin/node
-import { runFixedToolEntry } from "../docker-action-worker.mjs";
-
-await runFixedToolEntry("backup-prune-apply");
-`,
-  "backup-prune-plan": `#!/usr/local/bin/node
-import { runFixedToolEntry } from "../docker-action-worker.mjs";
-
-await runFixedToolEntry("backup-prune-plan");
-`,
-  "restore-drill-full": `#!/usr/local/bin/node
-import { runFixedToolEntry } from "../docker-action-worker.mjs";
-
-await runFixedToolEntry("restore-drill-full");
-`,
-  "restore-job": `#!/usr/local/bin/node
-import { runFixedToolEntry } from "../docker-action-worker.mjs";
-
-await runFixedToolEntry("restore-job");
-`,
-});
+const EXPECTED_FIXED_ADAPTER_SOURCE_TEXT = Object.freeze(
+  Object.fromEntries(
+    Object.keys(EXPECTED_FIXED_ADAPTERS).map((command) => [
+      command,
+      expectedFixedAdapterSource(command),
+    ]),
+  ),
+);
 const ALLOWED_WORKER_BUILTINS = new Set([
   "node:buffer",
   "node:child_process",
@@ -1208,6 +1904,1044 @@ bodyMatrixTest("workerCreateBody bounds AUTHORITY_BASE64 and keeps the largest a
   assert.deepEqual(nearLimitBody.Env, nearLimitEntries);
 });
 
+test("RED v2: the real broker-created worker body binds the production runtime guard", () => {
+  const phaseCase = phaseActionCases(WORKER_TRUSTED_CONTEXT)
+    .find(({ phaseId }) => phaseId === "prune.plan");
+  assert.ok(phaseCase, "runtime-guard consumer RED lacks the prune.plan fixture");
+  let legacyFallbackUsed = false;
+  let body;
+  try {
+    body = workerBodyForCase(phaseCase, WORKER_TRUSTED_CONTEXT);
+  } catch (error) {
+    assert.match(error?.message ?? "", /worker policy mismatch/i);
+    legacyFallbackUsed = true;
+    body = broker.workerCreateBody({
+      action: "backup.prune.plan",
+      command: "backup-prune-plan",
+      hostPath: "/srv/platform/backups",
+      imageRef: "sha256:".concat("1".repeat(64)),
+      intentId: "intent-runtime-guard-red",
+      mountAttestation: {
+        access: "ro",
+        containerPath: "/data/backups",
+        device: "1",
+        hostPath: "/srv/platform/backups",
+        inode: "2",
+        kind: "directory",
+        mode: "0700",
+        ownerGid: 0,
+        ownerUid: 0,
+        symlinkFree: true,
+      },
+      receiptDigest: "2".repeat(64),
+    });
+  }
+  assert.deepEqual(body.Entrypoint, EXPECTED_WORKER_ENTRYPOINT);
+  assert.equal(
+    legacyFallbackUsed,
+    false,
+    "runtime-guard body passed only through the obsolete worker policy surface",
+  );
+  assert.equal(
+    body.Env.some((entry) => String(entry).startsWith("NODE_OPTIONS=")),
+    false,
+    "worker body may bind its guard only through the immutable Entrypoint",
+  );
+});
+
+test("Dockerfile staging oracle excludes artifacts copied only by an unused build stage", (t) => {
+  const repositoryRoot = fs.mkdtempSync(
+    path.join(os.tmpdir(), "docker-worker-final-stage-oracle-"),
+  );
+  t.after(() => fs.rmSync(repositoryRoot, { force: true, recursive: true }));
+  const scriptsDirectory = path.join(repositoryRoot, "scripts");
+  fs.mkdirSync(scriptsDirectory, { mode: 0o700 });
+  fs.writeFileSync(
+    path.join(scriptsDirectory, "decoy-guard.mjs"),
+    "throw new Error('unused stage');\n",
+    { mode: 0o600 },
+  );
+  fs.writeFileSync(
+    path.join(scriptsDirectory, "docker-action-worker.mjs"),
+    "process.stdout.write('final stage');\n",
+    { mode: 0o600 },
+  );
+  const dockerfile = path.join(repositoryRoot, "Dockerfile");
+  fs.writeFileSync(
+    dockerfile,
+    [
+      "FROM node:fixture AS unused",
+      `COPY scripts/decoy-guard.mjs ${WORKER_RUNTIME_GUARD_CONTAINER_PATH}`,
+      "FROM node:fixture AS final",
+      `COPY scripts/docker-action-worker.mjs ${WORKER_CONTAINER_PATH}`,
+      "",
+    ].join("\n"),
+    { mode: 0o600 },
+  );
+  const staged = stageDockerWorkerImageLayout(
+    t,
+    "docker-worker-final-stage-oracle-stage-",
+    { dockerfile, repositoryRoot },
+  );
+  assert.equal(
+    fs.existsSync(path.join(
+      staged.root,
+      WORKER_RUNTIME_GUARD_CONTAINER_PATH.replace(/^\/+/, ""),
+    )),
+    false,
+    "staging oracle merged an unused Docker build stage into the final image",
+  );
+});
+
+test("runtime-guard package oracle rejects every final-stage mutation of its immutable execution boundary", () => {
+  const exactCopy =
+    `COPY --chown=0:0 --chmod=0555 scripts/docker-action-worker-runtime-guard.mjs ${WORKER_RUNTIME_GUARD_CONTAINER_PATH}`;
+  const entrypoint =
+    `ENTRYPOINT ${JSON.stringify(EXPECTED_BROKER_IMAGE_ENTRYPOINT)}`;
+  const control = ["FROM node:fixture", exactCopy, entrypoint, ""].join("\n");
+  assert.doesNotThrow(() => assertFixtureFinalRuntimeGuardLayer(control));
+  const canonicalProductionDockerfile = [
+    `# syntax=${EXPECTED_DOCKERFILE_FRONTEND_REFERENCE}`,
+    ...canonicalProductionDockerfileInstructions(),
+    "",
+  ].join("\n");
+  assert.doesNotThrow(
+    () => assertFinalRuntimeGuardLayer(canonicalProductionDockerfile),
+    "canonical production image manifest rejected its own exact instruction set",
+  );
+  for (const [label, instruction] of [
+    [
+      "non-root chown",
+      `RUN chown 1000:1000 ${WORKER_RUNTIME_GUARD_CONTAINER_PATH}`,
+    ],
+    [
+      "writable chmod",
+      `RUN chmod 0777 ${WORKER_RUNTIME_GUARD_CONTAINER_PATH}`,
+    ],
+    [
+      "replacement COPY",
+      `COPY scripts/decoy.mjs ${WORKER_RUNTIME_GUARD_CONTAINER_PATH}`,
+    ],
+    [
+      "replacement ADD",
+      `ADD scripts/decoy.mjs ${WORKER_RUNTIME_GUARD_CONTAINER_PATH}`,
+    ],
+    [
+      "runtime-obscuring VOLUME",
+      "VOLUME /opt/platform-docker-worker",
+    ],
+    [
+      "post-copy WORKDIR",
+      "WORKDIR /opt/platform-docker-worker",
+    ],
+    [
+      "deferred ONBUILD mutation",
+      "ONBUILD RUN node /tmp/preload.mjs",
+    ],
+    [
+      "NODE_OPTIONS preload",
+      "ENV NODE_OPTIONS=--import=/tmp/preload.mjs",
+    ],
+    [
+      "replacement entrypoint",
+      'ENTRYPOINT ["node","/tmp/preload.mjs"]',
+    ],
+    [
+      "worker entrypoint as the image default",
+      `ENTRYPOINT ${JSON.stringify(EXPECTED_WORKER_ENTRYPOINT)}`,
+    ],
+    [
+      "inherited command",
+      'CMD ["node","/tmp/preload.mjs"]',
+    ],
+    [
+      "executable healthcheck",
+      "HEALTHCHECK CMD node /tmp/preload.mjs",
+    ],
+  ]) {
+    assert.throws(
+      () => assertFixtureFinalRuntimeGuardLayer(
+        control.replace(entrypoint, `${instruction}\n${entrypoint}`),
+      ),
+      /canonical immutable image manifest/i,
+      `runtime-guard package oracle admitted ${label}`,
+    );
+  }
+  for (const [label, instruction] of [
+    [
+      "relocated NODE_OPTIONS preload",
+      "ENV NODE_OPTIONS=--import=/tmp/preload.mjs",
+    ],
+    [
+      "relocated deferred ONBUILD mutation",
+      "ONBUILD RUN node /tmp/preload.mjs",
+    ],
+    [
+      "relocated replacement entrypoint",
+      'ENTRYPOINT ["node","/tmp/preload.mjs"]',
+    ],
+    [
+      "relocated inherited command",
+      'CMD ["node","/tmp/preload.mjs"]',
+    ],
+    [
+      "relocated executable healthcheck",
+      "HEALTHCHECK CMD node /tmp/preload.mjs",
+    ],
+  ]) {
+    assert.throws(
+      () => assertFixtureFinalRuntimeGuardLayer(
+        control.replace(exactCopy, `${instruction}\n${exactCopy}`),
+      ),
+      /canonical immutable image manifest/i,
+      `runtime-guard package oracle admitted ${label} before its guard COPY`,
+    );
+  }
+  for (const [label, instruction] of [
+    [
+      "pre-guard Node interpreter replacement",
+      "COPY scripts/evil-node /usr/local/bin/node",
+    ],
+    [
+      "pre-guard Node wrapper installation",
+      "RUN mv /usr/local/bin/node /usr/local/bin/node-real && install /tmp/evil-node /usr/local/bin/node",
+    ],
+    [
+      "duplicate admitted-looking worker COPY",
+      `COPY scripts/docker-action-worker.mjs ${WORKER_CONTAINER_PATH}`,
+    ],
+  ]) {
+    assert.throws(
+      () => assertFixtureFinalRuntimeGuardLayer(
+        control.replace(exactCopy, `${instruction}\n${exactCopy}`),
+      ),
+      /canonical immutable image manifest/i,
+      `runtime-guard package oracle admitted ${label}`,
+    );
+  }
+  const heredocStageSpoof = [
+    "FROM node:fixture",
+    "ENV NODE_OPTIONS=--import=/tmp/preload.mjs",
+    "COPY <<EOF /tmp/decoy",
+    "FROM decoy",
+    "EOF",
+    exactCopy,
+    entrypoint,
+    "",
+  ].join("\n");
+  assert.throws(
+    () => assertFixtureFinalRuntimeGuardLayer(heredocStageSpoof),
+    /heredoc syntax is forbidden/i,
+    "runtime-guard package oracle admitted a heredoc stage-boundary spoof",
+  );
+  const parserEscapeSpoof = [
+    "# escape=`",
+    "FROM node:fixture",
+    "ARG SWALLOW=ignored`",
+    exactCopy,
+    entrypoint,
+    "",
+  ].join("\n");
+  assert.throws(
+    () => assertFixtureFinalRuntimeGuardLayer(parserEscapeSpoof),
+    /parser directive/i,
+    "runtime-guard package oracle admitted a parser-escape stage spoof",
+  );
+  const buildArgumentBaseImageSpoof = [
+    `ARG NODE_IMAGE=${EXPECTED_NODE_IMAGE_REFERENCE}`,
+    "FROM ${NODE_IMAGE}",
+    exactCopy,
+    entrypoint,
+    "",
+  ].join("\n");
+  assert.throws(
+    () => assertFixtureFinalRuntimeGuardLayer(buildArgumentBaseImageSpoof),
+    /canonical immutable image manifest/i,
+    "runtime-guard package oracle admitted an overrideable base-image build argument",
+  );
+  for (const [label, mutated, pattern] of [
+    [
+      "missing pinned frontend",
+      canonicalProductionDockerfile
+        .replace(`# syntax=${EXPECTED_DOCKERFILE_FRONTEND_REFERENCE}\n`, ""),
+      /first physical line|exact digest-pinned/i,
+    ],
+    [
+      "altered frontend digest",
+      canonicalProductionDockerfile.replace(
+        EXPECTED_DOCKERFILE_FRONTEND_REFERENCE,
+        EXPECTED_DOCKERFILE_FRONTEND_REFERENCE.replace(/.$/, "0"),
+      ),
+      /parser directive|exact digest-pinned/i,
+    ],
+    [
+      "unpinned frontend tag",
+      canonicalProductionDockerfile.replace(
+        EXPECTED_DOCKERFILE_FRONTEND_REFERENCE,
+        "docker/dockerfile:1.7",
+      ),
+      /parser directive|exact digest-pinned/i,
+    ],
+    [
+      "misplaced frontend directive",
+      canonicalProductionDockerfile.replace(
+        `# syntax=${EXPECTED_DOCKERFILE_FRONTEND_REFERENCE}\n`,
+        `\n# syntax=${EXPECTED_DOCKERFILE_FRONTEND_REFERENCE}\n`,
+      ),
+      /first physical line/i,
+    ],
+    [
+      "duplicate frontend directive",
+      canonicalProductionDockerfile.replace(
+        `# syntax=${EXPECTED_DOCKERFILE_FRONTEND_REFERENCE}\n`,
+        `# syntax=${EXPECTED_DOCKERFILE_FRONTEND_REFERENCE}\n# syntax=${EXPECTED_DOCKERFILE_FRONTEND_REFERENCE}\n`,
+      ),
+      /exactly one Dockerfile frontend/i,
+    ],
+    [
+      "dangling continuation",
+      `${canonicalProductionDockerfile.trimEnd()} \\\n`,
+      /ended inside a continued instruction/i,
+    ],
+    [
+      "continuation trailing whitespace",
+      canonicalProductionDockerfile.replace(
+        "WORKDIR /opt/platform-docker-broker",
+        "WORKDIR /opt/platform-docker-broker\\ ",
+      ),
+      /continuation escape must be the final physical byte/i,
+    ],
+  ]) {
+    assert.throws(
+      () => assertFinalRuntimeGuardLayer(mutated),
+      pattern,
+      `production image oracle admitted ${label}`,
+    );
+  }
+});
+
+test("global reachability oracle rejects renamed callable, accessor and nested deregistration capabilities", () => {
+  const setup = `
+import childProcess from "node:child_process";
+import moduleBuiltin, { syncBuiltinESMExports } from "node:module";
+const registration = moduleBuiltin.registerHooks({
+  resolve(specifier, context, nextResolve) {
+    if (specifier === "node:net") {
+      throw new Error("self-mutant resolver blocked node:net");
+    }
+    return nextResolve(specifier, context);
+  },
+});
+function blocked(label) {
+  return () => {
+    throw new Error("socketless runtime guard blocked " + label);
+  };
+}
+const OriginalFunction = globalThis.Function;
+const FunctionPrototype = OriginalFunction.prototype;
+const AsyncFunctionPrototype = Object.getPrototypeOf(async function () {});
+const GeneratorFunctionPrototype = Object.getPrototypeOf(function* () {});
+const AsyncGeneratorFunctionPrototype =
+  Object.getPrototypeOf(async function* () {});
+const constructorIntrinsics = [
+  ["Function", FunctionPrototype.constructor, FunctionPrototype],
+  [
+    "AsyncFunction",
+    AsyncFunctionPrototype.constructor,
+    AsyncFunctionPrototype,
+  ],
+  [
+    "GeneratorFunction",
+    GeneratorFunctionPrototype.constructor,
+    GeneratorFunctionPrototype,
+  ],
+  [
+    "AsyncGeneratorFunction",
+    AsyncGeneratorFunctionPrototype.constructor,
+    AsyncGeneratorFunctionPrototype,
+  ],
+];
+const guardedConstructors = new Map();
+for (const [name, intrinsic, prototype] of constructorIntrinsics) {
+  const guarded = new Proxy(intrinsic, {
+    apply: blocked(name),
+    construct: blocked(name),
+  });
+  Object.defineProperty(prototype, "constructor", {
+    configurable: true,
+    value: guarded,
+    writable: true,
+  });
+  guardedConstructors.set(name, guarded);
+}
+Object.defineProperty(globalThis, "Function", {
+  configurable: true,
+  value: guardedConstructors.get("Function"),
+  writable: true,
+});
+for (const name of ["eval", "fetch", "WebSocket", "EventSource"]) {
+  Object.defineProperty(globalThis, name, {
+    configurable: true,
+    value: blocked(name),
+    writable: true,
+  });
+}
+for (const name of ["getBuiltinModule", "binding", "_linkedBinding", "dlopen"]) {
+  Object.defineProperty(process, name, {
+    configurable: true,
+    value: blocked("process." + name),
+    writable: true,
+  });
+}
+void childProcess;
+syncBuiltinESMExports();
+`;
+  const oracle = assertNoGlobalDeregistrationHandleSource();
+  const identityBaseline = `
+${GLOBAL_REACHABILITY_IDENTITY_SOURCE}
+const exactGlobalReachabilityIdentitySnapshot =
+  captureGlobalReachabilityIdentities();
+`;
+  const run = (source) => spawnSync(
+    process.execPath,
+    ["--input-type=module", "--eval", source],
+    {
+      encoding: "utf8",
+      env: {
+        HOME: os.tmpdir(),
+        LANG: "C.UTF-8",
+        NODE_ENV: "production",
+      },
+    },
+  );
+  const positive = run(`${setup}
+${identityBaseline}
+${oracle}
+process.stdout.write("oracle-ok" + String.fromCharCode(10));`);
+  assert.deepEqual(
+    {
+      signal: positive.signal,
+      status: positive.status,
+      stderr: positive.stderr,
+      stdout: positive.stdout,
+    },
+    {
+      signal: null,
+      status: 0,
+      stderr: "",
+      stdout: "oracle-ok\n",
+    },
+    "global reachability oracle rejected its exact lexical-handle control",
+  );
+
+  for (const [label, expose, deregister] of [
+    [
+      "renamed bound callable",
+      'const leakedKey = Symbol("renamed-callable"); globalThis[leakedKey] = registration.deregister.bind(registration);',
+      "globalThis[leakedKey]();",
+    ],
+    [
+      "renamed accessor",
+      'const leakedKey = Symbol("renamed-accessor"); Object.defineProperty(globalThis, leakedKey, { configurable: true, get() { return registration; } });',
+      "globalThis[leakedKey].deregister();",
+    ],
+    [
+      "two nested wrappers",
+      'const leakedKey = Symbol("renamed-nested"); globalThis[leakedKey] = { first: { second: registration } };',
+      "globalThis[leakedKey].first.second.deregister();",
+    ],
+    [
+      "existing configurable accessor",
+      'const leakedKey = "crypto"; const originalDescriptor = Object.getOwnPropertyDescriptor(globalThis, leakedKey); if (!originalDescriptor?.configurable || typeof originalDescriptor.get !== "function") throw new Error("missing accessor control"); Object.defineProperty(globalThis, leakedKey, { configurable: originalDescriptor.configurable, enumerable: originalDescriptor.enumerable, get() { return registration; }, set: originalDescriptor.set });',
+      "globalThis[leakedKey].deregister();",
+    ],
+    [
+      "existing data-function slot",
+      'const leakedKey = "fetch"; const originalDescriptor = Object.getOwnPropertyDescriptor(globalThis, leakedKey); const leakedCallable = registration.deregister.bind(registration); Object.defineProperty(leakedCallable, "name", { configurable: true, value: "run" }); Object.defineProperty(globalThis, leakedKey, { configurable: originalDescriptor.configurable, enumerable: originalDescriptor.enumerable, value: leakedCallable, writable: originalDescriptor.writable });',
+      "globalThis[leakedKey]();",
+    ],
+    [
+      "existing nested data-function slot",
+      'const leakedOwner = globalThis.console.Console.prototype; const leakedKey = "log"; const originalDescriptor = Object.getOwnPropertyDescriptor(leakedOwner, leakedKey); if (!originalDescriptor || typeof originalDescriptor.value !== "function") throw new Error("missing nested function control"); const leakedCallable = registration.deregister.bind(registration); Object.defineProperty(leakedCallable, "name", { configurable: true, value: "log" }); Object.defineProperty(leakedOwner, leakedKey, { configurable: originalDescriptor.configurable, enumerable: originalDescriptor.enumerable, value: leakedCallable, writable: originalDescriptor.writable });',
+      "globalThis.console.Console.prototype.log();",
+    ],
+    [
+      "existing opaque bound-function slot",
+      'const leakedOwner = globalThis.console; const leakedKey = "log"; const originalDescriptor = Object.getOwnPropertyDescriptor(leakedOwner, leakedKey); if (!originalDescriptor || typeof originalDescriptor.value !== "function") throw new Error("missing opaque function control"); const leakedCallable = registration.deregister.bind(registration); Object.defineProperty(leakedCallable, "name", { configurable: true, value: "log" }); Object.defineProperty(leakedOwner, leakedKey, { configurable: originalDescriptor.configurable, enumerable: originalDescriptor.enumerable, value: leakedCallable, writable: originalDescriptor.writable });',
+      "globalThis.console.log();",
+    ],
+  ]) {
+    const vulnerabilityControl = run(`${setup}
+${expose}
+${deregister}
+await import("node:net");
+process.stdout.write("bypass-ok" + String.fromCharCode(10));`);
+    assert.deepEqual(
+      {
+        signal: vulnerabilityControl.signal,
+        status: vulnerabilityControl.status,
+        stderr: vulnerabilityControl.stderr,
+        stdout: vulnerabilityControl.stdout,
+      },
+      {
+        signal: null,
+        status: 0,
+        stderr: "",
+        stdout: "bypass-ok\n",
+      },
+      `${label} is not a real resolver deregistration capability`,
+    );
+    const rejected = run(`${setup}
+${identityBaseline}
+${expose}
+${oracle}
+${deregister}
+await import("node:net");`);
+    assert.notEqual(rejected.status, 0, `${label} escaped the global oracle`);
+    assert.match(
+      rejected.stderr,
+      /global reachability (?:shape|identity).*changed|resolution handle leaked through global reachability/i,
+      `${label} failed outside the global reachability oracle`,
+    );
+  }
+
+  const capExpose = `
+const originalConsole = globalThis.console;
+const expandedConsoleEntries = Object.create(null);
+for (let index = 0; index < 40000; index += 1) {
+  expandedConsoleEntries["k" + index] =
+    index === 39999 ? registration : Object.create(null);
+}
+let consoleOwnKeysCalls = 0;
+globalThis.console = new Proxy(originalConsole, {
+  get(target, key, receiver) {
+    if (Object.hasOwn(expandedConsoleEntries, key)) {
+      return expandedConsoleEntries[key];
+    }
+    return Reflect.get(target, key, receiver);
+  },
+  getOwnPropertyDescriptor(target, key) {
+    if (Object.hasOwn(expandedConsoleEntries, key)) {
+      return {
+        configurable: true,
+        enumerable: true,
+        value: expandedConsoleEntries[key],
+        writable: true,
+      };
+    }
+    return Reflect.getOwnPropertyDescriptor(target, key);
+  },
+  ownKeys(target) {
+    consoleOwnKeysCalls += 1;
+    return consoleOwnKeysCalls === 1
+      ? Reflect.ownKeys(target)
+      : [...Reflect.ownKeys(target), ...Object.keys(expandedConsoleEntries)];
+  },
+});
+`;
+  const capVulnerabilityControl = run(`${setup}
+${capExpose}
+globalThis.console.k39999.deregister();
+await import("node:net");
+process.stdout.write("cap-bypass-ok" + String.fromCharCode(10));`);
+  assert.deepEqual(
+    {
+      signal: capVulnerabilityControl.signal,
+      status: capVulnerabilityControl.status,
+      stderr: capVulnerabilityControl.stderr,
+      stdout: capVulnerabilityControl.stdout,
+    },
+    {
+      signal: null,
+      status: 0,
+      stderr: "",
+      stdout: "cap-bypass-ok\n",
+    },
+    "stateful cap mutant is not a real resolver deregistration capability",
+  );
+  const capRejected = run(`${setup}
+${capExpose}
+${oracle}`);
+  assert.notEqual(capRejected.status, 0, "stateful cap mutant escaped the oracle");
+  assert.match(
+    capRejected.stderr,
+    /global reachability handle scan exceeded its object bound/i,
+    "stateful cap mutant failed outside the fail-closed object bound",
+  );
+
+  const deepExpose = `
+const originalConsole = globalThis.console;
+let deepRegistration = registration;
+for (let depth = 0; depth < 12; depth += 1) {
+  deepRegistration = { next: deepRegistration };
+}
+let consoleOwnKeysCalls = 0;
+globalThis.console = new Proxy(originalConsole, {
+  get(target, key, receiver) {
+    if (key === "hidden") return deepRegistration;
+    return Reflect.get(target, key, receiver);
+  },
+  getOwnPropertyDescriptor(target, key) {
+    if (key === "hidden") {
+      return {
+        configurable: true,
+        enumerable: true,
+        value: deepRegistration,
+        writable: true,
+      };
+    }
+    return Reflect.getOwnPropertyDescriptor(target, key);
+  },
+  ownKeys(target) {
+    consoleOwnKeysCalls += 1;
+    return consoleOwnKeysCalls === 1
+      ? Reflect.ownKeys(target)
+      : [...Reflect.ownKeys(target), "hidden"];
+  },
+});
+`;
+  const deepVulnerabilityControl = run(`${setup}
+${deepExpose}
+let leakedRegistration = globalThis.console.hidden;
+for (let depth = 0; depth < 12; depth += 1) {
+  leakedRegistration = leakedRegistration.next;
+}
+leakedRegistration.deregister();
+await import("node:net");
+process.stdout.write("deep-bypass-ok" + String.fromCharCode(10));`);
+  assert.deepEqual(
+    {
+      signal: deepVulnerabilityControl.signal,
+      status: deepVulnerabilityControl.status,
+      stderr: deepVulnerabilityControl.stderr,
+      stdout: deepVulnerabilityControl.stdout,
+    },
+    {
+      signal: null,
+      status: 0,
+      stderr: "",
+      stdout: "deep-bypass-ok\n",
+    },
+    "stateful deep mutant is not a real resolver deregistration capability",
+  );
+  const deepRejected = run(`${setup}
+${deepExpose}
+${oracle}`);
+  assert.notEqual(deepRejected.status, 0, "stateful deep mutant escaped the oracle");
+  assert.match(
+    deepRejected.stderr,
+    /resolution handle leaked through global reachability/i,
+    "stateful deep mutant failed outside the unbounded reachability walk",
+  );
+});
+
+test("runtime-guard resolver oracle kills a registered no-op hook", (t) => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "docker-worker-noop-resolver-mutant-"),
+  );
+  t.after(() => fs.rmSync(root, { force: true, recursive: true }));
+  const guardPath = path.join(root, "runtime-guard-noop-mutant.mjs");
+  const exactResolveHeader =
+    "  resolve(specifier, context, nextResolve) {\n";
+  const source = socketlessRuntimeGuardSource();
+  assertRuntimeGuardLexicalHandleDiscipline(
+    source,
+    "test-local runtime guard control",
+  );
+  const mutant = source.replace(
+    exactResolveHeader,
+    `${exactResolveHeader}    return nextResolve(specifier, context);\n`,
+  );
+  assert.notEqual(mutant, source, "no-op resolver mutant was not activated");
+  fs.writeFileSync(guardPath, mutant, { mode: 0o600 });
+  const runMutant = (snippet) => spawnSync(
+    process.execPath,
+    [
+      "--import",
+      pathToFileURL(guardPath).href,
+      "--input-type=module",
+      "--eval",
+      snippet,
+    ],
+    {
+      encoding: "utf8",
+      env: {
+        HOME: root,
+        LANG: "C.UTF-8",
+        NODE_ENV: "production",
+      },
+    },
+  );
+  const vulnerabilityControl = runMutant(
+    'await import("node:net"); process.stdout.write("noop-bypass\\n");',
+  );
+  assert.deepEqual(
+    {
+      signal: vulnerabilityControl.signal,
+      status: vulnerabilityControl.status,
+      stderr: vulnerabilityControl.stderr,
+      stdout: vulnerabilityControl.stdout,
+    },
+    {
+      signal: null,
+      status: 0,
+      stderr: "",
+      stdout: "noop-bypass\n",
+    },
+    "registered no-op hook is not a live direct-import bypass",
+  );
+  assert.throws(
+    () => assertRuntimeGuardRejectsDirectNetworkImport(
+      runMutant,
+      "registered no-op hook mutant",
+    ),
+    /admitted direct node:net module resolution/i,
+    "direct-import behavior oracle did not kill the no-op resolver mutant",
+  );
+
+  const exactHandleValidation =
+    'if (typeof resolutionHookRegistration?.deregister !== "function") {';
+  const leakMutant = source.replace(
+    exactHandleValidation,
+    `const leakedConsoleDeregister =
+  resolutionHookRegistration.deregister.bind(resolutionHookRegistration);
+Object.defineProperty(leakedConsoleDeregister, "name", {
+  configurable: true,
+  value: "log",
+});
+globalThis.console.log = leakedConsoleDeregister;
+${exactHandleValidation}`,
+  );
+  assert.notEqual(leakMutant, source, "lexical-handle leak mutant was not activated");
+  assert.throws(
+    () => assertRuntimeGuardLexicalHandleDiscipline(
+      leakMutant,
+      "lexical-handle leak mutant",
+    ),
+    /exact canonical socketless runtime-guard source/i,
+    "lexical source oracle admitted an opaque bound-handle leak",
+  );
+  const leakPath = path.join(root, "runtime-guard-handle-leak-mutant.mjs");
+  fs.writeFileSync(leakPath, leakMutant, { mode: 0o600 });
+  const leakedGuard = (snippet) => spawnSync(
+    process.execPath,
+    [
+      "--import",
+      pathToFileURL(leakPath).href,
+      "--input-type=module",
+      "--eval",
+      snippet,
+    ],
+    {
+      encoding: "utf8",
+      env: {
+        HOME: root,
+        LANG: "C.UTF-8",
+        NODE_ENV: "production",
+      },
+    },
+  );
+  const leakVulnerabilityControl = leakedGuard(
+    'globalThis.console.log(); await import("node:net"); process.stdout.write("leak-bypass\\n");',
+  );
+  assert.deepEqual(
+    {
+      signal: leakVulnerabilityControl.signal,
+      status: leakVulnerabilityControl.status,
+      stderr: leakVulnerabilityControl.stderr,
+      stdout: leakVulnerabilityControl.stdout,
+    },
+    {
+      signal: null,
+      status: 0,
+      stderr: "",
+      stdout: "leak-bypass\n",
+    },
+    "opaque bound-handle leak mutant is not a real resolver bypass",
+  );
+  const identityRejected = runRuntimeGuardGlobalIdentityBoundary(
+    leakPath,
+    root,
+  );
+  assert.notEqual(
+    identityRejected.status,
+    0,
+    "same-process identity boundary admitted the opaque bound-handle leak",
+  );
+  assert.match(
+    identityRejected.stderr,
+    /global reachability identity changed at log/i,
+    "opaque bound-handle leak failed outside the same-process identity boundary",
+  );
+
+  const exactRegisterHooksBlock =
+    'moduleBuiltin.registerHooks = blocked("module.registerHooks");';
+  const computedSecondRegistrationMutant = source.replace(
+    exactRegisterHooksBlock,
+    `void moduleBuiltin[["register", "Hooks"].join("")].call(moduleBuiltin, {
+  resolve(specifier, context, nextResolve) {
+    return nextResolve(specifier, context);
+  },
+});
+${exactRegisterHooksBlock}`,
+  );
+  assert.notEqual(
+    computedSecondRegistrationMutant,
+    source,
+    "computed second-registerHooks mutant was not activated",
+  );
+  assert.throws(
+    () => assertRuntimeGuardLexicalHandleDiscipline(
+      computedSecondRegistrationMutant,
+      "computed second-registerHooks mutant",
+    ),
+    /exact canonical socketless runtime-guard source/i,
+    "canonical source oracle admitted a computed second hook registration",
+  );
+  const computedSecondRegistrationPath = path.join(
+    root,
+    "runtime-guard-computed-second-registration-mutant.mjs",
+  );
+  fs.writeFileSync(
+    computedSecondRegistrationPath,
+    computedSecondRegistrationMutant,
+    { mode: 0o600 },
+  );
+  const computedSecondRegistrationRejected =
+    runRuntimeGuardGlobalIdentityBoundary(
+      computedSecondRegistrationPath,
+      root,
+    );
+  assert.notEqual(
+    computedSecondRegistrationRejected.status,
+    0,
+    "dynamic hook-count boundary admitted a computed second registration",
+  );
+  assert.match(
+    computedSecondRegistrationRejected.stderr,
+    /runtime guard registered 2 resolution hooks/i,
+    "computed second registration failed outside the real registerHooks boundary",
+  );
+
+  const exactRegisterHooksBinding =
+    "const registerHooks = moduleBuiltin.registerHooks?.bind(moduleBuiltin);";
+  const cryptoAccessorLeakMutant = source.replace(
+    exactRegisterHooksBinding,
+    `const registerHooks = (...args) => {
+  const registration =
+    moduleBuiltin[["register", "Hooks"].join("")].apply(moduleBuiltin, args);
+  globalThis.crypto[
+    Symbol.for(["worker", "resolution", "handle"].join("."))
+  ] = registration;
+  return registration;
+};`,
+  );
+  assert.notEqual(
+    cryptoAccessorLeakMutant,
+    source,
+    "crypto-accessor handle-leak mutant was not activated",
+  );
+  assert.throws(
+    () => assertRuntimeGuardLexicalHandleDiscipline(
+      cryptoAccessorLeakMutant,
+      "crypto-accessor handle-leak mutant",
+    ),
+    /exact canonical socketless runtime-guard source/i,
+    "canonical source oracle admitted a crypto-accessor handle leak",
+  );
+  const cryptoAccessorLeakPath = path.join(
+    root,
+    "runtime-guard-crypto-accessor-leak-mutant.mjs",
+  );
+  fs.writeFileSync(cryptoAccessorLeakPath, cryptoAccessorLeakMutant, {
+    mode: 0o600,
+  });
+  const cryptoAccessorLeakControl = spawnSync(
+    process.execPath,
+    [
+      "--import",
+      pathToFileURL(cryptoAccessorLeakPath).href,
+      "--input-type=module",
+      "--eval",
+      `globalThis.crypto[
+  Symbol.for(["worker", "resolution", "handle"].join("."))
+].deregister();
+await import("node:net");
+process.stdout.write("crypto-accessor-bypass" + String.fromCharCode(10));`,
+    ],
+    {
+      encoding: "utf8",
+      env: {
+        HOME: root,
+        LANG: "C.UTF-8",
+        NODE_ENV: "production",
+      },
+    },
+  );
+  assert.deepEqual(
+    {
+      signal: cryptoAccessorLeakControl.signal,
+      status: cryptoAccessorLeakControl.status,
+      stderr: cryptoAccessorLeakControl.stderr,
+      stdout: cryptoAccessorLeakControl.stdout,
+    },
+    {
+      signal: null,
+      status: 0,
+      stderr: "",
+      stdout: "crypto-accessor-bypass\n",
+    },
+    "crypto-accessor mutant is not a real resolver deregistration capability",
+  );
+  const cryptoAccessorLeakRejected = runRuntimeGuardGlobalIdentityBoundary(
+    cryptoAccessorLeakPath,
+    root,
+  );
+  assert.notEqual(
+    cryptoAccessorLeakRejected.status,
+    0,
+    "same-process identity boundary admitted a crypto-accessor handle leak",
+  );
+  assert.match(
+    cryptoAccessorLeakRejected.stderr,
+    /global reachability identity key set changed/i,
+    "crypto-accessor handle leak failed outside its materialized identity root",
+  );
+});
+
+test("RED v2: the production runtime guard is root-owned, Dockerfile-bound and executed by the exact worker entrypoint", (t) => {
+  assert.equal(
+    fs.existsSync(workerRuntimeGuardPath),
+    true,
+    "production worker runtime guard source is missing",
+  );
+  const dockerfile = path.join(
+    path.resolve(scriptDir, ".."),
+    "docker",
+    "docker-action-broker.Dockerfile",
+  );
+  const dockerfileSource = fs.readFileSync(dockerfile, "utf8");
+  assertFinalRuntimeGuardLayer(dockerfileSource);
+  assert.match(
+    dockerfileSource,
+    new RegExp(
+      `^COPY --chown=0:0 --chmod=0555 scripts/docker-action-worker-runtime-guard\\.mjs ${escapeRegExp(WORKER_RUNTIME_GUARD_CONTAINER_PATH)}$`,
+      "m",
+    ),
+    "Dockerfile lacks the one exact root-owned immutable runtime-guard COPY",
+  );
+  const staged = stageDockerWorkerImageLayout(t, "docker-worker-runtime-guard-stage-");
+  const stagedGuardPath = path.join(
+    staged.root,
+    WORKER_RUNTIME_GUARD_CONTAINER_PATH.replace(/^\/+/, ""),
+  );
+  assert.equal(fs.existsSync(stagedGuardPath), true);
+  const stagedGuardStat = fs.lstatSync(stagedGuardPath);
+  assert.equal(stagedGuardStat.isFile(), true);
+  assert.equal(stagedGuardStat.isSymbolicLink(), false);
+  assert.equal(stagedGuardStat.mode & 0o777, 0o555);
+  const guardSource = fs.readFileSync(stagedGuardPath, "utf8");
+  assertRuntimeGuardLexicalHandleDiscipline(
+    guardSource,
+    "production runtime guard",
+  );
+  const identityBoundary = runRuntimeGuardGlobalIdentityBoundary(
+    stagedGuardPath,
+    staged.root,
+  );
+  assert.deepEqual(
+    {
+      signal: identityBoundary.signal,
+      status: identityBoundary.status,
+      stderr: identityBoundary.stderr,
+      stdout: identityBoundary.stdout,
+    },
+    {
+      signal: null,
+      status: 0,
+      stderr: "",
+      stdout: "identity-ok\n",
+    },
+    "production guard changed a global-reachable identity outside its exact allowlist",
+  );
+
+  const exactEntrypoint = EXPECTED_WORKER_ENTRYPOINT.map((argument, index) => {
+    if (index === 0) return process.execPath;
+    if (!argument.startsWith("/")) return argument;
+    return path.join(staged.root, argument.replace(/^\/+/, ""));
+  });
+  assert.deepEqual(exactEntrypoint.slice(1, 3), ["--import", stagedGuardPath]);
+  assert.equal(exactEntrypoint.at(-1), staged.workerPath);
+  const runExactEntrypoint = (source) => {
+    fs.chmodSync(staged.workerPath, 0o700);
+    fs.writeFileSync(staged.workerPath, `${source}\n`, { mode: 0o700 });
+    fs.chmodSync(staged.workerPath, 0o555);
+    return spawnSync(exactEntrypoint[0], exactEntrypoint.slice(1), {
+      cwd: path.dirname(staged.workerPath),
+      encoding: "utf8",
+      env: {
+        HOME: staged.root,
+        LANG: "C.UTF-8",
+        NODE_ENV: "production",
+      },
+    });
+  };
+
+  const positive = runExactEntrypoint(
+    `${assertNoGlobalDeregistrationHandleSource()}
+if (globalThis[Symbol.for("platform.worker.socketless-guard-count")] !== 1) throw new Error("guard sentinel");
+await import("node:fs");
+await import("node:path");
+process.stdout.write("guard-ok" + String.fromCharCode(10));`,
+  );
+  assert.deepEqual(
+    {
+      signal: positive.signal,
+      status: positive.status,
+      stderr: positive.stderr,
+      stdout: positive.stdout,
+    },
+    {
+      signal: null,
+      status: 0,
+      stderr: "",
+      stdout: "guard-ok\n",
+    },
+  );
+
+  assertRuntimeGuardRejectsDirectNetworkImport(
+    runExactEntrypoint,
+    "production runtime guard",
+  );
+
+  for (const [name, snippet] of [
+    [
+      "Function",
+      'globalThis[Symbol.for("platform.worker.socketless-resolution-hook")]?.deregister?.(); const load = (() => {}).constructor(\'return import("node:" + "net")\'); await load();',
+    ],
+    [
+      "AsyncFunction",
+      'const load = (async () => {}).constructor(\'return import("node:" + "net")\'); await load();',
+    ],
+    [
+      "GeneratorFunction",
+      'const load = (function* () {}).constructor(\'yield import("node:" + "net")\'); await load().next();',
+    ],
+    [
+      "AsyncGeneratorFunction",
+      'const load = (async function* () {}).constructor(\'yield import("node:" + "net")\'); await load().next();',
+    ],
+  ]) {
+    const rejected = runExactEntrypoint(snippet);
+    assert.notEqual(rejected.status, 0, `${name} reconstruction was admitted`);
+    assert.match(
+      rejected.stderr,
+      new RegExp(`socketless runtime guard blocked ${name}(?:\\n|\\b)`),
+      `${name} was blocked only by a later resolver boundary`,
+    );
+  }
+});
+
 test("worker source is socketless while its fixed subprocess adapter remains testable", (t) => {
   const source = fs.readFileSync(workerPath, "utf8");
   assertSocketlessWorkerSource(source, "real worker source");
@@ -1241,11 +2975,47 @@ test("worker source is socketless while its fixed subprocess adapter remains tes
     ],
     ["eval", 'eval("process.getBuiltinModule(\\"node:net\\")");'],
     ["Function constructor", 'Function("return fetch(\\"http://engine\\")")();'],
+    [
+      "prototype constructor reconstruction",
+      '(() => {})["con" + "structor"]("return im" + "port(\\"node:\\" + \\"net\\")")();',
+    ],
+    [
+      "joined constructor and import aliases",
+      'const key = ["con", "structor"].join(""); const word = ["im", "port"].join(""); const body = ["return ", word, "(\\"node:\\" + \\"net\\")"].join(""); await (() => {})[key](body)();',
+    ],
+    [
+      "reverse-order joined import and constructor aliases",
+      'const word = ["im", "port"].join(""); const key = ["con", "structor"].join(""); const body = ["return ", word, "(\\"node:\\" + \\"net\\")"].join(""); await (() => {})[key](body)();',
+    ],
+    [
+      "indirect joined constructor alias",
+      'function buildKey() { return ["con", "structor"].join(""); } const word = ["im", "port"].join(""); await (() => {})[buildKey()]("return " + word + "(\\"node:\\" + \\"net\\")")();',
+    ],
     ["global fetch", 'await fetch("http://engine/containers/json");'],
     ["WebSocket", 'new WebSocket("ws://engine/events");'],
     [
       "child process network tool",
       'import { spawn } from "node:child_process"; spawn("/usr/bin/curl", ["http://engine"]);',
+    ],
+    [
+      "computed network command through a shell",
+      'import { spawn } from "node:child_process"; const command = String.fromCharCode(99,117,114,108,32,104,116,116,112,58,47,47,101,110,103,105,110,101); spawn("/bin/sh", ["-c", command], { shell: false });',
+    ],
+    [
+      "environment interpreter wrapper",
+      'import { spawn } from "node:child_process"; spawn("/usr/bin/env", ["node", "-e", "process.exit(0)"], { shell: false });',
+    ],
+    [
+      "computed process execve",
+      'process[["exec", "ve"].join("")]("/usr/bin/printf", ["printf", "admitted"], process.env);',
+    ],
+    [
+      "computed process stdout Socket connect",
+      'const stream = process[["std", "out"].join("")]; new stream[["con", "structor"].join("")]()[["con", "nect"].join("")](65535, "127.0.0.1");',
+    ],
+    [
+      "computed child stdout Socket connect",
+      'const child = {}; child.stdout = process.stdout; new child.stdout[["con", "structor"].join("")]()[["con", "nect"].join("")](65535, "127.0.0.1");',
     ],
     ["joined Docker socket", 'const socket = ["/var/run/", "docker", ".sock"].join("");'],
     ["templated Docker socket", 'const socket = `/var/run/${"docker"}${".sock"}`;'],
@@ -1307,7 +3077,12 @@ test("worker source is socketless while its fixed subprocess adapter remains tes
   );
 
   const guardPath = path.join(staged.root, "socketless-runtime-guard.mjs");
-  fs.writeFileSync(guardPath, socketlessRuntimeGuardSource(), { mode: 0o600 });
+  const guardSource = socketlessRuntimeGuardSource();
+  assertRuntimeGuardLexicalHandleDiscipline(
+    guardSource,
+    "test-local socketless runtime guard",
+  );
+  fs.writeFileSync(guardPath, guardSource, { mode: 0o600 });
   const guardCheck = spawnSync(process.execPath, ["--check", guardPath], {
     encoding: "utf8",
   });
@@ -1315,6 +3090,25 @@ test("worker source is socketless while its fixed subprocess adapter remains tes
     { signal: guardCheck.signal, status: guardCheck.status, stderr: guardCheck.stderr },
     { signal: null, status: 0, stderr: "" },
     "socketless runtime guard is not syntactically valid",
+  );
+  const identityBoundary = runRuntimeGuardGlobalIdentityBoundary(
+    guardPath,
+    staged.root,
+  );
+  assert.deepEqual(
+    {
+      signal: identityBoundary.signal,
+      status: identityBoundary.status,
+      stderr: identityBoundary.stderr,
+      stdout: identityBoundary.stdout,
+    },
+    {
+      signal: null,
+      status: 0,
+      stderr: "",
+      stdout: "identity-ok\n",
+    },
+    "test-local guard changed a global-reachable identity outside its allowlist",
   );
   const guardUrl = pathToFileURL(guardPath).href;
   const positiveGuard = spawnSync(
@@ -1324,7 +3118,11 @@ test("worker source is socketless while its fixed subprocess adapter remains tes
       guardUrl,
       "--input-type=module",
       "--eval",
-      'if (globalThis[Symbol.for("platform.worker.socketless-guard-count")] !== 1) throw new Error("guard sentinel"); await import("node:fs"); process.stdout.write("guard-ok\\n");',
+      `${assertNoGlobalDeregistrationHandleSource()}
+if (globalThis[Symbol.for("platform.worker.socketless-guard-count")] !== 1) throw new Error("guard sentinel");
+await import("node:fs");
+await import("node:path");
+process.stdout.write("guard-ok" + String.fromCharCode(10));`,
     ],
     { encoding: "utf8", env: { HOME: staged.root, LANG: "C.UTF-8" } },
   );
@@ -1338,7 +3136,12 @@ test("worker source is socketless while its fixed subprocess adapter remains tes
     { signal: null, status: 0, stderr: "", stdout: "guard-ok\n" },
     "socketless runtime guard broke the admitted builtin control",
   );
-  for (const [label, snippet] of [
+  for (const [label, snippet, expectedError = /socketless runtime guard/i] of [
+    [
+      "direct node:net import",
+      'await import("node:net");',
+      /socketless runtime guard blocked module resolution: node:net/i,
+    ],
     [
       "comment-obfuscated static import",
       'import net from/*x*/"node:net"; void net;',
@@ -1374,10 +3177,65 @@ test("worker source is socketless while its fixed subprocess adapter remains tes
     ],
     ["eval", 'eval("1 + 1");'],
     ["Function", 'Function("return 1")();'],
+    [
+      "leaked handle plus Function prototype constructor",
+      'globalThis[Symbol.for("platform.worker.socketless-resolution-hook")]?.deregister?.(); const load = (() => {}).constructor(\'return import("node:" + "net")\'); await load();',
+      /socketless runtime guard blocked Function(?:\n|\b)/,
+    ],
+    [
+      "AsyncFunction prototype constructor",
+      'const load = (async () => {}).constructor(\'return import("node:" + "net")\'); await load();',
+      /socketless runtime guard blocked AsyncFunction(?:\n|\b)/,
+    ],
+    [
+      "GeneratorFunction prototype constructor",
+      'const load = (function* () {}).constructor(\'yield import("node:" + "net")\'); await load().next();',
+      /socketless runtime guard blocked GeneratorFunction(?:\n|\b)/,
+    ],
+    [
+      "AsyncGeneratorFunction prototype constructor",
+      'const load = (async function* () {}).constructor(\'yield import("node:" + "net")\'); await load().next();',
+      /socketless runtime guard blocked AsyncGeneratorFunction(?:\n|\b)/,
+    ],
     ["fetch", 'await fetch("http://engine");'],
     [
       "child-process curl",
       'const { spawnSync } = await import("node:child_process"); spawnSync("/usr/bin/curl", []);',
+    ],
+    [
+      "shell indirection",
+      'const { spawn } = await import("node:child_process"); spawn("/bin/sh", ["-c", "printf admitted"], { env: process.env, shell: false, stdio: ["ignore", "pipe", "pipe"] });',
+      /socketless runtime guard rejected non-exact fixed adapter spawn/i,
+    ],
+    [
+      "environment wrapper",
+      'const { spawn } = await import("node:child_process"); spawn("/usr/bin/env", ["/opt/platform-docker-worker/bin/backup-catalog"], { env: process.env, shell: false, stdio: ["ignore", "pipe", "pipe"] });',
+      /socketless runtime guard rejected non-exact fixed adapter spawn/i,
+    ],
+    [
+      "interpreter indirection",
+      'const { spawn } = await import("node:child_process"); spawn("/usr/local/bin/node", ["-e", "process.exit(0)"], { env: process.env, shell: false, stdio: ["ignore", "pipe", "pipe"] });',
+      /socketless runtime guard rejected non-exact fixed adapter spawn/i,
+    ],
+    [
+      "adapter argv widening",
+      'const { spawn } = await import("node:child_process"); spawn("/opt/platform-docker-worker/bin/backup-catalog", ["attacker"], { env: process.env, shell: false, stdio: ["ignore", "pipe", "pipe"] });',
+      /socketless runtime guard rejected non-exact fixed adapter spawn/i,
+    ],
+    [
+      "adapter shell widening",
+      'const { spawn } = await import("node:child_process"); spawn("/opt/platform-docker-worker/bin/backup-catalog", [], { env: process.env, shell: true, stdio: ["ignore", "pipe", "pipe"] });',
+      /socketless runtime guard rejected non-exact fixed adapter spawn/i,
+    ],
+    [
+      "adapter environment widening",
+      'const { spawn } = await import("node:child_process"); spawn("/opt/platform-docker-worker/bin/backup-catalog", [], { env: { ...process.env, NODE_OPTIONS: "--import=/tmp/attacker.mjs" }, shell: false, stdio: ["ignore", "pipe", "pipe"] });',
+      /socketless runtime guard rejected non-exact fixed adapter spawn/i,
+    ],
+    [
+      "safe-looking executable through wrong API",
+      'const { execFile } = await import("node:child_process"); execFile("/opt/platform-docker-worker/bin/backup-catalog", []);',
+      /socketless runtime guard blocked non-admitted child_process API: execFile/i,
     ],
   ]) {
     const guarded = spawnSync(
@@ -1391,10 +3249,537 @@ test("worker source is socketless while its fixed subprocess adapter remains tes
     assert.notEqual(guarded.status, 0, `socketless runtime guard admitted ${label}`);
     assert.match(
       guarded.stderr,
-      /socketless runtime guard/i,
+      expectedError,
       `${label} failed outside the socketless runtime guard`,
     );
   }
+});
+
+test("runtime guard owns spawn inputs, phase identity and every child-visible capability", (t) => {
+  const fixtureCommandByActionPhase = {};
+  for (const [action, profile] of Object.entries(EXPECTED_ACTION_PHASES)) {
+    const phaseIds = [
+      ...profile.phaseIds,
+      ...Object.values(profile.operationPhaseIds).flat(),
+    ];
+    for (const phaseId of phaseIds) {
+      fixtureCommandByActionPhase[`${action}\0${phaseId}`] =
+        EXPECTED_PHASE_PROFILES[phaseId].command;
+    }
+  }
+  assert.deepEqual(
+    EXPECTED_COMMAND_BY_ACTION_PHASE,
+    fixtureCommandByActionPhase,
+    "runtime guard action/phase mapping does not cover the exact eight fixture identities",
+  );
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "docker-worker-owned-spawn-guard-"),
+  );
+  t.after(() => fs.rmSync(root, { force: true, recursive: true }));
+  const tracePath = path.join(root, "owned-spawn-trace.json");
+  const hookPath = path.join(root, "owned-spawn-hook.mjs");
+  const guardPath = path.join(root, "owned-spawn-guard.mjs");
+  fs.writeFileSync(
+    hookPath,
+    `
+import childProcess from "node:child_process";
+import { EventEmitter } from "node:events";
+import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
+import { PassThrough } from "node:stream";
+
+const tracePath = ${JSON.stringify(tracePath)};
+childProcess.ChildProcess.prototype.spawn = function (options) {
+  this.pid = 4242;
+  this.stdin = null;
+  this.stdout = new PassThrough();
+  this.stderr = new PassThrough();
+  this.kill = () => true;
+  const environmentDescriptors =
+    Object.getOwnPropertyDescriptors(options.env);
+  const optionDescriptors =
+    Object.getOwnPropertyDescriptors(options);
+  const stdioDescriptors =
+    Object.getOwnPropertyDescriptors(options.stdio);
+  fs.writeFileSync(tracePath, JSON.stringify({
+    args: [...options.args],
+    envFrozen: Object.isFrozen(options.env),
+    envKeys: Reflect.ownKeys(options.env).sort(),
+    envOwnData: Reflect.ownKeys(environmentDescriptors).every((key) =>
+      Object.hasOwn(environmentDescriptors[key], "value")
+      && environmentDescriptors[key].configurable === false
+      && environmentDescriptors[key].enumerable === true
+      && environmentDescriptors[key].writable === false),
+    envSameAsProcess: options.env === process.env,
+    executable: options.file,
+    optionKeys: Reflect.ownKeys(options).sort(),
+    optionsOwnData: Reflect.ownKeys(optionDescriptors).every((key) =>
+      Object.hasOwn(optionDescriptors[key], "value")
+      && typeof optionDescriptors[key].get !== "function"
+      && typeof optionDescriptors[key].set !== "function"),
+    shell: options.shell,
+    stdio: [...options.stdio],
+    stdioFrozen: Object.isFrozen(options.stdio),
+    stdioOwnData: ["0", "1", "2"].every((key) =>
+      Object.hasOwn(stdioDescriptors[key], "value")
+      && stdioDescriptors[key].configurable === false
+      && stdioDescriptors[key].enumerable === true
+      && stdioDescriptors[key].writable === false),
+  }));
+  queueMicrotask(() => {
+    this.stdout.end("owned-child-output\\n");
+    this.stderr.end();
+    this.emit("exit", 0, null);
+    this.emit("close", 0, null);
+  });
+};
+syncBuiltinESMExports();
+`,
+    { mode: 0o600 },
+  );
+  fs.writeFileSync(guardPath, socketlessRuntimeGuardSource(), { mode: 0o600 });
+  const runGuarded = (source, environment = {}) => spawnSync(
+    process.execPath,
+    [
+      "--import",
+      pathToFileURL(hookPath).href,
+      "--import",
+      pathToFileURL(guardPath).href,
+      "--input-type=module",
+      "--eval",
+      source,
+    ],
+    {
+      encoding: "utf8",
+      env: {
+        HOME: root,
+        LANG: "C.UTF-8",
+        NODE_ENV: "production",
+        PLATFORM_DOCKER_ACTION: "backup.catalog",
+        PLATFORM_DOCKER_PHASE_ID: "catalog.capture",
+        ...environment,
+      },
+      maxBuffer: 32 * 1024,
+    },
+  );
+  const exactExecutable =
+    EXPECTED_FIXED_ADAPTERS["backup-catalog"].executable;
+  const admitted = runGuarded(`
+    import childProcess from "node:child_process";
+    const callerArgv = [];
+    const callerOptions = {
+      env: process.env,
+      shell: false,
+      stdio: ["ignore", "pipe", "pipe"],
+    };
+    const child = childProcess.spawn(
+      ${JSON.stringify(exactExecutable)},
+      callerArgv,
+      callerOptions,
+    );
+    if (child === null || typeof child !== "object") {
+      throw new Error("guard returned no safe child facade");
+    }
+    if (
+      typeof process.stdout.constructor?.prototype?.connect === "function"
+      || typeof process.stderr.constructor?.prototype?.connect === "function"
+      || typeof child.stdout.constructor?.prototype?.connect === "function"
+      || typeof child.stderr.constructor?.prototype?.connect === "function"
+      || child.stdout._handle !== undefined
+      || child.stderr._handle !== undefined
+      || typeof child.constructor?.prototype?.spawn === "function"
+    ) {
+      throw new Error("raw stream or ChildProcess capability escaped the guard");
+    }
+    child.stdout.on("data", (chunk) => process.stdout.write(chunk));
+    child.on("close", () => process.stdout.write("guard-owned-ok\\n"));
+  `);
+  assert.deepEqual(
+    {
+      signal: admitted.signal,
+      status: admitted.status,
+      stderr: admitted.stderr,
+      stdout: admitted.stdout,
+    },
+    {
+      signal: null,
+      status: 0,
+      stderr: "",
+      stdout: "owned-child-output\nguard-owned-ok\n",
+    },
+    "exact worker-style spawn did not cross the real guard-owned invocation",
+  );
+  const trace = JSON.parse(fs.readFileSync(tracePath, "utf8"));
+  assert.deepEqual(trace, {
+    args: [exactExecutable],
+    envFrozen: true,
+    envKeys: [
+      "HOME",
+      "LANG",
+      "NODE_ENV",
+      "PLATFORM_DOCKER_ACTION",
+      "PLATFORM_DOCKER_PHASE_ID",
+    ],
+    envOwnData: true,
+    envSameAsProcess: false,
+    executable: exactExecutable,
+    optionKeys: [
+      "args",
+      "cwd",
+      "detached",
+      "env",
+      "envPairs",
+      "file",
+      "shell",
+      "stdio",
+      "windowsHide",
+      "windowsVerbatimArguments",
+    ],
+    optionsOwnData: true,
+    shell: false,
+    stdio: ["ignore", "pipe", "pipe"],
+    stdioFrozen: true,
+    stdioOwnData: true,
+  });
+
+  for (const [label, source, pattern] of [
+    [
+      "argv Proxy",
+      `import childProcess from "node:child_process";
+       childProcess.spawn(${JSON.stringify(exactExecutable)}, new Proxy([], {}), {
+         env: process.env, shell: false, stdio: ["ignore", "pipe", "pipe"],
+       });`,
+      /non-exact fixed adapter spawn/i,
+    ],
+    [
+      "options Proxy",
+      `import childProcess from "node:child_process";
+       childProcess.spawn(${JSON.stringify(exactExecutable)}, [], new Proxy({
+         env: process.env, shell: false, stdio: ["ignore", "pipe", "pipe"],
+       }, {}));`,
+      /non-exact fixed adapter spawn/i,
+    ],
+    [
+      "options accessor",
+      `import childProcess from "node:child_process";
+       const options = {};
+       Object.defineProperties(options, {
+         env: { configurable: true, enumerable: true, get() { return process.env; } },
+         shell: { configurable: true, enumerable: true, value: false, writable: true },
+         stdio: {
+           configurable: true,
+           enumerable: true,
+           value: ["ignore", "pipe", "pipe"],
+           writable: true,
+         },
+       });
+       childProcess.spawn(${JSON.stringify(exactExecutable)}, [], options);`,
+      /non-exact fixed adapter spawn/i,
+    ],
+    [
+      "stateful stdio Proxy",
+      `import childProcess from "node:child_process";
+       const stdio = new Proxy(["ignore", "pipe", "pipe"], {
+         get(target, key, receiver) {
+           return Reflect.get(target, key, receiver);
+         },
+       });
+       childProcess.spawn(${JSON.stringify(exactExecutable)}, [], {
+         env: process.env, shell: false, stdio,
+       });`,
+      /non-exact fixed adapter spawn/i,
+    ],
+    [
+      "omitted env and stdio",
+      `import childProcess from "node:child_process";
+       childProcess.spawn(${JSON.stringify(exactExecutable)}, [], { shell: false });`,
+      /non-exact fixed adapter spawn/i,
+    ],
+    [
+      "cross-phase executable",
+      `import childProcess from "node:child_process";
+       childProcess.spawn(
+         ${JSON.stringify(EXPECTED_FIXED_ADAPTERS["backup-job"].executable)},
+         [],
+         { env: process.env, shell: false, stdio: ["ignore", "pipe", "pipe"] },
+       );`,
+      /non-exact fixed adapter spawn/i,
+    ],
+    [
+      "ChildProcess prototype spawn",
+      `import childProcess from "node:child_process";
+       new childProcess.ChildProcess().spawn({
+         args: ["printf", "prototype-admitted"],
+         detached: false,
+         envPairs: [],
+         file: "/usr/bin/printf",
+         stdio: ["ignore", "pipe", "pipe"],
+         windowsHide: false,
+         windowsVerbatimArguments: false,
+       });`,
+      /blocked ChildProcess\.prototype\.spawn/i,
+    ],
+    [
+      "computed process execve",
+      `process[["exec", "ve"].join("")](
+         "/usr/bin/printf",
+         ["printf", "execve-admitted"],
+         process.env,
+       );`,
+      /blocked process\.execve/i,
+    ],
+  ]) {
+    fs.rmSync(tracePath, { force: true });
+    const rejected = runGuarded(source);
+    assert.notEqual(rejected.status, 0, `runtime guard admitted ${label}`);
+    assert.equal(rejected.stdout, "", `${label} reached child output`);
+    assert.match(rejected.stderr, pattern, `${label} failed outside the real guard`);
+    assert.equal(
+      fs.existsSync(tracePath),
+      false,
+      `${label} reached the pre-guard spawn sink`,
+    );
+  }
+
+  const prototypeVulnerabilityControl = spawnSync(
+    process.execPath,
+    [
+      "--input-type=module",
+      "--eval",
+      `import childProcess from "node:child_process";
+       const child = new childProcess.ChildProcess();
+       child.spawn({
+         args: ["printf", "prototype-spawn-vulnerable\\\\n"],
+         detached: false,
+         envPairs: [],
+         file: "/usr/bin/printf",
+         stdio: ["ignore", "pipe", "pipe"],
+         windowsHide: false,
+         windowsVerbatimArguments: false,
+       });
+       child.stdout.on("data", (chunk) => process.stdout.write(chunk));`,
+    ],
+    { encoding: "utf8" },
+  );
+  assert.deepEqual(
+    {
+      signal: prototypeVulnerabilityControl.signal,
+      status: prototypeVulnerabilityControl.status,
+      stderr: prototypeVulnerabilityControl.stderr,
+      stdout: prototypeVulnerabilityControl.stdout,
+    },
+    {
+      signal: null,
+      status: 0,
+      stderr: "",
+      stdout: "prototype-spawn-vulnerable\n",
+    },
+    "ChildProcess.prototype.spawn mutant is not a live child-process bypass",
+  );
+
+  const toctouVulnerabilityControl = spawnSync(
+    process.execPath,
+    [
+      "--input-type=module",
+      "--eval",
+      `import { spawn } from "node:child_process";
+       let environmentReads = 0;
+       const options = new Proxy({
+         shell: false,
+         stdio: ["ignore", "pipe", "pipe"],
+       }, {
+         get(target, key, receiver) {
+           if (key === "env") {
+             environmentReads += 1;
+             return environmentReads === 1
+               ? process.env
+               : { ...process.env, PLATFORM_TOCTOU_INJECTED: "yes" };
+           }
+           return Reflect.get(target, key, receiver);
+         },
+         ownKeys(target) {
+           return ["env", ...Reflect.ownKeys(target)];
+         },
+         getOwnPropertyDescriptor(target, key) {
+           if (key === "env") {
+             return {
+               configurable: true,
+               enumerable: true,
+               value: process.env,
+               writable: true,
+             };
+           }
+           return Reflect.getOwnPropertyDescriptor(target, key);
+         },
+       });
+       function vulnerableForward(executable, argv, candidate) {
+         if (candidate.env !== process.env || candidate.shell !== false) {
+           throw new Error("unexpected vulnerability-control shape");
+         }
+         return spawn(executable, argv, candidate);
+       }
+       const child = vulnerableForward(
+         process.execPath,
+         ["--input-type=module", "--eval",
+          "process.stdout.write(process.env.PLATFORM_TOCTOU_INJECTED ?? 'missing')"],
+         options,
+       );
+       child.stdout.on("data", (chunk) => process.stdout.write(chunk));`,
+    ],
+    { encoding: "utf8" },
+  );
+  assert.deepEqual(
+    {
+      signal: toctouVulnerabilityControl.signal,
+      status: toctouVulnerabilityControl.status,
+      stderr: toctouVulnerabilityControl.stderr,
+      stdout: toctouVulnerabilityControl.stdout,
+    },
+    {
+      signal: null,
+      status: 0,
+      stderr: "",
+      stdout: "yes",
+    },
+    "stateful options Proxy is not a live validate-then-forward mutation",
+  );
+});
+
+test("exact fixed adapter starts its own guard before the first worker import", (t) => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "docker-worker-real-adapter-guard-"),
+  );
+  t.after(() => fs.rmSync(root, { force: true, recursive: true }));
+  const bin = path.join(root, "bin");
+  fs.mkdirSync(bin, { mode: 0o700 });
+  const adapterPath = path.join(bin, "backup-catalog.mjs");
+  const guardPath = path.join(root, "docker-action-worker-runtime-guard.mjs");
+  const workerFixturePath = path.join(root, "docker-action-worker.mjs");
+  const exactAdapterSource = EXPECTED_FIXED_ADAPTER_SOURCE_TEXT["backup-catalog"];
+  fs.writeFileSync(adapterPath, exactAdapterSource, { mode: 0o555 });
+  fs.chmodSync(adapterPath, 0o555);
+  fs.writeFileSync(guardPath, socketlessRuntimeGuardSource(), { mode: 0o555 });
+  fs.chmodSync(guardPath, 0o555);
+  const environment = {
+    HOME: root,
+    LANG: "C.UTF-8",
+    NODE_ENV: "production",
+  };
+  const runAdapter = () => spawnSync(
+    process.execPath,
+    [adapterPath],
+    {
+      cwd: root,
+      encoding: "utf8",
+      env: environment,
+      maxBuffer: 32 * 1024,
+    },
+  );
+
+  fs.writeFileSync(
+    workerFixturePath,
+    `export async function runFixedToolEntry(command) {
+  const guardCount =
+    globalThis[Symbol.for("platform.worker.socketless-guard-count")] ?? 0;
+  process.stdout.write(JSON.stringify({ command, guardCount }) + "\\n");
+}
+`,
+    { mode: 0o555 },
+  );
+  fs.chmodSync(workerFixturePath, 0o555);
+  const positive = runAdapter();
+  assert.deepEqual(
+    {
+      signal: positive.signal,
+      status: positive.status,
+      stderr: positive.stderr,
+      stdout: positive.stdout,
+    },
+    {
+      signal: null,
+      status: 0,
+      stderr: "",
+      stdout: '{"command":"backup-catalog","guardCount":1}\n',
+    },
+    "the real adapter process did not execute exactly one guard before its worker import",
+  );
+
+  const reconstructedNetworkModule = [
+    110, 111, 100, 101, 58, 110, 101, 116,
+  ];
+  fs.chmodSync(workerFixturePath, 0o755);
+  fs.writeFileSync(
+    workerFixturePath,
+    `export async function runFixedToolEntry() {
+  const dynamicConstructor = globalThis[["Func", "tion"].join("")];
+  const load = dynamicConstructor(
+    "return im" + "port(String.fromCharCode(${
+      reconstructedNetworkModule.join(",")
+    }))",
+  );
+  await load();
+  process.stdout.write(
+    JSON.stringify({
+      guardCount:
+        globalThis[Symbol.for("platform.worker.socketless-guard-count")] ?? 0,
+      networkImport: "admitted",
+    }) + "\\n",
+  );
+}
+`,
+    { mode: 0o555 },
+  );
+  fs.chmodSync(workerFixturePath, 0o555);
+  const guarded = runAdapter();
+  assert.notEqual(
+    guarded.status,
+    0,
+    "the real adapter child admitted reconstructed dynamic network authority",
+  );
+  assert.equal(
+    guarded.stdout,
+    "",
+    "the guarded adapter child reached output after reconstructed network authority",
+  );
+  assert.match(
+    guarded.stderr,
+    /socketless runtime guard blocked Function(?:\n|\b)/i,
+    "the adapter child failed outside its own runtime guard",
+  );
+
+  const missingGuardSource = exactAdapterSource.replace(
+    'import "../docker-action-worker-runtime-guard.mjs";\n\n',
+    "",
+  );
+  assert.notEqual(
+    missingGuardSource,
+    exactAdapterSource,
+    "missing-child-guard mutant was not activated",
+  );
+  fs.chmodSync(adapterPath, 0o755);
+  fs.writeFileSync(adapterPath, missingGuardSource, { mode: 0o555 });
+  fs.chmodSync(adapterPath, 0o555);
+  const vulnerabilityControl = runAdapter();
+  assert.deepEqual(
+    {
+      signal: vulnerabilityControl.signal,
+      status: vulnerabilityControl.status,
+      stderr: vulnerabilityControl.stderr,
+      stdout: vulnerabilityControl.stdout,
+    },
+    {
+      signal: null,
+      status: 0,
+      stderr: "",
+      stdout: '{"guardCount":0,"networkImport":"admitted"}\n',
+    },
+    "missing-child-guard mutant is not a live adapter-process network bypass",
+  );
+  assert.equal(
+    EXPECTED_FIXED_ADAPTER_SOURCE_TEXT["backup-catalog"],
+    exactAdapterSource,
+    "canonical adapter source changed during the child-process oracle",
+  );
 });
 
 test("descriptor-stable read oracle requires exactly two complete positional passes", (t) => {
@@ -1540,6 +3925,145 @@ test("descriptor-stable read oracle requires exactly two complete positional pas
   assert.equal(fs.statSync(file).mode & 0o777, 0o400, "race fixture changed snapshot mode");
 });
 
+test("Dockerfile image identities bind exact supply-chain lock keys", () => {
+  const lock = JSON.parse(fs.readFileSync(SUPPLY_CHAIN_LOCK_PATH, "utf8"));
+  assert.doesNotThrow(() => assertExactDockerfileSupplyChainLock(lock));
+  for (const [label, mutate] of [
+    [
+      "swapped Node and frontend values",
+      (candidate) => {
+        const frontend = candidate.images["dockerfile-frontend"];
+        candidate.images["dockerfile-frontend"] = candidate.images.node;
+        candidate.images.node = frontend;
+      },
+    ],
+    [
+      "frontend rebound to another admitted lock member",
+      (candidate) => {
+        candidate.images["dockerfile-frontend"] = candidate.images.node;
+      },
+    ],
+    [
+      "missing exact frontend key",
+      (candidate) => {
+        candidate.images.frontend = candidate.images["dockerfile-frontend"];
+        delete candidate.images["dockerfile-frontend"];
+      },
+    ],
+    [
+      "missing exact Node key",
+      (candidate) => {
+        candidate.images["node-runtime"] = candidate.images.node;
+        delete candidate.images.node;
+      },
+    ],
+  ]) {
+    const mutant = structuredClone(lock);
+    mutate(mutant);
+    assert.throws(
+      () => assertExactDockerfileSupplyChainLock(mutant),
+      /exact (?:dockerfile-frontend|node) lock key|disjoint/i,
+      `supply-chain key oracle admitted ${label}`,
+    );
+  }
+});
+
+test("Dockerignore semantics preserve every exact Dockerfile COPY source", () => {
+  const repositoryRoot = path.resolve(scriptDir, "..");
+  const dockerignoreSource = fs.readFileSync(
+    path.join(repositoryRoot, ".dockerignore"),
+    "utf8",
+  );
+  const canonicalDockerfile = [
+    `# syntax=${EXPECTED_DOCKERFILE_FRONTEND_REFERENCE}`,
+    ...canonicalProductionDockerfileInstructions(),
+    "",
+  ].join("\n");
+  const canonicalSources = canonicalProductionDockerfileInstructions()
+    .map(parseDockerCopyInstruction)
+    .filter(Boolean)
+    .flatMap(({ sources }) => sources)
+    .sort();
+  assert.deepEqual(
+    assertDockerCopySourcesIncludedByDockerignore(
+      canonicalDockerfile,
+      dockerignoreSource,
+    ),
+    canonicalSources,
+    "repository .dockerignore removed a production COPY dependency",
+  );
+  const fixtureDockerfile = [
+    "FROM node:fixture",
+    `COPY scripts/docker-action-worker.mjs ${WORKER_CONTAINER_PATH}`,
+    "",
+  ].join("\n");
+  for (const [label, hostileDockerignore] of [
+    [
+      "exact worker exclusion",
+      "scripts/docker-action-worker.mjs\n",
+    ],
+    [
+      "excluded parent directory",
+      "scripts/\n",
+    ],
+    [
+      "single-segment glob",
+      "scripts/*.mjs\n",
+    ],
+    [
+      "recursive basename glob",
+      "**/docker-action-worker.mjs\n",
+    ],
+    [
+      "file negation beneath a still-excluded parent",
+      "*\n!scripts/docker-action-worker.mjs\n",
+    ],
+    [
+      "late re-exclusion after a valid negation",
+      [
+        "scripts/*.mjs",
+        "!scripts/docker-action-worker.mjs",
+        "scripts/docker-action-worker.mjs",
+        "",
+      ].join("\n"),
+    ],
+  ]) {
+    assert.throws(
+      () => assertDockerCopySourcesIncludedByDockerignore(
+        fixtureDockerfile,
+        hostileDockerignore,
+      ),
+      /Dockerignore excludes an exact Dockerfile COPY source/i,
+      `Dockerignore closure admitted ${label}`,
+    );
+  }
+  assert.deepEqual(
+    assertDockerCopySourcesIncludedByDockerignore(
+      fixtureDockerfile,
+      [
+        "scripts/*.mjs",
+        "!scripts/docker-action-worker.mjs",
+        "",
+      ].join("\n"),
+    ),
+    ["scripts/docker-action-worker.mjs"],
+    "Dockerignore closure did not honor an exact late file negation",
+  );
+  assert.deepEqual(
+    assertDockerCopySourcesIncludedByDockerignore(
+      fixtureDockerfile,
+      [
+        "scripts/",
+        "!scripts/",
+        "!scripts/docker-action-worker.mjs",
+        "",
+      ].join("\n"),
+    ),
+    ["scripts/docker-action-worker.mjs"],
+    "Dockerignore closure did not honor explicit parent and leaf negations",
+  );
+});
+
 test("Dockerfile stage packages all seven exact root-owned fixed adapter targets", (t) => {
   const staged = stageDockerWorkerImageLayout(t, "docker-worker-adapter-package-stage-");
   const commands = Object.keys(EXPECTED_FIXED_ADAPTERS).sort();
@@ -1639,6 +4163,15 @@ test("fixed adapter package oracle rejects post-COPY mutations and non-canonical
     "export async function runFixedToolEntry(command) { return command; }\n",
     { mode: 0o600 },
   );
+  fs.writeFileSync(
+    path.join(
+      repositoryRoot,
+      "scripts",
+      "docker-action-worker-runtime-guard.mjs",
+    ),
+    "export {};\n",
+    { mode: 0o600 },
+  );
   const commands = Object.keys(EXPECTED_FIXED_ADAPTERS).sort();
   const sourceByCommand = Object.fromEntries(commands.map((command) => [
     command,
@@ -1658,7 +4191,8 @@ test("fixed adapter package oracle rejects post-COPY mutations and non-canonical
     "FROM node:fixture",
     "COPY scripts/docker-action-worker.mjs /opt/platform-docker-worker/docker-action-worker.mjs",
     ...adapterCopies,
-    'ENTRYPOINT ["node", "/opt/platform-docker-worker/docker-action-worker.mjs"]',
+    `COPY --chown=0:0 --chmod=0555 scripts/docker-action-worker-runtime-guard.mjs ${WORKER_RUNTIME_GUARD_CONTAINER_PATH}`,
+    `ENTRYPOINT ${JSON.stringify(EXPECTED_WORKER_ENTRYPOINT)}`,
     "",
   ].join("\n");
   fs.writeFileSync(dockerfile, validDockerfileSource, { mode: 0o600 });
@@ -1794,6 +4328,7 @@ test("dummy fixed-adapter preload rejects every non-exact process identity befor
   const expectedEnvironment = {
     HOME: staged.root,
     LANG: "C.UTF-8",
+    PLATFORM_DOCKER_ACTION: "backup.catalog",
     PLATFORM_DOCKER_PHASE_ID: phaseId,
   };
   const expectedOutput = buildFixturePhaseOutputV2(
@@ -1817,9 +4352,9 @@ test("dummy fixed-adapter preload rejects every non-exact process identity befor
   fs.writeFileSync(guardPath, socketlessRuntimeGuardSource(), { mode: 0o600 });
   const preloadArguments = [
     "--import",
-    pathToFileURL(guardPath).href,
-    "--import",
     pathToFileURL(hookPath).href,
+    "--import",
+    pathToFileURL(guardPath).href,
     "--input-type=module",
     "--eval",
   ];
@@ -1837,7 +4372,11 @@ test("dummy fixed-adapter preload rejects every non-exact process identity befor
     const child = childProcess.spawn(
       ${JSON.stringify(expected.executable)},
       [],
-      { shell: false },
+      {
+        env: process.env,
+        shell: false,
+        stdio: ["ignore", "pipe", "pipe"],
+      },
     );
     child.stdout.on("data", (chunk) => process.stdout.write(chunk));
     child.stderr.on("data", (chunk) => process.stderr.write(chunk));
@@ -1869,25 +4408,25 @@ test("dummy fixed-adapter preload rejects every non-exact process identity befor
       "shell token smuggling",
       `import childProcess from "node:child_process";
        childProcess.spawn("/bin/sh", ["-c", "id", ${JSON.stringify(command)}], { shell: false });`,
-      /exact code-owned identity/i,
+      /non-exact fixed adapter spawn|exact code-owned identity/i,
     ],
     [
       "environment wrapper",
       `import childProcess from "node:child_process";
        childProcess.spawn("/usr/bin/env", [${JSON.stringify(expected.executable)}], { shell: false });`,
-      /exact code-owned identity/i,
+      /non-exact fixed adapter spawn|exact code-owned identity/i,
     ],
     [
       "network tool",
       `import childProcess from "node:child_process";
        childProcess.spawn("/usr/bin/curl", [${JSON.stringify(command)}], { shell: false });`,
-      /exact code-owned identity/i,
+      /non-exact fixed adapter spawn|exact code-owned identity/i,
     ],
     [
       "caller argv",
       `import childProcess from "node:child_process";
        childProcess.spawn(${JSON.stringify(expected.executable)}, ["attacker"], { shell: false });`,
-      /exact code-owned identity/i,
+      /non-exact fixed adapter spawn|exact code-owned identity/i,
     ],
     [
       "wrong API",
@@ -1921,7 +4460,11 @@ test("dummy fixed-adapter preload rejects every non-exact process identity befor
     const child = childProcess.spawn(
       ${JSON.stringify(expected.executable)},
       [],
-      { shell: false },
+      {
+        env: process.env,
+        shell: false,
+        stdio: ["ignore", "pipe", "pipe"],
+      },
     );
     child.stdout.on("data", (chunk) => process.stdout.write(chunk));
   `);
@@ -2061,9 +4604,33 @@ test("real worker main executes all eight phases through one code-owned socketle
     { mode: 0o600 },
   );
   const hookUrl = pathToFileURL(hookPath).href;
-  const runtimeGuardPath = path.join(staged.root, "socketless-runtime-guard.mjs");
-  fs.writeFileSync(runtimeGuardPath, socketlessRuntimeGuardSource(), { mode: 0o600 });
-  const runtimeGuardUrl = pathToFileURL(runtimeGuardPath).href;
+  const runtimeGuardPath = path.join(
+    staged.root,
+    WORKER_RUNTIME_GUARD_CONTAINER_PATH.replace(/^\/+/, ""),
+  );
+  assert.equal(
+    fs.readFileSync(runtimeGuardPath, "utf8"),
+    fs.readFileSync(workerRuntimeGuardPath, "utf8"),
+    "real-main matrix did not consume the Dockerfile-staged production guard",
+  );
+  const instrumentedLocalEntrypoint = (body, preloadUrl) => {
+    assert.deepEqual(body.Entrypoint, EXPECTED_WORKER_ENTRYPOINT);
+    const localized = body.Entrypoint.map((argument, index) => {
+      if (index === 0) return process.execPath;
+      if (!argument.startsWith("/")) return argument;
+      return path.join(staged.root, argument.replace(/^\/+/, ""));
+    });
+    return [
+      localized[0],
+      [
+        "--import",
+        preloadUrl,
+        ...localized.slice(1, -1),
+        localized.at(-1),
+        ...body.Cmd,
+      ],
+    ];
+  };
   let traceCount = 0;
 
   for (const phaseCase of cases) {
@@ -2095,16 +4662,13 @@ test("real worker main executes all eight phases through one code-owned socketle
     } else {
       assert.equal(Object.hasOwn(exactEnvironment, "PLATFORM_CLAIMED_JOB_PATH"), false);
     }
+    const [workerExecutable, workerArgv] = instrumentedLocalEntrypoint(
+      body,
+      hookUrl,
+    );
     const result = spawnSync(
-      process.execPath,
-      [
-        "--import",
-        runtimeGuardUrl,
-        "--import",
-        hookUrl,
-        staged.workerPath,
-        ...expectedBody.Cmd,
-      ],
+      workerExecutable,
+      workerArgv,
       {
         cwd: path.dirname(staged.workerPath),
         encoding: "utf8",
@@ -2213,16 +4777,13 @@ test("real worker main executes all eight phases through one code-owned socketle
       }),
       { mode: 0o600 },
     );
+    const [hostileExecutable, hostileArgv] = instrumentedLocalEntrypoint(
+      hostileBody,
+      pathToFileURL(hostileHookPath).href,
+    );
     const rejected = spawnSync(
-      process.execPath,
-      [
-        "--import",
-        runtimeGuardUrl,
-        "--import",
-        pathToFileURL(hostileHookPath).href,
-        staged.workerPath,
-        ...hostileExpectedBody.Cmd,
-      ],
+      hostileExecutable,
+      hostileArgv,
       {
         cwd: path.dirname(staged.workerPath),
         encoding: "utf8",
@@ -2530,6 +5091,87 @@ workerTest("worker result normalization binds request, action, phase and the com
   }
 });
 
+test("prune seal oracle independently binds canonical digest, key and MAC domains", () => {
+  const plan = {
+    schema: "platform.backup-prune-sealed-plan/v1",
+    planId: "prune-plan-worker-test",
+    artifactCount: 2,
+    artifactSetSha256: "a".repeat(64),
+    candidatePaths: [
+      "postgres/expired-one.dump",
+      "manifests/manifest-expired.json",
+    ],
+  };
+  const key = { keyId: "prune-test-v1", key: PRUNE_TEST_KEY };
+  const seal = testPrunePlanSeal(plan, key);
+  assert.deepEqual(seal, {
+    algorithm: "HMAC-SHA256",
+    digest: "18f546d44c38efab8b4a502aff8017916f96518b8bdc0f1ad8f9482e8450cc76",
+    keyId: "prune-test-v1",
+    value: "jCGw3PRX5vSGcQcj_EVm_49ngC4Wo2Sb9ecuVknEXBo",
+  });
+  assert.deepEqual(
+    testPrunePlanSeal(reverseObjectKeyOrder(plan), key),
+    seal,
+    "prune seal changed under recursive object-key reordering",
+  );
+  for (const [label, mutant] of [
+    [
+      "same-size nested candidate substitution",
+      {
+        ...structuredClone(plan),
+        candidatePaths: [
+          "postgres/expired-two.dump",
+          "manifests/manifest-expired.json",
+        ],
+      },
+    ],
+    [
+      "same-size artifact-set substitution",
+      {
+        ...structuredClone(plan),
+        artifactSetSha256: `${"a".repeat(63)}b`,
+      },
+    ],
+    [
+      "nested candidate order substitution",
+      {
+        ...structuredClone(plan),
+        candidatePaths: [...plan.candidatePaths].reverse(),
+      },
+    ],
+  ]) {
+    assert.equal(
+      JSON.stringify(mutant).length,
+      JSON.stringify(plan).length,
+      `${label} is not a same-size causality mutant`,
+    );
+    assert.notEqual(
+      testPrunePlanDigest(mutant),
+      seal.digest,
+      `prune digest oracle admitted ${label}`,
+    );
+    assert.notEqual(
+      testPrunePlanMac(mutant, key),
+      seal.value,
+      `prune MAC oracle admitted ${label}`,
+    );
+  }
+  const wrongKey = { keyId: key.keyId, key: Buffer.alloc(48, 0x51) };
+  const wrongKeyId = { keyId: "prune-test-v2", key: key.key };
+  assert.equal(testPrunePlanDigest(plan), seal.digest);
+  assert.notEqual(testPrunePlanMac(plan, wrongKey), seal.value);
+  assert.notEqual(testPrunePlanMac(plan, wrongKeyId), seal.value);
+  assert.notEqual(
+    testHmacBase64Url(
+      key.key,
+      `${PRUNE_PLAN_DIGEST_DOMAIN}${key.keyId}\0${plan.planId}\0${seal.digest}\0`,
+    ),
+    seal.value,
+    "prune MAC oracle collapsed its explicit MAC and digest domains",
+  );
+});
+
 workerTest("prune state requires a sealed plan, quarantine barrier and exact committed digest", [
   "applyPruneTransition",
   "planPruneTransition",
@@ -2549,9 +5191,50 @@ workerTest("prune state requires a sealed plan, quarantine barrier and exact com
   const sealKey = { keyId: "prune-test-v1", key: PRUNE_TEST_KEY };
   const sealed = planPruneTransition({ phase: "empty" }, { type: "seal", plan }, sealKey);
   assert.equal(sealed.phase, "sealed");
-  assert.equal(sealed.plan.seal.algorithm, "HMAC-SHA256");
-  assert.equal(sealed.plan.seal.keyId, sealKey.keyId);
-  assert.match(sealed.plan.seal.digest, /^[a-f0-9]{64}$/);
+  assert.deepEqual(
+    Object.keys(sealed.plan.seal).sort(),
+    ["algorithm", "digest", "keyId", "value"],
+    "sealed prune plan must expose one exact authenticated seal",
+  );
+  assert.deepEqual(
+    sealed.plan.seal,
+    testPrunePlanSeal(plan, sealKey),
+    "prune transition accepted a self-derived digest or MAC",
+  );
+  const reorderedSealed = planPruneTransition(
+    { phase: "empty" },
+    { type: "seal", plan: reverseObjectKeyOrder(plan) },
+    sealKey,
+  );
+  assert.deepEqual(
+    reorderedSealed.plan.seal,
+    sealed.plan.seal,
+    "prune transition seal depends on object insertion order",
+  );
+  const sameSizeNestedMutation = {
+    ...structuredClone(plan),
+    candidatePaths: [
+      "postgres/expired-two.dump",
+      "manifests/manifest-expired.json",
+    ],
+  };
+  assert.equal(
+    JSON.stringify(sameSizeNestedMutation).length,
+    JSON.stringify(plan).length,
+    "prune product causality mutant is not same-size",
+  );
+  const mutationSealed = planPruneTransition(
+    { phase: "empty" },
+    { type: "seal", plan: sameSizeNestedMutation },
+    sealKey,
+  );
+  assert.deepEqual(
+    mutationSealed.plan.seal,
+    testPrunePlanSeal(sameSizeNestedMutation, sealKey),
+    "prune transition did not authenticate the nested mutation independently",
+  );
+  assert.notEqual(mutationSealed.plan.seal.digest, sealed.plan.seal.digest);
+  assert.notEqual(mutationSealed.plan.seal.value, sealed.plan.seal.value);
 
   assert.throws(
     () => applyPruneTransition(sealed, {
@@ -2561,6 +5244,25 @@ workerTest("prune state requires a sealed plan, quarantine barrier and exact com
     }, { keys: { [sealKey.keyId]: sealKey.key } }),
     /quarantine|phase|barrier|transition/i,
   );
+  for (const [label, keys] of [
+    [
+      "wrong key bytes",
+      { [sealKey.keyId]: Buffer.alloc(PRUNE_TEST_KEY.length, 0x51) },
+    ],
+    ["unknown key id", {}],
+    ["wrong known key id", { "prune-test-v2": PRUNE_TEST_KEY }],
+  ]) {
+    assert.throws(
+      () => applyPruneTransition(sealed, {
+        type: "quarantine",
+        planDigest: sealed.plan.seal.digest,
+        quarantineDigest: "c".repeat(64),
+        artifactCount: plan.artifactCount,
+      }, { keys }),
+      /key|HMAC|MAC|seal|signature|authenticated|unknown/i,
+      `prune transition admitted ${label}`,
+    );
+  }
   const quarantined = applyPruneTransition(sealed, {
     type: "quarantine",
     planDigest: sealed.plan.seal.digest,
@@ -2781,7 +5483,7 @@ function assertExactWorkerBody({ observedBody, phaseCase, trusted }) {
     "WorkingDir",
   ]);
   assert.equal(body.Image, phase.workerImageRef, `${phaseId} image`);
-  assert.deepEqual(body.Entrypoint, ["node", "/opt/platform-docker-worker/docker-action-worker.mjs"]);
+  assert.deepEqual(body.Entrypoint, EXPECTED_WORKER_ENTRYPOINT);
   assert.deepEqual(body.Cmd, [phase.command], `${phaseId} fixed command`);
   assert.equal(body.User, "0:0", `${phaseId} must traverse root-owned 0700/0400 inputs`);
   assert.equal(body.WorkingDir, "/opt/platform-docker-worker");
@@ -3298,7 +6000,7 @@ function assertSocketlessWorkerSource(source, label) {
   );
   assert.doesNotMatch(
     decoded,
-    /\b(?:eval|fetch|WebSocket|EventSource)\s*\(|(?:\bnew\s+)?\bFunction\s*\(/,
+    /\b(?:eval|fetch|WebSocket|EventSource)\s*\(|(?:\bnew\s+)?\bFunction\s*\(|(?:\.\s*constructor|\[\s*["']constructor["']\s*\])\s*\(/,
     `${label} violates the socketless dynamic-code or global-network boundary`,
   );
   assert.doesNotMatch(
@@ -3319,11 +6021,36 @@ function assertSocketlessWorkerSource(source, label) {
     /docker\.sock|docker_host|\/containers\/(?:create|[^/]*\/start)|\/images\/create|getbuiltinmodule|createrequire|module(?:builtin)?\.?_load|module(?:builtin)?prototype\.?require/,
     `${label} reconstructs forbidden Docker Engine authority`,
   );
+  assert.equal(
+    /constructor/.test(folded)
+      && /(?:import|fetch|websocket|eventsource)/.test(folded),
+    false,
+    `${label} reconstructs a dynamic constructor and forbidden loader in any order`,
+  );
   assert.doesNotMatch(
     folded,
     /(?:spawn|exec|fork)[a-z]*.*\/(?:curl|wget|nc|ncat|socat|ssh)/,
     `${label} invokes a forbidden child_process network tool`,
   );
+  assert.doesNotMatch(
+    folded,
+    /process[^a-z0-9]*execve/,
+    `${label} violates the socketless native execve boundary`,
+  );
+  assert.equal(
+    /(?:process|child)[\s\S]*(?:stdin|stdout|stderr)/.test(folded)
+      && /constructor/.test(folded)
+      && /connect/.test(folded),
+    false,
+    `${label} reaches a stream-derived network capability`,
+  );
+  if (/(?:spawn|exec|fork)/.test(folded)) {
+    assert.doesNotMatch(
+      folded,
+      /\/(?:bin\/(?:bash|dash|sh|zsh)|usr\/bin\/env|usr\/local\/bin\/node)/,
+      `${label} violates the socketless shell, interpreter, or environment-wrapper boundary`,
+    );
+  }
   for (const specifier of staticModuleSpecifiers(decoded)) {
     if (specifier.startsWith("node:")) {
       assert.equal(
@@ -3508,7 +6235,7 @@ function expectedWorkerBodyDocument(phaseCase, trusted) {
     AttachStdin: false,
     AttachStdout: false,
     Cmd: [phase.command],
-    Entrypoint: ["node", "/opt/platform-docker-worker/docker-action-worker.mjs"],
+    Entrypoint: [...EXPECTED_WORKER_ENTRYPOINT],
     Env: Object.entries(environment).map(([name, value]) => `${name}=${value}`),
     HostConfig: expectedWorkerHostConfig(receipt, phase, phaseCase.snapshot),
     Image: phase.workerImageRef,
@@ -4378,11 +7105,43 @@ function stagedContainerPath(root, containerPath) {
 }
 
 function dockerfileLogicalLines(source) {
+  const physicalSource = String(source);
+  const physicalLines = physicalSource.split(/\r?\n/);
+  const parserDirectiveIndexes = [];
+  for (const [index, rawLine] of physicalLines.entries()) {
+    if (/^\s*#\s*(?:check|escape|syntax)\s*=/i.test(rawLine)) {
+      parserDirectiveIndexes.push(index);
+      assert.equal(
+        rawLine,
+        `# syntax=${EXPECTED_DOCKERFILE_FRONTEND_REFERENCE}`,
+        "Dockerfile parser directive is not the exact digest-pinned frontend",
+      );
+      assert.equal(
+        index,
+        0,
+        "Dockerfile frontend must be the first physical line",
+      );
+    }
+  }
+  assert.ok(
+    parserDirectiveIndexes.length <= 1,
+    "Dockerfile may contain exactly one Dockerfile frontend directive",
+  );
   const logicalLines = [];
   let pending = "";
-  for (const rawLine of String(source).split(/\r?\n/)) {
+  for (const rawLine of physicalLines) {
     const line = rawLine.trim();
     if (!line || line.startsWith("#")) continue;
+    assert.doesNotMatch(
+      line,
+      /<</,
+      "Dockerfile heredoc syntax is forbidden by the exact image manifest",
+    );
+    assert.doesNotMatch(
+      rawLine,
+      /\\[ \t]+$/,
+      "Dockerfile continuation escape must be the final physical byte",
+    );
     pending += `${pending ? " " : ""}${line.replace(/\\$/, "").trim()}`;
     if (line.endsWith("\\")) continue;
     logicalLines.push(pending);
@@ -4390,6 +7149,197 @@ function dockerfileLogicalLines(source) {
   }
   assert.equal(pending, "", "Dockerfile ended inside a continued instruction");
   return logicalLines;
+}
+
+function assertExactDockerfileFrontendDirective(dockerfileSource) {
+  const physicalLines = String(dockerfileSource).split(/\r?\n/);
+  assert.equal(
+    physicalLines[0],
+    `# syntax=${EXPECTED_DOCKERFILE_FRONTEND_REFERENCE}`,
+    "Dockerfile frontend must be the first physical line and exact digest-pinned identity",
+  );
+  assert.equal(
+    physicalLines.filter(
+      (line) => /^\s*#\s*(?:check|escape|syntax)\s*=/i.test(line),
+    ).length,
+    1,
+    "Dockerfile must contain exactly one Dockerfile frontend directive",
+  );
+}
+
+function assertExactDockerfileSupplyChainLock(lock) {
+  assert.equal(
+    lock !== null
+      && typeof lock === "object"
+      && lock.images !== null
+      && typeof lock.images === "object"
+      && !Array.isArray(lock.images),
+    true,
+    "supply-chain lock must expose one images record",
+  );
+  assert.equal(
+    lock.images["dockerfile-frontend"],
+    EXPECTED_DOCKERFILE_FRONTEND_REFERENCE,
+    "Dockerfile frontend must bind the exact dockerfile-frontend lock key",
+  );
+  assert.equal(
+    lock.images.node,
+    EXPECTED_NODE_IMAGE_REFERENCE,
+    "Dockerfile base image must bind the exact node lock key",
+  );
+  assert.notEqual(
+    lock.images["dockerfile-frontend"],
+    lock.images.node,
+    "Dockerfile frontend and Node base image lock identities must stay disjoint",
+  );
+}
+
+function dockerIgnoreRules(source) {
+  const rules = [];
+  for (const rawLine of String(source).split(/\r?\n/)) {
+    let line = rawLine.trim();
+    if (!line || line === "." || line.startsWith("#")) continue;
+    if (line.startsWith("\\#")) line = line.slice(1);
+    let negated = false;
+    if (line.startsWith("\\!")) {
+      line = line.slice(1);
+    } else if (line.startsWith("!")) {
+      negated = true;
+      line = line.slice(1);
+    }
+    line = line.replaceAll("\\", "/");
+    const directoryOnly = line.endsWith("/");
+    line = line.replace(/^\/+|\/+$/g, "");
+    if (!line || line === ".") continue;
+    assert.equal(
+      line.split("/").every((component) => component !== ".."),
+      true,
+      "Dockerignore pattern may not escape its build context",
+    );
+    rules.push({
+      directoryOnly,
+      hasSlash: line.includes("/"),
+      negated,
+      pattern: line,
+    });
+  }
+  return rules;
+}
+
+function dockerIgnoreRuleMatches(rule, candidate, isDirectory) {
+  if (rule.directoryOnly && !isDirectory) return false;
+  if (rule.hasSlash) {
+    return path.matchesGlob(candidate, rule.pattern);
+  }
+  return path.matchesGlob(path.posix.basename(candidate), rule.pattern);
+}
+
+function dockerBuildContextPathIsIncluded(relativePath, dockerignoreSource) {
+  const normalized = String(relativePath).replaceAll("\\", "/").replace(/^\.\/+/, "");
+  assert.equal(
+    normalized.length > 0
+      && !normalized.startsWith("/")
+      && normalized.split("/").every(
+        (component) => component.length > 0 && component !== "." && component !== "..",
+      ),
+    true,
+    `Docker build-context path is not one bounded relative identity: ${relativePath}`,
+  );
+  const components = normalized.split("/");
+  const prefixes = components.map((_, index) => ({
+    ignored: false,
+    isDirectory: index < components.length - 1,
+    path: components.slice(0, index + 1).join("/"),
+  }));
+  for (const rule of dockerIgnoreRules(dockerignoreSource)) {
+    for (const prefix of prefixes) {
+      if (dockerIgnoreRuleMatches(rule, prefix.path, prefix.isDirectory)) {
+        prefix.ignored = !rule.negated;
+      }
+    }
+  }
+  return prefixes.every(({ ignored }) => !ignored);
+}
+
+function assertDockerCopySourcesIncludedByDockerignore(
+  dockerfileSource,
+  dockerignoreSource,
+) {
+  const sources = [];
+  for (const instruction of dockerfileLogicalLines(dockerfileSource)) {
+    const copy = parseDockerCopyInstruction(instruction);
+    if (!copy) continue;
+    assert.equal(
+      copy.flags.some((flag) => flag.startsWith("--from=")),
+      false,
+      "Dockerignore closure does not admit cross-stage COPY sources",
+    );
+    for (const source of copy.sources) {
+      assert.doesNotMatch(
+        source,
+        /[*?[\]{}]/,
+        `Dockerfile COPY source must be one exact path: ${source}`,
+      );
+      assert.equal(
+        dockerBuildContextPathIsIncluded(source, dockerignoreSource),
+        true,
+        `Dockerignore excludes an exact Dockerfile COPY source: ${source}`,
+      );
+      sources.push(source);
+    }
+  }
+  assert.ok(sources.length > 0, "Dockerfile has no exact COPY source closure");
+  return sources.sort();
+}
+
+function canonicalProductionDockerfileInstructions() {
+  const adapterCopies = Object.keys(EXPECTED_FIXED_ADAPTERS)
+    .sort()
+    .map((command) =>
+      `COPY --chown=0:0 --chmod=0555 ${FIXED_ADAPTER_SOURCE_DIRECTORY}/${command}.mjs ${EXPECTED_FIXED_ADAPTERS[command].executable}`);
+  return [
+    `FROM ${EXPECTED_NODE_IMAGE_REFERENCE}`,
+    "WORKDIR /opt/platform-docker-broker",
+    "COPY scripts/docker-action-contract.mjs /opt/platform-docker-broker/docker-action-contract.mjs",
+    "COPY scripts/docker-action-activation.mjs /opt/platform-docker-broker/docker-action-activation.mjs",
+    "COPY scripts/docker-action-broker.mjs /opt/platform-docker-broker/docker-action-broker.mjs",
+    `COPY scripts/docker-action-worker.mjs ${WORKER_CONTAINER_PATH}`,
+    "COPY policy/docker-action-activation-policy.json /opt/platform-docker-broker/docker-action-activation-policy.json",
+    "RUN chmod 0555 /opt/platform-docker-broker/docker-action-contract.mjs /opt/platform-docker-broker/docker-action-activation.mjs /opt/platform-docker-broker/docker-action-broker.mjs /opt/platform-docker-worker/docker-action-worker.mjs && chmod 0400 /opt/platform-docker-broker/docker-action-activation-policy.json && chown -R root:root /opt/platform-docker-broker /opt/platform-docker-worker",
+    ...adapterCopies,
+    `COPY --chown=0:0 --chmod=0555 scripts/docker-action-worker-runtime-guard.mjs ${WORKER_RUNTIME_GUARD_CONTAINER_PATH}`,
+    `ENTRYPOINT ${JSON.stringify(EXPECTED_BROKER_IMAGE_ENTRYPOINT)}`,
+  ];
+}
+
+function assertFinalRuntimeGuardLayer(dockerfileSource) {
+  assertExactDockerfileFrontendDirective(dockerfileSource);
+  const allLogicalLines = dockerfileLogicalLines(dockerfileSource);
+  assert.equal(
+    canonicalProductionDockerfileInstructions().length === allLogicalLines.length
+      && canonicalProductionDockerfileInstructions().every(
+        (instruction, index) => instruction === allLogicalLines[index],
+      ),
+    true,
+    "Dockerfile does not match the one exact canonical immutable production image manifest",
+  );
+}
+
+function assertFixtureFinalRuntimeGuardLayer(dockerfileSource) {
+  const allLogicalLines = dockerfileLogicalLines(dockerfileSource);
+  const exactFixtureManifest = [
+    "FROM node:fixture",
+    `COPY --chown=0:0 --chmod=0555 scripts/docker-action-worker-runtime-guard.mjs ${WORKER_RUNTIME_GUARD_CONTAINER_PATH}`,
+    `ENTRYPOINT ${JSON.stringify(EXPECTED_BROKER_IMAGE_ENTRYPOINT)}`,
+  ];
+  assert.equal(
+    exactFixtureManifest.length === allLogicalLines.length
+      && exactFixtureManifest.every(
+        (instruction, index) => instruction === allLogicalLines[index],
+      ),
+    true,
+    "Dockerfile does not match the exact fixture-only canonical immutable image manifest",
+  );
 }
 
 function dockerfileInstructionRecords(source) {
@@ -4433,6 +7383,14 @@ function fixedAdapterPackageAssessment({
   const admittedCopyIndexes = new Set();
   const adapterCopyIndexes = [];
   const requiredFlags = ["--chown=0:0", "--chmod=0555"].sort();
+  const exactGuardCopy =
+    `COPY --chown=0:0 --chmod=0555 scripts/docker-action-worker-runtime-guard.mjs ${WORKER_RUNTIME_GUARD_CONTAINER_PATH}`;
+  const exactGuardCopies = finalStage.filter(
+    ({ instruction }) => instruction === exactGuardCopy,
+  );
+  if (exactGuardCopies.length === 1) {
+    admittedCopyIndexes.add(exactGuardCopies[0].index);
+  }
 
   for (const [command, expected] of Object.entries(EXPECTED_FIXED_ADAPTERS)) {
     const issueCount = issues.length;
@@ -4574,12 +7532,26 @@ function escapeRegExp(value) {
 }
 
 function stageDockerWorkerImageLayout(t, prefix, {
-  dockerfile = path.join(path.resolve(scriptDir, ".."), "docker", "docker-action-broker.Dockerfile"),
   repositoryRoot = path.resolve(scriptDir, ".."),
+  dockerignore = path.join(repositoryRoot, ".dockerignore"),
+  dockerfile = path.join(path.resolve(scriptDir, ".."), "docker", "docker-action-broker.Dockerfile"),
 } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
   t.after(() => fs.rmSync(root, { force: true, recursive: true }));
-  const logicalLines = dockerfileLogicalLines(fs.readFileSync(dockerfile, "utf8"));
+  const dockerfileSource = fs.readFileSync(dockerfile, "utf8");
+  const dockerignoreSource = fs.existsSync(dockerignore)
+    ? fs.readFileSync(dockerignore, "utf8")
+    : "";
+  assertDockerCopySourcesIncludedByDockerignore(
+    dockerfileSource,
+    dockerignoreSource,
+  );
+  const allLogicalLines = dockerfileLogicalLines(dockerfileSource);
+  const finalFromIndex = allLogicalLines.findLastIndex(
+    (instruction) => /^FROM(?:\s|$)/i.test(instruction),
+  );
+  assert.ok(finalFromIndex >= 0, "Dockerfile stage has no final FROM instruction");
+  const logicalLines = allLogicalLines.slice(finalFromIndex);
   let copyCount = 0;
   for (const instruction of logicalLines) {
     const match = instruction.match(/^COPY\s+(.+)$/i);
@@ -4638,9 +7610,22 @@ function stageDockerWorkerImageLayout(t, prefix, {
 function socketlessRuntimeGuardSource() {
   return `
 import childProcess from "node:child_process";
+import { EventEmitter } from "node:events";
 import moduleBuiltin, { syncBuiltinESMExports } from "node:module";
+import { PassThrough } from "node:stream";
+import { types as utilTypes } from "node:util";
 
 const ALLOWED_BUILTINS = new Set(${JSON.stringify([...ALLOWED_WORKER_BUILTINS].sort())});
+const EXPECTED_COMMAND_BY_ACTION_PHASE = Object.freeze(
+  ${JSON.stringify(EXPECTED_COMMAND_BY_ACTION_PHASE)},
+);
+const EXPECTED_EXECUTABLE_BY_COMMAND = Object.freeze(
+  ${JSON.stringify(Object.fromEntries(
+    Object.entries(EXPECTED_FIXED_ADAPTERS).map(
+      ([command, { executable }]) => [command, executable],
+    ),
+  ))},
+);
 
 if (process.platform === "darwin" && Object.hasOwn(process.env, "__CF_USER_TEXT_ENCODING")) {
   if (!/^0x[0-9a-f]+:0x[0-9a-f]+:0x[0-9a-f]+$/i.test(process.env.__CF_USER_TEXT_ENCODING)) {
@@ -4662,7 +7647,7 @@ const registerHooks = moduleBuiltin.registerHooks?.bind(moduleBuiltin);
 if (typeof registerHooks !== "function") {
   throw new Error("socketless runtime guard requires module.registerHooks");
 }
-globalThis[Symbol.for("platform.worker.socketless-resolution-hook")] = registerHooks({
+const resolutionHookRegistration = registerHooks({
   resolve(specifier, context, nextResolve) {
     if (String(specifier).startsWith("node:")) {
       if (!ALLOWED_BUILTINS.has(String(specifier))) {
@@ -4680,8 +7665,38 @@ globalThis[Symbol.for("platform.worker.socketless-resolution-hook")] = registerH
     throw new Error("socketless runtime guard blocked bare or remote module resolution: " + specifier);
   },
 });
+if (typeof resolutionHookRegistration?.deregister !== "function") {
+  throw new Error("socketless runtime guard did not retain its lexical resolution hook");
+}
 
 const OriginalFunction = globalThis.Function;
+const FunctionPrototype = OriginalFunction.prototype;
+const AsyncFunctionPrototype = Object.getPrototypeOf(async function () {});
+const GeneratorFunctionPrototype = Object.getPrototypeOf(function* () {});
+const AsyncGeneratorFunctionPrototype = Object.getPrototypeOf(async function* () {});
+const constructorIntrinsics = [
+  ["Function", FunctionPrototype.constructor, FunctionPrototype],
+  ["AsyncFunction", AsyncFunctionPrototype.constructor, AsyncFunctionPrototype],
+  ["GeneratorFunction", GeneratorFunctionPrototype.constructor, GeneratorFunctionPrototype],
+  [
+    "AsyncGeneratorFunction",
+    AsyncGeneratorFunctionPrototype.constructor,
+    AsyncGeneratorFunctionPrototype,
+  ],
+];
+const guardedConstructors = new Map();
+for (const [name, intrinsic, prototype] of constructorIntrinsics) {
+  const guarded = new Proxy(intrinsic, {
+    apply: blocked(name),
+    construct: blocked(name),
+  });
+  Object.defineProperty(prototype, "constructor", {
+    configurable: true,
+    value: guarded,
+    writable: true,
+  });
+  guardedConstructors.set(name, guarded);
+}
 for (const name of ["eval", "fetch", "WebSocket", "EventSource"]) {
   Object.defineProperty(globalThis, name, {
     configurable: true,
@@ -4691,13 +7706,18 @@ for (const name of ["eval", "fetch", "WebSocket", "EventSource"]) {
 }
 Object.defineProperty(globalThis, "Function", {
   configurable: true,
-  value: new Proxy(OriginalFunction, {
-    apply: blocked("Function"),
-    construct: blocked("Function"),
-  }),
+  value: guardedConstructors.get("Function"),
   writable: true,
 });
-for (const name of ["getBuiltinModule", "binding", "_linkedBinding", "dlopen"]) {
+for (const name of [
+  "getBuiltinModule",
+  "binding",
+  "_linkedBinding",
+  "dlopen",
+  "execve",
+  "_getActiveHandles",
+  "_getActiveRequests",
+]) {
   Object.defineProperty(process, name, {
     configurable: true,
     value: blocked("process." + name),
@@ -4710,25 +7730,261 @@ moduleBuiltin.prototype.require = blocked("module.require");
 moduleBuiltin.register = blocked("module.register");
 moduleBuiltin.registerHooks = blocked("module.registerHooks");
 
-const childApis = [
+const rawStdout = process.stdout;
+const rawStderr = process.stderr;
+function safeWritableFacade(rawStream, label) {
+  const facade = Object.create(null);
+  Object.defineProperties(facade, {
+    isTTY: {
+      enumerable: true,
+      value: rawStream?.isTTY === true,
+    },
+    write: {
+      enumerable: true,
+      value: (...arguments_) => {
+        if (!rawStream || typeof rawStream.write !== "function") {
+          throw new Error("socketless runtime guard has no " + label + " writer");
+        }
+        return Reflect.apply(rawStream.write, rawStream, arguments_);
+      },
+    },
+  });
+  return Object.freeze(facade);
+}
+const safeStdin = Object.create(null);
+Object.defineProperties(safeStdin, {
+  isTTY: { enumerable: true, value: false },
+  read: { enumerable: true, value: blocked("process.stdin.read") },
+});
+Object.freeze(safeStdin);
+for (const [name, value] of [
+  ["stdin", safeStdin],
+  ["stdout", safeWritableFacade(rawStdout, "stdout")],
+  ["stderr", safeWritableFacade(rawStderr, "stderr")],
+]) {
+  Object.defineProperty(process, name, {
+    configurable: true,
+    enumerable: true,
+    value,
+    writable: false,
+  });
+}
+
+const guardedEnvironmentEntries = Object.entries(process.env)
+  .sort(([left], [right]) => left.localeCompare(right));
+const guardedProcessEnvironment = JSON.stringify(
+  Object.fromEntries(guardedEnvironmentEntries),
+);
+const guardOwnedEnvironment = Object.freeze(
+  Object.fromEntries(guardedEnvironmentEntries),
+);
+const guardOwnedArgv = Object.freeze([]);
+const guardOwnedStdio = Object.freeze(["ignore", "pipe", "pipe"]);
+const guardOwnedOptions = Object.freeze({
+  env: guardOwnedEnvironment,
+  shell: false,
+  stdio: guardOwnedStdio,
+});
+
+function hasExactDataDescriptor(descriptor, value) {
+  return descriptor !== undefined
+    && Object.hasOwn(descriptor, "value")
+    && descriptor.configurable === true
+    && descriptor.enumerable === true
+    && descriptor.writable === true
+    && Object.is(descriptor.value, value);
+}
+
+function hasExactEmptyArrayShape(value) {
+  if (
+    !Array.isArray(value)
+    || utilTypes.isProxy(value)
+    || Object.getPrototypeOf(value) !== Array.prototype
+    || JSON.stringify(Reflect.ownKeys(value)) !== JSON.stringify(["length"])
+  ) {
+    return false;
+  }
+  const descriptor = Object.getOwnPropertyDescriptor(value, "length");
+  return descriptor !== undefined
+    && Object.hasOwn(descriptor, "value")
+    && descriptor.configurable === false
+    && descriptor.enumerable === false
+    && descriptor.writable === true
+    && descriptor.value === 0;
+}
+
+function hasExactStdioShape(value) {
+  if (
+    !Array.isArray(value)
+    || utilTypes.isProxy(value)
+    || Object.getPrototypeOf(value) !== Array.prototype
+    || JSON.stringify(Reflect.ownKeys(value))
+      !== JSON.stringify(["0", "1", "2", "length"])
+  ) {
+    return false;
+  }
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  return hasExactDataDescriptor(descriptors["0"], "ignore")
+    && hasExactDataDescriptor(descriptors["1"], "pipe")
+    && hasExactDataDescriptor(descriptors["2"], "pipe")
+    && descriptors.length?.configurable === false
+    && descriptors.length?.enumerable === false
+    && descriptors.length?.writable === true
+    && descriptors.length?.value === 3;
+}
+
+function hasExactOptionsShape(value) {
+  if (
+    value === null
+    || typeof value !== "object"
+    || utilTypes.isProxy(value)
+    || Object.getPrototypeOf(value) !== Object.prototype
+    || JSON.stringify(Reflect.ownKeys(value).sort())
+      !== JSON.stringify(["env", "shell", "stdio"])
+  ) {
+    return false;
+  }
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  return hasExactDataDescriptor(descriptors.env, process.env)
+    && hasExactDataDescriptor(descriptors.shell, false)
+    && hasExactDataDescriptor(descriptors.stdio, descriptors.stdio?.value)
+    && hasExactStdioShape(descriptors.stdio.value);
+}
+
+const originalSpawn = childProcess.spawn.bind(childProcess);
+const ChildProcessPrototype = childProcess.ChildProcess.prototype;
+const originalPrototypeSpawnDescriptor =
+  Object.getOwnPropertyDescriptor(ChildProcessPrototype, "spawn");
+if (
+  !originalPrototypeSpawnDescriptor
+  || typeof originalPrototypeSpawnDescriptor.value !== "function"
+) {
+  throw new Error("socketless runtime guard requires ChildProcess.prototype.spawn");
+}
+let prototypeSpawnPermit = false;
+const guardedPrototypeSpawnDescriptor = {
+  ...originalPrototypeSpawnDescriptor,
+  value: function (...arguments_) {
+    if (!prototypeSpawnPermit) {
+      throw new Error(
+        "socketless runtime guard blocked ChildProcess.prototype.spawn",
+      );
+    }
+    prototypeSpawnPermit = false;
+    return Reflect.apply(
+      originalPrototypeSpawnDescriptor.value,
+      this,
+      arguments_,
+    );
+  },
+};
+Object.defineProperty(
+  ChildProcessPrototype,
+  "spawn",
+  guardedPrototypeSpawnDescriptor,
+);
+for (const api of [
   "exec",
   "execFile",
   "execFileSync",
   "execSync",
   "fork",
-  "spawn",
   "spawnSync",
-];
-const forbiddenTool = /(?:^|[\\/\\s])(?:curl|wget|nc|ncat|socat|ssh|telnet|openssl)(?:$|[\\s])/i;
-for (const api of childApis) {
-  const original = childProcess[api].bind(childProcess);
-  childProcess[api] = (executable, ...args) => {
-    if (forbiddenTool.test(String(executable))) {
-      throw new Error("socketless runtime guard blocked child_process network tool");
-    }
-    return original(executable, ...args);
-  };
+]) {
+  childProcess[api] = blocked("non-admitted child_process API: " + api);
 }
+let admittedSpawnCount = 0;
+
+function spawnWithGuardOwnedInputs(executable) {
+  if (prototypeSpawnPermit) {
+    throw new Error("socketless runtime guard detected a nested spawn permit");
+  }
+  prototypeSpawnPermit = true;
+  try {
+    const child = originalSpawn(
+      executable,
+      guardOwnedArgv,
+      guardOwnedOptions,
+    );
+    if (prototypeSpawnPermit) {
+      throw new Error(
+        "socketless runtime guard spawn did not cross its lexical prototype permit",
+      );
+    }
+    return child;
+  } finally {
+    prototypeSpawnPermit = false;
+  }
+}
+
+function safeReadableFacade(rawStream, label) {
+  if (
+    rawStream === null
+    || typeof rawStream !== "object"
+    || typeof rawStream.on !== "function"
+  ) {
+    throw new Error("socketless runtime guard received no " + label + " stream");
+  }
+  const safeStream = new PassThrough();
+  rawStream.on("data", (chunk) => safeStream.write(chunk));
+  rawStream.on("end", () => safeStream.end());
+  rawStream.on("error", (error) => safeStream.destroy(error));
+  return safeStream;
+}
+
+function safeChildFacade(rawChild) {
+  if (
+    rawChild === null
+    || typeof rawChild !== "object"
+    || typeof rawChild.on !== "function"
+  ) {
+    throw new Error("socketless runtime guard received no child process");
+  }
+  const safeChild = new EventEmitter();
+  safeChild.stdin = null;
+  safeChild.stdout = safeReadableFacade(rawChild.stdout, "stdout");
+  safeChild.stderr = safeReadableFacade(rawChild.stderr, "stderr");
+  safeChild.pid = Number.isSafeInteger(rawChild.pid) ? rawChild.pid : undefined;
+  safeChild.kill = (signal = "SIGTERM") => {
+    if (signal !== "SIGTERM" && signal !== "SIGKILL") {
+      throw new Error("socketless runtime guard rejected child signal");
+    }
+    if (typeof rawChild.kill !== "function") return false;
+    return Reflect.apply(rawChild.kill, rawChild, [signal]);
+  };
+  for (const event of ["close", "disconnect", "error", "exit"]) {
+    rawChild.on(event, (...arguments_) => safeChild.emit(event, ...arguments_));
+  }
+  return safeChild;
+}
+
+childProcess.spawn = (executable, argv, options) => {
+  const currentProcessEnvironment = JSON.stringify(
+    Object.fromEntries(
+      Object.entries(process.env).sort(([left], [right]) => left.localeCompare(right)),
+    ),
+  );
+  const action = process.env.PLATFORM_DOCKER_ACTION;
+  const phaseId = process.env.PLATFORM_DOCKER_PHASE_ID;
+  const command = EXPECTED_COMMAND_BY_ACTION_PHASE[action + "\\0" + phaseId];
+  const expectedExecutable = EXPECTED_EXECUTABLE_BY_COMMAND[command];
+  if (
+    typeof executable !== "string"
+    || typeof command !== "string"
+    || executable !== expectedExecutable
+    || !hasExactEmptyArrayShape(argv)
+    || !hasExactOptionsShape(options)
+    || Object.hasOwn(process.env, "NODE_OPTIONS")
+    || currentProcessEnvironment !== guardedProcessEnvironment
+    || admittedSpawnCount !== 0
+  ) {
+    throw new Error(
+      "socketless runtime guard rejected non-exact fixed adapter spawn",
+    );
+  }
+  admittedSpawnCount += 1;
+  return safeChildFacade(spawnWithGuardOwnedInputs(executable));
+};
 syncBuiltinESMExports();
 `;
 }
@@ -4748,6 +8004,7 @@ import fs from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import path from "node:path";
 import { PassThrough } from "node:stream";
+import { types as utilTypes } from "node:util";
 
 const TRACE_PATH = ${JSON.stringify(tracePath)};
 const EXPECTED_ADAPTERS = ${JSON.stringify(EXPECTED_FIXED_ADAPTERS)};
@@ -4761,8 +8018,6 @@ const STAGED_ROOT = ${JSON.stringify(stagedRoot)};
 const PRELOAD_SENTINEL = Symbol.for("platform.worker.fixed-adapter-preload-count");
 globalThis[PRELOAD_SENTINEL] = (globalThis[PRELOAD_SENTINEL] ?? 0) + 1;
 const PRELOAD_COUNT = globalThis[PRELOAD_SENTINEL];
-const SOCKETLESS_GUARD_COUNT =
-  globalThis[Symbol.for("platform.worker.socketless-guard-count")] ?? 0;
 
 function sortedEnvironment(value) {
   return Object.fromEntries(
@@ -4775,7 +8030,9 @@ function exactJson(left, right) {
 }
 
 function expectedPhaseContext() {
-  if (SOCKETLESS_GUARD_COUNT !== 1) {
+  const socketlessGuardCount =
+    globalThis[Symbol.for("platform.worker.socketless-guard-count")] ?? 0;
+  if (socketlessGuardCount !== 1) {
     throw new Error("socketless runtime guard was not loaded exactly once");
   }
   const phaseId = process.env.PLATFORM_DOCKER_PHASE_ID;
@@ -4792,12 +8049,121 @@ function expectedPhaseContext() {
   if (!exactJson(processEnvironment, sortedEnvironment(expectedEnvironment))) {
     throw new Error("worker process environment diverged from the independent body oracle");
   }
-  return { command, expectedEnvironment, output, phaseId, processEnvironment };
+  return {
+    command,
+    expectedEnvironment,
+    output,
+    phaseId,
+    processEnvironment,
+    socketlessGuardCount,
+  };
 }
 
-function normalizedInvocation(argv, options) {
-  if (Array.isArray(argv)) return { argv, options: options ?? {} };
-  return { argv: [], options: argv ?? options ?? {} };
+function exactFrozenDataDescriptor(descriptor, value) {
+  return descriptor !== undefined
+    && Object.hasOwn(descriptor, "value")
+    && descriptor.configurable === false
+    && descriptor.enumerable === true
+    && descriptor.writable === false
+    && Object.is(descriptor.value, value);
+}
+
+function assertGuardOwnedInvocationShape(options, context, expected) {
+  if (
+    options === null
+    || typeof options !== "object"
+    || utilTypes.isProxy(options)
+    || JSON.stringify(Reflect.ownKeys(options).sort())
+      !== JSON.stringify([
+        "args",
+        "cwd",
+        "detached",
+        "env",
+        "envPairs",
+        "file",
+        "shell",
+        "stdio",
+        "windowsHide",
+        "windowsVerbatimArguments",
+      ])
+  ) {
+    throw new Error("fixed adapter did not receive the exact normalized spawn record");
+  }
+  const optionDescriptors = Object.getOwnPropertyDescriptors(options);
+  if (
+    Reflect.ownKeys(optionDescriptors).some((key) =>
+      !Object.hasOwn(optionDescriptors[key], "value")
+      || typeof optionDescriptors[key].get === "function"
+      || typeof optionDescriptors[key].set === "function")
+  ) {
+    throw new Error("fixed adapter normalized options contain an accessor field");
+  }
+  if (
+    options.cwd !== undefined
+    || options.detached !== false
+    || options.file !== expected.executable
+    || options.shell !== false
+    || options.windowsHide !== false
+    || options.windowsVerbatimArguments !== false
+    || !Array.isArray(options.args)
+    || utilTypes.isProxy(options.args)
+    || !exactJson(options.args, [expected.executable])
+  ) {
+    throw new Error("fixed adapter normalized process identity diverged");
+  }
+  const environment = optionDescriptors.env.value;
+  if (
+    environment === process.env
+    || environment === null
+    || typeof environment !== "object"
+    || utilTypes.isProxy(environment)
+    || Object.getPrototypeOf(environment) !== Object.prototype
+    || !Object.isFrozen(environment)
+  ) {
+    throw new Error("fixed adapter environment is not one guard-owned snapshot");
+  }
+  const environmentDescriptors = Object.getOwnPropertyDescriptors(environment);
+  if (
+    Reflect.ownKeys(environmentDescriptors).some((key) =>
+      !exactFrozenDataDescriptor(
+        environmentDescriptors[key],
+        environmentDescriptors[key]?.value,
+      ))
+    || !exactJson(
+      sortedEnvironment(environment),
+      sortedEnvironment(context.expectedEnvironment),
+    )
+  ) {
+    throw new Error("fixed adapter environment diverged from the worker process environment");
+  }
+  const stdio = optionDescriptors.stdio.value;
+  const stdioDescriptors = Object.getOwnPropertyDescriptors(stdio);
+  if (
+    !Array.isArray(stdio)
+    || utilTypes.isProxy(stdio)
+    || Object.getPrototypeOf(stdio) !== Array.prototype
+    || !Object.isFrozen(stdio)
+    || JSON.stringify(Reflect.ownKeys(stdio))
+      !== JSON.stringify(["0", "1", "2", "length"])
+    || !exactFrozenDataDescriptor(stdioDescriptors["0"], "ignore")
+    || !exactFrozenDataDescriptor(stdioDescriptors["1"], "pipe")
+    || !exactFrozenDataDescriptor(stdioDescriptors["2"], "pipe")
+    || stdioDescriptors.length?.value !== 3
+    || stdioDescriptors.length?.writable !== false
+  ) {
+    throw new Error("fixed adapter stdio is not the exact guard-owned tuple");
+  }
+  const expectedEnvironmentPairs = Object.entries(context.expectedEnvironment)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([name, value]) => name + "=" + value);
+  if (
+    !Array.isArray(options.envPairs)
+    || utilTypes.isProxy(options.envPairs)
+    || !exactJson(options.envPairs, expectedEnvironmentPairs)
+  ) {
+    throw new Error("fixed adapter normalized environment pairs diverged");
+  }
+  return environment;
 }
 
 function encodedOutput(output) {
@@ -4806,22 +8172,23 @@ function encodedOutput(output) {
   return Buffer.from(JSON.stringify(output) + "\\n");
 }
 
-function assertExactInvocation(api, executable, argv, options) {
+function assertExactInvocation(options) {
   const context = expectedPhaseContext();
   const expected = EXPECTED_ADAPTERS[context.command];
   if (!expected) throw new Error("fixed adapter command has no exact oracle");
+  const effectiveEnvironment = assertGuardOwnedInvocationShape(
+    options,
+    context,
+    expected,
+  );
   const actual = {
-    api,
-    executable: String(executable),
-    argv: argv.map(String),
-    shell: options?.shell ?? null,
+    api: "spawn",
+    executable: options.file,
+    argv: options.args.slice(1),
+    shell: options.shell,
   };
   if (!exactJson(actual, expected)) {
     throw new Error("fixed adapter invocation diverged from its exact code-owned identity");
-  }
-  const effectiveEnvironment = sortedEnvironment(options?.env ?? process.env);
-  if (!exactJson(effectiveEnvironment, sortedEnvironment(context.expectedEnvironment))) {
-    throw new Error("fixed adapter environment diverged from the worker process environment");
   }
   const stagedExecutable = path.resolve(
     STAGED_ROOT,
@@ -4840,7 +8207,11 @@ function assertExactInvocation(api, executable, argv, options) {
   ) {
     throw new Error("fixed adapter source bytes diverged from the exact adapter contract");
   }
-  return { actual, context, effectiveEnvironment };
+  return {
+    actual,
+    context,
+    effectiveEnvironment: sortedEnvironment(effectiveEnvironment),
+  };
 }
 
 function record(validated) {
@@ -4850,36 +8221,27 @@ function record(validated) {
     phaseId: validated.context.phaseId,
     preloadCount: PRELOAD_COUNT,
     processEnvironment: validated.context.processEnvironment,
-    socketlessGuardCount: SOCKETLESS_GUARD_COUNT,
+    socketlessGuardCount: validated.context.socketlessGuardCount,
   }) + "\\n");
 }
 
-function asynchronousChild(stdout) {
-  const child = new EventEmitter();
+function asynchronousChild(child, stdout) {
   child.pid = 4242;
-  child.stdin = new PassThrough();
+  child.stdin = null;
   child.stdout = new PassThrough();
   child.stderr = new PassThrough();
-  child.kill = () => true;
   queueMicrotask(() => {
     child.stdout.end(stdout);
     child.stderr.end();
     child.emit("exit", EXIT_STATUS, null);
     child.emit("close", EXIT_STATUS, null);
   });
-  return child;
 }
 
-childProcess.spawn = (executable, argv = [], options = {}) => {
-  const normalized = normalizedInvocation(argv, options);
-  const validated = assertExactInvocation(
-    "spawn",
-    executable,
-    normalized.argv,
-    normalized.options,
-  );
+childProcess.ChildProcess.prototype.spawn = function (options) {
+  const validated = assertExactInvocation(options);
   record(validated);
-  return asynchronousChild(encodedOutput(validated.context.output));
+  asynchronousChild(this, encodedOutput(validated.context.output));
 };
 
 for (const api of ["exec", "execFile", "execFileSync", "execSync", "fork", "spawnSync"]) {
@@ -4985,6 +8347,34 @@ function testHmacBase64Url(key, value) {
 
 function testManifestDigest(document) {
   return testCryptoSha256(JSON.stringify(testCanonicalBackupValue(document)));
+}
+
+function testPrunePlanUnsignedValue(plan) {
+  const unsigned = structuredClone(plan);
+  delete unsigned.seal;
+  return testCanonicalBackupValue(unsigned);
+}
+
+function testPrunePlanDigest(plan) {
+  const canonical = JSON.stringify(testPrunePlanUnsignedValue(plan));
+  return testCryptoSha256(`${PRUNE_PLAN_DIGEST_DOMAIN}${canonical}`);
+}
+
+function testPrunePlanMac(plan, { keyId, key }, digest = testPrunePlanDigest(plan)) {
+  return testHmacBase64Url(
+    key,
+    `${PRUNE_PLAN_MAC_DOMAIN}${keyId}\0${plan.planId}\0${digest}\0`,
+  );
+}
+
+function testPrunePlanSeal(plan, key) {
+  const digest = testPrunePlanDigest(plan);
+  return {
+    algorithm: "HMAC-SHA256",
+    digest,
+    keyId: key.keyId,
+    value: testPrunePlanMac(plan, key, digest),
+  };
 }
 
 function testCanonicalBackupValue(value) {

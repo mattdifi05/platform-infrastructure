@@ -15,6 +15,7 @@ import * as client from "./docker-action-client.mjs";
 import {
   buildFixtureActionResultV2,
   buildFixturePhaseOutputV2,
+  buildFixtureSignedActionRequestV2,
   buildFixtureTrustedContextV2,
   buildFixtureVolumeInspect,
   fixtureCapabilityKey,
@@ -575,6 +576,193 @@ test("RED v2: real UDS consumer binds result.action to response.action and reque
   }
 });
 
+test("test-only canonical identity-collision fixtures are fully re-digested and re-MACed", () => {
+  const fixture = canonicalIdentityCollisionFixture();
+
+  assert.equal(fixture.request.action, fixture.expectedAction);
+  assert.equal(
+    JSON.stringify(fixture.request),
+    canonicalJsonOracle(fixture.request),
+    "the independently signed request control must already be recursively canonical",
+  );
+  assert.equal(fixture.control.action, fixture.expectedAction);
+  assert.equal(fixture.control.result.action, fixture.expectedAction);
+  assert.equal(
+    fixture.control.result.job.jobId,
+    fixture.expectedJobId,
+  );
+  assert.equal(
+    fixture.control.result.phases[0].phaseId,
+    fixture.expectedPhaseId,
+  );
+  assertCanonicalIdentityResponseSeal(
+    fixture.control,
+    fixture.request,
+    fixture.capabilityKey,
+  );
+
+  assert.deepEqual(
+    fixture.mutations.map(({ label }) => label),
+    [
+      "action exact prefix plus slash child",
+      "action exact prefix plus dotted nested identity",
+      "job identity with the exact job as a prefix",
+      "job identity with the exact job as a suffix",
+      "phase identity with the exact phase as a prefix",
+      "phase identity with the exact phase as a suffix",
+    ],
+    "the hostile fixture matrix must keep every independently required collision class active",
+  );
+  assert.deepEqual(
+    fixture.mutations.map(({ boundary }) => boundary),
+    [
+      "grammar",
+      "exact-identity",
+      "exact-identity",
+      "exact-identity",
+      "exact-identity",
+      "exact-identity",
+    ],
+    "slash-child is the explicit grammar fail-closed control; every other affix is a valid exact-identity collision",
+  );
+
+  for (const mutation of fixture.mutations) {
+    const {
+      candidate,
+      candidateIdentity,
+      expectedIdentity,
+      layer,
+      relationship,
+      syntaxPattern,
+    } = mutation;
+    assert.notEqual(
+      candidateIdentity,
+      expectedIdentity,
+      `${mutation.label} must be a distinct canonical identity`,
+    );
+    if (relationship === "prefix") {
+      assert.equal(
+        candidateIdentity.startsWith(expectedIdentity),
+        true,
+        `${mutation.label} must survive a startsWith identity-blind consumer`,
+      );
+    } else {
+      assert.equal(
+        candidateIdentity.endsWith(expectedIdentity),
+        true,
+        `${mutation.label} must survive an endsWith identity-blind consumer`,
+      );
+    }
+    if (syntaxPattern) {
+      assert.match(
+        candidateIdentity,
+        syntaxPattern,
+        `${mutation.label} must itself remain a syntactically valid ${layer} identity`,
+      );
+    }
+    assert.equal(
+      JSON.stringify(candidate),
+      canonicalJsonOracle(candidate),
+      `${mutation.label} must remain recursively canonical on the raw wire`,
+    );
+    assertCanonicalIdentityResponseSeal(
+      candidate,
+      fixture.request,
+      fixture.capabilityKey,
+    );
+    assert.equal(
+      affixIdentityBlindResponseMutantAccepts(
+        candidate,
+        fixture.control,
+        fixture.request,
+        mutation,
+        fixture.capabilityKey,
+      ),
+      true,
+      `${mutation.label} must survive a consumer that enforces every non-identity field but uses affix matching`,
+    );
+    assert.notEqual(
+      candidate.resultSha256,
+      fixture.control.resultSha256,
+      `${mutation.label} must change the independently sealed result`,
+    );
+    assert.notEqual(
+      candidate.mac,
+      fixture.control.mac,
+      `${mutation.label} must carry a fresh response MAC`,
+    );
+    if (layer === "job") {
+      assert.equal(
+        candidate.result.job.jobSha256,
+        fixture.control.result.job.jobSha256,
+        `${mutation.label} must preserve the exact claimed-byte digest`,
+      );
+      assert.notEqual(
+        candidate.result.phases[0].outputSha256,
+        fixture.control.result.phases[0].outputSha256,
+        `${mutation.label} must also re-digest the changed worker output identity`,
+      );
+    } else if (layer === "phase") {
+      assert.deepEqual(
+        candidate.result.phases[0].output,
+        fixture.control.result.phases[0].output,
+        `${mutation.label} must isolate the phase identity without changing output semantics`,
+      );
+    } else {
+      assert.deepEqual(
+        candidate.result.phases,
+        fixture.control.result.phases,
+        `${mutation.label} must isolate the action identities without changing the phase plan`,
+      );
+    }
+  }
+
+  assert.deepEqual(
+    fixture.control,
+    fixture.producerControlSnapshot,
+    "constructing hostile identities must not mutate the admitted producer control",
+  );
+});
+
+test("RED v2: real UDS consumer rejects fully sealed action, job and phase affix collisions", async (t) => {
+  const fixture = canonicalIdentityCollisionFixture();
+  const admitted = await exchangeWithLocalBroker(
+    fixture.request,
+    fixture.control,
+    {
+      capabilityKey: fixture.capabilityKey,
+      responseFrame: (response) => `${canonicalJsonOracle(response)}\n`,
+    },
+  );
+  assert.deepEqual(
+    admitted,
+    fixture.control,
+    "the exact producer control must reach and pass the real response consumer first",
+  );
+
+  for (const mutation of fixture.mutations) {
+    await t.test(mutation.label, async () => {
+      const controlSnapshot = structuredClone(fixture.control);
+      await assert.rejects(
+        () => exchangeWithLocalBroker(
+          fixture.request,
+          mutation.candidate,
+          {
+            capabilityKey: fixture.capabilityKey,
+            responseFrame: (response) => `${canonicalJsonOracle(response)}\n`,
+          },
+        ),
+        `${mutation.label} must be rejected after the real canonical response exchange`,
+      );
+      assert.deepEqual(
+        fixture.control,
+        controlSnapshot,
+        `${mutation.label} rejection must not alter the admitted producer state`,
+      );
+    });
+  }
+});
+
 testWhenProductionExports(
   [
     [actionContract, "normalizeActionResponse"],
@@ -758,6 +946,284 @@ testWhenProductionExports(
       rejected,
       "semantic rejection",
     );
+  },
+);
+
+testWhenProductionExports(
+  injectedAssemblyRequirements(),
+  "RED v2: request producer cannot turn action affix collisions into broker side effects",
+  async (t) => {
+    const expectedAction = "backup.prune.plan";
+    const capabilityKey = fixtureCapabilityKey(expectedAction);
+    const { trusted } = buildFixtureTrustedContextV2({
+      allowedActions: [expectedAction],
+      now: NOW,
+    });
+    const control = buildClientRequest("prune-manifest-backups-plan", [], {
+      runtimeIntentId: trusted.intent.intentId,
+      activeReceiptSha256: trusted.receiptDigest,
+      combinedRenderSha256: trusted.receipt.combinedRenderSha256,
+      capabilityKey,
+      now: NOW,
+      requestId: "123e4567-e89b-42d3-a456-426614174104",
+      nonce: "F".repeat(43),
+    });
+    assert.equal(control.action, expectedAction);
+    assert.equal(
+      control.mac,
+      domainMacWithKey(
+        REQUEST_MAC_DOMAIN,
+        omit(control, "mac"),
+        capabilityKey,
+      ),
+      "the exact request producer control must carry an independently verified request MAC",
+    );
+
+    const assembly = await realBrokerAssembly(t, {
+      capabilityKey,
+      outcomes: [{
+        rejection: "exact producer control reached the semantic executor",
+      }],
+      trusted,
+    });
+    assert.equal(
+      assembly.semanticExecutorFactoryCalls,
+      1,
+      "the control must prove that the injected semantic factory owns this assembly",
+    );
+    assert.deepEqual(
+      assembly.replayEvents,
+      ["recover"],
+      "the control must prove that the injected replay store owns initialization",
+    );
+    assert.equal(assembly.capabilityProviderCalls, 0);
+    assert.equal(assembly.trustedContextProviderCalls, 0);
+    assert.deepEqual(assembly.executedActions, []);
+    assert.equal(
+      fs.existsSync(assembly.stateDir),
+      false,
+      "the injected replay store must keep the default persistent state directory unmaterialized",
+    );
+
+    const admittedControl = await sendActionRequest(
+      control,
+      assembly.socketPath,
+      capabilityKey,
+    );
+    assert.equal(admittedControl.status, "rejected");
+    assert.equal(admittedControl.statusCode, 403);
+    assert.equal(admittedControl.errorCode, "ACTION_REJECTED");
+    assert.equal(admittedControl.result, null);
+    assert.equal(assembly.capabilityProviderCalls, 1);
+    assert.equal(assembly.trustedContextProviderCalls, 1);
+    assert.deepEqual(assembly.executedActions, [expectedAction]);
+    assert.ok(
+      assembly.replayEvents.includes("consume"),
+      "the exact request must prove that the injected replay store crosses real admission",
+    );
+    assert.equal(assembly.responseFrames.length, 1);
+    assertProductionEncoderMatchesWrittenFrame(
+      assembly.responseFrames[0],
+      admittedControl,
+      "exact request producer rejection control",
+    );
+
+    const baseline = {
+      capabilityProviderCalls: assembly.capabilityProviderCalls,
+      executedActions: [...assembly.executedActions],
+      replayEvents: [...assembly.replayEvents],
+      semanticExecutorFactoryCalls: assembly.semanticExecutorFactoryCalls,
+      stateDirExists: fs.existsSync(assembly.stateDir),
+      trustedContextProviderCalls: assembly.trustedContextProviderCalls,
+    };
+    const mutations = [
+      {
+        action: `${expectedAction}/child`,
+        boundary: "grammar",
+        nonce: "G".repeat(43),
+        requestId: "123e4567-e89b-42d3-a456-426614174105",
+      },
+      {
+        action: `${expectedAction}.nested`,
+        boundary: "exact-identity",
+        nonce: "H".repeat(43),
+        requestId: "123e4567-e89b-42d3-a456-426614174106",
+      },
+    ];
+
+    for (const mutation of mutations) {
+      await t.test(`${mutation.boundary}: ${mutation.action}`, async () => {
+        const exactRequest = buildClientRequest(
+          "prune-manifest-backups-plan",
+          [],
+          {
+            runtimeIntentId: trusted.intent.intentId,
+            activeReceiptSha256: trusted.receiptDigest,
+            combinedRenderSha256: trusted.receipt.combinedRenderSha256,
+            capabilityKey,
+            now: NOW,
+            requestId: mutation.requestId,
+            nonce: mutation.nonce,
+          },
+        );
+        const candidate = independentlyResignedRequest(
+          exactRequest,
+          { action: mutation.action },
+          capabilityKey,
+        );
+        assert.equal(candidate.action, mutation.action);
+        assert.equal(
+          candidate.mac,
+          domainMacWithKey(
+            REQUEST_MAC_DOMAIN,
+            omit(candidate, "mac"),
+            capabilityKey,
+          ),
+          "the hostile action request must be coherently re-MACed before broker admission",
+        );
+        if (mutation.boundary === "grammar") {
+          assert.equal(candidate.action.startsWith(expectedAction), true);
+        } else {
+          assert.match(
+            candidate.action,
+            /^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$/,
+            "the dotted action collision must itself remain a syntactically valid logical identity",
+          );
+        }
+
+        const outcome = await sendActionRequest(
+          candidate,
+          assembly.socketPath,
+          capabilityKey,
+        ).then(
+          (value) => ({ kind: "response", value }),
+          (error) => ({ error, kind: "error" }),
+        );
+        if (outcome.kind === "response") {
+          assert.equal(
+            outcome.value.status,
+            "rejected",
+            "a hostile action collision may only produce an authenticated rejection",
+          );
+          assert.notEqual(outcome.value.statusCode, 200);
+          assert.equal(outcome.value.result, null);
+        } else {
+          assert.ok(
+            outcome.error instanceof Error,
+            "a fail-closed transport rejection must preserve an Error",
+          );
+        }
+
+        assert.deepEqual(
+          {
+            capabilityProviderCalls: assembly.capabilityProviderCalls,
+            executedActions: assembly.executedActions,
+            replayEvents: assembly.replayEvents,
+            semanticExecutorFactoryCalls: assembly.semanticExecutorFactoryCalls,
+            stateDirExists: fs.existsSync(assembly.stateDir),
+            trustedContextProviderCalls: assembly.trustedContextProviderCalls,
+          },
+          baseline,
+          "an affix collision must not reach trust, capability, replay, or semantic execution side effects",
+        );
+      });
+    }
+  },
+);
+
+testWhenProductionExports(
+  injectedAssemblyRequirements(),
+  "RED v2: real response producer emits no success frame for identity-blind semantic results",
+  async (t) => {
+    const seed = canonicalIdentityCollisionFixture();
+    const { trusted } = buildFixtureTrustedContextV2({
+      allowedActions: [seed.expectedAction],
+      now: NOW,
+    });
+    const assembly = await realBrokerAssembly(t, {
+      capabilityKey: seed.capabilityKey,
+      outcomes: seed.mutations.map(({ candidate }) => ({
+        result: candidate.result,
+      })),
+      trusted,
+    });
+    assert.equal(assembly.semanticExecutorFactoryCalls, 1);
+    assert.deepEqual(assembly.replayEvents, ["recover"]);
+    assert.equal(fs.existsSync(assembly.stateDir), false);
+
+    for (const [index, seedMutation] of seed.mutations.entries()) {
+      await t.test(`${seedMutation.boundary}: ${seedMutation.label}`, async () => {
+        const fixture = canonicalIdentityCollisionFixture({
+          requestIndex: 80 + index,
+        });
+        const mutation = fixture.mutations[index];
+        assert.equal(mutation.label, seedMutation.label);
+        assert.equal(
+          affixIdentityBlindResponseMutantAccepts(
+            mutation.candidate,
+            fixture.control,
+            fixture.request,
+            mutation,
+            fixture.capabilityKey,
+          ),
+          true,
+          "the hostile semantic result must first survive the exact identity-blind mutant",
+        );
+
+        const frameBaseline = assembly.responseFrames.length;
+        const outcome = await sendActionRequest(
+          fixture.request,
+          assembly.socketPath,
+          fixture.capabilityKey,
+        ).then(
+          (value) => ({ kind: "response", value }),
+          (error) => ({ error, kind: "error" }),
+        );
+        if (outcome.kind === "response") {
+          assert.notEqual(
+            `${outcome.value.status}:${outcome.value.statusCode}`,
+            "completed:200",
+            "an identity-blind semantic result may not become a completed response",
+          );
+          assert.equal(
+            outcome.value.result,
+            null,
+            "a fail-closed producer response may not expose the hostile semantic result",
+          );
+        } else {
+          assert.ok(outcome.error instanceof Error);
+        }
+
+        const newFrames = assembly.responseFrames.slice(frameBaseline);
+        for (const frame of newFrames) {
+          const wire = frame.toString("utf8");
+          assert.equal(wire.endsWith("\n"), true);
+          assert.equal(wire.slice(0, -1).includes("\n"), false);
+          const response = JSON.parse(wire.slice(0, -1));
+          assertProductionEncoderMatchesWrittenFrame(
+            frame,
+            response,
+            `${mutation.label} fail-closed producer frame`,
+          );
+          assert.notEqual(
+            `${response.status}:${response.statusCode}`,
+            "completed:200",
+            `${mutation.label} must never reach a signed success frame`,
+          );
+          assert.equal(response.result, null);
+        }
+        assert.deepEqual(
+          assembly.executedActions,
+          Array(index + 1).fill(seed.expectedAction),
+          "the semantic executor receives only the exact request action; the producer must reject its hostile result",
+        );
+        assert.equal(
+          fs.existsSync(assembly.stateDir),
+          false,
+          "the injected replay store must keep default state unmaterialized during producer rejection",
+        );
+      });
+    }
   },
 );
 
@@ -2642,6 +3108,329 @@ function independentlySignedResponseWithResult(response, result, capabilityKey) 
   });
 }
 
+function independentlyResignedRequest(request, changes, capabilityKey) {
+  const unsigned = canonicalValueOracle({
+    ...omit(canonicalValueOracle(request), "mac"),
+    ...structuredClone(changes),
+  });
+  return canonicalValueOracle({
+    ...unsigned,
+    mac: domainMacWithKey(REQUEST_MAC_DOMAIN, unsigned, capabilityKey),
+  });
+}
+
+function independentlySignedActionResponse(
+  request,
+  result,
+  capabilityKey,
+  {
+    action = request.action,
+  } = {},
+) {
+  const canonicalResult = canonicalValueOracle(result);
+  const unsigned = canonicalValueOracle({
+    schema: RESPONSE_SCHEMA_V2,
+    status: "completed",
+    statusCode: 200,
+    errorCode: null,
+    action,
+    requestId: request.requestId,
+    requestSha256: sha256Bytes(canonicalJsonOracle(request)),
+    result: canonicalResult,
+    resultSha256: sha256Bytes(canonicalJsonOracle(canonicalResult)),
+  });
+  return canonicalValueOracle({
+    ...unsigned,
+    mac: domainMacWithKey(RESPONSE_MAC_DOMAIN, unsigned, capabilityKey),
+  });
+}
+
+function independentlyResealedIdentityResult(
+  result,
+  {
+    action = result.action,
+    job = result.job,
+    phaseId = result.phases[0].phaseId,
+    output = result.phases[0].output,
+  } = {},
+) {
+  const canonicalOutput = canonicalValueOracle(output);
+  const phase = canonicalValueOracle({
+    ...result.phases[0],
+    output: canonicalOutput,
+    outputSha256: sha256Bytes(canonicalJsonOracle(canonicalOutput)),
+    phaseId,
+  });
+  return canonicalValueOracle({
+    ...result,
+    action,
+    job: structuredClone(job),
+    phases: [phase],
+  });
+}
+
+function canonicalIdentityCollisionFixture({
+  requestIndex = 73,
+} = {}) {
+  const expectedAction = "backup.job.execute";
+  const expectedJobId = "scheduled-platform-20260728-120000-a1b2c3";
+  const parameters = {
+    jobFileName: `${expectedJobId}.json`,
+    jobId: expectedJobId,
+    jobOperation: "backup",
+    jobSha256: "1".repeat(64),
+  };
+  const { trusted } = buildFixtureTrustedContextV2({
+    allowedActions: [expectedAction],
+    now: NOW,
+  });
+  const capabilityKey = fixtureCapabilityKey(expectedAction);
+  const request = canonicalValueOracle(buildFixtureSignedActionRequestV2(
+    expectedAction,
+    parameters,
+    {
+      capabilityKey,
+      index: requestIndex,
+      now: NOW,
+      trustedContext: trusted,
+    },
+  ));
+  const result = canonicalValueOracle(
+    buildFixtureActionResultV2(expectedAction, parameters),
+  );
+  const expectedPhaseId = result.phases[0].phaseId;
+  const control = independentlySignedActionResponse(
+    request,
+    result,
+    capabilityKey,
+  );
+  const producerControlSnapshot = structuredClone(control);
+
+  const actionMutations = [
+    {
+      boundary: "grammar",
+      candidateIdentity: `${expectedAction}/child`,
+      label: "action exact prefix plus slash child",
+    },
+    {
+      boundary: "exact-identity",
+      candidateIdentity: `${expectedAction}.nested`,
+      label: "action exact prefix plus dotted nested identity",
+    },
+  ].map(({ boundary, candidateIdentity, label }) => {
+    const reboundResult = independentlyResealedIdentityResult(result, {
+      action: candidateIdentity,
+    });
+    return {
+      candidate: independentlySignedActionResponse(
+        request,
+        reboundResult,
+        capabilityKey,
+        { action: candidateIdentity },
+      ),
+      boundary,
+      candidateIdentity,
+      expectedIdentity: expectedAction,
+      label,
+      layer: "action",
+      relationship: "prefix",
+      syntaxPattern: label.includes("dotted")
+        ? /^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$/
+        : null,
+    };
+  });
+
+  const jobMutations = [
+    {
+      boundary: "exact-identity",
+      candidateIdentity: `${expectedJobId}-child`,
+      label: "job identity with the exact job as a prefix",
+      relationship: "prefix",
+    },
+    {
+      boundary: "exact-identity",
+      candidateIdentity: `child-${expectedJobId}`,
+      label: "job identity with the exact job as a suffix",
+      relationship: "suffix",
+    },
+  ].map((mutation) => {
+    const reboundResult = independentlyResealedIdentityResult(result, {
+      job: {
+        ...result.job,
+        jobFileName: `${mutation.candidateIdentity}.json`,
+        jobId: mutation.candidateIdentity,
+      },
+      output: {
+        ...result.phases[0].output,
+        jobId: mutation.candidateIdentity,
+      },
+    });
+    return {
+      ...mutation,
+      candidate: independentlySignedActionResponse(
+        request,
+        reboundResult,
+        capabilityKey,
+      ),
+      expectedIdentity: expectedJobId,
+      layer: "job",
+      syntaxPattern: /^[a-z0-9][a-z0-9-]{15,127}$/,
+    };
+  });
+
+  const phaseMutations = [
+    {
+      boundary: "exact-identity",
+      candidateIdentity: `${expectedPhaseId}.child`,
+      label: "phase identity with the exact phase as a prefix",
+      relationship: "prefix",
+    },
+    {
+      boundary: "exact-identity",
+      candidateIdentity: `child.${expectedPhaseId}`,
+      label: "phase identity with the exact phase as a suffix",
+      relationship: "suffix",
+    },
+  ].map((mutation) => {
+    const reboundResult = independentlyResealedIdentityResult(result, {
+      phaseId: mutation.candidateIdentity,
+    });
+    return {
+      ...mutation,
+      candidate: independentlySignedActionResponse(
+        request,
+        reboundResult,
+        capabilityKey,
+      ),
+      expectedIdentity: expectedPhaseId,
+      layer: "phase",
+      syntaxPattern: /^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$/,
+    };
+  });
+
+  return {
+    capabilityKey,
+    control,
+    expectedAction,
+    expectedJobId,
+    expectedPhaseId,
+    mutations: [
+      ...actionMutations,
+      ...jobMutations,
+      ...phaseMutations,
+    ],
+    producerControlSnapshot,
+    request,
+  };
+}
+
+function assertCanonicalIdentityResponseSeal(response, request, capabilityKey) {
+  assert.equal(
+    request.mac,
+    domainMacWithKey(
+      REQUEST_MAC_DOMAIN,
+      omit(request, "mac"),
+      capabilityKey,
+    ),
+    "the complete hostile request fixture must retain an independent request-domain MAC",
+  );
+  assert.equal(
+    response.requestSha256,
+    sha256Bytes(canonicalJsonOracle(request)),
+    "the response must bind the complete canonical signed request",
+  );
+  assert.notEqual(
+    response.requestSha256,
+    sha256Bytes(request.requestId),
+    "the response request digest may not collapse to the shared request ID",
+  );
+  assert.equal(
+    response.resultSha256,
+    sha256Bytes(canonicalJsonOracle(response.result)),
+    "the nested result must be independently re-digested",
+  );
+  for (const phase of response.result.phases) {
+    assert.equal(
+      phase.outputSha256,
+      sha256Bytes(canonicalJsonOracle(phase.output)),
+      `${phase.phaseId} output must be independently re-digested`,
+    );
+  }
+  assert.equal(
+    response.mac,
+    domainMacWithKey(
+      RESPONSE_MAC_DOMAIN,
+      omit(response, "mac"),
+      capabilityKey,
+    ),
+    "the complete hostile response must be independently re-MACed",
+  );
+}
+
+function affixIdentityBlindResponseMutantAccepts(
+  response,
+  control,
+  request,
+  {
+    candidateIdentity,
+    expectedIdentity,
+    layer,
+    relationship,
+  },
+  capabilityKey,
+) {
+  if (JSON.stringify(response) !== canonicalJsonOracle(response)) return false;
+  if (response.requestSha256 !== sha256Bytes(canonicalJsonOracle(request))) return false;
+  if (response.resultSha256 !== sha256Bytes(canonicalJsonOracle(response.result))) return false;
+  if (response.mac !== domainMacWithKey(
+    RESPONSE_MAC_DOMAIN,
+    omit(response, "mac"),
+    capabilityKey,
+  )) {
+    return false;
+  }
+  if (response.result.phases.some((phase) => (
+    phase.outputSha256 !== sha256Bytes(canonicalJsonOracle(phase.output))
+  ))) {
+    return false;
+  }
+  const affixMatches = relationship === "prefix"
+    ? candidateIdentity.startsWith(expectedIdentity)
+    : candidateIdentity.endsWith(expectedIdentity);
+  if (!affixMatches || candidateIdentity === expectedIdentity) return false;
+
+  const normalized = structuredClone(response);
+  if (layer === "action") {
+    if (normalized.action !== candidateIdentity
+      || normalized.result.action !== candidateIdentity) {
+      return false;
+    }
+    normalized.action = expectedIdentity;
+    normalized.result.action = expectedIdentity;
+  } else if (layer === "job") {
+    const job = normalized.result.job;
+    const output = normalized.result.phases[0]?.output;
+    if (job?.jobId !== candidateIdentity
+      || job.jobFileName !== `${candidateIdentity}.json`
+      || output?.jobId !== candidateIdentity) {
+      return false;
+    }
+    job.jobId = expectedIdentity;
+    job.jobFileName = `${expectedIdentity}.json`;
+    output.jobId = expectedIdentity;
+    normalized.result.phases[0].outputSha256 =
+      control.result.phases[0].outputSha256;
+  } else if (layer === "phase") {
+    if (normalized.result.phases[0]?.phaseId !== candidateIdentity) return false;
+    normalized.result.phases[0].phaseId = expectedIdentity;
+  } else {
+    return false;
+  }
+  normalized.resultSha256 = control.resultSha256;
+  normalized.mac = control.mac;
+  return canonicalJsonOracle(normalized) === canonicalJsonOracle(control);
+}
+
 function independentlySignedNestedNonCanonicalResponse(response, capabilityKey) {
   const canonicalResponse = canonicalValueOracle(response);
   assert.ok(canonicalResponse.result, "nested-order fixture requires a completed result");
@@ -2846,11 +3635,14 @@ async function realBrokerAssembly(t, {
   const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "docker-action-real-assembly-"));
   fs.chmodSync(temporary, 0o700);
   const socketPath = path.join(temporary, "broker.sock");
+  const stateDir = path.join(temporary, "state-must-remain-unmaterialized");
   const responseFrames = [];
   const executedActions = [];
   const executedParameters = [];
   const replayEvents = [];
+  let capabilityProviderCalls = 0;
   let semanticExecutorFactoryCalls = 0;
+  let trustedContextProviderCalls = 0;
   let outcomeIndex = 0;
   const semanticExecutorOptions = Object.freeze({
     assemblyProbe: "client-real-uds",
@@ -2904,9 +3696,15 @@ async function realBrokerAssembly(t, {
   };
   const server = broker.createDockerActionBroker({
     socketPath,
-    stateDir: path.join(temporary, "state-must-remain-unmaterialized"),
-    trustedContextProvider: async () => trusted,
-    capabilityProvider: async () => capabilityKey,
+    stateDir,
+    trustedContextProvider: async () => {
+      trustedContextProviderCalls += 1;
+      return trusted;
+    },
+    capabilityProvider: async () => {
+      capabilityProviderCalls += 1;
+      return capabilityKey;
+    },
     replayStore,
     semanticExecutorFactory(options) {
       semanticExecutorFactoryCalls += 1;
@@ -2937,6 +3735,9 @@ async function realBrokerAssembly(t, {
     server.listen(socketPath, resolve);
   });
   return {
+    get capabilityProviderCalls() {
+      return capabilityProviderCalls;
+    },
     executedActions,
     executedParameters,
     get semanticExecutorFactoryCalls() {
@@ -2945,6 +3746,10 @@ async function realBrokerAssembly(t, {
     replayEvents,
     responseFrames,
     socketPath,
+    stateDir,
+    get trustedContextProviderCalls() {
+      return trustedContextProviderCalls;
+    },
   };
 }
 
@@ -3191,7 +3996,12 @@ function expectedPrunePlanWorkerBody({ requestId, trusted }) {
   });
   return {
     Image: phase.workerImageRef,
-    Entrypoint: ["node", "/opt/platform-docker-worker/docker-action-worker.mjs"],
+    Entrypoint: [
+      "node",
+      "--import",
+      "/opt/platform-docker-worker/docker-action-worker-runtime-guard.mjs",
+      "/opt/platform-docker-worker/docker-action-worker.mjs",
+    ],
     Cmd: [phase.command],
     Env: [
       "HOME=/tmp",

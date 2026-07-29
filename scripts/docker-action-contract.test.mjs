@@ -278,6 +278,43 @@ test("RED v2: request consumer admits the v2 domain control and rejects legacy o
       );
     });
   }
+  for (const [label, nestedAction] of [
+    ["authenticated dot-nested action", `${valid.action}.nested`],
+    ["authenticated path-nested action", `${valid.action}/child`],
+  ]) {
+    await t.test(label, (st) => {
+      if (!requestConsumerV2Ready(st)) return;
+      const unsignedCandidate = {
+        ...unsigned,
+        action: nestedAction,
+      };
+      const candidate = {
+        ...unsignedCandidate,
+        mac: requestMac(unsignedCandidate, key),
+      };
+      assert.deepEqual(
+        Object.keys(candidate).sort(),
+        [...REQUEST_KEYS].sort(),
+        `${label} must preserve the exact request wire schema`,
+      );
+      assert.equal(candidate.schema, REQUEST_SCHEMA_V2);
+      assert.equal(
+        candidate.mac,
+        requestMac(omit(candidate, "mac"), key),
+        `${label} must carry a valid independently recomputed request MAC`,
+      );
+      const error = assert.throws(
+        () => contract.normalizeActionRequest(candidate, trusted, key, { now: NOW }),
+        /action|authorized|enabled|binding|identity/i,
+        `${label} must fail only at exact canonical action binding`,
+      );
+      assert.doesNotMatch(
+        error.message,
+        /authentication|mac|schema|digest/i,
+        `${label} must not be rejected for authentication, schema or digest`,
+      );
+    });
+  }
 });
 
 test("RED v2: every capability is action-distinct and bound to the attested file bytes", async (t) => {
@@ -744,9 +781,39 @@ test("RED v2: response signing binds request and result digests and exact fields
     "an unauthenticated rejected response mutation must fail",
   );
 
+  const exactIdentityMutations = [];
+  for (const [position, nestedAction] of [
+    ["suffix", `${request.action}.nested`],
+    ["prefix", `nested.${request.action}`],
+  ]) {
+    exactIdentityMutations.push(
+      [`response action ${position}`, responseWithRecomputedSeals({
+        ...unsigned,
+        action: nestedAction,
+      }, result), /action|binding|identity/i],
+      [`result action ${position}`, responseWithRecomputedSeals(unsigned, {
+        ...result,
+        action: nestedAction,
+      }), /action|result|binding|identity/i],
+    );
+  }
+  const expectedPhaseId = result.phases[0].phaseId;
+  for (const [position, nestedPhaseId] of [
+    ["suffix", `${expectedPhaseId}.nested`],
+    ["prefix", `nested.${expectedPhaseId}`],
+  ]) {
+    exactIdentityMutations.push(
+      [`phase identity ${position}`, responseWithRecomputedSeals(unsigned, {
+        ...result,
+        phases: [{ ...result.phases[0], phaseId: nestedPhaseId }],
+      }), /phase|plan|binding|identity/i],
+    );
+  }
+
   const signedMutations = [
     ["extra field", { ...unsigned, extension: "not-allowed" }],
     ["cross-action", { ...unsigned, action: "backup.catalog" }],
+    ...exactIdentityMutations,
     ["cross-request ID", { ...unsigned, requestId: "123e4567-e89b-42d3-a456-426614174999" }],
     ["request digest", { ...unsigned, requestSha256: "0".repeat(64) }],
     ["requestId-only digest", {
@@ -834,12 +901,26 @@ test("RED v2: response signing binds request and result digests and exact fields
       statusCode: 200,
     }],
   ];
-  for (const [label, mutation] of signedMutations) {
+  for (const [label, mutation, exactIdentityError] of signedMutations) {
     const candidate = { ...mutation, mac: responseMac(mutation, key) };
-    assert.throws(
+    if (!exactIdentityError) {
+      assert.throws(
+        () => contract.normalizeActionResponse(candidate, request, key),
+        undefined,
+        label,
+      );
+      continue;
+    }
+    assertAuthenticatedResponseEnvelope(candidate, key, label);
+    const error = assert.throws(
       () => contract.normalizeActionResponse(candidate, request, key),
-      undefined,
-      label,
+      exactIdentityError,
+      `${label} must fail only at exact canonical identity binding`,
+    );
+    assert.doesNotMatch(
+      error.message,
+      /authentication|mac|schema|digest/i,
+      `${label} must not be rejected for authentication, schema or digest`,
     );
   }
   assert.throws(
@@ -933,6 +1014,16 @@ test("RED v2: typed job result is bound to the exact request operation, job iden
     jobId: "fedcba9876543210",
     jobSha256: "2".repeat(64),
   };
+  const prefixedIdentityParameters = {
+    ...parameters,
+    jobId: `nested-${parameters.jobId}`,
+    jobFileName: `nested-${parameters.jobId}.json`,
+  };
+  const suffixedIdentityParameters = {
+    ...parameters,
+    jobId: `${parameters.jobId}-nested`,
+    jobFileName: `${parameters.jobId}-nested.json`,
+  };
   const mutations = [
     ["valid operation and phase rebind", buildFixtureActionResultV2(
       "backup.job.execute",
@@ -946,6 +1037,14 @@ test("RED v2: typed job result is bound to the exact request operation, job iden
       ...result,
       phases: buildFixtureActionResultV2("backup.job.execute", restoreParameters).phases,
     }],
+    ["job identity prefix lookalike", resultWithCoherentJobIdentity(
+      result,
+      prefixedIdentityParameters,
+    ), prefixedIdentityParameters],
+    ["job identity suffix lookalike", resultWithCoherentJobIdentity(
+      result,
+      suffixedIdentityParameters,
+    ), suffixedIdentityParameters],
   ];
   for (const [index, [label, mutatedResult, coherentParameters]] of mutations.entries()) {
     await t.test(label, (st) => {
@@ -963,10 +1062,9 @@ test("RED v2: typed job result is bound to the exact request operation, job iden
           50 + index,
         );
         const coherentUnsigned = responseUnsigned(coherentRequest, mutatedResult);
-        const coherent = {
-          ...coherentUnsigned,
-          mac: responseMac(coherentUnsigned, key),
-        };
+        const coherentSealed = responseWithRecomputedSeals(coherentUnsigned, mutatedResult);
+        const coherent = { ...coherentSealed, mac: responseMac(coherentSealed, key) };
+        assertAuthenticatedResponseEnvelope(coherent, key, `${label} coherent control`);
         assert.deepEqual(
           contract.normalizeActionResponse(coherent, coherentRequest, key),
           coherent,
@@ -974,18 +1072,26 @@ test("RED v2: typed job result is bound to the exact request operation, job iden
         );
         assertResponseBoundToSignedRequestAndResult(coherent, coherentRequest);
       }
-      const candidateUnsigned = responseWithResealedResult(validUnsigned, mutatedResult);
+      const candidateUnsigned = responseWithRecomputedSeals(validUnsigned, mutatedResult);
       const candidate = { ...candidateUnsigned, mac: responseMac(candidateUnsigned, key) };
+      assertAuthenticatedResponseEnvelope(candidate, key, label);
       assert.equal(
         candidate.resultSha256,
-        fixtureSha256(canonicalFixtureJson(mutatedResult)),
+        fixtureSha256(canonicalFixtureJson(candidate.result)),
         `${label} must reseal the internally coherent result before request binding is tested`,
       );
-      assert.throws(
+      const error = assert.throws(
         () => contract.normalizeActionResponse(candidate, request, key),
-        /result|job|operation|phase/i,
+        /result|job|operation|phase|identity|binding/i,
         `${label} must not authenticate a coherent valid-to-valid result rebind`,
       );
+      if (label.includes("lookalike")) {
+        assert.doesNotMatch(
+          error.message,
+          /authentication|mac|schema|digest/i,
+          `${label} must fail only at exact job identity binding`,
+        );
+      }
     });
   }
 });
@@ -1444,6 +1550,51 @@ function responseWithResealedResult(unsigned, result) {
     result,
     resultSha256: fixtureSha256(canonicalFixtureJson(result)),
   };
+}
+
+function responseWithRecomputedSeals(unsigned, result) {
+  const resealed = structuredClone(result);
+  resealed.phases = resealed.phases.map(
+    (phase) => phaseResultWithResealedOutput(phase, phase.output),
+  );
+  return responseWithResealedResult(unsigned, resealed);
+}
+
+function assertAuthenticatedResponseEnvelope(response, key, label) {
+  assert.deepEqual(Object.keys(response).sort(), [...RESPONSE_KEYS].sort(), label);
+  assert.equal(response.schema, RESPONSE_SCHEMA_V2, `${label} response schema`);
+  assert.equal(response.result.schema, RESULT_SCHEMA_V2, `${label} result schema`);
+  for (const phase of response.result.phases) {
+    assert.equal(
+      phase.outputSha256,
+      fixtureSha256(canonicalFixtureJson(phase.output)),
+      `${label} output digest`,
+    );
+  }
+  assert.equal(
+    response.resultSha256,
+    fixtureSha256(canonicalFixtureJson(response.result)),
+    `${label} result digest`,
+  );
+  assert.equal(
+    response.mac,
+    responseMac(omit(response, "mac"), key),
+    `${label} must carry a valid independently recomputed response MAC`,
+  );
+}
+
+function resultWithCoherentJobIdentity(result, parameters) {
+  const mutated = structuredClone(result);
+  mutated.job = structuredClone(parameters);
+  mutated.phases = mutated.phases.map((phase) => {
+    const output = {
+      ...phase.output,
+      jobId: parameters.jobId,
+      jobOperation: parameters.jobOperation,
+    };
+    return phaseResultWithResealedOutput(phase, output);
+  });
+  return mutated;
 }
 
 function phaseResultWithResealedOutput(phaseResult, output) {
