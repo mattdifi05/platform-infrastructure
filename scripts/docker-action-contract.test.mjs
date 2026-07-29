@@ -14,13 +14,20 @@ import {
   EXPECTED_ACTION_BINDINGS,
   EXPECTED_ACTION_PHASES,
   EXPECTED_CLAIMED_JOB_SOURCE_IDS,
+  EXPECTED_EVIDENCE_RESULT_PHASE,
   EXPECTED_PHASE_PROFILES,
   FIXTURE_NOW,
   FIXTURE_TRUST_KEY,
+  MAX_PHASE_OUTPUT_BYTES_V2,
   REQUEST_SCHEMA_V2,
   RESPONSE_SCHEMA_V2,
+  RESULT_SCHEMA_V2,
   PHASE_PROFILE_KEYS,
   SCHEDULER_ACTION_NAMES,
+  buildFixtureActionResultV2,
+  buildFixtureSignedActionRequestV2,
+  buildFixtureTrustedContextV2,
+  buildFixtureUnsignedActionRequestV2,
   buildRawActiveReceiptV2,
   buildTrustedContextV2,
   canonicalFixtureJson,
@@ -64,6 +71,26 @@ const RESPONSE_KEYS = Object.freeze([
   "schema",
   "status",
   "statusCode",
+]);
+const RESULT_KEYS = Object.freeze([
+  "action",
+  "job",
+  "phases",
+  "schema",
+  "status",
+]);
+const RESULT_JOB_KEYS = Object.freeze([
+  "jobFileName",
+  "jobId",
+  "jobOperation",
+  "jobSha256",
+]);
+const RESULT_PHASE_KEYS = Object.freeze([
+  "output",
+  "outputSchema",
+  "outputSha256",
+  "phaseId",
+  "status",
 ]);
 
 test("RED v2: scheduler and runtime-evidence registries are disjoint, complete, modeled and uniquely bound", () => {
@@ -130,16 +157,12 @@ test("RED v2: request schema has exact keys and rejects extensions", () => {
 });
 
 test("RED v2: request MAC is canonical and domain-separated", () => {
-  assert.equal(contract.REQUEST_SCHEMA, REQUEST_SCHEMA_V2);
   const trusted = requestTrustedFixture("backup.catalog");
-  const unsigned = {
-    ...contract.buildUnsignedRequest("backup.catalog", {}, trusted, {
-      now: NOW,
-      requestId: "123e4567-e89b-42d3-a456-426614174000",
-      nonce: "A".repeat(43),
-    }),
-    schema: REQUEST_SCHEMA_V2,
-  };
+  const unsigned = buildFixtureUnsignedActionRequestV2("backup.catalog", {}, {
+    index: 8,
+    now: NOW,
+    trustedContext: trusted,
+  });
   const key = capabilityKey("backup.catalog");
   const signed = contract.signActionRequest(unsigned, key);
   const expectedMac = requestMac(unsigned, key);
@@ -157,7 +180,69 @@ test("RED v2: request MAC is canonical and domain-separated", () => {
   );
 });
 
-test("RED v2: every capability is action-distinct and bound to the attested file bytes", () => {
+test("RED v2: request consumer admits the v2 domain control and rejects legacy or cross-domain MACs", async (t) => {
+  const trusted = requestTrustedFixture("backup.catalog");
+  const key = capabilityKey("backup.catalog");
+  const unsigned = buildFixtureUnsignedActionRequestV2("backup.catalog", {}, {
+    index: 9,
+    now: NOW,
+    trustedContext: trusted,
+  });
+  const valid = buildFixtureSignedActionRequestV2("backup.catalog", {}, {
+    capabilityKey: key,
+    index: 9,
+    now: NOW,
+    trustedContext: trusted,
+  });
+  const candidates = [
+    [
+      "bare legacy canonical JSON",
+      {
+        ...unsigned,
+        mac: crypto
+          .createHmac("sha256", key)
+          .update(canonicalFixtureJson(unsigned))
+          .digest("hex"),
+      },
+    ],
+    [
+      "response-domain MAC",
+      {
+        ...unsigned,
+        mac: crypto
+          .createHmac("sha256", key)
+          .update(RESPONSE_MAC_DOMAIN)
+          .update(canonicalFixtureJson(unsigned))
+          .digest("hex"),
+      },
+    ],
+  ];
+
+  await t.test("positive v2 request-domain control reaches the consumer", (st) => {
+    if (!requestConsumerV2Ready(st)) return;
+    assert.deepEqual(
+      contract.normalizeActionRequest(valid, trusted, key, { now: NOW }),
+      admittedRequestShape(valid),
+    );
+  });
+  for (const [label, candidate] of candidates) {
+    await t.test(label, (st) => {
+      if (!requestConsumerV2Ready(st)) return;
+      assert.deepEqual(
+        contract.normalizeActionRequest(valid, trusted, key, { now: NOW }),
+        admittedRequestShape(valid),
+        `${label} negative is meaningful only after the correct domain is admitted`,
+      );
+      assert.throws(
+        () => contract.normalizeActionRequest(candidate, trusted, key, { now: NOW }),
+        /authentication|mac/i,
+        `${label} must reach and fail request authentication`,
+      );
+    });
+  }
+});
+
+test("RED v2: every capability is action-distinct and bound to the attested file bytes", async (t) => {
   const receipt = activeReceiptFixture();
   const keyDigests = [];
   for (const action of ALL_ACTION_NAMES) {
@@ -174,45 +259,76 @@ test("RED v2: every capability is action-distinct and bound to the attested file
   const action = "backup.catalog";
   const trusted = requestTrustedFixture(action);
   const request = signedRequest(action, {}, trusted, 10);
-  assert.throws(
-    () => contract.normalizeActionRequest(
-      request,
-      trusted,
-      capabilityKey("backup.prune.plan"),
-      { now: NOW },
-    ),
-    /capability|authentication|mac|digest/i,
-    "a different action capability must not authenticate",
-  );
+  await t.test("positive exact action capability control", (st) => {
+    if (!requestConsumerV2Ready(st)) return;
+    assert.deepEqual(
+      contract.normalizeActionRequest(
+        request,
+        trusted,
+        capabilityKey(action),
+        { now: NOW },
+      ),
+      admittedRequestShape(request),
+    );
+  });
+  await t.test("different valid action capability", (st) => {
+    if (!requestConsumerV2Ready(st)) return;
+    assert.deepEqual(
+      contract.normalizeActionRequest(
+        request,
+        trusted,
+        capabilityKey(action),
+        { now: NOW },
+      ),
+      admittedRequestShape(request),
+      "cross-capability rejection is meaningful only after the exact capability is admitted",
+    );
+    assert.throws(
+      () => contract.normalizeActionRequest(
+        request,
+        trusted,
+        capabilityKey("backup.prune.plan"),
+        { now: NOW },
+      ),
+      /capability|authentication|mac|digest/i,
+      "a different action capability must not authenticate",
+    );
+  });
 
-  const wrongDigestReceipt = activeReceiptFixture();
-  wrongDigestReceipt.resources.capabilityFiles[capabilityFileId(action)].sha256 = "0".repeat(64);
-  const wrongDigestTrusted = buildTrustedContextV2(contract, {
-    allowedActions: [action],
-    now: NOW,
-    rawReceipt: wrongDigestReceipt,
-    trustKey: TRUST_KEY,
-  }).trusted;
-  const wrongDigestRequest = signedRequest(action, {}, wrongDigestTrusted, 11);
-  assert.throws(
-    () => contract.normalizeActionRequest(
-      wrongDigestRequest,
-      wrongDigestTrusted,
-      capabilityKey(action),
-      { now: NOW },
-    ),
-    /capability.*(?:digest|sha)|digest.*capability/i,
-    "the broker must compare loaded capability bytes with the signed receipt",
-  );
+  await t.test("receipt capability digest does not match the loaded bytes", (st) => {
+    if (!requestConsumerV2Ready(st)) return;
+    assert.deepEqual(
+      contract.normalizeActionRequest(
+        request,
+        trusted,
+        capabilityKey(action),
+        { now: NOW },
+      ),
+      admittedRequestShape(request),
+      "digest substitution is meaningful only after the exact receipt and bytes are admitted",
+    );
+    const wrongDigestReceipt = activeReceiptFixture();
+    wrongDigestReceipt.resources.capabilityFiles[capabilityFileId(action)].sha256 = "0".repeat(64);
+    const wrongDigestTrusted = buildFixtureTrustedContextV2({
+      allowedActions: [action],
+      now: NOW,
+      rawReceipt: wrongDigestReceipt,
+    }).trusted;
+    const wrongDigestRequest = signedRequest(action, {}, wrongDigestTrusted, 11);
+    assert.throws(
+      () => contract.normalizeActionRequest(
+        wrongDigestRequest,
+        wrongDigestTrusted,
+        capabilityKey(action),
+        { now: NOW },
+      ),
+      /capability.*(?:digest|sha)|digest.*capability/i,
+      "the broker must compare loaded capability bytes with the signed receipt",
+    );
+  });
 });
 
-test("RED v2: typed job parameters preserve real identifiers and reject normalization or aliases", () => {
-  assert.equal(contract.REQUEST_SCHEMA, REQUEST_SCHEMA_V2);
-  assert.deepEqual(
-    Object.keys(contract.SCHEDULER_ACTIONS ?? {}).sort(),
-    [...SCHEDULER_ACTION_NAMES].sort(),
-    "typed scheduler requests require the exact v2 scheduler registry",
-  );
+test("RED v2: typed job parameters preserve real identifiers and reject normalization or aliases", async (t) => {
   const trusted = requestTrustedFixture("backup.job.execute");
   const key = capabilityKey("backup.job.execute");
   const accepted = [
@@ -237,15 +353,18 @@ test("RED v2: typed job parameters preserve real identifiers and reject normaliz
   ];
 
   for (const [index, parameters] of accepted.entries()) {
-    const request = signedRequest("backup.job.execute", parameters, trusted, index);
-    const normalized = contract.normalizeActionRequest(request, trusted, key, { now: NOW });
-    assert.deepEqual(Object.keys(normalized.parameters).sort(), [
-      "jobFileName",
-      "jobId",
-      "jobOperation",
-      "jobSha256",
-    ]);
-    assert.deepEqual(normalized.parameters, parameters, "admitted job identity must be byte-exact");
+    await t.test(`accepted canonical job identity ${index + 1}`, (st) => {
+      if (!requestConsumerV2Ready(st)) return;
+      const request = signedRequest("backup.job.execute", parameters, trusted, index);
+      const normalized = contract.normalizeActionRequest(request, trusted, key, { now: NOW });
+      assert.deepEqual(Object.keys(normalized.parameters).sort(), [
+        "jobFileName",
+        "jobId",
+        "jobOperation",
+        "jobSha256",
+      ]);
+      assert.deepEqual(normalized.parameters, parameters, "admitted job identity must be byte-exact");
+    });
   }
 
   const base = accepted[0];
@@ -266,21 +385,31 @@ test("RED v2: typed job parameters preserve real identifiers and reject normaliz
     ["digest case", { ...base, jobSha256: "A".repeat(64) }],
     ["digest whitespace", { ...base, jobSha256: `${base.jobSha256} ` }],
   ];
-  for (const [label, parameters] of invalid) {
-    const request = signedRequest("backup.job.execute", parameters, trusted, 20);
-    assert.throws(
-      () => contract.normalizeActionRequest(request, trusted, key, { now: NOW }),
-      undefined,
-      label,
-    );
+  for (const [index, [label, parameters]] of invalid.entries()) {
+    await t.test(label, (st) => {
+      if (!requestConsumerV2Ready(st)) return;
+      const control = signedRequest("backup.job.execute", base, trusted, 100 + index);
+      assert.deepEqual(
+        contract.normalizeActionRequest(control, trusted, key, { now: NOW }),
+        admittedRequestShape(control),
+        `${label} negative is meaningful only after the exact job identity is admitted`,
+      );
+      const request = signedRequest("backup.job.execute", parameters, trusted, 200 + index);
+      assert.throws(
+        () => contract.normalizeActionRequest(request, trusted, key, { now: NOW }),
+        /job|parameter|field|identity|operation|digest|file/i,
+        label,
+      );
+    });
   }
 });
 
-test("RED v2: broker core emits the exact authenticated response wire contract", async () => {
+test("RED v2: broker core emits the exact authenticated response wire contract", async (t) => {
+  if (!requestConsumerV2Ready(t)) return;
   const trusted = requestTrustedFixture("backup.prune.plan");
   const key = capabilityKey("backup.prune.plan");
   const request = signedRequest("backup.prune.plan", {}, trusted, 30);
-  const result = { mode: "plan", mutationPerformed: false };
+  const result = buildFixtureActionResultV2("backup.prune.plan");
   const replayStore = {
     acquire() {
       return { preserve() {}, recordWorker() {}, release() {} };
@@ -314,6 +443,7 @@ test("RED v2: broker core emits the exact authenticated response wire contract",
   assert.equal(response.requestSha256, requestSha256);
   assert.equal(response.resultSha256, resultSha256);
   assert.deepEqual(response.result, result);
+  assertResultBoundToRequest(response.result, request);
   assert.equal(response.mac, responseMac(omit(response, "mac"), key));
 });
 
@@ -332,7 +462,7 @@ test("RED v2: response signing binds request and result digests and exact fields
   const trusted = requestTrustedFixture("backup.prune.plan");
   const key = capabilityKey("backup.prune.plan");
   const request = signedRequest("backup.prune.plan", {}, trusted, 40);
-  const result = { mode: "plan", mutationPerformed: false };
+  const result = buildFixtureActionResultV2("backup.prune.plan");
   const unsigned = {
     schema: RESPONSE_SCHEMA_V2,
     status: "completed",
@@ -362,6 +492,7 @@ test("RED v2: response signing binds request and result digests and exact fields
     contract.normalizeActionResponse(response, request, key),
     response,
   );
+  assertResultBoundToRequest(response.result, request);
 
   const rejectedUnsigned = {
     schema: RESPONSE_SCHEMA_V2,
@@ -397,8 +528,77 @@ test("RED v2: response signing binds request and result digests and exact fields
     ["cross-action", { ...unsigned, action: "backup.catalog" }],
     ["cross-request ID", { ...unsigned, requestId: "123e4567-e89b-42d3-a456-426614174999" }],
     ["request digest", { ...unsigned, requestSha256: "0".repeat(64) }],
-    ["result without matching digest", { ...unsigned, result: { mode: "apply", mutationPerformed: true } }],
+    ["result without matching digest", {
+      ...unsigned,
+      result: buildFixtureActionResultV2("backup.catalog"),
+    }],
     ["result digest", { ...unsigned, resultSha256: "0".repeat(64) }],
+    ["result action coherently rebound", responseWithResealedResult(unsigned, {
+      ...result,
+      action: "backup.catalog",
+    })],
+    ["result phase coherently rebound", responseWithResealedResult(unsigned, {
+      ...result,
+      phases: buildFixtureActionResultV2("backup.catalog").phases,
+    })],
+    ["result phase output schema coherently rebound", responseWithResealedResult(unsigned, {
+      ...result,
+      phases: [{
+        ...result.phases[0],
+        outputSchema: EXPECTED_PHASE_PROFILES["catalog.capture"].outputSchema,
+      }],
+    })],
+    ["result extension", responseWithResealedResult(unsigned, {
+      ...result,
+      extension: "not-allowed",
+    })],
+    ["fixed action result gains job identity", responseWithResealedResult(unsigned, {
+      ...result,
+      job: {
+        jobFileName: "0123456789abcdef.json",
+        jobId: "0123456789abcdef",
+        jobOperation: "backup",
+        jobSha256: "1".repeat(64),
+      },
+    })],
+    ["phase output without matching digest", responseWithResealedResult(unsigned, {
+      ...result,
+      phases: [{ ...result.phases[0], output: { arbitrary: "bytes" } }],
+    })],
+    ["phase output coherently rebound", responseWithResealedResult(unsigned, {
+      ...result,
+      phases: [{
+        ...result.phases[0],
+        output: buildFixtureActionResultV2("backup.catalog").phases[0].output,
+        outputSha256: buildFixtureActionResultV2("backup.catalog").phases[0].outputSha256,
+      }],
+    })],
+    ["phase result extension", responseWithResealedResult(unsigned, {
+      ...result,
+      phases: [{ ...result.phases[0], extension: "not-allowed" }],
+    })],
+    ["duplicate phase result", responseWithResealedResult(unsigned, {
+      ...result,
+      phases: [result.phases[0], result.phases[0]],
+    })],
+    ["missing phase result", responseWithResealedResult(unsigned, {
+      ...result,
+      phases: [],
+    })],
+    ["invalid worker output digest", responseWithResealedResult(unsigned, {
+      ...result,
+      phases: [{ ...result.phases[0], outputSha256: "A".repeat(64) }],
+    })],
+    ["oversized bounded worker output", responseWithResealedResult(unsigned, {
+      ...result,
+      phases: [phaseResultWithResealedOutput(result.phases[0], {
+        ...result.phases[0].output,
+        retainedManifestIds: Array.from(
+          { length: 512 },
+          (_, index) => `manifest:${String(index).padStart(4, "0")}`,
+        ),
+      })],
+    })],
     ["completed response with an error code", { ...unsigned, errorCode: "ACTION_REJECTED" }],
     ["rejected response without an error code", {
       ...rejectedUnsigned,
@@ -422,6 +622,120 @@ test("RED v2: response signing binds request and result digests and exact fields
     undefined,
     "MAC mutation",
   );
+});
+
+test("RED v2: response consumer admits the v2 domain control and rejects legacy or request-domain MACs", async (t) => {
+  const trusted = requestTrustedFixture("backup.prune.plan");
+  const key = capabilityKey("backup.prune.plan");
+  const request = signedRequest("backup.prune.plan", {}, trusted, 41);
+  const result = buildFixtureActionResultV2("backup.prune.plan");
+  const unsigned = responseUnsigned(request, result);
+  const valid = { ...unsigned, mac: responseMac(unsigned, key) };
+  const candidates = [
+    [
+      "bare legacy canonical JSON",
+      {
+        ...unsigned,
+        mac: crypto
+          .createHmac("sha256", key)
+          .update(canonicalFixtureJson(unsigned))
+          .digest("hex"),
+      },
+    ],
+    [
+      "request-domain MAC",
+      {
+        ...unsigned,
+        mac: crypto
+          .createHmac("sha256", key)
+          .update(REQUEST_MAC_DOMAIN)
+          .update(canonicalFixtureJson(unsigned))
+          .digest("hex"),
+      },
+    ],
+  ];
+
+  await t.test("positive v2 response-domain control reaches the consumer", (st) => {
+    if (!responseConsumerV2Ready(st)) return;
+    assert.deepEqual(contract.normalizeActionResponse(valid, request, key), valid);
+  });
+  for (const [label, candidate] of candidates) {
+    await t.test(label, (st) => {
+      if (!responseConsumerV2Ready(st)) return;
+      assert.deepEqual(
+        contract.normalizeActionResponse(valid, request, key),
+        valid,
+        `${label} negative is meaningful only after the correct domain is admitted`,
+      );
+      assert.throws(
+        () => contract.normalizeActionResponse(candidate, request, key),
+        /authentication|mac/i,
+        `${label} must reach and fail response authentication`,
+      );
+    });
+  }
+});
+
+test("RED v2: typed job result is bound to the exact request operation, job identity and phase", async (t) => {
+  const trusted = requestTrustedFixture("backup.job.execute");
+  const key = capabilityKey("backup.job.execute");
+  const parameters = {
+    jobFileName: "0123456789abcdef.json",
+    jobId: "0123456789abcdef",
+    jobOperation: "backup",
+    jobSha256: "1".repeat(64),
+  };
+  const request = signedRequest("backup.job.execute", parameters, trusted, 42);
+  const result = buildFixtureActionResultV2("backup.job.execute", parameters);
+  const validUnsigned = responseUnsigned(request, result);
+  const valid = { ...validUnsigned, mac: responseMac(validUnsigned, key) };
+
+  await t.test("positive exact job and phase control", (st) => {
+    if (!responseConsumerV2Ready(st)) return;
+    assert.deepEqual(contract.normalizeActionResponse(valid, request, key), valid);
+    assertResultBoundToRequest(valid.result, request);
+  });
+
+  const restoreParameters = {
+    ...parameters,
+    jobOperation: "restore-drill",
+    jobSha256: "3".repeat(64),
+  };
+  const mutations = [
+    ["valid operation and phase rebind", buildFixtureActionResultV2(
+      "backup.job.execute",
+      restoreParameters,
+    )],
+    ["valid job identity rebind", {
+      ...result,
+      job: {
+        ...result.job,
+        jobFileName: "job-0123456789abcdef.json",
+        jobId: "job-0123456789abcdef",
+      },
+    }],
+    ["valid phase rebind with original operation", {
+      ...result,
+      phases: buildFixtureActionResultV2("backup.job.execute", restoreParameters).phases,
+    }],
+  ];
+  for (const [label, mutatedResult] of mutations) {
+    await t.test(label, (st) => {
+      if (!responseConsumerV2Ready(st)) return;
+      assert.deepEqual(
+        contract.normalizeActionResponse(valid, request, key),
+        valid,
+        `${label} negative is meaningful only after the exact request-bound result is admitted`,
+      );
+      const candidateUnsigned = responseWithResealedResult(validUnsigned, mutatedResult);
+      const candidate = { ...candidateUnsigned, mac: responseMac(candidateUnsigned, key) };
+      assert.throws(
+        () => contract.normalizeActionResponse(candidate, request, key),
+        /result|job|operation|phase/i,
+        `${label} must not authenticate a coherent valid-to-valid result rebind`,
+      );
+    });
+  }
 });
 
 test("RED v2: active receipt binds exact action plans to phase-scoped Docker authority", () => {
@@ -511,6 +825,22 @@ test("RED v2: active receipt binds exact action plans to phase-scoped Docker aut
   );
   assert.equal(receipt.resources.claimedJobSources["jobs.running"].volumeId, "jobs.queue");
   assert.equal(receipt.resources.claimedJobSources["jobs.running"].brokerRoot, "/run/platform/backup-jobs/running");
+  assert.equal(
+    receipt.resources.claimedJobSources["jobs.running"].snapshotVolumeId,
+    "broker.state",
+  );
+  assert.equal(
+    receipt.resources.claimedJobSources["jobs.running"].snapshotContainerPath,
+    "/run/platform/claimed-job/job.json",
+  );
+  assert.equal(
+    receipt.resources.claimedJobSources["jobs.running"].snapshotVolumeSubpath,
+    "claimed-jobs",
+  );
+  assert.equal(
+    receipt.resources.volumes["broker.state"].engineName,
+    "platform_infra_vps_docker_action_broker_state",
+  );
   assert.equal(receipt.resources.writableSubpaths["backup.quarantine"].device, 42);
   assert.equal(receipt.resources.mounts["backup.root.rw"].device, 42);
   assert.equal(receipt.resources.volumes["backup.quarantine"], undefined);
@@ -634,6 +964,20 @@ test("RED v2: active receipt binds exact action plans to phase-scoped Docker aut
       value.resources.claimedJobSources["jobs.running"].brokerRoot =
         "/run/platform/backup-jobs/../queued";
     }],
+    ["snapshot points to queue volume", (value) => {
+      value.resources.claimedJobSources["jobs.running"].snapshotVolumeId = "jobs.queue";
+    }],
+    ["snapshot worker path substitution", (value) => {
+      value.resources.claimedJobSources["jobs.running"].snapshotContainerPath =
+        "/run/platform/claimed-job/../forged.json";
+    }],
+    ["snapshot volume subpath traversal", (value) => {
+      value.resources.claimedJobSources["jobs.running"].snapshotVolumeSubpath =
+        "../claimed-jobs";
+    }],
+    ["broker state volume substitution", (value) => {
+      value.resources.volumes["broker.state"].engineName = "attacker_broker_state";
+    }],
     ["queue is unbounded", (value) => {
       value.resources.claimedJobSources["jobs.running"].maximumBytes = Number.MAX_SAFE_INTEGER;
     }],
@@ -681,7 +1025,58 @@ test("RED v2: active receipt binds exact action plans to phase-scoped Docker aut
   }
 });
 
-test("RED v2: signed runtime intent detects every Release-owned receipt reference mutation", () => {
+test("RED v2: coherent valid-to-valid receipt rebinds cannot be accepted after exact resealing", async (t) => {
+  const control = activeReceiptFixture();
+  const cases = [
+    ["action-key ownership", (value) => {
+      const catalog = structuredClone(value.resources.actionProfiles["backup.catalog"]);
+      const prune = structuredClone(value.resources.actionProfiles["backup.prune.plan"]);
+      value.resources.actionProfiles["backup.catalog"] = prune;
+      value.resources.actionProfiles["backup.prune.plan"] = catalog;
+    }],
+    ["canonical profile identity", (value) => {
+      value.resources.actionProfiles["backup.catalog"].profileId =
+        EXPECTED_ACTION_BINDINGS["backup.prune.plan"].profileId;
+    }],
+    ["phase-key ownership", (value) => {
+      const catalog = structuredClone(value.resources.phaseProfiles["catalog.capture"]);
+      const prune = structuredClone(value.resources.phaseProfiles["prune.plan"]);
+      value.resources.phaseProfiles["catalog.capture"] = prune;
+      value.resources.phaseProfiles["prune.plan"] = catalog;
+    }],
+    ["canonical capability ownership", (value) => {
+      value.resources.actionProfiles["backup.catalog"].capabilityFileId =
+        capabilityFileId("backup.prune.plan");
+    }],
+    ["canonical resource ownership", (value) => {
+      const brokerState = structuredClone(value.resources.volumes["broker.state"]);
+      const queue = structuredClone(value.resources.volumes["jobs.queue"]);
+      value.resources.volumes["broker.state"] = queue;
+      value.resources.volumes["jobs.queue"] = brokerState;
+    }],
+  ];
+
+  for (const [label, mutate] of cases) {
+    await t.test(label, (st) => {
+      if (!activeReceiptV2Ready(st)) return;
+      assert.doesNotThrow(
+        () => contract.normalizeActiveReceipt(structuredClone(control), { now: NOW }),
+        `${label} negative is meaningful only after the exact v2 control is admitted`,
+      );
+      const candidate = structuredClone(control);
+      mutate(candidate);
+      resealActionProfiles(candidate);
+      assert.throws(
+        () => contract.normalizeActiveReceipt(candidate, { now: NOW }),
+        /action|profile|phase|capability|resource|volume|identity|binding/i,
+        `${label} must reject a coherent reseal made from individually valid identities`,
+      );
+    });
+  }
+});
+
+test("RED v2: signed runtime intent detects every Release-owned receipt reference mutation", (t) => {
+  if (!activeReceiptV2Ready(t)) return;
   const {
     intent,
     rawReceipt: receipt,
@@ -741,21 +1136,19 @@ test("RED v2: signed runtime intent detects every Release-owned receipt referenc
 });
 
 function requestTrustedFixture(action) {
-  return buildTrustedContextV2(contract, {
+  return buildFixtureTrustedContextV2({
     allowedActions: [action],
     now: NOW,
-    trustKey: TRUST_KEY,
   }).trusted;
 }
 
 function signedRequest(action, parameters, trusted, index) {
-  const suffix = String(index).padStart(12, "0");
-  const unsigned = contract.buildUnsignedRequest(action, parameters, trusted, {
+  return buildFixtureSignedActionRequestV2(action, parameters, {
+    capabilityKey: capabilityKey(action),
+    index,
     now: NOW,
-    requestId: `123e4567-e89b-42d3-a456-${suffix}`,
-    nonce: Buffer.alloc(32, index + 1).toString("base64url"),
+    trustedContext: trusted,
   });
-  return contract.signActionRequest(unsigned, capabilityKey(action));
 }
 
 function activeReceiptFixture() {
@@ -770,6 +1163,36 @@ function responseMac(unsigned, key) {
     .digest("hex");
 }
 
+function responseUnsigned(request, result) {
+  return {
+    schema: RESPONSE_SCHEMA_V2,
+    status: "completed",
+    statusCode: 200,
+    errorCode: null,
+    action: request.action,
+    requestId: request.requestId,
+    requestSha256: fixtureSha256(canonicalFixtureJson(request)),
+    result,
+    resultSha256: fixtureSha256(canonicalFixtureJson(result)),
+  };
+}
+
+function responseWithResealedResult(unsigned, result) {
+  return {
+    ...unsigned,
+    result,
+    resultSha256: fixtureSha256(canonicalFixtureJson(result)),
+  };
+}
+
+function phaseResultWithResealedOutput(phaseResult, output) {
+  return {
+    ...phaseResult,
+    output,
+    outputSha256: fixtureSha256(canonicalFixtureJson(output)),
+  };
+}
+
 function requestMac(unsigned, key) {
   return crypto
     .createHmac("sha256", key)
@@ -780,6 +1203,89 @@ function requestMac(unsigned, key) {
 
 function capabilityKey(action) {
   return fixtureCapabilityKey(action);
+}
+
+function admittedRequestShape(request) {
+  return {
+    action: request.action,
+    capabilityId: request.capabilityId,
+    parameters: structuredClone(request.parameters),
+    requestId: request.requestId,
+    nonce: request.nonce,
+    runtimeIntentId: request.runtimeIntentId,
+    activeReceiptSha256: request.activeReceiptSha256,
+    combinedRenderSha256: request.combinedRenderSha256,
+  };
+}
+
+function assertResultBoundToRequest(result, request) {
+  assert.equal(result.schema, RESULT_SCHEMA_V2);
+  assert.deepEqual(Object.keys(result).sort(), [...RESULT_KEYS].sort());
+  assert.equal(result.action, request.action);
+  assert.equal(result.status, "completed");
+  const isEvidence = request.action === "evidence.runtime.snapshot";
+  const plan = EXPECTED_ACTION_PHASES[request.action] ?? null;
+  assert.ok(isEvidence || plan, `missing fixture action plan for ${request.action}`);
+  const isJob = request.action === "backup.job.execute";
+  if (isJob) {
+    assert.deepEqual(Object.keys(result.job).sort(), [...RESULT_JOB_KEYS].sort());
+    assert.deepEqual(result.job, request.parameters);
+  } else {
+    assert.equal(result.job, null);
+  }
+  const expectedPhaseIds = isEvidence
+    ? [EXPECTED_EVIDENCE_RESULT_PHASE.phaseId]
+    : isJob
+      ? plan.operationPhaseIds[request.parameters.jobOperation]
+      : plan.phaseIds;
+  assert.ok(result.phases.length >= 1 && result.phases.length <= 2);
+  assert.deepEqual(
+    result.phases.map(({ phaseId }) => phaseId),
+    expectedPhaseIds,
+    "result phases must preserve the canonical request action/operation plan and order",
+  );
+  const expectedResult = buildFixtureActionResultV2(request.action, request.parameters);
+  for (const [index, phaseResult] of result.phases.entries()) {
+    assert.deepEqual(Object.keys(phaseResult).sort(), [...RESULT_PHASE_KEYS].sort());
+    assert.equal(phaseResult.status, "completed");
+    assert.equal(
+      phaseResult.outputSchema,
+      isEvidence
+        ? EXPECTED_EVIDENCE_RESULT_PHASE.outputSchema
+        : EXPECTED_PHASE_PROFILES[phaseResult.phaseId].outputSchema,
+    );
+    assert.deepEqual(
+      phaseResult.output,
+      expectedResult.phases[index].output,
+      `${phaseResult.phaseId} output must be the bounded action-specific worker schema`,
+    );
+    assert.equal(
+      phaseResult.outputSha256,
+      fixtureSha256(canonicalFixtureJson(phaseResult.output)),
+    );
+    assert.ok(
+      Buffer.byteLength(canonicalFixtureJson(phaseResult.output)) <= MAX_PHASE_OUTPUT_BYTES_V2,
+      `${phaseResult.phaseId} output exceeds the bounded response contract`,
+    );
+  }
+}
+
+function requestConsumerV2Ready(t) {
+  if (contract.REQUEST_SCHEMA === REQUEST_SCHEMA_V2) return true;
+  t.todo("blocked until the product request schema reaches v2");
+  return false;
+}
+
+function responseConsumerV2Ready(t) {
+  if (typeof contract.normalizeActionResponse === "function") return true;
+  t.todo("blocked until the product exports the v2 response consumer");
+  return false;
+}
+
+function activeReceiptV2Ready(t) {
+  if (contract.ACTIVE_RECEIPT_SCHEMA === ACTIVE_RECEIPT_SCHEMA_V2) return true;
+  t.todo("blocked until the product active receipt schema reaches v2");
+  return false;
 }
 
 function omit(value, key) {

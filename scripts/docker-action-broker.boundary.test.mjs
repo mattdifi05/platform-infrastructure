@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -9,12 +10,15 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(scriptDir, "..");
 const dockerSocketPath = "/var/run/docker.sock";
+const pinnedComposeSha256 = "32691ba1196d819fa68cbdc0aad9a5569e730a35ae40c6fdd8458110ecd69488";
+const composeAvailability = findComposeCli();
+let cachedCanonicalRender;
 
 function read(relativePath) {
   return fs.readFileSync(path.join(root, relativePath), "utf8");
 }
 
-test("the static Compose model is derived from the canonical compose-vps.sh order", () => {
+test("the canonical Compose file order is derived from compose-vps.sh", () => {
   const files = canonicalComposeFiles(read("scripts/compose-vps.sh"));
 
   assert.ok(files.length > 1, "compose-vps.sh must provide a non-empty ordered overlay set");
@@ -26,7 +30,7 @@ test("the static Compose model is derived from the canonical compose-vps.sh orde
   }
 });
 
-test("the fail-closed static model handles short, long, override, reset and named host aliases", () => {
+test("unit support: the fail-closed parser handles short, long, override, reset and named host aliases", () => {
   const model = effectiveComposeModel([
     {
       label: "base.yaml",
@@ -84,7 +88,7 @@ volumes:
   assert.equal(model.volumes.get("host_runtime").device, "/var/run");
 });
 
-test("the static model expands mount sources, follows volumes_from and resolves explicit volume aliases", () => {
+test("unit support: the parser expands mount sources, follows volumes_from and resolves explicit volume aliases", () => {
   const model = effectiveComposeModel([
     {
       label: "expanded.yaml",
@@ -144,7 +148,7 @@ volumes:
   );
 });
 
-test("the static model rejects Compose volume constructs it cannot prove safe", () => {
+test("unit support: the parser rejects Compose volume constructs it cannot prove safe", () => {
   for (const [label, source] of [
     ["inline sequence", "services:\n  app:\n    volumes: [/var/run:/host/run:ro]\n"],
     ["inline mapping", "services:\n  app:\n    volumes:\n      - { type: bind, source: /var/run, target: /host/run }\n"],
@@ -159,9 +163,19 @@ test("the static model rejects Compose volume constructs it cannot prove safe", 
   }
 });
 
-test("the effective canonical VPS render has one raw Docker authority", () => {
-  const model = canonicalComposeModel();
-  const owners = rawSocketOwners(model);
+test("canonical Compose rendering is available without a Docker Engine", () => {
+  assert.equal(
+    composeAvailability.available,
+    true,
+    `NOT_RUN: canonical docker compose config renderer unavailable: ${composeAvailability.reason}`,
+  );
+});
+
+test("the effective canonical VPS JSON render has one raw Docker authority", (t) => {
+  const config = canonicalComposeRenderOrSkip(t);
+  if (!config) return;
+  assertRenderedPolicySurface(config);
+  const owners = renderedRawSocketOwners(config);
 
   assert.deepEqual(
     owners,
@@ -169,9 +183,9 @@ test("the effective canonical VPS render has one raw Docker authority", () => {
     `raw Docker socket owners include bind parents or named-volume aliases: ${owners.join(",") || "none"}`,
   );
   for (const metricsService of ["cadvisor", "node-exporter"]) {
-    assert.ok(model.services.has(metricsService), `${metricsService} service disappeared instead of being de-privileged`);
+    assert.ok(config.services?.[metricsService], `${metricsService} service disappeared instead of being de-privileged`);
     assert.equal(
-      serviceOwnsRawSocket(model, metricsService),
+      renderedServiceOwnsRawSocket(config, metricsService),
       false,
       `${metricsService} must not regain Docker authority through /, /run, /var/run or a named-volume alias`,
     );
@@ -180,20 +194,23 @@ test("the effective canonical VPS render has one raw Docker authority", () => {
 
 test.todo("Package A/B runtime metrics continuity after removing cAdvisor/node-exporter host parents (NOT_RUN)");
 
-test("broker and scheduler share only the root-owned claimed-job queue boundary", () => {
-  const model = canonicalComposeModel();
-  const owners = [...model.services.entries()]
-    .filter(([, service]) => service.volumes.some((mount) => mount.source === "backup_scheduler_jobs"))
+test("broker and scheduler share only the root-owned claimed-job queue boundary", (t) => {
+  const config = canonicalComposeRenderOrSkip(t);
+  if (!config) return;
+  const owners = Object.entries(config.services ?? {})
+    .filter(([, service]) => (service.volumes ?? []).some((mount) => mount.source === "backup_scheduler_jobs"))
     .map(([name, service]) => ({
       name,
-      mounts: service.volumes.filter((mount) => mount.source === "backup_scheduler_jobs"),
+      mounts: service.volumes
+        .filter((mount) => mount.source === "backup_scheduler_jobs")
+        .map(normalizeRenderedMount),
     }))
     .sort((left, right) => left.name.localeCompare(right.name));
 
-  assert.equal(
-    exactPrivateVolumeName(model, "backup_scheduler_jobs"),
+  assertPrivateRenderedVolume(
+    config,
+    "backup_scheduler_jobs",
     "platform_infra_vps_backup_scheduler_jobs",
-    "claimed-job queue identity must be the exact project-private effective volume",
   );
   assert.deepEqual(
     owners,
@@ -221,10 +238,12 @@ test("broker and scheduler share only the root-owned claimed-job queue boundary"
   );
 });
 
-test("broker readiness rejects incoherent trusted activation state, not merely a present UDS", async () => {
-  const broker = canonicalComposeModel().services.get("docker-action-broker");
+test("broker readiness rejects incoherent trusted activation state, not merely a present UDS", async (t) => {
+  const config = canonicalComposeRenderOrSkip(t);
+  if (!config) return;
+  const broker = config.services?.["docker-action-broker"];
   assert.deepEqual(
-    broker?.healthcheckTest,
+    broker?.healthcheck?.test,
     [
       "CMD",
       "node",
@@ -291,18 +310,279 @@ test("activation remains external-pending until Release materializes exact v2 va
   assert.equal(policy.status, "external-pending");
 });
 
-function canonicalComposeModel() {
-  return effectiveComposeModel(canonicalComposeFiles(read("scripts/compose-vps.sh")).map((file) => ({
-    label: file,
-    source: read(file),
-  })), {
-    environment: {
-      COMPOSE_PROJECT_NAME: "platform_infra_vps",
-      DOCKER_ACTION_ACTIVATION_INBOX: "/srv/platform/provider-activation/inbox",
-      DOCKER_ACTION_ACTIVE_RECEIPT_FILE: "/srv/platform/trust/active-receipt.json",
-      DOCKER_ACTION_RUNTIME_INTENT_FILE: "/srv/platform/trust/runtime-intent.json",
-    },
+function canonicalComposeRenderOrSkip(t) {
+  if (!composeAvailability.available) {
+    t.skip(`NOT_RUN: canonical docker compose config renderer unavailable: ${composeAvailability.reason}`);
+    return null;
+  }
+  return canonicalComposeRender();
+}
+
+function canonicalComposeRender() {
+  if (cachedCanonicalRender) return structuredClone(cachedCanonicalRender);
+
+  const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "platform-compose-render-"));
+  const envFile = path.join(temporaryRoot, "compose.env");
+  const dockerConfig = path.join(temporaryRoot, "docker-config");
+  fs.mkdirSync(dockerConfig, { mode: 0o700 });
+  fs.writeFileSync(envFile, deterministicComposeEnvironment(), { mode: 0o600 });
+  const executionPath = prepareComposeExecutionPath(temporaryRoot);
+
+  try {
+    const result = spawnSync(
+      "bash",
+      [path.join(root, "scripts", "compose-vps.sh"), "config", "--format", "json"],
+      {
+        cwd: root,
+        encoding: "utf8",
+        env: {
+          COMPOSE_ANSI: "never",
+          COMPOSE_ENV_FILE: envFile,
+          COMPOSE_PROJECT_NAME: "platform_infra_vps",
+          DOCKER_CONFIG: dockerConfig,
+          DOCKER_HOST: `unix://${path.join(temporaryRoot, "engine-must-not-exist.sock")}`,
+          HOME: temporaryRoot,
+          HOSTED_WORKLOAD_ALLOW_RESOLVED: "0",
+          HOSTED_WORKLOAD_LOCK: "",
+          LANG: "C",
+          LC_ALL: "C",
+          PATH: executionPath,
+        },
+        timeout: 30_000,
+      },
+    );
+    const output = `${result.stdout || ""}\n${result.stderr || ""}`;
+    assert.equal(
+      result.status,
+      0,
+      `offline canonical docker compose config render failed (no Engine is permitted):\n${output}`,
+    );
+    assert.equal(result.signal, null, `offline Compose render terminated by ${result.signal}`);
+    let parsed;
+    try {
+      parsed = JSON.parse(result.stdout);
+    } catch (error) {
+      assert.fail(`docker compose config --format json returned invalid JSON: ${error.message}`);
+    }
+    assert.ok(parsed && typeof parsed === "object" && !Array.isArray(parsed), "Compose JSON render must be an object");
+    assert.ok(parsed.services && typeof parsed.services === "object", "Compose JSON render must contain services");
+    cachedCanonicalRender = parsed;
+    return structuredClone(cachedCanonicalRender);
+  } finally {
+    fs.rmSync(temporaryRoot, { recursive: true, force: true });
+  }
+}
+
+function findComposeCli() {
+  const searchPath = [
+    process.env.PATH,
+    "/usr/local/bin",
+    "/opt/homebrew/bin",
+    "/Applications/Docker.app/Contents/Resources/bin",
+    "/usr/bin",
+    "/bin",
+    "/usr/sbin",
+    "/sbin",
+  ].filter(Boolean).join(path.delimiter);
+
+  const bundledCompose = process.env.PLATFORM_TEST_DOCKER_COMPOSE_BIN
+    || path.resolve(root, "../compose-runtime/docker-compose");
+  if (fs.existsSync(bundledCompose) && fs.statSync(bundledCompose).isFile()) {
+    const sha256 = createHash("sha256").update(fs.readFileSync(bundledCompose)).digest("hex");
+    if (!process.env.PLATFORM_TEST_DOCKER_COMPOSE_BIN && sha256 !== pinnedComposeSha256) {
+      return {
+        available: false,
+        path: searchPath,
+        reason: `bundled Compose SHA256 mismatch at ${bundledCompose}: ${sha256}`,
+      };
+    }
+    const probe = spawnSync(bundledCompose, ["version", "--short"], {
+      encoding: "utf8",
+      env: {
+        DOCKER_HOST: "unix:///tmp/platform-compose-probe-engine-must-not-exist.sock",
+        HOME: os.tmpdir(),
+        LANG: "C",
+        LC_ALL: "C",
+        PATH: searchPath,
+      },
+      timeout: 10_000,
+    });
+    if (probe.status === 0) {
+      return {
+        available: true,
+        path: searchPath,
+        reason: "",
+        standalone: bundledCompose,
+      };
+    }
+    const detail = `${probe.stderr || probe.stdout || `status ${probe.status}`}`.trim();
+    return {
+      available: false,
+      path: searchPath,
+      reason: `bundled Compose at ${bundledCompose} failed its offline version probe: ${detail}`,
+    };
+  }
+
+  const resolved = spawnSync("/usr/bin/which", ["docker"], {
+    encoding: "utf8",
+    env: { LANG: "C", LC_ALL: "C", PATH: searchPath },
+    timeout: 5_000,
   });
+  if (resolved.status !== 0 || !resolved.stdout.trim()) {
+    return {
+      available: false,
+      path: searchPath,
+      reason: "docker CLI not found in local PATH or Docker Desktop; no stored canonical render exists",
+    };
+  }
+
+  const docker = resolved.stdout.trim();
+  const dockerPath = [path.dirname(docker), searchPath].join(path.delimiter);
+  const probe = spawnSync(docker, ["compose", "version", "--short"], {
+    encoding: "utf8",
+    env: {
+      DOCKER_HOST: "unix:///tmp/platform-compose-probe-engine-must-not-exist.sock",
+      HOME: os.tmpdir(),
+      LANG: "C",
+      LC_ALL: "C",
+      PATH: dockerPath,
+    },
+    timeout: 10_000,
+  });
+  if (probe.status !== 0) {
+    const detail = `${probe.stderr || probe.stdout || `status ${probe.status}`}`.trim();
+    return {
+      available: false,
+      path: dockerPath,
+      reason: `docker CLI found at ${docker}, but the local Compose plugin is unavailable: ${detail}`,
+    };
+  }
+  return { available: true, path: dockerPath, reason: "" };
+}
+
+function prepareComposeExecutionPath(temporaryRoot) {
+  if (!composeAvailability.standalone) return composeAvailability.path;
+  const shimDir = path.join(temporaryRoot, "compose-shim");
+  const shim = path.join(shimDir, "docker");
+  fs.mkdirSync(shimDir, { mode: 0o700 });
+  fs.writeFileSync(
+    shim,
+    [
+      "#!/bin/sh",
+      "[ \"$1\" = compose ] || exit 64",
+      "shift",
+      `exec ${shellSingleQuote(composeAvailability.standalone)} "$@"`,
+      "",
+    ].join("\n"),
+    { mode: 0o700 },
+  );
+  return [shimDir, composeAvailability.path].join(path.delimiter);
+}
+
+function shellSingleQuote(value) {
+  return `'${String(value).replaceAll("'", `'\\''`)}'`;
+}
+
+function deterministicComposeEnvironment() {
+  return [
+    "ALERT_EMAIL_TO=alerts@example.invalid",
+    "COMPOSE_PROJECT_NAME=platform_infra_vps",
+    "DOMAIN=platform.example.invalid",
+    "DOCKER_ACTION_ACTIVATION_INBOX=/srv/platform/provider-activation/inbox",
+    "DOCKER_ACTION_ACTIVE_RECEIPT_FILE=/srv/platform/trust/active-receipt.json",
+    `DOCKER_ACTION_ACTIVE_RECEIPT_SHA256=${"a".repeat(64)}`,
+    `DOCKER_ACTION_COMBINED_RENDER_SHA256=${"b".repeat(64)}`,
+    "DOCKER_ACTION_RUNTIME_INTENT_FILE=/srv/platform/trust/runtime-intent.json",
+    "DOCKER_ACTION_RUNTIME_INTENT_ID=intent.offline-compose-v2",
+    "HOSTED_WORKLOAD_LOCK=",
+    "KC_BOOTSTRAP_ADMIN_PASSWORD_FILE=/run/secrets/keycloak_admin_password",
+    "KC_DB_PASSWORD_FILE=/run/secrets/keycloak_db_password",
+    "MAILER_FROM=no-reply@example.invalid",
+    "MAILER_REPLY_TO=no-reply@example.invalid",
+    "MARIADB_ROOT_PASSWORD=offline-not-a-secret",
+    "MINIO_ROOT_PASSWORD_FILE=/run/secrets/minio_root_password",
+    "PLATFORM_DOCKER_ACTION_BROKER_IMAGE_REPOSITORY=registry.example.invalid/platform/docker-action-broker",
+    `PLATFORM_DOCKER_ACTION_BROKER_IMAGE_SHA256=${"c".repeat(64)}`,
+    "PLATFORM_PROVIDER_ACTIVATION_SIDECAR_IMAGE_REPOSITORY=registry.example.invalid/platform/provider-activation",
+    `PLATFORM_PROVIDER_ACTIVATION_SIDECAR_IMAGE_SHA256=${"d".repeat(64)}`,
+    "POSTGRES_USER=postgres",
+    "REDIS_PASSWORD_FILE=/run/secrets/redis_password",
+    "REDIS_USERNAME=platform",
+    "SMTP_HOST=smtp.example.invalid",
+    "SMTP_USER=mailer",
+    "",
+  ].join("\n");
+}
+
+function assertRenderedPolicySurface(config) {
+  assert.ok(config.services && typeof config.services === "object" && !Array.isArray(config.services));
+  assert.ok(config.volumes && typeof config.volumes === "object" && !Array.isArray(config.volumes));
+  assert.ok(config.networks && typeof config.networks === "object" && !Array.isArray(config.networks));
+  assert.ok(config.secrets && typeof config.secrets === "object" && !Array.isArray(config.secrets));
+  for (const name of ["docker-action-broker", "backup-scheduler"]) {
+    const service = config.services[name];
+    assert.ok(service && typeof service === "object", `canonical render is missing ${name}`);
+    for (const field of ["cap_drop", "cap_add", "secrets", "tmpfs", "volumes", "volumes_from"]) {
+      assert.ok(
+        service[field] === undefined || Array.isArray(service[field]),
+        `${name}.${field} has an unsupported normalized Compose JSON shape`,
+      );
+    }
+    assert.ok(
+      service.healthcheck === undefined || Array.isArray(service.healthcheck.test),
+      `${name}.healthcheck.test has an unsupported rendered shape`,
+    );
+    assert.ok(
+      service.network_mode === "none" || service.networks === undefined
+        || Array.isArray(service.networks) || typeof service.networks === "object",
+      `${name}.networks has an unsupported rendered shape`,
+    );
+    assert.ok(service.user === undefined || typeof service.user === "string", `${name}.user has an unsupported rendered shape`);
+  }
+}
+
+function renderedRawSocketOwners(config) {
+  return Object.keys(config.services ?? {})
+    .filter((name) => renderedServiceOwnsRawSocket(config, name))
+    .sort();
+}
+
+function renderedServiceOwnsRawSocket(config, name, ancestry = new Set()) {
+  if (ancestry.has(name)) throw new Error(`cyclic rendered volumes_from authority chain at ${name}`);
+  const service = config.services?.[name];
+  if (!service) throw new Error(`unknown rendered volumes_from service ${name}`);
+  const next = new Set(ancestry).add(name);
+  if ((service.volumes ?? []).some((mount) => {
+    const source = mount?.type === "volume"
+      ? config.volumes?.[mount.source]?.driver_opts?.device
+      : mount?.source;
+    return exposesDockerSocket(source);
+  })) return true;
+  return (service.volumes_from ?? []).some((rawReference) => {
+    const reference = typeof rawReference === "string"
+      ? rawReference.split(":")[0]
+      : String(rawReference?.source || rawReference?.service || "");
+    if (!reference || reference.startsWith("container:")) return true;
+    return renderedServiceOwnsRawSocket(config, reference, next);
+  });
+}
+
+function normalizeRenderedMount(mount) {
+  return {
+    type: String(mount?.type || ""),
+    source: String(mount?.source || ""),
+    target: String(mount?.target || ""),
+    readOnly: mount?.read_only === true,
+  };
+}
+
+function assertPrivateRenderedVolume(config, name, exactName) {
+  const declaration = config.volumes?.[name];
+  assert.ok(declaration && typeof declaration === "object", `missing rendered named volume ${name}`);
+  assert.equal(declaration.name, exactName, `rendered ${name} must have the exact project-private Engine name`);
+  assert.notEqual(declaration.external, true, `${name} must not be external`);
+  assert.ok(!declaration.driver || declaration.driver === "local", `${name} uses a non-local driver`);
+  assert.equal(declaration.driver_opts, undefined, `${name} must not alias a host path through driver_opts`);
 }
 
 function canonicalComposeFiles(wrapper) {

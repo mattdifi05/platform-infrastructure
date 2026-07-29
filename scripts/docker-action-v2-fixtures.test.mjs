@@ -8,11 +8,19 @@ import {
   ALL_ACTION_NAMES,
   EXPECTED_ACTION_BINDINGS,
   EXPECTED_ACTION_PHASES,
+  EXPECTED_EVIDENCE_RESULT_PHASE,
   EXPECTED_PHASE_PROFILES,
+  MAX_PHASE_OUTPUT_BYTES_V2,
   REQUEST_SCHEMA_V2,
+  RESULT_SCHEMA_V2,
+  RUNTIME_INTENT_SCHEMA_V1,
   SCHEDULER_ACTION_NAMES,
+  buildFixtureActionResultV2,
+  buildFixturePhaseOutputV2,
   buildFixtureSignedActionRequestV2,
+  buildFixtureTrustedContextV2,
   buildFixtureUnsignedActionRequestV2,
+  buildFixtureVolumeInspect,
   buildRawActiveReceiptV2,
   canonicalFixtureJson,
   capabilityFileId,
@@ -93,12 +101,23 @@ test("fixture oracle keeps queue broker-only, secrets split and quarantine on th
   assert.deepEqual(queue, {
     brokerRoot: "/run/platform/backup-jobs/running",
     maximumBytes: 128 * 1024,
+    snapshotContainerPath: "/run/platform/claimed-job/job.json",
+    snapshotVolumeId: "broker.state",
+    snapshotVolumeSubpath: "claimed-jobs",
     volumeId: "jobs.queue",
     volumeSubpath: "running",
   });
   assert.equal(
     receipt.resources.volumes["jobs.queue"].engineName,
     "platform_infra_vps_backup_scheduler_jobs",
+  );
+  assert.equal(
+    receipt.resources.volumes[queue.snapshotVolumeId].engineName,
+    "platform_infra_vps_docker_action_broker_state",
+  );
+  assert.equal(
+    buildFixtureVolumeInspect(receipt, queue.snapshotVolumeId).Mountpoint,
+    "/var/lib/docker/volumes/platform_infra_vps_docker_action_broker_state/_data",
   );
   assert.equal(
     Object.values(receipt.resources.workerSecretSets)
@@ -120,12 +139,10 @@ test("fixture oracle keeps queue broker-only, secrets split and quarantine on th
 });
 
 test("fixture request/v2 builder is independent, exact and domain-separated", () => {
-  const receipt = buildRawActiveReceiptV2();
-  const trustedContext = {
-    intent: { intentId: "intent.release-v2" },
-    receipt,
-    receiptDigest: fixtureSha256(canonicalFixtureJson(receipt)),
-  };
+  const { trusted: trustedContext } = buildFixtureTrustedContextV2({
+    allowedActions: ["backup.prune.plan"],
+  });
+  assert.equal(trustedContext.intent.schema, RUNTIME_INTENT_SCHEMA_V1);
   const unsigned = buildFixtureUnsignedActionRequestV2("backup.prune.plan", {}, {
     index: 7,
     trustedContext,
@@ -150,6 +167,80 @@ test("fixture request/v2 builder is independent, exact and domain-separated", ()
   assert.notEqual(
     signed.mac,
     crypto.createHmac("sha256", key).update(canonicalFixtureJson(unsigned)).digest("hex"),
+  );
+});
+
+test("fixture result/v2 envelope binds exact request job identity and canonical phases", () => {
+  const fixed = buildFixtureActionResultV2("restore.drill.full");
+  const captureOutput = buildFixturePhaseOutputV2(
+    "restore.drill.full",
+    "restore.capture",
+  );
+  const verifyOutput = buildFixturePhaseOutputV2(
+    "restore.drill.full",
+    "restore.verify",
+  );
+  assert.deepEqual(fixed, {
+    schema: RESULT_SCHEMA_V2,
+    action: "restore.drill.full",
+    job: null,
+    phases: [
+      {
+        output: captureOutput,
+        outputSchema: EXPECTED_PHASE_PROFILES["restore.capture"].outputSchema,
+        outputSha256: fixtureSha256(canonicalFixtureJson(captureOutput)),
+        phaseId: "restore.capture",
+        status: "completed",
+      },
+      {
+        output: verifyOutput,
+        outputSchema: EXPECTED_PHASE_PROFILES["restore.verify"].outputSchema,
+        outputSha256: fixtureSha256(canonicalFixtureJson(verifyOutput)),
+        phaseId: "restore.verify",
+        status: "completed",
+      },
+    ],
+    status: "completed",
+  });
+
+  const parameters = {
+    jobFileName: "0123456789abcdef.json",
+    jobId: "0123456789abcdef",
+    jobOperation: "backup",
+    jobSha256: "1".repeat(64),
+  };
+  const job = buildFixtureActionResultV2("backup.job.execute", parameters);
+  assert.deepEqual(job.job, parameters);
+  assert.deepEqual(
+    job.phases.map(({ phaseId }) => phaseId),
+    ["job.backup.capture"],
+  );
+  assert.deepEqual(
+    Object.keys(job).sort(),
+    ["action", "job", "phases", "schema", "status"],
+  );
+  assert.deepEqual(
+    Object.keys(job.phases[0]).sort(),
+    ["output", "outputSchema", "outputSha256", "phaseId", "status"],
+  );
+
+  const evidence = buildFixtureActionResultV2("evidence.runtime.snapshot");
+  assert.equal(evidence.job, null);
+  assert.deepEqual(
+    evidence.phases.map(({ phaseId, outputSchema }) => ({ phaseId, outputSchema })),
+    [EXPECTED_EVIDENCE_RESULT_PHASE],
+  );
+  assert.deepEqual(evidence.phases[0].output, {
+    schema: EXPECTED_EVIDENCE_RESULT_PHASE.outputSchema,
+    resources: {},
+  });
+  assert.equal(
+    evidence.phases[0].outputSha256,
+    fixtureSha256(canonicalFixtureJson(evidence.phases[0].output)),
+  );
+  assert.ok(
+    Buffer.byteLength(canonicalFixtureJson(evidence.phases[0].output))
+      <= MAX_PHASE_OUTPUT_BYTES_V2,
   );
 });
 

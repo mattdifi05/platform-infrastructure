@@ -2,8 +2,11 @@ import crypto from "node:crypto";
 
 export const FIXTURE_NOW = Date.parse("2026-07-28T12:00:00.000Z");
 export const ACTIVE_RECEIPT_SCHEMA_V2 = "platform.docker-active-receipt/v2";
+export const RUNTIME_INTENT_SCHEMA_V1 = "platform.docker-runtime-intent/v1";
 export const REQUEST_SCHEMA_V2 = "platform.docker-action.request/v2";
 export const RESPONSE_SCHEMA_V2 = "platform.docker-action.response/v2";
+export const RESULT_SCHEMA_V2 = "platform.docker-action.result/v2";
+export const MAX_PHASE_OUTPUT_BYTES_V2 = 4096;
 export const FIXTURE_TRUST_KEY = Buffer.from("runtime-intent-v2-trust-key-material".repeat(2));
 
 export const SCHEDULER_ACTION_NAMES = Object.freeze([
@@ -101,6 +104,11 @@ export const EXPECTED_CLAIMED_JOB_SOURCE_IDS = deepFreeze({
   "backup.prune.apply": null,
   "restore.drill.full": null,
   "backup.offsite.sync": null,
+});
+
+export const EXPECTED_EVIDENCE_RESULT_PHASE = deepFreeze({
+  outputSchema: "platform.docker-runtime-snapshot/v2",
+  phaseId: "evidence.runtime.snapshot",
 });
 
 export const EXPECTED_PHASE_PROFILES = deepFreeze({
@@ -283,6 +291,7 @@ export function buildFixtureVolumeInspect(receipt, logicalId) {
   return {
     Name: admitted.engineName,
     Driver: admitted.driver,
+    Mountpoint: `/var/lib/docker/volumes/${admitted.engineName}/_data`,
     Scope: admitted.scope,
     Labels: material.labels,
     Options: material.options,
@@ -416,6 +425,9 @@ export function buildRawActiveReceiptV2({ now = FIXTURE_NOW } = {}) {
         "jobs.running": {
           brokerRoot: "/run/platform/backup-jobs/running",
           maximumBytes: 128 * 1024,
+          snapshotContainerPath: "/run/platform/claimed-job/job.json",
+          snapshotVolumeId: "broker.state",
+          snapshotVolumeSubpath: "claimed-jobs",
           volumeId: "jobs.queue",
           volumeSubpath: "running",
         },
@@ -480,6 +492,10 @@ export function buildRawActiveReceiptV2({ now = FIXTURE_NOW } = {}) {
       },
       phaseProfiles,
       volumes: {
+        "broker.state": admittedVolume({
+          engineName: "platform_infra_vps_docker_action_broker_state",
+          seed: "broker-state",
+        }),
         "jobs.queue": admittedVolume({
           engineName: "platform_infra_vps_backup_scheduler_jobs",
           seed: "jobs-queue",
@@ -592,6 +608,54 @@ export function buildTrustedContextV2(contract, {
   return Object.freeze({ intent, rawReceipt, receipt, receiptDigest, trusted });
 }
 
+export function buildFixtureTrustedContextV2({
+  allowedActions = SCHEDULER_ACTION_NAMES,
+  now = FIXTURE_NOW,
+  rawReceipt = buildRawActiveReceiptV2({ now }),
+} = {}) {
+  if (!Array.isArray(allowedActions)
+    || allowedActions.length < 1
+    || new Set(allowedActions).size !== allowedActions.length) {
+    throw new TypeError("allowedActions must contain unique fixture actions");
+  }
+  for (const action of allowedActions) requireAction(action);
+  const receipt = structuredClone(rawReceipt);
+  const receiptDigest = fixtureSha256(canonicalFixtureJson(receipt));
+  const unsignedIntent = {
+    schema: RUNTIME_INTENT_SCHEMA_V1,
+    activeReceiptSha256: receiptDigest,
+    activationBundleSha256: receipt.activationBundleSha256,
+    allowedActions: [...allowedActions],
+    candidateId: receipt.candidateId,
+    combinedRenderSha256: receipt.combinedRenderSha256,
+    dastChainSha256: receipt.dastChainSha256,
+    environment: receipt.environment,
+    expiresAt: new Date(now + 30 * 60_000).toISOString(),
+    generation: receipt.generation,
+    intentId: "intent.release-v2",
+    issuedAt: new Date(now - 30_000).toISOString(),
+    releaseId: receipt.releaseId,
+    targetId: receipt.targetId,
+  };
+  const intent = {
+    ...unsignedIntent,
+    mac: crypto
+      .createHmac("sha256", FIXTURE_TRUST_KEY)
+      .update(`${unsignedIntent.schema}\0`)
+      .update(canonicalFixtureJson(unsignedIntent))
+      .digest("hex"),
+  };
+  const trusted = { intent, receipt, receiptDigest };
+  deepFreeze(trusted);
+  return Object.freeze({
+    intent: trusted.intent,
+    rawReceipt: structuredClone(rawReceipt),
+    receipt: trusted.receipt,
+    receiptDigest,
+    trusted,
+  });
+}
+
 export function buildFixtureUnsignedActionRequestV2(action, parameters, {
   index = 0,
   now = FIXTURE_NOW,
@@ -637,22 +701,130 @@ export function buildFixtureSignedActionRequestV2(action, parameters, options = 
   );
 }
 
-export function buildSignedActionRequestV2(contract, action, parameters, {
-  capabilityKey = fixtureCapabilityKey(action),
-  index = 0,
-  now = FIXTURE_NOW,
-  trustedContext,
+export function buildFixtureActionResultV2(action, parameters = {}, {
+  outputByPhaseId = {},
 } = {}) {
-  requireContractFunctions(contract, ["buildUnsignedRequest", "signActionRequest"]);
-  const trusted = trustedContext
-    ?? buildTrustedContextV2(contract, { allowedActions: [action], now }).trusted;
-  const suffix = String(index).padStart(12, "0");
-  const unsigned = contract.buildUnsignedRequest(action, parameters, trusted, {
-    now,
-    requestId: `123e4567-e89b-42d3-a456-${suffix}`,
-    nonce: Buffer.alloc(32, index + 1).toString("base64url"),
+  requireAction(action);
+  const isEvidence = action === "evidence.runtime.snapshot";
+  const plan = isEvidence
+    ? null
+    : requiredBinding(EXPECTED_ACTION_PHASES, action, "action phase");
+  const isJob = action === "backup.job.execute";
+  if (isJob) {
+    const keys = Object.keys(parameters).sort();
+    const expectedKeys = ["jobFileName", "jobId", "jobOperation", "jobSha256"];
+    if (canonicalFixtureJson(keys) !== canonicalFixtureJson(expectedKeys)
+      || !/^[a-z0-9][a-z0-9-]{15,127}$/.test(String(parameters.jobId ?? ""))
+      || parameters.jobFileName !== `${parameters.jobId}.json`
+      || !["backup", "restore-drill"].includes(parameters.jobOperation)
+      || !/^[a-f0-9]{64}$/.test(String(parameters.jobSha256 ?? ""))) {
+      throw new TypeError("typed job result fixture requires an exact canonical job identity");
+    }
+  } else if (!isPlainObject(parameters) || Object.keys(parameters).length !== 0) {
+    throw new TypeError("fixed-action result fixture parameters must be empty");
+  }
+  const operation = isJob ? parameters.jobOperation : null;
+  const phaseIds = isEvidence
+    ? [EXPECTED_EVIDENCE_RESULT_PHASE.phaseId]
+    : isJob
+      ? requiredBinding(plan.operationPhaseIds, operation, "job operation")
+      : plan.phaseIds;
+  if (Object.keys(outputByPhaseId).some((phaseId) => !phaseIds.includes(phaseId))) {
+    throw new TypeError("worker output fixture contains a phase outside the action plan");
+  }
+  const job = isJob
+    ? {
+        jobFileName: parameters.jobFileName,
+        jobId: parameters.jobId,
+        jobOperation: parameters.jobOperation,
+        jobSha256: parameters.jobSha256,
+      }
+    : null;
+  const phases = phaseIds.map((phaseId) => {
+    const outputSchema = isEvidence
+      ? EXPECTED_EVIDENCE_RESULT_PHASE.outputSchema
+      : requiredBinding(EXPECTED_PHASE_PROFILES, phaseId, "phase profile").outputSchema;
+    const output = structuredClone(
+      outputByPhaseId[phaseId]
+        ?? buildFixturePhaseOutputV2(action, phaseId, parameters),
+    );
+    if (!isPlainObject(output) || output.schema !== outputSchema) {
+      throw new TypeError(`invalid worker output fixture for ${phaseId}`);
+    }
+    if (Buffer.byteLength(canonicalFixtureJson(output)) > MAX_PHASE_OUTPUT_BYTES_V2) {
+      throw new TypeError(`oversized worker output fixture for ${phaseId}`);
+    }
+    return {
+      output,
+      outputSchema,
+      outputSha256: fixtureSha256(canonicalFixtureJson(output)),
+      phaseId,
+      status: "completed",
+    };
   });
-  return contract.signActionRequest(unsigned, capabilityKey);
+  return {
+    schema: RESULT_SCHEMA_V2,
+    action,
+    job,
+    phases,
+    status: "completed",
+  };
+}
+
+export function buildFixturePhaseOutputV2(action, phaseId, parameters = {}) {
+  requireAction(action);
+  if (action === "evidence.runtime.snapshot") {
+    if (phaseId !== EXPECTED_EVIDENCE_RESULT_PHASE.phaseId) {
+      throw new TypeError(`unsupported evidence result phase fixture: ${phaseId}`);
+    }
+    return {
+      schema: EXPECTED_EVIDENCE_RESULT_PHASE.outputSchema,
+      resources: {},
+    };
+  }
+  const plan = requiredBinding(EXPECTED_ACTION_PHASES, action, "action phase");
+  const ownedPhaseIds = action === "backup.job.execute"
+    ? requiredBinding(plan.operationPhaseIds, parameters.jobOperation, "job operation")
+    : plan.phaseIds;
+  if (!ownedPhaseIds.includes(phaseId)) {
+    throw new TypeError(`${phaseId} is not owned by fixture action ${action}`);
+  }
+  const profile = requiredBinding(EXPECTED_PHASE_PROFILES, phaseId, "phase profile");
+  const common = {
+    schema: profile.outputSchema,
+    status: "passed",
+    evidenceSha256: fixtureSha256(`fixture:worker-evidence:${phaseId}`),
+  };
+  if (phaseId === "prune.plan") {
+    return {
+      schema: profile.outputSchema,
+      mode: "plan",
+      keepCompleteManifests: 42,
+      completeManifestCount: 2,
+      retainedManifestIds: ["manifest:one"],
+      expiredManifestIds: ["manifest:two"],
+      mutationPerformed: false,
+    };
+  }
+  if (phaseId === "job.backup.capture" || phaseId === "job.restore.verify") {
+    return {
+      ...common,
+      jobId: parameters.jobId,
+      jobOperation: parameters.jobOperation,
+      mutationPerformed: true,
+    };
+  }
+  if (phaseId === "offsite.sync") {
+    return {
+      ...common,
+      mutationPerformed: true,
+      repositoryOffsite: true,
+    };
+  }
+  return {
+    ...common,
+    mutationPerformed: true,
+  };
 }
 
 function phase({

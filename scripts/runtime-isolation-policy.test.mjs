@@ -1,8 +1,15 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 import { evaluateRuntimeIsolation } from "./runtime-isolation-policy.mjs";
 
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const CAPABILITY_SECRETS = [
   "docker_action_backup_catalog",
   "docker_action_backup_job_execute",
@@ -13,9 +20,96 @@ const CAPABILITY_SECRETS = [
 ];
 const EVIDENCE_SECRET = "docker_action_evidence_runtime_snapshot";
 const TRUST_SECRET = "docker_action_runtime_intent_trust_key";
+const pinnedComposeSha256 = "32691ba1196d819fa68cbdc0aad9a5569e730a35ae40c6fdd8458110ecd69488";
+const composeAvailability = findComposeCli();
+const cachedCanonicalRenders = new Map();
 
-test("accepts the host-private immutable action broker boundary", () => {
-  const report = evaluateRuntimeIsolation(fixture());
+test("canonical Compose policy rendering is available without a Docker Engine", () => {
+  assert.equal(
+    composeAvailability.available,
+    true,
+    `NOT_RUN: canonical docker compose config renderer unavailable: ${composeAvailability.reason}`,
+  );
+});
+
+test("the test-only candidate overlay resolves to the intended authority boundary", (t) => {
+  const config = canonicalComposeRenderOrSkip(t, "candidate");
+  if (!config) return;
+  assertRenderedPolicySurface(config);
+
+  assert.deepEqual(renderedRawSocketOwners(config), ["docker-action-broker"]);
+  assert.equal(config.volumes.backup_scheduler_jobs?.name, "platform_infra_vps_backup_scheduler_jobs");
+  assert.equal(config.volumes.backup_scheduler_jobs?.external, undefined);
+  assert.equal(config.volumes.backup_scheduler_jobs?.driver_opts, undefined);
+
+  const broker = config.services["docker-action-broker"];
+  const scheduler = config.services["backup-scheduler"];
+  assert.equal(broker.user, "0:0");
+  assert.deepEqual(broker.cap_drop, ["ALL"]);
+  assert.deepEqual(broker.cap_add ?? [], []);
+  assert.equal(broker.network_mode, "none");
+  assert.deepEqual(Object.keys(broker.networks ?? {}), []);
+  assert.deepEqual(broker.healthcheck.test, [
+    "CMD",
+    "node",
+    "/opt/platform-docker-broker/docker-action-readiness.mjs",
+    "--require-trusted-activation",
+  ]);
+  assert.deepEqual(
+    broker.volumes.find((mount) => mount.source === "backup_scheduler_jobs"),
+    {
+      type: "volume",
+      source: "backup_scheduler_jobs",
+      target: "/run/platform/backup-jobs",
+      read_only: true,
+      volume: {},
+    },
+  );
+
+  assert.equal(scheduler.user, "0:0");
+  assert.deepEqual(scheduler.cap_drop, ["ALL"]);
+  assert.deepEqual(scheduler.cap_add ?? [], []);
+  assert.equal(scheduler.network_mode, "none");
+  assert.deepEqual(Object.keys(scheduler.networks ?? {}), []);
+  assert.equal(scheduler.build, undefined);
+  assert.match(scheduler.image, /@sha256:[a-f0-9]{64}$/);
+  assert.deepEqual(
+    scheduler.volumes.find((mount) => mount.source === "backup_scheduler_jobs"),
+    {
+      type: "volume",
+      source: "backup_scheduler_jobs",
+      target: "/var/www/project-state/backup-jobs",
+      volume: {},
+    },
+  );
+
+  const brokerSecrets = secretNamesFromRender(broker);
+  const schedulerSecrets = secretNamesFromRender(scheduler);
+  assert.deepEqual(
+    brokerSecrets,
+    [...CAPABILITY_SECRETS, EVIDENCE_SECRET, TRUST_SECRET].sort(),
+  );
+  assert.deepEqual(schedulerSecrets, [...CAPABILITY_SECRETS].sort());
+  assert.ok(!schedulerSecrets.includes(EVIDENCE_SECRET));
+  assert.ok(!schedulerSecrets.includes(TRUST_SECRET));
+});
+
+test("the unmodified canonical source render itself satisfies the policy (real-current gate)", (t) => {
+  const config = canonicalComposeRenderOrSkip(t, "current");
+  if (!config) return;
+  assertRenderedPolicySurface(config);
+  const report = evaluateRuntimeIsolation(config);
+  assert.equal(report.status, "passed", report.failures.join("\n"));
+});
+
+test("accepts the complete canonical Compose JSON render", (t) => {
+  const config = canonicalComposeRenderOrSkip(t, "candidate");
+  if (!config) return;
+  assertRenderedPolicySurface(config);
+  const report = evaluateRuntimeIsolation(config);
+
+  assert.equal(report.status, "passed", report.failures.join("\n"));
+  assert.deepEqual(report.summary.rawSocketOwners, ["docker-action-broker"]);
   for (const id of [
     "docker-broker-immutable-image",
     "docker-broker-host-private",
@@ -37,663 +131,1050 @@ test("accepts the host-private immutable action broker boundary", () => {
     "scheduler-uses-local-action-socket",
     "scheduler-has-no-docker-api",
   ]) {
-    assert.equal(report.checks.find((item) => item.id === id)?.status, "passed", id);
+    assert.equal(checkStatus(report, id), "passed", id);
   }
-  assert.equal(report.status, "passed", report.failures.join("\n"));
-  assert.equal(report.summary.rawSocketOwners.join(","), "docker-action-broker");
-  assert.equal(report.summary.hostedWorkloads, 1);
 });
 
-test("the policy consumes a realistic Compose JSON render, not a source-only fixture shape", () => {
-  const renderedJson = JSON.stringify(fixture());
-  const parsedRender = JSON.parse(renderedJson);
-  const report = evaluateRuntimeIsolation(parsedRender);
+test("the policy consumes user, capabilities, networks, secrets, tmpfs, volumes, volumes_from and healthcheck from the real render", (t) => {
+  const admitted = admittedCandidatePolicyOrTodo(t);
+  if (!admitted) return;
+  const { config, report } = admitted;
+  const broker = config.services["docker-action-broker"];
+  const scheduler = config.services["backup-scheduler"];
+
+  assert.equal(typeof broker.user, "string");
+  assert.ok(Array.isArray(broker.cap_drop));
+  assert.ok(broker.cap_add === undefined || Array.isArray(broker.cap_add));
+  assert.ok(broker.network_mode === "none" || broker.networks !== undefined);
+  assert.ok(Array.isArray(broker.secrets));
+  assert.ok(Array.isArray(broker.tmpfs));
+  assert.ok(Array.isArray(broker.volumes));
+  assert.ok(broker.volumes_from === undefined || Array.isArray(broker.volumes_from));
+  assert.ok(Array.isArray(broker.healthcheck?.test));
+
+  assert.equal(typeof scheduler.user, "string");
+  assert.ok(Array.isArray(scheduler.cap_drop));
+  assert.ok(scheduler.cap_add === undefined || Array.isArray(scheduler.cap_add));
+  assert.ok(scheduler.network_mode === "none" || scheduler.networks !== undefined);
+  assert.ok(Array.isArray(scheduler.secrets));
+  assert.ok(Array.isArray(scheduler.tmpfs));
+  assert.ok(Array.isArray(scheduler.volumes));
+  assert.ok(scheduler.volumes_from === undefined || Array.isArray(scheduler.volumes_from));
+  assert.ok(Array.isArray(scheduler.healthcheck?.test));
 
   assert.equal(report.status, "passed", report.failures.join("\n"));
-  assert.deepEqual(report.summary.rawSocketOwners, ["docker-action-broker"]);
+});
 
-  parsedRender.services["node-exporter"].volumes = [
-    {
-      type: "bind",
-      source: "/",
-      target: "/host",
-      read_only: true,
-      bind: { create_host_path: true },
+test("follows rendered volumes_from authority instead of trusting an empty local mount list", (t) => {
+  assertMutationRejected(t, {
+    checks: ["raw-socket-single-owner"],
+    mutate(config) {
+      config.services.cadvisor.volumes = [];
+      config.services.cadvisor.volumes_from = ["docker-action-broker:ro"];
     },
-  ];
-  const widened = evaluateRuntimeIsolation(JSON.parse(JSON.stringify(parsedRender)));
-  assert.equal(widened.checks.find((item) => item.id === "raw-socket-single-owner")?.status, "failed");
-  assert.ok(widened.summary.rawSocketOwners.includes("node-exporter"));
-});
-
-test("the rendered policy follows volumes_from authority instead of trusting an empty local mount list", () => {
-  const config = fixture();
-  config.services.cadvisor.volumes_from = ["docker-action-broker:ro"];
-  const report = evaluateRuntimeIsolation(JSON.parse(JSON.stringify(config)));
-  assert.equal(report.checks.find((item) => item.id === "raw-socket-single-owner")?.status, "failed");
-  assert.ok(report.summary.rawSocketOwners.includes("cadvisor"));
+  });
 });
 
 for (const serviceName of ["cadvisor", "node-exporter"]) {
   for (const source of ["/", "/run", "/var/run", "/run/docker.sock"]) {
-    test(`rejects ${serviceName} raw socket exposing mount ${source}`, () => {
-      const config = fixture();
-      config.services[serviceName] = bounded({
-        read_only: true,
-        volumes: [
-          { type: "bind", source, target: "/host-runtime", read_only: true },
-        ],
-        networks: { platform_observability: null },
+    test(`rejects ${serviceName} raw socket exposing mount ${source}`, (t) => {
+      assertMutationRejected(t, {
+        checks: ["raw-socket-single-owner"],
+        mutate(config) {
+          config.services[serviceName].volumes = [{
+            type: "bind",
+            source,
+            target: "/host-runtime",
+            read_only: true,
+            bind: { create_host_path: true },
+          }];
+        },
       });
-      const report = evaluateRuntimeIsolation(config);
-      assert.equal(
-        report.checks.find((item) => item.id === "raw-socket-single-owner")?.status,
-        "failed",
-        `${source} exposes /var/run/docker.sock even when mounted read-only`,
-      );
-      assert.ok(report.summary.rawSocketOwners.includes(serviceName), `${source} must make ${serviceName} a raw socket owner`);
     });
   }
 }
 
 for (const device of ["/", "/run", "/var/run"]) {
-  test(`rejects cAdvisor named-volume alias ${device} to the raw socket`, () => {
-    const config = fixture();
-    config.services.cadvisor = bounded({
-      read_only: true,
-      volumes: [
-        { type: "volume", source: "cadvisor_runtime", target: "/host-runtime", read_only: true },
-      ],
-      networks: { platform_observability: null },
+  test(`rejects cAdvisor named-volume alias ${device} to the raw socket`, (t) => {
+    assertMutationRejected(t, {
+      checks: ["raw-socket-single-owner"],
+      mutate(config) {
+        config.services.cadvisor.volumes = [{
+          type: "volume",
+          source: "cadvisor_runtime",
+          target: "/host-runtime",
+          read_only: true,
+        }];
+        config.volumes.cadvisor_runtime = {
+          name: "platform_infra_vps_cadvisor_runtime",
+          driver: "local",
+          driver_opts: { type: "none", o: "bind,ro", device },
+        };
+      },
     });
-    config.volumes.cadvisor_runtime = {
-      driver: "local",
-      driver_opts: { type: "none", o: "bind,ro", device },
-    };
-    const report = evaluateRuntimeIsolation(config);
-    assert.equal(
-      report.checks.find((item) => item.id === "raw-socket-single-owner")?.status,
-      "failed",
-      "named-volume bind aliases must be resolved before raw socket ownership is decided",
-    );
-    assert.ok(report.summary.rawSocketOwners.includes("cadvisor"), "aliased cAdvisor mount must be reported as an owner");
   });
 }
 
-test("rejects workload raw socket, bind and broad host mounts", () => {
-  const config = fixture();
-  config.services["example-app-web"].volumes.push(
-    { type: "bind", source: "/var/run/docker.sock", target: "/var/run/docker.sock", read_only: true },
-    { type: "bind", source: "/srv/platform", target: "/mnt/host/platform", read_only: true },
-  );
-  const report = evaluateRuntimeIsolation(config);
-  assert.equal(report.status, "failed");
-  assert.match(report.failures.join("\n"), /raw-socket-single-owner/);
-  assert.match(report.failures.join("\n"), /workload-no-bind-mounts-example-app-web/);
-  assert.match(report.failures.join("\n"), /workload-deny-mount-mnt-host-example-app-web/);
-});
-
-test("rejects root workload identity, added capabilities and supplemental Docker group", () => {
-  const config = fixture();
-  config.services["example-app-web"].user = "0:0";
-  config.services["example-app-web"].cap_add = ["NET_ADMIN"];
-  config.services["example-app-web"].group_add = ["998"];
-  const report = evaluateRuntimeIsolation(config);
-  assert.equal(report.status, "failed");
-  assert.match(report.failures.join("\n"), /workload-non-root-example-app-web/);
-  assert.match(report.failures.join("\n"), /workload-drop-all-capabilities-example-app-web/);
-  assert.match(report.failures.join("\n"), /workload-no-supplemental-groups-example-app-web/);
-});
-
-test("rejects a workload named-volume alias to a host path", () => {
-  const config = fixture();
-  config.volumes.example_data = {
-    driver: "local",
-    driver_opts: { type: "none", o: "bind", device: "/var/run" },
-  };
-  const report = evaluateRuntimeIsolation(config);
-  assert.equal(report.status, "failed");
-  assert.match(report.failures.join("\n"), /workload-volume-no-host-alias-example-data-example-app-web/);
-});
-
-test("rejects broker socket and state volume alias substitution", () => {
-  const external = fixture();
-  external.volumes.docker_action_broker_socket = { external: true, name: "attacker_socket" };
-  let report = evaluateRuntimeIsolation(external);
-  assert.equal(report.status, "failed");
-  assert.match(report.failures.join("\n"), /docker-broker-socket-volume-not-aliased/);
-
-  const driverOpts = fixture();
-  driverOpts.volumes.docker_action_broker_state = {
-    driver: "local",
-    driver_opts: { type: "none", o: "bind", device: "/var/run" },
-  };
-  report = evaluateRuntimeIsolation(driverOpts);
-  assert.equal(report.status, "failed");
-  assert.match(report.failures.join("\n"), /docker-broker-state-volume-not-aliased/);
-
-  const activationCas = fixture();
-  activationCas.volumes.docker_action_activation_cas = { external: true, name: "shared_cas" };
-  report = evaluateRuntimeIsolation(activationCas);
-  assert.equal(report.status, "failed");
-  assert.match(report.failures.join("\n"), /docker-broker-activation-cas-volume-not-aliased/);
-
-  const jobQueue = fixture();
-  jobQueue.volumes.backup_scheduler_jobs = {
-    driver: "local",
-    driver_opts: { type: "none", o: "bind,ro", device: "/srv/shared/jobs" },
-  };
-  report = evaluateRuntimeIsolation(jobQueue);
-  assert.equal(report.status, "failed");
-  assert.match(report.failures.join("\n"), /docker-broker-claimed-job-queue-not-aliased/);
-});
-
-test("rejects mutable, networked or candidate-mounted brokers", () => {
-  const config = fixture();
-  const broker = config.services["docker-action-broker"];
-  broker.image = "platform/docker-action-broker:latest";
-  broker.build = { context: "." };
-  broker.network_mode = "bridge";
-  broker.ports = ["0.0.0.0:2376:2376"];
-  broker.environment.DOCKER_HOST = "tcp://evil:2376";
-  broker.volumes.push({ type: "bind", source: ".", target: "/infra", read_only: true });
-  const report = evaluateRuntimeIsolation(config);
-  assert.equal(report.status, "failed");
-  assert.match(report.failures.join("\n"), /docker-broker-immutable-image/);
-  assert.match(report.failures.join("\n"), /docker-broker-host-private/);
-  assert.match(report.failures.join("\n"), /docker-broker-no-candidate-code/);
-  assert.match(report.failures.join("\n"), /docker-broker-no-remote-host/);
-  assert.match(report.failures.join("\n"), /docker-broker-exact-mount-targets/);
-});
-
-test("rejects broker and scheduler supplemental groups", () => {
-  const config = fixture();
-  config.services["docker-action-broker"].group_add = ["998"];
-  config.services["backup-scheduler"].group_add = ["998"];
-  const report = evaluateRuntimeIsolation(config);
-  assert.equal(report.status, "failed");
-  assert.match(report.failures.join("\n"), /docker-broker-no-supplemental-groups/);
-  assert.match(report.failures.join("\n"), /scheduler-no-supplemental-groups/);
-});
-
-test("rejects a broker without the explicit root identity required by its private state", () => {
-  const config = fixture();
-  delete config.services["docker-action-broker"].user;
-  const report = evaluateRuntimeIsolation(config);
-  assert.equal(report.checks.find((item) => item.id === "docker-broker-root-identity")?.status, "failed");
-  assert.match(report.failures.join("\n"), /docker-broker-root-identity/);
-});
-
-test("rejects broker readiness that proves only the UDS exists", () => {
-  const config = fixture();
-  config.services["docker-action-broker"].healthcheck = {
-    test: ["CMD", "node", "-e", "const fs=require('node:fs');process.exit(fs.statSync('/run/platform/docker-action-broker/broker.sock').isSocket()?0:1)"],
-  };
-  const report = evaluateRuntimeIsolation(config);
-  assert.equal(report.checks.find((item) => item.id === "docker-broker-trust-aware-readiness")?.status, "failed");
-  assert.match(report.failures.join("\n"), /docker-broker-trust-aware-readiness/);
-});
-
-test("rejects readiness commands that merely contain trusted-looking words", () => {
-  const config = fixture();
-  config.services["docker-action-broker"].healthcheck = {
-    test: ["CMD", "echo", "readiness trusted activation receipt"],
-  };
-  const report = evaluateRuntimeIsolation(config);
-  assert.equal(report.checks.find((item) => item.id === "docker-broker-trust-aware-readiness")?.status, "failed");
-});
-
-test("requires the exact readiness module command and mandatory trust argument", () => {
-  for (const command of [
-    ["CMD", "node", "/opt/platform-docker-broker/docker-action-readiness.mjs"],
-    ["CMD", "node", "/opt/platform-docker-broker/docker-action-readiness.mjs", "--require-trusted-activation", "--allow-pending"],
-    ["CMD", "node", "/tmp/docker-action-readiness.mjs", "--require-trusted-activation"],
-    ["CMD-SHELL", "node /opt/platform-docker-broker/docker-action-readiness.mjs --require-trusted-activation"],
-  ]) {
-    const config = fixture();
-    config.services["docker-action-broker"].healthcheck = { test: command };
-    const report = evaluateRuntimeIsolation(config);
-    assert.equal(
-      report.checks.find((item) => item.id === "docker-broker-trust-aware-readiness")?.status,
-      "failed",
-      `healthcheck widening was accepted: ${JSON.stringify(command)}`,
-    );
-  }
-});
-
-test("rejects a mutable or generic scheduler image", () => {
-  const config = fixture();
-  const scheduler = config.services["backup-scheduler"];
-  scheduler.image = "platform/ops:local";
-  scheduler.build = { context: ".", dockerfile: "docker/ops.Dockerfile" };
-  const report = evaluateRuntimeIsolation(config);
-  assert.equal(report.checks.find((item) => item.id === "scheduler-immutable-image")?.status, "failed");
-  assert.match(report.failures.join("\n"), /scheduler-immutable-image/);
-});
-
-test("rejects scheduler Linux capability widening", () => {
-  const config = fixture();
-  const scheduler = config.services["backup-scheduler"];
-  scheduler.cap_drop = [];
-  scheduler.cap_add = ["NET_ADMIN"];
-  const report = evaluateRuntimeIsolation(config);
-  assert.equal(report.checks.find((item) => item.id === "scheduler-minimum-authority")?.status, "failed");
-  assert.match(report.failures.join("\n"), /scheduler-minimum-authority/);
-});
-
-test("rejects scheduler external egress", () => {
-  const config = fixture();
-  const scheduler = config.services["backup-scheduler"];
-  scheduler.network_mode = "bridge";
-  scheduler.networks = { platform_egress: null };
-  const report = evaluateRuntimeIsolation(config);
-  assert.equal(report.checks.find((item) => item.id === "scheduler-host-private")?.status, "failed");
-  assert.match(report.failures.join("\n"), /scheduler-host-private/);
-});
-
-test("rejects scheduler repository, backup, report, state or source mounts", () => {
-  const config = fixture();
-  config.services["backup-scheduler"].volumes.push(
-    { type: "bind", source: ".", target: "/infra", read_only: true },
-    { type: "bind", source: "./backups", target: "/infra/backups", read_only: false },
-    { type: "bind", source: "./reports", target: "/infra/reports", read_only: false },
-    { type: "bind", source: "./projects-portal/state", target: "/var/www/project-state", read_only: false },
-    { type: "bind", source: "../src", target: "/project", read_only: true },
-  );
-  const report = evaluateRuntimeIsolation(config);
-  assert.equal(report.checks.find((item) => item.id === "scheduler-exact-mount-targets")?.status, "failed");
-  assert.match(report.failures.join("\n"), /scheduler-exact-mount-targets/);
-});
-
-test("requires the private claimed-job queue read-write on scheduler and read-only on broker", () => {
-  const schedulerReadOnly = fixture();
-  schedulerReadOnly.services["backup-scheduler"].volumes
-    .find((mount) => mount.source === "backup_scheduler_jobs").read_only = true;
-  let report = evaluateRuntimeIsolation(schedulerReadOnly);
-  assert.equal(report.checks.find((item) => item.id === "scheduler-claimed-job-queue-read-write")?.status, "failed");
-
-  const brokerWritable = fixture();
-  brokerWritable.services["docker-action-broker"].volumes
-    .find((mount) => mount.source === "backup_scheduler_jobs").read_only = false;
-  report = evaluateRuntimeIsolation(brokerWritable);
-  assert.equal(report.checks.find((item) => item.id === "docker-broker-claimed-job-queue-read-only")?.status, "failed");
-
-  const thirdParty = fixture();
-  thirdParty.services["example-app-web"].volumes.push({
-    type: "volume",
-    source: "backup_scheduler_jobs",
-    target: "/app/jobs",
-    read_only: true,
+test("rejects workload raw socket, bind and broad host mounts", (t) => {
+  assertMutationRejected(t, {
+    checks: [
+      "raw-socket-single-owner",
+      "workload-no-bind-mounts-example-app-web",
+      "workload-deny-mount-mnt-host-example-app-web",
+    ],
+    mutate(config) {
+      config.services["example-app-web"] = hostileWorkload({
+        volumes: [
+          {
+            type: "bind",
+            source: "/var/run/docker.sock",
+            target: "/var/run/docker.sock",
+            read_only: true,
+          },
+          {
+            type: "bind",
+            source: "/srv/platform",
+            target: "/mnt/host/platform",
+            read_only: true,
+          },
+        ],
+      });
+    },
   });
-  report = evaluateRuntimeIsolation(thirdParty);
-  assert.equal(report.checks.find((item) => item.id === "docker-broker-claimed-job-queue-not-aliased")?.status, "failed");
-
-  for (const declaration of [
-    { external: true, name: "platform_infra_vps_backup_scheduler_jobs" },
-    { name: "shared_backup_scheduler_jobs" },
-    { name: "${COMPOSE_PROJECT_NAME}_backup_scheduler_jobs" },
-  ]) {
-    const aliased = fixture();
-    aliased.volumes.backup_scheduler_jobs = declaration;
-    report = evaluateRuntimeIsolation(aliased);
-    assert.equal(
-      report.checks.find((item) => item.id === "docker-broker-claimed-job-queue-not-aliased")?.status,
-      "failed",
-      `claimed queue alias was accepted: ${JSON.stringify(declaration)}`,
-    );
-  }
 });
 
-test("rejects scheduler control files outside its exact hardened tmpfs", () => {
-  const config = fixture();
-  const scheduler = config.services["backup-scheduler"];
-  scheduler.environment.BACKUP_SCHEDULER_CRON_FILE = "/tmp/root.cron";
-  scheduler.environment.BACKUP_SCHEDULER_ENV_FILE = "/var/lib/platform/backup-scheduler.env";
-  const report = evaluateRuntimeIsolation(config);
-  assert.equal(report.checks.find((item) => item.id === "scheduler-writable-paths")?.status, "failed");
-  assert.match(report.failures.join("\n"), /scheduler-writable-paths/);
-});
-
-test("rejects scheduler tmpfs without noexec/nosuid/nodev or with an unbounded size", () => {
-  for (const tmpfs of [
-    [
-      "/tmp:rw,nosuid,nodev,size=64m",
-      "/run/platform/backup-scheduler:rw,noexec,nosuid,nodev,size=8m",
+test("rejects root workload identity, added capabilities and supplemental Docker group", (t) => {
+  assertMutationRejected(t, {
+    checks: [
+      "workload-non-root-example-app-web",
+      "workload-drop-all-capabilities-example-app-web",
+      "workload-no-supplemental-groups-example-app-web",
     ],
-    [
-      "/tmp:rw,noexec,nosuid,nodev,size=1024m",
-      "/run/platform/backup-scheduler:rw,noexec,nosuid,nodev,size=8m",
-    ],
-    [
-      "/tmp:rw,noexec,nosuid,nodev,size=64m",
-      "/run/platform/backup-scheduler:rw,noexec,nosuid,size=8m",
-    ],
-  ]) {
-    const config = fixture();
-    config.services["backup-scheduler"].tmpfs = tmpfs;
-    const report = evaluateRuntimeIsolation(config);
-    assert.equal(
-      report.checks.find((item) => item.id === "scheduler-writable-paths")?.status,
-      "failed",
-      `unsafe tmpfs was accepted: ${JSON.stringify(tmpfs)}`,
-    );
-  }
-});
-
-test("rejects scheduler mount source, target, type and option widening", () => {
-  for (const mutate of [
-    (scheduler) => { scheduler.volumes.find((mount) => mount.target === "/var/log/platform").source = "shared_logs"; },
-    (scheduler) => { scheduler.volumes.find((mount) => mount.target === "/run/platform/docker-action-broker").read_only = false; },
-    (scheduler) => { scheduler.volumes.find((mount) => mount.source === "backup_scheduler_jobs").target = "/run/jobs"; },
-    (scheduler) => { scheduler.volumes.find((mount) => mount.source === "backup_scheduler_jobs").type = "bind"; },
-  ]) {
-    const config = fixture();
-    mutate(config.services["backup-scheduler"]);
-    const report = evaluateRuntimeIsolation(config);
-    assert.equal(report.checks.find((item) => item.id === "scheduler-exact-mount-targets")?.status, "failed");
-  }
-});
-
-test("rejects a mutable, networked or Docker-bearing activation sidecar", () => {
-  const config = fixture();
-  const sidecar = config.services["docker-action-activation-sidecar"];
-  sidecar.image = "provider/activation-sidecar:latest";
-  sidecar.build = { context: "." };
-  sidecar.network_mode = "bridge";
-  sidecar.group_add = ["998"];
-  sidecar.volumes.push({
-    type: "bind",
-    source: "/var/run/docker.sock",
-    target: "/var/run/docker.sock",
-    read_only: true,
+    mutate(config) {
+      config.services["example-app-web"] = hostileWorkload({
+        user: "0:0",
+        cap_add: ["NET_ADMIN"],
+        group_add: ["998"],
+      });
+    },
   });
-  const report = evaluateRuntimeIsolation(config);
-  assert.equal(report.status, "failed");
-  assert.match(report.failures.join("\n"), /activation-sidecar-immutable-provider-image/);
-  assert.match(report.failures.join("\n"), /activation-sidecar-host-private/);
-  assert.match(report.failures.join("\n"), /activation-sidecar-minimum-authority/);
-  assert.match(report.failures.join("\n"), /activation-sidecar-exact-mounts/);
-  assert.match(report.failures.join("\n"), /activation-sidecar-no-docker-control/);
-  assert.match(report.failures.join("\n"), /raw-socket-single-owner/);
 });
 
-test("rejects secret external/name substitution, third-party owners and weak mounts", () => {
-  const config = fixture();
-  config.secrets.docker_action_backup_prune_plan = {
-    external: true,
-    name: "shared_admin_token",
-  };
-  config.services["example-app-web"].secrets = [
-    secret("docker_action_backup_prune_plan"),
-  ];
-  config.services["backup-scheduler"].secrets
-    .find((item) => item.source === "docker_action_backup_prune_plan").mode = 0o444;
-  const report = evaluateRuntimeIsolation(config);
-  assert.equal(report.status, "failed");
-  assert.match(report.failures.join("\n"), /docker-broker-secret-source-docker_action_backup_prune_plan/);
-  assert.match(report.failures.join("\n"), /docker-broker-secret-owners-docker_action_backup_prune_plan/);
-  assert.match(report.failures.join("\n"), /docker-broker-secret-mode-docker_action_backup_prune_plan-backup-scheduler/);
+test("rejects a workload named-volume alias to a host path", (t) => {
+  assertMutationRejected(t, {
+    checks: ["workload-volume-no-host-alias-example-data-example-app-web"],
+    mutate(config) {
+      config.services["example-app-web"] = hostileWorkload({
+        volumes: [{
+          type: "volume",
+          source: "example_data",
+          target: "/app/data",
+          read_only: false,
+        }],
+      });
+      config.volumes.example_data = {
+        name: "platform_infra_vps_example_data",
+        driver: "local",
+        driver_opts: { type: "none", o: "bind", device: "/var/run" },
+      };
+    },
+  });
 });
 
-test("assigns exact root-owned capability and evidence secret ownership", () => {
-  const report = evaluateRuntimeIsolation(fixture());
-  for (const name of CAPABILITY_SECRETS) {
-    assert.equal(
-      report.checks.find((item) => item.id === `docker-broker-secret-owners-${name}`)?.status,
-      "passed",
-      `${name} must belong exactly to backup-scheduler and docker-action-broker`,
-    );
-    for (const owner of ["backup-scheduler", "docker-action-broker"]) {
-      assert.equal(
-        report.checks.find((item) => item.id === `docker-broker-secret-mode-${name}-${owner}`)?.status,
-        "passed",
-        `${name} must be mounted root:root 0400 by ${owner}`,
+for (const [label, volumeName, declaration, check] of [
+  [
+    "broker socket external substitution",
+    "docker_action_broker_socket",
+    { external: true, name: "attacker_socket" },
+    "docker-broker-socket-volume-not-aliased",
+  ],
+  [
+    "broker state host alias",
+    "docker_action_broker_state",
+    { name: "platform_infra_vps_docker_action_broker_state", driver: "local", driver_opts: { type: "none", o: "bind", device: "/var/run" } },
+    "docker-broker-state-volume-not-aliased",
+  ],
+  [
+    "activation CAS external substitution",
+    "docker_action_activation_cas",
+    { external: true, name: "shared_cas" },
+    "docker-broker-activation-cas-volume-not-aliased",
+  ],
+  [
+    "claimed job queue host alias",
+    "backup_scheduler_jobs",
+    { name: "platform_infra_vps_backup_scheduler_jobs", driver: "local", driver_opts: { type: "none", o: "bind,ro", device: "/srv/shared/jobs" } },
+    "docker-broker-claimed-job-queue-not-aliased",
+  ],
+]) {
+  test(`rejects ${label}`, (t) => {
+    assertMutationRejected(t, {
+      checks: [check],
+      mutate(config) {
+        config.volumes[volumeName] = structuredClone(declaration);
+      },
+    });
+  });
+}
+
+test("rejects mutable, networked, remotely controlled or candidate-mounted brokers", (t) => {
+  assertMutationRejected(t, {
+    checks: [
+      "docker-broker-immutable-image",
+      "docker-broker-host-private",
+      "docker-broker-no-candidate-code",
+      "docker-broker-no-remote-host",
+      "docker-broker-exact-mount-targets",
+    ],
+    mutate(config) {
+      const broker = config.services["docker-action-broker"];
+      broker.image = "platform/docker-action-broker:latest";
+      broker.build = { context: "." };
+      broker.network_mode = "bridge";
+      broker.networks = { platform_egress: null };
+      broker.ports = [{ target: 2376, published: "2376", protocol: "tcp", mode: "ingress" }];
+      broker.environment.DOCKER_HOST = "tcp://evil.invalid:2376";
+      broker.volumes.push({ type: "bind", source: root, target: "/infra", read_only: true });
+    },
+  });
+});
+
+test("rejects broker and scheduler supplemental groups", (t) => {
+  assertMutationRejected(t, {
+    checks: ["docker-broker-no-supplemental-groups", "scheduler-no-supplemental-groups"],
+    mutate(config) {
+      config.services["docker-action-broker"].group_add = ["998"];
+      config.services["backup-scheduler"].group_add = ["998"];
+    },
+  });
+});
+
+test("rejects a broker without the explicit root identity required by its private state", (t) => {
+  assertMutationRejected(t, {
+    checks: ["docker-broker-root-identity"],
+    mutate(config) {
+      delete config.services["docker-action-broker"].user;
+    },
+  });
+});
+
+for (const command of [
+  ["CMD", "node", "-e", "require('node:fs').statSync('/run/platform/docker-action-broker/broker.sock')"],
+  ["CMD", "echo", "readiness trusted activation receipt"],
+  ["CMD", "node", "/opt/platform-docker-broker/docker-action-readiness.mjs"],
+  ["CMD", "node", "/opt/platform-docker-broker/docker-action-readiness.mjs", "--require-trusted-activation", "--allow-pending"],
+  ["CMD", "node", "/tmp/docker-action-readiness.mjs", "--require-trusted-activation"],
+  ["CMD-SHELL", "node /opt/platform-docker-broker/docker-action-readiness.mjs --require-trusted-activation"],
+]) {
+  test(`rejects widened broker readiness ${JSON.stringify(command)}`, (t) => {
+    assertMutationRejected(t, {
+      checks: ["docker-broker-trust-aware-readiness"],
+      mutate(config) {
+        config.services["docker-action-broker"].healthcheck.test = command;
+      },
+    });
+  });
+}
+
+test("rejects a mutable or generic scheduler image", (t) => {
+  assertMutationRejected(t, {
+    checks: ["scheduler-immutable-image"],
+    mutate(config) {
+      const scheduler = config.services["backup-scheduler"];
+      scheduler.image = "platform/ops:local";
+      scheduler.build = { context: ".", dockerfile: "docker/ops.Dockerfile" };
+    },
+  });
+});
+
+test("rejects scheduler Linux capability widening", (t) => {
+  assertMutationRejected(t, {
+    checks: ["scheduler-minimum-authority"],
+    mutate(config) {
+      config.services["backup-scheduler"].cap_drop = [];
+      config.services["backup-scheduler"].cap_add = ["NET_ADMIN"];
+    },
+  });
+});
+
+test("rejects scheduler external egress", (t) => {
+  assertMutationRejected(t, {
+    checks: ["scheduler-host-private"],
+    mutate(config) {
+      config.services["backup-scheduler"].network_mode = "bridge";
+      config.services["backup-scheduler"].networks = { platform_egress: null };
+    },
+  });
+});
+
+test("rejects scheduler repository, backup, report, state or source mounts", (t) => {
+  assertMutationRejected(t, {
+    checks: ["scheduler-exact-mount-targets"],
+    mutate(config) {
+      config.services["backup-scheduler"].volumes.push(
+        { type: "bind", source: root, target: "/infra", read_only: true },
+        { type: "bind", source: path.join(root, "backups"), target: "/infra/backups", read_only: false },
+        { type: "bind", source: path.join(root, "reports"), target: "/infra/reports", read_only: false },
+        { type: "bind", source: path.join(root, "projects-portal/state"), target: "/var/www/project-state", read_only: false },
+        { type: "bind", source: path.resolve(root, "../src"), target: "/project", read_only: true },
       );
+    },
+  });
+});
+
+for (const [label, check, mutate] of [
+  [
+    "scheduler queue read-only",
+    "scheduler-claimed-job-queue-read-write",
+    (config) => {
+      config.services["backup-scheduler"].volumes
+        .find((mount) => mount.source === "backup_scheduler_jobs").read_only = true;
+    },
+  ],
+  [
+    "broker queue writable",
+    "docker-broker-claimed-job-queue-read-only",
+    (config) => {
+      config.services["docker-action-broker"].volumes
+        .find((mount) => mount.source === "backup_scheduler_jobs").read_only = false;
+    },
+  ],
+  [
+    "third-party queue owner",
+    "docker-broker-claimed-job-queue-not-aliased",
+    (config) => {
+      config.services["example-app-web"] = hostileWorkload({
+        volumes: [{
+          type: "volume",
+          source: "backup_scheduler_jobs",
+          target: "/app/jobs",
+          read_only: true,
+        }],
+      });
+    },
+  ],
+]) {
+  test(`rejects ${label}`, (t) => {
+    assertMutationRejected(t, { checks: [check], mutate });
+  });
+}
+
+for (const declaration of [
+  { external: true, name: "platform_infra_vps_backup_scheduler_jobs" },
+  { name: "shared_backup_scheduler_jobs" },
+  { name: "${COMPOSE_PROJECT_NAME}_backup_scheduler_jobs" },
+]) {
+  test(`rejects claimed queue alias ${JSON.stringify(declaration)}`, (t) => {
+    assertMutationRejected(t, {
+      checks: ["docker-broker-claimed-job-queue-not-aliased"],
+      mutate(config) {
+        config.volumes.backup_scheduler_jobs = structuredClone(declaration);
+      },
+    });
+  });
+}
+
+test("rejects scheduler control files outside its exact hardened tmpfs", (t) => {
+  assertMutationRejected(t, {
+    checks: ["scheduler-writable-paths"],
+    mutate(config) {
+      const scheduler = config.services["backup-scheduler"];
+      scheduler.environment.BACKUP_SCHEDULER_CRON_FILE = "/tmp/root.cron";
+      scheduler.environment.BACKUP_SCHEDULER_ENV_FILE = "/var/lib/platform/backup-scheduler.env";
+    },
+  });
+});
+
+for (const tmpfs of [
+  [
+    "/tmp:rw,nosuid,nodev,size=64m",
+    "/run/platform/backup-scheduler:rw,noexec,nosuid,nodev,size=8m",
+  ],
+  [
+    "/tmp:rw,noexec,nosuid,nodev,size=1024m",
+    "/run/platform/backup-scheduler:rw,noexec,nosuid,nodev,size=8m",
+  ],
+  [
+    "/tmp:rw,noexec,nosuid,nodev,size=64m",
+    "/run/platform/backup-scheduler:rw,noexec,nosuid,size=8m",
+  ],
+]) {
+  test(`rejects unsafe scheduler tmpfs ${JSON.stringify(tmpfs)}`, (t) => {
+    assertMutationRejected(t, {
+      checks: ["scheduler-writable-paths"],
+      mutate(config) {
+        config.services["backup-scheduler"].tmpfs = structuredClone(tmpfs);
+      },
+    });
+  });
+}
+
+for (const [label, mutate] of [
+  [
+    "log source",
+    (scheduler) => {
+      scheduler.volumes.find((mount) => mount.target === "/var/log/platform").source = "shared_logs";
+    },
+  ],
+  [
+    "broker UDS write access",
+    (scheduler) => {
+      scheduler.volumes.find((mount) => mount.target === "/run/platform/docker-action-broker").read_only = false;
+    },
+  ],
+  [
+    "queue target",
+    (scheduler) => {
+      scheduler.volumes.find((mount) => mount.source === "backup_scheduler_jobs").target = "/run/jobs";
+    },
+  ],
+  [
+    "queue type",
+    (scheduler) => {
+      scheduler.volumes.find((mount) => mount.source === "backup_scheduler_jobs").type = "bind";
+    },
+  ],
+]) {
+  test(`rejects scheduler mount widening: ${label}`, (t) => {
+    assertMutationRejected(t, {
+      checks: ["scheduler-exact-mount-targets"],
+      mutate(config) {
+        mutate(config.services["backup-scheduler"]);
+      },
+    });
+  });
+}
+
+test("rejects a mutable, networked or Docker-bearing activation sidecar", (t) => {
+  assertMutationRejected(t, {
+    checks: [
+      "activation-sidecar-immutable-provider-image",
+      "activation-sidecar-host-private",
+      "activation-sidecar-minimum-authority",
+      "activation-sidecar-exact-mounts",
+      "activation-sidecar-no-docker-control",
+      "raw-socket-single-owner",
+    ],
+    mutate(config) {
+      const sidecar = config.services["docker-action-activation-sidecar"];
+      sidecar.image = "provider/activation-sidecar:latest";
+      sidecar.build = { context: "." };
+      sidecar.network_mode = "bridge";
+      sidecar.networks = { platform_egress: null };
+      sidecar.group_add = ["998"];
+      sidecar.volumes.push({
+        type: "bind",
+        source: "/var/run/docker.sock",
+        target: "/var/run/docker.sock",
+        read_only: true,
+      });
+    },
+  });
+});
+
+test("rejects secret external/name substitution, third-party owners and weak mounts", (t) => {
+  assertMutationRejected(t, {
+    checks: [
+      "docker-broker-secret-source-docker_action_backup_prune_plan",
+      "docker-broker-secret-owners-docker_action_backup_prune_plan",
+      "docker-broker-secret-mode-docker_action_backup_prune_plan-backup-scheduler",
+    ],
+    mutate(config) {
+      config.secrets.docker_action_backup_prune_plan = {
+        external: true,
+        name: "shared_admin_token",
+      };
+      config.services["example-app-web"] = hostileWorkload({
+        secrets: [secret("docker_action_backup_prune_plan")],
+      });
+      config.services["backup-scheduler"].secrets
+        .find((item) => item.source === "docker_action_backup_prune_plan").mode = 0o444;
+    },
+  });
+});
+
+test("assigns exact root-owned capability, evidence and trust secret ownership", (t) => {
+  const admitted = admittedCandidatePolicyOrTodo(t);
+  if (!admitted) return;
+  const { report } = admitted;
+
+  for (const name of CAPABILITY_SECRETS) {
+    assert.equal(checkStatus(report, `docker-broker-secret-owners-${name}`), "passed", name);
+    for (const owner of ["backup-scheduler", "docker-action-broker"]) {
+      assert.equal(checkStatus(report, `docker-broker-secret-mode-${name}-${owner}`), "passed", `${name}:${owner}`);
     }
   }
-  assert.equal(
-    report.checks.find((item) => item.id === `docker-broker-secret-owners-${EVIDENCE_SECRET}`)?.status,
-    "passed",
-    "runtime snapshot evidence authority belongs only to docker-action-broker",
-  );
+  assert.equal(checkStatus(report, `docker-broker-secret-owners-${EVIDENCE_SECRET}`), "passed");
+  assert.equal(checkStatus(report, `docker-broker-secret-owners-${TRUST_SECRET}`), "passed");
 });
 
-test("requires all six scheduler capability secrets", () => {
-  const missingCapability = fixture();
-  missingCapability.services["backup-scheduler"].secrets = missingCapability.services["backup-scheduler"].secrets
-    .filter((item) => item.source !== "docker_action_backup_catalog");
-  const report = evaluateRuntimeIsolation(missingCapability);
-  assert.equal(report.checks.find((item) => item.id === "scheduler-exact-capability-secrets")?.status, "failed");
-  assert.equal(
-    report.checks.find((item) => item.id === "docker-broker-secret-owners-docker_action_backup_catalog")?.status,
-    "failed",
-  );
-});
-
-test("excludes runtime snapshot evidence authority from the scheduler", () => {
-  const evidenceWidening = fixture();
-  evidenceWidening.services["backup-scheduler"].secrets.push(secret(EVIDENCE_SECRET));
-  const report = evaluateRuntimeIsolation(evidenceWidening);
-  assert.equal(report.checks.find((item) => item.id === "scheduler-exact-capability-secrets")?.status, "failed");
-  assert.equal(
-    report.checks.find((item) => item.id === `docker-broker-secret-owners-${EVIDENCE_SECRET}`)?.status,
-    "failed",
-    "runtime snapshot is evidence authority and must not be delegated to backup-scheduler",
-  );
-});
-
-test("rejects scheduler Docker API, trust documents and aliased broker socket", () => {
-  const config = fixture();
-  const scheduler = config.services["backup-scheduler"];
-  scheduler.environment.DOCKER_HOST = "unix:///var/run/docker.sock";
-  scheduler.volumes.push({
-    type: "bind",
-    source: "/srv/platform/trust/runtime-intent.json",
-    target: "/run/platform/docker-action-trust/runtime-intent.json",
-    read_only: true,
+test("requires all six scheduler capability secrets", (t) => {
+  assertMutationRejected(t, {
+    checks: [
+      "scheduler-exact-capability-secrets",
+      "docker-broker-secret-owners-docker_action_backup_catalog",
+    ],
+    mutate(config) {
+      config.services["backup-scheduler"].secrets = config.services["backup-scheduler"].secrets
+        .filter((item) => item.source !== "docker_action_backup_catalog");
+    },
   });
-  scheduler.volumes
-    .find((mount) => mount.target === "/run/platform/docker-action-broker").source = "attacker_socket";
-  const report = evaluateRuntimeIsolation(config);
-  assert.equal(report.status, "failed");
-  assert.match(report.failures.join("\n"), /scheduler-uses-local-action-socket/);
-  assert.match(report.failures.join("\n"), /scheduler-has-no-docker-api/);
-  assert.match(report.failures.join("\n"), /scheduler-no-trust-documents/);
 });
 
-test("rejects missing limits, budget overcommit and unsafe broker bootstrap", () => {
-  const config = fixture();
-  config.services["example-app-web"].mem_limit = 0;
-  config.services.postgres.mem_limit = 99 * 1024 * 1024 * 1024;
-  config.services["broker-auth-bootstrap"].network_mode = "bridge";
-  config.services["broker-auth-bootstrap"].volumes[0].read_only = false;
-  config.services.nats.command.push("--user", "global", "--pass", "shared");
-  const report = evaluateRuntimeIsolation(config);
-  assert.equal(report.status, "failed");
-  assert.match(report.failures.join("\n"), /resource-memory-example-app-web/);
-  assert.match(report.failures.join("\n"), /resource-memory-admission/);
-  assert.match(report.failures.join("\n"), /broker-bootstrap-no-network/);
-  assert.match(report.failures.join("\n"), /broker-bootstrap-lock-read-only/);
-  assert.match(report.failures.join("\n"), /nats-no-global-credential-flags/);
+test("excludes runtime snapshot evidence authority from the scheduler", (t) => {
+  assertMutationRejected(t, {
+    checks: [
+      "scheduler-exact-capability-secrets",
+      `docker-broker-secret-owners-${EVIDENCE_SECRET}`,
+    ],
+    mutate(config) {
+      config.services["backup-scheduler"].secrets.push(secret(EVIDENCE_SECRET));
+    },
+  });
 });
 
-function fixture() {
-  const services = {};
-  services["example-app-web"] = bounded({
+test("rejects scheduler Docker API, trust documents and aliased broker socket", (t) => {
+  assertMutationRejected(t, {
+    checks: [
+      "scheduler-uses-local-action-socket",
+      "scheduler-has-no-docker-api",
+      "scheduler-no-trust-documents",
+    ],
+    mutate(config) {
+      const scheduler = config.services["backup-scheduler"];
+      scheduler.environment.DOCKER_HOST = "unix:///var/run/docker.sock";
+      scheduler.volumes.push({
+        type: "bind",
+        source: "/srv/platform/trust/runtime-intent.json",
+        target: "/run/platform/docker-action-trust/runtime-intent.json",
+        read_only: true,
+      });
+      scheduler.volumes
+        .find((mount) => mount.target === "/run/platform/docker-action-broker").source = "attacker_socket";
+    },
+  });
+});
+
+test("rejects missing limits, budget overcommit and unsafe broker bootstrap", (t) => {
+  assertMutationRejected(t, {
+    checks: [
+      "resource-memory-control-center",
+      "resource-memory-admission",
+      "broker-bootstrap-no-network",
+      "broker-bootstrap-lock-read-only",
+      "nats-no-global-credential-flags",
+    ],
+    mutate(config) {
+      config.services["control-center"].mem_limit = 0;
+      config.services.postgres.mem_limit = 99 * 1024 * 1024 * 1024;
+      config.services["broker-auth-bootstrap"].network_mode = "bridge";
+      config.services["broker-auth-bootstrap"].networks = { platform_egress: null };
+      config.services["broker-auth-bootstrap"].volumes
+        .find((mount) => mount.target === "/run/platform/hosted-workloads.lock.json").read_only = false;
+      config.services.nats.command = [
+        ...(config.services.nats.command ?? []),
+        "--user",
+        "global",
+        "--pass",
+        "shared",
+      ];
+    },
+  });
+});
+
+test.todo("Package A/B runtime metrics continuity after removing cAdvisor/node-exporter host parents (NOT_RUN)");
+
+function assertMutationRejected(t, { checks, mutate }) {
+  const baseline = canonicalComposeRenderOrSkip(t, "candidate");
+  if (!baseline) return;
+
+  const baselineReport = evaluateRuntimeIsolation(baseline);
+  const blockedTargets = checks
+    .map((id) => ({ id, status: checkStatus(baselineReport, id) ?? "missing" }))
+    .filter(({ status }) => status !== "passed");
+  if (blockedTargets.length > 0) {
+    t.todo(
+      `blocked by candidate policy consumer RED: ${blockedTargets
+        .map(({ id, status }) => `${id}=${status}`)
+        .join(", ")}`,
+    );
+    return;
+  }
+
+  const candidate = structuredClone(baseline);
+  mutate(candidate);
+  const report = evaluateRuntimeIsolation(candidate);
+  for (const id of checks) {
+    assert.equal(
+      checkStatus(report, id),
+      "failed",
+      `mutation did not reject at its intended consumer check: ${id}\n${report.failures.join("\n")}`,
+    );
+  }
+}
+
+function admittedCandidatePolicyOrTodo(t) {
+  const config = canonicalComposeRenderOrSkip(t, "candidate");
+  if (!config) return null;
+  const report = evaluateRuntimeIsolation(config);
+  if (report.status !== "passed") {
+    const failedIds = report.checks
+      .filter((item) => item.status === "failed")
+      .map((item) => item.id);
+    t.todo(`blocked by candidate policy consumer RED: ${failedIds.join(", ") || "status=failed"}`);
+    return null;
+  }
+  return { config, report };
+}
+
+function checkStatus(report, id) {
+  return report.checks.find((item) => item.id === id)?.status;
+}
+
+function canonicalComposeRenderOrSkip(t, variant = "candidate") {
+  if (!composeAvailability.available) {
+    t.skip(`NOT_RUN: canonical docker compose config renderer unavailable: ${composeAvailability.reason}`);
+    return null;
+  }
+  return canonicalComposeRender(variant);
+}
+
+function canonicalComposeRender(variant) {
+  assert.ok(["current", "candidate"].includes(variant), `unsupported Compose render variant ${variant}`);
+  if (cachedCanonicalRenders.has(variant)) return structuredClone(cachedCanonicalRenders.get(variant));
+
+  const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "platform-policy-render-"));
+  const envFile = path.join(temporaryRoot, "compose.env");
+  const dockerConfig = path.join(temporaryRoot, "docker-config");
+  const candidateOverlay = variant === "candidate"
+    ? path.join(temporaryRoot, "candidate-runtime-isolation.yaml")
+    : "";
+  fs.mkdirSync(dockerConfig, { mode: 0o700 });
+  fs.writeFileSync(envFile, deterministicComposeEnvironment(), { mode: 0o600 });
+  if (candidateOverlay) {
+    fs.writeFileSync(candidateOverlay, candidateRuntimeIsolationOverlay(), { mode: 0o600 });
+  }
+  const executionPath = prepareComposeExecutionPath(temporaryRoot, candidateOverlay);
+
+  try {
+    const result = spawnSync(
+      "bash",
+      [path.join(root, "scripts", "compose-vps.sh"), "config", "--format", "json"],
+      {
+        cwd: root,
+        encoding: "utf8",
+        env: {
+          COMPOSE_ANSI: "never",
+          COMPOSE_ENV_FILE: envFile,
+          COMPOSE_PROJECT_NAME: "platform_infra_vps",
+          DOCKER_CONFIG: dockerConfig,
+          DOCKER_HOST: `unix://${path.join(temporaryRoot, "engine-must-not-exist.sock")}`,
+          HOME: temporaryRoot,
+          HOSTED_WORKLOAD_ALLOW_RESOLVED: "0",
+          HOSTED_WORKLOAD_LOCK: "",
+          LANG: "C",
+          LC_ALL: "C",
+          PATH: executionPath,
+        },
+        timeout: 30_000,
+      },
+    );
+    const output = `${result.stdout || ""}\n${result.stderr || ""}`;
+    assert.equal(
+      result.status,
+      0,
+      `offline canonical docker compose config render failed (no Engine is permitted):\n${output}`,
+    );
+    assert.equal(result.signal, null, `offline Compose render terminated by ${result.signal}`);
+    let parsed;
+    try {
+      parsed = JSON.parse(result.stdout);
+    } catch (error) {
+      assert.fail(`docker compose config --format json returned invalid JSON: ${error.message}`);
+    }
+    assertRenderedPolicySurface(parsed);
+    cachedCanonicalRenders.set(variant, parsed);
+    return structuredClone(cachedCanonicalRenders.get(variant));
+  } finally {
+    fs.rmSync(temporaryRoot, { recursive: true, force: true });
+  }
+}
+
+function findComposeCli() {
+  const searchPath = [
+    process.env.PATH,
+    "/usr/local/bin",
+    "/opt/homebrew/bin",
+    "/Applications/Docker.app/Contents/Resources/bin",
+    "/usr/bin",
+    "/bin",
+    "/usr/sbin",
+    "/sbin",
+  ].filter(Boolean).join(path.delimiter);
+
+  const bundledCompose = process.env.PLATFORM_TEST_DOCKER_COMPOSE_BIN
+    || path.resolve(root, "../compose-runtime/docker-compose");
+  if (fs.existsSync(bundledCompose) && fs.statSync(bundledCompose).isFile()) {
+    const sha256 = createHash("sha256").update(fs.readFileSync(bundledCompose)).digest("hex");
+    if (!process.env.PLATFORM_TEST_DOCKER_COMPOSE_BIN && sha256 !== pinnedComposeSha256) {
+      return {
+        available: false,
+        path: searchPath,
+        reason: `bundled Compose SHA256 mismatch at ${bundledCompose}: ${sha256}`,
+      };
+    }
+    const probe = spawnSync(bundledCompose, ["version", "--short"], {
+      encoding: "utf8",
+      env: {
+        DOCKER_HOST: "unix:///tmp/platform-compose-probe-engine-must-not-exist.sock",
+        HOME: os.tmpdir(),
+        LANG: "C",
+        LC_ALL: "C",
+        PATH: searchPath,
+      },
+      timeout: 10_000,
+    });
+    if (probe.status === 0) {
+      return {
+        available: true,
+        path: searchPath,
+        reason: "",
+        standalone: bundledCompose,
+      };
+    }
+    const detail = `${probe.stderr || probe.stdout || `status ${probe.status}`}`.trim();
+    return {
+      available: false,
+      path: searchPath,
+      reason: `bundled Compose at ${bundledCompose} failed its offline version probe: ${detail}`,
+    };
+  }
+
+  const resolved = spawnSync("/usr/bin/which", ["docker"], {
+    encoding: "utf8",
+    env: { LANG: "C", LC_ALL: "C", PATH: searchPath },
+    timeout: 5_000,
+  });
+  if (resolved.status !== 0 || !resolved.stdout.trim()) {
+    return {
+      available: false,
+      path: searchPath,
+      reason: "docker CLI not found in local PATH or Docker Desktop; no stored canonical render exists",
+    };
+  }
+
+  const docker = resolved.stdout.trim();
+  const dockerPath = [path.dirname(docker), searchPath].join(path.delimiter);
+  const probe = spawnSync(docker, ["compose", "version", "--short"], {
+    encoding: "utf8",
+    env: {
+      DOCKER_HOST: "unix:///tmp/platform-compose-probe-engine-must-not-exist.sock",
+      HOME: os.tmpdir(),
+      LANG: "C",
+      LC_ALL: "C",
+      PATH: dockerPath,
+    },
+    timeout: 10_000,
+  });
+  if (probe.status !== 0) {
+    const detail = `${probe.stderr || probe.stdout || `status ${probe.status}`}`.trim();
+    return {
+      available: false,
+      path: dockerPath,
+      reason: `docker CLI found at ${docker}, but the local Compose plugin is unavailable: ${detail}`,
+    };
+  }
+  return { available: true, path: dockerPath, reason: "", docker };
+}
+
+function prepareComposeExecutionPath(temporaryRoot, candidateOverlay) {
+  const shimDir = path.join(temporaryRoot, "compose-shim");
+  const shim = path.join(shimDir, "docker");
+  fs.mkdirSync(shimDir, { mode: 0o700 });
+  const delegate = composeAvailability.standalone
+    ? `exec ${shellSingleQuote(composeAvailability.standalone)} "\${arguments[@]}"`
+    : `exec ${shellSingleQuote(composeAvailability.docker)} compose "\${arguments[@]}"`;
+  fs.writeFileSync(
+    shim,
+    [
+      "#!/bin/bash",
+      "set -euo pipefail",
+      "[ \"$1\" = compose ] || exit 64",
+      "shift",
+      "arguments=()",
+      "overlay_inserted=0",
+      "for argument in \"$@\"; do",
+      `  if [[ "$argument" == "--profile" && "$overlay_inserted" == 0 && -n ${shellSingleQuote(candidateOverlay)} ]]; then`,
+      `    arguments+=("-f" ${shellSingleQuote(candidateOverlay)})`,
+      "    overlay_inserted=1",
+      "  fi",
+      "  arguments+=(\"$argument\")",
+      "done",
+      `if [[ "$overlay_inserted" == 0 && -n ${shellSingleQuote(candidateOverlay)} ]]; then exit 65; fi`,
+      delegate,
+      "",
+    ].join("\n"),
+    { mode: 0o700 },
+  );
+  return [shimDir, composeAvailability.path].join(path.delimiter);
+}
+
+function shellSingleQuote(value) {
+  return `'${String(value).replaceAll("'", `'\\''`)}'`;
+}
+
+function deterministicComposeEnvironment() {
+  return [
+    "ALERT_EMAIL_TO=alerts@example.invalid",
+    "COMPOSE_PROJECT_NAME=platform_infra_vps",
+    "DOMAIN=platform.example.invalid",
+    "DOCKER_ACTION_ACTIVATION_INBOX=/srv/platform/provider-activation/inbox",
+    "DOCKER_ACTION_ACTIVE_RECEIPT_FILE=/srv/platform/trust/active-receipt.json",
+    `DOCKER_ACTION_ACTIVE_RECEIPT_SHA256=${"a".repeat(64)}`,
+    `DOCKER_ACTION_COMBINED_RENDER_SHA256=${"b".repeat(64)}`,
+    "DOCKER_ACTION_RUNTIME_INTENT_FILE=/srv/platform/trust/runtime-intent.json",
+    "DOCKER_ACTION_RUNTIME_INTENT_ID=intent.offline-compose-v2",
+    "HOSTED_WORKLOAD_LOCK=",
+    "KC_BOOTSTRAP_ADMIN_PASSWORD_FILE=/run/secrets/keycloak_admin_password",
+    "KC_DB_PASSWORD_FILE=/run/secrets/keycloak_db_password",
+    "MAILER_FROM=no-reply@example.invalid",
+    "MAILER_REPLY_TO=no-reply@example.invalid",
+    "MARIADB_ROOT_PASSWORD=offline-not-a-secret",
+    "MINIO_ROOT_PASSWORD_FILE=/run/secrets/minio_root_password",
+    "PLATFORM_BACKUP_SCHEDULER_IMAGE_REPOSITORY=registry.example.invalid/platform/backup-scheduler",
+    `PLATFORM_BACKUP_SCHEDULER_IMAGE_SHA256=${"e".repeat(64)}`,
+    "PLATFORM_DOCKER_ACTION_BROKER_IMAGE_REPOSITORY=registry.example.invalid/platform/docker-action-broker",
+    `PLATFORM_DOCKER_ACTION_BROKER_IMAGE_SHA256=${"c".repeat(64)}`,
+    "PLATFORM_PROVIDER_ACTIVATION_SIDECAR_IMAGE_REPOSITORY=registry.example.invalid/platform/provider-activation",
+    `PLATFORM_PROVIDER_ACTIVATION_SIDECAR_IMAGE_SHA256=${"d".repeat(64)}`,
+    "POSTGRES_USER=postgres",
+    "REDIS_PASSWORD_FILE=/run/secrets/redis_password",
+    "REDIS_USERNAME=platform",
+    "SMTP_HOST=smtp.example.invalid",
+    "SMTP_USER=mailer",
+    "",
+  ].join("\n");
+}
+
+function candidateRuntimeIsolationOverlay() {
+  const capabilitySecrets = CAPABILITY_SECRETS.map((name) => `      - source: ${name}
+        target: ${name}
+        uid: "0"
+        gid: "0"
+        mode: 256`).join("\n");
+  const secretDeclarations = CAPABILITY_SECRETS.map((name) => `  ${name}:
+    file: ./secrets/${name}.txt`).join("\n");
+  return `services:
+  node-exporter:
+    pid: !reset null
+    command: !override
+      - --collector.textfile.directory=/var/lib/node-exporter/textfile
+    volumes: !override
+      - \${NODE_EXPORTER_TEXTFILE_DIR:-./projects-portal/state/node-exporter-textfile}:/var/lib/node-exporter/textfile:ro
+
+  cadvisor:
+    command: !override
+      - --docker_only=false
+      - --store_container_labels=false
+      - --housekeeping_interval=30s
+    volumes: !reset []
+
+  docker-action-broker:
+    user: "0:0"
+    read_only: true
+    cap_drop: !override
+      - ALL
+    cap_add: !reset []
+    group_add: !reset []
+    network_mode: none
+    networks: !reset []
+    ports: !reset []
+    expose: !reset []
+    secrets: !override
+      - source: ${TRUST_SECRET}
+        target: ${TRUST_SECRET}
+        uid: "0"
+        gid: "0"
+        mode: 256
+${capabilitySecrets}
+      - source: ${EVIDENCE_SECRET}
+        target: ${EVIDENCE_SECRET}
+        uid: "0"
+        gid: "0"
+        mode: 256
+    volumes: !override
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - docker_action_broker_socket:/run/platform/docker-action-broker
+      - docker_action_broker_state:/var/lib/platform/docker-action-broker
+      - backup_scheduler_jobs:/run/platform/backup-jobs:ro
+      - docker_action_activation_cas:/run/platform/docker-action-activation/by-bundle-sha256:ro
+      - \${DOCKER_ACTION_RUNTIME_INTENT_FILE:?set root-owned runtime intent}:/run/platform/docker-action-trust/runtime-intent.json:ro
+      - \${DOCKER_ACTION_ACTIVE_RECEIPT_FILE:?set root-owned active receipt}:/run/platform/docker-action-trust/active-receipt.json:ro
+    tmpfs: !override
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+      - /root:rw,noexec,nosuid,nodev,size=16m
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - /opt/platform-docker-broker/docker-action-readiness.mjs
+        - --require-trusted-activation
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  backup-scheduler:
+    image: \${PLATFORM_BACKUP_SCHEDULER_IMAGE_REPOSITORY:?set scheduler repository}@sha256:\${PLATFORM_BACKUP_SCHEDULER_IMAGE_SHA256:?set scheduler sha256}
+    build: !reset null
+    user: "0:0"
+    read_only: true
+    entrypoint: !override
+      - /opt/platform-backup-scheduler/backup-scheduler.sh
+    command: !reset []
+    cap_drop: !override
+      - ALL
+    cap_add: !reset []
+    group_add: !reset []
+    network_mode: none
+    networks: !reset []
+    ports: !reset []
+    expose: !reset []
+    environment: !override
+      DOCKER_ACTION_BROKER_SOCKET: /run/platform/docker-action-broker/broker.sock
+      DOCKER_ACTION_RUNTIME_INTENT_ID: \${DOCKER_ACTION_RUNTIME_INTENT_ID:?set admitted runtime intent id}
+      DOCKER_ACTION_ACTIVE_RECEIPT_SHA256: \${DOCKER_ACTION_ACTIVE_RECEIPT_SHA256:?set admitted active receipt sha256}
+      DOCKER_ACTION_COMBINED_RENDER_SHA256: \${DOCKER_ACTION_COMBINED_RENDER_SHA256:?set exact final combined render sha256}
+      BACKUP_SCHEDULER_JOBS_DIR: /var/www/project-state/backup-jobs
+      BACKUP_SCHEDULER_LOG_DIR: /var/log/platform
+      BACKUP_SCHEDULER_CRON_FILE: /run/platform/backup-scheduler/crontabs/root
+      BACKUP_SCHEDULER_ENV_FILE: /run/platform/backup-scheduler/backup-scheduler.env
+    secrets: !override
+${capabilitySecrets}
+    volumes: !override
+      - backup_scheduler_jobs:/var/www/project-state/backup-jobs
+      - backup_scheduler_logs:/var/log/platform
+      - docker_action_broker_socket:/run/platform/docker-action-broker:ro
+    tmpfs: !override
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+      - /run/platform/backup-scheduler:rw,noexec,nosuid,nodev,size=8m
+    depends_on: !override
+      docker-action-broker:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - test -s /run/platform/backup-scheduler/crontabs/root
+      interval: 30s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  backup_scheduler_jobs:
+
+secrets:
+${secretDeclarations}
+  ${EVIDENCE_SECRET}:
+    file: ./secrets/${EVIDENCE_SECRET}.txt
+  ${TRUST_SECRET}:
+    file: ./secrets/${TRUST_SECRET}.txt
+`;
+}
+
+function assertRenderedPolicySurface(config) {
+  assert.ok(config && typeof config === "object" && !Array.isArray(config), "Compose JSON render must be an object");
+  for (const field of ["services", "networks", "volumes", "secrets"]) {
+    assert.ok(
+      config[field] && typeof config[field] === "object" && !Array.isArray(config[field]),
+      `Compose JSON render must contain ${field}`,
+    );
+  }
+  for (const name of ["docker-action-broker", "backup-scheduler"]) {
+    const service = config.services[name];
+    assert.ok(service && typeof service === "object", `canonical render is missing ${name}`);
+    for (const field of ["cap_drop", "cap_add", "secrets", "tmpfs", "volumes", "volumes_from"]) {
+      assert.ok(
+        service[field] === undefined || Array.isArray(service[field]),
+        `${name}.${field} has an unsupported normalized render shape`,
+      );
+    }
+    assert.ok(
+      service.networks === undefined || Array.isArray(service.networks) || typeof service.networks === "object",
+      `${name}.networks shape is invalid`,
+    );
+    assert.ok(
+      service.healthcheck === undefined || Array.isArray(service.healthcheck.test),
+      `${name}.healthcheck.test shape is invalid`,
+    );
+    assert.ok(service.user === undefined || typeof service.user === "string", `${name}.user shape is invalid`);
+  }
+}
+
+function renderedRawSocketOwners(config) {
+  return Object.keys(config.services)
+    .filter((name) => renderedServiceOwnsRawSocket(config, name))
+    .sort();
+}
+
+function renderedServiceOwnsRawSocket(config, name, ancestry = new Set()) {
+  if (ancestry.has(name)) throw new Error(`cyclic rendered volumes_from authority chain at ${name}`);
+  const service = config.services[name];
+  assert.ok(service, `unknown rendered service ${name}`);
+  const next = new Set(ancestry).add(name);
+  if ((service.volumes ?? []).some((mount) => {
+    const source = mount?.type === "volume"
+      ? config.volumes?.[mount.source]?.driver_opts?.device
+      : mount?.source;
+    return exposesDockerSocket(source);
+  })) return true;
+  return (service.volumes_from ?? []).some((rawReference) => {
+    const reference = typeof rawReference === "string"
+      ? rawReference.split(":")[0]
+      : String(rawReference?.source || rawReference?.service || "");
+    if (!reference || reference.startsWith("container:")) return true;
+    return renderedServiceOwnsRawSocket(config, reference, next);
+  });
+}
+
+function exposesDockerSocket(source) {
+  if (!String(source || "").startsWith("/")) return false;
+  const observed = path.posix.normalize(source);
+  const normalized = observed === "/run" || observed.startsWith("/run/")
+    ? `/var${observed}`
+    : observed;
+  const clean = normalized === "/" ? "/" : normalized.replace(/\/+$/, "");
+  return clean === "/var/run/docker.sock"
+    || "/var/run/docker.sock".startsWith(clean === "/" ? "/" : `${clean}/`);
+}
+
+function secretNamesFromRender(service) {
+  return (service.secrets ?? [])
+    .map((entry) => typeof entry === "string" ? entry : String(entry?.source || ""))
+    .sort();
+}
+
+function hostileWorkload(overrides = {}) {
+  return {
+    cpus: 0.5,
+    cpu_shares: 256,
+    mem_limit: 128 * 1024 * 1024,
+    mem_reservation: 32 * 1024 * 1024,
+    pids_limit: 128,
+    ulimits: { nofile: { soft: 8192, hard: 8192 } },
+    blkio_config: { weight: 300 },
     read_only: true,
     user: "1000:1000",
     security_opt: ["no-new-privileges:true"],
     cap_drop: ["ALL"],
+    environment: {},
     labels: {
       "com.platform.workload-id": "example-app",
       "com.platform.workload-role": "web",
     },
-    volumes: [
-      { type: "volume", source: "example_data", target: "/app/data", read_only: false },
-    ],
     networks: { example_app_ingress: null },
-  });
-  services["control-center"] = bounded({ read_only: true, cpu_shares: 1024, volumes: [], networks: {} });
-  services["project-router"] = bounded({
-    read_only: true,
-    volumes: [
-      { type: "bind", source: "/srv/apps", target: "/var/www/projects", read_only: true },
-      { type: "bind", source: "/srv/state", target: "/var/www/project-state", read_only: true },
-    ],
-    networks: {},
-  });
-  services["platform-alert-dispatcher"] = bounded({ read_only: true, networks: {} });
-  services["node-exporter"] = bounded({
-    read_only: true,
-    volumes: [
-      { type: "volume", source: "node_exporter_textfiles", target: "/var/lib/node-exporter/textfile", read_only: true },
-    ],
-    networks: { platform_observability: null },
-  });
-  services.cadvisor = bounded({
-    read_only: true,
+    secrets: [],
+    tmpfs: [],
     volumes: [],
-    networks: { platform_observability: null },
-  });
-  services["broker-auth-bootstrap"] = bounded({
-    read_only: true,
-    network_mode: "none",
-    cap_drop: ["ALL"],
-    cap_add: ["CHOWN"],
-    volumes: [
-      { type: "bind", source: "/private/hosted.lock.json", target: "/run/platform/hosted-workloads.lock.json", read_only: true },
-      { type: "volume", source: "redis_auth_config", target: "/out/redis", read_only: false },
-      { type: "volume", source: "nats_auth_config", target: "/out/nats", read_only: false },
-    ],
-    networks: {},
-  });
-  services.redis = bounded({
-    volumes: [{ type: "volume", source: "redis_auth_config", target: "/run/platform-broker", read_only: true }],
-    networks: {},
-  });
-  services.nats = bounded({
-    user: "1000:1000",
-    entrypoint: ["/bin/sh", "-ec"],
-    command: ["cd /run/platform-broker && sha256sum -c nats-server.conf.sha256 >/dev/null && exec /nats-server --config /run/platform-broker/nats-server.conf"],
-    volumes: [{ type: "volume", source: "nats_auth_config", target: "/run/platform-broker", read_only: true }],
-    networks: {},
-  });
-  services["backup-scheduler"] = bounded({
-    image: `platform/backup-scheduler@sha256:${"e".repeat(64)}`,
-    read_only: true,
-    cpu_shares: 1024,
-    network_mode: "none",
-    entrypoint: ["/opt/platform-backup-scheduler/backup-scheduler.sh"],
-    cap_drop: ["ALL"],
-    security_opt: ["no-new-privileges:true"],
-    environment: {
-      DOCKER_ACTION_BROKER_SOCKET: "/run/platform/docker-action-broker/broker.sock",
-      DOCKER_ACTION_RUNTIME_INTENT_ID: INTENT_ID,
-      DOCKER_ACTION_ACTIVE_RECEIPT_SHA256: "a".repeat(64),
-      DOCKER_ACTION_COMBINED_RENDER_SHA256: "b".repeat(64),
-      BACKUP_SCHEDULER_JOBS_DIR: "/var/www/project-state/backup-jobs",
-      BACKUP_SCHEDULER_LOG_DIR: "/var/log/platform",
-      BACKUP_SCHEDULER_CRON_FILE: "/run/platform/backup-scheduler/crontabs/root",
-      BACKUP_SCHEDULER_ENV_FILE: "/run/platform/backup-scheduler/backup-scheduler.env",
-    },
-    secrets: CAPABILITY_SECRETS.map(secret),
-    volumes: [
-      { type: "volume", source: "backup_scheduler_jobs", target: "/var/www/project-state/backup-jobs", read_only: false },
-      { type: "volume", source: "backup_scheduler_logs", target: "/var/log/platform", read_only: false },
-      { type: "volume", source: "docker_action_broker_socket", target: "/run/platform/docker-action-broker", read_only: true },
-    ],
-    tmpfs: [
-      "/tmp:rw,noexec,nosuid,nodev,size=64m",
-      "/run/platform/backup-scheduler:rw,noexec,nosuid,nodev,size=8m",
-    ],
-    networks: {},
-  });
-  services["docker-action-activation-sidecar"] = bounded({
-    image: `provider.example/platform/activation-sidecar@sha256:${"c".repeat(64)}`,
-    read_only: true,
-    user: "0:0",
-    network_mode: "none",
-    entrypoint: ["/opt/provider-activation/materialize-dsse-cas"],
-    cap_drop: ["ALL"],
-    security_opt: ["no-new-privileges:true"],
-    volumes: [
-      {
-        type: "bind",
-        source: "/srv/platform/provider-activation/inbox",
-        target: "/run/platform/provider-activation/inbox",
-        read_only: true,
-      },
-      {
-        type: "volume",
-        source: "docker_action_activation_cas",
-        target: "/run/platform/docker-action-activation/by-bundle-sha256",
-        read_only: false,
-      },
-    ],
-    networks: {},
-  });
-  services["docker-action-broker"] = bounded({
-    image: `platform/docker-action-broker@sha256:${"d".repeat(64)}`,
-    read_only: true,
-    user: "0:0",
-    cpu_shares: 1024,
-    network_mode: "none",
-    entrypoint: ["node", "/opt/platform-docker-broker/docker-action-broker.mjs"],
-    environment: {
-      DOCKER_ACTION_BROKER_SOCKET: "/run/platform/docker-action-broker/broker.sock",
-    },
-    cap_drop: ["ALL"],
-    security_opt: ["no-new-privileges:true"],
-    secrets: [
-      secret(TRUST_SECRET),
-      ...CAPABILITY_SECRETS.map(secret),
-      secret(EVIDENCE_SECRET),
-    ],
-    volumes: [
-      { type: "bind", source: "/var/run/docker.sock", target: "/var/run/docker.sock", read_only: true },
-      { type: "volume", source: "docker_action_broker_socket", target: "/run/platform/docker-action-broker", read_only: false },
-      { type: "volume", source: "docker_action_broker_state", target: "/var/lib/platform/docker-action-broker", read_only: false },
-      { type: "volume", source: "backup_scheduler_jobs", target: "/run/platform/backup-jobs", read_only: true },
-      { type: "volume", source: "docker_action_activation_cas", target: "/run/platform/docker-action-activation/by-bundle-sha256", read_only: true },
-      { type: "bind", source: "/srv/platform/trust/runtime-intent.json", target: "/run/platform/docker-action-trust/runtime-intent.json", read_only: true },
-      { type: "bind", source: "/srv/platform/trust/active-receipt.json", target: "/run/platform/docker-action-trust/active-receipt.json", read_only: true },
-    ],
-    healthcheck: {
-      test: [
-        "CMD",
-        "node",
-        "/opt/platform-docker-broker/docker-action-readiness.mjs",
-        "--require-trusted-activation",
-      ],
-    },
-    networks: {},
-  });
-  services.postgres = bounded({ networks: {} });
-  const secrets = Object.fromEntries([
-    TRUST_SECRET,
-    ...CAPABILITY_SECRETS,
-    EVIDENCE_SECRET,
-  ].map((name) => [name, { file: `./secrets/${name}.txt` }]));
-  return {
-    services,
-    networks: {
-      platform_db_admin: { internal: true },
-      platform_storage: { internal: true },
-      platform_egress: {},
-      example_app_ingress: { internal: true },
-    },
-    volumes: {
-      docker_action_broker_socket: {},
-      docker_action_broker_state: {},
-      docker_action_activation_cas: {},
-      backup_scheduler_jobs: { name: "platform_infra_vps_backup_scheduler_jobs" },
-      backup_scheduler_logs: {},
-      node_exporter_textfiles: {},
-      example_data: {},
-      redis_auth_config: {},
-      nats_auth_config: {},
-    },
-    secrets,
+    ...overrides,
   };
 }
 
@@ -706,22 +1187,3 @@ function secret(name) {
     mode: 0o400,
   };
 }
-
-function bounded(overrides = {}) {
-  return {
-    cpus: 0.5,
-    cpu_shares: 256,
-    mem_limit: 128 * 1024 * 1024,
-    mem_reservation: 32 * 1024 * 1024,
-    pids_limit: 128,
-    ulimits: { nofile: { soft: 8192, hard: 8192 } },
-    blkio_config: { weight: 300 },
-    environment: {},
-    secrets: [],
-    volumes: [],
-    networks: {},
-    ...overrides,
-  };
-}
-
-const INTENT_ID = "intent.release-1";
