@@ -567,7 +567,7 @@ export function loadProtectedJson(file, maximumBytes = MAX_TRUST_DOCUMENT_BYTES)
   return JSON.parse(readProtectedFile(file, maximumBytes).toString("utf8"));
 }
 
-export function readClaimedJobSnapshot(input, { io } = {}) {
+export function readClaimedJobSnapshot(input, { io = fs } = {}) {
   if (!isPlainRecord(input) || !hasExactKeys(input, ["parameters", "policy", "source", "sourceId"])) {
     throw new TypeError("claimed job reader input is invalid");
   }
@@ -636,7 +636,7 @@ export function readClaimedJobSnapshot(input, { io } = {}) {
     throw new TypeError("claimed job reader requires an injected no-follow filesystem interface");
   }
 
-  const rootStat = io.lstatSync(brokerRoot, { bigint: true });
+  const rootStat = io.lstatSync(brokerRoot);
   if (!rootStat.isDirectory() || rootStat.isSymbolicLink()
     || statInteger(rootStat.uid) !== expectedUid || statInteger(rootStat.gid) !== expectedGid
     || (statInteger(rootStat.mode) & 0o777) !== 0o700) {
@@ -647,6 +647,16 @@ export function readClaimedJobSnapshot(input, { io } = {}) {
   if (path.dirname(leaf) !== brokerRoot || path.basename(leaf) !== parameters.jobFileName) {
     throw new Error("claimed job filename is not an exact leaf basename");
   }
+  const leafStat = io.lstatSync(leaf);
+  const leafSize = statInteger(leafStat.size);
+  if (!leafStat.isFile() || leafStat.isSymbolicLink()
+    || statInteger(leafStat.nlink) !== 1
+    || statInteger(leafStat.uid) !== expectedUid || statInteger(leafStat.gid) !== expectedGid
+    || (statInteger(leafStat.mode) & 0o777) !== policy.expectedMode
+    || leafSize < 1 || leafSize > policy.maximumBytes
+    || !hasStableTimestamps(leafStat)) {
+    throw new Error("claimed job leaf owner, private mode, link count, type or size is invalid");
+  }
   let descriptor;
   let bytes;
   try {
@@ -654,19 +664,20 @@ export function readClaimedJobSnapshot(input, { io } = {}) {
       leaf,
       io.constants.O_RDONLY | io.constants.O_NOFOLLOW,
     );
-    const before = io.fstatSync(descriptor, { bigint: true });
+    const before = io.fstatSync(descriptor);
     const size = statInteger(before.size);
     if (!before.isFile() || before.isSymbolicLink()
       || statInteger(before.nlink) !== 1
       || statInteger(before.uid) !== expectedUid || statInteger(before.gid) !== expectedGid
       || (statInteger(before.mode) & 0o777) !== policy.expectedMode
       || size < 1 || size > policy.maximumBytes
-      || !hasNanosecondTimestamps(before)) {
+      || !hasStableTimestamps(before)
+      || !sameClaimedJobMetadata(leafStat, before)) {
       throw new Error("claimed job leaf owner, private mode, link count, type or size is invalid");
     }
     const first = readClaimedJobDescriptor(io, descriptor, size);
     const second = readClaimedJobDescriptor(io, descriptor, size);
-    const after = io.fstatSync(descriptor, { bigint: true });
+    const after = io.fstatSync(descriptor);
     if (!sameClaimedJobMetadata(before, after)) {
       throw new Error("claimed job descriptor metadata changed while being read");
     }
@@ -839,18 +850,19 @@ function sameClaimedJobMetadata(before, after) {
       "gid",
       "nlink",
       "size",
-      "mtimeNs",
-      "ctimeNs",
-      "birthtimeNs",
-    ].every((field) => before[field] === after[field]);
+      "mtimeMs",
+      "ctimeMs",
+      "birthtimeMs",
+    ].every((field) => Object.is(before[field], after[field]))
+      && before.isFile() === after.isFile();
   } catch {
     return false;
   }
 }
 
-function hasNanosecondTimestamps(stat) {
-  return ["mtimeNs", "ctimeNs", "birthtimeNs"]
-    .every((field) => typeof stat[field] === "bigint");
+function hasStableTimestamps(stat) {
+  return ["mtimeMs", "ctimeMs", "birthtimeMs"]
+    .every((field) => typeof stat[field] === "number" && Number.isFinite(stat[field]));
 }
 
 function statInteger(value) {
