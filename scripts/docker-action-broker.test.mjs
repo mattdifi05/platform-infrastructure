@@ -428,6 +428,99 @@ testRunner(
 );
 
 testRunner(
+  "RED v2: slash-child action identity fails its grammar before every provider, replay or Engine boundary",
+  async () => {
+    const phase = findPhase("job.backup.capture");
+    const { trusted } = buildFixtureTrustedContextV2({
+      allowedActions: [phase.action],
+      now: NOW,
+    });
+    const canonicalRequest = buildFixtureSignedActionRequestV2(
+      phase.action,
+      phase.parameters,
+      {
+        index: 2596,
+        now: NOW,
+        trustedContext: trusted,
+      },
+    );
+    const hostileAction = `${phase.action}/child`;
+    const unsigned = {
+      ...Object.fromEntries(
+        Object.entries(canonicalRequest).filter(([key]) => key !== "mac"),
+      ),
+      action: hostileAction,
+    };
+    const hostileRequest = {
+      ...unsigned,
+      mac: crypto
+        .createHmac("sha256", fixtureCapabilityKey(phase.action))
+        .update(`${REQUEST_SCHEMA_V2}\0`)
+        .update(canonicalFixtureJson(unsigned))
+        .digest("hex"),
+    };
+    const calls = {
+      capabilityProvider: 0,
+      engine: 0,
+      replay: 0,
+      trustedContextProvider: 0,
+    };
+    const replayStore = Object.fromEntries(
+      [
+        "acquire",
+        "admitActivation",
+        "admitTrustedContext",
+        "consume",
+      ].map((name) => [name, () => {
+        calls.replay += 1;
+        throw new Error(`slash-child reached replay.${name}`);
+      }]),
+    );
+    const core = broker.createBrokerCore({
+      capabilityProvider: async () => {
+        calls.capabilityProvider += 1;
+        throw new Error("slash-child reached capability provider");
+      },
+      engine: {
+        async execute() {
+          calls.engine += 1;
+          throw new Error("slash-child reached Engine");
+        },
+      },
+      now: () => NOW,
+      operationTimeoutMs: 1_000,
+      replayStore,
+      trustedContextProvider: async () => {
+        calls.trustedContextProvider += 1;
+        return trusted;
+      },
+    });
+
+    let failure;
+    try {
+      await core.handle(Buffer.from(canonicalFixtureJson(hostileRequest)));
+    } catch (error) {
+      failure = error;
+    }
+    assert.deepEqual(
+      calls,
+      {
+        capabilityProvider: 0,
+        engine: 0,
+        replay: 0,
+        trustedContextProvider: 0,
+      },
+      "slash-child crossed a provider, replay or Engine boundary",
+    );
+    assert.match(
+      failure?.message ?? "",
+      /action (?:grammar|syntax|format)|(?:grammar|syntax|format).*action/i,
+      "slash-child was not rejected by the action-identity grammar",
+    );
+  },
+);
+
+testRunner(
   "RED v2: default socketless broker traverses backup.job.execute through one root-owned snapshot store",
   async () => {
     const assemblySource = Function.prototype.toString.call(
@@ -467,26 +560,35 @@ testRunner(
           trustedContext: trusted,
         },
       );
+      const capabilityKey = fixtureCapabilityKey(request.action);
+      const rawResult = rawWorkerResult(phase, request.requestId);
       const defaultStore = snapshotStoreFixture({});
       const injectedStore = snapshotStoreFixture({});
       const trace = {
         acceptConnection: null,
+        capabilityKey,
         connectionEnd: [],
         defaultStore,
         factoryOptions: [],
         injectedStore,
+        phase,
         providerCalls: 0,
+        rawResult,
         request,
+        response: null,
         serverEvents: [],
         timeoutMs: [],
+        transport: null,
+        trusted,
       };
       const transport = new OracleEngineTransport({
         phases: [phase],
-        rawResults: [rawWorkerResult(phase, request.requestId)],
+        rawResults: [rawResult],
         request,
         requestId: request.requestId,
         trusted,
       });
+      trace.transport = transport;
       const replayStore = Object.freeze({
         acquire(candidateRequest, candidateTrusted) {
           assert.deepEqual(candidateRequest, request);
@@ -523,7 +625,7 @@ testRunner(
       const server = broker.createDockerActionBroker({
         capabilityProvider: async (action) => {
           assert.equal(action, request.action);
-          return fixtureCapabilityKey(action);
+          return capabilityKey;
         },
         claimedJobSnapshotProvider: async ({ parameters, sourceId }) => {
           trace.providerCalls += 1;
@@ -603,6 +705,7 @@ testRunner(
       const response = JSON.parse(
         responseFrame.subarray(0, -1).toString("utf8"),
       );
+      trace.response = response;
       assert.equal(response.schema, "platform.docker-action.response/v2");
       assert.equal(response.status, "completed");
       assert.equal(response.action, request.action);
@@ -616,6 +719,56 @@ testRunner(
         Buffer.from(`${canonicalFixtureJson(response)}\n`),
       );
       return trace;
+    }
+
+    function expectedAssemblyResponse(trace) {
+      const result = expectedActionResult(trace.phase, trace.rawResult);
+      const unsignedResponse = {
+        action: trace.request.action,
+        errorCode: null,
+        requestId: trace.request.requestId,
+        requestSha256: fixtureSha256(canonicalFixtureJson(trace.request)),
+        result,
+        resultSha256: fixtureSha256(canonicalFixtureJson(result)),
+        schema: "platform.docker-action.response/v2",
+        status: "completed",
+        statusCode: 200,
+      };
+      return {
+        ...unsignedResponse,
+        mac: crypto
+          .createHmac("sha256", trace.capabilityKey)
+          .update(`${unsignedResponse.schema}\0`)
+          .update(canonicalFixtureJson(unsignedResponse))
+          .digest("hex"),
+      };
+    }
+
+    function exactOracleCall(call) {
+      if (call.method === "inspectNetwork") {
+        return { id: call.id, method: call.method };
+      }
+      if (call.method === "inspectVolume") {
+        return { method: call.method, name: call.name };
+      }
+      if (call.method === "createWorker") {
+        return {
+          body: call.body,
+          id: call.id,
+          method: call.method,
+          name: call.name,
+        };
+      }
+      if ([
+        "deleteContainer",
+        "inspectContainer",
+        "logsContainer",
+        "startContainer",
+        "waitContainer",
+      ].includes(call.method)) {
+        return { id: call.id, method: call.method };
+      }
+      assert.fail(`unexpected Oracle Engine method ${call.method}`);
     }
 
     function assertDefaultRootTrace(trace) {
@@ -634,6 +787,11 @@ testRunner(
         1,
         "default root-owned store did not receive exactly one cleanup",
       );
+      assert.deepEqual(
+        trace.defaultStore.cleanupCalls,
+        [trace.defaultStore.calls[0].result],
+        "default root-owned store did not clean the exact seal it created",
+      );
       assert.equal(
         trace.injectedStore.calls.length,
         0,
@@ -651,6 +809,102 @@ testRunner(
         fixtureSha256(canonicalFixtureJson(authority.request)),
         "default seal lost the complete canonical signed-request digest",
       );
+      const sealed = trace.defaultStore.calls[0].result;
+      const receipt = trace.trusted.receipt;
+      const resourceName = `platform-action-job-backup-capture-${"31".repeat(12)}`;
+      const expectedBody = expectedWorkerBody(
+        trace.phase,
+        trace.trusted,
+        sealed,
+        trace.request.requestId,
+      );
+      assert.deepEqual(
+        trace.transport.calls.map(exactOracleCall),
+        [
+          {
+            id: receipt.resources.networks.platform_db_admin.engineId,
+            method: "inspectNetwork",
+          },
+          {
+            id: receipt.resources.networks.platform_storage.engineId,
+            method: "inspectNetwork",
+          },
+          {
+            method: "inspectVolume",
+            name: receipt.resources.volumes["jobs.queue"].engineName,
+          },
+          {
+            method: "inspectVolume",
+            name: receipt.resources.volumes["broker.state"].engineName,
+          },
+          {
+            method: "inspectVolume",
+            name: receipt.resources.volumes["worker.input.manifest-signing"].engineName,
+          },
+          {
+            body: expectedBody,
+            id: WORKER_ID,
+            method: "createWorker",
+            name: resourceName,
+          },
+          { id: WORKER_ID, method: "inspectContainer" },
+          { id: WORKER_ID, method: "startContainer" },
+          { id: WORKER_ID, method: "waitContainer" },
+          { id: WORKER_ID, method: "logsContainer" },
+          { id: WORKER_ID, method: "deleteContainer" },
+        ],
+        "default assembly did not traverse the exact Oracle Engine transport call sequence",
+      );
+      assert.deepEqual(
+        trace.transport.created.map(({ id, name, phase }) => ({
+          id,
+          name,
+          phaseId: phase.phaseId,
+        })),
+        [{ id: WORKER_ID, name: resourceName, phaseId: trace.phase.phaseId }],
+        "default assembly did not create exactly one phase-bound Oracle worker",
+      );
+      assert.deepEqual(
+        trace.transport.startedIds,
+        [WORKER_ID],
+        "default assembly did not start the exact created worker ID",
+      );
+      assert.deepEqual(
+        trace.transport.deletedIds,
+        [WORKER_ID],
+        "default assembly did not delete the exact created worker ID",
+      );
+      assert.deepEqual(
+        trace.response?.result,
+        expectedActionResult(trace.phase, trace.rawResult),
+        "default assembly synthesized completed instead of returning the exact phase result/v2",
+      );
+      assert.deepEqual(
+        trace.response,
+        expectedAssemblyResponse(trace),
+        "default assembly did not emit the exact complete authenticated response/v2",
+      );
+      assert.deepEqual(
+        trace.connectionEnd,
+        [Buffer.from(`${canonicalFixtureJson(expectedAssemblyResponse(trace))}\n`)],
+        "socketless connection did not receive the exact canonical response/v2 frame",
+      );
+      assert.deepEqual(
+        Object.keys(trace.response).sort(),
+        [
+          "action",
+          "errorCode",
+          "mac",
+          "requestId",
+          "requestSha256",
+          "result",
+          "resultSha256",
+          "schema",
+          "status",
+          "statusCode",
+        ],
+        "default assembly response/v2 key set is not exact",
+      );
     }
 
     const defaultTrace = await runAssembly();
@@ -663,6 +917,39 @@ testRunner(
       () => assertDefaultRootTrace(injectedTrace),
       /default root-owned|masqueraded/,
       "default-store oracle admitted an explicitly injected-store mutant",
+    );
+
+    const shortcutStore = snapshotStoreFixture({});
+    const shortcutSealed = shortcutStore.seal(
+      {
+        ...defaultTrace.phase.claimedJob,
+        bytes: Buffer.from(defaultTrace.phase.claimedJob.bytes),
+      },
+      defaultTrace.defaultStore.calls[0].authority,
+    );
+    shortcutStore.cleanup(shortcutSealed);
+    const shortcutTransport = new OracleEngineTransport({
+      phases: [defaultTrace.phase],
+      rawResults: [defaultTrace.rawResult],
+      request: defaultTrace.request,
+      requestId: defaultTrace.request.requestId,
+      trusted: defaultTrace.trusted,
+    });
+    const syntheticShortcutTrace = {
+      ...defaultTrace,
+      defaultStore: shortcutStore,
+      injectedStore: snapshotStoreFixture({}),
+      response: expectedAssemblyResponse(defaultTrace),
+      transport: shortcutTransport,
+    };
+    assert.equal(shortcutStore.calls.length, 1);
+    assert.equal(shortcutStore.cleanupCalls.length, 1);
+    assert.equal(syntheticShortcutTrace.response.status, "completed");
+    assert.deepEqual(shortcutTransport.calls, []);
+    assert.throws(
+      () => assertDefaultRootTrace(syntheticShortcutTrace),
+      /exact Oracle Engine transport call sequence/,
+      "assembly oracle admitted seal/cleanup plus a synthetic completed response without Engine execution",
     );
   },
 );
@@ -3409,6 +3696,18 @@ const hookHandle = rawRegisterHooks({
     });
   },
 });
+assert.equal(
+  typeof hookHandle.deregister,
+  "function",
+  "fresh-process loader hook did not return its lexical lifetime handle",
+);
+process.on("exit", () => {
+  assert.equal(
+    loaderActive,
+    true,
+    "fresh-process loader hook was not active at process termination",
+  );
+});
 
 const rawSyncBuiltinESMExports = importedSyncBuiltinESMExports;
 for (const name of [
@@ -3973,10 +4272,9 @@ if (process.env.SNAPSHOT_TRAP_SELF_TEST === "1") {
     /LOADER_GRAPH_FORBIDDEN/,
     "lazy loader escaped before self-oracle revocation",
   );
-  hookHandle.deregister();
-  loaderActive = false;
   process.stdout.write(JSON.stringify({
     directAttempts,
+    loaderActiveAtExit: loaderActive,
     loaderFiles: [...new Set(loaderLoads)].sort(),
     loaderIoCount: loaderAudit.length,
     loaderRejectCount: loaderRejects.length,
@@ -3994,10 +4292,30 @@ assert.equal(
   "function",
   "fresh first-import consumer requires createSnapshotFileStore",
 );
-const store = broker.createSnapshotFileStore({
+const realStore = broker.createSnapshotFileStore({
   expectedGid: payload.expectedGid,
   expectedUid: payload.expectedUid,
   io,
+});
+let cleanupLazyImportAttempt;
+const store = Object.freeze({
+  seal(...args) {
+    return realStore.seal(...args);
+  },
+  cleanup(...args) {
+    assert.equal(
+      cleanupLazyImportAttempt,
+      undefined,
+      "cleanup scheduled the lazy-import mutant more than once",
+    );
+    cleanupLazyImportAttempt = new Promise((resolve, reject) => {
+      setImmediate(() => {
+        import("data:text/javascript,export default 'cleanup-scheduled-mutant'")
+          .then(resolve, reject);
+      });
+    });
+    return realStore.cleanup(...args);
+  },
 });
 const { bytesBase64, ...metadata } = payload.snapshot;
 snapshotPhase = "seal";
@@ -4022,6 +4340,15 @@ await assert.rejects(
 );
 snapshotPhase = "cleanup";
 await store.cleanup(sealed);
+assert.ok(
+  cleanupLazyImportAttempt,
+  "snapshot cleanup did not schedule its late-import causal mutant",
+);
+await assert.rejects(
+  cleanupLazyImportAttempt,
+  /LOADER_GRAPH_FORBIDDEN/,
+  "lazy import scheduled inside cleanup escaped the process-lifetime hook",
+);
 snapshotRevoked = true;
 assert.throws(
   () => io.existsSync(target),
@@ -4031,28 +4358,38 @@ assert.throws(
 await assert.rejects(
   () => import("data:text/javascript,export default 'post-cleanup-mutant'"),
   /LOADER_GRAPH_FORBIDDEN/,
-  "lazy loader escaped before capability revocation and hook teardown",
+  "lazy loader escaped after cleanup and capability revocation",
 );
-assert.equal(loaderActive, true, "loader hook was removed before cleanup/revocation");
-hookHandle.deregister();
-loaderActive = false;
+assert.equal(loaderActive, true, "loader hook was removed before process termination");
 assert.deepEqual(
   directAttempts,
   [],
   "snapshot store used fs authority outside its strict injected io",
 );
 process.stdout.write(JSON.stringify({
+  cleanupLazyImportRejected: true,
   directAttempts,
+  loaderActiveAtExit: loaderActive,
   loaderFiles: [...new Set(loaderLoads)].sort(),
   loaderIoCount: loaderAudit.length,
   loaderRejectCount: loaderRejects.length,
-  mutantCount,
+  mutantCount: mutantCount + 1,
   processId: process.pid,
   snapshotAuditCount: snapshotAudit.length,
   snapshotCallValidationRejectCount: snapshotCallValidationRejects.length,
 }) + "\n");
 `;
 
+    assert.doesNotMatch(
+      childSource,
+      /\.deregister\s*\(/,
+      "fresh-process harness contains a finite ESM-hook deregistration window",
+    );
+    assert.doesNotMatch(
+      childSource,
+      /loaderActive\s*=\s*false/,
+      "fresh-process harness marks the ESM hook inactive before termination",
+    );
     const runChild = (selfTest) => spawnSync(
       process.execPath,
       ["--input-type=module", "--eval", childSource],
@@ -4082,6 +4419,7 @@ process.stdout.write(JSON.stringify({
     assert.equal(oracleProof.stage, "first-import-oracle-ready");
     assert.equal(oracleProof.mutantCount, 54);
     assert.deepEqual(oracleProof.directAttempts, []);
+    assert.equal(oracleProof.loaderActiveAtExit, true);
     assert.deepEqual(oracleProof.loaderFiles, [
       new URL("./docker-action-activation.mjs", BROKER_MODULE_URL).href,
       BROKER_MODULE_URL,
@@ -4102,11 +4440,13 @@ process.stdout.write(JSON.stringify({
     );
     const proof = JSON.parse(child.stdout);
     assert.notEqual(proof.processId, process.pid);
-    assert.equal(proof.mutantCount, 54);
+    assert.equal(proof.mutantCount, 55);
+    assert.equal(proof.cleanupLazyImportRejected, true);
     assert.deepEqual(proof.directAttempts, []);
+    assert.equal(proof.loaderActiveAtExit, true);
     assert.deepEqual(proof.loaderFiles, oracleProof.loaderFiles);
     assert.equal(Number.isInteger(proof.loaderIoCount), true);
-    assert.equal(proof.loaderRejectCount, 4);
+    assert.equal(proof.loaderRejectCount, 5);
     assert.equal(proof.snapshotAuditCount > oracleProof.snapshotAuditCount, true);
     assert.equal(proof.snapshotCallValidationRejectCount, 9);
   },

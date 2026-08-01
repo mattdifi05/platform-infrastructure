@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -945,10 +946,9 @@ test("test-only producer, result and semantic-core helpers are permanently NO-UD
     inMemoryCoreConnection,
     inMemorySemanticExecutorCoreFixture,
   ].map((value) => Function.prototype.toString.call(value)).join("\n");
-  assert.doesNotMatch(
+  assertSocketlessSourceOracle(
     source,
-    /\b(?:createDockerActionBroker|exchangeWithLocalBroker|sendActionRequest|socketPath)\b|(?:^|[^\w])net\.(?:connect|createConnection|createServer)\s*\(|\.listen\s*\(/m,
-    "a future GREEN may not turn the SAFE cohort into a UDS or network test",
+    "the complete in-memory SAFE helper graph",
   );
   assert.match(
     source,
@@ -973,12 +973,129 @@ test("test-only producer, result and semantic-core helpers are permanently NO-UD
     const nextTest = /\n(?:test|testWhenClientExports|testWhenProductionExports)\s*\(/.exec(remainder);
     assert.ok(nextTest, `${testName} must retain a bounded source region`);
     const testBodySource = remainder.slice(0, nextTest.index);
-    assert.doesNotMatch(
+    assertSocketlessSourceOracle(
       testBodySource,
-      /\b(?:exchangeWithLocalBroker|realBrokerAssembly|realDefaultSemanticBrokerAssembly|sendActionRequest|socketPath)\b|(?:^|[^\w])net\.(?:connect|createConnection|createServer)\s*\(|\.listen\s*\(/m,
-      `${testName} may never open or traverse a UDS, even after its RED exports exist`,
+      `${testName} bounded SAFE body`,
     );
   }
+});
+
+test("test-only NO-UDS oracle kills computed, aliased and builtin-module network mutants", async (t) => {
+  await t.test("socketless positive fixture records exactly zero capability calls", async () => {
+    await withSocketlessNetworkCapabilityTrap(
+      "active socketless positive fixture",
+      async () => {
+        const value = await Promise.resolve({ status: "socketless" });
+        assert.deepEqual(value, { status: "socketless" });
+      },
+    );
+  });
+
+  const mutants = [
+    {
+      blockedAttempt: "net.createServer",
+      invoke() {
+        return net["createServer"](() => {});
+      },
+      label: "bracket createServer",
+      source: `function mutant() { return net["createServer"](() => {}); }`,
+    },
+    {
+      blockedAttempt: "net.createServer",
+      invoke() {
+        const { createServer: openServer } = net;
+        return openServer(() => {});
+      },
+      label: "destructured createServer alias",
+      source: `function mutant() { const { createServer: openServer } = net; return openServer(() => {}); }`,
+    },
+    {
+      blockedAttempt: "net.createServer",
+      invoke() {
+        const openServer = net.createServer;
+        return openServer(() => {});
+      },
+      label: "property createServer alias",
+      source: `function mutant() { const openServer = net.createServer; return openServer(() => {}); }`,
+    },
+    {
+      blockedAttempt: "process.getBuiltinModule",
+      invoke() {
+        return process.getBuiltinModule("node:net").createServer(() => {});
+      },
+      label: "process builtin-module escape",
+      source: `function mutant() { return process.getBuiltinModule("node:net").createServer(() => {}); }`,
+    },
+    {
+      blockedAttempt: "net.createServer",
+      invoke() {
+        const method = ["create", "Server"].join("");
+        return Reflect.get(net, method)(() => {});
+      },
+      label: "Reflect.get computed createServer",
+      source: `function mutant() { return Reflect.get(net, ["create", "Server"].join(""))(() => {}); }`,
+    },
+  ];
+
+  for (const mutant of mutants) {
+    await t.test(mutant.label, async () => {
+      assert.throws(
+        () => assertSocketlessSourceOracle(mutant.source, mutant.label),
+        /NO-UDS source oracle rejected/i,
+        `${mutant.label} must be rejected statically before the SAFE body can run`,
+      );
+      await withSocketlessNetworkCapabilityTrap(
+        `${mutant.label} runtime self-mutant`,
+        async () => {
+          assert.throws(
+            () => mutant.invoke(),
+            (error) => error?.code === "ERR_TEST_NO_UDS_CAPABILITY",
+            `${mutant.label} must hit the causal runtime capability trap without opening a socket`,
+          );
+        },
+        { expectedAttempts: [mutant.blockedAttempt] },
+      );
+    });
+  }
+
+  await t.test("every exported net callable and reachable connect/listen prototype", async () => {
+    const callableNames = socketlessNetCallableNames();
+    const originalServerPrototype = socketlessOriginalNetPrototype("Server");
+    const expectedAttempts = [
+      ...callableNames.map((name) => `net.${name}`),
+      "net.Socket.prototype.connect",
+      "net.Server.prototype.listen",
+      "net.Socket.prototype.constructor",
+    ];
+    await withSocketlessNetworkCapabilityTrap(
+      "complete node:net callable surface self-mutant",
+      async () => {
+        for (const name of callableNames) {
+          assert.throws(
+            () => Reflect.apply(net[name], undefined, []),
+            (error) => error?.code === "ERR_TEST_NO_UDS_CAPABILITY",
+            `node:net callable ${name} must be replaced by the runtime trap`,
+          );
+        }
+        assert.throws(
+          () => process.stdout.connect(),
+          (error) => error?.code === "ERR_TEST_NO_UDS_CAPABILITY",
+          "the reachable Socket prototype may not retain connect authority",
+        );
+        assert.throws(
+          () => originalServerPrototype.listen(),
+          (error) => error?.code === "ERR_TEST_NO_UDS_CAPABILITY",
+          "the reachable Server prototype may not retain listen authority",
+        );
+        assert.throws(
+          () => Reflect.construct(process.stdout.constructor, []),
+          (error) => error?.code === "ERR_TEST_NO_UDS_CAPABILITY",
+          "the reachable Socket prototype constructor may not create a socket",
+        );
+      },
+      { expectedAttempts },
+    );
+  });
 });
 
 testWhenProductionExports(
@@ -1064,7 +1181,9 @@ testWhenProductionExports(
 testWhenProductionExports(
   injectedAssemblyRequirements(),
   "RED v2: in-memory request producer rejects SAFE action affixes before every provider",
-  async (t) => {
+  async (t) => withSocketlessNetworkCapabilityTrap(
+    "in-memory request producer SAFE cohort",
+    async () => {
     const expectedAction = "backup.prune.plan";
     const capabilityKey = fixtureCapabilityKey(expectedAction);
     const { trusted } = buildFixtureTrustedContextV2({
@@ -1148,12 +1267,6 @@ testWhenProductionExports(
       fixtureReplayEvents: [...coreFixture.fixtureReplayEvents],
       trustedContextProviderCalls: coreFixture.trustedContextProviderCalls,
     };
-    const grammarMutation = {
-      action: `${expectedAction}/child`,
-      boundary: "grammar",
-      label: "slash child",
-      relationship: "prefix",
-    };
     const identityMutations = [
       {
         action: `${expectedAction}.nested`,
@@ -1196,19 +1309,11 @@ testWhenProductionExports(
           true,
           "the request fixture must survive its exact affix-blind authorization mutant",
         );
-        if (mutation.boundary === "exact-identity") {
-          assert.match(
-            candidate.action,
-            SAFE_ACTION_IDENTITY,
-            "the exact-identity collision must pass the shared SAFE grammar",
-          );
-        } else {
-          assert.doesNotMatch(
-            candidate.action,
-            SAFE_ACTION_IDENTITY,
-            "slash-child must remain isolated at the grammar boundary",
-          );
-        }
+        assert.match(
+          candidate.action,
+          SAFE_ACTION_IDENTITY,
+          "the exact-identity collision must pass the shared SAFE grammar",
+        );
 
         const outcome = await coreFixture.exchange(candidate).then(
           (value) => ({ kind: "response", value }),
@@ -1246,17 +1351,90 @@ testWhenProductionExports(
       });
     }
 
-    await assertPreProviderRejection(grammarMutation);
     for (const mutation of identityMutations) {
       await assertPreProviderRejection(mutation);
     }
-  },
+
+    await t.test("grammar: slash child fails specifically before every provider", async () => {
+      const grammarMutation = {
+        action: `${expectedAction}/child`,
+        boundary: "grammar",
+        label: "slash child",
+        relationship: "prefix",
+      };
+      const candidate = independentlyResignedRequest(
+        control,
+        { action: grammarMutation.action },
+        capabilityKey,
+      );
+      assert.equal(
+        candidate.mac,
+        domainMacWithKey(
+          REQUEST_MAC_DOMAIN,
+          omit(candidate, "mac"),
+          capabilityKey,
+        ),
+        "the slash-child request must be coherently re-MACed before grammar admission",
+      );
+      assert.doesNotMatch(
+        candidate.action,
+        SAFE_ACTION_IDENTITY,
+        "slash-child must remain isolated at the grammar boundary",
+      );
+      assert.equal(
+        affixIdentityBlindRequestMutantAccepts(
+          candidate,
+          control,
+          grammarMutation,
+          capabilityKey,
+        ),
+        true,
+        "the slash-child request must survive the explicit prefix-blind mutant",
+      );
+
+      const grammarCore = await inMemoryBrokerCoreFixture({
+        capabilityKey,
+        outcomes: [],
+        trusted,
+      });
+      assert.equal(grammarCore.capabilityProviderCalls, 0);
+      assert.equal(grammarCore.trustedContextProviderCalls, 0);
+      assert.deepEqual(grammarCore.executedActions, []);
+      const error = await grammarCore.exchange(candidate).then(
+        () => assert.fail("slash-child must fail specifically at action grammar"),
+        (rejection) => rejection,
+      );
+      assert.ok(error instanceof Error, "grammar rejection must preserve an Error");
+      assert.match(
+        error.message,
+        /action.*(?:grammar|syntax|format|logical[ -]?id)/i,
+        "slash-child must fail specifically at action grammar before registry lookup",
+      );
+      assert.doesNotMatch(
+        error.message,
+        /(?:registry|unknown|not authorized|not enabled|unsupported|binding|identity|authentication|mac|schema|digest)/i,
+        "slash-child may not be misclassified as registry, identity, authentication or digest rejection",
+      );
+      assert.equal(grammarCore.capabilityProviderCalls, 0);
+      assert.equal(grammarCore.trustedContextProviderCalls, 0);
+      assert.deepEqual(grammarCore.executedActions, []);
+      assert.deepEqual(
+        grammarCore.fixtureReplayEvents,
+        ["recover"],
+        "grammar rejection must precede activation, trust, replay consume and lease acquisition",
+      );
+      assert.deepEqual(grammarCore.responseFrames, []);
+    });
+    },
+  ),
 );
 
 testWhenProductionExports(
   injectedAssemblyRequirements(),
   "RED v2: in-memory response producer emits no success frame for identity-blind semantic results",
-  async (t) => {
+  async (t) => withSocketlessNetworkCapabilityTrap(
+    "in-memory response producer SAFE cohort",
+    async () => {
     const seed = canonicalIdentityCollisionFixture();
     const { trusted } = buildFixtureTrustedContextV2({
       allowedActions: [seed.expectedAction],
@@ -1362,13 +1540,16 @@ testWhenProductionExports(
         );
       });
     }
-  },
+    },
+  ),
 );
 
 testWhenProductionExports(
   semanticCoreRequirements(),
   "RED v2: in-memory core crosses the real semantic executor without UDS",
-  async () => {
+  async () => withSocketlessNetworkCapabilityTrap(
+    "in-memory semantic executor SAFE cohort",
+    async () => {
     const action = "backup.prune.plan";
     const command = "prune-manifest-backups-plan";
     const capabilityKey = fixtureCapabilityKey(action);
@@ -1460,7 +1641,8 @@ testWhenProductionExports(
       successExchange.frame,
       rejectionExchange.frame,
     ]);
-  },
+    },
+  ),
 );
 
 test("capability reader requires stable private ownership, parents and one link", async (t) => {
@@ -2598,6 +2780,197 @@ testWhenClientExports(
     }
   },
 );
+
+function socketlessNetCallableEntries() {
+  return Reflect.ownKeys(net)
+    .filter((name) => typeof name === "string")
+    .map((name) => {
+      const descriptor = Object.getOwnPropertyDescriptor(net, name);
+      assert.ok(descriptor, `node:net export ${name} must retain an own descriptor`);
+      const value = Object.hasOwn(descriptor, "value")
+        ? descriptor.value
+        : descriptor.get?.call(net);
+      return { descriptor, name, value };
+    })
+    .filter(({ value }) => typeof value === "function")
+    .sort((left, right) => left.name.localeCompare(right.name));
+}
+
+function socketlessNetCallableNames() {
+  return socketlessNetCallableEntries().map(({ name }) => name);
+}
+
+function socketlessOriginalNetPrototype(name) {
+  const entry = socketlessNetCallableEntries().find((candidate) => candidate.name === name);
+  assert.ok(entry, `node:net must expose callable ${name}`);
+  assert.ok(entry.value.prototype && typeof entry.value.prototype === "object");
+  return entry.value.prototype;
+}
+
+function socketlessForbiddenSourceTokens() {
+  return [...new Set([
+    ...socketlessNetCallableNames(),
+    "createDockerActionBroker",
+    "exchangeWithLocalBroker",
+    "realBrokerAssembly",
+    "realDefaultSemanticBrokerAssembly",
+    "sendActionRequest",
+    "socketPath",
+    "node:net",
+    "net",
+    "listen",
+    "getBuiltinModule",
+    "process",
+    "globalThis",
+    "Reflect",
+    "Proxy",
+    "eval",
+    "Function",
+    "constructor",
+    "fromCharCode",
+    "fromCodePoint",
+    "getOwnPropertyDescriptor",
+    "ownKeys",
+    "require",
+    "module",
+  ])].sort((left, right) => left.localeCompare(right));
+}
+
+function socketlessSourceTokenPattern(token) {
+  const escaped = token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  if (/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(token)) {
+    return new RegExp(`(?:^|[^A-Za-z0-9_$])${escaped}(?:$|[^A-Za-z0-9_$])`, "m");
+  }
+  return new RegExp(escaped, "m");
+}
+
+function rejectSocketlessSource(label, reason) {
+  const error = new Error(`NO-UDS source oracle rejected ${label}: ${reason}`);
+  error.code = "ERR_TEST_NO_UDS_SOURCE";
+  throw error;
+}
+
+function assertSocketlessSourceOracle(source, label) {
+  if (typeof source !== "string" || source.length === 0) {
+    rejectSocketlessSource(label, "source is absent");
+  }
+  const normalized = source.normalize("NFKC");
+  if (normalized !== source) {
+    rejectSocketlessSource(label, "Unicode normalization changes the audited source");
+  }
+  if (/\\(?:u\{?[0-9a-fA-F]|x[0-9a-fA-F]{2})/.test(source)) {
+    rejectSocketlessSource(label, "escaped identifiers or property names are forbidden");
+  }
+  if (/[^\x09\x0a\x0d\x20-\x7e]/.test(source)) {
+    rejectSocketlessSource(label, "non-ASCII source is forbidden");
+  }
+  for (const token of socketlessForbiddenSourceTokens()) {
+    if (socketlessSourceTokenPattern(token).test(source)) {
+      rejectSocketlessSource(label, `forbidden capability token ${JSON.stringify(token)}`);
+    }
+  }
+  return source;
+}
+
+async function withSocketlessNetworkCapabilityTrap(
+  label,
+  body,
+  { expectedAttempts = [] } = {},
+) {
+  assert.equal(typeof body, "function", `${label} body must be callable`);
+  assert.ok(Array.isArray(expectedAttempts), `${label} expected-attempt transcript must be an array`);
+  const attempts = [];
+  const callableEntries = socketlessNetCallableEntries();
+  const patches = [];
+  const patchedProperties = new WeakMap();
+
+  function stagePatch(target, property, attemptLabel) {
+    let properties = patchedProperties.get(target);
+    if (!properties) {
+      properties = new Set();
+      patchedProperties.set(target, properties);
+    }
+    if (properties.has(property)) return;
+    properties.add(property);
+    const descriptor = Object.getOwnPropertyDescriptor(target, property);
+    assert.ok(descriptor, `${label} trap target ${attemptLabel} must have an own descriptor`);
+    assert.equal(
+      descriptor.configurable,
+      true,
+      `${label} trap target ${attemptLabel} must be reversibly configurable`,
+    );
+    patches.push({ attemptLabel, descriptor, property, target });
+  }
+
+  for (const entry of callableEntries) {
+    stagePatch(net, entry.name, `net.${entry.name}`);
+  }
+  const constructorPrototypes = new Set();
+  for (const entry of callableEntries) {
+    const prototype = entry.value.prototype;
+    if (!prototype || typeof prototype !== "object" || constructorPrototypes.has(prototype)) continue;
+    constructorPrototypes.add(prototype);
+    if (Object.hasOwn(prototype, "constructor")) {
+      stagePatch(prototype, "constructor", `net.${entry.name}.prototype.constructor`);
+    }
+  }
+  stagePatch(
+    socketlessOriginalNetPrototype("Socket"),
+    "connect",
+    "net.Socket.prototype.connect",
+  );
+  stagePatch(
+    socketlessOriginalNetPrototype("Server"),
+    "listen",
+    "net.Server.prototype.listen",
+  );
+  stagePatch(process, "getBuiltinModule", "process.getBuiltinModule");
+
+  function blockedCapability(attemptLabel) {
+    return function noUdsRuntimeCapability() {
+      attempts.push(attemptLabel);
+      const error = new Error(`NO-UDS runtime capability blocked ${attemptLabel}`);
+      error.code = "ERR_TEST_NO_UDS_CAPABILITY";
+      throw error;
+    };
+  }
+
+  let bodyError;
+  let value;
+  try {
+    for (const patch of patches) {
+      Object.defineProperty(patch.target, patch.property, {
+        configurable: true,
+        enumerable: patch.descriptor.enumerable,
+        value: blockedCapability(patch.attemptLabel),
+        writable: false,
+      });
+    }
+    syncBuiltinESMExports();
+    try {
+      value = await body();
+    } catch (error) {
+      bodyError = error;
+    }
+  } finally {
+    for (const patch of patches.toReversed()) {
+      Object.defineProperty(
+        patch.target,
+        patch.property,
+        patch.descriptor,
+      );
+    }
+    syncBuiltinESMExports();
+  }
+
+  assert.deepEqual(
+    attempts,
+    expectedAttempts,
+    `${label} must retain the exact NO-UDS capability-attempt transcript`,
+  );
+  if (bodyError) throw bodyError;
+  return value;
+}
 
 function testWhenClientExports(exportNames, name, body) {
   const missing = exportNames.filter((exportName) => typeof client[exportName] !== "function");

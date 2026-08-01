@@ -661,6 +661,73 @@ function assertRuntimeGuardLexicalHandleDiscipline(source, label) {
     /platform\.worker\.socketless-resolution-hook/,
     `${label} exposes a deregistration handle through a global symbol`,
   );
+  for (const [identity, pattern] of [
+    [
+      "original process environment",
+      /\bconst\s+originalProcessEnvironment\s*=\s*process\.env\s*;/,
+    ],
+    [
+      "action identity",
+      /\bconst\s+guardedAction\s*=\s*originalProcessEnvironment\.PLATFORM_DOCKER_ACTION\s*;/,
+    ],
+    [
+      "phase identity",
+      /\bconst\s+guardedPhaseId\s*=\s*originalProcessEnvironment\.PLATFORM_DOCKER_PHASE_ID\s*;/,
+    ],
+    [
+      "Proxy detector",
+      /\bconst\s+utilTypesIsProxy\s*=\s*utilTypes\.isProxy\.bind\(utilTypes\)\s*;/,
+    ],
+    [
+      "Object descriptor reader",
+      /\bconst\s+objectGetOwnPropertyDescriptors\s*=\s*\n\s*Object\.getOwnPropertyDescriptors\.bind\(Object\)\s*;/,
+    ],
+    [
+      "Object key reader",
+      /\bconst\s+objectEntries\s*=\s*Object\.entries\.bind\(Object\)\s*;/,
+    ],
+    [
+      "Object freezer",
+      /\bconst\s+objectFreeze\s*=\s*Object\.freeze\.bind\(Object\)\s*;/,
+    ],
+    [
+      "JSON serializer",
+      /\bconst\s+jsonStringify\s*=\s*JSON\.stringify\.bind\(JSON\)\s*;/,
+    ],
+    [
+      "Reflect key reader",
+      /\bconst\s+reflectOwnKeys\s*=\s*Reflect\.ownKeys\.bind\(Reflect\)\s*;/,
+    ],
+    [
+      "Reflect applicator",
+      /\bconst\s+reflectApply\s*=\s*Reflect\.apply\.bind\(Reflect\)\s*;/,
+    ],
+  ]) {
+    assert.match(
+      source,
+      pattern,
+      `${label} did not capture its lexical ${identity} before worker code`,
+    );
+  }
+  const delayedSpawnSource = source.slice(source.indexOf("childProcess.spawn ="));
+  assert.notEqual(
+    delayedSpawnSource,
+    source.slice(-1),
+    `${label} has no guarded spawn body`,
+  );
+  for (const [authority, pattern] of [
+    ["process.env", /\bprocess\.env\b/],
+    ["mutable Proxy detector", /\butilTypes\.isProxy\b/],
+    ["mutable Object intrinsic", /\bObject\.(?:entries|freeze|fromEntries|getOwnProperty|hasOwn|is)\b/],
+    ["mutable JSON intrinsic", /\bJSON\.stringify\b/],
+    ["mutable Reflect intrinsic", /\bReflect\.(?:apply|ownKeys)\b/],
+  ]) {
+    assert.doesNotMatch(
+      delayedSpawnSource,
+      pattern,
+      `${label} re-read ${authority} after worker code acquired control`,
+    );
+  }
   for (const [capability, pattern] of [
     [
       "ChildProcess constructor export",
@@ -3587,6 +3654,113 @@ syncBuiltinESMExports();
     stdioFrozen: true,
     stdioOwnData: true,
   });
+
+  fs.rmSync(tracePath, { force: true });
+  const hostileEnvironmentReplacement = runGuarded(`
+    import childProcess from "node:child_process";
+    import { types as mutableUtilTypes } from "node:util";
+
+    const originalEnvironment = process.env;
+    const originalArrayIsArray = Array.isArray.bind(Array);
+    const originalJsonStringify = JSON.stringify.bind(JSON);
+    const originalObjectEntries = Object.entries.bind(Object);
+    const originalObjectFreeze = Object.freeze.bind(Object);
+    const originalObjectFromEntries = Object.fromEntries.bind(Object);
+    const originalObjectGetOwnPropertyDescriptor =
+      Object.getOwnPropertyDescriptor.bind(Object);
+    const originalObjectGetOwnPropertyDescriptors =
+      Object.getOwnPropertyDescriptors.bind(Object);
+    const originalObjectGetPrototypeOf = Object.getPrototypeOf.bind(Object);
+    const originalObjectHasOwn = Object.hasOwn.bind(Object);
+    const originalObjectIs = Object.is.bind(Object);
+    const originalReflectApply = Reflect.apply.bind(Reflect);
+    const originalReflectOwnKeys = Reflect.ownKeys.bind(Reflect);
+    const canonicalEnvironment = originalJsonStringify(
+      originalObjectFromEntries(
+        originalObjectEntries(originalEnvironment)
+          .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0),
+      ),
+    );
+    let actionReads = 0;
+    let phaseReads = 0;
+    const replacementEnvironment = new Proxy(originalEnvironment, {
+      get(target, key, receiver) {
+        if (key === "PLATFORM_DOCKER_ACTION") {
+          actionReads += 1;
+          return actionReads === 1 ? "backup.catalog" : "backup.create";
+        }
+        if (key === "PLATFORM_DOCKER_PHASE_ID") {
+          phaseReads += 1;
+          return phaseReads === 1 ? "catalog.capture" : "job.execute";
+        }
+        return originalReflectApply(Reflect.get, Reflect, [target, key, receiver]);
+      },
+    });
+    process.env = replacementEnvironment;
+
+    mutableUtilTypes.isProxy = () => false;
+    Object.entries = (...arguments_) => originalObjectEntries(...arguments_);
+    Object.freeze = (...arguments_) => originalObjectFreeze(...arguments_);
+    Object.fromEntries = (...arguments_) => originalObjectFromEntries(...arguments_);
+    Object.getOwnPropertyDescriptor = (...arguments_) =>
+      originalObjectGetOwnPropertyDescriptor(...arguments_);
+    Object.getOwnPropertyDescriptors = (...arguments_) =>
+      originalObjectGetOwnPropertyDescriptors(...arguments_);
+    Object.getPrototypeOf = (...arguments_) =>
+      originalObjectGetPrototypeOf(...arguments_);
+    Object.hasOwn = (...arguments_) => originalObjectHasOwn(...arguments_);
+    Object.is = (...arguments_) => originalObjectIs(...arguments_);
+    JSON.stringify = (value, ...arguments_) => {
+      if (
+        value !== null
+        && typeof value === "object"
+        && !originalArrayIsArray(value)
+        && originalObjectHasOwn(value, "PLATFORM_DOCKER_ACTION")
+        && originalObjectHasOwn(value, "PLATFORM_DOCKER_PHASE_ID")
+      ) {
+        return canonicalEnvironment;
+      }
+      return originalJsonStringify(value, ...arguments_);
+    };
+    Reflect.apply = (...arguments_) => originalReflectApply(...arguments_);
+    Reflect.ownKeys = (...arguments_) => originalReflectOwnKeys(...arguments_);
+
+    try {
+      childProcess.spawn(
+        ${JSON.stringify(EXPECTED_FIXED_ADAPTERS["backup-job"].executable)},
+        [],
+        {
+          env: replacementEnvironment,
+          shell: false,
+          stdio: ["ignore", "pipe", "pipe"],
+        },
+      );
+    } catch (error) {
+      process.stderr.write("hostile-env-rejected:" + error.message);
+      process.exitCode = 73;
+    }
+  `);
+  assert.deepEqual(
+    {
+      signal: hostileEnvironmentReplacement.signal,
+      status: hostileEnvironmentReplacement.status,
+      stderr: hostileEnvironmentReplacement.stderr,
+      stdout: hostileEnvironmentReplacement.stdout,
+    },
+    {
+      signal: null,
+      status: 73,
+      stderr:
+        "hostile-env-rejected:socketless runtime guard rejected non-exact fixed adapter spawn",
+      stdout: "",
+    },
+    "stateful process.env/monkeypatched-intrinsic PoC changed the lexical action/phase identity",
+  );
+  assert.equal(
+    fs.existsSync(tracePath),
+    false,
+    "stateful process.env/monkeypatched-intrinsic PoC reached the spawn sink",
+  );
 
   for (const [label, source, pattern] of [
     [
@@ -8132,6 +8306,51 @@ import moduleBuiltin from "node:module";
 import { PassThrough } from "node:stream";
 import { types as utilTypes } from "node:util";
 
+const arrayIsArray = Array.isArray.bind(Array);
+const arrayPrototype = Array.prototype;
+const arraySort = Function.prototype.call.bind(Array.prototype.sort);
+const jsonStringify = JSON.stringify.bind(JSON);
+const numberIsSafeInteger = Number.isSafeInteger.bind(Number);
+const objectCreate = Object.create.bind(Object);
+const objectDefineProperties = Object.defineProperties.bind(Object);
+const objectDefineProperty = Object.defineProperty.bind(Object);
+const objectEntries = Object.entries.bind(Object);
+const objectFreeze = Object.freeze.bind(Object);
+const objectFromEntries = Object.fromEntries.bind(Object);
+const objectGetOwnPropertyDescriptor =
+  Object.getOwnPropertyDescriptor.bind(Object);
+const objectGetOwnPropertyDescriptors =
+  Object.getOwnPropertyDescriptors.bind(Object);
+const objectGetPrototypeOf = Object.getPrototypeOf.bind(Object);
+const objectHasOwn = Object.hasOwn.bind(Object);
+const objectIs = Object.is.bind(Object);
+const objectPrototype = Object.prototype;
+const reflectApply = Reflect.apply.bind(Reflect);
+const reflectOwnKeys = Reflect.ownKeys.bind(Reflect);
+const setHas = Function.prototype.call.bind(Set.prototype.has);
+const stringStartsWith =
+  Function.prototype.call.bind(String.prototype.startsWith);
+const stringIntrinsic = String;
+const utilTypesIsProxy = utilTypes.isProxy.bind(utilTypes);
+const originalProcessEnvironment = process.env;
+const originalProcessEnvironmentDescriptor =
+  objectGetOwnPropertyDescriptor(process, "env");
+if (
+  originalProcessEnvironment === null
+  || typeof originalProcessEnvironment !== "object"
+  || utilTypesIsProxy(originalProcessEnvironment)
+  || originalProcessEnvironmentDescriptor === undefined
+  || !objectHasOwn(originalProcessEnvironmentDescriptor, "value")
+  || !objectIs(
+    originalProcessEnvironmentDescriptor.value,
+    originalProcessEnvironment,
+  )
+) {
+  throw new Error("socketless runtime guard requires the original non-Proxy process.env");
+}
+const guardedAction = originalProcessEnvironment.PLATFORM_DOCKER_ACTION;
+const guardedPhaseId = originalProcessEnvironment.PLATFORM_DOCKER_PHASE_ID;
+
 const ALLOWED_BUILTINS = new Set(${JSON.stringify([...ALLOWED_WORKER_BUILTINS].sort())});
 const EXPECTED_COMMAND_BY_ACTION_PHASE = Object.freeze(
   ${JSON.stringify(EXPECTED_COMMAND_BY_ACTION_PHASE)},
@@ -8144,11 +8363,16 @@ const EXPECTED_EXECUTABLE_BY_COMMAND = Object.freeze(
   ))},
 );
 
-if (process.platform === "darwin" && Object.hasOwn(process.env, "__CF_USER_TEXT_ENCODING")) {
-  if (!/^0x[0-9a-f]+:0x[0-9a-f]+:0x[0-9a-f]+$/i.test(process.env.__CF_USER_TEXT_ENCODING)) {
+if (
+  process.platform === "darwin"
+  && objectHasOwn(originalProcessEnvironment, "__CF_USER_TEXT_ENCODING")
+) {
+  if (!/^0x[0-9a-f]+:0x[0-9a-f]+:0x[0-9a-f]+$/i.test(
+    originalProcessEnvironment.__CF_USER_TEXT_ENCODING,
+  )) {
     throw new Error("socketless runtime guard rejected malformed Darwin launcher metadata");
   }
-  delete process.env.__CF_USER_TEXT_ENCODING;
+  delete originalProcessEnvironment.__CF_USER_TEXT_ENCODING;
 }
 
 const SENTINEL = Symbol.for("platform.worker.socketless-guard-count");
@@ -8168,16 +8392,16 @@ if (typeof registerHooks !== "function") {
 }
 const resolutionHookRegistration = registerHooks({
   resolve(specifier, context, nextResolve) {
-    if (String(specifier).startsWith("node:")) {
-      if (!ALLOWED_BUILTINS.has(String(specifier))) {
+    if (stringStartsWith(stringIntrinsic(specifier), "node:")) {
+      if (!setHas(ALLOWED_BUILTINS, stringIntrinsic(specifier))) {
         throw new Error("socketless runtime guard blocked module resolution: " + specifier);
       }
       return nextResolve(specifier, context);
     }
     if (
-      String(specifier).startsWith("./")
-      || String(specifier).startsWith("../")
-      || String(specifier).startsWith("file:")
+      stringStartsWith(stringIntrinsic(specifier), "./")
+      || stringStartsWith(stringIntrinsic(specifier), "../")
+      || stringStartsWith(stringIntrinsic(specifier), "file:")
     ) {
       return nextResolve(specifier, context);
     }
@@ -8257,8 +8481,8 @@ moduleBuiltin.registerHooks = blocked("module.registerHooks");
 const rawStdout = process.stdout;
 const rawStderr = process.stderr;
 function safeWritableFacade(rawStream, label) {
-  const facade = Object.create(null);
-  Object.defineProperties(facade, {
+  const facade = objectCreate(null);
+  objectDefineProperties(facade, {
     isTTY: {
       enumerable: true,
       value: rawStream?.isTTY === true,
@@ -8269,24 +8493,24 @@ function safeWritableFacade(rawStream, label) {
         if (!rawStream || typeof rawStream.write !== "function") {
           throw new Error("socketless runtime guard has no " + label + " writer");
         }
-        return Reflect.apply(rawStream.write, rawStream, arguments_);
+        return reflectApply(rawStream.write, rawStream, arguments_);
       },
     },
   });
-  return Object.freeze(facade);
+  return objectFreeze(facade);
 }
-const safeStdin = Object.create(null);
-Object.defineProperties(safeStdin, {
+const safeStdin = objectCreate(null);
+objectDefineProperties(safeStdin, {
   isTTY: { enumerable: true, value: false },
   read: { enumerable: true, value: blocked("process.stdin.read") },
 });
-Object.freeze(safeStdin);
+objectFreeze(safeStdin);
 for (const [name, value] of [
   ["stdin", safeStdin],
   ["stdout", safeWritableFacade(rawStdout, "stdout")],
   ["stderr", safeWritableFacade(rawStderr, "stderr")],
 ]) {
-  Object.defineProperty(process, name, {
+  objectDefineProperty(process, name, {
     configurable: true,
     enumerable: true,
     value,
@@ -8294,17 +8518,19 @@ for (const [name, value] of [
   });
 }
 
-const guardedEnvironmentEntries = Object.entries(process.env)
-  .sort(([left], [right]) => left.localeCompare(right));
-const guardedProcessEnvironment = JSON.stringify(
-  Object.fromEntries(guardedEnvironmentEntries),
+const guardedEnvironmentEntries = arraySort(
+  objectEntries(originalProcessEnvironment),
+  ([left], [right]) => left < right ? -1 : left > right ? 1 : 0,
 );
-const guardOwnedEnvironment = Object.freeze(
-  Object.fromEntries(guardedEnvironmentEntries),
+const guardedProcessEnvironment = jsonStringify(
+  objectFromEntries(guardedEnvironmentEntries),
 );
-const guardOwnedArgv = Object.freeze([]);
-const guardOwnedStdio = Object.freeze(["ignore", "pipe", "pipe"]);
-const guardOwnedOptions = Object.freeze({
+const guardOwnedEnvironment = objectFreeze(
+  objectFromEntries(guardedEnvironmentEntries),
+);
+const guardOwnedArgv = objectFreeze([]);
+const guardOwnedStdio = objectFreeze(["ignore", "pipe", "pipe"]);
+const guardOwnedOptions = objectFreeze({
   env: guardOwnedEnvironment,
   shell: false,
   stdio: guardOwnedStdio,
@@ -8312,25 +8538,31 @@ const guardOwnedOptions = Object.freeze({
 
 function hasExactDataDescriptor(descriptor, value) {
   return descriptor !== undefined
-    && Object.hasOwn(descriptor, "value")
+    && objectHasOwn(descriptor, "value")
     && descriptor.configurable === true
     && descriptor.enumerable === true
     && descriptor.writable === true
-    && Object.is(descriptor.value, value);
+    && objectIs(descriptor.value, value);
+}
+
+function hasOriginalProcessEnvironmentIdentity() {
+  const descriptor = objectGetOwnPropertyDescriptor(process, "env");
+  return hasExactDataDescriptor(descriptor, originalProcessEnvironment)
+    && !utilTypesIsProxy(descriptor.value);
 }
 
 function hasExactEmptyArrayShape(value) {
   if (
-    !Array.isArray(value)
-    || utilTypes.isProxy(value)
-    || Object.getPrototypeOf(value) !== Array.prototype
-    || JSON.stringify(Reflect.ownKeys(value)) !== JSON.stringify(["length"])
+    !arrayIsArray(value)
+    || utilTypesIsProxy(value)
+    || objectGetPrototypeOf(value) !== arrayPrototype
+    || jsonStringify(reflectOwnKeys(value)) !== jsonStringify(["length"])
   ) {
     return false;
   }
-  const descriptor = Object.getOwnPropertyDescriptor(value, "length");
+  const descriptor = objectGetOwnPropertyDescriptor(value, "length");
   return descriptor !== undefined
-    && Object.hasOwn(descriptor, "value")
+    && objectHasOwn(descriptor, "value")
     && descriptor.configurable === false
     && descriptor.enumerable === false
     && descriptor.writable === true
@@ -8339,15 +8571,15 @@ function hasExactEmptyArrayShape(value) {
 
 function hasExactStdioShape(value) {
   if (
-    !Array.isArray(value)
-    || utilTypes.isProxy(value)
-    || Object.getPrototypeOf(value) !== Array.prototype
-    || JSON.stringify(Reflect.ownKeys(value))
-      !== JSON.stringify(["0", "1", "2", "length"])
+    !arrayIsArray(value)
+    || utilTypesIsProxy(value)
+    || objectGetPrototypeOf(value) !== arrayPrototype
+    || jsonStringify(reflectOwnKeys(value))
+      !== jsonStringify(["0", "1", "2", "length"])
   ) {
     return false;
   }
-  const descriptors = Object.getOwnPropertyDescriptors(value);
+  const descriptors = objectGetOwnPropertyDescriptors(value);
   return hasExactDataDescriptor(descriptors["0"], "ignore")
     && hasExactDataDescriptor(descriptors["1"], "pipe")
     && hasExactDataDescriptor(descriptors["2"], "pipe")
@@ -8361,15 +8593,15 @@ function hasExactOptionsShape(value) {
   if (
     value === null
     || typeof value !== "object"
-    || utilTypes.isProxy(value)
-    || Object.getPrototypeOf(value) !== Object.prototype
-    || JSON.stringify(Reflect.ownKeys(value).sort())
-      !== JSON.stringify(["env", "shell", "stdio"])
+    || utilTypesIsProxy(value)
+    || objectGetPrototypeOf(value) !== objectPrototype
+    || jsonStringify(arraySort(reflectOwnKeys(value)))
+      !== jsonStringify(["env", "shell", "stdio"])
   ) {
     return false;
   }
-  const descriptors = Object.getOwnPropertyDescriptors(value);
-  return hasExactDataDescriptor(descriptors.env, process.env)
+  const descriptors = objectGetOwnPropertyDescriptors(value);
+  return hasExactDataDescriptor(descriptors.env, originalProcessEnvironment)
     && hasExactDataDescriptor(descriptors.shell, false)
     && hasExactDataDescriptor(descriptors.stdio, descriptors.stdio?.value)
     && hasExactStdioShape(descriptors.stdio.value);
@@ -8379,7 +8611,7 @@ const originalSpawn = childProcess.spawn.bind(childProcess);
 const OriginalChildProcess = childProcess.ChildProcess;
 const ChildProcessPrototype = OriginalChildProcess.prototype;
 const originalPrototypeSpawnDescriptor =
-  Object.getOwnPropertyDescriptor(ChildProcessPrototype, "spawn");
+  objectGetOwnPropertyDescriptor(ChildProcessPrototype, "spawn");
 if (
   !originalPrototypeSpawnDescriptor
   || typeof originalPrototypeSpawnDescriptor.value !== "function"
@@ -8396,14 +8628,14 @@ const guardedPrototypeSpawnDescriptor = {
       );
     }
     prototypeSpawnPermit = false;
-    return Reflect.apply(
+    return reflectApply(
       originalPrototypeSpawnDescriptor.value,
       this,
       arguments_,
     );
   },
 };
-Object.defineProperty(
+objectDefineProperty(
   ChildProcessPrototype,
   "spawn",
   guardedPrototypeSpawnDescriptor,
@@ -8471,13 +8703,13 @@ function safeChildFacade(rawChild) {
   safeChild.stdin = null;
   safeChild.stdout = safeReadableFacade(rawChild.stdout, "stdout");
   safeChild.stderr = safeReadableFacade(rawChild.stderr, "stderr");
-  safeChild.pid = Number.isSafeInteger(rawChild.pid) ? rawChild.pid : undefined;
+  safeChild.pid = numberIsSafeInteger(rawChild.pid) ? rawChild.pid : undefined;
   safeChild.kill = (signal = "SIGTERM") => {
     if (signal !== "SIGTERM" && signal !== "SIGKILL") {
       throw new Error("socketless runtime guard rejected child signal");
     }
     if (typeof rawChild.kill !== "function") return false;
-    return Reflect.apply(rawChild.kill, rawChild, [signal]);
+    return reflectApply(rawChild.kill, rawChild, [signal]);
   };
   for (const event of ["close", "disconnect", "error", "exit"]) {
     rawChild.on(event, (...arguments_) => safeChild.emit(event, ...arguments_));
@@ -8486,22 +8718,25 @@ function safeChildFacade(rawChild) {
 }
 
 childProcess.spawn = (executable, argv, options) => {
-  const currentProcessEnvironment = JSON.stringify(
-    Object.fromEntries(
-      Object.entries(process.env).sort(([left], [right]) => left.localeCompare(right)),
+  const currentProcessEnvironment = jsonStringify(
+    objectFromEntries(
+      arraySort(
+        objectEntries(originalProcessEnvironment),
+        ([left], [right]) => left < right ? -1 : left > right ? 1 : 0,
+      ),
     ),
   );
-  const action = process.env.PLATFORM_DOCKER_ACTION;
-  const phaseId = process.env.PLATFORM_DOCKER_PHASE_ID;
-  const command = EXPECTED_COMMAND_BY_ACTION_PHASE[action + "\\0" + phaseId];
+  const command =
+    EXPECTED_COMMAND_BY_ACTION_PHASE[guardedAction + "\\0" + guardedPhaseId];
   const expectedExecutable = EXPECTED_EXECUTABLE_BY_COMMAND[command];
   if (
     typeof executable !== "string"
+    || !hasOriginalProcessEnvironmentIdentity()
     || typeof command !== "string"
     || executable !== expectedExecutable
     || !hasExactEmptyArrayShape(argv)
     || !hasExactOptionsShape(options)
-    || Object.hasOwn(process.env, "NODE_OPTIONS")
+    || objectHasOwn(originalProcessEnvironment, "NODE_OPTIONS")
     || currentProcessEnvironment !== guardedProcessEnvironment
     || admittedSpawnCount !== 0
   ) {

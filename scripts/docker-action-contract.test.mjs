@@ -278,7 +278,7 @@ test("RED v2: request consumer admits the v2 domain control and rejects legacy o
       );
     });
   }
-  const nestedActionCollisions = actionIdentityCollisions(valid.action);
+  const nestedActionCollisions = exactActionIdentityCollisions(valid.action);
   assert.deepEqual(
     nestedActionCollisions
       .filter(([, nestedAction]) => identityBlindEndsWithActionMutant(
@@ -311,7 +311,7 @@ test("RED v2: request consumer admits the v2 domain control and rejects legacy o
         requestMac(omit(candidate, "mac"), key),
         `${label} must carry a valid independently recomputed request MAC`,
       );
-      const error = assert.throws(
+      const error = captureThrownError(
         () => contract.normalizeActionRequest(candidate, trusted, key, { now: NOW }),
         /action|authorized|enabled|binding|identity/i,
         `${label} must fail only at exact canonical action binding`,
@@ -323,6 +323,55 @@ test("RED v2: request consumer admits the v2 domain control and rejects legacy o
       );
     });
   }
+  await t.test("authenticated path-nested action fails at action grammar", (st) => {
+    const nestedAction = `${valid.action}/child`;
+    const unsignedCandidate = {
+      ...unsigned,
+      action: nestedAction,
+    };
+    const candidate = {
+      ...unsignedCandidate,
+      mac: requestMac(unsignedCandidate, key),
+    };
+    assert.deepEqual(
+      Object.keys(candidate).sort(),
+      [...REQUEST_KEYS].sort(),
+      "the path-nested action must preserve the exact signed request wire schema",
+    );
+    assert.equal(candidate.schema, REQUEST_SCHEMA_V2);
+    assert.equal(candidate.activeReceiptSha256, valid.activeReceiptSha256);
+    assert.equal(candidate.combinedRenderSha256, valid.combinedRenderSha256);
+    assert.equal(candidate.runtimeIntentId, valid.runtimeIntentId);
+    assert.equal(
+      candidate.mac,
+      requestMac(omit(candidate, "mac"), key),
+      "the path-nested action must carry a valid independently recomputed request MAC",
+    );
+    assert.notEqual(
+      candidate.mac,
+      valid.mac,
+      "the authenticated action mutation must alter the request MAC",
+    );
+    assert.notEqual(
+      canonicalSignedRequestSha256(candidate),
+      canonicalSignedRequestSha256(valid),
+      "the authenticated action mutation must alter the complete signed-request digest",
+    );
+    assert.throws(
+      () => assertActionGrammarFailure(
+        () => grammarBlindExactRegistryLookupMutant(candidate),
+        "the active grammar-blind exact-registry mutant",
+      ),
+      /must fail specifically at action grammar before registry lookup/i,
+      "the grammar-specific consumer oracle must kill an exact registry lookup with no grammar gate",
+    );
+
+    if (!requestConsumerV2Ready(st)) return;
+    assertActionGrammarFailure(
+      () => contract.normalizeActionRequest(candidate, trusted, key, { now: NOW }),
+      "the authenticated path-nested action",
+    );
+  });
 });
 
 test("RED v2: every capability is action-distinct and bound to the attested file bytes", async (t) => {
@@ -790,7 +839,7 @@ test("RED v2: response signing binds request and result digests and exact fields
   );
 
   const exactIdentityMutations = [];
-  const nestedActionCollisions = actionIdentityCollisions(request.action);
+  const nestedActionCollisions = exactActionIdentityCollisions(request.action);
   assert.deepEqual(
     nestedActionCollisions
       .filter(([, nestedAction]) => identityBlindEndsWithActionMutant(
@@ -960,7 +1009,7 @@ test("RED v2: response signing binds request and result digests and exact fields
         `${label} must be admitted by the active identity-blind endsWith mutant`,
       );
     }
-    const error = assert.throws(
+    const error = captureThrownError(
       () => contract.normalizeActionResponse(candidate, request, key),
       exactIdentityError,
       `${label} must fail only at exact canonical identity binding`,
@@ -1128,7 +1177,7 @@ test("RED v2: typed job result is bound to the exact request operation, job iden
         fixtureSha256(canonicalFixtureJson(candidate.result)),
         `${label} must reseal the internally coherent result before request binding is tested`,
       );
-      const error = assert.throws(
+      const error = captureThrownError(
         () => contract.normalizeActionResponse(candidate, request, key),
         /result|job|operation|phase|identity|binding/i,
         `${label} must not authenticate a coherent valid-to-valid result rebind`,
@@ -1661,16 +1710,56 @@ function requestMac(unsigned, key) {
     .digest("hex");
 }
 
-function actionIdentityCollisions(expectedAction) {
+function exactActionIdentityCollisions(expectedAction) {
   return [
     ["authenticated expected-prefix dot action", `${expectedAction}.nested`],
-    ["authenticated expected-prefix path action", `${expectedAction}/child`],
     ["authenticated expected-suffix action", `nested.${expectedAction}`],
   ];
 }
 
 function identityBlindEndsWithActionMutant(candidateAction, expectedAction) {
   return candidateAction.endsWith(expectedAction);
+}
+
+function grammarBlindExactRegistryLookupMutant(request) {
+  const action = String(request.action ?? "");
+  if (!Object.hasOwn(EXPECTED_ACTION_BINDINGS, action)) {
+    throw new Error("action is unknown to the exact registry");
+  }
+  return action;
+}
+
+function assertActionGrammarFailure(operation, label) {
+  const error = captureThrownError(operation, undefined, `${label} must be rejected`);
+  assert.match(
+    error.message,
+    /action.*(?:grammar|syntax|format|logical[ -]?id)/i,
+    `${label} must fail specifically at action grammar before registry lookup`,
+  );
+  assert.doesNotMatch(
+    error.message,
+    /(?:registry|unknown|not authorized|not enabled|unsupported|binding|identity|authentication|mac|schema|digest)/i,
+    `${label} must not be classified as a registry, identity, authentication or digest failure`,
+  );
+  return error;
+}
+
+function captureThrownError(operation, expected, message) {
+  let captured;
+  assert.throws(
+    () => {
+      try {
+        operation();
+      } catch (error) {
+        captured = error;
+        throw error;
+      }
+    },
+    expected,
+    message,
+  );
+  assert.ok(captured instanceof Error, `${message}: thrown Error was not captured`);
+  return captured;
 }
 
 function canonicalSignedRequestSha256(request) {
