@@ -1031,7 +1031,7 @@ function normalizeResources(value) {
     "postgres.capture.credentials": [
       "/run/platform/worker-secrets/postgres-capture",
       "worker.input.postgres-capture",
-      { database: "database", pgpass: ".pgpass", username: "username" },
+      { pgpass: ".pgpass", serviceConfig: "pg_service.conf" },
     ],
   };
   const workerSecretSets = normalizeExactMap(

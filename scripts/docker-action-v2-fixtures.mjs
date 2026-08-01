@@ -862,19 +862,14 @@ export function buildRawActiveReceiptV2({ now = FIXTURE_NOW } = {}) {
         "postgres.capture.credentials": workerSecretSet({
           containerRoot: "/run/platform/worker-secrets/postgres-capture",
           files: {
-            database: protectedVolumeFile({
-              inode: 2008,
-              relativePath: "database",
-              sha256: "9".repeat(64),
-            }),
             pgpass: protectedVolumeFile({
               inode: 2009,
               relativePath: ".pgpass",
               sha256: "b".repeat(64),
             }),
-            username: protectedVolumeFile({
+            serviceConfig: protectedVolumeFile({
               inode: 2010,
-              relativePath: "username",
+              relativePath: "pg_service.conf",
               sha256: "c".repeat(64),
             }),
           },
