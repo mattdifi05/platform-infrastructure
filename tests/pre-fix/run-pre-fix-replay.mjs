@@ -505,8 +505,8 @@ export async function materializeDetachedBaselineClone(sourceRepository, cloneRo
 }
 
 export async function resolveRunnerIdentity(repositoryRoot = REPOSITORY_ROOT) {
-  const status = await git(repositoryRoot, ["status", "--porcelain=v1", "--untracked-files=all", "--", "tests/pre-fix"]);
-  if (status !== "") fail(`runner inputs must be clean and tracked at HEAD:\n${status}`);
+  const status = await git(repositoryRoot, ["status", "--porcelain=v1", "--untracked-files=all"]);
+  if (status !== "") fail(`runner worktree must be clean at HEAD:\n${status}`);
   const tracked = await git(repositoryRoot, ["ls-files", "--", "tests/pre-fix"]);
   if (tracked === "") fail("runner inputs are not tracked at HEAD");
   return {
@@ -681,16 +681,48 @@ export async function runSandboxedCommand(invocation, {
   );
 }
 
-async function assertExternalOutputDirectory(outputDirectory, protectedRoots) {
-  const absolute = path.resolve(outputDirectory);
-  for (const protectedRoot of protectedRoots) {
-    const root = await realpath(protectedRoot);
-    if (absolute === root || absolute.startsWith(`${root}${path.sep}`)) {
-      fail(`output directory must be external to protected worktree: ${absolute}`);
-    }
+export async function assertExternalOutputDirectory(outputDirectory, protectedRoots) {
+  if (typeof outputDirectory !== "string" || outputDirectory.length === 0 || outputDirectory.includes("\0")) {
+    fail("output directory must be a non-empty path");
   }
-  await mkdir(absolute, { recursive: true, mode: 0o700 });
+  const absolute = path.resolve(outputDirectory);
+  const canonicalProtectedRoots = await Promise.all(protectedRoots.map((protectedRoot) => realpath(protectedRoot)));
+  const assertOutsideProtectedRoots = (candidate) => {
+    for (const root of canonicalProtectedRoots) {
+      if (candidate === root || candidate.startsWith(`${root}${path.sep}`)) {
+        fail(`output directory must be external to protected worktree: ${candidate}`);
+      }
+    }
+  };
+  assertOutsideProtectedRoots(absolute);
+
+  let outputInfo = await lstat(absolute).catch((error) => {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  });
+  if (outputInfo?.isSymbolicLink()) fail(`output directory must not be a symbolic link: ${absolute}`);
+  if (outputInfo !== null && !outputInfo.isDirectory()) fail(`output path must be a directory: ${absolute}`);
+  if (outputInfo === null) {
+    const parent = path.dirname(absolute);
+    const parentInfo = await lstat(parent).catch((error) => {
+      if (error.code === "ENOENT") fail(`output directory parent must already exist: ${parent}`);
+      throw error;
+    });
+    if (parentInfo.isSymbolicLink() || !parentInfo.isDirectory()) {
+      fail(`output directory parent must be a real directory: ${parent}`);
+    }
+    const canonicalParent = await realpath(parent);
+    const canonicalCandidate = path.join(canonicalParent, path.basename(absolute));
+    assertOutsideProtectedRoots(canonicalCandidate);
+    await mkdir(canonicalCandidate, { mode: 0o700 });
+  }
+
+  outputInfo = await lstat(absolute);
+  if (outputInfo.isSymbolicLink() || !outputInfo.isDirectory()) {
+    fail(`output directory changed identity during validation: ${absolute}`);
+  }
   const resolved = await realpath(absolute);
+  assertOutsideProtectedRoots(resolved);
   if ((await readdir(resolved)).length !== 0) fail(`output directory must be empty: ${resolved}`);
   return resolved;
 }
@@ -847,8 +879,8 @@ async function executeReplayOnBaseline({
     const finishedAt = new Date().toISOString();
     const baselineStatusAfter = await git(baselineIdentity.root, ["status", "--porcelain=v1", "--untracked-files=all"]);
     if (baselineStatusAfter !== "") fail(`${definition.case_id} changed the detached baseline despite the sandbox`);
-    const runnerStatusAfter = await git(repositoryRoot, ["status", "--porcelain=v1", "--untracked-files=all", "--", "tests/pre-fix"]);
-    if (runnerStatusAfter !== "") fail(`${definition.case_id} changed tracked runner inputs despite the sandbox`);
+    const runnerStatusAfter = await git(repositoryRoot, ["status", "--porcelain=v1", "--untracked-files=all"]);
+    if (runnerStatusAfter !== "") fail(`${definition.case_id} changed the runner worktree despite the sandbox`);
     await writeFile(path.join(caseArtifacts, "stdout.log"), execution.stdout, { mode: 0o600 });
     await writeFile(path.join(caseArtifacts, "stderr.log"), execution.stderr, { mode: 0o600 });
     const status = execution.code === 0 && !execution.timedOut && !execution.exceededOutput ? "PASS" : "FAIL";

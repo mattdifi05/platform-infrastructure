@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, realpath, rm } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, realpath, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -10,6 +10,7 @@ import {
   EXPECTED_CASE_IDS,
   PRE_FIX_ROOT,
   REPOSITORY_ROOT,
+  assertExternalOutputDirectory,
   assertBaselineIdentity,
   computeSeedTreeSha256,
   createCaseInvocation,
@@ -158,6 +159,38 @@ test("sandbox profile denies network and target writes while declaring ephemeral
     ephemeral_scratch: true,
     external_artifacts: true,
   });
+});
+
+test("external output validation rejects symlink aliases into protected roots", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "pre-fix-output-boundary-test-"));
+  const protectedRoot = path.join(root, "protected");
+  const outsideRoot = path.join(root, "outside");
+  const protectedTarget = path.join(protectedRoot, "empty-target");
+  try {
+    await mkdir(protectedTarget, { recursive: true });
+    await mkdir(outsideRoot);
+    const leafAlias = path.join(outsideRoot, "leaf-alias");
+    await symlink(protectedTarget, leafAlias);
+    await assert.rejects(
+      assertExternalOutputDirectory(leafAlias, [protectedRoot]),
+      /must not be a symbolic link/,
+    );
+
+    const parentAlias = path.join(outsideRoot, "parent-alias");
+    await symlink(protectedRoot, parentAlias);
+    const aliasedChild = path.join(parentAlias, "new-output");
+    await assert.rejects(
+      assertExternalOutputDirectory(aliasedChild, [protectedRoot]),
+      /parent must be a real directory/,
+    );
+    await assert.rejects(lstat(path.join(protectedRoot, "new-output")), /ENOENT/);
+
+    const external = path.join(outsideRoot, "evidence");
+    assert.equal(await assertExternalOutputDirectory(external, [protectedRoot]), await realpath(external));
+    assert.ok((await lstat(external)).isDirectory());
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("baseline materialization is detached, exact, and contains no hardlinked Git objects", async () => {
