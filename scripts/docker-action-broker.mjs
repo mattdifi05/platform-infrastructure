@@ -889,6 +889,633 @@ function hasExactKeys(value, required, optional = []) {
     && keys.length <= required.length + optional.length;
 }
 
+export function createSnapshotFileStore({
+  expectedUid = 0,
+  expectedGid = 0,
+  io = fs,
+  storageRoot,
+} = {}) {
+  if (!isUnixIdentity(expectedUid) || !isUnixIdentity(expectedGid)) {
+    throw new TypeError("snapshot store owner policy is invalid");
+  }
+  const requiredMethods = [
+    "closeSync",
+    "existsSync",
+    "fstatSync",
+    "fsyncSync",
+    "lstatSync",
+    "mkdirSync",
+    "openSync",
+    "readdirSync",
+    "realpathSync",
+    "rmdirSync",
+    "unlinkSync",
+    "writeSync",
+  ];
+  if (!io || typeof io !== "object"
+    || requiredMethods.some((method) => typeof io[method] !== "function")
+    || !io.constants
+    || ["O_RDONLY", "O_DIRECTORY", "O_NOFOLLOW", "O_WRONLY", "O_CREAT", "O_EXCL"]
+      .some((name) => !Number.isInteger(io.constants[name]))) {
+    throw new TypeError("snapshot store requires a complete injected filesystem interface");
+  }
+  if (storageRoot !== undefined && (
+    typeof storageRoot !== "string"
+    || storageRoot.includes("\0")
+    || !path.isAbsolute(storageRoot)
+    || path.normalize(storageRoot) !== storageRoot
+  )) {
+    throw new TypeError("snapshot store local storage root is not an exact canonical path");
+  }
+
+  return Object.freeze({
+    async seal(snapshotValue, authorityValue) {
+      const snapshot = normalizeSnapshotInput(snapshotValue);
+      const authority = normalizeSnapshotAuthority(authorityValue, snapshot);
+      const bytes = Buffer.from(snapshot.bytes);
+      let materialized = false;
+      let writeStarted = false;
+      const pins = [];
+      let ancestorPin;
+      let claimedPin;
+      let leaf;
+      let leafDescriptor;
+      let leafIdentity;
+      let requestDirectory;
+      let requestIdentity;
+      let requestPin;
+      try {
+        const mountpoint = authority.volumeInspect.Mountpoint;
+        const materializationRoot = storageRoot ?? mountpoint;
+        const ancestor = path.dirname(materializationRoot);
+        const claimedJobsDirectory = path.join(
+          materializationRoot,
+          authority.source.snapshotVolumeSubpath,
+        );
+        requestDirectory = path.join(claimedJobsDirectory, authority.requestSha256);
+        leaf = path.join(requestDirectory, "job.json");
+        assertSnapshotPathLayout({
+          ancestor,
+          claimedJobsDirectory,
+          leaf,
+          mountpoint: materializationRoot,
+          requestDirectory,
+          requestSha256: authority.requestSha256,
+          subpath: authority.source.snapshotVolumeSubpath,
+        });
+        const hostLeaf = snapshotHostLeaf(authority);
+
+        if (storageRoot === undefined) {
+          ancestorPin = openSnapshotDirectory(io, ancestor, {
+            expectedGid,
+            expectedUid,
+            label: "mount ancestor",
+          });
+          pins.push(ancestorPin);
+        }
+        const mountPin = openSnapshotDirectory(io, materializationRoot, {
+          expectedGid,
+          expectedUid,
+          label: storageRoot === undefined
+            ? "Engine Mountpoint"
+            : "broker.state local mountpoint",
+        });
+        pins.push(mountPin);
+
+        if (!io.existsSync(claimedJobsDirectory)) {
+          io.mkdirSync(claimedJobsDirectory, { mode: 0o700 });
+          io.fsyncSync(mountPin.descriptor);
+        }
+        claimedPin = openSnapshotDirectory(io, claimedJobsDirectory, {
+          expectedGid,
+          expectedUid,
+          label: "claimed-jobs directory",
+        });
+        pins.push(claimedPin);
+
+        if (io.existsSync(requestDirectory)) {
+          throw new Error("snapshot request directory already exists; replay or collision rejected");
+        }
+        io.mkdirSync(requestDirectory, { mode: 0o700 });
+        io.fsyncSync(claimedPin.descriptor);
+        materialized = true;
+        requestIdentity = io.lstatSync(requestDirectory, { bigint: true });
+        requestPin = openSnapshotDirectory(io, requestDirectory, {
+          expectedGid,
+          expectedUid,
+          label: "request snapshot directory",
+        });
+        pins.push(requestPin);
+
+        leafDescriptor = io.openSync(
+          leaf,
+          io.constants.O_WRONLY
+            | io.constants.O_CREAT
+            | io.constants.O_EXCL
+            | io.constants.O_NOFOLLOW,
+          0o400,
+        );
+        leafIdentity = io.fstatSync(leafDescriptor, { bigint: true });
+        assertSnapshotLeafStat(leafIdentity, expectedUid, expectedGid, 0);
+        mountPin.settled = io.fstatSync(mountPin.descriptor, { bigint: true });
+        assertSnapshotDirectoryStat(mountPin.settled, expectedUid, expectedGid, mountPin.label);
+        claimedPin.settled = io.fstatSync(claimedPin.descriptor, { bigint: true });
+        assertSnapshotDirectoryStat(claimedPin.settled, expectedUid, expectedGid, claimedPin.label);
+        requestPin.settled = io.fstatSync(requestPin.descriptor, { bigint: true });
+        assertSnapshotDirectoryStat(requestPin.settled, expectedUid, expectedGid, requestPin.label);
+        writeStarted = true;
+        writeSnapshotBytes(io, leafDescriptor, bytes);
+        io.fsyncSync(leafDescriptor);
+        io.closeSync(leafDescriptor);
+        leafDescriptor = undefined;
+        io.fsyncSync(requestPin.descriptor);
+
+        revalidateSnapshotDirectories(io, [mountPin, claimedPin, requestPin], {
+          expectedGid,
+          expectedUid,
+        });
+        if (ancestorPin) {
+          revalidateSnapshotDirectories(io, [ancestorPin], {
+            expectedGid,
+            expectedUid,
+          });
+        }
+        const leafStat = io.lstatSync(leaf, { bigint: true });
+        assertSnapshotLeafStat(leafStat, expectedUid, expectedGid, bytes.length);
+        if (path.resolve(String(io.realpathSync(leaf))) !== leaf) {
+          throw new Error("snapshot leaf realpath escaped its exact authority path");
+        }
+        const requestInventory = io.readdirSync(requestDirectory).map(String).sort();
+        if (canonicalJson(requestInventory) !== canonicalJson(["job.json"])) {
+          throw new Error("snapshot request directory inventory is not exact");
+        }
+
+        const sealed = Object.freeze({
+          containerPath: authority.source.snapshotContainerPath,
+          hostPath: hostLeaf,
+          jobFileName: snapshot.jobFileName,
+          jobId: snapshot.jobId,
+          jobOperation: snapshot.jobOperation,
+          jobSha256: snapshot.jobSha256,
+          requestSha256: authority.requestSha256,
+          snapshotVolumeId: authority.source.snapshotVolumeId,
+          snapshotVolumeMountpoint: mountpoint,
+          snapshotVolumeName: authority.volumeInspect.Name,
+          snapshotVolumeSubpath: authority.source.snapshotVolumeSubpath,
+          sourceId: snapshot.sourceId,
+        });
+        closeSnapshotPins(io, pins);
+        return sealed;
+      } catch (error) {
+        if (leafDescriptor !== undefined) {
+          try {
+            io.closeSync(leafDescriptor);
+          } catch {}
+        }
+        if (materialized && !writeStarted) {
+          rollbackUnwrittenSnapshot(io, {
+            claimedPin,
+            leaf,
+            leafIdentity,
+            requestDirectory,
+            requestIdentity,
+            requestPin,
+          });
+        }
+        closeSnapshotPins(io, pins);
+        if (materialized && error && typeof error === "object") error.preserveLease = true;
+        throw error;
+      }
+    },
+
+    async cleanup(sealedValue) {
+      const sealed = normalizeSealedSnapshot(sealedValue);
+      const mountpoint = sealed.snapshotVolumeMountpoint;
+      const materializationRoot = storageRoot ?? mountpoint;
+      const claimedJobsDirectory = path.join(
+        materializationRoot,
+        sealed.snapshotVolumeSubpath,
+      );
+      const requestDirectory = path.join(claimedJobsDirectory, sealed.requestSha256);
+      const leaf = path.join(requestDirectory, "job.json");
+      const hostLeaf = path.join(
+        mountpoint,
+        sealed.snapshotVolumeSubpath,
+        sealed.requestSha256,
+        "job.json",
+      );
+      if (sealed.hostPath !== hostLeaf
+        || sealed.containerPath !== "/run/platform/claimed-job/job.json") {
+        throw snapshotPreserveError("sealed snapshot path lineage is invalid");
+      }
+      const pins = [];
+      try {
+        const ancestor = path.dirname(materializationRoot);
+        assertSnapshotPathLayout({
+          ancestor,
+          claimedJobsDirectory,
+          leaf,
+          mountpoint: materializationRoot,
+          requestDirectory,
+          requestSha256: sealed.requestSha256,
+          subpath: sealed.snapshotVolumeSubpath,
+        });
+        if (storageRoot === undefined) {
+          pins.push(openSnapshotDirectory(io, ancestor, {
+            expectedGid,
+            expectedUid,
+            label: "snapshot cleanup mount ancestor",
+          }));
+        }
+        pins.push(openSnapshotDirectory(io, materializationRoot, {
+          expectedGid,
+          expectedUid,
+          label: storageRoot === undefined
+            ? "snapshot cleanup Engine Mountpoint"
+            : "snapshot cleanup broker.state local mountpoint",
+        }));
+        const claimedPin = openSnapshotDirectory(io, claimedJobsDirectory, {
+          expectedGid,
+          expectedUid,
+          label: "snapshot cleanup claimed-jobs directory",
+        });
+        pins.push(claimedPin);
+        const requestPin = openSnapshotDirectory(io, requestDirectory, {
+          expectedGid,
+          expectedUid,
+          label: "snapshot cleanup request directory",
+        });
+        pins.push(requestPin);
+
+        const leafStat = io.lstatSync(leaf, { bigint: true });
+        assertSnapshotLeafStat(leafStat, expectedUid, expectedGid);
+        if (path.resolve(String(io.realpathSync(leaf))) !== leaf) {
+          throw new Error("snapshot cleanup leaf realpath escaped its exact authority path");
+        }
+        const inventory = io.readdirSync(requestDirectory).map(String).sort();
+        if (canonicalJson(inventory) !== canonicalJson(["job.json"])) {
+          throw new Error("snapshot cleanup request inventory is not exact");
+        }
+        for (const pin of pins) {
+          pin.settled = io.fstatSync(pin.descriptor, { bigint: true });
+          revalidateSnapshotDirectory(io, pin, { expectedGid, expectedUid });
+        }
+
+        io.unlinkSync(leaf);
+        io.fsyncSync(requestPin.descriptor);
+        io.closeSync(requestPin.descriptor);
+        requestPin.closed = true;
+        io.rmdirSync(requestDirectory);
+        io.fsyncSync(claimedPin.descriptor);
+        closeSnapshotPins(io, pins);
+      } catch (error) {
+        closeSnapshotPins(io, pins);
+        if (error && typeof error === "object") error.preserveLease = true;
+        throw error;
+      }
+    },
+  });
+}
+
+function normalizeSnapshotInput(value) {
+  if (isPlainRecord(value) && Object.hasOwn(value, "hostPath")) {
+    throw new TypeError("claimed snapshot host path is not caller-controlled authority");
+  }
+  if (!isPlainRecord(value)
+    || !hasExactKeys(value, [
+      "bytes",
+      "jobFileName",
+      "jobId",
+      "jobOperation",
+      "jobSha256",
+      "sourceId",
+    ])
+    || !Buffer.isBuffer(value.bytes)
+    || value.bytes.length < 1
+    || value.sourceId !== "jobs.running"
+    || value.jobFileName !== `${value.jobId}.json`
+    || !["backup", "restore-drill"].includes(value.jobOperation)
+    || !/^[a-f0-9]{64}$/.test(String(value.jobSha256 ?? ""))
+    || sha256(value.bytes) !== value.jobSha256) {
+    throw new TypeError("claimed snapshot input is invalid");
+  }
+  return value;
+}
+
+function normalizeSnapshotAuthority(value, snapshot) {
+  if (!isPlainRecord(value)
+    || !hasExactKeys(value, ["request", "requestId", "requestSha256", "source", "volumeInspect"])
+    || !isPlainRecord(value.request)
+    || value.requestId !== value.request.requestId
+    || value.requestSha256 !== sha256(canonicalJson(value.request))
+    || !/^[a-f0-9]{64}$/.test(String(value.requestSha256 ?? ""))
+    || value.request.action !== "backup.job.execute"
+    || canonicalJson(value.request.parameters) !== canonicalJson({
+      jobFileName: snapshot.jobFileName,
+      jobId: snapshot.jobId,
+      jobOperation: snapshot.jobOperation,
+      jobSha256: snapshot.jobSha256,
+    })) {
+    throw new TypeError("snapshot request authority is invalid");
+  }
+  const source = value.source;
+  if (!isPlainRecord(source)
+    || !hasExactKeys(source, [
+      "brokerRoot",
+      "maximumBytes",
+      "snapshotContainerPath",
+      "snapshotVolumeId",
+      "snapshotVolumeSubpath",
+      "volumeId",
+      "volumeSubpath",
+    ])
+    || source.snapshotContainerPath !== "/run/platform/claimed-job/job.json"
+    || source.snapshotVolumeId !== "broker.state"
+    || source.snapshotVolumeSubpath !== "claimed-jobs"
+    || source.volumeId !== "jobs.queue"
+    || source.volumeSubpath !== "running"
+    || !Number.isSafeInteger(source.maximumBytes)
+    || snapshot.bytes.length > source.maximumBytes) {
+    throw new TypeError("snapshot claimed-job source subpath authority is invalid");
+  }
+  const inspect = value.volumeInspect;
+  const expectedVolumeName = "platform_infra_vps_docker_action_broker_state";
+  if (!isPlainRecord(inspect)
+    || !hasExactKeys(inspect, ["Driver", "Labels", "Mountpoint", "Name", "Options", "Scope"])
+    || inspect.Name !== expectedVolumeName
+    || inspect.Driver !== "local"
+    || inspect.Scope !== "local"
+    || canonicalJson(inspect.Labels) !== canonicalJson({
+      "com.docker.compose.volume": expectedVolumeName,
+      "com.platform.volume-authority": "docker-action-broker-v2",
+    })
+    || canonicalJson(inspect.Options) !== canonicalJson({})
+    || typeof inspect.Mountpoint !== "string"
+    || inspect.Mountpoint.includes("\0")
+    || !path.isAbsolute(inspect.Mountpoint)
+    || path.normalize(inspect.Mountpoint) !== inspect.Mountpoint) {
+    throw new TypeError("snapshot broker.state volume authority is invalid");
+  }
+  return value;
+}
+
+function snapshotHostLeaf(authority) {
+  const mountpoint = authority.volumeInspect.Mountpoint;
+  const requestDirectory = path.join(
+    mountpoint,
+    authority.source.snapshotVolumeSubpath,
+    authority.requestSha256,
+  );
+  const leaf = path.join(requestDirectory, "job.json");
+  if (path.dirname(path.dirname(requestDirectory)) !== mountpoint
+    || path.basename(path.dirname(requestDirectory))
+      !== authority.source.snapshotVolumeSubpath
+    || path.basename(requestDirectory) !== authority.requestSha256
+    || [requestDirectory, leaf].some((candidate) => candidate.includes("\0")
+      || !path.isAbsolute(candidate)
+      || path.normalize(candidate) !== candidate)) {
+    throw new Error("snapshot Engine host path escaped its exact volume authority");
+  }
+  return leaf;
+}
+
+function normalizeSealedSnapshot(value) {
+  const keys = [
+    "containerPath",
+    "hostPath",
+    "jobFileName",
+    "jobId",
+    "jobOperation",
+    "jobSha256",
+    "requestSha256",
+    "snapshotVolumeId",
+    "snapshotVolumeMountpoint",
+    "snapshotVolumeName",
+    "snapshotVolumeSubpath",
+    "sourceId",
+  ];
+  if (!isPlainRecord(value) || !hasExactKeys(value, keys)
+    || value.sourceId !== "jobs.running"
+    || value.snapshotVolumeId !== "broker.state"
+    || value.snapshotVolumeSubpath !== "claimed-jobs"
+    || value.snapshotVolumeName !== "platform_infra_vps_docker_action_broker_state"
+    || value.jobFileName !== `${value.jobId}.json`
+    || !["backup", "restore-drill"].includes(value.jobOperation)
+    || !/^[a-f0-9]{64}$/.test(String(value.jobSha256 ?? ""))
+    || !/^[a-f0-9]{64}$/.test(String(value.requestSha256 ?? ""))
+    || typeof value.snapshotVolumeMountpoint !== "string"
+    || !path.isAbsolute(value.snapshotVolumeMountpoint)
+    || path.normalize(value.snapshotVolumeMountpoint) !== value.snapshotVolumeMountpoint) {
+    throw snapshotPreserveError("sealed snapshot record is invalid");
+  }
+  return value;
+}
+
+function assertSnapshotPathLayout({
+  ancestor,
+  claimedJobsDirectory,
+  leaf,
+  mountpoint,
+  requestDirectory,
+  requestSha256,
+  subpath,
+}) {
+  if (path.dirname(mountpoint) !== ancestor
+    || path.join(mountpoint, subpath) !== claimedJobsDirectory
+    || path.join(claimedJobsDirectory, requestSha256) !== requestDirectory
+    || path.join(requestDirectory, "job.json") !== leaf
+    || [ancestor, mountpoint, claimedJobsDirectory, requestDirectory, leaf]
+      .some((candidate) => candidate.includes("\0") || !path.isAbsolute(candidate)
+        || path.normalize(candidate) !== candidate)) {
+    throw new Error("snapshot path authority escaped its exact layout");
+  }
+}
+
+function openSnapshotDirectory(io, directory, { expectedUid, expectedGid, label }) {
+  const pathStat = io.lstatSync(directory, { bigint: true });
+  assertSnapshotDirectoryStat(pathStat, expectedUid, expectedGid, label);
+  if (path.resolve(String(io.realpathSync(directory))) !== directory) {
+    throw new Error(`${label} realpath escaped its exact authority path`);
+  }
+  const descriptor = io.openSync(
+    directory,
+    io.constants.O_RDONLY | io.constants.O_DIRECTORY | io.constants.O_NOFOLLOW,
+  );
+  try {
+    const initial = io.fstatSync(descriptor, { bigint: true });
+    assertSnapshotDirectoryStat(initial, expectedUid, expectedGid, label);
+    if (!sameSnapshotIdentity(pathStat, initial)) {
+      throw new Error(`${label} pathname and descriptor identities diverged`);
+    }
+    return { closed: false, descriptor, directory, initial, label, settled: initial };
+  } catch (error) {
+    io.closeSync(descriptor);
+    throw error;
+  }
+}
+
+function revalidateSnapshotDirectory(io, pin, policy) {
+  revalidateSnapshotDirectories(io, [pin], policy);
+}
+
+function revalidateSnapshotDirectories(io, pins, { expectedUid, expectedGid }) {
+  const observations = pins.map((pin) => {
+    const descriptorStat = io.fstatSync(pin.descriptor, { bigint: true });
+    const pathStat = io.lstatSync(pin.directory, { bigint: true });
+    return {
+      descriptorCtimeNs: descriptorStat.ctimeNs,
+      descriptorMtimeNs: descriptorStat.mtimeNs,
+      descriptorStat,
+      pathCtimeNs: pathStat.ctimeNs,
+      pathMtimeNs: pathStat.mtimeNs,
+      pathStat,
+      pin,
+      resolved: path.resolve(String(io.realpathSync(pin.directory))),
+    };
+  });
+  for (const { descriptorStat, pathStat, pin } of observations) {
+    if (!pathStat?.isDirectory?.()
+      || pathStat.isSymbolicLink?.()
+      || pathStat.dev !== descriptorStat.dev
+      || pathStat.ino !== descriptorStat.ino) {
+      throw new Error(`${pin.label} pathname no longer resolves to the pinned directory`);
+    }
+  }
+  for (const { pin, resolved } of observations) {
+    if (resolved !== pin.directory) {
+      throw new Error(`${pin.label} realpath no longer resolves to its canonical authority`);
+    }
+  }
+  for (const {
+    descriptorCtimeNs,
+    descriptorMtimeNs,
+    pathCtimeNs,
+    pathMtimeNs,
+    pin,
+  } of observations) {
+    if (descriptorMtimeNs !== pin.settled.mtimeNs
+      || pathMtimeNs !== descriptorMtimeNs) {
+      throw new Error(`${pin.label} pinned directory settled mtimeNs changed`);
+    }
+    if (descriptorCtimeNs !== pin.settled.ctimeNs
+      || pathCtimeNs !== descriptorCtimeNs) {
+      throw new Error(`${pin.label} pinned directory settled ctimeNs changed`);
+    }
+  }
+  for (const { descriptorStat, pathStat, pin } of observations) {
+    assertSnapshotDirectoryStat(descriptorStat, expectedUid, expectedGid, pin.label);
+    assertSnapshotDirectoryStat(pathStat, expectedUid, expectedGid, pin.label);
+    if (!sameSnapshotIdentity(descriptorStat, pathStat)) {
+      throw new Error(`${pin.label} pathname metadata diverged from the pinned directory`);
+    }
+    io.readdirSync(pin.directory);
+  }
+}
+
+function assertSnapshotDirectoryStat(stat, expectedUid, expectedGid, label) {
+  if (!stat?.isDirectory?.() || stat.isSymbolicLink?.()
+    || stat.uid !== BigInt(expectedUid) || stat.gid !== BigInt(expectedGid)
+    || (stat.mode & 0o777n) !== 0o700n) {
+    throw new Error(`${label} owner, mode, symlink or type is unsafe`);
+  }
+}
+
+function assertSnapshotLeafStat(stat, expectedUid, expectedGid, expectedSize) {
+  if (!stat?.isFile?.() || stat.isSymbolicLink?.()
+    || stat.uid !== BigInt(expectedUid) || stat.gid !== BigInt(expectedGid)
+    || stat.nlink !== 1n || (stat.mode & 0o777n) !== 0o400n
+    || (expectedSize !== undefined && stat.size !== BigInt(expectedSize))) {
+    throw new Error("snapshot leaf owner, mode, hardlink, type or size is invalid");
+  }
+}
+
+function sameSnapshotIdentity(left, right) {
+  return [
+    "dev",
+    "ino",
+    "mode",
+    "uid",
+    "gid",
+    "nlink",
+    "size",
+    "mtimeNs",
+    "ctimeNs",
+  ].every((field) => left[field] === right[field])
+    && left.isDirectory() === right.isDirectory()
+    && left.isSymbolicLink() === right.isSymbolicLink();
+}
+
+function writeSnapshotBytes(io, descriptor, bytes) {
+  let offset = 0;
+  while (offset < bytes.length) {
+    const count = io.writeSync(descriptor, bytes, offset, bytes.length - offset, offset);
+    if (!Number.isInteger(count) || count < 1 || count > bytes.length - offset) {
+      throw new Error("snapshot descriptor write made no bounded progress");
+    }
+    offset += count;
+  }
+}
+
+function rollbackUnwrittenSnapshot(io, {
+  claimedPin,
+  leaf,
+  leafIdentity,
+  requestDirectory,
+  requestIdentity,
+  requestPin,
+}) {
+  try {
+    if (leafIdentity && leaf) {
+      const currentLeaf = io.lstatSync(leaf, { bigint: true });
+      if (currentLeaf?.isFile?.()
+        && !currentLeaf.isSymbolicLink?.()
+        && currentLeaf.dev === leafIdentity.dev
+        && currentLeaf.ino === leafIdentity.ino
+        && currentLeaf.size === 0n
+        && path.resolve(String(io.realpathSync(leaf))) === leaf) {
+        io.unlinkSync(leaf);
+        if (requestPin && !requestPin.closed) {
+          io.fsyncSync(requestPin.descriptor);
+        }
+      }
+    }
+    const baseline = requestPin?.initial ?? requestIdentity;
+    if (!baseline || !requestDirectory) return;
+    const currentRequest = io.lstatSync(requestDirectory, { bigint: true });
+    if (!currentRequest?.isDirectory?.()
+      || currentRequest.isSymbolicLink?.()
+      || currentRequest.dev !== baseline.dev
+      || currentRequest.ino !== baseline.ino
+      || path.resolve(String(io.realpathSync(requestDirectory))) !== requestDirectory
+      || io.readdirSync(requestDirectory).length !== 0) {
+      return;
+    }
+    if (requestPin && !requestPin.closed) {
+      io.closeSync(requestPin.descriptor);
+      requestPin.closed = true;
+    }
+    io.rmdirSync(requestDirectory);
+    if (claimedPin && !claimedPin.closed) io.fsyncSync(claimedPin.descriptor);
+  } catch {}
+}
+
+function closeSnapshotPins(io, pins) {
+  for (let index = pins.length - 1; index >= 0; index -= 1) {
+    const pin = pins[index];
+    if (pin.closed) continue;
+    try {
+      io.closeSync(pin.descriptor);
+    } catch {}
+    pin.closed = true;
+  }
+}
+
+function snapshotPreserveError(message) {
+  const error = new Error(message);
+  error.preserveLease = true;
+  return error;
+}
+
 export function readProtectedFile(file, maximumBytes = 4096, { expectedUid = 0, expectedGid = 0, parentRoot = "/" } = {}) {
   const resolved = path.resolve(file);
   assertProtectedParentChain(path.dirname(resolved), { expectedUid, expectedGid, parentRoot });
