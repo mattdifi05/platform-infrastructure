@@ -91,6 +91,7 @@ const BACKUP_RESOURCE_ID = /^(?:source|database|storage|platform-state):[a-z0-9]
 const CONTAINER_NAME = /^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/;
 const DIGEST_IMAGE = /^[a-zA-Z0-9][a-zA-Z0-9._/:+-]*@sha256:[a-f0-9]{64}$/;
 const NONCE = /^[A-Za-z0-9_-]{43}$/;
+const DNS_HOST = /^[a-z0-9](?:[a-z0-9-]{0,62})(?:\.[a-z0-9](?:[a-z0-9-]{0,62}))*$/;
 const ALLOWED_CONTAINER_PATHS = new Set([
   "/opt/platform-infrastructure",
   "/opt/platform-infrastructure/backups",
@@ -119,6 +120,8 @@ const ACTION_PROFILE_KEYS = Object.freeze([
 ]);
 const PHASE_PROFILE_KEYS = Object.freeze([
   "command",
+  "endpointIds",
+  "helperProfileIds",
   "mountIds",
   "mutationPolicy",
   "networkIds",
@@ -177,70 +180,256 @@ const ACTION_PLANS = deepFreeze({
 const PHASE_PLANS = deepFreeze({
   "catalog.capture": phasePlan({
     command: "backup-catalog",
+    endpointPurpose: "capture",
     mountIds: ["backup.root.rw", "report.root.rw", "source.root.ro", "state.catalog.ro"],
     mutationPolicy: "backup-write",
     networkIds: ["platform_db_admin", "platform_storage"],
     outputSchema: "platform.backup-catalog/v1",
+    helperProfileIds: ["helper.capture.mariadb", "helper.capture.minio", "helper.capture.postgres"],
     workerSecretSetIds: ["manifest.signing"],
   }),
   "job.backup.capture": phasePlan({
     command: "backup-job",
+    endpointPurpose: "capture",
     mountIds: ["backup.root.rw", "report.root.rw", "source.root.ro", "state.catalog.ro"],
     mutationPolicy: "backup-write",
     networkIds: ["platform_db_admin", "platform_storage"],
     outputSchema: "platform.backup-job-result/v1",
+    helperProfileIds: ["helper.capture.mariadb", "helper.capture.minio", "helper.capture.postgres"],
     workerSecretSetIds: ["manifest.signing"],
   }),
   "job.restore.verify": phasePlan({
     command: "restore-job",
+    endpointPurpose: "none",
     mountIds: ["backup.root.ro", "report.root.rw"],
     mutationPolicy: "restore-disposable",
     networkIds: [],
     outputSchema: "platform.backup-job-result/v1",
     scratchVolumeIds: ["restore.scratch"],
+    helperProfileIds: ["helper.restore.mariadb.restore", "helper.restore.mariadb.server", "helper.restore.mariadb.verify", "helper.restore.minio.restore", "helper.restore.minio.server", "helper.restore.minio.verify", "helper.restore.postgres.restore", "helper.restore.postgres.server", "helper.restore.postgres.verify"],
     workerSecretSetIds: ["manifest.verification"],
   }),
   "prune.plan": phasePlan({
     command: "backup-prune-plan",
+    endpointPurpose: "none",
     mountIds: ["backup.root.ro", "report.root.rw"],
     mutationPolicy: "report-only",
     networkIds: [],
     outputSchema: "platform.backup-prune-plan/v1",
+    helperProfileIds: [],
     workerSecretSetIds: ["manifest.verification"],
   }),
   "prune.apply": phasePlan({
     command: "backup-prune-apply",
+    endpointPurpose: "none",
     mountIds: ["backup.root.rw", "report.root.rw"],
     mutationPolicy: "retention-apply",
     networkIds: [],
     outputSchema: "platform.backup-prune-apply/v1",
+    helperProfileIds: [],
     workerSecretSetIds: ["manifest.verification"],
     writableSubpathIds: ["backup.quarantine"],
   }),
   "restore.capture": phasePlan({
     command: "backup-catalog",
+    endpointPurpose: "capture",
     mountIds: ["backup.root.rw", "report.root.rw", "source.root.ro", "state.catalog.ro"],
     mutationPolicy: "backup-write",
     networkIds: ["platform_db_admin", "platform_storage"],
     outputSchema: "platform.backup-catalog/v1",
+    helperProfileIds: ["helper.capture.mariadb", "helper.capture.minio", "helper.capture.postgres"],
     workerSecretSetIds: ["manifest.signing"],
   }),
   "restore.verify": phasePlan({
     command: "restore-drill-full",
+    endpointPurpose: "none",
     mountIds: ["backup.root.ro", "report.root.rw"],
     mutationPolicy: "restore-disposable",
     networkIds: [],
     outputSchema: "platform.restore-drill/v1",
     scratchVolumeIds: ["restore.scratch"],
+    helperProfileIds: ["helper.restore.mariadb.restore", "helper.restore.mariadb.server", "helper.restore.mariadb.verify", "helper.restore.minio.restore", "helper.restore.minio.server", "helper.restore.minio.verify", "helper.restore.postgres.restore", "helper.restore.postgres.server", "helper.restore.postgres.verify"],
     workerSecretSetIds: ["manifest.verification"],
   }),
   "offsite.sync": phasePlan({
     command: "backup-offsite-sync",
+    endpointPurpose: "offsite",
     mountIds: ["backup.root.ro", "report.root.rw"],
     mutationPolicy: "offsite-write",
     networkIds: ["platform_egress"],
     outputSchema: "platform.offsite-backup-receipt/v1",
-    workerSecretSetIds: ["manifest.verification", "offsite.credentials"],
+    helperProfileIds: ["helper.offsite.restic"],
+    workerSecretSetIds: ["manifest.verification"],
+  }),
+});
+
+const SERVICE_ENDPOINT_PLANS = deepFreeze({
+  "capture.database.mariadb": {
+    backupResourceId: "database:mariadb",
+    engine: "mariadb",
+    endpointId: "capture.database.mariadb",
+    host: "mariadb",
+    networkId: "platform_db_admin",
+    port: 3306,
+    protocol: "mariadb",
+    purpose: "capture",
+    secretSetId: "mariadb.capture.credentials",
+    targetContainerId: "mariadb",
+    tlsMode: "require",
+  },
+  "capture.database.postgres": {
+    backupResourceId: "database:postgres",
+    engine: "postgres",
+    endpointId: "capture.database.postgres",
+    host: "postgres",
+    networkId: "platform_db_admin",
+    port: 5432,
+    protocol: "postgresql",
+    purpose: "capture",
+    secretSetId: "postgres.capture.credentials",
+    targetContainerId: "postgres",
+    tlsMode: "require",
+  },
+  "capture.storage.minio": {
+    backupResourceId: "storage:minio",
+    engine: "minio",
+    endpointId: "capture.storage.minio",
+    host: "minio",
+    networkId: "platform_storage",
+    port: 9000,
+    protocol: "s3-http",
+    purpose: "capture",
+    secretSetId: "minio.capture.credentials",
+    targetContainerId: "minio",
+    tlsMode: "none",
+  },
+  "offsite.repository": {
+    backupResourceId: null,
+    engine: "restic",
+    endpointId: "offsite.repository",
+    host: "backup.example.net",
+    networkId: "platform_egress",
+    port: 443,
+    protocol: "restic-https",
+    purpose: "offsite",
+    secretSetId: "offsite.credentials",
+    targetContainerId: null,
+    tlsMode: "verify-full",
+  },
+});
+
+const HELPER_PROFILE_PLANS = deepFreeze({
+  "helper.capture.mariadb": helperProfilePlan({
+    engine: "mariadb",
+    entrypoint: ["/usr/bin/mariadb-dump"],
+    imageRef: "mariadb:12.3.2@sha256:b1c7bf836e64ed9406a8984af29509f40089d55cea14b32f12c4726a1f17104b",
+    networkId: "platform_db_admin",
+    operation: "capture",
+    outputMode: "artifact",
+    resourceKind: "database",
+    secretSetId: "mariadb.capture.credentials",
+  }),
+  "helper.capture.minio": helperProfilePlan({
+    engine: "minio",
+    entrypoint: ["/bin/sh"],
+    imageRef: "quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727",
+    networkId: "platform_storage",
+    operation: "capture",
+    outputMode: "artifact",
+    resourceKind: "storage",
+    secretSetId: "minio.capture.credentials",
+  }),
+  "helper.capture.postgres": helperProfilePlan({
+    engine: "postgres",
+    entrypoint: ["/usr/local/bin/pg_dump"],
+    imageRef: "postgres:18-alpine@sha256:1b1689b20d16a014a3d195653381cf2caa75a41a92d93b255a9d6ea29fd353aa",
+    networkId: "platform_db_admin",
+    operation: "capture",
+    outputMode: "artifact",
+    resourceKind: "database",
+    secretSetId: "postgres.capture.credentials",
+  }),
+  "helper.offsite.restic": helperProfilePlan({
+    engine: "restic",
+    entrypoint: ["/usr/bin/restic"],
+    imageRef: "restic/restic:0.18.0@sha256:4cf4a61ef9786f4de53e9de8c8f5c040f33830eb0a10bf3d614410ee2fcb6120",
+    networkId: "platform_egress",
+    operation: "offsite-sync",
+    outputMode: "json",
+    resourceKind: null,
+    secretSetId: "offsite.credentials",
+  }),
+  "helper.restore.mariadb.restore": helperProfilePlan({
+    engine: "mariadb",
+    entrypoint: ["/usr/bin/mariadb"],
+    imageRef: "mariadb:12.3.2@sha256:b1c7bf836e64ed9406a8984af29509f40089d55cea14b32f12c4726a1f17104b",
+    operation: "restore",
+    outputMode: "none",
+    resourceKind: "database",
+  }),
+  "helper.restore.mariadb.server": helperProfilePlan({
+    engine: "mariadb",
+    entrypoint: ["/usr/local/bin/docker-entrypoint.sh"],
+    imageRef: "mariadb:12.3.2@sha256:b1c7bf836e64ed9406a8984af29509f40089d55cea14b32f12c4726a1f17104b",
+    operation: "restore-server",
+    outputMode: "none",
+    resourceKind: "database",
+  }),
+  "helper.restore.mariadb.verify": helperProfilePlan({
+    engine: "mariadb",
+    entrypoint: ["/usr/bin/mariadb"],
+    imageRef: "mariadb:12.3.2@sha256:b1c7bf836e64ed9406a8984af29509f40089d55cea14b32f12c4726a1f17104b",
+    operation: "verify",
+    outputMode: "json",
+    resourceKind: "database",
+  }),
+  "helper.restore.minio.restore": helperProfilePlan({
+    engine: "minio",
+    entrypoint: ["/usr/bin/mc"],
+    imageRef: "quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727",
+    operation: "restore",
+    outputMode: "none",
+    resourceKind: "storage",
+  }),
+  "helper.restore.minio.server": helperProfilePlan({
+    engine: "minio",
+    entrypoint: ["/usr/bin/minio"],
+    imageRef: "quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e",
+    operation: "restore-server",
+    outputMode: "none",
+    resourceKind: "storage",
+  }),
+  "helper.restore.minio.verify": helperProfilePlan({
+    engine: "minio",
+    entrypoint: ["/usr/bin/mc"],
+    imageRef: "quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727",
+    operation: "verify",
+    outputMode: "json",
+    resourceKind: "storage",
+  }),
+  "helper.restore.postgres.restore": helperProfilePlan({
+    engine: "postgres",
+    entrypoint: ["/usr/local/bin/pg_restore"],
+    imageRef: "postgres:18-alpine@sha256:1b1689b20d16a014a3d195653381cf2caa75a41a92d93b255a9d6ea29fd353aa",
+    operation: "restore",
+    outputMode: "none",
+    resourceKind: "database",
+  }),
+  "helper.restore.postgres.server": helperProfilePlan({
+    engine: "postgres",
+    entrypoint: ["/usr/local/bin/docker-entrypoint.sh"],
+    imageRef: "postgres:18-alpine@sha256:1b1689b20d16a014a3d195653381cf2caa75a41a92d93b255a9d6ea29fd353aa",
+    operation: "restore-server",
+    outputMode: "none",
+    resourceKind: "database",
+  }),
+  "helper.restore.postgres.verify": helperProfilePlan({
+    engine: "postgres",
+    entrypoint: ["/usr/local/bin/psql"],
+    imageRef: "postgres:18-alpine@sha256:1b1689b20d16a014a3d195653381cf2caa75a41a92d93b255a9d6ea29fd353aa",
+    operation: "verify",
+    outputMode: "json",
+    resourceKind: "database",
   }),
 });
 
@@ -618,9 +807,11 @@ function normalizeResources(value) {
     "capabilityFiles",
     "claimedJobSources",
     "containers",
+    "helperProfiles",
     "mounts",
     "networks",
     "phaseProfiles",
+    "serviceEndpoints",
     "volumes",
     "workerSecretSets",
     "writableSubpaths",
@@ -785,9 +976,12 @@ function normalizeResources(value) {
     "broker.state": ["platform_infra_vps_docker_action_broker_state", null],
     "jobs.queue": ["platform_infra_vps_backup_scheduler_jobs", null],
     "restore.scratch": ["platform_docker_action_restore_scratch", "/run/platform/restore-scratch"],
+    "worker.input.mariadb-capture": ["platform_docker_action_mariadb_capture_credentials", null],
     "worker.input.manifest-signing": ["platform_docker_action_manifest_signing", null],
     "worker.input.manifest-verification": ["platform_docker_action_manifest_verification", null],
+    "worker.input.minio-capture": ["platform_docker_action_minio_capture_credentials", null],
     "worker.input.offsite": ["platform_docker_action_offsite_credentials", null],
+    "worker.input.postgres-capture": ["platform_docker_action_postgres_capture_credentials", null],
   };
   const volumes = normalizeExactMap(resources.volumes, Object.keys(volumeIdentity), "volumes", (entry, logicalId) => {
     assertExactKeys(entry, [
@@ -809,6 +1003,11 @@ function normalizeResources(value) {
   });
 
   const secretSetIdentity = {
+    "mariadb.capture.credentials": [
+      "/run/platform/worker-secrets/mariadb-capture",
+      "worker.input.mariadb-capture",
+      { clientConfig: "client.cnf" },
+    ],
     "manifest.signing": [
       "/run/platform/worker-secrets/manifest-signing",
       "worker.input.manifest-signing",
@@ -819,10 +1018,20 @@ function normalizeResources(value) {
       "worker.input.manifest-verification",
       { key: "verification.pub" },
     ],
+    "minio.capture.credentials": [
+      "/run/platform/worker-secrets/minio-capture",
+      "worker.input.minio-capture",
+      { accessKey: "access-key", secretKey: "secret-key" },
+    ],
     "offsite.credentials": [
       "/run/platform/worker-secrets/offsite",
       "worker.input.offsite",
       { password: "password", repository: "repository" },
+    ],
+    "postgres.capture.credentials": [
+      "/run/platform/worker-secrets/postgres-capture",
+      "worker.input.postgres-capture",
+      { database: "database", pgpass: ".pgpass", username: "username" },
     ],
   };
   const workerSecretSets = normalizeExactMap(
@@ -856,6 +1065,17 @@ function normalizeResources(value) {
     },
   );
 
+  const serviceEndpoints = normalizeServiceEndpoints(resources.serviceEndpoints, {
+    backupResources,
+    containers,
+    networks,
+    workerSecretSets,
+  });
+  const helperProfiles = normalizeHelperProfiles(resources.helperProfiles, {
+    networks,
+    workerSecretSets,
+  });
+
   const writableSubpaths = normalizeExactMap(
     resources.writableSubpaths,
     ["backup.quarantine"],
@@ -876,8 +1096,10 @@ function normalizeResources(value) {
     claimedJobSources,
   });
   const phaseProfiles = normalizePhaseProfiles(resources.phaseProfiles, {
+    helperProfiles,
     mounts,
     networks,
+    serviceEndpoints,
     volumes,
     workerSecretSets,
     writableSubpaths,
@@ -890,9 +1112,11 @@ function normalizeResources(value) {
     capabilityFiles,
     claimedJobSources,
     containers,
+    helperProfiles,
     mounts,
     networks,
     phaseProfiles,
+    serviceEndpoints,
     volumes,
     workerSecretSets,
     writableSubpaths,
@@ -929,9 +1153,106 @@ function normalizeActionProfiles(value, { capabilityFiles, claimedJobSources }) 
   });
 }
 
+function normalizeServiceEndpoints(value, {
+  backupResources,
+  containers,
+  networks,
+  workerSecretSets,
+}) {
+  return normalizeExactMap(
+    value,
+    Object.keys(SERVICE_ENDPOINT_PLANS),
+    "serviceEndpoints",
+    (entry, endpointId) => {
+      const expected = SERVICE_ENDPOINT_PLANS[endpointId];
+      assertExactKeys(entry, [
+        "backupResourceId",
+        "engine",
+        "endpointId",
+        "host",
+        "networkId",
+        "port",
+        "protocol",
+        "purpose",
+        "secretSetId",
+        "targetContainerId",
+        "tlsMode",
+      ], `service endpoint ${endpointId}`);
+      if (canonicalJson(entry) !== canonicalJson(expected)) {
+        fail(403, `service endpoint ${endpointId} canonical identity or authority binding is invalid`);
+      }
+      if (entry.endpointId !== endpointId || !DNS_HOST.test(entry.host) || entry.host.length > 253
+        || !Number.isSafeInteger(entry.port) || entry.port < 1 || entry.port > 65535
+        || !networks[entry.networkId] || !workerSecretSets[entry.secretSetId]) {
+        fail(403, `service endpoint ${endpointId} identity, network or credential binding is invalid`);
+      }
+      if (entry.purpose === "capture") {
+        const resource = backupResources[entry.backupResourceId];
+        const container = containers[entry.targetContainerId];
+        const expectedResourceEngine = resource?.kind === "database" ? resource.engine : resource?.kind === "storage" ? "minio" : null;
+        if (!resource || !container || resource.externalId !== entry.targetContainerId
+          || expectedResourceEngine !== entry.engine
+          || !container.authority.networks.includes(networks[entry.networkId].engineName)) {
+          fail(403, `service endpoint ${endpointId} resource or target container binding is invalid`);
+        }
+      } else if (entry.purpose !== "offsite"
+        || entry.backupResourceId !== null
+        || entry.targetContainerId !== null) {
+        fail(403, `service endpoint ${endpointId} purpose binding is invalid`);
+      }
+      return deepFreeze(structuredClone(entry));
+    },
+  );
+}
+
+function normalizeHelperProfiles(value, { networks, workerSecretSets }) {
+  return normalizeExactMap(
+    value,
+    Object.keys(HELPER_PROFILE_PLANS),
+    "helperProfiles",
+    (entry, helperProfileId) => {
+      assertExactKeys(entry, [
+        "engine",
+        "entrypoint",
+        "helperProfileId",
+        "imageId",
+        "imageRef",
+        "networkId",
+        "operation",
+        "outputMode",
+        "resourceKind",
+        "secretSetId",
+      ], `helper profile ${helperProfileId}`);
+      const expected = HELPER_PROFILE_PLANS[helperProfileId];
+      const semantic = withoutKey(entry, "imageId");
+      if (entry.helperProfileId !== helperProfileId
+        || canonicalJson(semantic) !== canonicalJson({ helperProfileId, ...expected })) {
+        fail(403, `helper profile ${helperProfileId} canonical identity or authority binding is invalid`);
+      }
+      if (!DIGEST_IMAGE.test(String(entry.imageRef ?? ""))
+        || !/^sha256:[a-f0-9]{64}$/.test(String(entry.imageId ?? ""))
+        || !Array.isArray(entry.entrypoint)
+        || entry.entrypoint.length !== 1
+        || !entry.entrypoint.every((item) => typeof item === "string" && item.startsWith("/")
+          && !item.includes("\0") && !item.includes("/../"))) {
+        fail(403, `helper profile ${helperProfileId} image or entrypoint attestation is invalid`);
+      }
+      if (entry.networkId !== null && !networks[entry.networkId]) {
+        fail(403, `helper profile ${helperProfileId} network binding is missing`);
+      }
+      if (entry.secretSetId !== null && !workerSecretSets[entry.secretSetId]) {
+        fail(403, `helper profile ${helperProfileId} credential binding is missing`);
+      }
+      return deepFreeze(structuredClone(entry));
+    },
+  );
+}
+
 function normalizePhaseProfiles(value, {
+  helperProfiles,
   mounts,
   networks,
+  serviceEndpoints,
   volumes,
   workerSecretSets,
   writableSubpaths,
@@ -947,6 +1268,7 @@ function normalizePhaseProfiles(value, {
     const expected = PHASE_PLANS[phaseId];
     for (const field of [
       "command",
+      "helperProfileIds",
       "mountIds",
       "mutationPolicy",
       "networkIds",
@@ -960,15 +1282,39 @@ function normalizePhaseProfiles(value, {
       }
     }
     if (!/^sha256:[a-f0-9]{64}$/.test(String(entry.workerImageId ?? ""))
-      || !DIGEST_IMAGE.test(String(entry.workerImageRef ?? ""))
-      || !entry.workerImageRef.endsWith(`@${entry.workerImageId}`)) {
+      || !DIGEST_IMAGE.test(String(entry.workerImageRef ?? ""))) {
       fail(403, `phase profile ${phaseId} worker image binding is invalid`);
+    }
+    const expectedEndpointIds = Object.values(serviceEndpoints)
+      .filter((endpoint) => endpoint.purpose === expected.endpointPurpose)
+      .map((endpoint) => endpoint.endpointId)
+      .sort();
+    if (canonicalJson(entry.endpointIds) !== canonicalJson(expectedEndpointIds)) {
+      fail(403, `phase profile ${phaseId} canonical endpoint binding is invalid`);
     }
     for (const mountId of entry.mountIds) {
       if (!mounts[mountId]) fail(403, `phase profile ${phaseId} has a dangling mount binding`);
     }
     for (const networkId of entry.networkIds) {
       if (!networks[networkId]) fail(403, `phase profile ${phaseId} has a dangling network binding`);
+    }
+    for (const endpointId of entry.endpointIds) {
+      const endpoint = serviceEndpoints[endpointId];
+      if (!endpoint || !entry.networkIds.includes(endpoint.networkId)
+        || entry.workerSecretSetIds.includes(endpoint.secretSetId)
+        || !entry.helperProfileIds.some((helperProfileId) => (
+          helperProfiles[helperProfileId]?.secretSetId === endpoint.secretSetId
+        ))) {
+        fail(403, `phase profile ${phaseId} has a dangling endpoint authority binding`);
+      }
+    }
+    for (const helperProfileId of entry.helperProfileIds) {
+      const helperProfile = helperProfiles[helperProfileId];
+      if (!helperProfile
+        || (helperProfile.networkId !== null && !entry.networkIds.includes(helperProfile.networkId))
+        || (helperProfile.secretSetId !== null && entry.workerSecretSetIds.includes(helperProfile.secretSetId))) {
+        fail(403, `phase profile ${phaseId} has a dangling helper authority binding`);
+      }
     }
     for (const volumeId of entry.scratchVolumeIds) {
       if (!volumes[volumeId]) fail(403, `phase profile ${phaseId} has a dangling scratch volume binding`);
@@ -1267,6 +1613,8 @@ function constantEqual(left, right) {
 
 function phasePlan({
   command,
+  endpointPurpose,
+  helperProfileIds,
   mountIds,
   mutationPolicy,
   networkIds,
@@ -1277,6 +1625,8 @@ function phasePlan({
 }) {
   return {
     command,
+    endpointPurpose,
+    helperProfileIds,
     mountIds,
     mutationPolicy,
     networkIds,
@@ -1284,6 +1634,28 @@ function phasePlan({
     scratchVolumeIds,
     workerSecretSetIds,
     writableSubpathIds,
+  };
+}
+
+function helperProfilePlan({
+  engine,
+  entrypoint,
+  imageRef,
+  networkId = null,
+  operation,
+  outputMode,
+  resourceKind,
+  secretSetId = null,
+}) {
+  return {
+    engine,
+    entrypoint,
+    imageRef,
+    networkId,
+    operation,
+    outputMode,
+    resourceKind,
+    secretSetId,
   };
 }
 

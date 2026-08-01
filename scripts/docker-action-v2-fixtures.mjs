@@ -111,73 +111,298 @@ export const EXPECTED_EVIDENCE_RESULT_PHASE = deepFreeze({
   phaseId: "evidence.runtime.snapshot",
 });
 
+export const EXPECTED_SERVICE_ENDPOINTS = deepFreeze({
+  "capture.database.mariadb": {
+    backupResourceId: "database:mariadb",
+    engine: "mariadb",
+    endpointId: "capture.database.mariadb",
+    host: "mariadb",
+    networkId: "platform_db_admin",
+    port: 3306,
+    protocol: "mariadb",
+    purpose: "capture",
+    secretSetId: "mariadb.capture.credentials",
+    targetContainerId: "mariadb",
+    tlsMode: "require",
+  },
+  "capture.database.postgres": {
+    backupResourceId: "database:postgres",
+    engine: "postgres",
+    endpointId: "capture.database.postgres",
+    host: "postgres",
+    networkId: "platform_db_admin",
+    port: 5432,
+    protocol: "postgresql",
+    purpose: "capture",
+    secretSetId: "postgres.capture.credentials",
+    targetContainerId: "postgres",
+    tlsMode: "require",
+  },
+  "capture.storage.minio": {
+    backupResourceId: "storage:minio",
+    engine: "minio",
+    endpointId: "capture.storage.minio",
+    host: "minio",
+    networkId: "platform_storage",
+    port: 9000,
+    protocol: "s3-http",
+    purpose: "capture",
+    secretSetId: "minio.capture.credentials",
+    targetContainerId: "minio",
+    tlsMode: "none",
+  },
+  "offsite.repository": {
+    backupResourceId: null,
+    engine: "restic",
+    endpointId: "offsite.repository",
+    host: "backup.example.net",
+    networkId: "platform_egress",
+    port: 443,
+    protocol: "restic-https",
+    purpose: "offsite",
+    secretSetId: "offsite.credentials",
+    targetContainerId: null,
+    tlsMode: "verify-full",
+  },
+});
+
+const POSTGRES_IMAGE_ID = `sha256:${"8".repeat(64)}`;
+const POSTGRES_IMAGE_REF = "postgres:18-alpine@sha256:1b1689b20d16a014a3d195653381cf2caa75a41a92d93b255a9d6ea29fd353aa";
+const MARIADB_IMAGE_ID = `sha256:${"9".repeat(64)}`;
+const MARIADB_IMAGE_REF = "mariadb:12.3.2@sha256:b1c7bf836e64ed9406a8984af29509f40089d55cea14b32f12c4726a1f17104b";
+const MINIO_MC_IMAGE_ID = `sha256:${"a".repeat(64)}`;
+const MINIO_MC_IMAGE_REF = "quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727";
+const MINIO_SERVER_IMAGE_ID = `sha256:${"b".repeat(64)}`;
+const MINIO_SERVER_IMAGE_REF = "quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e";
+const RESTIC_IMAGE_ID = `sha256:${"c".repeat(64)}`;
+const RESTIC_IMAGE_REF = "restic/restic:0.18.0@sha256:4cf4a61ef9786f4de53e9de8c8f5c040f33830eb0a10bf3d614410ee2fcb6120";
+
+export const EXPECTED_HELPER_PROFILES = deepFreeze({
+  "helper.capture.mariadb": helperProfile({
+    engine: "mariadb",
+    entrypoint: ["/usr/bin/mariadb-dump"],
+    imageId: MARIADB_IMAGE_ID,
+    imageRef: MARIADB_IMAGE_REF,
+    networkId: "platform_db_admin",
+    operation: "capture",
+    outputMode: "artifact",
+    resourceKind: "database",
+    secretSetId: "mariadb.capture.credentials",
+    helperProfileId: "helper.capture.mariadb",
+  }),
+  "helper.capture.minio": helperProfile({
+    engine: "minio",
+    entrypoint: ["/bin/sh"],
+    imageId: MINIO_MC_IMAGE_ID,
+    imageRef: MINIO_MC_IMAGE_REF,
+    networkId: "platform_storage",
+    operation: "capture",
+    outputMode: "artifact",
+    resourceKind: "storage",
+    secretSetId: "minio.capture.credentials",
+    helperProfileId: "helper.capture.minio",
+  }),
+  "helper.capture.postgres": helperProfile({
+    engine: "postgres",
+    entrypoint: ["/usr/local/bin/pg_dump"],
+    imageId: POSTGRES_IMAGE_ID,
+    imageRef: POSTGRES_IMAGE_REF,
+    networkId: "platform_db_admin",
+    operation: "capture",
+    outputMode: "artifact",
+    resourceKind: "database",
+    secretSetId: "postgres.capture.credentials",
+    helperProfileId: "helper.capture.postgres",
+  }),
+  "helper.offsite.restic": helperProfile({
+    engine: "restic",
+    entrypoint: ["/usr/bin/restic"],
+    imageId: RESTIC_IMAGE_ID,
+    imageRef: RESTIC_IMAGE_REF,
+    networkId: "platform_egress",
+    operation: "offsite-sync",
+    outputMode: "json",
+    resourceKind: null,
+    secretSetId: "offsite.credentials",
+    helperProfileId: "helper.offsite.restic",
+  }),
+  "helper.restore.minio.restore": helperProfile({
+    engine: "minio",
+    entrypoint: ["/usr/bin/mc"],
+    imageId: MINIO_MC_IMAGE_ID,
+    imageRef: MINIO_MC_IMAGE_REF,
+    operation: "restore",
+    outputMode: "none",
+    resourceKind: "storage",
+    helperProfileId: "helper.restore.minio.restore",
+  }),
+  "helper.restore.minio.server": helperProfile({
+    engine: "minio",
+    entrypoint: ["/usr/bin/minio"],
+    imageId: MINIO_SERVER_IMAGE_ID,
+    imageRef: MINIO_SERVER_IMAGE_REF,
+    operation: "restore-server",
+    outputMode: "none",
+    resourceKind: "storage",
+    helperProfileId: "helper.restore.minio.server",
+  }),
+  "helper.restore.minio.verify": helperProfile({
+    engine: "minio",
+    entrypoint: ["/usr/bin/mc"],
+    imageId: MINIO_MC_IMAGE_ID,
+    imageRef: MINIO_MC_IMAGE_REF,
+    operation: "verify",
+    outputMode: "json",
+    resourceKind: "storage",
+    helperProfileId: "helper.restore.minio.verify",
+  }),
+  "helper.restore.mariadb.restore": helperProfile({
+    engine: "mariadb",
+    entrypoint: ["/usr/bin/mariadb"],
+    imageId: MARIADB_IMAGE_ID,
+    imageRef: MARIADB_IMAGE_REF,
+    operation: "restore",
+    outputMode: "none",
+    resourceKind: "database",
+    helperProfileId: "helper.restore.mariadb.restore",
+  }),
+  "helper.restore.mariadb.server": helperProfile({
+    engine: "mariadb",
+    entrypoint: ["/usr/local/bin/docker-entrypoint.sh"],
+    imageId: MARIADB_IMAGE_ID,
+    imageRef: MARIADB_IMAGE_REF,
+    operation: "restore-server",
+    outputMode: "none",
+    resourceKind: "database",
+    helperProfileId: "helper.restore.mariadb.server",
+  }),
+  "helper.restore.mariadb.verify": helperProfile({
+    engine: "mariadb",
+    entrypoint: ["/usr/bin/mariadb"],
+    imageId: MARIADB_IMAGE_ID,
+    imageRef: MARIADB_IMAGE_REF,
+    operation: "verify",
+    outputMode: "json",
+    resourceKind: "database",
+    helperProfileId: "helper.restore.mariadb.verify",
+  }),
+  "helper.restore.postgres.restore": helperProfile({
+    engine: "postgres",
+    entrypoint: ["/usr/local/bin/pg_restore"],
+    imageId: POSTGRES_IMAGE_ID,
+    imageRef: POSTGRES_IMAGE_REF,
+    operation: "restore",
+    outputMode: "none",
+    resourceKind: "database",
+    helperProfileId: "helper.restore.postgres.restore",
+  }),
+  "helper.restore.postgres.server": helperProfile({
+    engine: "postgres",
+    entrypoint: ["/usr/local/bin/docker-entrypoint.sh"],
+    imageId: POSTGRES_IMAGE_ID,
+    imageRef: POSTGRES_IMAGE_REF,
+    operation: "restore-server",
+    outputMode: "none",
+    resourceKind: "database",
+    helperProfileId: "helper.restore.postgres.server",
+  }),
+  "helper.restore.postgres.verify": helperProfile({
+    engine: "postgres",
+    entrypoint: ["/usr/local/bin/psql"],
+    imageId: POSTGRES_IMAGE_ID,
+    imageRef: POSTGRES_IMAGE_REF,
+    operation: "verify",
+    outputMode: "json",
+    resourceKind: "database",
+    helperProfileId: "helper.restore.postgres.verify",
+  }),
+});
+
+export const EXPECTED_HELPER_PROFILE_IDS = Object.freeze(Object.keys(EXPECTED_HELPER_PROFILES));
+
 export const EXPECTED_PHASE_PROFILES = deepFreeze({
   "catalog.capture": phase({
     command: "backup-catalog",
+    endpointIds: ["capture.database.mariadb", "capture.database.postgres", "capture.storage.minio"],
     mountIds: ["backup.root.rw", "report.root.rw", "source.root.ro", "state.catalog.ro"],
     mutationPolicy: "backup-write",
     networkIds: ["platform_db_admin", "platform_storage"],
     outputSchema: "platform.backup-catalog/v1",
+    helperProfileIds: ["helper.capture.mariadb", "helper.capture.minio", "helper.capture.postgres"],
     workerSecretSetIds: ["manifest.signing"],
   }),
   "job.backup.capture": phase({
     command: "backup-job",
+    endpointIds: ["capture.database.mariadb", "capture.database.postgres", "capture.storage.minio"],
     mountIds: ["backup.root.rw", "report.root.rw", "source.root.ro", "state.catalog.ro"],
     mutationPolicy: "backup-write",
     networkIds: ["platform_db_admin", "platform_storage"],
     outputSchema: "platform.backup-job-result/v1",
+    helperProfileIds: ["helper.capture.mariadb", "helper.capture.minio", "helper.capture.postgres"],
     workerSecretSetIds: ["manifest.signing"],
   }),
   "job.restore.verify": phase({
     command: "restore-job",
+    endpointIds: [],
     mountIds: ["backup.root.ro", "report.root.rw"],
     mutationPolicy: "restore-disposable",
     networkIds: [],
     outputSchema: "platform.backup-job-result/v1",
     scratchVolumeIds: ["restore.scratch"],
+    helperProfileIds: ["helper.restore.mariadb.restore", "helper.restore.mariadb.server", "helper.restore.mariadb.verify", "helper.restore.minio.restore", "helper.restore.minio.server", "helper.restore.minio.verify", "helper.restore.postgres.restore", "helper.restore.postgres.server", "helper.restore.postgres.verify"],
     workerSecretSetIds: ["manifest.verification"],
   }),
   "prune.plan": phase({
     command: "backup-prune-plan",
+    endpointIds: [],
     mountIds: ["backup.root.ro", "report.root.rw"],
     mutationPolicy: "report-only",
     networkIds: [],
     outputSchema: "platform.backup-prune-plan/v1",
+    helperProfileIds: [],
     workerSecretSetIds: ["manifest.verification"],
   }),
   "prune.apply": phase({
     command: "backup-prune-apply",
+    endpointIds: [],
     mountIds: ["backup.root.rw", "report.root.rw"],
     mutationPolicy: "retention-apply",
     networkIds: [],
     outputSchema: "platform.backup-prune-apply/v1",
+    helperProfileIds: [],
     workerSecretSetIds: ["manifest.verification"],
     writableSubpathIds: ["backup.quarantine"],
   }),
   "restore.capture": phase({
     command: "backup-catalog",
+    endpointIds: ["capture.database.mariadb", "capture.database.postgres", "capture.storage.minio"],
     mountIds: ["backup.root.rw", "report.root.rw", "source.root.ro", "state.catalog.ro"],
     mutationPolicy: "backup-write",
     networkIds: ["platform_db_admin", "platform_storage"],
     outputSchema: "platform.backup-catalog/v1",
+    helperProfileIds: ["helper.capture.mariadb", "helper.capture.minio", "helper.capture.postgres"],
     workerSecretSetIds: ["manifest.signing"],
   }),
   "restore.verify": phase({
     command: "restore-drill-full",
+    endpointIds: [],
     mountIds: ["backup.root.ro", "report.root.rw"],
     mutationPolicy: "restore-disposable",
     networkIds: [],
     outputSchema: "platform.restore-drill/v1",
     scratchVolumeIds: ["restore.scratch"],
+    helperProfileIds: ["helper.restore.mariadb.restore", "helper.restore.mariadb.server", "helper.restore.mariadb.verify", "helper.restore.minio.restore", "helper.restore.minio.server", "helper.restore.minio.verify", "helper.restore.postgres.restore", "helper.restore.postgres.server", "helper.restore.postgres.verify"],
     workerSecretSetIds: ["manifest.verification"],
   }),
   "offsite.sync": phase({
     command: "backup-offsite-sync",
+    endpointIds: ["offsite.repository"],
     mountIds: ["backup.root.ro", "report.root.rw"],
     mutationPolicy: "offsite-write",
     networkIds: ["platform_egress"],
     outputSchema: "platform.offsite-backup-receipt/v1",
-    workerSecretSetIds: ["manifest.verification", "offsite.credentials"],
+    helperProfileIds: ["helper.offsite.restic"],
+    workerSecretSetIds: ["manifest.verification"],
   }),
 });
 
@@ -192,6 +417,7 @@ export const ACTION_PROFILE_KEYS = Object.freeze([
 ]);
 export const PHASE_PROFILE_KEYS = Object.freeze([
   "command",
+  "endpointIds",
   "mountIds",
   "mutationPolicy",
   "networkIds",
@@ -199,6 +425,7 @@ export const PHASE_PROFILE_KEYS = Object.freeze([
   "phaseId",
   "phaseSha256",
   "scratchVolumeIds",
+  "helperProfileIds",
   "workerImageId",
   "workerImageRef",
   "workerSecretSetIds",
@@ -230,7 +457,9 @@ export const ACTIVE_RECEIPT_RESOURCE_KEYS = Object.freeze([
   "mounts",
   "networks",
   "phaseProfiles",
+  "serviceEndpoints",
   "volumes",
+  "helperProfiles",
   "workerSecretSets",
   "writableSubpaths",
 ]);
@@ -318,6 +547,14 @@ export function expectedNetworkIds(action) {
   return unionPhaseField(action, "networkIds");
 }
 
+export function expectedEndpointIds(action) {
+  return unionPhaseField(action, "endpointIds");
+}
+
+export function expectedHelperProfileIds(action) {
+  return unionPhaseField(action, "helperProfileIds");
+}
+
 export function expectedWorkerSecretSetIds(action) {
   return unionPhaseField(action, "workerSecretSetIds");
 }
@@ -368,15 +605,17 @@ export function buildRawActiveReceiptV2({ now = FIXTURE_NOW } = {}) {
 
   const phaseProfiles = {};
   for (const [index, [phaseId, expected]] of Object.entries(EXPECTED_PHASE_PROFILES).entries()) {
-    const digest = fixtureSha256(`fixture:worker-image:${phaseId}`);
+    const manifestDigest = fixtureSha256(`fixture:worker-image-manifest:${phaseId}`);
+    const imageId = fixtureSha256(`fixture:worker-image-config:${phaseId}`);
     const unsigned = {
       ...structuredClone(expected),
       phaseId,
-      workerImageId: `sha256:${digest}`,
-      workerImageRef: `registry.example/platform/docker-action-${index + 1}@sha256:${digest}`,
+      workerImageId: `sha256:${imageId}`,
+      workerImageRef: `registry.example/platform/docker-action-${index + 1}@sha256:${manifestDigest}`,
     };
     phaseProfiles[phaseId] = { ...unsigned, phaseSha256: phaseDigest(unsigned) };
   }
+  const helperProfiles = structuredClone(EXPECTED_HELPER_PROFILES);
 
   return {
     schema: ACTIVE_RECEIPT_SCHEMA_V2,
@@ -393,6 +632,13 @@ export function buildRawActiveReceiptV2({ now = FIXTURE_NOW } = {}) {
     resources: {
       actionProfiles,
       backupResources: {
+        "database:mariadb": {
+          engine: "mariadb",
+          externalId: "mariadb",
+          kind: "database",
+          name: "mariadb",
+          projectId: "platform",
+        },
         "database:postgres": {
           engine: "postgres",
           externalId: "postgres",
@@ -432,7 +678,23 @@ export function buildRawActiveReceiptV2({ now = FIXTURE_NOW } = {}) {
           volumeSubpath: "running",
         },
       },
-      containers: {},
+      containers: {
+        mariadb: admittedContainer({
+          logicalId: "mariadb",
+          name: "mariadb",
+          networkIds: ["platform_db_admin"],
+        }),
+        minio: admittedContainer({
+          logicalId: "minio",
+          name: "enterprise-minio",
+          networkIds: ["platform_storage"],
+        }),
+        postgres: admittedContainer({
+          logicalId: "postgres",
+          name: "enterprise-postgres",
+          networkIds: ["platform_db_admin"],
+        }),
+      },
       mounts: {
         "backup.root.ro": protectedMount({
           access: "ro",
@@ -491,6 +753,7 @@ export function buildRawActiveReceiptV2({ now = FIXTURE_NOW } = {}) {
         }),
       },
       phaseProfiles,
+      serviceEndpoints: structuredClone(EXPECTED_SERVICE_ENDPOINTS),
       volumes: {
         "broker.state": admittedVolume({
           engineName: "platform_infra_vps_docker_action_broker_state",
@@ -505,6 +768,10 @@ export function buildRawActiveReceiptV2({ now = FIXTURE_NOW } = {}) {
           engineName: "platform_docker_action_restore_scratch",
           seed: "restore-scratch",
         }),
+        "worker.input.mariadb-capture": admittedVolume({
+          engineName: "platform_docker_action_mariadb_capture_credentials",
+          seed: "mariadb-capture-credentials",
+        }),
         "worker.input.manifest-signing": admittedVolume({
           engineName: "platform_docker_action_manifest_signing",
           seed: "manifest-signing",
@@ -513,12 +780,31 @@ export function buildRawActiveReceiptV2({ now = FIXTURE_NOW } = {}) {
           engineName: "platform_docker_action_manifest_verification",
           seed: "manifest-verification",
         }),
+        "worker.input.minio-capture": admittedVolume({
+          engineName: "platform_docker_action_minio_capture_credentials",
+          seed: "minio-capture-credentials",
+        }),
         "worker.input.offsite": admittedVolume({
           engineName: "platform_docker_action_offsite_credentials",
           seed: "offsite-credentials",
         }),
+        "worker.input.postgres-capture": admittedVolume({
+          engineName: "platform_docker_action_postgres_capture_credentials",
+          seed: "postgres-capture-credentials",
+        }),
       },
       workerSecretSets: {
+        "mariadb.capture.credentials": workerSecretSet({
+          containerRoot: "/run/platform/worker-secrets/mariadb-capture",
+          files: {
+            clientConfig: protectedVolumeFile({
+              inode: 2004,
+              relativePath: "client.cnf",
+              sha256: "2".repeat(64),
+            }),
+          },
+          volumeId: "worker.input.mariadb-capture",
+        }),
         "manifest.signing": workerSecretSet({
           containerRoot: "/run/platform/worker-secrets/manifest-signing",
           files: {
@@ -541,6 +827,22 @@ export function buildRawActiveReceiptV2({ now = FIXTURE_NOW } = {}) {
           },
           volumeId: "worker.input.manifest-verification",
         }),
+        "minio.capture.credentials": workerSecretSet({
+          containerRoot: "/run/platform/worker-secrets/minio-capture",
+          files: {
+            accessKey: protectedVolumeFile({
+              inode: 2006,
+              relativePath: "access-key",
+              sha256: "4".repeat(64),
+            }),
+            secretKey: protectedVolumeFile({
+              inode: 2007,
+              relativePath: "secret-key",
+              sha256: "8".repeat(64),
+            }),
+          },
+          volumeId: "worker.input.minio-capture",
+        }),
         "offsite.credentials": workerSecretSet({
           containerRoot: "/run/platform/worker-secrets/offsite",
           files: {
@@ -557,7 +859,29 @@ export function buildRawActiveReceiptV2({ now = FIXTURE_NOW } = {}) {
           },
           volumeId: "worker.input.offsite",
         }),
+        "postgres.capture.credentials": workerSecretSet({
+          containerRoot: "/run/platform/worker-secrets/postgres-capture",
+          files: {
+            database: protectedVolumeFile({
+              inode: 2008,
+              relativePath: "database",
+              sha256: "9".repeat(64),
+            }),
+            pgpass: protectedVolumeFile({
+              inode: 2009,
+              relativePath: ".pgpass",
+              sha256: "b".repeat(64),
+            }),
+            username: protectedVolumeFile({
+              inode: 2010,
+              relativePath: "username",
+              sha256: "c".repeat(64),
+            }),
+          },
+          volumeId: "worker.input.postgres-capture",
+        }),
       },
+      helperProfiles,
       writableSubpaths: {
         "backup.quarantine": {
           device: 42,
@@ -829,23 +1153,103 @@ export function buildFixturePhaseOutputV2(action, phaseId, parameters = {}) {
 
 function phase({
   command,
+  endpointIds,
   mountIds,
   mutationPolicy,
   networkIds,
   outputSchema,
   scratchVolumeIds = [],
+  helperProfileIds,
   workerSecretSetIds = [],
   writableSubpathIds = [],
 }) {
   return {
     command,
+    endpointIds,
     mountIds,
     mutationPolicy,
     networkIds,
     outputSchema,
     scratchVolumeIds,
+    helperProfileIds,
     workerSecretSetIds,
     writableSubpathIds,
+  };
+}
+
+function helperProfile({
+  engine,
+  entrypoint,
+  imageId,
+  imageRef,
+  networkId = null,
+  operation,
+  outputMode,
+  resourceKind,
+  secretSetId = null,
+  helperProfileId,
+}) {
+  return {
+    engine,
+    entrypoint,
+    imageId,
+    imageRef,
+    networkId,
+    operation,
+    outputMode,
+    resourceKind,
+    secretSetId,
+    helperProfileId,
+  };
+}
+
+function admittedContainer({ logicalId, name, networkIds }) {
+  const imageDigest = fixtureSha256(`fixture:container-image:${logicalId}`);
+  return {
+    authority: {
+      binds: [],
+      capAdd: [],
+      capDrop: ["ALL"],
+      cgroupnsMode: "private",
+      configSha256: fixtureSha256(`fixture:container-config:${logicalId}`),
+      deviceCgroupRules: [],
+      devices: [],
+      deviceRequests: [],
+      extraHosts: [],
+      groupAdd: [],
+      hostConfigSha256: fixtureSha256(`fixture:container-host-config:${logicalId}`),
+      ipcMode: "private",
+      links: [],
+      mounts: [],
+      networkMode: networkIds[0],
+      networkSettingsSha256: fixtureSha256(`fixture:container-network-settings:${logicalId}`),
+      networks: [...networkIds],
+      pidMode: "",
+      portBindings: {},
+      privileged: false,
+      publishAllPorts: false,
+      readonlyRootfs: false,
+      runtime: "runc",
+      securityOpt: ["no-new-privileges:true"],
+      user: "999:999",
+      usernsMode: "",
+      utsMode: "",
+      volumesFrom: [],
+    },
+    containerId: fixtureSha256(`fixture:container:${logicalId}`),
+    expectedHealth: "healthy",
+    expectedState: "running",
+    imageId: `sha256:${imageDigest}`,
+    imageRef: `registry.example/platform/${logicalId}@sha256:${imageDigest}`,
+    labels: {
+      "com.platform.runtime.candidate-id": "candidate.v2",
+      "com.platform.runtime.commit": "a".repeat(40),
+      "com.platform.runtime.deployment-id": "deployment.v2",
+      "com.platform.runtime.source-render-sha256": "5".repeat(64),
+      "com.platform.runtime.tree": "6".repeat(64),
+      "com.platform.runtime.workload-lock-sha256": "7".repeat(64),
+    },
+    name,
   };
 }
 

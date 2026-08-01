@@ -93,6 +93,307 @@ const RESULT_PHASE_KEYS = Object.freeze([
   "phaseId",
   "status",
 ]);
+const SERVICE_ENDPOINT_KEYS = Object.freeze([
+  "backupResourceId",
+  "engine",
+  "endpointId",
+  "host",
+  "networkId",
+  "port",
+  "protocol",
+  "purpose",
+  "secretSetId",
+  "targetContainerId",
+  "tlsMode",
+]);
+const HELPER_PROFILE_KEYS = Object.freeze([
+  "engine",
+  "entrypoint",
+  "imageId",
+  "imageRef",
+  "networkId",
+  "operation",
+  "outputMode",
+  "resourceKind",
+  "secretSetId",
+  "helperProfileId",
+]);
+const EXPECTED_SERVICE_ENDPOINTS = Object.freeze({
+  "capture.database.mariadb": Object.freeze({
+    backupResourceId: "database:mariadb",
+    engine: "mariadb",
+    endpointId: "capture.database.mariadb",
+    host: "mariadb",
+    networkId: "platform_db_admin",
+    port: 3306,
+    protocol: "mariadb",
+    purpose: "capture",
+    secretSetId: "mariadb.capture.credentials",
+    targetContainerId: "mariadb",
+    tlsMode: "require",
+  }),
+  "capture.database.postgres": Object.freeze({
+    backupResourceId: "database:postgres",
+    engine: "postgres",
+    endpointId: "capture.database.postgres",
+    host: "postgres",
+    networkId: "platform_db_admin",
+    port: 5432,
+    protocol: "postgresql",
+    purpose: "capture",
+    secretSetId: "postgres.capture.credentials",
+    targetContainerId: "postgres",
+    tlsMode: "require",
+  }),
+  "capture.storage.minio": Object.freeze({
+    backupResourceId: "storage:minio",
+    engine: "minio",
+    endpointId: "capture.storage.minio",
+    host: "minio",
+    networkId: "platform_storage",
+    port: 9000,
+    protocol: "s3-http",
+    purpose: "capture",
+    secretSetId: "minio.capture.credentials",
+    targetContainerId: "minio",
+    tlsMode: "none",
+  }),
+  "offsite.repository": Object.freeze({
+    backupResourceId: null,
+    engine: "restic",
+    endpointId: "offsite.repository",
+    host: "backup.example.net",
+    networkId: "platform_egress",
+    port: 443,
+    protocol: "restic-https",
+    purpose: "offsite",
+    secretSetId: "offsite.credentials",
+    targetContainerId: null,
+    tlsMode: "verify-full",
+  }),
+});
+const POSTGRES_IMAGE_ID = `sha256:${"8".repeat(64)}`;
+const POSTGRES_IMAGE_REF = "postgres:18-alpine@sha256:1b1689b20d16a014a3d195653381cf2caa75a41a92d93b255a9d6ea29fd353aa";
+const MARIADB_IMAGE_ID = `sha256:${"9".repeat(64)}`;
+const MARIADB_IMAGE_REF = "mariadb:12.3.2@sha256:b1c7bf836e64ed9406a8984af29509f40089d55cea14b32f12c4726a1f17104b";
+const MINIO_MC_IMAGE_ID = `sha256:${"a".repeat(64)}`;
+const MINIO_MC_IMAGE_REF = "quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727";
+const MINIO_SERVER_IMAGE_ID = `sha256:${"b".repeat(64)}`;
+const MINIO_SERVER_IMAGE_REF = "quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e";
+const RESTIC_IMAGE_ID = `sha256:${"c".repeat(64)}`;
+const RESTIC_IMAGE_REF = "restic/restic:0.18.0@sha256:4cf4a61ef9786f4de53e9de8c8f5c040f33830eb0a10bf3d614410ee2fcb6120";
+const EXPECTED_HELPER_PROFILES = Object.freeze({
+  "helper.capture.mariadb": Object.freeze({
+    engine: "mariadb",
+    entrypoint: Object.freeze(["/usr/bin/mariadb-dump"]),
+    imageId: MARIADB_IMAGE_ID,
+    imageRef: MARIADB_IMAGE_REF,
+    networkId: "platform_db_admin",
+    operation: "capture",
+    outputMode: "artifact",
+    resourceKind: "database",
+    secretSetId: "mariadb.capture.credentials",
+    helperProfileId: "helper.capture.mariadb",
+  }),
+  "helper.capture.minio": Object.freeze({
+    engine: "minio",
+    entrypoint: Object.freeze(["/bin/sh"]),
+    imageId: MINIO_MC_IMAGE_ID,
+    imageRef: MINIO_MC_IMAGE_REF,
+    networkId: "platform_storage",
+    operation: "capture",
+    outputMode: "artifact",
+    resourceKind: "storage",
+    secretSetId: "minio.capture.credentials",
+    helperProfileId: "helper.capture.minio",
+  }),
+  "helper.capture.postgres": Object.freeze({
+    engine: "postgres",
+    entrypoint: Object.freeze(["/usr/local/bin/pg_dump"]),
+    imageId: POSTGRES_IMAGE_ID,
+    imageRef: POSTGRES_IMAGE_REF,
+    networkId: "platform_db_admin",
+    operation: "capture",
+    outputMode: "artifact",
+    resourceKind: "database",
+    secretSetId: "postgres.capture.credentials",
+    helperProfileId: "helper.capture.postgres",
+  }),
+  "helper.offsite.restic": Object.freeze({
+    engine: "restic",
+    entrypoint: Object.freeze(["/usr/bin/restic"]),
+    imageId: RESTIC_IMAGE_ID,
+    imageRef: RESTIC_IMAGE_REF,
+    networkId: "platform_egress",
+    operation: "offsite-sync",
+    outputMode: "json",
+    resourceKind: null,
+    secretSetId: "offsite.credentials",
+    helperProfileId: "helper.offsite.restic",
+  }),
+  "helper.restore.minio.restore": Object.freeze({
+    engine: "minio",
+    entrypoint: Object.freeze(["/usr/bin/mc"]),
+    imageId: MINIO_MC_IMAGE_ID,
+    imageRef: MINIO_MC_IMAGE_REF,
+    networkId: null,
+    operation: "restore",
+    outputMode: "none",
+    resourceKind: "storage",
+    secretSetId: null,
+    helperProfileId: "helper.restore.minio.restore",
+  }),
+  "helper.restore.minio.server": Object.freeze({
+    engine: "minio",
+    entrypoint: Object.freeze(["/usr/bin/minio"]),
+    imageId: MINIO_SERVER_IMAGE_ID,
+    imageRef: MINIO_SERVER_IMAGE_REF,
+    networkId: null,
+    operation: "restore-server",
+    outputMode: "none",
+    resourceKind: "storage",
+    secretSetId: null,
+    helperProfileId: "helper.restore.minio.server",
+  }),
+  "helper.restore.minio.verify": Object.freeze({
+    engine: "minio",
+    entrypoint: Object.freeze(["/usr/bin/mc"]),
+    imageId: MINIO_MC_IMAGE_ID,
+    imageRef: MINIO_MC_IMAGE_REF,
+    networkId: null,
+    operation: "verify",
+    outputMode: "json",
+    resourceKind: "storage",
+    secretSetId: null,
+    helperProfileId: "helper.restore.minio.verify",
+  }),
+  "helper.restore.mariadb.restore": Object.freeze({
+    engine: "mariadb",
+    entrypoint: Object.freeze(["/usr/bin/mariadb"]),
+    imageId: MARIADB_IMAGE_ID,
+    imageRef: MARIADB_IMAGE_REF,
+    networkId: null,
+    operation: "restore",
+    outputMode: "none",
+    resourceKind: "database",
+    secretSetId: null,
+    helperProfileId: "helper.restore.mariadb.restore",
+  }),
+  "helper.restore.mariadb.server": Object.freeze({
+    engine: "mariadb",
+    entrypoint: Object.freeze(["/usr/local/bin/docker-entrypoint.sh"]),
+    imageId: MARIADB_IMAGE_ID,
+    imageRef: MARIADB_IMAGE_REF,
+    networkId: null,
+    operation: "restore-server",
+    outputMode: "none",
+    resourceKind: "database",
+    secretSetId: null,
+    helperProfileId: "helper.restore.mariadb.server",
+  }),
+  "helper.restore.mariadb.verify": Object.freeze({
+    engine: "mariadb",
+    entrypoint: Object.freeze(["/usr/bin/mariadb"]),
+    imageId: MARIADB_IMAGE_ID,
+    imageRef: MARIADB_IMAGE_REF,
+    networkId: null,
+    operation: "verify",
+    outputMode: "json",
+    resourceKind: "database",
+    secretSetId: null,
+    helperProfileId: "helper.restore.mariadb.verify",
+  }),
+  "helper.restore.postgres.restore": Object.freeze({
+    engine: "postgres",
+    entrypoint: Object.freeze(["/usr/local/bin/pg_restore"]),
+    imageId: POSTGRES_IMAGE_ID,
+    imageRef: POSTGRES_IMAGE_REF,
+    networkId: null,
+    operation: "restore",
+    outputMode: "none",
+    resourceKind: "database",
+    secretSetId: null,
+    helperProfileId: "helper.restore.postgres.restore",
+  }),
+  "helper.restore.postgres.server": Object.freeze({
+    engine: "postgres",
+    entrypoint: Object.freeze(["/usr/local/bin/docker-entrypoint.sh"]),
+    imageId: POSTGRES_IMAGE_ID,
+    imageRef: POSTGRES_IMAGE_REF,
+    networkId: null,
+    operation: "restore-server",
+    outputMode: "none",
+    resourceKind: "database",
+    secretSetId: null,
+    helperProfileId: "helper.restore.postgres.server",
+  }),
+  "helper.restore.postgres.verify": Object.freeze({
+    engine: "postgres",
+    entrypoint: Object.freeze(["/usr/local/bin/psql"]),
+    imageId: POSTGRES_IMAGE_ID,
+    imageRef: POSTGRES_IMAGE_REF,
+    networkId: null,
+    operation: "verify",
+    outputMode: "json",
+    resourceKind: "database",
+    secretSetId: null,
+    helperProfileId: "helper.restore.postgres.verify",
+  }),
+});
+const EXPECTED_PHASE_ENDPOINT_HELPER_IDS = Object.freeze({
+  "catalog.capture": Object.freeze({
+    endpointIds: Object.freeze(["capture.database.mariadb", "capture.database.postgres", "capture.storage.minio"]),
+    helperProfileIds: Object.freeze(["helper.capture.mariadb", "helper.capture.minio", "helper.capture.postgres"]),
+  }),
+  "job.backup.capture": Object.freeze({
+    endpointIds: Object.freeze(["capture.database.mariadb", "capture.database.postgres", "capture.storage.minio"]),
+    helperProfileIds: Object.freeze(["helper.capture.mariadb", "helper.capture.minio", "helper.capture.postgres"]),
+  }),
+  "job.restore.verify": Object.freeze({
+    endpointIds: Object.freeze([]),
+    helperProfileIds: Object.freeze([
+      "helper.restore.mariadb.restore",
+      "helper.restore.mariadb.server",
+      "helper.restore.mariadb.verify",
+      "helper.restore.minio.restore",
+      "helper.restore.minio.server",
+      "helper.restore.minio.verify",
+      "helper.restore.postgres.restore",
+      "helper.restore.postgres.server",
+      "helper.restore.postgres.verify",
+    ]),
+  }),
+  "offsite.sync": Object.freeze({
+    endpointIds: Object.freeze(["offsite.repository"]),
+    helperProfileIds: Object.freeze(["helper.offsite.restic"]),
+  }),
+  "prune.apply": Object.freeze({
+    endpointIds: Object.freeze([]),
+    helperProfileIds: Object.freeze([]),
+  }),
+  "prune.plan": Object.freeze({
+    endpointIds: Object.freeze([]),
+    helperProfileIds: Object.freeze([]),
+  }),
+  "restore.capture": Object.freeze({
+    endpointIds: Object.freeze(["capture.database.mariadb", "capture.database.postgres", "capture.storage.minio"]),
+    helperProfileIds: Object.freeze(["helper.capture.mariadb", "helper.capture.minio", "helper.capture.postgres"]),
+  }),
+  "restore.verify": Object.freeze({
+    endpointIds: Object.freeze([]),
+    helperProfileIds: Object.freeze([
+      "helper.restore.mariadb.restore",
+      "helper.restore.mariadb.server",
+      "helper.restore.mariadb.verify",
+      "helper.restore.minio.restore",
+      "helper.restore.minio.server",
+      "helper.restore.minio.verify",
+      "helper.restore.postgres.restore",
+      "helper.restore.postgres.server",
+      "helper.restore.postgres.verify",
+    ]),
+  }),
+});
 
 test("RED v2: scheduler and runtime-evidence registries are disjoint, complete, modeled and uniquely bound", () => {
   assert.ok(
@@ -1236,6 +1537,8 @@ test("RED v2: active receipt binds exact action plans to phase-scoped Docker aut
     assert.equal(profile.phaseSha256, phaseDigest(profile), `${phaseId} digest`);
     for (const field of [
       "command",
+      "endpointIds",
+      "helperProfileIds",
       "mountIds",
       "mutationPolicy",
       "networkIds",
@@ -1472,6 +1775,161 @@ test("RED v2: active receipt binds exact action plans to phase-scoped Docker aut
     assert.throws(
       () => contract.normalizeActiveReceipt(candidate, { now: NOW }),
       undefined,
+      label,
+    );
+  }
+});
+
+test("RED v2: active receipt binds exact service endpoints and helper profiles to each phase", () => {
+  const receipt = activeReceiptFixture();
+  const normalized = contract.normalizeActiveReceipt(receipt, { now: NOW });
+
+  assert.deepEqual(receipt.resources.serviceEndpoints, EXPECTED_SERVICE_ENDPOINTS);
+  assert.deepEqual(receipt.resources.helperProfiles, EXPECTED_HELPER_PROFILES);
+  for (const [endpointId, endpoint] of Object.entries(normalized.resources.serviceEndpoints)) {
+    assert.deepEqual(Object.keys(endpoint).sort(), [...SERVICE_ENDPOINT_KEYS].sort(), endpointId);
+    assert.equal(endpoint.endpointId, endpointId);
+    assert.deepEqual(endpoint, EXPECTED_SERVICE_ENDPOINTS[endpointId]);
+    assert.ok(normalized.resources.networks[endpoint.networkId], endpoint.networkId);
+    if (endpoint.purpose === "capture") {
+      assert.ok(normalized.resources.backupResources[endpoint.backupResourceId], endpoint.backupResourceId);
+      assert.ok(normalized.resources.containers[endpoint.targetContainerId], endpoint.targetContainerId);
+    } else {
+      assert.equal(endpoint.backupResourceId, null);
+      assert.equal(endpoint.targetContainerId, null);
+    }
+  }
+  for (const [helperProfileId, helperProfile] of Object.entries(normalized.resources.helperProfiles)) {
+    assert.deepEqual(Object.keys(helperProfile).sort(), [...HELPER_PROFILE_KEYS].sort(), helperProfileId);
+    assert.equal(helperProfile.helperProfileId, helperProfileId);
+    assert.deepEqual(helperProfile, EXPECTED_HELPER_PROFILES[helperProfileId]);
+    assert.match(helperProfile.imageRef, /@sha256:[a-f0-9]{64}$/);
+    assert.notEqual(helperProfile.imageRef.split("@").at(-1), helperProfile.imageId);
+    assert.equal(Array.isArray(helperProfile.entrypoint), true);
+    assert.equal(helperProfile.entrypoint.length, 1);
+  }
+  for (const [phaseId, profile] of Object.entries(normalized.resources.phaseProfiles)) {
+    const expected = EXPECTED_PHASE_ENDPOINT_HELPER_IDS[phaseId];
+    assert.deepEqual(profile.endpointIds, expected.endpointIds, `${phaseId}.endpointIds`);
+    assert.deepEqual(profile.helperProfileIds, expected.helperProfileIds, `${phaseId}.helperProfileIds`);
+    for (const endpointId of profile.endpointIds) {
+      const endpoint = normalized.resources.serviceEndpoints[endpointId];
+      assert.ok(endpoint, `${phaseId}/${endpointId}`);
+      assert.ok(profile.networkIds.includes(endpoint.networkId), `${phaseId}/${endpoint.networkId}`);
+    }
+    for (const helperProfileId of profile.helperProfileIds) {
+      assert.ok(normalized.resources.helperProfiles[helperProfileId], `${phaseId}/${helperProfileId}`);
+    }
+  }
+});
+
+test("RED v2: phase worker registry and config image digests are independent exact attestations", () => {
+  const receipt = activeReceiptFixture();
+  const profile = receipt.resources.phaseProfiles["catalog.capture"];
+  assert.match(profile.workerImageRef, /@sha256:[a-f0-9]{64}$/);
+  assert.match(profile.workerImageId, /^sha256:[a-f0-9]{64}$/);
+  assert.notEqual(profile.workerImageRef.split("@").at(-1), profile.workerImageId);
+  assert.doesNotThrow(() => contract.normalizeActiveReceipt(receipt, { now: NOW }));
+
+  for (const [label, mutate] of [
+    ["registry manifest digest", (value) => {
+      value.resources.phaseProfiles["catalog.capture"].workerImageRef = "registry.example/platform/worker:latest";
+    }],
+    ["config image digest", (value) => {
+      value.resources.phaseProfiles["catalog.capture"].workerImageId = "sha256:invalid";
+    }],
+  ]) {
+    const candidate = structuredClone(receipt);
+    mutate(candidate);
+    resealActionProfiles(candidate);
+    assert.throws(
+      () => contract.normalizeActiveReceipt(candidate, { now: NOW }),
+      /phase|worker image|digest|binding|invalid/i,
+      label,
+    );
+  }
+});
+
+test("RED v2: endpoint and helper authority rejects canonical widening and coherent resealing", () => {
+  const control = activeReceiptFixture();
+  assert.doesNotThrow(() => contract.normalizeActiveReceipt(structuredClone(control), { now: NOW }));
+  const cases = [
+    ["missing endpoint", (value) => { delete value.resources.serviceEndpoints["capture.database.postgres"]; }],
+    ["endpoint extension", (value) => { value.resources.serviceEndpoints["capture.database.postgres"].extension = true; }],
+    ["endpoint key substitution", (value) => {
+      value.resources.serviceEndpoints["capture.database.postgres"].endpointId = "capture.database.mariadb";
+    }],
+    ["endpoint resource substitution", (value) => {
+      value.resources.serviceEndpoints["capture.database.postgres"].backupResourceId = "database:mariadb";
+    }],
+    ["endpoint target substitution", (value) => {
+      value.resources.serviceEndpoints["capture.database.postgres"].targetContainerId = "mariadb";
+    }],
+    ["endpoint host widening", (value) => { value.resources.serviceEndpoints["capture.database.postgres"].host = "attacker"; }],
+    ["endpoint port widening", (value) => { value.resources.serviceEndpoints["capture.database.postgres"].port = 15432; }],
+    ["endpoint network widening", (value) => {
+      value.resources.serviceEndpoints["capture.database.postgres"].networkId = "platform_egress";
+    }],
+    ["endpoint TLS downgrade", (value) => { value.resources.serviceEndpoints["capture.database.postgres"].tlsMode = "none"; }],
+    ["endpoint engine widening", (value) => { value.resources.serviceEndpoints["capture.database.postgres"].engine = "mariadb"; }],
+    ["endpoint secret widening", (value) => {
+      value.resources.serviceEndpoints["capture.database.postgres"].secretSetId = "manifest.signing";
+    }],
+    ["offsite endpoint becomes local", (value) => {
+      value.resources.serviceEndpoints["offsite.repository"].targetContainerId = "postgres";
+    }],
+    ["missing helper", (value) => { delete value.resources.helperProfiles["helper.capture.postgres"]; }],
+    ["helper extension", (value) => { value.resources.helperProfiles["helper.capture.postgres"].extension = true; }],
+    ["helper key substitution", (value) => {
+      value.resources.helperProfiles["helper.capture.postgres"].helperProfileId = "helper.capture.mariadb";
+    }],
+    ["helper entrypoint widening", (value) => {
+      value.resources.helperProfiles["helper.capture.postgres"].entrypoint = ["sh"];
+    }],
+    ["helper operation widening", (value) => {
+      value.resources.helperProfiles["helper.capture.postgres"].operation = "restore";
+    }],
+    ["helper resource kind widening", (value) => {
+      value.resources.helperProfiles["helper.capture.postgres"].resourceKind = "source";
+    }],
+    ["helper network widening", (value) => {
+      value.resources.helperProfiles["helper.capture.postgres"].networkId = "platform_egress";
+    }],
+    ["helper secret widening", (value) => {
+      value.resources.helperProfiles["helper.capture.postgres"].secretSetId = "offsite.credentials";
+    }],
+    ["helper output widening", (value) => {
+      value.resources.helperProfiles["helper.capture.postgres"].outputMode = "json";
+    }],
+    ["helper image reference substitution", (value) => {
+      value.resources.helperProfiles["helper.capture.postgres"].imageRef = MARIADB_IMAGE_REF;
+    }],
+    ["helper image ID invalid", (value) => {
+      value.resources.helperProfiles["helper.capture.postgres"].imageId = "sha256:invalid";
+    }],
+    ["phase gains endpoint", (value) => {
+      value.resources.phaseProfiles["prune.plan"].endpointIds = ["offsite.repository"];
+    }],
+    ["phase substitutes helper", (value) => {
+      value.resources.phaseProfiles["job.backup.capture"].helperProfileIds = ["helper.offsite.restic"];
+    }],
+    ["phase overlaps worker and helper credentials", (value) => {
+      value.resources.phaseProfiles["catalog.capture"].workerSecretSetIds = [
+        "manifest.signing",
+        "postgres.capture.credentials",
+      ];
+    }],
+    ["phase endpoint loses owning network", (value) => {
+      value.resources.phaseProfiles["catalog.capture"].networkIds = ["platform_storage"];
+    }],
+  ];
+  for (const [label, mutate] of cases) {
+    const candidate = structuredClone(control);
+    mutate(candidate);
+    resealActionProfiles(candidate);
+    assert.throws(
+      () => contract.normalizeActiveReceipt(candidate, { now: NOW }),
+      /endpoint|helper|phase|network|authority|identity|binding|unsupported|missing|canonical/i,
       label,
     );
   }
