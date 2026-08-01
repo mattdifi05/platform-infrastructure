@@ -716,7 +716,7 @@ test("RED v2: evidence output is bounded before the broker releases its replay l
     const harness = evidenceBrokerHarness({ key, result, trusted });
 
     assert.ok(outputBytes <= MAX_PHASE_OUTPUT_BYTES_V2);
-    const wire = await harness.core.handle(Buffer.from(JSON.stringify(request)));
+    const wire = await harness.core.handle(Buffer.from(canonicalFixtureJson(request)));
     assert.equal(wire.statusCode, 200);
     assert.equal(harness.executeCount(), 1);
     assert.deepEqual(harness.leaseEvents, ["acquire", "release"]);
@@ -748,7 +748,7 @@ test("RED v2: evidence output is bounded before the broker releases its replay l
       "the negative must cross the unchanged 4096-byte phase-output boundary",
     );
     await assert.rejects(
-      () => harness.core.handle(Buffer.from(JSON.stringify(request))),
+      () => harness.core.handle(Buffer.from(canonicalFixtureJson(request))),
       undefined,
       "an oversized evidence result must not reach the authenticated response consumer",
     );
