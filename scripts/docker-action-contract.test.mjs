@@ -1878,6 +1878,12 @@ test("RED v2: endpoint and helper authority rejects canonical widening and coher
     ["offsite endpoint becomes local", (value) => {
       value.resources.serviceEndpoints["offsite.repository"].targetContainerId = "postgres";
     }],
+    ["offsite endpoint uses localhost", (value) => {
+      value.resources.serviceEndpoints["offsite.repository"].host = "localhost";
+    }],
+    ["offsite endpoint uses a numeric address", (value) => {
+      value.resources.serviceEndpoints["offsite.repository"].host = "127.0.0.1";
+    }],
     ["missing helper", (value) => { delete value.resources.helperProfiles["helper.capture.postgres"]; }],
     ["helper extension", (value) => { value.resources.helperProfiles["helper.capture.postgres"].extension = true; }],
     ["helper key substitution", (value) => {
@@ -2008,6 +2014,9 @@ test("RED v2: signed runtime intent detects every Release-owned receipt referenc
     ["network identity", (value) => {
       const network = value.resources.networks.platform_egress;
       network.engineId = alternateSha256(network.engineId);
+    }],
+    ["offsite repository host", (value) => {
+      value.resources.serviceEndpoints["offsite.repository"].host = "restic.backup.vendor.com";
     }],
     ["volume options", (value) => {
       const volume = value.resources.volumes["restore.scratch"];

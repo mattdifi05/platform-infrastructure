@@ -1178,7 +1178,10 @@ function normalizeServiceEndpoints(value, {
         "targetContainerId",
         "tlsMode",
       ], `service endpoint ${endpointId}`);
-      if (canonicalJson(entry) !== canonicalJson(expected)) {
+      const canonicalEntry = endpointId === "offsite.repository"
+        ? { ...entry, host: expected.host }
+        : entry;
+      if (canonicalJson(canonicalEntry) !== canonicalJson(expected)) {
         fail(403, `service endpoint ${endpointId} canonical identity or authority binding is invalid`);
       }
       if (entry.endpointId !== endpointId || !DNS_HOST.test(entry.host) || entry.host.length > 253
@@ -1197,12 +1200,20 @@ function normalizeServiceEndpoints(value, {
         }
       } else if (entry.purpose !== "offsite"
         || entry.backupResourceId !== null
-        || entry.targetContainerId !== null) {
+        || entry.targetContainerId !== null
+        || !isPublicOffsiteHost(entry.host)) {
         fail(403, `service endpoint ${endpointId} purpose binding is invalid`);
       }
       return deepFreeze(structuredClone(entry));
     },
   );
+}
+
+function isPublicOffsiteHost(value) {
+  return DNS_HOST.test(value)
+    && value.includes(".")
+    && !/^\d+(?:\.\d+){3}$/.test(value)
+    && !/(?:^|\.)(?:localhost|local|internal|lan)$/.test(value);
 }
 
 function normalizeHelperProfiles(value, { networks, workerSecretSets }) {
