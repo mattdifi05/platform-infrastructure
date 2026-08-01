@@ -10,6 +10,7 @@ import {
   EXPECTED_CASE_IDS,
   PRE_FIX_ROOT,
   REPOSITORY_ROOT,
+  SOURCE_MAP_SHA256,
   assertExternalOutputDirectory,
   assertBaselineIdentity,
   computeSeedTreeSha256,
@@ -17,6 +18,7 @@ import {
   createSandboxPolicy,
   loadRegistry,
   loadSandboxProfile,
+  loadSourceMap,
   materializeDetachedBaselineClone,
   materializeEphemeralCaseSeed,
   normalizeEvidenceText,
@@ -26,6 +28,7 @@ import {
   validateDefinition,
   validateSandboxProfile,
   verifyBaselineConsumerAnchors,
+  verifyRegistrySourceMap,
   verifyTrackedSeeds,
 } from "./run-pre-fix-replay.mjs";
 
@@ -39,9 +42,9 @@ test("schema v2 registry preserves exactly 77 distinct FG identities", async () 
       .sort()
       .map((classification) => [classification, definitions.filter((definition) => definition.proof_scope.classification === classification).length])),
     {
-      "offline-product-consumer": 47,
+      "offline-product-consumer": 46,
       "offline-source-control": 3,
-      "offline-source-model": 27,
+      "offline-source-model": 28,
     },
   );
   for (const definition of definitions) {
@@ -54,6 +57,18 @@ test("schema v2 registry preserves exactly 77 distinct FG identities", async () 
     assert.deepEqual(definition.anchors.slice(0, 2).map((anchor) => anchor.kind), ["root_control", "tracked_seed"]);
     assert.ok(definition.anchors.some((anchor) => anchor.kind === "baseline_consumer"));
   }
+});
+
+test("tracked authoritative source map binds all 77 groups and 135 canonical ids", async () => {
+  const sourceMap = await loadSourceMap();
+  const definitions = await loadRegistry();
+  assert.equal(sourceMap.length, 77);
+  assert.equal(sourceMap.flatMap((entry) => entry.canonical_ids).length, 135);
+  assert.equal(verifyRegistrySourceMap(definitions, sourceMap), true);
+  assert.equal(sha256(await readFile(path.join(PRE_FIX_ROOT, "security-fix-groups-v1.jsonl"))), SOURCE_MAP_SHA256);
+  const mutated = structuredClone(sourceMap);
+  mutated[23].canonical_ids = ["CAN-999"];
+  assert.throws(() => verifyRegistrySourceMap(definitions, mutated), /disagrees with the authoritative source map/);
 });
 
 test("every migrated seed tree and primary probe matches its registry digest", async () => {
@@ -153,6 +168,10 @@ test("sandbox profile denies network and target writes while declaring ephemeral
   assert.equal(profile.target_worktree_write, false);
   assert.equal(profile.ephemeral_write, true);
   assert.equal(profile.mode, "offline-contained");
+  assert.equal(profile.claim_scope, "approved-tracked-seeds");
+  assert.equal(profile.process_exec_enforcement, "PATH-only-command-guards");
+  assert.equal(profile.secret_read_enforcement, "deny-listed-common-user-secret-roots");
+  assert.deepEqual(profile.denied_user_secret_roots, [".ssh", ".aws", ".docker", ".kube", ".gnupg", ".codex"]);
   assert.deepEqual(profile.filesystem_write, {
     target_worktree: false,
     baseline_worktree: false,

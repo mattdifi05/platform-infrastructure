@@ -33,9 +33,13 @@ export const PRE_FIX_ROOT = path.dirname(modulePath);
 export const REPOSITORY_ROOT = path.resolve(PRE_FIX_ROOT, "../..");
 export const REGISTRY_PATH = path.join(PRE_FIX_ROOT, "definition-registry.jsonl");
 export const SANDBOX_PROFILE_PATH = path.join(PRE_FIX_ROOT, "sandbox-profile.json");
+export const SOURCE_MAP_PATH = path.join(PRE_FIX_ROOT, "security-fix-groups-v1.jsonl");
+export const SOURCE_MAP_SHA256 = "82eb9a2f436afaf521b2d73a91537612f5f543e05af0dd35f2af494fcc26a725";
 const MAX_REGISTRY_BYTES = 2 * 1024 * 1024;
+const MAX_SOURCE_MAP_BYTES = 2 * 1024 * 1024;
 const MAX_CASE_OUTPUT_BYTES = 8 * 1024 * 1024;
 const DEFAULT_CASE_TIMEOUT_MS = 120_000;
+const DENIED_USER_SECRET_ROOTS = Object.freeze([".ssh", ".aws", ".docker", ".kube", ".gnupg", ".codex"]);
 
 function fail(message) {
   throw new Error(message);
@@ -215,6 +219,64 @@ export async function loadRegistry(registryPath = REGISTRY_PATH) {
   return definitions;
 }
 
+export async function loadSourceMap(sourceMapPath = SOURCE_MAP_PATH) {
+  const info = await stat(sourceMapPath);
+  if (!info.isFile() || info.size <= 0 || info.size > MAX_SOURCE_MAP_BYTES) fail("source map size is invalid");
+  const raw = await readFile(sourceMapPath, "utf8");
+  if (!raw.endsWith("\n")) fail("source map must end with a newline");
+  if (sha256(raw) !== SOURCE_MAP_SHA256) fail("source map does not match its authoritative digest");
+  const entries = raw.trimEnd().split("\n").map((line, index) => {
+    let entry;
+    try {
+      entry = JSON.parse(line);
+    } catch (error) {
+      throw new Error(`source map line ${index + 1}: ${error.message}`);
+    }
+    assertExactKeys(
+      entry,
+      ["group_id", "slug", "canonical_ids", "root_control", "remediation", "test_boundary"],
+      [],
+      `source map line ${index + 1}`,
+    );
+    if (entry.group_id !== EXPECTED_CASE_IDS[index]) fail(`source map line ${index + 1} has the wrong group identity`);
+    if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(entry.slug)) fail(`${entry.group_id} source-map slug is invalid`);
+    if (!Array.isArray(entry.canonical_ids) || entry.canonical_ids.length === 0 ||
+        !entry.canonical_ids.every((id) => /^CAN-[0-9]{3}$/.test(id))) {
+      fail(`${entry.group_id} source-map canonical ids are invalid`);
+    }
+    for (const key of ["root_control", "remediation", "test_boundary"]) {
+      if (typeof entry[key] !== "string" || entry[key].length < 8) fail(`${entry.group_id} source-map ${key} is invalid`);
+    }
+    return entry;
+  });
+  if (entries.length !== EXPECTED_CASE_IDS.length) fail("source map must contain exactly 77 rows");
+  const canonicalIds = entries.flatMap((entry) => entry.canonical_ids);
+  if (canonicalIds.length !== 135 || new Set(canonicalIds).size !== canonicalIds.length) {
+    fail("source map must preserve exactly 135 unique canonical finding ids");
+  }
+  return entries;
+}
+
+export function verifyRegistrySourceMap(definitions, sourceMap) {
+  if (definitions.length !== sourceMap.length) fail("registry and source map lengths differ");
+  for (const [index, definition] of definitions.entries()) {
+    const source = sourceMap[index];
+    const rootControls = definition.anchors.filter((anchor) => anchor.kind === "root_control");
+    if (
+      definition.case_id !== source.group_id ||
+      definition.slug !== source.slug ||
+      JSON.stringify(definition.canonical_ids) !== JSON.stringify(source.canonical_ids) ||
+      definition.test_boundary !== source.test_boundary ||
+      rootControls.length !== 1 ||
+      rootControls[0].value !== source.root_control ||
+      definition.provenance.source_map_sha256 !== SOURCE_MAP_SHA256
+    ) {
+      fail(`${definition.case_id} registry identity disagrees with the authoritative source map`);
+    }
+  }
+  return true;
+}
+
 export function validateSandboxProfile(profile) {
   assertExactKeys(
     profile,
@@ -222,6 +284,7 @@ export function validateSandboxProfile(profile) {
       "schema",
       "implementation",
       "mode",
+      "claim_scope",
       "default_policy",
       "network",
       "docker",
@@ -235,7 +298,10 @@ export function validateSandboxProfile(profile) {
       "filesystem_write",
       "allowed_write_scope",
       "inherit_environment",
-      "allowed_executables",
+      "process_exec_enforcement",
+      "secret_read_enforcement",
+      "denied_user_secret_roots",
+      "expected_executables",
       "blocked_commands",
       "forbidden_capabilities",
     ],
@@ -247,6 +313,7 @@ export function validateSandboxProfile(profile) {
   }
   if (
     profile.default_policy !== "allow" ||
+    profile.claim_scope !== "approved-tracked-seeds" ||
     profile.network !== false ||
     profile.docker !== false ||
     profile.live !== false ||
@@ -259,6 +326,16 @@ export function validateSandboxProfile(profile) {
     profile.inherit_environment !== false
   ) {
     fail("sandbox profile weakens the replay boundary");
+  }
+  if (
+    profile.process_exec_enforcement !== "PATH-only-command-guards" ||
+    profile.secret_read_enforcement !== "deny-listed-common-user-secret-roots" ||
+    JSON.stringify(profile.denied_user_secret_roots) !== JSON.stringify(DENIED_USER_SECRET_ROOTS)
+  ) {
+    fail("sandbox containment scope is not explicit or exact");
+  }
+  if (!Array.isArray(profile.expected_executables) || profile.expected_executables.length === 0) {
+    fail("sandbox profile must list the expected trusted-seed executables");
   }
   assertExactKeys(
     profile.filesystem_write,
@@ -594,7 +671,7 @@ function escapeSandboxString(value) {
 }
 
 export function createSandboxPolicy({ scratchRoot, userHome = process.env.HOME ?? "" }) {
-  const protectedReadRoots = [".ssh", ".aws", ".docker", ".kube", ".gnupg", ".codex"]
+  const protectedReadRoots = DENIED_USER_SECRET_ROOTS
     .filter(() => userHome !== "")
     .map((suffix) => `(deny file-read* (subpath "${escapeSandboxString(path.join(userHome, suffix))}"))`);
   return [
@@ -814,6 +891,7 @@ async function executeReplayOnBaseline({
   repositoryRoot = REPOSITORY_ROOT,
   registryPath = REGISTRY_PATH,
   sandboxProfilePath = SANDBOX_PROFILE_PATH,
+  sourceMapPath = SOURCE_MAP_PATH,
 } = {}) {
   if (!baselineRoot) fail("materialized baseline root is required");
   if (!outputDirectory) fail("--output-dir is required");
@@ -822,6 +900,8 @@ async function executeReplayOnBaseline({
   const baselineIdentity = await resolveBaselineIdentity(baselineRoot);
   const profile = await loadSandboxProfile(sandboxProfilePath);
   const definitions = await loadRegistry(registryPath);
+  const sourceMap = await loadSourceMap(sourceMapPath);
+  verifyRegistrySourceMap(definitions, sourceMap);
   await verifyTrackedSeeds(definitions, repositoryRoot);
   await verifyBaselineConsumerAnchors(definitions, baselineIdentity.root);
   const selectedSet = new Set(selectedCaseIds);
@@ -835,10 +915,12 @@ async function executeReplayOnBaseline({
   await writeFile(resultsPath, "", { mode: 0o600 });
   const profileSha256 = sha256(await readFile(sandboxProfilePath));
   const registrySha256 = sha256(await readFile(registryPath));
+  const sourceMapSha256 = sha256(await readFile(sourceMapPath));
   const trackedInputs = {
     runner: await gitTrackedDescriptor(repositoryRoot, "tests/pre-fix/run-pre-fix-replay.mjs"),
     registry: await gitTrackedDescriptor(repositoryRoot, "tests/pre-fix/definition-registry.jsonl"),
     sandbox_profile: await gitTrackedDescriptor(repositoryRoot, "tests/pre-fix/sandbox-profile.json"),
+    source_map: await gitTrackedDescriptor(repositoryRoot, "tests/pre-fix/security-fix-groups-v1.jsonl"),
   };
   const sandboxExecutable = await executableDescriptor("/usr/bin/sandbox-exec");
   const makePath = await resolveDeveloperTool("make");
@@ -949,6 +1031,7 @@ async function executeReplayOnBaseline({
       target_worktree_write: false,
       ephemeral_write: true,
       forbidden_access: { network: false, docker: false, live: false, provider: false, secrets: false },
+      access_claim_scope: profile.claim_scope,
       log_envelope: {
         schema: "platform.pre-fix-negative-replay-log-envelope/v2",
         path: `${definition.case_id}/execution.log`,
@@ -997,10 +1080,12 @@ async function executeReplayOnBaseline({
     runner: { commit: runnerIdentity.commit, tree: runnerIdentity.tree, clean_before: true, clean_after: true },
     tracked_inputs: trackedInputs,
     registry_sha256: registrySha256,
+    source_map_sha256: sourceMapSha256,
     sandbox_profile_sha256: profileSha256,
     sandbox: {
       schema: profile.schema,
       mode: profile.mode,
+      claim_scope: profile.claim_scope,
       implementation: profile.implementation,
       executable: sandboxExecutable,
       network: false,
@@ -1008,11 +1093,20 @@ async function executeReplayOnBaseline({
       live: false,
       provider: false,
       secrets: false,
-      forbidden_access: ["network", "docker", "live", "provider", "secrets", "target_worktree_write", "baseline_worktree_write"],
+      process_exec_enforcement: profile.process_exec_enforcement,
+      secret_read_enforcement: profile.secret_read_enforcement,
+      denied_user_secret_roots: profile.denied_user_secret_roots,
+      forbidden_access: ["network", "docker", "live", "provider", "listed_user_secret_roots", "target_worktree_write", "baseline_worktree_write"],
       target_worktree_write: false,
       ephemeral_write: true,
       environment_inherited: false,
     },
+    trust_assumptions: [
+      "The checkout, approved tracked seed PoCs, Node executable, runner command, bootstrap, and CI are trusted.",
+      "The sandbox enforces network and filesystem-write boundaries but does not claim containment of arbitrary hostile code introduced before the trusted bootstrap.",
+      "Process-exec guards are PATH-based; approved tracked seeds are trusted not to bypass them with undeclared absolute executables.",
+    ],
+    access_claim_scope: profile.claim_scope,
     filesystem_write: {
       target_worktree: false,
       baseline_worktree: false,
@@ -1055,6 +1149,7 @@ async function executeReplayOnBaseline({
     residuals: [
       "A PASS proves only that the exact detached pre-fix source tree satisfies each tracked seed's negative oracle; it is not runtime or live-state proof.",
       "Positive, regression, hostile, integration, provider, and post-deploy evidence remain separate gates.",
+      "Generic containment of malicious tracked seed code is outside the declared threat model; the access attestations apply only to the approved exact seed corpus.",
     ],
   };
   await writeJsonAtomic(path.join(outputRoot, "summary.json"), summary);

@@ -2,6 +2,7 @@
   "schema": "platform.pre-fix-replay-sandbox/v2",
   "implementation": "macos-sandbox-exec",
   "mode": "offline-contained",
+  "claim_scope": "approved-tracked-seeds",
   "default_policy": "allow",
   "network": false,
   "docker": false,
@@ -20,7 +21,17 @@
   },
   "allowed_write_scope": "per-case ephemeral scratch directory only",
   "inherit_environment": false,
-  "allowed_executables": [
+  "process_exec_enforcement": "PATH-only-command-guards",
+  "secret_read_enforcement": "deny-listed-common-user-secret-roots",
+  "denied_user_secret_roots": [
+    ".ssh",
+    ".aws",
+    ".docker",
+    ".kube",
+    ".gnupg",
+    ".codex"
+  ],
+  "expected_executables": [
     "/bin/bash",
     "/bin/sh",
     "/usr/bin/env",
@@ -43,10 +54,9 @@
     "wget"
   ],
   "forbidden_capabilities": [
-    "Docker Engine or socket access",
-    "external or loopback network access",
-    "live infrastructure access",
-    "secret-store or user-home access",
+    "network access enforced by sandbox-exec",
+    "Docker and live/provider access absent from approved tracked seeds",
+    "reads from listed common user secret roots denied by sandbox-exec",
     "writes to the baseline or runner worktree"
   ]
 }
