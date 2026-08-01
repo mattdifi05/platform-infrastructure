@@ -59,6 +59,7 @@ const SOCKETLESS_SAFE_COHORT_LABELS = Object.freeze([
   "in-memory response producer SAFE cohort",
   "in-memory semantic executor SAFE cohort",
 ]);
+const SOCKETLESS_SAFE_RUNNER_TEST_COUNT = 12;
 let socketlessPreimportTodoBodyMustRemainClosed = false;
 
 test("client rejects raw argument injection before constructing a request", () => {
@@ -191,6 +192,240 @@ test("RED v2: real UDS producer emits one bounded canonical request frame", asyn
   assert.deepEqual(exchange.value, response);
 });
 
+test("PB-UDS: a lost peer after the exact frame yields one typed non-retryable outcome", async () => {
+  const request = wireRequest();
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "docker-action-client-peer-loss-"));
+  fs.chmodSync(directory, 0o700);
+  const socketPath = path.join(directory, "broker.sock");
+  const observedFrames = [];
+  let connections = 0;
+  const server = net.createServer((connection) => {
+    connections += 1;
+    const chunks = [];
+    connection.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+    connection.on("end", () => {
+      const bytes = Buffer.concat(chunks);
+      assert.equal(bytes.at(-1), 0x0a);
+      assert.equal(bytes.subarray(0, -1).includes(0x0a), false);
+      observedFrames.push(bytes);
+      connection.destroy();
+    });
+    connection.on("error", () => {});
+  });
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(socketPath, resolve);
+  });
+
+  try {
+    const failure = await sendActionRequest(
+      request,
+      socketPath,
+      CAPABILITY,
+      { responseTimeoutMs: 250 },
+    ).then(
+      () => null,
+      (error) => error,
+    );
+    assert.ok(failure instanceof Error);
+    assert.equal(failure.name, "DockerActionOutcomeUnknownError");
+    assert.equal(failure.code, "UNKNOWN_AFTER_ADMISSION");
+    assert.equal(failure.outcome, "UNKNOWN_AFTER_ADMISSION");
+    assert.equal(failure.retrySafe, false);
+    assert.equal(failure.requestFrameSent, true);
+    assert.equal(failure.action, request.action);
+    assert.equal(failure.requestId, request.requestId);
+    assert.equal(
+      failure.requestSha256,
+      sha256Bytes(canonicalJsonOracle(request)),
+    );
+    assert.ok(failure.cause instanceof Error);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(connections, 1, "one client invocation must open exactly one connection");
+    assert.deepEqual(observedFrames, [
+      Buffer.from(`${canonicalJsonOracle(request)}\n`),
+    ]);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    fs.rmSync(directory, { force: true, recursive: true });
+  }
+});
+
+test("PB-UDS: a response deadline after frame delivery is typed unknown, never safe to retry", async () => {
+  const request = wireRequest();
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "docker-action-client-deadline-"));
+  fs.chmodSync(directory, 0o700);
+  const socketPath = path.join(directory, "broker.sock");
+  let acceptedConnection;
+  let observedFrame;
+  let connections = 0;
+  const server = net.createServer({ allowHalfOpen: true }, (connection) => {
+    acceptedConnection = connection;
+    connections += 1;
+    const chunks = [];
+    connection.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+    connection.on("end", () => {
+      observedFrame = Buffer.concat(chunks);
+    });
+    connection.on("error", () => {});
+  });
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(socketPath, resolve);
+  });
+
+  try {
+    const failure = await sendActionRequest(
+      request,
+      socketPath,
+      CAPABILITY,
+      { responseTimeoutMs: 25 },
+    ).then(
+      () => null,
+      (error) => error,
+    );
+    assert.equal(failure?.outcome, "UNKNOWN_AFTER_ADMISSION");
+    assert.equal(failure?.retrySafe, false);
+    assert.match(failure?.cause?.message ?? "", /response deadline elapsed/);
+    assert.equal(connections, 1);
+    assert.deepEqual(
+      observedFrame,
+      Buffer.from(`${canonicalJsonOracle(request)}\n`),
+    );
+  } finally {
+    acceptedConnection?.destroy();
+    await new Promise((resolve) => server.close(resolve));
+    fs.rmSync(directory, { force: true, recursive: true });
+  }
+});
+
+test("PB-UDS: failure before a connection is not mislabeled as admitted", async () => {
+  const request = wireRequest();
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "docker-action-client-no-peer-"));
+  fs.chmodSync(directory, 0o700);
+  const socketPath = path.join(directory, "missing.sock");
+  try {
+    const failure = await sendActionRequest(
+      request,
+      socketPath,
+      CAPABILITY,
+      { responseTimeoutMs: 250 },
+    ).then(
+      () => null,
+      (error) => error,
+    );
+    assert.ok(failure instanceof Error);
+    assert.notEqual(failure.name, "DockerActionOutcomeUnknownError");
+    assert.equal(failure.outcome, undefined);
+    assert.equal(failure.requestFrameSent, undefined);
+  } finally {
+    fs.rmSync(directory, { force: true, recursive: true });
+  }
+});
+
+test("PB-UDS: the default response deadline covers the broker operation window", async () => {
+  assert.equal(
+    client.DEFAULT_RESPONSE_DEADLINE_MS,
+    (4 * 60 * 60_000) + 60_000,
+    "the client deadline must include the four-hour broker operation bound plus response grace",
+  );
+  const request = wireRequest();
+  const result = canonicalActionResultV2(request);
+  const response = signedResponse(request, {
+    status: "completed",
+    statusCode: 200,
+    errorCode: null,
+    result,
+  });
+  const exchange = await invokeWithLocalBroker(
+    (socketPath) => sendActionRequest(
+      request,
+      socketPath,
+      CAPABILITY,
+      { responseTimeoutMs: 100 },
+    ),
+    () => response,
+    {
+      encodeResponse: canonicalJsonOracle,
+      responseDelayMs: 25,
+    },
+  );
+  assert.equal(exchange.requestWire, canonicalJsonOracle(request));
+  assert.deepEqual(exchange.value, response);
+});
+
+test("PB-UDS: the real client main emits one canonical manual-reconciliation outcome", async (t) => {
+  const fixture = claimedJobFixture(t);
+  const action = "backup.job.execute";
+  const capabilityKey = fixtureCapabilityKey(action);
+  const redirect = clientMainFsRedirectFixture(t, {
+    capabilityKey,
+    capabilityPath: actionContract.ACTIONS[action].capabilityFile,
+  });
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "docker-action-client-main-peer-loss-"));
+  fs.chmodSync(directory, 0o700);
+  const socketPath = path.join(directory, "broker.sock");
+  let request;
+  let connections = 0;
+  const server = net.createServer((connection) => {
+    connections += 1;
+    const chunks = [];
+    connection.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+    connection.on("end", () => {
+      const bytes = Buffer.concat(chunks);
+      assert.equal(bytes.at(-1), 0x0a);
+      assert.equal(bytes.subarray(0, -1).includes(0x0a), false);
+      request = JSON.parse(bytes.subarray(0, -1).toString("utf8"));
+      connection.destroy();
+    });
+    connection.on("error", () => {});
+  });
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(socketPath, resolve);
+  });
+
+  try {
+    const result = await invokeSchedulerRealMain(
+      fixture,
+      socketPath,
+      redirect,
+      {
+        activeReceiptSha256: RECEIPT_SHA256,
+        combinedRenderSha256: COMBINED_RENDER_SHA256,
+        runtimeIntentId: INTENT_ID,
+      },
+      "unknown-after-admission",
+    );
+    assert.equal(client.UNKNOWN_AFTER_ADMISSION_EXIT_CODE, 74);
+    assert.equal(result.code, client.UNKNOWN_AFTER_ADMISSION_EXIT_CODE);
+    assert.equal(result.signal, null);
+    assert.equal(result.stdout, "");
+    assertSingleJsonLine(result.stderr, "unknown-after-admission client outcome");
+    const outcome = JSON.parse(result.stderr);
+    assert.deepEqual(Object.keys(outcome).sort(), [
+      "action",
+      "outcome",
+      "requestId",
+      "requestSha256",
+      "retrySafe",
+    ]);
+    assert.equal(outcome.action, action);
+    assert.equal(outcome.outcome, "UNKNOWN_AFTER_ADMISSION");
+    assert.equal(outcome.requestId, request.requestId);
+    assert.equal(
+      outcome.requestSha256,
+      sha256Bytes(canonicalJsonOracle(request)),
+    );
+    assert.equal(outcome.retrySafe, false);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(connections, 1, "the real main must never retry an ambiguous request");
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    fs.rmSync(directory, { force: true, recursive: true });
+  }
+});
+
 test("RED v2: real UDS consumer rejects the complete authenticated response mutation matrix", async (t) => {
   const request = wireRequest();
   assertManualRequestV2(request);
@@ -222,7 +457,7 @@ test("RED v2: real UDS consumer rejects the complete authenticated response muta
     [
       "request digest",
       resignResponse({ ...unsigned, requestSha256: "0".repeat(64) }),
-      /response request.*(?:digest|sha)/i,
+      /response (?:signed-)?request.*(?:digest|sha)/i,
     ],
     [
       "result bytes without matching digest",
@@ -930,6 +1165,7 @@ test("test-only semantic transport proxy rejects every method outside its exact 
       "createWorker",
       "deleteContainer",
       "inspectContainer",
+      "inspectContainerForRecovery",
       "inspectVolume",
       "logsContainer",
       "startContainer",
@@ -1253,7 +1489,11 @@ test("test-only fresh process behaviorally proves exact-once SAFE wrappers", asy
       await runSocketlessGuardedSafeChild("skip-body"),
       "guard-source skip-body mutant",
     );
-    assertSocketlessGuardedSafeChildEnvelope(skipped, "guard-source skip-body mutant");
+    assertSocketlessGuardedSafeChildEnvelope(
+      skipped,
+      "guard-source skip-body mutant",
+      { callbackBodiesExecuted: false },
+    );
     assert.deepEqual(
       skipped.report.wrapperLedger,
       SOCKETLESS_SAFE_COHORT_LABELS.map((label) => ({
@@ -1309,7 +1549,7 @@ test("test-only fresh process behaviorally proves exact-once SAFE wrappers", asy
 
 testWhenProductionExports(
   injectedAssemblyRequirements(),
-  "RED v2: real broker assembly signs and writes semantic success and rejection to the real client",
+  "RED v2: real broker core assembly signs and writes semantic success and rejection to the real client",
   async (t) => {
     const action = "backup.prune.plan";
     const command = "prune-manifest-backups-plan";
@@ -1366,7 +1606,7 @@ testWhenProductionExports(
     assert.equal(rejected.errorCode, "ACTION_REJECTED");
     assert.equal(rejected.result, null);
 
-    assert.equal(assembly.semanticExecutorFactoryCalls, 1);
+    assert.equal(assembly.testSemanticExecutorCreations, 1);
     assert.deepEqual(
       assembly.executedActions,
       [action, action],
@@ -2186,7 +2426,7 @@ testWhenClientExports(
 
 testWhenProductionExports(
   schedulerMainRequirements(),
-  "RED v2: scheduler executes the real client main through the real broker assembly",
+  "RED v2: scheduler executes the real client main through the real broker core assembly",
   async (t) => {
     const fixture = claimedJobFixture(t);
     const expected = await assertValidClaimedJobControl(
@@ -3153,7 +3393,11 @@ function parseSocketlessGuardedSafeChild(result, label) {
   return { ...result, report, summary: report.runnerSummary };
 }
 
-function assertSocketlessGuardedSafeChildEnvelope(result, label) {
+function assertSocketlessGuardedSafeChildEnvelope(
+  result,
+  label,
+  { callbackBodiesExecuted = true } = {},
+) {
   assert.equal(
     result.code,
     0,
@@ -3195,20 +3439,25 @@ function assertSocketlessGuardedSafeChildEnvelope(result, label) {
     SOCKETLESS_SAFE_COHORT_LABELS,
     `${label} must report only the three exact SAFE labels`,
   );
-  const expectedTodoCount = [
-    injectedAssemblyRequirements(),
-    injectedAssemblyRequirements(),
-    semanticCoreRequirements(),
-  ].filter((requirements) => missingProductionExports(requirements).length > 0).length;
+  const expectedTodoCount = callbackBodiesExecuted
+    ? [
+        injectedAssemblyRequirements(),
+        injectedAssemblyRequirements(),
+        semanticCoreRequirements(),
+      ].filter((requirements) => missingProductionExports(requirements).length > 0).length
+    : 0;
+  const expectedTestCount = callbackBodiesExecuted
+    ? SOCKETLESS_SAFE_RUNNER_TEST_COUNT
+    : SOCKETLESS_SAFE_COHORT_NAMES.length;
   assert.deepEqual(
     result.summary,
     {
       fail: 0,
-      pass: SOCKETLESS_SAFE_COHORT_NAMES.length - expectedTodoCount,
-      tests: SOCKETLESS_SAFE_COHORT_NAMES.length,
+      pass: expectedTestCount - expectedTodoCount,
+      tests: expectedTestCount,
       todo: expectedTodoCount,
     },
-    `${label} must execute only the three SAFE patterns with the exact current RED TODO count`,
+    `${label} must retain the exact SAFE root and nested-test count for its callback-execution mode`,
   );
   assert.deepEqual(
     result.report.runnerTestNames,
@@ -5345,18 +5594,14 @@ async function realBrokerAssembly(t, {
   const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "docker-action-real-assembly-"));
   fs.chmodSync(temporary, 0o700);
   const socketPath = path.join(temporary, "broker.sock");
-  const stateDir = path.join(temporary, "state-must-remain-unmaterialized");
   const responseFrames = [];
   const executedActions = [];
   const executedParameters = [];
   const replayEvents = [];
   let capabilityProviderCalls = 0;
-  let semanticExecutorFactoryCalls = 0;
+  let testSemanticExecutorCreations = 0;
   let trustedContextProviderCalls = 0;
   let outcomeIndex = 0;
-  const semanticExecutorOptions = Object.freeze({
-    assemblyProbe: "client-real-uds",
-  });
   const semanticExecutor = Object.freeze({
     async execute(action, { parameters }) {
       executedActions.push(action);
@@ -5376,6 +5621,7 @@ async function realBrokerAssembly(t, {
       throw new Error("the clean replay fixture must not recover a worker");
     },
   });
+  testSemanticExecutorCreations += 1;
   const replayStore = {
     async recover(engine) {
       replayEvents.push("recover");
@@ -5404,9 +5650,7 @@ async function realBrokerAssembly(t, {
       };
     },
   };
-  const server = broker.createDockerActionBroker({
-    socketPath,
-    stateDir,
+  const core = broker.createBrokerCore({
     trustedContextProvider: async () => {
       trustedContextProviderCalls += 1;
       return trusted;
@@ -5415,18 +5659,48 @@ async function realBrokerAssembly(t, {
       capabilityProviderCalls += 1;
       return capabilityKey;
     },
+    engine: semanticExecutor,
     replayStore,
-    semanticExecutorFactory(options) {
-      semanticExecutorFactoryCalls += 1;
-      assert.deepEqual(options, semanticExecutorOptions);
-      return semanticExecutor;
-    },
-    semanticExecutorOptions,
-    onResponseFrame(frame) {
-      responseFrames.push(Buffer.from(frame));
-    },
     now,
     operationTimeoutMs: 100,
+  });
+  let serverFailure;
+  const server = net.createServer({ allowHalfOpen: true }, (connection) => {
+    const chunks = [];
+    let length = 0;
+    connection.on("data", (chunk) => {
+      const bytes = Buffer.from(chunk);
+      length += bytes.length;
+      if (length > MAX_SIGNED_REQUEST_BYTES + 1) {
+        serverFailure ??= new Error("test-local broker core request frame is oversized");
+        connection.destroy(serverFailure);
+        return;
+      }
+      chunks.push(bytes);
+    });
+    connection.on("end", async () => {
+      if (serverFailure) return;
+      try {
+        const frame = Buffer.concat(chunks, length);
+        if (frame.length < 2 || frame.at(-1) !== 0x0a || frame.subarray(0, -1).includes(0x0a)) {
+          throw new Error("test-local broker core requires exactly one delimited request frame");
+        }
+        const response = await core.handle(frame.subarray(0, -1));
+        const encoded = broker.encodeActionResponseFrame({
+          statusCode: response.statusCode,
+          ...response.body,
+        });
+        assertProductionResponseFrame(encoded, response.body);
+        responseFrames.push(Buffer.from(encoded));
+        connection.end(encoded);
+      } catch (error) {
+        serverFailure ??= error;
+        connection.destroy(error);
+      }
+    });
+    connection.on("error", (error) => {
+      serverFailure ??= error;
+    });
   });
   t.after(async () => {
     if (server.listening) {
@@ -5439,24 +5713,24 @@ async function realBrokerAssembly(t, {
     }
     fs.rmSync(temporary, { force: true, recursive: true });
   });
-  await server.initialize();
+  await replayStore.recover(semanticExecutor);
   await new Promise((resolve, reject) => {
     server.once("error", reject);
     server.listen(socketPath, resolve);
   });
+  fs.chmodSync(socketPath, 0o600);
   return {
     get capabilityProviderCalls() {
       return capabilityProviderCalls;
     },
     executedActions,
     executedParameters,
-    get semanticExecutorFactoryCalls() {
-      return semanticExecutorFactoryCalls;
+    get testSemanticExecutorCreations() {
+      return testSemanticExecutorCreations;
     },
     replayEvents,
     responseFrames,
     socketPath,
-    stateDir,
     get trustedContextProviderCalls() {
       return trustedContextProviderCalls;
     },
@@ -5553,6 +5827,16 @@ function exactPrunePlanTransportOracle({ successRequestId, trusted }) {
         name: workerName,
         trusted,
       });
+    },
+
+    async inspectContainerForRecovery(name, signal) {
+      assert.equal(arguments.length, 2, "inspectContainerForRecovery exact argument count");
+      assertSignal(signal, "inspectContainerForRecovery");
+      assert.equal(name, workerName, "inspectContainerForRecovery exact deterministic worker name");
+      assert.notEqual(signal, firstRequestSignal, "recovery cleanup must use its own bounded signal");
+      cleanupSignal = signal;
+      calls.push({ method: "inspectContainerForRecovery", name, signal });
+      return null;
     },
 
     async startContainer(id, signal) {
@@ -5660,8 +5944,15 @@ function expectedPrunePlanPhaseAuthority(receipt) {
     schema: "platform.docker-worker.phase-authority/v2",
     action,
     actionProfile: structuredClone(receipt.resources.actionProfiles[action]),
+    effectiveEndpointIds: [],
+    effectiveHelperProfileIds: [],
+    effectiveHelperSecretSetIds: [],
+    effectiveNetworkIds: [],
     phaseProfile: structuredClone(phase),
     resources: {
+      backupResources: {},
+      helperProfiles: {},
+      helperSecretSets: {},
       mounts: Object.fromEntries(
         phase.mountIds.map((id) => [
           id,
@@ -5674,6 +5965,7 @@ function expectedPrunePlanPhaseAuthority(receipt) {
           structuredClone(receipt.resources.networks[id]),
         ]),
       ),
+      serviceEndpoints: {},
       volumes: Object.fromEntries(
         [...new Set(volumeIds)].map((id) => [
           id,
@@ -6394,6 +6686,7 @@ async function invokeWithLocalBroker(
   responseForRequest,
   {
     encodeResponse = JSON.stringify,
+    responseDelayMs = 0,
     responseFrame,
   } = {},
 ) {
@@ -6403,7 +6696,7 @@ async function invokeWithLocalBroker(
   let receivedFrame;
   let receivedWire;
   let serverFailure;
-  const server = net.createServer((connection) => {
+  const server = net.createServer({ allowHalfOpen: true }, (connection) => {
     let bytes = "";
     connection.setEncoding("utf8");
     connection.on("data", (chunk) => {
@@ -6417,11 +6710,14 @@ async function invokeWithLocalBroker(
         [receivedWire] = frames;
         receivedFrame = JSON.parse(frames[0]);
         const response = responseForRequest(receivedFrame);
-        connection.end(
-          responseFrame
-            ? responseFrame(response)
-            : `${encodeResponse(response)}\n`,
-        );
+        const frame = responseFrame
+          ? responseFrame(response)
+          : `${encodeResponse(response)}\n`;
+        if (responseDelayMs > 0) {
+          setTimeout(() => connection.end(frame), responseDelayMs);
+        } else {
+          connection.end(frame);
+        }
       } catch (error) {
         serverFailure = error;
         connection.destroy(error);
