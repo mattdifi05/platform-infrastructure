@@ -107,6 +107,7 @@ const SERVICE_ENDPOINT_KEYS = Object.freeze([
   "tlsMode",
 ]);
 const HELPER_PROFILE_KEYS = Object.freeze([
+  "declaredVolumePaths",
   "engine",
   "entrypoint",
   "imageId",
@@ -115,6 +116,8 @@ const HELPER_PROFILE_KEYS = Object.freeze([
   "operation",
   "outputMode",
   "resourceKind",
+  "runtimeGid",
+  "runtimeUid",
   "secretSetId",
   "helperProfileId",
 ]);
@@ -184,6 +187,7 @@ const RESTIC_IMAGE_ID = `sha256:${"c".repeat(64)}`;
 const RESTIC_IMAGE_REF = "restic/restic:0.18.0@sha256:4cf4a61ef9786f4de53e9de8c8f5c040f33830eb0a10bf3d614410ee2fcb6120";
 const EXPECTED_HELPER_PROFILES = Object.freeze({
   "helper.capture.mariadb": Object.freeze({
+    declaredVolumePaths: Object.freeze(["/var/lib/mysql"]),
     engine: "mariadb",
     entrypoint: Object.freeze(["/usr/bin/mariadb-dump"]),
     imageId: MARIADB_IMAGE_ID,
@@ -192,10 +196,13 @@ const EXPECTED_HELPER_PROFILES = Object.freeze({
     operation: "capture",
     outputMode: "artifact",
     resourceKind: "database",
+    runtimeGid: 0,
+    runtimeUid: 0,
     secretSetId: "mariadb.capture.credentials",
     helperProfileId: "helper.capture.mariadb",
   }),
   "helper.capture.minio": Object.freeze({
+    declaredVolumePaths: Object.freeze([]),
     engine: "minio",
     entrypoint: Object.freeze(["/bin/sh"]),
     imageId: MINIO_MC_IMAGE_ID,
@@ -204,10 +211,13 @@ const EXPECTED_HELPER_PROFILES = Object.freeze({
     operation: "capture",
     outputMode: "artifact",
     resourceKind: "storage",
+    runtimeGid: 0,
+    runtimeUid: 0,
     secretSetId: "minio.capture.credentials",
     helperProfileId: "helper.capture.minio",
   }),
   "helper.capture.postgres": Object.freeze({
+    declaredVolumePaths: Object.freeze(["/var/lib/postgresql"]),
     engine: "postgres",
     entrypoint: Object.freeze(["/usr/local/bin/pg_dump"]),
     imageId: POSTGRES_IMAGE_ID,
@@ -216,10 +226,13 @@ const EXPECTED_HELPER_PROFILES = Object.freeze({
     operation: "capture",
     outputMode: "artifact",
     resourceKind: "database",
+    runtimeGid: 0,
+    runtimeUid: 0,
     secretSetId: "postgres.capture.credentials",
     helperProfileId: "helper.capture.postgres",
   }),
   "helper.offsite.restic": Object.freeze({
+    declaredVolumePaths: Object.freeze([]),
     engine: "restic",
     entrypoint: Object.freeze(["/usr/bin/restic"]),
     imageId: RESTIC_IMAGE_ID,
@@ -228,10 +241,13 @@ const EXPECTED_HELPER_PROFILES = Object.freeze({
     operation: "offsite-sync",
     outputMode: "json",
     resourceKind: null,
+    runtimeGid: 0,
+    runtimeUid: 0,
     secretSetId: "offsite.credentials",
     helperProfileId: "helper.offsite.restic",
   }),
   "helper.restore.minio.restore": Object.freeze({
+    declaredVolumePaths: Object.freeze([]),
     engine: "minio",
     entrypoint: Object.freeze(["/usr/bin/mc"]),
     imageId: MINIO_MC_IMAGE_ID,
@@ -240,10 +256,13 @@ const EXPECTED_HELPER_PROFILES = Object.freeze({
     operation: "restore",
     outputMode: "none",
     resourceKind: "storage",
+    runtimeGid: 0,
+    runtimeUid: 0,
     secretSetId: null,
     helperProfileId: "helper.restore.minio.restore",
   }),
   "helper.restore.minio.server": Object.freeze({
+    declaredVolumePaths: Object.freeze(["/data"]),
     engine: "minio",
     entrypoint: Object.freeze(["/usr/bin/minio"]),
     imageId: MINIO_SERVER_IMAGE_ID,
@@ -252,10 +271,13 @@ const EXPECTED_HELPER_PROFILES = Object.freeze({
     operation: "restore-server",
     outputMode: "none",
     resourceKind: "storage",
+    runtimeGid: 1000,
+    runtimeUid: 1000,
     secretSetId: null,
     helperProfileId: "helper.restore.minio.server",
   }),
   "helper.restore.minio.verify": Object.freeze({
+    declaredVolumePaths: Object.freeze([]),
     engine: "minio",
     entrypoint: Object.freeze(["/usr/bin/mc"]),
     imageId: MINIO_MC_IMAGE_ID,
@@ -264,10 +286,13 @@ const EXPECTED_HELPER_PROFILES = Object.freeze({
     operation: "verify",
     outputMode: "json",
     resourceKind: "storage",
+    runtimeGid: 0,
+    runtimeUid: 0,
     secretSetId: null,
     helperProfileId: "helper.restore.minio.verify",
   }),
   "helper.restore.mariadb.restore": Object.freeze({
+    declaredVolumePaths: Object.freeze(["/var/lib/mysql"]),
     engine: "mariadb",
     entrypoint: Object.freeze(["/usr/bin/mariadb"]),
     imageId: MARIADB_IMAGE_ID,
@@ -276,10 +301,13 @@ const EXPECTED_HELPER_PROFILES = Object.freeze({
     operation: "restore",
     outputMode: "none",
     resourceKind: "database",
+    runtimeGid: 0,
+    runtimeUid: 0,
     secretSetId: null,
     helperProfileId: "helper.restore.mariadb.restore",
   }),
   "helper.restore.mariadb.server": Object.freeze({
+    declaredVolumePaths: Object.freeze(["/var/lib/mysql"]),
     engine: "mariadb",
     entrypoint: Object.freeze(["/usr/local/bin/docker-entrypoint.sh"]),
     imageId: MARIADB_IMAGE_ID,
@@ -288,10 +316,13 @@ const EXPECTED_HELPER_PROFILES = Object.freeze({
     operation: "restore-server",
     outputMode: "none",
     resourceKind: "database",
+    runtimeGid: 999,
+    runtimeUid: 999,
     secretSetId: null,
     helperProfileId: "helper.restore.mariadb.server",
   }),
   "helper.restore.mariadb.verify": Object.freeze({
+    declaredVolumePaths: Object.freeze(["/var/lib/mysql"]),
     engine: "mariadb",
     entrypoint: Object.freeze(["/usr/bin/mariadb"]),
     imageId: MARIADB_IMAGE_ID,
@@ -300,10 +331,13 @@ const EXPECTED_HELPER_PROFILES = Object.freeze({
     operation: "verify",
     outputMode: "json",
     resourceKind: "database",
+    runtimeGid: 0,
+    runtimeUid: 0,
     secretSetId: null,
     helperProfileId: "helper.restore.mariadb.verify",
   }),
   "helper.restore.postgres.restore": Object.freeze({
+    declaredVolumePaths: Object.freeze(["/var/lib/postgresql"]),
     engine: "postgres",
     entrypoint: Object.freeze(["/usr/local/bin/pg_restore"]),
     imageId: POSTGRES_IMAGE_ID,
@@ -312,10 +346,13 @@ const EXPECTED_HELPER_PROFILES = Object.freeze({
     operation: "restore",
     outputMode: "none",
     resourceKind: "database",
+    runtimeGid: 0,
+    runtimeUid: 0,
     secretSetId: null,
     helperProfileId: "helper.restore.postgres.restore",
   }),
   "helper.restore.postgres.server": Object.freeze({
+    declaredVolumePaths: Object.freeze(["/var/lib/postgresql"]),
     engine: "postgres",
     entrypoint: Object.freeze(["/usr/local/bin/docker-entrypoint.sh"]),
     imageId: POSTGRES_IMAGE_ID,
@@ -324,10 +361,13 @@ const EXPECTED_HELPER_PROFILES = Object.freeze({
     operation: "restore-server",
     outputMode: "none",
     resourceKind: "database",
+    runtimeGid: 70,
+    runtimeUid: 70,
     secretSetId: null,
     helperProfileId: "helper.restore.postgres.server",
   }),
   "helper.restore.postgres.verify": Object.freeze({
+    declaredVolumePaths: Object.freeze(["/var/lib/postgresql"]),
     engine: "postgres",
     entrypoint: Object.freeze(["/usr/local/bin/psql"]),
     imageId: POSTGRES_IMAGE_ID,
@@ -336,6 +376,8 @@ const EXPECTED_HELPER_PROFILES = Object.freeze({
     operation: "verify",
     outputMode: "json",
     resourceKind: "database",
+    runtimeGid: 0,
+    runtimeUid: 0,
     secretSetId: null,
     helperProfileId: "helper.restore.postgres.verify",
   }),
@@ -853,6 +895,8 @@ test("RED v2: broker core emits the exact authenticated response wire contract",
     acquire: [],
     consume: [],
     engine: [],
+    journal: [],
+    lifecycle: [],
   };
   let lease;
   const replayStore = {
@@ -868,9 +912,13 @@ test("RED v2: broker core emits the exact authenticated response wire contract",
           requestId: observedRequest.requestId,
           requestSha256: fixtureSha256(canonicalFixtureJson(observedRequest)),
         }),
-        preserve() {},
-        recordWorker() {},
-        release() {},
+        preserve() { calls.lifecycle.push("preserve"); },
+        recordEvent(event) {
+          calls.journal.push(structuredClone(event));
+          calls.lifecycle.push(`journal:${event.event}`);
+        },
+        recordWorker() { calls.lifecycle.push("recordWorker"); },
+        release() { calls.lifecycle.push("release"); },
       });
       return lease;
     },
@@ -886,6 +934,11 @@ test("RED v2: broker core emits the exact authenticated response wire contract",
     engine: {
       async execute(...args) {
         calls.engine.push(args);
+        args[1].lease.recordEvent({
+          event: "action-completed",
+          requestSha256: canonicalSignedRequestSha256(request),
+          resultSha256: fixtureSha256(canonicalFixtureJson(result)),
+        });
         return result;
       },
     },
@@ -950,6 +1003,12 @@ test("RED v2: broker core emits the exact authenticated response wire contract",
   assert.deepEqual(response.result, result);
   assertResponseBoundToSignedRequestAndResult(response, request);
   assert.equal(response.mac, responseMac(omit(response, "mac"), key));
+  assert.deepEqual(calls.journal, [{
+    event: "action-completed",
+    requestSha256,
+    resultSha256,
+  }]);
+  assert.deepEqual(calls.lifecycle, ["journal:action-completed", "release"]);
 
   const truncated = admittedRequestShape(request);
   assert.throws(
@@ -1807,7 +1866,22 @@ test("RED v2: active receipt binds exact service endpoints and helper profiles t
     assert.notEqual(helperProfile.imageRef.split("@").at(-1), helperProfile.imageId);
     assert.equal(Array.isArray(helperProfile.entrypoint), true);
     assert.equal(helperProfile.entrypoint.length, 1);
+    assert.equal(Number.isSafeInteger(helperProfile.runtimeUid), true);
+    assert.equal(Number.isSafeInteger(helperProfile.runtimeGid), true);
+    assert.equal(Array.isArray(helperProfile.declaredVolumePaths), true);
   }
+  assert.deepEqual(
+    normalized.resources.helperProfiles["helper.restore.mariadb.server"],
+    { ...EXPECTED_HELPER_PROFILES["helper.restore.mariadb.server"], runtimeUid: 999, runtimeGid: 999 },
+  );
+  assert.deepEqual(
+    normalized.resources.helperProfiles["helper.restore.postgres.server"],
+    { ...EXPECTED_HELPER_PROFILES["helper.restore.postgres.server"], runtimeUid: 70, runtimeGid: 70 },
+  );
+  assert.deepEqual(
+    normalized.resources.helperProfiles["helper.restore.minio.server"],
+    { ...EXPECTED_HELPER_PROFILES["helper.restore.minio.server"], runtimeUid: 1000, runtimeGid: 1000 },
+  );
   for (const [phaseId, profile] of Object.entries(normalized.resources.phaseProfiles)) {
     const expected = EXPECTED_PHASE_ENDPOINT_HELPER_IDS[phaseId];
     assert.deepEqual(profile.endpointIds, expected.endpointIds, `${phaseId}.endpointIds`);
@@ -1912,6 +1986,21 @@ test("RED v2: endpoint and helper authority rejects canonical widening and coher
     }],
     ["helper image ID invalid", (value) => {
       value.resources.helperProfiles["helper.capture.postgres"].imageId = "sha256:invalid";
+    }],
+    ["helper runtime uid substitution", (value) => {
+      value.resources.helperProfiles["helper.restore.postgres.server"].runtimeUid = 0;
+    }],
+    ["helper runtime gid substitution", (value) => {
+      value.resources.helperProfiles["helper.restore.mariadb.server"].runtimeGid = 0;
+    }],
+    ["helper declared volume deletion", (value) => {
+      value.resources.helperProfiles["helper.capture.postgres"].declaredVolumePaths = [];
+    }],
+    ["helper declared volume extension", (value) => {
+      value.resources.helperProfiles["helper.capture.postgres"].declaredVolumePaths = [
+        ...(value.resources.helperProfiles["helper.capture.postgres"].declaredVolumePaths ?? []),
+        "/host",
+      ];
     }],
     ["phase gains endpoint", (value) => {
       value.resources.phaseProfiles["prune.plan"].endpointIds = ["offsite.repository"];
@@ -2346,7 +2435,17 @@ function assertSemanticCoreContext(context, request, trusted, lease, label) {
     `${label} must carry the exact request parameters`,
   );
   assert.strictEqual(context.trusted, trusted, `${label} must carry the exact trusted context`);
-  assert.strictEqual(context.lease, lease, `${label} must carry the acquired lease`);
+  assert.notStrictEqual(context.lease, lease, `${label} must wrap terminal delivery semantics`);
+  assert.deepEqual(
+    Object.keys(context.lease).sort(),
+    ["lineage", "preserve", "recordEvent", "recordWorker", "release"],
+    `${label} execution lease schema`,
+  );
+  assert.strictEqual(context.lease.lineage, lease.lineage, `${label} lineage delegation`);
+  assert.strictEqual(context.lease.preserve, lease.preserve, `${label} preserve delegation`);
+  assert.strictEqual(context.lease.release, lease.release, `${label} release delegation`);
+  assert.notStrictEqual(context.lease.recordEvent, lease.recordEvent, `${label} recordEvent must be wrapped`);
+  assert.notStrictEqual(context.lease.recordWorker, lease.recordWorker, `${label} recordWorker must be guarded`);
   assertTrustedRequestLineage(context.lease.lineage, request, trusted, `${label} lease`);
   assert.ok(
     context.signal && typeof context.signal.aborted === "boolean",

@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import path from "node:path";
 
 export const REQUEST_SCHEMA = "platform.docker-action.request/v2";
 export const RUNTIME_INTENT_SCHEMA = "platform.docker-runtime-intent/v1";
@@ -320,6 +321,7 @@ const SERVICE_ENDPOINT_PLANS = deepFreeze({
 
 const HELPER_PROFILE_PLANS = deepFreeze({
   "helper.capture.mariadb": helperProfilePlan({
+    declaredVolumePaths: ["/var/lib/mysql"],
     engine: "mariadb",
     entrypoint: ["/usr/bin/mariadb-dump"],
     imageRef: "mariadb:12.3.2@sha256:b1c7bf836e64ed9406a8984af29509f40089d55cea14b32f12c4726a1f17104b",
@@ -327,9 +329,12 @@ const HELPER_PROFILE_PLANS = deepFreeze({
     operation: "capture",
     outputMode: "artifact",
     resourceKind: "database",
+    runtimeGid: 0,
+    runtimeUid: 0,
     secretSetId: "mariadb.capture.credentials",
   }),
   "helper.capture.minio": helperProfilePlan({
+    declaredVolumePaths: [],
     engine: "minio",
     entrypoint: ["/bin/sh"],
     imageRef: "quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727",
@@ -337,9 +342,12 @@ const HELPER_PROFILE_PLANS = deepFreeze({
     operation: "capture",
     outputMode: "artifact",
     resourceKind: "storage",
+    runtimeGid: 0,
+    runtimeUid: 0,
     secretSetId: "minio.capture.credentials",
   }),
   "helper.capture.postgres": helperProfilePlan({
+    declaredVolumePaths: ["/var/lib/postgresql"],
     engine: "postgres",
     entrypoint: ["/usr/local/bin/pg_dump"],
     imageRef: "postgres:18-alpine@sha256:1b1689b20d16a014a3d195653381cf2caa75a41a92d93b255a9d6ea29fd353aa",
@@ -347,9 +355,12 @@ const HELPER_PROFILE_PLANS = deepFreeze({
     operation: "capture",
     outputMode: "artifact",
     resourceKind: "database",
+    runtimeGid: 0,
+    runtimeUid: 0,
     secretSetId: "postgres.capture.credentials",
   }),
   "helper.offsite.restic": helperProfilePlan({
+    declaredVolumePaths: [],
     engine: "restic",
     entrypoint: ["/usr/bin/restic"],
     imageRef: "restic/restic:0.18.0@sha256:4cf4a61ef9786f4de53e9de8c8f5c040f33830eb0a10bf3d614410ee2fcb6120",
@@ -357,79 +368,108 @@ const HELPER_PROFILE_PLANS = deepFreeze({
     operation: "offsite-sync",
     outputMode: "json",
     resourceKind: null,
+    runtimeGid: 0,
+    runtimeUid: 0,
     secretSetId: "offsite.credentials",
   }),
   "helper.restore.mariadb.restore": helperProfilePlan({
+    declaredVolumePaths: ["/var/lib/mysql"],
     engine: "mariadb",
     entrypoint: ["/usr/bin/mariadb"],
     imageRef: "mariadb:12.3.2@sha256:b1c7bf836e64ed9406a8984af29509f40089d55cea14b32f12c4726a1f17104b",
     operation: "restore",
     outputMode: "none",
     resourceKind: "database",
+    runtimeGid: 0,
+    runtimeUid: 0,
   }),
   "helper.restore.mariadb.server": helperProfilePlan({
+    declaredVolumePaths: ["/var/lib/mysql"],
     engine: "mariadb",
     entrypoint: ["/usr/local/bin/docker-entrypoint.sh"],
     imageRef: "mariadb:12.3.2@sha256:b1c7bf836e64ed9406a8984af29509f40089d55cea14b32f12c4726a1f17104b",
     operation: "restore-server",
     outputMode: "none",
     resourceKind: "database",
+    runtimeGid: 999,
+    runtimeUid: 999,
   }),
   "helper.restore.mariadb.verify": helperProfilePlan({
+    declaredVolumePaths: ["/var/lib/mysql"],
     engine: "mariadb",
     entrypoint: ["/usr/bin/mariadb"],
     imageRef: "mariadb:12.3.2@sha256:b1c7bf836e64ed9406a8984af29509f40089d55cea14b32f12c4726a1f17104b",
     operation: "verify",
     outputMode: "json",
     resourceKind: "database",
+    runtimeGid: 0,
+    runtimeUid: 0,
   }),
   "helper.restore.minio.restore": helperProfilePlan({
+    declaredVolumePaths: [],
     engine: "minio",
     entrypoint: ["/usr/bin/mc"],
     imageRef: "quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727",
     operation: "restore",
     outputMode: "none",
     resourceKind: "storage",
+    runtimeGid: 0,
+    runtimeUid: 0,
   }),
   "helper.restore.minio.server": helperProfilePlan({
+    declaredVolumePaths: ["/data"],
     engine: "minio",
     entrypoint: ["/usr/bin/minio"],
     imageRef: "quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e",
     operation: "restore-server",
     outputMode: "none",
     resourceKind: "storage",
+    runtimeGid: 1000,
+    runtimeUid: 1000,
   }),
   "helper.restore.minio.verify": helperProfilePlan({
+    declaredVolumePaths: [],
     engine: "minio",
     entrypoint: ["/usr/bin/mc"],
     imageRef: "quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727",
     operation: "verify",
     outputMode: "json",
     resourceKind: "storage",
+    runtimeGid: 0,
+    runtimeUid: 0,
   }),
   "helper.restore.postgres.restore": helperProfilePlan({
+    declaredVolumePaths: ["/var/lib/postgresql"],
     engine: "postgres",
     entrypoint: ["/usr/local/bin/pg_restore"],
     imageRef: "postgres:18-alpine@sha256:1b1689b20d16a014a3d195653381cf2caa75a41a92d93b255a9d6ea29fd353aa",
     operation: "restore",
     outputMode: "none",
     resourceKind: "database",
+    runtimeGid: 0,
+    runtimeUid: 0,
   }),
   "helper.restore.postgres.server": helperProfilePlan({
+    declaredVolumePaths: ["/var/lib/postgresql"],
     engine: "postgres",
     entrypoint: ["/usr/local/bin/docker-entrypoint.sh"],
     imageRef: "postgres:18-alpine@sha256:1b1689b20d16a014a3d195653381cf2caa75a41a92d93b255a9d6ea29fd353aa",
     operation: "restore-server",
     outputMode: "none",
     resourceKind: "database",
+    runtimeGid: 70,
+    runtimeUid: 70,
   }),
   "helper.restore.postgres.verify": helperProfilePlan({
+    declaredVolumePaths: ["/var/lib/postgresql"],
     engine: "postgres",
     entrypoint: ["/usr/local/bin/psql"],
     imageRef: "postgres:18-alpine@sha256:1b1689b20d16a014a3d195653381cf2caa75a41a92d93b255a9d6ea29fd353aa",
     operation: "verify",
     outputMode: "json",
     resourceKind: "database",
+    runtimeGid: 0,
+    runtimeUid: 0,
   }),
 });
 
@@ -1223,6 +1263,7 @@ function normalizeHelperProfiles(value, { networks, workerSecretSets }) {
     "helperProfiles",
     (entry, helperProfileId) => {
       assertExactKeys(entry, [
+        "declaredVolumePaths",
         "engine",
         "entrypoint",
         "helperProfileId",
@@ -1232,6 +1273,8 @@ function normalizeHelperProfiles(value, { networks, workerSecretSets }) {
         "operation",
         "outputMode",
         "resourceKind",
+        "runtimeGid",
+        "runtimeUid",
         "secretSetId",
       ], `helper profile ${helperProfileId}`);
       const expected = HELPER_PROFILE_PLANS[helperProfileId];
@@ -1247,6 +1290,18 @@ function normalizeHelperProfiles(value, { networks, workerSecretSets }) {
         || !entry.entrypoint.every((item) => typeof item === "string" && item.startsWith("/")
           && !item.includes("\0") && !item.includes("/../"))) {
         fail(403, `helper profile ${helperProfileId} image or entrypoint attestation is invalid`);
+      }
+      if (!Number.isSafeInteger(entry.runtimeUid) || entry.runtimeUid < 0
+        || !Number.isSafeInteger(entry.runtimeGid) || entry.runtimeGid < 0
+        || !Array.isArray(entry.declaredVolumePaths)
+        || entry.declaredVolumePaths.length > 8
+        || entry.declaredVolumePaths.some((item, index, values) => (
+          typeof item !== "string" || !item.startsWith("/") || item.includes("\0")
+          || item.includes("/../") || item.endsWith("/..")
+          || path.posix.normalize(item) !== item
+          || values.indexOf(item) !== index
+        ))) {
+        fail(403, `helper profile ${helperProfileId} runtime principal or declared volumes are invalid`);
       }
       if (entry.networkId !== null && !networks[entry.networkId]) {
         fail(403, `helper profile ${helperProfileId} network binding is missing`);
@@ -1649,6 +1704,7 @@ function phasePlan({
 }
 
 function helperProfilePlan({
+  declaredVolumePaths,
   engine,
   entrypoint,
   imageRef,
@@ -1656,9 +1712,12 @@ function helperProfilePlan({
   operation,
   outputMode,
   resourceKind,
+  runtimeGid,
+  runtimeUid,
   secretSetId = null,
 }) {
   return {
+    declaredVolumePaths,
     engine,
     entrypoint,
     imageRef,
@@ -1666,6 +1725,8 @@ function helperProfilePlan({
     operation,
     outputMode,
     resourceKind,
+    runtimeGid,
+    runtimeUid,
     secretSetId,
   };
 }

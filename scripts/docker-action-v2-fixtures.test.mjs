@@ -9,6 +9,7 @@ import {
   EXPECTED_ACTION_BINDINGS,
   EXPECTED_ACTION_PHASES,
   EXPECTED_EVIDENCE_RESULT_PHASE,
+  EXPECTED_HELPER_PROFILES,
   EXPECTED_PHASE_PROFILES,
   MAX_PHASE_OUTPUT_BYTES_V2,
   REQUEST_SCHEMA_V2,
@@ -54,6 +55,31 @@ test("fixture oracle has exact v2 schemas, resource maps and sealed profiles", (
     assert.equal(profile.phaseSha256, phaseDigest(profile), `${phaseId} phase digest`);
     assert.match(profile.workerImageRef, /@sha256:[a-f0-9]{64}$/);
     assert.match(profile.workerImageId, /^sha256:[a-f0-9]{64}$/);
+  }
+});
+
+test("fixture helper authority binds runtime principals and image-declared volumes", () => {
+  const expected = {
+    "helper.capture.mariadb": [0, 0, ["/var/lib/mysql"]],
+    "helper.capture.minio": [0, 0, []],
+    "helper.capture.postgres": [0, 0, ["/var/lib/postgresql"]],
+    "helper.offsite.restic": [0, 0, []],
+    "helper.restore.mariadb.restore": [0, 0, ["/var/lib/mysql"]],
+    "helper.restore.mariadb.server": [999, 999, ["/var/lib/mysql"]],
+    "helper.restore.mariadb.verify": [0, 0, ["/var/lib/mysql"]],
+    "helper.restore.minio.restore": [0, 0, []],
+    "helper.restore.minio.server": [1000, 1000, ["/data"]],
+    "helper.restore.minio.verify": [0, 0, []],
+    "helper.restore.postgres.restore": [0, 0, ["/var/lib/postgresql"]],
+    "helper.restore.postgres.server": [70, 70, ["/var/lib/postgresql"]],
+    "helper.restore.postgres.verify": [0, 0, ["/var/lib/postgresql"]],
+  };
+  assert.deepEqual(Object.keys(EXPECTED_HELPER_PROFILES).sort(), Object.keys(expected).sort());
+  for (const [helperProfileId, [runtimeUid, runtimeGid, declaredVolumePaths]] of Object.entries(expected)) {
+    const profile = EXPECTED_HELPER_PROFILES[helperProfileId];
+    assert.equal(profile.runtimeUid, runtimeUid, `${helperProfileId}.runtimeUid`);
+    assert.equal(profile.runtimeGid, runtimeGid, `${helperProfileId}.runtimeGid`);
+    assert.deepEqual(profile.declaredVolumePaths, declaredVolumePaths, `${helperProfileId}.declaredVolumePaths`);
   }
 });
 
