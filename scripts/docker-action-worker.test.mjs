@@ -3899,27 +3899,60 @@ syncBuiltinESMExports();
     "EventEmitter lock-removal mutant did not expose the raw child emitter",
   );
 
+  const writeExactGuardMutant = (
+    label,
+    needle,
+    replacement,
+    baseSource = canonicalGuardSource,
+  ) => {
+    assert.equal(
+      baseSource.split(needle).length - 1,
+      1,
+      `${label} must replace exactly one canonical guard fragment`,
+    );
+    const mutantSource = baseSource.replace(needle, replacement);
+    assert.notEqual(
+      mutantSource,
+      baseSource,
+      `${label} was not activated`,
+    );
+    assert.equal(
+      mutantSource.split(replacement).length - 1,
+      1,
+      `${label} replacement is not unique in the mutant guard`,
+    );
+    const mutantPath = path.join(root, `${label}.mjs`);
+    fs.writeFileSync(mutantPath, mutantSource, { mode: 0o600 });
+    return { path: mutantPath, source: mutantSource };
+  };
+
   fs.rmSync(tracePath, { force: true });
-  const environmentIdentityReplacement = runGuarded(`
+  const environmentIdentitySource = `
     import childProcess from "node:child_process";
     const originalEnvironment = process.env;
     const replacementEnvironment = new Proxy(originalEnvironment, {});
     process.env = replacementEnvironment;
     try {
-      childProcess.spawn(
+      const child = childProcess.spawn(
         ${JSON.stringify(exactExecutable)},
         [],
         {
-          env: replacementEnvironment,
+          env: originalEnvironment,
           shell: false,
           stdio: ["ignore", "pipe", "pipe"],
         },
       );
+      child.on("close", () => {
+        process.stdout.write("environment-identity-mutant-sink\\n");
+      });
     } catch (error) {
       process.stderr.write("environment-identity-rejected:" + error.message);
       process.exitCode = 73;
     }
-  `);
+  `;
+  const environmentIdentityReplacement = runGuarded(
+    environmentIdentitySource,
+  );
   assert.deepEqual(
     {
       signal: environmentIdentityReplacement.signal,
@@ -3942,13 +3975,124 @@ syncBuiltinESMExports();
     "process.env Proxy replacement reached the spawn sink",
   );
 
-  const actionPhaseMutation = runGuarded(`
+  const environmentIdentityMutant = writeExactGuardMutant(
+    "environment-identity-only-mutant",
+    "    || !hasOriginalProcessEnvironmentIdentity()\n",
+    "    /* test mutant: original process environment identity omitted */\n",
+  );
+  fs.rmSync(tracePath, { force: true });
+  const environmentIdentityVulnerabilityControl = runGuarded(
+    environmentIdentitySource,
+    {},
+    environmentIdentityMutant.path,
+  );
+  assert.deepEqual(
+    {
+      signal: environmentIdentityVulnerabilityControl.signal,
+      status: environmentIdentityVulnerabilityControl.status,
+      stderr: environmentIdentityVulnerabilityControl.stderr,
+      stdout: environmentIdentityVulnerabilityControl.stdout,
+    },
+    {
+      signal: null,
+      status: 0,
+      stderr: "",
+      stdout: "environment-identity-mutant-sink\n",
+    },
+    "identity-only guard mutant did not reach the spawn sink",
+  );
+  assert.equal(
+    fs.existsSync(tracePath),
+    true,
+    "identity-only guard mutant did not traverse the pre-guard spawn sink",
+  );
+
+  const environmentDigestSource = `
     import childProcess from "node:child_process";
     const originalEnvironment = process.env;
     originalEnvironment.PLATFORM_DOCKER_ACTION = "backup.job.execute";
     originalEnvironment.PLATFORM_DOCKER_PHASE_ID = "job.backup.capture";
     try {
-      childProcess.spawn(
+      const child = childProcess.spawn(
+        ${JSON.stringify(exactExecutable)},
+        [],
+        {
+          env: originalEnvironment,
+          shell: false,
+          stdio: ["ignore", "pipe", "pipe"],
+        },
+      );
+      child.on("close", () => {
+        process.stdout.write("environment-digest-mutant-sink\\n");
+      });
+    } catch (error) {
+      process.stderr.write("environment-digest-rejected:" + error.message);
+      process.exitCode = 74;
+    }
+  `;
+  fs.rmSync(tracePath, { force: true });
+  const environmentDigestMutation = runGuarded(environmentDigestSource);
+  assert.deepEqual(
+    {
+      signal: environmentDigestMutation.signal,
+      status: environmentDigestMutation.status,
+      stderr: environmentDigestMutation.stderr,
+      stdout: environmentDigestMutation.stdout,
+    },
+    {
+      signal: null,
+      status: 74,
+      stderr:
+        "environment-digest-rejected:socketless runtime guard rejected non-exact fixed adapter spawn",
+      stdout: "",
+    },
+    "post-guard environment mutation crossed the immutable environment digest",
+  );
+  assert.equal(
+    fs.existsSync(tracePath),
+    false,
+    "post-guard environment mutation reached the spawn sink",
+  );
+
+  const environmentDigestMutant = writeExactGuardMutant(
+    "environment-digest-only-mutant",
+    "    || currentProcessEnvironment !== guardedProcessEnvironment\n",
+    "    /* test mutant: current process environment digest omitted */\n",
+  );
+  fs.rmSync(tracePath, { force: true });
+  const environmentDigestVulnerabilityControl = runGuarded(
+    environmentDigestSource,
+    {},
+    environmentDigestMutant.path,
+  );
+  assert.deepEqual(
+    {
+      signal: environmentDigestVulnerabilityControl.signal,
+      status: environmentDigestVulnerabilityControl.status,
+      stderr: environmentDigestVulnerabilityControl.stderr,
+      stdout: environmentDigestVulnerabilityControl.stdout,
+    },
+    {
+      signal: null,
+      status: 0,
+      stderr: "",
+      stdout: "environment-digest-mutant-sink\n",
+    },
+    "digest-only guard mutant did not reach the original phase spawn sink",
+  );
+  assert.equal(
+    fs.existsSync(tracePath),
+    true,
+    "digest-only guard mutant did not traverse the pre-guard spawn sink",
+  );
+
+  const lexicalPhaseSource = `
+    import childProcess from "node:child_process";
+    const originalEnvironment = process.env;
+    originalEnvironment.PLATFORM_DOCKER_ACTION = "backup.job.execute";
+    originalEnvironment.PLATFORM_DOCKER_PHASE_ID = "job.backup.capture";
+    try {
+      const child = childProcess.spawn(
         ${JSON.stringify(EXPECTED_FIXED_ADAPTERS["backup-job"].executable)},
         [],
         {
@@ -3957,33 +4101,84 @@ syncBuiltinESMExports();
           stdio: ["ignore", "pipe", "pipe"],
         },
       );
+      child.on("close", () => {
+        process.stdout.write("dynamic-phase-reread-mutant-sink\\n");
+      });
     } catch (error) {
-      process.stderr.write("action-phase-mutation-rejected:" + error.message);
-      process.exitCode = 74;
+      process.stderr.write("lexical-phase-rejected:" + error.message);
+      process.exitCode = 76;
     }
-  `);
+  `;
+  fs.rmSync(tracePath, { force: true });
+  const lexicalPhaseControl = runGuarded(
+    lexicalPhaseSource,
+    {},
+    environmentDigestMutant.path,
+  );
   assert.deepEqual(
     {
-      signal: actionPhaseMutation.signal,
-      status: actionPhaseMutation.status,
-      stderr: actionPhaseMutation.stderr,
-      stdout: actionPhaseMutation.stdout,
+      signal: lexicalPhaseControl.signal,
+      status: lexicalPhaseControl.status,
+      stderr: lexicalPhaseControl.stderr,
+      stdout: lexicalPhaseControl.stdout,
     },
     {
       signal: null,
-      status: 74,
+      status: 76,
       stderr:
-        "action-phase-mutation-rejected:socketless runtime guard rejected non-exact fixed adapter spawn",
+        "lexical-phase-rejected:socketless runtime guard rejected non-exact fixed adapter spawn",
       stdout: "",
     },
-    "post-guard action/phase mutation changed the captured phase executable",
+    "digest-neutral guard did not preserve its captured action/phase identity",
   );
   assert.equal(
     fs.existsSync(tracePath),
     false,
-    "post-guard action/phase mutation reached the cross-phase spawn sink",
+    "digest-neutral lexical-phase control reached the cross-phase spawn sink",
   );
 
+  const exactLexicalPhaseLookup = `  const command =
+    EXPECTED_COMMAND_BY_ACTION_PHASE[guardedAction + "\\0" + guardedPhaseId];`;
+  const dynamicPhaseLookup = `  const command =
+    EXPECTED_COMMAND_BY_ACTION_PHASE[
+      originalProcessEnvironment.PLATFORM_DOCKER_ACTION
+        + "\\0"
+        + originalProcessEnvironment.PLATFORM_DOCKER_PHASE_ID
+    ];`;
+  const dynamicPhaseRereadMutant = writeExactGuardMutant(
+    "dynamic-action-phase-reread-mutant",
+    exactLexicalPhaseLookup,
+    dynamicPhaseLookup,
+    environmentDigestMutant.source,
+  );
+  fs.rmSync(tracePath, { force: true });
+  const dynamicPhaseRereadVulnerabilityControl = runGuarded(
+    lexicalPhaseSource,
+    {},
+    dynamicPhaseRereadMutant.path,
+  );
+  assert.deepEqual(
+    {
+      signal: dynamicPhaseRereadVulnerabilityControl.signal,
+      status: dynamicPhaseRereadVulnerabilityControl.status,
+      stderr: dynamicPhaseRereadVulnerabilityControl.stderr,
+      stdout: dynamicPhaseRereadVulnerabilityControl.stdout,
+    },
+    {
+      signal: null,
+      status: 0,
+      stderr: "",
+      stdout: "dynamic-phase-reread-mutant-sink\n",
+    },
+    "dynamic action/phase reread mutant did not reach the cross-phase spawn sink",
+  );
+  assert.equal(
+    fs.existsSync(tracePath),
+    true,
+    "dynamic action/phase reread mutant did not traverse the pre-guard spawn sink",
+  );
+
+  fs.rmSync(tracePath, { force: true });
   const intrinsicAndOptionsProxyMutation = runGuarded(`
     import childProcess from "node:child_process";
     import { types as mutableUtilTypes } from "node:util";
