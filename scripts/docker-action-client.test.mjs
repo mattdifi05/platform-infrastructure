@@ -1184,37 +1184,52 @@ test("test-only fresh process behaviorally proves exact-once SAFE wrappers", asy
     );
   });
 
-  await t.test("global Symbol/computed-property forgery cannot self-attest the ledger", async () => {
-    const forged = await runSocketlessGuardedSafeChild("forge-global");
+  await t.test("computed global operation adds calls instead of forging the ledger", async () => {
+    const forged = await runSocketlessGuardedSafeChild("computed-global");
     assertSocketlessGuardedSafeChildEnvelope(
       forged,
-      "global capability-forgery mutant",
-      { allowWrapperExtraEvents: true },
+      "computed global-operation mutant",
     );
     assert.deepEqual(
       forged.report.wrapperLedger,
       SOCKETLESS_SAFE_COHORT_LABELS.map((label) => ({
-        bodyEntries: 1,
-        entries: 1,
-        exits: 1,
+        bodyEntries: 2,
+        entries: 2,
+        exits: 2,
         inFlight: 0,
         label,
       })),
-      "late and forged capabilities must not alter any legitimate wrapper counter",
+      "a computed global call must add to, never forge or replace, the legitimate invocation",
     );
     assert.deepEqual(
       forged.report.wrapperExtraEvents,
-      SOCKETLESS_SAFE_COHORT_LABELS.flatMap((exactLabel) => [
-        "late-authority-claim",
-        `forged-enter:${exactLabel}`,
-        `forged-exit:${exactLabel}`,
-      ]),
-      "each computed global PoC must produce only one late claim and one rejected begin/end pair",
+      [],
+      "an exact computed call is counted directly rather than mislabeled as a forgery",
     );
     assert.throws(
-      () => assertExactSocketlessWrapperLedger(forged.report, "global capability-forgery mutant"),
-      /must attest no extra wrapper event/i,
-      "the dynamic globalThis/Symbol/computed-property PoC must fail the authoritative ledger oracle",
+      () => assertExactSocketlessWrapperLedger(forged.report, "computed global-operation mutant"),
+      /exactly one completed wrapper invocation/i,
+      "the dynamic globalThis/Symbol/computed-property call must fail exact-once",
+    );
+  });
+
+  await t.test("hostile second pre-import cannot prefill and silence the ledger", async () => {
+    const stolen = await runSocketlessGuardedSafeChild("preimport-steal");
+    assertSocketlessGuardedSafeChildEnvelope(stolen, "pre-import steal mutant");
+    assert.deepEqual(
+      stolen.report.wrapperLedger,
+      SOCKETLESS_SAFE_COHORT_LABELS.map((label) => ({
+        bodyEntries: 2,
+        entries: 2,
+        exits: 2,
+        inFlight: 0,
+        label,
+      })),
+      "hostile pre-import calls made under a patched Array.push must remain additive",
+    );
+    assert.throws(
+      () => assertExactSocketlessWrapperLedger(stolen.report, "pre-import steal mutant"),
+      /exactly one completed wrapper invocation/i,
     );
   });
 });
@@ -2926,13 +2941,9 @@ function assertSocketlessCohortCannotAttestWrapperLedger(source, label) {
   for (const forbidden of [
     "SOCKETLESS_PREIMPORT_GUARD_SYMBOL",
     "Symbol",
-    "beginWrapper",
-    "claimWrapperAuthority",
-    "endWrapper",
     "global",
-    "networkSnapshot",
     "platform-infrastructure.test.socketless-preimport-guard/v1",
-    "recordBodyEntry",
+    "runWrapper",
     "socketlessPreimportTodoBodyMustRemainClosed",
     "wrapperExtraEvents",
     "wrapperLedger",
@@ -2985,7 +2996,9 @@ function parseTapTestSummary(stdout) {
 
 async function runSocketlessGuardedSafeChild(wrapperMutant = "control") {
   assert.ok(
-    ["bypass", "control", "double-alias", "forge-global"].includes(wrapperMutant),
+    ["bypass", "computed-global", "control", "double-alias", "preimport-steal"].includes(
+      wrapperMutant,
+    ),
     `unknown socketless wrapper mutant ${wrapperMutant}`,
   );
   const guardUrl = `data:text/javascript;charset=utf-8,${encodeURIComponent(
@@ -3000,10 +3013,17 @@ async function runSocketlessGuardedSafeChild(wrapperMutant = "control") {
   };
   delete childEnvironment.NODE_OPTIONS;
   delete childEnvironment.NODE_TEST_CONTEXT;
+  const preloadArguments = [`--import=${guardUrl}`];
+  if (["computed-global", "double-alias", "preimport-steal"].includes(wrapperMutant)) {
+    const hostileUrl = `data:text/javascript;charset=utf-8,${encodeURIComponent(
+      socketlessHostilePreimportSource(),
+    )}`;
+    preloadArguments.push(`--import=${hostileUrl}`);
+  }
   const result = await collectChildProcess(
     process.execPath,
     [
-      `--import=${guardUrl}`,
+      ...preloadArguments,
       "--test",
       "--test-reporter=tap",
       `--test-name-pattern=${exactNamePattern}`,
@@ -3030,11 +3050,7 @@ async function runSocketlessGuardedSafeChild(wrapperMutant = "control") {
   };
 }
 
-function assertSocketlessGuardedSafeChildEnvelope(
-  result,
-  label,
-  { allowWrapperExtraEvents = false } = {},
-) {
+function assertSocketlessGuardedSafeChildEnvelope(result, label) {
   assert.equal(
     result.code,
     0,
@@ -3063,13 +3079,11 @@ function assertSocketlessGuardedSafeChildEnvelope(
     socketlessExpectedFreshGuardCapabilities(),
     `${label} must lock the complete node:net surface and builtin escape`,
   );
-  if (!allowWrapperExtraEvents) {
-    assert.deepEqual(
-      result.report.wrapperExtraEvents,
-      [],
-      `${label} may not contain an unknown, forged, or duplicate-exit wrapper event`,
-    );
-  }
+  assert.deepEqual(
+    result.report.wrapperExtraEvents,
+    [],
+    `${label} may not contain an unknown-label or invalid-body wrapper event`,
+  );
   assert.deepEqual(
     result.report.wrapperLedger.map(({ label: wrapperLabel }) => wrapperLabel),
     SOCKETLESS_SAFE_COHORT_LABELS,
@@ -3124,6 +3138,30 @@ function assertExactSocketlessWrapperLedger(report, label) {
 }
 
 async function socketlessFreshProcessGuardMain() {
+  const wrapperMode = process.env.DOCKER_ACTION_TEST_SOCKETLESS_WRAPPER_MUTANT;
+  if (
+    wrapperMode !== "bypass" &&
+    wrapperMode !== "computed-global" &&
+    wrapperMode !== "control" &&
+    wrapperMode !== "double-alias" &&
+    wrapperMode !== "preimport-steal"
+  ) {
+    throw new Error(`fresh-process guard rejected wrapper mode ${String(wrapperMode)}`);
+  }
+  const arraySlice = Function.prototype.call.bind(Array.prototype.slice);
+  const arraySort = Function.prototype.call.bind(Array.prototype.sort);
+  const objectCreate = Object.create;
+  const objectDefineProperty = Object.defineProperty;
+  const objectFreeze = Object.freeze;
+  const objectGetOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
+  const reflectApply = Reflect.apply;
+  const reflectGet = Reflect.get;
+  const reflectOwnKeys = Reflect.ownKeys;
+  const stringify = JSON.stringify;
+  const stringFrom = String;
+  const stringLocaleCompare = Function.prototype.call.bind(String.prototype.localeCompare);
+  const openProductionBodyGate = objectFreeze({ productionBodyAllowed: true });
+  const closedProductionBodyGate = objectFreeze({ productionBodyAllowed: false });
   const [
     { default: guardedNet },
     { syncBuiltinESMExports: synchronizeBuiltins },
@@ -3133,30 +3171,56 @@ async function socketlessFreshProcessGuardMain() {
   void process.stdout;
   void process.stderr;
   const attempts = [];
+  let attemptCount = 0;
   const installations = [];
+  let installationCount = 0;
   const exactWrapperLabels = [
     "in-memory request producer SAFE cohort",
     "in-memory response producer SAFE cohort",
     "in-memory semantic executor SAFE cohort",
   ];
-  const privateWrapperLedger = new Map(
-    exactWrapperLabels.map((label) => [label, {
+  const privateWrapperLedger = [
+    {
       bodyEntries: 0,
       entries: 0,
       exits: 0,
       inFlight: 0,
-      label,
-    }]),
-  );
-  const exactWrapperAuthority = Object.freeze(Object.create(null));
-  let wrapperAuthorityClaimed = false;
-  const activeWrapperTickets = new WeakMap();
-  const forgedWrapperTickets = new WeakMap();
+      label: exactWrapperLabels[0],
+    },
+    {
+      bodyEntries: 0,
+      entries: 0,
+      exits: 0,
+      inFlight: 0,
+      label: exactWrapperLabels[1],
+    },
+    {
+      bodyEntries: 0,
+      entries: 0,
+      exits: 0,
+      inFlight: 0,
+      label: exactWrapperLabels[2],
+    },
+  ];
   const wrapperExtraEvents = [];
+  let wrapperExtraEventCount = 0;
+
+  function addWrapperExtraEvent(event) {
+    wrapperExtraEvents[wrapperExtraEventCount] = event;
+    wrapperExtraEventCount += 1;
+  }
+
+  function wrapperState(label) {
+    if (label === exactWrapperLabels[0]) return privateWrapperLedger[0];
+    if (label === exactWrapperLabels[1]) return privateWrapperLedger[1];
+    if (label === exactWrapperLabels[2]) return privateWrapperLedger[2];
+    return undefined;
+  }
 
   function blockedCapability(label) {
     return function preimportNoNetworkCapability() {
-      attempts.push(label);
+      attempts[attemptCount] = label;
+      attemptCount += 1;
       const error = new Error(`fresh-process NO-network guard blocked ${label}`);
       error.code = "ERR_TEST_FRESH_NO_NETWORK_CAPABILITY";
       throw error;
@@ -3164,18 +3228,19 @@ async function socketlessFreshProcessGuardMain() {
   }
 
   function install(target, property, label) {
-    const descriptor = Object.getOwnPropertyDescriptor(target, property);
+    const descriptor = objectGetOwnPropertyDescriptor(target, property);
     if (!descriptor || descriptor.configurable !== true) {
       throw new Error(`fresh-process guard cannot lock ${label}`);
     }
     const blocker = blockedCapability(label);
-    Object.defineProperty(target, property, {
+    objectDefineProperty(target, property, {
       configurable: false,
       enumerable: descriptor.enumerable,
       value: blocker,
       writable: false,
     });
-    installations.push({ blocker, label, property, target });
+    installations[installationCount] = { blocker, label, property, target };
+    installationCount += 1;
   }
 
   const originalSocketPrototype = guardedNet.Socket.prototype;
@@ -3183,88 +3248,81 @@ async function socketlessFreshProcessGuardMain() {
   install(originalSocketPrototype, "connect", "net.Socket.prototype.connect");
   install(originalServerPrototype, "listen", "net.Server.prototype.listen");
 
-  const callableNames = Reflect.ownKeys(guardedNet)
-    .filter((name) => typeof name === "string")
-    .filter((name) => typeof Reflect.get(guardedNet, name) === "function")
-    .sort((left, right) => left.localeCompare(right));
-  for (const name of callableNames) install(guardedNet, name, `net.${name}`);
+  const callableNames = [];
+  let callableNameCount = 0;
+  for (const name of reflectOwnKeys(guardedNet)) {
+    if (typeof name !== "string" || typeof reflectGet(guardedNet, name) !== "function") continue;
+    callableNames[callableNameCount] = name;
+    callableNameCount += 1;
+  }
+  arraySort(callableNames, (left, right) => stringLocaleCompare(left, right));
+  for (let index = 0; index < callableNameCount; index += 1) {
+    const name = callableNames[index];
+    install(guardedNet, name, `net.${name}`);
+  }
   install(process, "getBuiltinModule", "process.getBuiltinModule");
   synchronizeBuiltins();
   const synchronizedNetNamespace = await import("node:net");
 
-  function claimWrapperAuthority() {
-    if (wrapperAuthorityClaimed) {
-      wrapperExtraEvents.push("late-authority-claim");
-      return Object.freeze(Object.create(null));
-    }
-    wrapperAuthorityClaimed = true;
-    return exactWrapperAuthority;
-  }
-
-  function beginWrapper(authority, label) {
-    if (authority !== exactWrapperAuthority) {
-      wrapperExtraEvents.push(`forged-enter:${String(label)}`);
-      const forgedTicket = Object.freeze(Object.create(null));
-      forgedWrapperTickets.set(forgedTicket, label);
-      return forgedTicket;
-    }
-    const state = privateWrapperLedger.get(label);
-    const ticket = Object.freeze(Object.create(null));
-    activeWrapperTickets.set(ticket, { label, state });
+  async function runWrapper(label, body, productionBodyAllowed) {
+    const state = wrapperState(label);
     if (!state) {
-      wrapperExtraEvents.push(`unexpected-enter:${String(label)}`);
-      return ticket;
+      addWrapperExtraEvent(`unexpected-label:${stringFrom(label)}`);
+      return undefined;
     }
-    state.entries += 1;
-    state.inFlight += 1;
-    return ticket;
+    if (typeof body !== "function") {
+      addWrapperExtraEvent(`invalid-body:${label}`);
+      return undefined;
+    }
+    if (typeof productionBodyAllowed !== "boolean") {
+      addWrapperExtraEvent(`invalid-production-body-gate:${label}`);
+      productionBodyAllowed = false;
+    }
+    const initialAttemptCount = attemptCount;
+    const invocationCount = 1;
+    const countWrapperLifecycle = wrapperMode !== "bypass";
+    const executionGate = productionBodyAllowed
+      ? openProductionBodyGate
+      : closedProductionBodyGate;
+    let bodyError;
+    let value;
+    for (let invocation = 0; invocation < invocationCount; invocation += 1) {
+      state.bodyEntries += 1;
+      if (countWrapperLifecycle) {
+        state.entries += 1;
+        state.inFlight += 1;
+      }
+      try {
+        value = await reflectApply(body, undefined, [executionGate]);
+      } catch (error) {
+        bodyError = error;
+      } finally {
+        if (countWrapperLifecycle) {
+          state.exits += 1;
+          state.inFlight -= 1;
+        }
+      }
+      if (bodyError) break;
+    }
+    if (attemptCount !== initialAttemptCount) {
+      const error = new Error(`SAFE wrapper ${label} attempted a NO-network capability`);
+      error.code = "ERR_TEST_FRESH_NO_NETWORK_CAPABILITY";
+      throw error;
+    }
+    if (bodyError) throw bodyError;
+    return value;
   }
 
-  function endWrapper(authority, ticket) {
-    if (authority !== exactWrapperAuthority) {
-      const forgedLabel = forgedWrapperTickets.get(ticket);
-      forgedWrapperTickets.delete(ticket);
-      wrapperExtraEvents.push(`forged-exit:${String(forgedLabel ?? "unknown")}`);
-      return;
-    }
-    const active = activeWrapperTickets.get(ticket);
-    if (!active) {
-      wrapperExtraEvents.push("unknown-or-duplicate-exit");
-      return;
-    }
-    activeWrapperTickets.delete(ticket);
-    if (!active.state) {
-      wrapperExtraEvents.push(`unexpected-exit:${String(active.label)}`);
-      return;
-    }
-    active.state.exits += 1;
-    active.state.inFlight -= 1;
-  }
-
-  function recordBodyEntry(authority, label) {
-    if (authority !== exactWrapperAuthority) {
-      wrapperExtraEvents.push(`forged-body-entry:${String(label)}`);
-      return;
-    }
-    const state = privateWrapperLedger.get(label);
-    if (!state) {
-      wrapperExtraEvents.push(`unexpected-body-entry:${String(label)}`);
-      return;
-    }
-    state.bodyEntries += 1;
-  }
-
-  const guardFacade = Object.freeze({
-    beginWrapper,
-    claimWrapperAuthority,
-    endWrapper,
-    kind: "platform-infrastructure.test.socketless-preimport-guard/v1",
-    networkSnapshot() {
-      return Object.freeze([...attempts]);
-    },
-    recordBodyEntry,
+  objectFreeze(runWrapper);
+  const guardFacade = objectCreate(null);
+  objectDefineProperty(guardFacade, "runWrapper", {
+    configurable: false,
+    enumerable: true,
+    value: runWrapper,
+    writable: false,
   });
-  Object.defineProperty(
+  objectFreeze(guardFacade);
+  objectDefineProperty(
     globalThis,
     Symbol.for("platform-infrastructure.test.socketless-preimport-guard/v1"),
     {
@@ -3277,14 +3335,14 @@ async function socketlessFreshProcessGuardMain() {
 
   process.once("exit", () => {
     let staleAliasBlocked = false;
-    let transcript = [...attempts];
+    let transcript = arraySlice(attempts, 0, attemptCount);
     try {
-      if (transcript.length !== 0) {
-        throw new Error(`SAFE cohorts attempted guarded capabilities: ${JSON.stringify(transcript)}`);
+      if (attemptCount !== 0) {
+        throw new Error(`SAFE cohorts attempted guarded capabilities: ${stringify(transcript)}`);
       }
       const staleAliasCapturedAfterModuleImport = synchronizedNetNamespace.createServer;
       try {
-        Reflect.apply(staleAliasCapturedAfterModuleImport, undefined, []);
+        reflectApply(staleAliasCapturedAfterModuleImport, undefined, []);
       } catch (error) {
         staleAliasBlocked = error?.code === "ERR_TEST_FRESH_NO_NETWORK_CAPABILITY";
       }
@@ -3292,15 +3350,19 @@ async function socketlessFreshProcessGuardMain() {
         throw new Error("the post-import node:net alias was not blocked");
       }
       if (
-        attempts.length !== 1 ||
+        attemptCount !== 1 ||
         attempts[0] !== "net.createServer"
       ) {
-        throw new Error(`unexpected stale-alias transcript: ${JSON.stringify(attempts)}`);
+        throw new Error(
+          `unexpected stale-alias transcript: ${stringify(arraySlice(attempts, 0, attemptCount))}`,
+        );
       }
+      attemptCount = 0;
       attempts.length = 0;
-      transcript = [...attempts];
-      for (const installation of installations) {
-        const descriptor = Object.getOwnPropertyDescriptor(
+      transcript = [];
+      for (let index = 0; index < installationCount; index += 1) {
+        const installation = installations[index];
+        const descriptor = objectGetOwnPropertyDescriptor(
           installation.target,
           installation.property,
         );
@@ -3314,25 +3376,100 @@ async function socketlessFreshProcessGuardMain() {
       }
     } catch (error) {
       process.exitCode = 1;
-      transcript = [...attempts];
+      transcript = arraySlice(attempts, 0, attemptCount);
     }
+    const lockedCapabilities = [];
+    for (let index = 0; index < installationCount; index += 1) {
+      lockedCapabilities[index] = installations[index].label;
+    }
+    arraySort(lockedCapabilities, (left, right) => stringLocaleCompare(left, right));
     const report = {
-      lockedCapabilities: installations
-        .map(({ label }) => label)
-        .sort((left, right) => left.localeCompare(right)),
+      lockedCapabilities,
       staleAliasBlocked,
       transcript,
-      wrapperExtraEvents: [...wrapperExtraEvents],
-      wrapperLedger: exactWrapperLabels.map((label) => ({
-        ...privateWrapperLedger.get(label),
-      })),
+      wrapperExtraEvents: arraySlice(wrapperExtraEvents, 0, wrapperExtraEventCount),
+      wrapperLedger: [
+        {
+          bodyEntries: privateWrapperLedger[0].bodyEntries,
+          entries: privateWrapperLedger[0].entries,
+          exits: privateWrapperLedger[0].exits,
+          inFlight: privateWrapperLedger[0].inFlight,
+          label: privateWrapperLedger[0].label,
+        },
+        {
+          bodyEntries: privateWrapperLedger[1].bodyEntries,
+          entries: privateWrapperLedger[1].entries,
+          exits: privateWrapperLedger[1].exits,
+          inFlight: privateWrapperLedger[1].inFlight,
+          label: privateWrapperLedger[1].label,
+        },
+        {
+          bodyEntries: privateWrapperLedger[2].bodyEntries,
+          entries: privateWrapperLedger[2].entries,
+          exits: privateWrapperLedger[2].exits,
+          inFlight: privateWrapperLedger[2].inFlight,
+          label: privateWrapperLedger[2].label,
+        },
+      ],
     };
-    writeSync(2, `SOCKETLESS_PREIMPORT_GUARD_REPORT=${JSON.stringify(report)}\n`);
+    writeSync(2, `SOCKETLESS_PREIMPORT_GUARD_REPORT=${stringify(report)}\n`);
   });
 }
 
 function socketlessFreshProcessGuardSource() {
   return `await (${Function.prototype.toString.call(socketlessFreshProcessGuardMain)})();\n`;
+}
+
+async function socketlessHostilePreimportMain() {
+  const wrapperMode = process.env.DOCKER_ACTION_TEST_SOCKETLESS_WRAPPER_MUTANT;
+  if (
+    wrapperMode !== "computed-global" &&
+    wrapperMode !== "double-alias" &&
+    wrapperMode !== "preimport-steal"
+  ) return;
+  const computedGuardIdentity = [
+    "platform-infrastructure",
+    "test",
+    "socketless-preimport-guard/v1",
+  ].join(".");
+  const symbolFactory = Symbol[["f", "or"].join("")];
+  const facade = globalThis[symbolFactory(computedGuardIdentity)];
+  const computedOperation = facade[["run", "Wrapper"].join("")];
+  const aliasedOperation = computedOperation;
+  const exactLabels = [
+    "in-memory request producer SAFE cohort",
+    "in-memory response producer SAFE cohort",
+    "in-memory semantic executor SAFE cohort",
+  ];
+  let originalPushDescriptor;
+  let originalWrapperMode;
+  if (wrapperMode === "preimport-steal") {
+    originalPushDescriptor = Object.getOwnPropertyDescriptor(Array.prototype, "push");
+    originalWrapperMode = process.env.DOCKER_ACTION_TEST_SOCKETLESS_WRAPPER_MUTANT;
+    process.env.DOCKER_ACTION_TEST_SOCKETLESS_WRAPPER_MUTANT = "bypass";
+    Object.defineProperty(Array.prototype, "push", {
+      configurable: true,
+      enumerable: originalPushDescriptor.enumerable,
+      value() {
+        return this.length;
+      },
+      writable: true,
+    });
+  }
+  try {
+    for (let index = 0; index < exactLabels.length; index += 1) {
+      await aliasedOperation(exactLabels[index], function hostilePreimportBody() {}, false);
+    }
+  } finally {
+    if (originalPushDescriptor) {
+      Object.defineProperty(Array.prototype, "push", originalPushDescriptor);
+      process.env.DOCKER_ACTION_TEST_SOCKETLESS_WRAPPER_MUTANT = originalWrapperMode;
+    }
+  }
+}
+
+function socketlessHostilePreimportSource() {
+  return `await (${Function.prototype.toString.call(socketlessHostilePreimportMain)})();\n`;
 }
 
 function socketlessNetCallableEntries() {
@@ -3428,7 +3565,7 @@ function assertSocketlessSourceOracle(source, label) {
 
 const withSocketlessNetworkCapabilityTrap = (() => {
   const capturedPreimportGuard = globalThis[SOCKETLESS_PREIMPORT_GUARD_SYMBOL];
-  const capturedWrapperAuthority = capturedPreimportGuard?.claimWrapperAuthority();
+  const capturedGuardOperation = capturedPreimportGuard?.runWrapper;
   const openProductionBodyGate = Object.freeze({ productionBodyAllowed: true });
 
   return async function exactSocketlessNetworkCapabilityTrap(
@@ -3440,24 +3577,17 @@ const withSocketlessNetworkCapabilityTrap = (() => {
   assert.ok(Array.isArray(expectedAttempts), `${label} expected-attempt transcript must be an array`);
   const preimportGuard = capturedPreimportGuard;
   if (preimportGuard !== undefined) {
-    assert.equal(
-      preimportGuard?.kind,
-      "platform-infrastructure.test.socketless-preimport-guard/v1",
-      `${label} must recognize only the exact fresh-process guard`,
-    );
     assert.equal(Object.isFrozen(preimportGuard), true);
     assert.deepEqual(
       Object.keys(preimportGuard).sort(),
-      [
-        "beginWrapper",
-        "claimWrapperAuthority",
-        "endWrapper",
-        "kind",
-        "networkSnapshot",
-        "recordBodyEntry",
-      ],
-      `${label} guard facade must expose only capability-gated lifecycle and transcript operations`,
+      ["runWrapper"],
+      `${label} guard facade must expose only one immutable wrapper operation`,
     );
+    const operationDescriptor = Object.getOwnPropertyDescriptor(preimportGuard, "runWrapper");
+    assert.equal(operationDescriptor?.configurable, false);
+    assert.equal(operationDescriptor?.writable, false);
+    assert.equal(operationDescriptor?.value, capturedGuardOperation);
+    assert.equal(Object.isFrozen(capturedGuardOperation), true);
     assert.deepEqual(
       expectedAttempts,
       [],
@@ -3467,44 +3597,8 @@ const withSocketlessNetworkCapabilityTrap = (() => {
       SOCKETLESS_SAFE_COHORT_LABELS.includes(label),
       `${label} must be one of the three exact SAFE wrapper identities`,
     );
-    const before = preimportGuard.networkSnapshot();
-    assert.deepEqual(before, [], `${label} must begin with a zero capability transcript`);
-    const bypassWrapperLedger = process.env.DOCKER_ACTION_TEST_SOCKETLESS_WRAPPER_MUTANT === "bypass";
-    const wrapperTicket = bypassWrapperLedger
-      ? undefined
-      : preimportGuard.beginWrapper(capturedWrapperAuthority, label);
     const productionBodyAllowed = !socketlessPreimportTodoBodyMustRemainClosed;
-    const executionGate = Object.freeze(Object.defineProperty(
-      Object.create(null),
-      "productionBodyAllowed",
-      {
-        enumerable: true,
-        get() {
-          preimportGuard.recordBodyEntry(capturedWrapperAuthority, label);
-          return productionBodyAllowed;
-        },
-      },
-    ));
-    let bodyError;
-    let value;
-    let after;
-    try {
-      value = await body(executionGate);
-    } catch (error) {
-      bodyError = error;
-    } finally {
-      after = preimportGuard.networkSnapshot();
-      if (!bypassWrapperLedger) {
-        preimportGuard.endWrapper(capturedWrapperAuthority, wrapperTicket);
-      }
-    }
-    assert.deepEqual(
-      after,
-      before,
-      `${label} must leave the fresh-process NO-network transcript exactly zero`,
-    );
-    if (bodyError) throw bodyError;
-    return value;
+    return capturedGuardOperation(label, body, productionBodyAllowed);
   }
   const attempts = [];
   const callableEntries = socketlessNetCallableEntries();
@@ -3658,35 +3752,10 @@ function testWhenProductionExports(requirements, name, body) {
       : `${name} [activates when ${missing.join(", ")} is exported]`;
     return test(registeredName, async (t) => {
       if (missing.length > 0) t.todo(`activates when ${missing.join(", ")} is exported`);
-      const wrapperMutant = process.env.DOCKER_ACTION_TEST_SOCKETLESS_WRAPPER_MUTANT;
-      assert.ok(
-        ["bypass", "control", "double-alias", "forge-global"].includes(wrapperMutant),
-        `fresh SAFE child received unknown wrapper mutant ${wrapperMutant}`,
-      );
       const previousBodyGate = socketlessPreimportTodoBodyMustRemainClosed;
       socketlessPreimportTodoBodyMustRemainClosed = missing.length > 0;
-      const invokeSafeBodyThroughItsRealWrapper = body;
       try {
-        if (wrapperMutant === "forge-global") {
-          const computedGuardIdentity = [
-            "platform-infrastructure",
-            "test",
-            "socketless-preimport-guard/v1",
-          ].join(".");
-          const symbolFactory = Symbol[["f", "or"].join("")];
-          const forgedFacade = globalThis[symbolFactory(computedGuardIdentity)];
-          const lateClaim = forgedFacade[["claim", "Wrapper", "Authority"].join("")]();
-          const exactLabel = SOCKETLESS_SAFE_COHORT_LABELS[safeCohortIndex];
-          const forgedTicket = forgedFacade[["begin", "Wrapper"].join("")](
-            lateClaim,
-            exactLabel,
-          );
-          forgedFacade[["end", "Wrapper"].join("")](lateClaim, forgedTicket);
-        }
-        await invokeSafeBodyThroughItsRealWrapper(t);
-        if (wrapperMutant === "double-alias") {
-          await invokeSafeBodyThroughItsRealWrapper(t);
-        }
+        await body(t);
       } finally {
         socketlessPreimportTodoBodyMustRemainClosed = previousBodyGate;
       }
