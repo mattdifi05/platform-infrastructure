@@ -856,11 +856,13 @@ async function executeReplayOnBaseline({
       ["BASELINE_CLONE", baselineIdentity.root],
       ["OUTPUT_ROOT", outputRoot],
       ["CASE_SCRATCH", scratchRoot],
+      ["RUNNER_WORKTREE", repositoryRoot],
     ]);
     const normalizedStderr = normalizeEvidenceText(execution.stderr, [
       ["BASELINE_CLONE", baselineIdentity.root],
       ["OUTPUT_ROOT", outputRoot],
       ["CASE_SCRATCH", scratchRoot],
+      ["RUNNER_WORKTREE", repositoryRoot],
     ]);
     const executionLog = [
       JSON.stringify({
