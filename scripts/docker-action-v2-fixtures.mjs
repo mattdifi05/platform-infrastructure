@@ -349,7 +349,7 @@ export const EXPECTED_PHASE_PROFILES = deepFreeze({
     networkIds: [],
     outputSchema: "platform.backup-job-result/v1",
     scratchVolumeIds: ["restore.scratch"],
-    helperProfileIds: ["helper.restore.mariadb.restore", "helper.restore.mariadb.server", "helper.restore.mariadb.verify", "helper.restore.minio.restore", "helper.restore.minio.server", "helper.restore.minio.verify", "helper.restore.postgres.restore", "helper.restore.postgres.server", "helper.restore.postgres.verify"],
+    helperProfileIds: ["helper.restore.mariadb.server", "helper.restore.mariadb.restore", "helper.restore.mariadb.verify", "helper.restore.minio.server", "helper.restore.minio.restore", "helper.restore.minio.verify", "helper.restore.postgres.server", "helper.restore.postgres.restore", "helper.restore.postgres.verify"],
     workerSecretSetIds: ["manifest.verification"],
   }),
   "prune.plan": phase({
@@ -391,7 +391,7 @@ export const EXPECTED_PHASE_PROFILES = deepFreeze({
     networkIds: [],
     outputSchema: "platform.restore-drill/v1",
     scratchVolumeIds: ["restore.scratch"],
-    helperProfileIds: ["helper.restore.mariadb.restore", "helper.restore.mariadb.server", "helper.restore.mariadb.verify", "helper.restore.minio.restore", "helper.restore.minio.server", "helper.restore.minio.verify", "helper.restore.postgres.restore", "helper.restore.postgres.server", "helper.restore.postgres.verify"],
+    helperProfileIds: ["helper.restore.mariadb.server", "helper.restore.mariadb.restore", "helper.restore.mariadb.verify", "helper.restore.minio.server", "helper.restore.minio.restore", "helper.restore.minio.verify", "helper.restore.postgres.server", "helper.restore.postgres.restore", "helper.restore.postgres.verify"],
     workerSecretSetIds: ["manifest.verification"],
   }),
   "offsite.sync": phase({
